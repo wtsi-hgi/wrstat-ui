@@ -29,14 +29,13 @@
 package cmd
 
 import (
-	"fmt"
 	"os"
 
 	"github.com/inconshreveable/log15"
 	"github.com/spf13/cobra"
 )
 
-// appLogger is used for logging events in our commands
+// appLogger is used for logging events in our commands.
 var appLogger = log15.New()
 
 // RootCmd represents the base command when called without any subcommands.
@@ -73,18 +72,8 @@ func init() {
 	appLogger.SetHandler(log15.LvlFilterHandler(log15.LvlInfo, log15.StderrHandler))
 }
 
-// info is a convenience to log a message at the Info level.
-func info(msg string, a ...interface{}) {
-	appLogger.Info(fmt.Sprintf(msg, a...))
-}
-
-// warn is a convenience to log a message at the Warn level.
-func warn(msg string, a ...interface{}) {
-	appLogger.Warn(fmt.Sprintf(msg, a...))
-}
-
 // die is a convenience to log a message at the Error level and exit non zero.
-func die(msg string, a ...interface{}) {
-	appLogger.Error(fmt.Sprintf(msg, a...))
+func die(msg string) {
+	appLogger.Error(msg)
 	os.Exit(1)
 }

@@ -32,7 +32,7 @@ import (
 )
 
 // Version gets set during build:
-// go build -ldflags "-X github.com/wtsi-ssg/wrstat/cmd.Version=`git describe --tags --always --long --dirty`"
+// go build -ldflags "-X github.com/wtsi-ssg/wrstat/cmd.Version=`git describe --tags --always --long --dirty`" .
 var Version string
 
 // versionCmd represents the version command.
