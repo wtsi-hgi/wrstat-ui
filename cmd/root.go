@@ -48,6 +48,8 @@ var RootCmd = &cobra.Command{
 It uses wr to queue getting the stats for each subdirectory, so enabling the
 work to be done in parallel and potentially distributed over many nodes.
 
+Before doing anything else, the wr manager must be running.
+
 For raw stats on a directory and all its sub contents:
 $ wrstat dir -o [/output/location] -d [dependency_group] [/location/of/interest]
 
