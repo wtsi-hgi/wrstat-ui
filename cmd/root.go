@@ -29,6 +29,7 @@
 package cmd
 
 import (
+	"fmt"
 	"os"
 
 	"github.com/inconshreveable/log15"
@@ -73,7 +74,7 @@ func init() {
 }
 
 // die is a convenience to log a message at the Error level and exit non zero.
-func die(msg string) {
-	appLogger.Error(msg)
+func die(msg string, a ...interface{}) {
+	appLogger.Error(fmt.Sprintf(msg, a...))
 	os.Exit(1)
 }
