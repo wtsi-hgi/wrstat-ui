@@ -1,2 +1,2 @@
 # wrstat
-A master->server replacement for mpistat using wr.
+A master->worker replacement for mpistat using wr.
