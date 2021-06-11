@@ -31,6 +31,7 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/inconshreveable/log15"
 	"github.com/spf13/cobra"
@@ -39,16 +40,23 @@ import (
 // appLogger is used for logging events in our commands.
 var appLogger = log15.New()
 
+// these variables are accessible by all subcommands.
+var deployment string
+
+const connectTimeout = 10 * time.Second
+
 // RootCmd represents the base command when called without any subcommands.
 var RootCmd = &cobra.Command{
 	Use:   "wrstat",
-	Short: "wrstat gets stats on all files in a filesystem directory.",
-	Long: `wrstat gets stats on all files in a filesystem directory.
+	Short: "wrstat gets stats on all files in a filesystem directory tree.",
+	Long: `wrstat gets stats on all files in a filesystem directory tree.
 
 It uses wr to queue getting the stats for each subdirectory, so enabling the
 work to be done in parallel and potentially distributed over many nodes.
 
-Before doing anything else, the wr manager must be running.
+Before doing anything else, the wr manager must be running. If the manager can
+run commands on multiple nodes, be sure to set wr's ManagerHost config option to
+the host you started the manager on.
 
 For raw stats on a directory and all its sub contents:
 $ wrstat dir -o [/output/location] -d [dependency_group] [/location/of/interest]
@@ -73,6 +81,17 @@ func Execute() {
 func init() {
 	// set up logging to stderr
 	appLogger.SetHandler(log15.LvlFilterHandler(log15.LvlInfo, log15.StderrHandler))
+
+	// global flags
+	RootCmd.PersistentFlags().StringVar(&deployment,
+		"deployment",
+		"production",
+		"the deployment your wr manager was started with")
+}
+
+// warn is a convenience to log a message at the Warn level.
+func warn(msg string, a ...interface{}) {
+	appLogger.Warn(fmt.Sprintf(msg, a...))
 }
 
 // die is a convenience to log a message at the Error level and exit non zero.
