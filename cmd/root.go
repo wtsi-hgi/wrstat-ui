@@ -51,15 +51,16 @@ var RootCmd = &cobra.Command{
 	Short: "wrstat gets stats on all files in a filesystem directory tree.",
 	Long: `wrstat gets stats on all files in a filesystem directory tree.
 
-It uses wr to queue getting the stats for each subdirectory, so enabling the
+It uses wr to queue getting the stats for subsets of the tree, so enabling the
 work to be done in parallel and potentially distributed over many nodes.
 
 Before doing anything else, the wr manager must be running. If the manager can
 run commands on multiple nodes, be sure to set wr's ManagerHost config option to
-the host you started the manager on.
+the host you started the manager on. Or run commands from the same node that you
+started the manager on.
 
 For raw stats on a directory and all its sub contents:
-$ wrstat dir -o [/output/location] -d [dependency_group] [/location/of/interest]
+$ wrstat walk -o [/output/location] -d [dependency_group] [/location/of/interest]
 
 Combine all the above output files:
 $ wrstat combine [/output/location]
