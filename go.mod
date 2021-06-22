@@ -4,12 +4,13 @@ go 1.16
 
 require (
 	github.com/VertebrateResequencing/wr v0.24.1-0.20210611100658-112c45bd87e0
-	github.com/dgryski/go-farm v0.0.0-20200201041132-a6ae2369ad13
 	github.com/inconshreveable/log15 v0.0.0-20201112154412-8562bdadbbac
 	github.com/karrick/godirwalk v1.16.1
 	github.com/klauspost/pgzip v1.2.5
+	github.com/rs/xid v1.3.0
 	github.com/smartystreets/goconvey v1.6.4
 	github.com/spf13/cobra v1.1.3
+	github.com/termie/go-shutil v0.0.0-20140729215957-bcacb06fecae
 )
 
 // we need to specify these due to github.com/VertebrateResequencing/wr's deps
