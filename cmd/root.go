@@ -31,11 +31,16 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
+	"github.com/VertebrateResequencing/wr/jobqueue"
 	"github.com/inconshreveable/log15"
 	"github.com/spf13/cobra"
+	"github.com/wtsi-ssg/wrstat/scheduler"
 )
+
+const userOnlyPerm = 0700
 
 // appLogger is used for logging events in our commands.
 var appLogger = log15.New()
@@ -90,6 +95,11 @@ func init() {
 		"the deployment your wr manager was started with")
 }
 
+// info is a convenience to log a message at the Info level.
+func info(msg string, a ...interface{}) {
+	appLogger.Info(fmt.Sprintf(msg, a...))
+}
+
 // warn is a convenience to log a message at the Warn level.
 func warn(msg string, a ...interface{}) {
 	appLogger.Warn(fmt.Sprintf(msg, a...))
@@ -99,4 +109,39 @@ func warn(msg string, a ...interface{}) {
 func die(msg string, a ...interface{}) {
 	appLogger.Error(fmt.Sprintf(msg, a...))
 	os.Exit(1)
+}
+
+// newScheduler returns a new Scheduler, exiting on error. It also returns a
+// function you should defer.
+func newScheduler() (*scheduler.Scheduler, func()) {
+	s, err := scheduler.New(deployment, connectTimeout, appLogger)
+	if err != nil {
+		die("%s", err)
+	}
+
+	return s, func() {
+		err = s.Disconnect()
+		if err != nil {
+			warn("failed to disconnect from wr manager: %s", err)
+		}
+	}
+}
+
+// repGrp returns a rep_grp that can be used for a wrstat job we will create.
+func repGrp(cmd, dir, unique string) string {
+	return fmt.Sprintf("wrstat-%s-%s-%s-%s", cmd, filepath.Base(dir), dateStamp(), unique)
+}
+
+// dateStamp returns today's date in the form YYYYMMDD.
+func dateStamp() string {
+	t := time.Now()
+
+	return t.Format("20060102")
+}
+
+// addJobsToQueue adds the jobs to wr's queue.
+func addJobsToQueue(s *scheduler.Scheduler, jobs []*jobqueue.Job) {
+	if err := s.SubmitJobs(jobs); err != nil {
+		die("failed to add jobs to wr's queue: %s", err)
+	}
 }

@@ -7,6 +7,7 @@ require (
 	github.com/inconshreveable/log15 v0.0.0-20201112154412-8562bdadbbac
 	github.com/karrick/godirwalk v1.16.1
 	github.com/klauspost/pgzip v1.2.5
+	github.com/phayes/freeport v0.0.0-20180830031419-95f893ade6f2
 	github.com/rs/xid v1.3.0
 	github.com/smartystreets/goconvey v1.6.4
 	github.com/spf13/cobra v1.1.3
