@@ -7,17 +7,21 @@ PATH := $(PATH):${GOPATH}/bin
 
 default: install
 
-build: export CGO_ENABLED = 0
+# We require CGO_ENABLED=1 for getting group information to work properly; the
+# pure go version doesn't work on all systems such as those using LDAP for
+# groups
+
+build: export CGO_ENABLED = 1
 build:
 	go build -tags netgo ${LDFLAGS}
 
-install: export CGO_ENABLED = 0
+install: export CGO_ENABLED = 1
 install:
 	@rm -f ${GOPATH}/bin/wrstat
 	@go install -tags netgo ${LDFLAGS}
 	@echo installed to ${GOPATH}/bin/wrstat
 
-test: export CGO_ENABLED = 0
+test: export CGO_ENABLED = 1
 test:
 	@go test -tags netgo --count 1 ./...
 
@@ -37,13 +41,13 @@ clean:
 	@rm -f ./wrstat
 	@rm -f ./dist.zip
 
-dist: export CGO_ENABLED = 0
+dist: export CGO_ENABLED = 1
 # go get -u github.com/gobuild/gopack
 # go get -u github.com/aktau/github-release
 dist:
 	gopack pack --os linux --arch amd64 -o linux-dist.zip
 	github-release release --tag ${TAG} --pre-release
-	github-release upload --tag ${TAG} --name wr-linux-x86-64.zip --file linux-dist.zip
-	@rm -f wr linux-dist.zip
+	github-release upload --tag ${TAG} --name wrstat-linux-x86-64.zip --file linux-dist.zip
+	@rm -f wrstat linux-dist.zip
 
 .PHONY: test race bench lint build install clean dist

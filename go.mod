@@ -4,6 +4,7 @@ go 1.16
 
 require (
 	github.com/VertebrateResequencing/wr v0.24.1-0.20210611100658-112c45bd87e0
+	github.com/hashicorp/go-multierror v1.1.1
 	github.com/inconshreveable/log15 v0.0.0-20201112154412-8562bdadbbac
 	github.com/karrick/godirwalk v1.16.1
 	github.com/klauspost/pgzip v1.2.5
