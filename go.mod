@@ -13,6 +13,7 @@ require (
 	github.com/smartystreets/goconvey v1.6.4
 	github.com/spf13/cobra v1.1.3
 	github.com/termie/go-shutil v0.0.0-20140729215957-bcacb06fecae
+	gopkg.in/yaml.v2 v2.4.0
 )
 
 // we need to specify these due to github.com/VertebrateResequencing/wr's deps
