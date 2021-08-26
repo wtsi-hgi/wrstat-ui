@@ -95,6 +95,17 @@ func init() {
 		"the deployment your wr manager was started with")
 }
 
+func logToFile(path string) {
+	fh, err := log15.FileHandler(path, log15.LogfmtFormat())
+	if err != nil {
+		warn("Could not log to file [%s]: %s", path, err)
+
+		return
+	}
+
+	appLogger.SetHandler(fh)
+}
+
 // warn is a convenience to log a message at the Warn level.
 func warn(msg string, a ...interface{}) {
 	appLogger.Warn(fmt.Sprintf(msg, a...))
