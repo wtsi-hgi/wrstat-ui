@@ -47,6 +47,7 @@ var appLogger = log15.New()
 
 // these variables are accessible by all subcommands.
 var deployment string
+var sudo bool
 
 const connectTimeout = 10 * time.Second
 
@@ -63,6 +64,10 @@ Before doing anything else, the wr manager must be running. If the manager can
 run commands on multiple nodes, be sure to set wr's ManagerHost config option to
 the host you started the manager on. Or run commands from the same node that you
 started the manager on.
+
+If you need root to have permission to see all deseired files, either start wr
+manager as root, or start it as a user that can sudo without a password when
+running wrstat, and supply the --sudo option to wrstat sub commands.
 
 For raw stats on a directory and all its sub contents:
 $ wrstat walk -o [/output/location] -d [dependency_group] [/location/of/interest]
@@ -93,6 +98,11 @@ func init() {
 		"deployment",
 		"production",
 		"the deployment your wr manager was started with")
+
+	RootCmd.PersistentFlags().BoolVar(&sudo,
+		"sudo",
+		false,
+		"created jobs will run with sudo")
 }
 
 func logToFile(path string) {
@@ -120,7 +130,7 @@ func die(msg string, a ...interface{}) {
 // newScheduler returns a new Scheduler, exiting on error. It also returns a
 // function you should defer.
 func newScheduler() (*scheduler.Scheduler, func()) {
-	s, err := scheduler.New(deployment, connectTimeout, appLogger)
+	s, err := scheduler.New(deployment, connectTimeout, appLogger, sudo)
 	if err != nil {
 		die("%s", err)
 	}

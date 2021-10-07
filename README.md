@@ -24,6 +24,10 @@ wrstat multi -w /working/dir -f /final/dir /disk1 /disk2
 wr status -i wrstat -z -o s
 ```
 
+Or if your user account has the ability to sudo without a password when
+executing the wrstat executable, add the --sudo option to `wrstat multi`.
+
+
 To do certain chmod and chown operations on desired paths to bring them in to
 line with desired unix groups, create a YAML file like the example ch.yml in the
 git repository, and supply it as the --ch option to `wrstat multi`.
