@@ -128,9 +128,19 @@ func die(msg string, a ...interface{}) {
 }
 
 // newScheduler returns a new Scheduler, exiting on error. It also returns a
-// function you should defer.
-func newScheduler(cwd string) (*scheduler.Scheduler, func()) {
-	s, err := scheduler.New(deployment, cwd, connectTimeout, appLogger, sudo)
+// function you should defer. Optional ram arg sets that with override 1,
+// otherwise ram defaults to 50MB override 0.
+func newScheduler(cwd string, ram ...int) (*scheduler.Scheduler, func()) {
+	var s *scheduler.Scheduler
+
+	var err error
+
+	if len(ram) == 1 {
+		s, err = scheduler.New(deployment, cwd, connectTimeout, appLogger, sudo, ram[0])
+	} else {
+		s, err = scheduler.New(deployment, cwd, connectTimeout, appLogger, sudo)
+	}
+
 	if err != nil {
 		die("%s", err)
 	}
