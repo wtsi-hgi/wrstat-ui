@@ -1,0 +1,405 @@
+body {
+  background: url(texture-noise.png);
+  overflow: auto;
+  font-size: 14px;
+  font-family: "Helvetica Neue", Helvetica;
+  margin: 10px;
+}
+
+.main {
+  margin-bottom: 1em;
+  display: flex;
+}
+
+#login {
+  padding: 1em;
+}
+
+#login-button {
+  background-color: #007DC1;
+  color: white;
+}
+
+button {
+  cursor: pointer;
+}
+
+button:hover {
+  cursor: pointer;
+}
+
+#chart {
+  width: 960px;
+  height: 500px;
+  background: #ddd;
+}
+
+#breadcrumbs {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  height: 18px;
+  padding: 2px;
+}
+
+#breadcrumbs button {
+  padding: 1px;
+  padding-bottom: 2px;
+  height: 18px;
+  font-size: 12px;
+  user-select: none;
+}
+
+_::-webkit-full-page-media,
+_:future,
+:root #breadcrumbs button {
+  margin-top: 1px;
+}
+
+#breadcrumbs span {
+  padding: 1px;
+  font-size: 12px;
+  user-select: none;
+}
+
+.dead {
+  border: 2px solid orange;
+  background-color: orange;
+  cursor: default;
+}
+
+_::-webkit-full-page-media,
+_:future,
+:root .dead {
+  border: 0;
+  border-left: 2px solid orange;
+}
+
+.dead:hover {
+  cursor: default;
+}
+
+#sidebar {
+  z-index: 1;
+  font-weight: 300;
+  text-shadow: 0 1px 0 #fff;
+  padding: 1ex;
+  display: flex;
+  flex-direction: column;
+}
+
+#title {
+  font-size: 28px;
+}
+
+.sidebar_section {
+  margin-bottom: 10px;
+}
+
+.filter {
+  margin-bottom: 10px;
+}
+
+#age_filter {
+  margin: 0;
+  padding: 0;
+  padding-left: 8px;
+  width: 102%;
+  height: 35px;
+}
+
+#header {
+  margin-top: 2px;
+  margin-bottom: 0.25em;
+  padding-top: 0;
+  font-size: 36px;
+  font-weight: 300;
+  text-shadow: 0 1px 0 #fff;
+}
+
+#error {
+  font-size: 16px;
+  color: red;
+}
+
+#sidebar_bottom {
+  margin-top: auto;
+}
+
+#under {
+  position: absolute;
+  top: 520px;
+  left: 10px;
+  width: 960px;
+  text-align: left;
+  white-space: nowrap;
+  font: 12px sans-serif;
+  margin: 0;
+  padding: 0;
+}
+
+#details {
+  background: #ddd;
+  border: solid 1px #aaa;
+  border-radius: 8px;
+  padding: 1em 0.5em;
+}
+
+#details_path {
+  font-size: 12px;
+  font-weight: 300;
+  text-shadow: 0 1px 0 #fff;
+  padding: 1em;
+}
+
+#details table {
+  padding: 0.5em;
+  margin: 0;
+}
+
+#details_groups,
+#details_users,
+#details_filetypes {
+  max-width: 870px;
+  overflow: auto;
+}
+
+#key {
+  margin-top: 15px;
+  padding: 0;
+}
+
+#key table tr td {
+  padding: 5px;
+}
+
+.key_caption {
+  padding-bottom: 5px;
+  text-align: left;
+}
+
+.key_highlight {
+  background-color: #007DC1;
+  padding: 5px;
+  border-radius: 8px;
+}
+
+form,
+.select_label {
+  font-size: 15px;
+  font-weight: 50%;
+}
+
+.grandparent text {
+  font-weight: bold;
+}
+
+rect {
+  fill: none;
+  stroke: #fff;
+}
+
+rect.parent,
+.grandparent rect {
+  stroke-width: 2px;
+}
+
+.grandparent rect {
+  fill: orange;
+}
+
+.grandparent:hover rect {
+  fill: #ee9700;
+}
+
+.children rect.parent {
+  fill-opacity: .75;
+}
+
+.children:hover rect.child {
+  fill: #bbb;
+}
+
+.childless rect.parent {
+  fill-opacity: 0.5;
+}
+
+.childless rect.child {
+  fill: #ddd;
+}
+
+text,
+#filters,
+#details {
+  user-select: none;
+}
+
+#details:hover {
+  user-select: text;
+}
+
+/*!
+ * box colours from https://colorbrewer2.org/#type=diverging&scheme=RdYlGn&n=9
+ */
+.age_2years {
+  background-color: rgba(215, 48, 39, 0.75);
+  fill: #d73027;
+}
+
+.age_1year {
+  background-color: rgba(244, 109, 67, 0.75);
+  fill: #f46d43;
+}
+
+.age_10months {
+  background-color: rgba(253, 174, 97, 0.75);
+  fill: #fdae61;
+}
+
+.age_8months {
+  background-color: rgba(254, 224, 139, 0.75);
+  fill: #fee08b;
+}
+
+.age_6months {
+  background-color: rgba(255, 255, 191, 0.75);
+  fill: #ffffbf;
+}
+
+.age_3months {
+  background-color: rgba(217, 239, 139, 0.75);
+  fill: #d9ef8b;
+}
+
+.age_2months {
+  background-color: rgba(166, 217, 106, 0.75);
+  fill: #a6d96a;
+}
+
+.age_1month {
+  background-color: rgba(102, 189, 99, 0.75);
+  fill: #66bd63;
+}
+
+.age_1week {
+  background-color: rgba(26, 152, 80, 0.75);
+  fill: #1a9850;
+}
+
+/*!
+ * lds-ellipsis
+ */
+
+.lds-ellipsis {
+  display: inline-block;
+  position: relative;
+  width: 80px;
+  height: 13px;
+  padding-bottom: 5px;
+}
+
+.lds-ellipsis div {
+  position: absolute;
+  top: 0px;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  background: black;
+  animation-timing-function: cubic-bezier(0, 1, 1, 0);
+}
+
+.lds-ellipsis div:nth-child(1) {
+  left: 8px;
+  animation: lds-ellipsis1 0.6s infinite;
+}
+
+.lds-ellipsis div:nth-child(2) {
+  left: 8px;
+  animation: lds-ellipsis2 0.6s infinite;
+}
+
+.lds-ellipsis div:nth-child(3) {
+  left: 32px;
+  animation: lds-ellipsis2 0.6s infinite;
+}
+
+.lds-ellipsis div:nth-child(4) {
+  left: 56px;
+  animation: lds-ellipsis3 0.6s infinite;
+}
+
+@keyframes lds-ellipsis1 {
+  0% {
+    transform: scale(0);
+  }
+
+  100% {
+    transform: scale(1);
+  }
+}
+
+@keyframes lds-ellipsis3 {
+  0% {
+    transform: scale(1);
+  }
+
+  100% {
+    transform: scale(0);
+  }
+}
+
+@keyframes lds-ellipsis2 {
+  0% {
+    transform: translate(0, 0);
+  }
+
+  100% {
+    transform: translate(24px, 0);
+  }
+}
+
+/*!
+ * form-control taken from:
+ * Bootstrap v3.3.5 (http://getbootstrap.com)
+ * Copyright 2011-2015 Twitter, Inc.
+ * Licensed under MIT (https://github.com/twbs/bootstrap/blob/master/LICENSE)
+ */
+
+.form-control {
+  display: block;
+  width: 100%;
+  height: 45px;
+  padding: 10px 15px;
+  font-size: 15px;
+  line-height: 1.42857143;
+  color: #2c3e50;
+  background-color: #ffffff;
+  background-image: none;
+  border: 1px solid #dce4ec;
+  border-radius: 4px;
+  -webkit-box-shadow: inset 0 1px 1px rgba(0, 0, 0, 0.075);
+  box-shadow: inset 0 1px 1px rgba(0, 0, 0, 0.075);
+  -webkit-transition: border-color ease-in-out .15s, -webkit-box-shadow ease-in-out .15s;
+  -o-transition: border-color ease-in-out .15s, box-shadow ease-in-out .15s;
+  transition: border-color ease-in-out .15s, box-shadow ease-in-out .15s
+}
+
+.form-control:focus {
+  border-color: #2c3e50;
+  outline: 0;
+  -webkit-box-shadow: inset 0 1px 1px rgba(0, 0, 0, 0.075), 0 0 8px rgba(44, 62, 80, 0.6);
+  box-shadow: inset 0 1px 1px rgba(0, 0, 0, 0.075), 0 0 8px rgba(44, 62, 80, 0.6)
+}
+
+.form-control,
+input {
+  border-width: 2px;
+  -webkit-box-shadow: none;
+  box-shadow: none
+}
+
+.form-control:focus,
+input:focus {
+  -webkit-box-shadow: none;
+  box-shadow: none
+}
