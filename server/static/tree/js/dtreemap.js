@@ -470,6 +470,18 @@ define(["d3", "cookie"], function (d3, cookie) {
         return list.join(", ");
     }
 
+    function dfnClasses(list) {
+        const dfns = [];
+
+        list.forEach(function (ft) {
+            let c = ft;
+            c = c.replace(/[./]/, "");
+            dfns.push("<dfn class='ft-" + c + "'>" + ft + "</dfn>");
+        });
+
+        return commaSep(dfns);
+    }
+
     function showDetails(node) {
         d3.select('#details_path').text(node.path);
         d3.select('#details_size').text(bytesHuman(node.size));
@@ -477,7 +489,7 @@ define(["d3", "cookie"], function (d3, cookie) {
         d3.select('#details_atime').text(node.atime);
         d3.select('#details_groups').text(commaSep(node.groups));
         d3.select('#details_users').text(commaSep(node.users));
-        d3.select('#details_filetypes').text(commaSep(node.filetypes));
+        d3.select('#details_filetypes').html(dfnClasses(node.filetypes));
     }
 
     function showCurrentDetails() {

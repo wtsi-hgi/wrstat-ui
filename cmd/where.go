@@ -96,8 +96,8 @@ You can filter what files should be considered and reported on:
 --users:  only consider files that have user ownership of one of these
           comma-separated users.
 --types:  only consider files that are one of these comma-separated file types,
-          from this set of allowed values: cram,bam,index,compressed,
-		  uncompressed,checkpoint,other,temporary
+          from this set of allowed values: vcf,vcf.gz,bcf,sam,bam,cram,fasta,
+		      fastq,fastq.gz,ped/bed,compressed,text,log,temp,other
 
 To avoid producing too much output, the --size option (specify your own units,
 eg. 50M for 50 megabytes) can be used to not display directories that have less
@@ -174,8 +174,8 @@ func init() {
 	whereCmd.Flags().StringVarP(&whereUsers, "users", "u", "",
 		"comma separated list of usernames to filter on")
 	whereCmd.Flags().StringVarP(&whereTypes, "types", "t", "",
-		"comma separated list of types (amongst cram,bam,index,compressed,uncompressed,"+
-			"checkpoint,other,temporary) to filter on")
+		"comma separated list of types (amongst vcf,vcf.gz,bcf,sam,bam,cram,fasta,fastq,fastq.gz,"+
+			"ped/bed,compressed,text,log,temp,other) to filter on")
 	whereCmd.Flags().StringVar(&whereSize, "size", defaultSize,
 		"minimum size (specify the unit) of files nested under a directory for it to be reported on")
 	whereCmd.Flags().IntVar(&whereAge, "age", 0,

@@ -460,7 +460,7 @@ func TestServer(t *testing.T) {
 						expectedGroupsA := []string{groupA}
 						expectedGroupsB := []string{groupB}
 						expectedFTs := expectedNonRoot[0].FileTypes
-						expectedBams := []string{"bam", "temporary"}
+						expectedBams := []string{"bam", "temp"}
 						expectedCrams := []string{"cram"}
 						expectedAtime := time.Unix(50, 0)
 
@@ -895,7 +895,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 				groups := gidsToGroups(t, gids[0], gids[1], "0")
 				sort.Strings(groups)
 
-				expectedFTs := []string{"bam", "cram", "temporary"}
+				expectedFTs := []string{"bam", "cram", "temp"}
 				expectedAtime := "1970-01-01T00:00:50Z"
 
 				tm := *resp.Result().(*TreeElement) //nolint:forcetypeassert
@@ -1233,35 +1233,35 @@ func createExampleDgutDir(t *testing.T) (string, error) {
 // exampleDGUTData is some example DGUT data that uses the given uid and gids,
 // along with root's uid.
 func exampleDGUTData(uid, gidA, gidB string) string {
-	data := `/	x	z	0	3	30	50
-/	x	z	1	2	10	50
-/	x	z	7	1	5	50
-/	x	0	0	4	40	50
-/	y	0	0	5	5	50
-/	0	0	0	1	1	50
-/a	x	z	0	3	30	50
-/a	x	z	1	2	10	50
-/a	x	z	7	1	5	50
-/a	x	0	0	4	40	50
-/a	y	0	0	5	5	50
-/a	0	0	0	1	1	50
-/a/b	x	z	0	3	30	50
-/a/b	x	z	1	2	10	50
-/a/b	x	z	7	1	5	50
-/a/b	x	0	0	4	40	50
-/a/b/d	x	z	0	3	30	50
-/a/b/d	x	0	0	4	40	50
-/a/b/d/f	x	z	0	1	10	75
-/a/b/d/g	x	z	0	2	20	50
-/a/b/d/g	x	0	0	4	40	50
-/a/b/e	x	z	1	2	10	50
-/a/b/e	x	z	7	1	5	50
-/a/b/e/h	x	z	1	2	10	50
-/a/b/e/h	x	z	7	1	5	50
+	data := `/	x	z	7	3	30	50
+/	x	z	6	2	10	50
+/	x	z	1	1	5	50
+/	x	0	7	4	40	50
+/	y	0	7	5	5	50
+/	0	0	7	1	1	50
+/a	x	z	7	3	30	50
+/a	x	z	6	2	10	50
+/a	x	z	1	1	5	50
+/a	x	0	7	4	40	50
+/a	y	0	7	5	5	50
+/a	0	0	7	1	1	50
+/a/b	x	z	7	3	30	50
+/a/b	x	z	6	2	10	50
+/a/b	x	z	1	1	5	50
+/a/b	x	0	7	4	40	50
+/a/b/d	x	z	7	3	30	50
+/a/b/d	x	0	7	4	40	50
+/a/b/d/f	x	z	7	1	10	75
+/a/b/d/g	x	z	7	2	20	50
+/a/b/d/g	x	0	7	4	40	50
+/a/b/e	x	z	6	2	10	50
+/a/b/e	x	z	1	1	5	50
+/a/b/e/h	x	z	6	2	10	50
+/a/b/e/h	x	z	1	1	5	50
+/a/b/e/h/tmp	x	z	6	1	5	50
 /a/b/e/h/tmp	x	z	1	1	5	50
-/a/b/e/h/tmp	x	z	7	1	5	50
-/a/c	y	0	0	5	5	50
-/a/c/d	y	0	0	5	5	50
+/a/c	y	0	7	5	5	50
+/a/c/d	y	0	7	5	5	50
 `
 
 	data = strings.ReplaceAll(data, "x", gidA)

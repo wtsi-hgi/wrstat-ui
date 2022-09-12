@@ -164,6 +164,82 @@ _:future,
   overflow: auto;
 }
 
+dfn {
+  cursor: help;
+  font-style: normal;
+}
+
+dfn:hover::after {
+  position: absolute;
+  z-index: 9999;
+  background: #eee;
+  border: solid 1px #aaa;
+  border-radius: 8px;
+  padding: 3px;
+  margin-left: -15px;
+  margin-top: -23px;
+}
+
+.ft-temp:hover::after {
+  content: '*.tmp, *.temp, .tmp.*, .temp.*, tmp.*, temp.*, in dir named tmp or temp';
+}
+
+.ft-vcf:hover::after {
+  content: '*.vcf';
+}
+
+.ft-vcfgz:hover::after {
+  content: '*.vcf.gz';
+}
+
+.ft-bcf:hover::after {
+  content: '*.bcf';
+}
+
+.ft-sam:hover::after {
+  content: '*.sam';
+}
+
+.ft-bam:hover::after {
+  content: '*.bam';
+}
+
+.ft-cram:hover::after {
+  content: '*.cram';
+}
+
+.ft-fasta:hover::after {
+  content: '*.fasta, *.fa';
+}
+
+.ft-fastq:hover::after {
+  content: '*.fastq, *.fq';
+}
+
+.ft-fastqgz:hover::after {
+  content: '*.fastq.gz, *.fq.gz';
+}
+
+.ft-pedbed:hover::after {
+  content: '*.ped, *.map, *.bed, *.bim, *.fam';
+}
+
+.ft-compressed:hover::after {
+  content: '*.bzip2, *.gz, *.tgz, *.zip, *.xz, *.bgz (excluding fq.gz and vcf.gz)';
+}
+
+.ft-text:hover::after {
+  content: '*.csv, *.tsv, *.txt, *.text, *.md, *.dat, *readme';
+}
+
+.ft-log:hover::after {
+  content: '*.log, *.out, *.o, *.err, *.e, *.oe';
+}
+
+.ft-other:hover::after {
+  content: 'files not matching other file types';
+}
+
 #key {
   margin-top: 15px;
   padding: 0;
