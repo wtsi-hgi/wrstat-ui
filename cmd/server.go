@@ -28,6 +28,8 @@
 package cmd
 
 import (
+	"encoding/csv"
+	"errors"
 	"io"
 	"log/syslog"
 	"os"
@@ -50,6 +52,7 @@ var oktaURL string
 var oktaOAuthIssuer string
 var oktaOAuthClientID string
 var oktaOAuthClientSecret string
+var areasPath string
 
 // serverCmd represents the server command.
 var serverCmd = &cobra.Command{
@@ -76,6 +79,10 @@ except for non-graceful stops of the server, which are sent at the CRIT level or
 include 'panic' in the message. The messages are tagged 'wrstat-server', and you
 might want to filter away 'STATUS=200' to find problems.
 If --logfile is supplied, logs to that file instaed of syslog.
+
+If --areas is supplied, the group,area csv file pointed to will be used to add
+"areas" to the server, allowing clients to specify an area to filter on all
+groups with that area.
 
 The server must be running for 'wrstat where' calls to succeed.
 
@@ -123,6 +130,10 @@ creation time in reports.
 		s.AddOIDCRoutes(oktaURL, oktaOAuthIssuer, oktaOAuthClientID, oktaOAuthClientSecret)
 
 		s.WhiteListGroups(whiteLister)
+
+		if areasPath != "" {
+			s.AddGroupAreas(areasCSVToMap(areasPath))
+		}
 
 		info("opening databases, please wait...")
 		dbPaths, err := server.FindLatestDgutDirs(args[0], dgutDBsSuffix)
@@ -176,6 +187,7 @@ func init() {
 		"Okta Client ID")
 	serverCmd.Flags().StringVar(&oktaOAuthClientSecret, "okta_secret", "",
 		"Okta Client Secret (default $OKTA_OAUTH2_CLIENT_SECRET)")
+	serverCmd.Flags().StringVar(&areasPath, "areas", "", "path to group,area csv file")
 	serverCmd.Flags().StringVar(&serverLogPath, "logfile", "",
 		"log to this file instead of syslog")
 
@@ -252,6 +264,51 @@ func whiteLister(gid string) bool {
 	_, ok := whiteListGIDs[gid]
 
 	return ok
+}
+
+// areasCSVToMap takes a group,area csv file and converts it in to a map of
+// area -> groups slice.
+func areasCSVToMap(path string) map[string][]string {
+	r, f := makeCSVReader(path)
+	defer f.Close()
+
+	areas := make(map[string][]string)
+
+	for {
+		rec, err := r.Read()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+
+		if err != nil {
+			die("could not read areas csv: %s", err)
+		}
+
+		groups, present := areas[rec[1]]
+		if !present {
+			groups = []string{}
+		}
+
+		areas[rec[1]] = append(groups, rec[0])
+	}
+
+	return areas
+}
+
+// makeCSVReader opens the given path and returns a CSV reader configured for
+// 2 column CSV files. Also returns an *os.File that should you Close() after
+// reading.
+func makeCSVReader(path string) (*csv.Reader, *os.File) {
+	f, err := os.Open(path)
+	if err != nil {
+		die("could not open areas csv: %s", err)
+	}
+
+	r := csv.NewReader(f)
+	r.FieldsPerRecord = 2
+	r.ReuseRecord = true
+
+	return r, f
 }
 
 // sayStarted logs to console that the server stated. It does this a second

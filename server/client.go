@@ -150,6 +150,32 @@ func newAuthenticatedClientRequest(url, cert, jwt string) *resty.Request {
 	return client.R()
 }
 
+// GetGroupAreas is a client call to a Server listening at the given
+// domain:port url that queries its configured group area information. The
+// returned map has area keys and group slices.
+//
+// Provide a non-blank path to a certificate to force us to trust that
+// certificate, eg. if the server was started with a self-signed certificate.
+//
+// You must first Login() to get a JWT that you must supply here.
+func GetGroupAreas(url, cert, jwt string) (map[string][]string, error) {
+	r := newAuthenticatedClientRequest(url, cert, jwt)
+
+	resp, err := r.SetResult(map[string][]string{}).
+		ForceContentType("application/json").
+		Get(EndPointAuthGroupAreas)
+	if err != nil {
+		return nil, err
+	}
+
+	switch resp.StatusCode() {
+	case http.StatusUnauthorized, http.StatusNotFound:
+		return nil, ErrNoAuth
+	}
+
+	return *resp.Result().(*map[string][]string), nil //nolint:forcetypeassert
+}
+
 // GetWhereDataIs is a client call to a Server listening at the given
 // domain:port url that queries where data is and returns the raw response body
 // (JSON string), and that body converted in to a slice of *DirSummary.

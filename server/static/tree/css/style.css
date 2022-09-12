@@ -100,7 +100,8 @@ _:future,
   margin-bottom: 10px;
 }
 
-#age_filter {
+#age_filter,
+#supergrouping {
   margin: 0;
   padding: 0;
   padding-left: 8px;

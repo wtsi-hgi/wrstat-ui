@@ -78,22 +78,41 @@ func getStaticFS() fs.FS {
 	return fsys
 }
 
+// AddGroupAreas takes a map of area keys and group slice values. Clients will
+// then receive this map on TreeElements in the "areas" field.
+//
+// If EnableAuth() has been called, also creates the /auth/group-areas endpoint
+// that returns the given value.
+func (s *Server) AddGroupAreas(areas map[string][]string) {
+	s.areas = areas
+
+	if s.authGroup != nil {
+		s.authGroup.GET(groupAreasPaths, s.getGroupAreas)
+	}
+}
+
+// getGroupAreas serves up our areas hash as JSON.
+func (s *Server) getGroupAreas(c *gin.Context) {
+	c.IndentedJSON(http.StatusOK, s.areas)
+}
+
 // TreeElement holds tree.DirInfo type information in a form suited to passing
 // to the treemap web interface. It also includes the server's dataTimeStamp so
 // interfaces can report on how long ago the data forming the tree was
 // captured.
 type TreeElement struct {
-	Name        string         `json:"name"`
-	Path        string         `json:"path"`
-	Count       uint64         `json:"count"`
-	Size        uint64         `json:"size"`
-	Atime       string         `json:"atime"`
-	Users       []string       `json:"users"`
-	Groups      []string       `json:"groups"`
-	FileTypes   []string       `json:"filetypes"`
-	HasChildren bool           `json:"has_children"`
-	Children    []*TreeElement `json:"children,omitempty"`
-	TimeStamp   string         `json:"timestamp"`
+	Name        string              `json:"name"`
+	Path        string              `json:"path"`
+	Count       uint64              `json:"count"`
+	Size        uint64              `json:"size"`
+	Atime       string              `json:"atime"`
+	Users       []string            `json:"users"`
+	Groups      []string            `json:"groups"`
+	FileTypes   []string            `json:"filetypes"`
+	HasChildren bool                `json:"has_children"`
+	Children    []*TreeElement      `json:"children,omitempty"`
+	TimeStamp   string              `json:"timestamp"`
+	Areas       map[string][]string `json:"areas"`
 }
 
 // getTree responds with the data needed by the tree web interface. LoadDGUTDB()
@@ -137,6 +156,7 @@ func (s *Server) diToTreeElement(di *dgut.DirInfo, filter *dgut.Filter) *TreeEle
 	}
 
 	te.Children = childElements
+	te.Areas = s.areas
 
 	return te
 }

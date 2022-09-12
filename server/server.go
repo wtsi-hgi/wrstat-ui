@@ -69,6 +69,12 @@ const (
 	// authorization is implemented.
 	EndPointAuthWhere = EndPointAuth + wherePath
 
+	groupAreasPaths = "/group-areas"
+
+	// EndPointAuthGroupAreas is the endpoint for making queries on what the
+	// group areas are, which is available if authorization is implemented.
+	EndPointAuthGroupAreas = EndPointAuth + groupAreasPaths
+
 	// TreePath is the path to the static tree website.
 	TreePath = "/tree"
 
@@ -127,6 +133,7 @@ type Server struct {
 	logger         *log.Logger
 	webOAuth       *oauthEnv
 	cliOAuth       *oauthEnv
+	areas          map[string][]string
 }
 
 // New creates a Server which can serve a REST API and website.

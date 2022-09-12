@@ -73,6 +73,7 @@ define(["d3", "cookie"], function (d3, cookie) {
         hasher.searchParams.set('area', area);
 
         hasher.searchParams.set('age', age_filter);
+        hasher.searchParams.set('supergroup', group_area);
 
         window.location.hash = hasher.searchParams;
     }
@@ -94,12 +95,15 @@ define(["d3", "cookie"], function (d3, cookie) {
     var filterIDs = ['groups_list', 'users_list', 'ft_list'];
     let filters = new Map();
 
-    let age_filter = "0"
+    let age_filter = "0";
+    let group_area = "-none-";
+    let area_groups = [];
 
     function getFilters() {
         str = "";
         filterIDs.forEach(id => str += id + ':' + filters.get(id) + ';');
         str += "age:" + age_filter;
+        str += ";super:" + group_area;
         return str;
     }
 
@@ -351,11 +355,23 @@ define(["d3", "cookie"], function (d3, cookie) {
     }
 
     function constructAPIURL(path) {
-        url = "/rest/v1/auth/tree?path=" + path
+        let url = "/rest/v1/auth/tree?path=" + path
 
-        groups = d3.select('#groups_list').property('value');
-        users = d3.select('#users_list').property('value');
-        filetypes = d3.select('#ft_list').property('value');
+        let groups = d3.select('#groups_list').property('value');
+        let users = d3.select('#users_list').property('value');
+        let filetypes = d3.select('#ft_list').property('value');
+
+        if (area_groups.length > 0) {
+            let garray = [];
+            if (groups != "") {
+                garray = groups.split(",");
+                garray = garray.concat(area_groups);
+            } else {
+                garray = area_groups;
+            }
+
+            groups = garray.join();
+        }
 
         if (groups != "") {
             url += '&groups=' + groups
@@ -501,6 +517,46 @@ define(["d3", "cookie"], function (d3, cookie) {
         showCurrentDetails();
     }
 
+    var supergroups;
+    function setGroupAreas(data) {
+        supergroups = data.areas;
+        if (supergroups === null) {
+            return;
+        }
+
+        let select = d3.select('#supergrouping');
+
+        let keys = Object.keys(supergroups);
+        keys.unshift("-none-")
+
+        select
+            .selectAll('option')
+            .remove();
+
+        select
+            .selectAll('option')
+            .data(keys).enter()
+            .append('option')
+            .text(function (d) { return d; });
+
+        select.on('change', function () {
+            group_area = d3.select(this).property('value');
+            if (group_area == "-none-") {
+                area_groups = [];
+                return;
+            }
+
+            area_groups = supergroups[group_area];
+        });
+
+        if (group_area != "-none-") {
+            $('#supergrouping').val(group_area).prop('selected', true);
+            area_groups = supergroups[group_area];
+        }
+
+        $("#supergroups").show();
+    }
+
     function setAllFilterOptions(data) {
         setFilterOptions('#groups_list', data.groups);
         setFilterOptions('#users_list', data.users);
@@ -508,7 +564,7 @@ define(["d3", "cookie"], function (d3, cookie) {
     }
 
     function setFilterOptions(id, elements) {
-        var select = d3.select(id);
+        let select = d3.select(id);
 
         select
             .selectAll('option')
@@ -565,7 +621,10 @@ define(["d3", "cookie"], function (d3, cookie) {
         }
         $("#age_filter").val(age_filter);
 
-        return path
+        group_area = getURLParam('supergroup');
+        if (group_area == null) {
+            group_area = "-none-";
+        }
     }
 
     setPageDefaultsFromHash();
@@ -608,27 +667,33 @@ define(["d3", "cookie"], function (d3, cookie) {
         }
     }
 
+    // first fetch just to get group areas
     getData(path, function (data) {
-        initialize(data);
-        setValues(data);
-        layout(data);
-        display(data);
-        updateDetails(data);
-        setAllFilterOptions(data);
+        setGroupAreas(data);
 
-        if (groups) {
-            $('#groups_list').val(groups)
-        }
+        // now do the real fetch
+        getData(path, function (data) {
+            initialize(data);
+            setValues(data);
+            layout(data);
+            display(data);
+            updateDetails(data);
+            setAllFilterOptions(data);
 
-        if (users) {
-            $('#users_list').val(users)
-        }
+            if (groups) {
+                $('#groups_list').val(groups)
+            }
 
-        if (fts) {
-            $('#ft_list').val(fts)
-        }
+            if (users) {
+                $('#users_list').val(users)
+            }
 
-        storeFilters(data);
-        setTimestamp(data);
+            if (fts) {
+                $('#ft_list').val(fts)
+            }
+
+            storeFilters(data);
+            setTimestamp(data);
+        });
     });
 });

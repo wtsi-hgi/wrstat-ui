@@ -991,6 +991,25 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 				So(err, ShouldBeNil)
 				So(resp.StatusCode(), ShouldEqual, http.StatusBadRequest)
 			})
+
+			Convey("You can access the group-areas endpoint after AddGroupAreas()", func() {
+				_, err := GetGroupAreas(addr, cert, token)
+				So(err, ShouldNotBeNil)
+
+				expectedAreas := map[string][]string{
+					"a": {"1", "2"},
+					"b": {"3", "4"},
+				}
+
+				s.AddGroupAreas(expectedAreas)
+
+				areas, err := GetGroupAreas(addr, cert, token)
+				So(err, ShouldBeNil)
+				So(areas, ShouldResemble, expectedAreas)
+
+				_, err = GetGroupAreas(addr, cert, "foo")
+				So(err, ShouldNotBeNil)
+			})
 		})
 	})
 }

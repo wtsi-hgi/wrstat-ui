@@ -50,17 +50,24 @@
 						<span class="select_label">Filters:</span><br>
 
 						<div class="filter">
-							<input type='text' placeholder='Groups' class='form-control flexdatalist' multiple=''
-								list='groups_list' name='groups_list' id='groups_list'>
-
-							<datalist id="groups_list"></datalist>
-						</div>
-
-						<div class="filter">
 							<input type='text' placeholder='Users' class='form-control flexdatalist' multiple=''
 								list='users_list' name='users_list' id='users_list'>
 
 							<datalist id="users_list"></datalist>
+						</div>
+
+						<div class="filter">
+							<input type='text' placeholder='Groups' class='form-control flexdatalist' multiple=''
+								list='groups_list' name='groups_list' id='groups_list'>
+
+							<datalist id="groups_list"></datalist>
+
+							<div id="supergroups" style="display: none;">
+								<label for="supergrouping">Group areas:</label>
+
+								<select name="supergrouping" id="supergrouping" class='form-control'>
+								</select>
+							</div>
 						</div>
 
 						<div class="filter">
