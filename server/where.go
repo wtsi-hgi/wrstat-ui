@@ -32,6 +32,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	gas "github.com/wtsi-hgi/go-authserver"
 	"github.com/wtsi-ssg/wrstat/dgut"
 	"github.com/wtsi-ssg/wrstat/summary"
 )
@@ -156,12 +157,12 @@ func splitCommaSeparatedString(value string) []string {
 
 // getUserFromContext extracts the User information from our JWT. Returns nil if
 // we're not doing auth.
-func (s *Server) getUserFromContext(c *gin.Context) *User {
-	if s.authGroup == nil {
+func (s *Server) getUserFromContext(c *gin.Context) *gas.User {
+	if s.AuthRouter() == nil {
 		return nil
 	}
 
-	return s.getUser(c)
+	return s.GetUser(c)
 }
 
 // restrictIDsToWanted returns the elements of ids that are in wanted. Will
@@ -195,7 +196,7 @@ func restrictIDsToWanted(ids []string, wanted map[string]bool) ([]string, error)
 // the groups they belong to; security restrictions are purely based on the
 // enforced restrictedGroups().
 func (s *Server) userIDsFromNames(users string) ([]string, error) {
-	ids, _, err := getWantedIDs(users, userNameToUID)
+	ids, _, err := getWantedIDs(users, gas.UserNameToUID)
 	if err != nil {
 		return nil, err
 	}

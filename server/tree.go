@@ -33,6 +33,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	gas "github.com/wtsi-hgi/go-authserver"
 	"github.com/wtsi-ssg/wrstat/dgut"
 )
 
@@ -44,19 +45,20 @@ const javascriptToJSONFormat = "2006-01-02T15:04:05.999Z"
 // /rest/v1/auth/tree endpoint. It only works if EnableAuth() has been called
 // first.
 func (s *Server) AddTreePage() error {
-	if s.authGroup == nil {
-		return ErrNeedsAuth
+	authGroup := s.AuthRouter()
+	if authGroup == nil {
+		return gas.ErrNeedsAuth
 	}
 
 	fsys := getStaticFS()
 
-	s.router.StaticFS(TreePath, http.FS(fsys))
+	s.Router().StaticFS(TreePath, http.FS(fsys))
 
-	s.router.NoRoute(func(c *gin.Context) {
+	s.Router().NoRoute(func(c *gin.Context) {
 		c.Redirect(http.StatusMovedPermanently, "/tree/tree.html")
 	})
 
-	s.authGroup.GET(TreePath, s.getTree)
+	authGroup.GET(TreePath, s.getTree)
 
 	return nil
 }
@@ -69,7 +71,7 @@ func getStaticFS() fs.FS {
 
 	treeDir := "static/tree"
 
-	if os.Getenv(devEnvKey) == devEnvVal {
+	if os.Getenv(gas.DevEnvKey) == gas.DevEnvVal {
 		fsys = os.DirFS(treeDir)
 	} else {
 		fsys, _ = fs.Sub(staticFS, treeDir) //nolint:errcheck
@@ -86,8 +88,9 @@ func getStaticFS() fs.FS {
 func (s *Server) AddGroupAreas(areas map[string][]string) {
 	s.areas = areas
 
-	if s.authGroup != nil {
-		s.authGroup.GET(groupAreasPaths, s.getGroupAreas)
+	authGroup := s.AuthRouter()
+	if authGroup != nil {
+		authGroup.GET(groupAreasPaths, s.getGroupAreas)
 	}
 }
 

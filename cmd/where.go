@@ -41,6 +41,7 @@ import (
 	"github.com/dustin/go-humanize" //nolint:misspell
 	"github.com/olekukonko/tablewriter"
 	"github.com/spf13/cobra"
+	gas "github.com/wtsi-hgi/go-authserver"
 	"github.com/wtsi-ssg/wrstat/server"
 )
 
@@ -409,7 +410,7 @@ func getStoredJWT(url, cert string) (string, error) {
 
 	token := strings.TrimSpace(string(content))
 
-	return server.RefreshJWT(url, cert, token)
+	return gas.RefreshJWT(url, cert, token)
 }
 
 // jwtStoragePath returns the path where we store our JWT.
@@ -426,14 +427,14 @@ func jwtStoragePath() (string, error) {
 // which will give them back a code to paste here to authenticate.
 func login(url, cert string) (string, error) {
 	cliPrint("Login at this URL, and then copy and paste the given code back here: https://%s%s\n",
-		url, server.EndpointOIDCCLILogin)
+		url, gas.EndpointOIDCCLILogin)
 	cliPrint("Auth Code:")
 
 	var authCode string
 
 	fmt.Scanln(&authCode)
 
-	return server.LoginWithOKTA(url, cert, authCode)
+	return gas.LoginWithOKTA(url, cert, authCode)
 }
 
 // storeJWT writes the given token string to a private file in user's home dir.

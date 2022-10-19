@@ -26,9 +26,7 @@
 package server
 
 import (
-	"context"
 	"encoding/json"
-	"fmt"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
@@ -39,61 +37,18 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
-	jwt "github.com/appleboy/gin-jwt/v2"
 	"github.com/gin-gonic/gin"
 	"github.com/go-resty/resty/v2"
-	gjwt "github.com/golang-jwt/jwt/v4"
 	. "github.com/smartystreets/goconvey/convey"
-	"github.com/wtsi-ssg/wr/network/port"
+	gas "github.com/wtsi-hgi/go-authserver"
 	"github.com/wtsi-ssg/wrstat/dgut"
-	"golang.org/x/sync/errgroup"
 )
 
 const dirPerms = 0755
 const exampleDgutDirParentSuffix = "dgut.dbs"
-
-// stringLogger is a thread-safe logger that logs to a string.
-type stringLogger struct {
-	builder *strings.Builder
-	sync.RWMutex
-}
-
-// newStringLogger returns a new stringLogger.
-func newStringLogger() *stringLogger {
-	var builder strings.Builder
-
-	return &stringLogger{
-		builder: &builder,
-	}
-}
-
-// Write passes through to our strings.Builder while being thread-safe.
-func (s *stringLogger) Write(p []byte) (n int, err error) {
-	s.Lock()
-	defer s.Unlock()
-
-	return s.builder.Write(p)
-}
-
-// String passes through to our strings.Builder while being thread-safe.
-func (s *stringLogger) String() string {
-	s.RLock()
-	defer s.RUnlock()
-
-	return s.builder.String()
-}
-
-// Reset passes through to our strings.Builder while being thread-safe.
-func (s *stringLogger) Reset() {
-	s.Lock()
-	defer s.Unlock()
-
-	s.builder.Reset()
-}
 
 func TestIDsToWanted(t *testing.T) {
 	Convey("restrictIDsToWanted returns bad query if you don't want any of the given ids", t, func() {
@@ -105,35 +60,10 @@ func TestIDsToWanted(t *testing.T) {
 func TestServer(t *testing.T) {
 	username, uid, gids := getUserAndGroups(t)
 	exampleGIDs := getExampleGIDs(gids)
-	exampleUser := &User{Username: "user", UID: uid}
 	sentinelPollFrequency := 10 * time.Millisecond
 
-	Convey("hasError tells you about errors", t, func() {
-		So(hasError(nil, nil), ShouldBeFalse)
-		So(hasError(nil, ErrBadQuery, nil), ShouldBeTrue)
-	})
-
-	Convey("You can get access to static website files", t, func() {
-		envVals := []string{devEnvVal, "0"}
-
-		for _, envVal := range envVals {
-			os.Setenv(devEnvKey, envVal)
-			fsys := getStaticFS()
-
-			f, err := fsys.Open("tree.html")
-			So(err, ShouldBeNil)
-
-			clen := 15
-			content := make([]byte, clen)
-			n, err := f.Read(content)
-			So(err, ShouldBeNil)
-			So(n, ShouldEqual, clen)
-			So(string(content), ShouldEqual, "<!DOCTYPE html>")
-		}
-	})
-
 	Convey("Given a Server", t, func() {
-		logWriter := newStringLogger()
+		logWriter := gas.NewStringLogger()
 		s := New(logWriter)
 
 		Convey("You can convert dgut.DCSs to DirSummarys", func() {
@@ -170,7 +100,7 @@ func TestServer(t *testing.T) {
 		})
 
 		Convey("userGIDs fails with bad UIDs", func() {
-			u := &User{
+			u := &gas.User{
 				Username: username,
 				UID:      "-1",
 			}
@@ -180,215 +110,44 @@ func TestServer(t *testing.T) {
 		})
 
 		Convey("You can Start the Server", func() {
-			certPath, keyPath, err := createTestCert(t)
+			certPath, keyPath, err := gas.CreateTestCert(t)
 			So(err, ShouldBeNil)
 
-			addr, dfunc := startTestServer(s, certPath, keyPath)
+			addr, dfunc, err := gas.StartTestServer(s, certPath, keyPath)
+			So(err, ShouldBeNil)
 			defer dfunc()
 
 			client := resty.New()
 			client.SetRootCertificate(certPath)
 
-			resp, err := client.R().Get("http://" + addr + "/foo")
-			So(err, ShouldBeNil)
-			So(resp.StatusCode(), ShouldEqual, http.StatusBadRequest)
-
-			resp, err = client.R().Get("https://" + addr + "/foo")
-			So(err, ShouldBeNil)
-			So(resp.StatusCode(), ShouldEqual, http.StatusNotFound)
-
 			Convey("The jwt endpoint works after enabling it", func() {
-				err = s.EnableAuth("/foo", "/bar", func(u, p string) (bool, string) {
-					return false, ""
-				})
-				So(err, ShouldNotBeNil)
-
 				err = s.EnableAuth(certPath, keyPath, func(u, p string) (bool, string) {
-					ok := p == "pass"
+					returnUID := uid
 
-					return ok, uid
+					if u == "user" {
+						returnUID = "-1"
+					}
+
+					return true, returnUID
 				})
 				So(err, ShouldBeNil)
 
-				r := newClientRequest(addr, certPath)
-				resp, err = r.Post(EndPointJWT)
-				So(err, ShouldBeNil)
-				So(resp.String(), ShouldEqual, `{"code":401,"message":"missing Username or Password"}`)
-
-				_, err = Login("foo", certPath, "user", "foo")
-				So(err, ShouldNotBeNil)
-
-				var token string
-				token, err = Login(addr, certPath, "user", "foo")
-				So(err, ShouldNotBeNil)
-				So(err, ShouldEqual, ErrNoAuth)
-				So(token, ShouldBeBlank)
-
-				token, err = Login(addr, certPath, "user", "pass")
-				So(err, ShouldBeNil)
-				So(token, ShouldNotBeBlank)
-
-				var called int
-				var claims jwt.MapClaims
-				var userI interface{}
-				var gu *User
-
-				s.authGroup.GET("/test", func(c *gin.Context) {
-					called++
-					userI, _ = c.Get(userKey)
-					gu = s.getUser(c)
-					claims = jwt.ExtractClaims(c)
-				})
-
-				resp, err = r.Get(EndPointAuth + "/test")
-				So(err, ShouldBeNil)
-				So(resp.String(), ShouldEqual, `{"code":401,"message":"auth header is empty"}`)
-
-				r = newAuthenticatedClientRequest(addr, certPath, "{sdf.sdf.sdf}")
-				resp, err = r.Get(EndPointAuth + "/test")
-				So(err, ShouldBeNil)
-				So(resp.String(), ShouldEqual, `{"code":401,"message":"illegal base64 data at input byte 0"}`)
-
-				start := time.Now()
-				end := start.Add(1 * time.Minute)
-
-				var noClaimToken string
-				noClaimToken, err = makeTestToken(keyPath, start, end, false)
-				So(err, ShouldBeNil)
-
-				r = newAuthenticatedClientRequest(addr, certPath, noClaimToken)
-				resp, err = r.Get(EndPointAuth + "/test")
-				So(err, ShouldBeNil)
-				So(resp.String(), ShouldEqual, `{"code":403,"message":"you don't have permission to access this resource"}`)
-
-				var keyPath2 string
-				_, keyPath2, err = createTestCert(t)
-				So(err, ShouldBeNil)
-
-				var manualWronglySignedToken string
-				manualWronglySignedToken, err = makeTestToken(keyPath2, start, end, true)
-				So(err, ShouldBeNil)
-
-				r = newAuthenticatedClientRequest(addr, certPath, manualWronglySignedToken)
-				resp, err = r.Get(EndPointAuth + "/test")
-				So(err, ShouldBeNil)
-				So(resp.String(), ShouldEqual, `{"code":401,"message":"crypto/rsa: verification error"}`)
-
-				var manualCorrectlySignedToken string
-				manualCorrectlySignedToken, err = makeTestToken(keyPath, start, end, true)
-				So(err, ShouldBeNil)
-
-				r = newAuthenticatedClientRequest(addr, certPath, manualCorrectlySignedToken)
-				resp, err = r.Get(EndPointAuth + "/test")
-				So(err, ShouldBeNil)
-				So(resp.String(), ShouldBeBlank)
-
-				var manualExpiredToken string
-				manualExpiredToken, err = makeTestToken(keyPath, start, start.Add(time.Nanosecond), true)
-				So(err, ShouldBeNil)
-
-				r = newAuthenticatedClientRequest(addr, certPath, manualExpiredToken)
-				resp, err = r.Get(EndPointAuth + "/test")
-				So(err, ShouldBeNil)
-				So(resp.String(), ShouldEqual, `{"code":401,"message":"Token is expired"}`)
-
-				_, err = RefreshJWT("foo", certPath, manualExpiredToken)
-				So(err, ShouldNotBeNil)
-
-				_, err = RefreshJWT(addr, certPath, manualWronglySignedToken)
-				So(err, ShouldNotBeNil)
-
-				var refreshedToken string
-				refreshedToken, err = RefreshJWT(addr, certPath, manualExpiredToken)
-				So(err, ShouldBeNil)
-				So(refreshedToken, ShouldNotBeBlank)
-
-				r = newAuthenticatedClientRequest(addr, certPath, refreshedToken)
-				resp, err = r.Get(EndPointAuth + "/test")
-				So(err, ShouldBeNil)
-				So(resp.String(), ShouldBeBlank)
-
-				past := start.Add(-(2 * tokenDuration) - (2 * time.Nanosecond))
-				manualExpiredToken, err = makeTestToken(keyPath, past, past.Add(time.Nanosecond), true)
-				So(err, ShouldBeNil)
-
-				_, err = RefreshJWT(addr, certPath, manualExpiredToken)
-				So(err, ShouldNotBeNil)
-
-				r = newAuthenticatedClientRequest(addr, certPath, token)
-				resp, err = r.Get(EndPointAuth + "/test")
-				So(err, ShouldBeNil)
-				So(resp.String(), ShouldBeBlank)
-
-				So(called, ShouldEqual, 3)
-				So(claims[userKey], ShouldBeNil)
-				So(claims[claimKeyUsername], ShouldEqual, "user")
-				user, ok := userI.(*User)
-				So(ok, ShouldBeTrue)
-				So(user, ShouldResemble, exampleUser)
-				So(gu, ShouldResemble, exampleUser)
-
-				s.authCB = func(u, p string) (bool, string) {
-					return true, "-1"
-				}
-
-				tokenBadUID, errl := Login(addr, certPath, "user", "pass")
+				token, errl := gas.Login(addr, certPath, username, "pass")
 				So(errl, ShouldBeNil)
-				So(token, ShouldNotBeBlank)
+				r := gas.NewAuthenticatedClientRequest(addr, certPath, token)
 
-				rBadUID := newAuthenticatedClientRequest(addr, certPath, tokenBadUID)
-				resp, err = r.Get(EndPointAuth + "/test")
+				tokenBadUID, errl := gas.Login(addr, certPath, "user", "pass")
+				So(errl, ShouldBeNil)
+				So(tokenBadUID, ShouldNotBeBlank)
+
+				s.AuthRouter().GET("/test", func(c *gin.Context) {})
+
+				rBadUID := gas.NewAuthenticatedClientRequest(addr, certPath, tokenBadUID)
+				resp, err := r.Get(gas.EndPointAuth + "/test")
 				So(err, ShouldBeNil)
 				So(resp.String(), ShouldBeBlank)
 
 				testRestrictedGroups(t, gids, s, r, rBadUID, exampleGIDs)
-			})
-
-			Convey("authPayLoad correctly maps a User to claims, or returns none", func() {
-				data := "foo"
-				claims := authPayLoad(data)
-				So(len(claims), ShouldEqual, 0)
-
-				claims = authPayLoad(exampleUser)
-				So(len(claims), ShouldEqual, 2)
-				So(claims, ShouldResemble, jwt.MapClaims{
-					claimKeyUsername: "user",
-					claimKeyUID:      uid,
-				})
-			})
-
-			Convey("retrieveClaimString fails with bad claims", func() {
-				claims := jwt.MapClaims{"foo": []string{"bar"}}
-
-				_, errc := retrieveClaimString(claims, "abc")
-				So(errc, ShouldNotBeNil)
-
-				str, errc := retrieveClaimString(claims, "foo")
-				So(errc, ShouldNotBeNil)
-				So(errc, ShouldEqual, ErrBadJWTClaim)
-				So(str, ShouldBeBlank)
-			})
-
-			Convey("getUser fails without the user key having a valid value", func() {
-				called := 0
-
-				var user1, user2 *User
-
-				s.router.GET("/test", func(c *gin.Context) {
-					user1 = s.getUser(c)
-					c.Keys = map[string]interface{}{userKey: "foo"}
-					user2 = s.getUser(c)
-
-					called++
-				})
-
-				r := newClientRequest(addr, certPath)
-				resp, err = r.Get("https://" + addr + "/test")
-				So(err, ShouldBeNil)
-
-				So(called, ShouldEqual, 1)
-				So(user1, ShouldBeNil)
-				So(user2, ShouldBeNil)
 			})
 
 			testClientsOnRealServer(t, username, uid, gids, s, addr, certPath, keyPath)
@@ -622,9 +381,10 @@ func TestServer(t *testing.T) {
 						s.dgutWatcher.RUnlock()
 						So(s.tree, ShouldNotBeNil)
 
-						certPath, keyPath, err := createTestCert(t)
+						certPath, keyPath, err := gas.CreateTestCert(t)
 						So(err, ShouldBeNil)
-						_, stop := startTestServer(s, certPath, keyPath)
+						_, stop, err := gas.StartTestServer(s, certPath, keyPath)
+						So(err, ShouldBeNil)
 
 						stop()
 						So(s.dgutWatcher, ShouldBeNil)
@@ -724,18 +484,6 @@ func TestServer(t *testing.T) {
 				So(err, ShouldNotBeNil)
 			})
 		})
-
-		Convey("Endpoints that panic are logged", func() {
-			s.router.GET("/foo", func(c *gin.Context) {
-				panic("bar")
-			})
-
-			response, err := queryREST(s, "/foo", "")
-			So(err, ShouldBeNil)
-			So(response.Code, ShouldEqual, http.StatusInternalServerError)
-			So(logWriter.String(), ShouldContainSubstring, "STATUS=500")
-			So(logWriter.String(), ShouldContainSubstring, "panic")
-		})
 	})
 }
 
@@ -776,7 +524,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 
 			_, _, err = GetWhereDataIs(addr, cert, "", "/", "", "", "", "")
 			So(err, ShouldNotBeNil)
-			So(err, ShouldEqual, ErrNoAuth)
+			So(err, ShouldEqual, gas.ErrNoAuth)
 
 			err = s.AddTreePage()
 			So(err, ShouldNotBeNil)
@@ -791,7 +539,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 			err = s.LoadDGUTDBs(path)
 			So(err, ShouldBeNil)
 
-			token, errl := Login(addr, cert, "user", "pass")
+			token, errl := gas.Login(addr, cert, "user", "pass")
 			So(errl, ShouldBeNil)
 
 			_, _, err = GetWhereDataIs(addr, cert, token, "", "", "", "", "")
@@ -826,7 +574,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 			err = s.LoadDGUTDBs(path)
 			So(err, ShouldBeNil)
 
-			token, errl := Login(addr, cert, "user", "pass")
+			token, errl := gas.Login(addr, cert, "user", "pass")
 			So(errl, ShouldBeNil)
 
 			json, dcss, errg := GetWhereDataIs(addr, cert, token, "/", "", "", "", "0")
@@ -863,14 +611,15 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 			err = s.AddTreePage()
 			So(err, ShouldBeNil)
 
-			addr, dfunc := startTestServer(s, cert, key)
+			addr, dfunc, err := gas.StartTestServer(s, cert, key)
+			So(err, ShouldBeNil)
 			defer dfunc()
 
-			token, err := Login(addr, cert, "user", "pass")
+			token, err := gas.Login(addr, cert, "user", "pass")
 			So(err, ShouldBeNil)
 
 			Convey("You can get the static tree web page", func() {
-				r := newAuthenticatedClientRequest(addr, cert, token)
+				r := gas.NewAuthenticatedClientRequest(addr, cert, token)
 
 				resp, err := r.Get("tree/tree.html")
 				So(err, ShouldBeNil)
@@ -882,7 +631,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 			})
 
 			Convey("You can access the tree API", func() {
-				r := newAuthenticatedClientRequest(addr, cert, token)
+				r := gas.NewAuthenticatedClientRequest(addr, cert, token)
 				resp, err := r.SetResult(&TreeElement{}).
 					ForceContentType("application/json").
 					Get(EndPointAuthTree)
@@ -927,7 +676,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 					},
 				})
 
-				r = newAuthenticatedClientRequest(addr, cert, token)
+				r = gas.NewAuthenticatedClientRequest(addr, cert, token)
 				resp, err = r.SetResult(&TreeElement{}).
 					ForceContentType("application/json").
 					SetQueryParams(map[string]string{
@@ -968,7 +717,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 					},
 				})
 
-				r = newAuthenticatedClientRequest(addr, cert, token)
+				r = gas.NewAuthenticatedClientRequest(addr, cert, token)
 				resp, err = r.SetResult(&TreeElement{}).
 					ForceContentType("application/json").
 					SetQueryParams(map[string]string{
@@ -980,7 +729,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 				So(err, ShouldBeNil)
 				So(resp.StatusCode(), ShouldEqual, http.StatusBadRequest)
 
-				r = newAuthenticatedClientRequest(addr, cert, token)
+				r = gas.NewAuthenticatedClientRequest(addr, cert, token)
 				resp, err = r.SetResult(&TreeElement{}).
 					ForceContentType("application/json").
 					SetQueryParams(map[string]string{
@@ -1014,156 +763,6 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 	})
 }
 
-func TestServerOktaLogin(t *testing.T) {
-	issuer := os.Getenv("OKTA_OAUTH2_ISSUER")
-	clientID := os.Getenv("OKTA_OAUTH2_CLIENT_ID")
-	secret := os.Getenv("OKTA_OAUTH2_CLIENT_SECRET")
-	addr := os.Getenv("OKTA_WRSTAT_ADDR")
-	certPath := os.Getenv("OKTA_WRSTAT_CERT")
-	keyPath := os.Getenv("OKTA_WRSTAT_KEY")
-	username := os.Getenv("OKTA_USERNAME")
-	password := os.Getenv("OKTA_PASSWORD")
-
-	if hasBlankValue(issuer, clientID, secret, addr, certPath, keyPath, username, password) {
-		SkipConvey("Can't do Okta tests without the OKTA_* env vars set", t, func() {})
-
-		return
-	}
-
-	oktaDomain := strings.TrimSuffix(issuer, "oauth2/default")
-
-	Convey("Given a started Server with auth enabled", t, func() {
-		logWriter := newStringLogger()
-		s := New(logWriter)
-
-		jwt, err := LoginWithOKTA(addr, certPath, "foo")
-		So(err, ShouldNotBeNil)
-		So(jwt, ShouldBeBlank)
-
-		dfunc := startTestServerUsingAddress(addr, s, certPath, keyPath)
-		defer dfunc()
-
-		err = s.EnableAuth(certPath, keyPath, func(u, p string) (bool, string) {
-			return false, ""
-		})
-		So(err, ShouldBeNil)
-
-		Convey("You can't LoginWithOkta without first getting a code", func() {
-			_, err = LoginWithOKTA(addr, certPath, "foo")
-			So(err, ShouldNotBeNil)
-		})
-
-		Convey("After AddOIDCRoutes you can access the login-cli endpoint and LoginWithOKTA to get a JWT", func() {
-			s.AddOIDCRoutes(addr, issuer, clientID, secret)
-			r := newClientRequest(addr, "")
-
-			resp, errp := r.Get(EndpointOIDCCLILogin)
-			So(errp, ShouldBeNil)
-			content := resp.String()
-			So(content, ShouldContainSubstring, `ok12static.oktacdn.com`)
-			So(content, ShouldContainSubstring, `redirect_uri&#x3d;https&#x25;3A&#x25;2F&#x25;2F`)
-			So(content, ShouldContainSubstring, `callback-cli`)
-
-			resp = authnLogin(s, r, oktaDomain, username, password, addr, clientID)
-
-			redirectURL := resp.RawResponse.Request.URL
-			So(redirectURL.String(), ShouldContainSubstring, `callback-cli?code=`)
-
-			resp, errp = r.Get(redirectURL.String())
-			So(errp, ShouldBeNil)
-
-			code := resp.String()
-			So(code, ShouldNotBeBlank)
-
-			jwt, errp := LoginWithOKTA(addr, "", code)
-			So(errp, ShouldBeNil)
-			So(jwt, ShouldNotBeBlank)
-
-			So(checkJWTWorks(t, s, addr, certPath, jwt), ShouldBeTrue)
-		})
-
-		Convey("After AddOIDCRoutes you can access the login endpoint", func() {
-			s.AddOIDCRoutes(addr, issuer, clientID, secret)
-			r := newClientRequest(addr, "")
-
-			resp, errp := r.Get(EndpointOIDCLogin)
-			So(errp, ShouldBeNil)
-			content := resp.String()
-			So(content, ShouldContainSubstring, `ok12static.oktacdn.com`)
-			So(content, ShouldContainSubstring, `redirect_uri&#x3d;https&#x25;3A&#x25;2F&#x25;2F`)
-			So(content, ShouldNotContainSubstring, `callback-cli`)
-			So(content, ShouldContainSubstring, `callback`)
-		})
-	})
-}
-
-// ManualOktaAuthn is for testing purposes only.
-type ManualOktaAuthn struct {
-	SessionToken string `json:"sessionToken" binding:"required"`
-}
-
-// hasBlankValue returns true if any of the given values is "".
-func hasBlankValue(vals ...string) bool {
-	for _, val := range vals {
-		if val == "" {
-			return true
-		}
-	}
-
-	return false
-}
-
-// createTestCert creates a self-signed cert and key, returning their paths.
-func createTestCert(t *testing.T) (string, string, error) {
-	t.Helper()
-
-	dir := t.TempDir()
-	certPath := filepath.Join(dir, "cert")
-	keyPath := filepath.Join(dir, "key")
-
-	cmd := exec.Command("openssl", "req", "-new", "-newkey", "rsa:4096",
-		"-days", "1", "-nodes", "-x509", "-subj", "/CN=localhost",
-		"-addext", "subjectAltName = DNS:localhost",
-		"-keyout", keyPath, "-out", certPath,
-	)
-
-	err := cmd.Run()
-
-	return certPath, keyPath, err
-}
-
-// makeTestToken creates a JWT signed with the key at the given path, that
-// has orig_iat of start and exp of end, and includes a claimKeyUsername claim
-// if withUserClaims is true.
-func makeTestToken(keyPath string, start, end time.Time, withUserClaims bool) (string, error) {
-	token := gjwt.New(gjwt.GetSigningMethod("RS512"))
-
-	claims, ok := token.Claims.(gjwt.MapClaims)
-	if !ok {
-		return "", ErrNoAuth
-	}
-
-	if withUserClaims {
-		claims[claimKeyUsername] = "root"
-		claims[claimKeyUID] = ""
-	}
-
-	claims["orig_iat"] = start.Unix()
-	claims["exp"] = end.Unix()
-
-	keyData, err := os.ReadFile(keyPath)
-	if err != nil {
-		return "", err
-	}
-
-	key, err := gjwt.ParseRSAPrivateKeyFromPEM(keyData)
-	if err != nil {
-		return "", err
-	}
-
-	return token.SignedString(key)
-}
-
 // getUserAndGroups returns the current users username, uid and gids.
 func getUserAndGroups(t *testing.T) (string, string, []string) {
 	t.Helper()
@@ -1188,22 +787,7 @@ func getUserAndGroups(t *testing.T) (string, string, []string) {
 // queryWhere does a test GET of /rest/v1/where, with extra appended (start it
 // with ?).
 func queryWhere(s *Server, extra string) (*httptest.ResponseRecorder, error) {
-	return queryREST(s, EndPointWhere, extra)
-}
-
-// queryREST does a test GET of the given REST endpoint (start it with /), with
-// extra appended (start it with ?).
-func queryREST(s *Server, endpoint, extra string) (*httptest.ResponseRecorder, error) {
-	response := httptest.NewRecorder()
-
-	req, err := http.NewRequestWithContext(context.Background(), "GET", endpoint+extra, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	s.router.ServeHTTP(response, req)
-
-	return response, nil
+	return gas.QueryREST(s.Router(), EndPointWhere, extra)
 }
 
 // decodeWhereResult decodes the result of a Where query.
@@ -1303,19 +887,19 @@ func testRestrictedGroups(t *testing.T, gids []string, s *Server, r, rBadUID *re
 
 	var errg error
 
-	s.authGroup.GET("/groups", func(c *gin.Context) {
+	s.AuthRouter().GET("/groups", func(c *gin.Context) {
 		groups := c.Query("groups")
 		filterGIDs, errg = s.restrictedGroups(c, groups)
 	})
 
 	groups := gidsToGroups(t, gids...)
-	_, err := r.Get(EndPointAuth + "/groups?groups=" + groups[0])
+	_, err := r.Get(gas.EndPointAuth + "/groups?groups=" + groups[0])
 	So(err, ShouldBeNil)
 
 	So(errg, ShouldBeNil)
 	So(filterGIDs, ShouldResemble, []string{exampleGIDs[0]})
 
-	_, err = r.Get(EndPointAuth + "/groups?groups=0")
+	_, err = r.Get(gas.EndPointAuth + "/groups?groups=0")
 	So(err, ShouldBeNil)
 
 	So(errg, ShouldNotBeNil)
@@ -1323,7 +907,7 @@ func testRestrictedGroups(t *testing.T, gids []string, s *Server, r, rBadUID *re
 
 	s.userToGIDs = make(map[string][]string)
 
-	_, err = rBadUID.Get(EndPointAuth + "/groups?groups=" + groups[0])
+	_, err = rBadUID.Get(gas.EndPointAuth + "/groups?groups=" + groups[0])
 	So(err, ShouldBeNil)
 	So(errg, ShouldNotBeNil)
 	So(filterGIDs, ShouldBeNil)
@@ -1334,7 +918,7 @@ func testRestrictedGroups(t *testing.T, gids []string, s *Server, r, rBadUID *re
 
 	s.userToGIDs = make(map[string][]string)
 
-	_, err = r.Get(EndPointAuth + "/groups?groups=root")
+	_, err = r.Get(gas.EndPointAuth + "/groups?groups=root")
 	So(err, ShouldBeNil)
 
 	So(errg, ShouldBeNil)
@@ -1346,7 +930,7 @@ func testRestrictedGroups(t *testing.T, gids []string, s *Server, r, rBadUID *re
 
 	s.userToGIDs = make(map[string][]string)
 
-	_, err = r.Get(EndPointAuth + "/groups?groups=root")
+	_, err = r.Get(gas.EndPointAuth + "/groups?groups=root")
 	So(err, ShouldBeNil)
 
 	So(errg, ShouldNotBeNil)
@@ -1473,44 +1057,6 @@ func runSliceMatrixTest(t *testing.T, matrix []string, s *Server) {
 	}
 }
 
-// startTestServer starts the given server using the given cert and key paths
-// and returns the address and a func you should defer to stop the server.
-func startTestServer(s *Server, certPath, keyPath string) (string, func()) {
-	addr := getTestServerAddress()
-	dfunc := startTestServerUsingAddress(addr, s, certPath, keyPath)
-
-	return addr, dfunc
-}
-
-// getTestServerAddress determines a free port and returns localhost:port.
-func getTestServerAddress() string {
-	checker, err := port.NewChecker("localhost")
-	So(err, ShouldBeNil)
-	port, _, err := checker.AvailableRange(2)
-	So(err, ShouldBeNil)
-
-	return fmt.Sprintf("localhost:%d", port)
-}
-
-// startTestServerUsingAddress does what startTestServer, but using the given
-// address.
-func startTestServerUsingAddress(addr string, s *Server, certPath, keyPath string) func() {
-	var g errgroup.Group
-
-	g.Go(func() error {
-		return s.Start(addr, certPath, keyPath)
-	})
-
-	<-time.After(100 * time.Millisecond)
-
-	return func() {
-		s.Stop()
-
-		err := g.Wait()
-		So(err, ShouldBeNil)
-	}
-}
-
 // waitForFileToBeDeleted waits for the given file to not exist. Times out after
 // 10 seconds.
 func waitForFileToBeDeleted(t *testing.T, path string) {
@@ -1545,89 +1091,6 @@ func waitForFileToBeDeleted(t *testing.T, path string) {
 	}()
 
 	<-wait
-}
-
-// authnLogin is used to login with username and password via the authn endpoint
-// on the given oktaDomain, since we can't use the browser form during this
-// test. Also provide a resty.Request from newClientRequest(server_address).
-// Returns a resty.Response from trying to authenticate in a similar way as the
-// browser would do after submitting the username/password form.
-func authnLogin(s *Server, r *resty.Request, oktaDomain, username, password, addr, clientID string) *resty.Response {
-	var oauthState, codeChallenge string
-
-	handleOIDCTest := func(c *gin.Context) {
-		c.Header("Cache-Control", "no-cache")
-
-		o := s.cliOAuth
-
-		session := o.getSession(c)
-		if session == nil {
-			return
-		}
-
-		oauthState = session.Values[oauth2StateKeyCookie].(string) //nolint:errcheck,forcetypeassert
-		codeChallenge = o.ccs256
-	}
-
-	s.router.GET("/login-test", handleOIDCTest)
-
-	moa := &ManualOktaAuthn{}
-
-	rOkta := resty.New()
-	resp, err := rOkta.R().
-		SetHeader("Content-Type", "application/json").
-		SetBody(map[string]interface{}{"username": username, "password": password}).
-		SetResult(moa).
-		Post(oktaDomain + "api/v1/authn")
-	So(err, ShouldBeNil)
-	So(resp.String(), ShouldContainSubstring, `"status":"SUCCESS"`)
-
-	sessionToken := moa.SessionToken
-	So(sessionToken, ShouldNotBeBlank)
-
-	_, err = r.Get("/login-test")
-	So(err, ShouldBeNil)
-	So(oauthState, ShouldNotBeBlank)
-	So(codeChallenge, ShouldNotBeBlank)
-
-	resp, err = rOkta.R().
-		SetQueryParams(map[string]string{
-			"client_id":                  clientID,
-			"response_type":              oauth2AuthCodeKey,
-			"response_mode":              "query",
-			"scope":                      "openid email",
-			"redirect_uri":               ClientProtocol + addr + EndpointAuthCLICallback,
-			"state":                      oauthState,
-			"sessionToken":               sessionToken,
-			oauth2AuthChallengeKey:       codeChallenge,
-			oauth2AuthChallengeMethodKey: oauth2AuthChallengeMethod,
-		}).
-		SetHeader("Accept", "application/json").
-		Get(s.cliOAuth.Endpoint.AuthURL)
-	So(err, ShouldBeNil)
-
-	return resp
-}
-
-// checkJWTWorks calls LoadDGUTDBs on the given server, then sees if we can
-// GetWhereDataIs using the given jwt. Returns true if it all worked, or if we
-// can't do this test due to not belonging to at least 2 unix groups.
-func checkJWTWorks(t *testing.T, s *Server, addr, certPath, jwt string) bool {
-	t.Helper()
-
-	_, uid, gids := getUserAndGroups(t)
-	if len(gids) < 2 {
-		return true
-	}
-
-	path, err := createExampleDB(t, uid, gids[0], gids[1])
-	So(err, ShouldBeNil)
-	err = s.LoadDGUTDBs(path)
-	So(err, ShouldBeNil)
-
-	_, _, err = GetWhereDataIs(addr, certPath, jwt, "/", "", "", "", "0")
-
-	return err == nil
 }
 
 type mockDirEntry struct{}
