@@ -38,7 +38,7 @@ import (
 	"github.com/VertebrateResequencing/wr/jobqueue"
 	"github.com/inconshreveable/log15"
 	"github.com/spf13/cobra"
-	"github.com/wtsi-ssg/wrstat/scheduler"
+	"github.com/wtsi-ssg/wrstat/v3/scheduler"
 )
 
 const userOnlyPerm = 0700

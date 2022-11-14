@@ -34,8 +34,8 @@ import (
 	"time"
 
 	gas "github.com/wtsi-hgi/go-authserver"
-	"github.com/wtsi-ssg/wrstat/dgut"
-	"github.com/wtsi-ssg/wrstat/watch"
+	"github.com/wtsi-ssg/wrstat/v3/dgut"
+	"github.com/wtsi-ssg/wrstat/v3/watch"
 )
 
 const ErrNoDgutDBDirFound = gas.Error("dgut database directory not found")

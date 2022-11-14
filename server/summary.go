@@ -31,8 +31,8 @@ import (
 	"sort"
 	"time"
 
-	"github.com/wtsi-ssg/wrstat/dgut"
-	"github.com/wtsi-ssg/wrstat/summary"
+	"github.com/wtsi-ssg/wrstat/v3/dgut"
+	"github.com/wtsi-ssg/wrstat/v3/summary"
 )
 
 // DirSummary holds nested file count, size and atime information on a
