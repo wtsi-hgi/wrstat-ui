@@ -1,4 +1,4 @@
-module github.com/wtsi-ssg/wrstat
+module github.com/wtsi-ssg/wrstat/v3
 
 go 1.18
 
