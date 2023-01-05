@@ -115,7 +115,10 @@ func TestServer(t *testing.T) {
 
 			addr, dfunc, err := gas.StartTestServer(s, certPath, keyPath)
 			So(err, ShouldBeNil)
-			defer dfunc()
+			defer func() {
+				errd := dfunc()
+				So(errd, ShouldBeNil)
+			}()
 
 			client := resty.New()
 			client.SetRootCertificate(certPath)
@@ -386,7 +389,8 @@ func TestServer(t *testing.T) {
 						_, stop, err := gas.StartTestServer(s, certPath, keyPath)
 						So(err, ShouldBeNil)
 
-						stop()
+						errs := stop()
+						So(errs, ShouldBeNil)
 						So(s.dgutWatcher, ShouldBeNil)
 						So(s.tree, ShouldBeNil)
 
@@ -613,7 +617,10 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 
 			addr, dfunc, err := gas.StartTestServer(s, cert, key)
 			So(err, ShouldBeNil)
-			defer dfunc()
+			defer func() {
+				errd := dfunc()
+				So(errd, ShouldBeNil)
+			}()
 
 			token, err := gas.Login(addr, cert, "user", "pass")
 			So(err, ShouldBeNil)

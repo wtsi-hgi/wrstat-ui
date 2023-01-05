@@ -41,7 +41,7 @@ import (
 	"github.com/wtsi-ssg/wrstat/v3/scheduler"
 )
 
-const userOnlyPerm = 0700
+const userGroupPerm = 0770
 
 // appLogger is used for logging events in our commands.
 var appLogger = log15.New()

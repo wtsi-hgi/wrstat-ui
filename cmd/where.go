@@ -183,7 +183,7 @@ with refreshes possible up to 5 days after expiry.
 	},
 }
 
-func init() {
+func init() { //nolint:funlen
 	RootCmd.AddCommand(whereCmd)
 
 	// flags specific to these sub-commands
