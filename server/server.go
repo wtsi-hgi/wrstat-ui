@@ -35,8 +35,8 @@ import (
 	"time"
 
 	gas "github.com/wtsi-hgi/go-authserver"
-	"github.com/wtsi-ssg/wrstat/v3/dgut"
-	"github.com/wtsi-ssg/wrstat/v3/watch"
+	"github.com/wtsi-ssg/wrstat/v4/dgut"
+	"github.com/wtsi-ssg/wrstat/v4/watch"
 )
 
 //go:embed static

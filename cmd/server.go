@@ -38,7 +38,7 @@ import (
 
 	"github.com/inconshreveable/log15"
 	"github.com/spf13/cobra"
-	"github.com/wtsi-ssg/wrstat/v3/server"
+	"github.com/wtsi-ssg/wrstat/v4/server"
 )
 
 const sentinelPollFrequencty = 1 * time.Minute

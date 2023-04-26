@@ -33,8 +33,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	gas "github.com/wtsi-hgi/go-authserver"
-	"github.com/wtsi-ssg/wrstat/v3/dgut"
-	"github.com/wtsi-ssg/wrstat/v3/summary"
+	"github.com/wtsi-ssg/wrstat/v4/dgut"
+	"github.com/wtsi-ssg/wrstat/v4/summary"
 )
 
 // getWhere responds with a list of directory stats describing where data is on
