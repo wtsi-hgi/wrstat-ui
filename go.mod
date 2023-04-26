@@ -10,7 +10,6 @@ require (
 	github.com/go-resty/resty/v2 v2.7.0
 	github.com/hashicorp/go-multierror v1.1.1
 	github.com/inconshreveable/log15 v0.0.0-20201112154412-8562bdadbbac
-	github.com/karrick/godirwalk v1.17.0
 	github.com/klauspost/pgzip v1.2.5
 	github.com/olekukonko/tablewriter v0.0.5
 	github.com/phayes/freeport v0.0.0-20220201140144-74d24b5ae9f5
@@ -19,6 +18,7 @@ require (
 	github.com/spf13/cobra v1.5.0
 	github.com/termie/go-shutil v0.0.0-20140729215957-bcacb06fecae
 	github.com/ugorji/go/codec v1.2.7
+	github.com/wtsi-hgi/godirwalk v1.18.1
 	github.com/wtsi-ssg/wr v0.5.5
 	go.etcd.io/bbolt v1.3.6
 	golang.org/x/exp v0.0.0-20220722155223-a9213eeb770e

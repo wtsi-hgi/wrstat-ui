@@ -181,8 +181,6 @@ github.com/json-iterator/go v1.1.12 h1:PV8peI4a0ysnczrg+LtxykD8LfKY9ML6u2jnxaEnr
 github.com/json-iterator/go v1.1.12/go.mod h1:e30LSqwooZae/UwlEbR2852Gd8hjQvJoHmT4TnhNGBo=
 github.com/jtolds/gls v4.20.0+incompatible h1:xdiiI2gbIgH/gLH7ADydsJ1uDOEzR8yvV7C0MuV77Wo=
 github.com/jtolds/gls v4.20.0+incompatible/go.mod h1:QJZ7F/aHp+rZTRtaJ1ow/lLfFfVYBRgL+9YlvaHOwJU=
-github.com/karrick/godirwalk v1.17.0 h1:b4kY7nqDdioR/6qnbHQyDvmA17u5G1cZ6J+CZXwSWoI=
-github.com/karrick/godirwalk v1.17.0/go.mod h1:j4mkqPuvaLI8mp1DroR3P6ad7cyYd4c1qeJ3RV7ULlk=
 github.com/kisielk/errcheck v1.5.0/go.mod h1:pFxgyoBC7bSaBwPgfKdkLd5X25qrDl4LWUI2bnpBCr8=
 github.com/kisielk/gotool v1.0.0/go.mod h1:XhKaO+MFFWcvkIS/tQcRk01m1F5IRFswLeQ+oQHNcck=
 github.com/klauspost/compress v1.15.9 h1:wKRjX6JRtDdrE9qwa4b/Cip7ACOshUI4smpCQanqjSY=
@@ -371,6 +369,8 @@ github.com/ugorji/go/codec v1.2.7 h1:YPXUKf7fYbp/y8xloBqZOw2qaVggbfwMlI8WM3wZUJ0
 github.com/ugorji/go/codec v1.2.7/go.mod h1:WGN1fab3R1fzQlVQTkfxVtIBhWDRqOviHU95kRgeqEY=
 github.com/wtsi-hgi/go-authserver v1.0.2 h1:kP4QLjLK4MCMTdmDDpODJUoqlTWhYO1lUFp+gRv5Pno=
 github.com/wtsi-hgi/go-authserver v1.0.2/go.mod h1:JmXQYlfT3mIXosjuvQk9vPVvrloQmV2jQdvK8eGXkBU=
+github.com/wtsi-hgi/godirwalk v1.18.1 h1:t7eaGXYBfTtfIEGLizPCC9fzASTvZtdhKEEri8TyyJs=
+github.com/wtsi-hgi/godirwalk v1.18.1/go.mod h1:rLa4FlI9kdT7o67jwFos8qgaX3K2sMC6XI4FXJ1iVyk=
 github.com/wtsi-ssg/wr v0.5.5 h1:uElH4e4f7dUrAQMLAPpiMduyKGJfxsoBG+BvcUdz99s=
 github.com/wtsi-ssg/wr v0.5.5/go.mod h1:uhZS41nGOlpcnH0dmf0Xrde2qMEIXa1Q1bTtR7iTdSU=
 github.com/yuin/goldmark v1.1.27/go.mod h1:3hX8gzYuyVAZsxl0MRgGTJEmQBFcNTphYh9decYSb74=
