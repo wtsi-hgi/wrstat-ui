@@ -1,4 +1,4 @@
-PKG := github.com/wtsi-ssg/wrstat/v3
+PKG := github.com/wtsi-ssg/wrstat/v4
 VERSION := $(shell git describe --tags --always --long --dirty)
 TAG := $(shell git describe --abbrev=0 --tags)
 LDFLAGS = -ldflags "-X ${PKG}/cmd.Version=${VERSION}"
