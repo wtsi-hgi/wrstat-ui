@@ -210,9 +210,21 @@ func getChildDirectories(dir string) ([]string, error) {
 }
 
 // deleteDirs deletes the given directories. Logs any errors. Also tries to
-// delete their parent directory which will work if now empty.
+// delete their parent directory which will work if now empty. Does not delete
+// any directory that's a current db directory.
 func (s *Server) deleteDirs(dirs []string) {
+	current := make(map[string]bool)
+	for _, dir := range s.dgutPaths {
+		current[dir] = true
+	}
+
 	for _, dir := range dirs {
+		if current[dir] {
+			s.Logger.Printf("skipping deletion of dgut db dir since still current: %s", dir)
+
+			continue
+		}
+
 		if err := os.RemoveAll(dir); err != nil {
 			s.Logger.Printf("deleting dgut dbs failed: %s", err)
 		}
