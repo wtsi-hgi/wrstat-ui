@@ -11,6 +11,7 @@ require (
 	github.com/hashicorp/go-multierror v1.1.1
 	github.com/inconshreveable/log15 v2.16.0+incompatible
 	github.com/klauspost/pgzip v1.2.6
+	github.com/moby/sys/mountinfo v0.6.2
 	github.com/olekukonko/tablewriter v0.0.5
 	github.com/phayes/freeport v0.0.0-20220201140144-74d24b5ae9f5
 	github.com/rs/xid v1.5.0

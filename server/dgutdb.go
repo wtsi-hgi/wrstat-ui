@@ -29,16 +29,12 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"sort"
-	"strings"
 	"time"
 
-	gas "github.com/wtsi-hgi/go-authserver"
 	"github.com/wtsi-ssg/wrstat/v4/dgut"
+	ifs "github.com/wtsi-ssg/wrstat/v4/internal/fs"
 	"github.com/wtsi-ssg/wrstat/v4/watch"
 )
-
-const ErrNoDgutDBDirFound = gas.Error("dgut database directory not found")
 
 // LoadDGUTDBs loads the given dgut.db directories (as produced by one or more
 // invocations of dgut.DB.Store()) and adds the /rest/v1/where GET endpoint to
@@ -158,33 +154,12 @@ func (s *Server) findNewDgutPaths(dir, suffix string) error {
 // FindLatestDgutDirs finds the latest subdirectory of dir that has the given
 // suffix, then returns that result's child directories.
 func FindLatestDgutDirs(dir, suffix string) ([]string, error) {
-	des, err := os.ReadDir(dir)
+	latest, err := ifs.FindLatestDirectoryEntry(dir, suffix)
 	if err != nil {
 		return nil, err
 	}
 
-	sort.Slice(des, func(i, j int) bool {
-		return dirEntryModTime(des[i]).After(dirEntryModTime(des[j]))
-	})
-
-	for _, de := range des {
-		if strings.HasSuffix(de.Name(), "."+suffix) {
-			return getChildDirectories(filepath.Join(dir, de.Name()))
-		}
-	}
-
-	return nil, ErrNoDgutDBDirFound
-}
-
-// dirEntryModTime returns the ModTime of the given DirEntry, treating errors as
-// time 0.
-func dirEntryModTime(de os.DirEntry) time.Time {
-	info, err := de.Info()
-	if err != nil {
-		return time.Time{}
-	}
-
-	return info.ModTime()
+	return getChildDirectories(latest)
 }
 
 // getChildDirectories returns the child directories of the given dir.
@@ -203,7 +178,7 @@ func getChildDirectories(dir string) ([]string, error) {
 	}
 
 	if len(paths) == 0 {
-		return nil, ErrNoDgutDBDirFound
+		return nil, ifs.ErrNoDirEntryFound
 	}
 
 	return paths, nil

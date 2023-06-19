@@ -497,9 +497,9 @@ func prepareWhereTable() *tablewriter.Table {
 	table := tablewriter.NewWriter(os.Stdout)
 
 	if whereShowUG {
-		table.SetHeader([]string{"Directory", "Users", "Groups", "Count", "Size", "Age"})
+		table.SetHeader([]string{"Directory", "Users", "Groups", "Count", "Size", "Age", "Modified"})
 	} else {
-		table.SetHeader([]string{"Directory", "Count", "Size", "Age"})
+		table.SetHeader([]string{"Directory", "Count", "Size", "Age", "Modified"})
 	}
 
 	return table
@@ -522,7 +522,8 @@ func columns(ds *server.DirSummary) []string {
 	return append(cols,
 		fmt.Sprintf("%d", ds.Count),
 		humanize.IBytes(ds.Size),
-		fmt.Sprintf("%d", timeToDaysAgo(ds.Atime)))
+		fmt.Sprintf("%d", timeToDaysAgo(ds.Atime)),
+		fmt.Sprintf("%d", timeToDaysAgo(ds.Mtime)))
 }
 
 // timeToDaysAgo returns the given time converted to number of days ago.

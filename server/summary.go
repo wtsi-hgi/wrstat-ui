@@ -44,6 +44,7 @@ type DirSummary struct {
 	Count     uint64
 	Size      uint64
 	Atime     time.Time
+	Mtime     time.Time
 	Users     []string
 	Groups    []string
 	FileTypes []string
@@ -70,6 +71,7 @@ func (s *Server) dgutDStoSummary(dds *dgut.DirSummary) *DirSummary {
 		Count:     dds.Count,
 		Size:      dds.Size,
 		Atime:     dds.Atime,
+		Mtime:     dds.Mtime,
 		Users:     s.uidsToUsernames(dds.UIDs),
 		Groups:    s.gidsToNames(dds.GIDs),
 		FileTypes: s.ftsToNames(dds.FTs),
