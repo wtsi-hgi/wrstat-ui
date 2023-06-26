@@ -61,9 +61,9 @@ var serverCmd = &cobra.Command{
 	Long: `Start the web server.
 
 Starting the web server brings up a web interface and REST API that will use the
-latest *.dgut.dbs directory inside the given 'wrstat multi' output directory to
-answer questions about where data is on the disks. (Provide your
-'wrstat multi -f' argument as an unamed argument to this command.)
+latest *.dgut.dbs directory and basedirs.db inside the given 'wrstat multi'
+output directory to answer questions about where data is on the disks. (Provide
+your 'wrstat multi -f' argument as an unamed argument to this command.)
 
 Your --bind address should include the port, and for it to work with your
 --cert, you probably need to specify it as fqdn:port.
@@ -83,6 +83,10 @@ If --logfile is supplied, logs to that file instaed of syslog.
 If --areas is supplied, the group,area csv file pointed to will be used to add
 "areas" to the server, allowing clients to specify an area to filter on all
 groups with that area.
+
+--owners gid,owner csv file is required and will be used to associate groups
+with their owners. If your groups don't really have owners, just supply the path
+to a file with a fake entry.
 
 The server must be running for 'wrstat where' calls to succeed.
 
@@ -110,6 +114,10 @@ creation time in reports.
 
 		if serverKey == "" {
 			die("you must supply --key")
+		}
+
+		if ownersPath == "" {
+			die("you must supply --owners")
 		}
 
 		checkOAuthArgs()
@@ -141,7 +149,17 @@ creation time in reports.
 			die("failed to find database paths: %s", err)
 		}
 
+		basedirsDBPath, err := server.FindLatestBasedirsDB(args[0], basedirBasename)
+		if err != nil {
+			die("failed to find basedirs database path: %s", err)
+		}
+
 		err = s.LoadDGUTDBs(dbPaths...)
+		if err != nil {
+			die("failed to load database: %s", err)
+		}
+
+		err = s.LoadBasedirsDB(basedirsDBPath, ownersPath)
 		if err != nil {
 			die("failed to load database: %s", err)
 		}
@@ -188,6 +206,7 @@ func init() {
 	serverCmd.Flags().StringVar(&oktaOAuthClientSecret, "okta_secret", "",
 		"Okta Client Secret (default $OKTA_OAUTH2_CLIENT_SECRET)")
 	serverCmd.Flags().StringVar(&areasPath, "areas", "", "path to group,area csv file")
+	serverCmd.Flags().StringVarP(&ownersPath, "owners", "o", "", "gid,owner csv file")
 	serverCmd.Flags().StringVar(&serverLogPath, "logfile", "",
 		"log to this file instead of syslog")
 

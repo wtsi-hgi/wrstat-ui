@@ -27,6 +27,7 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
@@ -44,7 +45,9 @@ import (
 	"github.com/go-resty/resty/v2"
 	. "github.com/smartystreets/goconvey/convey"
 	gas "github.com/wtsi-hgi/go-authserver"
+	"github.com/wtsi-ssg/wrstat/v4/basedirs"
 	"github.com/wtsi-ssg/wrstat/v4/dgut"
+	internaldata "github.com/wtsi-ssg/wrstat/v4/internal/data"
 	internaldb "github.com/wtsi-ssg/wrstat/v4/internal/db"
 	"github.com/wtsi-ssg/wrstat/v4/internal/fixtimes"
 	ifs "github.com/wtsi-ssg/wrstat/v4/internal/fs"
@@ -182,7 +185,7 @@ func TestServer(t *testing.T) {
 			logWriter.Reset()
 
 			Convey("And given a dgut database", func() {
-				path, err := internaldb.CreateExampleDB(t, uid, gids[0], gids[1])
+				path, err := internaldb.CreateExampleDGUTDBCustomIDs(t, uid, gids[0], gids[1])
 				So(err, ShouldBeNil)
 				groupA := gidToGroup(t, gids[0])
 				groupB := gidToGroup(t, gids[1])
@@ -326,7 +329,7 @@ func TestServer(t *testing.T) {
 					})
 
 					Convey("And you can auto-reload a new database", func() {
-						pathNew, errc := internaldb.CreateExampleDB(t, uid, gids[1], gids[0])
+						pathNew, errc := internaldb.CreateExampleDGUTDBCustomIDs(t, uid, gids[1], gids[0])
 						So(errc, ShouldBeNil)
 
 						grandparentDir := filepath.Dir(filepath.Dir(path))
@@ -513,6 +516,96 @@ func TestServer(t *testing.T) {
 				So(err, ShouldNotBeNil)
 			})
 		})
+
+		Convey("You can query the basedirs endpoints", func() {
+			response, err := query(s, EndPointBasedirUsageGroup, "")
+			So(err, ShouldBeNil)
+			So(response.Code, ShouldEqual, http.StatusNotFound)
+			So(logWriter.String(), ShouldContainSubstring, "[GET /rest/v1/basedirs/usage/groups")
+			So(logWriter.String(), ShouldContainSubstring, "STATUS=404")
+			logWriter.Reset()
+
+			Convey("And given a basedirs database", func() {
+				dbPath, ownersPath, err := createExampleBasedirsDB(t)
+				So(err, ShouldBeNil)
+
+				Convey("You can get results after calling LoadBasedirsDB", func() {
+					err = s.LoadBasedirsDB(dbPath, ownersPath)
+					So(err, ShouldBeNil)
+
+					s.basedirs.SetMountPoints([]string{
+						"/lustre/scratch123/",
+						"/lustre/scratch125/",
+					})
+
+					response, err := query(s, EndPointBasedirUsageGroup, "")
+					So(err, ShouldBeNil)
+					So(response.Code, ShouldEqual, http.StatusOK)
+					So(logWriter.String(), ShouldContainSubstring, "[GET /rest/v1/basedirs/usage/groups")
+					So(logWriter.String(), ShouldContainSubstring, "STATUS=200")
+
+					usageGroup, err := decodeUsageResult(response)
+					So(err, ShouldBeNil)
+					So(len(usageGroup), ShouldEqual, 6)
+					So(usageGroup[0].GID, ShouldNotEqual, 0)
+					So(usageGroup[0].UID, ShouldEqual, 0)
+					So(usageGroup[0].Name, ShouldNotBeBlank)
+					So(usageGroup[0].Owner, ShouldNotBeBlank)
+					So(usageGroup[0].BaseDir, ShouldNotBeBlank)
+
+					response, err = query(s, EndPointBasedirUsageUser, "")
+					So(err, ShouldBeNil)
+					So(response.Code, ShouldEqual, http.StatusOK)
+					So(logWriter.String(), ShouldContainSubstring, "[GET /rest/v1/basedirs/usage/users")
+					So(logWriter.String(), ShouldContainSubstring, "STATUS=200")
+
+					usageUser, err := decodeUsageResult(response)
+					So(err, ShouldBeNil)
+					So(len(usageUser), ShouldEqual, 6)
+					So(usageUser[0].GID, ShouldEqual, 0)
+					So(usageUser[0].UID, ShouldNotEqual, 0)
+					So(usageUser[0].Name, ShouldNotBeBlank)
+					So(usageUser[0].Owner, ShouldBeBlank)
+					So(usageUser[0].BaseDir, ShouldNotBeBlank)
+
+					response, err = query(s, EndPointBasedirSubdirGroup,
+						fmt.Sprintf("?id=%d&basedir=%s", usageGroup[0].GID, usageGroup[0].BaseDir))
+					So(err, ShouldBeNil)
+					So(response.Code, ShouldEqual, http.StatusOK)
+					So(logWriter.String(), ShouldContainSubstring, "[GET /rest/v1/basedirs/subdirs/group")
+					So(logWriter.String(), ShouldContainSubstring, "STATUS=200")
+
+					subdirs, err := decodeSubdirResult(response)
+					So(err, ShouldBeNil)
+					So(len(subdirs), ShouldEqual, 2)
+					So(subdirs[0].SubDir, ShouldEqual, ".")
+					So(subdirs[1].SubDir, ShouldEqual, "sub")
+
+					response, err = query(s, EndPointBasedirSubdirUser,
+						fmt.Sprintf("?id=%d&basedir=%s", usageUser[0].UID, usageUser[0].BaseDir))
+					So(err, ShouldBeNil)
+					So(response.Code, ShouldEqual, http.StatusOK)
+					So(logWriter.String(), ShouldContainSubstring, "[GET /rest/v1/basedirs/subdirs/user")
+					So(logWriter.String(), ShouldContainSubstring, "STATUS=200")
+
+					subdirs, err = decodeSubdirResult(response)
+					So(err, ShouldBeNil)
+					So(len(subdirs), ShouldEqual, 2)
+
+					response, err = query(s, EndPointBasedirHistory,
+						fmt.Sprintf("?id=%d&basedir=%s", usageGroup[0].GID, usageGroup[0].BaseDir))
+					So(err, ShouldBeNil)
+					So(response.Code, ShouldEqual, http.StatusOK)
+					So(logWriter.String(), ShouldContainSubstring, "[GET /rest/v1/basedirs/history")
+					So(logWriter.String(), ShouldContainSubstring, "STATUS=200")
+
+					history, err := decodeHistoryResult(response)
+					So(err, ShouldBeNil)
+					So(len(history), ShouldEqual, 1)
+					So(history[0].UsageInodes, ShouldEqual, 2)
+				})
+			})
+		})
 	})
 }
 
@@ -547,11 +640,14 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 	g, errg := user.LookupGroupId(gids[0])
 	So(errg, ShouldBeNil)
 
-	Convey("Given a database", func() {
+	Convey("Given databases", func() {
 		_, _, err := GetWhereDataIs("localhost:1", cert, "", "", "", "", "", "")
 		So(err, ShouldNotBeNil)
 
-		path, err := internaldb.CreateExampleDB(t, uid, gids[0], gids[1])
+		path, err := internaldb.CreateExampleDGUTDBCustomIDs(t, uid, gids[0], gids[1])
+		So(err, ShouldBeNil)
+
+		basedirsDBPath, ownersPath, err := createExampleBasedirsDB(t)
 		So(err, ShouldBeNil)
 
 		Convey("You can't get where data is or add the tree page without auth", func() {
@@ -642,6 +738,9 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 			So(err, ShouldBeNil)
 
 			err = s.LoadDGUTDBs(path)
+			So(err, ShouldBeNil)
+
+			err = s.LoadBasedirsDB(basedirsDBPath, ownersPath)
 			So(err, ShouldBeNil)
 
 			err = s.AddTreePage()
@@ -802,6 +901,67 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 				_, err = GetGroupAreas(addr, cert, "foo")
 				So(err, ShouldNotBeNil)
 			})
+
+			Convey("You can access the secure basedirs endpoints after LoadBasedirsDB()", func() {
+				r := gas.NewAuthenticatedClientRequest(addr, cert, token)
+
+				var usage []*basedirs.Usage
+
+				resp, err := r.SetResult(&usage).
+					ForceContentType("application/json").
+					Get(EndPointAuthBasedirUsageUser)
+				So(err, ShouldBeNil)
+				So(resp.Result(), ShouldNotBeNil)
+				So(len(usage), ShouldEqual, 6)
+				So(usage[0].UID, ShouldNotEqual, 0)
+
+				userUsageUID := usage[0].UID
+				userUsageBasedir := usage[0].BaseDir
+
+				resp, err = r.SetResult(&usage).
+					ForceContentType("application/json").
+					Get(EndPointAuthBasedirUsageGroup)
+				So(err, ShouldBeNil)
+				So(resp.Result(), ShouldNotBeNil)
+				So(len(usage), ShouldEqual, 6)
+				So(usage[0].GID, ShouldNotEqual, 0)
+
+				var subdirs []*basedirs.SubDir
+
+				resp, err = r.SetResult(&subdirs).
+					ForceContentType("application/json").
+					SetQueryParams(map[string]string{
+						"id":      fmt.Sprintf("%d", usage[0].GID),
+						"basedir": usage[0].BaseDir,
+					}).
+					Get(EndPointAuthBasedirSubdirGroup)
+				So(err, ShouldBeNil)
+				So(resp.Result(), ShouldNotBeNil)
+				So(len(subdirs), ShouldEqual, 2)
+
+				resp, err = r.SetResult(&subdirs).
+					ForceContentType("application/json").
+					SetQueryParams(map[string]string{
+						"id":      fmt.Sprintf("%d", userUsageUID),
+						"basedir": userUsageBasedir,
+					}).
+					Get(EndPointAuthBasedirSubdirUser)
+				So(err, ShouldBeNil)
+				So(resp.Result(), ShouldNotBeNil)
+				So(len(subdirs), ShouldEqual, 2)
+
+				var history []basedirs.History
+
+				resp, err = r.SetResult(&history).
+					ForceContentType("application/json").
+					SetQueryParams(map[string]string{
+						"id":      fmt.Sprintf("%d", usage[0].GID),
+						"basedir": usage[0].BaseDir,
+					}).
+					Get(EndPointAuthBasedirHistory)
+				So(err, ShouldBeNil)
+				So(resp.Result(), ShouldNotBeNil)
+			})
 		})
 	})
 }
@@ -830,7 +990,11 @@ func getUserAndGroups(t *testing.T) (string, string, []string) {
 // queryWhere does a test GET of /rest/v1/where, with extra appended (start it
 // with ?).
 func queryWhere(s *Server, extra string) (*httptest.ResponseRecorder, error) {
-	return gas.QueryREST(s.Router(), EndPointWhere, extra)
+	return query(s, EndPointWhere, extra)
+}
+
+func query(s *Server, endpoint, extra string) (*httptest.ResponseRecorder, error) {
+	return gas.QueryREST(s.Router(), endpoint, extra)
 }
 
 // decodeWhereResult decodes the result of a Where query.
@@ -1080,4 +1244,67 @@ func (m *mockDirEntry) Type() fs.FileMode {
 
 func (m *mockDirEntry) Info() (fs.FileInfo, error) {
 	return nil, fs.ErrNotExist
+}
+
+// createExampleBasedirsDB creates a temporary basedirs.db and returns the path
+// to the database file.
+func createExampleBasedirsDB(t *testing.T) (string, string, error) {
+	t.Helper()
+
+	tree, _, err := internaldb.CreateExampleDGUTDBForBasedirs(t)
+	if err != nil {
+		return "", "", err
+	}
+
+	csvPath := internaldata.CreateQuotasCSV(t, internaldata.ExampleQuotaCSV)
+
+	quotas, err := basedirs.ParseQuotas(csvPath)
+	if err != nil {
+		return "", "", err
+	}
+
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "basedir.db")
+
+	bd, err := basedirs.NewCreator(dbPath, tree, quotas)
+	if err != nil {
+		return "", "", err
+	}
+
+	bd.SetMountPoints([]string{
+		"/lustre/scratch123/",
+		"/lustre/scratch125/",
+	})
+
+	err = bd.CreateDatabase(time.Now())
+	if err != nil {
+		return "", "", err
+	}
+
+	ownersPath, err := internaldata.CreateOwnersCSV(t, internaldata.ExampleOwnersCSV)
+
+	return dbPath, ownersPath, err
+}
+
+// decodeUsageResult decodes the result of a basedirs usage query.
+func decodeUsageResult(response *httptest.ResponseRecorder) ([]*basedirs.Usage, error) {
+	var result []*basedirs.Usage
+	err := json.NewDecoder(response.Body).Decode(&result)
+
+	return result, err
+}
+
+// decodeSubdirResult decodes the result of a basedirs subdir query.
+func decodeSubdirResult(response *httptest.ResponseRecorder) ([]*basedirs.SubDir, error) {
+	var result []*basedirs.SubDir
+	err := json.NewDecoder(response.Body).Decode(&result)
+
+	return result, err
+}
+
+func decodeHistoryResult(response *httptest.ResponseRecorder) ([]basedirs.History, error) {
+	var result []basedirs.History
+	err := json.NewDecoder(response.Body).Decode(&result)
+
+	return result, err
 }

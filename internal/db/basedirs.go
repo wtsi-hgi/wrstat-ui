@@ -1,10 +1,8 @@
 /*******************************************************************************
- * Copyright (c) 2022, 2023 Genome Research Ltd.
+ * Copyright (c) 2023 Genome Research Ltd.
  *
  * Authors:
  *	- Sendu Bala <sb10@sanger.ac.uk>
- *	- Michael Grace <mg38@sanger.ac.uk>
- *	- Michael Woolnough <mw31@sanger.ac.uk>
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -26,33 +24,29 @@
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  ******************************************************************************/
 
-// package internal provides some test-related functions needed by multiple
-// other packages.
-
 package internaldb
 
 import (
-	"os/user"
 	"testing"
+
+	"github.com/wtsi-ssg/wrstat/v4/dgut"
+	internaldata "github.com/wtsi-ssg/wrstat/v4/internal/data"
 )
 
-// GetUserAndGroups returns the current users username, uid and gids.
-func GetUserAndGroups(t *testing.T) (string, string, []string) {
+// CreateExampleDGUTDBForBasedirs makes a tree database with data useful for
+// testing basedirs, and returns it along with a slice of directories where the
+// data is.
+func CreateExampleDGUTDBForBasedirs(t *testing.T) (*dgut.Tree, []string, error) {
 	t.Helper()
 
-	uu, err := user.Current()
+	gid, uid, _, _, err := internaldata.RealGIDAndUID()
 	if err != nil {
-		t.Logf("getting current user failed: %s", err.Error())
-
-		return "", "", nil
+		return nil, nil, err
 	}
 
-	gids, err := uu.GroupIds()
-	if err != nil {
-		t.Logf("getting group ids failed: %s", err.Error())
+	dirs, files := internaldata.FakeFilesForDGUTDBForBasedirsTesting(gid, uid)
 
-		return "", "", nil
-	}
+	tree, err := CreateDGUTDBFromFakeFiles(t, files)
 
-	return uu.Username, uu.Uid, gids
+	return tree, dirs, err
 }

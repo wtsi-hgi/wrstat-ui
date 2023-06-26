@@ -28,7 +28,10 @@
 package internaldata
 
 import (
+	"io"
 	"io/fs"
+	"os"
+	"os/user"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -38,6 +41,8 @@ import (
 
 	"github.com/wtsi-ssg/wrstat/v4/summary"
 )
+
+const filePerms = 0644
 
 type stringBuilderCloser struct {
 	strings.Builder
@@ -234,4 +239,214 @@ func addTestDirInfo(t *testing.T, dgut *summary.DirGroupUserType, doneDirs map[s
 			return
 		}
 	}
+}
+
+// RealGIDAndUID returns the currently logged in user's gid and uid, and the
+// corresponding group and user names.
+func RealGIDAndUID() (int, int, string, string, error) {
+	u, err := user.Current()
+	if err != nil {
+		return 0, 0, "", "", err
+	}
+
+	uid64, err := strconv.ParseUint(u.Uid, 10, 64)
+	if err != nil {
+		return 0, 0, "", "", err
+	}
+
+	groups, err := u.GroupIds()
+	if err != nil || len(groups) == 0 {
+		return 0, 0, "", "", err
+	}
+
+	gid64, err := strconv.ParseUint(groups[0], 10, 64)
+	if err != nil {
+		return 0, 0, "", "", err
+	}
+
+	group, err := user.LookupGroupId(groups[0])
+	if err != nil {
+		return 0, 0, "", "", err
+	}
+
+	return int(gid64), int(uid64), group.Name, u.Username, nil
+}
+
+func FakeFilesForDGUTDBForBasedirsTesting(gid, uid int) ([]string, []TestFile) {
+	projectA := filepath.Join("/", "lustre", "scratch125", "humgen", "projects", "A")
+	projectB125 := filepath.Join("/", "lustre", "scratch125", "humgen", "projects", "B")
+	projectB123 := filepath.Join("/", "lustre", "scratch123", "hgi", "mdt1", "projects", "B")
+	projectC1 := filepath.Join("/", "lustre", "scratch123", "hgi", "m0")
+	projectC2 := filepath.Join("/", "lustre", "scratch123", "hgi", "mdt0")
+	user2 := filepath.Join("/", "lustre", "scratch125", "humgen", "teams", "102")
+	projectD := filepath.Join("/", "lustre", "scratch125", "humgen", "projects", "D")
+	projectDSub1 := filepath.Join(projectD, "sub1")
+	projectDSub2 := filepath.Join(projectD, "sub2")
+
+	files := []TestFile{
+		{
+			Path:           filepath.Join(projectA, "a.bam"),
+			NumFiles:       1,
+			SizeOfEachFile: 10,
+			GID:            1,
+			UID:            101,
+			ATime:          50,
+			MTime:          50,
+		},
+		{
+			Path:           filepath.Join(projectA, "sub", "a.bam"),
+			NumFiles:       1,
+			SizeOfEachFile: 11,
+			GID:            1,
+			UID:            101,
+			ATime:          50,
+			MTime:          100,
+		},
+		{
+			Path:           filepath.Join(projectB125, "b.bam"),
+			NumFiles:       1,
+			SizeOfEachFile: 20,
+			GID:            2,
+			UID:            102,
+			ATime:          50,
+			MTime:          50,
+		},
+		{
+			Path:           filepath.Join(projectB123, "b.bam"),
+			NumFiles:       1,
+			SizeOfEachFile: 30,
+			GID:            2,
+			UID:            102,
+			ATime:          50,
+			MTime:          50,
+		},
+		{
+			Path:           filepath.Join(projectC1, "c.bam"),
+			NumFiles:       1,
+			SizeOfEachFile: 40,
+			GID:            2,
+			UID:            88888,
+			ATime:          50,
+			MTime:          50,
+		},
+		{
+			Path:           filepath.Join(projectC2, "c.bam"),
+			NumFiles:       1,
+			SizeOfEachFile: 40,
+			GID:            2,
+			UID:            88888,
+			ATime:          50,
+			MTime:          50,
+		},
+		{
+			Path:           filepath.Join(user2, "d.bam"),
+			NumFiles:       1,
+			SizeOfEachFile: 60,
+			GID:            77777,
+			UID:            102,
+			ATime:          50,
+			MTime:          50,
+		},
+	}
+
+	files = append(files,
+		TestFile{
+			Path:           filepath.Join(projectDSub1, "a.bam"),
+			NumFiles:       1,
+			SizeOfEachFile: 1,
+			GID:            gid,
+			UID:            uid,
+			ATime:          50,
+			MTime:          50,
+		},
+		TestFile{
+			Path:           filepath.Join(projectDSub1, "temp", "a.sam"),
+			NumFiles:       1,
+			SizeOfEachFile: 2,
+			GID:            gid,
+			UID:            uid,
+			ATime:          50,
+			MTime:          50,
+		},
+		TestFile{
+			Path:           filepath.Join(projectDSub1, "a.cram"),
+			NumFiles:       1,
+			SizeOfEachFile: 3,
+			GID:            gid,
+			UID:            uid,
+			ATime:          50,
+			MTime:          50,
+		},
+		TestFile{
+			Path:           filepath.Join(projectDSub2, "a.bed"),
+			NumFiles:       1,
+			SizeOfEachFile: 4,
+			GID:            gid,
+			UID:            uid,
+			ATime:          50,
+			MTime:          50,
+		},
+		TestFile{
+			Path:           filepath.Join(projectDSub2, "b.bed"),
+			NumFiles:       1,
+			SizeOfEachFile: 5,
+			GID:            gid,
+			UID:            uid,
+			ATime:          50,
+			MTime:          50,
+		},
+	)
+
+	return []string{projectA, projectB125, projectB123, projectC1, projectC2, user2, projectD}, files
+}
+
+const ExampleQuotaCSV = `1,/disk/1,10,20
+1,/disk/2,11,21
+2,/disk/1,12,22
+`
+
+// CreateQuotasCSV creates a quotas csv file in a temp directory. Returns its
+// path. You can use ExampleQuotaCSV as the csv data.
+func CreateQuotasCSV(t *testing.T, csv string) string {
+	t.Helper()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "quotas.csv")
+
+	if err := os.WriteFile(path, []byte(csv), filePerms); err != nil {
+		t.Fatalf("could not write test csv file: %s", err)
+	}
+
+	return path
+}
+
+const ExampleOwnersCSV = `1,Alan
+2,Barbara
+4,Dellilah`
+
+// CreateOwnersCSV creates an owners csv files in a temp directory. Returns its
+// path. You can use ExampleOwnersCSV as the csv data.
+func CreateOwnersCSV(t *testing.T, csv string) (string, error) {
+	t.Helper()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "quotas.csv")
+
+	err := writeFile(path, csv)
+
+	return path, err
+}
+
+func writeFile(path, contents string) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+
+	_, err = io.WriteString(f, contents)
+	if err != nil {
+		return err
+	}
+
+	return f.Close()
 }
