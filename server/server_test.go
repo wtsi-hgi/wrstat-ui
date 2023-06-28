@@ -526,7 +526,10 @@ func TestServer(t *testing.T) {
 			logWriter.Reset()
 
 			Convey("And given a basedirs database", func() {
-				dbPath, ownersPath, err := createExampleBasedirsDB(t)
+				tree, _, err := internaldb.CreateExampleDGUTDBForBasedirs(t)
+				So(err, ShouldBeNil)
+
+				dbPath, ownersPath, err := createExampleBasedirsDB(t, tree)
 				So(err, ShouldBeNil)
 
 				Convey("You can get results after calling LoadBasedirsDB", func() {
@@ -603,6 +606,61 @@ func TestServer(t *testing.T) {
 					So(err, ShouldBeNil)
 					So(len(history), ShouldEqual, 1)
 					So(history[0].UsageInodes, ShouldEqual, 2)
+
+					Convey("Which get updated by an auto-reload when the sentinal file changes", func() {
+						parentDir := filepath.Dir(filepath.Dir(dbPath))
+						sentinel := filepath.Join(parentDir, ".sentinel")
+						file, err := os.Create(sentinel)
+						So(err, ShouldBeNil)
+						err = file.Close()
+						So(err, ShouldBeNil)
+
+						err = s.EnableBasedirDBReloading(sentinel, parentDir,
+							filepath.Base(dbPath), sentinelPollFrequency)
+						So(err, ShouldBeNil)
+
+						gid, uid, _, _, err := internaldata.RealGIDAndUID()
+						So(err, ShouldBeNil)
+
+						_, files := internaldata.FakeFilesForDGUTDBForBasedirsTesting(gid, uid)
+						tree, err = internaldb.CreateDGUTDBFromFakeFiles(t, files[:1])
+						So(err, ShouldBeNil)
+
+						pathNew, _, err := createExampleBasedirsDB(t, tree)
+						So(err, ShouldBeNil)
+
+						newerPath := filepath.Join(parentDir, "newer.basedir.db")
+						err = os.Rename(pathNew, newerPath)
+						So(err, ShouldBeNil)
+
+						later := time.Now().Local().Add(1 * time.Second)
+						err = os.Chtimes(newerPath, later, later)
+						So(err, ShouldBeNil)
+
+						response, err := query(s, EndPointBasedirUsageGroup, "")
+						So(err, ShouldBeNil)
+						So(response.Code, ShouldEqual, http.StatusOK)
+
+						usageGroup, err := decodeUsageResult(response)
+						So(err, ShouldBeNil)
+						So(len(usageGroup), ShouldEqual, 6)
+
+						err = os.Chtimes(sentinel, later, later)
+						So(err, ShouldBeNil)
+
+						waitForFileToBeDeleted(t, dbPath)
+
+						_, err = os.Stat(dbPath)
+						So(err, ShouldNotBeNil)
+
+						response, err = query(s, EndPointBasedirUsageGroup, "")
+						So(err, ShouldBeNil)
+						So(response.Code, ShouldEqual, http.StatusOK)
+
+						usageGroup, err = decodeUsageResult(response)
+						So(err, ShouldBeNil)
+						So(len(usageGroup), ShouldEqual, 1)
+					})
 				})
 			})
 		})
@@ -647,7 +705,10 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 		path, err := internaldb.CreateExampleDGUTDBCustomIDs(t, uid, gids[0], gids[1])
 		So(err, ShouldBeNil)
 
-		basedirsDBPath, ownersPath, err := createExampleBasedirsDB(t)
+		tree, _, err := internaldb.CreateExampleDGUTDBForBasedirs(t)
+		So(err, ShouldBeNil)
+
+		basedirsDBPath, ownersPath, err := createExampleBasedirsDB(t, tree)
 		So(err, ShouldBeNil)
 
 		Convey("You can't get where data is or add the tree page without auth", func() {
@@ -1248,13 +1309,8 @@ func (m *mockDirEntry) Info() (fs.FileInfo, error) {
 
 // createExampleBasedirsDB creates a temporary basedirs.db and returns the path
 // to the database file.
-func createExampleBasedirsDB(t *testing.T) (string, string, error) {
+func createExampleBasedirsDB(t *testing.T, tree *dgut.Tree) (string, string, error) {
 	t.Helper()
-
-	tree, _, err := internaldb.CreateExampleDGUTDBForBasedirs(t)
-	if err != nil {
-		return "", "", err
-	}
 
 	csvPath := internaldata.CreateQuotasCSV(t, internaldata.ExampleQuotaCSV)
 

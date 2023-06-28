@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2022 Genome Research Ltd.
+ * Copyright (c) 2022, 2023 Genome Research Ltd.
  *
  * Authors:
  *	- Sendu Bala <sb10@sanger.ac.uk>
@@ -167,6 +167,11 @@ creation time in reports.
 		sentinel := filepath.Join(args[0], dgutDBsSentinelBasename)
 
 		err = s.EnableDGUTDBReloading(sentinel, args[0], dgutDBsSuffix, sentinelPollFrequencty)
+		if err != nil {
+			die("failed to set up database reloading: %s", err)
+		}
+
+		err = s.EnableBasedirDBReloading(sentinel, args[0], basedirBasename, sentinelPollFrequencty)
 		if err != nil {
 			die("failed to set up database reloading: %s", err)
 		}

@@ -27,11 +27,15 @@ package server
 
 import (
 	"net/http"
+	"os"
 	"strconv"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	gas "github.com/wtsi-hgi/go-authserver"
 	"github.com/wtsi-ssg/wrstat/v4/basedirs"
+	ifs "github.com/wtsi-ssg/wrstat/v4/internal/fs"
+	"github.com/wtsi-ssg/wrstat/v4/watch"
 )
 
 const ErrBadBasedirsQuery = gas.Error("bad query; check id and basedir")
@@ -63,6 +67,7 @@ func (s *Server) LoadBasedirsDB(dbPath, ownersPath string) error {
 
 	s.basedirs = bd
 	s.basedirsPath = dbPath
+	s.ownersPath = ownersPath
 
 	authGroup := s.AuthRouter()
 
@@ -165,4 +170,99 @@ func (s *Server) getBasedirsHistory(c *gin.Context) {
 	s.getBasedirs(c, func() (any, error) {
 		return s.basedirs.History(uint32(id), basedir)
 	})
+}
+
+// EnableBasedirDBReloading will wait for changes to the file at watchPath, then:
+//  1. close any previously loaded basedirs database file
+//  2. find the latest file in the given directory with the given suffix
+//  3. set the basedirs.db directory path to that and load it
+//  4. delete the old basedirs.db file
+//
+// It will only return an error if trying to watch watchPath immediately fails.
+// Other errors (eg. reloading or deleting files) will be logged.
+func (s *Server) EnableBasedirDBReloading(watchPath, dir, suffix string, pollFrequency time.Duration) error {
+	s.basedirsMutex.Lock()
+	defer s.basedirsMutex.Unlock()
+
+	cb := func(_ time.Time) {
+		s.reloadBasedirsDB(dir, suffix)
+	}
+
+	watcher, err := watch.New(watchPath, cb, pollFrequency)
+	if err != nil {
+		return err
+	}
+
+	s.basedirsWatcher = watcher
+
+	return nil
+}
+
+// reloadBasedirsDB closes the database file previously loaded during
+// LoadBasedirsDB(), looks for the latest file in the given directory that has
+// the given suffix, and loads that as our new basedirsPath.
+//
+// On success, deletes the previous basedirsPath.
+//
+// Logs any errors.
+func (s *Server) reloadBasedirsDB(dir, suffix string) {
+	s.basedirsMutex.Lock()
+	defer s.basedirsMutex.Unlock()
+
+	if s.basedirs != nil {
+		s.basedirs.Close()
+	}
+
+	oldPath := s.basedirsPath
+
+	err := s.findNewBasedirsPath(dir, suffix)
+	if err != nil {
+		s.Logger.Printf("reloading basedirs db failed: %s", err)
+
+		return
+	}
+
+	if s.basedirsPath == oldPath {
+		return
+	}
+
+	s.loadNewBasedirsDBAndDeleteOld(oldPath)
+}
+
+// findNewBasedirsPath finds the latest file in dir that has the given suffix,
+// then sets our basedirsPath to the result.
+func (s *Server) findNewBasedirsPath(dir, suffix string) error {
+	path, err := FindLatestBasedirsDB(dir, suffix)
+	if err != nil {
+		return err
+	}
+
+	s.basedirsPath = path
+
+	return nil
+}
+
+// FindLatestBasedirsDB finds the latest file in dir that has the given suffix.
+func FindLatestBasedirsDB(dir, suffix string) (string, error) {
+	return ifs.FindLatestDirectoryEntry(dir, suffix)
+}
+
+func (s *Server) loadNewBasedirsDBAndDeleteOld(oldPath string) {
+	s.Logger.Printf("reloading basedirs db from %s", s.basedirsPath)
+
+	var err error
+
+	s.basedirs, err = basedirs.NewReader(s.basedirsPath, s.ownersPath)
+	if err != nil {
+		s.Logger.Printf("reloading basedirs db failed: %s", err)
+
+		return
+	}
+
+	s.Logger.Printf("server ready again after reloading dgut dbs")
+
+	err = os.Remove(oldPath)
+	if err != nil {
+		s.Logger.Printf("deletion of old basedirs db after reload failed: %s", err)
+	}
 }

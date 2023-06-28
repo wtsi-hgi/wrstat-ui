@@ -112,9 +112,11 @@ type Server struct {
 	dataTimeStamp  time.Time
 	areas          map[string][]string
 
-	basedirsMutex sync.RWMutex
-	basedirs      *basedirs.BaseDirReader
-	basedirsPath  string
+	basedirsMutex   sync.RWMutex
+	basedirs        *basedirs.BaseDirReader
+	basedirsPath    string
+	ownersPath      string
+	basedirsWatcher *watch.Watcher
 }
 
 // New creates a Server which can serve a REST API and website.
@@ -143,6 +145,11 @@ func (s *Server) stop() {
 	if s.dgutWatcher != nil {
 		s.dgutWatcher.Stop()
 		s.dgutWatcher = nil
+	}
+
+	if s.basedirsWatcher != nil {
+		s.basedirsWatcher.Stop()
+		s.basedirsWatcher = nil
 	}
 
 	if s.tree != nil {

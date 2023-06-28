@@ -184,11 +184,6 @@ func getChildDirectories(dir string) ([]string, error) {
 	return paths, nil
 }
 
-// FindLatestBasedirsDB finds the latest file in dir that has the given suffix.
-func FindLatestBasedirsDB(dir, suffix string) (string, error) {
-	return ifs.FindLatestDirectoryEntry(dir, suffix)
-}
-
 // deleteDirs deletes the given directories. Logs any errors. Also tries to
 // delete their parent directory which will work if now empty. Does not delete
 // any directory that's a current db directory.
