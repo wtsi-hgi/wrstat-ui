@@ -109,6 +109,7 @@ type TreeElement struct {
 	Count       uint64              `json:"count"`
 	Size        uint64              `json:"size"`
 	Atime       string              `json:"atime"`
+	Mtime       string              `json:"mtime"`
 	Users       []string            `json:"users"`
 	Groups      []string            `json:"groups"`
 	FileTypes   []string            `json:"filetypes"`
@@ -173,6 +174,7 @@ func (s *Server) ddsToTreeElement(dds *dgut.DirSummary) *TreeElement {
 		Count:     dds.Count,
 		Size:      dds.Size,
 		Atime:     timeToJavascriptDate(dds.Atime),
+		Mtime:     timeToJavascriptDate(dds.Mtime),
 		Users:     s.uidsToUsernames(dds.UIDs),
 		Groups:    s.gidsToNames(dds.GIDs),
 		FileTypes: s.ftsToNames(dds.FTs),

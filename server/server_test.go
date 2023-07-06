@@ -845,6 +845,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 
 				expectedFTs := []string{"bam", "cram", "dir", "temp"}
 				expectedAtime := "1970-01-01T00:00:50Z"
+				expectedMtime := "1970-01-01T00:01:30Z"
 
 				const numDirectories = 10
 
@@ -857,6 +858,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 					Count:       19 + numDirectories,
 					Size:        126 + numDirectories*directorySize,
 					Atime:       expectedAtime,
+					Mtime:       expectedMtime,
 					Users:       users,
 					Groups:      groups,
 					FileTypes:   expectedFTs,
@@ -869,6 +871,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 							Count:       19 + numDirectories,
 							Size:        126 + numDirectories*directorySize,
 							Atime:       expectedAtime,
+							Mtime:       expectedMtime,
 							Users:       users,
 							Groups:      groups,
 							FileTypes:   expectedFTs,
@@ -891,6 +894,8 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 				So(err, ShouldBeNil)
 				So(resp.Result(), ShouldNotBeNil)
 
+				expectedMtime = "1970-01-01T00:01:20Z"
+
 				tm = *resp.Result().(*TreeElement) //nolint:forcetypeassert
 				So(tm, ShouldResemble, TreeElement{
 					Name:        "/",
@@ -898,6 +903,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 					Count:       13 + 8,
 					Size:        120 + 8*directorySize,
 					Atime:       expectedAtime,
+					Mtime:       expectedMtime,
 					Users:       users,
 					Groups:      []string{g.Name},
 					FileTypes:   expectedFTs,
@@ -910,6 +916,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 							Count:       13 + 8,
 							Size:        120 + 8*directorySize,
 							Atime:       expectedAtime,
+							Mtime:       expectedMtime,
 							Users:       users,
 							Groups:      []string{g.Name},
 							FileTypes:   expectedFTs,
