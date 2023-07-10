@@ -31,6 +31,8 @@ import (
 	"time"
 )
 
+// FixTime alters the given time's zone to be a fixed one, for consistent
+// testing purposes.
 func FixTime(t time.Time) time.Time {
 	_, offset := time.Now().Zone()
 	l := time.FixedZone("", offset)

@@ -53,9 +53,6 @@ import (
 	ifs "github.com/wtsi-ssg/wrstat/v4/internal/fs"
 )
 
-const dirPerms = 0755
-const exampleDgutDirParentSuffix = "dgut.dbs"
-
 func TestIDsToWanted(t *testing.T) {
 	Convey("restrictGIDs returns bad query if you don't want any of the given ids", t, func() {
 		_, err := restrictGIDs(map[uint32]bool{1: true}, []uint32{2})
