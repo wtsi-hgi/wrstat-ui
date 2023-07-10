@@ -57,8 +57,8 @@ const dirPerms = 0755
 const exampleDgutDirParentSuffix = "dgut.dbs"
 
 func TestIDsToWanted(t *testing.T) {
-	Convey("restrictIDsToWanted returns bad query if you don't want any of the given ids", t, func() {
-		_, err := restrictIDsToWanted([]string{"a"}, map[string]bool{"b": true})
+	Convey("restrictGIDs returns bad query if you don't want any of the given ids", t, func() {
+		_, err := restrictGIDs(map[uint32]bool{1: true}, []uint32{2})
 		So(err, ShouldNotBeNil)
 	})
 }
@@ -229,6 +229,8 @@ func TestServer(t *testing.T) {
 						expectedRoot := []string{"root"}
 						expectedGroupsA := []string{groupA}
 						expectedGroupsB := []string{groupB}
+						expectedGroupsRootA := []string{groupA, "root"}
+						sort.Strings(expectedGroupsRootA)
 						expectedFTs := expectedNonRoot[0].FileTypes
 						expectedBams := []string{"bam", "temp"}
 						expectedCrams := []string{"cram"}
@@ -261,12 +263,18 @@ func TestServer(t *testing.T) {
 								{Dir: "/a", Count: 14, Size: 86, Atime: expectedAtime,
 									Mtime: time.Unix(90, 0), Users: expectedRoot,
 									Groups: expectedGroupsRoot, FileTypes: expectedCrams},
+								{Dir: "/a/b/d", Count: 9, Size: 81, Atime: expectedAtime,
+									Mtime: time.Unix(75, 0), Users: expectedRoot,
+									Groups: expectedGroupsRootA, FileTypes: expectedCrams},
 								{Dir: "/a/b/d/g", Count: 8, Size: 80, Atime: time.Unix(75, 0),
 									Mtime: time.Unix(75, 0), Users: expectedRoot,
 									Groups: expectedGroupsA, FileTypes: expectedCrams},
 								{Dir: "/a/c/d", Count: 5, Size: 5, Atime: time.Unix(90, 0),
 									Mtime: time.Unix(90, 0), Users: expectedRoot,
 									Groups: expectedGroupsB, FileTypes: expectedCrams},
+								{Dir: "/a/b/d/i/j", Count: 1, Size: 1, Atime: expectedAtime,
+									Mtime: expectedAtime, Users: expectedRoot,
+									Groups: expectedRoot, FileTypes: expectedCrams},
 							}},
 							{"?groups=" + groups[0] + "&users=root", []*DirSummary{
 								{Dir: "/a/b/d/g", Count: 8, Size: 80, Atime: time.Unix(75, 0),
@@ -794,7 +802,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 			s := New(&logWriter)
 
 			err = s.EnableAuth(cert, key, func(username, password string) (bool, string) {
-				return true, ""
+				return true, uid
 			})
 			So(err, ShouldBeNil)
 
@@ -847,7 +855,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 				expectedAtime := "1970-01-01T00:00:50Z"
 				expectedMtime := "1970-01-01T00:01:30Z"
 
-				const numDirectories = 10
+				const numDirectories = 12
 
 				const directorySize = 1024
 
@@ -894,7 +902,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 				So(err, ShouldBeNil)
 				So(resp.Result(), ShouldNotBeNil)
 
-				expectedMtime = "1970-01-01T00:01:20Z"
+				expectedMtime2 := "1970-01-01T00:01:20Z"
 
 				tm = *resp.Result().(*TreeElement) //nolint:forcetypeassert
 				So(tm, ShouldResemble, TreeElement{
@@ -903,7 +911,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 					Count:       13 + 8,
 					Size:        120 + 8*directorySize,
 					Atime:       expectedAtime,
-					Mtime:       expectedMtime,
+					Mtime:       expectedMtime2,
 					Users:       users,
 					Groups:      []string{g.Name},
 					FileTypes:   expectedFTs,
@@ -916,7 +924,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 							Count:       13 + 8,
 							Size:        120 + 8*directorySize,
 							Atime:       expectedAtime,
-							Mtime:       expectedMtime,
+							Mtime:       expectedMtime2,
 							Users:       users,
 							Groups:      []string{g.Name},
 							FileTypes:   expectedFTs,
@@ -925,6 +933,175 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 							Children:    nil,
 						},
 					},
+				})
+
+				r = gas.NewAuthenticatedClientRequest(addr, cert, token)
+				resp, err = r.SetResult(&TreeElement{}).
+					ForceContentType("application/json").
+					SetQueryParams(map[string]string{
+						"path": "/a",
+					}).
+					Get(EndPointAuthTree)
+
+				So(err, ShouldBeNil)
+				So(resp.Result(), ShouldNotBeNil)
+
+				abgroups := gidsToGroups(t, g.Gid, "0")
+				sort.Strings(abgroups)
+
+				acgroups := gidsToGroups(t, gids[1])
+				cramAndDir := []string{"cram", "dir"}
+
+				tm = *resp.Result().(*TreeElement) //nolint:forcetypeassert
+				So(tm, ShouldResemble, TreeElement{
+					Name:        "a",
+					Path:        "/a",
+					Count:       19 + numDirectories,
+					Size:        126 + numDirectories*directorySize,
+					Atime:       expectedAtime,
+					Mtime:       expectedMtime,
+					Users:       users,
+					Groups:      groups,
+					FileTypes:   expectedFTs,
+					TimeStamp:   "0001-01-01T00:00:00Z",
+					HasChildren: true,
+					Children: []*TreeElement{
+						{
+							Name:        "b",
+							Path:        "/a/b",
+							Count:       19 - 5 + numDirectories - 3,
+							Size:        126 - 5 + (numDirectories-3)*directorySize,
+							Atime:       expectedAtime,
+							Mtime:       expectedMtime2,
+							Users:       users,
+							Groups:      abgroups,
+							FileTypes:   expectedFTs,
+							TimeStamp:   "0001-01-01T00:00:00Z",
+							HasChildren: true,
+							Children:    nil,
+						},
+						{
+							Name:        "c",
+							Path:        "/a/c",
+							Count:       7,
+							Size:        5 + 2*directorySize,
+							Atime:       "1970-01-01T00:01:30Z",
+							Mtime:       expectedMtime,
+							Users:       []string{"root"},
+							Groups:      acgroups,
+							FileTypes:   cramAndDir,
+							TimeStamp:   "0001-01-01T00:00:00Z",
+							HasChildren: true,
+							Children:    nil,
+						},
+					},
+				})
+
+				r = gas.NewAuthenticatedClientRequest(addr, cert, token)
+				resp, err = r.SetResult(&TreeElement{}).
+					ForceContentType("application/json").
+					SetQueryParams(map[string]string{
+						"path": "/a/b/d",
+					}).
+					Get(EndPointAuthTree)
+
+				So(err, ShouldBeNil)
+				So(resp.Result(), ShouldNotBeNil)
+
+				dgroups := gidsToGroups(t, gids[0], "0")
+				sort.Strings(dgroups)
+
+				root := []string{"root"}
+
+				tm = *resp.Result().(*TreeElement) //nolint:forcetypeassert
+				So(tm, ShouldResemble, TreeElement{
+					Name:        "d",
+					Path:        "/a/b/d",
+					Count:       12 + 5,
+					Size:        111 + 5*directorySize,
+					Atime:       expectedAtime,
+					Mtime:       "1970-01-01T00:01:15Z",
+					Users:       users,
+					Groups:      dgroups,
+					FileTypes:   cramAndDir,
+					TimeStamp:   "0001-01-01T00:00:00Z",
+					HasChildren: true,
+					NoAuth:      false,
+					Children: []*TreeElement{
+						{
+							Name:        "f",
+							Path:        "/a/b/d/f",
+							Count:       2,
+							Size:        10 + directorySize,
+							Atime:       expectedAtime,
+							Mtime:       "1970-01-01T00:00:50Z",
+							Users:       []string{username},
+							Groups:      []string{g.Name},
+							FileTypes:   cramAndDir,
+							TimeStamp:   "0001-01-01T00:00:00Z",
+							HasChildren: false,
+							Children:    nil,
+							NoAuth:      false,
+						},
+						{
+							Name:        "g",
+							Path:        "/a/b/d/g",
+							Count:       11,
+							Size:        100 + directorySize,
+							Atime:       "1970-01-01T00:01:00Z",
+							Mtime:       "1970-01-01T00:01:15Z",
+							Users:       users,
+							Groups:      []string{g.Name},
+							FileTypes:   cramAndDir,
+							TimeStamp:   "0001-01-01T00:00:00Z",
+							HasChildren: false,
+							Children:    nil,
+							NoAuth:      false,
+						},
+						{
+							Name:        "i",
+							Path:        "/a/b/d/i",
+							Count:       3,
+							Size:        1 + 2*directorySize,
+							Atime:       expectedAtime,
+							Mtime:       "1970-01-01T00:00:50Z",
+							Users:       root,
+							Groups:      root,
+							FileTypes:   cramAndDir,
+							TimeStamp:   "0001-01-01T00:00:00Z",
+							HasChildren: true,
+							Children:    nil,
+							NoAuth:      true,
+						},
+					},
+				})
+
+				r = gas.NewAuthenticatedClientRequest(addr, cert, token)
+				resp, err = r.SetResult(&TreeElement{}).
+					ForceContentType("application/json").
+					SetQueryParams(map[string]string{
+						"path": "/a/b/d/i",
+					}).
+					Get(EndPointAuthTree)
+
+				So(err, ShouldBeNil)
+				So(resp.Result(), ShouldNotBeNil)
+
+				tm = *resp.Result().(*TreeElement) //nolint:forcetypeassert
+				So(tm, ShouldResemble, TreeElement{
+					Name:        "i",
+					Path:        "/a/b/d/i",
+					Count:       3,
+					Size:        1 + 2*directorySize,
+					Atime:       expectedAtime,
+					Mtime:       "1970-01-01T00:00:50Z",
+					Users:       root,
+					Groups:      root,
+					FileTypes:   cramAndDir,
+					TimeStamp:   "0001-01-01T00:00:00Z",
+					HasChildren: true,
+					Children:    nil,
+					NoAuth:      true,
 				})
 
 				r = gas.NewAuthenticatedClientRequest(addr, cert, token)
@@ -1075,7 +1252,7 @@ func decodeWhereResult(response *httptest.ResponseRecorder) ([]*DirSummary, erro
 	return result, err
 }
 
-// testRestrictedGroups does tests for s.restrictedGroups() if user running the
+// testRestrictedGroups does tests for s.getRestrictedGIDs() if user running the
 // test has enough groups to make the test viable.
 func testRestrictedGroups(t *testing.T, gids []string, s *Server, r, rBadUID *resty.Request, exampleGIDs []string) {
 	t.Helper()
@@ -1084,13 +1261,17 @@ func testRestrictedGroups(t *testing.T, gids []string, s *Server, r, rBadUID *re
 		return
 	}
 
-	var filterGIDs []string
-
-	var errg error
+	var (
+		filterGIDs []uint32
+		errg       error
+	)
 
 	s.AuthRouter().GET("/groups", func(c *gin.Context) {
+		filterGIDs = nil
+
 		groups := c.Query("groups")
-		filterGIDs, errg = s.restrictedGroups(c, groups)
+
+		filterGIDs, errg = s.getRestrictedGIDs(c, groups)
 	})
 
 	groups := gidsToGroups(t, gids...)
@@ -1098,7 +1279,11 @@ func testRestrictedGroups(t *testing.T, gids []string, s *Server, r, rBadUID *re
 	So(err, ShouldBeNil)
 
 	So(errg, ShouldBeNil)
-	So(filterGIDs, ShouldResemble, []string{exampleGIDs[0]})
+
+	gid0, err := strconv.Atoi(exampleGIDs[0])
+	So(err, ShouldBeNil)
+
+	So(filterGIDs, ShouldResemble, []uint32{uint32(gid0)})
 
 	_, err = r.Get(gas.EndPointAuth + "/groups?groups=0")
 	So(err, ShouldBeNil)
@@ -1123,7 +1308,7 @@ func testRestrictedGroups(t *testing.T, gids []string, s *Server, r, rBadUID *re
 	So(err, ShouldBeNil)
 
 	So(errg, ShouldBeNil)
-	So(filterGIDs, ShouldResemble, []string{"0"})
+	So(filterGIDs, ShouldResemble, []uint32{0})
 
 	s.WhiteListGroups(func(group string) bool {
 		return false
@@ -1173,7 +1358,8 @@ func adjustedExpectations(expected []*DirSummary, groupA, groupB string) ([]*Dir
 	for i, ds := range expected {
 		expectedNonRoot[i] = ds
 
-		if ds.Dir == "/a" {
+		switch ds.Dir {
+		case "/a":
 			groups := []string{groupA, groupB}
 			sort.Strings(groups)
 
@@ -1189,6 +1375,17 @@ func adjustedExpectations(expected []*DirSummary, groupA, groupB string) ([]*Dir
 			}
 
 			expectedGroupsRoot = ds.Groups
+		case "/a/b", "/a/b/d":
+			expectedNonRoot[i] = &DirSummary{
+				Dir:       ds.Dir,
+				Count:     ds.Count - 1,
+				Size:      ds.Size - 1,
+				Atime:     ds.Atime,
+				Mtime:     ds.Mtime,
+				Users:     ds.Users,
+				Groups:    []string{groupA},
+				FileTypes: ds.FileTypes,
+			}
 		}
 	}
 

@@ -66,6 +66,7 @@ func CreateDefaultTestData(gidA, gidB, gidC, uidA, uidB int) []TestFile {
 	abdg := filepath.Join(dir, "a", "b", "d", "g")
 	abehtmp := filepath.Join(dir, "a", "b", "e", "h", "tmp")
 	acd := filepath.Join(dir, "a", "c", "d")
+	abdij := filepath.Join(dir, "a", "b", "d", "i", "j")
 	files := []TestFile{
 		{
 			Path:           filepath.Join(abdf, "file.cram"),
@@ -125,7 +126,7 @@ func CreateDefaultTestData(gidA, gidB, gidC, uidA, uidB int) []TestFile {
 	if gidC == 0 {
 		files = append(files,
 			TestFile{
-				Path:           filepath.Join(dir, "a", "file.cram"),
+				Path:           filepath.Join(abdij, "file.cram"),
 				NumFiles:       1,
 				SizeOfEachFile: 1,
 				GID:            gidC,
