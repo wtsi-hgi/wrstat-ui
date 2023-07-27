@@ -69,7 +69,7 @@ func (s *Server) AddTreePage() error {
 func getStaticFS() fs.FS {
 	var fsys fs.FS
 
-	treeDir := "static/tree"
+	treeDir := "static/wrstat/build"
 
 	if os.Getenv(gas.DevEnvKey) == gas.DevEnvVal {
 		fsys = os.DirFS(treeDir)

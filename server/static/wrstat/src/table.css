@@ -1,0 +1,131 @@
+/*******************************************************************************
+ * Copyright (c) 2023 Genome Research Ltd.
+ *
+ * Authors:
+ *   Michael Woolnough <mw31@sanger.ac.uk>
+ *   Sendu Bala <sb10@sanger.ac.uk>
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining
+ * a copy of this software and associated documentation files (the
+ * "Software"), to deal in the Software without restriction, including
+ * without limitation the rights to use, copy, modify, merge, publish,
+ * distribute, sublicense, and/or sell copies of the Software, and to
+ * permit persons to whom the Software is furnished to do so, subject to
+ * the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included
+ * in all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+ * IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+ * CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+ * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+ * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ ******************************************************************************/
+
+.prettyTable {
+	clear: both;
+	border-collapse: separate;
+	border-spacing: 0;
+	border: 1px solid var(--tableBorder);
+	border-radius: 4px;
+}
+
+.prettyTable thead th {
+	padding-right: 1.25em;
+	border-bottom: 1px solid var(--tableBorder);
+}
+
+.prettyTable thead th.sortable:hover {
+	text-decoration: underline;
+	cursor: pointer;
+}
+
+.prettyTable tbody td:not(:first-child),
+.prettyTable thead th:not(:first-child) {
+	border-left: 1px solid var(--tableBorder);
+}
+
+.prettyTable .sortable {
+	min-height: 2em;
+	background-repeat: no-repeat;
+	background-position: right 0.25em center;
+	background-size: 1em;
+	background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 42'%3E%3Cpath d='M1,23 h38 l-19,18 z' fill='%23aaa'  fill-opacity='0.25' stroke='none' stroke-linejoin='round' /%3E%3Cpath d='M1,20 h38 l-19,-18 z' fill='%23aaa' fill-opacity='0.25' stroke='none' stroke-linejoin='round' /%3E%3C/svg%3E%0A");
+}
+
+.prettyTable .sort {
+	background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 42'%3E%3Cpath d='M1,23 h38 l-19,18 z' fill='%23aaa'  fill-opacity='0.25' stroke='none' stroke-linejoin='round' /%3E%3Cpath d='M1,20 h38 l-19,-18 z' fill='%23f00' fill-opacity='1' stroke='%23000' stroke-linejoin='round' /%3E%3C/svg%3E%0A");
+}
+
+.prettyTable .reverse {
+	background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 42'%3E%3Cpath d='M1,23 h38 l-19,18 z' fill='%23f00'  fill-opacity='1' stroke='%23000' stroke-linejoin='round' /%3E%3Cpath d='M1,20 h38 l-19,-18 z' fill='%23aaa' fill-opacity='0.25' stroke='none' stroke-linejoin='round' /%3E%3C/svg%3E%0A");
+}
+
+.prettyTable tbody tr {
+	background-color: var(--tableOddBG);
+	color: var(--tableOddFont);
+}
+
+.prettyTable tbody tr:nth-child(even) {
+	background-color: var(--tableEventBG);
+	color: var(--tableEvenFont);
+}
+
+.prettyTable tbody tr:hover {
+	background-color: var(--tableHoverBG);
+	color: var(--tableHoverFont);
+}
+
+.prettyTable tbody tr.selected {
+	background-color: var(--tableSelectedBG);
+	color: var(--tableSelectedFont);
+}
+
+.prettyTable tbody {
+	cursor: pointer;
+}
+
+.prettyTable tbody tr td {
+	padding: 0.5em 0.25em;
+}
+
+.pagination {
+	float: right;
+	list-style: none;
+	margin: 0;
+	padding: 0 1em 0 0;
+	user-select: none;
+}
+
+.pagination>li {
+	display: inline-block;
+}
+
+.pagination>li:not(:first-child) {
+	margin-left: 0.25em;
+}
+
+.pagination .pagination_link {
+	cursor: pointer;
+	background-color: var(--paginationClickableBG);
+	border: 1px solid var(--paginationClickableBorder);
+	color: var(--paginationClickableFont);
+}
+
+.pagination_link,
+.pagination_selected,
+.pagination_next,
+.pagination_prev {
+	padding: 0.1em 0.25em;
+	background-color: var(--paginationNonClickableBG);
+	border: 1px solid var(--paginationNonClickableBorder);
+	color: var(--paginationNonClickableFont);
+	border-radius: 4px;
+}
+
+.pagination_selected {
+	font-weight: bold;
+}

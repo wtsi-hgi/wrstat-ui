@@ -26,6 +26,7 @@
 package server
 
 import (
+	"io"
 	"net/http"
 	"os"
 	"strconv"
@@ -120,8 +121,21 @@ func (s *Server) getBasedirsUserUsage(c *gin.Context) {
 }
 
 func (s *Server) getBasedirsGroupSubdirs(c *gin.Context) {
+	allowedGIDs, err := s.allowedGIDs(c)
+	if err != nil {
+		c.AbortWithError(http.StatusBadRequest, err) //nolint:errcheck
+
+		return
+	}
+
 	id, basedir, ok := getSubdirsArgs(c)
 	if !ok {
+		return
+	}
+
+	if areDisjoint(allowedGIDs, []uint32{uint32(id)}) {
+		io.WriteString(c.Writer, "[]") //nolint:errcheck
+
 		return
 	}
 
@@ -156,9 +170,36 @@ func (s *Server) getBasedirsUserSubdirs(c *gin.Context) {
 		return
 	}
 
+	if !s.isUserAuthedToReadPath(c, basedir) {
+		io.WriteString(c.Writer, "[]") //nolint:errcheck
+
+		return
+	}
+
 	s.getBasedirs(c, func() (any, error) {
 		return s.basedirs.UserSubDirs(uint32(id), basedir)
 	})
+}
+
+func (s *Server) isUserAuthedToReadPath(c *gin.Context, path string) bool {
+	s.treeMutex.RLock()
+	defer s.treeMutex.RUnlock()
+
+	di, err := s.tree.DirInfo(path, nil)
+	if err != nil {
+		c.AbortWithError(http.StatusBadRequest, err) //nolint:errcheck
+
+		return false
+	}
+
+	allowedGIDs, err := s.allowedGIDs(c)
+	if err != nil {
+		c.AbortWithError(http.StatusBadRequest, err) //nolint:errcheck
+
+		return false
+	}
+
+	return !areDisjoint(allowedGIDs, di.Current.GIDs)
 }
 
 func (s *Server) getBasedirsHistory(c *gin.Context) {

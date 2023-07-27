@@ -1,0 +1,320 @@
+/*******************************************************************************
+ * Copyright (c) 2023 Genome Research Ltd.
+ *
+ * Authors:
+ *   Michael Woolnough <mw31@sanger.ac.uk>
+ *   Sendu Bala <sb10@sanger.ac.uk>
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining
+ * a copy of this software and associated documentation files (the
+ * "Software"), to deal in the Software without restriction, including
+ * without limitation the rights to use, copy, modify, merge, publish,
+ * distribute, sublicense, and/or sell copies of the Software, and to
+ * permit persons to whom the Software is furnished to do so, subject to
+ * the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included
+ * in all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+ * IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+ * CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+ * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+ * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ ******************************************************************************/
+
+@import url("auth.css");
+@import url("diskTree.css");
+@import url("filter.css");
+@import url("groupUserFilter.css");
+@import url("history.css");
+@import url("minmax.css");
+@import url("multiSelect.css");
+@import url("scatter.css");
+@import url("subDirs.css");
+@import url("table.css");
+@import url("tabs.css");
+@import url("treeMap.css");
+@import url("usageTable.css");
+
+body {
+  padding: 2px 0 0 0;
+  font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --fontSize: 14px;
+  font-size: var(--fontSize);
+}
+
+html,
+body {
+  color: var(--colour);
+  background-color: var(--background);
+  margin: 0;
+}
+
+#copyright {
+  margin-top: -0.5em;
+  padding: 0 2px 0.5em 0;
+  text-align: right;
+}
+
+input[type=radio],
+input[type=checkbox] {
+  accent-color: var(--inputAccent);
+}
+
+caption {
+  visibility: hidden;
+}
+
+#timestamp {
+  float: right;
+  padding-right: 2px;
+}
+
+summary>h1 {
+  margin: 0;
+  font-size: inherit;
+  font-weight: normal;
+}
+
+details {
+  border: 1px solid var(--subtleBorder);
+  border-radius: 8px;
+  margin: 1em;
+  min-width: 940px;
+}
+
+details summary {
+  list-style: none;
+  padding: 0.5em 1em;
+  position: relative;
+  cursor: pointer;
+}
+
+details summary::-webkit-details-marker {
+  display: none
+}
+
+details[open] summary {
+  border-bottom: 1px solid var(--subtleBorder);
+  margin-bottom: 1em;
+}
+
+details summary:before,
+details summary:after {
+  display: block;
+  content: "·";
+  color: #000;
+  padding: 0.5em 1em;
+  position: absolute;
+  top: 0;
+  right: -1px;
+}
+
+details summary:before {
+  border-left: 1px solid var(--subtleBorder);
+}
+
+details summary:after {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 10'%3E%3Cpath d='M7,0 v10 l-5,-5 z' fill='black' /%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: center center;
+  background-size: 1em 1em;
+}
+
+details[open] summary:after {
+  transform: rotate(-90deg);
+}
+
+.treeFilter {
+  display: grid;
+  gap: 0.5em 1em;
+  grid-template-columns: auto auto auto auto;
+  grid-auto-rows: min-content;
+  border: 1px solid var(--subtleBorder);
+  background-color: var(--subtleBG);
+  border-radius: 8px;
+  padding: 1em;
+}
+
+.treeFilter label {
+  white-space: nowrap;
+  justify-self: end;
+}
+
+.treeFilter>label:after {
+  content: ":";
+}
+
+.treeFilter>.multiSelect {
+  grid-column: 2 / span 3;
+}
+
+.treeFilter>select {
+  grid-column: 2 / span 2;
+}
+
+.graphLines {
+  stroke: var(--graphLines);
+}
+
+summary,
+label,
+text,
+th,
+.multiSelect,
+.minmax {
+  user-select: none;
+}
+
+@media (prefers-color-scheme: light) {
+  html {
+    --colour: #000;
+    --background: #fff;
+
+    --subtleBorder: #ddd;
+    --subtleBG: #f8f8f8;
+
+    --graphQuota: #00c9cf;
+    --graphUsage: #fb8c80;
+    --graphBack: #efefef;
+    --graphLines: #fff;
+
+    --inputAccent: #428bca;
+
+    --minmaxRangeBG: var(--inputAccent);
+    --minmaxRangeFont: #fff;
+    --minmaxLine: #aaa;
+    --minmaxStaticBG: #ddd;
+    --minmaxStaticFont: currentColor;
+    --minmaxSlide: #888;
+
+    --multiSelectBG: var(--background);
+    --multiSelectFont: currentColor;
+    --multiSelectRemove: #f00;
+
+    --paginationClickableBG: var(--inputAccent);
+    --paginationClickableFont: #fff;
+    --paginationClickableBorder: currentColor;
+    --paginationNonClickableBG: var(--background);
+    --paginationNonClickableFont: currentColor;
+    --paginationNonClickableBorder: currentColor;
+
+    --tableBorder: #ccc;
+    --tableHoverBG: #c0cee9;
+    --tableHoverFont: currentColor;
+    --tableSelectedBG: #b0bed9;
+    --tableSelectedFont: currentColor;
+    --tableOddBG: var(--background);
+    --tableOddFont: currentColor;
+    --tableEventBG: #f9f9f9;
+    --tableOddFont: currentColor;
+
+    --perPageBG: var(--background);
+    --perPageBorder: #aaa;
+    --perPageFont: currentColor;
+
+    --diskTreeDetailsBG: #ddd;
+    --diskTreeDetailsBorder: #aaa;
+    --diskTreeDetailsFont: currentColor;
+
+    --colourKeyBG: var(--inputAccent);
+    --colourKeyFont: #fff;
+
+    --historyInfoFont: currentColor;
+    --historyInfoBorder: currentColor;
+    --historyInfoBG: var(--background);
+
+    --tabFont: currentColor;
+    --tabBGFrom: #ececec;
+    --tabBGTo: #d1d1d1;
+    --tabHoverBGFrom: var(--inputAccent);
+    --tabHoverBGMid: color-mix(in srgb, var(--inputAccent) 25%, #fff);
+    --tabHoverBGTo: #d1d1d1;
+    --tabShadow: #d1d1d1;
+    --tabSelectedBG: var(--background);
+    --tabSelectedFont: currentColor;
+
+    --scatterHighlight: #f00;
+    --exceedWarning: #f00;
+  }
+}
+
+@media (prefers-color-scheme: dark) {
+  html {
+    --colour: #fff;
+    --background: #222;
+
+    --subtleBorder: #888;
+    --subtleBG: #666;
+
+    --graphQuota: #00c9cf;
+    --graphUsage: #fb8c80;
+    --graphBack: #444;
+    --graphLines: #000;
+
+    --inputAccent: #80caff;
+
+    --minmaxRangeBG: var(--inputAccent);
+    --minmaxRangeFont: #000;
+    --minmaxLine: #aaa;
+    --minmaxStaticBG: #444;
+    --minmaxStaticFont: currentColor;
+    --minmaxSlide: #666;
+
+    --multiSelectBG: var(--background);
+    --multiSelectFont: currentColor;
+    --multiSelectRemove: #f00;
+
+    --paginationClickableBG: var(--inputAccent);
+    --paginationClickableFont: #000;
+    --paginationClickableBorder: currentColor;
+    --paginationNonClickableBG: var(--background);
+    --paginationNonClickableFont: currentColor;
+    --paginationNonClickableBorder: currentColor;
+
+    --tableBorder: #aaa;
+    --tableHoverBG: #445;
+    --tableHoverFont: currentColor;
+    --tableSelectedBG: #446;
+    --tableSelectedFont: currentColor;
+    --tableOddBG: var(--background);
+    --tableOddFont: currentColor;
+    --tableEventBG: #333;
+    --tableOddFont: currentColor;
+
+    --perPageBG: var(--background);
+    --perPageBorder: #444;
+    --perPageFont: currentColor;
+
+    --diskTreeDetailsBG: #444;
+    --diskTreeDetailsBorder: #888;
+    --diskTreeDetailsFont: currentColor;
+
+    --colourKeyBG: var(--inputAccent);
+    --colourKeyFont: #000;
+
+    --historyInfoFont: currentColor;
+    --historyInfoBorder: currentColor;
+    --historyInfoBG: var(--background);
+
+    --tabFont: currentColor;
+    --tabBGFrom: #777;
+    --tabBGTo: #111;
+    --tabHoverBGFrom: var(--inputAccent);
+    --tabHoverBGMid: color-mix(in srgb, var(--inputAccent) 50%, #000);
+    --tabHoverBGTo: #111;
+    --tabShadow: #2e2e2e;
+    --tabSelectedBG: var(--background);
+    --tabSelectedFont: currentColor;
+
+    --scatterHighlight: #f00;
+    --exceedWarning: #f00;
+  }
+
+  details summary:after {
+    filter: invert(1);
+  }
+}

@@ -1,0 +1,205 @@
+/*******************************************************************************
+ * Copyright (c) 2023 Genome Research Ltd.
+ *
+ * Authors:
+ *   Michael Woolnough <mw31@sanger.ac.uk>
+ *   Sendu Bala <sb10@sanger.ac.uk>
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining
+ * a copy of this software and associated documentation files (the
+ * "Software"), to deal in the Software without restriction, including
+ * without limitation the rights to use, copy, modify, merge, publish,
+ * distribute, sublicense, and/or sell copies of the Software, and to
+ * permit persons to whom the Software is furnished to do so, subject to
+ * the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included
+ * in all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+ * IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+ * CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+ * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+ * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ ******************************************************************************/
+
+details #treeBreadcrumbs {
+	margin: 0;
+	width: calc(100% - 4em);
+}
+
+#treeBreadcrumbs {
+	list-style: none;
+	padding: 0;
+	margin: 1em 0 0 0;
+	grid-row: 1;
+	grid-column: 1 / span 2;
+	width: calc(100% - 2em);
+}
+
+#treeBreadcrumbs li {
+	display: inline-block;
+}
+
+#treeBreadcrumbs li:first-child {
+	margin: 0 1em 0 0;
+}
+
+#treeBreadcrumbs li:first-child:after {
+	content: ":";
+	display: inline-block;
+}
+
+#treeBreadcrumbs button {
+	cursor: pointer;
+}
+
+#treeBreadcrumbs li:not(:first-child):not(:last-child):after {
+	display: inline-block;
+	margin: 0 1em;
+	content: "/";
+}
+
+#details {
+	border-radius: 0 0 8px 8px;
+	padding: 1em 0.5em;
+	margin-bottom: 1em;
+	max-width: 100vw;
+	color: var(--diskTreeDetailsFont);
+	background-color: var(--diskTreeDetailsBG);
+	border: 1px solid var(--diskTreeDetailsBorder);
+	box-sizing: border-box;
+}
+
+#details table {
+	width: 100%;
+	table-layout: fixed;
+}
+
+#details th {
+	text-align: left;
+	width: 5em;
+}
+
+#details td div {
+	white-space: nowrap;
+	overflow-x: hidden;
+}
+
+#details td div:hover {
+	overflow-x: auto;
+}
+
+#disktree {
+	padding-left: 1em;
+	margin-top: 0.25em;
+	display: grid;
+	width: calc(100% - 2em);
+	gap: 1em;
+	grid-template-columns: 1fr auto;
+	align-items: start;
+}
+
+details #disktree>div:first-child {
+	margin-right: 2em;
+}
+
+#disktree>div:first-child {
+	grid-column: 2;
+	grid-row: 2;
+}
+
+#disktree .treeFilter .title {
+	grid-column: 1 / span 4;
+	font-size: 1em;
+	text-align: center;
+	font-weight: bold;
+	margin-bottom: 1em;
+}
+
+#disktree .treeFilter .title:not(:first-child) {
+	margin-top: 1em;
+}
+
+.age_2years:before {
+	background-color: rgba(215, 48, 39, 0.75);
+}
+
+.age_1year:before {
+	background-color: rgba(244, 109, 67, 0.75);
+}
+
+.age_10months:before {
+	background-color: rgba(253, 174, 97, 0.75);
+}
+
+.age_8months:before {
+	background-color: rgba(254, 224, 139, 0.75);
+}
+
+.age_6months:before {
+	background-color: rgba(255, 255, 191, 0.75);
+}
+
+.age_3months:before {
+	background-color: rgba(217, 239, 139, 0.75);
+}
+
+.age_2months:before {
+	background-color: rgba(166, 217, 106, 0.75);
+}
+
+.age_1month:before {
+	background-color: rgba(102, 189, 99, 0.75);
+}
+
+.age_1week:before {
+	background-color: rgba(26, 152, 80, 0.75);
+}
+
+#treeKey {
+	margin-top: 1em;
+	font: 12px sans-serif;
+	background-color: var(--subtleBG);
+	border: 1px solid var(--subtleBorder);
+	border-radius: 8px;
+	padding: 1em;
+}
+
+#treeKey div {
+	padding-bottom: 5px;
+	text-align: left;
+	visibility: visible;
+}
+
+#treeKey span {
+	background-color: var(--colourKeyBG);
+	color: var(--colourKeyFont);
+	padding: 5px;
+	border-radius: 8px;
+	margin-right: 0.5em;
+	display: block;
+	float: left;
+}
+
+#treeKey ol {
+	margin: 0;
+	list-style: none;
+	padding: 0;
+}
+
+#treeKey li {
+	margin-bottom: 0.25em;
+}
+
+#treeKey li:before {
+	content: " ";
+	display: inline-block;
+	border: 1px solid currentColor;
+	border-radius: 2px;
+	padding: 0.5em;
+	margin-right: 1em;
+	margin-bottom: -0.25em;
+}

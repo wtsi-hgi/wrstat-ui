@@ -1,0 +1,192 @@
+/*******************************************************************************
+ * Copyright (c) 2023 Genome Research Ltd.
+ *
+ * Authors:
+ *   Michael Woolnough <mw31@sanger.ac.uk>
+ *   Sendu Bala <sb10@sanger.ac.uk>
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining
+ * a copy of this software and associated documentation files (the
+ * "Software"), to deal in the Software without restriction, including
+ * without limitation the rights to use, copy, modify, merge, publish,
+ * distribute, sublicense, and/or sell copies of the Software, and to
+ * permit persons to whom the Software is furnished to do so, subject to
+ * the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included
+ * in all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+ * IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+ * CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+ * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+ * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ ******************************************************************************/
+
+#usageTable {
+	table-layout: fixed;
+	width: calc(100% - 2em);
+	margin: 4em 1em 0 1em;
+	overflow: hidden;
+	border-width: 0;
+}
+
+#usageTable tbody {
+	white-space: nowrap;
+}
+
+#usageTable td {
+	overflow: hidden;
+}
+
+#usageTable .selected td:first-child,
+#usageTable .selected td:nth-child(2) {
+	white-space: normal;
+}
+
+#usageTable {
+	min-width: 64em;
+}
+
+#usageTable thead th {
+	border-top: 1px solid var(--tableBorder);
+}
+
+#usageTable thead th:first-child {
+	border-left: 1px solid var(--tableBorder);
+	border-top-left-radius: 4px;
+}
+
+#usageTable thead th:last-child,
+#usageTable.noQuota thead th:nth-child(9) {
+	border-right: 1px solid var(--tableBorder);
+	border-top-right-radius: 4px;
+}
+
+#usageTable tbody td:first-child {
+	border-left: 1px solid var(--tableBorder);
+}
+
+#usageTable tbody td:last-child,
+#usageTable.noQuota tbody td:nth-child(9) {
+	border-right: 1px solid var(--tableBorder);
+}
+
+#usageTable tbody tr:last-child td {
+	border-bottom: 1px solid var(--tableBorder);
+}
+
+#usageTable tbody tr:last-child td:first-child {
+	border-left: 1px solid var(--tableBorder);
+	border-bottom-left-radius: 4px;
+}
+
+#usageTable tbody tr:last-child td:last-child,
+#usageTable.noQuota tbody tr:last-child td:nth-child(9) {
+	border-right: 1px solid var(--tableBorder);
+	border-bottom-right-radius: 4px;
+}
+
+#usageTable.noQuota {
+	min-width: 32em;
+}
+
+#usageTable td:nth-child(2) {
+	text-align: center;
+}
+
+#usageTable td:first-child,
+#usageTable td:nth-child(2) {
+	text-overflow: ellipsis;
+}
+
+#usageTable col:nth-child(8),
+#usageTable col:nth-child(10) {
+	width: 5em;
+}
+
+#usageTable col:nth-child(3),
+#usageTable col:nth-child(4),
+#usageTable col:nth-child(9) {
+	width: 6em;
+}
+
+#usageTable col:nth-child(2),
+#usageTable col:nth-child(5),
+#usageTable col:nth-child(6) {
+	width: 8em;
+}
+
+#usageTable col:nth-child(7) {
+	width: 9em;
+}
+
+#usageTable.noQuota tr> :nth-child(4),
+#usageTable.noQuota tr> :nth-child(5),
+#usageTable.noQuota tr> :nth-child(7),
+#usageTable.noQuota tr> :nth-child(8),
+#usageTable.noQuota tr> :nth-child(10) {
+	visibility: hidden;
+}
+
+#usageTable.noQuota col:nth-child(4),
+#usageTable.noQuota col:nth-child(5),
+#usageTable.noQuota col:nth-child(7),
+#usageTable.noQuota col:nth-child(8),
+#usageTable.noQuota col:nth-child(10) {
+	width: 0;
+}
+
+#usageTable tbody td:nth-child(3),
+#usageTable tfoot td:nth-child(3),
+#usageTable tbody td:nth-child(4),
+#usageTable tbody td:nth-child(5),
+#usageTable tbody td:nth-child(6),
+#usageTable tfoot td:nth-child(6),
+#usageTable tbody td:nth-child(7),
+#usageTable tbody td:nth-child(8),
+#usageTable tbody td:nth-child(9) {
+	text-align: right;
+	padding-right: 1em;
+}
+
+#usageTable tbody td:nth-child(10) {
+	text-align: center;
+	white-space: nowrap;
+}
+
+#usageTable tfoot>tr>td:not(:empty) {
+	border-top: 3px double currentColor;
+	padding: 0.5em 1em 0.5em 0.25em;
+}
+
+#usageTable.noQuota tfoot td:nth-child(6) {
+	border-left: 1px solid var(--tableBorder);
+}
+
+#perPage {
+	float: left;
+	padding-left: 1em;
+}
+
+#perPage select {
+	border: 1px solid var(--perPageBorder);
+	background-color: var(--perPageBG);
+	color: var(--perPageFont);
+	border-radius: 3px;
+	padding: 5px;
+	background-color: transparent;
+	padding: 4px;
+}
+
+.download {
+	background-repeat: no-repeat;
+	background-position: 1em 0.25em;
+	background-size: 1.5em 1.5em;
+	padding: 0.5em 1em 0.5em 3.5em;
+	margin-left: 1em;
+	margin-bottom: 1em;
+	background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Cpath d='M40,0 v35 h-20 l30,30 l30,-30 h-20 v-35 z M0,70 v25 h100 v-25 h-30 l-20,15 l-20,-15 z' fill='%23000' stroke-linejoin='round' stroke-width='5' stroke='%23000' /%3E%3C/svg%3E");
+}

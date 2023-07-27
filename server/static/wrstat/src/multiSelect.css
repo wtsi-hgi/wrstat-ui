@@ -1,0 +1,86 @@
+/*******************************************************************************
+ * Copyright (c) 2023 Genome Research Ltd.
+ *
+ * Authors:
+ *   Michael Woolnough <mw31@sanger.ac.uk>
+ *   Sendu Bala <sb10@sanger.ac.uk>
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining
+ * a copy of this software and associated documentation files (the
+ * "Software"), to deal in the Software without restriction, including
+ * without limitation the rights to use, copy, modify, merge, publish,
+ * distribute, sublicense, and/or sell copies of the Software, and to
+ * permit persons to whom the Software is furnished to do so, subject to
+ * the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included
+ * in all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+ * IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+ * CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+ * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+ * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ ******************************************************************************/
+
+.multiSelect ul {
+	margin: 0;
+	padding: 0;
+	list-style: none;
+}
+
+.multiSelect>ul li {
+	display: inline-block;
+}
+
+.multiSelect>ul li:not(:first-child) button {
+	margin-left: 1em;
+	padding: 0 0.5em;
+	cursor: pointer;
+	border: 1px solid var(--colour);
+	background-color: var(--background);
+	color: var(--colour);
+	position: relative;
+}
+
+.multiSelect>ul li:not(:first-child) button:hover:after {
+	content: "X";
+	color: var(--multiSelectRemove);
+	position: absolute;
+	top: 0;
+	right: 0;
+	font-size: 0.75em;
+	font-weight: bold;
+}
+
+.multiSelect>div {
+	height: 0px;
+	position: relative;
+	z-index: 10;
+}
+
+.multiSelect>div:not(:focus-within) {
+	overflow: hidden;
+}
+
+.multiSelect>div>div {
+	position: absolute;
+	background-color: var(--multiSelectBG);
+	color: var(--multiSelectFont);
+}
+
+.multiSelect>div>div>input {
+	box-sizing: border-box;
+	width: 100%;
+}
+
+.multiSelect>div>div ul {
+	max-height: 20em;
+	overflow-y: scroll;
+	overscroll-behavior: contain;
+	border-width: 0 1px 1px 1px;
+	border-style: solid;
+	border-color: currentColor;
+}
