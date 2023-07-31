@@ -97,7 +97,7 @@ it("TreeMap creates boxes with the correct area", () => {
 						bottom = top + height,
 						right = left + width,
 						area = width * height,
-						expectedArea = expectedAreas.get(child.textContent ?? "");
+						expectedArea = expectedAreas.get((child as Element).getAttribute("aria-label")?.charAt(0) ?? "");
 
 					expect(area).toEqual(expectedArea);
 					expect(left).toBeGreaterThanOrEqual(0);

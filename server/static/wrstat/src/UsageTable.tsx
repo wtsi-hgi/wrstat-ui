@@ -94,7 +94,7 @@ const stringSort = new Intl.Collator().compare,
 					}}
 					cols={[
 						{
-							title: "Path",
+							title: "Base Directory",
 							key: "BaseDir",
 							extra: (path, row) => ({
 								title: path +

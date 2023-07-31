@@ -829,11 +829,11 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 
 				resp, err := r.Get("tree/tree.html")
 				So(err, ShouldBeNil)
-				So(string(resp.Body()), ShouldStartWith, "<!doctype html>")
+				So(strings.ToUpper(string(resp.Body())), ShouldStartWith, "<!DOCTYPE HTML>")
 
 				resp, err = r.Get("")
 				So(err, ShouldBeNil)
-				So(string(resp.Body()), ShouldStartWith, "<!doctype html>")
+				So(strings.ToUpper(string(resp.Body())), ShouldStartWith, "<!DOCTYPE HTML>")
 			})
 
 			Convey("You can access the tree API", func() {

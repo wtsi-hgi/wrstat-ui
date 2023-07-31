@@ -62,10 +62,11 @@ type BoxParams = {
 	colWidth: number;
 	rowHeight: number;
 	minScale: number;
-	bbox: { width: number; height: number };
+	bbox: { width: number; height: number; depth: number };
 }
 
 const phi = (1 + Math.sqrt(5)) / 2,
+	underhangs = ['g', 'j', 'p', 'q', 'y'],
 	DirBox = ({ entry, top, left, colWidth, rowHeight, minScale, bbox }: BoxParams) => <>
 		<rect
 			x={left}
@@ -90,34 +91,33 @@ const phi = (1 + Math.sqrt(5)) / 2,
 				}
 			} : undefined}
 			onMouseOver={entry.onmouseover}
-		>
-			<title>{entry.name}</title>
-		</rect>
+		/>
 		{
 			entry.onclick ? <></> :
 				entry.noauth ?
 					<use
-						x={left + (colWidth - bbox.width * minScale * 0.9) / 2}
-						y={top + (rowHeight - minScale * 0.40) / 2}
+						x={left + (colWidth - bbox.width * minScale) / 2}
+						y={top + (rowHeight - minScale * 0.5) / 2}
 						href="#lock"
 						width="0.5em"
 						height="0.5em"
-						style={{ color: "#000", fontSize: `${minScale * 0.9}px` }} /> :
+						style={{ color: "#000", fontSize: `${minScale}px` }} /> :
 					<use
-						x={left + (colWidth - bbox.width * minScale * 0.9) / 2}
-						y={top + (rowHeight - minScale * 0.40) / 2}
+						x={left + (colWidth - bbox.width * minScale) / 2}
+						y={top + (rowHeight - minScale * 0.25) / 2}
 						href="#emptyDirectory"
 						width="0.5em"
 						height="0.3846em"
 						style={{ color: "#000", fontSize: `${minScale * 0.9}px` }} />
 		}
 		<text
-			fontSize={minScale * 0.9}
+			fontSize={minScale}
 			fontFamily={font}
 			x={(entry.noauth ? minScale * 0.225 : 0) + left + colWidth / 2}
-			y={top + rowHeight / 2 + 0.225 * minScale * bbox.height}
+			y={top + rowHeight / 2}
 			textAnchor="middle"
 			fill={entry.colour ?? "#000"}
+			dominantBaseline={underhangs.some(u => entry.name.includes(u)) ? "middle" : "central"}
 		>{entry.name}</text>
 	</>,
 	buildTree = (table: Table, box: Box) => {
@@ -167,12 +167,12 @@ const phi = (1 + Math.sqrt(5)) / 2,
 						boxHeight * entry.value / total,
 					bbox = getTextBB((entry.onclick ? "" : "W") + entry.name),
 					xScale = colWidth / bbox.width,
-					yScale = rowHeight / bbox.height,
+					yScale = 0.9 * rowHeight / (bbox.height + bbox.depth),
 					minScale = lastFontSize = Math.min(xScale, yScale, lastFontSize);
 
 				d += isRow ? colWidth : rowHeight;
 
-				toRet.push(<DirBox key={entry.key ? `box_${entry.key}` : `box_${i}`} {...{ entry, top, left, colWidth, rowHeight, minScale, bbox }} />);
+				toRet.push(<DirBox key={entry.key ? `box_${entry.key}` : `box_${i}`} {...{ entry, top, left, colWidth, rowHeight, minScale: minScale * 0.75, bbox }} />);
 			}
 
 			if (isRow) {
@@ -189,19 +189,19 @@ const phi = (1 + Math.sqrt(5)) / 2,
 	},
 	font = "\"Helvetica Neue\", Helvetica, Arial, sans-serif",
 	getTextBB = (() => {
-		const ctx = document.createElement("canvas").getContext("2d");
+		const ctx = document.createElement("canvas").getContext("2d"),
+			fontSize = 1000; // Fix for WebKit/Blink bug around font rendering at small sizes.
 
 		if (!ctx) {
-			return () => ({ "width": 1, "height": 1 });
+			return () => ({ "width": 1, "height": 1, "depth": 1 });
 		}
 
-		ctx.font = "1px " + font;
-		ctx.textBaseline = "bottom";
+		ctx.font = `${fontSize}px ${font}`;
 
 		return (text: string) => {
-			const { width = 1, actualBoundingBoxAscent: height = 1 } = ctx.measureText(text) ?? { "width": 1, "height": 1 };
+			const { width = fontSize, actualBoundingBoxAscent: height = fontSize, actualBoundingBoxDescent: depth = 0 } = ctx.measureText(text) ?? { "width": fontSize, "actualBoundingBoxAscent": fontSize, "actualBoundingBoxDescent": 0 };
 
-			return { width, height };
+			return { width: width / fontSize, height: height / fontSize, depth: depth / fontSize };
 		};
 	})(),
 	maxTableEntries = 1000,

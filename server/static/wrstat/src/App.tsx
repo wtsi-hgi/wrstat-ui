@@ -114,8 +114,6 @@ const groupNameToIDMap = new Map<string, number>(),
 			}, baseFilter),
 			preview = savedMinSize !== filterMinSize || savedMaxSize !== filterMaxSize || savedMinDaysAgo !== filterMinDaysAgo || savedMaxDaysAgo !== filterMaxDaysAgo,
 			guf = {
-				groupUsage,
-				userUsage,
 				areas,
 				groupNameToIDMap,
 				groupIDToNameMap,
@@ -152,7 +150,7 @@ const groupNameToIDMap = new Map<string, number>(),
 			if (primaryFilter.current) {
 				setScatterWidth(calculateScatterWidth(primaryFilter.current));
 			}
-		}, []);
+		}, [just]);
 
 		return <>
 			<Tabs id="mainTabs" tabs={[
@@ -264,7 +262,6 @@ const groupNameToIDMap = new Map<string, number>(),
 					treePath,
 					setTreePath,
 					guf,
-					filter
 				}} /> :
 				<details open>
 					<summary><h1>Disktree</h1></summary>
@@ -275,10 +272,10 @@ const groupNameToIDMap = new Map<string, number>(),
 							treePath,
 							setTreePath,
 							guf,
-							filter
 						}} />
 				</details>
 			}
+			<div id="copyright">&copy; 2023 Genome Research Ltd.</div>
 		</>
 	};
 

@@ -30,6 +30,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -50,12 +51,17 @@ func (s *Server) AddTreePage() error {
 		return gas.ErrNeedsAuth
 	}
 
-	fsys := getStaticFS()
-
-	s.Router().StaticFS(TreePath, http.FS(fsys))
+	staticServer := http.FileServer(http.FS(getStaticFS()))
 
 	s.Router().NoRoute(func(c *gin.Context) {
-		c.Redirect(http.StatusMovedPermanently, "/tree/tree.html")
+		if strings.HasPrefix(c.Request.URL.Path, "/tree/") {
+			c.Redirect(http.StatusMovedPermanently, "/")
+
+			return
+		}
+
+		c.Writer.Header().Del("Content-Security-Policy")
+		staticServer.ServeHTTP(c.Writer, c.Request)
 	})
 
 	authGroup.GET(TreePath, s.getTree)

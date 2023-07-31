@@ -26,8 +26,7 @@
  ******************************************************************************/
 
 import type { GroupUserFilterParams } from './GroupUserFilter';
-import type { Child, Usage } from './rpc';
-import type { Filter } from './Table';
+import type { Child } from './rpc';
 import type { Entry } from './Treemap';
 import { useEffect, useState } from "react"
 import GroupUserFilter from './GroupUserFilter';
@@ -39,7 +38,6 @@ import { useSavedState } from './state';
 
 type DiskTreeParams = {
 	treePath: string;
-	filter: Filter<Usage>;
 	userMap: Map<number, string>;
 	groupMap: Map<number, string>;
 	setTreePath: (v: string) => void;
@@ -115,10 +113,10 @@ const colours = [
 		return breadcrumbs;
 	},
 	determineTreeWidth = () => Math.max(window.innerWidth - 420, 400),
-	makeFilter = (path: string, filter: Filter<Usage>, filetypes: string[], users: Map<number, string>, groups: Map<number, string>) => ({
+	makeFilter = (path: string, uids: number[], gids: number[], filetypes: string[], users: Map<number, string>, groups: Map<number, string>) => ({
 		path,
-		"users": (filter.UID as null | number[])?.map(uid => users.get(uid) ?? -1).join(",") ?? "",
-		"groups": (filter.GID as null | number[])?.map(gid => groups.get(gid) ?? -1).join(",") ?? "",
+		"users": uids.map(uid => users.get(uid) ?? "").filter(u => u).join(",") ?? "",
+		"groups": gids.map(gid => groups.get(gid) ?? "").filter(g => g).join(",") ?? "",
 		"types": filetypes.join(",")
 	}),
 	fileTypes = [
@@ -137,7 +135,8 @@ const colours = [
 		["> 1 year", 365],
 		["> 2 years", 730]
 	] as const,
-	DiskTreeComponent = ({ treePath, filter, userMap, groupMap, setTreePath, guf }: DiskTreeParams) => {
+	entrySort = (a: Entry, b: Entry) => b.value - a.value,
+	DiskTreeComponent = ({ treePath, userMap, groupMap, setTreePath, guf }: DiskTreeParams) => {
 		const [treeMapData, setTreeMapData] = useState<Entry[] | null>(null),
 			[breadcrumbs, setBreadcrumbs] = useState<JSX.Element[]>([]),
 			[childDetails, setChildDetails] = useState<Child | null>(null),
@@ -147,18 +146,15 @@ const colours = [
 			[treeWidth, setTreeWidth] = useState(determineTreeWidth()),
 			[filterFileTypes, setFilterFileTypes] = useSavedState<string[]>("treeTypes", []),
 			[sinceLastAccess, setSinceLastAccess] = useSavedState("sinceLastAccess", 0),
-			[hasAuth, setHasAuth] = useState(true),
-			filterStr = JSON.stringify(filter);
+			[hasAuth, setHasAuth] = useState(true);
 
 		useEffect(() => window.addEventListener("resize", () => setTreeWidth(determineTreeWidth())), []);
 
 		useEffect(() => {
-			RPC.getChildren(makeFilter(treePath, filter, filterFileTypes, userMap, groupMap))
+			RPC.getChildren(makeFilter(treePath, guf.users, guf.groups, filterFileTypes, userMap, groupMap))
 				.then(children => {
 					const entries: Entry[] = [],
 						since = Date.now() - sinceLastAccess * 86_400_000;
-
-					setHasAuth(!children.noauth);
 
 					for (const child of children.children ?? []) {
 						if (new Date(child.atime).valueOf() > since) {
@@ -176,15 +172,16 @@ const colours = [
 						});
 					}
 
-					entries.sort((a, b) => b.value - a.value);
+					entries.sort(entrySort);
 
+					setHasAuth(!children.noauth);
 					setTreeMapData(entries);
 					setChildDetails(children);
 					setDirDetails(children);
 				});
 
 			setBreadcrumbs(makeBreadcrumbs(treePath, setTreePath));
-		}, [treePath, useMTime, useCount, filterFileTypes, sinceLastAccess, filterStr]);
+		}, [treePath, useMTime, useCount, filterFileTypes, sinceLastAccess, guf.groups, guf.users]);
 
 		return <>
 			<div id="disktree">

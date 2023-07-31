@@ -98,8 +98,7 @@ const endpointREST = "/rest/v1/auth",
 const cache = new Map<string, string>(),
 	getURL = <T>(url: string, params: Record<string, unknown> = {}) => {
 		return new Promise<T>((successFn, errorFn) => {
-			const xh = new XMLHttpRequest(),
-				urlParams: string[] = [];
+			const urlParams: string[] = [];
 
 			for (const [key, value] of Object.entries(params)) {
 				urlParams.push(`${key}=${encodeURIComponent(value + "")}`);
@@ -116,10 +115,10 @@ const cache = new Map<string, string>(),
 				return;
 			}
 
+			const xh = new XMLHttpRequest();
+
 			xh.open("GET", url);
 			xh.setRequestHeader("Authorization", `Bearer ${getCookie("jwt")}`);
-			xh.send();
-
 			xh.addEventListener("readystatechange", () => {
 				if (xh.readyState === 4) {
 					if (xh.status === 200) {
@@ -132,6 +131,7 @@ const cache = new Map<string, string>(),
 					}
 				}
 			});
+			xh.send();
 		});
 	}
 

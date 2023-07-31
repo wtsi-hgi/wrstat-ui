@@ -39,6 +39,10 @@ rect+use+text {
 	fill-opacity: 0.75;
 }
 
-.treeMap rect.box:hover {
+.treeMap rect.box:not(.hasClick):hover {
+	cursor: not-allowed;
+}
+
+.treeMap rect.hasClick:hover {
 	fill-opacity: 0.8;
 }

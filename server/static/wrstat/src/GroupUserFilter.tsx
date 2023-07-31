@@ -25,12 +25,9 @@
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  ******************************************************************************/
 
-import MultiSelect, { type Listener } from "./MultiSelect";
-import type { Usage } from "./rpc";
+import MultiSelect from "./MultiSelect";
 
 export type GroupUserFilterParams = {
-	groupUsage: Usage[];
-	userUsage: Usage[];
 	areas: Record<string, string[]>;
 	users: number[];
 	setUsers: (v: number[]) => void;
@@ -43,10 +40,7 @@ export type GroupUserFilterParams = {
 }
 
 const stringSort = new Intl.Collator().compare,
-	pipes: (Listener | null)[] = [null, null],
 	GroupUserFilter = ({
-		groupUsage,
-		userUsage,
 		areas,
 		groupNameToIDMap,
 		groupIDToNameMap,
@@ -69,41 +63,31 @@ const stringSort = new Intl.Collator().compare,
 				list={Object.keys(areas).sort(stringSort)}
 				selected={selectedBOMs}
 				onchange={(boms, deleted) => {
-					if (deleted) {
-						for (const pipe of pipes) {
-							pipe?.(areas[deleted], true);
-						}
+					const existingGroups = new Set(groups);
 
-						return false;
-					}
-
-					const existingGroups = new Set(groups.map(gid => groupIDToNameMap.get(gid) ?? ""));
-
-					for (const bom of boms) {
+					for (const bom of deleted ? [deleted] : boms) {
 						for (const g of areas[bom] ?? []) {
-							if (groupNameToIDMap.has(g)) {
-								existingGroups.add(g);
+							const id = groupNameToIDMap.get(g);
+							if (id !== undefined) {
+								existingGroups[deleted ? "delete" : "add"](id);
 							}
 						}
 					}
 
-					for (const pipe of pipes) {
-						pipe?.(Array.from(existingGroups), false);
-					}
+					setGroups(Array.from(existingGroups));
 
 					return false;
 				}} />
 			<label htmlFor={`unix_${num}`}>Unix Group</label >
 			<MultiSelect
 				id={`unix_${num}`}
-				list={Array.from(new Set(groupUsage.map(e => e.Name)).values()).sort(stringSort)}
-				listener={(cb: Listener) => pipes[num] = cb}
+				list={Array.from(new Set(groupNameToIDMap.keys())).sort(stringSort)}
 				selected={selectedGroups}
 				onchange={groups => setGroups(groups.map(groupname => groupNameToIDMap.get(groupname) ?? -1))} />
 			<label htmlFor={`username_${num}`}>Username</label>
 			<MultiSelect
 				id={`username_${num}`}
-				list={Array.from(new Set(userUsage.map(e => e.Name)).values()).sort(stringSort)}
+				list={Array.from(new Set(userNameToIDMap.keys())).sort(stringSort)}
 				selected={selectedUsers}
 				onchange={users => setUsers(users.map(username => userNameToIDMap.get(username) ?? -1))} />
 		</>

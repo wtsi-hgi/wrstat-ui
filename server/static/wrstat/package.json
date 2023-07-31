@@ -1,6 +1,6 @@
 {
   "name": "wrstat",
-  "homepage": "/tree/",
+  "homepage": "/",
   "version": "0.1.0",
   "private": true,
   "dependencies": {
@@ -17,8 +17,8 @@
   "scripts": {
     "start": "react-scripts start",
     "build": "echo \"Please use build:dev or build:prod \" && exit 1",
-    "build:prod": "cross-env NODE_ENV=production react-scripts build && mv build/index.html build/tree.html",
-    "build:dev": "cross-env NODE_ENV=development react-scripts build && mv build/index.html build/tree.html",
+    "build:prod": "cross-env NODE_ENV=production react-scripts build",
+    "build:dev": "cross-env NODE_ENV=development react-scripts build",
     "postinstall": "npx patch-package",
     "test": "react-scripts test",
     "eject": "react-scripts eject"

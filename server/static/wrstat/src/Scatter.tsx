@@ -168,6 +168,10 @@ const minDaysAgo = (date: string) => {
 			dataStr = JSON.stringify(data);
 
 		useEffect(() => {
+			if (data.length === 0) {
+				return;
+			}
+
 			const x = dateToX(minX),
 				y = sizeToY(maxY),
 				width = dateToX(maxX) - x,

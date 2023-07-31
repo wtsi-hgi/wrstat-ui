@@ -80,7 +80,8 @@ details #treeBreadcrumbs {
 
 #details th {
 	text-align: left;
-	width: 5em;
+	width: 6em;
+	white-space: nowrap;
 }
 
 #details td div {

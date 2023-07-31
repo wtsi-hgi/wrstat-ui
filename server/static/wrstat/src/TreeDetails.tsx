@@ -43,7 +43,7 @@ const TreedetailsComponent = ({ details, ...rest }: { details: Child | null } & 
 					<td>{formatBytes(details.size)}</td>
 				</tr>
 				<tr>
-					<th>Count</th>
+					<th aria-label="Files & Directories">Files &amp; Dirs</th>
 					<td>{formatNumber(details.count)}</td>
 				</tr>
 				<tr>

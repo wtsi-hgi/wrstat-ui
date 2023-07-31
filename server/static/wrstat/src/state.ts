@@ -25,7 +25,7 @@
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  ******************************************************************************/
 
-import { useState } from "react";
+import { useCallback, useState } from "react";
 
 const state = new Map<string, any>(),
 	isDefaultValue = <T>(v: T, def: T) => v === def || JSON.stringify(v) === JSON.stringify(def),
@@ -107,7 +107,7 @@ export const useSavedState = <T>(name: string, v: T) => {
 		firstSet = window.setTimeout(() => firstRender = false, 1);
 	}
 
-	return [val, (val: T) => {
+	return [val, useCallback((val: T) => {
 		if (firstRender || restoring) {
 			return;
 		}
@@ -117,7 +117,7 @@ export const useSavedState = <T>(name: string, v: T) => {
 		setter(val);
 
 		setQueryState();
-	}] as const;
+	}, [name, setter])] as const;
 },
 	clearState = () => {
 		state.clear();
