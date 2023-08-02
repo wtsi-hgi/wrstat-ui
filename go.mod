@@ -23,10 +23,7 @@ require (
 	github.com/wtsi-ssg/wr v0.5.7
 	go.etcd.io/bbolt v1.3.7
 	golang.org/x/exp v0.0.0-20230522175609-2e198f4a06a1
-	gopkg.in/yaml.v2 v2.4.0
 )
-
-require github.com/gabriel-vasile/mimetype v1.4.2 // indirect
 
 require (
 	cloud.google.com/go/compute v1.20.0 // indirect
@@ -51,6 +48,7 @@ require (
 	github.com/docker/go-units v0.5.0 // indirect
 	github.com/docker/spdystream v0.2.0 // indirect
 	github.com/fanatic/go-infoblox v0.0.0-20190709161059-e25f3820238c // indirect
+	github.com/gabriel-vasile/mimetype v1.4.2 // indirect
 	github.com/ghodss/yaml v1.0.0 // indirect
 	github.com/gin-contrib/secure v0.0.1 // indirect
 	github.com/gin-contrib/sse v0.1.0 // indirect
@@ -145,6 +143,7 @@ require (
 	gopkg.in/inf.v0 v0.9.1 // indirect
 	gopkg.in/ini.v1 v1.67.0 // indirect
 	gopkg.in/tylerb/graceful.v1 v1.2.15 // indirect
+	gopkg.in/yaml.v2 v2.4.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	k8s.io/api v0.27.2 // indirect
 	k8s.io/apimachinery v0.27.2 // indirect
