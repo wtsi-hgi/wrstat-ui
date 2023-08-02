@@ -67,6 +67,7 @@ type BoxParams = {
 
 const phi = (1 + Math.sqrt(5)) / 2,
 	underhangs = ['g', 'j', 'p', 'q', 'y'],
+	smallLetters = /^[acemnorsuvwxz]+$/,
 	DirBox = ({ entry, top, left, colWidth, rowHeight, minScale, bbox }: BoxParams) => <>
 		<rect
 			x={left}
@@ -117,7 +118,7 @@ const phi = (1 + Math.sqrt(5)) / 2,
 			y={top + rowHeight / 2}
 			textAnchor="middle"
 			fill={entry.colour ?? "#000"}
-			dominantBaseline={underhangs.some(u => entry.name.includes(u)) ? "middle" : "central"}
+			dominantBaseline={underhangs.some(u => entry.name.includes(u)) || smallLetters.test(entry.name) ? "middle" : "central"}
 		>{entry.name}</text>
 	</>,
 	buildTree = (table: Table, box: Box) => {
