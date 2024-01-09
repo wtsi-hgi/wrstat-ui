@@ -35,16 +35,13 @@ import (
 
 const ErrBadQuery = gas.Error("bad query; check dir, group, user and type")
 
-// GetGroupAreas is a client call to a Server listening at the given
-// domain:port url that queries its configured group area information. The
-// returned map has area keys and group slices.
-//
-// Provide a non-blank path to a certificate to force us to trust that
-// certificate, eg. if the server was started with a self-signed certificate.
-//
-// You must first Login() to get a JWT that you must supply here.
-func GetGroupAreas(url, cert, jwt string) (map[string][]string, error) {
-	r := gas.NewAuthenticatedClientRequest(url, cert, jwt)
+// GetGroupAreas is a client call to a Server that queries its configured group
+// area information. The returned map has area keys and group slices.
+func GetGroupAreas(c *gas.ClientCLI) (map[string][]string, error) {
+	r, err := c.AuthenticatedRequest()
+	if err != nil {
+		return nil, err
+	}
 
 	resp, err := r.SetResult(map[string][]string{}).
 		ForceContentType("application/json").
@@ -71,8 +68,11 @@ func GetGroupAreas(url, cert, jwt string) (map[string][]string, error) {
 // You must first Login() to get a JWT that you must supply here.
 //
 // The other parameters correspond to arguments that dgut.Tree.Where() takes.
-func GetWhereDataIs(url, cert, jwt, dir, groups, users, types, splits string) ([]byte, []*DirSummary, error) {
-	r := gas.NewAuthenticatedClientRequest(url, cert, jwt)
+func GetWhereDataIs(c *gas.ClientCLI, dir, groups, users, types, splits string) ([]byte, []*DirSummary, error) {
+	r, err := c.AuthenticatedRequest()
+	if err != nil {
+		return nil, nil, err
+	}
 
 	resp, err := r.SetResult([]*DirSummary{}).
 		ForceContentType("application/json").

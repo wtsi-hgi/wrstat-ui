@@ -42,6 +42,7 @@ import (
 )
 
 const sentinelPollFrequencty = 1 * time.Minute
+const serverTokenBasename = ".wrstat.servertoken"
 
 // options for this cmd.
 var serverLogPath string
@@ -126,7 +127,7 @@ creation time in reports.
 
 		s := server.New(logWriter)
 
-		err := s.EnableAuth(serverCert, serverKey, authenticateDeny)
+		err := s.EnableAuthWithServerToken(serverCert, serverKey, serverTokenBasename, authenticateDeny)
 		if err != nil {
 			die("failed to enable authentication: %s", err)
 		}

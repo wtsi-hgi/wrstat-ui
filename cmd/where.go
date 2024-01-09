@@ -29,10 +29,8 @@ package cmd
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -156,9 +154,14 @@ with refreshes possible up to 5 days after expiry.
 			whereCert = os.Getenv("WRSTAT_SERVER_CERT")
 		}
 
+		c, err := gas.NewClientCLI(jwtBasename, serverTokenBasename, url, whereCert, true)
+		if err != nil {
+			die(err.Error())
+		}
+
 		if whereShowSupergroups {
-			if err := showSupergroups(url, whereCert); err != nil {
-				die(err.Error())
+			if errs := showSupergroups(c); err != nil {
+				die(errs.Error())
 			}
 
 			return
@@ -175,7 +178,7 @@ with refreshes possible up to 5 days after expiry.
 
 		minAtime := time.Now().Add(-(time.Duration(whereAge*hoursePerDay) * time.Hour))
 
-		err = where(url, whereCert, whereQueryDir, whereGroups, whereSupergroup, whereUsers, whereTypes,
+		err = where(c, whereQueryDir, whereGroups, whereSupergroup, whereUsers, whereTypes,
 			fmt.Sprintf("%d", whereSplits), whereOrder, minSizeBytes, minAtime, whereJSON)
 		if err != nil {
 			die(err.Error())
@@ -239,8 +242,8 @@ func getServerURL(args []string) string {
 }
 
 // showSupergroups does a query just to get details about the group areas.
-func showSupergroups(url, cert string) error {
-	areas, err := getSupergroups(url, cert)
+func showSupergroups(c *gas.ClientCLI) error {
+	areas, err := getSupergroups(c)
 	if err != nil {
 		return err
 	}
@@ -256,13 +259,8 @@ func showSupergroups(url, cert string) error {
 }
 
 // getSupergroups returns the map of the server's configured group areas.
-func getSupergroups(url, cert string) (map[string][]string, error) {
-	token, err := getJWT(url, cert)
-	if err != nil {
-		return nil, err
-	}
-
-	areas, err := server.GetGroupAreas(url, cert, token)
+func getSupergroups(c *gas.ClientCLI) (map[string][]string, error) {
+	areas, err := server.GetGroupAreas(c)
 	if err != nil {
 		return nil, err
 	}
@@ -272,18 +270,15 @@ func getSupergroups(url, cert string) (map[string][]string, error) {
 
 // where does the main job of querying the server to answer where the data is on
 // disk.
-func where(url, cert, dir, groups, supergroup, users, types, splits, order string,
+func where(c *gas.ClientCLI, dir, groups, supergroup, users, types, splits, order string,
 	minSizeBytes uint64, minAtime time.Time, json bool) error {
-	token, err := getJWT(url, cert)
-	if err != nil {
+	var err error
+
+	if groups, err = mergeGroupsWithAreaGroups(c, groups, supergroup); err != nil {
 		return err
 	}
 
-	if groups, err = mergeGroupsWithAreaGroups(url, cert, groups, supergroup); err != nil {
-		return err
-	}
-
-	body, dss, err := server.GetWhereDataIs(url, cert, token, dir, groups, users, types, splits)
+	body, dss, err := server.GetWhereDataIs(c, dir, groups, users, types, splits)
 	if err != nil {
 		return err
 	}
@@ -303,12 +298,12 @@ func where(url, cert, dir, groups, supergroup, users, types, splits, order strin
 
 // mergeGroupsWithAreaGroups will get the groups belonging to the given
 // supergroup "group area", and merge them with the given groups, removing dups.
-func mergeGroupsWithAreaGroups(url, cert, groups, supergroup string) (string, error) {
+func mergeGroupsWithAreaGroups(c *gas.ClientCLI, groups, supergroup string) (string, error) {
 	if supergroup == "" {
 		return groups, nil
 	}
 
-	areas, err := getSupergroups(url, cert)
+	areas, err := getSupergroups(c)
 	if err != nil {
 		return "", err
 	}
@@ -342,109 +337,6 @@ func deDup(withDups []string) []string {
 	}
 
 	return noDups
-}
-
-// JWTPermissionsError is used to distinguish this type of error - where the
-// already stored JWT token doesn't have private permissions.
-type JWTPermissionsError struct {
-	tokenFile string
-}
-
-// Error is the print out string for JWTPermissionsError, so the user can
-// see and rectify the permissions issue.
-func (e JWTPermissionsError) Error() string {
-	return fmt.Sprintf("Token %s does not have %v permissions "+
-		"- won't use it", e.tokenFile, privatePerms)
-}
-
-// getJWT checks if we have stored a jwt in a file in user's home directory.
-// If so, the JWT is refreshed and returned.
-//
-// Otherwise, we ask the user for the password and login, storing and returning
-// the new JWT.
-func getJWT(url, cert string) (string, error) {
-	token, err := getStoredJWT(url, cert)
-	if err == nil {
-		return token, nil
-	}
-
-	if errors.As(err, &JWTPermissionsError{}) {
-		return "", err
-	}
-
-	token, err = login(url, cert)
-	if err == nil {
-		err = storeJWT(token)
-	}
-
-	return token, err
-}
-
-// getStoredJWT sees if we've previously called storeJWT(), gets the token
-// from the file it made, then tries to refresh it on the Server.
-//
-// We also check if the token has private permissions, otherwise we won't use
-// it. This is as an attempt to reduce the likelihood of the token being
-// leaked with its long expiry time (used so the user doesn't have to continuously
-// log in, as we're not working with specific refresh tokens to get new access
-// tokens).
-func getStoredJWT(url, cert string) (string, error) {
-	path, err := jwtStoragePath()
-	if err != nil {
-		return "", err
-	}
-
-	stat, err := os.Stat(path)
-	if err != nil {
-		return "", err
-	}
-
-	if stat.Mode() != privatePerms {
-		return "", JWTPermissionsError{tokenFile: path}
-	}
-
-	content, err := os.ReadFile(path)
-	if err != nil {
-		return "", err
-	}
-
-	token := strings.TrimSpace(string(content))
-
-	return gas.RefreshJWT(url, cert, token)
-}
-
-// jwtStoragePath returns the path where we store our JWT.
-func jwtStoragePath() (string, error) {
-	dir, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-
-	return filepath.Join(dir, jwtBasename), nil
-}
-
-// login gives the user a URL to visit to log in using Okta,
-// which will give them back a code to paste here to authenticate.
-func login(url, cert string) (string, error) {
-	cliPrint("Login at this URL, and then copy and paste the given code back here: https://%s%s\n",
-		url, gas.EndpointOIDCCLILogin)
-	cliPrint("Auth Code:")
-
-	var authCode string
-
-	fmt.Scanln(&authCode)
-
-	return gas.LoginWithOKTA(url, cert, authCode)
-}
-
-// storeJWT writes the given token string to a private file in user's home dir.
-func storeJWT(token string) error {
-	path, err := jwtStoragePath()
-	if err != nil {
-		return err
-	}
-
-	return os.WriteFile(path, []byte(token), privatePerms)
 }
 
 // orderDSs reorders the given DirSummarys by count or dir, does nothing if
