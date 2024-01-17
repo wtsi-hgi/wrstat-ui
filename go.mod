@@ -25,6 +25,8 @@ require (
 	golang.org/x/exp v0.0.0-20231110203233-9a3e6036ecaa
 )
 
+require github.com/otiai10/copy v1.14.0
+
 require (
 	cloud.google.com/go/compute v1.23.3 // indirect
 	cloud.google.com/go/compute/metadata v0.2.3 // indirect
