@@ -281,6 +281,7 @@ var whiteListGIDs = map[string]struct{}{
 	"15306": {},
 	"1662":  {},
 	"15394": {},
+	"1527":  {},
 }
 
 // whiteLister is currently hard-coded to say that membership of certain gids
