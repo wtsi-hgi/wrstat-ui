@@ -48,12 +48,12 @@ type Error string
 func (e Error) Error() string { return string(e) }
 
 const (
-	defaultSplits               = 2
-	defaultSize                 = "50M"
-	hoursePerDay                = 24
-	jwtBasename                 = ".wrstat.jwt"
-	errBadGroupArea             = Error("unknown group area")
-	privatePerms    os.FileMode = 0600
+	defaultWhereSplits             = 2
+	defaultSize                    = "50M"
+	hoursePerDay                   = 24
+	jwtBasename                    = ".wrstat.jwt"
+	errBadGroupArea                = Error("unknown group area")
+	privatePerms       os.FileMode = 0600
 )
 
 // options for this cmd.
@@ -192,7 +192,7 @@ func init() { //nolint:funlen
 	// flags specific to these sub-commands
 	whereCmd.Flags().StringVarP(&whereQueryDir, "dir", "d", "/",
 		"directory path you wish to query")
-	whereCmd.Flags().IntVarP(&whereSplits, "splits", "s", defaultSplits,
+	whereCmd.Flags().IntVarP(&whereSplits, "splits", "s", defaultWhereSplits,
 		"number of splits (see help text)")
 	whereCmd.Flags().StringVarP(&whereGroups, "groups", "g", "",
 		"comma separated list of unix groups to filter on")

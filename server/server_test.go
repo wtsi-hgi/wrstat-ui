@@ -1569,7 +1569,7 @@ func createExampleBasedirsDB(t *testing.T, tree *dgut.Tree) (string, string, err
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "basedir.db")
 
-	bd, err := basedirs.NewCreator(dbPath, tree, quotas)
+	bd, err := basedirs.NewCreator(dbPath, 4, 4, tree, quotas)
 	if err != nil {
 		return "", "", err
 	}

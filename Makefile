@@ -20,8 +20,9 @@ install: export CGO_ENABLED = 1
 install:
 	@rm -f ${GOPATH}/bin/wrstat
 	@cd server/static/wrstat; npm install && npm run build:prod
+	@echo Starting go install
 	@go install -tags netgo ${LDFLAGS}
-	@echo installed to ${GOPATH}/bin/wrstat
+	@echo Installed to ${GOPATH}/bin/wrstat
 
 installnonpm: export CGO_ENABLED = 1
 installnonpm:
