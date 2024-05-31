@@ -68,7 +68,7 @@ const paginationEnd = 3,
 			lastPage = totalPages - 1;
 
 		if (lastPage < 1) {
-			return <></>
+			return <></>;
 		}
 
 		if (currentPage > lastPage) {
@@ -86,7 +86,7 @@ const paginationEnd = 3,
 				if (page !== start) {
 					processPaginationSection(ret, currentPage, start, page - 1, onClick);
 				}
-				start = page + 1
+				start = page + 1;
 			}
 		}
 
@@ -132,7 +132,7 @@ const paginationEnd = 3,
 					onClick(currentPage + 1);
 				}}
 			>Next</li>
-		</ul >
+		</ul>;
 	};
 
 export default PaginationComponent;

@@ -179,7 +179,7 @@ const SelectItem = ({ item, selectedSet, disabled, onchange, keypress }: SelectI
 					</ul>
 				</div>
 			</div>
-		</div>
+		</div>;
 	};
 
 export default MultiSelectComponent;

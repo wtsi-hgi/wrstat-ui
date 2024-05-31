@@ -30,7 +30,7 @@ import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import App from './App';
 import Auth, { logout } from './auth';
-import { formatTimeAgo } from './format';
+import { approxTimeAgo } from './format';
 import ready from './ready';
 import RPC from './rpc';
 
@@ -54,13 +54,13 @@ auth.then(username => Promise.all([
 			let spaceOK = false, filesOK = false;
 
 			if (d.DateNoSpace === nullDate) {
-				spaceOK = true
+				spaceOK = true;
 			} else {
 				spaceOK = daysUntilQuotaFull(d.DateNoSpace) > 3;
 			}
 
 			if (d.DateNoFiles === nullDate) {
-				filesOK = true
+				filesOK = true;
 			} else {
 				filesOK = daysUntilQuotaFull(d.DateNoFiles) > 3;
 			}
@@ -99,6 +99,6 @@ auth.then(username => Promise.all([
 
 			logout();
 		}}>Logout</button></div>
-		<div id="timestamp" title={timestamp}>Database updated: {formatTimeAgo(timestamp)}</div>
+		<div id="timestamp" title={timestamp}>Database updated: {approxTimeAgo(timestamp)}</div>
 		<App groupUsage={groupUsage} userUsage={userUsage} areas={areas} />
 	</StrictMode>));

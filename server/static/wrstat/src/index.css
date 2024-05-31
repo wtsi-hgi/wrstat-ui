@@ -37,6 +37,7 @@
 @import url("table.css");
 @import url("tabs.css");
 @import url("treeMap.css");
+@import url("treeTable.css");
 @import url("usageTable.css");
 
 body {
@@ -167,6 +168,10 @@ th,
 .multiSelect,
 .minmax {
   user-select: none;
+}
+
+button {
+	cursor: pointer;
 }
 
 @media (prefers-color-scheme: light) {

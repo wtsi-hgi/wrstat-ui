@@ -90,7 +90,7 @@ const stringSort = new Intl.Collator().compare,
 				list={Array.from(new Set(userNameToIDMap.keys())).sort(stringSort)}
 				selected={selectedUsers}
 				onchange={users => setUsers(users.map(username => userNameToIDMap.get(username) ?? -1))} />
-		</>
-	}
+		</>;
+	};
 
 export default GroupUserFilter;

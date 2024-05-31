@@ -193,7 +193,7 @@ const minDaysAgo = (date: string) => {
 			return <svg id="scatter" xmlns="http://www.w3.org/2000/svg" width={width} height={height} viewBox={`0 0 ${width} ${height}`}>
 				<rect width={width} height={height} stroke="currentColor" fill="none" />
 				<text fill="currentColor" textAnchor="middle" x={width / 2} y={height / 2}>—No Data—</text>
-			</svg>
+			</svg>;
 		}
 
 		let minSize = Infinity,
@@ -203,7 +203,7 @@ const minDaysAgo = (date: string) => {
 
 		for (const d of data) {
 			if (d.UsageSize < minSize) {
-				minSize = d.UsageSize
+				minSize = d.UsageSize;
 			}
 
 			if (d.UsageSize > maxSize) {
@@ -263,7 +263,7 @@ const minDaysAgo = (date: string) => {
 				}} />)
 			}
 			<text x={paddingXL + (width - paddingXL - paddingXR) / 2} y={height - 5} textAnchor="middle" fill="currentColor">Last Modified (Days)</text>
-		</svg>
+		</svg>;
 	};
 
 export default ScatterComponent;

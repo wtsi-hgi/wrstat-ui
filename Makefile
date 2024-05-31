@@ -48,7 +48,9 @@ bench:
 # curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(go env GOPATH)/bin v1.55.2
 lint: export CGO_ENABLED = 1
 lint:
+	@cd server/static/wrstat; npm install && CI= npm run lint || true 
 	@golangci-lint run
+# remove the || true when you get round to removing all anys
 
 clean:
 	@rm -f ./wrstat

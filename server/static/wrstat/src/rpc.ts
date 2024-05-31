@@ -133,7 +133,7 @@ const cache = new Map<string, string>(),
 			});
 			xh.send();
 		});
-	}
+	};
 
 const RPC = {
 	"getChildren": (filter: ChildFilter) => getURL<Child>(treeURL, filter),

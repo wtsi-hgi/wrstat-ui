@@ -117,7 +117,7 @@ const stringSort = new Intl.Collator().compare,
 					setByUser(byUser);
 				}}>Reset</button>
 			</div>
-		</>
+		</>;
 	};
 
 export default FilterComponent;

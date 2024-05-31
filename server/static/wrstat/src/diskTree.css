@@ -25,40 +25,30 @@
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  ******************************************************************************/
 
-details #treeBreadcrumbs {
-	margin: 0;
-	width: calc(100% - 4em);
-}
-
 #treeBreadcrumbs {
 	list-style: none;
 	padding: 0;
 	margin: 1em 0 0 0;
 	grid-row: 1;
 	grid-column: 1 / span 2;
-	width: calc(100% - 2em);
+	padding: 3px;
+	background-color: var(--subtleBG);
+	border: 1px solid var(--subtleBorder);
+	width: fit-content;
+	border-radius: 4px;
 }
 
 #treeBreadcrumbs li {
 	display: inline-block;
 }
 
-#treeBreadcrumbs li:first-child {
-	margin: 0 1em 0 0;
-}
-
-#treeBreadcrumbs li:first-child:after {
-	content: ":";
-	display: inline-block;
-}
-
-#treeBreadcrumbs button {
-	cursor: pointer;
+#treeBreadcrumbs li:nth-child(2) {
+	margin: 0 0 0 0.25em;
 }
 
 #treeBreadcrumbs li:not(:first-child):not(:last-child):after {
 	display: inline-block;
-	margin: 0 1em;
+	margin: 0 0.25em;
 	content: "/";
 }
 
@@ -99,8 +89,10 @@ details #treeBreadcrumbs {
 	display: grid;
 	width: calc(100% - 2em);
 	gap: 1em;
+	row-gap: 0.5em;
 	grid-template-columns: 1fr auto;
 	align-items: start;
+	margin-bottom: 1.5em;
 }
 
 details #disktree>div:first-child {
@@ -203,4 +195,8 @@ details #disktree>div:first-child {
 	padding: 0.5em;
 	margin-right: 1em;
 	margin-bottom: -0.25em;
+}
+
+#treeTabs {
+	margin-top: 1em;
 }

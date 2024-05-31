@@ -34,7 +34,7 @@ const usernameFromJWT = (jwt: string): string => JSON.parse(atob(jwt.split('.')[
 				if (xh.status === 200) {
 					const token = JSON.parse(xh.response);
 
-					document.cookie = `jwt=${token};samesite=strict;path=/`
+					document.cookie = `jwt=${token};samesite=strict;path=/`;
 
 					successFn(usernameFromJWT(token));
 				} else {

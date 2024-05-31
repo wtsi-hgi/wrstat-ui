@@ -28,13 +28,15 @@
 import type { GroupUserFilterParams } from './GroupUserFilter';
 import type { Child } from './rpc';
 import type { Entry } from './Treemap';
-import { useEffect, useState } from "react"
+import { useEffect, useState } from "react";
 import GroupUserFilter from './GroupUserFilter';
 import MultiSelect from './MultiSelect';
 import TreeDetails from "./TreeDetails";
 import Treemap from "./Treemap";
+import Treetable from "./TreeTable";
 import RPC from "./rpc";
 import { useSavedState } from './state';
+import Tabs from "./Tabs";
 
 type DiskTreeParams = {
 	treePath: string;
@@ -90,25 +92,23 @@ const colours = [
 		}}>{part}</button>
 	</li>,
 	makeBreadcrumbs = (path: string, setPath: (path: string) => void) => {
-		let last = 0;
+		let last = 0,
+			pos = path.indexOf("/", last + 1);
 
 		const breadcrumbs = [
-			<Breadcrumb key={`breadcrumb_root`} path="/" part="Root" setPath={setPath} />
+			<Breadcrumb key={`breadcrumb_root`} path="/" part="/" setPath={setPath} />
 		];
 
-		while (true) {
-			const pos = path.indexOf("/", last + 1);
-
-			if (pos === -1) {
-				break;
-			}
-
+		while (pos !== -1) {
 			breadcrumbs.push(<Breadcrumb key={`breadcrumb_${breadcrumbs.length}`} path={path.slice(0, pos)} part={path.slice(last + 1, pos)} setPath={setPath} />);
 
 			last = pos;
+			pos = path.indexOf("/", last + 1);
 		}
 
-		breadcrumbs.push(<li key={`breadcrumb_${breadcrumbs.length}`} tabIndex={0} aria-current="location">{path.slice(last + 1) || "/"}</li>);
+		if (path.length > 1) {
+			breadcrumbs.push(<li key={`breadcrumb_${breadcrumbs.length}`} tabIndex={0} aria-current="location">{path.slice(last + 1) || "/"}</li>);
+		}
 
 		return breadcrumbs;
 	},
@@ -140,13 +140,16 @@ const colours = [
 		const [treeMapData, setTreeMapData] = useState<Entry[] | null>(null),
 			[breadcrumbs, setBreadcrumbs] = useState<JSX.Element[]>([]),
 			[childDetails, setChildDetails] = useState<Child | null>(null),
+			[tableDetails, setTableDetails] = useState<Child | null>(null),
 			[dirDetails, setDirDetails] = useState<Child | null>(childDetails),
 			[useMTime, setUseMTime] = useSavedState("useMTime", false),
 			[useCount, setUseCount] = useSavedState("useCount", false),
 			[treeWidth, setTreeWidth] = useState(determineTreeWidth()),
 			[filterFileTypes, setFilterFileTypes] = useSavedState<string[]>("treeTypes", []),
 			[sinceLastAccess, setSinceLastAccess] = useSavedState("sinceLastAccess", 0),
-			[hasAuth, setHasAuth] = useState(true);
+			[hasAuth, setHasAuth] = useState(true),
+			[viewBoxes, setViewBoxes] = useState(true);
+
 
 		useEffect(() => window.addEventListener("resize", () => setTreeWidth(determineTreeWidth())), []);
 
@@ -178,65 +181,96 @@ const colours = [
 					setTreeMapData(entries);
 					setChildDetails(children);
 					setDirDetails(children);
+					setTableDetails(children);
 				});
 
 			setBreadcrumbs(makeBreadcrumbs(treePath, setTreePath));
 		}, [treePath, useMTime, useCount, filterFileTypes, sinceLastAccess, guf.groups, guf.users]);
 
 		return <>
-			<div id="disktree">
-				<div>
-					<div className="treeFilter">
-						<div className="title">Colour By</div>
-						<label aria-label="Colour by Oldest Access Time" title="Oldest Access Time" htmlFor="aTime">Access Time</label><input type="radio" id="aTime" checked={!useMTime} onChange={() => setUseMTime(false)} />
-						<label aria-label="Colour by Latest Modified Time" title="Latest Modified Time" htmlFor="mTime">Modified Time</label><input type="radio" id="mTime" checked={useMTime} onChange={() => setUseMTime(true)} />
-						<div className="title">Area Represents</div>
-						<label aria-label="Area represents File Size" htmlFor="useSize">File Size</label><input type="radio" id="useSize" checked={!useCount} onChange={() => setUseCount(false)} />
-						<label aria-label="Area represents File Count" htmlFor="useCount">File Count</label><input type="radio" id="useCount" checked={useCount} onChange={() => setUseCount(true)} />
-						<div className="title">Filter</div>
-						<label htmlFor="filetypes">File Types</label><MultiSelect id="filetypes" list={fileTypes} selected={filterFileTypes} onchange={setFilterFileTypes} />
-						<label htmlFor="sinceAccess">Time Since Access</label>
-						<select value={sinceLastAccess} id="sinceAccess" onChange={e => setSinceLastAccess(parseInt(e.target.value) ?? 0)}>
-							{timesSinceAccess.map(([l, t]) => <option key={`tsa_${t}`} value={t}>{l}</option>)}
-						</select>
-						<br />
-						<GroupUserFilter {...guf} num={1} />
-						<button onClick={e => {
-							if (e.button !== 0) {
-								return;
+			<div>
+				<Tabs id="treeTabs" tabs={[
+					{
+						title: "Tree",
+						onClick: () => {
+							setViewBoxes(true);
+						},
+						selected: viewBoxes
+					},
+					{
+						title: "List",
+						onClick: () => {
+							setViewBoxes(false);
+						},
+						selected: !viewBoxes
+					},
+				]} />
+				<div id="disktree">
+					<div>
+						<div className="treeFilter">
+							{viewBoxes &&
+								<>
+									<div className="title">Colour By</div>
+									<label aria-label="Colour by Oldest Access Time" title="Oldest Access Time" htmlFor="aTime">Access Time</label><input type="radio" id="aTime" checked={!useMTime} onChange={() => setUseMTime(false)} />
+									<label aria-label="Colour by Latest Modified Time" title="Latest Modified Time" htmlFor="mTime">Modified Time</label><input type="radio" id="mTime" checked={useMTime} onChange={() => setUseMTime(true)} />
+									<div className="title">Area Represents</div>
+									<label aria-label="Area represents File Size" htmlFor="useSize">File Size</label><input type="radio" id="useSize" checked={!useCount} onChange={() => setUseCount(false)} />
+									<label aria-label="Area represents File Count" htmlFor="useCount">File Count</label><input type="radio" id="useCount" checked={useCount} onChange={() => setUseCount(true)} />
+								</>
 							}
+							<div className="title">Filter</div>
+							<label htmlFor="filetypes">File Types</label><MultiSelect id="filetypes" list={fileTypes} selected={filterFileTypes} onchange={setFilterFileTypes} />
+							<label htmlFor="sinceAccess">Time Since Access</label>
+							<select value={sinceLastAccess} id="sinceAccess" onChange={e => setSinceLastAccess(parseInt(e.target.value) ?? 0)}>
+								{timesSinceAccess.map(([l, t]) => <option key={`tsa_${t}`} value={t}>{l}</option>)}
+							</select>
+							<br />
+							<GroupUserFilter {...guf} num={1} />
+							<button onClick={e => {
+								if (e.button !== 0) {
+									return;
+								}
 
-							setFilterFileTypes([]);
-							setSinceLastAccess(0);
-							guf.setGroups([]);
-							guf.setUsers([]);
-						}}>Reset Filter</button>
-					</div>
-					<div id="treeKey">
-						<div>
-							<span>Colour Key</span>
-							{useMTime ? "Least" : "Greatest"} time since a file nested within the directory was {useMTime ? "modified" : "accessed"}:
+								setFilterFileTypes([]);
+								setSinceLastAccess(0);
+								guf.setGroups([]);
+								guf.setUsers([]);
+							}}>Reset Filter</button>
 						</div>
-						<ol>
-							<li className="age_2years">&gt; 2 years</li>
-							<li className="age_1year">&gt; 1 year</li>
-							<li className="age_10months">&gt; 10 months</li>
-							<li className="age_8months">&gt; 8 months</li>
-							<li className="age_6months">&gt; 6 months</li>
-							<li className="age_3months">&gt; 3 months</li>
-							<li className="age_2months">&gt; 2 months</li>
-							<li className="age_1month">&gt; 1 month</li>
-							<li className="age_1week">&lt; 1 month</li>
-						</ol>
+						{viewBoxes &&
+							<div id="treeKey">
+								<div>
+									<span>Colour Key</span>
+									{useMTime ? "Least" : "Greatest"} time since a file nested within the directory was {useMTime ? "modified" : "accessed"}:
+								</div>
+								<ol>
+									<li className="age_2years">&gt; 2 years</li>
+									<li className="age_1year">&gt; 1 year</li>
+									<li className="age_10months">&gt; 10 months</li>
+									<li className="age_8months">&gt; 8 months</li>
+									<li className="age_6months">&gt; 6 months</li>
+									<li className="age_3months">&gt; 3 months</li>
+									<li className="age_2months">&gt; 2 months</li>
+									<li className="age_1month">&gt; 1 month</li>
+									<li className="age_1week">&lt; 1 month</li>
+								</ol>
+							</div>
+						}
 					</div>
-				</div>
-				<ul id="treeBreadcrumbs">{breadcrumbs}</ul>
-				<div>
-					<Treemap table={treeMapData} width={treeWidth} height={500} noAuth={!hasAuth} onmouseout={() => setChildDetails(dirDetails)} />
-					<TreeDetails details={childDetails} style={{ width: treeWidth + "px" }} />
+					<ul id="treeBreadcrumbs">{breadcrumbs}</ul>
+					<div>
+						{viewBoxes &&
+							<Treemap table={treeMapData} width={treeWidth} height={500} noAuth={!hasAuth} onmouseout={() => setChildDetails(dirDetails)} />
+						}
+						{!viewBoxes &&
+						// make new state and variable to replace child details in the details field, so that clicking and hovering do different things
+							<Treetable details={tableDetails} setTreePath={setTreePath} setChildDetails={setChildDetails} />
+						}
+						<TreeDetails details={childDetails} style={{ width: treeWidth + "px" }} />
+					</div>
 				</div>
 			</div>
-		</>
+		</>;
 	};
 
 export default DiskTreeComponent;

@@ -27,7 +27,7 @@
 
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import DiskTreeComponent from "./DiskTree";
-import Filter from "./Filter"
+import Filter from "./Filter";
 import History from './History';
 import Scatter from "./Scatter";
 import SubDirs from './SubDirs';
@@ -35,7 +35,7 @@ import Tabs from "./Tabs";
 import { fitlerTableRows } from "./Table";
 import UsageTable from "./UsageTable";
 import { asDaysAgo } from "./format";
-import type { Usage } from "./rpc"
+import type { Usage } from "./rpc";
 import { clearState, useSavedState } from "./state";
 
 type AppParams = {
@@ -276,7 +276,7 @@ const groupNameToIDMap = new Map<string, number>(),
 				</details>
 			}
 			<div id="copyright">&copy; 2023 Genome Research Ltd.</div>
-		</>
+		</>;
 	};
 
 export default App;

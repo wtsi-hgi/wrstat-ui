@@ -1,8 +1,8 @@
 /*******************************************************************************
- * Copyright (c) 2023 Genome Research Ltd.
+ * Copyright (c) 2024 Genome Research Ltd.
  *
  * Authors:
- *   Michael Woolnough <mw31@sanger.ac.uk>
+ *   Daniel Elia <de7@sanger.ac.uk>
  *   Sendu Bala <sb10@sanger.ac.uk>
  *
  * Permission is hereby granted, free of charge, to any person obtaining
@@ -25,32 +25,17 @@
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  ******************************************************************************/
 
-type TabData = {
-	title: string;
-	onClick: (title: string) => void;
-	selected?: boolean;
+#treeTable {
+	overflow: hidden;
+	width: 100%;
+	margin-bottom: 5px;
 }
 
-const Tabs = ({ id, tabs }: { id: string, tabs: TabData[] }) => <ul id={id} className="tabs">
-	{tabs.map((tab, n) => <li
-		tabIndex={0}
-		key={`tab_${id}_${n}`}
-		role="tab"
-		aria-selected={tab.selected ? "true" : "false"}
-		className={tab.selected ? "selected" : ""}
-		onClick={tab.selected ? undefined : e => {
-			if (e.button !== 0) {
-				return;
-			}
-
-			tab.onClick(tab.title);
-		}}
-		onKeyDown={tab.selected ? undefined : e => {
-			if (e.key === "Enter") {
-				tab.onClick(tab.title);
-			}
-		}}
-	>{tab.title}</li>)}
-</ul>;
-
-export default Tabs;
+#treeTable tbody td:nth-child(2),
+#treeTable tbody td:nth-child(3),
+#treeTable tbody td:nth-child(4),
+#treeTable tbody td:nth-child(5) {
+	text-align: right;
+	padding-right: 1em;
+	white-space: nowrap;
+}

@@ -138,9 +138,9 @@ const phi = (1 + Math.sqrt(5)) / 2,
 				boxHeight = box.bottom - box.top;
 
 			let total = table[pos].value,
-				split = pos + 1,
-				totalRatio = total / remainingTotal,
-				lastDR = phi - boxWidth * (isRow ? 1 : totalRatio) / (boxHeight * (isRow ? totalRatio : 1)),
+				split = pos + 1;
+			const totalRatio = total / remainingTotal;
+			let lastDR = phi - boxWidth * (isRow ? 1 : totalRatio) / (boxHeight * (isRow ? totalRatio : 1)),
 				d = isRow ? box.left : box.top;
 
 			for (let i = split; i < table.length; i++) {
@@ -214,7 +214,7 @@ const phi = (1 + Math.sqrt(5)) / 2,
 		onmouseout
 	}: TreeMapParams) => {
 		if (table === null) {
-			return <></>
+			return <></>;
 		}
 
 		const filteredTable: Table = [],
@@ -248,7 +248,7 @@ const phi = (1 + Math.sqrt(5)) / 2,
 
 		return <svg className="treeMap" xmlns="http://www.w3.org/2000/svg" width={width} height={height} viewBox={`0 0 ${width} ${height}`} onMouseOut={onmouseout}>
 			{buildTree(table, box)}
-		</svg>
+		</svg>;
 	};
 
 export default TreemapComponent;

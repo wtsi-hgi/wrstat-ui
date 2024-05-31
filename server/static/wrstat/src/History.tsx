@@ -58,7 +58,7 @@ const determineGraphWidth = () => Math.max(500, window.innerWidth - 60),
 
 		if (isInodes) {
 			if (exceedInode === 0) {
-				return <div className="exceeded">Inode Quota has been reached</div>
+				return <div className="exceeded">Inode Quota has been reached</div>;
 			}
 			if (exceedInode !== Infinity) {
 				const prox = 100 * Math.min(maxWarningDay, (exceedInode - daysToday)) / maxWarningDay;
@@ -67,14 +67,14 @@ const determineGraphWidth = () => Math.max(500, window.innerWidth - 60),
 						[`--warningProx` as any]: prox + "%"
 					}}
 					className="exceed"
-				>Expected to exceed inode quota in {formatNumber(exceedInode - daysToday)} days</div>
+				>Expected to exceed inode quota in {formatNumber(exceedInode - daysToday)} days</div>;
 			}
 
-			return <></>
+			return <></>;
 		}
 
 		if (exceedSize === 0) {
-			return <div className="exceeded">Size Quota has been reached</div>
+			return <div className="exceeded">Size Quota has been reached</div>;
 		}
 
 		if (exceedSize !== Infinity) {
@@ -84,11 +84,11 @@ const determineGraphWidth = () => Math.max(500, window.innerWidth - 60),
 			return <div
 				style={{ [`--warningProx` as any]: prox + "%" }}
 				className="exceed"
-			>Expected to exceed size quota in {formatNumber(daysLeft)} day{daysLeft === 1 ? "" : "s"}</div>
+			>Expected to exceed size quota in {formatNumber(daysLeft)} day{daysLeft === 1 ? "" : "s"}</div>;
 		}
 
 
-		return <></>
+		return <></>;
 	},
 	HistoryComponent = ({ id, path, name, owner, isUser, justDisktree }: HistoryParams) => {
 		const [inodeHistory, setInodeHistory] = useSavedState("inodeHistory", false),
@@ -113,7 +113,7 @@ const determineGraphWidth = () => Math.max(500, window.innerWidth - 60),
 		useEffect(() => window.addEventListener("resize", () => setHistoryWidth(determineGraphWidth())), []);
 
 		if (history.length === 0 || isUser) {
-			return <></>
+			return <></>;
 		}
 
 		return <>
@@ -144,7 +144,7 @@ const determineGraphWidth = () => Math.max(500, window.innerWidth - 60),
 					yRounder={inodeHistory ? formatLog10 : formatLog2}
 				/>
 			</details>
-		</>
+		</>;
 	};
 
 export default HistoryComponent;

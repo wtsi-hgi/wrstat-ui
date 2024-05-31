@@ -29,7 +29,7 @@ import type { Usage } from './rpc';
 import type { Filter, } from './Table';
 import Table, { fitlerTableRows } from './Table';
 import { downloadGroups, downloadUsers } from './download';
-import { asDaysAgoStr, formatBytes, formatNumber } from './format';
+import { asTimeAgo, formatBytes, formatNumber } from './format';
 import { useSavedState } from './state';
 
 
@@ -68,7 +68,7 @@ const stringSort = new Intl.Collator().compare,
 			<details open id="usage" style={justDisktree ? { display: "none" } : undefined}>
 				<summary><h1>{byUser ? "User" : "Group"} Usage Table</h1></summary>
 				<span id="perPage">Show
-					<select value={perPage} onChange={e => { setPerPage(parseInt(e.target.value) ?? 10) }}>
+					<select value={perPage} onChange={e => { setPerPage(parseInt(e.target.value) ?? 10); }}>
 						<option>10</option>
 						<option>20</option>
 						<option>50</option>
@@ -163,11 +163,11 @@ const stringSort = new Intl.Collator().compare,
 							formatter: (p: number | undefined) => p ? formatNumber(p) : "0"
 						},
 						{
-							title: "Last Modified (days)",
+							title: "Last Modified",
 							key: "Mtime",
 							extra: title => ({ title }),
 							sortFn: sortMTime,
-							formatter: asDaysAgoStr
+							formatter: asTimeAgo
 						},
 						{
 							title: "Status",
@@ -199,7 +199,7 @@ const stringSort = new Intl.Collator().compare,
 					(byUser ? downloadUsers : downloadGroups)(fitlerTableRows(usage, filter));
 				}}>Download Filtered Table</button>
 			</details>
-		</>
+		</>;
 	};
 
 export default UsageTableComponent;

@@ -74,18 +74,19 @@
 	color: var(--tableEvenFont);
 }
 
-.prettyTable tbody tr:hover {
+.prettyTable tbody tr:not(.noHover):hover {
 	background-color: var(--tableHoverBG);
 	color: var(--tableHoverFont);
+	cursor: pointer;
+}
+
+.prettyTable tbody tr.noHover {
+	cursor: not-allowed;
 }
 
 .prettyTable tbody tr.selected {
 	background-color: var(--tableSelectedBG);
 	color: var(--tableSelectedFont);
-}
-
-.prettyTable tbody {
-	cursor: pointer;
 }
 
 .prettyTable tbody tr td {

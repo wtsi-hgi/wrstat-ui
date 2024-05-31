@@ -28,7 +28,7 @@
 import type { SubDir } from "./rpc";
 import { useEffect, useState } from "react";
 import Table from './Table';
-import { asDaysAgoStr, formatBytes, formatNumber } from './format';
+import { asTimeAgo, formatBytes, formatNumber } from './format';
 import RPC from './rpc';
 
 type SubDirParams = {
@@ -79,7 +79,7 @@ const pathJoin = (base: string, sub: string) => sub === "." ? base : base + "/" 
 		}, [id, path, isUser]);
 
 		if (!subdirs || subdirs.length === 0) {
-			return <></>
+			return <></>;
 		}
 
 		return <details open id="subdirs" style={justDisktree ? { display: "none" } : undefined}>
@@ -96,7 +96,6 @@ const pathJoin = (base: string, sub: string) => sub === "." ? base : base + "/" 
 						title: "Path",
 						key: "SubDir",
 						sortFn: sortPath,
-						formatter: (subdir: string) => pathJoin(path, subdir)
 					},
 					{
 						title: "Number of Files",
@@ -114,12 +113,12 @@ const pathJoin = (base: string, sub: string) => sub === "." ? base : base + "/" 
 						formatter: formatBytes
 					},
 					{
-						title: "Last Modified (days)",
+						title: "Last Modified",
 						key: "LastModified",
 						extra: title => ({ title }),
 						sortFn: sortLastModifed,
 						startReverse: true,
-						formatter: asDaysAgoStr
+						formatter: asTimeAgo
 					},
 					{
 						title: "File Usage",
@@ -127,7 +126,7 @@ const pathJoin = (base: string, sub: string) => sub === "." ? base : base + "/" 
 						formatter: (files: Record<number, number>) => Object.entries(files).sort((a, b) => b[1] - a[1]).map(e => `${fileTypes[parseInt(e[0])]}: ${formatBytes(e[1])}`).join(", ")
 					}
 				]} />
-		</details>
+		</details>;
 	};
 
 export default SubdirsComponent;

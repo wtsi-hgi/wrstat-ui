@@ -65,7 +65,7 @@ const paddingXL = 80,
 		useEffect(() => setInfoBox(-1), [history, width, height]);
 
 		if (history.length === 0) {
-			return <></>
+			return <></>;
 		}
 
 		for (const h of history) {
@@ -135,15 +135,15 @@ const paddingXL = 80,
 				</div>) - 1;
 
 			if (quotaPath.length > 1) {
-				quotaPath += " L"
+				quotaPath += " L";
 				usagePath += " L";
 			}
 
 			quotaPath += `${x},${quotaY}`;
 			usagePath += `${x},${sizeY}`;
 
-			quotaPoints.push(<use key={`point_quota_${n}`} href="#point" style={{ fill: "var(--graphQuota)" }} x={x} y={quotaY} onMouseOver={() => setInfoBox(quotaBox)} onMouseOut={() => setInfoBox(-1)} />)
-			usagePoints.push(<use key={`point_usage_${n++}`} href="#point" style={{ fill: "var(--graphUsage)" }} x={x} y={sizeY} onMouseOver={() => setInfoBox(usageBox)} onMouseOut={() => setInfoBox(-1)} />)
+			quotaPoints.push(<use key={`point_quota_${n}`} href="#point" style={{ fill: "var(--graphQuota)" }} x={x} y={quotaY} onMouseOver={() => setInfoBox(quotaBox)} onMouseOut={() => setInfoBox(-1)} />);
+			usagePoints.push(<use key={`point_usage_${n++}`} href="#point" style={{ fill: "var(--graphUsage)" }} x={x} y={sizeY} onMouseOver={() => setInfoBox(usageBox)} onMouseOut={() => setInfoBox(-1)} />);
 		}
 
 		const previousHistory = history.at(-3) ?? history.at(0)!,
@@ -169,7 +169,7 @@ const paddingXL = 80,
 
 			infoBoxes.push(<div style={{ left: dateToX(x) + "px", top: amountToY(y) + "px", display: infoBoxes.length === infoBox ? "inline-block" : "" }}>
 				Fill Quota Data: {formatDate(x)}
-			</div>)
+			</div>);
 		}
 
 		return <>
@@ -196,7 +196,9 @@ const paddingXL = 80,
 				<path d={quotaPath} style={{ stroke: "var(--graphQuota)" }} fill="none" />
 				<path d={`M${dateToX(latestDate)},${amountToY(latestHistory.Quota)} L${dateToX(projectDate)},${amountToY(latestHistory.Quota)}`} style={{ stroke: "var(--graphQuota)" }} fill="none" strokeWidth="3" strokeDasharray="3" />
 				<path d={usagePath} style={{ stroke: "var(--graphUsage)" }} fill="none" />
-				<path d={`M${dateToX(latestDate)},${amountToY(latestHistory.Usage)} L${dateToX(x)},${amountToY(y)}`} style={{ stroke: "var(--graphUsage)" }} fill="none" strokeWidth="3" strokeDasharray="3" />
+				{y !== -Infinity &&
+					<path d={`M${dateToX(latestDate)},${amountToY(latestHistory.Usage)} L${dateToX(x)},${amountToY(y)}`} style={{ stroke: "var(--graphUsage)" }} fill="none" strokeWidth="3" strokeDasharray="3" />
+				}
 				{quotaPoints}
 				{usagePoints}
 				{
@@ -208,7 +210,7 @@ const paddingXL = 80,
 				<rect rx={2} x={width - 65} y={paddingYT + 25} width={10} height={10} stroke="currentColor" style={{ fill: "var(--graphUsage)" }} />
 				<text x={width - 48} y={paddingYT + 35} fill="currentColor">Usage</text>
 			</svg>
-		</>
+		</>;
 	};
 
 export default HistoryGraph;
