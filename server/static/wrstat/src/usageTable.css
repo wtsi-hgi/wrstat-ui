@@ -185,3 +185,13 @@
 	margin-left: 1em;
 	margin-bottom: 1em;
 }
+
+#search {
+	background-color: var(--subtleBG);
+	border: 1px solid var(--subtleBorder);
+	color: var(--perPageFont);
+}
+
+::placeholder {
+	color: var(--tableBorder);
+}

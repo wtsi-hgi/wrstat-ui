@@ -32,6 +32,7 @@ import { useSavedState } from "./state";
 type Column<T> = {
 	[K in Extract<keyof T, string>]-?: {
 		title: string;
+		titleHTML?: JSX.Element
 		key: K;
 		extra?: (data: T[K], row: T) => Record<string, any>;
 		formatter?: (data: T[K], row: T) => JSX.Element | string;
@@ -190,7 +191,7 @@ const noopFormatter = (a: { toString(): string }) => a + "",
 									setSortReverse(cols[n].startReverse ?? false);
 								}
 							} : undefined}
-						>{c.title}</th>)}
+						>{c.titleHTML ?? c.title}</th>)}
 					</tr>
 				</thead>
 				<tbody>

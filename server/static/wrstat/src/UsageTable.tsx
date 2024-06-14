@@ -62,6 +62,7 @@ const stringSort = new Intl.Collator().compare,
 	reverseSortPercentInodes = (a: Usage, b: Usage) => !a.QuotaInodes ? 1 : !b.QuotaInodes ? -1 : sortPercentInodes(b, a),
 	UsageTableComponent = ({ usage, byUser, groupMap, userMap, selectedID, selectedDir, setSelectedID, setSelectedDir, setTreePath, filter, justDisktree }: FilterTableParams) => {
 		const [perPage, setPerPage] = useSavedState("perPage", 10),
+		    [baseDirFilter, setBaseDirFilter] = useSavedState("baseDirFilter", ""),
 			hasQuota = usage.some(u => u.QuotaSize || u.QuotaInodes);
 
 		return <>
@@ -76,6 +77,7 @@ const stringSort = new Intl.Collator().compare,
 						<option value={Number.MAX_SAFE_INTEGER}>All</option>
 					</select>
 					Entries</span>
+				
 				<Table
 					caption={`${byUser ? "User" : " Group"} Usage Table`}
 					rowExtra={row => {
@@ -95,6 +97,7 @@ const stringSort = new Intl.Collator().compare,
 					cols={[
 						{
 							title: "Base Directory",
+							titleHTML: <>Base Directory<input type="search" id="search" onChange={e => setBaseDirFilter(e.target.value)} placeholder="Filter…" value={baseDirFilter} onClick={e => e.stopPropagation()} style={{ marginLeft: "1em", float: "left"}} /></>,
 							key: "BaseDir",
 							extra: (path, row) => ({
 								title: path +
@@ -180,7 +183,7 @@ const stringSort = new Intl.Collator().compare,
 							sortFn: sortStatus
 						}
 					]}
-					table={usage}
+					table={usage.filter(u => u.BaseDir.includes(baseDirFilter))}
 					id="usageTable"
 					className={"prettyTable " + (hasQuota ? undefined : "noQuota")}
 				/>
