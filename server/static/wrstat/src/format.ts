@@ -65,7 +65,7 @@ export const formatNumber = (n: number) => numberFormatter.format(n),
 
 		return formatNumber(n) + " " + byteUnits[unit];
 	},
-	asDaysAgo = (date: string) => Math.max(0, Math.round((now - new Date(date).valueOf()) / msInDay)),
+	asDaysAgo = (date: string) => Math.max(0, Math.floor((now - new Date(date).valueOf()) / msInDay)),
 	asTimeAgo = (dateStr: string) => {
 		const duration = dateFns.intervalToDuration({
 			start: new Date(dateStr),
