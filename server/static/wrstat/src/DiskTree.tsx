@@ -63,17 +63,17 @@ const colours = [
 	colourFromAge = (lm: number) => {
 		const diff = now - lm;
 
-		if (diff > 2 * 365 * day) {
+		if (diff > 7 * 365 * day) {
 			return colours[0];
-		} else if (diff > 365 * day) {
+		} else if (diff > 5 * 365 * day) {
 			return colours[1];
-		} else if (diff > 10 * 30 * day) {
+		} else if (diff > 3 * 365 * day) {
 			return colours[2];
-		} else if (diff > 8 * 30 * day) {
+		} else if (diff > 2 * 365 * day) {
 			return colours[3];
-		} else if (diff > 6 * 30 * day) {
+		} else if (diff > 365 * day) {
 			return colours[4];
-		} else if (diff > 3 * 30 * day) {
+		} else if (diff > 6 * 30 * day) {
 			return colours[5];
 		} else if (diff > 2 * 30 * day) {
 			return colours[6];
@@ -128,12 +128,12 @@ const colours = [
 		["> 0 days", 0],
 		["> 1 month", 30],
 		["> 2 months", 60],
-		["> 3 months", 120],
 		["> 6 months", 180],
-		["> 8 months", 240],
-		["> 10 months", 300],
 		["> 1 year", 365],
-		["> 2 years", 730]
+		["> 2 years", 730],
+		["> 3 years", 1095],
+		["> 5 years", 1825],
+		["> 7 years", 2555],
 	] as const,
 	entrySort = (a: Entry, b: Entry) => b.value - a.value,
 	DiskTreeComponent = ({ treePath, userMap, groupMap, setTreePath, guf }: DiskTreeParams) => {
@@ -244,12 +244,12 @@ const colours = [
 									{useMTime ? "Least" : "Greatest"} time since a file nested within the directory was {useMTime ? "modified" : "accessed"}:
 								</div>
 								<ol>
-									<li className="age_2years">&gt; 2 years</li>
-									<li className="age_1year">&gt; 1 year</li>
-									<li className="age_10months">&gt; 10 months</li>
-									<li className="age_8months">&gt; 8 months</li>
-									<li className="age_6months">&gt; 6 months</li>
-									<li className="age_3months">&gt; 3 months</li>
+									<li className="age_2years">&gt; 7 years</li>
+									<li className="age_1year">&gt; 5 years</li>
+									<li className="age_10months">&gt; 3 years</li>
+									<li className="age_8months">&gt; 2 years</li>
+									<li className="age_6months">&gt; 1 year</li>
+									<li className="age_3months">&gt; 6 months</li>
 									<li className="age_2months">&gt; 2 months</li>
 									<li className="age_1month">&gt; 1 month</li>
 									<li className="age_1week">&lt; 1 month</li>
