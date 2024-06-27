@@ -62,7 +62,7 @@ const stringSort = new Intl.Collator().compare,
 	reverseSortPercentInodes = (a: Usage, b: Usage) => !a.QuotaInodes ? 1 : !b.QuotaInodes ? -1 : sortPercentInodes(b, a),
 	UsageTableComponent = ({ usage, byUser, groupMap, userMap, selectedID, selectedDir, setSelectedID, setSelectedDir, setTreePath, filter, justDisktree }: FilterTableParams) => {
 		const [perPage, setPerPage] = useSavedState("perPage", 10),
-		    [baseDirFilter, setBaseDirFilter] = useSavedState("baseDirFilter", ""),
+			[baseDirFilter, setBaseDirFilter] = useSavedState("baseDirFilter", ""),
 			hasQuota = usage.some(u => u.QuotaSize || u.QuotaInodes);
 
 		return <>
@@ -77,7 +77,7 @@ const stringSort = new Intl.Collator().compare,
 						<option value={Number.MAX_SAFE_INTEGER}>All</option>
 					</select>
 					Entries</span>
-				
+
 				<Table
 					caption={`${byUser ? "User" : " Group"} Usage Table`}
 					rowExtra={row => {
@@ -97,7 +97,12 @@ const stringSort = new Intl.Collator().compare,
 					cols={[
 						{
 							title: "Base Directory",
-							titleHTML: <>Base Directory<input type="search" id="search" onChange={e => setBaseDirFilter(e.target.value)} placeholder="Filter…" value={baseDirFilter} onClick={e => e.stopPropagation()} style={{ marginLeft: "1em", float: "left"}} /></>,
+							titleHTML: <>
+								Base Directory
+								<div className="question" data-help={"A base directory is a directory where all a group/user's data lies nested within, per major area on each mounted volume (lustre scratch disk or nfs area).\n\nYou will see deep subdirectories if all the data for a group/user is only found in that deep subdirectory.\n\nYou will see shorter paths if a group/user owns any files that are in that higher level directory."} onClick={e => e.stopPropagation()} />
+								<br />
+								<input type="search" id="search" onChange={e => setBaseDirFilter(e.target.value)} placeholder="Filter…" value={baseDirFilter} onClick={e => e.stopPropagation()} style={{maxWidth: "100%"}} />
+							</>,
 							key: "BaseDir",
 							extra: (path, row) => ({
 								title: path +
