@@ -50,26 +50,28 @@ func (e Error) Error() string { return string(e) }
 const (
 	defaultWhereSplits             = 2
 	defaultSize                    = "50M"
-	hoursePerDay                   = 24
+	hoursPerDay                    = 24
 	jwtBasename                    = ".wrstat.jwt"
 	errBadGroupArea                = Error("unknown group area")
 	privatePerms       os.FileMode = 0600
 )
 
 // options for this cmd.
-var whereQueryDir string
-var whereSplits int
-var whereGroups string
-var whereUsers string
-var whereTypes string
-var whereSize string
-var whereAge int
-var whereShowSupergroups bool
-var whereSupergroup string
-var whereCert string
-var whereJSON bool
-var whereOrder string
-var whereShowUG bool
+var (
+	whereQueryDir        string
+	whereSplits          int
+	whereGroups          string
+	whereUsers           string
+	whereTypes           string
+	whereSize            string
+	whereAge             int
+	whereShowSupergroups bool
+	whereSupergroup      string
+	whereCert            string
+	whereJSON            bool
+	whereOrder           string
+	whereShowUG          bool
+)
 
 // whereCmd represents the where command.
 var whereCmd = &cobra.Command{
@@ -176,7 +178,7 @@ with refreshes possible up to 5 days after expiry.
 			die("bad --size: %s", err)
 		}
 
-		minAtime := time.Now().Add(-(time.Duration(whereAge*hoursePerDay) * time.Hour))
+		minAtime := time.Now().Add(-(time.Duration(whereAge*hoursPerDay) * time.Hour))
 
 		err = where(c, whereQueryDir, whereGroups, whereSupergroup, whereUsers, whereTypes,
 			fmt.Sprintf("%d", whereSplits), whereOrder, minSizeBytes, minAtime, whereJSON)
@@ -208,7 +210,7 @@ func init() { //nolint:funlen
 	whereCmd.Flags().StringVar(&whereSize, "size", defaultSize,
 		"minimum size (specify the unit) of files nested under a directory for it to be reported on")
 	whereCmd.Flags().IntVar(&whereAge, "age", 0,
-		"minimum age (in days) of the oldest file nested under a directory for it to be reported on")
+		"do not report on directories that contain a file whose access time falls within the last x days")
 	whereCmd.Flags().StringVarP(&whereCert, "cert", "c", "",
 		"path to the server's certificate to force trust in it")
 	whereCmd.Flags().StringVarP(&whereOrder, "order", "o", "size",
@@ -271,7 +273,8 @@ func getSupergroups(c *gas.ClientCLI) (map[string][]string, error) {
 // where does the main job of querying the server to answer where the data is on
 // disk.
 func where(c *gas.ClientCLI, dir, groups, supergroup, users, types, splits, order string,
-	minSizeBytes uint64, minAtime time.Time, json bool) error {
+	minSizeBytes uint64, minAtime time.Time, json bool,
+) error {
 	var err error
 
 	if groups, err = mergeGroupsWithAreaGroups(c, groups, supergroup); err != nil {
@@ -420,7 +423,7 @@ func columns(ds *server.DirSummary) []string {
 
 // timeToDaysAgo returns the given time converted to number of days ago.
 func timeToDaysAgo(t time.Time) int {
-	return int(time.Since(t).Hours() / hoursePerDay)
+	return int(time.Since(t).Hours() / hoursPerDay)
 }
 
 // printSkipped prints the given number of results were skipped.
