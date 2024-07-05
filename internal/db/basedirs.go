@@ -46,7 +46,7 @@ func CreateExampleDGUTDBForBasedirs(t *testing.T) (*dgut.Tree, []string, error) 
 
 	dirs, files := internaldata.FakeFilesForDGUTDBForBasedirsTesting(gid, uid)
 
-	tree, err := CreateDGUTDBFromFakeFiles(t, files)
+	tree, _, err := CreateDGUTDBFromFakeFiles(t, files)
 
 	return tree, dirs, err
 }

@@ -34,12 +34,14 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/wtsi-ssg/wrstat/v4/dgut"
 	internaldata "github.com/wtsi-ssg/wrstat/v4/internal/data"
+	"github.com/wtsi-ssg/wrstat/v4/internal/fs"
 )
 
-const DirPerms = 0755
+const DirPerms = fs.DirPerms
 const ExampleDgutDirParentSuffix = "dgut.dbs"
 const minGIDsForExampleDgutDB = 2
 const exampleDBBatchSize = 20
@@ -122,7 +124,8 @@ func exampleDGUTData(t *testing.T, uidStr, gidAStr, gidBStr string) string {
 	return internaldata.TestDGUTData(t, internaldata.CreateDefaultTestData(int(gidA), int(gidB), 0, int(uid), 0))
 }
 
-func CreateDGUTDBFromFakeFiles(t *testing.T, files []internaldata.TestFile) (*dgut.Tree, error) {
+func CreateDGUTDBFromFakeFiles(t *testing.T, files []internaldata.TestFile,
+	modtime ...time.Time) (*dgut.Tree, string, error) {
 	t.Helper()
 
 	dgutData := internaldata.TestDGUTData(t, files)
@@ -132,7 +135,13 @@ func CreateDGUTDBFromFakeFiles(t *testing.T, files []internaldata.TestFile) (*dg
 		t.Fatalf("could not create dgut db: %s", err)
 	}
 
+	if len(modtime) == 1 {
+		if err = fs.Touch(dbPath, modtime[0]); err != nil {
+			return nil, "", err
+		}
+	}
+
 	tree, err := dgut.NewTree(dbPath)
 
-	return tree, err
+	return tree, dbPath, err
 }

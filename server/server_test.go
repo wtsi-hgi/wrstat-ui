@@ -626,7 +626,7 @@ func TestServer(t *testing.T) {
 						So(err, ShouldBeNil)
 
 						_, files := internaldata.FakeFilesForDGUTDBForBasedirsTesting(gid, uid)
-						tree, err = internaldb.CreateDGUTDBFromFakeFiles(t, files[:1])
+						tree, _, err = internaldb.CreateDGUTDBFromFakeFiles(t, files[:1])
 						So(err, ShouldBeNil)
 
 						pathNew, _, err := createExampleBasedirsDB(t, tree)
@@ -1579,7 +1579,7 @@ func createExampleBasedirsDB(t *testing.T, tree *dgut.Tree) (string, string, err
 		"/lustre/scratch125/",
 	})
 
-	err = bd.CreateDatabase(time.Now())
+	err = bd.CreateDatabase()
 	if err != nil {
 		return "", "", err
 	}
