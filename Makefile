@@ -16,6 +16,10 @@ build:
 	@cd server/static/wrstat; npm install && npm run build:prod
 	go build -tags netgo ${LDFLAGS}
 
+buildnonpm: export CGO_ENABLED = 1
+buildnonpm:
+	go build -tags netgo ${LDFLAGS}
+
 install: export CGO_ENABLED = 1
 install:
 	@rm -f ${GOPATH}/bin/wrstat
@@ -38,20 +42,22 @@ test:
 
 race: export CGO_ENABLED = 1
 race:
-	@cd server/static/wrstat; npm install && CI= npm run build:prod
 	go test -tags netgo -race --count 1 ./...
-	@cd server/static/wrstat; CI=1 npm test
 
 bench: export CGO_ENABLED = 1
 bench:
 	go test -tags netgo --count 1 -run Bench -bench=. ./...
 
-# curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(go env GOPATH)/bin  v1.59.1
+# curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(go env GOPATH)/bin v1.59.1
 lint: export CGO_ENABLED = 1
 lint:
 	@cd server/static/wrstat; npm install && CI= npm run lint || true 
-	@golangci-lint run
+	@golangci-lint run --timeout 2m
 # remove the || true when you get round to removing all anys
+
+lintnonpm: export CGO_ENABLED = 1
+lintnonpm:
+	@golangci-lint run --timeout 2m
 
 clean:
 	@rm -f ./wrstat
