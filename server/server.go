@@ -92,9 +92,8 @@ const (
 	// authorization is implemented.
 	EndPointAuthTree = gas.EndPointAuth + TreePath
 
-	defaultDir    = "/"
-	defaultSplits = "2"
-	unknown       = "#unknown"
+	defaultDir = "/"
+	unknown    = "#unknown"
 )
 
 // Server is used to start a web server that provides a REST API to the dgut
