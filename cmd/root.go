@@ -53,31 +53,13 @@ const connectTimeout = 10 * time.Second
 
 // RootCmd represents the base command when called without any subcommands.
 var RootCmd = &cobra.Command{
-	Use:   "wrstat",
-	Short: "wrstat gets stats on all files in a filesystem directory tree.",
-	Long: `wrstat gets stats on all files in a filesystem directory tree.
+	Use:   "wrstat-ui",
+	Short: "wrstat-ui supplies a user interface to a WRStat database.",
+	Long: `wrstat-ui supplies a user interface to a WRStat database.
 
-It uses wr to queue getting the stats for subsets of the tree, so enabling the
-work to be done in parallel and potentially distributed over many nodes.
+The 'where' subcommand can be used to find out where data is on disk.
 
-Before doing anything else, the wr manager must be running. If the manager can
-run commands on multiple nodes, be sure to set wr's ManagerHost config option to
-the host you started the manager on. Or run commands from the same node that you
-started the manager on.
-
-If you need root to have permission to see all deseired files, either start wr
-manager as root, or start it as a user that can sudo without a password when
-running wrstat, and supply the --sudo option to wrstat sub commands.
-
-For raw stats on a directory and all its sub contents:
-$ wrstat walk -o [/output/location] -d [dependency_group] [/location/of/interest]
-
-Combine all the above output files:
-$ wrstat combine [/output/location]
-
-Or more easily work on multiple locations of interest at once by doing the
-above 2 steps on each location and moving the final results to a final location:
-$ wrstat multi -w [/working/directory] -f [/final/output/dir] [/a /b /c]`,
+The 'server' subcommand can be used to start the web server.`,
 }
 
 // Execute adds all child commands to the root command and sets flags
