@@ -40,7 +40,7 @@ import (
 	"github.com/olekukonko/tablewriter"
 	"github.com/spf13/cobra"
 	gas "github.com/wtsi-hgi/go-authserver"
-	"github.com/wtsi-ssg/wrstat/v4/server"
+	"github.com/wtsi-hgi/wrstat-ui/v4/server"
 )
 
 type Error string

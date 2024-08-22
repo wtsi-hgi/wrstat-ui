@@ -38,22 +38,30 @@ import (
 
 	"github.com/inconshreveable/log15"
 	"github.com/spf13/cobra"
-	"github.com/wtsi-ssg/wrstat/v4/server"
+	"github.com/wtsi-hgi/wrstat-ui/v4/server"
 )
 
-const sentinelPollFrequencty = 1 * time.Minute
-const serverTokenBasename = ".wrstat.servertoken"
+const (
+	sentinelPollFrequencty  = 1 * time.Minute
+	serverTokenBasename     = ".wrstat.servertoken"
+	dgutDBsSuffix           = "dgut.dbs"
+	basedirBasename         = "basedirs.db"
+	dgutDBsSentinelBasename = ".dgut.dbs.updated"
+)
 
 // options for this cmd.
-var serverLogPath string
-var serverBind string
-var serverCert string
-var serverKey string
-var oktaURL string
-var oktaOAuthIssuer string
-var oktaOAuthClientID string
-var oktaOAuthClientSecret string
-var areasPath string
+var (
+	serverLogPath         string
+	serverBind            string
+	serverCert            string
+	serverKey             string
+	oktaURL               string
+	oktaOAuthIssuer       string
+	oktaOAuthClientID     string
+	oktaOAuthClientSecret string
+	areasPath             string
+	ownersPath            string
+)
 
 // serverCmd represents the server command.
 var serverCmd = &cobra.Command{

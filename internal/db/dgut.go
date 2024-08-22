@@ -36,29 +36,17 @@ import (
 	"testing"
 	"time"
 
+	internaldata "github.com/wtsi-hgi/wrstat-ui/v4/internal/data"
+	"github.com/wtsi-hgi/wrstat-ui/v4/internal/fs"
 	"github.com/wtsi-ssg/wrstat/v4/dgut"
-	internaldata "github.com/wtsi-ssg/wrstat/v4/internal/data"
-	"github.com/wtsi-ssg/wrstat/v4/internal/fs"
 )
 
-const DirPerms = fs.DirPerms
-const ExampleDgutDirParentSuffix = "dgut.dbs"
-const minGIDsForExampleDgutDB = 2
-const exampleDBBatchSize = 20
-
-// CreateExampleDGUTDB creates a temporary dgut.db from some example data that
-// uses your uid and 2 of your gids, and returns the path to the database
-// directory. For use when testing something that needs a Tree.
-func CreateExampleDGUTDB(t *testing.T) (string, error) {
-	t.Helper()
-
-	_, uid, gids := GetUserAndGroups(t)
-	if len(gids) < minGIDsForExampleDgutDB {
-		gids = append(gids, "0")
-	}
-
-	return CreateExampleDGUTDBCustomIDs(t, uid, gids[0], gids[1])
-}
+const (
+	DirPerms                   = fs.DirPerms
+	ExampleDgutDirParentSuffix = "dgut.dbs"
+	minGIDsForExampleDgutDB    = 2
+	exampleDBBatchSize         = 20
+)
 
 // CreateExampleDGUTDBCustomIDs creates a temporary dgut.db from some example
 // data that uses the given uid and gids, and returns the path to the database
@@ -125,7 +113,8 @@ func exampleDGUTData(t *testing.T, uidStr, gidAStr, gidBStr string) string {
 }
 
 func CreateDGUTDBFromFakeFiles(t *testing.T, files []internaldata.TestFile,
-	modtime ...time.Time) (*dgut.Tree, string, error) {
+	modtime ...time.Time,
+) (*dgut.Tree, string, error) {
 	t.Helper()
 
 	dgutData := internaldata.TestDGUTData(t, files)

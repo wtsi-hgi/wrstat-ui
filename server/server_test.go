@@ -44,13 +44,13 @@ import (
 	"github.com/gin-gonic/gin"
 	. "github.com/smartystreets/goconvey/convey"
 	gas "github.com/wtsi-hgi/go-authserver"
+	internaldata "github.com/wtsi-hgi/wrstat-ui/v4/internal/data"
+	internaldb "github.com/wtsi-hgi/wrstat-ui/v4/internal/db"
+	"github.com/wtsi-hgi/wrstat-ui/v4/internal/fixtimes"
+	ifs "github.com/wtsi-hgi/wrstat-ui/v4/internal/fs"
+	"github.com/wtsi-hgi/wrstat-ui/v4/internal/split"
 	"github.com/wtsi-ssg/wrstat/v4/basedirs"
 	"github.com/wtsi-ssg/wrstat/v4/dgut"
-	internaldata "github.com/wtsi-ssg/wrstat/v4/internal/data"
-	internaldb "github.com/wtsi-ssg/wrstat/v4/internal/db"
-	"github.com/wtsi-ssg/wrstat/v4/internal/fixtimes"
-	ifs "github.com/wtsi-ssg/wrstat/v4/internal/fs"
-	"github.com/wtsi-ssg/wrstat/v4/internal/split"
 )
 
 func TestIDsToWanted(t *testing.T) {
@@ -233,79 +233,117 @@ func TestServer(t *testing.T) {
 						matrix := []*matrixElement{
 							{"?groups=" + groups[0] + "," + groups[1], expectedNonRoot},
 							{"?groups=" + groups[0], []*DirSummary{
-								{Dir: "/a/b", Count: 13, Size: 120, Atime: expectedAtime,
+								{
+									Dir: "/a/b", Count: 13, Size: 120, Atime: expectedAtime,
 									Mtime: time.Unix(80, 0), Users: expectedUsers,
-									Groups: expectedGroupsA, FileTypes: expectedFTs},
-								{Dir: "/a/b/d", Count: 11, Size: 110, Atime: expectedAtime,
+									Groups: expectedGroupsA, FileTypes: expectedFTs,
+								},
+								{
+									Dir: "/a/b/d", Count: 11, Size: 110, Atime: expectedAtime,
 									Mtime: time.Unix(75, 0), Users: expectedUsers,
-									Groups: expectedGroupsA, FileTypes: expectedCrams},
-								{Dir: "/a/b/d/g", Count: 10, Size: 100, Atime: time.Unix(60, 0),
+									Groups: expectedGroupsA, FileTypes: expectedCrams,
+								},
+								{
+									Dir: "/a/b/d/g", Count: 10, Size: 100, Atime: time.Unix(60, 0),
 									Mtime: time.Unix(75, 0), Users: expectedUsers,
-									Groups: expectedGroupsA, FileTypes: expectedCrams},
-								{Dir: "/a/b/d/f", Count: 1, Size: 10, Atime: expectedAtime,
+									Groups: expectedGroupsA, FileTypes: expectedCrams,
+								},
+								{
+									Dir: "/a/b/d/f", Count: 1, Size: 10, Atime: expectedAtime,
 									Mtime: time.Unix(50, 0), Users: expectedUser,
-									Groups: expectedGroupsA, FileTypes: expectedCrams},
-								{Dir: "/a/b/e/h", Count: 2, Size: 10, Atime: time.Unix(80, 0),
+									Groups: expectedGroupsA, FileTypes: expectedCrams,
+								},
+								{
+									Dir: "/a/b/e/h", Count: 2, Size: 10, Atime: time.Unix(80, 0),
 									Mtime: time.Unix(80, 0), Users: expectedUser,
-									Groups: expectedGroupsA, FileTypes: expectedBams},
-								{Dir: "/a/b/e/h/tmp", Count: 1, Size: 5, Atime: time.Unix(80, 0),
+									Groups: expectedGroupsA, FileTypes: expectedBams,
+								},
+								{
+									Dir: "/a/b/e/h/tmp", Count: 1, Size: 5, Atime: time.Unix(80, 0),
 									Mtime: time.Unix(80, 0), Users: expectedUser,
-									Groups: expectedGroupsA, FileTypes: expectedBams},
+									Groups: expectedGroupsA, FileTypes: expectedBams,
+								},
 							}},
 							{"?users=root," + username, expected},
 							{"?users=root", []*DirSummary{
-								{Dir: "/a", Count: 14, Size: 86, Atime: expectedAtime,
+								{
+									Dir: "/a", Count: 14, Size: 86, Atime: expectedAtime,
 									Mtime: time.Unix(90, 0), Users: expectedRoot,
-									Groups: expectedGroupsRoot, FileTypes: expectedCrams},
-								{Dir: "/a/b/d", Count: 9, Size: 81, Atime: expectedAtime,
+									Groups: expectedGroupsRoot, FileTypes: expectedCrams,
+								},
+								{
+									Dir: "/a/b/d", Count: 9, Size: 81, Atime: expectedAtime,
 									Mtime: time.Unix(75, 0), Users: expectedRoot,
-									Groups: expectedGroupsRootA, FileTypes: expectedCrams},
-								{Dir: "/a/b/d/g", Count: 8, Size: 80, Atime: time.Unix(75, 0),
+									Groups: expectedGroupsRootA, FileTypes: expectedCrams,
+								},
+								{
+									Dir: "/a/b/d/g", Count: 8, Size: 80, Atime: time.Unix(75, 0),
 									Mtime: time.Unix(75, 0), Users: expectedRoot,
-									Groups: expectedGroupsA, FileTypes: expectedCrams},
-								{Dir: "/a/c/d", Count: 5, Size: 5, Atime: time.Unix(90, 0),
+									Groups: expectedGroupsA, FileTypes: expectedCrams,
+								},
+								{
+									Dir: "/a/c/d", Count: 5, Size: 5, Atime: time.Unix(90, 0),
 									Mtime: time.Unix(90, 0), Users: expectedRoot,
-									Groups: expectedGroupsB, FileTypes: expectedCrams},
-								{Dir: "/a/b/d/i/j", Count: 1, Size: 1, Atime: expectedAtime,
+									Groups: expectedGroupsB, FileTypes: expectedCrams,
+								},
+								{
+									Dir: "/a/b/d/i/j", Count: 1, Size: 1, Atime: expectedAtime,
 									Mtime: expectedAtime, Users: expectedRoot,
-									Groups: expectedRoot, FileTypes: expectedCrams},
+									Groups: expectedRoot, FileTypes: expectedCrams,
+								},
 							}},
 							{"?groups=" + groups[0] + "&users=root", []*DirSummary{
-								{Dir: "/a/b/d/g", Count: 8, Size: 80, Atime: time.Unix(75, 0),
+								{
+									Dir: "/a/b/d/g", Count: 8, Size: 80, Atime: time.Unix(75, 0),
 									Mtime: time.Unix(75, 0), Users: expectedRoot,
-									Groups: expectedGroupsA, FileTypes: expectedCrams},
+									Groups: expectedGroupsA, FileTypes: expectedCrams,
+								},
 							}},
 							{"?types=cram,bam", expectedNoTemp},
 							{"?types=bam", []*DirSummary{
-								{Dir: "/a/b/e/h", Count: 2, Size: 10, Atime: time.Unix(80, 0),
+								{
+									Dir: "/a/b/e/h", Count: 2, Size: 10, Atime: time.Unix(80, 0),
 									Mtime: time.Unix(80, 0), Users: expectedUser,
-									Groups: expectedGroupsA, FileTypes: []string{"bam"}},
-								{Dir: "/a/b/e/h/tmp", Count: 1, Size: 5, Atime: time.Unix(80, 0),
+									Groups: expectedGroupsA, FileTypes: []string{"bam"},
+								},
+								{
+									Dir: "/a/b/e/h/tmp", Count: 1, Size: 5, Atime: time.Unix(80, 0),
 									Mtime: time.Unix(80, 0), Users: expectedUser,
-									Groups: expectedGroupsA, FileTypes: []string{"bam"}},
+									Groups: expectedGroupsA, FileTypes: []string{"bam"},
+								},
 							}},
 							{"?groups=" + groups[0] + "&users=root&types=cram,bam", []*DirSummary{
-								{Dir: "/a/b/d/g", Count: 8, Size: 80, Atime: time.Unix(75, 0),
+								{
+									Dir: "/a/b/d/g", Count: 8, Size: 80, Atime: time.Unix(75, 0),
 									Mtime: time.Unix(75, 0), Users: expectedRoot,
-									Groups: expectedGroupsA, FileTypes: expectedCrams},
+									Groups: expectedGroupsA, FileTypes: expectedCrams,
+								},
 							}},
 							{"?groups=" + groups[0] + "&users=root&types=bam", []*DirSummary{
-								{Dir: "/", Count: 0, Size: 0, Atime: time.Unix(0, 0),
+								{
+									Dir: "/", Count: 0, Size: 0, Atime: time.Unix(0, 0),
 									Mtime: time.Unix(0, 0), Users: []string{}, Groups: []string{},
-									FileTypes: []string{}},
+									FileTypes: []string{},
+								},
 							}},
 							{"?splits=0", []*DirSummary{
-								{Dir: "/a", Count: 19, Size: 126, Atime: expectedAtime,
+								{
+									Dir: "/a", Count: 19, Size: 126, Atime: expectedAtime,
 									Mtime: time.Unix(90, 0), Users: expectedUsers,
-									Groups: expectedGroupsRoot, FileTypes: expectedFTs},
+									Groups: expectedGroupsRoot, FileTypes: expectedFTs,
+								},
 							}},
 							{"?dir=/a/b/e/h", []*DirSummary{
-								{Dir: "/a/b/e/h", Count: 2, Size: 10, Atime: time.Unix(80, 0),
+								{
+									Dir: "/a/b/e/h", Count: 2, Size: 10, Atime: time.Unix(80, 0),
 									Mtime: time.Unix(80, 0), Users: expectedUser,
-									Groups: expectedGroupsA, FileTypes: expectedBams},
-								{Dir: "/a/b/e/h/tmp", Count: 1, Size: 5, Atime: time.Unix(80, 0),
+									Groups: expectedGroupsA, FileTypes: expectedBams,
+								},
+								{
+									Dir: "/a/b/e/h/tmp", Count: 1, Size: 5, Atime: time.Unix(80, 0),
 									Mtime: time.Unix(80, 0), Users: expectedUser,
-									Groups: expectedGroupsA, FileTypes: expectedBams},
+									Groups: expectedGroupsA, FileTypes: expectedBams,
+								},
 							}},
 						}
 
@@ -1293,7 +1331,8 @@ func decodeWhereResult(response *httptest.ResponseRecorder) ([]*DirSummary, erro
 // testRestrictedGroups does tests for s.getRestrictedGIDs() if user running the
 // test has enough groups to make the test viable.
 func testRestrictedGroups(t *testing.T, gids []string, s *Server, exampleGIDs []string,
-	addr, certPath, token, tokenBadUID string) {
+	addr, certPath, token, tokenBadUID string,
+) {
 	t.Helper()
 
 	if len(gids) < 3 {

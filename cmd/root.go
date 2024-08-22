@@ -32,13 +32,10 @@ import (
 	"bytes"
 	"fmt"
 	"os"
-	"path/filepath"
 	"time"
 
-	"github.com/VertebrateResequencing/wr/jobqueue"
 	"github.com/inconshreveable/log15"
 	"github.com/spf13/cobra"
-	"github.com/wtsi-ssg/wrstat/v4/scheduler"
 )
 
 const userGroupPerm = 0770
@@ -47,8 +44,10 @@ const userGroupPerm = 0770
 var appLogger = log15.New()
 
 // these variables are accessible by all subcommands.
-var deployment string
-var sudo bool
+var (
+	deployment string
+	sudo       bool
+)
 
 const connectTimeout = 10 * time.Second
 
@@ -166,46 +165,4 @@ func warn(msg string, a ...interface{}) {
 func die(msg string, a ...interface{}) {
 	appLogger.Error(fmt.Sprintf(msg, a...))
 	os.Exit(1)
-}
-
-// newScheduler returns a new Scheduler, exiting on error. It also returns a
-// function you should defer.
-//
-// If you provide a non-blank queue, that queue will be used when scheduling.
-func newScheduler(cwd, queue string) (*scheduler.Scheduler, func()) {
-	s, err := scheduler.New(deployment, cwd, queue, connectTimeout, appLogger, sudo)
-
-	if err != nil {
-		die("%s", err)
-	}
-
-	return s, func() {
-		err = s.Disconnect()
-		if err != nil {
-			warn("failed to disconnect from wr manager: %s", err)
-		}
-	}
-}
-
-// repGrp returns a rep_grp that can be used for a wrstat job we will create.
-func repGrp(cmd, dir, unique string) string {
-	if dir == "" {
-		return fmt.Sprintf("wrstat-%s-%s-%s", cmd, dateStamp(), unique)
-	}
-
-	return fmt.Sprintf("wrstat-%s-%s-%s-%s", cmd, filepath.Base(dir), dateStamp(), unique)
-}
-
-// dateStamp returns today's date in the form YYYYMMDD.
-func dateStamp() string {
-	t := time.Now()
-
-	return t.Format("20060102")
-}
-
-// addJobsToQueue adds the jobs to wr's queue.
-func addJobsToQueue(s *scheduler.Scheduler, jobs []*jobqueue.Job) {
-	if err := s.SubmitJobs(jobs); err != nil {
-		die("failed to add jobs to wr's queue: %s", err)
-	}
 }

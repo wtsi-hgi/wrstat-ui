@@ -30,7 +30,7 @@ import (
 	"strconv"
 
 	"github.com/gin-gonic/gin"
-	"github.com/wtsi-ssg/wrstat/v4/internal/split"
+	"github.com/wtsi-hgi/wrstat-ui/v4/internal/split"
 )
 
 const (

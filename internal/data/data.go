@@ -113,7 +113,8 @@ func CreateDefaultTestData(gidA, gidB, gidC, uidA, uidB int) []TestFile {
 			ATime:          80,
 			MTime:          80,
 		},
-		{Path: filepath.Join(acd, "file.cram"),
+		{
+			Path:           filepath.Join(acd, "file.cram"),
 			NumFiles:       5,
 			SizeOfEachFile: 1,
 			GID:            gidB,
@@ -134,7 +135,8 @@ func CreateDefaultTestData(gidA, gidB, gidC, uidA, uidB int) []TestFile {
 				ATime:          50,
 				MTime:          50,
 			},
-			TestFile{Path: filepath.Join(abdg, "file.cram"),
+			TestFile{
+				Path:           filepath.Join(abdg, "file.cram"),
 				NumFiles:       4,
 				SizeOfEachFile: 10,
 				GID:            gidA,
@@ -182,7 +184,8 @@ func (f *fakeFileInfo) IsDir() bool        { return f.dir }
 func (f *fakeFileInfo) Sys() any           { return f.stat }
 
 func addTestFileInfo(t *testing.T, dgut *summary.DirGroupUserType, doneDirs map[string]bool,
-	path string, numFiles, sizeOfEachFile, gid, uid, atime, mtime int) {
+	path string, numFiles, sizeOfEachFile, gid, uid, atime, mtime int,
+) {
 	t.Helper()
 
 	dir, basename := filepath.Split(path)
@@ -210,7 +213,8 @@ func addTestFileInfo(t *testing.T, dgut *summary.DirGroupUserType, doneDirs map[
 }
 
 func addTestDirInfo(t *testing.T, dgut *summary.DirGroupUserType, doneDirs map[string]bool,
-	dir string, gid, uid int) {
+	dir string, gid, uid int,
+) {
 	t.Helper()
 
 	for {
