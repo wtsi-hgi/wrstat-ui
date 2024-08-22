@@ -38,16 +38,8 @@ import (
 	"github.com/spf13/cobra"
 )
 
-const userGroupPerm = 0770
-
 // appLogger is used for logging events in our commands.
 var appLogger = log15.New()
-
-// these variables are accessible by all subcommands.
-var (
-	deployment string
-	sudo       bool
-)
 
 const connectTimeout = 10 * time.Second
 
@@ -74,31 +66,6 @@ func Execute() {
 func init() {
 	// set up logging to stderr
 	appLogger.SetHandler(log15.LvlFilterHandler(log15.LvlInfo, log15.StderrHandler))
-
-	// global flags
-	RootCmd.PersistentFlags().StringVar(&deployment,
-		"deployment",
-		"production",
-		"the deployment your wr manager was started with")
-
-	RootCmd.PersistentFlags().BoolVar(&sudo,
-		"sudo",
-		false,
-		"created jobs will run with sudo")
-}
-
-// hideGlobalFlags can be used for sub-commands that don't need deployment and
-// sudo options.
-func hideGlobalFlags(from *cobra.Command, command *cobra.Command, strings []string) {
-	if err := RootCmd.Flags().MarkHidden("deployment"); err != nil {
-		die("err: %s", err)
-	}
-
-	if err := RootCmd.Flags().MarkHidden("sudo"); err != nil {
-		die("err: %s", err)
-	}
-
-	from.Parent().HelpFunc()(command, strings)
 }
 
 // logToFile logs to the given file.
