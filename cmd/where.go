@@ -219,10 +219,6 @@ func init() { //nolint:funlen
 		"output USERS and GROUPS columns")
 	whereCmd.Flags().BoolVarP(&whereJSON, "json", "j", false,
 		"output JSON (ignores --minimum and --order)")
-
-	whereCmd.SetHelpFunc(func(command *cobra.Command, strings []string) {
-		hideGlobalFlags(whereCmd, command, strings)
-	})
 }
 
 // getServerURL gets the wrstat server URL from the commandline arg or

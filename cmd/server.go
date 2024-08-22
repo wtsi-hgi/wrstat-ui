@@ -223,10 +223,6 @@ func init() {
 	serverCmd.Flags().StringVarP(&ownersPath, "owners", "o", "", "gid,owner csv file")
 	serverCmd.Flags().StringVar(&serverLogPath, "logfile", "",
 		"log to this file instead of syslog")
-
-	serverCmd.SetHelpFunc(func(command *cobra.Command, strings []string) {
-		hideGlobalFlags(serverCmd, command, strings)
-	})
 }
 
 // checkOAuthArgs ensures we have the necessary args/ env vars for Okta auth.
