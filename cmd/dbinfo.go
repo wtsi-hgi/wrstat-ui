@@ -30,7 +30,7 @@ import (
 	"log/slog"
 
 	"github.com/spf13/cobra"
-	"github.com/wtsi-hgi/wrstat-ui/v1/server"
+	"github.com/wtsi-hgi/wrstat-ui/server"
 	"github.com/wtsi-ssg/wrstat/v5/basedirs"
 	"github.com/wtsi-ssg/wrstat/v5/dgut"
 )

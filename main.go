@@ -28,7 +28,7 @@
 package main
 
 import (
-	"github.com/wtsi-hgi/wrstat-ui/v1/cmd"
+	"github.com/wtsi-hgi/wrstat-ui/cmd"
 )
 
 func main() {

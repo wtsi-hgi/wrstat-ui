@@ -32,14 +32,14 @@ import (
 )
 
 // Version gets set during build:
-// go build -ldflags "-X github.com/wtsi-ssg/wrstat/cmd.Version=`git describe --tags --always --long --dirty`" .
+// go build -ldflags "-X github.com/wtsi-hgi/wrstat-ui/cmd.Version=`git describe --tags --always --long --dirty`" .
 var Version string
 
 // versionCmd represents the version command.
 var versionCmd = &cobra.Command{
 	Use:   "version",
-	Short: "Print wrstat version",
-	Long:  `Print wrstat version.`,
+	Short: "Print wrstat-ui version",
+	Long:  `Print wrstat-ui version.`,
 	Run: func(cmd *cobra.Command, args []string) {
 		fmt.Println(Version)
 	},

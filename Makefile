@@ -1,4 +1,4 @@
-PKG := github.com/wtsi-ssg/wrstat-ui/v1
+PKG := github.com/wtsi-hgi/wrstat-ui
 VERSION := $(shell git describe --tags --always --long --dirty)
 TAG := $(shell git describe --abbrev=0 --tags)
 LDFLAGS = -ldflags "-X ${PKG}/cmd.Version=${VERSION}"
@@ -22,7 +22,7 @@ buildnonpm:
 
 install: export CGO_ENABLED = 1
 install:
-	@rm -f ${GOPATH}/bin/wrstat
+	@rm -f ${GOPATH}/bin/wrstat-ui
 	@cd server/static/wrstat; npm install && npm run build:prod
 	@echo Starting go install
 	@go install -tags netgo ${LDFLAGS}
@@ -30,8 +30,8 @@ install:
 
 installnonpm: export CGO_ENABLED = 1
 installnonpm:
-	@rm -f ${GOPATH}/bin/wrstat
-	@go install -tags netgo ${LDFLAGS}
+	@rm -f ${GOPATH}/bin/wrstat-ui
+	go install -tags netgo ${LDFLAGS}
 	@echo installed to ${GOPATH}/bin/wrstat-ui
 
 test: export CGO_ENABLED = 1

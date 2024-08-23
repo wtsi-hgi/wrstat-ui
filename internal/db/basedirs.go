@@ -29,7 +29,7 @@ package internaldb
 import (
 	"testing"
 
-	internaldata "github.com/wtsi-hgi/wrstat-ui/v1/internal/data"
+	internaldata "github.com/wtsi-hgi/wrstat-ui/internal/data"
 	"github.com/wtsi-ssg/wrstat/v5/dgut"
 )
 

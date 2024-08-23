@@ -36,8 +36,8 @@ import (
 	"testing"
 	"time"
 
-	internaldata "github.com/wtsi-hgi/wrstat-ui/v1/internal/data"
-	"github.com/wtsi-hgi/wrstat-ui/v1/internal/fs"
+	internaldata "github.com/wtsi-hgi/wrstat-ui/internal/data"
+	"github.com/wtsi-hgi/wrstat-ui/internal/fs"
 	"github.com/wtsi-ssg/wrstat/v5/dgut"
 )
 

@@ -34,7 +34,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	gas "github.com/wtsi-hgi/go-authserver"
-	ifs "github.com/wtsi-hgi/wrstat-ui/v1/internal/fs"
+	ifs "github.com/wtsi-hgi/wrstat-ui/internal/fs"
 	"github.com/wtsi-ssg/wrstat/v5/basedirs"
 	"github.com/wtsi-ssg/wrstat/v5/watch"
 )
