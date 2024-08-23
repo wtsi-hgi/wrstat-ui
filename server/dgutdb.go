@@ -31,7 +31,7 @@ import (
 	"path/filepath"
 	"time"
 
-	ifs "github.com/wtsi-hgi/wrstat-ui/v1/internal/fs"
+	ifs "github.com/wtsi-hgi/wrstat-ui/internal/fs"
 	"github.com/wtsi-ssg/wrstat/v5/dgut"
 	"github.com/wtsi-ssg/wrstat/v5/watch"
 )

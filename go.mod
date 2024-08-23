@@ -1,4 +1,4 @@
-module github.com/wtsi-hgi/wrstat-ui/v1
+module github.com/wtsi-hgi/wrstat-ui
 
 go 1.22
 
