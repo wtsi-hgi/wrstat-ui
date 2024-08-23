@@ -44,13 +44,13 @@ import (
 	"github.com/gin-gonic/gin"
 	. "github.com/smartystreets/goconvey/convey"
 	gas "github.com/wtsi-hgi/go-authserver"
-	internaldata "github.com/wtsi-hgi/wrstat-ui/v4/internal/data"
-	internaldb "github.com/wtsi-hgi/wrstat-ui/v4/internal/db"
-	"github.com/wtsi-hgi/wrstat-ui/v4/internal/fixtimes"
-	ifs "github.com/wtsi-hgi/wrstat-ui/v4/internal/fs"
-	"github.com/wtsi-hgi/wrstat-ui/v4/internal/split"
-	"github.com/wtsi-ssg/wrstat/v4/basedirs"
-	"github.com/wtsi-ssg/wrstat/v4/dgut"
+	internaldata "github.com/wtsi-hgi/wrstat-ui/v1/internal/data"
+	internaldb "github.com/wtsi-hgi/wrstat-ui/v1/internal/db"
+	"github.com/wtsi-hgi/wrstat-ui/v1/internal/fixtimes"
+	ifs "github.com/wtsi-hgi/wrstat-ui/v1/internal/fs"
+	"github.com/wtsi-hgi/wrstat-ui/v1/internal/split"
+	"github.com/wtsi-ssg/wrstat/v5/basedirs"
+	"github.com/wtsi-ssg/wrstat/v5/dgut"
 )
 
 func TestIDsToWanted(t *testing.T) {

@@ -39,7 +39,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wtsi-ssg/wrstat/v4/summary"
+	"github.com/wtsi-ssg/wrstat/v5/summary"
 )
 
 const filePerms = 0644

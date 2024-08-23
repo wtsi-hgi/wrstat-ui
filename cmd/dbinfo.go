@@ -30,9 +30,9 @@ import (
 	"log/slog"
 
 	"github.com/spf13/cobra"
-	"github.com/wtsi-hgi/wrstat-ui/v4/server"
-	"github.com/wtsi-ssg/wrstat/v4/basedirs"
-	"github.com/wtsi-ssg/wrstat/v4/dgut"
+	"github.com/wtsi-hgi/wrstat-ui/v1/server"
+	"github.com/wtsi-ssg/wrstat/v5/basedirs"
+	"github.com/wtsi-ssg/wrstat/v5/dgut"
 )
 
 // dbinfoCmd represents the server command.

@@ -38,7 +38,7 @@ import (
 
 	"github.com/inconshreveable/log15"
 	"github.com/spf13/cobra"
-	"github.com/wtsi-hgi/wrstat-ui/v4/server"
+	"github.com/wtsi-hgi/wrstat-ui/v1/server"
 )
 
 const (

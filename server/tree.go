@@ -35,7 +35,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	gas "github.com/wtsi-hgi/go-authserver"
-	"github.com/wtsi-ssg/wrstat/v4/dgut"
+	"github.com/wtsi-ssg/wrstat/v5/dgut"
 )
 
 // javascriptToJSONFormat is the date format emitted by javascript's Date's

@@ -1,4 +1,4 @@
-PKG := github.com/wtsi-ssg/wrstat/v4
+PKG := github.com/wtsi-ssg/wrstat-ui/v1
 VERSION := $(shell git describe --tags --always --long --dirty)
 TAG := $(shell git describe --abbrev=0 --tags)
 LDFLAGS = -ldflags "-X ${PKG}/cmd.Version=${VERSION}"
@@ -26,13 +26,13 @@ install:
 	@cd server/static/wrstat; npm install && npm run build:prod
 	@echo Starting go install
 	@go install -tags netgo ${LDFLAGS}
-	@echo Installed to ${GOPATH}/bin/wrstat
+	@echo Installed to ${GOPATH}/bin/wrstat-ui
 
 installnonpm: export CGO_ENABLED = 1
 installnonpm:
 	@rm -f ${GOPATH}/bin/wrstat
 	@go install -tags netgo ${LDFLAGS}
-	@echo installed to ${GOPATH}/bin/wrstat
+	@echo installed to ${GOPATH}/bin/wrstat-ui
 
 test: export CGO_ENABLED = 1
 test:
@@ -60,7 +60,7 @@ lintnonpm:
 	@golangci-lint run --timeout 2m
 
 clean:
-	@rm -f ./wrstat
+	@rm -f ./wrstat-ui
 	@rm -f ./dist.zip
 
 dist: export CGO_ENABLED = 1
@@ -69,7 +69,7 @@ dist: export CGO_ENABLED = 1
 dist:
 	gopack pack --os linux --arch amd64 -o linux-dist.zip
 	github-release release --tag ${TAG} --pre-release
-	github-release upload --tag ${TAG} --name wrstat-linux-x86-64.zip --file linux-dist.zip
-	@rm -f wrstat linux-dist.zip
+	github-release upload --tag ${TAG} --name wrstat-ui-linux-x86-64.zip --file linux-dist.zip
+	@rm -f wrstat-ui linux-dist.zip
 
 .PHONY: test race bench lint build install clean dist
