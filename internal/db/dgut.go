@@ -36,9 +36,9 @@ import (
 	"testing"
 	"time"
 
-	internaldata "github.com/wtsi-hgi/wrstat-ui/v4/internal/data"
-	"github.com/wtsi-hgi/wrstat-ui/v4/internal/fs"
-	"github.com/wtsi-ssg/wrstat/v4/dgut"
+	internaldata "github.com/wtsi-hgi/wrstat-ui/v1/internal/data"
+	"github.com/wtsi-hgi/wrstat-ui/v1/internal/fs"
+	"github.com/wtsi-ssg/wrstat/v5/dgut"
 )
 
 const (
