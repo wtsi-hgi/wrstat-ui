@@ -29,7 +29,7 @@ import type { Child } from "./rpc";
 import { formatBytes, formatDate, formatNumber } from "./format";
 import type React from "react";
 
-const TreedetailsComponent = ({ details, ...rest }: { details: Child | null } & React.HTMLAttributes<HTMLDivElement>) => {
+const TreedetailsComponent = ({ details, ...rest}: { details: Child | null} & React.HTMLAttributes<HTMLDivElement>) => {
 	if (!details) {
 		return <></>;
 	}
@@ -52,6 +52,10 @@ const TreedetailsComponent = ({ details, ...rest }: { details: Child | null } & 
 					<td>{formatDate(details.atime)}</td>
 				</tr>
 				<tr>
+					<th>Modifed</th>
+					<td>{formatDate(details.mtime)}</td>
+				</tr>
+				<tr>
 					<th>Groups</th>
 					<td><div>{details.groups.join(", ")}</div></td>
 				</tr>
@@ -62,6 +66,18 @@ const TreedetailsComponent = ({ details, ...rest }: { details: Child | null } & 
 				<tr>
 					<th>Filetypes</th>
 					<td><div>{details.filetypes.join(", ")}</div></td>
+				</tr>
+				<tr>
+					<th>Asize</th>
+					<td><div>{details.size_by_access_age ? details.size_by_access_age.map(function (sizeBytes) {
+    					return formatBytes(sizeBytes);
+					}).join(", "):""}</div></td>
+				</tr>
+				<tr>
+					<th>Msize</th>
+					<td><div>{details.size_by_modify_age ? details.size_by_modify_age.map(function (sizeBytes) {
+    					return formatBytes(sizeBytes);
+					}).join(", "):""}</div></td>
 				</tr>
 			</tbody>
 		</table>
