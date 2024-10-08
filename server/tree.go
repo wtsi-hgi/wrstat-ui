@@ -110,20 +110,22 @@ func (s *Server) getGroupAreas(c *gin.Context) {
 // interfaces can report on how long ago the data forming the tree was
 // captured.
 type TreeElement struct {
-	Name        string              `json:"name"`
-	Path        string              `json:"path"`
-	Count       uint64              `json:"count"`
-	Size        uint64              `json:"size"`
-	Atime       string              `json:"atime"`
-	Mtime       string              `json:"mtime"`
-	Users       []string            `json:"users"`
-	Groups      []string            `json:"groups"`
-	FileTypes   []string            `json:"filetypes"`
-	HasChildren bool                `json:"has_children"`
-	Children    []*TreeElement      `json:"children,omitempty"`
-	TimeStamp   string              `json:"timestamp"`
-	Areas       map[string][]string `json:"areas"`
-	NoAuth      bool                `json:"noauth"`
+	Name            string              `json:"name"`
+	Path            string              `json:"path"`
+	Count           uint64              `json:"count"`
+	Size            uint64              `json:"size"`
+	Atime           string              `json:"atime"`
+	Mtime           string              `json:"mtime"`
+	SizeByAccessAge [8]int64            `json:"size_by_access_age"`
+	SizeByModifyAge [8]int64            `json:"size_by_modify_age"`
+	Users           []string            `json:"users"`
+	Groups          []string            `json:"groups"`
+	FileTypes       []string            `json:"filetypes"`
+	HasChildren     bool                `json:"has_children"`
+	Children        []*TreeElement      `json:"children,omitempty"`
+	TimeStamp       string              `json:"timestamp"`
+	Areas           map[string][]string `json:"areas"`
+	NoAuth          bool                `json:"noauth"`
 }
 
 // getTree responds with the data needed by the tree web interface. LoadDGUTDB()
@@ -191,17 +193,19 @@ func (s *Server) diToTreeElement(di *dgut.DirInfo, filter *dgut.Filter, allowedG
 // NoAuth will always be false.
 func (s *Server) ddsToTreeElement(dds *dgut.DirSummary, allowedGIDs map[uint32]bool) *TreeElement {
 	return &TreeElement{
-		Name:      filepath.Base(dds.Dir),
-		Path:      dds.Dir,
-		Count:     dds.Count,
-		Size:      dds.Size,
-		Atime:     timeToJavascriptDate(dds.Atime),
-		Mtime:     timeToJavascriptDate(dds.Mtime),
-		Users:     s.uidsToUsernames(dds.UIDs),
-		Groups:    s.gidsToNames(dds.GIDs),
-		FileTypes: s.ftsToNames(dds.FTs),
-		TimeStamp: timeToJavascriptDate(s.dataTimeStamp),
-		NoAuth:    areDisjoint(allowedGIDs, dds.GIDs),
+		Name:            filepath.Base(dds.Dir),
+		Path:            dds.Dir,
+		Count:           dds.Count,
+		Size:            dds.Size,
+		Atime:           timeToJavascriptDate(dds.Atime),
+		Mtime:           timeToJavascriptDate(dds.Mtime),
+		SizeByAccessAge: dds.SizeByAccessAge,
+		SizeByModifyAge: dds.SizeByModifyAge,
+		Users:           s.uidsToUsernames(dds.UIDs),
+		Groups:          s.gidsToNames(dds.GIDs),
+		FileTypes:       s.ftsToNames(dds.FTs),
+		TimeStamp:       timeToJavascriptDate(s.dataTimeStamp),
+		NoAuth:          areDisjoint(allowedGIDs, dds.GIDs),
 	}
 }
 

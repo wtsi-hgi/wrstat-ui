@@ -40,14 +40,16 @@ import (
 // directory, and their file types. It differs from dgut.DirSummary in having
 // string names for users, groups and types, instead of ids.
 type DirSummary struct {
-	Dir       string
-	Count     uint64
-	Size      uint64
-	Atime     time.Time
-	Mtime     time.Time
-	Users     []string
-	Groups    []string
-	FileTypes []string
+	Dir             string
+	Count           uint64
+	Size            uint64
+	Atime           time.Time
+	Mtime           time.Time
+	Users           []string
+	Groups          []string
+	FileTypes       []string
+	SizeByAccessAge [8]int64
+	SizeByModifyAge [8]int64
 }
 
 // dcssToSummaries converts the given DCSs to our own DirSummary, the difference
@@ -67,14 +69,16 @@ func (s *Server) dcssToSummaries(dcss dgut.DCSs) []*DirSummary {
 // basically just converting the *IDs to names.
 func (s *Server) dgutDStoSummary(dds *dgut.DirSummary) *DirSummary {
 	return &DirSummary{
-		Dir:       dds.Dir,
-		Count:     dds.Count,
-		Size:      dds.Size,
-		Atime:     dds.Atime,
-		Mtime:     dds.Mtime,
-		Users:     s.uidsToUsernames(dds.UIDs),
-		Groups:    s.gidsToNames(dds.GIDs),
-		FileTypes: s.ftsToNames(dds.FTs),
+		Dir:             dds.Dir,
+		Count:           dds.Count,
+		Size:            dds.Size,
+		Atime:           dds.Atime,
+		Mtime:           dds.Mtime,
+		Users:           s.uidsToUsernames(dds.UIDs),
+		Groups:          s.gidsToNames(dds.GIDs),
+		FileTypes:       s.ftsToNames(dds.FTs),
+		SizeByAccessAge: dds.SizeByAccessAge,
+		SizeByModifyAge: dds.SizeByModifyAge,
 	}
 }
 

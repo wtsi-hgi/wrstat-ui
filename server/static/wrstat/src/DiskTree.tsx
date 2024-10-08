@@ -135,6 +135,26 @@ const colours = [
 		["> 5 years", 1825],
 		["> 7 years", 2555],
 	] as const,
+	areaOptions = [
+		["count", 0],
+		["total size", 1],
+		["unused size (1 month)", 2],
+		["unused size (2 month)", 3],
+		["unused size (6 month)", 4],
+		["unused size (1 year)", 5],
+		["unused size (2 year)", 6],
+		["unused size (3 year)", 7],
+		["unused size (5 year)", 8],
+		["unused size (7 year)", 9],
+		["unchanged size (1 month)", 10],
+		["unchanged size (2 month)", 11],
+		["unchanged size (6 month)", 12],
+		["unchanged size (1 year)", 13],
+		["unchanged size (2 year)", 14],
+		["unchanged size (3 year)", 15],
+		["unchanged size (5 year)", 16],
+		["unchanged size (7 year)", 17],
+	] as const,
 	entrySort = (a: Entry, b: Entry) => b.value - a.value,
 	DiskTreeComponent = ({ treePath, userMap, groupMap, setTreePath, guf }: DiskTreeParams) => {
 		const [treeMapData, setTreeMapData] = useState<Entry[] | null>(null),
@@ -143,7 +163,7 @@ const colours = [
 			[tableDetails, setTableDetails] = useState<Child | null>(null),
 			[dirDetails, setDirDetails] = useState<Child | null>(childDetails),
 			[useMTime, setUseMTime] = useSavedState("useMTime", false),
-			[useCount, setUseCount] = useSavedState("useCount", false),
+			[areaRepresents, setAreaRepresents] = useSavedState("areaRepresents", 0),
 			[treeWidth, setTreeWidth] = useState(determineTreeWidth()),
 			[filterFileTypes, setFilterFileTypes] = useSavedState<string[]>("treeTypes", []),
 			[sinceLastAccess, setSinceLastAccess] = useSavedState("sinceLastAccess", 0),
@@ -151,6 +171,48 @@ const colours = [
 			[viewBoxes, setViewBoxes] = useState(true);
 
 
+		const areaRepresentsToChildValue = (child: Child): number => {
+			switch (areaRepresents){
+				case 0:
+					return child.count
+				case 1:
+					return child.size
+				case 2:
+					return child.size_by_access_age[0]
+				case 3:
+					return child.size_by_access_age[1]
+				case 4:
+					return child.size_by_access_age[2]
+				case 5:
+					return child.size_by_access_age[3]
+				case 6:
+					return child.size_by_access_age[4]
+				case 7:
+					return child.size_by_access_age[5]
+				case 8:
+					return child.size_by_access_age[6]
+				case 9:
+					return child.size_by_access_age[7]
+				case 10:
+					return child.size_by_modify_age[0]
+				case 11:
+					return child.size_by_modify_age[1]
+				case 12:
+					return child.size_by_modify_age[2]
+				case 13:
+					return child.size_by_modify_age[3]
+				case 14:
+					return child.size_by_modify_age[4]
+				case 15:
+					return child.size_by_modify_age[5]
+				case 16:
+					return child.size_by_modify_age[6]
+				case 17:
+					return child.size_by_modify_age[7]
+			}
+			return 0
+		}
+		
 		useEffect(() => window.addEventListener("resize", () => setTreeWidth(determineTreeWidth())), []);
 
 		useEffect(() => {
@@ -167,7 +229,7 @@ const colours = [
 						entries.push({
 							key: btoa(child.path),
 							name: child.name,
-							value: useCount ? child.count : child.size,
+							value: areaRepresentsToChildValue(child),
 							backgroundColour: colourFromAge(+(new Date(useMTime ? child.mtime : child.atime))),
 							onclick: child.has_children && !child.noauth ? () => setTreePath(child.path) : undefined,
 							onmouseover: () => setChildDetails(child),
@@ -185,7 +247,7 @@ const colours = [
 				});
 
 			setBreadcrumbs(makeBreadcrumbs(treePath, setTreePath));
-		}, [treePath, useMTime, useCount, filterFileTypes, sinceLastAccess, guf.groups, guf.users]);
+		}, [treePath, useMTime, areaRepresents, filterFileTypes, sinceLastAccess, guf.groups, guf.users]);
 
 		return <>
 			<div>
@@ -214,8 +276,9 @@ const colours = [
 									<label aria-label="Colour by Oldest Access Time" title="Oldest Access Time" htmlFor="aTime">Access Time</label><input type="radio" id="aTime" checked={!useMTime} onChange={() => setUseMTime(false)} />
 									<label aria-label="Colour by Latest Modified Time" title="Latest Modified Time" htmlFor="mTime">Modified Time</label><input type="radio" id="mTime" checked={useMTime} onChange={() => setUseMTime(true)} />
 									<div className="title">Area Represents</div>
-									<label aria-label="Area represents File Size" htmlFor="useSize">File Size</label><input type="radio" id="useSize" checked={!useCount} onChange={() => setUseCount(false)} />
-									<label aria-label="Area represents File Count" htmlFor="useCount">File Count</label><input type="radio" id="useCount" checked={useCount} onChange={() => setUseCount(true)} />
+									<select value={areaRepresents} id="areaRepresents" onChange={e => setAreaRepresents(parseInt(e.target.value) ?? 0)}>
+										{areaOptions.map(([l, t]) => <option key={`ar_${t}`} value={t}>{l}</option>)}
+									</select>
 								</>
 							}
 							<div className="title">Filter</div>
