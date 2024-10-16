@@ -300,7 +300,7 @@ func (s *Server) loadNewBasedirsDBAndDeleteOld(oldPath string) {
 		return
 	}
 
-	s.Logger.Printf("server ready again after reloading dgut dbs")
+	s.Logger.Printf("server ready again after reloading dguta dbs")
 
 	err = os.Remove(oldPath)
 	if err != nil {

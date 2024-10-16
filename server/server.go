@@ -36,7 +36,7 @@ import (
 
 	gas "github.com/wtsi-hgi/go-authserver"
 	"github.com/wtsi-ssg/wrstat/v5/basedirs"
-	"github.com/wtsi-ssg/wrstat/v5/dgut"
+	"github.com/wtsi-ssg/wrstat/v5/dguta"
 	"github.com/wtsi-ssg/wrstat/v5/watch"
 )
 
@@ -100,14 +100,14 @@ const (
 // package's database, and a website that displays the information nicely.
 type Server struct {
 	gas.Server
-	tree           *dgut.Tree
+	tree           *dguta.Tree
 	treeMutex      sync.RWMutex
 	whiteCB        WhiteListCallback
 	uidToNameCache map[uint32]string
 	gidToNameCache map[uint32]string
 	userToGIDs     map[string][]string
-	dgutPaths      []string
-	dgutWatcher    *watch.Watcher
+	dgutaPaths     []string
+	dgutaWatcher   *watch.Watcher
 	dataTimeStamp  time.Time
 	areas          map[string][]string
 
@@ -141,9 +141,9 @@ func (s *Server) stop() {
 	s.treeMutex.Lock()
 	defer s.treeMutex.Unlock()
 
-	if s.dgutWatcher != nil {
-		s.dgutWatcher.Stop()
-		s.dgutWatcher = nil
+	if s.dgutaWatcher != nil {
+		s.dgutaWatcher.Stop()
+		s.dgutaWatcher = nil
 	}
 
 	if s.basedirsWatcher != nil {

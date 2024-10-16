@@ -30,13 +30,13 @@ import (
 	"testing"
 
 	internaldata "github.com/wtsi-hgi/wrstat-ui/internal/data"
-	"github.com/wtsi-ssg/wrstat/v5/dgut"
+	"github.com/wtsi-ssg/wrstat/v5/dguta"
 )
 
-// CreateExampleDGUTDBForBasedirs makes a tree database with data useful for
+// CreateExampleDGUTADBForBasedirs makes a tree database with data useful for
 // testing basedirs, and returns it along with a slice of directories where the
 // data is.
-func CreateExampleDGUTDBForBasedirs(t *testing.T) (*dgut.Tree, []string, error) {
+func CreateExampleDGUTADBForBasedirs(t *testing.T) (*dguta.Tree, []string, error) {
 	t.Helper()
 
 	gid, uid, _, _, err := internaldata.RealGIDAndUID()
@@ -44,9 +44,9 @@ func CreateExampleDGUTDBForBasedirs(t *testing.T) (*dgut.Tree, []string, error) 
 		return nil, nil, err
 	}
 
-	dirs, files := internaldata.FakeFilesForDGUTDBForBasedirsTesting(gid, uid)
+	dirs, files := internaldata.FakeFilesForDGUTADBForBasedirsTesting(gid, uid)
 
-	tree, _, err := CreateDGUTDBFromFakeFiles(t, files)
+	tree, _, err := CreateDGUTADBFromFakeFiles(t, files)
 
 	return tree, dirs, err
 }
