@@ -68,16 +68,8 @@ const TreedetailsComponent = ({ details, ...rest}: { details: Child | null} & Re
 					<td><div>{details.filetypes.join(", ")}</div></td>
 				</tr>
 				<tr>
-					<th>Asize</th>
-					<td><div>{details.size_by_access_age ? details.size_by_access_age.map(function (sizeBytes) {
-    					return formatBytes(sizeBytes);
-					}).join(", "):""}</div></td>
-				</tr>
-				<tr>
-					<th>Msize</th>
-					<td><div>{details.size_by_modify_age ? details.size_by_modify_age.map(function (sizeBytes) {
-    					return formatBytes(sizeBytes);
-					}).join(", "):""}</div></td>
+					<th>Age</th>
+					<td><div>{details.age}</div></td>
 				</tr>
 			</tbody>
 		</table>

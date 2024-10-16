@@ -39,7 +39,7 @@ const (
 )
 
 // getWhere responds with a list of directory stats describing where data is on
-// disks. LoadDGUTDB() must already have been called. This is called when there
+// disks. LoadDGUTADB() must already have been called. This is called when there
 // is a GET on /rest/v1/where or /rest/v1/auth/where.
 func (s *Server) getWhere(c *gin.Context) {
 	dir := c.DefaultQuery("dir", defaultDir)

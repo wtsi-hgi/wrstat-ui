@@ -32,7 +32,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/wtsi-hgi/wrstat-ui/server"
 	"github.com/wtsi-ssg/wrstat/v5/basedirs"
-	"github.com/wtsi-ssg/wrstat/v5/dgut"
+	"github.com/wtsi-ssg/wrstat/v5/dguta"
 )
 
 // dbinfoCmd represents the server command.
@@ -51,7 +51,7 @@ NB: for large databases, this can take hours to run.
 			die("you must supply the path to your 'wrstat multi -f' output directory")
 		}
 
-		dbPaths, err := server.FindLatestDgutDirs(args[0], dgutDBsSuffix)
+		dbPaths, err := server.FindLatestDgutaDirs(args[0], dgutaDBsSuffix)
 		if err != nil {
 			die("failed to find database paths: %s", err)
 		}
@@ -63,15 +63,15 @@ NB: for large databases, this can take hours to run.
 
 		slog.SetLogLoggerLevel(slog.LevelDebug)
 
-		info("opening dgut databases...")
-		dgutDB := dgut.NewDB(dbPaths...)
-		dbInfo, err := dgutDB.Info()
+		info("opening dguta databases...")
+		dgutaDB := dguta.NewDB(dbPaths...)
+		dbInfo, err := dgutaDB.Info()
 		if err != nil {
-			die("failed to get dgut db info: %s", err)
+			die("failed to get dguta db info: %s", err)
 		}
 
-		cliPrint("\nDirs: %d\nDGUTs: %d\nParents: %d\nChildren: %d\n\n",
-			dbInfo.NumDirs, dbInfo.NumDGUTs, dbInfo.NumParents, dbInfo.NumChildren)
+		cliPrint("\nDirs: %d\nDGUTAs: %d\nParents: %d\nChildren: %d\n\n",
+			dbInfo.NumDirs, dbInfo.NumDGUTAs, dbInfo.NumParents, dbInfo.NumChildren)
 
 		info("opening basedir database...\n")
 

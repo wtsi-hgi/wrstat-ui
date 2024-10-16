@@ -32,28 +32,28 @@ import (
 	"time"
 
 	ifs "github.com/wtsi-hgi/wrstat-ui/internal/fs"
-	"github.com/wtsi-ssg/wrstat/v5/dgut"
+	"github.com/wtsi-ssg/wrstat/v5/dguta"
 	"github.com/wtsi-ssg/wrstat/v5/watch"
 )
 
-// LoadDGUTDBs loads the given dgut.db directories (as produced by one or more
-// invocations of dgut.DB.Store()) and adds the /rest/v1/where GET endpoint to
+// LoadDGUTADBs loads the given dguta.db directories (as produced by one or more
+// invocations of dguta.DB.Store()) and adds the /rest/v1/where GET endpoint to
 // the REST API. If you call EnableAuth() first, then this endpoint will be
 // secured and be available at /rest/v1/auth/where.
 //
 // The where endpoint can take the dir, splits, groups, users and types
-// parameters, which correspond to arguments that dgut.Tree.Where() takes.
-func (s *Server) LoadDGUTDBs(paths ...string) error {
+// parameters, which correspond to arguments that dguta.Tree.Where() takes.
+func (s *Server) LoadDGUTADBs(paths ...string) error {
 	s.treeMutex.Lock()
 	defer s.treeMutex.Unlock()
 
-	tree, err := dgut.NewTree(paths...)
+	tree, err := dguta.NewTree(paths...)
 	if err != nil {
 		return err
 	}
 
 	s.tree = tree
-	s.dgutPaths = paths
+	s.dgutaPaths = paths
 
 	authGroup := s.AuthRouter()
 
@@ -66,11 +66,11 @@ func (s *Server) LoadDGUTDBs(paths ...string) error {
 	return nil
 }
 
-// EnableDGUTDBReloading will wait for changes to the file at watchPath, then:
-//  1. close any previously loaded dgut database files
+// EnableDGUTADBReloading will wait for changes to the file at watchPath, then:
+//  1. close any previously loaded dguta database files
 //  2. find the latest sub-directory in the given directory with the given suffix
-//  3. set the dgut.db directory paths to children of 2) and load those
-//  4. delete the old dgut.db directory paths to save space, and their parent
+//  3. set the dguta.db directory paths to children of 2) and load those
+//  4. delete the old dguta.db directory paths to save space, and their parent
 //     dir if now empty
 //  5. update the server's data-creation date to the mtime of the watchPath file
 //
@@ -78,12 +78,12 @@ func (s *Server) LoadDGUTDBs(paths ...string) error {
 //
 // It will only return an error if trying to watch watchPath immediately fails.
 // Other errors (eg. reloading or deleting files) will be logged.
-func (s *Server) EnableDGUTDBReloading(watchPath, dir, suffix string, pollFrequency time.Duration) error {
+func (s *Server) EnableDGUTADBReloading(watchPath, dir, suffix string, pollFrequency time.Duration) error {
 	s.treeMutex.Lock()
 	defer s.treeMutex.Unlock()
 
 	cb := func(mtime time.Time) {
-		s.reloadDGUTDBs(dir, suffix, mtime)
+		s.reloadDGUTADBs(dir, suffix, mtime)
 	}
 
 	watcher, err := watch.New(watchPath, cb, pollFrequency)
@@ -93,19 +93,19 @@ func (s *Server) EnableDGUTDBReloading(watchPath, dir, suffix string, pollFreque
 
 	s.dataTimeStamp = watcher.Mtime()
 
-	s.dgutWatcher = watcher
+	s.dgutaWatcher = watcher
 
 	return nil
 }
 
-// reloadDGUTDBs closes database files previously loaded during LoadDGUTDBs(),
+// reloadDGUTADBs closes database files previously loaded during LoadDGUTADBs(),
 // looks for the latest subdirectory of the given directory that has the given
-// suffix, and loads the children of that as our new dgutPaths.
+// suffix, and loads the children of that as our new dgutaPaths.
 //
-// On success, deletes the previous dgutPaths and updates our dataTimestamp.
+// On success, deletes the previous dgutaPaths and updates our dataTimestamp.
 //
 // Logs any errors.
-func (s *Server) reloadDGUTDBs(dir, suffix string, mtime time.Time) {
+func (s *Server) reloadDGUTADBs(dir, suffix string, mtime time.Time) {
 	s.treeMutex.Lock()
 	defer s.treeMutex.Unlock()
 
@@ -113,47 +113,47 @@ func (s *Server) reloadDGUTDBs(dir, suffix string, mtime time.Time) {
 		s.tree.Close()
 	}
 
-	oldPaths := s.dgutPaths
+	oldPaths := s.dgutaPaths
 
-	err := s.findNewDgutPaths(dir, suffix)
+	err := s.findNewDgutaPaths(dir, suffix)
 	if err != nil {
-		s.Logger.Printf("reloading dgut dbs failed: %s", err)
+		s.Logger.Printf("reloading dguta dbs failed: %s", err)
 
 		return
 	}
 
-	s.Logger.Printf("reloading dgut dbs from %s", s.dgutPaths)
+	s.Logger.Printf("reloading dguta dbs from %s", s.dgutaPaths)
 
-	s.tree, err = dgut.NewTree(s.dgutPaths...)
+	s.tree, err = dguta.NewTree(s.dgutaPaths...)
 	if err != nil {
-		s.Logger.Printf("reloading dgut dbs failed: %s", err)
+		s.Logger.Printf("reloading dguta dbs failed: %s", err)
 
 		return
 	}
 
-	s.Logger.Printf("server ready again after reloading dgut dbs")
+	s.Logger.Printf("server ready again after reloading dguta dbs")
 
 	s.deleteDirs(oldPaths)
 
 	s.dataTimeStamp = mtime
 }
 
-// findNewDgutPaths finds the latest subdirectory of dir that has the given
-// suffix, then sets our dgutPaths to the result's children.
-func (s *Server) findNewDgutPaths(dir, suffix string) error {
-	paths, err := FindLatestDgutDirs(dir, suffix)
+// findNewDgutaPaths finds the latest subdirectory of dir that has the given
+// suffix, then sets our dgutaPaths to the result's children.
+func (s *Server) findNewDgutaPaths(dir, suffix string) error {
+	paths, err := FindLatestDgutaDirs(dir, suffix)
 	if err != nil {
 		return err
 	}
 
-	s.dgutPaths = paths
+	s.dgutaPaths = paths
 
 	return nil
 }
 
-// FindLatestDgutDirs finds the latest subdirectory of dir that has the given
+// FindLatestDgutaDirs finds the latest subdirectory of dir that has the given
 // suffix, then returns that result's child directories.
-func FindLatestDgutDirs(dir, suffix string) ([]string, error) {
+func FindLatestDgutaDirs(dir, suffix string) ([]string, error) {
 	latest, err := ifs.FindLatestDirectoryEntry(dir, suffix)
 	if err != nil {
 		return nil, err
@@ -189,25 +189,25 @@ func getChildDirectories(dir string) ([]string, error) {
 // any directory that's a current db directory.
 func (s *Server) deleteDirs(dirs []string) {
 	current := make(map[string]bool)
-	for _, dir := range s.dgutPaths {
+	for _, dir := range s.dgutaPaths {
 		current[dir] = true
 	}
 
 	for _, dir := range dirs {
 		if current[dir] {
-			s.Logger.Printf("skipping deletion of dgut db dir since still current: %s", dir)
+			s.Logger.Printf("skipping deletion of dguta db dir since still current: %s", dir)
 
 			continue
 		}
 
 		if err := os.RemoveAll(dir); err != nil {
-			s.Logger.Printf("deleting dgut dbs failed: %s", err)
+			s.Logger.Printf("deleting dguta dbs failed: %s", err)
 		}
 	}
 
 	parent := filepath.Dir(dirs[0])
 
 	if err := os.Remove(parent); err != nil {
-		s.Logger.Printf("deleting dgut dbs parent dir failed: %s", err)
+		s.Logger.Printf("deleting dguta dbs parent dir failed: %s", err)
 	}
 }

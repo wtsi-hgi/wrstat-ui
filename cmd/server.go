@@ -42,11 +42,11 @@ import (
 )
 
 const (
-	sentinelPollFrequencty  = 1 * time.Minute
-	serverTokenBasename     = ".wrstat.servertoken"
-	dgutDBsSuffix           = "dgut.dbs"
-	basedirBasename         = "basedirs.db"
-	dgutDBsSentinelBasename = ".dgut.dbs.updated"
+	sentinelPollFrequencty   = 1 * time.Minute
+	serverTokenBasename      = ".wrstat.servertoken"
+	dgutaDBsSuffix           = "dguta.dbs"
+	basedirBasename          = "basedirs.db"
+	dgutaDBsSentinelBasename = ".dguta.dbs.updated"
 )
 
 // options for this cmd.
@@ -70,7 +70,7 @@ var serverCmd = &cobra.Command{
 	Long: `Start the web server.
 
 Starting the web server brings up a web interface and REST API that will use the
-latest *.dgut.dbs directory and basedirs.db inside the given 'wrstat multi'
+latest *.dguta.dbs directory and basedirs.db inside the given 'wrstat multi'
 output directory to answer questions about where data is on the disks. (Provide
 your 'wrstat multi -f' argument as an unamed argument to this command.)
 
@@ -102,7 +102,7 @@ The server must be running for 'wrstat where' calls to succeed.
 This command will block forever in the foreground; you can background it with
 ctrl-z; bg. Or better yet, use the daemonize program to daemonize this.
 
-It will monitor a file called ".dgut.dbs.updated" in the given directory and
+It will monitor a file called ".dguta.dbs.updated" in the given directory and
 attempt to reload the databases when the file is updated by another run of
 'wrstat multi' with the same output directory. After reloading, will delete the
 previous run's database files. It will use the mtime of the file as the data
@@ -153,7 +153,7 @@ creation time in reports.
 		}
 
 		info("opening databases, please wait...")
-		dbPaths, err := server.FindLatestDgutDirs(args[0], dgutDBsSuffix)
+		dbPaths, err := server.FindLatestDgutaDirs(args[0], dgutaDBsSuffix)
 		if err != nil {
 			die("failed to find database paths: %s", err)
 		}
@@ -163,7 +163,7 @@ creation time in reports.
 			die("failed to find basedirs database path: %s", err)
 		}
 
-		err = s.LoadDGUTDBs(dbPaths...)
+		err = s.LoadDGUTADBs(dbPaths...)
 		if err != nil {
 			die("failed to load database: %s", err)
 		}
@@ -173,9 +173,9 @@ creation time in reports.
 			die("failed to load database: %s", err)
 		}
 
-		sentinel := filepath.Join(args[0], dgutDBsSentinelBasename)
+		sentinel := filepath.Join(args[0], dgutaDBsSentinelBasename)
 
-		err = s.EnableDGUTDBReloading(sentinel, args[0], dgutDBsSuffix, sentinelPollFrequencty)
+		err = s.EnableDGUTADBReloading(sentinel, args[0], dgutaDBsSuffix, sentinelPollFrequencty)
 		if err != nil {
 			die("failed to set up database reloading: %s", err)
 		}

@@ -67,7 +67,7 @@ func GetGroupAreas(c *gas.ClientCLI) (map[string][]string, error) {
 //
 // You must first Login() to get a JWT that you must supply here.
 //
-// The other parameters correspond to arguments that dgut.Tree.Where() takes.
+// The other parameters correspond to arguments that dguta.Tree.Where() takes.
 func GetWhereDataIs(c *gas.ClientCLI, dir, groups, users, types, splits string) ([]byte, []*DirSummary, error) {
 	r, err := c.AuthenticatedRequest()
 	if err != nil {

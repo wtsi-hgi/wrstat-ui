@@ -44,8 +44,7 @@ export type Child = {
 	users: string[];
 	groups: string[];
 	filetypes: string[];
-	size_by_access_age: number[];
-	size_by_modify_age: number[];
+	age: number;
 	has_children: boolean;
 	children: Child[];
 	timestamp: string;

@@ -42,6 +42,7 @@ type DiskTreeParams = {
 	treePath: string;
 	userMap: Map<number, string>;
 	groupMap: Map<number, string>;
+	filterAge: number;
 	setTreePath: (v: string) => void;
 	guf: GroupUserFilterParams;
 }
@@ -113,11 +114,12 @@ const colours = [
 		return breadcrumbs;
 	},
 	determineTreeWidth = () => Math.max(window.innerWidth - 420, 400),
-	makeFilter = (path: string, uids: number[], gids: number[], filetypes: string[], users: Map<number, string>, groups: Map<number, string>) => ({
+	makeFilter = (path: string, uids: number[], gids: number[], filetypes: string[], age: number, users: Map<number, string>, groups: Map<number, string>) => ({
 		path,
 		"users": uids.map(uid => users.get(uid) ?? "").filter(u => u).join(",") ?? "",
 		"groups": gids.map(gid => groups.get(gid) ?? "").filter(g => g).join(",") ?? "",
-		"types": filetypes.join(",")
+		"types": filetypes.join(","),
+		"age": age
 	}),
 	fileTypes = [
 		"other", "temp", "vcf", "vcf.gz", "bcf", "sam", "bam",
@@ -156,7 +158,7 @@ const colours = [
 		["unchanged size (7 year)", 17],
 	] as const,
 	entrySort = (a: Entry, b: Entry) => b.value - a.value,
-	DiskTreeComponent = ({ treePath, userMap, groupMap, setTreePath, guf }: DiskTreeParams) => {
+	DiskTreeComponent = ({ treePath, userMap, groupMap, filterAge, setTreePath, guf }: DiskTreeParams) => {
 		const [treeMapData, setTreeMapData] = useState<Entry[] | null>(null),
 			[breadcrumbs, setBreadcrumbs] = useState<JSX.Element[]>([]),
 			[childDetails, setChildDetails] = useState<Child | null>(null),
@@ -177,38 +179,6 @@ const colours = [
 					return child.count
 				case 1:
 					return child.size
-				case 2:
-					return child.size_by_access_age[0]
-				case 3:
-					return child.size_by_access_age[1]
-				case 4:
-					return child.size_by_access_age[2]
-				case 5:
-					return child.size_by_access_age[3]
-				case 6:
-					return child.size_by_access_age[4]
-				case 7:
-					return child.size_by_access_age[5]
-				case 8:
-					return child.size_by_access_age[6]
-				case 9:
-					return child.size_by_access_age[7]
-				case 10:
-					return child.size_by_modify_age[0]
-				case 11:
-					return child.size_by_modify_age[1]
-				case 12:
-					return child.size_by_modify_age[2]
-				case 13:
-					return child.size_by_modify_age[3]
-				case 14:
-					return child.size_by_modify_age[4]
-				case 15:
-					return child.size_by_modify_age[5]
-				case 16:
-					return child.size_by_modify_age[6]
-				case 17:
-					return child.size_by_modify_age[7]
 			}
 			return 0
 		}
@@ -216,7 +186,7 @@ const colours = [
 		useEffect(() => window.addEventListener("resize", () => setTreeWidth(determineTreeWidth())), []);
 
 		useEffect(() => {
-			RPC.getChildren(makeFilter(treePath, guf.users, guf.groups, filterFileTypes, userMap, groupMap))
+			RPC.getChildren(makeFilter(treePath, guf.users, guf.groups, filterFileTypes, filterAge, userMap, groupMap))
 				.then(children => {
 					const entries: Entry[] = [],
 						since = Date.now() - sinceLastAccess * 86_400_000;
@@ -224,6 +194,10 @@ const colours = [
 					for (const child of children.children ?? []) {
 						if (new Date(child.atime).valueOf() > since) {
 							continue;
+						}
+
+						if (areaRepresents != 0) {
+							child.size = areaRepresentsToChildValue(child);
 						}
 
 						entries.push({

@@ -50,7 +50,7 @@ import (
 	ifs "github.com/wtsi-hgi/wrstat-ui/internal/fs"
 	"github.com/wtsi-hgi/wrstat-ui/internal/split"
 	"github.com/wtsi-ssg/wrstat/v5/basedirs"
-	"github.com/wtsi-ssg/wrstat/v5/dgut"
+	"github.com/wtsi-ssg/wrstat/v5/dguta"
 )
 
 func TestIDsToWanted(t *testing.T) {
@@ -69,13 +69,13 @@ func TestServer(t *testing.T) {
 		logWriter := gas.NewStringLogger()
 		s := New(logWriter)
 
-		Convey("You can convert dgut.DCSs to DirSummarys", func() {
+		Convey("You can convert dguta.DCSs to DirSummarys", func() {
 			uid32, err := strconv.Atoi(uid)
 			So(err, ShouldBeNil)
 			gid32, err := strconv.Atoi(gids[0])
 			So(err, ShouldBeNil)
 
-			dcss := dgut.DCSs{
+			dcss := dguta.DCSs{
 				{
 					Dir:   "/foo",
 					Count: 1,
@@ -178,13 +178,13 @@ func TestServer(t *testing.T) {
 			So(logWriter.String(), ShouldContainSubstring, "STATUS=404")
 			logWriter.Reset()
 
-			Convey("And given a dgut database", func() {
-				path, err := internaldb.CreateExampleDGUTDBCustomIDs(t, uid, gids[0], gids[1])
+			Convey("And given a dguta database", func() {
+				path, err := internaldb.CreateExampleDGUTADBCustomIDs(t, uid, gids[0], gids[1])
 				So(err, ShouldBeNil)
 				groupA := gidToGroup(t, gids[0])
 				groupB := gidToGroup(t, gids[1])
 
-				tree, err := dgut.NewTree(path)
+				tree, err := dguta.NewTree(path)
 				So(err, ShouldBeNil)
 
 				expectedRaw, err := tree.Where("/", nil, split.SplitsToSplitFn(2))
@@ -200,8 +200,8 @@ func TestServer(t *testing.T) {
 
 				tree.Close()
 
-				Convey("You can get results after calling LoadDGUTDB", func() {
-					err = s.LoadDGUTDBs(path)
+				Convey("You can get results after calling LoadDGUTADB", func() {
+					err = s.LoadDGUTADBs(path)
 					So(err, ShouldBeNil)
 
 					response, err := queryWhere(s, "")
@@ -369,11 +369,11 @@ func TestServer(t *testing.T) {
 					})
 
 					Convey("And you can auto-reload a new database", func() {
-						pathNew, errc := internaldb.CreateExampleDGUTDBCustomIDs(t, uid, gids[1], gids[0])
+						pathNew, errc := internaldb.CreateExampleDGUTADBCustomIDs(t, uid, gids[1], gids[0])
 						So(errc, ShouldBeNil)
 
 						grandparentDir := filepath.Dir(filepath.Dir(path))
-						newerPath := filepath.Join(grandparentDir, "newer."+internaldb.ExampleDgutDirParentSuffix, "0")
+						newerPath := filepath.Join(grandparentDir, "newer."+internaldb.ExampleDgutaDirParentSuffix, "0")
 						err = os.MkdirAll(filepath.Dir(newerPath), internaldb.DirPerms)
 						So(err, ShouldBeNil)
 						err = os.Rename(pathNew, newerPath)
@@ -391,8 +391,8 @@ func TestServer(t *testing.T) {
 
 						sentinel := path + ".sentinel"
 
-						err = s.EnableDGUTDBReloading(sentinel, grandparentDir,
-							internaldb.ExampleDgutDirParentSuffix, sentinelPollFrequency)
+						err = s.EnableDGUTADBReloading(sentinel, grandparentDir,
+							internaldb.ExampleDgutaDirParentSuffix, sentinelPollFrequency)
 						So(err, ShouldNotBeNil)
 
 						file, err := os.Create(sentinel)
@@ -404,8 +404,8 @@ func TestServer(t *testing.T) {
 						So(s.dataTimeStamp.IsZero(), ShouldBeTrue)
 						s.treeMutex.RUnlock()
 
-						err = s.EnableDGUTDBReloading(sentinel, grandparentDir,
-							internaldb.ExampleDgutDirParentSuffix, sentinelPollFrequency)
+						err = s.EnableDGUTADBReloading(sentinel, grandparentDir,
+							internaldb.ExampleDgutaDirParentSuffix, sentinelPollFrequency)
 						So(err, ShouldBeNil)
 
 						s.treeMutex.RLock()
@@ -447,9 +447,9 @@ func TestServer(t *testing.T) {
 						So(err, ShouldBeNil)
 						So(result, ShouldNotResemble, expected)
 
-						s.dgutWatcher.RLock()
-						So(s.dgutWatcher, ShouldNotBeNil)
-						s.dgutWatcher.RUnlock()
+						s.dgutaWatcher.RLock()
+						So(s.dgutaWatcher, ShouldNotBeNil)
+						s.dgutaWatcher.RUnlock()
 						So(s.tree, ShouldNotBeNil)
 
 						certPath, keyPath, err := gas.CreateTestCert(t)
@@ -459,13 +459,13 @@ func TestServer(t *testing.T) {
 
 						errs := stop()
 						So(errs, ShouldBeNil)
-						So(s.dgutWatcher, ShouldBeNil)
+						So(s.dgutaWatcher, ShouldBeNil)
 						So(s.tree, ShouldBeNil)
 
 						s.Stop()
 					})
 
-					Convey("EnableDGUTDBReloading logs errors", func() {
+					Convey("EnableDGUTADBReloading logs errors", func() {
 						sentinel := path + ".sentinel"
 						testSuffix := "test"
 
@@ -475,7 +475,7 @@ func TestServer(t *testing.T) {
 						So(err, ShouldBeNil)
 
 						testReloadFail := func(dir, message string) {
-							err = s.EnableDGUTDBReloading(sentinel, dir, testSuffix, sentinelPollFrequency)
+							err = s.EnableDGUTADBReloading(sentinel, dir, testSuffix, sentinelPollFrequency)
 							So(err, ShouldBeNil)
 
 							now := time.Now().Local()
@@ -533,7 +533,7 @@ func TestServer(t *testing.T) {
 						})
 
 						Convey("when the old path can't be deleted", func() {
-							s.dgutPaths = []string{"."}
+							s.dgutaPaths = []string{"."}
 							tpath := makeTestPath()
 
 							cmd := exec.Command("cp", "--recursive", path, filepath.Join(tpath, "0"))
@@ -551,8 +551,8 @@ func TestServer(t *testing.T) {
 				})
 			})
 
-			Convey("LoadDGUTDBs fails on an invalid path", func() {
-				err := s.LoadDGUTDBs("/foo")
+			Convey("LoadDGUTADBs fails on an invalid path", func() {
+				err := s.LoadDGUTADBs("/foo")
 				So(err, ShouldNotBeNil)
 			})
 		})
@@ -566,7 +566,7 @@ func TestServer(t *testing.T) {
 			logWriter.Reset()
 
 			Convey("And given a basedirs database", func() {
-				tree, _, err := internaldb.CreateExampleDGUTDBForBasedirs(t)
+				tree, _, err := internaldb.CreateExampleDGUTADBForBasedirs(t)
 				So(err, ShouldBeNil)
 
 				dbPath, ownersPath, err := createExampleBasedirsDB(t, tree)
@@ -664,8 +664,8 @@ func TestServer(t *testing.T) {
 						gid, uid, _, _, err := internaldata.RealGIDAndUID()
 						So(err, ShouldBeNil)
 
-						_, files := internaldata.FakeFilesForDGUTDBForBasedirsTesting(gid, uid)
-						tree, _, err = internaldb.CreateDGUTDBFromFakeFiles(t, files[:1])
+						_, files := internaldata.FakeFilesForDGUTADBForBasedirsTesting(gid, uid)
+						tree, _, err = internaldb.CreateDGUTADBFromFakeFiles(t, files[:1])
 						So(err, ShouldBeNil)
 
 						pathNew, _, err := createExampleBasedirsDB(t, tree)
@@ -750,10 +750,10 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 		_, _, err = GetWhereDataIs(c, "", "", "", "", "")
 		So(err, ShouldNotBeNil)
 
-		path, err := internaldb.CreateExampleDGUTDBCustomIDs(t, uid, gids[0], gids[1])
+		path, err := internaldb.CreateExampleDGUTADBCustomIDs(t, uid, gids[0], gids[1])
 		So(err, ShouldBeNil)
 
-		tree, _, err := internaldb.CreateExampleDGUTDBForBasedirs(t)
+		tree, _, err := internaldb.CreateExampleDGUTADBForBasedirs(t)
 		So(err, ShouldBeNil)
 
 		basedirsDBPath, ownersPath, err := createExampleBasedirsDB(t, tree)
@@ -763,7 +763,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 		So(err, ShouldBeNil)
 
 		Convey("You can't get where data is or add the tree page without auth", func() {
-			err = s.LoadDGUTDBs(path)
+			err = s.LoadDGUTADBs(path)
 			So(err, ShouldBeNil)
 
 			_, _, err = GetWhereDataIs(c, "/", "", "", "", "")
@@ -780,7 +780,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 			})
 			So(err, ShouldBeNil)
 
-			err = s.LoadDGUTDBs(path)
+			err = s.LoadDGUTADBs(path)
 			So(err, ShouldBeNil)
 
 			err = c.Login("user", "pass")
@@ -815,7 +815,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 			})
 			So(err, ShouldBeNil)
 
-			err = s.LoadDGUTDBs(path)
+			err = s.LoadDGUTADBs(path)
 			So(err, ShouldBeNil)
 
 			err = c.Login("user", "pass")
@@ -849,7 +849,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 			})
 			So(err, ShouldBeNil)
 
-			err = s.LoadDGUTDBs(path)
+			err = s.LoadDGUTADBs(path)
 			So(err, ShouldBeNil)
 
 			err = s.LoadBasedirsDB(basedirsDBPath, ownersPath)
@@ -1596,7 +1596,7 @@ func (m *mockDirEntry) Info() (fs.FileInfo, error) {
 
 // createExampleBasedirsDB creates a temporary basedirs.db and returns the path
 // to the database file.
-func createExampleBasedirsDB(t *testing.T, tree *dgut.Tree) (string, string, error) {
+func createExampleBasedirsDB(t *testing.T, tree *dguta.Tree) (string, string, error) {
 	t.Helper()
 
 	csvPath := internaldata.CreateQuotasCSV(t, internaldata.ExampleQuotaCSV)
