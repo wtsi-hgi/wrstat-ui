@@ -60,13 +60,14 @@ type TestFile struct {
 	ATime, MTime   int
 }
 
-func CreateDefaultTestData(gidA, gidB, gidC, uidA, uidB int) []TestFile {
+func CreateDefaultTestData(gidA, gidB, gidC, uidA, uidB, refTime int) []TestFile {
 	dir := "/"
 	abdf := filepath.Join(dir, "a", "b", "d", "f")
 	abdg := filepath.Join(dir, "a", "b", "d", "g")
 	abehtmp := filepath.Join(dir, "a", "b", "e", "h", "tmp")
 	acd := filepath.Join(dir, "a", "c", "d")
 	abdij := filepath.Join(dir, "a", "b", "d", "i", "j")
+	k := filepath.Join(dir, "k")
 	files := []TestFile{
 		{
 			Path:           filepath.Join(abdf, "file.cram"),
@@ -121,6 +122,51 @@ func CreateDefaultTestData(gidA, gidB, gidC, uidA, uidB int) []TestFile {
 			UID:            uidB,
 			ATime:          90,
 			MTime:          90,
+		},
+		{
+			Path:           filepath.Join(k, "file1.cram"),
+			NumFiles:       1,
+			SizeOfEachFile: 1,
+			GID:            gidB,
+			UID:            uidA,
+			ATime:          refTime - (summary.SecondsInAYear * 3),
+			MTime:          refTime - (summary.SecondsInAYear * 7),
+		},
+		{
+			Path:           filepath.Join(k, "file2.cram"),
+			NumFiles:       1,
+			SizeOfEachFile: 2,
+			GID:            gidB,
+			UID:            uidA,
+			ATime:          refTime - (summary.SecondsInAYear * 1),
+			MTime:          refTime - (summary.SecondsInAYear * 2),
+		},
+		{
+			Path:           filepath.Join(k, "file3.cram"),
+			NumFiles:       1,
+			SizeOfEachFile: 3,
+			GID:            gidB,
+			UID:            uidA,
+			ATime:          refTime - (summary.SecondsInAMonth) - 10,
+			MTime:          refTime - (summary.SecondsInAMonth * 2),
+		},
+		{
+			Path:           filepath.Join(k, "file4.cram"),
+			NumFiles:       1,
+			SizeOfEachFile: 4,
+			GID:            gidB,
+			UID:            uidA,
+			ATime:          refTime - (summary.SecondsInAMonth * 6),
+			MTime:          refTime - (summary.SecondsInAYear),
+		},
+		{
+			Path:           filepath.Join(k, "file5.cram"),
+			NumFiles:       1,
+			SizeOfEachFile: 5,
+			GID:            gidB,
+			UID:            uidA,
+			ATime:          refTime,
+			MTime:          refTime,
 		},
 	}
 

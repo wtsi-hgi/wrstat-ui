@@ -39,20 +39,21 @@ import (
 // makeFilterFromContext extracts the user's filter requests, and returns a tree
 // filter.
 func makeFilterFromContext(c *gin.Context) (*dguta.Filter, error) {
-	groups, users, types := getFilterArgsFromContext(c)
+	groups, users, types, age := getFilterArgsFromContext(c)
 
 	filterGIDs, err := getWantedIDs(groups, groupNameToGID)
 	if err != nil {
 		return nil, err
 	}
 
-	return makeFilterGivenGIDs(filterGIDs, users, types)
+	return makeFilterGivenGIDs(filterGIDs, users, types, age)
 }
 
-func getFilterArgsFromContext(c *gin.Context) (groups string, users string, types string) {
+func getFilterArgsFromContext(c *gin.Context) (groups string, users string, types string, age string) {
 	groups = c.Query("groups")
 	users = c.Query("users")
 	types = c.Query("types")
+	age = c.Query("age")
 
 	return
 }
@@ -108,13 +109,13 @@ func idStringsToInts(idString string) uint32 {
 	return uint32(id)
 }
 
-func makeFilterGivenGIDs(filterGIDs []uint32, users, types string) (*dguta.Filter, error) {
+func makeFilterGivenGIDs(filterGIDs []uint32, users, types, age string) (*dguta.Filter, error) {
 	filterUIDs, err := userIDsFromNames(users)
 	if err != nil {
 		return nil, err
 	}
 
-	return makeTreeFilter(filterGIDs, filterUIDs, types)
+	return makeTreeFilter(filterGIDs, filterUIDs, types, age)
 }
 
 // userIDsFromNames returns the user IDs that correspond to the given comma
@@ -132,12 +133,17 @@ func userIDsFromNames(users string) ([]uint32, error) {
 }
 
 // makeTreeFilter creates a filter from string args.
-func makeTreeFilter(gids, uids []uint32, types string) (*dguta.Filter, error) {
+func makeTreeFilter(gids, uids []uint32, types, age string) (*dguta.Filter, error) {
 	filter := makeTreeGroupFilter(gids)
 
 	addUsersToFilter(filter, uids)
 
 	err := addTypesToFilter(filter, types)
+	if err != nil {
+		return nil, err
+	}
+
+	err = addAgeToFilter(filter, age)
 
 	return filter, err
 }
@@ -179,6 +185,22 @@ func addTypesToFilter(filter *dguta.Filter, types string) error {
 	}
 
 	filter.FTs = fts
+
+	return nil
+}
+
+// addAgeToFilter adds a filter for age to the given filter.
+func addAgeToFilter(filter *dguta.Filter, ageStr string) error {
+	if ageStr == "" || ageStr == "0" {
+		return nil
+	}
+
+	age, err := summary.AgeStringToDirGUTAge(ageStr)
+	if err != nil {
+		return err
+	}
+
+	filter.Age = age
 
 	return nil
 }
@@ -228,14 +250,14 @@ func (s *Server) getUserFromContext(c *gin.Context) *gas.User {
 // makeRestrictedFilterFromContext extracts the user's filter requests, as
 // restricted by their jwt, and returns a tree filter.
 func (s *Server) makeRestrictedFilterFromContext(c *gin.Context) (*dguta.Filter, error) {
-	groups, users, types := getFilterArgsFromContext(c)
+	groups, users, types, age := getFilterArgsFromContext(c)
 
 	restrictedGIDs, err := s.getRestrictedGIDs(c, groups)
 	if err != nil {
 		return nil, err
 	}
 
-	return makeFilterGivenGIDs(restrictedGIDs, users, types)
+	return makeFilterGivenGIDs(restrictedGIDs, users, types, age)
 }
 
 func (s *Server) getRestrictedGIDs(c *gin.Context, groups string) ([]uint32, error) {
