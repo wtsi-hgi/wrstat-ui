@@ -44,7 +44,6 @@ export type Child = {
 	users: string[];
 	groups: string[];
 	filetypes: string[];
-	age: number;
 	has_children: boolean;
 	children: Child[];
 	timestamp: string;

@@ -51,10 +51,10 @@ const (
 // CreateExampleDGUTADBCustomIDs creates a temporary dguta.db from some example
 // data that uses the given uid and gids, and returns the path to the database
 // directory.
-func CreateExampleDGUTADBCustomIDs(t *testing.T, uid, gidA, gidB string) (string, error) {
+func CreateExampleDGUTADBCustomIDs(t *testing.T, uid, gidA, gidB string, refTime int) (string, error) {
 	t.Helper()
 
-	dgutaData := exampleDGUTAData(t, uid, gidA, gidB)
+	dgutaData := exampleDGUTAData(t, uid, gidA, gidB, refTime)
 
 	return CreateCustomDGUTADB(t, dgutaData)
 }
@@ -91,7 +91,7 @@ func createExampleDgutaDir(t *testing.T) (string, error) {
 
 // exampleDGUTAData is some example DGUTA data that uses the given uid and gids,
 // along with root's uid.
-func exampleDGUTAData(t *testing.T, uidStr, gidAStr, gidBStr string) string {
+func exampleDGUTAData(t *testing.T, uidStr, gidAStr, gidBStr string, refTime int) string {
 	t.Helper()
 
 	uid, err := strconv.ParseUint(uidStr, 10, 64)
@@ -109,7 +109,7 @@ func exampleDGUTAData(t *testing.T, uidStr, gidAStr, gidBStr string) string {
 		t.Fatal(err)
 	}
 
-	return internaldata.TestDGUTAData(t, internaldata.CreateDefaultTestData(int(gidA), int(gidB), 0, int(uid), 0))
+	return internaldata.TestDGUTAData(t, internaldata.CreateDefaultTestData(int(gidA), int(gidB), 0, int(uid), 0, refTime))
 }
 
 func CreateDGUTADBFromFakeFiles(t *testing.T, files []internaldata.TestFile,

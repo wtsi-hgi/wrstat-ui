@@ -68,8 +68,7 @@ const TreedetailsComponent = ({ details, ...rest}: { details: Child | null} & Re
 					<td><div>{details.filetypes.join(", ")}</div></td>
 				</tr>
 				<tr>
-					<th>Age</th>
-					<td><div>{details.age}</div></td>
+					<th>tesssting</th>
 				</tr>
 			</tbody>
 		</table>

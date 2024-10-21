@@ -36,6 +36,8 @@ type FilterParams = {
 	usage: Usage[];
 	groupUsage: Usage[];
 	byUser: boolean;
+	age: number;
+	setAge: (v: number) => void;
 	axisMinSize: number;
 	setAxisMinSize: (v: number) => void;
 	axisMaxSize: number;
@@ -58,6 +60,8 @@ const stringSort = new Intl.Collator().compare,
 	FilterComponent = ({
 		usage,
 		byUser,
+		age,
+		setAge,
 		axisMinSize, setAxisMinSize,
 		axisMaxSize, setAxisMaxSize,
 		axisMinDaysAgo, setAxisMinDaysAgo,
@@ -80,6 +84,17 @@ const stringSort = new Intl.Collator().compare,
 					onchange={setOwners}
 					disabled={byUser} />
 				<GroupUserFilter {...guf} num={0} />
+				<label htmlFor={`age`}>Age</label>
+				<select name="selectedAge"
+					value={age}
+					onChange={e => setAge(+e.target.value)}
+				>
+        			<option value="0">All</option>
+       				<option value="1">unused size (1 month)</option>
+       				<option value="7">unused size (5 year)</option>
+					<option value="12">unchanged size (1 year)</option>
+					<option value="16">unchanged size (7 years)</option>
+     			 </select>
 				<label>Size</label>
 				<Minmax
 					max={usage.reduce((max, curr) => Math.max(max, curr.UsageSize), 0)}
