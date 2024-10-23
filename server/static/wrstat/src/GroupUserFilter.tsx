@@ -54,7 +54,7 @@ const stringSort = new Intl.Collator().compare,
 	}: GroupUserFilterParams & { num: number }) => {
 		const selectedGroups = groups.map(gid => groupIDToNameMap.get(gid) ?? "").sort(stringSort).filter(g => g),
 			selectedUsers = users.map(uid => userIDToNameMap.get(uid) ?? "").sort(stringSort).filter(u => u),
-			selectedBOMs = Object.entries(areas).map(([bom, groups]) => groups.every(g => groupNameToIDMap.get(g) === undefined || selectedGroups.includes(g)) ? bom : "").filter(b => b).sort(stringSort);
+			selectedBOMs = Object.entries(areas).map(([bom, groups]) => groups.every(g => groupNameToIDMap.get(g) === undefined || selectedGroups.includes(g)) && groups.some(g => groupNameToIDMap.get(g)) ? bom : "").filter(b => b).sort(stringSort);
 
 		return <>
 			<label htmlFor={`bom_${num}`}>Group Areas</label>
