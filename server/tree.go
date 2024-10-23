@@ -158,14 +158,18 @@ func (s *Server) getTree(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, s.diToTreeElement(di, filter, allowedGIDs))
+	c.JSON(http.StatusOK, s.diToTreeElement(di, filter, allowedGIDs, path))
 }
 
 // diToTreeElement converts the given dguta.DirInfo to our own TreeElement. It
 // has to do additional database queries to find out if di's children have
 // children. If results don't belong to at least one of the allowedGIDs, they
 // will be marked as NoAuth and won't include child info.
-func (s *Server) diToTreeElement(di *dguta.DirInfo, filter *dguta.Filter, allowedGIDs map[uint32]bool) *TreeElement {
+func (s *Server) diToTreeElement(di *dguta.DirInfo, filter *dguta.Filter, allowedGIDs map[uint32]bool, path string) *TreeElement {
+	s.Logger.Println("di in diToTreeElement: ", di)
+	if di == nil {
+		return &TreeElement{Path: path}
+	}
 	te := s.ddsToTreeElement(di.Current, allowedGIDs)
 	te.Areas = s.areas
 	te.HasChildren = len(di.Children) > 0

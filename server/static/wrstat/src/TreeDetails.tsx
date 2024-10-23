@@ -49,26 +49,23 @@ const TreedetailsComponent = ({ details, ...rest}: { details: Child | null} & Re
 				</tr>
 				<tr>
 					<th>Accessed</th>
-					<td>{formatDate(details.atime)}</td>
+					<td>{details.atime ? formatDate(details.atime): ""}</td>
 				</tr>
 				<tr>
 					<th>Modifed</th>
-					<td>{formatDate(details.mtime)}</td>
+					<td>{details.mtime ? formatDate(details.mtime): ""}</td>
 				</tr>
 				<tr>
 					<th>Groups</th>
-					<td><div>{details.groups.join(", ")}</div></td>
+					<td><div>{details.groups ? details.groups.join(", "): ""}</div></td>
 				</tr>
 				<tr>
 					<th>Users</th>
-					<td><div>{details.users.join(", ")}</div></td>
+					<td><div>{details.users ? details.users.join(", "): ""}</div></td>
 				</tr>
 				<tr>
 					<th>Filetypes</th>
-					<td><div>{details.filetypes.join(", ")}</div></td>
-				</tr>
-				<tr>
-					<th>tesssting</th>
+					<td><div>{details.filetypes ? details.filetypes.join(", "): ""}</div></td>
 				</tr>
 			</tbody>
 		</table>
