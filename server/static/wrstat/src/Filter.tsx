@@ -90,11 +90,23 @@ const stringSort = new Intl.Collator().compare,
 					onChange={e => setAge(+e.target.value)}
 				>
         			<option value="0">All</option>
-       				<option value="1">unused size (1 month)</option>
-       				<option value="7">unused size (5 year)</option>
-					<option value="12">unchanged size (1 year)</option>
-					<option value="16">unchanged size (7 years)</option>
-     			 </select>
+       				<option value="1">unused files (1 month)</option>
+       				<option value="2">unused files (2 months)</option>
+       				<option value="3">unused files (6 months)</option>
+       				<option value="4">unused files (1 year)</option>
+       				<option value="5">unused files (2 years)</option>
+       				<option value="6">unused files (3 years)</option>
+       				<option value="7">unused files (5 years)</option>
+       				<option value="8">unused files (7 years)</option>
+					<option value="9">unchanged files (1 month)</option>
+					<option value="10">unchanged files (2 months)</option>
+					<option value="11">unchanged files (6 months)</option>
+					<option value="12">unchanged files (1 year)</option>
+					<option value="13">unchanged files (2 year)</option>
+					<option value="14">unchanged files (3 year)</option>
+					<option value="15">unchanged files (5 year)</option>
+					<option value="16">unchanged files (7 years)</option>
+     			 </select> <br />
 				<label>Size</label>
 				<Minmax
 					max={usage.reduce((max, curr) => Math.max(max, curr.UsageSize), 0)}
