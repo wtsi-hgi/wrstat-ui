@@ -164,7 +164,7 @@ files. It will use the mtime of the file as the data creation time in reports.
 		}
 
 		if spywareDB != "" {
-			if err := s.InitAnalyticsDB(spywareDB); err != nil {
+			if err = s.InitAnalyticsDB(spywareDB); err != nil {
 				die("failed to init spyware db: %s", err)
 			}
 		}
