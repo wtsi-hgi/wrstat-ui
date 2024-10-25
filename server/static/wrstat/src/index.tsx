@@ -46,7 +46,7 @@ auth.catch(() => createRoot(document.body).render(<StrictMode>
 
 auth.then(username => Promise.all([
 	username,
-	RPC.getGroupUsageData().then(gud => {
+	RPC.getGroupUsageData(0).then(gud => {
 		for (const d of gud) {
 			d.percentSize = Math.round(10000 * d.UsageSize / d.QuotaSize) / 100;
 			d.percentInodes = Math.round(10000 * d.UsageInodes / d.QuotaInodes) / 100;
@@ -70,7 +70,7 @@ auth.then(username => Promise.all([
 
 		return gud;
 	}),
-	RPC.getUserUsageData(),
+	RPC.getUserUsageData(0),
 	RPC.getChildren({ path: "/" })
 ]))
 	.then(([username, groupUsage, userUsage, { areas, timestamp }]) => createRoot(document.body.firstElementChild!).render(<StrictMode>

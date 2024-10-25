@@ -166,7 +166,6 @@ func (s *Server) getTree(c *gin.Context) {
 // children. If results don't belong to at least one of the allowedGIDs, they
 // will be marked as NoAuth and won't include child info.
 func (s *Server) diToTreeElement(di *dguta.DirInfo, filter *dguta.Filter, allowedGIDs map[uint32]bool, path string) *TreeElement {
-	s.Logger.Println("di in diToTreeElement: ", di)
 	if di == nil {
 		return &TreeElement{Path: path}
 	}

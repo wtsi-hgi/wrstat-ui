@@ -36,6 +36,7 @@ import (
 	gas "github.com/wtsi-hgi/go-authserver"
 	ifs "github.com/wtsi-hgi/wrstat-ui/internal/fs"
 	"github.com/wtsi-ssg/wrstat/v5/basedirs"
+	"github.com/wtsi-ssg/wrstat/v5/summary"
 	"github.com/wtsi-ssg/wrstat/v5/watch"
 )
 
@@ -91,7 +92,18 @@ func (s *Server) LoadBasedirsDB(dbPath, ownersPath string) error {
 
 func (s *Server) getBasedirsGroupUsage(c *gin.Context) {
 	s.getBasedirs(c, func() (any, error) {
-		return s.basedirs.GroupUsage()
+		var results []*basedirs.Usage
+
+		for _, age := range summary.DirGUTAges {
+			result, err := s.basedirs.GroupUsage(age)
+			if err != nil {
+				return nil, err
+			}
+
+			results = append(results, result...)
+		}
+
+		return results, nil
 	})
 }
 
@@ -116,7 +128,18 @@ func (s *Server) getBasedirs(c *gin.Context, cb func() (any, error)) {
 
 func (s *Server) getBasedirsUserUsage(c *gin.Context) {
 	s.getBasedirs(c, func() (any, error) {
-		return s.basedirs.UserUsage()
+		var results []*basedirs.Usage
+
+		for _, age := range summary.DirGUTAges {
+			result, err := s.basedirs.UserUsage(age)
+			if err != nil {
+				return nil, err
+			}
+
+			results = append(results, result...)
+		}
+
+		return results, nil
 	})
 }
 
@@ -140,7 +163,18 @@ func (s *Server) getBasedirsGroupSubdirs(c *gin.Context) {
 	}
 
 	s.getBasedirs(c, func() (any, error) {
-		return s.basedirs.GroupSubDirs(uint32(id), basedir)
+		var results []*basedirs.SubDir
+
+		for _, age := range summary.DirGUTAges {
+			result, err := s.basedirs.GroupSubDirs(uint32(id), basedir, age)
+			if err != nil {
+				return nil, err
+			}
+
+			results = append(results, result...)
+		}
+
+		return results, nil
 	})
 }
 
@@ -177,7 +211,18 @@ func (s *Server) getBasedirsUserSubdirs(c *gin.Context) {
 	}
 
 	s.getBasedirs(c, func() (any, error) {
-		return s.basedirs.UserSubDirs(uint32(id), basedir)
+		var results []*basedirs.SubDir
+
+		for _, age := range summary.DirGUTAges {
+			result, err := s.basedirs.UserSubDirs(uint32(id), basedir, age)
+			if err != nil {
+				return nil, err
+			}
+
+			results = append(results, result...)
+		}
+
+		return results, nil
 	})
 }
 

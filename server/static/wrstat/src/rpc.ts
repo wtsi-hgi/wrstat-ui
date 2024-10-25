@@ -137,10 +137,10 @@ const cache = new Map<string, string>(),
 
 const RPC = {
 	"getChildren": (filter: ChildFilter) => getURL<Child>(treeURL, filter),
-	"getGroupUsageData": () => getURL<Usage[]>(groupUsageURL),
-	"getUserUsageData": () => getURL<Usage[]>(userUsageURL),
-	"getBasedirsGroupSubdirs": (id: number, basedir: string) => getURL<SubDir[]>(groupSubDirPathURL, { id, basedir }),
-	"getBasedirsUserSubdirs": (id: number, basedir: string) => getURL<SubDir[]>(userSubDirPathURL, { id, basedir }),
+	"getGroupUsageData": (age: number) => getURL<Usage[]>(groupUsageURL, { age }),
+	"getUserUsageData": (age: number) => getURL<Usage[]>(userUsageURL, { age }),
+	"getBasedirsGroupSubdirs": (id: number, basedir: string, age: number) => getURL<SubDir[]>(groupSubDirPathURL, { id, basedir, age }),
+	"getBasedirsUserSubdirs": (id: number, basedir: string, age: number) => getURL<SubDir[]>(userSubDirPathURL, { id, basedir, age }),
 	"getBasedirsHistory": (id: number, basedir: string) => getURL<History[]>(baseDirHistoryURL, { id, basedir })
 };
 
