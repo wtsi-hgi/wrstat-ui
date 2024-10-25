@@ -74,7 +74,7 @@ func (s *Server) handleAnalytics(c *gin.Context) (int, error) {
 		return code, err
 	}
 
-	sessionID, code, err := s.dataFromBody(c)
+	sessionID, code, err := dataFromBody(c)
 	if sessionID == "" {
 		return code, err
 	}
@@ -118,7 +118,7 @@ func (s *Server) dataFromHeaders(c *gin.Context) (string, url.Values, int, error
 	return username.Username, u.Query(), 0, nil
 }
 
-func (s *Server) dataFromBody(c *gin.Context) (string, int, error) {
+func dataFromBody(c *gin.Context) (string, int, error) {
 	data := sessionPool.Get().(*[14]byte) //nolint:forcetypeassert,errcheck
 	defer sessionPool.Put(data)
 
