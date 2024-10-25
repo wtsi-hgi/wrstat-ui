@@ -3,6 +3,7 @@ package server
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/url"
@@ -12,16 +13,16 @@ import (
 	"unsafe"
 
 	"github.com/gin-gonic/gin"
-	_ "github.com/mattn/go-sqlite3"
+	_ "github.com/mattn/go-sqlite3" //
 )
 
 var (
-	sessionPool     = sync.Pool{New: func() any { return &[14]byte{} }}
-	boolPool        = sync.Pool{New: func() any { return new(bool) }}
-	intPool         = sync.Pool{New: func() any { return new(int) }}
-	intSlicePool    = sync.Pool{New: func() any { return new([]int) }}
-	stringPool      = sync.Pool{New: func() any { return new(string) }}
-	stringSlicePool = sync.Pool{New: func() any { return new([]string) }}
+	sessionPool     = sync.Pool{New: func() any { return &[14]byte{} }}   //nolint:gochecknoglobals
+	boolPool        = sync.Pool{New: func() any { return new(bool) }}     //nolint:gochecknoglobals
+	intPool         = sync.Pool{New: func() any { return new(int) }}      //nolint:gochecknoglobals
+	intSlicePool    = sync.Pool{New: func() any { return new([]int) }}    //nolint:gochecknoglobals
+	stringPool      = sync.Pool{New: func() any { return new(string) }}   //nolint:gochecknoglobals
+	stringSlicePool = sync.Pool{New: func() any { return new([]string) }} //nolint:gochecknoglobals
 )
 
 func (s *Server) InitAnalyticsDB(dbPath string) error {
@@ -37,7 +38,7 @@ func (s *Server) InitAnalyticsDB(dbPath string) error {
 		`CREATE INDEX IF NOT EXISTS username ON [events] (user)`,
 		`CREATE INDEX IF NOT EXISTS sessionID ON [events] (session)`,
 	} {
-		if _, err := db.Exec(table); err != nil {
+		if _, err = db.Exec(table); err != nil {
 			return err
 		}
 	}
@@ -57,7 +58,7 @@ func (s *Server) InitAnalyticsDB(dbPath string) error {
 func (s *Server) recordAnalytics(c *gin.Context) {
 	code, err := s.handleAnalytics(c)
 	if err != nil {
-		c.AbortWithError(code, err)
+		c.AbortWithError(code, err) //nolint:errcheck
 	} else {
 		c.AbortWithStatus(code)
 	}
@@ -69,26 +70,22 @@ func (s *Server) handleAnalytics(c *gin.Context) (int, error) {
 	}
 
 	username, state, code, err := s.dataFromHeaders(c)
-	if code != 0 || err != nil {
+	if username == "" {
 		return code, err
 	}
 
-	data := sessionPool.Get().(*[14]byte)
-	defer sessionPool.Put(data)
-
-	n, err := io.ReadFull(c.Request.Body, data[:])
-	if err != nil && err != io.ErrUnexpectedEOF || n == 0 {
-		return http.StatusBadRequest, err
-
+	sessionID, code, err := s.dataFromBody(c)
+	if sessionID == "" {
+		return code, err
 	}
 
 	if _, err := s.analyticsStmt.Exec(
 		username,
-		unsafe.String(&data[0], n),
+		sessionID,
 		createStateData(state),
 		time.Now().Unix(),
 	); err != nil {
-		return http.StatusInternalServerError, nil
+		return http.StatusInternalServerError, nil //nolint:nilerr
 	}
 
 	return http.StatusNoContent, nil
@@ -105,7 +102,7 @@ func (s *Server) dataFromHeaders(c *gin.Context) (string, url.Values, int, error
 		return "", nil, http.StatusBadRequest, err
 	}
 
-	jwt, _ := c.Cookie("jwt")
+	jwt, _ := c.Cookie("jwt") //nolint:errcheck
 
 	c.Request.Header.Set("Authorization", "Bearer "+jwt)
 
@@ -119,6 +116,18 @@ func (s *Server) dataFromHeaders(c *gin.Context) (string, url.Values, int, error
 	}
 
 	return username.Username, u.Query(), 0, nil
+}
+
+func (s *Server) dataFromBody(c *gin.Context) (string, int, error) {
+	data := sessionPool.Get().(*[14]byte) //nolint:forcetypeassert,errcheck
+	defer sessionPool.Put(data)
+
+	n, err := io.ReadFull(c.Request.Body, data[:])
+	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) || n == 0 {
+		return "", http.StatusBadRequest, err
+	}
+
+	return unsafe.String(&data[0], n), 0, nil
 }
 
 func createStateData(state url.Values) string {
@@ -142,7 +151,7 @@ func createStateData(state url.Values) string {
 
 	var stateData strings.Builder
 
-	json.NewEncoder(&stateData).Encode(stateMap)
+	json.NewEncoder(&stateData).Encode(stateMap) //nolint:errcheck,errchkjson
 
 	return stateData.String()
 }
