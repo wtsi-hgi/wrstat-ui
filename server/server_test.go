@@ -630,7 +630,7 @@ func TestServer(t *testing.T) {
 
 					usageGroup, err := decodeUsageResult(response)
 					So(err, ShouldBeNil)
-					So(len(usageGroup), ShouldEqual, 6)
+					So(len(usageGroup), ShouldEqual, 102)
 					So(usageGroup[0].GID, ShouldNotEqual, 0)
 					So(usageGroup[0].UID, ShouldEqual, 0)
 					So(usageGroup[0].Name, ShouldNotBeBlank)
@@ -645,7 +645,7 @@ func TestServer(t *testing.T) {
 
 					usageUser, err := decodeUsageResult(response)
 					So(err, ShouldBeNil)
-					So(len(usageUser), ShouldEqual, 6)
+					So(len(usageUser), ShouldEqual, 102)
 					So(usageUser[0].GID, ShouldEqual, 0)
 					So(usageUser[0].UID, ShouldNotEqual, 0)
 					So(usageUser[0].Name, ShouldNotBeBlank)
@@ -661,7 +661,7 @@ func TestServer(t *testing.T) {
 
 					subdirs, err := decodeSubdirResult(response)
 					So(err, ShouldBeNil)
-					So(len(subdirs), ShouldEqual, 2)
+					So(len(subdirs), ShouldEqual, 34)
 					So(subdirs[0].SubDir, ShouldEqual, ".")
 					So(subdirs[1].SubDir, ShouldEqual, "sub")
 
@@ -674,7 +674,7 @@ func TestServer(t *testing.T) {
 
 					subdirs, err = decodeSubdirResult(response)
 					So(err, ShouldBeNil)
-					So(len(subdirs), ShouldEqual, 2)
+					So(len(subdirs), ShouldEqual, 34)
 
 					response, err = query(s, EndPointBasedirHistory,
 						fmt.Sprintf("?id=%d&basedir=%s", usageGroup[0].GID, usageGroup[0].BaseDir))
@@ -724,7 +724,7 @@ func TestServer(t *testing.T) {
 
 						usageGroup, err := decodeUsageResult(response)
 						So(err, ShouldBeNil)
-						So(len(usageGroup), ShouldEqual, 6)
+						So(len(usageGroup), ShouldEqual, 102)
 
 						err = os.Chtimes(sentinel, later, later)
 						So(err, ShouldBeNil)
@@ -740,7 +740,7 @@ func TestServer(t *testing.T) {
 
 						usageGroup, err = decodeUsageResult(response)
 						So(err, ShouldBeNil)
-						So(len(usageGroup), ShouldEqual, 1)
+						So(len(usageGroup), ShouldEqual, 17)
 					})
 				})
 			})
@@ -983,7 +983,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 							Atime:       kExpectedAtime,
 							Mtime:       rootExpectedMtime,
 							Users:       []string{username},
-							Groups:      []string{groups[1]},
+							Groups:      []string{groups[2]},
 							FileTypes:   []string{"cram", "dir"},
 							TimeStamp:   "0001-01-01T00:00:00Z",
 							HasChildren: false,
@@ -1262,7 +1262,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 					Get(EndPointAuthBasedirUsageUser)
 				So(err, ShouldBeNil)
 				So(resp.Result(), ShouldNotBeNil)
-				So(len(usage), ShouldEqual, 6)
+				So(len(usage), ShouldEqual, 102)
 				So(usage[0].UID, ShouldNotEqual, 0)
 
 				userUsageUID := usage[0].UID
@@ -1273,7 +1273,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 					Get(EndPointAuthBasedirUsageGroup)
 				So(err, ShouldBeNil)
 				So(resp.Result(), ShouldNotBeNil)
-				So(len(usage), ShouldEqual, 6)
+				So(len(usage), ShouldEqual, 102)
 				So(usage[0].GID, ShouldNotEqual, 0)
 
 				var subdirs []*basedirs.SubDir
@@ -1328,7 +1328,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 						Get(EndPointAuthBasedirSubdirGroup)
 					So(err, ShouldBeNil)
 					So(resp.Result(), ShouldNotBeNil)
-					So(len(subdirs), ShouldEqual, 2)
+					So(len(subdirs), ShouldEqual, 34)
 
 					resp, err = r.SetResult(&subdirs).
 						ForceContentType("application/json").
@@ -1339,32 +1339,11 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 						Get(EndPointAuthBasedirSubdirUser)
 					So(err, ShouldBeNil)
 					So(resp.Result(), ShouldNotBeNil)
-					So(len(subdirs), ShouldEqual, 2)
+					So(len(subdirs), ShouldEqual, 34)
 				})
 			})
 		})
 	})
-}
-
-// getUserAndGroups returns the current users username, uid and gids.
-func getUserAndGroups(t *testing.T) (string, string, []string) {
-	t.Helper()
-
-	uu, err := user.Current()
-	if err != nil {
-		t.Logf("getting current user failed: %s", err.Error())
-
-		return "", "", nil
-	}
-
-	gids, err := uu.GroupIds()
-	if err != nil {
-		t.Logf("getting group ids failed: %s", err.Error())
-
-		return "", "", nil
-	}
-
-	return uu.Username, uu.Uid, gids
 }
 
 // queryWhere does a test GET of /rest/v1/where, with extra appended (start it
