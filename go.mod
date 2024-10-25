@@ -9,6 +9,7 @@ require (
 	github.com/dustin/go-humanize v1.0.1
 	github.com/gin-gonic/gin v1.10.0
 	github.com/inconshreveable/log15 v2.16.0+incompatible
+	github.com/mattn/go-sqlite3 v1.14.24
 	github.com/olekukonko/tablewriter v0.0.5
 	github.com/smartystreets/goconvey v1.7.2
 	github.com/spf13/cobra v1.8.1

@@ -29,6 +29,7 @@
 package server
 
 import (
+	"database/sql"
 	"embed"
 	"io"
 	"sync"
@@ -86,7 +87,8 @@ const (
 	EndPointAuthBasedirHistory     = gas.EndPointAuth + basedirsHistoryPath
 
 	// TreePath is the path to the static tree website.
-	TreePath = "/tree"
+	TreePath    = "/tree"
+	spywarePath = "/spyware"
 
 	// EndPointAuthTree is the endpoint for making treemap queries when
 	// authorization is implemented.
@@ -116,6 +118,9 @@ type Server struct {
 	basedirsPath    string
 	ownersPath      string
 	basedirsWatcher *watch.Watcher
+
+	analyticsDB   *sql.DB
+	analyticsStmt *sql.Stmt
 }
 
 // New creates a Server which can serve a REST API and website.
@@ -154,5 +159,9 @@ func (s *Server) stop() {
 	if s.tree != nil {
 		s.tree.Close()
 		s.tree = nil
+	}
+
+	if s.analyticsDB != nil {
+		s.analyticsDB.Close()
 	}
 }
