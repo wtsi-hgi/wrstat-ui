@@ -30,6 +30,7 @@ package cmd
 import (
 	"encoding/csv"
 	"errors"
+	"fmt"
 	"io"
 	"log/syslog"
 	"os"
@@ -60,6 +61,7 @@ var (
 	oktaOAuthClientSecret string
 	areasPath             string
 	ownersPath            string
+	spywareDB             string
 )
 
 // serverCmd represents the server command.
@@ -161,6 +163,12 @@ files. It will use the mtime of the file as the data creation time in reports.
 			die("failed to add tree page: %s", err)
 		}
 
+		if spywareDB != "" {
+			if err := s.InitAnalyticsDB(spywareDB); err != nil {
+				die("failed to init spyware db: %s", err)
+			}
+		}
+
 		defer s.Stop()
 
 		sayStarted()
@@ -194,6 +202,7 @@ func init() {
 	serverCmd.Flags().StringVarP(&ownersPath, "owners", "o", "", "gid,owner csv file")
 	serverCmd.Flags().StringVar(&serverLogPath, "logfile", "",
 		"log to this file instead of syslog")
+	serverCmd.Flags().StringVar(&spywareDB, "spyware", "s", "path to sqlite database to record analytics")
 }
 
 // checkOAuthArgs ensures we have the necessary args/ env vars for Okta auth.
@@ -320,5 +329,5 @@ func makeCSVReader(path string) (*csv.Reader, *os.File) {
 func sayStarted() {
 	<-time.After(1 * time.Second)
 
-	info("server started")
+	fmt.Println("server started")
 }
