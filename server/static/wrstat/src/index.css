@@ -153,7 +153,7 @@ details[open] summary:after {
   grid-column: 2 / span 3;
 }
 
-.treeFilter>select {
+.treeFilter>select:not(.ageFilter) {
   grid-column: 2 / span 2;
 }
 
