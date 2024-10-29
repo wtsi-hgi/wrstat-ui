@@ -57,15 +57,15 @@ const TreedetailsComponent = ({ details, ...rest}: { details: Child | null} & Re
 				</tr>
 				<tr>
 					<th>Groups</th>
-					<td><div>{details.groups ? details.groups.join(", "): ""}</div></td>
+					<td><div>{details.groups?.join(", ") ?? ""}</div></td>
 				</tr>
 				<tr>
 					<th>Users</th>
-					<td><div>{details.users ? details.users.join(", "): ""}</div></td>
+					<td><div>{details.users?.join(", ") ?? ""}</div></td>
 				</tr>
 				<tr>
 					<th>Filetypes</th>
-					<td><div>{details.filetypes ? details.filetypes.join(", "): ""}</div></td>
+					<td><div>{details.filetypes?.join(", ") ?? ""}</div></td>
 				</tr>
 			</tbody>
 		</table>

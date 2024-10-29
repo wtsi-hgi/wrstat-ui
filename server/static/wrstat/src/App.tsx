@@ -104,9 +104,7 @@ const groupNameToIDMap = new Map<string, number>(),
 
 					return daysAgo >= Math.max(filterMinDaysAgo, axisMinDaysAgo) && daysAgo <= Math.min(filterMaxDaysAgo, axisMaxDaysAgo);
 				},
-				Age: (rowAge: number) => {
-					return rowAge == age
-				},
+				Age: (rowAge: number) => rowAge === age,
 			}, baseFilter),
 			scatterFilter = Object.assign({
 				UsageSize: { min: axisMinSize, max: axisMaxSize },
