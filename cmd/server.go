@@ -30,7 +30,6 @@ package cmd
 import (
 	"encoding/csv"
 	"errors"
-	"fmt"
 	"io"
 	"log/syslog"
 	"os"
@@ -329,5 +328,5 @@ func makeCSVReader(path string) (*csv.Reader, *os.File) {
 func sayStarted() {
 	<-time.After(1 * time.Second)
 
-	fmt.Println("server started")
+	info("server started")
 }
