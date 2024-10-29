@@ -674,7 +674,7 @@ func TestServer(t *testing.T) {
 
 					subdirs, err = decodeSubdirResult(response)
 					So(err, ShouldBeNil)
-					So(len(subdirs), ShouldEqual, 34)
+					So(len(subdirs), ShouldEqual, 17)
 
 					response, err = query(s, EndPointBasedirHistory,
 						fmt.Sprintf("?id=%d&basedir=%s", usageGroup[0].GID, usageGroup[0].BaseDir))
@@ -940,6 +940,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 				expectedMtime := "1970-01-01T00:01:30Z"
 
 				const numRootDirectories = 13
+
 				const numADirectories = 12
 
 				const directorySize = 1024
