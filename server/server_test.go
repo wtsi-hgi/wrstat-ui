@@ -932,7 +932,10 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 
 				users := []string{"root", username}
 				sort.Strings(users)
-				groups := gidsToGroups(t, gids[0], gids[1], "0")
+
+				unsortedGroups := gidsToGroups(t, gids[0], gids[1], "0")
+				groups := make([]string, len(unsortedGroups))
+				copy(groups, unsortedGroups)
 				sort.Strings(groups)
 
 				expectedFTs := []string{"bam", "cram", "dir", "temp"}
@@ -984,7 +987,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 							Atime:       kExpectedAtime,
 							Mtime:       rootExpectedMtime,
 							Users:       []string{username},
-							Groups:      []string{groups[2]},
+							Groups:      []string{unsortedGroups[1]},
 							FileTypes:   []string{"cram", "dir"},
 							TimeStamp:   "0001-01-01T00:00:00Z",
 							HasChildren: false,
