@@ -246,6 +246,7 @@ const groupNameToIDMap = new Map<string, number>(),
 			<History
 				id={selectedID}
 				path={selectedDir}
+				age={age}
 				isUser={byUser}
 				name={selectedRow?.Name}
 				owner={selectedRow?.Owner}
