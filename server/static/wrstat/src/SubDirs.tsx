@@ -34,6 +34,7 @@ import RPC from './rpc';
 type SubDirParams = {
 	id: number;
 	path: string;
+	age: number;
 	isUser: boolean;
 	treePath: string;
 	justDisktree: boolean;
@@ -64,7 +65,7 @@ const pathJoin = (base: string, sub: string) => sub === "." ? base : base + "/" 
 	sortNumFiles = (a: SubDir, b: SubDir) => a.NumFiles - b.NumFiles,
 	sortSizeFiles = (a: SubDir, b: SubDir) => a.SizeFiles - b.SizeFiles,
 	sortLastModifed = (a: SubDir, b: SubDir) => new Date(b.LastModified).valueOf() - new Date(a.LastModified).valueOf(),
-	SubdirsComponent = ({ id, path, isUser, treePath, setTreePath, justDisktree }: SubDirParams) => {
+	SubdirsComponent = ({ id, path, age, isUser, treePath, setTreePath, justDisktree }: SubDirParams) => {
 		const [subdirs, setSubdirs] = useState<SubDir[]>([]);
 
 		useEffect(() => {
@@ -74,9 +75,9 @@ const pathJoin = (base: string, sub: string) => sub === "." ? base : base + "/" 
 				return;
 			}
 
-			(isUser ? RPC.getBasedirsUserSubdirs : RPC.getBasedirsGroupSubdirs)(id, path)
+			(isUser ? RPC.getBasedirsUserSubdirs : RPC.getBasedirsGroupSubdirs)(id, path, age)
 				.then(setSubdirs);
-		}, [id, path, isUser]);
+		}, [id, path, age, isUser]);
 
 		if (!subdirs || subdirs.length === 0) {
 			return <></>;

@@ -171,3 +171,5 @@ replace github.com/docker/spdystream => github.com/docker/spdystream v0.1.0
 
 // mergo moved to a vanity URL in v1.0.0
 replace github.com/imdario/mergo => github.com/imdario/mergo v0.3.16
+
+replace github.com/wtsi-ssg/wrstat/v5 => /nfs/users/nfs_r/rk18/src/wrstat

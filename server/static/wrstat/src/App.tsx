@@ -254,6 +254,7 @@ const groupNameToIDMap = new Map<string, number>(),
 			<SubDirs
 				id={selectedID}
 				path={selectedDir}
+				age={age}
 				isUser={byUser}
 				treePath={treePath}
 				setTreePath={setTreePath}

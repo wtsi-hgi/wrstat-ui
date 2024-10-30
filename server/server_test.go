@@ -688,6 +688,17 @@ func TestServer(t *testing.T) {
 					So(len(history), ShouldEqual, 1)
 					So(history[0].UsageInodes, ShouldEqual, 2)
 
+					response, err = query(s, EndPointBasedirSubdirUser,
+						fmt.Sprintf("?id=%d&basedir=%s&age=%d", usageUser[0].UID, usageUser[0].BaseDir, summary.DGUTAgeA3Y))
+					So(err, ShouldBeNil)
+					So(response.Code, ShouldEqual, http.StatusOK)
+					So(logWriter.String(), ShouldContainSubstring, "[GET /rest/v1/basedirs/subdirs/user")
+					So(logWriter.String(), ShouldContainSubstring, "STATUS=200")
+
+					subdirs, err = decodeSubdirResult(response)
+					So(err, ShouldBeNil)
+					So(len(subdirs), ShouldEqual, 17)
+
 					Convey("Which get updated by an auto-reload when the sentinal file changes", func() {
 						parentDir := filepath.Dir(filepath.Dir(dbPath))
 						sentinel := filepath.Join(parentDir, ".sentinel")

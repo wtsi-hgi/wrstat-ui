@@ -151,7 +151,7 @@ func (s *Server) getBasedirsGroupSubdirs(c *gin.Context) {
 		return
 	}
 
-	id, basedir, ok := getSubdirsArgs(c)
+	id, basedir, age, ok := getSubdirsArgs(c)
 	if !ok {
 		return
 	}
@@ -165,41 +165,53 @@ func (s *Server) getBasedirsGroupSubdirs(c *gin.Context) {
 	s.getBasedirs(c, func() (any, error) {
 		var results []*basedirs.SubDir
 
-		for _, age := range summary.DirGUTAges {
-			result, err := s.basedirs.GroupSubDirs(uint32(id), basedir, age)
-			if err != nil {
-				return nil, err
-			}
-
-			results = append(results, result...)
+		// for _, age := range summary.DirGUTAges {
+		result, err := s.basedirs.GroupSubDirs(uint32(id), basedir, age)
+		if err != nil {
+			return nil, err
 		}
+
+		results = append(results, result...)
+		// }
 
 		return results, nil
 	})
 }
 
-func getSubdirsArgs(c *gin.Context) (int, string, bool) {
+func getSubdirsArgs(c *gin.Context) (int, string, summary.DirGUTAge, bool) {
 	idStr := c.Query("id")
 	basedir := c.Query("basedir")
+	ageStr := c.Query("age")
 
 	if idStr == "" || basedir == "" {
 		c.AbortWithError(http.StatusBadRequest, ErrBadBasedirsQuery) //nolint:errcheck
 
-		return 0, "", false
+		return 0, "", summary.DGUTAgeAll, false
 	}
 
 	id, err := strconv.Atoi(idStr)
 	if err != nil {
 		c.AbortWithError(http.StatusBadRequest, ErrBadBasedirsQuery) //nolint:errcheck
 
-		return 0, "", false
+		return 0, "", summary.DGUTAgeAll, false
 	}
 
-	return id, basedir, true
+	if ageStr == "" {
+		ageStr = "0"
+	}
+
+	age, err := summary.AgeStringToDirGUTAge(ageStr)
+	if err != nil {
+		c.AbortWithError(http.StatusBadRequest, ErrBadBasedirsQuery) //nolint:errcheck
+
+		return 0, "", summary.DGUTAgeAll, false
+	}
+
+	return id, basedir, age, true
 }
 
 func (s *Server) getBasedirsUserSubdirs(c *gin.Context) {
-	id, basedir, ok := getSubdirsArgs(c)
+	id, basedir, age, ok := getSubdirsArgs(c)
 	if !ok {
 		return
 	}
@@ -213,14 +225,14 @@ func (s *Server) getBasedirsUserSubdirs(c *gin.Context) {
 	s.getBasedirs(c, func() (any, error) {
 		var results []*basedirs.SubDir
 
-		for _, age := range summary.DirGUTAges {
-			result, err := s.basedirs.UserSubDirs(uint32(id), basedir, age)
-			if err != nil {
-				return nil, err
-			}
-
-			results = append(results, result...)
+		// for _, age := range summary.DirGUTAges {
+		result, err := s.basedirs.UserSubDirs(uint32(id), basedir, age)
+		if err != nil {
+			return nil, err
 		}
+
+		results = append(results, result...)
+		// }
 
 		return results, nil
 	})
@@ -248,7 +260,7 @@ func (s *Server) isUserAuthedToReadPath(c *gin.Context, path string) bool {
 }
 
 func (s *Server) getBasedirsHistory(c *gin.Context) {
-	id, basedir, ok := getSubdirsArgs(c)
+	id, basedir, _, ok := getSubdirsArgs(c)
 	if !ok {
 		return
 	}
