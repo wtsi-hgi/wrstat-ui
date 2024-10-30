@@ -33,12 +33,15 @@ func (s *Server) InitAnalyticsDB(dbPath string) error {
 
 	db.SetMaxOpenConns(1)
 
-	for _, table := range [...]string{
+	for _, cmd := range [...]string{
+		`PRAGMA JOURNAL_MODE = DELETE;`,
 		`CREATE TABLE IF NOT EXISTS [events] (user TEXT, session TEXT, state TEXT, time INTEGER)`,
 		`CREATE INDEX IF NOT EXISTS username ON [events] (user)`,
 		`CREATE INDEX IF NOT EXISTS sessionID ON [events] (session)`,
+		`CREATE INDEX IF NOT EXISTS eventTime ON [events] (time)`,
+		`VACUUM;`,
 	} {
-		if _, err = db.Exec(table); err != nil {
+		if _, err = db.Exec(cmd); err != nil {
 			return err
 		}
 	}
