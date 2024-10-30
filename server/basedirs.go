@@ -165,14 +165,12 @@ func (s *Server) getBasedirsGroupSubdirs(c *gin.Context) {
 	s.getBasedirs(c, func() (any, error) {
 		var results []*basedirs.SubDir
 
-		// for _, age := range summary.DirGUTAges {
 		result, err := s.basedirs.GroupSubDirs(uint32(id), basedir, age)
 		if err != nil {
 			return nil, err
 		}
 
 		results = append(results, result...)
-		// }
 
 		return results, nil
 	})
@@ -225,14 +223,12 @@ func (s *Server) getBasedirsUserSubdirs(c *gin.Context) {
 	s.getBasedirs(c, func() (any, error) {
 		var results []*basedirs.SubDir
 
-		// for _, age := range summary.DirGUTAges {
 		result, err := s.basedirs.UserSubDirs(uint32(id), basedir, age)
 		if err != nil {
 			return nil, err
 		}
 
 		results = append(results, result...)
-		// }
 
 		return results, nil
 	})
