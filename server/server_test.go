@@ -799,7 +799,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 		c, err := gas.NewClientCLI(jwtBasename, serverTokenBasename, "localhost:1", cert, true)
 		So(err, ShouldBeNil)
 
-		_, _, err = GetWhereDataIs(c, "", "", "", "", "")
+		_, _, err = GetWhereDataIs(c, "", "", "", "", summary.DGUTAgeAll, "")
 		So(err, ShouldNotBeNil)
 
 		path, err := internaldb.CreateExampleDGUTADBCustomIDs(t, uid, gids[0], gids[1], int(refTime))
@@ -818,7 +818,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 			err = s.LoadDGUTADBs(path)
 			So(err, ShouldBeNil)
 
-			_, _, err = GetWhereDataIs(c, "/", "", "", "", "")
+			_, _, err = GetWhereDataIs(c, "/", "", "", "", summary.DGUTAgeAll, "")
 			So(err, ShouldNotBeNil)
 			So(err, ShouldEqual, gas.ErrNoAuth)
 
@@ -838,27 +838,33 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 			err = c.Login("user", "pass")
 			So(err, ShouldBeNil)
 
-			_, _, err = GetWhereDataIs(c, "", "", "", "", "")
+			_, _, err = GetWhereDataIs(c, "", "", "", "", summary.DGUTAgeAll, "")
 			So(err, ShouldNotBeNil)
 			So(err, ShouldEqual, ErrBadQuery)
 
-			json, dcss, errg := GetWhereDataIs(c, "/", "", "", "", "0")
+			json, dcss, errg := GetWhereDataIs(c, "/", "", "", "", summary.DGUTAgeAll, "0")
 			So(errg, ShouldBeNil)
 			So(string(json), ShouldNotBeBlank)
 			So(len(dcss), ShouldEqual, 1)
 			So(dcss[0].Count, ShouldEqual, 24)
 
-			json, dcss, errg = GetWhereDataIs(c, "/", g.Name, "", "", "0")
+			json, dcss, errg = GetWhereDataIs(c, "/", g.Name, "", "", summary.DGUTAgeAll, "0")
 			So(errg, ShouldBeNil)
 			So(string(json), ShouldNotBeBlank)
 			So(len(dcss), ShouldEqual, 1)
 			So(dcss[0].Count, ShouldEqual, 13)
 
-			json, dcss, errg = GetWhereDataIs(c, "/", "", "root", "", "0")
+			json, dcss, errg = GetWhereDataIs(c, "/", "", "root", "", summary.DGUTAgeAll, "0")
 			So(errg, ShouldBeNil)
 			So(string(json), ShouldNotBeBlank)
 			So(len(dcss), ShouldEqual, 1)
 			So(dcss[0].Count, ShouldEqual, 14)
+
+			json, dcss, errg = GetWhereDataIs(c, "/", "", "", "", summary.DGUTAgeA7Y, "0")
+			So(errg, ShouldBeNil)
+			So(string(json), ShouldNotBeBlank)
+			So(len(dcss), ShouldEqual, 1)
+			So(dcss[0].Count, ShouldEqual, 19)
 		})
 
 		Convey("Normal users have access restricted only by group", func() {
@@ -873,19 +879,19 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 			err = c.Login("user", "pass")
 			So(err, ShouldBeNil)
 
-			json, dcss, errg := GetWhereDataIs(c, "/", "", "", "", "0")
+			json, dcss, errg := GetWhereDataIs(c, "/", "", "", "", summary.DGUTAgeAll, "0")
 			So(errg, ShouldBeNil)
 			So(string(json), ShouldNotBeBlank)
 			So(len(dcss), ShouldEqual, 1)
 			So(dcss[0].Count, ShouldEqual, 23)
 
-			json, dcss, errg = GetWhereDataIs(c, "/", g.Name, "", "", "0")
+			json, dcss, errg = GetWhereDataIs(c, "/", g.Name, "", "", summary.DGUTAgeAll, "0")
 			So(errg, ShouldBeNil)
 			So(string(json), ShouldNotBeBlank)
 			So(len(dcss), ShouldEqual, 1)
 			So(dcss[0].Count, ShouldEqual, 13)
 
-			_, _, errg = GetWhereDataIs(c, "/", "", "root", "", "0")
+			_, _, errg = GetWhereDataIs(c, "/", "", "root", "", summary.DGUTAgeAll, "0")
 			So(errg, ShouldBeNil)
 			So(string(json), ShouldNotBeBlank)
 			So(len(dcss), ShouldEqual, 1)
