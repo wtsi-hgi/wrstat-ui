@@ -37,6 +37,7 @@ import { exceedDates } from "./trend";
 type HistoryParams = {
 	id: number;
 	path: string;
+	age: number;
 	name: string;
 	owner: string;
 	isUser: boolean;
@@ -90,7 +91,7 @@ const determineGraphWidth = () => Math.max(500, window.innerWidth - 60),
 
 		return <></>;
 	},
-	HistoryComponent = ({ id, path, name, owner, isUser, justDisktree }: HistoryParams) => {
+	HistoryComponent = ({ id, path, age, name, owner, isUser, justDisktree }: HistoryParams) => {
 		const [inodeHistory, setInodeHistory] = useSavedState("inodeHistory", false),
 			[history, setHistory] = useState<History[]>([]),
 			[historyWidth, setHistoryWidth] = useState(determineGraphWidth()),
@@ -112,7 +113,7 @@ const determineGraphWidth = () => Math.max(500, window.innerWidth - 60),
 
 		useEffect(() => window.addEventListener("resize", () => setHistoryWidth(determineGraphWidth())), []);
 
-		if (history.length === 0 || isUser) {
+		if (history.length === 0 || isUser || age !== 0) {
 			return <></>;
 		}
 

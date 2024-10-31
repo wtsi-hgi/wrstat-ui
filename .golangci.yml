@@ -64,6 +64,7 @@ issues:
         - revive
     - path: internal
       linters:
+        - mnd
         - gomnd
         - funlen
     - path: cmd

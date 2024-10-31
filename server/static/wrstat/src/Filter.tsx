@@ -36,6 +36,8 @@ type FilterParams = {
 	usage: Usage[];
 	groupUsage: Usage[];
 	byUser: boolean;
+	age: number;
+	setAge: (v: number) => void;
 	axisMinSize: number;
 	setAxisMinSize: (v: number) => void;
 	axisMaxSize: number;
@@ -58,6 +60,8 @@ const stringSort = new Intl.Collator().compare,
 	FilterComponent = ({
 		usage,
 		byUser,
+		age,
+		setAge,
 		axisMinSize, setAxisMinSize,
 		axisMaxSize, setAxisMaxSize,
 		axisMinDaysAgo, setAxisMinDaysAgo,
@@ -72,14 +76,40 @@ const stringSort = new Intl.Collator().compare,
 	}: FilterParams) => {
 		return <>
 			<div className="treeFilter">
-				<label htmlFor={`owners`}>Owners</label>
+				<label htmlFor="owners">Owners</label>
 				<MultiSelect
-					id={`owners`}
+					id="owners"
 					list={Array.from(new Set(groupUsage.map(e => e.Owner).filter(o => o)).values()).sort(stringSort)}
 					selected={owners}
 					onchange={setOwners}
 					disabled={byUser} />
 				<GroupUserFilter {...guf} num={0} />
+				<label htmlFor="age">Age</label>
+				<select className="ageFilter"
+					id="age"
+					name="selectedAge"
+					value={age}
+					onChange={e => setAge(+e.target.value)}
+				>
+					<option value="0">All</option>
+					<option value="1">unused {'>'} 1 month</option>
+					<option value="2">unused {'>'} 2 months</option>
+					<option value="3">unused {'>'} 6 months</option>
+					<option value="4">unused {'>'} 1 year</option>
+					<option value="5">unused {'>'} 2 years</option>
+					<option value="6">unused {'>'} 3 years</option>
+					<option value="7">unused {'>'} 5 years</option>
+					<option value="8">unused {'>'} 7 years</option>
+					<option value="9">unchanged {'>'} 1 month</option>
+					<option value="10">unchanged {'>'} 2 months</option>
+					<option value="11">unchanged {'>'} 6 months</option>
+					<option value="12">unchanged {'>'} 1 year</option>
+					<option value="13">unchanged {'>'} 2 years</option>
+					<option value="14">unchanged {'>'} 3 years</option>
+					<option value="15">unchanged {'>'} 5 years</option>
+					<option value="16">unchanged {'>'} 7 years</option>
+				</select> <br />
+				<div></div>
 				<label>Size</label>
 				<Minmax
 					max={usage.reduce((max, curr) => Math.max(max, curr.UsageSize), 0)}

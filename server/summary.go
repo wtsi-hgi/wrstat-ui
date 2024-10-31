@@ -31,13 +31,13 @@ import (
 	"sort"
 	"time"
 
-	"github.com/wtsi-ssg/wrstat/v5/dgut"
+	"github.com/wtsi-ssg/wrstat/v5/dguta"
 	"github.com/wtsi-ssg/wrstat/v5/summary"
 )
 
 // DirSummary holds nested file count, size and atime information on a
 // directory. It also holds which users and groups own files nested under the
-// directory, and their file types. It differs from dgut.DirSummary in having
+// directory, and their file types. It differs from dguta.DirSummary in having
 // string names for users, groups and types, instead of ids.
 type DirSummary struct {
 	Dir       string
@@ -48,24 +48,25 @@ type DirSummary struct {
 	Users     []string
 	Groups    []string
 	FileTypes []string
+	Age       summary.DirGUTAge
 }
 
 // dcssToSummaries converts the given DCSs to our own DirSummary, the difference
 // being we change the UIDs to usernames and the GIDs to group names. On failure
 // to convert, the name will skipped.
-func (s *Server) dcssToSummaries(dcss dgut.DCSs) []*DirSummary {
+func (s *Server) dcssToSummaries(dcss dguta.DCSs) []*DirSummary {
 	summaries := make([]*DirSummary, len(dcss))
 
 	for i, dds := range dcss {
-		summaries[i] = s.dgutDStoSummary(dds)
+		summaries[i] = s.dgutaDStoSummary(dds)
 	}
 
 	return summaries
 }
 
-// dgutDStoSummary converts the given dgut.DirSummary to one of our DirSummary,
-// basically just converting the *IDs to names.
-func (s *Server) dgutDStoSummary(dds *dgut.DirSummary) *DirSummary {
+// dgutaDStoSummary converts the given dguta.DirSummary to one of our
+// DirSummary, basically just converting the *IDs to names.
+func (s *Server) dgutaDStoSummary(dds *dguta.DirSummary) *DirSummary {
 	return &DirSummary{
 		Dir:       dds.Dir,
 		Count:     dds.Count,
@@ -75,6 +76,7 @@ func (s *Server) dgutDStoSummary(dds *dgut.DirSummary) *DirSummary {
 		Users:     s.uidsToUsernames(dds.UIDs),
 		Groups:    s.gidsToNames(dds.GIDs),
 		FileTypes: s.ftsToNames(dds.FTs),
+		Age:       dds.Age,
 	}
 }
 
@@ -149,7 +151,7 @@ func (s *Server) gidsToNames(gids []uint32) []string {
 }
 
 // ftsToNames converts the given file types to their names, sorted on the names.
-func (s *Server) ftsToNames(fts []summary.DirGUTFileType) []string {
+func (s *Server) ftsToNames(fts []summary.DirGUTAFileType) []string {
 	names := make([]string, len(fts))
 
 	for i, ft := range fts {

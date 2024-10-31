@@ -42,6 +42,7 @@ type DiskTreeParams = {
 	treePath: string;
 	userMap: Map<number, string>;
 	groupMap: Map<number, string>;
+	age: number;
 	setTreePath: (v: string) => void;
 	guf: GroupUserFilterParams;
 }
@@ -113,11 +114,12 @@ const colours = [
 		return breadcrumbs;
 	},
 	determineTreeWidth = () => Math.max(window.innerWidth - 420, 400),
-	makeFilter = (path: string, uids: number[], gids: number[], filetypes: string[], users: Map<number, string>, groups: Map<number, string>) => ({
+	makeFilter = (path: string, uids: number[], gids: number[], filetypes: string[],age: number, users: Map<number, string>, groups: Map<number, string>) => ({
 		path,
 		"users": uids.map(uid => users.get(uid) ?? "").filter(u => u).join(",") ?? "",
 		"groups": gids.map(gid => groups.get(gid) ?? "").filter(g => g).join(",") ?? "",
-		"types": filetypes.join(",")
+		"types": filetypes.join(","),
+		"age": age
 	}),
 	fileTypes = [
 		"other", "temp", "vcf", "vcf.gz", "bcf", "sam", "bam",
@@ -136,7 +138,7 @@ const colours = [
 		["> 7 years", 2555],
 	] as const,
 	entrySort = (a: Entry, b: Entry) => b.value - a.value,
-	DiskTreeComponent = ({ treePath, userMap, groupMap, setTreePath, guf }: DiskTreeParams) => {
+	DiskTreeComponent = ({ treePath, userMap, groupMap, age, setTreePath, guf }: DiskTreeParams) => {
 		const [treeMapData, setTreeMapData] = useState<Entry[] | null>(null),
 			[breadcrumbs, setBreadcrumbs] = useState<JSX.Element[]>([]),
 			[childDetails, setChildDetails] = useState<Child | null>(null),
@@ -154,7 +156,7 @@ const colours = [
 		useEffect(() => window.addEventListener("resize", () => setTreeWidth(determineTreeWidth())), []);
 
 		useEffect(() => {
-			RPC.getChildren(makeFilter(treePath, guf.users, guf.groups, filterFileTypes, userMap, groupMap))
+			RPC.getChildren(makeFilter(treePath, guf.users, guf.groups, filterFileTypes, age, userMap, groupMap))
 				.then(children => {
 					const entries: Entry[] = [],
 						since = Date.now() - sinceLastAccess * 86_400_000;
@@ -185,7 +187,7 @@ const colours = [
 				});
 
 			setBreadcrumbs(makeBreadcrumbs(treePath, setTreePath));
-		}, [treePath, useMTime, useCount, filterFileTypes, sinceLastAccess, guf.groups, guf.users]);
+		}, [treePath, useMTime, useCount, filterFileTypes, age, sinceLastAccess, guf.groups, guf.users]);
 
 		return <>
 			<div>

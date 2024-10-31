@@ -50,7 +50,8 @@ import (
 	ifs "github.com/wtsi-hgi/wrstat-ui/internal/fs"
 	"github.com/wtsi-hgi/wrstat-ui/internal/split"
 	"github.com/wtsi-ssg/wrstat/v5/basedirs"
-	"github.com/wtsi-ssg/wrstat/v5/dgut"
+	"github.com/wtsi-ssg/wrstat/v5/dguta"
+	"github.com/wtsi-ssg/wrstat/v5/summary"
 )
 
 func TestIDsToWanted(t *testing.T) {
@@ -65,17 +66,19 @@ func TestServer(t *testing.T) {
 	exampleGIDs := getExampleGIDs(gids)
 	sentinelPollFrequency := 10 * time.Millisecond
 
+	refTime := time.Now().Unix()
+
 	Convey("Given a Server", t, func() {
 		logWriter := gas.NewStringLogger()
 		s := New(logWriter)
 
-		Convey("You can convert dgut.DCSs to DirSummarys", func() {
+		Convey("You can convert dguta.DCSs to DirSummarys", func() {
 			uid32, err := strconv.Atoi(uid)
 			So(err, ShouldBeNil)
 			gid32, err := strconv.Atoi(gids[0])
 			So(err, ShouldBeNil)
 
-			dcss := dgut.DCSs{
+			dcss := dguta.DCSs{
 				{
 					Dir:   "/foo",
 					Count: 1,
@@ -178,13 +181,13 @@ func TestServer(t *testing.T) {
 			So(logWriter.String(), ShouldContainSubstring, "STATUS=404")
 			logWriter.Reset()
 
-			Convey("And given a dgut database", func() {
-				path, err := internaldb.CreateExampleDGUTDBCustomIDs(t, uid, gids[0], gids[1])
+			Convey("And given a dguta database", func() {
+				path, err := internaldb.CreateExampleDGUTADBCustomIDs(t, uid, gids[0], gids[1], int(refTime))
 				So(err, ShouldBeNil)
 				groupA := gidToGroup(t, gids[0])
 				groupB := gidToGroup(t, gids[1])
 
-				tree, err := dgut.NewTree(path)
+				tree, err := dguta.NewTree(path)
 				So(err, ShouldBeNil)
 
 				expectedRaw, err := tree.Where("/", nil, split.SplitsToSplitFn(2))
@@ -200,8 +203,8 @@ func TestServer(t *testing.T) {
 
 				tree.Close()
 
-				Convey("You can get results after calling LoadDGUTDB", func() {
-					err = s.LoadDGUTDBs(path)
+				Convey("You can get results after calling LoadDGUTADB", func() {
+					err = s.LoadDGUTADBs(path)
 					So(err, ShouldBeNil)
 
 					response, err := queryWhere(s, "")
@@ -229,7 +232,6 @@ func TestServer(t *testing.T) {
 						expectedBams := []string{"bam", "temp"}
 						expectedCrams := []string{"cram"}
 						expectedAtime := time.Unix(50, 0)
-
 						matrix := []*matrixElement{
 							{"?groups=" + groups[0] + "," + groups[1], expectedNonRoot},
 							{"?groups=" + groups[0], []*DirSummary{
@@ -319,14 +321,15 @@ func TestServer(t *testing.T) {
 									Groups: expectedGroupsA, FileTypes: expectedCrams,
 								},
 							}},
-							{"?groups=" + groups[0] + "&users=root&types=bam", []*DirSummary{
+							{"?groups=" + groups[0] + "&users=root&types=bam", []*DirSummary{}},
+							{"?splits=0", []*DirSummary{
 								{
-									Dir: "/", Count: 0, Size: 0, Atime: time.Unix(0, 0),
-									Mtime: time.Unix(0, 0), Users: []string{}, Groups: []string{},
-									FileTypes: []string{},
+									Dir: "/", Count: 24, Size: 141, Atime: expectedAtime,
+									Mtime: expectedNonRoot[0].Mtime, Users: expectedUsers,
+									Groups: expectedGroupsRoot, FileTypes: expectedFTs,
 								},
 							}},
-							{"?splits=0", []*DirSummary{
+							{"?dir=/a&splits=0", []*DirSummary{
 								{
 									Dir: "/a", Count: 19, Size: 126, Atime: expectedAtime,
 									Mtime: time.Unix(90, 0), Users: expectedUsers,
@@ -343,6 +346,42 @@ func TestServer(t *testing.T) {
 									Dir: "/a/b/e/h/tmp", Count: 1, Size: 5, Atime: time.Unix(80, 0),
 									Mtime: time.Unix(80, 0), Users: expectedUser,
 									Groups: expectedGroupsA, FileTypes: expectedBams,
+								},
+							}},
+							{"?dir=/k&age=1", []*DirSummary{
+								{
+									Dir: "/k", Count: 4, Size: 10, Atime: expectedNonRoot[3].Atime,
+									Mtime: time.Unix(refTime-(summary.SecondsInAMonth*2), 0), Users: expectedUser,
+									Groups: expectedGroupsB, FileTypes: expectedCrams, Age: summary.DGUTAgeA1M,
+								},
+							}},
+							{"?dir=/k&age=2", []*DirSummary{
+								{
+									Dir: "/k", Count: 3, Size: 7, Atime: expectedNonRoot[3].Atime,
+									Mtime: time.Unix(refTime-summary.SecondsInAYear, 0), Users: expectedUser,
+									Groups: expectedGroupsB, FileTypes: expectedCrams, Age: summary.DGUTAgeA2M,
+								},
+							}},
+							{"?dir=/k&age=6", []*DirSummary{
+								{
+									Dir: "/k", Count: 1, Size: 1, Atime: expectedNonRoot[3].Atime,
+									Mtime: time.Unix(refTime-(summary.SecondsInAYear*7), 0), Users: expectedUser,
+									Groups: expectedGroupsB, FileTypes: expectedCrams, Age: summary.DGUTAgeA3Y,
+								},
+							}},
+							{"?dir=/k&age=8", []*DirSummary{}},
+							{"?dir=/k&age=11", []*DirSummary{
+								{
+									Dir: "/k", Count: 3, Size: 7, Atime: expectedNonRoot[3].Atime,
+									Mtime: time.Unix(refTime-(summary.SecondsInAYear), 0), Users: expectedUser,
+									Groups: expectedGroupsB, FileTypes: expectedCrams, Age: summary.DGUTAgeM6M,
+								},
+							}},
+							{"?dir=/k&age=16", []*DirSummary{
+								{
+									Dir: "/k", Count: 1, Size: 1, Atime: expectedNonRoot[3].Atime,
+									Mtime: time.Unix(refTime-(summary.SecondsInAYear*7), 0), Users: expectedUser,
+									Groups: expectedGroupsB, FileTypes: expectedCrams, Age: summary.DGUTAgeM7Y,
 								},
 							}},
 						}
@@ -369,11 +408,11 @@ func TestServer(t *testing.T) {
 					})
 
 					Convey("And you can auto-reload a new database", func() {
-						pathNew, errc := internaldb.CreateExampleDGUTDBCustomIDs(t, uid, gids[1], gids[0])
+						pathNew, errc := internaldb.CreateExampleDGUTADBCustomIDs(t, uid, gids[1], gids[0], int(refTime))
 						So(errc, ShouldBeNil)
 
 						grandparentDir := filepath.Dir(filepath.Dir(path))
-						newerPath := filepath.Join(grandparentDir, "newer."+internaldb.ExampleDgutDirParentSuffix, "0")
+						newerPath := filepath.Join(grandparentDir, "newer."+internaldb.ExampleDgutaDirParentSuffix, "0")
 						err = os.MkdirAll(filepath.Dir(newerPath), internaldb.DirPerms)
 						So(err, ShouldBeNil)
 						err = os.Rename(pathNew, newerPath)
@@ -391,8 +430,8 @@ func TestServer(t *testing.T) {
 
 						sentinel := path + ".sentinel"
 
-						err = s.EnableDGUTDBReloading(sentinel, grandparentDir,
-							internaldb.ExampleDgutDirParentSuffix, sentinelPollFrequency)
+						err = s.EnableDGUTADBReloading(sentinel, grandparentDir,
+							internaldb.ExampleDgutaDirParentSuffix, sentinelPollFrequency)
 						So(err, ShouldNotBeNil)
 
 						file, err := os.Create(sentinel)
@@ -404,8 +443,8 @@ func TestServer(t *testing.T) {
 						So(s.dataTimeStamp.IsZero(), ShouldBeTrue)
 						s.treeMutex.RUnlock()
 
-						err = s.EnableDGUTDBReloading(sentinel, grandparentDir,
-							internaldb.ExampleDgutDirParentSuffix, sentinelPollFrequency)
+						err = s.EnableDGUTADBReloading(sentinel, grandparentDir,
+							internaldb.ExampleDgutaDirParentSuffix, sentinelPollFrequency)
 						So(err, ShouldBeNil)
 
 						s.treeMutex.RLock()
@@ -447,9 +486,9 @@ func TestServer(t *testing.T) {
 						So(err, ShouldBeNil)
 						So(result, ShouldNotResemble, expected)
 
-						s.dgutWatcher.RLock()
-						So(s.dgutWatcher, ShouldNotBeNil)
-						s.dgutWatcher.RUnlock()
+						s.dgutaWatcher.RLock()
+						So(s.dgutaWatcher, ShouldNotBeNil)
+						s.dgutaWatcher.RUnlock()
 						So(s.tree, ShouldNotBeNil)
 
 						certPath, keyPath, err := gas.CreateTestCert(t)
@@ -459,13 +498,13 @@ func TestServer(t *testing.T) {
 
 						errs := stop()
 						So(errs, ShouldBeNil)
-						So(s.dgutWatcher, ShouldBeNil)
+						So(s.dgutaWatcher, ShouldBeNil)
 						So(s.tree, ShouldBeNil)
 
 						s.Stop()
 					})
 
-					Convey("EnableDGUTDBReloading logs errors", func() {
+					Convey("EnableDGUTADBReloading logs errors", func() {
 						sentinel := path + ".sentinel"
 						testSuffix := "test"
 
@@ -475,7 +514,7 @@ func TestServer(t *testing.T) {
 						So(err, ShouldBeNil)
 
 						testReloadFail := func(dir, message string) {
-							err = s.EnableDGUTDBReloading(sentinel, dir, testSuffix, sentinelPollFrequency)
+							err = s.EnableDGUTADBReloading(sentinel, dir, testSuffix, sentinelPollFrequency)
 							So(err, ShouldBeNil)
 
 							now := time.Now().Local()
@@ -533,7 +572,7 @@ func TestServer(t *testing.T) {
 						})
 
 						Convey("when the old path can't be deleted", func() {
-							s.dgutPaths = []string{"."}
+							s.dgutaPaths = []string{"."}
 							tpath := makeTestPath()
 
 							cmd := exec.Command("cp", "--recursive", path, filepath.Join(tpath, "0"))
@@ -551,8 +590,8 @@ func TestServer(t *testing.T) {
 				})
 			})
 
-			Convey("LoadDGUTDBs fails on an invalid path", func() {
-				err := s.LoadDGUTDBs("/foo")
+			Convey("LoadDGUTADBs fails on an invalid path", func() {
+				err := s.LoadDGUTADBs("/foo")
 				So(err, ShouldNotBeNil)
 			})
 		})
@@ -566,7 +605,7 @@ func TestServer(t *testing.T) {
 			logWriter.Reset()
 
 			Convey("And given a basedirs database", func() {
-				tree, _, err := internaldb.CreateExampleDGUTDBForBasedirs(t)
+				tree, _, err := internaldb.CreateExampleDGUTADBForBasedirs(t)
 				So(err, ShouldBeNil)
 
 				dbPath, ownersPath, err := createExampleBasedirsDB(t, tree)
@@ -591,7 +630,7 @@ func TestServer(t *testing.T) {
 
 					usageGroup, err := decodeUsageResult(response)
 					So(err, ShouldBeNil)
-					So(len(usageGroup), ShouldEqual, 6)
+					So(len(usageGroup), ShouldEqual, 102)
 					So(usageGroup[0].GID, ShouldNotEqual, 0)
 					So(usageGroup[0].UID, ShouldEqual, 0)
 					So(usageGroup[0].Name, ShouldNotBeBlank)
@@ -606,7 +645,7 @@ func TestServer(t *testing.T) {
 
 					usageUser, err := decodeUsageResult(response)
 					So(err, ShouldBeNil)
-					So(len(usageUser), ShouldEqual, 6)
+					So(len(usageUser), ShouldEqual, 102)
 					So(usageUser[0].GID, ShouldEqual, 0)
 					So(usageUser[0].UID, ShouldNotEqual, 0)
 					So(usageUser[0].Name, ShouldNotBeBlank)
@@ -635,7 +674,7 @@ func TestServer(t *testing.T) {
 
 					subdirs, err = decodeSubdirResult(response)
 					So(err, ShouldBeNil)
-					So(len(subdirs), ShouldEqual, 2)
+					So(len(subdirs), ShouldEqual, 1)
 
 					response, err = query(s, EndPointBasedirHistory,
 						fmt.Sprintf("?id=%d&basedir=%s", usageGroup[0].GID, usageGroup[0].BaseDir))
@@ -648,6 +687,17 @@ func TestServer(t *testing.T) {
 					So(err, ShouldBeNil)
 					So(len(history), ShouldEqual, 1)
 					So(history[0].UsageInodes, ShouldEqual, 2)
+
+					response, err = query(s, EndPointBasedirSubdirUser,
+						fmt.Sprintf("?id=%d&basedir=%s&age=%d", usageUser[0].UID, usageUser[0].BaseDir, summary.DGUTAgeA3Y))
+					So(err, ShouldBeNil)
+					So(response.Code, ShouldEqual, http.StatusOK)
+					So(logWriter.String(), ShouldContainSubstring, "[GET /rest/v1/basedirs/subdirs/user")
+					So(logWriter.String(), ShouldContainSubstring, "STATUS=200")
+
+					subdirs, err = decodeSubdirResult(response)
+					So(err, ShouldBeNil)
+					So(len(subdirs), ShouldEqual, 1)
 
 					Convey("Which get updated by an auto-reload when the sentinal file changes", func() {
 						parentDir := filepath.Dir(filepath.Dir(dbPath))
@@ -664,8 +714,8 @@ func TestServer(t *testing.T) {
 						gid, uid, _, _, err := internaldata.RealGIDAndUID()
 						So(err, ShouldBeNil)
 
-						_, files := internaldata.FakeFilesForDGUTDBForBasedirsTesting(gid, uid)
-						tree, _, err = internaldb.CreateDGUTDBFromFakeFiles(t, files[:1])
+						_, files := internaldata.FakeFilesForDGUTADBForBasedirsTesting(gid, uid)
+						tree, _, err = internaldb.CreateDGUTADBFromFakeFiles(t, files[:1])
 						So(err, ShouldBeNil)
 
 						pathNew, _, err := createExampleBasedirsDB(t, tree)
@@ -685,7 +735,7 @@ func TestServer(t *testing.T) {
 
 						usageGroup, err := decodeUsageResult(response)
 						So(err, ShouldBeNil)
-						So(len(usageGroup), ShouldEqual, 6)
+						So(len(usageGroup), ShouldEqual, 102)
 
 						err = os.Chtimes(sentinel, later, later)
 						So(err, ShouldBeNil)
@@ -701,7 +751,7 @@ func TestServer(t *testing.T) {
 
 						usageGroup, err = decodeUsageResult(response)
 						So(err, ShouldBeNil)
-						So(len(usageGroup), ShouldEqual, 1)
+						So(len(usageGroup), ShouldEqual, 17)
 					})
 				})
 			})
@@ -740,6 +790,8 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 	g, errg := user.LookupGroupId(gids[0])
 	So(errg, ShouldBeNil)
 
+	refTime := time.Now().Unix()
+
 	Convey("Given databases", func() {
 		jwtBasename := ".wrstat.test.jwt"
 		serverTokenBasename := ".wrstat.test.servertoken" //nolint:gosec
@@ -750,10 +802,10 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 		_, _, err = GetWhereDataIs(c, "", "", "", "", "")
 		So(err, ShouldNotBeNil)
 
-		path, err := internaldb.CreateExampleDGUTDBCustomIDs(t, uid, gids[0], gids[1])
+		path, err := internaldb.CreateExampleDGUTADBCustomIDs(t, uid, gids[0], gids[1], int(refTime))
 		So(err, ShouldBeNil)
 
-		tree, _, err := internaldb.CreateExampleDGUTDBForBasedirs(t)
+		tree, _, err := internaldb.CreateExampleDGUTADBForBasedirs(t)
 		So(err, ShouldBeNil)
 
 		basedirsDBPath, ownersPath, err := createExampleBasedirsDB(t, tree)
@@ -763,7 +815,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 		So(err, ShouldBeNil)
 
 		Convey("You can't get where data is or add the tree page without auth", func() {
-			err = s.LoadDGUTDBs(path)
+			err = s.LoadDGUTADBs(path)
 			So(err, ShouldBeNil)
 
 			_, _, err = GetWhereDataIs(c, "/", "", "", "", "")
@@ -780,7 +832,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 			})
 			So(err, ShouldBeNil)
 
-			err = s.LoadDGUTDBs(path)
+			err = s.LoadDGUTADBs(path)
 			So(err, ShouldBeNil)
 
 			err = c.Login("user", "pass")
@@ -794,7 +846,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 			So(errg, ShouldBeNil)
 			So(string(json), ShouldNotBeBlank)
 			So(len(dcss), ShouldEqual, 1)
-			So(dcss[0].Count, ShouldEqual, 19)
+			So(dcss[0].Count, ShouldEqual, 24)
 
 			json, dcss, errg = GetWhereDataIs(c, "/", g.Name, "", "", "0")
 			So(errg, ShouldBeNil)
@@ -815,7 +867,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 			})
 			So(err, ShouldBeNil)
 
-			err = s.LoadDGUTDBs(path)
+			err = s.LoadDGUTADBs(path)
 			So(err, ShouldBeNil)
 
 			err = c.Login("user", "pass")
@@ -825,7 +877,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 			So(errg, ShouldBeNil)
 			So(string(json), ShouldNotBeBlank)
 			So(len(dcss), ShouldEqual, 1)
-			So(dcss[0].Count, ShouldEqual, 18)
+			So(dcss[0].Count, ShouldEqual, 23)
 
 			json, dcss, errg = GetWhereDataIs(c, "/", g.Name, "", "", "0")
 			So(errg, ShouldBeNil)
@@ -849,7 +901,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 			})
 			So(err, ShouldBeNil)
 
-			err = s.LoadDGUTDBs(path)
+			err = s.LoadDGUTADBs(path)
 			So(err, ShouldBeNil)
 
 			err = s.LoadBasedirsDB(basedirsDBPath, ownersPath)
@@ -891,25 +943,33 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 
 				users := []string{"root", username}
 				sort.Strings(users)
-				groups := gidsToGroups(t, gids[0], gids[1], "0")
+
+				unsortedGroups := gidsToGroups(t, gids[0], gids[1], "0")
+				groups := make([]string, len(unsortedGroups))
+				copy(groups, unsortedGroups)
 				sort.Strings(groups)
 
 				expectedFTs := []string{"bam", "cram", "dir", "temp"}
 				expectedAtime := "1970-01-01T00:00:50Z"
 				expectedMtime := "1970-01-01T00:01:30Z"
 
-				const numDirectories = 12
+				const numRootDirectories = 13
+
+				const numADirectories = 12
 
 				const directorySize = 1024
 
 				tm := *resp.Result().(*TreeElement) //nolint:forcetypeassert
+
+				rootExpectedMtime := tm.Mtime
+				kExpectedAtime := tm.Children[1].Atime
 				So(tm, ShouldResemble, TreeElement{
 					Name:        "/",
 					Path:        "/",
-					Count:       19 + numDirectories,
-					Size:        126 + numDirectories*directorySize,
+					Count:       24 + numRootDirectories,
+					Size:        141 + numRootDirectories*directorySize,
 					Atime:       expectedAtime,
-					Mtime:       expectedMtime,
+					Mtime:       rootExpectedMtime,
 					Users:       users,
 					Groups:      groups,
 					FileTypes:   expectedFTs,
@@ -919,8 +979,8 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 						{
 							Name:        "a",
 							Path:        "/a",
-							Count:       19 + numDirectories,
-							Size:        126 + numDirectories*directorySize,
+							Count:       19 + numADirectories,
+							Size:        126 + numADirectories*directorySize,
 							Atime:       expectedAtime,
 							Mtime:       expectedMtime,
 							Users:       users,
@@ -928,6 +988,20 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 							FileTypes:   expectedFTs,
 							TimeStamp:   "0001-01-01T00:00:00Z",
 							HasChildren: true,
+							Children:    nil,
+						},
+						{
+							Name:        "k",
+							Path:        "/k",
+							Count:       5 + 1,
+							Size:        15 + 1*directorySize,
+							Atime:       kExpectedAtime,
+							Mtime:       rootExpectedMtime,
+							Users:       []string{username},
+							Groups:      []string{unsortedGroups[1]},
+							FileTypes:   []string{"cram", "dir"},
+							TimeStamp:   "0001-01-01T00:00:00Z",
+							HasChildren: false,
 							Children:    nil,
 						},
 					},
@@ -999,8 +1073,8 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 				So(tm, ShouldResemble, TreeElement{
 					Name:        "a",
 					Path:        "/a",
-					Count:       19 + numDirectories,
-					Size:        126 + numDirectories*directorySize,
+					Count:       19 + numADirectories,
+					Size:        126 + numADirectories*directorySize,
 					Atime:       expectedAtime,
 					Mtime:       expectedMtime,
 					Users:       users,
@@ -1012,8 +1086,8 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 						{
 							Name:        "b",
 							Path:        "/a/b",
-							Count:       19 - 5 + numDirectories - 3,
-							Size:        126 - 5 + (numDirectories-3)*directorySize,
+							Count:       19 - 5 + numADirectories - 3,
+							Size:        126 - 5 + (numADirectories-3)*directorySize,
 							Atime:       expectedAtime,
 							Mtime:       expectedMtime2,
 							Users:       users,
@@ -1203,7 +1277,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 					Get(EndPointAuthBasedirUsageUser)
 				So(err, ShouldBeNil)
 				So(resp.Result(), ShouldNotBeNil)
-				So(len(usage), ShouldEqual, 6)
+				So(len(usage), ShouldEqual, 102)
 				So(usage[0].UID, ShouldNotEqual, 0)
 
 				userUsageUID := usage[0].UID
@@ -1214,7 +1288,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 					Get(EndPointAuthBasedirUsageGroup)
 				So(err, ShouldBeNil)
 				So(resp.Result(), ShouldNotBeNil)
-				So(len(usage), ShouldEqual, 6)
+				So(len(usage), ShouldEqual, 102)
 				So(usage[0].GID, ShouldNotEqual, 0)
 
 				var subdirs []*basedirs.SubDir
@@ -1285,27 +1359,6 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 			})
 		})
 	})
-}
-
-// getUserAndGroups returns the current users username, uid and gids.
-func getUserAndGroups(t *testing.T) (string, string, []string) {
-	t.Helper()
-
-	uu, err := user.Current()
-	if err != nil {
-		t.Logf("getting current user failed: %s", err.Error())
-
-		return "", "", nil
-	}
-
-	gids, err := uu.GroupIds()
-	if err != nil {
-		t.Logf("getting group ids failed: %s", err.Error())
-
-		return "", "", nil
-	}
-
-	return uu.Username, uu.Uid, gids
 }
 
 // queryWhere does a test GET of /rest/v1/where, with extra appended (start it
@@ -1438,14 +1491,14 @@ func adjustedExpectations(expected []*DirSummary, groupA, groupB string) ([]*Dir
 	var expectedGroupsRoot []string
 
 	expectedNonRoot := make([]*DirSummary, len(expected))
+	groups := []string{groupA, groupB}
+	sort.Strings(groups)
+
 	for i, ds := range expected {
 		expectedNonRoot[i] = ds
 
 		switch ds.Dir {
 		case "/a":
-			groups := []string{groupA, groupB}
-			sort.Strings(groups)
-
 			expectedNonRoot[i] = &DirSummary{
 				Dir:       "/a",
 				Count:     18,
@@ -1467,6 +1520,17 @@ func adjustedExpectations(expected []*DirSummary, groupA, groupB string) ([]*Dir
 				Mtime:     ds.Mtime,
 				Users:     ds.Users,
 				Groups:    []string{groupA},
+				FileTypes: ds.FileTypes,
+			}
+		case "/":
+			expectedNonRoot[i] = &DirSummary{
+				Dir:       ds.Dir,
+				Count:     ds.Count - 1,
+				Size:      ds.Size - 1,
+				Atime:     ds.Atime,
+				Mtime:     ds.Mtime,
+				Users:     ds.Users,
+				Groups:    groups,
 				FileTypes: ds.FileTypes,
 			}
 		}
@@ -1596,7 +1660,7 @@ func (m *mockDirEntry) Info() (fs.FileInfo, error) {
 
 // createExampleBasedirsDB creates a temporary basedirs.db and returns the path
 // to the database file.
-func createExampleBasedirsDB(t *testing.T, tree *dgut.Tree) (string, string, error) {
+func createExampleBasedirsDB(t *testing.T, tree *dguta.Tree) (string, string, error) {
 	t.Helper()
 
 	csvPath := internaldata.CreateQuotasCSV(t, internaldata.ExampleQuotaCSV)

@@ -35,7 +35,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	gas "github.com/wtsi-hgi/go-authserver"
-	"github.com/wtsi-ssg/wrstat/v5/dgut"
+	"github.com/wtsi-ssg/wrstat/v5/dguta"
+	"github.com/wtsi-ssg/wrstat/v5/summary"
 )
 
 // javascriptToJSONFormat is the date format emitted by javascript's Date's
@@ -116,6 +117,7 @@ type TreeElement struct {
 	Size        uint64              `json:"size"`
 	Atime       string              `json:"atime"`
 	Mtime       string              `json:"mtime"`
+	Age         summary.DirGUTAge   `json:"age"`
 	Users       []string            `json:"users"`
 	Groups      []string            `json:"groups"`
 	FileTypes   []string            `json:"filetypes"`
@@ -126,9 +128,9 @@ type TreeElement struct {
 	NoAuth      bool                `json:"noauth"`
 }
 
-// getTree responds with the data needed by the tree web interface. LoadDGUTDB()
-// must already have been called. This is called when there is a GET on
-// /rest/v1/auth/tree.
+// getTree responds with the data needed by the tree web interface.
+// LoadDGUTADB() must already have been called. This is called when there is a
+// GET on /rest/v1/auth/tree.
 func (s *Server) getTree(c *gin.Context) {
 	path := c.DefaultQuery("path", "/")
 
@@ -156,14 +158,18 @@ func (s *Server) getTree(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, s.diToTreeElement(di, filter, allowedGIDs))
+	c.JSON(http.StatusOK, s.diToTreeElement(di, filter, allowedGIDs, path))
 }
 
-// diToTreeElement converts the given dgut.DirInfo to our own TreeElement. It
+// diToTreeElement converts the given dguta.DirInfo to our own TreeElement. It
 // has to do additional database queries to find out if di's children have
 // children. If results don't belong to at least one of the allowedGIDs, they
 // will be marked as NoAuth and won't include child info.
-func (s *Server) diToTreeElement(di *dgut.DirInfo, filter *dgut.Filter, allowedGIDs map[uint32]bool) *TreeElement {
+func (s *Server) diToTreeElement(di *dguta.DirInfo, filter *dguta.Filter,
+	allowedGIDs map[uint32]bool, path string) *TreeElement {
+	if di == nil {
+		return &TreeElement{Path: path}
+	}
 	te := s.ddsToTreeElement(di.Current, allowedGIDs)
 	te.Areas = s.areas
 	te.HasChildren = len(di.Children) > 0
@@ -185,11 +191,11 @@ func (s *Server) diToTreeElement(di *dgut.DirInfo, filter *dgut.Filter, allowedG
 	return te
 }
 
-// ddsToTreeElement converts a dgut.DirSummary to a TreeElement, but with no
+// ddsToTreeElement converts a dguta.DirSummary to a TreeElement, but with no
 // child info. It uses the allowedGIDs to mark the returned element NoAuth if
 // none of the GIDs for the dds are in the allowedGIDs. If allowedGIDs is nil,
 // NoAuth will always be false.
-func (s *Server) ddsToTreeElement(dds *dgut.DirSummary, allowedGIDs map[uint32]bool) *TreeElement {
+func (s *Server) ddsToTreeElement(dds *dguta.DirSummary, allowedGIDs map[uint32]bool) *TreeElement {
 	return &TreeElement{
 		Name:      filepath.Base(dds.Dir),
 		Path:      dds.Dir,
@@ -197,6 +203,7 @@ func (s *Server) ddsToTreeElement(dds *dgut.DirSummary, allowedGIDs map[uint32]b
 		Size:      dds.Size,
 		Atime:     timeToJavascriptDate(dds.Atime),
 		Mtime:     timeToJavascriptDate(dds.Mtime),
+		Age:       dds.Age,
 		Users:     s.uidsToUsernames(dds.UIDs),
 		Groups:    s.gidsToNames(dds.GIDs),
 		FileTypes: s.ftsToNames(dds.FTs),

@@ -82,6 +82,7 @@ const groupNameToIDMap = new Map<string, number>(),
 			[selectedDir, setSelectedDir] = useSavedState("selectedDir", ""),
 			[selectedID, setSelectedID] = useSavedState("selectedID", -1),
 			[treePath, setTreePath] = useSavedState("treePath", "/"),
+			[age, setAge] = useSavedState("age", 0),
 			primaryFilter = useRef<HTMLDivElement>(null),
 			[scaleSize, setScaleSize] = useSavedState("scaleSize", false),
 			[scaleDays, setScaleDays] = useSavedState("scaleDays", false),
@@ -102,7 +103,8 @@ const groupNameToIDMap = new Map<string, number>(),
 					const daysAgo = asDaysAgo(mtime);
 
 					return daysAgo >= Math.max(filterMinDaysAgo, axisMinDaysAgo) && daysAgo <= Math.min(filterMaxDaysAgo, axisMaxDaysAgo);
-				}
+				},
+				Age: (rowAge: number) => rowAge === age,
 			}, baseFilter),
 			scatterFilter = Object.assign({
 				UsageSize: { min: axisMinSize, max: axisMaxSize },
@@ -184,6 +186,8 @@ const groupNameToIDMap = new Map<string, number>(),
 					<Filter {...({
 						usage: byUser ? userUsage : groupUsage,
 						groupUsage,
+						age,
+						setAge,
 						axisMinSize, setAxisMinSize,
 						axisMaxSize, setAxisMaxSize,
 						axisMinDaysAgo, setAxisMinDaysAgo,
@@ -242,6 +246,7 @@ const groupNameToIDMap = new Map<string, number>(),
 			<History
 				id={selectedID}
 				path={selectedDir}
+				age={age}
 				isUser={byUser}
 				name={selectedRow?.Name}
 				owner={selectedRow?.Owner}
@@ -250,6 +255,7 @@ const groupNameToIDMap = new Map<string, number>(),
 			<SubDirs
 				id={selectedID}
 				path={selectedDir}
+				age={age}
 				isUser={byUser}
 				treePath={treePath}
 				setTreePath={setTreePath}
@@ -259,6 +265,7 @@ const groupNameToIDMap = new Map<string, number>(),
 				{...{
 					userMap: userIDToNameMap,
 					groupMap: groupIDToNameMap,
+					age: age,
 					treePath,
 					setTreePath,
 					guf,
@@ -269,6 +276,7 @@ const groupNameToIDMap = new Map<string, number>(),
 						{...{
 							userMap: userIDToNameMap,
 							groupMap: groupIDToNameMap,
+							age: age,
 							treePath,
 							setTreePath,
 							guf,

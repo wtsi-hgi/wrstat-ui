@@ -38,60 +38,60 @@ import (
 
 	internaldata "github.com/wtsi-hgi/wrstat-ui/internal/data"
 	"github.com/wtsi-hgi/wrstat-ui/internal/fs"
-	"github.com/wtsi-ssg/wrstat/v5/dgut"
+	"github.com/wtsi-ssg/wrstat/v5/dguta"
 )
 
 const (
-	DirPerms                   = fs.DirPerms
-	ExampleDgutDirParentSuffix = "dgut.dbs"
-	minGIDsForExampleDgutDB    = 2
-	exampleDBBatchSize         = 20
+	DirPerms                    = fs.DirPerms
+	ExampleDgutaDirParentSuffix = "dguta.dbs"
+	minGIDsForExampleDgutaDB    = 2
+	exampleDBBatchSize          = 20
 )
 
-// CreateExampleDGUTDBCustomIDs creates a temporary dgut.db from some example
+// CreateExampleDGUTADBCustomIDs creates a temporary dguta.db from some example
 // data that uses the given uid and gids, and returns the path to the database
 // directory.
-func CreateExampleDGUTDBCustomIDs(t *testing.T, uid, gidA, gidB string) (string, error) {
+func CreateExampleDGUTADBCustomIDs(t *testing.T, uid, gidA, gidB string, refTime int) (string, error) {
 	t.Helper()
 
-	dgutData := exampleDGUTData(t, uid, gidA, gidB)
+	dgutaData := exampleDGUTAData(t, uid, gidA, gidB, refTime)
 
-	return CreateCustomDGUTDB(t, dgutData)
+	return CreateCustomDGUTADB(t, dgutaData)
 }
 
-// CreateCustomDGUTDB creates a dgut database in a temp directory using the
-// given dgut data, and returns the database directory.
-func CreateCustomDGUTDB(t *testing.T, dgutData string) (string, error) {
+// CreateCustomDGUTADB creates a dguta database in a temp directory using the
+// given dguta data, and returns the database directory.
+func CreateCustomDGUTADB(t *testing.T, dgutaData string) (string, error) {
 	t.Helper()
 
-	dir, err := createExampleDgutDir(t)
+	dir, err := createExampleDgutaDir(t)
 	if err != nil {
 		return dir, err
 	}
 
-	data := strings.NewReader(dgutData)
-	db := dgut.NewDB(dir)
+	data := strings.NewReader(dgutaData)
+	db := dguta.NewDB(dir)
 
 	err = db.Store(data, exampleDBBatchSize)
 
 	return dir, err
 }
 
-// createExampleDgutDir creates a temp directory structure to hold dgut db files
-// in the same way that 'wrstat tidy' organises them.
-func createExampleDgutDir(t *testing.T) (string, error) {
+// createExampleDgutaDir creates a temp directory structure to hold dguta db
+// files in the same way that 'wrstat tidy' organises them.
+func createExampleDgutaDir(t *testing.T) (string, error) {
 	t.Helper()
 
 	tdir := t.TempDir()
-	dir := filepath.Join(tdir, "orig."+ExampleDgutDirParentSuffix, "0")
+	dir := filepath.Join(tdir, "orig."+ExampleDgutaDirParentSuffix, "0")
 	err := os.MkdirAll(dir, DirPerms)
 
 	return dir, err
 }
 
-// exampleDGUTData is some example DGUT data that uses the given uid and gids,
+// exampleDGUTAData is some example DGUTA data that uses the given uid and gids,
 // along with root's uid.
-func exampleDGUTData(t *testing.T, uidStr, gidAStr, gidBStr string) string {
+func exampleDGUTAData(t *testing.T, uidStr, gidAStr, gidBStr string, refTime int) string {
 	t.Helper()
 
 	uid, err := strconv.ParseUint(uidStr, 10, 64)
@@ -109,19 +109,19 @@ func exampleDGUTData(t *testing.T, uidStr, gidAStr, gidBStr string) string {
 		t.Fatal(err)
 	}
 
-	return internaldata.TestDGUTData(t, internaldata.CreateDefaultTestData(int(gidA), int(gidB), 0, int(uid), 0))
+	return internaldata.TestDGUTAData(t, internaldata.CreateDefaultTestData(int(gidA), int(gidB), 0, int(uid), 0, refTime))
 }
 
-func CreateDGUTDBFromFakeFiles(t *testing.T, files []internaldata.TestFile,
+func CreateDGUTADBFromFakeFiles(t *testing.T, files []internaldata.TestFile,
 	modtime ...time.Time,
-) (*dgut.Tree, string, error) {
+) (*dguta.Tree, string, error) {
 	t.Helper()
 
-	dgutData := internaldata.TestDGUTData(t, files)
+	dgutaData := internaldata.TestDGUTAData(t, files)
 
-	dbPath, err := CreateCustomDGUTDB(t, dgutData)
+	dbPath, err := CreateCustomDGUTADB(t, dgutaData)
 	if err != nil {
-		t.Fatalf("could not create dgut db: %s", err)
+		t.Fatalf("could not create dguta db: %s", err)
 	}
 
 	if len(modtime) == 1 {
@@ -130,7 +130,7 @@ func CreateDGUTDBFromFakeFiles(t *testing.T, files []internaldata.TestFile,
 		}
 	}
 
-	tree, err := dgut.NewTree(dbPath)
+	tree, err := dguta.NewTree(dbPath)
 
 	return tree, dbPath, err
 }
