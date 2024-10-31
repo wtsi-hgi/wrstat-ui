@@ -41,6 +41,7 @@ import (
 	"github.com/spf13/cobra"
 	gas "github.com/wtsi-hgi/go-authserver"
 	"github.com/wtsi-hgi/wrstat-ui/server"
+	"github.com/wtsi-ssg/wrstat/v5/summary"
 )
 
 type Error string
@@ -64,13 +65,15 @@ var (
 	whereUsers           string
 	whereTypes           string
 	whereSize            string
-	whereAge             int
+	whereAccess          int
 	whereShowSupergroups bool
 	whereSupergroup      string
 	whereCert            string
 	whereJSON            bool
 	whereOrder           string
 	whereShowUG          bool
+	whereUnused          string
+	whereUnchanged       string
 )
 
 // whereCmd represents the where command.
@@ -100,24 +103,34 @@ The default of 2 should give you useful results.
 
 You can filter what files should be considered and reported on:
 
---groups: only consider files that have group ownership of one of these
-          comma-separated groups.
---users:  only consider files that have user ownership of one of these
-          comma-separated users.
---types:  only consider files that are one of these comma-separated file types,
-          from this set of allowed values: vcf,vcf.gz,bcf,sam,bam,cram,fasta,
-		      fastq,fastq.gz,ped/bed,compressed,text,log,temp,other
+--groups: 	 only consider files that have group ownership of one of these
+          	 comma-separated groups.
+--users: 	 only consider files that have user ownership of one of these
+         	 comma-separated users.
+--types: 	 only consider files that are one of these comma-separated file
+			 types, from this set of allowed values: 
+			 	vcf,vcf.gz,bcf,sam,bam,cram,fasta,fastq,fastq.gz,ped/bed,
+				compressed,text,log,temp,other
+--unused:	 only consider files that have been unused (based on access time)
+			 for certain amounts of time, from this set of allowed values 
+			 (where M is months and Y is years):
+			 	1M,2M,6M,1Y,2Y,3Y,5Y,7Y
+--unchanged: only consider files that have been unchanged (based on modify time)
+			 for certain amounts of time, using the same values as unused.  
+
+If --unused and --unchanged are not specified then files of any age are 
+considered. These options are mutually exclusive.
 
 To avoid producing too much output, the --size option (specify your own units,
 eg. 50M for 50 megabytes) can be used to not display directories that have less
 than that size of data nested inside. Defaults to 50M. Likewise, you can use
---age (in days) to only show directories where a file nested inside hasn't been
-accessed for at least that long.
+--access (number of days) to only show directories where a file nested inside 
+hasn't been accessed for at least that long.
 
 You can change the sort --order from the default of by 'size', to by 'count',
 'age' or 'dir'.
 
---size, --age and --sort are ignored, however, if you choose --json output,
+--size, --access and --sort are ignored, however, if you choose --json output,
 which will just give you all the filtered results. In the JSON output, the Size
 is in bytes and instead of "age" you get "Atime".
 
@@ -178,9 +191,20 @@ with refreshes possible up to 5 days after expiry.
 			die("bad --size: %s", err)
 		}
 
-		minAtime := time.Now().Add(-(time.Duration(whereAge*hoursPerDay) * time.Hour))
+		if whereUnused != "" && whereUnchanged != "" {
+			die("--unused and --unchanged are mutually exclusive")
+		}
 
-		err = where(c, whereQueryDir, whereGroups, whereSupergroup, whereUsers, whereTypes,
+		age := summary.DGUTAgeAll
+		if whereUnused != "" {
+			age = stringToAge("A" + whereUnused)
+		} else if whereUnchanged != "" {
+			age = stringToAge("M" + whereUnchanged)
+		}
+
+		minAtime := time.Now().Add(-(time.Duration(whereAccess*hoursPerDay) * time.Hour))
+
+		err = where(c, whereQueryDir, whereGroups, whereSupergroup, whereUsers, whereTypes, age,
 			fmt.Sprintf("%d", whereSplits), whereOrder, minSizeBytes, minAtime, whereJSON)
 		if err != nil {
 			die(err.Error())
@@ -209,7 +233,7 @@ func init() { //nolint:funlen
 			"ped/bed,compressed,text,log,temp,other) to filter on")
 	whereCmd.Flags().StringVar(&whereSize, "size", defaultSize,
 		"minimum size (specify the unit) of files nested under a directory for it to be reported on")
-	whereCmd.Flags().IntVar(&whereAge, "age", 0,
+	whereCmd.Flags().IntVar(&whereAccess, "access", 0,
 		"do not report on directories that contain a file whose access time falls within the last x days")
 	whereCmd.Flags().StringVarP(&whereCert, "cert", "c", "",
 		"path to the server's certificate to force trust in it")
@@ -219,6 +243,10 @@ func init() { //nolint:funlen
 		"output USERS and GROUPS columns")
 	whereCmd.Flags().BoolVarP(&whereJSON, "json", "j", false,
 		"output JSON (ignores --minimum and --order)")
+	whereCmd.Flags().StringVar(&whereUnused, "unused", "",
+		"unused age value to filter on (amongst 1M,2M,6M,1Y,2Y,3Y,5Y,7Y)")
+	whereCmd.Flags().StringVar(&whereUnchanged, "unchanged", "",
+		"unchanged age value to filter on (amongst 1M,2M,6M,1Y,2Y,3Y,5Y,7Y)")
 }
 
 // getServerURL gets the wrstat server URL from the commandline arg or
@@ -266,10 +294,50 @@ func getSupergroups(c *gas.ClientCLI) (map[string][]string, error) {
 	return areas, nil
 }
 
+func stringToAge(ageStr string) summary.DirGUTAge {
+	switch ageStr {
+	case "A1M":
+		return summary.DGUTAgeA1M
+	case "A2M":
+		return summary.DGUTAgeA2M
+	case "A6M":
+		return summary.DGUTAgeA6M
+	case "A1Y":
+		return summary.DGUTAgeA1Y
+	case "A2Y":
+		return summary.DGUTAgeA2Y
+	case "A3Y":
+		return summary.DGUTAgeA3Y
+	case "A5Y":
+		return summary.DGUTAgeA5Y
+	case "A7Y":
+		return summary.DGUTAgeA7Y
+	case "M1M":
+		return summary.DGUTAgeM1M
+	case "M2M":
+		return summary.DGUTAgeM2M
+	case "M6M":
+		return summary.DGUTAgeM6M
+	case "M1Y":
+		return summary.DGUTAgeM1Y
+	case "M2Y":
+		return summary.DGUTAgeM2Y
+	case "M3Y":
+		return summary.DGUTAgeM3Y
+	case "M5Y":
+		return summary.DGUTAgeM5Y
+	case "M7Y":
+		return summary.DGUTAgeM7Y
+	}
+
+	die("invalid age")
+	return summary.DGUTAgeAll
+}
+
 // where does the main job of querying the server to answer where the data is on
 // disk.
-func where(c *gas.ClientCLI, dir, groups, supergroup, users, types, splits, order string,
-	minSizeBytes uint64, minAtime time.Time, json bool,
+func where(c *gas.ClientCLI, dir, groups, supergroup, users, types string, age summary.DirGUTAge,
+	splits, order string, minSizeBytes uint64, minAtime time.Time, json bool,
 ) error {
 	var err error
 
@@ -277,7 +345,7 @@ func where(c *gas.ClientCLI, dir, groups, supergroup, users, types, splits, orde
 		return err
 	}
 
-	body, dss, err := server.GetWhereDataIs(c, dir, groups, users, types, splits)
+	body, dss, err := server.GetWhereDataIs(c, dir, groups, users, types, age, splits)
 	if err != nil {
 		return err
 	}
@@ -428,5 +496,5 @@ func printSkipped(n int) {
 		return
 	}
 
-	warn(fmt.Sprintf("(%d results not displayed as smaller than --size or younger than --age)", n))
+	warn(fmt.Sprintf("(%d results not displayed as smaller than --size or younger than --access)", n))
 }
