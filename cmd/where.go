@@ -294,7 +294,7 @@ func getSupergroups(c *gas.ClientCLI) (map[string][]string, error) {
 	return areas, nil
 }
 
-func stringToAge(ageStr string) summary.DirGUTAge {
+func stringToAge(ageStr string) summary.DirGUTAge { //nolint:funlen,gocyclo,cyclop
 	switch ageStr {
 	case "A1M":
 		return summary.DGUTAgeA1M
@@ -331,6 +331,7 @@ func stringToAge(ageStr string) summary.DirGUTAge {
 	}
 
 	die("invalid age")
+
 	return summary.DGUTAgeAll
 }
 
@@ -496,5 +497,5 @@ func printSkipped(n int) {
 		return
 	}
 
-	warn(fmt.Sprintf("(%d results not displayed as smaller than --size or younger than --access)", n))
+	warn("(%d results not displayed as smaller than --size or younger than --access)", n)
 }
