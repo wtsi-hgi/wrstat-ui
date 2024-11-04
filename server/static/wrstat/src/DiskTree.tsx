@@ -268,7 +268,7 @@ const colours = [
 						// make new state and variable to replace child details in the details field, so that clicking and hovering do different things
 							<Treetable details={tableDetails} setTreePath={setTreePath} setChildDetails={setChildDetails} />
 						}
-						<TreeDetails details={childDetails} style={{ width: treeWidth + "px" }} />
+						<TreeDetails details={childDetails} style={{ width: "100%" }} />
 					</div>
 				</div>
 			</div>
