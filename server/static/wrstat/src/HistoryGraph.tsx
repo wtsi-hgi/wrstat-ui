@@ -90,6 +90,11 @@ const paddingXL = 80,
 
 		const projectDate = maxDate = maxDate += (maxDate - minDate) / 5;
 
+		if (minDate === maxDate) {
+			minDate -= 2.5*86400000;
+			maxDate += 2.5*86400000;
+		}
+
 		minDate -= (maxDate - minDate) / 10;
 		maxDate += (maxDate - minDate) / 10;
 
