@@ -1,8 +1,8 @@
 module github.com/wtsi-hgi/wrstat-ui
 
-go 1.22.0
+go 1.23.0
 
-toolchain go1.22.4
+toolchain go1.23.2
 
 require (
 	code.cloudfoundry.org/bytefmt v0.16.0

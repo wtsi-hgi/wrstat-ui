@@ -74,6 +74,10 @@ func handleError(w http.ResponseWriter, err error) {
 
 type DB struct {
 	db *sql.DB
+
+	summaryStmt *sql.Stmt
+	userStmt    *sql.Stmt
+	sessionStmt *sql.Stmt
 }
 
 func newDB(dbPath string) (*DB, error) {
@@ -82,7 +86,19 @@ func newDB(dbPath string) (*DB, error) {
 		return nil, err
 	}
 
-	return &DB{db: db}, nil
+	rdb := &DB{db: db}
+
+	for stmt, sql := range map[**sql.Stmt]string{
+		&rdb.summaryStmt: "SELECT [user], [session], [state], [time] FROM [events] WHERE [time] BETWEEN ? AND ?;",
+		&rdb.userStmt:    "SELECT [session], [state], [time] FROM [events] WHERE [user] = ? AND [time] BETWEEN ? AND ?;",
+		&rdb.sessionStmt: "SELECT [state], [time] FROM [events] WHERE [username] = ? AND [session] = ?;",
+	} {
+		if *stmt, err = db.Prepare(sql); err != nil {
+			return nil, err
+		}
+	}
+
+	return rdb, nil
 }
 
 type summaryInput struct {
@@ -90,8 +106,51 @@ type summaryInput struct {
 	EndTime   uint64 `json:"endTime"`
 }
 
+type Summary struct {
+	Users    map[string]uint `json:"users"`
+	Sessions map[string]uint `json:"sessions"`
+}
+
+func newSummary() *Summary {
+	return &Summary{
+		Users:    make(map[string]uint),
+		Sessions: make(map[string]uint),
+	}
+}
+
+func (s *Summary) addToSummary(user, session string, state json.RawMessage, timestamp uint64) {
+	s.Users[user] = s.Users[user] + 1
+	s.Sessions[session] = s.Sessions[session] + 1
+}
+
 func (d *DB) summary(i summaryInput) (any, error) {
-	return nil, nil
+	if i.StartTime > i.EndTime {
+		return nil, ErrInvalidRange
+	}
+
+	rows, err := d.summaryStmt.Query(i.StartTime, i.EndTime)
+	if err != nil {
+		return nil, err
+	}
+
+	s := newSummary()
+
+	for rows.Next() {
+		var (
+			username  string
+			session   string
+			state     json.RawMessage
+			timestamp uint64
+		)
+
+		if err := rows.Scan(&username, &session, &state, &timestamp); err != nil {
+			return nil, err
+		}
+
+		s.addToSummary(username, session, state, timestamp)
+	}
+
+	return s, nil
 }
 
 type userInput struct {
@@ -101,7 +160,32 @@ type userInput struct {
 }
 
 func (d *DB) user(i userInput) (any, error) {
-	return nil, nil
+	if i.StartTime > i.EndTime {
+		return nil, ErrInvalidRange
+	}
+
+	rows, err := d.userStmt.Query(i.Username, i.StartTime, i.EndTime)
+	if err != nil {
+		return nil, err
+	}
+
+	s := newSummary()
+
+	for rows.Next() {
+		var (
+			session   string
+			state     json.RawMessage
+			timestamp uint64
+		)
+
+		if err := rows.Scan(&session, &state, &timestamp); err != nil {
+			return nil, err
+		}
+
+		s.addToSummary(i.Username, session, state, timestamp)
+	}
+
+	return s, nil
 }
 
 type sessionInput struct {
@@ -109,6 +193,30 @@ type sessionInput struct {
 	Session  string `json:"string"`
 }
 
-func (d *DB) session(i sessionInput) (any, error) {
-	return nil, nil
+type Event struct {
+	Data      json.RawMessage `json:"data"`
+	Timestamp uint64          `json:"timestamp"`
 }
+
+func (d *DB) session(i sessionInput) (any, error) {
+	rows, err := d.sessionStmt.Query(i.Username, i.Session)
+	if err != nil {
+		return nil, err
+	}
+
+	var events []Event
+
+	for rows.Next() {
+		var e Event
+
+		if err := rows.Scan(&e.Data, &e.Timestamp); err != nil {
+			return nil, err
+		}
+
+		events = append(events, e)
+	}
+
+	return events, nil
+}
+
+var ErrInvalidRange = HTTPError{http.StatusBadRequest, "invalid date range"}
