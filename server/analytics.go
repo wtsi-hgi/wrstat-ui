@@ -35,6 +35,7 @@ func (s *Server) InitAnalyticsDB(dbPath string) error {
 
 	for _, cmd := range [...]string{
 		`PRAGMA JOURNAL_MODE = DELETE;`,
+		`PRAGMA page_size = 1024;`,
 		`CREATE TABLE IF NOT EXISTS [events] (user TEXT, session TEXT, state TEXT, time INTEGER)`,
 		`CREATE INDEX IF NOT EXISTS username ON [events] (user)`,
 		`CREATE INDEX IF NOT EXISTS sessionID ON [events] (session)`,
@@ -48,7 +49,6 @@ func (s *Server) InitAnalyticsDB(dbPath string) error {
 
 	s.analyticsStmt, err = db.Prepare(
 		"INSERT INTO [events] (user, session, state, time) VALUES (?, ?, ?, ?);")
-
 	if err != nil {
 		return err
 	}
