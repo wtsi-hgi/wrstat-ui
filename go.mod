@@ -18,6 +18,7 @@ require (
 	github.com/wtsi-hgi/go-authserver v1.3.0
 	go.etcd.io/bbolt v1.3.11
 	golang.org/x/exp v0.0.0-20241108190413-2d47ceb2692f
+	vimagination.zapto.org/tsserver v1.0.11
 )
 
 require (
@@ -84,7 +85,6 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	vimagination.zapto.org/javascript v1.4.15 // indirect
 	vimagination.zapto.org/parser v1.0.2 // indirect
-	vimagination.zapto.org/tsserver v1.0.11 // indirect
 )
 
 // we need to specify these due to github.com/VertebrateResequencing/wr's deps
