@@ -1,14 +1,15 @@
 module github.com/wtsi-hgi/wrstat-ui
 
-go 1.22.0
+go 1.23.0
 
-toolchain go1.22.4
+toolchain go1.23.2
 
 require (
 	code.cloudfoundry.org/bytefmt v0.18.0
 	github.com/dustin/go-humanize v1.0.1
 	github.com/gin-gonic/gin v1.10.0
 	github.com/inconshreveable/log15 v2.16.0+incompatible
+	github.com/mattn/go-sqlite3 v1.14.24
 	github.com/olekukonko/tablewriter v0.0.5
 	github.com/smartystreets/goconvey v1.7.2
 	github.com/spf13/cobra v1.8.1
@@ -82,6 +83,9 @@ require (
 	google.golang.org/protobuf v1.35.1 // indirect
 	gopkg.in/tylerb/graceful.v1 v1.2.15 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
+	vimagination.zapto.org/javascript v1.4.15 // indirect
+	vimagination.zapto.org/parser v1.0.2 // indirect
+	vimagination.zapto.org/tsserver v1.0.11 // indirect
 )
 
 // we need to specify these due to github.com/VertebrateResequencing/wr's deps

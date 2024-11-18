@@ -61,6 +61,7 @@ var (
 	oktaOAuthClientSecret string
 	areasPath             string
 	ownersPath            string
+	spywareDB             string
 )
 
 // serverCmd represents the server command.
@@ -190,6 +191,12 @@ creation time in reports.
 			die("failed to add tree page: %s", err)
 		}
 
+		if spywareDB != "" {
+			if err = s.InitAnalyticsDB(spywareDB); err != nil {
+				die("failed to init spyware db: %s", err)
+			}
+		}
+
 		defer s.Stop()
 
 		sayStarted()
@@ -223,6 +230,7 @@ func init() {
 	serverCmd.Flags().StringVarP(&ownersPath, "owners", "o", "", "gid,owner csv file")
 	serverCmd.Flags().StringVar(&serverLogPath, "logfile", "",
 		"log to this file instead of syslog")
+	serverCmd.Flags().StringVar(&spywareDB, "spyware", "s", "path to sqlite database to record analytics")
 }
 
 // checkOAuthArgs ensures we have the necessary args/ env vars for Okta auth.
