@@ -31,9 +31,9 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/wtsi-hgi/wrstat-ui/dguta"
 	ifs "github.com/wtsi-hgi/wrstat-ui/internal/fs"
-	"github.com/wtsi-ssg/wrstat/v5/dguta"
-	"github.com/wtsi-ssg/wrstat/v5/watch"
+	"github.com/wtsi-hgi/wrstat-ui/watch"
 )
 
 // LoadDGUTADBs loads the given dguta.db directories (as produced by one or more

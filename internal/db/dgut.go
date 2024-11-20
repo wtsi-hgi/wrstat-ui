@@ -36,9 +36,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wtsi-hgi/wrstat-ui/dguta"
 	internaldata "github.com/wtsi-hgi/wrstat-ui/internal/data"
 	"github.com/wtsi-hgi/wrstat-ui/internal/fs"
-	"github.com/wtsi-ssg/wrstat/v5/dguta"
 )
 
 const (
@@ -51,7 +51,7 @@ const (
 // CreateExampleDGUTADBCustomIDs creates a temporary dguta.db from some example
 // data that uses the given uid and gids, and returns the path to the database
 // directory.
-func CreateExampleDGUTADBCustomIDs(t *testing.T, uid, gidA, gidB string, refTime int) (string, error) {
+func CreateExampleDGUTADBCustomIDs(t *testing.T, uid, gidA, gidB string, refTime int64) (string, error) {
 	t.Helper()
 
 	dgutaData := exampleDGUTAData(t, uid, gidA, gidB, refTime)
@@ -91,7 +91,7 @@ func createExampleDgutaDir(t *testing.T) (string, error) {
 
 // exampleDGUTAData is some example DGUTA data that uses the given uid and gids,
 // along with root's uid.
-func exampleDGUTAData(t *testing.T, uidStr, gidAStr, gidBStr string, refTime int) string {
+func exampleDGUTAData(t *testing.T, uidStr, gidAStr, gidBStr string, refTime int64) string {
 	t.Helper()
 
 	uid, err := strconv.ParseUint(uidStr, 10, 64)

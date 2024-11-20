@@ -44,14 +44,14 @@ import (
 	"github.com/gin-gonic/gin"
 	. "github.com/smartystreets/goconvey/convey"
 	gas "github.com/wtsi-hgi/go-authserver"
+	"github.com/wtsi-hgi/wrstat-ui/basedirs"
+	"github.com/wtsi-hgi/wrstat-ui/dguta"
 	internaldata "github.com/wtsi-hgi/wrstat-ui/internal/data"
 	internaldb "github.com/wtsi-hgi/wrstat-ui/internal/db"
 	"github.com/wtsi-hgi/wrstat-ui/internal/fixtimes"
 	ifs "github.com/wtsi-hgi/wrstat-ui/internal/fs"
 	"github.com/wtsi-hgi/wrstat-ui/internal/split"
-	"github.com/wtsi-ssg/wrstat/v5/basedirs"
-	"github.com/wtsi-ssg/wrstat/v5/dguta"
-	"github.com/wtsi-ssg/wrstat/v5/summary"
+	"github.com/wtsi-hgi/wrstat-ui/summary"
 )
 
 func TestIDsToWanted(t *testing.T) {
@@ -182,7 +182,7 @@ func TestServer(t *testing.T) {
 			logWriter.Reset()
 
 			Convey("And given a dguta database", func() {
-				path, err := internaldb.CreateExampleDGUTADBCustomIDs(t, uid, gids[0], gids[1], int(refTime))
+				path, err := internaldb.CreateExampleDGUTADBCustomIDs(t, uid, gids[0], gids[1], refTime)
 				So(err, ShouldBeNil)
 				groupA := gidToGroup(t, gids[0])
 				groupB := gidToGroup(t, gids[1])
@@ -408,7 +408,7 @@ func TestServer(t *testing.T) {
 					})
 
 					Convey("And you can auto-reload a new database", func() {
-						pathNew, errc := internaldb.CreateExampleDGUTADBCustomIDs(t, uid, gids[1], gids[0], int(refTime))
+						pathNew, errc := internaldb.CreateExampleDGUTADBCustomIDs(t, uid, gids[1], gids[0], refTime)
 						So(errc, ShouldBeNil)
 
 						grandparentDir := filepath.Dir(filepath.Dir(path))
@@ -605,7 +605,7 @@ func TestServer(t *testing.T) {
 			logWriter.Reset()
 
 			Convey("And given a basedirs database", func() {
-				tree, _, err := internaldb.CreateExampleDGUTADBForBasedirs(t)
+				tree, _, err := internaldb.CreateExampleDGUTADBForBasedirs(t, refTime)
 				So(err, ShouldBeNil)
 
 				dbPath, ownersPath, err := createExampleBasedirsDB(t, tree)
@@ -714,7 +714,7 @@ func TestServer(t *testing.T) {
 						gid, uid, _, _, err := internaldata.RealGIDAndUID()
 						So(err, ShouldBeNil)
 
-						_, files := internaldata.FakeFilesForDGUTADBForBasedirsTesting(gid, uid)
+						_, files := internaldata.FakeFilesForDGUTADBForBasedirsTesting(gid, uid, refTime)
 						tree, _, err = internaldb.CreateDGUTADBFromFakeFiles(t, files[:1])
 						So(err, ShouldBeNil)
 
@@ -802,10 +802,10 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 		_, _, err = GetWhereDataIs(c, "", "", "", "", summary.DGUTAgeAll, "")
 		So(err, ShouldNotBeNil)
 
-		path, err := internaldb.CreateExampleDGUTADBCustomIDs(t, uid, gids[0], gids[1], int(refTime))
+		path, err := internaldb.CreateExampleDGUTADBCustomIDs(t, uid, gids[0], gids[1], refTime)
 		So(err, ShouldBeNil)
 
-		tree, _, err := internaldb.CreateExampleDGUTADBForBasedirs(t)
+		tree, _, err := internaldb.CreateExampleDGUTADBForBasedirs(t, refTime)
 		So(err, ShouldBeNil)
 
 		basedirsDBPath, ownersPath, err := createExampleBasedirsDB(t, tree)

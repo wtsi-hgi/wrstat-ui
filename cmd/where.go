@@ -41,7 +41,7 @@ import (
 	"github.com/spf13/cobra"
 	gas "github.com/wtsi-hgi/go-authserver"
 	"github.com/wtsi-hgi/wrstat-ui/server"
-	"github.com/wtsi-ssg/wrstat/v5/summary"
+	"github.com/wtsi-hgi/wrstat-ui/summary"
 )
 
 type Error string

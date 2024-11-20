@@ -2,7 +2,8 @@
  * Copyright (c) 2023 Genome Research Ltd.
  *
  * Authors:
- *	- Sendu Bala <sb10@sanger.ac.uk>
+ *   Sendu Bala <sb10@sanger.ac.uk>
+ *   Michael Woolnough <mw31@sanger.ac.uk>
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -24,29 +25,78 @@
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  ******************************************************************************/
 
-package internaldb
+package basedirs
 
 import (
-	"testing"
-
-	"github.com/wtsi-hgi/wrstat-ui/dguta"
-	internaldata "github.com/wtsi-hgi/wrstat-ui/internal/data"
+	"os/user"
+	"strconv"
+	"sync"
 )
 
-// CreateExampleDGUTADBForBasedirs makes a tree database with data useful for
-// testing basedirs, and returns it along with a slice of directories where the
-// data is.
-func CreateExampleDGUTADBForBasedirs(t *testing.T, refTime int64) (*dguta.Tree, []string, error) {
-	t.Helper()
+type GroupCache struct {
+	mu   sync.RWMutex
+	data map[uint32]string
+}
 
-	gid, uid, _, _, err := internaldata.RealGIDAndUID()
-	if err != nil {
-		return nil, nil, err
+func NewGroupCache() *GroupCache {
+	return &GroupCache{
+		data: make(map[uint32]string),
+	}
+}
+
+func (g *GroupCache) GroupName(gid uint32) string {
+	g.mu.RLock()
+	groupName, ok := g.data[gid]
+	g.mu.RUnlock()
+
+	if ok {
+		return groupName
 	}
 
-	dirs, files := internaldata.FakeFilesForDGUTADBForBasedirsTesting(gid, uid, refTime)
+	groupStr := strconv.FormatUint(uint64(gid), 10)
 
-	tree, _, err := CreateDGUTADBFromFakeFiles(t, files)
+	group, err := user.LookupGroupId(groupStr)
+	if err == nil {
+		groupStr = group.Name
+	}
 
-	return tree, dirs, err
+	g.mu.Lock()
+	g.data[gid] = groupStr
+	g.mu.Unlock()
+
+	return groupStr
+}
+
+type UserCache struct {
+	mu   sync.RWMutex
+	data map[uint32]string
+}
+
+func NewUserCache() *UserCache {
+	return &UserCache{
+		data: make(map[uint32]string),
+	}
+}
+
+func (u *UserCache) UserName(uid uint32) string {
+	u.mu.RLock()
+	userName, ok := u.data[uid]
+	u.mu.RUnlock()
+
+	if ok {
+		return userName
+	}
+
+	userStr := strconv.FormatUint(uint64(uid), 10)
+
+	uu, err := user.LookupId(userStr)
+	if err == nil {
+		userStr = uu.Username
+	}
+
+	u.mu.Lock()
+	u.data[uid] = userStr
+	u.mu.Unlock()
+
+	return userStr
 }

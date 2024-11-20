@@ -1,8 +1,7 @@
 /*******************************************************************************
- * Copyright (c) 2023 Genome Research Ltd.
+ * Copyright (c) 2022 Genome Research Ltd.
  *
- * Authors:
- *	- Sendu Bala <sb10@sanger.ac.uk>
+ * Author: Sendu Bala <sb10@sanger.ac.uk>
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -24,29 +23,19 @@
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  ******************************************************************************/
 
-package internaldb
+package basedirs
 
 import (
-	"testing"
-
 	"github.com/wtsi-hgi/wrstat-ui/dguta"
-	internaldata "github.com/wtsi-hgi/wrstat-ui/internal/data"
 )
 
-// CreateExampleDGUTADBForBasedirs makes a tree database with data useful for
-// testing basedirs, and returns it along with a slice of directories where the
-// data is.
-func CreateExampleDGUTADBForBasedirs(t *testing.T, refTime int64) (*dguta.Tree, []string, error) {
-	t.Helper()
-
-	gid, uid, _, _, err := internaldata.RealGIDAndUID()
+// getAllGIDsandUIDsInTree gets all the unix group and user IDs that own files
+// in the given file tree.
+func getAllGIDsandUIDsInTree(tree *dguta.Tree) ([]uint32, []uint32, error) {
+	di, err := tree.DirInfo("/", nil)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	dirs, files := internaldata.FakeFilesForDGUTADBForBasedirsTesting(gid, uid, refTime)
-
-	tree, _, err := CreateDGUTADBFromFakeFiles(t, files)
-
-	return tree, dirs, err
+	return di.Current.GIDs, di.Current.UIDs, nil
 }

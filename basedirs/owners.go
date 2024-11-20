@@ -2,7 +2,8 @@
  * Copyright (c) 2023 Genome Research Ltd.
  *
  * Authors:
- *	- Sendu Bala <sb10@sanger.ac.uk>
+ *   Sendu Bala <sb10@sanger.ac.uk>
+ *   Michael Woolnough <mw31@sanger.ac.uk>
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -24,29 +25,48 @@
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  ******************************************************************************/
 
-package internaldb
+package basedirs
 
 import (
-	"testing"
-
-	"github.com/wtsi-hgi/wrstat-ui/dguta"
-	internaldata "github.com/wtsi-hgi/wrstat-ui/internal/data"
+	"bufio"
+	"errors"
+	"os"
+	"strconv"
+	"strings"
 )
 
-// CreateExampleDGUTADBForBasedirs makes a tree database with data useful for
-// testing basedirs, and returns it along with a slice of directories where the
-// data is.
-func CreateExampleDGUTADBForBasedirs(t *testing.T, refTime int64) (*dguta.Tree, []string, error) {
-	t.Helper()
+const colsInOwnersFile = 2
 
-	gid, uid, _, _, err := internaldata.RealGIDAndUID()
+var ErrInvalidOwnersFile = errors.New("invalid owners file format")
+
+func parseOwners(path string) (map[uint32]string, error) {
+	f, err := os.Open(path)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
-	dirs, files := internaldata.FakeFilesForDGUTADBForBasedirsTesting(gid, uid, refTime)
+	defer f.Close()
 
-	tree, _, err := CreateDGUTADBFromFakeFiles(t, files)
+	scanner := bufio.NewScanner(f)
+	scanner.Split(bufio.ScanLines)
 
-	return tree, dirs, err
+	owners := make(map[uint32]string)
+
+	for scanner.Scan() {
+		line := scanner.Text()
+
+		cols := strings.Split(line, ",")
+		if len(cols) != colsInOwnersFile {
+			return nil, ErrInvalidOwnersFile
+		}
+
+		gid, err := strconv.ParseUint(cols[0], 10, 32)
+		if err != nil {
+			return nil, err
+		}
+
+		owners[uint32(gid)] = cols[1]
+	}
+
+	return owners, nil
 }

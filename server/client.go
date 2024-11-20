@@ -32,7 +32,7 @@ import (
 	"strconv"
 
 	gas "github.com/wtsi-hgi/go-authserver"
-	"github.com/wtsi-ssg/wrstat/v5/summary"
+	"github.com/wtsi-hgi/wrstat-ui/summary"
 )
 
 const ErrBadQuery = gas.Error("bad query; check dir, group, user and type")

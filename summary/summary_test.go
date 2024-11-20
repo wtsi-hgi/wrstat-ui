@@ -1,8 +1,7 @@
 /*******************************************************************************
- * Copyright (c) 2023 Genome Research Ltd.
+ * Copyright (c) 2021 Genome Research Ltd.
  *
- * Authors:
- *	- Sendu Bala <sb10@sanger.ac.uk>
+ * Author: Sendu Bala <sb10@sanger.ac.uk>
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -24,29 +23,50 @@
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  ******************************************************************************/
 
-package internaldb
+package summary
 
 import (
 	"testing"
 
-	"github.com/wtsi-hgi/wrstat-ui/dguta"
-	internaldata "github.com/wtsi-hgi/wrstat-ui/internal/data"
+	. "github.com/smartystreets/goconvey/convey"
 )
 
-// CreateExampleDGUTADBForBasedirs makes a tree database with data useful for
-// testing basedirs, and returns it along with a slice of directories where the
-// data is.
-func CreateExampleDGUTADBForBasedirs(t *testing.T, refTime int64) (*dguta.Tree, []string, error) {
-	t.Helper()
+func TestSummary(t *testing.T) {
+	Convey("Given a summary", t, func() {
+		s := &summary{}
 
-	gid, uid, _, _, err := internaldata.RealGIDAndUID()
-	if err != nil {
-		return nil, nil, err
-	}
+		Convey("You can add sizes to it", func() {
+			s.add(10)
+			So(s.count, ShouldEqual, 1)
+			So(s.size, ShouldEqual, 10)
 
-	dirs, files := internaldata.FakeFilesForDGUTADBForBasedirsTesting(gid, uid, refTime)
+			s.add(20)
+			So(s.count, ShouldEqual, 2)
+			So(s.size, ShouldEqual, 30)
+		})
+	})
 
-	tree, _, err := CreateDGUTADBFromFakeFiles(t, files)
+	Convey("Given a summaryWithAtime", t, func() {
+		s := &summaryWithTimes{}
 
-	return tree, dirs, err
+		Convey("You can add sizes and atime/mtimes to it", func() {
+			s.add(10, 12, 24)
+			So(s.count, ShouldEqual, 1)
+			So(s.size, ShouldEqual, 10)
+			So(s.atime, ShouldEqual, 12)
+			So(s.mtime, ShouldEqual, 24)
+
+			s.add(20, -5, -10)
+			So(s.count, ShouldEqual, 2)
+			So(s.size, ShouldEqual, 30)
+			So(s.atime, ShouldEqual, 12)
+			So(s.mtime, ShouldEqual, 24)
+
+			s.add(30, 1, 30)
+			So(s.count, ShouldEqual, 3)
+			So(s.size, ShouldEqual, 60)
+			So(s.atime, ShouldEqual, 1)
+			So(s.mtime, ShouldEqual, 30)
+		})
+	})
 }

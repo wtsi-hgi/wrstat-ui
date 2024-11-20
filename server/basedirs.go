@@ -34,10 +34,10 @@ import (
 
 	"github.com/gin-gonic/gin"
 	gas "github.com/wtsi-hgi/go-authserver"
+	"github.com/wtsi-hgi/wrstat-ui/basedirs"
 	ifs "github.com/wtsi-hgi/wrstat-ui/internal/fs"
-	"github.com/wtsi-ssg/wrstat/v5/basedirs"
-	"github.com/wtsi-ssg/wrstat/v5/summary"
-	"github.com/wtsi-ssg/wrstat/v5/watch"
+	"github.com/wtsi-hgi/wrstat-ui/summary"
+	"github.com/wtsi-hgi/wrstat-ui/watch"
 )
 
 const ErrBadBasedirsQuery = gas.Error("bad query; check id and basedir")

@@ -32,8 +32,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	gas "github.com/wtsi-hgi/go-authserver"
-	"github.com/wtsi-ssg/wrstat/v5/dguta"
-	"github.com/wtsi-ssg/wrstat/v5/summary"
+	"github.com/wtsi-hgi/wrstat-ui/dguta"
+	"github.com/wtsi-hgi/wrstat-ui/summary"
 )
 
 // makeFilterFromContext extracts the user's filter requests, and returns a tree
