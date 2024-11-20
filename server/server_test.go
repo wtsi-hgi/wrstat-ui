@@ -605,7 +605,7 @@ func TestServer(t *testing.T) {
 			logWriter.Reset()
 
 			Convey("And given a basedirs database", func() {
-				tree, _, err := internaldb.CreateExampleDGUTADBForBasedirs(t, refTime)
+				tree, _, err := internaldb.CreateExampleDGUTADBForBasedirs(t)
 				So(err, ShouldBeNil)
 
 				dbPath, ownersPath, err := createExampleBasedirsDB(t, tree)
@@ -714,7 +714,7 @@ func TestServer(t *testing.T) {
 						gid, uid, _, _, err := internaldata.RealGIDAndUID()
 						So(err, ShouldBeNil)
 
-						_, files := internaldata.FakeFilesForDGUTADBForBasedirsTesting(gid, uid, refTime)
+						_, files := internaldata.FakeFilesForDGUTADBForBasedirsTesting(gid, uid)
 						tree, _, err = internaldb.CreateDGUTADBFromFakeFiles(t, files[:1])
 						So(err, ShouldBeNil)
 
@@ -805,7 +805,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 		path, err := internaldb.CreateExampleDGUTADBCustomIDs(t, uid, gids[0], gids[1], refTime)
 		So(err, ShouldBeNil)
 
-		tree, _, err := internaldb.CreateExampleDGUTADBForBasedirs(t, refTime)
+		tree, _, err := internaldb.CreateExampleDGUTADBForBasedirs(t)
 		So(err, ShouldBeNil)
 
 		basedirsDBPath, ownersPath, err := createExampleBasedirsDB(t, tree)
@@ -968,6 +968,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 				tm := *resp.Result().(*TreeElement) //nolint:forcetypeassert
 
 				rootExpectedMtime := tm.Mtime
+				So(len(tm.Children), ShouldBeGreaterThan, 1)
 				kExpectedAtime := tm.Children[1].Atime
 				So(tm, ShouldResemble, TreeElement{
 					Name:        "/",

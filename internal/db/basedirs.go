@@ -36,7 +36,7 @@ import (
 // CreateExampleDGUTADBForBasedirs makes a tree database with data useful for
 // testing basedirs, and returns it along with a slice of directories where the
 // data is.
-func CreateExampleDGUTADBForBasedirs(t *testing.T, refTime int64) (*dguta.Tree, []string, error) {
+func CreateExampleDGUTADBForBasedirs(t *testing.T) (*dguta.Tree, []string, error) {
 	t.Helper()
 
 	gid, uid, _, _, err := internaldata.RealGIDAndUID()
@@ -44,7 +44,7 @@ func CreateExampleDGUTADBForBasedirs(t *testing.T, refTime int64) (*dguta.Tree, 
 		return nil, nil, err
 	}
 
-	dirs, files := internaldata.FakeFilesForDGUTADBForBasedirsTesting(gid, uid, refTime)
+	dirs, files := internaldata.FakeFilesForDGUTADBForBasedirsTesting(gid, uid)
 
 	tree, _, err := CreateDGUTADBFromFakeFiles(t, files)
 

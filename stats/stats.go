@@ -53,8 +53,10 @@ type StatsParser struct {
 	lineIndex  int
 	Path       []byte
 	Size       int64
+	UID        int64
 	GID        int64
 	MTime      int64
+	ATime      int64
 	CTime      int64
 	EntryType  byte
 	error      error
@@ -119,7 +121,7 @@ func (p *StatsParser) parseLine() bool {
 }
 
 func (p *StatsParser) parseColumns2to7() bool {
-	for _, val := range []*int64{&p.Size, nil, &p.GID, nil, &p.MTime, &p.CTime} {
+	for _, val := range []*int64{&p.Size, &p.UID, &p.GID, &p.ATime, &p.MTime, &p.CTime} {
 		if !p.parseNumberColumn(val) {
 			return false
 		}
@@ -151,10 +153,6 @@ func (p *StatsParser) parseNumberColumn(v *int64) bool {
 	col, ok := p.parseNextColumn()
 	if !ok {
 		return false
-	}
-
-	if v == nil {
-		return true
 	}
 
 	*v = 0
