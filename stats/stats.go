@@ -30,6 +30,16 @@ import (
 	"unicode/utf8"
 )
 
+const (
+	FileType    = 'f'
+	DirType     = 'd'
+	SymlinkType = 'L'
+	DeviceType  = 'D'
+	PipeType    = 'p'
+	SocketType  = 'S'
+	CharType    = 'c'
+)
+
 // Error is the type of the constant Err* variables.
 type Error string
 

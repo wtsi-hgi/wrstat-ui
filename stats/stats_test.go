@@ -37,11 +37,6 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/internal/statsdata"
 )
 
-const (
-	fileType = byte('f')
-	dirType  = byte('d')
-)
-
 func TestParseStats(t *testing.T) {
 	Convey("Given a parser and reader", t, func() {
 		refTime := time.Now().Unix()
@@ -65,7 +60,7 @@ func TestParseStats(t *testing.T) {
 					So(info.ATime, ShouldEqual, refTime)
 					So(info.MTime, ShouldEqual, refTime)
 					So(info.CTime, ShouldEqual, refTime)
-					So(info.EntryType, ShouldEqual, dirType)
+					So(info.EntryType, ShouldEqual, DirType)
 				} else if i == 1 {
 					So(string(info.Path), ShouldEqual, "/opt/dir0/")
 				}
