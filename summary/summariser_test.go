@@ -14,15 +14,7 @@ type testGlobalOperator struct {
 	totalCount int
 }
 
-func (testGlobalOperator) New() Operation {
-	return new(testGlobalOperator)
-}
-
 func (t *testGlobalOperator) Add(s *stats.FileInfo) error {
-	if t.dirCounts == nil {
-		return nil
-	}
-
 	t.totalCount++
 
 	if s.EntryType == 'f' {
@@ -44,12 +36,6 @@ type testDirectoryOperator struct {
 	size      int64
 }
 
-func (t *testDirectoryOperator) New() Operation {
-	return &testDirectoryOperator{
-		outputMap: t.outputMap,
-	}
-}
-
 func (t *testDirectoryOperator) Add(s *stats.FileInfo) error {
 	if t.path == "" {
 		t.path = string(s.Path)
@@ -63,6 +49,9 @@ func (t *testDirectoryOperator) Add(s *stats.FileInfo) error {
 func (t *testDirectoryOperator) Output() error {
 	t.outputMap[t.path] = t.size
 
+	t.path = ""
+	t.size = 0
+
 	return nil
 }
 
@@ -75,7 +64,7 @@ func TestParse(t *testing.T) {
 
 		Convey("You can add an operation and have it apply over every line of data", func() {
 			so := &testGlobalOperator{dirCounts: make(map[string]int)}
-			s.AddOperation(so)
+			s.AddGlobalOperation(func() Operation { return so })
 
 			err := s.Summarise()
 			So(err, ShouldBeNil)
@@ -85,16 +74,28 @@ func TestParse(t *testing.T) {
 
 		Convey("You can add multiple operations and they run sequentially", func() {
 			so := &testGlobalOperator{dirCounts: make(map[string]int)}
-			s.AddOperation(so)
+			so2 := &testGlobalOperator{dirCounts: make(map[string]int)}
+			s.AddGlobalOperation(func() Operation { return so })
+			s.AddGlobalOperation(func() Operation { return so2 })
 
-			do := &testDirectoryOperator{outputMap: make(map[string]int64)}
-			s.AddOperation(do)
+			outputMap := make(map[string]int64)
+			outputMap2 := make(map[string]int64)
+
+			s.AddDirectoryOperation(func() Operation {
+				return &testDirectoryOperator{outputMap: outputMap}
+			})
+			s.AddDirectoryOperation(func() Operation {
+				return &testDirectoryOperator{outputMap: outputMap2}
+			})
 
 			err := s.Summarise()
 			So(err, ShouldBeNil)
 			So(so.totalCount, ShouldEqual, 651)
-			So(do.outputMap["/opt/dir0/dir0/dir0/dir0/dir0/"], ShouldEqual, 4096)
-			So(do.outputMap["/opt/dir0/dir0/dir0/dir1/"], ShouldEqual, 8193)
+			So(so2.totalCount, ShouldEqual, 651)
+			So(outputMap["/opt/dir0/dir0/dir0/dir0/dir0/"], ShouldEqual, 4096)
+			So(outputMap["/opt/dir0/dir0/dir0/dir1/"], ShouldEqual, 8193)
+			So(outputMap2["/opt/dir0/dir0/dir0/dir0/dir0/"], ShouldEqual, 4096)
+			So(outputMap2["/opt/dir0/dir0/dir0/dir1/"], ShouldEqual, 8193)
 		})
 	})
 }

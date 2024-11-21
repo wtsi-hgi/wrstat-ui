@@ -2,8 +2,6 @@ package summary
 
 import (
 	"bytes"
-	"io"
-	"io/fs"
 
 	"github.com/wtsi-hgi/wrstat-ui/stats"
 )
@@ -12,34 +10,32 @@ var (
 	slash = []byte{'/'}
 )
 
-type outputOperator interface {
-	Add(path string, info fs.FileInfo) error
-	Output(output io.WriteCloser) error
-}
+const (
+	maxPathLen                = 4096
+	probableMaxDirectoryDepth = 128
+)
 
-// Operation is a callback that once added to a Paths will be called on each
-// path encountered. It receives the absolute path to the filesystem entry, and
-// the FileInfo returned by Statter.Lstat() on that path.
+// Operation is
 type Operation interface {
-	New() Operation
+	// Add is called once for the containing directory and for each of its
+	// descendents during a Summariser.Summarise() call.
 	Add(info *stats.FileInfo) error
+
+	// Output is called when we return to the parent directory during a
+	// Summariser.Summarise() call, having processed all descendent entries.
+	//
+	// For an Operation working on a directory, this method must also do any
+	// necessary reset of the instance of the type before returning.
 	Output() error
 }
 
-type Operations []Operation
+// directory is a collection of the Operation that will be run for a directory,
+// with Add being called for itself and every descendent FileInfo during
+// Summariser.Summarise().
+type directory []Operation
 
-func (o Operations) New() Operations {
-	newOps := make(Operations, len(o))
-
-	for n, op := range o {
-		newOps[n] = op.New()
-	}
-
-	return newOps
-}
-
-func (o Operations) Add(s *stats.FileInfo) error {
-	for _, op := range o {
+func (d directory) Add(s *stats.FileInfo) error {
+	for _, op := range d {
 		if err := op.Add(s); err != nil {
 			return err
 		}
@@ -48,8 +44,8 @@ func (o Operations) Add(s *stats.FileInfo) error {
 	return nil
 }
 
-func (o Operations) Output() error {
-	for _, op := range o {
+func (d directory) Output() error {
+	for _, op := range d {
 		if err := op.Output(); err != nil {
 			return err
 		}
@@ -58,30 +54,46 @@ func (o Operations) Output() error {
 	return nil
 }
 
-type Directory struct {
-	Parent     *Directory
-	Operations Operations
-}
+type OperationGenerator func() Operation
 
-func (d Directory) HandleInfo(s *stats.FileInfo) error {
-	if err := d.Operations.Add(s); err != nil {
-		return err
+type operationGenerators []OperationGenerator
+
+func (o operationGenerators) Generate() directory {
+	ops := make(directory, len(o))
+
+	for n, op := range o {
+		ops[n] = op()
 	}
 
-	if d.Parent == nil {
-		return nil
-	}
-
-	return d.Parent.HandleInfo(s)
+	return ops
 }
 
-func (d Directory) Close() error {
-	return d.Operations.Output()
+type directories []directory
+
+func (d directories) Add(info *stats.FileInfo) error {
+	for _, o := range d {
+		if err := o.Add(info); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (d directories) Output() error {
+	for _, o := range d {
+		if err := o.Output(); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 type Summariser struct {
-	statsParser *stats.StatsParser
-	operations  []Operation
+	statsParser         *stats.StatsParser
+	directoryOperations operationGenerators
+	globalOperations    operationGenerators
 }
 
 func NewSummariser(p *stats.StatsParser) *Summariser {
@@ -90,55 +102,76 @@ func NewSummariser(p *stats.StatsParser) *Summariser {
 	}
 }
 
-func (s *Summariser) AddOperation(op Operation) {
-	s.operations = append(s.operations, op)
+func (s *Summariser) AddDirectoryOperation(op OperationGenerator) {
+	s.directoryOperations = append(s.directoryOperations, op)
+}
+
+func (s *Summariser) AddGlobalOperation(op OperationGenerator) {
+	s.globalOperations = append(s.globalOperations, op)
 }
 
 func (s *Summariser) Summarise() error {
 	info := new(stats.FileInfo)
 
-	var currentPath []byte
+	currentDir := make([]byte, 0, maxPathLen)
+	directories := make(directories, 1, probableMaxDirectoryDepth)
+	directories[0] = s.directoryOperations.Generate()
+	global := s.globalOperations.Generate()
 
-	directory := &Directory{
-		Operations: s.operations,
-	}
+	var err error
 
 	for s.statsParser.Scan(info) == nil {
-		if !bytes.HasPrefix(info.Path, currentPath) {
-			for ; !bytes.HasPrefix(info.Path, currentPath); currentPath = parentDir(currentPath) {
-				if err := directory.Close(); err != nil {
-					return err
-				}
-
-				directory = directory.Parent
-			}
-
-			currentPath = bytes.Clone(currentPath)
+		if err = global.Add(info); err != nil {
+			return err
 		}
 
-		if bytes.HasSuffix(info.Path, slash) && bytes.HasPrefix(info.Path, currentPath) {
-			directory = &Directory{
-				Parent:     directory,
-				Operations: directory.Operations.New(),
-			}
-
-			currentPath = bytes.Clone(info.Path)
+		directories, currentDir, err = s.changeToWorkingDirectoryOfEntry(directories, currentDir, info)
+		if err != nil {
+			return err
 		}
 
-		if err := directory.HandleInfo(info); err != nil {
+		if err = directories.Add(info); err != nil {
 			return err
 		}
 	}
 
-	for directory != nil {
-		if err := directory.Close(); err != nil {
-			return err
-		}
-
-		directory = directory.Parent
+	if err := s.statsParser.Err(); err != nil {
+		return err
 	}
 
-	return s.statsParser.Err()
+	if err := directories.Output(); err != nil {
+		return err
+	}
+
+	return global.Output()
+}
+
+func (s *Summariser) changeToWorkingDirectoryOfEntry(directories directories, currentDir []byte, info *stats.FileInfo) (directories, []byte, error) {
+	var err error
+
+	directories, currentDir, err = s.changeToAscendantDirectoryOfEntry(directories, currentDir, info)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	if info.EntryType == stats.DirType {
+		directories, currentDir = s.changeToDirectoryOfEntry(directories, currentDir, info)
+	}
+
+	return directories, currentDir, nil
+}
+
+func (s *Summariser) changeToAscendantDirectoryOfEntry(directories directories, currentDir []byte, info *stats.FileInfo) (directories, []byte, error) {
+	for !bytes.HasPrefix(info.Path, currentDir) {
+		if err := directories[len(directories)-1].Output(); err != nil {
+			return nil, nil, err
+		}
+
+		directories = directories[:len(directories)-1]
+		currentDir = parentDir(currentDir)
+	}
+
+	return directories, currentDir, nil
 }
 
 func parentDir(path []byte) []byte {
@@ -146,4 +179,21 @@ func parentDir(path []byte) []byte {
 	nextSlash := bytes.LastIndex(path, slash)
 
 	return path[:nextSlash+1]
+}
+
+func (s *Summariser) changeToDirectoryOfEntry(directories directories, currentDir []byte,
+	info *stats.FileInfo) (directories, []byte) {
+	if cap(directories) > len(directories) {
+		directories = directories[:len(directories)+1]
+
+		if directories[len(directories)-1] == nil {
+			directories[len(directories)-1] = s.directoryOperations.Generate()
+		}
+	} else {
+		directories = append(directories, s.directoryOperations.Generate())
+	}
+
+	currentDir = currentDir[:copy(currentDir[:cap(currentDir)], info.Path)]
+
+	return directories, currentDir
 }
