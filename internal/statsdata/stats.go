@@ -11,9 +11,6 @@ import (
 	_ "embed"
 )
 
-//go:embed test.stats.gz
-var testStats string
-
 func TestStats(width, depth int, rootPath string, refTime int64) *Directory {
 	d := NewRoot(rootPath, refTime)
 
