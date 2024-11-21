@@ -26,6 +26,8 @@ package stats
 import (
 	"bufio"
 	"io"
+	"slices"
+	"unicode/utf8"
 )
 
 // Error is the type of the constant Err* variables.
@@ -35,7 +37,6 @@ type Error string
 func (e Error) Error() string { return string(e) }
 
 const (
-	fileType                   = byte('f')
 	defaultAge                 = 7
 	secsPerYear                = 3600 * 24 * 365
 	maxLineLength              = 64 * 1024
@@ -51,15 +52,26 @@ type StatsParser struct {
 	lineBytes  []byte
 	lineLength int
 	lineIndex  int
-	Path       []byte
-	Size       int64
-	UID        int64
-	GID        int64
-	MTime      int64
-	ATime      int64
-	CTime      int64
-	EntryType  byte
+	path       []byte
+	size       int64
+	uid        int64
+	gid        int64
+	mtime      int64
+	atime      int64
+	ctime      int64
+	entryType  byte
 	error      error
+}
+
+type FileInfo struct {
+	Path      []byte
+	Size      int64
+	UID       int64
+	GID       int64
+	MTime     int64
+	ATime     int64
+	CTime     int64
+	EntryType byte
 }
 
 // NewStatsParser is used to create a new StatsParser, given uncompressed wrstat
@@ -80,13 +92,97 @@ func NewStatsParser(r io.Reader) *StatsParser {
 // or an error. After Scan returns false, the Err method will return any error
 // that occurred during scanning, except that if it was io.EOF, Err will return
 // nil.
-func (p *StatsParser) Scan() bool {
+func (p *StatsParser) Scan(info *FileInfo) error {
 	keepGoing := p.scanner.Scan()
 	if !keepGoing {
-		return false
+		return io.EOF
 	}
 
-	return p.parseLine()
+	if !p.parseLine() {
+		return p.error
+	}
+
+	info.Path = unquote(p.path)
+	info.Size = p.size
+	info.UID = p.uid
+	info.GID = p.gid
+	info.MTime = p.mtime
+	info.ATime = p.atime
+	info.CTime = p.ctime
+	info.EntryType = p.entryType
+
+	return nil
+}
+
+func unquote(path []byte) []byte {
+	if path == nil {
+		return path
+	}
+
+	path = path[1 : len(path)-1]
+
+	for i := 0; i < len(path); i++ {
+		if path[i] == '\\' {
+			added := 1
+			read := 2
+
+			switch path[i+1] {
+			case 'a':
+				path[i] = '\a'
+			case 'b':
+				path[i] = '\b'
+			case 'f':
+				path[i] = '\f'
+			case 'n':
+				path[i] = '\n'
+			case 'r':
+				path[i] = '\r'
+			case 't':
+				path[i] = '\t'
+			case 'v':
+				path[i] = '\v'
+			case '"':
+				path[i] = '"'
+			case '\'':
+				path[i] = '\''
+			case 'x', 'u', 'U':
+				n := 0
+
+				switch path[i+1] {
+				case 'x':
+					n = 2
+				case 'u':
+					n = 4
+				case 'U':
+					n = 8
+				}
+
+				read = n + 2
+
+				var value rune
+
+				for _, b := range path[i+2 : i+n+2] {
+					value <<= 4
+
+					if b >= '0' && b <= '9' {
+						value |= rune(b) - '0'
+					} else if b >= 'A' && b <= 'F' {
+						value |= rune(b) - 'A'
+					} else if b >= 'a' && b <= 'f' {
+						value |= rune(b) - 'a'
+					}
+				}
+
+				a := utf8.AppendRune(path[:i], value)
+
+				added = len(a) - i
+			}
+
+			path = slices.Delete(path, i+added, i+read)
+		}
+	}
+
+	return path
 }
 
 func (p *StatsParser) parseLine() bool {
@@ -101,7 +197,7 @@ func (p *StatsParser) parseLine() bool {
 
 	var ok bool
 
-	p.Path, ok = p.parseNextColumn()
+	p.path, ok = p.parseNextColumn()
 	if !ok {
 		return false
 	}
@@ -115,13 +211,13 @@ func (p *StatsParser) parseLine() bool {
 		return false
 	}
 
-	p.EntryType = entryTypeCol[0]
+	p.entryType = entryTypeCol[0]
 
 	return true
 }
 
 func (p *StatsParser) parseColumns2to7() bool {
-	for _, val := range []*int64{&p.Size, &p.UID, &p.GID, &p.ATime, &p.MTime, &p.CTime} {
+	for _, val := range []*int64{&p.size, &p.uid, &p.gid, &p.atime, &p.mtime, &p.ctime} {
 		if !p.parseNumberColumn(val) {
 			return false
 		}

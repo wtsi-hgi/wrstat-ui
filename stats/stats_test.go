@@ -25,48 +25,57 @@ package stats
 
 import (
 	"bufio"
-	"compress/gzip"
+	"bytes"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	. "github.com/smartystreets/goconvey/convey"
+	"github.com/wtsi-hgi/wrstat-ui/internal/statsdata"
+)
+
+const (
+	fileType = byte('f')
+	dirType  = byte('d')
 )
 
 func TestParseStats(t *testing.T) {
 	Convey("Given a parser and reader", t, func() {
-		f, err := os.Open("test.stats.gz")
-		So(err, ShouldBeNil)
+		refTime := time.Now().Unix()
 
-		defer f.Close()
+		f := statsdata.TestStats(5, 5, "/opt/", refTime).AsReader()
 
-		gr, err := gzip.NewReader(f)
-		So(err, ShouldBeNil)
+		var sb strings.Builder
 
-		defer gr.Close()
-
-		p := NewStatsParser(gr)
+		p := NewStatsParser(io.TeeReader(f, &sb))
 		So(p, ShouldNotBeNil)
 
 		Convey("you can extract info for all entries", func() {
+			info := new(FileInfo)
+
 			i := 0
-			for p.Scan() {
+			for p.Scan(info) == nil {
 				if i == 0 {
-					So(string(p.Path), ShouldEqual, "/lustre/scratch122/tol/teams/blaxter/users/am75/assemblies/dataset/ilXesSexs1.2_genomic.fna") //nolint:lll
-					So(p.Size, ShouldEqual, 646315412)
-					So(p.GID, ShouldEqual, 15078)
-					So(p.MTime, ShouldEqual, 1698792671)
-					So(p.CTime, ShouldEqual, 1698917473)
-					So(p.EntryType, ShouldEqual, fileType)
+					So(string(info.Path), ShouldEqual, "/opt/")
+					So(info.Size, ShouldEqual, 4096)
+					So(info.GID, ShouldEqual, 0)
+					So(info.ATime, ShouldEqual, refTime)
+					So(info.MTime, ShouldEqual, refTime)
+					So(info.CTime, ShouldEqual, refTime)
+					So(info.EntryType, ShouldEqual, dirType)
 				} else if i == 1 {
-					So(string(p.Path), ShouldEqual, "/lustre/scratch122/tol/teams/blaxter/users/am75/assemblies/dataset/ilOpeBrum1.1_genomic.fna.fai") //nolint:lll
+					So(string(info.Path), ShouldEqual, "/opt/dir0/")
 				}
 
 				i++
 			}
-			So(i, ShouldEqual, 18890)
+
+			numLines := strings.Count(sb.String(), "\n")
+
+			So(i, ShouldEqual, numLines)
 
 			So(p.Err(), ShouldBeNil)
 		})
@@ -75,63 +84,100 @@ func TestParseStats(t *testing.T) {
 	Convey("Scan generates Err() when", t, func() {
 		Convey("there are not enough tab separated columns", func() {
 			examplePath := `"/an/example/path"`
+			info := new(FileInfo)
 
 			p := NewStatsParser(strings.NewReader(examplePath + "\t1\t1\t1\t1\t1\t1\tf\t1\t1\td\n"))
-			So(p.Scan(), ShouldBeTrue)
-			So(p.Err(), ShouldBeNil)
+			So(p.Scan(info), ShouldBeNil)
 
 			p = NewStatsParser(strings.NewReader(examplePath + "\t1\t1\t1\t1\t1\n"))
-			So(p.Scan(), ShouldBeFalse)
-			So(p.Err(), ShouldEqual, ErrTooFewColumns)
+			So(p.Scan(info), ShouldEqual, ErrTooFewColumns)
 
 			p = NewStatsParser(strings.NewReader(examplePath + "\t1\t1\t1\t1\n"))
-			So(p.Scan(), ShouldBeFalse)
-			So(p.Err(), ShouldEqual, ErrTooFewColumns)
+			So(p.Scan(info), ShouldEqual, ErrTooFewColumns)
 
 			p = NewStatsParser(strings.NewReader(examplePath + "\t1\t1\t1\n"))
-			So(p.Scan(), ShouldBeFalse)
-			So(p.Err(), ShouldEqual, ErrTooFewColumns)
+			So(p.Scan(info), ShouldEqual, ErrTooFewColumns)
 
 			p = NewStatsParser(strings.NewReader(examplePath + "\t1\t1\n"))
-			So(p.Scan(), ShouldBeFalse)
-			So(p.Err(), ShouldEqual, ErrTooFewColumns)
+			So(p.Scan(info), ShouldEqual, ErrTooFewColumns)
 
 			p = NewStatsParser(strings.NewReader(examplePath + "\t1\n"))
-			So(p.Scan(), ShouldBeFalse)
-			So(p.Err(), ShouldEqual, ErrTooFewColumns)
+			So(p.Scan(info), ShouldEqual, ErrTooFewColumns)
 
 			p = NewStatsParser(strings.NewReader(examplePath + "\n"))
-			So(p.Scan(), ShouldBeFalse)
-			So(p.Err(), ShouldEqual, ErrTooFewColumns)
+			So(p.Scan(info), ShouldEqual, ErrTooFewColumns)
 
 			Convey("but not for blank lines", func() {
 				p = NewStatsParser(strings.NewReader("\n"))
-				So(p.Scan(), ShouldBeTrue)
-				So(p.Err(), ShouldBeNil)
+				So(p.Scan(info), ShouldBeNil)
 
 				p := NewStatsParser(strings.NewReader(""))
-				So(p.Scan(), ShouldBeFalse)
-				So(p.Err(), ShouldBeNil)
+				So(p.Scan(info), ShouldEqual, io.EOF)
 			})
 		})
 	})
 }
 
+func TestUnquote(t *testing.T) {
+	for n, test := range [...][2][]byte{
+		{
+			[]byte(`""`),
+			[]byte(``),
+		},
+		{
+			[]byte(`"abc"`),
+			[]byte(`abc`),
+		},
+		{
+			[]byte(`"\""`),
+			[]byte(`"`),
+		},
+		{
+			[]byte(`"\""`),
+			[]byte(`"`),
+		},
+		{
+			[]byte(`"\'"`),
+			[]byte(`'`),
+		},
+		{
+			[]byte(`"\x20"`),
+			[]byte(` `),
+		},
+		{
+			[]byte(`"abc\x20def"`),
+			[]byte(`abc def`),
+		},
+		{
+			[]byte(`"abc\u0020def"`),
+			[]byte(`abc def`),
+		},
+		{
+			[]byte(`"abc\U00000020def"`),
+			[]byte(`abc def`),
+		},
+	} {
+		if out := unquote(test[0]); !bytes.Equal(out, test[1]) {
+			t.Errorf("test %d: expecting output %v, got %v", n+1, test[1], out)
+		}
+	}
+}
+
 func BenchmarkScanAndFileInfo(b *testing.B) {
 	tempDir := b.TempDir()
 	testStatsFile := filepath.Join(tempDir, "test.stats")
+	info := new(FileInfo)
 
-	f, gr := openTestFile(b)
+	f := statsdata.TestStats(5, 5, "/opt/", 0).AsReader()
 
 	defer f.Close()
-	defer gr.Close()
 
 	outFile, err := os.Create(testStatsFile)
 	if err != nil {
 		b.Fatal(err)
 	}
 
-	_, err = io.Copy(outFile, gr)
+	_, err = io.Copy(outFile, f)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -152,8 +198,8 @@ func BenchmarkScanAndFileInfo(b *testing.B) {
 
 		p := NewStatsParser(f)
 
-		for p.Scan() {
-			if p.Size == 0 {
+		for p.Scan(info) == nil {
+			if p.size == 0 {
 				continue
 			}
 		}
@@ -168,45 +214,17 @@ func BenchmarkScanAndFileInfo(b *testing.B) {
 	}
 }
 
-func openTestFile(b *testing.B) (io.ReadCloser, io.ReadCloser) {
-	b.Helper()
-
-	f, err := os.Open("test.stats.gz")
-	if err != nil {
-		b.Fatal(err)
-	}
-
-	gr, err := gzip.NewReader(f)
-	if err != nil {
-		b.Fatal(err)
-	}
-
-	return f, gr
-}
-
 func BenchmarkRawScanner(b *testing.B) {
+	var buf bytes.Buffer
+
+	io.Copy(&buf, statsdata.TestStats(5, 5, "/opt/", 0).AsReader())
+
+	data := buf.Bytes()
+
 	for n := 0; n < b.N; n++ {
 		b.StopTimer()
 
-		f, gr := openTestFile(b)
-
-		b.StartTimer()
-
-		scanner := bufio.NewScanner(gr)
-
-		for scanner.Scan() {
-		}
-
-		gr.Close()
-		f.Close()
-	}
-}
-
-func BenchmarkRawScannerUncompressed(b *testing.B) {
-	for n := 0; n < b.N; n++ {
-		b.StopTimer()
-
-		f, gr := openTestFile(b)
+		f := bytes.NewReader(data)
 
 		b.StartTimer()
 
@@ -214,8 +232,5 @@ func BenchmarkRawScannerUncompressed(b *testing.B) {
 
 		for scanner.Scan() {
 		}
-
-		gr.Close()
-		f.Close()
 	}
 }
