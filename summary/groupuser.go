@@ -33,106 +33,10 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/stats"
 )
 
-// userToSummary is a sortable map with uids as keys and summaries as values.
-type userToSummaryStore map[uint32]*summary
-
-// add will auto-vivify a summary for the given uid and call add(size) on it.
-func (store userToSummaryStore) add(uid uint32, size int64) {
-	s, ok := store[uid]
-	if !ok {
-		s = &summary{}
-		store[uid] = s
-	}
-
-	s.add(size)
-}
-
-// sort returns a slice of our summary values, sorted by our uid keys converted
-// to user names, which are also returned.
-//
-// If uid is invalid, user name will be id[uid].
-//
-// If you will be sorting multiple different userToSummaryStores, supply them
-// all the same uidLookupCache which is used to minimise uid to name lookups.
-func (store userToSummaryStore) sort(uidLookupCache map[uint32]string) ([]string, []*summary) {
-	byUserName := make(map[string]*summary)
-
-	for uid, summary := range store {
-		byUserName[uidToName(uid, uidLookupCache)] = summary
-	}
-
-	keys := make([]string, len(byUserName))
-	i := 0
-
-	for k := range byUserName {
-		keys[i] = k
-		i++
-	}
-
-	sort.Strings(keys)
-
-	s := make([]*summary, len(byUserName))
-
-	for i, k := range keys {
-		s[i] = byUserName[k]
-	}
-
-	return keys, s
-}
-
-// uidToName converts uid to username, using the given cache to avoid lookups.
-func uidToName(uid uint32, cache map[uint32]string) string {
-	return cachedIDToName(uid, cache, getUserName)
-}
-
-// groupToUserStore is a sortable map of gid to userToSummaryStore.
-type groupToUserStore map[uint32]userToSummaryStore
-
-// getUserToSummaryStore auto-vivifies a userToSummaryStore for the given gid
-// and returns it.
-func (store groupToUserStore) getUserToSummaryStore(gid uint32) userToSummaryStore {
-	uStore, ok := store[gid]
-	if !ok {
-		uStore = make(userToSummaryStore)
-		store[gid] = uStore
-	}
-
-	return uStore
-}
-
-// sort returns a slice of our userToSummaryStore values, sorted by our gid keys
-// converted to unix group names, which are also returned. If gid has no group
-// name, name becomes id[gid].
-func (store groupToUserStore) sort() ([]string, []userToSummaryStore) {
-	byGroupName := make(map[string]userToSummaryStore)
-
-	for gid, uStore := range store {
-		byGroupName[getGroupName(gid)] = uStore
-	}
-
-	keys := make([]string, len(byGroupName))
-	i := 0
-
-	for k := range byGroupName {
-		keys[i] = k
-		i++
-	}
-
-	sort.Strings(keys)
-
-	s := make([]userToSummaryStore, len(byGroupName))
-
-	for i, k := range keys {
-		s[i] = byGroupName[k]
-	}
-
-	return keys, s
-}
-
 // GroupUser is used to summarise file stats by group and user.
 type GroupUser struct {
 	w     io.WriteCloser
-	store groupToUserStore
+	store map[uint64]*summary
 }
 
 // NewByGroupUser returns a GroupUser.
@@ -140,7 +44,7 @@ func NewByGroupUser(w io.WriteCloser) OperationGenerator {
 	return func() Operation {
 		return &GroupUser{
 			w:     w,
-			store: make(groupToUserStore),
+			store: make(map[uint64]*summary),
 		}
 	}
 }
@@ -153,9 +57,44 @@ func (g *GroupUser) Add(info *stats.FileInfo) error {
 		return nil
 	}
 
-	g.store.getUserToSummaryStore(uint32(info.GID)).add(uint32(info.UID), info.Size)
+	id := uint64(info.GID)<<32 | uint64(info.UID)
+
+	ss, ok := g.store[id]
+	if !ok {
+		ss = new(summary)
+		g.store[id] = ss
+	}
+
+	ss.add(info.Size)
 
 	return nil
+}
+
+type groupUserSummary struct {
+	Group, User string
+	*summary
+}
+
+type groupUserSummaries []groupUserSummary
+
+func (g groupUserSummaries) Len() int {
+	return len(g)
+}
+
+func (g groupUserSummaries) Less(i, j int) bool {
+	if g[i].Group < g[j].Group {
+		return true
+	}
+
+	if g[i].Group > g[j].Group {
+		return false
+	}
+
+	return g[i].User < g[j].User
+}
+
+func (g groupUserSummaries) Swap(i, j int) {
+	g[i], g[j] = g[j], g[i]
 }
 
 // Output will write summary information for all the paths previously added. The
@@ -170,12 +109,24 @@ func (g *GroupUser) Add(info *stats.FileInfo) error {
 // determined from the uids and gids in the added file info. output is closed
 // on completion.
 func (g *GroupUser) Output() error {
-	groups, uStores := g.store.sort()
-
 	uidLookupCache := make(map[uint32]string)
+	gidLookupCache := make(map[uint32]string)
 
-	for i, groupname := range groups {
-		if err := outputUserSummariesForGroup(g.w, groupname, uStores[i], uidLookupCache); err != nil {
+	data := make(groupUserSummaries, 0, len(g.store))
+
+	for gu, s := range g.store {
+		data = append(data, groupUserSummary{
+			Group:   gidToName(uint32(gu>>32), gidLookupCache),
+			User:    uidToName(uint32(gu), uidLookupCache),
+			summary: s,
+		})
+	}
+
+	sort.Sort(data)
+
+	for _, row := range data {
+		if _, err := fmt.Fprintf(g.w, "%s\t%s\t%d\t%d\n",
+			row.Group, row.User, row.count, row.size); err != nil {
 			return err
 		}
 	}
@@ -183,18 +134,7 @@ func (g *GroupUser) Output() error {
 	return g.w.Close()
 }
 
-// outputUserSummariesForGroup sorts the users for this group and outputs the
-// summary information.
-func outputUserSummariesForGroup(output io.WriteCloser, groupname string,
-	uStore userToSummaryStore, uidLookupCache map[uint32]string) error {
-	usernames, summaries := uStore.sort(uidLookupCache)
-
-	for i, s := range summaries {
-		if _, err := fmt.Fprintf(output, "%s\t%s\t%d\t%d\n",
-			groupname, usernames[i], s.count, s.size); err != nil {
-			return err
-		}
-	}
-
-	return nil
+// uidToName converts uid to username, using the given cache to avoid lookups.
+func uidToName(uid uint32, cache map[uint32]string) string {
+	return cachedIDToName(uid, cache, getUserName)
 }
