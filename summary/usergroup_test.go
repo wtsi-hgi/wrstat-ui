@@ -30,88 +30,102 @@ import (
 	"io/fs"
 	"os"
 	"os/exec"
-	"os/user"
 	"strconv"
 	"strings"
 	"testing"
 
 	. "github.com/smartystreets/goconvey/convey"
+	"github.com/wtsi-hgi/wrstat-ui/internal/statsdata"
 	internaluser "github.com/wtsi-hgi/wrstat-ui/internal/user"
 	"github.com/wtsi-hgi/wrstat-ui/stats"
 	"golang.org/x/exp/slices"
 )
 
 func TestUsergroup(t *testing.T) {
-	_, cuid, _, _, err := internaluser.RealGIDAndUID()
+	gid, uid, gname, uname, err := internaluser.RealGIDAndUID()
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	Convey("Given stats data, a Usergroup and a writer", t, func() {
+	Convey("UserGroup Operation accumulates count and size by username, group and directory", t, func() {
 		var w stringBuilder
-		ugGen := NewByUserGroup(&w)
-		So(ugGen, ShouldNotBeNil)
 
-		ug := ugGen().(*Usergroup)
+		ugGenerator := NewByUserGroup(&w)
+		So(ugGenerator, ShouldNotBeNil)
 
-		Convey("You can add file info to it which accumulates the info", func() {
-			addTestData(ug, cuid)
+		Convey("You can add file info to it which accumulates the info into the output", func() {
+			f := statsdata.NewRoot("/opt/", 0)
+			f.UID = uid
+			f.GID = gid
 
-			So(ug.store[cuid], ShouldNotBeNil)
-			So(ug.store[2], ShouldNotBeNil)
-			So(ug.store[3], ShouldBeNil)
-			So(ug.store[cuid][2], ShouldNotBeNil)
-			So(ug.store[cuid][3], ShouldBeNil)
+			ud := f.AddDirectory("userDir")
+			ud.AddFile("file1.txt").Size = 1
+			ud.AddFile("file2.txt").Size = 2
+			ud.AddDirectory("subDir").AddDirectory("subsubDir").AddFile("file3.txt").Size = 3
 
-			So(len(ug.store[cuid][2]), ShouldEqual, 4)
-			So(ug.store[cuid][2]["/a/b/c"], ShouldResemble, &summary{2, 30})
-			So(ug.store[cuid][2]["/a/b"], ShouldResemble, &summary{3, 60})
-			So(ug.store[cuid][2]["/a"], ShouldResemble, &summary{3, 60})
-			So(ug.store[cuid][2]["/"], ShouldResemble, &summary{3, 60})
+			otherDir := f.AddDirectory("other")
+			otherDir.UID = 0
+			otherDir.GID = 0
+			otherDir.AddDirectory("someDir").AddFile("someFile").Size = 50
+			otherDir.AddFile("miscFile").Size = 51
 
-			So(len(ug.store[2][2]), ShouldEqual, 4)
-			So(ug.store[2][2]["/a/b/c"], ShouldResemble, &summary{1, 5})
-			So(ug.store[2][2]["/a/b"], ShouldResemble, &summary{1, 5})
-			So(ug.store[2][2]["/a"], ShouldResemble, &summary{1, 5})
-			So(ug.store[2][2]["/"], ShouldResemble, &summary{1, 5})
+			p := stats.NewStatsParser(f.AsReader())
+			s := NewSummariser(p)
+			s.AddGlobalOperation(ugGenerator)
 
-			So(len(ug.store[2][3]), ShouldEqual, 4)
-			So(ug.store[2][3]["/a/b/c"], ShouldResemble, &summary{1, 6})
-			So(ug.store[2][3]["/a/b"], ShouldResemble, &summary{1, 6})
-			So(ug.store[2][3]["/a"], ShouldResemble, &summary{1, 6})
-			So(ug.store[2][3]["/"], ShouldResemble, &summary{1, 6})
+			err = s.Summarise()
+			So(err, ShouldBeNil)
 
-			Convey("You can output the summaries to file", func() {
-				err = ug.Output()
-				So(err, ShouldBeNil)
+			output := w.String()
 
-				output := w.String()
+			So(output, ShouldContainSubstring, uname+"\t"+
+				gname+"\t"+strconv.Quote("/")+"\t3\t6\n")
 
-				g, errl := user.LookupGroupId(strconv.Itoa(2))
-				So(errl, ShouldBeNil)
+			So(output, ShouldContainSubstring, uname+"\t"+
+				gname+"\t"+strconv.Quote("/opt")+"\t3\t6\n")
 
-				So(output, ShouldContainSubstring, os.Getenv("USER")+"\t"+
-					g.Name+"\t"+strconv.Quote("/a/b/c")+"\t2\t30\n")
+			So(output, ShouldContainSubstring, uname+"\t"+
+				gname+"\t"+strconv.Quote("/opt/userDir")+"\t3\t6\n")
 
-				So(checkDataIsSorted(output, 3), ShouldBeTrue)
-			})
+			So(output, ShouldContainSubstring, uname+"\t"+
+				gname+"\t"+strconv.Quote("/opt/userDir/subDir")+"\t1\t3\n")
 
-			Convey("Output handles bad uids", func() {
-				err = ug.Add(newMockInfo("/a/b/c/7.txt", 999999999, 2, 1, false))
-				testBadIds(err, ug, &w)
-			})
+			So(output, ShouldContainSubstring, uname+"\t"+
+				gname+"\t"+strconv.Quote("/opt/userDir/subDir/subsubDir")+"\t1\t3\n")
 
-			Convey("Output handles bad gids", func() {
-				err = ug.Add(newMockInfo("/a/b/c/8.txt", 1, 999999999, 1, false))
-				testBadIds(err, ug, &w)
-			})
+			So(output, ShouldNotContainSubstring, "root\troot\t"+
+				strconv.Quote("/opt/userDir"))
 
-			Convey("Output fails if we can't write to the output file", func() {
-				ug.w = badWriter{}
+			So(output, ShouldNotContainSubstring, uname+"\t"+
+				gname+"\t"+strconv.Quote("/opt/other"))
 
-				err = ug.Output()
-				So(err, ShouldNotBeNil)
-			})
+			So(output, ShouldContainSubstring, "root\troot\t"+
+				strconv.Quote("/opt")+"\t2\t101\n")
+
+			So(output, ShouldContainSubstring, "root\troot\t"+
+				strconv.Quote("/")+"\t2\t101\n")
+
+			So(output, ShouldContainSubstring, "root\troot\t"+
+				strconv.Quote("/opt/other")+"\t2\t101\n")
+
+			So(checkDataIsSorted(output, 3), ShouldBeTrue)
+		})
+
+		Convey("Output handles bad uids", func() {
+			ug := NewByUserGroup(&w)()
+			err = ug.Add(newMockInfo("/a/b/c/7.txt", 999999999, 2, 1, false))
+			testBadIds(err, ug, &w)
+		})
+
+		Convey("Output handles bad gids", func() {
+			ug := NewByUserGroup(&w)()
+			err = ug.Add(newMockInfo("/a/b/c/8.txt", 1, 999999999, 1, false))
+			testBadIds(err, ug, &w)
+		})
+
+		Convey("Output fails if we can't write to the output file", func() {
+			err = NewByUserGroup(badWriter{})().Output()
+			So(err, ShouldNotBeNil)
 		})
 	})
 }

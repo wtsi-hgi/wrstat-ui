@@ -123,7 +123,7 @@ type File struct {
 	Path                string
 	Size                int64
 	ATime, MTime, CTime int64
-	UID, GID            int
+	UID, GID            uint32
 	Type                byte
 }
 
