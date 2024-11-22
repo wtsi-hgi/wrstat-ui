@@ -30,7 +30,6 @@ package basedirs
 import (
 	"sort"
 	"testing"
-	"time"
 
 	. "github.com/smartystreets/goconvey/convey"
 	internaldata "github.com/wtsi-hgi/wrstat-ui/internal/data"
@@ -39,9 +38,7 @@ import (
 
 func TestTree(t *testing.T) {
 	Convey("Given a Tree", t, func() {
-		refTime := time.Now().Unix()
-
-		tree, _, err := internaldb.CreateExampleDGUTADBForBasedirs(t, refTime)
+		tree, _, err := internaldb.CreateExampleDGUTADBForBasedirs(t)
 		So(err, ShouldBeNil)
 
 		Convey("You can get all the gids and uids in it", func() {

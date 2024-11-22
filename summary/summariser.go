@@ -15,7 +15,8 @@ const (
 	probableMaxDirectoryDepth = 128
 )
 
-// Operation is
+// Operation is a type that receives file information either for a directory,
+// and it's descendants, or for an entire tree.
 type Operation interface {
 	// Add is called once for the containing directory and for each of its
 	// descendents during a Summariser.Summarise() call.
@@ -54,6 +55,11 @@ func (d directory) Output() error {
 	return nil
 }
 
+// OperationGenerator is used to generate an Operation for a
+// Summariser.Summarise() run.
+//
+// Will be called a single time as a Global Operator and multiple times as a
+// Directory Operator.
 type OperationGenerator func() Operation
 
 type operationGenerators []OperationGenerator
@@ -90,6 +96,8 @@ func (d directories) Output() error {
 	return nil
 }
 
+// Summariser provides methods to register Operators that act on FileInfo
+// entries in a tree.
 type Summariser struct {
 	statsParser         *stats.StatsParser
 	directoryOperations operationGenerators

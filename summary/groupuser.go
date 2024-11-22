@@ -28,9 +28,9 @@ package summary
 import (
 	"fmt"
 	"io"
-	"io/fs"
 	"sort"
-	"syscall"
+
+	"github.com/wtsi-hgi/wrstat-ui/stats"
 )
 
 // userToSummary is a sortable map with uids as keys and summaries as values.
@@ -131,30 +131,29 @@ func (store groupToUserStore) sort() ([]string, []userToSummaryStore) {
 
 // GroupUser is used to summarise file stats by group and user.
 type GroupUser struct {
+	w     io.WriteCloser
 	store groupToUserStore
 }
 
 // NewByGroupUser returns a GroupUser.
-func NewByGroupUser() *GroupUser {
-	return &GroupUser{
-		store: make(groupToUserStore),
+func NewByGroupUser(w io.WriteCloser) OperationGenerator {
+	return func() Operation {
+		return &GroupUser{
+			w:     w,
+			store: make(groupToUserStore),
+		}
 	}
 }
 
 // Add is a github.com/wtsi-ssg/wrstat/stat Operation. It will add the file size
 // and increment the file count summed for the info's group and user. If path is
 // a directory, it is ignored.
-func (g *GroupUser) Add(_ string, info fs.FileInfo) error {
+func (g *GroupUser) Add(info *stats.FileInfo) error {
 	if info.IsDir() {
 		return nil
 	}
 
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok {
-		return errNotUnix
-	}
-
-	g.store.getUserToSummaryStore(stat.Gid).add(stat.Uid, info.Size())
+	g.store.getUserToSummaryStore(uint32(info.GID)).add(uint32(info.UID), info.Size)
 
 	return nil
 }
@@ -170,18 +169,18 @@ func (g *GroupUser) Add(_ string, info fs.FileInfo) error {
 // Returns an error on failure to write, or if username or group can't be
 // determined from the uids and gids in the added file info. output is closed
 // on completion.
-func (g *GroupUser) Output(output io.WriteCloser) error {
+func (g *GroupUser) Output() error {
 	groups, uStores := g.store.sort()
 
 	uidLookupCache := make(map[uint32]string)
 
 	for i, groupname := range groups {
-		if err := outputUserSummariesForGroup(output, groupname, uStores[i], uidLookupCache); err != nil {
+		if err := outputUserSummariesForGroup(g.w, groupname, uStores[i], uidLookupCache); err != nil {
 			return err
 		}
 	}
 
-	return output.Close()
+	return g.w.Close()
 }
 
 // outputUserSummariesForGroup sorts the users for this group and outputs the

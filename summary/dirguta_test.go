@@ -37,6 +37,7 @@ import (
 	"time"
 
 	. "github.com/smartystreets/goconvey/convey"
+	"github.com/wtsi-hgi/wrstat-ui/stats"
 )
 
 func TestDirGUTAFileType(t *testing.T) {
@@ -252,7 +253,10 @@ func TestDirGUTAFileType(t *testing.T) {
 	})
 
 	Convey("DirGroupUserTypeAge.pathToTypes lets you know the filetypes of a path", t, func() {
-		d := NewDirGroupUserTypeAge()
+		var w stringBuilder
+		dGen := NewDirGroupUserTypeAge(&w)
+
+		d := dGen().(*DirGroupUserTypeAge)
 
 		So(d.pathToTypes("/foo/bar.asd"), ShouldResemble, []DirGUTAFileType{DGUTAFileTypeOther})
 		So(pathToTypesMap(d, "/foo/.tmp.asd"), ShouldResemble, map[DirGUTAFileType]bool{
@@ -384,249 +388,240 @@ func TestDirGUTA(t *testing.T) {
 	cuid := uint32(cuidI)
 
 	Convey("Given a DirGroupUserTypeAge", t, func() {
-		dguta := NewDirGroupUserTypeAge()
-		So(dguta, ShouldNotBeNil)
+		var w stringBuilder
+		dgutaGen := NewDirGroupUserTypeAge(&w)
+		So(dgutaGen, ShouldNotBeNil)
+
+		dguta := dgutaGen().(*DirGroupUserTypeAge)
 
 		Convey("You can add file info with a range of Atimes to it", func() {
 			atime1 := dguta.store.refTime - (SecondsInAMonth*2 + 100000)
 			mtime1 := dguta.store.refTime - (SecondsInAMonth * 3)
-			mi := newMockInfoWithAtime(10, 2, 2, false, atime1)
-			mi.mtime = mtime1
-			err = dguta.Add("/a/b/c/1.bam", mi)
+			mi := newMockInfoWithAtime("/a/b/c/1.bam", 10, 2, 2, false, atime1)
+			mi.MTime = mtime1
+			err = dguta.Add(mi)
 			So(err, ShouldBeNil)
 
 			atime2 := dguta.store.refTime - (SecondsInAMonth * 7)
 			mtime2 := dguta.store.refTime - (SecondsInAMonth * 8)
-			mi = newMockInfoWithAtime(10, 2, 3, false, atime2)
-			mi.mtime = mtime2
-			err = dguta.Add("/a/b/c/2.bam", mi)
+			mi = newMockInfoWithAtime("/a/b/c/2.bam", 10, 2, 3, false, atime2)
+			mi.MTime = mtime2
+			err = dguta.Add(mi)
 			So(err, ShouldBeNil)
 
 			atime3 := dguta.store.refTime - (SecondsInAYear + SecondsInAMonth)
 			mtime3 := dguta.store.refTime - (SecondsInAYear + SecondsInAMonth*6)
-			mi = newMockInfoWithAtime(10, 2, 4, false, atime3)
-			mi.mtime = mtime3
-			err = dguta.Add("/a/b/c/3.txt", mi)
+			mi = newMockInfoWithAtime("/a/b/c/3.txt", 10, 2, 4, false, atime3)
+			mi.MTime = mtime3
+			err = dguta.Add(mi)
 			So(err, ShouldBeNil)
 
 			atime4 := dguta.store.refTime - (SecondsInAYear * 4)
 			mtime4 := dguta.store.refTime - (SecondsInAYear * 6)
-			mi = newMockInfoWithAtime(10, 2, 5, false, atime4)
-			mi.mtime = mtime4
-			err = dguta.Add("/a/b/c/4.bam", mi)
+			mi = newMockInfoWithAtime("/a/b/c/4.bam", 10, 2, 5, false, atime4)
+			mi.MTime = mtime4
+			err = dguta.Add(mi)
 			So(err, ShouldBeNil)
 
 			atime5 := dguta.store.refTime - (SecondsInAYear*5 + SecondsInAMonth)
 			mtime5 := dguta.store.refTime - (SecondsInAYear*7 + SecondsInAMonth)
-			mi = newMockInfoWithAtime(10, 2, 6, false, atime5)
-			mi.mtime = mtime5
-			err = dguta.Add("/a/b/c/5.cram", mi)
+			mi = newMockInfoWithAtime("/a/b/c/5.cram", 10, 2, 6, false, atime5)
+			mi.MTime = mtime5
+			err = dguta.Add(mi)
 			So(err, ShouldBeNil)
 
 			atime6 := dguta.store.refTime - (SecondsInAYear*7 + SecondsInAMonth)
 			mtime6 := dguta.store.refTime - (SecondsInAYear*7 + SecondsInAMonth)
-			mi = newMockInfoWithAtime(10, 2, 7, false, atime6)
-			mi.mtime = mtime6
-			err = dguta.Add("/a/b/c/6.cram", mi)
+			mi = newMockInfoWithAtime("/a/b/c/6.cram", 10, 2, 7, false, atime6)
+			mi.MTime = mtime6
+			err = dguta.Add(mi)
 			So(err, ShouldBeNil)
 
-			mi = newMockInfoWithAtime(10, 2, 8, false, mtime3)
-			mi.mtime = mtime3
-			err = dguta.Add("/a/b/c/6.tmp", mi)
+			mi = newMockInfoWithAtime("/a/b/c/6.tmp", 10, 2, 8, false, mtime3)
+			mi.MTime = mtime3
+			err = dguta.Add(mi)
 			So(err, ShouldBeNil)
 
-			Convey("And then given an output file", func() {
-				dir := t.TempDir()
-				outPath := filepath.Join(dir, "out")
-				out, errc := os.Create(outPath)
-				So(errc, ShouldBeNil)
+			Convey("You can output the summaries to file", func() {
+				err = dguta.Output()
+				So(err, ShouldBeNil)
 
-				Convey("You can output the summaries to file", func() {
-					err = dguta.Output(out)
-					So(err, ShouldBeNil)
-					err = out.Close()
-					So(err, ShouldNotBeNil)
+				output := w.String()
 
-					o, errr := os.ReadFile(outPath)
-					So(errr, ShouldBeNil)
+				buildExpectedOutputLine := func(
+					dir string, gid, uid int, ft DirGUTAFileType, age DirGUTAge,
+					count, size int, atime, mtime int64,
+				) string {
+					return fmt.Sprintf("%q\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\n",
+						dir, gid, uid, ft, age, count, size, atime, mtime)
+				}
 
-					output := string(o)
+				buildExpectedEmptyOutputLine := func(dir string, gid, uid int, ft DirGUTAFileType, age DirGUTAge) string {
+					return fmt.Sprintf("%s\t%d\t%d\t%d\t%d",
+						strconv.Quote(dir), gid, uid, ft, age)
+				}
 
-					buildExpectedOutputLine := func(
-						dir string, gid, uid int, ft DirGUTAFileType, age DirGUTAge,
-						count, size int, atime, mtime int64,
-					) string {
-						return fmt.Sprintf("%q\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\n",
-							dir, gid, uid, ft, age, count, size, atime, mtime)
-					}
+				dir := "/a/b/c"
+				gid, uid, ft, count, size := 2, 10, DGUTAFileTypeBam, 3, 10
+				testAtime, testMtime := atime4, mtime1
 
-					buildExpectedEmptyOutputLine := func(dir string, gid, uid int, ft DirGUTAFileType, age DirGUTAge) string {
-						return fmt.Sprintf("%s\t%d\t%d\t%d\t%d",
-							strconv.Quote(dir), gid, uid, ft, age)
-					}
+				So(output, ShouldNotContainSubstring, "0\t0\t0\t0\n")
 
-					dir := "/a/b/c"
-					gid, uid, ft, count, size := 2, 10, DGUTAFileTypeBam, 3, 10
-					testAtime, testMtime := atime4, mtime1
+				So(output, ShouldContainSubstring,
+					buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeAll, count, size, testAtime, testMtime))
+				So(output, ShouldContainSubstring,
+					buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeA1M, count, size, testAtime, testMtime))
+				So(output, ShouldContainSubstring,
+					buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeA2M, count, size, testAtime, testMtime))
+				So(output, ShouldContainSubstring,
+					buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeA6M, count-1, size-2, testAtime, mtime2))
+				So(output, ShouldContainSubstring,
+					buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeA1Y, count-2, size-5, testAtime, mtime4))
+				So(output, ShouldContainSubstring,
+					buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeA2Y, count-2, size-5, testAtime, mtime4))
+				So(output, ShouldContainSubstring,
+					buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeA3Y, count-2, size-5, testAtime, mtime4))
+				So(output, ShouldNotContainSubstring, buildExpectedEmptyOutputLine(dir, gid, uid, ft, DGUTAgeA5Y))
+				So(output, ShouldNotContainSubstring, buildExpectedEmptyOutputLine(dir, gid, uid, ft, DGUTAgeA7Y))
+				So(output, ShouldContainSubstring,
+					buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeM1M, count, size, testAtime, testMtime))
+				So(output, ShouldContainSubstring,
+					buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeM2M, count, size, testAtime, testMtime))
+				So(output, ShouldContainSubstring,
+					buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeM6M, count-1, size-2, testAtime, mtime2))
+				So(output, ShouldContainSubstring,
+					buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeM1Y, count-2, size-5, testAtime, mtime4))
+				So(output, ShouldContainSubstring,
+					buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeM2Y, count-2, size-5, testAtime, mtime4))
+				So(output, ShouldContainSubstring,
+					buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeM3Y, count-2, size-5, testAtime, mtime4))
+				So(output, ShouldContainSubstring,
+					buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeM5Y, count-2, size-5, testAtime, mtime4))
+				So(output, ShouldNotContainSubstring, buildExpectedEmptyOutputLine(dir, gid, uid, ft, DGUTAgeM7Y))
 
-					So(output, ShouldNotContainSubstring, "0\t0\t0\t0\n")
+				gid, uid, ft, count, size = 2, 10, DGUTAFileTypeCram, 2, 13
+				testAtime, testMtime = atime6, mtime5
 
-					So(output, ShouldContainSubstring,
-						buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeAll, count, size, testAtime, testMtime))
-					So(output, ShouldContainSubstring,
-						buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeA1M, count, size, testAtime, testMtime))
-					So(output, ShouldContainSubstring,
-						buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeA2M, count, size, testAtime, testMtime))
-					So(output, ShouldContainSubstring,
-						buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeA6M, count-1, size-2, testAtime, mtime2))
-					So(output, ShouldContainSubstring,
-						buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeA1Y, count-2, size-5, testAtime, mtime4))
-					So(output, ShouldContainSubstring,
-						buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeA2Y, count-2, size-5, testAtime, mtime4))
-					So(output, ShouldContainSubstring,
-						buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeA3Y, count-2, size-5, testAtime, mtime4))
-					So(output, ShouldNotContainSubstring, buildExpectedEmptyOutputLine(dir, gid, uid, ft, DGUTAgeA5Y))
-					So(output, ShouldNotContainSubstring, buildExpectedEmptyOutputLine(dir, gid, uid, ft, DGUTAgeA7Y))
-					So(output, ShouldContainSubstring,
-						buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeM1M, count, size, testAtime, testMtime))
-					So(output, ShouldContainSubstring,
-						buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeM2M, count, size, testAtime, testMtime))
-					So(output, ShouldContainSubstring,
-						buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeM6M, count-1, size-2, testAtime, mtime2))
-					So(output, ShouldContainSubstring,
-						buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeM1Y, count-2, size-5, testAtime, mtime4))
-					So(output, ShouldContainSubstring,
-						buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeM2Y, count-2, size-5, testAtime, mtime4))
-					So(output, ShouldContainSubstring,
-						buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeM3Y, count-2, size-5, testAtime, mtime4))
-					So(output, ShouldContainSubstring,
-						buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeM5Y, count-2, size-5, testAtime, mtime4))
-					So(output, ShouldNotContainSubstring, buildExpectedEmptyOutputLine(dir, gid, uid, ft, DGUTAgeM7Y))
+				So(output, ShouldContainSubstring,
+					buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeAll, count, size, testAtime, testMtime))
+				So(output, ShouldContainSubstring,
+					buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeA1M, count, size, testAtime, testMtime))
+				So(output, ShouldContainSubstring,
+					buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeA2M, count, size, testAtime, testMtime))
+				So(output, ShouldContainSubstring,
+					buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeA6M, count, size, testAtime, testMtime))
+				So(output, ShouldContainSubstring,
+					buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeA1Y, count, size, testAtime, testMtime))
+				So(output, ShouldContainSubstring,
+					buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeA2Y, count, size, testAtime, testMtime))
+				So(output, ShouldContainSubstring,
+					buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeA3Y, count, size, testAtime, testMtime))
+				So(output, ShouldContainSubstring,
+					buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeA5Y, count, size, testAtime, testMtime))
+				So(output, ShouldContainSubstring,
+					buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeA7Y, count-1, size-6, testAtime, testMtime))
+				So(output, ShouldContainSubstring,
+					buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeM1M, count, size, testAtime, testMtime))
+				So(output, ShouldContainSubstring,
+					buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeM2M, count, size, testAtime, testMtime))
+				So(output, ShouldContainSubstring,
+					buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeM6M, count, size, testAtime, testMtime))
+				So(output, ShouldContainSubstring,
+					buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeM1Y, count, size, testAtime, testMtime))
+				So(output, ShouldContainSubstring,
+					buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeM2Y, count, size, testAtime, testMtime))
+				So(output, ShouldContainSubstring,
+					buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeM3Y, count, size, testAtime, testMtime))
+				So(output, ShouldContainSubstring,
+					buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeM5Y, count, size, testAtime, testMtime))
+				So(output, ShouldContainSubstring,
+					buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeM7Y, count, size, testAtime, testMtime))
 
-					gid, uid, ft, count, size = 2, 10, DGUTAFileTypeCram, 2, 13
-					testAtime, testMtime = atime6, mtime5
+				gid, uid, ft, count, size = 2, 10, DGUTAFileTypeText, 1, 4
+				testAtime, testMtime = atime3, mtime3
 
-					So(output, ShouldContainSubstring,
-						buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeAll, count, size, testAtime, testMtime))
-					So(output, ShouldContainSubstring,
-						buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeA1M, count, size, testAtime, testMtime))
-					So(output, ShouldContainSubstring,
-						buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeA2M, count, size, testAtime, testMtime))
-					So(output, ShouldContainSubstring,
-						buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeA6M, count, size, testAtime, testMtime))
-					So(output, ShouldContainSubstring,
-						buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeA1Y, count, size, testAtime, testMtime))
-					So(output, ShouldContainSubstring,
-						buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeA2Y, count, size, testAtime, testMtime))
-					So(output, ShouldContainSubstring,
-						buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeA3Y, count, size, testAtime, testMtime))
-					So(output, ShouldContainSubstring,
-						buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeA5Y, count, size, testAtime, testMtime))
-					So(output, ShouldContainSubstring,
-						buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeA7Y, count-1, size-6, testAtime, testMtime))
-					So(output, ShouldContainSubstring,
-						buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeM1M, count, size, testAtime, testMtime))
-					So(output, ShouldContainSubstring,
-						buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeM2M, count, size, testAtime, testMtime))
-					So(output, ShouldContainSubstring,
-						buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeM6M, count, size, testAtime, testMtime))
-					So(output, ShouldContainSubstring,
-						buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeM1Y, count, size, testAtime, testMtime))
-					So(output, ShouldContainSubstring,
-						buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeM2Y, count, size, testAtime, testMtime))
-					So(output, ShouldContainSubstring,
-						buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeM3Y, count, size, testAtime, testMtime))
-					So(output, ShouldContainSubstring,
-						buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeM5Y, count, size, testAtime, testMtime))
-					So(output, ShouldContainSubstring,
-						buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeM7Y, count, size, testAtime, testMtime))
+				So(output, ShouldContainSubstring,
+					buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeAll, count, size, testAtime, testMtime))
+				So(output, ShouldContainSubstring,
+					buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeA1M, count, size, testAtime, testMtime))
+				So(output, ShouldContainSubstring,
+					buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeA2M, count, size, testAtime, testMtime))
+				So(output, ShouldContainSubstring,
+					buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeA6M, count, size, testAtime, testMtime))
+				So(output, ShouldContainSubstring,
+					buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeA1Y, count, size, testAtime, testMtime))
+				So(output, ShouldNotContainSubstring, buildExpectedEmptyOutputLine(dir, gid, uid, ft, DGUTAgeA2Y))
+				So(output, ShouldNotContainSubstring, buildExpectedEmptyOutputLine(dir, gid, uid, ft, DGUTAgeA3Y))
+				So(output, ShouldNotContainSubstring, buildExpectedEmptyOutputLine(dir, gid, uid, ft, DGUTAgeA5Y))
+				So(output, ShouldNotContainSubstring, buildExpectedEmptyOutputLine(dir, gid, uid, ft, DGUTAgeA7Y))
+				So(output, ShouldContainSubstring,
+					buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeM1M, count, size, testAtime, testMtime))
+				So(output, ShouldContainSubstring,
+					buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeM2M, count, size, testAtime, testMtime))
+				So(output, ShouldContainSubstring,
+					buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeM6M, count, size, testAtime, testMtime))
+				So(output, ShouldContainSubstring,
+					buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeM1Y, count, size, testAtime, testMtime))
+				So(output, ShouldNotContainSubstring, buildExpectedEmptyOutputLine(dir, gid, uid, ft, DGUTAgeM2Y))
+				So(output, ShouldNotContainSubstring, buildExpectedEmptyOutputLine(dir, gid, uid, ft, DGUTAgeM3Y))
+				So(output, ShouldNotContainSubstring, buildExpectedEmptyOutputLine(dir, gid, uid, ft, DGUTAgeM5Y))
+				So(output, ShouldNotContainSubstring, buildExpectedEmptyOutputLine(dir, gid, uid, ft, DGUTAgeM7Y))
 
-					gid, uid, ft, count, size = 2, 10, DGUTAFileTypeText, 1, 4
-					testAtime, testMtime = atime3, mtime3
+				gid, uid, ft, count, size = 2, 10, DGUTAFileTypeTemp, 1, 8
+				testAtime, testMtime = mtime3, mtime3
 
-					So(output, ShouldContainSubstring,
-						buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeAll, count, size, testAtime, testMtime))
-					So(output, ShouldContainSubstring,
-						buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeA1M, count, size, testAtime, testMtime))
-					So(output, ShouldContainSubstring,
-						buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeA2M, count, size, testAtime, testMtime))
-					So(output, ShouldContainSubstring,
-						buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeA6M, count, size, testAtime, testMtime))
-					So(output, ShouldContainSubstring,
-						buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeA1Y, count, size, testAtime, testMtime))
-					So(output, ShouldNotContainSubstring, buildExpectedEmptyOutputLine(dir, gid, uid, ft, DGUTAgeA2Y))
-					So(output, ShouldNotContainSubstring, buildExpectedEmptyOutputLine(dir, gid, uid, ft, DGUTAgeA3Y))
-					So(output, ShouldNotContainSubstring, buildExpectedEmptyOutputLine(dir, gid, uid, ft, DGUTAgeA5Y))
-					So(output, ShouldNotContainSubstring, buildExpectedEmptyOutputLine(dir, gid, uid, ft, DGUTAgeA7Y))
-					So(output, ShouldContainSubstring,
-						buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeM1M, count, size, testAtime, testMtime))
-					So(output, ShouldContainSubstring,
-						buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeM2M, count, size, testAtime, testMtime))
-					So(output, ShouldContainSubstring,
-						buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeM6M, count, size, testAtime, testMtime))
-					So(output, ShouldContainSubstring,
-						buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeM1Y, count, size, testAtime, testMtime))
-					So(output, ShouldNotContainSubstring, buildExpectedEmptyOutputLine(dir, gid, uid, ft, DGUTAgeM2Y))
-					So(output, ShouldNotContainSubstring, buildExpectedEmptyOutputLine(dir, gid, uid, ft, DGUTAgeM3Y))
-					So(output, ShouldNotContainSubstring, buildExpectedEmptyOutputLine(dir, gid, uid, ft, DGUTAgeM5Y))
-					So(output, ShouldNotContainSubstring, buildExpectedEmptyOutputLine(dir, gid, uid, ft, DGUTAgeM7Y))
-
-					gid, uid, ft, count, size = 2, 10, DGUTAFileTypeTemp, 1, 8
-					testAtime, testMtime = mtime3, mtime3
-
-					So(output, ShouldContainSubstring,
-						buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeAll, count, size, testAtime, testMtime))
-					So(output, ShouldContainSubstring,
-						buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeA1M, count, size, testAtime, testMtime))
-					So(output, ShouldContainSubstring,
-						buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeA2M, count, size, testAtime, testMtime))
-					So(output, ShouldContainSubstring,
-						buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeA6M, count, size, testAtime, testMtime))
-					So(output, ShouldContainSubstring,
-						buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeA1Y, count, size, testAtime, testMtime))
-					So(output, ShouldNotContainSubstring, buildExpectedEmptyOutputLine(dir, gid, uid, ft, DGUTAgeA2Y))
-					So(output, ShouldNotContainSubstring, buildExpectedEmptyOutputLine(dir, gid, uid, ft, DGUTAgeA3Y))
-					So(output, ShouldNotContainSubstring, buildExpectedEmptyOutputLine(dir, gid, uid, ft, DGUTAgeA5Y))
-					So(output, ShouldNotContainSubstring, buildExpectedEmptyOutputLine(dir, gid, uid, ft, DGUTAgeA7Y))
-					So(output, ShouldContainSubstring,
-						buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeM1M, count, size, testAtime, testMtime))
-					So(output, ShouldContainSubstring,
-						buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeM2M, count, size, testAtime, testMtime))
-					So(output, ShouldContainSubstring,
-						buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeM6M, count, size, testAtime, testMtime))
-					So(output, ShouldContainSubstring,
-						buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeM1Y, count, size, testAtime, testMtime))
-					So(output, ShouldNotContainSubstring, buildExpectedEmptyOutputLine(dir, gid, uid, ft, DGUTAgeM2Y))
-					So(output, ShouldNotContainSubstring, buildExpectedEmptyOutputLine(dir, gid, uid, ft, DGUTAgeM3Y))
-					So(output, ShouldNotContainSubstring, buildExpectedEmptyOutputLine(dir, gid, uid, ft, DGUTAgeM5Y))
-					So(output, ShouldNotContainSubstring, buildExpectedEmptyOutputLine(dir, gid, uid, ft, DGUTAgeM7Y))
-				})
+				So(output, ShouldContainSubstring,
+					buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeAll, count, size, testAtime, testMtime))
+				So(output, ShouldContainSubstring,
+					buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeA1M, count, size, testAtime, testMtime))
+				So(output, ShouldContainSubstring,
+					buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeA2M, count, size, testAtime, testMtime))
+				So(output, ShouldContainSubstring,
+					buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeA6M, count, size, testAtime, testMtime))
+				So(output, ShouldContainSubstring,
+					buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeA1Y, count, size, testAtime, testMtime))
+				So(output, ShouldNotContainSubstring, buildExpectedEmptyOutputLine(dir, gid, uid, ft, DGUTAgeA2Y))
+				So(output, ShouldNotContainSubstring, buildExpectedEmptyOutputLine(dir, gid, uid, ft, DGUTAgeA3Y))
+				So(output, ShouldNotContainSubstring, buildExpectedEmptyOutputLine(dir, gid, uid, ft, DGUTAgeA5Y))
+				So(output, ShouldNotContainSubstring, buildExpectedEmptyOutputLine(dir, gid, uid, ft, DGUTAgeA7Y))
+				So(output, ShouldContainSubstring,
+					buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeM1M, count, size, testAtime, testMtime))
+				So(output, ShouldContainSubstring,
+					buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeM2M, count, size, testAtime, testMtime))
+				So(output, ShouldContainSubstring,
+					buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeM6M, count, size, testAtime, testMtime))
+				So(output, ShouldContainSubstring,
+					buildExpectedOutputLine(dir, gid, uid, ft, DGUTAgeM1Y, count, size, testAtime, testMtime))
+				So(output, ShouldNotContainSubstring, buildExpectedEmptyOutputLine(dir, gid, uid, ft, DGUTAgeM2Y))
+				So(output, ShouldNotContainSubstring, buildExpectedEmptyOutputLine(dir, gid, uid, ft, DGUTAgeM3Y))
+				So(output, ShouldNotContainSubstring, buildExpectedEmptyOutputLine(dir, gid, uid, ft, DGUTAgeM5Y))
+				So(output, ShouldNotContainSubstring, buildExpectedEmptyOutputLine(dir, gid, uid, ft, DGUTAgeM7Y))
 			})
 		})
 
 		Convey("You can add file info to it which accumulates the info", func() {
-			addTestData(dguta, cuid)
+			addTestData(dguta, int64(cuid))
 
-			err = dguta.Add("/a/b/c/3.bam", newMockInfoWithAtime(2, 2, 3, false, 100))
+			err = dguta.Add(newMockInfoWithAtime("/a/b/c/3.bam", 2, 2, 3, false, 100))
 			So(err, ShouldBeNil)
 
-			mi := newMockInfoWithAtime(10, 2, 2, false, 250)
-			mi.mtime = 250
-			err = dguta.Add("/a/b/c/7.cram", mi)
+			mi := newMockInfoWithAtime("/a/b/c/7.cram", 10, 2, 2, false, 250)
+			mi.MTime = 250
+			err = dguta.Add(mi)
 			So(err, ShouldBeNil)
 
-			mi = newMockInfoWithAtime(10, 2, 2, false, 199)
-			mi.mtime = 200
-			err = dguta.Add("/a/b/c/d/9.cram", mi)
+			mi = newMockInfoWithAtime("/a/b/c/d/9.cram", 10, 2, 2, false, 199)
+			mi.MTime = 200
+			err = dguta.Add(mi)
 			So(err, ShouldBeNil)
 
-			mi = newMockInfoWithAtime(2, 10, 2, false, 300)
-			mi.ctime = 301
-			err = dguta.Add("/a/b/c/8.cram", mi)
+			mi = newMockInfoWithAtime("/a/b/c/8.cram", 2, 10, 2, false, 300)
+			mi.CTime = 301
+			err = dguta.Add(mi)
 			So(err, ShouldBeNil)
 
 			before := time.Now().Unix()
-			err = dguta.Add("/a/b/c/d", newMockInfoWithAtime(10, 2, 4096, true, 50))
+			err = dguta.Add(newMockInfoWithAtime("/a/b/c/d", 10, 2, 4096, true, 50))
 			So(err, ShouldBeNil)
 
 			So(dguta.store.gsMap["/a/b/c"], ShouldNotBeNil)
@@ -658,70 +653,55 @@ func TestDirGUTA(t *testing.T) {
 			})
 			So(dguta.store.gsMap["/a/b/c/d"].sumMap[GUTAKey{2, 10, 15, 0}.String()], ShouldNotBeNil)
 
-			Convey("And then given an output file", func() {
-				dir := t.TempDir()
-				outPath := filepath.Join(dir, "out")
-				out, err := os.Create(outPath)
+			Convey("You can output the summaries to file", func() {
+				err = dguta.Output()
 				So(err, ShouldBeNil)
 
-				Convey("You can output the summaries to file", func() {
-					err = dguta.Output(out)
-					So(err, ShouldBeNil)
-					err = out.Close()
-					So(err, ShouldNotBeNil)
+				output := w.String()
 
-					o, errr := os.ReadFile(outPath)
-					So(errr, ShouldBeNil)
+				for i := range len(DirGUTAges) - 1 {
+					So(output, ShouldContainSubstring, strconv.Quote("/a/b/c/d")+
+						fmt.Sprintf("\t2\t10\t7\t%d\t1\t2\t200\t200\n", i))
+				}
 
-					output := string(o)
+				// these are based on files added with newMockInfo and
+				// don't have a/mtime set, so show up as 0 a/mtime and are
+				// treated as ancient
+				So(output, ShouldContainSubstring, strconv.Quote("/a/b/c")+
+					"\t"+cuidKey+"\t2\t30\t0\t0\n")
+				So(output, ShouldContainSubstring, strconv.Quote("/a/b/c")+
+					"\t"+fmt.Sprintf("2\t%d\t13\t1", cuid)+"\t2\t30\t0\t0\n")
+				So(output, ShouldContainSubstring, strconv.Quote("/a/b/c")+
+					"\t"+fmt.Sprintf("2\t%d\t13\t16", cuid)+"\t2\t30\t0\t0\n")
+				So(output, ShouldContainSubstring, strconv.Quote("/a/b")+
+					"\t"+cuidKey+"\t3\t60\t0\t0\n")
+				So(output, ShouldContainSubstring, strconv.Quote("/a/b")+
+					"\t2\t2\t13\t0\t1\t5\t0\t0\n")
+				So(output, ShouldContainSubstring, strconv.Quote("/a/b")+
+					"\t2\t2\t6\t0\t1\t3\t100\t0\n")
+				So(output, ShouldContainSubstring, strconv.Quote("/")+
+					"\t3\t2\t13\t0\t1\t6\t0\t0\n")
 
-					for i := range len(DirGUTAges) - 1 {
-						So(output, ShouldContainSubstring, strconv.Quote("/a/b/c/d")+
-							fmt.Sprintf("\t2\t10\t7\t%d\t1\t2\t200\t200\n", i))
-					}
-
-					// these are based on files added with newMockInfo and
-					// don't have a/mtime set, so show up as 0 a/mtime and are
-					// treated as ancient
-					So(output, ShouldContainSubstring, strconv.Quote("/a/b/c")+
-						"\t"+cuidKey+"\t2\t30\t0\t0\n")
-					So(output, ShouldContainSubstring, strconv.Quote("/a/b/c")+
-						"\t"+fmt.Sprintf("2\t%d\t13\t1", cuid)+"\t2\t30\t0\t0\n")
-					So(output, ShouldContainSubstring, strconv.Quote("/a/b/c")+
-						"\t"+fmt.Sprintf("2\t%d\t13\t16", cuid)+"\t2\t30\t0\t0\n")
-					So(output, ShouldContainSubstring, strconv.Quote("/a/b")+
-						"\t"+cuidKey+"\t3\t60\t0\t0\n")
-					So(output, ShouldContainSubstring, strconv.Quote("/a/b")+
-						"\t2\t2\t13\t0\t1\t5\t0\t0\n")
-					So(output, ShouldContainSubstring, strconv.Quote("/a/b")+
-						"\t2\t2\t6\t0\t1\t3\t100\t0\n")
-					So(output, ShouldContainSubstring, strconv.Quote("/")+
-						"\t3\t2\t13\t0\t1\t6\t0\t0\n")
-
-					So(checkDGUTAFileIsSorted(outPath), ShouldBeTrue)
-				})
-
-				Convey("Output fails if we can't write to the output file", func() {
-					err = out.Close()
-					So(err, ShouldBeNil)
-
-					err = dguta.Output(out)
-					So(err, ShouldNotBeNil)
-				})
+				So(checkDataIsSorted(output, 1), ShouldBeTrue)
 			})
-		})
 
-		Convey("You can't Add() on non-unix-like systems'", func() {
-			err := dguta.Add("/a/b/c/1.txt", &badInfo{})
-			So(err, ShouldNotBeNil)
+			Convey("Output fails if we can't write to the output file", func() {
+				dguta.w = badWriter{}
+
+				err = dguta.Output()
+				So(err, ShouldNotBeNil)
+			})
 		})
 	})
 }
 
 func TestOldFile(t *testing.T) {
 	Convey("Given an real old file and a dguta", t, func() {
-		dguta := NewDirGroupUserTypeAge()
-		So(dguta, ShouldNotBeNil)
+		var w stringBuilder
+		dgutaGen := NewDirGroupUserTypeAge(&w)
+		So(dgutaGen, ShouldNotBeNil)
+
+		dguta := dgutaGen().(*DirGroupUserTypeAge)
 
 		tempDir := t.TempDir()
 		path := filepath.Join(tempDir, "oldFile.txt")
@@ -754,7 +734,16 @@ func TestOldFile(t *testing.T) {
 		GID := statt.Gid
 
 		Convey("adding it results in correct a and m age sizes", func() {
-			err = dguta.Add(path, fileInfo)
+			err = dguta.Add(&stats.FileInfo{
+				Path:      []byte(path),
+				Size:      statt.Size,
+				UID:       int64(UID),
+				GID:       int64(GID),
+				MTime:     amtime,
+				ATime:     amtime,
+				CTime:     amtime,
+				EntryType: stats.FileType,
+			})
 
 			So(dguta.store.gsMap[tempDir].sumMap[GUTAKey{GID, UID, DGUTAFileTypeText, DGUTAgeA1M}.String()],
 				ShouldResemble, &summaryWithTimes{
@@ -802,9 +791,4 @@ func TestOldFile(t *testing.T) {
 				ShouldBeNil)
 		})
 	})
-}
-
-func checkDGUTAFileIsSorted(path string) bool {
-	return checkFileIsSorted(path, "-k1,1", "-k2,2n", "-k3,3n", "-k4,4n", "-k5,5n",
-		"-k6,6n", "-k7,7n", "-k8,8n", "-k9,9n")
 }

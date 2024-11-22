@@ -111,7 +111,7 @@ func TestBaseDirs(t *testing.T) {
 		gid, uid, groupName, username, err := internaldata.RealGIDAndUID()
 		So(err, ShouldBeNil)
 
-		locDirs, files := internaldata.FakeFilesForDGUTADBForBasedirsTesting(gid, uid, refTime)
+		locDirs, files := internaldata.FakeFilesForDGUTADBForBasedirsTesting(gid, uid)
 
 		const (
 			halfGig = 1 << 29
@@ -788,7 +788,7 @@ func TestBaseDirs(t *testing.T) {
 					})
 
 					Convey("Then you can add and retrieve a new day's usage and quota", func() {
-						_, files := internaldata.FakeFilesForDGUTADBForBasedirsTesting(gid, uid, refTime)
+						_, files := internaldata.FakeFilesForDGUTADBForBasedirsTesting(gid, uid)
 						files[0].NumFiles = 2
 						files[0].SizeOfEachFile = halfGig
 						files[1].SizeOfEachFile = twoGig
@@ -1374,7 +1374,7 @@ func TestBaseDirs(t *testing.T) {
 			})
 
 			Convey("and merge with another database", func() {
-				_, newFiles := internaldata.FakeFilesForDGUTADBForBasedirsTesting(gid, uid, refTime)
+				_, newFiles := internaldata.FakeFilesForDGUTADBForBasedirsTesting(gid, uid)
 				for i := range newFiles {
 					newFiles[i].Path = "/nfs" + newFiles[i].Path[7:]
 				}

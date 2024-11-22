@@ -84,6 +84,10 @@ type FileInfo struct {
 	EntryType byte
 }
 
+func (f *FileInfo) IsDir() bool {
+	return f.EntryType == DirType
+}
+
 // NewStatsParser is used to create a new StatsParser, given uncompressed wrstat
 // stats data.
 func NewStatsParser(r io.Reader) *StatsParser {

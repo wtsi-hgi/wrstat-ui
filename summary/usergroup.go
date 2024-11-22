@@ -28,12 +28,12 @@ package summary
 import (
 	"fmt"
 	"io"
-	"io/fs"
 	"os/user"
 	"path/filepath"
 	"sort"
 	"strconv"
-	"syscall"
+
+	"github.com/wtsi-hgi/wrstat-ui/stats"
 )
 
 type Error string
@@ -242,32 +242,31 @@ func getUserName(id uint32) string {
 
 // Usergroup is used to summarise file stats by user and group.
 type Usergroup struct {
+	w     io.WriteCloser
 	store userStore
 }
 
 // NewByUserGroup returns a Usergroup.
-func NewByUserGroup() *Usergroup {
-	return &Usergroup{
-		store: make(userStore),
+func NewByUserGroup(w io.WriteCloser) OperationGenerator {
+	return func() Operation {
+		return &Usergroup{
+			w:     w,
+			store: make(userStore),
+		}
 	}
 }
 
 // Add is a github.com/wtsi-ssg/wrstat/stat Operation. It will break path in to
 // its directories and add the file size and increment the file count to each,
 // summed for the info's user and group. If path is a directory, it is ignored.
-func (u *Usergroup) Add(path string, info fs.FileInfo) error {
+func (u *Usergroup) Add(info *stats.FileInfo) error {
 	if info.IsDir() {
 		return nil
 	}
 
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok {
-		return errNotUnix
-	}
+	dStore := u.store.DirStore(uint32(info.UID), uint32(info.GID))
 
-	dStore := u.store.DirStore(stat.Uid, stat.Gid)
-
-	dStore.addForEachDir(path, info.Size())
+	dStore.addForEachDir(string(info.Path), info.Size)
 
 	return nil
 }
@@ -282,18 +281,18 @@ func (u *Usergroup) Add(path string, info fs.FileInfo) error {
 // Returns an error on failure to write, or if username or group can't be
 // determined from the uids and gids in the added file info. output is closed
 // on completion.
-func (u *Usergroup) Output(output io.WriteCloser) error {
+func (u *Usergroup) Output() error {
 	users, gStores := u.store.sort()
 
 	gidLookupCache := make(map[uint32]string)
 
 	for i, username := range users {
-		if err := outputGroupDirectorySummariesForUser(output, username, gStores[i], gidLookupCache); err != nil {
+		if err := outputGroupDirectorySummariesForUser(u.w, username, gStores[i], gidLookupCache); err != nil {
 			return err
 		}
 	}
 
-	return output.Close()
+	return u.w.Close()
 }
 
 // outputGroupDirectorySummariesForUser sortes the groups for this user and

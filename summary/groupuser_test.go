@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2021 Genome Research Ltd.
+ * Copyright (c) 2021, 2024 Genome Research Ltd.
  *
  * Author: Sendu Bala <sb10@sanger.ac.uk>
  *
@@ -26,11 +26,11 @@
 package summary
 
 import (
-	"os"
+	"fmt"
 	"os/user"
-	"path/filepath"
 	"strconv"
 	"testing"
+	"time"
 
 	. "github.com/smartystreets/goconvey/convey"
 )
@@ -46,79 +46,69 @@ func TestGroupUser(t *testing.T) {
 		t.Fatal(err.Error())
 	}
 
-	cuid := uint32(cuidI)
+	cuid := int64(cuidI)
 
-	Convey("Given a GroupUser", t, func() {
-		ug := NewByGroupUser()
-		So(ug, ShouldNotBeNil)
+	gidI, err := strconv.Atoi(usr.Gid)
+	if err != nil {
+		t.Fatal(err.Error())
+	}
 
-		Convey("You can add file info to it which accumulates the info", func() {
-			addTestData(ug, cuid)
+	gid := int64(gidI)
 
-			So(ug.store[2], ShouldNotBeNil)
-			So(ug.store[3], ShouldNotBeNil)
-			So(ug.store[2][cuid], ShouldNotBeNil)
-			So(ug.store[2][2], ShouldNotBeNil)
-			So(ug.store[3][2], ShouldNotBeNil)
-			So(ug.store[3][cuid], ShouldBeNil)
+	g, err := user.LookupGroupId(strconv.FormatInt(gid, 10))
+	if err != nil {
+		t.Fatal(err.Error())
+	}
 
-			So(ug.store[2][cuid], ShouldResemble, &summary{3, 60})
+	uname := usr.Username
+	gname := g.Name
 
-			So(ug.store[2][2], ShouldResemble, &summary{1, 5})
+	tim := time.Now().Unix()
 
-			So(ug.store[3][2], ShouldResemble, &summary{1, 6})
+	Convey("GroupUser Operation accumulates count and size by group and username", t, func() {
+		var w stringBuilder
 
-			Convey("And then given an output file", func() {
-				dir := t.TempDir()
-				outPath := filepath.Join(dir, "out")
-				out, err := os.Create(outPath)
-				So(err, ShouldBeNil)
+		ugGenerator := NewByGroupUser(&w)
+		So(ugGenerator, ShouldNotBeNil)
 
-				Convey("You can output the summaries to file", func() {
-					err = ug.Output(out)
-					So(err, ShouldBeNil)
-					err = out.Close()
-					So(err, ShouldNotBeNil)
+		ug := ugGenerator().(*GroupUser)
 
-					o, errr := os.ReadFile(outPath)
-					So(errr, ShouldBeNil)
-					output := string(o)
+		Convey("You can add file info to it which accumulates the info into the output", func() {
+			ug.Add(newMockInfoWithTimes("/a/b/d/file3.txt", 0, gid, 3, false, tim))
+			ug.Add(newMockInfoWithTimes("/a/b/c/file1.txt", cuid, gid, 1, false, tim))
+			ug.Add(newMockInfoWithTimes("/a/b/d/file2.txt", cuid, gid, 2, false, tim))
+			ug.Add(newMockInfoWithTimes("/a/b/d/file4.txt", cuid, 0, 4, false, tim))
+			ug.Add(newMockInfoWithTimes("/a/e/file5.txt", 0, 0, 5, false, tim))
+			ug.Add(newMockInfoWithTimes("/a/", 0, 0, 4096, true, tim))
 
-					g, errl := user.LookupGroupId(strconv.Itoa(2))
-					So(errl, ShouldBeNil)
+			err = ug.Output()
+			So(err, ShouldBeNil)
 
-					So(output, ShouldContainSubstring, g.Name+"\t"+os.Getenv("USER")+"\t3\t60\n")
+			output := w.String()
 
-					So(checkGroupUserFileIsSorted(outPath), ShouldBeTrue)
-				})
+			So(output, ShouldContainSubstring, fmt.Sprintf("%s\t%s\t2\t3\n", gname, uname))
+			So(output, ShouldContainSubstring, fmt.Sprintf("%s\troot\t1\t3\n", gname))
+			So(output, ShouldContainSubstring, fmt.Sprintf("root\t%s\t1\t4\n", uname))
+			So(output, ShouldContainSubstring, "root\troot\t1\t5\n")
 
-				Convey("Output handles bad uids", func() {
-					err = ug.Add("/a/b/c/7.txt", newMockInfo(999999999, 2, 1, false))
-					testBadIds(err, ug, out, outPath)
-				})
-
-				Convey("Output handles bad gids", func() {
-					err = ug.Add("/a/b/c/8.txt", newMockInfo(1, 999999999, 1, false))
-					testBadIds(err, ug, out, outPath)
-				})
-
-				Convey("Output fails if we can't write to the output file", func() {
-					err = out.Close()
-					So(err, ShouldBeNil)
-
-					err = ug.Output(out)
-					So(err, ShouldNotBeNil)
-				})
-			})
+			So(checkDataIsSorted(output, 2), ShouldBeTrue)
 		})
 
-		Convey("You can't Add() on non-unix-like systems'", func() {
-			err := ug.Add("/a/b/c/1.txt", &badInfo{})
+		Convey("Output handles bad uids", func() {
+			err = ug.Add(newMockInfo("/a/b/c/7.txt", 999999999, 2, 1, false))
+			testBadIds(err, ug, &w)
+		})
+
+		Convey("Output handles bad gids", func() {
+			err = ug.Add(newMockInfo("/a/b/c/8.txt", 1, 999999999, 1, false))
+			testBadIds(err, ug, &w)
+		})
+
+		Convey("Output fails if we can't write to the output file", func() {
+			ug.w = badWriter{}
+
+			err = ug.Output()
 			So(err, ShouldNotBeNil)
 		})
 	})
-}
-
-func checkGroupUserFileIsSorted(path string) bool {
-	return checkFileIsSorted(path, "-k1,1", "-k2,2", "-k3,3n", "-k4,4n")
 }

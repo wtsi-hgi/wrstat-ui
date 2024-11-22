@@ -39,6 +39,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wtsi-hgi/wrstat-ui/stats"
 	"github.com/wtsi-hgi/wrstat-ui/summary"
 )
 
@@ -200,7 +201,10 @@ func CreateDefaultTestData(gidA, gidB, gidC, uidA, uidB int, refUnixTime int64) 
 func TestDGUTAData(t *testing.T, files []TestFile) string {
 	t.Helper()
 
-	dguta := summary.NewDirGroupUserTypeAge()
+	var sb stringBuilderCloser
+
+	dgutaGen := summary.NewDirGroupUserTypeAge(&sb)
+	dguta := dgutaGen().(*summary.DirGroupUserTypeAge)
 	doneDirs := make(map[string]bool)
 
 	for _, file := range files {
@@ -208,9 +212,7 @@ func TestDGUTAData(t *testing.T, files []TestFile) string {
 			file.SizeOfEachFile, file.GID, file.UID, file.ATime, file.MTime)
 	}
 
-	var sb stringBuilderCloser
-
-	err := dguta.Output(&sb)
+	err := dguta.Output()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -240,17 +242,17 @@ func addTestFileInfo(t *testing.T, dguta *summary.DirGroupUserTypeAge, doneDirs 
 	for i := 0; i < numFiles; i++ {
 		filePath := filepath.Join(dir, strconv.FormatInt(int64(i), 10)+basename)
 
-		info := &fakeFileInfo{
-			stat: &syscall.Stat_t{
-				Uid:  uint32(uid),
-				Gid:  uint32(gid),
-				Size: int64(sizeOfEachFile),
-				Atim: syscall.Timespec{Sec: int64(atime)},
-				Mtim: syscall.Timespec{Sec: int64(mtime)},
-			},
+		info := &stats.FileInfo{
+			Path:      []byte(filePath),
+			UID:       int64(uid),
+			GID:       int64(gid),
+			Size:      int64(sizeOfEachFile),
+			ATime:     int64(atime),
+			MTime:     int64(mtime),
+			EntryType: stats.FileType,
 		}
 
-		err := dguta.Add(filePath, info)
+		err := dguta.Add(info)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -269,17 +271,16 @@ func addTestDirInfo(t *testing.T, dguta *summary.DirGroupUserTypeAge, doneDirs m
 			return
 		}
 
-		info := &fakeFileInfo{
-			dir: true,
-			stat: &syscall.Stat_t{
-				Uid:  uint32(uid),
-				Gid:  uint32(gid),
-				Size: int64(1024),
-				Mtim: syscall.Timespec{Sec: int64(1)},
-			},
+		info := &stats.FileInfo{
+			Path:      []byte(dir),
+			EntryType: stats.DirType,
+			UID:       int64(uid),
+			GID:       int64(gid),
+			Size:      int64(1024),
+			MTime:     1,
 		}
 
-		err := dguta.Add(dir, info)
+		err := dguta.Add(info)
 		if err != nil {
 			t.Fatal(err)
 		}

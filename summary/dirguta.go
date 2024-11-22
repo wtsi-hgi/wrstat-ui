@@ -29,14 +29,14 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
-	"io/fs"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"sync"
-	"syscall"
 	"time"
 	"unsafe"
+
+	"github.com/wtsi-hgi/wrstat-ui/stats"
 )
 
 // DirGUTAge is one of the age types that the
@@ -292,30 +292,34 @@ type typeChecker func(path string) bool
 // DirGroupUserTypeAge is used to summarise file stats by directory, group,
 // user, file type and age.
 type DirGroupUserTypeAge struct {
+	w            io.WriteCloser
 	store        dirToGUTAStore
 	typeCheckers map[DirGUTAFileType]typeChecker
 }
 
 // NewDirGroupUserTypeAge returns a DirGroupUserTypeAge.
-func NewDirGroupUserTypeAge() *DirGroupUserTypeAge {
-	return &DirGroupUserTypeAge{
-		store: dirToGUTAStore{make(map[string]gutaStore), time.Now().Unix()},
-		typeCheckers: map[DirGUTAFileType]typeChecker{
-			DGUTAFileTypeTemp:       isTemp,
-			DGUTAFileTypeVCF:        isVCF,
-			DGUTAFileTypeVCFGz:      isVCFGz,
-			DGUTAFileTypeBCF:        isBCF,
-			DGUTAFileTypeSam:        isSam,
-			DGUTAFileTypeBam:        isBam,
-			DGUTAFileTypeCram:       isCram,
-			DGUTAFileTypeFasta:      isFasta,
-			DGUTAFileTypeFastq:      isFastq,
-			DGUTAFileTypeFastqGz:    isFastqGz,
-			DGUTAFileTypePedBed:     isPedBed,
-			DGUTAFileTypeCompressed: isCompressed,
-			DGUTAFileTypeText:       isText,
-			DGUTAFileTypeLog:        isLog,
-		},
+func NewDirGroupUserTypeAge(w io.WriteCloser) OperationGenerator {
+	return func() Operation {
+		return &DirGroupUserTypeAge{
+			w:     w,
+			store: dirToGUTAStore{make(map[string]gutaStore), time.Now().Unix()},
+			typeCheckers: map[DirGUTAFileType]typeChecker{
+				DGUTAFileTypeTemp:       isTemp,
+				DGUTAFileTypeVCF:        isVCF,
+				DGUTAFileTypeVCFGz:      isVCFGz,
+				DGUTAFileTypeBCF:        isBCF,
+				DGUTAFileTypeSam:        isSam,
+				DGUTAFileTypeBam:        isBam,
+				DGUTAFileTypeCram:       isCram,
+				DGUTAFileTypeFasta:      isFasta,
+				DGUTAFileTypeFastq:      isFastq,
+				DGUTAFileTypeFastqGz:    isFastqGz,
+				DGUTAFileTypePedBed:     isPedBed,
+				DGUTAFileTypeCompressed: isCompressed,
+				DGUTAFileTypeText:       isText,
+				DGUTAFileTypeLog:        isLog,
+			},
+		}
 	}
 }
 
@@ -481,29 +485,26 @@ func isLog(path string) bool {
 // filetypes, so if you sum all the filetypes to get information about a given
 // directory+group+user combination, you should ignore "temp". Only count "temp"
 // when it's the only type you're considering, or you'll count some files twice.
-func (d *DirGroupUserTypeAge) Add(path string, info fs.FileInfo) error {
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok {
-		return errNotUnix
-	}
-
+func (d *DirGroupUserTypeAge) Add(info *stats.FileInfo) error {
 	var atime int64
 
 	gutaKeysA := gutaKey.Get().(*[maxNumOfGUTAKeys]GUTAKey) //nolint:errcheck,forcetypeassert
 
 	var gutaKeys []GUTAKey
 
+	path := string(info.Path)
+
 	if info.IsDir() {
 		atime = time.Now().Unix()
 		path = filepath.Join(path, "leaf")
 
-		gutaKeys = appendGUTAKeysForDir(path, gutaKeysA[:0], stat.Gid, stat.Uid)
+		gutaKeys = appendGUTAKeysForDir(path, gutaKeysA[:0], uint32(info.GID), uint32(info.UID))
 	} else {
-		atime = maxInt(0, stat.Mtim.Sec, stat.Atim.Sec)
-		gutaKeys = d.statToGUTAKeys(stat, gutaKeysA[:0], path)
+		atime = maxInt(0, info.MTime, info.ATime)
+		gutaKeys = d.statToGUTAKeys(info, gutaKeysA[:0], path)
 	}
 
-	d.addForEachDir(path, gutaKeys, info.Size(), atime, maxInt(0, stat.Mtim.Sec))
+	d.addForEachDir(path, gutaKeys, info.Size, atime, maxInt(0, info.MTime))
 
 	gutaKey.Put(gutaKeysA)
 
@@ -577,11 +578,11 @@ func maxInt(ints ...int64) int64 {
 // from the path, and combines them into a group+user+type+age key. More than 1
 // key will be returned, because there is a key for each age, possibly a "temp"
 // filetype as well as more specific types, and path could be both.
-func (d *DirGroupUserTypeAge) statToGUTAKeys(stat *syscall.Stat_t, gutaKeys []GUTAKey, path string) []GUTAKey {
+func (d *DirGroupUserTypeAge) statToGUTAKeys(info *stats.FileInfo, gutaKeys []GUTAKey, path string) []GUTAKey {
 	types := d.pathToTypes(path)
 
 	for _, t := range types {
-		gutaKeys = appendGUTAKeys(gutaKeys, stat.Gid, stat.Uid, t)
+		gutaKeys = appendGUTAKeys(gutaKeys, uint32(info.GID), uint32(info.UID), t)
 	}
 
 	return gutaKeys
@@ -676,8 +677,8 @@ func (d *DirGroupUserTypeAge) addForEachDir(path string, gutaKeys []GUTAKey, siz
 //	13 = text (.csv | .tsv | .txt | .text | .md | .dat | readme suffix)
 //	14 = log (.log | .out | .o | .err | .e | .err | .oe suffix)
 //
-// Returns an error on failure to write. output is closed on completion.
-func (d *DirGroupUserTypeAge) Output(output io.WriteCloser) error {
+// Returns an error on failure to write.
+func (d *DirGroupUserTypeAge) Output() error {
 	dirs, gStores := d.store.sort()
 
 	for i, dir := range dirs {
@@ -687,7 +688,7 @@ func (d *DirGroupUserTypeAge) Output(output io.WriteCloser) error {
 			guta := gutaKeyFromString(gutaKey)
 
 			s := summaries[j]
-			_, errw := fmt.Fprintf(output, "%s\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\n",
+			_, errw := fmt.Fprintf(d.w, "%s\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\n",
 				strconv.Quote(dir),
 				guta.GID, guta.UID, guta.FileType, guta.Age,
 				s.count, s.size,
@@ -699,5 +700,5 @@ func (d *DirGroupUserTypeAge) Output(output io.WriteCloser) error {
 		}
 	}
 
-	return output.Close()
+	return nil
 }
