@@ -26,126 +26,81 @@
 package summary
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"os/user"
-	"path/filepath"
 	"sort"
 	"strconv"
 
 	"github.com/wtsi-hgi/wrstat-ui/stats"
 )
 
-type Error string
+type directoryPath struct {
+	Name   []byte
+	Depth  int
+	Parent *directoryPath
+}
 
-func (e Error) Error() string { return string(e) }
+func (d *directoryPath) Cwd(path []byte) *directoryPath {
+	depth := bytes.Count(path, slash)
 
-const errNotUnix = Error("file info Sys() was not a *syscall.Stat_t; only unix is supported")
+	for d.Depth >= depth {
+		d = d.Parent
+	}
 
-// dirStore is a sortable map with directory paths as keys and summaries as
-// values.
-type dirStore map[string]*summary
+	name := path[bytes.LastIndexByte(path[:len(path)-1], '/')+1:]
 
-// addForEachDir breaks path into each directory and calls add() on it.
-func (store dirStore) addForEachDir(path string, size int64) {
-	dir := filepath.Dir(path)
-
-	for {
-		store.add(dir, size)
-
-		if dir == "/" || dir == "." {
-			return
-		}
-
-		dir = filepath.Dir(dir)
+	return &directoryPath{
+		Name:   bytes.Clone(name),
+		Depth:  depth,
+		Parent: d,
 	}
 }
 
-// add will auto-vivify a summary for the given directory path and call
-// add(size) on it.
-func (store dirStore) add(path string, size int64) {
-	s, ok := store[path]
-	if !ok {
-		s = &summary{}
-		store[path] = s
+func (d *directoryPath) appendTo(p []byte) []byte {
+	if d.Parent != nil {
+		p = d.Parent.appendTo(p)
 	}
 
-	s.add(size)
+	return append(p, d.Name...)
 }
 
-// sort returns a slice of our summary values, sorted by our directory path
-// keys which are also returned.
-func (store dirStore) sort() ([]string, []*summary) {
-	return sortSummaryStore(store)
+func (d *directoryPath) Less(e *directoryPath) bool {
+	if d.Depth < e.Depth {
+		return d.compare(e.getDepth(d.Depth)) != 1
+	} else if d.Depth > e.Depth {
+		return d.getDepth(e.Depth).compare(e) == -1
+	}
+
+	return d.compare(e) == -1
 }
 
-// sortSummaryStore returns a slice of the store's values, sorted by the store's
-// keys which are also returned.
-func sortSummaryStore[T any](store map[string]*T) ([]string, []*T) {
-	keys := make([]string, len(store))
-	i := 0
-
-	for k := range store {
-		keys[i] = k
-		i++
+func (d *directoryPath) getDepth(n int) *directoryPath {
+	for d.Depth != n {
+		d = d.Parent
 	}
 
-	sort.Strings(keys)
-
-	s := make([]*T, len(store))
-
-	for i, k := range keys {
-		s[i] = store[k]
-	}
-
-	return keys, s
+	return d
 }
 
-// groupStore is a sortable map of gid to dirStore.
-type groupStore map[uint32]dirStore
-
-// getDirStore auto-vivifies a dirStore for the given gid and returns it.
-func (store groupStore) getDirStore(gid uint32) dirStore {
-	dStore, ok := store[gid]
-	if !ok {
-		dStore = make(dirStore)
-		store[gid] = dStore
+func (d *directoryPath) compare(e *directoryPath) int {
+	if d == nil {
+		return 0
 	}
 
-	return dStore
+	cmp := d.Parent.compare(e.Parent)
+
+	if cmp == 0 {
+		return bytes.Compare(d.Name[:len(d.Name)-1], e.Name[:len(e.Name)-1])
+	}
+
+	return cmp
 }
 
-// sort returns a slice of our dirStore values, sorted by our gid keys converted
-// to group names, which are also returned.
-//
-// If a gid is invalid, the name will be id[gid].
-//
-// If you will be sorting multiple different groupStores, supply them all the
-// same gidLookupCache which is used to minimise gid to name lookups.
-func (store groupStore) sort(gidLookupCache map[uint32]string) ([]string, []dirStore) {
-	byGroupName := make(map[string]dirStore)
-
-	for gid, dStore := range store {
-		byGroupName[gidToName(gid, gidLookupCache)] = dStore
-	}
-
-	keys := make([]string, len(byGroupName))
-	i := 0
-
-	for k := range byGroupName {
-		keys[i] = k
-		i++
-	}
-
-	sort.Strings(keys)
-
-	s := make([]dirStore, len(byGroupName))
-
-	for i, k := range keys {
-		s[i] = byGroupName[k]
-	}
-
-	return keys, s
+type dirSummary struct {
+	*directoryPath
+	*summary
 }
 
 // gidToName converts gid to group name, using the given cache to avoid lookups.
@@ -178,55 +133,6 @@ func getGroupName(id uint32) string {
 	return g.Name
 }
 
-// userStore is a sortable map of uid to groupStore.
-type userStore map[uint32]groupStore
-
-// DirStore auto-vivifies an entry in our store for the given uid and gid and
-// returns it.
-func (store userStore) DirStore(uid, gid uint32) dirStore {
-	return store.getGroupStore(uid).getDirStore(gid)
-}
-
-// getGroupStore auto-vivifies a groupStore for the given uid and returns it.
-func (store userStore) getGroupStore(uid uint32) groupStore {
-	gStore, ok := store[uid]
-	if !ok {
-		gStore = make(groupStore)
-		store[uid] = gStore
-	}
-
-	return gStore
-}
-
-// sort returns a slice of our groupStore values, sorted by our uid keys
-// converted to user names, which are also returned. If uid has no user name,
-// user name will be id[uid].
-func (store userStore) sort() ([]string, []groupStore) {
-	byUserName := make(map[string]groupStore)
-
-	for uid, gids := range store {
-		byUserName[getUserName(uid)] = gids
-	}
-
-	keys := make([]string, len(byUserName))
-	i := 0
-
-	for k := range byUserName {
-		keys[i] = k
-		i++
-	}
-
-	sort.Strings(keys)
-
-	s := make([]groupStore, len(byUserName))
-
-	for i, k := range keys {
-		s[i] = byUserName[k]
-	}
-
-	return keys, s
-}
-
 // getUserName returns the username of the given uid. If the lookup fails,
 // returns "idxxx", where xxx is the given id as a string.
 func getUserName(id uint32) string {
@@ -240,35 +146,137 @@ func getUserName(id uint32) string {
 	return u.Username
 }
 
-// Usergroup is used to summarise file stats by user and group.
-type Usergroup struct {
-	w     io.WriteCloser
-	store userStore
+type rootUserGroup struct {
+	w io.WriteCloser
+	userGroup
+}
+
+type directorySummaryStore map[*directoryPath]*summary
+
+func (d directorySummaryStore) Get(p *directoryPath) *summary {
+	s, ok := d[p]
+	if !ok {
+		s = new(summary)
+		d[p] = s
+	}
+
+	return s
+}
+
+type userGroupStore map[groupUserID]directorySummaryStore
+
+func (u userGroupStore) Get(id groupUserID, p *directoryPath) *summary {
+	d, ok := u[id]
+	if !ok {
+		d = make(directorySummaryStore)
+		u[id] = d
+	}
+
+	return d.Get(p)
+}
+
+// userGroup is used to summarise file stats by user and group.
+type userGroup struct {
+	store            userGroupStore
+	currentDirectory **directoryPath
+	thisDir          *directoryPath
 }
 
 // NewByUserGroup returns a Usergroup.
 func NewByUserGroup(w io.WriteCloser) OperationGenerator {
+	store := make(userGroupStore)
+	first := true
+
+	var currentDirectory *directoryPath
+
 	return func() Operation {
-		return &Usergroup{
-			w:     w,
-			store: make(userStore),
+		if first {
+			first = false
+
+			return &rootUserGroup{
+				w: w,
+				userGroup: userGroup{
+					store:            store,
+					currentDirectory: &currentDirectory,
+				},
+			}
+		}
+
+		return &userGroup{
+			store:            store,
+			currentDirectory: &currentDirectory,
 		}
 	}
+}
+
+func (r *rootUserGroup) Add(info *stats.FileInfo) error {
+	if info.IsDir() {
+		if *r.currentDirectory == nil {
+			r.thisDir = &directoryPath{
+				Name:  bytes.Clone(info.Path),
+				Depth: bytes.Count(info.Path, slash),
+			}
+			*r.currentDirectory = r.thisDir
+		}
+
+		return nil
+	}
+
+	return r.userGroup.Add(info)
 }
 
 // Add is a github.com/wtsi-ssg/wrstat/stat Operation. It will break path in to
 // its directories and add the file size and increment the file count to each,
 // summed for the info's user and group. If path is a directory, it is ignored.
-func (u *Usergroup) Add(info *stats.FileInfo) error {
+func (u *userGroup) Add(info *stats.FileInfo) error {
 	if info.IsDir() {
+		if u.thisDir == nil {
+			*u.currentDirectory = (*u.currentDirectory).Cwd(info.Path)
+			u.thisDir = *u.currentDirectory
+		}
+
 		return nil
 	}
 
-	dStore := u.store.DirStore(uint32(info.UID), uint32(info.GID))
-
-	dStore.addForEachDir(string(info.Path), info.Size)
+	u.store.Get(newGroupUserID(info.GID, info.UID), u.thisDir).add(info.Size)
 
 	return nil
+}
+
+type userGroupDirectory struct {
+	Group, User string
+	Directory   *directoryPath
+	*summary
+}
+
+type userGroupDirectories []userGroupDirectory
+
+func (u userGroupDirectories) Len() int {
+	return len(u)
+}
+
+func (u userGroupDirectories) Less(i, j int) bool {
+	if u[i].User < u[j].User {
+		return true
+	}
+
+	if u[i].User > u[j].User {
+		return false
+	}
+
+	if u[i].Group < u[j].Group {
+		return true
+	}
+
+	if u[i].Group > u[j].Group {
+		return false
+	}
+
+	return u[i].Directory.Less(u[j].Directory)
+}
+
+func (u userGroupDirectories) Swap(i, j int) {
+	u[i], u[j] = u[j], u[i]
 }
 
 // Output will write summary information for all the paths previously added. The
@@ -281,48 +289,41 @@ func (u *Usergroup) Add(info *stats.FileInfo) error {
 // Returns an error on failure to write, or if username or group can't be
 // determined from the uids and gids in the added file info. output is closed
 // on completion.
-func (u *Usergroup) Output() error {
-	users, gStores := u.store.sort()
-
+func (r *rootUserGroup) Output() error {
+	uidLookupCache := make(map[uint32]string)
 	gidLookupCache := make(map[uint32]string)
 
-	for i, username := range users {
-		if err := outputGroupDirectorySummariesForUser(u.w, username, gStores[i], gidLookupCache); err != nil {
+	data := make(userGroupDirectories, 0, len(r.store))
+
+	for gu, ds := range r.store {
+		for d, s := range ds {
+			data = append(data, userGroupDirectory{
+				Group:     gidToName(gu.GID(), gidLookupCache),
+				User:      uidToName(gu.UID(), uidLookupCache),
+				Directory: d,
+				summary:   s,
+			})
+		}
+	}
+
+	sort.Sort(data)
+
+	path := make([]byte, 0, maxPathLen)
+
+	for _, row := range data {
+		rowPath := row.Directory.appendTo(path)
+
+		if _, err := fmt.Fprintf(r.w, "%s\t%s\t%q\t%d\t%d\n",
+			row.Group, row.User, rowPath, row.count, row.size); err != nil {
 			return err
 		}
 	}
 
-	return u.w.Close()
+	return r.w.Close()
 }
 
-// outputGroupDirectorySummariesForUser sortes the groups for this user and
-// calls outputDirectorySummariesForGroup.
-func outputGroupDirectorySummariesForUser(output io.WriteCloser, username string,
-	gStore groupStore, gidLookupCache map[uint32]string,
-) error {
-	groupnames, dStores := gStore.sort(gidLookupCache)
-
-	for i, groupname := range groupnames {
-		if err := outputDirectorySummariesForGroup(output, username, groupname, dStores[i]); err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-// outputDirectorySummariesForGroup sorts the directories for this group and
-// does the actual output of all the summary information.
-func outputDirectorySummariesForGroup(output io.WriteCloser, username, groupname string, dStore dirStore) error {
-	dirs, summaries := dStore.sort()
-
-	for i, s := range summaries {
-		_, errw := fmt.Fprintf(output, "%s\t%s\t%s\t%d\t%d\n",
-			username, groupname, strconv.Quote(dirs[i]), s.count, s.size)
-		if errw != nil {
-			return errw
-		}
-	}
+func (u *userGroup) Output() error {
+	u.thisDir = nil
 
 	return nil
 }

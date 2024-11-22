@@ -31,7 +31,6 @@ import (
 	"io"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"sync"
 	"time"
 	"unsafe"
@@ -113,6 +112,10 @@ var AllTypesExceptDirectories = []DirGUTAFileType{ //nolint:gochecknoglobals
 	DGUTAFileTypeText,
 	DGUTAFileTypeLog,
 }
+
+type Error string
+
+func (e Error) Error() string { return string(e) }
 
 const (
 	ErrInvalidType = Error("not a valid file type")
@@ -244,7 +247,23 @@ func (store gutaStore) add(gkey GUTAKey, size int64, atime int64, mtime int64) {
 // sort returns a slice of our summaryWithAtime values, sorted by our dguta keys
 // which are also returned.
 func (store gutaStore) sort() ([]string, []*summaryWithTimes) {
-	return sortSummaryStore(store.sumMap)
+	keys := make([]string, len(store.sumMap))
+	i := 0
+
+	for k := range store.sumMap {
+		keys[i] = k
+		i++
+	}
+
+	sort.Strings(keys)
+
+	s := make([]*summaryWithTimes, len(store.sumMap))
+
+	for i, k := range keys {
+		s[i] = store.sumMap[k]
+	}
+
+	return keys, s
 }
 
 // dirToGUTAStore is a sortable map of directory to gutaStore.
@@ -498,7 +517,7 @@ func (d *DirGroupUserTypeAge) Add(info *stats.FileInfo) error {
 		atime = time.Now().Unix()
 		path = filepath.Join(path, "leaf")
 
-		gutaKeys = appendGUTAKeysForDir(path, gutaKeysA[:0], uint32(info.GID), uint32(info.UID))
+		gutaKeys = appendGUTAKeysForDir(path, gutaKeysA[:0], info.GID, info.UID)
 	} else {
 		atime = maxInt(0, info.MTime, info.ATime)
 		gutaKeys = d.statToGUTAKeys(info, gutaKeysA[:0], path)
@@ -688,8 +707,8 @@ func (d *DirGroupUserTypeAge) Output() error {
 			guta := gutaKeyFromString(gutaKey)
 
 			s := summaries[j]
-			_, errw := fmt.Fprintf(d.w, "%s\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\n",
-				strconv.Quote(dir),
+			_, errw := fmt.Fprintf(d.w, "%q\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\n",
+				dir,
 				guta.GID, guta.UID, guta.FileType, guta.Age,
 				s.count, s.size,
 				s.atime, s.mtime)
@@ -698,6 +717,10 @@ func (d *DirGroupUserTypeAge) Output() error {
 				return errw
 			}
 		}
+	}
+
+	for k := range d.store.gsMap {
+		delete(d.store.gsMap, k)
 	}
 
 	return nil

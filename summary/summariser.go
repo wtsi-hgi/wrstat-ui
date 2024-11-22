@@ -122,8 +122,7 @@ func (s *Summariser) Summarise() error {
 	info := new(stats.FileInfo)
 
 	currentDir := make([]byte, 0, maxPathLen)
-	directories := make(directories, 1, probableMaxDirectoryDepth)
-	directories[0] = s.directoryOperations.Generate()
+	directories := make(directories, 0, probableMaxDirectoryDepth)
 	global := s.globalOperations.Generate()
 
 	var err error

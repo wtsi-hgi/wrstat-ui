@@ -36,7 +36,7 @@ import (
 // GroupUser is used to summarise file stats by group and user.
 type GroupUser struct {
 	w     io.WriteCloser
-	store map[uint64]*summary
+	store map[groupUserID]*summary
 }
 
 // NewByGroupUser returns a GroupUser.
@@ -44,9 +44,23 @@ func NewByGroupUser(w io.WriteCloser) OperationGenerator {
 	return func() Operation {
 		return &GroupUser{
 			w:     w,
-			store: make(map[uint64]*summary),
+			store: make(map[groupUserID]*summary),
 		}
 	}
+}
+
+type groupUserID uint64
+
+func newGroupUserID(gid, uid uint32) groupUserID {
+	return groupUserID(gid)<<32 | groupUserID(uid)
+}
+
+func (g groupUserID) GID() uint32 {
+	return uint32(g >> 32)
+}
+
+func (g groupUserID) UID() uint32 {
+	return uint32(g)
 }
 
 // Add is a github.com/wtsi-ssg/wrstat/stat Operation. It will add the file size
@@ -57,7 +71,7 @@ func (g *GroupUser) Add(info *stats.FileInfo) error {
 		return nil
 	}
 
-	id := uint64(info.GID)<<32 | uint64(info.UID)
+	id := newGroupUserID(info.GID, info.UID)
 
 	ss, ok := g.store[id]
 	if !ok {
@@ -116,8 +130,8 @@ func (g *GroupUser) Output() error {
 
 	for gu, s := range g.store {
 		data = append(data, groupUserSummary{
-			Group:   gidToName(uint32(gu>>32), gidLookupCache),
-			User:    uidToName(uint32(gu), uidLookupCache),
+			Group:   gidToName(gu.GID(), gidLookupCache),
+			User:    uidToName(gu.UID(), uidLookupCache),
 			summary: s,
 		})
 	}
