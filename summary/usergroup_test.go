@@ -36,22 +36,16 @@ import (
 	"testing"
 
 	. "github.com/smartystreets/goconvey/convey"
+	internaluser "github.com/wtsi-hgi/wrstat-ui/internal/user"
 	"github.com/wtsi-hgi/wrstat-ui/stats"
 	"golang.org/x/exp/slices"
 )
 
 func TestUsergroup(t *testing.T) {
-	usr, err := user.Current()
+	_, cuid, _, _, err := internaluser.RealGIDAndUID()
 	if err != nil {
-		t.Fatal(err.Error())
+		t.Fatal(err)
 	}
-
-	cuidI, err := strconv.Atoi(usr.Uid)
-	if err != nil {
-		t.Fatal(err.Error())
-	}
-
-	cuid := uint32(cuidI)
 
 	Convey("Given stats data, a Usergroup and a writer", t, func() {
 		var w stringBuilder
@@ -61,7 +55,7 @@ func TestUsergroup(t *testing.T) {
 		ug := ugGen().(*Usergroup)
 
 		Convey("You can add file info to it which accumulates the info", func() {
-			addTestData(ug, int64(cuid))
+			addTestData(ug, cuid)
 
 			So(ug.store[cuid], ShouldNotBeNil)
 			So(ug.store[2], ShouldNotBeNil)
@@ -146,7 +140,7 @@ type byColumnAdder interface {
 	Output(output io.WriteCloser) error
 }
 
-func addTestData(a Operation, cuid int64) {
+func addTestData(a Operation, cuid uint32) {
 	err := a.Add(newMockInfo("/a/b/6.txt", cuid, 2, 30, false))
 	So(err, ShouldBeNil)
 	err = a.Add(newMockInfo("/a/b/c/1.txt", cuid, 2, 10, false))
@@ -161,7 +155,7 @@ func addTestData(a Operation, cuid int64) {
 	So(err, ShouldBeNil)
 }
 
-func newMockInfo(path string, uid, gid int64, size int64, dir bool) *stats.FileInfo {
+func newMockInfo(path string, uid, gid uint32, size int64, dir bool) *stats.FileInfo {
 	entryType := stats.FileType
 
 	if dir {
@@ -177,14 +171,14 @@ func newMockInfo(path string, uid, gid int64, size int64, dir bool) *stats.FileI
 	}
 }
 
-func newMockInfoWithAtime(path string, uid, gid int64, size int64, dir bool, atime int64) *stats.FileInfo {
+func newMockInfoWithAtime(path string, uid, gid uint32, size int64, dir bool, atime int64) *stats.FileInfo {
 	mi := newMockInfo(path, uid, gid, size, dir)
 	mi.ATime = atime
 
 	return mi
 }
 
-func newMockInfoWithTimes(path string, uid, gid int64, size int64, dir bool, tim int64) *stats.FileInfo {
+func newMockInfoWithTimes(path string, uid, gid uint32, size int64, dir bool, tim int64) *stats.FileInfo {
 	mi := newMockInfo(path, uid, gid, size, dir)
 	mi.ATime = tim
 	mi.MTime = tim

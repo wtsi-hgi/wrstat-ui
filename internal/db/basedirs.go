@@ -31,6 +31,7 @@ import (
 
 	"github.com/wtsi-hgi/wrstat-ui/dguta"
 	internaldata "github.com/wtsi-hgi/wrstat-ui/internal/data"
+	internaluser "github.com/wtsi-hgi/wrstat-ui/internal/user"
 )
 
 // CreateExampleDGUTADBForBasedirs makes a tree database with data useful for
@@ -39,7 +40,7 @@ import (
 func CreateExampleDGUTADBForBasedirs(t *testing.T) (*dguta.Tree, []string, error) {
 	t.Helper()
 
-	gid, uid, _, _, err := internaldata.RealGIDAndUID()
+	gid, uid, _, _, err := internaluser.RealGIDAndUID()
 	if err != nil {
 		return nil, nil, err
 	}

@@ -46,6 +46,7 @@ import (
 	internaldb "github.com/wtsi-hgi/wrstat-ui/internal/db"
 	"github.com/wtsi-hgi/wrstat-ui/internal/fixtimes"
 	"github.com/wtsi-hgi/wrstat-ui/internal/fs"
+	internaluser "github.com/wtsi-hgi/wrstat-ui/internal/user"
 	"github.com/wtsi-hgi/wrstat-ui/summary"
 	bolt "go.etcd.io/bbolt"
 )
@@ -108,7 +109,7 @@ func TestBaseDirs(t *testing.T) {
 	expectedFixedAgeMtime2 := fixtimes.FixTime(expectedAgeMtime2)
 
 	Convey("Given a Tree and Quotas you can make a BaseDirs", t, func() {
-		gid, uid, groupName, username, err := internaldata.RealGIDAndUID()
+		gid, uid, groupName, username, err := internaluser.RealGIDAndUID()
 		So(err, ShouldBeNil)
 
 		locDirs, files := internaldata.FakeFilesForDGUTADBForBasedirsTesting(gid, uid)

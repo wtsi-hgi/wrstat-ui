@@ -76,8 +76,8 @@ type StatsParser struct {
 type FileInfo struct {
 	Path      []byte
 	Size      int64
-	UID       int64
-	GID       int64
+	UID       uint32
+	GID       uint32
 	MTime     int64
 	ATime     int64
 	CTime     int64
@@ -118,8 +118,8 @@ func (p *StatsParser) Scan(info *FileInfo) error {
 
 	info.Path = unquote(p.path)
 	info.Size = p.size
-	info.UID = p.uid
-	info.GID = p.gid
+	info.UID = uint32(p.uid)
+	info.GID = uint32(p.gid)
 	info.MTime = p.mtime
 	info.ATime = p.atime
 	info.CTime = p.ctime

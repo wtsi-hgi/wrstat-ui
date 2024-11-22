@@ -600,7 +600,7 @@ func TestDirGUTA(t *testing.T) {
 		})
 
 		Convey("You can add file info to it which accumulates the info", func() {
-			addTestData(dguta, int64(cuid))
+			addTestData(dguta, cuid)
 
 			err = dguta.Add(newMockInfoWithAtime("/a/b/c/3.bam", 2, 2, 3, false, 100))
 			So(err, ShouldBeNil)
@@ -737,8 +737,8 @@ func TestOldFile(t *testing.T) {
 			err = dguta.Add(&stats.FileInfo{
 				Path:      []byte(path),
 				Size:      statt.Size,
-				UID:       int64(UID),
-				GID:       int64(GID),
+				UID:       UID,
+				GID:       GID,
 				MTime:     amtime,
 				ATime:     amtime,
 				CTime:     amtime,

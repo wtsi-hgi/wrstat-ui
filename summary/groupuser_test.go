@@ -27,41 +27,18 @@ package summary
 
 import (
 	"fmt"
-	"os/user"
-	"strconv"
 	"testing"
 	"time"
 
 	. "github.com/smartystreets/goconvey/convey"
+	"github.com/wtsi-hgi/wrstat-ui/internal/user"
 )
 
 func TestGroupUser(t *testing.T) {
-	usr, err := user.Current()
+	gid, uid, gname, uname, err := user.RealGIDAndUID()
 	if err != nil {
-		t.Fatal(err.Error())
+		t.Fatal(err)
 	}
-
-	cuidI, err := strconv.Atoi(usr.Uid)
-	if err != nil {
-		t.Fatal(err.Error())
-	}
-
-	cuid := int64(cuidI)
-
-	gidI, err := strconv.Atoi(usr.Gid)
-	if err != nil {
-		t.Fatal(err.Error())
-	}
-
-	gid := int64(gidI)
-
-	g, err := user.LookupGroupId(strconv.FormatInt(gid, 10))
-	if err != nil {
-		t.Fatal(err.Error())
-	}
-
-	uname := usr.Username
-	gname := g.Name
 
 	tim := time.Now().Unix()
 
@@ -75,9 +52,9 @@ func TestGroupUser(t *testing.T) {
 
 		Convey("You can add file info to it which accumulates the info into the output", func() {
 			ug.Add(newMockInfoWithTimes("/a/b/d/file3.txt", 0, gid, 3, false, tim))
-			ug.Add(newMockInfoWithTimes("/a/b/c/file1.txt", cuid, gid, 1, false, tim))
-			ug.Add(newMockInfoWithTimes("/a/b/d/file2.txt", cuid, gid, 2, false, tim))
-			ug.Add(newMockInfoWithTimes("/a/b/d/file4.txt", cuid, 0, 4, false, tim))
+			ug.Add(newMockInfoWithTimes("/a/b/c/file1.txt", uid, gid, 1, false, tim))
+			ug.Add(newMockInfoWithTimes("/a/b/d/file2.txt", uid, gid, 2, false, tim))
+			ug.Add(newMockInfoWithTimes("/a/b/d/file4.txt", uid, 0, 4, false, tim))
 			ug.Add(newMockInfoWithTimes("/a/e/file5.txt", 0, 0, 5, false, tim))
 			ug.Add(newMockInfoWithTimes("/a/", 0, 0, 4096, true, tim))
 

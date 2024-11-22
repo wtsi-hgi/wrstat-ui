@@ -94,22 +94,22 @@ func createExampleDgutaDir(t *testing.T) (string, error) {
 func exampleDGUTAData(t *testing.T, uidStr, gidAStr, gidBStr string, refTime int64) string {
 	t.Helper()
 
-	uid, err := strconv.ParseUint(uidStr, 10, 64)
+	uid, err := strconv.ParseUint(uidStr, 10, 32)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	gidA, err := strconv.ParseUint(gidAStr, 10, 64)
+	gidA, err := strconv.ParseUint(gidAStr, 10, 32)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	gidB, err := strconv.ParseUint(gidBStr, 10, 64)
+	gidB, err := strconv.ParseUint(gidBStr, 10, 32)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	return internaldata.TestDGUTAData(t, internaldata.CreateDefaultTestData(int(gidA), int(gidB), 0, int(uid), 0, refTime))
+	return internaldata.TestDGUTAData(t, internaldata.CreateDefaultTestData(uint32(gidA), uint32(gidB), 0, uint32(uid), 0, refTime))
 }
 
 func CreateDGUTADBFromFakeFiles(t *testing.T, files []internaldata.TestFile,

@@ -51,6 +51,7 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/internal/fixtimes"
 	ifs "github.com/wtsi-hgi/wrstat-ui/internal/fs"
 	"github.com/wtsi-hgi/wrstat-ui/internal/split"
+	internaluser "github.com/wtsi-hgi/wrstat-ui/internal/user"
 	"github.com/wtsi-hgi/wrstat-ui/summary"
 )
 
@@ -711,7 +712,7 @@ func TestServer(t *testing.T) {
 							filepath.Base(dbPath), sentinelPollFrequency)
 						So(err, ShouldBeNil)
 
-						gid, uid, _, _, err := internaldata.RealGIDAndUID()
+						gid, uid, _, _, err := internaluser.RealGIDAndUID()
 						So(err, ShouldBeNil)
 
 						_, files := internaldata.FakeFilesForDGUTADBForBasedirsTesting(gid, uid)

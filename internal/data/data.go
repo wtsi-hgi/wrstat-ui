@@ -31,7 +31,6 @@ import (
 	"io"
 	"io/fs"
 	"os"
-	"os/user"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -55,13 +54,13 @@ func (s stringBuilderCloser) Close() error {
 
 type TestFile struct {
 	Path           string
-	UID, GID       int
+	UID, GID       uint32
 	NumFiles       int
 	SizeOfEachFile int
 	ATime, MTime   int
 }
 
-func CreateDefaultTestData(gidA, gidB, gidC, uidA, uidB int, refUnixTime int64) []TestFile {
+func CreateDefaultTestData(gidA, gidB, gidC, uidA, uidB uint32, refUnixTime int64) []TestFile {
 	refTime := int(refUnixTime)
 	dir := "/"
 	abdf := filepath.Join(dir, "a", "b", "d", "f")
@@ -233,7 +232,7 @@ func (f *fakeFileInfo) IsDir() bool        { return f.dir }
 func (f *fakeFileInfo) Sys() any           { return f.stat }
 
 func addTestFileInfo(t *testing.T, dguta *summary.DirGroupUserTypeAge, doneDirs map[string]bool,
-	path string, numFiles, sizeOfEachFile, gid, uid, atime, mtime int,
+	path string, numFiles, sizeOfEachFile int, gid, uid uint32, atime, mtime int,
 ) {
 	t.Helper()
 
@@ -244,8 +243,8 @@ func addTestFileInfo(t *testing.T, dguta *summary.DirGroupUserTypeAge, doneDirs 
 
 		info := &stats.FileInfo{
 			Path:      []byte(filePath),
-			UID:       int64(uid),
-			GID:       int64(gid),
+			UID:       uid,
+			GID:       gid,
 			Size:      int64(sizeOfEachFile),
 			ATime:     int64(atime),
 			MTime:     int64(mtime),
@@ -262,7 +261,7 @@ func addTestFileInfo(t *testing.T, dguta *summary.DirGroupUserTypeAge, doneDirs 
 }
 
 func addTestDirInfo(t *testing.T, dguta *summary.DirGroupUserTypeAge, doneDirs map[string]bool,
-	dir string, gid, uid int,
+	dir string, gid, uid uint32,
 ) {
 	t.Helper()
 
@@ -274,8 +273,8 @@ func addTestDirInfo(t *testing.T, dguta *summary.DirGroupUserTypeAge, doneDirs m
 		info := &stats.FileInfo{
 			Path:      []byte(dir),
 			EntryType: stats.DirType,
-			UID:       int64(uid),
-			GID:       int64(gid),
+			UID:       uid,
+			GID:       gid,
 			Size:      int64(1024),
 			MTime:     1,
 		}
@@ -294,38 +293,7 @@ func addTestDirInfo(t *testing.T, dguta *summary.DirGroupUserTypeAge, doneDirs m
 	}
 }
 
-// RealGIDAndUID returns the currently logged in user's gid and uid, and the
-// corresponding group and user names.
-func RealGIDAndUID() (int, int, string, string, error) {
-	u, err := user.Current()
-	if err != nil {
-		return 0, 0, "", "", err
-	}
-
-	uid64, err := strconv.ParseUint(u.Uid, 10, 64)
-	if err != nil {
-		return 0, 0, "", "", err
-	}
-
-	groups, err := u.GroupIds()
-	if err != nil || len(groups) == 0 {
-		return 0, 0, "", "", err
-	}
-
-	gid64, err := strconv.ParseUint(groups[0], 10, 64)
-	if err != nil {
-		return 0, 0, "", "", err
-	}
-
-	group, err := user.LookupGroupId(groups[0])
-	if err != nil {
-		return 0, 0, "", "", err
-	}
-
-	return int(gid64), int(uid64), group.Name, u.Username, nil
-}
-
-func FakeFilesForDGUTADBForBasedirsTesting(gid, uid int) ([]string, []TestFile) {
+func FakeFilesForDGUTADBForBasedirsTesting(gid, uid uint32) ([]string, []TestFile) {
 	projectA := filepath.Join("/", "lustre", "scratch125", "humgen", "projects", "A")
 	projectB125 := filepath.Join("/", "lustre", "scratch125", "humgen", "projects", "B")
 	projectB123 := filepath.Join("/", "lustre", "scratch123", "hgi", "mdt1", "projects", "B")

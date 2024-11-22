@@ -32,8 +32,8 @@ import (
 	"testing"
 
 	. "github.com/smartystreets/goconvey/convey"
-	internaldata "github.com/wtsi-hgi/wrstat-ui/internal/data"
 	internaldb "github.com/wtsi-hgi/wrstat-ui/internal/db"
+	internaluser "github.com/wtsi-hgi/wrstat-ui/internal/user"
 )
 
 func TestTree(t *testing.T) {
@@ -48,7 +48,7 @@ func TestTree(t *testing.T) {
 			expectedGIDs := []uint32{1, 2, 3, 77777}
 			expectedUIDs := []uint32{101, 102, 103, 88888}
 
-			gid, uid, _, _, err := internaldata.RealGIDAndUID()
+			gid, uid, _, _, err := internaluser.RealGIDAndUID()
 			So(err, ShouldBeNil)
 			expectedGIDs = append(expectedGIDs, uint32(gid))
 			expectedUIDs = append(expectedUIDs, uint32(uid))
