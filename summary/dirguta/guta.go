@@ -23,13 +23,12 @@
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  ******************************************************************************/
 
-package dguta
+package dirguta
 
 import (
 	"sort"
 	"time"
 
-	"github.com/wtsi-hgi/wrstat-ui/summary"
 	"golang.org/x/exp/constraints"
 )
 
@@ -37,8 +36,8 @@ import (
 type GUTA struct {
 	GID        uint32
 	UID        uint32
-	FT         summary.DirGUTAFileType
-	Age        summary.DirGUTAge
+	FT         DirGUTAFileType
+	Age        DirGUTAge
 	Count      uint64
 	Size       uint64
 	Atime      int64 // seconds since Unix epoch
@@ -60,8 +59,8 @@ type GUTA struct {
 type Filter struct {
 	GIDs []uint32
 	UIDs []uint32
-	FTs  []summary.DirGUTAFileType
-	Age  summary.DirGUTAge
+	FTs  []DirGUTAFileType
+	Age  DirGUTAge
 }
 
 // PassesFilter checks to see if this GUTA has a GID in the filter's GIDs
@@ -118,7 +117,7 @@ func (g *GUTA) passesUIDFilter(filter *Filter) bool {
 // FTs only hold DGUTAFileTypeTemp.
 func (g *GUTA) passesFTFilter(filter *Filter) (bool, bool) {
 	if filter == nil || filter.FTs == nil {
-		return true, g.FT != summary.DGUTAFileTypeTemp
+		return true, g.FT != DGUTAFileTypeTemp
 	}
 
 	for _, ft := range filter.FTs {
@@ -133,7 +132,7 @@ func (g *GUTA) passesFTFilter(filter *Filter) (bool, bool) {
 // amTempAndNotFilteredJustForTemp tells you if our FT is DGUTAFileTypeTemp and
 // the filter has more than one type set.
 func (g *GUTA) amTempAndNotFilteredJustForTemp(filter *Filter) bool {
-	return g.FT == summary.DGUTAFileTypeTemp && len(filter.FTs) > 1
+	return g.FT == DGUTAFileTypeTemp && len(filter.FTs) > 1
 }
 
 // passesAgeFilter tells you if our age is the same as the filter's Age. Also
@@ -171,7 +170,7 @@ func (g GUTAs) Summary(filter *Filter) *DirSummary { //nolint:funlen
 		count, size  uint64
 		atime, mtime int64
 		updateTime   time.Time
-		age          summary.DirGUTAge
+		age          DirGUTAge
 	)
 
 	if filter != nil {
@@ -180,7 +179,7 @@ func (g GUTAs) Summary(filter *Filter) *DirSummary { //nolint:funlen
 
 	uniqueUIDs := make(map[uint32]bool)
 	uniqueGIDs := make(map[uint32]bool)
-	uniqueFTs := make(map[summary.DirGUTAFileType]bool)
+	uniqueFTs := make(map[DirGUTAFileType]bool)
 
 	for _, guta := range g {
 		passes, passesDisallowingTemp := guta.PassesFilter(filter)

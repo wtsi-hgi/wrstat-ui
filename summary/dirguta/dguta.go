@@ -23,12 +23,11 @@
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  ******************************************************************************/
 
-// package dguta lets you create and query a database made from dguta files.
-
-package dguta
+package dirguta
 
 import (
 	"github.com/ugorji/go/codec"
+	"github.com/wtsi-hgi/wrstat-ui/summary"
 )
 
 // DGUTA handles all the *GUTA information for a directory.
@@ -37,14 +36,23 @@ type DGUTA struct {
 	GUTAs GUTAs
 }
 
+type recordDGUTA struct {
+	Dir   *summary.DirectoryPath
+	GUTAs GUTAs
+}
+
+var pathBuf [4098]byte
+
 // encodeToBytes returns our Dir as a []byte and our GUTAs encoded in another
 // []byte suitable for storing on disk.
-func (d *DGUTA) encodeToBytes(ch codec.Handle) ([]byte, []byte) {
+func (d *recordDGUTA) encodeToBytes(ch codec.Handle, age DirGUTAge) ([]byte, []byte) {
 	var encoded []byte
 	enc := codec.NewEncoderBytes(&encoded, ch)
 	enc.MustEncode(d.GUTAs)
 
-	return []byte(d.Dir), encoded
+	dir := append(d.Dir.AppendTo(pathBuf[:0]), 255, byte(age))
+
+	return dir, encoded
 }
 
 // decodeDGUTAbytes converts the byte slices returned by DGUTA.Encode() back in to

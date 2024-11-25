@@ -34,7 +34,7 @@ import (
 	"time"
 
 	"github.com/moby/sys/mountinfo"
-	"github.com/wtsi-hgi/wrstat-ui/summary"
+	"github.com/wtsi-hgi/wrstat-ui/summary/dirguta"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -83,7 +83,7 @@ func (b *BaseDirReader) History(gid uint32, path string) ([]History, error) {
 }
 
 func historyKey(gid uint32, mountPoint string) []byte {
-	return keyName(gid, mountPoint, summary.DGUTAgeAll)
+	return keyName(gid, mountPoint, dirguta.DGUTAgeAll)
 }
 
 type mountPoints []string

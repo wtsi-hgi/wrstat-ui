@@ -23,18 +23,29 @@
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  ******************************************************************************/
 
-package summary
+package dirguta
 
 import (
 	"encoding/binary"
-	"fmt"
-	"io"
-	"path/filepath"
+	"maps"
+	"slices"
 	"sort"
 	"sync"
 	"time"
 	"unsafe"
+
+	"github.com/wtsi-hgi/wrstat-ui/summary"
 )
+
+const (
+	SecondsInAMonth = 2628000
+	SecondsInAYear  = SecondsInAMonth * 12
+)
+
+var ageThresholds = [8]int64{ //nolint:gochecknoglobals
+	SecondsInAMonth, SecondsInAMonth * 2, SecondsInAMonth * 6, SecondsInAYear,
+	SecondsInAYear * 2, SecondsInAYear * 3, SecondsInAYear * 5, SecondsInAYear * 7,
+}
 
 // DirGUTAge is one of the age types that the
 // directory,group,user,filetype,age summaries group on. All is for files of
@@ -111,6 +122,25 @@ var AllTypesExceptDirectories = []DirGUTAFileType{ //nolint:gochecknoglobals
 	DGUTAFileTypeLog,
 }
 
+// typeCheckers take a path and return true if the path is of their file type.
+type typeChecker func(path string) bool
+
+var typeCheckers = map[DirGUTAFileType]typeChecker{
+	DGUTAFileTypeVCF:        isVCF,
+	DGUTAFileTypeVCFGz:      isVCFGz,
+	DGUTAFileTypeBCF:        isBCF,
+	DGUTAFileTypeSam:        isSam,
+	DGUTAFileTypeBam:        isBam,
+	DGUTAFileTypeCram:       isCram,
+	DGUTAFileTypeFasta:      isFasta,
+	DGUTAFileTypeFastq:      isFastq,
+	DGUTAFileTypeFastqGz:    isFastqGz,
+	DGUTAFileTypePedBed:     isPedBed,
+	DGUTAFileTypeCompressed: isCompressed,
+	DGUTAFileTypeText:       isText,
+	DGUTAFileTypeLog:        isLog,
+}
+
 type Error string
 
 func (e Error) Error() string { return string(e) }
@@ -122,7 +152,7 @@ const (
 
 var (
 	tmpSuffixes        = [...]string{".tmp", ".temp"}                                          //nolint:gochecknoglobals
-	tmpPaths           = [...]string{"/tmp/", "/temp/"}                                        //nolint:gochecknoglobals
+	tmpPaths           = [...]string{"tmp", "temp"}                                            //nolint:gochecknoglobals
 	tmpPrefixes        = [...]string{".tmp.", "tmp.", ".temp.", "temp."}                       //nolint:gochecknoglobals
 	fastASuffixes      = [...]string{".fasta", ".fa"}                                          //nolint:gochecknoglobals
 	fastQSuffixes      = [...]string{".fastq", ".fq"}                                          //nolint:gochecknoglobals
@@ -220,48 +250,34 @@ func AgeStringToDirGUTAge(age string) (DirGUTAge, error) {
 // gutaStore is a sortable map with gid,uid,filetype,age as keys and
 // summaryWithAtime as values.
 type gutaStore struct {
-	sumMap  map[string]*summaryWithTimes
+	sumMap  map[GUTAKey]*summary.SummaryWithTimes
 	refTime int64
 }
 
 // add will auto-vivify a summary for the given key (which should have been
 // generated with statToGUTAKey()) and call add(size, atime, mtime) on it.
 func (store gutaStore) add(gkey GUTAKey, size int64, atime int64, mtime int64) {
-	if !FitsAgeInterval(gkey, atime, mtime, store.refTime) {
+	if !fitsAgeInterval(gkey, atime, mtime, store.refTime) {
 		return
 	}
 
-	key := gkey.String()
-
-	s, ok := store.sumMap[key]
+	s, ok := store.sumMap[gkey]
 	if !ok {
-		s = &summaryWithTimes{refTime: store.refTime}
-		store.sumMap[key] = s
+		s = new(summary.SummaryWithTimes)
+		store.sumMap[gkey] = s
 	}
 
-	s.add(size, atime, mtime)
+	s.Add(size, atime, mtime)
 }
 
 // sort returns a slice of our summaryWithAtime values, sorted by our dguta keys
 // which are also returned.
-func (store gutaStore) sort() ([]string, []*summaryWithTimes) {
-	keys := make([]string, len(store.sumMap))
-	i := 0
+func (store gutaStore) sort() GUTAKeys {
+	keys := GUTAKeys(slices.Collect(maps.Keys(store.sumMap)))
 
-	for k := range store.sumMap {
-		keys[i] = k
-		i++
-	}
+	sort.Sort(keys)
 
-	sort.Strings(keys)
-
-	s := make([]*summaryWithTimes, len(store.sumMap))
-
-	for i, k := range keys {
-		s[i] = store.sumMap[k]
-	}
-
-	return keys, s
+	return keys
 }
 
 // dirToGUTAStore is a sortable map of directory to gutaStore.
@@ -274,7 +290,7 @@ type dirToGUTAStore struct {
 func (store dirToGUTAStore) getGUTAStore(dir string) gutaStore {
 	gStore, ok := store.gsMap[dir]
 	if !ok {
-		gStore = gutaStore{make(map[string]*summaryWithTimes), store.refTime}
+		gStore = gutaStore{make(map[GUTAKey]*summary.SummaryWithTimes), store.refTime}
 		store.gsMap[dir] = gStore
 	}
 
@@ -303,71 +319,52 @@ func (store dirToGUTAStore) sort() ([]string, []gutaStore) {
 	return keys, s
 }
 
-// typeCheckers take a path and return true if the path is of their file type.
-type typeChecker func(path string) bool
-
-// DirGroupUserTypeAge is used to summarise file stats by directory, group,
-// user, file type and age.
-type DirGroupUserTypeAge struct {
-	w            io.WriteCloser
-	store        dirToGUTAStore
-	typeCheckers map[DirGUTAFileType]typeChecker
-}
-
-// NewDirGroupUserTypeAge returns a DirGroupUserTypeAge.
-func NewDirGroupUserTypeAge(w io.WriteCloser) OperationGenerator {
-	return func() Operation {
-		return &DirGroupUserTypeAge{
-			w:     w,
-			store: dirToGUTAStore{make(map[string]gutaStore), time.Now().Unix()},
-			typeCheckers: map[DirGUTAFileType]typeChecker{
-				DGUTAFileTypeTemp:       isTemp,
-				DGUTAFileTypeVCF:        isVCF,
-				DGUTAFileTypeVCFGz:      isVCFGz,
-				DGUTAFileTypeBCF:        isBCF,
-				DGUTAFileTypeSam:        isSam,
-				DGUTAFileTypeBam:        isBam,
-				DGUTAFileTypeCram:       isCram,
-				DGUTAFileTypeFasta:      isFasta,
-				DGUTAFileTypeFastq:      isFastq,
-				DGUTAFileTypeFastqGz:    isFastqGz,
-				DGUTAFileTypePedBed:     isPedBed,
-				DGUTAFileTypeCompressed: isCompressed,
-				DGUTAFileTypeText:       isText,
-				DGUTAFileTypeLog:        isLog,
-			},
-		}
-	}
-}
-
 // isTemp tells you if path is named like a temporary file.
-func isTemp(path string) bool {
-	if hasOneOfSuffixes(path, tmpSuffixes[:]) {
+func isTempFile(name string) bool {
+	if hasOneOfSuffixes(name, tmpSuffixes[:]) {
 		return true
 	}
 
-	for _, containing := range tmpPaths {
-		if len(path) < len(containing) {
-			continue
+	for _, prefix := range tmpPrefixes {
+		if len(name) < len(prefix) {
+			break
 		}
 
-		for n := len(path) - len(containing); n >= 0; n-- {
-			if caseInsensitiveCompare(path[n:n+len(containing)], containing) {
-				return true
-			}
+		if caseInsensitiveCompare(name[:len(prefix)], prefix) {
+			return true
 		}
 	}
 
-	base := filepath.Base(path)
+	return false
+}
 
-	for _, prefix := range tmpPrefixes {
-		if len(base) < len(prefix) {
-			return false
-		}
-
-		if caseInsensitiveCompare(base[:len(prefix)], prefix) {
+func isTempDir(path *summary.DirectoryPath) bool {
+	for path != nil {
+		if hasOneOfSuffixes(path.Name, tmpSuffixes[:]) {
 			return true
 		}
+
+		for _, containing := range tmpPaths {
+			if len(path.Name) != len(containing) {
+				continue
+			}
+
+			if caseInsensitiveCompare(path.Name, containing) {
+				return true
+			}
+		}
+
+		for _, prefix := range tmpPrefixes {
+			if len(path.Name) < len(prefix) {
+				break
+			}
+
+			if caseInsensitiveCompare(path.Name[:len(prefix)], prefix) {
+				return true
+			}
+		}
+
+		path = path.Parent
 	}
 
 	return false
@@ -484,6 +481,30 @@ func isLog(path string) bool {
 	return hasOneOfSuffixes(path, logSuffixes[:])
 }
 
+type db interface {
+	Add(recordDGUTA) error
+}
+
+// DirGroupUserTypeAge is used to summarise file stats by directory, group,
+// user, file type and age.
+type DirGroupUserTypeAge struct {
+	db      db
+	store   gutaStore
+	thisDir *summary.DirectoryPath
+}
+
+// NewDirGroupUserTypeAge returns a DirGroupUserTypeAge.
+func NewDirGroupUserTypeAge(db db) summary.OperationGenerator {
+	refTime := time.Now().Unix()
+
+	return func() summary.Operation {
+		return &DirGroupUserTypeAge{
+			db:    db,
+			store: gutaStore{make(map[GUTAKey]*summary.SummaryWithTimes), refTime},
+		}
+	}
+}
+
 // Add is a github.com/wtsi-ssg/wrstat/stat Operation. It will break path in to
 // its directories and add the file size, increment the file count to each,
 // summed for the info's group, user, filetype and age. It will also record the
@@ -502,27 +523,40 @@ func isLog(path string) bool {
 // filetypes, so if you sum all the filetypes to get information about a given
 // directory+group+user combination, you should ignore "temp". Only count "temp"
 // when it's the only type you're considering, or you'll count some files twice.
-func (d *DirGroupUserTypeAge) Add(info *FileInfo) error {
+func (d *DirGroupUserTypeAge) Add(info *summary.FileInfo) error {
+	if d.thisDir == nil {
+		d.thisDir = info.Path
+	}
+
 	var atime int64
 
 	gutaKeysA := gutaKey.Get().(*[maxNumOfGUTAKeys]GUTAKey) //nolint:errcheck,forcetypeassert
+	gutaKeys := GUTAKeys(gutaKeysA[:0])
 
-	var gutaKeys []GUTAKey
-
-	path := string(info.Path.appendTo(nil))
+	var (
+		isTmp    bool
+		filetype DirGUTAFileType
+	)
 
 	if info.IsDir() {
 		atime = time.Now().Unix()
-		path = filepath.Join(path, "leaf")
-
-		gutaKeys = appendGUTAKeysForDir(path, gutaKeysA[:0], info.GID, info.UID)
+		filetype = DGUTAFileTypeDir
 	} else {
-		path = filepath.Join(path, string(info.Name))
+		filetype, isTmp = filenameToType(string(info.Name))
 		atime = maxInt(0, info.MTime, info.ATime)
-		gutaKeys = d.statToGUTAKeys(info, gutaKeysA[:0], path)
 	}
 
-	d.addForEachDir(path, gutaKeys, info.Size, atime, maxInt(0, info.MTime))
+	if !isTmp {
+		isTmp = isTempDir(info.Path)
+	}
+
+	gutaKeys.append(info.GID, info.UID, filetype)
+
+	if isTmp {
+		gutaKeys.append(info.GID, info.UID, DGUTAFileTypeTemp)
+	}
+
+	d.addForEach(gutaKeys, info.Size, atime, maxInt(0, info.MTime))
 
 	gutaKey.Put(gutaKeysA)
 
@@ -533,6 +567,44 @@ type GUTAKey struct {
 	GID, UID uint32
 	FileType DirGUTAFileType
 	Age      DirGUTAge
+}
+
+type GUTAKeys []GUTAKey
+
+func (g GUTAKeys) Len() int {
+	return len(g)
+}
+
+func (g GUTAKeys) Less(i, j int) bool {
+	if g[i].GID < g[j].GID {
+		return true
+	}
+
+	if g[i].GID > g[j].GID {
+		return false
+	}
+
+	if g[i].UID < g[j].UID {
+		return true
+	}
+
+	if g[i].UID > g[j].UID {
+		return false
+	}
+
+	if g[i].FileType < g[j].FileType {
+		return true
+	}
+
+	if g[i].FileType > g[j].FileType {
+		return false
+	}
+
+	return g[i].Age < g[j].Age
+}
+
+func (g GUTAKeys) Swap(i, j int) {
+	g[i], g[j] = g[j], g[i]
 }
 
 func gutaKeyFromString(key string) GUTAKey {
@@ -557,26 +629,12 @@ func (g GUTAKey) String() string {
 	return unsafe.String(&a[0], len(a))
 }
 
-// appendGUTAKeysForDir checks if the path is temp and calls appendGUTAKeys for the
-// relevant file types.
-func appendGUTAKeysForDir(path string, gutaKeys []GUTAKey, gid, uid uint32) []GUTAKey {
-	if isTemp(path) {
-		gutaKeys = appendGUTAKeys(gutaKeys, gid, uid, DGUTAFileTypeTemp)
-	}
-
-	gutaKeys = appendGUTAKeys(gutaKeys, gid, uid, DGUTAFileTypeDir)
-
-	return gutaKeys
-}
-
 // appendGUTAKeys appends gutaKeys with keys including the given gid, uid, file
 // type and age.
-func appendGUTAKeys(gutaKeys []GUTAKey, gid, uid uint32, fileType DirGUTAFileType) []GUTAKey {
+func (g GUTAKeys) append(gid, uid uint32, fileType DirGUTAFileType) {
 	for _, age := range DirGUTAges {
-		gutaKeys = append(gutaKeys, GUTAKey{gid, uid, fileType, age})
+		g = append(g, GUTAKey{gid, uid, fileType, age})
 	}
-
-	return gutaKeys
 }
 
 // maxInt returns the greatest of the inputs.
@@ -592,57 +650,32 @@ func maxInt(ints ...int64) int64 {
 	return max
 }
 
-// statToGUTAKeys extracts gid and uid from the stat, determines the filetype
-// from the path, and combines them into a group+user+type+age key. More than 1
-// key will be returned, because there is a key for each age, possibly a "temp"
-// filetype as well as more specific types, and path could be both.
-func (d *DirGroupUserTypeAge) statToGUTAKeys(info *FileInfo, gutaKeys []GUTAKey, path string) []GUTAKey {
-	types := d.pathToTypes(path)
-
-	for _, t := range types {
-		gutaKeys = appendGUTAKeys(gutaKeys, uint32(info.GID), uint32(info.UID), t)
-	}
-
-	return gutaKeys
-}
-
 // pathToTypes determines the filetype of the given path based on its basename,
 // and returns a slice of our DirGUTAFileType. More than one is possible,
 // because a path can be both a temporary file, and another type.
-func (d *DirGroupUserTypeAge) pathToTypes(path string) []DirGUTAFileType {
-	var types []DirGUTAFileType
+func filenameToType(name string) (DirGUTAFileType, bool) {
+	isTmp := isTempFile(name)
 
-	for ftype, isThisType := range d.typeCheckers {
-		if isThisType(path) {
-			types = append(types, ftype)
+	for ftype, isThisType := range typeCheckers {
+		if isThisType(name) {
+			return ftype, isTmp
 		}
 	}
 
-	if len(types) == 0 || (len(types) == 1 && types[0] == DGUTAFileTypeTemp) {
-		types = append(types, DGUTAFileTypeOther)
-	}
-
-	return types
+	return DGUTAFileTypeOther, isTmp
 }
 
-// addForEachDir breaks path into each directory, gets a gutaStore for each and
+// addForEach breaks path into each directory, gets a gutaStore for each and
 // adds a file of the given size to them under the given gutaKeys.
-func (d *DirGroupUserTypeAge) addForEachDir(path string, gutaKeys []GUTAKey, size int64, atime int64, mtime int64) {
-	dir := filepath.Dir(path)
-
-	for {
-		gStore := d.store.getGUTAStore(dir)
-
-		for _, gutaKey := range gutaKeys {
-			gStore.add(gutaKey, size, atime, mtime)
-		}
-
-		if dir == "/" || dir == "." {
-			return
-		}
-
-		dir = filepath.Dir(dir)
+func (d *DirGroupUserTypeAge) addForEach(gutaKeys []GUTAKey, size int64, atime int64, mtime int64) {
+	for _, gutaKey := range gutaKeys {
+		d.store.add(gutaKey, size, atime, mtime)
 	}
+
+}
+
+type DirGUTA struct {
+	Path *summary.DirectoryPath
 }
 
 // Output will write summary information for all the paths previously added. The
@@ -697,30 +730,57 @@ func (d *DirGroupUserTypeAge) addForEachDir(path string, gutaKeys []GUTAKey, siz
 //
 // Returns an error on failure to write.
 func (d *DirGroupUserTypeAge) Output() error {
-	dirs, gStores := d.store.sort()
+	dgutas := d.store.sort()
 
-	for i, dir := range dirs {
-		dgutas, summaries := gStores[i].sort()
-
-		for j, gutaKey := range dgutas {
-			guta := gutaKeyFromString(gutaKey)
-
-			s := summaries[j]
-			_, errw := fmt.Fprintf(d.w, "%q\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\n",
-				dir,
-				guta.GID, guta.UID, guta.FileType, guta.Age,
-				s.count, s.size,
-				s.atime, s.mtime)
-
-			if errw != nil {
-				return errw
-			}
-		}
+	dguta := recordDGUTA{
+		Dir: d.thisDir,
 	}
 
-	for k := range d.store.gsMap {
-		delete(d.store.gsMap, k)
+	for _, guta := range dgutas {
+		s := d.store.sumMap[guta]
+
+		dguta.GUTAs = append(dguta.GUTAs, &GUTA{
+			GID:   guta.GID,
+			UID:   guta.UID,
+			FT:    guta.FileType,
+			Age:   guta.Age,
+			Count: uint64(s.Count),
+			Size:  uint64(s.Size),
+			Atime: s.Atime,
+			Mtime: s.Mtime,
+		})
 	}
+
+	if err := d.db.Add(dguta); err != nil {
+		return err
+	}
+
+	for k := range d.store.sumMap {
+		delete(d.store.sumMap, k)
+	}
+
+	d.thisDir = nil
 
 	return nil
+}
+
+// fitsAgeInterval takes a dguta and the mtime and atime and reference time. It
+// checks the value of age inside the dguta, and then returns true if the mtime
+// or atime respectively fits inside the age interval. E.g. if age = 3, this
+// corresponds to DGUTAgeA6M, so atime is checked to see if it is older than 6
+// months.
+func fitsAgeInterval(dguta GUTAKey, atime, mtime, refTime int64) bool {
+	age := int(dguta.Age)
+
+	if age > len(ageThresholds) {
+		return checkTimeIsInInterval(mtime, refTime, age-(len(ageThresholds)+1))
+	} else if age > 0 {
+		return checkTimeIsInInterval(atime, refTime, age-1)
+	}
+
+	return true
+}
+
+func checkTimeIsInInterval(amtime, refTime int64, thresholdIndex int) bool {
+	return amtime <= refTime-ageThresholds[thresholdIndex]
 }

@@ -13,7 +13,7 @@ var (
 )
 
 const (
-	maxPathLen                = 4096
+	MaxPathLen                = 4096
 	probableMaxDirectoryDepth = 128
 )
 
@@ -23,9 +23,9 @@ type DirectoryPath struct {
 	Parent *DirectoryPath
 }
 
-func (d *DirectoryPath) appendTo(p []byte) []byte {
+func (d *DirectoryPath) AppendTo(p []byte) []byte {
 	if d.Parent != nil {
-		p = d.Parent.appendTo(p)
+		p = d.Parent.AppendTo(p)
 	}
 
 	return append(p, d.Name...)
@@ -187,9 +187,12 @@ func (s *Summariser) Summarise() error {
 
 	directories := make(directories, 0, probableMaxDirectoryDepth)
 	global := s.globalOperations.Generate()
-	var currentDir *DirectoryPath
 
-	var err error
+	var (
+		currentDir *DirectoryPath
+		err        error
+		info       FileInfo
+	)
 
 	for s.statsParser.Scan(statsInfo) == nil {
 		directories, currentDir, err = s.changeToWorkingDirectoryOfEntry(directories, currentDir, statsInfo)
@@ -197,7 +200,7 @@ func (s *Summariser) Summarise() error {
 			return err
 		}
 
-		info := FileInfo{
+		info = FileInfo{
 			Path:      currentDir,
 			Name:      statsInfo.BaseName(),
 			Size:      statsInfo.Size,

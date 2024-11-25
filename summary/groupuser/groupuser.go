@@ -23,68 +23,56 @@
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  ******************************************************************************/
 
-package summary
+package groupuser
 
 import (
 	"fmt"
 	"io"
 	"sort"
+
+	"github.com/wtsi-hgi/wrstat-ui/summary"
 )
 
 // GroupUser is used to summarise file stats by group and user.
 type GroupUser struct {
 	w     io.WriteCloser
-	store map[groupUserID]*summary
+	store map[summary.GroupUserID]*summary.Summary
 }
 
 // NewByGroupUser returns a GroupUser.
-func NewByGroupUser(w io.WriteCloser) OperationGenerator {
-	return func() Operation {
+func NewByGroupUser(w io.WriteCloser) summary.OperationGenerator {
+	return func() summary.Operation {
 		return &GroupUser{
 			w:     w,
-			store: make(map[groupUserID]*summary),
+			store: make(map[summary.GroupUserID]*summary.Summary),
 		}
 	}
-}
-
-type groupUserID uint64
-
-func newGroupUserID(gid, uid uint32) groupUserID {
-	return groupUserID(gid)<<32 | groupUserID(uid)
-}
-
-func (g groupUserID) GID() uint32 {
-	return uint32(g >> 32)
-}
-
-func (g groupUserID) UID() uint32 {
-	return uint32(g)
 }
 
 // Add is a github.com/wtsi-ssg/wrstat/stat Operation. It will add the file size
 // and increment the file count summed for the info's group and user. If path is
 // a directory, it is ignored.
-func (g *GroupUser) Add(info *FileInfo) error {
+func (g *GroupUser) Add(info *summary.FileInfo) error {
 	if info.IsDir() {
 		return nil
 	}
 
-	id := newGroupUserID(info.GID, info.UID)
+	id := summary.NewGroupUserID(info.GID, info.UID)
 
 	ss, ok := g.store[id]
 	if !ok {
-		ss = new(summary)
+		ss = new(summary.Summary)
 		g.store[id] = ss
 	}
 
-	ss.add(info.Size)
+	ss.Add(info.Size)
 
 	return nil
 }
 
 type groupUserSummary struct {
 	Group, User string
-	*summary
+	*summary.Summary
 }
 
 type groupUserSummaries []groupUserSummary
@@ -128,9 +116,9 @@ func (g *GroupUser) Output() error {
 
 	for gu, s := range g.store {
 		data = append(data, groupUserSummary{
-			Group:   gidToName(gu.GID(), gidLookupCache),
-			User:    uidToName(gu.UID(), uidLookupCache),
-			summary: s,
+			Group:   summary.GIDToName(gu.GID(), gidLookupCache),
+			User:    summary.UIDToName(gu.UID(), uidLookupCache),
+			Summary: s,
 		})
 	}
 
@@ -138,15 +126,10 @@ func (g *GroupUser) Output() error {
 
 	for _, row := range data {
 		if _, err := fmt.Fprintf(g.w, "%s\t%s\t%d\t%d\n",
-			row.Group, row.User, row.count, row.size); err != nil {
+			row.Group, row.User, row.Count, row.Size); err != nil {
 			return err
 		}
 	}
 
 	return g.w.Close()
-}
-
-// uidToName converts uid to username, using the given cache to avoid lookups.
-func uidToName(uid uint32, cache map[uint32]string) string {
-	return cachedIDToName(uid, cache, getUserName)
 }

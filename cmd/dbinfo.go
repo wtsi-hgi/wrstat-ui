@@ -31,8 +31,8 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
-	"github.com/wtsi-hgi/wrstat-ui/dguta"
 	"github.com/wtsi-hgi/wrstat-ui/server"
+	"github.com/wtsi-hgi/wrstat-ui/summary/dirguta"
 )
 
 // dbinfoCmd represents the server command.
@@ -64,7 +64,7 @@ NB: for large databases, this can take hours to run.
 		slog.SetLogLoggerLevel(slog.LevelDebug)
 
 		info("opening dguta databases...")
-		dgutaDB := dguta.NewDB(dbPaths...)
+		dgutaDB := dirguta.NewDB(dbPaths...)
 		dbInfo, err := dgutaDB.Info()
 		if err != nil {
 			die("failed to get dguta db info: %s", err)

@@ -41,7 +41,7 @@ import (
 	"github.com/spf13/cobra"
 	gas "github.com/wtsi-hgi/go-authserver"
 	"github.com/wtsi-hgi/wrstat-ui/server"
-	"github.com/wtsi-hgi/wrstat-ui/summary"
+	"github.com/wtsi-hgi/wrstat-ui/summary/dirguta"
 )
 
 type Error string
@@ -195,7 +195,7 @@ with refreshes possible up to 5 days after expiry.
 			die("--unused and --unchanged are mutually exclusive")
 		}
 
-		age := summary.DGUTAgeAll
+		age := dirguta.DGUTAgeAll
 		if whereUnused != "" {
 			age = stringToAge("A" + whereUnused)
 		} else if whereUnchanged != "" {
@@ -294,50 +294,50 @@ func getSupergroups(c *gas.ClientCLI) (map[string][]string, error) {
 	return areas, nil
 }
 
-func stringToAge(ageStr string) summary.DirGUTAge { //nolint:funlen,gocyclo,cyclop
+func stringToAge(ageStr string) dirguta.DirGUTAge { //nolint:funlen,gocyclo,cyclop
 	switch ageStr {
 	case "A1M":
-		return summary.DGUTAgeA1M
+		return dirguta.DGUTAgeA1M
 	case "A2M":
-		return summary.DGUTAgeA2M
+		return dirguta.DGUTAgeA2M
 	case "A6M":
-		return summary.DGUTAgeA6M
+		return dirguta.DGUTAgeA6M
 	case "A1Y":
-		return summary.DGUTAgeA1Y
+		return dirguta.DGUTAgeA1Y
 	case "A2Y":
-		return summary.DGUTAgeA2Y
+		return dirguta.DGUTAgeA2Y
 	case "A3Y":
-		return summary.DGUTAgeA3Y
+		return dirguta.DGUTAgeA3Y
 	case "A5Y":
-		return summary.DGUTAgeA5Y
+		return dirguta.DGUTAgeA5Y
 	case "A7Y":
-		return summary.DGUTAgeA7Y
+		return dirguta.DGUTAgeA7Y
 	case "M1M":
-		return summary.DGUTAgeM1M
+		return dirguta.DGUTAgeM1M
 	case "M2M":
-		return summary.DGUTAgeM2M
+		return dirguta.DGUTAgeM2M
 	case "M6M":
-		return summary.DGUTAgeM6M
+		return dirguta.DGUTAgeM6M
 	case "M1Y":
-		return summary.DGUTAgeM1Y
+		return dirguta.DGUTAgeM1Y
 	case "M2Y":
-		return summary.DGUTAgeM2Y
+		return dirguta.DGUTAgeM2Y
 	case "M3Y":
-		return summary.DGUTAgeM3Y
+		return dirguta.DGUTAgeM3Y
 	case "M5Y":
-		return summary.DGUTAgeM5Y
+		return dirguta.DGUTAgeM5Y
 	case "M7Y":
-		return summary.DGUTAgeM7Y
+		return dirguta.DGUTAgeM7Y
 	}
 
 	die("invalid age")
 
-	return summary.DGUTAgeAll
+	return dirguta.DGUTAgeAll
 }
 
 // where does the main job of querying the server to answer where the data is on
 // disk.
-func where(c *gas.ClientCLI, dir, groups, supergroup, users, types string, age summary.DirGUTAge,
+func where(c *gas.ClientCLI, dir, groups, supergroup, users, types string, age dirguta.DirGUTAge,
 	splits, order string, minSizeBytes uint64, minAtime time.Time, json bool,
 ) error {
 	var err error

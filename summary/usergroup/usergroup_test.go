@@ -23,22 +23,20 @@
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  ******************************************************************************/
 
-package summary
+package usergroup
 
 import (
 	"io"
 	"io/fs"
-	"os"
-	"os/exec"
 	"strconv"
-	"strings"
 	"testing"
 
 	. "github.com/smartystreets/goconvey/convey"
 	"github.com/wtsi-hgi/wrstat-ui/internal/statsdata"
+	internaltest "github.com/wtsi-hgi/wrstat-ui/internal/test"
 	internaluser "github.com/wtsi-hgi/wrstat-ui/internal/user"
 	"github.com/wtsi-hgi/wrstat-ui/stats"
-	"golang.org/x/exp/slices"
+	"github.com/wtsi-hgi/wrstat-ui/summary"
 )
 
 func TestUsergroup(t *testing.T) {
@@ -48,7 +46,7 @@ func TestUsergroup(t *testing.T) {
 	}
 
 	Convey("UserGroup Operation accumulates count and size by username, group and directory", t, func() {
-		var w stringBuilder
+		var w internaltest.StringBuilder
 
 		ugGenerator := NewByUserGroup(&w)
 		So(ugGenerator, ShouldNotBeNil)
@@ -70,7 +68,7 @@ func TestUsergroup(t *testing.T) {
 			otherDir.AddFile("miscFile").Size = 51
 
 			p := stats.NewStatsParser(f.AsReader())
-			s := NewSummariser(p)
+			s := summary.NewSummariser(p)
 			s.AddDirectoryOperation(ugGenerator)
 
 			err = s.Summarise()
@@ -102,176 +100,38 @@ func TestUsergroup(t *testing.T) {
 			So(output, ShouldContainSubstring, "root\troot\t"+
 				strconv.Quote("/opt/other/")+"\t2\t101\n")
 
-			So(checkDataIsSorted(output, 3), ShouldBeTrue)
+			So(internaltest.CheckDataIsSorted(output, 3), ShouldBeTrue)
 		})
 
 		Convey("Output handles bad uids", func() {
-			paths := NewDirectoryPathCreator()
+			paths := internaltest.NewDirectoryPathCreator()
 			ug := ugGenerator()
-			err = ug.Add(newMockInfo(paths.ToDirectoryPath("/a/b/c/"), 999999999, 2, 1, true))
+			err = ug.Add(internaltest.NewMockInfo(paths.ToDirectoryPath("/a/b/c/"), 999999999, 2, 1, true))
 			So(err, ShouldBeNil)
 
-			err = ug.Add(newMockInfo(paths.ToDirectoryPath("/a/b/c/file.txt"), 999999999, 2, 1, false))
-			testBadIds(err, ug, &w)
+			err = ug.Add(internaltest.NewMockInfo(paths.ToDirectoryPath("/a/b/c/file.txt"), 999999999, 2, 1, false))
+			internaltest.TestBadIds(err, ug, &w)
 		})
 
 		Convey("Output handles bad gids", func() {
-			paths := NewDirectoryPathCreator()
+			paths := internaltest.NewDirectoryPathCreator()
 			ug := NewByUserGroup(&w)()
-			err = ug.Add(newMockInfo(paths.ToDirectoryPath("/a/b/c/"), 999999999, 2, 1, true))
+			err = ug.Add(internaltest.NewMockInfo(paths.ToDirectoryPath("/a/b/c/"), 999999999, 2, 1, true))
 			So(err, ShouldBeNil)
 
-			err = ug.Add(newMockInfo(paths.ToDirectoryPath("/a/b/c/8.txt"), 1, 999999999, 1, false))
-			testBadIds(err, ug, &w)
+			err = ug.Add(internaltest.NewMockInfo(paths.ToDirectoryPath("/a/b/c/8.txt"), 1, 999999999, 1, false))
+			internaltest.TestBadIds(err, ug, &w)
 		})
 
 		Convey("Output fails if we can't write to the output file", func() {
-			err = NewByUserGroup(badWriter{})().Output()
+			err = NewByUserGroup(internaltest.BadWriter{})().Output()
 			So(err, ShouldNotBeNil)
 		})
 	})
-}
-
-type stringBuilder struct {
-	strings.Builder
-}
-
-func (stringBuilder) Close() error {
-	return nil
-}
-
-type badWriter struct{}
-
-func (badWriter) Write([]byte) (int, error) {
-	return 0, fs.ErrClosed
-}
-
-func (badWriter) Close() error {
-	return fs.ErrClosed
 }
 
 // byColumnAdder describes one of our New* types.
 type byColumnAdder interface {
 	Add(string, fs.FileInfo) error
 	Output(output io.WriteCloser) error
-}
-
-func newMockInfo(path *DirectoryPath, uid, gid uint32, size int64, dir bool) *FileInfo {
-	entryType := stats.FileType
-
-	if dir {
-		entryType = stats.DirType
-	}
-
-	return &FileInfo{
-		Path:      path,
-		UID:       uid,
-		GID:       gid,
-		Size:      size,
-		EntryType: byte(entryType),
-	}
-}
-
-func newMockInfoWithAtime(path *DirectoryPath, uid, gid uint32, size int64, dir bool, atime int64) *FileInfo {
-	mi := newMockInfo(path, uid, gid, size, dir)
-	mi.ATime = atime
-
-	return mi
-}
-
-func newMockInfoWithTimes(path *DirectoryPath, uid, gid uint32, size int64, dir bool, tim int64) *FileInfo {
-	mi := newMockInfo(path, uid, gid, size, dir)
-	mi.ATime = tim
-	mi.MTime = tim
-	mi.CTime = tim
-
-	return mi
-}
-
-func testBadIds(err error, a Operation, w *stringBuilder) {
-	So(err, ShouldBeNil)
-
-	err = a.Output()
-	So(err, ShouldBeNil)
-
-	output := w.String()
-
-	So(output, ShouldContainSubstring, "id999999999")
-}
-
-func checkFileIsSorted(path string, args ...string) bool {
-	cmd := exec.Command("sort", append(append([]string{"-C"}, args...), path)...) //nolint:gosec
-	cmd.Env = os.Environ()
-	cmd.Env = append(cmd.Env, "LC_ALL=C")
-
-	err := cmd.Run()
-
-	return err == nil
-}
-
-func checkDataIsSorted(data string, textCols int) bool {
-	lines := strings.Split(strings.TrimSuffix(data, "\n"), "\n")
-	splitLines := make([][]string, len(lines))
-
-	for n, line := range lines {
-		splitLines[n] = strings.Split(line, "\t")
-	}
-
-	return slices.IsSortedFunc(splitLines, func(a, b []string) int {
-		for n, col := range a {
-			if n < textCols {
-				if cmp := strings.Compare(col, b[n]); cmp != 0 {
-					return cmp
-				}
-
-				continue
-			}
-
-			colA, _ := strconv.ParseInt(col, 10, 0)
-			colB, _ := strconv.ParseInt(b[n], 10, 0)
-
-			if dx := colA - colB; dx != 0 {
-				return int(dx)
-			}
-		}
-
-		return 0
-	})
-}
-
-type DirectoryPathCreator map[string]*DirectoryPath
-
-func (d DirectoryPathCreator) ToDirectoryPath(p string) *DirectoryPath {
-	pos := strings.LastIndexByte(p[:len(p)-1], '/')
-	dir := p[:pos+1]
-	base := p[pos+1:]
-
-	if dp, ok := d[p]; ok {
-		dp.Name = base
-
-		return dp
-	}
-
-	parent := d.ToDirectoryPath(dir)
-
-	dp := &DirectoryPath{
-		Name:   base,
-		Depth:  strings.Count(p, "/"),
-		Parent: parent,
-	}
-
-	d[p] = dp
-
-	return dp
-}
-
-func NewDirectoryPathCreator() DirectoryPathCreator {
-	d := make(DirectoryPathCreator)
-
-	d["/"] = &DirectoryPath{
-		Name:  "/",
-		Depth: -1,
-	}
-
-	return d
 }

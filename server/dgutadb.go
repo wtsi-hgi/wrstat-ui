@@ -31,8 +31,8 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/wtsi-hgi/wrstat-ui/dguta"
 	ifs "github.com/wtsi-hgi/wrstat-ui/internal/fs"
+	"github.com/wtsi-hgi/wrstat-ui/summary/dirguta"
 	"github.com/wtsi-hgi/wrstat-ui/watch"
 )
 
@@ -47,7 +47,7 @@ func (s *Server) LoadDGUTADBs(paths ...string) error {
 	s.treeMutex.Lock()
 	defer s.treeMutex.Unlock()
 
-	tree, err := dguta.NewTree(paths...)
+	tree, err := dirguta.NewTree(paths...)
 	if err != nil {
 		return err
 	}
@@ -124,7 +124,7 @@ func (s *Server) reloadDGUTADBs(dir, suffix string, mtime time.Time) {
 
 	s.Logger.Printf("reloading dguta dbs from %s", s.dgutaPaths)
 
-	s.tree, err = dguta.NewTree(s.dgutaPaths...)
+	s.tree, err = dirguta.NewTree(s.dgutaPaths...)
 	if err != nil {
 		s.Logger.Printf("reloading dguta dbs failed: %s", err)
 

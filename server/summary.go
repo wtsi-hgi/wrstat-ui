@@ -31,8 +31,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/wtsi-hgi/wrstat-ui/dguta"
-	"github.com/wtsi-hgi/wrstat-ui/summary"
+	"github.com/wtsi-hgi/wrstat-ui/summary/dirguta"
 )
 
 // DirSummary holds nested file count, size and atime information on a
@@ -48,13 +47,13 @@ type DirSummary struct {
 	Users     []string
 	Groups    []string
 	FileTypes []string
-	Age       summary.DirGUTAge
+	Age       dirguta.DirGUTAge
 }
 
 // dcssToSummaries converts the given DCSs to our own DirSummary, the difference
 // being we change the UIDs to usernames and the GIDs to group names. On failure
 // to convert, the name will skipped.
-func (s *Server) dcssToSummaries(dcss dguta.DCSs) []*DirSummary {
+func (s *Server) dcssToSummaries(dcss dirguta.DCSs) []*DirSummary {
 	summaries := make([]*DirSummary, len(dcss))
 
 	for i, dds := range dcss {
@@ -66,7 +65,7 @@ func (s *Server) dcssToSummaries(dcss dguta.DCSs) []*DirSummary {
 
 // dgutaDStoSummary converts the given dguta.DirSummary to one of our
 // DirSummary, basically just converting the *IDs to names.
-func (s *Server) dgutaDStoSummary(dds *dguta.DirSummary) *DirSummary {
+func (s *Server) dgutaDStoSummary(dds *dirguta.DirSummary) *DirSummary {
 	return &DirSummary{
 		Dir:       dds.Dir,
 		Count:     dds.Count,
@@ -151,7 +150,7 @@ func (s *Server) gidsToNames(gids []uint32) []string {
 }
 
 // ftsToNames converts the given file types to their names, sorted on the names.
-func (s *Server) ftsToNames(fts []summary.DirGUTAFileType) []string {
+func (s *Server) ftsToNames(fts []dirguta.DirGUTAFileType) []string {
 	names := make([]string, len(fts))
 
 	for i, ft := range fts {

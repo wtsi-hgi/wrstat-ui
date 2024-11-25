@@ -32,7 +32,7 @@ import (
 	"strconv"
 
 	gas "github.com/wtsi-hgi/go-authserver"
-	"github.com/wtsi-hgi/wrstat-ui/summary"
+	"github.com/wtsi-hgi/wrstat-ui/summary/dirguta"
 )
 
 const ErrBadQuery = gas.Error("bad query; check dir, group, user and type")
@@ -70,7 +70,7 @@ func GetGroupAreas(c *gas.ClientCLI) (map[string][]string, error) {
 // You must first Login() to get a JWT that you must supply here.
 //
 // The other parameters correspond to arguments that dguta.Tree.Where() takes.
-func GetWhereDataIs(c *gas.ClientCLI, dir, groups, users, types string, age summary.DirGUTAge,
+func GetWhereDataIs(c *gas.ClientCLI, dir, groups, users, types string, age dirguta.DirGUTAge,
 	splits string) ([]byte, []*DirSummary, error) {
 	r, err := c.AuthenticatedRequest()
 	if err != nil {

@@ -23,14 +23,13 @@
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  ******************************************************************************/
 
-package dguta
+package dirguta
 
 import (
 	"sort"
 	"time"
 
 	"github.com/wtsi-hgi/wrstat-ui/internal/split"
-	"github.com/wtsi-hgi/wrstat-ui/summary"
 )
 
 // Tree is used to do high-level queries on DB.Store() database files.
@@ -62,8 +61,8 @@ type DirSummary struct {
 	Mtime   time.Time
 	UIDs    []uint32
 	GIDs    []uint32
-	FTs     []summary.DirGUTAFileType
-	Age     summary.DirGUTAge
+	FTs     []DirGUTAFileType
+	Age     DirGUTAge
 	Modtime time.Time
 }
 
@@ -221,7 +220,7 @@ func (t *Tree) Where(dir string, filter *Filter, recurseCount split.SplitFn) (DC
 	}
 
 	if filter.FTs == nil {
-		filter.FTs = summary.AllTypesExceptDirectories
+		filter.FTs = AllTypesExceptDirectories
 	}
 
 	dcss, err := t.recurseWhere(dir, filter, recurseCount, 0)

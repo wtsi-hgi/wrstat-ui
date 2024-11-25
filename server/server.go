@@ -36,7 +36,7 @@ import (
 
 	gas "github.com/wtsi-hgi/go-authserver"
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
-	"github.com/wtsi-hgi/wrstat-ui/dguta"
+	"github.com/wtsi-hgi/wrstat-ui/summary/dirguta"
 	"github.com/wtsi-hgi/wrstat-ui/watch"
 )
 
@@ -100,7 +100,7 @@ const (
 // package's database, and a website that displays the information nicely.
 type Server struct {
 	gas.Server
-	tree           *dguta.Tree
+	tree           *dirguta.Tree
 	treeMutex      sync.RWMutex
 	whiteCB        WhiteListCallback
 	uidToNameCache map[uint32]string

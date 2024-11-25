@@ -36,7 +36,7 @@ import (
 	gas "github.com/wtsi-hgi/go-authserver"
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
 	ifs "github.com/wtsi-hgi/wrstat-ui/internal/fs"
-	"github.com/wtsi-hgi/wrstat-ui/summary"
+	"github.com/wtsi-hgi/wrstat-ui/summary/dirguta"
 	"github.com/wtsi-hgi/wrstat-ui/watch"
 )
 
@@ -94,7 +94,7 @@ func (s *Server) getBasedirsGroupUsage(c *gin.Context) {
 	s.getBasedirs(c, func() (any, error) {
 		var results []*basedirs.Usage
 
-		for _, age := range summary.DirGUTAges {
+		for _, age := range dirguta.DirGUTAges {
 			result, err := s.basedirs.GroupUsage(age)
 			if err != nil {
 				return nil, err
@@ -130,7 +130,7 @@ func (s *Server) getBasedirsUserUsage(c *gin.Context) {
 	s.getBasedirs(c, func() (any, error) {
 		var results []*basedirs.Usage
 
-		for _, age := range summary.DirGUTAges {
+		for _, age := range dirguta.DirGUTAges {
 			result, err := s.basedirs.UserUsage(age)
 			if err != nil {
 				return nil, err
@@ -176,7 +176,7 @@ func (s *Server) getBasedirsGroupSubdirs(c *gin.Context) {
 	})
 }
 
-func getSubdirsArgs(c *gin.Context) (int, string, summary.DirGUTAge, bool) {
+func getSubdirsArgs(c *gin.Context) (int, string, dirguta.DirGUTAge, bool) {
 	idStr := c.Query("id")
 	basedir := c.Query("basedir")
 	ageStr := c.Query("age")
@@ -184,25 +184,25 @@ func getSubdirsArgs(c *gin.Context) (int, string, summary.DirGUTAge, bool) {
 	if idStr == "" || basedir == "" {
 		c.AbortWithError(http.StatusBadRequest, ErrBadBasedirsQuery) //nolint:errcheck
 
-		return 0, "", summary.DGUTAgeAll, false
+		return 0, "", dirguta.DGUTAgeAll, false
 	}
 
 	id, err := strconv.Atoi(idStr)
 	if err != nil {
 		c.AbortWithError(http.StatusBadRequest, ErrBadBasedirsQuery) //nolint:errcheck
 
-		return 0, "", summary.DGUTAgeAll, false
+		return 0, "", dirguta.DGUTAgeAll, false
 	}
 
 	if ageStr == "" {
 		ageStr = "0"
 	}
 
-	age, err := summary.AgeStringToDirGUTAge(ageStr)
+	age, err := dirguta.AgeStringToDirGUTAge(ageStr)
 	if err != nil {
 		c.AbortWithError(http.StatusBadRequest, ErrBadBasedirsQuery) //nolint:errcheck
 
-		return 0, "", summary.DGUTAgeAll, false
+		return 0, "", dirguta.DGUTAgeAll, false
 	}
 
 	return id, basedir, age, true

@@ -18,7 +18,7 @@ func (t *testGlobalOperator) Add(s *FileInfo) error {
 	t.totalCount++
 
 	if s.EntryType == 'f' {
-		dir := s.Path.appendTo(nil)
+		dir := s.Path.AppendTo(nil)
 
 		t.dirCounts[string(dir)] = t.dirCounts[string(dir)] + 1
 	}
@@ -38,7 +38,7 @@ type testDirectoryOperator struct {
 
 func (t *testDirectoryOperator) Add(s *FileInfo) error {
 	if t.path == "" {
-		t.path = string(s.Path.appendTo(nil))
+		t.path = string(s.Path.AppendTo(nil))
 	}
 
 	t.size += s.Size

@@ -25,13 +25,11 @@
 
 package basedirs
 
-import (
-	"github.com/wtsi-hgi/wrstat-ui/dguta"
-)
+import "github.com/wtsi-hgi/wrstat-ui/summary/dirguta"
 
 // getAllGIDsandUIDsInTree gets all the unix group and user IDs that own files
 // in the given file tree.
-func getAllGIDsandUIDsInTree(tree *dguta.Tree) ([]uint32, []uint32, error) {
+func getAllGIDsandUIDsInTree(tree *dirguta.Tree) ([]uint32, []uint32, error) {
 	di, err := tree.DirInfo("/", nil)
 	if err != nil {
 		return nil, nil, err

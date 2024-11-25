@@ -23,7 +23,7 @@
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  ******************************************************************************/
 
-package summary
+package groupuser
 
 import (
 	"fmt"
@@ -31,6 +31,7 @@ import (
 	"time"
 
 	. "github.com/smartystreets/goconvey/convey"
+	internaltest "github.com/wtsi-hgi/wrstat-ui/internal/test"
 	"github.com/wtsi-hgi/wrstat-ui/internal/user"
 )
 
@@ -43,7 +44,7 @@ func TestGroupUser(t *testing.T) {
 	tim := time.Now().Unix()
 
 	Convey("GroupUser Operation accumulates count and size by group and username", t, func() {
-		var w stringBuilder
+		var w internaltest.StringBuilder
 
 		ugGenerator := NewByGroupUser(&w)
 		So(ugGenerator, ShouldNotBeNil)
@@ -51,12 +52,12 @@ func TestGroupUser(t *testing.T) {
 		ug := ugGenerator().(*GroupUser)
 
 		Convey("You can add file info to it which accumulates the info into the output", func() {
-			ug.Add(newMockInfoWithTimes(nil, 0, gid, 3, false, tim))
-			ug.Add(newMockInfoWithTimes(nil, uid, gid, 1, false, tim))
-			ug.Add(newMockInfoWithTimes(nil, uid, gid, 2, false, tim))
-			ug.Add(newMockInfoWithTimes(nil, uid, 0, 4, false, tim))
-			ug.Add(newMockInfoWithTimes(nil, 0, 0, 5, false, tim))
-			ug.Add(newMockInfoWithTimes(nil, 0, 0, 4096, true, tim))
+			ug.Add(internaltest.NewMockInfoWithTimes(nil, 0, gid, 3, false, tim))
+			ug.Add(internaltest.NewMockInfoWithTimes(nil, uid, gid, 1, false, tim))
+			ug.Add(internaltest.NewMockInfoWithTimes(nil, uid, gid, 2, false, tim))
+			ug.Add(internaltest.NewMockInfoWithTimes(nil, uid, 0, 4, false, tim))
+			ug.Add(internaltest.NewMockInfoWithTimes(nil, 0, 0, 5, false, tim))
+			ug.Add(internaltest.NewMockInfoWithTimes(nil, 0, 0, 4096, true, tim))
 
 			err = ug.Output()
 			So(err, ShouldBeNil)
@@ -68,23 +69,23 @@ func TestGroupUser(t *testing.T) {
 			So(output, ShouldContainSubstring, fmt.Sprintf("root\t%s\t1\t4\n", uname))
 			So(output, ShouldContainSubstring, "root\troot\t1\t5\n")
 
-			So(checkDataIsSorted(output, 2), ShouldBeTrue)
+			So(internaltest.CheckDataIsSorted(output, 2), ShouldBeTrue)
 		})
 
 		Convey("Output handles bad uids", func() {
-			paths := NewDirectoryPathCreator()
-			err = ug.Add(newMockInfo(paths.ToDirectoryPath("/a/b/c/7.txt"), 999999999, 2, 1, false))
-			testBadIds(err, ug, &w)
+			paths := internaltest.NewDirectoryPathCreator()
+			err = ug.Add(internaltest.NewMockInfo(paths.ToDirectoryPath("/a/b/c/7.txt"), 999999999, 2, 1, false))
+			internaltest.TestBadIds(err, ug, &w)
 		})
 
 		Convey("Output handles bad gids", func() {
-			paths := NewDirectoryPathCreator()
-			err = ug.Add(newMockInfo(paths.ToDirectoryPath("/a/b/c/8.txt"), 1, 999999999, 1, false))
-			testBadIds(err, ug, &w)
+			paths := internaltest.NewDirectoryPathCreator()
+			err = ug.Add(internaltest.NewMockInfo(paths.ToDirectoryPath("/a/b/c/8.txt"), 1, 999999999, 1, false))
+			internaltest.TestBadIds(err, ug, &w)
 		})
 
 		Convey("Output fails if we can't write to the output file", func() {
-			ug.w = badWriter{}
+			ug.w = internaltest.BadWriter{}
 
 			err = ug.Output()
 			So(err, ShouldNotBeNil)

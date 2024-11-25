@@ -23,62 +23,19 @@
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  ******************************************************************************/
 
-package summary
+package usergroup
 
 import (
 	"fmt"
 	"io"
-	"os/user"
 	"sort"
-	"strconv"
+
+	"github.com/wtsi-hgi/wrstat-ui/summary"
 )
 
 type dirSummary struct {
-	*DirectoryPath
-	*summary
-}
-
-// gidToName converts gid to group name, using the given cache to avoid lookups.
-func gidToName(gid uint32, cache map[uint32]string) string {
-	return cachedIDToName(gid, cache, getGroupName)
-}
-
-func cachedIDToName(id uint32, cache map[uint32]string, lookup func(uint32) string) string {
-	if name, ok := cache[id]; ok {
-		return name
-	}
-
-	name := lookup(id)
-
-	cache[id] = name
-
-	return name
-}
-
-// getGroupName returns the name of the group given gid. If the lookup fails,
-// returns "idxxx", where xxx is the given id as a string.
-func getGroupName(id uint32) string {
-	sid := strconv.Itoa(int(id))
-
-	g, err := user.LookupGroupId(sid)
-	if err != nil {
-		return "id" + sid
-	}
-
-	return g.Name
-}
-
-// getUserName returns the username of the given uid. If the lookup fails,
-// returns "idxxx", where xxx is the given id as a string.
-func getUserName(id uint32) string {
-	sid := strconv.Itoa(int(id))
-
-	u, err := user.LookupId(sid)
-	if err != nil {
-		return "id" + sid
-	}
-
-	return u.Username
+	*summary.DirectoryPath
+	*summary.Summary
 }
 
 type rootUserGroup struct {
@@ -92,20 +49,20 @@ type rootUserGroup struct {
 func (r *rootUserGroup) addToStore(u *userGroup) {
 	for id, s := range u.summaries {
 		r.store = append(r.store, userGroupDirectory{
-			Group:     gidToName(id.GID(), r.gidLookupCache),
-			User:      uidToName(id.UID(), r.uidLookupCache),
+			Group:     summary.GIDToName(id.GID(), r.gidLookupCache),
+			User:      summary.UIDToName(id.UID(), r.uidLookupCache),
 			Directory: u.thisDir,
-			summary:   s,
+			Summary:   s,
 		})
 	}
 }
 
-type directorySummaryStore map[*DirectoryPath]*summary
+type directorySummaryStore map[*summary.DirectoryPath]*summary.Summary
 
-func (d directorySummaryStore) Get(p *DirectoryPath) *summary {
+func (d directorySummaryStore) Get(p *summary.DirectoryPath) *summary.Summary {
 	s, ok := d[p]
 	if !ok {
-		s = new(summary)
+		s = new(summary.Summary)
 		d[p] = s
 	}
 
@@ -115,25 +72,25 @@ func (d directorySummaryStore) Get(p *DirectoryPath) *summary {
 // userGroup is used to summarise file stats by user and group.
 type userGroup struct {
 	root      *rootUserGroup
-	summaries map[groupUserID]*summary
-	thisDir   *DirectoryPath
+	summaries map[summary.GroupUserID]*summary.Summary
+	thisDir   *summary.DirectoryPath
 }
 
 // NewByUserGroup returns a Usergroup.
-func NewByUserGroup(w io.WriteCloser) OperationGenerator {
+func NewByUserGroup(w io.WriteCloser) summary.OperationGenerator {
 	root := &rootUserGroup{
 		w:              w,
 		uidLookupCache: make(map[uint32]string),
 		gidLookupCache: make(map[uint32]string),
 		userGroup: userGroup{
-			summaries: make(map[groupUserID]*summary),
+			summaries: make(map[summary.GroupUserID]*summary.Summary),
 		},
 	}
 
 	root.userGroup.root = root
 	first := true
 
-	return func() Operation {
+	return func() summary.Operation {
 		if first {
 			first = false
 
@@ -142,7 +99,7 @@ func NewByUserGroup(w io.WriteCloser) OperationGenerator {
 
 		return &userGroup{
 			root:      root,
-			summaries: make(map[groupUserID]*summary),
+			summaries: make(map[summary.GroupUserID]*summary.Summary),
 		}
 	}
 }
@@ -150,7 +107,7 @@ func NewByUserGroup(w io.WriteCloser) OperationGenerator {
 // Add is a github.com/wtsi-ssg/wrstat/stat Operation. It will break path in to
 // its directories and add the file size and increment the file count to each,
 // summed for the info's user and group. If path is a directory, it is ignored.
-func (u *userGroup) Add(info *FileInfo) error {
+func (u *userGroup) Add(info *summary.FileInfo) error {
 	if info.IsDir() {
 		if u.thisDir == nil {
 			u.thisDir = info.Path
@@ -159,23 +116,23 @@ func (u *userGroup) Add(info *FileInfo) error {
 		return nil
 	}
 
-	id := newGroupUserID(info.GID, info.UID)
+	id := summary.NewGroupUserID(info.GID, info.UID)
 
 	s, ok := u.summaries[id]
 	if !ok {
-		s = new(summary)
+		s = new(summary.Summary)
 		u.summaries[id] = s
 	}
 
-	s.add(info.Size)
+	s.Add(info.Size)
 
 	return nil
 }
 
 type userGroupDirectory struct {
 	Group, User string
-	Directory   *DirectoryPath
-	*summary
+	Directory   *summary.DirectoryPath
+	*summary.Summary
 }
 
 type userGroupDirectories []userGroupDirectory
@@ -223,13 +180,13 @@ func (r *rootUserGroup) Output() error {
 
 	sort.Sort(r.store)
 
-	path := make([]byte, 0, maxPathLen)
+	path := make([]byte, 0, summary.MaxPathLen)
 
 	for _, row := range r.store {
-		rowPath := row.Directory.appendTo(path)
+		rowPath := row.Directory.AppendTo(path)
 
 		if _, err := fmt.Fprintf(r.w, "%s\t%s\t%q\t%d\t%d\n",
-			row.Group, row.User, rowPath, row.count, row.size); err != nil {
+			row.Group, row.User, rowPath, row.Count, row.Size); err != nil {
 			return err
 		}
 	}
