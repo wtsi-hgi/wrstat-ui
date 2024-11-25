@@ -148,8 +148,22 @@ func getUserName(id uint32) string {
 }
 
 type rootUserGroup struct {
-	w io.WriteCloser
+	w              io.WriteCloser
+	store          userGroupDirectories
+	uidLookupCache map[uint32]string
+	gidLookupCache map[uint32]string
 	userGroup
+}
+
+func (r *rootUserGroup) addToStore(u *userGroup) {
+	for id, s := range u.summaries {
+		r.store = append(r.store, userGroupDirectory{
+			Group:     gidToName(id.GID(), r.gidLookupCache),
+			User:      uidToName(id.UID(), r.uidLookupCache),
+			Directory: u.thisDir,
+			summary:   s,
+		})
+	}
 }
 
 type directorySummaryStore map[*directoryPath]*summary
@@ -164,47 +178,41 @@ func (d directorySummaryStore) Get(p *directoryPath) *summary {
 	return s
 }
 
-type userGroupStore map[groupUserID]directorySummaryStore
-
-func (u userGroupStore) Get(id groupUserID, p *directoryPath) *summary {
-	d, ok := u[id]
-	if !ok {
-		d = make(directorySummaryStore)
-		u[id] = d
-	}
-
-	return d.Get(p)
-}
-
 // userGroup is used to summarise file stats by user and group.
 type userGroup struct {
-	store            userGroupStore
+	root             *rootUserGroup
+	summaries        map[groupUserID]*summary
 	currentDirectory **directoryPath
 	thisDir          *directoryPath
 }
 
 // NewByUserGroup returns a Usergroup.
 func NewByUserGroup(w io.WriteCloser) OperationGenerator {
-	store := make(userGroupStore)
-	first := true
-
 	var currentDirectory *directoryPath
+
+	root := &rootUserGroup{
+		w:              w,
+		uidLookupCache: make(map[uint32]string),
+		gidLookupCache: make(map[uint32]string),
+		userGroup: userGroup{
+			summaries:        make(map[groupUserID]*summary),
+			currentDirectory: &currentDirectory,
+		},
+	}
+
+	root.userGroup.root = root
+	first := true
 
 	return func() Operation {
 		if first {
 			first = false
 
-			return &rootUserGroup{
-				w: w,
-				userGroup: userGroup{
-					store:            store,
-					currentDirectory: &currentDirectory,
-				},
-			}
+			return root
 		}
 
 		return &userGroup{
-			store:            store,
+			root:             root,
+			summaries:        make(map[groupUserID]*summary),
 			currentDirectory: &currentDirectory,
 		}
 	}
@@ -217,6 +225,7 @@ func (r *rootUserGroup) Add(info *stats.FileInfo) error {
 				Name:  string(info.Path),
 				Depth: bytes.Count(info.Path, slash),
 			}
+
 			*r.currentDirectory = r.thisDir
 		}
 
@@ -239,7 +248,15 @@ func (u *userGroup) Add(info *stats.FileInfo) error {
 		return nil
 	}
 
-	u.store.Get(newGroupUserID(info.GID, info.UID), u.thisDir).add(info.Size)
+	id := newGroupUserID(info.GID, info.UID)
+
+	s, ok := u.summaries[id]
+	if !ok {
+		s = new(summary)
+		u.summaries[id] = s
+	}
+
+	s.add(info.Size)
 
 	return nil
 }
@@ -291,27 +308,13 @@ func (u userGroupDirectories) Swap(i, j int) {
 // determined from the uids and gids in the added file info. output is closed
 // on completion.
 func (r *rootUserGroup) Output() error {
-	uidLookupCache := make(map[uint32]string)
-	gidLookupCache := make(map[uint32]string)
+	r.addToStore(&r.userGroup)
 
-	data := make(userGroupDirectories, 0, len(r.store))
-
-	for gu, ds := range r.store {
-		for d, s := range ds {
-			data = append(data, userGroupDirectory{
-				Group:     gidToName(gu.GID(), gidLookupCache),
-				User:      uidToName(gu.UID(), uidLookupCache),
-				Directory: d,
-				summary:   s,
-			})
-		}
-	}
-
-	sort.Sort(data)
+	sort.Sort(r.store)
 
 	path := make([]byte, 0, maxPathLen)
 
-	for _, row := range data {
+	for _, row := range r.store {
 		rowPath := row.Directory.appendTo(path)
 
 		if _, err := fmt.Fprintf(r.w, "%s\t%s\t%q\t%d\t%d\n",
@@ -324,7 +327,13 @@ func (r *rootUserGroup) Output() error {
 }
 
 func (u *userGroup) Output() error {
+	u.root.addToStore(u)
+
 	u.thisDir = nil
+
+	for k := range u.summaries {
+		delete(u.summaries, k)
+	}
 
 	return nil
 }
