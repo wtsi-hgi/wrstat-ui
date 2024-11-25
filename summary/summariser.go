@@ -2,6 +2,7 @@ package summary
 
 import (
 	"bytes"
+	"slices"
 
 	"github.com/wtsi-hgi/wrstat-ui/stats"
 )
@@ -87,7 +88,7 @@ func (d directories) Add(info *stats.FileInfo) error {
 }
 
 func (d directories) Output() error {
-	for _, o := range d {
+	for _, o := range slices.Backward(d) {
 		if err := o.Output(); err != nil {
 			return err
 		}
