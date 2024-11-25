@@ -32,12 +32,13 @@ import (
 	"os/user"
 	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/wtsi-hgi/wrstat-ui/stats"
 )
 
 type directoryPath struct {
-	Name   []byte
+	Name   string
 	Depth  int
 	Parent *directoryPath
 }
@@ -52,7 +53,7 @@ func (d *directoryPath) Cwd(path []byte) *directoryPath {
 	name := path[bytes.LastIndexByte(path[:len(path)-1], '/')+1:]
 
 	return &directoryPath{
-		Name:   bytes.Clone(name),
+		Name:   string(name),
 		Depth:  depth,
 		Parent: d,
 	}
@@ -85,14 +86,14 @@ func (d *directoryPath) getDepth(n int) *directoryPath {
 }
 
 func (d *directoryPath) compare(e *directoryPath) int {
-	if d == nil {
+	if d == e {
 		return 0
 	}
 
 	cmp := d.Parent.compare(e.Parent)
 
 	if cmp == 0 {
-		return bytes.Compare(d.Name[:len(d.Name)-1], e.Name[:len(e.Name)-1])
+		return strings.Compare(d.Name[:len(d.Name)-1], e.Name[:len(e.Name)-1])
 	}
 
 	return cmp
@@ -213,7 +214,7 @@ func (r *rootUserGroup) Add(info *stats.FileInfo) error {
 	if info.IsDir() {
 		if *r.currentDirectory == nil {
 			r.thisDir = &directoryPath{
-				Name:  bytes.Clone(info.Path),
+				Name:  string(info.Path),
 				Depth: bytes.Count(info.Path, slash),
 			}
 			*r.currentDirectory = r.thisDir
