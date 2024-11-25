@@ -26,81 +26,15 @@
 package summary
 
 import (
-	"bytes"
 	"fmt"
 	"io"
 	"os/user"
 	"sort"
 	"strconv"
-	"strings"
-
-	"github.com/wtsi-hgi/wrstat-ui/stats"
 )
 
-type directoryPath struct {
-	Name   string
-	Depth  int
-	Parent *directoryPath
-}
-
-func (d *directoryPath) Cwd(path []byte) *directoryPath {
-	depth := bytes.Count(path, slash)
-
-	for d.Depth >= depth {
-		d = d.Parent
-	}
-
-	name := path[bytes.LastIndexByte(path[:len(path)-1], '/')+1:]
-
-	return &directoryPath{
-		Name:   string(name),
-		Depth:  depth,
-		Parent: d,
-	}
-}
-
-func (d *directoryPath) appendTo(p []byte) []byte {
-	if d.Parent != nil {
-		p = d.Parent.appendTo(p)
-	}
-
-	return append(p, d.Name...)
-}
-
-func (d *directoryPath) Less(e *directoryPath) bool {
-	if d.Depth < e.Depth {
-		return d.compare(e.getDepth(d.Depth)) != 1
-	} else if d.Depth > e.Depth {
-		return d.getDepth(e.Depth).compare(e) == -1
-	}
-
-	return d.compare(e) == -1
-}
-
-func (d *directoryPath) getDepth(n int) *directoryPath {
-	for d.Depth != n {
-		d = d.Parent
-	}
-
-	return d
-}
-
-func (d *directoryPath) compare(e *directoryPath) int {
-	if d == e {
-		return 0
-	}
-
-	cmp := d.Parent.compare(e.Parent)
-
-	if cmp == 0 {
-		return strings.Compare(d.Name[:len(d.Name)-1], e.Name[:len(e.Name)-1])
-	}
-
-	return cmp
-}
-
 type dirSummary struct {
-	*directoryPath
+	*DirectoryPath
 	*summary
 }
 
@@ -166,9 +100,9 @@ func (r *rootUserGroup) addToStore(u *userGroup) {
 	}
 }
 
-type directorySummaryStore map[*directoryPath]*summary
+type directorySummaryStore map[*DirectoryPath]*summary
 
-func (d directorySummaryStore) Get(p *directoryPath) *summary {
+func (d directorySummaryStore) Get(p *DirectoryPath) *summary {
 	s, ok := d[p]
 	if !ok {
 		s = new(summary)
@@ -180,23 +114,19 @@ func (d directorySummaryStore) Get(p *directoryPath) *summary {
 
 // userGroup is used to summarise file stats by user and group.
 type userGroup struct {
-	root             *rootUserGroup
-	summaries        map[groupUserID]*summary
-	currentDirectory **directoryPath
-	thisDir          *directoryPath
+	root      *rootUserGroup
+	summaries map[groupUserID]*summary
+	thisDir   *DirectoryPath
 }
 
 // NewByUserGroup returns a Usergroup.
 func NewByUserGroup(w io.WriteCloser) OperationGenerator {
-	var currentDirectory *directoryPath
-
 	root := &rootUserGroup{
 		w:              w,
 		uidLookupCache: make(map[uint32]string),
 		gidLookupCache: make(map[uint32]string),
 		userGroup: userGroup{
-			summaries:        make(map[groupUserID]*summary),
-			currentDirectory: &currentDirectory,
+			summaries: make(map[groupUserID]*summary),
 		},
 	}
 
@@ -211,38 +141,19 @@ func NewByUserGroup(w io.WriteCloser) OperationGenerator {
 		}
 
 		return &userGroup{
-			root:             root,
-			summaries:        make(map[groupUserID]*summary),
-			currentDirectory: &currentDirectory,
+			root:      root,
+			summaries: make(map[groupUserID]*summary),
 		}
 	}
-}
-
-func (r *rootUserGroup) Add(info *stats.FileInfo) error {
-	if info.IsDir() {
-		if *r.currentDirectory == nil {
-			r.thisDir = &directoryPath{
-				Name:  string(info.Path),
-				Depth: bytes.Count(info.Path, slash),
-			}
-
-			*r.currentDirectory = r.thisDir
-		}
-
-		return nil
-	}
-
-	return r.userGroup.Add(info)
 }
 
 // Add is a github.com/wtsi-ssg/wrstat/stat Operation. It will break path in to
 // its directories and add the file size and increment the file count to each,
 // summed for the info's user and group. If path is a directory, it is ignored.
-func (u *userGroup) Add(info *stats.FileInfo) error {
+func (u *userGroup) Add(info *FileInfo) error {
 	if info.IsDir() {
 		if u.thisDir == nil {
-			*u.currentDirectory = (*u.currentDirectory).Cwd(info.Path)
-			u.thisDir = *u.currentDirectory
+			u.thisDir = info.Path
 		}
 
 		return nil
@@ -263,7 +174,7 @@ func (u *userGroup) Add(info *stats.FileInfo) error {
 
 type userGroupDirectory struct {
 	Group, User string
-	Directory   *directoryPath
+	Directory   *DirectoryPath
 	*summary
 }
 

@@ -25,6 +25,7 @@ package stats
 
 import (
 	"bufio"
+	"bytes"
 	"io"
 	"slices"
 	"unicode/utf8"
@@ -86,6 +87,10 @@ type FileInfo struct {
 
 func (f *FileInfo) IsDir() bool {
 	return f.EntryType == DirType
+}
+
+func (f *FileInfo) BaseName() []byte {
+	return f.Path[bytes.LastIndexByte(f.Path[:len(f.Path)-1], '/')+1:]
 }
 
 // NewStatsParser is used to create a new StatsParser, given uncompressed wrstat

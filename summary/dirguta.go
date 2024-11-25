@@ -34,8 +34,6 @@ import (
 	"sync"
 	"time"
 	"unsafe"
-
-	"github.com/wtsi-hgi/wrstat-ui/stats"
 )
 
 // DirGUTAge is one of the age types that the
@@ -504,14 +502,14 @@ func isLog(path string) bool {
 // filetypes, so if you sum all the filetypes to get information about a given
 // directory+group+user combination, you should ignore "temp". Only count "temp"
 // when it's the only type you're considering, or you'll count some files twice.
-func (d *DirGroupUserTypeAge) Add(info *stats.FileInfo) error {
+func (d *DirGroupUserTypeAge) Add(info *FileInfo) error {
 	var atime int64
 
 	gutaKeysA := gutaKey.Get().(*[maxNumOfGUTAKeys]GUTAKey) //nolint:errcheck,forcetypeassert
 
 	var gutaKeys []GUTAKey
 
-	path := string(info.Path)
+	path := string(info.Path.appendTo(nil))
 
 	if info.IsDir() {
 		atime = time.Now().Unix()
@@ -519,6 +517,7 @@ func (d *DirGroupUserTypeAge) Add(info *stats.FileInfo) error {
 
 		gutaKeys = appendGUTAKeysForDir(path, gutaKeysA[:0], info.GID, info.UID)
 	} else {
+		path = filepath.Join(path, string(info.Name))
 		atime = maxInt(0, info.MTime, info.ATime)
 		gutaKeys = d.statToGUTAKeys(info, gutaKeysA[:0], path)
 	}
@@ -597,7 +596,7 @@ func maxInt(ints ...int64) int64 {
 // from the path, and combines them into a group+user+type+age key. More than 1
 // key will be returned, because there is a key for each age, possibly a "temp"
 // filetype as well as more specific types, and path could be both.
-func (d *DirGroupUserTypeAge) statToGUTAKeys(info *stats.FileInfo, gutaKeys []GUTAKey, path string) []GUTAKey {
+func (d *DirGroupUserTypeAge) statToGUTAKeys(info *FileInfo, gutaKeys []GUTAKey, path string) []GUTAKey {
 	types := d.pathToTypes(path)
 
 	for _, t := range types {

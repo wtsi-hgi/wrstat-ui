@@ -51,12 +51,12 @@ func TestGroupUser(t *testing.T) {
 		ug := ugGenerator().(*GroupUser)
 
 		Convey("You can add file info to it which accumulates the info into the output", func() {
-			ug.Add(newMockInfoWithTimes("/a/b/d/file3.txt", 0, gid, 3, false, tim))
-			ug.Add(newMockInfoWithTimes("/a/b/c/file1.txt", uid, gid, 1, false, tim))
-			ug.Add(newMockInfoWithTimes("/a/b/d/file2.txt", uid, gid, 2, false, tim))
-			ug.Add(newMockInfoWithTimes("/a/b/d/file4.txt", uid, 0, 4, false, tim))
-			ug.Add(newMockInfoWithTimes("/a/e/file5.txt", 0, 0, 5, false, tim))
-			ug.Add(newMockInfoWithTimes("/a/", 0, 0, 4096, true, tim))
+			ug.Add(newMockInfoWithTimes(nil, 0, gid, 3, false, tim))
+			ug.Add(newMockInfoWithTimes(nil, uid, gid, 1, false, tim))
+			ug.Add(newMockInfoWithTimes(nil, uid, gid, 2, false, tim))
+			ug.Add(newMockInfoWithTimes(nil, uid, 0, 4, false, tim))
+			ug.Add(newMockInfoWithTimes(nil, 0, 0, 5, false, tim))
+			ug.Add(newMockInfoWithTimes(nil, 0, 0, 4096, true, tim))
 
 			err = ug.Output()
 			So(err, ShouldBeNil)
@@ -72,12 +72,14 @@ func TestGroupUser(t *testing.T) {
 		})
 
 		Convey("Output handles bad uids", func() {
-			err = ug.Add(newMockInfo("/a/b/c/7.txt", 999999999, 2, 1, false))
+			paths := NewDirectoryPathCreator()
+			err = ug.Add(newMockInfo(paths.ToDirectoryPath("/a/b/c/7.txt"), 999999999, 2, 1, false))
 			testBadIds(err, ug, &w)
 		})
 
 		Convey("Output handles bad gids", func() {
-			err = ug.Add(newMockInfo("/a/b/c/8.txt", 1, 999999999, 1, false))
+			paths := NewDirectoryPathCreator()
+			err = ug.Add(newMockInfo(paths.ToDirectoryPath("/a/b/c/8.txt"), 1, 999999999, 1, false))
 			testBadIds(err, ug, &w)
 		})
 

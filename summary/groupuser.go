@@ -29,8 +29,6 @@ import (
 	"fmt"
 	"io"
 	"sort"
-
-	"github.com/wtsi-hgi/wrstat-ui/stats"
 )
 
 // GroupUser is used to summarise file stats by group and user.
@@ -66,7 +64,7 @@ func (g groupUserID) UID() uint32 {
 // Add is a github.com/wtsi-ssg/wrstat/stat Operation. It will add the file size
 // and increment the file count summed for the info's group and user. If path is
 // a directory, it is ignored.
-func (g *GroupUser) Add(info *stats.FileInfo) error {
+func (g *GroupUser) Add(info *FileInfo) error {
 	if info.IsDir() {
 		return nil
 	}

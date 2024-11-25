@@ -3,6 +3,7 @@ package summary
 import (
 	"bytes"
 	"slices"
+	"strings"
 
 	"github.com/wtsi-hgi/wrstat-ui/stats"
 )
@@ -16,12 +17,74 @@ const (
 	probableMaxDirectoryDepth = 128
 )
 
+type DirectoryPath struct {
+	Name   string
+	Depth  int
+	Parent *DirectoryPath
+}
+
+func (d *DirectoryPath) appendTo(p []byte) []byte {
+	if d.Parent != nil {
+		p = d.Parent.appendTo(p)
+	}
+
+	return append(p, d.Name...)
+}
+
+func (d *DirectoryPath) Less(e *DirectoryPath) bool {
+	if d.Depth < e.Depth {
+		return d.compare(e.getDepth(d.Depth)) != 1
+	} else if d.Depth > e.Depth {
+		return d.getDepth(e.Depth).compare(e) == -1
+	}
+
+	return d.compare(e) == -1
+}
+
+func (d *DirectoryPath) getDepth(n int) *DirectoryPath {
+	for d.Depth != n {
+		d = d.Parent
+	}
+
+	return d
+}
+
+func (d *DirectoryPath) compare(e *DirectoryPath) int {
+	if d == e {
+		return 0
+	}
+
+	cmp := d.Parent.compare(e.Parent)
+
+	if cmp == 0 {
+		return strings.Compare(d.Name[:len(d.Name)-1], e.Name[:len(e.Name)-1])
+	}
+
+	return cmp
+}
+
+type FileInfo struct {
+	Path      *DirectoryPath
+	Name      []byte
+	Size      int64
+	UID       uint32
+	GID       uint32
+	MTime     int64
+	ATime     int64
+	CTime     int64
+	EntryType byte
+}
+
+func (f *FileInfo) IsDir() bool {
+	return f.EntryType == stats.DirType
+}
+
 // Operation is a type that receives file information either for a directory,
 // and it's descendants, or for an entire tree.
 type Operation interface {
 	// Add is called once for the containing directory and for each of its
 	// descendents during a Summariser.Summarise() call.
-	Add(info *stats.FileInfo) error
+	Add(info *FileInfo) error
 
 	// Output is called when we return to the parent directory during a
 	// Summariser.Summarise() call, having processed all descendent entries.
@@ -36,7 +99,7 @@ type Operation interface {
 // Summariser.Summarise().
 type directory []Operation
 
-func (d directory) Add(s *stats.FileInfo) error {
+func (d directory) Add(s *FileInfo) error {
 	for _, op := range d {
 		if err := op.Add(s); err != nil {
 			return err
@@ -77,7 +140,7 @@ func (o operationGenerators) Generate() directory {
 
 type directories []directory
 
-func (d directories) Add(info *stats.FileInfo) error {
+func (d directories) Add(info *FileInfo) error {
 	for _, o := range d {
 		if err := o.Add(info); err != nil {
 			return err
@@ -120,25 +183,37 @@ func (s *Summariser) AddGlobalOperation(op OperationGenerator) {
 }
 
 func (s *Summariser) Summarise() error {
-	info := new(stats.FileInfo)
+	statsInfo := new(stats.FileInfo)
 
-	currentDir := make([]byte, 0, maxPathLen)
 	directories := make(directories, 0, probableMaxDirectoryDepth)
 	global := s.globalOperations.Generate()
+	var currentDir *DirectoryPath
 
 	var err error
 
-	for s.statsParser.Scan(info) == nil {
-		if err = global.Add(info); err != nil {
-			return err
-		}
-
-		directories, currentDir, err = s.changeToWorkingDirectoryOfEntry(directories, currentDir, info)
+	for s.statsParser.Scan(statsInfo) == nil {
+		directories, currentDir, err = s.changeToWorkingDirectoryOfEntry(directories, currentDir, statsInfo)
 		if err != nil {
 			return err
 		}
 
-		if err = directories.Add(info); err != nil {
+		info := FileInfo{
+			Path:      currentDir,
+			Name:      statsInfo.BaseName(),
+			Size:      statsInfo.Size,
+			UID:       statsInfo.UID,
+			GID:       statsInfo.GID,
+			MTime:     statsInfo.MTime,
+			ATime:     statsInfo.ATime,
+			CTime:     statsInfo.CTime,
+			EntryType: statsInfo.EntryType,
+		}
+
+		if err = global.Add(&info); err != nil {
+			return err
+		}
+
+		if err = directories.Add(&info); err != nil {
 			return err
 		}
 	}
@@ -154,29 +229,34 @@ func (s *Summariser) Summarise() error {
 	return global.Output()
 }
 
-func (s *Summariser) changeToWorkingDirectoryOfEntry(directories directories, currentDir []byte, info *stats.FileInfo) (directories, []byte, error) {
+func (s *Summariser) changeToWorkingDirectoryOfEntry(directories directories, currentDir *DirectoryPath, info *stats.FileInfo) (directories, *DirectoryPath, error) {
 	var err error
 
-	directories, currentDir, err = s.changeToAscendantDirectoryOfEntry(directories, currentDir, info)
-	if err != nil {
-		return nil, nil, err
+	depth := bytes.Count(info.Path[:len(info.Path)-1], slash)
+
+	if currentDir != nil {
+		directories, currentDir, err = s.changeToAscendantDirectoryOfEntry(directories, currentDir, depth)
+		if err != nil {
+			return nil, nil, err
+		}
 	}
 
 	if info.EntryType == stats.DirType {
-		directories, currentDir = s.changeToDirectoryOfEntry(directories, currentDir, info)
+		directories, currentDir = s.changeToDirectoryOfEntry(directories, currentDir, info, depth)
 	}
 
 	return directories, currentDir, nil
 }
 
-func (s *Summariser) changeToAscendantDirectoryOfEntry(directories directories, currentDir []byte, info *stats.FileInfo) (directories, []byte, error) {
-	for !bytes.HasPrefix(info.Path, currentDir) {
+func (s *Summariser) changeToAscendantDirectoryOfEntry(directories directories, currentDir *DirectoryPath, depth int) (directories, *DirectoryPath, error) {
+	for currentDir.Depth >= depth {
+		currentDir = currentDir.Parent
+
 		if err := directories[len(directories)-1].Output(); err != nil {
 			return nil, nil, err
 		}
 
 		directories = directories[:len(directories)-1]
-		currentDir = parentDir(currentDir)
 	}
 
 	return directories, currentDir, nil
@@ -189,8 +269,8 @@ func parentDir(path []byte) []byte {
 	return path[:nextSlash+1]
 }
 
-func (s *Summariser) changeToDirectoryOfEntry(directories directories, currentDir []byte,
-	info *stats.FileInfo) (directories, []byte) {
+func (s *Summariser) changeToDirectoryOfEntry(directories directories, currentDir *DirectoryPath,
+	info *stats.FileInfo, depth int) (directories, *DirectoryPath) {
 	if cap(directories) > len(directories) {
 		directories = directories[:len(directories)+1]
 
@@ -201,7 +281,20 @@ func (s *Summariser) changeToDirectoryOfEntry(directories directories, currentDi
 		directories = append(directories, s.directoryOperations.Generate())
 	}
 
-	currentDir = currentDir[:copy(currentDir[:cap(currentDir)], info.Path)]
+	var name string
+
+	if currentDir == nil {
+		name = string(info.Path)
+		depth = -1
+	} else {
+		name = string(info.BaseName())
+	}
+
+	currentDir = &DirectoryPath{
+		Name:   name,
+		Depth:  depth,
+		Parent: currentDir,
+	}
 
 	return directories, currentDir
 }

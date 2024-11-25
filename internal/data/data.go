@@ -236,13 +236,14 @@ func addTestFileInfo(t *testing.T, dguta *summary.DirGroupUserTypeAge, doneDirs 
 ) {
 	t.Helper()
 
+	paths := NewDirectoryPathCreator()
 	dir, basename := filepath.Split(path)
 
 	for i := 0; i < numFiles; i++ {
 		filePath := filepath.Join(dir, strconv.FormatInt(int64(i), 10)+basename)
 
-		info := &stats.FileInfo{
-			Path:      []byte(filePath),
+		info := &summary.FileInfo{
+			Path:      paths.ToDirectoryPath(filePath),
 			UID:       uid,
 			GID:       gid,
 			Size:      int64(sizeOfEachFile),
@@ -270,8 +271,8 @@ func addTestDirInfo(t *testing.T, dguta *summary.DirGroupUserTypeAge, doneDirs m
 			return
 		}
 
-		info := &stats.FileInfo{
-			Path:      []byte(dir),
+		info := &summary.FileInfo{
+			Path:      nil,
 			EntryType: stats.DirType,
 			UID:       uid,
 			GID:       gid,
@@ -470,4 +471,41 @@ func writeFile(path, contents string) error {
 	}
 
 	return f.Close()
+}
+
+type DirectoryPathCreator map[string]*summary.DirectoryPath
+
+func (d DirectoryPathCreator) ToDirectoryPath(p string) *summary.DirectoryPath {
+	pos := strings.LastIndexByte(p[:len(p)-1], '/')
+	dir := p[:pos+1]
+	base := p[pos+1:]
+
+	if dp, ok := d[p]; ok {
+		dp.Name = base
+
+		return dp
+	}
+
+	parent := d.ToDirectoryPath(dir)
+
+	dp := &summary.DirectoryPath{
+		Name:   base,
+		Depth:  strings.Count(p, "/"),
+		Parent: parent,
+	}
+
+	d[p] = dp
+
+	return dp
+}
+
+func NewDirectoryPathCreator() DirectoryPathCreator {
+	d := make(DirectoryPathCreator)
+
+	d["/"] = &summary.DirectoryPath{
+		Name:  "/",
+		Depth: -1,
+	}
+
+	return d
 }

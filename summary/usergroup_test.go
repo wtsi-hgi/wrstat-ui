@@ -78,9 +78,6 @@ func TestUsergroup(t *testing.T) {
 
 			output := w.String()
 
-			//So(output, ShouldContainSubstring, uname+"\t"+
-			//	gname+"\t"+strconv.Quote("/")+"\t3\t6\n")
-
 			So(output, ShouldContainSubstring, uname+"\t"+
 				gname+"\t"+strconv.Quote("/opt/")+"\t3\t6\n")
 
@@ -102,31 +99,36 @@ func TestUsergroup(t *testing.T) {
 			So(output, ShouldContainSubstring, "root\troot\t"+
 				strconv.Quote("/opt/")+"\t2\t101\n")
 
-			//So(output, ShouldContainSubstring, "root\troot\t"+
-			//	strconv.Quote("/")+"\t2\t101\n")
-
 			So(output, ShouldContainSubstring, "root\troot\t"+
 				strconv.Quote("/opt/other/")+"\t2\t101\n")
 
 			So(checkDataIsSorted(output, 3), ShouldBeTrue)
 		})
 
-		// Convey("Output handles bad uids", func() {
-		// 	ug := NewByUserGroup(&w)()
-		// 	err = ug.Add(newMockInfo("/a/b/c/7.txt", 999999999, 2, 1, false))
-		// 	testBadIds(err, ug, &w)
-		// })
+		Convey("Output handles bad uids", func() {
+			paths := NewDirectoryPathCreator()
+			ug := ugGenerator()
+			err = ug.Add(newMockInfo(paths.ToDirectoryPath("/a/b/c/"), 999999999, 2, 1, true))
+			So(err, ShouldBeNil)
 
-		// Convey("Output handles bad gids", func() {
-		// 	ug := NewByUserGroup(&w)()
-		// 	err = ug.Add(newMockInfo("/a/b/c/8.txt", 1, 999999999, 1, false))
-		// 	testBadIds(err, ug, &w)
-		// })
+			err = ug.Add(newMockInfo(paths.ToDirectoryPath("/a/b/c/file.txt"), 999999999, 2, 1, false))
+			testBadIds(err, ug, &w)
+		})
 
-		// Convey("Output fails if we can't write to the output file", func() {
-		// 	err = NewByUserGroup(badWriter{})().Output()
-		// 	So(err, ShouldNotBeNil)
-		// })
+		Convey("Output handles bad gids", func() {
+			paths := NewDirectoryPathCreator()
+			ug := NewByUserGroup(&w)()
+			err = ug.Add(newMockInfo(paths.ToDirectoryPath("/a/b/c/"), 999999999, 2, 1, true))
+			So(err, ShouldBeNil)
+
+			err = ug.Add(newMockInfo(paths.ToDirectoryPath("/a/b/c/8.txt"), 1, 999999999, 1, false))
+			testBadIds(err, ug, &w)
+		})
+
+		Convey("Output fails if we can't write to the output file", func() {
+			err = NewByUserGroup(badWriter{})().Output()
+			So(err, ShouldNotBeNil)
+		})
 	})
 }
 
@@ -154,30 +156,15 @@ type byColumnAdder interface {
 	Output(output io.WriteCloser) error
 }
 
-func addTestData(a Operation, cuid uint32) {
-	err := a.Add(newMockInfo("/a/b/6.txt", cuid, 2, 30, false))
-	So(err, ShouldBeNil)
-	err = a.Add(newMockInfo("/a/b/c/1.txt", cuid, 2, 10, false))
-	So(err, ShouldBeNil)
-	err = a.Add(newMockInfo("/a/b/c/2.txt", cuid, 2, 20, false))
-	So(err, ShouldBeNil)
-	err = a.Add(newMockInfo("/a/b/c/3.txt", 2, 2, 5, false))
-	So(err, ShouldBeNil)
-	err = a.Add(newMockInfo("/a/b/c/4.txt", 2, 3, 6, false))
-	So(err, ShouldBeNil)
-	err = a.Add(newMockInfo("/a/b/c/5", 2, 3, 1, true))
-	So(err, ShouldBeNil)
-}
-
-func newMockInfo(path string, uid, gid uint32, size int64, dir bool) *stats.FileInfo {
+func newMockInfo(path *DirectoryPath, uid, gid uint32, size int64, dir bool) *FileInfo {
 	entryType := stats.FileType
 
 	if dir {
 		entryType = stats.DirType
 	}
 
-	return &stats.FileInfo{
-		Path:      []byte(path),
+	return &FileInfo{
+		Path:      path,
 		UID:       uid,
 		GID:       gid,
 		Size:      size,
@@ -185,14 +172,14 @@ func newMockInfo(path string, uid, gid uint32, size int64, dir bool) *stats.File
 	}
 }
 
-func newMockInfoWithAtime(path string, uid, gid uint32, size int64, dir bool, atime int64) *stats.FileInfo {
+func newMockInfoWithAtime(path *DirectoryPath, uid, gid uint32, size int64, dir bool, atime int64) *FileInfo {
 	mi := newMockInfo(path, uid, gid, size, dir)
 	mi.ATime = atime
 
 	return mi
 }
 
-func newMockInfoWithTimes(path string, uid, gid uint32, size int64, dir bool, tim int64) *stats.FileInfo {
+func newMockInfoWithTimes(path *DirectoryPath, uid, gid uint32, size int64, dir bool, tim int64) *FileInfo {
 	mi := newMockInfo(path, uid, gid, size, dir)
 	mi.ATime = tim
 	mi.MTime = tim
@@ -250,4 +237,41 @@ func checkDataIsSorted(data string, textCols int) bool {
 
 		return 0
 	})
+}
+
+type DirectoryPathCreator map[string]*DirectoryPath
+
+func (d DirectoryPathCreator) ToDirectoryPath(p string) *DirectoryPath {
+	pos := strings.LastIndexByte(p[:len(p)-1], '/')
+	dir := p[:pos+1]
+	base := p[pos+1:]
+
+	if dp, ok := d[p]; ok {
+		dp.Name = base
+
+		return dp
+	}
+
+	parent := d.ToDirectoryPath(dir)
+
+	dp := &DirectoryPath{
+		Name:   base,
+		Depth:  strings.Count(p, "/"),
+		Parent: parent,
+	}
+
+	d[p] = dp
+
+	return dp
+}
+
+func NewDirectoryPathCreator() DirectoryPathCreator {
+	d := make(DirectoryPathCreator)
+
+	d["/"] = &DirectoryPath{
+		Name:  "/",
+		Depth: -1,
+	}
+
+	return d
 }

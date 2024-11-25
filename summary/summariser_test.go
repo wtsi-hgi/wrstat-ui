@@ -14,11 +14,11 @@ type testGlobalOperator struct {
 	totalCount int
 }
 
-func (t *testGlobalOperator) Add(s *stats.FileInfo) error {
+func (t *testGlobalOperator) Add(s *FileInfo) error {
 	t.totalCount++
 
 	if s.EntryType == 'f' {
-		dir := parentDir(s.Path)
+		dir := s.Path.appendTo(nil)
 
 		t.dirCounts[string(dir)] = t.dirCounts[string(dir)] + 1
 	}
@@ -36,9 +36,9 @@ type testDirectoryOperator struct {
 	size      int64
 }
 
-func (t *testDirectoryOperator) Add(s *stats.FileInfo) error {
+func (t *testDirectoryOperator) Add(s *FileInfo) error {
 	if t.path == "" {
-		t.path = string(s.Path)
+		t.path = string(s.Path.appendTo(nil))
 	}
 
 	t.size += s.Size
