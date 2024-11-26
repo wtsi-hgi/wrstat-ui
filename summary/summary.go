@@ -49,9 +49,8 @@ func (s *Summary) Add(size int64) {
 // atime, newest mtime add()ed.
 type SummaryWithTimes struct {
 	Summary
-	RefTime int64 // seconds since Unix epoch
-	Atime   int64 // seconds since Unix epoch
-	Mtime   int64 // seconds since Unix epoch
+	Atime int64 // seconds since Unix epoch
+	Mtime int64 // seconds since Unix epoch
 }
 
 // add will increment our count and add the given size to our size. It also

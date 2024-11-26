@@ -340,26 +340,32 @@ func isTempFile(name string) bool {
 
 func isTempDir(path *summary.DirectoryPath) bool {
 	for path != nil {
-		if hasOneOfSuffixes(path.Name, tmpSuffixes[:]) {
+		name := path.Name
+
+		if name[len(name)-1] == '/' {
+			name = name[:len(name)-1]
+		}
+
+		if hasOneOfSuffixes(name, tmpSuffixes[:]) {
 			return true
 		}
 
 		for _, containing := range tmpPaths {
-			if len(path.Name) != len(containing) {
+			if len(name) != len(containing) {
 				continue
 			}
 
-			if caseInsensitiveCompare(path.Name, containing) {
+			if caseInsensitiveCompare(name, containing) {
 				return true
 			}
 		}
 
 		for _, prefix := range tmpPrefixes {
-			if len(path.Name) < len(prefix) {
+			if len(name) < len(prefix) {
 				break
 			}
 
-			if caseInsensitiveCompare(path.Name[:len(prefix)], prefix) {
+			if caseInsensitiveCompare(name[:len(prefix)], prefix) {
 				return true
 			}
 		}
@@ -495,8 +501,10 @@ type DirGroupUserTypeAge struct {
 
 // NewDirGroupUserTypeAge returns a DirGroupUserTypeAge.
 func NewDirGroupUserTypeAge(db db) summary.OperationGenerator {
-	refTime := time.Now().Unix()
+	return newDirGroupUserTypeAge(db, time.Now().Unix())
+}
 
+func newDirGroupUserTypeAge(db db, refTime int64) summary.OperationGenerator {
 	return func() summary.Operation {
 		return &DirGroupUserTypeAge{
 			db:    db,
@@ -528,27 +536,16 @@ func (d *DirGroupUserTypeAge) Add(info *summary.FileInfo) error {
 		d.thisDir = info.Path
 	}
 
-	var atime int64
+	atime := info.ATime
+
+	if info.IsDir() {
+		atime = time.Now().Unix()
+	}
 
 	gutaKeysA := gutaKey.Get().(*[maxNumOfGUTAKeys]GUTAKey) //nolint:errcheck,forcetypeassert
 	gutaKeys := GUTAKeys(gutaKeysA[:0])
 
-	var (
-		isTmp    bool
-		filetype DirGUTAFileType
-	)
-
-	if info.IsDir() {
-		atime = time.Now().Unix()
-		filetype = DGUTAFileTypeDir
-	} else {
-		filetype, isTmp = filenameToType(string(info.Name))
-		atime = maxInt(0, info.MTime, info.ATime)
-	}
-
-	if !isTmp {
-		isTmp = isTempDir(info.Path)
-	}
+	filetype, isTmp := infoToType(info)
 
 	gutaKeys.append(info.GID, info.UID, filetype)
 
@@ -561,6 +558,25 @@ func (d *DirGroupUserTypeAge) Add(info *summary.FileInfo) error {
 	gutaKey.Put(gutaKeysA)
 
 	return nil
+}
+
+func infoToType(info *summary.FileInfo) (DirGUTAFileType, bool) {
+	var (
+		isTmp    bool
+		filetype DirGUTAFileType
+	)
+
+	if info.IsDir() {
+		filetype = DGUTAFileTypeDir
+	} else {
+		filetype, isTmp = filenameToType(string(info.Name))
+	}
+
+	if !isTmp {
+		isTmp = isTempDir(info.Path)
+	}
+
+	return filetype, isTmp
 }
 
 type GUTAKey struct {
@@ -631,9 +647,9 @@ func (g GUTAKey) String() string {
 
 // appendGUTAKeys appends gutaKeys with keys including the given gid, uid, file
 // type and age.
-func (g GUTAKeys) append(gid, uid uint32, fileType DirGUTAFileType) {
+func (g *GUTAKeys) append(gid, uid uint32, fileType DirGUTAFileType) {
 	for _, age := range DirGUTAges {
-		g = append(g, GUTAKey{gid, uid, fileType, age})
+		*g = append(*g, GUTAKey{gid, uid, fileType, age})
 	}
 }
 
@@ -671,7 +687,6 @@ func (d *DirGroupUserTypeAge) addForEach(gutaKeys []GUTAKey, size int64, atime i
 	for _, gutaKey := range gutaKeys {
 		d.store.add(gutaKey, size, atime, mtime)
 	}
-
 }
 
 type DirGUTA struct {
