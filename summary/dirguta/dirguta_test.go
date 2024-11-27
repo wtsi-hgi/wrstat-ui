@@ -32,6 +32,7 @@ import (
 	"time"
 
 	. "github.com/smartystreets/goconvey/convey"
+	"github.com/wtsi-hgi/wrstat-ui/db"
 	"github.com/wtsi-hgi/wrstat-ui/internal/statsdata"
 	internaltest "github.com/wtsi-hgi/wrstat-ui/internal/test"
 	internaluser "github.com/wtsi-hgi/wrstat-ui/internal/user"
@@ -40,94 +41,6 @@ import (
 )
 
 func TestDirGUTAFileType(t *testing.T) {
-	Convey("DGUTAFileType* consts are ints that can be stringified", t, func() {
-		So(DirGUTAFileType(0).String(), ShouldEqual, "other")
-		So(DGUTAFileTypeOther.String(), ShouldEqual, "other")
-		So(DGUTAFileTypeTemp.String(), ShouldEqual, "temp")
-		So(DGUTAFileTypeVCF.String(), ShouldEqual, "vcf")
-		So(DGUTAFileTypeVCFGz.String(), ShouldEqual, "vcf.gz")
-		So(DGUTAFileTypeBCF.String(), ShouldEqual, "bcf")
-		So(DGUTAFileTypeSam.String(), ShouldEqual, "sam")
-		So(DGUTAFileTypeBam.String(), ShouldEqual, "bam")
-		So(DGUTAFileTypeCram.String(), ShouldEqual, "cram")
-		So(DGUTAFileTypeFasta.String(), ShouldEqual, "fasta")
-		So(DGUTAFileTypeFastq.String(), ShouldEqual, "fastq")
-		So(DGUTAFileTypeFastqGz.String(), ShouldEqual, "fastq.gz")
-		So(DGUTAFileTypePedBed.String(), ShouldEqual, "ped/bed")
-		So(DGUTAFileTypeCompressed.String(), ShouldEqual, "compressed")
-		So(DGUTAFileTypeText.String(), ShouldEqual, "text")
-		So(DGUTAFileTypeLog.String(), ShouldEqual, "log")
-
-		So(int(DGUTAFileTypeTemp), ShouldEqual, 1)
-	})
-
-	Convey("You can go from a string to a DGUTAFileType", t, func() {
-		ft, err := FileTypeStringToDirGUTAFileType("other")
-		So(err, ShouldBeNil)
-		So(ft, ShouldEqual, DGUTAFileTypeOther)
-
-		ft, err = FileTypeStringToDirGUTAFileType("temp")
-		So(err, ShouldBeNil)
-		So(ft, ShouldEqual, DGUTAFileTypeTemp)
-
-		ft, err = FileTypeStringToDirGUTAFileType("vcf")
-		So(err, ShouldBeNil)
-		So(ft, ShouldEqual, DGUTAFileTypeVCF)
-
-		ft, err = FileTypeStringToDirGUTAFileType("vcf.gz")
-		So(err, ShouldBeNil)
-		So(ft, ShouldEqual, DGUTAFileTypeVCFGz)
-
-		ft, err = FileTypeStringToDirGUTAFileType("bcf")
-		So(err, ShouldBeNil)
-		So(ft, ShouldEqual, DGUTAFileTypeBCF)
-
-		ft, err = FileTypeStringToDirGUTAFileType("sam")
-		So(err, ShouldBeNil)
-		So(ft, ShouldEqual, DGUTAFileTypeSam)
-
-		ft, err = FileTypeStringToDirGUTAFileType("bam")
-		So(err, ShouldBeNil)
-		So(ft, ShouldEqual, DGUTAFileTypeBam)
-
-		ft, err = FileTypeStringToDirGUTAFileType("cram")
-		So(err, ShouldBeNil)
-		So(ft, ShouldEqual, DGUTAFileTypeCram)
-
-		ft, err = FileTypeStringToDirGUTAFileType("fasta")
-		So(err, ShouldBeNil)
-		So(ft, ShouldEqual, DGUTAFileTypeFasta)
-
-		ft, err = FileTypeStringToDirGUTAFileType("fastq")
-		So(err, ShouldBeNil)
-		So(ft, ShouldEqual, DGUTAFileTypeFastq)
-
-		ft, err = FileTypeStringToDirGUTAFileType("fastq.gz")
-		So(err, ShouldBeNil)
-		So(ft, ShouldEqual, DGUTAFileTypeFastqGz)
-
-		ft, err = FileTypeStringToDirGUTAFileType("ped/bed")
-		So(err, ShouldBeNil)
-		So(ft, ShouldEqual, DGUTAFileTypePedBed)
-
-		ft, err = FileTypeStringToDirGUTAFileType("compressed")
-		So(err, ShouldBeNil)
-		So(ft, ShouldEqual, DGUTAFileTypeCompressed)
-
-		ft, err = FileTypeStringToDirGUTAFileType("text")
-		So(err, ShouldBeNil)
-		So(ft, ShouldEqual, DGUTAFileTypeText)
-
-		ft, err = FileTypeStringToDirGUTAFileType("log")
-		So(err, ShouldBeNil)
-		So(ft, ShouldEqual, DGUTAFileTypeLog)
-
-		ft, err = FileTypeStringToDirGUTAFileType("foo")
-		So(err, ShouldNotBeNil)
-		So(err, ShouldEqual, ErrInvalidType)
-		So(ft, ShouldEqual, DGUTAFileTypeOther)
-	})
-
 	Convey("isTemp lets you know if a path is a temporary file", t, func() {
 		So(isTempFile(".tmp.cram"), ShouldBeTrue)
 		So(isTempFile("tmp.cram"), ShouldBeTrue)
@@ -259,24 +172,24 @@ func TestDirGUTAFileType(t *testing.T) {
 		for _, test := range [...]struct {
 			Path     string
 			IsDir    bool
-			FileType DirGUTAFileType
+			FileType db.DirGUTAFileType
 			IsTmp    bool
 		}{
-			{"/some/path/", true, DGUTAFileTypeDir, false},
-			{"/foo/bar.asd", false, DGUTAFileTypeOther, false},
-			{"/foo/.tmp.asd", false, DGUTAFileTypeOther, true},
-			{"/foo/bar.vcf", false, DGUTAFileTypeVCF, false},
-			{"/foo/bar.vcf.gz", false, DGUTAFileTypeVCFGz, false},
-			{"/foo/bar.bcf", false, DGUTAFileTypeBCF, false},
-			{"/foo/bar.sam", false, DGUTAFileTypeSam, false},
-			{"/foo/bar.bam", false, DGUTAFileTypeBam, false},
-			{"/foo/.tmp.cram", false, DGUTAFileTypeCram, true},
-			{"/foo/bar.fa", false, DGUTAFileTypeFasta, false},
-			{"/foo/bar.fq", false, DGUTAFileTypeFastq, false},
-			{"/foo/bar.fq.gz", false, DGUTAFileTypeFastqGz, false},
-			{"/foo/bar.bzip2", false, DGUTAFileTypeCompressed, false},
-			{"/foo/bar.csv", false, DGUTAFileTypeText, false},
-			{"/foo/bar.o", false, DGUTAFileTypeLog, false},
+			{"/some/path/", true, db.DGUTAFileTypeDir, false},
+			{"/foo/bar.asd", false, db.DGUTAFileTypeOther, false},
+			{"/foo/.tmp.asd", false, db.DGUTAFileTypeOther, true},
+			{"/foo/bar.vcf", false, db.DGUTAFileTypeVCF, false},
+			{"/foo/bar.vcf.gz", false, db.DGUTAFileTypeVCFGz, false},
+			{"/foo/bar.bcf", false, db.DGUTAFileTypeBCF, false},
+			{"/foo/bar.sam", false, db.DGUTAFileTypeSam, false},
+			{"/foo/bar.bam", false, db.DGUTAFileTypeBam, false},
+			{"/foo/.tmp.cram", false, db.DGUTAFileTypeCram, true},
+			{"/foo/bar.fa", false, db.DGUTAFileTypeFasta, false},
+			{"/foo/bar.fq", false, db.DGUTAFileTypeFastq, false},
+			{"/foo/bar.fq.gz", false, db.DGUTAFileTypeFastqGz, false},
+			{"/foo/bar.bzip2", false, db.DGUTAFileTypeCompressed, false},
+			{"/foo/bar.csv", false, db.DGUTAFileTypeText, false},
+			{"/foo/bar.o", false, db.DGUTAFileTypeLog, false},
 		} {
 			ft, tmp := infoToType(internaltest.NewMockInfo(d.ToDirectoryPath(test.Path), 0, 0, 0, test.IsDir))
 			So(ft, ShouldEqual, test.FileType)
@@ -285,101 +198,23 @@ func TestDirGUTAFileType(t *testing.T) {
 	})
 }
 
-func TestDirGUTAge(t *testing.T) {
-	Convey("You can go from a string to a DirGUTAge", t, func() {
-		age, err := AgeStringToDirGUTAge("0")
-		So(err, ShouldBeNil)
-		So(age, ShouldEqual, DGUTAgeAll)
-
-		age, err = AgeStringToDirGUTAge("1")
-		So(err, ShouldBeNil)
-		So(age, ShouldEqual, DGUTAgeA1M)
-
-		age, err = AgeStringToDirGUTAge("2")
-		So(err, ShouldBeNil)
-		So(age, ShouldEqual, DGUTAgeA2M)
-
-		age, err = AgeStringToDirGUTAge("3")
-		So(err, ShouldBeNil)
-		So(age, ShouldEqual, DGUTAgeA6M)
-
-		age, err = AgeStringToDirGUTAge("4")
-		So(err, ShouldBeNil)
-		So(age, ShouldEqual, DGUTAgeA1Y)
-
-		age, err = AgeStringToDirGUTAge("5")
-		So(err, ShouldBeNil)
-		So(age, ShouldEqual, DGUTAgeA2Y)
-
-		age, err = AgeStringToDirGUTAge("6")
-		So(err, ShouldBeNil)
-		So(age, ShouldEqual, DGUTAgeA3Y)
-
-		age, err = AgeStringToDirGUTAge("7")
-		So(err, ShouldBeNil)
-		So(age, ShouldEqual, DGUTAgeA5Y)
-
-		age, err = AgeStringToDirGUTAge("8")
-		So(err, ShouldBeNil)
-		So(age, ShouldEqual, DGUTAgeA7Y)
-
-		age, err = AgeStringToDirGUTAge("9")
-		So(err, ShouldBeNil)
-		So(age, ShouldEqual, DGUTAgeM1M)
-
-		age, err = AgeStringToDirGUTAge("10")
-		So(err, ShouldBeNil)
-		So(age, ShouldEqual, DGUTAgeM2M)
-
-		age, err = AgeStringToDirGUTAge("11")
-		So(err, ShouldBeNil)
-		So(age, ShouldEqual, DGUTAgeM6M)
-
-		age, err = AgeStringToDirGUTAge("12")
-		So(err, ShouldBeNil)
-		So(age, ShouldEqual, DGUTAgeM1Y)
-
-		age, err = AgeStringToDirGUTAge("13")
-		So(err, ShouldBeNil)
-		So(age, ShouldEqual, DGUTAgeM2Y)
-
-		age, err = AgeStringToDirGUTAge("14")
-		So(err, ShouldBeNil)
-		So(age, ShouldEqual, DGUTAgeM3Y)
-
-		age, err = AgeStringToDirGUTAge("15")
-		So(err, ShouldBeNil)
-		So(age, ShouldEqual, DGUTAgeM5Y)
-
-		age, err = AgeStringToDirGUTAge("16")
-		So(err, ShouldBeNil)
-		So(age, ShouldEqual, DGUTAgeM7Y)
-
-		_, err = AgeStringToDirGUTAge("17")
-		So(err, ShouldNotBeNil)
-
-		_, err = AgeStringToDirGUTAge("incorrect")
-		So(err, ShouldNotBeNil)
-	})
-}
-
 type mockDB struct {
-	gutas map[string]GUTAs
+	gutas map[string]db.GUTAs
 }
 
-func (m *mockDB) Add(dguta recordDGUTA) error {
+func (m *mockDB) Add(dguta db.RecordDGUTA) error {
 	m.gutas[string(dguta.Dir.AppendTo(nil))] = dguta.GUTAs
 
 	return nil
 }
 
-func (m *mockDB) has(dir string, gid, uid uint32, ft DirGUTAFileType, age DirGUTAge, count, size uint64, atime, mtime int64) bool {
+func (m *mockDB) has(dir string, gid, uid uint32, ft db.DirGUTAFileType, age db.DirGUTAge, count, size uint64, atime, mtime int64) bool {
 	dgutas, ok := m.gutas[dir]
 	if !ok {
 		return false
 	}
 
-	expected := GUTA{
+	expected := db.GUTA{
 		GID:   gid,
 		UID:   uid,
 		FT:    ft,
@@ -399,7 +234,7 @@ func (m *mockDB) has(dir string, gid, uid uint32, ft DirGUTAFileType, age DirGUT
 	return false
 }
 
-func (m *mockDB) hasNot(dir string, gid, uid uint32, ft DirGUTAFileType, age DirGUTAge) bool {
+func (m *mockDB) hasNot(dir string, gid, uid uint32, ft db.DirGUTAFileType, age db.DirGUTAge) bool {
 	dgutas, ok := m.gutas[dir]
 	if !ok {
 		return true
@@ -427,34 +262,34 @@ func TestDirGUTA(t *testing.T) {
 		f.UID = uid
 		f.GID = gid
 
-		atime1 := refTime - (SecondsInAMonth*2 + 100000)
-		mtime1 := refTime - (SecondsInAMonth * 3)
+		atime1 := refTime - (db.SecondsInAMonth*2 + 100000)
+		mtime1 := refTime - (db.SecondsInAMonth * 3)
 		addFile(f, "a/b/c/1.bam", uid, gid, 2, atime1, mtime1)
 
-		atime2 := refTime - (SecondsInAMonth * 7)
-		mtime2 := refTime - (SecondsInAMonth * 8)
+		atime2 := refTime - (db.SecondsInAMonth * 7)
+		mtime2 := refTime - (db.SecondsInAMonth * 8)
 		addFile(f, "a/b/c/2.bam", uid, gid, 3, atime2, mtime2)
 
-		atime3 := refTime - (SecondsInAYear + SecondsInAMonth)
-		mtime3 := refTime - (SecondsInAYear + SecondsInAMonth*6)
+		atime3 := refTime - (db.SecondsInAYear + db.SecondsInAMonth)
+		mtime3 := refTime - (db.SecondsInAYear + db.SecondsInAMonth*6)
 		addFile(f, "a/b/c/3.txt", uid, gid, 4, atime3, mtime3)
 
-		atime4 := refTime - (SecondsInAYear * 4)
-		mtime4 := refTime - (SecondsInAYear * 6)
+		atime4 := refTime - (db.SecondsInAYear * 4)
+		mtime4 := refTime - (db.SecondsInAYear * 6)
 		addFile(f, "a/b/c/4.bam", uid, gid, 5, atime4, mtime4)
 
-		atime5 := refTime - (SecondsInAYear*5 + SecondsInAMonth)
-		mtime5 := refTime - (SecondsInAYear*7 + SecondsInAMonth)
+		atime5 := refTime - (db.SecondsInAYear*5 + db.SecondsInAMonth)
+		mtime5 := refTime - (db.SecondsInAYear*7 + db.SecondsInAMonth)
 		addFile(f, "a/b/c/5.cram", uid, gid, 6, atime5, mtime5)
 
-		atime6 := refTime - (SecondsInAYear*7 + SecondsInAMonth)
-		mtime6 := refTime - (SecondsInAYear*7 + SecondsInAMonth)
+		atime6 := refTime - (db.SecondsInAYear*7 + db.SecondsInAMonth)
+		mtime6 := refTime - (db.SecondsInAYear*7 + db.SecondsInAMonth)
 		addFile(f, "a/b/c/6.cram", uid, gid, 7, atime6, mtime6)
 
 		addFile(f, "a/b/c/6.tmp", uid, gid, 8, mtime3, mtime3)
 
 		s := summary.NewSummariser(stats.NewStatsParser(f.AsReader()))
-		m := &mockDB{make(map[string]GUTAs)}
+		m := &mockDB{make(map[string]db.GUTAs)}
 		op := newDirGroupUserTypeAge(m, refTime)
 		s.AddDirectoryOperation(op)
 
@@ -462,89 +297,89 @@ func TestDirGUTA(t *testing.T) {
 		So(err, ShouldBeNil)
 
 		dir := "/a/b/c/"
-		ft, count, size := DGUTAFileTypeBam, uint64(3), uint64(10)
+		ft, count, size := db.DGUTAFileTypeBam, uint64(3), uint64(10)
 		testAtime, testMtime := atime4, mtime1
 
-		So(m.has(dir, gid, uid, ft, DGUTAgeAll, count, size, testAtime, testMtime), ShouldBeTrue)
-		So(m.has(dir, gid, uid, ft, DGUTAgeA1M, count, size, testAtime, testMtime), ShouldBeTrue)
-		So(m.has(dir, gid, uid, ft, DGUTAgeA2M, count, size, testAtime, testMtime), ShouldBeTrue)
-		So(m.has(dir, gid, uid, ft, DGUTAgeA6M, count-1, size-2, testAtime, mtime2), ShouldBeTrue)
-		So(m.has(dir, gid, uid, ft, DGUTAgeA1Y, count-2, size-5, testAtime, mtime4), ShouldBeTrue)
-		So(m.has(dir, gid, uid, ft, DGUTAgeA2Y, count-2, size-5, testAtime, mtime4), ShouldBeTrue)
-		So(m.has(dir, gid, uid, ft, DGUTAgeA3Y, count-2, size-5, testAtime, mtime4), ShouldBeTrue)
-		So(m.hasNot(dir, gid, uid, ft, DGUTAgeA5Y), ShouldBeTrue)
-		So(m.hasNot(dir, gid, uid, ft, DGUTAgeA7Y), ShouldBeTrue)
-		So(m.has(dir, gid, uid, ft, DGUTAgeM1M, count, size, testAtime, testMtime), ShouldBeTrue)
-		So(m.has(dir, gid, uid, ft, DGUTAgeM2M, count, size, testAtime, testMtime), ShouldBeTrue)
-		So(m.has(dir, gid, uid, ft, DGUTAgeM6M, count-1, size-2, testAtime, mtime2), ShouldBeTrue)
-		So(m.has(dir, gid, uid, ft, DGUTAgeM1Y, count-2, size-5, testAtime, mtime4), ShouldBeTrue)
-		So(m.has(dir, gid, uid, ft, DGUTAgeM2Y, count-2, size-5, testAtime, mtime4), ShouldBeTrue)
-		So(m.has(dir, gid, uid, ft, DGUTAgeM3Y, count-2, size-5, testAtime, mtime4), ShouldBeTrue)
-		So(m.has(dir, gid, uid, ft, DGUTAgeM5Y, count-2, size-5, testAtime, mtime4), ShouldBeTrue)
-		So(m.hasNot(dir, gid, uid, ft, DGUTAgeM7Y), ShouldBeTrue)
+		So(m.has(dir, gid, uid, ft, db.DGUTAgeAll, count, size, testAtime, testMtime), ShouldBeTrue)
+		So(m.has(dir, gid, uid, ft, db.DGUTAgeA1M, count, size, testAtime, testMtime), ShouldBeTrue)
+		So(m.has(dir, gid, uid, ft, db.DGUTAgeA2M, count, size, testAtime, testMtime), ShouldBeTrue)
+		So(m.has(dir, gid, uid, ft, db.DGUTAgeA6M, count-1, size-2, testAtime, mtime2), ShouldBeTrue)
+		So(m.has(dir, gid, uid, ft, db.DGUTAgeA1Y, count-2, size-5, testAtime, mtime4), ShouldBeTrue)
+		So(m.has(dir, gid, uid, ft, db.DGUTAgeA2Y, count-2, size-5, testAtime, mtime4), ShouldBeTrue)
+		So(m.has(dir, gid, uid, ft, db.DGUTAgeA3Y, count-2, size-5, testAtime, mtime4), ShouldBeTrue)
+		So(m.hasNot(dir, gid, uid, ft, db.DGUTAgeA5Y), ShouldBeTrue)
+		So(m.hasNot(dir, gid, uid, ft, db.DGUTAgeA7Y), ShouldBeTrue)
+		So(m.has(dir, gid, uid, ft, db.DGUTAgeM1M, count, size, testAtime, testMtime), ShouldBeTrue)
+		So(m.has(dir, gid, uid, ft, db.DGUTAgeM2M, count, size, testAtime, testMtime), ShouldBeTrue)
+		So(m.has(dir, gid, uid, ft, db.DGUTAgeM6M, count-1, size-2, testAtime, mtime2), ShouldBeTrue)
+		So(m.has(dir, gid, uid, ft, db.DGUTAgeM1Y, count-2, size-5, testAtime, mtime4), ShouldBeTrue)
+		So(m.has(dir, gid, uid, ft, db.DGUTAgeM2Y, count-2, size-5, testAtime, mtime4), ShouldBeTrue)
+		So(m.has(dir, gid, uid, ft, db.DGUTAgeM3Y, count-2, size-5, testAtime, mtime4), ShouldBeTrue)
+		So(m.has(dir, gid, uid, ft, db.DGUTAgeM5Y, count-2, size-5, testAtime, mtime4), ShouldBeTrue)
+		So(m.hasNot(dir, gid, uid, ft, db.DGUTAgeM7Y), ShouldBeTrue)
 
-		ft, count, size = DGUTAFileTypeCram, 2, 13
+		ft, count, size = db.DGUTAFileTypeCram, 2, 13
 		testAtime, testMtime = atime6, mtime5
 
-		So(m.has(dir, gid, uid, ft, DGUTAgeAll, count, size, testAtime, testMtime), ShouldBeTrue)
-		So(m.has(dir, gid, uid, ft, DGUTAgeA1M, count, size, testAtime, testMtime), ShouldBeTrue)
-		So(m.has(dir, gid, uid, ft, DGUTAgeA2M, count, size, testAtime, testMtime), ShouldBeTrue)
-		So(m.has(dir, gid, uid, ft, DGUTAgeA6M, count, size, testAtime, testMtime), ShouldBeTrue)
-		So(m.has(dir, gid, uid, ft, DGUTAgeA1Y, count, size, testAtime, testMtime), ShouldBeTrue)
-		So(m.has(dir, gid, uid, ft, DGUTAgeA2Y, count, size, testAtime, testMtime), ShouldBeTrue)
-		So(m.has(dir, gid, uid, ft, DGUTAgeA3Y, count, size, testAtime, testMtime), ShouldBeTrue)
-		So(m.has(dir, gid, uid, ft, DGUTAgeA5Y, count, size, testAtime, testMtime), ShouldBeTrue)
-		So(m.has(dir, gid, uid, ft, DGUTAgeA7Y, count-1, size-6, testAtime, testMtime), ShouldBeTrue)
-		So(m.has(dir, gid, uid, ft, DGUTAgeM1M, count, size, testAtime, testMtime), ShouldBeTrue)
-		So(m.has(dir, gid, uid, ft, DGUTAgeM2M, count, size, testAtime, testMtime), ShouldBeTrue)
-		So(m.has(dir, gid, uid, ft, DGUTAgeM6M, count, size, testAtime, testMtime), ShouldBeTrue)
-		So(m.has(dir, gid, uid, ft, DGUTAgeM1Y, count, size, testAtime, testMtime), ShouldBeTrue)
-		So(m.has(dir, gid, uid, ft, DGUTAgeM2Y, count, size, testAtime, testMtime), ShouldBeTrue)
-		So(m.has(dir, gid, uid, ft, DGUTAgeM3Y, count, size, testAtime, testMtime), ShouldBeTrue)
-		So(m.has(dir, gid, uid, ft, DGUTAgeM5Y, count, size, testAtime, testMtime), ShouldBeTrue)
-		So(m.has(dir, gid, uid, ft, DGUTAgeM7Y, count, size, testAtime, testMtime), ShouldBeTrue)
+		So(m.has(dir, gid, uid, ft, db.DGUTAgeAll, count, size, testAtime, testMtime), ShouldBeTrue)
+		So(m.has(dir, gid, uid, ft, db.DGUTAgeA1M, count, size, testAtime, testMtime), ShouldBeTrue)
+		So(m.has(dir, gid, uid, ft, db.DGUTAgeA2M, count, size, testAtime, testMtime), ShouldBeTrue)
+		So(m.has(dir, gid, uid, ft, db.DGUTAgeA6M, count, size, testAtime, testMtime), ShouldBeTrue)
+		So(m.has(dir, gid, uid, ft, db.DGUTAgeA1Y, count, size, testAtime, testMtime), ShouldBeTrue)
+		So(m.has(dir, gid, uid, ft, db.DGUTAgeA2Y, count, size, testAtime, testMtime), ShouldBeTrue)
+		So(m.has(dir, gid, uid, ft, db.DGUTAgeA3Y, count, size, testAtime, testMtime), ShouldBeTrue)
+		So(m.has(dir, gid, uid, ft, db.DGUTAgeA5Y, count, size, testAtime, testMtime), ShouldBeTrue)
+		So(m.has(dir, gid, uid, ft, db.DGUTAgeA7Y, count-1, size-6, testAtime, testMtime), ShouldBeTrue)
+		So(m.has(dir, gid, uid, ft, db.DGUTAgeM1M, count, size, testAtime, testMtime), ShouldBeTrue)
+		So(m.has(dir, gid, uid, ft, db.DGUTAgeM2M, count, size, testAtime, testMtime), ShouldBeTrue)
+		So(m.has(dir, gid, uid, ft, db.DGUTAgeM6M, count, size, testAtime, testMtime), ShouldBeTrue)
+		So(m.has(dir, gid, uid, ft, db.DGUTAgeM1Y, count, size, testAtime, testMtime), ShouldBeTrue)
+		So(m.has(dir, gid, uid, ft, db.DGUTAgeM2Y, count, size, testAtime, testMtime), ShouldBeTrue)
+		So(m.has(dir, gid, uid, ft, db.DGUTAgeM3Y, count, size, testAtime, testMtime), ShouldBeTrue)
+		So(m.has(dir, gid, uid, ft, db.DGUTAgeM5Y, count, size, testAtime, testMtime), ShouldBeTrue)
+		So(m.has(dir, gid, uid, ft, db.DGUTAgeM7Y, count, size, testAtime, testMtime), ShouldBeTrue)
 
-		ft, count, size = DGUTAFileTypeText, 1, 4
+		ft, count, size = db.DGUTAFileTypeText, 1, 4
 		testAtime, testMtime = atime3, mtime3
 
-		So(m.has(dir, gid, uid, ft, DGUTAgeAll, count, size, testAtime, testMtime), ShouldBeTrue)
-		So(m.has(dir, gid, uid, ft, DGUTAgeA1M, count, size, testAtime, testMtime), ShouldBeTrue)
-		So(m.has(dir, gid, uid, ft, DGUTAgeA2M, count, size, testAtime, testMtime), ShouldBeTrue)
-		So(m.has(dir, gid, uid, ft, DGUTAgeA6M, count, size, testAtime, testMtime), ShouldBeTrue)
-		So(m.has(dir, gid, uid, ft, DGUTAgeA1Y, count, size, testAtime, testMtime), ShouldBeTrue)
-		So(m.hasNot(dir, gid, uid, ft, DGUTAgeA2Y), ShouldBeTrue)
-		So(m.hasNot(dir, gid, uid, ft, DGUTAgeA3Y), ShouldBeTrue)
-		So(m.hasNot(dir, gid, uid, ft, DGUTAgeA5Y), ShouldBeTrue)
-		So(m.hasNot(dir, gid, uid, ft, DGUTAgeA7Y), ShouldBeTrue)
-		So(m.has(dir, gid, uid, ft, DGUTAgeM1M, count, size, testAtime, testMtime), ShouldBeTrue)
-		So(m.has(dir, gid, uid, ft, DGUTAgeM2M, count, size, testAtime, testMtime), ShouldBeTrue)
-		So(m.has(dir, gid, uid, ft, DGUTAgeM6M, count, size, testAtime, testMtime), ShouldBeTrue)
-		So(m.has(dir, gid, uid, ft, DGUTAgeM1Y, count, size, testAtime, testMtime), ShouldBeTrue)
-		So(m.hasNot(dir, gid, uid, ft, DGUTAgeM2Y), ShouldBeTrue)
-		So(m.hasNot(dir, gid, uid, ft, DGUTAgeM3Y), ShouldBeTrue)
-		So(m.hasNot(dir, gid, uid, ft, DGUTAgeM5Y), ShouldBeTrue)
-		So(m.hasNot(dir, gid, uid, ft, DGUTAgeM7Y), ShouldBeTrue)
+		So(m.has(dir, gid, uid, ft, db.DGUTAgeAll, count, size, testAtime, testMtime), ShouldBeTrue)
+		So(m.has(dir, gid, uid, ft, db.DGUTAgeA1M, count, size, testAtime, testMtime), ShouldBeTrue)
+		So(m.has(dir, gid, uid, ft, db.DGUTAgeA2M, count, size, testAtime, testMtime), ShouldBeTrue)
+		So(m.has(dir, gid, uid, ft, db.DGUTAgeA6M, count, size, testAtime, testMtime), ShouldBeTrue)
+		So(m.has(dir, gid, uid, ft, db.DGUTAgeA1Y, count, size, testAtime, testMtime), ShouldBeTrue)
+		So(m.hasNot(dir, gid, uid, ft, db.DGUTAgeA2Y), ShouldBeTrue)
+		So(m.hasNot(dir, gid, uid, ft, db.DGUTAgeA3Y), ShouldBeTrue)
+		So(m.hasNot(dir, gid, uid, ft, db.DGUTAgeA5Y), ShouldBeTrue)
+		So(m.hasNot(dir, gid, uid, ft, db.DGUTAgeA7Y), ShouldBeTrue)
+		So(m.has(dir, gid, uid, ft, db.DGUTAgeM1M, count, size, testAtime, testMtime), ShouldBeTrue)
+		So(m.has(dir, gid, uid, ft, db.DGUTAgeM2M, count, size, testAtime, testMtime), ShouldBeTrue)
+		So(m.has(dir, gid, uid, ft, db.DGUTAgeM6M, count, size, testAtime, testMtime), ShouldBeTrue)
+		So(m.has(dir, gid, uid, ft, db.DGUTAgeM1Y, count, size, testAtime, testMtime), ShouldBeTrue)
+		So(m.hasNot(dir, gid, uid, ft, db.DGUTAgeM2Y), ShouldBeTrue)
+		So(m.hasNot(dir, gid, uid, ft, db.DGUTAgeM3Y), ShouldBeTrue)
+		So(m.hasNot(dir, gid, uid, ft, db.DGUTAgeM5Y), ShouldBeTrue)
+		So(m.hasNot(dir, gid, uid, ft, db.DGUTAgeM7Y), ShouldBeTrue)
 
-		ft, count, size = DGUTAFileTypeTemp, 1, 8
+		ft, count, size = db.DGUTAFileTypeTemp, 1, 8
 		testAtime, testMtime = mtime3, mtime3
 
-		So(m.has(dir, gid, uid, ft, DGUTAgeAll, count, size, testAtime, testMtime), ShouldBeTrue)
-		So(m.has(dir, gid, uid, ft, DGUTAgeA1M, count, size, testAtime, testMtime), ShouldBeTrue)
-		So(m.has(dir, gid, uid, ft, DGUTAgeA2M, count, size, testAtime, testMtime), ShouldBeTrue)
-		So(m.has(dir, gid, uid, ft, DGUTAgeA6M, count, size, testAtime, testMtime), ShouldBeTrue)
-		So(m.has(dir, gid, uid, ft, DGUTAgeA1Y, count, size, testAtime, testMtime), ShouldBeTrue)
-		So(m.hasNot(dir, gid, uid, ft, DGUTAgeA2Y), ShouldBeTrue)
-		So(m.hasNot(dir, gid, uid, ft, DGUTAgeA3Y), ShouldBeTrue)
-		So(m.hasNot(dir, gid, uid, ft, DGUTAgeA5Y), ShouldBeTrue)
-		So(m.hasNot(dir, gid, uid, ft, DGUTAgeA7Y), ShouldBeTrue)
-		So(m.has(dir, gid, uid, ft, DGUTAgeM1M, count, size, testAtime, testMtime), ShouldBeTrue)
-		So(m.has(dir, gid, uid, ft, DGUTAgeM2M, count, size, testAtime, testMtime), ShouldBeTrue)
-		So(m.has(dir, gid, uid, ft, DGUTAgeM6M, count, size, testAtime, testMtime), ShouldBeTrue)
-		So(m.has(dir, gid, uid, ft, DGUTAgeM1Y, count, size, testAtime, testMtime), ShouldBeTrue)
-		So(m.hasNot(dir, gid, uid, ft, DGUTAgeM2Y), ShouldBeTrue)
-		So(m.hasNot(dir, gid, uid, ft, DGUTAgeM3Y), ShouldBeTrue)
-		So(m.hasNot(dir, gid, uid, ft, DGUTAgeM5Y), ShouldBeTrue)
-		So(m.hasNot(dir, gid, uid, ft, DGUTAgeM7Y), ShouldBeTrue)
+		So(m.has(dir, gid, uid, ft, db.DGUTAgeAll, count, size, testAtime, testMtime), ShouldBeTrue)
+		So(m.has(dir, gid, uid, ft, db.DGUTAgeA1M, count, size, testAtime, testMtime), ShouldBeTrue)
+		So(m.has(dir, gid, uid, ft, db.DGUTAgeA2M, count, size, testAtime, testMtime), ShouldBeTrue)
+		So(m.has(dir, gid, uid, ft, db.DGUTAgeA6M, count, size, testAtime, testMtime), ShouldBeTrue)
+		So(m.has(dir, gid, uid, ft, db.DGUTAgeA1Y, count, size, testAtime, testMtime), ShouldBeTrue)
+		So(m.hasNot(dir, gid, uid, ft, db.DGUTAgeA2Y), ShouldBeTrue)
+		So(m.hasNot(dir, gid, uid, ft, db.DGUTAgeA3Y), ShouldBeTrue)
+		So(m.hasNot(dir, gid, uid, ft, db.DGUTAgeA5Y), ShouldBeTrue)
+		So(m.hasNot(dir, gid, uid, ft, db.DGUTAgeA7Y), ShouldBeTrue)
+		So(m.has(dir, gid, uid, ft, db.DGUTAgeM1M, count, size, testAtime, testMtime), ShouldBeTrue)
+		So(m.has(dir, gid, uid, ft, db.DGUTAgeM2M, count, size, testAtime, testMtime), ShouldBeTrue)
+		So(m.has(dir, gid, uid, ft, db.DGUTAgeM6M, count, size, testAtime, testMtime), ShouldBeTrue)
+		So(m.has(dir, gid, uid, ft, db.DGUTAgeM1Y, count, size, testAtime, testMtime), ShouldBeTrue)
+		So(m.hasNot(dir, gid, uid, ft, db.DGUTAgeM2Y), ShouldBeTrue)
+		So(m.hasNot(dir, gid, uid, ft, db.DGUTAgeM3Y), ShouldBeTrue)
+		So(m.hasNot(dir, gid, uid, ft, db.DGUTAgeM5Y), ShouldBeTrue)
+		So(m.hasNot(dir, gid, uid, ft, db.DGUTAgeM7Y), ShouldBeTrue)
 	})
 
 	Convey("You can summarise data with different groups and users", t, func() {
@@ -573,21 +408,21 @@ func TestDirGUTA(t *testing.T) {
 		dDir.Size = 8192
 
 		s := summary.NewSummariser(stats.NewStatsParser(f.AsReader()))
-		m := &mockDB{make(map[string]GUTAs)}
+		m := &mockDB{make(map[string]db.GUTAs)}
 		op := newDirGroupUserTypeAge(m, refTime)
 		s.AddDirectoryOperation(op)
 
 		err := s.Summarise()
 		So(err, ShouldBeNil)
 
-		for _, age := range DirGUTAges {
-			So(m.has("/a/b/c/d/", 2, 10, DGUTAFileTypeCram, age, 1, 3, atime3, mtime3), ShouldBeTrue)
+		for _, age := range db.DirGUTAges {
+			So(m.has("/a/b/c/d/", 2, 10, db.DGUTAFileTypeCram, age, 1, 3, atime3, mtime3), ShouldBeTrue)
 		}
 
-		So(m.has("/a/b/c/", 2, 2, DGUTAFileTypeBam, DGUTAgeAll, 1, 1, atime1, mtime1), ShouldBeTrue)
-		So(m.hasNot("/a/b/c/", 2, 2, DGUTAFileTypeCram, DGUTAgeAll), ShouldBeTrue)
-		So(m.has("/a/b/c/", 2, 10, DGUTAFileTypeCram, DGUTAgeAll, 2, 5, atime3, mtime2), ShouldBeTrue)
-		So(m.has("/a/b/c/", 10, 2, DGUTAFileTypeCram, DGUTAgeAll, 1, 4, atime4, mtime4), ShouldBeTrue)
+		So(m.has("/a/b/c/", 2, 2, db.DGUTAFileTypeBam, db.DGUTAgeAll, 1, 1, atime1, mtime1), ShouldBeTrue)
+		So(m.hasNot("/a/b/c/", 2, 2, db.DGUTAFileTypeCram, db.DGUTAgeAll), ShouldBeTrue)
+		So(m.has("/a/b/c/", 2, 10, db.DGUTAFileTypeCram, db.DGUTAgeAll, 2, 5, atime3, mtime2), ShouldBeTrue)
+		So(m.has("/a/b/c/", 10, 2, db.DGUTAFileTypeCram, db.DGUTAgeAll, 1, 4, atime4, mtime4), ShouldBeTrue)
 	})
 }
 

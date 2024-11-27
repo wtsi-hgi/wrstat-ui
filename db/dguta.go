@@ -23,7 +23,7 @@
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  ******************************************************************************/
 
-package dirguta
+package db
 
 import (
 	"github.com/ugorji/go/codec"
@@ -36,7 +36,7 @@ type DGUTA struct {
 	GUTAs GUTAs
 }
 
-type recordDGUTA struct {
+type RecordDGUTA struct {
 	Dir   *summary.DirectoryPath
 	GUTAs GUTAs
 }
@@ -45,7 +45,7 @@ var pathBuf [4098]byte
 
 // encodeToBytes returns our Dir as a []byte and our GUTAs encoded in another
 // []byte suitable for storing on disk.
-func (d *recordDGUTA) encodeToBytes(ch codec.Handle, age DirGUTAge) ([]byte, []byte) {
+func (d *RecordDGUTA) encodeToBytes(ch codec.Handle, age DirGUTAge) ([]byte, []byte) {
 	var encoded []byte
 	enc := codec.NewEncoderBytes(&encoded, ch)
 	enc.MustEncode(d.GUTAs)

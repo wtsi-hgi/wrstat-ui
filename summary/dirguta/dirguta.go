@@ -34,121 +34,32 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/wtsi-hgi/wrstat-ui/db"
 	"github.com/wtsi-hgi/wrstat-ui/summary"
 )
-
-const (
-	SecondsInAMonth = 2628000
-	SecondsInAYear  = SecondsInAMonth * 12
-)
-
-var ageThresholds = [8]int64{ //nolint:gochecknoglobals
-	SecondsInAMonth, SecondsInAMonth * 2, SecondsInAMonth * 6, SecondsInAYear,
-	SecondsInAYear * 2, SecondsInAYear * 3, SecondsInAYear * 5, SecondsInAYear * 7,
-}
-
-// DirGUTAge is one of the age types that the
-// directory,group,user,filetype,age summaries group on. All is for files of
-// all ages. The AgeA* consider age according to access time. The AgeM* consider
-// age according to modify time. The *\dM ones are age in the number of months,
-// and the *\dY ones are in number of years.
-type DirGUTAge uint8
-
-const (
-	DGUTAgeAll DirGUTAge = 0
-	DGUTAgeA1M DirGUTAge = 1
-	DGUTAgeA2M DirGUTAge = 2
-	DGUTAgeA6M DirGUTAge = 3
-	DGUTAgeA1Y DirGUTAge = 4
-	DGUTAgeA2Y DirGUTAge = 5
-	DGUTAgeA3Y DirGUTAge = 6
-	DGUTAgeA5Y DirGUTAge = 7
-	DGUTAgeA7Y DirGUTAge = 8
-	DGUTAgeM1M DirGUTAge = 9
-	DGUTAgeM2M DirGUTAge = 10
-	DGUTAgeM6M DirGUTAge = 11
-	DGUTAgeM1Y DirGUTAge = 12
-	DGUTAgeM2Y DirGUTAge = 13
-	DGUTAgeM3Y DirGUTAge = 14
-	DGUTAgeM5Y DirGUTAge = 15
-	DGUTAgeM7Y DirGUTAge = 16
-)
-
-var DirGUTAges = [17]DirGUTAge{ //nolint:gochecknoglobals
-	DGUTAgeAll, DGUTAgeA1M, DGUTAgeA2M, DGUTAgeA6M, DGUTAgeA1Y,
-	DGUTAgeA2Y, DGUTAgeA3Y, DGUTAgeA5Y, DGUTAgeA7Y, DGUTAgeM1M,
-	DGUTAgeM2M, DGUTAgeM6M, DGUTAgeM1Y, DGUTAgeM2Y, DGUTAgeM3Y,
-	DGUTAgeM5Y, DGUTAgeM7Y,
-}
-
-// DirGUTAFileType is one of the special file types that the
-// directory,group,user,filetype,age summaries group on.
-type DirGUTAFileType uint8
-
-const (
-	DGUTAFileTypeOther      DirGUTAFileType = 0
-	DGUTAFileTypeTemp       DirGUTAFileType = 1
-	DGUTAFileTypeVCF        DirGUTAFileType = 2
-	DGUTAFileTypeVCFGz      DirGUTAFileType = 3
-	DGUTAFileTypeBCF        DirGUTAFileType = 4
-	DGUTAFileTypeSam        DirGUTAFileType = 5
-	DGUTAFileTypeBam        DirGUTAFileType = 6
-	DGUTAFileTypeCram       DirGUTAFileType = 7
-	DGUTAFileTypeFasta      DirGUTAFileType = 8
-	DGUTAFileTypeFastq      DirGUTAFileType = 9
-	DGUTAFileTypeFastqGz    DirGUTAFileType = 10
-	DGUTAFileTypePedBed     DirGUTAFileType = 11
-	DGUTAFileTypeCompressed DirGUTAFileType = 12
-	DGUTAFileTypeText       DirGUTAFileType = 13
-	DGUTAFileTypeLog        DirGUTAFileType = 14
-	DGUTAFileTypeDir        DirGUTAFileType = 15
-)
-
-var AllTypesExceptDirectories = []DirGUTAFileType{ //nolint:gochecknoglobals
-	DGUTAFileTypeOther,
-	DGUTAFileTypeTemp,
-	DGUTAFileTypeVCF,
-	DGUTAFileTypeVCFGz,
-	DGUTAFileTypeBCF,
-	DGUTAFileTypeSam,
-	DGUTAFileTypeBam,
-	DGUTAFileTypeCram,
-	DGUTAFileTypeFasta,
-	DGUTAFileTypeFastq,
-	DGUTAFileTypeFastqGz,
-	DGUTAFileTypePedBed,
-	DGUTAFileTypeCompressed,
-	DGUTAFileTypeText,
-	DGUTAFileTypeLog,
-}
 
 // typeCheckers take a path and return true if the path is of their file type.
 type typeChecker func(path string) bool
 
-var typeCheckers = map[DirGUTAFileType]typeChecker{
-	DGUTAFileTypeVCF:        isVCF,
-	DGUTAFileTypeVCFGz:      isVCFGz,
-	DGUTAFileTypeBCF:        isBCF,
-	DGUTAFileTypeSam:        isSam,
-	DGUTAFileTypeBam:        isBam,
-	DGUTAFileTypeCram:       isCram,
-	DGUTAFileTypeFasta:      isFasta,
-	DGUTAFileTypeFastq:      isFastq,
-	DGUTAFileTypeFastqGz:    isFastqGz,
-	DGUTAFileTypePedBed:     isPedBed,
-	DGUTAFileTypeCompressed: isCompressed,
-	DGUTAFileTypeText:       isText,
-	DGUTAFileTypeLog:        isLog,
+var typeCheckers = map[db.DirGUTAFileType]typeChecker{
+	db.DGUTAFileTypeVCF:        isVCF,
+	db.DGUTAFileTypeVCFGz:      isVCFGz,
+	db.DGUTAFileTypeBCF:        isBCF,
+	db.DGUTAFileTypeSam:        isSam,
+	db.DGUTAFileTypeBam:        isBam,
+	db.DGUTAFileTypeCram:       isCram,
+	db.DGUTAFileTypeFasta:      isFasta,
+	db.DGUTAFileTypeFastq:      isFastq,
+	db.DGUTAFileTypeFastqGz:    isFastqGz,
+	db.DGUTAFileTypePedBed:     isPedBed,
+	db.DGUTAFileTypeCompressed: isCompressed,
+	db.DGUTAFileTypeText:       isText,
+	db.DGUTAFileTypeLog:        isLog,
 }
 
 type Error string
 
 func (e Error) Error() string { return string(e) }
-
-const (
-	ErrInvalidType = Error("not a valid file type")
-	ErrInvalidAge  = Error("not a valid age")
-)
 
 var (
 	tmpSuffixes        = [...]string{".tmp", ".temp"}                                          //nolint:gochecknoglobals
@@ -172,79 +83,6 @@ var gutaKey = sync.Pool{ //nolint:gochecknoglobals
 	New: func() any {
 		return new([maxNumOfGUTAKeys]GUTAKey)
 	},
-}
-
-// String lets you convert a DirGUTAFileType to a meaningful string.
-func (d DirGUTAFileType) String() string {
-	return [...]string{
-		"other", "temp", "vcf", "vcf.gz", "bcf", "sam", "bam",
-		"cram", "fasta", "fastq", "fastq.gz", "ped/bed", "compressed", "text",
-		"log", "dir",
-	}[d]
-}
-
-// FileTypeStringToDirGUTAFileType converts the String() representation of a
-// DirGUTAFileType back in to a DirGUTAFileType. Errors if an invalid string
-// supplied.
-func FileTypeStringToDirGUTAFileType(ft string) (DirGUTAFileType, error) {
-	convert := map[string]DirGUTAFileType{
-		"other":      DGUTAFileTypeOther,
-		"temp":       DGUTAFileTypeTemp,
-		"vcf":        DGUTAFileTypeVCF,
-		"vcf.gz":     DGUTAFileTypeVCFGz,
-		"bcf":        DGUTAFileTypeBCF,
-		"sam":        DGUTAFileTypeSam,
-		"bam":        DGUTAFileTypeBam,
-		"cram":       DGUTAFileTypeCram,
-		"fasta":      DGUTAFileTypeFasta,
-		"fastq":      DGUTAFileTypeFastq,
-		"fastq.gz":   DGUTAFileTypeFastqGz,
-		"ped/bed":    DGUTAFileTypePedBed,
-		"compressed": DGUTAFileTypeCompressed,
-		"text":       DGUTAFileTypeText,
-		"log":        DGUTAFileTypeLog,
-		"dir":        DGUTAFileTypeDir,
-	}
-
-	dgft, ok := convert[ft]
-
-	if !ok {
-		return DGUTAFileTypeOther, ErrInvalidType
-	}
-
-	return dgft, nil
-}
-
-// AgeStringToDirGUTAge converts the String() representation of a DirGUTAge
-// back in to a DirGUTAge. Errors if an invalid string supplied.
-func AgeStringToDirGUTAge(age string) (DirGUTAge, error) {
-	convert := map[string]DirGUTAge{
-		"0":  DGUTAgeAll,
-		"1":  DGUTAgeA1M,
-		"2":  DGUTAgeA2M,
-		"3":  DGUTAgeA6M,
-		"4":  DGUTAgeA1Y,
-		"5":  DGUTAgeA2Y,
-		"6":  DGUTAgeA3Y,
-		"7":  DGUTAgeA5Y,
-		"8":  DGUTAgeA7Y,
-		"9":  DGUTAgeM1M,
-		"10": DGUTAgeM2M,
-		"11": DGUTAgeM6M,
-		"12": DGUTAgeM1Y,
-		"13": DGUTAgeM2Y,
-		"14": DGUTAgeM3Y,
-		"15": DGUTAgeM5Y,
-		"16": DGUTAgeM7Y,
-	}
-
-	dgage, ok := convert[age]
-
-	if !ok {
-		return DGUTAgeAll, ErrInvalidAge
-	}
-
-	return dgage, nil
 }
 
 // gutaStore is a sortable map with gid,uid,filetype,age as keys and
@@ -487,24 +325,24 @@ func isLog(path string) bool {
 	return hasOneOfSuffixes(path, logSuffixes[:])
 }
 
-type db interface {
-	Add(recordDGUTA) error
+type DB interface {
+	Add(db.RecordDGUTA) error
 }
 
 // DirGroupUserTypeAge is used to summarise file stats by directory, group,
 // user, file type and age.
 type DirGroupUserTypeAge struct {
-	db      db
+	db      DB
 	store   gutaStore
 	thisDir *summary.DirectoryPath
 }
 
 // NewDirGroupUserTypeAge returns a DirGroupUserTypeAge.
-func NewDirGroupUserTypeAge(db db) summary.OperationGenerator {
+func NewDirGroupUserTypeAge(db DB) summary.OperationGenerator {
 	return newDirGroupUserTypeAge(db, time.Now().Unix())
 }
 
-func newDirGroupUserTypeAge(db db, refTime int64) summary.OperationGenerator {
+func newDirGroupUserTypeAge(db DB, refTime int64) summary.OperationGenerator {
 	return func() summary.Operation {
 		return &DirGroupUserTypeAge{
 			db:    db,
@@ -550,7 +388,7 @@ func (d *DirGroupUserTypeAge) Add(info *summary.FileInfo) error {
 	gutaKeys.append(info.GID, info.UID, filetype)
 
 	if isTmp {
-		gutaKeys.append(info.GID, info.UID, DGUTAFileTypeTemp)
+		gutaKeys.append(info.GID, info.UID, db.DGUTAFileTypeTemp)
 	}
 
 	d.addForEach(gutaKeys, info.Size, atime, maxInt(0, info.MTime))
@@ -560,14 +398,14 @@ func (d *DirGroupUserTypeAge) Add(info *summary.FileInfo) error {
 	return nil
 }
 
-func infoToType(info *summary.FileInfo) (DirGUTAFileType, bool) {
+func infoToType(info *summary.FileInfo) (db.DirGUTAFileType, bool) {
 	var (
 		isTmp    bool
-		filetype DirGUTAFileType
+		filetype db.DirGUTAFileType
 	)
 
 	if info.IsDir() {
-		filetype = DGUTAFileTypeDir
+		filetype = db.DGUTAFileTypeDir
 	} else {
 		filetype, isTmp = filenameToType(string(info.Name))
 	}
@@ -581,8 +419,8 @@ func infoToType(info *summary.FileInfo) (DirGUTAFileType, bool) {
 
 type GUTAKey struct {
 	GID, UID uint32
-	FileType DirGUTAFileType
-	Age      DirGUTAge
+	FileType db.DirGUTAFileType
+	Age      db.DirGUTAge
 }
 
 type GUTAKeys []GUTAKey
@@ -629,8 +467,8 @@ func gutaKeyFromString(key string) GUTAKey {
 	return GUTAKey{
 		GID:      binary.BigEndian.Uint32(dgutaBytes[:4]),
 		UID:      binary.BigEndian.Uint32(dgutaBytes[4:8]),
-		FileType: DirGUTAFileType(dgutaBytes[8]),
-		Age:      DirGUTAge(dgutaBytes[9]),
+		FileType: db.DirGUTAFileType(dgutaBytes[8]),
+		Age:      db.DirGUTAge(dgutaBytes[9]),
 	}
 }
 
@@ -647,8 +485,8 @@ func (g GUTAKey) String() string {
 
 // appendGUTAKeys appends gutaKeys with keys including the given gid, uid, file
 // type and age.
-func (g *GUTAKeys) append(gid, uid uint32, fileType DirGUTAFileType) {
-	for _, age := range DirGUTAges {
+func (g *GUTAKeys) append(gid, uid uint32, fileType db.DirGUTAFileType) {
+	for _, age := range db.DirGUTAges {
 		*g = append(*g, GUTAKey{gid, uid, fileType, age})
 	}
 }
@@ -669,7 +507,7 @@ func maxInt(ints ...int64) int64 {
 // pathToTypes determines the filetype of the given path based on its basename,
 // and returns a slice of our DirGUTAFileType. More than one is possible,
 // because a path can be both a temporary file, and another type.
-func filenameToType(name string) (DirGUTAFileType, bool) {
+func filenameToType(name string) (db.DirGUTAFileType, bool) {
 	isTmp := isTempFile(name)
 
 	for ftype, isThisType := range typeCheckers {
@@ -678,7 +516,7 @@ func filenameToType(name string) (DirGUTAFileType, bool) {
 		}
 	}
 
-	return DGUTAFileTypeOther, isTmp
+	return db.DGUTAFileTypeOther, isTmp
 }
 
 // addForEach breaks path into each directory, gets a gutaStore for each and
@@ -747,14 +585,14 @@ type DirGUTA struct {
 func (d *DirGroupUserTypeAge) Output() error {
 	dgutas := d.store.sort()
 
-	dguta := recordDGUTA{
+	dguta := db.RecordDGUTA{
 		Dir: d.thisDir,
 	}
 
 	for _, guta := range dgutas {
 		s := d.store.sumMap[guta]
 
-		dguta.GUTAs = append(dguta.GUTAs, &GUTA{
+		dguta.GUTAs = append(dguta.GUTAs, &db.GUTA{
 			GID:   guta.GID,
 			UID:   guta.UID,
 			FT:    guta.FileType,
@@ -787,8 +625,8 @@ func (d *DirGroupUserTypeAge) Output() error {
 func fitsAgeInterval(dguta GUTAKey, atime, mtime, refTime int64) bool {
 	age := int(dguta.Age)
 
-	if age > len(ageThresholds) {
-		return checkTimeIsInInterval(mtime, refTime, age-(len(ageThresholds)+1))
+	if age > len(db.AgeThresholds) {
+		return checkTimeIsInInterval(mtime, refTime, age-(len(db.AgeThresholds)+1))
 	} else if age > 0 {
 		return checkTimeIsInInterval(atime, refTime, age-1)
 	}
@@ -797,5 +635,5 @@ func fitsAgeInterval(dguta GUTAKey, atime, mtime, refTime int64) bool {
 }
 
 func checkTimeIsInInterval(amtime, refTime int64, thresholdIndex int) bool {
-	return amtime <= refTime-ageThresholds[thresholdIndex]
+	return amtime <= refTime-db.AgeThresholds[thresholdIndex]
 }

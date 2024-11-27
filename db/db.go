@@ -23,7 +23,7 @@
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  ******************************************************************************/
 
-package dirguta
+package db
 
 import (
 	"log/slog"
@@ -45,6 +45,10 @@ const (
 	dbBasenameChildren = dbBasenameDGUTA + ".children"
 	dbOpenMode         = 0600
 )
+
+type Error string
+
+func (e Error) Error() string { return string(e) }
 
 const ErrDBExists = Error("database already exists")
 const ErrDBNotExists = Error("database doesn't exist")
@@ -281,8 +285,7 @@ type DB struct {
 	writeSet   *dbSet
 	readSets   []*dbSet
 	batchSize  int
-	writeBatch []*recordDGUTA
-	writeI     int
+	writeBatch []RecordDGUTA
 	writeErr   error
 	ch         codec.Handle
 }
@@ -292,7 +295,7 @@ type DB struct {
 // case of only reading databases with Open(), you can supply multiple directory
 // paths to query all of them simultaneously.
 func NewDB(paths ...string) *DB {
-	return &DB{paths: paths}
+	return &DB{paths: paths, batchSize: 1}
 }
 
 // Store will read the given dguta file data (as output by
@@ -364,18 +367,16 @@ func (d *DB) createDB() error {
 
 // resetBatch prepares us to receive a new batch of DGUTAs from the parser.
 func (d *DB) resetBatch() {
-	d.writeBatch = make([]*recordDGUTA, d.batchSize)
-	d.writeI = 0
+	d.writeBatch = d.writeBatch[:0]
 }
 
-// parserCB is a dgutaParserCallBack that is called during parsing of dguta file
+// Add is a dgutaParserCallBack that is called during parsing of dguta file
 // data. It batches up the DGUTs we receive, and writes them to the database
 // when a batch is full.
-func (d *DB) parserCB(dguta *recordDGUTA) {
-	d.writeBatch[d.writeI] = dguta
-	d.writeI++
+func (d *DB) Add(dguta RecordDGUTA) {
+	d.writeBatch = append(d.writeBatch, dguta)
 
-	if d.writeI == d.batchSize {
+	if len(d.writeBatch) == d.batchSize {
 		d.storeBatch()
 		d.resetBatch()
 	}
@@ -496,10 +497,6 @@ func (d *DB) storeDGUTAs(tx *bolt.Tx) error {
 	b := tx.Bucket([]byte(gutaBucket))
 
 	for _, dguta := range d.writeBatch {
-		if dguta == nil {
-			return nil
-		}
-
 		if err := d.storeDGUTA(b, dguta); err != nil {
 			return err
 		}
@@ -510,8 +507,8 @@ func (d *DB) storeDGUTAs(tx *bolt.Tx) error {
 
 // storeDGUTA stores a DGUTA in the db. DGUTAs are expected to be unique per
 // Store() operation and database.
-func (d *DB) storeDGUTA(b *bolt.Bucket, dguta *recordDGUTA) error {
-	var dgutas [len(DirGUTAges)]recordDGUTA
+func (d *DB) storeDGUTA(b *bolt.Bucket, dguta RecordDGUTA) error {
+	var dgutas [len(DirGUTAges)]RecordDGUTA
 
 	for _, v := range dguta.GUTAs {
 		dgutas[v.Age].GUTAs = append(dgutas[v.Age].GUTAs, v)
