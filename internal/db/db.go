@@ -32,6 +32,7 @@
 package internaldb
 
 import (
+	"fmt"
 	"os/user"
 	"testing"
 )
@@ -54,5 +55,22 @@ func GetUserAndGroups(t *testing.T) (string, string, []string) {
 		return "", "", nil
 	}
 
-	return uu.Username, uu.Uid, gids
+	filteredGIDs := make([]string, 0, len(gids))
+
+	for _, gid := range gids {
+		group, err := user.LookupGroupId(gid)
+		if err != nil {
+			continue
+		}
+
+		if group.Name == "root" || group.Name == "wheel" {
+			continue
+		}
+
+		filteredGIDs = append(filteredGIDs, gid)
+	}
+
+	fmt.Println(filteredGIDs)
+
+	return uu.Username, uu.Uid, filteredGIDs
 }

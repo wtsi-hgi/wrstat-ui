@@ -89,16 +89,17 @@ func CreateDefaultTestData(gidA, gidB, gidC, uidA, uidB uint32, refTime int64) *
 	addFiles(dir, "a/b/e/h", "file.bam", 1, 5, 100, 30, gidA, uidA)
 	addFiles(dir, "a/b/e/h/tmp", "file.bam", 1, 5, 80, 80, gidA, uidA)
 	addFiles(dir, "a/c/d", "file.cram", 5, 1, 90, 90, gidB, uidB)
-	addFiles(dir, "a/c/d", "file.cram", 7, 1, refTime-db.SecondsInAYear, refTime-(db.SecondsInAYear*3), 3, 103)
-	// addFiles(dir, "k", "file1.cram", 1, 1, refTime-(db.SecondsInAYear*3), refTime-(db.SecondsInAYear*7), gidB, uidA)
-	// addFiles(dir, "k", "file2.cram", 1, 2, refTime-(db.SecondsInAYear*1), refTime-(db.SecondsInAYear*2), gidB, uidA)
-	// addFiles(dir, "k", "file3.cram", 1, 3, refTime-(db.SecondsInAMonth)-10, refTime-(db.SecondsInAMonth*2), gidB, uidA)
-	// addFiles(dir, "k", "file4.cram", 1, 4, refTime-(db.SecondsInAMonth*6), refTime-(db.SecondsInAYear), gidB, uidA)
-	// addFiles(dir, "k", "file5.cram", 1, 5, refTime, refTime, gidB, uidA)
 
 	if gidC == 0 {
 		addFiles(dir, "a/b/d/i/j", "file.cram", 1, 1, 50, 50, gidC, uidB)
 		addFiles(dir, "a/b/d/g", "file.cram", 4, 10, 50, 75, gidA, uidB)
+		addFiles(dir, "k", "file1.cram", 1, 1, refTime-(db.SecondsInAYear*3), refTime-(db.SecondsInAYear*7), gidB, uidA)
+		addFiles(dir, "k", "file2.cram", 1, 2, refTime-(db.SecondsInAYear*1), refTime-(db.SecondsInAYear*2), gidB, uidA)
+		addFiles(dir, "k", "file3.cram", 1, 3, refTime-(db.SecondsInAMonth)-10, refTime-(db.SecondsInAMonth*2), gidB, uidA)
+		addFiles(dir, "k", "file4.cram", 1, 4, refTime-(db.SecondsInAMonth*6), refTime-(db.SecondsInAYear), gidB, uidA)
+		addFiles(dir, "k", "file5.cram", 1, 5, refTime, refTime, gidB, uidA)
+	} else {
+		addFiles(dir, "a/c/d", "file.cram", 7, 1, refTime-db.SecondsInAYear, refTime-(db.SecondsInAYear*3), 3, 103)
 	}
 
 	return dir

@@ -31,6 +31,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"os/user"
 	"path/filepath"
 	"sort"
@@ -46,6 +47,8 @@ import (
 	internaldata "github.com/wtsi-hgi/wrstat-ui/internal/data"
 	internaldb "github.com/wtsi-hgi/wrstat-ui/internal/db"
 	"github.com/wtsi-hgi/wrstat-ui/internal/fixtimes"
+	ifs "github.com/wtsi-hgi/wrstat-ui/internal/fs"
+	"github.com/wtsi-hgi/wrstat-ui/internal/split"
 )
 
 func TestIDsToWanted(t *testing.T) {
@@ -58,9 +61,9 @@ func TestIDsToWanted(t *testing.T) {
 func TestServer(t *testing.T) {
 	username, uid, gids := internaldb.GetUserAndGroups(t)
 	exampleGIDs := getExampleGIDs(gids)
-	//sentinelPollFrequency := 10 * time.Millisecond
+	sentinelPollFrequency := 10 * time.Millisecond
 
-	//refTime := time.Now().Unix()
+	refTime := time.Now().Unix()
 
 	Convey("Given a Server", t, func() {
 		logWriter := gas.NewStringLogger()
@@ -176,412 +179,412 @@ func TestServer(t *testing.T) {
 			logWriter.Reset()
 
 			Convey("And given a dguta database", func() {
-				// path, err := internaldb.CreateExampleDGUTADBCustomIDs(t, uid, gids[0], gids[1], refTime)
-				// So(err, ShouldBeNil)
-				// groupA := gidToGroup(t, gids[0])
-				// groupB := gidToGroup(t, gids[1])
+				path, err := internaldb.CreateExampleDGUTADBCustomIDs(t, uid, gids[0], gids[1], refTime)
+				So(err, ShouldBeNil)
+				groupA := gidToGroup(t, gids[0])
+				groupB := gidToGroup(t, gids[1])
 
-				// tree, err := dirguta.NewTree(path)
-				// So(err, ShouldBeNil)
+				tree, err := db.NewTree(path)
+				So(err, ShouldBeNil)
 
-				// expectedRaw, err := tree.Where("/", nil, split.SplitsToSplitFn(2))
-				// So(err, ShouldBeNil)
+				expectedRaw, err := tree.Where("/", nil, split.SplitsToSplitFn(2))
+				So(err, ShouldBeNil)
 
-				// expected := s.dcssToSummaries(expectedRaw)
+				expected := s.dcssToSummaries(expectedRaw)
 
-				// fixDirSummaryTimes(expected)
+				fixDirSummaryTimes(expected)
 
-				// expectedNonRoot, expectedGroupsRoot := adjustedExpectations(expected, groupA, groupB)
+				expectedNonRoot, expectedGroupsRoot := adjustedExpectations(expected, groupA, groupB)
 
-				// expectedNoTemp := removeTempFromDSs(expected)
+				expectedNoTemp := removeTempFromDSs(expected)
 
-				// tree.Close()
+				tree.Close()
 
-				// Convey("You can get results after calling LoadDGUTADB", func() {
-				// 	err = s.LoadDGUTADBs(path)
-				// 	So(err, ShouldBeNil)
+				Convey("You can get results after calling LoadDGUTADB", func() {
+					err = s.LoadDGUTADBs(path)
+					So(err, ShouldBeNil)
 
-				// 	response, err := queryWhere(s, "")
-				// 	So(err, ShouldBeNil)
-				// 	So(response.Code, ShouldEqual, http.StatusOK)
-				// 	So(logWriter.String(), ShouldContainSubstring, "[GET /rest/v1/where")
-				// 	So(logWriter.String(), ShouldContainSubstring, "STATUS=200")
+					response, err := queryWhere(s, "")
+					So(err, ShouldBeNil)
+					So(response.Code, ShouldEqual, http.StatusOK)
+					So(logWriter.String(), ShouldContainSubstring, "[GET /rest/v1/where")
+					So(logWriter.String(), ShouldContainSubstring, "STATUS=200")
 
-				// 	result, err := decodeWhereResult(response)
-				// 	So(err, ShouldBeNil)
-				// 	So(result, ShouldResemble, expected)
+					result, err := decodeWhereResult(response)
+					So(err, ShouldBeNil)
+					So(result, ShouldResemble, expected)
 
-				// 	Convey("And you can filter results", func() {
-				// 		groups := gidsToGroups(t, gids...)
+					Convey("And you can filter results", func() {
+						groups := gidsToGroups(t, gids...)
 
-				// 		expectedUsers := expectedNonRoot[0].Users
-				// 		sort.Strings(expectedUsers)
-				// 		expectedUser := []string{username}
-				// 		expectedRoot := []string{"root"}
-				// 		expectedGroupsA := []string{groupA}
-				// 		expectedGroupsB := []string{groupB}
-				// 		expectedGroupsRootA := []string{groupA, "root"}
-				// 		sort.Strings(expectedGroupsRootA)
-				// 		expectedFTs := expectedNonRoot[0].FileTypes
-				// 		expectedBams := []string{"bam", "temp"}
-				// 		expectedCrams := []string{"cram"}
-				// 		expectedAtime := time.Unix(50, 0)
-				// 		matrix := []*matrixElement{
-				// 			{"?groups=" + groups[0] + "," + groups[1], expectedNonRoot},
-				// 			{"?groups=" + groups[0], []*DirSummary{
-				// 				{
-				// 					Dir: "/a/b", Count: 13, Size: 120, Atime: expectedAtime,
-				// 					Mtime: time.Unix(80, 0), Users: expectedUsers,
-				// 					Groups: expectedGroupsA, FileTypes: expectedFTs,
-				// 				},
-				// 				{
-				// 					Dir: "/a/b/d", Count: 11, Size: 110, Atime: expectedAtime,
-				// 					Mtime: time.Unix(75, 0), Users: expectedUsers,
-				// 					Groups: expectedGroupsA, FileTypes: expectedCrams,
-				// 				},
-				// 				{
-				// 					Dir: "/a/b/d/g", Count: 10, Size: 100, Atime: time.Unix(60, 0),
-				// 					Mtime: time.Unix(75, 0), Users: expectedUsers,
-				// 					Groups: expectedGroupsA, FileTypes: expectedCrams,
-				// 				},
-				// 				{
-				// 					Dir: "/a/b/d/f", Count: 1, Size: 10, Atime: expectedAtime,
-				// 					Mtime: time.Unix(50, 0), Users: expectedUser,
-				// 					Groups: expectedGroupsA, FileTypes: expectedCrams,
-				// 				},
-				// 				{
-				// 					Dir: "/a/b/e/h", Count: 2, Size: 10, Atime: time.Unix(80, 0),
-				// 					Mtime: time.Unix(80, 0), Users: expectedUser,
-				// 					Groups: expectedGroupsA, FileTypes: expectedBams,
-				// 				},
-				// 				{
-				// 					Dir: "/a/b/e/h/tmp", Count: 1, Size: 5, Atime: time.Unix(80, 0),
-				// 					Mtime: time.Unix(80, 0), Users: expectedUser,
-				// 					Groups: expectedGroupsA, FileTypes: expectedBams,
-				// 				},
-				// 			}},
-				// 			{"?users=root," + username, expected},
-				// 			{"?users=root", []*DirSummary{
-				// 				{
-				// 					Dir: "/a", Count: 14, Size: 86, Atime: expectedAtime,
-				// 					Mtime: time.Unix(90, 0), Users: expectedRoot,
-				// 					Groups: expectedGroupsRoot, FileTypes: expectedCrams,
-				// 				},
-				// 				{
-				// 					Dir: "/a/b/d", Count: 9, Size: 81, Atime: expectedAtime,
-				// 					Mtime: time.Unix(75, 0), Users: expectedRoot,
-				// 					Groups: expectedGroupsRootA, FileTypes: expectedCrams,
-				// 				},
-				// 				{
-				// 					Dir: "/a/b/d/g", Count: 8, Size: 80, Atime: time.Unix(75, 0),
-				// 					Mtime: time.Unix(75, 0), Users: expectedRoot,
-				// 					Groups: expectedGroupsA, FileTypes: expectedCrams,
-				// 				},
-				// 				{
-				// 					Dir: "/a/c/d", Count: 5, Size: 5, Atime: time.Unix(90, 0),
-				// 					Mtime: time.Unix(90, 0), Users: expectedRoot,
-				// 					Groups: expectedGroupsB, FileTypes: expectedCrams,
-				// 				},
-				// 				{
-				// 					Dir: "/a/b/d/i/j", Count: 1, Size: 1, Atime: expectedAtime,
-				// 					Mtime: expectedAtime, Users: expectedRoot,
-				// 					Groups: expectedRoot, FileTypes: expectedCrams,
-				// 				},
-				// 			}},
-				// 			{"?groups=" + groups[0] + "&users=root", []*DirSummary{
-				// 				{
-				// 					Dir: "/a/b/d/g", Count: 8, Size: 80, Atime: time.Unix(75, 0),
-				// 					Mtime: time.Unix(75, 0), Users: expectedRoot,
-				// 					Groups: expectedGroupsA, FileTypes: expectedCrams,
-				// 				},
-				// 			}},
-				// 			{"?types=cram,bam", expectedNoTemp},
-				// 			{"?types=bam", []*DirSummary{
-				// 				{
-				// 					Dir: "/a/b/e/h", Count: 2, Size: 10, Atime: time.Unix(80, 0),
-				// 					Mtime: time.Unix(80, 0), Users: expectedUser,
-				// 					Groups: expectedGroupsA, FileTypes: []string{"bam"},
-				// 				},
-				// 				{
-				// 					Dir: "/a/b/e/h/tmp", Count: 1, Size: 5, Atime: time.Unix(80, 0),
-				// 					Mtime: time.Unix(80, 0), Users: expectedUser,
-				// 					Groups: expectedGroupsA, FileTypes: []string{"bam"},
-				// 				},
-				// 			}},
-				// 			{"?groups=" + groups[0] + "&users=root&types=cram,bam", []*DirSummary{
-				// 				{
-				// 					Dir: "/a/b/d/g", Count: 8, Size: 80, Atime: time.Unix(75, 0),
-				// 					Mtime: time.Unix(75, 0), Users: expectedRoot,
-				// 					Groups: expectedGroupsA, FileTypes: expectedCrams,
-				// 				},
-				// 			}},
-				// 			{"?groups=" + groups[0] + "&users=root&types=bam", []*DirSummary{}},
-				// 			{"?splits=0", []*DirSummary{
-				// 				{
-				// 					Dir: "/", Count: 24, Size: 141, Atime: expectedAtime,
-				// 					Mtime: expectedNonRoot[0].Mtime, Users: expectedUsers,
-				// 					Groups: expectedGroupsRoot, FileTypes: expectedFTs,
-				// 				},
-				// 			}},
-				// 			{"?dir=/a&splits=0", []*DirSummary{
-				// 				{
-				// 					Dir: "/a", Count: 19, Size: 126, Atime: expectedAtime,
-				// 					Mtime: time.Unix(90, 0), Users: expectedUsers,
-				// 					Groups: expectedGroupsRoot, FileTypes: expectedFTs,
-				// 				},
-				// 			}},
-				// 			{"?dir=/a/b/e/h", []*DirSummary{
-				// 				{
-				// 					Dir: "/a/b/e/h", Count: 2, Size: 10, Atime: time.Unix(80, 0),
-				// 					Mtime: time.Unix(80, 0), Users: expectedUser,
-				// 					Groups: expectedGroupsA, FileTypes: expectedBams,
-				// 				},
-				// 				{
-				// 					Dir: "/a/b/e/h/tmp", Count: 1, Size: 5, Atime: time.Unix(80, 0),
-				// 					Mtime: time.Unix(80, 0), Users: expectedUser,
-				// 					Groups: expectedGroupsA, FileTypes: expectedBams,
-				// 				},
-				// 			}},
-				// 			{"?dir=/k&age=1", []*DirSummary{
-				// 				{
-				// 					Dir: "/k", Count: 4, Size: 10, Atime: expectedNonRoot[3].Atime,
-				// 					Mtime: time.Unix(refTime-(dirguta.SecondsInAMonth*2), 0), Users: expectedUser,
-				// 					Groups: expectedGroupsB, FileTypes: expectedCrams, Age: dirguta.DGUTAgeA1M,
-				// 				},
-				// 			}},
-				// 			{"?dir=/k&age=2", []*DirSummary{
-				// 				{
-				// 					Dir: "/k", Count: 3, Size: 7, Atime: expectedNonRoot[3].Atime,
-				// 					Mtime: time.Unix(refTime-dirguta.SecondsInAYear, 0), Users: expectedUser,
-				// 					Groups: expectedGroupsB, FileTypes: expectedCrams, Age: dirguta.DGUTAgeA2M,
-				// 				},
-				// 			}},
-				// 			{"?dir=/k&age=6", []*DirSummary{
-				// 				{
-				// 					Dir: "/k", Count: 1, Size: 1, Atime: expectedNonRoot[3].Atime,
-				// 					Mtime: time.Unix(refTime-(dirguta.SecondsInAYear*7), 0), Users: expectedUser,
-				// 					Groups: expectedGroupsB, FileTypes: expectedCrams, Age: dirguta.DGUTAgeA3Y,
-				// 				},
-				// 			}},
-				// 			{"?dir=/k&age=8", []*DirSummary{}},
-				// 			{"?dir=/k&age=11", []*DirSummary{
-				// 				{
-				// 					Dir: "/k", Count: 3, Size: 7, Atime: expectedNonRoot[3].Atime,
-				// 					Mtime: time.Unix(refTime-(dirguta.SecondsInAYear), 0), Users: expectedUser,
-				// 					Groups: expectedGroupsB, FileTypes: expectedCrams, Age: dirguta.DGUTAgeM6M,
-				// 				},
-				// 			}},
-				// 			{"?dir=/k&age=16", []*DirSummary{
-				// 				{
-				// 					Dir: "/k", Count: 1, Size: 1, Atime: expectedNonRoot[3].Atime,
-				// 					Mtime: time.Unix(refTime-(dirguta.SecondsInAYear*7), 0), Users: expectedUser,
-				// 					Groups: expectedGroupsB, FileTypes: expectedCrams, Age: dirguta.DGUTAgeM7Y,
-				// 				},
-				// 			}},
-				// 		}
+						expectedUsers := expectedNonRoot[0].Users
+						sort.Strings(expectedUsers)
+						expectedUser := []string{username}
+						expectedRoot := []string{"root"}
+						expectedGroupsA := []string{groupA}
+						expectedGroupsB := []string{groupB}
+						expectedGroupsRootA := []string{groupA, "root"}
+						sort.Strings(expectedGroupsRootA)
+						expectedFTs := expectedNonRoot[0].FileTypes
+						expectedBams := []string{"bam", "temp"}
+						expectedCrams := []string{"cram"}
+						expectedAtime := time.Unix(50, 0)
+						matrix := []*matrixElement{
+							{"?groups=" + groups[0] + "," + groups[1], expectedNonRoot},
+							{"?groups=" + groups[0], []*DirSummary{
+								{
+									Dir: "/a/b/", Count: 13, Size: 120, Atime: expectedAtime,
+									Mtime: time.Unix(80, 0), Users: expectedUsers,
+									Groups: expectedGroupsA, FileTypes: expectedFTs,
+								},
+								{
+									Dir: "/a/b/d/", Count: 11, Size: 110, Atime: expectedAtime,
+									Mtime: time.Unix(75, 0), Users: expectedUsers,
+									Groups: expectedGroupsA, FileTypes: expectedCrams,
+								},
+								{
+									Dir: "/a/b/d/g/", Count: 10, Size: 100, Atime: time.Unix(50, 0),
+									Mtime: time.Unix(75, 0), Users: expectedUsers,
+									Groups: expectedGroupsA, FileTypes: expectedCrams,
+								},
+								{
+									Dir: "/a/b/d/f/", Count: 1, Size: 10, Atime: expectedAtime,
+									Mtime: time.Unix(50, 0), Users: expectedUser,
+									Groups: expectedGroupsA, FileTypes: expectedCrams,
+								},
+								{
+									Dir: "/a/b/e/h/", Count: 2, Size: 10, Atime: time.Unix(80, 0),
+									Mtime: time.Unix(80, 0), Users: expectedUser,
+									Groups: expectedGroupsA, FileTypes: expectedBams,
+								},
+								{
+									Dir: "/a/b/e/h/tmp/", Count: 1, Size: 5, Atime: time.Unix(80, 0),
+									Mtime: time.Unix(80, 0), Users: expectedUser,
+									Groups: expectedGroupsA, FileTypes: expectedBams,
+								},
+							}},
+							{"?users=root," + username, expected},
+							{"?users=root", []*DirSummary{
+								{
+									Dir: "/a/", Count: 14, Size: 86, Atime: expectedAtime,
+									Mtime: time.Unix(90, 0), Users: expectedRoot,
+									Groups: expectedGroupsRoot, FileTypes: expectedCrams,
+								},
+								{
+									Dir: "/a/b/d/", Count: 9, Size: 81, Atime: expectedAtime,
+									Mtime: time.Unix(75, 0), Users: expectedRoot,
+									Groups: expectedGroupsRootA, FileTypes: expectedCrams,
+								},
+								{
+									Dir: "/a/b/d/g/", Count: 8, Size: 80, Atime: time.Unix(50, 0),
+									Mtime: time.Unix(75, 0), Users: expectedRoot,
+									Groups: expectedGroupsA, FileTypes: expectedCrams,
+								},
+								{
+									Dir: "/a/c/d/", Count: 5, Size: 5, Atime: time.Unix(90, 0),
+									Mtime: time.Unix(90, 0), Users: expectedRoot,
+									Groups: expectedGroupsB, FileTypes: expectedCrams,
+								},
+								{
+									Dir: "/a/b/d/i/j/", Count: 1, Size: 1, Atime: expectedAtime,
+									Mtime: expectedAtime, Users: expectedRoot,
+									Groups: expectedRoot, FileTypes: expectedCrams,
+								},
+							}},
+							{"?groups=" + groups[0] + "&users=root", []*DirSummary{
+								{
+									Dir: "/a/b/d/g/", Count: 8, Size: 80, Atime: time.Unix(50, 0),
+									Mtime: time.Unix(75, 0), Users: expectedRoot,
+									Groups: expectedGroupsA, FileTypes: expectedCrams,
+								},
+							}},
+							{"?types=cram,bam", expectedNoTemp},
+							{"?types=bam", []*DirSummary{
+								{
+									Dir: "/a/b/e/h/", Count: 2, Size: 10, Atime: time.Unix(80, 0),
+									Mtime: time.Unix(80, 0), Users: expectedUser,
+									Groups: expectedGroupsA, FileTypes: []string{"bam"},
+								},
+								{
+									Dir: "/a/b/e/h/tmp/", Count: 1, Size: 5, Atime: time.Unix(80, 0),
+									Mtime: time.Unix(80, 0), Users: expectedUser,
+									Groups: expectedGroupsA, FileTypes: []string{"bam"},
+								},
+							}},
+							{"?groups=" + groups[0] + "&users=root&types=cram,bam", []*DirSummary{
+								{
+									Dir: "/a/b/d/g/", Count: 8, Size: 80, Atime: time.Unix(50, 0),
+									Mtime: time.Unix(75, 0), Users: expectedRoot,
+									Groups: expectedGroupsA, FileTypes: expectedCrams,
+								},
+							}},
+							{"?groups=" + groups[0] + "&users=root&types=bam", []*DirSummary{}},
+							{"?splits=0", []*DirSummary{
+								{
+									Dir: "/", Count: 24, Size: 141, Atime: expectedAtime,
+									Mtime: expectedNonRoot[0].Mtime, Users: expectedUsers,
+									Groups: expectedGroupsRoot, FileTypes: expectedFTs,
+								},
+							}},
+							{"?dir=/a&splits=0", []*DirSummary{
+								{
+									Dir: "/a", Count: 19, Size: 126, Atime: expectedAtime,
+									Mtime: time.Unix(90, 0), Users: expectedUsers,
+									Groups: expectedGroupsRoot, FileTypes: expectedFTs,
+								},
+							}},
+							{"?dir=/a/b/e/h", []*DirSummary{
+								{
+									Dir: "/a/b/e/h", Count: 2, Size: 10, Atime: time.Unix(80, 0),
+									Mtime: time.Unix(80, 0), Users: expectedUser,
+									Groups: expectedGroupsA, FileTypes: expectedBams,
+								},
+								{
+									Dir: "/a/b/e/h/tmp/", Count: 1, Size: 5, Atime: time.Unix(80, 0),
+									Mtime: time.Unix(80, 0), Users: expectedUser,
+									Groups: expectedGroupsA, FileTypes: expectedBams,
+								},
+							}},
+							{"?dir=/k/&age=1", []*DirSummary{
+								{
+									Dir: "/k/", Count: 4, Size: 10, Atime: expectedNonRoot[3].Atime,
+									Mtime: time.Unix(refTime-(db.SecondsInAMonth*2), 0), Users: expectedUser,
+									Groups: expectedGroupsB, FileTypes: expectedCrams, Age: db.DGUTAgeA1M,
+								},
+							}},
+							{"?dir=/k&age=2", []*DirSummary{
+								{
+									Dir: "/k", Count: 3, Size: 7, Atime: expectedNonRoot[3].Atime,
+									Mtime: time.Unix(refTime-db.SecondsInAYear, 0), Users: expectedUser,
+									Groups: expectedGroupsB, FileTypes: expectedCrams, Age: db.DGUTAgeA2M,
+								},
+							}},
+							{"?dir=/k&age=6", []*DirSummary{
+								{
+									Dir: "/k", Count: 1, Size: 1, Atime: expectedNonRoot[3].Atime,
+									Mtime: time.Unix(refTime-(db.SecondsInAYear*7), 0), Users: expectedUser,
+									Groups: expectedGroupsB, FileTypes: expectedCrams, Age: db.DGUTAgeA3Y,
+								},
+							}},
+							{"?dir=/k&age=8", []*DirSummary{}},
+							{"?dir=/k&age=11", []*DirSummary{
+								{
+									Dir: "/k", Count: 3, Size: 7, Atime: expectedNonRoot[3].Atime,
+									Mtime: time.Unix(refTime-(db.SecondsInAYear), 0), Users: expectedUser,
+									Groups: expectedGroupsB, FileTypes: expectedCrams, Age: db.DGUTAgeM6M,
+								},
+							}},
+							{"?dir=/k&age=16", []*DirSummary{
+								{
+									Dir: "/k", Count: 1, Size: 1, Atime: expectedNonRoot[3].Atime,
+									Mtime: time.Unix(refTime-(db.SecondsInAYear*7), 0), Users: expectedUser,
+									Groups: expectedGroupsB, FileTypes: expectedCrams, Age: db.DGUTAgeM7Y,
+								},
+							}},
+						}
 
-				// 		runMapMatrixTest(t, matrix, s)
-				// 	})
+						runMapMatrixTest(t, matrix, s)
+					})
 
-				// 	Convey("Where bad filters fail", func() {
-				// 		badFilters := []string{
-				// 			"?groups=fo#€o",
-				// 			"?users=fo#€o",
-				// 			"?types=fo#€o",
-				// 		}
+					Convey("Where bad filters fail", func() {
+						badFilters := []string{
+							"?groups=fo#€o",
+							"?users=fo#€o",
+							"?types=fo#€o",
+						}
 
-				// 		runSliceMatrixTest(t, badFilters, s)
-				// 	})
+						runSliceMatrixTest(t, badFilters, s)
+					})
 
-				// 	Convey("Unless you provide an invalid directory", func() {
-				// 		response, err = queryWhere(s, "?dir=/foo")
-				// 		So(err, ShouldBeNil)
-				// 		So(response.Code, ShouldEqual, http.StatusBadRequest)
-				// 		So(logWriter.String(), ShouldContainSubstring, "STATUS=400")
-				// 		So(logWriter.String(), ShouldContainSubstring, "Error #01: directory not found")
-				// 	})
+					Convey("Unless you provide an invalid directory", func() {
+						response, err = queryWhere(s, "?dir=/foo")
+						So(err, ShouldBeNil)
+						So(response.Code, ShouldEqual, http.StatusBadRequest)
+						So(logWriter.String(), ShouldContainSubstring, "STATUS=400")
+						So(logWriter.String(), ShouldContainSubstring, "Error #01: directory not found")
+					})
 
-				// 	Convey("And you can auto-reload a new database", func() {
-				// 		pathNew, errc := internaldb.CreateExampleDGUTADBCustomIDs(t, uid, gids[1], gids[0], refTime)
-				// 		So(errc, ShouldBeNil)
+					Convey("And you can auto-reload a new database", func() {
+						pathNew, errc := internaldb.CreateExampleDGUTADBCustomIDs(t, uid, gids[1], gids[0], refTime)
+						So(errc, ShouldBeNil)
 
-				// 		grandparentDir := filepath.Dir(filepath.Dir(path))
-				// 		newerPath := filepath.Join(grandparentDir, "newer."+internaldb.ExampleDgutaDirParentSuffix, "0")
-				// 		err = os.MkdirAll(filepath.Dir(newerPath), internaldb.DirPerms)
-				// 		So(err, ShouldBeNil)
-				// 		err = os.Rename(pathNew, newerPath)
-				// 		So(err, ShouldBeNil)
+						grandparentDir := filepath.Dir(filepath.Dir(path))
+						newerPath := filepath.Join(grandparentDir, "newer."+internaldb.ExampleDgutaDirParentSuffix, "0")
+						err = os.MkdirAll(filepath.Dir(newerPath), internaldb.DirPerms)
+						So(err, ShouldBeNil)
+						err = os.Rename(pathNew, newerPath)
+						So(err, ShouldBeNil)
 
-				// 		later := time.Now().Local().Add(1 * time.Second)
-				// 		err = os.Chtimes(filepath.Dir(newerPath), later, later)
-				// 		So(err, ShouldBeNil)
+						later := time.Now().Local().Add(1 * time.Second)
+						err = os.Chtimes(filepath.Dir(newerPath), later, later)
+						So(err, ShouldBeNil)
 
-				// 		response, err = queryWhere(s, "")
-				// 		So(err, ShouldBeNil)
-				// 		result, err = decodeWhereResult(response)
-				// 		So(err, ShouldBeNil)
-				// 		So(result, ShouldResemble, expected)
+						response, err = queryWhere(s, "")
+						So(err, ShouldBeNil)
+						result, err = decodeWhereResult(response)
+						So(err, ShouldBeNil)
+						So(result, ShouldResemble, expected)
 
-				// 		sentinel := path + ".sentinel"
+						sentinel := path + ".sentinel"
 
-				// 		err = s.EnableDGUTADBReloading(sentinel, grandparentDir,
-				// 			internaldb.ExampleDgutaDirParentSuffix, sentinelPollFrequency)
-				// 		So(err, ShouldNotBeNil)
+						err = s.EnableDGUTADBReloading(sentinel, grandparentDir,
+							internaldb.ExampleDgutaDirParentSuffix, sentinelPollFrequency)
+						So(err, ShouldNotBeNil)
 
-				// 		file, err := os.Create(sentinel)
-				// 		So(err, ShouldBeNil)
-				// 		err = file.Close()
-				// 		So(err, ShouldBeNil)
+						file, err := os.Create(sentinel)
+						So(err, ShouldBeNil)
+						err = file.Close()
+						So(err, ShouldBeNil)
 
-				// 		s.treeMutex.RLock()
-				// 		So(s.dataTimeStamp.IsZero(), ShouldBeTrue)
-				// 		s.treeMutex.RUnlock()
+						s.treeMutex.RLock()
+						So(s.dataTimeStamp.IsZero(), ShouldBeTrue)
+						s.treeMutex.RUnlock()
 
-				// 		err = s.EnableDGUTADBReloading(sentinel, grandparentDir,
-				// 			internaldb.ExampleDgutaDirParentSuffix, sentinelPollFrequency)
-				// 		So(err, ShouldBeNil)
+						err = s.EnableDGUTADBReloading(sentinel, grandparentDir,
+							internaldb.ExampleDgutaDirParentSuffix, sentinelPollFrequency)
+						So(err, ShouldBeNil)
 
-				// 		s.treeMutex.RLock()
-				// 		So(s.dataTimeStamp.IsZero(), ShouldBeFalse)
-				// 		previous := s.dataTimeStamp
-				// 		s.treeMutex.RUnlock()
+						s.treeMutex.RLock()
+						So(s.dataTimeStamp.IsZero(), ShouldBeFalse)
+						previous := s.dataTimeStamp
+						s.treeMutex.RUnlock()
 
-				// 		response, err = queryWhere(s, "")
-				// 		So(err, ShouldBeNil)
-				// 		result, err = decodeWhereResult(response)
+						response, err = queryWhere(s, "")
+						So(err, ShouldBeNil)
+						result, err = decodeWhereResult(response)
 
-				// 		So(err, ShouldBeNil)
-				// 		So(result, ShouldResemble, expected)
+						So(err, ShouldBeNil)
+						So(result, ShouldResemble, expected)
 
-				// 		_, err = os.Stat(path)
-				// 		So(err, ShouldBeNil)
+						_, err = os.Stat(path)
+						So(err, ShouldBeNil)
 
-				// 		now := time.Now().Local()
-				// 		err = os.Chtimes(sentinel, now, now)
-				// 		So(err, ShouldBeNil)
+						now := time.Now().Local()
+						err = os.Chtimes(sentinel, now, now)
+						So(err, ShouldBeNil)
 
-				// 		waitForFileToBeDeleted(t, path)
+						waitForFileToBeDeleted(t, path)
 
-				// 		s.treeMutex.RLock()
-				// 		So(s.dataTimeStamp.After(previous), ShouldBeTrue)
-				// 		s.treeMutex.RUnlock()
+						s.treeMutex.RLock()
+						So(s.dataTimeStamp.After(previous), ShouldBeTrue)
+						s.treeMutex.RUnlock()
 
-				// 		_, err = os.Stat(path)
-				// 		So(err, ShouldNotBeNil)
+						_, err = os.Stat(path)
+						So(err, ShouldNotBeNil)
 
-				// 		parent := filepath.Dir(path)
-				// 		_, err = os.Stat(parent)
-				// 		So(err, ShouldBeNil)
+						parent := filepath.Dir(path)
+						_, err = os.Stat(parent)
+						So(err, ShouldBeNil)
 
-				// 		response, err = queryWhere(s, "")
-				// 		So(err, ShouldBeNil)
-				// 		So(response.Code, ShouldEqual, http.StatusOK)
-				// 		result, err = decodeWhereResult(response)
-				// 		So(err, ShouldBeNil)
-				// 		So(result, ShouldNotResemble, expected)
+						response, err = queryWhere(s, "")
+						So(err, ShouldBeNil)
+						So(response.Code, ShouldEqual, http.StatusOK)
+						result, err = decodeWhereResult(response)
+						So(err, ShouldBeNil)
+						So(result, ShouldNotResemble, expected)
 
-				// 		s.dgutaWatcher.RLock()
-				// 		So(s.dgutaWatcher, ShouldNotBeNil)
-				// 		s.dgutaWatcher.RUnlock()
-				// 		So(s.tree, ShouldNotBeNil)
+						s.dgutaWatcher.RLock()
+						So(s.dgutaWatcher, ShouldNotBeNil)
+						s.dgutaWatcher.RUnlock()
+						So(s.tree, ShouldNotBeNil)
 
-				// 		certPath, keyPath, err := gas.CreateTestCert(t)
-				// 		So(err, ShouldBeNil)
-				// 		_, stop, err := gas.StartTestServer(s, certPath, keyPath)
-				// 		So(err, ShouldBeNil)
+						certPath, keyPath, err := gas.CreateTestCert(t)
+						So(err, ShouldBeNil)
+						_, stop, err := gas.StartTestServer(s, certPath, keyPath)
+						So(err, ShouldBeNil)
 
-				// 		errs := stop()
-				// 		So(errs, ShouldBeNil)
-				// 		So(s.dgutaWatcher, ShouldBeNil)
-				// 		So(s.tree, ShouldBeNil)
+						errs := stop()
+						So(errs, ShouldBeNil)
+						So(s.dgutaWatcher, ShouldBeNil)
+						So(s.tree, ShouldBeNil)
 
-				// 		s.Stop()
-				// 	})
+						s.Stop()
+					})
 
-				// 	Convey("EnableDGUTADBReloading logs errors", func() {
-				// 		sentinel := path + ".sentinel"
-				// 		testSuffix := "test"
+					Convey("EnableDGUTADBReloading logs errors", func() {
+						sentinel := path + ".sentinel"
+						testSuffix := "test"
 
-				// 		file, err := os.Create(sentinel)
-				// 		So(err, ShouldBeNil)
-				// 		err = file.Close()
-				// 		So(err, ShouldBeNil)
+						file, err := os.Create(sentinel)
+						So(err, ShouldBeNil)
+						err = file.Close()
+						So(err, ShouldBeNil)
 
-				// 		testReloadFail := func(dir, message string) {
-				// 			err = s.EnableDGUTADBReloading(sentinel, dir, testSuffix, sentinelPollFrequency)
-				// 			So(err, ShouldBeNil)
+						testReloadFail := func(dir, message string) {
+							err = s.EnableDGUTADBReloading(sentinel, dir, testSuffix, sentinelPollFrequency)
+							So(err, ShouldBeNil)
 
-				// 			now := time.Now().Local()
-				// 			err = os.Chtimes(sentinel, now, now)
-				// 			So(err, ShouldBeNil)
+							now := time.Now().Local()
+							err = os.Chtimes(sentinel, now, now)
+							So(err, ShouldBeNil)
 
-				// 			<-time.After(50 * time.Millisecond)
+							<-time.After(50 * time.Millisecond)
 
-				// 			s.treeMutex.RLock()
-				// 			defer s.treeMutex.RUnlock()
-				// 			So(logWriter.String(), ShouldContainSubstring, message)
-				// 		}
+							s.treeMutex.RLock()
+							defer s.treeMutex.RUnlock()
+							So(logWriter.String(), ShouldContainSubstring, message)
+						}
 
-				// 		grandparentDir := filepath.Dir(filepath.Dir(path))
+						grandparentDir := filepath.Dir(filepath.Dir(path))
 
-				// 		makeTestPath := func() string {
-				// 			tpath := filepath.Join(grandparentDir, "new."+testSuffix)
-				// 			err = os.MkdirAll(tpath, internaldb.DirPerms)
-				// 			So(err, ShouldBeNil)
+						makeTestPath := func() string {
+							tpath := filepath.Join(grandparentDir, "new."+testSuffix)
+							err = os.MkdirAll(tpath, internaldb.DirPerms)
+							So(err, ShouldBeNil)
 
-				// 			return tpath
-				// 		}
+							return tpath
+						}
 
-				// 		Convey("when the directory doesn't contain the suffix", func() {
-				// 			testReloadFail(".", "file not found in directory")
-				// 		})
+						Convey("when the directory doesn't contain the suffix", func() {
+							testReloadFail(".", "file not found in directory")
+						})
 
-				// 		Convey("when the directory doesn't exist", func() {
-				// 			testReloadFail("/sdf@£$", "no such file or directory")
-				// 		})
+						Convey("when the directory doesn't exist", func() {
+							testReloadFail("/sdf@£$", "no such file or directory")
+						})
 
-				// 		Convey("when the suffix subdir can't be opened", func() {
-				// 			tpath := makeTestPath()
+						Convey("when the suffix subdir can't be opened", func() {
+							tpath := makeTestPath()
 
-				// 			err = os.Chmod(tpath, 0000)
-				// 			So(err, ShouldBeNil)
+							err = os.Chmod(tpath, 0000)
+							So(err, ShouldBeNil)
 
-				// 			testReloadFail(grandparentDir, "permission denied")
-				// 		})
+							testReloadFail(grandparentDir, "permission denied")
+						})
 
-				// 		Convey("when the directory contains no subdirs", func() {
-				// 			makeTestPath()
+						Convey("when the directory contains no subdirs", func() {
+							makeTestPath()
 
-				// 			testReloadFail(grandparentDir, "file not found in directory")
-				// 		})
+							testReloadFail(grandparentDir, "file not found in directory")
+						})
 
-				// 		Convey("when the new database path is invalid", func() {
-				// 			tpath := makeTestPath()
+						Convey("when the new database path is invalid", func() {
+							tpath := makeTestPath()
 
-				// 			dbPath := filepath.Join(tpath, "0")
-				// 			err = os.Mkdir(dbPath, internaldb.DirPerms)
-				// 			So(err, ShouldBeNil)
+							dbPath := filepath.Join(tpath, "0")
+							err = os.Mkdir(dbPath, internaldb.DirPerms)
+							So(err, ShouldBeNil)
 
-				// 			testReloadFail(grandparentDir, "database doesn't exist")
-				// 		})
+							testReloadFail(grandparentDir, "database doesn't exist")
+						})
 
-				// 		Convey("when the old path can't be deleted", func() {
-				// 			s.dgutaPaths = []string{"."}
-				// 			tpath := makeTestPath()
+						Convey("when the old path can't be deleted", func() {
+							s.dgutaPaths = []string{"."}
+							tpath := makeTestPath()
 
-				// 			cmd := exec.Command("cp", "--recursive", path, filepath.Join(tpath, "0"))
-				// 			err = cmd.Run()
-				// 			So(err, ShouldBeNil)
+							cmd := exec.Command("cp", "--recursive", path, filepath.Join(tpath, "0"))
+							err = cmd.Run()
+							So(err, ShouldBeNil)
 
-				// 			testReloadFail(grandparentDir, "invalid argument")
-				// 		})
+							testReloadFail(grandparentDir, "invalid argument")
+						})
 
-				// 		Convey("when there's an issue with getting dir mtime, it is ignored", func() {
-				// 			t := ifs.DirEntryModTime(&mockDirEntry{})
-				// 			So(t.IsZero(), ShouldBeTrue)
-				// 		})
-				// 	})
-				// })
+						Convey("when there's an issue with getting dir mtime, it is ignored", func() {
+							t := ifs.DirEntryModTime(&mockDirEntry{})
+							So(t.IsZero(), ShouldBeTrue)
+						})
+					})
+				})
 			})
 
 			Convey("LoadDGUTADBs fails on an invalid path", func() {
@@ -1499,9 +1502,9 @@ func adjustedExpectations(expected []*DirSummary, groupA, groupB string) ([]*Dir
 		expectedNonRoot[i] = ds
 
 		switch ds.Dir {
-		case "/a":
+		case "/a/":
 			expectedNonRoot[i] = &DirSummary{
-				Dir:       "/a",
+				Dir:       ds.Dir,
 				Count:     18,
 				Size:      125,
 				Atime:     time.Unix(50, 0),
@@ -1512,7 +1515,7 @@ func adjustedExpectations(expected []*DirSummary, groupA, groupB string) ([]*Dir
 			}
 
 			expectedGroupsRoot = ds.Groups
-		case "/a/b", "/a/b/d":
+		case "/a/b/", "/a/b/d/":
 			expectedNonRoot[i] = &DirSummary{
 				Dir:       ds.Dir,
 				Count:     ds.Count - 1,

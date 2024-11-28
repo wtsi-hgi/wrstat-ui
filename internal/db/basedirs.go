@@ -26,10 +26,10 @@
 
 package internaldb
 
-// // CreateExampleDGUTADBForBasedirs makes a tree database with data useful for
-// // testing basedirs, and returns it along with a slice of directories where the
-// // data is.
-// func CreateExampleDGUTADBForBasedirs(t *testing.T) (*dirguta.Tree, []string, error) {
+// CreateExampleDGUTADBForBasedirs makes a tree database with data useful for
+// testing basedirs, and returns it along with a slice of directories where the
+// data is.
+// func CreateExampleDGUTADBForBasedirs(t *testing.T) (*db.Tree, []string, error) {
 // 	t.Helper()
 
 // 	gid, uid, _, _, err := internaluser.RealGIDAndUID()
