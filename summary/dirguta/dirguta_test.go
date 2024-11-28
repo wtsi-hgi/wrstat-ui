@@ -26,8 +26,6 @@
 package dirguta
 
 import (
-	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -264,29 +262,29 @@ func TestDirGUTA(t *testing.T) {
 
 		atime1 := refTime - (db.SecondsInAMonth*2 + 100000)
 		mtime1 := refTime - (db.SecondsInAMonth * 3)
-		addFile(f, "a/b/c/1.bam", uid, gid, 2, atime1, mtime1)
+		statsdata.AddFile(f, "a/b/c/1.bam", uid, gid, 2, atime1, mtime1)
 
 		atime2 := refTime - (db.SecondsInAMonth * 7)
 		mtime2 := refTime - (db.SecondsInAMonth * 8)
-		addFile(f, "a/b/c/2.bam", uid, gid, 3, atime2, mtime2)
+		statsdata.AddFile(f, "a/b/c/2.bam", uid, gid, 3, atime2, mtime2)
 
 		atime3 := refTime - (db.SecondsInAYear + db.SecondsInAMonth)
 		mtime3 := refTime - (db.SecondsInAYear + db.SecondsInAMonth*6)
-		addFile(f, "a/b/c/3.txt", uid, gid, 4, atime3, mtime3)
+		statsdata.AddFile(f, "a/b/c/3.txt", uid, gid, 4, atime3, mtime3)
 
 		atime4 := refTime - (db.SecondsInAYear * 4)
 		mtime4 := refTime - (db.SecondsInAYear * 6)
-		addFile(f, "a/b/c/4.bam", uid, gid, 5, atime4, mtime4)
+		statsdata.AddFile(f, "a/b/c/4.bam", uid, gid, 5, atime4, mtime4)
 
 		atime5 := refTime - (db.SecondsInAYear*5 + db.SecondsInAMonth)
 		mtime5 := refTime - (db.SecondsInAYear*7 + db.SecondsInAMonth)
-		addFile(f, "a/b/c/5.cram", uid, gid, 6, atime5, mtime5)
+		statsdata.AddFile(f, "a/b/c/5.cram", uid, gid, 6, atime5, mtime5)
 
 		atime6 := refTime - (db.SecondsInAYear*7 + db.SecondsInAMonth)
 		mtime6 := refTime - (db.SecondsInAYear*7 + db.SecondsInAMonth)
-		addFile(f, "a/b/c/6.cram", uid, gid, 7, atime6, mtime6)
+		statsdata.AddFile(f, "a/b/c/6.cram", uid, gid, 7, atime6, mtime6)
 
-		addFile(f, "a/b/c/6.tmp", uid, gid, 8, mtime3, mtime3)
+		statsdata.AddFile(f, "a/b/c/6.tmp", uid, gid, 8, mtime3, mtime3)
 
 		s := summary.NewSummariser(stats.NewStatsParser(f.AsReader()))
 		m := &mockDB{make(map[string]db.GUTAs)}
@@ -387,19 +385,19 @@ func TestDirGUTA(t *testing.T) {
 
 		atime1 := int64(100)
 		mtime1 := int64(0)
-		addFile(f, "a/b/c/3.bam", 2, 2, 1, atime1, mtime1)
+		statsdata.AddFile(f, "a/b/c/3.bam", 2, 2, 1, atime1, mtime1)
 
 		atime2 := int64(250)
 		mtime2 := int64(250)
-		addFile(f, "a/b/c/7.cram", 10, 2, 2, atime2, mtime2)
+		statsdata.AddFile(f, "a/b/c/7.cram", 10, 2, 2, atime2, mtime2)
 
 		atime3 := int64(201)
 		mtime3 := int64(200)
-		addFile(f, "a/b/c/d/9.cram", 10, 2, 3, atime3, mtime3)
+		statsdata.AddFile(f, "a/b/c/d/9.cram", 10, 2, 3, atime3, mtime3)
 
 		atime4 := int64(300)
 		mtime4 := int64(301)
-		addFile(f, "a/b/c/8.cram", 2, 10, 4, atime4, mtime4)
+		statsdata.AddFile(f, "a/b/c/8.cram", 2, 10, 4, atime4, mtime4)
 
 		dDir := f.AddDirectory("a").AddDirectory("b").AddDirectory("c").AddDirectory("d")
 		dDir.UID = 10
@@ -424,17 +422,4 @@ func TestDirGUTA(t *testing.T) {
 		So(m.has("/a/b/c/", 2, 10, db.DGUTAFileTypeCram, db.DGUTAgeAll, 2, 5, atime3, mtime2), ShouldBeTrue)
 		So(m.has("/a/b/c/", 10, 2, db.DGUTAFileTypeCram, db.DGUTAgeAll, 1, 4, atime4, mtime4), ShouldBeTrue)
 	})
-}
-
-func addFile(d *statsdata.Directory, path string, uid, gid uint32, size, atime, mtime int64) {
-	for _, part := range strings.Split(filepath.Dir(path), "/") {
-		d = d.AddDirectory(part)
-	}
-
-	file := d.AddFile(filepath.Base(path))
-	file.UID = uid
-	file.GID = gid
-	file.Size = size
-	file.ATime = atime
-	file.MTime = mtime
 }

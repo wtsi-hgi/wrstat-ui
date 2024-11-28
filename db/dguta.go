@@ -37,27 +37,32 @@ type DGUTA struct {
 }
 
 type RecordDGUTA struct {
-	Dir   *summary.DirectoryPath
-	GUTAs GUTAs
+	Dir      *summary.DirectoryPath
+	GUTAs    GUTAs
+	Children []string
 }
 
 var pathBuf [4098]byte
 
-// encodeToBytes returns our Dir as a []byte and our GUTAs encoded in another
+// EncodeToBytes returns our Dir as a []byte and our GUTAs encoded in another
 // []byte suitable for storing on disk.
-func (d *RecordDGUTA) encodeToBytes(ch codec.Handle, age DirGUTAge) ([]byte, []byte) {
+func (d *RecordDGUTA) EncodeToBytes(ch codec.Handle) ([]byte, []byte) {
 	var encoded []byte
 	enc := codec.NewEncoderBytes(&encoded, ch)
 	enc.MustEncode(d.GUTAs)
 
-	dir := append(d.Dir.AppendTo(pathBuf[:0]), 255, byte(age))
+	dir := append(d.pathBytes(), 255)
 
 	return dir, encoded
 }
 
-// decodeDGUTAbytes converts the byte slices returned by DGUTA.Encode() back in to
+func (d *RecordDGUTA) pathBytes() []byte {
+	return d.Dir.AppendTo(pathBuf[:0])
+}
+
+// DecodeDGUTAbytes converts the byte slices returned by DGUTA.Encode() back in to
 // a *DGUTA.
-func decodeDGUTAbytes(ch codec.Handle, dir, encoded []byte) *DGUTA {
+func DecodeDGUTAbytes(ch codec.Handle, dir, encoded []byte) *DGUTA {
 	dec := codec.NewDecoderBytes(encoded, ch)
 
 	var g GUTAs
@@ -65,7 +70,7 @@ func decodeDGUTAbytes(ch codec.Handle, dir, encoded []byte) *DGUTA {
 	dec.MustDecode(&g)
 
 	return &DGUTA{
-		Dir:   string(dir),
+		Dir:   string(dir[:len(dir)-1]), // remove the seperator (255)
 		GUTAs: g,
 	}
 }

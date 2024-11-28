@@ -35,7 +35,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	gas "github.com/wtsi-hgi/go-authserver"
-	"github.com/wtsi-hgi/wrstat-ui/summary/dirguta"
+	"github.com/wtsi-hgi/wrstat-ui/db"
 )
 
 // javascriptToJSONFormat is the date format emitted by javascript's Date's
@@ -116,7 +116,7 @@ type TreeElement struct {
 	Size        uint64              `json:"size"`
 	Atime       string              `json:"atime"`
 	Mtime       string              `json:"mtime"`
-	Age         dirguta.DirGUTAge   `json:"age"`
+	Age         db.DirGUTAge        `json:"age"`
 	Users       []string            `json:"users"`
 	Groups      []string            `json:"groups"`
 	FileTypes   []string            `json:"filetypes"`
@@ -164,7 +164,7 @@ func (s *Server) getTree(c *gin.Context) {
 // has to do additional database queries to find out if di's children have
 // children. If results don't belong to at least one of the allowedGIDs, they
 // will be marked as NoAuth and won't include child info.
-func (s *Server) diToTreeElement(di *dirguta.DirInfo, filter *dirguta.Filter,
+func (s *Server) diToTreeElement(di *db.DirInfo, filter *db.Filter,
 	allowedGIDs map[uint32]bool, path string) *TreeElement {
 	if di == nil {
 		return &TreeElement{Path: path}
@@ -194,7 +194,7 @@ func (s *Server) diToTreeElement(di *dirguta.DirInfo, filter *dirguta.Filter,
 // child info. It uses the allowedGIDs to mark the returned element NoAuth if
 // none of the GIDs for the dds are in the allowedGIDs. If allowedGIDs is nil,
 // NoAuth will always be false.
-func (s *Server) ddsToTreeElement(dds *dirguta.DirSummary, allowedGIDs map[uint32]bool) *TreeElement {
+func (s *Server) ddsToTreeElement(dds *db.DirSummary, allowedGIDs map[uint32]bool) *TreeElement {
 	return &TreeElement{
 		Name:      filepath.Base(dds.Dir),
 		Path:      dds.Dir,

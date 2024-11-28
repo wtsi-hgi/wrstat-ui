@@ -23,12 +23,13 @@
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  ******************************************************************************/
 
-package db
+package db_test
 
 import (
 	"testing"
 
 	. "github.com/smartystreets/goconvey/convey"
+	"github.com/wtsi-hgi/wrstat-ui/db"
 )
 
 func TestTree(t *testing.T) {
@@ -40,7 +41,7 @@ func TestTree(t *testing.T) {
 		paths, err := testMakeDBPaths(t)
 		So(err, ShouldBeNil)
 
-		tree, errc := NewTree(paths[0])
+		tree, errc := db.NewTree(paths[0])
 		So(errc, ShouldNotBeNil)
 		So(tree, ShouldBeNil)
 

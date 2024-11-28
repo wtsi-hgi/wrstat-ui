@@ -332,9 +332,10 @@ type DB interface {
 // DirGroupUserTypeAge is used to summarise file stats by directory, group,
 // user, file type and age.
 type DirGroupUserTypeAge struct {
-	db      DB
-	store   gutaStore
-	thisDir *summary.DirectoryPath
+	db       DB
+	store    gutaStore
+	thisDir  *summary.DirectoryPath
+	children []string
 }
 
 // NewDirGroupUserTypeAge returns a DirGroupUserTypeAge.
@@ -372,6 +373,10 @@ func newDirGroupUserTypeAge(db DB, refTime int64) summary.OperationGenerator {
 func (d *DirGroupUserTypeAge) Add(info *summary.FileInfo) error {
 	if d.thisDir == nil {
 		d.thisDir = info.Path
+	}
+
+	if info.IsDir() && info.Path.Parent == d.thisDir {
+		d.children = append(d.children, string(info.Name))
 	}
 
 	atime := info.ATime
@@ -586,7 +591,8 @@ func (d *DirGroupUserTypeAge) Output() error {
 	dgutas := d.store.sort()
 
 	dguta := db.RecordDGUTA{
-		Dir: d.thisDir,
+		Dir:      d.thisDir,
+		Children: d.children,
 	}
 
 	for _, guta := range dgutas {
@@ -613,6 +619,7 @@ func (d *DirGroupUserTypeAge) Output() error {
 	}
 
 	d.thisDir = nil
+	d.children = nil
 
 	return nil
 }

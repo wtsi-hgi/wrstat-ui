@@ -42,10 +42,10 @@ import (
 	. "github.com/smartystreets/goconvey/convey"
 	gas "github.com/wtsi-hgi/go-authserver"
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
+	"github.com/wtsi-hgi/wrstat-ui/db"
 	internaldata "github.com/wtsi-hgi/wrstat-ui/internal/data"
 	internaldb "github.com/wtsi-hgi/wrstat-ui/internal/db"
 	"github.com/wtsi-hgi/wrstat-ui/internal/fixtimes"
-	"github.com/wtsi-hgi/wrstat-ui/summary/dirguta"
 )
 
 func TestIDsToWanted(t *testing.T) {
@@ -72,7 +72,7 @@ func TestServer(t *testing.T) {
 			gid32, err := strconv.Atoi(gids[0])
 			So(err, ShouldBeNil)
 
-			dcss := dirguta.DCSs{
+			dcss := db.DCSs{
 				{
 					Dir:   "/foo",
 					Count: 1,
@@ -1661,7 +1661,7 @@ func (m *mockDirEntry) Info() (fs.FileInfo, error) {
 
 // createExampleBasedirsDB creates a temporary basedirs.db and returns the path
 // to the database file.
-func createExampleBasedirsDB(t *testing.T, tree *dirguta.Tree) (string, string, error) {
+func createExampleBasedirsDB(t *testing.T, tree *db.Tree) (string, string, error) {
 	t.Helper()
 
 	csvPath := internaldata.CreateQuotasCSV(t, internaldata.ExampleQuotaCSV)

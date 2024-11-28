@@ -33,7 +33,7 @@ import (
 	"time"
 
 	"github.com/ugorji/go/codec"
-	"github.com/wtsi-hgi/wrstat-ui/summary/dirguta"
+	"github.com/wtsi-hgi/wrstat-ui/db"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -95,11 +95,11 @@ func (b *BaseDirReader) Close() error {
 
 // GroupUsage returns the usage for every GID-BaseDir combination in the
 // database.
-func (b *BaseDirReader) GroupUsage(age dirguta.DirGUTAge) ([]*Usage, error) {
+func (b *BaseDirReader) GroupUsage(age db.DirGUTAge) ([]*Usage, error) {
 	return b.usage(groupUsageBucket, age)
 }
 
-func (b *BaseDirReader) usage(bucketName string, age dirguta.DirGUTAge) ([]*Usage, error) {
+func (b *BaseDirReader) usage(bucketName string, age db.DirGUTAge) ([]*Usage, error) {
 	var uwms []*Usage
 
 	if err := b.db.View(func(tx *bolt.Tx) error {
@@ -144,18 +144,18 @@ func (b *BaseDirReader) getNameBasedOnBucket(bucketName string, uwm *Usage) stri
 
 // UserUsage returns the usage for every UID-BaseDir combination in the
 // database.
-func (b *BaseDirReader) UserUsage(age dirguta.DirGUTAge) ([]*Usage, error) {
+func (b *BaseDirReader) UserUsage(age db.DirGUTAge) ([]*Usage, error) {
 	return b.usage(userUsageBucket, age)
 }
 
 // GroupSubDirs returns a slice of SubDir, one for each subdirectory of the
 // given basedir, owned by the given group. If basedir directly contains files,
 // one of the SubDirs will be for ".".
-func (b *BaseDirReader) GroupSubDirs(gid uint32, basedir string, age dirguta.DirGUTAge) ([]*SubDir, error) {
+func (b *BaseDirReader) GroupSubDirs(gid uint32, basedir string, age db.DirGUTAge) ([]*SubDir, error) {
 	return b.subDirs(groupSubDirsBucket, gid, basedir, age)
 }
 
-func (b *BaseDirReader) subDirs(bucket string, id uint32, basedir string, age dirguta.DirGUTAge) ([]*SubDir, error) {
+func (b *BaseDirReader) subDirs(bucket string, id uint32, basedir string, age db.DirGUTAge) ([]*SubDir, error) {
 	var sds []*SubDir
 
 	if err := b.db.View(func(tx *bolt.Tx) error {
@@ -177,7 +177,7 @@ func (b *BaseDirReader) subDirs(bucket string, id uint32, basedir string, age di
 // UserSubDirs returns a slice of SubDir, one for each subdirectory of the
 // given basedir, owned by the given user. If basedir directly contains files,
 // one of the SubDirs will be for ".".
-func (b *BaseDirReader) UserSubDirs(uid uint32, basedir string, age dirguta.DirGUTAge) ([]*SubDir, error) {
+func (b *BaseDirReader) UserSubDirs(uid uint32, basedir string, age db.DirGUTAge) ([]*SubDir, error) {
 	return b.subDirs(userSubDirsBucket, uid, basedir, age)
 }
 
@@ -195,7 +195,7 @@ func (b *BaseDirReader) UserSubDirs(uid uint32, basedir string, age dirguta.DirG
 // warning ("OK" or "Not OK" if quota is estimated to have run out in 3 days)
 //
 // Any error returned is from GroupUsage().
-func (b *BaseDirReader) GroupUsageTable(age dirguta.DirGUTAge) (string, error) {
+func (b *BaseDirReader) GroupUsageTable(age db.DirGUTAge) (string, error) {
 	gu, err := b.GroupUsage(age)
 	if err != nil {
 		return "", err
@@ -252,7 +252,7 @@ func usageStatus(sizeExceedDate, inodeExceedDate time.Time) string {
 // warning (always "OK")
 //
 // Any error returned is from UserUsage().
-func (b *BaseDirReader) UserUsageTable(age dirguta.DirGUTAge) (string, error) {
+func (b *BaseDirReader) UserUsageTable(age db.DirGUTAge) (string, error) {
 	uu, err := b.UserUsage(age)
 	if err != nil {
 		return "", err
@@ -276,7 +276,7 @@ func daysSince(mtime time.Time) uint64 {
 // filetypes
 //
 // Any error returned is from GroupSubDirs().
-func (b *BaseDirReader) GroupSubDirUsageTable(gid uint32, basedir string, age dirguta.DirGUTAge) (string, error) {
+func (b *BaseDirReader) GroupSubDirUsageTable(gid uint32, basedir string, age db.DirGUTAge) (string, error) {
 	gsdut, err := b.GroupSubDirs(gid, basedir, age)
 	if err != nil {
 		return "", err
@@ -313,7 +313,7 @@ func subDirUsageTable(basedir string, subdirs []*SubDir) string {
 // filetypes
 //
 // Any error returned is from UserSubDirUsageTable().
-func (b *BaseDirReader) UserSubDirUsageTable(uid uint32, basedir string, age dirguta.DirGUTAge) (string, error) {
+func (b *BaseDirReader) UserSubDirUsageTable(uid uint32, basedir string, age db.DirGUTAge) (string, error) {
 	usdut, err := b.UserSubDirs(uid, basedir, age)
 	if err != nil {
 		return "", err

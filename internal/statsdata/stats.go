@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"path/filepath"
 	"slices"
 	"sort"
+	"strings"
 
 	_ "embed"
 )
@@ -132,4 +134,17 @@ func (f *File) WriteTo(w io.Writer) (int64, error) {
 		f.Path, f.Size, f.UID, f.GID, f.ATime, f.MTime, f.CTime, f.Type)
 
 	return int64(n), err
+}
+
+func AddFile(d *Directory, path string, uid, gid uint32, size, atime, mtime int64) {
+	for _, part := range strings.Split(filepath.Dir(path), "/") {
+		d = d.AddDirectory(part)
+	}
+
+	file := d.AddFile(filepath.Base(path))
+	file.UID = uid
+	file.GID = gid
+	file.Size = size
+	file.ATime = atime
+	file.MTime = mtime
 }
