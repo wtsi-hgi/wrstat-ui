@@ -95,7 +95,7 @@ type gutaStore struct {
 // add will auto-vivify a summary for the given key (which should have been
 // generated with statToGUTAKey()) and call add(size, atime, mtime) on it.
 func (store gutaStore) add(gkey GUTAKey, size int64, atime int64, mtime int64) {
-	if !fitsAgeInterval(gkey, atime, mtime, store.refTime) {
+	if !gkey.Age.FitsAgeInterval(atime, mtime, store.refTime) {
 		return
 	}
 
@@ -622,25 +622,4 @@ func (d *DirGroupUserTypeAge) Output() error {
 	d.children = nil
 
 	return nil
-}
-
-// fitsAgeInterval takes a dguta and the mtime and atime and reference time. It
-// checks the value of age inside the dguta, and then returns true if the mtime
-// or atime respectively fits inside the age interval. E.g. if age = 3, this
-// corresponds to DGUTAgeA6M, so atime is checked to see if it is older than 6
-// months.
-func fitsAgeInterval(dguta GUTAKey, atime, mtime, refTime int64) bool {
-	age := int(dguta.Age)
-
-	if age > len(db.AgeThresholds) {
-		return checkTimeIsInInterval(mtime, refTime, age-(len(db.AgeThresholds)+1))
-	} else if age > 0 {
-		return checkTimeIsInInterval(atime, refTime, age-1)
-	}
-
-	return true
-}
-
-func checkTimeIsInInterval(amtime, refTime int64, thresholdIndex int) bool {
-	return amtime <= refTime-db.AgeThresholds[thresholdIndex]
 }
