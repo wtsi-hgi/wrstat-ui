@@ -1,6 +1,7 @@
 package basedirs
 
 import (
+	"sync"
 	"time"
 
 	"github.com/wtsi-hgi/wrstat-ui/db"
@@ -9,22 +10,69 @@ import (
 
 const numAges = len(db.DirGUTAges)
 
-type minDepth func(*summary.DirectoryPath) bool
+type DB interface {
+	AddUserBase(uid uint32, path *summary.DirectoryPath, age db.DirGUTAge) error
+	AddGroupBase(uid uint32, path *summary.DirectoryPath, age db.DirGUTAge) error
+}
 
-type splits func(*summary.DirectoryPath) int
+type minDepth func(*summary.DirectoryPath) int
 
 type baseDirs [numAges]*summary.DirectoryPath
+
+var baseDirsPool = sync.Pool{
+	New: func() any {
+		return new(baseDirs)
+	},
+}
+
+func (b *baseDirs) Set(i int, new, parent *summary.DirectoryPath) {
+	if b[i] != nil {
+		new = parent
+	}
+
+	b[i] = new
+}
 
 type baseDirsMap map[uint32]*baseDirs
 
 func (b baseDirsMap) Get(id uint32) *baseDirs {
 	bd, ok := b[id]
 	if !ok {
-		bd = new(baseDirs)
+		bd = baseDirsPool.Get().(*baseDirs)
 		b[id] = bd
 	}
 
 	return bd
+}
+
+func (b baseDirsMap) AddAll(fn func(id uint32, path *summary.DirectoryPath, age db.DirGUTAge) error) error {
+	for id, bd := range b {
+		for age, path := range bd {
+			if path != nil {
+				if err := fn(id, path, db.DirGUTAges[age]); err != nil {
+					return err
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
+func (b baseDirsMap) AddChildren(fn func(id uint32, path *summary.DirectoryPath, age db.DirGUTAge) error, parent *summary.DirectoryPath) error {
+	for id, bd := range b {
+		for age, path := range bd {
+			if path != nil && path != parent {
+				if err := fn(id, path, db.DirGUTAges[age]); err != nil {
+					return err
+				}
+
+				bd[age] = nil
+			}
+		}
+	}
+
+	return nil
 }
 
 func (b baseDirsMap) mergeTo(pbm baseDirsMap, parent *summary.DirectoryPath) {
@@ -33,12 +81,16 @@ func (b baseDirsMap) mergeTo(pbm baseDirsMap, parent *summary.DirectoryPath) {
 		if !ok {
 			pbm[id] = bm
 
+			delete(b, id)
+
 			continue
 		}
 
-		for n := range bm {
-			if pm[n] == nil {
-				pm[n] = bm[n]
+		for n, p := range bm {
+			if p == nil {
+				continue
+			} else if pm[n] == nil {
+				pm[n] = p
 			} else {
 				pm[n] = parent
 			}
@@ -49,22 +101,22 @@ func (b baseDirsMap) mergeTo(pbm baseDirsMap, parent *summary.DirectoryPath) {
 type BaseDirs struct {
 	parent        *BaseDirs
 	minDepth      minDepth
-	splits        splits
+	db            DB
 	refTime       int64
 	thisDir       *summary.DirectoryPath
 	users, groups baseDirsMap
 }
 
-func NewBaseDirs(minDepth minDepth, splits splits) summary.OperationGenerator {
+func NewBaseDirs(minDepth minDepth, db DB) summary.OperationGenerator {
 	var parent *BaseDirs
 
 	now := time.Now().Unix()
 
 	return func() summary.Operation {
-		parent := &BaseDirs{
+		parent = &BaseDirs{
 			parent:   parent,
 			minDepth: minDepth,
-			splits:   splits,
+			db:       db,
 			refTime:  now,
 			users:    make(baseDirsMap),
 			groups:   make(baseDirsMap),
@@ -79,7 +131,7 @@ func (b *BaseDirs) Add(info *summary.FileInfo) error {
 		b.thisDir = info.Path
 	}
 
-	if info.Path.Parent != b.thisDir {
+	if info.Path != b.thisDir || info.IsDir() {
 		return nil
 	}
 
@@ -88,8 +140,8 @@ func (b *BaseDirs) Add(info *summary.FileInfo) error {
 
 	for n, threshold := range db.DirGUTAges {
 		if threshold.FitsAgeInterval(info.ATime, info.MTime, b.refTime) {
-			gidBasedir[n] = b.thisDir
-			uidBasedir[n] = b.thisDir
+			gidBasedir.Set(n, info.Path, b.thisDir)
+			uidBasedir.Set(n, info.Path, b.thisDir)
 		}
 	}
 
@@ -97,19 +149,29 @@ func (b *BaseDirs) Add(info *summary.FileInfo) error {
 }
 
 func (b *BaseDirs) Output() error {
-	// output if appropriate
+	minDepth := b.minDepth(b.thisDir)
 
-	b.addToParent()
+	if b.thisDir.Depth == minDepth {
+		if err := b.groups.AddAll(b.db.AddGroupBase); err != nil {
+			return err
+		}
 
-	b.thisDir = nil
+		if err := b.users.AddAll(b.db.AddUserBase); err != nil {
+			return err
+		}
+	} else if b.thisDir.Depth > minDepth {
+		if err := b.groups.AddChildren(b.db.AddGroupBase, b.thisDir); err != nil {
+			return err
+		}
 
-	for k := range b.groups {
-		delete(b.groups, k)
+		if err := b.users.AddChildren(b.db.AddUserBase, b.thisDir); err != nil {
+			return err
+		}
+
+		b.addToParent()
 	}
 
-	for k := range b.users {
-		delete(b.users, k)
-	}
+	b.cleanup()
 
 	return nil
 }
@@ -121,4 +183,28 @@ func (b *BaseDirs) addToParent() {
 
 	b.groups.mergeTo(b.parent.groups, b.parent.thisDir)
 	b.users.mergeTo(b.parent.users, b.parent.thisDir)
+}
+
+func (b *BaseDirs) cleanup() {
+	b.thisDir = nil
+
+	for _, v := range b.groups {
+		*v = baseDirs{}
+
+		baseDirsPool.Put(v)
+	}
+
+	for _, v := range b.users {
+		*v = baseDirs{}
+
+		baseDirsPool.Put(v)
+	}
+
+	for k := range b.groups {
+		delete(b.groups, k)
+	}
+
+	for k := range b.users {
+		delete(b.users, k)
+	}
 }
