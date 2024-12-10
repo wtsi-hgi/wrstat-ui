@@ -375,7 +375,7 @@ func (d *DirGroupUserTypeAge) Add(info *summary.FileInfo) error {
 		d.thisDir = info.Path
 	}
 
-	if info.IsDir() && info.Path.Parent == d.thisDir {
+	if info.IsDir() && info.Path != nil && info.Path.Parent == d.thisDir {
 		d.children = append(d.children, string(info.Name))
 	}
 

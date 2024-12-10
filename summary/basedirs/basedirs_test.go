@@ -51,10 +51,17 @@ func TestBaseDirs(t *testing.T) {
 		statsdata.AddFile(f, "opt/teams/teamA/user1/aFile.txt", 1, 10, 0, times[3], times[1])
 		statsdata.AddFile(f, "opt/teams/teamA/user2/aDir/aFile.txt", 2, 11, 0, times[2], times[1])
 		statsdata.AddFile(f, "opt/teams/teamA/user2/bDir/bFile.txt", 2, 11, 0, times[3], times[1])
+		statsdata.AddFile(f, "opt/teams/teamB/user3/aDir/bDir/cDir/aFile.txt", 3, 12, 0, times[0], times[0])
+		statsdata.AddFile(f, "opt/teams/teamB/user3/eDir/aFile.txt", 3, 12, 0, times[0], times[0])
+		statsdata.AddFile(f, "opt/teams/teamB/user3/fDir/aFile.txt", 3, 12, 0, times[0], times[0])
+		statsdata.AddFile(f, "opt/teams/teamB/user4/aDir/bDir/cDir/aFile.txt", 4, 12, 0, times[0], times[0])
+		statsdata.AddFile(f, "opt/teams/teamB/user4/aDir/dDir/eDir/aFile.txt", 4, 12, 0, times[0], times[0])
+		statsdata.AddFile(f, "opt/teams/teamC/user4/aDir/bDir/cDir/aFile.txt", 4, 12, 0, times[0], times[0])
+		statsdata.AddFile(f, "opt/teams/teamC/user4/aDir/dDir/eDir/aFile.txt", 4, 12, 0, times[0], times[0])
 
 		s := summary.NewSummariser(stats.NewStatsParser(f.AsReader()))
 		m := &mockDB{users: make(mockBaseDirsMap), groups: make(mockBaseDirsMap)}
-		s.AddDirectoryOperation(NewBaseDirs(func(_ *summary.DirectoryPath) int { return 3 }, m))
+		s.AddDirectoryOperation(NewBaseDirs(func(dp *summary.DirectoryPath) bool { return dp.Depth == 3 }, m))
 
 		err := s.Summarise()
 		So(err, ShouldBeNil)
@@ -67,11 +74,18 @@ func TestBaseDirs(t *testing.T) {
 				pathAge("/opt/teams/teamA/user1/", db.DGUTAgeM1M),
 			},
 			2: []string{
-				pathAge("/opt/teams/teamA/user2/bDir/", db.DGUTAgeA6M),
 				pathAge("/opt/teams/teamA/user2/", db.DGUTAgeAll),
 				pathAge("/opt/teams/teamA/user2/", db.DGUTAgeA1M),
 				pathAge("/opt/teams/teamA/user2/", db.DGUTAgeA2M),
+				pathAge("/opt/teams/teamA/user2/bDir/", db.DGUTAgeA6M),
 				pathAge("/opt/teams/teamA/user2/", db.DGUTAgeM1M),
+			},
+			3: []string{
+				pathAge("/opt/teams/teamB/user3/", db.DGUTAgeAll),
+			},
+			4: []string{
+				pathAge("/opt/teams/teamB/user4/aDir/", db.DGUTAgeAll),
+				pathAge("/opt/teams/teamC/user4/aDir/", db.DGUTAgeAll),
 			},
 		})
 		So(m.groups, ShouldResemble, mockBaseDirsMap{
@@ -83,11 +97,15 @@ func TestBaseDirs(t *testing.T) {
 				pathAge("/opt/teams/teamA/user1/", db.DGUTAgeM1M),
 			},
 			11: []string{
-				pathAge("/opt/teams/teamA/user2/bDir/", db.DGUTAgeA6M),
 				pathAge("/opt/teams/teamA/user2/", db.DGUTAgeAll),
 				pathAge("/opt/teams/teamA/user2/", db.DGUTAgeA1M),
 				pathAge("/opt/teams/teamA/user2/", db.DGUTAgeA2M),
+				pathAge("/opt/teams/teamA/user2/bDir/", db.DGUTAgeA6M),
 				pathAge("/opt/teams/teamA/user2/", db.DGUTAgeM1M),
+			},
+			12: []string{
+				pathAge("/opt/teams/teamB/", db.DGUTAgeAll),
+				pathAge("/opt/teams/teamC/user4/aDir/", db.DGUTAgeAll),
 			},
 		})
 	})

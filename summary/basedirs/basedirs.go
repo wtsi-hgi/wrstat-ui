@@ -15,7 +15,7 @@ type DB interface {
 	AddGroupBase(uid uint32, path *summary.DirectoryPath, age db.DirGUTAge) error
 }
 
-type minDepth func(*summary.DirectoryPath) int
+type outputForDir func(*summary.DirectoryPath) bool
 
 type baseDirs [numAges]*summary.DirectoryPath
 
@@ -45,29 +45,13 @@ func (b baseDirsMap) Get(id uint32) *baseDirs {
 	return bd
 }
 
-func (b baseDirsMap) AddAll(fn func(id uint32, path *summary.DirectoryPath, age db.DirGUTAge) error) error {
+func (b baseDirsMap) Add(fn func(id uint32, path *summary.DirectoryPath, age db.DirGUTAge) error) error {
 	for id, bd := range b {
 		for age, path := range bd {
 			if path != nil {
 				if err := fn(id, path, db.DirGUTAges[age]); err != nil {
 					return err
 				}
-			}
-		}
-	}
-
-	return nil
-}
-
-func (b baseDirsMap) AddChildren(fn func(id uint32, path *summary.DirectoryPath, age db.DirGUTAge) error, parent *summary.DirectoryPath) error {
-	for id, bd := range b {
-		for age, path := range bd {
-			if path != nil && path != parent {
-				if err := fn(id, path, db.DirGUTAges[age]); err != nil {
-					return err
-				}
-
-				bd[age] = nil
 			}
 		}
 	}
@@ -100,26 +84,26 @@ func (b baseDirsMap) mergeTo(pbm baseDirsMap, parent *summary.DirectoryPath) {
 
 type BaseDirs struct {
 	parent        *BaseDirs
-	minDepth      minDepth
+	output        outputForDir
 	db            DB
 	refTime       int64
 	thisDir       *summary.DirectoryPath
 	users, groups baseDirsMap
 }
 
-func NewBaseDirs(minDepth minDepth, db DB) summary.OperationGenerator {
+func NewBaseDirs(output outputForDir, db DB) summary.OperationGenerator {
 	var parent *BaseDirs
 
 	now := time.Now().Unix()
 
 	return func() summary.Operation {
 		parent = &BaseDirs{
-			parent:   parent,
-			minDepth: minDepth,
-			db:       db,
-			refTime:  now,
-			users:    make(baseDirsMap),
-			groups:   make(baseDirsMap),
+			parent:  parent,
+			output:  output,
+			db:      db,
+			refTime: now,
+			users:   make(baseDirsMap),
+			groups:  make(baseDirsMap),
 		}
 
 		return parent
@@ -149,25 +133,15 @@ func (b *BaseDirs) Add(info *summary.FileInfo) error {
 }
 
 func (b *BaseDirs) Output() error {
-	minDepth := b.minDepth(b.thisDir)
-
-	if b.thisDir.Depth == minDepth {
-		if err := b.groups.AddAll(b.db.AddGroupBase); err != nil {
+	if b.output(b.thisDir) {
+		if err := b.groups.Add(b.db.AddGroupBase); err != nil {
 			return err
 		}
 
-		if err := b.users.AddAll(b.db.AddUserBase); err != nil {
+		if err := b.users.Add(b.db.AddUserBase); err != nil {
 			return err
 		}
-	} else if b.thisDir.Depth > minDepth {
-		if err := b.groups.AddChildren(b.db.AddGroupBase, b.thisDir); err != nil {
-			return err
-		}
-
-		if err := b.users.AddChildren(b.db.AddUserBase, b.thisDir); err != nil {
-			return err
-		}
-
+	} else {
 		b.addToParent()
 	}
 

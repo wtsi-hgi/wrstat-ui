@@ -5,6 +5,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/wtsi-hgi/wrstat-ui/internal/split"
 	"github.com/wtsi-hgi/wrstat-ui/stats"
 )
 
@@ -288,19 +289,25 @@ func (s *Summariser) changeToDirectoryOfEntry(directories directories, currentDi
 		directories = append(directories, s.directoryOperations.Generate())
 	}
 
-	var name string
-
 	if currentDir == nil {
-		name = string(info.Path)
-		depth = -1
-	} else {
-		name = string(info.BaseName())
-	}
+		currentDir = &DirectoryPath{
+			Name:  "/",
+			Depth: -1,
+		}
 
-	currentDir = &DirectoryPath{
-		Name:   name,
-		Depth:  depth,
-		Parent: currentDir,
+		for n, part := range split.SplitPath(string(info.Path)) {
+			currentDir = &DirectoryPath{
+				Name:   part,
+				Depth:  n,
+				Parent: currentDir,
+			}
+		}
+	} else {
+		currentDir = &DirectoryPath{
+			Name:   string(info.BaseName()),
+			Depth:  depth,
+			Parent: currentDir,
+		}
 	}
 
 	return directories, currentDir
