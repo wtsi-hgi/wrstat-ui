@@ -73,9 +73,15 @@ func NewMockInfo(path *summary.DirectoryPath, uid, gid uint32, size int64, dir b
 		entryType = stats.DirType
 	}
 
+	var name string
+
+	if path != nil {
+		name = path.Name
+	}
+
 	return &summary.FileInfo{
 		Path:      path,
-		Name:      []byte(path.Name),
+		Name:      []byte(name),
 		UID:       uid,
 		GID:       gid,
 		Size:      size,

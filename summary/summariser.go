@@ -24,6 +24,10 @@ type DirectoryPath struct {
 }
 
 func (d *DirectoryPath) AppendTo(p []byte) []byte {
+	if d == nil {
+		return append(p, '/')
+	}
+
 	if d.Parent != nil {
 		p = d.Parent.AppendTo(p)
 	}
