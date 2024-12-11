@@ -19,7 +19,7 @@ func SplitPath(path string) []string {
 	}
 
 	path = strings.TrimPrefix(path, "/")
-	parts := make([]string, strings.Count(path, "/"))
+	parts := make([]string, 0, strings.Count(path, "/"))
 
 	for len(path) > 0 {
 		pos := strings.IndexByte(path, '/')

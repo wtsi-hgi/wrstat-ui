@@ -28,7 +28,7 @@ func (d DirectoryPathCreator) ToDirectoryPath(p string) *summary.DirectoryPath {
 
 	dp := &summary.DirectoryPath{
 		Name:   base,
-		Depth:  strings.Count(p, "/"),
+		Depth:  parent.Depth + 1,
 		Parent: parent,
 	}
 
@@ -42,7 +42,7 @@ func NewDirectoryPathCreator() DirectoryPathCreator {
 
 	d["/"] = &summary.DirectoryPath{
 		Name:  "/",
-		Depth: -1,
+		Depth: 0,
 	}
 
 	return d

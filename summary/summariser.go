@@ -240,9 +240,9 @@ func (s *Summariser) Summarise() error {
 func (s *Summariser) changeToWorkingDirectoryOfEntry(directories directories, currentDir *DirectoryPath, info *stats.FileInfo) (directories, *DirectoryPath, error) {
 	var err error
 
-	depth := bytes.Count(info.Path[:len(info.Path)-1], slash)
-
 	if currentDir != nil {
+		depth := bytes.Count(info.Path[:len(info.Path)-1], slash)
+
 		directories, currentDir, err = s.changeToAscendantDirectoryOfEntry(directories, currentDir, depth)
 		if err != nil {
 			return nil, nil, err
@@ -250,7 +250,7 @@ func (s *Summariser) changeToWorkingDirectoryOfEntry(directories directories, cu
 	}
 
 	if info.EntryType == stats.DirType {
-		directories, currentDir = s.changeToDirectoryOfEntry(directories, currentDir, info, depth)
+		directories, currentDir = s.changeToDirectoryOfEntry(directories, currentDir, info)
 	}
 
 	return directories, currentDir, nil
@@ -278,7 +278,7 @@ func parentDir(path []byte) []byte {
 }
 
 func (s *Summariser) changeToDirectoryOfEntry(directories directories, currentDir *DirectoryPath,
-	info *stats.FileInfo, depth int) (directories, *DirectoryPath) {
+	info *stats.FileInfo) (directories, *DirectoryPath) {
 	if cap(directories) > len(directories) {
 		directories = directories[:len(directories)+1]
 
@@ -292,20 +292,20 @@ func (s *Summariser) changeToDirectoryOfEntry(directories directories, currentDi
 	if currentDir == nil {
 		currentDir = &DirectoryPath{
 			Name:  "/",
-			Depth: -1,
+			Depth: 0,
 		}
 
-		for n, part := range split.SplitPath(string(info.Path)) {
+		for _, part := range split.SplitPath(string(info.Path)) {
 			currentDir = &DirectoryPath{
 				Name:   part,
-				Depth:  n,
+				Depth:  currentDir.Depth + 1,
 				Parent: currentDir,
 			}
 		}
 	} else {
 		currentDir = &DirectoryPath{
 			Name:   string(info.BaseName()),
-			Depth:  depth,
+			Depth:  currentDir.Depth + 1,
 			Parent: currentDir,
 		}
 	}
