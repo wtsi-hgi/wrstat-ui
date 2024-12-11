@@ -9,9 +9,7 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/stats"
 )
 
-var (
-	slash = []byte{'/'}
-)
+var slash = []byte{'/'}
 
 const (
 	MaxPathLen                = 4096
@@ -26,14 +24,18 @@ type DirectoryPath struct {
 
 func (d *DirectoryPath) AppendTo(p []byte) []byte {
 	if d == nil {
-		return append(p, '/')
+		return nil
 	}
 
-	if d.Parent != nil {
-		p = d.Parent.AppendTo(p)
+	return append(d.Parent.AppendTo(p), d.Name...)
+}
+
+func (d *DirectoryPath) Len() int {
+	if d == nil {
+		return 0
 	}
 
-	return append(p, d.Name...)
+	return d.Parent.Len() + len(d.Name)
 }
 
 func (d *DirectoryPath) Less(e *DirectoryPath) bool {
