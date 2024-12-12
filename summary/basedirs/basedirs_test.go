@@ -5,6 +5,7 @@ import (
 	"time"
 
 	. "github.com/smartystreets/goconvey/convey"
+	"github.com/wtsi-hgi/wrstat-ui/basedirs"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 	"github.com/wtsi-hgi/wrstat-ui/internal/statsdata"
 	"github.com/wtsi-hgi/wrstat-ui/stats"
@@ -17,18 +18,23 @@ type mockDB struct {
 	users, groups mockBaseDirsMap
 }
 
-func (m *mockDB) AddUserBase(uid uint32, path *summary.DirectoryPath, age db.DirGUTAge) error {
-	return add(m.users, uid, path, age)
-}
-
-func add(m mockBaseDirsMap, id uint32, path *summary.DirectoryPath, age db.DirGUTAge) error {
-	m[id] = append(m[id], string(append(path.AppendTo(nil), byte(age))))
+func (m *mockDB) Output(users, groups basedirs.IDAgeDirs) error {
+	add(m.users, users)
+	add(m.groups, groups)
 
 	return nil
 }
 
-func (m *mockDB) AddGroupBase(gid uint32, path *summary.DirectoryPath, age db.DirGUTAge) error {
-	return add(m.groups, gid, path, age)
+func add(m mockBaseDirsMap, i basedirs.IDAgeDirs) error {
+	for id, ad := range i {
+		for age, dcss := range ad {
+			for _, dcs := range dcss {
+				m[id] = append(m[id], dcs.Dir+string(byte(age)))
+			}
+		}
+	}
+
+	return nil
 }
 
 func pathAge(path string, age db.DirGUTAge) string {
