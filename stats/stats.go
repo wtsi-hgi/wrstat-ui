@@ -176,7 +176,7 @@ func unquote(path []byte) []byte {
 					n = 8
 				}
 
-				read = n + 2
+				read = n + 2 //nolint:mnd
 
 				var value rune
 

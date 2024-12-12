@@ -57,17 +57,17 @@ func (d *DirSummary) Merge(old *DirSummary) {
 	merge(&d.SummaryWithChildren, &old.SummaryWithChildren, p.Name)
 }
 
-func merge(new, old *basedirs.SummaryWithChildren, name string) {
-	for n, c := range old.Children[0].FileUsage {
-		new.Children[0].FileUsage[n] += c
+func merge(newS, oldS *basedirs.SummaryWithChildren, name string) {
+	for n, c := range oldS.Children[0].FileUsage {
+		newS.Children[0].FileUsage[n] += c
 	}
 
-	setTimes(new, old.Atime, old.Mtime)
+	setTimes(newS, oldS.Atime, oldS.Mtime)
 
-	new.Children[0].NumFiles += old.Children[0].NumFiles
-	new.Children[0].SizeFiles += old.Children[0].SizeFiles
-	old.Children[0].SubDir = name
-	new.Children = append(new.Children, old.Children[0])
+	newS.Children[0].NumFiles += oldS.Children[0].NumFiles
+	newS.Children[0].SizeFiles += oldS.Children[0].SizeFiles
+	oldS.Children[0].SubDir = name
+	newS.Children = append(newS.Children, oldS.Children[0])
 }
 
 type baseDirs [numAges]*DirSummary
@@ -115,7 +115,7 @@ func (b baseDirsMap) Get(id uint32) *baseDirs {
 	return bd
 }
 
-func (b baseDirsMap) Add(fn func(uint32, basedirs.SummaryWithChildren, db.DirGUTAge)) error {
+func (b baseDirsMap) Add(fn func(uint32, basedirs.SummaryWithChildren, db.DirGUTAge)) {
 	for id, bd := range b {
 		for age, ds := range bd {
 			if ds != nil {
@@ -123,7 +123,7 @@ func (b baseDirsMap) Add(fn func(uint32, basedirs.SummaryWithChildren, db.DirGUT
 
 				for n, c := range ds.Children[0].FileUsage {
 					if c > 0 {
-						ds.FTs = append(ds.FTs, db.DirGUTAFileType(n))
+						ds.FTs = append(ds.FTs, n)
 					}
 				}
 
@@ -136,8 +136,6 @@ func (b baseDirsMap) Add(fn func(uint32, basedirs.SummaryWithChildren, db.DirGUT
 			}
 		}
 	}
-
-	return nil
 }
 
 func (b baseDirsMap) mergeTo(pbm baseDirsMap, parent *summary.DirectoryPath) {
@@ -278,7 +276,7 @@ func (b *BaseDirs) cleanup() {
 }
 
 func (r *RootBaseDirs) Output() error {
-	r.BaseDirs.Output()
+	r.BaseDirs.Output() //nolint:errcheck
 
 	return r.db.Output(r.users, r.groups)
 }

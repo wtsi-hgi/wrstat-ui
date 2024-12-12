@@ -138,7 +138,7 @@ func DateQuotaFull(history []History) (time.Time, time.Time) {
 	switch len(history) {
 	case 0:
 		return time.Time{}, time.Time{}
-	case 1, 2: //nolint:gomnd
+	case 1, 2: //nolint:mnd
 		oldest = history[0]
 	default:
 		oldest = history[len(history)-3]
@@ -152,8 +152,8 @@ func DateQuotaFull(history []History) (time.Time, time.Time) {
 	return untilSize, untilInodes
 }
 
-func calculateTrend(max uint64, latestTime, oldestTime time.Time, latestValue, oldestValue uint64) time.Time {
-	if latestValue >= max {
+func calculateTrend(maxV uint64, latestTime, oldestTime time.Time, latestValue, oldestValue uint64) time.Time {
+	if latestValue >= maxV {
 		return latestTime
 	}
 
@@ -170,7 +170,7 @@ func calculateTrend(max uint64, latestTime, oldestTime time.Time, latestValue, o
 
 	c := float64(latestValue) - latestSecs*dy/dt
 
-	secs := (float64(max) - c) * dt / dy
+	secs := (float64(maxV) - c) * dt / dy
 
 	t := time.Unix(int64(secs), 0)
 

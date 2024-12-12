@@ -20,7 +20,7 @@ func (t *testGlobalOperator) Add(s *FileInfo) error {
 	if s.EntryType == 'f' {
 		dir := s.Path.AppendTo(nil)
 
-		t.dirCounts[string(dir)] = t.dirCounts[string(dir)] + 1
+		t.dirCounts[string(dir)]++
 	}
 
 	return nil
@@ -64,6 +64,7 @@ func TestParse(t *testing.T) {
 
 		Convey("You can add an operation and have it apply over every line of data", func() {
 			so := &testGlobalOperator{dirCounts: make(map[string]int)}
+
 			s.AddGlobalOperation(func() Operation { return so })
 
 			err := s.Summarise()
@@ -75,6 +76,7 @@ func TestParse(t *testing.T) {
 		Convey("You can add multiple operations and they run sequentially", func() {
 			so := &testGlobalOperator{dirCounts: make(map[string]int)}
 			so2 := &testGlobalOperator{dirCounts: make(map[string]int)}
+
 			s.AddGlobalOperation(func() Operation { return so })
 			s.AddGlobalOperation(func() Operation { return so2 })
 

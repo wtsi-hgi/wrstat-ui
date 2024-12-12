@@ -32,7 +32,6 @@
 package internaldb
 
 import (
-	"fmt"
 	"os/user"
 	"testing"
 )
@@ -69,8 +68,6 @@ func GetUserAndGroups(t *testing.T) (string, string, []string) {
 
 		filteredGIDs = append(filteredGIDs, gid)
 	}
-
-	fmt.Println(filteredGIDs)
 
 	return uu.Username, uu.Uid, filteredGIDs
 }

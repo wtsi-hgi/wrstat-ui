@@ -75,7 +75,7 @@ func NewGroupUserID(gid, uid uint32) GroupUserID {
 }
 
 func (g GroupUserID) GID() uint32 {
-	return uint32(g >> 32)
+	return uint32(g >> 32) //nolint:mnd
 }
 
 func (g GroupUserID) UID() uint32 {

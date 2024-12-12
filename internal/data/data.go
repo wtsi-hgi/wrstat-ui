@@ -63,11 +63,13 @@ type TestFile struct {
 	ATime, MTime   int
 }
 
-var i int
+var i int //nolint:gochecknoglobals
 
-func addFiles(d *statsdata.Directory, directory, suffix string, numFiles int, sizeOfEachFile, atime, mtime int64, gid, uid uint32) {
+func addFiles(d *statsdata.Directory, directory, suffix string, numFiles int,
+	sizeOfEachFile, atime, mtime int64, gid, uid uint32) {
 	for range numFiles {
 		statsdata.AddFile(d, filepath.Join(directory, strconv.Itoa(i)+suffix), uid, gid, sizeOfEachFile, atime, mtime)
+
 		i++
 	}
 }
@@ -75,7 +77,7 @@ func addFiles(d *statsdata.Directory, directory, suffix string, numFiles int, si
 func CreateDefaultTestData(gidA, gidB, gidC, uidA, uidB uint32, refTime int64) *statsdata.Directory {
 	dir := statsdata.NewRoot("/", 0)
 	dir.ATime = refTime
-	//dir.MTime = refTime
+	// dir.MTime = refTime
 	dir.GID = gidA
 	dir.UID = uidA
 

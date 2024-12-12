@@ -9,8 +9,6 @@ import (
 	"slices"
 	"sort"
 	"strings"
-
-	_ "embed"
 )
 
 func TestStats(width, depth int, rootPath string, refTime int64) *Directory {
@@ -24,6 +22,7 @@ func TestStats(width, depth int, rootPath string, refTime int64) *Directory {
 func addChildren(d *Directory, width, depth int) {
 	for n := range width {
 		addChildren(d.AddDirectory(fmt.Sprintf("dir%d", n)), width-1, depth-1)
+
 		d.AddFile(fmt.Sprintf("file%d", n)).Size = 1
 	}
 }
@@ -53,9 +52,9 @@ func (d *Directory) AddDirectory(name string) *Directory {
 	if c, ok := d.children[name]; ok {
 		if cd, ok := c.(*Directory); ok {
 			return cd
-		} else {
-			return nil
 		}
+
+		return nil
 	}
 
 	c := &Directory{
@@ -73,9 +72,9 @@ func (d *Directory) AddFile(name string) *File {
 	if c, ok := d.children[name]; ok {
 		if cf, ok := c.(*File); ok {
 			return cf
-		} else {
-			return nil
 		}
+
+		return nil
 	}
 
 	f := d.File
@@ -91,7 +90,7 @@ func (d *Directory) AddFile(name string) *File {
 func (d *Directory) WriteTo(w io.Writer) (int64, error) {
 	n, err := d.File.WriteTo(w)
 	if err != nil {
-		return int64(n), err
+		return n, err
 	}
 
 	keys := slices.Collect(maps.Keys(d.children))
@@ -103,18 +102,18 @@ func (d *Directory) WriteTo(w io.Writer) (int64, error) {
 		n += m
 
 		if err != nil {
-			return int64(n), err
+			return n, err
 		}
 	}
 
-	return int64(n), nil
+	return n, nil
 }
 
 func (d *Directory) AsReader() io.ReadCloser {
 	pr, pw := io.Pipe()
 
 	go func() {
-		d.WriteTo(pw)
+		d.WriteTo(pw) //nolint:errcheck
 		pw.Close()
 	}()
 

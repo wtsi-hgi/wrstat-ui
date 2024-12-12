@@ -1664,7 +1664,7 @@ func (m *mockDirEntry) Info() (fs.FileInfo, error) {
 
 // createExampleBasedirsDB creates a temporary basedirs.db and returns the path
 // to the database file.
-func createExampleBasedirsDB(t *testing.T, tree *db.Tree) (string, string, error) {
+func createExampleBasedirsDB(t *testing.T) (string, string, error) {
 	t.Helper()
 
 	csvPath := internaldata.CreateQuotasCSV(t, internaldata.ExampleQuotaCSV)
@@ -1687,7 +1687,7 @@ func createExampleBasedirsDB(t *testing.T, tree *db.Tree) (string, string, error
 			Splits:  4,
 			MinDirs: 4,
 		},
-	}, tree, quotas)
+	}, quotas)
 	if err != nil {
 		return "", "", err
 	}

@@ -25,7 +25,7 @@ func (m *mockDB) Output(users, groups basedirs.IDAgeDirs) error {
 	return nil
 }
 
-func add(m mockBaseDirsMap, i basedirs.IDAgeDirs) error {
+func add(m mockBaseDirsMap, i basedirs.IDAgeDirs) {
 	for id, ad := range i {
 		for age, dcss := range ad {
 			for _, dcs := range dcss {
@@ -33,8 +33,6 @@ func add(m mockBaseDirsMap, i basedirs.IDAgeDirs) error {
 			}
 		}
 	}
-
-	return nil
 }
 
 func pathAge(path string, age db.DirGUTAge) string {

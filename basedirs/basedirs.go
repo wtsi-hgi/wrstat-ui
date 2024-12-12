@@ -53,7 +53,7 @@ type BaseDirs struct {
 // `/mounts/[group name]`, that's 2 directories deep and splits 1, minDirs 2
 // might work well. If it's 5 directories deep, splits 4, minDirs 4 might work
 // well.
-func NewCreator(dbPath string, c Config, tree *db.Tree, quotas *Quotas) (*BaseDirs, error) {
+func NewCreator(dbPath string, c Config, quotas *Quotas) (*BaseDirs, error) {
 	mp, err := getMountPoints()
 	if err != nil {
 		return nil, err

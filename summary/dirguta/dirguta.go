@@ -41,7 +41,7 @@ import (
 // typeCheckers take a path and return true if the path is of their file type.
 type typeChecker func(path string) bool
 
-var typeCheckers = map[db.DirGUTAFileType]typeChecker{
+var typeCheckers = map[db.DirGUTAFileType]typeChecker{ //nolint:gochecknoglobals
 	db.DGUTAFileTypeVCF:        isVCF,
 	db.DGUTAFileTypeVCFGz:      isVCFGz,
 	db.DGUTAFileTypeBCF:        isBCF,
@@ -326,7 +326,7 @@ func isLog(path string) bool {
 }
 
 type DB interface {
-	Add(db.RecordDGUTA) error
+	Add(dguta db.RecordDGUTA) error
 }
 
 // DirGroupUserTypeAge is used to summarise file stats by directory, group,
@@ -498,15 +498,15 @@ func (g *GUTAKeys) append(gid, uid uint32, fileType db.DirGUTAFileType) {
 
 // maxInt returns the greatest of the inputs.
 func maxInt(ints ...int64) int64 {
-	var max int64
+	var maxInt int64
 
 	for _, i := range ints {
-		if i > max {
-			max = i
+		if i > maxInt {
+			maxInt = i
 		}
 	}
 
-	return max
+	return maxInt
 }
 
 // pathToTypes determines the filetype of the given path based on its basename,

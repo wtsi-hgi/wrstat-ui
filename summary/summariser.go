@@ -9,7 +9,7 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/stats"
 )
 
-var slash = []byte{'/'}
+var slash = []byte{'/'} //nolint:gochecknoglobals
 
 const (
 	MaxPathLen                = 4096
@@ -22,7 +22,7 @@ type DirectoryPath struct {
 	Parent *DirectoryPath
 }
 
-func (d *DirectoryPath) AppendTo(p []byte) []byte {
+func (d *DirectoryPath) AppendTo(p []byte) []byte { //nolint:unparam
 	if d == nil {
 		return nil
 	}
@@ -192,7 +192,7 @@ func (s *Summariser) AddGlobalOperation(op OperationGenerator) {
 func (s *Summariser) Summarise() error {
 	statsInfo := new(stats.FileInfo)
 
-	directories := make(directories, 0, probableMaxDirectoryDepth)
+	dirs := make(directories, 0, probableMaxDirectoryDepth)
 	global := s.globalOperations.Generate()
 
 	var (
@@ -202,7 +202,7 @@ func (s *Summariser) Summarise() error {
 	)
 
 	for s.statsParser.Scan(statsInfo) == nil {
-		directories, currentDir, err = s.changeToWorkingDirectoryOfEntry(directories, currentDir, statsInfo)
+		dirs, currentDir, err = s.changeToWorkingDirectoryOfEntry(dirs, currentDir, statsInfo)
 		if err != nil {
 			return err
 		}
@@ -223,7 +223,7 @@ func (s *Summariser) Summarise() error {
 			return err
 		}
 
-		if err = directories.Add(&info); err != nil {
+		if err = dirs.Add(&info); err != nil {
 			return err
 		}
 	}
@@ -232,14 +232,15 @@ func (s *Summariser) Summarise() error {
 		return err
 	}
 
-	if err := directories.Output(); err != nil {
+	if err := dirs.Output(); err != nil {
 		return err
 	}
 
 	return global.Output()
 }
 
-func (s *Summariser) changeToWorkingDirectoryOfEntry(directories directories, currentDir *DirectoryPath, info *stats.FileInfo) (directories, *DirectoryPath, error) {
+func (s *Summariser) changeToWorkingDirectoryOfEntry(directories directories,
+	currentDir *DirectoryPath, info *stats.FileInfo) (directories, *DirectoryPath, error) {
 	var err error
 
 	if currentDir != nil {
@@ -258,7 +259,8 @@ func (s *Summariser) changeToWorkingDirectoryOfEntry(directories directories, cu
 	return directories, currentDir, nil
 }
 
-func (s *Summariser) changeToAscendantDirectoryOfEntry(directories directories, currentDir *DirectoryPath, depth int) (directories, *DirectoryPath, error) {
+func (s *Summariser) changeToAscendantDirectoryOfEntry(directories directories,
+	currentDir *DirectoryPath, depth int) (directories, *DirectoryPath, error) {
 	for currentDir.Depth >= depth {
 		currentDir = currentDir.Parent
 

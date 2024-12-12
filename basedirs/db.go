@@ -115,7 +115,7 @@ func openDB(dbPath string) (*bolt.DB, error) {
 	})
 }
 
-func (b *BaseDirs) updateDatabase(users, groups IDAgeDirs) func(*bolt.Tx) error { //nolint:gocognit
+func (b *BaseDirs) updateDatabase(users, groups IDAgeDirs) func(*bolt.Tx) error {
 	return func(tx *bolt.Tx) error {
 		if err := clearUsageBuckets(tx); err != nil {
 			return err

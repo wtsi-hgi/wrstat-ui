@@ -206,7 +206,8 @@ func (m *mockDB) Add(dguta db.RecordDGUTA) error {
 	return nil
 }
 
-func (m *mockDB) has(dir string, gid, uid uint32, ft db.DirGUTAFileType, age db.DirGUTAge, count, size uint64, atime, mtime int64) bool {
+func (m *mockDB) has(dir string, gid, uid uint32, ft db.DirGUTAFileType,
+	age db.DirGUTAge, count, size uint64, atime, mtime int64) bool {
 	dgutas, ok := m.gutas[dir]
 	if !ok {
 		return false

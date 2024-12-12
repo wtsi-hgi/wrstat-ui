@@ -499,7 +499,7 @@ func (d *DB) Close() error {
 
 	for _, readSet := range d.readSets {
 		if err := readSet.Close(); err != nil {
-			return nil
+			return err
 		}
 	}
 
@@ -578,14 +578,14 @@ func getDGUTAFromDBAndAppend(b *bolt.Bucket, dir string, ch codec.Handle, dguta 
 
 // getDGUTAFromDB gets and decodes a dguta from the given database.
 func getDGUTAFromDB(b *bolt.Bucket, dir string, ch codec.Handle) (*DGUTA, error) {
-	bdir := make([]byte, 0, 2+len(dir))
+	bdir := make([]byte, 0, 2+len(dir)) //nolint:mnd
 	bdir = append(bdir, dir...)
 
 	if !strings.HasSuffix(dir, "/") {
 		bdir = append(bdir, '/')
 	}
 
-	bdir = append(bdir, 255)
+	bdir = append(bdir, endByte)
 
 	v := b.Get(bdir)
 	if v == nil {

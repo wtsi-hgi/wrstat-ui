@@ -41,7 +41,7 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/stats"
 	"github.com/wtsi-hgi/wrstat-ui/summary"
 	"github.com/wtsi-hgi/wrstat-ui/summary/dirguta"
-	"go.etcd.io/bbolt"
+
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -346,7 +346,7 @@ func TestDGUTA(t *testing.T) {
 							err = os.RemoveAll(paths[2])
 							So(err, ShouldBeNil)
 
-							err = os.WriteFile(paths[2], []byte("foo"), 0600)
+							err = os.WriteFile(paths[2], []byte("foo"), 0o600)
 							So(err, ShouldBeNil)
 
 							err = d.Open()
@@ -355,7 +355,7 @@ func TestDGUTA(t *testing.T) {
 							err = os.RemoveAll(paths[1])
 							So(err, ShouldBeNil)
 
-							err = os.WriteFile(paths[1], []byte("foo"), 0600)
+							err = os.WriteFile(paths[1], []byte("foo"), 0o600)
 							So(err, ShouldBeNil)
 
 							err = d.Open()
@@ -464,7 +464,7 @@ func TestDGUTA(t *testing.T) {
 
 						err := d.Add(db.RecordDGUTA{
 							Dir: &summary.DirectoryPath{
-								Name: strings.Repeat("a", bbolt.MaxKeySize),
+								Name: strings.Repeat("a", bolt.MaxKeySize),
 							},
 							GUTAs: expected[0].GUTAs,
 						})
@@ -488,7 +488,7 @@ func TestDGUTA(t *testing.T) {
 
 				d = db.NewDB(paths[0])
 
-				err = os.WriteFile(paths[2], []byte("foo"), 0600)
+				err = os.WriteFile(paths[2], []byte("foo"), 0o600)
 				So(err, ShouldBeNil)
 
 				err = store(d, data, 4)

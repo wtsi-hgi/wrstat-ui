@@ -212,7 +212,7 @@ func BenchmarkScanAndFileInfo(b *testing.B) {
 func BenchmarkRawScanner(b *testing.B) {
 	var buf bytes.Buffer
 
-	io.Copy(&buf, statsdata.TestStats(5, 5, "/opt/", 0).AsReader())
+	io.Copy(&buf, statsdata.TestStats(5, 5, "/opt/", 0).AsReader()) //nolint:errcheck
 
 	data := buf.Bytes()
 

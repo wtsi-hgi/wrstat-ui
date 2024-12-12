@@ -30,6 +30,8 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/summary"
 )
 
+const endByte = 255
+
 // DGUTA handles all the *GUTA information for a directory.
 type DGUTA struct {
 	Dir   string
@@ -42,7 +44,7 @@ type RecordDGUTA struct {
 	Children []string
 }
 
-var pathBuf [4098]byte
+var pathBuf [4098]byte //nolint:gochecknoglobals
 
 // EncodeToBytes returns our Dir as a []byte and our GUTAs encoded in another
 // []byte suitable for storing on disk.
@@ -51,7 +53,7 @@ func (d *RecordDGUTA) EncodeToBytes(ch codec.Handle) ([]byte, []byte) {
 	enc := codec.NewEncoderBytes(&encoded, ch)
 	enc.MustEncode(d.GUTAs)
 
-	dir := append(d.pathBytes(), 255)
+	dir := append(d.pathBytes(), endByte)
 
 	return dir, encoded
 }
@@ -70,7 +72,7 @@ func DecodeDGUTAbytes(ch codec.Handle, dir, encoded []byte) *DGUTA {
 	dec.MustDecode(&g)
 
 	return &DGUTA{
-		Dir:   string(dir[:len(dir)-1]), // remove the seperator (255)
+		Dir:   string(dir[:len(dir)-1]), // remove the separator (255)
 		GUTAs: g,
 	}
 }

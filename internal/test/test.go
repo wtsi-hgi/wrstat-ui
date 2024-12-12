@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"strings"
 
-	. "github.com/smartystreets/goconvey/convey"
+	. "github.com/smartystreets/goconvey/convey" //nolint:revive,stylecheck
 	"github.com/wtsi-hgi/wrstat-ui/stats"
 	"github.com/wtsi-hgi/wrstat-ui/summary"
 )
@@ -89,14 +89,16 @@ func NewMockInfo(path *summary.DirectoryPath, uid, gid uint32, size int64, dir b
 	}
 }
 
-func NewMockInfoWithAtime(path *summary.DirectoryPath, uid, gid uint32, size int64, dir bool, atime int64) *summary.FileInfo {
+func NewMockInfoWithAtime(path *summary.DirectoryPath, uid, gid uint32,
+	size int64, dir bool, atime int64) *summary.FileInfo {
 	mi := NewMockInfo(path, uid, gid, size, dir)
 	mi.ATime = atime
 
 	return mi
 }
 
-func NewMockInfoWithTimes(path *summary.DirectoryPath, uid, gid uint32, size int64, dir bool, tim int64) *summary.FileInfo {
+func NewMockInfoWithTimes(path *summary.DirectoryPath, uid, gid uint32,
+	size int64, dir bool, tim int64) *summary.FileInfo {
 	mi := NewMockInfo(path, uid, gid, size, dir)
 	mi.ATime = tim
 	mi.MTime = tim
@@ -123,8 +125,8 @@ func CheckDataIsSorted(data string, textCols int) bool {
 				continue
 			}
 
-			colA, _ := strconv.ParseInt(col, 10, 0)
-			colB, _ := strconv.ParseInt(b[n], 10, 0)
+			colA, _ := strconv.ParseInt(col, 10, 0)  //nolint:errcheck
+			colB, _ := strconv.ParseInt(b[n], 10, 0) //nolint:errcheck
 
 			if dx := colA - colB; dx != 0 {
 				return int(dx)
@@ -135,7 +137,7 @@ func CheckDataIsSorted(data string, textCols int) bool {
 	})
 }
 
-func TestBadIds(err error, a summary.Operation, w *StringBuilder) {
+func TestBadIDs(err error, a summary.Operation, w *StringBuilder) {
 	So(err, ShouldBeNil)
 
 	err = a.Output()

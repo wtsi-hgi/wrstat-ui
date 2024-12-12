@@ -94,5 +94,4 @@ func TestDirGUTAFileType(t *testing.T) {
 		So(err, ShouldEqual, ErrInvalidType)
 		So(ft, ShouldEqual, DGUTAFileTypeOther)
 	})
-
 }

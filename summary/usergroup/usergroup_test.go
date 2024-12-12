@@ -26,8 +26,6 @@
 package usergroup
 
 import (
-	"io"
-	"io/fs"
 	"strconv"
 	"testing"
 
@@ -110,7 +108,7 @@ func TestUsergroup(t *testing.T) {
 			So(err, ShouldBeNil)
 
 			err = ug.Add(internaltest.NewMockInfo(paths.ToDirectoryPath("/a/b/c/file.txt"), 999999999, 2, 1, false))
-			internaltest.TestBadIds(err, ug, &w)
+			internaltest.TestBadIDs(err, ug, &w)
 		})
 
 		Convey("Output handles bad gids", func() {
@@ -120,7 +118,7 @@ func TestUsergroup(t *testing.T) {
 			So(err, ShouldBeNil)
 
 			err = ug.Add(internaltest.NewMockInfo(paths.ToDirectoryPath("/a/b/c/8.txt"), 1, 999999999, 1, false))
-			internaltest.TestBadIds(err, ug, &w)
+			internaltest.TestBadIDs(err, ug, &w)
 		})
 
 		Convey("Output fails if we can't write to the output file", func() {
@@ -128,10 +126,4 @@ func TestUsergroup(t *testing.T) {
 			So(err, ShouldNotBeNil)
 		})
 	})
-}
-
-// byColumnAdder describes one of our New* types.
-type byColumnAdder interface {
-	Add(string, fs.FileInfo) error
-	Output(output io.WriteCloser) error
 }
