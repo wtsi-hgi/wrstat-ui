@@ -189,7 +189,7 @@ func TestDirGUTAFileType(t *testing.T) {
 			{"/foo/bar.csv", false, db.DGUTAFileTypeText, false},
 			{"/foo/bar.o", false, db.DGUTAFileTypeLog, false},
 		} {
-			ft, tmp := infoToType(internaltest.NewMockInfo(d.ToDirectoryPath(test.Path), 0, 0, 0, test.IsDir))
+			ft, tmp := InfoToType(internaltest.NewMockInfo(d.ToDirectoryPath(test.Path), 0, 0, 0, test.IsDir))
 			So(ft, ShouldEqual, test.FileType)
 			So(tmp, ShouldEqual, test.IsTmp)
 		}

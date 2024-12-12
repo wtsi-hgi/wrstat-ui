@@ -388,7 +388,7 @@ func (d *DirGroupUserTypeAge) Add(info *summary.FileInfo) error {
 	gutaKeysA := gutaKey.Get().(*[maxNumOfGUTAKeys]GUTAKey) //nolint:errcheck,forcetypeassert
 	gutaKeys := GUTAKeys(gutaKeysA[:0])
 
-	filetype, isTmp := infoToType(info)
+	filetype, isTmp := InfoToType(info)
 
 	gutaKeys.append(info.GID, info.UID, filetype)
 
@@ -403,7 +403,7 @@ func (d *DirGroupUserTypeAge) Add(info *summary.FileInfo) error {
 	return nil
 }
 
-func infoToType(info *summary.FileInfo) (db.DirGUTAFileType, bool) {
+func InfoToType(info *summary.FileInfo) (db.DirGUTAFileType, bool) {
 	var (
 		isTmp    bool
 		filetype db.DirGUTAFileType
