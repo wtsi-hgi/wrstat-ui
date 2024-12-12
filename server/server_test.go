@@ -1679,8 +1679,7 @@ func createExampleBasedirsDB(t *testing.T, tree *db.Tree) (string, string, error
 
 	bd, err := basedirs.NewCreator(dbPath, basedirs.Config{
 		{
-			Prefix:  "/lustre/scratch123/hgi/mdt",
-			Score:   4,
+			Prefix:  split.SplitPath("/lustre/scratch123/hgi/mdt"),
 			Splits:  5,
 			MinDirs: 5,
 		},
@@ -1698,7 +1697,7 @@ func createExampleBasedirsDB(t *testing.T, tree *db.Tree) (string, string, error
 		"/lustre/scratch125/",
 	})
 
-	err = bd.CreateDatabase()
+	err = bd.Output(nil, nil) // TODO: FIX!!!
 	if err != nil {
 		return "", "", err
 	}

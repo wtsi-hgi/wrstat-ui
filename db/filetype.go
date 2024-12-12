@@ -25,7 +25,7 @@ const (
 	DGUTAFileTypeDir        DirGUTAFileType = 15
 )
 
-var AllTypesExceptDirectories = []DirGUTAFileType{ //nolint:gochecknoglobals
+var AllTypesExceptDirectories = [...]DirGUTAFileType{ //nolint:gochecknoglobals
 	DGUTAFileTypeOther,
 	DGUTAFileTypeTemp,
 	DGUTAFileTypeVCF,

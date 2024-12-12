@@ -88,18 +88,13 @@ type Usage struct {
 
 // CreateDatabase creates a database containing usage information for each of
 // our groups and users by calculated base directory.
-func (b *BaseDirs) CreateDatabase() error {
+func (b *BaseDirs) Output(users, groups IDAgeDirs) error {
 	db, err := openDB(b.dbPath)
 	if err != nil {
 		return err
 	}
 
-	gids, uids, err := getAllGIDsandUIDsInTree(b.tree)
-	if err != nil {
-		return err
-	}
-
-	err = db.Update(b.updateDatabase(gids, uids))
+	err = db.Update(b.updateDatabase(users, groups))
 	if err != nil {
 		return err
 	}
@@ -120,7 +115,7 @@ func openDB(dbPath string) (*bolt.DB, error) {
 	})
 }
 
-func (b *BaseDirs) updateDatabase(gids, uids []uint32) func(*bolt.Tx) error { //nolint:gocognit
+func (b *BaseDirs) updateDatabase(users, groups IDAgeDirs) func(*bolt.Tx) error { //nolint:gocognit
 	return func(tx *bolt.Tx) error {
 		if err := clearUsageBuckets(tx); err != nil {
 			return err
@@ -130,20 +125,15 @@ func (b *BaseDirs) updateDatabase(gids, uids []uint32) func(*bolt.Tx) error { //
 			return err
 		}
 
-		gidBase, err := b.gidsToBaseDirs(gids)
-		if err != nil {
-			return err
-		}
-
-		if errc := b.calculateUsage(tx, gidBase, uids); errc != nil {
+		if errc := b.calculateUsage(tx, groups, users); errc != nil {
 			return errc
 		}
 
-		if errc := b.updateHistories(tx, gidBase); errc != nil {
+		if errc := b.updateHistories(tx, groups); errc != nil {
 			return errc
 		}
 
-		return b.calculateSubDirUsage(tx, gidBase, uids)
+		return b.calculateSubDirUsage(tx, groups, users)
 	}
 }
 
@@ -172,50 +162,37 @@ func createBucketsIfNotExist(tx *bolt.Tx) error {
 	return nil
 }
 
-func (b *BaseDirs) gidsToBaseDirs(gids []uint32) (map[uint32]db.DCSs, error) {
-	gidBase := make(map[uint32]db.DCSs, len(gids))
-
-	for _, gid := range gids {
-		dcss, err := b.calculateForGroup(gid)
-		if err != nil {
-			return nil, err
-		}
-
-		gidBase[gid] = dcss
-	}
-
-	return gidBase, nil
-}
-
-func (b *BaseDirs) calculateUsage(tx *bolt.Tx, gidBase map[uint32]db.DCSs, uids []uint32) error {
+func (b *BaseDirs) calculateUsage(tx *bolt.Tx, gidBase IDAgeDirs, uidBase IDAgeDirs) error {
 	if errc := b.storeGIDBaseDirs(tx, gidBase); errc != nil {
 		return errc
 	}
 
-	return b.storeUIDBaseDirs(tx, uids)
+	return b.storeUIDBaseDirs(tx, uidBase)
 }
 
-func (b *BaseDirs) storeGIDBaseDirs(tx *bolt.Tx, gidBase map[uint32]db.DCSs) error {
+func (b *BaseDirs) storeGIDBaseDirs(tx *bolt.Tx, gidBase IDAgeDirs) error {
 	gub := tx.Bucket([]byte(groupUsageBucket))
 
 	for gid, dcss := range gidBase {
-		for _, dcs := range dcss {
-			quotaSize, quotaInode := b.quotas.Get(gid, dcs.Dir)
+		for _, adcs := range dcss {
+			for _, dcs := range adcs {
+				quotaSize, quotaInode := b.quotas.Get(gid, dcs.Dir)
 
-			uwm := &Usage{
-				GID:         gid,
-				UIDs:        dcs.UIDs,
-				BaseDir:     dcs.Dir,
-				UsageSize:   dcs.Size,
-				QuotaSize:   quotaSize,
-				UsageInodes: dcs.Count,
-				QuotaInodes: quotaInode,
-				Mtime:       dcs.Mtime,
-				Age:         dcs.Age,
-			}
+				uwm := &Usage{
+					GID:         gid,
+					UIDs:        dcs.UIDs,
+					BaseDir:     dcs.Dir,
+					UsageSize:   dcs.Size,
+					QuotaSize:   quotaSize,
+					UsageInodes: dcs.Count,
+					QuotaInodes: quotaInode,
+					Mtime:       dcs.Mtime,
+					Age:         dcs.Age,
+				}
 
-			if err := gub.Put(keyName(gid, dcs.Dir, uwm.Age), b.encodeToBytes(uwm)); err != nil {
-				return err
+				if err := gub.Put(keyName(gid, dcs.Dir, uwm.Age), b.encodeToBytes(uwm)); err != nil {
+					return err
+				}
 			}
 		}
 	}
@@ -247,28 +224,25 @@ func (b *BaseDirs) encodeToBytes(data any) []byte {
 	return encoded
 }
 
-func (b *BaseDirs) storeUIDBaseDirs(tx *bolt.Tx, uids []uint32) error {
+func (b *BaseDirs) storeUIDBaseDirs(tx *bolt.Tx, uidBase IDAgeDirs) error {
 	uub := tx.Bucket([]byte(userUsageBucket))
 
-	for _, uid := range uids {
-		dcss, err := b.calculateForUser(uid)
-		if err != nil {
-			return err
-		}
+	for uid, dcss := range uidBase {
+		for _, adcs := range dcss {
+			for _, dcs := range adcs {
+				uwm := &Usage{
+					UID:         uid,
+					GIDs:        dcs.GIDs,
+					BaseDir:     dcs.Dir,
+					UsageSize:   dcs.Size,
+					UsageInodes: dcs.Count,
+					Mtime:       dcs.Mtime,
+					Age:         dcs.Age,
+				}
 
-		for _, dcs := range dcss {
-			uwm := &Usage{
-				UID:         uid,
-				GIDs:        dcs.GIDs,
-				BaseDir:     dcs.Dir,
-				UsageSize:   dcs.Size,
-				UsageInodes: dcs.Count,
-				Mtime:       dcs.Mtime,
-				Age:         dcs.Age,
-			}
-
-			if err := uub.Put(keyName(uid, dcs.Dir, uwm.Age), b.encodeToBytes(uwm)); err != nil {
-				return err
+				if err := uub.Put(keyName(uid, dcs.Dir, uwm.Age), b.encodeToBytes(uwm)); err != nil {
+					return err
+				}
 			}
 		}
 	}
@@ -276,7 +250,7 @@ func (b *BaseDirs) storeUIDBaseDirs(tx *bolt.Tx, uids []uint32) error {
 	return nil
 }
 
-func (b *BaseDirs) updateHistories(tx *bolt.Tx, gidBase map[uint32]db.DCSs) error {
+func (b *BaseDirs) updateHistories(tx *bolt.Tx, gidBase IDAgeDirs) error {
 	ghb := tx.Bucket([]byte(groupHistoricalBucket))
 
 	gidMounts := b.gidsToMountpoints(gidBase)
@@ -292,7 +266,7 @@ func (b *BaseDirs) updateHistories(tx *bolt.Tx, gidBase map[uint32]db.DCSs) erro
 
 type gidMountsMap map[uint32]map[string]db.DirSummary
 
-func (b *BaseDirs) gidsToMountpoints(gidBase map[uint32]db.DCSs) gidMountsMap {
+func (b *BaseDirs) gidsToMountpoints(gidBase IDAgeDirs) gidMountsMap {
 	gidMounts := make(gidMountsMap, len(gidBase))
 
 	for gid, dcss := range gidBase {
@@ -302,14 +276,10 @@ func (b *BaseDirs) gidsToMountpoints(gidBase map[uint32]db.DCSs) gidMountsMap {
 	return gidMounts
 }
 
-func (b *BaseDirs) dcssToMountPoints(dcss db.DCSs) map[string]db.DirSummary {
+func (b *BaseDirs) dcssToMountPoints(dcss *AgeDirs) map[string]db.DirSummary {
 	mounts := make(map[string]db.DirSummary)
 
-	for _, dcs := range dcss {
-		if dcs.Age != db.DGUTAgeAll {
-			continue
-		}
-
+	for _, dcs := range dcss[0] {
 		mp := b.mountPoints.prefixOf(dcs.Dir)
 		if mp == "" {
 			continue
@@ -420,21 +390,23 @@ type SubDir struct {
 	FileUsage    UsageBreakdownByType
 }
 
-func (b *BaseDirs) calculateSubDirUsage(tx *bolt.Tx, gidBase map[uint32]db.DCSs, uids []uint32) error {
+func (b *BaseDirs) calculateSubDirUsage(tx *bolt.Tx, gidBase, uidBase IDAgeDirs) error {
 	if errc := b.storeGIDSubDirs(tx, gidBase); errc != nil {
 		return errc
 	}
 
-	return b.storeUIDSubDirs(tx, uids)
+	return b.storeUIDSubDirs(tx, uidBase)
 }
 
-func (b *BaseDirs) storeGIDSubDirs(tx *bolt.Tx, gidBase map[uint32]db.DCSs) error {
+func (b *BaseDirs) storeGIDSubDirs(tx *bolt.Tx, gidBase IDAgeDirs) error {
 	bucket := tx.Bucket([]byte(groupSubDirsBucket))
 
 	for gid, dcss := range gidBase {
-		for _, dcs := range dcss {
-			if err := b.storeSubDirs(bucket, dcs, gid, db.Filter{GIDs: []uint32{gid}, Age: dcs.Age}); err != nil {
-				return err
+		for _, adcs := range dcss {
+			for _, dcs := range adcs {
+				if err := b.storeSubDirs(bucket, gid, dcs); err != nil {
+					return err
+				}
 			}
 		}
 	}
@@ -442,65 +414,8 @@ func (b *BaseDirs) storeGIDSubDirs(tx *bolt.Tx, gidBase map[uint32]db.DCSs) erro
 	return nil
 }
 
-func (b *BaseDirs) storeSubDirs(bucket *bolt.Bucket, dcs *db.DirSummary, id uint32, filter db.Filter) error {
-	filter.FTs = db.AllTypesExceptDirectories
-
-	info, err := b.tree.DirInfo(dcs.Dir, &filter)
-	if err != nil {
-		return err
-	}
-
-	parentTypes, childToTypes, err := b.dirAndSubDirTypes(info, filter, dcs.Dir)
-	if err != nil {
-		return err
-	}
-
-	subDirs := makeSubDirs(info, parentTypes, childToTypes)
-
-	return bucket.Put(keyName(id, dcs.Dir, dcs.Age), b.encodeToBytes(subDirs))
-}
-
-func (b *BaseDirs) dirAndSubDirTypes(info *db.DirInfo, filter db.Filter,
-	dir string,
-) (UsageBreakdownByType, map[string]UsageBreakdownByType, error) {
-	childToTypes := make(map[string]UsageBreakdownByType)
-	parentTypes := make(UsageBreakdownByType)
-
-	for _, ft := range info.Current.FTs {
-		filter.FTs = []db.DirGUTAFileType{ft}
-
-		typedInfo, err := b.tree.DirInfo(dir, &filter)
-		if err != nil {
-			return nil, nil, err
-		}
-
-		childrenTypeSize := collateSubDirFileTypeSizes(typedInfo.Children, childToTypes, ft)
-
-		if parentTypeSize := typedInfo.Current.Size - childrenTypeSize; parentTypeSize > 0 {
-			parentTypes[ft] = parentTypeSize
-		}
-	}
-
-	return parentTypes, childToTypes, nil
-}
-
-func collateSubDirFileTypeSizes(children []*db.DirSummary,
-	childToTypes map[string]UsageBreakdownByType, ft db.DirGUTAFileType,
-) uint64 {
-	var fileTypeSize uint64
-
-	for _, child := range children {
-		ubbt, ok := childToTypes[child.Dir]
-		if !ok {
-			ubbt = make(UsageBreakdownByType)
-		}
-
-		ubbt[ft] = child.Size
-		childToTypes[child.Dir] = ubbt
-		fileTypeSize += child.Size
-	}
-
-	return fileTypeSize
+func (b *BaseDirs) storeSubDirs(bucket *bolt.Bucket, id uint32, dcs SummaryWithChildren) error {
+	return bucket.Put(keyName(id, dcs.Dir, dcs.Age), b.encodeToBytes(dcs.Children))
 }
 
 func makeSubDirs(info *db.DirInfo, parentTypes UsageBreakdownByType, //nolint:funlen
@@ -541,18 +456,15 @@ func makeSubDirs(info *db.DirInfo, parentTypes UsageBreakdownByType, //nolint:fu
 	return subDirs
 }
 
-func (b *BaseDirs) storeUIDSubDirs(tx *bolt.Tx, uids []uint32) error {
+func (b *BaseDirs) storeUIDSubDirs(tx *bolt.Tx, uidBase IDAgeDirs) error {
 	bucket := tx.Bucket([]byte(userSubDirsBucket))
 
-	for _, uid := range uids {
-		dcss, err := b.calculateForUser(uid)
-		if err != nil {
-			return err
-		}
-
-		for _, dcs := range dcss {
-			if err := b.storeSubDirs(bucket, dcs, uid, db.Filter{UIDs: []uint32{uid}, Age: dcs.Age}); err != nil {
-				return err
+	for uid, dcss := range uidBase {
+		for _, adcs := range dcss {
+			for _, dcs := range adcs {
+				if err := b.storeSubDirs(bucket, uid, dcs); err != nil {
+					return err
+				}
 			}
 		}
 	}

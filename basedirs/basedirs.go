@@ -31,8 +31,6 @@
 package basedirs
 
 import (
-	"strings"
-
 	"github.com/ugorji/go/codec"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 )
@@ -42,7 +40,6 @@ import (
 type BaseDirs struct {
 	dbPath      string
 	config      Config
-	tree        *db.Tree
 	quotas      *Quotas
 	ch          codec.Handle
 	mountPoints mountPoints
@@ -65,7 +62,6 @@ func NewCreator(dbPath string, c Config, tree *db.Tree, quotas *Quotas) (*BaseDi
 	return &BaseDirs{
 		dbPath:      dbPath,
 		config:      c,
-		tree:        tree,
 		quotas:      quotas,
 		ch:          new(codec.BincHandle),
 		mountPoints: mp,
@@ -78,70 +74,23 @@ func (b *BaseDirs) SetMountPoints(mountpoints []string) {
 	b.mountPoints = mountpoints
 }
 
-// calculateForGroup calculates all the base directories for the given group.
-func (b *BaseDirs) calculateForGroup(gid uint32) (db.DCSs, error) {
-	return b.calculateDCSs(&db.Filter{GIDs: []uint32{gid}})
+type SummaryWithChildren struct {
+	db.DirSummary
+	Children []*SubDir
 }
 
-func (b *BaseDirs) calculateDCSs(filter *db.Filter) (db.DCSs, error) {
-	var dcss db.DCSs
+type AgeDirs [len(db.DirGUTAges)][]SummaryWithChildren
 
-	for _, age := range db.DirGUTAges {
-		filter.Age = age
-		if err := b.filterWhereResults(filter, func(ds *db.DirSummary) {
-			dcss = append(dcss, ds)
-		}); err != nil {
-			return nil, err
-		}
+type IDAgeDirs map[uint32]*AgeDirs
+
+func (i IDAgeDirs) Get(id uint32) *AgeDirs {
+	ap := i[id]
+
+	if ap == nil {
+		ap = new(AgeDirs)
+
+		i[id] = ap
 	}
 
-	dcss.SortByDirAndAge()
-
-	return dcss, nil
-}
-
-func (b *BaseDirs) filterWhereResults(filter *db.Filter, cb func(ds *db.DirSummary)) error {
-	dcss, err := b.tree.Where("/", filter, b.config.splitFn())
-	if err != nil {
-		return err
-	}
-
-	dcss.SortByDirAndAge()
-
-	var previous string
-
-	for _, ds := range dcss {
-		if b.notEnoughDirs(ds.Dir) || childOfPreviousResult(ds.Dir, previous) {
-			continue
-		}
-
-		cb(ds)
-
-		// used to be `dirs = append(dirs, ds.Dir)`
-		// then for each dir, `outFile.WriteString(fmt.Sprintf("%d\t%s\n", gid, dir))`
-
-		previous = ds.Dir
-	}
-
-	return nil
-}
-
-// notEnoughDirs returns true if the given path has fewer than minDirs
-// directories.
-func (b *BaseDirs) notEnoughDirs(path string) bool {
-	numDirs := strings.Count(path, "/")
-	min := b.config.findBestMatch(path).MinDirs
-
-	return numDirs < min
-}
-
-// childOfPreviousResult returns true if previous is not blank, and dir starts
-// with it.
-func childOfPreviousResult(dir, previous string) bool {
-	return previous != "" && strings.HasPrefix(dir, previous)
-}
-
-// calculateForUser calculates all the base directories for the given user.
-func (b *BaseDirs) calculateForUser(uid uint32) (db.DCSs, error) {
-	return b.calculateDCSs(&db.Filter{UIDs: []uint32{uid}})
+	return ap
 }
