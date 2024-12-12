@@ -7,16 +7,39 @@ import (
 	"io"
 	"sort"
 	"strconv"
-	"strings"
 
 	"github.com/wtsi-hgi/wrstat-ui/internal/split"
+	"github.com/wtsi-hgi/wrstat-ui/summary"
 )
 
 type ConfigAttrs struct {
-	Prefix  string
-	Score   int
+	Prefix  []string
 	Splits  int
 	MinDirs int
+}
+
+func (c *ConfigAttrs) PathShouldOutput(path *summary.DirectoryPath) bool {
+	return path.Depth >= c.MinDirs && path.Depth < c.MinDirs+c.Splits
+}
+
+func (c *ConfigAttrs) Match(path *summary.DirectoryPath) bool {
+	if path.Depth < len(c.Prefix) {
+		return false
+	}
+
+	for path.Depth > len(c.Prefix) {
+		path = path.Parent
+	}
+
+	for n := len(c.Prefix) - 1; n >= 0; n-- {
+		if c.Prefix[n] != path.Name {
+			return false
+		}
+
+		path = path.Parent
+	}
+
+	return true
 }
 
 type Config []ConfigAttrs
@@ -44,7 +67,7 @@ func ParseConfig(r io.Reader) (Config, error) {
 	b := bufio.NewReader(r)
 
 	var ( //nolint:prealloc
-		result Config
+		result []ConfigAttrs
 		end    bool
 	)
 
@@ -71,7 +94,7 @@ func ParseConfig(r io.Reader) (Config, error) {
 	}
 
 	sort.Slice(result, func(i, j int) bool {
-		return result[i].Score > result[j].Score
+		return len(result[i].Prefix) > len(result[j].Prefix)
 	})
 
 	return result, nil
@@ -96,28 +119,18 @@ func parseLine(line []byte) (ConfigAttrs, error) {
 	}
 
 	return ConfigAttrs{
-		Prefix:  prefix,
-		Score:   strings.Count(prefix, "/"),
+		Prefix:  split.SplitPath(prefix),
 		Splits:  int(splits),
 		MinDirs: int(minDirs),
 	}, nil
 }
 
-func (c *Config) splitFn() split.SplitFn {
-	return func(path string) int {
-		return c.findBestMatch(path).Splits
-	}
-}
-
-func (c *Config) findBestMatch(path string) ConfigAttrs {
-	for _, p := range *c {
-		if strings.HasPrefix(path, p.Prefix) {
-			return p
+func (c Config) PathShouldOutput(path *summary.DirectoryPath) bool {
+	for _, ca := range c {
+		if ca.Match(path) {
+			return path.Depth >= ca.MinDirs && path.Depth < ca.MinDirs+ca.Splits
 		}
 	}
 
-	return ConfigAttrs{
-		Splits:  DefaultSplits,
-		MinDirs: defaultMinDirs,
-	}
+	return false
 }
