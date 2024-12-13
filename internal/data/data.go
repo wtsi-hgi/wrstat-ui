@@ -31,7 +31,6 @@ import (
 	"io"
 	"io/fs"
 	"os"
-	"os/user"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -39,7 +38,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wtsi-ssg/wrstat/v5/summary"
+	"github.com/wtsi-hgi/wrstat-ui/db"
+	"github.com/wtsi-hgi/wrstat-ui/internal/statsdata"
+	"github.com/wtsi-hgi/wrstat-ui/stats"
+	"github.com/wtsi-hgi/wrstat-ui/summary"
+	"github.com/wtsi-hgi/wrstat-ui/summary/dirguta"
 )
 
 const filePerms = 0644
@@ -54,167 +57,54 @@ func (s stringBuilderCloser) Close() error {
 
 type TestFile struct {
 	Path           string
-	UID, GID       int
+	UID, GID       uint32
 	NumFiles       int
 	SizeOfEachFile int
 	ATime, MTime   int
 }
 
-func CreateDefaultTestData(gidA, gidB, gidC, uidA, uidB, refTime int) []TestFile {
-	dir := "/"
-	abdf := filepath.Join(dir, "a", "b", "d", "f")
-	abdg := filepath.Join(dir, "a", "b", "d", "g")
-	abehtmp := filepath.Join(dir, "a", "b", "e", "h", "tmp")
-	acd := filepath.Join(dir, "a", "c", "d")
-	abdij := filepath.Join(dir, "a", "b", "d", "i", "j")
-	k := filepath.Join(dir, "k")
-	files := []TestFile{
-		{
-			Path:           filepath.Join(abdf, "file.cram"),
-			NumFiles:       1,
-			SizeOfEachFile: 10,
-			GID:            gidA,
-			UID:            uidA,
-			ATime:          50,
-			MTime:          50,
-		},
-		{
-			Path:           filepath.Join(abdg, "file.cram"),
-			NumFiles:       2,
-			SizeOfEachFile: 10,
-			GID:            gidA,
-			UID:            uidA,
-			ATime:          60,
-			MTime:          60,
-		},
-		{
-			Path:           filepath.Join(abdg, "file.cram"),
-			NumFiles:       4,
-			SizeOfEachFile: 10,
-			GID:            gidA,
-			UID:            uidB,
-			ATime:          75,
-			MTime:          75,
-		},
-		{
-			Path:           filepath.Join(dir, "a", "b", "e", "h", "file.bam"),
-			NumFiles:       1,
-			SizeOfEachFile: 5,
-			GID:            gidA,
-			UID:            uidA,
-			ATime:          100,
-			MTime:          30,
-		},
-		{
-			Path:           filepath.Join(abehtmp, "file.bam"),
-			NumFiles:       1,
-			SizeOfEachFile: 5,
-			GID:            gidA,
-			UID:            uidA,
-			ATime:          80,
-			MTime:          80,
-		},
-		{
-			Path:           filepath.Join(acd, "file.cram"),
-			NumFiles:       5,
-			SizeOfEachFile: 1,
-			GID:            gidB,
-			UID:            uidB,
-			ATime:          90,
-			MTime:          90,
-		},
-		{
-			Path:           filepath.Join(k, "file1.cram"),
-			NumFiles:       1,
-			SizeOfEachFile: 1,
-			GID:            gidB,
-			UID:            uidA,
-			ATime:          refTime - (summary.SecondsInAYear * 3),
-			MTime:          refTime - (summary.SecondsInAYear * 7),
-		},
-		{
-			Path:           filepath.Join(k, "file2.cram"),
-			NumFiles:       1,
-			SizeOfEachFile: 2,
-			GID:            gidB,
-			UID:            uidA,
-			ATime:          refTime - (summary.SecondsInAYear * 1),
-			MTime:          refTime - (summary.SecondsInAYear * 2),
-		},
-		{
-			Path:           filepath.Join(k, "file3.cram"),
-			NumFiles:       1,
-			SizeOfEachFile: 3,
-			GID:            gidB,
-			UID:            uidA,
-			ATime:          refTime - (summary.SecondsInAMonth) - 10,
-			MTime:          refTime - (summary.SecondsInAMonth * 2),
-		},
-		{
-			Path:           filepath.Join(k, "file4.cram"),
-			NumFiles:       1,
-			SizeOfEachFile: 4,
-			GID:            gidB,
-			UID:            uidA,
-			ATime:          refTime - (summary.SecondsInAMonth * 6),
-			MTime:          refTime - (summary.SecondsInAYear),
-		},
-		{
-			Path:           filepath.Join(k, "file5.cram"),
-			NumFiles:       1,
-			SizeOfEachFile: 5,
-			GID:            gidB,
-			UID:            uidA,
-			ATime:          refTime,
-			MTime:          refTime,
-		},
-	}
+var i int //nolint:gochecknoglobals
 
-	if gidC == 0 {
-		files = append(files,
-			TestFile{
-				Path:           filepath.Join(abdij, "file.cram"),
-				NumFiles:       1,
-				SizeOfEachFile: 1,
-				GID:            gidC,
-				UID:            uidB,
-				ATime:          50,
-				MTime:          50,
-			},
-			TestFile{
-				Path:           filepath.Join(abdg, "file.cram"),
-				NumFiles:       4,
-				SizeOfEachFile: 10,
-				GID:            gidA,
-				UID:            uidB,
-				ATime:          50,
-				MTime:          75,
-			},
-		)
-	}
+func addFiles(d *statsdata.Directory, directory, suffix string, numFiles int,
+	sizeOfEachFile, atime, mtime int64, gid, uid uint32) {
+	for range numFiles {
+		statsdata.AddFile(d, filepath.Join(directory, strconv.Itoa(i)+suffix), uid, gid, sizeOfEachFile, atime, mtime)
 
-	return files
+		i++
+	}
 }
 
-func TestDGUTAData(t *testing.T, files []TestFile) string {
-	t.Helper()
+func CreateDefaultTestData(gidA, gidB, gidC, uidA, uidB uint32, refTime int64) *statsdata.Directory {
+	dir := statsdata.NewRoot("/", 0)
+	dir.ATime = refTime
+	// dir.MTime = refTime
+	dir.GID = gidA
+	dir.UID = uidA
 
-	dguta := summary.NewDirGroupUserTypeAge()
-	doneDirs := make(map[string]bool)
+	ac := dir.AddDirectory("a").AddDirectory("c")
+	ac.GID = gidB
+	ac.UID = uidB
 
-	for _, file := range files {
-		addTestFileInfo(t, dguta, doneDirs, file.Path, file.NumFiles,
-			file.SizeOfEachFile, file.GID, file.UID, file.ATime, file.MTime)
+	addFiles(dir, "a/b/d/f", "file.cram", 1, 10, 50, 50, gidA, uidA)
+	addFiles(dir, "a/b/d/g", "file.cram", 2, 10, 60, 60, gidA, uidA)
+	addFiles(dir, "a/b/d/g", "file.cram", 4, 10, 75, 75, gidA, uidB)
+	addFiles(dir, "a/b/e/h", "file.bam", 1, 5, 100, 30, gidA, uidA)
+	addFiles(dir, "a/b/e/h/tmp", "file.bam", 1, 5, 80, 80, gidA, uidA)
+	addFiles(dir, "a/c/d", "file.cram", 5, 1, 90, 90, gidB, uidB)
+
+	if gidC == 0 {
+		addFiles(dir, "a/b/d/i/j", "file.cram", 1, 1, 50, 50, gidC, uidB)
+		addFiles(dir, "a/b/d/g", "file.cram", 4, 10, 50, 75, gidA, uidB)
+		addFiles(dir, "k", "file1.cram", 1, 1, refTime-(db.SecondsInAYear*3), refTime-(db.SecondsInAYear*7), gidB, uidA)
+		addFiles(dir, "k", "file2.cram", 1, 2, refTime-(db.SecondsInAYear*1), refTime-(db.SecondsInAYear*2), gidB, uidA)
+		addFiles(dir, "k", "file3.cram", 1, 3, refTime-(db.SecondsInAMonth)-10, refTime-(db.SecondsInAMonth*2), gidB, uidA)
+		addFiles(dir, "k", "file4.cram", 1, 4, refTime-(db.SecondsInAMonth*6), refTime-(db.SecondsInAYear), gidB, uidA)
+		addFiles(dir, "k", "file5.cram", 1, 5, refTime, refTime, gidB, uidA)
+	} else {
+		addFiles(dir, "a/c/d", "file.cram", 7, 1, refTime-db.SecondsInAYear, refTime-(db.SecondsInAYear*3), 3, 103)
 	}
 
-	var sb stringBuilderCloser
-
-	err := dguta.Output(&sb)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	return sb.String()
+	return dir
 }
 
 type fakeFileInfo struct {
@@ -229,27 +119,28 @@ func (f *fakeFileInfo) ModTime() time.Time { return time.Time{} }
 func (f *fakeFileInfo) IsDir() bool        { return f.dir }
 func (f *fakeFileInfo) Sys() any           { return f.stat }
 
-func addTestFileInfo(t *testing.T, dguta *summary.DirGroupUserTypeAge, doneDirs map[string]bool,
-	path string, numFiles, sizeOfEachFile, gid, uid, atime, mtime int,
+func addTestFileInfo(t *testing.T, dguta *dirguta.DirGroupUserTypeAge, doneDirs map[string]bool,
+	path string, numFiles, sizeOfEachFile int, gid, uid uint32, atime, mtime int,
 ) {
 	t.Helper()
 
+	paths := NewDirectoryPathCreator()
 	dir, basename := filepath.Split(path)
 
 	for i := 0; i < numFiles; i++ {
 		filePath := filepath.Join(dir, strconv.FormatInt(int64(i), 10)+basename)
 
-		info := &fakeFileInfo{
-			stat: &syscall.Stat_t{
-				Uid:  uint32(uid),
-				Gid:  uint32(gid),
-				Size: int64(sizeOfEachFile),
-				Atim: syscall.Timespec{Sec: int64(atime)},
-				Mtim: syscall.Timespec{Sec: int64(mtime)},
-			},
+		info := &summary.FileInfo{
+			Path:      paths.ToDirectoryPath(filePath),
+			UID:       uid,
+			GID:       gid,
+			Size:      int64(sizeOfEachFile),
+			ATime:     int64(atime),
+			MTime:     int64(mtime),
+			EntryType: stats.FileType,
 		}
 
-		err := dguta.Add(filePath, info)
+		err := dguta.Add(info)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -258,8 +149,8 @@ func addTestFileInfo(t *testing.T, dguta *summary.DirGroupUserTypeAge, doneDirs 
 	addTestDirInfo(t, dguta, doneDirs, filepath.Dir(path), gid, uid)
 }
 
-func addTestDirInfo(t *testing.T, dguta *summary.DirGroupUserTypeAge, doneDirs map[string]bool,
-	dir string, gid, uid int,
+func addTestDirInfo(t *testing.T, dguta *dirguta.DirGroupUserTypeAge, doneDirs map[string]bool,
+	dir string, gid, uid uint32,
 ) {
 	t.Helper()
 
@@ -268,17 +159,16 @@ func addTestDirInfo(t *testing.T, dguta *summary.DirGroupUserTypeAge, doneDirs m
 			return
 		}
 
-		info := &fakeFileInfo{
-			dir: true,
-			stat: &syscall.Stat_t{
-				Uid:  uint32(uid),
-				Gid:  uint32(gid),
-				Size: int64(1024),
-				Mtim: syscall.Timespec{Sec: int64(1)},
-			},
+		info := &summary.FileInfo{
+			Path:      nil,
+			EntryType: stats.DirType,
+			UID:       uid,
+			GID:       gid,
+			Size:      int64(1024),
+			MTime:     1,
 		}
 
-		err := dguta.Add(dir, info)
+		err := dguta.Add(info)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -292,38 +182,7 @@ func addTestDirInfo(t *testing.T, dguta *summary.DirGroupUserTypeAge, doneDirs m
 	}
 }
 
-// RealGIDAndUID returns the currently logged in user's gid and uid, and the
-// corresponding group and user names.
-func RealGIDAndUID() (int, int, string, string, error) {
-	u, err := user.Current()
-	if err != nil {
-		return 0, 0, "", "", err
-	}
-
-	uid64, err := strconv.ParseUint(u.Uid, 10, 64)
-	if err != nil {
-		return 0, 0, "", "", err
-	}
-
-	groups, err := u.GroupIds()
-	if err != nil || len(groups) == 0 {
-		return 0, 0, "", "", err
-	}
-
-	gid64, err := strconv.ParseUint(groups[0], 10, 64)
-	if err != nil {
-		return 0, 0, "", "", err
-	}
-
-	group, err := user.LookupGroupId(groups[0])
-	if err != nil {
-		return 0, 0, "", "", err
-	}
-
-	return int(gid64), int(uid64), group.Name, u.Username, nil
-}
-
-func FakeFilesForDGUTADBForBasedirsTesting(gid, uid int) ([]string, []TestFile) {
+func FakeFilesForDGUTADBForBasedirsTesting(gid, uid uint32) ([]string, []TestFile) {
 	projectA := filepath.Join("/", "lustre", "scratch125", "humgen", "projects", "A")
 	projectB125 := filepath.Join("/", "lustre", "scratch125", "humgen", "projects", "B")
 	projectB123 := filepath.Join("/", "lustre", "scratch123", "hgi", "mdt1", "projects", "B")
@@ -500,4 +359,41 @@ func writeFile(path, contents string) error {
 	}
 
 	return f.Close()
+}
+
+type DirectoryPathCreator map[string]*summary.DirectoryPath
+
+func (d DirectoryPathCreator) ToDirectoryPath(p string) *summary.DirectoryPath {
+	pos := strings.LastIndexByte(p[:len(p)-1], '/')
+	dir := p[:pos+1]
+	base := p[pos+1:]
+
+	if dp, ok := d[p]; ok {
+		dp.Name = base
+
+		return dp
+	}
+
+	parent := d.ToDirectoryPath(dir)
+
+	dp := &summary.DirectoryPath{
+		Name:   base,
+		Depth:  strings.Count(p, "/"),
+		Parent: parent,
+	}
+
+	d[p] = dp
+
+	return dp
+}
+
+func NewDirectoryPathCreator() DirectoryPathCreator {
+	d := make(DirectoryPathCreator)
+
+	d["/"] = &summary.DirectoryPath{
+		Name:  "/",
+		Depth: -1,
+	}
+
+	return d
 }
