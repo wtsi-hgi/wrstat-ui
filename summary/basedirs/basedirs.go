@@ -24,10 +24,13 @@ type DirSummary struct {
 	basedirs.SummaryWithChildren
 }
 
-func newDirSummary(parent *summary.DirectoryPath) *DirSummary {
+func newDirSummary(parent *summary.DirectoryPath, age db.DirGUTAge) *DirSummary {
 	return &DirSummary{
 		Path: parent,
 		SummaryWithChildren: basedirs.SummaryWithChildren{
+			DirSummary: db.DirSummary{
+				Age: age,
+			},
 			Children: []*basedirs.SubDir{
 				{
 					FileUsage: make(basedirs.UsageBreakdownByType),
@@ -38,12 +41,13 @@ func newDirSummary(parent *summary.DirectoryPath) *DirSummary {
 }
 
 func setTimes(d *basedirs.SummaryWithChildren, atime, mtime time.Time) {
-	if atime.Before(d.Atime) {
+	if atime.Before(d.Atime) || d.Atime.IsZero() {
 		d.Atime = atime
 	}
 
 	if mtime.After(d.Mtime) {
 		d.Mtime = mtime
+		d.Children[0].LastModified = mtime
 	}
 }
 
@@ -62,6 +66,14 @@ func merge(newS, oldS *basedirs.SummaryWithChildren, name string) {
 		newS.Children[0].FileUsage[n] += c
 	}
 
+	for _, uid := range oldS.UIDs {
+		newS.UIDs = addToSlice(newS.UIDs, uid)
+	}
+
+	for _, gid := range oldS.GIDs {
+		newS.GIDs = addToSlice(newS.GIDs, gid)
+	}
+
 	setTimes(newS, oldS.Atime, oldS.Mtime)
 
 	newS.Children[0].NumFiles += oldS.Children[0].NumFiles
@@ -72,12 +84,13 @@ func merge(newS, oldS *basedirs.SummaryWithChildren, name string) {
 
 type baseDirs [numAges]*DirSummary
 
-func (b *baseDirs) Set(i int, fi *summary.FileInfo, parent *summary.DirectoryPath) {
+func (b *baseDirs) Set(i db.DirGUTAge, fi *summary.FileInfo, parent *summary.DirectoryPath) {
 	if b[i] == nil {
-		b[i] = newDirSummary(parent)
+		b[i] = newDirSummary(parent, i)
+		b[i].Age = i
 	} else if b[i].Path != parent {
 		old := b[i]
-		b[i] = newDirSummary(parent)
+		b[i] = newDirSummary(parent, i)
 		b[i].Merge(old)
 	}
 
@@ -88,19 +101,23 @@ func (b *baseDirs) Set(i int, fi *summary.FileInfo, parent *summary.DirectoryPat
 
 	t, tmp := dirguta.InfoToType(fi)
 
-	b[i].Children[0].FileUsage[t]++
+	b[i].Children[0].FileUsage[t] += uint64(fi.Size)
 
 	if tmp {
-		b[i].Children[0].FileUsage[db.DGUTAFileTypeTemp]++
+		b[i].Children[0].FileUsage[db.DGUTAFileTypeTemp] += uint64(fi.Size)
 	}
 
-	if !slices.Contains(b[i].GIDs, fi.GID) {
-		b[i].GIDs = append(b[i].GIDs, fi.GID)
+	b[i].GIDs = addToSlice(b[i].GIDs, fi.GID)
+	b[i].UIDs = addToSlice(b[i].UIDs, fi.UID)
+}
+
+func addToSlice(s []uint32, id uint32) []uint32 {
+	pos, ok := slices.BinarySearch(s, id)
+	if ok {
+		return s
 	}
 
-	if !slices.Contains(b[i].UIDs, fi.UID) {
-		b[i].UIDs = append(b[i].UIDs, fi.UID)
-	}
+	return slices.Insert(s, pos, id)
 }
 
 type baseDirsMap map[uint32]*baseDirs
@@ -126,6 +143,8 @@ func (b baseDirsMap) Add(fn func(uint32, basedirs.SummaryWithChildren, db.DirGUT
 						ds.FTs = append(ds.FTs, n)
 					}
 				}
+
+				slices.Sort(ds.FTs)
 
 				ds.Children[0].SubDir = "."
 				ds.Children[0].LastModified = ds.Mtime
@@ -158,7 +177,7 @@ func (b baseDirsMap) mergeTo(pbm baseDirsMap, parent *summary.DirectoryPath) {
 				pm[n].Merge(p)
 			} else {
 				old := pm[n]
-				pm[n] = newDirSummary(parent)
+				pm[n] = newDirSummary(parent, db.DirGUTAge(n))
 				pm[n].Merge(old)
 				pm[n].Merge(p)
 			}
@@ -231,10 +250,10 @@ func (b *BaseDirs) Add(info *summary.FileInfo) error {
 	gidBasedir := b.groups.Get(info.GID)
 	uidBasedir := b.users.Get(info.UID)
 
-	for n, threshold := range db.DirGUTAges {
+	for _, threshold := range db.DirGUTAges {
 		if threshold.FitsAgeInterval(info.ATime, info.MTime, b.refTime) {
-			gidBasedir.Set(n, info, b.thisDir)
-			uidBasedir.Set(n, info, b.thisDir)
+			gidBasedir.Set(threshold, info, b.thisDir)
+			uidBasedir.Set(threshold, info, b.thisDir)
 		}
 	}
 
