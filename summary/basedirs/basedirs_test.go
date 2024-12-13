@@ -1,6 +1,8 @@
 package basedirs
 
 import (
+	"maps"
+	"slices"
 	"testing"
 	"time"
 
@@ -12,32 +14,101 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/summary"
 )
 
-type mockBaseDirsMap map[uint32][]string
-
 type mockDB struct {
-	users, groups mockBaseDirsMap
+	users, groups basedirs.IDAgeDirs
 }
 
 func (m *mockDB) Output(users, groups basedirs.IDAgeDirs) error {
-	add(m.users, users)
-	add(m.groups, groups)
+	m.users = users
+	m.groups = groups
 
 	return nil
 }
 
-func add(m mockBaseDirsMap, i basedirs.IDAgeDirs) {
-	for id, ad := range i {
-		for age, dcss := range ad {
-			for _, dcs := range dcss {
-				m[id] = append(m[id], dcs.Dir+string(byte(age)))
-			}
+func ageDirs(all []basedirs.SummaryWithChildren, a *basedirs.AgeDirs, m *basedirs.AgeDirs) *basedirs.AgeDirs {
+	a[0] = all
+	copy(a[len(db.AgeThresholds):], m[len(db.AgeThresholds):])
+
+	return a
+}
+
+func a(dirs ...[]basedirs.SummaryWithChildren) *basedirs.AgeDirs {
+	return setdirs(dirs, 1)
+}
+
+func m(dirs ...[]basedirs.SummaryWithChildren) *basedirs.AgeDirs {
+	return setdirs(dirs, len(db.AgeThresholds)+1)
+}
+
+func setdirs(dirs [][]basedirs.SummaryWithChildren, offset int) *basedirs.AgeDirs {
+	a := new(basedirs.AgeDirs)
+
+	for n, dir := range dirs {
+		d := slices.Clone(dir)
+
+		for m := range d {
+			d[m].Age = db.DirGUTAge(n + offset)
 		}
+
+		a[n+offset] = d
+	}
+
+	return a
+}
+
+func dir(name string, lastMod int64, numFiles int64, files basedirs.UsageBreakdownByType) *basedirs.SubDir {
+	var size uint64
+
+	for ft, s := range files {
+		if ft != db.DGUTAFileTypeTemp {
+			size += s
+		}
+	}
+
+	return &basedirs.SubDir{
+		SubDir:       name,
+		NumFiles:     uint64(numFiles),
+		SizeFiles:    size,
+		LastModified: time.Unix(lastMod, 0),
+		FileUsage:    files,
 	}
 }
 
-func pathAge(path string, age db.DirGUTAge) string {
-	return path + string(byte(age))
+func userSummary(path string, uid uint32, gids []uint32, atime int64, children ...*basedirs.SubDir) basedirs.SummaryWithChildren {
+	return dirsummary(path, []uint32{uid}, gids, atime, children)
 }
+
+func dirsummary(path string, uids []uint32, gids []uint32, atime int64, children []*basedirs.SubDir) basedirs.SummaryWithChildren {
+	fts := slices.Collect(maps.Keys(children[0].FileUsage))
+
+	slices.Sort(fts)
+
+	s := basedirs.SummaryWithChildren{
+		DirSummary: db.DirSummary{
+			Dir:   path,
+			Count: children[0].NumFiles,
+			Size:  children[0].SizeFiles,
+			UIDs:  uids,
+			GIDs:  gids,
+			Atime: time.Unix(atime, 0),
+			Mtime: children[0].LastModified,
+			FTs:   fts,
+		},
+		Children: children,
+	}
+
+	return s
+}
+
+func groupSummary(path string, uids []uint32, gid uint32, atime int64, children ...*basedirs.SubDir) basedirs.SummaryWithChildren {
+	return dirsummary(path, uids, []uint32{gid}, atime, children)
+}
+
+func ids(ids ...uint32) []uint32 {
+	return ids
+}
+
+type files = basedirs.UsageBreakdownByType
 
 func TestBaseDirs(t *testing.T) {
 	Convey("", t, func() {
@@ -52,65 +123,136 @@ func TestBaseDirs(t *testing.T) {
 		}
 
 		f := statsdata.NewRoot("/", 0)
-		statsdata.AddFile(f, "opt/teams/teamA/user1/aFile.txt", 1, 10, 0, times[3], times[1])
-		statsdata.AddFile(f, "opt/teams/teamA/user2/aDir/aFile.txt", 2, 11, 0, times[2], times[1])
-		statsdata.AddFile(f, "opt/teams/teamA/user2/bDir/bFile.txt", 2, 11, 0, times[3], times[1])
-		statsdata.AddFile(f, "opt/teams/teamB/user3/aDir/bDir/cDir/aFile.txt", 3, 12, 0, times[0], times[0])
-		statsdata.AddFile(f, "opt/teams/teamB/user3/eDir/aFile.txt", 3, 12, 0, times[0], times[0])
-		statsdata.AddFile(f, "opt/teams/teamB/user3/fDir/aFile.txt", 3, 12, 0, times[0], times[0])
-		statsdata.AddFile(f, "opt/teams/teamB/user4/aDir/bDir/cDir/aFile.txt", 4, 12, 0, times[0], times[0])
-		statsdata.AddFile(f, "opt/teams/teamB/user4/aDir/dDir/eDir/aFile.txt", 4, 12, 0, times[0], times[0])
-		statsdata.AddFile(f, "opt/teams/teamC/user4/aDir/bDir/cDir/aFile.txt", 4, 12, 0, times[0], times[0])
-		statsdata.AddFile(f, "opt/teams/teamC/user4/aDir/dDir/eDir/aFile.txt", 4, 12, 0, times[0], times[0])
+		statsdata.AddFile(f, "opt/teams/teamA/user1/aFile.txt", 1, 10, 3, times[3], times[1])
+		statsdata.AddFile(f, "opt/teams/teamA/user2/aDir/aFile.bam", 2, 11, 5, times[2], times[1])
+		statsdata.AddFile(f, "opt/teams/teamA/user2/bDir/bFile.gz", 2, 11, 7, times[3], times[1])
+		statsdata.AddFile(f, "opt/teams/teamB/user3/aDir/bDir/cDir/aFile.vcf", 3, 12, 11, times[0], times[0])
+		statsdata.AddFile(f, "opt/teams/teamB/user3/eDir/tmp.cram", 3, 12, 13, times[0], times[0])
+		statsdata.AddFile(f, "opt/teams/teamB/user3/fDir/aFile", 3, 12, 17, times[0], times[0])
+		statsdata.AddFile(f, "opt/teams/teamB/user4/aDir/bDir/cDir/aFile", 4, 12, 19, times[0], times[0])
+		statsdata.AddFile(f, "opt/teams/teamB/user4/aDir/dDir/eDir/aFile", 4, 12, 23, times[0], times[0])
+		statsdata.AddFile(f, "opt/teams/teamC/user4/aDir/bDir/cDir/aFile", 4, 12, 29, times[0], times[0])
+		statsdata.AddFile(f, "opt/teams/teamC/user4/aDir/dDir/eDir/aFile", 4, 12, 31, times[0], times[0])
 
 		s := summary.NewSummariser(stats.NewStatsParser(f.AsReader()))
-		m := &mockDB{users: make(mockBaseDirsMap), groups: make(mockBaseDirsMap)}
-		s.AddDirectoryOperation(NewBaseDirs(func(dp *summary.DirectoryPath) bool { return dp.Depth == 3 }, m))
+		mdb := &mockDB{users: make(basedirs.IDAgeDirs), groups: make(basedirs.IDAgeDirs)}
+		s.AddDirectoryOperation(NewBaseDirs(func(dp *summary.DirectoryPath) bool { return dp.Depth == 3 }, mdb))
+
+		user1Dir := []basedirs.SummaryWithChildren{
+			userSummary("/opt/teams/teamA/user1/", 1, ids(10), times[3],
+				dir(".", times[1], 1, files{db.DGUTAFileTypeText: 3}),
+			),
+		}
+
+		user2DirA := []basedirs.SummaryWithChildren{
+			userSummary("/opt/teams/teamA/user2/", 2, ids(11), times[3],
+				dir(".", times[1], 2, files{db.DGUTAFileTypeBam: 5, db.DGUTAFileTypeCompressed: 7}),
+				dir("aDir/", times[1], 1, files{db.DGUTAFileTypeBam: 5}),
+				dir("bDir/", times[1], 1, files{db.DGUTAFileTypeCompressed: 7}),
+			),
+		}
+
+		user2DirB := []basedirs.SummaryWithChildren{
+			userSummary("/opt/teams/teamA/user2/bDir/", 2, ids(11), times[3],
+				dir(".", times[1], 1, files{db.DGUTAFileTypeCompressed: 7}),
+			),
+		}
+
+		user3Dir := []basedirs.SummaryWithChildren{
+			userSummary("/opt/teams/teamB/user3/", 3, ids(12), times[0],
+				dir(".", times[0], 3, files{db.DGUTAFileTypeOther: 17, db.DGUTAFileTypeTemp: 13, db.DGUTAFileTypeVCF: 11, db.DGUTAFileTypeCram: 13}),
+				dir("aDir/", times[0], 1, files{db.DGUTAFileTypeVCF: 11}),
+				dir("eDir/", times[0], 1, files{db.DGUTAFileTypeTemp: 13, db.DGUTAFileTypeCram: 13}),
+				dir("fDir/", times[0], 1, files{db.DGUTAFileTypeOther: 17}),
+			),
+		}
+
+		user4Dir := []basedirs.SummaryWithChildren{
+			userSummary("/opt/teams/teamB/user4/aDir/", 4, ids(12), times[0],
+				dir(".", times[0], 2, files{db.DGUTAFileTypeOther: 42}),
+				dir("bDir/", times[0], 1, files{db.DGUTAFileTypeOther: 19}),
+				dir("dDir/", times[0], 1, files{db.DGUTAFileTypeOther: 23}),
+			),
+			userSummary("/opt/teams/teamC/user4/aDir/", 4, ids(12), times[0],
+				dir(".", times[0], 2, files{db.DGUTAFileTypeOther: 60}),
+				dir("bDir/", times[0], 1, files{db.DGUTAFileTypeOther: 29}),
+				dir("dDir/", times[0], 1, files{db.DGUTAFileTypeOther: 31}),
+			),
+		}
+
+		group10Dir := []basedirs.SummaryWithChildren{
+			groupSummary("/opt/teams/teamA/user1/", ids(1), 10, times[3],
+				dir(".", times[1], 1, files{db.DGUTAFileTypeText: 3}),
+			),
+		}
+
+		group11DirA := []basedirs.SummaryWithChildren{
+			groupSummary("/opt/teams/teamA/user2/", ids(2), 11, times[3],
+				dir(".", times[1], 2, files{db.DGUTAFileTypeBam: 5, db.DGUTAFileTypeCompressed: 7}),
+				dir("aDir/", times[1], 1, files{db.DGUTAFileTypeBam: 5}),
+				dir("bDir/", times[1], 1, files{db.DGUTAFileTypeCompressed: 7}),
+			),
+		}
+
+		group11DirB := []basedirs.SummaryWithChildren{
+			groupSummary("/opt/teams/teamA/user2/bDir/", ids(2), 11, times[3],
+				dir(".", times[1], 1, files{db.DGUTAFileTypeCompressed: 7}),
+			),
+		}
+
+		group12Dir := []basedirs.SummaryWithChildren{
+			groupSummary("/opt/teams/teamB/", ids(3, 4), 12, times[0],
+				dir(".", times[0], 5, files{db.DGUTAFileTypeOther: 59, db.DGUTAFileTypeTemp: 13, db.DGUTAFileTypeVCF: 11, db.DGUTAFileTypeCram: 13}),
+				dir("user3/", times[0], 3, files{db.DGUTAFileTypeOther: 17, db.DGUTAFileTypeTemp: 13, db.DGUTAFileTypeVCF: 11, db.DGUTAFileTypeCram: 13}),
+				dir("user4/", times[0], 2, files{db.DGUTAFileTypeOther: 42}),
+			),
+			groupSummary("/opt/teams/teamC/user4/aDir/", ids(4), 12, times[0],
+				dir(".", times[0], 2, files{db.DGUTAFileTypeOther: 60}),
+				dir("bDir/", times[0], 1, files{db.DGUTAFileTypeOther: 29}),
+				dir("dDir/", times[0], 1, files{db.DGUTAFileTypeOther: 31}),
+			),
+		}
 
 		err := s.Summarise()
 		So(err, ShouldBeNil)
-		So(m.users, ShouldResemble, mockBaseDirsMap{
-			1: []string{
-				pathAge("/opt/teams/teamA/user1/", db.DGUTAgeAll),
-				pathAge("/opt/teams/teamA/user1/", db.DGUTAgeA1M),
-				pathAge("/opt/teams/teamA/user1/", db.DGUTAgeA2M),
-				pathAge("/opt/teams/teamA/user1/", db.DGUTAgeA6M),
-				pathAge("/opt/teams/teamA/user1/", db.DGUTAgeM1M),
-			},
-			2: []string{
-				pathAge("/opt/teams/teamA/user2/", db.DGUTAgeAll),
-				pathAge("/opt/teams/teamA/user2/", db.DGUTAgeA1M),
-				pathAge("/opt/teams/teamA/user2/", db.DGUTAgeA2M),
-				pathAge("/opt/teams/teamA/user2/bDir/", db.DGUTAgeA6M),
-				pathAge("/opt/teams/teamA/user2/", db.DGUTAgeM1M),
-			},
-			3: []string{
-				pathAge("/opt/teams/teamB/user3/", db.DGUTAgeAll),
-			},
-			4: []string{
-				pathAge("/opt/teams/teamB/user4/aDir/", db.DGUTAgeAll),
-				pathAge("/opt/teams/teamC/user4/aDir/", db.DGUTAgeAll),
-			},
+		So(mdb.users, ShouldResemble, basedirs.IDAgeDirs{
+			1: ageDirs(
+				user1Dir,
+				a(user1Dir, user1Dir, user1Dir),
+				m(user1Dir),
+			),
+			2: ageDirs(
+				user2DirA,
+				a(user2DirA, user2DirA, user2DirB),
+				m(user2DirA),
+			),
+			3: ageDirs(
+				user3Dir,
+				a(),
+				m(),
+			),
+			4: ageDirs(
+				user4Dir,
+				a(),
+				m(),
+			),
 		})
-		So(m.groups, ShouldResemble, mockBaseDirsMap{
-			10: []string{
-				pathAge("/opt/teams/teamA/user1/", db.DGUTAgeAll),
-				pathAge("/opt/teams/teamA/user1/", db.DGUTAgeA1M),
-				pathAge("/opt/teams/teamA/user1/", db.DGUTAgeA2M),
-				pathAge("/opt/teams/teamA/user1/", db.DGUTAgeA6M),
-				pathAge("/opt/teams/teamA/user1/", db.DGUTAgeM1M),
-			},
-			11: []string{
-				pathAge("/opt/teams/teamA/user2/", db.DGUTAgeAll),
-				pathAge("/opt/teams/teamA/user2/", db.DGUTAgeA1M),
-				pathAge("/opt/teams/teamA/user2/", db.DGUTAgeA2M),
-				pathAge("/opt/teams/teamA/user2/bDir/", db.DGUTAgeA6M),
-				pathAge("/opt/teams/teamA/user2/", db.DGUTAgeM1M),
-			},
-			12: []string{
-				pathAge("/opt/teams/teamB/", db.DGUTAgeAll),
-				pathAge("/opt/teams/teamC/user4/aDir/", db.DGUTAgeAll),
-			},
+		So(mdb.groups, ShouldResemble, basedirs.IDAgeDirs{
+			10: ageDirs(
+				group10Dir,
+				a(group10Dir, group10Dir, group10Dir),
+				m(group10Dir),
+			),
+			11: ageDirs(
+				group11DirA,
+				a(group11DirA, group11DirA, group11DirB),
+				m(group11DirA),
+			),
+			12: ageDirs(
+				group12Dir,
+				a(),
+				m(),
+			),
 		})
 	})
 }
