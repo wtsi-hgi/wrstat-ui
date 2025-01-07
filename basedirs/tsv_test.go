@@ -1,10 +1,11 @@
-package basedirs
+package basedirs_test
 
 import (
 	"strings"
 	"testing"
 
 	. "github.com/smartystreets/goconvey/convey"
+	"github.com/wtsi-hgi/wrstat-ui/basedirs"
 	"github.com/wtsi-hgi/wrstat-ui/internal/split"
 	internaltest "github.com/wtsi-hgi/wrstat-ui/internal/test"
 	"github.com/wtsi-hgi/wrstat-ui/summary"
@@ -14,12 +15,12 @@ func TestTSV(t *testing.T) {
 	Convey("", t, func() {
 		for _, test := range [...]struct {
 			Input  string
-			Output Config
+			Output basedirs.Config
 			Error  error
 		}{
 			{
 				Input: "/some/path/\t1\t2\n/some/other/path\t3\t4\n/some/much/longer/path/\t999\t911",
-				Output: Config{
+				Output: basedirs.Config{
 					{
 						Prefix:  split.SplitPath("/some/much/longer/path/"),
 						Splits:  999,
@@ -39,7 +40,7 @@ func TestTSV(t *testing.T) {
 			},
 			{
 				Input: "# A comment\n/some/path/\t1\t2\n/some/other/path\t3\t4\n/some/much/longer/path/\t999\t911\n",
-				Output: Config{
+				Output: basedirs.Config{
 					{
 						Prefix:  split.SplitPath("/some/much/longer/path/"),
 						Splits:  999,
@@ -59,10 +60,10 @@ func TestTSV(t *testing.T) {
 			},
 			{
 				Input: "/some/path\t12\n/some/other/path\t3\t4",
-				Error: ErrBadTSV,
+				Error: basedirs.ErrBadTSV,
 			},
 		} {
-			c, err := ParseConfig(strings.NewReader(test.Input))
+			c, err := basedirs.ParseConfig(strings.NewReader(test.Input))
 			So(err, ShouldEqual, test.Error)
 			So(c, ShouldResemble, test.Output)
 		}
@@ -70,7 +71,7 @@ func TestTSV(t *testing.T) {
 }
 
 func TestSplitFn(t *testing.T) {
-	c := Config{
+	c := basedirs.Config{
 		{
 			Prefix: split.SplitPath("/some/partial/thing/"),
 			Splits: 6,
