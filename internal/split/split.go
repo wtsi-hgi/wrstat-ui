@@ -13,7 +13,6 @@ func SplitsToSplitFn(splits int) SplitFn {
 }
 
 func SplitPath(path string) []string {
-
 	if !strings.HasSuffix(path, "/") {
 		path += "/"
 	}
