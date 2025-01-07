@@ -16,7 +16,7 @@ func TestSplitPath(t *testing.T) {
 		},
 		{
 			"/a",
-			[]string{"a/"},
+			[]string{"a"},
 		},
 		{
 			"/a/",

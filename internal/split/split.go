@@ -13,15 +13,15 @@ func SplitsToSplitFn(splits int) SplitFn {
 }
 
 func SplitPath(path string) []string {
-	if !strings.HasSuffix(path, "/") {
-		path += "/"
-	}
-
 	path = strings.TrimPrefix(path, "/")
 	parts := make([]string, 0, strings.Count(path, "/"))
 
 	for len(path) > 0 {
 		pos := strings.IndexByte(path, '/')
+
+		if pos < 0 {
+			pos = len(path) - 1
+		}
 
 		parts = append(parts, path[:pos+1])
 		path = path[pos+1:]
