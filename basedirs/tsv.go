@@ -7,6 +7,7 @@ import (
 	"io"
 	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/wtsi-hgi/wrstat-ui/internal/split"
 	"github.com/wtsi-hgi/wrstat-ui/summary"
@@ -31,12 +32,16 @@ func (c *ConfigAttrs) Match(path *summary.DirectoryPath) bool {
 		path = path.Parent
 	}
 
-	for n := len(c.Prefix) - 1; n >= 0; n-- {
+	if !strings.HasPrefix(path.Name, c.Prefix[len(c.Prefix)-1]) {
+		return false
+	}
+
+	for n := len(c.Prefix) - 2; n >= 0; n-- {
+		path = path.Parent
+
 		if c.Prefix[n] != path.Name {
 			return false
 		}
-
-		path = path.Parent
 	}
 
 	return true
