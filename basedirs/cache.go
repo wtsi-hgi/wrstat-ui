@@ -33,6 +33,13 @@ import (
 	"sync"
 )
 
+func (b *BaseDirReader) SetCachedGroup(gid uint32, name string) {
+	b.groupCache.mu.Lock()
+	defer b.groupCache.mu.Unlock()
+
+	b.groupCache.data[gid] = name
+}
+
 type GroupCache struct {
 	mu   sync.RWMutex
 	data map[uint32]string
@@ -65,6 +72,13 @@ func (g *GroupCache) GroupName(gid uint32) string {
 	g.mu.Unlock()
 
 	return groupStr
+}
+
+func (b *BaseDirReader) SetCachedUser(uid uint32, name string) {
+	b.userCache.mu.Lock()
+	defer b.userCache.mu.Unlock()
+
+	b.userCache.data[uid] = name
 }
 
 type UserCache struct {
