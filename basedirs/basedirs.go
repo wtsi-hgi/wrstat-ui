@@ -39,7 +39,6 @@ import (
 // group or user.
 type BaseDirs struct {
 	dbPath      string
-	config      Config
 	quotas      *Quotas
 	ch          codec.Handle
 	mountPoints mountPoints
@@ -53,7 +52,7 @@ type BaseDirs struct {
 // `/mounts/[group name]`, that's 2 directories deep and splits 1, minDirs 2
 // might work well. If it's 5 directories deep, splits 4, minDirs 4 might work
 // well.
-func NewCreator(dbPath string, c Config, quotas *Quotas) (*BaseDirs, error) {
+func NewCreator(dbPath string, quotas *Quotas) (*BaseDirs, error) {
 	mp, err := getMountPoints()
 	if err != nil {
 		return nil, err
@@ -61,7 +60,6 @@ func NewCreator(dbPath string, c Config, quotas *Quotas) (*BaseDirs, error) {
 
 	return &BaseDirs{
 		dbPath:      dbPath,
-		config:      c,
 		quotas:      quotas,
 		ch:          new(codec.BincHandle),
 		mountPoints: mp,
