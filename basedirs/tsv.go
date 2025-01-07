@@ -24,6 +24,10 @@ func (c *ConfigAttrs) PathShouldOutput(path *summary.DirectoryPath) bool {
 }
 
 func (c *ConfigAttrs) Match(path *summary.DirectoryPath) bool {
+	if len(c.Prefix) == 0 {
+		return true
+	}
+
 	if path.Depth < len(c.Prefix) {
 		return false
 	}
