@@ -29,31 +29,18 @@ package internaldata
 
 import (
 	"io"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"testing"
-	"time"
 
 	"github.com/wtsi-hgi/wrstat-ui/db"
 	"github.com/wtsi-hgi/wrstat-ui/internal/statsdata"
-	"github.com/wtsi-hgi/wrstat-ui/stats"
 	"github.com/wtsi-hgi/wrstat-ui/summary"
-	"github.com/wtsi-hgi/wrstat-ui/summary/dirguta"
 )
 
 const filePerms = 0644
-
-type stringBuilderCloser struct {
-	strings.Builder
-}
-
-func (s stringBuilderCloser) Close() error {
-	return nil
-}
 
 type TestFile struct {
 	Path           string
@@ -107,207 +94,38 @@ func CreateDefaultTestData(gidA, gidB, gidC, uidA, uidB uint32, refTime int64) *
 	return dir
 }
 
-type fakeFileInfo struct {
-	dir  bool
-	stat *syscall.Stat_t
-}
+func FakeFilesForDGUTADBForBasedirsTesting(gid, uid uint32, prefix string, numFirstFiles int, firstFileSize, secondFileSize int64, last bool) ([]string, *statsdata.Directory) {
+	dir := statsdata.NewRoot("/", 0)
+	dir.ATime = 50
+	dir.MTime = 0
+	base := dir.AddDirectory(prefix)
 
-func (f *fakeFileInfo) Name() string       { return "" }
-func (f *fakeFileInfo) Size() int64        { return f.stat.Size }
-func (f *fakeFileInfo) Mode() fs.FileMode  { return 0 }
-func (f *fakeFileInfo) ModTime() time.Time { return time.Time{} }
-func (f *fakeFileInfo) IsDir() bool        { return f.dir }
-func (f *fakeFileInfo) Sys() any           { return f.stat }
+	addFiles(base, "scratch125/humgen/projects/A", "file.bam", numFirstFiles, firstFileSize, 50, 50, 1, 101)
+	addFiles(base, "scratch125/humgen/projects/A/sub", "file.bam", 1, secondFileSize, 50, 100, 1, 101)
+	addFiles(base, "scratch125/humgen/projects/B", "file.bam", 1, 20, 50, 50, 2, 102)
+	addFiles(base, "scratch123/hgi/mdt1/projects/B", "file.bam", 1, 30, 50, 50, 2, 102)
+	addFiles(base, "scratch123/hgi/m0", "file.bam", 1, 40, 50, 50, 2, 88888)
+	addFiles(base, "scratch123/hgi/mdt0", "file.bam", 1, 40, 50, 50, 2, 88888)
+	addFiles(base, "scratch125/humgen/teams/102", "file.bam", 1, 1, 50, 50, 77777, 102)
 
-func addTestFileInfo(t *testing.T, dguta *dirguta.DirGroupUserTypeAge, doneDirs map[string]bool,
-	path string, numFiles, sizeOfEachFile int, gid, uid uint32, atime, mtime int,
-) {
-	t.Helper()
+	addFiles(base, "scratch125/humgen/projects/D/sub1", "file.bam", 1, 1, 50, 50, gid, uid)
+	addFiles(base, "scratch125/humgen/projects/D/sub1/temp", "file.sam", 1, 2, 50, 50, gid, uid)
+	addFiles(base, "scratch125/humgen/projects/D/sub1", "file.cram", 1, 3, 50, 50, gid, uid)
+	addFiles(base, "scratch125/humgen/projects/D/sub2", "file.bed", 1, 4, 50, 50, gid, uid)
 
-	paths := NewDirectoryPathCreator()
-	dir, basename := filepath.Split(path)
-
-	for i := 0; i < numFiles; i++ {
-		filePath := filepath.Join(dir, strconv.FormatInt(int64(i), 10)+basename)
-
-		info := &summary.FileInfo{
-			Path:      paths.ToDirectoryPath(filePath),
-			UID:       uid,
-			GID:       gid,
-			Size:      int64(sizeOfEachFile),
-			ATime:     int64(atime),
-			MTime:     int64(mtime),
-			EntryType: stats.FileType,
-		}
-
-		err := dguta.Add(info)
-		if err != nil {
-			t.Fatal(err)
-		}
+	if last {
+		addFiles(base, "scratch125/humgen/projects/D/sub2", "file.bed", 1, 5, 50, 50, gid, uid)
 	}
 
-	addTestDirInfo(t, dguta, doneDirs, filepath.Dir(path), gid, uid)
-}
+	projectA := filepath.Join("/", prefix, "scratch125", "humgen", "projects", "A")
+	projectB125 := filepath.Join("/", prefix, "scratch125", "humgen", "projects", "B")
+	projectB123 := filepath.Join("/", prefix, "scratch123", "hgi", "mdt1", "projects", "B")
+	projectC1 := filepath.Join("/", prefix, "scratch123", "hgi", "m0")
+	projectC2 := filepath.Join("/", prefix, "scratch123", "hgi", "mdt0")
+	user2 := filepath.Join("/", prefix, "scratch125", "humgen", "teams", "102")
+	projectD := filepath.Join("/", prefix, "scratch125", "humgen", "projects", "D")
 
-func addTestDirInfo(t *testing.T, dguta *dirguta.DirGroupUserTypeAge, doneDirs map[string]bool,
-	dir string, gid, uid uint32,
-) {
-	t.Helper()
-
-	for {
-		if doneDirs[dir] {
-			return
-		}
-
-		info := &summary.FileInfo{
-			Path:      nil,
-			EntryType: stats.DirType,
-			UID:       uid,
-			GID:       gid,
-			Size:      int64(1024),
-			MTime:     1,
-		}
-
-		err := dguta.Add(info)
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		doneDirs[dir] = true
-
-		dir = filepath.Dir(dir)
-		if dir == "/" {
-			return
-		}
-	}
-}
-
-func FakeFilesForDGUTADBForBasedirsTesting(gid, uid uint32) ([]string, []TestFile) {
-	projectA := filepath.Join("/", "lustre", "scratch125", "humgen", "projects", "A")
-	projectB125 := filepath.Join("/", "lustre", "scratch125", "humgen", "projects", "B")
-	projectB123 := filepath.Join("/", "lustre", "scratch123", "hgi", "mdt1", "projects", "B")
-	projectC1 := filepath.Join("/", "lustre", "scratch123", "hgi", "m0")
-	projectC2 := filepath.Join("/", "lustre", "scratch123", "hgi", "mdt0")
-	user2 := filepath.Join("/", "lustre", "scratch125", "humgen", "teams", "102")
-	projectD := filepath.Join("/", "lustre", "scratch125", "humgen", "projects", "D")
-	projectDSub1 := filepath.Join(projectD, "sub1")
-	projectDSub2 := filepath.Join(projectD, "sub2")
-
-	files := []TestFile{
-		{
-			Path:           filepath.Join(projectA, "a.bam"),
-			NumFiles:       1,
-			SizeOfEachFile: 10,
-			GID:            1,
-			UID:            101,
-			ATime:          50,
-			MTime:          50,
-		},
-		{
-			Path:           filepath.Join(projectA, "sub", "a.bam"),
-			NumFiles:       1,
-			SizeOfEachFile: 11,
-			GID:            1,
-			UID:            101,
-			ATime:          50,
-			MTime:          100,
-		},
-		{
-			Path:           filepath.Join(projectB125, "b.bam"),
-			NumFiles:       1,
-			SizeOfEachFile: 20,
-			GID:            2,
-			UID:            102,
-			ATime:          50,
-			MTime:          50,
-		},
-		{
-			Path:           filepath.Join(projectB123, "b.bam"),
-			NumFiles:       1,
-			SizeOfEachFile: 30,
-			GID:            2,
-			UID:            102,
-			ATime:          50,
-			MTime:          50,
-		},
-		{
-			Path:           filepath.Join(projectC1, "c.bam"),
-			NumFiles:       1,
-			SizeOfEachFile: 40,
-			GID:            2,
-			UID:            88888,
-			ATime:          50,
-			MTime:          50,
-		},
-		{
-			Path:           filepath.Join(projectC2, "c.bam"),
-			NumFiles:       1,
-			SizeOfEachFile: 40,
-			GID:            2,
-			UID:            88888,
-			ATime:          50,
-			MTime:          50,
-		},
-		{
-			Path:           filepath.Join(user2, "d.bam"),
-			NumFiles:       1,
-			SizeOfEachFile: 60,
-			GID:            77777,
-			UID:            102,
-			ATime:          50,
-			MTime:          50,
-		},
-	}
-
-	files = append(files,
-		TestFile{
-			Path:           filepath.Join(projectDSub1, "a.bam"),
-			NumFiles:       1,
-			SizeOfEachFile: 1,
-			GID:            gid,
-			UID:            uid,
-			ATime:          50,
-			MTime:          50,
-		},
-		TestFile{
-			Path:           filepath.Join(projectDSub1, "temp", "a.sam"),
-			NumFiles:       1,
-			SizeOfEachFile: 2,
-			GID:            gid,
-			UID:            uid,
-			ATime:          50,
-			MTime:          50,
-		},
-		TestFile{
-			Path:           filepath.Join(projectDSub1, "a.cram"),
-			NumFiles:       1,
-			SizeOfEachFile: 3,
-			GID:            gid,
-			UID:            uid,
-			ATime:          50,
-			MTime:          50,
-		},
-		TestFile{
-			Path:           filepath.Join(projectDSub2, "a.bed"),
-			NumFiles:       1,
-			SizeOfEachFile: 4,
-			GID:            gid,
-			UID:            uid,
-			ATime:          50,
-			MTime:          50,
-		},
-		TestFile{
-			Path:           filepath.Join(projectDSub2, "b.bed"),
-			NumFiles:       1,
-			SizeOfEachFile: 5,
-			GID:            gid,
-			UID:            uid,
-			ATime:          50,
-			MTime:          50,
-		},
-	)
-
-	return []string{projectA, projectB125, projectB123, projectC1, projectC2, user2, projectD}, files
+	return []string{projectA, projectB125, projectB123, projectC1, projectC2, user2, projectD}, dir
 }
 
 const ExampleQuotaCSV = `1,/disk/1,10,20
