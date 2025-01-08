@@ -78,7 +78,7 @@ func merge(newS, oldS *basedirs.SummaryWithChildren, name string) {
 
 	newS.Children[0].NumFiles += oldS.Children[0].NumFiles
 	newS.Children[0].SizeFiles += oldS.Children[0].SizeFiles
-	oldS.Children[0].SubDir = name
+	oldS.Children[0].SubDir = strings.TrimSuffix(name, "/")
 	newS.Children = append(newS.Children, oldS.Children[0])
 }
 
@@ -136,7 +136,7 @@ func (b baseDirsMap) Add(fn func(uint32, basedirs.SummaryWithChildren, db.DirGUT
 	for id, bd := range b {
 		for age, ds := range bd {
 			if ds != nil {
-				ds.Dir = string(ds.Path.AppendTo(make([]byte, 0, ds.Path.Len())))
+				ds.Dir = strings.TrimSuffix(string(ds.Path.AppendTo(make([]byte, 0, ds.Path.Len()))), "/")
 
 				for n, c := range ds.Children[0].FileUsage {
 					if c > 0 {
