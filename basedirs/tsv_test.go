@@ -73,8 +73,9 @@ func TestTSV(t *testing.T) {
 func TestSplitFn(t *testing.T) {
 	c := basedirs.Config{
 		{
-			Prefix: split.SplitPath("/some/partial/thing/"),
-			Splits: 6,
+			Prefix:  split.SplitPath("/some/partial/thing"),
+			MinDirs: 3,
+			Splits:  6,
 		},
 		{
 			Prefix:  split.SplitPath("/ab/cd/"),
@@ -100,10 +101,6 @@ func TestSplitFn(t *testing.T) {
 			},
 			{
 				paths.ToDirectoryPath("/ab/cd/ef/g/h/"),
-				true,
-			},
-			{
-				paths.ToDirectoryPath("/ab/cd/ef/g/h/i/"),
 				false,
 			},
 			{
@@ -112,6 +109,10 @@ func TestSplitFn(t *testing.T) {
 			},
 			{
 				paths.ToDirectoryPath("/some/partial/thingCat/"),
+				true,
+			},
+			{
+				paths.ToDirectoryPath("/some/partial/think/"),
 				false,
 			},
 		} {

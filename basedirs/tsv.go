@@ -137,7 +137,7 @@ func parseLine(line []byte) (ConfigAttrs, error) {
 func (c Config) PathShouldOutput(path *summary.DirectoryPath) bool {
 	for _, ca := range c {
 		if ca.Match(path) {
-			return path.Depth >= ca.MinDirs && path.Depth < ca.MinDirs+ca.Splits
+			return path.Depth == ca.MinDirs //&& path.Depth < ca.MinDirs+ca.Splits
 		}
 	}
 
