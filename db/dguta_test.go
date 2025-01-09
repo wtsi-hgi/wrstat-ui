@@ -324,10 +324,10 @@ func TestDGUTA(t *testing.T) {
 							So(ds.FTs, ShouldResemble, []db.DirGUTAFileType{db.DGUTAFileTypeTemp})
 
 							children := d.Children("/a")
-							So(children, ShouldResemble, []string{"/a/b/", "/a/c/"})
+							So(children, ShouldResemble, []string{"/a/b", "/a/c"})
 
 							children = d.Children("/a/b/e/h")
-							So(children, ShouldResemble, []string{"/a/b/e/h/tmp/"})
+							So(children, ShouldResemble, []string{"/a/b/e/h/tmp"})
 
 							children = d.Children("/a/c/d")
 							So(children, ShouldBeNil)
@@ -404,10 +404,10 @@ func TestDGUTA(t *testing.T) {
 								So(ds.FTs, ShouldResemble, expectedFTs)
 
 								children := d.Children("/")
-								So(children, ShouldResemble, []string{"/a/", "/i/"})
+								So(children, ShouldResemble, []string{"/a", "/i"})
 
 								children = d.Children("/a")
-								So(children, ShouldResemble, []string{"/a/b/", "/a/c/", "/a/i/"})
+								So(children, ShouldResemble, []string{"/a/b", "/a/c", "/a/i"})
 							})
 						})
 					})
