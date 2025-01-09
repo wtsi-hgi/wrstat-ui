@@ -28,6 +28,7 @@
 package basedirs
 
 import (
+	"iter"
 	"os/user"
 	"strconv"
 	"sync"
@@ -74,6 +75,21 @@ func (g *GroupCache) GroupName(gid uint32) string {
 	return groupStr
 }
 
+func (g *GroupCache) Iter(yield func(k uint32, v string) bool) {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+
+	for k, v := range g.data {
+		if !yield(k, v) {
+			return
+		}
+	}
+}
+
+func (b *BaseDirReader) IterCachedGroups() iter.Seq2[uint32, string] {
+	return b.groupCache.Iter
+}
+
 func (b *BaseDirReader) SetCachedUser(uid uint32, name string) {
 	b.userCache.mu.Lock()
 	defer b.userCache.mu.Unlock()
@@ -113,4 +129,18 @@ func (u *UserCache) UserName(uid uint32) string {
 	u.mu.Unlock()
 
 	return userStr
+}
+func (u *UserCache) Iter(yield func(k uint32, v string) bool) {
+	u.mu.RLock()
+	defer u.mu.RUnlock()
+
+	for k, v := range u.data {
+		if !yield(k, v) {
+			return
+		}
+	}
+}
+
+func (b *BaseDirReader) IterCachedUsers() iter.Seq2[uint32, string] {
+	return b.userCache.Iter
 }
