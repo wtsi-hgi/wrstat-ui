@@ -71,6 +71,8 @@ func CreateDefaultTestData(gidA, gidB, gidC, uidA, uidB uint32, refTime int64) *
 	ac := dir.AddDirectory("a").AddDirectory("c")
 	ac.GID = gidB
 	ac.UID = uidB
+	dir.AddDirectory("a").AddDirectory("b").AddDirectory("d").UID = uidB
+	dir.AddDirectory("a").AddDirectory("b").AddDirectory("d").AddDirectory("f").UID = uidA
 
 	addFiles(dir, "a/b/d/f", "file.cram", 1, 10, 50, 50, gidA, uidA)
 	addFiles(dir, "a/b/d/g", "file.cram", 2, 10, 60, 60, gidA, uidA)
@@ -80,8 +82,12 @@ func CreateDefaultTestData(gidA, gidB, gidC, uidA, uidB uint32, refTime int64) *
 	addFiles(dir, "a/c/d", "file.cram", 5, 1, 90, 90, gidB, uidB)
 
 	if gidC == 0 {
+		dir.AddDirectory("a").AddDirectory("b").AddDirectory("d").AddDirectory("i").GID = gidC
+		dir.AddDirectory("k").GID = gidB
+
 		addFiles(dir, "a/b/d/i/j", "file.cram", 1, 1, 50, 50, gidC, uidB)
 		addFiles(dir, "a/b/d/g", "file.cram", 4, 10, 50, 75, gidA, uidB)
+
 		addFiles(dir, "k", "file1.cram", 1, 1, refTime-(db.SecondsInAYear*3), refTime-(db.SecondsInAYear*7), gidB, uidA)
 		addFiles(dir, "k", "file2.cram", 1, 2, refTime-(db.SecondsInAYear*1), refTime-(db.SecondsInAYear*2), gidB, uidA)
 		addFiles(dir, "k", "file3.cram", 1, 3, refTime-(db.SecondsInAMonth)-10, refTime-(db.SecondsInAMonth*2), gidB, uidA)

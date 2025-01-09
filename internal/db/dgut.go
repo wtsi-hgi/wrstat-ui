@@ -122,26 +122,3 @@ func exampleDGUTAData(t *testing.T, uidStr, gidAStr, gidBStr string, refTime int
 
 	return internaldata.CreateDefaultTestData(uint32(gidA), uint32(gidB), 0, uint32(uid), 0, refTime).AsReader()
 }
-
-// func CreateDGUTADBFromFakeFiles(t *testing.T, files []internaldata.TestFile,
-// 	modtime ...time.Time,
-// ) (*db.Tree, string, error) {
-// 	t.Helper()
-
-// 	dgutaData := internaldata.TestDGUTAData(t, files)
-
-// 	dbPath, err := CreateCustomDGUTADB(t, dgutaData)
-// 	if err != nil {
-// 		t.Fatalf("could not create dguta db: %s", err)
-// 	}
-
-// 	if len(modtime) == 1 {
-// 		if err = fs.Touch(dbPath, modtime[0]); err != nil {
-// 			return nil, "", err
-// 		}
-// 	}
-
-// 	tree, err := db.NewTree(dbPath)
-
-// 	return tree, dbPath, err
-// }
