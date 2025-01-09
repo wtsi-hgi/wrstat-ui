@@ -31,7 +31,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -47,11 +46,11 @@ const (
 	bucketKeySeparatorByte = '-'
 	gBytes                 = 1024 * 1024 * 1024
 
-	groupUsageBucket      = "groupUsage"
-	groupHistoricalBucket = "groupHistorical"
-	groupSubDirsBucket    = "groupSubDirs"
-	userUsageBucket       = "userUsage"
-	userSubDirsBucket     = "userSubDirs"
+	GroupUsageBucket      = "groupUsage"
+	GroupHistoricalBucket = "groupHistorical"
+	GroupSubDirsBucket    = "groupSubDirs"
+	UserUsageBucket       = "userUsage"
+	UserSubDirsBucket     = "userSubDirs"
 
 	sizeOfUint32         = 4
 	sizeOfUint16         = 2
@@ -86,7 +85,7 @@ type Usage struct {
 	Age         db.DirGUTAge
 }
 
-// CreateDatabase creates a database containing usage information for each of
+// Output creates a database containing usage information for each of
 // our groups and users by calculated base directory.
 func (b *BaseDirs) Output(users, groups IDAgeDirs) error {
 	db, err := openDB(b.dbPath)
@@ -138,11 +137,11 @@ func (b *BaseDirs) updateDatabase(users, groups IDAgeDirs) func(*bolt.Tx) error 
 }
 
 func clearUsageBuckets(tx *bolt.Tx) error {
-	if err := tx.DeleteBucket([]byte(groupUsageBucket)); err != nil && !errors.Is(err, bolt.ErrBucketNotFound) {
+	if err := tx.DeleteBucket([]byte(GroupUsageBucket)); err != nil && !errors.Is(err, bolt.ErrBucketNotFound) {
 		return err
 	}
 
-	if err := tx.DeleteBucket([]byte(userUsageBucket)); err != nil && !errors.Is(err, bolt.ErrBucketNotFound) {
+	if err := tx.DeleteBucket([]byte(UserUsageBucket)); err != nil && !errors.Is(err, bolt.ErrBucketNotFound) {
 		return err
 	}
 
@@ -151,8 +150,8 @@ func clearUsageBuckets(tx *bolt.Tx) error {
 
 func createBucketsIfNotExist(tx *bolt.Tx) error {
 	for _, bucket := range [...]string{
-		groupUsageBucket, groupHistoricalBucket,
-		groupSubDirsBucket, userUsageBucket, userSubDirsBucket,
+		GroupUsageBucket, GroupHistoricalBucket,
+		GroupSubDirsBucket, UserUsageBucket, UserSubDirsBucket,
 	} {
 		if _, errc := tx.CreateBucketIfNotExists([]byte(bucket)); errc != nil {
 			return errc
@@ -171,7 +170,7 @@ func (b *BaseDirs) calculateUsage(tx *bolt.Tx, gidBase IDAgeDirs, uidBase IDAgeD
 }
 
 func (b *BaseDirs) storeGIDBaseDirs(tx *bolt.Tx, gidBase IDAgeDirs) error {
-	gub := tx.Bucket([]byte(groupUsageBucket))
+	gub := tx.Bucket([]byte(GroupUsageBucket))
 
 	for gid, dcss := range gidBase {
 		for _, adcs := range dcss {
@@ -225,7 +224,7 @@ func (b *BaseDirs) encodeToBytes(data any) []byte {
 }
 
 func (b *BaseDirs) storeUIDBaseDirs(tx *bolt.Tx, uidBase IDAgeDirs) error {
-	uub := tx.Bucket([]byte(userUsageBucket))
+	uub := tx.Bucket([]byte(UserUsageBucket))
 
 	for uid, dcss := range uidBase {
 		for _, adcs := range dcss {
@@ -251,7 +250,7 @@ func (b *BaseDirs) storeUIDBaseDirs(tx *bolt.Tx, uidBase IDAgeDirs) error {
 }
 
 func (b *BaseDirs) updateHistories(tx *bolt.Tx, gidBase IDAgeDirs) error {
-	ghb := tx.Bucket([]byte(groupHistoricalBucket))
+	ghb := tx.Bucket([]byte(GroupHistoricalBucket))
 
 	gidMounts := b.gidsToMountpoints(gidBase)
 
@@ -310,7 +309,7 @@ func (b *BaseDirs) updateGroupHistories(ghb *bolt.Bucket, gid uint32,
 
 		existing := ghb.Get(key)
 
-		histories, err := b.updateHistory(ds, quotaSize, quotaInode, ds.Modtime, existing)
+		histories, err := b.updateHistory(ds, quotaSize, quotaInode, b.modTime, existing)
 		if err != nil {
 			return err
 		}
@@ -399,7 +398,7 @@ func (b *BaseDirs) calculateSubDirUsage(tx *bolt.Tx, gidBase, uidBase IDAgeDirs)
 }
 
 func (b *BaseDirs) storeGIDSubDirs(tx *bolt.Tx, gidBase IDAgeDirs) error {
-	bucket := tx.Bucket([]byte(groupSubDirsBucket))
+	bucket := tx.Bucket([]byte(GroupSubDirsBucket))
 
 	for gid, dcss := range gidBase {
 		for _, adcs := range dcss {
@@ -418,46 +417,8 @@ func (b *BaseDirs) storeSubDirs(bucket *bolt.Bucket, id uint32, dcs SummaryWithC
 	return bucket.Put(keyName(id, dcs.Dir, dcs.Age), b.encodeToBytes(dcs.Children))
 }
 
-func makeSubDirs(info *db.DirInfo, parentTypes UsageBreakdownByType, //nolint:funlen
-	childToTypes map[string]UsageBreakdownByType,
-) []*SubDir {
-	subDirs := make([]*SubDir, len(info.Children)+1)
-
-	var (
-		totalCount uint64
-		totalSize  uint64
-	)
-
-	for i, child := range info.Children {
-		subDirs[i+1] = &SubDir{
-			SubDir:       filepath.Base(child.Dir),
-			NumFiles:     child.Count,
-			SizeFiles:    child.Size,
-			LastModified: child.Mtime,
-			FileUsage:    childToTypes[child.Dir],
-		}
-
-		totalCount += child.Count
-		totalSize += child.Size
-	}
-
-	if totalCount == info.Current.Count {
-		return subDirs[1:]
-	}
-
-	subDirs[0] = &SubDir{
-		SubDir:       ".",
-		NumFiles:     info.Current.Count - totalCount,
-		SizeFiles:    info.Current.Size - totalSize,
-		LastModified: info.Current.Mtime,
-		FileUsage:    parentTypes,
-	}
-
-	return subDirs
-}
-
 func (b *BaseDirs) storeUIDSubDirs(tx *bolt.Tx, uidBase IDAgeDirs) error {
-	bucket := tx.Bucket([]byte(userSubDirsBucket))
+	bucket := tx.Bucket([]byte(UserSubDirsBucket))
 
 	for uid, dcss := range uidBase {
 		for _, adcs := range dcss {
@@ -482,10 +443,10 @@ func (b *BaseDirs) storeUIDSubDirs(tx *bolt.Tx, uidBase IDAgeDirs) error {
 // to the latest stored history, without having to have all histories in memory.
 func (b *BaseDirs) storeDateQuotasFill() func(*bolt.Tx) error {
 	return func(tx *bolt.Tx) error {
-		bucket := tx.Bucket([]byte(groupUsageBucket))
-		hbucket := tx.Bucket([]byte(groupHistoricalBucket))
+		bucket := tx.Bucket([]byte(GroupUsageBucket))
+		hbucket := tx.Bucket([]byte(GroupHistoricalBucket))
 
-		return bucket.ForEach(func(_, data []byte) error {
+		return bucket.ForEach(func(k, data []byte) error {
 			gu := new(Usage)
 
 			if err := b.decodeFromBytes(data, gu); err != nil {
@@ -542,14 +503,14 @@ func MergeDBs(pathA, pathB, outputPath string) (err error) { //nolint:funlen
 		}
 	}
 
-	dbA, err = openDBRO(pathA)
+	dbA, err = OpenDBRO(pathA)
 	if err != nil {
 		return err
 	}
 
 	defer closeDB(dbA)
 
-	dbB, err = openDBRO(pathB)
+	dbB, err = OpenDBRO(pathB)
 	if err != nil {
 		return err
 	}
@@ -582,8 +543,8 @@ func transferAllBucketContents(utx *bolt.Tx, source *bolt.DB) error {
 
 	return source.View(func(vtx *bolt.Tx) error {
 		for _, bucket := range []string{
-			groupUsageBucket, groupHistoricalBucket,
-			groupSubDirsBucket, userUsageBucket, userSubDirsBucket,
+			GroupUsageBucket, GroupHistoricalBucket,
+			GroupSubDirsBucket, UserUsageBucket, UserSubDirsBucket,
 		} {
 			err := transferBucketContents(vtx, utx, bucket)
 			if err != nil {
