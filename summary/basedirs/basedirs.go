@@ -78,7 +78,7 @@ func merge(newS, oldS *basedirs.SummaryWithChildren, name string) {
 
 	newS.Children[0].NumFiles += oldS.Children[0].NumFiles
 	newS.Children[0].SizeFiles += oldS.Children[0].SizeFiles
-	oldS.Children[0].SubDir = strings.TrimSuffix(name, "/")
+	oldS.Children[0].SubDir = name
 	newS.Children = append(newS.Children, oldS.Children[0])
 }
 
@@ -136,7 +136,7 @@ func (b baseDirsMap) Add(fn func(uint32, basedirs.SummaryWithChildren, db.DirGUT
 	for id, bd := range b {
 		for age, ds := range bd {
 			if ds != nil {
-				ds.Dir = strings.TrimSuffix(string(ds.Path.AppendTo(make([]byte, 0, ds.Path.Len()))), "/")
+				ds.Dir = string(ds.Path.AppendTo(make([]byte, 0, ds.Path.Len())))
 
 				for n, c := range ds.Children[0].FileUsage {
 					if c > 0 {
@@ -297,7 +297,42 @@ func (b *BaseDirs) cleanup() {
 func (r *RootBaseDirs) Output() error {
 	r.BaseDirs.Output() //nolint:errcheck
 
+	removeChildDirFilesFromDot(r.users)
+	removeChildDirFilesFromDot(r.groups)
+
 	return r.db.Output(r.users, r.groups)
+}
+
+func removeChildDirFilesFromDot(idag basedirs.IDAgeDirs) {
+	for _, ad := range idag {
+		for _, c := range ad {
+			for n := range c {
+				swc := &c[n]
+				swc.Dir = strings.TrimSuffix(swc.Dir, "/")
+				dot := swc.Children[0]
+
+				for _, sd := range swc.Children[1:] {
+					sd.SubDir = strings.TrimSuffix(sd.SubDir, "/")
+					dot.NumFiles -= sd.NumFiles
+					dot.SizeFiles -= sd.SizeFiles
+
+					for typ, count := range sd.FileUsage {
+						dot.FileUsage[typ] -= count
+					}
+				}
+
+				if dot.NumFiles == 0 {
+					swc.Children = swc.Children[1:]
+				} else {
+					for typ, count := range dot.FileUsage {
+						if count == 0 {
+							delete(dot.FileUsage, typ)
+						}
+					}
+				}
+			}
+		}
+	}
 }
 
 func (r *RootBaseDirs) AddUserBase(uid uint32, ds basedirs.SummaryWithChildren, age db.DirGUTAge) {

@@ -79,19 +79,37 @@ func userSummary(path string, uid uint32, gids []uint32, atime int64, children .
 }
 
 func dirsummary(path string, uids []uint32, gids []uint32, atime int64, children []*basedirs.SubDir) basedirs.SummaryWithChildren {
-	fts := slices.Collect(maps.Keys(children[0].FileUsage))
+	ftsMap := make(map[db.DirGUTAFileType]struct{})
+
+	var size, num uint64
+	var mod time.Time
+
+	for _, c := range children {
+		size += c.SizeFiles
+		num += c.NumFiles
+
+		if mod.IsZero() || mod.Before(c.LastModified) {
+			mod = c.LastModified
+		}
+
+		for ft := range c.FileUsage {
+			ftsMap[ft] = struct{}{}
+		}
+	}
+
+	fts := slices.Collect(maps.Keys(ftsMap))
 
 	slices.Sort(fts)
 
 	s := basedirs.SummaryWithChildren{
 		DirSummary: db.DirSummary{
 			Dir:   path,
-			Count: children[0].NumFiles,
-			Size:  children[0].SizeFiles,
+			Count: num,
+			Size:  size,
 			UIDs:  uids,
 			GIDs:  gids,
 			Atime: time.Unix(atime, 0),
-			Mtime: children[0].LastModified,
+			Mtime: mod,
 			FTs:   fts,
 		},
 		Children: children,
@@ -142,7 +160,6 @@ func TestBaseDirs(t *testing.T) {
 
 		user2DirA := []basedirs.SummaryWithChildren{
 			userSummary("/opt/teams/teamA/user2", 2, ids(11), times[3],
-				dir(".", times[1], 2, files{db.DGUTAFileTypeBam: 5, db.DGUTAFileTypeCompressed: 7}),
 				dir("aDir", times[1], 1, files{db.DGUTAFileTypeBam: 5}),
 				dir("bDir", times[1], 1, files{db.DGUTAFileTypeCompressed: 7}),
 			),
@@ -156,7 +173,6 @@ func TestBaseDirs(t *testing.T) {
 
 		user3Dir := []basedirs.SummaryWithChildren{
 			userSummary("/opt/teams/teamB/user3", 3, ids(12), times[0],
-				dir(".", times[0], 3, files{db.DGUTAFileTypeOther: 17, db.DGUTAFileTypeTemp: 13, db.DGUTAFileTypeVCF: 11, db.DGUTAFileTypeCram: 13}),
 				dir("aDir", times[0], 1, files{db.DGUTAFileTypeVCF: 11}),
 				dir("eDir", times[0], 1, files{db.DGUTAFileTypeTemp: 13, db.DGUTAFileTypeCram: 13}),
 				dir("fDir", times[0], 1, files{db.DGUTAFileTypeOther: 17}),
@@ -165,12 +181,10 @@ func TestBaseDirs(t *testing.T) {
 
 		user4Dir := []basedirs.SummaryWithChildren{
 			userSummary("/opt/teams/teamB/user4/aDir", 4, ids(12), times[0],
-				dir(".", times[0], 2, files{db.DGUTAFileTypeOther: 42}),
 				dir("bDir", times[0], 1, files{db.DGUTAFileTypeOther: 19}),
 				dir("dDir", times[0], 1, files{db.DGUTAFileTypeOther: 23}),
 			),
 			userSummary("/opt/teams/teamC/user4/aDir", 4, ids(12), times[0],
-				dir(".", times[0], 2, files{db.DGUTAFileTypeOther: 60}),
 				dir("bDir", times[0], 1, files{db.DGUTAFileTypeOther: 29}),
 				dir("dDir", times[0], 1, files{db.DGUTAFileTypeOther: 31}),
 			),
@@ -184,7 +198,6 @@ func TestBaseDirs(t *testing.T) {
 
 		group11DirA := []basedirs.SummaryWithChildren{
 			groupSummary("/opt/teams/teamA/user2", ids(2), 11, times[3],
-				dir(".", times[1], 2, files{db.DGUTAFileTypeBam: 5, db.DGUTAFileTypeCompressed: 7}),
 				dir("aDir", times[1], 1, files{db.DGUTAFileTypeBam: 5}),
 				dir("bDir", times[1], 1, files{db.DGUTAFileTypeCompressed: 7}),
 			),
@@ -198,12 +211,10 @@ func TestBaseDirs(t *testing.T) {
 
 		group12Dir := []basedirs.SummaryWithChildren{
 			groupSummary("/opt/teams/teamB", ids(3, 4), 12, times[0],
-				dir(".", times[0], 5, files{db.DGUTAFileTypeOther: 59, db.DGUTAFileTypeTemp: 13, db.DGUTAFileTypeVCF: 11, db.DGUTAFileTypeCram: 13}),
 				dir("user3", times[0], 3, files{db.DGUTAFileTypeOther: 17, db.DGUTAFileTypeTemp: 13, db.DGUTAFileTypeVCF: 11, db.DGUTAFileTypeCram: 13}),
 				dir("user4", times[0], 2, files{db.DGUTAFileTypeOther: 42}),
 			),
 			groupSummary("/opt/teams/teamC/user4/aDir", ids(4), 12, times[0],
-				dir(".", times[0], 2, files{db.DGUTAFileTypeOther: 60}),
 				dir("bDir", times[0], 1, files{db.DGUTAFileTypeOther: 29}),
 				dir("dDir", times[0], 1, files{db.DGUTAFileTypeOther: 31}),
 			),
