@@ -49,7 +49,7 @@ type DBInfo struct {
 // Info returns summary information about the given basedirs database file
 // itself.
 func Info(dbPath string) (*DBInfo, error) {
-	db, err := openDBRO(dbPath)
+	db, err := OpenDBRO(dbPath)
 	if err != nil {
 		return nil, err
 	}
@@ -58,15 +58,15 @@ func Info(dbPath string) (*DBInfo, error) {
 	ch := new(codec.BincHandle)
 
 	db.View(func(tx *bolt.Tx) error { //nolint:errcheck
-		info.GroupDirCombos, _ = countFromFullBucketScan(tx, groupUsageBucket, countOnly, ch)
+		info.GroupDirCombos, _ = countFromFullBucketScan(tx, GroupUsageBucket, countOnly, ch)
 
-		info.GroupMountCombos, info.GroupHistories = countFromFullBucketScan(tx, groupHistoricalBucket, countHistories, ch)
+		info.GroupMountCombos, info.GroupHistories = countFromFullBucketScan(tx, GroupHistoricalBucket, countHistories, ch)
 
-		info.GroupSubDirCombos, info.GroupSubDirs = countFromFullBucketScan(tx, groupSubDirsBucket, countSubDirs, ch)
+		info.GroupSubDirCombos, info.GroupSubDirs = countFromFullBucketScan(tx, GroupSubDirsBucket, countSubDirs, ch)
 
-		info.UserDirCombos, _ = countFromFullBucketScan(tx, userUsageBucket, countOnly, ch)
+		info.UserDirCombos, _ = countFromFullBucketScan(tx, UserUsageBucket, countOnly, ch)
 
-		info.UserSubDirCombos, info.UserSubDirs = countFromFullBucketScan(tx, userSubDirsBucket, countSubDirs, ch)
+		info.UserSubDirCombos, info.UserSubDirs = countFromFullBucketScan(tx, UserSubDirsBucket, countSubDirs, ch)
 
 		return nil
 	})
@@ -83,7 +83,7 @@ func countFromFullBucketScan(tx *bolt.Tx, bucketName string,
 	sliceLen := 0
 
 	b.ForEach(func(k, v []byte) error { //nolint:errcheck
-		if !checkAgeOfKeyIsAll(k) {
+		if !CheckAgeOfKeyIsAll(k) {
 			return nil
 		}
 
@@ -96,7 +96,7 @@ func countFromFullBucketScan(tx *bolt.Tx, bucketName string,
 	return count, sliceLen
 }
 
-func checkAgeOfKeyIsAll(key []byte) bool {
+func CheckAgeOfKeyIsAll(key []byte) bool {
 	return bytes.Count(key, bucketKeySeparatorByteSlice) == 1
 }
 

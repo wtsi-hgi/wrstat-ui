@@ -40,8 +40,8 @@ import (
 const (
 	secondsInDay     = time.Hour * 24
 	threeDays        = 3 * secondsInDay
-	quotaStatusOK    = "OK"
-	quotaStatusNotOK = "Not OK"
+	QuotaStatusOK    = "OK"
+	QuotaStatusNotOK = "Not OK"
 )
 
 // BaseDirReader is used to read the information stored in a BaseDir database.
@@ -58,7 +58,7 @@ type BaseDirReader struct {
 // stored in a BaseDir database. It takes an owners file (gid,name csv) to
 // associate groups with their owners in certain output.
 func NewReader(dbPath, ownersPath string) (*BaseDirReader, error) {
-	db, err := openDBRO(dbPath)
+	db, err := OpenDBRO(dbPath)
 	if err != nil {
 		return nil, err
 	}
@@ -83,7 +83,7 @@ func NewReader(dbPath, ownersPath string) (*BaseDirReader, error) {
 	}, nil
 }
 
-func openDBRO(dbPath string) (*bolt.DB, error) {
+func OpenDBRO(dbPath string) (*bolt.DB, error) {
 	return bolt.Open(dbPath, dbOpenMode, &bolt.Options{
 		ReadOnly: true,
 	})
@@ -96,7 +96,7 @@ func (b *BaseDirReader) Close() error {
 // GroupUsage returns the usage for every GID-BaseDir combination in the
 // database.
 func (b *BaseDirReader) GroupUsage(age db.DirGUTAge) ([]*Usage, error) {
-	return b.usage(groupUsageBucket, age)
+	return b.usage(GroupUsageBucket, age)
 }
 
 func (b *BaseDirReader) usage(bucketName string, age db.DirGUTAge) ([]*Usage, error) {
@@ -135,7 +135,7 @@ func (b *BaseDirReader) decodeFromBytes(encoded []byte, data any) error {
 }
 
 func (b *BaseDirReader) getNameBasedOnBucket(bucketName string, uwm *Usage) string {
-	if bucketName == groupUsageBucket {
+	if bucketName == GroupUsageBucket {
 		return b.groupCache.GroupName(uwm.GID)
 	}
 
@@ -145,14 +145,14 @@ func (b *BaseDirReader) getNameBasedOnBucket(bucketName string, uwm *Usage) stri
 // UserUsage returns the usage for every UID-BaseDir combination in the
 // database.
 func (b *BaseDirReader) UserUsage(age db.DirGUTAge) ([]*Usage, error) {
-	return b.usage(userUsageBucket, age)
+	return b.usage(UserUsageBucket, age)
 }
 
 // GroupSubDirs returns a slice of SubDir, one for each subdirectory of the
 // given basedir, owned by the given group. If basedir directly contains files,
 // one of the SubDirs will be for ".".
 func (b *BaseDirReader) GroupSubDirs(gid uint32, basedir string, age db.DirGUTAge) ([]*SubDir, error) {
-	return b.subDirs(groupSubDirsBucket, gid, basedir, age)
+	return b.subDirs(GroupSubDirsBucket, gid, basedir, age)
 }
 
 func (b *BaseDirReader) subDirs(bucket string, id uint32, basedir string, age db.DirGUTAge) ([]*SubDir, error) {
@@ -178,7 +178,7 @@ func (b *BaseDirReader) subDirs(bucket string, id uint32, basedir string, age db
 // given basedir, owned by the given user. If basedir directly contains files,
 // one of the SubDirs will be for ".".
 func (b *BaseDirReader) UserSubDirs(uid uint32, basedir string, age db.DirGUTAge) ([]*SubDir, error) {
-	return b.subDirs(userSubDirsBucket, uid, basedir, age)
+	return b.subDirs(UserSubDirsBucket, uid, basedir, age)
 }
 
 // GroupUsageTable returns GroupUsage() information formatted with the following
@@ -228,14 +228,14 @@ func usageStatus(sizeExceedDate, inodeExceedDate time.Time) string {
 	threeDaysFromNow := time.Now().Add(threeDays)
 
 	if !sizeExceedDate.IsZero() && threeDaysFromNow.After(sizeExceedDate) {
-		return quotaStatusNotOK
+		return QuotaStatusNotOK
 	}
 
 	if !inodeExceedDate.IsZero() && threeDaysFromNow.After(inodeExceedDate) {
-		return quotaStatusNotOK
+		return QuotaStatusNotOK
 	}
 
-	return quotaStatusOK
+	return QuotaStatusOK
 }
 
 // UserUsageTable returns UserUsage() information formatted with the following

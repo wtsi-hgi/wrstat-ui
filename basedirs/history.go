@@ -66,7 +66,7 @@ func (b *BaseDirReader) History(gid uint32, path string) ([]History, error) {
 	var history []History
 
 	if err := b.db.View(func(tx *bolt.Tx) error {
-		bucket := tx.Bucket([]byte(groupHistoricalBucket))
+		bucket := tx.Bucket([]byte(GroupHistoricalBucket))
 		key := historyKey(gid, mp)
 
 		data := bucket.Get(key)
