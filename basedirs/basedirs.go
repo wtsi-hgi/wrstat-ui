@@ -31,6 +31,8 @@
 package basedirs
 
 import (
+	"time"
+
 	"github.com/ugorji/go/codec"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 )
@@ -42,6 +44,7 @@ type BaseDirs struct {
 	quotas      *Quotas
 	ch          codec.Handle
 	mountPoints mountPoints
+	modTime     time.Time
 }
 
 // NewCreator returns a BaseDirs that lets you create a database summarising
@@ -63,6 +66,7 @@ func NewCreator(dbPath string, quotas *Quotas) (*BaseDirs, error) {
 		quotas:      quotas,
 		ch:          new(codec.BincHandle),
 		mountPoints: mp,
+		modTime:     time.Now(),
 	}, nil
 }
 
@@ -70,6 +74,10 @@ func NewCreator(dbPath string, quotas *Quotas) (*BaseDirs, error) {
 // discovery of mountpoints on your system doesn't work.
 func (b *BaseDirs) SetMountPoints(mountpoints []string) {
 	b.mountPoints = mountpoints
+}
+
+func (b *BaseDirs) SetModTime(t time.Time) {
+	b.modTime = t
 }
 
 type SummaryWithChildren struct {
