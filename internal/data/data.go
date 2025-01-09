@@ -94,29 +94,10 @@ func CreateDefaultTestData(gidA, gidB, gidC, uidA, uidB uint32, refTime int64) *
 	return dir
 }
 
-func FakeFilesForDGUTADBForBasedirsTesting(gid, uid uint32, prefix string, numFirstFiles int, firstFileSize, secondFileSize int64, last bool) ([]string, *statsdata.Directory) {
+func FakeFilesForDGUTADBForBasedirsTesting(gid, uid uint32, prefix string, numFirstFiles int, firstFileSize, secondFileSize int64, last bool, refTime int64) ([]string, *statsdata.Directory) {
 	dir := statsdata.NewRoot("/", 0)
 	dir.ATime = 50
 	dir.MTime = 0
-	base := dir.AddDirectory(prefix)
-
-	addFiles(base, "scratch125/humgen/projects/A", "file.bam", numFirstFiles, firstFileSize, 50, 50, 1, 101)
-	addFiles(base, "scratch125/humgen/projects/A/sub", "file.bam", 1, secondFileSize, 50, 100, 1, 101)
-	addFiles(base, "scratch125/humgen/projects/B", "file.bam", 1, 20, 50, 50, 2, 102)
-	addFiles(base, "scratch123/hgi/mdt1/projects/B", "file.bam", 1, 30, 50, 50, 2, 102)
-	addFiles(base, "scratch123/hgi/m0", "file.bam", 1, 40, 50, 50, 2, 88888)
-	addFiles(base, "scratch123/hgi/mdt0", "file.bam", 1, 40, 50, 50, 2, 88888)
-	addFiles(base, "scratch125/humgen/teams/102", "file.bam", 1, 1, 50, 50, 77777, 102)
-
-	addFiles(base, "scratch125/humgen/projects/D/sub1", "file.bam", 1, 1, 50, 50, gid, uid)
-	addFiles(base, "scratch125/humgen/projects/D/sub1/temp", "file.sam", 1, 2, 50, 50, gid, uid)
-	addFiles(base, "scratch125/humgen/projects/D/sub1", "file.cram", 1, 3, 50, 50, gid, uid)
-	addFiles(base, "scratch125/humgen/projects/D/sub2", "file.bed", 1, 4, 50, 50, gid, uid)
-
-	if last {
-		addFiles(base, "scratch125/humgen/projects/D/sub2", "file.bed", 1, 5, 50, 50, gid, uid)
-	}
-
 	projectA := filepath.Join("/", prefix, "scratch125", "humgen", "projects", "A")
 	projectB125 := filepath.Join("/", prefix, "scratch125", "humgen", "projects", "B")
 	projectB123 := filepath.Join("/", prefix, "scratch123", "hgi", "mdt1", "projects", "B")
@@ -124,6 +105,25 @@ func FakeFilesForDGUTADBForBasedirsTesting(gid, uid uint32, prefix string, numFi
 	projectC2 := filepath.Join("/", prefix, "scratch123", "hgi", "mdt0")
 	user2 := filepath.Join("/", prefix, "scratch125", "humgen", "teams", "102")
 	projectD := filepath.Join("/", prefix, "scratch125", "humgen", "projects", "D")
+
+	addFiles(dir, projectA[1:], "file.bam", numFirstFiles, firstFileSize, 50, 50, 1, 101)
+	addFiles(dir, projectA[1:]+"/sub", "file.bam", 1, secondFileSize, 50, 100, 1, 101)
+	addFiles(dir, projectB125[1:], "file.bam", 1, 20, 50, 50, 2, 102)
+	addFiles(dir, projectB123[1:], "file.bam", 1, 30, 50, 50, 2, 102)
+	addFiles(dir, projectC1[1:], "file.bam", 1, 40, 50, 50, 2, 88888)
+	addFiles(dir, projectC2[1:], "file.bam", 1, 40, 50, 50, 2, 88888)
+	addFiles(dir, user2[1:], "file.bam", 1, 60, 50, 50, 77777, 102)
+	addFiles(dir, projectA[1:], "age.bam", 1, 60, refTime-db.SecondsInAYear*2, refTime-db.SecondsInAYear*3, 3, 103)
+	addFiles(dir, projectA[1:], "age.bam", 1, 40, refTime-db.SecondsInAYear*3, refTime-db.SecondsInAYear*5, 3, 103)
+
+	addFiles(dir, projectD[1:]+"/sub1", "file.bam", 1, 1, 50, 50, gid, uid)
+	addFiles(dir, projectD[1:]+"/sub1/temp", "file.sam", 1, 2, 50, 50, gid, uid)
+	addFiles(dir, projectD[1:]+"/sub1", "file.cram", 1, 3, 50, 50, gid, uid)
+	addFiles(dir, projectD[1:]+"/sub2", "file.bed", 1, 4, 50, 50, gid, uid)
+
+	if last {
+		addFiles(dir, projectD[1:]+"/sub2", "file.bed", 1, 5, 50, 50, gid, uid)
+	}
 
 	return []string{projectA, projectB125, projectB123, projectC1, projectC2, user2, projectD}, dir
 }
