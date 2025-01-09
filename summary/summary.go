@@ -47,7 +47,7 @@ func (s *Summary) Add(size int64) {
 
 // SummaryWithTimes is like summary, but also holds the reference time, oldest
 // atime, newest mtime add()ed.
-type SummaryWithTimes struct {
+type SummaryWithTimes struct { //nolint:revive
 	Summary
 	Atime int64 // seconds since Unix epoch
 	Mtime int64 // seconds since Unix epoch
@@ -75,11 +75,11 @@ func NewGroupUserID(gid, uid uint32) GroupUserID {
 }
 
 func (g GroupUserID) GID() uint32 {
-	return uint32(g >> 32) //nolint:mnd
+	return uint32(g >> 32) //nolint:mnd,gosec
 }
 
 func (g GroupUserID) UID() uint32 {
-	return uint32(g)
+	return uint32(g) //nolint:gosec
 }
 
 // GIDToName converts gid to group name, using the given cache to avoid lookups.

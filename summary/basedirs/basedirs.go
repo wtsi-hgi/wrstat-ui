@@ -213,10 +213,9 @@ func NewBaseDirs(output outputForDir, db DB) summary.OperationGenerator {
 	}
 
 	root.root = root
+	now := time.Now().Unix()
 
 	var parent *BaseDirs
-
-	now := time.Now().Unix()
 
 	return func() summary.Operation {
 		if parent == nil {

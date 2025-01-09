@@ -42,6 +42,7 @@ import (
 //		t.Helper()
 func CreateExampleDGUTADBForBasedirs(t *testing.T, refTime int64) (*statsdata.Directory, []string, error) {
 	t.Helper()
+
 	gid, uid, _, _, err := internaluser.RealGIDAndUID()
 	if err != nil {
 		return nil, nil, err

@@ -81,8 +81,10 @@ func userSummary(path string, uid uint32, gids []uint32, atime int64, children .
 func dirsummary(path string, uids []uint32, gids []uint32, atime int64, children []*basedirs.SubDir) basedirs.SummaryWithChildren {
 	ftsMap := make(map[db.DirGUTAFileType]struct{})
 
-	var size, num uint64
-	var mod time.Time
+	var (
+		size, num uint64
+		mod       time.Time
+	)
 
 	for _, c := range children {
 		size += c.SizeFiles

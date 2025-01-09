@@ -607,157 +607,157 @@ func TestServer(t *testing.T) {
 			So(logWriter.String(), ShouldContainSubstring, "STATUS=404")
 			logWriter.Reset()
 
-			// 	Convey("And given a basedirs database", func() {
-			// 		root, _, err := internaldb.CreateExampleDGUTADBForBasedirs(t, time.Now().Unix())
+			// Convey("And given a basedirs database", func() {
+			// 	root, _, err := internaldb.CreateExampleDGUTADBForBasedirs(t, time.Now().Unix())
+			// 	So(err, ShouldBeNil)
+
+			// 	dbPath, ownersPath, err := createExampleBasedirsDB(t, root)
+			// 	So(err, ShouldBeNil)
+
+			// 	s.tree = tree
+
+			// 	Convey("You can get results after calling LoadBasedirsDB", func() {
+			// 		err = s.LoadBasedirsDB(dbPath, ownersPath)
 			// 		So(err, ShouldBeNil)
 
-			// 		dbPath, ownersPath, err := createExampleBasedirsDB(t, root)
+			// 		s.basedirs.SetMountPoints([]string{
+			// 			"/lustre/scratch123/",
+			// 			"/lustre/scratch125/",
+			// 		})
+
+			// 		response, err := query(s, EndPointBasedirUsageGroup, "")
 			// 		So(err, ShouldBeNil)
+			// 		So(response.Code, ShouldEqual, http.StatusOK)
+			// 		So(logWriter.String(), ShouldContainSubstring, "[GET /rest/v1/basedirs/usage/groups")
+			// 		So(logWriter.String(), ShouldContainSubstring, "STATUS=200")
 
-			// 		s.tree = tree
+			// 		usageGroup, err := decodeUsageResult(response)
+			// 		So(err, ShouldBeNil)
+			// 		So(len(usageGroup), ShouldEqual, 102)
+			// 		So(usageGroup[0].GID, ShouldNotEqual, 0)
+			// 		So(usageGroup[0].UID, ShouldEqual, 0)
+			// 		So(usageGroup[0].Name, ShouldNotBeBlank)
+			// 		So(usageGroup[0].Owner, ShouldNotBeBlank)
+			// 		So(usageGroup[0].BaseDir, ShouldNotBeBlank)
 
-			// 		Convey("You can get results after calling LoadBasedirsDB", func() {
-			// 			err = s.LoadBasedirsDB(dbPath, ownersPath)
+			// 		response, err = query(s, EndPointBasedirUsageUser, "")
+			// 		So(err, ShouldBeNil)
+			// 		So(response.Code, ShouldEqual, http.StatusOK)
+			// 		So(logWriter.String(), ShouldContainSubstring, "[GET /rest/v1/basedirs/usage/users")
+			// 		So(logWriter.String(), ShouldContainSubstring, "STATUS=200")
+
+			// 		usageUser, err := decodeUsageResult(response)
+			// 		So(err, ShouldBeNil)
+			// 		So(len(usageUser), ShouldEqual, 102)
+			// 		So(usageUser[0].GID, ShouldEqual, 0)
+			// 		So(usageUser[0].UID, ShouldNotEqual, 0)
+			// 		So(usageUser[0].Name, ShouldNotBeBlank)
+			// 		So(usageUser[0].Owner, ShouldBeBlank)
+			// 		So(usageUser[0].BaseDir, ShouldNotBeBlank)
+
+			// 		response, err = query(s, EndPointBasedirSubdirGroup,
+			// 			fmt.Sprintf("?id=%d&basedir=%s", usageGroup[0].GID, usageGroup[0].BaseDir))
+			// 		So(err, ShouldBeNil)
+			// 		So(response.Code, ShouldEqual, http.StatusOK)
+			// 		So(logWriter.String(), ShouldContainSubstring, "[GET /rest/v1/basedirs/subdirs/group")
+			// 		So(logWriter.String(), ShouldContainSubstring, "STATUS=200")
+
+			// 		subdirs, err := decodeSubdirResult(response)
+			// 		So(err, ShouldBeNil)
+			// 		So(len(subdirs), ShouldEqual, 2)
+			// 		So(subdirs[0].SubDir, ShouldEqual, ".")
+			// 		So(subdirs[1].SubDir, ShouldEqual, "sub")
+
+			// 		response, err = query(s, EndPointBasedirSubdirUser,
+			// 			fmt.Sprintf("?id=%d&basedir=%s", usageUser[0].UID, usageUser[0].BaseDir))
+			// 		So(err, ShouldBeNil)
+			// 		So(response.Code, ShouldEqual, http.StatusOK)
+			// 		So(logWriter.String(), ShouldContainSubstring, "[GET /rest/v1/basedirs/subdirs/user")
+			// 		So(logWriter.String(), ShouldContainSubstring, "STATUS=200")
+
+			// 		subdirs, err = decodeSubdirResult(response)
+			// 		So(err, ShouldBeNil)
+			// 		So(len(subdirs), ShouldEqual, 1)
+
+			// 		response, err = query(s, EndPointBasedirHistory,
+			// 			fmt.Sprintf("?id=%d&basedir=%s", usageGroup[0].GID, usageGroup[0].BaseDir))
+			// 		So(err, ShouldBeNil)
+			// 		So(response.Code, ShouldEqual, http.StatusOK)
+			// 		So(logWriter.String(), ShouldContainSubstring, "[GET /rest/v1/basedirs/history")
+			// 		So(logWriter.String(), ShouldContainSubstring, "STATUS=200")
+
+			// 		history, err := decodeHistoryResult(response)
+			// 		So(err, ShouldBeNil)
+			// 		So(len(history), ShouldEqual, 1)
+			// 		So(history[0].UsageInodes, ShouldEqual, 2)
+
+			// 		response, err = query(s, EndPointBasedirSubdirUser,
+			// 			fmt.Sprintf("?id=%d&basedir=%s&age=%d", usageUser[0].UID, usageUser[0].BaseDir, dirguta.DGUTAgeA3Y))
+			// 		So(err, ShouldBeNil)
+			// 		So(response.Code, ShouldEqual, http.StatusOK)
+			// 		So(logWriter.String(), ShouldContainSubstring, "[GET /rest/v1/basedirs/subdirs/user")
+			// 		So(logWriter.String(), ShouldContainSubstring, "STATUS=200")
+
+			// 		subdirs, err = decodeSubdirResult(response)
+			// 		So(err, ShouldBeNil)
+			// 		So(len(subdirs), ShouldEqual, 1)
+
+			// 		Convey("Which get updated by an auto-reload when the sentinal file changes", func() {
+			// 			parentDir := filepath.Dir(filepath.Dir(dbPath))
+			// 			sentinel := filepath.Join(parentDir, ".sentinel")
+			// 			file, err := os.Create(sentinel)
+			// 			So(err, ShouldBeNil)
+			// 			err = file.Close()
 			// 			So(err, ShouldBeNil)
 
-			// 			s.basedirs.SetMountPoints([]string{
-			// 				"/lustre/scratch123/",
-			// 				"/lustre/scratch125/",
-			// 			})
+			// 			err = s.EnableBasedirDBReloading(sentinel, parentDir,
+			// 				filepath.Base(dbPath), sentinelPollFrequency)
+			// 			So(err, ShouldBeNil)
+
+			// 			gid, uid, _, _, err := internaluser.RealGIDAndUID()
+			// 			So(err, ShouldBeNil)
+
+			// 			_, files := internaldata.FakeFilesForDGUTADBForBasedirsTesting(gid, uid)
+			// 			tree, _, err = internaldb.CreateDGUTADBFromFakeFiles(t, files[:1])
+			// 			So(err, ShouldBeNil)
+
+			// 			pathNew, _, err := createExampleBasedirsDB(t, tree)
+			// 			So(err, ShouldBeNil)
+
+			// 			newerPath := filepath.Join(parentDir, "newer.basedir.db")
+			// 			err = os.Rename(pathNew, newerPath)
+			// 			So(err, ShouldBeNil)
+
+			// 			later := time.Now().Local().Add(1 * time.Second)
+			// 			err = os.Chtimes(newerPath, later, later)
+			// 			So(err, ShouldBeNil)
 
 			// 			response, err := query(s, EndPointBasedirUsageGroup, "")
 			// 			So(err, ShouldBeNil)
 			// 			So(response.Code, ShouldEqual, http.StatusOK)
-			// 			So(logWriter.String(), ShouldContainSubstring, "[GET /rest/v1/basedirs/usage/groups")
-			// 			So(logWriter.String(), ShouldContainSubstring, "STATUS=200")
 
 			// 			usageGroup, err := decodeUsageResult(response)
 			// 			So(err, ShouldBeNil)
 			// 			So(len(usageGroup), ShouldEqual, 102)
-			// 			So(usageGroup[0].GID, ShouldNotEqual, 0)
-			// 			So(usageGroup[0].UID, ShouldEqual, 0)
-			// 			So(usageGroup[0].Name, ShouldNotBeBlank)
-			// 			So(usageGroup[0].Owner, ShouldNotBeBlank)
-			// 			So(usageGroup[0].BaseDir, ShouldNotBeBlank)
 
-			// 			response, err = query(s, EndPointBasedirUsageUser, "")
+			// 			err = os.Chtimes(sentinel, later, later)
+			// 			So(err, ShouldBeNil)
+
+			// 			waitForFileToBeDeleted(t, dbPath)
+
+			// 			_, err = os.Stat(dbPath)
+			// 			So(err, ShouldNotBeNil)
+
+			// 			response, err = query(s, EndPointBasedirUsageGroup, "")
 			// 			So(err, ShouldBeNil)
 			// 			So(response.Code, ShouldEqual, http.StatusOK)
-			// 			So(logWriter.String(), ShouldContainSubstring, "[GET /rest/v1/basedirs/usage/users")
-			// 			So(logWriter.String(), ShouldContainSubstring, "STATUS=200")
 
-			// 			usageUser, err := decodeUsageResult(response)
+			// 			usageGroup, err = decodeUsageResult(response)
 			// 			So(err, ShouldBeNil)
-			// 			So(len(usageUser), ShouldEqual, 102)
-			// 			So(usageUser[0].GID, ShouldEqual, 0)
-			// 			So(usageUser[0].UID, ShouldNotEqual, 0)
-			// 			So(usageUser[0].Name, ShouldNotBeBlank)
-			// 			So(usageUser[0].Owner, ShouldBeBlank)
-			// 			So(usageUser[0].BaseDir, ShouldNotBeBlank)
-
-			// 			response, err = query(s, EndPointBasedirSubdirGroup,
-			// 				fmt.Sprintf("?id=%d&basedir=%s", usageGroup[0].GID, usageGroup[0].BaseDir))
-			// 			So(err, ShouldBeNil)
-			// 			So(response.Code, ShouldEqual, http.StatusOK)
-			// 			So(logWriter.String(), ShouldContainSubstring, "[GET /rest/v1/basedirs/subdirs/group")
-			// 			So(logWriter.String(), ShouldContainSubstring, "STATUS=200")
-
-			// 			subdirs, err := decodeSubdirResult(response)
-			// 			So(err, ShouldBeNil)
-			// 			So(len(subdirs), ShouldEqual, 2)
-			// 			So(subdirs[0].SubDir, ShouldEqual, ".")
-			// 			So(subdirs[1].SubDir, ShouldEqual, "sub")
-
-			// 			response, err = query(s, EndPointBasedirSubdirUser,
-			// 				fmt.Sprintf("?id=%d&basedir=%s", usageUser[0].UID, usageUser[0].BaseDir))
-			// 			So(err, ShouldBeNil)
-			// 			So(response.Code, ShouldEqual, http.StatusOK)
-			// 			So(logWriter.String(), ShouldContainSubstring, "[GET /rest/v1/basedirs/subdirs/user")
-			// 			So(logWriter.String(), ShouldContainSubstring, "STATUS=200")
-
-			// 			subdirs, err = decodeSubdirResult(response)
-			// 			So(err, ShouldBeNil)
-			// 			So(len(subdirs), ShouldEqual, 1)
-
-			// 			response, err = query(s, EndPointBasedirHistory,
-			// 				fmt.Sprintf("?id=%d&basedir=%s", usageGroup[0].GID, usageGroup[0].BaseDir))
-			// 			So(err, ShouldBeNil)
-			// 			So(response.Code, ShouldEqual, http.StatusOK)
-			// 			So(logWriter.String(), ShouldContainSubstring, "[GET /rest/v1/basedirs/history")
-			// 			So(logWriter.String(), ShouldContainSubstring, "STATUS=200")
-
-			// 			history, err := decodeHistoryResult(response)
-			// 			So(err, ShouldBeNil)
-			// 			So(len(history), ShouldEqual, 1)
-			// 			So(history[0].UsageInodes, ShouldEqual, 2)
-
-			// 			response, err = query(s, EndPointBasedirSubdirUser,
-			// 				fmt.Sprintf("?id=%d&basedir=%s&age=%d", usageUser[0].UID, usageUser[0].BaseDir, dirguta.DGUTAgeA3Y))
-			// 			So(err, ShouldBeNil)
-			// 			So(response.Code, ShouldEqual, http.StatusOK)
-			// 			So(logWriter.String(), ShouldContainSubstring, "[GET /rest/v1/basedirs/subdirs/user")
-			// 			So(logWriter.String(), ShouldContainSubstring, "STATUS=200")
-
-			// 			subdirs, err = decodeSubdirResult(response)
-			// 			So(err, ShouldBeNil)
-			// 			So(len(subdirs), ShouldEqual, 1)
-
-			// 			Convey("Which get updated by an auto-reload when the sentinal file changes", func() {
-			// 				parentDir := filepath.Dir(filepath.Dir(dbPath))
-			// 				sentinel := filepath.Join(parentDir, ".sentinel")
-			// 				file, err := os.Create(sentinel)
-			// 				So(err, ShouldBeNil)
-			// 				err = file.Close()
-			// 				So(err, ShouldBeNil)
-
-			// 				err = s.EnableBasedirDBReloading(sentinel, parentDir,
-			// 					filepath.Base(dbPath), sentinelPollFrequency)
-			// 				So(err, ShouldBeNil)
-
-			// 				gid, uid, _, _, err := internaluser.RealGIDAndUID()
-			// 				So(err, ShouldBeNil)
-
-			// 				_, files := internaldata.FakeFilesForDGUTADBForBasedirsTesting(gid, uid)
-			// 				tree, _, err = internaldb.CreateDGUTADBFromFakeFiles(t, files[:1])
-			// 				So(err, ShouldBeNil)
-
-			// 				pathNew, _, err := createExampleBasedirsDB(t, tree)
-			// 				So(err, ShouldBeNil)
-
-			// 				newerPath := filepath.Join(parentDir, "newer.basedir.db")
-			// 				err = os.Rename(pathNew, newerPath)
-			// 				So(err, ShouldBeNil)
-
-			// 				later := time.Now().Local().Add(1 * time.Second)
-			// 				err = os.Chtimes(newerPath, later, later)
-			// 				So(err, ShouldBeNil)
-
-			// 				response, err := query(s, EndPointBasedirUsageGroup, "")
-			// 				So(err, ShouldBeNil)
-			// 				So(response.Code, ShouldEqual, http.StatusOK)
-
-			// 				usageGroup, err := decodeUsageResult(response)
-			// 				So(err, ShouldBeNil)
-			// 				So(len(usageGroup), ShouldEqual, 102)
-
-			// 				err = os.Chtimes(sentinel, later, later)
-			// 				So(err, ShouldBeNil)
-
-			// 				waitForFileToBeDeleted(t, dbPath)
-
-			// 				_, err = os.Stat(dbPath)
-			// 				So(err, ShouldNotBeNil)
-
-			// 				response, err = query(s, EndPointBasedirUsageGroup, "")
-			// 				So(err, ShouldBeNil)
-			// 				So(response.Code, ShouldEqual, http.StatusOK)
-
-			// 				usageGroup, err = decodeUsageResult(response)
-			// 				So(err, ShouldBeNil)
-			// 				So(len(usageGroup), ShouldEqual, 17)
-			// 			})
+			// 			So(len(usageGroup), ShouldEqual, 17)
 			// 		})
 			// 	})
+			//})
 		})
 	})
 }

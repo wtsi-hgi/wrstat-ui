@@ -123,7 +123,8 @@ func TestBaseDirs(t *testing.T) {
 			twoGig  = 1 << 31
 		)
 
-		locDirs, root := internaldata.FakeFilesForDGUTADBForBasedirsTesting(gid, uid, "lustre", 1, halfGig, twoGig, true, refTime)
+		locDirs, root := internaldata.FakeFilesForDGUTADBForBasedirsTesting(gid, uid,
+			"lustre", 1, halfGig, twoGig, true, refTime)
 
 		now := fixtimes.FixTime(time.Now())
 		yesterday := fixtimes.FixTime(now.Add(-24 * time.Hour))
@@ -144,8 +145,8 @@ func TestBaseDirs(t *testing.T) {
 		basedirsCreator := func(modtime time.Time) {
 			t.Helper()
 
-			bd, err := basedirs.NewCreator(dbPath, quotas)
-			So(err, ShouldBeNil)
+			bd, errr := basedirs.NewCreator(dbPath, quotas)
+			So(errr, ShouldBeNil)
 			So(bd, ShouldNotBeNil)
 
 			bd.SetMountPoints(mps)
@@ -154,8 +155,8 @@ func TestBaseDirs(t *testing.T) {
 			s := summary.NewSummariser(stats.NewStatsParser(root.AsReader()))
 			s.AddDirectoryOperation(sbasedirs.NewBaseDirs(defaultConfig.PathShouldOutput, bd))
 
-			err = s.Summarise()
-			So(err, ShouldBeNil)
+			errr = s.Summarise()
+			So(errr, ShouldBeNil)
 		}
 
 		basedirsCreator(yesterday)
@@ -172,8 +173,8 @@ func TestBaseDirs(t *testing.T) {
 			baseDirsReader := func() *basedirs.BaseDirReader {
 				t.Helper()
 
-				bdr, err := basedirs.NewReader(dbPath, ownersPath)
-				So(err, ShouldBeNil)
+				bdr, errr := basedirs.NewReader(dbPath, ownersPath)
+				So(errr, ShouldBeNil)
 
 				bdr.SetMountPoints(mps)
 
@@ -183,7 +184,6 @@ func TestBaseDirs(t *testing.T) {
 			bdr := baseDirsReader()
 
 			Convey("and then read the database", func() {
-
 				bdr.SetCachedGroup(1, "group1")
 				bdr.SetCachedGroup(2, "group2")
 				bdr.SetCachedUser(101, "user101")
@@ -193,7 +193,7 @@ func TestBaseDirs(t *testing.T) {
 				expectedMtimeA := fixtimes.FixTime(time.Unix(100, 0))
 
 				Convey("getting group and user usage info", func() {
-					mainTable, err := bdr.GroupUsage(db.DGUTAgeAll)
+					mainTable, errr := bdr.GroupUsage(db.DGUTAgeAll)
 					fixUsageTimes(mainTable)
 
 					expectedUsageTable := []*basedirs.Usage{
@@ -219,7 +219,7 @@ func TestBaseDirs(t *testing.T) {
 							UsageSize: 100, QuotaSize: 300, UsageInodes: 2, QuotaInodes: 30, Mtime: expectedFixedAgeMtime,
 						},
 						{
-							Name: groupName, GID: uint32(gid), UIDs: []uint32{uint32(uid)}, BaseDir: projectD,
+							Name: groupName, GID: gid, UIDs: []uint32{uid}, BaseDir: projectD,
 							UsageSize: 15, QuotaSize: 0, UsageInodes: 5, QuotaInodes: 0, Mtime: expectedMtime,
 							DateNoSpace: yesterday, DateNoFiles: yesterday,
 						},
@@ -231,11 +231,11 @@ func TestBaseDirs(t *testing.T) {
 
 					sortByDatabaseKeyOrder(expectedUsageTable)
 
-					So(err, ShouldBeNil)
+					So(errr, ShouldBeNil)
 					So(len(mainTable), ShouldEqual, 7)
 					So(mainTable, ShouldResemble, expectedUsageTable)
 
-					mainTable, err = bdr.GroupUsage(db.DGUTAgeA3Y)
+					mainTable, errr = bdr.GroupUsage(db.DGUTAgeA3Y)
 					fixUsageTimes(mainTable)
 
 					expectedUsageTable = []*basedirs.Usage{
@@ -265,7 +265,7 @@ func TestBaseDirs(t *testing.T) {
 							Age: db.DGUTAgeA3Y,
 						},
 						{
-							Name: groupName, GID: uint32(gid), UIDs: []uint32{uint32(uid)}, BaseDir: projectD,
+							Name: groupName, GID: gid, UIDs: []uint32{uid}, BaseDir: projectD,
 							UsageSize: 15, QuotaSize: 0, UsageInodes: 5, QuotaInodes: 0, Mtime: expectedMtime,
 							Age: db.DGUTAgeA3Y,
 						},
@@ -277,11 +277,11 @@ func TestBaseDirs(t *testing.T) {
 					}
 					sortByDatabaseKeyOrder(expectedUsageTable)
 
-					So(err, ShouldBeNil)
+					So(errr, ShouldBeNil)
 					So(len(mainTable), ShouldEqual, 7)
 					So(mainTable, ShouldResemble, expectedUsageTable)
 
-					mainTable, err = bdr.GroupUsage(db.DGUTAgeA7Y)
+					mainTable, errr = bdr.GroupUsage(db.DGUTAgeA7Y)
 					fixUsageTimes(mainTable)
 
 					expectedUsageTable = []*basedirs.Usage{
@@ -318,11 +318,11 @@ func TestBaseDirs(t *testing.T) {
 					}
 					sortByDatabaseKeyOrder(expectedUsageTable)
 
-					So(err, ShouldBeNil)
+					So(errr, ShouldBeNil)
 					So(len(mainTable), ShouldEqual, 6)
 					So(mainTable, ShouldResemble, expectedUsageTable)
 
-					mainTable, err = bdr.UserUsage(db.DGUTAgeAll)
+					mainTable, errr = bdr.UserUsage(db.DGUTAgeAll)
 					fixUsageTimes(mainTable)
 
 					expectedMainTable := []*basedirs.Usage{
@@ -347,7 +347,7 @@ func TestBaseDirs(t *testing.T) {
 							UsageInodes: 1, Mtime: expectedMtime,
 						},
 						{
-							Name: username, UID: uint32(uid), GIDs: []uint32{uint32(gid)}, BaseDir: projectD,
+							Name: username, UID: uid, GIDs: []uint32{gid}, BaseDir: projectD,
 							UsageSize: 15, UsageInodes: 5, Mtime: expectedMtime,
 						},
 						{
@@ -358,7 +358,7 @@ func TestBaseDirs(t *testing.T) {
 
 					sortByDatabaseKeyOrder(expectedMainTable)
 
-					So(err, ShouldBeNil)
+					So(errr, ShouldBeNil)
 					So(len(mainTable), ShouldEqual, 7)
 					So(mainTable, ShouldResemble, expectedMainTable)
 				})
@@ -372,24 +372,24 @@ func TestBaseDirs(t *testing.T) {
 						QuotaInodes: 20,
 					}
 
-					history, err := bdr.History(1, projectA)
+					history, errr := bdr.History(1, projectA)
 					fixHistoryTimes(history)
 
-					So(err, ShouldBeNil)
+					So(errr, ShouldBeNil)
 					So(len(history), ShouldEqual, 1)
 					So(history, ShouldResemble, []basedirs.History{expectedAHistory})
 
-					history, err = bdr.History(1, filepath.Join(projectA, "newsub"))
+					history, errr = bdr.History(1, filepath.Join(projectA, "newsub"))
 					fixHistoryTimes(history)
 
-					So(err, ShouldBeNil)
+					So(errr, ShouldBeNil)
 					So(len(history), ShouldEqual, 1)
 					So(history, ShouldResemble, []basedirs.History{expectedAHistory})
 
-					history, err = bdr.History(2, projectB125)
+					history, errr = bdr.History(2, projectB125)
 					fixHistoryTimes(history)
 
-					So(err, ShouldBeNil)
+					So(errr, ShouldBeNil)
 					So(len(history), ShouldEqual, 1)
 					So(history, ShouldResemble, []basedirs.History{
 						{
@@ -453,7 +453,8 @@ func TestBaseDirs(t *testing.T) {
 					})
 
 					Convey("Then you can add and retrieve a new day's usage and quota", func() {
-						_, root = internaldata.FakeFilesForDGUTADBForBasedirsTesting(gid, uid, "lustre", 2, halfGig, twoGig, false, refTime)
+						_, root = internaldata.FakeFilesForDGUTADBForBasedirsTesting(gid, uid,
+							"lustre", 2, halfGig, twoGig, false, refTime)
 
 						const fiveGig = 5 * (1 << 30)
 
@@ -480,8 +481,8 @@ func TestBaseDirs(t *testing.T) {
 						bdr.SetCachedUser(101, "user101")
 						bdr.SetCachedUser(102, "user102")
 
-						mainTable, err := bdr.GroupUsage(db.DGUTAgeAll)
-						So(err, ShouldBeNil)
+						mainTable, errr := bdr.GroupUsage(db.DGUTAgeAll)
+						So(errr, ShouldBeNil)
 						fixUsageTimes(mainTable)
 
 						leeway := 5 * time.Minute
@@ -524,7 +525,7 @@ func TestBaseDirs(t *testing.T) {
 								QuotaInodes: 30, Mtime: expectedFixedAgeMtime,
 							},
 							{
-								Name: groupName, GID: uint32(gid), UIDs: []uint32{uint32(uid)}, BaseDir: projectD,
+								Name: groupName, GID: gid, UIDs: []uint32{uid}, BaseDir: projectD,
 								UsageSize: 10, QuotaSize: 0, UsageInodes: 4, QuotaInodes: 0, Mtime: expectedMtime,
 								DateNoSpace: now, DateNoFiles: now,
 							},
@@ -552,10 +553,10 @@ func TestBaseDirs(t *testing.T) {
 						So(len(mainTable), ShouldEqual, 7)
 						So(mainTable, ShouldResemble, mainTableExpectation)
 
-						history, err := bdr.History(1, projectA)
+						history, errr := bdr.History(1, projectA)
 						fixHistoryTimes(history)
 
-						So(err, ShouldBeNil)
+						So(errr, ShouldBeNil)
 						So(len(history), ShouldEqual, 2)
 						So(history, ShouldResemble, []basedirs.History{
 							expectedAHistory,
@@ -603,22 +604,22 @@ func TestBaseDirs(t *testing.T) {
 				}
 
 				Convey("getting subdir information for a group-basedir", func() {
-					unknownProject, err := bdr.GroupSubDirs(1, "unknown", db.DGUTAgeAll)
-					So(err, ShouldBeNil)
+					unknownProject, errr := bdr.GroupSubDirs(1, "unknown", db.DGUTAgeAll)
+					So(errr, ShouldBeNil)
 					So(unknownProject, ShouldBeNil)
 
-					unknownGroup, err := bdr.GroupSubDirs(10, projectA, db.DGUTAgeAll)
-					So(err, ShouldBeNil)
+					unknownGroup, errr := bdr.GroupSubDirs(10, projectA, db.DGUTAgeAll)
+					So(errr, ShouldBeNil)
 					So(unknownGroup, ShouldBeNil)
 
-					subdirsA1, err := bdr.GroupSubDirs(1, projectA, db.DGUTAgeAll)
-					So(err, ShouldBeNil)
+					subdirsA1, errr := bdr.GroupSubDirs(1, projectA, db.DGUTAgeAll)
+					So(errr, ShouldBeNil)
 
 					fixSubDirTimes(subdirsA1)
 					So(subdirsA1, ShouldResemble, expectedProjectASubDirs)
 
-					subdirsA3, err := bdr.GroupSubDirs(3, projectA, db.DGUTAgeAll)
-					So(err, ShouldBeNil)
+					subdirsA3, errr := bdr.GroupSubDirs(3, projectA, db.DGUTAgeAll)
+					So(errr, ShouldBeNil)
 
 					fixSubDirTimes(subdirsA3)
 					So(subdirsA3, ShouldResemble, []*basedirs.SubDir{
@@ -633,8 +634,8 @@ func TestBaseDirs(t *testing.T) {
 						},
 					})
 
-					subdirsA3, err = bdr.GroupSubDirs(3, projectA, db.DGUTAgeA3Y)
-					So(err, ShouldBeNil)
+					subdirsA3, errr = bdr.GroupSubDirs(3, projectA, db.DGUTAgeA3Y)
+					So(errr, ShouldBeNil)
 
 					fixSubDirTimes(subdirsA3)
 					So(subdirsA3, ShouldResemble, []*basedirs.SubDir{
@@ -651,22 +652,22 @@ func TestBaseDirs(t *testing.T) {
 				})
 
 				Convey("getting subdir information for a user-basedir", func() {
-					unknownProject, err := bdr.UserSubDirs(101, "unknown", db.DGUTAgeAll)
-					So(err, ShouldBeNil)
+					unknownProject, errr := bdr.UserSubDirs(101, "unknown", db.DGUTAgeAll)
+					So(errr, ShouldBeNil)
 					So(unknownProject, ShouldBeNil)
 
-					unknownGroup, err := bdr.UserSubDirs(999, projectA, db.DGUTAgeAll)
-					So(err, ShouldBeNil)
+					unknownGroup, errr := bdr.UserSubDirs(999, projectA, db.DGUTAgeAll)
+					So(errr, ShouldBeNil)
 					So(unknownGroup, ShouldBeNil)
 
-					subdirsA1, err := bdr.UserSubDirs(101, projectA, db.DGUTAgeAll)
-					So(err, ShouldBeNil)
+					subdirsA1, errr := bdr.UserSubDirs(101, projectA, db.DGUTAgeAll)
+					So(errr, ShouldBeNil)
 
 					fixSubDirTimes(subdirsA1)
 					So(subdirsA1, ShouldResemble, expectedProjectASubDirs)
 
-					subdirsB125, err := bdr.UserSubDirs(102, projectB125, db.DGUTAgeAll)
-					So(err, ShouldBeNil)
+					subdirsB125, errr := bdr.UserSubDirs(102, projectB125, db.DGUTAgeAll)
+					So(errr, ShouldBeNil)
 
 					fixSubDirTimes(subdirsB125)
 					So(subdirsB125, ShouldResemble, []*basedirs.SubDir{
@@ -681,8 +682,8 @@ func TestBaseDirs(t *testing.T) {
 						},
 					})
 
-					subdirsB123, err := bdr.UserSubDirs(102, projectB123, db.DGUTAgeAll)
-					So(err, ShouldBeNil)
+					subdirsB123, errr := bdr.UserSubDirs(102, projectB123, db.DGUTAgeAll)
+					So(errr, ShouldBeNil)
 
 					fixSubDirTimes(subdirsB123)
 					So(subdirsB123, ShouldResemble, []*basedirs.SubDir{
@@ -697,8 +698,8 @@ func TestBaseDirs(t *testing.T) {
 						},
 					})
 
-					subdirsD, err := bdr.UserSubDirs(uint32(uid), projectD, db.DGUTAgeAll)
-					So(err, ShouldBeNil)
+					subdirsD, errr := bdr.UserSubDirs(uid, projectD, db.DGUTAgeAll)
+					So(errr, ShouldBeNil)
 
 					fixSubDirTimes(subdirsD)
 					So(subdirsD, ShouldResemble, []*basedirs.SubDir{
@@ -725,8 +726,8 @@ func TestBaseDirs(t *testing.T) {
 						},
 					})
 
-					subdirsA3, err := bdr.UserSubDirs(103, projectA, db.DGUTAgeAll)
-					So(err, ShouldBeNil)
+					subdirsA3, errr := bdr.UserSubDirs(103, projectA, db.DGUTAgeAll)
+					So(errr, ShouldBeNil)
 
 					fixSubDirTimes(subdirsA3)
 					So(subdirsA3, ShouldResemble, []*basedirs.SubDir{
@@ -741,8 +742,8 @@ func TestBaseDirs(t *testing.T) {
 						},
 					})
 
-					subdirsA3, err = bdr.UserSubDirs(103, projectA, db.DGUTAgeA3Y)
-					So(err, ShouldBeNil)
+					subdirsA3, errr = bdr.UserSubDirs(103, projectA, db.DGUTAgeA3Y)
+					So(errr, ShouldBeNil)
 
 					fixSubDirTimes(subdirsA3)
 					So(subdirsA3, ShouldResemble, []*basedirs.SubDir{
@@ -767,7 +768,7 @@ func TestBaseDirs(t *testing.T) {
 				}
 
 				daysSince := func(mtime time.Time) uint64 {
-					return uint64(time.Since(mtime) / (time.Hour * 24))
+					return uint64(time.Since(mtime) / (time.Hour * 24)) //nolint:gosec
 				}
 
 				daysSinceString := func(mtime time.Time) string {
@@ -778,8 +779,8 @@ func TestBaseDirs(t *testing.T) {
 				expectedAgeDaysSince := daysSinceString(expectedFixedAgeMtime)
 
 				Convey("getting weaver-like output for group base-dirs", func() {
-					wbo, err := bdr.GroupUsageTable(db.DGUTAgeAll)
-					So(err, ShouldBeNil)
+					wbo, errr := bdr.GroupUsageTable(db.DGUTAgeAll)
+					So(errr, ShouldBeNil)
 
 					groupsToID := make(map[string]uint32)
 
@@ -884,8 +885,8 @@ func TestBaseDirs(t *testing.T) {
 				})
 
 				Convey("getting weaver-like output for user base-dirs", func() {
-					wbo, err := bdr.UserUsageTable(db.DGUTAgeAll)
-					So(err, ShouldBeNil)
+					wbo, errr := bdr.UserUsageTable(db.DGUTAgeAll)
+					So(errr, ShouldBeNil)
 
 					groupsToID := make(map[string]uint32)
 
@@ -1009,30 +1010,30 @@ func TestBaseDirs(t *testing.T) {
 				)
 
 				Convey("getting weaver-like output for group sub-dirs", func() {
-					unknown, err := bdr.GroupSubDirUsageTable(1, "unknown", db.DGUTAgeAll)
-					So(err, ShouldBeNil)
+					unknown, errr := bdr.GroupSubDirUsageTable(1, "unknown", db.DGUTAgeAll)
+					So(errr, ShouldBeNil)
 					So(unknown, ShouldBeEmpty)
 
-					badgroup, err := bdr.GroupSubDirUsageTable(999, projectA, db.DGUTAgeAll)
-					So(err, ShouldBeNil)
+					badgroup, errr := bdr.GroupSubDirUsageTable(999, projectA, db.DGUTAgeAll)
+					So(errr, ShouldBeNil)
 					So(badgroup, ShouldBeEmpty)
 
-					wso, err := bdr.GroupSubDirUsageTable(1, projectA, db.DGUTAgeAll)
-					So(err, ShouldBeNil)
+					wso, errr := bdr.GroupSubDirUsageTable(1, projectA, db.DGUTAgeAll)
+					So(errr, ShouldBeNil)
 					So(wso, ShouldEqual, expectedProjectASubDirUsage)
 				})
 
 				Convey("getting weaver-like output for user sub-dirs", func() {
-					unknown, err := bdr.UserSubDirUsageTable(1, "unknown", db.DGUTAgeAll)
-					So(err, ShouldBeNil)
+					unknown, errr := bdr.UserSubDirUsageTable(1, "unknown", db.DGUTAgeAll)
+					So(errr, ShouldBeNil)
 					So(unknown, ShouldBeEmpty)
 
-					badgroup, err := bdr.UserSubDirUsageTable(999, projectA, db.DGUTAgeAll)
-					So(err, ShouldBeNil)
+					badgroup, errr := bdr.UserSubDirUsageTable(999, projectA, db.DGUTAgeAll)
+					So(errr, ShouldBeNil)
 					So(badgroup, ShouldBeEmpty)
 
-					wso, err := bdr.UserSubDirUsageTable(101, projectA, db.DGUTAgeAll)
-					So(err, ShouldBeNil)
+					wso, errr := bdr.UserSubDirUsageTable(101, projectA, db.DGUTAgeAll)
+					So(errr, ShouldBeNil)
 					So(wso, ShouldEqual, expectedProjectASubDirUsage)
 				})
 			})
@@ -1063,6 +1064,7 @@ func TestBaseDirs(t *testing.T) {
 				db, err := basedirs.OpenDBRO(outputDBPath)
 
 				So(err, ShouldBeNil)
+
 				defer db.Close()
 
 				countKeys := func(bucket string) (int, int) {
@@ -1075,9 +1077,11 @@ func TestBaseDirs(t *testing.T) {
 							if !basedirs.CheckAgeOfKeyIsAll(k) {
 								return nil
 							}
+
 							if strings.Contains(string(k), "/lustre/") {
 								lustreKeys++
 							}
+
 							if strings.Contains(string(k), "/nfs/") {
 								nfsKeys++
 							}

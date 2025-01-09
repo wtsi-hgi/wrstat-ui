@@ -274,13 +274,6 @@ func (s *Summariser) changeToAscendantDirectoryOfEntry(directories directories,
 	return directories, currentDir, nil
 }
 
-func parentDir(path []byte) []byte {
-	path = path[:len(path)-1]
-	nextSlash := bytes.LastIndex(path, slash)
-
-	return path[:nextSlash+1]
-}
-
 func (s *Summariser) changeToDirectoryOfEntry(directories directories, currentDir *DirectoryPath,
 	info *stats.FileInfo) (directories, *DirectoryPath) {
 	if cap(directories) > len(directories) {
