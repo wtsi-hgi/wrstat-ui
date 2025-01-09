@@ -384,7 +384,7 @@ func (d *DB) storeChildren(txn *bolt.Tx) error {
 		parent := string(r.Dir.AppendTo(nil))
 
 		for n := range r.Children {
-			r.Children[n] = parent + r.Children[n]
+			r.Children[n] = parent + strings.TrimSuffix(r.Children[n], "/")
 		}
 
 		if err := b.Put(r.pathBytes(), d.encodeChildren(r.Children)); err != nil {
