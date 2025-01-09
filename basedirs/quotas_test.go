@@ -87,3 +87,18 @@ func TestQuotas(t *testing.T) {
 		So(err, ShouldNotBeNil)
 	})
 }
+
+func TestOwners(t *testing.T) {
+	Convey("Given an owners tsv you can parse it", t, func() {
+		ownersPath, err := internaldata.CreateOwnersCSV(t, internaldata.ExampleOwnersCSV)
+		So(err, ShouldBeNil)
+
+		owners, err := parseOwners(ownersPath)
+		So(err, ShouldBeNil)
+		So(owners, ShouldResemble, map[uint32]string{
+			1: "Alan",
+			2: "Barbara",
+			4: "Dellilah",
+		})
+	})
+}
