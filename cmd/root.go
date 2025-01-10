@@ -32,7 +32,6 @@ import (
 	"bytes"
 	"fmt"
 	"os"
-	"time"
 
 	"github.com/inconshreveable/log15"
 	"github.com/spf13/cobra"
@@ -40,8 +39,6 @@ import (
 
 // appLogger is used for logging events in our commands.
 var appLogger = log15.New()
-
-const connectTimeout = 10 * time.Second
 
 // RootCmd represents the base command when called without any subcommands.
 var RootCmd = &cobra.Command{
@@ -59,7 +56,7 @@ The 'server' subcommand can be used to start the web server.`,
 // the rootCmd.
 func Execute() {
 	if err := RootCmd.Execute(); err != nil {
-		die(err.Error())
+		die("%s", err.Error())
 	}
 }
 

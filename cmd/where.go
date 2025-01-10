@@ -171,12 +171,12 @@ with refreshes possible up to 5 days after expiry.
 
 		c, err := gas.NewClientCLI(jwtBasename, serverTokenBasename, url, whereCert, true)
 		if err != nil {
-			die(err.Error())
+			die("%s", err.Error())
 		}
 
 		if whereShowSupergroups {
 			if errs := showSupergroups(c); err != nil {
-				die(errs.Error())
+				die("%s", errs.Error())
 			}
 
 			return
@@ -207,7 +207,7 @@ with refreshes possible up to 5 days after expiry.
 		err = where(c, whereQueryDir, whereGroups, whereSupergroup, whereUsers, whereTypes, age,
 			fmt.Sprintf("%d", whereSplits), whereOrder, minSizeBytes, minAtime, whereJSON)
 		if err != nil {
-			die(err.Error())
+			die("%s", err.Error())
 		}
 	},
 }
@@ -279,7 +279,7 @@ func showSupergroups(c *gas.ClientCLI) error {
 		return err
 	}
 
-	cliPrint(string(m))
+	cliPrint("%s", string(m))
 
 	return nil
 }
@@ -352,7 +352,7 @@ func where(c *gas.ClientCLI, dir, groups, supergroup, users, types string, age d
 	}
 
 	if json {
-		cliPrint(string(body))
+		cliPrint("%s", string(body))
 
 		return nil
 	}
