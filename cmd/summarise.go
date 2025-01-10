@@ -26,7 +26,6 @@
 package cmd
 
 import (
-	"compress/gzip"
 	"errors"
 	"fmt"
 	"io"
@@ -34,6 +33,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/klauspost/pgzip"
 	"github.com/spf13/cobra"
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
 	"github.com/wtsi-hgi/wrstat-ui/db"
@@ -122,7 +122,7 @@ func openStatsFile(statsFile string) (io.Reader, error) {
 	var r io.Reader = f
 
 	if strings.HasSuffix(statsFile, ".gz") {
-		if r, err = gzip.NewReader(f); err != nil {
+		if r, err = pgzip.NewReader(f); err != nil {
 			return nil, fmt.Errorf("failed to decompress stats file: %w", err)
 		}
 	}
