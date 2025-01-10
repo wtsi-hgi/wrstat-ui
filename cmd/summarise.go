@@ -244,5 +244,5 @@ func init() {
 
 	summariseCmd.Flags().StringVarP(&quotaPath, "quota", "q", "", "csv of gid,disk,size_quota,inode_quota")
 	summariseCmd.Flags().StringVarP(&ownersPath, "owners", "o", "", "gid,owner csv file")
-	summariseCmd.Flags().StringVarP(&basedirsConfig, "config", "b", "", "path to basedirs config file")
+	summariseCmd.Flags().StringVarP(&basedirsConfig, "config", "c", "", "path to basedirs config file")
 }
