@@ -228,6 +228,10 @@ func addBasedirsSummariser(s *summary.Summariser, basedirsDB, quotaPath, basedir
 func addDirgutaSummariser(s *summary.Summariser, dirgutaDB string) (func() error, error) {
 	db := db.NewDB(dirgutaDB)
 
+	if err := db.CreateDB(); err != nil {
+		return nil, err
+	}
+
 	s.AddDirectoryOperation(dirguta.NewDirGroupUserTypeAge(db))
 
 	return db.Close, nil
