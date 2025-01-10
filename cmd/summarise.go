@@ -75,7 +75,7 @@ func run(args []string) (err error) {
 		return err
 	}
 
-	r, err := openStatsFile(args[1])
+	r, err := openStatsFile(args[0])
 	if err != nil {
 		return err
 	}
