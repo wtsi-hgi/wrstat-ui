@@ -110,6 +110,10 @@ func checkArgs(args []string) error {
 }
 
 func openStatsFile(statsFile string) (io.Reader, error) {
+	if statsFile == "-" {
+		return os.Stdin, nil
+	}
+
 	f, err := os.Open(statsFile)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open stats file: %w", err)
