@@ -12,7 +12,7 @@ func SplitsToSplitFn(splits int) SplitFn {
 	}
 }
 
-func SplitPath(path string) []string {
+func SplitPath(path string) []string { //nolint:revive
 	path = strings.TrimPrefix(path, "/")
 	parts := make([]string, 0, strings.Count(path, "/"))
 

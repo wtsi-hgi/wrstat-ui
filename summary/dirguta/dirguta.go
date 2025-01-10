@@ -118,45 +118,6 @@ func (store gutaStore) sort() GUTAKeys {
 	return keys
 }
 
-// dirToGUTAStore is a sortable map of directory to gutaStore.
-type dirToGUTAStore struct {
-	gsMap   map[string]gutaStore
-	refTime int64
-}
-
-// getGUTAStore auto-vivifies a gutaStore for the given dir and returns it.
-func (store dirToGUTAStore) getGUTAStore(dir string) gutaStore {
-	gStore, ok := store.gsMap[dir]
-	if !ok {
-		gStore = gutaStore{make(map[GUTAKey]*summary.SummaryWithTimes), store.refTime}
-		store.gsMap[dir] = gStore
-	}
-
-	return gStore
-}
-
-// sort returns a slice of our gutaStore values, sorted by our directory keys
-// which are also returned.
-func (store dirToGUTAStore) sort() ([]string, []gutaStore) {
-	keys := make([]string, len(store.gsMap))
-	i := 0
-
-	for k := range store.gsMap {
-		keys[i] = k
-		i++
-	}
-
-	sort.Strings(keys)
-
-	s := make([]gutaStore, len(keys))
-
-	for i, k := range keys {
-		s[i] = store.gsMap[k]
-	}
-
-	return keys, s
-}
-
 // isTemp tells you if path is named like a temporary file.
 func isTempFile(name string) bool {
 	if hasOneOfSuffixes(name, tmpSuffixes[:]) {
@@ -176,10 +137,9 @@ func isTempFile(name string) bool {
 	return false
 }
 
-func isTempDir(path *summary.DirectoryPath) bool {
+func isTempDir(path *summary.DirectoryPath) bool { //nolint:gocognit,gocyclo
 	for path != nil {
 		name := path.Name
-
 		if name[len(name)-1] == '/' {
 			name = name[:len(name)-1]
 		}
@@ -189,11 +149,7 @@ func isTempDir(path *summary.DirectoryPath) bool {
 		}
 
 		for _, containing := range tmpPaths {
-			if len(name) != len(containing) {
-				continue
-			}
-
-			if caseInsensitiveCompare(name, containing) {
+			if len(name) == len(containing) && caseInsensitiveCompare(name, containing) {
 				return true
 			}
 		}
@@ -466,17 +422,6 @@ func (g GUTAKeys) Swap(i, j int) {
 	g[i], g[j] = g[j], g[i]
 }
 
-func gutaKeyFromString(key string) GUTAKey {
-	dgutaBytes := unsafe.Slice(unsafe.StringData(key), len(key))
-
-	return GUTAKey{
-		GID:      binary.BigEndian.Uint32(dgutaBytes[:4]),
-		UID:      binary.BigEndian.Uint32(dgutaBytes[4:8]),
-		FileType: db.DirGUTAFileType(dgutaBytes[8]),
-		Age:      db.DirGUTAge(dgutaBytes[9]),
-	}
-}
-
 func (g GUTAKey) String() string {
 	var a [lengthOfGUTAKey]byte
 
@@ -589,11 +534,7 @@ type DirGUTA struct {
 // Returns an error on failure to write.
 func (d *DirGroupUserTypeAge) Output() error {
 	dgutas := d.store.sort()
-
-	dguta := db.RecordDGUTA{
-		Dir:      d.thisDir,
-		Children: d.children,
-	}
+	dguta := db.RecordDGUTA{Dir: d.thisDir, Children: d.children}
 
 	for _, guta := range dgutas {
 		s := d.store.sumMap[guta]
@@ -603,8 +544,8 @@ func (d *DirGroupUserTypeAge) Output() error {
 			UID:   guta.UID,
 			FT:    guta.FileType,
 			Age:   guta.Age,
-			Count: uint64(s.Count),
-			Size:  uint64(s.Size),
+			Count: uint64(s.Count), //nolint:gosec
+			Size:  uint64(s.Size),  //nolint:gosec
 			Atime: s.Atime,
 			Mtime: s.Mtime,
 		})

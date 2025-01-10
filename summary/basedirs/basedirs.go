@@ -95,16 +95,16 @@ func (b *baseDirs) Set(i db.DirGUTAge, fi *summary.FileInfo, parent *summary.Dir
 	}
 
 	b[i].Children[0].NumFiles++
-	b[i].Children[0].SizeFiles += uint64(fi.Size)
+	b[i].Children[0].SizeFiles += uint64(fi.Size) //nolint:gosec
 
 	setTimes(&b[i].SummaryWithChildren, time.Unix(fi.ATime, 0), time.Unix(fi.MTime, 0))
 
 	t, tmp := dirguta.InfoToType(fi)
 
-	b[i].Children[0].FileUsage[t] += uint64(fi.Size)
+	b[i].Children[0].FileUsage[t] += uint64(fi.Size) //nolint:gosec
 
 	if tmp {
-		b[i].Children[0].FileUsage[db.DGUTAFileTypeTemp] += uint64(fi.Size)
+		b[i].Children[0].FileUsage[db.DGUTAFileTypeTemp] += uint64(fi.Size) //nolint:gosec
 	}
 
 	b[i].GIDs = addToSlice(b[i].GIDs, fi.GID)
@@ -132,7 +132,7 @@ func (b baseDirsMap) Get(id uint32) *baseDirs {
 	return bd
 }
 
-func (b baseDirsMap) Add(fn func(uint32, basedirs.SummaryWithChildren, db.DirGUTAge)) {
+func (b baseDirsMap) Add(fn func(uint32, basedirs.SummaryWithChildren, db.DirGUTAge)) { //nolint:gocognit
 	for id, bd := range b {
 		for age, ds := range bd {
 			if ds != nil {
@@ -157,7 +157,7 @@ func (b baseDirsMap) Add(fn func(uint32, basedirs.SummaryWithChildren, db.DirGUT
 	}
 }
 
-func (b baseDirsMap) mergeTo(pbm baseDirsMap, parent *summary.DirectoryPath) {
+func (b baseDirsMap) mergeTo(pbm baseDirsMap, parent *summary.DirectoryPath) { //nolint:gocognit
 	for id, bm := range b {
 		pm, ok := pbm[id]
 		if !ok {
@@ -169,7 +169,7 @@ func (b baseDirsMap) mergeTo(pbm baseDirsMap, parent *summary.DirectoryPath) {
 		}
 
 		for n, p := range bm {
-			if p == nil {
+			if p == nil { //nolint:gocritic,nestif
 				continue
 			} else if pm[n] == nil {
 				pm[n] = p
@@ -177,7 +177,7 @@ func (b baseDirsMap) mergeTo(pbm baseDirsMap, parent *summary.DirectoryPath) {
 				pm[n].Merge(p)
 			} else {
 				old := pm[n]
-				pm[n] = newDirSummary(parent, db.DirGUTAge(n))
+				pm[n] = newDirSummary(parent, db.DirGUTAge(n)) //nolint:gosec
 				pm[n].Merge(old)
 				pm[n].Merge(p)
 			}
@@ -200,7 +200,7 @@ type RootBaseDirs struct {
 	users, groups basedirs.IDAgeDirs
 }
 
-func NewBaseDirs(output outputForDir, db DB) summary.OperationGenerator {
+func NewBaseDirs(output outputForDir, db DB) summary.OperationGenerator { //nolint:funlen
 	root := &RootBaseDirs{
 		BaseDirs: BaseDirs{
 			output: output,
@@ -302,7 +302,7 @@ func (r *RootBaseDirs) Output() error {
 	return r.db.Output(r.users, r.groups)
 }
 
-func removeChildDirFilesFromDot(idag basedirs.IDAgeDirs) {
+func removeChildDirFilesFromDot(idag basedirs.IDAgeDirs) { //nolint:gocognit,gocyclo
 	for _, ad := range idag {
 		for _, c := range ad {
 			for n := range c {
@@ -320,7 +320,7 @@ func removeChildDirFilesFromDot(idag basedirs.IDAgeDirs) {
 					}
 				}
 
-				if dot.NumFiles == 0 {
+				if dot.NumFiles == 0 { //nolint:nestif
 					swc.Children = swc.Children[1:]
 				} else {
 					for typ, count := range dot.FileUsage {

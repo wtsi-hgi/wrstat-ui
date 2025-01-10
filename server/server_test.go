@@ -1714,7 +1714,7 @@ func createExampleBasedirsDB(t *testing.T, files *statsdata.Directory) (string, 
 	s.AddDirectoryOperation(sbasedirs.NewBaseDirs(config.PathShouldOutput, bd))
 
 	d := db.NewDB(dir)
-	if err := d.CreateDB(); err != nil {
+	if err = d.CreateDB(); err != nil {
 		return "", "", "", err
 	}
 

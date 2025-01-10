@@ -230,24 +230,24 @@ func TestHistory(t *testing.T) {
 			Histories: []History{
 				{
 					Date:        time.Now().Add(-(time.Duration(changeDays * 24)) * time.Hour),
-					UsageSize:   uint64(quotaUsageStart),
-					QuotaSize:   uint64(quotaMax),
-					UsageInodes: uint64(quotaUsageStart),
-					QuotaInodes: uint64(quotaMax),
+					UsageSize:   uint64(quotaUsageStart), //nolint:gosec
+					QuotaSize:   uint64(quotaMax),        //nolint:gosec
+					UsageInodes: uint64(quotaUsageStart), //nolint:gosec
+					QuotaInodes: uint64(quotaMax),        //nolint:gosec
 				},
 				{
 					Date:        time.Now().Add(-24 * time.Hour),
-					UsageSize:   uint64(quotaUsageStart),
-					QuotaSize:   uint64(quotaMax),
-					UsageInodes: uint64(quotaUsageStart),
-					QuotaInodes: uint64(quotaMax),
+					UsageSize:   uint64(quotaUsageStart), //nolint:gosec
+					QuotaSize:   uint64(quotaMax),        //nolint:gosec
+					UsageInodes: uint64(quotaUsageStart), //nolint:gosec
+					QuotaInodes: uint64(quotaMax),        //nolint:gosec
 				},
 				{
 					Date:        time.Now(),
 					UsageSize:   uint64(usageFor6Years),
-					QuotaSize:   uint64(quotaMax),
+					QuotaSize:   uint64(quotaMax), //nolint:gosec
 					UsageInodes: uint64(usageFor4Years),
-					QuotaInodes: uint64(quotaMax),
+					QuotaInodes: uint64(quotaMax), //nolint:gosec
 				},
 			},
 			UntilSize:   time.Time{},

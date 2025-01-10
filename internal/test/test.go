@@ -107,7 +107,7 @@ func NewMockInfoWithTimes(path *summary.DirectoryPath, uid, gid uint32,
 	return mi
 }
 
-func CheckDataIsSorted(data string, textCols int) bool {
+func CheckDataIsSorted(data string, textCols int) bool { //nolint:gocognit
 	lines := strings.Split(strings.TrimSuffix(data, "\n"), "\n")
 	splitLines := make([][]string, len(lines))
 

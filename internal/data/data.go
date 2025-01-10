@@ -103,7 +103,8 @@ func CreateDefaultTestData(gidA, gidB, gidC, uidA, uidB uint32, refTime int64) *
 	return dir
 }
 
-func FakeFilesForDGUTADBForBasedirsTesting(gid, uid uint32, prefix string, numFirstFiles int, firstFileSize, secondFileSize int64, last bool, refTime int64) ([]string, *statsdata.Directory) {
+func FakeFilesForDGUTADBForBasedirsTesting(gid, uid uint32, prefix string, numFirstFiles int,
+	firstFileSize, secondFileSize int64, last bool, refTime int64) ([]string, *statsdata.Directory) {
 	dir := statsdata.NewRoot("/", 0)
 	dir.ATime = 50
 	projectA := filepath.Join("/", prefix, "scratch125", "humgen", "projects", "A")

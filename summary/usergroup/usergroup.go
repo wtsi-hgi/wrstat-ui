@@ -33,11 +33,6 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/summary"
 )
 
-type dirSummary struct {
-	*summary.DirectoryPath
-	*summary.Summary
-}
-
 type rootUserGroup struct {
 	w              io.WriteCloser
 	store          userGroupDirectories
@@ -55,18 +50,6 @@ func (r *rootUserGroup) addToStore(u *userGroup) {
 			Summary:   s,
 		})
 	}
-}
-
-type directorySummaryStore map[*summary.DirectoryPath]*summary.Summary
-
-func (d directorySummaryStore) Get(p *summary.DirectoryPath) *summary.Summary {
-	s, ok := d[p]
-	if !ok {
-		s = new(summary.Summary)
-		d[p] = s
-	}
-
-	return s
 }
 
 // userGroup is used to summarise file stats by user and group.

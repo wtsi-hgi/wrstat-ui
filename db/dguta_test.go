@@ -41,7 +41,6 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/stats"
 	"github.com/wtsi-hgi/wrstat-ui/summary"
 	"github.com/wtsi-hgi/wrstat-ui/summary/dirguta"
-
 	bolt "go.etcd.io/bbolt"
 )
 

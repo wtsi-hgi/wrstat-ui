@@ -40,7 +40,7 @@ func (c *ConfigAttrs) Match(path *summary.DirectoryPath) bool {
 		return false
 	}
 
-	for n := len(c.Prefix) - 2; n >= 0; n-- {
+	for n := len(c.Prefix) - 2; n >= 0; n-- { //nolint:mnd
 		path = path.Parent
 
 		if c.Prefix[n] != path.Name {
@@ -74,11 +74,9 @@ const (
 // PREFIX	SPLITS	MINDIRS.
 func ParseConfig(r io.Reader) (Config, error) {
 	b := bufio.NewReader(r)
+	end := false
 
-	var ( //nolint:prealloc
-		result []ConfigAttrs
-		end    bool
-	)
+	var result []ConfigAttrs //nolint:prealloc
 
 	for !end {
 		line, err := b.ReadBytes('\n')
@@ -102,9 +100,7 @@ func ParseConfig(r io.Reader) (Config, error) {
 		result = append(result, conf)
 	}
 
-	sort.Slice(result, func(i, j int) bool {
-		return len(result[i].Prefix) > len(result[j].Prefix)
-	})
+	sort.Slice(result, func(i, j int) bool { return len(result[i].Prefix) > len(result[j].Prefix) })
 
 	return result, nil
 }
@@ -129,15 +125,15 @@ func parseLine(line []byte) (ConfigAttrs, error) {
 
 	return ConfigAttrs{
 		Prefix:  split.SplitPath(prefix),
-		Splits:  int(splits),
-		MinDirs: int(minDirs),
+		Splits:  int(splits),  //nolint:gosec
+		MinDirs: int(minDirs), //nolint:gosec
 	}, nil
 }
 
 func (c Config) PathShouldOutput(path *summary.DirectoryPath) bool {
 	for _, ca := range c {
 		if ca.Match(path) {
-			return path.Depth == ca.MinDirs //&& path.Depth < ca.MinDirs+ca.Splits
+			return path.Depth == ca.MinDirs
 		}
 	}
 

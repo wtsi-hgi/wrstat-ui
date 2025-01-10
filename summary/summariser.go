@@ -22,6 +22,14 @@ type DirectoryPath struct {
 	Parent *DirectoryPath
 }
 
+func newDirectoryPath(name string, depth int, parent *DirectoryPath) *DirectoryPath {
+	return &DirectoryPath{
+		Name:   name,
+		Depth:  depth,
+		Parent: parent,
+	}
+}
+
 func (d *DirectoryPath) AppendTo(p []byte) []byte { //nolint:unparam
 	if d == nil {
 		return nil
@@ -80,6 +88,20 @@ type FileInfo struct {
 	ATime     int64
 	CTime     int64
 	EntryType byte
+}
+
+func fileInfoFromStatsInfo(currentDir *DirectoryPath, statsInfo *stats.FileInfo) FileInfo {
+	return FileInfo{
+		Path:      currentDir,
+		Name:      statsInfo.BaseName(),
+		Size:      statsInfo.Size,
+		UID:       statsInfo.UID,
+		GID:       statsInfo.GID,
+		MTime:     statsInfo.MTime,
+		ATime:     statsInfo.ATime,
+		CTime:     statsInfo.CTime,
+		EntryType: statsInfo.EntryType,
+	}
 }
 
 func (f *FileInfo) IsDir() bool {
@@ -189,9 +211,8 @@ func (s *Summariser) AddGlobalOperation(op OperationGenerator) {
 	s.globalOperations = append(s.globalOperations, op)
 }
 
-func (s *Summariser) Summarise() error {
+func (s *Summariser) Summarise() error { //nolint:funlen
 	statsInfo := new(stats.FileInfo)
-
 	dirs := make(directories, 0, probableMaxDirectoryDepth)
 	global := s.globalOperations.Generate()
 
@@ -207,17 +228,7 @@ func (s *Summariser) Summarise() error {
 			return err
 		}
 
-		info = FileInfo{
-			Path:      currentDir,
-			Name:      statsInfo.BaseName(),
-			Size:      statsInfo.Size,
-			UID:       statsInfo.UID,
-			GID:       statsInfo.GID,
-			MTime:     statsInfo.MTime,
-			ATime:     statsInfo.ATime,
-			CTime:     statsInfo.CTime,
-			EntryType: statsInfo.EntryType,
-		}
+		info = fileInfoFromStatsInfo(currentDir, statsInfo)
 
 		if err = global.Add(&info); err != nil {
 			return err
@@ -276,7 +287,7 @@ func (s *Summariser) changeToAscendantDirectoryOfEntry(directories directories,
 
 func (s *Summariser) changeToDirectoryOfEntry(directories directories, currentDir *DirectoryPath,
 	info *stats.FileInfo) (directories, *DirectoryPath) {
-	if cap(directories) > len(directories) {
+	if cap(directories) > len(directories) { //nolint:nestif
 		directories = directories[:len(directories)+1]
 
 		if directories[len(directories)-1] == nil {
@@ -287,24 +298,13 @@ func (s *Summariser) changeToDirectoryOfEntry(directories directories, currentDi
 	}
 
 	if currentDir == nil {
-		currentDir = &DirectoryPath{
-			Name:  "/",
-			Depth: 0,
-		}
+		currentDir = newDirectoryPath("/", 0, nil)
 
 		for _, part := range split.SplitPath(string(info.Path)) {
-			currentDir = &DirectoryPath{
-				Name:   part,
-				Depth:  currentDir.Depth + 1,
-				Parent: currentDir,
-			}
+			currentDir = newDirectoryPath(part, currentDir.Depth+1, currentDir)
 		}
 	} else {
-		currentDir = &DirectoryPath{
-			Name:   string(info.BaseName()),
-			Depth:  currentDir.Depth + 1,
-			Parent: currentDir,
-		}
+		currentDir = newDirectoryPath(string(info.BaseName()), currentDir.Depth+1, currentDir)
 	}
 
 	return directories, currentDir

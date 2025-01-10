@@ -58,7 +58,7 @@ const (
 )
 
 // StatsParser is used to parse wrstat stats files.
-type StatsParser struct {
+type StatsParser struct { //nolint:revive
 	scanner    *bufio.Scanner
 	lineBytes  []byte
 	lineLength int
@@ -123,8 +123,8 @@ func (p *StatsParser) Scan(info *FileInfo) error {
 
 	info.Path = unquote(p.path)
 	info.Size = p.size
-	info.UID = uint32(p.uid)
-	info.GID = uint32(p.gid)
+	info.UID = uint32(p.uid) //nolint:gosec
+	info.GID = uint32(p.gid) //nolint:gosec
 	info.MTime = p.mtime
 	info.ATime = p.atime
 	info.CTime = p.ctime
@@ -133,7 +133,7 @@ func (p *StatsParser) Scan(info *FileInfo) error {
 	return nil
 }
 
-func unquote(path []byte) []byte {
+func unquote(path []byte) []byte { //nolint:funlen,gocognit,gocyclo,cyclop
 	if path == nil {
 		return path
 	}
@@ -141,7 +141,7 @@ func unquote(path []byte) []byte {
 	path = path[1 : len(path)-1]
 
 	for i := 0; i < len(path); i++ {
-		if path[i] == '\\' {
+		if path[i] == '\\' { //nolint:nestif
 			added := 1
 			read := 2
 
@@ -183,7 +183,7 @@ func unquote(path []byte) []byte {
 				for _, b := range path[i+2 : i+n+2] {
 					value <<= 4
 
-					if b >= '0' && b <= '9' {
+					if b >= '0' && b <= '9' { //nolint:gocritic
 						value |= rune(b) - '0'
 					} else if b >= 'A' && b <= 'F' {
 						value |= rune(b) - 'A'

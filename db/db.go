@@ -67,7 +67,7 @@ type dbSet struct {
 
 // NewDBSet creates a new NewDBSet that knows where its database files are
 // located or should be created.
-func NewDBSet(dir string) (*dbSet, error) {
+func NewDBSet(dir string) (*dbSet, error) { //nolint:revive
 	fi, err := os.Lstat(dir)
 	if err != nil {
 		return nil, err
@@ -189,7 +189,7 @@ func (s *dbSet) Close() error {
 	return errm.ErrorOrNil()
 }
 
-type DBInfo struct {
+type DBInfo struct { //nolint:revive
 	NumDirs     int
 	NumDGUTAs   int
 	NumParents  int

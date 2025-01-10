@@ -169,7 +169,7 @@ func (b *BaseDirs) calculateUsage(tx *bolt.Tx, gidBase IDAgeDirs, uidBase IDAgeD
 	return b.storeUIDBaseDirs(tx, uidBase)
 }
 
-func (b *BaseDirs) storeGIDBaseDirs(tx *bolt.Tx, gidBase IDAgeDirs) error {
+func (b *BaseDirs) storeGIDBaseDirs(tx *bolt.Tx, gidBase IDAgeDirs) error { //nolint:gocognit
 	gub := tx.Bucket([]byte(GroupUsageBucket))
 
 	for gid, dcss := range gidBase {
@@ -223,7 +223,7 @@ func (b *BaseDirs) encodeToBytes(data any) []byte {
 	return encoded
 }
 
-func (b *BaseDirs) storeUIDBaseDirs(tx *bolt.Tx, uidBase IDAgeDirs) error {
+func (b *BaseDirs) storeUIDBaseDirs(tx *bolt.Tx, uidBase IDAgeDirs) error { //nolint:gocognit
 	uub := tx.Bucket([]byte(UserUsageBucket))
 
 	for uid, dcss := range uidBase {
@@ -327,7 +327,7 @@ func (b *BaseDirs) updateHistory(ds db.DirSummary, quotaSize, quotaInode uint64,
 ) ([]byte, error) {
 	var histories []History
 
-	if existing != nil {
+	if existing != nil { //nolint:nestif
 		if err := b.decodeFromBytes(existing, &histories); err != nil {
 			return nil, err
 		}
@@ -397,7 +397,7 @@ func (b *BaseDirs) calculateSubDirUsage(tx *bolt.Tx, gidBase, uidBase IDAgeDirs)
 	return b.storeUIDSubDirs(tx, uidBase)
 }
 
-func (b *BaseDirs) storeGIDSubDirs(tx *bolt.Tx, gidBase IDAgeDirs) error {
+func (b *BaseDirs) storeGIDSubDirs(tx *bolt.Tx, gidBase IDAgeDirs) error { //nolint:gocognit
 	bucket := tx.Bucket([]byte(GroupSubDirsBucket))
 
 	for gid, dcss := range gidBase {
@@ -417,7 +417,7 @@ func (b *BaseDirs) storeSubDirs(bucket *bolt.Bucket, id uint32, dcs SummaryWithC
 	return bucket.Put(keyName(id, dcs.Dir, dcs.Age), b.encodeToBytes(dcs.Children))
 }
 
-func (b *BaseDirs) storeUIDSubDirs(tx *bolt.Tx, uidBase IDAgeDirs) error {
+func (b *BaseDirs) storeUIDSubDirs(tx *bolt.Tx, uidBase IDAgeDirs) error { //nolint:gocognit
 	bucket := tx.Bucket([]byte(UserSubDirsBucket))
 
 	for uid, dcss := range uidBase {
@@ -446,7 +446,7 @@ func (b *BaseDirs) storeDateQuotasFill() func(*bolt.Tx) error {
 		bucket := tx.Bucket([]byte(GroupUsageBucket))
 		hbucket := tx.Bucket([]byte(GroupHistoricalBucket))
 
-		return bucket.ForEach(func(k, data []byte) error {
+		return bucket.ForEach(func(_, data []byte) error {
 			gu := new(Usage)
 
 			if err := b.decodeFromBytes(data, gu); err != nil {

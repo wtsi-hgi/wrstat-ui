@@ -233,7 +233,7 @@ func (m *mockDB) has(dir string, gid, uid uint32, ft db.DirGUTAFileType,
 	return false
 }
 
-func (m *mockDB) hasNot(dir string, gid, uid uint32, ft db.DirGUTAFileType, age db.DirGUTAge) bool {
+func (m *mockDB) hasNot(dir string, gid, uid uint32, ft db.DirGUTAFileType, age db.DirGUTAge) bool { //nolint:unparam
 	dgutas, ok := m.gutas[dir]
 	if !ok {
 		return true

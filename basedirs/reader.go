@@ -262,7 +262,7 @@ func (b *BaseDirReader) UserUsageTable(age db.DirGUTAge) (string, error) {
 }
 
 func daysSince(mtime time.Time) uint64 {
-	return uint64(time.Since(mtime) / secondsInDay)
+	return uint64(time.Since(mtime) / secondsInDay) //nolint:gosec
 }
 
 // GroupSubDirUsageTable returns GroupSubDirs() information formatted with the

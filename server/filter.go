@@ -32,7 +32,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	gas "github.com/wtsi-hgi/go-authserver"
-
 	"github.com/wtsi-hgi/wrstat-ui/db"
 )
 

@@ -287,13 +287,14 @@ func TestTree(t *testing.T) {
 
 		Convey("Queries fail with bad dirs", func() {
 			_, err := tree.DirInfo("/foo", nil)
-			So(err, ShouldNotBeNil)
 			// di := &db.DirInfo{Current: &db.DirSummary{
 			// 	"/", 14, 85, expectedAtime, expectedMtime,
 			// 	expectedUIDs, expectedGIDs, expectedFTs, db.DGUTAgeAll, dbModTime,
 			// }}
 			// err = tree.addChildInfo(di, []string{"/foo"}, nil)
 			// So(err, ShouldNotBeNil)
+			// NB: the above is from the end of this block
+			So(err, ShouldNotBeNil)
 		})
 
 		Convey("Closing works", func() {

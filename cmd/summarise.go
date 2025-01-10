@@ -67,13 +67,9 @@ var summariseCmd = &cobra.Command{
 	},
 }
 
-func run(args []string) error {
-	if len(args) != 1 {
-		return errors.New("exactly 1 input file should be provided")
-	}
-
-	if defaultDir == "" && userGroup == "" && groupUser == "" && basedirsDB == "" && dirgutaDB == "" {
-		return errors.New("no output files specified")
+func run(args []string) (err error) {
+	if err = checkArgs(args); err != nil {
+		return err
 	}
 
 	f, err := os.Open(args[1])
@@ -85,77 +81,138 @@ func run(args []string) error {
 
 	s := summary.NewSummariser(stats.NewStatsParser(f))
 
-	if defaultDir != "" {
-		if userGroup == "" {
-			userGroup = filepath.Join(defaultDir, "usergroup")
-		}
+	setArgsDefaults()
 
-		if groupUser == "" {
-			groupUser = filepath.Join(defaultDir, "groupuser")
-		}
-
-		if basedirsDB == "" {
-			basedirsDB = filepath.Join(defaultDir, "basedirs")
-		}
-
-		if dirgutaDB == "" {
-			dirgutaDB = filepath.Join(defaultDir, "dirguta")
-			// mkdir??
-		}
-	}
-
-	if userGroup != "" {
-		uf, err := os.Create(userGroup)
-		if err != nil {
-			return fmt.Errorf("failed to create usergroup file: %w", err)
-		}
-
-		s.AddDirectoryOperation(usergroup.NewByUserGroup(uf))
-	}
-
-	if groupUser != "" {
-		gf, err := os.Create(groupUser)
-		if err != nil {
-			return fmt.Errorf("failed to create groupuser file: %w", err)
-		}
-
-		s.AddGlobalOperation(groupuser.NewByGroupUser(gf))
-	}
-
-	if basedirsDB != "" {
-		quotas, err := basedirs.ParseQuotas(quotaPath)
-		if err != nil {
-			return fmt.Errorf("error parsing quotas file: %w", err)
-		}
-
-		cf, err := os.Open(basedirsConfig)
-		if err != nil {
-			return fmt.Errorf("error opening basedirs config: %w", err)
-		}
-
-		config, err := basedirs.ParseConfig(cf)
-		if err != nil {
-			return fmt.Errorf("error parsing basedirs config: %w", err)
-		}
-
-		cf.Close()
-
-		bd, err := basedirs.NewCreator(basedirsDB, quotas)
-		if err != nil {
-			return fmt.Errorf("failed to create new basedirs creator: %w", err)
-		}
-
-		s.AddDirectoryOperation(sbasedirs.NewBaseDirs(config.PathShouldOutput, bd))
-	}
-
-	if dirgutaDB != "" {
-		db := db.NewDB(dirgutaDB)
-		defer db.Close()
-
-		s.AddDirectoryOperation(dirguta.NewDirGroupUserTypeAge(db))
+	if fn, err := setSummarisers(s); err != nil { //nolint:nestif
+		return err
+	} else if fn != nil {
+		defer func() {
+			if errr := fn(); err == nil {
+				err = errr
+			}
+		}()
 	}
 
 	return s.Summarise()
+}
+
+func checkArgs(args []string) error {
+	if len(args) != 1 {
+		return errors.New("exactly 1 input file should be provided") //nolint:err113
+	}
+
+	if defaultDir == "" && userGroup == "" && groupUser == "" && basedirsDB == "" && dirgutaDB == "" {
+		return errors.New("no output files specified") //nolint:err113
+	}
+
+	return nil
+}
+
+func setArgsDefaults() {
+	if defaultDir == "" {
+		return
+	}
+
+	if userGroup == "" {
+		userGroup = filepath.Join(defaultDir, "usergroup")
+	}
+
+	if groupUser == "" {
+		groupUser = filepath.Join(defaultDir, "groupuser")
+	}
+
+	if basedirsDB == "" {
+		basedirsDB = filepath.Join(defaultDir, "basedirs")
+	}
+
+	if dirgutaDB == "" {
+		// mkdir??
+		dirgutaDB = filepath.Join(defaultDir, "dirguta")
+	}
+}
+
+func setSummarisers(s *summary.Summariser) (func() error, error) { //nolint:gocognit,gocyclo
+	if userGroup != "" {
+		if err := addUserGroupSummariser(s, userGroup); err != nil {
+			return nil, err
+		}
+	}
+
+	if groupUser != "" {
+		if err := addGroupUserSummariser(s, groupUser); err != nil {
+			return nil, err
+		}
+	}
+
+	if basedirsDB != "" {
+		if err := addBasedirsSummariser(s, basedirsDB, quotaPath, basedirsConfig); err != nil {
+			return nil, err
+		}
+	}
+
+	if dirgutaDB != "" {
+		return addDirgutaSummariser(s, dirgutaDB)
+	}
+
+	return nil, nil //nolint:nilnil
+}
+
+func addUserGroupSummariser(s *summary.Summariser, userGroup string) error {
+	uf, err := os.Create(userGroup)
+	if err != nil {
+		return fmt.Errorf("failed to create usergroup file: %w", err)
+	}
+
+	s.AddDirectoryOperation(usergroup.NewByUserGroup(uf))
+
+	return nil
+}
+
+func addGroupUserSummariser(s *summary.Summariser, groupUser string) error {
+	gf, err := os.Create(groupUser)
+	if err != nil {
+		return fmt.Errorf("failed to create groupuser file: %w", err)
+	}
+
+	s.AddGlobalOperation(groupuser.NewByGroupUser(gf))
+
+	return nil
+}
+
+func addBasedirsSummariser(s *summary.Summariser, basedirsDB, quotaPath, basedirsConfig string) error {
+	quotas, err := basedirs.ParseQuotas(quotaPath)
+	if err != nil {
+		return fmt.Errorf("error parsing quotas file: %w", err)
+	}
+
+	cf, err := os.Open(basedirsConfig)
+	if err != nil {
+		return fmt.Errorf("error opening basedirs config: %w", err)
+	}
+
+	config, err := basedirs.ParseConfig(cf)
+	if err != nil {
+		return fmt.Errorf("error parsing basedirs config: %w", err)
+	}
+
+	cf.Close()
+
+	bd, err := basedirs.NewCreator(basedirsDB, quotas)
+	if err != nil {
+		return fmt.Errorf("failed to create new basedirs creator: %w", err)
+	}
+
+	s.AddDirectoryOperation(sbasedirs.NewBaseDirs(config.PathShouldOutput, bd))
+
+	return nil
+}
+
+func addDirgutaSummariser(s *summary.Summariser, dirgutaDB string) (func() error, error) {
+	db := db.NewDB(dirgutaDB)
+
+	s.AddDirectoryOperation(dirguta.NewDirGroupUserTypeAge(db))
+
+	return db.Close, nil
 }
 
 func init() {

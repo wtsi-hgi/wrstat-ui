@@ -47,7 +47,7 @@ func setdirs(dirs [][]basedirs.SummaryWithChildren, offset int) *basedirs.AgeDir
 		d := slices.Clone(dir)
 
 		for m := range d {
-			d[m].Age = db.DirGUTAge(n + offset)
+			d[m].Age = db.DirGUTAge(n + offset) //nolint:gosec
 		}
 
 		a[n+offset] = d
@@ -67,18 +67,20 @@ func dir(name string, lastMod int64, numFiles int64, files basedirs.UsageBreakdo
 
 	return &basedirs.SubDir{
 		SubDir:       name,
-		NumFiles:     uint64(numFiles),
+		NumFiles:     uint64(numFiles), //nolint:gosec
 		SizeFiles:    size,
 		LastModified: time.Unix(lastMod, 0),
 		FileUsage:    files,
 	}
 }
 
-func userSummary(path string, uid uint32, gids []uint32, atime int64, children ...*basedirs.SubDir) basedirs.SummaryWithChildren {
+func userSummary(path string, uid uint32, gids []uint32, atime int64,
+	children ...*basedirs.SubDir) basedirs.SummaryWithChildren {
 	return dirsummary(path, []uint32{uid}, gids, atime, children)
 }
 
-func dirsummary(path string, uids []uint32, gids []uint32, atime int64, children []*basedirs.SubDir) basedirs.SummaryWithChildren {
+func dirsummary(path string, uids []uint32, gids []uint32, atime int64,
+	children []*basedirs.SubDir) basedirs.SummaryWithChildren {
 	ftsMap := make(map[db.DirGUTAFileType]struct{})
 
 	var (
@@ -120,7 +122,8 @@ func dirsummary(path string, uids []uint32, gids []uint32, atime int64, children
 	return s
 }
 
-func groupSummary(path string, uids []uint32, gid uint32, atime int64, children ...*basedirs.SubDir) basedirs.SummaryWithChildren {
+func groupSummary(path string, uids []uint32, gid uint32, atime int64,
+	children ...*basedirs.SubDir) basedirs.SummaryWithChildren {
 	return dirsummary(path, uids, []uint32{gid}, atime, children)
 }
 
@@ -213,7 +216,8 @@ func TestBaseDirs(t *testing.T) {
 
 		group12Dir := []basedirs.SummaryWithChildren{
 			groupSummary("/opt/teams/teamB", ids(3, 4), 12, times[0],
-				dir("user3", times[0], 3, files{db.DGUTAFileTypeOther: 17, db.DGUTAFileTypeTemp: 13, db.DGUTAFileTypeVCF: 11, db.DGUTAFileTypeCram: 13}),
+				dir("user3", times[0], 3, files{db.DGUTAFileTypeOther: 17, db.DGUTAFileTypeTemp: 13,
+					db.DGUTAFileTypeVCF: 11, db.DGUTAFileTypeCram: 13}),
 				dir("user4", times[0], 2, files{db.DGUTAFileTypeOther: 42}),
 			),
 			groupSummary("/opt/teams/teamC/user4/aDir", ids(4), 12, times[0],
@@ -226,7 +230,9 @@ func TestBaseDirs(t *testing.T) {
 		mdb := &mockDB{users: make(basedirs.IDAgeDirs), groups: make(basedirs.IDAgeDirs)}
 
 		Convey("with a simple output func", func() {
-			s.AddDirectoryOperation(NewBaseDirs(func(dp *summary.DirectoryPath) bool { return dp.Depth == 3 }, mdb))
+			s.AddDirectoryOperation(NewBaseDirs(func(dp *summary.DirectoryPath) bool {
+				return dp.Depth == 3
+			}, mdb))
 
 			err := s.Summarise()
 			So(err, ShouldBeNil)

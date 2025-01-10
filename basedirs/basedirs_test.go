@@ -306,7 +306,7 @@ func TestBaseDirs(t *testing.T) {
 							Age: db.DGUTAgeA7Y,
 						},
 						{
-							Name: groupName, GID: uint32(gid), UIDs: []uint32{uint32(uid)}, BaseDir: projectD,
+							Name: groupName, GID: gid, UIDs: []uint32{uid}, BaseDir: projectD,
 							UsageSize: 15, QuotaSize: 0, UsageInodes: 5, QuotaInodes: 0, Mtime: expectedMtime,
 							Age: db.DGUTAgeA7Y,
 						},
