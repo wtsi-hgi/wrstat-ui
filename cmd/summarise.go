@@ -56,6 +56,8 @@ var (
 	basedirsConfig string
 )
 
+const dbBatchSize = 10000
+
 // summariseCmd represents the stat command.
 var summariseCmd = &cobra.Command{
 	Use:   "summarise",
@@ -235,6 +237,8 @@ func addDirgutaSummariser(s *summary.Summariser, dirgutaDB string) (func() error
 	if err := db.CreateDB(); err != nil {
 		return nil, err
 	}
+
+	db.SetBatchSize(dbBatchSize)
 
 	s.AddDirectoryOperation(dirguta.NewDirGroupUserTypeAge(db))
 
