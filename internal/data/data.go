@@ -64,14 +64,17 @@ func addFiles(d *statsdata.Directory, directory, suffix string, numFiles int,
 func CreateDefaultTestData(gidA, gidB, gidC, uidA, uidB uint32, refTime int64) *statsdata.Directory {
 	dir := statsdata.NewRoot("/", 0)
 	dir.ATime = refTime
-	// dir.MTime = refTime
 	dir.GID = gidA
 	dir.UID = uidA
 
 	ac := dir.AddDirectory("a").AddDirectory("c")
 	ac.GID = gidB
 	ac.UID = uidB
-	dir.AddDirectory("a").AddDirectory("b").AddDirectory("d").UID = uidB
+
+	if gidC == 0 {
+		dir.AddDirectory("a").AddDirectory("b").AddDirectory("d").UID = uidB
+	}
+
 	dir.AddDirectory("a").AddDirectory("b").AddDirectory("d").AddDirectory("f").UID = uidA
 
 	addFiles(dir, "a/b/d/f", "file.cram", 1, 10, 50, 50, gidA, uidA)
@@ -103,7 +106,6 @@ func CreateDefaultTestData(gidA, gidB, gidC, uidA, uidB uint32, refTime int64) *
 func FakeFilesForDGUTADBForBasedirsTesting(gid, uid uint32, prefix string, numFirstFiles int, firstFileSize, secondFileSize int64, last bool, refTime int64) ([]string, *statsdata.Directory) {
 	dir := statsdata.NewRoot("/", 0)
 	dir.ATime = 50
-	dir.MTime = 0
 	projectA := filepath.Join("/", prefix, "scratch125", "humgen", "projects", "A")
 	projectB125 := filepath.Join("/", prefix, "scratch125", "humgen", "projects", "B")
 	projectB123 := filepath.Join("/", prefix, "scratch123", "hgi", "mdt1", "projects", "B")
