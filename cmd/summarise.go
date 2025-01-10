@@ -26,10 +26,13 @@
 package cmd
 
 import (
+	"compress/gzip"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
@@ -72,14 +75,12 @@ func run(args []string) (err error) {
 		return err
 	}
 
-	f, err := os.Open(args[1])
+	r, err := openStatsFile(args[1])
 	if err != nil {
-		return fmt.Errorf("failed to open stats file: %w", err)
+		return err
 	}
 
-	defer f.Close()
-
-	s := summary.NewSummariser(stats.NewStatsParser(f))
+	s := summary.NewSummariser(stats.NewStatsParser(r))
 
 	setArgsDefaults()
 
@@ -106,6 +107,23 @@ func checkArgs(args []string) error {
 	}
 
 	return nil
+}
+
+func openStatsFile(statsFile string) (io.Reader, error) {
+	f, err := os.Open(statsFile)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open stats file: %w", err)
+	}
+
+	var r io.Reader = f
+
+	if strings.HasSuffix(statsFile, ".gz") {
+		if r, err = gzip.NewReader(f); err != nil {
+			return nil, fmt.Errorf("failed to decompress stats file: %w", err)
+		}
+	}
+
+	return r, nil
 }
 
 func setArgsDefaults() {
