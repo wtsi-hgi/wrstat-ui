@@ -169,7 +169,7 @@ func (r *rootUserGroup) Output() error {
 		rowPath := row.Directory.AppendTo(path)
 
 		if _, err := fmt.Fprintf(r.w, "%s\t%s\t%q\t%d\t%d\n",
-			row.Group, row.User, rowPath, row.Count, row.Size); err != nil {
+			row.User, row.Group, rowPath, row.Count, row.Size); err != nil {
 			return err
 		}
 	}
