@@ -102,6 +102,7 @@ type DirGroupUserTypeAge struct {
 	store    gutaStore
 	thisDir  *summary.DirectoryPath
 	children []string
+	now      int64
 }
 
 // NewDirGroupUserTypeAge returns a DirGroupUserTypeAge.
@@ -110,10 +111,13 @@ func NewDirGroupUserTypeAge(db DB) summary.OperationGenerator {
 }
 
 func newDirGroupUserTypeAge(db DB, refTime int64) summary.OperationGenerator {
+	now := time.Now().Unix()
+
 	return func() summary.Operation {
 		return &DirGroupUserTypeAge{
 			db:    db,
 			store: gutaStore{make(map[gutaKey]*summary.SummaryWithTimes), refTime},
+			now:   now,
 		}
 	}
 }
@@ -144,7 +148,7 @@ func (d *DirGroupUserTypeAge) Add(info *summary.FileInfo) error {
 	atime := info.ATime
 
 	if info.IsDir() {
-		atime = time.Now().Unix()
+		atime = d.now
 	}
 
 	gutaKeysA := gutaKeyPool.Get().(*[maxNumOfGUTAKeys]gutaKey) //nolint:errcheck,forcetypeassert
