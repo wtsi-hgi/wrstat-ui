@@ -240,7 +240,7 @@ func NewSummariser(p *stats.StatsParser) *Summariser {
 }
 
 // AddDirectoryOperation will add an operation that will be created for each
-// directory, recieving information for all of its descendants.
+// directory, receiving information for all of its descendants.
 func (s *Summariser) AddDirectoryOperation(op OperationGenerator) {
 	s.directoryOperations = append(s.directoryOperations, op)
 }

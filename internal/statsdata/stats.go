@@ -57,7 +57,7 @@ func addChildren(d *Directory, width, depth int) {
 // Directory represents the stat information for a directory and its children.
 type Directory struct {
 	children map[string]io.WriterTo
-	file
+	File
 }
 
 // NewRoot creates a new Directory root with the specified time as the atime,
@@ -65,7 +65,7 @@ type Directory struct {
 func NewRoot(path string, refTime int64) *Directory {
 	return &Directory{
 		children: make(map[string]io.WriterTo),
-		file: file{
+		File: File{
 			Path:  path,
 			Size:  4096,
 			ATime: refTime,
@@ -89,10 +89,10 @@ func (d *Directory) AddDirectory(name string) *Directory {
 
 	c := &Directory{
 		children: make(map[string]io.WriterTo),
-		file:     d.file,
+		File:     d.File,
 	}
 
-	c.file.Path += name + "/"
+	c.File.Path += name + "/"
 	d.children[name] = c
 
 	return c
@@ -100,16 +100,16 @@ func (d *Directory) AddDirectory(name string) *Directory {
 
 // AddFile either creates and returns a new file in the direcory or returns an
 // existing one.
-func (d *Directory) AddFile(name string) *file {
+func (d *Directory) AddFile(name string) *File {
 	if c, ok := d.children[name]; ok {
-		if cf, ok := c.(*file); ok {
+		if cf, ok := c.(*File); ok {
 			return cf
 		}
 
 		return nil
 	}
 
-	f := d.file
+	f := d.File
 
 	d.children[name] = &f
 	f.Path += name
@@ -121,7 +121,7 @@ func (d *Directory) AddFile(name string) *file {
 
 // WriteTo writes the stats data for the directory.
 func (d *Directory) WriteTo(w io.Writer) (int64, error) {
-	n, err := d.file.WriteTo(w)
+	n, err := d.File.WriteTo(w)
 	if err != nil {
 		return n, err
 	}
@@ -155,7 +155,8 @@ func (d *Directory) AsReader() io.ReadCloser {
 	return pr
 }
 
-type file struct {
+// File represents a pseudo-file entry.
+type File struct {
 	Path                string
 	Size                int64
 	ATime, MTime, CTime int64
@@ -163,7 +164,8 @@ type file struct {
 	Type                byte
 }
 
-func (f *file) WriteTo(w io.Writer) (int64, error) {
+// WriteTo writes the stats data for a file entry.
+func (f *File) WriteTo(w io.Writer) (int64, error) {
 	n, err := fmt.Fprintf(w, "%q\t%d\t%d\t%d\t%d\t%d\t%d\t%c\t1\t1\t1\n",
 		f.Path, f.Size, f.UID, f.GID, f.ATime, f.MTime, f.CTime, f.Type)
 

@@ -135,7 +135,7 @@ func openStatsFile(statsFile string) (io.Reader, error) {
 }
 
 func setArgsDefaults() error {
-	if defaultDir != "" {
+	if defaultDir != "" { //nolint:nestif
 		if userGroup == "" {
 			userGroup = filepath.Join(defaultDir, "usergroup")
 		}
@@ -150,7 +150,6 @@ func setArgsDefaults() error {
 
 		if dirgutaDB == "" {
 			dirgutaDB = filepath.Join(defaultDir, "dirguta")
-
 		}
 	}
 

@@ -148,17 +148,17 @@ func (d *DirGroupUserTypeAge) Add(info *summary.FileInfo) error {
 	}
 
 	gutaKeysA := gutaKeyPool.Get().(*[maxNumOfGUTAKeys]gutaKey) //nolint:errcheck,forcetypeassert
-	gutaKeys := gutaKeys(gutaKeysA[:0])
+	gKeys := gutaKeys(gutaKeysA[:0])
 
 	filetype, isTmp := InfoToType(info)
 
-	gutaKeys.append(info.GID, info.UID, filetype)
+	gKeys.append(info.GID, info.UID, filetype)
 
 	if isTmp {
-		gutaKeys.append(info.GID, info.UID, db.DGUTAFileTypeTemp)
+		gKeys.append(info.GID, info.UID, db.DGUTAFileTypeTemp)
 	}
 
-	d.addForEach(gutaKeys, info.Size, atime, maxInt(0, info.MTime))
+	d.addForEach(gKeys, info.Size, atime, maxInt(0, info.MTime))
 
 	gutaKeyPool.Put(gutaKeysA)
 

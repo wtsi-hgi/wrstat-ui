@@ -189,7 +189,7 @@ func unquote(path []byte) []byte { //nolint:funlen,gocognit,gocyclo,cyclop
 			for _, b := range path[i+2 : i+n+2] {
 				value <<= 4
 
-				if b >= '0' && b <= '9' { //nolint:gocritic
+				if b >= '0' && b <= '9' { //nolint:gocritic,nestif
 					value |= rune(b) - '0'
 				} else if b >= 'A' && b <= 'F' {
 					value |= rune(b) - 'A'

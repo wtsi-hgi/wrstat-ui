@@ -12,7 +12,7 @@ import (
 )
 
 func TestTSV(t *testing.T) {
-	Convey("Given a specific config string, the ouput should match", t, func() {
+	Convey("Given a specific config string, the output should match", t, func() {
 		for _, test := range [...]struct {
 			Input  string
 			Output basedirs.Config
