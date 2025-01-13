@@ -1,7 +1,7 @@
 /*******************************************************************************
- * Copyright (c) 2021-2022 Genome Research Ltd.
+ * Copyright (c) 2025 Genome Research Ltd.
  *
- * Author: Sendu Bala <sb10@sanger.ac.uk>
+ * Author: Michael Woolnough <mw31@sanger.ac.uk>
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -84,7 +84,9 @@ func run(args []string) (err error) {
 
 	s := summary.NewSummariser(stats.NewStatsParser(r))
 
-	setArgsDefaults()
+	if err = setArgsDefaults(); err != nil {
+		return err
+	}
 
 	if fn, err := setSummarisers(s); err != nil { //nolint:nestif
 		return err
@@ -132,27 +134,27 @@ func openStatsFile(statsFile string) (io.Reader, error) {
 	return r, nil
 }
 
-func setArgsDefaults() {
-	if defaultDir == "" {
-		return
+func setArgsDefaults() error {
+	if defaultDir != "" {
+		if userGroup == "" {
+			userGroup = filepath.Join(defaultDir, "usergroup")
+		}
+
+		if groupUser == "" {
+			groupUser = filepath.Join(defaultDir, "groupuser")
+		}
+
+		if basedirsDB == "" {
+			basedirsDB = filepath.Join(defaultDir, "basedirs")
+		}
+
+		if dirgutaDB == "" {
+			dirgutaDB = filepath.Join(defaultDir, "dirguta")
+
+		}
 	}
 
-	if userGroup == "" {
-		userGroup = filepath.Join(defaultDir, "usergroup")
-	}
-
-	if groupUser == "" {
-		groupUser = filepath.Join(defaultDir, "groupuser")
-	}
-
-	if basedirsDB == "" {
-		basedirsDB = filepath.Join(defaultDir, "basedirs")
-	}
-
-	if dirgutaDB == "" {
-		// mkdir??
-		dirgutaDB = filepath.Join(defaultDir, "dirguta")
-	}
+	return os.MkdirAll(dirgutaDB, 0755) //nolint:mnd
 }
 
 func setSummarisers(s *summary.Summariser) (func() error, error) { //nolint:gocognit,gocyclo

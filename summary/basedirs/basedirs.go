@@ -1,3 +1,30 @@
+/*******************************************************************************
+ * Copyright (c) 2024, 2025 Genome Research Ltd.
+ *
+ * Authors:
+ *   Sendu Bala <sb10@sanger.ac.uk>
+ *   Michael Woolnough <mw31@sanger.ac.uk>
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining
+ * a copy of this software and associated documentation files (the
+ * "Software"), to deal in the Software without restriction, including
+ * without limitation the rights to use, copy, modify, merge, publish,
+ * distribute, sublicense, and/or sell copies of the Software, and to
+ * permit persons to whom the Software is furnished to do so, subject to
+ * the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included
+ * in all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+ * IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+ * CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+ * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+ * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ ******************************************************************************/
+
 package basedirs
 
 import (
@@ -13,19 +40,19 @@ import (
 
 const numAges = len(db.DirGUTAges)
 
-type DB interface {
+type output interface {
 	Output(users, groups basedirs.IDAgeDirs) error
 }
 
 type outputForDir func(*summary.DirectoryPath) bool
 
-type DirSummary struct {
+type dirSummary struct {
 	Path *summary.DirectoryPath
 	basedirs.SummaryWithChildren
 }
 
-func newDirSummary(parent *summary.DirectoryPath, age db.DirGUTAge) *DirSummary {
-	return &DirSummary{
+func newDirSummary(parent *summary.DirectoryPath, age db.DirGUTAge) *dirSummary {
+	return &dirSummary{
 		Path: parent,
 		SummaryWithChildren: basedirs.SummaryWithChildren{
 			DirSummary: db.DirSummary{
@@ -51,7 +78,7 @@ func setTimes(d *basedirs.SummaryWithChildren, atime, mtime time.Time) {
 	}
 }
 
-func (d *DirSummary) Merge(old *DirSummary) {
+func (d *dirSummary) Merge(old *dirSummary) {
 	p := old.Path
 
 	for p.Depth > d.Path.Depth+1 {
@@ -82,9 +109,9 @@ func merge(newS, oldS *basedirs.SummaryWithChildren, name string) {
 	newS.Children = append(newS.Children, oldS.Children[0])
 }
 
-type baseDirs [numAges]*DirSummary
+type ageBaseDirs [numAges]*dirSummary
 
-func (b *baseDirs) Set(i db.DirGUTAge, fi *summary.FileInfo, parent *summary.DirectoryPath) {
+func (b *ageBaseDirs) Set(i db.DirGUTAge, fi *summary.FileInfo, parent *summary.DirectoryPath) {
 	if b[i] == nil {
 		b[i] = newDirSummary(parent, i)
 		b[i].Age = i
@@ -120,12 +147,12 @@ func addToSlice(s []uint32, id uint32) []uint32 {
 	return slices.Insert(s, pos, id)
 }
 
-type baseDirsMap map[uint32]*baseDirs
+type baseDirsMap map[uint32]*ageBaseDirs
 
-func (b baseDirsMap) Get(id uint32) *baseDirs {
+func (b baseDirsMap) Get(id uint32) *ageBaseDirs {
 	bd, ok := b[id]
 	if !ok {
-		bd = new(baseDirs)
+		bd = new(ageBaseDirs)
 		b[id] = bd
 	}
 
@@ -185,24 +212,26 @@ func (b baseDirsMap) mergeTo(pbm baseDirsMap, parent *summary.DirectoryPath) { /
 	}
 }
 
-type BaseDirs struct {
-	root          *RootBaseDirs
-	parent        *BaseDirs
+type baseDirs struct {
+	root          *rootBaseDirs
+	parent        *baseDirs
 	output        outputForDir
 	refTime       int64
 	thisDir       *summary.DirectoryPath
 	users, groups baseDirsMap
 }
 
-type RootBaseDirs struct {
-	BaseDirs
-	db            DB
+type rootBaseDirs struct {
+	baseDirs
+	db            output
 	users, groups basedirs.IDAgeDirs
 }
 
-func NewBaseDirs(output outputForDir, db DB) summary.OperationGenerator { //nolint:funlen
-	root := &RootBaseDirs{
-		BaseDirs: BaseDirs{
+// NewBaseDirs returns a summary.OperationGenerator that calculates base
+// directory information.
+func NewBaseDirs(output outputForDir, db output) summary.OperationGenerator { //nolint:funlen
+	root := &rootBaseDirs{
+		baseDirs: baseDirs{
 			output: output,
 			users:  make(baseDirsMap),
 			groups: make(baseDirsMap),
@@ -215,16 +244,16 @@ func NewBaseDirs(output outputForDir, db DB) summary.OperationGenerator { //noli
 	root.root = root
 	now := time.Now().Unix()
 
-	var parent *BaseDirs
+	var parent *baseDirs
 
 	return func() summary.Operation {
 		if parent == nil {
-			parent = &root.BaseDirs
+			parent = &root.baseDirs
 
 			return root
 		}
 
-		parent = &BaseDirs{
+		parent = &baseDirs{
 			parent:  parent,
 			output:  output,
 			root:    root,
@@ -237,7 +266,8 @@ func NewBaseDirs(output outputForDir, db DB) summary.OperationGenerator { //noli
 	}
 }
 
-func (b *BaseDirs) Add(info *summary.FileInfo) error {
+// Add is a summary.Operation method.
+func (b *baseDirs) Add(info *summary.FileInfo) error {
 	if b.thisDir == nil {
 		b.thisDir = info.Path
 	}
@@ -259,10 +289,11 @@ func (b *BaseDirs) Add(info *summary.FileInfo) error {
 	return nil
 }
 
-func (b *BaseDirs) Output() error {
+// Output is a summary.Operation method.
+func (b *baseDirs) Output() error {
 	if b.output(b.thisDir) {
-		b.groups.Add(b.root.AddGroupBase)
-		b.users.Add(b.root.AddUserBase)
+		b.groups.Add(b.root.addGroupBase)
+		b.users.Add(b.root.addUserBase)
 	} else {
 		b.addToParent()
 	}
@@ -272,7 +303,7 @@ func (b *BaseDirs) Output() error {
 	return nil
 }
 
-func (b *BaseDirs) addToParent() {
+func (b *baseDirs) addToParent() {
 	if b.parent == nil {
 		return
 	}
@@ -281,7 +312,7 @@ func (b *BaseDirs) addToParent() {
 	b.users.mergeTo(b.parent.users, b.parent.thisDir)
 }
 
-func (b *BaseDirs) cleanup() {
+func (b *baseDirs) cleanup() {
 	b.thisDir = nil
 
 	for k := range b.groups {
@@ -293,8 +324,9 @@ func (b *BaseDirs) cleanup() {
 	}
 }
 
-func (r *RootBaseDirs) Output() error {
-	r.BaseDirs.Output() //nolint:errcheck
+// Output is a summary.Operation method.
+func (r *rootBaseDirs) Output() error {
+	r.baseDirs.Output() //nolint:errcheck
 
 	removeChildDirFilesFromDot(r.users)
 	removeChildDirFilesFromDot(r.groups)
@@ -334,7 +366,7 @@ func removeChildDirFilesFromDot(idag basedirs.IDAgeDirs) { //nolint:gocognit,goc
 	}
 }
 
-func (r *RootBaseDirs) AddUserBase(uid uint32, ds basedirs.SummaryWithChildren, age db.DirGUTAge) {
+func (r *rootBaseDirs) addUserBase(uid uint32, ds basedirs.SummaryWithChildren, age db.DirGUTAge) {
 	addIDAgePath(r.users, uid, ds, age)
 }
 
@@ -353,6 +385,6 @@ func addIDAgePath(m basedirs.IDAgeDirs, id uint32, ds basedirs.SummaryWithChildr
 	}), ds)
 }
 
-func (r *RootBaseDirs) AddGroupBase(uid uint32, ds basedirs.SummaryWithChildren, age db.DirGUTAge) {
+func (r *rootBaseDirs) addGroupBase(uid uint32, ds basedirs.SummaryWithChildren, age db.DirGUTAge) {
 	addIDAgePath(r.groups, uid, ds, age)
 }

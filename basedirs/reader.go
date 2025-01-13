@@ -83,12 +83,14 @@ func NewReader(dbPath, ownersPath string) (*BaseDirReader, error) {
 	}, nil
 }
 
+// OpenDBRO opens a database as readonly.
 func OpenDBRO(dbPath string) (*bolt.DB, error) {
 	return bolt.Open(dbPath, dbOpenMode, &bolt.Options{
 		ReadOnly: true,
 	})
 }
 
+// Close closes the database.
 func (b *BaseDirReader) Close() error {
 	return b.db.Close()
 }

@@ -37,6 +37,7 @@ import (
 
 const colsInOwnersFile = 2
 
+// Error for invalid owners file format.
 var ErrInvalidOwnersFile = errors.New("invalid owners file format")
 
 func parseOwners(path string) (map[uint32]string, error) {

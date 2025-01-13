@@ -1,7 +1,8 @@
 /*******************************************************************************
- * Copyright (c) 2022 Genome Research Ltd.
+ * Copyright (c) 2022, 2025 Genome Research Ltd.
  *
  * Author: Sendu Bala <sb10@sanger.ac.uk>
+ *         Michael Woolnough <mw31@sanger.ac.uk>
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -38,8 +39,10 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/summary"
 )
 
+// Error is a custom error type.
 type Error string
 
+// Error implements the error interface.
 func (e Error) Error() string { return string(e) }
 
 const (
@@ -47,22 +50,22 @@ const (
 	lengthOfGUTAKey  = 12
 )
 
-var gutaKey = sync.Pool{ //nolint:gochecknoglobals
+var gutaKeyPool = sync.Pool{ //nolint:gochecknoglobals
 	New: func() any {
-		return new([maxNumOfGUTAKeys]GUTAKey)
+		return new([maxNumOfGUTAKeys]gutaKey)
 	},
 }
 
 // gutaStore is a sortable map with gid,uid,filetype,age as keys and
 // summaryWithAtime as values.
 type gutaStore struct {
-	sumMap  map[GUTAKey]*summary.SummaryWithTimes
+	sumMap  map[gutaKey]*summary.SummaryWithTimes
 	refTime int64
 }
 
 // add will auto-vivify a summary for the given key (which should have been
 // generated with statToGUTAKey()) and call add(size, atime, mtime) on it.
-func (store gutaStore) add(gkey GUTAKey, size int64, atime int64, mtime int64) {
+func (store gutaStore) add(gkey gutaKey, size int64, atime int64, mtime int64) {
 	if !gkey.Age.FitsAgeInterval(atime, mtime, store.refTime) {
 		return
 	}
@@ -78,14 +81,16 @@ func (store gutaStore) add(gkey GUTAKey, size int64, atime int64, mtime int64) {
 
 // sort returns a slice of our summaryWithAtime values, sorted by our dguta keys
 // which are also returned.
-func (store gutaStore) sort() GUTAKeys {
-	keys := GUTAKeys(slices.Collect(maps.Keys(store.sumMap)))
+func (store gutaStore) sort() gutaKeys {
+	keys := gutaKeys(slices.Collect(maps.Keys(store.sumMap)))
 
 	sort.Sort(keys)
 
 	return keys
 }
 
+// DB contains the method that will be called for each directories DGUTA
+// information.
 type DB interface {
 	Add(dguta db.RecordDGUTA) error
 }
@@ -108,24 +113,20 @@ func newDirGroupUserTypeAge(db DB, refTime int64) summary.OperationGenerator {
 	return func() summary.Operation {
 		return &DirGroupUserTypeAge{
 			db:    db,
-			store: gutaStore{make(map[GUTAKey]*summary.SummaryWithTimes), refTime},
+			store: gutaStore{make(map[gutaKey]*summary.SummaryWithTimes), refTime},
 		}
 	}
 }
 
-// Add is a github.com/wtsi-ssg/wrstat/stat Operation. It will break path in to
-// its directories and add the file size, increment the file count to each,
-// summed for the info's group, user, filetype and age. It will also record the
-// oldest file access time for each directory, plus the newest modification
-// time.
+// Add is a summary.Operation method. It will break path in to its directories
+// and add the file size, increment the file count to each, summed for the
+// info's group, user, filetype and age. It will also record the oldest file
+// access time for each directory, plus the newest modification time.
 //
 // If path is a directory, its access time is treated as now, so that when
 // interested in files that haven't been accessed in a long time, directories
 // that haven't been manually visted in a longer time don't hide the "real"
 // results.
-//
-// "Access" times are actually considered to be the greatest of atime, mtime and
-// unix epoch.
 //
 // NB: the "temp" filetype is an extra filetype on top of the other normal
 // filetypes, so if you sum all the filetypes to get information about a given
@@ -146,8 +147,8 @@ func (d *DirGroupUserTypeAge) Add(info *summary.FileInfo) error {
 		atime = time.Now().Unix()
 	}
 
-	gutaKeysA := gutaKey.Get().(*[maxNumOfGUTAKeys]GUTAKey) //nolint:errcheck,forcetypeassert
-	gutaKeys := GUTAKeys(gutaKeysA[:0])
+	gutaKeysA := gutaKeyPool.Get().(*[maxNumOfGUTAKeys]gutaKey) //nolint:errcheck,forcetypeassert
+	gutaKeys := gutaKeys(gutaKeysA[:0])
 
 	filetype, isTmp := InfoToType(info)
 
@@ -159,11 +160,13 @@ func (d *DirGroupUserTypeAge) Add(info *summary.FileInfo) error {
 
 	d.addForEach(gutaKeys, info.Size, atime, maxInt(0, info.MTime))
 
-	gutaKey.Put(gutaKeysA)
+	gutaKeyPool.Put(gutaKeysA)
 
 	return nil
 }
 
+// InfoToType returns the type of a FileInfo, based on its name, and a bool that
+// determines whether the file is considered a temporary one, based on its path.
 func InfoToType(info *summary.FileInfo) (db.DirGUTAFileType, bool) {
 	var (
 		isTmp    bool
@@ -183,19 +186,19 @@ func InfoToType(info *summary.FileInfo) (db.DirGUTAFileType, bool) {
 	return filetype, isTmp
 }
 
-type GUTAKey struct {
+type gutaKey struct {
 	GID, UID uint32
 	FileType db.DirGUTAFileType
 	Age      db.DirGUTAge
 }
 
-type GUTAKeys []GUTAKey
+type gutaKeys []gutaKey
 
-func (g GUTAKeys) Len() int {
+func (g gutaKeys) Len() int {
 	return len(g)
 }
 
-func (g GUTAKeys) Less(i, j int) bool {
+func (g gutaKeys) Less(i, j int) bool {
 	if g[i].GID < g[j].GID {
 		return true
 	}
@@ -223,11 +226,11 @@ func (g GUTAKeys) Less(i, j int) bool {
 	return g[i].Age < g[j].Age
 }
 
-func (g GUTAKeys) Swap(i, j int) {
+func (g gutaKeys) Swap(i, j int) {
 	g[i], g[j] = g[j], g[i]
 }
 
-func (g GUTAKey) String() string {
+func (g gutaKey) String() string {
 	var a [lengthOfGUTAKey]byte
 
 	binary.BigEndian.PutUint32(a[:4], g.GID)
@@ -240,9 +243,9 @@ func (g GUTAKey) String() string {
 
 // appendGUTAKeys appends gutaKeys with keys including the given gid, uid, file
 // type and age.
-func (g *GUTAKeys) append(gid, uid uint32, fileType db.DirGUTAFileType) {
+func (g *gutaKeys) append(gid, uid uint32, fileType db.DirGUTAFileType) {
 	for _, age := range db.DirGUTAges {
-		*g = append(*g, GUTAKey{gid, uid, fileType, age})
+		*g = append(*g, gutaKey{gid, uid, fileType, age})
 	}
 }
 
@@ -261,18 +264,14 @@ func maxInt(ints ...int64) int64 {
 
 // addForEach breaks path into each directory, gets a gutaStore for each and
 // adds a file of the given size to them under the given gutaKeys.
-func (d *DirGroupUserTypeAge) addForEach(gutaKeys []GUTAKey, size int64, atime int64, mtime int64) {
-	for _, gutaKey := range gutaKeys {
-		d.store.add(gutaKey, size, atime, mtime)
+func (d *DirGroupUserTypeAge) addForEach(gutaKeys []gutaKey, size int64, atime int64, mtime int64) {
+	for _, agutaKey := range gutaKeys {
+		d.store.add(agutaKey, size, atime, mtime)
 	}
 }
 
-type DirGUTA struct {
-	Path *summary.DirectoryPath
-}
-
-// Output will write summary information for all the paths previously added. The
-// format is (tab separated):
+// Output is a summary.Operation method, and will write summary information for
+// all the paths previously added. The format is (tab separated):
 //
 // directory gid uid filetype age filecount filesize atime mtime
 //
@@ -281,23 +280,23 @@ type DirGUTA struct {
 //
 // age is one of our age ints:
 //
-//		 0 = all ages
-//		 1 = older than one month according to atime
-//		 2 = older than two months according to atime
-//		 3 = older than six months according to atime
-//		 4 = older than one year according to atime
-//		 5 = older than two years according to atime
-//		 6 = older than three years according to atime
-//		 7 = older than five years according to atime
-//		 8 = older than seven years according to atime
-//		 9 = older than one month according to mtime
-//		10 = older than two months according to mtime
-//		11 = older than six months according to mtime
-//		12 = older than one year according to mtime
-//		13 = older than two years according to mtime
-//		14 = older than three years according to mtime
-//	 15 = older than five years according to mtime
-//		16 = older than seven years according to mtime
+//	    0 = all ages
+//	    1 = older than one month according to atime
+//	    2 = older than two months according to atime
+//	    3 = older than six months according to atime
+//	    4 = older than one year according to atime
+//	    5 = older than two years according to atime
+//	    6 = older than three years according to atime
+//	    7 = older than five years according to atime
+//	    8 = older than seven years according to atime
+//	    9 = older than one month according to mtime
+//	   10 = older than two months according to mtime
+//	   11 = older than six months according to mtime
+//	   12 = older than one year according to mtime
+//	   13 = older than two years according to mtime
+//	   14 = older than three years according to mtime
+//	15 = older than five years according to mtime
+//	   16 = older than seven years according to mtime
 //
 // directory, gid, uid, filetype and age are sorted. The sort on the columns is
 // not numeric, but alphabetical. So gid 10 will come before gid 2.

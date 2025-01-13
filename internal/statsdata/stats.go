@@ -1,7 +1,33 @@
+/*******************************************************************************
+ * Copyright (c) 2024, 2025 Genome Research Ltd.
+ *
+ * Authors:
+ *   Sendu Bala <sb10@sanger.ac.uk>
+ *   Michael Woolnough <mw31@sanger.ac.uk>
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining
+ * a copy of this software and associated documentation files (the
+ * "Software"), to deal in the Software without restriction, including
+ * without limitation the rights to use, copy, modify, merge, publish,
+ * distribute, sublicense, and/or sell copies of the Software, and to
+ * permit persons to whom the Software is furnished to do so, subject to
+ * the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included
+ * in all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+ * IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+ * CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+ * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+ * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ ******************************************************************************/
+
 package statsdata
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -11,6 +37,7 @@ import (
 	"strings"
 )
 
+// TestStats creates a new Directory filled with pseudo content.
 func TestStats(width, depth int, rootPath string, refTime int64) *Directory {
 	d := NewRoot(rootPath, refTime)
 
@@ -27,17 +54,18 @@ func addChildren(d *Directory, width, depth int) {
 	}
 }
 
-var ErrNotEnoughGroups = errors.New("not enough groups")
-
+// Directory represents the stat information for a directory and its children.
 type Directory struct {
 	children map[string]io.WriterTo
-	File
+	file
 }
 
+// NewRoot creates a new Directory root with the specified time as the atime,
+// mtime, and ctime.
 func NewRoot(path string, refTime int64) *Directory {
 	return &Directory{
 		children: make(map[string]io.WriterTo),
-		File: File{
+		file: file{
 			Path:  path,
 			Size:  4096,
 			ATime: refTime,
@@ -48,6 +76,8 @@ func NewRoot(path string, refTime int64) *Directory {
 	}
 }
 
+// AddDirectory either creates and returns a new directory in the direcory or
+// returns an existing one.
 func (d *Directory) AddDirectory(name string) *Directory {
 	if c, ok := d.children[name]; ok {
 		if cd, ok := c.(*Directory); ok {
@@ -59,25 +89,27 @@ func (d *Directory) AddDirectory(name string) *Directory {
 
 	c := &Directory{
 		children: make(map[string]io.WriterTo),
-		File:     d.File,
+		file:     d.file,
 	}
 
-	c.File.Path += name + "/"
+	c.file.Path += name + "/"
 	d.children[name] = c
 
 	return c
 }
 
-func (d *Directory) AddFile(name string) *File {
+// AddFile either creates and returns a new file in the direcory or returns an
+// existing one.
+func (d *Directory) AddFile(name string) *file {
 	if c, ok := d.children[name]; ok {
-		if cf, ok := c.(*File); ok {
+		if cf, ok := c.(*file); ok {
 			return cf
 		}
 
 		return nil
 	}
 
-	f := d.File
+	f := d.file
 
 	d.children[name] = &f
 	f.Path += name
@@ -87,8 +119,9 @@ func (d *Directory) AddFile(name string) *File {
 	return &f
 }
 
+// WriteTo writes the stats data for the directory.
 func (d *Directory) WriteTo(w io.Writer) (int64, error) {
-	n, err := d.File.WriteTo(w)
+	n, err := d.file.WriteTo(w)
 	if err != nil {
 		return n, err
 	}
@@ -109,6 +142,8 @@ func (d *Directory) WriteTo(w io.Writer) (int64, error) {
 	return n, nil
 }
 
+// AsReader returns a ReadCloser that will output a stats file as read by the
+// stats package.
 func (d *Directory) AsReader() io.ReadCloser {
 	pr, pw := io.Pipe()
 
@@ -120,7 +155,7 @@ func (d *Directory) AsReader() io.ReadCloser {
 	return pr
 }
 
-type File struct {
+type file struct {
 	Path                string
 	Size                int64
 	ATime, MTime, CTime int64
@@ -128,13 +163,15 @@ type File struct {
 	Type                byte
 }
 
-func (f *File) WriteTo(w io.Writer) (int64, error) {
+func (f *file) WriteTo(w io.Writer) (int64, error) {
 	n, err := fmt.Fprintf(w, "%q\t%d\t%d\t%d\t%d\t%d\t%d\t%c\t1\t1\t1\n",
 		f.Path, f.Size, f.UID, f.GID, f.ATime, f.MTime, f.CTime, f.Type)
 
 	return int64(n), err
 }
 
+// AddFile adds file data to a directory, creating the directory in the tree if
+// necessary.
 func AddFile(d *Directory, path string, uid, gid uint32, size, atime, mtime int64) {
 	for _, part := range strings.Split(filepath.Dir(path), "/") {
 		d = d.AddDirectory(part)

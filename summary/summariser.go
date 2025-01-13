@@ -1,3 +1,29 @@
+/*******************************************************************************
+ * Copyright (c) 2024, 2025 Genome Research Ltd.
+ *
+ * Author: Sendu Bala <sb10@sanger.ac.uk>
+ *         Michael Woolnough <mw31@sanger.ac.uk>
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining
+ * a copy of this software and associated documentation files (the
+ * "Software"), to deal in the Software without restriction, including
+ * without limitation the rights to use, copy, modify, merge, publish,
+ * distribute, sublicense, and/or sell copies of the Software, and to
+ * permit persons to whom the Software is furnished to do so, subject to
+ * the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included
+ * in all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+ * IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+ * CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+ * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+ * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ ******************************************************************************/
+
 package summary
 
 import (
@@ -16,6 +42,8 @@ const (
 	probableMaxDirectoryDepth = 128
 )
 
+// DirectoryPath represents a linked-list of path parts, which the next element
+// being the parent directory.
 type DirectoryPath struct {
 	Name   string
 	Depth  int
@@ -30,6 +58,8 @@ func newDirectoryPath(name string, depth int, parent *DirectoryPath) *DirectoryP
 	}
 }
 
+// AppendTo will append the full path to the given byte slice, returning the
+// slice.
 func (d *DirectoryPath) AppendTo(p []byte) []byte { //nolint:unparam
 	if d == nil {
 		return nil
@@ -38,6 +68,7 @@ func (d *DirectoryPath) AppendTo(p []byte) []byte { //nolint:unparam
 	return append(d.Parent.AppendTo(p), d.Name...)
 }
 
+// Len returns the length of the path.
 func (d *DirectoryPath) Len() int {
 	if d == nil {
 		return 0
@@ -46,6 +77,7 @@ func (d *DirectoryPath) Len() int {
 	return d.Parent.Len() + len(d.Name)
 }
 
+// Less implements the sort.Interface interface.
 func (d *DirectoryPath) Less(e *DirectoryPath) bool {
 	if d.Depth < e.Depth {
 		return d.compare(e.getDepth(d.Depth)) != 1
@@ -78,6 +110,7 @@ func (d *DirectoryPath) compare(e *DirectoryPath) int {
 	return cmp
 }
 
+// FileInfo represents the parsed information about a file or directory.
 type FileInfo struct {
 	Path      *DirectoryPath
 	Name      []byte
@@ -104,6 +137,7 @@ func fileInfoFromStatsInfo(currentDir *DirectoryPath, statsInfo *stats.FileInfo)
 	}
 }
 
+// IsDir returns true if the FileInfo represents a directory.
 func (f *FileInfo) IsDir() bool {
 	return f.EntryType == stats.DirType
 }
@@ -197,20 +231,28 @@ type Summariser struct {
 	globalOperations    operationGenerators
 }
 
+// NewSummariser returns a new Summariser that will read from the given
+// stats.StatsParser.
 func NewSummariser(p *stats.StatsParser) *Summariser {
 	return &Summariser{
 		statsParser: p,
 	}
 }
 
+// AddDirectoryOperation will add an operation that will be created for each
+// directory, recieving information for all of its descendants.
 func (s *Summariser) AddDirectoryOperation(op OperationGenerator) {
 	s.directoryOperations = append(s.directoryOperations, op)
 }
 
+// AddGlobalOperation will add an operation that will be passed information for
+// every file parsed.
 func (s *Summariser) AddGlobalOperation(op OperationGenerator) {
 	s.globalOperations = append(s.globalOperations, op)
 }
 
+// Summarise will read from the stats.StatsParser and pass that information to
+// the Operations it has been given.
 func (s *Summariser) Summarise() error { //nolint:funlen
 	statsInfo := new(stats.FileInfo)
 	dirs := make(directories, 0, probableMaxDirectoryDepth)

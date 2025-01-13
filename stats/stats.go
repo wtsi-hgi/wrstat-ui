@@ -74,6 +74,7 @@ type StatsParser struct { //nolint:revive
 	error      error
 }
 
+// FileInfo represents a parsed line of data from a stats file.
 type FileInfo struct {
 	Path      []byte
 	Size      int64
@@ -85,10 +86,12 @@ type FileInfo struct {
 	EntryType byte
 }
 
+// IsDir returns true if the FileInfo represents a directory.
 func (f *FileInfo) IsDir() bool {
 	return f.EntryType == DirType
 }
 
+// BaseName returns the name of the file.
 func (f *FileInfo) BaseName() []byte {
 	return f.Path[bytes.LastIndexByte(f.Path[:len(f.Path)-1], '/')+1:]
 }
@@ -141,64 +144,66 @@ func unquote(path []byte) []byte { //nolint:funlen,gocognit,gocyclo,cyclop
 	path = path[1 : len(path)-1]
 
 	for i := 0; i < len(path); i++ {
-		if path[i] == '\\' { //nolint:nestif
-			added := 1
-			read := 2
+		if path[i] != '\\' {
+			continue
+		}
+
+		added := 1
+		read := 2
+
+		switch path[i+1] {
+		case 'a':
+			path[i] = '\a'
+		case 'b':
+			path[i] = '\b'
+		case 'f':
+			path[i] = '\f'
+		case 'n':
+			path[i] = '\n'
+		case 'r':
+			path[i] = '\r'
+		case 't':
+			path[i] = '\t'
+		case 'v':
+			path[i] = '\v'
+		case '"':
+			path[i] = '"'
+		case '\'':
+			path[i] = '\''
+		case 'x', 'u', 'U':
+			n := 0
 
 			switch path[i+1] {
-			case 'a':
-				path[i] = '\a'
-			case 'b':
-				path[i] = '\b'
-			case 'f':
-				path[i] = '\f'
-			case 'n':
-				path[i] = '\n'
-			case 'r':
-				path[i] = '\r'
-			case 't':
-				path[i] = '\t'
-			case 'v':
-				path[i] = '\v'
-			case '"':
-				path[i] = '"'
-			case '\'':
-				path[i] = '\''
-			case 'x', 'u', 'U':
-				n := 0
-
-				switch path[i+1] {
-				case 'x':
-					n = 2
-				case 'u':
-					n = 4
-				case 'U':
-					n = 8
-				}
-
-				read = n + 2 //nolint:mnd
-
-				var value rune
-
-				for _, b := range path[i+2 : i+n+2] {
-					value <<= 4
-
-					if b >= '0' && b <= '9' { //nolint:gocritic
-						value |= rune(b) - '0'
-					} else if b >= 'A' && b <= 'F' {
-						value |= rune(b) - 'A'
-					} else if b >= 'a' && b <= 'f' {
-						value |= rune(b) - 'a'
-					}
-				}
-
-				a := utf8.AppendRune(path[:i], value)
-
-				added = len(a) - i
+			case 'x':
+				n = 2
+			case 'u':
+				n = 4
+			case 'U':
+				n = 8
 			}
 
-			path = slices.Delete(path, i+added, i+read)
+			read = n + 2 //nolint:mnd
+
+			var value rune
+
+			for _, b := range path[i+2 : i+n+2] {
+				value <<= 4
+
+				if b >= '0' && b <= '9' { //nolint:gocritic
+					value |= rune(b) - '0'
+				} else if b >= 'A' && b <= 'F' {
+					value |= rune(b) - 'A'
+				} else if b >= 'a' && b <= 'f' {
+					value |= rune(b) - 'a'
+				}
+			}
+
+			a := utf8.AppendRune(path[:i], value)
+
+			added = len(a) - i
 		}
+
+		path = slices.Delete(path, i+added, i+read)
 	}
 
 	return path

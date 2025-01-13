@@ -1,7 +1,8 @@
 /*******************************************************************************
- * Copyright (c) 2021 Genome Research Ltd.
+ * Copyright (c) 2021, 2025 Genome Research Ltd.
  *
  * Author: Sendu Bala <sb10@sanger.ac.uk>
+ *         Michael Woolnough <mw31@sanger.ac.uk>
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -39,7 +40,7 @@ type Summary struct {
 	Size  int64
 }
 
-// add will increment our count and add the given size to our size.
+// Add will increment our count and add the given size to our size.
 func (s *Summary) Add(size int64) {
 	s.Count++
 	s.Size += size
@@ -68,16 +69,20 @@ func (s *SummaryWithTimes) Add(size int64, atime int64, mtime int64) {
 	}
 }
 
+// GroupUserID is a combined GID and UID.
 type GroupUserID uint64
 
+// NewGroupUserID create a new GroupUserID.
 func NewGroupUserID(gid, uid uint32) GroupUserID {
 	return GroupUserID(gid)<<32 | GroupUserID(uid)
 }
 
+// GID returns the GID.
 func (g GroupUserID) GID() uint32 {
 	return uint32(g >> 32) //nolint:mnd,gosec
 }
 
+// UID returns the UID.
 func (g GroupUserID) UID() uint32 {
 	return uint32(g) //nolint:gosec
 }

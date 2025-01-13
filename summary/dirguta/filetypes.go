@@ -527,7 +527,7 @@ var tmpPrefixes = [...]comparitor{ //nolint:gochecknoglobals
 			'm': 4,
 		},
 	},
-	{ // 3: ".te", ".t", "te", "t"
+	{ // 3: ".te", "te"
 		chars: chars{
 			'M': 4,
 			'm': 4,

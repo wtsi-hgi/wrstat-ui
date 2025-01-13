@@ -12,7 +12,7 @@ import (
 )
 
 func TestTSV(t *testing.T) {
-	Convey("", t, func() {
+	Convey("Given a specific config string, the ouput should match", t, func() {
 		for _, test := range [...]struct {
 			Input  string
 			Output basedirs.Config
@@ -90,7 +90,8 @@ func TestSplitFn(t *testing.T) {
 
 	paths := internaltest.NewDirectoryPathCreator()
 
-	Convey("", t, func() {
+	Convey("Given a particular parsed config, you should be able to determine "+
+		"whether particular path should output", t, func() {
 		for _, test := range [...]struct {
 			Input  *summary.DirectoryPath
 			Output bool

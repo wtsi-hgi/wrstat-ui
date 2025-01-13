@@ -34,6 +34,7 @@ import (
 	"sync"
 )
 
+// SetCachedGroup sets the name of a specified GID.
 func (b *BaseDirReader) SetCachedGroup(gid uint32, name string) {
 	b.groupCache.mu.Lock()
 	defer b.groupCache.mu.Unlock()
@@ -41,17 +42,20 @@ func (b *BaseDirReader) SetCachedGroup(gid uint32, name string) {
 	b.groupCache.data[gid] = name
 }
 
+// GroupCache caches the names associated with GIDs.
 type GroupCache struct {
 	mu   sync.RWMutex
 	data map[uint32]string
 }
 
+// NewGroupCache creates a new GroupCache.
 func NewGroupCache() *GroupCache {
 	return &GroupCache{
 		data: make(map[uint32]string),
 	}
 }
 
+// GroupName retrieves the name of a given GID.
 func (g *GroupCache) GroupName(gid uint32) string {
 	g.mu.RLock()
 	groupName, ok := g.data[gid]
@@ -75,6 +79,7 @@ func (g *GroupCache) GroupName(gid uint32) string {
 	return groupStr
 }
 
+// Iter iterates over the cached groups.
 func (g *GroupCache) Iter(yield func(k uint32, v string) bool) {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
@@ -86,10 +91,12 @@ func (g *GroupCache) Iter(yield func(k uint32, v string) bool) {
 	}
 }
 
+// IterCachedGroups returns an iterator for the group cache.
 func (b *BaseDirReader) IterCachedGroups() iter.Seq2[uint32, string] {
 	return b.groupCache.Iter
 }
 
+// SetCachedUser sets the name of a specified UID.
 func (b *BaseDirReader) SetCachedUser(uid uint32, name string) {
 	b.userCache.mu.Lock()
 	defer b.userCache.mu.Unlock()
@@ -97,17 +104,20 @@ func (b *BaseDirReader) SetCachedUser(uid uint32, name string) {
 	b.userCache.data[uid] = name
 }
 
+// UserCache caches the names associated with UIDs.
 type UserCache struct {
 	mu   sync.RWMutex
 	data map[uint32]string
 }
 
+// NewUserCache creates a new UserCache.
 func NewUserCache() *UserCache {
 	return &UserCache{
 		data: make(map[uint32]string),
 	}
 }
 
+// UserName retrieves the name of a given UID.
 func (u *UserCache) UserName(uid uint32) string {
 	u.mu.RLock()
 	userName, ok := u.data[uid]
@@ -130,6 +140,8 @@ func (u *UserCache) UserName(uid uint32) string {
 
 	return userStr
 }
+
+// Iter iterates over the cached users.
 func (u *UserCache) Iter(yield func(k uint32, v string) bool) {
 	u.mu.RLock()
 	defer u.mu.RUnlock()
@@ -141,6 +153,7 @@ func (u *UserCache) Iter(yield func(k uint32, v string) bool) {
 	}
 }
 
+// IterCachedGroups returns an iterator for the user cache.
 func (b *BaseDirReader) IterCachedUsers() iter.Seq2[uint32, string] {
 	return b.userCache.Iter
 }

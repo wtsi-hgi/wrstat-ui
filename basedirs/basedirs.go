@@ -48,13 +48,7 @@ type BaseDirs struct {
 }
 
 // NewCreator returns a BaseDirs that lets you create a database summarising
-// usage information by base directory, taken from the given tree and quotas.
-//
-// Choose splits and minDirs based on how many directories deep you expect data
-// for different groups/users to appear. Eg. if your file structure is
-// `/mounts/[group name]`, that's 2 directories deep and splits 1, minDirs 2
-// might work well. If it's 5 directories deep, splits 4, minDirs 4 might work
-// well.
+// usage information by base directory, taken from the given quotas.
 func NewCreator(dbPath string, quotas *Quotas) (*BaseDirs, error) {
 	mp, err := getMountPoints()
 	if err != nil {
@@ -76,19 +70,28 @@ func (b *BaseDirs) SetMountPoints(mountpoints []string) {
 	b.mountPoints = mountpoints
 }
 
+// SetModTime sets the time used for the new History date. Defaults to
+// time.Now() if not set.
 func (b *BaseDirs) SetModTime(t time.Time) {
 	b.modTime = t
 }
 
+// SummaryWithChildren contains all of the information for a basedirectory and
+// it's direct children.
 type SummaryWithChildren struct {
 	db.DirSummary
 	Children []*SubDir
 }
 
+// AgeDirs contains all of the basedirectory information for a particular user
+// or group at various time intervals.
 type AgeDirs [len(db.DirGUTAges)][]SummaryWithChildren
 
+// IDAgeDirs is a map of all of the user or group base directories at various
+// time intervals.
 type IDAgeDirs map[uint32]*AgeDirs
 
+// Get retrieves the base directory information for a given user or group ID.
 func (i IDAgeDirs) Get(id uint32) *AgeDirs {
 	ap := i[id]
 

@@ -96,6 +96,7 @@ func countFromFullBucketScan(tx *bolt.Tx, bucketName string,
 	return count, sliceLen
 }
 
+// CheckAgeOfKeyIsAll returns true if the key represents the db.DGUTAgeAll key.
 func CheckAgeOfKeyIsAll(key []byte) bool {
 	return bytes.Count(key, bucketKeySeparatorByteSlice) == 1
 }
