@@ -424,3 +424,81 @@ func TestDirGUTA(t *testing.T) {
 		So(m.has("/a/b/c/", 10, 2, db.DGUTAFileTypeCram, db.DGUTAgeAll, 1, 4, atime4, mtime4), ShouldBeTrue)
 	})
 }
+
+func isVCF(name string) bool {
+	t, _ := filenameToType(name)
+
+	return t == db.DGUTAFileTypeVCF
+}
+
+func isVCFGz(name string) bool {
+	t, _ := filenameToType(name)
+
+	return t == db.DGUTAFileTypeVCFGz
+}
+
+func isBCF(name string) bool {
+	t, _ := filenameToType(name)
+
+	return t == db.DGUTAFileTypeBCF
+}
+
+func isSam(name string) bool {
+	t, _ := filenameToType(name)
+
+	return t == db.DGUTAFileTypeSam
+}
+
+func isBam(name string) bool {
+	t, _ := filenameToType(name)
+
+	return t == db.DGUTAFileTypeBam
+}
+
+func isCram(name string) bool {
+	t, _ := filenameToType(name)
+
+	return t == db.DGUTAFileTypeCram
+}
+
+func isFasta(name string) bool {
+	t, _ := filenameToType(name)
+
+	return t == db.DGUTAFileTypeFasta
+}
+
+func isFastq(name string) bool {
+	t, _ := filenameToType(name)
+
+	return t == db.DGUTAFileTypeFastq
+}
+
+func isFastqGz(name string) bool {
+	t, _ := filenameToType(name)
+
+	return t == db.DGUTAFileTypeFastqGz
+}
+
+func isPedBed(name string) bool {
+	t, _ := filenameToType(name)
+
+	return t == db.DGUTAFileTypePedBed
+}
+
+func isCompressed(name string) bool {
+	t, _ := filenameToType(name)
+
+	return t == db.DGUTAFileTypeCompressed
+}
+
+func isText(name string) bool {
+	t, _ := filenameToType(name)
+
+	return t == db.DGUTAFileTypeText
+}
+
+func isLog(name string) bool {
+	t, _ := filenameToType(name)
+
+	return t == db.DGUTAFileTypeLog
+}

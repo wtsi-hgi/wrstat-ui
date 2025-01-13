@@ -38,41 +38,9 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/summary"
 )
 
-// typeCheckers take a path and return true if the path is of their file type.
-type typeChecker func(path string) bool
-
-var typeCheckers = map[db.DirGUTAFileType]typeChecker{ //nolint:gochecknoglobals
-	db.DGUTAFileTypeVCF:        isVCF,
-	db.DGUTAFileTypeVCFGz:      isVCFGz,
-	db.DGUTAFileTypeBCF:        isBCF,
-	db.DGUTAFileTypeSam:        isSam,
-	db.DGUTAFileTypeBam:        isBam,
-	db.DGUTAFileTypeCram:       isCram,
-	db.DGUTAFileTypeFasta:      isFasta,
-	db.DGUTAFileTypeFastq:      isFastq,
-	db.DGUTAFileTypeFastqGz:    isFastqGz,
-	db.DGUTAFileTypePedBed:     isPedBed,
-	db.DGUTAFileTypeCompressed: isCompressed,
-	db.DGUTAFileTypeText:       isText,
-	db.DGUTAFileTypeLog:        isLog,
-}
-
 type Error string
 
 func (e Error) Error() string { return string(e) }
-
-var (
-	tmpSuffixes        = [...]string{".tmp", ".temp"}                                          //nolint:gochecknoglobals
-	tmpPaths           = [...]string{"tmp", "temp"}                                            //nolint:gochecknoglobals
-	tmpPrefixes        = [...]string{".tmp.", "tmp.", ".temp.", "temp."}                       //nolint:gochecknoglobals
-	fastASuffixes      = [...]string{".fasta", ".fa"}                                          //nolint:gochecknoglobals
-	fastQSuffixes      = [...]string{".fastq", ".fq"}                                          //nolint:gochecknoglobals
-	fastQQZSuffixes    = [...]string{".fastq.gz", ".fq.gz"}                                    //nolint:gochecknoglobals
-	pedBedSuffixes     = [...]string{".ped", ".map", ".bed", ".bim", ".fam"}                   //nolint:gochecknoglobals
-	compressedSuffixes = [...]string{".bzip2", ".gz", ".tgz", ".zip", ".xz", ".bgz"}           //nolint:gochecknoglobals
-	textSuffixes       = [...]string{".csv", ".tsv", ".txt", ".text", ".md", ".dat", "readme"} //nolint:gochecknoglobals
-	logSuffixes        = [...]string{".log", ".out", ".o", ".err", ".e", ".oe"}                //nolint:gochecknoglobals
-)
 
 const (
 	maxNumOfGUTAKeys = 34
@@ -116,169 +84,6 @@ func (store gutaStore) sort() GUTAKeys {
 	sort.Sort(keys)
 
 	return keys
-}
-
-// isTemp tells you if path is named like a temporary file.
-func isTempFile(name string) bool {
-	if hasOneOfSuffixes(name, tmpSuffixes[:]) {
-		return true
-	}
-
-	for _, prefix := range tmpPrefixes {
-		if len(name) < len(prefix) {
-			break
-		}
-
-		if caseInsensitiveCompare(name[:len(prefix)], prefix) {
-			return true
-		}
-	}
-
-	return false
-}
-
-func isTempDir(path *summary.DirectoryPath) bool { //nolint:gocognit,gocyclo
-	for path != nil {
-		name := path.Name
-		if name[len(name)-1] == '/' {
-			name = name[:len(name)-1]
-		}
-
-		if hasOneOfSuffixes(name, tmpSuffixes[:]) {
-			return true
-		}
-
-		for _, containing := range tmpPaths {
-			if len(name) == len(containing) && caseInsensitiveCompare(name, containing) {
-				return true
-			}
-		}
-
-		for _, prefix := range tmpPrefixes {
-			if len(name) < len(prefix) {
-				break
-			}
-
-			if caseInsensitiveCompare(name[:len(prefix)], prefix) {
-				return true
-			}
-		}
-
-		path = path.Parent
-	}
-
-	return false
-}
-
-// hasOneOfSuffixes tells you if path has one of the given suffixes.
-func hasOneOfSuffixes(path string, suffixes []string) bool {
-	for _, suffix := range suffixes {
-		if hasSuffix(path, suffix) {
-			return true
-		}
-	}
-
-	return false
-}
-
-// isVCF tells you if path is named like a vcf file.
-func isVCF(path string) bool {
-	return hasSuffix(path, ".vcf")
-}
-
-// caseInsensitiveCompare compares to equal length string for a case insensitive
-// match.
-func caseInsensitiveCompare(a, b string) bool {
-	for n := len(a) - 1; n >= 0; n-- {
-		if charToLower(a[n]) != charToLower(b[n]) {
-			return false
-		}
-	}
-
-	return true
-}
-
-// charToLower returns the lowercase form of an ascii letter passed to it,
-// returning any other character unmodified.
-func charToLower(char byte) byte {
-	if char >= 'A' && char <= 'Z' {
-		char += 'a' - 'A'
-	}
-
-	return char
-}
-
-// hasSuffix tells you if path has the given suffix.
-func hasSuffix(path, suffix string) bool {
-	if len(path) < len(suffix) {
-		return false
-	}
-
-	return caseInsensitiveCompare(path[len(path)-len(suffix):], suffix)
-}
-
-// isVCFGz tells you if path is named like a vcf.gz file.
-func isVCFGz(path string) bool {
-	return hasSuffix(path, ".vcf.gz")
-}
-
-// isBCF tells you if path is named like a bcf file.
-func isBCF(path string) bool {
-	return hasSuffix(path, ".bcf")
-}
-
-// isSam tells you if path is named like a sam file.
-func isSam(path string) bool {
-	return hasSuffix(path, ".sam")
-}
-
-// isBam tells you if path is named like a bam file.
-func isBam(path string) bool {
-	return hasSuffix(path, ".bam")
-}
-
-// isCram tells you if path is named like a cram file.
-func isCram(path string) bool {
-	return hasSuffix(path, ".cram")
-}
-
-// isFasta tells you if path is named like a fasta file.
-func isFasta(path string) bool {
-	return hasOneOfSuffixes(path, fastASuffixes[:])
-}
-
-// isFastq tells you if path is named like a fastq file.
-func isFastq(path string) bool {
-	return hasOneOfSuffixes(path, fastQSuffixes[:])
-}
-
-// isFastqGz tells you if path is named like a fastq.gz file.
-func isFastqGz(path string) bool {
-	return hasOneOfSuffixes(path, fastQQZSuffixes[:])
-}
-
-// isPedBed tells you if path is named like a ped/bed file.
-func isPedBed(path string) bool {
-	return hasOneOfSuffixes(path, pedBedSuffixes[:])
-}
-
-// isCompressed tells you if path is named like a compressed file.
-func isCompressed(path string) bool {
-	if isFastqGz(path) || isVCFGz(path) {
-		return false
-	}
-
-	return hasOneOfSuffixes(path, compressedSuffixes[:])
-}
-
-// isText tells you if path is named like some standard text file.
-func isText(path string) bool {
-	return hasOneOfSuffixes(path, textSuffixes[:])
-}
-
-// isLog tells you if path is named like some standard log file.
-func isLog(path string) bool {
-	return hasOneOfSuffixes(path, logSuffixes[:])
 }
 
 type DB interface {
@@ -452,21 +257,6 @@ func maxInt(ints ...int64) int64 {
 	}
 
 	return maxInt
-}
-
-// pathToTypes determines the filetype of the given path based on its basename,
-// and returns a slice of our DirGUTAFileType. More than one is possible,
-// because a path can be both a temporary file, and another type.
-func filenameToType(name string) (db.DirGUTAFileType, bool) {
-	isTmp := isTempFile(name)
-
-	for ftype, isThisType := range typeCheckers {
-		if isThisType(name) {
-			return ftype, isTmp
-		}
-	}
-
-	return db.DGUTAFileTypeOther, isTmp
 }
 
 // addForEach breaks path into each directory, gets a gutaStore for each and
