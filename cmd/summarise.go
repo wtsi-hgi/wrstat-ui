@@ -251,9 +251,9 @@ func init() {
 
 	summariseCmd.Flags().StringVarP(&defaultDir, "defaultDir", "d", "", "output all summarisers to here")
 	summariseCmd.Flags().StringVarP(&userGroup, "userGroup", "u", "", "usergroup output file")
-	summariseCmd.Flags().StringVarP(&userGroup, "groupUser", "g", "", "groupUser output file")
-	summariseCmd.Flags().StringVarP(&userGroup, "basedirsDB", "b", "", "basedirs output file")
-	summariseCmd.Flags().StringVarP(&userGroup, "tree", "t", "", "tree output dir")
+	summariseCmd.Flags().StringVarP(&groupUser, "groupUser", "g", "", "groupUser output file")
+	summariseCmd.Flags().StringVarP(&basedirsDB, "basedirsDB", "b", "", "basedirs output file")
+	summariseCmd.Flags().StringVarP(&dirgutaDB, "tree", "t", "", "tree output dir")
 
 	summariseCmd.Flags().StringVarP(&quotaPath, "quota", "q", "", "csv of gid,disk,size_quota,inode_quota")
 	summariseCmd.Flags().StringVarP(&ownersPath, "owners", "o", "", "gid,owner csv file")
