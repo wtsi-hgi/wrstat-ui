@@ -665,14 +665,12 @@ func filenameToType(name string) (db.DirGUTAFileType, bool) {
 	var place uint8
 
 	for len(name) > 0 {
-		char := name[len(name)-1]
-		name = name[:len(name)-1]
-		next := filenameSuffixes[place].chars[char]
-
+		next := filenameSuffixes[place].chars[name[len(name)-1]]
 		if next == 0 {
 			break
 		}
 
+		name = name[:len(name)-1]
 		place = next
 	}
 
@@ -688,14 +686,12 @@ func hasTempPrefix(name string) bool {
 	var place uint8
 
 	for len(name) > 0 {
-		char := name[0]
-		name = name[1:]
-		next := tmpPrefixes[place].chars[char]
-
+		next := tmpPrefixes[place].chars[name[0]]
 		if next == 0 {
 			break
 		}
 
+		name = name[1:]
 		place = next
 	}
 
@@ -706,14 +702,12 @@ func isTemp(name string) bool {
 	var place uint8
 
 	for len(name) > 0 {
-		char := name[0]
-		name = name[1:]
-		next := tmpPaths[place].chars[char]
-
+		next := tmpPaths[place].chars[name[0]]
 		if next == 0 {
 			break
 		}
 
+		name = name[1:]
 		place = next
 	}
 
@@ -724,14 +718,12 @@ func hasTempSuffix(name string) bool {
 	var place uint8
 
 	for len(name) > 0 {
-		char := name[len(name)-1]
-		name = name[:len(name)-1]
-		next := tmpSuffixes[place].chars[char]
-
+		next := tmpSuffixes[place].chars[name[len(name)-1]]
 		if next == 0 {
 			break
 		}
 
+		name = name[:len(name)-1]
 		place = next
 	}
 
