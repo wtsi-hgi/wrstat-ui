@@ -201,7 +201,7 @@ func TestMulti(t *testing.T) {
 					mainTable, errr := bdr.GroupUsage(db.DGUTAgeAll)
 					fixUsageTimes(mainTable)
 
-					expectedUsageTable := sortByDatabaseKeyOrder([]*basedirs.Usage{
+					expectedUsageTable := sortByDatabaseKeyOrder([]*basedirs.Usage{ //nolint:dupl
 						{
 							Name: "group1", GID: 1, UIDs: []uint32{101}, Owner: "Alan", BaseDir: projectAA,
 							UsageSize: halfGig + twoGig, QuotaSize: 4000000000, UsageInodes: 2,
@@ -275,7 +275,7 @@ func TestMulti(t *testing.T) {
 					mainTable, errr = bdr.GroupUsage(db.DGUTAgeA3Y)
 					fixUsageTimes(mainTable)
 
-					expectedUsageTable = sortByDatabaseKeyOrder([]*basedirs.Usage{
+					expectedUsageTable = sortByDatabaseKeyOrder([]*basedirs.Usage{ //nolint:dupl
 						{
 							Name: "group1", GID: 1, UIDs: []uint32{101}, Owner: "Alan", BaseDir: projectAA,
 							UsageSize: halfGig + twoGig, QuotaSize: 4000000000, UsageInodes: 2,
@@ -358,7 +358,7 @@ func TestMulti(t *testing.T) {
 					mainTable, errr = bdr.GroupUsage(db.DGUTAgeA7Y)
 					fixUsageTimes(mainTable)
 
-					expectedUsageTable = sortByDatabaseKeyOrder([]*basedirs.Usage{
+					expectedUsageTable = sortByDatabaseKeyOrder([]*basedirs.Usage{ //nolint:dupl
 						{
 							Name: "group1", GID: 1, UIDs: []uint32{101}, Owner: "Alan", BaseDir: projectAA,
 							UsageSize: halfGig + twoGig, QuotaSize: 4000000000, UsageInodes: 2,
@@ -431,7 +431,7 @@ func TestMulti(t *testing.T) {
 					mainTable, errr = bdr.UserUsage(db.DGUTAgeAll)
 					fixUsageTimes(mainTable)
 
-					expectedMainTable := sortByDatabaseKeyOrder([]*basedirs.Usage{
+					expectedMainTable := sortByDatabaseKeyOrder([]*basedirs.Usage{ //nolint:dupl
 						{
 							Name: "88888", UID: 88888, GIDs: []uint32{2}, BaseDir: projectAC1, UsageSize: 40,
 							UsageInodes: 1, Mtime: expectedMtime,
@@ -567,7 +567,7 @@ func TestMulti(t *testing.T) {
 					},
 				}
 
-				Convey("getting subdir information for a group-basedir", func() {
+				Convey("getting subdir information for a group-basedir", func() { //nolint:dupl
 					unknownProject, errr := bdr.GroupSubDirs(1, "unknown", db.DGUTAgeAll)
 					So(errr, ShouldBeNil)
 					So(unknownProject, ShouldBeNil)

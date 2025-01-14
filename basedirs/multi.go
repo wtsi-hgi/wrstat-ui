@@ -34,7 +34,7 @@ import (
 type MultiReader []*BaseDirReader
 
 // OpenMulti opens a BaseDirReader for each path specified.
-func OpenMulti(ownersPath string, paths ...string) (MultiReader, error) {
+func OpenMulti(ownersPath string, paths ...string) (MultiReader, error) { //nolint:funlen
 	mp, err := getMountPoints()
 	if err != nil {
 		return nil, err
@@ -71,8 +71,8 @@ func OpenMulti(ownersPath string, paths ...string) (MultiReader, error) {
 // Close closes each database.
 func (m MultiReader) Close() (err error) {
 	for _, r := range m {
-		if err := r.Close(); err != nil {
-			err = multierror.Append(err, err)
+		if errr := r.Close(); err != nil {
+			err = multierror.Append(err, errr)
 		}
 	}
 
