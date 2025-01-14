@@ -1,3 +1,28 @@
+/*******************************************************************************
+ * Copyright (c) 2025 Genome Research Ltd.
+ *
+ * Author: Michael Woolnough <mw31@sanger.ac.uk>
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining
+ * a copy of this software and associated documentation files (the
+ * "Software"), to deal in the Software without restriction, including
+ * without limitation the rights to use, copy, modify, merge, publish,
+ * distribute, sublicense, and/or sell copies of the Software, and to
+ * permit persons to whom the Software is furnished to do so, subject to
+ * the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included
+ * in all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+ * IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+ * CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+ * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+ * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ ******************************************************************************/
+
 //nolint:mnd
 package dirguta
 
@@ -8,12 +33,12 @@ import (
 
 type chars [256]uint8
 
-type comparitor struct {
+type state struct {
 	chars chars
 	typ   db.DirGUTAFileType
 }
 
-var filenameSuffixes = [...]comparitor{ //nolint:gochecknoglobals
+var filenameSuffixes = [...]state{ //nolint:gochecknoglobals
 	{ // 0
 		chars: chars{
 			'/': 1,  // Directory
@@ -505,7 +530,7 @@ var filenameSuffixes = [...]comparitor{ //nolint:gochecknoglobals
 	},
 }
 
-var tmpPrefixes = [...]comparitor{ //nolint:gochecknoglobals
+var tmpPrefixes = [...]state{ //nolint:gochecknoglobals
 	{ // 0
 		chars: chars{
 			'.': 1,
@@ -549,7 +574,7 @@ var tmpPrefixes = [...]comparitor{ //nolint:gochecknoglobals
 	},
 }
 
-var tmpPaths = [...]comparitor{ //nolint:gochecknoglobals
+var tmpPaths = [...]state{ //nolint:gochecknoglobals
 	{ // 0
 		chars: chars{
 			'T': 1,
@@ -584,7 +609,7 @@ var tmpPaths = [...]comparitor{ //nolint:gochecknoglobals
 	},
 }
 
-var tmpSuffixes = [...]comparitor{ //nolint:gochecknoglobals
+var tmpSuffixes = [...]state{ //nolint:gochecknoglobals
 	{ // 0
 		chars: chars{
 			'P': 1,
@@ -637,21 +662,21 @@ func fillChars(id uint8) chars {
 func filenameToType(name string) (db.DirGUTAFileType, bool) {
 	isTmp := isTempFile(name)
 
-	place := &filenameSuffixes[0]
+	var place uint8
 
 	for len(name) > 0 {
 		char := name[len(name)-1]
 		name = name[:len(name)-1]
-		next := place.chars[char]
+		next := filenameSuffixes[place].chars[char]
 
 		if next == 0 {
 			break
 		}
 
-		place = &filenameSuffixes[next]
+		place = next
 	}
 
-	return place.typ, isTmp
+	return filenameSuffixes[place].typ, isTmp
 }
 
 // isTempFile tells you if path is named like a temporary file.
@@ -660,57 +685,57 @@ func isTempFile(name string) bool {
 }
 
 func hasTempPrefix(name string) bool {
-	place := &tmpPrefixes[0]
+	var place uint8
 
 	for len(name) > 0 {
 		char := name[0]
 		name = name[1:]
-		next := place.chars[char]
+		next := tmpPrefixes[place].chars[char]
 
 		if next == 0 {
 			break
 		}
 
-		place = &tmpPrefixes[next]
+		place = next
 	}
 
-	return place.typ == db.DGUTAFileTypeTemp
+	return tmpPrefixes[place].typ == db.DGUTAFileTypeTemp
 }
 
 func isTemp(name string) bool {
-	place := &tmpPaths[0]
+	var place uint8
 
 	for len(name) > 0 {
 		char := name[0]
 		name = name[1:]
-		next := place.chars[char]
+		next := tmpPaths[place].chars[char]
 
 		if next == 0 {
 			break
 		}
 
-		place = &tmpPaths[next]
+		place = next
 	}
 
-	return place.typ == db.DGUTAFileTypeTemp
+	return tmpPaths[place].typ == db.DGUTAFileTypeTemp
 }
 
 func hasTempSuffix(name string) bool {
-	place := &tmpSuffixes[0]
+	var place uint8
 
 	for len(name) > 0 {
 		char := name[len(name)-1]
 		name = name[:len(name)-1]
-		next := place.chars[char]
+		next := tmpSuffixes[place].chars[char]
 
 		if next == 0 {
 			break
 		}
 
-		place = &tmpSuffixes[next]
+		place = next
 	}
 
-	return place.typ == db.DGUTAFileTypeTemp
+	return tmpSuffixes[place].typ == db.DGUTAFileTypeTemp
 }
 
 func isTempDir(path *summary.DirectoryPath) bool {
