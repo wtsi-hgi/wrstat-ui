@@ -40,8 +40,8 @@ import (
 	"github.com/olekukonko/tablewriter"
 	"github.com/spf13/cobra"
 	gas "github.com/wtsi-hgi/go-authserver"
+	"github.com/wtsi-hgi/wrstat-ui/db"
 	"github.com/wtsi-hgi/wrstat-ui/server"
-	"github.com/wtsi-ssg/wrstat/v5/summary"
 )
 
 type Error string
@@ -171,12 +171,12 @@ with refreshes possible up to 5 days after expiry.
 
 		c, err := gas.NewClientCLI(jwtBasename, serverTokenBasename, url, whereCert, true)
 		if err != nil {
-			die(err.Error())
+			die("%s", err.Error())
 		}
 
 		if whereShowSupergroups {
 			if errs := showSupergroups(c); err != nil {
-				die(errs.Error())
+				die("%s", errs.Error())
 			}
 
 			return
@@ -195,7 +195,7 @@ with refreshes possible up to 5 days after expiry.
 			die("--unused and --unchanged are mutually exclusive")
 		}
 
-		age := summary.DGUTAgeAll
+		age := db.DGUTAgeAll
 		if whereUnused != "" {
 			age = stringToAge("A" + whereUnused)
 		} else if whereUnchanged != "" {
@@ -207,7 +207,7 @@ with refreshes possible up to 5 days after expiry.
 		err = where(c, whereQueryDir, whereGroups, whereSupergroup, whereUsers, whereTypes, age,
 			fmt.Sprintf("%d", whereSplits), whereOrder, minSizeBytes, minAtime, whereJSON)
 		if err != nil {
-			die(err.Error())
+			die("%s", err.Error())
 		}
 	},
 }
@@ -279,7 +279,7 @@ func showSupergroups(c *gas.ClientCLI) error {
 		return err
 	}
 
-	cliPrint(string(m))
+	cliPrint("%s", string(m))
 
 	return nil
 }
@@ -294,50 +294,50 @@ func getSupergroups(c *gas.ClientCLI) (map[string][]string, error) {
 	return areas, nil
 }
 
-func stringToAge(ageStr string) summary.DirGUTAge { //nolint:funlen,gocyclo,cyclop
+func stringToAge(ageStr string) db.DirGUTAge { //nolint:funlen,gocyclo,cyclop
 	switch ageStr {
 	case "A1M":
-		return summary.DGUTAgeA1M
+		return db.DGUTAgeA1M
 	case "A2M":
-		return summary.DGUTAgeA2M
+		return db.DGUTAgeA2M
 	case "A6M":
-		return summary.DGUTAgeA6M
+		return db.DGUTAgeA6M
 	case "A1Y":
-		return summary.DGUTAgeA1Y
+		return db.DGUTAgeA1Y
 	case "A2Y":
-		return summary.DGUTAgeA2Y
+		return db.DGUTAgeA2Y
 	case "A3Y":
-		return summary.DGUTAgeA3Y
+		return db.DGUTAgeA3Y
 	case "A5Y":
-		return summary.DGUTAgeA5Y
+		return db.DGUTAgeA5Y
 	case "A7Y":
-		return summary.DGUTAgeA7Y
+		return db.DGUTAgeA7Y
 	case "M1M":
-		return summary.DGUTAgeM1M
+		return db.DGUTAgeM1M
 	case "M2M":
-		return summary.DGUTAgeM2M
+		return db.DGUTAgeM2M
 	case "M6M":
-		return summary.DGUTAgeM6M
+		return db.DGUTAgeM6M
 	case "M1Y":
-		return summary.DGUTAgeM1Y
+		return db.DGUTAgeM1Y
 	case "M2Y":
-		return summary.DGUTAgeM2Y
+		return db.DGUTAgeM2Y
 	case "M3Y":
-		return summary.DGUTAgeM3Y
+		return db.DGUTAgeM3Y
 	case "M5Y":
-		return summary.DGUTAgeM5Y
+		return db.DGUTAgeM5Y
 	case "M7Y":
-		return summary.DGUTAgeM7Y
+		return db.DGUTAgeM7Y
 	}
 
 	die("invalid age")
 
-	return summary.DGUTAgeAll
+	return db.DGUTAgeAll
 }
 
 // where does the main job of querying the server to answer where the data is on
 // disk.
-func where(c *gas.ClientCLI, dir, groups, supergroup, users, types string, age summary.DirGUTAge,
+func where(c *gas.ClientCLI, dir, groups, supergroup, users, types string, age db.DirGUTAge,
 	splits, order string, minSizeBytes uint64, minAtime time.Time, json bool,
 ) error {
 	var err error
@@ -352,7 +352,7 @@ func where(c *gas.ClientCLI, dir, groups, supergroup, users, types string, age s
 	}
 
 	if json {
-		cliPrint(string(body))
+		cliPrint("%s", string(body))
 
 		return nil
 	}

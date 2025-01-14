@@ -32,13 +32,12 @@ import (
 
 	"github.com/gin-gonic/gin"
 	gas "github.com/wtsi-hgi/go-authserver"
-	"github.com/wtsi-ssg/wrstat/v5/dguta"
-	"github.com/wtsi-ssg/wrstat/v5/summary"
+	"github.com/wtsi-hgi/wrstat-ui/db"
 )
 
 // makeFilterFromContext extracts the user's filter requests, and returns a tree
 // filter.
-func makeFilterFromContext(c *gin.Context) (*dguta.Filter, error) {
+func makeFilterFromContext(c *gin.Context) (*db.Filter, error) {
 	groups, users, types, age := getFilterArgsFromContext(c)
 
 	filterGIDs, err := getWantedIDs(groups, groupNameToGID)
@@ -109,7 +108,7 @@ func idStringsToInts(idString string) uint32 {
 	return uint32(id)
 }
 
-func makeFilterGivenGIDs(filterGIDs []uint32, users, types, age string) (*dguta.Filter, error) {
+func makeFilterGivenGIDs(filterGIDs []uint32, users, types, age string) (*db.Filter, error) {
 	filterUIDs, err := userIDsFromNames(users)
 	if err != nil {
 		return nil, err
@@ -133,7 +132,7 @@ func userIDsFromNames(users string) ([]uint32, error) {
 }
 
 // makeTreeFilter creates a filter from string args.
-func makeTreeFilter(gids, uids []uint32, types, age string) (*dguta.Filter, error) {
+func makeTreeFilter(gids, uids []uint32, types, age string) (*db.Filter, error) {
 	filter := makeTreeGroupFilter(gids)
 
 	addUsersToFilter(filter, uids)
@@ -149,16 +148,16 @@ func makeTreeFilter(gids, uids []uint32, types, age string) (*dguta.Filter, erro
 }
 
 // makeTreeGroupFilter creates a filter for groups.
-func makeTreeGroupFilter(gids []uint32) *dguta.Filter {
+func makeTreeGroupFilter(gids []uint32) *db.Filter {
 	if len(gids) == 0 {
-		return &dguta.Filter{}
+		return &db.Filter{}
 	}
 
-	return &dguta.Filter{GIDs: gids}
+	return &db.Filter{GIDs: gids}
 }
 
 // addUsersToFilter adds a filter for users to the given filter.
-func addUsersToFilter(filter *dguta.Filter, uids []uint32) {
+func addUsersToFilter(filter *db.Filter, uids []uint32) {
 	if len(uids) == 0 {
 		return
 	}
@@ -167,16 +166,16 @@ func addUsersToFilter(filter *dguta.Filter, uids []uint32) {
 }
 
 // addTypesToFilter adds a filter for types to the given filter.
-func addTypesToFilter(filter *dguta.Filter, types string) error {
+func addTypesToFilter(filter *db.Filter, types string) error {
 	if types == "" {
 		return nil
 	}
 
 	tnames := splitCommaSeparatedString(types)
-	fts := make([]summary.DirGUTAFileType, len(tnames))
+	fts := make([]db.DirGUTAFileType, len(tnames))
 
 	for i, name := range tnames {
-		ft, err := summary.FileTypeStringToDirGUTAFileType(name)
+		ft, err := db.FileTypeStringToDirGUTAFileType(name)
 		if err != nil {
 			return err
 		}
@@ -190,12 +189,12 @@ func addTypesToFilter(filter *dguta.Filter, types string) error {
 }
 
 // addAgeToFilter adds a filter for age to the given filter.
-func addAgeToFilter(filter *dguta.Filter, ageStr string) error {
+func addAgeToFilter(filter *db.Filter, ageStr string) error {
 	if ageStr == "" || ageStr == "0" {
 		return nil
 	}
 
-	age, err := summary.AgeStringToDirGUTAge(ageStr)
+	age, err := db.AgeStringToDirGUTAge(ageStr)
 	if err != nil {
 		return err
 	}
@@ -249,7 +248,7 @@ func (s *Server) getUserFromContext(c *gin.Context) *gas.User {
 
 // makeRestrictedFilterFromContext extracts the user's filter requests, as
 // restricted by their jwt, and returns a tree filter.
-func (s *Server) makeRestrictedFilterFromContext(c *gin.Context) (*dguta.Filter, error) {
+func (s *Server) makeRestrictedFilterFromContext(c *gin.Context) (*db.Filter, error) {
 	groups, users, types, age := getFilterArgsFromContext(c)
 
 	restrictedGIDs, err := s.getRestrictedGIDs(c, groups)

@@ -35,9 +35,9 @@ import (
 	"time"
 
 	gas "github.com/wtsi-hgi/go-authserver"
-	"github.com/wtsi-ssg/wrstat/v5/basedirs"
-	"github.com/wtsi-ssg/wrstat/v5/dguta"
-	"github.com/wtsi-ssg/wrstat/v5/watch"
+	"github.com/wtsi-hgi/wrstat-ui/basedirs"
+	"github.com/wtsi-hgi/wrstat-ui/db"
+	"github.com/wtsi-hgi/wrstat-ui/watch"
 )
 
 //go:embed static
@@ -100,7 +100,7 @@ const (
 // package's database, and a website that displays the information nicely.
 type Server struct {
 	gas.Server
-	tree           *dguta.Tree
+	tree           *db.Tree
 	treeMutex      sync.RWMutex
 	whiteCB        WhiteListCallback
 	uidToNameCache map[uint32]string

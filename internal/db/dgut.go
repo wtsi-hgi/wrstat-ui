@@ -29,16 +29,18 @@
 package internaldb
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"testing"
-	"time"
 
+	"github.com/wtsi-hgi/wrstat-ui/db"
 	internaldata "github.com/wtsi-hgi/wrstat-ui/internal/data"
 	"github.com/wtsi-hgi/wrstat-ui/internal/fs"
-	"github.com/wtsi-ssg/wrstat/v5/dguta"
+	"github.com/wtsi-hgi/wrstat-ui/stats"
+	"github.com/wtsi-hgi/wrstat-ui/summary"
+	"github.com/wtsi-hgi/wrstat-ui/summary/dirguta"
 )
 
 const (
@@ -51,7 +53,7 @@ const (
 // CreateExampleDGUTADBCustomIDs creates a temporary dguta.db from some example
 // data that uses the given uid and gids, and returns the path to the database
 // directory.
-func CreateExampleDGUTADBCustomIDs(t *testing.T, uid, gidA, gidB string, refTime int) (string, error) {
+func CreateExampleDGUTADBCustomIDs(t *testing.T, uid, gidA, gidB string, refTime int64) (string, error) {
 	t.Helper()
 
 	dgutaData := exampleDGUTAData(t, uid, gidA, gidB, refTime)
@@ -61,7 +63,7 @@ func CreateExampleDGUTADBCustomIDs(t *testing.T, uid, gidA, gidB string, refTime
 
 // CreateCustomDGUTADB creates a dguta database in a temp directory using the
 // given dguta data, and returns the database directory.
-func CreateCustomDGUTADB(t *testing.T, dgutaData string) (string, error) {
+func CreateCustomDGUTADB(t *testing.T, data io.Reader) (string, error) {
 	t.Helper()
 
 	dir, err := createExampleDgutaDir(t)
@@ -69,12 +71,21 @@ func CreateCustomDGUTADB(t *testing.T, dgutaData string) (string, error) {
 		return dir, err
 	}
 
-	data := strings.NewReader(dgutaData)
-	db := dguta.NewDB(dir)
+	d := db.NewDB(dir)
+	d.SetBatchSize(exampleDBBatchSize)
 
-	err = db.Store(data, exampleDBBatchSize)
+	if err = d.CreateDB(); err != nil {
+		return dir, err
+	}
 
-	return dir, err
+	s := summary.NewSummariser(stats.NewStatsParser(data))
+	s.AddDirectoryOperation(dirguta.NewDirGroupUserTypeAge(d))
+
+	if err := s.Summarise(); err != nil {
+		return dir, err
+	}
+
+	return dir, d.Close()
 }
 
 // createExampleDgutaDir creates a temp directory structure to hold dguta db
@@ -91,46 +102,23 @@ func createExampleDgutaDir(t *testing.T) (string, error) {
 
 // exampleDGUTAData is some example DGUTA data that uses the given uid and gids,
 // along with root's uid.
-func exampleDGUTAData(t *testing.T, uidStr, gidAStr, gidBStr string, refTime int) string {
+func exampleDGUTAData(t *testing.T, uidStr, gidAStr, gidBStr string, refTime int64) io.Reader {
 	t.Helper()
 
-	uid, err := strconv.ParseUint(uidStr, 10, 64)
+	uid, err := strconv.ParseUint(uidStr, 10, 32)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	gidA, err := strconv.ParseUint(gidAStr, 10, 64)
+	gidA, err := strconv.ParseUint(gidAStr, 10, 32)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	gidB, err := strconv.ParseUint(gidBStr, 10, 64)
+	gidB, err := strconv.ParseUint(gidBStr, 10, 32)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	return internaldata.TestDGUTAData(t, internaldata.CreateDefaultTestData(int(gidA), int(gidB), 0, int(uid), 0, refTime))
-}
-
-func CreateDGUTADBFromFakeFiles(t *testing.T, files []internaldata.TestFile,
-	modtime ...time.Time,
-) (*dguta.Tree, string, error) {
-	t.Helper()
-
-	dgutaData := internaldata.TestDGUTAData(t, files)
-
-	dbPath, err := CreateCustomDGUTADB(t, dgutaData)
-	if err != nil {
-		t.Fatalf("could not create dguta db: %s", err)
-	}
-
-	if len(modtime) == 1 {
-		if err = fs.Touch(dbPath, modtime[0]); err != nil {
-			return nil, "", err
-		}
-	}
-
-	tree, err := dguta.NewTree(dbPath)
-
-	return tree, dbPath, err
+	return internaldata.CreateDefaultTestData(uint32(gidA), uint32(gidB), 0, uint32(uid), 0, refTime).AsReader()
 }
