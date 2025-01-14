@@ -33,7 +33,6 @@ import (
 	"io"
 	"log/syslog"
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/inconshreveable/log15"
@@ -61,6 +60,7 @@ var (
 	oktaOAuthClientSecret string
 	areasPath             string
 	ownersPath            string
+	basedirsDBPath        string
 )
 
 // serverCmd represents the server command.
@@ -109,8 +109,8 @@ previous run's database files. It will use the mtime of the file as the data
 creation time in reports.
 `,
 	Run: func(cmd *cobra.Command, args []string) {
-		if len(args) != 1 {
-			die("you must supply the path to your 'wrstat multi -f' output directory")
+		if len(args) < 1 {
+			die("you must supply the path(s) to your 'wrstat summary' dirguta directories")
 		}
 
 		if serverBind == "" {
@@ -127,6 +127,10 @@ creation time in reports.
 
 		if ownersPath == "" {
 			die("you must supply --owners")
+		}
+
+		if basedirsDBPath == "" {
+			die("you must supply --basedirs")
 		}
 
 		checkOAuthArgs()
@@ -153,17 +157,8 @@ creation time in reports.
 		}
 
 		info("opening databases, please wait...")
-		dbPaths, err := server.FindLatestDgutaDirs(args[0], dgutaDBsSuffix)
-		if err != nil {
-			die("failed to find database paths: %s", err)
-		}
 
-		basedirsDBPath, err := server.FindLatestBasedirsDB(args[0], basedirBasename)
-		if err != nil {
-			die("failed to find basedirs database path: %s", err)
-		}
-
-		err = s.LoadDGUTADBs(dbPaths...)
+		err = s.LoadDGUTADBs(args...)
 		if err != nil {
 			die("failed to load database: %s", err)
 		}
@@ -173,17 +168,17 @@ creation time in reports.
 			die("failed to load database: %s", err)
 		}
 
-		sentinel := filepath.Join(args[0], dgutaDBsSentinelBasename)
+		// sentinel := filepath.Join(args[0], dgutaDBsSentinelBasename)
 
-		err = s.EnableDGUTADBReloading(sentinel, args[0], dgutaDBsSuffix, sentinelPollFrequencty)
-		if err != nil {
-			die("failed to set up database reloading: %s", err)
-		}
+		// err = s.EnableDGUTADBReloading(sentinel, args[0], dgutaDBsSuffix, sentinelPollFrequencty)
+		// if err != nil {
+		// 	die("failed to set up database reloading: %s", err)
+		// }
 
-		err = s.EnableBasedirDBReloading(sentinel, args[0], basedirBasename, sentinelPollFrequencty)
-		if err != nil {
-			die("failed to set up database reloading: %s", err)
-		}
+		// err = s.EnableBasedirDBReloading(sentinel, args[0], basedirBasename, sentinelPollFrequencty)
+		// if err != nil {
+		// 	die("failed to set up database reloading: %s", err)
+		// }
 
 		err = s.AddTreePage()
 		if err != nil {
@@ -211,6 +206,8 @@ func init() {
 		"path to certificate file")
 	serverCmd.Flags().StringVarP(&serverKey, "key", "k", "",
 		"path to key file")
+	serverCmd.Flags().StringVar(&basedirsDBPath, "basedirs", "",
+		"path to basedirs database")
 	serverCmd.Flags().StringVar(&oktaURL, "okta_url", "",
 		"Okta application URL, eg host:port (defaults to --bind)")
 	serverCmd.Flags().StringVar(&oktaOAuthIssuer, "okta_issuer", os.Getenv("OKTA_OAUTH2_ISSUER"),
