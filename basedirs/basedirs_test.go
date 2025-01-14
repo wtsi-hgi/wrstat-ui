@@ -1225,14 +1225,16 @@ func fixSubDirTimes(sds []*basedirs.SubDir) {
 	}
 }
 
-func sortByDatabaseKeyOrder(usageTable []*basedirs.Usage) {
+func sortByDatabaseKeyOrder(usageTable []*basedirs.Usage) []*basedirs.Usage {
 	if usageTable[0].UID != 0 {
 		sortByUID(usageTable)
 
-		return
+		return usageTable
 	}
 
 	sortByGID(usageTable)
+
+	return usageTable
 }
 
 func idToByteSlice(id uint32) []byte {
