@@ -188,7 +188,7 @@ func (b *BaseDirs) CopyHistoryFrom(db *bolt.DB) (err error) {
 	}
 
 	defer func() {
-		if errr := db.Close(); err == nil {
+		if errr := bd.Close(); err == nil {
 			err = errr
 		}
 	}()

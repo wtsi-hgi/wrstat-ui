@@ -452,6 +452,32 @@ func TestBaseDirs(t *testing.T) {
 						So(err, ShouldBeNil)
 					})
 
+					Convey("you can copy the History to another database", func() {
+						db, err := basedirs.OpenDBRO(dbPath)
+						So(err, ShouldBeNil)
+
+						tmpDir := t.TempDir()
+						newDB := filepath.Join(tmpDir, "basedirs")
+
+						bd, err := basedirs.NewCreator(newDB, quotas)
+						So(err, ShouldBeNil)
+
+						err = bd.CopyHistoryFrom(db)
+						So(err, ShouldBeNil)
+
+						bdr, err := basedirs.NewReader(newDB, ownersPath)
+						So(err, ShouldBeNil)
+
+						bdr.SetMountPoints(mps)
+
+						history, errr := bdr.History(1, projectA)
+						fixHistoryTimes(history)
+
+						So(errr, ShouldBeNil)
+						So(len(history), ShouldEqual, 1)
+						So(history, ShouldResemble, []basedirs.History{expectedAHistory})
+					})
+
 					Convey("Then you can add and retrieve a new day's usage and quota", func() {
 						_, root = internaldata.FakeFilesForDGUTADBForBasedirsTesting(gid, uid,
 							"lustre", 2, halfGig, twoGig, false, refTime)
