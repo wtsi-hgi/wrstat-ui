@@ -180,3 +180,31 @@ func calculateTrend(maxV uint64, latestTime, oldestTime time.Time, latestValue, 
 
 	return t
 }
+
+func (b *BaseDirs) CopyHistoryFrom(db *bolt.DB) (err error) {
+	bd, err := openDB(b.dbPath)
+	if err != nil {
+		return err
+	}
+
+	defer func() {
+		if errr := db.Close(); err == nil {
+			err = errr
+		}
+	}()
+
+	return bd.Update(func(dest *bolt.Tx) error {
+		key := []byte(GroupHistoricalBucket)
+
+		bucket, err := dest.CreateBucketIfNotExists(key)
+		if err != nil {
+			return err
+		}
+
+		return db.View(func(source *bolt.Tx) error {
+			return source.Bucket(key).ForEach(func(k, v []byte) error {
+				return bucket.Put(k, v)
+			})
+		})
+	})
+}
