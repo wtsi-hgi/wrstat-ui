@@ -453,19 +453,19 @@ func TestBaseDirs(t *testing.T) {
 					})
 
 					Convey("you can copy the History to another database", func() {
-						db, err := basedirs.OpenDBRO(dbPath)
-						So(err, ShouldBeNil)
+						db, errr := basedirs.OpenDBRO(dbPath)
+						So(errr, ShouldBeNil)
 
 						tmpDir := t.TempDir()
 						newDB := filepath.Join(tmpDir, "basedirs")
 
-						bd, err := basedirs.NewCreator(newDB, quotas)
-						So(err, ShouldBeNil)
+						bd, errr := basedirs.NewCreator(newDB, quotas)
+						So(errr, ShouldBeNil)
 
 						err = bd.CopyHistoryFrom(db)
 						So(err, ShouldBeNil)
 
-						bdr, err := basedirs.NewReader(newDB, ownersPath)
+						bdr, err = basedirs.NewReader(newDB, ownersPath)
 						So(err, ShouldBeNil)
 
 						bdr.SetMountPoints(mps)
