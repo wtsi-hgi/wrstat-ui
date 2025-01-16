@@ -423,6 +423,8 @@ func TestDirGUTA(t *testing.T) {
 		So(m.has("/a/b/c/", 2, 10, db.DGUTAFileTypeCram, db.DGUTAgeAll, 2, 5, atime3, mtime2), ShouldBeTrue)
 		So(m.has("/a/b/c/", 10, 2, db.DGUTAFileTypeCram, db.DGUTAgeAll, 1, 4, atime4, mtime4), ShouldBeTrue)
 		So(m.has("/", 10, 2, db.DGUTAFileTypeCram, db.DGUTAgeAll, 1, 4, atime4, mtime4), ShouldBeTrue)
+		So(m.has("/a/", 10, 2, db.DGUTAFileTypeCram, db.DGUTAgeAll, 1, 4, atime4, mtime4), ShouldBeTrue)
+		So(m.has("/a/b/", 10, 2, db.DGUTAFileTypeCram, db.DGUTAgeAll, 1, 4, atime4, mtime4), ShouldBeTrue)
 	})
 }
 
