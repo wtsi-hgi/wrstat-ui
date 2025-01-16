@@ -206,7 +206,7 @@ func setSummarisers(s *summary.Summariser) (func() error, error) { //nolint:goco
 	}
 
 	if basedirsDB != "" {
-		if err := addBasedirsSummariser(s, basedirsDB, quotaPath, basedirsHistoryDB, basedirsConfig); err != nil {
+		if err := addBasedirsSummariser(s, basedirsDB, basedirsHistoryDB, quotaPath, basedirsConfig); err != nil {
 			return nil, err
 		}
 	}
