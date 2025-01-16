@@ -371,7 +371,7 @@ func (d *DirGroupUserTypeAge) getGUTA(guta gutaKey) *db.GUTA {
 }
 
 func (d *DirGroupUserTypeAge) outputRoot(dguta db.RecordDGUTA) error {
-	for thisDir := d.thisDir; thisDir != nil; thisDir = thisDir.Parent {
+	for thisDir := d.thisDir; thisDir.Parent != nil; thisDir = thisDir.Parent {
 		dguta.Dir = thisDir.Parent
 		dguta.Children = []string{thisDir.Name}
 
