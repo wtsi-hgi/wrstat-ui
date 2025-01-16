@@ -382,25 +382,25 @@ func TestDirGUTA(t *testing.T) {
 	})
 
 	Convey("You can summarise data with different groups and users", t, func() {
-		f := statsdata.NewRoot("/", 0)
+		f := statsdata.NewRoot("/a/b/", 0)
 
 		atime1 := int64(100)
 		mtime1 := int64(0)
-		statsdata.AddFile(f, "a/b/c/3.bam", 2, 2, 1, atime1, mtime1)
+		statsdata.AddFile(f, "c/3.bam", 2, 2, 1, atime1, mtime1)
 
 		atime2 := int64(250)
 		mtime2 := int64(250)
-		statsdata.AddFile(f, "a/b/c/7.cram", 10, 2, 2, atime2, mtime2)
+		statsdata.AddFile(f, "c/7.cram", 10, 2, 2, atime2, mtime2)
 
 		atime3 := int64(201)
 		mtime3 := int64(200)
-		statsdata.AddFile(f, "a/b/c/d/9.cram", 10, 2, 3, atime3, mtime3)
+		statsdata.AddFile(f, "c/d/9.cram", 10, 2, 3, atime3, mtime3)
 
 		atime4 := int64(300)
 		mtime4 := int64(301)
-		statsdata.AddFile(f, "a/b/c/8.cram", 2, 10, 4, atime4, mtime4)
+		statsdata.AddFile(f, "c/8.cram", 2, 10, 4, atime4, mtime4)
 
-		dDir := f.AddDirectory("a").AddDirectory("b").AddDirectory("c").AddDirectory("d")
+		dDir := f.AddDirectory("c").AddDirectory("d")
 		dDir.UID = 10
 		dDir.GID = 2
 		dDir.ATime = 50
@@ -422,6 +422,9 @@ func TestDirGUTA(t *testing.T) {
 		So(m.hasNot("/a/b/c/", 2, 2, db.DGUTAFileTypeCram, db.DGUTAgeAll), ShouldBeTrue)
 		So(m.has("/a/b/c/", 2, 10, db.DGUTAFileTypeCram, db.DGUTAgeAll, 2, 5, atime3, mtime2), ShouldBeTrue)
 		So(m.has("/a/b/c/", 10, 2, db.DGUTAFileTypeCram, db.DGUTAgeAll, 1, 4, atime4, mtime4), ShouldBeTrue)
+		So(m.has("/", 10, 2, db.DGUTAFileTypeCram, db.DGUTAgeAll, 1, 4, atime4, mtime4), ShouldBeTrue)
+		So(m.has("/a/", 10, 2, db.DGUTAFileTypeCram, db.DGUTAgeAll, 1, 4, atime4, mtime4), ShouldBeTrue)
+		So(m.has("/a/b/", 10, 2, db.DGUTAFileTypeCram, db.DGUTAgeAll, 1, 4, atime4, mtime4), ShouldBeTrue)
 	})
 }
 
