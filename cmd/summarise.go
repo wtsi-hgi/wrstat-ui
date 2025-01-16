@@ -64,9 +64,43 @@ const dbBatchSize = 10000
 var summariseCmd = &cobra.Command{
 	Use:   "summarise",
 	Short: "Summarise stat data",
-	Long: `Summarise state data in to dirguta database, basedirs database, ` +
+	Long: `Summarise stat data in to dirguta database, basedirs database, ` +
 		`and usergroup/groupuser files.
-	`,
+
+Summarise processes stat files from the output of 'wrstat multi' into different
+summaries.
+
+Summarise takes the following arguments
+
+  --defaultDir,-d
+	output all summarisers to here with the default names.
+
+  --userGroup,-u
+	usergroup output file. Defaults to DEFAULTDIR/usergroup, if --defaultDir is set.
+
+  --groupUser,-g
+	groupUser output file. Defaults to DEFAULTDIR/groupuser, if --defaultDir is set.
+
+  --basedirsDB,-b
+	basedirs output file. Defaults to DEFAULTDIR/basedirs, if --defaultDir is set.
+
+  --tree,-t
+	tree output dir. Defaults to DEFAULTDIR/dirguta, if --defaultDir is set.
+
+  --basedirsHistoryDB,-h
+	basedirs file containing previous history.
+
+  --quota,-q
+	Required for basedirs, format is a csv of gid,disk,size_quota,inode_quota
+
+  --config,-c
+	Required for basedirs, path to basedirs config file.
+
+An example command would be the following:
+
+	wrstat-ui summarise -d /path/to/output -h /path/to/previous/basedirs.db -q ` +
+		`/path/to/quota.file -c /path/to/basedirs.config /path/to/stats.file
+`,
 	Run: func(_ *cobra.Command, args []string) {
 		if err := run(args); err != nil {
 			die("%s", err)
@@ -297,8 +331,6 @@ func init() {
 	summariseCmd.Flags().StringVarP(&basedirsHistoryDB, "basedirsHistoryDB", "h", "",
 		"basedirs file containing previous history")
 	summariseCmd.Flags().StringVarP(&dirgutaDB, "tree", "t", "", "tree output dir")
-
 	summariseCmd.Flags().StringVarP(&quotaPath, "quota", "q", "", "csv of gid,disk,size_quota,inode_quota")
-	summariseCmd.Flags().StringVarP(&ownersPath, "owners", "o", "", "gid,owner csv file")
 	summariseCmd.Flags().StringVarP(&basedirsConfig, "config", "c", "", "path to basedirs config file")
 }
