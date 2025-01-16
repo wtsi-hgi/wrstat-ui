@@ -103,6 +103,7 @@ type DirGroupUserTypeAge struct {
 	thisDir  *summary.DirectoryPath
 	children []string
 	now      int64
+	isRoot   bool
 }
 
 // NewDirGroupUserTypeAge returns a DirGroupUserTypeAge.
@@ -113,11 +114,17 @@ func NewDirGroupUserTypeAge(db DB) summary.OperationGenerator {
 func newDirGroupUserTypeAge(db DB, refTime int64) summary.OperationGenerator {
 	now := time.Now().Unix()
 
+	hasRoot := false
+
 	return func() summary.Operation {
+		root := !hasRoot
+		hasRoot = true
+
 		return &DirGroupUserTypeAge{
-			db:    db,
-			store: gutaStore{make(map[gutaKey]*summary.SummaryWithTimes), refTime},
-			now:   now,
+			db:     db,
+			store:  gutaStore{make(map[gutaKey]*summary.SummaryWithTimes), refTime},
+			now:    now,
+			isRoot: root,
 		}
 	}
 }
@@ -330,30 +337,57 @@ func (d *DirGroupUserTypeAge) Output() error {
 	dguta := db.RecordDGUTA{Dir: d.thisDir, Children: d.children}
 
 	for _, guta := range dgutas {
-		s := d.store.sumMap[guta]
-
-		dguta.GUTAs = append(dguta.GUTAs, &db.GUTA{
-			GID:   guta.GID,
-			UID:   guta.UID,
-			FT:    guta.FileType,
-			Age:   guta.Age,
-			Count: uint64(s.Count), //nolint:gosec
-			Size:  uint64(s.Size),  //nolint:gosec
-			Atime: s.Atime,
-			Mtime: s.Mtime,
-		})
+		dguta.GUTAs = append(dguta.GUTAs, d.getGUTA(guta))
 	}
 
 	if err := d.db.Add(dguta); err != nil {
 		return err
 	}
 
+	if d.isRoot {
+		if err := d.outputRoot(dguta); err != nil {
+			return err
+		}
+	}
+
+	d.clear()
+
+	return nil
+}
+
+func (d *DirGroupUserTypeAge) getGUTA(guta gutaKey) *db.GUTA {
+	s := d.store.sumMap[guta]
+
+	return &db.GUTA{
+		GID:   guta.GID,
+		UID:   guta.UID,
+		FT:    guta.FileType,
+		Age:   guta.Age,
+		Count: uint64(s.Count), //nolint:gosec
+		Size:  uint64(s.Size),  //nolint:gosec
+		Atime: s.Atime,
+		Mtime: s.Mtime,
+	}
+}
+
+func (d *DirGroupUserTypeAge) outputRoot(dguta db.RecordDGUTA) error {
+	for thisDir := d.thisDir; thisDir != nil; thisDir = thisDir.Parent {
+		dguta.Dir = thisDir.Parent
+		dguta.Children = []string{thisDir.Name}
+
+		if err := d.db.Add(dguta); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (d *DirGroupUserTypeAge) clear() {
 	for k := range d.store.sumMap {
 		delete(d.store.sumMap, k)
 	}
 
 	d.thisDir = nil
 	d.children = nil
-
-	return nil
 }
