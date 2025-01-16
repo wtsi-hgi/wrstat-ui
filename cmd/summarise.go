@@ -87,7 +87,7 @@ Summarise takes the following arguments
   --tree,-t
 	tree output dir. Defaults to DEFAULTDIR/dirguta, if --defaultDir is set.
 
-  --basedirsHistoryDB,-h
+  --basedirsHistoryDB,-s
 	basedirs file containing previous history.
 
   --quota,-q
@@ -96,9 +96,11 @@ Summarise takes the following arguments
   --config,-c
 	Required for basedirs, path to basedirs config file.
 
+NB: All existing output files will be deleted or truncated during initialisation.
+
 An example command would be the following:
 
-	wrstat-ui summarise -d /path/to/output -h /path/to/previous/basedirs.db -q ` +
+	wrstat-ui summarise -d /path/to/output -s /path/to/previous/basedirs.db -q ` +
 		`/path/to/quota.file -c /path/to/basedirs.config /path/to/stats.file
 `,
 	Run: func(_ *cobra.Command, args []string) {
@@ -328,7 +330,7 @@ func init() {
 	summariseCmd.Flags().StringVarP(&userGroup, "userGroup", "u", "", "usergroup output file")
 	summariseCmd.Flags().StringVarP(&groupUser, "groupUser", "g", "", "groupUser output file")
 	summariseCmd.Flags().StringVarP(&basedirsDB, "basedirsDB", "b", "", "basedirs output file")
-	summariseCmd.Flags().StringVarP(&basedirsHistoryDB, "basedirsHistoryDB", "h", "",
+	summariseCmd.Flags().StringVarP(&basedirsHistoryDB, "basedirsHistoryDB", "s", "",
 		"basedirs file containing previous history")
 	summariseCmd.Flags().StringVarP(&dirgutaDB, "tree", "t", "", "tree output dir")
 	summariseCmd.Flags().StringVarP(&quotaPath, "quota", "q", "", "csv of gid,disk,size_quota,inode_quota")
