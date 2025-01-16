@@ -29,6 +29,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -46,11 +47,12 @@ import (
 )
 
 var (
-	defaultDir string
-	userGroup  string
-	groupUser  string
-	basedirsDB string
-	dirgutaDB  string
+	defaultDir        string
+	userGroup         string
+	groupUser         string
+	basedirsDB        string
+	basedirsHistoryDB string
+	dirgutaDB         string
 
 	quotaPath      string
 	basedirsConfig string
@@ -62,9 +64,45 @@ const dbBatchSize = 10000
 var summariseCmd = &cobra.Command{
 	Use:   "summarise",
 	Short: "Summarise stat data",
-	Long: `Summarise state data in to dirguta database, basedirs database, ` +
+	Long: `Summarise stat data in to dirguta database, basedirs database, ` +
 		`and usergroup/groupuser files.
-	`,
+
+Summarise processes stat files from the output of 'wrstat multi' into different
+summaries.
+
+Summarise takes the following arguments
+
+  --defaultDir,-d
+	output all summarisers to here with the default names.
+
+  --userGroup,-u
+	usergroup output file. Defaults to DEFAULTDIR/usergroup, if --defaultDir is set.
+
+  --groupUser,-g
+	groupUser output file. Defaults to DEFAULTDIR/groupuser, if --defaultDir is set.
+
+  --basedirsDB,-b
+	basedirs output file. Defaults to DEFAULTDIR/basedirs, if --defaultDir is set.
+
+  --tree,-t
+	tree output dir. Defaults to DEFAULTDIR/dirguta, if --defaultDir is set.
+
+  --basedirsHistoryDB,-s
+	basedirs file containing previous history.
+
+  --quota,-q
+	Required for basedirs, format is a csv of gid,disk,size_quota,inode_quota
+
+  --config,-c
+	Required for basedirs, path to basedirs config file.
+
+NB: All existing output files will be deleted or truncated during initialisation.
+
+An example command would be the following:
+
+	wrstat-ui summarise -d /path/to/output -s /path/to/previous/basedirs.db -q ` +
+		`/path/to/quota.file -c /path/to/basedirs.config /path/to/stats.file
+`,
 	Run: func(_ *cobra.Command, args []string) {
 		if err := run(args); err != nil {
 			die("%s", err)
@@ -84,9 +122,7 @@ func run(args []string) (err error) {
 
 	s := summary.NewSummariser(stats.NewStatsParser(r))
 
-	if err = setArgsDefaults(); err != nil {
-		return err
-	}
+	setArgsDefaults()
 
 	if fn, err := setSummarisers(s); err != nil { //nolint:nestif
 		return err
@@ -134,26 +170,26 @@ func openStatsFile(statsFile string) (io.Reader, error) {
 	return r, nil
 }
 
-func setArgsDefaults() error {
-	if defaultDir != "" { //nolint:nestif
-		if userGroup == "" {
-			userGroup = filepath.Join(defaultDir, "usergroup")
-		}
-
-		if groupUser == "" {
-			groupUser = filepath.Join(defaultDir, "groupuser")
-		}
-
-		if basedirsDB == "" {
-			basedirsDB = filepath.Join(defaultDir, "basedirs")
-		}
-
-		if dirgutaDB == "" {
-			dirgutaDB = filepath.Join(defaultDir, "dirguta")
-		}
+func setArgsDefaults() {
+	if defaultDir == "" {
+		return
 	}
 
-	return os.MkdirAll(dirgutaDB, 0755) //nolint:mnd
+	if userGroup == "" {
+		userGroup = filepath.Join(defaultDir, "usergroup")
+	}
+
+	if groupUser == "" {
+		groupUser = filepath.Join(defaultDir, "groupuser")
+	}
+
+	if basedirsDB == "" {
+		basedirsDB = filepath.Join(defaultDir, "basedirs")
+	}
+
+	if dirgutaDB == "" {
+		dirgutaDB = filepath.Join(defaultDir, "dirguta")
+	}
 }
 
 func setSummarisers(s *summary.Summariser) (func() error, error) { //nolint:gocognit,gocyclo
@@ -170,7 +206,7 @@ func setSummarisers(s *summary.Summariser) (func() error, error) { //nolint:goco
 	}
 
 	if basedirsDB != "" {
-		if err := addBasedirsSummariser(s, basedirsDB, quotaPath, basedirsConfig); err != nil {
+		if err := addBasedirsSummariser(s, basedirsDB, quotaPath, basedirsHistoryDB, basedirsConfig); err != nil {
 			return nil, err
 		}
 	}
@@ -204,27 +240,26 @@ func addGroupUserSummariser(s *summary.Summariser, groupUser string) error {
 	return nil
 }
 
-func addBasedirsSummariser(s *summary.Summariser, basedirsDB, quotaPath, basedirsConfig string) error {
-	quotas, err := basedirs.ParseQuotas(quotaPath)
+func addBasedirsSummariser(s *summary.Summariser, basedirsDB, basedirsHistoryDB,
+	quotaPath, basedirsConfig string) error {
+	quotas, config, err := parseBasedirConfig(quotaPath, basedirsConfig)
 	if err != nil {
-		return fmt.Errorf("error parsing quotas file: %w", err)
+		return err
 	}
 
-	cf, err := os.Open(basedirsConfig)
-	if err != nil {
-		return fmt.Errorf("error opening basedirs config: %w", err)
+	if err = os.Remove(basedirsDB); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
 	}
-
-	config, err := basedirs.ParseConfig(cf)
-	if err != nil {
-		return fmt.Errorf("error parsing basedirs config: %w", err)
-	}
-
-	cf.Close()
 
 	bd, err := basedirs.NewCreator(basedirsDB, quotas)
 	if err != nil {
 		return fmt.Errorf("failed to create new basedirs creator: %w", err)
+	}
+
+	if basedirsHistoryDB != "" {
+		if err = copyHistory(bd, basedirsHistoryDB); err != nil {
+			return err
+		}
 	}
 
 	s.AddDirectoryOperation(sbasedirs.NewBaseDirs(config.PathShouldOutput, bd))
@@ -232,7 +267,49 @@ func addBasedirsSummariser(s *summary.Summariser, basedirsDB, quotaPath, basedir
 	return nil
 }
 
+func parseBasedirConfig(quotaPath, basedirsConfig string) (*basedirs.Quotas, basedirs.Config, error) {
+	quotas, err := basedirs.ParseQuotas(quotaPath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("error parsing quotas file: %w", err)
+	}
+
+	cf, err := os.Open(basedirsConfig)
+	if err != nil {
+		return nil, nil, fmt.Errorf("error opening basedirs config: %w", err)
+	}
+
+	defer cf.Close()
+
+	config, err := basedirs.ParseConfig(cf)
+	if err != nil {
+		return nil, nil, fmt.Errorf("error parsing basedirs config: %w", err)
+	}
+
+	cf.Close()
+
+	return quotas, config, nil
+}
+
+func copyHistory(bd *basedirs.BaseDirs, basedirsHistoryDB string) error {
+	db, err := basedirs.OpenDBRO(basedirsHistoryDB)
+	if err != nil {
+		return err
+	}
+
+	defer db.Close()
+
+	return bd.CopyHistoryFrom(db)
+}
+
 func addDirgutaSummariser(s *summary.Summariser, dirgutaDB string) (func() error, error) {
+	if err := os.RemoveAll(dirgutaDB); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return nil, err
+	}
+
+	if err := os.MkdirAll(dirgutaDB, 0755); err != nil { //nolint:mnd
+		return nil, err
+	}
+
 	db := db.NewDB(dirgutaDB)
 
 	if err := db.CreateDB(); err != nil {
@@ -253,9 +330,9 @@ func init() {
 	summariseCmd.Flags().StringVarP(&userGroup, "userGroup", "u", "", "usergroup output file")
 	summariseCmd.Flags().StringVarP(&groupUser, "groupUser", "g", "", "groupUser output file")
 	summariseCmd.Flags().StringVarP(&basedirsDB, "basedirsDB", "b", "", "basedirs output file")
+	summariseCmd.Flags().StringVarP(&basedirsHistoryDB, "basedirsHistoryDB", "s", "",
+		"basedirs file containing previous history")
 	summariseCmd.Flags().StringVarP(&dirgutaDB, "tree", "t", "", "tree output dir")
-
 	summariseCmd.Flags().StringVarP(&quotaPath, "quota", "q", "", "csv of gid,disk,size_quota,inode_quota")
-	summariseCmd.Flags().StringVarP(&ownersPath, "owners", "o", "", "gid,owner csv file")
 	summariseCmd.Flags().StringVarP(&basedirsConfig, "config", "c", "", "path to basedirs config file")
 }
