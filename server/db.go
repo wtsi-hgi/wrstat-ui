@@ -233,6 +233,9 @@ func (s *Server) logReloadError(format string, v ...any) bool {
 	return false
 }
 
+// FindDBDirs finds the latest dirguta and basedir databases in the given base
+// directory, returning the paths to the dirguta dbs and basedir dbs for each
+// key/mountpoint.
 func FindDBDirs(basepath, dgutaDBsSuffix, basedirBasename string) ([]string, []string, error) {
 	dbPaths, _, err := findDBDirs(basepath, dgutaDBsSuffix, basedirBasename)
 	dirgutaPaths, basedirPaths := makeDBPaths(dbPaths, dgutaDBsSuffix, basedirBasename)
