@@ -56,7 +56,7 @@ func addChildren(d *Directory, width, depth int) {
 
 // Directory represents the stat information for a directory and its children.
 type Directory struct {
-	Children map[string]io.WriterTo
+	children map[string]io.WriterTo
 	File
 }
 
@@ -64,7 +64,7 @@ type Directory struct {
 // mtime, and ctime.
 func NewRoot(path string, refTime int64) *Directory {
 	return &Directory{
-		Children: make(map[string]io.WriterTo),
+		children: make(map[string]io.WriterTo),
 		File: File{
 			Path:  path,
 			Size:  4096,
@@ -79,7 +79,7 @@ func NewRoot(path string, refTime int64) *Directory {
 // AddDirectory either creates and returns a new directory in the direcory or
 // returns an existing one.
 func (d *Directory) AddDirectory(name string) *Directory {
-	if c, ok := d.Children[name]; ok {
+	if c, ok := d.children[name]; ok {
 		if cd, ok := c.(*Directory); ok {
 			return cd
 		}
@@ -88,12 +88,12 @@ func (d *Directory) AddDirectory(name string) *Directory {
 	}
 
 	c := &Directory{
-		Children: make(map[string]io.WriterTo),
+		children: make(map[string]io.WriterTo),
 		File:     d.File,
 	}
 
 	c.File.Path += name + "/"
-	d.Children[name] = c
+	d.children[name] = c
 
 	return c
 }
@@ -101,7 +101,7 @@ func (d *Directory) AddDirectory(name string) *Directory {
 // AddFile either creates and returns a new file in the direcory or returns an
 // existing one.
 func (d *Directory) AddFile(name string) *File {
-	if c, ok := d.Children[name]; ok {
+	if c, ok := d.children[name]; ok {
 		if cf, ok := c.(*File); ok {
 			return cf
 		}
@@ -111,7 +111,7 @@ func (d *Directory) AddFile(name string) *File {
 
 	f := d.File
 
-	d.Children[name] = &f
+	d.children[name] = &f
 	f.Path += name
 	f.Size = 0
 	f.Type = 'f'
@@ -126,11 +126,11 @@ func (d *Directory) WriteTo(w io.Writer) (int64, error) {
 		return n, err
 	}
 
-	keys := slices.Collect(maps.Keys(d.Children))
+	keys := slices.Collect(maps.Keys(d.children))
 	sort.Strings(keys)
 
 	for _, k := range keys {
-		m, err := d.Children[k].WriteTo(w)
+		m, err := d.children[k].WriteTo(w)
 
 		n += m
 
