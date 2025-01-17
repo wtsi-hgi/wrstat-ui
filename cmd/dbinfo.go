@@ -51,14 +51,9 @@ NB: for large databases, this can take hours to run.
 			die("you must supply the path to your 'wrstat multi -f' output directory")
 		}
 
-		dbPaths, err := server.FindLatestDgutaDirs(args[0], dgutaDBsSuffix)
+		dbPaths, basedirsDBPath, err := server.FindDBDirs(args[0], dgutaDBsSuffix, basedirBasename)
 		if err != nil {
 			die("failed to find database paths: %s", err)
-		}
-
-		basedirsDBPath, err := server.FindLatestBasedirsDB(args[0], basedirBasename)
-		if err != nil {
-			die("failed to find basedirs database path: %s", err)
 		}
 
 		slog.SetLogLoggerLevel(slog.LevelDebug)
@@ -75,9 +70,22 @@ NB: for large databases, this can take hours to run.
 
 		info("opening basedir database...\n")
 
-		basedirsInfo, err := basedirs.Info(basedirsDBPath)
-		if err != nil {
-			die("failed to get basedirs db info: %s", err)
+		var basedirsInfo basedirs.DBInfo
+
+		for _, path := range basedirsDBPath {
+			bdInfo, err := basedirs.Info(path)
+			if err != nil {
+				die("failed to get basedirs db info: %s", err)
+			}
+
+			basedirsInfo.GroupDirCombos += bdInfo.GroupDirCombos
+			basedirsInfo.GroupHistories += bdInfo.GroupHistories
+			basedirsInfo.GroupMountCombos += bdInfo.GroupMountCombos
+			basedirsInfo.GroupSubDirCombos += bdInfo.GroupSubDirCombos
+			basedirsInfo.GroupSubDirs += bdInfo.GroupSubDirs
+			basedirsInfo.UserDirCombos += bdInfo.UserDirCombos
+			basedirsInfo.UserSubDirCombos += bdInfo.UserSubDirCombos
+			basedirsInfo.UserSubDirs += bdInfo.UserSubDirs
 		}
 
 		cliPrint("Group usage group-dir combinations: %d\n", basedirsInfo.GroupDirCombos)

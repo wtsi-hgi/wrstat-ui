@@ -28,11 +28,9 @@ package server
 import (
 	"encoding/json"
 	"fmt"
-	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"os/user"
 	"path/filepath"
 	"sort"
@@ -49,14 +47,7 @@ import (
 	internaldata "github.com/wtsi-hgi/wrstat-ui/internal/data"
 	internaldb "github.com/wtsi-hgi/wrstat-ui/internal/db"
 	"github.com/wtsi-hgi/wrstat-ui/internal/fixtimes"
-	ifs "github.com/wtsi-hgi/wrstat-ui/internal/fs"
 	"github.com/wtsi-hgi/wrstat-ui/internal/split"
-	"github.com/wtsi-hgi/wrstat-ui/internal/statsdata"
-	internaluser "github.com/wtsi-hgi/wrstat-ui/internal/user"
-	"github.com/wtsi-hgi/wrstat-ui/stats"
-	"github.com/wtsi-hgi/wrstat-ui/summary"
-	sbasedirs "github.com/wtsi-hgi/wrstat-ui/summary/basedirs"
-	"github.com/wtsi-hgi/wrstat-ui/summary/dirguta"
 )
 
 func TestIDsToWanted(t *testing.T) {
@@ -178,7 +169,7 @@ func TestServer(t *testing.T) {
 			So(n(""), ShouldEqual, 2)
 		})
 
-		Convey("You can query the where endpoint", func() {
+		Convey("You can query the endpoints", func() {
 			response, err := queryWhere(s, "")
 			So(err, ShouldBeNil)
 			So(response.Code, ShouldEqual, http.StatusNotFound)
@@ -186,13 +177,20 @@ func TestServer(t *testing.T) {
 			So(logWriter.String(), ShouldContainSubstring, "STATUS=404")
 			logWriter.Reset()
 
-			Convey("And given a dguta database", func() {
-				path, err := internaldb.CreateExampleDGUTADBCustomIDs(t, uid, gids[0], gids[1], refTime)
+			response, err = query(s, EndPointBasedirUsageGroup, "")
+			So(err, ShouldBeNil)
+			So(response.Code, ShouldEqual, http.StatusNotFound)
+			So(logWriter.String(), ShouldContainSubstring, "[GET /rest/v1/basedirs/usage/groups")
+			So(logWriter.String(), ShouldContainSubstring, "STATUS=404")
+			logWriter.Reset()
+
+			Convey("And given dirguta and basedir databases", func() {
+				path, err := internaldb.CreateExampleDBsCustomIDs(t, uid, gids[0], gids[1], refTime)
 				So(err, ShouldBeNil)
 				groupA := gidToGroup(t, gids[0])
 				groupB := gidToGroup(t, gids[1])
 
-				tree, err := db.NewTree(path)
+				tree, err := db.NewTree(filepath.Join(path, "dirguta"))
 				So(err, ShouldBeNil)
 
 				expectedRaw, err := tree.Where("/", nil, split.SplitsToSplitFn(2))
@@ -208,10 +206,13 @@ func TestServer(t *testing.T) {
 
 				tree.Close()
 
-				Convey("You can get results after calling LoadDGUTADB", func() {
-					err = s.LoadDGUTADBs(path)
-					So(err, ShouldBeNil)
+				ownersPath, err := internaldata.CreateOwnersCSV(t, fmt.Sprintf("0,Alan\n%s,Barbara\n%s,Dellilah", gids[0], gids[1]))
+				So(err, ShouldBeNil)
 
+				err = s.LoadDBs([]string{path}, "dirguta", "basedir.db", ownersPath)
+				So(err, ShouldBeNil)
+
+				Convey("You can get dirguta results", func() {
 					response, err := queryWhere(s, "")
 					So(err, ShouldBeNil)
 					So(response.Code, ShouldEqual, http.StatusOK)
@@ -411,221 +412,12 @@ func TestServer(t *testing.T) {
 						So(logWriter.String(), ShouldContainSubstring, "STATUS=400")
 						So(logWriter.String(), ShouldContainSubstring, "Error #01: directory not found")
 					})
-
-					Convey("And you can auto-reload a new database", func() {
-						pathNew, errc := internaldb.CreateExampleDGUTADBCustomIDs(t, uid, gids[1], gids[0], refTime)
-						So(errc, ShouldBeNil)
-
-						grandparentDir := filepath.Dir(filepath.Dir(path))
-						newerPath := filepath.Join(grandparentDir, "newer."+internaldb.ExampleDgutaDirParentSuffix, "0")
-						err = os.MkdirAll(filepath.Dir(newerPath), internaldb.DirPerms)
-						So(err, ShouldBeNil)
-						err = os.Rename(pathNew, newerPath)
-						So(err, ShouldBeNil)
-
-						later := time.Now().Local().Add(1 * time.Second)
-						err = os.Chtimes(filepath.Dir(newerPath), later, later)
-						So(err, ShouldBeNil)
-
-						response, err = queryWhere(s, "")
-						So(err, ShouldBeNil)
-						result, err = decodeWhereResult(response)
-						So(err, ShouldBeNil)
-						So(result, ShouldResemble, expected)
-
-						sentinel := path + ".sentinel"
-
-						err = s.EnableDGUTADBReloading(sentinel, grandparentDir,
-							internaldb.ExampleDgutaDirParentSuffix, sentinelPollFrequency)
-						So(err, ShouldNotBeNil)
-
-						file, err := os.Create(sentinel)
-						So(err, ShouldBeNil)
-						err = file.Close()
-						So(err, ShouldBeNil)
-
-						s.treeMutex.RLock()
-						So(s.dataTimeStamp.IsZero(), ShouldBeTrue)
-						s.treeMutex.RUnlock()
-
-						err = s.EnableDGUTADBReloading(sentinel, grandparentDir,
-							internaldb.ExampleDgutaDirParentSuffix, sentinelPollFrequency)
-						So(err, ShouldBeNil)
-
-						s.treeMutex.RLock()
-						So(s.dataTimeStamp.IsZero(), ShouldBeFalse)
-						previous := s.dataTimeStamp
-						s.treeMutex.RUnlock()
-
-						response, err = queryWhere(s, "")
-						So(err, ShouldBeNil)
-						result, err = decodeWhereResult(response)
-
-						So(err, ShouldBeNil)
-						So(result, ShouldResemble, expected)
-
-						_, err = os.Stat(path)
-						So(err, ShouldBeNil)
-
-						now := time.Now().Local()
-						err = os.Chtimes(sentinel, now, now)
-						So(err, ShouldBeNil)
-
-						waitForFileToBeDeleted(t, path)
-
-						s.treeMutex.RLock()
-						So(s.dataTimeStamp.After(previous), ShouldBeTrue)
-						s.treeMutex.RUnlock()
-
-						_, err = os.Stat(path)
-						So(err, ShouldNotBeNil)
-
-						parent := filepath.Dir(path)
-						_, err = os.Stat(parent)
-						So(err, ShouldBeNil)
-
-						response, err = queryWhere(s, "")
-						So(err, ShouldBeNil)
-						So(response.Code, ShouldEqual, http.StatusOK)
-						result, err = decodeWhereResult(response)
-						So(err, ShouldBeNil)
-						So(result, ShouldNotResemble, expected)
-
-						s.dgutaWatcher.RLock()
-						So(s.dgutaWatcher, ShouldNotBeNil)
-						s.dgutaWatcher.RUnlock()
-						So(s.tree, ShouldNotBeNil)
-
-						certPath, keyPath, err := gas.CreateTestCert(t)
-						So(err, ShouldBeNil)
-						_, stop, err := gas.StartTestServer(s, certPath, keyPath)
-						So(err, ShouldBeNil)
-
-						errs := stop()
-						So(errs, ShouldBeNil)
-						So(s.dgutaWatcher, ShouldBeNil)
-						So(s.tree, ShouldBeNil)
-
-						s.Stop()
-					})
-
-					Convey("EnableDGUTADBReloading logs errors", func() {
-						sentinel := path + ".sentinel"
-						testSuffix := "test"
-
-						file, err := os.Create(sentinel)
-						So(err, ShouldBeNil)
-						err = file.Close()
-						So(err, ShouldBeNil)
-
-						testReloadFail := func(dir, message string) {
-							err = s.EnableDGUTADBReloading(sentinel, dir, testSuffix, sentinelPollFrequency)
-							So(err, ShouldBeNil)
-
-							now := time.Now().Local()
-							err = os.Chtimes(sentinel, now, now)
-							So(err, ShouldBeNil)
-
-							<-time.After(50 * time.Millisecond)
-
-							s.treeMutex.RLock()
-							defer s.treeMutex.RUnlock()
-							So(logWriter.String(), ShouldContainSubstring, message)
-						}
-
-						grandparentDir := filepath.Dir(filepath.Dir(path))
-
-						makeTestPath := func() string {
-							tpath := filepath.Join(grandparentDir, "new."+testSuffix)
-							err = os.MkdirAll(tpath, internaldb.DirPerms)
-							So(err, ShouldBeNil)
-
-							return tpath
-						}
-
-						Convey("when the directory doesn't contain the suffix", func() {
-							testReloadFail(".", "file not found in directory")
-						})
-
-						Convey("when the directory doesn't exist", func() {
-							testReloadFail("/sdf@£$", "no such file or directory")
-						})
-
-						Convey("when the suffix subdir can't be opened", func() {
-							tpath := makeTestPath()
-
-							err = os.Chmod(tpath, 0000)
-							So(err, ShouldBeNil)
-
-							testReloadFail(grandparentDir, "permission denied")
-						})
-
-						Convey("when the directory contains no subdirs", func() {
-							makeTestPath()
-
-							testReloadFail(grandparentDir, "file not found in directory")
-						})
-
-						Convey("when the new database path is invalid", func() {
-							tpath := makeTestPath()
-
-							dbPath := filepath.Join(tpath, "0")
-							err = os.Mkdir(dbPath, internaldb.DirPerms)
-							So(err, ShouldBeNil)
-
-							testReloadFail(grandparentDir, "database doesn't exist")
-						})
-
-						Convey("when the old path can't be deleted", func() {
-							s.dgutaPaths = []string{"."}
-							tpath := makeTestPath()
-
-							cmd := exec.Command("cp", "--recursive", path, filepath.Join(tpath, "0"))
-							err = cmd.Run()
-							So(err, ShouldBeNil)
-
-							testReloadFail(grandparentDir, "invalid argument")
-						})
-
-						Convey("when there's an issue with getting dir mtime, it is ignored", func() {
-							t := ifs.DirEntryModTime(&mockDirEntry{})
-							So(t.IsZero(), ShouldBeTrue)
-						})
-					})
 				})
-			})
 
-			Convey("LoadDGUTADBs fails on an invalid path", func() {
-				err := s.LoadDGUTADBs("/foo")
-				So(err, ShouldNotBeNil)
-			})
-		})
-
-		Convey("You can query the basedirs endpoints", func() {
-			response, err := query(s, EndPointBasedirUsageGroup, "")
-			So(err, ShouldBeNil)
-			So(response.Code, ShouldEqual, http.StatusNotFound)
-			So(logWriter.String(), ShouldContainSubstring, "[GET /rest/v1/basedirs/usage/groups")
-			So(logWriter.String(), ShouldContainSubstring, "STATUS=404")
-			logWriter.Reset()
-
-			Convey("And given a basedirs database", func() {
-				root, _, err := internaldb.CreateExampleDGUTADBForBasedirs(t, time.Now().Unix())
-				So(err, ShouldBeNil)
-
-				dir, dbPath, ownersPath, err := createExampleBasedirsDB(t, root)
-				So(err, ShouldBeNil)
-
-				err = s.LoadDGUTADBs(dir)
-				So(err, ShouldBeNil)
-
-				Convey("You can get results after calling LoadBasedirsDB", func() {
-					err = s.LoadBasedirsDB(dbPath, ownersPath)
-					So(err, ShouldBeNil)
-
+				Convey("You can get basedir results", func() {
 					s.basedirs.SetMountPoints([]string{
-						"/lustre/scratch123/",
-						"/lustre/scratch125/",
+						"/a/",
+						"/k/",
 					})
 
 					response, err := query(s, EndPointBasedirUsageGroup, "")
@@ -636,8 +428,8 @@ func TestServer(t *testing.T) {
 
 					usageGroup, err := decodeUsageResult(response)
 					So(err, ShouldBeNil)
-					So(len(usageGroup), ShouldEqual, 116)
-					So(usageGroup[0].GID, ShouldNotEqual, 0)
+					So(len(usageGroup), ShouldEqual, 51)
+					So(usageGroup[0].GID, ShouldEqual, 0)
 					So(usageGroup[0].UID, ShouldEqual, 0)
 					So(usageGroup[0].Name, ShouldNotBeBlank)
 					So(usageGroup[0].Owner, ShouldNotBeBlank)
@@ -651,11 +443,11 @@ func TestServer(t *testing.T) {
 
 					usageUser, err := decodeUsageResult(response)
 					So(err, ShouldBeNil)
-					So(len(usageUser), ShouldEqual, 116)
+					So(len(usageUser), ShouldEqual, 34)
 					So(usageUser[0].GID, ShouldEqual, 0)
-					So(usageUser[0].UID, ShouldNotEqual, 0)
+					So(usageUser[0].UID, ShouldEqual, 0)
 					So(usageUser[0].Name, ShouldNotBeBlank)
-					So(usageUser[0].Owner, ShouldBeBlank)
+					So(usageUser[0].Owner, ShouldEqual, "Alan")
 					So(usageUser[0].BaseDir, ShouldNotBeBlank)
 
 					response, err = query(s, EndPointBasedirSubdirGroup,
@@ -667,9 +459,8 @@ func TestServer(t *testing.T) {
 
 					subdirs, err := decodeSubdirResult(response)
 					So(err, ShouldBeNil)
-					So(len(subdirs), ShouldEqual, 2)
+					So(len(subdirs), ShouldEqual, 1)
 					So(subdirs[0].SubDir, ShouldEqual, ".")
-					So(subdirs[1].SubDir, ShouldEqual, "sub")
 
 					response, err = query(s, EndPointBasedirSubdirUser,
 						fmt.Sprintf("?id=%d&basedir=%s", usageUser[0].UID, usageUser[0].BaseDir))
@@ -680,7 +471,7 @@ func TestServer(t *testing.T) {
 
 					subdirs, err = decodeSubdirResult(response)
 					So(err, ShouldBeNil)
-					So(len(subdirs), ShouldEqual, 1)
+					So(len(subdirs), ShouldEqual, 2)
 
 					response, err = query(s, EndPointBasedirHistory,
 						fmt.Sprintf("?id=%d&basedir=%s", usageGroup[0].GID, usageGroup[0].BaseDir))
@@ -692,7 +483,7 @@ func TestServer(t *testing.T) {
 					history, err := decodeHistoryResult(response)
 					So(err, ShouldBeNil)
 					So(len(history), ShouldEqual, 1)
-					So(history[0].UsageInodes, ShouldEqual, 2)
+					So(history[0].UsageInodes, ShouldEqual, 1)
 
 					response, err = query(s, EndPointBasedirSubdirUser,
 						fmt.Sprintf("?id=%d&basedir=%s&age=%d", usageUser[0].UID, usageUser[0].BaseDir, db.DGUTAgeA3Y))
@@ -703,62 +494,80 @@ func TestServer(t *testing.T) {
 
 					subdirs, err = decodeSubdirResult(response)
 					So(err, ShouldBeNil)
-					So(len(subdirs), ShouldEqual, 1)
-
-					Convey("Which get updated by an auto-reload when the sentinal file changes", func() {
-						parentDir := filepath.Dir(filepath.Dir(dbPath))
-						sentinel := filepath.Join(parentDir, ".sentinel")
-						file, err := os.Create(sentinel)
-						So(err, ShouldBeNil)
-						err = file.Close()
-						So(err, ShouldBeNil)
-
-						err = s.EnableBasedirDBReloading(sentinel, parentDir,
-							filepath.Base(dbPath), sentinelPollFrequency)
-						So(err, ShouldBeNil)
-
-						gid, uid, _, _, err := internaluser.RealGIDAndUID()
-						So(err, ShouldBeNil)
-
-						_, files := internaldata.FakeFilesForDGUTADBForBasedirsTesting(gid, uid, "lustre", 10, 11, 1, false, refTime)
-
-						_, pathNew, _, err := createExampleBasedirsDB(t, files)
-						So(err, ShouldBeNil)
-
-						newerPath := filepath.Join(parentDir, "newer.basedir.db")
-						err = os.Rename(pathNew, newerPath)
-						So(err, ShouldBeNil)
-
-						later := time.Now().Local().Add(1 * time.Second)
-						err = os.Chtimes(newerPath, later, later)
-						So(err, ShouldBeNil)
-
-						response, err := query(s, EndPointBasedirUsageGroup, "")
-						So(err, ShouldBeNil)
-						So(response.Code, ShouldEqual, http.StatusOK)
-
-						usageGroup, err := decodeUsageResult(response)
-						So(err, ShouldBeNil)
-						So(len(usageGroup), ShouldEqual, 116)
-
-						err = os.Chtimes(sentinel, later, later)
-						So(err, ShouldBeNil)
-
-						waitForFileToBeDeleted(t, dbPath)
-
-						_, err = os.Stat(dbPath)
-						So(err, ShouldNotBeNil)
-
-						response, err = query(s, EndPointBasedirUsageGroup, "")
-						So(err, ShouldBeNil)
-						So(response.Code, ShouldEqual, http.StatusOK)
-
-						usageGroup, err = decodeUsageResult(response)
-						So(err, ShouldBeNil)
-						So(len(usageGroup), ShouldEqual, 116) // 17?
-					})
+					So(len(subdirs), ShouldEqual, 2)
 				})
 			})
+		})
+
+		Convey("LoadDBs fails on an invalid path", func() {
+			err := s.LoadDBs([]string{"/foo"}, "something", "anything", "")
+			So(err, ShouldNotBeNil)
+		})
+
+		Reset(func() { s.Stop() })
+
+		Convey("You can enable automatic reloading", func() {
+			ownersPath, err := internaldata.CreateOwnersCSV(t, internaldata.ExampleOwnersCSV)
+			So(err, ShouldBeNil)
+
+			tmp := t.TempDir()
+
+			first := filepath.Join(tmp, "111_keyA")
+
+			err = internaldb.CreateExampleDBsCustomIDsWithDir(t, first, uid, gids[0], gids[1], refTime)
+			So(err, ShouldBeNil)
+
+			err = s.EnableDBReloading(tmp, "dirguta", "basedir.db", ownersPath, sentinelPollFrequency, true)
+			So(err, ShouldBeNil)
+
+			dirguta := s.tree
+			basedirs := s.basedirs
+			lastMod := s.dataTimeStamp
+
+			secondDot := filepath.Join(tmp, ".112_keyB")
+			second := filepath.Join(tmp, "112_keyB")
+
+			err = internaldb.CreateExampleDBsCustomIDsWithDir(t, secondDot, uid, gids[0], gids[1], refTime)
+			So(err, ShouldBeNil)
+
+			err = os.Rename(secondDot, second)
+			So(err, ShouldBeNil)
+
+			timeout := time.After(time.Second)
+
+		Loop:
+			for {
+				select {
+				case <-timeout:
+					break Loop
+				case <-time.After(time.Millisecond):
+					s.mu.RLock()
+					dataTimeStamp := s.dataTimeStamp
+					s.mu.RUnlock()
+
+					if dataTimeStamp != lastMod {
+						break Loop
+					}
+				}
+			}
+
+			So(s.tree, ShouldNotEqual, dirguta)
+			So(s.basedirs, ShouldNotEqual, basedirs)
+			So(s.dataTimeStamp, ShouldHappenAfter, lastMod)
+
+			thirdDot := filepath.Join(tmp, ".113_keyA")
+			third := filepath.Join(tmp, "113_keyA")
+
+			err = internaldb.CreateExampleDBsCustomIDsWithDir(t, thirdDot, uid, gids[0], gids[1], refTime)
+			So(err, ShouldBeNil)
+
+			err = os.Rename(thirdDot, third)
+			So(err, ShouldBeNil)
+
+			waitForFileToBeDeleted(t, first)
+
+			_, err = os.Stat(first)
+			So(os.IsNotExist(err), ShouldBeTrue)
 		})
 	})
 }
@@ -806,20 +615,17 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 		_, _, err = GetWhereDataIs(c, "", "", "", "", db.DGUTAgeAll, "")
 		So(err, ShouldNotBeNil)
 
-		path, err := internaldb.CreateExampleDGUTADBCustomIDs(t, uid, gids[0], gids[1], refTime)
+		path, err := internaldb.CreateExampleDBsCustomIDs(t, uid, gids[0], gids[1], refTime)
 		So(err, ShouldBeNil)
 
-		tree, _, err := internaldb.CreateExampleDGUTADBForBasedirs(t, time.Now().Unix())
-		So(err, ShouldBeNil)
-
-		_, basedirsDBPath, ownersPath, err := createExampleBasedirsDB(t, tree)
+		ownersPath, err := internaldata.CreateOwnersCSV(t, internaldata.ExampleOwnersCSV)
 		So(err, ShouldBeNil)
 
 		c, err = gas.NewClientCLI(jwtBasename, serverTokenBasename, addr, cert, false)
 		So(err, ShouldBeNil)
 
 		Convey("You can't get where data is or add the tree page without auth", func() {
-			err = s.LoadDGUTADBs(path)
+			err = s.LoadDBs([]string{path}, "dirguta", "basedir.db", ownersPath)
 			So(err, ShouldBeNil)
 
 			_, _, err = GetWhereDataIs(c, "/", "", "", "", db.DGUTAgeAll, "")
@@ -836,7 +642,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 			})
 			So(err, ShouldBeNil)
 
-			err = s.LoadDGUTADBs(path)
+			err = s.LoadDBs([]string{path}, "dirguta", "basedir.db", ownersPath)
 			So(err, ShouldBeNil)
 
 			err = c.Login("user", "pass")
@@ -877,7 +683,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 			})
 			So(err, ShouldBeNil)
 
-			err = s.LoadDGUTADBs(path)
+			err = s.LoadDBs([]string{path}, "dirguta", "basedir.db", ownersPath)
 			So(err, ShouldBeNil)
 
 			err = c.Login("user", "pass")
@@ -911,11 +717,28 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 			})
 			So(err, ShouldBeNil)
 
-			err = s.LoadDGUTADBs(path)
+			err = s.LoadDBs([]string{path}, "dirguta", "basedir.db", ownersPath)
 			So(err, ShouldBeNil)
 
-			err = s.LoadBasedirsDB(basedirsDBPath, ownersPath)
-			So(err, ShouldBeNil)
+			s.dataTimeStamp = time.Time{}
+
+			s.gidToNameCache[1] = "GroupA"
+			s.gidToNameCache[2] = "GroupB"
+			s.gidToNameCache[3] = "GroupC"
+			s.gidToNameCache[77777] = "77777"
+			s.uidToNameCache[101] = "UserA"
+			s.uidToNameCache[102] = "UserB"
+			s.uidToNameCache[103] = "UserC"
+			s.uidToNameCache[88888] = "88888"
+
+			s.basedirs.SetCachedGroup(1, "GroupA")
+			s.basedirs.SetCachedGroup(2, "GroupB")
+			s.basedirs.SetCachedGroup(3, "GroupC")
+			s.basedirs.SetCachedUser(77777, "77777")
+			s.basedirs.SetCachedUser(101, "UserA")
+			s.basedirs.SetCachedUser(102, "UserB")
+			s.basedirs.SetCachedUser(103, "UserC")
+			s.basedirs.SetCachedUser(88888, "88888")
 
 			err = s.AddTreePage()
 			So(err, ShouldBeNil)
@@ -1278,7 +1101,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 				So(areas, ShouldResemble, expectedAreas)
 			})
 
-			Convey("You can access the secure basedirs endpoints after LoadBasedirsDB()", func() {
+			Convey("You can access the secure basedirs endpoints after LoadDBs()", func() {
 				r := gas.NewAuthenticatedClientRequest(addr, cert, token)
 
 				var usage []*basedirs.Usage
@@ -1288,8 +1111,8 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 					Get(EndPointAuthBasedirUsageUser)
 				So(err, ShouldBeNil)
 				So(resp.Result(), ShouldNotBeNil)
-				So(len(usage), ShouldEqual, 116)
-				So(usage[0].UID, ShouldNotEqual, 0)
+				So(len(usage), ShouldEqual, 34)
+				So(usage[0].UID, ShouldEqual, 0)
 
 				userUsageUID := usage[0].UID
 				userUsageBasedir := usage[0].BaseDir
@@ -1299,8 +1122,8 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 					Get(EndPointAuthBasedirUsageGroup)
 				So(err, ShouldBeNil)
 				So(resp.Result(), ShouldNotBeNil)
-				So(len(usage), ShouldEqual, 116)
-				So(usage[0].GID, ShouldNotEqual, 0)
+				So(len(usage), ShouldEqual, 51)
+				So(usage[0].GID, ShouldEqual, 0)
 
 				var subdirs []*basedirs.SubDir
 
@@ -1324,7 +1147,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 					Get(EndPointAuthBasedirSubdirUser)
 				So(err, ShouldBeNil)
 				So(resp.Result(), ShouldNotBeNil)
-				So(len(subdirs), ShouldEqual, 0)
+				So(len(subdirs), ShouldEqual, 2)
 
 				var history []basedirs.History
 
@@ -1354,7 +1177,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 						Get(EndPointAuthBasedirSubdirGroup)
 					So(err, ShouldBeNil)
 					So(resp.Result(), ShouldNotBeNil)
-					So(len(subdirs), ShouldEqual, 2)
+					So(len(subdirs), ShouldEqual, 1)
 
 					resp, err = r.SetResult(&subdirs).
 						ForceContentType("application/json").
@@ -1649,82 +1472,6 @@ func waitForFileToBeDeleted(t *testing.T, path string) {
 	}()
 
 	<-wait
-}
-
-type mockDirEntry struct{}
-
-func (m *mockDirEntry) Name() string {
-	return ""
-}
-
-func (m *mockDirEntry) IsDir() bool {
-	return false
-}
-
-func (m *mockDirEntry) Type() fs.FileMode {
-	return fs.ModeDir
-}
-
-func (m *mockDirEntry) Info() (fs.FileInfo, error) {
-	return nil, fs.ErrNotExist
-}
-
-// createExampleBasedirsDB creates a temporary basedirs.db and returns the path
-// to the database file.
-func createExampleBasedirsDB(t *testing.T, files *statsdata.Directory) (string, string, string, error) {
-	t.Helper()
-
-	csvPath := internaldata.CreateQuotasCSV(t, internaldata.ExampleQuotaCSV)
-
-	quotas, err := basedirs.ParseQuotas(csvPath)
-	if err != nil {
-		return "", "", "", err
-	}
-
-	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "basedir.db")
-	config := basedirs.Config{
-		{
-			Prefix:  split.SplitPath("/lustre/scratch123/hgi/mdt"),
-			Splits:  5,
-			MinDirs: 5,
-		},
-		{
-			Splits:  4,
-			MinDirs: 4,
-		},
-	}
-
-	bd, err := basedirs.NewCreator(dbPath, quotas)
-	if err != nil {
-		return "", "", "", err
-	}
-
-	bd.SetMountPoints([]string{
-		"/lustre/scratch123/",
-		"/lustre/scratch125/",
-	})
-
-	ownersPath, err := internaldata.CreateOwnersCSV(t, internaldata.ExampleOwnersCSV)
-	if err != nil {
-		return "", "", "", err
-	}
-
-	s := summary.NewSummariser(stats.NewStatsParser(files.AsReader()))
-	s.AddDirectoryOperation(sbasedirs.NewBaseDirs(config.PathShouldOutput, bd))
-
-	d := db.NewDB(dir)
-	if err = d.CreateDB(); err != nil {
-		return "", "", "", err
-	}
-
-	defer d.Close()
-
-	s.AddDirectoryOperation(dirguta.NewDirGroupUserTypeAge(d))
-
-	err = s.Summarise()
-
-	return dir, dbPath, ownersPath, err
 }
 
 // decodeUsageResult decodes the result of a basedirs usage query.

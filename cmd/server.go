@@ -33,7 +33,6 @@ import (
 	"io"
 	"log/syslog"
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/inconshreveable/log15"
@@ -153,36 +152,9 @@ creation time in reports.
 		}
 
 		info("opening databases, please wait...")
-		dbPaths, err := server.FindLatestDgutaDirs(args[0], dgutaDBsSuffix)
+		err = s.EnableDBReloading(args[0], dgutaDBsSuffix, basedirBasename, ownersPath, sentinelPollFrequencty, true)
 		if err != nil {
-			die("failed to find database paths: %s", err)
-		}
-
-		basedirsDBPath, err := server.FindLatestBasedirsDB(args[0], basedirBasename)
-		if err != nil {
-			die("failed to find basedirs database path: %s", err)
-		}
-
-		err = s.LoadDGUTADBs(dbPaths...)
-		if err != nil {
-			die("failed to load database: %s", err)
-		}
-
-		err = s.LoadBasedirsDB(basedirsDBPath, ownersPath)
-		if err != nil {
-			die("failed to load database: %s", err)
-		}
-
-		sentinel := filepath.Join(args[0], dgutaDBsSentinelBasename)
-
-		err = s.EnableDGUTADBReloading(sentinel, args[0], dgutaDBsSuffix, sentinelPollFrequencty)
-		if err != nil {
-			die("failed to set up database reloading: %s", err)
-		}
-
-		err = s.EnableBasedirDBReloading(sentinel, args[0], basedirBasename, sentinelPollFrequencty)
-		if err != nil {
-			die("failed to set up database reloading: %s", err)
+			die("failed to load databases: %s", err)
 		}
 
 		err = s.AddTreePage()

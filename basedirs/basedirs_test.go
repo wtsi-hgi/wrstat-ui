@@ -196,7 +196,7 @@ func TestBaseDirs(t *testing.T) {
 					mainTable, errr := bdr.GroupUsage(db.DGUTAgeAll)
 					fixUsageTimes(mainTable)
 
-					expectedUsageTable := []*basedirs.Usage{
+					expectedUsageTable := []*basedirs.Usage{ //nolint:dupl
 						{
 							Name: "group1", GID: 1, UIDs: []uint32{101}, Owner: "Alan", BaseDir: projectA,
 							UsageSize: halfGig + twoGig, QuotaSize: 4000000000, UsageInodes: 2,
@@ -238,7 +238,7 @@ func TestBaseDirs(t *testing.T) {
 					mainTable, errr = bdr.GroupUsage(db.DGUTAgeA3Y)
 					fixUsageTimes(mainTable)
 
-					expectedUsageTable = []*basedirs.Usage{
+					expectedUsageTable = []*basedirs.Usage{ //nolint:dupl
 						{
 							Name: "group1", GID: 1, UIDs: []uint32{101}, Owner: "Alan", BaseDir: projectA,
 							UsageSize: halfGig + twoGig, QuotaSize: 4000000000, UsageInodes: 2,
@@ -284,7 +284,7 @@ func TestBaseDirs(t *testing.T) {
 					mainTable, errr = bdr.GroupUsage(db.DGUTAgeA7Y)
 					fixUsageTimes(mainTable)
 
-					expectedUsageTable = []*basedirs.Usage{
+					expectedUsageTable = []*basedirs.Usage{ //nolint:dupl
 						{
 							Name: "group1", GID: 1, UIDs: []uint32{101}, Owner: "Alan", BaseDir: projectA,
 							UsageSize: halfGig + twoGig, QuotaSize: 4000000000, UsageInodes: 2,
@@ -325,7 +325,7 @@ func TestBaseDirs(t *testing.T) {
 					mainTable, errr = bdr.UserUsage(db.DGUTAgeAll)
 					fixUsageTimes(mainTable)
 
-					expectedMainTable := []*basedirs.Usage{
+					expectedMainTable := []*basedirs.Usage{ //nolint:dupl
 						{
 							Name: "88888", UID: 88888, GIDs: []uint32{2}, BaseDir: projectC1, UsageSize: 40,
 							UsageInodes: 1, Mtime: expectedMtime,
@@ -629,7 +629,7 @@ func TestBaseDirs(t *testing.T) {
 					},
 				}
 
-				Convey("getting subdir information for a group-basedir", func() {
+				Convey("getting subdir information for a group-basedir", func() { //nolint:dupl
 					unknownProject, errr := bdr.GroupSubDirs(1, "unknown", db.DGUTAgeAll)
 					So(errr, ShouldBeNil)
 					So(unknownProject, ShouldBeNil)
@@ -1225,14 +1225,16 @@ func fixSubDirTimes(sds []*basedirs.SubDir) {
 	}
 }
 
-func sortByDatabaseKeyOrder(usageTable []*basedirs.Usage) {
+func sortByDatabaseKeyOrder(usageTable []*basedirs.Usage) []*basedirs.Usage {
 	if usageTable[0].UID != 0 {
 		sortByUID(usageTable)
 
-		return
+		return usageTable
 	}
 
 	sortByGID(usageTable)
+
+	return usageTable
 }
 
 func idToByteSlice(id uint32) []byte {
