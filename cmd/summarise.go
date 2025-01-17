@@ -76,16 +76,16 @@ Summarise takes the following arguments
 	output all summarisers to here with the default names.
 
   --userGroup,-u
-	usergroup output file. Defaults to DEFAULTDIR/usergroup, if --defaultDir is set.
+	usergroup output file. Defaults to DEFAULTDIR/byusergroup, if --defaultDir is set.
 
   --groupUser,-g
-	groupUser output file. Defaults to DEFAULTDIR/groupuser, if --defaultDir is set.
+	groupUser output file. Defaults to DEFAULTDIR/bygroup, if --defaultDir is set.
 
   --basedirsDB,-b
-	basedirs output file. Defaults to DEFAULTDIR/basedirs, if --defaultDir is set.
+	basedirs output file. Defaults to DEFAULTDIR/basedirs.db, if --defaultDir is set.
 
   --tree,-t
-	tree output dir. Defaults to DEFAULTDIR/dirguta, if --defaultDir is set.
+	tree output dir. Defaults to DEFAULTDIR/dguta.dbs, if --defaultDir is set.
 
   --basedirsHistoryDB,-s
 	basedirs file containing previous history.
@@ -176,19 +176,19 @@ func setArgsDefaults() {
 	}
 
 	if userGroup == "" {
-		userGroup = filepath.Join(defaultDir, "usergroup")
+		userGroup = filepath.Join(defaultDir, "byusergroup")
 	}
 
 	if groupUser == "" {
-		groupUser = filepath.Join(defaultDir, "groupuser")
+		groupUser = filepath.Join(defaultDir, "bygroup")
 	}
 
 	if basedirsDB == "" {
-		basedirsDB = filepath.Join(defaultDir, "basedirs")
+		basedirsDB = filepath.Join(defaultDir, basedirBasename)
 	}
 
 	if dirgutaDB == "" {
-		dirgutaDB = filepath.Join(defaultDir, "dirguta")
+		dirgutaDB = filepath.Join(defaultDir, dgutaDBsSuffix)
 	}
 }
 
