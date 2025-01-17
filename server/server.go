@@ -37,7 +37,6 @@ import (
 	gas "github.com/wtsi-hgi/go-authserver"
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
 	"github.com/wtsi-hgi/wrstat-ui/db"
-	"github.com/wtsi-hgi/wrstat-ui/watch"
 )
 
 //go:embed static
@@ -100,22 +99,18 @@ const (
 // package's database, and a website that displays the information nicely.
 type Server struct {
 	gas.Server
+
+	mu             sync.RWMutex
+	basedirs       basedirs.MultiReader
 	tree           *db.Tree
-	treeMutex      sync.RWMutex
 	whiteCB        WhiteListCallback
 	uidToNameCache map[uint32]string
 	gidToNameCache map[uint32]string
 	userToGIDs     map[string][]string
-	dgutaPaths     []string
-	dgutaWatcher   *watch.Watcher
 	dataTimeStamp  time.Time
 	areas          map[string][]string
 
-	basedirsMutex   sync.RWMutex
-	basedirs        *basedirs.BaseDirReader
-	basedirsPath    string
-	ownersPath      string
-	basedirsWatcher *watch.Watcher
+	stopCh chan struct{}
 }
 
 // New creates a Server which can serve a REST API and website.
@@ -128,6 +123,7 @@ func New(logWriter io.Writer) *Server {
 		uidToNameCache: make(map[uint32]string),
 		gidToNameCache: make(map[uint32]string),
 		userToGIDs:     make(map[string][]string),
+		stopCh:         make(chan struct{}),
 	}
 
 	s.SetStopCallBack(s.stop)
@@ -138,18 +134,10 @@ func New(logWriter io.Writer) *Server {
 // stop is called when the server is Stop()ped, cleaning up our additional
 // properties.
 func (s *Server) stop() {
-	s.treeMutex.Lock()
-	defer s.treeMutex.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	if s.dgutaWatcher != nil {
-		s.dgutaWatcher.Stop()
-		s.dgutaWatcher = nil
-	}
-
-	if s.basedirsWatcher != nil {
-		s.basedirsWatcher.Stop()
-		s.basedirsWatcher = nil
-	}
+	close(s.stopCh)
 
 	if s.tree != nil {
 		s.tree.Close()

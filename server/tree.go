@@ -42,6 +42,16 @@ import (
 // toJSON method. It conforms to ISO 8601 and is like RFC3339 and in UTC.
 const javascriptToJSONFormat = "2006-01-02T15:04:05.999Z"
 
+func (s *Server) addBaseDGUTARoutes() {
+	authGroup := s.AuthRouter()
+
+	if authGroup == nil {
+		s.Router().GET(EndPointWhere, s.getWhere)
+	} else {
+		authGroup.GET(wherePath, s.getWhere)
+	}
+}
+
 // AddTreePage adds the /tree static web page to the server, along with the
 // /rest/v1/auth/tree endpoint. It only works if EnableAuth() has been called
 // first.
@@ -140,8 +150,8 @@ func (s *Server) getTree(c *gin.Context) {
 		return
 	}
 
-	s.treeMutex.RLock()
-	defer s.treeMutex.RUnlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 
 	di, err := s.tree.DirInfo(path, filter)
 	if err != nil {

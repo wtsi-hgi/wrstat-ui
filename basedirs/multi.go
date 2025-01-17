@@ -63,7 +63,11 @@ func OpenMulti(ownersPath string, paths ...string) (MultiReader, error) { //noli
 			userCache:   userCache,
 			owners:      owners,
 		}
+
+		// find first entry (should be the root)
 	}
+
+	// Create pseudo entries for root and required subdirs
 
 	return mr, nil
 }

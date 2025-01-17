@@ -134,8 +134,36 @@ func FakeFilesForDGUTADBForBasedirsTesting(gid, uid uint32, prefix string, numFi
 		addFiles(dir, projectD[1:]+"/sub2", "file.bed", 1, 5, 50, 50, gid, uid)
 	}
 
+	// fmt.Println(countDirs(dir.AddDirectory("lustre")))
+	// fmt.Println(countDirs(dir.AddDirectory("lustre").AddDirectory("scratch123")))
+	// fmt.Println(countDirs(dir.AddDirectory("lustre").AddDirectory("scratch125")))
+
 	return []string{projectA, projectB125, projectB123, projectC1, projectC2, user2, projectD}, dir
 }
+
+// func countDirs(dir *statsdata.Directory) (int, int, int64) {
+// 	dirs := 0
+// 	files := 0
+// 	size := int64(0)
+
+// 	for _, d := range dir.Children {
+// 		switch d := d.(type) {
+// 		case *statsdata.Directory:
+// 			dirs++
+
+// 			dc, fc, s := countDirs(d)
+
+// 			dirs += dc
+// 			files += fc
+// 			size += s
+// 		case *statsdata.File:
+// 			files++
+// 			size += d.Size
+// 		}
+// 	}
+
+// 	return dirs, files, size
+// }
 
 const ExampleQuotaCSV = `1,/disk/1,10,20
 1,/disk/2,11,21
