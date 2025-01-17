@@ -66,7 +66,7 @@ const ErrNoPaths = basedirs.Error("no db paths found")
 // The subdir endpoints require id (gid or uid) and basedir parameters. The
 // history endpoint requires a gid and basedir (can be basedir, actually a
 // mountpoint) parameter.
-func (s *Server) LoadDBs(basePaths []string, dgutaDBsSuffix, basedirBasename, ownersPath string) error {
+func (s *Server) LoadDBs(basePaths []string, dgutaDBsSuffix, basedirBasename, ownersPath string) error { //nolint:funlen
 	dirgutaPaths, baseDirPaths := makeDBPaths(basePaths, dgutaDBsSuffix, basedirBasename)
 
 	mt, err := s.getLatestTimestamp(dirgutaPaths, baseDirPaths)
@@ -138,7 +138,6 @@ func (s *Server) getLatestTimestampFromPaths(paths []string) (time.Time, error) 
 
 func (s *Server) EnableDBReloading(basepath, dgutaDBsSuffix, basedirBasename, ownersPath string,
 	sentinelPollFrequency time.Duration, removeOldPaths bool) error {
-
 	dbPaths, toDelete, err := findDBDirs(basepath, dgutaDBsSuffix, basedirBasename)
 	if err != nil {
 		return err
@@ -162,7 +161,7 @@ func (s *Server) EnableDBReloading(basepath, dgutaDBsSuffix, basedirBasename, ow
 	return nil
 }
 
-func (s *Server) reloadLoop(basepath, dgutaDBsSuffix, basedirBasename, ownersPath string,
+func (s *Server) reloadLoop(basepath, dgutaDBsSuffix, basedirBasename, ownersPath string, //nolint:gocognit,gocyclo
 	sentinelPollFrequency time.Duration, removeOldPaths bool, dbPaths []string) {
 	for {
 		select {
@@ -182,7 +181,7 @@ func (s *Server) reloadLoop(basepath, dgutaDBsSuffix, basedirBasename, ownersPat
 			continue
 		}
 
-		if s.reloadDBs(dgutaDBsSuffix, basedirBasename, ownersPath, newDBPaths) {
+		if s.reloadDBs(dgutaDBsSuffix, basedirBasename, ownersPath, newDBPaths) { //nolint:nestif
 			dbPaths = newDBPaths
 
 			if removeOldPaths {
@@ -194,7 +193,7 @@ func (s *Server) reloadLoop(basepath, dgutaDBsSuffix, basedirBasename, ownersPat
 	}
 }
 
-func (s *Server) reloadDBs(dgutaDBsSuffix, basedirBasename,
+func (s *Server) reloadDBs(dgutaDBsSuffix, basedirBasename, //nolint:funlen
 	ownersPath string, dbPaths []string) bool {
 	dirgutaPaths, baseDirPaths := makeDBPaths(dbPaths, dgutaDBsSuffix, basedirBasename)
 
@@ -304,7 +303,7 @@ func entryExists(path string) bool {
 }
 
 func addEntryToMap(entry fs.DirEntry, latest map[string]nameTime, toDelete []string) []string {
-	parts := strings.SplitN(entry.Name(), "_", 2)
+	parts := strings.SplitN(entry.Name(), "_", 2) //nolint:mnd
 	key := parts[1]
 
 	timestamp, err := strconv.ParseInt(parts[0], 10, 64)
@@ -312,7 +311,7 @@ func addEntryToMap(entry fs.DirEntry, latest map[string]nameTime, toDelete []str
 		return toDelete
 	}
 
-	if previous, ok := latest[key]; previous.time > timestamp {
+	if previous, ok := latest[key]; previous.time > timestamp { //nolint:nestif
 		toDelete = append(toDelete, key)
 	} else {
 		if ok {

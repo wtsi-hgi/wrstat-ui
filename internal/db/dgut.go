@@ -71,6 +71,8 @@ func CreateExampleDBsCustomIDs(t *testing.T, uid, gidA, gidB string, refTime int
 // CreateExampleDBsCustomIDsWithDir creates a temporary dguta.db, in the path
 // provided, from some example data that uses the given uid and gids.
 func CreateExampleDBsCustomIDsWithDir(t *testing.T, dir, uid, gidA, gidB string, refTime int64) error {
+	t.Helper()
+
 	dbData := exampleDBData(t, uid, gidA, gidB, refTime)
 	s := summary.NewSummariser(stats.NewStatsParser(dbData))
 
@@ -111,6 +113,8 @@ func addDirgutaSummariser(s *summary.Summariser, path string) (func() error, err
 }
 
 func addBasedirsSummariser(t *testing.T, s *summary.Summariser, path string) error {
+	t.Helper()
+
 	csvPath := internaldata.CreateQuotasCSV(t, internaldata.ExampleQuotaCSV)
 
 	quotas, err := basedirs.ParseQuotas(csvPath)
