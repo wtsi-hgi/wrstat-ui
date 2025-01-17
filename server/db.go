@@ -66,8 +66,8 @@ const ErrNoPaths = basedirs.Error("no db paths found")
 // The subdir endpoints require id (gid or uid) and basedir parameters. The
 // history endpoint requires a gid and basedir (can be basedir, actually a
 // mountpoint) parameter.
-func (s *Server) LoadDBs(basePaths []string, dgutaDBsSuffix, basedirBasename, ownersPath string) error { //nolint:funlen
-	dirgutaPaths, baseDirPaths := makeDBPaths(basePaths, dgutaDBsSuffix, basedirBasename)
+func (s *Server) LoadDBs(basePaths []string, dgutaDBName, basedirDBName, ownersPath string) error { //nolint:funlen
+	dirgutaPaths, baseDirPaths := joinDBPaths(basePaths, dgutaDBName, basedirDBName)
 
 	mt, err := s.getLatestTimestamp(dirgutaPaths, baseDirPaths)
 	if err != nil {
@@ -136,16 +136,37 @@ func (s *Server) getLatestTimestampFromPaths(paths []string) (time.Time, error) 
 	return lt, nil
 }
 
-func (s *Server) EnableDBReloading(basepath, dgutaDBsSuffix, basedirBasename, ownersPath string,
-	sentinelPollFrequency time.Duration, removeOldPaths bool) error {
-	dbPaths, toDelete, err := findDBDirs(basepath, dgutaDBsSuffix, basedirBasename)
+// EnableDBReloading will periodically scan the basepath for the latest
+// directories that contains dirguta and basedir databases and update the server
+// to use the new databases.
+//
+// The scan will looks for directories within the base path with names that
+// match the following regular expression:
+//
+// ^\d+_.
+//
+// The directory name consists of two parts, a numeric version identifier and a
+// mountpoint/key, separated by an underscore.
+//
+// The directory must contain entries with names equal to both the dgutaDBName
+// and basedirDBName to be considered valid.
+//
+// For each mountpoint/key, the databases in the directory with the greatest
+// (numerical) version will be considered the most up-to-date version and those
+// that will be loaded.
+//
+// You can set the removeOldPaths to true to cause valid, but older directories
+// to be removed from the base path after each reload.
+func (s *Server) EnableDBReloading(basepath, dgutaDBName, basedirDBName, ownersPath string,
+	pollFrequency time.Duration, removeOldPaths bool) error {
+	dbPaths, toDelete, err := findDBDirs(basepath, dgutaDBName, basedirDBName)
 	if err != nil {
 		return err
 	} else if len(dbPaths) == 0 {
 		return ErrNoPaths
 	}
 
-	if err := s.LoadDBs(dbPaths, dgutaDBsSuffix, basedirBasename, ownersPath); err != nil {
+	if err := s.LoadDBs(dbPaths, dgutaDBName, basedirDBName, ownersPath); err != nil {
 		return err
 	}
 
@@ -155,22 +176,22 @@ func (s *Server) EnableDBReloading(basepath, dgutaDBsSuffix, basedirBasename, ow
 		}
 	}
 
-	go s.reloadLoop(basepath, dgutaDBsSuffix, basedirBasename, ownersPath,
-		sentinelPollFrequency, removeOldPaths, dbPaths)
+	go s.reloadLoop(basepath, dgutaDBName, basedirDBName, ownersPath,
+		pollFrequency, removeOldPaths, dbPaths)
 
 	return nil
 }
 
-func (s *Server) reloadLoop(basepath, dgutaDBsSuffix, basedirBasename, ownersPath string, //nolint:gocognit,gocyclo
-	sentinelPollFrequency time.Duration, removeOldPaths bool, dbPaths []string) {
+func (s *Server) reloadLoop(basepath, dgutaDBName, basedirDBName, ownersPath string, //nolint:gocognit,gocyclo
+	pollFrequency time.Duration, removeOldPaths bool, dbPaths []string) {
 	for {
 		select {
-		case <-time.After(sentinelPollFrequency):
+		case <-time.After(pollFrequency):
 		case <-s.stopCh:
 			return
 		}
 
-		newDBPaths, toDelete, err := findDBDirs(basepath, dgutaDBsSuffix, basedirBasename)
+		newDBPaths, toDelete, err := findDBDirs(basepath, dgutaDBName, basedirDBName)
 		if err != nil {
 			s.Logger.Printf("finding new database directories failed: %s", err)
 
@@ -181,7 +202,7 @@ func (s *Server) reloadLoop(basepath, dgutaDBsSuffix, basedirBasename, ownersPat
 			continue
 		}
 
-		if s.reloadDBs(dgutaDBsSuffix, basedirBasename, ownersPath, newDBPaths) { //nolint:nestif
+		if s.reloadDBs(dgutaDBName, basedirDBName, ownersPath, newDBPaths) { //nolint:nestif
 			dbPaths = newDBPaths
 
 			if removeOldPaths {
@@ -193,9 +214,9 @@ func (s *Server) reloadLoop(basepath, dgutaDBsSuffix, basedirBasename, ownersPat
 	}
 }
 
-func (s *Server) reloadDBs(dgutaDBsSuffix, basedirBasename, //nolint:funlen
+func (s *Server) reloadDBs(dgutaDBName, basedirDBName, //nolint:funlen
 	ownersPath string, dbPaths []string) bool {
-	dirgutaPaths, baseDirPaths := makeDBPaths(dbPaths, dgutaDBsSuffix, basedirBasename)
+	dirgutaPaths, baseDirPaths := joinDBPaths(dbPaths, dgutaDBName, basedirDBName)
 
 	mt, err := s.getLatestTimestamp(dirgutaPaths, baseDirPaths)
 	if err != nil {
@@ -236,31 +257,31 @@ func (s *Server) logReloadError(format string, v ...any) bool {
 // FindDBDirs finds the latest dirguta and basedir databases in the given base
 // directory, returning the paths to the dirguta dbs and basedir dbs for each
 // key/mountpoint.
-func FindDBDirs(basepath, dgutaDBsSuffix, basedirBasename string) ([]string, []string, error) {
-	dbPaths, _, err := findDBDirs(basepath, dgutaDBsSuffix, basedirBasename)
-	dirgutaPaths, basedirPaths := makeDBPaths(dbPaths, dgutaDBsSuffix, basedirBasename)
+func FindDBDirs(basepath, dgutaDBName, basedirDBName string) ([]string, []string, error) {
+	dbPaths, _, err := findDBDirs(basepath, dgutaDBName, basedirDBName)
+	dirgutaPaths, basedirPaths := joinDBPaths(dbPaths, dgutaDBName, basedirDBName)
 
 	return dirgutaPaths, basedirPaths, err
 }
 
-func makeDBPaths(dbPaths []string, dgutaDBsSuffix, basedirBasename string) ([]string, []string) {
+func joinDBPaths(dbPaths []string, dgutaDBName, basedirDBName string) ([]string, []string) {
 	dirgutaPaths := make([]string, len(dbPaths))
 	baseDirPaths := make([]string, len(dbPaths))
 
 	for n, path := range dbPaths {
-		dirgutaPaths[n] = filepath.Join(path, dgutaDBsSuffix)
-		baseDirPaths[n] = filepath.Join(path, basedirBasename)
+		dirgutaPaths[n] = filepath.Join(path, dgutaDBName)
+		baseDirPaths[n] = filepath.Join(path, basedirDBName)
 	}
 
 	return dirgutaPaths, baseDirPaths
 }
 
-type nameTime struct {
-	name string
-	time int64
+type nameVersion struct {
+	name    string
+	version int64
 }
 
-func findDBDirs(basepath, dgutaDBsSuffix, basedirBasename string) ([]string, []string, error) {
+func findDBDirs(basepath, dgutaDBName, basedirDBName string) ([]string, []string, error) {
 	entries, err := os.ReadDir(basepath)
 	if err != nil {
 		return nil, nil, err
@@ -268,10 +289,10 @@ func findDBDirs(basepath, dgutaDBsSuffix, basedirBasename string) ([]string, []s
 
 	var toDelete []string
 
-	latest := make(map[string]nameTime)
+	latest := make(map[string]nameVersion)
 
 	for _, entry := range entries {
-		if !isValidDBDir(entry, basepath, dgutaDBsSuffix, basedirBasename) {
+		if !isValidDBDir(entry, basepath, dgutaDBName, basedirDBName) {
 			continue
 		}
 
@@ -291,11 +312,11 @@ func findDBDirs(basepath, dgutaDBsSuffix, basedirBasename string) ([]string, []s
 
 var validDBDir = regexp.MustCompile(`^\d+_.`)
 
-func isValidDBDir(entry fs.DirEntry, basepath, dgutaDBsSuffix, basedirBasename string) bool {
+func isValidDBDir(entry fs.DirEntry, basepath, dgutaDBName, basedirBasename string) bool {
 	name := entry.Name()
 
 	return entry.IsDir() && validDBDir.MatchString(name) &&
-		entryExists(filepath.Join(basepath, name, dgutaDBsSuffix)) &&
+		entryExists(filepath.Join(basepath, name, dgutaDBName)) &&
 		entryExists(filepath.Join(basepath, name, basedirBasename))
 }
 
@@ -305,23 +326,23 @@ func entryExists(path string) bool {
 	return err == nil
 }
 
-func addEntryToMap(entry fs.DirEntry, latest map[string]nameTime, toDelete []string) []string {
+func addEntryToMap(entry fs.DirEntry, latest map[string]nameVersion, toDelete []string) []string {
 	parts := strings.SplitN(entry.Name(), "_", 2) //nolint:mnd
 	key := parts[1]
 
-	timestamp, err := strconv.ParseInt(parts[0], 10, 64)
+	version, err := strconv.ParseInt(parts[0], 10, 64)
 	if err != nil {
 		return toDelete
 	}
 
-	if previous, ok := latest[key]; previous.time > timestamp { //nolint:nestif
+	if previous, ok := latest[key]; previous.version > version { //nolint:nestif
 		toDelete = append(toDelete, key)
 	} else {
 		if ok {
 			toDelete = append(toDelete, previous.name)
 		}
 
-		latest[key] = nameTime{name: entry.Name(), time: timestamp}
+		latest[key] = nameVersion{name: entry.Name(), version: version}
 	}
 
 	return toDelete
