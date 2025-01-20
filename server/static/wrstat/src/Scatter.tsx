@@ -49,6 +49,8 @@ type Data = {
 	Mtime: string;
 }
 
+let scatterKey = 0;
+
 const minDaysAgo = (date: string) => {
 	const daysAgo = asDaysAgo(date);
 	if (daysAgo < 0) {
@@ -232,7 +234,7 @@ const minDaysAgo = (date: string) => {
 		const xScale = graphWidth / (maxDate - minDate),
 			yScale = graphHeight / (maxSize - minSize);
 
-		return <svg id="scatter" xmlns="http://www.w3.org/2000/svg" width={width} height={height} viewBox={`0 0 ${width} ${height}`} onMouseDown={onDrag}>
+		return <svg id="scatter" key={`scatter_${++scatterKey}`} xmlns="http://www.w3.org/2000/svg" width={width} height={height} viewBox={`0 0 ${width} ${height}`} onMouseDown={onDrag}>
 			<defs>
 				<circle id="marker" r="2.5" />
 			</defs>
