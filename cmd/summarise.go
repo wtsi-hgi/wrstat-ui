@@ -80,7 +80,7 @@ Summarise takes the following arguments
 	If filename ends in '.gz' the file will be gzip compressed.
 
   --groupUser,-g
-	groupUser output file. Defaults to DEFAULTDIR/bygroup.gz, if --defaultDir is set.
+	groupUser output file. Defaults to DEFAULTDIR/bygroup, if --defaultDir is set.
 	If filename ends in '.gz' the file will be gzip compressed.
 
   --basedirsDB,-b
@@ -182,7 +182,7 @@ func setArgsDefaults() {
 	}
 
 	if groupUser == "" {
-		groupUser = filepath.Join(defaultDir, "bygroup.gz")
+		groupUser = filepath.Join(defaultDir, "bygroup")
 	}
 
 	if basedirsDB == "" {
