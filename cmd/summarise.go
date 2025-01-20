@@ -76,10 +76,12 @@ Summarise takes the following arguments
 	output all summarisers to here with the default names.
 
   --userGroup,-u
-	usergroup output file. Defaults to DEFAULTDIR/byusergroup, if --defaultDir is set.
+	usergroup output file. Defaults to DEFAULTDIR/byusergroup.gz, if --defaultDir is set.
+	If filename ends in '.gz' the file will be gzip compressed.
 
   --groupUser,-g
-	groupUser output file. Defaults to DEFAULTDIR/bygroup, if --defaultDir is set.
+	groupUser output file. Defaults to DEFAULTDIR/bygroup.gz, if --defaultDir is set.
+	If filename ends in '.gz' the file will be gzip compressed.
 
   --basedirsDB,-b
 	basedirs output file. Defaults to DEFAULTDIR/basedirs.db, if --defaultDir is set.
@@ -176,11 +178,11 @@ func setArgsDefaults() {
 	}
 
 	if userGroup == "" {
-		userGroup = filepath.Join(defaultDir, "byusergroup")
+		userGroup = filepath.Join(defaultDir, "byusergroup.gz")
 	}
 
 	if groupUser == "" {
-		groupUser = filepath.Join(defaultDir, "bygroup")
+		groupUser = filepath.Join(defaultDir, "bygroup.gz")
 	}
 
 	if basedirsDB == "" {
@@ -224,9 +226,36 @@ func addUserGroupSummariser(s *summary.Summariser, userGroup string) error {
 		return fmt.Errorf("failed to create usergroup file: %w", err)
 	}
 
-	s.AddDirectoryOperation(usergroup.NewByUserGroup(uf))
+	s.AddDirectoryOperation(usergroup.NewByUserGroup(wrapCompressed(uf)))
 
 	return nil
+}
+
+type compressedFile struct {
+	*pgzip.Writer
+	file *os.File
+}
+
+func (c *compressedFile) Close() error {
+	err := c.Writer.Close()
+	errr := c.file.Close()
+
+	if err != nil {
+		return err
+	}
+
+	return errr
+}
+
+func wrapCompressed(wc *os.File) io.WriteCloser {
+	if !strings.HasSuffix(wc.Name(), ".gz") {
+		return wc
+	}
+
+	return &compressedFile{
+		Writer: pgzip.NewWriter(wc),
+		file:   wc,
+	}
 }
 
 func addGroupUserSummariser(s *summary.Summariser, groupUser string) error {
@@ -235,7 +264,7 @@ func addGroupUserSummariser(s *summary.Summariser, groupUser string) error {
 		return fmt.Errorf("failed to create groupuser file: %w", err)
 	}
 
-	s.AddGlobalOperation(groupuser.NewByGroupUser(gf))
+	s.AddGlobalOperation(groupuser.NewByGroupUser(wrapCompressed(gf)))
 
 	return nil
 }
