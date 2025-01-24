@@ -60,7 +60,7 @@ func TestMain(m *testing.M) {
 	defer d1()
 }
 
-func runWRStat(args ...string) (string, string, []*jobqueue.JobViaJSON, error) { //nolint:unparam
+func runWRStat(args ...string) (string, string, []*jobqueue.JobViaJSON, error) {
 	var (
 		stdout, stderr strings.Builder
 		jobs           []*jobqueue.JobViaJSON
@@ -342,7 +342,8 @@ func TestWatch(t *testing.T) {
 
 		So(jobs, ShouldResemble, []*jobqueue.JobViaJSON{
 			{
-				Cmd: fmt.Sprintf(`"./wrstat-ui_test" summarise -d %[1]q -q "/some/quota.file" -c "basedirs.config" %[2]q && touch -r %[3]q %[1]q && mv %[1]q %[4]q`,
+				Cmd: fmt.Sprintf(`"./wrstat-ui_test" summarise -d %[1]q -q `+
+					`"/some/quota.file" -c "basedirs.config" %[2]q && touch -r %[3]q %[1]q && mv %[1]q %[4]q`,
 					dotA, statsA, runA, finalA,
 				),
 				ReqGrp: "wrstat-ui-summarise",
@@ -362,7 +363,8 @@ func TestWatch(t *testing.T) {
 
 		So(jobs, ShouldResemble, []*jobqueue.JobViaJSON{
 			{
-				Cmd: fmt.Sprintf(`"./wrstat-ui_test" summarise -d %[1]q -s %[2]q -q "/some/quota.file" -c "basedirs.config" %[3]q && touch -r %[4]q %[1]q && mv %[1]q %[5]q`,
+				Cmd: fmt.Sprintf(`"./wrstat-ui_test" summarise -d %[1]q `+
+					`-s %[2]q -q "/some/quota.file" -c "basedirs.config" %[3]q && touch -r %[4]q %[1]q && mv %[1]q %[5]q`,
 					dotA, previousBasedirs, statsA, runA, finalA,
 				),
 				ReqGrp: "wrstat-ui-summarise",
