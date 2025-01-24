@@ -7,13 +7,15 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/wtsi-hgi/wrstat-ui/server"
 )
 
-const inputStatsFile = "combine.stats.gz"
+const inputStatsFile = "stats.gz"
 const testOutputFD = 3
 const dirPerms = 0750
 
@@ -26,21 +28,25 @@ var watch = &cobra.Command{
 			die("%s", err)
 		}
 
-		inputPaths, err := server.FindDBDirs(args[0], "stats.gz")
-		if err != nil {
-			die("error getting input DB paths: %s", err)
-		}
-
-		for _, p := range inputPaths {
-			base := filepath.Base(p)
-
-			if entryExists(filepath.Join(defaultDir, base)) || entryExists(filepath.Join(defaultDir, "."+base)) {
-				continue
+		for {
+			inputPaths, err := server.FindDBDirs(args[0], "stats.gz")
+			if err != nil {
+				die("error getting input DB paths: %s", err)
 			}
 
-			if err := scheduleSummarise(args[0], defaultDir, base); err != nil {
-				warn("error scheduling summarise (%s): %s", base, err)
+			for _, p := range inputPaths {
+				base := filepath.Base(p)
+
+				if entryExists(filepath.Join(defaultDir, base)) || entryExists(filepath.Join(defaultDir, "."+base)) {
+					continue
+				}
+
+				if err := scheduleSummarise(args[0], defaultDir, base); err != nil {
+					warn("error scheduling summarise (%s): %s", base, err)
+				}
 			}
+
+			time.Sleep(time.Minute)
 		}
 	},
 }
@@ -85,18 +91,18 @@ func scheduleSummarise(inputDir, outputDir, base string) error { //nolint:funlen
 		return err
 	}
 
-	cmdFormat := "%[1]q summarise -d %[2]q -q %[4]q -c %[5]q  %[6]q && touch -r %[7]q %[2]q && mv %[2]q %[8]q"
+	cmdFormat := "%[1]q summarise -d %[2]q -q %[4]q -c %[5]q %[6]q && touch -r %[7]q %[2]q && mv %[2]q %[8]q"
 
 	if previousBasedirsDB != "" {
 		cmdFormat = "%[1]q summarise -d %[2]q -s %[3]q -q %[4]q -c %[5]q %[6]q && touch -r %[7]q %[2]q && mv %[2]q %[8]q"
 	}
 
-	input := strings.NewReader(fmt.Sprintf(`{"cmd":`+cmdFormat+`,"ReqGrp":"wrstat-ui-summarise"}`,
+	input := strings.NewReader(`{"cmd":` + strconv.Quote(fmt.Sprintf(cmdFormat,
 		os.Args[0], dotOutputBase, previousBasedirsDB, quotaPath, basedirsConfig,
 		filepath.Join(inputDir, base, inputStatsFile),
 		filepath.Join(inputDir, base),
 		filepath.Join(outputDir, base),
-	))
+	)) + `,"req_grp":"wrstat-ui-summarise"}`)
 
 	if runJobs != "" {
 		io.Copy(os.NewFile(uintptr(testOutputFD), "/dev/stdout"), input) //nolint:errcheck
@@ -116,10 +122,12 @@ func getPreviousBasedirsDB(outputDir, base string) (string, error) {
 		return "", err
 	}
 
+	splitBase := strings.Split(base, "_")
+
 	for _, possibleBasedirDB := range possibleBasedirs {
 		key := strings.SplitN(filepath.Base(possibleBasedirDB), "_", 2) //nolint:mnd
 
-		if key[1] == base {
+		if key[1] == splitBase[1] {
 			return filepath.Join(possibleBasedirDB, basedirBasename), nil
 		}
 	}
