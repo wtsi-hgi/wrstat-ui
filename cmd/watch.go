@@ -15,6 +15,7 @@ import (
 
 const inputStatsFile = "combine.stats.gz"
 const testOutputFD = 3
+const dirPerms = 0750
 
 var watch = &cobra.Command{
 	Use:   "watch",
@@ -72,10 +73,10 @@ func checkWatchArgs(args []string) error {
 	return nil
 }
 
-func scheduleSummarise(inputDir, outputDir, base string) error {
+func scheduleSummarise(inputDir, outputDir, base string) error { //nolint:funlen
 	dotOutputBase := filepath.Join(outputDir, "."+base)
 
-	if err := os.MkdirAll(dotOutputBase, 0750); err != nil {
+	if err := os.MkdirAll(dotOutputBase, dirPerms); err != nil {
 		return err
 	}
 
@@ -91,18 +92,14 @@ func scheduleSummarise(inputDir, outputDir, base string) error {
 	}
 
 	input := strings.NewReader(fmt.Sprintf(`{"cmd":`+cmdFormat+`,"ReqGrp":"wrstat-ui-summarise"}`,
-		os.Args[0],
-		dotOutputBase,
-		previousBasedirsDB,
-		quotaPath,
-		basedirsConfig,
+		os.Args[0], dotOutputBase, previousBasedirsDB, quotaPath, basedirsConfig,
 		filepath.Join(inputDir, base, inputStatsFile),
 		filepath.Join(inputDir, base),
 		filepath.Join(outputDir, base),
 	))
 
 	if runJobs != "" {
-		io.Copy(os.NewFile(uintptr(testOutputFD), "/dev/stdout"), input)
+		io.Copy(os.NewFile(uintptr(testOutputFD), "/dev/stdout"), input) //nolint:errcheck
 
 		os.Exit(0)
 	}
@@ -120,7 +117,7 @@ func getPreviousBasedirsDB(outputDir, base string) (string, error) {
 	}
 
 	for _, possibleBasedirDB := range possibleBasedirs {
-		key := strings.SplitN(filepath.Base(possibleBasedirDB), "_", 2)
+		key := strings.SplitN(filepath.Base(possibleBasedirDB), "_", 2) //nolint:mnd
 
 		if key[1] == base {
 			return filepath.Join(possibleBasedirDB, basedirBasename), nil

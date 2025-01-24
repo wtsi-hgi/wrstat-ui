@@ -19,7 +19,6 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 	internaldata "github.com/wtsi-hgi/wrstat-ui/internal/data"
-	"github.com/wtsi-hgi/wrstat-ui/internal/user"
 	internaluser "github.com/wtsi-hgi/wrstat-ui/internal/user"
 )
 
@@ -61,7 +60,7 @@ func TestMain(m *testing.M) {
 	defer d1()
 }
 
-func runWRStat(args ...string) (string, string, []*jobqueue.Job, error) {
+func runWRStat(args ...string) (string, string, []*jobqueue.Job, error) { //nolint:unparam
 	var (
 		stdout, stderr strings.Builder
 		jobs           []*jobqueue.Job
@@ -120,7 +119,8 @@ func TestSummarise(t *testing.T) {
 		refTime := time.Now().Truncate(time.Second)
 		yesterday := refTime.Add(-24 * time.Hour)
 
-		_, root := internaldata.FakeFilesForDGUTADBForBasedirsTesting(gid, uid, "lustre", 1, 1<<29, 1<<31, true, yesterday.Unix())
+		_, root := internaldata.FakeFilesForDGUTADBForBasedirsTesting(gid, uid,
+			"lustre", 1, 1<<29, 1<<31, true, yesterday.Unix())
 
 		inputDir := t.TempDir()
 		outputDir := t.TempDir()
@@ -136,12 +136,12 @@ func TestSummarise(t *testing.T) {
 2,/nfs/scratch123,400,40
 77777,/nfs/scratch125,500,50
 3,/lustre/scratch125,300,30
-`), 0644)
+`), 0600)
 		So(err, ShouldBeNil)
 
 		err = os.WriteFile(basedirsConfig, []byte(`/lustre/scratch123/hgi/mdt	5	5
 /nfs/scratch123/hgi/mdt	5	5
-/	4	4`), 0644)
+/	4	4`), 0600)
 		So(err, ShouldBeNil)
 
 		ownersPath, err := internaldata.CreateOwnersCSV(t, internaldata.ExampleOwnersCSV)
@@ -176,63 +176,64 @@ func TestSummarise(t *testing.T) {
 			"%[6]s\t%[5]s\t1\t60\n"+
 			"%[7]s\t%[8]s\t5\t15\n"+
 			"%[9]s\t%[10]s\t2\t100\n",
-			user.GetGroupName(t, "1"), user.GetUsername(t, "101"),
-			user.GetGroupName(t, "2"), user.GetUsername(t, "88888"),
-			user.GetUsername(t, "102"), user.GetGroupName(t, "77777"),
-			user.GetGroupName(t, strconv.Itoa(int(gid))), user.GetUsername(t, strconv.Itoa(int(uid))),
-			user.GetGroupName(t, "3"), user.GetUsername(t, "103"),
+			internaluser.GetGroupName(t, "1"), internaluser.GetUsername(t, "101"),
+			internaluser.GetGroupName(t, "2"), internaluser.GetUsername(t, "88888"),
+			internaluser.GetUsername(t, "102"), internaluser.GetGroupName(t, "77777"),
+			internaluser.GetGroupName(t, strconv.Itoa(int(gid))), internaluser.GetUsername(t, strconv.Itoa(int(uid))),
+			internaluser.GetGroupName(t, "3"), internaluser.GetUsername(t, "103"),
 		)))
 
-		compareFileContents(t, filepath.Join(outputA, "byusergroup.gz"), sortLines(fmt.Sprintf("%[1]s\t%[2]s\t\"/\"\t2\t100\n"+
-			"%[1]s\t%[2]s\t\"/lustre/\"\t2\t100\n"+
-			"%[1]s\t%[2]s\t\"/lustre/scratch125/\"\t2\t100\n"+
-			"%[1]s\t%[2]s\t\"/lustre/scratch125/humgen/\"\t2\t100\n"+
-			"%[1]s\t%[2]s\t\"/lustre/scratch125/humgen/projects/\"\t2\t100\n"+
-			"%[1]s\t%[2]s\t\"/lustre/scratch125/humgen/projects/A/\"\t2\t100\n"+
-			"%[3]s\t%[4]s\t\"/\"\t2\t80\n"+
-			"%[3]s\t%[4]s\t\"/lustre/\"\t2\t80\n"+
-			"%[3]s\t%[4]s\t\"/lustre/scratch123/\"\t2\t80\n"+
-			"%[3]s\t%[4]s\t\"/lustre/scratch123/hgi/\"\t2\t80\n"+
-			"%[3]s\t%[4]s\t\"/lustre/scratch123/hgi/m0/\"\t1\t40\n"+
-			"%[3]s\t%[4]s\t\"/lustre/scratch123/hgi/mdt0/\"\t1\t40\n"+
-			"%[5]s\t%[6]s\t\"/\"\t2\t2684354560\n"+
-			"%[5]s\t%[6]s\t\"/lustre/\"\t2\t2684354560\n"+
-			"%[5]s\t%[6]s\t\"/lustre/scratch125/\"\t2\t2684354560\n"+
-			"%[5]s\t%[6]s\t\"/lustre/scratch125/humgen/\"\t2\t2684354560\n"+
-			"%[5]s\t%[6]s\t\"/lustre/scratch125/humgen/projects/\"\t2\t2684354560\n"+
-			"%[5]s\t%[6]s\t\"/lustre/scratch125/humgen/projects/A/\"\t2\t2684354560\n"+
-			"%[5]s\t%[6]s\t\"/lustre/scratch125/humgen/projects/A/sub/\"\t1\t2147483648\n"+
-			"%[7]s\t%[8]s\t\"/\"\t5\t15\n"+
-			"%[7]s\t%[8]s\t\"/lustre/\"\t5\t15\n"+
-			"%[7]s\t%[8]s\t\"/lustre/scratch125/\"\t5\t15\n"+
-			"%[7]s\t%[8]s\t\"/lustre/scratch125/humgen/\"\t5\t15\n"+
-			"%[7]s\t%[8]s\t\"/lustre/scratch125/humgen/projects/\"\t5\t15\n"+
-			"%[7]s\t%[8]s\t\"/lustre/scratch125/humgen/projects/D/\"\t5\t15\n"+
-			"%[7]s\t%[8]s\t\"/lustre/scratch125/humgen/projects/D/sub1/\"\t3\t6\n"+
-			"%[7]s\t%[8]s\t\"/lustre/scratch125/humgen/projects/D/sub1/temp/\"\t1\t2\n"+
-			"%[7]s\t%[8]s\t\"/lustre/scratch125/humgen/projects/D/sub2/\"\t2\t9\n"+
-			"%[9]s\t%[4]s\t\"/\"\t2\t50\n"+
-			"%[9]s\t%[4]s\t\"/lustre/\"\t2\t50\n"+
-			"%[9]s\t%[4]s\t\"/lustre/scratch123/\"\t1\t30\n"+
-			"%[9]s\t%[4]s\t\"/lustre/scratch123/hgi/\"\t1\t30\n"+
-			"%[9]s\t%[4]s\t\"/lustre/scratch123/hgi/mdt1/\"\t1\t30\n"+
-			"%[9]s\t%[4]s\t\"/lustre/scratch123/hgi/mdt1/projects/\"\t1\t30\n"+
-			"%[9]s\t%[4]s\t\"/lustre/scratch123/hgi/mdt1/projects/B/\"\t1\t30\n"+
-			"%[9]s\t%[4]s\t\"/lustre/scratch125/\"\t1\t20\n"+
-			"%[9]s\t%[4]s\t\"/lustre/scratch125/humgen/\"\t1\t20\n"+
-			"%[9]s\t%[4]s\t\"/lustre/scratch125/humgen/projects/\"\t1\t20\n"+
-			"%[9]s\t%[4]s\t\"/lustre/scratch125/humgen/projects/B/\"\t1\t20\n"+
-			"%[9]s\t%[10]s\t\"/\"\t1\t60\n"+
-			"%[9]s\t%[10]s\t\"/lustre/\"\t1\t60\n"+
-			"%[9]s\t%[10]s\t\"/lustre/scratch125/\"\t1\t60\n"+
-			"%[9]s\t%[10]s\t\"/lustre/scratch125/humgen/\"\t1\t60\n"+
-			"%[9]s\t%[10]s\t\"/lustre/scratch125/humgen/teams/\"\t1\t60\n"+
-			"%[9]s\t%[10]s\t\"/lustre/scratch125/humgen/teams/102/\"\t1\t60\n",
-			user.GetUsername(t, "103"), user.GetGroupName(t, "3"),
-			user.GetUsername(t, "88888"), user.GetGroupName(t, "2"),
-			user.GetUsername(t, "101"), user.GetGroupName(t, "1"),
-			user.GetUsername(t, strconv.Itoa(int(uid))), user.GetGroupName(t, strconv.Itoa(int(gid))),
-			user.GetUsername(t, "102"), user.GetGroupName(t, "77777"))))
+		compareFileContents(t, filepath.Join(outputA, "byusergroup.gz"),
+			sortLines(fmt.Sprintf("%[1]s\t%[2]s\t\"/\"\t2\t100\n"+
+				"%[1]s\t%[2]s\t\"/lustre/\"\t2\t100\n"+
+				"%[1]s\t%[2]s\t\"/lustre/scratch125/\"\t2\t100\n"+
+				"%[1]s\t%[2]s\t\"/lustre/scratch125/humgen/\"\t2\t100\n"+
+				"%[1]s\t%[2]s\t\"/lustre/scratch125/humgen/projects/\"\t2\t100\n"+
+				"%[1]s\t%[2]s\t\"/lustre/scratch125/humgen/projects/A/\"\t2\t100\n"+
+				"%[3]s\t%[4]s\t\"/\"\t2\t80\n"+
+				"%[3]s\t%[4]s\t\"/lustre/\"\t2\t80\n"+
+				"%[3]s\t%[4]s\t\"/lustre/scratch123/\"\t2\t80\n"+
+				"%[3]s\t%[4]s\t\"/lustre/scratch123/hgi/\"\t2\t80\n"+
+				"%[3]s\t%[4]s\t\"/lustre/scratch123/hgi/m0/\"\t1\t40\n"+
+				"%[3]s\t%[4]s\t\"/lustre/scratch123/hgi/mdt0/\"\t1\t40\n"+
+				"%[5]s\t%[6]s\t\"/\"\t2\t2684354560\n"+
+				"%[5]s\t%[6]s\t\"/lustre/\"\t2\t2684354560\n"+
+				"%[5]s\t%[6]s\t\"/lustre/scratch125/\"\t2\t2684354560\n"+
+				"%[5]s\t%[6]s\t\"/lustre/scratch125/humgen/\"\t2\t2684354560\n"+
+				"%[5]s\t%[6]s\t\"/lustre/scratch125/humgen/projects/\"\t2\t2684354560\n"+
+				"%[5]s\t%[6]s\t\"/lustre/scratch125/humgen/projects/A/\"\t2\t2684354560\n"+
+				"%[5]s\t%[6]s\t\"/lustre/scratch125/humgen/projects/A/sub/\"\t1\t2147483648\n"+
+				"%[7]s\t%[8]s\t\"/\"\t5\t15\n"+
+				"%[7]s\t%[8]s\t\"/lustre/\"\t5\t15\n"+
+				"%[7]s\t%[8]s\t\"/lustre/scratch125/\"\t5\t15\n"+
+				"%[7]s\t%[8]s\t\"/lustre/scratch125/humgen/\"\t5\t15\n"+
+				"%[7]s\t%[8]s\t\"/lustre/scratch125/humgen/projects/\"\t5\t15\n"+
+				"%[7]s\t%[8]s\t\"/lustre/scratch125/humgen/projects/D/\"\t5\t15\n"+
+				"%[7]s\t%[8]s\t\"/lustre/scratch125/humgen/projects/D/sub1/\"\t3\t6\n"+
+				"%[7]s\t%[8]s\t\"/lustre/scratch125/humgen/projects/D/sub1/temp/\"\t1\t2\n"+
+				"%[7]s\t%[8]s\t\"/lustre/scratch125/humgen/projects/D/sub2/\"\t2\t9\n"+
+				"%[9]s\t%[4]s\t\"/\"\t2\t50\n"+
+				"%[9]s\t%[4]s\t\"/lustre/\"\t2\t50\n"+
+				"%[9]s\t%[4]s\t\"/lustre/scratch123/\"\t1\t30\n"+
+				"%[9]s\t%[4]s\t\"/lustre/scratch123/hgi/\"\t1\t30\n"+
+				"%[9]s\t%[4]s\t\"/lustre/scratch123/hgi/mdt1/\"\t1\t30\n"+
+				"%[9]s\t%[4]s\t\"/lustre/scratch123/hgi/mdt1/projects/\"\t1\t30\n"+
+				"%[9]s\t%[4]s\t\"/lustre/scratch123/hgi/mdt1/projects/B/\"\t1\t30\n"+
+				"%[9]s\t%[4]s\t\"/lustre/scratch125/\"\t1\t20\n"+
+				"%[9]s\t%[4]s\t\"/lustre/scratch125/humgen/\"\t1\t20\n"+
+				"%[9]s\t%[4]s\t\"/lustre/scratch125/humgen/projects/\"\t1\t20\n"+
+				"%[9]s\t%[4]s\t\"/lustre/scratch125/humgen/projects/B/\"\t1\t20\n"+
+				"%[9]s\t%[10]s\t\"/\"\t1\t60\n"+
+				"%[9]s\t%[10]s\t\"/lustre/\"\t1\t60\n"+
+				"%[9]s\t%[10]s\t\"/lustre/scratch125/\"\t1\t60\n"+
+				"%[9]s\t%[10]s\t\"/lustre/scratch125/humgen/\"\t1\t60\n"+
+				"%[9]s\t%[10]s\t\"/lustre/scratch125/humgen/teams/\"\t1\t60\n"+
+				"%[9]s\t%[10]s\t\"/lustre/scratch125/humgen/teams/102/\"\t1\t60\n",
+				internaluser.GetUsername(t, "103"), internaluser.GetGroupName(t, "3"),
+				internaluser.GetUsername(t, "88888"), internaluser.GetGroupName(t, "2"),
+				internaluser.GetUsername(t, "101"), internaluser.GetGroupName(t, "1"),
+				internaluser.GetUsername(t, strconv.Itoa(int(uid))), internaluser.GetGroupName(t, strconv.Itoa(int(gid))),
+				internaluser.GetUsername(t, "102"), internaluser.GetGroupName(t, "77777"))))
 
 		bddb, err := basedirs.NewReader(filepath.Join(outputA, "basedirs.db"), ownersPath)
 		So(err, ShouldBeNil)
@@ -249,12 +250,12 @@ func TestSummarise(t *testing.T) {
 		So(err, ShouldBeNil)
 
 		childrenExist := tree.DirHasChildren("/", nil)
-		So(err, ShouldBeNil)
 		So(childrenExist, ShouldBeTrue)
 
 		tree.Close()
 
-		_, root = internaldata.FakeFilesForDGUTADBForBasedirsTesting(gid, uid, "lustre", 2, 1<<29, 1<<31, true, refTime.Unix())
+		_, root = internaldata.FakeFilesForDGUTADBForBasedirsTesting(gid, uid,
+			"lustre", 2, 1<<29, 1<<31, true, refTime.Unix())
 
 		f, err = os.Create(inputB)
 		So(err, ShouldBeNil)
