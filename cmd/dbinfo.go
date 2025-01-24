@@ -51,15 +51,17 @@ NB: for large databases, this can take hours to run.
 			die("you must supply the path to your 'wrstat multi -f' output directory")
 		}
 
-		dbPaths, basedirsDBPath, err := server.FindDBDirs(args[0], dgutaDBsSuffix, basedirBasename)
+		dbPaths, err := server.FindDBDirs(args[0], dgutaDBsSuffix, basedirBasename)
 		if err != nil {
 			die("failed to find database paths: %s", err)
 		}
 
+		durgutaPaths, basedirsDBPaths := server.JoinDBPaths(dbPaths, dgutaDBsSuffix, basedirBasename)
+
 		slog.SetLogLoggerLevel(slog.LevelDebug)
 
 		info("opening dguta databases...")
-		dgutaDB := db.NewDB(dbPaths...)
+		dgutaDB := db.NewDB(durgutaPaths...)
 		dbInfo, err := dgutaDB.Info()
 		if err != nil {
 			die("failed to get dguta db info: %s", err)
@@ -72,7 +74,7 @@ NB: for large databases, this can take hours to run.
 
 		var basedirsInfo basedirs.DBInfo
 
-		for _, path := range basedirsDBPath {
+		for _, path := range basedirsDBPaths {
 			bdInfo, err := basedirs.Info(path)
 			if err != nil {
 				die("failed to get basedirs db info: %s", err)
