@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -169,7 +170,7 @@ func TestSummarise(t *testing.T) {
 		_, _, _, err = runWRStat("summarise", "-d", outputA, "-q", quotaFile, "-c", basedirsConfig, inputA)
 		So(err, ShouldBeNil)
 
-		compareFileContents(t, filepath.Join(outputA, "bygroup"), fmt.Sprintf("%[1]s\t%[2]s\t2\t2684354560\n"+
+		compareFileContents(t, filepath.Join(outputA, "bygroup"), sortLines(fmt.Sprintf("%[1]s\t%[2]s\t2\t2684354560\n"+
 			"%[3]s\t%[4]s\t2\t80\n"+
 			"%[3]s\t%[5]s\t2\t50\n"+
 			"%[6]s\t%[5]s\t1\t60\n"+
@@ -180,9 +181,9 @@ func TestSummarise(t *testing.T) {
 			user.GetUsername(t, "102"), user.GetGroupName(t, "77777"),
 			user.GetGroupName(t, strconv.Itoa(int(gid))), user.GetUsername(t, strconv.Itoa(int(uid))),
 			user.GetGroupName(t, "3"), user.GetUsername(t, "103"),
-		))
+		)))
 
-		compareFileContents(t, filepath.Join(outputA, "byusergroup.gz"), fmt.Sprintf("%[1]s\t%[2]s\t\"/\"\t2\t100\n"+
+		compareFileContents(t, filepath.Join(outputA, "byusergroup.gz"), sortLines(fmt.Sprintf("%[1]s\t%[2]s\t\"/\"\t2\t100\n"+
 			"%[1]s\t%[2]s\t\"/lustre/\"\t2\t100\n"+
 			"%[1]s\t%[2]s\t\"/lustre/scratch125/\"\t2\t100\n"+
 			"%[1]s\t%[2]s\t\"/lustre/scratch125/humgen/\"\t2\t100\n"+
@@ -231,7 +232,7 @@ func TestSummarise(t *testing.T) {
 			user.GetUsername(t, "88888"), user.GetGroupName(t, "2"),
 			user.GetUsername(t, "101"), user.GetGroupName(t, "1"),
 			user.GetUsername(t, strconv.Itoa(int(uid))), user.GetGroupName(t, strconv.Itoa(int(gid))),
-			user.GetUsername(t, "102"), user.GetGroupName(t, "77777")))
+			user.GetUsername(t, "102"), user.GetGroupName(t, "77777"))))
 
 		bddb, err := basedirs.NewReader(filepath.Join(outputA, "basedirs.db"), ownersPath)
 		So(err, ShouldBeNil)
@@ -280,6 +281,25 @@ func TestSummarise(t *testing.T) {
 
 		bddb.Close()
 	})
+}
+
+func sortLines(data string) string {
+	nl := strings.HasSuffix(data, "\n")
+	if nl {
+		data = data[:len(data)-1]
+	}
+
+	lines := strings.Split(data, "\n")
+
+	slices.Sort(lines)
+
+	data = strings.Join(lines, "\n")
+
+	if nl {
+		data += "\n"
+	}
+
+	return data
 }
 
 func compareFileContents(t *testing.T, path, expectation string) {
