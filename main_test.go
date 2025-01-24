@@ -1,15 +1,25 @@
 package main
 
 import (
+	"compress/gzip"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/VertebrateResequencing/wr/jobqueue"
 	. "github.com/smartystreets/goconvey/convey"
+	"github.com/wtsi-hgi/wrstat-ui/basedirs"
+	"github.com/wtsi-hgi/wrstat-ui/db"
+	internaldata "github.com/wtsi-hgi/wrstat-ui/internal/data"
+	"github.com/wtsi-hgi/wrstat-ui/internal/user"
+	internaluser "github.com/wtsi-hgi/wrstat-ui/internal/user"
 )
 
 const app = "wrstat-ui_test"
@@ -99,4 +109,196 @@ func TestVersion(t *testing.T) {
 		So(strings.TrimSpace(output), ShouldEqual, "TESTVERSION")
 		So(stderr, ShouldBeBlank)
 	})
+}
+
+func TestSummarise(t *testing.T) {
+	Convey("summarise produces the correct output", t, func() {
+		gid, uid, _, _, err := internaluser.RealGIDAndUID()
+		So(err, ShouldBeNil)
+
+		refTime := time.Now().Truncate(time.Second)
+		yesterday := refTime.Add(-24 * time.Hour)
+
+		_, root := internaldata.FakeFilesForDGUTADBForBasedirsTesting(gid, uid, "lustre", 1, 1<<29, 1<<31, true, yesterday.Unix())
+
+		inputDir := t.TempDir()
+		outputDir := t.TempDir()
+		quotaFile := filepath.Join(inputDir, "quota.csv")
+		basedirsConfig := filepath.Join(inputDir, "basedirs.config")
+
+		err = os.WriteFile(quotaFile, []byte(`1,/lustre/scratch125,4000000000,20
+2,/lustre/scratch125,300,30
+2,/lustre/scratch123,400,40
+77777,/lustre/scratch125,500,50
+1,/nfs/scratch125,4000000000,20
+2,/nfs/scratch125,300,30
+2,/nfs/scratch123,400,40
+77777,/nfs/scratch125,500,50
+3,/lustre/scratch125,300,30
+`), 0644)
+		So(err, ShouldBeNil)
+
+		err = os.WriteFile(basedirsConfig, []byte(`/lustre/scratch123/hgi/mdt	5	5
+/nfs/scratch123/hgi/mdt	5	5
+/	4	4`), 0644)
+		So(err, ShouldBeNil)
+
+		ownersPath, err := internaldata.CreateOwnersCSV(t, internaldata.ExampleOwnersCSV)
+		So(err, ShouldBeNil)
+
+		inputA := filepath.Join(inputDir, "inputA")
+		inputB := filepath.Join(inputDir, "inputB")
+		outputA := filepath.Join(outputDir, "A")
+		outputB := filepath.Join(outputDir, "B")
+
+		err = os.Mkdir(outputA, 0755)
+		So(err, ShouldBeNil)
+
+		err = os.Mkdir(outputB, 0755)
+		So(err, ShouldBeNil)
+
+		f, err := os.Create(inputA)
+		So(err, ShouldBeNil)
+
+		_, err = io.Copy(f, root.AsReader())
+		So(err, ShouldBeNil)
+		So(f.Close(), ShouldBeNil)
+
+		So(os.Chtimes(inputA, yesterday, yesterday), ShouldBeNil)
+
+		_, _, _, err = runWRStat("summarise", "-d", outputA, "-q", quotaFile, "-c", basedirsConfig, inputA)
+		So(err, ShouldBeNil)
+
+		compareFileContents(t, filepath.Join(outputA, "bygroup"), fmt.Sprintf("%[1]s\t%[2]s\t2\t2684354560\n"+
+			"%[3]s\t%[4]s\t2\t80\n"+
+			"%[3]s\t%[5]s\t2\t50\n"+
+			"%[6]s\t%[5]s\t1\t60\n"+
+			"%[7]s\t%[8]s\t5\t15\n"+
+			"%[9]s\t%[10]s\t2\t100\n",
+			user.GetGroupName(t, "1"), user.GetUsername(t, "101"),
+			user.GetGroupName(t, "2"), user.GetUsername(t, "88888"),
+			user.GetUsername(t, "102"), user.GetGroupName(t, "77777"),
+			user.GetGroupName(t, strconv.Itoa(int(gid))), user.GetUsername(t, strconv.Itoa(int(uid))),
+			user.GetGroupName(t, "3"), user.GetUsername(t, "103"),
+		))
+
+		compareFileContents(t, filepath.Join(outputA, "byusergroup.gz"), fmt.Sprintf("%[1]s\t%[2]s\t\"/\"\t2\t100\n"+
+			"%[1]s\t%[2]s\t\"/lustre/\"\t2\t100\n"+
+			"%[1]s\t%[2]s\t\"/lustre/scratch125/\"\t2\t100\n"+
+			"%[1]s\t%[2]s\t\"/lustre/scratch125/humgen/\"\t2\t100\n"+
+			"%[1]s\t%[2]s\t\"/lustre/scratch125/humgen/projects/\"\t2\t100\n"+
+			"%[1]s\t%[2]s\t\"/lustre/scratch125/humgen/projects/A/\"\t2\t100\n"+
+			"%[3]s\t%[4]s\t\"/\"\t2\t80\n"+
+			"%[3]s\t%[4]s\t\"/lustre/\"\t2\t80\n"+
+			"%[3]s\t%[4]s\t\"/lustre/scratch123/\"\t2\t80\n"+
+			"%[3]s\t%[4]s\t\"/lustre/scratch123/hgi/\"\t2\t80\n"+
+			"%[3]s\t%[4]s\t\"/lustre/scratch123/hgi/m0/\"\t1\t40\n"+
+			"%[3]s\t%[4]s\t\"/lustre/scratch123/hgi/mdt0/\"\t1\t40\n"+
+			"%[5]s\t%[6]s\t\"/\"\t2\t2684354560\n"+
+			"%[5]s\t%[6]s\t\"/lustre/\"\t2\t2684354560\n"+
+			"%[5]s\t%[6]s\t\"/lustre/scratch125/\"\t2\t2684354560\n"+
+			"%[5]s\t%[6]s\t\"/lustre/scratch125/humgen/\"\t2\t2684354560\n"+
+			"%[5]s\t%[6]s\t\"/lustre/scratch125/humgen/projects/\"\t2\t2684354560\n"+
+			"%[5]s\t%[6]s\t\"/lustre/scratch125/humgen/projects/A/\"\t2\t2684354560\n"+
+			"%[5]s\t%[6]s\t\"/lustre/scratch125/humgen/projects/A/sub/\"\t1\t2147483648\n"+
+			"%[7]s\t%[8]s\t\"/\"\t5\t15\n"+
+			"%[7]s\t%[8]s\t\"/lustre/\"\t5\t15\n"+
+			"%[7]s\t%[8]s\t\"/lustre/scratch125/\"\t5\t15\n"+
+			"%[7]s\t%[8]s\t\"/lustre/scratch125/humgen/\"\t5\t15\n"+
+			"%[7]s\t%[8]s\t\"/lustre/scratch125/humgen/projects/\"\t5\t15\n"+
+			"%[7]s\t%[8]s\t\"/lustre/scratch125/humgen/projects/D/\"\t5\t15\n"+
+			"%[7]s\t%[8]s\t\"/lustre/scratch125/humgen/projects/D/sub1/\"\t3\t6\n"+
+			"%[7]s\t%[8]s\t\"/lustre/scratch125/humgen/projects/D/sub1/temp/\"\t1\t2\n"+
+			"%[7]s\t%[8]s\t\"/lustre/scratch125/humgen/projects/D/sub2/\"\t2\t9\n"+
+			"%[9]s\t%[4]s\t\"/\"\t2\t50\n"+
+			"%[9]s\t%[4]s\t\"/lustre/\"\t2\t50\n"+
+			"%[9]s\t%[4]s\t\"/lustre/scratch123/\"\t1\t30\n"+
+			"%[9]s\t%[4]s\t\"/lustre/scratch123/hgi/\"\t1\t30\n"+
+			"%[9]s\t%[4]s\t\"/lustre/scratch123/hgi/mdt1/\"\t1\t30\n"+
+			"%[9]s\t%[4]s\t\"/lustre/scratch123/hgi/mdt1/projects/\"\t1\t30\n"+
+			"%[9]s\t%[4]s\t\"/lustre/scratch123/hgi/mdt1/projects/B/\"\t1\t30\n"+
+			"%[9]s\t%[4]s\t\"/lustre/scratch125/\"\t1\t20\n"+
+			"%[9]s\t%[4]s\t\"/lustre/scratch125/humgen/\"\t1\t20\n"+
+			"%[9]s\t%[4]s\t\"/lustre/scratch125/humgen/projects/\"\t1\t20\n"+
+			"%[9]s\t%[4]s\t\"/lustre/scratch125/humgen/projects/B/\"\t1\t20\n"+
+			"%[9]s\t%[10]s\t\"/\"\t1\t60\n"+
+			"%[9]s\t%[10]s\t\"/lustre/\"\t1\t60\n"+
+			"%[9]s\t%[10]s\t\"/lustre/scratch125/\"\t1\t60\n"+
+			"%[9]s\t%[10]s\t\"/lustre/scratch125/humgen/\"\t1\t60\n"+
+			"%[9]s\t%[10]s\t\"/lustre/scratch125/humgen/teams/\"\t1\t60\n"+
+			"%[9]s\t%[10]s\t\"/lustre/scratch125/humgen/teams/102/\"\t1\t60\n",
+			user.GetUsername(t, "103"), user.GetGroupName(t, "3"),
+			user.GetUsername(t, "88888"), user.GetGroupName(t, "2"),
+			user.GetUsername(t, "101"), user.GetGroupName(t, "1"),
+			user.GetUsername(t, strconv.Itoa(int(uid))), user.GetGroupName(t, strconv.Itoa(int(gid))),
+			user.GetUsername(t, "102"), user.GetGroupName(t, "77777")))
+
+		bddb, err := basedirs.NewReader(filepath.Join(outputA, "basedirs.db"), ownersPath)
+		So(err, ShouldBeNil)
+
+		h, err := bddb.History(gid, "/lustre/scratch125/humgen/projects/D")
+		So(err, ShouldBeNil)
+		So(h, ShouldResemble, []basedirs.History{
+			{Date: yesterday.In(time.UTC), UsageSize: 15, UsageInodes: 5},
+		})
+
+		bddb.Close()
+
+		tree, err := db.NewTree(filepath.Join(outputA, "dguta.dbs"))
+		So(err, ShouldBeNil)
+
+		childrenExist := tree.DirHasChildren("/", nil)
+		So(err, ShouldBeNil)
+		So(childrenExist, ShouldBeTrue)
+
+		tree.Close()
+
+		_, root = internaldata.FakeFilesForDGUTADBForBasedirsTesting(gid, uid, "lustre", 2, 1<<29, 1<<31, true, refTime.Unix())
+
+		f, err = os.Create(inputB)
+		So(err, ShouldBeNil)
+
+		_, err = io.Copy(f, root.AsReader())
+		So(err, ShouldBeNil)
+		So(f.Close(), ShouldBeNil)
+
+		So(os.Chtimes(inputB, refTime, refTime), ShouldBeNil)
+
+		_, _, _, err = runWRStat("summarise", "-s", filepath.Join(outputA, "basedirs.db"),
+			"-d", outputB, "-q", quotaFile, "-c", basedirsConfig, inputB)
+		So(err, ShouldBeNil)
+
+		bddb, err = basedirs.NewReader(filepath.Join(outputB, "basedirs.db"), ownersPath)
+		So(err, ShouldBeNil)
+
+		h, err = bddb.History(gid, "/lustre/scratch125/humgen/projects/D")
+		So(err, ShouldBeNil)
+		So(h, ShouldResemble, []basedirs.History{
+			{Date: yesterday.In(time.UTC), UsageSize: 15, UsageInodes: 5},
+			{Date: refTime.In(time.UTC), UsageSize: 15, UsageInodes: 5},
+		})
+
+		bddb.Close()
+	})
+}
+
+func compareFileContents(t *testing.T, path, expectation string) {
+	t.Helper()
+
+	f, err := os.Open(path)
+	So(err, ShouldBeNil)
+
+	defer f.Close()
+
+	var r io.Reader = f
+
+	if strings.HasSuffix(path, ".gz") {
+		r, err = gzip.NewReader(f)
+		So(err, ShouldBeNil)
+	}
+
+	contents, err := io.ReadAll(r)
+	So(err, ShouldBeNil)
+
+	So(string(contents), ShouldEqual, expectation)
 }

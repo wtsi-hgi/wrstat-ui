@@ -29,6 +29,7 @@ package user
 import (
 	"os/user"
 	"strconv"
+	"testing"
 )
 
 // RealGIDAndUID returns the currently logged in user's gid and uid, and the
@@ -60,4 +61,22 @@ func RealGIDAndUID() (uint32, uint32, string, string, error) {
 	}
 
 	return uint32(gid64), uint32(uid64), group.Name, u.Username, nil
+}
+
+func GetUsername(t *testing.T, uid string) string {
+	u, err := user.LookupId(uid)
+	if err != nil {
+		return "id" + uid
+	}
+
+	return u.Username
+}
+
+func GetGroupName(t *testing.T, gid string) string {
+	g, err := user.LookupGroupId(gid)
+	if err != nil {
+		return "id" + gid
+	}
+
+	return g.Name
 }
