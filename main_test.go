@@ -60,10 +60,10 @@ func TestMain(m *testing.M) {
 	defer d1()
 }
 
-func runWRStat(args ...string) (string, string, []*jobqueue.Job, error) { //nolint:unparam
+func runWRStat(args ...string) (string, string, []*jobqueue.JobViaJSON, error) { //nolint:unparam
 	var (
 		stdout, stderr strings.Builder
-		jobs           []*jobqueue.Job
+		jobs           []*jobqueue.JobViaJSON
 	)
 
 	pr, pw, err := os.Pipe()
@@ -81,13 +81,13 @@ func runWRStat(args ...string) (string, string, []*jobqueue.Job, error) { //noli
 
 	go func() {
 		for {
-			var j []*jobqueue.Job
+			var j *jobqueue.JobViaJSON
 
 			if errr := jd.Decode(&j); errr != nil {
 				break
 			}
 
-			jobs = append(jobs, j...)
+			jobs = append(jobs, j)
 		}
 
 		close(done)
@@ -322,4 +322,51 @@ func compareFileContents(t *testing.T, path, expectation string) {
 	So(err, ShouldBeNil)
 
 	So(string(contents), ShouldEqual, expectation)
+}
+
+func TestWatch(t *testing.T) {
+	Convey("watch starts the correct jobs", t, func() {
+		tmp := t.TempDir()
+		output := t.TempDir()
+
+		runA := filepath.Join(tmp, "12345_A")
+		dotA := filepath.Join(output, ".12345_A")
+		finalA := filepath.Join(output, "12345_A")
+		statsA := filepath.Join(runA, "stats.gz")
+
+		So(os.Mkdir(runA, 0755), ShouldBeNil)
+		So(os.WriteFile(statsA, nil, 0600), ShouldBeNil)
+
+		_, _, jobs, err := runWRStat("watch", "-o", output, "-q", "/some/quota.file", "-c", "basedirs.config", tmp)
+		So(err, ShouldBeNil)
+
+		So(jobs, ShouldResemble, []*jobqueue.JobViaJSON{
+			{
+				Cmd: fmt.Sprintf(`"./wrstat-ui_test" summarise -d %[1]q -q "/some/quota.file" -c "basedirs.config" %[2]q && touch -r %[3]q %[1]q && mv %[1]q %[4]q`,
+					dotA, statsA, runA, finalA,
+				),
+				ReqGrp: "wrstat-ui-summarise",
+			},
+		})
+
+		So(os.Remove(dotA), ShouldBeNil)
+
+		previous := filepath.Join(output, "12344_A")
+		previousBasedirs := filepath.Join(previous, "basedirs.db")
+
+		So(os.Mkdir(previous, 0700), ShouldBeNil)
+		So(os.WriteFile(previousBasedirs, nil, 0600), ShouldBeNil)
+
+		_, _, jobs, err = runWRStat("watch", "-o", output, "-q", "/some/quota.file", "-c", "basedirs.config", tmp)
+		So(err, ShouldBeNil)
+
+		So(jobs, ShouldResemble, []*jobqueue.JobViaJSON{
+			{
+				Cmd: fmt.Sprintf(`"./wrstat-ui_test" summarise -d %[1]q -s %[2]q -q "/some/quota.file" -c "basedirs.config" %[3]q && touch -r %[4]q %[1]q && mv %[1]q %[5]q`,
+					dotA, previousBasedirs, statsA, runA, finalA,
+				),
+				ReqGrp: "wrstat-ui-summarise",
+			},
+		})
+	})
 }
