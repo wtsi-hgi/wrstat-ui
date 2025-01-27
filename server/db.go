@@ -34,6 +34,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hashicorp/go-multierror"
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 )
@@ -66,19 +67,11 @@ const ErrNoPaths = basedirs.Error("no db paths found")
 // history endpoint requires a gid and basedir (can be basedir, actually a
 // mountpoint) parameter.
 func (s *Server) LoadDBs(basePaths []string, dgutaDBName, basedirDBName, ownersPath string, mounts ...string) error { //nolint:funlen,lll
-	dirgutaPaths, baseDirPaths := JoinDBPaths(basePaths, dgutaDBName, basedirDBName)
+	return s.loadDBs(basePaths, nil, dgutaDBName, basedirDBName, ownersPath, mounts)
+}
 
-	mt, err := s.getLatestTimestamp(dirgutaPaths, baseDirPaths)
-	if err != nil {
-		return err
-	}
-
-	tree, err := db.NewTree(dirgutaPaths...)
-	if err != nil {
-		return err
-	}
-
-	bd, err := basedirs.OpenMulti(ownersPath, baseDirPaths...)
+func (s *Server) loadDBs(basePaths, removedPaths []string, dgutaDBName, basedirDBName, ownersPath string, mounts []string) error {
+	tree, bd, mt, fn, err := s.openDBs(basePaths, removedPaths, dgutaDBName, basedirDBName, ownersPath)
 	if err != nil {
 		return err
 	}
@@ -100,7 +93,73 @@ func (s *Server) LoadDBs(basePaths []string, dgutaDBName, basedirDBName, ownersP
 		s.addBaseDirRoutes()
 	}
 
+	if fn != nil {
+		return fn()
+	}
+
 	return nil
+}
+
+func (s *Server) openDBs(basePaths, removedPaths []string, dgutaDBName, //nolint:funlen
+	basedirDBName, ownersPath string) (tree *db.Tree, bd basedirs.MultiReader,
+	mt time.Time, ret func() error, err error) {
+	dirgutaPaths, baseDirPaths := JoinDBPaths(basePaths, dgutaDBName, basedirDBName)
+	removedDirgutaPaths, removedBaseDirPaths := JoinDBPaths(removedPaths, dgutaDBName, basedirDBName)
+
+	mt, err = s.getLatestTimestamp(dirgutaPaths, baseDirPaths)
+	if err != nil {
+		return nil, nil, mt, nil, err
+	}
+
+	s.mu.RLock()
+	existingTree := s.tree
+	existingBasedirs := s.basedirs
+	s.mu.RUnlock()
+
+	hasExisting := existingTree != nil && existingBasedirs != nil
+
+	if hasExisting {
+		var fn func() error
+
+		tree, bd, fn, err = loadFromExisting(existingTree, existingBasedirs,
+			dirgutaPaths, baseDirPaths, removedDirgutaPaths, removedBaseDirPaths)
+
+		return tree, bd, mt, fn, err
+	}
+
+	if tree, err = db.NewTree(dirgutaPaths...); err != nil {
+		return nil, nil, mt, nil, err
+	}
+
+	if bd, err = basedirs.OpenMulti(ownersPath, baseDirPaths...); err != nil {
+		return nil, nil, mt, nil, err
+	}
+
+	return tree, bd, mt, nil, nil
+}
+
+func loadFromExisting(existingTree *db.Tree, existingBasedirs basedirs.MultiReader,
+	dirgutaPaths, baseDirPaths, removedDirgutaPaths,
+	removedBaseDirPaths []string) (*db.Tree, basedirs.MultiReader, func() error, error) {
+	tree, err := existingTree.OpenFrom(dirgutaPaths, removedDirgutaPaths)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	bd, err := existingBasedirs.OpenFrom(baseDirPaths, removedBaseDirPaths)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	return tree, bd, func() error {
+		treeErr := tree.CloseOnly(removedDirgutaPaths)
+
+		if bdErr := bd.CloseOnly(removedBaseDirPaths); bdErr != nil {
+			err = multierror.Append(treeErr, bdErr)
+		}
+
+		return err
+	}, nil
 }
 
 func (s *Server) getLatestTimestamp(a, b []string) (time.Time, error) {

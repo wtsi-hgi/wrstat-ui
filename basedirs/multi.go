@@ -27,6 +27,7 @@ package basedirs
 
 import (
 	"errors"
+	"slices"
 
 	"github.com/hashicorp/go-multierror"
 	"github.com/ugorji/go/codec"
@@ -70,9 +71,72 @@ func OpenMulti(ownersPath string, paths ...string) (MultiReader, error) { //noli
 	return mr, nil
 }
 
+// OpenFrom creates a new MultiReady from an existing one, potentially removing
+// some databases and adding others.
+//
+// It is recommended to call CloseOnly when replacing a MultiReader to close the
+// unused databases.
+func (m MultiReader) OpenFrom(add, remove []string) (MultiReader, error) { //nolint:funlen
+	if len(m) == 0 {
+		return nil, db.ErrDBNotExists
+	}
+
+	var ( //nolint:prealloc
+		n        MultiReader
+		existing []string
+	)
+
+	for _, r := range m {
+		if p := r.db.Path(); !slices.Contains(remove, p) {
+			n = append(n, r)
+			existing = append(existing, p)
+		}
+	}
+
+	for _, path := range add {
+		if slices.Contains(existing, path) {
+			continue
+		}
+
+		db, err := OpenDBRO(path)
+		if err != nil {
+			return nil, err
+		}
+
+		n = append(n, &BaseDirReader{
+			db:          db,
+			ch:          m[0].ch,
+			mountPoints: m[0].mountPoints,
+			groupCache:  m[0].groupCache,
+			userCache:   m[0].userCache,
+			owners:      m[0].owners,
+		})
+	}
+
+	return n, nil
+}
+
 // Close closes each database.
 func (m MultiReader) Close() (err error) {
 	for _, r := range m {
+		if errr := r.Close(); err != nil {
+			err = multierror.Append(err, errr)
+		}
+	}
+
+	return err
+}
+
+// CloseOnly closes the databases corresponding to the given paths.
+//
+// Should only be used after calling OpenFrom to close the unused databases in
+// the old MultiReader.
+func (m MultiReader) CloseOnly(paths []string) (err error) {
+	for _, r := range m {
+		if !slices.Contains(paths, r.db.Path()) {
+			continue
+		}
+
 		if errr := r.Close(); err != nil {
 			err = multierror.Append(err, errr)
 		}

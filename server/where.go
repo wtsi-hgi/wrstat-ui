@@ -52,8 +52,8 @@ func (s *Server) getWhere(c *gin.Context) {
 		return
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 
 	dcss, err := s.tree.Where(dir, filter, convertSplitsValue(splits))
 	if err != nil {
