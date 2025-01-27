@@ -14,7 +14,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/VertebrateResequencing/wr/jobqueue"
 	. "github.com/smartystreets/goconvey/convey"
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
 	"github.com/wtsi-hgi/wrstat-ui/db"
@@ -60,10 +59,95 @@ func TestMain(m *testing.M) {
 	defer d1()
 }
 
-func runWRStat(args ...string) (string, string, []*jobqueue.JobViaJSON, error) {
+type MountConfig struct {
+	Mount     string `json:",omitempty"`
+	CacheBase string `json:",omitempty"`
+	Retries   int    `json:",omitempty"`
+	Verbose   bool   `json:",omitempty"`
+	Targets   []MountTarget
+}
+
+type MountTarget struct {
+	Profile  string `json:",omitempty"`
+	Path     string
+	CacheDir string `json:",omitempty"`
+	Cache    bool   `json:",omitempty"`
+	Write    bool   `json:",omitempty"`
+}
+
+type MountConfigs []MountConfig
+
+type JobEssence struct {
+	JobKey       string
+	Cmd          string
+	Cwd          string
+	MountConfigs MountConfigs
+}
+
+type Dependency struct {
+	Essence  *JobEssence
+	DepGroup string
+}
+
+type Dependencies []*Dependency
+
+type BehaviourViaJSON struct {
+	Run           string   `json:"run,omitempty"`
+	CopyToManager []string `json:"copy_to_manager,omitempty"`
+	Cleanup       bool     `json:"cleanup,omitempty"`
+	CleanupAll    bool     `json:"cleanup_all,omitempty"`
+	Remove        bool     `json:"remove,omitempty"`
+	Nothing       bool     `json:"nothing,omitempty"`
+}
+
+type BehavioursViaJSON []BehaviourViaJSON
+
+type JobViaJSON struct {
+	MountConfigs          MountConfigs      `json:"mounts"`
+	LimitGrps             []string          `json:"limit_grps"`
+	DepGrps               []string          `json:"dep_grps"`
+	Deps                  []string          `json:"deps"`
+	CmdDeps               Dependencies      `json:"cmd_deps"`
+	OnFailure             BehavioursViaJSON `json:"on_failure"`
+	OnSuccess             BehavioursViaJSON `json:"on_success"`
+	OnExit                BehavioursViaJSON `json:"on_exit"`
+	Env                   []string          `json:"env"`
+	Cmd                   string            `json:"cmd"`
+	Cwd                   string            `json:"cwd"`
+	ReqGrp                string            `json:"req_grp"`
+	Memory                string            `json:"memory"`
+	Time                  string            `json:"time"`
+	RepGrp                string            `json:"rep_grp"`
+	MonitorDocker         string            `json:"monitor_docker"`
+	WithDocker            string            `json:"with_docker"`
+	WithSingularity       string            `json:"with_singularity"`
+	ContainerMounts       string            `json:"container_mounts"`
+	CloudOS               string            `json:"cloud_os"`
+	CloudUser             string            `json:"cloud_username"`
+	CloudScript           string            `json:"cloud_script"`
+	CloudConfigFiles      string            `json:"cloud_config_files"`
+	CloudFlavor           string            `json:"cloud_flavor"`
+	SchedulerQueue        string            `json:"queue"`
+	SchedulerQueuesAvoid  string            `json:"queues_avoid"`
+	SchedulerMisc         string            `json:"misc"`
+	BsubMode              string            `json:"bsub_mode"`
+	CPUs                  *float64          `json:"cpus"`
+	Disk                  *int              `json:"disk"`
+	Override              *int              `json:"override"`
+	Priority              *int              `json:"priority"`
+	Retries               *int              `json:"retries"`
+	NoRetriesOverWalltime string            `json:"no_retry_over_walltime"`
+	CloudOSRam            *int              `json:"cloud_ram"`
+	RTimeout              *int              `json:"reserve_timeout"`
+	CwdMatters            bool              `json:"cwd_matters"`
+	ChangeHome            bool              `json:"change_home"`
+	CloudShared           bool              `json:"cloud_shared"`
+}
+
+func runWRStat(args ...string) (string, string, []*JobViaJSON, error) {
 	var (
 		stdout, stderr strings.Builder
-		jobs           []*jobqueue.JobViaJSON
+		jobs           []*JobViaJSON
 	)
 
 	pr, pw, err := os.Pipe()
@@ -81,7 +165,7 @@ func runWRStat(args ...string) (string, string, []*jobqueue.JobViaJSON, error) {
 
 	go func() {
 		for {
-			var j *jobqueue.JobViaJSON
+			var j *JobViaJSON
 
 			if errr := jd.Decode(&j); errr != nil {
 				break
@@ -340,7 +424,7 @@ func TestWatch(t *testing.T) {
 		_, _, jobs, err := runWRStat("watch", "-o", output, "-q", "/some/quota.file", "-c", "basedirs.config", tmp)
 		So(err, ShouldBeNil)
 
-		So(jobs, ShouldResemble, []*jobqueue.JobViaJSON{
+		So(jobs, ShouldResemble, []JobViaJSON{
 			{
 				Cmd: fmt.Sprintf(`"./wrstat-ui_test" summarise -d %[1]q -q `+
 					`"/some/quota.file" -c "basedirs.config" %[2]q && touch -r %[3]q %[1]q && mv %[1]q %[4]q`,
@@ -361,7 +445,7 @@ func TestWatch(t *testing.T) {
 		_, _, jobs, err = runWRStat("watch", "-o", output, "-q", "/some/quota.file", "-c", "basedirs.config", tmp)
 		So(err, ShouldBeNil)
 
-		So(jobs, ShouldResemble, []*jobqueue.JobViaJSON{
+		So(jobs, ShouldResemble, []JobViaJSON{
 			{
 				Cmd: fmt.Sprintf(`"./wrstat-ui_test" summarise -d %[1]q `+
 					`-s %[2]q -q "/some/quota.file" -c "basedirs.config" %[3]q && touch -r %[4]q %[1]q && mv %[1]q %[5]q`,
