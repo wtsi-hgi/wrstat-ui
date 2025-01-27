@@ -28,6 +28,7 @@ package dirguta
 import (
 	"testing"
 	"time"
+	"unsafe"
 
 	. "github.com/smartystreets/goconvey/convey"
 	"github.com/wtsi-hgi/wrstat-ui/db"
@@ -40,20 +41,20 @@ import (
 
 func TestDirGUTAFileType(t *testing.T) {
 	Convey("isTemp lets you know if a path is a temporary file", t, func() {
-		So(isTempFile(".tmp.cram"), ShouldBeTrue)
-		So(isTempFile("tmp.cram"), ShouldBeTrue)
-		So(isTempFile("xtmp.cram"), ShouldBeFalse)
-		So(isTempFile("tmpx.cram"), ShouldBeFalse)
+		So(IsTemp(strToBS(".tmp.cram")), ShouldBeTrue)
+		So(IsTemp(strToBS("tmp.cram")), ShouldBeTrue)
+		So(IsTemp(strToBS("xtmp.cram")), ShouldBeFalse)
+		So(IsTemp(strToBS("tmpx.cram")), ShouldBeFalse)
 
-		So(isTempFile(".temp.cram"), ShouldBeTrue)
-		So(isTempFile("temp.cram"), ShouldBeTrue)
-		So(isTempFile("xtemp.cram"), ShouldBeFalse)
-		So(isTempFile("tempx.cram"), ShouldBeFalse)
+		So(IsTemp(strToBS(".temp.cram")), ShouldBeTrue)
+		So(IsTemp(strToBS("temp.cram")), ShouldBeTrue)
+		So(IsTemp(strToBS("xtemp.cram")), ShouldBeFalse)
+		So(IsTemp(strToBS("tempx.cram")), ShouldBeFalse)
 
-		So(isTempFile("a.cram.tmp"), ShouldBeTrue)
-		So(isTempFile("xtmp"), ShouldBeFalse)
-		So(isTempFile("a.cram.temp"), ShouldBeTrue)
-		So(isTempFile("xtemp"), ShouldBeFalse)
+		So(IsTemp(strToBS("a.cram.tmp")), ShouldBeTrue)
+		So(IsTemp(strToBS("xtmp")), ShouldBeFalse)
+		So(IsTemp(strToBS("a.cram.temp")), ShouldBeTrue)
+		So(IsTemp(strToBS("xtemp")), ShouldBeFalse)
 
 		d := internaltest.NewDirectoryPathCreator()
 
@@ -164,32 +165,31 @@ func TestDirGUTAFileType(t *testing.T) {
 		So(isLog("bar.asd"), ShouldBeFalse)
 	})
 
-	Convey("infoToType lets you know the filetypes of a file", t, func() {
-		d := internaltest.NewDirectoryPathCreator()
-
+	Convey("FilenameToType lets you know the filetypes of a file", t, func() {
 		for _, test := range [...]struct {
-			Path     string
+			Name     string
 			IsDir    bool
 			FileType db.DirGUTAFileType
 			IsTmp    bool
 		}{
-			{"/some/path/", true, db.DGUTAFileTypeDir, false},
-			{"/foo/bar.asd", false, db.DGUTAFileTypeOther, false},
-			{"/foo/.tmp.asd", false, db.DGUTAFileTypeOther, true},
-			{"/foo/bar.vcf", false, db.DGUTAFileTypeVCF, false},
-			{"/foo/bar.vcf.gz", false, db.DGUTAFileTypeVCFGz, false},
-			{"/foo/bar.bcf", false, db.DGUTAFileTypeBCF, false},
-			{"/foo/bar.sam", false, db.DGUTAFileTypeSam, false},
-			{"/foo/bar.bam", false, db.DGUTAFileTypeBam, false},
-			{"/foo/.tmp.cram", false, db.DGUTAFileTypeCram, true},
-			{"/foo/bar.fa", false, db.DGUTAFileTypeFasta, false},
-			{"/foo/bar.fq", false, db.DGUTAFileTypeFastq, false},
-			{"/foo/bar.fq.gz", false, db.DGUTAFileTypeFastqGz, false},
-			{"/foo/bar.bzip2", false, db.DGUTAFileTypeCompressed, false},
-			{"/foo/bar.csv", false, db.DGUTAFileTypeText, false},
-			{"/foo/bar.o", false, db.DGUTAFileTypeLog, false},
+			{"path/", true, db.DGUTAFileTypeDir, false},
+			{"bar.asd", false, db.DGUTAFileTypeOther, false},
+			{".tmp.asd", false, db.DGUTAFileTypeOther, true},
+			{"bar.vcf", false, db.DGUTAFileTypeVCF, false},
+			{"bar.vcf.gz", false, db.DGUTAFileTypeVCFGz, false},
+			{"bar.bcf", false, db.DGUTAFileTypeBCF, false},
+			{"bar.sam", false, db.DGUTAFileTypeSam, false},
+			{"bar.bam", false, db.DGUTAFileTypeBam, false},
+			{".tmp.cram", false, db.DGUTAFileTypeCram, true},
+			{"bar.fa", false, db.DGUTAFileTypeFasta, false},
+			{"bar.fq", false, db.DGUTAFileTypeFastq, false},
+			{"bar.fq.gz", false, db.DGUTAFileTypeFastqGz, false},
+			{"bar.bzip2", false, db.DGUTAFileTypeCompressed, false},
+			{"bar.csv", false, db.DGUTAFileTypeText, false},
+			{"bar.o", false, db.DGUTAFileTypeLog, false},
 		} {
-			ft, tmp := InfoToType(internaltest.NewMockInfo(d.ToDirectoryPath(test.Path), 0, 0, 0, test.IsDir))
+			ft := FilenameToType(strToBS(test.Name))
+			tmp := IsTemp(strToBS(test.Name))
 			So(ft, ShouldEqual, test.FileType)
 			So(tmp, ShouldEqual, test.IsTmp)
 		}
@@ -429,79 +429,67 @@ func TestDirGUTA(t *testing.T) {
 }
 
 func isVCF(name string) bool {
-	t, _ := filenameToType(name)
-
-	return t == db.DGUTAFileTypeVCF
+	return FilenameToType(strToBS(name)) == db.DGUTAFileTypeVCF
 }
 
 func isVCFGz(name string) bool {
-	t, _ := filenameToType(name)
-
-	return t == db.DGUTAFileTypeVCFGz
+	return FilenameToType(strToBS(name)) == db.DGUTAFileTypeVCFGz
 }
 
 func isBCF(name string) bool {
-	t, _ := filenameToType(name)
-
-	return t == db.DGUTAFileTypeBCF
+	return FilenameToType(strToBS(name)) == db.DGUTAFileTypeBCF
 }
 
 func isSam(name string) bool {
-	t, _ := filenameToType(name)
-
-	return t == db.DGUTAFileTypeSam
+	return FilenameToType(strToBS(name)) == db.DGUTAFileTypeSam
 }
 
 func isBam(name string) bool {
-	t, _ := filenameToType(name)
-
-	return t == db.DGUTAFileTypeBam
+	return FilenameToType(strToBS(name)) == db.DGUTAFileTypeBam
 }
 
 func isCram(name string) bool {
-	t, _ := filenameToType(name)
-
-	return t == db.DGUTAFileTypeCram
+	return FilenameToType(strToBS(name)) == db.DGUTAFileTypeCram
 }
 
 func isFasta(name string) bool {
-	t, _ := filenameToType(name)
-
-	return t == db.DGUTAFileTypeFasta
+	return FilenameToType(strToBS(name)) == db.DGUTAFileTypeFasta
 }
 
 func isFastq(name string) bool {
-	t, _ := filenameToType(name)
-
-	return t == db.DGUTAFileTypeFastq
+	return FilenameToType(strToBS(name)) == db.DGUTAFileTypeFastq
 }
 
 func isFastqGz(name string) bool {
-	t, _ := filenameToType(name)
-
-	return t == db.DGUTAFileTypeFastqGz
+	return FilenameToType(strToBS(name)) == db.DGUTAFileTypeFastqGz
 }
 
 func isPedBed(name string) bool {
-	t, _ := filenameToType(name)
-
-	return t == db.DGUTAFileTypePedBed
+	return FilenameToType(strToBS(name)) == db.DGUTAFileTypePedBed
 }
 
 func isCompressed(name string) bool {
-	t, _ := filenameToType(name)
-
-	return t == db.DGUTAFileTypeCompressed
+	return FilenameToType(strToBS(name)) == db.DGUTAFileTypeCompressed
 }
 
 func isText(name string) bool {
-	t, _ := filenameToType(name)
-
-	return t == db.DGUTAFileTypeText
+	return FilenameToType(strToBS(name)) == db.DGUTAFileTypeText
 }
 
 func isLog(name string) bool {
-	t, _ := filenameToType(name)
+	return FilenameToType(strToBS(name)) == db.DGUTAFileTypeLog
+}
 
-	return t == db.DGUTAFileTypeLog
+func strToBS(str string) []byte {
+	return unsafe.Slice(unsafe.StringData(str), len(str))
+}
+
+func isTempDir(dir *summary.DirectoryPath) bool {
+	for n := dir; n != nil; n = n.Parent {
+		if IsTemp(strToBS(n.Name)) {
+			return true
+		}
+	}
+
+	return false
 }

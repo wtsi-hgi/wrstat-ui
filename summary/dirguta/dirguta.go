@@ -98,12 +98,13 @@ type DB interface {
 // DirGroupUserTypeAge is used to summarise file stats by directory, group,
 // user, file type and age.
 type DirGroupUserTypeAge struct {
-	db       DB
-	store    gutaStore
-	thisDir  *summary.DirectoryPath
-	children []string
-	now      int64
-	isRoot   bool
+	parent    *DirGroupUserTypeAge
+	db        DB
+	store     gutaStore
+	thisDir   *summary.DirectoryPath
+	children  []string
+	now       int64
+	isTempDir bool
 }
 
 // NewDirGroupUserTypeAge returns a DirGroupUserTypeAge.
@@ -114,18 +115,17 @@ func NewDirGroupUserTypeAge(db DB) summary.OperationGenerator {
 func newDirGroupUserTypeAge(db DB, refTime int64) summary.OperationGenerator {
 	now := time.Now().Unix()
 
-	hasRoot := false
+	var last *DirGroupUserTypeAge
 
 	return func() summary.Operation {
-		root := !hasRoot
-		hasRoot = true
-
-		return &DirGroupUserTypeAge{
+		last = &DirGroupUserTypeAge{
+			parent: last,
 			db:     db,
 			store:  gutaStore{make(map[gutaKey]*summary.SummaryWithTimes), refTime},
 			now:    now,
-			isRoot: root,
 		}
+
+		return last
 	}
 }
 
@@ -146,10 +146,20 @@ func newDirGroupUserTypeAge(db DB, refTime int64) summary.OperationGenerator {
 func (d *DirGroupUserTypeAge) Add(info *summary.FileInfo) error {
 	if d.thisDir == nil {
 		d.thisDir = info.Path
+
+		if d.parent != nil && d.parent.isTempDir {
+			d.isTempDir = true
+		} else {
+			d.isTempDir = IsTemp(info.Name)
+		}
 	}
 
 	if info.IsDir() && info.Path != nil && info.Path.Parent == d.thisDir {
 		d.children = append(d.children, string(info.Name))
+	}
+
+	if info.Path != d.thisDir {
+		return nil
 	}
 
 	atime := info.ATime
@@ -161,7 +171,8 @@ func (d *DirGroupUserTypeAge) Add(info *summary.FileInfo) error {
 	gutaKeysA := gutaKeyPool.Get().(*[maxNumOfGUTAKeys]gutaKey) //nolint:errcheck,forcetypeassert
 	gKeys := gutaKeys(gutaKeysA[:0])
 
-	filetype, isTmp := InfoToType(info)
+	filetype := FilenameToType(info.Name)
+	isTmp := d.isTempDir || IsTemp(info.Name)
 
 	gKeys.append(info.GID, info.UID, filetype)
 
@@ -174,27 +185,6 @@ func (d *DirGroupUserTypeAge) Add(info *summary.FileInfo) error {
 	gutaKeyPool.Put(gutaKeysA)
 
 	return nil
-}
-
-// InfoToType returns the type of a FileInfo, based on its name, and a bool that
-// determines whether the file is considered a temporary one, based on its path.
-func InfoToType(info *summary.FileInfo) (db.DirGUTAFileType, bool) {
-	var (
-		isTmp    bool
-		filetype db.DirGUTAFileType
-	)
-
-	if info.IsDir() {
-		filetype = db.DGUTAFileTypeDir
-	} else {
-		filetype, isTmp = filenameToType(string(info.Name))
-	}
-
-	if !isTmp {
-		isTmp = isTempDir(info.Path)
-	}
-
-	return filetype, isTmp
 }
 
 type gutaKey struct {
@@ -344,15 +334,27 @@ func (d *DirGroupUserTypeAge) Output() error {
 		return err
 	}
 
-	if d.isRoot {
+	if d.parent == nil {
 		if err := d.outputRoot(dguta); err != nil {
 			return err
 		}
+	} else {
+		d.parent.addChild(d.store)
 	}
 
 	d.clear()
 
 	return nil
+}
+
+func (d *DirGroupUserTypeAge) addChild(child gutaStore) {
+	for key, summary := range child.sumMap {
+		if existing, ok := d.store.sumMap[key]; ok {
+			existing.AddSummary(summary)
+		} else {
+			d.store.sumMap[key] = summary
+		}
+	}
 }
 
 func (d *DirGroupUserTypeAge) getGUTA(guta gutaKey) *db.GUTA {
