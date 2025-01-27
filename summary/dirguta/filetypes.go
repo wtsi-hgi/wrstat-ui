@@ -602,36 +602,43 @@ var tmpPrefixes = [...]state{ //nolint:gochecknoglobals
 var tmpSuffixes = [...]state{ //nolint:gochecknoglobals
 	{ // 0
 		chars: chars{
-			'P': 1,
-			'p': 1,
+			'/': 1,
+			'P': 2,
+			'p': 2,
 		},
 	},
-	{ // 1: "p"
+	{ // 1: "/"
 		chars: chars{
-			'M': 2,
-			'm': 2,
+			'P': 2,
+			'p': 2,
 		},
 	},
-	{ // 2: "mp"
+	{ // 2: "p", "p/"
 		chars: chars{
-			'E': 3,
-			'e': 3,
-			'T': 4,
-			't': 4,
+			'M': 3,
+			'm': 3,
 		},
 	},
-	{ // 3: "emp"
+	{ // 3: "mp", "mp/"
 		chars: chars{
-			'T': 4,
-			't': 4,
+			'E': 4,
+			'e': 4,
+			'T': 5,
+			't': 5,
 		},
 	},
-	{ // 4: "temp", "tmp"
+	{ // 4: "emp", "emp/"
 		chars: chars{
-			'.': 5,
+			'T': 5,
+			't': 5,
 		},
 	},
-	{ // 5: ".temp", ".tmp"
+	{ // 5: "temp", "temp/", "tmp", "tmp/"
+		chars: chars{
+			'.': 6,
+		},
+	},
+	{ // 6: ".temp", ".temp/", ".tmp", ".tmp/"
 		typ: db.DGUTAFileTypeTemp,
 	},
 }
