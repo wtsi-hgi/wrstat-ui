@@ -126,7 +126,7 @@ type JobViaJSON struct {
 	CloudUser             string            `json:"cloud_username"`
 	CloudScript           string            `json:"cloud_script"`
 	CloudConfigFiles      string            `json:"cloud_config_files"`
-	CloudFlavor           string            `json:"cloud_flavor"`
+	CloudFlavor           string            `json:"cloud_flavor"` //nolint:misspell
 	SchedulerQueue        string            `json:"queue"`
 	SchedulerQueuesAvoid  string            `json:"queues_avoid"`
 	SchedulerMisc         string            `json:"misc"`
@@ -424,7 +424,7 @@ func TestWatch(t *testing.T) {
 		_, _, jobs, err := runWRStat("watch", "-o", output, "-q", "/some/quota.file", "-c", "basedirs.config", tmp)
 		So(err, ShouldBeNil)
 
-		So(jobs, ShouldResemble, []JobViaJSON{
+		So(jobs, ShouldResemble, []*JobViaJSON{
 			{
 				Cmd: fmt.Sprintf(`"./wrstat-ui_test" summarise -d %[1]q -q `+
 					`"/some/quota.file" -c "basedirs.config" %[2]q && touch -r %[3]q %[1]q && mv %[1]q %[4]q`,
@@ -445,7 +445,7 @@ func TestWatch(t *testing.T) {
 		_, _, jobs, err = runWRStat("watch", "-o", output, "-q", "/some/quota.file", "-c", "basedirs.config", tmp)
 		So(err, ShouldBeNil)
 
-		So(jobs, ShouldResemble, []JobViaJSON{
+		So(jobs, ShouldResemble, []*JobViaJSON{
 			{
 				Cmd: fmt.Sprintf(`"./wrstat-ui_test" summarise -d %[1]q `+
 					`-s %[2]q -q "/some/quota.file" -c "basedirs.config" %[3]q && touch -r %[4]q %[1]q && mv %[1]q %[5]q`,
