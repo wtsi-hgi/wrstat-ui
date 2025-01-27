@@ -127,15 +127,10 @@ func (b *ageBaseDirs) Set(i db.DirGUTAge, fi *summary.FileInfo, parent *summary.
 
 	setTimes(&b[i].SummaryWithChildren, time.Unix(fi.ATime, 0), time.Unix(fi.MTime, 0))
 
-	t := dirguta.FilenameToType(fi.Name)
+	ft := dirguta.FilenameToType(fi.Name)
+	b[i].Children[0].FileUsage[ft] += uint64(fi.Size) //nolint:gosec
 
-	if !tmp {
-		tmp = dirguta.IsTemp(fi.Name)
-	}
-
-	b[i].Children[0].FileUsage[t] += uint64(fi.Size) //nolint:gosec
-
-	if tmp {
+	if tmp || dirguta.IsTemp(fi.Name) {
 		b[i].Children[0].FileUsage[db.DGUTAFileTypeTemp] += uint64(fi.Size) //nolint:gosec
 	}
 
@@ -276,12 +271,8 @@ func NewBaseDirs(output outputForDir, db output) summary.OperationGenerator { //
 func (b *baseDirs) Add(info *summary.FileInfo) error {
 	if b.thisDir == nil {
 		b.thisDir = info.Path
-
-		if b.parent != nil && b.parent.isTempDir {
-			b.isTempDir = true
-		} else {
-			b.isTempDir = dirguta.IsTemp(unsafe.Slice(unsafe.StringData(info.Path.Name), len(info.Path.Name)))
-		}
+		b.isTempDir = b.parent != nil && b.parent.isTempDir ||
+			dirguta.IsTemp(unsafe.Slice(unsafe.StringData(info.Path.Name), len(info.Path.Name)))
 	}
 
 	if info.Path != b.thisDir || info.IsDir() {

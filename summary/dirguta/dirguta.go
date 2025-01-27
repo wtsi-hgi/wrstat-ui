@@ -146,12 +146,7 @@ func newDirGroupUserTypeAge(db DB, refTime int64) summary.OperationGenerator {
 func (d *DirGroupUserTypeAge) Add(info *summary.FileInfo) error {
 	if d.thisDir == nil {
 		d.thisDir = info.Path
-
-		if d.parent != nil && d.parent.isTempDir {
-			d.isTempDir = true
-		} else {
-			d.isTempDir = IsTemp(info.Name)
-		}
+		d.isTempDir = d.parent != nil && d.parent.isTempDir || IsTemp(info.Name)
 	}
 
 	if info.IsDir() && info.Path != nil && info.Path.Parent == d.thisDir {
