@@ -21,8 +21,31 @@ const dirPerms = 0750
 
 var watch = &cobra.Command{
 	Use:   "watch",
-	Short: "",
-	Long:  ``,
+	Short: "watches watches a wrstat output directory for new results and summarises them",
+	Long: `watches watches a wrstat output directory for new results and summarises them
+
+wr manager must have been started before running this. If the manager can run
+commands on multiple nodes, be sure to set wr's ManagerHost config option to
+the host you started the manager on.
+
+This subcommand polls the given directory for new subdirectories matching the
+following name format:
+
+^\d+_.
+
+That is, starting with some string of digits, an underscore, and then at least one
+character of key data.
+
+Once found, a summarise task will be launched via wr and it will be given the
+stats.gz file in that directory.
+
+The --output flag determines where the summarised data will be written. A new
+subdirectory, named the same as the subdirectory containing the stats.gz file,
+will be created to contain the new files.
+
+The --quota and --config flags act the same as in the summarise subcommand as
+will be passed along to it.
+`,
 	Run: func(_ *cobra.Command, args []string) {
 		if err := checkWatchArgs(args); err != nil {
 			die("%s", err)
