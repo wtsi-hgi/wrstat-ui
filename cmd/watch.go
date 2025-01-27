@@ -21,8 +21,8 @@ const dirPerms = 0750
 
 var watch = &cobra.Command{
 	Use:   "watch",
-	Short: "watches watches a wrstat output directory for new results and summarises them",
-	Long: `watches watches a wrstat output directory for new results and summarises them
+	Short: "watch watches a wrstat output directory for new results and summarises them",
+	Long: `watch watches a wrstat output directory for new results and summarises them
 
 wr manager must have been started before running this. If the manager can run
 commands on multiple nodes, be sure to set wr's ManagerHost config option to
