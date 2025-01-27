@@ -268,7 +268,7 @@ func NewBaseDirs(output outputForDir, db output) summary.OperationGenerator { //
 }
 
 // Add is a summary.Operation method.
-func (b *baseDirs) Add(info *summary.FileInfo) error {
+func (b *baseDirs) Add(info *summary.FileInfo) error { //nolint:gocyclo
 	if b.thisDir == nil {
 		b.thisDir = info.Path
 		b.isTempDir = b.parent != nil && b.parent.isTempDir ||

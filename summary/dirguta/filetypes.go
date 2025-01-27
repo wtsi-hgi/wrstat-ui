@@ -637,7 +637,7 @@ var tmpSuffixes = [...]state{ //nolint:gochecknoglobals
 }
 
 // FilenameToType determines the filetype of the given path based on its
-// basename, and returns a a DirGUTAFileType.
+// basename, and returns a DirGUTAFileType.
 func FilenameToType(name []byte) db.DirGUTAFileType {
 	var place uint8
 
