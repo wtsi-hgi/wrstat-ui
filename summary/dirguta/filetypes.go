@@ -28,7 +28,6 @@ package dirguta
 
 import (
 	"github.com/wtsi-hgi/wrstat-ui/db"
-	"github.com/wtsi-hgi/wrstat-ui/summary"
 )
 
 type chars [256]uint8
@@ -534,8 +533,8 @@ var tmpPrefixes = [...]state{ //nolint:gochecknoglobals
 	{ // 0
 		chars: chars{
 			'.': 1,
-			'T': 2,
-			't': 2,
+			'T': 7,
+			't': 7,
 		},
 	},
 	{ // 1: "."
@@ -544,7 +543,7 @@ var tmpPrefixes = [...]state{ //nolint:gochecknoglobals
 			't': 2,
 		},
 	},
-	{ // 2: ".t", "t"
+	{ // 2: ".t"
 		chars: chars{
 			'E': 3,
 			'e': 3,
@@ -552,116 +551,101 @@ var tmpPrefixes = [...]state{ //nolint:gochecknoglobals
 			'm': 4,
 		},
 	},
-	{ // 3: ".te", "te"
+	{ // 3: ".te"
 		chars: chars{
 			'M': 4,
 			'm': 4,
 		},
 	},
-	{ // 4: ".tem", ".tm", "tem", "tm"
+	{ // 4: ".tem", ".tm"
 		chars: chars{
 			'P': 5,
 			'p': 5,
 		},
 	},
-	{ // 5: ".temp", ".tmp", "temp", "tmp"
+	{ // 5: ".temp", ".tmp"
 		chars: chars{
 			'.': 6,
 		},
 	},
-	{ // 6: ".temp.", ".tmp.", "temp.", "tmp."
+	{ // 6: ".temp.", ".tmp.", "temp.", "tmp.", "temp/", "tmp/"
 		typ: db.DGUTAFileTypeTemp,
 	},
-}
-
-var tmpPaths = [...]state{ //nolint:gochecknoglobals
-	{ // 0
+	{ // 7: "t"
 		chars: chars{
-			'T': 1,
-			't': 1,
+			'E': 8,
+			'e': 8,
+			'M': 9,
+			'm': 9,
 		},
 	},
-	{ // 1: "t"
+	{ // 8: "te"
 		chars: chars{
-			'E': 2,
-			'e': 2,
-			'M': 3,
-			'm': 3,
+			'M': 9,
+			'm': 9,
 		},
 	},
-	{ // 2: "te"
+	{ // 9: "tem", "tm"
 		chars: chars{
-			'M': 3,
-			'm': 3,
+			'P': 10,
+			'p': 10,
 		},
 	},
-	{ // 3: "tem", "tm"
+	{ // 10: "temp", "tmp"
 		chars: chars{
-			'P': 4,
-			'p': 4,
+			'.': 6,
+			'/': 6,
 		},
-	},
-	{ // 4: "temp", "tmp"
-		chars: fillChars(5),
-		typ:   db.DGUTAFileTypeTemp,
-	},
-	{ // 5: OTHER
 	},
 }
 
 var tmpSuffixes = [...]state{ //nolint:gochecknoglobals
 	{ // 0
 		chars: chars{
-			'P': 1,
-			'p': 1,
+			'/': 1,
+			'P': 2,
+			'p': 2,
 		},
 	},
-	{ // 1: "p"
+	{ // 1: "/"
 		chars: chars{
-			'M': 2,
-			'm': 2,
+			'P': 2,
+			'p': 2,
 		},
 	},
-	{ // 2: "mp"
+	{ // 2: "p", "p/"
 		chars: chars{
-			'E': 3,
-			'e': 3,
-			'T': 4,
-			't': 4,
+			'M': 3,
+			'm': 3,
 		},
 	},
-	{ // 3: "emp"
+	{ // 3: "mp", "mp/"
 		chars: chars{
-			'T': 4,
-			't': 4,
+			'E': 4,
+			'e': 4,
+			'T': 5,
+			't': 5,
 		},
 	},
-	{ // 4: "temp", "tmp"
+	{ // 4: "emp", "emp/"
 		chars: chars{
-			'.': 5,
+			'T': 5,
+			't': 5,
 		},
 	},
-	{ // 5: ".temp", ".tmp"
+	{ // 5: "temp", "temp/", "tmp", "tmp/"
+		chars: chars{
+			'.': 6,
+		},
+	},
+	{ // 6: ".temp", ".temp/", ".tmp", ".tmp/"
 		typ: db.DGUTAFileTypeTemp,
 	},
 }
 
-func fillChars(id uint8) chars {
-	var c chars
-
-	for n := range c {
-		c[n] = id
-	}
-
-	return c
-}
-
-// filenameToType determines the filetype of the given path based on its
-// basename, and returns a slice of our DirGUTAFileType. More than one is
-// possible, because a path can be both a temporary file, and another type.
-func filenameToType(name string) (db.DirGUTAFileType, bool) {
-	isTmp := isTempFile(name)
-
+// FilenameToType determines the filetype of the given path based on its
+// basename, and returns a DirGUTAFileType.
+func FilenameToType(name []byte) db.DirGUTAFileType {
 	var place uint8
 
 	for len(name) > 0 {
@@ -674,47 +658,30 @@ func filenameToType(name string) (db.DirGUTAFileType, bool) {
 		place = next
 	}
 
-	return filenameSuffixes[place].typ, isTmp
+	return filenameSuffixes[place].typ
 }
 
-// isTempFile tells you if path is named like a temporary file.
-func isTempFile(name string) bool {
+// IsTemp tells you if path is named like a temporary file.
+func IsTemp(name []byte) bool {
 	return hasTempPrefix(name) || hasTempSuffix(name)
 }
 
-func hasTempPrefix(name string) bool {
+func hasTempPrefix(name []byte) bool {
 	var place uint8
 
-	for len(name) > 0 {
-		next := tmpPrefixes[place].chars[name[0]]
+	for _, b := range name {
+		next := tmpPrefixes[place].chars[b]
 		if next == 0 {
 			break
 		}
 
-		name = name[1:]
 		place = next
 	}
 
 	return tmpPrefixes[place].typ == db.DGUTAFileTypeTemp
 }
 
-func isTemp(name string) bool {
-	var place uint8
-
-	for len(name) > 0 {
-		next := tmpPaths[place].chars[name[0]]
-		if next == 0 {
-			break
-		}
-
-		name = name[1:]
-		place = next
-	}
-
-	return tmpPaths[place].typ == db.DGUTAFileTypeTemp
-}
-
-func hasTempSuffix(name string) bool {
+func hasTempSuffix(name []byte) bool {
 	var place uint8
 
 	for len(name) > 0 {
@@ -728,21 +695,4 @@ func hasTempSuffix(name string) bool {
 	}
 
 	return tmpSuffixes[place].typ == db.DGUTAFileTypeTemp
-}
-
-func isTempDir(path *summary.DirectoryPath) bool {
-	for path != nil {
-		name := path.Name
-		if name[len(name)-1] == '/' {
-			name = name[:len(name)-1]
-		}
-
-		if hasTempPrefix(name) || isTemp(name) || hasTempSuffix(name) {
-			return true
-		}
-
-		path = path.Parent
-	}
-
-	return false
 }

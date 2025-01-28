@@ -54,7 +54,7 @@ type SummaryWithTimes struct { //nolint:revive
 	Mtime int64 // seconds since Unix epoch
 }
 
-// add will increment our count and add the given size to our size. It also
+// Add will increment our count and add the given size to our size. It also
 // stores the given atime if it is older than our current one, and the given
 // mtime if it is newer than our current one.
 func (s *SummaryWithTimes) Add(size int64, atime int64, mtime int64) {
@@ -66,6 +66,21 @@ func (s *SummaryWithTimes) Add(size int64, atime int64, mtime int64) {
 
 	if mtime > 0 && (s.Mtime == 0 || mtime > s.Mtime) {
 		s.Mtime = mtime
+	}
+}
+
+// AddSummary add the data in the passed SummaryWithTimes to the existing
+// SummaryWithTimes.
+func (s *SummaryWithTimes) AddSummary(t *SummaryWithTimes) {
+	s.Count += t.Count
+	s.Size += t.Size
+
+	if t.Atime > 0 && (s.Atime == 0 || t.Atime < s.Atime) {
+		s.Atime = t.Atime
+	}
+
+	if t.Mtime > 0 && (s.Mtime == 0 || t.Mtime > s.Mtime) {
+		s.Mtime = t.Mtime
 	}
 }
 

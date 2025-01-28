@@ -31,6 +31,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unsafe"
 
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
 	"github.com/wtsi-hgi/wrstat-ui/db"
@@ -111,7 +112,7 @@ func merge(newS, oldS *basedirs.SummaryWithChildren, name string) {
 
 type ageBaseDirs [numAges]*dirSummary
 
-func (b *ageBaseDirs) Set(i db.DirGUTAge, fi *summary.FileInfo, parent *summary.DirectoryPath) {
+func (b *ageBaseDirs) Set(i db.DirGUTAge, fi *summary.FileInfo, parent *summary.DirectoryPath, tmp bool) {
 	if b[i] == nil {
 		b[i] = newDirSummary(parent, i)
 		b[i].Age = i
@@ -126,11 +127,10 @@ func (b *ageBaseDirs) Set(i db.DirGUTAge, fi *summary.FileInfo, parent *summary.
 
 	setTimes(&b[i].SummaryWithChildren, time.Unix(fi.ATime, 0), time.Unix(fi.MTime, 0))
 
-	t, tmp := dirguta.InfoToType(fi)
+	ft := dirguta.FilenameToType(fi.Name)
+	b[i].Children[0].FileUsage[ft] += uint64(fi.Size) //nolint:gosec
 
-	b[i].Children[0].FileUsage[t] += uint64(fi.Size) //nolint:gosec
-
-	if tmp {
+	if tmp || dirguta.IsTemp(fi.Name) {
 		b[i].Children[0].FileUsage[db.DGUTAFileTypeTemp] += uint64(fi.Size) //nolint:gosec
 	}
 
@@ -219,6 +219,7 @@ type baseDirs struct {
 	refTime       int64
 	thisDir       *summary.DirectoryPath
 	users, groups baseDirsMap
+	isTempDir     bool
 }
 
 type rootBaseDirs struct {
@@ -267,9 +268,11 @@ func NewBaseDirs(output outputForDir, db output) summary.OperationGenerator { //
 }
 
 // Add is a summary.Operation method.
-func (b *baseDirs) Add(info *summary.FileInfo) error {
+func (b *baseDirs) Add(info *summary.FileInfo) error { //nolint:gocyclo
 	if b.thisDir == nil {
 		b.thisDir = info.Path
+		b.isTempDir = b.parent != nil && b.parent.isTempDir ||
+			dirguta.IsTemp(unsafe.Slice(unsafe.StringData(info.Path.Name), len(info.Path.Name)))
 	}
 
 	if info.Path != b.thisDir || info.IsDir() {
@@ -281,8 +284,8 @@ func (b *baseDirs) Add(info *summary.FileInfo) error {
 
 	for _, threshold := range db.DirGUTAges {
 		if threshold.FitsAgeInterval(info.ATime, info.MTime, b.refTime) {
-			gidBasedir.Set(threshold, info, b.thisDir)
-			uidBasedir.Set(threshold, info, b.thisDir)
+			gidBasedir.Set(threshold, info, b.thisDir, b.isTempDir)
+			uidBasedir.Set(threshold, info, b.thisDir, b.isTempDir)
 		}
 	}
 
