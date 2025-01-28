@@ -118,7 +118,7 @@ func run(args []string) (err error) {
 		return err
 	}
 
-	r, mt, err := openStatsFile(args[0])
+	r, modtime, err := openStatsFile(args[0])
 	if err != nil {
 		return err
 	}
@@ -127,7 +127,7 @@ func run(args []string) (err error) {
 
 	setArgsDefaults()
 
-	if fn, err := setSummarisers(s, mt); err != nil { //nolint:nestif
+	if fn, err := setSummarisers(s, modtime); err != nil { //nolint:nestif
 		return err
 	} else if fn != nil {
 		defer func() {
@@ -200,7 +200,7 @@ func setArgsDefaults() {
 	}
 }
 
-func setSummarisers(s *summary.Summariser, mt time.Time) (func() error, error) { //nolint:gocognit,gocyclo
+func setSummarisers(s *summary.Summariser, modtime time.Time) (func() error, error) { //nolint:gocognit,gocyclo
 	if userGroup != "" {
 		if err := addUserGroupSummariser(s, userGroup); err != nil {
 			return nil, err
@@ -214,7 +214,7 @@ func setSummarisers(s *summary.Summariser, mt time.Time) (func() error, error) {
 	}
 
 	if basedirsDB != "" {
-		if err := addBasedirsSummariser(s, basedirsDB, basedirsHistoryDB, quotaPath, basedirsConfig, mt); err != nil {
+		if err := addBasedirsSummariser(s, basedirsDB, basedirsHistoryDB, quotaPath, basedirsConfig, modtime); err != nil {
 			return nil, err
 		}
 	}
@@ -276,7 +276,7 @@ func addGroupUserSummariser(s *summary.Summariser, groupUser string) error {
 }
 
 func addBasedirsSummariser(s *summary.Summariser, basedirsDB, basedirsHistoryDB,
-	quotaPath, basedirsConfig string, mt time.Time) error {
+	quotaPath, basedirsConfig string, modtime time.Time) error {
 	quotas, config, err := parseBasedirConfig(quotaPath, basedirsConfig)
 	if err != nil {
 		return err
@@ -291,7 +291,7 @@ func addBasedirsSummariser(s *summary.Summariser, basedirsDB, basedirsHistoryDB,
 		return fmt.Errorf("failed to create new basedirs creator: %w", err)
 	}
 
-	bd.SetModTime(mt)
+	bd.SetModTime(modtime)
 
 	if basedirsHistoryDB != "" {
 		if err = copyHistory(bd, basedirsHistoryDB); err != nil {

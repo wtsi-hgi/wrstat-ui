@@ -1,3 +1,27 @@
+/*******************************************************************************
+ * Copyright (c) 2025 Genome Research Ltd.
+ *
+ * Author: Michael Woolnough <mw31@sanger.ac.uk>
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining
+ * a copy of this software and associated documentation files (the
+ * "Software"), to deal in the Software without restriction, including
+ * without limitation the rights to use, copy, modify, merge, publish,
+ * distribute, sublicense, and/or sell copies of the Software, and to
+ * permit persons to whom the Software is furnished to do so, subject to
+ * the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included
+ * in all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+ * IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+ * CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+ * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+ * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ ******************************************************************************/
 package cmd
 
 import (
@@ -19,10 +43,12 @@ const inputStatsFile = "stats.gz"
 const testOutputFD = 3
 const dirPerms = 0750
 
+var runJobs string
+
 var watch = &cobra.Command{
 	Use:   "watch",
-	Short: "watch watches a wrstat output directory for new results and summarises them",
-	Long: `watch watches a wrstat output directory for new results and summarises them
+	Short: "watch summarises new wrstat output",
+	Long: `watch watches a wrstat output directory for new results and summarises them.
 
 wr manager must have been started before running this. If the manager can run
 commands on multiple nodes, be sure to set wr's ManagerHost config option to
@@ -43,7 +69,7 @@ The --output flag determines where the summarised data will be written. A new
 subdirectory, named the same as the subdirectory containing the stats.gz file,
 will be created to contain the new files.
 
-The --quota and --config flags act the same as in the summarise subcommand as
+The --quota and --config flags act the same as in the summarise subcommand and
 will be passed along to it.
 `,
 	Run: func(_ *cobra.Command, args []string) {
@@ -74,8 +100,6 @@ will be passed along to it.
 	},
 }
 
-var runJobs string
-
 func entryExists(path string) bool {
 	_, err := os.Stat(path)
 
@@ -84,7 +108,7 @@ func entryExists(path string) bool {
 
 func checkWatchArgs(args []string) error {
 	if len(args) != 1 {
-		return errors.New("exactly 1 input file should be provided") //nolint:err113
+		return errors.New("exactly 1 input directory should be provided") //nolint:err113
 	}
 
 	if defaultDir == "" {
@@ -114,11 +138,13 @@ func scheduleSummarise(inputDir, outputDir, base string) error { //nolint:funlen
 		return err
 	}
 
-	cmdFormat := "%[1]q summarise -d %[2]q -q %[4]q -c %[5]q %[6]q && touch -r %[7]q %[2]q && mv %[2]q %[8]q"
+	cmdFormat := "%[1]q summarise -d %[2]q"
 
 	if previousBasedirsDB != "" {
-		cmdFormat = "%[1]q summarise -d %[2]q -s %[3]q -q %[4]q -c %[5]q %[6]q && touch -r %[7]q %[2]q && mv %[2]q %[8]q"
+		cmdFormat += " -s %[3]q"
 	}
+
+	cmdFormat += " -q %[4]q -c %[5]q %[6]q && touch -r %[7]q %[2]q && mv %[2]q %[8]q"
 
 	input := strings.NewReader(`{"cmd":` + strconv.Quote(fmt.Sprintf(cmdFormat,
 		os.Args[0], dotOutputBase, previousBasedirsDB, quotaPath, basedirsConfig,
