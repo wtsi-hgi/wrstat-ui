@@ -26,26 +26,12 @@ package cmd
 
 import (
 	"errors"
-	"fmt"
-	"io"
-	"os"
-	"os/exec"
-	"path/filepath"
-	"strconv"
-	"strings"
-	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/wtsi-hgi/wrstat-ui/server"
+	"github.com/wtsi-hgi/wrstat-ui/watch"
 )
 
-const inputStatsFile = "stats.gz"
-const testOutputFD = 3
-const dirPerms = 0750
-
-var runJobs string
-
-var watch = &cobra.Command{
+var watchcmd = &cobra.Command{
 	Use:   "watch",
 	Short: "watch summarises new wrstat output",
 	Long: `watch watches a wrstat output directory for new results and summarises them.
@@ -77,33 +63,10 @@ will be passed along to it.
 			die("%s", err)
 		}
 
-		for {
-			inputPaths, err := server.FindDBDirs(args[0], "stats.gz")
-			if err != nil {
-				die("error getting input DB paths: %s", err)
-			}
-
-			for _, p := range inputPaths {
-				base := filepath.Base(p)
-
-				if entryExists(filepath.Join(defaultDir, base)) || entryExists(filepath.Join(defaultDir, "."+base)) {
-					continue
-				}
-
-				if err := scheduleSummarise(args[0], defaultDir, base); err != nil {
-					warn("error scheduling summarise (%s): %s", base, err)
-				}
-			}
-
-			time.Sleep(time.Minute)
+		if err := watch.Watch(args[0], defaultDir, quotaPath, basedirsConfig); err != nil {
+			die("%s", err)
 		}
 	},
-}
-
-func entryExists(path string) bool {
-	_, err := os.Stat(path)
-
-	return err == nil
 }
 
 func checkWatchArgs(args []string) error {
@@ -126,68 +89,10 @@ func checkWatchArgs(args []string) error {
 	return nil
 }
 
-func scheduleSummarise(inputDir, outputDir, base string) error { //nolint:funlen
-	dotOutputBase := filepath.Join(outputDir, "."+base)
-
-	if err := os.MkdirAll(dotOutputBase, dirPerms); err != nil {
-		return err
-	}
-
-	previousBasedirsDB, err := getPreviousBasedirsDB(outputDir, base)
-	if err != nil {
-		return err
-	}
-
-	cmdFormat := "%[1]q summarise -d %[2]q"
-
-	if previousBasedirsDB != "" {
-		cmdFormat += " -s %[3]q"
-	}
-
-	cmdFormat += " -q %[4]q -c %[5]q %[6]q && touch -r %[7]q %[2]q && mv %[2]q %[8]q"
-
-	input := strings.NewReader(`{"cmd":` + strconv.Quote(fmt.Sprintf(cmdFormat,
-		os.Args[0], dotOutputBase, previousBasedirsDB, quotaPath, basedirsConfig,
-		filepath.Join(inputDir, base, inputStatsFile),
-		filepath.Join(inputDir, base),
-		filepath.Join(outputDir, base),
-	)) + `,"req_grp":"wrstat-ui-summarise"}`)
-
-	if runJobs != "" {
-		io.Copy(os.NewFile(uintptr(testOutputFD), "/dev/stdout"), input) //nolint:errcheck
-
-		os.Exit(0)
-	}
-
-	cmd := exec.Command("wr", "add")
-	cmd.Stdin = input
-
-	return cmd.Run()
-}
-
-func getPreviousBasedirsDB(outputDir, base string) (string, error) {
-	possibleBasedirs, err := server.FindDBDirs(outputDir, basedirBasename)
-	if err != nil {
-		return "", err
-	}
-
-	splitBase := strings.Split(base, "_")
-
-	for _, possibleBasedirDB := range possibleBasedirs {
-		key := strings.SplitN(filepath.Base(possibleBasedirDB), "_", 2) //nolint:mnd
-
-		if key[1] == splitBase[1] {
-			return filepath.Join(possibleBasedirDB, basedirBasename), nil
-		}
-	}
-
-	return "", nil
-}
-
 func init() {
-	RootCmd.AddCommand(watch)
+	RootCmd.AddCommand(watchcmd)
 
-	watch.Flags().StringVarP(&defaultDir, "output", "o", "", "output all summariser data to here")
-	watch.Flags().StringVarP(&quotaPath, "quota", "q", "", "csv of gid,disk,size_quota,inode_quota")
-	watch.Flags().StringVarP(&basedirsConfig, "config", "c", "", "path to basedirs config file")
+	watchcmd.Flags().StringVarP(&defaultDir, "output", "o", "", "output all summariser data to here")
+	watchcmd.Flags().StringVarP(&quotaPath, "quota", "q", "", "csv of gid,disk,size_quota,inode_quota")
+	watchcmd.Flags().StringVarP(&basedirsConfig, "config", "c", "", "path to basedirs config file")
 }

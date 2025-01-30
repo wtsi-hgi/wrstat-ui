@@ -50,7 +50,7 @@ const app = "wrstat-ui_test"
 func buildSelf() func() {
 	cmd := exec.Command(
 		"go", "build", "-tags", "netgo",
-		"-ldflags=-X github.com/wtsi-hgi/wrstat-ui/cmd.runJobs=0 -X github.com/wtsi-hgi/wrstat-ui/cmd.Version=TESTVERSION",
+		"-ldflags=-X github.com/wtsi-hgi/wrstat-ui/watch.runJobs=0 -X github.com/wtsi-hgi/wrstat-ui/cmd.Version=TESTVERSION",
 		"-o", app,
 	)
 
