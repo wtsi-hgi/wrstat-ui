@@ -30,68 +30,64 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
-	"time"
 
 	. "github.com/smartystreets/goconvey/convey"
 )
 
 func TestWatch(t *testing.T) {
+	exit = func() {}
+	runJobs = "0"
+
 	Convey("Given the expected setup", t, func() {
 		inputDir := t.TempDir()
 		outputDir := t.TempDir()
 		testInputA := filepath.Join(inputDir, "12345_abc")
 		testInputB := filepath.Join(inputDir, "12345_def")
 		delayCh := make(chan struct{})
-		wrWrittenCh := make(chan struct{})
-		exit = func() {}
-		round := 0
-		delay = func() {
-			delayCh <- struct{}{}
-
-			if round > 0 {
-				runtime.Goexit()
-			}
-
-			round++
-		}
+		wrWrittenCh := make(chan bool)
 
 		pr, pw, err := os.Pipe()
 		So(err, ShouldBeNil)
 
-		testOutputFD = int(pw.Fd())
-		runJobs = "1"
+		delay = func() {
+			delayCh <- struct{}{}
 
-		Reset(func() {
-			pr.Close()
 			pw.Close()
-		})
+
+			runtime.Goexit()
+		}
+
+		testOutputFD = int(pw.Fd())
 
 		var wr string
 
 		go func() {
+			defer pr.Close()
+
 			var buf [4096]byte
 
-			for {
-				n, err := pr.Read(buf[:])
-				if err != nil {
-					break
-				}
+			n, err := pr.Read(buf[:])
+			if err != nil || n == 0 {
+				wrWrittenCh <- false
 
-				wr = string(buf[:n])
-				wrWrittenCh <- struct{}{}
+				return
 			}
-		}()
 
-		go Watch(inputDir, outputDir, "/path/to/quota", "/path/to/basedirs.config")
+			wr = string(buf[:n])
+			wrWrittenCh <- true
+		}()
 
 		So(os.Mkdir(testInputA, 0755), ShouldBeNil)
 		So(os.Mkdir(testInputB, 0755), ShouldBeNil)
 		So(createFile(filepath.Join(testInputA, inputStatsFile)), ShouldBeNil)
 
 		Convey("Watch will spot a new directory and schedule a summarise", func() {
-			<-delayCh // Watch loop should now run
-			<-wrWrittenCh
+			go Watch(inputDir, outputDir, "/path/to/quota", "/path/to/basedirs.config")
 
+			<-delayCh // Watch loop should now have run
+
+			written := <-wrWrittenCh
+			So(written, ShouldBeTrue)
 			So(wr, ShouldEqual, fmt.Sprintf(`{"cmd":"\"%[1]s\" summarise -d \"%[2]s/.12345_abc\" `+
 				`-q \"/path/to/quota\" -c \"/path/to/basedirs.config\" \"%[3]s/stats.gz\" && `+
 				`touch -r \"%[3]s\" \"%[2]s/.12345_abc\" && mv \"%[2]s/.12345_abc\" \"%[2]s/12345_abc\"",`+
@@ -101,33 +97,25 @@ func TestWatch(t *testing.T) {
 		Convey("Watch will not reschedule a summarise if one has already started", func() {
 			So(os.Mkdir(filepath.Join(outputDir, ".12345_abc"), 0755), ShouldBeNil)
 
-			<-delayCh // Watch loop should now run
+			go Watch(inputDir, outputDir, "/path/to/quota", "/path/to/basedirs.config")
 
-			var written bool
+			<-delayCh // Watch loop should now have run
 
-			select {
-			case <-wrWrittenCh:
-				written = true
-			case <-time.After(time.Second):
-			}
-
+			written := <-wrWrittenCh
 			So(written, ShouldBeFalse)
+			So(wr, ShouldEqual, "")
 		})
 
 		Convey("Watch will not reschedule a summarise if one has already completed", func() {
 			So(os.Mkdir(filepath.Join(outputDir, "12345_abc"), 0755), ShouldBeNil)
 
-			<-delayCh // Watch loop should now run
+			go Watch(inputDir, outputDir, "/path/to/quota", "/path/to/basedirs.config")
 
-			var written bool
+			<-delayCh // Watch loop should now have run
 
-			select {
-			case <-wrWrittenCh:
-				written = true
-			case <-time.After(time.Second):
-			}
-
+			written := <-wrWrittenCh
 			So(written, ShouldBeFalse)
+			So(wr, ShouldEqual, "")
 		})
 
 		Convey("Watch will recognise existing basedir history in the output path", func() {
@@ -135,9 +123,12 @@ func TestWatch(t *testing.T) {
 			So(os.Mkdir(existingOutput, 0755), ShouldBeNil)
 			So(createFile(filepath.Join(existingOutput, basedirBasename)), ShouldBeNil)
 
-			<-delayCh // Watch loop should now run
-			<-wrWrittenCh
+			go Watch(inputDir, outputDir, "/path/to/quota", "/path/to/basedirs.config")
 
+			<-delayCh // Watch loop should now have run
+
+			written := <-wrWrittenCh
+			So(written, ShouldBeTrue)
 			So(wr, ShouldEqual, fmt.Sprintf(`{"cmd":"\"%[1]s\" summarise -d \"%[2]s/.12345_abc\" `+
 				`-s \"%[2]s/00001_abc/basedirs.db\" `+
 				`-q \"/path/to/quota\" -c \"/path/to/basedirs.config\" \"%[3]s/stats.gz\" && `+
