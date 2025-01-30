@@ -82,7 +82,7 @@ func TestWatch(t *testing.T) {
 		So(createFile(filepath.Join(testInputA, inputStatsFile)), ShouldBeNil)
 
 		Convey("Watch will spot a new directory and schedule a summarise", func() {
-			go Watch(inputDir, outputDir, "/path/to/quota", "/path/to/basedirs.config")
+			go Watch(inputDir, outputDir, "/path/to/quota", "/path/to/basedirs.config") //nolint:errcheck
 
 			<-delayCh // Watch loop should now have run
 
@@ -97,7 +97,7 @@ func TestWatch(t *testing.T) {
 		Convey("Watch will not reschedule a summarise if one has already started", func() {
 			So(os.Mkdir(filepath.Join(outputDir, ".12345_abc"), 0755), ShouldBeNil)
 
-			go Watch(inputDir, outputDir, "/path/to/quota", "/path/to/basedirs.config")
+			go Watch(inputDir, outputDir, "/path/to/quota", "/path/to/basedirs.config") //nolint:errcheck
 
 			<-delayCh // Watch loop should now have run
 
@@ -109,7 +109,7 @@ func TestWatch(t *testing.T) {
 		Convey("Watch will not reschedule a summarise if one has already completed", func() {
 			So(os.Mkdir(filepath.Join(outputDir, "12345_abc"), 0755), ShouldBeNil)
 
-			go Watch(inputDir, outputDir, "/path/to/quota", "/path/to/basedirs.config")
+			go Watch(inputDir, outputDir, "/path/to/quota", "/path/to/basedirs.config") //nolint:errcheck
 
 			<-delayCh // Watch loop should now have run
 
@@ -123,7 +123,7 @@ func TestWatch(t *testing.T) {
 			So(os.Mkdir(existingOutput, 0755), ShouldBeNil)
 			So(createFile(filepath.Join(existingOutput, basedirBasename)), ShouldBeNil)
 
-			go Watch(inputDir, outputDir, "/path/to/quota", "/path/to/basedirs.config")
+			go Watch(inputDir, outputDir, "/path/to/quota", "/path/to/basedirs.config") //nolint:errcheck
 
 			<-delayCh // Watch loop should now have run
 
