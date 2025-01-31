@@ -56,8 +56,18 @@ var (
 //
 // The scheduled summarise subcommands will be given the output directory, quota
 // path and basedirs config path.
-func Watch(inputDir, outputDir, quotaPath, basedirsConfig string) error {
+func Watch(inputDirs []string, outputDir, quotaPath, basedirsConfig string) error {
 	for {
+		if err := watch(inputDirs, outputDir, quotaPath, basedirsConfig); err != nil {
+			return err
+		}
+
+		delay()
+	}
+}
+
+func watch(inputDirs []string, outputDir, quotaPath, basedirsConfig string) error {
+	for _, inputDir := range inputDirs {
 		inputPaths, err := server.FindDBDirs(inputDir, "stats.gz")
 		if err != nil {
 			return fmt.Errorf("error getting input DB paths: %w", err)
@@ -72,9 +82,9 @@ func Watch(inputDir, outputDir, quotaPath, basedirsConfig string) error {
 		if err := scheduleSummarisers(inputDir, outputDir, quotaPath, basedirsConfig, inputPaths); err != nil {
 			return err
 		}
-
-		delay()
 	}
+
+	return nil
 }
 
 func entryExists(path string) bool {
