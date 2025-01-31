@@ -51,8 +51,8 @@ var (
 )
 
 // Watch watches an input directory (which should be the output directory of a
-// wrstat multi run) for new stats.gz files, upon which it will run the summarise
-// subcommand.
+// wrstat multi run) for new stats.gz files, upon which it will run the
+// summarise subcommand on that data, if it has not already been run.
 //
 // The scheduled summarise subcommands will be given the output directory, quota
 // path and basedirs config path.
