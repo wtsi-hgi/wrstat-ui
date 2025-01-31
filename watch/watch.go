@@ -29,6 +29,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -49,6 +50,12 @@ var (
 	delay        = func() { time.Sleep(time.Minute) } //nolint:gochecknoglobals
 )
 
+// Watch watches an input directory (which should be the output directory of a
+// wrstat multi run) for new stats.gz files, upon which it will run the summarise
+// subcommand.
+//
+// The scheduled summarise subcommands will be given the output directory, quota
+// path and basedirs config path.
 func Watch(inputDir, outputDir, quotaPath, basedirsConfig string) error {
 	for {
 		inputPaths, err := server.FindDBDirs(inputDir, "stats.gz")
@@ -56,7 +63,13 @@ func Watch(inputDir, outputDir, quotaPath, basedirsConfig string) error {
 			return fmt.Errorf("error getting input DB paths: %w", err)
 		}
 
-		if err := checkInputPaths(inputDir, outputDir, quotaPath, basedirsConfig, inputPaths); err != nil {
+		inputPaths = slices.DeleteFunc(inputPaths, func(p string) bool {
+			base := filepath.Base(p)
+
+			return entryExists(filepath.Join(outputDir, base)) || entryExists(filepath.Join(outputDir, "."+base))
+		})
+
+		if err := scheduleSummarisers(inputDir, outputDir, quotaPath, basedirsConfig, inputPaths); err != nil {
 			return err
 		}
 
@@ -64,13 +77,15 @@ func Watch(inputDir, outputDir, quotaPath, basedirsConfig string) error {
 	}
 }
 
-func checkInputPaths(inputDir, outputDir, quotaPath, basedirsConfig string, inputPaths []string) error {
+func entryExists(path string) bool {
+	_, err := os.Stat(path)
+
+	return err == nil
+}
+
+func scheduleSummarisers(inputDir, outputDir, quotaPath, basedirsConfig string, inputPaths []string) error {
 	for _, p := range inputPaths {
 		base := filepath.Base(p)
-
-		if entryExists(filepath.Join(outputDir, base)) || entryExists(filepath.Join(outputDir, "."+base)) {
-			continue
-		}
 
 		if err := scheduleSummarise(inputDir, outputDir, base, quotaPath, basedirsConfig); err != nil {
 			return fmt.Errorf("error scheduling summarise (%s): %w", base, err)
@@ -78,12 +93,6 @@ func checkInputPaths(inputDir, outputDir, quotaPath, basedirsConfig string, inpu
 	}
 
 	return nil
-}
-
-func entryExists(path string) bool {
-	_, err := os.Stat(path)
-
-	return err == nil
 }
 
 func scheduleSummarise(inputDir, outputDir, base, quotaPath, basedirsConfig string) error {
@@ -98,7 +107,7 @@ func scheduleSummarise(inputDir, outputDir, base, quotaPath, basedirsConfig stri
 		return err
 	}
 
-	return runJob(getWRJSON(dotOutputBase, previousBasedirsDB, quotaPath, basedirsConfig, inputDir, base, outputDir))
+	return addJob(getWRJSON(dotOutputBase, previousBasedirsDB, quotaPath, basedirsConfig, inputDir, base, outputDir))
 }
 
 func getWRJSON(dotOutputBase, previousBasedirsDB, quotaPath, basedirsConfig, inputDir, base, outputDir string) string {
@@ -118,7 +127,7 @@ func getWRJSON(dotOutputBase, previousBasedirsDB, quotaPath, basedirsConfig, inp
 	)) + `,"req_grp":"wrstat-ui-summarise"}`
 }
 
-func runJob(wrJSON string) error {
+func addJob(wrJSON string) error {
 	if runJobs != "" {
 		fakeRunJobs(wrJSON)
 
