@@ -63,15 +63,15 @@ will be passed along to it.
 			die("%s", err)
 		}
 
-		if err := watch.Watch(args[0], defaultDir, quotaPath, basedirsConfig); err != nil {
+		if err := watch.Watch(args, defaultDir, quotaPath, basedirsConfig); err != nil {
 			die("%s", err)
 		}
 	},
 }
 
 func checkWatchArgs(args []string) error {
-	if len(args) != 1 {
-		return errors.New("exactly 1 input directory should be provided") //nolint:err113
+	if len(args) < 1 {
+		return errors.New("at least 1 input directory should be provided") //nolint:err113
 	}
 
 	if defaultDir == "" {

@@ -28,7 +28,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"testing"
 
 	. "github.com/smartystreets/goconvey/convey"
@@ -43,19 +42,10 @@ func TestWatch(t *testing.T) {
 		outputDir := t.TempDir()
 		testInputA := filepath.Join(inputDir, "12345_abc")
 		testInputB := filepath.Join(inputDir, "12345_def")
-		delayCh := make(chan struct{})
 		wrWrittenCh := make(chan bool)
 
 		pr, pw, err := os.Pipe()
 		So(err, ShouldBeNil)
-
-		delay = func() {
-			delayCh <- struct{}{}
-
-			pw.Close()
-
-			runtime.Goexit()
-		}
 
 		testOutputFD = int(pw.Fd())
 
@@ -63,18 +53,18 @@ func TestWatch(t *testing.T) {
 
 		go func() {
 			defer pr.Close()
+			defer close(wrWrittenCh)
 
 			var buf [4096]byte
 
-			n, err := pr.Read(buf[:])
-			if err != nil || n == 0 {
-				wrWrittenCh <- false
+			for {
+				n, err := pr.Read(buf[:])
+				if err != nil || n == 0 {
+					return
+				}
 
-				return
+				wr += string(buf[:n])
 			}
-
-			wr = string(buf[:n])
-			wrWrittenCh <- true
 		}()
 
 		So(os.Mkdir(testInputA, 0755), ShouldBeNil)
@@ -82,12 +72,13 @@ func TestWatch(t *testing.T) {
 		So(createFile(filepath.Join(testInputA, inputStatsFile)), ShouldBeNil)
 
 		Convey("Watch will spot a new directory and schedule a summarise", func() {
-			go Watch(inputDir, outputDir, "/path/to/quota", "/path/to/basedirs.config") //nolint:errcheck
+			err := watch([]string{inputDir}, outputDir, "/path/to/quota", "/path/to/basedirs.config")
+			So(err, ShouldBeNil)
 
-			<-delayCh // Watch loop should now have run
+			pw.Close()
 
-			written := <-wrWrittenCh
-			So(written, ShouldBeTrue)
+			<-wrWrittenCh
+
 			So(wr, ShouldEqual, fmt.Sprintf(`{"cmd":"\"%[1]s\" summarise -d \"%[2]s/.12345_abc\" `+
 				`-q \"/path/to/quota\" -c \"/path/to/basedirs.config\" \"%[3]s/stats.gz\" && `+
 				`touch -r \"%[3]s\" \"%[2]s/.12345_abc\" && mv \"%[2]s/.12345_abc\" \"%[2]s/12345_abc\"",`+
@@ -97,24 +88,26 @@ func TestWatch(t *testing.T) {
 		Convey("Watch will not reschedule a summarise if one has already started", func() {
 			So(os.Mkdir(filepath.Join(outputDir, ".12345_abc"), 0755), ShouldBeNil)
 
-			go Watch(inputDir, outputDir, "/path/to/quota", "/path/to/basedirs.config") //nolint:errcheck
+			err := watch([]string{inputDir}, outputDir, "/path/to/quota", "/path/to/basedirs.config")
+			So(err, ShouldBeNil)
 
-			<-delayCh // Watch loop should now have run
+			pw.Close()
 
-			written := <-wrWrittenCh
-			So(written, ShouldBeFalse)
+			<-wrWrittenCh
+
 			So(wr, ShouldEqual, "")
 		})
 
 		Convey("Watch will not reschedule a summarise if one has already completed", func() {
 			So(os.Mkdir(filepath.Join(outputDir, "12345_abc"), 0755), ShouldBeNil)
 
-			go Watch(inputDir, outputDir, "/path/to/quota", "/path/to/basedirs.config") //nolint:errcheck
+			err := watch([]string{inputDir}, outputDir, "/path/to/quota", "/path/to/basedirs.config")
+			So(err, ShouldBeNil)
 
-			<-delayCh // Watch loop should now have run
+			pw.Close()
 
-			written := <-wrWrittenCh
-			So(written, ShouldBeFalse)
+			<-wrWrittenCh
+
 			So(wr, ShouldEqual, "")
 		})
 
@@ -123,17 +116,42 @@ func TestWatch(t *testing.T) {
 			So(os.Mkdir(existingOutput, 0755), ShouldBeNil)
 			So(createFile(filepath.Join(existingOutput, basedirBasename)), ShouldBeNil)
 
-			go Watch(inputDir, outputDir, "/path/to/quota", "/path/to/basedirs.config") //nolint:errcheck
+			err := watch([]string{inputDir}, outputDir, "/path/to/quota", "/path/to/basedirs.config")
+			So(err, ShouldBeNil)
 
-			<-delayCh // Watch loop should now have run
+			pw.Close()
 
-			written := <-wrWrittenCh
-			So(written, ShouldBeTrue)
+			<-wrWrittenCh
+
 			So(wr, ShouldEqual, fmt.Sprintf(`{"cmd":"\"%[1]s\" summarise -d \"%[2]s/.12345_abc\" `+
 				`-s \"%[2]s/00001_abc/basedirs.db\" `+
 				`-q \"/path/to/quota\" -c \"/path/to/basedirs.config\" \"%[3]s/stats.gz\" && `+
 				`touch -r \"%[3]s\" \"%[2]s/.12345_abc\" && mv \"%[2]s/.12345_abc\" \"%[2]s/12345_abc\"",`+
 				`"req_grp":"wrstat-ui-summarise"}`, os.Args[0], outputDir, testInputA))
+		})
+
+		Convey("Watch can watch multiple directories", func() {
+			inputDir2 := t.TempDir()
+			testInputC := filepath.Join(inputDir2, "98765_c")
+			So(os.Mkdir(testInputC, 0755), ShouldBeNil)
+			So(createFile(filepath.Join(testInputC, inputStatsFile)), ShouldBeNil)
+
+			err := watch([]string{inputDir, inputDir2}, outputDir, "/path/to/quota", "/path/to/basedirs.config")
+			So(err, ShouldBeNil)
+
+			pw.Close()
+
+			<-wrWrittenCh
+
+			So(wr, ShouldEqual, fmt.Sprintf(`{"cmd":"\"%[1]s\" summarise -d \"%[2]s/.12345_abc\" `+
+				`-q \"/path/to/quota\" -c \"/path/to/basedirs.config\" \"%[3]s/stats.gz\" && `+
+				`touch -r \"%[3]s\" \"%[2]s/.12345_abc\" && mv \"%[2]s/.12345_abc\" \"%[2]s/12345_abc\"",`+
+				`"req_grp":"wrstat-ui-summarise"}`+
+				`{"cmd":"\"%[1]s\" summarise -d \"%[2]s/.98765_c\" `+
+				`-q \"/path/to/quota\" -c \"/path/to/basedirs.config\" \"%[4]s/stats.gz\" && `+
+				`touch -r \"%[4]s\" \"%[2]s/.98765_c\" && mv \"%[2]s/.98765_c\" \"%[2]s/98765_c\"",`+
+				`"req_grp":"wrstat-ui-summarise"}`,
+				os.Args[0], outputDir, testInputA, testInputC))
 		})
 	})
 }
