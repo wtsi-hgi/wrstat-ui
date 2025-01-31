@@ -67,7 +67,7 @@ const ErrNoPaths = basedirs.Error("no db paths found")
 // history endpoint requires a gid and basedir (can be basedir, actually a
 // mountpoint) parameter.
 func (s *Server) LoadDBs(basePaths []string, dgutaDBName, basedirDBName, ownersPath string) error { //nolint:funlen
-	dirgutaPaths, baseDirPaths := joinDBPaths(basePaths, dgutaDBName, basedirDBName)
+	dirgutaPaths, baseDirPaths := JoinDBPaths(basePaths, dgutaDBName, basedirDBName)
 
 	mt, err := s.getLatestTimestamp(dirgutaPaths, baseDirPaths)
 	if err != nil {
@@ -216,7 +216,7 @@ func (s *Server) reloadLoop(basepath, dgutaDBName, basedirDBName, ownersPath str
 
 func (s *Server) reloadDBs(dgutaDBName, basedirDBName, //nolint:funlen
 	ownersPath string, dbPaths []string) bool {
-	dirgutaPaths, baseDirPaths := joinDBPaths(dbPaths, dgutaDBName, basedirDBName)
+	dirgutaPaths, baseDirPaths := JoinDBPaths(dbPaths, dgutaDBName, basedirDBName)
 
 	mt, err := s.getLatestTimestamp(dirgutaPaths, baseDirPaths)
 	if err != nil {
@@ -257,14 +257,15 @@ func (s *Server) logReloadError(format string, v ...any) bool {
 // FindDBDirs finds the latest dirguta and basedir databases in the given base
 // directory, returning the paths to the dirguta dbs and basedir dbs for each
 // key/mountpoint.
-func FindDBDirs(basepath, dgutaDBName, basedirDBName string) ([]string, []string, error) {
-	dbPaths, _, err := findDBDirs(basepath, dgutaDBName, basedirDBName)
-	dirgutaPaths, basedirPaths := joinDBPaths(dbPaths, dgutaDBName, basedirDBName)
+func FindDBDirs(basepath string, required ...string) ([]string, error) {
+	dbPaths, _, err := findDBDirs(basepath, required...)
 
-	return dirgutaPaths, basedirPaths, err
+	return dbPaths, err
 }
 
-func joinDBPaths(dbPaths []string, dgutaDBName, basedirDBName string) ([]string, []string) {
+// JoinDBPaths produces a list of a dgutaDB paths and basedirDB paths from the
+// provided base dbPaths and the basenames of the DBs.
+func JoinDBPaths(dbPaths []string, dgutaDBName, basedirDBName string) ([]string, []string) {
 	dirgutaPaths := make([]string, len(dbPaths))
 	baseDirPaths := make([]string, len(dbPaths))
 
@@ -281,7 +282,7 @@ type nameVersion struct {
 	version int64
 }
 
-func findDBDirs(basepath, dgutaDBName, basedirDBName string) ([]string, []string, error) {
+func findDBDirs(basepath string, required ...string) ([]string, []string, error) {
 	entries, err := os.ReadDir(basepath)
 	if err != nil {
 		return nil, nil, err
@@ -292,7 +293,7 @@ func findDBDirs(basepath, dgutaDBName, basedirDBName string) ([]string, []string
 	latest := make(map[string]nameVersion)
 
 	for _, entry := range entries {
-		if !isValidDBDir(entry, basepath, dgutaDBName, basedirDBName) {
+		if !isValidDBDir(entry, basepath, required...) {
 			continue
 		}
 
@@ -312,12 +313,20 @@ func findDBDirs(basepath, dgutaDBName, basedirDBName string) ([]string, []string
 
 var validDBDir = regexp.MustCompile(`^\d+_.`)
 
-func isValidDBDir(entry fs.DirEntry, basepath, dgutaDBName, basedirBasename string) bool {
+func isValidDBDir(entry fs.DirEntry, basepath string, required ...string) bool {
 	name := entry.Name()
 
-	return entry.IsDir() && validDBDir.MatchString(name) &&
-		entryExists(filepath.Join(basepath, name, dgutaDBName)) &&
-		entryExists(filepath.Join(basepath, name, basedirBasename))
+	if !entry.IsDir() || !validDBDir.MatchString(name) {
+		return false
+	}
+
+	for _, entry := range required {
+		if !entryExists(filepath.Join(basepath, name, entry)) {
+			return false
+		}
+	}
+
+	return true
 }
 
 func entryExists(path string) bool {
@@ -350,6 +359,16 @@ func addEntryToMap(entry fs.DirEntry, latest map[string]nameVersion, toDelete []
 
 func removeAll(baseDirectory string, toDelete []string) error {
 	for _, path := range toDelete {
+		// Create marker to avoid the watch subcommand re-running a summarise.
+		f, err := os.Create(filepath.Join(baseDirectory, "."+path))
+		if err != nil {
+			return err
+		}
+
+		if err := f.Close(); err != nil {
+			return err
+		}
+
 		if err := os.RemoveAll(filepath.Join(baseDirectory, path)); err != nil {
 			return err
 		}

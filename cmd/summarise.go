@@ -33,6 +33,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/klauspost/pgzip"
 	"github.com/spf13/cobra"
@@ -117,7 +118,7 @@ func run(args []string) (err error) {
 		return err
 	}
 
-	r, err := openStatsFile(args[0])
+	r, modtime, err := openStatsFile(args[0])
 	if err != nil {
 		return err
 	}
@@ -126,7 +127,7 @@ func run(args []string) (err error) {
 
 	setArgsDefaults()
 
-	if fn, err := setSummarisers(s); err != nil { //nolint:nestif
+	if fn, err := setSummarisers(s, modtime); err != nil { //nolint:nestif
 		return err
 	} else if fn != nil {
 		defer func() {
@@ -151,25 +152,30 @@ func checkArgs(args []string) error {
 	return nil
 }
 
-func openStatsFile(statsFile string) (io.Reader, error) {
+func openStatsFile(statsFile string) (io.Reader, time.Time, error) {
 	if statsFile == "-" {
-		return os.Stdin, nil
+		return os.Stdin, time.Now(), nil
 	}
 
 	f, err := os.Open(statsFile)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open stats file: %w", err)
+		return nil, time.Time{}, fmt.Errorf("failed to open stats file: %w", err)
+	}
+
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, time.Time{}, err
 	}
 
 	var r io.Reader = f
 
 	if strings.HasSuffix(statsFile, ".gz") {
 		if r, err = pgzip.NewReader(f); err != nil {
-			return nil, fmt.Errorf("failed to decompress stats file: %w", err)
+			return nil, time.Time{}, fmt.Errorf("failed to decompress stats file: %w", err)
 		}
 	}
 
-	return r, nil
+	return r, fi.ModTime(), nil
 }
 
 func setArgsDefaults() {
@@ -194,7 +200,7 @@ func setArgsDefaults() {
 	}
 }
 
-func setSummarisers(s *summary.Summariser) (func() error, error) { //nolint:gocognit,gocyclo
+func setSummarisers(s *summary.Summariser, modtime time.Time) (func() error, error) { //nolint:gocognit,gocyclo
 	if userGroup != "" {
 		if err := addUserGroupSummariser(s, userGroup); err != nil {
 			return nil, err
@@ -208,7 +214,7 @@ func setSummarisers(s *summary.Summariser) (func() error, error) { //nolint:goco
 	}
 
 	if basedirsDB != "" {
-		if err := addBasedirsSummariser(s, basedirsDB, basedirsHistoryDB, quotaPath, basedirsConfig); err != nil {
+		if err := addBasedirsSummariser(s, basedirsDB, basedirsHistoryDB, quotaPath, basedirsConfig, modtime); err != nil {
 			return nil, err
 		}
 	}
@@ -270,7 +276,7 @@ func addGroupUserSummariser(s *summary.Summariser, groupUser string) error {
 }
 
 func addBasedirsSummariser(s *summary.Summariser, basedirsDB, basedirsHistoryDB,
-	quotaPath, basedirsConfig string) error {
+	quotaPath, basedirsConfig string, modtime time.Time) error {
 	quotas, config, err := parseBasedirConfig(quotaPath, basedirsConfig)
 	if err != nil {
 		return err
@@ -284,6 +290,8 @@ func addBasedirsSummariser(s *summary.Summariser, basedirsDB, basedirsHistoryDB,
 	if err != nil {
 		return fmt.Errorf("failed to create new basedirs creator: %w", err)
 	}
+
+	bd.SetModTime(modtime)
 
 	if basedirsHistoryDB != "" {
 		if err = copyHistory(bd, basedirsHistoryDB); err != nil {

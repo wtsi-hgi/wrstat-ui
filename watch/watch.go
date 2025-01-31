@@ -1,7 +1,7 @@
 /*******************************************************************************
- * Copyright (c) 2022 Genome Research Ltd.
+ * Copyright (c) 2025 Genome Research Ltd.
  *
- * Author: Sendu Bala <sb10@sanger.ac.uk>
+ * Author: Michael Woolnough <mw31@sanger.ac.uk>
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -22,128 +22,145 @@
  * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  ******************************************************************************/
-
-// package watch is used to watch single files for changes to their mtimes, for
-// filesystems that don't support inotify.
-
 package watch
 
 import (
+	"fmt"
 	"os"
-	"sync"
+	"os/exec"
+	"path/filepath"
+	"slices"
+	"strconv"
+	"strings"
 	"time"
+
+	"github.com/wtsi-hgi/wrstat-ui/server"
 )
 
-// WatcherCallback, once supplied to New(), will be called each time your
-// Watcher path changes (that is, the file's mtime changes), and is supplied the
-// new mtime of that path.
-type WatcherCallback func(mtime time.Time)
+const (
+	inputStatsFile  = "stats.gz"
+	dirPerms        = 0750
+	basedirBasename = "basedirs.db"
+)
 
-// Watcher is used to watch a file on a filesystem, and let you do something
-// whenever it's mtime changes.
-type Watcher struct {
-	path          string
-	cb            WatcherCallback
-	pollFrequency time.Duration
-	previous      time.Time
-	stop          chan bool
-	stopped       bool
-	sync.RWMutex
-}
+var (
+	testOutputFD = 3                                  //nolint:gochecknoglobals
+	exit         = func() { os.Exit(0) }              //nolint:gochecknoglobals
+	runJobs      string                               //nolint:gochecknoglobals
+	delay        = func() { time.Sleep(time.Minute) } //nolint:gochecknoglobals
+)
 
-// New returns a new Watcher that will call your cb with path's mtime whenever
-// its mtime changes in the future.
+// Watch watches an input directory (which should be the output directory of a
+// wrstat multi run) for new stats.gz files, upon which it will run the
+// summarise subcommand on that data, if it has not already been run.
 //
-// It also immediately gets the path's mtime, available via Mtime().
-//
-// This is intended for use on filesystems that don't support inotify, so the
-// watcher will check for changes to path's mtime every pollFrequency.
-func New(path string, cb WatcherCallback, pollFrequency time.Duration) (*Watcher, error) {
-	mtime, err := getFileMtime(path)
-	if err != nil {
-		return nil, err
-	}
-
-	w := &Watcher{
-		path:          path,
-		cb:            cb,
-		pollFrequency: pollFrequency,
-		previous:      mtime,
-	}
-
-	w.startWatching()
-
-	return w, nil
-}
-
-// getFileMtime returns the mtime of the given file.
-func getFileMtime(path string) (time.Time, error) {
-	info, err := os.Stat(path)
-	if err != nil {
-		return time.Time{}, err
-	}
-
-	return info.ModTime(), nil
-}
-
-// startWatching will start ticking at our pollFrequency, and call our cb if
-// our path's mtime changes.
-func (w *Watcher) startWatching() {
-	ticker := time.NewTicker(w.pollFrequency)
-
-	stopTicking := make(chan bool)
-
-	w.stop = stopTicking
-
-	go func() {
-		defer ticker.Stop()
-
-		for {
-			select {
-			case <-stopTicking:
-				return
-			case <-ticker.C:
-				w.callCBIfMtimeChanged()
-			}
+// The scheduled summarise subcommands will be given the output directory, quota
+// path and basedirs config path.
+func Watch(inputDir, outputDir, quotaPath, basedirsConfig string) error {
+	for {
+		inputPaths, err := server.FindDBDirs(inputDir, "stats.gz")
+		if err != nil {
+			return fmt.Errorf("error getting input DB paths: %w", err)
 		}
-	}()
+
+		inputPaths = slices.DeleteFunc(inputPaths, func(p string) bool {
+			base := filepath.Base(p)
+
+			return entryExists(filepath.Join(outputDir, base)) || entryExists(filepath.Join(outputDir, "."+base))
+		})
+
+		if err := scheduleSummarisers(inputDir, outputDir, quotaPath, basedirsConfig, inputPaths); err != nil {
+			return err
+		}
+
+		delay()
+	}
 }
 
-// callCBIfMtimeChanged calls our cb if the mtime of our path has changed since
-// the last time this method was called. Errors in trying to get the mtime are
-// ignored, in the hopes a future attempt will succeed.
-func (w *Watcher) callCBIfMtimeChanged() {
-	w.Lock()
-	defer w.Unlock()
+func entryExists(path string) bool {
+	_, err := os.Stat(path)
 
-	mtime, err := getFileMtime(w.path)
-	if err != nil || mtime == w.previous {
-		return
+	return err == nil
+}
+
+func scheduleSummarisers(inputDir, outputDir, quotaPath, basedirsConfig string, inputPaths []string) error {
+	for _, p := range inputPaths {
+		base := filepath.Base(p)
+
+		if err := scheduleSummarise(inputDir, outputDir, base, quotaPath, basedirsConfig); err != nil {
+			return fmt.Errorf("error scheduling summarise (%s): %w", base, err)
+		}
 	}
 
-	w.cb(mtime)
-
-	w.previous = mtime
+	return nil
 }
 
-// Mtime returns the latest mtime of our path, captured during New() or the last
-// time we polled.
-func (w *Watcher) Mtime() time.Time {
-	w.RLock()
-	defer w.RUnlock()
+func scheduleSummarise(inputDir, outputDir, base, quotaPath, basedirsConfig string) error {
+	dotOutputBase := filepath.Join(outputDir, "."+base)
 
-	return w.previous
-}
-
-// Stop will stop watching our path for changes.
-func (w *Watcher) Stop() {
-	w.Lock()
-	defer w.Unlock()
-
-	if w.stopped {
-		return
+	if err := os.MkdirAll(dotOutputBase, dirPerms); err != nil {
+		return err
 	}
 
-	close(w.stop)
-	w.stopped = true
+	previousBasedirsDB, err := getPreviousBasedirsDB(outputDir, base)
+	if err != nil {
+		return err
+	}
+
+	return addJob(getWRJSON(dotOutputBase, previousBasedirsDB, quotaPath, basedirsConfig, inputDir, base, outputDir))
+}
+
+func getWRJSON(dotOutputBase, previousBasedirsDB, quotaPath, basedirsConfig, inputDir, base, outputDir string) string {
+	cmdFormat := "%[1]q summarise -d %[2]q"
+
+	if previousBasedirsDB != "" {
+		cmdFormat += " -s %[3]q"
+	}
+
+	cmdFormat += " -q %[4]q -c %[5]q %[6]q && touch -r %[7]q %[2]q && mv %[2]q %[8]q"
+
+	return `{"cmd":` + strconv.Quote(fmt.Sprintf(cmdFormat,
+		os.Args[0], dotOutputBase, previousBasedirsDB, quotaPath, basedirsConfig,
+		filepath.Join(inputDir, base, inputStatsFile),
+		filepath.Join(inputDir, base),
+		filepath.Join(outputDir, base),
+	)) + `,"req_grp":"wrstat-ui-summarise"}`
+}
+
+func addJob(wrJSON string) error {
+	if runJobs != "" {
+		fakeRunJobs(wrJSON)
+
+		return nil
+	}
+
+	cmd := exec.Command("wr", "add")
+	cmd.Stdin = strings.NewReader(wrJSON)
+
+	return cmd.Run()
+}
+
+func fakeRunJobs(wrJSON string) {
+	os.NewFile(uintptr(testOutputFD), "").WriteString(wrJSON) //nolint:errcheck
+
+	exit()
+}
+
+func getPreviousBasedirsDB(outputDir, base string) (string, error) {
+	possibleBasedirs, err := server.FindDBDirs(outputDir, basedirBasename)
+	if err != nil {
+		return "", err
+	}
+
+	splitBase := strings.Split(base, "_")
+
+	for _, possibleBasedirDB := range possibleBasedirs {
+		key := strings.SplitN(filepath.Base(possibleBasedirDB), "_", 2) //nolint:mnd
+
+		if key[1] == splitBase[1] {
+			return filepath.Join(possibleBasedirDB, basedirBasename), nil
+		}
+	}
+
+	return "", nil
 }
