@@ -362,6 +362,16 @@ func removeAll(baseDirectory string, toDelete []string) error {
 		if err := os.RemoveAll(filepath.Join(baseDirectory, path)); err != nil {
 			return err
 		}
+
+		// Create marker to avoid the watch subcommand re-running a summarise.
+		f, err := os.Create(filepath.Join(baseDirectory, "."+path))
+		if err != nil {
+			return err
+		}
+
+		if err := f.Close(); err != nil {
+			return err
+		}
 	}
 
 	return nil
