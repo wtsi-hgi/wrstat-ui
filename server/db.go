@@ -359,10 +359,6 @@ func addEntryToMap(entry fs.DirEntry, latest map[string]nameVersion, toDelete []
 
 func removeAll(baseDirectory string, toDelete []string) error {
 	for _, path := range toDelete {
-		if err := os.RemoveAll(filepath.Join(baseDirectory, path)); err != nil {
-			return err
-		}
-
 		// Create marker to avoid the watch subcommand re-running a summarise.
 		f, err := os.Create(filepath.Join(baseDirectory, "."+path))
 		if err != nil {
@@ -370,6 +366,10 @@ func removeAll(baseDirectory string, toDelete []string) error {
 		}
 
 		if err := f.Close(); err != nil {
+			return err
+		}
+
+		if err := os.RemoveAll(filepath.Join(baseDirectory, path)); err != nil {
 			return err
 		}
 	}
