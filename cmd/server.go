@@ -96,16 +96,15 @@ groups with that area.
 with their owners. If your groups don't really have owners, just supply the path
 to a file with a fake entry.
 
-The server must be running for 'wrstat where' calls to succeed.
+The server must be running for 'wrstat-ui where' calls to succeed.
 
 This command will block forever in the foreground; you can background it with
 ctrl-z; bg. Or better yet, use the daemonize program to daemonize this.
 
-It will monitor a file called ".dguta.dbs.updated" in the given directory and
-attempt to reload the databases when the file is updated by another run of
-'wrstat multi' with the same output directory. After reloading, will delete the
-previous run's database files. It will use the mtime of the file as the data
-creation time in reports.
+It will monitor the given directory and attempt to reload the databases when a
+new subdirectory is added by another run of 'wrstat summarise' with the same
+base output directory. After reloading, will delete the previous run's database
+files. It will use the mtime of the file as the data creation time in reports.
 `,
 	Run: func(cmd *cobra.Command, args []string) {
 		if len(args) != 1 {
