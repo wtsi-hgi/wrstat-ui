@@ -448,6 +448,8 @@ func TestWatch(t *testing.T) {
 		_, _, jobs, err := runWRStat("watch", "-o", output, "-q", "/some/quota.file", "-c", "basedirs.config", tmp)
 		So(err, ShouldBeNil)
 
+		So(len(jobs), ShouldBeGreaterThan, 0)
+		So(jobs[0].RepGrp, ShouldStartWith, "wrstat-ui-summarise-")
 		So(jobs, ShouldResemble, []*JobViaJSON{
 			{
 				Cmd: fmt.Sprintf(`"./wrstat-ui_test" summarise -d %[1]q -q `+
@@ -455,6 +457,7 @@ func TestWatch(t *testing.T) {
 					dotA, statsA, runA, finalA,
 				),
 				ReqGrp: "wrstat-ui-summarise",
+				RepGrp: jobs[0].RepGrp,
 			},
 		})
 
@@ -469,6 +472,8 @@ func TestWatch(t *testing.T) {
 		_, _, jobs, err = runWRStat("watch", "-o", output, "-q", "/some/quota.file", "-c", "basedirs.config", tmp)
 		So(err, ShouldBeNil)
 
+		So(len(jobs), ShouldBeGreaterThan, 0)
+		So(jobs[0].RepGrp, ShouldStartWith, "wrstat-ui-summarise-")
 		So(jobs, ShouldResemble, []*JobViaJSON{
 			{
 				Cmd: fmt.Sprintf(`"./wrstat-ui_test" summarise -d %[1]q `+
@@ -476,6 +481,7 @@ func TestWatch(t *testing.T) {
 					dotA, previousBasedirs, statsA, runA, finalA,
 				),
 				ReqGrp: "wrstat-ui-summarise",
+				RepGrp: jobs[0].RepGrp,
 			},
 		})
 	})
