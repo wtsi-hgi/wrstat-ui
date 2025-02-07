@@ -442,19 +442,26 @@ func TestWatch(t *testing.T) {
 		finalA := filepath.Join(output, "12345_A")
 		statsA := filepath.Join(runA, "stats.gz")
 
+		cpus := float64(2)
+
 		So(os.Mkdir(runA, 0755), ShouldBeNil)
 		So(os.WriteFile(statsA, nil, 0600), ShouldBeNil)
 
 		_, _, jobs, err := runWRStat("watch", "-o", output, "-q", "/some/quota.file", "-c", "basedirs.config", tmp)
 		So(err, ShouldBeNil)
 
+		So(len(jobs), ShouldBeGreaterThan, 0)
+		So(jobs[0].RepGrp, ShouldStartWith, "wrstat-ui-summarise-")
 		So(jobs, ShouldResemble, []*JobViaJSON{
 			{
 				Cmd: fmt.Sprintf(`"./wrstat-ui_test" summarise -d %[1]q -q `+
 					`"/some/quota.file" -c "basedirs.config" %[2]q && touch -r %[3]q %[1]q && mv %[1]q %[4]q`,
 					dotA, statsA, runA, finalA,
 				),
+				CPUs:   &cpus,
+				Memory: "8000",
 				ReqGrp: "wrstat-ui-summarise",
+				RepGrp: jobs[0].RepGrp,
 			},
 		})
 
@@ -469,13 +476,18 @@ func TestWatch(t *testing.T) {
 		_, _, jobs, err = runWRStat("watch", "-o", output, "-q", "/some/quota.file", "-c", "basedirs.config", tmp)
 		So(err, ShouldBeNil)
 
+		So(len(jobs), ShouldBeGreaterThan, 0)
+		So(jobs[0].RepGrp, ShouldStartWith, "wrstat-ui-summarise-")
 		So(jobs, ShouldResemble, []*JobViaJSON{
 			{
 				Cmd: fmt.Sprintf(`"./wrstat-ui_test" summarise -d %[1]q `+
 					`-s %[2]q -q "/some/quota.file" -c "basedirs.config" %[3]q && touch -r %[4]q %[1]q && mv %[1]q %[5]q`,
 					dotA, previousBasedirs, statsA, runA, finalA,
 				),
+				CPUs:   &cpus,
+				Memory: "8000",
 				ReqGrp: "wrstat-ui-summarise",
+				RepGrp: jobs[0].RepGrp,
 			},
 		})
 	})

@@ -134,7 +134,8 @@ func getWRJSON(dotOutputBase, previousBasedirsDB, quotaPath, basedirsConfig, inp
 		filepath.Join(inputDir, base, inputStatsFile),
 		filepath.Join(inputDir, base),
 		filepath.Join(outputDir, base),
-	)) + `,"req_grp":"wrstat-ui-summarise"}`
+	)) + `,"cpus":2,"memory":"8000","req_grp":"wrstat-ui-summarise","rep_grp":"wrstat-ui-summarise-` +
+		time.Now().Format("20060102150405") + `"}`
 }
 
 func addJob(wrJSON string) error {

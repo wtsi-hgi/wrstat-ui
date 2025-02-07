@@ -43,9 +43,9 @@ the host you started the manager on.
 This subcommand polls the given directory for new subdirectories matching the
 following name format:
 
-^\d+_.
+^[^_]+_.
 
-That is, starting with some string of digits, an underscore, and then at least one
+That is, starting with some version string, an underscore, and then at least one
 character of key data.
 
 Once found, a summarise task will be launched via wr and it will be given the

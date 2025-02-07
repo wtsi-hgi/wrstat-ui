@@ -31,7 +31,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
-	"strconv"
 	"strings"
 	"time"
 
@@ -279,7 +278,7 @@ func JoinDBPaths(dbPaths []string, dgutaDBName, basedirDBName string) ([]string,
 
 type nameVersion struct {
 	name    string
-	version int64
+	version string
 }
 
 func findDBDirs(basepath string, required ...string) ([]string, []string, error) {
@@ -311,7 +310,7 @@ func findDBDirs(basepath string, required ...string) ([]string, []string, error)
 	return dirs, toDelete, nil
 }
 
-var validDBDir = regexp.MustCompile(`^\d+_.`)
+var validDBDir = regexp.MustCompile(`^[^_]+_.`)
 
 func isValidDBDir(entry fs.DirEntry, basepath string, required ...string) bool {
 	name := entry.Name()
@@ -339,10 +338,7 @@ func addEntryToMap(entry fs.DirEntry, latest map[string]nameVersion, toDelete []
 	parts := strings.SplitN(entry.Name(), "_", 2) //nolint:mnd
 	key := parts[1]
 
-	version, err := strconv.ParseInt(parts[0], 10, 64)
-	if err != nil {
-		return toDelete
-	}
+	version := parts[0]
 
 	if previous, ok := latest[key]; previous.version > version { //nolint:nestif
 		toDelete = append(toDelete, key)
