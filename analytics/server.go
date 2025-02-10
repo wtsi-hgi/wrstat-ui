@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"math"
 	"net/http"
+	"slices"
 	"unsafe"
 
 	_ "github.com/mattn/go-sqlite3" //
@@ -21,9 +21,7 @@ func StartServer(addr, dbPath string) error {
 	}
 
 	http.Handle("/", index)
-	http.Handle("/summary", handle[summaryInput](db.summary))
-	http.Handle("/user", handle[userInput](db.user))
-	http.Handle("/session", handle[sessionInput](db.session))
+	http.Handle("/analytics", handle[summaryInput](db.summary))
 
 	return http.ListenAndServe(addr, nil) //nolint:gosec
 }
@@ -75,11 +73,8 @@ func handleError(w http.ResponseWriter, err error) {
 }
 
 type DB struct {
-	db *sql.DB
-
+	db          *sql.DB
 	summaryStmt *sql.Stmt
-	userStmt    *sql.Stmt
-	sessionStmt *sql.Stmt
 }
 
 func newDB(dbPath string) (*DB, error) {
@@ -90,14 +85,8 @@ func newDB(dbPath string) (*DB, error) {
 
 	rdb := &DB{db: db}
 
-	for stmt, sql := range map[**sql.Stmt]string{
-		&rdb.summaryStmt: "SELECT [user], [session], [state], [time] FROM [events] WHERE [time] BETWEEN ? AND ?;",
-		&rdb.userStmt:    "SELECT [session], [state], [time] FROM [events] WHERE [user] = ? AND [time] BETWEEN ? AND ?;",
-		&rdb.sessionStmt: "SELECT [state], [time] FROM [events] WHERE [user] = ? AND [session] = ?;",
-	} {
-		if *stmt, err = db.Prepare(sql); err != nil {
-			return nil, err
-		}
+	if rdb.summaryStmt, err = db.Prepare("SELECT [user], [session], [state], [time] FROM [events] WHERE [time] BETWEEN ? AND ?;"); err != nil {
+		return nil, err
 	}
 
 	return rdb, nil
@@ -108,86 +97,27 @@ type summaryInput struct {
 	EndTime   uint64 `json:"endTime"`
 }
 
-type Session struct {
-	Start, End uint64
-	Events     uint64
-	DiskTree   uint64
-	GroupBase  uint64
-	UserBase   uint64
-	Age        uint64
-	Owners     uint64
-	Groups     uint64
-	Users      uint64
+type Event struct {
+	Timestamp uint64
+	State     json.RawMessage
 }
 
-type Summary struct {
-	Users    map[string]uint     `json:"users"`
-	Sessions map[string]*Session `json:"sessions"`
-}
+type AnalyticsResponse map[string]map[string][]Event
 
-func newSummary() *Summary {
-	return &Summary{
-		Users:    make(map[string]uint),
-		Sessions: make(map[string]*Session),
-	}
-}
-
-func (s *Summary) addToSummary(user, session, state string, timestamp uint64) {
-	s.Users[user]++
-
-	sess, ok := s.Sessions[session]
+func (a AnalyticsResponse) add(username, session, state string, timestamp uint64) {
+	u, ok := a[username]
 	if !ok {
-		sess = &Session{
-			Start: math.MaxUint64,
-		}
+		u = make(map[string][]Event)
 
-		s.Sessions[session] = sess
+		a[username] = u
 	}
 
-	if sess.Start > timestamp {
-		sess.Start = timestamp
-	}
-
-	if sess.End < timestamp {
-		sess.End = timestamp
-	}
-
-	processState(sess, state)
-}
-
-func processState(sess *Session, state string) {
-	sess.Events++
-
-	stateMap := make(map[string]json.RawMessage)
-
-	if json.Unmarshal(unsafe.Slice(unsafe.StringData(state), len(state)), &stateMap) != nil {
-		return
-	}
-
-	if countState(stateMap, "just", "", nil, &sess.DiskTree) {
-		countState(stateMap, "byUser", "", &sess.GroupBase, &sess.UserBase)
-	}
-
-	countState(stateMap, "age", "", nil, &sess.Age)
-	countState(stateMap, "owners", "", nil, &sess.Owners)
-	countState(stateMap, "groups", "", nil, &sess.Groups)
-	countState(stateMap, "users", "", nil, &sess.Users)
-}
-
-func countState(stateMap map[string]json.RawMessage, key, value string, t, f *uint64) bool { //nolint:unparam
-	if string(stateMap[key]) == value {
-		if t != nil {
-			*t++
-		}
-
-		return true
-	}
-
-	if f != nil {
-		*f++
-	}
-
-	return false
+	s := u[session]
+	ne := Event{Timestamp: timestamp, State: json.RawMessage(unsafe.Slice(unsafe.StringData(state), len(state)))}
+	pos, _ := slices.BinarySearchFunc(s, ne, func(a, b Event) int {
+		return int(b.Timestamp) - int(a.Timestamp)
+	})
+	u[session] = slices.Insert(s, pos, ne)
 }
 
 func (d *DB) summary(i summaryInput) (any, error) {
@@ -200,7 +130,7 @@ func (d *DB) summary(i summaryInput) (any, error) {
 		return nil, err
 	}
 
-	s := newSummary()
+	r := make(AnalyticsResponse)
 
 	for rows.Next() {
 		var (
@@ -214,76 +144,10 @@ func (d *DB) summary(i summaryInput) (any, error) {
 			return nil, err
 		}
 
-		s.addToSummary(username, session, state, timestamp)
+		r.add(username, session, state, timestamp)
 	}
 
-	return s, nil
-}
-
-type userInput struct {
-	Username  string `json:"username"`
-	StartTime uint64 `json:"startTime"`
-	EndTime   uint64 `json:"endTime"`
-}
-
-func (d *DB) user(i userInput) (any, error) {
-	if i.StartTime > i.EndTime {
-		return nil, ErrInvalidRange
-	}
-
-	rows, err := d.userStmt.Query(i.Username, i.StartTime, i.EndTime)
-	if err != nil {
-		return nil, err
-	}
-
-	s := newSummary()
-
-	for rows.Next() {
-		var (
-			session   string
-			state     string
-			timestamp uint64
-		)
-
-		if err := rows.Scan(&session, &state, &timestamp); err != nil {
-			return nil, err
-		}
-
-		s.addToSummary(i.Username, session, state, timestamp)
-	}
-
-	return s, nil
-}
-
-type sessionInput struct {
-	Username string `json:"username"`
-	Session  string `json:"string"`
-}
-
-type Event struct {
-	Data      json.RawMessage `json:"data"`
-	Timestamp uint64          `json:"timestamp"`
-}
-
-func (d *DB) session(i sessionInput) (any, error) {
-	rows, err := d.sessionStmt.Query(i.Username, i.Session)
-	if err != nil {
-		return nil, err
-	}
-
-	var events []Event //nolint:prealloc
-
-	for rows.Next() {
-		var e Event
-
-		if err := rows.Scan(&e.Data, &e.Timestamp); err != nil {
-			return nil, err
-		}
-
-		events = append(events, e)
-	}
-
-	return events, nil
+	return r, nil
 }
 
 var ErrInvalidRange = HTTPError{http.StatusBadRequest, "invalid date range"}
