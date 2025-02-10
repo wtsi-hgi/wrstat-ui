@@ -40,7 +40,7 @@ const amendNode = (node: Element, propertiesOrChildren: PropertiesOrChildren, ch
       {br, button, div, label, input} = new Proxy({}, {"get": (_, element: keyof HTMLElementTagNameMap) => (props: PropertiesOrChildren = {}, children?: Children) => amendNode(document.createElementNS("http://www.w3.org/1999/xhtml", element), props, children)}) as {[K in keyof HTMLElementTagNameMap]: (props?: PropertiesOrChildren, children?: Children) => HTMLElementTagNameMap[K]},
       rpc = (() => {
 	const base = "/",
-	      getData = <T>(url: string, body: string) => fetch(base + url, {body}).then(j => j.json() as T);
+	      getData = <T>(url: string, body: string) => fetch(base + url, {"method": "POST", body}).then(j => j.json() as T);
 	
 	return {
 		"getSummary": (startTime: number, endTime: number) => getData<TopSummary>("summary", JSON.stringify({startTime, endTime})),
