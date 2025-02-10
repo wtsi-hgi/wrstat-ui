@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
+	"unsafe"
 
 	_ "github.com/mattn/go-sqlite3" //
 )
@@ -92,7 +93,7 @@ func newDB(dbPath string) (*DB, error) {
 	for stmt, sql := range map[**sql.Stmt]string{
 		&rdb.summaryStmt: "SELECT [user], [session], [state], [time] FROM [events] WHERE [time] BETWEEN ? AND ?;",
 		&rdb.userStmt:    "SELECT [session], [state], [time] FROM [events] WHERE [user] = ? AND [time] BETWEEN ? AND ?;",
-		&rdb.sessionStmt: "SELECT [state], [time] FROM [events] WHERE [username] = ? AND [session] = ?;",
+		&rdb.sessionStmt: "SELECT [state], [time] FROM [events] WHERE [user] = ? AND [session] = ?;",
 	} {
 		if *stmt, err = db.Prepare(sql); err != nil {
 			return nil, err
@@ -131,7 +132,7 @@ func newSummary() *Summary {
 	}
 }
 
-func (s *Summary) addToSummary(user, session string, state json.RawMessage, timestamp uint64) {
+func (s *Summary) addToSummary(user, session, state string, timestamp uint64) {
 	s.Users[user]++
 
 	sess, ok := s.Sessions[session]
@@ -154,12 +155,12 @@ func (s *Summary) addToSummary(user, session string, state json.RawMessage, time
 	processState(sess, state)
 }
 
-func processState(sess *Session, state json.RawMessage) {
+func processState(sess *Session, state string) {
 	sess.Events++
 
 	stateMap := make(map[string]json.RawMessage)
 
-	if json.Unmarshal(state, &stateMap) != nil {
+	if json.Unmarshal(unsafe.Slice(unsafe.StringData(state), len(state)), &stateMap) != nil {
 		return
 	}
 
@@ -205,7 +206,7 @@ func (d *DB) summary(i summaryInput) (any, error) {
 		var (
 			username  string
 			session   string
-			state     json.RawMessage
+			state     string
 			timestamp uint64
 		)
 
@@ -240,7 +241,7 @@ func (d *DB) user(i userInput) (any, error) {
 	for rows.Next() {
 		var (
 			session   string
-			state     json.RawMessage
+			state     string
 			timestamp uint64
 		)
 
