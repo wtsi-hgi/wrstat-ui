@@ -9,7 +9,7 @@ var analyticsCmd = &cobra.Command{
 	Use:   "analytics",
 	Short: "Start analytics server",
 	Long:  `Start analytics server.`,
-	Run: func(cmd *cobra.Command, args []string) {
+	Run: func(_ *cobra.Command, args []string) {
 		if len(args) != 1 {
 			die("sqlite database location required")
 		}
