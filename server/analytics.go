@@ -91,7 +91,7 @@ func (s *Server) handleAnalytics(c *gin.Context) (int, error) {
 		createStateData(state),
 		time.Now().Unix(),
 	); err != nil {
-		return http.StatusInternalServerError, nil //nolint:nilerr
+		return http.StatusInternalServerError, nil
 	}
 
 	return http.StatusNoContent, nil

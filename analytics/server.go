@@ -25,7 +25,7 @@ func StartServer(addr, dbPath string) error {
 	http.Handle("/user", handle[userInput](db.user))
 	http.Handle("/session", handle[sessionInput](db.session))
 
-	return http.ListenAndServe(addr, nil)
+	return http.ListenAndServe(addr, nil) //nolint:gosec
 }
 
 type HTTPError struct {
@@ -42,7 +42,7 @@ type handle[T any] func(T) (any, error)
 func (h handle[T]) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var val T
 
-	if err := readBody(r.Body, &val); err != nil {
+	if err := readBody(r.Body, &val); err != nil { //nolint:nestif
 		handleError(w, err)
 	} else if data, err := h(val); err != nil {
 		handleError(w, err)
@@ -174,7 +174,7 @@ func processState(sess *Session, state string) {
 	countState(stateMap, "users", "", nil, &sess.Users)
 }
 
-func countState(stateMap map[string]json.RawMessage, key, value string, t, f *uint64) bool {
+func countState(stateMap map[string]json.RawMessage, key, value string, t, f *uint64) bool { //nolint:unparam
 	if string(stateMap[key]) == value {
 		if t != nil {
 			*t++
@@ -271,7 +271,7 @@ func (d *DB) session(i sessionInput) (any, error) {
 		return nil, err
 	}
 
-	var events []Event
+	var events []Event //nolint:prealloc
 
 	for rows.Next() {
 		var e Event
