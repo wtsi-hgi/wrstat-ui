@@ -77,14 +77,17 @@ func (s *Server) handleAnalytics(c *gin.Context) (int, error) {
 		return code, err
 	}
 
-	sessionID, code, err := dataFromBody(c)
-	if sessionID == "" {
+	sessionID, l, code, err := dataFromBody(c)
+
+	defer sessionPool.Put(sessionID)
+
+	if err != nil {
 		return code, err
 	}
 
 	if _, err := s.analyticsStmt.Exec(
 		username,
-		sessionID,
+		unsafe.String(&sessionID[0], l),
 		createStateData(state),
 		time.Now().Unix(),
 	); err != nil {
@@ -121,16 +124,15 @@ func (s *Server) dataFromHeaders(c *gin.Context) (string, url.Values, int, error
 	return username.Username, u.Query(), 0, nil
 }
 
-func dataFromBody(c *gin.Context) (string, int, error) {
+func dataFromBody(c *gin.Context) (*[14]byte, int, int, error) {
 	data := sessionPool.Get().(*[14]byte) //nolint:forcetypeassert,errcheck
-	defer sessionPool.Put(data)
 
 	n, err := io.ReadFull(c.Request.Body, data[:])
 	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) || n == 0 {
-		return "", http.StatusBadRequest, err
+		return data, 0, http.StatusBadRequest, err
 	}
 
-	return unsafe.String(&data[0], n), 0, nil
+	return data, n, 0, nil
 }
 
 func createStateData(state url.Values) string {
