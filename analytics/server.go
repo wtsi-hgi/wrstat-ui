@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 
 	_ "github.com/mattn/go-sqlite3" //
@@ -106,21 +107,86 @@ type summaryInput struct {
 	EndTime   uint64 `json:"endTime"`
 }
 
+type Session struct {
+	Start, End uint64
+	Events     uint64
+	DiskTree   uint64
+	GroupBase  uint64
+	UserBase   uint64
+	Age        uint64
+	Owners     uint64
+	Groups     uint64
+	Users      uint64
+}
+
 type Summary struct {
-	Users    map[string]uint `json:"users"`
-	Sessions map[string]uint `json:"sessions"`
+	Users    map[string]uint     `json:"users"`
+	Sessions map[string]*Session `json:"sessions"`
 }
 
 func newSummary() *Summary {
 	return &Summary{
 		Users:    make(map[string]uint),
-		Sessions: make(map[string]uint),
+		Sessions: make(map[string]*Session),
 	}
 }
 
 func (s *Summary) addToSummary(user, session string, state json.RawMessage, timestamp uint64) {
-	s.Users[user] = s.Users[user] + 1
-	s.Sessions[session] = s.Sessions[session] + 1
+	s.Users[user]++
+
+	sess, ok := s.Sessions[session]
+	if !ok {
+		sess = &Session{
+			Start: math.MaxUint64,
+		}
+
+		s.Sessions[session] = sess
+	}
+
+	if sess.Start > timestamp {
+		sess.Start = timestamp
+	}
+
+	if sess.End < timestamp {
+		sess.End = timestamp
+	}
+
+	processState(sess, state)
+}
+
+func processState(sess *Session, state json.RawMessage) {
+	sess.Events++
+
+	stateMap := make(map[string]json.RawMessage)
+
+	if json.Unmarshal(state, &stateMap) != nil {
+		return
+	}
+
+	if countState(stateMap, "just", "", nil, &sess.DiskTree) {
+		countState(stateMap, "byUser", "", &sess.GroupBase, &sess.UserBase)
+	}
+
+	countState(stateMap, "age", "", nil, &sess.Age)
+	countState(stateMap, "owners", "", nil, &sess.Owners)
+	countState(stateMap, "groups", "", nil, &sess.Groups)
+	countState(stateMap, "users", "", nil, &sess.Users)
+}
+
+func countState(stateMap map[string]json.RawMessage, key, value string, t, f *uint64) bool {
+	if string(stateMap[key]) == value {
+		if t != nil {
+			*t++
+		}
+
+		return true
+	}
+
+	if f != nil {
+		*f++
+	}
+
+	return false
 }
 
 func (d *DB) summary(i summaryInput) (any, error) {
