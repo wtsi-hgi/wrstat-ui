@@ -83,7 +83,30 @@ func TestWatch(t *testing.T) {
 			So(wr, ShouldEqual, fmt.Sprintf(`{"cmd":"\"%[1]s\" summarise -d \"%[2]s/.12345_abc\" `+
 				`-q \"/path/to/quota\" -c \"/path/to/basedirs.config\" \"%[3]s/stats.gz\" && `+
 				`touch -r \"%[3]s\" \"%[2]s/.12345_abc\" && mv \"%[2]s/.12345_abc\" \"%[2]s/12345_abc\"",`+
-				`"cpus":2,"memory":"8000","req_grp":"wrstat-ui-summarise","rep_grp":"wrstat-ui-summarise-`+
+				`"cpus":2,"memory":"8G","req_grp":"wrstat-ui-summarise","rep_grp":"wrstat-ui-summarise-`+
+				time.Now().Format("20060102150405")+`"}`, os.Args[0], outputDir, testInputA))
+		})
+
+		Convey("Watch will provide absolute paths to summarise given relative paths", func() {
+			parentDir := filepath.Dir(inputDir)
+
+			err = os.Chdir(parentDir)
+			So(err, ShouldBeNil)
+
+			relInput := filepath.Base(inputDir)
+			relOutput := filepath.Base(outputDir)
+
+			err := watch([]string{relInput}, relOutput, "/path/to/quota", "/path/to/basedirs.config")
+			So(err, ShouldBeNil)
+
+			pw.Close()
+
+			<-wrWrittenCh
+
+			So(wr, ShouldEqual, fmt.Sprintf(`{"cmd":"\"%[1]s\" summarise -d \"%[2]s/.12345_abc\" `+
+				`-q \"/path/to/quota\" -c \"/path/to/basedirs.config\" \"%[3]s/stats.gz\" && `+
+				`touch -r \"%[3]s\" \"%[2]s/.12345_abc\" && mv \"%[2]s/.12345_abc\" \"%[2]s/12345_abc\"",`+
+				`"cpus":2,"memory":"8G","req_grp":"wrstat-ui-summarise","rep_grp":"wrstat-ui-summarise-`+
 				time.Now().Format("20060102150405")+`"}`, os.Args[0], outputDir, testInputA))
 		})
 
@@ -129,7 +152,7 @@ func TestWatch(t *testing.T) {
 				`-s \"%[2]s/00001_abc/basedirs.db\" `+
 				`-q \"/path/to/quota\" -c \"/path/to/basedirs.config\" \"%[3]s/stats.gz\" && `+
 				`touch -r \"%[3]s\" \"%[2]s/.12345_abc\" && mv \"%[2]s/.12345_abc\" \"%[2]s/12345_abc\"",`+
-				`"cpus":2,"memory":"8000","req_grp":"wrstat-ui-summarise","rep_grp":"wrstat-ui-summarise-`+
+				`"cpus":2,"memory":"8G","req_grp":"wrstat-ui-summarise","rep_grp":"wrstat-ui-summarise-`+
 				time.Now().Format("20060102150405")+`"}`, os.Args[0], outputDir, testInputA))
 		})
 
@@ -149,12 +172,12 @@ func TestWatch(t *testing.T) {
 			So(wr, ShouldEqual, fmt.Sprintf(`{"cmd":"\"%[1]s\" summarise -d \"%[2]s/.12345_abc\" `+
 				`-q \"/path/to/quota\" -c \"/path/to/basedirs.config\" \"%[3]s/stats.gz\" && `+
 				`touch -r \"%[3]s\" \"%[2]s/.12345_abc\" && mv \"%[2]s/.12345_abc\" \"%[2]s/12345_abc\"",`+
-				`"cpus":2,"memory":"8000","req_grp":"wrstat-ui-summarise","rep_grp":"wrstat-ui-summarise-`+
+				`"cpus":2,"memory":"8G","req_grp":"wrstat-ui-summarise","rep_grp":"wrstat-ui-summarise-`+
 				time.Now().Format("20060102150405")+`"}`+
 				`{"cmd":"\"%[1]s\" summarise -d \"%[2]s/.98765_c\" `+
 				`-q \"/path/to/quota\" -c \"/path/to/basedirs.config\" \"%[4]s/stats.gz\" && `+
 				`touch -r \"%[4]s\" \"%[2]s/.98765_c\" && mv \"%[2]s/.98765_c\" \"%[2]s/98765_c\"",`+
-				`"cpus":2,"memory":"8000","req_grp":"wrstat-ui-summarise","rep_grp":"wrstat-ui-summarise-`+
+				`"cpus":2,"memory":"8G","req_grp":"wrstat-ui-summarise","rep_grp":"wrstat-ui-summarise-`+
 				time.Now().Format("20060102150405")+`"}`,
 				os.Args[0], outputDir, testInputA, testInputC))
 		})

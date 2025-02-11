@@ -41,6 +41,8 @@ const (
 	inputStatsFile  = "stats.gz"
 	dirPerms        = 0750
 	basedirBasename = "basedirs.db"
+	summariseCPU    = "2"
+	summariseMem    = "8G"
 )
 
 var (
@@ -67,6 +69,19 @@ func Watch(inputDirs []string, outputDir, quotaPath, basedirsConfig string) erro
 }
 
 func watch(inputDirs []string, outputDir, quotaPath, basedirsConfig string) error {
+	var err error
+
+	for n := range inputDirs {
+		inputDirs[n], err = filepath.Abs(inputDirs[n])
+		if err != nil {
+			return err
+		}
+	}
+
+	if outputDir, err = filepath.Abs(outputDir); err != nil {
+		return err
+	}
+
 	for _, inputDir := range inputDirs {
 		inputPaths, err := server.FindDBDirs(inputDir, "stats.gz")
 		if err != nil {
@@ -134,7 +149,8 @@ func getWRJSON(dotOutputBase, previousBasedirsDB, quotaPath, basedirsConfig, inp
 		filepath.Join(inputDir, base, inputStatsFile),
 		filepath.Join(inputDir, base),
 		filepath.Join(outputDir, base),
-	)) + `,"cpus":2,"memory":"8000","req_grp":"wrstat-ui-summarise","rep_grp":"wrstat-ui-summarise-` +
+	)) + `,"cpus":` + summariseCPU + `,"memory":"` + summariseMem +
+		`","req_grp":"wrstat-ui-summarise","rep_grp":"wrstat-ui-summarise-` +
 		time.Now().Format("20060102150405") + `"}`
 }
 
