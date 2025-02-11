@@ -47,9 +47,14 @@ class Summary {
 
 	addEvent(event: UserEvent) {
 		this.#events++;
-		this.#groups = +!!event.State.groups;
-		this.#users = +!!event.State.users;
-		this.#diskTree = +!!event.State["just"];
+
+		if (event.State.byUser) {
+			this.#users++;
+		} else if (event.State["just"]) {
+			this.#diskTree++;
+		} else {
+			this.#groups++;
+		}
 
 		if (event.Timestamp < this.#start) {
 			this.#start = event.Timestamp;
@@ -62,9 +67,9 @@ class Summary {
 
 	addTo(s: Summary) {
 		s.#events = this.#events;
-		s.#groups += this.#groups;
-		s.#users+= this.#users;
-		s.#diskTree += this.#diskTree;
+		s.#groups += this.#groups?1:0;
+		s.#users+= this.#users?1:0;
+		s.#diskTree += this.#diskTree?1:0;
 
 		if (this.#start < s.#start) {
 			s.#start = this.#start;
@@ -75,9 +80,9 @@ class Summary {
 		}
 	}
 
-	summaryHTML() {
+	html(): Children {
 		return [
-			span(`${new Date(this.#start * 1000)} - ${new Date(this.#end * 1000)}`),
+			span(`${formatTimestamp(this.#start)} - ${formatTimestamp(this.#end)}`),
 			table([
 				thead(tr([
 					th("Groups"),
@@ -109,8 +114,8 @@ class SessionSummary extends Summary {
 
 	html() {
 		return [
-			this.summaryHTML(),
-			ul(this.#events.map(event => li(a({"href": "https://wrstat.internal.sanger.ac.uk/?"+Object.entries(event.State).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join("&")}, new Date(event.Timestamp * 1000) + ""))))
+			super.html(),
+			ul(this.#events.map(event => li(a({"href": "https://wrstat.internal.sanger.ac.uk/?"+Object.entries(event.State).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join("&")}, formatTimestamp(event.Timestamp)))))
 		];
 	}
 }
@@ -137,9 +142,9 @@ class UserSummary extends Summary {
 
 	html() {
 		return [
-			this.summaryHTML(),
+			super.html(),
 			ul(this.#sessions.map(session => li(details([
-				summary(new Date(session.start*1000)+""),
+				summary(formatTimestamp(session.start)),
 				session.html()
 			]))))
 		];
@@ -166,8 +171,12 @@ class TopSummary extends Summary {
 	}
 
 	html() {
+		if (this.#users.length === 0) {
+			return div("-No Data-");
+		}
+
 		return [
-			this.summaryHTML(),
+			super.html(),
 			ul(this.#users.map(user => li(details([
 				summary(user.username),
 				user.html()
@@ -186,7 +195,7 @@ const amendNode = (node: Element, propertiesOrChildren: PropertiesOrChildren, ch
 	return node;
       },
       clearNode = (node: Element, propertiesOrChildren: PropertiesOrChildren = {}, children?: Children) => amendNode((node.replaceChildren(), node), propertiesOrChildren, children),
-      {a, br, button, details, div, label, li, input, span, summary, table, tbody, td, th, thead, tr, ul} = new Proxy({}, {"get": (_, element: keyof HTMLElementTagNameMap) => (props: PropertiesOrChildren = {}, children?: Children) => amendNode(document.createElementNS("http://www.w3.org/1999/xhtml", element), props, children)}) as {[K in keyof HTMLElementTagNameMap]: (props?: PropertiesOrChildren, children?: Children) => HTMLElementTagNameMap[K]},
+      {a, br, button, details, div, hr, label, li, input, span, summary, table, tbody, td, th, thead, tr, ul} = new Proxy({}, {"get": (_, element: keyof HTMLElementTagNameMap) => (props: PropertiesOrChildren = {}, children?: Children) => amendNode(document.createElementNS("http://www.w3.org/1999/xhtml", element), props, children)}) as {[K in keyof HTMLElementTagNameMap]: (props?: PropertiesOrChildren, children?: Children) => HTMLElementTagNameMap[K]},
       rpc = (() => {
 	const base = "/",
 	      getData = <T>(url: string, body: string) => fetch(base + url, {"method": "POST", body}).then(j => j.json() as T);
@@ -204,36 +213,33 @@ const amendNode = (node: Element, propertiesOrChildren: PropertiesOrChildren, ch
       })(),
       startTime = input({"id": "startTime", "type": "date", "value": yesterday}),
       endTime = input({"id": "endTime", "type": "date", "value": yesterday}),
-      today = endTime.valueAsNumber/1000|0;
+      today = endTime.valueAsNumber/1000|0,
+      formatTimestamp = (timestamp: number) => new Date(timestamp * 1000).toISOString().replace("T", " ").replace(/\..*/, ""),
+      topLevelStats = div(),
+      setTopLevel = (data: Analytics) => clearNode(topLevelStats, new TopSummary(data).html());
 
-rpc.getAnalytics(today - 86400, today).then(data => {
-	const topLevelStats = div(),
-	      setTopLevel = (data: Analytics) => clearNode(topLevelStats, new TopSummary(data).html());
+amendNode(document.body, [
+	div([
+		label({"for": "startTime"}, "Start Time"),
+		startTime,
+		br(),
+		label({"for": "endTime"}, "End Time"),
+		endTime,
+		br(),
+		button({"click": () => {
+			const start = startTime.valueAsNumber/1000|0,
+			      end = (endTime.valueAsNumber/1000|0)+86400;
 
-	setTopLevel(data);
+			if (isNaN(start) || isNaN(end) || start >= end) {
+				alert("Invalid time range");
 
-	amendNode(document.body, [
-		div([
-			label({"for": "startTime"}, "Start Time"),
-			startTime,
-			br(),
-			label({"for": "endTime"}, "End Time"),
-			endTime,
-			br(),
-			button({"click": () => {
-				const start = startTime.valueAsNumber/1000|0,
-				      end = (endTime.valueAsNumber/1000|0)+86400;
+				return;
+			}
 
-				if (isNaN(start) || isNaN(end) || start >= end) {
-					alert("Invalid time range");
-
-					return;
-				}
-
-				rpc.getAnalytics(start, end)
-				.then(data => setTopLevel(data));
-			}}, "Go!")
-		]),
-		topLevelStats,
-	]);
-});
+			rpc.getAnalytics(start, end)
+			.then(data => setTopLevel(data));
+		}}, "Go!")
+	]),
+	hr(),
+	topLevelStats,
+]);
