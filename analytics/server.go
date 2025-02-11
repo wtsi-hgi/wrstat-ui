@@ -115,7 +115,7 @@ func (a AnalyticsResponse) add(username, session, state string, timestamp uint64
 	s := u[session]
 	ne := Event{Timestamp: timestamp, State: json.RawMessage(unsafe.Slice(unsafe.StringData(state), len(state)))}
 	pos, _ := slices.BinarySearchFunc(s, ne, func(a, b Event) int {
-		return int(b.Timestamp) - int(a.Timestamp)
+		return int(b.Timestamp) - int(a.Timestamp) //nolint:gosec
 	})
 	u[session] = slices.Insert(s, pos, ne)
 }
