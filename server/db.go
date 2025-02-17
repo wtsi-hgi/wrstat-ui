@@ -310,7 +310,7 @@ func findDBDirs(basepath string, required ...string) ([]string, []string, error)
 	return dirs, toDelete, nil
 }
 
-var validDBDir = regexp.MustCompile(`^[^_]+_.`)
+var validDBDir = regexp.MustCompile(`^[^.][^_]*_.`)
 
 func isValidDBDir(entry fs.DirEntry, basepath string, required ...string) bool {
 	name := entry.Name()
