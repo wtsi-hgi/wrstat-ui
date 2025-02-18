@@ -241,5 +241,5 @@ func init() {
 	RootCmd.AddCommand(dupescmd)
 
 	dupescmd.Flags().Int64VarP(&minSize, "minsize", "m", 0, "minimum file size to consider a possible duplicate")
-	dupescmd.Flags().StringVarP(&output, "minsize", "o", "-", "file to output possible duplicate file data")
+	dupescmd.Flags().StringVarP(&output, "output", "o", "-", "file to output possible duplicate file data")
 }
