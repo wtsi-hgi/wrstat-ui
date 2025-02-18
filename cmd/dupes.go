@@ -178,6 +178,7 @@ func processNodes(output io.Writer, nodes iter.Seq[*dedupe.Node]) error {
 			lastSize = node.Size
 			lastMountPoint = -1
 			lastInode = -1
+			matches = nil
 		}
 
 		if node.Mountpoint != lastMountPoint || node.Inode != lastInode {
