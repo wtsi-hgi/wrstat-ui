@@ -50,6 +50,7 @@ func (d *Deduper) Iter(yield func(*Node) bool) {
 
 func (d *Deduper) Operation() summary.OperationGenerator {
 	d.node = nullDirEnt
+	d.mountpoint = -1
 
 	return func() summary.Operation {
 		d.mountpoint++
@@ -105,10 +106,9 @@ func (n *Node) insert(e *Node) *Node { //nolint:gocyclo
 		return e
 	}
 
-	switch n.compare(e) {
-	case 1:
+	if n.compare(e) > 0 {
 		n.left = n.left.insert(e)
-	default:
+	} else {
 		n.right = n.right.insert(e)
 	}
 
@@ -175,9 +175,14 @@ func (n *Node) iter(yield func(*Node) bool) bool {
 		return false
 	}
 
+	right := n.right
+	n.left = nil
+	n.right = nil
+	n.depth = 0
+
 	if !yield(n) {
 		return false
 	}
 
-	return n.right.iter(yield)
+	return right.iter(yield)
 }
