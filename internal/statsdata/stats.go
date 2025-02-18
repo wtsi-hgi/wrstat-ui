@@ -161,20 +161,21 @@ type File struct {
 	Size                int64
 	ATime, MTime, CTime int64
 	UID, GID            uint32
+	Inode               uint64
 	Type                byte
 }
 
 // WriteTo writes the stats data for a file entry.
 func (f *File) WriteTo(w io.Writer) (int64, error) {
-	n, err := fmt.Fprintf(w, "%q\t%d\t%d\t%d\t%d\t%d\t%d\t%c\t1\t1\t1\n",
-		f.Path, f.Size, f.UID, f.GID, f.ATime, f.MTime, f.CTime, f.Type)
+	n, err := fmt.Fprintf(w, "%q\t%d\t%d\t%d\t%d\t%d\t%d\t%c\t%d\t1\t1\n",
+		f.Path, f.Size, f.UID, f.GID, f.ATime, f.MTime, f.CTime, f.Type, f.Inode)
 
 	return int64(n), err
 }
 
 // AddFile adds file data to a directory, creating the directory in the tree if
 // necessary.
-func AddFile(d *Directory, path string, uid, gid uint32, size, atime, mtime int64) {
+func AddFile(d *Directory, path string, uid, gid uint32, size, atime, mtime int64) *File {
 	for _, part := range strings.Split(filepath.Dir(path), "/") {
 		d = d.AddDirectory(part)
 	}
@@ -185,4 +186,6 @@ func AddFile(d *Directory, path string, uid, gid uint32, size, atime, mtime int6
 	file.Size = size
 	file.ATime = atime
 	file.MTime = mtime
+
+	return file
 }
