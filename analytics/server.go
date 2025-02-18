@@ -85,7 +85,8 @@ func newDB(dbPath string) (*DB, error) {
 
 	rdb := &DB{db: db}
 
-	if rdb.summaryStmt, err = db.Prepare("SELECT [user], [session], [state], [time] FROM [events] WHERE [time] BETWEEN ? AND ?;"); err != nil {
+	if rdb.summaryStmt, err = db.Prepare("SELECT [user], [session], [state], " +
+		"[time] FROM [events] WHERE [time] BETWEEN ? AND ?;"); err != nil {
 		return nil, err
 	}
 
