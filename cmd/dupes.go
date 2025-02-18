@@ -22,6 +22,7 @@
  * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  ******************************************************************************/
+
 package cmd
 
 import (
@@ -47,10 +48,6 @@ var (
 	minSize int64
 	output  string
 )
-
-type statsFile struct {
-	io.Reader
-}
 
 var dupescmd = &cobra.Command{
 	Use:   "dupes",
@@ -99,26 +96,28 @@ func parseFiles(args []string) ([]string, error) {
 }
 
 func findDupes(files []string, minSize int64, output string) error {
-	var sf statsFile
+	sp := stats.NewStatsParser(nil)
 
 	deduper := dedupe.Deduper{MinFileSize: minSize}
 
-	s := summary.NewSummariser(stats.NewStatsParser(&sf))
+	s := summary.NewSummariser(sp)
 	s.AddGlobalOperation(deduper.Operation())
 
-	for _, stats := range files {
-		f, err := os.Open(stats)
+	for _, statsFile := range files {
+		f, err := os.Open(statsFile)
 		if err != nil {
 			return err
 		}
 
-		sf.Reader = f
+		var r io.Reader = f
 
-		if strings.HasSuffix(stats, ".gz") {
-			if sf.Reader, err = pgzip.NewReader(f); err != nil {
+		if strings.HasSuffix(statsFile, ".gz") {
+			if r, err = pgzip.NewReader(f); err != nil {
 				return err
 			}
 		}
+
+		*sp = *stats.NewStatsParser(r)
 
 		if err = s.Summarise(); err != nil {
 			return err
