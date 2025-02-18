@@ -71,6 +71,7 @@ type StatsParser struct { //nolint:revive
 	atime      int64
 	ctime      int64
 	entryType  byte
+	inode      int64
 	error      error
 }
 
@@ -83,6 +84,7 @@ type FileInfo struct {
 	MTime     int64
 	ATime     int64
 	CTime     int64
+	Inode     int64
 	EntryType byte
 }
 
@@ -132,6 +134,7 @@ func (p *StatsParser) Scan(info *FileInfo) error {
 	info.ATime = p.atime
 	info.CTime = p.ctime
 	info.EntryType = p.entryType
+	info.Inode = p.inode
 
 	return nil
 }
@@ -237,7 +240,7 @@ func (p *StatsParser) parseLine() bool {
 
 	p.entryType = entryTypeCol[0]
 
-	return true
+	return p.parseNumberColumn(&p.inode)
 }
 
 func (p *StatsParser) parseColumns2to7() bool {
