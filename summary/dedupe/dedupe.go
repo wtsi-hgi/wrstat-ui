@@ -24,6 +24,8 @@ func (d *Deduper) Iter(yield func(*Node) bool) {
 }
 
 func (d *Deduper) Operation() summary.OperationGenerator {
+	d.node = nullDirEnt
+
 	return func() summary.Operation {
 		d.mountpoint++
 
