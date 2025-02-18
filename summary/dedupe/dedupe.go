@@ -36,6 +36,8 @@ func (d *Deduper) Operation() summary.OperationGenerator {
 func (d *Deduper) Add(info *summary.FileInfo) error {
 	if info.Size >= d.MinFileSize && !info.IsDir() {
 		d.node = d.node.insert(&Node{
+			left:       nullDirEnt,
+			right:      nullDirEnt,
 			Mountpoint: d.mountpoint,
 			Path:       info.Path,
 			Name:       string(info.Name),
