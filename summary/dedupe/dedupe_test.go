@@ -27,6 +27,7 @@ package dedupe
 
 import (
 	"slices"
+	"strings"
 	"testing"
 
 	. "github.com/smartystreets/goconvey/convey"
@@ -56,11 +57,21 @@ func TestDedupe(t *testing.T) {
 
 		paths := internaltest.NewDirectoryPathCreator()
 
-		So(slices.Collect(d.Iter), ShouldResemble, []*Node{
-			{Path: paths.ToDirectoryPath("/opt/teams/teamA/user1/"), Name: "bFile.txt", Size: 200, Inode: 0},
-			{Path: paths.ToDirectoryPath("/opt/teams/teamA/user1/"), Name: "aFile.txt", Size: 300, Inode: 1},
-			{Path: paths.ToDirectoryPath("/opt/teams/teamA/user3/"), Name: "cFile.txt", Size: 300, Inode: 1},
-			{Path: paths.ToDirectoryPath("/opt/teams/teamA/user2/"), Name: "aFile.txt", Size: 300, Inode: 3},
+		Convey("The nodes should be sorted correctly", func() {
+			So(slices.Collect(d.Iter), ShouldResemble, []*Node{
+				{Path: paths.ToDirectoryPath("/opt/teams/teamA/user1/"), Name: "bFile.txt", Size: 200, Inode: 0},
+				{Path: paths.ToDirectoryPath("/opt/teams/teamA/user1/"), Name: "aFile.txt", Size: 300, Inode: 1},
+				{Path: paths.ToDirectoryPath("/opt/teams/teamA/user3/"), Name: "cFile.txt", Size: 300, Inode: 1},
+				{Path: paths.ToDirectoryPath("/opt/teams/teamA/user2/"), Name: "aFile.txt", Size: 300, Inode: 3},
+			})
+		})
+
+		Convey("Printing should only output size groups with more than 1 hardlink", func() {
+			var sb strings.Builder
+
+			So(d.Print(&sb), ShouldBeNil)
+			So(sb.String(), ShouldEqual, "Size: 300\n\"/opt/teams/teamA/user1/aFile.txt\"\n"+
+				"\t\"/opt/teams/teamA/user3/cFile.txt\"\n\"/opt/teams/teamA/user2/aFile.txt\"\n")
 		})
 	})
 }
