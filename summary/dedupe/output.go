@@ -7,6 +7,17 @@ import (
 
 const minNodeGroups = 2
 
+// Print writes sized matched files to the output Writer. If all of the files in
+// a group are hardlinks of each other, nothing is printed.
+//
+// Each group of matched files will print a small header in the following
+// format:
+//
+// Size: %d
+//
+// …followed by a list of the filenames of the matching files.
+//
+// Hardlinks to previously printed files are prefixed with a tab character.
 func (d *Deduper) Print(output io.Writer) error { //nolint:gocognit
 	var (
 		lastSize       int64 = -1

@@ -9,6 +9,7 @@ func init() { //nolint:gochecknoinits
 	nullNode.right = nullNode
 }
 
+// Node represents a single file in the sorted tree.
 type Node struct {
 	left, right *Node
 	depth       int32

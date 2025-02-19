@@ -29,12 +29,16 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/summary"
 )
 
+// Deduper represents a summary Operation that can be used to match files by
+// size.
 type Deduper struct {
 	mountpoint  int32
 	MinFileSize int64
 	node        *Node
 }
 
+// Iter implements the iter.Seq interface, interating over each file in the
+// sorted list.
 func (d *Deduper) Iter(yield func(*Node) bool) {
 	d.node.iter(yield)
 }
@@ -50,6 +54,7 @@ func (d *Deduper) Operation() summary.OperationGenerator {
 	}
 }
 
+// Add is used to implements summary.Operation.
 func (d *Deduper) Add(info *summary.FileInfo) error {
 	if info.Size >= d.MinFileSize && !info.IsDir() {
 		d.node = d.node.insert(&Node{
@@ -66,6 +71,7 @@ func (d *Deduper) Add(info *summary.FileInfo) error {
 	return nil
 }
 
+// Output is used to implements summary.Operation.
 func (d *Deduper) Output() error {
 	return nil
 }
