@@ -140,24 +140,32 @@ func outputDupes(output string, nodes iter.Seq[*dedupe.Node]) (err error) {
 			return err
 		}
 
-		defer func() {
-			if errr := f.Close(); err == nil {
-				err = errr
-			}
-		}()
-
 		w = f
+
+		defer deferClose(f.Close, &err)
 	}
 
-	b := bufio.NewWriter(w)
+	if strings.HasSuffix(output, ".gz") {
+		g := pgzip.NewWriter(w)
+		w = g
 
-	if err = processNodes(b, nodes); err != nil {
-		return err
+		defer deferClose(g.Close, &err)
+	} else {
+		b := bufio.NewWriter(w)
+		w = b
+
+		defer deferClose(b.Flush, &err)
 	}
 
-	err = b.Flush()
+	err = processNodes(w, nodes)
 
 	return err
+}
+
+func deferClose(fn func() error, err *error) {
+	if errr := fn(); *err == nil {
+		*err = errr
+	}
 }
 
 func processNodes(output io.Writer, nodes iter.Seq[*dedupe.Node]) error {
