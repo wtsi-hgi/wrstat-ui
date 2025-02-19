@@ -103,14 +103,14 @@ type Event struct {
 	State     json.RawMessage
 }
 
-type AnalyticsResponse map[string]map[string][]Event
+type Response map[string]map[string][]Event
 
-func (a AnalyticsResponse) add(username, session, state string, timestamp uint64) {
-	u, ok := a[username]
+func (r Response) add(username, session, state string, timestamp uint64) {
+	u, ok := r[username]
 	if !ok {
 		u = make(map[string][]Event)
 
-		a[username] = u
+		r[username] = u
 	}
 
 	s := u[session]
@@ -131,7 +131,7 @@ func (d *DB) summary(i summaryInput) (any, error) {
 		return nil, err
 	}
 
-	r := make(AnalyticsResponse)
+	r := make(Response)
 
 	for rows.Next() {
 		var (
