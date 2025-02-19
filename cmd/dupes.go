@@ -54,8 +54,23 @@ var (
 
 var dupescmd = &cobra.Command{
 	Use:   "dupes",
-	Short: "dupes",
-	Long:  ``,
+	Short: "dupes searches for potentially duplicated files in wrstat output",
+	Long: `dupes searches wrstat output for files with the same size,
+flagging them as potential duplicates. Useful as a pre-step for a more abosolute
+check of same-ness.
+
+Input files can either be specified directly, with the paths to the stats.gz
+files created by wrstat, or a directory can be specified that will be searched
+for stats.gz files in the same manner as the server and watch commands.
+
+The --minsize/-m flag can be used to set the minimum file size to consider as a
+duplicate. It is recommended to set this at at least 10MB to avoid many small
+files being discovered where the likeliness of coincidental size matches is
+high.
+
+The --output/-o flag can be used to set the output file, instead of the default
+stdout. Files ending in '.gz' will be compressed.
+`,
 	Run: func(_ *cobra.Command, args []string) {
 		files, err := parseFiles(args)
 		if err != nil {
