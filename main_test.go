@@ -44,6 +44,7 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 	internaldata "github.com/wtsi-hgi/wrstat-ui/internal/data"
+	"github.com/wtsi-hgi/wrstat-ui/internal/statsdata"
 	internaluser "github.com/wtsi-hgi/wrstat-ui/internal/user"
 )
 
@@ -430,5 +431,59 @@ func TestWatch(t *testing.T) {
 				Retries:  30,
 			},
 		})
+	})
+}
+
+func TestDupes(t *testing.T) {
+	Convey("dupes correctly matches same-sized files", t, func() {
+		tmp := t.TempDir()
+		statsA := filepath.Join(tmp, "statsA")
+		statsB := filepath.Join(tmp, "statsB.gz")
+
+		fa := statsdata.NewRoot("/mount/A/", 0)
+		statsdata.AddFile(fa, "someDir/not_displayed", 0, 0, 1, 0, 0)
+		statsdata.AddFile(fa, "someDir/not_displayed_2", 0, 0, 1, 0, 0).Inode = 1
+		statsdata.AddFile(fa, "someDir/not_displayed_3", 0, 0, 1, 0, 0).Inode = 1
+		statsdata.AddFile(fa, "someDir/big_files/1", 0, 0, 100, 0, 0)
+		statsdata.AddFile(fa, "someDir/big_files/2", 0, 0, 101, 0, 0)
+		statsdata.AddFile(fa, "someDir/big_files/3", 0, 0, 101, 0, 0).Inode = 2
+		statsdata.AddFile(fa, "someDir/big_files/4", 0, 0, 101, 0, 0).Inode = 2
+		statsdata.AddFile(fa, "someDir/big_files/5", 0, 0, 102, 0, 0)
+
+		fb := statsdata.NewRoot("/mount/B/", 0)
+		statsdata.AddFile(fb, "anotherDir/big_files/1", 0, 0, 100, 0, 0)
+		statsdata.AddFile(fb, "anotherDir/big_files/2", 0, 0, 101, 0, 0).Inode = 2
+		statsdata.AddFile(fb, "anotherDir/big_files/3", 0, 0, 103, 0, 0)
+
+		f, err := os.Create(statsA)
+		So(err, ShouldBeNil)
+
+		_, err = io.Copy(f, fa.AsReader())
+
+		So(err, ShouldBeNil)
+		So(f.Close(), ShouldBeNil)
+
+		f, err = os.Create(statsB)
+		So(err, ShouldBeNil)
+
+		gf := gzip.NewWriter(f)
+
+		_, err = io.Copy(gf, fb.AsReader())
+		So(err, ShouldBeNil)
+		So(gf.Close(), ShouldBeNil)
+		So(f.Close(), ShouldBeNil)
+
+		stdout, _, _, err := runWRStat("dupes", "-m", "10", statsA, statsB)
+		So(err, ShouldBeNil)
+		So(stdout, ShouldEqual, ``+
+			`Size: 100
+"/mount/A/someDir/big_files/1"
+"/mount/B/anotherDir/big_files/1"
+Size: 101
+"/mount/A/someDir/big_files/2"
+"/mount/A/someDir/big_files/3"
+	"/mount/A/someDir/big_files/4"
+"/mount/B/anotherDir/big_files/2"
+`)
 	})
 }
