@@ -35,7 +35,7 @@ const idLen = 4 + 1
 
 // CleanInvalidDBHistory removes irrelevant paths from the history bucket,
 // leaving only those with the specified path prefix.
-func CleanInvalidDBHistory(dbPath, prefix string) error {
+func CleanInvalidDBHistory(dbPath, prefix string) error { //nolint:gocognit
 	db, err := bbolt.Open(dbPath, dbOpenMode, &bbolt.Options{})
 	if err != nil {
 		return err
@@ -48,7 +48,9 @@ func CleanInvalidDBHistory(dbPath, prefix string) error {
 
 		for k, _ := c.First(); k != nil; k, _ = c.Next() {
 			if !bytes.HasPrefix(k[idLen:], prefixB) {
-				c.Delete()
+				if err := c.Delete(); err != nil {
+					return err
+				}
 			}
 		}
 
