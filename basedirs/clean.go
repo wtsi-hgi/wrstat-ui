@@ -76,7 +76,7 @@ func findInvalidHistory(db *bbolt.DB, bucket, prefix []byte) ([][]byte, error) {
 	if err := db.View(func(tx *bbolt.Tx) error {
 		return tx.Bucket(bucket).ForEach(func(k, _ []byte) error {
 			if !bytes.HasPrefix(k[idLen:], prefix) {
-				toRemove = append(toRemove, k)
+				toRemove = append(toRemove, append(make([]byte, 0, len(k)), k...))
 			}
 
 			return nil
