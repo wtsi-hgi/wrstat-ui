@@ -9,7 +9,7 @@ import (
 // CleanInvalidDBHistory removes irrelevant paths from the history bucket,
 // leaving only those with the specified path prefix.
 func CleanInvalidDBHistory(dbPath, prefix string) error {
-	db, err := bbolt.Open(dbPath, 0640, &bbolt.Options{})
+	db, err := bbolt.Open(dbPath, dbOpenMode, &bbolt.Options{})
 	if err != nil {
 		return err
 	}
@@ -31,7 +31,7 @@ func CleanInvalidDBHistory(dbPath, prefix string) error {
 // FindInvalidHistoryKeys returns a list of the keys from the history bucket
 // that do not contain the specified prefix.
 func FindInvalidHistoryKeys(dbPath, prefix string) ([][]byte, error) {
-	db, err := bbolt.Open(dbPath, 0640, &bbolt.Options{
+	db, err := bbolt.Open(dbPath, dbOpenMode, &bbolt.Options{
 		ReadOnly: true,
 	})
 	if err != nil {
