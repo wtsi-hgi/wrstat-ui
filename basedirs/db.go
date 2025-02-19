@@ -41,7 +41,8 @@ import (
 )
 
 const (
-	dbOpenMode             = 0600
+	dbOpenMode = 0640
+
 	bucketKeySeparator     = "-"
 	bucketKeySeparatorByte = '-'
 	gBytes                 = 1024 * 1024 * 1024

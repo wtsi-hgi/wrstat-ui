@@ -46,7 +46,7 @@ const (
 	ChildBucket        = "children"
 	dbBasenameDGUTA    = "dguta.db"
 	dbBasenameChildren = dbBasenameDGUTA + ".children"
-	DBOpenMode         = 0600
+	DBOpenMode         = 0640
 )
 
 type Error string
