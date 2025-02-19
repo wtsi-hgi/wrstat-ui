@@ -31,6 +31,8 @@ import (
 	"go.etcd.io/bbolt"
 )
 
+const idLen = 4 + 1
+
 // CleanInvalidDBHistory removes irrelevant paths from the history bucket,
 // leaving only those with the specified path prefix.
 func CleanInvalidDBHistory(dbPath, prefix string) error {
@@ -39,14 +41,19 @@ func CleanInvalidDBHistory(dbPath, prefix string) error {
 		return err
 	}
 
-	histBucket := []byte(GroupHistoricalBucket)
+	prefixB := []byte(prefix)
 
-	toRemove, err := findInvalidHistory(db, histBucket, []byte(prefix))
-	if err != nil {
-		return err
-	}
+	if err := db.Update(func(tx *bbolt.Tx) error {
+		c := tx.Bucket([]byte(GroupHistoricalBucket)).Cursor()
 
-	if err := cleanHistory(db, histBucket, toRemove); err != nil {
+		for k, _ := c.First(); k != nil; k, _ = c.Next() {
+			if !bytes.HasPrefix(k[idLen:], prefixB) {
+				c.Delete()
+			}
+		}
+
+		return nil
+	}); err != nil {
 		return err
 	}
 
@@ -65,17 +72,13 @@ func FindInvalidHistoryKeys(dbPath, prefix string) ([][]byte, error) {
 
 	defer db.Close()
 
-	return findInvalidHistory(db, []byte(GroupHistoricalBucket), []byte(prefix))
-}
-
-func findInvalidHistory(db *bbolt.DB, bucket, prefix []byte) ([][]byte, error) {
-	const idLen = 4 + 1
-
 	var toRemove [][]byte
 
+	prefixB := []byte(prefix)
+
 	if err := db.View(func(tx *bbolt.Tx) error {
-		return tx.Bucket(bucket).ForEach(func(k, _ []byte) error {
-			if !bytes.HasPrefix(k[idLen:], prefix) {
+		return tx.Bucket([]byte(GroupHistoricalBucket)).ForEach(func(k, _ []byte) error {
+			if !bytes.HasPrefix(k[idLen:], prefixB) {
 				toRemove = append(toRemove, append(make([]byte, 0, len(k)), k...))
 			}
 
@@ -86,18 +89,4 @@ func findInvalidHistory(db *bbolt.DB, bucket, prefix []byte) ([][]byte, error) {
 	}
 
 	return toRemove, nil
-}
-
-func cleanHistory(db *bbolt.DB, bucket []byte, toRemove [][]byte) error {
-	return db.Update(func(tx *bbolt.Tx) error {
-		b := tx.Bucket(bucket)
-
-		for _, k := range toRemove {
-			if err := b.Delete(k); err != nil {
-				return err
-			}
-		}
-
-		return nil
-	})
 }
