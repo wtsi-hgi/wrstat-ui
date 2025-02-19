@@ -83,6 +83,7 @@ const colours = [
 		}
 		return colours[8];
 	},
+	base64Encode = (path: string) => btoa(Array.from(new TextEncoder().encode(path), b => String.fromCodePoint(b)).join("")),
 	Breadcrumb = ({ path, part, setPath }: { path: string; part: string; setPath: (path: string) => void }) => <li>
 		<button title={`Jump To: ${part}`} onClick={e => {
 			if (e.button !== 0) {
@@ -114,7 +115,7 @@ const colours = [
 		return breadcrumbs;
 	},
 	determineTreeWidth = () => Math.max(window.innerWidth - 420, 400),
-	makeFilter = (path: string, uids: number[], gids: number[], filetypes: string[],age: number, users: Map<number, string>, groups: Map<number, string>) => ({
+	makeFilter = (path: string, uids: number[], gids: number[], filetypes: string[], age: number, users: Map<number, string>, groups: Map<number, string>) => ({
 		path,
 		"users": uids.map(uid => users.get(uid) ?? "").filter(u => u).join(",") ?? "",
 		"groups": gids.map(gid => groups.get(gid) ?? "").filter(g => g).join(",") ?? "",
@@ -167,7 +168,7 @@ const colours = [
 						}
 
 						entries.push({
-							key: btoa(child.path),
+							key: base64Encode(child.path),
 							name: child.name,
 							value: useCount ? child.count : child.size,
 							backgroundColour: colourFromAge(+(new Date(useMTime ? child.mtime : child.atime))),
@@ -265,7 +266,7 @@ const colours = [
 							<Treemap table={treeMapData} width={treeWidth} height={500} noAuth={!hasAuth} onmouseout={() => setChildDetails(dirDetails)} />
 						}
 						{!viewBoxes &&
-						// make new state and variable to replace child details in the details field, so that clicking and hovering do different things
+							// make new state and variable to replace child details in the details field, so that clicking and hovering do different things
 							<Treetable details={tableDetails} setTreePath={setTreePath} setChildDetails={setChildDetails} />
 						}
 						<TreeDetails details={childDetails} style={{ width: "100%" }} />
