@@ -59,7 +59,7 @@ files created by wrstat, or a directory can be specified that will be searched
 for stats.gz files in the same manner as the server and watch commands.
 
 The --minsize/-m flag can be used to set the minimum file size to consider as a
-duplicate. It is recommended to set this at at least 10MB to avoid many small
+duplicate. It is recommended to set this at at-least 10MB to avoid many small
 files being discovered where the likeliness of coincidental size matches is
 high.
 

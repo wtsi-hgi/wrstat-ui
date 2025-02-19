@@ -52,6 +52,8 @@ func (d *Deduper) Print(output io.Writer) error { //nolint:gocognit
 }
 
 func outputNodes(output io.Writer, nodes [][]*Node) error {
+	var buffer [4096]byte
+
 	if len(nodes) < minNodeGroups {
 		return nil
 	}
@@ -61,7 +63,7 @@ func outputNodes(output io.Writer, nodes [][]*Node) error {
 	}
 
 	for _, hardlinks := range nodes {
-		if err := outputHardlinks(output, hardlinks); err != nil {
+		if err := outputHardlinks(output, hardlinks, &buffer); err != nil {
 			return err
 		}
 	}
@@ -69,8 +71,8 @@ func outputNodes(output io.Writer, nodes [][]*Node) error {
 	return nil
 }
 
-func outputHardlinks(output io.Writer, hardlinks []*Node) error {
-	if err := outputNode(output, hardlinks[0]); err != nil {
+func outputHardlinks(output io.Writer, hardlinks []*Node, buffer *[4096]byte) error {
+	if err := outputNode(output, hardlinks[0], buffer); err != nil {
 		return err
 	}
 
@@ -79,7 +81,7 @@ func outputHardlinks(output io.Writer, hardlinks []*Node) error {
 			return err
 		}
 
-		if err := outputNode(output, node); err != nil {
+		if err := outputNode(output, node, buffer); err != nil {
 			return err
 		}
 	}
@@ -87,9 +89,7 @@ func outputHardlinks(output io.Writer, hardlinks []*Node) error {
 	return nil
 }
 
-var buffer [4096]byte
-
-func outputNode(output io.Writer, node *Node) error {
+func outputNode(output io.Writer, node *Node, buffer *[4096]byte) error {
 	_, err := fmt.Fprintf(output, "%q\n", append(node.Path.AppendTo(buffer[:0]), node.Name...))
 
 	return err

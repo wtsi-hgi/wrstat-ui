@@ -2,7 +2,7 @@ package dedupe
 
 import "github.com/wtsi-hgi/wrstat-ui/summary"
 
-var nullNode = &Node{Size: -1} //nolint:gochecknoglobals1
+var nullNode = &Node{Size: -1} //nolint:gochecknoglobals
 
 func init() { //nolint:gochecknoinits
 	nullNode.left = nullNode
