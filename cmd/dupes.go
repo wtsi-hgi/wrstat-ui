@@ -42,7 +42,10 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/summary/dedupe"
 )
 
-const inputStatsFile = "stats.gz"
+const (
+	inputStatsFile = "stats.gz"
+	minNodeGroups  = 2
+)
 
 var (
 	minSize int64
@@ -65,10 +68,10 @@ var dupescmd = &cobra.Command{
 	},
 }
 
-func parseFiles(args []string) ([]string, error) {
+func parseFiles(args []string) ([]string, error) { //nolint:gocognit
 	var files []string
 
-	if len(args) == 1 {
+	if len(args) == 1 { //nolint:nestif
 		fi, err := os.Stat(args[0])
 		if err != nil {
 			return nil, err
@@ -95,11 +98,9 @@ func parseFiles(args []string) ([]string, error) {
 	return files, nil
 }
 
-func findDupes(files []string, minSize int64, output string) error {
+func findDupes(files []string, minSize int64, output string) error { //nolint:gocognit
 	sp := stats.NewStatsParser(nil)
-
 	deduper := dedupe.Deduper{MinFileSize: minSize}
-
 	s := summary.NewSummariser(sp)
 	s.AddGlobalOperation(deduper.Operation())
 
@@ -132,12 +133,12 @@ func findDupes(files []string, minSize int64, output string) error {
 func outputDupes(output string, nodes iter.Seq[*dedupe.Node]) (err error) {
 	var w io.Writer
 
-	if output == "-" {
+	if output == "-" { //nolint:nestif
 		w = os.Stdout
 	} else {
-		f, err := os.Create(output)
-		if err != nil {
-			return err
+		f, errr := os.Create(output)
+		if errr != nil {
+			return errr
 		}
 
 		w = f
@@ -168,7 +169,7 @@ func deferClose(fn func() error, err *error) {
 	}
 }
 
-func processNodes(output io.Writer, nodes iter.Seq[*dedupe.Node]) error {
+func processNodes(output io.Writer, nodes iter.Seq[*dedupe.Node]) error { //nolint:gocognit
 	var (
 		lastSize       int64 = -1
 		lastMountPoint int32 = -1
@@ -202,7 +203,7 @@ func processNodes(output io.Writer, nodes iter.Seq[*dedupe.Node]) error {
 }
 
 func outputNodes(output io.Writer, nodes [][]*dedupe.Node) error {
-	if len(nodes) < 2 {
+	if len(nodes) < minNodeGroups {
 		return nil
 	}
 

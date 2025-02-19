@@ -40,7 +40,9 @@ func TestDedupe(t *testing.T) {
 	Convey("Dedupe should be able to sort stats.gz data by size, and inode-mountpoint", t, func() {
 		f := statsdata.NewRoot("/", 0)
 		statsdata.AddFile(f, "opt/teams/teamA/user1/aFile.txt", 0, 0, 300, 0, 0).Inode = 1
+
 		statsdata.AddFile(f, "opt/teams/teamA/user1/bFile.txt", 0, 0, 200, 0, 0)
+
 		statsdata.AddFile(f, "opt/teams/teamA/user2/aFile.txt", 0, 0, 300, 0, 0).Inode = 3
 		statsdata.AddFile(f, "opt/teams/teamA/user3/cFile.txt", 0, 0, 300, 0, 0).Inode = 1
 

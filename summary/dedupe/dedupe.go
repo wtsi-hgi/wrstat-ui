@@ -33,7 +33,7 @@ var (
 	nullDirEnt = &Node{Size: -1} //nolint:gochecknoglobals
 )
 
-func init() {
+func init() { //nolint:gochecknoinits
 	nullDirEnt.left = nullDirEnt
 	nullDirEnt.right = nullDirEnt
 }
@@ -101,7 +101,7 @@ func (n *Node) compare(e *Node) int64 {
 	return n.Size - e.Size
 }
 
-func (n *Node) insert(e *Node) *Node { //nolint:gocyclo
+func (n *Node) insert(e *Node) *Node {
 	if n == nullDirEnt {
 		return e
 	}
