@@ -27,9 +27,7 @@ package cmd
 
 import (
 	"bufio"
-	"fmt"
 	"io"
-	"iter"
 	"os"
 	"path/filepath"
 	"strings"
@@ -42,10 +40,7 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/summary/dedupe"
 )
 
-const (
-	inputStatsFile = "stats.gz"
-	minNodeGroups  = 2
-)
+const inputStatsFile = "stats.gz"
 
 var (
 	minSize int64
@@ -142,10 +137,10 @@ func findDupes(files []string, minSize int64, output string) error { //nolint:go
 		f.Close()
 	}
 
-	return outputDupes(output, deduper.Iter)
+	return outputDupes(output, &deduper)
 }
 
-func outputDupes(output string, nodes iter.Seq[*dedupe.Node]) (err error) {
+func outputDupes(output string, d *dedupe.Deduper) (err error) {
 	var w io.Writer
 
 	if output == "-" { //nolint:nestif
@@ -173,7 +168,7 @@ func outputDupes(output string, nodes iter.Seq[*dedupe.Node]) (err error) {
 		defer deferClose(b.Flush, &err)
 	}
 
-	err = processNodes(w, nodes)
+	err = d.Print(w)
 
 	return err
 }
@@ -182,83 +177,6 @@ func deferClose(fn func() error, err *error) {
 	if errr := fn(); *err == nil {
 		*err = errr
 	}
-}
-
-func processNodes(output io.Writer, nodes iter.Seq[*dedupe.Node]) error { //nolint:gocognit
-	var (
-		lastSize       int64 = -1
-		lastMountPoint int32 = -1
-		lastInode      int64 = -1
-
-		matches [][]*dedupe.Node
-	)
-
-	for node := range nodes {
-		if node.Size != lastSize {
-			if err := outputNodes(output, matches); err != nil {
-				return err
-			}
-
-			lastSize = node.Size
-			lastMountPoint = -1
-			lastInode = -1
-			matches = nil
-		}
-
-		if node.Mountpoint != lastMountPoint || node.Inode != lastInode {
-			matches = append(matches, []*dedupe.Node{node})
-			lastMountPoint = node.Mountpoint
-			lastInode = node.Inode
-		} else {
-			matches[len(matches)-1] = append(matches[len(matches)-1], node)
-		}
-	}
-
-	return outputNodes(output, matches)
-}
-
-func outputNodes(output io.Writer, nodes [][]*dedupe.Node) error {
-	if len(nodes) < minNodeGroups {
-		return nil
-	}
-
-	if _, err := fmt.Fprintf(output, "Size: %d\n", nodes[0][0].Size); err != nil {
-		return err
-	}
-
-	for _, hardlinks := range nodes {
-		if err := outputHardlinks(output, hardlinks); err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-func outputHardlinks(output io.Writer, hardlinks []*dedupe.Node) error {
-	if err := outputNode(output, hardlinks[0]); err != nil {
-		return err
-	}
-
-	for _, node := range hardlinks[1:] {
-		if _, err := io.WriteString(output, "\t"); err != nil {
-			return err
-		}
-
-		if err := outputNode(output, node); err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-var buffer [4096]byte
-
-func outputNode(output io.Writer, node *dedupe.Node) error {
-	_, err := fmt.Fprintf(output, "%q\n", append(node.Path.AppendTo(buffer[:0]), node.Name...))
-
-	return err
 }
 
 func init() {
