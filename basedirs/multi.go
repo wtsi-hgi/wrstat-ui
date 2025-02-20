@@ -146,14 +146,16 @@ func (m MultiReader) SetMountPoints(mountpoints []string) {
 func (m MultiReader) History(gid uint32, path string) ([]History, error) {
 	for _, r := range m {
 		h, err := r.History(gid, path)
-		if err != nil {
+		if err == ErrNoBaseDirHistory {
+			continue
+		} else if err != nil {
 			return nil, err
 		} else if h != nil {
 			return h, nil
 		}
 	}
 
-	return nil, nil
+	return nil, ErrNoBaseDirHistory
 }
 
 // SetCachedGroup sets the name of a specified GID.
