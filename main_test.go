@@ -371,8 +371,7 @@ func TestWatch(t *testing.T) {
 		So(os.Mkdir(runA, 0755), ShouldBeNil)
 		So(os.WriteFile(statsA, nil, 0600), ShouldBeNil)
 
-		stdout, stderr, jobs, err := runWRStat("watch", "-o", output, "-q", "/some/quota.file", "-c", "basedirs.config", tmp)
-		fmt.Println(stdout, stderr)
+		_, _, jobs, err := runWRStat("watch", "-o", output, "-q", "/some/quota.file", "-c", "basedirs.config", tmp)
 		So(err, ShouldBeNil)
 
 		So(len(jobs), ShouldBeGreaterThan, 0)

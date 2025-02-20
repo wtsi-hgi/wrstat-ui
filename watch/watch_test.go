@@ -66,7 +66,7 @@ func TestWatch(t *testing.T) {
 			for {
 				var js []*jobqueue.Job
 
-				if err := j.Decode(&js); err != nil {
+				if errr := j.Decode(&js); errr != nil {
 					return
 				}
 
@@ -79,7 +79,7 @@ func TestWatch(t *testing.T) {
 		So(createFile(filepath.Join(testInputA, inputStatsFile)), ShouldBeNil)
 
 		Convey("Watch will spot a new directory and schedule a summarise", func() {
-			err := watch([]string{inputDir}, outputDir, "/path/to/quota", "/path/to/basedirs.config", nil)
+			err = watch([]string{inputDir}, outputDir, "/path/to/quota", "/path/to/basedirs.config", nil)
 			So(err, ShouldBeNil)
 
 			pw.Close()
@@ -107,7 +107,6 @@ func TestWatch(t *testing.T) {
 					Retries:  30,
 				},
 			})
-
 		})
 
 		Convey("Watch will provide absolute paths to summarise given relative paths", func() {

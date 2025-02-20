@@ -66,12 +66,11 @@ func Watch(inputDirs []string, outputDir, quotaPath, basedirsConfig string, logg
 	}
 }
 
-func watch(inputDirs []string, outputDir, quotaPath, basedirsConfig string, logger log15.Logger) error {
+func watch(inputDirs []string, outputDir, quotaPath, basedirsConfig string, logger log15.Logger) error { //nolint:gocognit,gocyclo,lll
 	var err error
 
 	for n := range inputDirs {
-		inputDirs[n], err = filepath.Abs(inputDirs[n])
-		if err != nil {
+		if inputDirs[n], err = filepath.Abs(inputDirs[n]); err != nil {
 			return err
 		}
 	}
@@ -106,7 +105,8 @@ func entryExists(path string) bool {
 	return err == nil
 }
 
-func scheduleSummarisers(inputDir, outputDir, quotaPath, basedirsConfig string, inputPaths []string, logger log15.Logger) error {
+func scheduleSummarisers(inputDir, outputDir, quotaPath, basedirsConfig string,
+	inputPaths []string, logger log15.Logger) error {
 	s, err := client.New(client.SchedulerSettings{
 		Logger: logger,
 	})
@@ -114,14 +114,14 @@ func scheduleSummarisers(inputDir, outputDir, quotaPath, basedirsConfig string, 
 		return fmt.Errorf("failed to create wr client: %w", err)
 	}
 
-	var jobs []*jobqueue.Job
+	jobs := make([]*jobqueue.Job, 0, len(inputPaths))
 
 	for _, p := range inputPaths {
 		base := filepath.Base(p)
 
-		job, err := createSummariseJob(inputDir, outputDir, base, quotaPath, basedirsConfig, s)
-		if err != nil {
-			return fmt.Errorf("error scheduling summarise (%s): %w", base, err)
+		job, errr := createSummariseJob(inputDir, outputDir, base, quotaPath, basedirsConfig, s)
+		if errr != nil {
+			return fmt.Errorf("error scheduling summarise (%s): %w", base, errr)
 		}
 
 		jobs = append(jobs, job)
@@ -156,7 +156,8 @@ func createSummariseJob(inputDir, outputDir, base, quotaPath, basedirsConfig str
 	reqs.RAM = summariseMem
 
 	return s.NewJob(
-		getJobCommand(dotOutputBase, previousBasedirsDB, quotaPath, basedirsConfig, inputDir, base, outputDir),
+		getJobCommand(dotOutputBase, previousBasedirsDB, quotaPath, basedirsConfig,
+			inputDir, base, outputDir),
 		"wrstat-ui-summarise-"+time.Now().Format("20060102150405"),
 		"wrstat-ui-summarise",
 		"",
@@ -165,7 +166,8 @@ func createSummariseJob(inputDir, outputDir, base, quotaPath, basedirsConfig str
 	), nil
 }
 
-func getJobCommand(dotOutputBase, previousBasedirsDB, quotaPath, basedirsConfig, inputDir, base, outputDir string) string {
+func getJobCommand(dotOutputBase, previousBasedirsDB, quotaPath, basedirsConfig,
+	inputDir, base, outputDir string) string {
 	cmdFormat := "%[1]q summarise -d %[2]q"
 
 	if previousBasedirsDB != "" {
