@@ -26,6 +26,8 @@
 package basedirs
 
 import (
+	"errors"
+
 	"github.com/hashicorp/go-multierror"
 	"github.com/ugorji/go/codec"
 	"github.com/wtsi-hgi/wrstat-ui/db"
@@ -146,14 +148,17 @@ func (m MultiReader) SetMountPoints(mountpoints []string) {
 func (m MultiReader) History(gid uint32, path string) ([]History, error) {
 	for _, r := range m {
 		h, err := r.History(gid, path)
-		if err != nil {
+
+		switch {
+		case errors.Is(err, ErrNoBaseDirHistory):
+		case err != nil:
 			return nil, err
-		} else if h != nil {
+		case h != nil:
 			return h, nil
 		}
 	}
 
-	return nil, nil
+	return nil, ErrNoBaseDirHistory
 }
 
 // SetCachedGroup sets the name of a specified GID.
