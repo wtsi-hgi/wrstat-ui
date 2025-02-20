@@ -442,17 +442,23 @@ func TestDupes(t *testing.T) {
 
 		fa := statsdata.NewRoot("/mount/A/", 0)
 		statsdata.AddFile(fa, "someDir/not_displayed", 0, 0, 1, 0, 0)
+
 		statsdata.AddFile(fa, "someDir/not_displayed_2", 0, 0, 1, 0, 0).Inode = 1
 		statsdata.AddFile(fa, "someDir/not_displayed_3", 0, 0, 1, 0, 0).Inode = 1
+
 		statsdata.AddFile(fa, "someDir/big_files/1", 0, 0, 100, 0, 0)
 		statsdata.AddFile(fa, "someDir/big_files/2", 0, 0, 101, 0, 0)
+
 		statsdata.AddFile(fa, "someDir/big_files/3", 0, 0, 101, 0, 0).Inode = 2
 		statsdata.AddFile(fa, "someDir/big_files/4", 0, 0, 101, 0, 0).Inode = 2
+
 		statsdata.AddFile(fa, "someDir/big_files/5", 0, 0, 102, 0, 0)
 
 		fb := statsdata.NewRoot("/mount/B/", 0)
 		statsdata.AddFile(fb, "anotherDir/big_files/1", 0, 0, 100, 0, 0)
+
 		statsdata.AddFile(fb, "anotherDir/big_files/2", 0, 0, 101, 0, 0).Inode = 2
+
 		statsdata.AddFile(fb, "anotherDir/big_files/3", 0, 0, 103, 0, 0)
 
 		f, err := os.Create(statsA)

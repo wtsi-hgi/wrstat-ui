@@ -40,12 +40,13 @@ import (
 func TestDedupe(t *testing.T) {
 	Convey("Dedupe should be able to sort stats.gz data by size, and inode-mountpoint", t, func() {
 		f := statsdata.NewRoot("/", 0)
-		statsdata.AddFile(f, "opt/teams/teamA/user1/aFile.txt", 0, 0, 300, 0, 0).Inode = 1
-
 		statsdata.AddFile(f, "opt/teams/teamA/user1/bFile.txt", 0, 0, 200, 0, 0)
+		statsdata.AddFile(f, "opt/teams/teamB/user2/aFile.txt", 0, 0, 400, 0, 0)
 
+		statsdata.AddFile(f, "opt/teams/teamA/user1/aFile.txt", 0, 0, 300, 0, 0).Inode = 1
 		statsdata.AddFile(f, "opt/teams/teamA/user2/aFile.txt", 0, 0, 300, 0, 0).Inode = 3
 		statsdata.AddFile(f, "opt/teams/teamA/user3/cFile.txt", 0, 0, 300, 0, 0).Inode = 1
+		statsdata.AddFile(f, "opt/teams/teamB/user3/cFile.txt", 0, 0, 400, 0, 0).Inode = 2
 
 		s := summary.NewSummariser(stats.NewStatsParser(f.AsReader()))
 
@@ -63,6 +64,8 @@ func TestDedupe(t *testing.T) {
 				{Path: paths.ToDirectoryPath("/opt/teams/teamA/user1/"), Name: "aFile.txt", Size: 300, Inode: 1},
 				{Path: paths.ToDirectoryPath("/opt/teams/teamA/user3/"), Name: "cFile.txt", Size: 300, Inode: 1},
 				{Path: paths.ToDirectoryPath("/opt/teams/teamA/user2/"), Name: "aFile.txt", Size: 300, Inode: 3},
+				{Path: paths.ToDirectoryPath("/opt/teams/teamB/user2/"), Name: "aFile.txt", Size: 400, Inode: 0},
+				{Path: paths.ToDirectoryPath("/opt/teams/teamB/user3/"), Name: "cFile.txt", Size: 400, Inode: 2},
 			})
 		})
 
@@ -71,7 +74,8 @@ func TestDedupe(t *testing.T) {
 
 			So(d.Print(&sb), ShouldBeNil)
 			So(sb.String(), ShouldEqual, "Size: 300\n\"/opt/teams/teamA/user1/aFile.txt\"\n"+
-				"\t\"/opt/teams/teamA/user3/cFile.txt\"\n\"/opt/teams/teamA/user2/aFile.txt\"\n")
+				"\t\"/opt/teams/teamA/user3/cFile.txt\"\n\"/opt/teams/teamA/user2/aFile.txt\"\n"+
+				"Size: 400\n\"/opt/teams/teamB/user2/aFile.txt\"\n\"/opt/teams/teamB/user3/cFile.txt\"\n")
 		})
 	})
 }

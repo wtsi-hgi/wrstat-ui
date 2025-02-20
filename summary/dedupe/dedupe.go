@@ -43,6 +43,8 @@ func (d *Deduper) Iter(yield func(*Node) bool) {
 	d.node.iter(yield)
 }
 
+// Operation provides a summary.OperationGenerator to be used with a
+// summary.Summariser.
 func (d *Deduper) Operation() summary.OperationGenerator {
 	d.node = nullNode
 	d.mountpoint = -1

@@ -51,7 +51,7 @@ var dupescmd = &cobra.Command{
 	Use:   "dupes",
 	Short: "dupes searches for potentially duplicated files in wrstat output",
 	Long: `dupes searches wrstat output for files with the same size,
-flagging them as potential duplicates. Useful as a pre-step for a more abosolute
+flagging them as potential duplicates. Useful as a pre-step for a more absolute
 check of same-ness.
 
 Input files can either be specified directly, with the paths to the stats.gz
