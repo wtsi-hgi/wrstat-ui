@@ -63,7 +63,7 @@ will be passed along to it.
 			die("%s", err)
 		}
 
-		if err := watch.Watch(args, defaultDir, quotaPath, basedirsConfig); err != nil {
+		if err := watch.Watch(args, defaultDir, quotaPath, basedirsConfig, appLogger); err != nil {
 			die("%s", err)
 		}
 	},

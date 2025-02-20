@@ -27,13 +27,14 @@ package watch
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 	"time"
 
+	"github.com/VertebrateResequencing/wr/client"
+	"github.com/VertebrateResequencing/wr/jobqueue"
+	"github.com/inconshreveable/log15"
 	"github.com/wtsi-hgi/wrstat-ui/server"
 )
 
@@ -41,15 +42,8 @@ const (
 	inputStatsFile  = "stats.gz"
 	dirPerms        = 0750
 	basedirBasename = "basedirs.db"
-	summariseCPU    = "2"
-	summariseMem    = "8G"
-)
-
-var (
-	testOutputFD = 3                                  //nolint:gochecknoglobals
-	exit         = func() { os.Exit(0) }              //nolint:gochecknoglobals
-	runJobs      string                               //nolint:gochecknoglobals
-	delay        = func() { time.Sleep(time.Minute) } //nolint:gochecknoglobals
+	summariseCPU    = 2
+	summariseMem    = 8192
 )
 
 // Watch watches an input directory (which should be the output directory of a
@@ -58,22 +52,25 @@ var (
 //
 // The scheduled summarise subcommands will be given the output directory, quota
 // path and basedirs config path.
-func Watch(inputDirs []string, outputDir, quotaPath, basedirsConfig string) error {
+func Watch(inputDirs []string, outputDir, quotaPath, basedirsConfig string, logger log15.Logger) error {
 	for {
-		if err := watch(inputDirs, outputDir, quotaPath, basedirsConfig); err != nil {
+		if err := watch(inputDirs, outputDir, quotaPath, basedirsConfig, logger); err != nil {
 			return err
 		}
 
-		delay()
+		if client.PretendSubmissions != "" {
+			return nil
+		}
+
+		time.Sleep(time.Minute)
 	}
 }
 
-func watch(inputDirs []string, outputDir, quotaPath, basedirsConfig string) error {
+func watch(inputDirs []string, outputDir, quotaPath, basedirsConfig string, logger log15.Logger) error { //nolint:gocognit,gocyclo,lll
 	var err error
 
 	for n := range inputDirs {
-		inputDirs[n], err = filepath.Abs(inputDirs[n])
-		if err != nil {
+		if inputDirs[n], err = filepath.Abs(inputDirs[n]); err != nil {
 			return err
 		}
 	}
@@ -94,7 +91,7 @@ func watch(inputDirs []string, outputDir, quotaPath, basedirsConfig string) erro
 			return entryExists(filepath.Join(outputDir, base)) || entryExists(filepath.Join(outputDir, "."+base))
 		})
 
-		if err := scheduleSummarisers(inputDir, outputDir, quotaPath, basedirsConfig, inputPaths); err != nil {
+		if err := scheduleSummarisers(inputDir, outputDir, quotaPath, basedirsConfig, inputPaths, logger); err != nil {
 			return err
 		}
 	}
@@ -108,34 +105,69 @@ func entryExists(path string) bool {
 	return err == nil
 }
 
-func scheduleSummarisers(inputDir, outputDir, quotaPath, basedirsConfig string, inputPaths []string) error {
+func scheduleSummarisers(inputDir, outputDir, quotaPath, basedirsConfig string,
+	inputPaths []string, logger log15.Logger) error {
+	s, err := client.New(client.SchedulerSettings{
+		Logger: logger,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create wr client: %w", err)
+	}
+
+	jobs := make([]*jobqueue.Job, 0, len(inputPaths))
+
 	for _, p := range inputPaths {
 		base := filepath.Base(p)
 
-		if err := scheduleSummarise(inputDir, outputDir, base, quotaPath, basedirsConfig); err != nil {
-			return fmt.Errorf("error scheduling summarise (%s): %w", base, err)
+		job, errr := createSummariseJob(inputDir, outputDir, base, quotaPath, basedirsConfig, s)
+		if errr != nil {
+			return fmt.Errorf("error scheduling summarise (%s): %w", base, errr)
 		}
+
+		jobs = append(jobs, job)
+	}
+
+	if len(jobs) == 0 {
+		return nil
+	}
+
+	if err = s.SubmitJobs(jobs); err != nil {
+		return fmt.Errorf("error submitting jobs to wr: %w", err)
 	}
 
 	return nil
 }
 
-func scheduleSummarise(inputDir, outputDir, base, quotaPath, basedirsConfig string) error {
+func createSummariseJob(inputDir, outputDir, base, quotaPath, basedirsConfig string,
+	s *client.Scheduler) (*jobqueue.Job, error) {
 	dotOutputBase := filepath.Join(outputDir, "."+base)
 
 	if err := os.MkdirAll(dotOutputBase, dirPerms); err != nil {
-		return err
+		return nil, err
 	}
 
 	previousBasedirsDB, err := getPreviousBasedirsDB(outputDir, base)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	return addJob(getWRJSON(dotOutputBase, previousBasedirsDB, quotaPath, basedirsConfig, inputDir, base, outputDir))
+	reqs := client.DefaultRequirements()
+	reqs.Cores = summariseCPU
+	reqs.RAM = summariseMem
+
+	return s.NewJob(
+		getJobCommand(dotOutputBase, previousBasedirsDB, quotaPath, basedirsConfig,
+			inputDir, base, outputDir),
+		"wrstat-ui-summarise-"+time.Now().Format("20060102150405"),
+		"wrstat-ui-summarise",
+		"",
+		"",
+		reqs,
+	), nil
 }
 
-func getWRJSON(dotOutputBase, previousBasedirsDB, quotaPath, basedirsConfig, inputDir, base, outputDir string) string {
+func getJobCommand(dotOutputBase, previousBasedirsDB, quotaPath, basedirsConfig,
+	inputDir, base, outputDir string) string {
 	cmdFormat := "%[1]q summarise -d %[2]q"
 
 	if previousBasedirsDB != "" {
@@ -144,33 +176,12 @@ func getWRJSON(dotOutputBase, previousBasedirsDB, quotaPath, basedirsConfig, inp
 
 	cmdFormat += " -q %[4]q -c %[5]q %[6]q && touch -r %[7]q %[2]q && mv %[2]q %[8]q"
 
-	return `{"cmd":` + strconv.Quote(fmt.Sprintf(cmdFormat,
+	return fmt.Sprintf(cmdFormat,
 		os.Args[0], dotOutputBase, previousBasedirsDB, quotaPath, basedirsConfig,
 		filepath.Join(inputDir, base, inputStatsFile),
 		filepath.Join(inputDir, base),
 		filepath.Join(outputDir, base),
-	)) + `,"cpus":` + summariseCPU + `,"memory":"` + summariseMem +
-		`","req_grp":"wrstat-ui-summarise","rep_grp":"wrstat-ui-summarise-` +
-		time.Now().Format("20060102150405") + `"}`
-}
-
-func addJob(wrJSON string) error {
-	if runJobs != "" {
-		fakeRunJobs(wrJSON)
-
-		return nil
-	}
-
-	cmd := exec.Command("wr", "add")
-	cmd.Stdin = strings.NewReader(wrJSON)
-
-	return cmd.Run()
-}
-
-func fakeRunJobs(wrJSON string) {
-	os.NewFile(uintptr(testOutputFD), "").WriteString(wrJSON) //nolint:errcheck
-
-	exit()
+	)
 }
 
 func getPreviousBasedirsDB(outputDir, base string) (string, error) {

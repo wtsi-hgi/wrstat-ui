@@ -25,19 +25,21 @@
 package watch
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
+	"github.com/VertebrateResequencing/wr/client"
+	"github.com/VertebrateResequencing/wr/jobqueue"
+	"github.com/VertebrateResequencing/wr/jobqueue/scheduler"
 	. "github.com/smartystreets/goconvey/convey"
 )
 
 func TestWatch(t *testing.T) {
-	exit = func() {}
-	runJobs = "0"
-
 	Convey("Given the expected setup", t, func() {
 		inputDir := t.TempDir()
 		outputDir := t.TempDir()
@@ -45,26 +47,30 @@ func TestWatch(t *testing.T) {
 		testInputB := filepath.Join(inputDir, "12345_def")
 		wrWrittenCh := make(chan bool)
 
+		cwd, err := os.Getwd()
+		So(err, ShouldBeNil)
+
 		pr, pw, err := os.Pipe()
 		So(err, ShouldBeNil)
 
-		testOutputFD = int(pw.Fd())
+		client.PretendSubmissions = strconv.FormatUint(uint64(pw.Fd()), 10)
 
-		var wr string
+		var jobs []*jobqueue.Job
 
 		go func() {
 			defer pr.Close()
 			defer close(wrWrittenCh)
 
-			var buf [4096]byte
+			j := json.NewDecoder(pr)
 
 			for {
-				n, err := pr.Read(buf[:])
-				if err != nil || n == 0 {
+				var js []*jobqueue.Job
+
+				if errr := j.Decode(&js); errr != nil {
 					return
 				}
 
-				wr += string(buf[:n])
+				jobs = append(jobs, js...)
 			}
 		}()
 
@@ -73,67 +79,102 @@ func TestWatch(t *testing.T) {
 		So(createFile(filepath.Join(testInputA, inputStatsFile)), ShouldBeNil)
 
 		Convey("Watch will spot a new directory and schedule a summarise", func() {
-			err := watch([]string{inputDir}, outputDir, "/path/to/quota", "/path/to/basedirs.config")
+			err = watch([]string{inputDir}, outputDir, "/path/to/quota", "/path/to/basedirs.config", nil)
 			So(err, ShouldBeNil)
 
 			pw.Close()
 
 			<-wrWrittenCh
 
-			So(wr, ShouldEqual, fmt.Sprintf(`{"cmd":"\"%[1]s\" summarise -d \"%[2]s/.12345_abc\" `+
-				`-q \"/path/to/quota\" -c \"/path/to/basedirs.config\" \"%[3]s/stats.gz\" && `+
-				`touch -r \"%[3]s\" \"%[2]s/.12345_abc\" && mv \"%[2]s/.12345_abc\" \"%[2]s/12345_abc\"",`+
-				`"cpus":2,"memory":"8G","req_grp":"wrstat-ui-summarise","rep_grp":"wrstat-ui-summarise-`+
-				time.Now().Format("20060102150405")+`"}`, os.Args[0], outputDir, testInputA))
+			So(jobs, ShouldResemble, []*jobqueue.Job{
+				{
+					Cmd: fmt.Sprintf(`%[1]q summarise -d "%[2]s/.12345_abc" `+
+						`-q "/path/to/quota" -c "/path/to/basedirs.config" `+
+						`"%[3]s/stats.gz" && touch -r "%[3]s" "%[2]s/.12345_abc" `+
+						`&& mv "%[2]s/.12345_abc" "%[2]s/12345_abc"`,
+						os.Args[0], outputDir, testInputA),
+					Cwd:        cwd,
+					CwdMatters: true,
+					RepGroup:   "wrstat-ui-summarise-" + time.Now().Format("20060102150405"),
+					ReqGroup:   "wrstat-ui-summarise",
+					Requirements: &scheduler.Requirements{
+						RAM:   8192,
+						Time:  10 * time.Second,
+						Cores: 2,
+						Disk:  1,
+					},
+					Override: 1,
+					Retries:  30,
+				},
+			})
 		})
 
 		Convey("Watch will provide absolute paths to summarise given relative paths", func() {
 			parentDir := filepath.Dir(inputDir)
 
-			err = os.Chdir(parentDir)
-			So(err, ShouldBeNil)
-
 			relInput := filepath.Base(inputDir)
 			relOutput := filepath.Base(outputDir)
 
-			err := watch([]string{relInput}, relOutput, "/path/to/quota", "/path/to/basedirs.config")
+			err = os.Chdir(parentDir)
+			So(err, ShouldBeNil)
+
+			err := watch([]string{relInput}, relOutput, "/path/to/quota", "/path/to/basedirs.config", nil)
+
+			errr := os.Chdir(cwd)
+			So(errr, ShouldBeNil)
 			So(err, ShouldBeNil)
 
 			pw.Close()
 
 			<-wrWrittenCh
 
-			So(wr, ShouldEqual, fmt.Sprintf(`{"cmd":"\"%[1]s\" summarise -d \"%[2]s/.12345_abc\" `+
-				`-q \"/path/to/quota\" -c \"/path/to/basedirs.config\" \"%[3]s/stats.gz\" && `+
-				`touch -r \"%[3]s\" \"%[2]s/.12345_abc\" && mv \"%[2]s/.12345_abc\" \"%[2]s/12345_abc\"",`+
-				`"cpus":2,"memory":"8G","req_grp":"wrstat-ui-summarise","rep_grp":"wrstat-ui-summarise-`+
-				time.Now().Format("20060102150405")+`"}`, os.Args[0], outputDir, testInputA))
+			So(jobs, ShouldResemble, []*jobqueue.Job{
+				{
+					Cmd: fmt.Sprintf(`%[1]q summarise -d "%[2]s/.12345_abc" `+
+						`-q "/path/to/quota" -c "/path/to/basedirs.config" `+
+						`"%[3]s/stats.gz" && touch -r "%[3]s" "%[2]s/.12345_abc" `+
+						`&& mv "%[2]s/.12345_abc" "%[2]s/12345_abc"`,
+						os.Args[0], outputDir, testInputA),
+					Cwd:        parentDir,
+					CwdMatters: true,
+					RepGroup:   "wrstat-ui-summarise-" + time.Now().Format("20060102150405"),
+					ReqGroup:   "wrstat-ui-summarise",
+					Requirements: &scheduler.Requirements{
+						RAM:   8192,
+						Time:  10 * time.Second,
+						Cores: 2,
+						Disk:  1,
+					},
+					Override: 1,
+					Retries:  30,
+				},
+			})
 		})
 
 		Convey("Watch will not reschedule a summarise if one has already started", func() {
 			So(os.Mkdir(filepath.Join(outputDir, ".12345_abc"), 0755), ShouldBeNil)
 
-			err := watch([]string{inputDir}, outputDir, "/path/to/quota", "/path/to/basedirs.config")
+			err := watch([]string{inputDir}, outputDir, "/path/to/quota", "/path/to/basedirs.config", nil)
 			So(err, ShouldBeNil)
 
 			pw.Close()
 
 			<-wrWrittenCh
 
-			So(wr, ShouldEqual, "")
+			So(len(jobs), ShouldEqual, 0)
 		})
 
 		Convey("Watch will not reschedule a summarise if one has already completed", func() {
 			So(os.Mkdir(filepath.Join(outputDir, "12345_abc"), 0755), ShouldBeNil)
 
-			err := watch([]string{inputDir}, outputDir, "/path/to/quota", "/path/to/basedirs.config")
+			err := watch([]string{inputDir}, outputDir, "/path/to/quota", "/path/to/basedirs.config", nil)
 			So(err, ShouldBeNil)
 
 			pw.Close()
 
 			<-wrWrittenCh
 
-			So(wr, ShouldEqual, "")
+			So(len(jobs), ShouldEqual, 0)
 		})
 
 		Convey("Watch will recognise existing basedir history in the output path", func() {
@@ -141,19 +182,35 @@ func TestWatch(t *testing.T) {
 			So(os.Mkdir(existingOutput, 0755), ShouldBeNil)
 			So(createFile(filepath.Join(existingOutput, basedirBasename)), ShouldBeNil)
 
-			err := watch([]string{inputDir}, outputDir, "/path/to/quota", "/path/to/basedirs.config")
+			err := watch([]string{inputDir}, outputDir, "/path/to/quota", "/path/to/basedirs.config", nil)
 			So(err, ShouldBeNil)
 
 			pw.Close()
 
 			<-wrWrittenCh
 
-			So(wr, ShouldEqual, fmt.Sprintf(`{"cmd":"\"%[1]s\" summarise -d \"%[2]s/.12345_abc\" `+
-				`-s \"%[2]s/00001_abc/basedirs.db\" `+
-				`-q \"/path/to/quota\" -c \"/path/to/basedirs.config\" \"%[3]s/stats.gz\" && `+
-				`touch -r \"%[3]s\" \"%[2]s/.12345_abc\" && mv \"%[2]s/.12345_abc\" \"%[2]s/12345_abc\"",`+
-				`"cpus":2,"memory":"8G","req_grp":"wrstat-ui-summarise","rep_grp":"wrstat-ui-summarise-`+
-				time.Now().Format("20060102150405")+`"}`, os.Args[0], outputDir, testInputA))
+			So(jobs, ShouldResemble, []*jobqueue.Job{
+				{
+					Cmd: fmt.Sprintf(`%[1]q summarise -d "%[2]s/.12345_abc" `+
+						`-s "%[2]s/00001_abc/basedirs.db" `+
+						`-q "/path/to/quota" -c "/path/to/basedirs.config" `+
+						`"%[3]s/stats.gz" && touch -r "%[3]s" "%[2]s/.12345_abc" `+
+						`&& mv "%[2]s/.12345_abc" "%[2]s/12345_abc"`,
+						os.Args[0], outputDir, testInputA),
+					Cwd:        cwd,
+					CwdMatters: true,
+					RepGroup:   "wrstat-ui-summarise-" + time.Now().Format("20060102150405"),
+					ReqGroup:   "wrstat-ui-summarise",
+					Requirements: &scheduler.Requirements{
+						RAM:   8192,
+						Time:  10 * time.Second,
+						Cores: 2,
+						Disk:  1,
+					},
+					Override: 1,
+					Retries:  30,
+				},
+			})
 		})
 
 		Convey("Watch can watch multiple directories", func() {
@@ -162,24 +219,53 @@ func TestWatch(t *testing.T) {
 			So(os.Mkdir(testInputC, 0755), ShouldBeNil)
 			So(createFile(filepath.Join(testInputC, inputStatsFile)), ShouldBeNil)
 
-			err := watch([]string{inputDir, inputDir2}, outputDir, "/path/to/quota", "/path/to/basedirs.config")
+			err := watch([]string{inputDir, inputDir2}, outputDir, "/path/to/quota", "/path/to/basedirs.config", nil)
 			So(err, ShouldBeNil)
 
 			pw.Close()
 
 			<-wrWrittenCh
 
-			So(wr, ShouldEqual, fmt.Sprintf(`{"cmd":"\"%[1]s\" summarise -d \"%[2]s/.12345_abc\" `+
-				`-q \"/path/to/quota\" -c \"/path/to/basedirs.config\" \"%[3]s/stats.gz\" && `+
-				`touch -r \"%[3]s\" \"%[2]s/.12345_abc\" && mv \"%[2]s/.12345_abc\" \"%[2]s/12345_abc\"",`+
-				`"cpus":2,"memory":"8G","req_grp":"wrstat-ui-summarise","rep_grp":"wrstat-ui-summarise-`+
-				time.Now().Format("20060102150405")+`"}`+
-				`{"cmd":"\"%[1]s\" summarise -d \"%[2]s/.98765_c\" `+
-				`-q \"/path/to/quota\" -c \"/path/to/basedirs.config\" \"%[4]s/stats.gz\" && `+
-				`touch -r \"%[4]s\" \"%[2]s/.98765_c\" && mv \"%[2]s/.98765_c\" \"%[2]s/98765_c\"",`+
-				`"cpus":2,"memory":"8G","req_grp":"wrstat-ui-summarise","rep_grp":"wrstat-ui-summarise-`+
-				time.Now().Format("20060102150405")+`"}`,
-				os.Args[0], outputDir, testInputA, testInputC))
+			So(jobs, ShouldResemble, []*jobqueue.Job{
+				{
+					Cmd: fmt.Sprintf(`%[1]q summarise -d "%[2]s/.12345_abc" `+
+						`-q "/path/to/quota" -c "/path/to/basedirs.config" `+
+						`"%[3]s/stats.gz" && touch -r "%[3]s" "%[2]s/.12345_abc" `+
+						`&& mv "%[2]s/.12345_abc" "%[2]s/12345_abc"`,
+						os.Args[0], outputDir, testInputA),
+					Cwd:        cwd,
+					CwdMatters: true,
+					RepGroup:   "wrstat-ui-summarise-" + time.Now().Format("20060102150405"),
+					ReqGroup:   "wrstat-ui-summarise",
+					Requirements: &scheduler.Requirements{
+						RAM:   8192,
+						Time:  10 * time.Second,
+						Cores: 2,
+						Disk:  1,
+					},
+					Override: 1,
+					Retries:  30,
+				},
+				{
+					Cmd: fmt.Sprintf(`%[1]q summarise -d "%[2]s/.98765_c" `+
+						`-q "/path/to/quota" -c "/path/to/basedirs.config" `+
+						`"%[3]s/stats.gz" && touch -r "%[3]s" "%[2]s/.98765_c" `+
+						`&& mv "%[2]s/.98765_c" "%[2]s/98765_c"`,
+						os.Args[0], outputDir, testInputC),
+					Cwd:        cwd,
+					CwdMatters: true,
+					RepGroup:   "wrstat-ui-summarise-" + time.Now().Format("20060102150405"),
+					ReqGroup:   "wrstat-ui-summarise",
+					Requirements: &scheduler.Requirements{
+						RAM:   8192,
+						Time:  10 * time.Second,
+						Cores: 2,
+						Disk:  1,
+					},
+					Override: 1,
+					Retries:  30,
+				},
+			})
 		})
 	})
 }

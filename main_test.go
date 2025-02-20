@@ -38,6 +38,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/VertebrateResequencing/wr/jobqueue"
+	"github.com/VertebrateResequencing/wr/jobqueue/scheduler"
 	. "github.com/smartystreets/goconvey/convey"
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
 	"github.com/wtsi-hgi/wrstat-ui/db"
@@ -50,7 +52,8 @@ const app = "wrstat-ui_test"
 func buildSelf() func() {
 	cmd := exec.Command(
 		"go", "build", "-tags", "netgo",
-		"-ldflags=-X github.com/wtsi-hgi/wrstat-ui/watch.runJobs=0 -X github.com/wtsi-hgi/wrstat-ui/cmd.Version=TESTVERSION",
+		"-ldflags=-X github.com/VertebrateResequencing/wr/client.PretendSubmissions=3 "+
+			"-X github.com/wtsi-hgi/wrstat-ui/cmd.Version=TESTVERSION",
 		"-o", app,
 	)
 
@@ -83,95 +86,10 @@ func TestMain(m *testing.M) {
 	defer d1()
 }
 
-type MountConfig struct {
-	Mount     string `json:",omitempty"`
-	CacheBase string `json:",omitempty"`
-	Retries   int    `json:",omitempty"`
-	Verbose   bool   `json:",omitempty"`
-	Targets   []MountTarget
-}
-
-type MountTarget struct {
-	Profile  string `json:",omitempty"`
-	Path     string
-	CacheDir string `json:",omitempty"`
-	Cache    bool   `json:",omitempty"`
-	Write    bool   `json:",omitempty"`
-}
-
-type MountConfigs []MountConfig
-
-type JobEssence struct {
-	JobKey       string
-	Cmd          string
-	Cwd          string
-	MountConfigs MountConfigs
-}
-
-type Dependency struct {
-	Essence  *JobEssence
-	DepGroup string
-}
-
-type Dependencies []*Dependency
-
-type BehaviourViaJSON struct {
-	Run           string   `json:"run,omitempty"`
-	CopyToManager []string `json:"copy_to_manager,omitempty"`
-	Cleanup       bool     `json:"cleanup,omitempty"`
-	CleanupAll    bool     `json:"cleanup_all,omitempty"`
-	Remove        bool     `json:"remove,omitempty"`
-	Nothing       bool     `json:"nothing,omitempty"`
-}
-
-type BehavioursViaJSON []BehaviourViaJSON
-
-type JobViaJSON struct {
-	MountConfigs          MountConfigs      `json:"mounts"`
-	LimitGrps             []string          `json:"limit_grps"`
-	DepGrps               []string          `json:"dep_grps"`
-	Deps                  []string          `json:"deps"`
-	CmdDeps               Dependencies      `json:"cmd_deps"`
-	OnFailure             BehavioursViaJSON `json:"on_failure"`
-	OnSuccess             BehavioursViaJSON `json:"on_success"`
-	OnExit                BehavioursViaJSON `json:"on_exit"`
-	Env                   []string          `json:"env"`
-	Cmd                   string            `json:"cmd"`
-	Cwd                   string            `json:"cwd"`
-	ReqGrp                string            `json:"req_grp"`
-	Memory                string            `json:"memory"`
-	Time                  string            `json:"time"`
-	RepGrp                string            `json:"rep_grp"`
-	MonitorDocker         string            `json:"monitor_docker"`
-	WithDocker            string            `json:"with_docker"`
-	WithSingularity       string            `json:"with_singularity"`
-	ContainerMounts       string            `json:"container_mounts"`
-	CloudOS               string            `json:"cloud_os"`
-	CloudUser             string            `json:"cloud_username"`
-	CloudScript           string            `json:"cloud_script"`
-	CloudConfigFiles      string            `json:"cloud_config_files"`
-	CloudFlavor           string            `json:"cloud_flavor"` //nolint:misspell
-	SchedulerQueue        string            `json:"queue"`
-	SchedulerQueuesAvoid  string            `json:"queues_avoid"`
-	SchedulerMisc         string            `json:"misc"`
-	BsubMode              string            `json:"bsub_mode"`
-	CPUs                  *float64          `json:"cpus"`
-	Disk                  *int              `json:"disk"`
-	Override              *int              `json:"override"`
-	Priority              *int              `json:"priority"`
-	Retries               *int              `json:"retries"`
-	NoRetriesOverWalltime string            `json:"no_retry_over_walltime"`
-	CloudOSRam            *int              `json:"cloud_ram"`
-	RTimeout              *int              `json:"reserve_timeout"`
-	CwdMatters            bool              `json:"cwd_matters"`
-	ChangeHome            bool              `json:"change_home"`
-	CloudShared           bool              `json:"cloud_shared"`
-}
-
-func runWRStat(args ...string) (string, string, []*JobViaJSON, error) {
+func runWRStat(args ...string) (string, string, []*jobqueue.Job, error) {
 	var (
 		stdout, stderr strings.Builder
-		jobs           []*JobViaJSON
+		jobs           []*jobqueue.Job
 	)
 
 	pr, pw, err := os.Pipe()
@@ -189,13 +107,13 @@ func runWRStat(args ...string) (string, string, []*JobViaJSON, error) {
 
 	go func() {
 		for {
-			var j *JobViaJSON
+			var j []*jobqueue.Job
 
 			if errr := jd.Decode(&j); errr != nil {
 				break
 			}
 
-			jobs = append(jobs, j)
+			jobs = append(jobs, j...)
 		}
 
 		close(done)
@@ -442,7 +360,13 @@ func TestWatch(t *testing.T) {
 		finalA := filepath.Join(output, "12345_A")
 		statsA := filepath.Join(runA, "stats.gz")
 
-		cpus := float64(2)
+		const (
+			cpus = 2
+			ram  = 8192
+		)
+
+		cwd, err := os.Getwd()
+		So(err, ShouldBeNil)
 
 		So(os.Mkdir(runA, 0755), ShouldBeNil)
 		So(os.WriteFile(statsA, nil, 0600), ShouldBeNil)
@@ -451,17 +375,25 @@ func TestWatch(t *testing.T) {
 		So(err, ShouldBeNil)
 
 		So(len(jobs), ShouldBeGreaterThan, 0)
-		So(jobs[0].RepGrp, ShouldStartWith, "wrstat-ui-summarise-")
-		So(jobs, ShouldResemble, []*JobViaJSON{
+		So(jobs[0].RepGroup, ShouldStartWith, "wrstat-ui-summarise-")
+		So(jobs, ShouldResemble, []*jobqueue.Job{
 			{
 				Cmd: fmt.Sprintf(`"./wrstat-ui_test" summarise -d %[1]q -q `+
 					`"/some/quota.file" -c "basedirs.config" %[2]q && touch -r %[3]q %[1]q && mv %[1]q %[4]q`,
 					dotA, statsA, runA, finalA,
 				),
-				CPUs:   &cpus,
-				Memory: "8G",
-				ReqGrp: "wrstat-ui-summarise",
-				RepGrp: jobs[0].RepGrp,
+				Cwd:        cwd,
+				CwdMatters: true,
+				ReqGroup:   "wrstat-ui-summarise",
+				RepGroup:   jobs[0].RepGroup,
+				Requirements: &scheduler.Requirements{
+					Cores: cpus,
+					RAM:   ram,
+					Time:  10 * time.Second,
+					Disk:  1,
+				},
+				Override: 1,
+				Retries:  30,
 			},
 		})
 
@@ -477,17 +409,25 @@ func TestWatch(t *testing.T) {
 		So(err, ShouldBeNil)
 
 		So(len(jobs), ShouldBeGreaterThan, 0)
-		So(jobs[0].RepGrp, ShouldStartWith, "wrstat-ui-summarise-")
-		So(jobs, ShouldResemble, []*JobViaJSON{
+		So(jobs[0].RepGroup, ShouldStartWith, "wrstat-ui-summarise-")
+		So(jobs, ShouldResemble, []*jobqueue.Job{
 			{
 				Cmd: fmt.Sprintf(`"./wrstat-ui_test" summarise -d %[1]q `+
 					`-s %[2]q -q "/some/quota.file" -c "basedirs.config" %[3]q && touch -r %[4]q %[1]q && mv %[1]q %[5]q`,
 					dotA, previousBasedirs, statsA, runA, finalA,
 				),
-				CPUs:   &cpus,
-				Memory: "8G",
-				ReqGrp: "wrstat-ui-summarise",
-				RepGrp: jobs[0].RepGrp,
+				Cwd:        cwd,
+				CwdMatters: true,
+				ReqGroup:   "wrstat-ui-summarise",
+				RepGroup:   jobs[0].RepGroup,
+				Requirements: &scheduler.Requirements{
+					Cores: cpus,
+					RAM:   ram,
+					Time:  10 * time.Second,
+					Disk:  1,
+				},
+				Override: 1,
+				Retries:  30,
 			},
 		})
 	})
