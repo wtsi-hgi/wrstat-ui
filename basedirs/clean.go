@@ -47,7 +47,7 @@ func CleanInvalidDBHistory(dbPath, prefix string) error { //nolint:gocognit
 		c := tx.Bucket([]byte(GroupHistoricalBucket)).Cursor()
 
 		for k, _ := c.First(); k != nil; k, _ = c.Next() {
-			if !bytes.HasPrefix(k[idLen:], prefixB) {
+			if len(k) > idLen && !bytes.HasPrefix(k[idLen:], prefixB) {
 				if err := c.Delete(); err != nil {
 					return err
 				}
@@ -80,7 +80,7 @@ func FindInvalidHistoryKeys(dbPath, prefix string) ([][]byte, error) {
 
 	if err := db.View(func(tx *bbolt.Tx) error {
 		return tx.Bucket([]byte(GroupHistoricalBucket)).ForEach(func(k, _ []byte) error {
-			if !bytes.HasPrefix(k[idLen:], prefixB) {
+			if len(k) > idLen && !bytes.HasPrefix(k[idLen:], prefixB) {
 				toRemove = append(toRemove, append(make([]byte, 0, len(k)), k...))
 			}
 
