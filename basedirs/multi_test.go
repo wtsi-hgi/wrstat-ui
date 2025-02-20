@@ -507,6 +507,14 @@ func TestMulti(t *testing.T) {
 						QuotaInodes: 20,
 					}
 
+					expectedBHistory := basedirs.History{
+						Date:        yesterday,
+						UsageSize:   21,
+						QuotaSize:   4000000000,
+						UsageInodes: 2,
+						QuotaInodes: 20,
+					}
+
 					history, errr := bdr.History(1, projectAA)
 					fixHistoryTimes(history)
 
@@ -539,6 +547,13 @@ func TestMulti(t *testing.T) {
 					dtrSize, dtrInode := basedirs.DateQuotaFull(history)
 					So(dtrSize, ShouldEqual, time.Time{})
 					So(dtrInode, ShouldEqual, time.Time{})
+
+					history, errr = bdr.History(1, projectBA)
+					fixHistoryTimes(history)
+
+					So(errr, ShouldBeNil)
+					So(len(history), ShouldEqual, 1)
+					So(history, ShouldResemble, []basedirs.History{expectedBHistory})
 
 					err = bdr.Close()
 					So(err, ShouldBeNil)
