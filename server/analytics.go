@@ -50,6 +50,8 @@ var (
 	stringSlicePool = sync.Pool{New: func() any { return new([]string) }} //nolint:gochecknoglobals
 )
 
+// InitAnalyticsDB adds user activity recording to the server, saving users
+// sessions to an SQLite database stored at the given path.
 func (s *Server) InitAnalyticsDB(dbPath string) error {
 	db, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
