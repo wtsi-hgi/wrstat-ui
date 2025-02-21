@@ -113,6 +113,8 @@ func scheduleSummarisers(inputDir, outputDir, quotaPath, basedirsConfig string,
 		return fmt.Errorf("failed to create wr client: %w", err)
 	}
 
+	defer s.Disconnect()
+
 	jobs := make([]*jobqueue.Job, 0, len(inputPaths))
 
 	for _, p := range inputPaths {
