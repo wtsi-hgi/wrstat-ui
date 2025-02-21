@@ -151,7 +151,7 @@ const colours = [
 			[filterFileTypes, setFilterFileTypes] = useSavedState<string[]>("treeTypes", []),
 			[sinceLastAccess, setSinceLastAccess] = useSavedState("sinceLastAccess", 0),
 			[hasAuth, setHasAuth] = useState(true),
-			[viewBoxes, setViewBoxes] = useState(true);
+			[viewList, setViewList] = useSavedState("viewDiskList", false);
 
 
 		useEffect(() => window.addEventListener("resize", () => setTreeWidth(determineTreeWidth())), []);
@@ -195,23 +195,19 @@ const colours = [
 				<Tabs id="treeTabs" tabs={[
 					{
 						title: "Tree",
-						onClick: () => {
-							setViewBoxes(true);
-						},
-						selected: viewBoxes
+						onClick: () => setViewList(false),
+						selected: !viewList
 					},
 					{
 						title: "List",
-						onClick: () => {
-							setViewBoxes(false);
-						},
-						selected: !viewBoxes
+						onClick: () => setViewList(true),
+						selected: viewList
 					},
 				]} />
 				<div id="disktree">
 					<div>
 						<div className="treeFilter">
-							{viewBoxes &&
+							{!viewList &&
 								<>
 									<div className="title">Colour By</div>
 									<label aria-label="Colour by Oldest Access Time" title="Oldest Access Time" htmlFor="aTime">Access Time</label><input type="radio" id="aTime" checked={!useMTime} onChange={() => setUseMTime(false)} />
@@ -240,7 +236,7 @@ const colours = [
 								guf.setUsers([]);
 							}}>Reset Filter</button>
 						</div>
-						{viewBoxes &&
+						{!viewList &&
 							<div id="treeKey">
 								<div>
 									<span>Colour Key</span>
@@ -262,12 +258,11 @@ const colours = [
 					</div>
 					<ul id="treeBreadcrumbs">{breadcrumbs}</ul>
 					<div>
-						{viewBoxes &&
-							<Treemap table={treeMapData} width={treeWidth} height={500} noAuth={!hasAuth} onmouseout={() => setChildDetails(dirDetails)} />
-						}
-						{!viewBoxes &&
+						{viewList ?
 							// make new state and variable to replace child details in the details field, so that clicking and hovering do different things
 							<Treetable details={tableDetails} setTreePath={setTreePath} setChildDetails={setChildDetails} />
+							:
+							<Treemap table={treeMapData} width={treeWidth} height={500} noAuth={!hasAuth} onmouseout={() => setChildDetails(dirDetails)} />
 						}
 						<TreeDetails details={childDetails} style={{ width: "100%" }} />
 					</div>

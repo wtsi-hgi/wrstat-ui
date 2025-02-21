@@ -12,6 +12,7 @@ require (
 	github.com/hashicorp/go-multierror v1.1.1
 	github.com/inconshreveable/log15 v2.16.0+incompatible
 	github.com/klauspost/pgzip v1.2.6
+	github.com/mattn/go-sqlite3 v1.14.24
 	github.com/moby/sys/mountinfo v0.7.2
 	github.com/olekukonko/tablewriter v0.0.5
 	github.com/smartystreets/goconvey v1.7.2
@@ -20,6 +21,7 @@ require (
 	github.com/wtsi-hgi/go-authserver v1.3.0
 	go.etcd.io/bbolt v1.4.0
 	golang.org/x/exp v0.0.0-20250218142911-aa4b98e5adaa
+	vimagination.zapto.org/tsserver v1.0.11
 )
 
 require (
@@ -153,6 +155,7 @@ require (
 	k8s.io/apimachinery v0.32.2 // indirect
 	k8s.io/client-go v11.0.0+incompatible // indirect
 	nanomsg.org/go-mangos v1.4.0 // indirect
+	vimagination.zapto.org/javascript v1.4.15 // indirect
 	vimagination.zapto.org/parser v1.0.4 // indirect
 )
 
