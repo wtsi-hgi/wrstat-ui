@@ -1,3 +1,28 @@
+/*******************************************************************************
+ * Copyright (c) 2025 Genome Research Ltd.
+ *
+ * Authors: Michael Woolnough <mw31@sanger.ac.uk>
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining
+ * a copy of this software and associated documentation files (the
+ * "Software"), to deal in the Software without restriction, including
+ * without limitation the rights to use, copy, modify, merge, publish,
+ * distribute, sublicense, and/or sell copies of the Software, and to
+ * permit persons to whom the Software is furnished to do so, subject to
+ * the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included
+ * in all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+ * IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+ * CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+ * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+ * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ ******************************************************************************/
+
 type Children = string | Element | DocumentFragment | Children[];
 
 type Properties = Record<string, string | Function>;
@@ -67,9 +92,9 @@ class Summary {
 
 	addTo(s: Summary) {
 		s.#events = this.#events;
-		s.#groups += this.#groups?1:0;
-		s.#users+= this.#users?1:0;
-		s.#diskTree += this.#diskTree?1:0;
+		s.#groups += this.#groups ? 1 : 0;
+		s.#users += this.#users ? 1 : 0;
+		s.#diskTree += this.#diskTree ? 1 : 0;
 
 		if (this.#start < s.#start) {
 			s.#start = this.#start;
@@ -115,7 +140,7 @@ class SessionSummary extends Summary {
 	html() {
 		return [
 			super.html(),
-			ul(this.#events.map(event => li(a({"href": "https://wrstat.internal.sanger.ac.uk/?"+Object.entries(event.State).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join("&")}, formatTimestamp(event.Timestamp)))))
+			ul(this.#events.map(event => li(a({ "href": "https://wrstat.internal.sanger.ac.uk/?" + Object.entries(event.State).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join("&") }, formatTimestamp(event.Timestamp)))))
 		];
 	}
 }
@@ -193,52 +218,54 @@ const amendNode = (node: Element, propertiesOrChildren: PropertiesOrChildren, ch
 	node.append(...[c as any].flat(Infinity));
 
 	return node;
-      },
-      clearNode = (node: Element, propertiesOrChildren: PropertiesOrChildren = {}, children?: Children) => amendNode((node.replaceChildren(), node), propertiesOrChildren, children),
-      {a, br, button, details, div, hr, label, li, input, span, summary, table, tbody, td, th, thead, tr, ul} = new Proxy({}, {"get": (_, element: keyof HTMLElementTagNameMap) => (props: PropertiesOrChildren = {}, children?: Children) => amendNode(document.createElementNS("http://www.w3.org/1999/xhtml", element), props, children)}) as {[K in keyof HTMLElementTagNameMap]: (props?: PropertiesOrChildren, children?: Children) => HTMLElementTagNameMap[K]},
-      rpc = (() => {
-	const base = "/",
-	      getData = <T>(url: string, body: string) => fetch(base + url, {"method": "POST", body}).then(j => j.json() as T);
-	
-	return {
-		"getAnalytics": (startTime: number, endTime: number) => getData<Analytics>("analytics", JSON.stringify({startTime, endTime})),
-	};
-      })(),
-      yesterday = (() => {
-	const d = new Date();
+},
+	clearNode = (node: Element, propertiesOrChildren: PropertiesOrChildren = {}, children?: Children) => amendNode((node.replaceChildren(), node), propertiesOrChildren, children),
+	{ a, br, button, details, div, hr, label, li, input, span, summary, table, tbody, td, th, thead, tr, ul } = new Proxy({}, { "get": (_, element: keyof HTMLElementTagNameMap) => (props: PropertiesOrChildren = {}, children?: Children) => amendNode(document.createElementNS("http://www.w3.org/1999/xhtml", element), props, children) }) as { [K in keyof HTMLElementTagNameMap]: (props?: PropertiesOrChildren, children?: Children) => HTMLElementTagNameMap[K] },
+	rpc = (() => {
+		const base = "/",
+			getData = <T>(url: string, body: string) => fetch(base + url, { "method": "POST", body }).then(j => j.json() as T);
 
-	d.setDate(d.getDate() - 1);
+		return {
+			"getAnalytics": (startTime: number, endTime: number) => getData<Analytics>("analytics", JSON.stringify({ startTime, endTime })),
+		};
+	})(),
+	yesterday = (() => {
+		const d = new Date();
 
-	return d.toISOString().split("T")[0];
-      })(),
-      startTime = input({"id": "startTime", "type": "date", "value": yesterday}),
-      endTime = input({"id": "endTime", "type": "date", "value": yesterday}),
-      today = endTime.valueAsNumber/1000|0,
-      formatTimestamp = (timestamp: number) => new Date(timestamp * 1000).toISOString().replace("T", " ").replace(/\..*/, ""),
-      topLevelStats = div(),
-      setTopLevel = (data: Analytics) => clearNode(topLevelStats, new TopSummary(data).html());
+		d.setDate(d.getDate() - 1);
+
+		return d.toISOString().split("T")[0];
+	})(),
+	startTime = input({ "id": "startTime", "type": "date", "value": yesterday }),
+	endTime = input({ "id": "endTime", "type": "date", "value": yesterday }),
+	today = endTime.valueAsNumber / 1000 | 0,
+	formatTimestamp = (timestamp: number) => new Date(timestamp * 1000).toISOString().replace("T", " ").replace(/\..*/, ""),
+	topLevelStats = div(),
+	setTopLevel = (data: Analytics) => clearNode(topLevelStats, new TopSummary(data).html());
 
 amendNode(document.body, [
 	div([
-		label({"for": "startTime"}, "Start Time"),
+		label({ "for": "startTime" }, "Start Time"),
 		startTime,
 		br(),
-		label({"for": "endTime"}, "End Time"),
+		label({ "for": "endTime" }, "End Time"),
 		endTime,
 		br(),
-		button({"click": () => {
-			const start = startTime.valueAsNumber/1000|0,
-			      end = (endTime.valueAsNumber/1000|0)+86400;
+		button({
+			"click": () => {
+				const start = startTime.valueAsNumber / 1000 | 0,
+					end = (endTime.valueAsNumber / 1000 | 0) + 86400;
 
-			if (isNaN(start) || isNaN(end) || start >= end) {
-				alert("Invalid time range");
+				if (isNaN(start) || isNaN(end) || start >= end) {
+					alert("Invalid time range");
 
-				return;
+					return;
+				}
+
+				rpc.getAnalytics(start, end)
+					.then(data => setTopLevel(data));
 			}
-
-			rpc.getAnalytics(start, end)
-			.then(data => setTopLevel(data));
-		}}, "Go!")
+		}, "Go!")
 	]),
 	hr(),
 	topLevelStats,
