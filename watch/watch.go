@@ -44,6 +44,7 @@ const (
 	basedirBasename = "basedirs.db"
 	summariseCPU    = 2
 	summariseMem    = 8192
+	connectTimeout  = 10 * time.Second
 )
 
 // Watch watches an input directory (which should be the output directory of a
@@ -107,7 +108,8 @@ func entryExists(path string) bool {
 func scheduleSummarisers(inputDir, outputDir, quotaPath, basedirsConfig string,
 	inputPaths []string, logger log15.Logger) error {
 	s, err := client.New(client.SchedulerSettings{
-		Logger: logger,
+		Logger:  logger,
+		Timeout: connectTimeout,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create wr client: %w", err)
