@@ -85,13 +85,12 @@ func watch(inputDirs []string, outputDir, quotaPath, basedirsConfig string, logg
 			return fmt.Errorf("error getting input DB paths: %w", err)
 		}
 
-		inputPaths = slices.DeleteFunc(inputPaths, func(p string) bool {
-			base := filepath.Base(p)
+		if err := scheduleSummarisers(inputDir, outputDir, quotaPath, basedirsConfig,
+			slices.DeleteFunc(inputPaths, func(p string) bool {
+				base := filepath.Base(p)
 
-			return entryExists(filepath.Join(outputDir, base)) || entryExists(filepath.Join(outputDir, "."+base))
-		})
-
-		if err := scheduleSummarisers(inputDir, outputDir, quotaPath, basedirsConfig, inputPaths, logger); err != nil {
+				return entryExists(filepath.Join(outputDir, base)) || entryExists(filepath.Join(outputDir, "."+base))
+			}), logger); err != nil {
 			return err
 		}
 	}
