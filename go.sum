@@ -368,6 +368,8 @@ github.com/ugorji/go/codec v1.2.12 h1:9LC83zGrHhuUA9l16C9AHXAqEV/2wBQ4nkvumAE65E
 github.com/ugorji/go/codec v1.2.12/go.mod h1:UNopzCgEMSXjBc6AOMqYvWC1ktqTAfzJZUZgYf6w6lg=
 github.com/wtsi-hgi/go-authserver v1.3.0 h1:pEqBt0+lPl5tH+aq5eQD+0DNiB5K7Owa5ZuO59NZl0k=
 github.com/wtsi-hgi/go-authserver v1.3.0/go.mod h1:itSUjEbYvkhkWkE0OVnZCuEmcmZjtqoDvkhi7b2sTjc=
+github.com/wtsi-hgi/go-authserver v1.4.0 h1:AaBkPIHZ1PilVQGUN57lKwkfDUf3IyHGoruWPp/oQTI=
+github.com/wtsi-hgi/go-authserver v1.4.0/go.mod h1:uUSOWZwSb3/GDn9QBWryF4sgS696aFHQXJ3J3C+GDN8=
 github.com/wtsi-ssg/wr v0.5.12 h1:d5us++CvScwkEyPyEv6L1Ty0IpetFjgw+wxOL0bi1MU=
 github.com/wtsi-ssg/wr v0.5.12/go.mod h1:QUqhVemSMBnVCcFUwy01H3ISFjbHg9gjRviM8diI9P0=
 github.com/yuin/goldmark v1.1.27/go.mod h1:3hX8gzYuyVAZsxl0MRgGTJEmQBFcNTphYh9decYSb74=
