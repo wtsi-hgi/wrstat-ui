@@ -28,6 +28,7 @@ package server
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -38,7 +39,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unsafe"
 
+	"github.com/gin-contrib/secure"
 	"github.com/gin-gonic/gin"
 	. "github.com/smartystreets/goconvey/convey"
 	gas "github.com/wtsi-hgi/go-authserver"
@@ -48,6 +51,7 @@ import (
 	internaldb "github.com/wtsi-hgi/wrstat-ui/internal/db"
 	"github.com/wtsi-hgi/wrstat-ui/internal/fixtimes"
 	"github.com/wtsi-hgi/wrstat-ui/internal/split"
+	"gopkg.in/tylerb/graceful.v1"
 )
 
 func TestIDsToWanted(t *testing.T) {
@@ -57,6 +61,38 @@ func TestIDsToWanted(t *testing.T) {
 	})
 }
 
+type tServer struct {
+	router *gin.Engine
+	srv    *graceful.Server
+}
+
+func startTestServer(t *testing.T, s *Server, certPath, keyPath string) (string, func()) {
+	t.Helper()
+
+	ts := (*tServer)(unsafe.Pointer(s))
+
+	ts.router.Use(secure.New(secure.DefaultConfig()))
+
+	srv := &graceful.Server{
+		Timeout: 10 * time.Second,
+
+		Server: &http.Server{
+			Addr:              "localhost:0",
+			Handler:           ts.router,
+			ReadHeaderTimeout: 20 * time.Second,
+		},
+	}
+
+	ts.srv = srv
+
+	l, err := srv.ListenTLS(certPath, keyPath)
+	So(err, ShouldBeNil)
+
+	go srv.Serve(l)
+
+	return fmt.Sprintf("localhost:%d", l.Addr().(*net.TCPAddr).Port), s.Stop
+}
+
 func TestServer(t *testing.T) {
 	username, uid, gids := internaldb.GetUserAndGroups(t)
 	exampleGIDs := getExampleGIDs(gids)
@@ -64,7 +100,7 @@ func TestServer(t *testing.T) {
 
 	refTime := time.Now().Unix()
 
-	Convey("Given a Server", t, func() {
+	FocusConvey("Given a Server", t, func() {
 		logWriter := gas.NewStringLogger()
 		s := New(logWriter)
 
@@ -111,10 +147,12 @@ func TestServer(t *testing.T) {
 			So(err, ShouldNotBeNil)
 		})
 
-		Convey("You can Start the Server", func() {
+		FocusConvey("You can Start the Server", func() {
 			certPath, keyPath, err := gas.CreateTestCert(t)
 			So(err, ShouldBeNil)
 
+			// addr, fn := startTestServer(t, s, certPath, keyPath)
+			// defer fn()
 			addr, dfunc, err := gas.StartTestServer(s, certPath, keyPath)
 			So(err, ShouldBeNil)
 			defer func() {
@@ -122,7 +160,7 @@ func TestServer(t *testing.T) {
 				So(errd, ShouldBeNil)
 			}()
 
-			Convey("The jwt endpoint works after enabling it", func() {
+			FocusConvey("The jwt endpoint works after enabling it", func() {
 				err = s.EnableAuth(certPath, keyPath, func(u, p string) (bool, string) {
 					returnUID := uid
 
@@ -572,6 +610,11 @@ func TestServer(t *testing.T) {
 	})
 }
 
+type analyticsData struct {
+	Name, Session, Data string
+	Time                int64
+}
+
 // getExampleGIDs returns some example GIDs to test with, using 2 real ones from
 // the given slice if the slice is long enough.
 func getExampleGIDs(gids []string) []string {
@@ -605,7 +648,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 
 	refTime := time.Now().Unix()
 
-	Convey("Given databases", func() {
+	FocusConvey("Given databases", func() {
 		jwtBasename := ".wrstat.test.jwt"
 		serverTokenBasename := ".wrstat.test.servertoken" //nolint:gosec
 
@@ -708,7 +751,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 			So(dcss[0].Count, ShouldEqual, 13)
 		})
 
-		Convey("Once you add the tree page", func() {
+		FocusConvey("Once you add the tree page", func() {
 			var logWriter strings.Builder
 			s := New(&logWriter)
 
@@ -743,12 +786,8 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 			err = s.AddTreePage()
 			So(err, ShouldBeNil)
 
-			addr, dfunc, err := gas.StartTestServer(s, cert, key)
-			So(err, ShouldBeNil)
-			defer func() {
-				errd := dfunc()
-				So(errd, ShouldBeNil)
-			}()
+			addr, fn := startTestServer(t, s, cert, key)
+			defer fn()
 
 			token, err := gas.Login(gas.NewClientRequest(addr, cert), "user", "pass")
 			So(err, ShouldBeNil)
@@ -763,6 +802,81 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 				resp, err = r.Get("")
 				So(err, ShouldBeNil)
 				So(strings.ToUpper(string(resp.Body())), ShouldStartWith, "<!DOCTYPE HTML>")
+			})
+
+			FocusConvey("You can send data to the analytics endpoint", func() {
+				So(s.InitAnalyticsDB(filepath.Join(t.TempDir(), "db")), ShouldBeNil)
+
+				getAndClear := func() []analyticsData {
+					r, err := s.analyticsDB.Query("SELECT user, session, state, time FROM [events];")
+					So(err, ShouldBeNil)
+
+					var rows []analyticsData
+
+					for r.Next() {
+						var ad analyticsData
+
+						So(r.Scan(&ad.Name, &ad.Session, &ad.Data, &ad.Time), ShouldBeNil)
+
+						rows = append(rows, ad)
+					}
+
+					r.Close()
+
+					_, err = s.analyticsDB.Exec("DELETE FROM [events];")
+					So(err, ShouldBeNil)
+
+					return rows
+				}
+
+				sessionID := "AAA"
+				var start, end int64
+
+				sendBeacon := func(referers ...string) {
+					start = time.Now().Unix()
+
+					for _, referer := range referers {
+						r := gas.NewClientRequest(addr, cert)
+						r.Cookies = append(r.Cookies, &http.Cookie{Name: "jwt", Value: token})
+						r.Body = sessionID
+
+						r.Header.Set("Referer", referer)
+
+						_, err = r.Post(EndPointAuthSpyware)
+						So(err, ShouldBeNil)
+					}
+
+					end = time.Now().Unix() + 1
+				}
+
+				checkTimes := func(data []analyticsData) {
+					for n := range data {
+						So(data[n].Time, ShouldBeBetweenOrEqual, start, end)
+
+						data[n].Time = 0
+					}
+				}
+
+				sendBeacon("")
+
+				d := getAndClear()
+
+				checkTimes(d)
+
+				So(d, ShouldResemble, []analyticsData{
+					{Name: "user", Session: "AAA", Data: "{}\n"},
+				})
+
+				sendBeacon(`?useCount=true&owners=["a","bc"]`, `?filterMaxSize=123&users=[1,2,3]&byUser="badString"`)
+
+				d = getAndClear()
+
+				checkTimes(d)
+
+				So(d, ShouldResemble, []analyticsData{
+					{Name: "user", Session: "AAA", Data: "{\"owners\":[\"a\",\"bc\"],\"useCount\":true}\n"},
+					{Name: "user", Session: "AAA", Data: "{\"filterMaxSize\":123,\"users\":[1,2,3]}\n"},
+				})
 			})
 
 			Convey("You can access the tree API", func() {
