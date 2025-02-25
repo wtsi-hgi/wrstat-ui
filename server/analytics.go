@@ -38,7 +38,8 @@ import (
 	"unsafe"
 
 	"github.com/gin-gonic/gin"
-	_ "github.com/mattn/go-sqlite3" //
+	_ "github.com/mattn/go-sqlite3" //nolint:revive
+	gas "github.com/wtsi-hgi/go-authserver"
 )
 
 var (
@@ -50,9 +51,19 @@ var (
 	stringSlicePool = sync.Pool{New: func() any { return new([]string) }} //nolint:gochecknoglobals
 )
 
+const (
+	spywarePath         = "/spyware"
+	EndPointAuthSpyware = gas.EndPointAuth + spywarePath
+)
+
 // InitAnalyticsDB adds user activity recording to the server, saving users
 // sessions to an SQLite database stored at the given path.
 func (s *Server) InitAnalyticsDB(dbPath string) error {
+	authGroup := s.AuthRouter()
+	if authGroup == nil {
+		return gas.ErrNeedsAuth
+	}
+
 	db, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
 		return err
@@ -64,8 +75,6 @@ func (s *Server) InitAnalyticsDB(dbPath string) error {
 		`PRAGMA JOURNAL_MODE = DELETE;`,
 		`PRAGMA page_size = 1024;`,
 		`CREATE TABLE IF NOT EXISTS [events] (user TEXT, session TEXT, state TEXT, time INTEGER)`,
-		`CREATE INDEX IF NOT EXISTS username ON [events] (user)`,
-		`CREATE INDEX IF NOT EXISTS sessionID ON [events] (session)`,
 		`CREATE INDEX IF NOT EXISTS eventTime ON [events] (time)`,
 		`VACUUM;`,
 	} {
@@ -81,6 +90,8 @@ func (s *Server) InitAnalyticsDB(dbPath string) error {
 	}
 
 	s.analyticsDB = db
+
+	authGroup.POST(spywarePath, s.recordAnalytics)
 
 	return nil
 }
@@ -125,22 +136,9 @@ func (s *Server) handleAnalytics(c *gin.Context) (int, error) {
 }
 
 func (s *Server) dataFromHeaders(c *gin.Context) (string, url.Values, int, error) {
-	ar := s.AuthRouter()
-	if ar == nil {
-		return "", nil, http.StatusInternalServerError, nil
-	}
-
 	u, err := url.Parse(c.Request.Referer())
 	if err != nil {
 		return "", nil, http.StatusBadRequest, err
-	}
-
-	jwt, _ := c.Cookie("jwt") //nolint:errcheck
-
-	c.Request.Header.Set("Authorization", "Bearer "+jwt)
-
-	for _, h := range ar.Handlers {
-		h(c)
 	}
 
 	username := s.GetUser(c)

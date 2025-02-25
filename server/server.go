@@ -86,8 +86,7 @@ const (
 	EndPointAuthBasedirHistory     = gas.EndPointAuth + basedirsHistoryPath
 
 	// TreePath is the path to the static tree website.
-	TreePath    = "/tree"
-	spywarePath = "/spyware"
+	TreePath = "/tree"
 
 	// EndPointAuthTree is the endpoint for making treemap queries when
 	// authorization is implemented.

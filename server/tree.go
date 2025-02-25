@@ -70,12 +70,6 @@ func (s *Server) AddTreePage() error {
 			return
 		}
 
-		if strings.HasPrefix(c.Request.URL.Path, spywarePath) {
-			s.recordAnalytics(c)
-
-			return
-		}
-
 		c.Writer.Header().Del("Content-Security-Policy")
 		staticServer.ServeHTTP(c.Writer, c.Request)
 	})
