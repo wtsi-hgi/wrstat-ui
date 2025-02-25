@@ -33,7 +33,15 @@ import (
 var analyticsCmd = &cobra.Command{
 	Use:   "analytics",
 	Short: "Start analytics server",
-	Long:  `Start analytics server.`,
+	Long: `Start analytics server to view recorded frontend analytics.
+
+Given the path to an sqlite database produced by the server subcommands
+--spyware flag will launch a webserver that can be used to explore the captured
+data.
+
+The server will, by default, start on port 8080, which can be changed by using
+the --bind/-b flag.
+`,
 	Run: func(_ *cobra.Command, args []string) {
 		if len(args) != 1 {
 			die("sqlite database location required")

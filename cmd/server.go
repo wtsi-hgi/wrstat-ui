@@ -97,6 +97,9 @@ groups with that area.
 with their owners. If your groups don't really have owners, just supply the path
 to a file with a fake entry.
 
+The --spyware flag can be given a path to a sqlite database (will be created if
+it doesn't exist) that will be used to record user activity on the web frontend.
+
 The server must be running for 'wrstat-ui where' calls to succeed.
 
 This command will block forever in the foreground; you can background it with
