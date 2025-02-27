@@ -247,6 +247,8 @@ github.com/mattn/go-runewidth v0.0.16 h1:E5ScNMtiwvlvB5paMFdw9p4kSQzbXFikJ5SQO6T
 github.com/mattn/go-runewidth v0.0.16/go.mod h1:Jdepj2loyihRzMpdS35Xk/zdY8IAYHsh153qUoGf23w=
 github.com/mattn/go-shellwords v1.0.12 h1:M2zGm7EW6UQJvDeQxo4T51eKPurbeFbe8WtebGE2xrk=
 github.com/mattn/go-shellwords v1.0.12/go.mod h1:EZzvwXDESEeg03EKmM+RmDnNOPKG4lLtQsUlTZDWQ8Y=
+github.com/mattn/go-sqlite3 v1.14.24 h1:tpSp2G2KyMnnQu99ngJ47EIkWVmliIizyZBfPrBWDRM=
+github.com/mattn/go-sqlite3 v1.14.24/go.mod h1:Uh1q+B4BYcTPb+yiD3kU8Ct7aC0hY9fxUwlHK0RXw+Y=
 github.com/minio/crc64nvme v1.0.1 h1:DHQPrYPdqK7jQG/Ls5CTBZWeex/2FMS3G5XGkycuFrY=
 github.com/minio/crc64nvme v1.0.1/go.mod h1:eVfm2fAzLlxMdUGc0EEBGSMmPwmXD5XiNRpnu9J3bvg=
 github.com/minio/md5-simd v1.1.0/go.mod h1:XpBqgZULrMYD3R+M28PcmP0CkI7PEMzB3U77ZrKZ0Gw=
@@ -366,6 +368,8 @@ github.com/ugorji/go/codec v1.2.12 h1:9LC83zGrHhuUA9l16C9AHXAqEV/2wBQ4nkvumAE65E
 github.com/ugorji/go/codec v1.2.12/go.mod h1:UNopzCgEMSXjBc6AOMqYvWC1ktqTAfzJZUZgYf6w6lg=
 github.com/wtsi-hgi/go-authserver v1.3.0 h1:pEqBt0+lPl5tH+aq5eQD+0DNiB5K7Owa5ZuO59NZl0k=
 github.com/wtsi-hgi/go-authserver v1.3.0/go.mod h1:itSUjEbYvkhkWkE0OVnZCuEmcmZjtqoDvkhi7b2sTjc=
+github.com/wtsi-hgi/go-authserver v1.4.0 h1:AaBkPIHZ1PilVQGUN57lKwkfDUf3IyHGoruWPp/oQTI=
+github.com/wtsi-hgi/go-authserver v1.4.0/go.mod h1:uUSOWZwSb3/GDn9QBWryF4sgS696aFHQXJ3J3C+GDN8=
 github.com/wtsi-ssg/wr v0.5.12 h1:d5us++CvScwkEyPyEv6L1Ty0IpetFjgw+wxOL0bi1MU=
 github.com/wtsi-ssg/wr v0.5.12/go.mod h1:QUqhVemSMBnVCcFUwy01H3ISFjbHg9gjRviM8diI9P0=
 github.com/yuin/goldmark v1.1.27/go.mod h1:3hX8gzYuyVAZsxl0MRgGTJEmQBFcNTphYh9decYSb74=
@@ -540,5 +544,10 @@ k8s.io/client-go v7.0.0+incompatible/go.mod h1:7vJpHMYJwNQCWgzmNV+VYUl1zCObLyodB
 nanomsg.org/go-mangos v1.4.0 h1:pVRLnzXePdSbhWlWdSncYszTagERhMG5zK/vXYmbEdM=
 nanomsg.org/go-mangos v1.4.0/go.mod h1:MOor8xUIgwsRMPpLr9xQxe7bT7rciibScOqVyztNxHQ=
 nullprogram.com/x/optparse v1.0.0/go.mod h1:KdyPE+Igbe0jQUrVfMqDMeJQIJZEuyV7pjYmp6pbG50=
+vimagination.zapto.org/javascript v1.4.15 h1:y+y/QCvti1lUHaVD6VSZviSCl2HMAmU5G3ZPlcjkFlQ=
+vimagination.zapto.org/javascript v1.4.15/go.mod h1:zGQvh50K8o8zaa/b3XH83gsjwSYz5ubq6EgpJw3smxg=
+vimagination.zapto.org/parser v1.0.2/go.mod h1:/H483adsvbp1SLfB0xfFBVfh+mze11+FHwCijc0rpCc=
 vimagination.zapto.org/parser v1.0.4 h1:7REiRsbDlO7amHGjrCMudJaaw+E854njekVmTTsI2Hg=
 vimagination.zapto.org/parser v1.0.4/go.mod h1:MxM1MZY6A9AeEx6nahIQ6MJaGZqX80n6Vm3zGVqV9FU=
+vimagination.zapto.org/tsserver v1.0.11 h1:DMwStw1hqnq3nvLI6Up7jnvNKn29hs1zqsMWWqo+Qco=
+vimagination.zapto.org/tsserver v1.0.11/go.mod h1:rnykt6klVAJFKHxHjAd3TNydRCRxtOVuPgTQBVwo124=

@@ -29,6 +29,7 @@
 package server
 
 import (
+	"database/sql"
 	"embed"
 	"io"
 	"sync"
@@ -111,6 +112,9 @@ type Server struct {
 	areas          map[string][]string
 
 	stopCh chan struct{}
+
+	analyticsDB   *sql.DB
+	analyticsStmt *sql.Stmt
 }
 
 // New creates a Server which can serve a REST API and website.
@@ -142,5 +146,9 @@ func (s *Server) stop() {
 	if s.tree != nil {
 		s.tree.Close()
 		s.tree = nil
+	}
+
+	if s.analyticsDB != nil {
+		s.analyticsDB.Close()
 	}
 }

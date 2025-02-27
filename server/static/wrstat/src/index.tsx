@@ -33,6 +33,7 @@ import Auth, { logout } from './auth';
 import { approxTimeAgo } from './format';
 import ready from './ready';
 import RPC from './rpc';
+import './analytics';
 
 const auth = ready.then(Auth),
 	now = Date.now(),

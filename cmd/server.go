@@ -60,6 +60,7 @@ var (
 	oktaOAuthClientSecret string
 	areasPath             string
 	ownersPath            string
+	spywareDB             string
 )
 
 // serverCmd represents the server command.
@@ -95,6 +96,9 @@ groups with that area.
 --owners gid,owner csv file is required and will be used to associate groups
 with their owners. If your groups don't really have owners, just supply the path
 to a file with a fake entry.
+
+The --spyware flag can be given a path to a sqlite database (will be created if
+it doesn't exist) that will be used to record user activity on the web frontend.
 
 The server must be running for 'wrstat-ui where' calls to succeed.
 
@@ -161,6 +165,12 @@ files. It will use the mtime of the file as the data creation time in reports.
 			die("failed to add tree page: %s", err)
 		}
 
+		if spywareDB != "" {
+			if err = s.InitAnalyticsDB(spywareDB); err != nil {
+				die("failed to init spyware db: %s", err)
+			}
+		}
+
 		defer s.Stop()
 
 		sayStarted()
@@ -194,6 +204,7 @@ func init() {
 	serverCmd.Flags().StringVarP(&ownersPath, "owners", "o", "", "gid,owner csv file")
 	serverCmd.Flags().StringVar(&serverLogPath, "logfile", "",
 		"log to this file instead of syslog")
+	serverCmd.Flags().StringVar(&spywareDB, "spyware", "s", "path to sqlite database to record analytics")
 }
 
 // checkOAuthArgs ensures we have the necessary args/ env vars for Okta auth.

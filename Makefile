@@ -13,6 +13,7 @@ default: install
 
 build: export CGO_ENABLED = 1
 build:
+	@cd analytics; ./embed.sh;
 	@cd server/static/wrstat; npm install && npm run build:prod
 	go build -tags netgo ${LDFLAGS}
 
@@ -23,6 +24,7 @@ buildnonpm:
 install: export CGO_ENABLED = 1
 install:
 	@rm -f ${GOPATH}/bin/wrstat-ui
+	@cd analytics; ./embed.sh;
 	@cd server/static/wrstat; npm install && npm run build:prod
 	@echo Starting go install
 	@go install -tags netgo ${LDFLAGS}
@@ -31,6 +33,7 @@ install:
 installnonpm: export CGO_ENABLED = 1
 installnonpm:
 	@rm -f ${GOPATH}/bin/wrstat-ui
+	@cd analytics; ./embed.sh;
 	go install -tags netgo ${LDFLAGS}
 	@echo installed to ${GOPATH}/bin/wrstat-ui
 

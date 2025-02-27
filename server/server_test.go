@@ -572,6 +572,11 @@ func TestServer(t *testing.T) {
 	})
 }
 
+type analyticsData struct {
+	Name, Session, Data string
+	Time                int64
+}
+
 // getExampleGIDs returns some example GIDs to test with, using 2 real ones from
 // the given slice if the slice is long enough.
 func getExampleGIDs(gids []string) []string {
@@ -763,6 +768,81 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 				resp, err = r.Get("")
 				So(err, ShouldBeNil)
 				So(strings.ToUpper(string(resp.Body())), ShouldStartWith, "<!DOCTYPE HTML>")
+			})
+
+			Convey("You can send data to the analytics endpoint", func() {
+				So(s.InitAnalyticsDB(filepath.Join(t.TempDir(), "db")), ShouldBeNil)
+
+				getAndClear := func() []analyticsData {
+					r, errr := s.analyticsDB.Query("SELECT user, session, state, time FROM [events];")
+					So(errr, ShouldBeNil)
+
+					var rows []analyticsData
+
+					for r.Next() {
+						var ad analyticsData
+
+						So(r.Scan(&ad.Name, &ad.Session, &ad.Data, &ad.Time), ShouldBeNil)
+
+						rows = append(rows, ad)
+					}
+
+					r.Close()
+
+					_, err = s.analyticsDB.Exec("DELETE FROM [events];")
+					So(err, ShouldBeNil)
+
+					return rows
+				}
+
+				var start, end int64
+
+				sessionID := "AAA"
+				sendBeacon := func(referers ...string) {
+					start = time.Now().Unix()
+
+					for _, referer := range referers {
+						r := gas.NewClientRequest(addr, cert)
+						r.Cookies = append(r.Cookies, &http.Cookie{Name: "jwt", Value: token})
+						r.Body = sessionID
+
+						r.Header.Set("Referer", referer)
+
+						_, err = r.Post(EndPointAuthSpyware)
+						So(err, ShouldBeNil)
+					}
+
+					end = time.Now().Unix() + 1
+				}
+
+				checkTimes := func(data []analyticsData) {
+					for n := range data {
+						So(data[n].Time, ShouldBeBetweenOrEqual, start, end)
+
+						data[n].Time = 0
+					}
+				}
+
+				sendBeacon("")
+
+				d := getAndClear()
+
+				checkTimes(d)
+
+				So(d, ShouldResemble, []analyticsData{
+					{Name: "user", Session: "AAA", Data: "{}\n"},
+				})
+
+				sendBeacon(`?useCount=true&owners=["a","bc"]`, `?filterMaxSize=123&users=[1,2,3]&byUser="badString"`)
+
+				d = getAndClear()
+
+				checkTimes(d)
+
+				So(d, ShouldResemble, []analyticsData{
+					{Name: "user", Session: "AAA", Data: "{\"owners\":[\"a\",\"bc\"],\"useCount\":true}\n"},
+					{Name: "user", Session: "AAA", Data: "{\"filterMaxSize\":123,\"users\":[1,2,3]}\n"},
+				})
 			})
 
 			Convey("You can access the tree API", func() {
