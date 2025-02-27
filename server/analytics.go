@@ -98,7 +98,6 @@ func initDB(db *sql.DB) (*sql.Stmt, error) {
 	}
 
 	return db.Prepare("INSERT INTO [events] (user, session, state, time) VALUES (?, ?, ?, ?);")
-
 }
 
 func (s *Server) recordAnalytics(c *gin.Context) {

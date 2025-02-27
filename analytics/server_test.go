@@ -54,6 +54,7 @@ func TestServer(t *testing.T) {
 
 		addr, dfunc, err := gas.StartTestServer(srv, certPath, keyPath)
 		So(err, ShouldBeNil)
+
 		defer func() {
 			So(dfunc(), ShouldBeNil)
 		}()
@@ -66,20 +67,20 @@ func TestServer(t *testing.T) {
 		l, err := net.Listen("tcp", "localhost:0")
 		So(err, ShouldBeNil)
 
-		port := l.Addr().(*net.TCPAddr).Port
+		port := l.Addr().(*net.TCPAddr).Port //nolint:errcheck,forcetypeassert
 		url := fmt.Sprintf("http://127.0.0.1:%d/", port)
 
 		So(l.Close(), ShouldBeNil)
 
-		go StartServer(":"+strconv.Itoa(port), dbPath, addr)
+		go StartServer(":"+strconv.Itoa(port), dbPath, addr) //nolint:errcheck
 
 		time.Sleep(time.Second)
 
 		request := func(endpoint string, request, response any) error {
 			var buf bytes.Buffer
 
-			json.NewEncoder(&buf).Encode(request)
-			resp, err := http.Post(url+endpoint, "application/json", &buf)
+			So(json.NewEncoder(&buf).Encode(request), ShouldBeNil)
+			resp, err := http.Post(url+endpoint, "application/json", &buf) //nolint:noctx
 			So(err, ShouldBeNil)
 
 			return json.NewDecoder(resp.Body).Decode(response)
@@ -111,6 +112,7 @@ func TestServer(t *testing.T) {
 			}
 
 			now := time.Now().Unix()
+
 			addData("")
 
 			var response Response
