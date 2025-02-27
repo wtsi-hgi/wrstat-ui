@@ -46,6 +46,8 @@ const (
 	summariseMem    = 8192
 )
 
+var connectTimeout = 10 * time.Second //nolint:gochecknoglobals
+
 // Watch watches an input directory (which should be the output directory of a
 // wrstat multi run) for new stats.gz files, upon which it will run the
 // summarise subcommand on that data, if it has not already been run.
@@ -107,11 +109,14 @@ func entryExists(path string) bool {
 func scheduleSummarisers(inputDir, outputDir, quotaPath, basedirsConfig string,
 	inputPaths []string, logger log15.Logger) error {
 	s, err := client.New(client.SchedulerSettings{
-		Logger: logger,
+		Logger:  logger,
+		Timeout: connectTimeout,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create wr client: %w", err)
 	}
+
+	defer s.Disconnect() //nolint:errcheck
 
 	jobs := make([]*jobqueue.Job, 0, len(inputPaths))
 

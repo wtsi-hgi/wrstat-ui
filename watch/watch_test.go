@@ -26,6 +26,7 @@ package watch
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -36,7 +37,9 @@ import (
 	"github.com/VertebrateResequencing/wr/client"
 	"github.com/VertebrateResequencing/wr/jobqueue"
 	"github.com/VertebrateResequencing/wr/jobqueue/scheduler"
+	"github.com/inconshreveable/log15"
 	. "github.com/smartystreets/goconvey/convey"
+	gas "github.com/wtsi-hgi/go-authserver"
 )
 
 func TestWatch(t *testing.T) {
@@ -266,6 +269,43 @@ func TestWatch(t *testing.T) {
 					Retries:  30,
 				},
 			})
+		})
+
+		Convey("watch errors if can't connect to manager", func() {
+			tempDir := t.TempDir()
+
+			certPath, keyPath, err := gas.CreateTestCert(t)
+			So(err, ShouldBeNil)
+
+			tokenPath := filepath.Join(tempDir, "token")
+			So(os.WriteFile(tokenPath, []byte("token"), 0600), ShouldBeNil)
+
+			os.Setenv("WR_MANAGERTOKENFILE", tokenPath)
+			os.Setenv("WR_MANAGERCAFILE", certPath)
+			os.Setenv("WR_MANAGERCERTFILE", certPath)
+			os.Setenv("WR_MANAGERKEYFILE", keyPath)
+
+			client.PretendSubmissions = ""
+			logger := log15.New()
+
+			errCh := make(chan error, 1)
+			errTimedOut := errors.New("timed out") //nolint:err113
+
+			connectTimeout = time.Second
+
+			go func() {
+				time.Sleep(3 * connectTimeout)
+				errCh <- errTimedOut
+			}()
+
+			go func() {
+				errCh <- watch([]string{inputDir}, outputDir, "/path/to/quota", "/path/to/basedirs.config", logger)
+			}()
+
+			err = <-errCh
+			So(err, ShouldNotBeNil)
+			So(err, ShouldNotEqual, errTimedOut)
+			So(err.Error(), ShouldContainSubstring, "could not reach the server")
 		})
 	})
 }
