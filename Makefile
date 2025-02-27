@@ -33,6 +33,7 @@ install:
 installnonpm: export CGO_ENABLED = 1
 installnonpm:
 	@rm -f ${GOPATH}/bin/wrstat-ui
+	@cd analytics; ./embed.sh;
 	go install -tags netgo ${LDFLAGS}
 	@echo installed to ${GOPATH}/bin/wrstat-ui
 

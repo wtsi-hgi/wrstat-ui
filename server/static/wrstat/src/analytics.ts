@@ -23,7 +23,7 @@
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  ******************************************************************************/
 
-const beaconURL = "/spyware",
+const beaconURL = "/rest/v1/auth/spyware",
 	newSessionID = () => Date.now().toString(36),
 	recordAnalytics = () => navigator.sendBeacon(beaconURL, sessionID),
 	pushState = window.history.pushState;

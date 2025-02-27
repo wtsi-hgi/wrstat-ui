@@ -28,7 +28,6 @@ package server
 import (
 	"encoding/json"
 	"fmt"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -39,9 +38,7 @@ import (
 	"strings"
 	"testing"
 	"time"
-	"unsafe"
 
-	"github.com/gin-contrib/secure"
 	"github.com/gin-gonic/gin"
 	. "github.com/smartystreets/goconvey/convey"
 	gas "github.com/wtsi-hgi/go-authserver"
@@ -51,7 +48,6 @@ import (
 	internaldb "github.com/wtsi-hgi/wrstat-ui/internal/db"
 	"github.com/wtsi-hgi/wrstat-ui/internal/fixtimes"
 	"github.com/wtsi-hgi/wrstat-ui/internal/split"
-	"gopkg.in/tylerb/graceful.v1"
 )
 
 func TestIDsToWanted(t *testing.T) {
@@ -59,38 +55,6 @@ func TestIDsToWanted(t *testing.T) {
 		_, err := restrictGIDs(map[uint32]bool{1: true}, []uint32{2})
 		So(err, ShouldNotBeNil)
 	})
-}
-
-type tServer struct {
-	router *gin.Engine
-	srv    *graceful.Server
-}
-
-func startTestServer(t *testing.T, s *Server, certPath, keyPath string) (string, func()) {
-	t.Helper()
-
-	ts := (*tServer)(unsafe.Pointer(s))
-
-	ts.router.Use(secure.New(secure.DefaultConfig()))
-
-	srv := &graceful.Server{
-		Timeout: 10 * time.Second,
-
-		Server: &http.Server{
-			Addr:              "localhost:0",
-			Handler:           ts.router,
-			ReadHeaderTimeout: 20 * time.Second,
-		},
-	}
-
-	ts.srv = srv
-
-	l, err := srv.ListenTLS(certPath, keyPath)
-	So(err, ShouldBeNil)
-
-	go srv.Serve(l) //nolint:errcheck
-
-	return fmt.Sprintf("localhost:%d", l.Addr().(*net.TCPAddr).Port), s.Stop //nolint:errcheck,forcetypeassert
 }
 
 func TestServer(t *testing.T) {
@@ -784,8 +748,12 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 			err = s.AddTreePage()
 			So(err, ShouldBeNil)
 
-			addr, fn := startTestServer(t, s, cert, key)
-			defer fn()
+			addr, dfunc, err := gas.StartTestServer(s, cert, key)
+			So(err, ShouldBeNil)
+			defer func() {
+				errd := dfunc()
+				So(errd, ShouldBeNil)
+			}()
 
 			token, err := gas.Login(gas.NewClientRequest(addr, cert), "user", "pass")
 			So(err, ShouldBeNil)

@@ -76,14 +76,14 @@ func TestServer(t *testing.T) {
 
 		time.Sleep(time.Second)
 
-		request := func(endpoint string, request, response any) error {
+		request := func(endpoint string, request, dbResponse any) error {
 			var buf bytes.Buffer
 
 			So(json.NewEncoder(&buf).Encode(request), ShouldBeNil)
 			resp, err := http.Post(url+endpoint, "application/json", &buf) //nolint:noctx
 			So(err, ShouldBeNil)
 
-			return json.NewDecoder(resp.Body).Decode(response)
+			return json.NewDecoder(resp.Body).Decode(dbResponse)
 		}
 
 		Convey("You can retrieve the hostname of the wrstat-ui server", func() {
@@ -115,16 +115,16 @@ func TestServer(t *testing.T) {
 
 			addData("")
 
-			var response Response
+			var dbResponse response
 
-			So(request("analytics", summaryInput{}, &response), ShouldBeNil)
-			So(response, ShouldResemble, Response{})
+			So(request("analytics", summaryInput{}, &dbResponse), ShouldBeNil)
+			So(dbResponse, ShouldResemble, response{})
 
-			So(request("analytics", summaryInput{StartTime: now - 100, EndTime: now + 100}, &response), ShouldBeNil)
+			So(request("analytics", summaryInput{StartTime: now - 100, EndTime: now + 100}, &dbResponse), ShouldBeNil)
 
-			fixTimes(response)
+			fixTimes(dbResponse)
 
-			So(response, ShouldResemble, Response{
+			So(dbResponse, ShouldResemble, response{
 				"user": {
 					"AAA": {
 						{State: json.RawMessage("{}")},
@@ -134,11 +134,11 @@ func TestServer(t *testing.T) {
 
 			addData("")
 
-			So(request("analytics", summaryInput{StartTime: now - 100, EndTime: now + 100}, &response), ShouldBeNil)
+			So(request("analytics", summaryInput{StartTime: now - 100, EndTime: now + 100}, &dbResponse), ShouldBeNil)
 
-			fixTimes(response)
+			fixTimes(dbResponse)
 
-			So(response, ShouldResemble, Response{
+			So(dbResponse, ShouldResemble, response{
 				"user": {
 					"AAA": {
 						{State: json.RawMessage("{}")},
@@ -151,11 +151,11 @@ func TestServer(t *testing.T) {
 
 			addData("?byUser=true")
 
-			So(request("analytics", summaryInput{StartTime: now - 100, EndTime: now + 100}, &response), ShouldBeNil)
+			So(request("analytics", summaryInput{StartTime: now - 100, EndTime: now + 100}, &dbResponse), ShouldBeNil)
 
-			fixTimes(response)
+			fixTimes(dbResponse)
 
-			So(response, ShouldResemble, Response{
+			So(dbResponse, ShouldResemble, response{
 				"user": {
 					"AAA": {
 						{State: json.RawMessage("{}")},
@@ -167,16 +167,16 @@ func TestServer(t *testing.T) {
 				},
 			})
 
-			response = nil
+			dbResponse = nil
 
-			So(request("analytics", summaryInput{StartTime: now - 200, EndTime: now - 100}, &response), ShouldBeNil)
+			So(request("analytics", summaryInput{StartTime: now - 200, EndTime: now - 100}, &dbResponse), ShouldBeNil)
 
-			So(response, ShouldResemble, Response{})
+			So(dbResponse, ShouldResemble, response{})
 		})
 	})
 }
 
-func fixTimes(response Response) {
+func fixTimes(response response) {
 	for n := range response {
 		us := response[n]
 

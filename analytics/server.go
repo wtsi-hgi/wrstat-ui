@@ -134,9 +134,9 @@ type event struct {
 	State     json.RawMessage
 }
 
-type Response map[string]map[string][]event
+type response map[string]map[string][]event
 
-func (r Response) add(username, session, state string, timestamp uint64) {
+func (r response) add(username, session, state string, timestamp uint64) {
 	u, ok := r[username]
 	if !ok {
 		u = make(map[string][]event)
@@ -166,7 +166,7 @@ func (d *database) summary(i summaryInput) (any, error) {
 		return nil, err
 	}
 
-	r := make(Response)
+	r := make(response)
 
 	for rows.Next() {
 		var (
