@@ -71,13 +71,7 @@ func (s *Server) InitAnalyticsDB(dbPath string) error {
 
 	db.SetMaxOpenConns(1)
 
-	if err = initDB(db); err != nil {
-		return err
-	}
-
-	s.analyticsStmt, err = db.Prepare(
-		"INSERT INTO [events] (user, session, state, time) VALUES (?, ?, ?, ?);")
-	if err != nil {
+	if s.analyticsStmt, err = initDB(db); err != nil {
 		return err
 	}
 
@@ -88,7 +82,7 @@ func (s *Server) InitAnalyticsDB(dbPath string) error {
 	return nil
 }
 
-func initDB(db *sql.DB) error {
+func initDB(db *sql.DB) (*sql.Stmt, error) {
 	var err error
 
 	for _, cmd := range [...]string{
@@ -99,11 +93,12 @@ func initDB(db *sql.DB) error {
 		`VACUUM;`,
 	} {
 		if _, err = db.Exec(cmd); err != nil {
-			return err
+			return nil, err
 		}
 	}
 
-	return nil
+	return db.Prepare("INSERT INTO [events] (user, session, state, time) VALUES (?, ?, ?, ?);")
+
 }
 
 func (s *Server) recordAnalytics(c *gin.Context) {

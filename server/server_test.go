@@ -151,8 +151,6 @@ func TestServer(t *testing.T) {
 			certPath, keyPath, err := gas.CreateTestCert(t)
 			So(err, ShouldBeNil)
 
-			// addr, fn := startTestServer(t, s, certPath, keyPath)
-			// defer fn()
 			addr, dfunc, err := gas.StartTestServer(s, certPath, keyPath)
 			So(err, ShouldBeNil)
 			defer func() {

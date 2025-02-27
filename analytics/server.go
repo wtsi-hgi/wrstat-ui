@@ -47,11 +47,13 @@ func StartServer(addr, dbPath, host string) error {
 		return err
 	}
 
-	http.Handle("/", index)
-	http.Handle("/analytics", handle[summaryInput](db.summary))
-	http.Handle("/host", handle[byte](db.host))
+	mux := http.NewServeMux()
 
-	return http.ListenAndServe(addr, nil) //nolint:gosec
+	mux.Handle("/", index)
+	mux.Handle("/analytics", handle[summaryInput](db.summary))
+	mux.Handle("/host", handle[byte](db.host))
+
+	return http.ListenAndServe(addr, mux) //nolint:gosec
 }
 
 type httpError struct {
@@ -123,8 +125,8 @@ func newDB(dbPath, host string) (*database, error) {
 }
 
 type summaryInput struct {
-	StartTime uint64 `json:"startTime"`
-	EndTime   uint64 `json:"endTime"`
+	StartTime int64 `json:"startTime"`
+	EndTime   int64 `json:"endTime"`
 }
 
 type event struct {
