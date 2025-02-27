@@ -46,7 +46,7 @@ const (
 	summariseMem    = 8192
 )
 
-var connectTimeout = 10 * time.Second
+var connectTimeout = 10 * time.Second //nolint:gochecknoglobals
 
 // Watch watches an input directory (which should be the output directory of a
 // wrstat multi run) for new stats.gz files, upon which it will run the
