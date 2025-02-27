@@ -140,7 +140,7 @@ class SessionSummary extends Summary {
 	html() {
 		return [
 			super.html(),
-			ul(this.#events.map(event => li(a({ "href": "https://wrstat.internal.sanger.ac.uk/?" + Object.entries(event.State).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join("&") }, formatTimestamp(event.Timestamp)))))
+			ul(this.#events.map(event => li(a({ "href": (host.search = "?" + Object.entries(event.State).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join("&"), host.toString()) }, formatTimestamp(event.Timestamp)))))
 		];
 	}
 }
@@ -223,12 +223,14 @@ const amendNode = (node: Element, propertiesOrChildren: PropertiesOrChildren, ch
 	{ a, br, button, details, div, hr, label, li, input, span, summary, table, tbody, td, th, thead, tr, ul } = new Proxy({}, { "get": (_, element: keyof HTMLElementTagNameMap) => (props: PropertiesOrChildren = {}, children?: Children) => amendNode(document.createElementNS("http://www.w3.org/1999/xhtml", element), props, children) }) as { [K in keyof HTMLElementTagNameMap]: (props?: PropertiesOrChildren, children?: Children) => HTMLElementTagNameMap[K] },
 	rpc = (() => {
 		const base = "/",
-			getData = <T>(url: string, body: string) => fetch(base + url, { "method": "POST", body }).then(j => j.json() as T);
+			getData = <T>(url: string, body: any) => fetch(base + url, { "method": "POST", body: JSON.stringify(body) }).then(j => j.json() as T);
 
 		return {
-			"getAnalytics": (startTime: number, endTime: number) => getData<Analytics>("analytics", JSON.stringify({ startTime, endTime })),
+			"getAnalytics": (startTime: number, endTime: number) => getData<Analytics>("analytics", { startTime, endTime }),
+			"getHost": () => getData<string>("host", 0)
 		};
 	})(),
+	host = new URL(await rpc.getHost()),
 	yesterday = (() => {
 		const d = new Date();
 
@@ -238,7 +240,6 @@ const amendNode = (node: Element, propertiesOrChildren: PropertiesOrChildren, ch
 	})(),
 	startTime = input({ "id": "startTime", "type": "date", "value": yesterday }),
 	endTime = input({ "id": "endTime", "type": "date", "value": yesterday }),
-	today = endTime.valueAsNumber / 1000 | 0,
 	formatTimestamp = (timestamp: number) => new Date(timestamp * 1000).toISOString().replace("T", " ").replace(/\..*/, ""),
 	topLevelStats = div(),
 	setTopLevel = (data: Analytics) => clearNode(topLevelStats, new TopSummary(data).html());
@@ -270,3 +271,5 @@ amendNode(document.body, [
 	hr(),
 	topLevelStats,
 ]);
+
+export { }

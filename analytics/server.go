@@ -41,14 +41,15 @@ import (
 
 // StartServer will start an anlytics viewing server on the given server address
 // and using the given sqlite database.
-func StartServer(addr, dbPath string) error {
-	db, err := newDB(dbPath)
+func StartServer(addr, dbPath, host string) error {
+	db, err := newDB(dbPath, host)
 	if err != nil {
 		return err
 	}
 
 	http.Handle("/", index)
 	http.Handle("/analytics", handle[summaryInput](db.summary))
+	http.Handle("/host", handle[byte](db.host))
 
 	return http.ListenAndServe(addr, nil) //nolint:gosec
 }
@@ -102,15 +103,16 @@ func handleError(w http.ResponseWriter, err error) {
 type database struct {
 	db          *sql.DB
 	summaryStmt *sql.Stmt
+	hostname    string
 }
 
-func newDB(dbPath string) (*database, error) {
+func newDB(dbPath, host string) (*database, error) {
 	db, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
 		return nil, err
 	}
 
-	rdb := &database{db: db}
+	rdb := &database{db: db, hostname: host}
 
 	if rdb.summaryStmt, err = db.Prepare("SELECT [user], [session], [state], " +
 		"[time] FROM [events] WHERE [time] BETWEEN ? AND ?;"); err != nil {
@@ -146,6 +148,10 @@ func (r Response) add(username, session, state string, timestamp uint64) {
 		return int(b.Timestamp) - int(a.Timestamp) //nolint:gosec
 	})
 	u[session] = slices.Insert(s, pos, ne)
+}
+
+func (d *database) host(_ byte) (any, error) {
+	return d.hostname, nil
 }
 
 func (d *database) summary(i summaryInput) (any, error) {

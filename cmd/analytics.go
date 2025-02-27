@@ -30,6 +30,8 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/analytics"
 )
 
+var serverHost string
+
 var analyticsCmd = &cobra.Command{
 	Use:   "analytics",
 	Short: "Start analytics server",
@@ -47,7 +49,7 @@ the --bind/-b flag.
 			die("sqlite database location required")
 		}
 
-		if err := analytics.StartServer(serverBind, args[0]); err != nil {
+		if err := analytics.StartServer(serverBind, args[0], serverHost); err != nil {
 			die("%s", err)
 		}
 	},
@@ -56,6 +58,8 @@ the --bind/-b flag.
 func init() {
 	analyticsCmd.Flags().StringVarP(&serverBind, "bind", "b", ":8080",
 		"address to bind to, eg host:port")
+	analyticsCmd.Flags().StringVarP(&serverHost, "host", "H", "http://localhost",
+		"address prefix to event URL; should point to active wrstat-ui server")
 
 	RootCmd.AddCommand(analyticsCmd)
 }
