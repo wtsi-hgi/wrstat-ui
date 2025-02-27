@@ -100,7 +100,7 @@ func TestServer(t *testing.T) {
 
 	refTime := time.Now().Unix()
 
-	FocusConvey("Given a Server", t, func() {
+	Convey("Given a Server", t, func() {
 		logWriter := gas.NewStringLogger()
 		s := New(logWriter)
 
@@ -147,7 +147,7 @@ func TestServer(t *testing.T) {
 			So(err, ShouldNotBeNil)
 		})
 
-		FocusConvey("You can Start the Server", func() {
+		Convey("You can Start the Server", func() {
 			certPath, keyPath, err := gas.CreateTestCert(t)
 			So(err, ShouldBeNil)
 
@@ -160,7 +160,7 @@ func TestServer(t *testing.T) {
 				So(errd, ShouldBeNil)
 			}()
 
-			FocusConvey("The jwt endpoint works after enabling it", func() {
+			Convey("The jwt endpoint works after enabling it", func() {
 				err = s.EnableAuth(certPath, keyPath, func(u, p string) (bool, string) {
 					returnUID := uid
 
@@ -648,7 +648,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 
 	refTime := time.Now().Unix()
 
-	FocusConvey("Given databases", func() {
+	Convey("Given databases", func() {
 		jwtBasename := ".wrstat.test.jwt"
 		serverTokenBasename := ".wrstat.test.servertoken" //nolint:gosec
 
@@ -751,7 +751,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 			So(dcss[0].Count, ShouldEqual, 13)
 		})
 
-		FocusConvey("Once you add the tree page", func() {
+		Convey("Once you add the tree page", func() {
 			var logWriter strings.Builder
 			s := New(&logWriter)
 
@@ -804,7 +804,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 				So(strings.ToUpper(string(resp.Body())), ShouldStartWith, "<!DOCTYPE HTML>")
 			})
 
-			FocusConvey("You can send data to the analytics endpoint", func() {
+			Convey("You can send data to the analytics endpoint", func() {
 				So(s.InitAnalyticsDB(filepath.Join(t.TempDir(), "db")), ShouldBeNil)
 
 				getAndClear := func() []analyticsData {
