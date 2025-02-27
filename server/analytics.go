@@ -38,7 +38,7 @@ import (
 	"unsafe"
 
 	"github.com/gin-gonic/gin"
-	_ "github.com/mattn/go-sqlite3" //nolint:revive
+	_ "github.com/mattn/go-sqlite3" //
 	gas "github.com/wtsi-hgi/go-authserver"
 )
 
@@ -71,16 +71,8 @@ func (s *Server) InitAnalyticsDB(dbPath string) error {
 
 	db.SetMaxOpenConns(1)
 
-	for _, cmd := range [...]string{
-		`PRAGMA JOURNAL_MODE = DELETE;`,
-		`PRAGMA page_size = 1024;`,
-		`CREATE TABLE IF NOT EXISTS [events] (user TEXT, session TEXT, state TEXT, time INTEGER)`,
-		`CREATE INDEX IF NOT EXISTS eventTime ON [events] (time)`,
-		`VACUUM;`,
-	} {
-		if _, err = db.Exec(cmd); err != nil {
-			return err
-		}
+	if err = initDB(db); err != nil {
+		return err
 	}
 
 	s.analyticsStmt, err = db.Prepare(
@@ -92,6 +84,24 @@ func (s *Server) InitAnalyticsDB(dbPath string) error {
 	s.analyticsDB = db
 
 	authGroup.POST(spywarePath, s.recordAnalytics)
+
+	return nil
+}
+
+func initDB(db *sql.DB) error {
+	var err error
+
+	for _, cmd := range [...]string{
+		`PRAGMA JOURNAL_MODE = DELETE;`,
+		`PRAGMA page_size = 1024;`,
+		`CREATE TABLE IF NOT EXISTS [events] (user TEXT, session TEXT, state TEXT, time INTEGER)`,
+		`CREATE INDEX IF NOT EXISTS eventTime ON [events] (time)`,
+		`VACUUM;`,
+	} {
+		if _, err = db.Exec(cmd); err != nil {
+			return err
+		}
+	}
 
 	return nil
 }

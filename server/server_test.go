@@ -88,9 +88,9 @@ func startTestServer(t *testing.T, s *Server, certPath, keyPath string) (string,
 	l, err := srv.ListenTLS(certPath, keyPath)
 	So(err, ShouldBeNil)
 
-	go srv.Serve(l)
+	go srv.Serve(l) //nolint:errcheck
 
-	return fmt.Sprintf("localhost:%d", l.Addr().(*net.TCPAddr).Port), s.Stop
+	return fmt.Sprintf("localhost:%d", l.Addr().(*net.TCPAddr).Port), s.Stop //nolint:errcheck,forcetypeassert
 }
 
 func TestServer(t *testing.T) {
@@ -808,8 +808,8 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 				So(s.InitAnalyticsDB(filepath.Join(t.TempDir(), "db")), ShouldBeNil)
 
 				getAndClear := func() []analyticsData {
-					r, err := s.analyticsDB.Query("SELECT user, session, state, time FROM [events];")
-					So(err, ShouldBeNil)
+					r, errr := s.analyticsDB.Query("SELECT user, session, state, time FROM [events];")
+					So(errr, ShouldBeNil)
 
 					var rows []analyticsData
 
@@ -829,9 +829,9 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 					return rows
 				}
 
-				sessionID := "AAA"
 				var start, end int64
 
+				sessionID := "AAA"
 				sendBeacon := func(referers ...string) {
 					start = time.Now().Unix()
 
