@@ -25,8 +25,15 @@
 package watch
 
 import (
+	"bytes"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
+	"errors"
 	"fmt"
+	"math/big"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -36,6 +43,7 @@ import (
 	"github.com/VertebrateResequencing/wr/client"
 	"github.com/VertebrateResequencing/wr/jobqueue"
 	"github.com/VertebrateResequencing/wr/jobqueue/scheduler"
+	"github.com/inconshreveable/log15"
 	. "github.com/smartystreets/goconvey/convey"
 )
 
@@ -266,6 +274,67 @@ func TestWatch(t *testing.T) {
 					Retries:  30,
 				},
 			})
+		})
+
+		Convey("watch errors if can't connect to manager", func() {
+			tempDir := t.TempDir()
+
+			ca := &x509.Certificate{
+				SerialNumber:          big.NewInt(2025),
+				NotBefore:             time.Now(),
+				NotAfter:              time.Now().AddDate(10, 0, 0),
+				IsCA:                  true,
+				ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth},
+				KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
+				BasicConstraintsValid: true,
+			}
+
+			pKey, err := rsa.GenerateKey(rand.Reader, 4096)
+			So(err, ShouldBeNil)
+
+			cert, err := x509.CreateCertificate(rand.Reader, ca, ca, &pKey.PublicKey, pKey)
+			So(err, ShouldBeNil)
+
+			var pemCA, pemKey bytes.Buffer
+
+			pem.Encode(&pemCA, &pem.Block{Type: "CERTIFICATE", Bytes: cert})
+			pem.Encode(&pemCA, &pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(pKey)})
+
+			for name, value := range map[string][]byte{
+				"MANAGERTOKENFILE": []byte("content1"),
+				"MANAGERCAFILE":    pemCA.Bytes(),
+				"MANAGERCERTFILE":  pemCA.Bytes(),
+				"MANAGERKEYFILE":   pemKey.Bytes(),
+			} {
+				path := filepath.Join(tempDir, name)
+				err := os.WriteFile(path, []byte(value), 0644)
+				So(err, ShouldBeNil)
+
+				os.Setenv("WR_"+name, path)
+			}
+
+			client.PretendSubmissions = ""
+			logger := log15.New()
+
+			errCh := make(chan error, 1)
+			errTimedOut := errors.New("timed out")
+
+			connectTimeout = time.Second
+
+			go func() {
+				time.Sleep(3 * connectTimeout)
+				errCh <- errTimedOut
+			}()
+
+			go func() {
+				err := watch([]string{inputDir}, outputDir, "/path/to/quota", "/path/to/basedirs.config", logger)
+				errCh <- err
+			}()
+
+			err = <-errCh
+			So(err, ShouldNotBeNil)
+			So(err, ShouldNotEqual, errTimedOut)
+			So(err.Error(), ShouldContainSubstring, "could not reach the server")
 		})
 	})
 }
