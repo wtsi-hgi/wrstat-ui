@@ -203,7 +203,8 @@ func setArgsDefaults() {
 	}
 }
 
-func setSummarisers(s *summary.Summariser, mountpoints string, modtime time.Time) (func() error, error) { //nolint:gocognit,gocyclo
+func setSummarisers(s *summary.Summariser, mountpoints string, //nolint:gocognit,gocyclo
+	modtime time.Time) (func() error, error) {
 	if userGroup != "" {
 		if err := addUserGroupSummariser(s, userGroup); err != nil {
 			return nil, err
@@ -293,8 +294,8 @@ func addBasedirsSummariser(s *summary.Summariser, basedirsDB, basedirsHistoryDB,
 	bd, err := basedirs.NewCreator(basedirsDB, quotas)
 	if err != nil {
 		return fmt.Errorf("failed to create new basedirs creator: %w", err)
-	} else if mps, err := parseMountpointsFromFile(mountpoints); err != nil {
-		return err
+	} else if mps, errr := parseMountpointsFromFile(mountpoints); errr != nil {
+		return errr
 	} else if len(mps) > 0 {
 		bd.SetMountPoints(mps)
 	}

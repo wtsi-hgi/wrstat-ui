@@ -121,11 +121,9 @@ func scheduleSummarisers(inputDir, outputDir, quotaPath, basedirsConfig, mounts 
 	jobs := make([]*jobqueue.Job, 0, len(inputPaths))
 
 	for _, p := range inputPaths {
-		base := filepath.Base(p)
-
-		job, errr := createSummariseJob(inputDir, outputDir, base, quotaPath, basedirsConfig, mounts, s)
+		job, errr := createSummariseJob(inputDir, outputDir, filepath.Base(p), quotaPath, basedirsConfig, mounts, s)
 		if errr != nil {
-			return fmt.Errorf("error scheduling summarise (%s): %w", base, errr)
+			return fmt.Errorf("error scheduling summarise (%s): %w", filepath.Base(p), errr)
 		}
 
 		jobs = append(jobs, job)
@@ -133,9 +131,7 @@ func scheduleSummarisers(inputDir, outputDir, quotaPath, basedirsConfig, mounts 
 
 	if len(jobs) == 0 {
 		return nil
-	}
-
-	if err = s.SubmitJobs(jobs); err != nil {
+	} else if err = s.SubmitJobs(jobs); err != nil {
 		return fmt.Errorf("error submitting jobs to wr: %w", err)
 	}
 
