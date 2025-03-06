@@ -65,7 +65,7 @@ const ErrNoPaths = basedirs.Error("no db paths found")
 // The subdir endpoints require id (gid or uid) and basedir parameters. The
 // history endpoint requires a gid and basedir (can be basedir, actually a
 // mountpoint) parameter.
-func (s *Server) LoadDBs(basePaths []string, dgutaDBName, basedirDBName, ownersPath string) error { //nolint:funlen
+func (s *Server) LoadDBs(basePaths []string, dgutaDBName, basedirDBName, ownersPath string, mounts ...string) error { //nolint:funlen,lll
 	dirgutaPaths, baseDirPaths := JoinDBPaths(basePaths, dgutaDBName, basedirDBName)
 
 	mt, err := s.getLatestTimestamp(dirgutaPaths, baseDirPaths)
@@ -81,6 +81,10 @@ func (s *Server) LoadDBs(basePaths []string, dgutaDBName, basedirDBName, ownersP
 	bd, err := basedirs.OpenMulti(ownersPath, baseDirPaths...)
 	if err != nil {
 		return err
+	}
+
+	if len(mounts) > 0 {
+		bd.SetMountPoints(mounts)
 	}
 
 	s.mu.Lock()
@@ -157,7 +161,7 @@ func (s *Server) getLatestTimestampFromPaths(paths []string) (time.Time, error) 
 // You can set the removeOldPaths to true to cause valid, but older directories
 // to be removed from the base path after each reload.
 func (s *Server) EnableDBReloading(basepath, dgutaDBName, basedirDBName, ownersPath string,
-	pollFrequency time.Duration, removeOldPaths bool) error {
+	pollFrequency time.Duration, removeOldPaths bool, mounts ...string) error {
 	dbPaths, toDelete, err := findDBDirs(basepath, dgutaDBName, basedirDBName)
 	if err != nil {
 		return err
@@ -165,7 +169,7 @@ func (s *Server) EnableDBReloading(basepath, dgutaDBName, basedirDBName, ownersP
 		return ErrNoPaths
 	}
 
-	if err := s.LoadDBs(dbPaths, dgutaDBName, basedirDBName, ownersPath); err != nil {
+	if err := s.LoadDBs(dbPaths, dgutaDBName, basedirDBName, ownersPath, mounts...); err != nil {
 		return err
 	}
 
@@ -176,13 +180,13 @@ func (s *Server) EnableDBReloading(basepath, dgutaDBName, basedirDBName, ownersP
 	}
 
 	go s.reloadLoop(basepath, dgutaDBName, basedirDBName, ownersPath,
-		pollFrequency, removeOldPaths, dbPaths)
+		pollFrequency, removeOldPaths, dbPaths, mounts)
 
 	return nil
 }
 
 func (s *Server) reloadLoop(basepath, dgutaDBName, basedirDBName, ownersPath string, //nolint:gocognit,gocyclo
-	pollFrequency time.Duration, removeOldPaths bool, dbPaths []string) {
+	pollFrequency time.Duration, removeOldPaths bool, dbPaths, mounts []string) {
 	for {
 		select {
 		case <-time.After(pollFrequency):
@@ -201,7 +205,7 @@ func (s *Server) reloadLoop(basepath, dgutaDBName, basedirDBName, ownersPath str
 			continue
 		}
 
-		if s.reloadDBs(dgutaDBName, basedirDBName, ownersPath, newDBPaths) { //nolint:nestif
+		if s.reloadDBs(dgutaDBName, basedirDBName, ownersPath, newDBPaths, mounts) { //nolint:nestif
 			dbPaths = newDBPaths
 
 			if removeOldPaths {
@@ -214,7 +218,7 @@ func (s *Server) reloadLoop(basepath, dgutaDBName, basedirDBName, ownersPath str
 }
 
 func (s *Server) reloadDBs(dgutaDBName, basedirDBName, //nolint:funlen
-	ownersPath string, dbPaths []string) bool {
+	ownersPath string, dbPaths, mounts []string) bool {
 	dirgutaPaths, baseDirPaths := JoinDBPaths(dbPaths, dgutaDBName, basedirDBName)
 
 	mt, err := s.getLatestTimestamp(dirgutaPaths, baseDirPaths)
@@ -234,6 +238,10 @@ func (s *Server) reloadDBs(dgutaDBName, basedirDBName, //nolint:funlen
 	bd, err := basedirs.OpenMulti(ownersPath, baseDirPaths...)
 	if err != nil {
 		return s.logReloadError("reloading basedirs db failed: %s", err)
+	}
+
+	if len(mounts) > 0 {
+		bd.SetMountPoints(mounts)
 	}
 
 	s.Logger.Printf("server ready again after reloading")

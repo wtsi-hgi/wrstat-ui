@@ -32,8 +32,10 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
+	"unsafe"
 
 	"github.com/klauspost/pgzip"
 	"github.com/spf13/cobra"
@@ -57,6 +59,7 @@ var (
 
 	quotaPath      string
 	basedirsConfig string
+	mounts         string
 )
 
 const dbBatchSize = 10000
@@ -127,7 +130,7 @@ func run(args []string) (err error) {
 
 	setArgsDefaults()
 
-	if fn, err := setSummarisers(s, modtime); err != nil { //nolint:nestif
+	if fn, err := setSummarisers(s, mounts, modtime); err != nil { //nolint:nestif
 		return err
 	} else if fn != nil {
 		defer func() {
@@ -200,7 +203,7 @@ func setArgsDefaults() {
 	}
 }
 
-func setSummarisers(s *summary.Summariser, modtime time.Time) (func() error, error) { //nolint:gocognit,gocyclo
+func setSummarisers(s *summary.Summariser, mountpoints string, modtime time.Time) (func() error, error) { //nolint:gocognit,gocyclo
 	if userGroup != "" {
 		if err := addUserGroupSummariser(s, userGroup); err != nil {
 			return nil, err
@@ -214,7 +217,8 @@ func setSummarisers(s *summary.Summariser, modtime time.Time) (func() error, err
 	}
 
 	if basedirsDB != "" {
-		if err := addBasedirsSummariser(s, basedirsDB, basedirsHistoryDB, quotaPath, basedirsConfig, modtime); err != nil {
+		if err := addBasedirsSummariser(s, basedirsDB, basedirsHistoryDB,
+			quotaPath, basedirsConfig, mountpoints, modtime); err != nil {
 			return nil, err
 		}
 	}
@@ -276,7 +280,7 @@ func addGroupUserSummariser(s *summary.Summariser, groupUser string) error {
 }
 
 func addBasedirsSummariser(s *summary.Summariser, basedirsDB, basedirsHistoryDB,
-	quotaPath, basedirsConfig string, modtime time.Time) error {
+	quotaPath, basedirsConfig, mountpoints string, modtime time.Time) error {
 	quotas, config, err := parseBasedirConfig(quotaPath, basedirsConfig)
 	if err != nil {
 		return err
@@ -289,6 +293,10 @@ func addBasedirsSummariser(s *summary.Summariser, basedirsDB, basedirsHistoryDB,
 	bd, err := basedirs.NewCreator(basedirsDB, quotas)
 	if err != nil {
 		return fmt.Errorf("failed to create new basedirs creator: %w", err)
+	} else if mps, err := parseMountpointsFromFile(mountpoints); err != nil {
+		return err
+	} else if len(mps) > 0 {
+		bd.SetMountPoints(mps)
 	}
 
 	bd.SetModTime(modtime)
@@ -302,6 +310,35 @@ func addBasedirsSummariser(s *summary.Summariser, basedirsDB, basedirsHistoryDB,
 	s.AddDirectoryOperation(sbasedirs.NewBaseDirs(config.PathShouldOutput, bd))
 
 	return nil
+}
+
+func parseMountpointsFromFile(mountpoints string) ([]string, error) {
+	if mountpoints == "" {
+		return nil, nil
+	}
+
+	data, err := os.ReadFile(mountpoints)
+	if err != nil {
+		return nil, err
+	}
+
+	lines := strings.Split(unsafe.String(unsafe.SliceData(data), len(data)), "\n")
+	mounts := make([]string, 0, len(lines))
+
+	for _, line := range lines {
+		if len(line) == 0 {
+			continue
+		}
+
+		mountpoint, err := strconv.Unquote(line)
+		if err != nil {
+			return nil, err
+		}
+
+		mounts = append(mounts, mountpoint)
+	}
+
+	return mounts, nil
 }
 
 func parseBasedirConfig(quotaPath, basedirsConfig string) (*basedirs.Quotas, basedirs.Config, error) {
@@ -372,4 +409,5 @@ func init() {
 	summariseCmd.Flags().StringVarP(&dirgutaDB, "tree", "t", "", "tree output dir")
 	summariseCmd.Flags().StringVarP(&quotaPath, "quota", "q", "", "csv of gid,disk,size_quota,inode_quota")
 	summariseCmd.Flags().StringVarP(&basedirsConfig, "config", "c", "", "path to basedirs config file")
+	summariseCmd.Flags().StringVarP(&mounts, "mounts", "m", "", "path to a file containing a list of quoted mountpoints")
 }

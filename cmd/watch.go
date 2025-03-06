@@ -64,7 +64,7 @@ will be passed along to it.
 			die("%s", err)
 		}
 
-		if err := watch.Watch(args, defaultDir, quotaPath, basedirsConfig, appLogger); err != nil {
+		if err := watch.Watch(args, defaultDir, quotaPath, basedirsConfig, mounts, appLogger); err != nil {
 			die("%s", err)
 		}
 	},
@@ -96,4 +96,5 @@ func init() {
 	watchcmd.Flags().StringVarP(&defaultDir, "output", "o", "", "output all summariser data to here")
 	watchcmd.Flags().StringVarP(&quotaPath, "quota", "q", "", "csv of gid,disk,size_quota,inode_quota")
 	watchcmd.Flags().StringVarP(&basedirsConfig, "config", "c", "", "path to basedirs config file")
+	watchcmd.Flags().StringVarP(&mounts, "mounts", "m", "", "path to a file containing a list of quoted mountpoints")
 }
