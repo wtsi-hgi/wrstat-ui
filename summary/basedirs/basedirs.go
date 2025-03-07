@@ -163,7 +163,8 @@ func (b baseDirsMap) Add(fn func(uint32, basedirs.SummaryWithChildren, db.DirGUT
 	for id, bd := range b {
 		for age, ds := range bd {
 			if ds != nil {
-				ds.Dir = string(ds.Path.AppendTo(make([]byte, 0, ds.Path.Len())))
+				buf := ds.Path.AppendTo(make([]byte, 0, ds.Path.Len()))
+				ds.Dir = unsafe.String(unsafe.SliceData(buf), len(buf))
 
 				for n, c := range ds.Children[0].FileUsage {
 					if c > 0 {

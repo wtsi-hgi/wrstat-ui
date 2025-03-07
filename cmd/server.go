@@ -131,6 +131,17 @@ files. It will use the mtime of the file as the data creation time in reports.
 			die("you must supply --owners")
 		}
 
+		var mountpoints []string
+
+		if mounts != "" {
+			mps, err := parseMountpointsFromFile(mounts)
+			if err != nil {
+				die("failed to parse mounts file: %s", err)
+			}
+
+			mountpoints = mps
+		}
+
 		checkOAuthArgs()
 
 		logWriter := setServerLogger(serverLogPath)
@@ -155,7 +166,8 @@ files. It will use the mtime of the file as the data creation time in reports.
 		}
 
 		info("opening databases, please wait...")
-		err = s.EnableDBReloading(args[0], dgutaDBsSuffix, basedirBasename, ownersPath, sentinelPollFrequencty, true)
+		err = s.EnableDBReloading(args[0], dgutaDBsSuffix, basedirBasename,
+			ownersPath, sentinelPollFrequencty, true, mountpoints...)
 		if err != nil {
 			die("failed to load databases: %s", err)
 		}
@@ -205,6 +217,7 @@ func init() {
 	serverCmd.Flags().StringVar(&serverLogPath, "logfile", "",
 		"log to this file instead of syslog")
 	serverCmd.Flags().StringVar(&spywareDB, "spyware", "s", "path to sqlite database to record analytics")
+	serverCmd.Flags().StringVarP(&mounts, "mounts", "m", "", "path to a file containing a list of quoted mountpoints")
 }
 
 // checkOAuthArgs ensures we have the necessary args/ env vars for Okta auth.

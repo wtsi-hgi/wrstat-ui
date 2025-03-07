@@ -56,15 +56,15 @@ The --output flag determines where the summarised data will be written. A new
 subdirectory, named the same as the subdirectory containing the stats.gz file,
 will be created to contain the new files.
 
-The --quota and --config flags act the same as in the summarise subcommand and
-will be passed along to it.
+The --quota, --config, and --mount flags act the same as in the summarise
+subcommand and will be passed along to it.
 `,
 	Run: func(_ *cobra.Command, args []string) {
 		if err := checkWatchArgs(args); err != nil {
 			die("%s", err)
 		}
 
-		if err := watch.Watch(args, defaultDir, quotaPath, basedirsConfig, appLogger); err != nil {
+		if err := watch.Watch(args, defaultDir, quotaPath, basedirsConfig, mounts, appLogger); err != nil {
 			die("%s", err)
 		}
 	},
@@ -96,4 +96,5 @@ func init() {
 	watchcmd.Flags().StringVarP(&defaultDir, "output", "o", "", "output all summariser data to here")
 	watchcmd.Flags().StringVarP(&quotaPath, "quota", "q", "", "csv of gid,disk,size_quota,inode_quota")
 	watchcmd.Flags().StringVarP(&basedirsConfig, "config", "c", "", "path to basedirs config file")
+	watchcmd.Flags().StringVarP(&mounts, "mounts", "m", "", "path to a file containing a list of quoted mountpoints")
 }

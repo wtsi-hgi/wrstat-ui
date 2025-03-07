@@ -109,6 +109,10 @@ func parseRowAndStore(row []string, q *Quotas) error {
 		return err
 	}
 
+	if !strings.HasSuffix(row[1], "/") {
+		row[1] += "/"
+	}
+
 	q.store(uint32(gid), row[1], quotaSize, quotaInode)
 
 	return nil
@@ -132,11 +136,11 @@ func (q *Quotas) Get(gid uint32, path string) (uint64, uint64) {
 		return 0, 0
 	}
 
-	for _, dq := range dqs {
-		if !strings.HasSuffix(dq.disk, "/") {
-			dq.disk += "/"
-		}
+	if !strings.HasSuffix(path, "/") {
+		path += "/"
+	}
 
+	for _, dq := range dqs {
 		if strings.HasPrefix(path, dq.disk) {
 			return dq.quotaSize, dq.quotaInode
 		}
