@@ -35,7 +35,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unsafe"
 
 	"github.com/klauspost/pgzip"
 	"github.com/spf13/cobra"
@@ -101,6 +100,13 @@ Summarise takes the following arguments
 
   --config,-c
 	Required for basedirs, path to basedirs config file.
+
+  --mounts,-m
+	Provide a file containing quoted mount points, one-per-line, instead of
+	relying on automatically discovered mount points.
+	The following is an example command that can be used to generate an
+	appropriate file:
+		findmnt -ln --real -o target | sed -e 's/^/"/' -e 's/$/"/' > mounts
 
 NB: All existing output files will be deleted or truncated during initialisation.
 
@@ -323,7 +329,7 @@ func parseMountpointsFromFile(mountpoints string) ([]string, error) {
 		return nil, err
 	}
 
-	lines := strings.Split(unsafe.String(unsafe.SliceData(data), len(data)), "\n")
+	lines := strings.Split(string(data), "\n")
 	mounts := make([]string, 0, len(lines))
 
 	for _, line := range lines {

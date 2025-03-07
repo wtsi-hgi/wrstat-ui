@@ -56,8 +56,8 @@ The --output flag determines where the summarised data will be written. A new
 subdirectory, named the same as the subdirectory containing the stats.gz file,
 will be created to contain the new files.
 
-The --quota and --config flags act the same as in the summarise subcommand and
-will be passed along to it.
+The --quota, --config, and --mount flags act the same as in the summarise
+subcommand and will be passed along to it.
 `,
 	Run: func(_ *cobra.Command, args []string) {
 		if err := checkWatchArgs(args); err != nil {
