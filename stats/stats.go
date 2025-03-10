@@ -59,35 +59,35 @@ const (
 
 // StatsParser is used to parse wrstat stats files.
 type StatsParser struct { //nolint:revive
-	scanner    *bufio.Scanner
-	lineBytes  []byte
-	lineLength int
-	lineIndex  int
-	path       []byte
-	size       int64
-	asize      int64
-	uid        int64
-	gid        int64
-	mtime      int64
-	atime      int64
-	ctime      int64
-	entryType  byte
-	inode      int64
-	error      error
+	scanner      *bufio.Scanner
+	lineBytes    []byte
+	lineLength   int
+	lineIndex    int
+	path         []byte
+	size         int64
+	apparentSize int64
+	uid          int64
+	gid          int64
+	mtime        int64
+	atime        int64
+	ctime        int64
+	entryType    byte
+	inode        int64
+	error        error
 }
 
 // FileInfo represents a parsed line of data from a stats file.
 type FileInfo struct {
-	Path      []byte
-	Size      int64
-	ASize     int64
-	UID       uint32
-	GID       uint32
-	MTime     int64
-	ATime     int64
-	CTime     int64
-	Inode     int64
-	EntryType byte
+	Path         []byte
+	Size         int64
+	ApparentSize int64
+	UID          uint32
+	GID          uint32
+	MTime        int64
+	ATime        int64
+	CTime        int64
+	Inode        int64
+	EntryType    byte
 }
 
 // IsDir returns true if the FileInfo represents a directory.
@@ -130,7 +130,7 @@ func (p *StatsParser) Scan(info *FileInfo) error {
 
 	info.Path = unquote(p.path)
 	info.Size = p.size
-	info.ASize = p.asize
+	info.ApparentSize = p.apparentSize
 	info.UID = uint32(p.uid) //nolint:gosec
 	info.GID = uint32(p.gid) //nolint:gosec
 	info.MTime = p.mtime
@@ -249,7 +249,7 @@ func (p *StatsParser) parseLine() bool {
 		return false
 	}
 
-	return p.parseNumberColumn(&p.asize)
+	return p.parseNumberColumn(&p.apparentSize)
 }
 
 func (p *StatsParser) parseColumns2to7() bool {

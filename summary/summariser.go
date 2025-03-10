@@ -112,32 +112,32 @@ func (d *DirectoryPath) compare(e *DirectoryPath) int {
 
 // FileInfo represents the parsed information about a file or directory.
 type FileInfo struct {
-	Path      *DirectoryPath
-	Name      []byte
-	Size      int64
-	ASize     int64
-	UID       uint32
-	GID       uint32
-	MTime     int64
-	ATime     int64
-	CTime     int64
-	Inode     int64
-	EntryType byte
+	Path         *DirectoryPath
+	Name         []byte
+	Size         int64
+	ApparentSize int64
+	UID          uint32
+	GID          uint32
+	MTime        int64
+	ATime        int64
+	CTime        int64
+	Inode        int64
+	EntryType    byte
 }
 
 func fileInfoFromStatsInfo(currentDir *DirectoryPath, statsInfo *stats.FileInfo) FileInfo {
 	return FileInfo{
-		Path:      currentDir,
-		Name:      statsInfo.BaseName(),
-		Size:      statsInfo.Size,
-		ASize:     statsInfo.ASize,
-		UID:       statsInfo.UID,
-		GID:       statsInfo.GID,
-		MTime:     statsInfo.MTime,
-		ATime:     statsInfo.ATime,
-		CTime:     statsInfo.CTime,
-		Inode:     statsInfo.Inode,
-		EntryType: statsInfo.EntryType,
+		Path:         currentDir,
+		Name:         statsInfo.BaseName(),
+		Size:         statsInfo.Size,
+		ApparentSize: statsInfo.ApparentSize,
+		UID:          statsInfo.UID,
+		GID:          statsInfo.GID,
+		MTime:        statsInfo.MTime,
+		ATime:        statsInfo.ATime,
+		CTime:        statsInfo.CTime,
+		Inode:        statsInfo.Inode,
+		EntryType:    statsInfo.EntryType,
 	}
 }
 
