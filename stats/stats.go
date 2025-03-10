@@ -65,6 +65,7 @@ type StatsParser struct { //nolint:revive
 	lineIndex  int
 	path       []byte
 	size       int64
+	asize      int64
 	uid        int64
 	gid        int64
 	mtime      int64
@@ -79,6 +80,7 @@ type StatsParser struct { //nolint:revive
 type FileInfo struct {
 	Path      []byte
 	Size      int64
+	ASize     int64
 	UID       uint32
 	GID       uint32
 	MTime     int64
@@ -128,6 +130,7 @@ func (p *StatsParser) Scan(info *FileInfo) error {
 
 	info.Path = unquote(p.path)
 	info.Size = p.size
+	info.ASize = p.asize
 	info.UID = uint32(p.uid) //nolint:gosec
 	info.GID = uint32(p.gid) //nolint:gosec
 	info.MTime = p.mtime
@@ -240,7 +243,13 @@ func (p *StatsParser) parseLine() bool {
 
 	p.entryType = entryTypeCol[0]
 
-	return p.parseNumberColumn(&p.inode)
+	var none int64
+
+	if !p.parseNumberColumn(&p.inode) || !p.parseNumberColumn(&none) || !p.parseNumberColumn(&none) {
+		return false
+	}
+
+	return p.parseNumberColumn(&p.asize)
 }
 
 func (p *StatsParser) parseColumns2to7() bool {
@@ -256,14 +265,14 @@ func (p *StatsParser) parseColumns2to7() bool {
 func (p *StatsParser) parseNextColumn() ([]byte, bool) {
 	start := p.lineIndex
 
-	for p.lineBytes[p.lineIndex] != '\t' {
+	if p.lineIndex >= p.lineLength {
+		p.error = ErrTooFewColumns
+
+		return nil, false
+	}
+
+	for p.lineIndex < p.lineLength && p.lineBytes[p.lineIndex] != '\t' {
 		p.lineIndex++
-
-		if p.lineIndex >= p.lineLength {
-			p.error = ErrTooFewColumns
-
-			return nil, false
-		}
 	}
 
 	end := p.lineIndex

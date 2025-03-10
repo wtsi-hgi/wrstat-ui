@@ -65,7 +65,7 @@ func (d *Deduper) Add(info *summary.FileInfo) error {
 			Mountpoint: d.mountpoint,
 			Path:       info.Path,
 			Name:       string(info.Name),
-			Size:       info.Size,
+			Size:       info.ASize,
 			Inode:      info.Inode,
 		})
 	}

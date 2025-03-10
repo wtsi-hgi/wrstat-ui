@@ -115,6 +115,7 @@ type FileInfo struct {
 	Path      *DirectoryPath
 	Name      []byte
 	Size      int64
+	ASize     int64
 	UID       uint32
 	GID       uint32
 	MTime     int64
@@ -129,6 +130,7 @@ func fileInfoFromStatsInfo(currentDir *DirectoryPath, statsInfo *stats.FileInfo)
 		Path:      currentDir,
 		Name:      statsInfo.BaseName(),
 		Size:      statsInfo.Size,
+		ASize:     statsInfo.ASize,
 		UID:       statsInfo.UID,
 		GID:       statsInfo.GID,
 		MTime:     statsInfo.MTime,
