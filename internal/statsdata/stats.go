@@ -167,8 +167,8 @@ type File struct {
 
 // WriteTo writes the stats data for a file entry.
 func (f *File) WriteTo(w io.Writer) (int64, error) {
-	n, err := fmt.Fprintf(w, "%q\t%d\t%d\t%d\t%d\t%d\t%d\t%c\t%d\t1\t1\n",
-		f.Path, f.Size, f.UID, f.GID, f.ATime, f.MTime, f.CTime, f.Type, f.Inode)
+	n, err := fmt.Fprintf(w, "%q\t%d\t%d\t%d\t%d\t%d\t%d\t%c\t%d\t1\t1\t%d\n",
+		f.Path, f.Size, f.UID, f.GID, f.ATime, f.MTime, f.CTime, f.Type, f.Inode, f.Size)
 
 	return int64(n), err
 }
