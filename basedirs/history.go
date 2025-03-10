@@ -91,7 +91,23 @@ type mountPoints []string
 // SetMountPoints can be used to manually set your mountpoints, if the automatic
 // discovery of mountpoints on your system doesn't work.
 func (b *BaseDirReader) SetMountPoints(mountpoints []string) {
-	b.mountPoints = mountpoints
+	b.mountPoints = validateMountPoints(mountpoints)
+}
+
+func validateMountPoints(mountpoints []string) []string {
+	mps := make([]string, len(mountpoints))
+
+	for n, mp := range mountpoints {
+		if !strings.HasSuffix(mp, "/") {
+			mp += "/"
+		}
+
+		mps[n] = mp
+	}
+
+	sort.Slice(mps, func(i, j int) bool { return len(mps[i]) > len(mps[j]) })
+
+	return mps
 }
 
 func getMountPoints() (mountPoints, error) {

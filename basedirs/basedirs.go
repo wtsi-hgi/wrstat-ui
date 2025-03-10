@@ -67,7 +67,7 @@ func NewCreator(dbPath string, quotas *Quotas) (*BaseDirs, error) {
 // SetMountPoints can be used to manually set your mountpoints, if the automatic
 // discovery of mountpoints on your system doesn't work.
 func (b *BaseDirs) SetMountPoints(mountpoints []string) {
-	b.mountPoints = mountpoints
+	b.mountPoints = validateMountPoints(mountpoints)
 }
 
 // SetModTime sets the time used for the new History date. Defaults to

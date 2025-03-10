@@ -54,9 +54,9 @@ var connectTimeout = 10 * time.Second //nolint:gochecknoglobals
 //
 // The scheduled summarise subcommands will be given the output directory, quota
 // path and basedirs config path.
-func Watch(inputDirs []string, outputDir, quotaPath, basedirsConfig string, logger log15.Logger) error {
+func Watch(inputDirs []string, outputDir, quotaPath, basedirsConfig, mounts string, logger log15.Logger) error {
 	for {
-		if err := watch(inputDirs, outputDir, quotaPath, basedirsConfig, logger); err != nil {
+		if err := watch(inputDirs, outputDir, quotaPath, basedirsConfig, mounts, logger); err != nil {
 			return err
 		}
 
@@ -68,7 +68,7 @@ func Watch(inputDirs []string, outputDir, quotaPath, basedirsConfig string, logg
 	}
 }
 
-func watch(inputDirs []string, outputDir, quotaPath, basedirsConfig string, logger log15.Logger) error { //nolint:gocognit,gocyclo,lll
+func watch(inputDirs []string, outputDir, quotaPath, basedirsConfig, mounts string, logger log15.Logger) error { //nolint:gocognit,gocyclo,lll
 	var err error
 
 	for n := range inputDirs {
@@ -87,7 +87,7 @@ func watch(inputDirs []string, outputDir, quotaPath, basedirsConfig string, logg
 			return fmt.Errorf("error getting input DB paths: %w", err)
 		}
 
-		if err := scheduleSummarisers(inputDir, outputDir, quotaPath, basedirsConfig,
+		if err := scheduleSummarisers(inputDir, outputDir, quotaPath, basedirsConfig, mounts,
 			slices.DeleteFunc(inputPaths, func(p string) bool {
 				base := filepath.Base(p)
 
@@ -106,7 +106,7 @@ func entryExists(path string) bool {
 	return err == nil
 }
 
-func scheduleSummarisers(inputDir, outputDir, quotaPath, basedirsConfig string,
+func scheduleSummarisers(inputDir, outputDir, quotaPath, basedirsConfig, mounts string,
 	inputPaths []string, logger log15.Logger) error {
 	s, err := client.New(client.SchedulerSettings{
 		Logger:  logger,
@@ -121,11 +121,9 @@ func scheduleSummarisers(inputDir, outputDir, quotaPath, basedirsConfig string,
 	jobs := make([]*jobqueue.Job, 0, len(inputPaths))
 
 	for _, p := range inputPaths {
-		base := filepath.Base(p)
-
-		job, errr := createSummariseJob(inputDir, outputDir, base, quotaPath, basedirsConfig, s)
+		job, errr := createSummariseJob(inputDir, outputDir, filepath.Base(p), quotaPath, basedirsConfig, mounts, s)
 		if errr != nil {
-			return fmt.Errorf("error scheduling summarise (%s): %w", base, errr)
+			return fmt.Errorf("error scheduling summarise (%s): %w", filepath.Base(p), errr)
 		}
 
 		jobs = append(jobs, job)
@@ -133,16 +131,14 @@ func scheduleSummarisers(inputDir, outputDir, quotaPath, basedirsConfig string,
 
 	if len(jobs) == 0 {
 		return nil
-	}
-
-	if err = s.SubmitJobs(jobs); err != nil {
+	} else if err = s.SubmitJobs(jobs); err != nil {
 		return fmt.Errorf("error submitting jobs to wr: %w", err)
 	}
 
 	return nil
 }
 
-func createSummariseJob(inputDir, outputDir, base, quotaPath, basedirsConfig string,
+func createSummariseJob(inputDir, outputDir, base, quotaPath, basedirsConfig, mounts string,
 	s *client.Scheduler) (*jobqueue.Job, error) {
 	dotOutputBase := filepath.Join(outputDir, "."+base)
 
@@ -160,7 +156,7 @@ func createSummariseJob(inputDir, outputDir, base, quotaPath, basedirsConfig str
 	reqs.RAM = summariseMem
 
 	return s.NewJob(
-		getJobCommand(dotOutputBase, previousBasedirsDB, quotaPath, basedirsConfig,
+		getJobCommand(dotOutputBase, previousBasedirsDB, quotaPath, basedirsConfig, mounts,
 			inputDir, base, outputDir),
 		"wrstat-ui-summarise-"+time.Now().Format("20060102150405"),
 		"wrstat-ui-summarise",
@@ -170,12 +166,16 @@ func createSummariseJob(inputDir, outputDir, base, quotaPath, basedirsConfig str
 	), nil
 }
 
-func getJobCommand(dotOutputBase, previousBasedirsDB, quotaPath, basedirsConfig,
+func getJobCommand(dotOutputBase, previousBasedirsDB, quotaPath, basedirsConfig, mounts,
 	inputDir, base, outputDir string) string {
 	cmdFormat := "%[1]q summarise -d %[2]q"
 
 	if previousBasedirsDB != "" {
 		cmdFormat += " -s %[3]q"
+	}
+
+	if mounts != "" {
+		cmdFormat += " -m %[9]q"
 	}
 
 	cmdFormat += " -q %[4]q -c %[5]q %[6]q && touch -r %[7]q %[2]q && mv %[2]q %[8]q"
@@ -185,6 +185,7 @@ func getJobCommand(dotOutputBase, previousBasedirsDB, quotaPath, basedirsConfig,
 		filepath.Join(inputDir, base, inputStatsFile),
 		filepath.Join(inputDir, base),
 		filepath.Join(outputDir, base),
+		mounts,
 	)
 }
 

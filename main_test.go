@@ -153,8 +153,9 @@ func TestSummarise(t *testing.T) {
 		outputDir := t.TempDir()
 		quotaFile := filepath.Join(inputDir, "quota.csv")
 		basedirsConfig := filepath.Join(inputDir, "basedirs.config")
+		mounts := filepath.Join(inputDir, "mounts")
 
-		err = os.WriteFile(quotaFile, []byte(`1,/lustre/scratch125,4000000000,20
+		So(os.WriteFile(quotaFile, []byte(`1,/lustre/scratch125,4000000000,20
 2,/lustre/scratch125,300,30
 2,/lustre/scratch123,400,40
 77777,/lustre/scratch125,500,50
@@ -163,16 +164,17 @@ func TestSummarise(t *testing.T) {
 2,/nfs/scratch123,400,40
 77777,/nfs/scratch125,500,50
 3,/lustre/scratch125,300,30
-`), 0600)
-		So(err, ShouldBeNil)
+`), 0600), ShouldBeNil)
 
-		err = os.WriteFile(basedirsConfig, []byte(`/lustre/scratch123/hgi/mdt	5	5
+		So(os.WriteFile(basedirsConfig, []byte(`/lustre/scratch123/hgi/mdt	5	5
 /nfs/scratch123/hgi/mdt	5	5
-/	4	4`), 0600)
-		So(err, ShouldBeNil)
+/	4	4`), 0600), ShouldBeNil)
 
 		ownersPath, err := internaldata.CreateOwnersCSV(t, internaldata.ExampleOwnersCSV)
 		So(err, ShouldBeNil)
+
+		So(os.WriteFile(mounts, []byte(`"/nfs/"
+"/lustre/"`), 0600), ShouldBeNil)
 
 		inputA := filepath.Join(inputDir, "inputA")
 		inputB := filepath.Join(inputDir, "inputB")
@@ -194,7 +196,7 @@ func TestSummarise(t *testing.T) {
 
 		So(os.Chtimes(inputA, yesterday, yesterday), ShouldBeNil)
 
-		_, _, _, err = runWRStat("summarise", "-d", outputA, "-q", quotaFile, "-c", basedirsConfig, inputA)
+		_, _, _, err = runWRStat("summarise", "-d", outputA, "-q", quotaFile, "-c", basedirsConfig, "-m", mounts, inputA)
 		So(err, ShouldBeNil)
 
 		compareFileContents(t, filepath.Join(outputA, "bygroup"), sortLines(fmt.Sprintf("%[1]s\t%[2]s\t2\t2684354560\n"+
@@ -265,6 +267,11 @@ func TestSummarise(t *testing.T) {
 		bddb, err := basedirs.NewReader(filepath.Join(outputA, "basedirs.db"), ownersPath)
 		So(err, ShouldBeNil)
 
+		bddb.SetMountPoints([]string{
+			"/nfs/",
+			"/lustre/",
+		})
+
 		h, err := bddb.History(gid, "/lustre/scratch125/humgen/projects/D")
 		So(err, ShouldBeNil)
 		So(h, ShouldResemble, []basedirs.History{
@@ -294,11 +301,16 @@ func TestSummarise(t *testing.T) {
 		So(os.Chtimes(inputB, refTime, refTime), ShouldBeNil)
 
 		_, _, _, err = runWRStat("summarise", "-s", filepath.Join(outputA, "basedirs.db"),
-			"-d", outputB, "-q", quotaFile, "-c", basedirsConfig, inputB)
+			"-d", outputB, "-q", quotaFile, "-c", basedirsConfig, "-m", mounts, inputB)
 		So(err, ShouldBeNil)
 
 		bddb, err = basedirs.NewReader(filepath.Join(outputB, "basedirs.db"), ownersPath)
 		So(err, ShouldBeNil)
+
+		bddb.SetMountPoints([]string{
+			"/nfs/",
+			"/lustre/",
+		})
 
 		h, err = bddb.History(gid, "/lustre/scratch125/humgen/projects/D")
 		So(err, ShouldBeNil)

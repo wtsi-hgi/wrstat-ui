@@ -82,7 +82,7 @@ func TestWatch(t *testing.T) {
 		So(createFile(filepath.Join(testInputA, inputStatsFile)), ShouldBeNil)
 
 		Convey("Watch will spot a new directory and schedule a summarise", func() {
-			err = watch([]string{inputDir}, outputDir, "/path/to/quota", "/path/to/basedirs.config", nil)
+			err = watch([]string{inputDir}, outputDir, "/path/to/quota", "/path/to/basedirs.config", "/path/to/mounts", nil)
 			So(err, ShouldBeNil)
 
 			pw.Close()
@@ -92,6 +92,7 @@ func TestWatch(t *testing.T) {
 			So(jobs, ShouldResemble, []*jobqueue.Job{
 				{
 					Cmd: fmt.Sprintf(`%[1]q summarise -d "%[2]s/.12345_abc" `+
+						`-m "/path/to/mounts" `+
 						`-q "/path/to/quota" -c "/path/to/basedirs.config" `+
 						`"%[3]s/stats.gz" && touch -r "%[3]s" "%[2]s/.12345_abc" `+
 						`&& mv "%[2]s/.12345_abc" "%[2]s/12345_abc"`,
@@ -121,7 +122,7 @@ func TestWatch(t *testing.T) {
 			err = os.Chdir(parentDir)
 			So(err, ShouldBeNil)
 
-			err := watch([]string{relInput}, relOutput, "/path/to/quota", "/path/to/basedirs.config", nil)
+			err := watch([]string{relInput}, relOutput, "/path/to/quota", "/path/to/basedirs.config", "", nil)
 
 			errr := os.Chdir(cwd)
 			So(errr, ShouldBeNil)
@@ -157,7 +158,7 @@ func TestWatch(t *testing.T) {
 		Convey("Watch will not reschedule a summarise if one has already started", func() {
 			So(os.Mkdir(filepath.Join(outputDir, ".12345_abc"), 0755), ShouldBeNil)
 
-			err := watch([]string{inputDir}, outputDir, "/path/to/quota", "/path/to/basedirs.config", nil)
+			err := watch([]string{inputDir}, outputDir, "/path/to/quota", "/path/to/basedirs.config", "", nil)
 			So(err, ShouldBeNil)
 
 			pw.Close()
@@ -170,7 +171,7 @@ func TestWatch(t *testing.T) {
 		Convey("Watch will not reschedule a summarise if one has already completed", func() {
 			So(os.Mkdir(filepath.Join(outputDir, "12345_abc"), 0755), ShouldBeNil)
 
-			err := watch([]string{inputDir}, outputDir, "/path/to/quota", "/path/to/basedirs.config", nil)
+			err := watch([]string{inputDir}, outputDir, "/path/to/quota", "/path/to/basedirs.config", "", nil)
 			So(err, ShouldBeNil)
 
 			pw.Close()
@@ -185,7 +186,7 @@ func TestWatch(t *testing.T) {
 			So(os.Mkdir(existingOutput, 0755), ShouldBeNil)
 			So(createFile(filepath.Join(existingOutput, basedirBasename)), ShouldBeNil)
 
-			err := watch([]string{inputDir}, outputDir, "/path/to/quota", "/path/to/basedirs.config", nil)
+			err := watch([]string{inputDir}, outputDir, "/path/to/quota", "/path/to/basedirs.config", "", nil)
 			So(err, ShouldBeNil)
 
 			pw.Close()
@@ -222,7 +223,7 @@ func TestWatch(t *testing.T) {
 			So(os.Mkdir(testInputC, 0755), ShouldBeNil)
 			So(createFile(filepath.Join(testInputC, inputStatsFile)), ShouldBeNil)
 
-			err := watch([]string{inputDir, inputDir2}, outputDir, "/path/to/quota", "/path/to/basedirs.config", nil)
+			err := watch([]string{inputDir, inputDir2}, outputDir, "/path/to/quota", "/path/to/basedirs.config", "", nil)
 			So(err, ShouldBeNil)
 
 			pw.Close()
@@ -299,7 +300,7 @@ func TestWatch(t *testing.T) {
 			}()
 
 			go func() {
-				errCh <- watch([]string{inputDir}, outputDir, "/path/to/quota", "/path/to/basedirs.config", logger)
+				errCh <- watch([]string{inputDir}, outputDir, "/path/to/quota", "/path/to/basedirs.config", "", logger)
 			}()
 
 			err = <-errCh
