@@ -81,7 +81,7 @@ func TestParseStats(t *testing.T) {
 			examplePath := `"/an/example/path"`
 			info := new(FileInfo)
 
-			p := NewStatsParser(strings.NewReader(examplePath + "\t1\t1\t1\t1\t1\t1\tf\t1\t1\td\t1\n"))
+			p := NewStatsParser(strings.NewReader(examplePath + "\t1\t1\t1\t1\t1\t1\tf\t1\t1\td\n"))
 			So(p.Scan(info), ShouldBeNil)
 
 			p = NewStatsParser(strings.NewReader(examplePath + "\t1\t1\t1\t1\t1\n"))
