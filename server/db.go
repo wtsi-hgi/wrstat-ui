@@ -300,7 +300,7 @@ func findDBDirs(basepath string, required ...string) ([]string, []string, error)
 	latest := make(map[string]nameVersion)
 
 	for _, entry := range entries {
-		if !isValidDBDir(entry, basepath, required...) {
+		if !IsValidDBDir(entry, basepath, required...) {
 			continue
 		}
 
@@ -320,7 +320,9 @@ func findDBDirs(basepath string, required ...string) ([]string, []string, error)
 
 var validDBDir = regexp.MustCompile(`^[^.][^_]*_.`)
 
-func isValidDBDir(entry fs.DirEntry, basepath string, required ...string) bool {
+// IsValidDBDir returns true if the given entry is a directory named with the
+// correct format and containing the required files.
+func IsValidDBDir(entry fs.DirEntry, basepath string, required ...string) bool {
 	name := entry.Name()
 
 	if !entry.IsDir() || !validDBDir.MatchString(name) {

@@ -21,6 +21,8 @@ require (
 	github.com/wtsi-hgi/go-authserver v1.4.0
 	go.etcd.io/bbolt v1.4.0
 	golang.org/x/exp v0.0.0-20250218142911-aa4b98e5adaa
+	vimagination.zapto.org/httpencoding v1.0.0
+	vimagination.zapto.org/parser v1.1.1
 	vimagination.zapto.org/tsserver v1.0.11
 )
 
@@ -156,7 +158,6 @@ require (
 	k8s.io/client-go v11.0.0+incompatible // indirect
 	nanomsg.org/go-mangos v1.4.0 // indirect
 	vimagination.zapto.org/javascript v1.4.15 // indirect
-	vimagination.zapto.org/parser v1.1.1 // indirect
 )
 
 // we need to specify these due to github.com/VertebrateResequencing/wr's deps
