@@ -550,6 +550,8 @@ vimagination.zapto.org/httpfile v1.0.0 h1:Z7HI1Zz8VoLEp2+n/Vn1aFlT4m+I9MLX9N6buK
 vimagination.zapto.org/httpfile v1.0.0/go.mod h1:KyGTgFHo8/mg4Ig/puJEipCWVebrAtYK+Go17Nhdg/s=
 vimagination.zapto.org/byteio v1.0.5 h1:xPq92lCx3m5EahcEUADFQqslcdd8cpqbEbGlJlu0his=
 vimagination.zapto.org/byteio v1.0.5/go.mod h1:wd40f4fNg/FXkhOlTeB5B2G8bSLrMH6YX6PDtq3cApo=
+vimagination.zapto.org/httpencoding v1.0.0 h1:sSibnPq1pKROK4IBTNNCAKRPCijIZAaMQUBf/Mn5GA0=
+vimagination.zapto.org/httpencoding v1.0.0/go.mod h1:J2hxhPn3VjWestQQ036OYpDwwerfvIHmbtmTqpKVe0w=
 vimagination.zapto.org/javascript v1.4.15 h1:y+y/QCvti1lUHaVD6VSZviSCl2HMAmU5G3ZPlcjkFlQ=
 vimagination.zapto.org/javascript v1.4.15/go.mod h1:zGQvh50K8o8zaa/b3XH83gsjwSYz5ubq6EgpJw3smxg=
 vimagination.zapto.org/parser v1.0.2/go.mod h1:/H483adsvbp1SLfB0xfFBVfh+mze11+FHwCijc0rpCc=
