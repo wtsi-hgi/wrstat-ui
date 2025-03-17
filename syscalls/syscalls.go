@@ -142,14 +142,14 @@ func (l *logAnalyzer) loadDirs(dirs []string) {
 		}()
 	}
 
-	wg.Wait()
-
 	w := l.File.Create()
 
+	wg.Wait()
 	json.NewEncoder(w).Encode(l.stats) //nolint:errcheck,errchkjson
 	w.Close()
-
 	slog.Info("done loading logs")
+	json.NewEncoder(w).Encode(l.stats)
+	w.Close()
 }
 
 func (l *logAnalyzer) loadDir(dir string) error {
