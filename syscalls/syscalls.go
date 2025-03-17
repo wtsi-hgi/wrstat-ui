@@ -30,7 +30,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"log/slog"
 	"net/http"
@@ -41,6 +40,7 @@ import (
 	"sync"
 
 	"github.com/wtsi-hgi/wrstat-ui/server"
+	"vimagination.zapto.org/httpfile"
 )
 
 func StartServer(serverBind string, dbs ...string) error {
@@ -90,15 +90,13 @@ func getDBPaths(dbs []string) ([]string, error) {
 type logAnalyzer struct {
 	mu    sync.RWMutex
 	stats map[string]json.RawMessage
-	file
+	*httpfile.File
 }
 
 func newLogAnalyzer() *logAnalyzer {
 	return &logAnalyzer{
 		stats: make(map[string]json.RawMessage),
-		file: file{
-			name: "data.json",
-		},
+		File:  httpfile.NewWithData("data.json", []byte{'{', '}'}),
 	}
 }
 
@@ -109,14 +107,10 @@ func (l *logAnalyzer) loadDirs(dirs []string) {
 		}
 	}
 
-	pr, pw := io.Pipe()
+	w := l.File.Create()
 
-	go func() {
-		json.NewEncoder(pw).Encode(l.stats)
-		pw.Close()
-	}()
-
-	l.file.ReadFrom(pr)
+	json.NewEncoder(w).Encode(l.stats)
+	w.Close()
 }
 
 func (l *logAnalyzer) loadDir(dir string) error {

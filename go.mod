@@ -1,8 +1,6 @@
 module github.com/wtsi-hgi/wrstat-ui
 
-go 1.23.5
-
-toolchain go1.23.6
+go 1.24.1
 
 require (
 	code.cloudfoundry.org/bytefmt v0.31.0
@@ -158,6 +156,7 @@ require (
 	k8s.io/apimachinery v0.32.2 // indirect
 	k8s.io/client-go v11.0.0+incompatible // indirect
 	nanomsg.org/go-mangos v1.4.0 // indirect
+	vimagination.zapto.org/httpfile v1.0.0 // indirect
 	vimagination.zapto.org/javascript v1.4.15 // indirect
 )
 
