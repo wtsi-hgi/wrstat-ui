@@ -29,17 +29,13 @@ package syscalls
 
 import (
 	_ "embed"
-	"net/http"
-	"strings"
-	"time"
+
+	"vimagination.zapto.org/httpfile"
 )
 
 var (
 	//go:embed index.html
-	indexHTML string
+	indexHTML []byte
 
-	modtime = time.Now()                                                      //nolint:gochecknoglobals
-	index   = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { //nolint:gochecknoglobals
-		http.ServeContent(w, r, "index.html", modtime, strings.NewReader((indexHTML)))
-	})
+	index = httpfile.NewWithData("index.html", indexHTML)
 )
