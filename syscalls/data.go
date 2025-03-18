@@ -39,6 +39,7 @@ import (
 type data struct {
 	Events   []Event `json:"events"`
 	Errors   []Error `json:"errors"`
+	Complete bool    `json:"complete"`
 	hosts    map[string]string
 	lastFile string
 }
