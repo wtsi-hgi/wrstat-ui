@@ -29,13 +29,6 @@ type Properties = Record<string, string | Function>;
 
 type PropertiesOrChildren = Properties | Children;
 
-type Input = HTMLInputElement | HTMLButtonElement | HTMLTextAreaElement | HTMLSelectElement;
-
-interface Labeller {
-	<T extends Input>(name: Children, input: T, props?: Properties): [HTMLLabelElement, T];
-	<T extends Input>(input: T, name: Children, props?: Properties): [T, HTMLLabelElement];
-}
-
 type EventSyscall = {
 	time: number;
 	file: string;
@@ -51,13 +44,14 @@ type EventError = {
 	time: number;
 	file: string;
 	host: string;
-	message: number;
-	data: Record<string, string>;
+	message: string;
+	data?: Record<string, string>;
 };
 
 type Data = {
 	events: EventSyscall[];
 	errors: EventError[];
+	complete: boolean;
 };
 
 let id = 0;
@@ -71,22 +65,43 @@ const amendNode = (node: Element, propertiesOrChildren: PropertiesOrChildren, ch
 	return node;
       },
       clearNode = (node: Element, propertiesOrChildren: PropertiesOrChildren = {}, children?: Children) => amendNode((node.replaceChildren(), node), propertiesOrChildren, children),
-      {br, div, h2, option, select, span} = new Proxy({}, { "get": (_, element: keyof HTMLElementTagNameMap) => (props: PropertiesOrChildren = {}, children?: Children) => amendNode(document.createElementNS("http://www.w3.org/1999/xhtml", element), props, children) }) as { [K in keyof HTMLElementTagNameMap]: (props?: PropertiesOrChildren, children?: Children) => HTMLElementTagNameMap[K] },
+      {br, details, div, h2, li, option, select, span, summary, ul} = new Proxy({}, { "get": (_, element: keyof HTMLElementTagNameMap) => (props: PropertiesOrChildren = {}, children?: Children) => amendNode(document.createElementNS("http://www.w3.org/1999/xhtml", element), props, children) }) as { [K in keyof HTMLElementTagNameMap]: (props?: PropertiesOrChildren, children?: Children) => HTMLElementTagNameMap[K] },
       body = div(),
+      formatTime = (time: number) => {
+	      const d = new Date(time * 1000);
+
+	      return d.toLocaleDateString() + " " + d.toLocaleTimeString()
+      },
+      showErr = (err: EventError) => li(`${formatTime(err.time)}, ${err.file} (${err.host}): ${err.message}`),
       display = (run: string, data: Data) => {
 	let [opens, reads, bytes, closes, stats] = data.events.reduce((d, e) => (d[0] += e.opens ?? 0, d[1] += e.reads ?? 0, d[2] += e.bytes ?? 0, d[3] += e.closes ?? 0, d[4] += e.stats ?? 0, d), [0, 0, 0, 0, 0]);
 
 	clearNode(body, [
 		h2(run),
-		div([
-			div("Run start time: " + new Date((data.events.at(0)?.time ?? 0) * 1000)),
-			div("Run end time: " + new Date((data.events.at(-1)?.time ?? 0) * 1000)),
-			div("Total Syscalls: " + (opens + reads + closes + stats).toLocaleString()),
-			div("Total Opens: " + opens.toLocaleString()),
-			div("Total Reads: " + reads.toLocaleString()),
-			div("Total Bytes Read: " + bytes.toLocaleString()),
-			div("Total Close: " + closes.toLocaleString()),
-			div("Total Stats: " + stats.toLocaleString()),
+		div({"class": "tabs"}, [
+			details({"name": "tabs", "open": "open"}, [
+				summary("Details"),
+				div([
+					div("Run start time: " + formatTime(data.events.at(0)?.time ?? 0)),
+					div("Run end time: " + formatTime(data.events.at(-1)?.time ?? 0)),
+					div("Total Syscalls: " + (opens + reads + closes + stats).toLocaleString()),
+					div("Total Opens: " + opens.toLocaleString()),
+					div("Total Reads: " + reads.toLocaleString()),
+					div("Total Bytes Read: " + bytes.toLocaleString()),
+					div("Total Close: " + closes.toLocaleString()),
+					div("Total Stats: " + stats.toLocaleString()),
+				])
+			]),
+			data.errors.length === 0 ? [] : details({"name": "tabs"}, [
+				summary("Errors"),
+				ul(data.errors.length > 7 ? [
+					data.errors.slice(0, 3).map(err => showErr(err)),
+					li({"class": "expandErrors", "click": function(this: HTMLLIElement) {
+						this.replaceWith(...data.errors.slice(3, -3).map(err => showErr(err)));
+					}}, "Click here to expand remaining errors"),
+					data.errors.slice(-3).map(err => showErr(err))
+				] : data.errors.map(err => showErr(err)))
+			])
 		])
 	]);
       };
@@ -98,7 +113,7 @@ const amendNode = (node: Element, propertiesOrChildren: PropertiesOrChildren, ch
 	amendNode(document.body, [
 			select([
 			option({"click": () => body.replaceChildren()}, "-- Please select a run --"),
-			Object.keys(data).map(val => option({"click": () => display(val, data[val])}, (data[val].errors.length === 0 ? "✓ " : "❌ ") + val))
+			Object.keys(data).map(val => option({"click": () => display(val, data[val])}, (data[val].complete ? "✓ " : "❌ ") + val))
 		]),
 		body
 	]);

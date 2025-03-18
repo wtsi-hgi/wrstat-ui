@@ -129,6 +129,7 @@ func (l *logAnalyzer) loadDir(dir string) error {
 
 	for _, file := range files {
 		if d.lastFile = strings.TrimSuffix(filepath.Base(file), ".log"); d.lastFile == "logs.gz" {
+			d.Complete = true
 			d.lastFile = "walk"
 		}
 
