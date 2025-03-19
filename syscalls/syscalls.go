@@ -102,11 +102,11 @@ func newLogAnalyzer() *logAnalyzer {
 
 func (l *logAnalyzer) loadDirs(dirs []string) {
 	for _, dir := range dirs {
+		slog.Info("loading logs from path", "path", dir)
+
 		if err := l.loadDir(dir); err != nil {
 			slog.Info("error loading log directory", "err", err)
 		}
-
-		slog.Info("loaded logs from path", "path", dir)
 	}
 
 	w := l.File.Create()
@@ -152,7 +152,7 @@ func (l *logAnalyzer) loadDir(dir string) error {
 	l.stats[name] = json.RawMessage(buf.Bytes())
 	l.mu.Unlock()
 
-	slog.Info("loaded logs", "name", name)
+	slog.Info("loaded logs", "path", name)
 
 	return nil
 }
