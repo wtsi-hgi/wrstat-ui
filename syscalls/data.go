@@ -28,6 +28,7 @@ package syscalls
 import (
 	"io"
 	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -131,7 +132,7 @@ func (d *data) parseLine(line [][2]string) error {
 				return nil
 			}
 		case "file":
-			event.File = part[1]
+			event.File = filepath.Base(part[1])
 		case "host":
 			event.Host = part[1]
 		case "opens":
