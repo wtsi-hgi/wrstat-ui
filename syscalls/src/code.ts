@@ -110,7 +110,6 @@ const amendNode = (node: Element, propertiesOrChildren: PropertiesOrChildren, ch
 	      s = svg(),
 	      lines = keys.map(() => [] as number[]),
 	      maxes = keys.map(() => 0);
-
 	
 	for (const [, minute] of minutes) {
 		for (const [n, key] of keys.entries()) {
@@ -149,7 +148,7 @@ const amendNode = (node: Element, propertiesOrChildren: PropertiesOrChildren, ch
 					div("Total Errors: " + (data.errors?.length ?? 0).toLocaleString()),
 				])
 			]),
-			data.errors?.length ?? 0 === 0 ? [] : details({"name": "tabs"}, [
+			(data.errors?.length ?? 0) === 0 ? [] : details({"name": "tabs"}, [
 				summary("Errors"),
 				ul(data.errors.length > 7 ? [
 					data.errors.slice(0, 3).map(err => showErr(err)),
