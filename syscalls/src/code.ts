@@ -86,7 +86,7 @@ const amendNode = (node: Element, propertiesOrChildren: PropertiesOrChildren, ch
       keyColours = ["#0f0", "#00f", "#f80", "#f0f", "#f00"],
       newSyscall = () => ({"time": 0, "opens": 0, "reads": 0, "bytes": 0, "closes": 0, "stats": 0}),
       maxY = 200,
-      buildChart = (events: EventSyscall[]) => {
+      buildChart = (events: EventSyscall[], startMinute: number, endMinute: number) => {
 	const minutes = new Map<number, syscalls>(),
 	      files = new Map<string, number>();
 
@@ -100,29 +100,30 @@ const amendNode = (node: Element, propertiesOrChildren: PropertiesOrChildren, ch
 		for (let i = lastTime + 1; i <= now; i++) {
 			const min = minutes.get(i) ?? setAndReturn(minutes, i, newSyscall());
 
+			min.time = i;
+
 			for (const key of keys) {
 				min[key] += (event[key] ?? 0) / dt;
 			}
 		}
 	}
 
-	const minTime = events[0].time / 60 | 0,
-	      s = svg(),
-	      lines = keys.map(() => [] as number[]),
+	const s = svg(),
+	      lines = keys.map(() => [] as [number, number][]),
 	      maxes = keys.map(() => 0);
 	
 	for (const [, minute] of minutes) {
 		for (const [n, key] of keys.entries()) {
-			lines[n].push(minute[key]);
+			lines[n].push([minute.time, minute[key]]);
 			maxes[n] = Math.max(maxes[n], minute[key]);
 		}
 	}
 
 	const maxSyscalls = Math.max(...maxes.slice(0, 4));
 
-	amendNode(s, {"viewBox": `0 0 ${(events.at(-1)!.time / 60 | 0) - minTime} ${maxY}`}, [
-		lines.slice(0, 4).map((points, l) => polyline({"points": points.map((point, n) => `${n},${maxY - maxY * point / maxSyscalls}`).join(" "), "stroke": keyColours[l], "fill": "none"})),
-		polyline({"points": lines[4].map((point, n) => `${n},${maxY - maxY * point / maxes[4]}`).join(" "), "stroke": keyColours[4], "fill": "none"})
+	amendNode(s, {"viewBox": `0 0 ${endMinute - startMinute} ${maxY}`}, [
+		lines.slice(0, 4).map((points, l) => polyline({"points": points.map(([n, point]) => `${n - startMinute},${maxY - maxY * point / maxSyscalls}`).join(" "), "stroke": keyColours[l], "fill": "none"})),
+		polyline({"points": lines[4].map(([n, point]) => `${n - startMinute},${maxY - maxY * point / maxes[4]}`).join(" "), "stroke": keyColours[4], "fill": "none"})
 	])
 
 	return s;
@@ -162,12 +163,12 @@ const amendNode = (node: Element, propertiesOrChildren: PropertiesOrChildren, ch
 				summary("Charts"),
 				div([
 					select({"change": function(this: HTMLSelectElement) {
-						(this.nextSibling as Element).replaceWith(buildChart(this.value === "..." ? data.events : data.events.filter(event => event.host === this.value)));
+						(this.nextSibling as Element).replaceWith(buildChart(this.value === "..." ? data.events : data.events.filter(event => event.host === this.value), data.events[0].time / 60 | 0, data.events.at(-1)!.time / 60 | 0));
 					}}, [
 						option({"value": "..."}, "-- All Hosts --"),
 						Array.from(data.events.reduce((hosts, event) => (hosts.add(event.host), hosts), new Set<string>())).map(host => option(host))
 					]),
-					buildChart(data.events),
+					buildChart(data.events, data.events[0].time / 60 | 0, data.events.at(-1)!.time / 60 | 0),
 					ul({"class": "graphKey"}, keys.map((key, n) => li([span({"style": "background-color: " + keyColours[n]}), span(key)])))
 				])
 			])
