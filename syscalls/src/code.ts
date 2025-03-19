@@ -114,6 +114,10 @@ const amendNode = (node: Element, propertiesOrChildren: PropertiesOrChildren, ch
 	
 	for (const [, minute] of minutes) {
 		for (const [n, key] of keys.entries()) {
+			if (minute[key] === 0 && (lines[n].at(-1)?.[1] ?? 0) === 0) {
+				continue
+			}
+
 			lines[n].push([minute.time, minute[key]]);
 			maxes[n] = Math.max(maxes[n], minute[key]);
 		}
