@@ -121,3 +121,22 @@
 .tabs > details[open] > summary:after {
 	box-shadow: -2px 2px 0 var(--tabSelectedBG);
 }
+
+.graphKey {
+	list-style: none;
+	padding: 0;
+}
+
+.graphKey > li {
+	display: inline-block;
+	margin-right: 2em;
+}
+
+.graphKey > li :first-child {
+	display: inline-block;
+	border: 1px solid #000;
+	width: 1em;
+	height: 1em;
+	margin-right: 0.5em;
+	margin-bottom: -0.25em;
+}
