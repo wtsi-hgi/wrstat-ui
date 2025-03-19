@@ -140,3 +140,8 @@
 	margin-right: 0.5em;
 	margin-bottom: -0.25em;
 }
+
+svg {
+	display: block;
+	max-height: 50vh;
+}
