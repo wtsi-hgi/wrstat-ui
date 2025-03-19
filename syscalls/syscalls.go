@@ -105,6 +105,8 @@ func (l *logAnalyzer) loadDirs(dirs []string) {
 		if err := l.loadDir(dir); err != nil {
 			slog.Info("error loading log directory", "err", err)
 		}
+
+		slog.Info("loaded logs from path", "path", dir)
 	}
 
 	w := l.File.Create()
@@ -149,6 +151,8 @@ func (l *logAnalyzer) loadDir(dir string) error {
 	l.mu.Lock()
 	l.stats[name] = json.RawMessage(buf.Bytes())
 	l.mu.Unlock()
+
+	slog.Info("loaded logs", "name", name)
 
 	return nil
 }
