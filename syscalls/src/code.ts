@@ -146,10 +146,10 @@ const amendNode = (node: Element, propertiesOrChildren: PropertiesOrChildren, ch
 					div("Total Bytes Read: " + bytes.toLocaleString()),
 					div("Total Close: " + closes.toLocaleString()),
 					div("Total Stats: " + stats.toLocaleString()),
-					div("Total Errors: " + data.errors.length.toLocaleString()),
+					div("Total Errors: " + (data.errors?.length ?? 0).toLocaleString()),
 				])
 			]),
-			data.errors.length === 0 ? [] : details({"name": "tabs"}, [
+			data.errors?.length ?? 0 === 0 ? [] : details({"name": "tabs"}, [
 				summary("Errors"),
 				ul(data.errors.length > 7 ? [
 					data.errors.slice(0, 3).map(err => showErr(err)),
