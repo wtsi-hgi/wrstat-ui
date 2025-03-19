@@ -36,6 +36,8 @@ import (
 	"github.com/klauspost/pgzip"
 )
 
+const timeFormat = "2006-01-02T15:04:05-0700"
+
 type data struct {
 	Events   []Event `json:"events"`
 	Errors   []Error `json:"errors"`
@@ -116,7 +118,7 @@ func (d *data) parseLine(line [][2]string) error {
 		case "t":
 			var t time.Time
 
-			t, err = time.Parse("2006-01-02T15:04:05-0700", part[1])
+			t, err = time.Parse(timeFormat, part[1])
 			event.Time = t.Unix()
 		case "lvl":
 			if part[1] == "eror" {
@@ -173,7 +175,7 @@ func (d *data) parseErrorLine(line [][2]string) error {
 		case "t":
 			var t time.Time
 
-			t, err = time.Parse("2006-01-02T15:04:05-0700", part[1])
+			t, err = time.Parse(timeFormat, part[1])
 			event.Time = t.Unix()
 		case "lvl":
 		case "msg":
