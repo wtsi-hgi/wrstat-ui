@@ -68,24 +68,24 @@ const amendNode = (node: Element, propertiesOrChildren: PropertiesOrChildren, ch
       clearNode = (node: Element, propertiesOrChildren: PropertiesOrChildren = {}, children?: Children) => amendNode((node.replaceChildren(), node), propertiesOrChildren, children),
       tags = <NS extends string>(ns: NS) => new Proxy({}, {"get": (_, element: string) => (props: PropertiesOrChildren = {}, children?: Children) => amendNode(document.createElementNS(ns, element), props, children) }) as NS extends "http://www.w3.org/1999/xhtml" ? {[K in keyof HTMLElementTagNameMap]: (props?: PropertiesOrChildren, children?: Children) => HTMLElementTagNameMap[K]} : NS extends "http://www.w3.org/2000/svg" ? {[K in keyof SVGElementTagNameMap]: (props?: PropertiesOrChildren, children?: Children) => SVGElementTagNameMap[K]} : Record<string, (props?: PropertiesOrChildren, children?: Children) => Element>,
       {br, details, div, h2, li, option, select, span, summary, ul} = tags("http://www.w3.org/1999/xhtml"),
-      {polyline, svg} = tags("http://www.w3.org/2000/svg"),
+      {g, line, polyline, svg, text} = tags("http://www.w3.org/2000/svg"),
       body = div(),
       formatTime = (time: number) => {
 	const d = new Date(time * 1000);
 
 	return d.toLocaleDateString() + " " + d.toLocaleTimeString()
       },
-      setAndReturn = <K, V>(m: {set: (k: K, v: V) => void}, k: K, v: V) => {
-	m.set(k, v);
-
-	return v;
-      },
       keys: (keyof syscalls)[] = ["opens", "reads", "closes", "stats", "bytes"],
       keyColours = ["#0f0", "#00f", "#f80", "#f0f", "#f00"],
       newSyscall = (time = 0) => ({time, "opens": 0, "reads": 0, "bytes": 0, "closes": 0, "stats": 0}),
+      range = function* <V>(start: number, stop: number, fn: (n: number) => V) {
+	for (let i = start; i <= stop; i++) {
+		yield fn(i);
+	}
+      },
       maxY = 200,
       buildChart = (events: EventSyscall[], startMinute: number, endMinute: number) => {
-	const minutes = new Map<number, syscalls>(Array.from({"length": endMinute - startMinute + 1}, (_, n) => [startMinute + n, newSyscall(startMinute + n)])),
+	const minutes = new Map(range(startMinute, endMinute,  n => [n, newSyscall(n)])),
 	      files = new Map<string, syscalls>();
 
 	for (const event of events) {
@@ -102,14 +102,13 @@ const amendNode = (node: Element, propertiesOrChildren: PropertiesOrChildren, ch
 			const lastTime = last[key] === 0 ? now - 1 : last.time / 60 | 0,
 			      dt = now - lastTime;
 
-			for (let i = lastTime + 1; i <= now; i++) {
+			for (const i of range(lastTime + 1, now, n => n)) {
 				minutes.get(i)![key] += (event[key] ?? 0) / dt;
 			}
 		}
 	}
 
-	const s = svg(),
-	      lines = keys.map(() => [] as [number, number][]),
+	const lines = keys.map(() => [] as [number, number][]),
 	      maxes = keys.map(() => 0);
 	
 	for (const [, minute] of minutes) {
@@ -131,12 +130,14 @@ const amendNode = (node: Element, propertiesOrChildren: PropertiesOrChildren, ch
 
 	const maxSyscalls = Math.max(...maxes.slice(0, 4));
 
-	amendNode(s, {"viewBox": `0 0 ${endMinute - startMinute} ${maxY}`}, [
-		lines.slice(0, 4).map((points, l) => polyline({"points": points.map(([n, point]) => `${n - startMinute},${maxY - maxY * point / maxSyscalls}`).join(" "), "stroke": keyColours[l], "fill": "none"})),
-		polyline({"points": lines[4].map(([n, point]) => `${n - startMinute},${maxY - maxY * point / maxes[4]}`).join(" "), "stroke": keyColours[4], "fill": "none"})
-	])
-
-	return s;
+	return svg({"viewBox": `0 0 ${endMinute - startMinute + 20} ${maxY + 100}`}, [
+		g({"transform": "translate(10 5)"}, [
+			lines.slice(0, 4).map((points, l) => polyline({"points": points.map(([n, point]) => `${n - startMinute},${maxY - maxY * point / maxSyscalls}`).join(" "), "stroke": keyColours[l], "fill": "none"})),
+			polyline({"points": lines[4].map(([n, point]) => `${n - startMinute},${maxY - maxY * point / maxes[4]}`).join(" "), "stroke": keyColours[4], "fill": "none"}),
+			line({"y1": maxY + "", "y2": maxY + "", "x2": "100%", "stroke": "#000"}),
+			Array.from(range(Math.ceil(startMinute / 60), Math.floor(endMinute / 60), n => text({"transform": `translate(${n * 60 - startMinute}, ${maxY + 5}) rotate(90) scale(0.5)`}, formatTime(n * 3600))))
+		])
+	]);
       },
       showErr = (err: EventError) => li(`${formatTime(err.time)}, ${err.file} (${err.host}): ${err.message}`),
       display = (run: string, data: Data) => {
