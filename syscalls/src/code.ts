@@ -185,9 +185,15 @@ const amendNode = (node: Element, propertiesOrChildren: PropertiesOrChildren, ch
 .then(j => j.json())
 .then((data: Record<string, Data>) => {
 	amendNode(document.body, [
-		select([
-			option({"click": () => body.replaceChildren()}, "-- Please select a run --"),
-			Object.entries(data).filter(([, e]) => e.events).map(([key, val]) => option({"click": () => display(key, val)}, (val.complete ? "✓ " : "❌ ") + key))
+		select({"change": function(this: HTMLSelectElement) {
+			if (!this.value) {
+				body.replaceChildren();
+			} else {
+				display(this.value, data[this.value]);
+			}
+		}}, [
+			option({"value": ""}, "-- Please select a run --"),
+			Object.entries(data).filter(([, e]) => e?.events).map(([key, val]) => option({"value": key}, (val.complete ? "✓ " : "❌ ") + key))
 		]),
 		body
 	]);
