@@ -156,10 +156,24 @@ const amendNode = (node: Element, propertiesOrChildren: PropertiesOrChildren, ch
       },
       showErr = (err: EventError) => li(`${formatTime(err.time)}, ${err.file} (${err.host}): ${err.message}`),
       display = (run: string, data: Data) => {
+	let chart: SVGSVGElement;
+
 	const {opens, reads, bytes, closes, stats} = data.events.reduce((d, e) => (d.opens += e.opens ?? 0, d.reads += e.reads ?? 0, d.bytes += e.bytes ?? 0, d.closes += e.closes ?? 0, d.stats += e.stats ?? 0, d), newSyscall()),
 	      dataStart = data.events[0].time / 60 | 0,
 	      dataEnd = data.events.at(-1)!.time / 60 | 0,
-	      [maxSyscalls, maxBytes] = findDataMaxes(data.events, dataStart, dataEnd);
+	      [maxSyscalls, maxBytes] = findDataMaxes(data.events, dataStart, dataEnd),
+	      chartContent = div([
+		select({"change": function(this: HTMLSelectElement) {
+			chart.replaceWith(chart = buildChart(this.value === "..." ? data.events : data.events.filter(event => event.host === this.value), dataStart, dataEnd, maxSyscalls, maxBytes));
+		}}, [
+			option({"value": "..."}, "-- All Hosts --"),
+			Array.from(data.events.reduce((hosts, event) => (hosts.add(event.host), hosts), new Set<string>())).map(host => option(host))
+		]),
+		ul({"class": "graphKey"}, keys.map((key, n) => li([span({"style": "background-color: " + keyColours[n], "click": function(this: HTMLSpanElement) {
+			this.setAttribute("style", chartContent.classList.toggle(keys[n]) ? "" : `background-color: ${keyColours[n]}`);
+		}}), span(key)]))),
+		chart = buildChart(data.events, dataStart, dataEnd, maxSyscalls, maxBytes)
+	      ]);
 
 	clearNode(body, [
 		h2(run),
@@ -190,18 +204,7 @@ const amendNode = (node: Element, propertiesOrChildren: PropertiesOrChildren, ch
 			]),
 			details({"name": "tabs"}, [
 				summary("Charts"),
-				div([
-					select({"change": function(this: HTMLSelectElement) {
-						(this.nextSibling as Element).replaceWith(buildChart(this.value === "..." ? data.events : data.events.filter(event => event.host === this.value), dataStart, dataEnd, maxSyscalls, maxBytes));
-					}}, [
-						option({"value": "..."}, "-- All Hosts --"),
-						Array.from(data.events.reduce((hosts, event) => (hosts.add(event.host), hosts), new Set<string>())).map(host => option(host))
-					]),
-					buildChart(data.events, dataStart, dataEnd, maxSyscalls, maxBytes),
-					ul({"class": "graphKey"}, keys.map((key, n) => li([span({"style": "background-color: " + keyColours[n], "click": function(this: HTMLSpanElement) {
-						this.setAttribute("style", this.parentElement?.parentElement?.parentElement?.classList.toggle(keys[n]) ? "" : `background-color: ${keyColours[n]}`);
-					}}), span(key)])))
-				])
+				chartContent
 			])
 		])
 	]);
