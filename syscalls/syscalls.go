@@ -179,6 +179,6 @@ func (l *logAnalyzer) setData(name string, data any) {
 	json.NewEncoder(&buf).Encode(data)
 
 	l.mu.Lock()
-	l.stats[name] = null
+	l.stats[name] = buf.Bytes()
 	l.mu.Unlock()
 }
