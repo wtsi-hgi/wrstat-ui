@@ -43,6 +43,8 @@ import (
 	"vimagination.zapto.org/httpfile"
 )
 
+var null = json.RawMessage{'n', 'u', 'l', 'l'}
+
 func StartServer(serverBind string, dbs ...string) error {
 	if len(dbs) == 0 {
 		return errors.New("no db paths given")
@@ -101,13 +103,23 @@ func newLogAnalyzer() *logAnalyzer {
 }
 
 func (l *logAnalyzer) loadDirs(dirs []string) {
+	var wg sync.WaitGroup
+
+	wg.Add(len(dirs))
+
 	for _, dir := range dirs {
 		slog.Info("loading logs from path", "path", dir)
 
-		if err := l.loadDir(dir); err != nil {
-			slog.Info("error loading log directory", "err", err)
-		}
+		go func() {
+			if err := l.loadDir(dir); err != nil {
+				slog.Info("error loading log directory", "err", err)
+			}
+
+			wg.Done()
+		}()
 	}
+
+	wg.Wait()
 
 	w := l.File.Create()
 
@@ -141,18 +153,30 @@ func (l *logAnalyzer) loadDir(dir string) error {
 	}
 
 	if len(d.Events) == 0 && len(d.Errors) == 0 {
+		l.setNull(name)
+
 		return nil
 	}
 
-	var buf bytes.Buffer
-
-	json.NewEncoder(&buf).Encode(d)
-
-	l.mu.Lock()
-	l.stats[name] = json.RawMessage(buf.Bytes())
-	l.mu.Unlock()
+	l.setData(name, d)
 
 	slog.Info("loaded logs", "path", name)
 
 	return nil
+}
+
+func (l *logAnalyzer) setNull(name string) {
+	l.mu.Lock()
+	l.stats[name] = null
+	l.mu.Unlock()
+}
+
+func (l *logAnalyzer) setData(name string, data any) {
+	var buf bytes.Buffer
+
+	json.NewEncoder(&buf).Encode(data)
+
+	l.mu.Lock()
+	l.stats[name] = null
+	l.mu.Unlock()
 }
