@@ -68,7 +68,7 @@ const amendNode = (node: Element, propertiesOrChildren: PropertiesOrChildren, ch
       },
       clearNode = (node: Element, propertiesOrChildren: PropertiesOrChildren = {}, children?: Children) => amendNode((node.replaceChildren(), node), propertiesOrChildren, children),
       tags = <NS extends string>(ns: NS) => new Proxy({}, {"get": (_, element: string) => (props: PropertiesOrChildren = {}, children?: Children) => amendNode(document.createElementNS(ns, element), props, children) }) as NS extends "http://www.w3.org/1999/xhtml" ? {[K in keyof HTMLElementTagNameMap]: (props?: PropertiesOrChildren, children?: Children) => HTMLElementTagNameMap[K]} : NS extends "http://www.w3.org/2000/svg" ? {[K in keyof SVGElementTagNameMap]: (props?: PropertiesOrChildren, children?: Children) => SVGElementTagNameMap[K]} : Record<string, (props?: PropertiesOrChildren, children?: Children) => Element>,
-      {br, details, div, h2, li, optgroup, option, select, span, summary, ul} = tags("http://www.w3.org/1999/xhtml"),
+      {br, details, div, h2, input, label, li, optgroup, option, select, span, summary, ul} = tags("http://www.w3.org/1999/xhtml"),
       {g, line, polyline, svg, text} = tags("http://www.w3.org/2000/svg"),
       body = div(),
       formatTime = (time: number) => {
@@ -118,9 +118,10 @@ const amendNode = (node: Element, propertiesOrChildren: PropertiesOrChildren, ch
 
 	return minutes;
       },
-      findDataMaxes = (events: EventSyscall[], startMinute: number, endMinute: number) => {
-	const minutes = buildMinuteByMinute(events, startMinute, endMinute),
-	      maxes: [number, number] = [0, 0];
+      findDataMaxes = (events: EventSyscall[], startMinute: number, endMinute: number) => findMinuteMaxes(buildMinuteByMinute(events, startMinute, endMinute)),
+      findMinuteMaxes = (minutes: Map<number, syscalls>) => {
+	const maxes: [number, number] = [0, 0];
+
 	
 	for (const [, minute] of minutes) {
 		maxes[0] = Math.max(maxes[0], minute.syscalls);
@@ -129,9 +130,13 @@ const amendNode = (node: Element, propertiesOrChildren: PropertiesOrChildren, ch
 
 	return maxes;
       },
-      buildChart = (events: EventSyscall[], startMinute: number, endMinute: number, maxSyscalls: number, maxBytes: number) => {
+      buildChart = (events: EventSyscall[], startMinute: number, endMinute: number, maxSyscalls: number, maxBytes: number, uniformY: boolean) => {
 	const minutes = buildMinuteByMinute(events, startMinute, endMinute),
 	      lines = keys.map(() => [] as [number, number][]);
+
+	if (!uniformY) {
+		[maxSyscalls, maxBytes] = findMinuteMaxes(minutes);
+	}
 	
 	for (const [, minute] of minutes) {
 		for (const [n, key] of keys.entries()) {
@@ -156,7 +161,9 @@ const amendNode = (node: Element, propertiesOrChildren: PropertiesOrChildren, ch
       },
       showErr = (err: EventError) => li(`${formatTime(err.time)}, ${err.file} (${err.host}): ${err.message}`),
       display = (run: string, data: Data) => {
-	let chart: SVGSVGElement;
+	let chart: SVGSVGElement,
+	    uniformY = true,
+	    hostData = data.events;
 
 	const {opens, reads, bytes, closes, stats} = data.events.reduce((d, e) => (d.opens += e.opens ?? 0, d.reads += e.reads ?? 0, d.bytes += e.bytes ?? 0, d.closes += e.closes ?? 0, d.stats += e.stats ?? 0, d), newSyscall()),
 	      dataStart = data.events[0].time / 60 | 0,
@@ -164,15 +171,20 @@ const amendNode = (node: Element, propertiesOrChildren: PropertiesOrChildren, ch
 	      [maxSyscalls, maxBytes] = findDataMaxes(data.events, dataStart, dataEnd),
 	      chartContent = div([
 		select({"change": function(this: HTMLSelectElement) {
-			chart.replaceWith(chart = buildChart(this.value === "..." ? data.events : data.events.filter(event => event.host === this.value), dataStart, dataEnd, maxSyscalls, maxBytes));
+			chart.replaceWith(chart = buildChart(hostData = this.value === "..." ? data.events : data.events.filter(event => event.host === this.value), dataStart, dataEnd, maxSyscalls, maxBytes, uniformY));
 		}}, [
 			option({"value": "..."}, "-- All Hosts --"),
 			Array.from(data.events.reduce((hosts, event) => (hosts.add(event.host), hosts), new Set<string>())).map(host => option(host))
 		]),
+		br(),
+		label({"for": "uniformY"}, "Uniform Y-axis: "),
+		input({"id": "uniformY", "checked": "checked", "type": "checkbox", "click": function(this: HTMLInputElement) {
+			chart.replaceWith(chart = buildChart(hostData, dataStart, dataEnd, maxSyscalls, maxBytes, uniformY = this.checked));
+		}}),
 		ul({"class": "graphKey"}, keys.map((key, n) => li([span({"style": "background-color: " + keyColours[n], "click": function(this: HTMLSpanElement) {
 			this.setAttribute("style", chartContent.classList.toggle(keys[n]) ? "" : `background-color: ${keyColours[n]}`);
 		}}), span(key)]))),
-		chart = buildChart(data.events, dataStart, dataEnd, maxSyscalls, maxBytes)
+		chart = buildChart(hostData, dataStart, dataEnd, maxSyscalls, maxBytes, uniformY)
 	      ]);
 
 	clearNode(body, [
