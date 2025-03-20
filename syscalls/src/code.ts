@@ -57,8 +57,6 @@ type Data = {
 	complete: boolean;
 };
 
-let id = 0;
-
 const amendNode = (node: Element, propertiesOrChildren: PropertiesOrChildren, children?: Children) => {
 	const [p, c] = typeof propertiesOrChildren === "string" || propertiesOrChildren instanceof Node || propertiesOrChildren instanceof Array ? [{}, propertiesOrChildren] : [propertiesOrChildren, children ?? []];
 
@@ -84,26 +82,28 @@ const amendNode = (node: Element, propertiesOrChildren: PropertiesOrChildren, ch
       },
       keys: (keyof syscalls)[] = ["opens", "reads", "closes", "stats", "bytes"],
       keyColours = ["#0f0", "#00f", "#f80", "#f0f", "#f00"],
-      newSyscall = () => ({"time": 0, "opens": 0, "reads": 0, "bytes": 0, "closes": 0, "stats": 0}),
+      newSyscall = (time = 0) => ({time, "opens": 0, "reads": 0, "bytes": 0, "closes": 0, "stats": 0}),
       maxY = 200,
       buildChart = (events: EventSyscall[], startMinute: number, endMinute: number) => {
-	const minutes = new Map<number, syscalls>(),
-	      files = new Map<string, number>();
+	const minutes = new Map<number, syscalls>(Array.from({"length": endMinute - startMinute + 1}, (_, n) => [startMinute + n, newSyscall(startMinute + n)])),
+	      files = new Map<string, syscalls>();
 
 	for (const event of events) {
 		const now = event.time / 60 | 0,
-		      lastTime = files.get(event.file) ?? now - 1,
-		      dt = now - lastTime;
+		      last = files.get(event.file) ?? newSyscall(event.time - 60);
 
-		files.set(event.file, now);
-		
-		for (let i = lastTime + 1; i <= now; i++) {
-			const min = minutes.get(i) ?? setAndReturn(minutes, i, newSyscall());
+		files.set(event.file, event);
 
-			min.time = i;
+		for (const key of keys) {
+			if (!event[key]) {
+				continue;
+			}
 
-			for (const key of keys) {
-				min[key] += (event[key] ?? 0) / dt;
+			const lastTime = last[key] === 0 ? now - 1 : last.time / 60 | 0,
+			      dt = now - lastTime;
+
+			for (let i = lastTime + 1; i <= now; i++) {
+				minutes.get(i)![key] += (event[key] ?? 0) / dt;
 			}
 		}
 	}
@@ -121,6 +121,12 @@ const amendNode = (node: Element, propertiesOrChildren: PropertiesOrChildren, ch
 			lines[n].push([minute.time, minute[key]]);
 			maxes[n] = Math.max(maxes[n], minute[key]);
 		}
+	}
+
+	for (const line of lines) {
+	      while (line.at(-1)?.[1] === 0) {
+		      line.pop();
+	      }
 	}
 
 	const maxSyscalls = Math.max(...maxes.slice(0, 4));
