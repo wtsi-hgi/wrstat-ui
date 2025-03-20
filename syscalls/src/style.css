@@ -146,6 +146,6 @@ svg {
 	height: 90vh;
 }
 
-svg.syscalls .syscalls, svg.opens .opens, svg.reads .reads, svg.bytes .bytes, svg.closes .closes, svg.stats .stats {
+.syscalls .syscalls, .opens .opens, .reads .reads, .bytes .bytes, .closes .closes, .stats .stats {
 	display: none;
 }
