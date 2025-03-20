@@ -145,3 +145,7 @@ svg {
 	display: block;
 	max-height: 50vh;
 }
+
+svg.syscalls .syscalls, svg.opens .opens, svg.reads .reads, svg.bytes .bytes, svg.closes .closes, svg.stats .stats {
+	display: none;
+}

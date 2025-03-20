@@ -147,8 +147,8 @@ const amendNode = (node: Element, propertiesOrChildren: PropertiesOrChildren, ch
 
 	return svg({"viewBox": `0 0 ${endMinute - startMinute + 20} ${maxY + 100}`}, [
 		g({"transform": "translate(10 5)"}, [
-			lines.slice(0, 5).map((points, l) => polyline({"points": points.map(([n, point]) => `${n - startMinute},${maxY - maxY * point / maxSyscalls}`).join(" "), "stroke": keyColours[l], "fill": "none"})),
-			polyline({"points": lines[5].map(([n, point]) => `${n - startMinute},${maxY - maxY * point / maxBytes}`).join(" "), "stroke": keyColours[5], "fill": "none"}),
+			polyline({"points": lines[5].map(([n, point]) => `${n - startMinute},${maxY - maxY * point / maxBytes}`).join(" "), "stroke": keyColours[5], "fill": "none", "class": keys[5]}),
+			lines.slice(0, 5).map((points, l) => polyline({"points": points.map(([n, point]) => `${n - startMinute},${maxY - maxY * point / maxSyscalls}`).join(" "), "stroke": keyColours[l], "fill": "none", "class": keys[l]})),
 			line({"y1": maxY + "", "y2": maxY + "", "x2": "100%", "stroke": "#000"}),
 			Array.from(range(Math.ceil(startMinute / 60), Math.floor(endMinute / 60), n => text({"transform": `translate(${n * 60 - startMinute}, ${maxY + 5}) rotate(90) scale(0.5)`}, formatTime(n * 3600))))
 		])
@@ -198,7 +198,9 @@ const amendNode = (node: Element, propertiesOrChildren: PropertiesOrChildren, ch
 						Array.from(data.events.reduce((hosts, event) => (hosts.add(event.host), hosts), new Set<string>())).map(host => option(host))
 					]),
 					buildChart(data.events, dataStart, dataEnd, maxSyscalls, maxBytes),
-					ul({"class": "graphKey"}, keys.map((key, n) => li([span({"style": "background-color: " + keyColours[n]}), span(key)])))
+					ul({"class": "graphKey"}, keys.map((key, n) => li([span({"style": "background-color: " + keyColours[n], "click": function(this: HTMLSpanElement) {
+						this.setAttribute("style", (this.parentElement?.parentElement as HTMLUListElement)?.previousElementSibling?.classList.toggle(keys[n]) ? "" : `background-color: ${keyColours[n]}`);
+					}}), span(key)])))
 				])
 			])
 		])
