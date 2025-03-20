@@ -67,7 +67,7 @@ const amendNode = (node: Element, propertiesOrChildren: PropertiesOrChildren, ch
       },
       clearNode = (node: Element, propertiesOrChildren: PropertiesOrChildren = {}, children?: Children) => amendNode((node.replaceChildren(), node), propertiesOrChildren, children),
       tags = <NS extends string>(ns: NS) => new Proxy({}, {"get": (_, element: string) => (props: PropertiesOrChildren = {}, children?: Children) => amendNode(document.createElementNS(ns, element), props, children) }) as NS extends "http://www.w3.org/1999/xhtml" ? {[K in keyof HTMLElementTagNameMap]: (props?: PropertiesOrChildren, children?: Children) => HTMLElementTagNameMap[K]} : NS extends "http://www.w3.org/2000/svg" ? {[K in keyof SVGElementTagNameMap]: (props?: PropertiesOrChildren, children?: Children) => SVGElementTagNameMap[K]} : Record<string, (props?: PropertiesOrChildren, children?: Children) => Element>,
-      {br, details, div, h2, li, option, select, span, summary, ul} = tags("http://www.w3.org/1999/xhtml"),
+      {br, details, div, h2, li, optgroup, option, select, span, summary, ul} = tags("http://www.w3.org/1999/xhtml"),
       {g, line, polyline, svg, text} = tags("http://www.w3.org/2000/svg"),
       body = div(),
       formatTime = (time: number) => {
@@ -113,10 +113,6 @@ const amendNode = (node: Element, propertiesOrChildren: PropertiesOrChildren, ch
 	
 	for (const [, minute] of minutes) {
 		for (const [n, key] of keys.entries()) {
-			if (minute[key] === 0 && (lines[n].at(-1)?.[1] ?? 0) === 0) {
-				continue
-			}
-
 			lines[n].push([minute.time, minute[key]]);
 			maxes[n] = Math.max(maxes[n], minute[key]);
 		}
@@ -185,23 +181,25 @@ const amendNode = (node: Element, propertiesOrChildren: PropertiesOrChildren, ch
 			])
 		])
 	]);
-      };
+      },
+      timeSort = (a: {time: number}, b: {time: number}) => a.time - b.time;
 
 (document.readyState === "complete" ? Promise.resolve() : new Promise(successFn => window.addEventListener("load", successFn, {"once": true})))
 .then(() => fetch("/data.json"))
 .then(j => j.json())
 .then((data: Record<string, Data>) => {
 	amendNode(document.body, [
-		select({"change": function(this: HTMLSelectElement) {
-			if (!this.value) {
+		select({"multiple": "multiple", "change": function(this: HTMLSelectElement) {
+			const selected = Array.from(this.getElementsByTagName("option")).filter(e => e.selected).map(e => e.value);
+
+			if (selected.length === 0) {
 				body.replaceChildren();
 			} else {
-				display(this.value, data[this.value]);
+				display(selected.join(", "), selected.map(v => [v, data[v]] as [string, Data]).reduce((data, [runName, run]) => (data.events = data.events.concat((run?.events ?? []).map(e => (e.file += "/" + runName + "/", e))).sort(timeSort), data.errors = data.errors.concat(run?.errors ?? []).sort(timeSort), data.complete &&= run.complete, data), {"events": [], "errors": [], "complete": true} as Data));
 			}
-		}}, [
-			option({"value": ""}, "-- Please select a run --"),
+		}}, optgroup({"label": "Please select one or more runs"}, [
 			Object.entries(data).filter(([, e]) => e?.events).map(([key, val]) => option({"value": key}, (val.complete ? "✓ " : "❌ ") + key))
-		]),
+		])),
 		body
 	]);
 });
