@@ -199,7 +199,7 @@ const amendNode = (node: Element, propertiesOrChildren: PropertiesOrChildren, ch
 					]),
 					buildChart(data.events, dataStart, dataEnd, maxSyscalls, maxBytes),
 					ul({"class": "graphKey"}, keys.map((key, n) => li([span({"style": "background-color: " + keyColours[n], "click": function(this: HTMLSpanElement) {
-						this.setAttribute("style", (this.parentElement?.parentElement as HTMLUListElement)?.previousElementSibling?.classList.toggle(keys[n]) ? "" : `background-color: ${keyColours[n]}`);
+						this.setAttribute("style", this.parentElement?.parentElement?.parentElement?.classList.toggle(keys[n]) ? "" : `background-color: ${keyColours[n]}`);
 					}}), span(key)])))
 				])
 			])
