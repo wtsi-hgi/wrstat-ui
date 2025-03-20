@@ -125,6 +125,8 @@ func (l *logAnalyzer) loadDirs(dirs []string) {
 
 	json.NewEncoder(w).Encode(l.stats)
 	w.Close()
+
+	slog.Info("done loading logs")
 }
 
 func (l *logAnalyzer) loadDir(dir string) error {
