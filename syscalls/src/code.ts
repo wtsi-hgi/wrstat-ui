@@ -247,6 +247,11 @@ const amendNode = (node: Element, propertiesOrChildren: PropertiesOrChildren, ch
 		])
 	]);
       },
+      reverse = <T>(arr: T[]) => {
+	arr.reverse();
+
+	return arr;
+      },
       timeSort = (a: {time: number}, b: {time: number}) => a.time - b.time;
 
 (document.readyState === "complete" ? Promise.resolve() : new Promise(successFn => window.addEventListener("load", successFn, {"once": true})))
@@ -263,7 +268,7 @@ const amendNode = (node: Element, propertiesOrChildren: PropertiesOrChildren, ch
 				display(selected.join(", "), selected.map(v => [v, data[v]] as [string, Data]).reduce((data, [runName, run]) => (data.events = data.events.concat((run?.events ?? []).map(e => (e.file += "/" + runName + "/", e))).sort(timeSort), data.errors = data.errors.concat(run?.errors ?? []).sort(timeSort), data.complete &&= run.complete, data), {"events": [], "errors": [], "complete": true} as Data));
 			}
 		}}, optgroup({"label": "Please select one or more runs"}, [
-			Object.entries(data).filter(([, e]) => e?.events).map(([key, val]) => option({"value": key}, (val.complete ? "✓ " : "❌ ") + key))
+			reverse(Object.entries(data).filter(([, e]) => e?.events)).map(([key, val]) => option({"value": key}, (val.complete ? "✓ " : "❌ ") + key))
 		])),
 		body
 	]);
