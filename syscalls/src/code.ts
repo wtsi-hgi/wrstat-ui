@@ -209,7 +209,7 @@ const amendNode = (node: Element, propertiesOrChildren: PropertiesOrChildren, ch
 		}}),
 		ul({"class": "graphKey"}, keys.map((key, n) => li([span({"style": "background-color: " + keyColours[n], "click": function(this: HTMLSpanElement) {
 			this.setAttribute("style", chartContent.classList.toggle(keys[n]) ? "" : `background-color: ${keyColours[n]}`);
-		}}), span(key)]))),
+		}}), span(key.at(0)!.toUpperCase() + key.slice(1))]))),
 		chart = buildChart(hostData, dataStart, dataEnd, maxSyscalls, maxBytes, uniformY)
 	      ]);
 
