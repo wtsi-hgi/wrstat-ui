@@ -43,8 +43,6 @@ import (
 	"vimagination.zapto.org/httpfile"
 )
 
-var null = json.RawMessage{'n', 'u', 'l', 'l'}
-
 func StartServer(serverBind string, dbs ...string) error {
 	if len(dbs) == 0 {
 		return errors.New("no db paths given")
@@ -169,7 +167,7 @@ func (l *logAnalyzer) loadDir(dir string) error {
 
 func (l *logAnalyzer) setNull(name string) {
 	l.mu.Lock()
-	l.stats[name] = null
+	l.stats[name] = nil
 	l.mu.Unlock()
 }
 
