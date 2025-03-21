@@ -200,7 +200,7 @@ const amendNode = (node: Element, propertiesOrChildren: PropertiesOrChildren, ch
 			chart.replaceWith(chart = buildChart(hostData = this.value === "..." ? data.events : data.events.filter(event => event.host === this.value), dataStart, dataEnd, maxSyscalls, maxBytes, uniformY));
 		}}, [
 			option({"value": "..."}, "-- All Hosts --"),
-			Array.from(data.events.reduce((hosts, event) => (hosts.add(event.host), hosts), new Set<string>())).map(host => option(host))
+			Array.from(data.events.reduce((hosts, event) => (hosts.add(event.host), hosts), new Set<string>())).sort().map(host => option(host))
 		]),
 		br(),
 		label({"for": "uniformY"}, "Uniform Y-axis: "),
