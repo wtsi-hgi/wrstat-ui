@@ -119,6 +119,11 @@ const amendNode = (node: Element, propertiesOrChildren: PropertiesOrChildren, ch
 	return minutes;
       },
       findDataMaxes = (events: EventSyscall[], startMinute: number, endMinute: number) => findMinuteMaxes(buildMinuteByMinute(events, startMinute, endMinute)),
+      roundUpToTenth = (n: number) => {
+	const tens = Math.pow(10, Math.floor(Math.log10(n)));
+
+	return Math.ceil(10 * n / tens) * tens / 10 ;
+      },
       findMinuteMaxes = (minutes: Map<number, syscalls>) => {
 	const maxes: [number, number] = [0, 0];
 
@@ -128,7 +133,22 @@ const amendNode = (node: Element, propertiesOrChildren: PropertiesOrChildren, ch
 		maxes[1] = Math.max(maxes[1], minute.bytes);
 	}
 
+	maxes[0] = roundUpToTenth(maxes[0]);
+	maxes[1] = roundUpToTenth(maxes[1]);
+
 	return maxes;
+      },
+      prefixes = ["", "k","M","G","T","P","E","Z","R","Y","Q"],
+      formatSI = (n: number) => {
+	for (const prefix of prefixes) {
+		if (n < 1000) {
+			return n + prefix;
+		}
+
+		n = Math.floor(n / 100) / 10;
+	}
+
+	return "∞";
       },
       buildChart = (events: EventSyscall[], startMinute: number, endMinute: number, maxSyscalls: number, maxBytes: number, uniformY: boolean) => {
 	const minutes = buildMinuteByMinute(events, startMinute, endMinute),
@@ -150,12 +170,18 @@ const amendNode = (node: Element, propertiesOrChildren: PropertiesOrChildren, ch
 	      }
 	}
 
-	return svg({"viewBox": `0 0 ${endMinute - startMinute + 20} ${maxY + 100}`}, [
-		g({"transform": "translate(10 5)"}, [
-			polyline({"points": lines[5].map(([n, point]) => `${n - startMinute},${maxY - maxY * point / maxBytes}`).join(" "), "stroke": keyColours[5], "fill": "none", "class": keys[5]}),
-			lines.slice(0, 5).map((points, l) => polyline({"points": points.map(([n, point]) => `${n - startMinute},${maxY - maxY * point / maxSyscalls}`).join(" "), "stroke": keyColours[l], "fill": "none", "class": keys[l]})),
-			line({"y1": maxY + "", "y2": maxY + "", "x2": "100%", "stroke": "#000"}),
-			Array.from(range(Math.ceil(startMinute / 60), Math.floor(endMinute / 60), n => text({"transform": `translate(${n * 60 - startMinute}, ${maxY + 5}) rotate(90) scale(0.5)`}, formatTime(n * 3600))))
+	return svg({"viewBox": `0 0 ${endMinute - startMinute + 130} ${maxY + 110}`}, [
+		g({"transform": "translate(0 10)"}, [
+			g({"transform": "translate(50 5)"}, [
+				polyline({"points": lines[5].map(([n, point]) => `${n - startMinute},${maxY - maxY * point / maxBytes}`).join(" "), "stroke": keyColours[5], "fill": "none", "class": keys[5]}),
+				lines.slice(0, 5).map((points, l) => polyline({"points": points.map(([n, point]) => `${n - startMinute},${maxY - maxY * point / maxSyscalls}`).join(" "), "stroke": keyColours[l], "fill": "none", "class": keys[l]})),
+				line({"y1": maxY + "", "y2": maxY + "", "x2": endMinute - startMinute + 10 + "", "stroke": "#000"}),
+				Array.from(range(Math.ceil(startMinute / 60), Math.floor(endMinute / 60), n => text({"transform": `translate(${n * 60 - startMinute}, ${maxY + 5}) rotate(90) scale(0.5)`}, formatTime(n * 3600))))
+			]),
+			line({"x1": "50", "x2": "50", "y2": maxY+5+"", "stroke": "#000"}),
+			Array.from(range(0, 5, n => text({"x": "40", "y": (5 - n) * 40 + 10 + "", "text-anchor": "end"}, formatSI(n * maxSyscalls / 5)))),
+			line({"x1": endMinute - startMinute + 60 + "", "x2": endMinute - startMinute + 60 + "", "y2": maxY+5+"", "stroke": "#000"}),
+			Array.from(range(0, 5, n => text({"x": endMinute - startMinute + 70 + "", "y": (5 - n) * 40 + 10 + ""}, (formatSI(n * maxBytes / 5) + "iB").replace(/([0-9])iB/, "$1B"))))
 		])
 	]);
       },
