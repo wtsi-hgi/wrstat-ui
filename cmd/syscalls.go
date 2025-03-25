@@ -30,13 +30,15 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/syscalls"
 )
 
+var syscallLogReloadTime uint
+
 // summariseCmd represents the stat command.
 var syscallsCmd = &cobra.Command{
 	Use:   "syscalls",
 	Short: "syscalls starts a server to analyze wrstat syscall logs",
 	Long:  ``,
 	Run: func(_ *cobra.Command, args []string) {
-		if err := syscalls.StartServer(serverBind, args...); err != nil {
+		if err := syscalls.StartServer(serverBind, syscallLogReloadTime, args...); err != nil {
 			die("%s", err)
 		}
 	},
@@ -45,7 +47,8 @@ var syscallsCmd = &cobra.Command{
 func init() {
 	syscallsCmd.Flags().StringVarP(&serverBind, "bind", "b", ":8080",
 		"address to bind to, eg host:port")
+	syscallsCmd.Flags().UintVarP(&syscallLogReloadTime, "reload", "r", 10,
+		"duration before loading new syscall logs")
 
 	RootCmd.AddCommand(syscallsCmd)
-
 }
