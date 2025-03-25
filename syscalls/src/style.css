@@ -149,3 +149,8 @@ svg {
 .syscalls .syscalls, .opens .opens, .reads .reads, .bytes .bytes, .closes .closes, .stats .stats {
 	display: none;
 }
+
+body > select:hover {
+	position: relative;
+	height: 20em;
+}
