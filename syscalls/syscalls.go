@@ -38,29 +38,59 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/wtsi-hgi/wrstat-ui/server"
 	"vimagination.zapto.org/httpfile"
 )
 
-func StartServer(serverBind string, dbs ...string) error {
+func StartServer(serverBind string, reload uint, dbs ...string) error {
 	if len(dbs) == 0 {
 		return errors.New("no db paths given")
 	}
 
-	paths, err := getDBPaths(dbs)
-	if err != nil {
-		return fmt.Errorf("error during inital log discovery: %w", err)
-	}
-
 	l := newLogAnalyzer()
 
-	go l.loadDirs(paths)
+	if err := l.load(dbs, reload); err != nil {
+		return fmt.Errorf("error during inital log discovery: %w", err)
+	}
 
 	http.Handle("/", index)
 	http.Handle("/data.json", l)
 
 	return http.ListenAndServe(serverBind, nil)
+}
+
+type logAnalyzer struct {
+	mu    sync.RWMutex
+	stats map[string]json.RawMessage
+	*httpfile.File
+}
+
+func newLogAnalyzer() *logAnalyzer {
+	return &logAnalyzer{
+		stats: make(map[string]json.RawMessage),
+		File:  httpfile.NewWithData("data.json", []byte{'{', '}'}),
+	}
+}
+
+func (l *logAnalyzer) load(dbs []string, reload uint) error {
+	paths, err := getDBPaths(dbs)
+	if err != nil {
+		return err
+	}
+
+	if reload > 0 {
+		go func() {
+			l.loadDirs(paths)
+			time.Sleep(time.Duration(reload) * time.Minute)
+			l.load(dbs, reload)
+		}()
+	} else {
+		go l.loadDirs(paths)
+	}
+
+	return nil
 }
 
 func getDBPaths(dbs []string) ([]string, error) {
@@ -85,19 +115,6 @@ func getDBPaths(dbs []string) ([]string, error) {
 	sort.Strings(dbDirs)
 
 	return dbDirs, nil
-}
-
-type logAnalyzer struct {
-	mu    sync.RWMutex
-	stats map[string]json.RawMessage
-	*httpfile.File
-}
-
-func newLogAnalyzer() *logAnalyzer {
-	return &logAnalyzer{
-		stats: make(map[string]json.RawMessage),
-		File:  httpfile.NewWithData("data.json", []byte{'{', '}'}),
-	}
 }
 
 func (l *logAnalyzer) loadDirs(dirs []string) {
