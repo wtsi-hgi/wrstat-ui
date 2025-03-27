@@ -138,7 +138,7 @@ func TestData(t *testing.T) {
 			},
 		},
 		{
-			Input: fmt.Sprintf("t=%s host=abc\nt=%s opens=1", time.Unix(123456, 0).Format(timeFormat), time.Unix(123457, 0).Format(timeFormat)),
+			Input: fmt.Sprintf("t=%s host=abc\nt=%s opens=1", time.Unix(123456, 0).Format(timeFormat), time.Unix(123457, 0).Format(timeFormat)), //nolint:lll
 			Events: []Event{
 				{
 					Time: 123456,
@@ -152,7 +152,7 @@ func TestData(t *testing.T) {
 			},
 		},
 		{
-			Input: fmt.Sprintf("t=%s host=abc\nt=%s lvl=eror msg=abc", time.Unix(123456, 0).Format(timeFormat), time.Unix(123457, 0).Format(timeFormat)),
+			Input: fmt.Sprintf("t=%s host=abc\nt=%s lvl=eror msg=abc", time.Unix(123456, 0).Format(timeFormat), time.Unix(123457, 0).Format(timeFormat)), //nolint:lll
 			Events: []Event{
 				{
 					Time: 123456,
@@ -169,7 +169,7 @@ func TestData(t *testing.T) {
 			},
 		},
 		{
-			Input: fmt.Sprintf("t=%s file=a host=abc\nt=%s file=b host=def\nt=%s lvl=eror msg=abc\nt=%s file=a opens=1", time.Unix(123456, 0).Format(timeFormat), time.Unix(123457, 0).Format(timeFormat), time.Unix(123458, 0).Format(timeFormat), time.Unix(123459, 0).Format(timeFormat)),
+			Input: fmt.Sprintf("t=%s file=a host=abc\nt=%s file=b host=def\nt=%s lvl=eror msg=abc\nt=%s file=a opens=1", time.Unix(123456, 0).Format(timeFormat), time.Unix(123457, 0).Format(timeFormat), time.Unix(123458, 0).Format(timeFormat), time.Unix(123459, 0).Format(timeFormat)), //nolint:lll
 			Events: []Event{
 				{
 					Time: 123456,
@@ -199,9 +199,9 @@ func TestData(t *testing.T) {
 	} {
 		d := &data{hosts: make(map[string]string)}
 
-		if err := d.loadData(strings.NewReader(test.Input)); !errors.Is(err, test.Error) {
+		if err := d.loadData(strings.NewReader(test.Input)); !errors.Is(err, test.Error) { //nolint:nestif
 			t.Errorf("test %d: expecting error %q, got %q", n+1, test.Error, err)
-		} else if len(d.Events) != len(test.Events) {
+		} else if len(d.Events) != len(test.Events) { //nolint:gocritic
 			t.Errorf("test %d: expecting to have %d events, got %d", n+1, len(test.Events), len(d.Events))
 		} else if len(d.Errors) != len(test.Errors) {
 			t.Errorf("test %d: expecting to have %d errors, got %d", n+1, len(test.Errors), len(d.Errors))

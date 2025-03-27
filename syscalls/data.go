@@ -26,6 +26,8 @@
 package syscalls
 
 import (
+	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -66,6 +68,21 @@ type Error struct {
 	Data    map[string]string `json:"data,omitempty"`
 }
 
+func (d *data) loadFiles(files []string) error {
+	for _, file := range files {
+		if d.lastFile = strings.TrimSuffix(filepath.Base(file), ".log"); d.lastFile == "logs.gz" {
+			d.Complete = true
+			d.lastFile = "walk"
+		}
+
+		if err := d.loadFile(file); err != nil {
+			return fmt.Errorf("error loading file (%s): %w", file, err)
+		}
+	}
+
+	return nil
+}
+
 func (d *data) loadFile(file string) error {
 	f, err := os.Open(file)
 	if err != nil {
@@ -95,7 +112,7 @@ func (d *data) loadData(r io.Reader) error {
 
 	for {
 		line, err := reader.Read()
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			break
 		} else if err != nil {
 			return err
@@ -109,7 +126,7 @@ func (d *data) loadData(r io.Reader) error {
 	return nil
 }
 
-func (d *data) parseLine(line [][2]string) error {
+func (d *data) parseLine(line [][2]string) error { //nolint:gocognit,gocyclo,cyclop,funlen
 	event := Event{File: d.lastFile}
 
 	var err error

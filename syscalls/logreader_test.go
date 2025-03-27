@@ -75,7 +75,7 @@ Loop:
 
 		for _, expectedLine := range test.Output {
 			line, err := r.Read()
-			if err != nil {
+			if err != nil { //nolint:gocritic,nestif
 				if !errors.Is(err, test.Error) {
 					t.Errorf("test %d: expecting error %q, got %q", n+1, test.Error, err)
 				}

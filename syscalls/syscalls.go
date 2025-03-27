@@ -36,7 +36,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 
@@ -44,21 +43,23 @@ import (
 	"vimagination.zapto.org/httpfile"
 )
 
+var errNoDBPath = errors.New("no db paths given")
+
 func StartServer(serverBind string, reload uint, dbs ...string) error {
 	if len(dbs) == 0 {
-		return errors.New("no db paths given")
+		return errNoDBPath
 	}
 
 	l := newLogAnalyzer()
 
 	if err := l.load(dbs, reload); err != nil {
-		return fmt.Errorf("error during inital log discovery: %w", err)
+		return fmt.Errorf("error during initial log discovery: %w", err)
 	}
 
 	http.Handle("/", index)
 	http.Handle("/data.json", l)
 
-	return http.ListenAndServe(serverBind, nil)
+	return http.ListenAndServe(serverBind, nil) //nolint:gosec
 }
 
 type logAnalyzer struct {
@@ -83,8 +84,8 @@ func (l *logAnalyzer) load(dbs []string, reload uint) error {
 	if reload > 0 {
 		go func() {
 			l.loadDirs(paths)
-			time.Sleep(time.Duration(reload) * time.Minute)
-			l.load(dbs, reload)
+			time.Sleep(time.Duration(reload) * time.Minute) //nolint:gosec
+			l.load(dbs, reload)                             //nolint:errcheck
 		}()
 	} else {
 		go l.loadDirs(paths)
@@ -93,7 +94,7 @@ func (l *logAnalyzer) load(dbs []string, reload uint) error {
 	return nil
 }
 
-func getDBPaths(dbs []string) ([]string, error) {
+func getDBPaths(dbs []string) ([]string, error) { //nolint:gocognit
 	var dbDirs []string
 
 	for _, db := range dbs {
@@ -136,7 +137,7 @@ func (l *logAnalyzer) loadDirs(dirs []string) {
 
 	w := l.File.Create()
 
-	json.NewEncoder(w).Encode(l.stats)
+	json.NewEncoder(w).Encode(l.stats) //nolint:errcheck,errchkjson
 	w.Close()
 
 	slog.Info("done loading logs")
@@ -156,17 +157,10 @@ func (l *logAnalyzer) loadDir(dir string) error {
 	slog.Info("loading logs from path", "path", dir)
 
 	d := &data{hosts: make(map[string]string)}
-	files, _ := filepath.Glob(filepath.Join(dir, "*log*"))
+	files, _ := filepath.Glob(filepath.Join(dir, "*log*")) //nolint:errcheck
 
-	for _, file := range files {
-		if d.lastFile = strings.TrimSuffix(filepath.Base(file), ".log"); d.lastFile == "logs.gz" {
-			d.Complete = true
-			d.lastFile = "walk"
-		}
-
-		if err := d.loadFile(file); err != nil {
-			return fmt.Errorf("error loading file (%s): %w", file, err)
-		}
+	if err := d.loadFiles(files); err != nil {
+		return err
 	}
 
 	if len(d.Events) == 0 && len(d.Errors) == 0 {
@@ -191,7 +185,7 @@ func (l *logAnalyzer) setNull(name string) {
 func (l *logAnalyzer) setData(name string, data any) {
 	var buf bytes.Buffer
 
-	json.NewEncoder(&buf).Encode(data)
+	json.NewEncoder(&buf).Encode(data) //nolint:errcheck,errchkjson
 
 	l.mu.Lock()
 	l.stats[name] = buf.Bytes()
