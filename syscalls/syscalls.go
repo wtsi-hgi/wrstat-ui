@@ -123,8 +123,6 @@ func (l *logAnalyzer) loadDirs(dirs []string) {
 	wg.Add(len(dirs))
 
 	for _, dir := range dirs {
-		slog.Info("loading logs from path", "path", dir)
-
 		go func() {
 			if err := l.loadDir(dir); err != nil {
 				slog.Info("error loading log directory", "err", err)
@@ -154,6 +152,8 @@ func (l *logAnalyzer) loadDir(dir string) error {
 	if ok {
 		return nil
 	}
+
+	slog.Info("loading logs from path", "path", dir)
 
 	d := &data{hosts: make(map[string]string)}
 	files, _ := filepath.Glob(filepath.Join(dir, "*log*"))
