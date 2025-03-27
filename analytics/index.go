@@ -37,5 +37,5 @@ var (
 	//go:embed index.html
 	indexHTML []byte
 
-	index = httpfile.NewWithData("index.html", indexHTML)
+	index = httpfile.NewWithData("index.html", indexHTML) //nolint:gochecknoglobals
 )

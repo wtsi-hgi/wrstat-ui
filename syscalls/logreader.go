@@ -42,7 +42,7 @@ func newLogReader(r io.Reader) *logReader {
 	return &logReader{tk: parser.NewReaderTokeniser(bufio.NewReader(r))}
 }
 
-func (l *logReader) Read() ([][2]string, error) {
+func (l *logReader) Read() ([][2]string, error) { //nolint:gocognit,gocyclo,cyclop,funlen
 	var (
 		fields   [][2]string
 		key, val string
@@ -66,6 +66,7 @@ func (l *logReader) Read() ([][2]string, error) {
 				break Loop
 			case '\n':
 				l.tk.Next()
+
 				break Loop
 			}
 
@@ -80,10 +81,9 @@ func (l *logReader) Read() ([][2]string, error) {
 				key = l.tk.Get()
 
 				l.tk.Accept("=")
-
 				l.tk.Get()
 
-				if l.tk.Accept("\"") {
+				if l.tk.Accept("\"") { //nolint:nestif
 				StrLoop:
 					for {
 						switch l.tk.ExceptRun("\\\"") {
