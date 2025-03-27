@@ -57,12 +57,8 @@ func TestLogAnalyzer(t *testing.T) {
 		"124_def/walk.1.log": "t=2025-03-13T03:01:55+0000 lvl=info msg=\"syscall logging\" host=host2 file=walk.1\nt=2025-03-13T03:11:55+0000 lvl=info msg=syscalls file=walk.1 stats=5625\n",
 		"124_def/walk.2.log": "t=2025-03-13T03:01:55+0000 lvl=info msg=\"syscall logging\" host=host1 file=walk.2\nt=2025-03-13T03:11:55+0000 lvl=info msg=syscalls file=walk.2 stats=5624\n",
 	} {
-		if err := os.MkdirAll(filepath.Join(tmp, filepath.Dir(path)), 0700); err != nil {
-			t.Fatalf("unexpected error creating directory: %s", err)
-		}
-
-		if err := writeFile(filepath.Join(tmp, path), contents); err != nil {
-			t.Fatalf("unexpected error creating log file: %s", err)
+		if err := createLog(filepath.Join(tmp, path), contents); err != nil {
+			t.Fatalf("error creating log: %s", err)
 		}
 	}
 
@@ -79,6 +75,34 @@ func TestLogAnalyzer(t *testing.T) {
 	if sb.String() != expected {
 		t.Errorf("expecting output JSON:\n%s\ngot:\n%s", expected, sb.String())
 	}
+
+	if err := createLog(filepath.Join(tmp, "125_def", "logs.gz"), `t=2025-03-26T17:00:02+0000 lvl=info msg="syscall logging" host=host4`); err != nil {
+		t.Fatalf("error creating log: %s", err)
+	}
+
+	l.loadDirs([]string{filepath.Join(tmp, "124_def"), filepath.Join(tmp, "125_def")})
+
+	expected = expected[:len(expected)-2] + `,"125_def":{"events":[{"time":1743008402,"file":"walk","host":"host4"}],"errors":null,"complete":true}}` + "\n"
+
+	sb.Reset()
+
+	l.File.WriteTo(&sb)
+
+	if sb.String() != expected {
+		t.Errorf("expecting output JSON:\n%s\ngot:\n%s", expected, sb.String())
+	}
+}
+
+func createLog(path, contents string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return err
+	}
+
+	if err := writeFile(path, contents); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func writeFile(path, contents string) (err error) {
