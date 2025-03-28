@@ -1,4 +1,4 @@
-//go:build !dev
+//go:build dev
 
 /*******************************************************************************
  * Copyright (c) 2025 Genome Research Ltd.
@@ -25,17 +25,13 @@
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  ******************************************************************************/
 
-package analytics
+package syscalls
 
 import (
-	_ "embed"
+	"net/http"
+	"os"
 
-	"vimagination.zapto.org/httpfile"
+	"vimagination.zapto.org/tsserver"
 )
 
-var (
-	//go:embed index.html
-	indexHTML []byte
-
-	index = httpfile.NewWithData("index.html", indexHTML) //nolint:gochecknoglobals
-)
+var index = http.FileServer(http.FS(tsserver.WrapFS(os.DirFS("./src")))) //nolint:gochecknoglobals

@@ -1,0 +1,156 @@
+.expandErrors {
+	cursor: pointer;
+	list-style: none;
+	user-select: none;
+}
+
+.expandErrors:before, .expandErrors:after {
+	content: ".\00000a.\00000a.";
+	display: block;
+	white-space: pre;
+	line-height: 0.5em;
+}
+
+.tabs {
+	position: relative;
+	display: flex;
+	flex-wrap: wrap;
+	line-height: 24px;
+	width: 100%;
+
+	--tabBGFrom: #ececec;
+	--tabBGTo: #d1d1d1;
+	--tabHoverBGFrom: #428bca;
+	--tabHoverBGMid: color-mix(in srgb, #428bca 25%, #fff);
+	--tabHoverBGTo: #d1d1d1;
+	--tabShadow: #d1d1d1;
+	--tabSelectedBG: #fff;
+	--tabSelectedFont: currentColor;
+}
+
+.tabs:before {
+	order: 0;
+	content: "";
+	width: 20px;
+	display: block;
+}
+
+.tabs:after {
+	content: "";
+	width: calc(100% + 20px);
+	transform: translateX(-20px);
+	z-index: 1;
+	margin-top: -1px;
+	border-top: 1px solid currentColor;
+	border-bottom: 2px solid #fff;
+	order: 1;
+}
+
+.tabs > details {
+	display: contents;
+}
+
+.tabs > details:first-child > summary {
+	padding-left: 20px;
+}
+
+.tabs > details > summary {
+	order: 0;
+	display: block;
+	border-width: 1px;
+	border-style: solid;
+	position: relative;
+	z-index: 1;
+	margin: 0 -5px;
+	padding: 0 20px;
+	border-top-right-radius: 6px;
+	border-top-left-radius: 6px;
+	background: linear-gradient(to bottom, var(--tabBGFrom) 50%, var(--tabBGTo) 100%);
+	text-shadow: 0 1px var(--background);
+	border-color: currentColor;
+	cursor: pointer;
+	user-select: none;
+}
+
+.tabs > details > summary:hover, .tabs > details > summary:focus {
+	outline: none;
+	background: linear-gradient(to bottom, var(--tabHoverBGFrom) 1%, var(--tabHoverBGMid) 50%, var(--tabHoverBGTo) 100%);
+}
+
+.tabs > details > :not(summary) {
+	order: 2;
+	width: 100%;
+}
+
+.tabs > details > summary:before {
+	left: -7px;
+	border-bottom-right-radius: 6px;
+	border-width: 0px 1px 1px 0px;
+	box-shadow: 2px 2px 0 var(--tabShadow);
+}
+
+.tabs > details > summary:after {
+	right: -7px;
+	border-bottom-left-radius: 6px;
+	border-width: 0px 0px 1px 1px;
+	box-shadow: -2px 2px 0 var(--tabShadow);
+}
+
+.tabs > details > summary:after, .tabs > details > summary:before {
+	content: "";
+	position: absolute;
+	bottom: -1px;
+	width: 6px;
+	height: 6px;
+	border-style: solid;
+	border-color: currentcolor;
+}
+
+.tabs > details[open] > summary:before {
+	box-shadow: 2px 2px 0 var(--tabSelectedBG);
+}
+
+.tabs > details[open] > summary {
+	z-index: 2;
+	cursor: default !important;
+	border-bottom-color: var(--tabSelectedBG) !important;
+	background: var(--tabSelectedBG) !important;
+	pointer-events: none;
+}
+
+.tabs > details[open] > summary:after {
+	box-shadow: -2px 2px 0 var(--tabSelectedBG);
+}
+
+.graphKey {
+	list-style: none;
+	padding: 0;
+}
+
+.graphKey > li {
+	display: inline-block;
+	margin-right: 2em;
+}
+
+.graphKey > li :first-child {
+	display: inline-block;
+	border: 1px solid #000;
+	width: 1em;
+	height: 1em;
+	margin-right: 0.5em;
+	margin-bottom: -0.25em;
+}
+
+svg {
+	display: block;
+	height: 90vh;
+}
+
+.syscalls .syscalls, .opens .opens, .reads .reads, .bytes .bytes, .closes .closes, .stats .stats, .writes .writes, .writeBytes .writeBytes {
+	display: none;
+}
+
+body > select:hover {
+	position: relative;
+	height: 20em;
+}
