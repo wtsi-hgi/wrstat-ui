@@ -45,6 +45,15 @@ import (
 
 var errNoDBPath = errors.New("no db paths given")
 
+// StartServer starts a webserver that displays wrstat logged syscall data in
+// order to analyse potential issues.
+//
+// The reload param represents the delay, in minutes, between the checks for new
+// logs. If set to zero, no log checks are performed after the server has
+// started.
+//
+// The dbs should be the 'wrstat multi -f' output directories that should be
+// scanned for logs.
 func StartServer(serverBind string, reload uint, dbs ...string) error {
 	if len(dbs) == 0 {
 		return errNoDBPath

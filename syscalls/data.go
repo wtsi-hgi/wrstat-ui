@@ -175,19 +175,26 @@ func (d *data) parseLine(line [][2]string) error { //nolint:gocognit,gocyclo,cyc
 		}
 	}
 
+	d.setOrStoreFileHost(&event)
+	d.insertSortedEvent(event)
+
+	return nil
+}
+
+func (d *data) setOrStoreFileHost(event *Event) {
 	if event.Host != "" {
 		d.hosts[event.File] = event.Host
 	} else {
 		event.Host = d.hosts[event.File]
 	}
+}
 
+func (d *data) insertSortedEvent(event Event) {
 	pos, _ := slices.BinarySearchFunc(d.Events, event, func(a, b Event) int {
 		return int(a.Time) - int(b.Time)
 	})
 
 	d.Events = slices.Insert(d.Events, pos, event)
-
-	return nil
 }
 
 func (d *data) parseErrorLine(line [][2]string) error {
