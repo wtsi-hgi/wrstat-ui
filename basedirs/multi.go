@@ -71,7 +71,7 @@ func OpenMulti(ownersPath string, paths ...string) (MultiReader, error) { //noli
 	return mr, nil
 }
 
-// OpenFrom creates a new MultiReady from an existing one, potentially removing
+// OpenFrom creates a new MultiReader from an existing one, potentially removing
 // some databases and adding others.
 //
 // It is recommended to call CloseOnly when replacing a MultiReader to close the
