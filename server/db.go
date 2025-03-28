@@ -240,13 +240,13 @@ func (s *Server) EnableDBReloading(basepath, dgutaDBName, basedirDBName, ownersP
 	}
 
 	go s.reloadLoop(basepath, dgutaDBName, basedirDBName, ownersPath,
-		pollFrequency, removeOldPaths, dbPaths, mounts)
+		pollFrequency, removeOldPaths, dbPaths)
 
 	return nil
 }
 
 func (s *Server) reloadLoop(basepath, dgutaDBName, basedirDBName, ownersPath string, //nolint:gocognit,gocyclo
-	pollFrequency time.Duration, removeOldPaths bool, dbPaths, mounts []string) {
+	pollFrequency time.Duration, removeOldPaths bool, dbPaths []string) {
 	for {
 		select {
 		case <-time.After(pollFrequency):
@@ -265,7 +265,9 @@ func (s *Server) reloadLoop(basepath, dgutaDBName, basedirDBName, ownersPath str
 			continue
 		}
 
-		if s.reloadDBs(dgutaDBName, basedirDBName, ownersPath, newDBPaths, mounts) { //nolint:nestif
+		if err := s.loadDBs(newDBPaths, toDelete, dgutaDBName, basedirDBName, ownersPath, nil); err != nil { //nolint:nestif
+			s.Logger.Printf("error reloading databases: %s", err)
+		} else {
 			dbPaths = newDBPaths
 
 			if removeOldPaths {
@@ -275,50 +277,6 @@ func (s *Server) reloadLoop(basepath, dgutaDBName, basedirDBName, ownersPath str
 			}
 		}
 	}
-}
-
-func (s *Server) reloadDBs(dgutaDBName, basedirDBName, //nolint:funlen
-	ownersPath string, dbPaths, mounts []string) bool {
-	dirgutaPaths, baseDirPaths := JoinDBPaths(dbPaths, dgutaDBName, basedirDBName)
-
-	mt, err := s.getLatestTimestamp(dirgutaPaths, baseDirPaths)
-	if err != nil {
-		return s.logReloadError("reloading dbs failed: %s", err)
-	}
-
-	s.Logger.Printf("reloading dirguta db from %v", dirgutaPaths)
-
-	tree, err := db.NewTree(dirgutaPaths...)
-	if err != nil {
-		return s.logReloadError("reloading dirguta db failed: %s", err)
-	}
-
-	s.Logger.Printf("reloading basedirs db from %v", baseDirPaths)
-
-	bd, err := basedirs.OpenMulti(ownersPath, baseDirPaths...)
-	if err != nil {
-		return s.logReloadError("reloading basedirs db failed: %s", err)
-	}
-
-	if len(mounts) > 0 {
-		bd.SetMountPoints(mounts)
-	}
-
-	s.Logger.Printf("server ready again after reloading")
-
-	s.mu.Lock()
-	s.tree = tree
-	s.basedirs = bd
-	s.dataTimeStamp = mt
-	s.mu.Unlock()
-
-	return true
-}
-
-func (s *Server) logReloadError(format string, v ...any) bool {
-	s.Logger.Printf(format, v...)
-
-	return false
 }
 
 // FindDBDirs finds the latest dirguta and basedir databases in the given base
