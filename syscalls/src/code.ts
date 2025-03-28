@@ -37,6 +37,8 @@ type syscalls = {
 	closes: number;
 	stats: number;
 	syscalls: number;
+	writes: number;
+	writeBytes: number;
 };
 
 type EventSyscall = syscalls & {
@@ -76,9 +78,9 @@ const amendNode = (node: Element, propertiesOrChildren: PropertiesOrChildren, ch
 
 	return d.toLocaleDateString() + " " + d.toLocaleTimeString()
       },
-      keys: (keyof syscalls)[] = ["syscalls", "opens", "reads", "closes", "stats", "bytes"],
-      keyColours = ["#000", "#0f0", "#00f", "#f80", "#f0f", "#f00"],
-      newSyscall = (time = 0) => ({time, "opens": 0, "reads": 0, "bytes": 0, "closes": 0, "stats": 0, "syscalls": 0}),
+      keys: (keyof syscalls)[] = ["syscalls", "opens", "reads", "closes", "stats", "writes", "bytes", "writeBytes"],
+      keyColours = ["#000", "#0f0", "#00f", "#f80", "#f0f", "#851", "#f00", "#f88"],
+      newSyscall = (time = 0) => ({time, "opens": 0, "reads": 0, "bytes": 0, "closes": 0, "stats": 0, "syscalls": 0, "writes": 0, "writeBytes": 0}),
       range = function* <V>(start: number, stop: number, fn: (n: number) => V) {
 	for (let i = start; i <= stop; i++) {
 		yield fn(i);
@@ -109,7 +111,7 @@ const amendNode = (node: Element, propertiesOrChildren: PropertiesOrChildren, ch
 
 				m[key] += v;
 
-				if (key !== "bytes") {
+				if (key.slice(-4) !== "ytes") {
 					m.syscalls += v
 				}
 			}
@@ -127,10 +129,9 @@ const amendNode = (node: Element, propertiesOrChildren: PropertiesOrChildren, ch
       findMinuteMaxes = (minutes: Map<number, syscalls>) => {
 	const maxes: [number, number] = [0, 0];
 
-	
 	for (const [, minute] of minutes) {
 		maxes[0] = Math.max(maxes[0], minute.syscalls);
-		maxes[1] = Math.max(maxes[1], minute.bytes);
+		maxes[1] = Math.max(maxes[1], minute.bytes, minute.writeBytes);
 	}
 
 	maxes[0] = roundUpToTenth(maxes[0]);
@@ -173,8 +174,8 @@ const amendNode = (node: Element, propertiesOrChildren: PropertiesOrChildren, ch
 	return svg({"viewBox": `0 0 ${endMinute - startMinute + 130} ${maxY + 110}`}, [
 		g({"transform": "translate(0 10)"}, [
 			g({"transform": "translate(50 5)"}, [
-				polyline({"points": lines[5].map(([n, point]) => `${n - startMinute},${maxY - maxY * point / maxBytes}`).join(" "), "stroke": keyColours[5], "fill": "none", "class": keys[5]}),
-				lines.slice(0, 5).map((points, l) => polyline({"points": points.map(([n, point]) => `${n - startMinute},${maxY - maxY * point / maxSyscalls}`).join(" "), "stroke": keyColours[l], "fill": "none", "class": keys[l]})),
+				lines.slice(6).map((points, l) => polyline({"points": points.map(([n, point]) => `${n - startMinute},${maxY - maxY * point / maxBytes}`).join(" "), "stroke": keyColours[6+l], "fill": "none", "class": keys[6+l]})),
+				lines.slice(0, 6).map((points, l) => polyline({"points": points.map(([n, point]) => `${n - startMinute},${maxY - maxY * point / maxSyscalls}`).join(" "), "stroke": keyColours[l], "fill": "none", "class": keys[l]})),
 				line({"y1": maxY + "", "y2": maxY + "", "x2": endMinute - startMinute + 10 + "", "stroke": "#000"}),
 				Array.from(range(Math.ceil(startMinute / 60), Math.floor(endMinute / 60), n => text({"transform": `translate(${n * 60 - startMinute}, ${maxY + 5}) rotate(90) scale(0.5)`}, formatTime(n * 3600))))
 			]),
@@ -191,7 +192,7 @@ const amendNode = (node: Element, propertiesOrChildren: PropertiesOrChildren, ch
 	    uniformY = true,
 	    hostData = data.events;
 
-	const {opens, reads, bytes, closes, stats} = data.events.reduce((d, e) => (d.opens += e.opens ?? 0, d.reads += e.reads ?? 0, d.bytes += e.bytes ?? 0, d.closes += e.closes ?? 0, d.stats += e.stats ?? 0, d), newSyscall()),
+	const {opens, reads, bytes, closes, stats, writes, writeBytes} = data.events.reduce((d, e) => (d.opens += e.opens ?? 0, d.reads += e.reads ?? 0, d.bytes += e.bytes ?? 0, d.closes += e.closes ?? 0, d.stats += e.stats ?? 0, d.writes += e.writes ?? 0, d.writeBytes += e.writeBytes ?? 0, d), newSyscall()),
 	      dataStart = data.events[0].time / 60 | 0,
 	      dataEnd = data.events.at(-1)!.time / 60 | 0,
 	      [maxSyscalls, maxBytes] = findDataMaxes(data.events, dataStart, dataEnd),
@@ -227,6 +228,8 @@ const amendNode = (node: Element, propertiesOrChildren: PropertiesOrChildren, ch
 					div("Total Bytes Read: " + bytes.toLocaleString()),
 					div("Total Close: " + closes.toLocaleString()),
 					div("Total Stats: " + stats.toLocaleString()),
+					div("Total Writes: " + writes.toLocaleString()),
+					div("Total Bytes Written: " + writeBytes.toLocaleString()),
 					div("Total Errors: " + (data.errors?.length ?? 0).toLocaleString()),
 				])
 			]),
