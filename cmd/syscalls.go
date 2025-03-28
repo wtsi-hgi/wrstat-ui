@@ -37,8 +37,20 @@ var syscallLogReloadTime uint
 // summariseCmd represents the stat command.
 var syscallsCmd = &cobra.Command{
 	Use:   "syscalls",
-	Short: "syscalls starts a server to analyse wrstat syscall logs",
-	Long:  ``,
+	Short: "Start a server to analyse wrstat syscall logs",
+	Long: `Start a server to analyse wrstat syscall logs.
+
+Starting the server brings up a web interface to view statistical information on
+the syscalls called during 'wrstat multi' runs. Provide one or more
+'wrstat multi -f' output directories to be scanned for logs.
+
+The bind flag (default: ":8080") determines the host and port that the server
+runs on.
+
+The reload flag (default: 10) determines the delay in minutes between checking
+for new logs in the given directories. A value of zero disables the repeated
+checks.
+`,
 	Run: func(_ *cobra.Command, args []string) {
 		if err := syscalls.StartServer(serverBind, syscallLogReloadTime, args...); err != nil {
 			die("%s", err)
@@ -50,7 +62,7 @@ func init() {
 	syscallsCmd.Flags().StringVarP(&serverBind, "bind", "b", ":8080",
 		"address to bind to, eg host:port")
 	syscallsCmd.Flags().UintVarP(&syscallLogReloadTime, "reload", "r", defaultSyscallReloadtime,
-		"duration before loading new syscall logs")
+		"duration in minutes before checking for new syscall logs to load")
 
 	RootCmd.AddCommand(syscallsCmd)
 }
