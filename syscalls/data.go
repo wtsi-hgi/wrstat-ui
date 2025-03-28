@@ -50,14 +50,16 @@ type data struct {
 }
 
 type Event struct {
-	Time   int64  `json:"time"`
-	File   string `json:"file"`
-	Host   string `json:"host"`
-	Opens  uint64 `json:"opens,omitempty"`
-	Reads  uint64 `json:"reads,omitempty"`
-	Bytes  uint64 `json:"bytes,omitempty"`
-	Closes uint64 `json:"closes,omitempty"`
-	Stats  uint64 `json:"stats,omitempty"`
+	Time       int64  `json:"time"`
+	File       string `json:"file"`
+	Host       string `json:"host"`
+	Opens      uint64 `json:"opens,omitempty"`
+	Reads      uint64 `json:"reads,omitempty"`
+	Bytes      uint64 `json:"bytes,omitempty"`
+	Closes     uint64 `json:"closes,omitempty"`
+	Stats      uint64 `json:"stats,omitempty"`
+	Writes     uint64 `json:"writes,omitempty"`
+	WriteBytes uint64 `json:"writeBytes,omitempty"`
 }
 
 type Error struct {
@@ -162,6 +164,10 @@ func (d *data) parseLine(line [][2]string) error { //nolint:gocognit,gocyclo,cyc
 			event.Closes, err = strconv.ParseUint(part[1], 10, 64)
 		case "stats":
 			event.Stats, err = strconv.ParseUint(part[1], 10, 64)
+		case "writes":
+			event.Writes, err = strconv.ParseUint(part[1], 10, 64)
+		case "writeBytes":
+			event.WriteBytes, err = strconv.ParseUint(part[1], 10, 64)
 		}
 
 		if err != nil {
@@ -178,6 +184,7 @@ func (d *data) parseLine(line [][2]string) error { //nolint:gocognit,gocyclo,cyc
 	pos, _ := slices.BinarySearchFunc(d.Events, event, func(a, b Event) int {
 		return int(a.Time) - int(b.Time)
 	})
+
 	d.Events = slices.Insert(d.Events, pos, event)
 
 	return nil
