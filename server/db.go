@@ -66,11 +66,12 @@ const ErrNoPaths = basedirs.Error("no db paths found")
 // The subdir endpoints require id (gid or uid) and basedir parameters. The
 // history endpoint requires a gid and basedir (can be basedir, actually a
 // mountpoint) parameter.
-func (s *Server) LoadDBs(basePaths []string, dgutaDBName, basedirDBName, ownersPath string, mounts ...string) error { //nolint:funlen,lll
+func (s *Server) LoadDBs(basePaths []string, dgutaDBName, basedirDBName, ownersPath string, mounts ...string) error {
 	return s.loadDBs(basePaths, nil, dgutaDBName, basedirDBName, ownersPath, mounts)
 }
 
-func (s *Server) loadDBs(basePaths, removedPaths []string, dgutaDBName, basedirDBName, ownersPath string, mounts []string) error {
+func (s *Server) loadDBs(basePaths, removedPaths []string, dgutaDBName, basedirDBName,
+	ownersPath string, mounts []string) error {
 	tree, bd, mt, fn, err := s.openDBs(basePaths, removedPaths, dgutaDBName, basedirDBName, ownersPath)
 	if err != nil {
 		return err
