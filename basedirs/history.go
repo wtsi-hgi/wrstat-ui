@@ -94,8 +94,8 @@ func (b *BaseDirReader) SetMountPoints(mountpoints []string) {
 	b.mountPoints = validateMountPoints(mountpoints)
 }
 
-func validateMountPoints(mountpoints []string) []string {
-	mps := make([]string, len(mountpoints))
+func validateMountPoints(mountpoints []string) mountPoints {
+	mps := make(mountPoints, len(mountpoints))
 
 	for n, mp := range mountpoints {
 		if !strings.HasSuffix(mp, "/") {
@@ -135,7 +135,7 @@ func getMountPoints() (mountPoints, error) {
 
 func (m mountPoints) prefixOf(basedir string) string {
 	for _, mount := range m {
-		if strings.HasPrefix(basedir, mount) {
+		if strings.HasPrefix(basedir, mount) || basedir == strings.TrimSuffix(mount, "/") {
 			return mount
 		}
 	}
