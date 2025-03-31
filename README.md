@@ -26,7 +26,7 @@ When making changes to the frontend code (analytics/src) the changes will need
 to be compiled for the production build.
 
 This can be done manually by running the embed.sh script in the analytics
-directory, or by running make build/install.
+directory, or by running `make buildembedded`.
 
 ## Syscalls
 
@@ -39,7 +39,7 @@ When making changes to the frontend code (analytics/src) the changes will need
 to be compiled for the production build.
 
 This can be done manually by running the embed.sh script in the analytics
-directory, or by running make build/install.
+directory, or by running `make buildembedded`.
 
 ### Tools Required
 
