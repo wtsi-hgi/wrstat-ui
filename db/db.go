@@ -33,7 +33,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/hashicorp/go-multierror"
@@ -169,8 +168,7 @@ func (s *dbSet) Open() error {
 // openBoltReadOnly opens a bolt database at the given path in read-only mode.
 func openBoltReadOnly(path string) (*bolt.DB, error) {
 	return bolt.Open(path, DBOpenMode, &bolt.Options{
-		ReadOnly:  true,
-		MmapFlags: syscall.MAP_POPULATE,
+		ReadOnly: true,
 	})
 }
 
