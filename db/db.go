@@ -203,7 +203,7 @@ func (s *dbSet) Info() (*DBInfo, error) {
 	info := &DBInfo{}
 	ch := new(codec.BincHandle)
 
-	err := gutaDBInfo(paths[0], info, ch)
+	err := gutaDBInfo(paths[0], info)
 	if err != nil {
 		return nil, err
 	}
@@ -213,7 +213,7 @@ func (s *dbSet) Info() (*DBInfo, error) {
 	return info, err
 }
 
-func gutaDBInfo(path string, info *DBInfo, ch codec.Handle) error {
+func gutaDBInfo(path string, info *DBInfo) error {
 	gutaDB, err := openBoltReadOnlyUnPopulated(path)
 	if err != nil {
 		return err
@@ -225,7 +225,7 @@ func gutaDBInfo(path string, info *DBInfo, ch codec.Handle) error {
 
 	fullBucketScan(gutaDB, GUTABucket, func(k, v []byte) {
 		info.NumDirs++
-		dguta := DecodeDGUTAbytes(ch, k, v)
+		dguta := DecodeDGUTAbytes(k, v)
 		info.NumDGUTAs += len(dguta.GUTAs)
 	})
 
@@ -451,7 +451,7 @@ func (d *DB) storeDGUTAs(tx *bolt.Tx) error {
 // storeDGUTA stores a DGUTA in the db. DGUTAs are expected to be unique per
 // Store() operation and database.
 func (d *DB) storeDGUTA(b *bolt.Bucket, dguta RecordDGUTA) error {
-	if err := b.Put(dguta.EncodeToBytes(d.ch)); err != nil {
+	if err := b.Put(dguta.EncodeToBytes()); err != nil {
 		return err
 	}
 
@@ -548,7 +548,7 @@ func (d *DB) combineDGUTAsFromReadSets(dir string) (*DGUTA, int, time.Time) {
 				lastUpdated = readSet.modtime
 			}
 
-			return getDGUTAFromDBAndAppend(b, dir, d.ch, dguta)
+			return getDGUTAFromDBAndAppend(b, dir, dguta)
 		}); err != nil {
 			notFound++
 		}
@@ -560,8 +560,8 @@ func (d *DB) combineDGUTAsFromReadSets(dir string) (*DGUTA, int, time.Time) {
 // getDGUTAFromDBAndAppend calls getDGUTAFromDB() and appends the result
 // to the given dguta. If the given dguta is empty, it will be populated with the
 // content of the result instead.
-func getDGUTAFromDBAndAppend(b *bolt.Bucket, dir string, ch codec.Handle, dguta *DGUTA) error {
-	thisDGUTA, err := getDGUTAFromDB(b, dir, ch)
+func getDGUTAFromDBAndAppend(b *bolt.Bucket, dir string, dguta *DGUTA) error {
+	thisDGUTA, err := getDGUTAFromDB(b, dir)
 	if err != nil {
 		return err
 	}
@@ -577,7 +577,7 @@ func getDGUTAFromDBAndAppend(b *bolt.Bucket, dir string, ch codec.Handle, dguta 
 }
 
 // getDGUTAFromDB gets and decodes a dguta from the given database.
-func getDGUTAFromDB(b *bolt.Bucket, dir string, ch codec.Handle) (*DGUTA, error) {
+func getDGUTAFromDB(b *bolt.Bucket, dir string) (*DGUTA, error) {
 	bdir := make([]byte, 0, 2+len(dir)) //nolint:mnd
 	bdir = append(bdir, dir...)
 
@@ -592,7 +592,7 @@ func getDGUTAFromDB(b *bolt.Bucket, dir string, ch codec.Handle) (*DGUTA, error)
 		return nil, ErrDirNotFound
 	}
 
-	dguta := DecodeDGUTAbytes(ch, bdir, v)
+	dguta := DecodeDGUTAbytes(bdir, v)
 
 	return dguta, nil
 }

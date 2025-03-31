@@ -34,7 +34,6 @@ import (
 	"time"
 
 	. "github.com/smartystreets/goconvey/convey"
-	"github.com/ugorji/go/codec"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 	internaldata "github.com/wtsi-hgi/wrstat-ui/internal/data"
 	"github.com/wtsi-hgi/wrstat-ui/internal/statsdata"
@@ -160,7 +159,6 @@ func TestDGUTA(t *testing.T) {
 		})
 
 		Convey("A DGUTA can be encoded and decoded", func() {
-			ch := new(codec.BincHandle)
 			d := internaldata.NewDirectoryPathCreator()
 
 			r := db.RecordDGUTA{
@@ -168,11 +166,11 @@ func TestDGUTA(t *testing.T) {
 				GUTAs: expected[0].GUTAs,
 			}
 
-			dirb, b := r.EncodeToBytes(ch)
+			dirb, b := r.EncodeToBytes()
 			So(len(dirb), ShouldEqual, 2) // 98, 255
-			So(len(b), ShouldEqual, 6814)
+			So(len(b), ShouldEqual, 1471)
 
-			dd := db.DecodeDGUTAbytes(ch, dirb, b)
+			dd := db.DecodeDGUTAbytes(dirb, b)
 			So(dd, ShouldResemble, expected[0])
 		})
 

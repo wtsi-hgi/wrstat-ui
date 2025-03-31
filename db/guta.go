@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"golang.org/x/exp/constraints"
+	"vimagination.zapto.org/byteio"
 )
 
 // GUTA handles group,user,type,age,count,size information.
@@ -43,6 +44,28 @@ type GUTA struct {
 	Atime      int64 // seconds since Unix epoch
 	Mtime      int64 // seconds since Unix epoch
 	updateTime time.Time
+}
+
+func (g GUTA) writeTo(w byteio.StickyEndianWriter) {
+	w.WriteUintX(uint64(g.GID))
+	w.WriteUintX(uint64(g.UID))
+	w.WriteUint8(uint8(g.FT))
+	w.WriteUint8(uint8(g.Age))
+	w.WriteUintX(g.Count)
+	w.WriteUintX(g.Size)
+	w.WriteIntX(g.Atime)
+	w.WriteIntX(g.Mtime)
+}
+
+func (g *GUTA) readFrom(r byteio.StickyEndianReader) {
+	g.GID = uint32(r.ReadUintX())
+	g.UID = uint32(r.ReadUintX())
+	g.FT = DirGUTAFileType(r.ReadUint8())
+	g.Age = DirGUTAge(r.ReadUint8())
+	g.Count = r.ReadUintX()
+	g.Size = r.ReadUintX()
+	g.Atime = r.ReadIntX()
+	g.Mtime = r.ReadIntX()
 }
 
 // Filter can be applied to a GUTA to see if it has one of the specified GIDs,
@@ -148,6 +171,24 @@ func (g *GUTA) passesAgeFilter(filter *Filter) bool {
 // GUTAs is a slice of *GUTA, offering ways to filter and summarise the
 // information in our *GUTAs.
 type GUTAs []*GUTA
+
+func (g GUTAs) writeTo(w byteio.StickyEndianWriter) {
+	w.WriteUintX(uint64(len(g)))
+
+	for _, guta := range g {
+		guta.writeTo(w)
+	}
+}
+
+func (g *GUTAs) readFrom(r byteio.StickyEndianReader) {
+	*g = make(GUTAs, r.ReadUintX())
+
+	for n := range *g {
+		(*g)[n] = new(GUTA)
+
+		(*g)[n].readFrom(r)
+	}
+}
 
 // Summary sums the count and size of all our GUTA elements and returns the
 // results, along with the oldest atime and newset mtime (in seconds since Unix

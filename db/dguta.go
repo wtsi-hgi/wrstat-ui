@@ -26,8 +26,10 @@
 package db
 
 import (
-	"github.com/ugorji/go/codec"
+	"bytes"
+
 	"github.com/wtsi-hgi/wrstat-ui/summary"
+	"vimagination.zapto.org/byteio"
 )
 
 const endByte = 255
@@ -48,14 +50,14 @@ var pathBuf [4098]byte //nolint:gochecknoglobals
 
 // EncodeToBytes returns our Dir as a []byte and our GUTAs encoded in another
 // []byte suitable for storing on disk.
-func (d *RecordDGUTA) EncodeToBytes(ch codec.Handle) ([]byte, []byte) {
-	var encoded []byte
-	enc := codec.NewEncoderBytes(&encoded, ch)
-	enc.MustEncode(d.GUTAs)
+func (d *RecordDGUTA) EncodeToBytes() ([]byte, []byte) {
+	var encoded bytes.Buffer
+
+	d.GUTAs.writeTo(&byteio.StickyLittleEndianWriter{Writer: &encoded})
 
 	dir := append(d.pathBytes(), endByte)
 
-	return dir, encoded
+	return dir, encoded.Bytes()
 }
 
 func (d *RecordDGUTA) pathBytes() []byte {
@@ -64,12 +66,10 @@ func (d *RecordDGUTA) pathBytes() []byte {
 
 // DecodeDGUTAbytes converts the byte slices returned by DGUTA.Encode() back in to
 // a *DGUTA.
-func DecodeDGUTAbytes(ch codec.Handle, dir, encoded []byte) *DGUTA {
-	dec := codec.NewDecoderBytes(encoded, ch)
-
+func DecodeDGUTAbytes(dir, encoded []byte) *DGUTA {
 	var g GUTAs
 
-	dec.MustDecode(&g)
+	g.readFrom(&byteio.StickyLittleEndianReader{Reader: bytes.NewReader(encoded)})
 
 	return &DGUTA{
 		Dir:   string(dir[:len(dir)-1]), // remove the separator (255)
