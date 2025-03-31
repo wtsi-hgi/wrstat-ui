@@ -21,6 +21,7 @@ require (
 	github.com/wtsi-hgi/go-authserver v1.4.0
 	go.etcd.io/bbolt v1.4.0
 	golang.org/x/exp v0.0.0-20250218142911-aa4b98e5adaa
+	vimagination.zapto.org/byteio v1.0.5
 	vimagination.zapto.org/tsserver v1.0.11
 )
 
