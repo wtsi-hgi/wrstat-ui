@@ -279,13 +279,13 @@ func TestMountpoints(t *testing.T) {
 		})
 
 		for basedir, mountpoint := range map[string]string{
-			"/some/path/here/":                       "/some/path/",
-			"/some/path/":                            "/some/path/",
-			"/some/path":                             "/some/path/",
-			"/some/path/here/as/well/":               "/some/path/",
-			"/some/other/path/here/":                 "/some/other/path/",
-			"/another/path/another/day":              "/another/path/",
-			"/another/path/here/ther/and/everywhere": "/another/path/here/",
+			"/some/path/here/":                        "/some/path/",
+			"/some/path/":                             "/some/path/",
+			"/some/path":                              "/some/path/",
+			"/some/path/here/as/well/":                "/some/path/",
+			"/some/other/path/here/":                  "/some/other/path/",
+			"/another/path/another/day":               "/another/path/",
+			"/another/path/here/there/and/everywhere": "/another/path/here/",
 		} {
 			So(mountpoint, ShouldEqual, mps.prefixOf(basedir))
 		}
