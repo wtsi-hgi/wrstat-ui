@@ -268,3 +268,26 @@ func TestHistory(t *testing.T) {
 		})
 	}
 }
+
+func TestMountpoints(t *testing.T) {
+	Convey("Given a set of mountpoints, you can match basedirs to a mountpoint", t, func() {
+		mps := validateMountPoints([]string{
+			"/some/path",
+			"/some/other/path/",
+			"/another/path/",
+			"/another/path/here",
+		})
+
+		for basedir, mountpoint := range map[string]string{
+			"/some/path/here/":                       "/some/path/",
+			"/some/path/":                            "/some/path/",
+			"/some/path":                             "/some/path/",
+			"/some/path/here/as/well/":               "/some/path/",
+			"/some/other/path/here/":                 "/some/other/path/",
+			"/another/path/another/day":              "/another/path/",
+			"/another/path/here/ther/and/everywhere": "/another/path/here/",
+		} {
+			So(mountpoint, ShouldEqual, mps.prefixOf(basedir))
+		}
+	})
+}
