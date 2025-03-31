@@ -58,8 +58,8 @@ func (g GUTA) writeTo(w byteio.StickyEndianWriter) {
 }
 
 func (g *GUTA) readFrom(r byteio.StickyEndianReader) {
-	g.GID = uint32(r.ReadUintX())
-	g.UID = uint32(r.ReadUintX())
+	g.GID = uint32(r.ReadUintX()) //nolint:gosec
+	g.UID = uint32(r.ReadUintX()) //nolint:gosec
 	g.FT = DirGUTAFileType(r.ReadUint8())
 	g.Age = DirGUTAge(r.ReadUint8())
 	g.Count = r.ReadUintX()
