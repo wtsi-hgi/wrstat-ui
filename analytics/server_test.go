@@ -52,6 +52,10 @@ func TestServer(t *testing.T) {
 		certPath, keyPath, err := gas.CreateTestCert(t)
 		So(err, ShouldBeNil)
 
+		So(srv.EnableAuth(certPath, keyPath, func(username, password string) (bool, string) {
+			return true, "user"
+		}), ShouldBeNil)
+
 		addr, dfunc, err := gas.StartTestServer(srv, certPath, keyPath)
 		So(err, ShouldBeNil)
 
@@ -59,9 +63,6 @@ func TestServer(t *testing.T) {
 			So(dfunc(), ShouldBeNil)
 		}()
 
-		So(srv.EnableAuth(certPath, keyPath, func(username, password string) (bool, string) {
-			return true, "user"
-		}), ShouldBeNil)
 		So(srv.InitAnalyticsDB(dbPath), ShouldBeNil)
 
 		l, err := net.Listen("tcp", "localhost:0")

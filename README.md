@@ -26,11 +26,24 @@ When making changes to the frontend code (analytics/src) the changes will need
 to be compiled for the production build.
 
 This can be done manually by running the embed.sh script in the analytics
-directory, or by running make build/install.
+directory, or by running `make buildembedded`.
+
+## Syscalls
+
+There is a seperate syscall log analysing server (wrstat-ui syscalls) that is
+used to see how many system calls were performed in each run.
+
+In addition, you can view any errors that were produced during the run.
+
+When making changes to the frontend code (analytics/src) the changes will need
+to be compiled for the production build.
+
+This can be done manually by running the embed.sh script in the analytics
+directory, or by running `make buildembedded`.
 
 ### Tools Required
 
-The following commands are needed to run the analytics embed script:
+The following commands are needed to run the analytics/syscalls embed script:
 
 ```bash
 npm install -g terser

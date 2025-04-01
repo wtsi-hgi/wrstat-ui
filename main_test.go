@@ -274,6 +274,9 @@ func TestSummarise(t *testing.T) {
 
 		h, err := bddb.History(gid, "/lustre/scratch125/humgen/projects/D")
 		So(err, ShouldBeNil)
+
+		fixTZs(h)
+
 		So(h, ShouldResemble, []basedirs.History{
 			{Date: yesterday.In(time.UTC), UsageSize: 15, UsageInodes: 5},
 		})
@@ -314,6 +317,9 @@ func TestSummarise(t *testing.T) {
 
 		h, err = bddb.History(gid, "/lustre/scratch125/humgen/projects/D")
 		So(err, ShouldBeNil)
+
+		fixTZs(h)
+
 		So(h, ShouldResemble, []basedirs.History{
 			{Date: yesterday.In(time.UTC), UsageSize: 15, UsageInodes: 5},
 			{Date: refTime.In(time.UTC), UsageSize: 15, UsageInodes: 5},
@@ -321,6 +327,12 @@ func TestSummarise(t *testing.T) {
 
 		bddb.Close()
 	})
+}
+
+func fixTZs(h []basedirs.History) {
+	for n := range h {
+		h[n].Date = h[n].Date.In(time.UTC)
+	}
 }
 
 func sortLines(data string) string {
