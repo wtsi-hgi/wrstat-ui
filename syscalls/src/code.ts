@@ -171,7 +171,7 @@ const amendNode = (node: Element, propertiesOrChildren: PropertiesOrChildren, ch
 	      }
 	}
 
-	return svg({"viewBox": `0 0 ${endMinute - startMinute + 155} ${maxY + 110}`, "click": function(this:SVGSVGElement) {this.classList.toggle("zoom");}}, [
+	return svg({"viewBox": `0 0 ${endMinute - startMinute + 155} ${maxY + 110}`, "click": function(this: SVGSVGElement) {this.classList.toggle("zoom");}}, [
 		g({"transform": "translate(0 10)"}, [
 			g({"transform": "translate(60 5)"}, [
 				lines.slice(6).map((points, l) => polyline({"points": points.map(([n, point]) => `${n - startMinute},${maxY - maxY * point / maxBytes}`).join(" "), "stroke": keyColours[6+l], "fill": "none", "class": keys[6+l]})),
