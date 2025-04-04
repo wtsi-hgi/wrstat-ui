@@ -34,6 +34,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hashicorp/go-multierror"
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 )
@@ -65,20 +66,13 @@ const ErrNoPaths = basedirs.Error("no db paths found")
 // The subdir endpoints require id (gid or uid) and basedir parameters. The
 // history endpoint requires a gid and basedir (can be basedir, actually a
 // mountpoint) parameter.
-func (s *Server) LoadDBs(basePaths []string, dgutaDBName, basedirDBName, ownersPath string, mounts ...string) error { //nolint:funlen,lll
-	dirgutaPaths, baseDirPaths := JoinDBPaths(basePaths, dgutaDBName, basedirDBName)
+func (s *Server) LoadDBs(basePaths []string, dgutaDBName, basedirDBName, ownersPath string, mounts ...string) error {
+	return s.loadDBs(basePaths, nil, dgutaDBName, basedirDBName, ownersPath, mounts)
+}
 
-	mt, err := s.getLatestTimestamp(dirgutaPaths, baseDirPaths)
-	if err != nil {
-		return err
-	}
-
-	tree, err := db.NewTree(dirgutaPaths...)
-	if err != nil {
-		return err
-	}
-
-	bd, err := basedirs.OpenMulti(ownersPath, baseDirPaths...)
+func (s *Server) loadDBs(basePaths, removedPaths []string, dgutaDBName, basedirDBName,
+	ownersPath string, mounts []string) error {
+	tree, bd, mt, fn, err := s.openDBs(basePaths, removedPaths, dgutaDBName, basedirDBName, ownersPath)
 	if err != nil {
 		return err
 	}
@@ -100,7 +94,73 @@ func (s *Server) LoadDBs(basePaths []string, dgutaDBName, basedirDBName, ownersP
 		s.addBaseDirRoutes()
 	}
 
+	if fn != nil {
+		return fn()
+	}
+
 	return nil
+}
+
+func (s *Server) openDBs(basePaths, removedPaths []string, dgutaDBName, //nolint:funlen
+	basedirDBName, ownersPath string) (tree *db.Tree, bd basedirs.MultiReader,
+	mt time.Time, ret func() error, err error) {
+	dirgutaPaths, baseDirPaths := JoinDBPaths(basePaths, dgutaDBName, basedirDBName)
+	removedDirgutaPaths, removedBaseDirPaths := JoinDBPaths(removedPaths, dgutaDBName, basedirDBName)
+
+	mt, err = s.getLatestTimestamp(dirgutaPaths, baseDirPaths)
+	if err != nil {
+		return nil, nil, mt, nil, err
+	}
+
+	s.mu.RLock()
+	existingTree := s.tree
+	existingBasedirs := s.basedirs
+	s.mu.RUnlock()
+
+	hasExisting := existingTree != nil && existingBasedirs != nil
+
+	if hasExisting {
+		var fn func() error
+
+		tree, bd, fn, err = loadFromExisting(existingTree, existingBasedirs,
+			dirgutaPaths, baseDirPaths, removedDirgutaPaths, removedBaseDirPaths)
+
+		return tree, bd, mt, fn, err
+	}
+
+	if tree, err = db.NewTree(dirgutaPaths...); err != nil {
+		return nil, nil, mt, nil, err
+	}
+
+	if bd, err = basedirs.OpenMulti(ownersPath, baseDirPaths...); err != nil {
+		return nil, nil, mt, nil, err
+	}
+
+	return tree, bd, mt, nil, nil
+}
+
+func loadFromExisting(existingTree *db.Tree, existingBasedirs basedirs.MultiReader,
+	dirgutaPaths, baseDirPaths, removedDirgutaPaths,
+	removedBaseDirPaths []string) (*db.Tree, basedirs.MultiReader, func() error, error) {
+	tree, err := existingTree.OpenFrom(dirgutaPaths, removedDirgutaPaths)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	bd, err := existingBasedirs.OpenFrom(baseDirPaths, removedBaseDirPaths)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	return tree, bd, func() error {
+		treeErr := tree.CloseOnly(removedDirgutaPaths)
+
+		if bdErr := bd.CloseOnly(removedBaseDirPaths); bdErr != nil {
+			err = multierror.Append(treeErr, bdErr)
+		}
+
+		return err
+	}, nil
 }
 
 func (s *Server) getLatestTimestamp(a, b []string) (time.Time, error) {
@@ -180,13 +240,13 @@ func (s *Server) EnableDBReloading(basepath, dgutaDBName, basedirDBName, ownersP
 	}
 
 	go s.reloadLoop(basepath, dgutaDBName, basedirDBName, ownersPath,
-		pollFrequency, removeOldPaths, dbPaths, mounts)
+		pollFrequency, removeOldPaths, dbPaths)
 
 	return nil
 }
 
 func (s *Server) reloadLoop(basepath, dgutaDBName, basedirDBName, ownersPath string, //nolint:gocognit,gocyclo
-	pollFrequency time.Duration, removeOldPaths bool, dbPaths, mounts []string) {
+	pollFrequency time.Duration, removeOldPaths bool, dbPaths []string) {
 	for {
 		select {
 		case <-time.After(pollFrequency):
@@ -205,7 +265,9 @@ func (s *Server) reloadLoop(basepath, dgutaDBName, basedirDBName, ownersPath str
 			continue
 		}
 
-		if s.reloadDBs(dgutaDBName, basedirDBName, ownersPath, newDBPaths, mounts) { //nolint:nestif
+		if err := s.loadDBs(newDBPaths, toDelete, dgutaDBName, basedirDBName, ownersPath, nil); err != nil { //nolint:nestif
+			s.Logger.Printf("error reloading databases: %s", err)
+		} else {
 			dbPaths = newDBPaths
 
 			if removeOldPaths {
@@ -215,50 +277,6 @@ func (s *Server) reloadLoop(basepath, dgutaDBName, basedirDBName, ownersPath str
 			}
 		}
 	}
-}
-
-func (s *Server) reloadDBs(dgutaDBName, basedirDBName, //nolint:funlen
-	ownersPath string, dbPaths, mounts []string) bool {
-	dirgutaPaths, baseDirPaths := JoinDBPaths(dbPaths, dgutaDBName, basedirDBName)
-
-	mt, err := s.getLatestTimestamp(dirgutaPaths, baseDirPaths)
-	if err != nil {
-		return s.logReloadError("reloading dbs failed: %s", err)
-	}
-
-	s.Logger.Printf("reloading dirguta db from %v", dirgutaPaths)
-
-	tree, err := db.NewTree(dirgutaPaths...)
-	if err != nil {
-		return s.logReloadError("reloading dirguta db failed: %s", err)
-	}
-
-	s.Logger.Printf("reloading basedirs db from %v", baseDirPaths)
-
-	bd, err := basedirs.OpenMulti(ownersPath, baseDirPaths...)
-	if err != nil {
-		return s.logReloadError("reloading basedirs db failed: %s", err)
-	}
-
-	if len(mounts) > 0 {
-		bd.SetMountPoints(mounts)
-	}
-
-	s.Logger.Printf("server ready again after reloading")
-
-	s.mu.Lock()
-	s.tree = tree
-	s.basedirs = bd
-	s.dataTimeStamp = mt
-	s.mu.Unlock()
-
-	return true
-}
-
-func (s *Server) logReloadError(format string, v ...any) bool {
-	s.Logger.Printf(format, v...)
-
-	return false
 }
 
 // FindDBDirs finds the latest dirguta and basedir databases in the given base
