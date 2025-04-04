@@ -144,6 +144,13 @@
 svg {
 	display: block;
 	height: 90vh;
+	cursor: zoom-out;
+}
+
+svg.zoom {
+	cursor: zoom-in;
+	width: 100%;
+	height: auto;
 }
 
 .syscalls .syscalls, .opens .opens, .reads .reads, .bytes .bytes, .closes .closes, .stats .stats, .writes .writes, .writeBytes .writeBytes {
