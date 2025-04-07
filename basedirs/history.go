@@ -134,8 +134,12 @@ func getMountPoints() (mountPoints, error) {
 }
 
 func (m mountPoints) prefixOf(basedir string) string {
+	if !strings.HasSuffix(basedir, "/") {
+		basedir += "/"
+	}
+
 	for _, mount := range m {
-		if strings.HasPrefix(basedir, mount) || basedir == strings.TrimSuffix(mount, "/") {
+		if strings.HasPrefix(basedir, mount) {
 			return mount
 		}
 	}
