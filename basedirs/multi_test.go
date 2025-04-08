@@ -62,10 +62,10 @@ func TestMulti(t *testing.T) {
 `)
 
 	mps := []string{
-		"/lustre/scratch123/",
+		"/lustre/scratch123",
 		"/lustre/scratch125/",
 		"/nfs/scratch123/",
-		"/nfs/scratch125/",
+		"/nfs/scratch125",
 	}
 
 	defaultConfig := basedirs.Config{
