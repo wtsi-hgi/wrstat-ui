@@ -138,8 +138,10 @@ func (m MultiReader) UserSubDirs(uid uint32, basedir string, age db.DirGUTAge) (
 // SetMountPoints can be used to manually set your mountpoints, if the automatic
 // discovery of mountpoints on your system doesn't work.
 func (m MultiReader) SetMountPoints(mountpoints []string) {
+	mps := validateMountPoints(mountpoints)
+
 	for _, r := range m {
-		r.mountPoints = mountpoints
+		r.mountPoints = mps
 	}
 }
 
