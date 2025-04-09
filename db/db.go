@@ -31,6 +31,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -489,6 +490,45 @@ func (d *DB) Open() error {
 	return nil
 }
 
+// OpenFrom creates a new DB from an existing one, potentially removing some
+// databases and adding others.
+func (d *DB) OpenFrom(add, remove []string) (*DB, error) { //nolint:funlen,gocognit,gocyclo
+	e := &DB{
+		batchSize: d.batchSize,
+		ch:        d.ch,
+	}
+
+	for _, path := range add {
+		if slices.Contains(d.paths, path) {
+			continue
+		}
+
+		readSet, err := NewDBSet(path)
+		if err != nil {
+			return nil, err
+		}
+
+		if !readSet.pathsExist(readSet.Paths()) {
+			return nil, ErrDBNotExists
+		}
+
+		if err = readSet.Open(); err != nil {
+			return nil, err
+		}
+
+		e.readSets = append(e.readSets, readSet)
+	}
+
+	for _, r := range d.readSets {
+		if !slices.Contains(remove, r.dir) {
+			e.paths = append(e.paths, r.dir)
+			e.readSets = append(e.readSets, r)
+		}
+	}
+
+	return e, nil
+}
+
 // Close closes the database(s) after reading. You should call this once
 // you've finished reading, but it's not necessary; errors are ignored.
 func (d *DB) Close() error {
@@ -508,6 +548,24 @@ func (d *DB) Close() error {
 	}
 
 	return d.writeSet.Close()
+}
+
+// CloseOnly closes the databases corresponding to the given paths.
+//
+// Should only be used after calling OpenFrom to close the unused databases in
+// the old DB.
+func (d *DB) CloseOnly(paths []string) error {
+	for _, readSet := range d.readSets {
+		if !slices.Contains(paths, readSet.dir) {
+			continue
+		}
+
+		if err := readSet.Close(); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 // DirInfo tells you the total number of files, their total size, oldest atime
