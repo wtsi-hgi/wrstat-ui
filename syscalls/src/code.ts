@@ -171,16 +171,16 @@ const amendNode = (node: Element, propertiesOrChildren: PropertiesOrChildren, ch
 	      }
 	}
 
-	return svg({"viewBox": `0 0 ${endMinute - startMinute + 155} ${maxY + 110}`, "click": function(this: SVGSVGElement) {this.classList.toggle("zoom");}}, [
-		g({"transform": "translate(0 10)"}, [
+	return svg({"viewBox": `0 0 ${endMinute - startMinute + 160} ${maxY + 110}`, "click": function(this: SVGSVGElement) {this.classList.toggle("zoom");}}, [
+		g({"transform": "translate(15 10)"}, [
 			g({"transform": "translate(60 5)"}, [
 				lines.slice(6).map((points, l) => polyline({"points": points.map(([n, point]) => `${n - startMinute},${maxY - maxY * point / maxBytes}`).join(" "), "stroke": keyColours[6+l], "fill": "none", "class": keys[6+l]})),
 				lines.slice(0, 6).map((points, l) => polyline({"points": points.map(([n, point]) => `${n - startMinute},${maxY - maxY * point / maxSyscalls}`).join(" "), "stroke": keyColours[l], "fill": "none", "class": keys[l]})),
 				line({"y1": maxY + "", "y2": maxY + "", "x2": endMinute - startMinute + 10 + "", "stroke": "#000"}),
 				Array.from(range(Math.ceil(startMinute / 60), Math.floor(endMinute / 60), n => text({"transform": `translate(${n * 60 - startMinute}, ${maxY + 5}) rotate(90) scale(0.5)`}, formatTime(n * 3600))))
 			]),
-			text({"transform-origin": "center", "transform": "translate(-55 100) rotate(-90)", "style": "transform-box: fill-box"}, "Syscalls per Minute"),
-			text({"transform-origin": "center", "transform": "translate("+(endMinute - startMinute + 90)+" 100) rotate(90)", "style": "transform-box: fill-box"}, "Bytes per Minute"),
+			g({"style": "transform-box: fill-box; transform-origin: center; transform: translate(-65px, 100px) rotate(-90deg)"}, text("Syscalls per Minute")),
+			g({"style": "transform-box: fill-box; transform-origin: center; transform: translate("+(endMinute - startMinute + 90)+"px, 100px) rotate(90deg)"}, text("Bytes per Minute")),
 			line({"x1": "60", "x2": "60", "y2": maxY+5+"", "stroke": "#000"}),
 			Array.from(range(0, 5, n => text({"x": "50", "y": (5 - n) * 40 + 10 + "", "text-anchor": "end"}, formatSI(n * maxSyscalls / 5)))),
 			line({"x1": endMinute - startMinute + 70 + "", "x2": endMinute - startMinute + 70 + "", "y2": maxY+5+"", "stroke": "#000"}),
