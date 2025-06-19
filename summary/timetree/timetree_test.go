@@ -49,12 +49,10 @@ func TestTimeTree(t *testing.T) {
 
 			userSummary, groupSummary := readSummary(r)
 			So(userSummary, ShouldResemble, []IDTime{
-				{0, 12345},
 				{1, 98767},
-				{2, 12349},
+				{2, 12346},
 			})
 			So(groupSummary, ShouldResemble, []IDTime{
-				{0, 12345},
 				{1, 98766},
 				{2, 98767},
 			})
@@ -72,12 +70,10 @@ func TestTimeTree(t *testing.T) {
 
 			userSummary, groupSummary := readSummary(r)
 			So(userSummary, ShouldResemble, []IDTime{
-				{0, 12345},
 				{1, 98767},
-				{2, 12349},
+				{2, 12346},
 			})
 			So(groupSummary, ShouldResemble, []IDTime{
-				{0, 12345},
 				{1, 98766},
 				{2, 98767},
 			})

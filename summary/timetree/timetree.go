@@ -88,8 +88,10 @@ func (n *Node) Add(info *summary.FileInfo) error {
 		}
 	}
 
-	n.users.Add(info.UID, info.MTime)
-	n.groups.Add(info.GID, info.MTime)
+	if !info.IsDir() {
+		n.users.Add(info.UID, info.MTime)
+		n.groups.Add(info.GID, info.MTime)
+	}
 
 	return nil
 }
