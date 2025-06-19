@@ -79,6 +79,10 @@ func NewRoot(path string, refTime int64) *Directory {
 // AddDirectory either creates and returns a new directory in the direcory or
 // returns an existing one.
 func (d *Directory) AddDirectory(name string) *Directory {
+	if name == "." {
+		return d
+	}
+
 	if c, ok := d.children[name]; ok {
 		if cd, ok := c.(*Directory); ok {
 			return cd
@@ -153,6 +157,14 @@ func (d *Directory) AsReader() io.ReadCloser {
 	}()
 
 	return pr
+}
+
+func (d *Directory) SetMeta(uid, gid uint32, mtime int64) *Directory {
+	d.UID = uid
+	d.GID = gid
+	d.MTime = mtime
+
+	return d
 }
 
 // File represents a pseudo-file entry.
