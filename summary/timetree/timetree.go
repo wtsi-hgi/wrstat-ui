@@ -43,8 +43,8 @@ type NameChild struct {
 type Node struct {
 	ctx context.Context
 
-	path, currChild *summary.DirectoryPath
-	child           *Node
+	path  *summary.DirectoryPath
+	child *Node
 
 	yield  chan NameChild
 	writer chan *byteio.StickyLittleEndianWriter
