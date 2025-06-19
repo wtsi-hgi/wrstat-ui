@@ -28,21 +28,21 @@ func TestMTimes(t *testing.T) {
 		statsdata.AddFile(b, "fileA.txt", 1, 1, 0, 0, 987)
 
 		Convey("The parent directories are filled in", func() {
-			var aBuf, bBuf, buf bytes.Buffer
-
-			_, err := io.Copy(&aBuf, a.AsReader())
-			So(err, ShouldBeNil)
-
-			_, err = io.Copy(&bBuf, b.AsReader())
-			So(err, ShouldBeNil)
+			var (
+				buf bytes.Buffer
+				err error
+			)
 
 			files := make([]timeFile, 2)
 
-			files[0], err = newTimeFile(bytes.NewReader(aBuf.Bytes()))
+			files[0].path, err = readFirstPath(a.AsReader())
 			So(err, ShouldBeNil)
 
-			files[1], err = newTimeFile(bytes.NewReader(bBuf.Bytes()))
+			files[1].path, err = readFirstPath(b.AsReader())
 			So(err, ShouldBeNil)
+
+			files[0].Reader = a.AsReader()
+			files[1].Reader = b.AsReader()
 
 			sortFiles(files)
 
