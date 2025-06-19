@@ -1,6 +1,7 @@
 package mtimes
 
 import (
+	"bufio"
 	"bytes"
 	"compress/gzip"
 	"errors"
@@ -91,16 +92,20 @@ func buildTree(files []timeFile, output string) error {
 
 	complete := make(chan struct{})
 
-	s := summary.NewSummariser(stats.NewStatsParser(r))
-	s.AddDirectoryOperation(timetree.NewTimeTree(w, complete))
+	buf := bufio.NewWriter(w)
 
-	if err = s.Summarise(); err != nil {
-		return err
-	}
+	s := summary.NewSummariser(stats.NewStatsParser(r))
+	s.AddDirectoryOperation(timetree.NewTimeTree(buf, complete))
+
+	err = s.Summarise()
 
 	<-complete
 
-	return nil
+	if err != nil {
+		return err
+	}
+
+	return buf.Flush()
 }
 
 func sortFiles(files []timeFile) {
