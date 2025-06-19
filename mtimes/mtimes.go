@@ -2,6 +2,7 @@ package mtimes
 
 import (
 	"bytes"
+	"compress/gzip"
 	"errors"
 	"fmt"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/klauspost/pgzip"
 	"github.com/wtsi-hgi/wrstat-ui/stats"
 	"github.com/wtsi-hgi/wrstat-ui/summary"
 	"github.com/wtsi-hgi/wrstat-ui/summary/timetree"
@@ -35,26 +37,43 @@ func Build(filePaths []string, output string) error {
 
 		defer f.Close()
 
-		if files[n], err = newTimeFile(f); err != nil {
+		var r io.Reader = f
+
+		if strings.HasSuffix(file, ".gz") {
+			if r, err = gzip.NewReader(f); err != nil {
+				return err
+			}
+		}
+
+		path, err := readFirstPath(r)
+		if err != nil {
 			return err
 		}
+
+		if _, err := f.Seek(0, io.SeekStart); err != nil {
+			return err
+		}
+
+		if strings.HasSuffix(file, ".gz") {
+			if r, err = pgzip.NewReader(f); err != nil {
+				return err
+			}
+		}
+
+		files[n] = timeFile{path, r}
 	}
 
 	return buildTree(files, output)
 }
 
-func newTimeFile(f io.ReadSeeker) (timeFile, error) {
+func readFirstPath(f io.Reader) (string, error) {
 	var path string
 
 	if _, err := fmt.Fscanf(f, "%q", &path); err != nil {
-		return timeFile{}, err
+		return "", err
 	}
 
-	if _, err := f.Seek(0, io.SeekStart); err != nil {
-		return timeFile{}, err
-	}
-
-	return timeFile{path, f}, nil
+	return path, nil
 }
 
 func buildTree(files []timeFile, output string) error {
