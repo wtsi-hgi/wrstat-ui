@@ -99,7 +99,7 @@ func (n *Node) Add(info *summary.FileInfo) error {
 func (n *Node) sendChild(name []byte, child tree.Node) error {
 	select {
 	case <-n.ctx.Done():
-		return n.ctx.Err()
+		return context.Cause(n.ctx)
 	case n.yield <- NameChild{Name: string(name), Child: child}:
 		return nil
 	}
@@ -110,7 +110,7 @@ func (n *Node) Output() error {
 
 	select {
 	case <-n.ctx.Done():
-		return n.ctx.Err()
+		return context.Cause(n.ctx)
 	case w := <-n.writer:
 		writeIDTimes(w, getSortedIDTimes(n.users))
 		writeIDTimes(w, getSortedIDTimes(n.groups))
