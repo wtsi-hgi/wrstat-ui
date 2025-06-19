@@ -21,6 +21,10 @@ type timeFile struct {
 }
 
 func Build(filePaths []string, output string) error {
+	if len(filePaths) == 0 {
+		return ErrNoFiles
+	}
+
 	files := make([]timeFile, len(filePaths))
 
 	for n, file := range filePaths {
@@ -143,4 +147,5 @@ func writeLines(w io.Writer, toAdd []string) {
 
 var (
 	ErrBadMerge = errors.New("can not merge file that is a subdirectory of another file")
+	ErrNoFiles  = errors.New("no files supplied")
 )
