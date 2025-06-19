@@ -79,6 +79,10 @@ func NewRoot(path string, refTime int64) *Directory {
 // AddDirectory either creates and returns a new directory in the direcory or
 // returns an existing one.
 func (d *Directory) AddDirectory(name string) *Directory {
+	if name == "." {
+		return d
+	}
+
 	if c, ok := d.children[name]; ok {
 		if cd, ok := c.(*Directory); ok {
 			return cd
@@ -155,6 +159,14 @@ func (d *Directory) AsReader() io.ReadCloser {
 	return pr
 }
 
+func (d *Directory) SetMeta(uid, gid uint32, mtime int64) *Directory {
+	d.UID = uid
+	d.GID = gid
+	d.MTime = mtime
+
+	return d
+}
+
 // File represents a pseudo-file entry.
 type File struct {
 	Path                string
@@ -176,7 +188,7 @@ func (f *File) WriteTo(w io.Writer) (int64, error) {
 // AddFile adds file data to a directory, creating the directory in the tree if
 // necessary.
 func AddFile(d *Directory, path string, uid, gid uint32, size, atime, mtime int64) *File {
-	for _, part := range strings.Split(filepath.Dir(path), "/") {
+	for part := range strings.SplitSeq(filepath.Dir(path), "/") {
 		d = d.AddDirectory(part)
 	}
 
