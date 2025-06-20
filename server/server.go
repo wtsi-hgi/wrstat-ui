@@ -33,7 +33,6 @@ import (
 	"embed"
 	"io"
 	"sync"
-	"time"
 
 	gas "github.com/wtsi-hgi/go-authserver"
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
@@ -88,9 +87,13 @@ const (
 	// TreePath is the path to the static tree website.
 	TreePath = "/tree"
 
+	DBsUpdated = "/dbsUpdated"
+
 	// EndPointAuthTree is the endpoint for making treemap queries when
 	// authorization is implemented.
 	EndPointAuthTree = gas.EndPointAuth + TreePath
+
+	EndPointAuthDBsUpdated = gas.EndPointAuth + DBsUpdated
 
 	defaultDir = "/"
 	unknown    = "#unknown"
@@ -108,7 +111,7 @@ type Server struct {
 	uidToNameCache map[uint32]string
 	gidToNameCache map[uint32]string
 	userToGIDs     map[string][]string
-	dataTimeStamp  time.Time
+	dataTimeStamp  map[string]int64
 	areas          map[string][]string
 
 	stopCh chan struct{}

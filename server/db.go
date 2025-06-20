@@ -27,6 +27,7 @@ package server
 
 import (
 	"io/fs"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -34,6 +35,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 )
@@ -68,7 +70,7 @@ const ErrNoPaths = basedirs.Error("no db paths found")
 func (s *Server) LoadDBs(basePaths []string, dgutaDBName, basedirDBName, ownersPath string, mounts ...string) error { //nolint:funlen,lll
 	dirgutaPaths, baseDirPaths := JoinDBPaths(basePaths, dgutaDBName, basedirDBName)
 
-	mt, err := s.getLatestTimestamp(dirgutaPaths, baseDirPaths)
+	mts, err := s.getDBTimestamps(baseDirPaths)
 	if err != nil {
 		return err
 	}
@@ -93,7 +95,7 @@ func (s *Server) LoadDBs(basePaths []string, dgutaDBName, basedirDBName, ownersP
 	loaded := s.basedirs != nil
 	s.basedirs = bd
 	s.tree = tree
-	s.dataTimeStamp = mt
+	s.dataTimeStamp = mts
 
 	if !loaded {
 		s.addBaseDGUTARoutes()
@@ -103,40 +105,21 @@ func (s *Server) LoadDBs(basePaths []string, dgutaDBName, basedirDBName, ownersP
 	return nil
 }
 
-func (s *Server) getLatestTimestamp(a, b []string) (time.Time, error) {
-	mt, err := s.getLatestTimestampFromPaths(a)
-	if err != nil {
-		return mt, err
-	}
-
-	nt, err := s.getLatestTimestampFromPaths(b)
-	if err != nil {
-		return mt, err
-	}
-
-	if nt.After(mt) {
-		return nt, nil
-	}
-
-	return mt, nil
-}
-
-func (s *Server) getLatestTimestampFromPaths(paths []string) (time.Time, error) {
-	var lt time.Time
+func (s *Server) getDBTimestamps(paths []string) (map[string]int64, error) {
+	timestamps := make(map[string]int64, len(paths))
 
 	for _, path := range paths {
-		st, err := os.Stat(path)
+		dbDir := filepath.Dir(path)
+
+		st, err := os.Stat(dbDir)
 		if err != nil {
-			return lt, err
+			return nil, err
 		}
 
-		mt := st.ModTime()
-		if mt.After(lt) {
-			lt = mt
-		}
+		timestamps[strings.SplitN(filepath.Base(dbDir), "_", 2)[1]] = st.ModTime().Unix()
 	}
 
-	return lt, nil
+	return timestamps, nil
 }
 
 // EnableDBReloading will periodically scan the basepath for the latest
@@ -221,7 +204,7 @@ func (s *Server) reloadDBs(dgutaDBName, basedirDBName, //nolint:funlen
 	ownersPath string, dbPaths, mounts []string) bool {
 	dirgutaPaths, baseDirPaths := JoinDBPaths(dbPaths, dgutaDBName, basedirDBName)
 
-	mt, err := s.getLatestTimestamp(dirgutaPaths, baseDirPaths)
+	mt, err := s.getDBTimestamps(baseDirPaths)
 	if err != nil {
 		return s.logReloadError("reloading dbs failed: %s", err)
 	}
@@ -381,4 +364,11 @@ func removeAll(baseDirectory string, toDelete []string) error {
 	}
 
 	return nil
+}
+
+func (s *Server) dbUpdateTimestamps(c *gin.Context) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	c.JSON(http.StatusOK, s.dataTimeStamp)
 }

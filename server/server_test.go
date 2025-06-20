@@ -517,18 +517,24 @@ func TestServer(t *testing.T) {
 			err = internaldb.CreateExampleDBsCustomIDsWithDir(t, first, uid, gids[0], gids[1], refTime)
 			So(err, ShouldBeNil)
 
+			So(os.Chtimes(first, time.Unix(refTime, 0), time.Unix(refTime, 0)), ShouldBeNil)
+
 			err = s.EnableDBReloading(tmp, "dirguta", "basedir.db", ownersPath, sentinelPollFrequency, true)
 			So(err, ShouldBeNil)
 
 			dirguta := s.tree
 			basedirs := s.basedirs
-			lastMod := s.dataTimeStamp
+			lastMod := s.dataTimeStamp["keyA"]
+
+			So(len(s.dataTimeStamp), ShouldEqual, 1)
 
 			secondDot := filepath.Join(tmp, ".112_keyB")
 			second := filepath.Join(tmp, "112_keyB")
 
-			err = internaldb.CreateExampleDBsCustomIDsWithDir(t, secondDot, uid, gids[0], gids[1], refTime)
+			err = internaldb.CreateExampleDBsCustomIDsWithDir(t, secondDot, uid, gids[0], gids[1], refTime+10)
 			So(err, ShouldBeNil)
+
+			So(os.Chtimes(secondDot, time.Unix(refTime+10, 0), time.Unix(refTime+10, 0)), ShouldBeNil)
 
 			err = os.Rename(secondDot, second)
 			So(err, ShouldBeNil)
@@ -542,10 +548,10 @@ func TestServer(t *testing.T) {
 					break Loop
 				case <-time.After(time.Millisecond):
 					s.mu.RLock()
-					dataTimeStamp := s.dataTimeStamp
+					dataTimeStamp := s.dataTimeStamp["keyB"]
 					s.mu.RUnlock()
 
-					if dataTimeStamp != lastMod {
+					if dataTimeStamp > lastMod {
 						break Loop
 					}
 				}
@@ -553,7 +559,8 @@ func TestServer(t *testing.T) {
 
 			So(s.tree, ShouldNotEqual, dirguta)
 			So(s.basedirs, ShouldNotEqual, basedirs)
-			So(s.dataTimeStamp, ShouldHappenAfter, lastMod)
+			So(len(s.dataTimeStamp), ShouldEqual, 2)
+			So(s.dataTimeStamp["keyB"], ShouldBeGreaterThan, lastMod)
 
 			thirdDot := filepath.Join(tmp, ".113_keyA")
 			third := filepath.Join(tmp, "113_keyA")
@@ -725,7 +732,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 			err = s.LoadDBs([]string{path}, "dirguta", "basedir.db", ownersPath)
 			So(err, ShouldBeNil)
 
-			s.dataTimeStamp = time.Time{}
+			s.dataTimeStamp = map[string]int64{}
 
 			s.gidToNameCache[1] = "GroupA"
 			s.gidToNameCache[2] = "GroupB"
@@ -887,7 +894,6 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 					Users:       users,
 					Groups:      groups,
 					FileTypes:   expectedFTs,
-					TimeStamp:   "0001-01-01T00:00:00Z",
 					HasChildren: true,
 					Children: []*TreeElement{
 						{
@@ -900,7 +906,6 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 							Users:       users,
 							Groups:      groups,
 							FileTypes:   expectedFTs,
-							TimeStamp:   "0001-01-01T00:00:00Z",
 							HasChildren: true,
 							Children:    nil,
 						},
@@ -914,7 +919,6 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 							Users:       []string{username},
 							Groups:      []string{unsortedGroups[1]},
 							FileTypes:   []string{"cram", "dir"},
-							TimeStamp:   "0001-01-01T00:00:00Z",
 							HasChildren: false,
 							Children:    nil,
 						},
@@ -946,7 +950,6 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 					Users:       users,
 					Groups:      []string{g.Name},
 					FileTypes:   expectedFTs,
-					TimeStamp:   "0001-01-01T00:00:00Z",
 					HasChildren: true,
 					Children: []*TreeElement{
 						{
@@ -959,7 +962,6 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 							Users:       users,
 							Groups:      []string{g.Name},
 							FileTypes:   expectedFTs,
-							TimeStamp:   "0001-01-01T00:00:00Z",
 							HasChildren: true,
 							Children:    nil,
 						},
@@ -994,7 +996,6 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 					Users:       users,
 					Groups:      groups,
 					FileTypes:   expectedFTs,
-					TimeStamp:   "0001-01-01T00:00:00Z",
 					HasChildren: true,
 					Children: []*TreeElement{
 						{
@@ -1007,7 +1008,6 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 							Users:       users,
 							Groups:      abgroups,
 							FileTypes:   expectedFTs,
-							TimeStamp:   "0001-01-01T00:00:00Z",
 							HasChildren: true,
 							Children:    nil,
 						},
@@ -1021,7 +1021,6 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 							Users:       []string{"root"},
 							Groups:      acgroups,
 							FileTypes:   cramAndDir,
-							TimeStamp:   "0001-01-01T00:00:00Z",
 							HasChildren: true,
 							Children:    nil,
 						},
@@ -1055,7 +1054,6 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 					Users:       users,
 					Groups:      dgroups,
 					FileTypes:   cramAndDir,
-					TimeStamp:   "0001-01-01T00:00:00Z",
 					HasChildren: true,
 					NoAuth:      false,
 					Children: []*TreeElement{
@@ -1069,7 +1067,6 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 							Users:       []string{username},
 							Groups:      []string{g.Name},
 							FileTypes:   cramAndDir,
-							TimeStamp:   "0001-01-01T00:00:00Z",
 							HasChildren: false,
 							Children:    nil,
 							NoAuth:      false,
@@ -1084,7 +1081,6 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 							Users:       users,
 							Groups:      []string{g.Name},
 							FileTypes:   cramAndDir,
-							TimeStamp:   "0001-01-01T00:00:00Z",
 							HasChildren: false,
 							Children:    nil,
 							NoAuth:      false,
@@ -1099,7 +1095,6 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 							Users:       root,
 							Groups:      root,
 							FileTypes:   cramAndDir,
-							TimeStamp:   "0001-01-01T00:00:00Z",
 							HasChildren: true,
 							Children:    nil,
 							NoAuth:      true,
@@ -1129,7 +1124,6 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 					Users:       root,
 					Groups:      root,
 					FileTypes:   cramAndDir,
-					TimeStamp:   "0001-01-01T00:00:00Z",
 					HasChildren: true,
 					Children:    nil,
 					NoAuth:      true,

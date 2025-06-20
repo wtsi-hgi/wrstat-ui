@@ -75,6 +75,7 @@ func (s *Server) AddTreePage() error {
 	})
 
 	authGroup.GET(TreePath, s.getTree)
+	authGroup.GET(DBsUpdated, s.dbUpdateTimestamps)
 
 	return nil
 }
@@ -132,7 +133,6 @@ type TreeElement struct {
 	FileTypes   []string            `json:"filetypes"`
 	HasChildren bool                `json:"has_children"`
 	Children    []*TreeElement      `json:"children,omitempty"`
-	TimeStamp   string              `json:"timestamp"`
 	Areas       map[string][]string `json:"areas"`
 	NoAuth      bool                `json:"noauth"`
 }
@@ -216,7 +216,6 @@ func (s *Server) ddsToTreeElement(dds *db.DirSummary, allowedGIDs map[uint32]boo
 		Users:     s.uidsToUsernames(dds.UIDs),
 		Groups:    s.gidsToNames(dds.GIDs),
 		FileTypes: s.ftsToNames(dds.FTs),
-		TimeStamp: timeToJavascriptDate(s.dataTimeStamp),
 		NoAuth:    areDisjoint(allowedGIDs, dds.GIDs),
 	}
 }
