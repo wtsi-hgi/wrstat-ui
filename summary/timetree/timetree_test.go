@@ -33,13 +33,9 @@ func TestTimeTree(t *testing.T) {
 
 		var treeDB bytes.Buffer
 
-		complete := make(chan struct{})
-
-		s.AddDirectoryOperation(NewTimeTree(&treeDB, complete))
+		s.AddDirectoryOperation(NewTimeTree(&treeDB))
 
 		So(s.Summarise(), ShouldBeNil)
-
-		<-complete
 
 		tr, err := tree.OpenMem(treeDB.Bytes())
 		So(err, ShouldBeNil)

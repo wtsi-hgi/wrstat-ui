@@ -90,18 +90,12 @@ func buildTree(files []timeFile, output string) error {
 		return err
 	}
 
-	complete := make(chan struct{})
-
 	buf := bufio.NewWriter(w)
 
 	s := summary.NewSummariser(stats.NewStatsParser(r))
-	s.AddDirectoryOperation(timetree.NewTimeTree(buf, complete))
+	s.AddDirectoryOperation(timetree.NewTimeTree(buf))
 
-	err = s.Summarise()
-
-	<-complete
-
-	if err != nil {
+	if err = s.Summarise(); err != nil {
 		return err
 	}
 

@@ -3,6 +3,7 @@ package timetree
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"iter"
 	"slices"
@@ -12,13 +13,12 @@ import (
 	"vimagination.zapto.org/tree"
 )
 
-func NewTimeTree(w io.Writer, complete chan struct{}) summary.OperationGenerator {
+func NewTimeTree(w io.Writer) summary.OperationGenerator {
 	ctx, cancel := context.WithCancelCause(context.Background())
 	next := newNode(ctx)
 
 	go func(node *Node) {
 		cancel(tree.Serialise(w, node))
-		close(complete)
 	}(next)
 
 	return func() summary.Operation {
@@ -122,11 +122,21 @@ func (n *Node) Output() error {
 		}
 	}
 
+	var err error
+
+	if n.path.Parent == nil {
+		<-n.ctx.Done()
+
+		if err = context.Cause(n.ctx); errors.Is(err, context.Canceled) {
+			err = nil
+		}
+	}
+
 	n.path = nil
 	clear(n.users)
 	clear(n.groups)
 
-	return nil
+	return err
 }
 
 func (n *Node) Children() iter.Seq2[string, tree.Node] {
