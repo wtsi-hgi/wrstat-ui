@@ -39,6 +39,11 @@ const auth = ready.then(Auth),
 	now = Date.now(),
 	day = 86_400_000,
 	nullDate = "0001-01-01T00:00:00Z",
+	stringSort = new Intl.Collator().compare,
+	timestampFormatter = new Intl.DateTimeFormat("en-GB", {
+		dateStyle: "long",
+		timeStyle: "long",
+	}),
 	daysUntilQuotaFull = (date: string) => (new Date(date).valueOf() - now) / day;
 
 auth.catch(() => createRoot(document.body).render(<StrictMode>
@@ -72,9 +77,10 @@ auth.then(username => Promise.all([
 		return gud;
 	}),
 	RPC.getUserUsageData(0),
-	RPC.getChildren({ path: "/" })
+	RPC.getChildren({ path: "/" }),
+	RPC.getDBTimestamps()
 ]))
-	.then(([username, groupUsage, userUsage, { areas, timestamp }]) => createRoot(document.body.firstElementChild!).render(<StrictMode>
+	.then(([username, groupUsage, userUsage, { areas }, timestamps]) => createRoot(document.body.firstElementChild!).render(<StrictMode>
 		<svg xmlns="http://www.w3.org/2000/svg" style={{ width: 0, height: 0 }}>
 			<symbol id="ok" viewBox="0 0 100 100">
 				<circle cx="50" cy="50" r="45" stroke="currentColor" fill="none" strokeWidth="10" />
@@ -100,6 +106,6 @@ auth.then(username => Promise.all([
 
 			logout();
 		}}>Logout</button></div>
-		<div id="timestamp" title={timestamp}>Database updated: {approxTimeAgo(timestamp)}</div>
+		<div id="timestamp" data-timestamps={Object.entries(timestamps).sort(([a], [b]) => stringSort(a, b)).map(([db, lastUpdated]) => `${db.replaceAll("／", "/")}: ${timestampFormatter.format(new Date(lastUpdated * 1000))}`).join("\n")}>Database updated: {approxTimeAgo(1000 * Math.max(...Object.values(timestamps)))}</div>
 		<App groupUsage={groupUsage} userUsage={userUsage} areas={areas} />
-	</StrictMode>));
+	</StrictMode >));

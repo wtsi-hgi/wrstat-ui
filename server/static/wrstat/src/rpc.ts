@@ -46,7 +46,6 @@ export type Child = {
 	filetypes: string[];
 	has_children: boolean;
 	children: Child[];
-	timestamp: string;
 	areas: Record<string, string[]>;
 	noauth: boolean;
 }
@@ -89,6 +88,7 @@ export type History = {
 
 const endpointREST = "/rest/v1/auth",
 	treeURL = endpointREST + "/tree",
+	dbTimestampsURL = endpointREST + "/dbsUpdated",
 	groupUsageURL = endpointREST + "/basedirs/usage/groups",
 	userUsageURL = endpointREST + "/basedirs/usage/users",
 	groupSubDirPathURL = endpointREST + "/basedirs/subdirs/group",
@@ -137,6 +137,7 @@ const cache = new Map<string, string>(),
 
 const RPC = {
 	"getChildren": (filter: ChildFilter) => getURL<Child>(treeURL, filter),
+	"getDBTimestamps": () => getURL<Record<string, number>>(dbTimestampsURL),
 	"getGroupUsageData": (age: number) => getURL<Usage[]>(groupUsageURL, { age }),
 	"getUserUsageData": (age: number) => getURL<Usage[]>(userUsageURL, { age }),
 	"getBasedirsGroupSubdirs": (id: number, basedir: string, age: number) => getURL<SubDir[]>(groupSubDirPathURL, { id, basedir, age }),
