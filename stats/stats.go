@@ -63,6 +63,8 @@ type StatsParser struct { //nolint:revive
 	lineBytes    []byte
 	lineLength   int
 	lineIndex    int
+	lastPath     []byte
+	indexes      []int
 	path         []byte
 	size         int64
 	apparentSize int64
@@ -119,6 +121,10 @@ func NewStatsParser(r io.Reader) *StatsParser {
 // that occurred during scanning, except that if it was io.EOF, Err will return
 // nil.
 func (p *StatsParser) Scan(info *FileInfo) error {
+	if p.fillMissingOrFullInfo(info) {
+		return nil
+	}
+
 	keepGoing := p.scanner.Scan()
 	if !keepGoing {
 		return io.EOF
@@ -128,7 +134,104 @@ func (p *StatsParser) Scan(info *FileInfo) error {
 		return p.error
 	}
 
-	info.Path = unquote(p.path)
+	return p.fillInfo(info)
+}
+
+func (p *StatsParser) fillInfo(info *FileInfo) error {
+	if p.lastPath != nil {
+		if splitPoint := findMatchingPathPrefix(p.lastPath, p.path); splitPoint != -1 {
+			p.setMissingIndexes(splitPoint)
+
+			p.lastPath = append(p.lastPath[:0], p.path...)
+
+			p.fillMissingOrFullInfo(info)
+
+			return nil
+		}
+	}
+
+	p.lastPath = append(p.lastPath[:0], p.path...)
+
+	p.fillFullInfo(info)
+
+	return nil
+}
+
+func findMatchingPathPrefix(last, curr []byte) int {
+	lastSlash := 0
+	currSlash := 0
+
+	for {
+		lnSlash := bytes.IndexByte(last[lastSlash:], '/')
+		cnSlash := bytes.IndexByte(curr[currSlash:], '/')
+
+		if cnSlash == -1 {
+			return -1
+		}
+
+		if lnSlash == -1 {
+			lnSlash = len(last)
+		} else {
+			lnSlash += lastSlash
+		}
+
+		cnSlash += currSlash
+
+		if !bytes.Equal(last[lastSlash:lnSlash], curr[currSlash:cnSlash]) {
+			return currSlash
+		}
+
+		lastSlash = lnSlash + 1
+		currSlash = cnSlash + 1
+	}
+}
+
+func (p *StatsParser) setMissingIndexes(currSlash int) {
+	last := len(p.path)
+	p.indexes = append(p.indexes, last)
+
+	for {
+		idx := bytes.LastIndexByte(p.path[:last-1], '/')
+		if idx == -1 || idx <= currSlash {
+			break
+		}
+
+		last = idx
+
+		p.indexes = append(p.indexes, idx+1)
+	}
+}
+
+func (p *StatsParser) fillMissingOrFullInfo(info *FileInfo) bool {
+	if len(p.indexes) == 0 {
+		return false
+	}
+
+	info.Path = p.path[:p.indexes[len(p.indexes)-1]]
+
+	info.UID = uint32(p.uid) //nolint:gosec
+	info.GID = uint32(p.gid) //nolint:gosec
+	info.MTime = p.mtime
+	info.ATime = p.atime
+	info.CTime = p.ctime
+
+	if p.indexes = p.indexes[:len(p.indexes)-1]; len(p.indexes) == 0 {
+		info.Size = p.size
+		info.ApparentSize = p.apparentSize
+		info.EntryType = p.entryType
+		info.Inode = p.inode
+	} else {
+		info.Size = 0
+		info.ApparentSize = 0
+		info.EntryType = DirType
+		info.Inode = 0
+	}
+
+	return true
+}
+
+func (p *StatsParser) fillFullInfo(info *FileInfo) {
+	info.Path = p.path
 	info.Size = p.size
 	info.ApparentSize = p.apparentSize
 	info.UID = uint32(p.uid) //nolint:gosec
@@ -138,8 +241,6 @@ func (p *StatsParser) Scan(info *FileInfo) error {
 	info.CTime = p.ctime
 	info.EntryType = p.entryType
 	info.Inode = p.inode
-
-	return nil
 }
 
 func unquote(path []byte) []byte { //nolint:funlen,gocognit,gocyclo,cyclop
@@ -231,6 +332,8 @@ func (p *StatsParser) parseLine() bool {
 	if !ok {
 		return false
 	}
+
+	p.path = unquote(p.path)
 
 	if !p.parseColumns2to7() {
 		return false
