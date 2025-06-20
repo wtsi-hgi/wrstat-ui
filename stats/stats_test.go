@@ -29,6 +29,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -70,9 +71,36 @@ func TestParseStats(t *testing.T) {
 
 			numLines := strings.Count(sb.String(), "\n")
 
-			So(i, ShouldEqual, numLines)
-
 			So(p.Err(), ShouldBeNil)
+			So(i, ShouldEqual, numLines)
+		})
+
+		Convey("Missing directories are re-inserted", func() {
+			info := new(FileInfo)
+
+			var files []string
+
+			for p.Scan(info) == nil {
+				files = append(files, string(info.Path))
+			}
+
+			lines := strings.Split(sb.String(), "\n")
+
+			lines = slices.Delete(lines, 580, 581)
+			lines = slices.Delete(lines, 33, 35)
+			lines = slices.Delete(lines, 7, 8)
+			lines = slices.Delete(lines, 1, 3)
+
+			p = NewStatsParser(strings.NewReader(strings.Join(lines, "\n")))
+
+			for p.Scan(info) == nil {
+				So(files, ShouldNotBeEmpty)
+				So(string(info.Path), ShouldEqual, files[0])
+
+				files = files[1:]
+			}
+
+			So(files, ShouldBeEmpty)
 		})
 	})
 
