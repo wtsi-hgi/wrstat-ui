@@ -40,7 +40,11 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/db"
 )
 
-const ErrNoPaths = basedirs.Error("no db paths found")
+const (
+	ErrNoPaths    = basedirs.Error("no db paths found")
+	numDBDirParts = 2
+	keyPart       = 1
+)
 
 // LoadDBs loads dirguta and basedir databases from the given
 // directory/directories, and adds the relevant endpoints to the REST API.
@@ -116,7 +120,7 @@ func (s *Server) getDBTimestamps(paths []string) (map[string]int64, error) {
 			return nil, err
 		}
 
-		timestamps[strings.SplitN(filepath.Base(dbDir), "_", 2)[1]] = st.ModTime().Unix()
+		timestamps[strings.SplitN(filepath.Base(dbDir), "_", numDBDirParts)[keyPart]] = st.ModTime().Unix()
 	}
 
 	return timestamps, nil
@@ -328,7 +332,7 @@ func entryExists(path string) bool {
 }
 
 func addEntryToMap(entry fs.DirEntry, latest map[string]nameVersion, toDelete []string) []string {
-	parts := strings.SplitN(entry.Name(), "_", 2) //nolint:mnd
+	parts := strings.SplitN(entry.Name(), "_", numDBDirParts)
 	key := parts[1]
 
 	version := parts[0]
