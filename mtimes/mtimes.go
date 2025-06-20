@@ -2,13 +2,11 @@ package mtimes
 
 import (
 	"bufio"
-	"bytes"
 	"compress/gzip"
 	"errors"
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/klauspost/pgzip"
@@ -78,8 +76,6 @@ func readFirstPath(f io.Reader) (string, error) {
 }
 
 func buildTree(files []timeFile, output string) error {
-	sortFiles(files)
-
 	r, err := mergeFiles(files)
 	if err != nil {
 		return err
@@ -109,61 +105,21 @@ func sortFiles(files []timeFile) {
 }
 
 func mergeFiles(files []timeFile) (io.Reader, error) {
-	added := make(map[string]struct{})
+	sortFiles(files)
+
 	readers := make([]io.Reader, 0, len(files))
 
-	for n, file := range files {
-		for _, pfile := range files[:n] {
-			if strings.HasPrefix(file.path, pfile.path) {
-				return nil, ErrBadMerge
-			}
-		}
+	if files[0].path != "/" {
+		readers = append(readers, strings.NewReader("\"/\"\t0\t0\t0\t0\t0\t0\td\t0\t1\t1\t0\n"))
+	}
 
-		toAdd := unboundParents(file.path, added)
-
-		if len(toAdd) > 0 {
-			var buf bytes.Buffer
-
-			writeLines(&buf, toAdd)
-
-			readers = append(readers, &buf)
-		}
-
+	for _, file := range files {
 		readers = append(readers, file.Reader)
 	}
 
 	return io.MultiReader(readers...), nil
 }
 
-func unboundParents(path string, added map[string]struct{}) []string {
-	toAdd := make([]string, 0)
-
-	for parent := filepath.Dir(strings.TrimSuffix(path, "/")); ; parent = filepath.Dir(parent) {
-		if _, ok := added[parent]; ok {
-			break
-		}
-
-		added[parent] = struct{}{}
-
-		if parent == "/" {
-			toAdd = append(toAdd, parent)
-		} else {
-			toAdd = append(toAdd, parent+"/")
-		}
-	}
-
-	return toAdd
-}
-
-func writeLines(w io.Writer, toAdd []string) {
-	slices.Reverse(toAdd)
-
-	for _, line := range toAdd {
-		fmt.Fprintf(w, "%q\t0\t0\t0\t0\t0\t0\td\t0\t1\t1\t0\n", line)
-	}
-}
-
 var (
-	ErrBadMerge = errors.New("can not merge file that is a subdirectory of another file")
-	ErrNoFiles  = errors.New("no files supplied")
+	ErrNoFiles = errors.New("no files supplied")
 )
