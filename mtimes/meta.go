@@ -110,6 +110,10 @@ type IDTime struct {
 	Time int64
 }
 
+func (i IDTime) compare(j IDTime) int {
+	return int(i.ID) - int(j.ID)
+}
+
 func readArray(lr *byteio.StickyLittleEndianReader) []IDTime {
 	idts := make([]IDTime, lr.ReadUintX())
 
