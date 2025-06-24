@@ -30,11 +30,23 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/mtimes"
 )
 
-var mtimesCmd = &cobra.Command{
-	Use:   "mtimes",
-	Short: "",
-	Long:  ``,
+var mtDBCmd = &cobra.Command{
+	Use:   "mtdb",
+	Short: "generate an mtime tree database",
+	Long: `generate an mtime tree database to be queried with the mtquery subcommand
+
+	
+Input files can either be specified directly, with the paths to the stats.gz
+files created by wrstat, or a directory can be specified that will be searched
+for stats.gz files in the same manner as the server and watch commands.
+
+Also requires an output file, specified with the --output/-o flag.
+	`,
 	Run: func(_ *cobra.Command, args []string) {
+		if output == "" {
+			die("require --output file")
+		}
+
 		files, err := parseFiles(args)
 		if err != nil {
 			die("%s", err)
@@ -47,7 +59,7 @@ var mtimesCmd = &cobra.Command{
 }
 
 func init() {
-	RootCmd.AddCommand(mtimesCmd)
+	RootCmd.AddCommand(mtDBCmd)
 
-	mtimesCmd.Flags().StringVarP(&output, "output", "o", "-", "file to output possible duplicate file data")
+	mtDBCmd.Flags().StringVarP(&output, "output", "o", "-", "file to output mtime tree")
 }
