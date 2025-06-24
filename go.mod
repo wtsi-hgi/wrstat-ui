@@ -25,6 +25,7 @@ require (
 	vimagination.zapto.org/httpfile v1.0.0
 	vimagination.zapto.org/parser v1.1.1
 	vimagination.zapto.org/rwcount v1.1.1
+	vimagination.zapto.org/tree v1.2.0
 	vimagination.zapto.org/tsserver v1.0.11
 )
 
@@ -161,7 +162,6 @@ require (
 	nanomsg.org/go-mangos v1.4.0 // indirect
 	vimagination.zapto.org/httpencoding v1.0.0 // indirect
 	vimagination.zapto.org/javascript v1.4.15 // indirect
-	vimagination.zapto.org/tree v1.2.0 // indirect
 )
 
 // we need to specify these due to github.com/VertebrateResequencing/wr's deps
