@@ -178,6 +178,14 @@ func (l *logAnalyzer) loadDir(dir string) error {
 		return nil
 	}
 
+	if jobs, err := os.Open(filepath.Join(dir, "jobs")); err == nil {
+		defer jobs.Close()
+
+		if err = d.loadJobsData(jobs); err != nil {
+			return err
+		}
+	}
+
 	l.setData(name, d)
 
 	slog.Info("loaded logs", "path", name)

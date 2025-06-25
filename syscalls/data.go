@@ -26,6 +26,7 @@
 package syscalls
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -222,6 +223,34 @@ func (d *data) parseErrorLine(line [][2]string) error {
 	}
 
 	d.Errors = append(d.Errors, event)
+
+	return nil
+}
+
+type Job struct {
+	ID        string    `json:"ReqGroup"`
+	StartTime time.Time `json:"StartTime"`
+	EndTime   time.Time `json:"EndTime"`
+	Host      string    `json:"Host"`
+}
+
+func (d *data) loadJobsData(r io.Reader) error {
+	var jobs []Job
+
+	if err := json.NewDecoder(r).Decode(&jobs); err != nil {
+		return err
+	}
+
+	for _, job := range jobs {
+		if !job.StartTime.IsZero() && job.EndTime.IsZero() {
+			d.Errors = append(d.Errors, Error{
+				Time:    job.StartTime.Unix(),
+				Message: "Timeout: " + job.ID,
+				File:    "jobs",
+				Host:    job.Host,
+			})
+		}
+	}
 
 	return nil
 }
