@@ -2,6 +2,9 @@ package backups
 
 import (
 	"errors"
+	"unsafe"
+
+	"github.com/wtsi-hgi/wrstat-ui/summary"
 )
 
 var (
@@ -36,14 +39,24 @@ func NewState(state uint32, line *Line) State {
 
 type StateMachine []State
 
-func (s StateMachine) GetLine(path []byte) *Line {
-	state := uint32(1)
+func (s StateMachine) GetLine(info *summary.FileInfo) *Line {
+	return s[s.getState(s.getPathState(info.Path), info.Name)].Line
+}
 
+func (s StateMachine) getPathState(path *summary.DirectoryPath) uint32 {
+	if path == nil {
+		return 1
+	}
+
+	return s.getState(s.getPathState(path.Parent), unsafe.Slice(unsafe.StringData(path.Name), len(path.Name)))
+}
+
+func (s StateMachine) getState(state uint32, path []byte) uint32 {
 	for _, c := range path {
 		state = s[state].chars[c]
 	}
 
-	return s[state].Line
+	return state
 }
 
 type lineBytes struct {
