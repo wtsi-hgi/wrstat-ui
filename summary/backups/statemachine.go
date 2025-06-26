@@ -51,65 +51,53 @@ type lineBytes struct {
 	directory []byte
 }
 
-func (s *StateMachine) build(lines []*Line, state, loopState uint32) error {
-	ct, wild, err := s.buildCharTable(lines, state)
+func (s *StateMachine) build(lines []*Line, state uint32) error {
+	ct, err := s.buildCharTable(lines, state)
 	if err != nil {
 		return err
 	}
 
-	if err := s.buildChildren(ct, state, loopState); err != nil {
+	if err := s.buildChildren(ct, state); err != nil {
 		return err
 	}
 
-	return s.buildWildcards(wild, state, loopState)
+	s.buildWildcards(state)
+
+	return nil
 }
 
-func (s StateMachine) buildCharTable(lines []*Line, state uint32) (ct [256][]*Line, wild []lineBytes, err error) {
+func (s StateMachine) buildCharTable(lines []*Line, state uint32) (ct [256][]*Line, err error) {
 	ended := false
 
 	for _, line := range lines {
 		if len(line.Path) == 0 {
 			if ended {
-				return ct, nil, ErrAmbiguous
+				return ct, ErrAmbiguous
 			}
 
 			ended = true
 			s[state].Line = line
-
 		} else {
-
 			b := line.shiftPath()
-
-			if b == '*' {
-				wild = append(wild, lineBytes{line, line.Path})
-
-				if len(line.Path) > 0 {
-					b = line.shiftPath()
-				} else if !ended {
-					s[state].Line = line
-				}
-			}
-
-			if b != '*' {
-				ct[b] = append(ct[b], line)
-			}
+			ct[b] = append(ct[b], line)
 		}
 	}
 
-	return ct, wild, nil
+	return ct, nil
 }
 
-func (s *StateMachine) buildChildren(ct [256][]*Line, state, loopState uint32) error {
+func (s *StateMachine) buildChildren(ct [256][]*Line, state uint32) error {
 	for c, lines := range ct {
 		if len(lines) == 0 {
 			continue
 		}
 
 		nextState := uint32(len(*s))
-		(*s)[state].chars[c] = nextState
-		*s = append(*s, NewState(loopState, (*s)[state].Line))
 
-		if err := s.build(lines, nextState, loopState); err != nil {
+		(*s)[state].chars[c] = nextState
+		*s = append(*s, State{Line: (*s)[state].Line})
+
+		if err := s.build(lines, nextState); err != nil {
 			return err
 		}
 	}
@@ -117,31 +105,36 @@ func (s *StateMachine) buildChildren(ct [256][]*Line, state, loopState uint32) e
 	return nil
 }
 
-func (s *StateMachine) buildWildcards(wild []lineBytes, state, loopState uint32) error {
-	if len(wild) == 0 {
-		return nil
+func (s *StateMachine) buildWildcards(state uint32) {
+	newState := (*s)[state].chars['*']
+
+	if newState == 0 {
+		return
 	}
 
-	newLoopState := uint32(len(*s))
-	*s = append(*s, NewState(newLoopState, (*s)[state].Line))
-
-	wildLines := make([]*Line, len(wild))
-
-	for n, w := range wild {
-		w.line.Path = w.directory
-		wildLines[n] = w.line
-	}
-
-	if err := s.build(wildLines, newLoopState, newLoopState); err != nil {
-		return err
-	}
-
-	s.fillState(state, loopState, newLoopState, (*s)[newLoopState].Line, make(map[uint32]struct{}))
-
-	return nil
+	s.merge(state, newState, newState, make(map[uint32]struct{}))
+	s.fillState(state, newState, (*s)[state].Line, make(map[uint32]struct{}))
 }
 
-func (s StateMachine) fillState(state, oldLoopState, newLoopState uint32, line *Line, done map[uint32]struct{}) {
+func (s *StateMachine) merge(state, oldLoopState, loopState uint32, done map[uint32]struct{}) {
+	done[state] = struct{}{}
+	sc := &(*s)[state]
+	nsc := (*s)[loopState]
+
+	if sc.Line == nil {
+		sc.Line = nsc.Line
+	}
+
+	for c, child := range sc.chars {
+		if child == 0 {
+			sc.chars[c] = (*s)[oldLoopState].chars[c]
+		} else if _, ok := done[child]; !ok {
+			s.merge(child, oldLoopState, nsc.chars[c], done)
+		}
+	}
+}
+
+func (s StateMachine) fillState(state, loopState uint32, line *Line, done map[uint32]struct{}) {
 	done[state] = struct{}{}
 	sc := &s[state]
 	chars := &sc.chars
@@ -150,11 +143,11 @@ func (s StateMachine) fillState(state, oldLoopState, newLoopState uint32, line *
 		sc.Line = line
 	}
 
-	for n, cs := range chars {
-		if cs == 0 || cs == oldLoopState {
-			chars[n] = newLoopState
-		} else if _, ok := done[cs]; !ok {
-			s.fillState(cs, oldLoopState, newLoopState, line, done)
+	for n, child := range chars {
+		if child == 0 {
+			chars[n] = loopState
+		} else if _, ok := done[child]; !ok {
+			s.fillState(child, loopState, line, done)
 		}
 	}
 }
@@ -162,7 +155,7 @@ func (s StateMachine) fillState(state, oldLoopState, newLoopState uint32, line *
 func NewStatemachine(lines []*Line) (StateMachine, error) {
 	states := make(StateMachine, 2, 1024)
 
-	if err := states.build(lines, 1, 0); err != nil {
+	if err := states.build(lines, 1); err != nil {
 		return nil, err
 	}
 
