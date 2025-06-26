@@ -8,7 +8,7 @@ import (
 
 func TestStateMachine(t *testing.T) {
 	Convey("With a compiled state machine", t, func() {
-		lines := []*line{
+		lines := []*Line{
 			{
 				Path:   []byte("/some/path/*"),
 				action: actionBackup,

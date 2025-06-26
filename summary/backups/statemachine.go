@@ -20,11 +20,11 @@ const (
 
 type State struct {
 	chars [256]uint32
-	*line
+	*Line
 }
 
-func NewState(state uint32, line *line) State {
-	s := State{line: line}
+func NewState(state uint32, line *Line) State {
+	s := State{Line: line}
 
 	if state != 0 {
 		for n := range s.chars {
@@ -35,51 +35,24 @@ func NewState(state uint32, line *line) State {
 	return s
 }
 
-type line struct {
-	Path []byte
-	action
-	reporter string
-	name     string
-	root     string
-}
-
-func (l *line) Action() action {
-	if l == nil {
-		return actionWarn
-	}
-
-	return l.action
-}
-
-func (l *line) shiftPath() byte {
-	if len(l.Path) == 0 {
-		return 0
-	}
-
-	b := l.Path[0]
-	l.Path = l.Path[1:]
-
-	return b
-}
-
 type StateMachine []State
 
-func (s StateMachine) GetLine(path string) *line {
+func (s StateMachine) GetLine(path string) *Line {
 	state := uint32(1)
 
 	for _, c := range unsafe.Slice(unsafe.StringData(path), len(path)) {
 		state = s[state].chars[c]
 	}
 
-	return s[state].line
+	return s[state].Line
 }
 
 type lineBytes struct {
-	line      *line
+	line      *Line
 	directory []byte
 }
 
-func (s *StateMachine) build(lines []*line, state, loopState uint32) error {
+func (s *StateMachine) build(lines []*Line, state, loopState uint32) error {
 	ct, wild, err := s.buildCharTable(lines, state)
 	if err != nil {
 		return err
@@ -92,7 +65,7 @@ func (s *StateMachine) build(lines []*line, state, loopState uint32) error {
 	return s.buildWildcards(wild, state, loopState)
 }
 
-func (s StateMachine) buildCharTable(lines []*line, state uint32) (ct [256][]*line, wild []lineBytes, err error) {
+func (s StateMachine) buildCharTable(lines []*Line, state uint32) (ct [256][]*Line, wild []lineBytes, err error) {
 	ended := false
 
 	for _, line := range lines {
@@ -102,7 +75,7 @@ func (s StateMachine) buildCharTable(lines []*line, state uint32) (ct [256][]*li
 			}
 
 			ended = true
-			s[state].line = line
+			s[state].Line = line
 
 		} else {
 
@@ -114,7 +87,7 @@ func (s StateMachine) buildCharTable(lines []*line, state uint32) (ct [256][]*li
 				if len(line.Path) > 0 {
 					b = line.shiftPath()
 				} else if !ended {
-					s[state].line = line
+					s[state].Line = line
 				}
 			}
 
@@ -127,7 +100,7 @@ func (s StateMachine) buildCharTable(lines []*line, state uint32) (ct [256][]*li
 	return ct, wild, nil
 }
 
-func (s *StateMachine) buildChildren(ct [256][]*line, state, loopState uint32) error {
+func (s *StateMachine) buildChildren(ct [256][]*Line, state, loopState uint32) error {
 	for c, lines := range ct {
 		if len(lines) == 0 {
 			continue
@@ -135,7 +108,7 @@ func (s *StateMachine) buildChildren(ct [256][]*line, state, loopState uint32) e
 
 		nextState := uint32(len(*s))
 		(*s)[state].chars[c] = nextState
-		*s = append(*s, NewState(loopState, (*s)[state].line))
+		*s = append(*s, NewState(loopState, (*s)[state].Line))
 
 		if err := s.build(lines, nextState, loopState); err != nil {
 			return err
@@ -151,9 +124,9 @@ func (s *StateMachine) buildWildcards(wild []lineBytes, state, loopState uint32)
 	}
 
 	newLoopState := uint32(len(*s))
-	*s = append(*s, NewState(newLoopState, (*s)[state].line))
+	*s = append(*s, NewState(newLoopState, (*s)[state].Line))
 
-	wildLines := make([]*line, len(wild))
+	wildLines := make([]*Line, len(wild))
 
 	for n, w := range wild {
 		w.line.Path = w.directory
@@ -164,18 +137,18 @@ func (s *StateMachine) buildWildcards(wild []lineBytes, state, loopState uint32)
 		return err
 	}
 
-	s.fillState(state, loopState, newLoopState, (*s)[newLoopState].line, make(map[uint32]struct{}))
+	s.fillState(state, loopState, newLoopState, (*s)[newLoopState].Line, make(map[uint32]struct{}))
 
 	return nil
 }
 
-func (s StateMachine) fillState(state, oldLoopState, newLoopState uint32, line *line, done map[uint32]struct{}) {
+func (s StateMachine) fillState(state, oldLoopState, newLoopState uint32, line *Line, done map[uint32]struct{}) {
 	done[state] = struct{}{}
 	sc := &s[state]
 	chars := &sc.chars
 
-	if sc.line == nil {
-		sc.line = line
+	if sc.Line == nil {
+		sc.Line = line
 	}
 
 	for n, cs := range chars {
@@ -187,7 +160,7 @@ func (s StateMachine) fillState(state, oldLoopState, newLoopState uint32, line *
 	}
 }
 
-func NewStatemachine(lines []*line) (StateMachine, error) {
+func NewStatemachine(lines []*Line) (StateMachine, error) {
 	states := make(StateMachine, 2, 1024)
 
 	if err := states.build(lines, 1, 0); err != nil {
