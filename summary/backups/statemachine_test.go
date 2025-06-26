@@ -10,24 +10,24 @@ func TestStateMachine(t *testing.T) {
 	Convey("With a compiled state machine", t, func() {
 		lines := []*Line{
 			{
-				Path:   []byte("/some/path/*"),
-				action: actionBackup,
+				Path: []byte("/some/path/*"),
+				name: "line[0]",
 			},
 			{
-				Path:   []byte("/some/path/temp-*"),
-				action: actionTempBackup,
+				Path: []byte("/some/path/temp-*"),
+				name: "line[1]",
 			},
 			{
-				Path:   []byte("/some/path/noBackup/*"),
-				action: actionNoBackup,
+				Path: []byte("/some/path/noBackup/*"),
+				name: "line[2]",
 			},
 			{
-				Path:   []byte("/some/other/path/*.txt"),
-				action: actionBackup,
+				Path: []byte("/some/other/path/*.txt"),
+				name: "line[3]",
 			},
 			{
-				Path:   []byte("/some/other/path/*.tsv*"),
-				action: actionTempBackup,
+				Path: []byte("/some/other/path/*.tsv*"),
+				name: "line[4]",
 			},
 		}
 
@@ -45,11 +45,17 @@ func TestStateMachine(t *testing.T) {
 			So(sm.GetLine([]byte("/some/path/noBackup/someFile")), ShouldEqual, lines[2])
 			So(sm.GetLine([]byte("/some/other/path/file")), ShouldEqual, nil)
 			So(sm.GetLine([]byte("/some/other/path/file.txt")), ShouldEqual, lines[3])
+			So(sm.GetLine([]byte("/some/other/path/file.txta.txt")), ShouldEqual, lines[3])
 			So(sm.GetLine([]byte("/some/other/path/subdir/file.txt")), ShouldEqual, lines[3])
 			So(sm.GetLine([]byte("/some/other/path/subdir/file.txts")), ShouldEqual, nil)
 			So(sm.GetLine([]byte("/some/other/path/subdir/.tsv")), ShouldEqual, lines[4])
 			So(sm.GetLine([]byte("/some/other/path/subdir/b.tsv")), ShouldEqual, lines[4])
 			So(sm.GetLine([]byte("/some/other/path/subdir/b.tsvs")), ShouldEqual, lines[4])
+			So(sm.GetLine([]byte("/some/other/path/subdir/file.tsv.txt")), ShouldEqual, lines[4])
+			So(sm.GetLine([]byte("/some/other/path/subdir/file.txta.tsv")), ShouldEqual, lines[4])
+			So(sm.GetLine([]byte("/some/other/path/file.tx.txt")), ShouldEqual, lines[3])
+			So(sm.GetLine([]byte("/some/other/path/file.txt.txt")), ShouldEqual, lines[3])
+			So(sm.GetLine([]byte("/some/other/path/subdir/file.txt.tsv")), ShouldEqual, lines[4])
 		})
 	})
 }
