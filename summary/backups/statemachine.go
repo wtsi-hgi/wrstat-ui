@@ -2,7 +2,6 @@ package backups
 
 import (
 	"errors"
-	"unsafe"
 )
 
 var (
@@ -37,10 +36,10 @@ func NewState(state uint32, line *Line) State {
 
 type StateMachine []State
 
-func (s StateMachine) GetLine(path string) *Line {
+func (s StateMachine) GetLine(path []byte) *Line {
 	state := uint32(1)
 
-	for _, c := range unsafe.Slice(unsafe.StringData(path), len(path)) {
+	for _, c := range path {
 		state = s[state].chars[c]
 	}
 
