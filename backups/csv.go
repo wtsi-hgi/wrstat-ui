@@ -1,4 +1,4 @@
-package group
+package backups
 
 import (
 	"encoding/csv"
@@ -37,6 +37,15 @@ const (
 )
 
 type headers [len(csvHeaders)]int
+
+type action uint8
+
+const (
+	actionWarn action = iota
+	actionNoBackup
+	actionTempBackup
+	actionBackup
+)
 
 type Line struct {
 	Path []byte
