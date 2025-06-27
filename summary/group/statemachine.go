@@ -11,15 +11,6 @@ var (
 	ErrAmbiguous = errors.New("ambiguous")
 )
 
-type action uint8
-
-const (
-	actionWarn action = iota
-	actionNoBackup
-	actionTempBackup
-	actionBackup
-)
-
 type State[T any] struct {
 	chars [256]uint32
 	Group *T
@@ -73,11 +64,6 @@ func (s StateMachine[T]) getState(state uint32, path []byte) uint32 {
 	}
 
 	return state
-}
-
-type lineBytes struct {
-	line      *Line
-	directory []byte
 }
 
 func (s *StateMachine[T]) build(groups []PathGroup[T], state uint32) error {
