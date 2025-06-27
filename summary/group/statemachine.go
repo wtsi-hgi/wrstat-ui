@@ -11,7 +11,7 @@ var (
 	ErrAmbiguous = errors.New("ambiguous")
 )
 
-type State[T any] struct {
+type charState[T any] struct {
 	chars [256]uint32
 	Group *T
 }
@@ -32,19 +32,7 @@ func (p *PathGroup[T]) shiftPath() byte {
 	return b
 }
 
-func NewState[T any](state uint32, group *T) State[T] {
-	s := State[T]{Group: group}
-
-	if state != 0 {
-		for n := range s.chars {
-			s.chars[n] = state
-		}
-	}
-
-	return s
-}
-
-type StateMachine[T any] []State[T]
+type StateMachine[T any] []charState[T]
 
 func (s StateMachine[T]) GetGroup(info *summary.FileInfo) *T {
 	return s[s.getState(s.getPathState(info.Path), info.Name)].Group
@@ -110,7 +98,7 @@ func (s *StateMachine[T]) buildChildren(ct [256][]PathGroup[T], state uint32) er
 		nextState := uint32(len(*s))
 
 		(*s)[state].chars[c] = nextState
-		*s = append(*s, State[T]{Group: (*s)[state].Group})
+		*s = append(*s, charState[T]{Group: (*s)[state].Group})
 
 		if err := s.build(lines, nextState); err != nil {
 			return err
