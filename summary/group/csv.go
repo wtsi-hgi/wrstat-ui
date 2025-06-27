@@ -1,4 +1,4 @@
-package backups
+package group
 
 import (
 	"encoding/csv"
@@ -62,17 +62,6 @@ func (l *Line) Action() action {
 	}
 
 	return l.action
-}
-
-func (l *Line) shiftPath() byte {
-	if len(l.Path) == 0 {
-		return 0
-	}
-
-	b := l.Path[0]
-	l.Path = l.Path[1:]
-
-	return b
 }
 
 func ParseCSV(r io.Reader) ([]*Line, error) {

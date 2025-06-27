@@ -1,4 +1,4 @@
-package backups
+package group
 
 import (
 	"errors"
@@ -20,13 +20,29 @@ const (
 	actionBackup
 )
 
-type State struct {
+type State[T any] struct {
 	chars [256]uint32
-	*Line
+	Group *T
 }
 
-func NewState(state uint32, line *Line) State {
-	s := State{Line: line}
+type PathGroup[T any] struct {
+	Path  []byte
+	Group *T
+}
+
+func (p *PathGroup[T]) shiftPath() byte {
+	if len(p.Path) == 0 {
+		return 0
+	}
+
+	b := p.Path[0]
+	p.Path = p.Path[1:]
+
+	return b
+}
+
+func NewState[T any](state uint32, group *T) State[T] {
+	s := State[T]{Group: group}
 
 	if state != 0 {
 		for n := range s.chars {
@@ -37,13 +53,13 @@ func NewState(state uint32, line *Line) State {
 	return s
 }
 
-type StateMachine []State
+type StateMachine[T any] []State[T]
 
-func (s StateMachine) GetLine(info *summary.FileInfo) *Line {
-	return s[s.getState(s.getPathState(info.Path), info.Name)].Line
+func (s StateMachine[T]) GetGroup(info *summary.FileInfo) *T {
+	return s[s.getState(s.getPathState(info.Path), info.Name)].Group
 }
 
-func (s StateMachine) getPathState(path *summary.DirectoryPath) uint32 {
+func (s StateMachine[T]) getPathState(path *summary.DirectoryPath) uint32 {
 	if path == nil {
 		return 1
 	}
@@ -51,7 +67,7 @@ func (s StateMachine) getPathState(path *summary.DirectoryPath) uint32 {
 	return s.getState(s.getPathState(path.Parent), unsafe.Slice(unsafe.StringData(path.Name), len(path.Name)))
 }
 
-func (s StateMachine) getState(state uint32, path []byte) uint32 {
+func (s StateMachine[T]) getState(state uint32, path []byte) uint32 {
 	for _, c := range path {
 		state = s[state].chars[c]
 	}
@@ -64,8 +80,8 @@ type lineBytes struct {
 	directory []byte
 }
 
-func (s *StateMachine) build(lines []*Line, state uint32) error {
-	ct, err := s.buildCharTable(lines, state)
+func (s *StateMachine[T]) build(groups []PathGroup[T], state uint32) error {
+	ct, err := s.buildCharTable(groups, state)
 	if err != nil {
 		return err
 	}
@@ -79,27 +95,27 @@ func (s *StateMachine) build(lines []*Line, state uint32) error {
 	return nil
 }
 
-func (s StateMachine) buildCharTable(lines []*Line, state uint32) (ct [256][]*Line, err error) {
+func (s StateMachine[T]) buildCharTable(groups []PathGroup[T], state uint32) (ct [256][]PathGroup[T], err error) {
 	ended := false
 
-	for _, line := range lines {
-		if len(line.Path) == 0 {
+	for _, group := range groups {
+		if len(group.Path) == 0 {
 			if ended {
 				return ct, ErrAmbiguous
 			}
 
 			ended = true
-			s[state].Line = line
+			s[state].Group = group.Group
 		} else {
-			b := line.shiftPath()
-			ct[b] = append(ct[b], line)
+			b := group.shiftPath()
+			ct[b] = append(ct[b], group)
 		}
 	}
 
 	return ct, nil
 }
 
-func (s *StateMachine) buildChildren(ct [256][]*Line, state uint32) error {
+func (s *StateMachine[T]) buildChildren(ct [256][]PathGroup[T], state uint32) error {
 	for c, lines := range ct {
 		if len(lines) == 0 {
 			continue
@@ -108,7 +124,7 @@ func (s *StateMachine) buildChildren(ct [256][]*Line, state uint32) error {
 		nextState := uint32(len(*s))
 
 		(*s)[state].chars[c] = nextState
-		*s = append(*s, State{Line: (*s)[state].Line})
+		*s = append(*s, State[T]{Group: (*s)[state].Group})
 
 		if err := s.build(lines, nextState); err != nil {
 			return err
@@ -118,7 +134,7 @@ func (s *StateMachine) buildChildren(ct [256][]*Line, state uint32) error {
 	return nil
 }
 
-func (s *StateMachine) buildWildcards(state uint32) {
+func (s *StateMachine[T]) buildWildcards(state uint32) {
 	newState := (*s)[state].chars['*']
 
 	if newState == 0 {
@@ -126,16 +142,16 @@ func (s *StateMachine) buildWildcards(state uint32) {
 	}
 
 	s.merge(state, newState, newState, make(map[uint32]struct{}))
-	s.fillState(state, newState, (*s)[state].Line, make(map[uint32]struct{}))
+	s.fillState(state, newState, (*s)[state].Group, make(map[uint32]struct{}))
 }
 
-func (s *StateMachine) merge(state, oldLoopState, loopState uint32, done map[uint32]struct{}) {
+func (s *StateMachine[T]) merge(state, oldLoopState, loopState uint32, done map[uint32]struct{}) {
 	done[state] = struct{}{}
 	sc := &(*s)[state]
 	nsc := (*s)[loopState]
 
-	if sc.Line == nil {
-		sc.Line = nsc.Line
+	if sc.Group == nil {
+		sc.Group = nsc.Group
 	}
 
 	for c, child := range sc.chars {
@@ -147,26 +163,26 @@ func (s *StateMachine) merge(state, oldLoopState, loopState uint32, done map[uin
 	}
 }
 
-func (s StateMachine) fillState(state, loopState uint32, line *Line, done map[uint32]struct{}) {
+func (s StateMachine[T]) fillState(state, loopState uint32, group *T, done map[uint32]struct{}) {
 	done[state] = struct{}{}
 	sc := &s[state]
 	chars := &sc.chars
 
-	if sc.Line == nil {
-		sc.Line = line
+	if sc.Group == nil {
+		sc.Group = group
 	}
 
 	for n, child := range chars {
 		if child == 0 {
 			chars[n] = loopState
 		} else if _, ok := done[child]; !ok {
-			s.fillState(child, loopState, line, done)
+			s.fillState(child, loopState, group, done)
 		}
 	}
 }
 
-func NewStatemachine(lines []*Line) (StateMachine, error) {
-	states := make(StateMachine, 2, 1024)
+func NewStatemachine[T any](lines []PathGroup[T]) (StateMachine[T], error) {
+	states := make(StateMachine[T], 2, 1024)
 
 	if err := states.build(lines, 1); err != nil {
 		return nil, err
