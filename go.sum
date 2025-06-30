@@ -554,3 +554,5 @@ k8s.io/client-go v7.0.0+incompatible/go.mod h1:7vJpHMYJwNQCWgzmNV+VYUl1zCObLyodB
 nanomsg.org/go-mangos v1.4.0 h1:pVRLnzXePdSbhWlWdSncYszTagERhMG5zK/vXYmbEdM=
 nanomsg.org/go-mangos v1.4.0/go.mod h1:MOor8xUIgwsRMPpLr9xQxe7bT7rciibScOqVyztNxHQ=
 nullprogram.com/x/optparse v1.0.0/go.mod h1:KdyPE+Igbe0jQUrVfMqDMeJQIJZEuyV7pjYmp6pbG50=
+vimagination.zapto.org/rwcount v1.1.1 h1:ymxj9pEofsdSuyQSK+ha9MHxXuWiKIDvjei8lgsTCfM=
+vimagination.zapto.org/rwcount v1.1.1/go.mod h1:lEj30C0ND1gyqNDORmrBL8iFUVMOmQpVhod5VBIsems=

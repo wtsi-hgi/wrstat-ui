@@ -8,6 +8,27 @@ import (
 	. "github.com/smartystreets/goconvey/convey"
 )
 
+const (
+	testHeaders = "reporting_name," +
+		"requestor," +
+		"faculty," +
+		"reporting_root," +
+		"directory," +
+		"instruction ['backup' or 'nobackup' or 'tempbackup']," +
+		"file_types_backup," +
+		"file_types_ignore" +
+		"\n"
+	testAltHeaders = "requestor," +
+		"instruction ['backup' or 'nobackup' or 'tempbackup']," +
+		"directory," +
+		"file_types_ignore," +
+		"reporting_name," +
+		"file_types_backup," +
+		"faculty," +
+		"reporting_root" +
+		"\n"
+)
+
 func ShouldMatchError(actual any, expected ...any) string {
 	if expected[0] == nil {
 		return ShouldBeNil(actual)
@@ -17,26 +38,6 @@ func ShouldMatchError(actual any, expected ...any) string {
 }
 
 func TestParseCSV(t *testing.T) {
-	const (
-		headers = "reporting_name," +
-			"requestor," +
-			"faculty," +
-			"reporting_root," +
-			"directory," +
-			"instruction ['backup' or 'nobackup' or 'tempbackup']," +
-			"file_types_backup," +
-			"file_types_ignore" +
-			"\n"
-		altHeaders = "requestor," +
-			"instruction ['backup' or 'nobackup' or 'tempbackup']," +
-			"directory," +
-			"file_types_ignore," +
-			"reporting_name," +
-			"file_types_backup," +
-			"faculty," +
-			"reporting_root" +
-			"\n"
-	)
 
 	Convey("You can parse a CSV files into line entries", t, func() {
 		for _, test := range [...]struct {
@@ -61,17 +62,17 @@ func TestParseCSV(t *testing.T) {
 			},
 			{
 				Test:   "Valid titles, but otherwise empty file produces no lines or errors",
-				Input:  headers,
+				Input:  testHeaders,
 				Output: []*ReportLine{},
 			},
 			{
 				Test:   "Title order doesn't matter",
-				Input:  altHeaders,
+				Input:  testAltHeaders,
 				Output: []*ReportLine{},
 			},
 			{
 				Test: "You can specify a path to back-up",
-				Input: headers +
+				Input: testHeaders +
 					"projectA,user1,facultyA,/some/path/,/some/path/to/backup/,backup,,",
 				Output: []*ReportLine{
 					{
@@ -86,7 +87,7 @@ func TestParseCSV(t *testing.T) {
 			},
 			{
 				Test: "You can specify a path to back-up, with specific filetypes to backup and ignore, with a different column order",
-				Input: altHeaders +
+				Input: testAltHeaders +
 					"user1,backup,/some/path/to/backup/,log* *.log,projectA,*.txt,facultyA,/some/path/",
 				Output: []*ReportLine{
 					{
@@ -117,7 +118,7 @@ func TestParseCSV(t *testing.T) {
 			},
 			{
 				Test: "You can specify many paths to backup or ignore",
-				Input: headers +
+				Input: testHeaders +
 					"projectA,user1,facultyA,/some/path/,/some/path/to/backup/,backup,*.sh,\n" +
 					"projectA,user1,facultyB,/some/path/,/some/path/to/not/backup/,nobackup,*.ignore,\n" +
 					"projectB,user2,facultyA,/some/other/path/,/some/other/path/,tempbackup,*,*.log\n",

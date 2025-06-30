@@ -2,6 +2,7 @@ package backups
 
 import (
 	"encoding/csv"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -21,7 +22,7 @@ var (
 		"file_types_backup",
 		"file_types_ignore",
 	}
-	defaultMatch      = strings.SplitSeq("*", " ")
+	defaultMatch      = slices.Values([]string{"*"})
 	ErrHeaderNotFound = errors.New("header not found")
 	ErrTooFewColumns  = errors.New("too few columns")
 	ErrInvalidAction  = errors.New("invalid action")
@@ -47,7 +48,31 @@ const (
 	actionNoBackup
 	actionTempBackup
 	actionBackup
+
+	maxActions
 )
+
+var (
+	actionWarnStr       = []byte("\"warn\"")
+	actionNoBackupStr   = []byte("\"nobackup\"")
+	actionTempBackupStr = []byte("\"tempbackup\"")
+	actionBackupStr     = []byte("\"backup\"")
+)
+
+func (a action) MarshalJSON() ([]byte, error) {
+	switch a {
+	case actionWarn:
+		return actionWarnStr, nil
+	case actionNoBackup:
+		return actionNoBackupStr, nil
+	case actionTempBackup:
+		return actionTempBackupStr, nil
+	case actionBackup:
+		return actionBackupStr, nil
+	}
+
+	return nil, &json.MarshalerError{}
+}
 
 type ReportLine struct {
 	Path []byte
