@@ -20,6 +20,7 @@ func TestParseCSV(t *testing.T) {
 	const (
 		headers = "reporting_name," +
 			"requestor," +
+			"faculty," +
 			"reporting_root," +
 			"directory," +
 			"instruction ['backup' or 'nobackup' or 'tempbackup']," +
@@ -32,6 +33,7 @@ func TestParseCSV(t *testing.T) {
 			"file_types_ignore," +
 			"reporting_name," +
 			"file_types_backup," +
+			"faculty," +
 			"reporting_root" +
 			"\n"
 	)
@@ -41,7 +43,7 @@ func TestParseCSV(t *testing.T) {
 			Test   string
 			Input  string
 			Err    error
-			Output []*Line
+			Output []*ReportLine
 		}{
 			{
 				Test: "Empty file produces ErrUnexpectedEOF error",
@@ -60,23 +62,24 @@ func TestParseCSV(t *testing.T) {
 			{
 				Test:   "Valid titles, but otherwise empty file produces no lines or errors",
 				Input:  headers,
-				Output: []*Line{},
+				Output: []*ReportLine{},
 			},
 			{
 				Test:   "Title order doesn't matter",
 				Input:  altHeaders,
-				Output: []*Line{},
+				Output: []*ReportLine{},
 			},
 			{
 				Test: "You can specify a path to back-up",
 				Input: headers +
-					"projectA,user1,/some/path/,/some/path/to/backup/,backup,,",
-				Output: []*Line{
+					"projectA,user1,facultyA,/some/path/,/some/path/to/backup/,backup,,",
+				Output: []*ReportLine{
 					{
 						Path:      []byte("/some/path/to/backup/*"),
 						action:    actionBackup,
 						requestor: "user1",
 						name:      "projectA",
+						faculty:   "facultyA",
 						root:      "/some/path/",
 					},
 				},
@@ -84,13 +87,14 @@ func TestParseCSV(t *testing.T) {
 			{
 				Test: "You can specify a path to back-up, with specific filetypes to backup and ignore, with a different column order",
 				Input: altHeaders +
-					"user1,backup,/some/path/to/backup/,log* *.log,projectA,*.txt,/some/path/",
-				Output: []*Line{
+					"user1,backup,/some/path/to/backup/,log* *.log,projectA,*.txt,facultyA,/some/path/",
+				Output: []*ReportLine{
 					{
 						Path:      []byte("/some/path/to/backup/log*"),
 						action:    actionNoBackup,
 						requestor: "user1",
 						name:      "projectA",
+						faculty:   "facultyA",
 						root:      "/some/path/",
 					},
 					{
@@ -98,6 +102,7 @@ func TestParseCSV(t *testing.T) {
 						action:    actionNoBackup,
 						requestor: "user1",
 						name:      "projectA",
+						faculty:   "facultyA",
 						root:      "/some/path/",
 					},
 					{
@@ -105,6 +110,7 @@ func TestParseCSV(t *testing.T) {
 						action:    actionBackup,
 						requestor: "user1",
 						name:      "projectA",
+						faculty:   "facultyA",
 						root:      "/some/path/",
 					},
 				},
@@ -112,15 +118,16 @@ func TestParseCSV(t *testing.T) {
 			{
 				Test: "You can specify many paths to backup or ignore",
 				Input: headers +
-					"projectA,user1,/some/path/,/some/path/to/backup/,backup,*.sh,\n" +
-					"projectA,user1,/some/path/,/some/path/to/not/backup/,nobackup,*.ignore,\n" +
-					"projectB,user2,/some/other/path/,/some/other/path/,tempbackup,*,*.log\n",
-				Output: []*Line{
+					"projectA,user1,facultyA,/some/path/,/some/path/to/backup/,backup,*.sh,\n" +
+					"projectA,user1,facultyB,/some/path/,/some/path/to/not/backup/,nobackup,*.ignore,\n" +
+					"projectB,user2,facultyA,/some/other/path/,/some/other/path/,tempbackup,*,*.log\n",
+				Output: []*ReportLine{
 					{
 						Path:      []byte("/some/path/to/backup/*.sh"),
 						action:    actionBackup,
 						requestor: "user1",
 						name:      "projectA",
+						faculty:   "facultyA",
 						root:      "/some/path/",
 					},
 					{
@@ -128,6 +135,7 @@ func TestParseCSV(t *testing.T) {
 						action:    actionNoBackup,
 						requestor: "user1",
 						name:      "projectA",
+						faculty:   "facultyB",
 						root:      "/some/path/",
 					},
 					{
@@ -135,6 +143,7 @@ func TestParseCSV(t *testing.T) {
 						action:    actionNoBackup,
 						requestor: "user2",
 						name:      "projectB",
+						faculty:   "facultyA",
 						root:      "/some/other/path/",
 					},
 					{
@@ -142,6 +151,7 @@ func TestParseCSV(t *testing.T) {
 						action:    actionTempBackup,
 						requestor: "user2",
 						name:      "projectB",
+						faculty:   "facultyA",
 						root:      "/some/other/path/",
 					},
 				},

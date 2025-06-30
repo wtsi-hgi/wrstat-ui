@@ -15,6 +15,7 @@ var (
 		"reporting_name",
 		"reporting_root",
 		"requestor",
+		"faculty",
 		"directory",
 		"instruction ['backup' or 'nobackup' or 'tempbackup']",
 		"file_types_backup",
@@ -30,6 +31,7 @@ const (
 	colName = iota
 	colRoot
 	colRequestor
+	colFaculty
 	colDirectory
 	colAction
 	colFileTypes
@@ -47,25 +49,27 @@ const (
 	actionBackup
 )
 
-type Line struct {
+type ReportLine struct {
 	Path []byte
 	action
 	requestor string
 	name      string
+	faculty   string
 	root      string
 }
 
-func newLine(line []string, headers headers, action action, filetype string) *Line {
-	return &Line{
+func newLine(line []string, headers headers, action action, filetype string) *ReportLine {
+	return &ReportLine{
 		Path:      []byte(filepath.Join(line[headers[colDirectory]], filetype)),
 		action:    action,
 		requestor: line[headers[colRequestor]],
 		name:      line[headers[colName]],
+		faculty:   line[headers[colFaculty]],
 		root:      line[headers[colRoot]],
 	}
 }
 
-func (l *Line) Action() action {
+func (l *ReportLine) Action() action {
 	if l == nil {
 		return actionWarn
 	}
@@ -73,7 +77,7 @@ func (l *Line) Action() action {
 	return l.action
 }
 
-func ParseCSV(r io.Reader) ([]*Line, error) {
+func ParseCSV(r io.Reader) ([]*ReportLine, error) {
 	cr := csv.NewReader(r)
 
 	headers, maxHeader, err := parseHeaders(cr)
@@ -81,7 +85,7 @@ func ParseCSV(r io.Reader) ([]*Line, error) {
 		return nil, err
 	}
 
-	lines := make([]*Line, 0)
+	lines := make([]*ReportLine, 0)
 
 	for {
 		line, err := cr.Read()
@@ -133,7 +137,7 @@ func parseHeaders(cr *csv.Reader) (headers, int, error) {
 	return headers, maxHeader, nil
 }
 
-func processLine(lines []*Line, line []string, headers headers) ([]*Line, error) {
+func processLine(lines []*ReportLine, line []string, headers headers) ([]*ReportLine, error) {
 	action, err := parseAction(line[headers[colAction]])
 	if err != nil {
 		return nil, err
@@ -148,7 +152,7 @@ func processLine(lines []*Line, line []string, headers headers) ([]*Line, error)
 			}
 		}
 
-		if toMatch := strings.TrimSpace(line[colFileTypes]); toMatch != "" {
+		if toMatch := strings.TrimSpace(line[headers[colFileTypes]]); toMatch != "" {
 			match = strings.SplitSeq(toMatch, " ")
 		}
 	}
