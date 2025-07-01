@@ -33,7 +33,7 @@ import (
 )
 
 var (
-	ErrAmbiguous = errors.New("ambiguous")
+	ErrAmbiguous = errors.New("ambiguous path match combination")
 )
 
 type charState[T any] struct {
