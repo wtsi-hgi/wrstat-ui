@@ -2,7 +2,6 @@ package backups
 
 import (
 	"encoding/csv"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -71,7 +70,7 @@ func (a action) MarshalJSON() ([]byte, error) {
 		return actionBackupStr, nil
 	}
 
-	return nil, &json.MarshalerError{}
+	return nil, errors.New("invalid action")
 }
 
 type ReportLine struct {
@@ -90,7 +89,7 @@ func newLine(line []string, headers headers, action action, filetype string) *Re
 		requestor: line[headers[colRequestor]],
 		name:      line[headers[colName]],
 		faculty:   line[headers[colFaculty]],
-		root:      line[headers[colRoot]],
+		root:      filepath.Clean(line[headers[colRoot]]),
 	}
 }
 

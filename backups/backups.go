@@ -21,7 +21,8 @@ const maxFilenameLength = 256
 const maxQuotedPathLength = (maxPathLength+maxFilenameLength)*4 + 2 + 1
 
 type Backup struct {
-	sm group.StateMachine[projectAction]
+	sm      group.StateMachine[projectAction]
+	summary Summary
 }
 
 type handler struct {
@@ -63,7 +64,7 @@ func (h *handler) writeBackupFile(file *summary.FileInfo, group *projectAction) 
 
 	_, err := w.Write(append(
 		strconv.AppendQuote(
-			h.quoted[:0], unsafe.String(&h.tmpPath[0], len(file.Path.AppendTo(h.tmpPath[:0]))),
+			h.quoted[:0], unsafe.String(&h.tmpPath[0], len(append(file.Path.AppendTo(h.tmpPath[:0]), file.Name...))),
 		), '\n'))
 
 	return err
@@ -125,7 +126,10 @@ func New(lines []*ReportLine, warnRoots ...string) (*Backup, error) {
 		return nil, err
 	}
 
-	return &Backup{sm: sm}, nil
+	return &Backup{
+		sm:      sm,
+		summary: make(Summary),
+	}, nil
 }
 
 func createActions(lines []*ReportLine, warnRoots []string) []group.PathGroup[projectAction] {
@@ -219,7 +223,7 @@ func (b *Backup) Process(statsData io.Reader, reportRoot string) error {
 	h := &handler{
 		root:    reportRoot,
 		backups: make(map[*projectData]io.WriteCloser),
-		summary: make(Summary),
+		summary: b.summary,
 	}
 
 	s.AddGlobalOperation(group.NewGrouper(b.sm, h))
@@ -231,4 +235,10 @@ func (b *Backup) Process(statsData io.Reader, reportRoot string) error {
 	}
 
 	return h.Close()
+}
+
+func (b *Backup) Summarise(w io.Writer) error {
+	_, err := b.summary.WriteTo(w)
+
+	return err
 }

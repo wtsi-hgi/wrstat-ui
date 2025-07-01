@@ -44,7 +44,7 @@ func TestSummary(t *testing.T) {
 			)
 
 			So(summaryJSON(), ShouldEqual, "["+
-				"{\"Faculty\":\"facultyA\",\"Name\":\"projectA\",\"Requestor\":\"user1\",\"Root\":\"/some/path/\",\"Action\":\"backup\",\"UserID\":100,\"Base\":\"/some/path/to/backup/some/child/dir/\",\"Size\":300,\"Count\":1,\"OldestMTime\":400,\"NewestMTime\":400}\n"+
+				"{\"Faculty\":\"facultyA\",\"Name\":\"projectA\",\"Requestor\":\"user1\",\"Root\":\"/some/path\",\"Action\":\"backup\",\"UserID\":100,\"Base\":\"/some/path/to/backup/some/child/dir/\",\"Size\":300,\"Count\":1,\"OldestMTime\":400,\"NewestMTime\":400}\n"+
 				"]")
 
 			s.addFile(
@@ -53,7 +53,7 @@ func TestSummary(t *testing.T) {
 			)
 
 			So(summaryJSON(), ShouldEqual, "["+
-				"{\"Faculty\":\"facultyA\",\"Name\":\"projectA\",\"Requestor\":\"user1\",\"Root\":\"/some/path/\",\"Action\":\"backup\",\"UserID\":100,\"Base\":\"/some/path/to/backup/some/child/\",\"Size\":700,\"Count\":2,\"OldestMTime\":400,\"NewestMTime\":500}\n"+
+				"{\"Faculty\":\"facultyA\",\"Name\":\"projectA\",\"Requestor\":\"user1\",\"Root\":\"/some/path\",\"Action\":\"backup\",\"UserID\":100,\"Base\":\"/some/path/to/backup/some/child/\",\"Size\":700,\"Count\":2,\"OldestMTime\":400,\"NewestMTime\":500}\n"+
 				"]")
 
 			s.addFile(
@@ -62,8 +62,8 @@ func TestSummary(t *testing.T) {
 			)
 
 			So(summaryJSON(), ShouldEqual, "["+
-				"{\"Faculty\":\"facultyA\",\"Name\":\"projectA\",\"Requestor\":\"user1\",\"Root\":\"/some/path/\",\"Action\":\"backup\",\"UserID\":100,\"Base\":\"/some/path/to/backup/some/child/\",\"Size\":700,\"Count\":2,\"OldestMTime\":400,\"NewestMTime\":500}\n"+
-				",{\"Faculty\":\"facultyA\",\"Name\":\"projectA\",\"Requestor\":\"user1\",\"Root\":\"/some/path/\",\"Action\":\"backup\",\"UserID\":101,\"Base\":\"/some/path/to/backup/some/child/dir2/\",\"Size\":400,\"Count\":1,\"OldestMTime\":500,\"NewestMTime\":500}\n"+
+				"{\"Faculty\":\"facultyA\",\"Name\":\"projectA\",\"Requestor\":\"user1\",\"Root\":\"/some/path\",\"Action\":\"backup\",\"UserID\":100,\"Base\":\"/some/path/to/backup/some/child/\",\"Size\":700,\"Count\":2,\"OldestMTime\":400,\"NewestMTime\":500}\n"+
+				",{\"Faculty\":\"facultyA\",\"Name\":\"projectA\",\"Requestor\":\"user1\",\"Root\":\"/some/path\",\"Action\":\"backup\",\"UserID\":101,\"Base\":\"/some/path/to/backup/some/child/dir2/\",\"Size\":400,\"Count\":1,\"OldestMTime\":500,\"NewestMTime\":500}\n"+
 				"]")
 
 			s.addFile(
@@ -72,9 +72,9 @@ func TestSummary(t *testing.T) {
 			)
 
 			So(summaryJSON(), ShouldEqual, "["+
-				"{\"Faculty\":\"facultyA\",\"Name\":\"projectA\",\"Requestor\":\"user1\",\"Root\":\"/some/path/\",\"Action\":\"backup\",\"UserID\":100,\"Base\":\"/some/path/to/backup/some/child/\",\"Size\":700,\"Count\":2,\"OldestMTime\":400,\"NewestMTime\":500}\n"+
-				",{\"Faculty\":\"facultyA\",\"Name\":\"projectA\",\"Requestor\":\"user1\",\"Root\":\"/some/path/\",\"Action\":\"backup\",\"UserID\":101,\"Base\":\"/some/path/to/backup/some/child/dir2/\",\"Size\":400,\"Count\":1,\"OldestMTime\":500,\"NewestMTime\":500}\n"+
-				",{\"Faculty\":\"facultyB\",\"Name\":\"projectA\",\"Requestor\":\"user1\",\"Root\":\"/some/path/\",\"Action\":\"nobackup\",\"UserID\":101,\"Base\":\"/some/path/to/not/backup/\",\"Size\":400,\"Count\":1,\"OldestMTime\":500,\"NewestMTime\":500}\n"+
+				"{\"Faculty\":\"facultyA\",\"Name\":\"projectA\",\"Requestor\":\"user1\",\"Root\":\"/some/path\",\"Action\":\"backup\",\"UserID\":100,\"Base\":\"/some/path/to/backup/some/child/\",\"Size\":700,\"Count\":2,\"OldestMTime\":400,\"NewestMTime\":500}\n"+
+				",{\"Faculty\":\"facultyA\",\"Name\":\"projectA\",\"Requestor\":\"user1\",\"Root\":\"/some/path\",\"Action\":\"backup\",\"UserID\":101,\"Base\":\"/some/path/to/backup/some/child/dir2/\",\"Size\":400,\"Count\":1,\"OldestMTime\":500,\"NewestMTime\":500}\n"+
+				",{\"Faculty\":\"facultyB\",\"Name\":\"projectA\",\"Requestor\":\"user1\",\"Root\":\"/some/path\",\"Action\":\"nobackup\",\"UserID\":101,\"Base\":\"/some/path/to/not/backup/\",\"Size\":400,\"Count\":1,\"OldestMTime\":500,\"NewestMTime\":500}\n"+
 				"]")
 
 			s.addFile(
@@ -83,10 +83,10 @@ func TestSummary(t *testing.T) {
 			)
 
 			So(summaryJSON(), ShouldEqual, "["+
-				"{\"Faculty\":\"facultyA\",\"Name\":\"projectA\",\"Requestor\":\"user1\",\"Root\":\"/some/path/\",\"Action\":\"backup\",\"UserID\":100,\"Base\":\"/some/path/to/backup/some/child/\",\"Size\":700,\"Count\":2,\"OldestMTime\":400,\"NewestMTime\":500}\n"+
-				",{\"Faculty\":\"facultyA\",\"Name\":\"projectA\",\"Requestor\":\"user1\",\"Root\":\"/some/path/\",\"Action\":\"backup\",\"UserID\":101,\"Base\":\"/some/path/to/backup/some/child/dir2/\",\"Size\":400,\"Count\":1,\"OldestMTime\":500,\"NewestMTime\":500}\n"+
-				",{\"Faculty\":\"facultyB\",\"Name\":\"projectA\",\"Requestor\":\"user1\",\"Root\":\"/some/path/\",\"Action\":\"nobackup\",\"UserID\":101,\"Base\":\"/some/path/to/not/backup/\",\"Size\":400,\"Count\":1,\"OldestMTime\":500,\"NewestMTime\":500}\n"+
-				",{\"Faculty\":\"facultyC\",\"Name\":\"projectB\",\"Requestor\":\"user3\",\"Root\":\"/some/other/path/\",\"Action\":\"nobackup\",\"UserID\":105,\"Base\":\"/some/other/path/\",\"Size\":400,\"Count\":1,\"OldestMTime\":500,\"NewestMTime\":500}\n"+
+				"{\"Faculty\":\"facultyA\",\"Name\":\"projectA\",\"Requestor\":\"user1\",\"Root\":\"/some/path\",\"Action\":\"backup\",\"UserID\":100,\"Base\":\"/some/path/to/backup/some/child/\",\"Size\":700,\"Count\":2,\"OldestMTime\":400,\"NewestMTime\":500}\n"+
+				",{\"Faculty\":\"facultyA\",\"Name\":\"projectA\",\"Requestor\":\"user1\",\"Root\":\"/some/path\",\"Action\":\"backup\",\"UserID\":101,\"Base\":\"/some/path/to/backup/some/child/dir2/\",\"Size\":400,\"Count\":1,\"OldestMTime\":500,\"NewestMTime\":500}\n"+
+				",{\"Faculty\":\"facultyB\",\"Name\":\"projectA\",\"Requestor\":\"user1\",\"Root\":\"/some/path\",\"Action\":\"nobackup\",\"UserID\":101,\"Base\":\"/some/path/to/not/backup/\",\"Size\":400,\"Count\":1,\"OldestMTime\":500,\"NewestMTime\":500}\n"+
+				",{\"Faculty\":\"facultyC\",\"Name\":\"projectB\",\"Requestor\":\"user3\",\"Root\":\"/some/other/path\",\"Action\":\"nobackup\",\"UserID\":105,\"Base\":\"/some/other/path/\",\"Size\":400,\"Count\":1,\"OldestMTime\":500,\"NewestMTime\":500}\n"+
 				"]")
 		})
 	})
