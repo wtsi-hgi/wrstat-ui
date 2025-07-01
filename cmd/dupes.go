@@ -27,6 +27,7 @@ package cmd
 
 import (
 	"bufio"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -81,7 +82,9 @@ stdout. Files ending in '.gz' will be compressed.
 func parseFiles(args []string) ([]string, error) { //nolint:gocognit
 	var files []string
 
-	if len(args) == 1 { //nolint:nestif
+	if len(args) == 0 { //nolint:nestif
+		return nil, errors.New("no stats files specified")
+	} else if len(args) == 1 {
 		fi, err := os.Stat(args[0])
 		if err != nil {
 			return nil, err
