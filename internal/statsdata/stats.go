@@ -176,7 +176,7 @@ func (f *File) WriteTo(w io.Writer) (int64, error) {
 // AddFile adds file data to a directory, creating the directory in the tree if
 // necessary.
 func AddFile(d *Directory, path string, uid, gid uint32, size, atime, mtime int64) *File {
-	for _, part := range strings.Split(filepath.Dir(path), "/") {
+	for part := range strings.SplitSeq(filepath.Dir(path), "/") {
 		d = d.AddDirectory(part)
 	}
 
