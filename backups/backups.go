@@ -45,6 +45,8 @@ const maxFilenameLength = 256
 // speech-marks are +2 and a newline is +1.
 const maxQuotedPathLength = (maxPathLength+maxFilenameLength)*4 + 2 + 1
 
+type pathGroup = group.PathGroup[projectAction]
+
 type Backup struct {
 	sm      group.StateMachine[projectAction]
 	summary Summary
@@ -157,11 +159,11 @@ func New(lines []*ReportLine, warnRoots ...string) (*Backup, error) {
 	}, nil
 }
 
-func createActions(lines []*ReportLine, warnRoots []string) []group.PathGroup[projectAction] {
+func createActions(lines []*ReportLine, warnRoots []string) []pathGroup {
 	actions := createProjectActions(lines)
 
 	for _, root := range warnRoots {
-		actions = append(actions, group.PathGroup[projectAction]{
+		actions = append(actions, pathGroup{
 			Path: []byte(filepath.Join(root, "*")),
 			Group: &projectAction{
 				projectRootData: &projectRootData{
@@ -175,15 +177,15 @@ func createActions(lines []*ReportLine, warnRoots []string) []group.PathGroup[pr
 	return actions
 }
 
-func createProjectActions(lines []*ReportLine) []group.PathGroup[projectAction] {
+func createProjectActions(lines []*ReportLine) []pathGroup {
 	projects := make(map[string]*projectData)
 	projectRoots := make(map[string]*projectRootData)
-	actions := make([]group.PathGroup[projectAction], len(lines))
+	actions := make([]pathGroup, len(lines))
 
 	for n, line := range lines {
 		projectRoot := getProjectRoot(line, projectRoots, projects)
 		projectRoot.isPlanned = projectRoot.isPlanned || projectRoot.Root == filepath.Dir(string(line.Path))
-		actions[n] = group.PathGroup[projectAction]{
+		actions[n] = pathGroup{
 			Path: line.Path,
 			Group: &projectAction{
 				projectRootData: projectRoot,
@@ -226,13 +228,10 @@ func getProjectRoot(
 	return projectRoot
 }
 
-func addRootActions(
-	projectRoots map[string]*projectRootData,
-	actions []group.PathGroup[projectAction],
-) []group.PathGroup[projectAction] {
+func addRootActions(projectRoots map[string]*projectRootData, actions []pathGroup) []pathGroup {
 	for _, project := range projectRoots {
 		if !project.isPlanned {
-			actions = append(actions, group.PathGroup[projectAction]{
+			actions = append(actions, pathGroup{
 				Path: []byte(filepath.Join(project.Root, "*")),
 				Group: &projectAction{
 					projectRootData: project,
