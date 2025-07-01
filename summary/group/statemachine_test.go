@@ -39,7 +39,7 @@ type name struct {
 	name string
 }
 
-var testGroups = []PathGroup[name]{
+var testGroups = []PathGroup[name]{ //nolint:gochecknoglobals
 	{
 		Path:  []byte("/some/path/*"),
 		Group: &name{"testGroup[0]"},

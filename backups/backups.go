@@ -63,7 +63,7 @@ func (h *handler) Handle(file *summary.FileInfo, group *projectAction) error {
 		return nil
 	}
 
-	switch group.action {
+	switch group.action { //nolint:exhaustive
 	case actionBackup, actionTempBackup:
 		if err := h.writeBackupFile(file, group); err != nil {
 			return err
@@ -226,7 +226,10 @@ func getProjectRoot(
 	return projectRoot
 }
 
-func addRootActions(projectRoots map[string]*projectRootData, actions []group.PathGroup[projectAction]) []group.PathGroup[projectAction] {
+func addRootActions(
+	projectRoots map[string]*projectRootData,
+	actions []group.PathGroup[projectAction],
+) []group.PathGroup[projectAction] {
 	for _, project := range projectRoots {
 		if !project.isPlanned {
 			actions = append(actions, group.PathGroup[projectAction]{

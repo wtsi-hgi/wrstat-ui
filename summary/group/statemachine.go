@@ -98,7 +98,7 @@ func (s StateMachine[T]) buildCharTable(groups []PathGroup[T], state uint32) (ct
 	ended := false
 
 	for _, group := range groups {
-		if len(group.Path) == 0 {
+		if len(group.Path) == 0 { //nolint:nestif
 			if ended {
 				return ct, ErrAmbiguous
 			}
@@ -120,7 +120,7 @@ func (s *StateMachine[T]) buildChildren(ct [256][]PathGroup[T], state uint32) er
 			continue
 		}
 
-		nextState := uint32(len(*s))
+		nextState := uint32(len(*s)) //nolint:gosec
 
 		(*s)[state].chars[c] = nextState
 		*s = append(*s, charState[T]{Group: (*s)[state].Group})
@@ -181,7 +181,7 @@ func (s StateMachine[T]) fillState(state, loopState uint32, group *T, done map[u
 }
 
 func NewStatemachine[T any](lines []PathGroup[T]) (StateMachine[T], error) {
-	states := make(StateMachine[T], 2, 1024)
+	states := make(StateMachine[T], 2, 1024) //nolint:mnd
 
 	if err := states.build(lines, 1); err != nil {
 		return nil, err

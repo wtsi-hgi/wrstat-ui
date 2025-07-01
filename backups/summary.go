@@ -43,7 +43,7 @@ type rootUserAction struct {
 	action action
 }
 
-func (r rootUserAction) compare(s rootUserAction) int {
+func (r rootUserAction) compare(s rootUserAction) int { //nolint:gocognit,gocyclo
 	if r.projectRootData == s.projectRootData {
 		if s.userID == r.userID {
 			return int(r.action) - int(s.action)
@@ -52,7 +52,7 @@ func (r rootUserAction) compare(s rootUserAction) int {
 		return int(r.userID) - int(s.userID)
 	}
 
-	if r.projectData == nil {
+	if r.projectData == nil { //nolint:nestif
 		if s.projectData == nil {
 			return strings.Compare(r.Root, s.Root)
 		}
@@ -62,7 +62,7 @@ func (r rootUserAction) compare(s rootUserAction) int {
 		return 1
 	}
 
-	if r.Faculty == s.Faculty {
+	if r.Faculty == s.Faculty { //nolint:nestif
 		if r.Name == s.Name {
 			if r.Requestor == s.Requestor {
 				return strings.Compare(r.Root, s.Root)
@@ -100,7 +100,7 @@ func (s Summary) addFile(file *summary.FileInfo, group *projectAction) {
 	root.Add(file)
 }
 
-func (s Summary) WriteTo(w io.Writer) (int64, error) {
+func (s Summary) WriteTo(w io.Writer) (int64, error) { //nolint:unparam
 	sw := &rwcount.Writer{Writer: w}
 	e := json.NewEncoder(sw)
 	first := true
@@ -108,26 +108,26 @@ func (s Summary) WriteTo(w io.Writer) (int64, error) {
 
 	slices.SortFunc(keys, rootUserAction.compare)
 
-	io.WriteString(sw, "[")
+	io.WriteString(sw, "[") //nolint:errcheck
 
 	var tmpPath [maxPathLength + maxFilenameLength]byte
 
 	for _, rua := range keys {
-		if userRoot := s[rua]; userRoot != nil {
+		if userRoot := s[rua]; userRoot != nil { //nolint:nestif
 			if first {
 				first = false
 			} else {
-				io.WriteString(sw, ",")
+				io.WriteString(sw, ",") //nolint:errcheck
 			}
 
 			path := userRoot.base.AppendTo(tmpPath[:0])
 			userRoot.Base = unsafe.String(unsafe.SliceData(path), len(path))
 
-			e.Encode(userRoot)
+			e.Encode(userRoot) //nolint:errcheck,errchkjson
 		}
 	}
 
-	io.WriteString(sw, "]")
+	io.WriteString(sw, "]") //nolint:errcheck
 
 	return sw.Count, sw.Err
 }

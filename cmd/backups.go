@@ -115,7 +115,7 @@ searched for stats.gz files in the same manner as the server and watch commands.
 	},
 }
 
-func must[T any](v T, err error) T {
+func must[T any](v T, err error) T { //nolint:ireturn
 	if err != nil {
 		die("%s", err)
 	}
@@ -136,7 +136,7 @@ type pathFile struct {
 	io.Reader
 }
 
-func combineStatsFiles(filePaths []string) (io.Reader, error) {
+func combineStatsFiles(filePaths []string) (io.Reader, error) { //nolint:gocognit,gocyclo,funlen
 	files := make([]pathFile, len(filePaths))
 
 	for n, file := range filePaths {
@@ -158,7 +158,7 @@ func combineStatsFiles(filePaths []string) (io.Reader, error) {
 			return nil, err
 		}
 
-		if _, err := f.Seek(0, io.SeekStart); err != nil {
+		if _, err = f.Seek(0, io.SeekStart); err != nil {
 			return nil, err
 		}
 

@@ -23,6 +23,7 @@
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  ******************************************************************************/
 
+//nolint:lll
 package backups
 
 import (
@@ -30,9 +31,8 @@ import (
 	"strings"
 	"testing"
 
-	internaltest "github.com/wtsi-hgi/wrstat-ui/internal/test"
-
 	. "github.com/smartystreets/goconvey/convey"
+	internaltest "github.com/wtsi-hgi/wrstat-ui/internal/test"
 )
 
 func TestSummary(t *testing.T) {
@@ -53,7 +53,7 @@ func TestSummary(t *testing.T) {
 		summaryJSON := func() string {
 			defer buf.Reset()
 
-			s.WriteTo(&buf)
+			s.WriteTo(&buf) //nolint:errcheck
 
 			return buf.String()
 		}

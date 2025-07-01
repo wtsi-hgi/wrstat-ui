@@ -23,6 +23,7 @@
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  ******************************************************************************/
 
+//nolint:lll
 package backups
 
 import (
@@ -63,7 +64,6 @@ func ShouldMatchError(actual any, expected ...any) string {
 }
 
 func TestParseCSV(t *testing.T) {
-
 	Convey("You can parse a CSV files into line entries", t, func() {
 		for _, test := range [...]struct {
 			Test   string

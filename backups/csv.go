@@ -35,6 +35,7 @@ import (
 	"strings"
 )
 
+//nolint:gochecknoglobals
 var (
 	csvHeaders = [...]string{
 		"reporting_name",
@@ -72,10 +73,9 @@ const (
 	actionNoBackup
 	actionTempBackup
 	actionBackup
-
-	maxActions
 )
 
+//nolint:gochecknoglobals
 var (
 	actionWarnStr       = []byte("\"warn\"")
 	actionNoBackupStr   = []byte("\"nobackup\"")
@@ -95,7 +95,7 @@ func (a action) MarshalJSON() ([]byte, error) {
 		return actionBackupStr, nil
 	}
 
-	return nil, errors.New("invalid action")
+	return nil, ErrInvalidAction
 }
 
 type ReportLine struct {
@@ -118,18 +118,10 @@ func newLine(line []string, headers headers, action action, filetype string) *Re
 	}
 }
 
-func (l *ReportLine) Action() action {
-	if l == nil {
-		return actionWarn
-	}
-
-	return l.action
-}
-
-func ParseCSV(r io.Reader) ([]*ReportLine, error) {
+func ParseCSV(r io.Reader) ([]*ReportLine, error) { //nolint:gocognit
 	cr := csv.NewReader(r)
 
-	headers, maxHeader, err := parseHeaders(cr)
+	h, maxHeader, err := parseHeaders(cr)
 	if err != nil {
 		return nil, err
 	}
@@ -150,7 +142,7 @@ func ParseCSV(r io.Reader) ([]*ReportLine, error) {
 			return nil, ErrTooFewColumns
 		}
 
-		if lines, err = processLine(lines, line, headers); err != nil {
+		if lines, err = processLine(lines, line, h); err != nil {
 			return nil, err
 		}
 	}
@@ -186,19 +178,19 @@ func parseHeaders(cr *csv.Reader) (headers, int, error) {
 	return headers, maxHeader, nil
 }
 
-func processLine(lines []*ReportLine, line []string, headers headers) ([]*ReportLine, error) {
+func processLine(lines []*ReportLine, line []string, headers headers) ([]*ReportLine, error) { //nolint:gocognit,gocyclo
 	for n := range line {
 		line[n] = strings.TrimSpace(line[n])
 	}
 
-	action, err := parseAction(line[headers[colAction]])
+	a, err := parseAction(line[headers[colAction]])
 	if err != nil {
 		return nil, err
 	}
 
 	match := defaultMatch
 
-	if action != actionNoBackup {
+	if a != actionNoBackup { //nolint:nestif
 		if ignore := strings.TrimSpace(line[headers[colFileTypesIgnore]]); ignore != "" {
 			for ft := range strings.SplitSeq(ignore, " ") {
 				lines = append(lines, newLine(line, headers, actionNoBackup, ft))
@@ -211,25 +203,25 @@ func processLine(lines []*ReportLine, line []string, headers headers) ([]*Report
 	}
 
 	for ft := range match {
-		lines = append(lines, newLine(line, headers, action, ft))
+		lines = append(lines, newLine(line, headers, a, ft))
 	}
 
 	return lines, nil
 }
 
 func parseAction(actionStr string) (action, error) {
-	var action action
+	var a action
 
 	switch actionStr {
 	case "backup":
-		action = actionBackup
+		a = actionBackup
 	case "tempbackup":
-		action = actionTempBackup
+		a = actionTempBackup
 	case "nobackup":
-		action = actionNoBackup
+		a = actionNoBackup
 	default:
 		return 0, fmt.Errorf("%s: %w", actionStr, ErrInvalidAction)
 	}
 
-	return action, nil
+	return a, nil
 }

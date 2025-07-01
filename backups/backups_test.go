@@ -23,6 +23,7 @@
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  ******************************************************************************/
 
+//nolint:lll
 package backups
 
 import (
@@ -72,7 +73,7 @@ func TestBackups(t *testing.T) {
 
 				So(b.Process(sproot.AsReader(), tmp), ShouldBeNil)
 
-				entries, _ := filepath.Glob(filepath.Join(tmp, "*"))
+				entries, _ := filepath.Glob(filepath.Join(tmp, "*")) //nolint:errcheck
 				So(entries, ShouldResemble, []string{
 					filepath.Join(tmp, "user1_projectA"),
 					filepath.Join(tmp, "user3_projectB"),
@@ -104,7 +105,7 @@ func TestBackups(t *testing.T) {
 
 				So(b.Process(mntroot.AsReader(), tmp), ShouldBeNil)
 
-				entries, _ = filepath.Glob(filepath.Join(tmp, "*"))
+				entries, _ = filepath.Glob(filepath.Join(tmp, "*")) //nolint:errcheck
 				So(entries, ShouldResemble, []string{
 					filepath.Join(tmp, "user3_projectB"),
 				})

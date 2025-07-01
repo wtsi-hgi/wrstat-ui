@@ -46,6 +46,8 @@ const inputStatsFile = "stats.gz"
 var (
 	minSize int64
 	output  string
+
+	ErrNoStatsFiles = errors.New("no stats files specified")
 )
 
 var dupescmd = &cobra.Command{
@@ -82,8 +84,8 @@ stdout. Files ending in '.gz' will be compressed.
 func parseFiles(args []string) ([]string, error) { //nolint:gocognit
 	var files []string
 
-	if len(args) == 0 { //nolint:nestif
-		return nil, errors.New("no stats files specified")
+	if len(args) == 0 { //nolint:nestif,gocritic
+		return nil, ErrNoStatsFiles
 	} else if len(args) == 1 {
 		fi, err := os.Stat(args[0])
 		if err != nil {
