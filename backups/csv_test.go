@@ -113,7 +113,7 @@ func TestParseCSV(t *testing.T) {
 			{
 				Test: "You can specify a path to back-up, with specific filetypes to backup and ignore, with a different column order",
 				Input: testAltHeaders +
-					"user1,backup,/some/path/to/backup/,log* *.log,projectA,*.txt,facultyA,/some/path/",
+					"user1, backup ,/some/path/to/backup/,log* *.log,projectA,*.txt,facultyA,/some/path/",
 				Output: []*ReportLine{
 					{
 						Path:      []byte("/some/path/to/backup/log*"),

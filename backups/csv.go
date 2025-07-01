@@ -187,6 +187,10 @@ func parseHeaders(cr *csv.Reader) (headers, int, error) {
 }
 
 func processLine(lines []*ReportLine, line []string, headers headers) ([]*ReportLine, error) {
+	for n := range line {
+		line[n] = strings.TrimSpace(line[n])
+	}
+
 	action, err := parseAction(line[headers[colAction]])
 	if err != nil {
 		return nil, err
