@@ -145,8 +145,6 @@ func combineStatsFiles(filePaths []string) (io.Reader, error) {
 			return nil, err
 		}
 
-		defer f.Close()
-
 		var r io.Reader = f
 
 		if strings.HasSuffix(file, ".gz") {
