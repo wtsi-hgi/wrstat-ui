@@ -142,7 +142,8 @@ type projectRootData struct {
 
 type projectAction struct {
 	*projectRootData
-	action
+	action action
+	path   string
 }
 
 func New(lines []*ReportLine, warnRoots ...string) (*Backup, error) {
@@ -189,7 +190,8 @@ func createProjectActions(lines []*ReportLine) []pathGroup {
 			Path: line.Path,
 			Group: &projectAction{
 				projectRootData: projectRoot,
-				action:          line.action,
+				action:          line.Action,
+				path:            string(line.Path),
 			},
 		}
 	}
@@ -202,25 +204,25 @@ func getProjectRoot(
 	projectRoots map[string]*projectRootData,
 	projects map[string]*projectData,
 ) *projectRootData {
-	projectRootKey := line.requestor + "\x00" + line.name + "\x00" + line.faculty + "\x00" + filepath.Clean(line.root)
+	projectRootKey := line.Requestor + "\x00" + line.Name + "\x00" + line.Faculty + "\x00" + filepath.Clean(line.Root)
 
 	projectRoot, ok := projectRoots[projectRootKey]
 	if !ok {
-		projectKey := line.requestor + "\x00" + line.name + "\x00" + line.faculty
+		projectKey := line.Requestor + "\x00" + line.Name + "\x00" + line.Faculty
 
 		project, ok := projects[projectKey]
 		if !ok {
 			project = &projectData{
-				Name:      line.name,
-				Requestor: line.requestor,
-				Faculty:   line.faculty,
+				Name:      line.Name,
+				Requestor: line.Requestor,
+				Faculty:   line.Faculty,
 			}
 			projects[projectKey] = project
 		}
 
 		projectRoot = &projectRootData{
 			projectData: project,
-			Root:        line.root,
+			Root:        line.Root,
 		}
 		projectRoots[projectRootKey] = projectRoot
 	}

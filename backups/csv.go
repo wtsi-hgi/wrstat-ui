@@ -99,22 +99,22 @@ func (a action) MarshalJSON() ([]byte, error) {
 }
 
 type ReportLine struct {
-	Path []byte
-	action
-	requestor string
-	name      string
-	faculty   string
-	root      string
+	Path      []byte
+	Action    action
+	Requestor string
+	Name      string
+	Faculty   string
+	Root      string
 }
 
 func newLine(line []string, headers headers, action action, filetype string) *ReportLine {
 	return &ReportLine{
 		Path:      []byte(filepath.Join(line[headers[colDirectory]], filetype)),
-		action:    action,
-		requestor: line[headers[colRequestor]],
-		name:      line[headers[colName]],
-		faculty:   line[headers[colFaculty]],
-		root:      filepath.Clean(line[headers[colRoot]]),
+		Action:    action,
+		Requestor: line[headers[colRequestor]],
+		Name:      line[headers[colName]],
+		Faculty:   line[headers[colFaculty]],
+		Root:      filepath.Clean(line[headers[colRoot]]),
 	}
 }
 
