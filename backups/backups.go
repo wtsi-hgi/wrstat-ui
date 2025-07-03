@@ -136,8 +136,7 @@ type projectData struct {
 
 type projectRootData struct {
 	*projectData
-	Root      string
-	isPlanned bool
+	Root string
 }
 
 type projectAction struct {
@@ -185,7 +184,6 @@ func createProjectActions(lines []*ReportLine) []pathGroup {
 
 	for n, line := range lines {
 		projectRoot := getProjectRoot(line, projectRoots, projects)
-		projectRoot.isPlanned = projectRoot.isPlanned || projectRoot.Root == filepath.Dir(string(line.Path))
 		actions[n] = pathGroup{
 			Path: line.Path,
 			Group: &projectAction{
@@ -231,15 +229,24 @@ func getProjectRoot(
 }
 
 func addRootActions(projectRoots map[string]*projectRootData, actions []pathGroup) []pathGroup {
+	done := make(map[string]struct{})
+
+	for _, action := range actions {
+		done[string(action.Path)] = struct{}{}
+	}
+
 	for _, project := range projectRoots {
-		if !project.isPlanned {
+		root := filepath.Join(project.Root, "*")
+
+		if _, ok := done[root]; !ok {
 			actions = append(actions, pathGroup{
-				Path: []byte(filepath.Join(project.Root, "*")),
+				Path: []byte(root),
 				Group: &projectAction{
 					projectRootData: project,
 					action:          actionWarn,
 				},
 			})
+			done[root] = struct{}{}
 		}
 	}
 
