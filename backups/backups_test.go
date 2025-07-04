@@ -81,11 +81,11 @@ func TestBackups(t *testing.T) {
 
 				data, err := os.ReadFile(filepath.Join(tmp, "user1_projectA"))
 				So(err, ShouldBeNil)
-				So(string(data), ShouldEqual, "\"/some/path/to/backup/a.sh\"\n")
+				So(string(data), ShouldEqual, "L3NvbWUvcGF0aC90by9iYWNrdXAvYS5zaA==\n")
 
 				data, err = os.ReadFile(filepath.Join(tmp, "user3_projectB_temp"))
 				So(err, ShouldBeNil)
-				So(string(data), ShouldEqual, "\"/some/other/path/b\"\n\"/some/other/path/c\"\n")
+				So(string(data), ShouldEqual, "L3NvbWUvb3RoZXIvcGF0aC9i\nL3NvbWUvb3RoZXIvcGF0aC9j\n")
 
 				var buf bytes.Buffer
 
@@ -112,7 +112,7 @@ func TestBackups(t *testing.T) {
 
 				data, err = os.ReadFile(filepath.Join(tmp, "user3_projectB"))
 				So(err, ShouldBeNil)
-				So(string(data), ShouldEqual, "\"/mnt/data/stuff/file\"\n")
+				So(string(data), ShouldEqual, "L21udC9kYXRhL3N0dWZmL2ZpbGU=\n")
 
 				buf.Reset()
 

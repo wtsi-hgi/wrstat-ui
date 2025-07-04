@@ -26,12 +26,11 @@
 package backups
 
 import (
+	"encoding/base64"
 	"io"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
-	"unsafe"
 
 	"github.com/wtsi-hgi/wrstat-ui/stats"
 	"github.com/wtsi-hgi/wrstat-ui/summary"
@@ -40,10 +39,7 @@ import (
 
 const maxPathLength = 4096
 const maxFilenameLength = 256
-
-// non-ascii bytes could become \xXX (4x the length at worst), the two
-// speech-marks are +2 and a newline is +1.
-const maxQuotedPathLength = (maxPathLength+maxFilenameLength)*4 + 2 + 1
+const maxBase64Length = ((maxPathLength + maxFilenameLength) + 2) / 3 * 4 //nolint:mnd
 
 type pathGroup = group.PathGroup[projectAction]
 
@@ -58,7 +54,7 @@ type handler struct {
 	root                 string
 	backups, tempbackups map[*projectData]io.WriteCloser
 	summary              backupSummary
-	quoted               [maxQuotedPathLength]byte
+	base64               [maxBase64Length]byte
 	tmpPath              [maxPathLength + maxFilenameLength]byte
 }
 
@@ -100,9 +96,7 @@ func (h *handler) writeBackupFile(file *summary.FileInfo, group *projectAction) 
 	}
 
 	_, err := w.Write(append(
-		strconv.AppendQuote(
-			h.quoted[:0], unsafe.String(&h.tmpPath[0], len(append(file.Path.AppendTo(h.tmpPath[:0]), file.Name...))),
-		), '\n'))
+		base64.StdEncoding.AppendEncode(h.base64[:0], append(file.Path.AppendTo(h.tmpPath[:0]), file.Name...)), '\n'))
 
 	return err
 }
