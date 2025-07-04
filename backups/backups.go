@@ -67,7 +67,7 @@ func (h *handler) Handle(file *summary.FileInfo, group *projectAction) error {
 		return nil
 	}
 
-	switch group.action { //nolint:exhaustive
+	switch group.Action { //nolint:exhaustive
 	case ActionBackup, ActionTempBackup:
 		if err := h.writeBackupFile(file, group); err != nil {
 			return err
@@ -146,8 +146,7 @@ type projectRootData struct {
 
 type projectAction struct {
 	*projectRootData
-	action Action
-	path   string
+	Action Action
 }
 
 // New takes a parsed backup plan CSV and optional, additional directories for
@@ -181,7 +180,7 @@ func createActions(lines []*ReportLine, warnRoots []string) []pathGroup {
 				projectRootData: &projectRootData{
 					Root: root,
 				},
-				action: ActionWarn,
+				Action: ActionWarn,
 			},
 		})
 	}
@@ -200,8 +199,7 @@ func createProjectActions(lines []*ReportLine) []pathGroup {
 			Path: line.Path,
 			Group: &projectAction{
 				projectRootData: projectRoot,
-				action:          line.Action,
-				path:            string(line.Path),
+				Action:          line.Action,
 			},
 		}
 	}
@@ -255,7 +253,7 @@ func addRootActions(projectRoots map[string]*projectRootData, actions []pathGrou
 				Path: []byte(root),
 				Group: &projectAction{
 					projectRootData: project,
-					action:          ActionWarn,
+					Action:          ActionWarn,
 				},
 			})
 			done[root] = struct{}{}

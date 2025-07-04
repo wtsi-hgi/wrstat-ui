@@ -38,15 +38,14 @@ import (
 )
 
 type rootUserAction struct {
-	*projectRootData
+	*projectAction
 	userID uint32
-	action Action
 }
 
 func (r rootUserAction) compare(s rootUserAction) int { //nolint:gocognit,gocyclo
 	if r.projectRootData == s.projectRootData {
 		if s.userID == r.userID {
-			return int(r.action) - int(s.action)
+			return int(r.Action) - int(s.Action)
 		}
 
 		return int(r.userID) - int(s.userID)
@@ -81,18 +80,16 @@ type backupSummary map[rootUserAction]*rootSummary
 
 func (b backupSummary) addFile(file *summary.FileInfo, group *projectAction) {
 	key := rootUserAction{
-		projectRootData: group.projectRootData,
-		userID:          file.UID,
-		action:          group.action,
+		projectAction: group,
+		userID:        file.UID,
 	}
 
 	root := b[key]
 	if root == nil {
 		root = &rootSummary{
-			Action:          group.action,
-			UserID:          file.UID,
-			projectRootData: group.projectRootData,
-			OldestMTime:     math.MaxInt64,
+			projectAction: group,
+			UserID:        file.UID,
+			OldestMTime:   math.MaxInt64,
 		}
 		b[key] = root
 	}
@@ -133,8 +130,7 @@ func (b backupSummary) WriteTo(w io.Writer) (int64, error) { //nolint:unparam
 }
 
 type rootSummary struct {
-	*projectRootData
-	Action      Action
+	*projectAction
 	UserID      uint32
 	base        *summary.DirectoryPath
 	Base        string
