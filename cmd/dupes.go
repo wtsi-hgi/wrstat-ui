@@ -27,6 +27,7 @@ package cmd
 
 import (
 	"bufio"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -45,6 +46,8 @@ const inputStatsFile = "stats.gz"
 var (
 	minSize int64
 	output  string
+
+	ErrNoStatsFiles = errors.New("no stats files specified")
 )
 
 var dupescmd = &cobra.Command{
@@ -81,28 +84,30 @@ stdout. Files ending in '.gz' will be compressed.
 func parseFiles(args []string) ([]string, error) { //nolint:gocognit
 	var files []string
 
-	if len(args) == 1 { //nolint:nestif
-		fi, err := os.Stat(args[0])
+	for _, arg := range args {
+		fi, err := os.Stat(arg)
 		if err != nil {
 			return nil, err
 		}
 
-		if fi.IsDir() {
-			dirs, err := server.FindDBDirs(args[0], inputStatsFile)
-			if err != nil {
-				return nil, err
-			}
+		if !fi.IsDir() {
+			files = append(files, arg)
 
-			files = make([]string, len(dirs))
-
-			for n, dir := range dirs {
-				files[n] = filepath.Join(dir, inputStatsFile)
-			}
-		} else {
-			files = args
+			continue
 		}
-	} else {
-		files = args
+
+		dirs, err := server.FindDBDirs(arg, inputStatsFile)
+		if err != nil {
+			return nil, err
+		}
+
+		for _, dir := range dirs {
+			files = append(files, filepath.Join(dir, inputStatsFile))
+		}
+	}
+
+	if len(args) == 0 {
+		return nil, ErrNoStatsFiles
 	}
 
 	return files, nil

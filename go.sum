@@ -271,6 +271,8 @@ github.com/mjkwoolnough/javascript v1.4.15 h1:XrWnnRGXqYDP6mlmlkd6IKIV4EXQEmEH5U
 github.com/mjkwoolnough/javascript v1.4.15/go.mod h1:zGQvh50K8o8zaa/b3XH83gsjwSYz5ubq6EgpJw3smxg=
 github.com/mjkwoolnough/parser v1.1.1 h1:mYDd486rqi8hxO5BdbYxpYd8pB5oZrlaxZLkvzLXYx0=
 github.com/mjkwoolnough/parser v1.1.1/go.mod h1:MxM1MZY6A9AeEx6nahIQ6MJaGZqX80n6Vm3zGVqV9FU=
+github.com/mjkwoolnough/rwcount v1.1.1 h1:kvjartDXJGgSrCCFc9rHjMZWhtUKUyeROpwIaRZ9nUw=
+github.com/mjkwoolnough/rwcount v1.1.1/go.mod h1:82FMETte0EmA4oJ0HpwMKk707X31pO8ZY8eaHvIjlO0=
 github.com/mjkwoolnough/tsserver v1.0.11 h1:vceqfxeTPsPA4V+wG5evii+Uka9Ww0BDAcqtJCfzBA4=
 github.com/mjkwoolnough/tsserver v1.0.11/go.mod h1:rnykt6klVAJFKHxHjAd3TNydRCRxtOVuPgTQBVwo124=
 github.com/moby/docker-image-spec v1.3.1 h1:jMKff3w6PgbfSa69GfNg+zN/XLhfXJGnEx3Nl2EsFP0=
