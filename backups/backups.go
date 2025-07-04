@@ -55,11 +55,11 @@ type Backup struct {
 }
 
 type handler struct {
-	root    string
-	backups map[*projectData]io.WriteCloser
-	summary backupSummary
-	quoted  [maxQuotedPathLength]byte
-	tmpPath [maxPathLength + maxFilenameLength]byte
+	root                 string
+	backups, tempbackups map[*projectData]io.WriteCloser
+	summary              backupSummary
+	quoted               [maxQuotedPathLength]byte
+	tmpPath              [maxPathLength + maxFilenameLength]byte
 }
 
 func (h *handler) Handle(file *summary.FileInfo, group *projectAction) error {
@@ -80,15 +80,23 @@ func (h *handler) Handle(file *summary.FileInfo, group *projectAction) error {
 }
 
 func (h *handler) writeBackupFile(file *summary.FileInfo, group *projectAction) error {
-	w, ok := h.backups[group.projectData]
+	path := filepath.Join(h.root, group.Requestor+"_"+group.Name)
+	files := h.backups
+
+	if group.Action == ActionTempBackup {
+		path += "_temp"
+		files = h.tempbackups
+	}
+
+	w, ok := files[group.projectData]
 	if !ok {
-		f, err := os.Create(filepath.Join(h.root, group.Requestor+"_"+group.Name))
+		f, err := os.Create(path)
 		if err != nil {
 			return err
 		}
 
 		w = f
-		h.backups[group.projectData] = w
+		files[group.projectData] = w
 	}
 
 	_, err := w.Write(append(
@@ -274,9 +282,10 @@ func (b *Backup) Process(statsData io.Reader, reportRoot string) error {
 	s := summary.NewSummariser(stats.NewStatsParser(statsData))
 
 	h := &handler{
-		root:    reportRoot,
-		backups: make(map[*projectData]io.WriteCloser),
-		summary: b.summary,
+		root:        reportRoot,
+		backups:     make(map[*projectData]io.WriteCloser),
+		tempbackups: make(map[*projectData]io.WriteCloser),
+		summary:     b.summary,
 	}
 
 	s.AddGlobalOperation(group.NewGrouper(b.sm, h))

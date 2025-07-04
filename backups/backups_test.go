@@ -76,14 +76,14 @@ func TestBackups(t *testing.T) {
 				entries, _ := filepath.Glob(filepath.Join(tmp, "*")) //nolint:errcheck
 				So(entries, ShouldResemble, []string{
 					filepath.Join(tmp, "user1_projectA"),
-					filepath.Join(tmp, "user3_projectB"),
+					filepath.Join(tmp, "user3_projectB_temp"),
 				})
 
 				data, err := os.ReadFile(filepath.Join(tmp, "user1_projectA"))
 				So(err, ShouldBeNil)
 				So(string(data), ShouldEqual, "\"/some/path/to/backup/a.sh\"\n")
 
-				data, err = os.ReadFile(filepath.Join(tmp, "user3_projectB"))
+				data, err = os.ReadFile(filepath.Join(tmp, "user3_projectB_temp"))
 				So(err, ShouldBeNil)
 				So(string(data), ShouldEqual, "\"/some/other/path/b\"\n\"/some/other/path/c\"\n")
 
