@@ -66,8 +66,10 @@ const (
 
 type headers [len(csvHeaders)]int
 
+// Action represents the action for a parsed ReportLine.
 type Action uint8
 
+// Allowed Action states.
 const (
 	ActionWarn Action = iota
 	ActionNoBackup
@@ -90,6 +92,7 @@ var (
 	actionBackupJSON     = []byte("\"" + actionBackupStr + "\"")
 )
 
+// String returns the string representation of the Action.
 func (a Action) String() string {
 	switch a {
 	case ActionWarn:
@@ -105,6 +108,7 @@ func (a Action) String() string {
 	return "invalid action"
 }
 
+// MarshalJSON implements the json.Marshaler interface.
 func (a Action) MarshalJSON() ([]byte, error) {
 	switch a {
 	case ActionWarn:
@@ -120,6 +124,10 @@ func (a Action) MarshalJSON() ([]byte, error) {
 	return nil, ErrInvalidAction
 }
 
+// ReportLine is a parsed entry of a Backup plan CSV.
+//
+// NB: A Backup Action row can be split into multiple ReportLines as described
+// in the comment for ParseCSV.
 type ReportLine struct {
 	Path      []byte
 	Action    Action
@@ -140,6 +148,21 @@ func newLine(line []string, headers headers, action Action, filetype string) *Re
 	}
 }
 
+// ParseCSV parses the given reader for a valid backup plan.
+//
+// The following headers must be in the first row (the order doesn't matter):
+//
+//	reporting_name
+//	reporting_root
+//	requestor
+//	faculty
+//	directory
+//	instruction ['backup' or 'nobackup' or 'tempbackup']
+//	file_types_backup
+//	file_types_ignore
+//
+// (Temp)Backup rows with multiple wildcards are split into multiple lines, and
+// any ignore entries also become their own line.
 func ParseCSV(r io.Reader) ([]*ReportLine, error) { //nolint:gocognit
 	cr := csv.NewReader(r)
 

@@ -47,6 +47,8 @@ const maxQuotedPathLength = (maxPathLength+maxFilenameLength)*4 + 2 + 1
 
 type pathGroup = group.PathGroup[projectAction]
 
+// Backup represents a BackupPlan ready to process wrstat stats data and produce
+// backup sets and summaries.
 type Backup struct {
 	sm      group.StateMachine[projectAction]
 	summary backupSummary
@@ -97,8 +99,10 @@ func (h *handler) writeBackupFile(file *summary.FileInfo, group *projectAction) 
 	return err
 }
 
+// Errors is a slice of errors.
 type Errors []error
 
+// Error implements the error interface.
 func (e Errors) Error() string {
 	var sb strings.Builder
 
@@ -110,6 +114,7 @@ func (e Errors) Error() string {
 	return sb.String()
 }
 
+// Unwrap returns a slice of errors for the errors.Unwrap function.
 func (e Errors) Unwrap() []error {
 	return e
 }
@@ -145,6 +150,13 @@ type projectAction struct {
 	path   string
 }
 
+// New takes a parsed backup plan CSV and optional, additional directories for
+// finding unplanned files outside of project roots.
+//
+// On the Backup object returned the Process method can be called multiple times
+// to produce FOFNs (File of Filenames) of files to be backed up, and the
+// Summarise method can be called to produce a JSON summary of the files
+// processed so far.
 func New(lines []*ReportLine, warnRoots ...string) (*Backup, error) {
 	actions := createActions(lines, warnRoots)
 
@@ -253,6 +265,12 @@ func addRootActions(projectRoots map[string]*projectRootData, actions []pathGrou
 	return actions
 }
 
+// Process summarises the given stats data, produces FOFNs (File of Filenames)
+// of files to be backed up and adds to the summary data which can be written
+// with the Summarise method.
+//
+// Backup FOFNs are written to the reportRoot directory with a file for each
+// requestor+project pair with the filename being `{requestor}_${projectname}`.
 func (b *Backup) Process(statsData io.Reader, reportRoot string) error {
 	s := summary.NewSummariser(stats.NewStatsParser(statsData))
 
@@ -273,6 +291,20 @@ func (b *Backup) Process(statsData io.Reader, reportRoot string) error {
 	return h.Close()
 }
 
+// Summarise writes JSON to the given writer with a row for each
+// root+user+action combination. Each rows with contain the following field:
+//
+//	Faculty   // Absent in warn root entries
+//	Name      // Absent in warn root entries
+//	Requestor // Absent in warn root entries
+//	Root
+//	Action
+//	UserID
+//	Base
+//	Size
+//	Count
+//	OldestMTime
+//	NewestMTime
 func (b *Backup) Summarise(w io.Writer) error {
 	_, err := b.summary.WriteTo(w)
 
