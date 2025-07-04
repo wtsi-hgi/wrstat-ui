@@ -49,13 +49,13 @@ type pathGroup = group.PathGroup[projectAction]
 
 type Backup struct {
 	sm      group.StateMachine[projectAction]
-	summary Summary
+	summary backupSummary
 }
 
 type handler struct {
 	root    string
 	backups map[*projectData]io.WriteCloser
-	summary Summary
+	summary backupSummary
 	quoted  [maxQuotedPathLength]byte
 	tmpPath [maxPathLength + maxFilenameLength]byte
 }
@@ -155,7 +155,7 @@ func New(lines []*ReportLine, warnRoots ...string) (*Backup, error) {
 
 	return &Backup{
 		sm:      sm,
-		summary: make(Summary),
+		summary: make(backupSummary),
 	}, nil
 }
 

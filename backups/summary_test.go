@@ -46,7 +46,7 @@ func TestSummary(t *testing.T) {
 		actions := createActions(lines, []string{"/some/"})
 
 		var (
-			s   = make(Summary)
+			s   = make(backupSummary)
 			buf bytes.Buffer
 		)
 

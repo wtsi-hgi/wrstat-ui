@@ -77,34 +77,34 @@ func (r rootUserAction) compare(s rootUserAction) int { //nolint:gocognit,gocycl
 	return strings.Compare(r.Faculty, s.Faculty)
 }
 
-type Summary map[rootUserAction]*RootSummary
+type backupSummary map[rootUserAction]*rootSummary
 
-func (s Summary) addFile(file *summary.FileInfo, group *projectAction) {
+func (b backupSummary) addFile(file *summary.FileInfo, group *projectAction) {
 	key := rootUserAction{
 		projectRootData: group.projectRootData,
 		userID:          file.UID,
 		action:          group.action,
 	}
 
-	root := s[key]
+	root := b[key]
 	if root == nil {
-		root = &RootSummary{
+		root = &rootSummary{
 			Action:          group.action,
 			UserID:          file.UID,
 			projectRootData: group.projectRootData,
 			OldestMTime:     math.MaxInt64,
 		}
-		s[key] = root
+		b[key] = root
 	}
 
 	root.Add(file)
 }
 
-func (s Summary) WriteTo(w io.Writer) (int64, error) { //nolint:unparam
+func (b backupSummary) WriteTo(w io.Writer) (int64, error) { //nolint:unparam
 	sw := &rwcount.Writer{Writer: w}
 	e := json.NewEncoder(sw)
 	first := true
-	keys := slices.Collect(maps.Keys(s))
+	keys := slices.Collect(maps.Keys(b))
 
 	slices.SortFunc(keys, rootUserAction.compare)
 
@@ -113,7 +113,7 @@ func (s Summary) WriteTo(w io.Writer) (int64, error) { //nolint:unparam
 	var tmpPath [maxPathLength + maxFilenameLength]byte
 
 	for _, rua := range keys {
-		if userRoot := s[rua]; userRoot != nil { //nolint:nestif
+		if userRoot := b[rua]; userRoot != nil { //nolint:nestif
 			if first {
 				first = false
 			} else {
@@ -132,7 +132,7 @@ func (s Summary) WriteTo(w io.Writer) (int64, error) { //nolint:unparam
 	return sw.Count, sw.Err
 }
 
-type RootSummary struct {
+type rootSummary struct {
 	*projectRootData
 	Action      action
 	UserID      uint32
@@ -144,7 +144,7 @@ type RootSummary struct {
 	NewestMTime int64
 }
 
-func (r *RootSummary) Add(file *summary.FileInfo) {
+func (r *rootSummary) Add(file *summary.FileInfo) {
 	if r.base == nil {
 		r.base = file.Path
 	} else {
