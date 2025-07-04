@@ -41,6 +41,9 @@ type charState[T any] struct {
 	Group *T
 }
 
+// PathGroup is a generic type that contains a path, to be matched, and the
+// resultant group data to be returned. The path can contain wildcard (*) chars,
+// which will match against zero of more characters.
 type PathGroup[T any] struct {
 	Path  []byte
 	Group *T
@@ -57,8 +60,12 @@ func (p *PathGroup[T]) shiftPath() byte {
 	return b
 }
 
+// StateMachine is a collection of states that can be used to match a
+// summary.FileInfo to a particular grouping.
 type StateMachine[T any] []charState[T]
 
+// GetGroup matches the given summary.FileInfo to a group, or nil if no group is
+// matched.
 func (s StateMachine[T]) GetGroup(info *summary.FileInfo) *T {
 	return s[s.getState(s.getPathState(info.Path), info.Name)].Group
 }
@@ -180,6 +187,13 @@ func (s StateMachine[T]) fillState(state, loopState uint32, group *T, done map[u
 	}
 }
 
+// NewStateMachine compiles a StateMachine from the given slice of PathGroups.
+//
+// Once compiled, the returned StateMachine can be used to match arbitrary paths
+// and to get the matching Group data.
+//
+// Paths can contain wildcards (*) that will match zero or more arbitrary
+// characters.
 func NewStatemachine[T any](lines []PathGroup[T]) (StateMachine[T], error) {
 	states := make(StateMachine[T], 2, 1024) //nolint:mnd
 

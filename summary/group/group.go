@@ -27,10 +27,15 @@ package group
 
 import "github.com/wtsi-hgi/wrstat-ui/summary"
 
+// Handler is used by NewGrouper to pass each entry of the Summarised stats files
+// combined with the discovered group.
 type Handler[T any] interface {
 	Handle(file *summary.FileInfo, group *T) error
 }
 
+// NewGrouper provides a summary.Operation that matches each entry passed from
+// the summary.Summariser to a group as defined in the given StateMachine, as
+// created with NewStatemachine().
 func NewGrouper[T any](sm StateMachine[T], output Handler[T]) summary.OperationGenerator {
 	return func() summary.Operation {
 		return &grouper[T]{sm: sm, output: output}

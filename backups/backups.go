@@ -149,8 +149,9 @@ type projectAction struct {
 	Action Action
 }
 
-// New takes a parsed backup plan CSV and optional, additional directories for
-// finding unplanned files outside of project roots.
+// New takes a parsed backup plan CSV, as produced by the ParseCSV function, and
+// optional, additional directories for finding unplanned files outside of
+// project roots.
 //
 // On the Backup object returned the Process method can be called multiple times
 // to produce FOFNs (File of Filenames) of files to be backed up, and the
@@ -290,7 +291,7 @@ func (b *Backup) Process(statsData io.Reader, reportRoot string) error {
 }
 
 // Summarise writes JSON to the given writer with a row for each
-// root+user+action combination. Each rows with contain the following field:
+// root+user+action combination. Each rows with contain the following fields:
 //
 //	Faculty   // Absent in warn root entries
 //	Name      // Absent in warn root entries

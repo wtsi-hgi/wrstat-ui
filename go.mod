@@ -188,3 +188,5 @@ replace vimagination.zapto.org/tsserver => github.com/mjkwoolnough/tsserver v1.0
 replace vimagination.zapto.org/httpencoding => github.com/mjkwoolnough/httpencoding v1.0.0
 
 replace vimagination.zapto.org/javascript => github.com/mjkwoolnough/javascript v1.4.15
+
+replace vimagination.zapto.org/rwcount => github.com/mjkwoolnough/rwcount v1.1.1

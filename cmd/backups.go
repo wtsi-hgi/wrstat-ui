@@ -75,8 +75,8 @@ The FOFNs will have a filename with the following format:
 
 …and contain a single, quoted filename on each line of the file.
 
-The summary file will be a JSON file named 'summary.json'. Each row of the JSON
-file will contain the following fields:
+The summary file will be a JSON file named 'summary.json'. The file will contain
+ an array of objects, each of which has the following fields:
 
 	Faculty   // Absent in warn root entries
 	Name      // Absent in warn root entries
@@ -94,90 +94,118 @@ The --root/-r flag can be used to specify additional directories that will be
 used for detecting non-planned for files, flagging them as 'warn'.
 
 Lastly, input files can either be specified directly, with the paths to the
-stats.gz files created by wrstat, or a directory can be specified that will be
+stats.gz files created by wrstat, or directoies can be specified that will be
 searched for stats.gz files in the same manner as the server and watch commands.
 `,
-	Run: func(_ *cobra.Command, args []string) {
-		f := must(os.Open(backupCSV))
-		csv := must(backups.ParseCSV(f))
+	RunE: func(_ *cobra.Command, args []string) error {
+		f, err := os.Open(backupCSV)
+		if err != nil {
+			return err
+		}
+
+		csv, err := backups.ParseCSV(f)
+		if err != nil {
+			return err
+		}
+
 		f.Close()
 
 		if validateCSV {
-			return
+			return nil
 		}
 
-		statsFiles := must(parseFiles(args))
-		r := must(combineStatsFiles(statsFiles))
+		statsFiles, err := parseFiles(args)
+		if err != nil {
+			return err
+		}
 
-		b := must(backups.New(csv, roots...))
+		r, err := combineStatsFiles(statsFiles)
+		if err != nil {
+			return err
+		}
 
-		must("", b.Process(r, reportRoot))
+		b, err := backups.New(csv, roots...)
+		if err != nil {
+			return err
+		}
 
-		f = must(os.Create(filepath.Join(reportRoot, "summary.json")))
+		if err = b.Process(r, reportRoot); err != nil {
+			return err
+		}
 
-		must("", b.Summarise(f))
-		must("", f.Close())
+		f, err = os.Create(filepath.Join(reportRoot, "summary.json"))
+		if err != nil {
+			return err
+		}
+
+		if err = b.Summarise(f); err != nil {
+			return err
+		}
+
+		return f.Close()
 	},
-}
-
-func must[T any](v T, err error) T { //nolint:ireturn
-	if err != nil {
-		die("%s", err)
-	}
-
-	return v
 }
 
 func init() {
 	RootCmd.AddCommand(backupsCmd)
 
-	backupsCmd.Flags().StringVarP(&backupCSV, "csv", "c", "", "Backup CSV input file")
+	backupsCmd.Flags().StringVarP(&backupCSV, "csv", "c", "", "backup plan CSV input file")
 	backupsCmd.Flags().StringVarP(&reportRoot, "output", "o", "", "output directory")
-	backupsCmd.Flags().StringSliceVarP(&roots, "root", "r", nil, "root to add to the warn list")
+	backupsCmd.Flags().StringSliceVarP(&roots, "root", "r", nil, "root to add to the warn list, "+
+		"can be supplied multuple times")
 	backupsCmd.Flags().BoolVarP(&validateCSV, "validate", "v", false, "validate CSV input file only")
 }
 
-type pathFile struct {
+type pathReader struct {
 	path string
 	io.Reader
 }
 
-func combineStatsFiles(filePaths []string) (io.Reader, error) { //nolint:gocognit,gocyclo,funlen
-	files := make([]pathFile, len(filePaths))
+func combineStatsFiles(filePaths []string) (io.Reader, error) {
+	files := make([]*pathReader, len(filePaths))
+
+	var err error
 
 	for n, file := range filePaths {
-		f, err := os.Open(file)
-		if err != nil {
+		if files[n], err = createPathReader(file); err != nil {
 			return nil, err
 		}
-
-		var r io.Reader = f
-
-		if strings.HasSuffix(file, ".gz") {
-			if r, err = gzip.NewReader(f); err != nil {
-				return nil, err
-			}
-		}
-
-		path, err := readFirstPath(r)
-		if err != nil {
-			return nil, err
-		}
-
-		if _, err = f.Seek(0, io.SeekStart); err != nil {
-			return nil, err
-		}
-
-		if strings.HasSuffix(file, ".gz") {
-			if r, err = pgzip.NewReader(f); err != nil {
-				return nil, err
-			}
-		}
-
-		files[n] = pathFile{path, r}
 	}
 
-	return mergeFiles(files)
+	return mergeReaders(files)
+}
+
+func createPathReader(file string) (*pathReader, error) { //nolint:gocyclo
+	f, err := os.Open(file)
+	if err != nil {
+		return nil, err
+	}
+
+	pf := &pathReader{Reader: f}
+	isGzip := strings.HasSuffix(file, ".gz")
+
+	if isGzip {
+		if pf.Reader, err = gzip.NewReader(f); err != nil {
+			return nil, err
+		}
+	}
+
+	pf.path, err = readFirstPath(pf.Reader)
+	if err != nil {
+		return nil, err
+	}
+
+	if _, err = f.Seek(0, io.SeekStart); err != nil {
+		return nil, err
+	}
+
+	if isGzip {
+		if pf.Reader, err = pgzip.NewReader(f); err != nil {
+			return nil, err
+		}
+	}
+
+	return pf, nil
 }
 
 func readFirstPath(f io.Reader) (string, error) {
@@ -190,14 +218,8 @@ func readFirstPath(f io.Reader) (string, error) {
 	return path, nil
 }
 
-func sortFiles(files []pathFile) {
-	slices.SortFunc(files, func(a, b pathFile) int {
-		return strings.Compare(a.path, b.path)
-	})
-}
-
-func mergeFiles(files []pathFile) (io.Reader, error) {
-	sortFiles(files)
+func mergeReaders(files []*pathReader) (io.Reader, error) {
+	sortPathReaders(files)
 
 	readers := make([]io.Reader, 0, len(files))
 
@@ -210,4 +232,10 @@ func mergeFiles(files []pathFile) (io.Reader, error) {
 	}
 
 	return io.MultiReader(readers...), nil
+}
+
+func sortPathReaders(files []*pathReader) {
+	slices.SortFunc(files, func(a, b *pathReader) int {
+		return strings.Compare(a.path, b.path)
+	})
 }
