@@ -40,9 +40,10 @@ import (
 )
 
 var (
-	backupCSV  string
-	reportRoot string
-	roots      []string
+	backupCSV   string
+	reportRoot  string
+	roots       []string
+	validateCSV bool
 )
 
 var backupsCmd = &cobra.Command{
@@ -97,12 +98,16 @@ stats.gz files created by wrstat, or a directory can be specified that will be
 searched for stats.gz files in the same manner as the server and watch commands.
 `,
 	Run: func(_ *cobra.Command, args []string) {
-		statsFiles := must(parseFiles(args))
-		r := must(combineStatsFiles(statsFiles))
 		f := must(os.Open(backupCSV))
 		csv := must(backups.ParseCSV(f))
-
 		f.Close()
+
+		if validateCSV {
+			return
+		}
+
+		statsFiles := must(parseFiles(args))
+		r := must(combineStatsFiles(statsFiles))
 
 		b := must(backups.New(csv, roots...))
 
@@ -129,6 +134,7 @@ func init() {
 	backupsCmd.Flags().StringVarP(&backupCSV, "csv", "c", "", "Backup CSV input file")
 	backupsCmd.Flags().StringVarP(&reportRoot, "output", "o", "", "output directory")
 	backupsCmd.Flags().StringSliceVarP(&roots, "root", "r", nil, "root to add to the warn list")
+	backupsCmd.Flags().BoolVarP(&validateCSV, "validate", "v", false, "validate CSV input file only")
 }
 
 type pathFile struct {
