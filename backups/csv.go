@@ -66,33 +66,55 @@ const (
 
 type headers [len(csvHeaders)]int
 
-type action uint8
+type Action uint8
 
 const (
-	actionWarn action = iota
-	actionNoBackup
-	actionTempBackup
-	actionBackup
+	ActionWarn Action = iota
+	ActionNoBackup
+	ActionTempBackup
+	ActionBackup
+)
+
+const (
+	actionWarnStr       = "warn"
+	actionNoBackupStr   = "nobackup"
+	actionTempBackupStr = "tempbackup"
+	actionBackupStr     = "backup"
 )
 
 //nolint:gochecknoglobals
 var (
-	actionWarnStr       = []byte("\"warn\"")
-	actionNoBackupStr   = []byte("\"nobackup\"")
-	actionTempBackupStr = []byte("\"tempbackup\"")
-	actionBackupStr     = []byte("\"backup\"")
+	actionWarnJSON       = []byte("\"" + actionWarnStr + "\"")
+	actionNoBackupJSON   = []byte("\"" + actionNoBackupStr + "\"")
+	actionTempBackupJSON = []byte("\"" + actionTempBackupStr + "\"")
+	actionBackupJSON     = []byte("\"" + actionBackupStr + "\"")
 )
 
-func (a action) MarshalJSON() ([]byte, error) {
+func (a Action) String() string {
 	switch a {
-	case actionWarn:
-		return actionWarnStr, nil
-	case actionNoBackup:
-		return actionNoBackupStr, nil
-	case actionTempBackup:
-		return actionTempBackupStr, nil
-	case actionBackup:
-		return actionBackupStr, nil
+	case ActionWarn:
+		return actionWarnStr
+	case ActionNoBackup:
+		return actionNoBackupStr
+	case ActionTempBackup:
+		return actionTempBackupStr
+	case ActionBackup:
+		return actionBackupStr
+	}
+
+	return "invalid action"
+}
+
+func (a Action) MarshalJSON() ([]byte, error) {
+	switch a {
+	case ActionWarn:
+		return actionWarnJSON, nil
+	case ActionNoBackup:
+		return actionNoBackupJSON, nil
+	case ActionTempBackup:
+		return actionTempBackupJSON, nil
+	case ActionBackup:
+		return actionBackupJSON, nil
 	}
 
 	return nil, ErrInvalidAction
@@ -100,14 +122,14 @@ func (a action) MarshalJSON() ([]byte, error) {
 
 type ReportLine struct {
 	Path      []byte
-	Action    action
+	Action    Action
 	Requestor string
 	Name      string
 	Faculty   string
 	Root      string
 }
 
-func newLine(line []string, headers headers, action action, filetype string) *ReportLine {
+func newLine(line []string, headers headers, action Action, filetype string) *ReportLine {
 	return &ReportLine{
 		Path:      []byte(filepath.Join(line[headers[colDirectory]], filetype)),
 		Action:    action,
@@ -190,10 +212,10 @@ func processLine(lines []*ReportLine, line []string, headers headers) ([]*Report
 
 	match := defaultMatch
 
-	if a != actionNoBackup { //nolint:nestif
+	if a != ActionNoBackup { //nolint:nestif
 		if ignore := strings.TrimSpace(line[headers[colFileTypesIgnore]]); ignore != "" {
 			for ft := range strings.SplitSeq(ignore, " ") {
-				lines = append(lines, newLine(line, headers, actionNoBackup, ft))
+				lines = append(lines, newLine(line, headers, ActionNoBackup, ft))
 			}
 		}
 
@@ -209,16 +231,16 @@ func processLine(lines []*ReportLine, line []string, headers headers) ([]*Report
 	return lines, nil
 }
 
-func parseAction(actionStr string) (action, error) {
-	var a action
+func parseAction(actionStr string) (Action, error) {
+	var a Action
 
 	switch actionStr {
 	case "backup":
-		a = actionBackup
+		a = ActionBackup
 	case "tempbackup":
-		a = actionTempBackup
+		a = ActionTempBackup
 	case "nobackup":
-		a = actionNoBackup
+		a = ActionNoBackup
 	default:
 		return 0, fmt.Errorf("%s: %w", actionStr, ErrInvalidAction)
 	}

@@ -102,7 +102,7 @@ func TestParseCSV(t *testing.T) {
 				Output: []*ReportLine{
 					{
 						Path:      []byte("/some/path/to/backup/*"),
-						Action:    actionBackup,
+						Action:    ActionBackup,
 						Requestor: "user1",
 						Name:      "projectA",
 						Faculty:   "facultyA",
@@ -117,7 +117,7 @@ func TestParseCSV(t *testing.T) {
 				Output: []*ReportLine{
 					{
 						Path:      []byte("/some/path/to/backup/log*"),
-						Action:    actionNoBackup,
+						Action:    ActionNoBackup,
 						Requestor: "user1",
 						Name:      "projectA",
 						Faculty:   "facultyA",
@@ -125,7 +125,7 @@ func TestParseCSV(t *testing.T) {
 					},
 					{
 						Path:      []byte("/some/path/to/backup/*.log"),
-						Action:    actionNoBackup,
+						Action:    ActionNoBackup,
 						Requestor: "user1",
 						Name:      "projectA",
 						Faculty:   "facultyA",
@@ -133,7 +133,7 @@ func TestParseCSV(t *testing.T) {
 					},
 					{
 						Path:      []byte("/some/path/to/backup/*.txt"),
-						Action:    actionBackup,
+						Action:    ActionBackup,
 						Requestor: "user1",
 						Name:      "projectA",
 						Faculty:   "facultyA",
@@ -150,7 +150,7 @@ func TestParseCSV(t *testing.T) {
 				Output: []*ReportLine{
 					{
 						Path:      []byte("/some/path/to/backup/*.sh"),
-						Action:    actionBackup,
+						Action:    ActionBackup,
 						Requestor: "user1",
 						Name:      "projectA",
 						Faculty:   "facultyA",
@@ -158,7 +158,7 @@ func TestParseCSV(t *testing.T) {
 					},
 					{
 						Path:      []byte("/some/path/to/not/backup/*"),
-						Action:    actionNoBackup,
+						Action:    ActionNoBackup,
 						Requestor: "user1",
 						Name:      "projectA",
 						Faculty:   "facultyB",
@@ -166,7 +166,7 @@ func TestParseCSV(t *testing.T) {
 					},
 					{
 						Path:      []byte("/some/other/path/*.log"),
-						Action:    actionNoBackup,
+						Action:    ActionNoBackup,
 						Requestor: "user2",
 						Name:      "projectB",
 						Faculty:   "facultyA",
@@ -174,7 +174,7 @@ func TestParseCSV(t *testing.T) {
 					},
 					{
 						Path:      []byte("/some/other/path/*"),
-						Action:    actionTempBackup,
+						Action:    ActionTempBackup,
 						Requestor: "user2",
 						Name:      "projectB",
 						Faculty:   "facultyA",

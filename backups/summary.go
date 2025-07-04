@@ -40,7 +40,7 @@ import (
 type rootUserAction struct {
 	*projectRootData
 	userID uint32
-	action action
+	action Action
 }
 
 func (r rootUserAction) compare(s rootUserAction) int { //nolint:gocognit,gocyclo
@@ -134,7 +134,7 @@ func (b backupSummary) WriteTo(w io.Writer) (int64, error) { //nolint:unparam
 
 type rootSummary struct {
 	*projectRootData
-	Action      action
+	Action      Action
 	UserID      uint32
 	base        *summary.DirectoryPath
 	Base        string
