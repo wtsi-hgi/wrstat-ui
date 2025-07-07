@@ -74,7 +74,7 @@ The FOFNs will have a filename with the following format:
 
 	{requestor}_{reporting_name}
 
-…and contain a single, quoted filename on each line of the file.
+…and contain a single, base64 encoded filename on each line of the file.
 
 The summary file will be a JSON file named 'summary.json'. The file will contain
  an array of objects, each of which has the following fields:
