@@ -294,7 +294,7 @@ func (b *Backup) Process(statsData io.Reader, reportRoot string) error {
 }
 
 // Summarise writes JSON to the given writer with a row for each
-// root+user+action combination. Each rows with contain the following fields:
+// root+user+action combination. Each row will contain the following fields:
 //
 //	Faculty   // Absent in warn root entries
 //	Name      // Absent in warn root entries
