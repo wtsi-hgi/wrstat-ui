@@ -40,10 +40,11 @@ import (
 )
 
 var (
-	backupCSV   string
-	reportRoot  string
-	roots       []string
-	validateCSV bool
+	backupCSV     string
+	reportRoot    string
+	summaryOutput string
+	roots         []string
+	validateCSV   bool
 )
 
 var backupsCmd = &cobra.Command{
@@ -133,7 +134,11 @@ searched for stats.gz files in the same manner as the server and watch commands.
 			return err
 		}
 
-		f, err = os.Create(filepath.Join(reportRoot, "summary.json"))
+		if summaryOutput == "" {
+			summaryOutput = filepath.Join(reportRoot, "summary.json")
+		}
+
+		f, err = os.Create(summaryOutput)
 		if err != nil {
 			return err
 		}
@@ -151,6 +156,8 @@ func init() {
 
 	backupsCmd.Flags().StringVarP(&backupCSV, "csv", "c", "", "backup plan CSV input file")
 	backupsCmd.Flags().StringVarP(&reportRoot, "output", "o", "", "output directory")
+	backupsCmd.Flags().StringVarP(&summaryOutput, "summary", "s", "", "summary output location; "+
+		"defaults to $OUTPUTDIR/summary.json")
 	backupsCmd.Flags().StringSliceVarP(&roots, "root", "r", nil, "root to add to the warn list, "+
 		"can be supplied multuple times")
 	backupsCmd.Flags().BoolVarP(&validateCSV, "validate", "v", false, "validate CSV input file only")
