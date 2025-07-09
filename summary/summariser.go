@@ -62,7 +62,7 @@ func newDirectoryPath(name string, depth int, parent *DirectoryPath) *DirectoryP
 // slice.
 func (d *DirectoryPath) AppendTo(p []byte) []byte { //nolint:unparam
 	if d == nil {
-		return nil
+		return p
 	}
 
 	return append(d.Parent.AppendTo(p), d.Name...)
