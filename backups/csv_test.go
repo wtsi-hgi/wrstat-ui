@@ -41,15 +41,15 @@ const (
 		"reporting_root," +
 		"directory," +
 		"instruction ['backup' or 'nobackup' or 'tempbackup']," +
-		"file_types_backup," +
-		"file_types_ignore" +
+		"match," +
+		"ignore" +
 		"\n"
 	testAltHeaders = "requestor," +
 		"instruction ['backup' or 'nobackup' or 'tempbackup']," +
 		"directory," +
-		"file_types_ignore," +
+		"ignore," +
 		"reporting_name," +
-		"file_types_backup," +
+		"match," +
 		"faculty," +
 		"reporting_root" +
 		"\n"
@@ -82,7 +82,7 @@ func TestParseCSV(t *testing.T) {
 			},
 			{
 				Test:  "Missing titles produces error",
-				Input: "reporting_name,requestor,directory,instruction ['backup' or 'nobackup' or 'tempbackup'],file_types_backup,file_types_ignore",
+				Input: "reporting_name,requestor,directory,instruction ['backup' or 'nobackup' or 'tempbackup'],match,ignore",
 				Err:   ErrHeaderNotFound,
 			},
 			{
