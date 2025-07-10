@@ -44,8 +44,8 @@ var (
 		"faculty",
 		"directory",
 		"instruction ['backup' or 'nobackup' or 'tempbackup']",
-		"file_types_backup",
-		"file_types_ignore",
+		"match",
+		"ignore",
 	}
 	defaultMatch      = slices.Values([]string{"*"})
 	ErrHeaderNotFound = errors.New("header not found")
@@ -60,8 +60,8 @@ const (
 	colFaculty
 	colDirectory
 	colAction
-	colFileTypes
-	colFileTypesIgnore
+	colMatch
+	colIgnore
 )
 
 type headers [len(csvHeaders)]int
@@ -158,8 +158,13 @@ func newLine(line []string, headers headers, action Action, filetype string) *Re
 //	faculty
 //	directory
 //	instruction ['backup' or 'nobackup' or 'tempbackup']
-//	file_types_backup
-//	file_types_ignore
+//	match
+//	ignore
+//
+// Where `match` and ignore are space-separated lists of * wildcarded values to
+// match against, such as *.txt. A blank `match` is treated as `*`. Wildcards
+// match `/`, so directory `/a/b` and match `*.txt` will match
+// `/a/b/c/file.txt`.
 //
 // (Temp)Backup rows with multiple wildcards are split into multiple lines, and
 // any ignore entries also become their own line.
@@ -236,13 +241,13 @@ func processLine(lines []*ReportLine, line []string, headers headers) ([]*Report
 	match := defaultMatch
 
 	if a != ActionNoBackup { //nolint:nestif
-		if ignore := strings.TrimSpace(line[headers[colFileTypesIgnore]]); ignore != "" {
+		if ignore := strings.TrimSpace(line[headers[colIgnore]]); ignore != "" {
 			for ft := range strings.SplitSeq(ignore, " ") {
 				lines = append(lines, newLine(line, headers, ActionNoBackup, ft))
 			}
 		}
 
-		if toMatch := strings.TrimSpace(line[headers[colFileTypes]]); toMatch != "" {
+		if toMatch := strings.TrimSpace(line[headers[colMatch]]); toMatch != "" {
 			match = strings.SplitSeq(toMatch, " ")
 		}
 	}
