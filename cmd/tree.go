@@ -1,7 +1,7 @@
 /*******************************************************************************
  * Copyright (c) 2025 Genome Research Ltd.
  *
- * Author: Michael Woolnough <mw31@sanger.ac.uk>
+ * Authors: Michael Woolnough <mw31@sanger.ac.uk>
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -26,40 +26,51 @@
 package cmd
 
 import (
+	"os"
+
 	"github.com/spf13/cobra"
-	"github.com/wtsi-hgi/wrstat-ui/mtimes"
+	"github.com/wtsi-hgi/wrstat-ui/stats"
+	"github.com/wtsi-hgi/wrstat-ui/summary"
+	"github.com/wtsi-hgi/wrstat-ui/summary/datatree"
 )
 
-var mtDBCmd = &cobra.Command{
-	Use:   "mtdb",
-	Short: "generate an mtime tree database",
-	Long: `generate an mtime tree database to be queried with the mtquery subcommand
+var treeOut string
 
-	
-Input files can either be specified directly, with the paths to the stats.gz
-files created by wrstat, or a directory can be specified that will be searched
-for stats.gz files in the same manner as the server and watch commands.
-
-Also requires an output file, specified with the --output/-o flag.
-	`,
-	Run: func(_ *cobra.Command, args []string) {
-		if output == "" {
-			die("require --output file")
-		}
-
-		files, err := parseFiles(args)
+var treeCmd = &cobra.Command{
+	Use:   "tree",
+	Short: "Create a tree database",
+	Long:  ``,
+	RunE: func(_ *cobra.Command, args []string) error {
+		statsFiles, err := parseFiles(args)
 		if err != nil {
-			die("%s", err)
+			return err
 		}
 
-		if err := mtimes.Build(files, output); err != nil {
-			die("%s", err)
+		r, err := combineStatsFiles(statsFiles)
+		if err != nil {
+			return err
 		}
+
+		s := summary.NewSummariser(stats.NewStatsParser(r))
+
+		f, err := os.Create(treeOut)
+		if err != nil {
+			return err
+		}
+
+		s.AddDirectoryOperation(datatree.NewTree(f))
+
+		if err := s.Summarise(); err != nil {
+			return err
+		}
+
+		return f.Close()
 	},
 }
 
 func init() {
-	RootCmd.AddCommand(mtDBCmd)
+	treeCmd.Flags().StringVarP(&treeOut, "tree", "t", "",
+		"path to store tree representaion of provided wrstat files")
 
-	mtDBCmd.Flags().StringVarP(&output, "output", "o", "-", "file to output mtime tree")
+	RootCmd.AddCommand(treeCmd)
 }
