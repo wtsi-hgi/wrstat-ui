@@ -1,4 +1,4 @@
-package timetree
+package datatree
 
 import (
 	"bytes"
@@ -13,7 +13,7 @@ import (
 	"vimagination.zapto.org/tree"
 )
 
-func NewTimeTree(w io.Writer) summary.OperationGenerator {
+func NewTree(w io.Writer) summary.OperationGenerator {
 	ctx, cancel := context.WithCancelCause(context.Background())
 	next := newNode(ctx)
 
@@ -31,8 +31,9 @@ func NewTimeTree(w io.Writer) summary.OperationGenerator {
 	}
 }
 
-type IDTime struct {
-	ID, Time uint32
+type IDData struct {
+	ID uint32
+	*Meta
 }
 
 type NameChild struct {
@@ -52,8 +53,8 @@ type Node struct {
 	uid, gid uint32
 	mtime    int64
 
-	users  IDTimes
-	groups IDTimes
+	users  IDMeta
+	groups IDMeta
 }
 
 func newNode(ctx context.Context) *Node {
@@ -61,15 +62,30 @@ func newNode(ctx context.Context) *Node {
 		ctx:    ctx,
 		yield:  make(chan NameChild),
 		writer: make(chan *byteio.StickyLittleEndianWriter),
-		users:  make(IDTimes),
-		groups: make(IDTimes),
+		users:  make(IDMeta),
+		groups: make(IDMeta),
 	}
 }
 
-type IDTimes map[uint32]uint32
+type Meta struct {
+	MTime uint32
+	Files uint32
+	Bytes uint64
+}
 
-func (i IDTimes) Add(id uint32, t int64) {
-	i[id] = max(i[id], uint32(t))
+type IDMeta map[uint32]*Meta
+
+func (i IDMeta) Add(id uint32, t int64, size int64) {
+	existing, ok := i[id]
+	if !ok {
+		existing = new(Meta)
+
+		i[id] = existing
+	}
+
+	existing.MTime = max(existing.MTime, uint32(t))
+	existing.Files++
+	existing.Bytes += uint64(size)
 }
 
 func (n *Node) Add(info *summary.FileInfo) error {
@@ -83,14 +99,14 @@ func (n *Node) Add(info *summary.FileInfo) error {
 			return err
 		}
 	} else if info.Path == n.path {
-		if err := n.sendChild(info.Name, file(info.UID, info.GID, info.MTime)); err != nil {
+		if err := n.sendChild(info.Name, file(info.UID, info.GID, info.MTime, info.Size)); err != nil {
 			return err
 		}
 	}
 
 	if !info.IsDir() {
-		n.users.Add(info.UID, info.MTime)
-		n.groups.Add(info.GID, info.MTime)
+		n.users.Add(info.UID, info.MTime, info.Size)
+		n.groups.Add(info.GID, info.MTime, info.Size)
 	}
 
 	return nil
@@ -160,13 +176,13 @@ func (n *Node) WriteTo(w io.Writer) (int64, error) {
 	return lw.Count, lw.Err
 }
 
-func getSortedIDTimes(idt IDTimes) []IDTime {
-	var idts []IDTime
+func getSortedIDTimes(idt IDMeta) []IDData {
+	var idts []IDData
 
-	for id, mtime := range idt {
-		it := IDTime{id, mtime}
+	for id, meta := range idt {
+		it := IDData{id, meta}
 
-		idx, _ := slices.BinarySearchFunc(idts, it, func(a, b IDTime) int {
+		idx, _ := slices.BinarySearchFunc(idts, it, func(a, b IDData) int {
 			return int(a.ID) - int(b.ID)
 		})
 
@@ -176,27 +192,30 @@ func getSortedIDTimes(idt IDTimes) []IDTime {
 	return idts
 }
 
-func writeIDTimes(w *byteio.StickyLittleEndianWriter, idts []IDTime) {
+func writeIDTimes(w *byteio.StickyLittleEndianWriter, idts []IDData) {
 	w.WriteUintX(uint64(len(idts)))
 
 	for _, idt := range idts {
 		w.WriteUint32(idt.ID)
-		w.WriteUint32(idt.Time)
+		w.WriteUint32(idt.MTime)
+		w.WriteUint32(idt.Files)
+		w.WriteUint64(idt.Bytes)
 	}
 }
 
-func file(uid, gid uint32, mtime int64) tree.Leaf {
+func file(uid, gid uint32, mtime, size int64) tree.Leaf {
 	var buf bytes.Buffer
 
 	w := byteio.StickyLittleEndianWriter{Writer: &buf}
 
-	writeFile(&w, uid, gid, mtime)
+	writeFile(&w, uid, gid, mtime, size)
 
 	return tree.Leaf(buf.Bytes())
 }
 
-func writeFile(w *byteio.StickyLittleEndianWriter, uid, gid uint32, mtime int64) {
+func writeFile(w *byteio.StickyLittleEndianWriter, uid, gid uint32, mtime, size int64) {
 	w.WriteUint32(uid)
 	w.WriteUint32(gid)
 	w.WriteUint32(uint32(mtime))
+	w.WriteUint64(uint64(size))
 }

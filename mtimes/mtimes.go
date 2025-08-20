@@ -12,7 +12,7 @@ import (
 	"github.com/klauspost/pgzip"
 	"github.com/wtsi-hgi/wrstat-ui/stats"
 	"github.com/wtsi-hgi/wrstat-ui/summary"
-	"github.com/wtsi-hgi/wrstat-ui/summary/timetree"
+	"github.com/wtsi-hgi/wrstat-ui/summary/datatree"
 	"golang.org/x/exp/slices"
 )
 
@@ -89,7 +89,7 @@ func buildTree(files []timeFile, output string) error {
 	buf := bufio.NewWriter(w)
 
 	s := summary.NewSummariser(stats.NewStatsParser(r))
-	s.AddDirectoryOperation(timetree.NewTimeTree(buf))
+	s.AddDirectoryOperation(datatree.NewTree(buf))
 
 	if err = s.Summarise(); err != nil {
 		return err
@@ -120,6 +120,4 @@ func mergeFiles(files []timeFile) (io.Reader, error) {
 	return io.MultiReader(readers...), nil
 }
 
-var (
-	ErrNoFiles = errors.New("no files supplied")
-)
+var ErrNoFiles = errors.New("no files supplied")

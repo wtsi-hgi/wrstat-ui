@@ -1,4 +1,4 @@
-package timetree
+package datatree
 
 import (
 	"bytes"
@@ -20,20 +20,20 @@ func TestTimeTree(t *testing.T) {
 		f := statsdata.NewRoot("/", 12345)
 
 		f.AddDirectory("opt").AddDirectory("userDir").SetMeta(1, 1, 98765)
-		statsdata.AddFile(f, "opt/userDir/file1.txt", 1, 1, 0, 0, 98766)
-		statsdata.AddFile(f, "opt/userDir/file2.txt", 1, 2, 0, 0, 98767)
-		statsdata.AddFile(f, "opt/subDir/subsubDir/file3.txt", 1, 2, 0, 0, 98000)
+		statsdata.AddFile(f, "opt/userDir/file1.txt", 1, 1, 9, 0, 98766)
+		statsdata.AddFile(f, "opt/userDir/file2.txt", 1, 2, 8, 0, 98767)
+		statsdata.AddFile(f, "opt/subDir/subsubDir/file3.txt", 1, 2, 7, 0, 98000)
 
 		f.AddDirectory("opt").AddDirectory("other").SetMeta(2, 1, 12349)
-		statsdata.AddFile(f, "opt/other/someDir/someFile", 2, 1, 0, 0, 12346)
-		statsdata.AddFile(f, "opt/other/someDir/someFile", 2, 1, 0, 0, 12346)
+		statsdata.AddFile(f, "opt/other/someDir/someFile", 2, 1, 6, 0, 12346)
+		statsdata.AddFile(f, "opt/other/someDir/someFile", 2, 1, 5, 0, 12346)
 
 		p := stats.NewStatsParser(f.AsReader())
 		s := summary.NewSummariser(p)
 
 		var treeDB bytes.Buffer
 
-		s.AddDirectoryOperation(NewTimeTree(&treeDB))
+		s.AddDirectoryOperation(NewTree(&treeDB))
 
 		So(s.Summarise(), ShouldBeNil)
 
@@ -44,13 +44,13 @@ func TestTimeTree(t *testing.T) {
 			r := bytes.NewReader(tr.Data())
 
 			userSummary, groupSummary := readSummary(r)
-			So(userSummary, ShouldResemble, []IDTime{
-				{1, 98767},
-				{2, 12346},
+			So(userSummary, ShouldResemble, []IDData{
+				{1, &Meta{MTime: 98767, Files: 3, Bytes: 24}},
+				{2, &Meta{MTime: 12346, Files: 1, Bytes: 5}},
 			})
-			So(groupSummary, ShouldResemble, []IDTime{
-				{1, 98766},
-				{2, 98767},
+			So(groupSummary, ShouldResemble, []IDData{
+				{1, &Meta{MTime: 98766, Files: 2, Bytes: 14}},
+				{2, &Meta{MTime: 98767, Files: 2, Bytes: 15}},
 			})
 
 			So(slices.Sorted(maps.Keys(maps.Collect(tr.Children()))), ShouldResemble, []string{
@@ -65,13 +65,13 @@ func TestTimeTree(t *testing.T) {
 			r := bytes.NewReader(tr.Data())
 
 			userSummary, groupSummary := readSummary(r)
-			So(userSummary, ShouldResemble, []IDTime{
-				{1, 98767},
-				{2, 12346},
+			So(userSummary, ShouldResemble, []IDData{
+				{1, &Meta{MTime: 98767, Files: 3, Bytes: 24}},
+				{2, &Meta{MTime: 12346, Files: 1, Bytes: 5}},
 			})
-			So(groupSummary, ShouldResemble, []IDTime{
-				{1, 98766},
-				{2, 98767},
+			So(groupSummary, ShouldResemble, []IDData{
+				{1, &Meta{MTime: 98766, Files: 2, Bytes: 14}},
+				{2, &Meta{MTime: 98767, Files: 2, Bytes: 15}},
 			})
 
 			So(slices.Sorted(maps.Keys(maps.Collect(tr.Children()))), ShouldResemble, []string{
@@ -91,32 +91,36 @@ func TestTimeTree(t *testing.T) {
 
 			r := bytes.NewReader(tr.Data())
 
-			rootUID, rootGID, rootMtime := readMeta(r)
+			rootUID, rootGID, rootMtime, rootBytes := readMeta(r)
 			So(rootUID, ShouldEqual, 1)
 			So(rootGID, ShouldEqual, 1)
 			So(rootMtime, ShouldEqual, 98766)
+			So(rootBytes, ShouldEqual, 9)
 		})
 	})
 }
 
-func readMeta(r io.Reader) (uint32, uint32, int64) {
+func readMeta(r io.Reader) (uint32, uint32, int64, uint64) {
 	lr := byteio.StickyLittleEndianReader{Reader: r}
 
-	return lr.ReadUint32(), lr.ReadUint32(), int64(lr.ReadUint32())
+	return lr.ReadUint32(), lr.ReadUint32(), int64(lr.ReadUint32()), lr.ReadUint64()
 }
 
-func readSummary(r io.Reader) ([]IDTime, []IDTime) {
+func readSummary(r io.Reader) ([]IDData, []IDData) {
 	lr := byteio.StickyLittleEndianReader{Reader: r}
 
 	return readArray(&lr), readArray(&lr)
 }
 
-func readArray(lr *byteio.StickyLittleEndianReader) []IDTime {
-	idts := make([]IDTime, lr.ReadUintX())
+func readArray(lr *byteio.StickyLittleEndianReader) []IDData {
+	idts := make([]IDData, lr.ReadUintX())
 
 	for n := range idts {
 		idts[n].ID = lr.ReadUint32()
-		idts[n].Time = lr.ReadUint32()
+		idts[n].Meta = new(Meta)
+		idts[n].MTime = lr.ReadUint32()
+		idts[n].Files = lr.ReadUint32()
+		idts[n].Bytes = lr.ReadUint64()
 	}
 
 	return idts
