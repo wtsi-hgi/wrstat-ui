@@ -41,6 +41,8 @@ const (
 	CharType    = 'c'
 )
 
+var slash = []byte{'/'}
+
 // Error is the type of the constant Err* variables.
 type Error string
 
@@ -345,6 +347,10 @@ func (p *StatsParser) parseLine() bool {
 	}
 
 	p.entryType = entryTypeCol[0]
+
+	if bytes.HasSuffix(p.path, slash) {
+		p.entryType = DirType
+	}
 
 	var none int64
 

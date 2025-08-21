@@ -102,6 +102,29 @@ func TestParseStats(t *testing.T) {
 
 			So(files, ShouldBeEmpty)
 		})
+
+		Convey("Directories marked as file will be typed as a directory", func() {
+			io.Copy(&sb, f)
+
+			p = NewStatsParser(strings.NewReader(strings.ReplaceAll(sb.String(), "\td\t", "\tf\t")))
+
+			info := new(FileInfo)
+			dirs := 0
+			files := 0
+
+			for p.Scan(info) == nil {
+				if info.EntryType == DirType {
+					dirs++
+				} else {
+					files++
+				}
+			}
+
+			expectedFiles := 5 + 5*4 + 5*4*3 + 5*4*3*2 + 5*4*3*2*1
+
+			So(dirs, ShouldEqual, expectedFiles+1)
+			So(files, ShouldEqual, expectedFiles)
+		})
 	})
 
 	Convey("Scan generates Err() when", t, func() {
