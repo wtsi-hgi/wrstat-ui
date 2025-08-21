@@ -41,7 +41,7 @@ const (
 	CharType    = 'c'
 )
 
-var slash = []byte{'/'}
+var slash = []byte{'/'} //nolint:gochecknoglobals
 
 // Error is the type of the constant Err* variables.
 type Error string

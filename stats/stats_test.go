@@ -104,7 +104,7 @@ func TestParseStats(t *testing.T) {
 		})
 
 		Convey("Directories marked as file will be typed as a directory", func() {
-			io.Copy(&sb, f)
+			io.Copy(&sb, f) //nolint:errcheck
 
 			p = NewStatsParser(strings.NewReader(strings.ReplaceAll(sb.String(), "\td\t", "\tf\t")))
 
