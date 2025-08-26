@@ -419,6 +419,7 @@ func TestWatch(t *testing.T) {
 				},
 				Override: 1,
 				Retries:  30,
+				State:    jobqueue.JobStateDelayed,
 			},
 		})
 
@@ -453,6 +454,7 @@ func TestWatch(t *testing.T) {
 				},
 				Override: 1,
 				Retries:  30,
+				State:    jobqueue.JobStateDelayed,
 			},
 		})
 	})
