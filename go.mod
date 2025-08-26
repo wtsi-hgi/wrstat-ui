@@ -22,7 +22,6 @@ require (
 	vimagination.zapto.org/byteio v1.0.5
 	vimagination.zapto.org/httpfile v1.0.0
 	vimagination.zapto.org/parser v1.2.2
-	vimagination.zapto.org/rwcount v1.1.1
 	vimagination.zapto.org/tsserver v1.0.11
 )
 
