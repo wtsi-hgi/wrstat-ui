@@ -69,7 +69,15 @@ func Watch(inputDirs []string, outputDir, quotaPath, basedirsConfig, mounts stri
 }
 
 func watch(inputDirs []string, outputDir, quotaPath, basedirsConfig, mounts string, logger log15.Logger) error { //nolint:gocognit,gocyclo,lll
-	var err error
+	s, err := client.New(client.SchedulerSettings{
+		Logger:  logger,
+		Timeout: connectTimeout,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create wr client: %w", err)
+	}
+
+	defer s.Disconnect() //nolint:errcheck
 
 	for n := range inputDirs {
 		if inputDirs[n], err = filepath.Abs(inputDirs[n]); err != nil {
@@ -87,12 +95,14 @@ func watch(inputDirs []string, outputDir, quotaPath, basedirsConfig, mounts stri
 			return fmt.Errorf("error getting input DB paths: %w", err)
 		}
 
-		if err := scheduleSummarisers(inputDir, outputDir, quotaPath, basedirsConfig, mounts,
-			slices.DeleteFunc(inputPaths, func(p string) bool {
-				base := filepath.Base(p)
+		inputPaths = slices.DeleteFunc(inputPaths, func(p string) bool {
+			base := filepath.Base(p)
 
-				return entryExists(filepath.Join(outputDir, base)) || entryExists(filepath.Join(outputDir, "."+base))
-			}), logger); err != nil {
+			return entryExists(filepath.Join(outputDir, base)) || entryExists(filepath.Join(outputDir, "."+base))
+		})
+
+		if err := scheduleSummarisers(s, inputDir, outputDir, quotaPath,
+			basedirsConfig, mounts, inputPaths, logger); err != nil {
 			return err
 		}
 	}
@@ -106,18 +116,8 @@ func entryExists(path string) bool {
 	return err == nil
 }
 
-func scheduleSummarisers(inputDir, outputDir, quotaPath, basedirsConfig, mounts string,
+func scheduleSummarisers(s *client.Scheduler, inputDir, outputDir, quotaPath, basedirsConfig, mounts string,
 	inputPaths []string, logger log15.Logger) error {
-	s, err := client.New(client.SchedulerSettings{
-		Logger:  logger,
-		Timeout: connectTimeout,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to create wr client: %w", err)
-	}
-
-	defer s.Disconnect() //nolint:errcheck
-
 	jobs := make([]*jobqueue.Job, 0, len(inputPaths))
 
 	for _, p := range inputPaths {
@@ -131,7 +131,7 @@ func scheduleSummarisers(inputDir, outputDir, quotaPath, basedirsConfig, mounts 
 
 	if len(jobs) == 0 {
 		return nil
-	} else if err = s.SubmitJobs(jobs); err != nil {
+	} else if err := s.SubmitJobs(jobs); err != nil {
 		return fmt.Errorf("error submitting jobs to wr: %w", err)
 	}
 
