@@ -22,6 +22,7 @@
  * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  ******************************************************************************/
+
 package watch
 
 import (
@@ -109,6 +110,7 @@ func TestWatch(t *testing.T) {
 					},
 					Override: 1,
 					Retries:  30,
+					State:    jobqueue.JobStateDelayed,
 				},
 			})
 		})
@@ -151,6 +153,7 @@ func TestWatch(t *testing.T) {
 					},
 					Override: 1,
 					Retries:  30,
+					State:    jobqueue.JobStateDelayed,
 				},
 			})
 		})
@@ -213,6 +216,7 @@ func TestWatch(t *testing.T) {
 					},
 					Override: 1,
 					Retries:  30,
+					State:    jobqueue.JobStateDelayed,
 				},
 			})
 		})
@@ -249,6 +253,7 @@ func TestWatch(t *testing.T) {
 					},
 					Override: 1,
 					Retries:  30,
+					State:    jobqueue.JobStateDelayed,
 				},
 				{
 					Cmd: fmt.Sprintf(`%[1]q summarise -d "%[2]s/.98765_c" `+
@@ -268,6 +273,7 @@ func TestWatch(t *testing.T) {
 					},
 					Override: 1,
 					Retries:  30,
+					State:    jobqueue.JobStateDelayed,
 				},
 			})
 		})
