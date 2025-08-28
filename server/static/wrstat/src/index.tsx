@@ -41,8 +41,13 @@ const auth = ready.then(Auth),
   nullDate = "0001-01-01T00:00:00Z",
   stringSort = new Intl.Collator().compare,
   timestampFormatter = new Intl.DateTimeFormat("en-GB", {
-    dateStyle: "long",
-    timeStyle: "long",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
   }),
   daysUntilQuotaFull = (date: string) => (new Date(date).valueOf() - now) / day;
 
@@ -94,36 +99,35 @@ const CollapsibleDBList = ({
         const toggleRest = (e: React.MouseEvent<HTMLButtonElement>) => {
           if (!restRef.current) return;
 
-          const isHidden = restRef.current.style.display === "none";
-          restRef.current.style.display = isHidden ? "block" : "none";
+          const isHidden = restRef.current.classList.contains("hidden");
+          restRef.current.classList.toggle("hidden");
           (e.currentTarget as HTMLButtonElement).textContent = isHidden
             ? "−"
             : "+";
         };
 
         return (
-          <div key={group} style={{ marginBottom: "6px" }}>
-            <div>
-              <strong>{group}</strong> :{" "}
-              {timestampFormatter.format(new Date(latestUpdated * 1000))}
-              {entries.length > 1 && (
-                <button onClick={toggleRest} style={{ marginLeft: "8px" }}>
+          <div key={group} className="db-group">
+            <div className="db-row">
+              <span className="db-dir">{group}</span>
+               {entries.length > 0 && (
+                <button onClick={toggleRest} className="db-toggle">
                   +
                 </button>
               )}
+              <span className="db-date">
+                {timestampFormatter.format(new Date(latestUpdated * 1000))}
+              </span>
+             
             </div>
-            {entries.length > 1 && (
-              <div
-                ref={restRef}
-                style={{
-                  display: "none",
-                  marginLeft: "16px",
-                  fontSize: "0.9em",
-                }}
-              >
+            {entries.length > 0 && (
+              <div ref={restRef} className="db-rest hidden">
                 {entries.map(([db, ts]) => (
-                  <div key={db}>
-                    {db} : {timestampFormatter.format(new Date(ts * 1000))}
+                  <div key={db} className="db-row">
+                    <span className="db-dir">{db}</span>
+                    <span className="db-date">
+                      {timestampFormatter.format(new Date(ts * 1000))}
+                    </span>
                   </div>
                 ))}
               </div>
