@@ -26,7 +26,7 @@
  ******************************************************************************/
 
 import "./index.css";
-import { createRef, StrictMode } from "react";
+import { StrictMode, useRef } from "react";
 import { createRoot } from "react-dom/client";
 import App from "./App";
 import Auth, { logout } from "./auth";
@@ -95,7 +95,7 @@ const CollapsibleDBList = ({
 
         const [, latestUpdated] = entries[latestIndex];
 
-        const restRef = createRef<HTMLDivElement>();
+        const restRef = useRef<HTMLDivElement>(null);
         const toggleRest = (e: React.MouseEvent<HTMLButtonElement>) => {
           if (!restRef.current) return;
 
@@ -110,28 +110,23 @@ const CollapsibleDBList = ({
           <div key={group} className="db-group">
             <div className="db-row">
               <span className="db-dir">{group}</span>
-               {entries.length > 0 && (
                 <button onClick={toggleRest} className="db-toggle">
                   +
                 </button>
-              )}
               <span className="db-date">
                 {timestampFormatter.format(new Date(latestUpdated * 1000))}
               </span>
-             
             </div>
-            {entries.length > 0 && (
-              <div ref={restRef} className="db-rest hidden">
-                {entries.map(([db, ts]) => (
-                  <div key={db} className="db-row">
-                    <span className="db-dir">{db}</span>
-                    <span className="db-date">
-                      {timestampFormatter.format(new Date(ts * 1000))}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            )}
+            <div ref={restRef} className="db-rest hidden">
+              {entries.map(([db, ts]) => (
+                <div key={db} className="db-row">
+                  <span className="db-dir">{db}</span>
+                  <span className="db-date">
+                    {timestampFormatter.format(new Date(ts * 1000))}
+                  </span>
+                </div>
+              ))}
+            </div>
           </div>
         );
       })}
