@@ -25,87 +25,243 @@
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  ******************************************************************************/
 
-import './index.css';
-import { StrictMode } from 'react';
-import { createRoot } from 'react-dom/client';
-import App from './App';
-import Auth, { logout } from './auth';
-import { approxTimeAgo } from './format';
-import ready from './ready';
-import RPC from './rpc';
-import './analytics';
+import "./index.css";
+import { StrictMode, useRef } from "react";
+import { createRoot } from "react-dom/client";
+import App from "./App";
+import Auth, { logout } from "./auth";
+import { approxTimeAgo } from "./format";
+import ready from "./ready";
+import RPC from "./rpc";
+import "./analytics";
 
 const auth = ready.then(Auth),
-	now = Date.now(),
-	day = 86_400_000,
-	nullDate = "0001-01-01T00:00:00Z",
-	stringSort = new Intl.Collator().compare,
-	timestampFormatter = new Intl.DateTimeFormat("en-GB", {
-		dateStyle: "long",
-		timeStyle: "long",
-	}),
-	daysUntilQuotaFull = (date: string) => (new Date(date).valueOf() - now) / day;
+  now = Date.now(),
+  day = 86_400_000,
+  nullDate = "0001-01-01T00:00:00Z",
+  stringSort = new Intl.Collator().compare,
+  timestampFormatter = new Intl.DateTimeFormat("en-GB", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }),
+  daysUntilQuotaFull = (date: string) => (new Date(date).valueOf() - now) / day;
 
-auth.catch(() => createRoot(document.body).render(<StrictMode>
-	<div id="login"><form action="/login"><input type="submit" value="Sign in via Okta" /></form></div>
-</StrictMode>));
+auth.catch(() =>
+  createRoot(document.body).render(
+    <StrictMode>
+      <div id="login">
+        <form action="/login">
+          <input type="submit" value="Sign in via Okta" />
+        </form>
+      </div>
+    </StrictMode>
+  )
+);
 
-auth.then(username => Promise.all([
-	username,
-	RPC.getGroupUsageData(0).then(gud => {
-		for (const d of gud) {
-			d.percentSize = Math.round(10000 * d.UsageSize / d.QuotaSize) / 100;
-			d.percentInodes = Math.round(10000 * d.UsageInodes / d.QuotaInodes) / 100;
+const CollapsibleDBList = ({
+  timestamps,
+}: {
+  timestamps: Record<string, number>;
+}) => {
+  const groups: Record<string, [string, number][]> = {};
 
-			let spaceOK = false, filesOK = false;
+  for (const [db, ts] of Object.entries(timestamps)) {
+    const normalizedDB = db.replaceAll("／", "/").trim();
 
-			if (d.DateNoSpace === nullDate) {
-				spaceOK = true;
-			} else {
-				spaceOK = daysUntilQuotaFull(d.DateNoSpace) > 3;
-			}
+    const match = normalizedDB.match(/^\/[^/]+/);
+    if (!match) continue;
 
-			if (d.DateNoFiles === nullDate) {
-				filesOK = true;
-			} else {
-				filesOK = daysUntilQuotaFull(d.DateNoFiles) > 3;
-			}
+    const group = match[0];
+    if (!groups[group]) groups[group] = [];
+    groups[group].push([normalizedDB, ts]);
+  }
 
-			d.status = spaceOK && filesOK ? "OK" : "Not OK";
-		}
+  return (
+    <div>
+      {Object.entries(groups).map(([group, entries]) => {
+        if (!entries.length) return null;
 
-		return gud;
-	}),
-	RPC.getUserUsageData(0),
-	RPC.getChildren({ path: "/" }),
-	RPC.getDBTimestamps()
-]))
-	.then(([username, groupUsage, userUsage, { areas }, timestamps]) => createRoot(document.body.firstElementChild!).render(<StrictMode>
-		<svg xmlns="http://www.w3.org/2000/svg" style={{ width: 0, height: 0 }}>
-			<symbol id="ok" viewBox="0 0 100 100">
-				<circle cx="50" cy="50" r="45" stroke="currentColor" fill="none" strokeWidth="10" />
-				<path d="M31,50 l13,13 l26,-26" stroke="currentColor" fill="none" strokeWidth="10" strokeLinecap="round" strokeLinejoin="round" />
-			</symbol>
-			<symbol id="notok" viewBox="0 0 100 100">
-				<circle cx="50" cy="50" r="45" stroke="currentColor" fill="none" strokeWidth="10" />
-				<path d="M35,35 l30,30 M35,65 l30,-30" stroke="currentColor" fill="none" strokeWidth="10" strokeLinecap="round" />
-			</symbol>
-			<symbol id="lock" viewBox="0 0 100 100">
-				<rect rx="15" x="5" y="38" width="90" height="62" fill="currentColor" />
-				<path d="M27,40 v-10 a1,1 0,0,1 46,0 v10" fill="none" stroke="currentColor" strokeWidth="12" />
-			</symbol>
-			<symbol id="emptyDirectory" viewBox="0 0 130 100">
-				<path d="M5,15 s0,-5 5,-5 h35 s5,0 5,5 s0,5 5,5 h35 s10,0 10,10 v10 h-65 s-6,0 -10,5 l-20,40 z M5,90 l20,-40 s4,-8 10,-8 h80 s12,0 10,10 l-20,40 s-3,10 -10,10 h-80 s-10,0 -10,-10 z" fill="currentColor" />
-				<path d="M103,10 l15,15 M118,10 l-15,15" stroke="currentColor" fill="none" strokeWidth="3" strokeLinecap="round" />
-			</symbol>
-		</svg>
-		<div id="auth">{username} - <button onClick={e => {
-			if (e.button !== 0) {
-				return;
-			}
+        entries.sort((a, b) => stringSort(a[0], b[0]));
 
-			logout();
-		}}>Logout</button></div>
-		<div id="timestamp" data-timestamps={Object.entries(timestamps).sort(([a], [b]) => stringSort(a, b)).map(([db, lastUpdated]) => `${db.replaceAll("／", "/")}: ${timestampFormatter.format(new Date(lastUpdated * 1000))}`).join("\n")}>Database updated: {approxTimeAgo(1000 * Math.max(...Object.values(timestamps)))}</div>
-		<App groupUsage={groupUsage} userUsage={userUsage} areas={areas} />
-	</StrictMode >));
+        const latestIndex = entries.reduce(
+          (maxIdx, curr, idx) => (curr[1] > entries[maxIdx][1] ? idx : maxIdx),
+          0
+        );
+
+        const [, latestUpdated] = entries[latestIndex];
+
+        const restRef = useRef<HTMLDivElement>(null);
+        const toggleRest = (e: React.MouseEvent<HTMLButtonElement>) => {
+          if (!restRef.current) return;
+
+          const isHidden = restRef.current.classList.contains("hidden");
+          restRef.current.classList.toggle("hidden");
+          (e.currentTarget as HTMLButtonElement).textContent = isHidden
+            ? "−"
+            : "+";
+        };
+
+        return (
+          <div key={group} className="db-group">
+            <div className="db-row">
+              <span className="db-dir">{group}</span>
+                <button onClick={toggleRest} className="db-toggle">
+                  +
+                </button>
+              <span className="db-date">
+                {timestampFormatter.format(new Date(latestUpdated * 1000))}
+              </span>
+            </div>
+            <div ref={restRef} className="db-rest hidden">
+              {entries.map(([db, ts]) => (
+                <div key={db} className="db-row">
+                  <span className="db-dir">{db}</span>
+                  <span className="db-date">
+                    {timestampFormatter.format(new Date(ts * 1000))}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+};
+
+auth
+  .then((username) =>
+    Promise.all([
+      username,
+      RPC.getGroupUsageData(0).then((gud) => {
+        for (const d of gud) {
+          d.percentSize = Math.round((10000 * d.UsageSize) / d.QuotaSize) / 100;
+          d.percentInodes =
+            Math.round((10000 * d.UsageInodes) / d.QuotaInodes) / 100;
+
+          let spaceOK = false,
+            filesOK = false;
+
+          if (d.DateNoSpace === nullDate) {
+            spaceOK = true;
+          } else {
+            spaceOK = daysUntilQuotaFull(d.DateNoSpace) > 3;
+          }
+
+          if (d.DateNoFiles === nullDate) {
+            filesOK = true;
+          } else {
+            filesOK = daysUntilQuotaFull(d.DateNoFiles) > 3;
+          }
+
+          d.status = spaceOK && filesOK ? "OK" : "Not OK";
+        }
+
+        return gud;
+      }),
+      RPC.getUserUsageData(0),
+      RPC.getChildren({ path: "/" }),
+      RPC.getDBTimestamps(),
+    ])
+  )
+  .then(([username, groupUsage, userUsage, { areas }, timestamps]) =>
+    createRoot(document.body.firstElementChild!).render(
+      <StrictMode>
+        <svg xmlns="http://www.w3.org/2000/svg" style={{ width: 0, height: 0 }}>
+          <symbol id="ok" viewBox="0 0 100 100">
+            <circle
+              cx="50"
+              cy="50"
+              r="45"
+              stroke="currentColor"
+              fill="none"
+              strokeWidth="10"
+            />
+            <path
+              d="M31,50 l13,13 l26,-26"
+              stroke="currentColor"
+              fill="none"
+              strokeWidth="10"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+          </symbol>
+          <symbol id="notok" viewBox="0 0 100 100">
+            <circle
+              cx="50"
+              cy="50"
+              r="45"
+              stroke="currentColor"
+              fill="none"
+              strokeWidth="10"
+            />
+            <path
+              d="M35,35 l30,30 M35,65 l30,-30"
+              stroke="currentColor"
+              fill="none"
+              strokeWidth="10"
+              strokeLinecap="round"
+            />
+          </symbol>
+          <symbol id="lock" viewBox="0 0 100 100">
+            <rect
+              rx="15"
+              x="5"
+              y="38"
+              width="90"
+              height="62"
+              fill="currentColor"
+            />
+            <path
+              d="M27,40 v-10 a1,1 0,0,1 46,0 v10"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="12"
+            />
+          </symbol>
+          <symbol id="emptyDirectory" viewBox="0 0 130 100">
+            <path
+              d="M5,15 s0,-5 5,-5 h35 s5,0 5,5 s0,5 5,5 h35 s10,0 10,10 v10 h-65 s-6,0 -10,5 l-20,40 z M5,90 l20,-40 s4,-8 10,-8 h80 s12,0 10,10 l-20,40 s-3,10 -10,10 h-80 s-10,0 -10,-10 z"
+              fill="currentColor"
+            />
+            <path
+              d="M103,10 l15,15 M118,10 l-15,15"
+              stroke="currentColor"
+              fill="none"
+              strokeWidth="3"
+              strokeLinecap="round"
+            />
+          </symbol>
+        </svg>
+        <div id="auth">
+          {username} -{" "}
+          <button
+            onClick={(e) => {
+              if (e.button !== 0) {
+                return;
+              }
+
+              logout();
+            }}
+          >
+            Logout
+          </button>
+        </div>
+
+        <div id="timestamp">
+          Database updated:
+          {approxTimeAgo(1000 * Math.max(...Object.values(timestamps)))}
+          <div className="timestamp-popup">
+            <CollapsibleDBList timestamps={timestamps} />
+          </div>
+        </div>
+
+        <App groupUsage={groupUsage} userUsage={userUsage} areas={areas} />
+      </StrictMode>
+    )
+  );

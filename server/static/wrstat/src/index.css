@@ -72,20 +72,84 @@ caption {
 #timestamp {
   float: right;
   padding-right: 2px;
+  position: relative;
+  cursor: pointer;
+
 }
 
-#timestamp:hover:before {
-  content: attr(data-timestamps);
+#timestamp .timestamp-popup {
+  display: none;
   position: absolute;
-  display: inline-block;
+  top: 100%;
+  right: 0.5px;
+  background-color: var(--background, #fff);
+  color: var(--color, #000);
+  border: 1px solid var(--subtleBorder, #ccc);
   padding: 0.5em;
-  background-color: var(--background);
-  color: var(--color);
-  border: 1px solid var(--subtleBorder);
-  white-space: pre;
-  right: 0;
   z-index: 100;
+  max-height: 300px;
+  overflow-y: auto;
+  white-space: nowrap;
+  padding-right: 1em;
 }
+
+#timestamp:hover .timestamp-popup {
+  display: block;
+}
+
+.db-group {
+  margin-bottom: 6px;
+}
+
+.db-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  font-family: monospace;
+}
+
+.db-dir {
+  font-weight: bold;
+  margin-right: 8px;
+  flex: 1;            
+}
+
+.db-date {
+  color: #555;
+  font-size: 0.9em;
+  text-align: right;   
+  min-width: 160px;
+}
+
+.db-toggle {
+  margin-left: 8px;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  background: #f8f8f8;
+  cursor: pointer;
+  width: 1.5em;
+  height: 1.5em;
+  line-height: 1.2em;
+  text-align: center;
+  padding: 0;
+  transition: background 0.2s;
+}
+
+.db-toggle:hover {
+  background: #e0e0e0;
+}
+
+.db-rest {
+  margin-left: 16px;
+  font-size: 0.9em;
+  font-family: monospace;
+}
+
+.db-rest.hidden {
+  display: none;
+}
+
 
 summary>h1 {
   margin: 0;

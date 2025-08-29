@@ -58,7 +58,7 @@ func (s *Server) addBaseDirRoutes() {
 
 func (s *Server) getBasedirsGroupUsage(c *gin.Context) {
 	s.getBasedirs(c, func() (any, error) {
-		var results []*basedirs.Usage
+		results := make([]*basedirs.Usage, 0)
 
 		for _, age := range db.DirGUTAges {
 			result, err := s.basedirs.GroupUsage(age)
@@ -94,7 +94,7 @@ func (s *Server) getBasedirs(c *gin.Context, cb func() (any, error)) {
 
 func (s *Server) getBasedirsUserUsage(c *gin.Context) {
 	s.getBasedirs(c, func() (any, error) {
-		var results []*basedirs.Usage
+		results := make([]*basedirs.Usage, 0)
 
 		for _, age := range db.DirGUTAges {
 			result, err := s.basedirs.UserUsage(age)
