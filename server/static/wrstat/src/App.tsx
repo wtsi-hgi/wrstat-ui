@@ -283,7 +283,7 @@ const groupNameToIDMap = new Map<string, number>(),
 						}} />
 				</details>
 			}
-			<div id="copyright">&copy; 2023 Genome Research Ltd.</div>
+			<div id="copyright">&copy; {new Date().getFullYear()} Genome Research Ltd.</div>
 		</>;
 	};
 
