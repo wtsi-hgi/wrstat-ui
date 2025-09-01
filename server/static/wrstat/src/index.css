@@ -60,8 +60,8 @@ body {
   text-align: right;
 }
 
-input[type=radio],
-input[type=checkbox] {
+input[type="radio"],
+input[type="checkbox"] {
   accent-color: var(--inputAccent);
 }
 
@@ -74,7 +74,6 @@ caption {
   padding-right: 2px;
   position: relative;
   cursor: pointer;
-
 }
 
 #timestamp .timestamp-popup {
@@ -113,13 +112,13 @@ caption {
 .db-dir {
   font-weight: bold;
   margin-right: 8px;
-  flex: 1;            
+  flex: 1;
 }
 
 .db-date {
   color: #555;
   font-size: 0.9em;
-  text-align: right;   
+  text-align: right;
   min-width: 160px;
 }
 
@@ -152,33 +151,7 @@ caption {
   display: none;
 }
 
-@media (prefers-color-scheme: dark) {
-  #timestamp .timestamp-popup {
-    background-color: var(--background-dark, #222);
-    color: var(--color-dark, #eee);
-    border: 1px solid var(--subtleBorder-dark, #555);
-  }
-
-  .db-date {
-    color: #bbb;
-  }
-
-  .db-toggle {
-    background: #333;
-    border: 1px solid #555;
-    color: #eee;
-  }
-
-  .db-toggle:hover {
-    background: #444;
-  }
-
-  .db-rest {
-    color: #ddd;
-  }
-}
-
-summary>h1 {
+summary > h1 {
   margin: 0;
   font-size: inherit;
   font-weight: normal;
@@ -199,7 +172,7 @@ details summary {
 }
 
 details summary::-webkit-details-marker {
-  display: none
+  display: none;
 }
 
 details[open] summary {
@@ -249,15 +222,15 @@ details[open] summary:after {
   justify-self: end;
 }
 
-.treeFilter>label:after {
+.treeFilter > label:after {
   content: ":";
 }
 
-.treeFilter>.multiSelect {
+.treeFilter > .multiSelect {
   grid-column: 2 / span 3;
 }
 
-.treeFilter>select:not(.ageFilter) {
+.treeFilter > select:not(.ageFilter) {
   grid-column: 2 / span 2;
 }
 
@@ -377,6 +350,8 @@ button {
 
     --scatterHighlight: #f00;
     --exceedWarning: #f00;
+
+    --dbDate: #666;
   }
 }
 
@@ -450,6 +425,32 @@ button {
 
     --scatterHighlight: #f00;
     --exceedWarning: #f00;
+
+    --dbDate: #bbb;
+  }
+
+  #timestamp .timestamp-popup {
+    background-color: var(--background);
+    color: var(--colour);
+    border: 1px solid var(--subtleBorder);
+  }
+
+  .db-date {
+    color: var(--dbDate);
+  }
+
+  .db-toggle {
+    background: var(--subtleBG);
+    border: 1px solid var(--subtleBorder);
+    color: var(--colour);
+  }
+
+  .db-toggle:hover {
+    background: color-mix(in srgb, var(--subtleBG) 80%, var(--colour) 20%);
+  }
+
+  .db-rest {
+    color: var(--colour);
   }
 
   details summary:after {
