@@ -91,6 +91,7 @@ caption {
   overflow-y: auto;
   white-space: nowrap;
   padding-right: 1em;
+  overscroll-behavior: contain;
 }
 
 #timestamp:hover .timestamp-popup {
@@ -144,12 +145,38 @@ caption {
   margin-left: 16px;
   font-size: 0.9em;
   font-family: monospace;
+  overscroll-behavior: contain;
 }
 
 .db-rest.hidden {
   display: none;
 }
 
+@media (prefers-color-scheme: dark) {
+  #timestamp .timestamp-popup {
+    background-color: var(--background-dark, #222);
+    color: var(--color-dark, #eee);
+    border: 1px solid var(--subtleBorder-dark, #555);
+  }
+
+  .db-date {
+    color: #bbb;
+  }
+
+  .db-toggle {
+    background: #333;
+    border: 1px solid #555;
+    color: #eee;
+  }
+
+  .db-toggle:hover {
+    background: #444;
+  }
+
+  .db-rest {
+    color: #ddd;
+  }
+}
 
 summary>h1 {
   margin: 0;
