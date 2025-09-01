@@ -81,9 +81,9 @@ caption {
   position: absolute;
   top: 100%;
   right: 0.5px;
-  background-color: var(--background, #fff);
-  color: var(--color, #000);
-  border: 1px solid var(--subtleBorder, #ccc);
+  background-color: var(--background);
+  color: var(--colour);
+  border: 1px solid var(--subtleBorder);
   padding: 0.5em;
   z-index: 100;
   max-height: 300px;
@@ -116,7 +116,7 @@ caption {
 }
 
 .db-date {
-  color: #555;
+  color: var(--dbDate);
   font-size: 0.9em;
   text-align: right;
   min-width: 160px;
@@ -124,9 +124,9 @@ caption {
 
 .db-toggle {
   margin-left: 8px;
-  border: 1px solid #ccc;
+  border: 1px solid var(--subtleBorder);
   border-radius: 4px;
-  background: #f8f8f8;
+  background: var(--dbToggleBG);
   cursor: pointer;
   width: 1.5em;
   height: 1.5em;
@@ -137,7 +137,7 @@ caption {
 }
 
 .db-toggle:hover {
-  background: #e0e0e0;
+  background: var(--dbToggleHoverBG);
 }
 
 .db-rest {
@@ -352,6 +352,8 @@ button {
     --exceedWarning: #f00;
 
     --dbDate: #666;
+    --dbToggleBG: #f8f8f8;
+    --dbToggleHoverBG: #ddd;
   }
 }
 
@@ -427,30 +429,8 @@ button {
     --exceedWarning: #f00;
 
     --dbDate: #bbb;
-  }
-
-  #timestamp .timestamp-popup {
-    background-color: var(--background);
-    color: var(--colour);
-    border: 1px solid var(--subtleBorder);
-  }
-
-  .db-date {
-    color: var(--dbDate);
-  }
-
-  .db-toggle {
-    background: var(--subtleBG);
-    border: 1px solid var(--subtleBorder);
-    color: var(--colour);
-  }
-
-  .db-toggle:hover {
-    background: color-mix(in srgb, var(--subtleBG) 80%, var(--colour) 20%);
-  }
-
-  .db-rest {
-    color: var(--colour);
+    --dbToggleBG: #fff;
+    --dbToggleHoverBG: #ccc;
   }
 
   details summary:after {
