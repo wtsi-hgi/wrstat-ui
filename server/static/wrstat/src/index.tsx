@@ -106,27 +106,36 @@ const CollapsibleDBList = ({
             : "+";
         };
 
+        const singleEntry = entries.length === 1;
+        const [singleDb] = entries[0] || [];
+
+        const isSameAsGroup = singleEntry && singleDb === group;
+
         return (
           <div key={group} className="db-group">
             <div className="db-row">
               <span className="db-dir">{group}</span>
+              {(!singleEntry || !isSameAsGroup) && (
                 <button onClick={toggleRest} className="db-toggle">
                   +
                 </button>
+              )}
               <span className="db-date">
                 {timestampFormatter.format(new Date(latestUpdated * 1000))}
               </span>
             </div>
-            <div ref={restRef} className="db-rest hidden">
-              {entries.map(([db, ts]) => (
-                <div key={db} className="db-row">
-                  <span className="db-dir">{db}</span>
-                  <span className="db-date">
-                    {timestampFormatter.format(new Date(ts * 1000))}
-                  </span>
-                </div>
-              ))}
-            </div>
+            {(!singleEntry || !isSameAsGroup) && (
+              <div ref={restRef} className="db-rest hidden">
+                {entries.map(([db, ts]) => (
+                  <div key={db} className="db-row">
+                    <span className="db-dir">{db}</span>
+                    <span className="db-date">
+                      {timestampFormatter.format(new Date(ts * 1000))}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         );
       })}
