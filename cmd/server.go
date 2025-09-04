@@ -167,7 +167,7 @@ files. It will use the mtime of the file as the data creation time in reports.
 
 		info("opening databases, please wait...")
 		err = s.EnableDBReloading(args[0], dgutaDBsSuffix, basedirBasename,
-			ownersPath, sentinelPollFrequencty, true, mountpoints...)
+			ownersPath, sentinelPollFrequencty, false, mountpoints...)
 		if err != nil {
 			die("failed to load databases: %s", err)
 		}

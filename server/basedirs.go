@@ -26,9 +26,14 @@
 package server
 
 import (
+	"bytes"
+	"compress/gzip"
+	"encoding/json"
 	"io"
+	"log"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	gas "github.com/wtsi-hgi/go-authserver"
@@ -57,7 +62,9 @@ func (s *Server) addBaseDirRoutes() {
 }
 
 func (s *Server) getBasedirsGroupUsage(c *gin.Context) {
-	s.getBasedirs(c, func() (any, error) {
+	start := time.Now()
+
+	s.serveGzippedCache(c, &s.groupUsageCache, func() (any, error) {
 		results := make([]*basedirs.Usage, 0)
 
 		for _, age := range db.DirGUTAges {
@@ -71,6 +78,8 @@ func (s *Server) getBasedirsGroupUsage(c *gin.Context) {
 
 		return results, nil
 	})
+	elapsed := time.Since(start)
+	log.Printf("[getBasedirsGroupUsage] took %s\n", elapsed)
 }
 
 // getBasedirs responds with the output of your callback in JSON format.
@@ -92,8 +101,50 @@ func (s *Server) getBasedirs(c *gin.Context, cb func() (any, error)) {
 	c.IndentedJSON(http.StatusOK, result)
 }
 
+func (s *Server) serveGzippedCache(c *gin.Context, cache **usageCache, compute func() (any, error)) {
+	s.mu.RLock()
+	if *cache != nil {
+		c.Header("Content-Encoding", "gzip")
+		c.Data(http.StatusOK, "application/json", (*cache).data)
+		s.mu.RUnlock()
+		return
+	}
+	s.mu.RUnlock()
+
+	result, err := compute()
+	if err != nil {
+		c.AbortWithError(http.StatusBadRequest, err)
+		return
+	}
+
+	jsonData, err := json.Marshal(result)
+	if err != nil {
+		c.AbortWithError(http.StatusInternalServerError, err)
+		return
+	}
+
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	if _, err := gz.Write(jsonData); err != nil {
+		c.AbortWithError(http.StatusInternalServerError, err)
+		return
+	}
+	gz.Close()
+
+	s.mu.Lock()
+	*cache = &usageCache{
+		data: buf.Bytes(),
+	}
+	s.mu.Unlock()
+
+	c.Header("Content-Encoding", "gzip")
+	c.Data(http.StatusOK, "application/json", buf.Bytes())
+}
+
 func (s *Server) getBasedirsUserUsage(c *gin.Context) {
-	s.getBasedirs(c, func() (any, error) {
+	start := time.Now()
+
+	s.serveGzippedCache(c, &s.userUsageCache, func() (any, error) {
 		results := make([]*basedirs.Usage, 0)
 
 		for _, age := range db.DirGUTAges {
@@ -107,6 +158,8 @@ func (s *Server) getBasedirsUserUsage(c *gin.Context) {
 
 		return results, nil
 	})
+	elapsed := time.Since(start)
+	log.Printf("[getBasedirsUsersUsage] took %s\n", elapsed)
 }
 
 func (s *Server) getBasedirsGroupSubdirs(c *gin.Context) {

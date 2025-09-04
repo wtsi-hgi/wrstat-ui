@@ -116,8 +116,14 @@ type Server struct {
 
 	stopCh chan struct{}
 
-	analyticsDB   *sql.DB
-	analyticsStmt *sql.Stmt
+	analyticsDB     *sql.DB
+	analyticsStmt   *sql.Stmt
+	groupUsageCache *usageCache
+	userUsageCache  *usageCache
+}
+
+type usageCache struct {
+	data []byte
 }
 
 // New creates a Server which can serve a REST API and website.
