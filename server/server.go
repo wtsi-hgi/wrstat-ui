@@ -29,8 +29,11 @@
 package server
 
 import (
+	"bytes"
+	"compress/gzip"
 	"database/sql"
 	"embed"
+	"encoding/json"
 	"io"
 	"sync"
 
@@ -122,8 +125,12 @@ type Server struct {
 	userUsageCache  *usageCache
 }
 
+// usageCache holds precomputed JSON data for a response.
+// jsonData: the uncompressed JSON payload.
+// gzipData: the gzip-compressed JSON payload for clients that support it.
 type usageCache struct {
-	data []byte
+	jsonData []byte
+	gzipData []byte
 }
 
 // New creates a Server which can serve a REST API and website.
@@ -160,4 +167,59 @@ func (s *Server) stop() {
 	if s.analyticsDB != nil {
 		s.analyticsDB.Close()
 	}
+}
+
+// prewarmCaches precomputes the group and user usage caches. It serialises
+// usage data into JSON and gzip. so serveGzippedCache can serve quickly.
+// Returns an error if any cache build fails.
+func (s *Server) prewarmCaches(bd basedirs.MultiReader) error {
+	if cache, err := s.buildCache(bd.GroupUsage); err != nil {
+		return err
+	} else if cache != nil {
+		s.groupUsageCache = cache
+	}
+
+	if cache, err := s.buildCache(bd.UserUsage); err != nil {
+		return err
+	} else if cache != nil {
+		s.userUsageCache = cache
+	}
+
+	return nil
+}
+
+// buildCache executes the provided usage function across all DirGUTAge values,
+// collects the results, marshals them to JSON, compresses with gzip, and
+// returns a populated usageCache. Returns an error if computation, JSON
+// encoding, or compression fails.
+func (s *Server) buildCache(usageFunc func(db.DirGUTAge) ([]*basedirs.Usage, error)) (*usageCache, error) {
+	var results []*basedirs.Usage
+
+	for _, age := range db.DirGUTAges {
+		result, err := usageFunc(age)
+		if err != nil {
+			return nil, err
+		}
+
+		results = append(results, result...)
+	}
+
+	jsonData, err := json.Marshal(results)
+	if err != nil {
+		return nil, err
+	}
+
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+
+	if _, err := gz.Write(jsonData); err != nil {
+		return nil, err
+	}
+
+	gz.Close()
+
+	return &usageCache{
+		jsonData: jsonData,
+		gzipData: buf.Bytes(),
+	}, nil
 }
