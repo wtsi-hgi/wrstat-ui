@@ -650,6 +650,11 @@ func TestServer(t *testing.T) {
 			usageUser, err := decodeUsageResult(response)
 			So(err, ShouldBeNil)
 			So(len(usageUser), ShouldBeGreaterThan, 0)
+			So(usageUser[0].GID, ShouldEqual, 0)
+			So(usageUser[0].UID, ShouldEqual, 0)
+			So(usageUser[0].Name, ShouldNotBeBlank)
+			So(usageUser[0].Owner, ShouldNotBeBlank)
+			So(usageUser[0].BaseDir, ShouldNotBeBlank)
 		})
 	})
 }
