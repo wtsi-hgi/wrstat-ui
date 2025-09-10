@@ -58,11 +58,18 @@ func (s *Server) addBaseDirRoutes() {
 }
 
 func (s *Server) getBasedirsGroupUsage(c *gin.Context) {
-	s.serveGzippedCache(c, &s.groupUsageCache)
+	s.mu.RLock()
+	groupCache := s.groupUsageCache
+	s.mu.RUnlock()
+	s.serveGzippedCache(c, groupCache)
 }
 
 func (s *Server) getBasedirsUserUsage(c *gin.Context) {
-	s.serveGzippedCache(c, &s.userUsageCache)
+	s.mu.RLock()
+	userCache := s.userUsageCache
+	s.mu.RUnlock()
+	s.serveGzippedCache(c, userCache)
+
 }
 
 // getBasedirs responds with the output of your callback in JSON format.
@@ -86,7 +93,7 @@ func (s *Server) getBasedirs(c *gin.Context, cb func() (any, error)) {
 
 // wantsGzip reports whether the client explicitly accepts gzip encoding.
 func wantsGzipEncoding(acceptEnc string) bool {
-	for _, enc := range strings.Split(acceptEnc, ",") {
+	for enc := range strings.SplitSeq(acceptEnc, ",") {
 		if strings.TrimSpace(enc) == "gzip" {
 			return true
 		}
@@ -98,27 +105,18 @@ func wantsGzipEncoding(acceptEnc string) bool {
 // serveGzippedCache serves a cached JSON payload to a client.
 // It automatically selects gzip or plain JSON based on the
 // "Accept-Encoding" header.
-func (s *Server) serveGzippedCache(c *gin.Context, cache **usageCache) {
+func (s *Server) serveGzippedCache(c *gin.Context, cache usageCache) {
 	acceptEnc := c.GetHeader("Accept-Encoding")
 	wantsGzip := wantsGzipEncoding(acceptEnc)
 
 	s.mu.RLock()
-	cached := *cache
-	s.mu.RUnlock()
-
-	if cached == nil {
-		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{
-			"error": "cache not ready",
-		})
-
-		return
-	}
+	defer s.mu.RUnlock()
 
 	if wantsGzip {
 		c.Header("Content-Encoding", "gzip")
-		c.Data(http.StatusOK, "application/json", cached.gzipData)
+		c.Data(http.StatusOK, "application/json", cache.gzipData)
 	} else {
-		c.Data(http.StatusOK, "application/json", cached.jsonData)
+		c.Data(http.StatusOK, "application/json", cache.jsonData)
 	}
 }
 

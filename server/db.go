@@ -360,7 +360,6 @@ func addEntryToMap(entry fs.DirEntry, latest map[string]nameVersion, toDelete []
 }
 
 func removeAll(baseDirectory string, toDelete []string) error {
-
 	for _, path := range toDelete {
 		// Create marker to avoid the watch subcommand re-running a summarise.
 

@@ -121,8 +121,8 @@ type Server struct {
 
 	analyticsDB     *sql.DB
 	analyticsStmt   *sql.Stmt
-	groupUsageCache *usageCache
-	userUsageCache  *usageCache
+	groupUsageCache usageCache
+	userUsageCache  usageCache
 }
 
 // usageCache holds precomputed JSON data for a response.
@@ -173,26 +173,47 @@ func (s *Server) stop() {
 // usage data into JSON and gzip. so serveGzippedCache can serve quickly.
 // Returns an error if any cache build fails.
 func (s *Server) prewarmCaches(bd basedirs.MultiReader) error {
-	if cache, err := s.buildCache(bd.GroupUsage); err != nil {
+	if err := s.buildCache(bd.GroupUsage, &s.groupUsageCache); err != nil {
 		return err
-	} else if cache != nil {
-		s.groupUsageCache = cache
 	}
 
-	if cache, err := s.buildCache(bd.UserUsage); err != nil {
+	return s.buildCache(bd.UserUsage, &s.userUsageCache)
+}
+
+// buildCache computes usage data, serialises it, compresses it, and stores it
+// in the cache.
+func (s *Server) buildCache(
+	usageFunc func(db.DirGUTAge) ([]*basedirs.Usage, error),
+	cache *usageCache,
+) error {
+	results, err := s.collectUsage(usageFunc)
+	if err != nil {
 		return err
-	} else if cache != nil {
-		s.userUsageCache = cache
+	}
+
+	jsonData, err := json.Marshal(results)
+	if err != nil {
+		return err
+	}
+
+	gzipData, err := compressGzip(jsonData)
+	if err != nil {
+		return err
+	}
+
+	*cache = usageCache{
+		jsonData: jsonData,
+		gzipData: gzipData,
 	}
 
 	return nil
 }
 
-// buildCache executes the provided usage function across all DirGUTAge values,
-// collects the results, marshals them to JSON, compresses with gzip, and
-// returns a populated usageCache. Returns an error if computation, JSON
-// encoding, or compression fails.
-func (s *Server) buildCache(usageFunc func(db.DirGUTAge) ([]*basedirs.Usage, error)) (*usageCache, error) {
+// collectUsage runs the usage function across all DirGUTAge values and combines
+// results.
+func (s *Server) collectUsage(
+	usageFunc func(db.DirGUTAge) ([]*basedirs.Usage, error),
+) ([]*basedirs.Usage, error) {
 	var results []*basedirs.Usage
 
 	for _, age := range db.DirGUTAges {
@@ -204,22 +225,21 @@ func (s *Server) buildCache(usageFunc func(db.DirGUTAge) ([]*basedirs.Usage, err
 		results = append(results, result...)
 	}
 
-	jsonData, err := json.Marshal(results)
-	if err != nil {
-		return nil, err
-	}
+	return results, nil
+}
 
+// compressGzip compresses JSON into gzip format.
+func compressGzip(data []byte) ([]byte, error) {
 	var buf bytes.Buffer
 	gz := gzip.NewWriter(&buf)
 
-	if _, err := gz.Write(jsonData); err != nil {
+	if _, err := gz.Write(data); err != nil {
 		return nil, err
 	}
 
-	gz.Close()
+	if err := gz.Close(); err != nil {
+		return nil, err
+	}
 
-	return &usageCache{
-		jsonData: jsonData,
-		gzipData: buf.Bytes(),
-	}, nil
+	return buf.Bytes(), nil
 }

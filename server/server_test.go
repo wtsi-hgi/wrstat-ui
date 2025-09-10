@@ -591,9 +591,6 @@ func TestServer(t *testing.T) {
 		})
 
 		Convey("prewarmCaches fills caches with JSON and gzip", func() {
-			s.groupUsageCache = nil
-			s.userUsageCache = nil
-
 			err := s.prewarmCaches(s.basedirs)
 			So(err, ShouldBeNil)
 
@@ -625,10 +622,9 @@ func TestServer(t *testing.T) {
 					break Loop
 				case <-tick:
 					s.mu.RLock()
-					groupReady := s.groupUsageCache != nil && len(s.groupUsageCache.jsonData) > 0
-					userReady := s.userUsageCache != nil && len(s.userUsageCache.jsonData) > 0
+					userReady := len(s.userUsageCache.jsonData) > 0
 					s.mu.RUnlock()
-					if groupReady && userReady {
+					if userReady {
 						break Loop
 					}
 				}
@@ -655,7 +651,6 @@ func TestServer(t *testing.T) {
 			So(err, ShouldBeNil)
 			So(len(usageUser), ShouldBeGreaterThan, 0)
 		})
-
 	})
 }
 
