@@ -26,8 +26,10 @@
 package server
 
 import (
+	"compress/gzip"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -655,6 +657,42 @@ func TestServer(t *testing.T) {
 			So(usageUser[0].Name, ShouldNotBeBlank)
 			So(usageUser[0].Owner, ShouldNotBeBlank)
 			So(usageUser[0].BaseDir, ShouldNotBeBlank)
+		})
+
+		Convey("serveGzippedCache serves group and user usage with gzip handling", func() {
+			err := s.prewarmCaches(s.basedirs)
+			So(err, ShouldBeNil)
+
+			makeContext := func(acceptEnc string) (*gin.Context, *httptest.ResponseRecorder) {
+				w := httptest.NewRecorder()
+				c, _ := gin.CreateTestContext(w)
+
+				req, err := http.NewRequest(http.MethodGet, "/", nil)
+				So(err, ShouldBeNil)
+
+				if acceptEnc != "" {
+					req.Header.Set("Accept-Encoding", acceptEnc)
+				}
+
+				c.Request = req
+
+				return c, w
+			}
+			c, w := makeContext("")
+			s.serveGzippedCache(c, s.userUsageCache)
+			So(w.Header().Get("Content-Encoding"), ShouldEqual, "gzip")
+
+			c, w = makeContext("gzip")
+			s.serveGzippedCache(c, s.userUsageCache)
+			So(w.Header().Get("Content-Encoding"), ShouldEqual, "gzip")
+
+			c, w = makeContext("gzip;q=0")
+			s.serveGzippedCache(c, s.userUsageCache)
+			So(w.Header().Get("Content-Encoding"), ShouldNotEqual, "gzip")
+
+			c, w = makeContext("*;q=1")
+			s.serveGzippedCache(c, s.userUsageCache)
+			So(w.Header().Get("Content-Encoding"), ShouldEqual, "gzip")
 		})
 	})
 }
@@ -1631,8 +1669,20 @@ func waitForFileToBeDeleted(t *testing.T, path string) {
 // decodeUsageResult decodes the result of a basedirs usage query.
 func decodeUsageResult(response *httptest.ResponseRecorder) ([]*basedirs.Usage, error) {
 	var result []*basedirs.Usage
-	err := json.NewDecoder(response.Body).Decode(&result)
 
+	var reader io.Reader = response.Body
+
+	if response.Header().Get("Content-Encoding") == "gzip" {
+		gz, err := gzip.NewReader(response.Body)
+		if err != nil {
+			return nil, err
+		}
+
+		defer gz.Close()
+		reader = gz
+	}
+
+	err := json.NewDecoder(reader).Decode(&result)
 	return result, err
 }
 
