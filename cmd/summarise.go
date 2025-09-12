@@ -542,42 +542,55 @@ GROUP BY s.mount_path, s.scan_id, s.ancestor`
 )
 
 func createSchema(ctx context.Context, conn clickhouse.Conn) error {
-	// Create scans first
+	// Create scans table first
 	if err := conn.Exec(ctx, createScansTable); err != nil {
 		return err
 	}
-	// Try fs_entries with path bloom filter, fallback if server lacks it
+
+	// Try fs_entries with path bloom filter, fallback if server doesn't support it
 	if err := conn.Exec(ctx, createFsEntriesTable); err != nil {
 		// Retry with no path index
 		if err2 := conn.Exec(ctx, createFsEntriesTableNoPathIdx); err2 != nil {
-			return err
+			return err2
 		}
 	}
-	// Ensure any missing columns on existing tables (safe no-ops if exist)
-	_ = conn.Exec(ctx, `ALTER TABLE ancestor_rollups_raw ADD COLUMN IF NOT EXISTS uid UInt32 AFTER mtime`)
-	_ = conn.Exec(ctx, `ALTER TABLE ancestor_rollups_raw ADD COLUMN IF NOT EXISTS gid UInt32 AFTER uid`)
-	_ = conn.Exec(ctx, `ALTER TABLE ancestor_rollups_raw ADD COLUMN IF NOT EXISTS ext_low String AFTER gid`)
 
+	// Create rollup raw table
 	if err := conn.Exec(ctx, createRollupRawTable); err != nil {
 		return err
 	}
-	// Add state table and ensure new aggregate columns exist
+
+	// Create state table
 	if err := conn.Exec(ctx, createRollupStateTable); err != nil {
 		return err
 	}
-	_ = conn.Exec(ctx, `ALTER TABLE ancestor_rollups_state ADD COLUMN IF NOT EXISTS uids AggregateFunction(groupUniqArray, UInt32) AFTER mtime_max`)
-	_ = conn.Exec(ctx, `ALTER TABLE ancestor_rollups_state ADD COLUMN IF NOT EXISTS gids AggregateFunction(groupUniqArray, UInt32) AFTER uids`)
-	_ = conn.Exec(ctx, `ALTER TABLE ancestor_rollups_state ADD COLUMN IF NOT EXISTS exts AggregateFunction(groupUniqArray, String) AFTER gids`)
 
+	// Ensure any missing columns on existing tables (these are safe no-ops if columns exist)
+	// We don't check errors here because these are optional improvements, and failure shouldn't abort ingestion
+	for _, alterStmt := range []string{
+		`ALTER TABLE ancestor_rollups_raw ADD COLUMN IF NOT EXISTS uid UInt32 AFTER mtime`,
+		`ALTER TABLE ancestor_rollups_raw ADD COLUMN IF NOT EXISTS gid UInt32 AFTER uid`,
+		`ALTER TABLE ancestor_rollups_raw ADD COLUMN IF NOT EXISTS ext_low String AFTER gid`,
+		`ALTER TABLE ancestor_rollups_state ADD COLUMN IF NOT EXISTS uids AggregateFunction(groupUniqArray, UInt32) AFTER mtime_max`,
+		`ALTER TABLE ancestor_rollups_state ADD COLUMN IF NOT EXISTS gids AggregateFunction(groupUniqArray, UInt32) AFTER uids`,
+		`ALTER TABLE ancestor_rollups_state ADD COLUMN IF NOT EXISTS exts AggregateFunction(groupUniqArray, String) AFTER gids`,
+	} {
+		_ = conn.Exec(ctx, alterStmt)
+	}
+
+	// Create materialized view and current views
 	if err := conn.Exec(ctx, createRollupMV); err != nil {
 		return err
 	}
+
 	if err := conn.Exec(ctx, createFilesCurrentView); err != nil {
 		return err
 	}
+
 	if err := conn.Exec(ctx, createRollupsCurrentView); err != nil {
 		return err
 	}
+
 	return nil
 }
 
@@ -604,20 +617,27 @@ func updateClickhouse(mountPath string, r io.Reader) (retErr error) {
 		return fmt.Errorf("createSchema: %w", err)
 	}
 
+	// Use current time as scan ID
 	scanID := uint64(time.Now().Unix())
 	started := time.Now()
 
-	// register scan as loading
-	if err := conn.Exec(ctx, `INSERT INTO scans (mount_path, scan_id, state, started_at, finished_at) VALUES (?, ?, 'loading', ?, NULL)`, mountPath, scanID, started); err != nil {
+	// Register scan as loading
+	if err := conn.Exec(ctx, `
+		INSERT INTO scans (mount_path, scan_id, state, started_at, finished_at) 
+		VALUES (?, ?, 'loading', ?, NULL)`,
+		mountPath, scanID, started); err != nil {
 		return fmt.Errorf("insert scan: %w", err)
 	}
 
-	// rollback on failure: drop this scan's partitions and scan row
+	// Rollback on failure: drop this scan's partitions and scan row
 	defer func() {
 		if retErr == nil {
 			return
 		}
+		// Construct partition tuple literal
 		part := fmt.Sprintf("('%s', %d)", escapeCHSingleQuotes(mountPath), scanID)
+
+		// Drop partitions - ignoring errors on cleanup
 		_ = conn.Exec(ctx, "ALTER TABLE fs_entries DROP PARTITION "+part)
 		_ = conn.Exec(ctx, "ALTER TABLE ancestor_rollups_raw DROP PARTITION "+part)
 		_ = conn.Exec(ctx, "ALTER TABLE ancestor_rollups_state DROP PARTITION "+part)
@@ -628,13 +648,16 @@ func updateClickhouse(mountPath string, r io.Reader) (retErr error) {
 		return err
 	}
 
-	// promote to ready
+	// Promote to ready
 	finished := time.Now()
-	if err := conn.Exec(ctx, `ALTER TABLE scans UPDATE state = 'ready', finished_at = ? WHERE mount_path = ? AND scan_id = ?`, finished, mountPath, scanID); err != nil {
+	if err := conn.Exec(ctx, `
+		ALTER TABLE scans UPDATE state = 'ready', finished_at = ? 
+		WHERE mount_path = ? AND scan_id = ?`,
+		finished, mountPath, scanID); err != nil {
 		return fmt.Errorf("promote scan: %w", err)
 	}
 
-	// drop older scans for this mount
+	// Drop older scans for this mount
 	if err := dropOlderScans(ctx, conn, mountPath, scanID); err != nil {
 		return fmt.Errorf("retention: %w", err)
 	}
@@ -642,44 +665,127 @@ func updateClickhouse(mountPath string, r io.Reader) (retErr error) {
 	return nil
 }
 
-func ingestScan(ctx context.Context, conn clickhouse.Conn, mountPath string, scanID uint64, r io.Reader) error {
-	filesBatch, err := conn.PrepareBatch(ctx, `INSERT INTO fs_entries (mount_path, scan_id, path, parent_path, name, ext_low, ftype, inode, size, uid, gid, mtime, atime, ctime)`)
+// Helper functions for batched processing of files
+type batchProcessor struct {
+	filesBatch interface {
+		Append(...interface{}) error
+		Send() error
+	}
+	rollupsBatch interface {
+		Append(...interface{}) error
+		Send() error
+	}
+	ctx          context.Context
+	conn         clickhouse.Conn
+	filesCount   int
+	rollupsCount int
+	mountPath    string
+	scanID       uint64
+}
+
+// Create a new batch processor
+func newBatchProcessor(ctx context.Context, conn clickhouse.Conn, mountPath string, scanID uint64) (*batchProcessor, error) {
+	filesBatch, err := conn.PrepareBatch(ctx, `
+		INSERT INTO fs_entries 
+		(mount_path, scan_id, path, parent_path, name, ext_low, ftype, inode, size, uid, gid, mtime, atime, ctime)`)
 	if err != nil {
+		return nil, err
+	}
+
+	rollupsBatch, err := conn.PrepareBatch(ctx, `
+		INSERT INTO ancestor_rollups_raw 
+		(mount_path, scan_id, ancestor, size, atime, mtime, uid, gid, ext_low)`)
+	if err != nil {
+		return nil, err
+	}
+
+	return &batchProcessor{
+		filesBatch:   filesBatch,
+		rollupsBatch: rollupsBatch,
+		ctx:          ctx,
+		conn:         conn,
+		mountPath:    mountPath,
+		scanID:       scanID,
+	}, nil
+}
+
+// Add a file entry to the batch
+func (bp *batchProcessor) addFile(path string, parent string, name string, ext string,
+	ft ftype, inode uint64, size uint64, uid uint32, gid uint32, mtime, atime, ctime time.Time) error {
+
+	if err := bp.filesBatch.Append(
+		bp.mountPath, bp.scanID, path, parent, name, ext, uint8(ft),
+		inode, size, uid, gid, mtime, atime, ctime,
+	); err != nil {
 		return err
 	}
-	rollBatch, err := conn.PrepareBatch(ctx, `INSERT INTO ancestor_rollups_raw (mount_path, scan_id, ancestor, size, atime, mtime, uid, gid, ext_low)`)
+
+	bp.filesCount++
+	return nil
+}
+
+// Add an ancestor rollup entry to the batch
+func (bp *batchProcessor) addRollup(ancestor string, size uint64, atime, mtime time.Time, uid, gid uint32, ext string) error {
+	if err := bp.rollupsBatch.Append(
+		bp.mountPath, bp.scanID, ancestor, size, atime, mtime, uid, gid, ext); err != nil {
+		return err
+	}
+
+	bp.rollupsCount++
+	return nil
+}
+
+// Check if either batch needs flushing
+func (bp *batchProcessor) needsFlush() bool {
+	return bp.filesCount >= fileBatchSize || bp.rollupsCount >= rollupBatchSize
+}
+
+// Flush both batches if they contain any data
+func (bp *batchProcessor) flush() error {
+	// Send files batch if non-empty
+	if bp.filesCount > 0 {
+		if err := bp.filesBatch.Send(); err != nil {
+			return err
+		}
+
+		bp.filesCount = 0
+		filesBatch, err := bp.conn.PrepareBatch(bp.ctx, `
+			INSERT INTO fs_entries 
+			(mount_path, scan_id, path, parent_path, name, ext_low, ftype, inode, size, uid, gid, mtime, atime, ctime)`)
+		if err != nil {
+			return err
+		}
+		bp.filesBatch = filesBatch
+	}
+
+	// Send rollups batch if non-empty
+	if bp.rollupsCount > 0 {
+		if err := bp.rollupsBatch.Send(); err != nil {
+			return err
+		}
+
+		bp.rollupsCount = 0
+		rollupsBatch, err := bp.conn.PrepareBatch(bp.ctx, `
+			INSERT INTO ancestor_rollups_raw 
+			(mount_path, scan_id, ancestor, size, atime, mtime, uid, gid, ext_low)`)
+		if err != nil {
+			return err
+		}
+		bp.rollupsBatch = rollupsBatch
+	}
+
+	return nil
+}
+
+func ingestScan(ctx context.Context, conn clickhouse.Conn, mountPath string, scanID uint64, r io.Reader) error {
+	// Create batch processor
+	bp, err := newBatchProcessor(ctx, conn, mountPath, scanID)
 	if err != nil {
 		return err
 	}
 
 	parser := stats.NewStatsParser(r)
 	fi := new(stats.FileInfo)
-	inFiles := 0
-	inRolls := 0
-
-	flush := func() error {
-		if inFiles > 0 {
-			if err := filesBatch.Send(); err != nil {
-				return err
-			}
-			inFiles = 0
-			filesBatch, err = conn.PrepareBatch(ctx, `INSERT INTO fs_entries (mount_path, scan_id, path, parent_path, name, ext_low, ftype, inode, size, uid, gid, mtime, atime, ctime)`)
-			if err != nil {
-				return err
-			}
-		}
-		if inRolls > 0 {
-			if err := rollBatch.Send(); err != nil {
-				return err
-			}
-			inRolls = 0
-			rollBatch, err = conn.PrepareBatch(ctx, `INSERT INTO ancestor_rollups_raw (mount_path, scan_id, ancestor, size, atime, mtime, uid, gid, ext_low)`)
-			if err != nil {
-				return err
-			}
-		}
-		return nil
-	}
 
 	for parser.Scan(fi) == nil {
 		path := string(fi.Path)
@@ -692,68 +798,104 @@ func ingestScan(ctx context.Context, conn clickhouse.Conn, mountPath string, sca
 		atime := time.Unix(fi.ATime, 0)
 		ctime := time.Unix(fi.CTime, 0)
 
-		if err := filesBatch.Append(
-			mountPath, scanID, path, parent, name, ext, uint8(ft), uint64(fi.Inode), uint64(fi.Size), uint32(fi.UID), uint32(fi.GID), mtime, atime, ctime,
-		); err != nil {
+		// Handle potential integer overflow by using explicit conversions
+		inode := uint64(0)
+		if fi.Inode > 0 {
+			inode = uint64(fi.Inode)
+		}
+
+		size := uint64(0)
+		if fi.Size > 0 {
+			size = uint64(fi.Size)
+		}
+
+		// Add file entry to batch
+		if err := bp.addFile(path, parent, name, ext, ft, inode, size,
+			fi.UID, fi.GID, mtime, atime, ctime); err != nil {
 			return err
 		}
-		inFiles++
 
-		// rollups for each ancestor directory (including mount root)
-		// include the directory itself in its own subtree if the entry is a directory
+		// Rollups for each ancestor directory (including mount root)
+		// Include the directory itself in its own subtree if the entry is a directory
 		base := parent
 		if isDir {
 			base = path
 		}
+
+		// Process all ancestors
+		continueProcess := true
 		forEachAncestor(base, mountPath, func(a string) bool {
-			if err := rollBatch.Append(mountPath, scanID, a, uint64(fi.Size), atime, mtime, uint32(fi.UID), uint32(fi.GID), ext); err != nil {
+			if err := bp.addRollup(a, size, atime, mtime, fi.UID, fi.GID, ext); err != nil {
+				continueProcess = false
 				return false
 			}
-			inRolls++
 			return true
 		})
 
-		if inFiles >= fileBatchSize || inRolls >= rollupBatchSize {
-			if err := flush(); err != nil {
+		if !continueProcess {
+			return fmt.Errorf("failed to add ancestor rollup")
+		}
+
+		// Flush batches if needed
+		if bp.needsFlush() {
+			if err := bp.flush(); err != nil {
 				return err
 			}
 		}
 	}
+
+	// Check for parser errors
 	if err := parser.Err(); err != nil {
 		return err
 	}
 
-	return flush()
+	// Final flush
+	return bp.flush()
 }
 
 func dropOlderScans(ctx context.Context, conn clickhouse.Conn, mountPath string, keepScanID uint64) error {
-	// Drop partitions for older scan_ids for this mount using DROP PARTITION (mount_path, scan_id)
-	// First fetch distinct older scan_ids
-	rows, err := conn.Query(ctx, `SELECT scan_id FROM scans WHERE mount_path = ? AND scan_id < ? ORDER BY scan_id`, mountPath, keepScanID)
+	// Get older scan_ids for this mount
+	rows, err := conn.Query(ctx, `
+		SELECT scan_id 
+		FROM scans 
+		WHERE mount_path = ? AND scan_id < ? 
+		ORDER BY scan_id`,
+		mountPath, keepScanID)
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
+
+	// Process each older scan ID
 	var sid uint64
 	for rows.Next() {
 		if err := rows.Scan(&sid); err != nil {
 			return err
 		}
-		// Construct a tuple literal safely
+
+		// Construct partition tuple literal safely
 		part := fmt.Sprintf("('%s', %d)", escapeCHSingleQuotes(mountPath), sid)
-		if err := conn.Exec(ctx, "ALTER TABLE fs_entries DROP PARTITION "+part); err != nil {
-			return err
+
+		// Drop partitions from tables
+		for _, dropStmt := range []string{
+			"ALTER TABLE fs_entries DROP PARTITION " + part,
+			"ALTER TABLE ancestor_rollups_raw DROP PARTITION " + part,
+			"ALTER TABLE ancestor_rollups_state DROP PARTITION " + part,
+		} {
+			if err := conn.Exec(ctx, dropStmt); err != nil {
+				return err
+			}
 		}
-		if err := conn.Exec(ctx, "ALTER TABLE ancestor_rollups_raw DROP PARTITION "+part); err != nil {
-			return err
-		}
-		if err := conn.Exec(ctx, "ALTER TABLE ancestor_rollups_state DROP PARTITION "+part); err != nil {
-			return err
-		}
-		if err := conn.Exec(ctx, `ALTER TABLE scans DELETE WHERE mount_path = ? AND scan_id = ?`, mountPath, sid); err != nil {
+
+		// Delete scan record
+		if err := conn.Exec(ctx, `
+			ALTER TABLE scans DELETE 
+			WHERE mount_path = ? AND scan_id = ?`,
+			mountPath, sid); err != nil {
 			return err
 		}
 	}
+
 	return rows.Err()
 }
 
@@ -795,42 +937,64 @@ type Filters struct {
 }
 
 func GetLastScanTimes(ctx context.Context, conn clickhouse.Conn) (map[string]time.Time, error) {
-	rows, err := conn.Query(ctx, `SELECT mount_path, toDateTime(max(scan_id)) FROM scans WHERE state = 'ready' GROUP BY mount_path`)
+	// Query the most recent scan_id for each mount that is in the 'ready' state
+	rows, err := conn.Query(ctx, `
+		SELECT mount_path, toDateTime(max(scan_id)) 
+		FROM scans 
+		WHERE state = 'ready' 
+		GROUP BY mount_path`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	res := make(map[string]time.Time)
+
+	// Collect results
+	result := make(map[string]time.Time)
 	for rows.Next() {
-		var m string
-		var ts time.Time
-		if err := rows.Scan(&m, &ts); err != nil {
+		var mountPath string
+		var timestamp time.Time
+
+		if err := rows.Scan(&mountPath, &timestamp); err != nil {
 			return nil, err
 		}
-		res[m] = ts
+
+		result[mountPath] = timestamp
 	}
-	return res, rows.Err()
+
+	return result, rows.Err()
 }
 
 func ListImmediateChildren(ctx context.Context, conn clickhouse.Conn, mountPath, dir string) ([]FileEntry, error) {
+	// Ensure the directory path ends with a slash
 	dir = ensureDir(dir)
+
+	// Query direct children of the directory
 	rows, err := conn.Query(ctx, `
-        SELECT path, parent_path, name, ext_low, ftype, inode, size, uid, gid, mtime, atime, ctime
-        FROM fs_entries_current
-        WHERE mount_path = ? AND parent_path = ?`, mountPath, dir)
+		SELECT path, parent_path, name, ext_low, ftype, inode, size, uid, gid, mtime, atime, ctime
+		FROM fs_entries_current
+		WHERE mount_path = ? AND parent_path = ?`,
+		mountPath, dir)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []FileEntry
+
+	// Collect results
+	var results []FileEntry
 	for rows.Next() {
-		var e FileEntry
-		if err := rows.Scan(&e.Path, &e.ParentPath, &e.Name, &e.Ext, &e.FType, &e.INode, &e.Size, &e.UID, &e.GID, &e.MTime, &e.ATime, &e.CTime); err != nil {
+		var entry FileEntry
+		if err := rows.Scan(
+			&entry.Path, &entry.ParentPath, &entry.Name, &entry.Ext,
+			&entry.FType, &entry.INode, &entry.Size,
+			&entry.UID, &entry.GID,
+			&entry.MTime, &entry.ATime, &entry.CTime); err != nil {
 			return nil, err
 		}
-		out = append(out, e)
+
+		results = append(results, entry)
 	}
-	return out, rows.Err()
+
+	return results, rows.Err()
 }
 
 func ensureDir(path string) string {
@@ -841,86 +1005,102 @@ func ensureDir(path string) string {
 }
 
 func buildBucketPredicate(col, bucket string) (string, error) {
-	switch bucket {
-	case "":
+	if bucket == "" {
 		return "", nil
-	case "0d":
-		return fmt.Sprintf("%s >= (toDateTime(max_scan) - INTERVAL 1 DAY)", col), nil
-	case ">1m":
-		return fmt.Sprintf("%s < (toDateTime(max_scan) - INTERVAL 1 MONTH)", col), nil
-	case ">2m":
-		return fmt.Sprintf("%s < (toDateTime(max_scan) - INTERVAL 2 MONTH)", col), nil
-	case ">6m":
-		return fmt.Sprintf("%s < (toDateTime(max_scan) - INTERVAL 6 MONTH)", col), nil
-	case ">1y":
-		return fmt.Sprintf("%s < (toDateTime(max_scan) - INTERVAL 1 YEAR)", col), nil
-	case ">2y":
-		return fmt.Sprintf("%s < (toDateTime(max_scan) - INTERVAL 2 YEAR)", col), nil
-	case ">3y":
-		return fmt.Sprintf("%s < (toDateTime(max_scan) - INTERVAL 3 YEAR)", col), nil
-	case ">5y":
-		return fmt.Sprintf("%s < (toDateTime(max_scan) - INTERVAL 5 YEAR)", col), nil
-	case ">7y":
-		return fmt.Sprintf("%s < (toDateTime(max_scan) - INTERVAL 7 YEAR)", col), nil
-	default:
+	}
+
+	// Map of bucket identifiers to their time interval expressions
+	timeIntervals := map[string]string{
+		"0d":  ">= (toDateTime(max_scan) - INTERVAL 1 DAY)",
+		">1m": "< (toDateTime(max_scan) - INTERVAL 1 MONTH)",
+		">2m": "< (toDateTime(max_scan) - INTERVAL 2 MONTH)",
+		">6m": "< (toDateTime(max_scan) - INTERVAL 6 MONTH)",
+		">1y": "< (toDateTime(max_scan) - INTERVAL 1 YEAR)",
+		">2y": "< (toDateTime(max_scan) - INTERVAL 2 YEAR)",
+		">3y": "< (toDateTime(max_scan) - INTERVAL 3 YEAR)",
+		">5y": "< (toDateTime(max_scan) - INTERVAL 5 YEAR)",
+		">7y": "< (toDateTime(max_scan) - INTERVAL 7 YEAR)",
+	}
+
+	interval, found := timeIntervals[bucket]
+	if !found {
 		return "", fmt.Errorf("invalid bucket: %s", bucket)
 	}
+
+	return col + " " + interval, nil
 }
 
 func SubtreeSummary(ctx context.Context, conn clickhouse.Conn, mountPath, dir string, f Filters) (Summary, error) {
 	dir = ensureDir(dir)
 
+	// Basic where clauses that apply to all queries
 	where := []string{"mount_path = ?", "path LIKE ?"}
 	args := []any{mountPath, dir + "%"}
 
+	// Add filter for GIDs if provided
 	if len(f.GIDs) > 0 {
-		ph := make([]string, len(f.GIDs))
+		placeholders := make([]string, len(f.GIDs))
 		for i, v := range f.GIDs {
-			ph[i] = "?"
+			placeholders[i] = "?"
 			args = append(args, v)
 		}
-		where = append(where, fmt.Sprintf("gid IN (%s)", strings.Join(ph, ",")))
+		where = append(where, fmt.Sprintf("gid IN (%s)", strings.Join(placeholders, ",")))
 	}
+
+	// Add filter for UIDs if provided
 	if len(f.UIDs) > 0 {
-		ph := make([]string, len(f.UIDs))
+		placeholders := make([]string, len(f.UIDs))
 		for i, v := range f.UIDs {
-			ph[i] = "?"
+			placeholders[i] = "?"
 			args = append(args, v)
 		}
-		where = append(where, fmt.Sprintf("uid IN (%s)", strings.Join(ph, ",")))
+		where = append(where, fmt.Sprintf("uid IN (%s)", strings.Join(placeholders, ",")))
 	}
+
+	// Add filter for extensions if provided
 	if len(f.Exts) > 0 {
-		ph := make([]string, len(f.Exts))
+		placeholders := make([]string, len(f.Exts))
 		for i, v := range f.Exts {
-			ph[i] = "?"
+			placeholders[i] = "?"
 			args = append(args, strings.ToLower(v))
 		}
-		where = append(where, fmt.Sprintf("ext_low IN (%s)", strings.Join(ph, ",")))
+		where = append(where, fmt.Sprintf("ext_low IN (%s)", strings.Join(placeholders, ",")))
 	}
 
-	// time buckets
+	// Build time bucket filters
 	bucketFilter := ""
 	if f.ATimeBucket != "" || f.MTimeBucket != "" {
-		atPred, err := buildBucketPredicate("atime", f.ATimeBucket)
-		if err != nil {
-			return Summary{}, err
+		predicates := []string{}
+
+		// Access time filter
+		if f.ATimeBucket != "" {
+			atPred, err := buildBucketPredicate("atime", f.ATimeBucket)
+			if err != nil {
+				return Summary{}, err
+			}
+			if atPred != "" {
+				predicates = append(predicates, atPred)
+			}
 		}
-		mtPred, err := buildBucketPredicate("mtime", f.MTimeBucket)
-		if err != nil {
-			return Summary{}, err
+
+		// Modification time filter
+		if f.MTimeBucket != "" {
+			mtPred, err := buildBucketPredicate("mtime", f.MTimeBucket)
+			if err != nil {
+				return Summary{}, err
+			}
+			if mtPred != "" {
+				predicates = append(predicates, mtPred)
+			}
 		}
-		preds := []string{}
-		if atPred != "" {
-			preds = append(preds, atPred)
-		}
-		if mtPred != "" {
-			preds = append(preds, mtPred)
-		}
-		if len(preds) > 0 {
-			bucketFilter = " AND (" + strings.Join(preds, " AND ") + ")"
+
+		// Combine predicates
+		if len(predicates) > 0 {
+			bucketFilter = " AND (" + strings.Join(predicates, " AND ") + ")"
 		}
 	}
 
+	// Construct the full query with CTE for max scan_id
 	query := `
 WITH (SELECT max(scan_id) FROM scans WHERE mount_path = ? AND state = 'ready') AS max_scan
 SELECT 
@@ -935,43 +1115,61 @@ SELECT
   groupUniqArray(ext_low) AS exts
 FROM fs_entries_current
 WHERE ` + strings.Join(where, " AND ") + bucketFilter
-	argsWithScan := make([]any, 0, len(args)+1)
-	argsWithScan = append(argsWithScan, mountPath)
-	argsWithScan = append(argsWithScan, args...)
-	row2 := conn.QueryRow(ctx, query, argsWithScan...)
+
+	// Add mountPath as the first argument for the CTE
+	allArgs := make([]any, 0, len(args)+1)
+	allArgs = append(allArgs, mountPath)
+	allArgs = append(allArgs, args...)
+
+	// Execute query and scan result
+	row := conn.QueryRow(ctx, query, allArgs...)
 
 	var s Summary
-	if err := row2.Scan(&s.TotalSize, &s.FileCount, &s.MostRecentATime, &s.OldestATime, &s.MostRecentMTime, &s.OldestMTime, &s.UIDs, &s.GIDs, &s.Exts); err != nil {
+	if err := row.Scan(
+		&s.TotalSize, &s.FileCount,
+		&s.MostRecentATime, &s.OldestATime,
+		&s.MostRecentMTime, &s.OldestMTime,
+		&s.UIDs, &s.GIDs, &s.Exts); err != nil {
 		return Summary{}, err
 	}
+
 	return s, nil
 }
 
 // OptimizedSubtreeSummary attempts to use precomputed ancestor rollups when possible
 // Falls back to the regular implementation for filtered queries
 func OptimizedSubtreeSummary(ctx context.Context, conn clickhouse.Conn, mountPath, dir string, f Filters) (Summary, error) {
-	// Only use rollups when there are no filters at all; ensures correctness for min/max times
-	if len(f.GIDs) == 0 && len(f.UIDs) == 0 && len(f.Exts) == 0 && f.ATimeBucket == "" && f.MTimeBucket == "" {
+	// Only use rollups when there are no filters at all
+	useRollups := len(f.GIDs) == 0 && len(f.UIDs) == 0 &&
+		len(f.Exts) == 0 && f.ATimeBucket == "" && f.MTimeBucket == ""
+
+	if useRollups {
 		dir = ensureDir(dir)
 
+		// Use the precomputed rollups table for better performance
 		query := `
-				SELECT 
-					total_size,
-					file_count,
-					atime_max AS most_recent_atime,
-					atime_min AS oldest_atime,
-					mtime_max AS most_recent_mtime,
-					mtime_min AS oldest_mtime,
-					uids,
-					gids,
-					exts
-				FROM ancestor_rollups_current
-				WHERE mount_path = ? AND ancestor = ?`
+		SELECT 
+			total_size,
+			file_count,
+			atime_max AS most_recent_atime,
+			atime_min AS oldest_atime,
+			mtime_max AS most_recent_mtime,
+			mtime_min AS oldest_mtime,
+			uids,
+			gids,
+			exts
+		FROM ancestor_rollups_current
+		WHERE mount_path = ? AND ancestor = ?`
 
 		row := conn.QueryRow(ctx, query, mountPath, dir)
 
 		var s Summary
-		if err := row.Scan(&s.TotalSize, &s.FileCount, &s.MostRecentATime, &s.OldestATime, &s.MostRecentMTime, &s.OldestMTime, &s.UIDs, &s.GIDs, &s.Exts); err != nil {
+		if err := row.Scan(
+			&s.TotalSize, &s.FileCount,
+			&s.MostRecentATime, &s.OldestATime,
+			&s.MostRecentMTime, &s.OldestMTime,
+			&s.UIDs, &s.GIDs, &s.Exts); err != nil {
+			// If no rows or other error, return empty summary (not an error condition)
 			if errors.Is(err, io.EOF) {
 				return Summary{}, nil
 			}
@@ -981,37 +1179,45 @@ func OptimizedSubtreeSummary(ctx context.Context, conn clickhouse.Conn, mountPat
 		return s, nil
 	}
 
+	// Fall back to regular implementation for filtered queries
 	return SubtreeSummary(ctx, conn, mountPath, dir, f)
 }
 
 func SearchGlobPaths(ctx context.Context, conn clickhouse.Conn, mountPath, globPattern string, limit int, caseInsensitive bool) ([]string, error) {
-	if limit <= 0 {
-		limit = 0
-	}
+	// Convert glob pattern to SQL LIKE pattern
 	pattern := strings.ReplaceAll(strings.ReplaceAll(globPattern, "*", "%"), "?", "_")
 
-	var q string
+	// Build the query based on case sensitivity
+	var query string
 	if caseInsensitive {
-		q = `SELECT path FROM fs_entries_current WHERE mount_path = ? AND lowerUTF8(path) LIKE lowerUTF8(?)`
+		query = `SELECT path FROM fs_entries_current 
+			WHERE mount_path = ? AND lowerUTF8(path) LIKE lowerUTF8(?)`
 	} else {
-		q = `SELECT path FROM fs_entries_current WHERE mount_path = ? AND path LIKE ?`
+		query = `SELECT path FROM fs_entries_current 
+			WHERE mount_path = ? AND path LIKE ?`
 	}
 
+	// Add limit if specified
 	if limit > 0 {
-		q += fmt.Sprintf(" LIMIT %d", limit)
+		query += fmt.Sprintf(" LIMIT %d", limit)
 	}
-	rows, err := conn.Query(ctx, q, mountPath, pattern)
+
+	// Execute query
+	rows, err := conn.Query(ctx, query, mountPath, pattern)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var res []string
+
+	// Collect results
+	var result []string
 	for rows.Next() {
-		var p string
-		if err := rows.Scan(&p); err != nil {
+		var path string
+		if err := rows.Scan(&path); err != nil {
 			return nil, err
 		}
-		res = append(res, p)
+		result = append(result, path)
 	}
-	return res, rows.Err()
+
+	return result, rows.Err()
 }
