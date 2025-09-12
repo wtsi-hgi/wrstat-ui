@@ -33,6 +33,8 @@ import (
 	"io"
 	"log/syslog"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/inconshreveable/log15"
@@ -346,4 +348,33 @@ func sayStarted() {
 	<-time.After(1 * time.Second)
 
 	info("server started")
+}
+
+func parseMountpointsFromFile(mountpoints string) ([]string, error) {
+	if mountpoints == "" {
+		return nil, nil
+	}
+
+	data, err := os.ReadFile(mountpoints)
+	if err != nil {
+		return nil, err
+	}
+
+	lines := strings.Split(string(data), "\n")
+	mounts := make([]string, 0, len(lines))
+
+	for _, line := range lines {
+		if len(line) == 0 {
+			continue
+		}
+
+		mountpoint, err := strconv.Unquote(line)
+		if err != nil {
+			return nil, err
+		}
+
+		mounts = append(mounts, mountpoint)
+	}
+
+	return mounts, nil
 }

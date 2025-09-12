@@ -26,26 +26,20 @@
 package cmd
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
+	"log"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
+	clickhouse "github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/klauspost/pgzip"
 	"github.com/spf13/cobra"
-	"github.com/wtsi-hgi/wrstat-ui/basedirs"
-	"github.com/wtsi-hgi/wrstat-ui/db"
 	"github.com/wtsi-hgi/wrstat-ui/stats"
-	"github.com/wtsi-hgi/wrstat-ui/summary"
-	sbasedirs "github.com/wtsi-hgi/wrstat-ui/summary/basedirs"
-	"github.com/wtsi-hgi/wrstat-ui/summary/dirguta"
-	"github.com/wtsi-hgi/wrstat-ui/summary/groupuser"
-	"github.com/wtsi-hgi/wrstat-ui/summary/usergroup"
 )
 
 var (
@@ -122,31 +116,37 @@ An example command would be the following:
 	},
 }
 
+func init() {
+	RootCmd.AddCommand(summariseCmd)
+
+	summariseCmd.Flags().StringVarP(&defaultDir, "defaultDir", "d", "", "output all summarisers to here")
+	summariseCmd.Flags().StringVarP(&userGroup, "userGroup", "u", "", "usergroup output file")
+	summariseCmd.Flags().StringVarP(&groupUser, "groupUser", "g", "", "groupUser output file")
+	summariseCmd.Flags().StringVarP(&basedirsDB, "basedirsDB", "b", "", "basedirs output file")
+	summariseCmd.Flags().StringVarP(&basedirsHistoryDB, "basedirsHistoryDB", "s", "",
+		"basedirs file containing previous history")
+	summariseCmd.Flags().StringVarP(&dirgutaDB, "tree", "t", "", "tree output dir")
+	summariseCmd.Flags().StringVarP(&quotaPath, "quota", "q", "", "csv of gid,disk,size_quota,inode_quota")
+	summariseCmd.Flags().StringVarP(&basedirsConfig, "config", "c", "", "path to basedirs config file")
+	summariseCmd.Flags().StringVarP(&mounts, "mounts", "m", "", "path to a file containing a list of quoted mountpoints")
+}
+
 func run(args []string) (err error) {
 	if err = checkArgs(args); err != nil {
 		return err
 	}
 
-	r, modtime, err := openStatsFile(args[0])
+	r, _, err := openStatsFile(args[0])
 	if err != nil {
 		return err
 	}
 
-	s := summary.NewSummariser(stats.NewStatsParser(r))
-
-	setArgsDefaults()
-
-	if fn, err := setSummarisers(s, mounts, modtime); err != nil { //nolint:nestif
+	err = updateClickhouse(r)
+	if err != nil {
 		return err
-	} else if fn != nil {
-		defer func() {
-			if errr := fn(); err == nil {
-				err = errr
-			}
-		}()
 	}
 
-	return s.Summarise()
+	return nil
 }
 
 func checkArgs(args []string) error {
@@ -187,234 +187,333 @@ func openStatsFile(statsFile string) (io.Reader, time.Time, error) {
 	return r, fi.ModTime(), nil
 }
 
-func setArgsDefaults() {
-	if defaultDir == "" {
-		return
-	}
-
-	if userGroup == "" {
-		userGroup = filepath.Join(defaultDir, "byusergroup.gz")
-	}
-
-	if groupUser == "" {
-		groupUser = filepath.Join(defaultDir, "bygroup")
-	}
-
-	if basedirsDB == "" {
-		basedirsDB = filepath.Join(defaultDir, basedirBasename)
-	}
-
-	if dirgutaDB == "" {
-		dirgutaDB = filepath.Join(defaultDir, dgutaDBsSuffix)
-	}
+// Ancestor aggregate record (scanner-produced, positive values for present
+// files).
+type AncestorAgg struct {
+	Ancestor   string
+	TotalSize  int64
+	TotalCount int64
+	ScanTS     uint32
+	ScanMonth  uint16
+	IsDeleted  uint8 // 0 normally
 }
 
-func setSummarisers(s *summary.Summariser, mountpoints string, //nolint:gocognit,gocyclo
-	modtime time.Time) (func() error, error) {
-	if userGroup != "" {
-		if err := addUserGroupSummariser(s, userGroup); err != nil {
-			return nil, err
-		}
-	}
+func updateClickhouse(r io.Reader) error {
+	ctx := context.Background()
 
-	if groupUser != "" {
-		if err := addGroupUserSummariser(s, groupUser); err != nil {
-			return nil, err
-		}
-	}
-
-	if basedirsDB != "" {
-		if err := addBasedirsSummariser(s, basedirsDB, basedirsHistoryDB,
-			quotaPath, basedirsConfig, mountpoints, modtime); err != nil {
-			return nil, err
-		}
-	}
-
-	if dirgutaDB != "" {
-		return addDirgutaSummariser(s, dirgutaDB)
-	}
-
-	return nil, nil //nolint:nilnil
-}
-
-func addUserGroupSummariser(s *summary.Summariser, userGroup string) error {
-	uf, err := os.Create(userGroup)
+	conn, err := clickhouse.Open(&clickhouse.Options{
+		Addr: []string{"127.0.0.1:9000"},
+		Auth: clickhouse.Auth{
+			Database: "default",
+			Username: "default",
+			Password: "",
+		},
+		DialTimeout: 5 * time.Second,
+	})
 	if err != nil {
-		return fmt.Errorf("failed to create usergroup file: %w", err)
+		return fmt.Errorf("failed to connect to clickhouse: %w", err)
 	}
 
-	s.AddDirectoryOperation(usergroup.NewByUserGroup(wrapCompressed(uf)))
+	if err := createSchema(ctx, conn); err != nil {
+		log.Fatalf("createSchema: %v", err)
+	}
+
+	// Simulate a daily scanner output (small example). In production, your
+	// scanner would stream batches of FileRecord to ingestStaging.
+	now := time.Now()
+	scanTS := uint32(now.Unix())
+	scanMonth := uint16(now.Year()*100 + int(now.Month()))
+
+	// 1) Insert today's scan into staging
+	ags, err := ingestStaging(ctx, conn, r, scanTS, scanMonth)
+	if err != nil {
+		log.Fatalf("ingestStaging: %v", err)
+	}
+
+	// 2) Generate tombstones (set-based in ClickHouse) and negative ancestor
+	// aggregates
+	if err := generateTombstonesAndNegativeAggs(ctx, conn, scanTS, scanMonth); err != nil {
+		log.Fatalf("generate tombstones: %v", err)
+	}
+
+	// 3) Append today's staging rows into append-only files table
+	if err := appendStagingToFiles(ctx, conn); err != nil {
+		log.Fatalf("appendStagingToFiles: %v", err)
+	}
+
+	// 4) Insert scanner-side positive ancestor aggregates (batch)
+	if err := ingestAncestorAggs(ctx, conn, ags); err != nil {
+		log.Fatalf("ingestAncestorAggs: %v", err)
+	}
+
+	// 5) Truncate staging to free space
+	if err := truncateStaging(ctx, conn); err != nil {
+		log.Fatalf("truncateStaging: %v", err)
+	}
 
 	return nil
 }
 
-type compressedFile struct {
-	*pgzip.Writer
-	file *os.File
-}
-
-func (c *compressedFile) Close() error {
-	err := c.Writer.Close()
-	errr := c.file.Close()
-
-	if err != nil {
+func createSchema(ctx context.Context, conn clickhouse.Conn) error {
+	// staging table (today)
+	if err := conn.Exec(ctx, `
+CREATE TABLE IF NOT EXISTS files_today (
+  path String,
+  dirname String,
+  basename String,
+  size UInt64,
+  uid UInt32,
+  gid UInt32,
+  mtime DateTime,
+  atime DateTime,
+  ctime DateTime,
+  scan_ts UInt32,
+  scan_month UInt16
+) ENGINE = MergeTree()
+ORDER BY path
+`); err != nil {
 		return err
 	}
 
-	return errr
-}
-
-func wrapCompressed(wc *os.File) io.WriteCloser {
-	if !strings.HasSuffix(wc.Name(), ".gz") {
-		return wc
+	// append-only files table (history + tombstones)
+	if err := conn.Exec(ctx, `
+CREATE TABLE IF NOT EXISTS files (
+  path String,
+  dirname String,
+  basename String,
+  size UInt64,
+  uid UInt32,
+  gid UInt32,
+  mtime DateTime,
+  atime DateTime,
+  ctime DateTime,
+  scan_ts UInt32,
+  scan_month UInt16,
+  is_deleted UInt8 DEFAULT 0
+) ENGINE = MergeTree()
+PARTITION BY scan_month
+ORDER BY (path, scan_ts)
+`); err != nil {
+		return err
 	}
 
-	return &compressedFile{
-		Writer: pgzip.NewWriter(wc),
-		file:   wc,
+	// compact "current" view of files (latest per path) via ReplacingMergeTree
+	if err := conn.Exec(ctx, `
+CREATE TABLE IF NOT EXISTS files_current (
+  path String,
+  dirname String,
+  basename String,
+  size UInt64,
+  uid UInt32,
+  gid UInt32,
+  mtime DateTime,
+  atime DateTime,
+  ctime DateTime,
+  last_seen UInt32,
+  is_deleted UInt8 DEFAULT 0
+) ENGINE = ReplacingMergeTree(last_seen)
+ORDER BY path
+`); err != nil {
+		return err
 	}
-}
 
-func addGroupUserSummariser(s *summary.Summariser, groupUser string) error {
-	gf, err := os.Create(groupUser)
-	if err != nil {
-		return fmt.Errorf("failed to create groupuser file: %w", err)
+	// materialized view to keep files_current updated from append-only files
+	// It groups by path/dirname/basename and computes latest values
+	if err := conn.Exec(ctx, `
+CREATE MATERIALIZED VIEW IF NOT EXISTS mv_files_current TO files_current AS
+SELECT
+  path,
+  dirname,
+  basename,
+  anyLast(size) AS size,
+  anyLast(uid) AS uid,
+  anyLast(gid) AS gid,
+  anyLast(mtime) AS mtime,
+  anyLast(atime) AS atime,
+  anyLast(ctime) AS ctime,
+  max(scan_ts) AS last_seen,
+  anyLast(is_deleted) AS is_deleted
+FROM files
+GROUP BY path, dirname, basename
+`); err != nil {
+		return err
 	}
 
-	s.AddGlobalOperation(groupuser.NewByGroupUser(wrapCompressed(gf)))
+	// per-ancestor aggregates (SummingMergeTree accepts positive/negative rows)
+	if err := conn.Exec(ctx, `
+CREATE TABLE IF NOT EXISTS file_aggregates (
+  ancestor String,
+  total_size Int64,   -- can be negative for tombstone adjustments
+  total_count Int64,
+  scan_ts UInt32,
+  scan_month UInt16,
+  is_deleted UInt8 DEFAULT 0
+) ENGINE = SummingMergeTree
+PARTITION BY scan_month
+ORDER BY (ancestor, scan_ts)
+`); err != nil {
+		return err
+	}
 
 	return nil
 }
 
-func addBasedirsSummariser(s *summary.Summariser, basedirsDB, basedirsHistoryDB,
-	quotaPath, basedirsConfig, mountpoints string, modtime time.Time) error {
-	quotas, config, err := parseBasedirConfig(quotaPath, basedirsConfig)
+// ingestStaging inserts scanner results into files_today in batches.
+func ingestStaging(ctx context.Context, conn clickhouse.Conn, r io.Reader, scanTS uint32, scanMonth uint16) ([]AncestorAgg, error) {
+	batch, err := conn.PrepareBatch(ctx, "INSERT INTO files_today (path, dirname, basename, size, uid, gid, mtime, atime, ctime, scan_ts, scan_month)")
+	if err != nil {
+		return nil, err
+	}
+
+	statsParser := stats.NewStatsParser(r)
+	fi := new(stats.FileInfo)
+	agg := map[string]*AncestorAgg{}
+
+	for statsParser.Scan(fi) == nil {
+		path := string(fi.Path)
+		dir := filepath.Dir(path)
+		name := filepath.Base(path)
+
+		if err := batch.Append(
+			path, dir, name, fi.Size, fi.UID, fi.GID,
+			fi.MTime, fi.ATime, fi.CTime, scanTS, scanMonth,
+		); err != nil {
+			return nil, err
+		}
+
+		for _, anc := range dirToAncestors(path, dir) {
+			if _, ok := agg[anc]; !ok {
+				agg[anc] = &AncestorAgg{
+					Ancestor:  anc,
+					ScanTS:    scanTS,
+					ScanMonth: scanMonth,
+					IsDeleted: 0,
+				}
+			}
+			agg[anc].TotalSize += int64(fi.Size)
+			agg[anc].TotalCount += 1
+		}
+	}
+
+	if err := statsParser.Err(); err != nil {
+		return nil, err
+	}
+
+	err = batch.Send()
+	if err != nil {
+		return nil, err
+	}
+
+	aggs := make([]AncestorAgg, 0, len(agg))
+	for _, v := range agg {
+		aggs = append(aggs, *v)
+	}
+
+	return aggs, nil
+}
+
+func dirToAncestors(path, dir string) []string {
+	ancestors := []string{}
+	if path != "/" {
+		parts := strings.Split(dir, string(os.PathSeparator))
+		for i := range parts {
+			if i == 0 && parts[i] == "" {
+				ancestors = append(ancestors, "/")
+
+				continue
+			}
+
+			if parts[i] == "" {
+				continue
+			}
+
+			anc := strings.Join(parts[0:i+1], string(os.PathSeparator))
+			if anc == "" {
+				anc = "/"
+			}
+
+			ancestors = append(ancestors, anc)
+		}
+	} else {
+		ancestors = append(ancestors, "/")
+	}
+
+	return ancestors
+}
+
+// generateTombstonesAndNegativeAggs:
+//   - Inserts tombstones rows into `files` for paths present in files_current but not in files_today.
+//   - Inserts negative per-ancestor aggregate rows into file_aggregates by using arrayJoin(splitByChar('/', path))
+//
+// This runs entirely in ClickHouse and requires no large memory in Go.
+func generateTombstonesAndNegativeAggs(ctx context.Context, conn clickhouse.Conn, scanTS uint32, scanMonth uint16) error {
+	// 1) Insert tombstone rows into files table for missing paths
+	// (is_deleted=1). Use files_current (the latest-per-path view) to find live
+	// paths; left join with files_today.
+	tombstoneSQL := fmt.Sprintf(`
+INSERT INTO files (path, dirname, basename, size, uid, gid, mtime, atime, ctime, scan_ts, scan_month, is_deleted)
+SELECT f.path, f.dirname, f.basename, 0 AS size, 0 AS uid, 0 AS gid, now() AS mtime, now() AS atime, now() AS ctime, %d AS scan_ts, %d AS scan_month, 1 AS is_deleted
+FROM files_current f
+LEFT JOIN files_today t ON f.path = t.path
+WHERE f.is_deleted = 0 AND t.path IS NULL
+`, scanTS, scanMonth)
+
+	if err := conn.Exec(ctx, tombstoneSQL); err != nil {
+		return fmt.Errorf("tombstone insert failed: %w", err)
+	}
+
+	// 2) Insert negative ancestor aggregates for those deleted paths.
+	// We use arrayJoin(splitByChar('/', path)) to expand ancestors server-side.
+	negAggSQL := fmt.Sprintf(`
+INSERT INTO file_aggregates (ancestor, total_size, total_count, scan_ts, scan_month, is_deleted)
+SELECT ancestor, -sum(size) AS total_size, -count() AS total_count, %d AS scan_ts, %d AS scan_month, 1 AS is_deleted
+FROM (
+  SELECT arrayJoin(splitByChar('/', path)) AS ancestor, size
+  FROM files_current f
+  LEFT JOIN files_today t ON f.path = t.path
+  WHERE f.is_deleted = 0 AND t.path IS NULL
+)
+GROUP BY ancestor
+`, scanTS, scanMonth)
+
+	if err := conn.Exec(ctx, negAggSQL); err != nil {
+		return fmt.Errorf("negative agg insert failed: %w", err)
+	}
+
+	return nil
+}
+
+// appendStagingToFiles appends all rows from files_today into files (history
+// table).
+func appendStagingToFiles(ctx context.Context, conn clickhouse.Conn) error {
+	return conn.Exec(ctx, `
+INSERT INTO files (path, dirname, basename, size, uid, gid, mtime, atime, ctime, scan_ts, scan_month, is_deleted)
+SELECT path, dirname, basename, size, uid, gid, mtime, atime, ctime, scan_ts, scan_month, 0 AS is_deleted FROM files_today
+`)
+}
+
+// ingestAncestorAggs inserts scanner-computed positive aggregates into
+// file_aggregates.
+func ingestAncestorAggs(ctx context.Context, conn clickhouse.Conn, aggs []AncestorAgg) error {
+	if len(aggs) == 0 {
+		return nil
+	}
+
+	batch, err := conn.PrepareBatch(ctx, "INSERT INTO file_aggregates (ancestor, total_size, total_count, scan_ts, scan_month, is_deleted)")
 	if err != nil {
 		return err
 	}
 
-	if err = os.Remove(basedirsDB); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return err
-	}
-
-	bd, err := basedirs.NewCreator(basedirsDB, quotas)
-	if err != nil {
-		return fmt.Errorf("failed to create new basedirs creator: %w", err)
-	} else if mps, errr := parseMountpointsFromFile(mountpoints); errr != nil {
-		return errr
-	} else if len(mps) > 0 {
-		bd.SetMountPoints(mps)
-	}
-
-	bd.SetModTime(modtime)
-
-	if basedirsHistoryDB != "" {
-		if err = copyHistory(bd, basedirsHistoryDB); err != nil {
+	for _, a := range aggs {
+		if err := batch.Append(a.Ancestor, a.TotalSize, a.TotalCount, a.ScanTS, a.ScanMonth, a.IsDeleted); err != nil {
 			return err
 		}
 	}
 
-	s.AddDirectoryOperation(sbasedirs.NewBaseDirs(config.PathShouldOutput, bd))
-
-	return nil
+	return batch.Send()
 }
 
-func parseMountpointsFromFile(mountpoints string) ([]string, error) {
-	if mountpoints == "" {
-		return nil, nil
-	}
-
-	data, err := os.ReadFile(mountpoints)
-	if err != nil {
-		return nil, err
-	}
-
-	lines := strings.Split(string(data), "\n")
-	mounts := make([]string, 0, len(lines))
-
-	for _, line := range lines {
-		if len(line) == 0 {
-			continue
-		}
-
-		mountpoint, err := strconv.Unquote(line)
-		if err != nil {
-			return nil, err
-		}
-
-		mounts = append(mounts, mountpoint)
-	}
-
-	return mounts, nil
-}
-
-func parseBasedirConfig(quotaPath, basedirsConfig string) (*basedirs.Quotas, basedirs.Config, error) {
-	quotas, err := basedirs.ParseQuotas(quotaPath)
-	if err != nil {
-		return nil, nil, fmt.Errorf("error parsing quotas file: %w", err)
-	}
-
-	cf, err := os.Open(basedirsConfig)
-	if err != nil {
-		return nil, nil, fmt.Errorf("error opening basedirs config: %w", err)
-	}
-
-	defer cf.Close()
-
-	config, err := basedirs.ParseConfig(cf)
-	if err != nil {
-		return nil, nil, fmt.Errorf("error parsing basedirs config: %w", err)
-	}
-
-	cf.Close()
-
-	return quotas, config, nil
-}
-
-func copyHistory(bd *basedirs.BaseDirs, basedirsHistoryDB string) error {
-	db, err := basedirs.OpenDBRO(basedirsHistoryDB)
-	if err != nil {
-		return err
-	}
-
-	defer db.Close()
-
-	return bd.CopyHistoryFrom(db)
-}
-
-func addDirgutaSummariser(s *summary.Summariser, dirgutaDB string) (func() error, error) {
-	if err := os.RemoveAll(dirgutaDB); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return nil, err
-	}
-
-	if err := os.MkdirAll(dirgutaDB, 0755); err != nil { //nolint:mnd
-		return nil, err
-	}
-
-	db := db.NewDB(dirgutaDB)
-
-	if err := db.CreateDB(); err != nil {
-		return nil, err
-	}
-
-	db.SetBatchSize(dbBatchSize)
-
-	s.AddDirectoryOperation(dirguta.NewDirGroupUserTypeAge(db))
-
-	return db.Close, nil
-}
-
-func init() {
-	RootCmd.AddCommand(summariseCmd)
-
-	summariseCmd.Flags().StringVarP(&defaultDir, "defaultDir", "d", "", "output all summarisers to here")
-	summariseCmd.Flags().StringVarP(&userGroup, "userGroup", "u", "", "usergroup output file")
-	summariseCmd.Flags().StringVarP(&groupUser, "groupUser", "g", "", "groupUser output file")
-	summariseCmd.Flags().StringVarP(&basedirsDB, "basedirsDB", "b", "", "basedirs output file")
-	summariseCmd.Flags().StringVarP(&basedirsHistoryDB, "basedirsHistoryDB", "s", "",
-		"basedirs file containing previous history")
-	summariseCmd.Flags().StringVarP(&dirgutaDB, "tree", "t", "", "tree output dir")
-	summariseCmd.Flags().StringVarP(&quotaPath, "quota", "q", "", "csv of gid,disk,size_quota,inode_quota")
-	summariseCmd.Flags().StringVarP(&basedirsConfig, "config", "c", "", "path to basedirs config file")
-	summariseCmd.Flags().StringVarP(&mounts, "mounts", "m", "", "path to a file containing a list of quoted mountpoints")
+// truncateStaging clears files_today (so next scan starts fresh).
+func truncateStaging(ctx context.Context, conn clickhouse.Conn) error {
+	return conn.Exec(ctx, "TRUNCATE TABLE files_today")
 }
