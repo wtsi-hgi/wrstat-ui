@@ -312,7 +312,8 @@ CREATE TABLE IF NOT EXISTS fs_entries (
   INDEX idx_gid gid TYPE minmax GRANULARITY 8192,
   INDEX idx_mtime mtime TYPE minmax GRANULARITY 8192,
   INDEX idx_atime atime TYPE minmax GRANULARITY 8192,
-  INDEX idx_path_bf path TYPE tokenbf_v1(256) GRANULARITY 4
+  INDEX idx_path_bf path TYPE tokenbf_v1(256) GRANULARITY 4,
+  INDEX idx_parent_path parent_path TYPE minmax GRANULARITY 8192
 ) ENGINE = MergeTree
 PARTITION BY (mount_path, scan_id)
 ORDER BY (mount_path, parent_path, name)
