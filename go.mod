@@ -16,6 +16,7 @@ require (
 	github.com/olekukonko/tablewriter v0.0.5
 	github.com/smartystreets/goconvey v1.7.2
 	github.com/spf13/cobra v1.9.1
+	github.com/stretchr/testify v1.10.0
 	github.com/ugorji/go/codec v1.2.12
 	github.com/wtsi-hgi/go-authserver v1.4.0
 	go.etcd.io/bbolt v1.4.0
@@ -130,6 +131,7 @@ require (
 	github.com/pierrec/lz4/v4 v4.1.22 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/pkg/sftp v1.13.9 // indirect
+	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/ricochet2200/go-disk-usage/du v0.0.0-20210707232629-ac9918953285 // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/rs/xid v1.6.0 // indirect

@@ -67,7 +67,7 @@ This command ingests a single mount's scan into ClickHouse with atomic promotion
 semantics (loading -> ready), maintains only the latest ready scan per mount,
 and provides precomputed subtree rollups.`,
 	Run: func(_ *cobra.Command, args []string) {
-		if err := run(args); err != nil {
+		if err := Run(args); err != nil {
 			die("%s", err)
 		}
 	},
@@ -84,7 +84,8 @@ func init() {
 	summariseCmd.Flags().StringVar(&chPassword, "ch-password", "", "ClickHouse password")
 }
 
-func run(args []string) (err error) {
+// Run executes the summarise command with the given arguments
+func Run(args []string) (err error) {
 	mountPath, statsPath, err := checkArgs(args)
 	if err != nil {
 		return err
@@ -97,14 +98,36 @@ func run(args []string) (err error) {
 
 	defer r.Close()
 
-	return updateClickhouse(mountPath, r)
+	ctx := context.Background()
+
+	conn, err := clickhouse.Open(&clickhouse.Options{
+		Addr:        []string{fmt.Sprintf("%s:%s", chHost, chPort)},
+		Auth:        clickhouse.Auth{Database: chDatabase, Username: chUsername, Password: chPassword},
+		DialTimeout: 10 * time.Second,
+		Compression: &clickhouse.Compression{Method: clickhouse.CompressionLZ4},
+		Settings: clickhouse.Settings{
+			"max_insert_block_size":       1000000,
+			"min_insert_block_size_rows":  100000,
+			"min_insert_block_size_bytes": 10485760, // 10MB
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("connect: %w", err)
+	}
+	defer conn.Close()
+
+	if err := createSchema(ctx, conn); err != nil {
+		return fmt.Errorf("createSchema: %w", err)
+	}
+
+	return updateClickhouse(ctx, conn, mountPath, r)
 }
 
 func checkArgs(args []string) (string, string, error) {
 	if len(args) != 2 {
 		return "", "", errors.New("usage: summarise <mount_path> <stats_file|->") //nolint:err113
 	}
-	mountPath := normalizeMount(args[0])
+	mountPath := NormalizeMount(args[0])
 	statsPath := args[1]
 	if mountPath == "/" {
 		return "", "", errors.New("mount_path must not be '/' — use the real mount point path") //nolint:err113
@@ -128,6 +151,11 @@ func (m *readMultiCloser) Close() error {
 		}
 	}
 	return firstErr
+}
+
+// OpenStatsFile exports the internal openStatsFile function for testing
+func OpenStatsFile(statsFile string) (io.ReadCloser, time.Time, error) {
+	return openStatsFile(statsFile)
 }
 
 func openStatsFile(statsFile string) (io.ReadCloser, time.Time, error) {
@@ -161,8 +189,9 @@ func openStatsFile(statsFile string) (io.ReadCloser, time.Time, error) {
 // --- ClickHouse schema and ingestion ---
 
 const (
-	fileBatchSize   = 500_000 // Increased for better performance
-	rollupBatchSize = 500_000 // Increased for better performance
+	// Lower batch sizes to balance performance and memory usage
+	fileBatchSize   = 100_000
+	rollupBatchSize = 100_000
 )
 
 type ftype uint8
@@ -199,24 +228,24 @@ func mapEntryType(b byte) ftype {
 	}
 }
 
-func normalizeMount(m string) string {
+func NormalizeMount(m string) string {
 	if m == "" {
 		return m
 	}
 	if !strings.HasSuffix(m, "/") {
-		m += "/"
+		return m + "/"
 	}
 	return m
 }
 
-func isDirPath(path string) bool {
+func IsDirPath(path string) bool {
 	return strings.HasSuffix(path, "/")
 }
 
-func splitParentAndName(path string) (parent, name string) {
+func SplitParentAndName(path string) (parent, name string) {
 	// Treat directories as having trailing slash in the input.
 	p := path
-	if isDirPath(p) {
+	if IsDirPath(p) {
 		p = p[:len(p)-1]
 	}
 	idx := strings.LastIndexByte(p, '/')
@@ -227,7 +256,7 @@ func splitParentAndName(path string) (parent, name string) {
 	return p[:idx+1], p[idx+1:]
 }
 
-func forEachAncestor(dir, mountPath string, fn func(a string) bool) {
+func ForEachAncestor(dir, mountPath string, fn func(a string) bool) {
 	// dir must be a directory path ending with '/'
 	if !strings.HasSuffix(dir, "/") {
 		dir += "/"
@@ -236,51 +265,59 @@ func forEachAncestor(dir, mountPath string, fn func(a string) bool) {
 	if !strings.HasPrefix(dir, mountPath) {
 		return
 	}
-	cur := dir
+
 	for {
-		if !fn(cur) {
+		if !fn(dir) {
 			return
 		}
-		if cur == mountPath {
+
+		if dir == mountPath {
 			return
 		}
-		trim := strings.TrimRight(cur, "/")
-		idx := strings.LastIndexByte(trim, '/')
-		if idx <= 0 {
+
+		// Get parent directory by truncating after the last slash before the final slash
+		lastSlash := strings.LastIndexByte(dir[:len(dir)-1], '/')
+		if lastSlash < 0 {
 			return
 		}
-		cur = trim[:idx+1]
+		dir = dir[:lastSlash+1]
 	}
 }
 
 // escapeCHSingleQuotes escapes single quotes for embedding string literals into ClickHouse queries
 func escapeCHSingleQuotes(s string) string { return strings.ReplaceAll(s, "'", "''") }
 
-func deriveExtLower(name string, isDir bool) string {
+func DeriveExtLower(name string, isDir bool) string {
 	if isDir {
 		return ""
 	}
+
 	// Hidden files: ignore leading dot for ext purposes
 	base := strings.TrimPrefix(name, ".")
 	dot := strings.LastIndexByte(base, '.')
 	if dot == -1 {
 		return ""
 	}
-	ext1 := base[dot+1:]
-	lower1 := strings.ToLower(ext1)
-	// Multi-dot rule for common compressed suffixes -> previousExt+"."+compressExt
-	switch lower1 {
-	case "gz", "bz2", "xz", "zst", "lz4", "lz", "br":
-		prev := strings.LastIndexByte(base[:dot], '.')
-		if prev != -1 {
-			prevExt := strings.ToLower(base[prev+1 : dot])
+
+	ext := strings.ToLower(base[dot+1:])
+
+	// Multi-dot rule for common compressed suffixes
+	compressExts := map[string]bool{
+		"gz": true, "bz2": true, "xz": true,
+		"zst": true, "lz4": true, "lz": true, "br": true,
+	}
+
+	if compressExts[ext] {
+		prevDot := strings.LastIndexByte(base[:dot], '.')
+		if prevDot != -1 {
+			prevExt := strings.ToLower(base[prevDot+1 : dot])
 			if prevExt != "" {
-				return prevExt + "." + lower1
+				return prevExt + "." + ext
 			}
 		}
-		return lower1
 	}
-	return lower1
+
+	return ext
 }
 
 // SQL constants
@@ -427,7 +464,7 @@ SELECT
   scan_id,
   ancestor,
   sumState(size) AS total_size,
-  sumState(1) AS file_count,
+  sumState(toUInt64(1)) AS file_count,
   minState(atime) AS atime_min,
   maxState(atime) AS atime_max,
   minState(mtime) AS mtime_min,
@@ -436,39 +473,39 @@ SELECT
 	groupUniqArrayState(gid) AS gids,
 	groupUniqArrayState(ext_low) AS exts,
   sumIfState(size, atime >= (scan_time - INTERVAL 1 DAY)) AS at_within_0d_size,
-  sumIfState(1, atime >= (scan_time - INTERVAL 1 DAY)) AS at_within_0d_count,
+  sumIfState(toUInt64(1), atime >= (scan_time - INTERVAL 1 DAY)) AS at_within_0d_count,
   sumIfState(size, atime < (scan_time - INTERVAL 1 MONTH)) AS at_older_1m_size,
-  sumIfState(1, atime < (scan_time - INTERVAL 1 MONTH)) AS at_older_1m_count,
+  sumIfState(toUInt64(1), atime < (scan_time - INTERVAL 1 MONTH)) AS at_older_1m_count,
   sumIfState(size, atime < (scan_time - INTERVAL 2 MONTH)) AS at_older_2m_size,
-  sumIfState(1, atime < (scan_time - INTERVAL 2 MONTH)) AS at_older_2m_count,
+  sumIfState(toUInt64(1), atime < (scan_time - INTERVAL 2 MONTH)) AS at_older_2m_count,
   sumIfState(size, atime < (scan_time - INTERVAL 6 MONTH)) AS at_older_6m_size,
-  sumIfState(1, atime < (scan_time - INTERVAL 6 MONTH)) AS at_older_6m_count,
+  sumIfState(toUInt64(1), atime < (scan_time - INTERVAL 6 MONTH)) AS at_older_6m_count,
   sumIfState(size, atime < (scan_time - INTERVAL 1 YEAR)) AS at_older_1y_size,
-  sumIfState(1, atime < (scan_time - INTERVAL 1 YEAR)) AS at_older_1y_count,
+  sumIfState(toUInt64(1), atime < (scan_time - INTERVAL 1 YEAR)) AS at_older_1y_count,
   sumIfState(size, atime < (scan_time - INTERVAL 2 YEAR)) AS at_older_2y_size,
-  sumIfState(1, atime < (scan_time - INTERVAL 2 YEAR)) AS at_older_2y_count,
+  sumIfState(toUInt64(1), atime < (scan_time - INTERVAL 2 YEAR)) AS at_older_2y_count,
   sumIfState(size, atime < (scan_time - INTERVAL 3 YEAR)) AS at_older_3y_size,
-  sumIfState(1, atime < (scan_time - INTERVAL 3 YEAR)) AS at_older_3y_count,
+  sumIfState(toUInt64(1), atime < (scan_time - INTERVAL 3 YEAR)) AS at_older_3y_count,
   sumIfState(size, atime < (scan_time - INTERVAL 5 YEAR)) AS at_older_5y_size,
-  sumIfState(1, atime < (scan_time - INTERVAL 5 YEAR)) AS at_older_5y_count,
+  sumIfState(toUInt64(1), atime < (scan_time - INTERVAL 5 YEAR)) AS at_older_5y_count,
   sumIfState(size, atime < (scan_time - INTERVAL 7 YEAR)) AS at_older_7y_size,
-  sumIfState(1, atime < (scan_time - INTERVAL 7 YEAR)) AS at_older_7y_count,
+  sumIfState(toUInt64(1), atime < (scan_time - INTERVAL 7 YEAR)) AS at_older_7y_count,
   sumIfState(size, mtime < (scan_time - INTERVAL 1 MONTH)) AS mt_older_1m_size,
-  sumIfState(1, mtime < (scan_time - INTERVAL 1 MONTH)) AS mt_older_1m_count,
+  sumIfState(toUInt64(1), mtime < (scan_time - INTERVAL 1 MONTH)) AS mt_older_1m_count,
   sumIfState(size, mtime < (scan_time - INTERVAL 2 MONTH)) AS mt_older_2m_size,
-  sumIfState(1, mtime < (scan_time - INTERVAL 2 MONTH)) AS mt_older_2m_count,
+  sumIfState(toUInt64(1), mtime < (scan_time - INTERVAL 2 MONTH)) AS mt_older_2m_count,
   sumIfState(size, mtime < (scan_time - INTERVAL 6 MONTH)) AS mt_older_6m_size,
-  sumIfState(1, mtime < (scan_time - INTERVAL 6 MONTH)) AS mt_older_6m_count,
+  sumIfState(toUInt64(1), mtime < (scan_time - INTERVAL 6 MONTH)) AS mt_older_6m_count,
   sumIfState(size, mtime < (scan_time - INTERVAL 1 YEAR)) AS mt_older_1y_size,
-  sumIfState(1, mtime < (scan_time - INTERVAL 1 YEAR)) AS mt_older_1y_count,
+  sumIfState(toUInt64(1), mtime < (scan_time - INTERVAL 1 YEAR)) AS mt_older_1y_count,
   sumIfState(size, mtime < (scan_time - INTERVAL 2 YEAR)) AS mt_older_2y_size,
-  sumIfState(1, mtime < (scan_time - INTERVAL 2 YEAR)) AS mt_older_2y_count,
+  sumIfState(toUInt64(1), mtime < (scan_time - INTERVAL 2 YEAR)) AS mt_older_2y_count,
   sumIfState(size, mtime < (scan_time - INTERVAL 3 YEAR)) AS mt_older_3y_size,
-  sumIfState(1, mtime < (scan_time - INTERVAL 3 YEAR)) AS mt_older_3y_count,
+  sumIfState(toUInt64(1), mtime < (scan_time - INTERVAL 3 YEAR)) AS mt_older_3y_count,
   sumIfState(size, mtime < (scan_time - INTERVAL 5 YEAR)) AS mt_older_5y_size,
-  sumIfState(1, mtime < (scan_time - INTERVAL 5 YEAR)) AS mt_older_5y_count,
+  sumIfState(toUInt64(1), mtime < (scan_time - INTERVAL 5 YEAR)) AS mt_older_5y_count,
   sumIfState(size, mtime < (scan_time - INTERVAL 7 YEAR)) AS mt_older_7y_size,
-  sumIfState(1, mtime < (scan_time - INTERVAL 7 YEAR)) AS mt_older_7y_count
+  sumIfState(toUInt64(1), mtime < (scan_time - INTERVAL 7 YEAR)) AS mt_older_7y_count
 FROM ancestor_rollups_raw
 GROUP BY mount_path, scan_id, ancestor`
 
@@ -541,6 +578,11 @@ INNER JOIN (
 GROUP BY s.mount_path, s.scan_id, s.ancestor`
 )
 
+// CreateSchema exports the internal createSchema function for testing
+func CreateSchema(ctx context.Context, conn clickhouse.Conn) error {
+	return createSchema(ctx, conn)
+}
+
 func createSchema(ctx context.Context, conn clickhouse.Conn) error {
 	// Create scans table first
 	if err := conn.Exec(ctx, createScansTable); err != nil {
@@ -594,29 +636,12 @@ func createSchema(ctx context.Context, conn clickhouse.Conn) error {
 	return nil
 }
 
-func updateClickhouse(mountPath string, r io.Reader) (retErr error) {
-	ctx := context.Background()
+// UpdateClickhouse exports the internal updateClickhouse function for testing
+func UpdateClickhouse(ctx context.Context, conn clickhouse.Conn, mountPath string, r io.Reader) error {
+	return updateClickhouse(ctx, conn, mountPath, r)
+}
 
-	conn, err := clickhouse.Open(&clickhouse.Options{
-		Addr:        []string{fmt.Sprintf("%s:%s", chHost, chPort)},
-		Auth:        clickhouse.Auth{Database: chDatabase, Username: chUsername, Password: chPassword},
-		DialTimeout: 10 * time.Second,
-		Compression: &clickhouse.Compression{Method: clickhouse.CompressionLZ4},
-		Settings: clickhouse.Settings{
-			"max_insert_block_size":       1000000,
-			"min_insert_block_size_rows":  100000,
-			"min_insert_block_size_bytes": 10485760, // 10MB
-		},
-	})
-	if err != nil {
-		return fmt.Errorf("connect: %w", err)
-	}
-	defer conn.Close()
-
-	if err := createSchema(ctx, conn); err != nil {
-		return fmt.Errorf("createSchema: %w", err)
-	}
-
+func updateClickhouse(ctx context.Context, conn clickhouse.Conn, mountPath string, r io.Reader) (retErr error) {
 	// Use current time as scan ID
 	scanID := uint64(time.Now().Unix())
 	started := time.Now()
@@ -654,7 +679,20 @@ func updateClickhouse(mountPath string, r io.Reader) (retErr error) {
 		ALTER TABLE scans UPDATE state = 'ready', finished_at = ? 
 		WHERE mount_path = ? AND scan_id = ?`,
 		finished, mountPath, scanID); err != nil {
-		return fmt.Errorf("promote scan: %w", err)
+		// If ALTER UPDATE fails, try delete and insert
+		if err1 := conn.Exec(ctx, `
+			ALTER TABLE scans DELETE WHERE mount_path = ? AND scan_id = ?`,
+			mountPath, scanID); err1 == nil {
+			// If deletion succeeds, try to insert a new row with state='ready'
+			if err2 := conn.Exec(ctx, `
+				INSERT INTO scans (mount_path, scan_id, state, started_at, finished_at)
+				VALUES (?, ?, 'ready', ?, ?)`,
+				mountPath, scanID, started, finished); err2 != nil {
+				return fmt.Errorf("promote scan (reinsert): %w", err2)
+			}
+		} else {
+			return fmt.Errorf("promote scan (delete): %w (original error: %v)", err1, err)
+		}
 	}
 
 	// Drop older scans for this mount
@@ -675,37 +713,45 @@ type batchProcessor struct {
 		Append(...interface{}) error
 		Send() error
 	}
-	ctx          context.Context
-	conn         clickhouse.Conn
-	filesCount   int
-	rollupsCount int
-	mountPath    string
-	scanID       uint64
+	ctx             context.Context
+	conn            clickhouse.Conn
+	filesCount      int
+	rollupsCount    int
+	mountPath       string
+	scanID          uint64
+	filesBatchSQL   string
+	rollupsBatchSQL string
 }
 
 // Create a new batch processor
 func newBatchProcessor(ctx context.Context, conn clickhouse.Conn, mountPath string, scanID uint64) (*batchProcessor, error) {
-	filesBatch, err := conn.PrepareBatch(ctx, `
+	filesBatchSQL := `
 		INSERT INTO fs_entries 
-		(mount_path, scan_id, path, parent_path, name, ext_low, ftype, inode, size, uid, gid, mtime, atime, ctime)`)
+		(mount_path, scan_id, path, parent_path, name, ext_low, ftype, inode, size, uid, gid, mtime, atime, ctime)`
+
+	rollupsBatchSQL := `
+		INSERT INTO ancestor_rollups_raw 
+		(mount_path, scan_id, ancestor, size, atime, mtime, uid, gid, ext_low)`
+
+	filesBatch, err := conn.PrepareBatch(ctx, filesBatchSQL)
 	if err != nil {
 		return nil, err
 	}
 
-	rollupsBatch, err := conn.PrepareBatch(ctx, `
-		INSERT INTO ancestor_rollups_raw 
-		(mount_path, scan_id, ancestor, size, atime, mtime, uid, gid, ext_low)`)
+	rollupsBatch, err := conn.PrepareBatch(ctx, rollupsBatchSQL)
 	if err != nil {
 		return nil, err
 	}
 
 	return &batchProcessor{
-		filesBatch:   filesBatch,
-		rollupsBatch: rollupsBatch,
-		ctx:          ctx,
-		conn:         conn,
-		mountPath:    mountPath,
-		scanID:       scanID,
+		filesBatch:      filesBatch,
+		rollupsBatch:    rollupsBatch,
+		ctx:             ctx,
+		conn:            conn,
+		mountPath:       mountPath,
+		scanID:          scanID,
+		filesBatchSQL:   filesBatchSQL,
+		rollupsBatchSQL: rollupsBatchSQL,
 	}, nil
 }
 
@@ -749,9 +795,7 @@ func (bp *batchProcessor) flush() error {
 		}
 
 		bp.filesCount = 0
-		filesBatch, err := bp.conn.PrepareBatch(bp.ctx, `
-			INSERT INTO fs_entries 
-			(mount_path, scan_id, path, parent_path, name, ext_low, ftype, inode, size, uid, gid, mtime, atime, ctime)`)
+		filesBatch, err := bp.conn.PrepareBatch(bp.ctx, bp.filesBatchSQL)
 		if err != nil {
 			return err
 		}
@@ -765,9 +809,7 @@ func (bp *batchProcessor) flush() error {
 		}
 
 		bp.rollupsCount = 0
-		rollupsBatch, err := bp.conn.PrepareBatch(bp.ctx, `
-			INSERT INTO ancestor_rollups_raw 
-			(mount_path, scan_id, ancestor, size, atime, mtime, uid, gid, ext_low)`)
+		rollupsBatch, err := bp.conn.PrepareBatch(bp.ctx, bp.rollupsBatchSQL)
 		if err != nil {
 			return err
 		}
@@ -786,13 +828,19 @@ func ingestScan(ctx context.Context, conn clickhouse.Conn, mountPath string, sca
 
 	parser := stats.NewStatsParser(r)
 	fi := new(stats.FileInfo)
+	var parseErr error
 
-	for parser.Scan(fi) == nil {
+	for {
+		// Read the next entry
+		if parseErr = parser.Scan(fi); parseErr != nil {
+			break
+		}
+
 		path := string(fi.Path)
-		isDir := fi.EntryType == stats.DirType || isDirPath(path)
+		isDir := fi.EntryType == stats.DirType || IsDirPath(path)
 
-		parent, name := splitParentAndName(path)
-		ext := deriveExtLower(name, isDir)
+		parent, name := SplitParentAndName(path)
+		ext := DeriveExtLower(name, isDir)
 		ft := mapEntryType(fi.EntryType)
 		mtime := time.Unix(fi.MTime, 0)
 		atime := time.Unix(fi.ATime, 0)
@@ -812,7 +860,7 @@ func ingestScan(ctx context.Context, conn clickhouse.Conn, mountPath string, sca
 		// Add file entry to batch
 		if err := bp.addFile(path, parent, name, ext, ft, inode, size,
 			fi.UID, fi.GID, mtime, atime, ctime); err != nil {
-			return err
+			return fmt.Errorf("failed to add file entry: %w", err)
 		}
 
 		// Rollups for each ancestor directory (including mount root)
@@ -823,30 +871,30 @@ func ingestScan(ctx context.Context, conn clickhouse.Conn, mountPath string, sca
 		}
 
 		// Process all ancestors
-		continueProcess := true
-		forEachAncestor(base, mountPath, func(a string) bool {
+		var ancestorErr error
+		ForEachAncestor(base, mountPath, func(a string) bool {
 			if err := bp.addRollup(a, size, atime, mtime, fi.UID, fi.GID, ext); err != nil {
-				continueProcess = false
+				ancestorErr = err
 				return false
 			}
 			return true
 		})
 
-		if !continueProcess {
-			return fmt.Errorf("failed to add ancestor rollup")
+		if ancestorErr != nil {
+			return fmt.Errorf("failed to add ancestor rollup: %w", ancestorErr)
 		}
 
 		// Flush batches if needed
 		if bp.needsFlush() {
 			if err := bp.flush(); err != nil {
-				return err
+				return fmt.Errorf("failed to flush batches: %w", err)
 			}
 		}
 	}
 
-	// Check for parser errors
-	if err := parser.Err(); err != nil {
-		return err
+	// Check for parser errors (excluding EOF which is expected)
+	if parseErr != nil && parseErr != io.EOF {
+		return fmt.Errorf("parser error: %w", parseErr)
 	}
 
 	// Final flush
