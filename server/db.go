@@ -96,6 +96,11 @@ func (s *Server) LoadDBs(basePaths []string, dgutaDBName, basedirDBName, ownersP
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	err = s.prewarmCaches(bd)
+	if err != nil {
+		return err
+	}
+
 	loaded := s.basedirs != nil
 	s.basedirs = bd
 	s.tree = tree
@@ -234,10 +239,15 @@ func (s *Server) reloadDBs(dgutaDBName, basedirDBName, //nolint:funlen
 	s.Logger.Printf("server ready again after reloading")
 
 	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	err = s.prewarmCaches(bd)
+	if err != nil {
+		return s.logReloadError("building prewarmCaches failed: %s", err)
+	}
 	s.tree = tree
 	s.basedirs = bd
 	s.dataTimeStamp = mt
-	s.mu.Unlock()
 
 	return true
 }
@@ -281,7 +291,6 @@ func findDBDirs(basepath string, required ...string) ([]string, []string, error)
 	if err != nil {
 		return nil, nil, err
 	}
-
 	var toDelete []string
 
 	latest := make(map[string]nameVersion)

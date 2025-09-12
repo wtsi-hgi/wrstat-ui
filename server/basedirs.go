@@ -29,6 +29,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	gas "github.com/wtsi-hgi/go-authserver"
@@ -57,20 +58,18 @@ func (s *Server) addBaseDirRoutes() {
 }
 
 func (s *Server) getBasedirsGroupUsage(c *gin.Context) {
-	s.getBasedirs(c, func() (any, error) {
-		results := make([]*basedirs.Usage, 0)
+	s.mu.RLock()
+	groupCache := s.groupUsageCache
+	s.mu.RUnlock()
+	s.serveGzippedCache(c, groupCache)
+}
 
-		for _, age := range db.DirGUTAges {
-			result, err := s.basedirs.GroupUsage(age)
-			if err != nil {
-				return nil, err
-			}
+func (s *Server) getBasedirsUserUsage(c *gin.Context) {
+	s.mu.RLock()
+	userCache := s.userUsageCache
+	s.mu.RUnlock()
+	s.serveGzippedCache(c, userCache)
 
-			results = append(results, result...)
-		}
-
-		return results, nil
-	})
 }
 
 // getBasedirs responds with the output of your callback in JSON format.
@@ -92,21 +91,70 @@ func (s *Server) getBasedirs(c *gin.Context, cb func() (any, error)) {
 	c.IndentedJSON(http.StatusOK, result)
 }
 
-func (s *Server) getBasedirsUserUsage(c *gin.Context) {
-	s.getBasedirs(c, func() (any, error) {
-		results := make([]*basedirs.Usage, 0)
+// wantsGzipEncoding reports whether the client accepts gzip encoding
+// according to the Accept-Encoding header and HTTP semantics.
+// - If no header is present, defaults to true (any encoding is acceptable).
+// - If gzip is listed with q=0, returns false.
+// - If gzip is listed with q>0, returns true.
+// - If not listed, but "*" is listed with q>0, returns true.
+func wantsGzipEncoding(acceptEnc string) bool {
+	if strings.TrimSpace(acceptEnc) == "" {
+		return true
+	}
 
-		for _, age := range db.DirGUTAges {
-			result, err := s.basedirs.UserUsage(age)
-			if err != nil {
-				return nil, err
-			}
+	qWildcard := 0.0
+	maxQParts := 2
 
-			results = append(results, result...)
+	for _, enc := range strings.Split(acceptEnc, ",") {
+		enc = strings.TrimSpace(enc)
+		parts := strings.SplitN(enc, ";", maxQParts)
+		name := strings.ToLower(strings.TrimSpace(parts[0]))
+
+		switch name {
+		case "gzip":
+			return parseQ(parts) > 0
+		case "*":
+			qWildcard = parseQ(parts)
 		}
+	}
 
-		return results, nil
-	})
+	return qWildcard > 0
+}
+
+// parseQ extracts the q-value (quality factor) from an Accept-Encoding
+// parameter slice.
+//
+// - If no q-value is specified, it defaults to 1.0. - If the q-value is
+// malformed, the default 1.0 is returned. - If present and valid (e.g.,
+// "q=0.5"), that float value is returned.
+func parseQ(parts []string) float64 {
+	q := 1.0
+
+	if len(parts) == 2 && strings.HasPrefix(strings.TrimSpace(parts[1]), "q=") {
+		if v, err := strconv.ParseFloat(strings.TrimPrefix(strings.TrimSpace(parts[1]), "q="), 64); err == nil {
+			q = v
+		}
+	}
+
+	return q
+}
+
+// serveGzippedCache serves a cached JSON payload to a client.
+// It automatically selects gzip or plain JSON based on the
+// "Accept-Encoding" header.
+func (s *Server) serveGzippedCache(c *gin.Context, cache usageCache) {
+	acceptEnc := c.GetHeader("Accept-Encoding")
+	wantsGzip := wantsGzipEncoding(acceptEnc)
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if wantsGzip {
+		c.Header("Content-Encoding", "gzip")
+		c.Data(http.StatusOK, "application/json", cache.gzipData)
+	} else {
+		c.Data(http.StatusOK, "application/json", cache.jsonData)
+	}
 }
 
 func (s *Server) getBasedirsGroupSubdirs(c *gin.Context) {

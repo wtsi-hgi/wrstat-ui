@@ -26,8 +26,10 @@
 package server
 
 import (
+	"compress/gzip"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -535,6 +537,13 @@ func TestServer(t *testing.T) {
 			So(err, ShouldBeNil)
 
 			So(os.Chtimes(secondDot, time.Unix(refTime+10, 0), time.Unix(refTime+10, 0)), ShouldBeNil)
+			s.mu.Lock()
+			initialGroupCache := s.groupUsageCache
+			initialUserCache := s.userUsageCache
+			s.mu.Unlock()
+
+			So(initialGroupCache, ShouldNotBeNil)
+			So(initialUserCache, ShouldNotBeNil)
 
 			err = os.Rename(secondDot, second)
 			So(err, ShouldBeNil)
@@ -562,6 +571,13 @@ func TestServer(t *testing.T) {
 			So(len(s.dataTimeStamp), ShouldEqual, 2)
 			So(s.dataTimeStamp["keyB"], ShouldBeGreaterThan, lastMod)
 
+			s.mu.RLock()
+			latestGroupCache := s.groupUsageCache
+			latestUserCache := s.userUsageCache
+			s.mu.RUnlock()
+			So(latestGroupCache, ShouldNotResemble, initialGroupCache)
+			So(latestUserCache, ShouldNotResemble, initialUserCache)
+
 			thirdDot := filepath.Join(tmp, ".113_keyA")
 			third := filepath.Join(tmp, "113_keyA")
 
@@ -572,9 +588,111 @@ func TestServer(t *testing.T) {
 			So(err, ShouldBeNil)
 
 			waitForFileToBeDeleted(t, first)
-
 			_, err = os.Stat(first)
 			So(os.IsNotExist(err), ShouldBeTrue)
+		})
+
+		Convey("prewarmCaches fills caches with JSON and gzip", func() {
+			err := s.prewarmCaches(s.basedirs)
+			So(err, ShouldBeNil)
+
+			So(s.groupUsageCache, ShouldNotBeNil)
+			So(s.userUsageCache, ShouldNotBeNil)
+			So(len(s.groupUsageCache.jsonData), ShouldBeGreaterThan, 0)
+			So(len(s.groupUsageCache.gzipData), ShouldBeGreaterThan, 0)
+			So(len(s.userUsageCache.jsonData), ShouldBeGreaterThan, 0)
+			So(len(s.userUsageCache.gzipData), ShouldBeGreaterThan, 0)
+		})
+
+		Convey("serveGzippedCache serves group and user usage via HTTP", func() {
+			path, err := internaldb.CreateExampleDBsCustomIDs(t, uid, gids[0], gids[1], refTime)
+			So(err, ShouldBeNil)
+
+			ownersPath, err := internaldata.CreateOwnersCSV(t, fmt.Sprintf("0,Alan\n%s,Barbara\n%s,Dellilah", gids[0], gids[1]))
+			So(err, ShouldBeNil)
+
+			err = s.LoadDBs([]string{path}, "dirguta", "basedir.db", ownersPath)
+			So(err, ShouldBeNil)
+
+			timeout := time.After(time.Second)
+			tick := time.Tick(5 * time.Millisecond)
+
+		Loop:
+			for {
+				select {
+				case <-timeout:
+					break Loop
+				case <-tick:
+					s.mu.RLock()
+					userReady := len(s.userUsageCache.jsonData) > 0
+					s.mu.RUnlock()
+					if userReady {
+						break Loop
+					}
+				}
+			}
+
+			response, err := query(s, EndPointBasedirUsageGroup, "")
+			So(err, ShouldBeNil)
+			So(response.Code, ShouldEqual, http.StatusOK)
+
+			usageGroup, err := decodeUsageResult(response)
+			So(err, ShouldBeNil)
+			So(len(usageGroup), ShouldBeGreaterThan, 0)
+			So(usageGroup[0].GID, ShouldEqual, 0)
+			So(usageGroup[0].UID, ShouldEqual, 0)
+			So(usageGroup[0].Name, ShouldNotBeBlank)
+			So(usageGroup[0].Owner, ShouldNotBeBlank)
+			So(usageGroup[0].BaseDir, ShouldNotBeBlank)
+
+			response, err = query(s, EndPointBasedirUsageUser, "")
+			So(err, ShouldBeNil)
+			So(response.Code, ShouldEqual, http.StatusOK)
+
+			usageUser, err := decodeUsageResult(response)
+			So(err, ShouldBeNil)
+			So(len(usageUser), ShouldBeGreaterThan, 0)
+			So(usageUser[0].GID, ShouldEqual, 0)
+			So(usageUser[0].UID, ShouldEqual, 0)
+			So(usageUser[0].Name, ShouldNotBeBlank)
+			So(usageUser[0].Owner, ShouldNotBeBlank)
+			So(usageUser[0].BaseDir, ShouldNotBeBlank)
+		})
+
+		Convey("serveGzippedCache serves group and user usage with gzip handling", func() {
+			err := s.prewarmCaches(s.basedirs)
+			So(err, ShouldBeNil)
+
+			makeContext := func(acceptEnc string) (*gin.Context, *httptest.ResponseRecorder) {
+				w := httptest.NewRecorder()
+				c, _ := gin.CreateTestContext(w)
+
+				req, err := http.NewRequest(http.MethodGet, "/", nil)
+				So(err, ShouldBeNil)
+
+				if acceptEnc != "" {
+					req.Header.Set("Accept-Encoding", acceptEnc)
+				}
+
+				c.Request = req
+
+				return c, w
+			}
+			c, w := makeContext("")
+			s.serveGzippedCache(c, s.userUsageCache)
+			So(w.Header().Get("Content-Encoding"), ShouldEqual, "gzip")
+
+			c, w = makeContext("gzip")
+			s.serveGzippedCache(c, s.userUsageCache)
+			So(w.Header().Get("Content-Encoding"), ShouldEqual, "gzip")
+
+			c, w = makeContext("gzip;q=0")
+			s.serveGzippedCache(c, s.userUsageCache)
+			So(w.Header().Get("Content-Encoding"), ShouldNotEqual, "gzip")
+
+			c, w = makeContext("*;q=1")
+			s.serveGzippedCache(c, s.userUsageCache)
+			So(w.Header().Get("Content-Encoding"), ShouldEqual, "gzip")
 		})
 	})
 }
@@ -1551,8 +1669,20 @@ func waitForFileToBeDeleted(t *testing.T, path string) {
 // decodeUsageResult decodes the result of a basedirs usage query.
 func decodeUsageResult(response *httptest.ResponseRecorder) ([]*basedirs.Usage, error) {
 	var result []*basedirs.Usage
-	err := json.NewDecoder(response.Body).Decode(&result)
 
+	var reader io.Reader = response.Body
+
+	if response.Header().Get("Content-Encoding") == "gzip" {
+		gz, err := gzip.NewReader(response.Body)
+		if err != nil {
+			return nil, err
+		}
+
+		defer gz.Close()
+		reader = gz
+	}
+
+	err := json.NewDecoder(reader).Decode(&result)
 	return result, err
 }
 
