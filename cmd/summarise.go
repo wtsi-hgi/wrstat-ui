@@ -253,6 +253,9 @@ func forEachAncestor(dir, mountPath string, fn func(a string) bool) {
 	}
 }
 
+// escapeCHSingleQuotes escapes single quotes for embedding string literals into ClickHouse queries
+func escapeCHSingleQuotes(s string) string { return strings.ReplaceAll(s, "'", "''") }
+
 func deriveExtLower(name string, isDir bool) string {
 	if isDir {
 		return ""
@@ -319,14 +322,44 @@ PARTITION BY (mount_path, scan_id)
 ORDER BY (mount_path, parent_path, name)
 SETTINGS index_granularity = 8192`
 
+	// Fallback without tokenbf index in case the server doesn't support it
+	createFsEntriesTableNoPathIdx = `
+CREATE TABLE IF NOT EXISTS fs_entries (
+	mount_path String,
+	scan_id UInt64,
+	path String,
+	parent_path String,
+	name String,
+	ext_low String,
+	ftype UInt8,
+	inode UInt64,
+	size UInt64,
+	uid UInt32,
+	gid UInt32,
+	mtime DateTime,
+	atime DateTime,
+	ctime DateTime,
+	INDEX idx_uid uid TYPE minmax GRANULARITY 8192,
+	INDEX idx_gid gid TYPE minmax GRANULARITY 8192,
+	INDEX idx_mtime mtime TYPE minmax GRANULARITY 8192,
+	INDEX idx_atime atime TYPE minmax GRANULARITY 8192,
+	INDEX idx_parent_path parent_path TYPE minmax GRANULARITY 8192
+) ENGINE = MergeTree
+PARTITION BY (mount_path, scan_id)
+ORDER BY (mount_path, parent_path, name)
+SETTINGS index_granularity = 8192`
+
 	createRollupRawTable = `
 CREATE TABLE IF NOT EXISTS ancestor_rollups_raw (
   mount_path String,
   scan_id UInt64,
   ancestor String,
   size UInt64,
-  atime DateTime,
-  mtime DateTime
+	atime DateTime,
+	mtime DateTime,
+	uid UInt32,
+	gid UInt32,
+	ext_low String
 ) ENGINE = MergeTree
 PARTITION BY (mount_path, scan_id)
 ORDER BY (mount_path, ancestor)
@@ -343,6 +376,9 @@ CREATE TABLE IF NOT EXISTS ancestor_rollups_state (
   atime_max AggregateFunction(max, DateTime),
   mtime_min AggregateFunction(min, DateTime),
   mtime_max AggregateFunction(max, DateTime),
+	uids AggregateFunction(groupUniqArray, UInt32),
+	gids AggregateFunction(groupUniqArray, UInt32),
+	exts AggregateFunction(groupUniqArray, String),
   at_within_0d_size AggregateFunction(sum, UInt64),
   at_within_0d_count AggregateFunction(sum, UInt64),
   at_older_1m_size AggregateFunction(sum, UInt64),
@@ -396,6 +432,9 @@ SELECT
   maxState(atime) AS atime_max,
   minState(mtime) AS mtime_min,
   maxState(mtime) AS mtime_max,
+	groupUniqArrayState(uid) AS uids,
+	groupUniqArrayState(gid) AS gids,
+	groupUniqArrayState(ext_low) AS exts,
   sumIfState(size, atime >= (scan_time - INTERVAL 1 DAY)) AS at_within_0d_size,
   sumIfState(1, atime >= (scan_time - INTERVAL 1 DAY)) AS at_within_0d_count,
   sumIfState(size, atime < (scan_time - INTERVAL 1 MONTH)) AS at_older_1m_size,
@@ -455,6 +494,9 @@ SELECT s.mount_path,
        maxMerge(atime_max)  AS atime_max,
        minMerge(mtime_min)  AS mtime_min,
        maxMerge(mtime_max)  AS mtime_max,
+	   groupUniqArrayMerge(uids) AS uids,
+	   groupUniqArrayMerge(gids) AS gids,
+	   groupUniqArrayMerge(exts) AS exts,
        sumMerge(at_within_0d_size) AS at_within_0d_size,
        sumMerge(at_within_0d_count) AS at_within_0d_count,
        sumMerge(at_older_1m_size) AS at_older_1m_size,
@@ -500,19 +542,41 @@ GROUP BY s.mount_path, s.scan_id, s.ancestor`
 )
 
 func createSchema(ctx context.Context, conn clickhouse.Conn) error {
-	stmts := []string{
-		createScansTable,
-		createFsEntriesTable,
-		createRollupRawTable,
-		createRollupStateTable,
-		createRollupMV,
-		createFilesCurrentView,
-		createRollupsCurrentView,
+	// Create scans first
+	if err := conn.Exec(ctx, createScansTable); err != nil {
+		return err
 	}
-	for _, s := range stmts {
-		if err := conn.Exec(ctx, s); err != nil {
+	// Try fs_entries with path bloom filter, fallback if server lacks it
+	if err := conn.Exec(ctx, createFsEntriesTable); err != nil {
+		// Retry with no path index
+		if err2 := conn.Exec(ctx, createFsEntriesTableNoPathIdx); err2 != nil {
 			return err
 		}
+	}
+	// Ensure any missing columns on existing tables (safe no-ops if exist)
+	_ = conn.Exec(ctx, `ALTER TABLE ancestor_rollups_raw ADD COLUMN IF NOT EXISTS uid UInt32 AFTER mtime`)
+	_ = conn.Exec(ctx, `ALTER TABLE ancestor_rollups_raw ADD COLUMN IF NOT EXISTS gid UInt32 AFTER uid`)
+	_ = conn.Exec(ctx, `ALTER TABLE ancestor_rollups_raw ADD COLUMN IF NOT EXISTS ext_low String AFTER gid`)
+
+	if err := conn.Exec(ctx, createRollupRawTable); err != nil {
+		return err
+	}
+	// Add state table and ensure new aggregate columns exist
+	if err := conn.Exec(ctx, createRollupStateTable); err != nil {
+		return err
+	}
+	_ = conn.Exec(ctx, `ALTER TABLE ancestor_rollups_state ADD COLUMN IF NOT EXISTS uids AggregateFunction(groupUniqArray, UInt32) AFTER mtime_max`)
+	_ = conn.Exec(ctx, `ALTER TABLE ancestor_rollups_state ADD COLUMN IF NOT EXISTS gids AggregateFunction(groupUniqArray, UInt32) AFTER uids`)
+	_ = conn.Exec(ctx, `ALTER TABLE ancestor_rollups_state ADD COLUMN IF NOT EXISTS exts AggregateFunction(groupUniqArray, String) AFTER gids`)
+
+	if err := conn.Exec(ctx, createRollupMV); err != nil {
+		return err
+	}
+	if err := conn.Exec(ctx, createFilesCurrentView); err != nil {
+		return err
+	}
+	if err := conn.Exec(ctx, createRollupsCurrentView); err != nil {
+		return err
 	}
 	return nil
 }
@@ -553,9 +617,10 @@ func updateClickhouse(mountPath string, r io.Reader) (retErr error) {
 		if retErr == nil {
 			return
 		}
-		_ = conn.Exec(ctx, `ALTER TABLE fs_entries DROP PARTITION WHERE mount_path = ? AND scan_id = ?`, mountPath, scanID)
-		_ = conn.Exec(ctx, `ALTER TABLE ancestor_rollups_raw DROP PARTITION WHERE mount_path = ? AND scan_id = ?`, mountPath, scanID)
-		_ = conn.Exec(ctx, `ALTER TABLE ancestor_rollups_state DROP PARTITION WHERE mount_path = ? AND scan_id = ?`, mountPath, scanID)
+		part := fmt.Sprintf("('%s', %d)", escapeCHSingleQuotes(mountPath), scanID)
+		_ = conn.Exec(ctx, "ALTER TABLE fs_entries DROP PARTITION "+part)
+		_ = conn.Exec(ctx, "ALTER TABLE ancestor_rollups_raw DROP PARTITION "+part)
+		_ = conn.Exec(ctx, "ALTER TABLE ancestor_rollups_state DROP PARTITION "+part)
 		_ = conn.Exec(ctx, `ALTER TABLE scans DELETE WHERE mount_path = ? AND scan_id = ?`, mountPath, scanID)
 	}()
 
@@ -582,7 +647,7 @@ func ingestScan(ctx context.Context, conn clickhouse.Conn, mountPath string, sca
 	if err != nil {
 		return err
 	}
-	rollBatch, err := conn.PrepareBatch(ctx, `INSERT INTO ancestor_rollups_raw (mount_path, scan_id, ancestor, size, atime, mtime)`)
+	rollBatch, err := conn.PrepareBatch(ctx, `INSERT INTO ancestor_rollups_raw (mount_path, scan_id, ancestor, size, atime, mtime, uid, gid, ext_low)`)
 	if err != nil {
 		return err
 	}
@@ -608,7 +673,7 @@ func ingestScan(ctx context.Context, conn clickhouse.Conn, mountPath string, sca
 				return err
 			}
 			inRolls = 0
-			rollBatch, err = conn.PrepareBatch(ctx, `INSERT INTO ancestor_rollups_raw (mount_path, scan_id, ancestor, size, atime, mtime)`)
+			rollBatch, err = conn.PrepareBatch(ctx, `INSERT INTO ancestor_rollups_raw (mount_path, scan_id, ancestor, size, atime, mtime, uid, gid, ext_low)`)
 			if err != nil {
 				return err
 			}
@@ -635,9 +700,13 @@ func ingestScan(ctx context.Context, conn clickhouse.Conn, mountPath string, sca
 		inFiles++
 
 		// rollups for each ancestor directory (including mount root)
-		dir := parent
-		forEachAncestor(dir, mountPath, func(a string) bool {
-			if err := rollBatch.Append(mountPath, scanID, a, uint64(fi.Size), atime, mtime); err != nil {
+		// include the directory itself in its own subtree if the entry is a directory
+		base := parent
+		if isDir {
+			base = path
+		}
+		forEachAncestor(base, mountPath, func(a string) bool {
+			if err := rollBatch.Append(mountPath, scanID, a, uint64(fi.Size), atime, mtime, uint32(fi.UID), uint32(fi.GID), ext); err != nil {
 				return false
 			}
 			inRolls++
@@ -658,20 +727,34 @@ func ingestScan(ctx context.Context, conn clickhouse.Conn, mountPath string, sca
 }
 
 func dropOlderScans(ctx context.Context, conn clickhouse.Conn, mountPath string, keepScanID uint64) error {
-	// Drop data for older scan_ids for this mount
-	if err := conn.Exec(ctx, `ALTER TABLE fs_entries DROP PARTITION WHERE mount_path = ? AND scan_id < ?`, mountPath, keepScanID); err != nil {
+	// Drop partitions for older scan_ids for this mount using DROP PARTITION (mount_path, scan_id)
+	// First fetch distinct older scan_ids
+	rows, err := conn.Query(ctx, `SELECT scan_id FROM scans WHERE mount_path = ? AND scan_id < ? ORDER BY scan_id`, mountPath, keepScanID)
+	if err != nil {
 		return err
 	}
-	if err := conn.Exec(ctx, `ALTER TABLE ancestor_rollups_raw DROP PARTITION WHERE mount_path = ? AND scan_id < ?`, mountPath, keepScanID); err != nil {
-		return err
+	defer rows.Close()
+	var sid uint64
+	for rows.Next() {
+		if err := rows.Scan(&sid); err != nil {
+			return err
+		}
+		// Construct a tuple literal safely
+		part := fmt.Sprintf("('%s', %d)", escapeCHSingleQuotes(mountPath), sid)
+		if err := conn.Exec(ctx, "ALTER TABLE fs_entries DROP PARTITION "+part); err != nil {
+			return err
+		}
+		if err := conn.Exec(ctx, "ALTER TABLE ancestor_rollups_raw DROP PARTITION "+part); err != nil {
+			return err
+		}
+		if err := conn.Exec(ctx, "ALTER TABLE ancestor_rollups_state DROP PARTITION "+part); err != nil {
+			return err
+		}
+		if err := conn.Exec(ctx, `ALTER TABLE scans DELETE WHERE mount_path = ? AND scan_id = ?`, mountPath, sid); err != nil {
+			return err
+		}
 	}
-	if err := conn.Exec(ctx, `ALTER TABLE ancestor_rollups_state DROP PARTITION WHERE mount_path = ? AND scan_id < ?`, mountPath, keepScanID); err != nil {
-		return err
-	}
-	if err := conn.Exec(ctx, `ALTER TABLE scans DELETE WHERE mount_path = ? AND scan_id < ?`, mountPath, keepScanID); err != nil {
-		return err
-	}
-	return nil
+	return rows.Err()
 }
 
 // --- Query helpers ---
@@ -872,36 +955,26 @@ func OptimizedSubtreeSummary(ctx context.Context, conn clickhouse.Conn, mountPat
 		dir = ensureDir(dir)
 
 		query := `
-		SELECT 
-		  total_size,
-		  file_count,
-		  atime_max AS most_recent_atime,
-		  atime_min AS oldest_atime,
-		  mtime_max AS most_recent_mtime,
-		  mtime_min AS oldest_mtime
-		FROM ancestor_rollups_current
-		WHERE mount_path = ? AND ancestor = ?`
+				SELECT 
+					total_size,
+					file_count,
+					atime_max AS most_recent_atime,
+					atime_min AS oldest_atime,
+					mtime_max AS most_recent_mtime,
+					mtime_min AS oldest_mtime,
+					uids,
+					gids,
+					exts
+				FROM ancestor_rollups_current
+				WHERE mount_path = ? AND ancestor = ?`
 
 		row := conn.QueryRow(ctx, query, mountPath, dir)
 
 		var s Summary
-		if err := row.Scan(&s.TotalSize, &s.FileCount, &s.MostRecentATime, &s.OldestATime, &s.MostRecentMTime, &s.OldestMTime); err != nil {
+		if err := row.Scan(&s.TotalSize, &s.FileCount, &s.MostRecentATime, &s.OldestATime, &s.MostRecentMTime, &s.OldestMTime, &s.UIDs, &s.GIDs, &s.Exts); err != nil {
 			if errors.Is(err, io.EOF) {
 				return Summary{}, nil
 			}
-			return Summary{}, err
-		}
-
-		uniqueQuery := `
-		SELECT 
-		  groupUniqArray(uid) AS uids,
-		  groupUniqArray(gid) AS gids,
-		  groupUniqArray(ext_low) AS exts
-		FROM fs_entries_current
-		WHERE mount_path = ? AND path LIKE ?`
-
-		row2 := conn.QueryRow(ctx, uniqueQuery, mountPath, dir+"%")
-		if err := row2.Scan(&s.UIDs, &s.GIDs, &s.Exts); err != nil {
 			return Summary{}, err
 		}
 
