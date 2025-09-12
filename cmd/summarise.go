@@ -30,7 +30,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -215,305 +214,291 @@ func updateClickhouse(r io.Reader) error {
 	}
 
 	if err := createSchema(ctx, conn); err != nil {
-		log.Fatalf("createSchema: %v", err)
+		return fmt.Errorf("createSchema: %w", err)
 	}
 
-	// Simulate a daily scanner output (small example). In production, your
-	// scanner would stream batches of FileRecord to ingestStaging.
 	now := time.Now()
-	scanTS := uint32(now.Unix())
-	scanMonth := uint16(now.Year()*100 + int(now.Month()))
+	scanID := uint32(now.Unix())
 
-	// 1) Insert today's scan into staging
-	ags, err := ingestStaging(ctx, conn, r, scanTS, scanMonth)
-	if err != nil {
-		log.Fatalf("ingestStaging: %v", err)
+	if err := ingestStats(ctx, conn, r, scanID); err != nil {
+		return fmt.Errorf("ingestStats: %w", err)
 	}
 
-	// 2) Generate tombstones (set-based in ClickHouse) and negative ancestor
-	// aggregates
-	if err := generateTombstonesAndNegativeAggs(ctx, conn, scanTS, scanMonth); err != nil {
-		log.Fatalf("generate tombstones: %v", err)
-	}
-
-	// 3) Append today's staging rows into append-only files table
-	if err := appendStagingToFiles(ctx, conn); err != nil {
-		log.Fatalf("appendStagingToFiles: %v", err)
-	}
-
-	// 4) Insert scanner-side positive ancestor aggregates (batch)
-	if err := ingestAncestorAggs(ctx, conn, ags); err != nil {
-		log.Fatalf("ingestAncestorAggs: %v", err)
-	}
-
-	// 5) Truncate staging to free space
-	if err := truncateStaging(ctx, conn); err != nil {
-		log.Fatalf("truncateStaging: %v", err)
+	// monthly run:
+	if false {
+		if err := rebuildAndSwap(ctx, conn); err != nil {
+			return fmt.Errorf("rebuildAndSwap: %w", err)
+		}
 	}
 
 	return nil
 }
 
 func createSchema(ctx context.Context, conn clickhouse.Conn) error {
-	// staging table (today)
 	if err := conn.Exec(ctx, `
-CREATE TABLE IF NOT EXISTS files_today (
-  path String,
-  dirname String,
-  basename String,
-  size UInt64,
-  uid UInt32,
-  gid UInt32,
-  mtime DateTime,
-  atime DateTime,
-  ctime DateTime,
-  scan_ts UInt32,
-  scan_month UInt16
-) ENGINE = MergeTree()
+CREATE TABLE IF NOT EXISTS files_active (
+    path String,
+    size UInt64,
+    uid UInt32,
+    gid UInt32,
+    mtime DateTime,
+    atime DateTime,
+    ctime DateTime,
+    is_deleted UInt8,
+    scan_id UInt64
+) ENGINE = MergeTree
 ORDER BY path
 `); err != nil {
 		return err
 	}
 
-	// append-only files table (history + tombstones)
 	if err := conn.Exec(ctx, `
-CREATE TABLE IF NOT EXISTS files (
-  path String,
-  dirname String,
-  basename String,
-  size UInt64,
-  uid UInt32,
-  gid UInt32,
-  mtime DateTime,
-  atime DateTime,
-  ctime DateTime,
-  scan_ts UInt32,
-  scan_month UInt16,
-  is_deleted UInt8 DEFAULT 0
-) ENGINE = MergeTree()
-PARTITION BY scan_month
-ORDER BY (path, scan_ts)
-`); err != nil {
-		return err
-	}
-
-	// compact "current" view of files (latest per path) via ReplacingMergeTree
-	if err := conn.Exec(ctx, `
-CREATE TABLE IF NOT EXISTS files_current (
-  path String,
-  dirname String,
-  basename String,
-  size UInt64,
-  uid UInt32,
-  gid UInt32,
-  mtime DateTime,
-  atime DateTime,
-  ctime DateTime,
-  last_seen UInt32,
-  is_deleted UInt8 DEFAULT 0
-) ENGINE = ReplacingMergeTree(last_seen)
-ORDER BY path
-`); err != nil {
-		return err
-	}
-
-	// materialized view to keep files_current updated from append-only files
-	// It groups by path/dirname/basename and computes latest values
-	if err := conn.Exec(ctx, `
-CREATE MATERIALIZED VIEW IF NOT EXISTS mv_files_current TO files_current AS
-SELECT
-  path,
-  dirname,
-  basename,
-  anyLast(size) AS size,
-  anyLast(uid) AS uid,
-  anyLast(gid) AS gid,
-  anyLast(mtime) AS mtime,
-  anyLast(atime) AS atime,
-  anyLast(ctime) AS ctime,
-  max(scan_ts) AS last_seen,
-  anyLast(is_deleted) AS is_deleted
-FROM files
-GROUP BY path, dirname, basename
-`); err != nil {
-		return err
-	}
-
-	// per-ancestor aggregates (SummingMergeTree accepts positive/negative rows)
-	if err := conn.Exec(ctx, `
-CREATE TABLE IF NOT EXISTS file_aggregates (
-  ancestor String,
-  total_size Int64,   -- can be negative for tombstone adjustments
-  total_count Int64,
-  scan_ts UInt32,
-  scan_month UInt16,
-  is_deleted UInt8 DEFAULT 0
+CREATE TABLE IF NOT EXISTS ancestor_aggs (
+    ancestor String,
+    total_size UInt64,
+    file_count UInt64,
+    scan_id UInt64
 ) ENGINE = SummingMergeTree
-PARTITION BY scan_month
-ORDER BY (ancestor, scan_ts)
+ORDER BY (ancestor, scan_id)
 `); err != nil {
+		return err
+	}
+
+	if err := conn.Exec(ctx, `
+CREATE OR REPLACE VIEW files_current AS
+    SELECT
+        path,
+        argMax(size, scan_id) AS size,
+        argMax(uid, scan_id) AS uid,
+        argMax(gid, scan_id) AS gid,
+        argMax(mtime, scan_id) AS mtime,
+        argMax(atime, scan_id) AS atime,
+        argMax(ctime, scan_id) AS ctime,
+        argMax(is_deleted, scan_id) AS is_deleted
+    FROM files_active
+GROUP BY path`); err != nil {
+		return err
+	}
+
+	if err := conn.Exec(ctx, `
+CREATE OR REPLACE VIEW ancestor_aggs_current AS
+WITH (SELECT max(scan_id) FROM ancestor_aggs) AS max_scan
+SELECT
+    ancestor,
+    sum(total_size) AS total_size,
+    sum(file_count) AS file_count
+FROM ancestor_aggs
+WHERE scan_id = max_scan
+GROUP BY ancestor`); err != nil {
 		return err
 	}
 
 	return nil
 }
 
-// ingestStaging inserts scanner results into files_today in batches.
-func ingestStaging(ctx context.Context, conn clickhouse.Conn, r io.Reader, scanTS uint32, scanMonth uint16) ([]AncestorAgg, error) {
-	batch, err := conn.PrepareBatch(ctx, "INSERT INTO files_today (path, dirname, basename, size, uid, gid, mtime, atime, ctime, scan_ts, scan_month)")
+const (
+	sqlBatchSize          = 10000
+	sqlInsertFilesActive  = `INSERT INTO files_active(path, size, uid, gid, mtime, atime, ctime, is_deleted, scan_id)`
+	sqlInsertAncestorAggs = `INSERT INTO ancestor_aggs(ancestor, total_size, file_count, scan_id)`
+)
+
+// ingestStats inserts scanner results into files_active and ancestor_aggs.
+// It pre-aggregates ancestor rows per batch to reduce insert volume.
+func ingestStats(ctx context.Context, conn clickhouse.Conn, r io.Reader, scanID uint32) error {
+	faBatch, err := conn.PrepareBatch(ctx, sqlInsertFilesActive)
 	if err != nil {
-		return nil, err
+		return err
 	}
+	aaBatch, err := conn.PrepareBatch(ctx, sqlInsertAncestorAggs)
+	if err != nil {
+		return err
+	}
+
+	type agg struct {
+		size  uint64
+		count uint64
+	}
+	ancestorAgg := make(map[string]agg, 1<<15) // pre-size for fewer allocs
 
 	statsParser := stats.NewStatsParser(r)
 	fi := new(stats.FileInfo)
-	agg := map[string]*AncestorAgg{}
+	filesInBatch := 0
+
+	flushFiles := func() error {
+		if filesInBatch == 0 {
+			return nil
+		}
+		if err := faBatch.Send(); err != nil {
+			return err
+		}
+		filesInBatch = 0
+		var err error
+		faBatch, err = conn.PrepareBatch(ctx, sqlInsertFilesActive)
+		return err
+	}
+	flushAncestorAgg := func() error {
+		if len(ancestorAgg) == 0 {
+			return nil
+		}
+		for dir, a := range ancestorAgg {
+			if err := aaBatch.Append(
+				dir, a.size, a.count, uint64(scanID),
+			); err != nil {
+				return err
+			}
+		}
+		ancestorAgg = make(map[string]agg, 1<<15)
+
+		if err := aaBatch.Send(); err != nil {
+			return err
+		}
+		var err error
+		aaBatch, err = conn.PrepareBatch(ctx, sqlInsertAncestorAggs)
+		return err
+	}
+
+	const ancestorAggFlushSize = 50000
 
 	for statsParser.Scan(fi) == nil {
 		path := string(fi.Path)
-		dir := filepath.Dir(path)
-		name := filepath.Base(path)
 
-		if err := batch.Append(
-			path, dir, name, fi.Size, fi.UID, fi.GID,
-			fi.MTime, fi.ATime, fi.CTime, scanTS, scanMonth,
+		// Convert types for ClickHouse
+		size := uint64(fi.Size)
+		uid := uint32(fi.UID)
+		gid := uint32(fi.GID)
+		mtime := time.Unix(fi.MTime, 0)
+		atime := time.Unix(fi.ATime, 0)
+		ctime := time.Unix(fi.CTime, 0)
+		isDeleted := uint8(0)
+
+		if err := faBatch.Append(
+			path, size, uid, gid, mtime, atime, ctime, isDeleted, uint64(scanID),
 		); err != nil {
-			return nil, err
+			return err
+		}
+		filesInBatch++
+
+		// Pre-aggregate ancestor stats for this file
+		dir := filepath.Dir(path)
+		for {
+			a := ancestorAgg[dir]
+			a.size += size
+			a.count++
+			ancestorAgg[dir] = a
+
+			if dir == "/" || dir == "." {
+				break
+			}
+			parent := filepath.Dir(dir)
+			if parent == dir {
+				break
+			}
+			dir = parent
 		}
 
-		for _, anc := range dirToAncestors(path, dir) {
-			if _, ok := agg[anc]; !ok {
-				agg[anc] = &AncestorAgg{
-					Ancestor:  anc,
-					ScanTS:    scanTS,
-					ScanMonth: scanMonth,
-					IsDeleted: 0,
-				}
+		// Flush independently to keep memory bounded
+		if filesInBatch >= sqlBatchSize {
+			if err := flushFiles(); err != nil {
+				return err
 			}
-			agg[anc].TotalSize += int64(fi.Size)
-			agg[anc].TotalCount += 1
+		}
+		if len(ancestorAgg) >= ancestorAggFlushSize {
+			if err := flushAncestorAgg(); err != nil {
+				return err
+			}
 		}
 	}
 
 	if err := statsParser.Err(); err != nil {
-		return nil, err
+		return err
 	}
 
-	err = batch.Send()
-	if err != nil {
-		return nil, err
+	// Final flush
+	if err := flushFiles(); err != nil {
+		return err
 	}
-
-	aggs := make([]AncestorAgg, 0, len(agg))
-	for _, v := range agg {
-		aggs = append(aggs, *v)
-	}
-
-	return aggs, nil
-}
-
-func dirToAncestors(path, dir string) []string {
-	ancestors := []string{}
-	if path != "/" {
-		parts := strings.Split(dir, string(os.PathSeparator))
-		for i := range parts {
-			if i == 0 && parts[i] == "" {
-				ancestors = append(ancestors, "/")
-
-				continue
-			}
-
-			if parts[i] == "" {
-				continue
-			}
-
-			anc := strings.Join(parts[0:i+1], string(os.PathSeparator))
-			if anc == "" {
-				anc = "/"
-			}
-
-			ancestors = append(ancestors, anc)
-		}
-	} else {
-		ancestors = append(ancestors, "/")
-	}
-
-	return ancestors
-}
-
-// generateTombstonesAndNegativeAggs:
-//   - Inserts tombstones rows into `files` for paths present in files_current but not in files_today.
-//   - Inserts negative per-ancestor aggregate rows into file_aggregates by using arrayJoin(splitByChar('/', path))
-//
-// This runs entirely in ClickHouse and requires no large memory in Go.
-func generateTombstonesAndNegativeAggs(ctx context.Context, conn clickhouse.Conn, scanTS uint32, scanMonth uint16) error {
-	// 1) Insert tombstone rows into files table for missing paths
-	// (is_deleted=1). Use files_current (the latest-per-path view) to find live
-	// paths; left join with files_today.
-	tombstoneSQL := fmt.Sprintf(`
-INSERT INTO files (path, dirname, basename, size, uid, gid, mtime, atime, ctime, scan_ts, scan_month, is_deleted)
-SELECT f.path, f.dirname, f.basename, 0 AS size, 0 AS uid, 0 AS gid, now() AS mtime, now() AS atime, now() AS ctime, %d AS scan_ts, %d AS scan_month, 1 AS is_deleted
-FROM files_current f
-LEFT JOIN files_today t ON f.path = t.path
-WHERE f.is_deleted = 0 AND t.path IS NULL
-`, scanTS, scanMonth)
-
-	if err := conn.Exec(ctx, tombstoneSQL); err != nil {
-		return fmt.Errorf("tombstone insert failed: %w", err)
-	}
-
-	// 2) Insert negative ancestor aggregates for those deleted paths.
-	// We use arrayJoin(splitByChar('/', path)) to expand ancestors server-side.
-	negAggSQL := fmt.Sprintf(`
-INSERT INTO file_aggregates (ancestor, total_size, total_count, scan_ts, scan_month, is_deleted)
-SELECT ancestor, -sum(size) AS total_size, -count() AS total_count, %d AS scan_ts, %d AS scan_month, 1 AS is_deleted
-FROM (
-  SELECT arrayJoin(splitByChar('/', path)) AS ancestor, size
-  FROM files_current f
-  LEFT JOIN files_today t ON f.path = t.path
-  WHERE f.is_deleted = 0 AND t.path IS NULL
-)
-GROUP BY ancestor
-`, scanTS, scanMonth)
-
-	if err := conn.Exec(ctx, negAggSQL); err != nil {
-		return fmt.Errorf("negative agg insert failed: %w", err)
+	if err := flushAncestorAgg(); err != nil {
+		return err
 	}
 
 	return nil
 }
 
-// appendStagingToFiles appends all rows from files_today into files (history
-// table).
-func appendStagingToFiles(ctx context.Context, conn clickhouse.Conn) error {
-	return conn.Exec(ctx, `
-INSERT INTO files (path, dirname, basename, size, uid, gid, mtime, atime, ctime, scan_ts, scan_month, is_deleted)
-SELECT path, dirname, basename, size, uid, gid, mtime, atime, ctime, scan_ts, scan_month, 0 AS is_deleted FROM files_today
-`)
-}
-
-// ingestAncestorAggs inserts scanner-computed positive aggregates into
-// file_aggregates.
-func ingestAncestorAggs(ctx context.Context, conn clickhouse.Conn, aggs []AncestorAgg) error {
-	if len(aggs) == 0 {
-		return nil
+func rebuildAndSwap(ctx context.Context, conn clickhouse.Conn) error {
+	// Drop any stale leftovers from a failed/partial run
+	if err := conn.Exec(ctx, `DROP TABLE IF EXISTS files_compacted`); err != nil {
+		return err
 	}
-
-	batch, err := conn.PrepareBatch(ctx, "INSERT INTO file_aggregates (ancestor, total_size, total_count, scan_ts, scan_month, is_deleted)")
-	if err != nil {
+	if err := conn.Exec(ctx, `DROP TABLE IF EXISTS ancestor_aggs_compacted`); err != nil {
 		return err
 	}
 
-	for _, a := range aggs {
-		if err := batch.Append(a.Ancestor, a.TotalSize, a.TotalCount, a.ScanTS, a.ScanMonth, a.IsDeleted); err != nil {
-			return err
-		}
+	// Create compacted tables by cloning schema from the source tables.
+	// This avoids duplicating column definitions and keeps them in lockstep.
+	if err := conn.Exec(ctx, `
+        CREATE TABLE files_compacted
+        AS files_active
+        ENGINE = MergeTree
+        ORDER BY path`); err != nil {
+		return err
 	}
 
-	return batch.Send()
-}
+	if err := conn.Exec(ctx, `
+        CREATE TABLE ancestor_aggs_compacted
+        AS ancestor_aggs
+        ENGINE = MergeTree
+        ORDER BY ancestor`); err != nil {
+		return err
+	}
 
-// truncateStaging clears files_today (so next scan starts fresh).
-func truncateStaging(ctx context.Context, conn clickhouse.Conn) error {
-	return conn.Exec(ctx, "TRUNCATE TABLE files_today")
+	// Populate compacted tables
+	if err := conn.Exec(ctx, `
+        INSERT INTO files_compacted
+        SELECT
+            path,
+            argMax(size, scan_id) AS size,
+            argMax(uid, scan_id) AS uid,
+            argMax(gid, scan_id) AS gid,
+            argMax(mtime, scan_id) AS mtime,
+            argMax(atime, scan_id) AS atime,
+            argMax(ctime, scan_id) AS ctime,
+            argMax(is_deleted, scan_id) AS is_deleted,
+            max(scan_id) AS scan_id
+        FROM files_active
+        GROUP BY path`); err != nil {
+		return err
+	}
+
+	if err := conn.Exec(ctx, `
+        INSERT INTO ancestor_aggs_compacted
+        SELECT
+            ancestor,
+            argMax(total_size, scan_id) AS total_size,
+            argMax(file_count, scan_id) AS file_count,
+            max(scan_id) AS scan_id
+        FROM ancestor_aggs
+        GROUP BY ancestor`); err != nil {
+		return err
+	}
+
+	// Swap tables atomically
+	if err := conn.Exec(ctx, `
+        RENAME TABLE
+            files_active TO files_old,
+            files_compacted TO files_active`); err != nil {
+		return err
+	}
+
+	if err := conn.Exec(ctx, `
+        RENAME TABLE
+            ancestor_aggs TO ancestor_aggs_old,
+            ancestor_aggs_compacted TO ancestor_aggs`); err != nil {
+		return err
+	}
+
+	// Drop old tables
+	_ = conn.Exec(ctx, `DROP TABLE IF EXISTS files_old`)
+	_ = conn.Exec(ctx, `DROP TABLE IF EXISTS ancestor_aggs_old`)
+
+	return nil
 }
