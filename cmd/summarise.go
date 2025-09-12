@@ -46,6 +46,13 @@ var (
 	quotaPath      string
 	basedirsConfig string
 	mounts         string
+
+	// ClickHouse connection settings
+	chHost     string
+	chPort     string
+	chDatabase string
+	chUsername string
+	chPassword string
 )
 
 const dbBatchSize = 10000
@@ -68,6 +75,13 @@ and provides precomputed subtree rollups.`,
 
 func init() {
 	RootCmd.AddCommand(summariseCmd)
+
+	// Add ClickHouse connection settings
+	summariseCmd.Flags().StringVar(&chHost, "ch-host", "127.0.0.1", "ClickHouse host")
+	summariseCmd.Flags().StringVar(&chPort, "ch-port", "9000", "ClickHouse port")
+	summariseCmd.Flags().StringVar(&chDatabase, "ch-database", "default", "ClickHouse database")
+	summariseCmd.Flags().StringVar(&chUsername, "ch-username", "default", "ClickHouse username")
+	summariseCmd.Flags().StringVar(&chPassword, "ch-password", "", "ClickHouse password")
 }
 
 func run(args []string) (err error) {
@@ -147,8 +161,8 @@ func openStatsFile(statsFile string) (io.ReadCloser, time.Time, error) {
 // --- ClickHouse schema and ingestion ---
 
 const (
-	fileBatchSize   = 100_000
-	rollupBatchSize = 100_000
+	fileBatchSize   = 500_000 // Increased for better performance
+	rollupBatchSize = 500_000 // Increased for better performance
 )
 
 type ftype uint8
@@ -296,7 +310,8 @@ CREATE TABLE IF NOT EXISTS fs_entries (
   INDEX idx_path_bf path TYPE tokenbf_v1(256) GRANULARITY 4
 ) ENGINE = MergeTree
 PARTITION BY (mount_path, scan_id)
-ORDER BY (mount_path, parent_path, name)`
+ORDER BY (mount_path, parent_path, name)
+SETTINGS index_granularity = 8192`
 
 	createRollupRawTable = `
 CREATE TABLE IF NOT EXISTS ancestor_rollups_raw (
@@ -308,7 +323,8 @@ CREATE TABLE IF NOT EXISTS ancestor_rollups_raw (
   mtime DateTime
 ) ENGINE = MergeTree
 PARTITION BY (mount_path, scan_id)
-ORDER BY (mount_path, ancestor)`
+ORDER BY (mount_path, ancestor)
+SETTINGS index_granularity = 8192`
 
 	createRollupStateTable = `
 CREATE TABLE IF NOT EXISTS ancestor_rollups_state (
@@ -357,7 +373,8 @@ CREATE TABLE IF NOT EXISTS ancestor_rollups_state (
   mt_older_7y_count AggregateFunction(sum, UInt64)
 ) ENGINE = AggregatingMergeTree
 PARTITION BY (mount_path, scan_id)
-ORDER BY (mount_path, ancestor)`
+ORDER BY (mount_path, ancestor)
+SETTINGS index_granularity = 8192`
 
 	createRollupMV = `
 CREATE MATERIALIZED VIEW IF NOT EXISTS ancestor_rollups_mv
@@ -498,10 +515,15 @@ func updateClickhouse(mountPath string, r io.Reader) (retErr error) {
 	ctx := context.Background()
 
 	conn, err := clickhouse.Open(&clickhouse.Options{
-		Addr:        []string{"127.0.0.1:9000"},
-		Auth:        clickhouse.Auth{Database: "default", Username: "default", Password: ""},
+		Addr:        []string{fmt.Sprintf("%s:%s", chHost, chPort)},
+		Auth:        clickhouse.Auth{Database: chDatabase, Username: chUsername, Password: chPassword},
 		DialTimeout: 10 * time.Second,
 		Compression: &clickhouse.Compression{Method: clickhouse.CompressionLZ4},
+		Settings: clickhouse.Settings{
+			"max_insert_block_size":       1000000,
+			"min_insert_block_size_rows":  100000,
+			"min_insert_block_size_bytes": 10485760, // 10MB
+		},
 	})
 	if err != nil {
 		return fmt.Errorf("connect: %w", err)
@@ -846,12 +868,100 @@ WHERE ` + strings.Join(where, " AND ") + bucketFilter
 	return s, nil
 }
 
-func SearchGlobPaths(ctx context.Context, conn clickhouse.Conn, mountPath, globPattern string, limit int) ([]string, error) {
+// OptimizedSubtreeSummary attempts to use precomputed ancestor rollups when possible
+// Falls back to the regular implementation for filtered queries
+func OptimizedSubtreeSummary(ctx context.Context, conn clickhouse.Conn, mountPath, dir string, f Filters) (Summary, error) {
+	// Check if we can use the precomputed rollups (no filters except possibly time buckets)
+	if len(f.GIDs) == 0 && len(f.UIDs) == 0 && len(f.Exts) == 0 {
+		// We can use the rollups table
+		dir = ensureDir(dir)
+
+		// Determine if we need time bucket filtering
+		timeBucketCond := ""
+		params := []interface{}{mountPath, dir}
+
+		if f.ATimeBucket != "" && f.ATimeBucket == f.MTimeBucket {
+			// Same time bucket for both
+			switch f.ATimeBucket {
+			case "0d":
+				// Recent files only
+				timeBucketCond = "AND at_within_0d_size > 0"
+			case ">1m":
+				timeBucketCond = "AND at_older_1m_size > 0"
+			case ">2m":
+				timeBucketCond = "AND at_older_2m_size > 0"
+			case ">6m":
+				timeBucketCond = "AND at_older_6m_size > 0"
+			case ">1y":
+				timeBucketCond = "AND at_older_1y_size > 0"
+			case ">2y":
+				timeBucketCond = "AND at_older_2y_size > 0"
+			case ">3y":
+				timeBucketCond = "AND at_older_3y_size > 0"
+			case ">5y":
+				timeBucketCond = "AND at_older_5y_size > 0"
+			case ">7y":
+				timeBucketCond = "AND at_older_7y_size > 0"
+			}
+		}
+
+		// Query the rollups directly
+		query := `
+		SELECT 
+		  total_size,
+		  file_count,
+		  atime_max AS most_recent_atime,
+		  atime_min AS oldest_atime,
+		  mtime_max AS most_recent_mtime,
+		  mtime_min AS oldest_mtime
+		FROM ancestor_rollups_current
+		WHERE mount_path = ? AND ancestor = ? ` + timeBucketCond
+
+		row := conn.QueryRow(ctx, query, params...)
+
+		var s Summary
+		if err := row.Scan(&s.TotalSize, &s.FileCount, &s.MostRecentATime, &s.OldestATime, &s.MostRecentMTime, &s.OldestMTime); err != nil {
+			if errors.Is(err, io.EOF) {
+				return Summary{}, nil
+			}
+			return Summary{}, err
+		}
+
+		// We still need to get the unique UIDs, GIDs, and extensions
+		// These could potentially be stored in the rollups as arrays
+		uniqueQuery := `
+		SELECT 
+		  groupUniqArray(uid) AS uids,
+		  groupUniqArray(gid) AS gids,
+		  groupUniqArray(ext_low) AS exts
+		FROM fs_entries_current
+		WHERE mount_path = ? AND path LIKE ?`
+
+		row2 := conn.QueryRow(ctx, uniqueQuery, mountPath, dir+"%")
+		if err := row2.Scan(&s.UIDs, &s.GIDs, &s.Exts); err != nil {
+			return Summary{}, err
+		}
+
+		return s, nil
+	}
+
+	// Fall back to the standard implementation for filtered queries
+	return SubtreeSummary(ctx, conn, mountPath, dir, f)
+}
+
+func SearchGlobPaths(ctx context.Context, conn clickhouse.Conn, mountPath, globPattern string, limit int, caseInsensitive bool) ([]string, error) {
 	if limit <= 0 {
 		limit = 0
 	}
 	pattern := strings.ReplaceAll(strings.ReplaceAll(globPattern, "*", "%"), "?", "_")
-	q := `SELECT path FROM fs_entries_current WHERE mount_path = ? AND path LIKE ?`
+
+	var q string
+	if caseInsensitive {
+		q = `SELECT path FROM fs_entries_current WHERE mount_path = ? AND lowerUTF8(path) LIKE lowerUTF8(?)`
+	} else {
+		q = `SELECT path FROM fs_entries_current WHERE mount_path = ? AND path LIKE ?`
+	}
+
 	if limit > 0 {
 		q += fmt.Sprintf(" LIMIT %d", limit)
 	}
