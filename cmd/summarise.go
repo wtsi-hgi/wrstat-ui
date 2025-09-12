@@ -139,6 +139,7 @@ func run(args []string) (err error) {
 	if err != nil {
 		return err
 	}
+	defer r.Close()
 
 	err = updateClickhouse(r)
 	if err != nil {
@@ -160,7 +161,25 @@ func checkArgs(args []string) error {
 	return nil
 }
 
-func openStatsFile(statsFile string) (io.Reader, time.Time, error) {
+// Helper to close multiple resources when wrapping readers
+type readMultiCloser struct {
+	r       io.Reader
+	closers []io.Closer
+}
+
+func (m *readMultiCloser) Read(p []byte) (int, error) { return m.r.Read(p) }
+
+func (m *readMultiCloser) Close() error {
+	var firstErr error
+	for i := len(m.closers) - 1; i >= 0; i-- {
+		if err := m.closers[i].Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
+func openStatsFile(statsFile string) (io.ReadCloser, time.Time, error) {
 	if statsFile == "-" {
 		return os.Stdin, time.Now(), nil
 	}
@@ -172,18 +191,20 @@ func openStatsFile(statsFile string) (io.Reader, time.Time, error) {
 
 	fi, err := f.Stat()
 	if err != nil {
+		_ = f.Close()
 		return nil, time.Time{}, err
 	}
 
-	var r io.Reader = f
-
 	if strings.HasSuffix(statsFile, ".gz") {
-		if r, err = pgzip.NewReader(f); err != nil {
+		zr, err := pgzip.NewReader(f)
+		if err != nil {
+			_ = f.Close()
 			return nil, time.Time{}, fmt.Errorf("failed to decompress stats file: %w", err)
 		}
+		return &readMultiCloser{r: zr, closers: []io.Closer{zr, f}}, fi.ModTime(), nil
 	}
 
-	return r, fi.ModTime(), nil
+	return f, fi.ModTime(), nil
 }
 
 // Ancestor aggregate record (scanner-produced, positive values for present
@@ -208,6 +229,7 @@ func updateClickhouse(r io.Reader) error {
 			Password: "",
 		},
 		DialTimeout: 5 * time.Second,
+		Compression: &clickhouse.Compression{Method: clickhouse.CompressionLZ4},
 	})
 	if err != nil {
 		return fmt.Errorf("failed to connect to clickhouse: %w", err)
@@ -247,6 +269,7 @@ CREATE TABLE IF NOT EXISTS files_active (
     is_deleted UInt8,
     scan_id UInt64
 ) ENGINE = MergeTree
+PARTITION BY scan_id
 ORDER BY path
 `); err != nil {
 		return err
@@ -259,6 +282,7 @@ CREATE TABLE IF NOT EXISTS ancestor_aggs (
     file_count UInt64,
     scan_id UInt64
 ) ENGINE = SummingMergeTree
+PARTITION BY scan_id
 ORDER BY (ancestor, scan_id)
 `); err != nil {
 		return err
@@ -266,17 +290,18 @@ ORDER BY (ancestor, scan_id)
 
 	if err := conn.Exec(ctx, `
 CREATE OR REPLACE VIEW files_current AS
-    SELECT
-        path,
-        argMax(size, scan_id) AS size,
-        argMax(uid, scan_id) AS uid,
-        argMax(gid, scan_id) AS gid,
-        argMax(mtime, scan_id) AS mtime,
-        argMax(atime, scan_id) AS atime,
-        argMax(ctime, scan_id) AS ctime,
-        argMax(is_deleted, scan_id) AS is_deleted
-    FROM files_active
-GROUP BY path`); err != nil {
+WITH (SELECT max(scan_id) FROM files_active) AS max_scan
+SELECT
+    path,
+    size,
+    uid,
+    gid,
+    mtime,
+    atime,
+    ctime,
+    is_deleted
+FROM files_active
+WHERE scan_id = max_scan`); err != nil {
 		return err
 	}
 
@@ -297,7 +322,7 @@ GROUP BY ancestor`); err != nil {
 }
 
 const (
-	sqlBatchSize          = 10000
+	sqlBatchSize          = 100000
 	sqlInsertFilesActive  = `INSERT INTO files_active(path, size, uid, gid, mtime, atime, ctime, is_deleted, scan_id)`
 	sqlInsertAncestorAggs = `INSERT INTO ancestor_aggs(ancestor, total_size, file_count, scan_id)`
 )
@@ -433,12 +458,12 @@ func rebuildAndSwap(ctx context.Context, conn clickhouse.Conn) error {
 		return err
 	}
 
-	// Create compacted tables by cloning schema from the source tables.
-	// This avoids duplicating column definitions and keeps them in lockstep.
+	// Create compacted tables mirroring engines and layouts to avoid drift
 	if err := conn.Exec(ctx, `
         CREATE TABLE files_compacted
         AS files_active
         ENGINE = MergeTree
+        PARTITION BY scan_id
         ORDER BY path`); err != nil {
 		return err
 	}
@@ -446,37 +471,40 @@ func rebuildAndSwap(ctx context.Context, conn clickhouse.Conn) error {
 	if err := conn.Exec(ctx, `
         CREATE TABLE ancestor_aggs_compacted
         AS ancestor_aggs
-        ENGINE = MergeTree
-        ORDER BY ancestor`); err != nil {
+        ENGINE = SummingMergeTree
+        PARTITION BY scan_id
+        ORDER BY (ancestor, scan_id)`); err != nil {
 		return err
 	}
 
-	// Populate compacted tables
+	// Populate compacted tables with the latest snapshot only
 	if err := conn.Exec(ctx, `
         INSERT INTO files_compacted
         SELECT
             path,
-            argMax(size, scan_id) AS size,
-            argMax(uid, scan_id) AS uid,
-            argMax(gid, scan_id) AS gid,
-            argMax(mtime, scan_id) AS mtime,
-            argMax(atime, scan_id) AS atime,
-            argMax(ctime, scan_id) AS ctime,
-            argMax(is_deleted, scan_id) AS is_deleted,
-            max(scan_id) AS scan_id
+            size,
+            uid,
+            gid,
+            mtime,
+            atime,
+            ctime,
+            is_deleted,
+            scan_id
         FROM files_active
-        GROUP BY path`); err != nil {
+        WHERE scan_id = (SELECT max(scan_id) FROM files_active)`); err != nil {
 		return err
 	}
 
 	if err := conn.Exec(ctx, `
         INSERT INTO ancestor_aggs_compacted
+        WITH (SELECT max(scan_id) FROM ancestor_aggs) AS max_scan
         SELECT
             ancestor,
-            argMax(total_size, scan_id) AS total_size,
-            argMax(file_count, scan_id) AS file_count,
-            max(scan_id) AS scan_id
+            sum(total_size) AS total_size,
+            sum(file_count) AS file_count,
+            max_scan AS scan_id
         FROM ancestor_aggs
+        WHERE scan_id = max_scan
         GROUP BY ancestor`); err != nil {
 		return err
 	}
