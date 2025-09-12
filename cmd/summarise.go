@@ -264,15 +264,20 @@ func deriveExtLower(name string, isDir bool) string {
 		return ""
 	}
 	ext1 := base[dot+1:]
-	// Multi-dot rule for common compressed suffixes
-	switch strings.ToLower(ext1) {
+	lower1 := strings.ToLower(ext1)
+	// Multi-dot rule for common compressed suffixes -> previousExt+"."+compressExt
+	switch lower1 {
 	case "gz", "bz2", "xz", "zst", "lz4", "lz", "br":
 		prev := strings.LastIndexByte(base[:dot], '.')
 		if prev != -1 {
-			return strings.ToLower(base[prev+1:])
+			prevExt := strings.ToLower(base[prev+1 : dot])
+			if prevExt != "" {
+				return prevExt + "." + lower1
+			}
 		}
+		return lower1
 	}
-	return strings.ToLower(ext1)
+	return lower1
 }
 
 // SQL constants
@@ -780,16 +785,6 @@ func buildBucketPredicate(col, bucket string) (string, error) {
 
 func SubtreeSummary(ctx context.Context, conn clickhouse.Conn, mountPath, dir string, f Filters) (Summary, error) {
 	dir = ensureDir(dir)
-	// Compute over current snapshot for this mount using prefix filter
-	// Use max ready scan_id per mount to anchor time buckets
-	var maxScanID uint64
-	row := conn.QueryRow(ctx, `SELECT max(scan_id) FROM scans WHERE mount_path = ? AND state = 'ready'`, mountPath)
-	if err := row.Scan(&maxScanID); err != nil {
-		if errors.Is(err, io.EOF) {
-			return Summary{}, nil
-		}
-		return Summary{}, err
-	}
 
 	where := []string{"mount_path = ?", "path LIKE ?"}
 	args := []any{mountPath, dir + "%"}
@@ -871,41 +866,10 @@ WHERE ` + strings.Join(where, " AND ") + bucketFilter
 // OptimizedSubtreeSummary attempts to use precomputed ancestor rollups when possible
 // Falls back to the regular implementation for filtered queries
 func OptimizedSubtreeSummary(ctx context.Context, conn clickhouse.Conn, mountPath, dir string, f Filters) (Summary, error) {
-	// Check if we can use the precomputed rollups (no filters except possibly time buckets)
-	if len(f.GIDs) == 0 && len(f.UIDs) == 0 && len(f.Exts) == 0 {
-		// We can use the rollups table
+	// Only use rollups when there are no filters at all; ensures correctness for min/max times
+	if len(f.GIDs) == 0 && len(f.UIDs) == 0 && len(f.Exts) == 0 && f.ATimeBucket == "" && f.MTimeBucket == "" {
 		dir = ensureDir(dir)
 
-		// Determine if we need time bucket filtering
-		timeBucketCond := ""
-		params := []interface{}{mountPath, dir}
-
-		if f.ATimeBucket != "" && f.ATimeBucket == f.MTimeBucket {
-			// Same time bucket for both
-			switch f.ATimeBucket {
-			case "0d":
-				// Recent files only
-				timeBucketCond = "AND at_within_0d_size > 0"
-			case ">1m":
-				timeBucketCond = "AND at_older_1m_size > 0"
-			case ">2m":
-				timeBucketCond = "AND at_older_2m_size > 0"
-			case ">6m":
-				timeBucketCond = "AND at_older_6m_size > 0"
-			case ">1y":
-				timeBucketCond = "AND at_older_1y_size > 0"
-			case ">2y":
-				timeBucketCond = "AND at_older_2y_size > 0"
-			case ">3y":
-				timeBucketCond = "AND at_older_3y_size > 0"
-			case ">5y":
-				timeBucketCond = "AND at_older_5y_size > 0"
-			case ">7y":
-				timeBucketCond = "AND at_older_7y_size > 0"
-			}
-		}
-
-		// Query the rollups directly
 		query := `
 		SELECT 
 		  total_size,
@@ -915,9 +879,9 @@ func OptimizedSubtreeSummary(ctx context.Context, conn clickhouse.Conn, mountPat
 		  mtime_max AS most_recent_mtime,
 		  mtime_min AS oldest_mtime
 		FROM ancestor_rollups_current
-		WHERE mount_path = ? AND ancestor = ? ` + timeBucketCond
+		WHERE mount_path = ? AND ancestor = ?`
 
-		row := conn.QueryRow(ctx, query, params...)
+		row := conn.QueryRow(ctx, query, mountPath, dir)
 
 		var s Summary
 		if err := row.Scan(&s.TotalSize, &s.FileCount, &s.MostRecentATime, &s.OldestATime, &s.MostRecentMTime, &s.OldestMTime); err != nil {
@@ -927,8 +891,6 @@ func OptimizedSubtreeSummary(ctx context.Context, conn clickhouse.Conn, mountPat
 			return Summary{}, err
 		}
 
-		// We still need to get the unique UIDs, GIDs, and extensions
-		// These could potentially be stored in the rollups as arrays
 		uniqueQuery := `
 		SELECT 
 		  groupUniqArray(uid) AS uids,
@@ -945,7 +907,6 @@ func OptimizedSubtreeSummary(ctx context.Context, conn clickhouse.Conn, mountPat
 		return s, nil
 	}
 
-	// Fall back to the standard implementation for filtered queries
 	return SubtreeSummary(ctx, conn, mountPath, dir, f)
 }
 
