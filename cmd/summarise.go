@@ -31,7 +31,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -42,13 +41,7 @@ import (
 )
 
 var (
-	defaultDir        string
-	userGroup         string
-	groupUser         string
-	basedirsDB        string
-	basedirsHistoryDB string
-	dirgutaDB         string
-	retentionDays     int
+	defaultDir string
 
 	quotaPath      string
 	basedirsConfig string
@@ -59,56 +52,13 @@ const dbBatchSize = 10000
 
 // summariseCmd represents the stat command.
 var summariseCmd = &cobra.Command{
-	Use:   "summarise",
+	Use:   "summarise <mount_path> <stats_file|->",
 	Short: "Summarise stat data",
-	Long: `Summarise stat data in to dirguta database, basedirs database, ` +
-		`and usergroup/groupuser files.
+	Long: `Summarise stat data into ClickHouse for fast, interactive queries.
 
-Summarise processes stat files from the output of 'wrstat multi' into different
-summaries.
-
-Summarise takes the following arguments
-
-  --defaultDir,-d
-	output all summarisers to here with the default names.
-
-  --userGroup,-u
-	usergroup output file. Defaults to DEFAULTDIR/byusergroup.gz, if --defaultDir is set.
-	If filename ends in '.gz' the file will be gzip compressed.
-
-  --groupUser,-g
-	groupUser output file. Defaults to DEFAULTDIR/bygroup, if --defaultDir is set.
-	If filename ends in '.gz' the file will be gzip compressed.
-
-  --basedirsDB,-b
-	basedirs output file. Defaults to DEFAULTDIR/basedirs.db, if --defaultDir is set.
-
-  --tree,-t
-	tree output dir. Defaults to DEFAULTDIR/dguta.dbs, if --defaultDir is set.
-
-  --basedirsHistoryDB,-s
-	basedirs file containing previous history.
-
-  --quota,-q
-	Required for basedirs, format is a csv of gid,disk,size_quota,inode_quota
-
-  --config,-c
-	Required for basedirs, path to basedirs config file.
-
-  --mounts,-m
-	Provide a file containing quoted mount points, one-per-line, instead of
-	relying on automatically discovered mount points.
-	The following is an example command that can be used to generate an
-	appropriate file:
-		findmnt -ln --real -o target | sed -e 's/^/"/' -e 's/$/"/' > mounts
-
-NB: All existing output files will be deleted or truncated during initialisation.
-
-An example command would be the following:
-
-	wrstat-ui summarise -d /path/to/output -s /path/to/previous/basedirs.db -q ` +
-		`/path/to/quota.file -c /path/to/basedirs.config /path/to/stats.file
-`,
+This command ingests a single mount's scan into ClickHouse with atomic promotion
+semantics (loading -> ready), maintains only the latest ready scan per mount,
+and provides precomputed subtree rollups.`,
 	Run: func(_ *cobra.Command, args []string) {
 		if err := run(args); err != nil {
 			die("%s", err)
@@ -118,49 +68,34 @@ An example command would be the following:
 
 func init() {
 	RootCmd.AddCommand(summariseCmd)
-
-	summariseCmd.Flags().StringVarP(&defaultDir, "defaultDir", "d", "", "output all summarisers to here")
-	summariseCmd.Flags().StringVarP(&userGroup, "userGroup", "u", "", "usergroup output file")
-	summariseCmd.Flags().StringVarP(&groupUser, "groupUser", "g", "", "groupUser output file")
-	summariseCmd.Flags().StringVarP(&basedirsDB, "basedirsDB", "b", "", "basedirs output file")
-	summariseCmd.Flags().StringVarP(&basedirsHistoryDB, "basedirsHistoryDB", "s", "",
-		"basedirs file containing previous history")
-	summariseCmd.Flags().StringVarP(&dirgutaDB, "tree", "t", "", "tree output dir")
-	summariseCmd.Flags().StringVarP(&quotaPath, "quota", "q", "", "csv of gid,disk,size_quota,inode_quota")
-	summariseCmd.Flags().StringVarP(&basedirsConfig, "config", "c", "", "path to basedirs config file")
-	summariseCmd.Flags().StringVarP(&mounts, "mounts", "m", "", "path to a file containing a list of quoted mountpoints")
-	summariseCmd.Flags().IntVar(&retentionDays, "retention-days", 30, "Number of days to retain historical scans")
 }
 
 func run(args []string) (err error) {
-	if err = checkArgs(args); err != nil {
-		return err
-	}
-
-	r, _, err := openStatsFile(args[0])
+	mountPath, statsPath, err := checkArgs(args)
 	if err != nil {
 		return err
 	}
+
+	r, _, err := openStatsFile(statsPath)
+	if err != nil {
+		return err
+	}
+
 	defer r.Close()
 
-	err = updateClickhouse(r)
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return updateClickhouse(mountPath, r)
 }
 
-func checkArgs(args []string) error {
-	if len(args) != 1 {
-		return errors.New("exactly 1 input file should be provided") //nolint:err113
+func checkArgs(args []string) (string, string, error) {
+	if len(args) != 2 {
+		return "", "", errors.New("usage: summarise <mount_path> <stats_file|->") //nolint:err113
 	}
-
-	if defaultDir == "" && userGroup == "" && groupUser == "" && basedirsDB == "" && dirgutaDB == "" {
-		return errors.New("no output files specified") //nolint:err113
+	mountPath := normalizeMount(args[0])
+	statsPath := args[1]
+	if mountPath == "/" {
+		return "", "", errors.New("mount_path must not be '/' — use the real mount point path") //nolint:err113
 	}
-
-	return nil
+	return mountPath, statsPath, nil
 }
 
 // Helper to close multiple resources when wrapping readers
@@ -209,516 +144,729 @@ func openStatsFile(statsFile string) (io.ReadCloser, time.Time, error) {
 	return f, fi.ModTime(), nil
 }
 
-// Ancestor aggregate record (scanner-produced, positive values for present
-// files).
-type AncestorAgg struct {
-	Ancestor   string
-	TotalSize  int64
-	TotalCount int64
-	ScanTS     uint32
-	ScanMonth  uint16
-	IsDeleted  uint8 // 0 normally
+// --- ClickHouse schema and ingestion ---
+
+const (
+	fileBatchSize   = 100_000
+	rollupBatchSize = 100_000
+)
+
+type ftype uint8
+
+const (
+	ftUnknown ftype = iota
+	ftFile
+	ftDir
+	ftSymlink
+	ftDevice
+	ftPipe
+	ftSocket
+	ftChar
+)
+
+func mapEntryType(b byte) ftype {
+	switch b {
+	case stats.FileType:
+		return ftFile
+	case stats.DirType:
+		return ftDir
+	case stats.SymlinkType:
+		return ftSymlink
+	case stats.DeviceType:
+		return ftDevice
+	case stats.PipeType:
+		return ftPipe
+	case stats.SocketType:
+		return ftSocket
+	case stats.CharType:
+		return ftChar
+	default:
+		return ftUnknown
+	}
 }
 
-func updateClickhouse(r io.Reader) error {
+func normalizeMount(m string) string {
+	if m == "" {
+		return m
+	}
+	if !strings.HasSuffix(m, "/") {
+		m += "/"
+	}
+	return m
+}
+
+func isDirPath(path string) bool {
+	return strings.HasSuffix(path, "/")
+}
+
+func splitParentAndName(path string) (parent, name string) {
+	// Treat directories as having trailing slash in the input.
+	p := path
+	if isDirPath(p) {
+		p = p[:len(p)-1]
+	}
+	idx := strings.LastIndexByte(p, '/')
+	if idx <= 0 {
+		// Root-like; parent is "/" and name is remainder
+		return "/", p
+	}
+	return p[:idx+1], p[idx+1:]
+}
+
+func forEachAncestor(dir, mountPath string, fn func(a string) bool) {
+	// dir must be a directory path ending with '/'
+	if !strings.HasSuffix(dir, "/") {
+		dir += "/"
+	}
+	// Only iterate ancestors at or below mountPath
+	if !strings.HasPrefix(dir, mountPath) {
+		return
+	}
+	cur := dir
+	for {
+		if !fn(cur) {
+			return
+		}
+		if cur == mountPath {
+			return
+		}
+		trim := strings.TrimRight(cur, "/")
+		idx := strings.LastIndexByte(trim, '/')
+		if idx <= 0 {
+			return
+		}
+		cur = trim[:idx+1]
+	}
+}
+
+func deriveExtLower(name string, isDir bool) string {
+	if isDir {
+		return ""
+	}
+	// Hidden files: ignore leading dot for ext purposes
+	base := strings.TrimPrefix(name, ".")
+	dot := strings.LastIndexByte(base, '.')
+	if dot == -1 {
+		return ""
+	}
+	ext1 := base[dot+1:]
+	// Multi-dot rule for common compressed suffixes
+	switch strings.ToLower(ext1) {
+	case "gz", "bz2", "xz", "zst", "lz4", "lz", "br":
+		prev := strings.LastIndexByte(base[:dot], '.')
+		if prev != -1 {
+			return strings.ToLower(base[prev+1:])
+		}
+	}
+	return strings.ToLower(ext1)
+}
+
+// SQL constants
+const (
+	createScansTable = `
+CREATE TABLE IF NOT EXISTS scans (
+  mount_path String,
+  scan_id UInt64,
+  state Enum8('loading' = 0, 'ready' = 1),
+  started_at DateTime,
+  finished_at Nullable(DateTime)
+) ENGINE = MergeTree
+ORDER BY (mount_path, scan_id)`
+
+	createFsEntriesTable = `
+CREATE TABLE IF NOT EXISTS fs_entries (
+  mount_path String,
+  scan_id UInt64,
+  path String,
+  parent_path String,
+  name String,
+  ext_low String,
+  ftype UInt8,
+  inode UInt64,
+  size UInt64,
+  uid UInt32,
+  gid UInt32,
+  mtime DateTime,
+  atime DateTime,
+  ctime DateTime,
+  INDEX idx_uid uid TYPE minmax GRANULARITY 8192,
+  INDEX idx_gid gid TYPE minmax GRANULARITY 8192,
+  INDEX idx_mtime mtime TYPE minmax GRANULARITY 8192,
+  INDEX idx_atime atime TYPE minmax GRANULARITY 8192,
+  INDEX idx_path_bf path TYPE tokenbf_v1(256) GRANULARITY 4
+) ENGINE = MergeTree
+PARTITION BY (mount_path, scan_id)
+ORDER BY (mount_path, parent_path, name)`
+
+	createRollupRawTable = `
+CREATE TABLE IF NOT EXISTS ancestor_rollups_raw (
+  mount_path String,
+  scan_id UInt64,
+  ancestor String,
+  size UInt64,
+  atime DateTime,
+  mtime DateTime
+) ENGINE = MergeTree
+PARTITION BY (mount_path, scan_id)
+ORDER BY (mount_path, ancestor)`
+
+	createRollupStateTable = `
+CREATE TABLE IF NOT EXISTS ancestor_rollups_state (
+  mount_path String,
+  scan_id UInt64,
+  ancestor String,
+  total_size AggregateFunction(sum, UInt64),
+  file_count AggregateFunction(sum, UInt64),
+  atime_min AggregateFunction(min, DateTime),
+  atime_max AggregateFunction(max, DateTime),
+  mtime_min AggregateFunction(min, DateTime),
+  mtime_max AggregateFunction(max, DateTime),
+  at_within_0d_size AggregateFunction(sum, UInt64),
+  at_within_0d_count AggregateFunction(sum, UInt64),
+  at_older_1m_size AggregateFunction(sum, UInt64),
+  at_older_1m_count AggregateFunction(sum, UInt64),
+  at_older_2m_size AggregateFunction(sum, UInt64),
+  at_older_2m_count AggregateFunction(sum, UInt64),
+  at_older_6m_size AggregateFunction(sum, UInt64),
+  at_older_6m_count AggregateFunction(sum, UInt64),
+  at_older_1y_size AggregateFunction(sum, UInt64),
+  at_older_1y_count AggregateFunction(sum, UInt64),
+  at_older_2y_size AggregateFunction(sum, UInt64),
+  at_older_2y_count AggregateFunction(sum, UInt64),
+  at_older_3y_size AggregateFunction(sum, UInt64),
+  at_older_3y_count AggregateFunction(sum, UInt64),
+  at_older_5y_size AggregateFunction(sum, UInt64),
+  at_older_5y_count AggregateFunction(sum, UInt64),
+  at_older_7y_size AggregateFunction(sum, UInt64),
+  at_older_7y_count AggregateFunction(sum, UInt64),
+  mt_older_1m_size AggregateFunction(sum, UInt64),
+  mt_older_1m_count AggregateFunction(sum, UInt64),
+  mt_older_2m_size AggregateFunction(sum, UInt64),
+  mt_older_2m_count AggregateFunction(sum, UInt64),
+  mt_older_6m_size AggregateFunction(sum, UInt64),
+  mt_older_6m_count AggregateFunction(sum, UInt64),
+  mt_older_1y_size AggregateFunction(sum, UInt64),
+  mt_older_1y_count AggregateFunction(sum, UInt64),
+  mt_older_2y_size AggregateFunction(sum, UInt64),
+  mt_older_2y_count AggregateFunction(sum, UInt64),
+  mt_older_3y_size AggregateFunction(sum, UInt64),
+  mt_older_3y_count AggregateFunction(sum, UInt64),
+  mt_older_5y_size AggregateFunction(sum, UInt64),
+  mt_older_5y_count AggregateFunction(sum, UInt64),
+  mt_older_7y_size AggregateFunction(sum, UInt64),
+  mt_older_7y_count AggregateFunction(sum, UInt64)
+) ENGINE = AggregatingMergeTree
+PARTITION BY (mount_path, scan_id)
+ORDER BY (mount_path, ancestor)`
+
+	createRollupMV = `
+CREATE MATERIALIZED VIEW IF NOT EXISTS ancestor_rollups_mv
+TO ancestor_rollups_state AS
+WITH toDateTime(scan_id) AS scan_time
+SELECT
+  mount_path,
+  scan_id,
+  ancestor,
+  sumState(size) AS total_size,
+  sumState(1) AS file_count,
+  minState(atime) AS atime_min,
+  maxState(atime) AS atime_max,
+  minState(mtime) AS mtime_min,
+  maxState(mtime) AS mtime_max,
+  sumIfState(size, atime >= (scan_time - INTERVAL 1 DAY)) AS at_within_0d_size,
+  sumIfState(1, atime >= (scan_time - INTERVAL 1 DAY)) AS at_within_0d_count,
+  sumIfState(size, atime < (scan_time - INTERVAL 1 MONTH)) AS at_older_1m_size,
+  sumIfState(1, atime < (scan_time - INTERVAL 1 MONTH)) AS at_older_1m_count,
+  sumIfState(size, atime < (scan_time - INTERVAL 2 MONTH)) AS at_older_2m_size,
+  sumIfState(1, atime < (scan_time - INTERVAL 2 MONTH)) AS at_older_2m_count,
+  sumIfState(size, atime < (scan_time - INTERVAL 6 MONTH)) AS at_older_6m_size,
+  sumIfState(1, atime < (scan_time - INTERVAL 6 MONTH)) AS at_older_6m_count,
+  sumIfState(size, atime < (scan_time - INTERVAL 1 YEAR)) AS at_older_1y_size,
+  sumIfState(1, atime < (scan_time - INTERVAL 1 YEAR)) AS at_older_1y_count,
+  sumIfState(size, atime < (scan_time - INTERVAL 2 YEAR)) AS at_older_2y_size,
+  sumIfState(1, atime < (scan_time - INTERVAL 2 YEAR)) AS at_older_2y_count,
+  sumIfState(size, atime < (scan_time - INTERVAL 3 YEAR)) AS at_older_3y_size,
+  sumIfState(1, atime < (scan_time - INTERVAL 3 YEAR)) AS at_older_3y_count,
+  sumIfState(size, atime < (scan_time - INTERVAL 5 YEAR)) AS at_older_5y_size,
+  sumIfState(1, atime < (scan_time - INTERVAL 5 YEAR)) AS at_older_5y_count,
+  sumIfState(size, atime < (scan_time - INTERVAL 7 YEAR)) AS at_older_7y_size,
+  sumIfState(1, atime < (scan_time - INTERVAL 7 YEAR)) AS at_older_7y_count,
+  sumIfState(size, mtime < (scan_time - INTERVAL 1 MONTH)) AS mt_older_1m_size,
+  sumIfState(1, mtime < (scan_time - INTERVAL 1 MONTH)) AS mt_older_1m_count,
+  sumIfState(size, mtime < (scan_time - INTERVAL 2 MONTH)) AS mt_older_2m_size,
+  sumIfState(1, mtime < (scan_time - INTERVAL 2 MONTH)) AS mt_older_2m_count,
+  sumIfState(size, mtime < (scan_time - INTERVAL 6 MONTH)) AS mt_older_6m_size,
+  sumIfState(1, mtime < (scan_time - INTERVAL 6 MONTH)) AS mt_older_6m_count,
+  sumIfState(size, mtime < (scan_time - INTERVAL 1 YEAR)) AS mt_older_1y_size,
+  sumIfState(1, mtime < (scan_time - INTERVAL 1 YEAR)) AS mt_older_1y_count,
+  sumIfState(size, mtime < (scan_time - INTERVAL 2 YEAR)) AS mt_older_2y_size,
+  sumIfState(1, mtime < (scan_time - INTERVAL 2 YEAR)) AS mt_older_2y_count,
+  sumIfState(size, mtime < (scan_time - INTERVAL 3 YEAR)) AS mt_older_3y_size,
+  sumIfState(1, mtime < (scan_time - INTERVAL 3 YEAR)) AS mt_older_3y_count,
+  sumIfState(size, mtime < (scan_time - INTERVAL 5 YEAR)) AS mt_older_5y_size,
+  sumIfState(1, mtime < (scan_time - INTERVAL 5 YEAR)) AS mt_older_5y_count,
+  sumIfState(size, mtime < (scan_time - INTERVAL 7 YEAR)) AS mt_older_7y_size,
+  sumIfState(1, mtime < (scan_time - INTERVAL 7 YEAR)) AS mt_older_7y_count
+FROM ancestor_rollups_raw
+GROUP BY mount_path, scan_id, ancestor`
+
+	createFilesCurrentView = `
+CREATE OR REPLACE VIEW fs_entries_current AS
+SELECT e.*
+FROM fs_entries e
+INNER JOIN (
+  SELECT mount_path, max(scan_id) AS scan_id
+  FROM scans
+  WHERE state = 'ready'
+  GROUP BY mount_path
+) r USING (mount_path, scan_id)`
+
+	createRollupsCurrentView = `
+CREATE OR REPLACE VIEW ancestor_rollups_current AS
+SELECT s.mount_path,
+       s.scan_id,
+       s.ancestor,
+       sumMerge(total_size) AS total_size,
+       sumMerge(file_count) AS file_count,
+       minMerge(atime_min)  AS atime_min,
+       maxMerge(atime_max)  AS atime_max,
+       minMerge(mtime_min)  AS mtime_min,
+       maxMerge(mtime_max)  AS mtime_max,
+       sumMerge(at_within_0d_size) AS at_within_0d_size,
+       sumMerge(at_within_0d_count) AS at_within_0d_count,
+       sumMerge(at_older_1m_size) AS at_older_1m_size,
+       sumMerge(at_older_1m_count) AS at_older_1m_count,
+       sumMerge(at_older_2m_size) AS at_older_2m_size,
+       sumMerge(at_older_2m_count) AS at_older_2m_count,
+       sumMerge(at_older_6m_size) AS at_older_6m_size,
+       sumMerge(at_older_6m_count) AS at_older_6m_count,
+       sumMerge(at_older_1y_size) AS at_older_1y_size,
+       sumMerge(at_older_1y_count) AS at_older_1y_count,
+       sumMerge(at_older_2y_size) AS at_older_2y_size,
+       sumMerge(at_older_2y_count) AS at_older_2y_count,
+       sumMerge(at_older_3y_size) AS at_older_3y_size,
+       sumMerge(at_older_3y_count) AS at_older_3y_count,
+       sumMerge(at_older_5y_size) AS at_older_5y_size,
+       sumMerge(at_older_5y_count) AS at_older_5y_count,
+       sumMerge(at_older_7y_size) AS at_older_7y_size,
+       sumMerge(at_older_7y_count) AS at_older_7y_count,
+       sumMerge(mt_older_1m_size) AS mt_older_1m_size,
+       sumMerge(mt_older_1m_count) AS mt_older_1m_count,
+       sumMerge(mt_older_2m_size) AS mt_older_2m_size,
+       sumMerge(mt_older_2m_count) AS mt_older_2m_count,
+       sumMerge(mt_older_6m_size) AS mt_older_6m_size,
+       sumMerge(mt_older_6m_count) AS mt_older_6m_count,
+       sumMerge(mt_older_1y_size) AS mt_older_1y_size,
+       sumMerge(mt_older_1y_count) AS mt_older_1y_count,
+       sumMerge(mt_older_2y_size) AS mt_older_2y_size,
+       sumMerge(mt_older_2y_count) AS mt_older_2y_count,
+       sumMerge(mt_older_3y_size) AS mt_older_3y_size,
+       sumMerge(mt_older_3y_count) AS mt_older_3y_count,
+       sumMerge(mt_older_5y_size) AS mt_older_5y_size,
+       sumMerge(mt_older_5y_count) AS mt_older_5y_count,
+       sumMerge(mt_older_7y_size) AS mt_older_7y_size,
+       sumMerge(mt_older_7y_count) AS mt_older_7y_count
+FROM ancestor_rollups_state s
+INNER JOIN (
+  SELECT mount_path, max(scan_id) AS scan_id
+  FROM scans
+  WHERE state = 'ready'
+  GROUP BY mount_path
+) r USING (mount_path, scan_id)
+GROUP BY s.mount_path, s.scan_id, s.ancestor`
+)
+
+func createSchema(ctx context.Context, conn clickhouse.Conn) error {
+	stmts := []string{
+		createScansTable,
+		createFsEntriesTable,
+		createRollupRawTable,
+		createRollupStateTable,
+		createRollupMV,
+		createFilesCurrentView,
+		createRollupsCurrentView,
+	}
+	for _, s := range stmts {
+		if err := conn.Exec(ctx, s); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func updateClickhouse(mountPath string, r io.Reader) (retErr error) {
 	ctx := context.Background()
 
 	conn, err := clickhouse.Open(&clickhouse.Options{
-		Addr: []string{"127.0.0.1:9000"},
-		Auth: clickhouse.Auth{
-			Database: "default",
-			Username: "default",
-			Password: "",
-		},
-		DialTimeout: 5 * time.Second,
+		Addr:        []string{"127.0.0.1:9000"},
+		Auth:        clickhouse.Auth{Database: "default", Username: "default", Password: ""},
+		DialTimeout: 10 * time.Second,
 		Compression: &clickhouse.Compression{Method: clickhouse.CompressionLZ4},
 	})
 	if err != nil {
-		return fmt.Errorf("failed to connect to clickhouse: %w", err)
+		return fmt.Errorf("connect: %w", err)
 	}
-
 	defer conn.Close()
 
 	if err := createSchema(ctx, conn); err != nil {
 		return fmt.Errorf("createSchema: %w", err)
 	}
 
-	now := time.Now()
-	scanID := uint32(now.Unix())
+	scanID := uint64(time.Now().Unix())
+	started := time.Now()
 
-	if err := ingestStats(ctx, conn, r, scanID); err != nil {
-		return fmt.Errorf("ingestStats: %w", err)
+	// register scan as loading
+	if err := conn.Exec(ctx, `INSERT INTO scans (mount_path, scan_id, state, started_at, finished_at) VALUES (?, ?, 'loading', ?, NULL)`, mountPath, scanID, started); err != nil {
+		return fmt.Errorf("insert scan: %w", err)
 	}
 
-	// Identify and handle deleted files
-	if err := handleDeletedFiles(ctx, conn, scanID); err != nil {
-		return fmt.Errorf("handleDeletedFiles: %w", err)
-	}
-
-	if retentionDays > 0 {
-		if err := cleanupOldScans(ctx, conn, retentionDays); err != nil {
-			return fmt.Errorf("cleanupOldScans: %w", err)
+	// rollback on failure: drop this scan's partitions and scan row
+	defer func() {
+		if retErr == nil {
+			return
 		}
+		_ = conn.Exec(ctx, `ALTER TABLE fs_entries DROP PARTITION WHERE mount_path = ? AND scan_id = ?`, mountPath, scanID)
+		_ = conn.Exec(ctx, `ALTER TABLE ancestor_rollups_raw DROP PARTITION WHERE mount_path = ? AND scan_id = ?`, mountPath, scanID)
+		_ = conn.Exec(ctx, `ALTER TABLE ancestor_rollups_state DROP PARTITION WHERE mount_path = ? AND scan_id = ?`, mountPath, scanID)
+		_ = conn.Exec(ctx, `ALTER TABLE scans DELETE WHERE mount_path = ? AND scan_id = ?`, mountPath, scanID)
+	}()
+
+	if err := ingestScan(ctx, conn, mountPath, scanID, r); err != nil {
+		return err
 	}
 
-	// monthly run:
-	if false {
-		if err := rebuildAndSwap(ctx, conn); err != nil {
-			return fmt.Errorf("rebuildAndSwap: %w", err)
-		}
+	// promote to ready
+	finished := time.Now()
+	if err := conn.Exec(ctx, `ALTER TABLE scans UPDATE state = 'ready', finished_at = ? WHERE mount_path = ? AND scan_id = ?`, finished, mountPath, scanID); err != nil {
+		return fmt.Errorf("promote scan: %w", err)
+	}
+
+	// drop older scans for this mount
+	if err := dropOlderScans(ctx, conn, mountPath, scanID); err != nil {
+		return fmt.Errorf("retention: %w", err)
 	}
 
 	return nil
 }
 
-// handleDeletedFiles identifies files that were present in the previous scan
-// but not in the current scan, marks them as deleted, and updates ancestor
-// aggregations accordingly.
-func handleDeletedFiles(ctx context.Context, conn clickhouse.Conn, currentScanID uint32) error {
-	// Get the previous scan ID
-	var prevScanID uint64
-	row := conn.QueryRow(ctx, `
-		SELECT max(scan_id) 
-		FROM files_active 
-		WHERE scan_id < ?`, uint64(currentScanID))
-
-	if err := row.Scan(&prevScanID); err != nil {
-		if errors.Is(err, io.EOF) || strings.Contains(err.Error(), "no rows in result set") {
-			// This is the first scan, nothing to mark as deleted
-			return nil
-		}
-		return fmt.Errorf("failed to get previous scan ID: %w", err)
+func ingestScan(ctx context.Context, conn clickhouse.Conn, mountPath string, scanID uint64, r io.Reader) error {
+	filesBatch, err := conn.PrepareBatch(ctx, `INSERT INTO fs_entries (mount_path, scan_id, path, parent_path, name, ext_low, ftype, inode, size, uid, gid, mtime, atime, ctime)`)
+	if err != nil {
+		return err
 	}
-
-	// Prepare batch for inserting deleted file records
-	filesBatch, err := conn.PrepareBatch(ctx, sqlInsertFilesActive)
+	rollBatch, err := conn.PrepareBatch(ctx, `INSERT INTO ancestor_rollups_raw (mount_path, scan_id, ancestor, size, atime, mtime)`)
 	if err != nil {
 		return err
 	}
 
-	// Prepare batch for inserting negative ancestor aggregations for deleted files
-	aggsBatch, err := conn.PrepareBatch(ctx, sqlInsertAncestorAggs)
-	if err != nil {
-		return err
-	}
+	parser := stats.NewStatsParser(r)
+	fi := new(stats.FileInfo)
+	inFiles := 0
+	inRolls := 0
 
-	// Get files that exist in previous scan but not in current scan
-	rows, err := conn.Query(ctx, `
-		SELECT prev.path, prev.size, prev.uid, prev.gid, prev.mtime, prev.atime, prev.ctime
-		FROM files_active prev
-		LEFT JOIN files_active curr ON prev.path = curr.path AND curr.scan_id = ?
-		WHERE prev.scan_id = ? 
-		AND prev.is_deleted = 0
-		AND curr.path IS NULL
-	`, prevScanID, uint64(currentScanID))
-	if err != nil {
-		return fmt.Errorf("failed to query deleted files: %w", err)
-	}
-	defer rows.Close()
-
-	// Map to track ancestor aggregations for deleted files
-	type agg struct {
-		size  uint64
-		count uint64
-	}
-	ancestorAgg := make(map[string]agg, 1<<15) // pre-size for fewer allocs
-
-	filesCount := 0
-	const batchSize = 10000
-
-	// Process each deleted file
-	for rows.Next() {
-		var path string
-		var size uint64
-		var uid, gid uint32
-		var mtime, atime, ctime time.Time
-
-		if err := rows.Scan(&path, &size, &uid, &gid, &mtime, &atime, &ctime); err != nil {
-			return fmt.Errorf("failed to scan deleted file: %w", err)
-		}
-
-		// Add record for deleted file (with is_deleted=1)
-		if err := filesBatch.Append(
-			path, uint64(0), uid, gid, mtime, atime, ctime, uint8(1), uint64(currentScanID),
-		); err != nil {
-			return err
-		}
-		filesCount++
-
-		// Update ancestor aggregations for this deleted file (subtract)
-		dir := filepath.Dir(path)
-		for {
-			a := ancestorAgg[dir]
-			a.size += size
-			a.count++
-			ancestorAgg[dir] = a
-
-			if dir == "/" || dir == "." {
-				break
-			}
-			parent := filepath.Dir(dir)
-			if parent == dir {
-				break
-			}
-			dir = parent
-		}
-
-		// Flush in batches to avoid memory issues
-		if filesCount >= batchSize {
+	flush := func() error {
+		if inFiles > 0 {
 			if err := filesBatch.Send(); err != nil {
-				return fmt.Errorf("failed to send deleted files batch: %w", err)
+				return err
 			}
-			filesBatch, err = conn.PrepareBatch(ctx, sqlInsertFilesActive)
+			inFiles = 0
+			filesBatch, err = conn.PrepareBatch(ctx, `INSERT INTO fs_entries (mount_path, scan_id, path, parent_path, name, ext_low, ftype, inode, size, uid, gid, mtime, atime, ctime)`)
 			if err != nil {
 				return err
 			}
-			filesCount = 0
 		}
-	}
-
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("error during rows iteration: %w", err)
-	}
-
-	// Flush any remaining files
-	if filesCount > 0 {
-		if err := filesBatch.Send(); err != nil {
-			return fmt.Errorf("failed to send final deleted files batch: %w", err)
-		}
-	}
-
-	// Insert negative aggregations for deleted files
-	for dir, a := range ancestorAgg {
-		// Insert negative values to cancel out the deleted files in the aggregation
-		if err := aggsBatch.Append(
-			dir, a.size*uint64(0xFFFFFFFFFFFFFFFF), a.count*uint64(0xFFFFFFFFFFFFFFFF), uint64(currentScanID),
-		); err != nil {
-			return fmt.Errorf("failed to append ancestor aggregation: %w", err)
-		}
-	}
-
-	if err := aggsBatch.Send(); err != nil {
-		return fmt.Errorf("failed to send ancestor aggregations batch: %w", err)
-	}
-
-	return nil
-}
-
-func createSchema(ctx context.Context, conn clickhouse.Conn) error {
-	if err := conn.Exec(ctx, `
-CREATE TABLE IF NOT EXISTS files_active (
-    path String,
-    size UInt64,
-    uid UInt32,
-    gid UInt32,
-    mtime DateTime,
-    atime DateTime,
-    ctime DateTime,
-    is_deleted UInt8,
-    scan_id UInt64,
-    INDEX idx_uid uid TYPE minmax GRANULARITY 8192,
-    INDEX idx_gid gid TYPE minmax GRANULARITY 8192,
-    INDEX idx_atime atime TYPE minmax GRANULARITY 8192
-) ENGINE = MergeTree
-PARTITION BY scan_id
-ORDER BY path
-`); err != nil {
-		return err
-	}
-
-	if err := conn.Exec(ctx, `
-CREATE TABLE IF NOT EXISTS ancestor_aggs (
-    ancestor String,
-    total_size UInt64,
-    file_count UInt64,
-    scan_id UInt64,
-    INDEX idx_ancestor ancestor TYPE bloom_filter GRANULARITY 1024,
-    INDEX idx_scan_ancestor (scan_id, ancestor) TYPE minmax GRANULARITY 1024
-) ENGINE = SummingMergeTree
-PARTITION BY scan_id
-ORDER BY (ancestor, scan_id)
-`); err != nil {
-		return err
-	}
-
-	if err := conn.Exec(ctx, `
-CREATE OR REPLACE VIEW files_current AS
-WITH (SELECT max(scan_id) FROM files_active) AS max_scan
-SELECT
-    path,
-    size,
-    uid,
-    gid,
-    mtime,
-    atime,
-    ctime,
-    is_deleted
-FROM files_active
-WHERE scan_id = max_scan AND is_deleted = 0`); err != nil {
-		return err
-	}
-
-	if err := conn.Exec(ctx, `
-CREATE OR REPLACE VIEW ancestor_aggs_current AS
-WITH (SELECT max(scan_id) FROM ancestor_aggs) AS max_scan
-SELECT
-    ancestor,
-    sum(total_size) AS total_size,
-    sum(file_count) AS file_count
-FROM ancestor_aggs
-WHERE scan_id = max_scan
-GROUP BY ancestor`); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-const (
-	sqlBatchSize          = 100000
-	sqlInsertFilesActive  = `INSERT INTO files_active(path, size, uid, gid, mtime, atime, ctime, is_deleted, scan_id)`
-	sqlInsertAncestorAggs = `INSERT INTO ancestor_aggs(ancestor, total_size, file_count, scan_id)`
-)
-
-// ingestStats inserts scanner results into files_active and ancestor_aggs.
-// It pre-aggregates ancestor rows per batch to reduce insert volume.
-func ingestStats(ctx context.Context, conn clickhouse.Conn, r io.Reader, scanID uint32) error {
-	faBatch, err := conn.PrepareBatch(ctx, sqlInsertFilesActive)
-	if err != nil {
-		return err
-	}
-	aaBatch, err := conn.PrepareBatch(ctx, sqlInsertAncestorAggs)
-	if err != nil {
-		return err
-	}
-
-	type agg struct {
-		size  uint64
-		count uint64
-	}
-	ancestorAgg := make(map[string]agg, 1<<15) // pre-size for fewer allocs
-
-	statsParser := stats.NewStatsParser(r)
-	fi := new(stats.FileInfo)
-	filesInBatch := 0
-
-	flushFiles := func() error {
-		if filesInBatch == 0 {
-			return nil
-		}
-		if err := faBatch.Send(); err != nil {
-			return err
-		}
-		filesInBatch = 0
-		var err error
-		faBatch, err = conn.PrepareBatch(ctx, sqlInsertFilesActive)
-		return err
-	}
-	flushAncestorAgg := func() error {
-		if len(ancestorAgg) == 0 {
-			return nil
-		}
-		for dir, a := range ancestorAgg {
-			if err := aaBatch.Append(
-				dir, a.size, a.count, uint64(scanID),
-			); err != nil {
+		if inRolls > 0 {
+			if err := rollBatch.Send(); err != nil {
+				return err
+			}
+			inRolls = 0
+			rollBatch, err = conn.PrepareBatch(ctx, `INSERT INTO ancestor_rollups_raw (mount_path, scan_id, ancestor, size, atime, mtime)`)
+			if err != nil {
 				return err
 			}
 		}
-		ancestorAgg = make(map[string]agg, 1<<15)
-
-		if err := aaBatch.Send(); err != nil {
-			return err
-		}
-		var err error
-		aaBatch, err = conn.PrepareBatch(ctx, sqlInsertAncestorAggs)
-		return err
+		return nil
 	}
 
-	const ancestorAggFlushSize = 50000
-
-	for statsParser.Scan(fi) == nil {
+	for parser.Scan(fi) == nil {
 		path := string(fi.Path)
+		isDir := fi.EntryType == stats.DirType || isDirPath(path)
 
-		// Convert types for ClickHouse
-		size := uint64(fi.Size)
-		uid := uint32(fi.UID)
-		gid := uint32(fi.GID)
+		parent, name := splitParentAndName(path)
+		ext := deriveExtLower(name, isDir)
+		ft := mapEntryType(fi.EntryType)
 		mtime := time.Unix(fi.MTime, 0)
 		atime := time.Unix(fi.ATime, 0)
 		ctime := time.Unix(fi.CTime, 0)
-		isDeleted := uint8(0)
 
-		if err := faBatch.Append(
-			path, size, uid, gid, mtime, atime, ctime, isDeleted, uint64(scanID),
+		if err := filesBatch.Append(
+			mountPath, scanID, path, parent, name, ext, uint8(ft), uint64(fi.Inode), uint64(fi.Size), uint32(fi.UID), uint32(fi.GID), mtime, atime, ctime,
 		); err != nil {
 			return err
 		}
-		filesInBatch++
+		inFiles++
 
-		// Pre-aggregate ancestor stats for this file
-		dir := filepath.Dir(path)
-		for {
-			a := ancestorAgg[dir]
-			a.size += size
-			a.count++
-			ancestorAgg[dir] = a
+		// rollups for each ancestor directory (including mount root)
+		dir := parent
+		forEachAncestor(dir, mountPath, func(a string) bool {
+			if err := rollBatch.Append(mountPath, scanID, a, uint64(fi.Size), atime, mtime); err != nil {
+				return false
+			}
+			inRolls++
+			return true
+		})
 
-			if dir == "/" || dir == "." {
-				break
-			}
-			parent := filepath.Dir(dir)
-			if parent == dir {
-				break
-			}
-			dir = parent
-		}
-
-		// Flush independently to keep memory bounded
-		if filesInBatch >= sqlBatchSize {
-			if err := flushFiles(); err != nil {
-				return err
-			}
-		}
-		if len(ancestorAgg) >= ancestorAggFlushSize {
-			if err := flushAncestorAgg(); err != nil {
+		if inFiles >= fileBatchSize || inRolls >= rollupBatchSize {
+			if err := flush(); err != nil {
 				return err
 			}
 		}
 	}
-
-	if err := statsParser.Err(); err != nil {
+	if err := parser.Err(); err != nil {
 		return err
 	}
 
-	// Final flush
-	if err := flushFiles(); err != nil {
-		return err
-	}
-	if err := flushAncestorAgg(); err != nil {
-		return err
-	}
+	return flush()
+}
 
+func dropOlderScans(ctx context.Context, conn clickhouse.Conn, mountPath string, keepScanID uint64) error {
+	// Drop data for older scan_ids for this mount
+	if err := conn.Exec(ctx, `ALTER TABLE fs_entries DROP PARTITION WHERE mount_path = ? AND scan_id < ?`, mountPath, keepScanID); err != nil {
+		return err
+	}
+	if err := conn.Exec(ctx, `ALTER TABLE ancestor_rollups_raw DROP PARTITION WHERE mount_path = ? AND scan_id < ?`, mountPath, keepScanID); err != nil {
+		return err
+	}
+	if err := conn.Exec(ctx, `ALTER TABLE ancestor_rollups_state DROP PARTITION WHERE mount_path = ? AND scan_id < ?`, mountPath, keepScanID); err != nil {
+		return err
+	}
+	if err := conn.Exec(ctx, `ALTER TABLE scans DELETE WHERE mount_path = ? AND scan_id < ?`, mountPath, keepScanID); err != nil {
+		return err
+	}
 	return nil
 }
 
-func rebuildAndSwap(ctx context.Context, conn clickhouse.Conn) error {
-	// Drop any stale leftovers from a failed/partial run
-	if err := conn.Exec(ctx, `DROP TABLE IF EXISTS files_compacted`); err != nil {
-		return err
-	}
-	if err := conn.Exec(ctx, `DROP TABLE IF EXISTS ancestor_aggs_compacted`); err != nil {
-		return err
-	}
+// --- Query helpers ---
 
-	// Create compacted tables mirroring engines and layouts to avoid drift
-	if err := conn.Exec(ctx, `
-        CREATE TABLE files_compacted
-        AS files_active
-        ENGINE = MergeTree
-        PARTITION BY scan_id
-        ORDER BY path`); err != nil {
-		return err
-	}
-
-	if err := conn.Exec(ctx, `
-        CREATE TABLE ancestor_aggs_compacted
-        AS ancestor_aggs
-        ENGINE = SummingMergeTree
-        PARTITION BY scan_id
-        ORDER BY (ancestor, scan_id)`); err != nil {
-		return err
-	}
-
-	// Populate compacted tables with the latest snapshot only
-	if err := conn.Exec(ctx, `
-        INSERT INTO files_compacted
-        SELECT
-            path,
-            size,
-            uid,
-            gid,
-            mtime,
-            atime,
-            ctime,
-            is_deleted,
-            scan_id
-        FROM files_active
-        WHERE scan_id = (SELECT max(scan_id) FROM files_active)`); err != nil {
-		return err
-	}
-
-	if err := conn.Exec(ctx, `
-        INSERT INTO ancestor_aggs_compacted
-        WITH (SELECT max(scan_id) FROM ancestor_aggs) AS max_scan
-        SELECT
-            ancestor,
-            sum(total_size) AS total_size,
-            sum(file_count) AS file_count,
-            max_scan AS scan_id
-        FROM ancestor_aggs
-        WHERE scan_id = max_scan
-        GROUP BY ancestor`); err != nil {
-		return err
-	}
-
-	// Swap tables atomically
-	if err := conn.Exec(ctx, `
-        RENAME TABLE
-            files_active TO files_old,
-            files_compacted TO files_active`); err != nil {
-		return err
-	}
-
-	if err := conn.Exec(ctx, `
-        RENAME TABLE
-            ancestor_aggs TO ancestor_aggs_old,
-            ancestor_aggs_compacted TO ancestor_aggs`); err != nil {
-		return err
-	}
-
-	// Drop old tables
-	_ = conn.Exec(ctx, `DROP TABLE IF EXISTS files_old`)
-	_ = conn.Exec(ctx, `DROP TABLE IF EXISTS ancestor_aggs_old`)
-
-	return nil
+type FileEntry struct {
+	Path       string
+	ParentPath string
+	Name       string
+	Ext        string
+	FType      uint8
+	INode      uint64
+	Size       uint64
+	UID        uint32
+	GID        uint32
+	MTime      time.Time
+	ATime      time.Time
+	CTime      time.Time
 }
 
-func cleanupOldScans(ctx context.Context, conn clickhouse.Conn, retentionDays int) error {
-	cutoffTime := time.Now().AddDate(0, 0, -retentionDays)
-	cutoffScanID := uint64(cutoffTime.Unix())
-
-	// Delete old partitions
-	if err := conn.Exec(ctx, `ALTER TABLE files_active DROP PARTITION WHERE scan_id < ?`, cutoffScanID); err != nil {
-		return err
-	}
-
-	if err := conn.Exec(ctx, `ALTER TABLE ancestor_aggs DROP PARTITION WHERE scan_id < ?`, cutoffScanID); err != nil {
-		return err
-	}
-
-	return nil
+type Summary struct {
+	TotalSize       uint64
+	FileCount       uint64
+	MostRecentATime time.Time
+	OldestATime     time.Time
+	MostRecentMTime time.Time
+	OldestMTime     time.Time
+	UIDs            []uint32
+	GIDs            []uint32
+	Exts            []string
 }
 
-func searchFilesByGlob(ctx context.Context, conn clickhouse.Conn, globPattern string) ([]string, error) {
-	rows, err := conn.Query(ctx, `
-        SELECT path 
-        FROM files_current
-        WHERE path LIKE ?
-    `, strings.Replace(strings.Replace(globPattern, "*", "%", -1), "?", "_", -1))
+type Filters struct {
+	GIDs        []uint32
+	UIDs        []uint32
+	Exts        []string
+	ATimeBucket string // one of: 0d, >1m, >2m, >6m, >1y, >2y, >3y, >5y, >7y
+	MTimeBucket string // same set
+}
+
+func GetLastScanTimes(ctx context.Context, conn clickhouse.Conn) (map[string]time.Time, error) {
+	rows, err := conn.Query(ctx, `SELECT mount_path, toDateTime(max(scan_id)) FROM scans WHERE state = 'ready' GROUP BY mount_path`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-
-	var results []string
+	res := make(map[string]time.Time)
 	for rows.Next() {
-		var path string
-		if err := rows.Scan(&path); err != nil {
+		var m string
+		var ts time.Time
+		if err := rows.Scan(&m, &ts); err != nil {
 			return nil, err
 		}
-		results = append(results, path)
+		res[m] = ts
+	}
+	return res, rows.Err()
+}
+
+func ListImmediateChildren(ctx context.Context, conn clickhouse.Conn, mountPath, dir string) ([]FileEntry, error) {
+	dir = ensureDir(dir)
+	rows, err := conn.Query(ctx, `
+        SELECT path, parent_path, name, ext_low, ftype, inode, size, uid, gid, mtime, atime, ctime
+        FROM fs_entries_current
+        WHERE mount_path = ? AND parent_path = ?`, mountPath, dir)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []FileEntry
+	for rows.Next() {
+		var e FileEntry
+		if err := rows.Scan(&e.Path, &e.ParentPath, &e.Name, &e.Ext, &e.FType, &e.INode, &e.Size, &e.UID, &e.GID, &e.MTime, &e.ATime, &e.CTime); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+func ensureDir(path string) string {
+	if !strings.HasSuffix(path, "/") {
+		return path + "/"
+	}
+	return path
+}
+
+func buildBucketPredicate(col, bucket string) (string, error) {
+	switch bucket {
+	case "":
+		return "", nil
+	case "0d":
+		return fmt.Sprintf("%s >= (toDateTime(max_scan) - INTERVAL 1 DAY)", col), nil
+	case ">1m":
+		return fmt.Sprintf("%s < (toDateTime(max_scan) - INTERVAL 1 MONTH)", col), nil
+	case ">2m":
+		return fmt.Sprintf("%s < (toDateTime(max_scan) - INTERVAL 2 MONTH)", col), nil
+	case ">6m":
+		return fmt.Sprintf("%s < (toDateTime(max_scan) - INTERVAL 6 MONTH)", col), nil
+	case ">1y":
+		return fmt.Sprintf("%s < (toDateTime(max_scan) - INTERVAL 1 YEAR)", col), nil
+	case ">2y":
+		return fmt.Sprintf("%s < (toDateTime(max_scan) - INTERVAL 2 YEAR)", col), nil
+	case ">3y":
+		return fmt.Sprintf("%s < (toDateTime(max_scan) - INTERVAL 3 YEAR)", col), nil
+	case ">5y":
+		return fmt.Sprintf("%s < (toDateTime(max_scan) - INTERVAL 5 YEAR)", col), nil
+	case ">7y":
+		return fmt.Sprintf("%s < (toDateTime(max_scan) - INTERVAL 7 YEAR)", col), nil
+	default:
+		return "", fmt.Errorf("invalid bucket: %s", bucket)
+	}
+}
+
+func SubtreeSummary(ctx context.Context, conn clickhouse.Conn, mountPath, dir string, f Filters) (Summary, error) {
+	dir = ensureDir(dir)
+	// Compute over current snapshot for this mount using prefix filter
+	// Use max ready scan_id per mount to anchor time buckets
+	var maxScanID uint64
+	row := conn.QueryRow(ctx, `SELECT max(scan_id) FROM scans WHERE mount_path = ? AND state = 'ready'`, mountPath)
+	if err := row.Scan(&maxScanID); err != nil {
+		if errors.Is(err, io.EOF) {
+			return Summary{}, nil
+		}
+		return Summary{}, err
 	}
 
-	return results, rows.Err()
+	where := []string{"mount_path = ?", "path LIKE ?"}
+	args := []any{mountPath, dir + "%"}
+
+	if len(f.GIDs) > 0 {
+		ph := make([]string, len(f.GIDs))
+		for i, v := range f.GIDs {
+			ph[i] = "?"
+			args = append(args, v)
+		}
+		where = append(where, fmt.Sprintf("gid IN (%s)", strings.Join(ph, ",")))
+	}
+	if len(f.UIDs) > 0 {
+		ph := make([]string, len(f.UIDs))
+		for i, v := range f.UIDs {
+			ph[i] = "?"
+			args = append(args, v)
+		}
+		where = append(where, fmt.Sprintf("uid IN (%s)", strings.Join(ph, ",")))
+	}
+	if len(f.Exts) > 0 {
+		ph := make([]string, len(f.Exts))
+		for i, v := range f.Exts {
+			ph[i] = "?"
+			args = append(args, strings.ToLower(v))
+		}
+		where = append(where, fmt.Sprintf("ext_low IN (%s)", strings.Join(ph, ",")))
+	}
+
+	// time buckets
+	bucketFilter := ""
+	if f.ATimeBucket != "" || f.MTimeBucket != "" {
+		atPred, err := buildBucketPredicate("atime", f.ATimeBucket)
+		if err != nil {
+			return Summary{}, err
+		}
+		mtPred, err := buildBucketPredicate("mtime", f.MTimeBucket)
+		if err != nil {
+			return Summary{}, err
+		}
+		preds := []string{}
+		if atPred != "" {
+			preds = append(preds, atPred)
+		}
+		if mtPred != "" {
+			preds = append(preds, mtPred)
+		}
+		if len(preds) > 0 {
+			bucketFilter = " AND (" + strings.Join(preds, " AND ") + ")"
+		}
+	}
+
+	query := `
+WITH (SELECT max(scan_id) FROM scans WHERE mount_path = ? AND state = 'ready') AS max_scan
+SELECT 
+  sum(size) AS total_size,
+  count() AS file_count,
+  max(atime) AS most_recent_atime,
+  min(atime) AS oldest_atime,
+  max(mtime) AS most_recent_mtime,
+  min(mtime) AS oldest_mtime,
+  groupUniqArray(uid) AS uids,
+  groupUniqArray(gid) AS gids,
+  groupUniqArray(ext_low) AS exts
+FROM fs_entries_current
+WHERE ` + strings.Join(where, " AND ") + bucketFilter
+	argsWithScan := make([]any, 0, len(args)+1)
+	argsWithScan = append(argsWithScan, mountPath)
+	argsWithScan = append(argsWithScan, args...)
+	row2 := conn.QueryRow(ctx, query, argsWithScan...)
+
+	var s Summary
+	if err := row2.Scan(&s.TotalSize, &s.FileCount, &s.MostRecentATime, &s.OldestATime, &s.MostRecentMTime, &s.OldestMTime, &s.UIDs, &s.GIDs, &s.Exts); err != nil {
+		return Summary{}, err
+	}
+	return s, nil
+}
+
+func SearchGlobPaths(ctx context.Context, conn clickhouse.Conn, mountPath, globPattern string, limit int) ([]string, error) {
+	if limit <= 0 {
+		limit = 0
+	}
+	pattern := strings.ReplaceAll(strings.ReplaceAll(globPattern, "*", "%"), "?", "_")
+	q := `SELECT path FROM fs_entries_current WHERE mount_path = ? AND path LIKE ?`
+	if limit > 0 {
+		q += fmt.Sprintf(" LIMIT %d", limit)
+	}
+	rows, err := conn.Query(ctx, q, mountPath, pattern)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var res []string
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			return nil, err
+		}
+		res = append(res, p)
+	}
+	return res, rows.Err()
 }
