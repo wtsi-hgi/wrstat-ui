@@ -383,7 +383,9 @@ func TestSummariseClickHouse(t *testing.T) {
 	}
 
 	// First drop the test database if it exists
-	_ = adminConn.Exec(ctx, fmt.Sprintf("DROP DATABASE IF EXISTS %s", testDatabase))
+	if err := adminConn.Exec(ctx, fmt.Sprintf("DROP DATABASE IF EXISTS %s", testDatabase)); err != nil {
+		t.Logf("Warning: failed to drop existing test DB: %v", err)
+	}
 
 	// Create a fresh test database
 	err = adminConn.Exec(ctx, fmt.Sprintf("CREATE DATABASE %s", testDatabase))
@@ -469,26 +471,7 @@ func TestSummariseClickHouse(t *testing.T) {
 		err = cmd.UpdateClickhouse(ctx, testConn, mountPath, r)
 		So(err, ShouldBeNil)
 
-		// Ensure scan is marked as ready since there might be issues with ALTER TABLE UPDATE
-		// This is a direct fix for the test, bypassing any implementation issues
-		err = testConn.Exec(ctx, `
-			ALTER TABLE scans DELETE WHERE mount_path = ? AND scan_id = (
-				SELECT max(scan_id) FROM scans WHERE mount_path = ?
-			)`, mountPath, mountPath)
-		if err != nil {
-			t.Logf("Warning: Failed to delete existing scan row: %v", err)
-		}
-
-		// Insert a new row with state='ready'
-		scanTime := time.Now()
-		scanID := uint64(scanTime.Unix())
-		err = testConn.Exec(ctx, `
-			INSERT INTO scans (mount_path, scan_id, state, started_at, finished_at)
-			VALUES (?, ?, ?, ?, ?)`,
-			mountPath, scanID, "ready", scanTime, scanTime)
-		if err != nil {
-			t.Logf("Warning: Failed to insert ready scan: %v", err)
-		}
+		// The implementation inserts a ready scan row; no manual fixup needed.
 
 		// Verify data was inserted by querying ClickHouse
 		chConn, err := clickhouse.Open(&clickhouse.Options{
@@ -507,13 +490,13 @@ func TestSummariseClickHouse(t *testing.T) {
 
 		// Check fs_entries table - we should have more than 3 entries due to directory entries
 		var fileCount uint64
-		err = chConn.QueryRow(ctx, "SELECT count() FROM fs_entries WHERE mount_path = ?", mountPath).Scan(&fileCount)
+		err = chConn.QueryRow(ctx, "SELECT count() FROM fs_entries_current WHERE mount_path = ?", mountPath).Scan(&fileCount)
 		So(err, ShouldBeNil)
 		So(fileCount, ShouldBeGreaterThan, 3) // Should have at least our 3 files plus directories
 
 		// Check ancestor_rollups_raw table
 		var rollupCount uint64
-		err = chConn.QueryRow(ctx, "SELECT count() FROM ancestor_rollups_raw WHERE mount_path = ?", mountPath).Scan(&rollupCount)
+		err = chConn.QueryRow(ctx, "SELECT count() FROM ancestor_rollups_current WHERE mount_path = ?", mountPath).Scan(&rollupCount)
 		So(err, ShouldBeNil)
 		So(rollupCount, ShouldBeGreaterThan, 3) // Should have multiple rollups per file
 
@@ -521,8 +504,8 @@ func TestSummariseClickHouse(t *testing.T) {
 		// but there may be additional bytes for directory entries
 		var totalSize uint64
 		err = chConn.QueryRow(ctx, `
-			SELECT sumMerge(total_size) 
-			FROM ancestor_rollups_state 
+			SELECT total_size 
+			FROM ancestor_rollups_current 
 			WHERE mount_path = ? AND ancestor = ?`,
 			mountPath, mountPath).Scan(&totalSize)
 		So(err, ShouldBeNil)

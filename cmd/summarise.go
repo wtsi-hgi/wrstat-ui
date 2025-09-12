@@ -607,18 +607,7 @@ func createSchema(ctx context.Context, conn clickhouse.Conn) error {
 		return err
 	}
 
-	// Ensure any missing columns on existing tables (these are safe no-ops if columns exist)
-	// We don't check errors here because these are optional improvements, and failure shouldn't abort ingestion
-	for _, alterStmt := range []string{
-		`ALTER TABLE ancestor_rollups_raw ADD COLUMN IF NOT EXISTS uid UInt32 AFTER mtime`,
-		`ALTER TABLE ancestor_rollups_raw ADD COLUMN IF NOT EXISTS gid UInt32 AFTER uid`,
-		`ALTER TABLE ancestor_rollups_raw ADD COLUMN IF NOT EXISTS ext_low String AFTER gid`,
-		`ALTER TABLE ancestor_rollups_state ADD COLUMN IF NOT EXISTS uids AggregateFunction(groupUniqArray, UInt32) AFTER mtime_max`,
-		`ALTER TABLE ancestor_rollups_state ADD COLUMN IF NOT EXISTS gids AggregateFunction(groupUniqArray, UInt32) AFTER uids`,
-		`ALTER TABLE ancestor_rollups_state ADD COLUMN IF NOT EXISTS exts AggregateFunction(groupUniqArray, String) AFTER gids`,
-	} {
-		_ = conn.Exec(ctx, alterStmt)
-	}
+	// All required columns are declared in the CREATE statements above.
 
 	// Create materialized view and current views
 	if err := conn.Exec(ctx, createRollupMV); err != nil {
@@ -643,7 +632,7 @@ func UpdateClickhouse(ctx context.Context, conn clickhouse.Conn, mountPath strin
 
 func updateClickhouse(ctx context.Context, conn clickhouse.Conn, mountPath string, r io.Reader) (retErr error) {
 	// Use current time as scan ID
-	scanID := uint64(time.Now().Unix())
+	scanID := uint64(time.Now().Unix()) //nolint:gosec // monotonic timestamp scan identifier
 	started := time.Now()
 
 	// Register scan as loading
@@ -663,36 +652,31 @@ func updateClickhouse(ctx context.Context, conn clickhouse.Conn, mountPath strin
 		part := fmt.Sprintf("('%s', %d)", escapeCHSingleQuotes(mountPath), scanID)
 
 		// Drop partitions - ignoring errors on cleanup
-		_ = conn.Exec(ctx, "ALTER TABLE fs_entries DROP PARTITION "+part)
-		_ = conn.Exec(ctx, "ALTER TABLE ancestor_rollups_raw DROP PARTITION "+part)
-		_ = conn.Exec(ctx, "ALTER TABLE ancestor_rollups_state DROP PARTITION "+part)
-		_ = conn.Exec(ctx, `ALTER TABLE scans DELETE WHERE mount_path = ? AND scan_id = ?`, mountPath, scanID)
+		if err := conn.Exec(ctx, "ALTER TABLE fs_entries DROP PARTITION "+part); err != nil {
+			// noop
+		}
+		if err := conn.Exec(ctx, "ALTER TABLE ancestor_rollups_raw DROP PARTITION "+part); err != nil {
+			// noop
+		}
+		if err := conn.Exec(ctx, "ALTER TABLE ancestor_rollups_state DROP PARTITION "+part); err != nil {
+			// noop
+		}
+		if err := conn.Exec(ctx, `ALTER TABLE scans DELETE WHERE mount_path = ? AND scan_id = ?`, mountPath, scanID); err != nil {
+			// noop
+		}
 	}()
 
 	if err := ingestScan(ctx, conn, mountPath, scanID, r); err != nil {
 		return err
 	}
 
-	// Promote to ready
+	// Promote to ready by inserting a new row (avoids ALTER UPDATE pitfalls)
 	finished := time.Now()
 	if err := conn.Exec(ctx, `
-		ALTER TABLE scans UPDATE state = 'ready', finished_at = ? 
-		WHERE mount_path = ? AND scan_id = ?`,
-		finished, mountPath, scanID); err != nil {
-		// If ALTER UPDATE fails, try delete and insert
-		if err1 := conn.Exec(ctx, `
-			ALTER TABLE scans DELETE WHERE mount_path = ? AND scan_id = ?`,
-			mountPath, scanID); err1 == nil {
-			// If deletion succeeds, try to insert a new row with state='ready'
-			if err2 := conn.Exec(ctx, `
-				INSERT INTO scans (mount_path, scan_id, state, started_at, finished_at)
-				VALUES (?, ?, 'ready', ?, ?)`,
-				mountPath, scanID, started, finished); err2 != nil {
-				return fmt.Errorf("promote scan (reinsert): %w", err2)
-			}
-		} else {
-			return fmt.Errorf("promote scan (delete): %w (original error: %v)", err1, err)
-		}
+		INSERT INTO scans (mount_path, scan_id, state, started_at, finished_at)
+		VALUES (?, ?, 'ready', ?, ?)`,
+		mountPath, scanID, started, finished); err != nil {
+		return fmt.Errorf("promote scan (insert ready): %w", err)
 	}
 
 	// Drop older scans for this mount
@@ -704,16 +688,14 @@ func updateClickhouse(ctx context.Context, conn clickhouse.Conn, mountPath strin
 }
 
 // Helper functions for batched processing of files
+type chBatch interface {
+	Append(values ...any) error
+	Send() error
+}
+
 type batchProcessor struct {
-	filesBatch interface {
-		Append(...interface{}) error
-		Send() error
-	}
-	rollupsBatch interface {
-		Append(...interface{}) error
-		Send() error
-	}
-	ctx             context.Context
+	filesBatch      chBatch
+	rollupsBatch    chBatch
 	conn            clickhouse.Conn
 	filesCount      int
 	rollupsCount    int
@@ -746,7 +728,6 @@ func newBatchProcessor(ctx context.Context, conn clickhouse.Conn, mountPath stri
 	return &batchProcessor{
 		filesBatch:      filesBatch,
 		rollupsBatch:    rollupsBatch,
-		ctx:             ctx,
 		conn:            conn,
 		mountPath:       mountPath,
 		scanID:          scanID,
@@ -787,7 +768,7 @@ func (bp *batchProcessor) needsFlush() bool {
 }
 
 // Flush both batches if they contain any data
-func (bp *batchProcessor) flush() error {
+func (bp *batchProcessor) flush(ctx context.Context) error {
 	// Send files batch if non-empty
 	if bp.filesCount > 0 {
 		if err := bp.filesBatch.Send(); err != nil {
@@ -795,7 +776,7 @@ func (bp *batchProcessor) flush() error {
 		}
 
 		bp.filesCount = 0
-		filesBatch, err := bp.conn.PrepareBatch(bp.ctx, bp.filesBatchSQL)
+		filesBatch, err := bp.conn.PrepareBatch(ctx, bp.filesBatchSQL)
 		if err != nil {
 			return err
 		}
@@ -809,7 +790,7 @@ func (bp *batchProcessor) flush() error {
 		}
 
 		bp.rollupsCount = 0
-		rollupsBatch, err := bp.conn.PrepareBatch(bp.ctx, bp.rollupsBatchSQL)
+		rollupsBatch, err := bp.conn.PrepareBatch(ctx, bp.rollupsBatchSQL)
 		if err != nil {
 			return err
 		}
@@ -849,12 +830,12 @@ func ingestScan(ctx context.Context, conn clickhouse.Conn, mountPath string, sca
 		// Handle potential integer overflow by using explicit conversions
 		inode := uint64(0)
 		if fi.Inode > 0 {
-			inode = uint64(fi.Inode)
+			inode = uint64(fi.Inode) //nolint:gosec // values originate from trusted stats parser
 		}
 
 		size := uint64(0)
 		if fi.Size > 0 {
-			size = uint64(fi.Size)
+			size = uint64(fi.Size) //nolint:gosec // values originate from trusted stats parser
 		}
 
 		// Add file entry to batch
@@ -886,19 +867,19 @@ func ingestScan(ctx context.Context, conn clickhouse.Conn, mountPath string, sca
 
 		// Flush batches if needed
 		if bp.needsFlush() {
-			if err := bp.flush(); err != nil {
+			if err := bp.flush(ctx); err != nil {
 				return fmt.Errorf("failed to flush batches: %w", err)
 			}
 		}
 	}
 
 	// Check for parser errors (excluding EOF which is expected)
-	if parseErr != nil && parseErr != io.EOF {
+	if parseErr != nil && !errors.Is(parseErr, io.EOF) {
 		return fmt.Errorf("parser error: %w", parseErr)
 	}
 
 	// Final flush
-	return bp.flush()
+	return bp.flush(ctx)
 }
 
 func dropOlderScans(ctx context.Context, conn clickhouse.Conn, mountPath string, keepScanID uint64) error {
@@ -1052,6 +1033,8 @@ func ensureDir(path string) string {
 	return path
 }
 
+var errInvalidBucket = errors.New("invalid bucket")
+
 func buildBucketPredicate(col, bucket string) (string, error) {
 	if bucket == "" {
 		return "", nil
@@ -1072,7 +1055,7 @@ func buildBucketPredicate(col, bucket string) (string, error) {
 
 	interval, found := timeIntervals[bucket]
 	if !found {
-		return "", fmt.Errorf("invalid bucket: %s", bucket)
+		return "", fmt.Errorf("%w: %s", errInvalidBucket, bucket)
 	}
 
 	return col + " " + interval, nil
@@ -1080,6 +1063,32 @@ func buildBucketPredicate(col, bucket string) (string, error) {
 
 func SubtreeSummary(ctx context.Context, conn clickhouse.Conn, mountPath, dir string, f Filters) (Summary, error) {
 	dir = ensureDir(dir)
+
+	// Fast path when no filters other than path/mount.
+	if len(f.GIDs) == 0 && len(f.UIDs) == 0 && len(f.Exts) == 0 && f.ATimeBucket == "" && f.MTimeBucket == "" {
+		row := conn.QueryRow(ctx, `
+WITH (SELECT max(scan_id) FROM scans WHERE mount_path = ? AND state = 'ready') AS max_scan
+SELECT 
+  sum(size),
+  count(),
+  max(atime),
+  min(atime),
+  max(mtime),
+  min(mtime),
+  groupUniqArray(uid),
+  groupUniqArray(gid),
+  groupUniqArray(ext_low)
+FROM fs_entries_current
+WHERE mount_path = ? AND path LIKE ?`, mountPath, mountPath, dir+"%")
+
+		var s Summary
+		if err := row.Scan(&s.TotalSize, &s.FileCount, &s.MostRecentATime, &s.OldestATime,
+			&s.MostRecentMTime, &s.OldestMTime, &s.UIDs, &s.GIDs, &s.Exts); err != nil {
+			return Summary{}, err
+		}
+
+		return s, nil
+	}
 
 	// Basic where clauses that apply to all queries
 	where := []string{"mount_path = ?", "path LIKE ?"}
