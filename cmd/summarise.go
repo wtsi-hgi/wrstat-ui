@@ -246,11 +246,150 @@ func updateClickhouse(r io.Reader) error {
 		return fmt.Errorf("ingestStats: %w", err)
 	}
 
+	// Identify and handle deleted files
+	if err := handleDeletedFiles(ctx, conn, scanID); err != nil {
+		return fmt.Errorf("handleDeletedFiles: %w", err)
+	}
+
 	// monthly run:
 	if false {
 		if err := rebuildAndSwap(ctx, conn); err != nil {
 			return fmt.Errorf("rebuildAndSwap: %w", err)
 		}
+	}
+
+	return nil
+}
+
+// handleDeletedFiles identifies files that were present in the previous scan
+// but not in the current scan, marks them as deleted, and updates ancestor
+// aggregations accordingly.
+func handleDeletedFiles(ctx context.Context, conn clickhouse.Conn, currentScanID uint32) error {
+	// Get the previous scan ID
+	var prevScanID uint64
+	row := conn.QueryRow(ctx, `
+		SELECT max(scan_id) 
+		FROM files_active 
+		WHERE scan_id < ?`, uint64(currentScanID))
+
+	if err := row.Scan(&prevScanID); err != nil {
+		if errors.Is(err, io.EOF) || strings.Contains(err.Error(), "no rows in result set") {
+			// This is the first scan, nothing to mark as deleted
+			return nil
+		}
+		return fmt.Errorf("failed to get previous scan ID: %w", err)
+	}
+
+	// Prepare batch for inserting deleted file records
+	filesBatch, err := conn.PrepareBatch(ctx, sqlInsertFilesActive)
+	if err != nil {
+		return err
+	}
+
+	// Prepare batch for inserting negative ancestor aggregations for deleted files
+	aggsBatch, err := conn.PrepareBatch(ctx, sqlInsertAncestorAggs)
+	if err != nil {
+		return err
+	}
+
+	// Get files that exist in previous scan but not in current scan
+	rows, err := conn.Query(ctx, `
+		SELECT path, size, uid, gid, mtime, atime, ctime
+		FROM files_active 
+		WHERE scan_id = ? 
+		AND is_deleted = 0
+		AND path NOT IN (
+			SELECT path FROM files_active WHERE scan_id = ?
+		)
+	`, prevScanID, uint64(currentScanID))
+	if err != nil {
+		return fmt.Errorf("failed to query deleted files: %w", err)
+	}
+	defer rows.Close()
+
+	// Map to track ancestor aggregations for deleted files
+	type agg struct {
+		size  uint64
+		count uint64
+	}
+	ancestorAgg := make(map[string]agg, 1<<15) // pre-size for fewer allocs
+
+	filesCount := 0
+	const batchSize = 10000
+
+	// Process each deleted file
+	for rows.Next() {
+		var path string
+		var size uint64
+		var uid, gid uint32
+		var mtime, atime, ctime time.Time
+
+		if err := rows.Scan(&path, &size, &uid, &gid, &mtime, &atime, &ctime); err != nil {
+			return fmt.Errorf("failed to scan deleted file: %w", err)
+		}
+
+		// Add record for deleted file (with is_deleted=1)
+		if err := filesBatch.Append(
+			path, uint64(0), uid, gid, mtime, atime, ctime, uint8(1), uint64(currentScanID),
+		); err != nil {
+			return err
+		}
+		filesCount++
+
+		// Update ancestor aggregations for this deleted file (subtract)
+		dir := filepath.Dir(path)
+		for {
+			a := ancestorAgg[dir]
+			a.size += size
+			a.count++
+			ancestorAgg[dir] = a
+
+			if dir == "/" || dir == "." {
+				break
+			}
+			parent := filepath.Dir(dir)
+			if parent == dir {
+				break
+			}
+			dir = parent
+		}
+
+		// Flush in batches to avoid memory issues
+		if filesCount >= batchSize {
+			if err := filesBatch.Send(); err != nil {
+				return fmt.Errorf("failed to send deleted files batch: %w", err)
+			}
+			filesBatch, err = conn.PrepareBatch(ctx, sqlInsertFilesActive)
+			if err != nil {
+				return err
+			}
+			filesCount = 0
+		}
+	}
+
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("error during rows iteration: %w", err)
+	}
+
+	// Flush any remaining files
+	if filesCount > 0 {
+		if err := filesBatch.Send(); err != nil {
+			return fmt.Errorf("failed to send final deleted files batch: %w", err)
+		}
+	}
+
+	// Insert negative aggregations for deleted files
+	for dir, a := range ancestorAgg {
+		// Insert negative values to cancel out the deleted files in the aggregation
+		if err := aggsBatch.Append(
+			dir, a.size*uint64(0xFFFFFFFFFFFFFFFF), a.count*uint64(0xFFFFFFFFFFFFFFFF), uint64(currentScanID),
+		); err != nil {
+			return fmt.Errorf("failed to append ancestor aggregation: %w", err)
+		}
+	}
+
+	if err := aggsBatch.Send(); err != nil {
+		return fmt.Errorf("failed to send ancestor aggregations batch: %w", err)
 	}
 
 	return nil
@@ -267,7 +406,10 @@ CREATE TABLE IF NOT EXISTS files_active (
     atime DateTime,
     ctime DateTime,
     is_deleted UInt8,
-    scan_id UInt64
+    scan_id UInt64,
+    INDEX idx_uid uid TYPE minmax GRANULARITY 8192,
+    INDEX idx_gid gid TYPE minmax GRANULARITY 8192,
+    INDEX idx_atime atime TYPE minmax GRANULARITY 8192
 ) ENGINE = MergeTree
 PARTITION BY scan_id
 ORDER BY path
@@ -280,7 +422,8 @@ CREATE TABLE IF NOT EXISTS ancestor_aggs (
     ancestor String,
     total_size UInt64,
     file_count UInt64,
-    scan_id UInt64
+    scan_id UInt64,
+    INDEX idx_ancestor ancestor TYPE bloom_filter GRANULARITY 1024
 ) ENGINE = SummingMergeTree
 PARTITION BY scan_id
 ORDER BY (ancestor, scan_id)
@@ -301,7 +444,7 @@ SELECT
     ctime,
     is_deleted
 FROM files_active
-WHERE scan_id = max_scan`); err != nil {
+WHERE scan_id = max_scan AND is_deleted = 0`); err != nil {
 		return err
 	}
 
