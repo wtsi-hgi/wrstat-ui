@@ -48,6 +48,7 @@ var (
 	basedirsDB        string
 	basedirsHistoryDB string
 	dirgutaDB         string
+	retentionDays     int
 
 	quotaPath      string
 	basedirsConfig string
@@ -128,6 +129,7 @@ func init() {
 	summariseCmd.Flags().StringVarP(&quotaPath, "quota", "q", "", "csv of gid,disk,size_quota,inode_quota")
 	summariseCmd.Flags().StringVarP(&basedirsConfig, "config", "c", "", "path to basedirs config file")
 	summariseCmd.Flags().StringVarP(&mounts, "mounts", "m", "", "path to a file containing a list of quoted mountpoints")
+	summariseCmd.Flags().IntVar(&retentionDays, "retention-days", 30, "Number of days to retain historical scans")
 }
 
 func run(args []string) (err error) {
@@ -235,6 +237,8 @@ func updateClickhouse(r io.Reader) error {
 		return fmt.Errorf("failed to connect to clickhouse: %w", err)
 	}
 
+	defer conn.Close()
+
 	if err := createSchema(ctx, conn); err != nil {
 		return fmt.Errorf("createSchema: %w", err)
 	}
@@ -249,6 +253,12 @@ func updateClickhouse(r io.Reader) error {
 	// Identify and handle deleted files
 	if err := handleDeletedFiles(ctx, conn, scanID); err != nil {
 		return fmt.Errorf("handleDeletedFiles: %w", err)
+	}
+
+	if retentionDays > 0 {
+		if err := cleanupOldScans(ctx, conn, retentionDays); err != nil {
+			return fmt.Errorf("cleanupOldScans: %w", err)
+		}
 	}
 
 	// monthly run:
@@ -294,13 +304,12 @@ func handleDeletedFiles(ctx context.Context, conn clickhouse.Conn, currentScanID
 
 	// Get files that exist in previous scan but not in current scan
 	rows, err := conn.Query(ctx, `
-		SELECT path, size, uid, gid, mtime, atime, ctime
-		FROM files_active 
-		WHERE scan_id = ? 
-		AND is_deleted = 0
-		AND path NOT IN (
-			SELECT path FROM files_active WHERE scan_id = ?
-		)
+		SELECT prev.path, prev.size, prev.uid, prev.gid, prev.mtime, prev.atime, prev.ctime
+		FROM files_active prev
+		LEFT JOIN files_active curr ON prev.path = curr.path AND curr.scan_id = ?
+		WHERE prev.scan_id = ? 
+		AND prev.is_deleted = 0
+		AND curr.path IS NULL
 	`, prevScanID, uint64(currentScanID))
 	if err != nil {
 		return fmt.Errorf("failed to query deleted files: %w", err)
@@ -423,7 +432,8 @@ CREATE TABLE IF NOT EXISTS ancestor_aggs (
     total_size UInt64,
     file_count UInt64,
     scan_id UInt64,
-    INDEX idx_ancestor ancestor TYPE bloom_filter GRANULARITY 1024
+    INDEX idx_ancestor ancestor TYPE bloom_filter GRANULARITY 1024,
+    INDEX idx_scan_ancestor (scan_id, ancestor) TYPE minmax GRANULARITY 1024
 ) ENGINE = SummingMergeTree
 PARTITION BY scan_id
 ORDER BY (ancestor, scan_id)
@@ -672,4 +682,43 @@ func rebuildAndSwap(ctx context.Context, conn clickhouse.Conn) error {
 	_ = conn.Exec(ctx, `DROP TABLE IF EXISTS ancestor_aggs_old`)
 
 	return nil
+}
+
+func cleanupOldScans(ctx context.Context, conn clickhouse.Conn, retentionDays int) error {
+	cutoffTime := time.Now().AddDate(0, 0, -retentionDays)
+	cutoffScanID := uint64(cutoffTime.Unix())
+
+	// Delete old partitions
+	if err := conn.Exec(ctx, `ALTER TABLE files_active DROP PARTITION WHERE scan_id < ?`, cutoffScanID); err != nil {
+		return err
+	}
+
+	if err := conn.Exec(ctx, `ALTER TABLE ancestor_aggs DROP PARTITION WHERE scan_id < ?`, cutoffScanID); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func searchFilesByGlob(ctx context.Context, conn clickhouse.Conn, globPattern string) ([]string, error) {
+	rows, err := conn.Query(ctx, `
+        SELECT path 
+        FROM files_current
+        WHERE path LIKE ?
+    `, strings.Replace(strings.Replace(globPattern, "*", "%", -1), "?", "_", -1))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []string
+	for rows.Next() {
+		var path string
+		if err := rows.Scan(&path); err != nil {
+			return nil, err
+		}
+		results = append(results, path)
+	}
+
+	return results, rows.Err()
 }
