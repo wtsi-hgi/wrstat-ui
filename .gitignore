@@ -1,0 +1,21 @@
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+./wrstat
+dist/
+
+# Test binary, built with `go test -c`
+*.test
+wrstat-ui
+
+# Output of the go coverage tool, specifically when used with LiteIDE
+*.out
+
+# Dependency directories (remove the comment below to include it)
+# vendor/
+
+# Script for running the server within the wrstatServer directory
+runserver.sh
