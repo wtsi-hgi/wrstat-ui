@@ -117,11 +117,8 @@ func TestClickHouseIntegration(t *testing.T) {
 	ch, err := clickhouse.New(params)
 	require.NoError(t, err)
 
-	defer ch.Close()
-
-	// Create schema
-	err = ch.CreateSchema(ctx)
-	require.NoError(t, err)
+	// Ensure schema exists in the test database
+	require.NoError(t, ch.CreateSchema(ctx))
 
 	// Prepare test data
 	uid := uint32(1000) // standard test user ID
@@ -511,6 +508,24 @@ func TestClickHouseIntegration(t *testing.T) {
 
 	// Concurrent ingests on different mount points should not interfere with each other
 	t.Run("ConcurrentMountIngests", func(t *testing.T) {
+		// Use a fresh database for this subtest to avoid interference from earlier ingests
+		tempDB := testDatabase + "_conc_" + time.Now().Format("150405")
+		require.NoError(t, adminCh.ExecuteQuery(ctx, "CREATE DATABASE "+tempDB))
+
+		defer func() {
+			require.NoError(t, adminCh.ExecuteQuery(ctx, "DROP DATABASE IF EXISTS "+tempDB))
+		}()
+
+		params2 := params
+		params2.Database = tempDB
+
+		ch2, err2 := clickhouse.New(params2)
+		require.NoError(t, err2)
+
+		defer ch2.Close()
+
+		require.NoError(t, ch2.CreateSchema(ctx))
+
 		mountA := "/lustre/scratch128/"
 		mountB := "/lustre/scratch129/"
 
@@ -535,10 +550,10 @@ func TestClickHouseIntegration(t *testing.T) {
 		go func() {
 			defer wg.Done()
 
-			// Use a dedicated connection to better simulate independent ingesters
-			chA, err := clickhouse.New(params)
-			if err != nil {
-				errs <- err
+			// Use a dedicated connection in the isolated DB to simulate independent ingesters
+			chA, errA := clickhouse.New(params2)
+			if errA != nil {
+				errs <- errA
 
 				return
 			}
@@ -553,10 +568,10 @@ func TestClickHouseIntegration(t *testing.T) {
 		go func() {
 			defer wg.Done()
 
-			// Use a dedicated connection to better simulate independent ingesters
-			chB, err := clickhouse.New(params)
-			if err != nil {
-				errs <- err
+			// Use a dedicated connection in the isolated DB to simulate independent ingesters
+			chB, errB := clickhouse.New(params2)
+			if errB != nil {
+				errs <- errB
 
 				return
 			}
@@ -577,13 +592,13 @@ func TestClickHouseIntegration(t *testing.T) {
 
 		// Each mount should have exactly one ready scan
 		var readyA, readyB uint64
-		require.NoError(t, ch.ExecuteQuery(
+		require.NoError(t, ch2.ExecuteQuery(
 			ctx2,
 			"SELECT count() FROM scans WHERE state = 'ready' AND mount_path = ?",
 			mountA,
 			&readyA,
 		))
-		require.NoError(t, ch.ExecuteQuery(
+		require.NoError(t, ch2.ExecuteQuery(
 			ctx2,
 			"SELECT count() FROM scans WHERE state = 'ready' AND mount_path = ?",
 			mountB,
@@ -594,7 +609,7 @@ func TestClickHouseIntegration(t *testing.T) {
 
 		// Verify files present for both mounts
 		var cnt uint64
-		require.NoError(t, ch.ExecuteQuery(
+		require.NoError(t, ch2.ExecuteQuery(
 			ctx2,
 			"SELECT count() FROM fs_entries_current WHERE mount_path = ? AND path = ?",
 			mountA,
@@ -602,7 +617,7 @@ func TestClickHouseIntegration(t *testing.T) {
 			&cnt,
 		))
 		assert.Equal(t, uint64(1), cnt)
-		require.NoError(t, ch.ExecuteQuery(
+		require.NoError(t, ch2.ExecuteQuery(
 			ctx2,
 			"SELECT count() FROM fs_entries_current WHERE mount_path = ? AND path = ?",
 			mountB,
@@ -610,5 +625,16 @@ func TestClickHouseIntegration(t *testing.T) {
 			&cnt,
 		))
 		assert.Equal(t, uint64(1), cnt)
+
+		// Now aggregate across all mounts at root (in the isolated DB) and ensure totals match both ingests combined
+		s, err := ch2.AllSubtreeSummary(ctx2, "/", clickhouse.Filters{})
+		require.NoError(t, err)
+
+		// We ingested 2 files under each mount (4 total) plus their ancestor directories.
+		// FileCount should count files only.
+		assert.Equal(t, uint64(4), s.FileCount)
+
+		// Total size is 111+222+333+444 == 1110
+		assert.Equal(t, uint64(1110), s.TotalSize)
 	})
 }
