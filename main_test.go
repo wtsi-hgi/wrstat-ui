@@ -371,6 +371,8 @@ func TestSummariseClickHouse(t *testing.T) {
 	// Connect to check if ClickHouse is available
 	ctx := context.Background()
 
+	// Use the clickhouse-go driver only to verify if the server is available
+	// and to setup/teardown the test database
 	adminConn, err := clickhouse.Open(&clickhouse.Options{
 		Addr:        []string{fmt.Sprintf("%s:%s", chHost, chPort)},
 		Auth:        clickhouse.Auth{Database: "default", Username: chUsername, Password: chPassword},
@@ -453,14 +455,12 @@ func TestSummariseClickHouse(t *testing.T) {
 			mountPath,
 			statsPath,
 		)
-		fmt.Printf("stderr: %s\n", stderr)
 		So(err, ShouldBeNil)
-		So(stderr, ShouldNotContain, "error")
-		So(output, ShouldBeBlank) // Command should not produce output on success
+		So(strings.Contains(stderr, "error"), ShouldBeFalse)
+		So(output, ShouldEqual, "") // Command should not produce output on success
 
 		// Now we need to verify the data was ingested correctly
-		// We'll use the clickhouse-go driver directly for this validation
-
+		// We'll connect directly to ClickHouse only for verification
 		conn, err := clickhouse.Open(&clickhouse.Options{
 			Addr:        []string{fmt.Sprintf("%s:%s", chHost, chPort)},
 			Auth:        clickhouse.Auth{Database: testDatabase, Username: chUsername, Password: chPassword},
