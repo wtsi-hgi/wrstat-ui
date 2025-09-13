@@ -390,11 +390,7 @@ func insertSyntheticAncestorDirs(bp *BatchProcessor, mountPath string) error {
 			return true
 		}
 
-		p, name := SplitParentAndName(a)
-
-		// Insert a single directory entry with zero size/ids; duplicates across mounts will be
-		// deduplicated at query time for global listings.
-		if err := bp.AddFile(a, p, name, "", FileTypeDir, 0, 0, 0, 0, t, t, t); err != nil {
+		if err := addSyntheticDirAndRollups(bp, a, t); err != nil {
 			firstErr = err
 
 			return false
@@ -404,4 +400,35 @@ func insertSyntheticAncestorDirs(bp *BatchProcessor, mountPath string) error {
 	})
 
 	return firstErr
+}
+
+// addSyntheticDirAndRollups inserts a synthetic directory entry for 'a' and adds
+// rollup rows for 'a' and all its ancestors up to and including root.
+func addSyntheticDirAndRollups(bp *BatchProcessor, a string, t time.Time) error {
+	p, name := SplitParentAndName(a)
+
+	// Insert a single directory entry with zero size/ids; duplicates across mounts will be
+	// deduplicated at query time for global listings.
+	if err := bp.AddFile(a, p, name, "", FileTypeDir, 0, 0, 0, 0, t, t, t); err != nil {
+		return err
+	}
+
+	var firstErr error
+
+	ForEachAncestor(a, "/", func(ra string) bool {
+		// Zero-size, zero-uid/gid, empty ext to avoid affecting size while counting entries.
+		if err := bp.AddRollup(ra, 0, t, t, 0, 0, ""); err != nil {
+			firstErr = err
+
+			return false
+		}
+
+		return true
+	})
+
+	if firstErr != nil {
+		return firstErr
+	}
+
+	return nil
 }

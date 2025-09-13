@@ -238,12 +238,6 @@ func (c *Clickhouse) SubtreeSummary(ctx context.Context, dir string, f Filters) 
 		return c.subtreeSummaryScan(ctx, d, f)
 	}
 
-	// Root requires inclusion of synthetic ancestors which may not be present in rollups.
-	// Use the scan-based fast path at root to match semantics (dirs + files counted).
-	if d == "/" {
-		return c.getUnfilteredAllSummary(ctx, d)
-	}
-
 	return c.getRollupSummaryGlobal(ctx, d)
 }
 
