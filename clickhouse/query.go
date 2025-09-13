@@ -31,43 +31,9 @@ import (
 	"strings"
 )
 
-// ListImmediateChildren returns direct children of a directory.
-func (c *Clickhouse) ListImmediateChildren(ctx context.Context, mountPath, dir string) ([]FileEntry, error) {
-	// Ensure the directory path ends with a slash
-	dir = EnsureDir(dir)
-
-	// Query direct children of the directory
-	rows, err := c.conn.Query(ctx, `
-		SELECT path, parent_path, name, ext_low, ftype, inode, size, uid, gid, mtime, atime, ctime
-		FROM fs_entries_current
-		WHERE mount_path = ? AND parent_path = ?`,
-		mountPath, dir)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	// Collect results - preallocate for better performance
-	results := make([]FileEntry, 0, DefaultResultCapacity) // Start with a reasonable capacity
-	for rows.Next() {
-		var entry FileEntry
-		if err := rows.Scan(
-			&entry.Path, &entry.ParentPath, &entry.Name, &entry.Ext,
-			&entry.FType, &entry.INode, &entry.Size,
-			&entry.UID, &entry.GID,
-			&entry.MTime, &entry.ATime, &entry.CTime); err != nil {
-			return nil, err
-		}
-
-		results = append(results, entry)
-	}
-
-	return results, rows.Err()
-}
-
-// ListImmediateChildrenAllMounts lists direct children of a directory across all mounts.
-// This supports global navigation at '/', '/mnt/', etc., leveraging synthetic dirs.
-func (c *Clickhouse) ListImmediateChildrenAllMounts(ctx context.Context, dir string) ([]FileEntry, error) {
+// ListImmediateChildren returns direct children of a directory (global, all mounts).
+// This supports navigation at '/', '/lustre/', etc., leveraging synthetic dirs.
+func (c *Clickhouse) ListImmediateChildren(ctx context.Context, dir string) ([]FileEntry, error) {
 	dir = EnsureDir(dir)
 
 	rows, err := c.conn.Query(ctx, `
@@ -129,42 +95,19 @@ func buildBucketPredicateWithScanExpr(scanExpr, col, bucket string) (string, err
 	return col + " " + interval, nil
 }
 
-// buildBucketPredicate defaults to using toDateTime(max_scan) for backward compatibility (per-mount).
-func buildBucketPredicate(col, bucket string) (string, error) {
-	return buildBucketPredicateWithScanExpr("toDateTime(max_scan)", col, bucket)
-}
-
-// SubtreeSummary returns statistics for a subtree, filtered by the given criteria.
-func (c *Clickhouse) SubtreeSummary(ctx context.Context, mountPath, dir string, f Filters) (Summary, error) {
+// SubtreeSummary returns statistics for a subtree (global, all mounts), filtered by the given criteria.
+func (c *Clickhouse) SubtreeSummary(ctx context.Context, dir string, f Filters) (Summary, error) {
 	dir = EnsureDir(dir)
 
-	// If no mount is specified (or the root dir is requested), aggregate across all mounts
-	if mountPath == "" || dir == "/" {
-		return c.AllSubtreeSummary(ctx, dir, f)
-	}
-
-	// Fast path when no filters other than path/mount.
 	if isNoFilters(f) {
-		return c.getUnfilteredSummary(ctx, mountPath, dir)
+		return c.getUnfilteredAllSummary(ctx, dir)
 	}
 
-	// Build query for filtered results
-	where, args := buildBasicWhereClause(mountPath, dir)
-	where, args = appendFilterClauses(where, args, f)
+	where, args := buildAllWhere(dir, f)
+	bucketFilter := buildGlobalTimeBucketFilter(f)
+	query := buildAllSummaryQuery(where, bucketFilter)
 
-	// Build time bucket filter
-	bucketFilter := buildTimeBucketFilter(f)
-
-	// Construct the full query with CTE for max scan_id
-	query := buildSummaryQuery(where, bucketFilter)
-
-	// Add mountPath as the first argument for the CTE
-	allArgs := make([]any, 0, len(args)+1)
-	allArgs = append(allArgs, mountPath)
-	allArgs = append(allArgs, args...)
-
-	// Execute query and scan result
-	return c.executeSummaryQuery(ctx, query, allArgs)
+	return c.executeSummaryQuery(ctx, query, args)
 }
 
 // Helper function to check if no filters are applied.
@@ -174,64 +117,12 @@ func isNoFilters(f Filters) bool {
 }
 
 // Helper function for getting unfiltered summary.
-func (c *Clickhouse) getUnfilteredSummary(ctx context.Context, mountPath, dir string) (Summary, error) {
-	row := c.conn.QueryRow(ctx, `
-WITH (SELECT max(scan_id) FROM scans WHERE mount_path = ? AND state = 'ready') AS max_scan
-SELECT 
-  sum(size),
-  count(),
-  max(atime),
-  min(atime),
-  max(mtime),
-  min(mtime),
-  groupUniqArray(uid),
-  groupUniqArray(gid),
-  groupUniqArray(ext_low)
-FROM fs_entries_current
-WHERE mount_path = ? AND path LIKE ?`, mountPath, mountPath, dir+"%")
-
-	var s Summary
-	if err := row.Scan(&s.TotalSize, &s.FileCount, &s.MostRecentATime, &s.OldestATime,
-		&s.MostRecentMTime, &s.OldestMTime, &s.UIDs, &s.GIDs, &s.Exts); err != nil {
-		return Summary{}, err
-	}
-
-	return s, nil
-}
+// Removed per-mount unfiltered summary; global unfiltered handled by getUnfilteredAllSummary
 
 // Build basic where clause and args for the query.
-func buildBasicWhereClause(mountPath, dir string) ([]string, []any) {
-	where := []string{"mount_path = ?", "path LIKE ?"}
-	args := []any{mountPath, dir + "%"}
+// Removed per-mount where builder (API unified to global)
 
-	return where, args
-}
-
-// Append filter clauses based on the provided filters.
-func appendFilterClauses(where []string, args []any, f Filters) ([]string, []any) {
-	// Add filter for GIDs if provided
-	if len(f.GIDs) > 0 {
-		gidClause, gidArgs := buildInClause("gid", f.GIDs)
-		where = append(where, gidClause)
-		args = append(args, gidArgs...)
-	}
-
-	// Add filter for UIDs if provided
-	if len(f.UIDs) > 0 {
-		uidClause, uidArgs := buildInClause("uid", f.UIDs)
-		where = append(where, uidClause)
-		args = append(args, uidArgs...)
-	}
-
-	// Add filter for extensions if provided
-	if len(f.Exts) > 0 {
-		extClause, extArgs := buildExtensionClause(f.Exts)
-		where = append(where, extClause)
-		args = append(args, extArgs...)
-	}
-
-	return where, args
-}
+// appendFilterClauses removed; buildAllWhere handles filters directly
 
 // Build IN clause for filters.
 func buildInClause(field string, values []uint32) (string, []any) {
@@ -259,33 +150,8 @@ func buildExtensionClause(exts []string) (string, []any) {
 	return fmt.Sprintf("ext_low IN (%s)", strings.Join(placeholders, ",")), args
 }
 
-// buildAccessTimeFilter builds the access time filter predicate.
-func buildAccessTimeFilter(aTimeBucket string) string {
-	if aTimeBucket == "" {
-		return ""
-	}
-
-	atPred, err := buildBucketPredicate("atime", aTimeBucket)
-	if err != nil || atPred == "" {
-		return ""
-	}
-
-	return atPred
-}
-
-// buildModificationTimeFilter builds the modification time filter predicate.
-func buildModificationTimeFilter(mTimeBucket string) string {
-	if mTimeBucket == "" {
-		return ""
-	}
-
-	mtPred, err := buildBucketPredicate("mtime", mTimeBucket)
-	if err != nil || mtPred == "" {
-		return ""
-	}
-
-	return mtPred
-}
+// buildAccessTimeFilter removed in global API; use buildGlobalTimeBucketFilter.
+// buildModificationTimeFilter removed in global API; use buildGlobalTimeBucketFilter.
 
 // joinTimeFilters combines multiple time filter predicates.
 func joinTimeFilters(predicates []string) string {
@@ -296,26 +162,7 @@ func joinTimeFilters(predicates []string) string {
 	return " AND (" + strings.Join(predicates, " AND ") + ")"
 }
 
-// buildTimeBucketFilter builds time bucket filter clauses.
-func buildTimeBucketFilter(f Filters) string {
-	if f.ATimeBucket == "" && f.MTimeBucket == "" {
-		return ""
-	}
-
-	var predicates []string
-
-	// Access time filter
-	if atPred := buildAccessTimeFilter(f.ATimeBucket); atPred != "" {
-		predicates = append(predicates, atPred)
-	}
-
-	// Modification time filter
-	if mtPred := buildModificationTimeFilter(f.MTimeBucket); mtPred != "" {
-		predicates = append(predicates, mtPred)
-	}
-
-	return joinTimeFilters(predicates)
-}
+// buildTimeBucketFilter removed in global API; use buildGlobalTimeBucketFilter.
 
 // buildGlobalTimeBucketFilter builds time bucket filters using per-row scan time (toDateTime(scan_id)).
 func buildGlobalTimeBucketFilter(f Filters) string {
@@ -344,30 +191,15 @@ func buildGlobalTimeBucketFilter(f Filters) string {
 }
 
 // Build the complete summary query.
-func buildSummaryQuery(where []string, bucketFilter string) string {
-	return `
-WITH (SELECT max(scan_id) FROM scans WHERE mount_path = ? AND state = 'ready') AS max_scan
-SELECT 
-  sum(size) AS total_size,
-	count() AS file_count,
-  max(atime) AS most_recent_atime,
-  min(atime) AS oldest_atime,
-  max(mtime) AS most_recent_mtime,
-  min(mtime) AS oldest_mtime,
-  groupUniqArray(uid) AS uids,
-  groupUniqArray(gid) AS gids,
-  groupUniqArray(ext_low) AS exts
-FROM fs_entries_current
-WHERE ` + strings.Join(where, " AND ") + bucketFilter
-}
+// Removed per-mount summary query builder (API unified to global)
 
 // buildAllSummaryQuery builds the summary query across all mounts (no mount_path filter),
 // using per-row scan time for any time buckets.
 func buildAllSummaryQuery(where []string, bucketFilter string) string {
 	return `
 SELECT 
-	sumIf(size, NOT endsWith(path, '/')) AS total_size,
-	countIf(NOT endsWith(path, '/')) AS file_count,
+	sum(size) AS total_size,
+	count() AS file_count,
   max(atime) AS most_recent_atime,
   min(atime) AS oldest_atime,
   max(mtime) AS most_recent_mtime,
@@ -395,36 +227,34 @@ func (c *Clickhouse) executeSummaryQuery(ctx context.Context, query string, args
 	return s, nil
 }
 
-// OptimizedSubtreeSummary attempts to use precomputed ancestor rollups when
-// possible. Falls back to the regular implementation for filtered queries.
-func (c *Clickhouse) OptimizedSubtreeSummary(ctx context.Context, mountPath, dir string, f Filters) (Summary, error) {
-	// Only use rollups when there are no filters at all
+// OptimizedSubtreeSummary attempts to use precomputed ancestor rollups when possible.
+// It falls back to the regular implementation for filtered queries.
+func (c *Clickhouse) OptimizedSubtreeSummary(ctx context.Context, dir string, f Filters) (Summary, error) {
 	if !isNoFilters(f) {
-		// Fall back to regular implementation for filtered queries
-		return c.SubtreeSummary(ctx, mountPath, dir, f)
+		return c.SubtreeSummary(ctx, dir, f)
 	}
 
-	// Use precomputed rollups
-	return c.getRollupSummary(ctx, mountPath, EnsureDir(dir))
+	return c.getRollupSummaryGlobal(ctx, EnsureDir(dir))
 }
 
 // Helper function to retrieve summary from the rollups table.
-func (c *Clickhouse) getRollupSummary(ctx context.Context, mountPath, dir string) (Summary, error) {
+// getRollupSummaryGlobal aggregates precomputed rollups across all mounts for the given ancestor path.
+func (c *Clickhouse) getRollupSummaryGlobal(ctx context.Context, dir string) (Summary, error) {
 	query := `
-	SELECT 
-		total_size,
-		file_count,
-		atime_max AS most_recent_atime,
-		atime_min AS oldest_atime,
-		mtime_max AS most_recent_mtime,
-		mtime_min AS oldest_mtime,
-		uids,
-		gids,
-		exts
-	FROM ancestor_rollups_current
-	WHERE mount_path = ? AND ancestor = ?`
+SELECT
+  sum(total_size) AS total_size,
+  sum(file_count) AS file_count,
+  max(atime_max) AS most_recent_atime,
+  min(atime_min) AS oldest_atime,
+  max(mtime_max) AS most_recent_mtime,
+  min(mtime_min) AS oldest_mtime,
+  arrayReduce('groupUniqArray', arrayFlatten(groupArray(uids))) AS uids,
+  arrayReduce('groupUniqArray', arrayFlatten(groupArray(gids))) AS gids,
+  arrayReduce('groupUniqArray', arrayFlatten(groupArray(exts))) AS exts
+FROM ancestor_rollups_current
+WHERE ancestor = ?`
 
-	row := c.conn.QueryRow(ctx, query, mountPath, dir)
+	row := c.conn.QueryRow(ctx, query, dir)
 
 	var s Summary
 	if err := row.Scan(
@@ -432,7 +262,6 @@ func (c *Clickhouse) getRollupSummary(ctx context.Context, mountPath, dir string
 		&s.MostRecentATime, &s.OldestATime,
 		&s.MostRecentMTime, &s.OldestMTime,
 		&s.UIDs, &s.GIDs, &s.Exts); err != nil {
-		// If no rows or other error, return empty summary (not an error condition)
 		if errors.Is(err, io.EOF) {
 			return Summary{}, nil
 		}
@@ -443,22 +272,7 @@ func (c *Clickhouse) getRollupSummary(ctx context.Context, mountPath, dir string
 	return s, nil
 }
 
-// AllSubtreeSummary returns statistics for a subtree across all mounts.
-// It aggregates by path prefix without restricting to a specific mount.
-// FileCount counts only files (ftype = 1), and bucket filters are relative to each row's scan time.
-func (c *Clickhouse) AllSubtreeSummary(ctx context.Context, dir string, f Filters) (Summary, error) {
-	dir = EnsureDir(dir)
-
-	if isNoFilters(f) {
-		return c.getUnfilteredAllSummary(ctx, dir)
-	}
-
-	where, args := buildAllWhere(dir, f)
-	bucketFilter := buildGlobalTimeBucketFilter(f)
-	query := buildAllSummaryQuery(where, bucketFilter)
-
-	return c.executeSummaryQuery(ctx, query, args)
-}
+// Removed AllSubtreeSummary in favour of unified SubtreeSummary
 
 // buildAllWhere constructs WHERE and args for all-mounts summary.
 func buildAllWhere(dir string, f Filters) ([]string, []any) {
@@ -490,8 +304,8 @@ func buildAllWhere(dir string, f Filters) ([]string, []any) {
 func (c *Clickhouse) getUnfilteredAllSummary(ctx context.Context, dir string) (Summary, error) {
 	row := c.conn.QueryRow(ctx, `
 SELECT 
-	sumIf(size, NOT endsWith(path, '/')),
-	countIf(NOT endsWith(path, '/')),
+	sum(size),
+	count(),
   max(atime),
   min(atime),
   max(mtime),
@@ -517,10 +331,10 @@ func buildGlobSearchQuery(caseInsensitive bool, limit int) string {
 	var query string
 	if caseInsensitive {
 		query = `SELECT path FROM fs_entries_current 
-			WHERE mount_path = ? AND lowerUTF8(path) LIKE lowerUTF8(?)`
+			WHERE lowerUTF8(path) LIKE lowerUTF8(?)`
 	} else {
 		query = `SELECT path FROM fs_entries_current 
-			WHERE mount_path = ? AND path LIKE ?`
+			WHERE path LIKE ?`
 	}
 
 	// Add limit if specified
@@ -534,7 +348,7 @@ func buildGlobSearchQuery(caseInsensitive bool, limit int) string {
 // SearchGlobPaths searches for paths matching a glob pattern in ClickHouse.
 func (c *Clickhouse) SearchGlobPaths(
 	ctx context.Context,
-	mountPath, globPattern string,
+	globPattern string,
 	limit int,
 	caseInsensitive bool,
 ) ([]string, error) {
@@ -545,7 +359,7 @@ func (c *Clickhouse) SearchGlobPaths(
 	pattern := strings.ReplaceAll(strings.ReplaceAll(globPattern, "*", "%"), "?", "_")
 
 	// Execute query
-	rows, err := c.conn.Query(ctx, query, mountPath, pattern)
+	rows, err := c.conn.Query(ctx, query, pattern)
 	if err != nil {
 		return nil, err
 	}

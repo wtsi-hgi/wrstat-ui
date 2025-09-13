@@ -3,8 +3,7 @@
  *
  * Author: Sendu Bala <sb10@sanger.ac.uk>
  *
- * Permission is hereby granted, free of charge, to any person obtaining
- * a copy of this software and associated documentation files (the
+	entries, err := ch.ListImmediateChildren(ctx, mountPath+"humgen/projects/")
  * "Software"), to deal in the Software without restriction, including
  * without limitation the rights to use, copy, modify, merge, publish,
  * distribute, sublicense, and/or sell copies of the Software, and to
@@ -201,20 +200,20 @@ func TestClickHouseIntegration(t *testing.T) {
 	})
 
 	t.Run("SubtreeSummaryCheck", func(t *testing.T) {
-		summary, err := ch.OptimizedSubtreeSummary(ctx, mountPath, mountPath+"humgen/projects/A/", clickhouse.Filters{})
+		summary, err := ch.OptimizedSubtreeSummary(ctx, mountPath+"humgen/projects/A/", clickhouse.Filters{})
 		require.NoError(t, err)
 		assert.GreaterOrEqual(t, summary.TotalSize, uint64(3000)) // At least 1000 + 2000
 		assert.GreaterOrEqual(t, summary.FileCount, uint64(2))    // At least 2 files in directory A
 	})
 
 	t.Run("ListImmediateChildrenCheck", func(t *testing.T) {
-		entries, err := ch.ListImmediateChildren(ctx, mountPath, mountPath+"humgen/projects/")
+		entries, err := ch.ListImmediateChildren(ctx, mountPath+"humgen/projects/")
 		require.NoError(t, err)
 		assert.GreaterOrEqual(t, len(entries), 2)
 	})
 
 	t.Run("SearchGlobPathsCheck", func(t *testing.T) {
-		paths, err := ch.SearchGlobPaths(ctx, mountPath, "*/projects/*/file*", 10, false)
+		paths, err := ch.SearchGlobPaths(ctx, "*/projects/*/file*", 10, false)
 		require.NoError(t, err)
 		assert.Equal(t, 3, len(paths)) // All 3 files match the pattern
 	})
@@ -470,37 +469,37 @@ func TestClickHouseIntegration(t *testing.T) {
 		base := mountPath3 + "humgen/projects/C/"
 
 		// ATime bucket >1y selects only old1.log (size 100)
-		s, err := ch.SubtreeSummary(ctx, mountPath3, base, clickhouse.Filters{ATimeBucket: ">1y"})
+		s, err := ch.SubtreeSummary(ctx, base, clickhouse.Filters{ATimeBucket: ">1y"})
 		require.NoError(t, err)
 		assert.Equal(t, uint64(100), s.TotalSize)
 		assert.Equal(t, uint64(1), s.FileCount)
 
 		// MTime bucket >2m selects only old1.log (size 100)
-		s, err = ch.SubtreeSummary(ctx, mountPath3, base, clickhouse.Filters{MTimeBucket: ">2m"})
+		s, err = ch.SubtreeSummary(ctx, base, clickhouse.Filters{MTimeBucket: ">2m"})
 		require.NoError(t, err)
 		assert.Equal(t, uint64(100), s.TotalSize)
 		assert.Equal(t, uint64(1), s.FileCount)
 
 		// Ext filter 'log' -> old1.log (100)
-		s, err = ch.SubtreeSummary(ctx, mountPath3, base, clickhouse.Filters{Exts: []string{"log"}})
+		s, err = ch.SubtreeSummary(ctx, base, clickhouse.Filters{Exts: []string{"log"}})
 		require.NoError(t, err)
 		assert.Equal(t, uint64(100), s.TotalSize)
 		assert.Equal(t, uint64(1), s.FileCount)
 
 		// Ext filter 'txt' -> recent.txt (200)
-		s, err = ch.SubtreeSummary(ctx, mountPath3, base, clickhouse.Filters{Exts: []string{"txt"}})
+		s, err = ch.SubtreeSummary(ctx, base, clickhouse.Filters{Exts: []string{"txt"}})
 		require.NoError(t, err)
 		assert.Equal(t, uint64(200), s.TotalSize)
 		assert.Equal(t, uint64(1), s.FileCount)
 
 		// GID filter 4242 -> gidfile.bin (300)
-		s, err = ch.SubtreeSummary(ctx, mountPath3, base, clickhouse.Filters{GIDs: []uint32{4242}})
+		s, err = ch.SubtreeSummary(ctx, base, clickhouse.Filters{GIDs: []uint32{4242}})
 		require.NoError(t, err)
 		assert.Equal(t, uint64(300), s.TotalSize)
 		assert.Equal(t, uint64(1), s.FileCount)
 
 		// UID filter 4242 -> uidfile.dat (400)
-		s, err = ch.SubtreeSummary(ctx, mountPath3, base, clickhouse.Filters{UIDs: []uint32{4242}})
+		s, err = ch.SubtreeSummary(ctx, base, clickhouse.Filters{UIDs: []uint32{4242}})
 		require.NoError(t, err)
 		assert.Equal(t, uint64(400), s.TotalSize)
 		assert.Equal(t, uint64(1), s.FileCount)
@@ -627,19 +626,37 @@ func TestClickHouseIntegration(t *testing.T) {
 		assert.Equal(t, uint64(1), cnt)
 
 		// Now aggregate across all mounts at root (in the isolated DB) and ensure totals match both ingests combined
-		s, err := ch2.AllSubtreeSummary(ctx2, "/", clickhouse.Filters{})
+		s, err := ch2.SubtreeSummary(ctx2, "/", clickhouse.Filters{})
 		require.NoError(t, err)
 
-		// We ingested 2 files under each mount (4 total) plus their ancestor directories.
-		// FileCount should count files only.
-		assert.Equal(t, uint64(4), s.FileCount)
+		// We ingested 2 files under each mount (4 total) plus their ancestor directories. FileCount now includes
+		// directories as well as files, so it should be >= 4.
+		assert.GreaterOrEqual(t, s.FileCount, uint64(4))
 
-		// Total size is 111+222+333+444 == 1110
-		assert.Equal(t, uint64(1110), s.TotalSize)
+		// Total size is at least 111+222+333+444 == 1110 (includes directories now)
+		assert.GreaterOrEqual(t, s.TotalSize, uint64(1110))
+
+		// Additionally, verify root count strictly exceeds the sum of counts at each mount root
+		// (due to the presence of synthetic ancestor directories like "/lustre/" etc.).
+		sa, err := ch2.OptimizedSubtreeSummary(ctx2, mountA, clickhouse.Filters{})
+		require.NoError(t, err)
+
+		sb, err := ch2.OptimizedSubtreeSummary(ctx2, mountB, clickhouse.Filters{})
+		require.NoError(t, err)
+
+		sumMountCounts := sa.FileCount + sb.FileCount
+		assert.Greater(t, s.FileCount, sumMountCounts)
+
+		// OptimizedSubtreeSummary should also work at root with filters (falls back under the hood).
+		// Filtering by GID ensures we only count files (directories have gid=0 by default in test data).
+		sFiltered, err := ch2.OptimizedSubtreeSummary(ctx2, "/", clickhouse.Filters{GIDs: []uint32{gid}})
+		require.NoError(t, err)
+		assert.Equal(t, uint64(1110), sFiltered.TotalSize)
+		assert.Equal(t, uint64(4), sFiltered.FileCount)
 
 		// Global listings should show synthetic ancestors leading to real mounts
 		// List at root -> expect at least 'lustre'
-		ents, err := ch2.ListImmediateChildrenAllMounts(ctx2, "/")
+		ents, err := ch2.ListImmediateChildren(ctx2, "/")
 		require.NoError(t, err)
 
 		var haveMnt bool
@@ -655,7 +672,7 @@ func TestClickHouseIntegration(t *testing.T) {
 		assert.True(t, haveMnt, "expected /lustre in root children")
 
 		// List at /lustre -> expect 'scratch128' and 'scratch129'
-		ents, err = ch2.ListImmediateChildrenAllMounts(ctx2, "/lustre/")
+		ents, err = ch2.ListImmediateChildren(ctx2, "/lustre/")
 		require.NoError(t, err)
 
 		var haveA, haveB bool

@@ -204,13 +204,13 @@ func TestBucketPredicatesViaSubtreeSummary(t *testing.T) {
 	require.NoError(t, ch.UpdateClickhouse(ctx, mount, r))
 
 	// >1y ATime picks old.log only
-	s, err := ch.SubtreeSummary(ctx, mount, base, clickhouse.Filters{ATimeBucket: ">1y"})
+	s, err := ch.SubtreeSummary(ctx, base, clickhouse.Filters{ATimeBucket: ">1y"})
 	require.NoError(t, err)
 	assert.Equal(t, uint64(10), s.TotalSize)
 	assert.Equal(t, uint64(1), s.FileCount)
 
 	// >2m MTime picks old.log only
-	s, err = ch.SubtreeSummary(ctx, mount, base, clickhouse.Filters{MTimeBucket: ">2m"})
+	s, err = ch.SubtreeSummary(ctx, base, clickhouse.Filters{MTimeBucket: ">2m"})
 	require.NoError(t, err)
 	assert.Equal(t, uint64(10), s.TotalSize)
 	assert.Equal(t, uint64(1), s.FileCount)
@@ -236,12 +236,12 @@ func TestSearchGlobPathsPublic(t *testing.T) {
 	require.NoError(t, ch.UpdateClickhouse(ctx, mount, r))
 
 	// Case-sensitive search; pattern must match full path, so include a leading wildcard
-	paths, err := ch.SearchGlobPaths(ctx, mount, "*/p/q/file*", 0, false)
+	paths, err := ch.SearchGlobPaths(ctx, "*/p/q/file*", 0, false)
 	require.NoError(t, err)
 	assert.Len(t, paths, 2)
 
 	// Limit works
-	paths, err = ch.SearchGlobPaths(ctx, mount, "*/p/q/file*", 1, false)
+	paths, err = ch.SearchGlobPaths(ctx, "*/p/q/file*", 1, false)
 	require.NoError(t, err)
 	assert.Len(t, paths, 1)
 }
@@ -266,7 +266,7 @@ func TestEntryTypesViaListImmediateChildren(t *testing.T) {
 	require.NoError(t, ch.UpdateClickhouse(ctx, mount, r))
 
 	// dirA should have at least one child (file.txt)
-	entries, err := ch.ListImmediateChildren(ctx, mount, mount+"dirA/")
+	entries, err := ch.ListImmediateChildren(ctx, mount+"dirA/")
 	require.NoError(t, err)
 	assert.GreaterOrEqual(t, len(entries), 1)
 }
