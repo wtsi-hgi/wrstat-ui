@@ -70,6 +70,7 @@ CREATE TABLE IF NOT EXISTS scans (
   started_at DateTime,
   finished_at Nullable(DateTime)
 ) ENGINE = MergeTree
+PARTITION BY (mount_path, scan_id)
 ORDER BY (mount_path, scan_id)`
 
 	createFsEntriesTable = `
@@ -431,8 +432,7 @@ func (c *Clickhouse) SetupRollbackHandler(ctx context.Context, mountPath string,
 		c.DropPartitionIgnoreErrors(ctx, "ALTER TABLE fs_entries DROP PARTITION "+part)
 		c.DropPartitionIgnoreErrors(ctx, "ALTER TABLE ancestor_rollups_raw DROP PARTITION "+part)
 		c.DropPartitionIgnoreErrors(ctx, "ALTER TABLE ancestor_rollups_state DROP PARTITION "+part)
-		c.DropPartitionIgnoreErrors(ctx,
-			`ALTER TABLE scans DELETE WHERE mount_path = ? AND scan_id = ?`, mountPath, scanID)
+		c.DropPartitionIgnoreErrors(ctx, "ALTER TABLE scans DROP PARTITION "+part)
 	}
 }
 
@@ -475,18 +475,11 @@ func (c *Clickhouse) DropSingleScan(ctx context.Context, mountPath string, scanI
 		"ALTER TABLE fs_entries DROP PARTITION " + part,
 		"ALTER TABLE ancestor_rollups_raw DROP PARTITION " + part,
 		"ALTER TABLE ancestor_rollups_state DROP PARTITION " + part,
+		"ALTER TABLE scans DROP PARTITION " + part,
 	} {
 		if err := c.conn.Exec(ctx, dropStmt); err != nil {
 			return err
 		}
-	}
-
-	// Delete scan record
-	if err := c.conn.Exec(ctx, `
-		ALTER TABLE scans DELETE
-		WHERE mount_path = ? AND scan_id = ?`,
-		mountPath, scanID); err != nil {
-		return err
 	}
 
 	return nil

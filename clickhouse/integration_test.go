@@ -235,4 +235,149 @@ func TestClickHouseIntegration(t *testing.T) {
 		require.NoError(t, ch.ExecuteQuery(ctx, q, mountPath, &want))
 		assert.WithinDuration(t, want, got, time.Second)
 	})
+
+	// Perform a second scan with some files unchanged, one deleted, and one new
+	t.Run("MultiScanLatestOnly", func(t *testing.T) {
+		// Ensure the next scan_id (Unix seconds) is strictly greater
+		time.Sleep(1 * time.Second)
+
+		// Build second dataset: file1 unchanged (1000), file2 changed (2500), file3 deleted, new file4 (4000)
+		refTime2 := time.Now().Truncate(time.Second)
+		unixTime2 := refTime2.Unix()
+		root2 := statsdata.NewRoot(mountPath, unixTime2)
+		statsdata.AddFile(root2, "humgen/projects/A/file1", uid, gid, 1000, unixTime2, unixTime2)
+		statsdata.AddFile(root2, "humgen/projects/A/file2", uid, gid, 2500, unixTime2, unixTime2) // modified
+		statsdata.AddFile(root2, "humgen/projects/B/file4", uid, gid, 4000, unixTime2, unixTime2) // new
+
+		// Write the second stats to a temp file
+		statsPath2 := filepath.Join(tmpDir, "test_stats_2")
+		f2, err := os.Create(statsPath2)
+		require.NoError(t, err)
+
+		_, err = io.Copy(f2, root2.AsReader())
+		require.NoError(t, err)
+		require.NoError(t, f2.Close())
+
+		// Ingest second scan
+		r2, _, err := clickhouse.OpenStatsFile(statsPath2)
+		require.NoError(t, err)
+
+		defer r2.Close()
+
+		require.NoError(t, ch.UpdateClickhouse(ctx, mountPath, r2))
+
+		// Only the latest ready scan should remain recorded for this mount
+		var readyCount uint64
+		require.NoError(t, ch.ExecuteQuery(
+			ctx,
+			"SELECT count() FROM scans WHERE state = 'ready' AND mount_path = ?",
+			mountPath,
+			&readyCount,
+		))
+		assert.Equal(t, uint64(1), readyCount)
+
+		// Underlying fs_entries should only have one scan_id for this mount (older partitions dropped)
+		var uniqScans uint64
+		require.NoError(t, ch.ExecuteQuery(
+			ctx,
+			"SELECT uniqExact(scan_id) FROM fs_entries WHERE mount_path = ?",
+			mountPath,
+			&uniqScans,
+		))
+		assert.Equal(t, uint64(1), uniqScans)
+
+		// Validate paths presence/absence and no duplicates
+		var (
+			cnt  uint64
+			size uint64
+		)
+
+		// file1 unchanged: present once, size 1000
+		require.NoError(t, ch.ExecuteQuery(
+			ctx,
+			"SELECT count() FROM fs_entries_current WHERE path = ?",
+			mountPath+"humgen/projects/A/file1",
+			&cnt,
+		))
+		assert.Equal(t, uint64(1), cnt)
+		require.NoError(t, ch.ExecuteQuery(
+			ctx,
+			"SELECT size FROM fs_entries_current WHERE path = ?",
+			mountPath+"humgen/projects/A/file1",
+			&size,
+		))
+		assert.Equal(t, uint64(1000), size)
+
+		// file2 modified: present once, size 2500
+		require.NoError(t, ch.ExecuteQuery(
+			ctx,
+			"SELECT count() FROM fs_entries_current WHERE path = ?",
+			mountPath+"humgen/projects/A/file2",
+			&cnt,
+		))
+		assert.Equal(t, uint64(1), cnt)
+		require.NoError(t, ch.ExecuteQuery(
+			ctx,
+			"SELECT size FROM fs_entries_current WHERE path = ?",
+			mountPath+"humgen/projects/A/file2",
+			&size,
+		))
+		assert.Equal(t, uint64(2500), size)
+
+		// file3 deleted: absent
+		require.NoError(t, ch.ExecuteQuery(
+			ctx,
+			"SELECT count() FROM fs_entries_current WHERE path = ?",
+			mountPath+"humgen/projects/B/file3",
+			&cnt,
+		))
+		assert.Equal(t, uint64(0), cnt)
+
+		// file4 new: present once, size 4000
+		require.NoError(t, ch.ExecuteQuery(
+			ctx,
+			"SELECT count() FROM fs_entries_current WHERE path = ?",
+			mountPath+"humgen/projects/B/file4",
+			&cnt,
+		))
+		assert.Equal(t, uint64(1), cnt)
+		require.NoError(t, ch.ExecuteQuery(
+			ctx,
+			"SELECT size FROM fs_entries_current WHERE path = ?",
+			mountPath+"humgen/projects/B/file4",
+			&size,
+		))
+		assert.Equal(t, uint64(4000), size)
+
+		// Rollup totals should reflect new dataset
+		var totalSizeRoot uint64
+		require.NoError(t, ch.ExecuteQuery(
+			ctx,
+			"SELECT total_size FROM ancestor_rollups_current WHERE mount_path = ? AND ancestor = ?",
+			mountPath,
+			mountPath,
+			&totalSizeRoot,
+		))
+		assert.GreaterOrEqual(t, totalSizeRoot, uint64(1000+2500+4000))
+
+		var totalSizeA uint64
+		require.NoError(t, ch.ExecuteQuery(
+			ctx,
+			"SELECT total_size FROM ancestor_rollups_current WHERE mount_path = ? AND ancestor = ?",
+			mountPath,
+			mountPath+"humgen/projects/A/",
+			&totalSizeA,
+		))
+		assert.GreaterOrEqual(t, totalSizeA, uint64(1000+2500))
+
+		var totalSizeB uint64
+		require.NoError(t, ch.ExecuteQuery(
+			ctx,
+			"SELECT total_size FROM ancestor_rollups_current WHERE mount_path = ? AND ancestor = ?",
+			mountPath,
+			mountPath+"humgen/projects/B/",
+			&totalSizeB,
+		))
+		assert.GreaterOrEqual(t, totalSizeB, uint64(4000))
+	})
 }
