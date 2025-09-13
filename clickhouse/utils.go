@@ -155,32 +155,32 @@ func SplitParentAndName(p string) (parent, name string) {
 }
 
 // ForEachAncestor calls the provided function for each ancestor directory of the path.
+// It yields the directory itself (ensured to end with '/'), then walks up to and including mountPath.
 func ForEachAncestor(dir, mountPath string, fn func(a string) bool) {
-	// dir must be a directory path ending with '/'
-	if !strings.HasSuffix(dir, "/") {
-		dir += "/"
-	}
+	d := EnsureDir(dir)
+	mp := EnsureDir(mountPath)
+
 	// Only iterate ancestors at or below mountPath
-	if !strings.HasPrefix(dir, mountPath) {
+	if !strings.HasPrefix(d, mp) {
 		return
 	}
 
 	for {
-		if !fn(dir) {
+		if !fn(d) {
 			return
 		}
 
-		if dir == mountPath {
+		if d == mp {
 			return
 		}
 
-		// Get parent directory by truncating after the last slash before the final slash
-		lastSlash := strings.LastIndexByte(dir[:len(dir)-1], '/')
-		if lastSlash < 0 {
+		// Trim trailing slash, get parent using slash-separated semantics, and re-ensure '/'
+		parent := path.Dir(strings.TrimSuffix(d, "/"))
+		if parent == "" || parent == "." {
 			return
 		}
 
-		dir = dir[:lastSlash+1]
+		d = EnsureDir(parent)
 	}
 }
 
