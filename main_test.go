@@ -367,7 +367,8 @@ func TestSummariseClickHouse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to get current user: %v", err)
 	}
-	testDatabase := fmt.Sprintf("test_wrstatui_%s", currentUser.Username)
+
+	testDatabase := "test_wrstatui_" + currentUser.Username
 
 	// Create a test connection
 
@@ -382,18 +383,19 @@ func TestSummariseClickHouse(t *testing.T) {
 	})
 	if err != nil {
 		t.Skipf("Skipping TestSummariseClickHouse - could not connect to ClickHouse: %v", err)
+
 		return
 	}
 
 	// First drop the test database if it exists
 
-	if err := adminConn.Exec(ctx, fmt.Sprintf("DROP DATABASE IF EXISTS %s", testDatabase)); err != nil {
-		t.Logf("Warning: failed to drop existing test DB: %v", err)
+	if dropErr := adminConn.Exec(ctx, "DROP DATABASE IF EXISTS "+testDatabase); dropErr != nil {
+		t.Logf("Warning: failed to drop existing test DB: %v", dropErr)
 	}
 
 	// Create a fresh test database
 
-	err = adminConn.Exec(ctx, fmt.Sprintf("CREATE DATABASE %s", testDatabase))
+	err = adminConn.Exec(ctx, "CREATE DATABASE "+testDatabase)
 	if err != nil {
 		adminConn.Close()
 		t.Fatalf("Failed to create test database: %v", err)
@@ -414,10 +416,11 @@ func TestSummariseClickHouse(t *testing.T) {
 		})
 		if err != nil {
 			t.Errorf("Failed to connect for cleanup: %v", err)
+
 			return
 		}
 
-		if err := cleanupConn.Exec(ctx, fmt.Sprintf("DROP DATABASE IF EXISTS %s", testDatabase)); err != nil {
+		if err := cleanupConn.Exec(ctx, "DROP DATABASE IF EXISTS "+testDatabase); err != nil {
 			t.Errorf("Failed to drop test database during cleanup: %v", err)
 		}
 
@@ -494,6 +497,7 @@ func TestSummariseClickHouse(t *testing.T) {
 
 		// Check scans table
 		var scanCount uint64
+
 		err = chConn.QueryRow(ctx,
 			"SELECT count() FROM scans WHERE state = 'ready' AND mount_path = ?", mountPath).Scan(&scanCount)
 		So(err, ShouldBeNil)
@@ -508,6 +512,7 @@ func TestSummariseClickHouse(t *testing.T) {
 
 		// Check ancestor_rollups_raw table
 		var rollupCount uint64
+
 		err = chConn.QueryRow(ctx,
 			"SELECT count() FROM ancestor_rollups_current WHERE mount_path = ?", mountPath).Scan(&rollupCount)
 		So(err, ShouldBeNil)

@@ -105,12 +105,12 @@ func Run(args []string) (err error) {
 	conn, err := clickhouse.Open(&clickhouse.Options{
 		Addr:        []string{fmt.Sprintf("%s:%s", chHost, chPort)},
 		Auth:        clickhouse.Auth{Database: chDatabase, Username: chUsername, Password: chPassword},
-		DialTimeout: 10 * time.Second,
+		DialTimeout: dialTimeoutSeconds * time.Second,
 		Compression: &clickhouse.Compression{Method: clickhouse.CompressionLZ4},
 		Settings: clickhouse.Settings{
-			"max_insert_block_size":       1000000,
-			"min_insert_block_size_rows":  100000,
-			"min_insert_block_size_bytes": 10485760, // 10MB
+			"max_insert_block_size":       maxInsertBlockSize,
+			"min_insert_block_size_rows":  minInsertBlockRows,
+			"min_insert_block_size_bytes": minInsertBlockBytes, // 10MB
 		},
 	})
 	if err != nil {
@@ -126,7 +126,7 @@ func Run(args []string) (err error) {
 }
 
 func checkArgs(args []string) (string, string, error) {
-	if len(args) != 2 {
+	if len(args) != expectedArgCount {
 		return "", "", errors.New("usage: summarise <mount_path> <stats_file|->") //nolint:err113
 	}
 
@@ -201,6 +201,18 @@ const (
 	// Lower batch sizes to balance performance and memory usage.
 	fileBatchSize   = 100_000
 	rollupBatchSize = 100_000
+
+	// ClickHouse connection settings.
+	dialTimeoutSeconds  = 10
+	maxInsertBlockSize  = 1000000
+	minInsertBlockRows  = 100000
+	minInsertBlockBytes = 10485760 // 10MB
+
+	// Command line arguments.
+	expectedArgCount = 2
+
+	// Default capacity for result slices.
+	defaultResultCapacity = 100
 )
 
 type ftype uint8
@@ -478,6 +490,7 @@ PARTITION BY (mount_path, scan_id)
 ORDER BY (mount_path, ancestor)
 SETTINGS index_granularity = 8192`
 
+	//nolint:misspell // ClickHouse requires American English spelling "MATERIALIZED"
 	createRollupMV = `
 CREATE MATERIALIZED VIEW IF NOT EXISTS ancestor_rollups_mv
 TO ancestor_rollups_state AS
@@ -632,6 +645,7 @@ func createSchema(ctx context.Context, conn clickhouse.Conn) error {
 
 	// All required columns are declared in the CREATE statements above.
 
+	//nolint:misspell // ClickHouse requires American English spelling "materialized"
 	// Create materialized view and current views
 	if err := conn.Exec(ctx, createRollupMV); err != nil {
 		return err
@@ -666,6 +680,14 @@ func updateClickhouse(ctx context.Context, conn clickhouse.Conn, mountPath strin
 		return fmt.Errorf("insert scan: %w", err)
 	}
 
+	// Helper function to execute a statement and ignore errors
+	// #nosec G104 - we intentionally ignore errors here for cleanup operations
+	dropPartitionIgnoreErrors := func(ctx context.Context, conn clickhouse.Conn, query string, args ...any) {
+		// We intentionally ignore errors from these cleanup operations
+		//nolint:errcheck
+		conn.Exec(ctx, query, args...)
+	}
+
 	// Rollback on failure: drop this scan's partitions and scan row
 	defer func() {
 		if retErr == nil {
@@ -675,18 +697,12 @@ func updateClickhouse(ctx context.Context, conn clickhouse.Conn, mountPath strin
 		part := fmt.Sprintf("('%s', %d)", escapeCHSingleQuotes(mountPath), scanID)
 
 		// Drop partitions - ignoring errors on cleanup
-		if err := conn.Exec(ctx, "ALTER TABLE fs_entries DROP PARTITION "+part); err != nil {
-			// noop
-		}
-		if err := conn.Exec(ctx, "ALTER TABLE ancestor_rollups_raw DROP PARTITION "+part); err != nil {
-			// noop
-		}
-		if err := conn.Exec(ctx, "ALTER TABLE ancestor_rollups_state DROP PARTITION "+part); err != nil {
-			// noop
-		}
-		if err := conn.Exec(ctx, `ALTER TABLE scans DELETE WHERE mount_path = ? AND scan_id = ?`, mountPath, scanID); err != nil {
-			// noop
-		}
+		// We use a separate function to avoid the empty block lint warnings
+		dropPartitionIgnoreErrors(ctx, conn, "ALTER TABLE fs_entries DROP PARTITION "+part)
+		dropPartitionIgnoreErrors(ctx, conn, "ALTER TABLE ancestor_rollups_raw DROP PARTITION "+part)
+		dropPartitionIgnoreErrors(ctx, conn, "ALTER TABLE ancestor_rollups_state DROP PARTITION "+part)
+		dropPartitionIgnoreErrors(ctx, conn,
+			`ALTER TABLE scans DELETE WHERE mount_path = ? AND scan_id = ?`, mountPath, scanID)
 	}()
 
 	if err := ingestScan(ctx, conn, mountPath, scanID, r); err != nil {
@@ -826,7 +842,9 @@ func (bp *batchProcessor) flushFilesBatch(ctx context.Context) error {
 	bp.filesBatch = filesBatch
 
 	return nil
-} // flushRollupsBatch sends the rollups batch if it's non-empty.
+}
+
+// flushRollupsBatch sends the rollups batch if it's non-empty.
 func (bp *batchProcessor) flushRollupsBatch(ctx context.Context) error {
 	if bp.rollupsCount == 0 {
 		return nil
@@ -1061,8 +1079,8 @@ func ListImmediateChildren(ctx context.Context, conn clickhouse.Conn, mountPath,
 	}
 	defer rows.Close()
 
-	// Collect results
-	var results []FileEntry
+	// Collect results - preallocate for better performance
+	results := make([]FileEntry, 0, defaultResultCapacity) // Start with a reasonable capacity
 	for rows.Next() {
 		var entry FileEntry
 		if err := rows.Scan(
@@ -1376,8 +1394,8 @@ func SearchGlobPaths(ctx context.Context, conn clickhouse.Conn, mountPath, globP
 	}
 	defer rows.Close()
 
-	// Collect results
-	var result []string
+	// Collect results - preallocate for better performance
+	result := make([]string, 0, defaultResultCapacity) // Start with a reasonable capacity
 	for rows.Next() {
 		var path string
 		if err := rows.Scan(&path); err != nil {
