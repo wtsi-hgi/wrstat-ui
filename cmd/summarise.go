@@ -303,6 +303,7 @@ func ForEachAncestor(dir, mountPath string, fn func(a string) bool) {
 func escapeCHSingleQuotes(s string) string { return strings.ReplaceAll(s, "'", "''") }
 
 func DeriveExtLower(name string, isDir bool) string {
+	// Directories and files without extensions return empty string
 	if isDir {
 		return ""
 	}
@@ -317,23 +318,29 @@ func DeriveExtLower(name string, isDir bool) string {
 
 	ext := strings.ToLower(base[dot+1:])
 
-	// Multi-dot rule for common compressed suffixes
+	// Check for compressed file extensions
 	compressExts := map[string]bool{
 		"gz": true, "bz2": true, "xz": true,
 		"zst": true, "lz4": true, "lz": true, "br": true,
 	}
 
-	if compressExts[ext] {
-		prevDot := strings.LastIndexByte(base[:dot], '.')
-		if prevDot != -1 {
-			prevExt := strings.ToLower(base[prevDot+1 : dot])
-			if prevExt != "" {
-				return prevExt + "." + ext
-			}
-		}
+	// If not a compressed extension, return as is
+	if !compressExts[ext] {
+		return ext
 	}
 
-	return ext
+	// Handle compound extensions for compressed files (.tar.gz, .csv.bz2, etc.)
+	prevDot := strings.LastIndexByte(base[:dot], '.')
+	if prevDot == -1 {
+		return ext
+	}
+
+	prevExt := strings.ToLower(base[prevDot+1 : dot])
+	if prevExt == "" {
+		return ext
+	}
+
+	return prevExt + "." + ext
 }
 
 // SQL constants.
@@ -788,37 +795,55 @@ func (bp *batchProcessor) needsFlush() bool {
 
 // Flush both batches if they contain any data.
 func (bp *batchProcessor) flush(ctx context.Context) error {
-	// Send files batch if non-empty
-	if bp.filesCount > 0 {
-		if err := bp.filesBatch.Send(); err != nil {
-			return err
-		}
-
-		bp.filesCount = 0
-
-		filesBatch, err := bp.conn.PrepareBatch(ctx, bp.filesBatchSQL)
-		if err != nil {
-			return err
-		}
-
-		bp.filesBatch = filesBatch
+	if err := bp.flushFilesBatch(ctx); err != nil {
+		return err
 	}
 
-	// Send rollups batch if non-empty
-	if bp.rollupsCount > 0 {
-		if err := bp.rollupsBatch.Send(); err != nil {
-			return err
-		}
-
-		bp.rollupsCount = 0
-
-		rollupsBatch, err := bp.conn.PrepareBatch(ctx, bp.rollupsBatchSQL)
-		if err != nil {
-			return err
-		}
-
-		bp.rollupsBatch = rollupsBatch
+	if err := bp.flushRollupsBatch(ctx); err != nil {
+		return err
 	}
+
+	return nil
+}
+
+// flushFilesBatch sends the files batch if it's non-empty.
+func (bp *batchProcessor) flushFilesBatch(ctx context.Context) error {
+	if bp.filesCount == 0 {
+		return nil
+	}
+
+	if err := bp.filesBatch.Send(); err != nil {
+		return err
+	}
+
+	bp.filesCount = 0
+
+	filesBatch, err := bp.conn.PrepareBatch(ctx, bp.filesBatchSQL)
+	if err != nil {
+		return err
+	}
+
+	bp.filesBatch = filesBatch
+
+	return nil
+} // flushRollupsBatch sends the rollups batch if it's non-empty.
+func (bp *batchProcessor) flushRollupsBatch(ctx context.Context) error {
+	if bp.rollupsCount == 0 {
+		return nil
+	}
+
+	if err := bp.rollupsBatch.Send(); err != nil {
+		return err
+	}
+
+	bp.rollupsCount = 0
+
+	rollupsBatch, err := bp.conn.PrepareBatch(ctx, bp.rollupsBatchSQL)
+	if err != nil {
+		return err
+	}
+
+	bp.rollupsBatch = rollupsBatch
 
 	return nil
 }
@@ -1094,8 +1119,38 @@ func SubtreeSummary(ctx context.Context, conn clickhouse.Conn, mountPath, dir st
 	dir = ensureDir(dir)
 
 	// Fast path when no filters other than path/mount.
-	if len(f.GIDs) == 0 && len(f.UIDs) == 0 && len(f.Exts) == 0 && f.ATimeBucket == "" && f.MTimeBucket == "" {
-		row := conn.QueryRow(ctx, `
+	if isNoFilters(f) {
+		return getUnfilteredSummary(ctx, conn, mountPath, dir)
+	}
+
+	// Build query for filtered results
+	where, args := buildBasicWhereClause(mountPath, dir)
+	where, args = appendFilterClauses(where, args, f)
+
+	// Build time bucket filter
+	bucketFilter := buildTimeBucketFilter(f)
+
+	// Construct the full query with CTE for max scan_id
+	query := buildSummaryQuery(where, bucketFilter)
+
+	// Add mountPath as the first argument for the CTE
+	allArgs := make([]any, 0, len(args)+1)
+	allArgs = append(allArgs, mountPath)
+	allArgs = append(allArgs, args...)
+
+	// Execute query and scan result
+	return executeSummaryQuery(ctx, conn, query, allArgs)
+}
+
+// Helper function to check if no filters are applied.
+func isNoFilters(f Filters) bool {
+	return len(f.GIDs) == 0 && len(f.UIDs) == 0 &&
+		len(f.Exts) == 0 && f.ATimeBucket == "" && f.MTimeBucket == ""
+}
+
+// Helper function for getting unfiltered summary.
+func getUnfilteredSummary(ctx context.Context, conn clickhouse.Conn, mountPath, dir string) (Summary, error) {
+	row := conn.QueryRow(ctx, `
 WITH (SELECT max(scan_id) FROM scans WHERE mount_path = ? AND state = 'ready') AS max_scan
 SELECT 
   sum(size),
@@ -1110,92 +1165,109 @@ SELECT
 FROM fs_entries_current
 WHERE mount_path = ? AND path LIKE ?`, mountPath, mountPath, dir+"%")
 
-		var s Summary
-		if err := row.Scan(&s.TotalSize, &s.FileCount, &s.MostRecentATime, &s.OldestATime,
-			&s.MostRecentMTime, &s.OldestMTime, &s.UIDs, &s.GIDs, &s.Exts); err != nil {
-			return Summary{}, err
-		}
-
-		return s, nil
+	var s Summary
+	if err := row.Scan(&s.TotalSize, &s.FileCount, &s.MostRecentATime, &s.OldestATime,
+		&s.MostRecentMTime, &s.OldestMTime, &s.UIDs, &s.GIDs, &s.Exts); err != nil {
+		return Summary{}, err
 	}
 
-	// Basic where clauses that apply to all queries
+	return s, nil
+}
+
+// Build basic where clause and args for the query.
+func buildBasicWhereClause(mountPath, dir string) ([]string, []any) {
 	where := []string{"mount_path = ?", "path LIKE ?"}
 	args := []any{mountPath, dir + "%"}
 
+	return where, args
+}
+
+// Append filter clauses based on the provided filters.
+func appendFilterClauses(where []string, args []any, f Filters) ([]string, []any) {
 	// Add filter for GIDs if provided
 	if len(f.GIDs) > 0 {
-		placeholders := make([]string, len(f.GIDs))
-		for i, v := range f.GIDs {
-			placeholders[i] = "?"
-
-			args = append(args, v)
-		}
-
-		where = append(where, fmt.Sprintf("gid IN (%s)", strings.Join(placeholders, ",")))
+		gidClause, gidArgs := buildInClause("gid", f.GIDs)
+		where = append(where, gidClause)
+		args = append(args, gidArgs...)
 	}
 
 	// Add filter for UIDs if provided
 	if len(f.UIDs) > 0 {
-		placeholders := make([]string, len(f.UIDs))
-		for i, v := range f.UIDs {
-			placeholders[i] = "?"
-
-			args = append(args, v)
-		}
-
-		where = append(where, fmt.Sprintf("uid IN (%s)", strings.Join(placeholders, ",")))
+		uidClause, uidArgs := buildInClause("uid", f.UIDs)
+		where = append(where, uidClause)
+		args = append(args, uidArgs...)
 	}
 
 	// Add filter for extensions if provided
 	if len(f.Exts) > 0 {
-		placeholders := make([]string, len(f.Exts))
-		for i, v := range f.Exts {
-			placeholders[i] = "?"
-
-			args = append(args, strings.ToLower(v))
-		}
-
-		where = append(where, fmt.Sprintf("ext_low IN (%s)", strings.Join(placeholders, ",")))
+		extClause, extArgs := buildExtensionClause(f.Exts)
+		where = append(where, extClause)
+		args = append(args, extArgs...)
 	}
 
-	// Build time bucket filters
-	bucketFilter := ""
-	if f.ATimeBucket != "" || f.MTimeBucket != "" {
-		predicates := []string{}
+	return where, args
+}
 
-		// Access time filter
-		if f.ATimeBucket != "" {
-			atPred, err := buildBucketPredicate("atime", f.ATimeBucket)
-			if err != nil {
-				return Summary{}, err
-			}
+// Build IN clause for filters.
+func buildInClause(field string, values []uint32) (string, []any) {
+	placeholders := make([]string, len(values))
+	args := make([]any, len(values))
 
-			if atPred != "" {
-				predicates = append(predicates, atPred)
-			}
-		}
+	for i, v := range values {
+		placeholders[i] = "?"
+		args[i] = v
+	}
 
-		// Modification time filter
-		if f.MTimeBucket != "" {
-			mtPred, err := buildBucketPredicate("mtime", f.MTimeBucket)
-			if err != nil {
-				return Summary{}, err
-			}
+	return fmt.Sprintf("%s IN (%s)", field, strings.Join(placeholders, ",")), args
+}
 
-			if mtPred != "" {
-				predicates = append(predicates, mtPred)
-			}
-		}
+// Build extension filter clause.
+func buildExtensionClause(exts []string) (string, []any) {
+	placeholders := make([]string, len(exts))
+	args := make([]any, len(exts))
 
-		// Combine predicates
-		if len(predicates) > 0 {
-			bucketFilter = " AND (" + strings.Join(predicates, " AND ") + ")"
+	for i, v := range exts {
+		placeholders[i] = "?"
+		args[i] = strings.ToLower(v)
+	}
+
+	return fmt.Sprintf("ext_low IN (%s)", strings.Join(placeholders, ",")), args
+}
+
+// Build time bucket filter clause.
+func buildTimeBucketFilter(f Filters) string {
+	if f.ATimeBucket == "" && f.MTimeBucket == "" {
+		return ""
+	}
+
+	var predicates []string
+
+	// Access time filter
+	if f.ATimeBucket != "" {
+		atPred, err := buildBucketPredicate("atime", f.ATimeBucket)
+		if err == nil && atPred != "" {
+			predicates = append(predicates, atPred)
 		}
 	}
 
-	// Construct the full query with CTE for max scan_id
-	query := `
+	// Modification time filter
+	if f.MTimeBucket != "" {
+		mtPred, err := buildBucketPredicate("mtime", f.MTimeBucket)
+		if err == nil && mtPred != "" {
+			predicates = append(predicates, mtPred)
+		}
+	}
+
+	if len(predicates) == 0 {
+		return ""
+	}
+
+	return " AND (" + strings.Join(predicates, " AND ") + ")"
+}
+
+// Build the complete summary query.
+func buildSummaryQuery(where []string, bucketFilter string) string {
+	return `
 WITH (SELECT max(scan_id) FROM scans WHERE mount_path = ? AND state = 'ready') AS max_scan
 SELECT 
   sum(size) AS total_size,
@@ -1209,14 +1281,11 @@ SELECT
   groupUniqArray(ext_low) AS exts
 FROM fs_entries_current
 WHERE ` + strings.Join(where, " AND ") + bucketFilter
+}
 
-	// Add mountPath as the first argument for the CTE
-	allArgs := make([]any, 0, len(args)+1)
-	allArgs = append(allArgs, mountPath)
-	allArgs = append(allArgs, args...)
-
-	// Execute query and scan result
-	row := conn.QueryRow(ctx, query, allArgs...)
+// Execute the summary query and return results.
+func executeSummaryQuery(ctx context.Context, conn clickhouse.Conn, query string, args []any) (Summary, error) {
+	row := conn.QueryRow(ctx, query, args...)
 
 	var s Summary
 	if err := row.Scan(
@@ -1232,50 +1301,53 @@ WHERE ` + strings.Join(where, " AND ") + bucketFilter
 
 // OptimizedSubtreeSummary attempts to use precomputed ancestor rollups when
 // possible. Falls back to the regular implementation for filtered queries.
-func OptimizedSubtreeSummary(ctx context.Context, conn clickhouse.Conn, mountPath, dir string, f Filters) (Summary, error) {
+func OptimizedSubtreeSummary(
+	ctx context.Context,
+	conn clickhouse.Conn,
+	mountPath, dir string,
+	f Filters,
+) (Summary, error) {
 	// Only use rollups when there are no filters at all
-	useRollups := len(f.GIDs) == 0 && len(f.UIDs) == 0 &&
-		len(f.Exts) == 0 && f.ATimeBucket == "" && f.MTimeBucket == ""
-
-	if useRollups {
-		dir = ensureDir(dir)
-
-		// Use the precomputed rollups table for better performance
-		query := `
-		SELECT 
-			total_size,
-			file_count,
-			atime_max AS most_recent_atime,
-			atime_min AS oldest_atime,
-			mtime_max AS most_recent_mtime,
-			mtime_min AS oldest_mtime,
-			uids,
-			gids,
-			exts
-		FROM ancestor_rollups_current
-		WHERE mount_path = ? AND ancestor = ?`
-
-		row := conn.QueryRow(ctx, query, mountPath, dir)
-
-		var s Summary
-		if err := row.Scan(
-			&s.TotalSize, &s.FileCount,
-			&s.MostRecentATime, &s.OldestATime,
-			&s.MostRecentMTime, &s.OldestMTime,
-			&s.UIDs, &s.GIDs, &s.Exts); err != nil {
-			// If no rows or other error, return empty summary (not an error condition)
-			if errors.Is(err, io.EOF) {
-				return Summary{}, nil
-			}
-
-			return Summary{}, err
-		}
-
-		return s, nil
+	if !isNoFilters(f) {
+		// Fall back to regular implementation for filtered queries
+		return SubtreeSummary(ctx, conn, mountPath, dir, f)
 	}
 
-	// Fall back to regular implementation for filtered queries
-	return SubtreeSummary(ctx, conn, mountPath, dir, f)
+	// Use precomputed rollups
+	return getRollupSummary(ctx, conn, mountPath, ensureDir(dir))
+} // Helper function to retrieve summary from the rollups table.
+func getRollupSummary(ctx context.Context, conn clickhouse.Conn, mountPath, dir string) (Summary, error) {
+	query := `
+	SELECT 
+		total_size,
+		file_count,
+		atime_max AS most_recent_atime,
+		atime_min AS oldest_atime,
+		mtime_max AS most_recent_mtime,
+		mtime_min AS oldest_mtime,
+		uids,
+		gids,
+		exts
+	FROM ancestor_rollups_current
+	WHERE mount_path = ? AND ancestor = ?`
+
+	row := conn.QueryRow(ctx, query, mountPath, dir)
+
+	var s Summary
+	if err := row.Scan(
+		&s.TotalSize, &s.FileCount,
+		&s.MostRecentATime, &s.OldestATime,
+		&s.MostRecentMTime, &s.OldestMTime,
+		&s.UIDs, &s.GIDs, &s.Exts); err != nil {
+		// If no rows or other error, return empty summary (not an error condition)
+		if errors.Is(err, io.EOF) {
+			return Summary{}, nil
+		}
+
+		return Summary{}, err
+	}
+
+	return s, nil
 }
 
 func SearchGlobPaths(ctx context.Context, conn clickhouse.Conn, mountPath, globPattern string, limit int, caseInsensitive bool) ([]string, error) {
