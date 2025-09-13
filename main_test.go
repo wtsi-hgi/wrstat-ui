@@ -494,7 +494,8 @@ func TestSummariseClickHouse(t *testing.T) {
 
 		// Check scans table
 		var scanCount uint64
-		err = chConn.QueryRow(ctx, "SELECT count() FROM scans WHERE state = 'ready' AND mount_path = ?", mountPath).Scan(&scanCount)
+		err = chConn.QueryRow(ctx,
+			"SELECT count() FROM scans WHERE state = 'ready' AND mount_path = ?", mountPath).Scan(&scanCount)
 		So(err, ShouldBeNil)
 		So(scanCount, ShouldBeGreaterThanOrEqualTo, 1)
 
@@ -507,7 +508,8 @@ func TestSummariseClickHouse(t *testing.T) {
 
 		// Check ancestor_rollups_raw table
 		var rollupCount uint64
-		err = chConn.QueryRow(ctx, "SELECT count() FROM ancestor_rollups_current WHERE mount_path = ?", mountPath).Scan(&rollupCount)
+		err = chConn.QueryRow(ctx,
+			"SELECT count() FROM ancestor_rollups_current WHERE mount_path = ?", mountPath).Scan(&rollupCount)
 		So(err, ShouldBeNil)
 		So(rollupCount, ShouldBeGreaterThan, 3) // Should have multiple rollups per file
 

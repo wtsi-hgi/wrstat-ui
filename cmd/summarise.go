@@ -56,6 +56,10 @@ var (
 )
 
 // summariseCmd represents the stat command.
+//
+// This command ingests a single mount's scan into ClickHouse with atomic
+// promotion semantics (loading -> ready), maintains only the latest ready scan
+// per mount, and provides precomputed subtree rollups.
 var summariseCmd = &cobra.Command{
 	Use:   "summarise <mount_path> <stats_file|->",
 	Short: "Summarise stat data",
@@ -294,7 +298,8 @@ func ForEachAncestor(dir, mountPath string, fn func(a string) bool) {
 	}
 }
 
-// escapeCHSingleQuotes escapes single quotes for embedding string literals into ClickHouse queries.
+// escapeCHSingleQuotes escapes single quotes for embedding string literals
+// into ClickHouse queries.
 func escapeCHSingleQuotes(s string) string { return strings.ReplaceAll(s, "'", "''") }
 
 func DeriveExtLower(name string, isDir bool) string {
@@ -717,7 +722,8 @@ type batchProcessor struct {
 }
 
 // Create a new batch processor.
-func newBatchProcessor(ctx context.Context, conn clickhouse.Conn, mountPath string, scanID uint64) (*batchProcessor, error) {
+func newBatchProcessor(ctx context.Context, conn clickhouse.Conn,
+	mountPath string, scanID uint64) (*batchProcessor, error) {
 	filesBatchSQL := `
 		INSERT INTO fs_entries 
 		(mount_path, scan_id, path, parent_path, name, ext_low, ftype, inode, size, uid, gid, mtime, atime, ctime)`
@@ -763,7 +769,8 @@ func (bp *batchProcessor) addFile(path string, parent string, name string, ext s
 }
 
 // Add an ancestor rollup entry to the batch.
-func (bp *batchProcessor) addRollup(ancestor string, size uint64, atime, mtime time.Time, uid, gid uint32, ext string) error {
+func (bp *batchProcessor) addRollup(ancestor string, size uint64,
+	atime, mtime time.Time, uid, gid uint32, ext string) error {
 	if err := bp.rollupsBatch.Append(
 		bp.mountPath, bp.scanID, ancestor, size, atime, mtime, uid, gid, ext); err != nil {
 		return err
@@ -1223,8 +1230,8 @@ WHERE ` + strings.Join(where, " AND ") + bucketFilter
 	return s, nil
 }
 
-// OptimizedSubtreeSummary attempts to use precomputed ancestor rollups when possible
-// Falls back to the regular implementation for filtered queries.
+// OptimizedSubtreeSummary attempts to use precomputed ancestor rollups when
+// possible. Falls back to the regular implementation for filtered queries.
 func OptimizedSubtreeSummary(ctx context.Context, conn clickhouse.Conn, mountPath, dir string, f Filters) (Summary, error) {
 	// Only use rollups when there are no filters at all
 	useRollups := len(f.GIDs) == 0 && len(f.UIDs) == 0 &&
