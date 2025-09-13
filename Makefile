@@ -52,7 +52,7 @@ bench: export CGO_ENABLED = 1
 bench:
 	go test -tags netgo --count 1 -run Bench -bench=. ./...
 
-# curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(go env GOPATH)/bin v1.59.1
+# curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh | sh -s -- -b $(go env GOPATH)/bin v2.4.0
 lint: export CGO_ENABLED = 1
 lint:
 	@cd server/static/wrstat; npm install && CI= npm run lint || true 
