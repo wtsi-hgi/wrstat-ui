@@ -87,6 +87,28 @@ func init() {
 }
 
 // Run executes the summarise command with the given arguments.
+// setupClickHouseConnection creates and configures a new ClickHouse connection.
+//
+//nolint:ireturn // We need to return the interface for compatibility with other functions
+func setupClickHouseConnection() (clickhouse.Conn, error) {
+	conn, err := clickhouse.Open(&clickhouse.Options{
+		Addr:        []string{fmt.Sprintf("%s:%s", chHost, chPort)},
+		Auth:        clickhouse.Auth{Database: chDatabase, Username: chUsername, Password: chPassword},
+		DialTimeout: dialTimeoutSeconds * time.Second,
+		Compression: &clickhouse.Compression{Method: clickhouse.CompressionLZ4},
+		Settings: clickhouse.Settings{
+			"max_insert_block_size":       maxInsertBlockSize,
+			"min_insert_block_size_rows":  minInsertBlockRows,
+			"min_insert_block_size_bytes": minInsertBlockBytes, // 10MB
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("connect: %w", err)
+	}
+
+	return conn, nil
+}
+
 func Run(args []string) (err error) {
 	mountPath, statsPath, err := checkArgs(args)
 	if err != nil {
@@ -102,19 +124,9 @@ func Run(args []string) (err error) {
 
 	ctx := context.Background()
 
-	conn, err := clickhouse.Open(&clickhouse.Options{
-		Addr:        []string{fmt.Sprintf("%s:%s", chHost, chPort)},
-		Auth:        clickhouse.Auth{Database: chDatabase, Username: chUsername, Password: chPassword},
-		DialTimeout: dialTimeoutSeconds * time.Second,
-		Compression: &clickhouse.Compression{Method: clickhouse.CompressionLZ4},
-		Settings: clickhouse.Settings{
-			"max_insert_block_size":       maxInsertBlockSize,
-			"min_insert_block_size_rows":  minInsertBlockRows,
-			"min_insert_block_size_bytes": minInsertBlockBytes, // 10MB
-		},
-	})
+	conn, err := setupClickHouseConnection()
 	if err != nil {
-		return fmt.Errorf("connect: %w", err)
+		return err
 	}
 	defer conn.Close()
 
@@ -228,25 +240,23 @@ const (
 	ftChar
 )
 
+// typeMap maps stats package entry type bytes to our internal ftype representation.
+var typeMap = map[byte]ftype{
+	stats.FileType:    ftFile,
+	stats.DirType:     ftDir,
+	stats.SymlinkType: ftSymlink,
+	stats.DeviceType:  ftDevice,
+	stats.PipeType:    ftPipe,
+	stats.SocketType:  ftSocket,
+	stats.CharType:    ftChar,
+}
+
 func mapEntryType(b byte) ftype {
-	switch b {
-	case stats.FileType:
-		return ftFile
-	case stats.DirType:
-		return ftDir
-	case stats.SymlinkType:
-		return ftSymlink
-	case stats.DeviceType:
-		return ftDevice
-	case stats.PipeType:
-		return ftPipe
-	case stats.SocketType:
-		return ftSocket
-	case stats.CharType:
-		return ftChar
-	default:
-		return ftUnknown
+	if ft, ok := typeMap[b]; ok {
+		return ft
 	}
+
+	return ftUnknown
 }
 
 func NormalizeMount(m string) string {
@@ -314,6 +324,31 @@ func ForEachAncestor(dir, mountPath string, fn func(a string) bool) {
 // into ClickHouse queries.
 func escapeCHSingleQuotes(s string) string { return strings.ReplaceAll(s, "'", "''") }
 
+// isCompressedExtension checks if the given extension is a compressed file extension.
+func isCompressedExtension(ext string) bool {
+	compressExts := map[string]bool{
+		"gz": true, "bz2": true, "xz": true,
+		"zst": true, "lz4": true, "lz": true, "br": true,
+	}
+
+	return compressExts[ext]
+}
+
+// handleCompressedExtension processes compound extensions like .tar.gz, .csv.bz2, etc.
+func handleCompressedExtension(base string, dot int, ext string) string {
+	prevDot := strings.LastIndexByte(base[:dot], '.')
+	if prevDot == -1 {
+		return ext
+	}
+
+	prevExt := strings.ToLower(base[prevDot+1 : dot])
+	if prevExt == "" {
+		return ext
+	}
+
+	return prevExt + "." + ext
+}
+
 func DeriveExtLower(name string, isDir bool) string {
 	// Directories and files without extensions return empty string
 	if isDir {
@@ -330,29 +365,13 @@ func DeriveExtLower(name string, isDir bool) string {
 
 	ext := strings.ToLower(base[dot+1:])
 
-	// Check for compressed file extensions
-	compressExts := map[string]bool{
-		"gz": true, "bz2": true, "xz": true,
-		"zst": true, "lz4": true, "lz": true, "br": true,
-	}
-
 	// If not a compressed extension, return as is
-	if !compressExts[ext] {
+	if !isCompressedExtension(ext) {
 		return ext
 	}
 
-	// Handle compound extensions for compressed files (.tar.gz, .csv.bz2, etc.)
-	prevDot := strings.LastIndexByte(base[:dot], '.')
-	if prevDot == -1 {
-		return ext
-	}
-
-	prevExt := strings.ToLower(base[prevDot+1 : dot])
-	if prevExt == "" {
-		return ext
-	}
-
-	return prevExt + "." + ext
+	// Handle compound extensions for compressed files
+	return handleCompressedExtension(base, dot, ext)
 }
 
 // SQL constants.
@@ -619,12 +638,14 @@ func CreateSchema(ctx context.Context, conn clickhouse.Conn) error {
 	return createSchema(ctx, conn)
 }
 
-func createSchema(ctx context.Context, conn clickhouse.Conn) error {
-	// Create scans table first
-	if err := conn.Exec(ctx, createScansTable); err != nil {
-		return err
-	}
+// createTableWithStatement executes a CREATE TABLE statement and returns any error.
+func createTableWithStatement(ctx context.Context, conn clickhouse.Conn, statement string) error {
+	return conn.Exec(ctx, statement)
+}
 
+// createFsEntriesTableWithFallback tries to create the fs_entries table with path bloom filter,
+// but falls back to no path index if the server doesn't support it.
+func createFsEntriesTableWithFallback(ctx context.Context, conn clickhouse.Conn) error {
 	// Try fs_entries with path bloom filter, fallback if server doesn't support it
 	if err := conn.Exec(ctx, createFsEntriesTable); err != nil {
 		// Retry with no path index
@@ -633,18 +654,11 @@ func createSchema(ctx context.Context, conn clickhouse.Conn) error {
 		}
 	}
 
-	// Create rollup raw table
-	if err := conn.Exec(ctx, createRollupRawTable); err != nil {
-		return err
-	}
+	return nil
+}
 
-	// Create state table
-	if err := conn.Exec(ctx, createRollupStateTable); err != nil {
-		return err
-	}
-
-	// All required columns are declared in the CREATE statements above.
-
+// createViews creates all the necessary views for the schema.
+func createViews(ctx context.Context, conn clickhouse.Conn) error {
 	//nolint:misspell // ClickHouse requires American English spelling "materialized"
 	// Create materialized view and current views
 	if err := conn.Exec(ctx, createRollupMV); err != nil {
@@ -662,34 +676,60 @@ func createSchema(ctx context.Context, conn clickhouse.Conn) error {
 	return nil
 }
 
+func createSchema(ctx context.Context, conn clickhouse.Conn) error {
+	// Create scans table first
+	if err := createTableWithStatement(ctx, conn, createScansTable); err != nil {
+		return err
+	}
+
+	// Create fs_entries table with fallback
+	if err := createFsEntriesTableWithFallback(ctx, conn); err != nil {
+		return err
+	}
+
+	// Create rollup raw table
+	if err := createTableWithStatement(ctx, conn, createRollupRawTable); err != nil {
+		return err
+	}
+
+	// Create state table
+	if err := createTableWithStatement(ctx, conn, createRollupStateTable); err != nil {
+		return err
+	}
+
+	// Create all views
+	return createViews(ctx, conn)
+}
+
 // UpdateClickhouse exports the internal updateClickhouse function for testing.
 func UpdateClickhouse(ctx context.Context, conn clickhouse.Conn, mountPath string, r io.Reader) error {
 	return updateClickhouse(ctx, conn, mountPath, r)
 }
 
-func updateClickhouse(ctx context.Context, conn clickhouse.Conn, mountPath string, r io.Reader) (retErr error) {
-	// Use current time as scan ID
-	scanID := uint64(time.Now().Unix()) //nolint:gosec // monotonic timestamp scan identifier
-	started := time.Now()
+// dropPartitionIgnoreErrors executes a query and ignores any errors.
+// #nosec G104 - we intentionally ignore errors here for cleanup operations
+func dropPartitionIgnoreErrors(ctx context.Context, conn clickhouse.Conn, query string, args ...any) {
+	// We intentionally ignore errors from these cleanup operations
+	//nolint:errcheck
+	conn.Exec(ctx, query, args...)
+}
 
-	// Register scan as loading
-	if err := conn.Exec(ctx, `
+// registerScan adds a new scan record with 'loading' state.
+func registerScan(ctx context.Context, conn clickhouse.Conn, mountPath string, scanID uint64, started time.Time) error {
+	err := conn.Exec(ctx, `
 		INSERT INTO scans (mount_path, scan_id, state, started_at, finished_at) 
 		VALUES (?, ?, 'loading', ?, NULL)`,
-		mountPath, scanID, started); err != nil {
+		mountPath, scanID, started)
+	if err != nil {
 		return fmt.Errorf("insert scan: %w", err)
 	}
 
-	// Helper function to execute a statement and ignore errors
-	// #nosec G104 - we intentionally ignore errors here for cleanup operations
-	dropPartitionIgnoreErrors := func(ctx context.Context, conn clickhouse.Conn, query string, args ...any) {
-		// We intentionally ignore errors from these cleanup operations
-		//nolint:errcheck
-		conn.Exec(ctx, query, args...)
-	}
+	return nil
+}
 
-	// Rollback on failure: drop this scan's partitions and scan row
-	defer func() {
+// setupRollbackHandler creates a deferred function that handles cleanup on error.
+func setupRollbackHandler(ctx context.Context, conn clickhouse.Conn, mountPath string, scanID uint64) func(error) {
+	return func(retErr error) {
 		if retErr == nil {
 			return
 		}
@@ -703,7 +743,21 @@ func updateClickhouse(ctx context.Context, conn clickhouse.Conn, mountPath strin
 		dropPartitionIgnoreErrors(ctx, conn, "ALTER TABLE ancestor_rollups_state DROP PARTITION "+part)
 		dropPartitionIgnoreErrors(ctx, conn,
 			`ALTER TABLE scans DELETE WHERE mount_path = ? AND scan_id = ?`, mountPath, scanID)
-	}()
+	}
+}
+
+func updateClickhouse(ctx context.Context, conn clickhouse.Conn, mountPath string, r io.Reader) (retErr error) {
+	// Use current time as scan ID
+	scanID := uint64(time.Now().Unix()) //nolint:gosec // monotonic timestamp scan identifier
+	started := time.Now()
+
+	// Register scan as loading
+	if err := registerScan(ctx, conn, mountPath, scanID, started); err != nil {
+		return err
+	}
+
+	// Set up rollback handler for cleanup on error
+	defer setupRollbackHandler(ctx, conn, mountPath, scanID)(retErr)
 
 	if err := ingestScan(ctx, conn, mountPath, scanID, r); err != nil {
 		return err
@@ -866,6 +920,86 @@ func (bp *batchProcessor) flushRollupsBatch(ctx context.Context) error {
 	return nil
 }
 
+// processFileEntry handles a single file entry during scan ingestion.
+func processFileEntry(bp *batchProcessor, fi *stats.FileInfo, mountPath string) error {
+	path := string(fi.Path)
+	isDir := fi.EntryType == stats.DirType || IsDirPath(path)
+
+	parent, name := SplitParentAndName(path)
+	ext := DeriveExtLower(name, isDir)
+	ft := mapEntryType(fi.EntryType)
+	mtime := time.Unix(fi.MTime, 0)
+	atime := time.Unix(fi.ATime, 0)
+	ctime := time.Unix(fi.CTime, 0)
+
+	// Handle potential integer overflow by using explicit conversions
+	inode := uint64(0)
+	if fi.Inode > 0 {
+		inode = uint64(fi.Inode) // Values originate from trusted stats parser
+	}
+
+	size := uint64(0)
+	if fi.Size > 0 {
+		size = uint64(fi.Size) // Values originate from trusted stats parser
+	}
+
+	// Add file entry to batch
+	if err := bp.addFile(path, parent, name, ext, ft, inode, size,
+		fi.UID, fi.GID, mtime, atime, ctime); err != nil {
+		return fmt.Errorf("failed to add file entry: %w", err)
+	}
+
+	return processAncestorRollups(bp, fi, path, parent, isDir, size, atime, mtime, ext, mountPath)
+}
+
+// processAncestorRollups processes rollups for all ancestor directories.
+// It calculates rollups for each directory in the path hierarchy.
+func processAncestorRollups(bp *batchProcessor, fi *stats.FileInfo, path, parent string,
+	isDir bool, size uint64, atime, mtime time.Time, ext, mountPath string) error {
+	// Include the directory itself in its own subtree if the entry is a directory
+	base := parent
+	if isDir {
+		base = path
+	}
+
+	// Process all ancestors
+	var ancestorErr error
+
+	ForEachAncestor(base, mountPath, func(a string) bool {
+		if err := bp.addRollup(a, size, atime, mtime, fi.UID, fi.GID, ext); err != nil {
+			ancestorErr = err
+
+			return false
+		}
+
+		return true
+	})
+
+	if ancestorErr != nil {
+		return fmt.Errorf("failed to add ancestor rollup: %w", ancestorErr)
+	}
+
+	return nil
+}
+
+// processScanEntry processes a single entry during scan ingestion.
+// Returns a boolean indicating if we should continue scanning, and any error encountered.
+func processScanEntry(ctx context.Context, bp *batchProcessor, fi *stats.FileInfo, mountPath string) (bool, error) {
+	// Process the file entry
+	if err := processFileEntry(bp, fi, mountPath); err != nil {
+		return false, err
+	}
+
+	// Flush batches if needed
+	if bp.needsFlush() {
+		if err := bp.flush(ctx); err != nil {
+			return false, fmt.Errorf("failed to flush batches: %w", err)
+		}
+	}
+
+	return true, nil
+}
+
 func ingestScan(ctx context.Context, conn clickhouse.Conn, mountPath string, scanID uint64, r io.Reader) error {
 	// Create batch processor
 	bp, err := newBatchProcessor(ctx, conn, mountPath, scanID)
@@ -873,6 +1007,16 @@ func ingestScan(ctx context.Context, conn clickhouse.Conn, mountPath string, sca
 		return err
 	}
 
+	if err := scanAndProcessEntries(ctx, bp, r, mountPath); err != nil {
+		return err
+	}
+
+	// Final flush
+	return bp.flush(ctx)
+}
+
+// scanAndProcessEntries scans through the file records and processes each entry.
+func scanAndProcessEntries(ctx context.Context, bp *batchProcessor, r io.Reader, mountPath string) error {
 	parser := stats.NewStatsParser(r)
 	fi := new(stats.FileInfo)
 
@@ -884,62 +1028,9 @@ func ingestScan(ctx context.Context, conn clickhouse.Conn, mountPath string, sca
 			break
 		}
 
-		path := string(fi.Path)
-		isDir := fi.EntryType == stats.DirType || IsDirPath(path)
-
-		parent, name := SplitParentAndName(path)
-		ext := DeriveExtLower(name, isDir)
-		ft := mapEntryType(fi.EntryType)
-		mtime := time.Unix(fi.MTime, 0)
-		atime := time.Unix(fi.ATime, 0)
-		ctime := time.Unix(fi.CTime, 0)
-
-		// Handle potential integer overflow by using explicit conversions
-		inode := uint64(0)
-		if fi.Inode > 0 {
-			inode = uint64(fi.Inode) //nolint:gosec // values originate from trusted stats parser
-		}
-
-		size := uint64(0)
-		if fi.Size > 0 {
-			size = uint64(fi.Size) //nolint:gosec // values originate from trusted stats parser
-		}
-
-		// Add file entry to batch
-		if err := bp.addFile(path, parent, name, ext, ft, inode, size,
-			fi.UID, fi.GID, mtime, atime, ctime); err != nil {
-			return fmt.Errorf("failed to add file entry: %w", err)
-		}
-
-		// Rollups for each ancestor directory (including mount root)
-		// Include the directory itself in its own subtree if the entry is a directory
-		base := parent
-		if isDir {
-			base = path
-		}
-
-		// Process all ancestors
-		var ancestorErr error
-
-		ForEachAncestor(base, mountPath, func(a string) bool {
-			if err := bp.addRollup(a, size, atime, mtime, fi.UID, fi.GID, ext); err != nil {
-				ancestorErr = err
-
-				return false
-			}
-
-			return true
-		})
-
-		if ancestorErr != nil {
-			return fmt.Errorf("failed to add ancestor rollup: %w", ancestorErr)
-		}
-
-		// Flush batches if needed
-		if bp.needsFlush() {
-			if err := bp.flush(ctx); err != nil {
-				return fmt.Errorf("failed to flush batches: %w", err)
-			}
+		shouldContinue, err := processScanEntry(ctx, bp, fi, mountPath)
+		if !shouldContinue || err != nil {
+			return err
 		}
 	}
 
@@ -948,8 +1039,7 @@ func ingestScan(ctx context.Context, conn clickhouse.Conn, mountPath string, sca
 		return fmt.Errorf("parser error: %w", parseErr)
 	}
 
-	// Final flush
-	return bp.flush(ctx)
+	return nil
 }
 
 func dropOlderScans(ctx context.Context, conn clickhouse.Conn, mountPath string, keepScanID uint64) error {
@@ -972,30 +1062,39 @@ func dropOlderScans(ctx context.Context, conn clickhouse.Conn, mountPath string,
 			return err
 		}
 
-		// Construct partition tuple literal safely
-		part := fmt.Sprintf("('%s', %d)", escapeCHSingleQuotes(mountPath), sid)
-
-		// Drop partitions from tables
-		for _, dropStmt := range []string{
-			"ALTER TABLE fs_entries DROP PARTITION " + part,
-			"ALTER TABLE ancestor_rollups_raw DROP PARTITION " + part,
-			"ALTER TABLE ancestor_rollups_state DROP PARTITION " + part,
-		} {
-			if err := conn.Exec(ctx, dropStmt); err != nil {
-				return err
-			}
-		}
-
-		// Delete scan record
-		if err := conn.Exec(ctx, `
-			ALTER TABLE scans DELETE
-			WHERE mount_path = ? AND scan_id = ?`,
-			mountPath, sid); err != nil {
+		if err := dropSingleScan(ctx, conn, mountPath, sid); err != nil {
 			return err
 		}
 	}
 
 	return rows.Err()
+}
+
+// dropSingleScan drops all data for a single scan ID.
+func dropSingleScan(ctx context.Context, conn clickhouse.Conn, mountPath string, scanID uint64) error {
+	// Construct partition tuple literal safely
+	part := fmt.Sprintf("('%s', %d)", escapeCHSingleQuotes(mountPath), scanID)
+
+	// Drop partitions from tables
+	for _, dropStmt := range []string{
+		"ALTER TABLE fs_entries DROP PARTITION " + part,
+		"ALTER TABLE ancestor_rollups_raw DROP PARTITION " + part,
+		"ALTER TABLE ancestor_rollups_state DROP PARTITION " + part,
+	} {
+		if err := conn.Exec(ctx, dropStmt); err != nil {
+			return err
+		}
+	}
+
+	// Delete scan record
+	if err := conn.Exec(ctx, `
+		ALTER TABLE scans DELETE
+		WHERE mount_path = ? AND scan_id = ?`,
+		mountPath, scanID); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 // --- Query helpers ---.
@@ -1253,6 +1352,43 @@ func buildExtensionClause(exts []string) (string, []any) {
 }
 
 // Build time bucket filter clause.
+// buildAccessTimeFilter builds the access time filter predicate.
+func buildAccessTimeFilter(aTimeBucket string) string {
+	if aTimeBucket == "" {
+		return ""
+	}
+
+	atPred, err := buildBucketPredicate("atime", aTimeBucket)
+	if err != nil || atPred == "" {
+		return ""
+	}
+
+	return atPred
+}
+
+// buildModificationTimeFilter builds the modification time filter predicate.
+func buildModificationTimeFilter(mTimeBucket string) string {
+	if mTimeBucket == "" {
+		return ""
+	}
+
+	mtPred, err := buildBucketPredicate("mtime", mTimeBucket)
+	if err != nil || mtPred == "" {
+		return ""
+	}
+
+	return mtPred
+}
+
+// joinTimeFilters combines multiple time filter predicates.
+func joinTimeFilters(predicates []string) string {
+	if len(predicates) == 0 {
+		return ""
+	}
+
+	return " AND (" + strings.Join(predicates, " AND ") + ")"
+}
+
 func buildTimeBucketFilter(f Filters) string {
 	if f.ATimeBucket == "" && f.MTimeBucket == "" {
 		return ""
@@ -1261,26 +1397,16 @@ func buildTimeBucketFilter(f Filters) string {
 	var predicates []string
 
 	// Access time filter
-	if f.ATimeBucket != "" {
-		atPred, err := buildBucketPredicate("atime", f.ATimeBucket)
-		if err == nil && atPred != "" {
-			predicates = append(predicates, atPred)
-		}
+	if atPred := buildAccessTimeFilter(f.ATimeBucket); atPred != "" {
+		predicates = append(predicates, atPred)
 	}
 
 	// Modification time filter
-	if f.MTimeBucket != "" {
-		mtPred, err := buildBucketPredicate("mtime", f.MTimeBucket)
-		if err == nil && mtPred != "" {
-			predicates = append(predicates, mtPred)
-		}
+	if mtPred := buildModificationTimeFilter(f.MTimeBucket); mtPred != "" {
+		predicates = append(predicates, mtPred)
 	}
 
-	if len(predicates) == 0 {
-		return ""
-	}
-
-	return " AND (" + strings.Join(predicates, " AND ") + ")"
+	return joinTimeFilters(predicates)
 }
 
 // Build the complete summary query.
@@ -1368,10 +1494,8 @@ func getRollupSummary(ctx context.Context, conn clickhouse.Conn, mountPath, dir 
 	return s, nil
 }
 
-func SearchGlobPaths(ctx context.Context, conn clickhouse.Conn, mountPath, globPattern string, limit int, caseInsensitive bool) ([]string, error) {
-	// Convert glob pattern to SQL LIKE pattern
-	pattern := strings.ReplaceAll(strings.ReplaceAll(globPattern, "*", "%"), "?", "_")
-
+// buildGlobSearchQuery constructs a SQL query for searching paths with a glob pattern.
+func buildGlobSearchQuery(caseInsensitive bool, limit int) string {
 	// Build the query based on case sensitivity
 	var query string
 	if caseInsensitive {
@@ -1386,6 +1510,23 @@ func SearchGlobPaths(ctx context.Context, conn clickhouse.Conn, mountPath, globP
 	if limit > 0 {
 		query += fmt.Sprintf(" LIMIT %d", limit)
 	}
+
+	return query
+}
+
+// SearchGlobPaths searches for paths matching a glob pattern in ClickHouse.
+func SearchGlobPaths(
+	ctx context.Context,
+	conn clickhouse.Conn,
+	mountPath, globPattern string,
+	limit int,
+	caseInsensitive bool,
+) ([]string, error) {
+	// Build the query
+	query := buildGlobSearchQuery(caseInsensitive, limit)
+
+	// Convert glob pattern to SQL LIKE pattern
+	pattern := strings.ReplaceAll(strings.ReplaceAll(globPattern, "*", "%"), "?", "_")
 
 	// Execute query
 	rows, err := conn.Query(ctx, query, mountPath, pattern)
