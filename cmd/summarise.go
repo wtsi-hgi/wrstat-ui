@@ -128,6 +128,7 @@ func checkArgs(args []string) (string, string, error) {
 
 	mountPath := NormalizeMount(args[0])
 	statsPath := args[1]
+
 	if mountPath == "/" {
 		return "", "", errors.New("mount_path must not be '/' — use the real mount point path") //nolint:err113
 	}
@@ -236,6 +237,7 @@ func NormalizeMount(m string) string {
 	if m == "" {
 		return m
 	}
+
 	if !strings.HasSuffix(m, "/") {
 		return m + "/"
 	}
@@ -253,6 +255,7 @@ func SplitParentAndName(path string) (parent, name string) {
 	if IsDirPath(p) {
 		p = p[:len(p)-1]
 	}
+
 	idx := strings.LastIndexByte(p, '/')
 	if idx <= 0 {
 		// Root-like; parent is "/" and name is remainder
@@ -286,6 +289,7 @@ func ForEachAncestor(dir, mountPath string, fn func(a string) bool) {
 		if lastSlash < 0 {
 			return
 		}
+
 		dir = dir[:lastSlash+1]
 	}
 }
@@ -300,6 +304,7 @@ func DeriveExtLower(name string, isDir bool) string {
 
 	// Hidden files: ignore leading dot for ext purposes
 	base := strings.TrimPrefix(name, ".")
+
 	dot := strings.LastIndexByte(base, '.')
 	if dot == -1 {
 		return ""
@@ -745,7 +750,6 @@ func newBatchProcessor(ctx context.Context, conn clickhouse.Conn, mountPath stri
 // Add a file entry to the batch
 func (bp *batchProcessor) addFile(path string, parent string, name string, ext string,
 	ft ftype, inode uint64, size uint64, uid uint32, gid uint32, mtime, atime, ctime time.Time) error {
-
 	if err := bp.filesBatch.Append(
 		bp.mountPath, bp.scanID, path, parent, name, ext, uint8(ft),
 		inode, size, uid, gid, mtime, atime, ctime,
@@ -784,10 +788,12 @@ func (bp *batchProcessor) flush(ctx context.Context) error {
 		}
 
 		bp.filesCount = 0
+
 		filesBatch, err := bp.conn.PrepareBatch(ctx, bp.filesBatchSQL)
 		if err != nil {
 			return err
 		}
+
 		bp.filesBatch = filesBatch
 	}
 
@@ -798,10 +804,12 @@ func (bp *batchProcessor) flush(ctx context.Context) error {
 		}
 
 		bp.rollupsCount = 0
+
 		rollupsBatch, err := bp.conn.PrepareBatch(ctx, bp.rollupsBatchSQL)
 		if err != nil {
 			return err
 		}
+
 		bp.rollupsBatch = rollupsBatch
 	}
 
@@ -817,6 +825,7 @@ func ingestScan(ctx context.Context, conn clickhouse.Conn, mountPath string, sca
 
 	parser := stats.NewStatsParser(r)
 	fi := new(stats.FileInfo)
+
 	var parseErr error
 
 	for {
@@ -861,6 +870,7 @@ func ingestScan(ctx context.Context, conn clickhouse.Conn, mountPath string, sca
 
 		// Process all ancestors
 		var ancestorErr error
+
 		ForEachAncestor(base, mountPath, func(a string) bool {
 			if err := bp.addRollup(a, size, atime, mtime, fi.UID, fi.GID, ext); err != nil {
 				ancestorErr = err
@@ -991,6 +1001,7 @@ func GetLastScanTimes(ctx context.Context, conn clickhouse.Conn) (map[string]tim
 	result := make(map[string]time.Time)
 	for rows.Next() {
 		var mountPath string
+
 		var timestamp time.Time
 
 		if err := rows.Scan(&mountPath, &timestamp); err != nil {
@@ -1095,7 +1106,6 @@ WHERE mount_path = ? AND path LIKE ?`, mountPath, mountPath, dir+"%")
 		var s Summary
 		if err := row.Scan(&s.TotalSize, &s.FileCount, &s.MostRecentATime, &s.OldestATime,
 			&s.MostRecentMTime, &s.OldestMTime, &s.UIDs, &s.GIDs, &s.Exts); err != nil {
-
 			return Summary{}, err
 		}
 
@@ -1111,8 +1121,10 @@ WHERE mount_path = ? AND path LIKE ?`, mountPath, mountPath, dir+"%")
 		placeholders := make([]string, len(f.GIDs))
 		for i, v := range f.GIDs {
 			placeholders[i] = "?"
+
 			args = append(args, v)
 		}
+
 		where = append(where, fmt.Sprintf("gid IN (%s)", strings.Join(placeholders, ",")))
 	}
 
@@ -1121,8 +1133,10 @@ WHERE mount_path = ? AND path LIKE ?`, mountPath, mountPath, dir+"%")
 		placeholders := make([]string, len(f.UIDs))
 		for i, v := range f.UIDs {
 			placeholders[i] = "?"
+
 			args = append(args, v)
 		}
+
 		where = append(where, fmt.Sprintf("uid IN (%s)", strings.Join(placeholders, ",")))
 	}
 
@@ -1131,8 +1145,10 @@ WHERE mount_path = ? AND path LIKE ?`, mountPath, mountPath, dir+"%")
 		placeholders := make([]string, len(f.Exts))
 		for i, v := range f.Exts {
 			placeholders[i] = "?"
+
 			args = append(args, strings.ToLower(v))
 		}
+
 		where = append(where, fmt.Sprintf("ext_low IN (%s)", strings.Join(placeholders, ",")))
 	}
 
@@ -1147,6 +1163,7 @@ WHERE mount_path = ? AND path LIKE ?`, mountPath, mountPath, dir+"%")
 			if err != nil {
 				return Summary{}, err
 			}
+
 			if atPred != "" {
 				predicates = append(predicates, atPred)
 			}
@@ -1158,6 +1175,7 @@ WHERE mount_path = ? AND path LIKE ?`, mountPath, mountPath, dir+"%")
 			if err != nil {
 				return Summary{}, err
 			}
+
 			if mtPred != "" {
 				predicates = append(predicates, mtPred)
 			}
@@ -1286,6 +1304,7 @@ func SearchGlobPaths(ctx context.Context, conn clickhouse.Conn, mountPath, globP
 		if err := rows.Scan(&path); err != nil {
 			return nil, err
 		}
+
 		result = append(result, path)
 	}
 

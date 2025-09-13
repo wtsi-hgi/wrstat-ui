@@ -83,8 +83,8 @@ func failMainTest(err string) {
 
 func TestMain(m *testing.M) {
 	d1 := buildSelf()
-	if d1 == nil {
 
+	if d1 == nil {
 		return
 	}
 
@@ -362,6 +362,7 @@ func TestSummariseClickHouse(t *testing.T) {
 	// No default password
 
 	// Create a unique test database name based on the current username
+
 	currentUser, err := user.Current()
 	if err != nil {
 		t.Fatalf("Failed to get current user: %v", err)
@@ -369,27 +370,29 @@ func TestSummariseClickHouse(t *testing.T) {
 	testDatabase := fmt.Sprintf("test_wrstatui_%s", currentUser.Username)
 
 	// Create a test connection
+
 	ctx := context.Background()
 
 	// Connect to default database first for management operations
+
 	adminConn, err := clickhouse.Open(&clickhouse.Options{
 		Addr:        []string{fmt.Sprintf("%s:%s", chHost, chPort)},
 		Auth:        clickhouse.Auth{Database: "default", Username: chUsername, Password: chPassword},
 		DialTimeout: 5 * time.Second,
 	})
-
 	if err != nil {
 		t.Skipf("Skipping TestSummariseClickHouse - could not connect to ClickHouse: %v", err)
-
 		return
 	}
 
 	// First drop the test database if it exists
+
 	if err := adminConn.Exec(ctx, fmt.Sprintf("DROP DATABASE IF EXISTS %s", testDatabase)); err != nil {
 		t.Logf("Warning: failed to drop existing test DB: %v", err)
 	}
 
 	// Create a fresh test database
+
 	err = adminConn.Exec(ctx, fmt.Sprintf("CREATE DATABASE %s", testDatabase))
 	if err != nil {
 		adminConn.Close()
@@ -397,9 +400,11 @@ func TestSummariseClickHouse(t *testing.T) {
 	}
 
 	// Close admin connection
+
 	adminConn.Close()
 
 	// Clean up the test database after the test
+
 	defer func() {
 		// Create a new connection to default database for cleanup
 		cleanupConn, err := clickhouse.Open(&clickhouse.Options{
@@ -409,7 +414,6 @@ func TestSummariseClickHouse(t *testing.T) {
 		})
 		if err != nil {
 			t.Errorf("Failed to connect for cleanup: %v", err)
-
 			return
 		}
 
@@ -459,6 +463,7 @@ func TestSummariseClickHouse(t *testing.T) {
 			},
 		})
 		So(err, ShouldBeNil)
+
 		defer testConn.Close()
 
 		// Create schema first
@@ -468,6 +473,7 @@ func TestSummariseClickHouse(t *testing.T) {
 		// Open the stats file
 		r, _, err := cmd.OpenStatsFile(statsPath)
 		So(err, ShouldBeNil)
+
 		defer r.Close()
 
 		// Update the ClickHouse database
@@ -483,6 +489,7 @@ func TestSummariseClickHouse(t *testing.T) {
 			DialTimeout: 5 * time.Second,
 		})
 		So(err, ShouldBeNil)
+
 		defer chConn.Close()
 
 		// Check scans table
@@ -493,6 +500,7 @@ func TestSummariseClickHouse(t *testing.T) {
 
 		// Check fs_entries table - we should have more than 3 entries due to directory entries
 		var fileCount uint64
+
 		err = chConn.QueryRow(ctx, "SELECT count() FROM fs_entries_current WHERE mount_path = ?", mountPath).Scan(&fileCount)
 		So(err, ShouldBeNil)
 		So(fileCount, ShouldBeGreaterThan, 3) // Should have at least our 3 files plus directories
@@ -506,6 +514,7 @@ func TestSummariseClickHouse(t *testing.T) {
 		// Check total size calculation in rollups - we expect at least 6000 (our 3 files),
 		// but there may be additional bytes for directory entries
 		var totalSize uint64
+
 		err = chConn.QueryRow(ctx, `
 			SELECT total_size 
 			FROM ancestor_rollups_current 
@@ -516,6 +525,7 @@ func TestSummariseClickHouse(t *testing.T) {
 
 		// Test querying by path
 		var fileSize uint64
+
 		err = chConn.QueryRow(ctx, `
 			SELECT size FROM fs_entries_current 
 			WHERE path = ?`,
