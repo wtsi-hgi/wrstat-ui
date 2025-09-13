@@ -31,6 +31,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -506,5 +507,108 @@ func TestClickHouseIntegration(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, uint64(400), s.TotalSize)
 		assert.Equal(t, uint64(1), s.FileCount)
+	})
+
+	// Concurrent ingests on different mount points should not interfere with each other
+	t.Run("ConcurrentMountIngests", func(t *testing.T) {
+		mountA := "/lustre/scratch128/"
+		mountB := "/lustre/scratch129/"
+
+		ref := time.Now().Truncate(time.Second).Unix()
+		rootA := statsdata.NewRoot(mountA, ref)
+		statsdata.AddFile(rootA, "projA/data/fileA1", uid, gid, 111, ref, ref)
+		statsdata.AddFile(rootA, "projA/data/fileA2", uid, gid, 222, ref, ref)
+
+		rootB := statsdata.NewRoot(mountB, ref)
+		statsdata.AddFile(rootB, "projB/data/fileB1", uid, gid, 333, ref, ref)
+		statsdata.AddFile(rootB, "projB/data/fileB2", uid, gid, 444, ref, ref)
+
+		ctx2, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+
+		var wg sync.WaitGroup
+
+		errs := make(chan error, 2)
+
+		wg.Add(2)
+
+		go func() {
+			defer wg.Done()
+
+			// Use a dedicated connection to better simulate independent ingesters
+			chA, err := clickhouse.New(params)
+			if err != nil {
+				errs <- err
+
+				return
+			}
+			defer chA.Close()
+
+			r := rootA.AsReader()
+			defer r.Close()
+
+			errs <- chA.UpdateClickhouse(ctx2, mountA, r)
+		}()
+
+		go func() {
+			defer wg.Done()
+
+			// Use a dedicated connection to better simulate independent ingesters
+			chB, err := clickhouse.New(params)
+			if err != nil {
+				errs <- err
+
+				return
+			}
+			defer chB.Close()
+
+			r := rootB.AsReader()
+			defer r.Close()
+
+			errs <- chB.UpdateClickhouse(ctx2, mountB, r)
+		}()
+
+		wg.Wait()
+		close(errs)
+
+		for err := range errs {
+			require.NoError(t, err)
+		}
+
+		// Each mount should have exactly one ready scan
+		var readyA, readyB uint64
+		require.NoError(t, ch.ExecuteQuery(
+			ctx2,
+			"SELECT count() FROM scans WHERE state = 'ready' AND mount_path = ?",
+			mountA,
+			&readyA,
+		))
+		require.NoError(t, ch.ExecuteQuery(
+			ctx2,
+			"SELECT count() FROM scans WHERE state = 'ready' AND mount_path = ?",
+			mountB,
+			&readyB,
+		))
+		assert.Equal(t, uint64(1), readyA)
+		assert.Equal(t, uint64(1), readyB)
+
+		// Verify files present for both mounts
+		var cnt uint64
+		require.NoError(t, ch.ExecuteQuery(
+			ctx2,
+			"SELECT count() FROM fs_entries_current WHERE mount_path = ? AND path = ?",
+			mountA,
+			mountA+"projA/data/fileA1",
+			&cnt,
+		))
+		assert.Equal(t, uint64(1), cnt)
+		require.NoError(t, ch.ExecuteQuery(
+			ctx2,
+			"SELECT count() FROM fs_entries_current WHERE mount_path = ? AND path = ?",
+			mountB,
+			mountB+"projB/data/fileB1",
+			&cnt,
+		))
+		assert.Equal(t, uint64(1), cnt)
 	})
 }
