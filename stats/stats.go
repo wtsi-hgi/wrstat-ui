@@ -50,10 +50,7 @@ type Error string
 func (e Error) Error() string { return string(e) }
 
 const (
-	defaultAge                 = 7
-	secsPerYear                = 3600 * 24 * 365
-	maxLineLength              = 64 * 1024
-	maxBase64EncodedPathLength = 1024
+	maxLineLength = 64 * 1024
 
 	ErrBadPath       = Error("invalid file format: path is not base64 encoded")
 	ErrTooFewColumns = Error("invalid file format: too few tab separated columns")

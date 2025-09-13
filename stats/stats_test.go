@@ -54,7 +54,8 @@ func TestParseStats(t *testing.T) {
 
 			i := 0
 			for p.Scan(info) == nil {
-				if i == 0 {
+				switch i {
+				case 0:
 					So(string(info.Path), ShouldEqual, "/opt/")
 					So(info.Size, ShouldEqual, 4096)
 					So(info.GID, ShouldEqual, 0)
@@ -62,7 +63,7 @@ func TestParseStats(t *testing.T) {
 					So(info.MTime, ShouldEqual, refTime)
 					So(info.CTime, ShouldEqual, refTime)
 					So(info.EntryType, ShouldEqual, DirType)
-				} else if i == 1 {
+				case 1:
 					So(string(info.Path), ShouldEqual, "/opt/dir0/")
 				}
 

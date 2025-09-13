@@ -55,8 +55,6 @@ var (
 	chPassword string
 )
 
-const dbBatchSize = 10000
-
 // summariseCmd represents the stat command.
 var summariseCmd = &cobra.Command{
 	Use:   "summarise <mount_path> <stats_file|->",
@@ -127,11 +125,13 @@ func checkArgs(args []string) (string, string, error) {
 	if len(args) != 2 {
 		return "", "", errors.New("usage: summarise <mount_path> <stats_file|->") //nolint:err113
 	}
+
 	mountPath := NormalizeMount(args[0])
 	statsPath := args[1]
 	if mountPath == "/" {
 		return "", "", errors.New("mount_path must not be '/' — use the real mount point path") //nolint:err113
 	}
+
 	return mountPath, statsPath, nil
 }
 
@@ -150,6 +150,7 @@ func (m *readMultiCloser) Close() error {
 			firstErr = err
 		}
 	}
+
 	return firstErr
 }
 
@@ -171,6 +172,7 @@ func openStatsFile(statsFile string) (io.ReadCloser, time.Time, error) {
 	fi, err := f.Stat()
 	if err != nil {
 		_ = f.Close()
+
 		return nil, time.Time{}, err
 	}
 
@@ -178,8 +180,10 @@ func openStatsFile(statsFile string) (io.ReadCloser, time.Time, error) {
 		zr, err := pgzip.NewReader(f)
 		if err != nil {
 			_ = f.Close()
+
 			return nil, time.Time{}, fmt.Errorf("failed to decompress stats file: %w", err)
 		}
+
 		return &readMultiCloser{r: zr, closers: []io.Closer{zr, f}}, fi.ModTime(), nil
 	}
 
@@ -235,6 +239,7 @@ func NormalizeMount(m string) string {
 	if !strings.HasSuffix(m, "/") {
 		return m + "/"
 	}
+
 	return m
 }
 
@@ -253,6 +258,7 @@ func SplitParentAndName(path string) (parent, name string) {
 		// Root-like; parent is "/" and name is remainder
 		return "/", p
 	}
+
 	return p[:idx+1], p[idx+1:]
 }
 
@@ -874,7 +880,7 @@ func ingestScan(ctx context.Context, conn clickhouse.Conn, mountPath string, sca
 	}
 
 	// Check for parser errors (excluding EOF which is expected)
-	if parseErr != nil && !errors.Is(parseErr, io.EOF) {
+	if !errors.Is(parseErr, io.EOF) {
 		return fmt.Errorf("parser error: %w", parseErr)
 	}
 
@@ -918,7 +924,7 @@ func dropOlderScans(ctx context.Context, conn clickhouse.Conn, mountPath string,
 
 		// Delete scan record
 		if err := conn.Exec(ctx, `
-			ALTER TABLE scans DELETE 
+			ALTER TABLE scans DELETE
 			WHERE mount_path = ? AND scan_id = ?`,
 			mountPath, sid); err != nil {
 			return err
@@ -1030,6 +1036,7 @@ func ensureDir(path string) string {
 	if !strings.HasSuffix(path, "/") {
 		return path + "/"
 	}
+
 	return path
 }
 
