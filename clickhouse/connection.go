@@ -494,11 +494,13 @@ func (c *Clickhouse) DropSingleScan(ctx context.Context, mountPath string, scanI
 
 // GetLastScanTimes retrieves the most recent scan times for each mount.
 func (c *Clickhouse) GetLastScanTimes(ctx context.Context) (map[string]time.Time, error) {
-	// Query the most recent scan_id for each mount that is in the 'ready' state
+	// Return the finished_at time of the latest ready scan per mount
+	// Using argMax(finished_at, scan_id) ensures we pick the finished time corresponding
+	// to the maximum scan_id (latest) for each mount.
 	rows, err := c.conn.Query(ctx, `
-		SELECT mount_path, toDateTime(max(scan_id)) 
-		FROM scans 
-		WHERE state = 'ready' 
+		SELECT mount_path, argMax(finished_at, scan_id)
+		FROM scans
+		WHERE state = 'ready'
 		GROUP BY mount_path`)
 	if err != nil {
 		return nil, err

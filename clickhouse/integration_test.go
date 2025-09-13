@@ -220,4 +220,19 @@ func TestClickHouseIntegration(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, 3, len(paths)) // All 3 files match the pattern
 	})
+
+	// Verify GetLastScanTimes returns the latest ready scan's finished_at
+	t.Run("LastScanTimesCheck", func(t *testing.T) {
+		m, err := ch.GetLastScanTimes(ctx)
+		require.NoError(t, err)
+
+		got, ok := m[mountPath]
+		require.True(t, ok)
+
+		var want time.Time
+
+		q := `SELECT argMax(finished_at, scan_id) FROM scans WHERE state = 'ready' AND mount_path = ?`
+		require.NoError(t, ch.ExecuteQuery(ctx, q, mountPath, &want))
+		assert.WithinDuration(t, want, got, time.Second)
+	})
 }
