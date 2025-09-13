@@ -80,19 +80,6 @@ func init() {
 	summariseCmd.Flags().StringVar(&chPassword, "ch-password", "", "ClickHouse password")
 }
 
-// setupClickHouseConnection creates and configures a new ClickHouse connection.
-func setupClickHouseConnection() (*clickhouse.Clickhouse, error) {
-	params := clickhouse.ConnectionParams{
-		Host:     chHost,
-		Port:     chPort,
-		Database: chDatabase,
-		Username: chUsername,
-		Password: chPassword,
-	}
-
-	return clickhouse.New(params)
-}
-
 // Run executes the summarise command with the given arguments.
 func Run(args []string) (err error) {
 	mountPath, statsPath, err := checkArgs(args)
@@ -138,4 +125,17 @@ func checkArgs(args []string) (string, string, error) {
 	}
 
 	return mountPath, statsPath, nil
+}
+
+// setupClickHouseConnection creates and configures a new ClickHouse connection.
+func setupClickHouseConnection() (*clickhouse.Clickhouse, error) {
+	params := clickhouse.ConnectionParams{
+		Host:     chHost,
+		Port:     chPort,
+		Database: chDatabase,
+		Username: chUsername,
+		Password: chPassword,
+	}
+
+	return clickhouse.New(params)
 }
