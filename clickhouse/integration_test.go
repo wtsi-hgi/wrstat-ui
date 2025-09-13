@@ -380,4 +380,131 @@ func TestClickHouseIntegration(t *testing.T) {
 		))
 		assert.GreaterOrEqual(t, totalSizeB, uint64(4000))
 	})
+
+	// Ensure retention and latest-only semantics are per-mount (independent mounts)
+	t.Run("PerMountRetention", func(t *testing.T) {
+		mountPath2 := "/lustre/scratch126/"
+
+		refTimeB := time.Now().Truncate(time.Second)
+		unixTimeB := refTimeB.Unix()
+		rootB := statsdata.NewRoot(mountPath2, unixTimeB)
+		statsdata.AddFile(rootB, "other/projects/X/fileX.txt", uid, gid, 1234, unixTimeB, unixTimeB)
+
+		statsPathB := filepath.Join(tmpDir, "test_stats_mount2")
+		fb, err := os.Create(statsPathB)
+		require.NoError(t, err)
+
+		_, err = io.Copy(fb, rootB.AsReader())
+		require.NoError(t, err)
+		require.NoError(t, fb.Close())
+
+		rb, _, err := clickhouse.OpenStatsFile(statsPathB)
+		require.NoError(t, err)
+
+		defer rb.Close()
+
+		require.NoError(t, ch.UpdateClickhouse(ctx, mountPath2, rb))
+
+		// Both mounts should have exactly one ready scan each
+		var ready1, ready2 uint64
+		require.NoError(t, ch.ExecuteQuery(
+			ctx,
+			"SELECT count() FROM scans WHERE state = 'ready' AND mount_path = ?",
+			mountPath,
+			&ready1,
+		))
+		require.NoError(t, ch.ExecuteQuery(
+			ctx,
+			"SELECT count() FROM scans WHERE state = 'ready' AND mount_path = ?",
+			mountPath2,
+			&ready2,
+		))
+		assert.Equal(t, uint64(1), ready1)
+		assert.Equal(t, uint64(1), ready2)
+
+		// Verify current view returns the file for mount2
+		var cnt uint64
+		require.NoError(t, ch.ExecuteQuery(
+			ctx,
+			"SELECT count() FROM fs_entries_current WHERE mount_path = ? AND path = ?",
+			mountPath2,
+			mountPath2+"other/projects/X/fileX.txt",
+			&cnt,
+		))
+		assert.Equal(t, uint64(1), cnt)
+	})
+
+	// Filters: GIDs, UIDs, Exts, ATimeBucket, MTimeBucket
+	t.Run("FilteredSubtreeSummary", func(t *testing.T) {
+		mountPath3 := "/lustre/scratch127/"
+
+		refTimeC := time.Now().Truncate(time.Second)
+		unixTimeC := refTimeC.Unix()
+
+		oldAT := unixTimeC - 400*24*3600 // >1 year
+		oldMT := unixTimeC - 70*24*3600  // >2 months
+
+		rootC := statsdata.NewRoot(mountPath3, unixTimeC)
+		// One old file (atime>1y, mtime>2m), ext log, uid/gid 2001/3001
+		statsdata.AddFile(rootC, "humgen/projects/C/old1.log", 2001, 3001, 100, oldAT, oldMT)
+		// Recent file (0d), ext txt, uid/gid 2002/3002
+		statsdata.AddFile(rootC, "humgen/projects/C/recent.txt", 2002, 3002, 200, unixTimeC, unixTimeC)
+		// GID-specific file
+		statsdata.AddFile(rootC, "humgen/projects/C/gidfile.bin", 2003, 4242, 300, unixTimeC, unixTimeC)
+		// UID-specific file
+		statsdata.AddFile(rootC, "humgen/projects/C/uidfile.dat", 4242, 3003, 400, unixTimeC, unixTimeC)
+
+		statsPathC := filepath.Join(tmpDir, "test_stats_mount3")
+		fc, err := os.Create(statsPathC)
+		require.NoError(t, err)
+
+		_, err = io.Copy(fc, rootC.AsReader())
+		require.NoError(t, err)
+		require.NoError(t, fc.Close())
+
+		rc, _, err := clickhouse.OpenStatsFile(statsPathC)
+		require.NoError(t, err)
+
+		defer rc.Close()
+
+		require.NoError(t, ch.UpdateClickhouse(ctx, mountPath3, rc))
+
+		base := mountPath3 + "humgen/projects/C/"
+
+		// ATime bucket >1y selects only old1.log (size 100)
+		s, err := ch.SubtreeSummary(ctx, mountPath3, base, clickhouse.Filters{ATimeBucket: ">1y"})
+		require.NoError(t, err)
+		assert.Equal(t, uint64(100), s.TotalSize)
+		assert.Equal(t, uint64(1), s.FileCount)
+
+		// MTime bucket >2m selects only old1.log (size 100)
+		s, err = ch.SubtreeSummary(ctx, mountPath3, base, clickhouse.Filters{MTimeBucket: ">2m"})
+		require.NoError(t, err)
+		assert.Equal(t, uint64(100), s.TotalSize)
+		assert.Equal(t, uint64(1), s.FileCount)
+
+		// Ext filter 'log' -> old1.log (100)
+		s, err = ch.SubtreeSummary(ctx, mountPath3, base, clickhouse.Filters{Exts: []string{"log"}})
+		require.NoError(t, err)
+		assert.Equal(t, uint64(100), s.TotalSize)
+		assert.Equal(t, uint64(1), s.FileCount)
+
+		// Ext filter 'txt' -> recent.txt (200)
+		s, err = ch.SubtreeSummary(ctx, mountPath3, base, clickhouse.Filters{Exts: []string{"txt"}})
+		require.NoError(t, err)
+		assert.Equal(t, uint64(200), s.TotalSize)
+		assert.Equal(t, uint64(1), s.FileCount)
+
+		// GID filter 4242 -> gidfile.bin (300)
+		s, err = ch.SubtreeSummary(ctx, mountPath3, base, clickhouse.Filters{GIDs: []uint32{4242}})
+		require.NoError(t, err)
+		assert.Equal(t, uint64(300), s.TotalSize)
+		assert.Equal(t, uint64(1), s.FileCount)
+
+		// UID filter 4242 -> uidfile.dat (400)
+		s, err = ch.SubtreeSummary(ctx, mountPath3, base, clickhouse.Filters{UIDs: []uint32{4242}})
+		require.NoError(t, err)
+		assert.Equal(t, uint64(400), s.TotalSize)
+		assert.Equal(t, uint64(1), s.FileCount)
+	})
 }
