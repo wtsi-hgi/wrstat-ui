@@ -81,7 +81,9 @@ func (c *Clickhouse) ExecuteQuery(ctx context.Context, query string, args ...int
 	}
 
 	return row.Scan(dest)
-} // isPointer checks if an interface value is a pointer.
+}
+
+// isPointer checks if an interface value is a pointer.
 func isPointer(v interface{}) bool {
 	if v == nil {
 		return false
@@ -90,7 +92,9 @@ func isPointer(v interface{}) bool {
 	val := reflect.ValueOf(v)
 
 	return val.Kind() == reflect.Ptr
-} // CHBatch defines the interface for a ClickHouse batch operation.
+}
+
+// CHBatch defines the interface for a ClickHouse batch operation.
 type CHBatch interface {
 	Append(values ...any) error
 	Send() error
