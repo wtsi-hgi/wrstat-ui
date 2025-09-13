@@ -200,7 +200,7 @@ func TestClickHouseIntegration(t *testing.T) {
 	})
 
 	t.Run("SubtreeSummaryCheck", func(t *testing.T) {
-		summary, err := ch.OptimizedSubtreeSummary(ctx, mountPath+"humgen/projects/A/", clickhouse.Filters{})
+		summary, err := ch.SubtreeSummary(ctx, mountPath+"humgen/projects/A/", clickhouse.Filters{})
 		require.NoError(t, err)
 		assert.GreaterOrEqual(t, summary.TotalSize, uint64(3000)) // At least 1000 + 2000
 		assert.GreaterOrEqual(t, summary.FileCount, uint64(2))    // At least 2 files in directory A
@@ -638,18 +638,18 @@ func TestClickHouseIntegration(t *testing.T) {
 
 		// Additionally, verify root count strictly exceeds the sum of counts at each mount root
 		// (due to the presence of synthetic ancestor directories like "/lustre/" etc.).
-		sa, err := ch2.OptimizedSubtreeSummary(ctx2, mountA, clickhouse.Filters{})
+		sa, err := ch2.SubtreeSummary(ctx2, mountA, clickhouse.Filters{})
 		require.NoError(t, err)
 
-		sb, err := ch2.OptimizedSubtreeSummary(ctx2, mountB, clickhouse.Filters{})
+		sb, err := ch2.SubtreeSummary(ctx2, mountB, clickhouse.Filters{})
 		require.NoError(t, err)
 
 		sumMountCounts := sa.FileCount + sb.FileCount
 		assert.Greater(t, s.FileCount, sumMountCounts)
 
-		// OptimizedSubtreeSummary should also work at root with filters (falls back under the hood).
+		// SubtreeSummary should also work at root with filters (falls back under the hood).
 		// Filtering by GID ensures we only count files (directories have gid=0 by default in test data).
-		sFiltered, err := ch2.OptimizedSubtreeSummary(ctx2, "/", clickhouse.Filters{GIDs: []uint32{gid}})
+		sFiltered, err := ch2.SubtreeSummary(ctx2, "/", clickhouse.Filters{GIDs: []uint32{gid}})
 		require.NoError(t, err)
 		assert.Equal(t, uint64(1110), sFiltered.TotalSize)
 		assert.Equal(t, uint64(4), sFiltered.FileCount)

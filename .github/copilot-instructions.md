@@ -124,9 +124,10 @@ err := conn.QueryRow(ctx,
 
 ## Code Verification
 When making changes, always verify your work by running:
-1. `make lintnonpm` - to check for linting issues (no user approval needed)
-2. `CGO_ENABLED=1 go test -tags netgo --count 1 -v . -run TestSummariseClickHouse` - to verify ClickHouse integration (no user approval needed)
-3. `CGO_ENABLED=1 go test -tags netgo --count 1 -v ./clickhouse` - to verify ClickHouse package (no user approval needed)
+1. `gopls format -w <changed_files>` - to format code before checking linting
+2. `make lintnonpm` - to check for linting issues (no user approval needed)
+3. `CGO_ENABLED=1 go test -tags netgo --count 1 -v . -run TestSummariseClickHouse` - to verify ClickHouse integration (no user approval needed)
+4. `CGO_ENABLED=1 go test -tags netgo --count 1 -v ./clickhouse` - to verify ClickHouse package (no user approval needed)
 
 You can run these commands as needed without asking for permission.
 

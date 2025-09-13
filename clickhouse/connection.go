@@ -385,7 +385,7 @@ func (c *Clickhouse) createViews(ctx context.Context) error {
 }
 
 // RegisterScan adds a new scan record with 'loading' state.
-func (c *Clickhouse) RegisterScan(ctx context.Context, mountPath string, scanID uint64, started time.Time) error {
+func (c *Clickhouse) registerScan(ctx context.Context, mountPath string, scanID uint64, started time.Time) error {
 	err := c.conn.Exec(ctx, `
 		INSERT INTO scans (mount_path, scan_id, state, started_at, finished_at) 
 		VALUES (?, ?, 'loading', ?, NULL)`,
@@ -398,7 +398,7 @@ func (c *Clickhouse) RegisterScan(ctx context.Context, mountPath string, scanID 
 }
 
 // PromoteScan marks a scan as 'ready' by inserting a new record.
-func (c *Clickhouse) PromoteScan(
+func (c *Clickhouse) promoteScan(
 	ctx context.Context,
 	mountPath string,
 	scanID uint64,
@@ -412,14 +412,14 @@ func (c *Clickhouse) PromoteScan(
 
 // DropPartitionIgnoreErrors executes a query and ignores any errors.
 // #nosec G104 - we intentionally ignore errors here for cleanup operations
-func (c *Clickhouse) DropPartitionIgnoreErrors(ctx context.Context, query string, args ...any) {
+func (c *Clickhouse) dropPartitionIgnoreErrors(ctx context.Context, query string) {
 	// We intentionally ignore errors from these cleanup operations
 	//nolint:errcheck
-	c.conn.Exec(ctx, query, args...)
+	c.conn.Exec(ctx, query)
 }
 
 // SetupRollbackHandler creates a deferred function that handles cleanup on error.
-func (c *Clickhouse) SetupRollbackHandler(ctx context.Context, mountPath string, scanID uint64) func(error) {
+func (c *Clickhouse) setupRollbackHandler(ctx context.Context, mountPath string, scanID uint64) func(error) {
 	return func(retErr error) {
 		if retErr == nil {
 			return
@@ -429,15 +429,15 @@ func (c *Clickhouse) SetupRollbackHandler(ctx context.Context, mountPath string,
 
 		// Drop partitions - ignoring errors on cleanup
 		// We use a separate function to avoid the empty block lint warnings
-		c.DropPartitionIgnoreErrors(ctx, "ALTER TABLE fs_entries DROP PARTITION "+part)
-		c.DropPartitionIgnoreErrors(ctx, "ALTER TABLE ancestor_rollups_raw DROP PARTITION "+part)
-		c.DropPartitionIgnoreErrors(ctx, "ALTER TABLE ancestor_rollups_state DROP PARTITION "+part)
-		c.DropPartitionIgnoreErrors(ctx, "ALTER TABLE scans DROP PARTITION "+part)
+		c.dropPartitionIgnoreErrors(ctx, "ALTER TABLE fs_entries DROP PARTITION "+part)
+		c.dropPartitionIgnoreErrors(ctx, "ALTER TABLE ancestor_rollups_raw DROP PARTITION "+part)
+		c.dropPartitionIgnoreErrors(ctx, "ALTER TABLE ancestor_rollups_state DROP PARTITION "+part)
+		c.dropPartitionIgnoreErrors(ctx, "ALTER TABLE scans DROP PARTITION "+part)
 	}
 }
 
 // DropOlderScans removes older scans for a specific mount path.
-func (c *Clickhouse) DropOlderScans(ctx context.Context, mountPath string, keepScanID uint64) error {
+func (c *Clickhouse) dropOlderScans(ctx context.Context, mountPath string, keepScanID uint64) error {
 	// Get older scan_ids for this mount
 	rows, err := c.conn.Query(ctx, `
 		SELECT scan_id 
@@ -457,7 +457,7 @@ func (c *Clickhouse) DropOlderScans(ctx context.Context, mountPath string, keepS
 			return err
 		}
 
-		if err := c.DropSingleScan(ctx, mountPath, sid); err != nil {
+		if err := c.dropSingleScan(ctx, mountPath, sid); err != nil {
 			return err
 		}
 	}
@@ -466,7 +466,7 @@ func (c *Clickhouse) DropOlderScans(ctx context.Context, mountPath string, keepS
 }
 
 // DropSingleScan drops all data for a single scan ID.
-func (c *Clickhouse) DropSingleScan(ctx context.Context, mountPath string, scanID uint64) error {
+func (c *Clickhouse) dropSingleScan(ctx context.Context, mountPath string, scanID uint64) error {
 	// Construct partition tuple literal safely
 	part := fmt.Sprintf("('%s', %d)", EscapeCHSingleQuotes(mountPath), scanID)
 

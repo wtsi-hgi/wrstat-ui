@@ -41,12 +41,12 @@ func (c *Clickhouse) UpdateClickhouse(ctx context.Context, mountPath string, r i
 	started := time.Now()
 
 	// Register scan as loading
-	if err := c.RegisterScan(ctx, mountPath, scanID, started); err != nil {
+	if err := c.registerScan(ctx, mountPath, scanID, started); err != nil {
 		return err
 	}
 
 	// Set up rollback handler for cleanup on error
-	defer c.SetupRollbackHandler(ctx, mountPath, scanID)(retErr)
+	defer c.setupRollbackHandler(ctx, mountPath, scanID)(retErr)
 
 	if err := c.ingestScan(ctx, mountPath, scanID, r); err != nil {
 		return err
@@ -54,12 +54,12 @@ func (c *Clickhouse) UpdateClickhouse(ctx context.Context, mountPath string, r i
 
 	// Promote to ready by inserting a new row (avoids ALTER UPDATE pitfalls)
 	finished := time.Now()
-	if err := c.PromoteScan(ctx, mountPath, scanID, started, finished); err != nil {
+	if err := c.promoteScan(ctx, mountPath, scanID, started, finished); err != nil {
 		return fmt.Errorf("promote scan (insert ready): %w", err)
 	}
 
 	// Drop older scans for this mount
-	if err := c.DropOlderScans(ctx, mountPath, scanID); err != nil {
+	if err := c.dropOlderScans(ctx, mountPath, scanID); err != nil {
 		return fmt.Errorf("retention: %w", err)
 	}
 
@@ -80,7 +80,7 @@ type BatchProcessor struct {
 }
 
 // NewBatchProcessor creates a new batch processor for files and rollups.
-func (c *Clickhouse) NewBatchProcessor(ctx context.Context, mountPath string, scanID uint64) (*BatchProcessor, error) {
+func (c *Clickhouse) newBatchProcessor(ctx context.Context, mountPath string, scanID uint64) (*BatchProcessor, error) {
 	filesBatchSQL := `
 		INSERT INTO fs_entries 
 		(mount_path, scan_id, path, parent_path, name, ext_low, ftype, inode, size, uid, gid, mtime, atime, ctime)`
@@ -203,7 +203,7 @@ func (bp *BatchProcessor) flushRollupsBatch(ctx context.Context) error {
 // ingestScan processes a stats file and loads it into ClickHouse.
 func (c *Clickhouse) ingestScan(ctx context.Context, mountPath string, scanID uint64, r io.Reader) error {
 	// Create batch processor
-	bp, err := c.NewBatchProcessor(ctx, mountPath, scanID)
+	bp, err := c.newBatchProcessor(ctx, mountPath, scanID)
 	if err != nil {
 		return err
 	}

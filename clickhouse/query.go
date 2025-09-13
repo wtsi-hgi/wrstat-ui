@@ -95,8 +95,9 @@ func buildBucketPredicateWithScanExpr(scanExpr, col, bucket string) (string, err
 	return col + " " + interval, nil
 }
 
-// SubtreeSummary returns statistics for a subtree (global, all mounts), filtered by the given criteria.
-func (c *Clickhouse) SubtreeSummary(ctx context.Context, dir string, f Filters) (Summary, error) {
+// subtreeSummaryScan returns statistics for a subtree by scanning fs_entries_current (global, all mounts),
+// filtered by the given criteria. This is the fallback when rollups cannot be used.
+func (c *Clickhouse) subtreeSummaryScan(ctx context.Context, dir string, f Filters) (Summary, error) {
 	dir = EnsureDir(dir)
 
 	if isNoFilters(f) {
@@ -227,14 +228,23 @@ func (c *Clickhouse) executeSummaryQuery(ctx context.Context, query string, args
 	return s, nil
 }
 
-// OptimizedSubtreeSummary attempts to use precomputed ancestor rollups when possible.
-// It falls back to the regular implementation for filtered queries.
-func (c *Clickhouse) OptimizedSubtreeSummary(ctx context.Context, dir string, f Filters) (Summary, error) {
+// SubtreeSummary uses rollups when possible (no filters) and falls back to a scan for filtered queries.
+// This keeps optimization as an implementation detail behind a single public API.
+func (c *Clickhouse) SubtreeSummary(ctx context.Context, dir string, f Filters) (Summary, error) {
+	d := EnsureDir(dir)
+
+	// For filtered queries, always use scan-based summary.
 	if !isNoFilters(f) {
-		return c.SubtreeSummary(ctx, dir, f)
+		return c.subtreeSummaryScan(ctx, d, f)
 	}
 
-	return c.getRollupSummaryGlobal(ctx, EnsureDir(dir))
+	// Root requires inclusion of synthetic ancestors which may not be present in rollups.
+	// Use the scan-based fast path at root to match semantics (dirs + files counted).
+	if d == "/" {
+		return c.getUnfilteredAllSummary(ctx, d)
+	}
+
+	return c.getRollupSummaryGlobal(ctx, d)
 }
 
 // Helper function to retrieve summary from the rollups table.
