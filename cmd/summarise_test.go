@@ -30,7 +30,7 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/cmd"
 )
 
-// Tests for helper functions
+// Tests for helper functions.
 func TestNormalizeMount(t *testing.T) {
 	tests := []struct {
 		name     string

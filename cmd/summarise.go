@@ -47,7 +47,7 @@ var (
 	basedirsConfig string
 	mounts         string
 
-	// ClickHouse connection settings
+	// ClickHouse connection settings.
 	chHost     string
 	chPort     string
 	chDatabase string
@@ -82,7 +82,7 @@ func init() {
 	summariseCmd.Flags().StringVar(&chPassword, "ch-password", "", "ClickHouse password")
 }
 
-// Run executes the summarise command with the given arguments
+// Run executes the summarise command with the given arguments.
 func Run(args []string) (err error) {
 	mountPath, statsPath, err := checkArgs(args)
 	if err != nil {
@@ -136,7 +136,7 @@ func checkArgs(args []string) (string, string, error) {
 	return mountPath, statsPath, nil
 }
 
-// Helper to close multiple resources when wrapping readers
+// Helper to close multiple resources when wrapping readers.
 type readMultiCloser struct {
 	r       io.Reader
 	closers []io.Closer
@@ -155,7 +155,7 @@ func (m *readMultiCloser) Close() error {
 	return firstErr
 }
 
-// OpenStatsFile exports the internal openStatsFile function for testing
+// OpenStatsFile exports the internal openStatsFile function for testing.
 func OpenStatsFile(statsFile string) (io.ReadCloser, time.Time, error) {
 	return openStatsFile(statsFile)
 }
@@ -191,10 +191,10 @@ func openStatsFile(statsFile string) (io.ReadCloser, time.Time, error) {
 	return f, fi.ModTime(), nil
 }
 
-// --- ClickHouse schema and ingestion ---
+// --- ClickHouse schema and ingestion ---.
 
 const (
-	// Lower batch sizes to balance performance and memory usage
+	// Lower batch sizes to balance performance and memory usage.
 	fileBatchSize   = 100_000
 	rollupBatchSize = 100_000
 )
@@ -294,7 +294,7 @@ func ForEachAncestor(dir, mountPath string, fn func(a string) bool) {
 	}
 }
 
-// escapeCHSingleQuotes escapes single quotes for embedding string literals into ClickHouse queries
+// escapeCHSingleQuotes escapes single quotes for embedding string literals into ClickHouse queries.
 func escapeCHSingleQuotes(s string) string { return strings.ReplaceAll(s, "'", "''") }
 
 func DeriveExtLower(name string, isDir bool) string {
@@ -331,7 +331,7 @@ func DeriveExtLower(name string, isDir bool) string {
 	return ext
 }
 
-// SQL constants
+// SQL constants.
 const (
 	createScansTable = `
 CREATE TABLE IF NOT EXISTS scans (
@@ -370,7 +370,7 @@ PARTITION BY (mount_path, scan_id)
 ORDER BY (mount_path, parent_path, name)
 SETTINGS index_granularity = 8192`
 
-	// Fallback without tokenbf index in case the server doesn't support it
+	// Fallback without tokenbf index in case the server doesn't support it.
 	createFsEntriesTableNoPathIdx = `
 CREATE TABLE IF NOT EXISTS fs_entries (
 	mount_path String,
@@ -589,7 +589,7 @@ INNER JOIN (
 GROUP BY s.mount_path, s.scan_id, s.ancestor`
 )
 
-// CreateSchema exports the internal createSchema function for testing
+// CreateSchema exports the internal createSchema function for testing.
 func CreateSchema(ctx context.Context, conn clickhouse.Conn) error {
 	return createSchema(ctx, conn)
 }
@@ -636,7 +636,7 @@ func createSchema(ctx context.Context, conn clickhouse.Conn) error {
 	return nil
 }
 
-// UpdateClickhouse exports the internal updateClickhouse function for testing
+// UpdateClickhouse exports the internal updateClickhouse function for testing.
 func UpdateClickhouse(ctx context.Context, conn clickhouse.Conn, mountPath string, r io.Reader) error {
 	return updateClickhouse(ctx, conn, mountPath, r)
 }
@@ -698,7 +698,7 @@ func updateClickhouse(ctx context.Context, conn clickhouse.Conn, mountPath strin
 	return nil
 }
 
-// Helper functions for batched processing of files
+// Helper functions for batched processing of files.
 type chBatch interface {
 	Append(values ...any) error
 	Send() error
@@ -716,7 +716,7 @@ type batchProcessor struct {
 	rollupsBatchSQL string
 }
 
-// Create a new batch processor
+// Create a new batch processor.
 func newBatchProcessor(ctx context.Context, conn clickhouse.Conn, mountPath string, scanID uint64) (*batchProcessor, error) {
 	filesBatchSQL := `
 		INSERT INTO fs_entries 
@@ -747,7 +747,7 @@ func newBatchProcessor(ctx context.Context, conn clickhouse.Conn, mountPath stri
 	}, nil
 }
 
-// Add a file entry to the batch
+// Add a file entry to the batch.
 func (bp *batchProcessor) addFile(path string, parent string, name string, ext string,
 	ft ftype, inode uint64, size uint64, uid uint32, gid uint32, mtime, atime, ctime time.Time) error {
 	if err := bp.filesBatch.Append(
@@ -762,7 +762,7 @@ func (bp *batchProcessor) addFile(path string, parent string, name string, ext s
 	return nil
 }
 
-// Add an ancestor rollup entry to the batch
+// Add an ancestor rollup entry to the batch.
 func (bp *batchProcessor) addRollup(ancestor string, size uint64, atime, mtime time.Time, uid, gid uint32, ext string) error {
 	if err := bp.rollupsBatch.Append(
 		bp.mountPath, bp.scanID, ancestor, size, atime, mtime, uid, gid, ext); err != nil {
@@ -774,12 +774,12 @@ func (bp *batchProcessor) addRollup(ancestor string, size uint64, atime, mtime t
 	return nil
 }
 
-// Check if either batch needs flushing
+// Check if either batch needs flushing.
 func (bp *batchProcessor) needsFlush() bool {
 	return bp.filesCount >= fileBatchSize || bp.rollupsCount >= rollupBatchSize
 }
 
-// Flush both batches if they contain any data
+// Flush both batches if they contain any data.
 func (bp *batchProcessor) flush(ctx context.Context) error {
 	// Send files batch if non-empty
 	if bp.filesCount > 0 {
@@ -948,7 +948,7 @@ func dropOlderScans(ctx context.Context, conn clickhouse.Conn, mountPath string,
 	return rows.Err()
 }
 
-// --- Query helpers ---
+// --- Query helpers ---.
 
 type FileEntry struct {
 	Path       string
@@ -1224,7 +1224,7 @@ WHERE ` + strings.Join(where, " AND ") + bucketFilter
 }
 
 // OptimizedSubtreeSummary attempts to use precomputed ancestor rollups when possible
-// Falls back to the regular implementation for filtered queries
+// Falls back to the regular implementation for filtered queries.
 func OptimizedSubtreeSummary(ctx context.Context, conn clickhouse.Conn, mountPath, dir string, f Filters) (Summary, error) {
 	// Only use rollups when there are no filters at all
 	useRollups := len(f.GIDs) == 0 && len(f.UIDs) == 0 &&
