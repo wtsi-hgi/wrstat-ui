@@ -117,7 +117,7 @@ err := conn.QueryRow(ctx,
 - When adding features that query data, consider performance implications
 
 ## Testing Approach
-- Unit tests for core functionality
+- Do not "unit test" implementation details. Do TDD-style tests focusing on behavior of public functions.
 - Integration tests with ClickHouse for database operations
 - Special test setup in `main_test.go` for end-to-end testing
 - **Always run `go test . -run Click -v` and `go test ./clickhouse -v` after changes to verify ClickHouse integration works**

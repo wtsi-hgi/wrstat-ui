@@ -9,6 +9,7 @@
  * permit persons to whom the Software is furnished to do so, subject to
  * the following conditions:
  *
+
  * The above copyright notice and this permission notice shall be included
  * in all copies or substantial portions of the Software.
  *
@@ -21,12 +22,45 @@
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  ******************************************************************************/
 
-package clickhouse_test
+package clickhouse
 
 import (
+	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
 )
 
-func TestStub(t *testing.T) {
+func TestBuildBucketPredicate(t *testing.T) {
+	// Valid buckets
+	valid := []string{"0d", ">1m", ">2m", ">6m", ">1y", ">2y", ">3y", ">5y", ">7y"}
+	for _, b := range valid {
+		pred, err := buildBucketPredicate("atime", b)
+		assert.NoError(t, err, b)
+		assert.True(t, strings.Contains(pred, "atime"))
+		assert.NotEmpty(t, pred)
+	}
 
+	// Empty bucket -> no predicate, no error
+	pred, err := buildBucketPredicate("mtime", "")
+	assert.NoError(t, err)
+	assert.Empty(t, pred)
+
+	// Invalid bucket -> error
+	pred, err = buildBucketPredicate("mtime", "invalid")
+	assert.ErrorIs(t, err, ErrInvalidBucket)
+	assert.Empty(t, pred)
+}
+
+func TestBuildGlobSearchQuery(t *testing.T) {
+	// Case-sensitive without limit
+	q := buildGlobSearchQuery(false, 0)
+	assert.Contains(t, q, "path LIKE ?")
+	assert.NotContains(t, q, "lowerUTF8")
+	assert.NotContains(t, q, "LIMIT")
+
+	// Case-insensitive with limit
+	q = buildGlobSearchQuery(true, 25)
+	assert.Contains(t, q, "lowerUTF8(path) LIKE lowerUTF8(?)")
+	assert.Contains(t, q, "LIMIT 25")
 }
