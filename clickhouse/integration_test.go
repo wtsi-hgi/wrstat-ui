@@ -636,5 +636,40 @@ func TestClickHouseIntegration(t *testing.T) {
 
 		// Total size is 111+222+333+444 == 1110
 		assert.Equal(t, uint64(1110), s.TotalSize)
+
+		// Global listings should show synthetic ancestors leading to real mounts
+		// List at root -> expect at least 'lustre'
+		ents, err := ch2.ListImmediateChildrenAllMounts(ctx2, "/")
+		require.NoError(t, err)
+
+		var haveMnt bool
+
+		for _, e := range ents {
+			if e.Path == "/lustre/" && e.FType == uint8(clickhouse.FileTypeDir) {
+				haveMnt = true
+
+				break
+			}
+		}
+
+		assert.True(t, haveMnt, "expected /lustre in root children")
+
+		// List at /lustre -> expect 'scratch128' and 'scratch129'
+		ents, err = ch2.ListImmediateChildrenAllMounts(ctx2, "/lustre/")
+		require.NoError(t, err)
+
+		var haveA, haveB bool
+
+		for _, e := range ents {
+			if e.Path == "/lustre/scratch128/" {
+				haveA = true
+			}
+
+			if e.Path == "/lustre/scratch129/" {
+				haveB = true
+			}
+		}
+
+		assert.True(t, haveA && haveB, "expected scratch128 and scratch129 under /lustre")
 	})
 }

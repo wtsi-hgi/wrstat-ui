@@ -65,6 +65,38 @@ func (c *Clickhouse) ListImmediateChildren(ctx context.Context, mountPath, dir s
 	return results, rows.Err()
 }
 
+// ListImmediateChildrenAllMounts lists direct children of a directory across all mounts.
+// This supports global navigation at '/', '/mnt/', etc., leveraging synthetic dirs.
+func (c *Clickhouse) ListImmediateChildrenAllMounts(ctx context.Context, dir string) ([]FileEntry, error) {
+	dir = EnsureDir(dir)
+
+	rows, err := c.conn.Query(ctx, `
+		SELECT path, parent_path, name, ext_low, ftype, inode, size, uid, gid, mtime, atime, ctime
+		FROM fs_entries_current
+		WHERE parent_path = ?`,
+		dir)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	results := make([]FileEntry, 0, DefaultResultCapacity)
+	for rows.Next() {
+		var entry FileEntry
+		if err := rows.Scan(
+			&entry.Path, &entry.ParentPath, &entry.Name, &entry.Ext,
+			&entry.FType, &entry.INode, &entry.Size,
+			&entry.UID, &entry.GID,
+			&entry.MTime, &entry.ATime, &entry.CTime); err != nil {
+			return nil, err
+		}
+
+		results = append(results, entry)
+	}
+
+	return results, rows.Err()
+}
+
 // buildBucketPredicate builds a time bucket predicate for filtering.
 // buildBucketPredicateWithScanExpr builds a time bucket predicate using the provided scan time expression.
 // scanExpr should evaluate to a DateTime, e.g. "toDateTime(max_scan)" or "toDateTime(scan_id)".

@@ -212,6 +212,11 @@ func (c *Clickhouse) ingestScan(ctx context.Context, mountPath string, scanID ui
 		return err
 	}
 
+	// Insert synthetic ancestor directories above the mount to enable global listings
+	if err := insertSyntheticAncestorDirs(bp, mountPath); err != nil {
+		return err
+	}
+
 	// Final flush
 	return bp.Flush(ctx)
 }
@@ -303,12 +308,25 @@ func processAncestorRollups(bp *BatchProcessor, fi *stats.FileInfo, path, parent
 		base = path
 	}
 
-	// Process all ancestors
-	var ancestorErr error
+	if err := addRollupsWithinMount(bp, fi, base, mountPath, size, atime, mtime, ext); err != nil {
+		return err
+	}
+
+	if err := addRollupsAboveMount(bp, fi, mountPath, size, atime, mtime, ext); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// addRollupsWithinMount adds rollups for the path and its ancestors inside the mount.
+func addRollupsWithinMount(bp *BatchProcessor, fi *stats.FileInfo, base, mountPath string,
+	size uint64, atime, mtime time.Time, ext string) error {
+	var firstErr error
 
 	ForEachAncestor(base, mountPath, func(a string) bool {
 		if err := bp.AddRollup(a, size, atime, mtime, fi.UID, fi.GID, ext); err != nil {
-			ancestorErr = err
+			firstErr = err
 
 			return false
 		}
@@ -316,9 +334,74 @@ func processAncestorRollups(bp *BatchProcessor, fi *stats.FileInfo, path, parent
 		return true
 	})
 
-	if ancestorErr != nil {
-		return fmt.Errorf("failed to add ancestor rollup: %w", ancestorErr)
+	if firstErr != nil {
+		return fmt.Errorf("failed to add ancestor rollup: %w", firstErr)
 	}
 
 	return nil
+}
+
+// addRollupsAboveMount adds rollups for ancestors above the mount up to root.
+func addRollupsAboveMount(bp *BatchProcessor, fi *stats.FileInfo, mountPath string,
+	size uint64, atime, mtime time.Time, ext string) error {
+	mp := EnsureDir(mountPath)
+	parentOfMount, _ := SplitParentAndName(mp)
+
+	var firstErr error
+
+	ForEachAncestor(parentOfMount, "/", func(a string) bool {
+		if err := bp.AddRollup(a, size, atime, mtime, fi.UID, fi.GID, ext); err != nil {
+			firstErr = err
+
+			return false
+		}
+
+		return true
+	})
+
+	if firstErr != nil {
+		return fmt.Errorf("failed to add ancestor rollup above mount: %w", firstErr)
+	}
+
+	return nil
+}
+
+// insertSyntheticAncestorDirs inserts one directory entry per ancestor above the mountPath
+// (eg. for "/mnt/b/c/" inserts "/mnt/b/" and "/mnt/") so that global listings at
+// high-level directories (including "/") can enumerate down to the real mountpoints.
+func insertSyntheticAncestorDirs(bp *BatchProcessor, mountPath string) error {
+	mp := EnsureDir(mountPath)
+	parent, _ := SplitParentAndName(mp)
+
+	// Nothing to do if already at root
+	if parent == "/" && mp == "/" {
+		return nil
+	}
+
+	// Use the scan time as a consistent timestamp for synthetic dirs.
+	// scanID originated from time.Now().Unix() and is safe to cast back.
+	t := time.Unix(int64(bp.scanID), 0) //nolint:gosec // scanID comes from Unix seconds
+
+	// Walk ancestors up to root, excluding root itself as an entry
+	var firstErr error
+
+	ForEachAncestor(parent, "/", func(a string) bool {
+		if a == "/" { // do not insert a synthetic root entry
+			return true
+		}
+
+		p, name := SplitParentAndName(a)
+
+		// Insert a single directory entry with zero size/ids; duplicates across mounts will be
+		// deduplicated at query time for global listings.
+		if err := bp.AddFile(a, p, name, "", FileTypeDir, 0, 0, 0, 0, t, t, t); err != nil {
+			firstErr = err
+
+			return false
+		}
+
+		return true
+	})
+
+	return firstErr
 }
