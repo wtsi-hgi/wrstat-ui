@@ -26,6 +26,7 @@ package clickhouse
 import (
 	"io"
 	"os"
+	"path"
 	"strings"
 	"time"
 
@@ -127,20 +128,30 @@ func IsDirPath(path string) bool {
 }
 
 // SplitParentAndName splits a path into its parent directory and name components.
-func SplitParentAndName(path string) (parent, name string) {
-	// Treat directories as having trailing slash in the input.
-	p := path
-	if IsDirPath(p) {
-		p = p[:len(p)-1]
+func SplitParentAndName(p string) (parent, name string) {
+	// Root directory
+	if p == "/" {
+		return "/", ""
 	}
 
-	idx := strings.LastIndexByte(p, '/')
-	if idx <= 0 {
-		// Root-like; parent is "/" and name is remainder
-		return "/", p
+	// Remove trailing slash for directory inputs to get a stable base component
+	pp := strings.TrimSuffix(p, "/")
+	if pp == "" {
+		// Input was "/" or equivalent
+		return "/", ""
 	}
 
-	return p[:idx+1], p[idx+1:]
+	dir := path.Dir(pp)
+	name = path.Base(pp)
+
+	// Ensure parent ends with a trailing slash
+	if dir == "/" || dir == "." {
+		parent = "/"
+	} else {
+		parent = dir + "/"
+	}
+
+	return parent, name
 }
 
 // ForEachAncestor calls the provided function for each ancestor directory of the path.

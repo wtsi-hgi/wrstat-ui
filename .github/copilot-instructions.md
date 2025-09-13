@@ -120,14 +120,13 @@ err := conn.QueryRow(ctx,
 - Do not "unit test" implementation details. Do TDD-style tests focusing on behavior of public functions.
 - Integration tests with ClickHouse for database operations
 - Special test setup in `main_test.go` for end-to-end testing
-- **Always run `go test . -run Click -v` and `go test ./clickhouse -v` after changes to verify ClickHouse integration works**
 - **Do not run all tests during routine development; use targeted test patterns**
 
 ## Code Verification
 When making changes, always verify your work by running:
 1. `make lintnonpm` - to check for linting issues (no user approval needed)
-2. `go test . -run Click -v` - to verify ClickHouse integration (no user approval needed)
-3. `go test ./clickhouse -v` - to verify ClickHouse integration (no user approval needed)
+2. `CGO_ENABLED=1 go test -tags netgo --count 1 -v . -run TestSummariseClickHouse` - to verify ClickHouse integration (no user approval needed)
+3. `CGO_ENABLED=1 go test -tags netgo --count 1 -v ./clickhouse` - to verify ClickHouse package (no user approval needed)
 
 You can run these commands as needed without asking for permission.
 
@@ -138,3 +137,4 @@ Follow Go best practices and fix these common linting issues:
 - `funlen`: Function length - keep functions focused and short
 - `nlreturn`: Add blank line before returns
 - `wsl_v5`: Whitespace linting rules
+- `errcheck`: Always check errors from functions that return them
