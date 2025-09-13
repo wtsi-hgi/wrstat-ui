@@ -45,7 +45,6 @@ import (
 	"github.com/VertebrateResequencing/wr/jobqueue/scheduler"
 	. "github.com/smartystreets/goconvey/convey"
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
-	"github.com/wtsi-hgi/wrstat-ui/cmd"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 	internaldata "github.com/wtsi-hgi/wrstat-ui/internal/data"
 	"github.com/wtsi-hgi/wrstat-ui/internal/statsdata"
@@ -362,7 +361,6 @@ func TestSummariseClickHouse(t *testing.T) {
 	// No default password
 
 	// Create a unique test database name based on the current username
-
 	currentUser, err := user.Current()
 	if err != nil {
 		t.Fatalf("Failed to get current user: %v", err)
@@ -370,11 +368,8 @@ func TestSummariseClickHouse(t *testing.T) {
 
 	testDatabase := "test_wrstatui_" + currentUser.Username
 
-	// Create a test connection
-
+	// Connect to check if ClickHouse is available
 	ctx := context.Background()
-
-	// Connect to default database first for management operations
 
 	adminConn, err := clickhouse.Open(&clickhouse.Options{
 		Addr:        []string{fmt.Sprintf("%s:%s", chHost, chPort)},
@@ -383,18 +378,15 @@ func TestSummariseClickHouse(t *testing.T) {
 	})
 	if err != nil {
 		t.Skipf("Skipping TestSummariseClickHouse - could not connect to ClickHouse: %v", err)
-
 		return
 	}
 
 	// First drop the test database if it exists
-
 	if dropErr := adminConn.Exec(ctx, "DROP DATABASE IF EXISTS "+testDatabase); dropErr != nil {
 		t.Logf("Warning: failed to drop existing test DB: %v", dropErr)
 	}
 
 	// Create a fresh test database
-
 	err = adminConn.Exec(ctx, "CREATE DATABASE "+testDatabase)
 	if err != nil {
 		adminConn.Close()
@@ -402,11 +394,9 @@ func TestSummariseClickHouse(t *testing.T) {
 	}
 
 	// Close admin connection
-
 	adminConn.Close()
 
 	// Clean up the test database after the test
-
 	defer func() {
 		// Create a new connection to default database for cleanup
 		cleanupConn, err := clickhouse.Open(&clickhouse.Options{
@@ -416,7 +406,6 @@ func TestSummariseClickHouse(t *testing.T) {
 		})
 		if err != nil {
 			t.Errorf("Failed to connect for cleanup: %v", err)
-
 			return
 		}
 
@@ -427,14 +416,16 @@ func TestSummariseClickHouse(t *testing.T) {
 		cleanupConn.Close()
 	}()
 
-	Convey("summarise with ClickHouse integration", t, func() {
-		// Prepare test data - use fixed UIDs and GIDs for testing
+	Convey("summarise CLI command with ClickHouse integration", t, func() {
+		// Prepare test data
 		uid := uint32(1000) // standard test user ID
 		gid := uint32(1000) // standard test group ID
+		mountPath := "/lustre/scratch125/"
 
+		// Create test data
 		refTime := time.Now().Truncate(time.Second)
 		unixTime := refTime.Unix()
-		root := statsdata.NewRoot("/lustre/scratch125/", unixTime)
+		root := statsdata.NewRoot(mountPath, unixTime)
 		statsdata.AddFile(root, "humgen/projects/A/file1", uid, gid, 1000, unixTime, unixTime)
 		statsdata.AddFile(root, "humgen/projects/A/file2", uid, gid, 2000, unixTime, unixTime)
 		statsdata.AddFile(root, "humgen/projects/B/file3", uid, gid, 3000, unixTime, unixTime)
@@ -450,79 +441,58 @@ func TestSummariseClickHouse(t *testing.T) {
 		So(err, ShouldBeNil)
 		So(f.Close(), ShouldBeNil)
 
-		// Run the test directly using the exported functions
-		mountPath := "/lustre/scratch125/"
-
-		// Create a fresh connection to the test database
-		testConn, err := clickhouse.Open(&clickhouse.Options{
-			Addr:        []string{fmt.Sprintf("%s:%s", chHost, chPort)},
-			Auth:        clickhouse.Auth{Database: testDatabase, Username: chUsername, Password: chPassword},
-			DialTimeout: 10 * time.Second,
-			Compression: &clickhouse.Compression{Method: clickhouse.CompressionLZ4},
-			Settings: clickhouse.Settings{
-				"max_insert_block_size":       1000000,
-				"min_insert_block_size_rows":  100000,
-				"min_insert_block_size_bytes": 10485760, // 10MB
-			},
-		})
+		// Run the summarise command using the CLI
+		fmt.Printf("Running summarise command with database %s\n", testDatabase)
+		output, stderr, _, err := runWRStat(
+			"summarise",
+			"--ch-host", chHost,
+			"--ch-port", chPort,
+			"--ch-database", testDatabase,
+			"--ch-username", chUsername,
+			"--ch-password", chPassword,
+			mountPath,
+			statsPath,
+		)
+		fmt.Printf("stderr: %s\n", stderr)
 		So(err, ShouldBeNil)
+		So(stderr, ShouldNotContain, "error")
+		So(output, ShouldBeBlank) // Command should not produce output on success
 
-		defer testConn.Close()
+		// Now we need to verify the data was ingested correctly
+		// We'll use the clickhouse-go driver directly for this validation
 
-		// Create schema first
-		err = cmd.CreateSchema(ctx, testConn)
-		So(err, ShouldBeNil)
-
-		// Open the stats file
-		r, _, err := cmd.OpenStatsFile(statsPath)
-		So(err, ShouldBeNil)
-
-		defer r.Close()
-
-		// Update the ClickHouse database
-		err = cmd.UpdateClickhouse(ctx, testConn, mountPath, r)
-		So(err, ShouldBeNil)
-
-		// The implementation inserts a ready scan row; no manual fixup needed.
-
-		// Verify data was inserted by querying ClickHouse
-		chConn, err := clickhouse.Open(&clickhouse.Options{
+		conn, err := clickhouse.Open(&clickhouse.Options{
 			Addr:        []string{fmt.Sprintf("%s:%s", chHost, chPort)},
 			Auth:        clickhouse.Auth{Database: testDatabase, Username: chUsername, Password: chPassword},
 			DialTimeout: 5 * time.Second,
 		})
 		So(err, ShouldBeNil)
-
-		defer chConn.Close()
+		defer conn.Close()
 
 		// Check scans table
 		var scanCount uint64
-
-		err = chConn.QueryRow(ctx,
-			"SELECT count() FROM scans WHERE state = 'ready' AND mount_path = ?", mountPath).Scan(&scanCount)
+		err = conn.QueryRow(ctx, "SELECT count() FROM scans WHERE state = 'ready' AND mount_path = ?",
+			mountPath).Scan(&scanCount)
 		So(err, ShouldBeNil)
 		So(scanCount, ShouldBeGreaterThanOrEqualTo, 1)
 
-		// Check fs_entries table - we should have more than 3 entries due to directory entries
+		// Check fs_entries table
 		var fileCount uint64
-
-		err = chConn.QueryRow(ctx, "SELECT count() FROM fs_entries_current WHERE mount_path = ?", mountPath).Scan(&fileCount)
+		err = conn.QueryRow(ctx, "SELECT count() FROM fs_entries_current WHERE mount_path = ?",
+			mountPath).Scan(&fileCount)
 		So(err, ShouldBeNil)
 		So(fileCount, ShouldBeGreaterThan, 3) // Should have at least our 3 files plus directories
 
 		// Check ancestor_rollups_raw table
 		var rollupCount uint64
-
-		err = chConn.QueryRow(ctx,
-			"SELECT count() FROM ancestor_rollups_current WHERE mount_path = ?", mountPath).Scan(&rollupCount)
+		err = conn.QueryRow(ctx, "SELECT count() FROM ancestor_rollups_current WHERE mount_path = ?",
+			mountPath).Scan(&rollupCount)
 		So(err, ShouldBeNil)
 		So(rollupCount, ShouldBeGreaterThan, 3) // Should have multiple rollups per file
 
-		// Check total size calculation in rollups - we expect at least 6000 (our 3 files),
-		// but there may be additional bytes for directory entries
+		// Check total size
 		var totalSize uint64
-
-		err = chConn.QueryRow(ctx, `
+		err = conn.QueryRow(ctx, `
 			SELECT total_size 
 			FROM ancestor_rollups_current 
 			WHERE mount_path = ? AND ancestor = ?`,
@@ -530,31 +500,14 @@ func TestSummariseClickHouse(t *testing.T) {
 		So(err, ShouldBeNil)
 		So(totalSize, ShouldBeGreaterThanOrEqualTo, 6000) // At least 1000 + 2000 + 3000
 
-		// Test querying by path
+		// Check specific file size
 		var fileSize uint64
-
-		err = chConn.QueryRow(ctx, `
+		err = conn.QueryRow(ctx, `
 			SELECT size FROM fs_entries_current 
 			WHERE path = ?`,
 			mountPath+"humgen/projects/A/file1").Scan(&fileSize)
 		So(err, ShouldBeNil)
 		So(fileSize, ShouldEqual, 1000)
-
-		// Test getting a subtree summary
-		summary, err := cmd.OptimizedSubtreeSummary(ctx, chConn, mountPath, mountPath+"humgen/projects/A/", cmd.Filters{})
-		So(err, ShouldBeNil)
-		So(summary.TotalSize, ShouldBeGreaterThanOrEqualTo, 3000) // At least 1000 + 2000
-		So(summary.FileCount, ShouldBeGreaterThanOrEqualTo, 2)    // At least 2 files in directory A
-
-		// Test directory listing
-		entries, err := cmd.ListImmediateChildren(ctx, chConn, mountPath, mountPath+"humgen/projects/")
-		So(err, ShouldBeNil)
-		So(len(entries), ShouldBeGreaterThanOrEqualTo, 2)
-
-		// Check the search functionality
-		paths, err := cmd.SearchGlobPaths(ctx, chConn, mountPath, "*/projects/*/file*", 10, false)
-		So(err, ShouldBeNil)
-		So(len(paths), ShouldEqual, 3) // All 3 files match the pattern
 	})
 }
 

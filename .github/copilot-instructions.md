@@ -42,8 +42,9 @@ make buildembedded
 make test
 
 # Run specific tests (e.g. ClickHouse integration tests)
-# Always run this after changes to verify nothing is broken
+# Always run these after changes to verify nothing is broken
 go test . -run Click -v
+go test ./clickhouse -v
 
 # Test with race detection
 make race
@@ -119,13 +120,14 @@ err := conn.QueryRow(ctx,
 - Unit tests for core functionality
 - Integration tests with ClickHouse for database operations
 - Special test setup in `main_test.go` for end-to-end testing
-- **Always run `go test . -run Click -v` after changes to verify ClickHouse integration works**
+- **Always run `go test . -run Click -v` and `go test ./clickhouse -v` after changes to verify ClickHouse integration works**
 - **Do not run all tests during routine development; use targeted test patterns**
 
 ## Code Verification
 When making changes, always verify your work by running:
 1. `make lintnonpm` - to check for linting issues (no user approval needed)
 2. `go test . -run Click -v` - to verify ClickHouse integration (no user approval needed)
+3. `go test ./clickhouse -v` - to verify ClickHouse integration (no user approval needed)
 
 You can run these commands as needed without asking for permission.
 

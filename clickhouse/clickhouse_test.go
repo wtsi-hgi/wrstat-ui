@@ -21,13 +21,13 @@
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  ******************************************************************************/
 
-package cmd_test
+package clickhouse_test
 
 import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/wtsi-hgi/wrstat-ui/cmd"
+	"github.com/wtsi-hgi/wrstat-ui/clickhouse"
 )
 
 // Tests for helper functions.
@@ -44,7 +44,7 @@ func TestNormalizeMount(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := cmd.NormalizeMount(tt.input)
+			result := clickhouse.NormalizeMount(tt.input)
 			assert.Equal(t, tt.expected, result)
 		})
 	}
@@ -65,7 +65,7 @@ func TestSplitParentAndName(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			dir, name := cmd.SplitParentAndName(tt.path)
+			dir, name := clickhouse.SplitParentAndName(tt.path)
 			assert.Equal(t, tt.expectedDir, dir)
 			assert.Equal(t, tt.expectedName, name)
 		})
@@ -107,7 +107,7 @@ func TestForEachAncestor(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var result []string
-			cmd.ForEachAncestor(tt.dir, tt.mountPath, func(a string) bool {
+			clickhouse.ForEachAncestor(tt.dir, tt.mountPath, func(a string) bool {
 				result = append(result, a)
 
 				return true
@@ -138,7 +138,7 @@ func TestDeriveExtLower(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := cmd.DeriveExtLower(tt.filename, tt.isDir)
+			result := clickhouse.DeriveExtLower(tt.filename, tt.isDir)
 			assert.Equal(t, tt.expected, result)
 		})
 	}
@@ -158,7 +158,7 @@ func TestIsDirPath(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := cmd.IsDirPath(tt.path)
+			result := clickhouse.IsDirPath(tt.path)
 			assert.Equal(t, tt.expected, result)
 		})
 	}
