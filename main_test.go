@@ -380,6 +380,7 @@ func TestSummariseClickHouse(t *testing.T) {
 	})
 	if err != nil {
 		t.Skipf("Skipping TestSummariseClickHouse - could not connect to ClickHouse: %v", err)
+
 		return
 	}
 
@@ -408,6 +409,7 @@ func TestSummariseClickHouse(t *testing.T) {
 		})
 		if err != nil {
 			t.Errorf("Failed to connect for cleanup: %v", err)
+
 			return
 		}
 
@@ -444,7 +446,7 @@ func TestSummariseClickHouse(t *testing.T) {
 		So(f.Close(), ShouldBeNil)
 
 		// Run the summarise command using the CLI
-		fmt.Printf("Running summarise command with database %s\n", testDatabase)
+		t.Logf("Running summarise command with database %s", testDatabase)
 		output, stderr, _, err := runWRStat(
 			"summarise",
 			"--ch-host", chHost,
@@ -467,10 +469,12 @@ func TestSummariseClickHouse(t *testing.T) {
 			DialTimeout: 5 * time.Second,
 		})
 		So(err, ShouldBeNil)
+
 		defer conn.Close()
 
 		// Check scans table
 		var scanCount uint64
+
 		err = conn.QueryRow(ctx, "SELECT count() FROM scans WHERE state = 'ready' AND mount_path = ?",
 			mountPath).Scan(&scanCount)
 		So(err, ShouldBeNil)
@@ -478,6 +482,7 @@ func TestSummariseClickHouse(t *testing.T) {
 
 		// Check fs_entries table
 		var fileCount uint64
+
 		err = conn.QueryRow(ctx, "SELECT count() FROM fs_entries_current WHERE mount_path = ?",
 			mountPath).Scan(&fileCount)
 		So(err, ShouldBeNil)
@@ -485,6 +490,7 @@ func TestSummariseClickHouse(t *testing.T) {
 
 		// Check ancestor_rollups_raw table
 		var rollupCount uint64
+
 		err = conn.QueryRow(ctx, "SELECT count() FROM ancestor_rollups_current WHERE mount_path = ?",
 			mountPath).Scan(&rollupCount)
 		So(err, ShouldBeNil)
@@ -492,6 +498,7 @@ func TestSummariseClickHouse(t *testing.T) {
 
 		// Check total size
 		var totalSize uint64
+
 		err = conn.QueryRow(ctx, `
 			SELECT total_size 
 			FROM ancestor_rollups_current 
@@ -502,6 +509,7 @@ func TestSummariseClickHouse(t *testing.T) {
 
 		// Check specific file size
 		var fileSize uint64
+
 		err = conn.QueryRow(ctx, `
 			SELECT size FROM fs_entries_current 
 			WHERE path = ?`,

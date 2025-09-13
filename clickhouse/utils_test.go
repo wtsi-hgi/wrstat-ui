@@ -203,6 +203,7 @@ func TestForEachAncestor(t *testing.T) {
 			var result []string
 			ForEachAncestor(tt.dir, tt.mountPath, func(a string) bool {
 				result = append(result, a)
+
 				return true
 			})
 			assert.Equal(t, tt.expected, result)
@@ -213,6 +214,7 @@ func TestForEachAncestor(t *testing.T) {
 		var result []string
 		ForEachAncestor("/data/folder/subfolder/", "/data/", func(a string) bool {
 			result = append(result, a)
+
 			return len(result) < 2 // Stop after collecting 2 ancestors
 		})
 		assert.Equal(t, []string{"/data/folder/subfolder/", "/data/folder/"}, result)
@@ -235,7 +237,7 @@ func TestOpenStatsFile(t *testing.T) {
 		tmpFile := filepath.Join(tmpDir, "test.txt")
 
 		testData := []byte("test data")
-		err := os.WriteFile(tmpFile, testData, 0644)
+		err := os.WriteFile(tmpFile, testData, 0600) // Use more restrictive permissions
 		require.NoError(t, err)
 
 		// Get file stats for later comparison

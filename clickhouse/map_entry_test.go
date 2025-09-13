@@ -32,9 +32,9 @@ import (
 
 func TestMapEntryType(t *testing.T) {
 	tests := []struct {
-		name         string
+		name          string
 		entryTypeByte byte
-		expected     FileType
+		expected      FileType
 	}{
 		{"File", stats.FileType, FileTypeFile},
 		{"Directory", stats.DirType, FileTypeDir},

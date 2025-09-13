@@ -33,15 +33,17 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/stats"
 )
 
-// typeMap maps stats package entry type bytes to our internal FileType representation.
-var typeMap = map[byte]FileType{
-	stats.FileType:    FileTypeFile,
-	stats.DirType:     FileTypeDir,
-	stats.SymlinkType: FileTypeSymlink,
-	stats.DeviceType:  FileTypeDevice,
-	stats.PipeType:    FileTypePipe,
-	stats.SocketType:  FileTypeSocket,
-	stats.CharType:    FileTypeChar,
+// fileTypeMapping maps stats package entry type bytes to our internal FileType representation.
+func fileTypeMapping() map[byte]FileType {
+	return map[byte]FileType{
+		stats.FileType:    FileTypeFile,
+		stats.DirType:     FileTypeDir,
+		stats.SymlinkType: FileTypeSymlink,
+		stats.DeviceType:  FileTypeDevice,
+		stats.PipeType:    FileTypePipe,
+		stats.SocketType:  FileTypeSocket,
+		stats.CharType:    FileTypeChar,
+	}
 }
 
 // Helper to close multiple resources when wrapping readers.
@@ -99,7 +101,7 @@ func OpenStatsFile(statsFile string) (io.ReadCloser, time.Time, error) {
 
 // MapEntryType converts a stats package entry type byte to our internal FileType.
 func MapEntryType(b byte) FileType {
-	if ft, ok := typeMap[b]; ok {
+	if ft, ok := fileTypeMapping()[b]; ok {
 		return ft
 	}
 

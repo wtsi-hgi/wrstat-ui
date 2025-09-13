@@ -81,11 +81,14 @@ func TestClickHouseIntegration(t *testing.T) {
 
 	// Try connecting
 	ctx := context.Background()
+
 	adminCh, err := clickhouse.New(params)
 	if err != nil {
 		t.Skipf("Skipping ClickHouse integration tests - could not connect to ClickHouse: %v", err)
+
 		return
 	}
+
 	defer adminCh.Close()
 
 	// Drop test database if it exists (cleanup from previous failed tests)
@@ -112,6 +115,7 @@ func TestClickHouseIntegration(t *testing.T) {
 	params.Database = testDatabase
 	ch, err := clickhouse.New(params)
 	require.NoError(t, err)
+
 	defer ch.Close()
 
 	// Create schema
@@ -145,6 +149,7 @@ func TestClickHouseIntegration(t *testing.T) {
 	// Open the stats file
 	r, _, err := clickhouse.OpenStatsFile(statsPath)
 	require.NoError(t, err)
+
 	defer r.Close()
 
 	// Update the ClickHouse database
@@ -154,6 +159,7 @@ func TestClickHouseIntegration(t *testing.T) {
 	// Test various queries
 	t.Run("ScanCountCheck", func(t *testing.T) {
 		var scanCount uint64
+
 		query := "SELECT count() FROM scans WHERE state = 'ready' AND mount_path = ?"
 		err = ch.ExecuteQuery(ctx, query, mountPath, &scanCount)
 		require.NoError(t, err)
@@ -162,6 +168,7 @@ func TestClickHouseIntegration(t *testing.T) {
 
 	t.Run("FileEntriesCheck", func(t *testing.T) {
 		var fileCount uint64
+
 		query := "SELECT count() FROM fs_entries_current WHERE mount_path = ?"
 		err = ch.ExecuteQuery(ctx, query, mountPath, &fileCount)
 		require.NoError(t, err)
@@ -170,6 +177,7 @@ func TestClickHouseIntegration(t *testing.T) {
 
 	t.Run("AncestorRollupsCheck", func(t *testing.T) {
 		var rollupCount uint64
+
 		query := "SELECT count() FROM ancestor_rollups_current WHERE mount_path = ?"
 		err = ch.ExecuteQuery(ctx, query, mountPath, &rollupCount)
 		require.NoError(t, err)
@@ -178,6 +186,7 @@ func TestClickHouseIntegration(t *testing.T) {
 
 	t.Run("TotalSizeCalculationCheck", func(t *testing.T) {
 		var totalSize uint64
+
 		query := `SELECT total_size FROM ancestor_rollups_current WHERE mount_path = ? AND ancestor = ?`
 		err = ch.ExecuteQuery(ctx, query, mountPath, mountPath, &totalSize)
 		require.NoError(t, err)
@@ -186,6 +195,7 @@ func TestClickHouseIntegration(t *testing.T) {
 
 	t.Run("PathQueryCheck", func(t *testing.T) {
 		var fileSize uint64
+
 		query := `SELECT size FROM fs_entries_current WHERE path = ?`
 		err = ch.ExecuteQuery(ctx, query, mountPath+"humgen/projects/A/file1", &fileSize)
 		require.NoError(t, err)

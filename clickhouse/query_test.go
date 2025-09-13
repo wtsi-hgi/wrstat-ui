@@ -42,5 +42,6 @@ func (c *Clickhouse) QueryRow(ctx context.Context, query string, args ...interfa
 	}
 
 	row := c.conn.QueryRow(ctx, query, args...)
+
 	return row.Scan(dest...)
 }

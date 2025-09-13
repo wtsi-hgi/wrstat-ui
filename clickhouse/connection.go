@@ -397,7 +397,12 @@ func (c *Clickhouse) RegisterScan(ctx context.Context, mountPath string, scanID 
 }
 
 // PromoteScan marks a scan as 'ready' by inserting a new record.
-func (c *Clickhouse) PromoteScan(ctx context.Context, mountPath string, scanID uint64, started, finished time.Time) error {
+func (c *Clickhouse) PromoteScan(
+	ctx context.Context,
+	mountPath string,
+	scanID uint64,
+	started, finished time.Time,
+) error {
 	return c.conn.Exec(ctx, `
 		INSERT INTO scans (mount_path, scan_id, state, started_at, finished_at)
 		VALUES (?, ?, 'ready', ?, ?)`,
@@ -502,9 +507,12 @@ func (c *Clickhouse) GetLastScanTimes(ctx context.Context) (map[string]time.Time
 
 	// Collect results
 	result := make(map[string]time.Time)
+
 	for rows.Next() {
-		var mountPath string
-		var timestamp time.Time
+		var (
+			mountPath string
+			timestamp time.Time
+		)
 
 		if err := rows.Scan(&mountPath, &timestamp); err != nil {
 			return nil, err
