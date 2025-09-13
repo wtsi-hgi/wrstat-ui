@@ -84,6 +84,7 @@ func failMainTest(err string) {
 func TestMain(m *testing.M) {
 	d1 := buildSelf()
 	if d1 == nil {
+
 		return
 	}
 
@@ -379,6 +380,7 @@ func TestSummariseClickHouse(t *testing.T) {
 
 	if err != nil {
 		t.Skipf("Skipping TestSummariseClickHouse - could not connect to ClickHouse: %v", err)
+
 		return
 	}
 
@@ -407,6 +409,7 @@ func TestSummariseClickHouse(t *testing.T) {
 		})
 		if err != nil {
 			t.Errorf("Failed to connect for cleanup: %v", err)
+
 			return
 		}
 

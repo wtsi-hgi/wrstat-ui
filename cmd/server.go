@@ -43,11 +43,10 @@ import (
 )
 
 const (
-	sentinelPollFrequencty   = 1 * time.Minute
-	serverTokenBasename      = ".wrstat.servertoken"
-	dgutaDBsSuffix           = "dguta.dbs"
-	basedirBasename          = "basedirs.db"
-	dgutaDBsSentinelBasename = ".dguta.dbs.updated"
+	sentinelPollFrequencty = 1 * time.Minute
+	serverTokenBasename    = ".wrstat.servertoken"
+	dgutaDBsSuffix         = "dguta.dbs"
+	basedirBasename        = "basedirs.db"
 )
 
 // options for this cmd.

@@ -109,6 +109,7 @@ func TestForEachAncestor(t *testing.T) {
 			var result []string
 			cmd.ForEachAncestor(tt.dir, tt.mountPath, func(a string) bool {
 				result = append(result, a)
+
 				return true
 			})
 			assert.Equal(t, tt.expected, result)

@@ -754,6 +754,7 @@ func (bp *batchProcessor) addFile(path string, parent string, name string, ext s
 	}
 
 	bp.filesCount++
+
 	return nil
 }
 
@@ -765,6 +766,7 @@ func (bp *batchProcessor) addRollup(ancestor string, size uint64, atime, mtime t
 	}
 
 	bp.rollupsCount++
+
 	return nil
 }
 
@@ -862,8 +864,10 @@ func ingestScan(ctx context.Context, conn clickhouse.Conn, mountPath string, sca
 		ForEachAncestor(base, mountPath, func(a string) bool {
 			if err := bp.addRollup(a, size, atime, mtime, fi.UID, fi.GID, ext); err != nil {
 				ancestorErr = err
+
 				return false
 			}
+
 			return true
 		})
 
@@ -1091,6 +1095,7 @@ WHERE mount_path = ? AND path LIKE ?`, mountPath, mountPath, dir+"%")
 		var s Summary
 		if err := row.Scan(&s.TotalSize, &s.FileCount, &s.MostRecentATime, &s.OldestATime,
 			&s.MostRecentMTime, &s.OldestMTime, &s.UIDs, &s.GIDs, &s.Exts); err != nil {
+
 			return Summary{}, err
 		}
 
@@ -1237,6 +1242,7 @@ func OptimizedSubtreeSummary(ctx context.Context, conn clickhouse.Conn, mountPat
 			if errors.Is(err, io.EOF) {
 				return Summary{}, nil
 			}
+
 			return Summary{}, err
 		}
 
