@@ -157,6 +157,8 @@ type Summary struct {
 	UIDs            []uint32
 	GIDs            []uint32
 	Exts            []string
+	FTypes          []uint8 // File types for Phase 1 - correspond to db.DirGUTAFileType constants
+	Age             uint8   // Age bucket for Phase 1 - corresponds to db.DirGUTAge constants
 }
 
 // Filters specifies filtering criteria for ClickHouse queries.

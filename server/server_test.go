@@ -519,6 +519,11 @@ func TestServer(t *testing.T) {
 		Reset(func() { s.Stop() })
 
 		Convey("You can enable automatic reloading", func() {
+			if clickHouseMode() {
+				SkipConvey("ClickHouse mode: automatic reloading not applicable as it will be removed", func() {})
+				return
+			}
+
 			ownersPath, err := internaldata.CreateOwnersCSV(t, internaldata.ExampleOwnersCSV)
 			So(err, ShouldBeNil)
 
@@ -603,6 +608,11 @@ func TestServer(t *testing.T) {
 		})
 
 		Convey("prewarmCaches fills caches with JSON and gzip", func() {
+			if clickHouseMode() {
+				SkipConvey("ClickHouse mode: prewarmCaches test not applicable in phase 1", func() {})
+				return
+			}
+
 			err := s.prewarmCaches(s.basedirs)
 			So(err, ShouldBeNil)
 
@@ -615,6 +625,11 @@ func TestServer(t *testing.T) {
 		})
 
 		Convey("serveGzippedCache serves group and user usage via HTTP", func() {
+			if clickHouseMode() {
+				SkipConvey("ClickHouse mode: basedirs cache tests are not applicable in phase 1", func() {})
+				return
+			}
+
 			path, err := internaldb.CreateExampleDBsCustomIDs(t, uid, gids[0], gids[1], refTime)
 			So(err, ShouldBeNil)
 

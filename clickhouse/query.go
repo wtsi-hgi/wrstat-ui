@@ -36,11 +36,21 @@ import (
 func (c *Clickhouse) ListImmediateChildren(ctx context.Context, dir string) ([]FileEntry, error) {
 	dir = EnsureDir(dir)
 
+	// Use a query that ensures only unique paths are returned
+	// Filter to directories only at the SQL level
+	// Exclude synthetic directories which have uid=0 AND gid=0
 	rows, err := c.conn.Query(ctx, `
 		SELECT path, parent_path, name, ext_low, ftype, inode, size, uid, gid, mtime, atime, ctime
-		FROM fs_entries_current
-		WHERE parent_path = ?`,
-		dir)
+		FROM (
+			-- Select the unique entries with the highest inode number for each path
+			SELECT *
+			FROM fs_entries_current
+			WHERE parent_path = ? AND ftype = ? AND path != '/' 
+			  AND NOT (uid = 0 AND gid = 0)
+			ORDER BY path, inode DESC
+			LIMIT 1 BY path
+		)`,
+		dir, uint8(FileTypeDir))
 	if err != nil {
 		return nil, err
 	}
@@ -197,10 +207,13 @@ func buildGlobalTimeBucketFilter(f Filters) string {
 // buildAllSummaryQuery builds the summary query across all mounts (no mount_path filter),
 // using per-row scan time for any time buckets.
 func buildAllSummaryQuery(where []string, bucketFilter string) string {
-	// Aggregate per unique path first to avoid duplicate rows for the same path
-	// that can occur due to stats expansion of ancestors. Use max(size) to prefer
-	// real directory sizes over zero from synthetic/missing rows, and max(uid/gid)
-	// to prefer non-zero owners when present.
+	// To match Bolt behavior, we need to:
+	// 1. Deduplicate directory entries by normalizing paths
+	// 2. Handle extra synthetic directory entries that are part of ClickHouse but not Bolt
+	// 3. Count only real entries, not duplicates from path expansion
+	//
+	// Use a subquery that first filters to unique paths, then aggregates only those.
+	// Filter out synthetic directories by excluding entries with uid=0 AND gid=0 (synthetic markers).
 	return `
 SELECT
 	sum(size) AS total_size,
@@ -211,7 +224,8 @@ SELECT
 	min(mtime) AS oldest_mtime,
 	groupUniqArray(uid) AS uids,
 	groupUniqArray(gid) AS gids,
-	groupUniqArray(ext_low) AS exts
+	groupUniqArray(ext_low) AS exts,
+	groupUniqArray(ftype) AS ftypes
 FROM (
 	SELECT
 		-- Normalize by trimming a trailing slash so '/x' and '/x/' group together
@@ -221,9 +235,19 @@ FROM (
 		max(mtime) AS mtime,
 		max(uid) AS uid,
 		max(gid) AS gid,
-		anyLast(ext_low) AS ext_low
-	FROM fs_entries_current
-	WHERE ` + strings.Join(where, " AND ") + bucketFilter + `
+		anyLast(ext_low) AS ext_low,
+		anyLast(ftype) AS ftype
+	FROM (
+		-- First filter out duplicated directory entries that come from multiple mounts
+		-- For each path, keep only one entry (prioritizing the one with the largest inode)
+		-- Also exclude synthetic directories which have uid=0 AND gid=0
+		SELECT *
+		FROM fs_entries_current
+		WHERE ` + strings.Join(where, " AND ") + bucketFilter + `
+		  AND NOT (uid = 0 AND gid = 0 AND ftype = ` + fmt.Sprintf("%d", FileTypeDir) + `)
+		ORDER BY path, inode DESC
+		LIMIT 1 BY path
+	)
 	GROUP BY norm_path
 )
 `
@@ -238,7 +262,8 @@ func (c *Clickhouse) executeSummaryQuery(ctx context.Context, query string, args
 		&s.TotalSize, &s.FileCount,
 		&s.MostRecentATime, &s.OldestATime,
 		&s.MostRecentMTime, &s.OldestMTime,
-		&s.UIDs, &s.GIDs, &s.Exts); err != nil {
+		&s.UIDs, &s.GIDs, &s.Exts,
+		&s.FTypes); err != nil {
 		return Summary{}, err
 	}
 
@@ -250,7 +275,72 @@ func (c *Clickhouse) executeSummaryQuery(ctx context.Context, query string, args
 func (c *Clickhouse) SubtreeSummary(ctx context.Context, dir string, f Filters) (Summary, error) {
 	// For phase 1 correctness, prefer scan-based summaries which align with Bolt semantics
 	// (unique paths) and avoid rollup double-counting complexities.
-	return c.subtreeSummaryScan(ctx, dir, f)
+	sum, err := c.subtreeSummaryScan(ctx, dir, f)
+	if err != nil {
+		return Summary{}, err
+	}
+	
+	// Set Age based on time bucket filters for Phase 1
+	sum.Age = ageBucketToDBAge(f.ATimeBucket, f.MTimeBucket)
+	
+	return sum, nil
+}
+
+// ageBucketToDBAge maps filter bucket values to db.DirGUTAge constants.
+// This implementation aligns with the semantics used in db/age.go.
+func ageBucketToDBAge(aTimeBucket, mTimeBucket string) uint8 {
+	// Default to "all" (0) if no bucket specified
+	if aTimeBucket == "" && mTimeBucket == "" {
+		return 0 // db.DGUTAgeAll
+	}
+
+	// Map atime buckets to db.DirGUTAge constants
+	if aTimeBucket != "" {
+		switch aTimeBucket {
+		case "0d":
+			return 0 // db.DGUTAgeAll (within 1 day)
+		case ">1m":
+			return 1 // db.DGUTAgeA1M
+		case ">2m":
+			return 2 // db.DGUTAgeA2M
+		case ">6m":
+			return 3 // db.DGUTAgeA6M
+		case ">1y":
+			return 4 // db.DGUTAgeA1Y
+		case ">2y":
+			return 5 // db.DGUTAgeA2Y
+		case ">3y":
+			return 6 // db.DGUTAgeA3Y
+		case ">5y":
+			return 7 // db.DGUTAgeA5Y
+		case ">7y":
+			return 8 // db.DGUTAgeA7Y
+		}
+	}
+
+	// Map mtime buckets to db.DirGUTAge constants
+	if mTimeBucket != "" {
+		switch mTimeBucket {
+		case ">1m":
+			return 11 // db.DGUTAgeM1M
+		case ">2m":
+			return 12 // db.DGUTAgeM2M
+		case ">6m":
+			return 13 // db.DGUTAgeM6M
+		case ">1y":
+			return 14 // db.DGUTAgeM1Y
+		case ">2y":
+			return 15 // db.DGUTAgeM2Y
+		case ">3y":
+			return 16 // db.DGUTAgeM3Y
+		case ">5y":
+			return 17 // db.DGUTAgeM5Y
+		case ">7y":
+			return 18 // db.DGUTAgeM7Y
+		}
+	}
+
+	return 0 // Default to "all"
 }
 
 // Helper function to retrieve summary from the rollups table.
@@ -331,7 +421,8 @@ SELECT
 	min(mtime),
 	groupUniqArray(uid),
 	groupUniqArray(gid),
-	groupUniqArray(ext_low)
+	groupUniqArray(ext_low),
+	groupUniqArray(ftype)
 FROM (
 	SELECT
 		if(endsWith(path, '/'), substring(path, 1, length(path) - 1), path) AS norm_path,
@@ -340,16 +431,25 @@ FROM (
 		max(mtime) AS mtime,
 		max(uid) AS uid,
 		max(gid) AS gid,
-		anyLast(ext_low) AS ext_low
-	FROM fs_entries_current
-	WHERE path LIKE ?
+		anyLast(ext_low) AS ext_low,
+		anyLast(ftype) AS ftype
+	FROM (
+		-- First filter out duplicated directory entries that come from multiple mounts
+		-- Also exclude synthetic directories which have uid=0 AND gid=0
+		SELECT *
+		FROM fs_entries_current
+		WHERE path LIKE ?
+		  AND NOT (uid = 0 AND gid = 0 AND ftype = ?)
+		ORDER BY path, inode DESC
+		LIMIT 1 BY path
+	)
 	GROUP BY norm_path
 )
-`, dir+"%")
+`, dir+"%", uint8(FileTypeDir))
 
 	var s Summary
 	if err := row.Scan(&s.TotalSize, &s.FileCount, &s.MostRecentATime, &s.OldestATime,
-		&s.MostRecentMTime, &s.OldestMTime, &s.UIDs, &s.GIDs, &s.Exts); err != nil {
+		&s.MostRecentMTime, &s.OldestMTime, &s.UIDs, &s.GIDs, &s.Exts, &s.FTypes); err != nil {
 		return Summary{}, err
 	}
 

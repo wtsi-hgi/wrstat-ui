@@ -77,6 +77,7 @@ func (s *Server) getBasedirsGroupUsage(c *gin.Context) {
 	s.mu.RLock()
 	groupCache := s.groupUsageCache
 	s.mu.RUnlock()
+
 	s.serveGzippedCache(c, groupCache)
 }
 
@@ -84,6 +85,14 @@ func (s *Server) getBasedirsUserUsage(c *gin.Context) {
 	s.mu.RLock()
 	userCache := s.userUsageCache
 	s.mu.RUnlock()
+
+	// In ClickHouse mode (phase 1), initialize empty cache
+	if useClickHouseFeatureFlag() {
+		c.Header("Content-Encoding", "gzip")
+		c.Data(http.StatusOK, "application/json", []byte("[]"))
+		return
+	}
+
 	s.serveGzippedCache(c, userCache)
 
 }
@@ -159,11 +168,14 @@ func parseQ(parts []string) float64 {
 // It automatically selects gzip or plain JSON based on the
 // "Accept-Encoding" header.
 func (s *Server) serveGzippedCache(c *gin.Context, cache usageCache) {
+	// In ClickHouse mode (phase 1), we should return empty JSON data for basedirs endpoints
+	if useClickHouseFeatureFlag() {
+		c.IndentedJSON(http.StatusOK, []any{})
+		return
+	}
+
 	acceptEnc := c.GetHeader("Accept-Encoding")
 	wantsGzip := wantsGzipEncoding(acceptEnc)
-
-	s.mu.RLock()
-	defer s.mu.RUnlock()
 
 	if wantsGzip {
 		c.Header("Content-Encoding", "gzip")

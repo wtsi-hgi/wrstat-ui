@@ -253,6 +253,24 @@ func notImplementedHandler(c *gin.Context) {
 // usage data into JSON and gzip. so serveGzippedCache can serve quickly.
 // Returns an error if any cache build fails.
 func (s *Server) prewarmCaches(bd basedirs.MultiReader) error {
+	// In ClickHouse mode (phase 1), we don't use basedirs
+	if useClickHouseFeatureFlag() {
+		emptyJSON := []byte("[]")
+		emptyGzip, _ := compressGzip(emptyJSON)
+
+		s.groupUsageCache = usageCache{
+			jsonData: emptyJSON,
+			gzipData: emptyGzip,
+		}
+
+		s.userUsageCache = usageCache{
+			jsonData: emptyJSON,
+			gzipData: emptyGzip,
+		}
+
+		return nil
+	}
+
 	if err := s.buildCache(bd.GroupUsage, &s.groupUsageCache); err != nil {
 		return err
 	}

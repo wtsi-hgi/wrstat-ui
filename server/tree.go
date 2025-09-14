@@ -26,6 +26,7 @@
 package server
 
 import (
+	"fmt"
 	"io/fs"
 	"net/http"
 	"os"
@@ -188,6 +189,9 @@ func (s *Server) getTree(c *gin.Context) {
 func (s *Server) getTreeCH(c *gin.Context) { //nolint:funlen
 	path := c.DefaultQuery("path", "/")
 
+	// Add debug to see what entries we have for the root path
+	s.debugClickHouseEntries(c, path)
+
 	filter, err := makeFilterFromContext(c)
 	if err != nil {
 		c.AbortWithError(http.StatusBadRequest, err) //nolint:errcheck
@@ -211,6 +215,11 @@ func (s *Server) getTreeCH(c *gin.Context) { //nolint:funlen
 
 		return
 	}
+
+	// Debug the current summary we're building
+	fmt.Fprintf(os.Stderr, "\nDEBUG: Current Summary for path=%s:\n", path)
+	fmt.Fprintf(os.Stderr, "  Count: %d\n  Size: %d\n  UIDs: %v\n  GIDs: %v\n  FileTypes: %v\n\n",
+		current.Count, current.Size, current.UIDs, current.GIDs, current.FTs)
 
 	allowedGIDs, err := s.getAllowedGIDsSafe(c)
 	if err != nil {
@@ -249,11 +258,14 @@ func (s *Server) chDirSummary(c *gin.Context, ch *clickhouse.Clickhouse, path st
 		return nil, err
 	}
 
+	count := sum.FileCount
+	size := sum.TotalSize
+
 	// Build current TreeElement-compatible summary
 	current := &db.DirSummary{
 		Dir:   path,
-		Count: sum.FileCount,
-		Size:  sum.TotalSize,
+		Count: count,
+		Size:  size,
 		Atime: sum.OldestATime, // matches existing semantics (oldest atime)
 		Mtime: sum.MostRecentMTime,
 		UIDs:  sum.UIDs,
@@ -302,26 +314,33 @@ func (s *Server) buildChildTE(c *gin.Context, ch *clickhouse.Clickhouse, child s
 }
 
 // uniqueDirChildren returns a de-duped list of child directory paths.
+// This is simpler now as the ClickHouse query already returns unique directories.
 func uniqueDirChildren(entries []clickhouse.FileEntry) []string {
-	seen := make(map[string]struct{})
-	dirs := make([]string, 0)
+	dirs := make([]string, 0, len(entries))
 
 	for _, e := range entries {
+		// We're already filtering for directories in the SQL query,
+		// but double-check to be safe
 		if e.FType != uint8(clickhouse.FileTypeDir) {
 			continue
 		}
 
-		// Exclude the root entry itself from its own children
-		if e.Path == "/" {
-			continue
+		// Normalize path (remove trailing slash)
+		normPath := e.Path
+		if strings.HasSuffix(normPath, "/") && normPath != "/" {
+			normPath = normPath[:len(normPath)-1]
 		}
 
-		if _, ok := seen[e.Path]; ok {
-			continue
-		}
+		dirs = append(dirs, normPath)
+	}
 
-		seen[e.Path] = struct{}{}
-		dirs = append(dirs, e.Path)
+	// Debug directory paths if enabled
+	if os.Getenv("WRSTAT_DEBUG") == "1" {
+		fmt.Fprintf(os.Stderr, "DEBUG: uniqueDirChildren found %d directories\n", len(dirs))
+
+		for i, dir := range dirs {
+			fmt.Fprintf(os.Stderr, "  - Dir %d: %s\n", i+1, dir)
+		}
 	}
 
 	return dirs
@@ -334,10 +353,13 @@ func (s *Server) chChildTreeElement(c *gin.Context, ch *clickhouse.Clickhouse, c
 		return nil, err
 	}
 
+	count := csum.FileCount
+	size := csum.TotalSize
+
 	cds := &db.DirSummary{
 		Dir:   child,
-		Count: csum.FileCount,
-		Size:  csum.TotalSize,
+		Count: count,
+		Size:  size,
 		Atime: csum.OldestATime,
 		Mtime: csum.MostRecentMTime,
 		UIDs:  csum.UIDs,

@@ -26,6 +26,7 @@
 package server
 
 import (
+	"context"
 	"errors"
 
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
@@ -71,15 +72,235 @@ func NewClickHouseBackend(ch *clickhouse.Clickhouse) *ClickHouseBackend {
 }
 
 // DirInfo returns a directory summary and its immediate children summaries.
-// Phase 0: leave unimplemented; server will continue using Bolt unless
-// explicitly switched later phases.
-func (b *ClickHouseBackend) DirInfo(_ string, _ *db.Filter) (*db.DirInfo, error) {
-	return nil, ErrNotImplemented
+// Phase 1: Implemented using ClickHouse SubtreeSummary and ChildrenSummaries
+func (b *ClickHouseBackend) DirInfo(dir string, filter *db.Filter) (*db.DirInfo, error) {
+	// Convert db.Filter to clickhouse.Filters
+	chFilters := convertFilters(filter)
+
+	// Use the Gin context to allow for cancellation
+	ctx := context.Background()
+
+	// Get the summary for the directory
+	sum, err := b.ch.SubtreeSummary(ctx, dir, chFilters)
+	if err != nil {
+		return nil, err
+	}
+
+	// Convert the ClickHouse summary to a db.DirSummary
+	current := &db.DirSummary{
+		Dir:   dir,
+		Count: sum.FileCount,
+		Size:  sum.TotalSize,
+		Atime: sum.OldestATime,     // Oldest atime matches Bolt semantics
+		Mtime: sum.MostRecentMTime, // Most recent mtime matches Bolt semantics
+		UIDs:  sum.UIDs,
+		GIDs:  sum.GIDs,
+		FTs:   convertFTypesToDirGUTAFileTypes(sum.FTypes),
+		Age:   db.DirGUTAge(sum.Age),
+	}
+
+	// Get the children summaries
+	children, err := b.ch.ChildrenSummaries(ctx, dir, chFilters)
+	if err != nil {
+		return nil, err
+	}
+
+	// Convert the ClickHouse child summaries to db.DirSummary slice
+	childSummaries := make([]*db.DirSummary, len(children))
+	for i, child := range children {
+		childSummaries[i] = &db.DirSummary{
+			Dir:   child.Path,
+			Count: child.Summary.FileCount,
+			Size:  child.Summary.TotalSize,
+			Atime: child.Summary.OldestATime,
+			Mtime: child.Summary.MostRecentMTime,
+			UIDs:  child.Summary.UIDs,
+			GIDs:  child.Summary.GIDs,
+			FTs:   convertFTypesToDirGUTAFileTypes(child.Summary.FTypes),
+			Age:   db.DirGUTAge(child.Summary.Age),
+		}
+	}
+
+	return &db.DirInfo{
+		Current:  current,
+		Children: childSummaries,
+	}, nil
 }
 
 // DirHasChildren reports if dir has any child dirs with matching files.
-func (b *ClickHouseBackend) DirHasChildren(_ string, _ *db.Filter) bool {
-	return false
+// Phase 1: Implemented to check if a directory has any children
+func (b *ClickHouseBackend) DirHasChildren(dir string, filter *db.Filter) bool {
+	// Convert db.Filter to clickhouse.Filters
+	chFilters := convertFilters(filter)
+
+	// Use the Gin context to allow for cancellation
+	ctx := context.Background()
+
+	// Get the children summaries
+	children, err := b.ch.ChildrenSummaries(ctx, dir, chFilters)
+	if err != nil {
+		return false
+	}
+
+	// Return true if there are any children
+	return len(children) > 0
+}
+
+// convertFilters converts a db.Filter to clickhouse.Filters
+func convertFilters(filter *db.Filter) clickhouse.Filters {
+	if filter == nil {
+		return clickhouse.Filters{}
+	}
+
+	var aTimeBucket, mTimeBucket string
+
+	// Convert age filter to appropriate bucket
+	switch filter.Age {
+	case db.DGUTAgeA1M:
+		aTimeBucket = ">1m"
+	case db.DGUTAgeA2M:
+		aTimeBucket = ">2m"
+	case db.DGUTAgeA6M:
+		aTimeBucket = ">6m"
+	case db.DGUTAgeA1Y:
+		aTimeBucket = ">1y"
+	case db.DGUTAgeA2Y:
+		aTimeBucket = ">2y"
+	case db.DGUTAgeA3Y:
+		aTimeBucket = ">3y"
+	case db.DGUTAgeA5Y:
+		aTimeBucket = ">5y"
+	case db.DGUTAgeA7Y:
+		aTimeBucket = ">7y"
+	case db.DGUTAgeM1M:
+		mTimeBucket = ">1m"
+	case db.DGUTAgeM2M:
+		mTimeBucket = ">2m"
+	case db.DGUTAgeM6M:
+		mTimeBucket = ">6m"
+	case db.DGUTAgeM1Y:
+		mTimeBucket = ">1y"
+	case db.DGUTAgeM2Y:
+		mTimeBucket = ">2y"
+	case db.DGUTAgeM3Y:
+		mTimeBucket = ">3y"
+	case db.DGUTAgeM5Y:
+		mTimeBucket = ">5y"
+	case db.DGUTAgeM7Y:
+		mTimeBucket = ">7y"
+	}
+
+	// Build and return the ClickHouse filters
+	return clickhouse.Filters{
+		GIDs:        filter.GIDs,
+		UIDs:        filter.UIDs,
+		Exts:        convertDGUTAFileTypesToExts(filter.FTs),
+		ATimeBucket: aTimeBucket,
+		MTimeBucket: mTimeBucket,
+	}
+}
+
+// convertFTypesToDirGUTAFileTypes converts ClickHouse FTypes to db.DirGUTAFileType slice
+func convertFTypesToDirGUTAFileTypes(ftypes []uint8) []db.DirGUTAFileType {
+	// If no file types, return nil
+	if len(ftypes) == 0 {
+		return nil
+	}
+
+	// Map to db.DirGUTAFileType values
+	result := make([]db.DirGUTAFileType, 0, len(ftypes))
+
+	// This is a simplified conversion - we'll need to expand this
+	for _, ft := range ftypes {
+		// ClickHouse file types to db.DirGUTAFileType conversion logic
+		// We'll map based on our understanding of the file types
+		var dgft db.DirGUTAFileType
+
+		if ft == 2 { // clickhouse.FileTypeDir (uint8 value is 2)
+			dgft = 15 // Value of db.DirGUTAFileTypeDir
+			result = append(result, dgft)
+		}
+		// For non-directory types, we skip as they're handled via extensions
+	}
+
+	return result
+}
+
+// convertDGUTAFileTypesToExts converts db.DirGUTAFileType slice to extensions for filtering
+func convertDGUTAFileTypesToExts(fts []db.DirGUTAFileType) []string {
+	if len(fts) == 0 {
+		return nil
+	}
+
+	// Create a map to avoid duplicates
+	extMap := make(map[string]struct{})
+
+	// This mapping should align with extToDGUTA in server/tree.go
+	for _, ft := range fts {
+		switch ft {
+		case 2: // db.DirGUTAFileTypeVCF
+			extMap["vcf"] = struct{}{}
+		case 3: // db.DirGUTAFileTypeVCFGz
+			extMap["vcf.gz"] = struct{}{}
+		case 4: // db.DirGUTAFileTypeBCF
+			extMap["bcf"] = struct{}{}
+		case 5: // db.DirGUTAFileTypeSam
+			extMap["sam"] = struct{}{}
+		case 6: // db.DirGUTAFileTypeBam
+			extMap["bam"] = struct{}{}
+		case 7: // db.DirGUTAFileTypeCram
+			extMap["cram"] = struct{}{}
+		case 8: // db.DirGUTAFileTypeFasta
+			extMap["fa"] = struct{}{}
+			extMap["fasta"] = struct{}{}
+		case 9: // db.DirGUTAFileTypeFastq
+			extMap["fastq"] = struct{}{}
+			extMap["fq"] = struct{}{}
+		case 10: // db.DirGUTAFileTypeFastqGz
+			extMap["fastq.gz"] = struct{}{}
+			extMap["fq.gz"] = struct{}{}
+		case 11: // db.DirGUTAFileTypePedBed
+			extMap["ped"] = struct{}{}
+			extMap["bed"] = struct{}{}
+			extMap["bim"] = struct{}{}
+			extMap["fam"] = struct{}{}
+			extMap["map"] = struct{}{}
+		case 13: // db.DirGUTAFileTypeText
+			extMap["csv"] = struct{}{}
+			extMap["dat"] = struct{}{}
+			extMap["md"] = struct{}{}
+			extMap["readme"] = struct{}{}
+			extMap["text"] = struct{}{}
+			extMap["txt"] = struct{}{}
+			extMap["tsv"] = struct{}{}
+		case 14: // db.DirGUTAFileTypeLog
+			extMap["log"] = struct{}{}
+			extMap["err"] = struct{}{}
+			extMap["e"] = struct{}{}
+			extMap["oe"] = struct{}{}
+		case 12: // db.DirGUTAFileTypeCompressed
+			extMap["gz"] = struct{}{}
+			extMap["bz2"] = struct{}{}
+			extMap["xz"] = struct{}{}
+			extMap["zip"] = struct{}{}
+			extMap["tgz"] = struct{}{}
+			extMap["bzip2"] = struct{}{}
+			extMap["bgz"] = struct{}{}
+			extMap["zst"] = struct{}{}
+			extMap["lz4"] = struct{}{}
+			extMap["lz"] = struct{}{}
+			extMap["br"] = struct{}{}
+		}
+		// Skip db.DirGUTAFileTypeDir (15) and db.DirGUTAFileTypeTemp (1) - these are handled separately
+	}
+
+	// Convert the map to a slice
+	exts := make([]string, 0, len(extMap))
+	for ext := range extMap {
+		exts = append(exts, ext)
+	}
+
+	return exts
 }
 
 // Where implements where-splits style aggregation.

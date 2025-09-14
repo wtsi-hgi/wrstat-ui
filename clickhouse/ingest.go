@@ -210,12 +210,15 @@ func (c *Clickhouse) ingestScan(ctx context.Context, mountPath string, scanID ui
 		return err
 	}
 
-	if err := scanAndProcessEntries(ctx, bp, r, mountPath); err != nil {
+	// Track directories we've already inserted to avoid duplicates
+	dirsSeen := make(map[string]bool)
+
+	if err := scanAndProcessEntries(ctx, bp, r, mountPath, dirsSeen); err != nil {
 		return err
 	}
 
 	// Insert synthetic ancestor directories above the mount to enable global listings
-	if err := insertSyntheticAncestorDirs(bp, mountPath); err != nil {
+	if err := insertSyntheticAncestorDirs(bp, mountPath, dirsSeen); err != nil {
 		return err
 	}
 
@@ -224,7 +227,7 @@ func (c *Clickhouse) ingestScan(ctx context.Context, mountPath string, scanID ui
 }
 
 // scanAndProcessEntries scans through the file records and processes each entry.
-func scanAndProcessEntries(ctx context.Context, bp *BatchProcessor, r io.Reader, mountPath string) error {
+func scanAndProcessEntries(ctx context.Context, bp *BatchProcessor, r io.Reader, mountPath string, dirsSeen map[string]bool) error {
 	parser := stats.NewStatsParser(r)
 	fi := new(stats.FileInfo)
 
@@ -236,7 +239,7 @@ func scanAndProcessEntries(ctx context.Context, bp *BatchProcessor, r io.Reader,
 			break
 		}
 
-		shouldContinue, err := processScanEntry(ctx, bp, fi, mountPath)
+		shouldContinue, err := processScanEntry(ctx, bp, fi, mountPath, dirsSeen)
 		if !shouldContinue || err != nil {
 			return err
 		}
@@ -252,9 +255,9 @@ func scanAndProcessEntries(ctx context.Context, bp *BatchProcessor, r io.Reader,
 
 // processScanEntry processes a single entry during scan ingestion.
 // Returns a boolean indicating if we should continue scanning, and any error encountered.
-func processScanEntry(ctx context.Context, bp *BatchProcessor, fi *stats.FileInfo, mountPath string) (bool, error) {
+func processScanEntry(ctx context.Context, bp *BatchProcessor, fi *stats.FileInfo, mountPath string, dirsSeen map[string]bool) (bool, error) {
 	// Process the file entry
-	if err := processFileEntry(bp, fi, mountPath); err != nil {
+	if err := processFileEntry(bp, fi, mountPath, dirsSeen); err != nil {
 		return false, err
 	}
 
@@ -269,7 +272,7 @@ func processScanEntry(ctx context.Context, bp *BatchProcessor, fi *stats.FileInf
 }
 
 // processFileEntry handles a single file entry during scan ingestion.
-func processFileEntry(bp *BatchProcessor, fi *stats.FileInfo, mountPath string) error {
+func processFileEntry(bp *BatchProcessor, fi *stats.FileInfo, mountPath string, dirsSeen map[string]bool) error {
 	path := string(fi.Path)
 
 	// Ensure all paths are absolute (start with '/') to align with server queries/tests
@@ -292,9 +295,27 @@ func processFileEntry(bp *BatchProcessor, fi *stats.FileInfo, mountPath string) 
 		inode = uint64(fi.Inode) // Values originate from trusted stats parser
 	}
 
+	// Set directory size to DirectorySize if it's a directory with zero size
 	size := uint64(0)
-	if fi.Size > 0 {
+	if isDir {
+		if fi.Size > 0 {
+			size = uint64(fi.Size)
+		} else {
+			// Only use DirectorySize for directories that don't have a size
+			// This ensures we properly handle "fake" directories that are ancestors of mount points
+			size = DirectorySize
+		}
+	} else if fi.Size > 0 {
 		size = uint64(fi.Size) // Values originate from trusted stats parser
+	}
+
+	// For directories, check if we've already seen this directory
+	if isDir {
+		if dirsSeen[path] {
+			// Skip adding duplicate directory entries
+			return nil
+		}
+		dirsSeen[path] = true
 	}
 
 	// Add file entry to batch
@@ -303,24 +324,24 @@ func processFileEntry(bp *BatchProcessor, fi *stats.FileInfo, mountPath string) 
 		return fmt.Errorf("failed to add file entry: %w", err)
 	}
 
-	return processAncestorRollups(bp, fi, path, parent, isDir, size, atime, mtime, ext, mountPath)
+	return processAncestorRollups(bp, fi, path, parent, isDir, size, atime, mtime, ext, mountPath, dirsSeen)
 }
 
 // processAncestorRollups processes rollups for all ancestor directories.
 // It calculates rollups for each directory in the path hierarchy.
 func processAncestorRollups(bp *BatchProcessor, fi *stats.FileInfo, path, parent string,
-	isDir bool, size uint64, atime, mtime time.Time, ext, mountPath string) error {
+	isDir bool, size uint64, atime, mtime time.Time, ext, mountPath string, dirsSeen map[string]bool) error {
 	// Include the directory itself in its own subtree if the entry is a directory
 	base := parent
 	if isDir {
 		base = path
 	}
 
-	if err := addRollupsWithinMount(bp, fi, base, mountPath, size, atime, mtime, ext); err != nil {
+	if err := addRollupsWithinMount(bp, fi, base, mountPath, size, atime, mtime, ext, dirsSeen); err != nil {
 		return err
 	}
 
-	if err := addRollupsAboveMount(bp, fi, mountPath, size, atime, mtime, ext); err != nil {
+	if err := addRollupsAboveMount(bp, fi, mountPath, size, atime, mtime, ext, dirsSeen); err != nil {
 		return err
 	}
 
@@ -329,10 +350,13 @@ func processAncestorRollups(bp *BatchProcessor, fi *stats.FileInfo, path, parent
 
 // addRollupsWithinMount adds rollups for the path and its ancestors inside the mount.
 func addRollupsWithinMount(bp *BatchProcessor, fi *stats.FileInfo, base, mountPath string,
-	size uint64, atime, mtime time.Time, ext string) error {
+	size uint64, atime, mtime time.Time, ext string, dirsSeen map[string]bool) error {
 	var firstErr error
 
 	ForEachAncestor(base, mountPath, func(a string) bool {
+		// Ensure we're tracking that we've seen this directory
+		dirsSeen[a] = true
+
 		if err := bp.AddRollup(a, size, atime, mtime, fi.UID, fi.GID, ext); err != nil {
 			firstErr = err
 
@@ -351,7 +375,7 @@ func addRollupsWithinMount(bp *BatchProcessor, fi *stats.FileInfo, base, mountPa
 
 // addRollupsAboveMount adds rollups for ancestors above the mount up to root.
 func addRollupsAboveMount(bp *BatchProcessor, fi *stats.FileInfo, mountPath string,
-	size uint64, atime, mtime time.Time, ext string) error {
+	size uint64, atime, mtime time.Time, ext string, dirsSeen map[string]bool) error {
 	mp := EnsureDir(mountPath)
 	parentOfMount, _ := SplitParentAndName(mp)
 
@@ -363,6 +387,9 @@ func addRollupsAboveMount(bp *BatchProcessor, fi *stats.FileInfo, mountPath stri
 	var firstErr error
 
 	ForEachAncestor(parentOfMount, "/", func(a string) bool {
+		// Ensure we're tracking that we've seen this directory
+		dirsSeen[a] = true
+
 		if err := bp.AddRollup(a, size, atime, mtime, fi.UID, fi.GID, ext); err != nil {
 			firstErr = err
 
@@ -382,7 +409,7 @@ func addRollupsAboveMount(bp *BatchProcessor, fi *stats.FileInfo, mountPath stri
 // insertSyntheticAncestorDirs inserts one directory entry per ancestor above the mountPath
 // (eg. for "/mnt/b/c/" inserts "/mnt/b/" and "/mnt/") so that global listings at
 // high-level directories (including "/") can enumerate down to the real mountpoints.
-func insertSyntheticAncestorDirs(bp *BatchProcessor, mountPath string) error {
+func insertSyntheticAncestorDirs(bp *BatchProcessor, mountPath string, dirsSeen map[string]bool) error {
 	mp := EnsureDir(mountPath)
 	parent, _ := SplitParentAndName(mp)
 
@@ -403,7 +430,12 @@ func insertSyntheticAncestorDirs(bp *BatchProcessor, mountPath string) error {
 			return true
 		}
 
-		if err := addSyntheticDirAndRollups(bp, a, t); err != nil {
+		// Skip if we've already seen this directory
+		if dirsSeen[a] {
+			return true
+		}
+
+		if err := addSyntheticDirAndRollups(bp, a, t, dirsSeen); err != nil {
 			firstErr = err
 
 			return false
@@ -417,18 +449,26 @@ func insertSyntheticAncestorDirs(bp *BatchProcessor, mountPath string) error {
 
 // addSyntheticDirAndRollups inserts a synthetic directory entry for 'a' and adds
 // rollup rows for 'a' and all its ancestors up to and including root.
-func addSyntheticDirAndRollups(bp *BatchProcessor, a string, t time.Time) error {
+func addSyntheticDirAndRollups(bp *BatchProcessor, a string, t time.Time, dirsSeen map[string]bool) error {
 	p, name := SplitParentAndName(a)
 
 	// Insert a single directory entry with zero size/ids; duplicates across mounts will be
 	// deduplicated at query time for global listings.
-	if err := bp.AddFile(a, p, name, "", FileTypeDir, 0, 0, 0, 0, t, t, t); err != nil {
+	//
+	// Use DirectorySize for synthetic directories to ensure consistent directory sizing
+	if err := bp.AddFile(a, p, name, "", FileTypeDir, 0, DirectorySize, 0, 0, t, t, t); err != nil {
 		return err
 	}
+
+	// Mark this directory as seen
+	dirsSeen[a] = true
 
 	var firstErr error
 
 	ForEachAncestor(a, "/", func(ra string) bool {
+		// Mark ancestor as seen
+		dirsSeen[ra] = true
+
 		// Zero-size, zero-uid/gid, empty ext to avoid affecting size while counting entries.
 		if err := bp.AddRollup(ra, 0, t, t, 0, 0, ""); err != nil {
 			firstErr = err
