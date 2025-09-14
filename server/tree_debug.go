@@ -106,6 +106,13 @@ func (s *Server) debugClickHouseEntries(c *gin.Context, path string) {
 		fmt.Fprintf(os.Stderr, "DEBUG: distinct parent directories with files under %s: %d\n", path, n)
 	}
 
+	// Compare with DirCountWithFiles implementation
+	if cnt, err := ch.DirCountWithFiles(ctx, path, clickhouse.Filters{}); err == nil {
+		fmt.Fprintf(os.Stderr, "DEBUG: DirCountWithFiles(%s) => %d\n", path, cnt)
+	} else {
+		fmt.Fprintf(os.Stderr, "DEBUG: DirCountWithFiles error: %v\n", err)
+	}
+
 	// Note: Additional low-level diagnostics removed to avoid relying on
 	// unexported connection details. Use ClickHouse helpers if needed.
 }

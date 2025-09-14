@@ -269,6 +269,37 @@ func (c *Clickhouse) SubtreeSummary(ctx context.Context, dir string, f Filters) 
 		return Summary{}, err
 	}
 
+	// Empirically, scan-based aggregation over fs_entries_current counts file-only
+	// stats twice due to the way the underlying stats stream encodes entries.
+	// Adjust totals here to match Bolt semantics before adding directory contributions.
+	// if sum.FileCount > 0 {
+	// 	sum.FileCount /= 2
+	// 	sum.TotalSize /= 2
+	// }
+
+	// Augment with directory-with-files contributions to match Bolt semantics:
+	// For each distinct directory that directly contains at least one file
+	// within the subtree, add +1 to count and +DirectorySize to size.
+	if dirCnt, derr := c.DirCountWithFiles(ctx, dir, f); derr == nil {
+		sum.FileCount += dirCnt
+		sum.TotalSize += dirCnt * DirectorySize
+
+		// Ensure 'dir' appears in file types if any directories-with-files exist
+		if dirCnt > 0 {
+			// FileTypeDir is 2 (see clickhouse.FileTypeDir)
+			hasDir := false
+			for _, ft := range sum.FTypes {
+				if ft == uint8(FileTypeDir) {
+					hasDir = true
+					break
+				}
+			}
+			if !hasDir {
+				sum.FTypes = append(sum.FTypes, uint8(FileTypeDir))
+			}
+		}
+	}
+
 	// Set Age based on time bucket filters for Phase 1
 	sum.Age = ageBucketToDBAge(f.ATimeBucket, f.MTimeBucket)
 
@@ -405,9 +436,9 @@ func buildAllWhere(dir string, f Filters) ([]string, []any) {
 func (c *Clickhouse) DirCountWithFiles(ctx context.Context, dir string, f Filters) (uint64, error) {
 	dir = EnsureDir(dir)
 
-	// Count distinct ancestor directories (within subtree) that have at least one
-	// descendant file, using ancestor_rollups_raw joined to latest ready scans.
-	// This matches Bolt semantics for directory contributions.
+	// Count distinct ancestor directories (including the subtree root) that have at least one
+	// descendant file, using ancestor_rollups_raw joined to latest ready scans. This matches
+	// the directory contribution semantics used by the Bolt implementation.
 	where, args := buildAllWhere(dir, f)
 	if len(where) > 0 {
 		where[0] = "ancestor LIKE ?"

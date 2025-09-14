@@ -285,27 +285,11 @@ func (s *Server) chDirSummary(c *gin.Context, ch *clickhouse.Clickhouse, path st
 		return nil, err
 	}
 
-	// Start with file-only counts and sizes
-	// The current ingestion produces duplicate file rollups per file; correct
-	// by collapsing duplicates using a factor of 2 for Phase 1 parity.
-	count := sum.FileCount / 2
-	size := sum.TotalSize / 2
-
-	// To match Bolt semantics, add a directory entry (count +1 and size +4096)
-	// for each distinct directory that directly contains at least one file
-	// within the subtree.
-	// Count directories-with-files.
-	if dirCnt, erdc := ch.DirCountWithFiles(c, path, cf); erdc == nil {
-		const directorySize = 4096
-		count += dirCnt
-		size += dirCnt * directorySize
-	}
-
 	// Build current TreeElement-compatible summary
 	current := &db.DirSummary{
 		Dir:   path,
-		Count: count,
-		Size:  size,
+		Count: sum.FileCount,
+		Size:  sum.TotalSize,
 		Atime: sum.OldestATime, // matches existing semantics (oldest atime)
 		Mtime: sum.MostRecentMTime,
 		UIDs:  sum.UIDs,
@@ -313,29 +297,17 @@ func (s *Server) chDirSummary(c *gin.Context, ch *clickhouse.Clickhouse, path st
 		FTs:   chExtsToDGUTA(sum.Exts),
 	}
 
-	// Synthesize 'dir' and 'temp' for the current subtree as needed.
-	if entries, erra := ch.ListImmediateChildren(c, path); erra == nil && childrenContainDirs(entries) {
-		current.FTs = append(current.FTs, db.DGUTAFileTypeDir)
+	// Include 'dir' from ClickHouse Summary.FTypes
+	for _, ft := range sum.FTypes {
+		if ft == uint8(clickhouse.FileTypeDir) {
+			current.FTs = append(current.FTs, db.DGUTAFileTypeDir)
+			break
+		}
 	}
 
+	// Heuristically include 'temp' based on subtree content
 	if subtreeLikelyHasTemp(c, ch, path) {
 		current.FTs = append(current.FTs, db.DGUTAFileTypeTemp)
-	}
-
-	// If directory count is non-zero, ensure 'dir' is present even if
-	// immediate children listing didn't detect directories (eg. due to filters)
-	if dirCnt, _ := ch.DirCountWithFiles(c, path, cf); dirCnt > 0 {
-		// prevent duplicates if already added
-		hasDir := false
-		for _, ft := range current.FTs {
-			if ft == db.DGUTAFileTypeDir {
-				hasDir = true
-				break
-			}
-		}
-		if !hasDir {
-			current.FTs = append(current.FTs, db.DGUTAFileTypeDir)
-		}
 	}
 
 	return current, nil
@@ -413,22 +385,10 @@ func (s *Server) chChildTreeElement(c *gin.Context, ch *clickhouse.Clickhouse, c
 	if err != nil {
 		return nil, err
 	}
-
-	// Apply the same temporary duplicate-correction as for the root summary.
-	count := csum.FileCount / 2
-	size := csum.TotalSize / 2
-
-	// Add directory counts/sizes under this child
-	if dirCnt, erdc := ch.DirCountWithFiles(c, child, cf); erdc == nil {
-		const directorySize = 4096
-		count += dirCnt
-		size += dirCnt * directorySize
-	}
-
 	cds := &db.DirSummary{
 		Dir:   child,
-		Count: count,
-		Size:  size,
+		Count: csum.FileCount,
+		Size:  csum.TotalSize,
 		Atime: csum.OldestATime,
 		Mtime: csum.MostRecentMTime,
 		UIDs:  csum.UIDs,
@@ -436,23 +396,15 @@ func (s *Server) chChildTreeElement(c *gin.Context, ch *clickhouse.Clickhouse, c
 		FTs:   chExtsToDGUTA(csum.Exts),
 	}
 
-	// Synthesize additional file types based on subtree structure.
-	cds.FTs = synthesizeFileTypes(c, ch, child, cds.FTs)
-
-	// If the subtree has any directories-with-files, ensure 'dir' is included.
-	if dirCnt, _ := ch.DirCountWithFiles(c, child, cf); dirCnt > 0 {
-		hasDir := false
-		for _, ft := range cds.FTs {
-			if ft == db.DGUTAFileTypeDir {
-				hasDir = true
-				break
-			}
-		}
-
-		if !hasDir {
+	// Include 'dir' from ClickHouse Summary.FTypes; also add 'temp' if detected
+	for _, ft := range csum.FTypes {
+		if ft == uint8(clickhouse.FileTypeDir) {
 			cds.FTs = append(cds.FTs, db.DGUTAFileTypeDir)
+			break
 		}
 	}
+
+	cds.FTs = synthesizeFileTypes(c, ch, child, cds.FTs)
 
 	childTE := s.ddsToTreeElement(cds, allowedGIDs)
 
@@ -504,7 +456,17 @@ func synthesizeFileTypes(
 	// Detect directory presence among immediate children
 	entries, err := ch.ListImmediateChildren(ctx, dir)
 	if err == nil && childrenContainDirs(entries) {
-		fts = append(fts, db.DGUTAFileTypeDir)
+		// only add if not already present
+		hasDir := false
+		for _, t := range fts {
+			if t == db.DGUTAFileTypeDir {
+				hasDir = true
+				break
+			}
+		}
+		if !hasDir {
+			fts = append(fts, db.DGUTAFileTypeDir)
+		}
 	}
 
 	// Detect '/tmp/' presence anywhere in subtree
