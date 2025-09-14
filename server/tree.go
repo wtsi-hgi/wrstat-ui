@@ -46,9 +46,17 @@ func (s *Server) addBaseDGUTARoutes() {
 	authGroup := s.AuthRouter()
 
 	if authGroup == nil {
-		s.Router().GET(EndPointWhere, s.getWhere)
+		if useClickHouseFeatureFlag() {
+			s.Router().GET(EndPointWhere, notImplementedHandler)
+		} else {
+			s.Router().GET(EndPointWhere, s.getWhere)
+		}
 	} else {
-		authGroup.GET(wherePath, s.getWhere)
+		if useClickHouseFeatureFlag() {
+			authGroup.GET(wherePath, notImplementedHandler)
+		} else {
+			authGroup.GET(wherePath, s.getWhere)
+		}
 	}
 }
 

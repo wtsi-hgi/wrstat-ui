@@ -201,7 +201,7 @@ type mockConnForQuery struct {
 
 // QueryRow implements the driver.Conn interface method for mock testing.
 //
-//nolint:ireturn // This method must return driver.Row as per the interface
+//nolint:ireturn // The interface requires returning driver.Row; this is in test mocks only.
 func (m *mockConnForQuery) QueryRow(ctx context.Context, query string, args ...interface{}) driver.Row {
 	m.queryRowCalled = true
 	// Skip assertion to avoid test.T in non-test code

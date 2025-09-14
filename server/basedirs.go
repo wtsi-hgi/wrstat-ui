@@ -43,17 +43,33 @@ func (s *Server) addBaseDirRoutes() {
 	authGroup := s.AuthRouter()
 
 	if authGroup == nil {
-		s.Router().GET(EndPointBasedirUsageGroup, s.getBasedirsGroupUsage)
-		s.Router().GET(EndPointBasedirUsageUser, s.getBasedirsUserUsage)
-		s.Router().GET(EndPointBasedirSubdirGroup, s.getBasedirsGroupSubdirs)
-		s.Router().GET(EndPointBasedirSubdirUser, s.getBasedirsUserSubdirs)
-		s.Router().GET(EndPointBasedirHistory, s.getBasedirsHistory)
+		if useClickHouseFeatureFlag() {
+			s.Router().GET(EndPointBasedirUsageGroup, notImplementedHandler)
+			s.Router().GET(EndPointBasedirUsageUser, notImplementedHandler)
+			s.Router().GET(EndPointBasedirSubdirGroup, notImplementedHandler)
+			s.Router().GET(EndPointBasedirSubdirUser, notImplementedHandler)
+			s.Router().GET(EndPointBasedirHistory, notImplementedHandler)
+		} else {
+			s.Router().GET(EndPointBasedirUsageGroup, s.getBasedirsGroupUsage)
+			s.Router().GET(EndPointBasedirUsageUser, s.getBasedirsUserUsage)
+			s.Router().GET(EndPointBasedirSubdirGroup, s.getBasedirsGroupSubdirs)
+			s.Router().GET(EndPointBasedirSubdirUser, s.getBasedirsUserSubdirs)
+			s.Router().GET(EndPointBasedirHistory, s.getBasedirsHistory)
+		}
 	} else {
-		authGroup.GET(basedirsGroupUsagePath, s.getBasedirsGroupUsage)
-		authGroup.GET(basedirsUserUsagePath, s.getBasedirsUserUsage)
-		authGroup.GET(basedirsGroupSubdirPath, s.getBasedirsGroupSubdirs)
-		authGroup.GET(basedirsUserSubdirPath, s.getBasedirsUserSubdirs)
-		authGroup.GET(basedirsHistoryPath, s.getBasedirsHistory)
+		if useClickHouseFeatureFlag() {
+			authGroup.GET(basedirsGroupUsagePath, notImplementedHandler)
+			authGroup.GET(basedirsUserUsagePath, notImplementedHandler)
+			authGroup.GET(basedirsGroupSubdirPath, notImplementedHandler)
+			authGroup.GET(basedirsUserSubdirPath, notImplementedHandler)
+			authGroup.GET(basedirsHistoryPath, notImplementedHandler)
+		} else {
+			authGroup.GET(basedirsGroupUsagePath, s.getBasedirsGroupUsage)
+			authGroup.GET(basedirsUserUsagePath, s.getBasedirsUserUsage)
+			authGroup.GET(basedirsGroupSubdirPath, s.getBasedirsGroupSubdirs)
+			authGroup.GET(basedirsUserSubdirPath, s.getBasedirsUserSubdirs)
+			authGroup.GET(basedirsHistoryPath, s.getBasedirsHistory)
+		}
 	}
 }
 

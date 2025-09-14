@@ -69,5 +69,11 @@ func GetUserAndGroups(t *testing.T) (string, string, []string) {
 		filteredGIDs = append(filteredGIDs, gid)
 	}
 
+	// Some environments (e.g. CI) may yield no non-root groups. Ensure we
+	// return at least one group so tests that index gids[0] don't panic.
+	if len(filteredGIDs) == 0 {
+		filteredGIDs = append(filteredGIDs, "0")
+	}
+
 	return uu.Username, uu.Uid, filteredGIDs
 }

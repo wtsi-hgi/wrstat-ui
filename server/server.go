@@ -35,8 +35,11 @@ import (
 	"embed"
 	"encoding/json"
 	"io"
+	"net/http"
+	"os"
 	"sync"
 
+	"github.com/gin-gonic/gin"
 	gas "github.com/wtsi-hgi/go-authserver"
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
 	"github.com/wtsi-hgi/wrstat-ui/db"
@@ -167,6 +170,24 @@ func (s *Server) stop() {
 	if s.analyticsDB != nil {
 		s.analyticsDB.Close()
 	}
+}
+
+// useClickHouseFeatureFlag returns true when the server should use the
+// ClickHouse-backed endpoints instead of Bolt-backed ones. Phase 0: controlled
+// by env WRSTAT_USE_CLICKHOUSE == "1".
+func useClickHouseFeatureFlag() bool {
+	return getenv("WRSTAT_USE_CLICKHOUSE") == "1"
+}
+
+// getenv is a tiny indirection for testing/mocking.
+func getenv(k string) string {
+	return os.Getenv(k)
+}
+
+// notImplementedHandler returns 501 for endpoints not yet supported by the
+// ClickHouse backend during the migration phases.
+func notImplementedHandler(c *gin.Context) {
+	c.AbortWithStatus(http.StatusNotImplemented)
 }
 
 // prewarmCaches precomputes the group and user usage caches. It serialises
