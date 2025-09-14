@@ -339,7 +339,7 @@ func fixTZs(h []basedirs.History) {
 	}
 }
 
-func TestSummariseClickHouse(t *testing.T) {
+func TestClickHouse(t *testing.T) {
 	// Check if TEST_CLICKHOUSE_HOST environment variable is set
 	// If not, skip the test
 	chHost := os.Getenv("TEST_CLICKHOUSE_HOST")
@@ -445,15 +445,15 @@ func TestSummariseClickHouse(t *testing.T) {
 		So(err, ShouldBeNil)
 		So(f.Close(), ShouldBeNil)
 
-		// Run the summarise command using the CLI
-		t.Logf("Running summarise command with database %s", testDatabase)
+		// Run the clickhouse command using the CLI
+		t.Logf("Running clickhouse command with database %s", testDatabase)
 		output, stderr, _, err := runWRStat(
-			"summarise",
-			"--ch-host", chHost,
-			"--ch-port", chPort,
-			"--ch-database", testDatabase,
-			"--ch-username", chUsername,
-			"--ch-password", chPassword,
+			"clickhouse",
+			"--host", chHost,
+			"--port", chPort,
+			"--database", testDatabase,
+			"--username", chUsername,
+			"--password", chPassword,
 			mountPath,
 			statsPath,
 		)

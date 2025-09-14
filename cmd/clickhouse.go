@@ -49,15 +49,15 @@ var (
 	chPassword string
 )
 
-// summariseCmd represents the stat command.
+// clickhouseCmd represents the clickhouse command.
 //
 // This command ingests a single mount's scan into ClickHouse with atomic
 // promotion semantics (loading -> ready), maintains only the latest ready scan
 // per mount, and provides precomputed subtree rollups.
-var summariseCmd = &cobra.Command{
-	Use:   "summarise <mount_path> <stats_file|->",
-	Short: "Summarise stat data",
-	Long: `Summarise stat data into ClickHouse for fast, interactive queries.
+var clickhouseCmd = &cobra.Command{
+	Use:   "clickhouse <mount_path> <stats_file|->",
+	Short: "Load and summarise stat data into ClickHouse",
+	Long: `Load and summarise stat data into ClickHouse for fast, interactive queries.
 
 This command ingests a single mount's scan into ClickHouse with atomic promotion
 semantics (loading -> ready), maintains only the latest ready scan per mount,
@@ -70,17 +70,17 @@ and provides precomputed subtree rollups.`,
 }
 
 func init() {
-	RootCmd.AddCommand(summariseCmd)
+	RootCmd.AddCommand(clickhouseCmd)
 
 	// Add ClickHouse connection settings
-	summariseCmd.Flags().StringVar(&chHost, "ch-host", "127.0.0.1", "ClickHouse host")
-	summariseCmd.Flags().StringVar(&chPort, "ch-port", "9000", "ClickHouse port")
-	summariseCmd.Flags().StringVar(&chDatabase, "ch-database", "default", "ClickHouse database")
-	summariseCmd.Flags().StringVar(&chUsername, "ch-username", "default", "ClickHouse username")
-	summariseCmd.Flags().StringVar(&chPassword, "ch-password", "", "ClickHouse password")
+	clickhouseCmd.Flags().StringVar(&chHost, "host", "127.0.0.1", "ClickHouse host")
+	clickhouseCmd.Flags().StringVar(&chPort, "port", "9000", "ClickHouse port")
+	clickhouseCmd.Flags().StringVar(&chDatabase, "database", "default", "ClickHouse database")
+	clickhouseCmd.Flags().StringVar(&chUsername, "username", "default", "ClickHouse username")
+	clickhouseCmd.Flags().StringVar(&chPassword, "password", "", "ClickHouse password")
 }
 
-// Run executes the summarise command with the given arguments.
+// Run executes the clickhouse command with the given arguments.
 func Run(args []string) (err error) {
 	mountPath, statsPath, err := checkArgs(args)
 	if err != nil {
@@ -114,7 +114,7 @@ func checkArgs(args []string) (string, string, error) {
 	const expectedArgCount = 2
 
 	if len(args) != expectedArgCount {
-		return "", "", errors.New("usage: summarise <mount_path> <stats_file|->") //nolint:err113
+		return "", "", errors.New("usage: clickhouse <mount_path> <stats_file|->") //nolint:err113
 	}
 
 	mountPath := clickhouse.NormalizeMount(args[0])
