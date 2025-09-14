@@ -179,10 +179,13 @@ FROM (
 	WHERE ` + strings.Join(conditions, " AND ") + bucketFilter + `
 	GROUP BY path, parent_path, name
 ) AS children
-WHERE ftype = ` + string(rune(FileTypeDir)) + `
+WHERE children.ftype = ?
 GROUP BY children.path, children.name
 ORDER BY children.name
 `
+
+	// Constrain to directories only at the output stage
+	args = append(args, uint8(FileTypeDir))
 
 	return query, args
 }

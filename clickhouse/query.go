@@ -38,7 +38,6 @@ func (c *Clickhouse) ListImmediateChildren(ctx context.Context, dir string) ([]F
 
 	// Use a query that ensures only unique paths are returned
 	// Filter to directories only at the SQL level
-	// Exclude synthetic directories which have uid=0 AND gid=0
 	rows, err := c.conn.Query(ctx, `
 		SELECT path, parent_path, name, ext_low, ftype, inode, size, uid, gid, mtime, atime, ctime
 		FROM (
@@ -46,7 +45,6 @@ func (c *Clickhouse) ListImmediateChildren(ctx context.Context, dir string) ([]F
 			SELECT *
 			FROM fs_entries_current
 			WHERE parent_path = ? AND ftype = ? AND path != '/' 
-			  AND NOT (uid = 0 AND gid = 0)
 			ORDER BY path, inode DESC
 			LIMIT 1 BY path
 		)`,
@@ -109,13 +107,12 @@ func buildBucketPredicateWithScanExpr(scanExpr, col, bucket string) (string, err
 // filtered by the given criteria. This is the fallback when rollups cannot be used.
 func (c *Clickhouse) subtreeSummaryScan(ctx context.Context, dir string, f Filters) (Summary, error) {
 	dir = EnsureDir(dir)
-
-	if isNoFilters(f) {
-		return c.getUnfilteredAllSummary(ctx, dir)
-	}
-
+	// For phase 1 correctness, prefer scan-based summaries on fs_entries_current
+	// which align with Bolt semantics (unique paths, file-only aggregation), and
+	// avoid rollup double-counting complexities.
 	where, args := buildAllWhere(dir, f)
 	bucketFilter := buildGlobalTimeBucketFilter(f)
+
 	query := buildAllSummaryQuery(where, bucketFilter)
 
 	return c.executeSummaryQuery(ctx, query, args)
@@ -222,32 +219,24 @@ SELECT
 	min(atime) AS oldest_atime,
 	max(mtime) AS most_recent_mtime,
 	min(mtime) AS oldest_mtime,
-	groupUniqArray(uid) AS uids,
-	groupUniqArray(gid) AS gids,
-	groupUniqArray(ext_low) AS exts,
-	groupUniqArray(ftype) AS ftypes
+	groupUniqArray(sel_uid) AS uids,
+	groupUniqArray(sel_gid) AS gids,
+	groupUniqArray(sel_ext) AS exts,
+	groupUniqArray(sel_ftype) AS ftypes
 FROM (
+	-- Normalize by trimming a trailing slash so '/x' and '/x/' group together
 	SELECT
-		-- Normalize by trimming a trailing slash so '/x' and '/x/' group together
 		if(endsWith(path, '/'), substring(path, 1, length(path) - 1), path) AS norm_path,
 		max(size) AS size,
 		max(atime) AS atime,
 		max(mtime) AS mtime,
-		max(uid) AS uid,
-		max(gid) AS gid,
-		anyLast(ext_low) AS ext_low,
-		anyLast(ftype) AS ftype
-	FROM (
-		-- First filter out duplicated directory entries that come from multiple mounts
-		-- For each path, keep only one entry (prioritizing the one with the largest inode)
-		-- Also exclude synthetic directories which have uid=0 AND gid=0
-		SELECT *
-		FROM fs_entries_current
-		WHERE ` + strings.Join(where, " AND ") + bucketFilter + `
-		  AND NOT (uid = 0 AND gid = 0 AND ftype = ` + fmt.Sprintf("%d", FileTypeDir) + `)
-		ORDER BY path, inode DESC
-		LIMIT 1 BY path
-	)
+		anyLast(uid) AS sel_uid,
+		anyLast(gid) AS sel_gid,
+		anyLast(ext_low) AS sel_ext,
+		anyLast(ftype) AS sel_ftype
+	FROM fs_entries_current
+	WHERE ` + strings.Join(where, " AND ") + bucketFilter + `
+	  AND ftype = ` + fmt.Sprintf("%d", FileTypeFile) + `
 	GROUP BY norm_path
 )
 `
@@ -279,10 +268,10 @@ func (c *Clickhouse) SubtreeSummary(ctx context.Context, dir string, f Filters) 
 	if err != nil {
 		return Summary{}, err
 	}
-	
+
 	// Set Age based on time bucket filters for Phase 1
 	sum.Age = ageBucketToDBAge(f.ATimeBucket, f.MTimeBucket)
-	
+
 	return sum, nil
 }
 
@@ -409,47 +398,80 @@ func buildAllWhere(dir string, f Filters) ([]string, []any) {
 	return where, args
 }
 
+// DirCountWithFiles returns the number of distinct directories (by parent_path)
+// that directly contain at least one file within the subtree rooted at dir,
+// respecting filters. This mirrors Bolt semantics where directory counts are
+// based on directories with files in them.
+func (c *Clickhouse) DirCountWithFiles(ctx context.Context, dir string, f Filters) (uint64, error) {
+	dir = EnsureDir(dir)
+
+	// Count distinct ancestor directories (within subtree) that have at least one
+	// descendant file, using ancestor_rollups_raw joined to latest ready scans.
+	// This matches Bolt semantics for directory contributions.
+	where, args := buildAllWhere(dir, f)
+	if len(where) > 0 {
+		where[0] = "ancestor LIKE ?"
+	}
+
+	bucketFilter := buildGlobalTimeBucketFilter(f)
+
+	query := `
+SELECT countDistinct(ancestor)
+FROM ancestor_rollups_raw arr
+INNER JOIN (
+	SELECT mount_path, max(scan_id) AS scan_id
+	FROM scans
+	WHERE state = 'ready'
+	GROUP BY mount_path
+) r USING (mount_path, scan_id)
+WHERE ` + strings.Join(where, " AND ") + ` AND ext_low != ''` + bucketFilter + `
+`
+
+	row := c.conn.QueryRow(ctx, query, args...)
+
+	var cnt uint64
+	if err := row.Scan(&cnt); err != nil {
+		return 0, err
+	}
+
+	return cnt, nil
+}
+
 // getUnfilteredAllSummary is the unfiltered fast path across all mounts.
-func (c *Clickhouse) getUnfilteredAllSummary(ctx context.Context, dir string) (Summary, error) { //nolint:funlen
+func (c *Clickhouse) getUnfilteredAllSummary(ctx context.Context, dir string) (Summary, error) {
+	// Use raw rollups restricted to this exact ancestor and real files only (ext_low != '').
 	row := c.conn.QueryRow(ctx, `
 SELECT
-	sum(size),
-	count(),
-	max(atime),
-	min(atime),
-	max(mtime),
-	min(mtime),
-	groupUniqArray(uid),
-	groupUniqArray(gid),
-	groupUniqArray(ext_low),
-	groupUniqArray(ftype)
-FROM (
-	SELECT
-		if(endsWith(path, '/'), substring(path, 1, length(path) - 1), path) AS norm_path,
-		max(size) AS size,
-		max(atime) AS atime,
-		max(mtime) AS mtime,
-		max(uid) AS uid,
-		max(gid) AS gid,
-		anyLast(ext_low) AS ext_low,
-		anyLast(ftype) AS ftype
-	FROM (
-		-- First filter out duplicated directory entries that come from multiple mounts
-		-- Also exclude synthetic directories which have uid=0 AND gid=0
-		SELECT *
-		FROM fs_entries_current
-		WHERE path LIKE ?
-		  AND NOT (uid = 0 AND gid = 0 AND ftype = ?)
-		ORDER BY path, inode DESC
-		LIMIT 1 BY path
-	)
-	GROUP BY norm_path
-)
-`, dir+"%", uint8(FileTypeDir))
+	sum(size) AS total_size,
+	count() AS file_count,
+	max(atime) AS most_recent_atime,
+	min(atime) AS oldest_atime,
+	max(mtime) AS most_recent_mtime,
+	min(mtime) AS oldest_mtime,
+	groupUniqArray(uid) AS uids,
+	groupUniqArray(gid) AS gids,
+	groupUniqArray(ext_low) AS exts,
+	array() AS ftypes
+FROM ancestor_rollups_raw arr
+INNER JOIN (
+	SELECT mount_path, max(scan_id) AS scan_id
+	FROM scans
+	WHERE state = 'ready'
+	GROUP BY mount_path
+) r USING (mount_path, scan_id)
+WHERE ancestor = ? AND ext_low != ''
+`, dir)
 
 	var s Summary
-	if err := row.Scan(&s.TotalSize, &s.FileCount, &s.MostRecentATime, &s.OldestATime,
-		&s.MostRecentMTime, &s.OldestMTime, &s.UIDs, &s.GIDs, &s.Exts, &s.FTypes); err != nil {
+	if err := row.Scan(
+		&s.TotalSize, &s.FileCount,
+		&s.MostRecentATime, &s.OldestATime,
+		&s.MostRecentMTime, &s.OldestMTime,
+		&s.UIDs, &s.GIDs, &s.Exts, &s.FTypes,
+	); err != nil {
+		if errors.Is(err, io.EOF) {
+			return Summary{}, nil
+		}
 		return Summary{}, err
 	}
 

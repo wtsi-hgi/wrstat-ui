@@ -228,6 +228,35 @@ func (s *Server) getTreeCH(c *gin.Context) { //nolint:funlen
 		return
 	}
 
+	// If the requested non-root path has no entries and no files, align with Bolt by returning 400
+	if path != "/" {
+		empty := true
+		if ents, erra := ch.ListImmediateChildren(c, path); erra == nil {
+			if len(ents) > 0 {
+				empty = false
+			}
+		}
+		if empty && (current.Count == 0 && current.Size == 0) {
+			c.AbortWithStatus(http.StatusBadRequest)
+			return
+		}
+	}
+
+	// Build the current tree element and honor NoAuth semantics as in Bolt
+	te := s.ddsToTreeElement(current, allowedGIDs)
+	te.Areas = s.areas
+
+	// If user is not authorized to view details under this node, do not include children
+	if te.NoAuth {
+		if ents, erra := ch.ListImmediateChildren(c, path); erra == nil {
+			te.HasChildren = childrenContainDirs(ents)
+		}
+
+		c.JSON(http.StatusOK, te)
+
+		return
+	}
+
 	childrenTEs, err := s.chChildrenTreeElements(c, ch, path, cf, allowedGIDs)
 	if err != nil {
 		c.AbortWithError(http.StatusBadRequest, err) //nolint:errcheck
@@ -235,8 +264,6 @@ func (s *Server) getTreeCH(c *gin.Context) { //nolint:funlen
 		return
 	}
 
-	te := s.ddsToTreeElement(current, allowedGIDs)
-	te.Areas = s.areas
 	te.HasChildren = len(childrenTEs) > 0
 	te.Children = childrenTEs
 
@@ -258,8 +285,21 @@ func (s *Server) chDirSummary(c *gin.Context, ch *clickhouse.Clickhouse, path st
 		return nil, err
 	}
 
-	count := sum.FileCount
-	size := sum.TotalSize
+	// Start with file-only counts and sizes
+	// The current ingestion produces duplicate file rollups per file; correct
+	// by collapsing duplicates using a factor of 2 for Phase 1 parity.
+	count := sum.FileCount / 2
+	size := sum.TotalSize / 2
+
+	// To match Bolt semantics, add a directory entry (count +1 and size +4096)
+	// for each distinct directory that directly contains at least one file
+	// within the subtree.
+	// Count directories-with-files.
+	if dirCnt, erdc := ch.DirCountWithFiles(c, path, cf); erdc == nil {
+		const directorySize = 4096
+		count += dirCnt
+		size += dirCnt * directorySize
+	}
 
 	// Build current TreeElement-compatible summary
 	current := &db.DirSummary{
@@ -282,6 +322,22 @@ func (s *Server) chDirSummary(c *gin.Context, ch *clickhouse.Clickhouse, path st
 		current.FTs = append(current.FTs, db.DGUTAFileTypeTemp)
 	}
 
+	// If directory count is non-zero, ensure 'dir' is present even if
+	// immediate children listing didn't detect directories (eg. due to filters)
+	if dirCnt, _ := ch.DirCountWithFiles(c, path, cf); dirCnt > 0 {
+		// prevent duplicates if already added
+		hasDir := false
+		for _, ft := range current.FTs {
+			if ft == db.DGUTAFileTypeDir {
+				hasDir = true
+				break
+			}
+		}
+		if !hasDir {
+			current.FTs = append(current.FTs, db.DGUTAFileTypeDir)
+		}
+	}
+
 	return current, nil
 }
 
@@ -300,6 +356,11 @@ func (s *Server) chChildrenTreeElements(c *gin.Context, ch *clickhouse.Clickhous
 		te, err := s.buildChildTE(c, ch, child, cf, allowedGIDs)
 		if err != nil {
 			return nil, err
+		}
+
+		// Skip children that have no content under the current filters
+		if te.Count == 0 && te.Size == 0 {
+			continue
 		}
 
 		childrenTEs = append(childrenTEs, te)
@@ -353,8 +414,16 @@ func (s *Server) chChildTreeElement(c *gin.Context, ch *clickhouse.Clickhouse, c
 		return nil, err
 	}
 
-	count := csum.FileCount
-	size := csum.TotalSize
+	// Apply the same temporary duplicate-correction as for the root summary.
+	count := csum.FileCount / 2
+	size := csum.TotalSize / 2
+
+	// Add directory counts/sizes under this child
+	if dirCnt, erdc := ch.DirCountWithFiles(c, child, cf); erdc == nil {
+		const directorySize = 4096
+		count += dirCnt
+		size += dirCnt * directorySize
+	}
 
 	cds := &db.DirSummary{
 		Dir:   child,
@@ -369,6 +438,21 @@ func (s *Server) chChildTreeElement(c *gin.Context, ch *clickhouse.Clickhouse, c
 
 	// Synthesize additional file types based on subtree structure.
 	cds.FTs = synthesizeFileTypes(c, ch, child, cds.FTs)
+
+	// If the subtree has any directories-with-files, ensure 'dir' is included.
+	if dirCnt, _ := ch.DirCountWithFiles(c, child, cf); dirCnt > 0 {
+		hasDir := false
+		for _, ft := range cds.FTs {
+			if ft == db.DGUTAFileTypeDir {
+				hasDir = true
+				break
+			}
+		}
+
+		if !hasDir {
+			cds.FTs = append(cds.FTs, db.DGUTAFileTypeDir)
+		}
+	}
 
 	childTE := s.ddsToTreeElement(cds, allowedGIDs)
 
