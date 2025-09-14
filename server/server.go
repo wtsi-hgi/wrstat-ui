@@ -42,6 +42,7 @@ import (
 	"github.com/gin-gonic/gin"
 	gas "github.com/wtsi-hgi/go-authserver"
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
+	"github.com/wtsi-hgi/wrstat-ui/clickhouse"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 )
 
@@ -126,6 +127,9 @@ type Server struct {
 	analyticsStmt   *sql.Stmt
 	groupUsageCache usageCache
 	userUsageCache  usageCache
+
+	// ClickHouse client (optional; used when WRSTAT_USE_CLICKHOUSE=1)
+	ch *clickhouse.Clickhouse
 }
 
 // usageCache holds precomputed JSON data for a response.
@@ -167,6 +171,11 @@ func (s *Server) stop() {
 		s.tree = nil
 	}
 
+	if s.ch != nil {
+		_ = s.ch.Close()
+		s.ch = nil
+	}
+
 	if s.analyticsDB != nil {
 		s.analyticsDB.Close()
 	}
@@ -182,6 +191,56 @@ func useClickHouseFeatureFlag() bool {
 // getenv is a tiny indirection for testing/mocking.
 func getenv(k string) string {
 	return os.Getenv(k)
+}
+
+// getClickHouse lazily creates and memoizes a ClickHouse client using env vars.
+// Defaults are applied if variables are unset.
+//
+//	WRSTAT_CH_HOST (default 127.0.0.1)
+//	WRSTAT_CH_PORT (default 9000)
+//	WRSTAT_CH_DATABASE (default default)
+//	WRSTAT_CH_USERNAME (default default)
+//	WRSTAT_CH_PASSWORD (default empty)
+func (s *Server) getClickHouse() (*clickhouse.Clickhouse, error) { //nolint:funlen
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.ch != nil {
+		return s.ch, nil
+	}
+
+	params := clickhouse.ConnectionParams{
+		Host:     getenv("WRSTAT_CH_HOST"),
+		Port:     getenv("WRSTAT_CH_PORT"),
+		Database: getenv("WRSTAT_CH_DATABASE"),
+		Username: getenv("WRSTAT_CH_USERNAME"),
+		Password: getenv("WRSTAT_CH_PASSWORD"),
+	}
+
+	if params.Host == "" {
+		params.Host = "127.0.0.1"
+	}
+
+	if params.Port == "" {
+		params.Port = "9000"
+	}
+
+	if params.Database == "" {
+		params.Database = "default"
+	}
+
+	if params.Username == "" {
+		params.Username = "default"
+	}
+
+	ch, err := clickhouse.New(params)
+	if err != nil {
+		return nil, err
+	}
+
+	s.ch = ch
+
+	return ch, nil
 }
 
 // notImplementedHandler returns 501 for endpoints not yet supported by the

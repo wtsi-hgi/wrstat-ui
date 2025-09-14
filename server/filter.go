@@ -32,7 +32,49 @@ import (
 
 	"github.com/gin-gonic/gin"
 	gas "github.com/wtsi-hgi/go-authserver"
+	"github.com/wtsi-hgi/wrstat-ui/clickhouse"
 	"github.com/wtsi-hgi/wrstat-ui/db"
+)
+
+// Mapping tables used to translate between Bolt DB types/ages and ClickHouse filters.
+var (
+	fileTypeToExts = map[db.DirGUTAFileType][]string{ //nolint:gochecknoglobals
+		db.DGUTAFileTypeVCF:        {"vcf"},
+		db.DGUTAFileTypeVCFGz:      {"vcf.gz"},
+		db.DGUTAFileTypeBCF:        {"bcf"},
+		db.DGUTAFileTypeSam:        {"sam"},
+		db.DGUTAFileTypeBam:        {"bam"},
+		db.DGUTAFileTypeCram:       {"cram"},
+		db.DGUTAFileTypeFasta:      {"fa", "fasta"},
+		db.DGUTAFileTypeFastq:      {"fastq", "fq"},
+		db.DGUTAFileTypeFastqGz:    {"fastq.gz", "fq.gz"},
+		db.DGUTAFileTypePedBed:     {"ped", "bed", "bim", "fam", "map"},
+		db.DGUTAFileTypeCompressed: {"gz", "bz2", "xz", "zip", "tgz", "bzip2", "bgz", "zst", "lz4", "lz", "br"},
+		db.DGUTAFileTypeText:       {"csv", "dat", "md", "readme", "text", "txt", "tsv"},
+		db.DGUTAFileTypeLog:        {"log", "err", "e", "oe"},
+	}
+
+	ageToATimeBucket = map[db.DirGUTAge]string{ //nolint:gochecknoglobals
+		db.DGUTAgeA1M: ">1m",
+		db.DGUTAgeA2M: ">2m",
+		db.DGUTAgeA6M: ">6m",
+		db.DGUTAgeA1Y: ">1y",
+		db.DGUTAgeA2Y: ">2y",
+		db.DGUTAgeA3Y: ">3y",
+		db.DGUTAgeA5Y: ">5y",
+		db.DGUTAgeA7Y: ">7y",
+	}
+
+	ageToMTimeBucket = map[db.DirGUTAge]string{ //nolint:gochecknoglobals
+		db.DGUTAgeM1M: ">1m",
+		db.DGUTAgeM2M: ">2m",
+		db.DGUTAgeM6M: ">6m",
+		db.DGUTAgeM1Y: ">1y",
+		db.DGUTAgeM2Y: ">2y",
+		db.DGUTAgeM3Y: ">3y",
+		db.DGUTAgeM5Y: ">5y",
+		db.DGUTAgeM7Y: ">7y",
+	}
 )
 
 // makeFilterFromContext extracts the user's filter requests, and returns a tree
@@ -145,6 +187,61 @@ func makeTreeFilter(gids, uids []uint32, types, age string) (*db.Filter, error) 
 	err = addAgeToFilter(filter, age)
 
 	return filter, err
+}
+
+// filtersToCH converts our Bolt/db Filter into a ClickHouse Filters struct.
+// Not all DB filter concepts have a 1:1 mapping to ClickHouse; we map what we can.
+func filtersToCH(f *db.Filter) clickhouse.Filters {
+	if f == nil {
+		return clickhouse.Filters{}
+	}
+
+	at, mt := mapAgeToBuckets(f.Age)
+
+	return clickhouse.Filters{
+		GIDs:        f.GIDs,
+		UIDs:        f.UIDs,
+		Exts:        extsFromFileTypes(f.FTs),
+		ATimeBucket: at,
+		MTimeBucket: mt,
+	}
+}
+
+func mapAgeToBuckets(age db.DirGUTAge) (aTimeBucket, mTimeBucket string) {
+	return ageToATimeBucket[age], ageToMTimeBucket[age]
+}
+
+// extsFromFileTypes maps our DirGUTA filetype categories to a set of ext_low strings
+// used by ClickHouse for filtering. Not all categories are precisely mappable; we
+// include the most common representative extensions where possible and ignore others.
+func extsFromFileTypes(fts []db.DirGUTAFileType) []string {
+	if len(fts) == 0 {
+		return nil
+	}
+
+	// Use a set to dedupe
+	set := make(map[string]struct{})
+
+	for _, ft := range fts {
+		for _, v := range fileTypeToExts[ft] {
+			if v == "" {
+				continue
+			}
+
+			set[v] = struct{}{}
+		}
+	}
+
+	if len(set) == 0 {
+		return nil
+	}
+
+	out := make([]string, 0, len(set))
+	for k := range set {
+		out = append(out, k)
+	}
+
+	return out
 }
 
 // makeTreeGroupFilter creates a filter for groups.

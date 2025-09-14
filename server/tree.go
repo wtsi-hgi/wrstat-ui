@@ -35,6 +35,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	gas "github.com/wtsi-hgi/go-authserver"
+	"github.com/wtsi-hgi/wrstat-ui/clickhouse"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 )
 
@@ -82,7 +83,11 @@ func (s *Server) AddTreePage() error {
 		staticServer.ServeHTTP(c.Writer, c.Request)
 	})
 
-	authGroup.GET(TreePath, s.getTree)
+	if useClickHouseFeatureFlag() {
+		authGroup.GET(TreePath, s.getTreeCH)
+	} else {
+		authGroup.GET(TreePath, s.getTree)
+	}
 	authGroup.GET(DBsUpdated, s.dbUpdateTimestamps)
 
 	return nil
@@ -176,6 +181,231 @@ func (s *Server) getTree(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, s.diToTreeElement(di, filter, allowedGIDs, path))
+}
+
+// getTreeCH is a ClickHouse-backed implementation of getTree.
+// It produces the same TreeElement payload using ClickHouse summaries.
+func (s *Server) getTreeCH(c *gin.Context) { //nolint:funlen
+	path := c.DefaultQuery("path", "/")
+
+	filter, err := makeFilterFromContext(c)
+	if err != nil {
+		c.AbortWithError(http.StatusBadRequest, err) //nolint:errcheck
+
+		return
+	}
+
+	ch, err := s.getClickHouse()
+	if err != nil {
+		c.AbortWithError(http.StatusInternalServerError, err) //nolint:errcheck
+
+		return
+	}
+
+	// Map db.Filter to clickhouse.Filters
+	cf := filtersToCH(filter)
+
+	current, err := s.chDirSummary(c, ch, path, cf)
+	if err != nil {
+		c.AbortWithError(http.StatusBadRequest, err) //nolint:errcheck
+
+		return
+	}
+
+	allowedGIDs, err := s.getAllowedGIDsSafe(c)
+	if err != nil {
+		c.AbortWithError(http.StatusBadRequest, err) //nolint:errcheck
+
+		return
+	}
+
+	childrenTEs, err := s.chChildrenTreeElements(c, ch, path, cf, allowedGIDs)
+	if err != nil {
+		c.AbortWithError(http.StatusBadRequest, err) //nolint:errcheck
+
+		return
+	}
+
+	te := s.ddsToTreeElement(current, allowedGIDs)
+	te.Areas = s.areas
+	te.HasChildren = len(childrenTEs) > 0
+	te.Children = childrenTEs
+
+	c.JSON(http.StatusOK, te)
+}
+
+// getAllowedGIDsSafe wraps allowedGIDs with the server read lock.
+func (s *Server) getAllowedGIDsSafe(c *gin.Context) (map[uint32]bool, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	return s.allowedGIDs(c)
+}
+
+// chDirSummary returns a DirSummary for the given path using ClickHouse.
+func (s *Server) chDirSummary(c *gin.Context, ch *clickhouse.Clickhouse, path string, cf clickhouse.Filters) (*db.DirSummary, error) { //nolint:lll
+	sum, err := ch.SubtreeSummary(c, path, cf)
+	if err != nil {
+		return nil, err
+	}
+
+	// Build current TreeElement-compatible summary
+	current := &db.DirSummary{
+		Dir:   path,
+		Count: sum.FileCount,
+		Size:  sum.TotalSize,
+		Atime: sum.OldestATime, // matches existing semantics (oldest atime)
+		Mtime: sum.MostRecentMTime,
+		UIDs:  sum.UIDs,
+		GIDs:  sum.GIDs,
+		FTs:   chExtsToDGUTA(sum.Exts),
+	}
+
+	return current, nil
+}
+
+// chChildrenTreeElements builds TreeElements for immediate child directories.
+func (s *Server) chChildrenTreeElements(c *gin.Context, ch *clickhouse.Clickhouse, path string, cf clickhouse.Filters, allowedGIDs map[uint32]bool) ([]*TreeElement, error) { //nolint:lll
+	entries, err := ch.ListImmediateChildren(c, path)
+	if err != nil {
+		return nil, err
+	}
+
+	// Use a set to collect unique child dirs
+	seen := make(map[string]struct{})
+
+	childrenTEs := make([]*TreeElement, 0)
+
+	for _, e := range entries {
+		if e.FType != uint8(clickhouse.FileTypeDir) {
+			continue
+		}
+
+		child := e.Path
+		if _, ok := seen[child]; ok {
+			continue
+		}
+
+		seen[child] = struct{}{}
+
+		childTE, err := s.chChildTreeElement(c, ch, child, cf, allowedGIDs)
+		if err != nil {
+			return nil, err
+		}
+
+		childrenTEs = append(childrenTEs, childTE)
+	}
+
+	return childrenTEs, nil
+}
+
+// chChildTreeElement summarises a child path and returns its TreeElement.
+func (s *Server) chChildTreeElement(c *gin.Context, ch *clickhouse.Clickhouse, child string, cf clickhouse.Filters, allowedGIDs map[uint32]bool) (*TreeElement, error) { //nolint:lll
+	csum, err := ch.SubtreeSummary(c, child, cf)
+	if err != nil {
+		return nil, err
+	}
+
+	cds := &db.DirSummary{
+		Dir:   child,
+		Count: csum.FileCount,
+		Size:  csum.TotalSize,
+		Atime: csum.OldestATime,
+		Mtime: csum.MostRecentMTime,
+		UIDs:  csum.UIDs,
+		GIDs:  csum.GIDs,
+		FTs:   chExtsToDGUTA(csum.Exts),
+	}
+
+	childTE := s.ddsToTreeElement(cds, allowedGIDs)
+
+	// Determine if child has children with files (heuristic: list its children)
+	gkids, err := ch.ListImmediateChildren(c, child)
+	if err == nil {
+		childTE.HasChildren = childrenContainDirs(gkids)
+	}
+
+	return childTE, nil
+}
+
+// childrenContainDirs returns true if any entry is a directory.
+func childrenContainDirs(ents []clickhouse.FileEntry) bool {
+	for _, g := range ents {
+		if g.FType == uint8(clickhouse.FileTypeDir) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// chExtsToDGUTA maps ClickHouse ext_low values to our DGUTA file type categories.
+// The mapping is heuristic and mirrors the extsFromFileTypes reverse mapping.
+var extToDGUTA = map[string]db.DirGUTAFileType{ //nolint:gochecknoglobals
+	"vcf":      db.DGUTAFileTypeVCF,
+	"vcf.gz":   db.DGUTAFileTypeVCFGz,
+	"bcf":      db.DGUTAFileTypeBCF,
+	"sam":      db.DGUTAFileTypeSam,
+	"bam":      db.DGUTAFileTypeBam,
+	"cram":     db.DGUTAFileTypeCram,
+	"fa":       db.DGUTAFileTypeFasta,
+	"fasta":    db.DGUTAFileTypeFasta,
+	"fastq":    db.DGUTAFileTypeFastq,
+	"fq":       db.DGUTAFileTypeFastq,
+	"fastq.gz": db.DGUTAFileTypeFastqGz,
+	"fq.gz":    db.DGUTAFileTypeFastqGz,
+	"ped":      db.DGUTAFileTypePedBed,
+	"bed":      db.DGUTAFileTypePedBed,
+	"bim":      db.DGUTAFileTypePedBed,
+	"fam":      db.DGUTAFileTypePedBed,
+	"map":      db.DGUTAFileTypePedBed,
+	"csv":      db.DGUTAFileTypeText,
+	"dat":      db.DGUTAFileTypeText,
+	"md":       db.DGUTAFileTypeText,
+	"readme":   db.DGUTAFileTypeText,
+	"text":     db.DGUTAFileTypeText,
+	"txt":      db.DGUTAFileTypeText,
+	"tsv":      db.DGUTAFileTypeText,
+	"log":      db.DGUTAFileTypeLog,
+	"err":      db.DGUTAFileTypeLog,
+	"e":        db.DGUTAFileTypeLog,
+	"oe":       db.DGUTAFileTypeLog,
+	"gz":       db.DGUTAFileTypeCompressed,
+	"bz2":      db.DGUTAFileTypeCompressed,
+	"xz":       db.DGUTAFileTypeCompressed,
+	"zip":      db.DGUTAFileTypeCompressed,
+	"tgz":      db.DGUTAFileTypeCompressed,
+	"bzip2":    db.DGUTAFileTypeCompressed,
+	"bgz":      db.DGUTAFileTypeCompressed,
+	"zst":      db.DGUTAFileTypeCompressed,
+	"lz4":      db.DGUTAFileTypeCompressed,
+	"lz":       db.DGUTAFileTypeCompressed,
+	"br":       db.DGUTAFileTypeCompressed,
+}
+
+func chExtsToDGUTA(exts []string) []db.DirGUTAFileType {
+	if len(exts) == 0 {
+		return nil
+	}
+
+	set := make(map[db.DirGUTAFileType]struct{})
+
+	for _, e := range exts {
+		if t, ok := extToDGUTA[e]; ok {
+			set[t] = struct{}{}
+		}
+	}
+
+	if len(set) == 0 {
+		return nil
+	}
+
+	out := make([]db.DirGUTAFileType, 0, len(set))
+	for k := range set {
+		out = append(out, k)
+	}
+
+	return out
 }
 
 // diToTreeElement converts the given dguta.DirInfo to our own TreeElement. It
