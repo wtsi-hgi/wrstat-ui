@@ -50,48 +50,24 @@ func (c *Clickhouse) Close() error {
 // ExecuteQuery executes a query that returns a single row and scans the result into dest.
 // For queries that don't return results (like CREATE DATABASE), no destination is needed.
 func (c *Clickhouse) ExecuteQuery(ctx context.Context, query string, args ...interface{}) error {
-	// Check if the last argument is a pointer for scanning results
-	var (
-		dest      interface{}
-		queryArgs []interface{}
-	)
-
-	// Default to using all args as query arguments
-	queryArgs = args
-
-	// If we have arguments, check if the last one is a pointer for scanning results
+	// If the last argument is a pointer for scanning results, separate it from query args
 	if len(args) > 0 {
 		last := args[len(args)-1]
+		if last != nil && reflect.ValueOf(last).Kind() == reflect.Ptr {
+			// This is a scan destination
+			queryArgs := args[:len(args)-1]
 
-		if isPointer(last) {
-			dest = last
-			queryArgs = args[:len(args)-1]
+			row := c.conn.QueryRow(ctx, query, queryArgs...)
+			if row.Err() != nil {
+				return row.Err()
+			}
+
+			return row.Scan(last)
 		}
 	}
 
 	// For DDL statements or queries without result sets
-	if dest == nil {
-		return c.conn.Exec(ctx, query, queryArgs...)
-	}
-
-	// For queries that return results
-	row := c.conn.QueryRow(ctx, query, queryArgs...)
-	if row.Err() != nil {
-		return row.Err()
-	}
-
-	return row.Scan(dest)
-}
-
-// isPointer checks if an interface value is a pointer.
-func isPointer(v interface{}) bool {
-	if v == nil {
-		return false
-	}
-
-	val := reflect.ValueOf(v)
-
-	return val.Kind() == reflect.Ptr
+	return c.conn.Exec(ctx, query, args...)
 }
 
 // CHBatch defines the interface for a ClickHouse batch operation.

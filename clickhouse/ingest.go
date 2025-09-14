@@ -38,7 +38,7 @@ import (
 
 // UpdateClickhouse ingests a scan into ClickHouse.
 func (c *Clickhouse) UpdateClickhouse(ctx context.Context, mountPath string, r io.Reader) (retErr error) {
-	// Use UUID as scan_id to guarantee uniqueness; record scan_time separately
+	// Use UUID as scan_id to guarantee uniqueness
 	scanUUID := uuid.New()
 	scanTime := time.Now()
 	started := scanTime
@@ -55,10 +55,10 @@ func (c *Clickhouse) UpdateClickhouse(ctx context.Context, mountPath string, r i
 		return err
 	}
 
-	// Promote to ready by inserting a new row (avoids ALTER UPDATE pitfalls)
+	// Promote to ready state
 	finished := time.Now()
 	if err := c.promoteScan(ctx, mountPath, scanUUID, scanTime, started, finished); err != nil {
-		return fmt.Errorf("promote scan (insert ready): %w", err)
+		return fmt.Errorf("promote scan: %w", err)
 	}
 
 	// Drop older scans for this mount
@@ -249,89 +249,67 @@ func scanAndProcessEntries(ctx context.Context, bp *BatchProcessor, r io.Reader,
 	parser := stats.NewStatsParser(r)
 	fi := new(stats.FileInfo)
 
-	var parseErr error
-
 	for {
 		// Read the next entry
-		if parseErr = parser.Scan(fi); parseErr != nil {
-			break
+		parseErr := parser.Scan(fi)
+		if parseErr != nil {
+			if errors.Is(parseErr, io.EOF) {
+				break
+			}
+
+			return fmt.Errorf("parser error: %w", parseErr)
 		}
 
-		shouldContinue, err := processScanEntry(ctx, bp, fi, mountPath, dirsSeen)
-		if !shouldContinue || err != nil {
+		// Process the file entry
+		if err := processFileEntry(bp, fi, mountPath, dirsSeen); err != nil {
 			return err
 		}
-	}
 
-	// Check for parser errors (excluding EOF which is expected)
-	if !errors.Is(parseErr, io.EOF) {
-		return fmt.Errorf("parser error: %w", parseErr)
+		// Flush batches if needed
+		if bp.NeedsFlush() {
+			if err := bp.Flush(ctx); err != nil {
+				return fmt.Errorf("failed to flush batches: %w", err)
+			}
+		}
 	}
 
 	return nil
-}
-
-// processScanEntry processes a single entry during scan ingestion.
-// Returns a boolean indicating if we should continue scanning, and any error encountered.
-func processScanEntry(
-	ctx context.Context,
-	bp *BatchProcessor,
-	fi *stats.FileInfo,
-	mountPath string,
-	dirsSeen map[string]bool,
-) (bool, error) {
-	// Process the file entry
-	if err := processFileEntry(bp, fi, mountPath, dirsSeen); err != nil {
-		return false, err
-	}
-
-	// Flush batches if needed
-	if bp.NeedsFlush() {
-		if err := bp.Flush(ctx); err != nil {
-			return false, fmt.Errorf("failed to flush batches: %w", err)
-		}
-	}
-
-	return true, nil
 }
 
 // processFileEntry handles a single file entry during scan ingestion.
 func processFileEntry(bp *BatchProcessor, fi *stats.FileInfo, mountPath string, dirsSeen map[string]bool) error {
 	path := string(fi.Path)
 
-	// Ensure all paths are absolute (start with '/') to align with server queries/tests
+	// Ensure all paths are absolute
 	if !strings.HasPrefix(path, "/") {
 		path = "/" + path
 	}
-	// Determine if this entry is a directory
-	isDir := fi.EntryType == stats.DirType || IsDirPath(path)
 
+	isDir := fi.EntryType == stats.DirType || IsDirPath(path)
 	parent, name := SplitParentAndName(path)
 	ext := DeriveExtLower(name, isDir)
 	ft := MapEntryType(fi.EntryType)
+
 	mtime := time.Unix(fi.MTime, 0)
 	atime := time.Unix(fi.ATime, 0)
 	ctime := time.Unix(fi.CTime, 0)
 
-	// Handle potential integer overflow by using explicit conversions
+	// Handle integer conversions
 	inode := uint64(0)
 	if fi.Inode > 0 {
-		inode = uint64(fi.Inode) // Values originate from trusted stats parser
+		inode = uint64(fi.Inode)
 	}
 
-	// Set directory size to DirectorySize if it's a directory with zero size
+	// Set directory size
 	size := uint64(0)
 	if fi.Size > 0 {
-		size = uint64(fi.Size) // Values originate from trusted stats parser
+		size = uint64(fi.Size)
 	} else if isDir {
-		// Only use DirectorySize for directories that don't have a size
-		// This ensures we properly handle "fake" directories that are ancestors of mount points
 		size = DirectorySize
 	}
 
-	// For directories, check if we've already seen this directory
+	// Skip duplicate directory entries
 	if isDir && dirsSeen[path] {
-		// Skip adding duplicate directory entries
 		return nil
 	}
 

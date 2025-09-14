@@ -618,8 +618,6 @@ func (c *Clickhouse) ensureScanIDUUID(ctx context.Context, table string, createS
 	}
 
 	// As a last resort (eg. incompatible engine settings), drop and recreate
-	debugf("migrateSchema: recreating table %s with correct schema (was %s)", table, typ)
-
 	if err := c.conn.Exec(ctx, "DROP TABLE IF EXISTS "+table); err != nil {
 		return err
 	}
