@@ -91,7 +91,7 @@ func (c *Clickhouse) ListImmediateChildren(ctx context.Context, dir string) ([]F
 
 // buildBucketPredicate builds a time bucket predicate for filtering.
 // buildBucketPredicateWithScanExpr builds a time bucket predicate using the provided scan time expression.
-// scanExpr should evaluate to a DateTime, e.g. "toDateTime(max_scan)" or "toDateTime(scan_id)".
+// scanExpr should evaluate to a DateTime, e.g. "toDateTime(max_scan)" or "scan_time".
 func buildBucketPredicateWithScanExpr(scanExpr, col, bucket string) (string, error) {
 	if bucket == "" {
 		return "", nil
@@ -193,7 +193,7 @@ func joinTimeFilters(predicates []string) string {
 
 // buildTimeBucketFilter removed in global API; use buildGlobalTimeBucketFilter.
 
-// buildGlobalTimeBucketFilter builds time bucket filters using per-row scan time (toDateTime(scan_id)).
+// buildGlobalTimeBucketFilter builds time bucket filters using per-row scan time (scan_time).
 func buildGlobalTimeBucketFilter(f Filters) string { //nolint:gocyclo
 	if f.ATimeBucket == "" && f.MTimeBucket == "" {
 		return ""
@@ -209,11 +209,11 @@ func buildGlobalTimeBucketFilter(f Filters) string { //nolint:gocyclo
 	}
 
 	if f.ATimeBucket != "" {
-		add("toDateTime(scan_id)", "atime", f.ATimeBucket)
+		add("scan_time", "atime", f.ATimeBucket)
 	}
 
 	if f.MTimeBucket != "" {
-		add("toDateTime(scan_id)", "mtime", f.MTimeBucket)
+		add("scan_time", "mtime", f.MTimeBucket)
 	}
 
 	s := joinTimeFilters(preds)
@@ -325,36 +325,34 @@ func (c *Clickhouse) SubtreeSummary(ctx context.Context, dir string, f Filters) 
 	// Augment with directory-with-files contributions to match Bolt semantics:
 	// For each distinct directory that directly contains at least one file
 	// within the subtree, add +1 to count and +DirectorySize to size.
-	// Only augment when absolutely no filters are applied (unfiltered view),
-	// i.e. no GIDs, UIDs, Exts, ATimeBucket or MTimeBucket.
-	if len(f.GIDs) == 0 && len(f.UIDs) == 0 && len(f.Exts) == 0 && f.ATimeBucket == "" && f.MTimeBucket == "" {
-		if dirCnt, derr := c.DirCountWithFiles(ctx, dir, f); derr == nil {
-			sum.FileCount += dirCnt
-			sum.TotalSize += dirCnt * DirectorySize
+	// Augment regardless of filters; count only directories that have at least one
+	// matching descendant file according to the filters provided.
+	if dirCnt, derr := c.DirCountWithFiles(ctx, dir, f); derr == nil {
+		sum.FileCount += dirCnt
+		sum.TotalSize += dirCnt * DirectorySize
 
-			// Ensure 'dir' appears in file types if any directories-with-files exist
-			if dirCnt > 0 {
-				// FileTypeDir is 2 (see clickhouse.FileTypeDir)
-				hasDir := false
+		// Ensure 'dir' appears in file types if any directories-with-files exist
+		if dirCnt > 0 {
+			// FileTypeDir is 2 (see clickhouse.FileTypeDir)
+			hasDir := false
 
-				for _, ft := range sum.FTypes {
-					if ft == uint8(FileTypeDir) {
-						hasDir = true
+			for _, ft := range sum.FTypes {
+				if ft == uint8(FileTypeDir) {
+					hasDir = true
 
-						break
-					}
-				}
-				if !hasDir {
-					sum.FTypes = append(sum.FTypes, uint8(FileTypeDir))
-				}
-
-				if debugEnabled() {
-					debugf("SubtreeSummary: dir=%s added dir-with-files count=%d size+=%d", dir, dirCnt, dirCnt*DirectorySize)
+					break
 				}
 			}
-		} else if debugEnabled() {
-			debugf("DirCountWithFiles error: %v", derr)
+			if !hasDir {
+				sum.FTypes = append(sum.FTypes, uint8(FileTypeDir))
+			}
+
+			if debugEnabled() {
+				debugf("SubtreeSummary: dir=%s added dir-with-files count=%d size+=%d", dir, dirCnt, dirCnt*DirectorySize)
+			}
 		}
+	} else if debugEnabled() {
+		debugf("DirCountWithFiles error: %v", derr)
 	}
 
 	// Set Age based on time bucket filters for Phase 1
@@ -489,26 +487,53 @@ func buildAllWhere(dir string, f Filters) ([]string, []any) {
 // one descendant file within the subtree rooted at dir, respecting filters.
 // This mirrors Bolt semantics for augmenting directory counts and ensures that
 // higher-level synthetic ancestors (e.g., "/lustre/") are included at the root.
-func (c *Clickhouse) DirCountWithFiles(ctx context.Context, dir string, _ Filters) (uint64, error) { //nolint:funlen
+func (c *Clickhouse) DirCountWithFiles(ctx context.Context, dir string, f Filters) (uint64, error) { //nolint:funlen
 	dir = EnsureDir(dir)
 
 	// Count distinct ancestor directories (within the subtree rooted at 'dir')
 	// that have at least one descendant file. This leverages the rollups table
 	// which contains one row per (file, ancestor) pair with ext_low for files.
 	// We restrict to the latest ready scan per mount to match current views.
-	query := `
+	base := `
 SELECT countDistinct(ancestor) AS dir_count
 FROM ancestor_rollups_raw arr
 INNER JOIN (
-	SELECT mount_path, max(scan_id) AS scan_id
+	SELECT mount_path, argMax(scan_id, finished_at) AS scan_id
 	FROM scans
 	WHERE state = 'ready'
 	GROUP BY mount_path
 ) r USING (mount_path, scan_id)
-WHERE ancestor LIKE ? AND ext_low != ''
-`
+WHERE ancestor LIKE ? AND ext_low != ''`
 
+	// Build optional filters
+	where := []string{base}
 	args := []any{dir + "%"}
+
+	if len(f.GIDs) > 0 {
+		clause, a := buildInClause("gid", f.GIDs)
+		where = append(where, "AND "+clause)
+		args = append(args, a...)
+	}
+	if len(f.UIDs) > 0 {
+		clause, a := buildInClause("uid", f.UIDs)
+		where = append(where, "AND "+clause)
+		args = append(args, a...)
+	}
+	if len(f.Exts) > 0 {
+		clause, a := buildExtensionClause(f.Exts)
+		where = append(where, "AND "+clause)
+		args = append(args, a...)
+	}
+
+	// Time bucket filters against per-row scan_time
+	if pred, err := buildBucketPredicateWithScanExpr("scan_time", "atime", f.ATimeBucket); err == nil && pred != "" {
+		where = append(where, "AND "+pred)
+	}
+	if pred, err := buildBucketPredicateWithScanExpr("scan_time", "mtime", f.MTimeBucket); err == nil && pred != "" {
+		where = append(where, "AND "+pred)
+	}
+
+	query := strings.Join(where, " ")
 
 	if debugEnabled() {
 		debugf("DirCountWithFiles SQL:\n%s", query)
@@ -546,7 +571,7 @@ SELECT
 	array() AS ftypes
 FROM ancestor_rollups_raw arr
 INNER JOIN (
-	SELECT mount_path, max(scan_id) AS scan_id
+	SELECT mount_path, argMax(scan_id, finished_at) AS scan_id
 	FROM scans
 	WHERE state = 'ready'
 	GROUP BY mount_path

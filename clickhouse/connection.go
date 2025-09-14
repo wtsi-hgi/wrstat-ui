@@ -29,6 +29,7 @@ import (
 	"time"
 
 	chdriver "github.com/ClickHouse/clickhouse-go/v2"
+	"github.com/google/uuid"
 )
 
 // ConnectionParams contains parameters for creating a new ClickHouse connection.
@@ -67,39 +68,41 @@ func New(params ConnectionParams) (*Clickhouse, error) {
 const (
 	createScansTable = `
 CREATE TABLE IF NOT EXISTS scans (
-  mount_path String,
-  scan_id UInt64,
-  state Enum8('loading' = 0, 'ready' = 1),
-  started_at DateTime,
-  finished_at Nullable(DateTime)
+	mount_path String,
+	scan_id UUID,
+	scan_time DateTime,
+	state Enum8('loading' = 0, 'ready' = 1),
+	started_at DateTime,
+	finished_at Nullable(DateTime)
 ) ENGINE = MergeTree
-PARTITION BY (mount_path, scan_id)
-ORDER BY (mount_path, scan_id)`
+PARTITION BY (mount_path, scan_time)
+ORDER BY (mount_path, scan_time)`
 
 	createFsEntriesTable = `
 CREATE TABLE IF NOT EXISTS fs_entries (
-  mount_path String,
-  scan_id UInt64,
-  path String,
-  parent_path String,
-  name String,
-  ext_low String,
-  ftype UInt8,
-  inode UInt64,
-  size UInt64,
-  uid UInt32,
-  gid UInt32,
-  mtime DateTime,
-  atime DateTime,
-  ctime DateTime,
-  INDEX idx_uid uid TYPE minmax GRANULARITY 8192,
-  INDEX idx_gid gid TYPE minmax GRANULARITY 8192,
-  INDEX idx_mtime mtime TYPE minmax GRANULARITY 8192,
-  INDEX idx_atime atime TYPE minmax GRANULARITY 8192,
-  INDEX idx_path_bf path TYPE tokenbf_v1(256) GRANULARITY 4,
-  INDEX idx_parent_path parent_path TYPE minmax GRANULARITY 8192
+	mount_path String,
+	scan_id UUID,
+	scan_time DateTime,
+	path String,
+	parent_path String,
+	name String,
+	ext_low String,
+	ftype UInt8,
+	inode UInt64,
+	size UInt64,
+	uid UInt32,
+	gid UInt32,
+	mtime DateTime,
+	atime DateTime,
+	ctime DateTime,
+	INDEX idx_uid uid TYPE minmax GRANULARITY 8192,
+	INDEX idx_gid gid TYPE minmax GRANULARITY 8192,
+	INDEX idx_mtime mtime TYPE minmax GRANULARITY 8192,
+	INDEX idx_atime atime TYPE minmax GRANULARITY 8192,
+	INDEX idx_path_bf path TYPE tokenbf_v1(256) GRANULARITY 4,
+	INDEX idx_parent_path parent_path TYPE minmax GRANULARITY 8192
 ) ENGINE = MergeTree
-PARTITION BY (mount_path, scan_id)
+PARTITION BY (mount_path, scan_time)
 ORDER BY (mount_path, parent_path, name)
 SETTINGS index_granularity = 8192`
 
@@ -107,7 +110,8 @@ SETTINGS index_granularity = 8192`
 	createFsEntriesTableNoPathIdx = `
 CREATE TABLE IF NOT EXISTS fs_entries (
 	mount_path String,
-	scan_id UInt64,
+	scan_id UUID,
+	scan_time DateTime,
 	path String,
 	parent_path String,
 	name String,
@@ -126,31 +130,33 @@ CREATE TABLE IF NOT EXISTS fs_entries (
 	INDEX idx_atime atime TYPE minmax GRANULARITY 8192,
 	INDEX idx_parent_path parent_path TYPE minmax GRANULARITY 8192
 ) ENGINE = MergeTree
-PARTITION BY (mount_path, scan_id)
+PARTITION BY (mount_path, scan_time)
 ORDER BY (mount_path, parent_path, name)
 SETTINGS index_granularity = 8192`
 
 	createRollupRawTable = `
 CREATE TABLE IF NOT EXISTS ancestor_rollups_raw (
-  mount_path String,
-  scan_id UInt64,
-  ancestor String,
-  size UInt64,
+	mount_path String,
+	scan_id UUID,
+	scan_time DateTime,
+	ancestor String,
+	size UInt64,
 	atime DateTime,
 	mtime DateTime,
 	uid UInt32,
 	gid UInt32,
 	ext_low String
 ) ENGINE = MergeTree
-PARTITION BY (mount_path, scan_id)
+PARTITION BY (mount_path, scan_time)
 ORDER BY (mount_path, ancestor)
 SETTINGS index_granularity = 8192`
 
 	createRollupStateTable = `
 CREATE TABLE IF NOT EXISTS ancestor_rollups_state (
-  mount_path String,
-  scan_id UInt64,
-  ancestor String,
+	mount_path String,
+		scan_id UUID,
+		scan_time DateTime,
+	ancestor String,
   total_size AggregateFunction(sum, UInt64),
   file_count AggregateFunction(sum, UInt64),
   atime_min AggregateFunction(min, DateTime),
@@ -195,7 +201,7 @@ CREATE TABLE IF NOT EXISTS ancestor_rollups_state (
   mt_older_7y_size AggregateFunction(sum, UInt64),
   mt_older_7y_count AggregateFunction(sum, UInt64)
 ) ENGINE = AggregatingMergeTree
-PARTITION BY (mount_path, scan_id)
+	PARTITION BY (mount_path, scan_time)
 ORDER BY (mount_path, ancestor)
 SETTINGS index_granularity = 8192`
 
@@ -203,10 +209,10 @@ SETTINGS index_granularity = 8192`
 	createRollupMV = `
 CREATE MATERIALIZED VIEW IF NOT EXISTS ancestor_rollups_mv
 TO ancestor_rollups_state AS
-WITH toDateTime(scan_id) AS scan_time
 SELECT
   mount_path,
   scan_id,
+	scan_time,
   ancestor,
   sumState(size) AS total_size,
   sumState(toUInt64(1)) AS file_count,
@@ -252,14 +258,14 @@ SELECT
   sumIfState(size, mtime < (scan_time - INTERVAL 7 YEAR)) AS mt_older_7y_size,
   sumIfState(toUInt64(1), mtime < (scan_time - INTERVAL 7 YEAR)) AS mt_older_7y_count
 FROM ancestor_rollups_raw
-GROUP BY mount_path, scan_id, ancestor`
+GROUP BY mount_path, scan_id, scan_time, ancestor`
 
 	createFilesCurrentView = `
 CREATE VIEW IF NOT EXISTS fs_entries_current AS
 SELECT e.*
 FROM fs_entries e
 INNER JOIN (
-  SELECT mount_path, max(scan_id) AS scan_id
+	SELECT mount_path, argMax(scan_id, finished_at) AS scan_id
   FROM scans
   WHERE state = 'ready'
   GROUP BY mount_path
@@ -268,7 +274,8 @@ INNER JOIN (
 	createRollupsCurrentView = `
 CREATE VIEW IF NOT EXISTS ancestor_rollups_current AS
 SELECT s.mount_path,
-       s.scan_id,
+	   s.scan_id,
+	   s.scan_time,
        s.ancestor,
        sumMerge(total_size) AS total_size,
        sumMerge(file_count) AS file_count,
@@ -315,12 +322,12 @@ SELECT s.mount_path,
        sumMerge(mt_older_7y_count) AS mt_older_7y_count
 FROM ancestor_rollups_state s
 INNER JOIN (
-  SELECT mount_path, max(scan_id) AS scan_id
+	SELECT mount_path, argMax(scan_id, finished_at) AS scan_id
   FROM scans
   WHERE state = 'ready'
   GROUP BY mount_path
 ) r USING (mount_path, scan_id)
-GROUP BY s.mount_path, s.scan_id, s.ancestor`
+GROUP BY s.mount_path, s.scan_id, s.scan_time, s.ancestor`
 )
 
 // CreateSchema creates all necessary tables and views in the ClickHouse database.
@@ -347,6 +354,12 @@ func (c *Clickhouse) CreateSchema(ctx context.Context) error {
 	// Create state table
 	if err := c.createTableWithStatement(ctx, createRollupStateTable); err != nil {
 		debugf("CreateSchema: rollup state error: %v", err)
+		return err
+	}
+
+	// Best-effort migration for legacy installations: ensure new columns/types exist
+	if err := c.migrateSchema(ctx); err != nil {
+		debugf("CreateSchema: migrate error: %v", err)
 		return err
 	}
 
@@ -381,6 +394,12 @@ func (c *Clickhouse) createFsEntriesTableWithFallback(ctx context.Context) error
 
 // createViews creates all the necessary views for the schema.
 func (c *Clickhouse) createViews(ctx context.Context) error {
+	// Drop views/MV if they exist to ensure we get the latest definitions
+	// Materialized views are dropped with DROP TABLE
+	_ = c.conn.Exec(ctx, "DROP VIEW IF EXISTS fs_entries_current")
+	_ = c.conn.Exec(ctx, "DROP VIEW IF EXISTS ancestor_rollups_current")
+	_ = c.conn.Exec(ctx, "DROP TABLE IF EXISTS ancestor_rollups_mv")
+
 	//nolint:misspell // ClickHouse requires American English spelling "materialized"
 	// Create materialized view and current views
 	if err := c.conn.Exec(ctx, createRollupMV); err != nil {
@@ -399,12 +418,12 @@ func (c *Clickhouse) createViews(ctx context.Context) error {
 }
 
 // RegisterScan adds a new scan record with 'loading' state.
-func (c *Clickhouse) registerScan(ctx context.Context, mountPath string, scanID uint64, started time.Time) error {
-	debugf("registerScan: mount=%s scan=%d started=%s", mountPath, scanID, started.Format(time.RFC3339))
+func (c *Clickhouse) registerScan(ctx context.Context, mountPath string, scanID uuid.UUID, scanTime, started time.Time) error {
+	debugf("registerScan: mount=%s scan=%s started=%s", mountPath, scanID.String(), started.Format(time.RFC3339))
 	err := c.conn.Exec(ctx, `
-		INSERT INTO scans (mount_path, scan_id, state, started_at, finished_at) 
-		VALUES (?, ?, 'loading', ?, NULL)`,
-		mountPath, scanID, started)
+		INSERT INTO scans (mount_path, scan_id, scan_time, state, started_at, finished_at) 
+		VALUES (?, ?, ?, 'loading', ?, NULL)`,
+		mountPath, scanID, scanTime, started)
 	if err != nil {
 		return fmt.Errorf("insert scan: %w", err)
 	}
@@ -416,14 +435,14 @@ func (c *Clickhouse) registerScan(ctx context.Context, mountPath string, scanID 
 func (c *Clickhouse) promoteScan(
 	ctx context.Context,
 	mountPath string,
-	scanID uint64,
-	started, finished time.Time,
+	scanID uuid.UUID,
+	scanTime, started, finished time.Time,
 ) error {
-	debugf("promoteScan: mount=%s scan=%d started=%s finished=%s", mountPath, scanID, started.Format(time.RFC3339), finished.Format(time.RFC3339))
+	debugf("promoteScan: mount=%s scan=%s started=%s finished=%s", mountPath, scanID.String(), started.Format(time.RFC3339), finished.Format(time.RFC3339))
 	return c.conn.Exec(ctx, `
-		INSERT INTO scans (mount_path, scan_id, state, started_at, finished_at)
-		VALUES (?, ?, 'ready', ?, ?)`,
-		mountPath, scanID, started, finished)
+		INSERT INTO scans (mount_path, scan_id, scan_time, state, started_at, finished_at)
+		VALUES (?, ?, ?, 'ready', ?, ?)`,
+		mountPath, scanID, scanTime, started, finished)
 }
 
 // DropPartitionIgnoreErrors executes a query and ignores any errors.
@@ -435,13 +454,13 @@ func (c *Clickhouse) dropPartitionIgnoreErrors(ctx context.Context, query string
 }
 
 // SetupRollbackHandler creates a deferred function that handles cleanup on error.
-func (c *Clickhouse) setupRollbackHandler(ctx context.Context, mountPath string, scanID uint64) func(error) {
+func (c *Clickhouse) setupRollbackHandler(ctx context.Context, mountPath string, scanTime time.Time) func(error) {
 	return func(retErr error) {
 		if retErr == nil {
 			return
 		}
-		// Construct partition tuple literal
-		part := fmt.Sprintf("('%s', %d)", EscapeCHSingleQuotes(mountPath), scanID)
+		// Construct partition tuple literal using scan_time
+		part := fmt.Sprintf("('%s', toDateTime('%s'))", EscapeCHSingleQuotes(mountPath), scanTime.Format("2006-01-02 15:04:05"))
 
 		// Drop partitions - ignoring errors on cleanup
 		// We use a separate function to avoid the empty block lint warnings
@@ -453,28 +472,28 @@ func (c *Clickhouse) setupRollbackHandler(ctx context.Context, mountPath string,
 }
 
 // DropOlderScans removes older scans for a specific mount path.
-func (c *Clickhouse) dropOlderScans(ctx context.Context, mountPath string, keepScanID uint64) error {
-	debugf("dropOlderScans: mount=%s keep=%d", mountPath, keepScanID)
-	// Get older scan_ids for this mount
+func (c *Clickhouse) dropOlderScans(ctx context.Context, mountPath string, keepFinishedAt time.Time) error {
+	debugf("dropOlderScans: mount=%s keepFinishedAt=%s", mountPath, keepFinishedAt.Format(time.RFC3339))
+	// Get older scans for this mount by finished_at and their scan_time for partition drops
 	rows, err := c.conn.Query(ctx, `
-		SELECT scan_id 
+		SELECT scan_time 
 		FROM scans 
-		WHERE mount_path = ? AND scan_id < ? 
-		ORDER BY scan_id`,
-		mountPath, keepScanID)
+		WHERE mount_path = ? AND finished_at IS NOT NULL AND finished_at < ? 
+		ORDER BY scan_time`,
+		mountPath, keepFinishedAt)
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
 
-	// Process each older scan ID
-	var sid uint64
+	// Process each older scan
+	var st time.Time
 	for rows.Next() {
-		if err := rows.Scan(&sid); err != nil {
+		if err := rows.Scan(&st); err != nil {
 			return err
 		}
-		debugf("dropOlderScans: dropping scan %d", sid)
-		if err := c.dropSingleScan(ctx, mountPath, sid); err != nil {
+		debugf("dropOlderScans: dropping scan with scan_time=%s", st.Format(time.RFC3339))
+		if err := c.dropSingleScan(ctx, mountPath, st); err != nil {
 			return err
 		}
 	}
@@ -483,20 +502,24 @@ func (c *Clickhouse) dropOlderScans(ctx context.Context, mountPath string, keepS
 }
 
 // DropSingleScan drops all data for a single scan ID.
-func (c *Clickhouse) dropSingleScan(ctx context.Context, mountPath string, scanID uint64) error {
-	debugf("dropSingleScan: mount=%s scan=%d", mountPath, scanID)
+func (c *Clickhouse) dropSingleScan(ctx context.Context, mountPath string, scanTime time.Time) error {
+	debugf("dropSingleScan: mount=%s scan_time=%s", mountPath, scanTime.Format(time.RFC3339))
 	// Construct partition tuple literal safely
-	part := fmt.Sprintf("('%s', %d)", EscapeCHSingleQuotes(mountPath), scanID)
+	part := fmt.Sprintf("('%s', toDateTime('%s'))", EscapeCHSingleQuotes(mountPath), scanTime.Format("2006-01-02 15:04:05"))
 
 	// Drop partitions from tables
-	for _, dropStmt := range []string{
-		"ALTER TABLE fs_entries DROP PARTITION " + part,
-		"ALTER TABLE ancestor_rollups_raw DROP PARTITION " + part,
-		"ALTER TABLE ancestor_rollups_state DROP PARTITION " + part,
-		"ALTER TABLE scans DROP PARTITION " + part,
-	} {
+	// Try drop using (mount_path, scan_time) partition; on failure, fall back to legacy
+	tables := []string{"fs_entries", "ancestor_rollups_raw", "ancestor_rollups_state", "scans"}
+	for _, tbl := range tables {
+		// First attempt: new partitioning
+		dropStmt := "ALTER TABLE " + tbl + " DROP PARTITION " + part
 		if err := c.conn.Exec(ctx, dropStmt); err != nil {
-			return err
+			// Fallback: legacy schemas may have partitioned only by mount_path
+			// In that case, drop by single key
+			legacy := fmt.Sprintf("ALTER TABLE %s DROP PARTITION '%s'", tbl, EscapeCHSingleQuotes(mountPath))
+			if err2 := c.conn.Exec(ctx, legacy); err2 != nil {
+				return err // return the original error to aid debugging
+			}
 		}
 	}
 
@@ -506,10 +529,8 @@ func (c *Clickhouse) dropSingleScan(ctx context.Context, mountPath string, scanI
 // GetLastScanTimes retrieves the most recent scan times for each mount.
 func (c *Clickhouse) GetLastScanTimes(ctx context.Context) (map[string]time.Time, error) {
 	// Return the finished_at time of the latest ready scan per mount
-	// Using argMax(finished_at, scan_id) ensures we pick the finished time corresponding
-	// to the maximum scan_id (latest) for each mount.
 	rows, err := c.conn.Query(ctx, `
-		SELECT mount_path, argMax(finished_at, scan_id)
+		SELECT mount_path, max(finished_at)
 		FROM scans
 		WHERE state = 'ready'
 		GROUP BY mount_path`)
@@ -535,4 +556,89 @@ func (c *Clickhouse) GetLastScanTimes(ctx context.Context) (map[string]time.Time
 	}
 
 	return result, rows.Err()
+}
+
+// migrateSchema applies best-effort migrations for pre-existing installations
+// that were created before scan_time/UUID scan_id were introduced.
+// It ensures columns exist with the right types and recreates dependent views.
+func (c *Clickhouse) migrateSchema(ctx context.Context) error { //nolint:funlen
+	debugf("migrateSchema: start")
+	// Ensure scan_time column exists on all tables used by queries/MVs
+	addScanTime := []string{
+		"ALTER TABLE scans ADD COLUMN IF NOT EXISTS scan_time DateTime AFTER scan_id",
+		"ALTER TABLE fs_entries ADD COLUMN IF NOT EXISTS scan_time DateTime AFTER scan_id",
+		"ALTER TABLE ancestor_rollups_raw ADD COLUMN IF NOT EXISTS scan_time DateTime AFTER scan_id",
+		"ALTER TABLE ancestor_rollups_state ADD COLUMN IF NOT EXISTS scan_time DateTime AFTER scan_id",
+	}
+	for _, q := range addScanTime {
+		// Ignore errors to keep migration idempotent across CH versions
+		_ = c.conn.Exec(ctx, q)
+	}
+
+	// Ensure scan_id columns are UUID (new type); attempt MODIFY or recreate table
+	if err := c.ensureScanIDUUID(ctx, "scans", createScansTable); err != nil {
+		return err
+	}
+	if err := c.ensureScanIDUUID(ctx, "fs_entries", createFsEntriesTable); err != nil {
+		// try fallback schema if needed
+		if err2 := c.ensureScanIDUUID(ctx, "fs_entries", createFsEntriesTableNoPathIdx); err2 != nil {
+			return err
+		}
+	}
+	if err := c.ensureScanIDUUID(ctx, "ancestor_rollups_raw", createRollupRawTable); err != nil {
+		return err
+	}
+	if err := c.ensureScanIDUUID(ctx, "ancestor_rollups_state", createRollupStateTable); err != nil {
+		return err
+	}
+
+	// Recreate views/materialized view to pick up new definitions
+	if err := c.createViews(ctx); err != nil {
+		return err
+	}
+
+	debugf("migrateSchema: done")
+	return nil
+}
+
+// ensureScanIDUUID verifies the column type of scan_id is UUID for the given table.
+// If the type differs, it tries to ALTER; if that fails, it drops and recreates the table.
+func (c *Clickhouse) ensureScanIDUUID(ctx context.Context, table string, createStmt string) error {
+	typ, err := c.getColumnType(ctx, table, "scan_id")
+	if err != nil {
+		// If table doesn't exist yet, just create it
+		if execErr := c.conn.Exec(ctx, createStmt); execErr != nil {
+			return execErr
+		}
+		return nil
+	}
+
+	if typ == "UUID" { // already correct
+		return nil
+	}
+
+	// Try to modify in-place
+	if err := c.conn.Exec(ctx, fmt.Sprintf("ALTER TABLE %s MODIFY COLUMN scan_id UUID", table)); err == nil {
+		return nil
+	}
+
+	// As a last resort (eg. incompatible engine settings), drop and recreate
+	debugf("migrateSchema: recreating table %s with correct schema (was %s)", table, typ)
+	if err := c.conn.Exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s", table)); err != nil {
+		return err
+	}
+	return c.conn.Exec(ctx, createStmt)
+}
+
+// getColumnType returns the data type of a column from system.columns, or an error if not found.
+func (c *Clickhouse) getColumnType(ctx context.Context, table, column string) (string, error) {
+	row := c.conn.QueryRow(ctx, `
+		SELECT type FROM system.columns
+		WHERE database = currentDatabase() AND table = ? AND name = ?
+		LIMIT 1`, table, column)
+	var typ string
+	if err := row.Scan(&typ); err != nil {
+		return "", err
+	}
+	return typ, nil
 }

@@ -32,43 +32,44 @@ import (
 	"time"
 
 	chdriver "github.com/ClickHouse/clickhouse-go/v2"
+	"github.com/google/uuid"
 	"github.com/wtsi-hgi/wrstat-ui/stats"
 )
 
 // UpdateClickhouse ingests a scan into ClickHouse.
 func (c *Clickhouse) UpdateClickhouse(ctx context.Context, mountPath string, r io.Reader) (retErr error) {
-	// Use seconds-since-epoch as scan ID so it can be safely cast to DateTime in queries.
-	// Uniqueness is ensured at mount level by retaining only the latest scan per mount.
-	scanID := uint64(time.Now().Unix()) //nolint:gosec // timestamp scan identifier in seconds
-	started := time.Now()
+	// Use UUID as scan_id to guarantee uniqueness; record scan_time separately
+	scanUUID := uuid.New()
+	scanTime := time.Now()
+	started := scanTime
 
-	debugf("UpdateClickhouse: mount=%s scan=%d", mountPath, scanID)
+	debugf("UpdateClickhouse: mount=%s scan=%s", mountPath, scanUUID.String())
 
 	// Register scan as loading
-	if err := c.registerScan(ctx, mountPath, scanID, started); err != nil {
+	if err := c.registerScan(ctx, mountPath, scanUUID, scanTime, started); err != nil {
 		return err
 	}
 
 	// Set up rollback handler for cleanup on error
-	defer c.setupRollbackHandler(ctx, mountPath, scanID)(retErr)
+	defer c.setupRollbackHandler(ctx, mountPath, scanTime)(retErr)
 
-	if err := c.ingestScan(ctx, mountPath, scanID, r); err != nil {
+	if err := c.ingestScan(ctx, mountPath, scanUUID, scanTime, r); err != nil {
 		debugf("UpdateClickhouse: ingestScan error: %v", err)
 		return err
 	}
 
 	// Promote to ready by inserting a new row (avoids ALTER UPDATE pitfalls)
 	finished := time.Now()
-	if err := c.promoteScan(ctx, mountPath, scanID, started, finished); err != nil {
+	if err := c.promoteScan(ctx, mountPath, scanUUID, scanTime, started, finished); err != nil {
 		return fmt.Errorf("promote scan (insert ready): %w", err)
 	}
 
 	// Drop older scans for this mount
-	if err := c.dropOlderScans(ctx, mountPath, scanID); err != nil {
+	if err := c.dropOlderScans(ctx, mountPath, finished); err != nil {
 		return fmt.Errorf("retention: %w", err)
 	}
 
-	debugf("UpdateClickhouse: done mount=%s scan=%d", mountPath, scanID)
+	debugf("UpdateClickhouse: done mount=%s scan=%s", mountPath, scanUUID.String())
 
 	return nil
 }
@@ -81,20 +82,21 @@ type BatchProcessor struct {
 	filesCount      int
 	rollupsCount    int
 	mountPath       string
-	scanID          uint64
+	scanID          uuid.UUID
+	scanTime        time.Time
 	filesBatchSQL   string
 	rollupsBatchSQL string
 }
 
 // NewBatchProcessor creates a new batch processor for files and rollups.
-func (c *Clickhouse) newBatchProcessor(ctx context.Context, mountPath string, scanID uint64) (*BatchProcessor, error) {
+func (c *Clickhouse) newBatchProcessor(ctx context.Context, mountPath string, scanID uuid.UUID, scanTime time.Time) (*BatchProcessor, error) {
 	filesBatchSQL := `
 		INSERT INTO fs_entries 
-		(mount_path, scan_id, path, parent_path, name, ext_low, ftype, inode, size, uid, gid, mtime, atime, ctime)`
+		(mount_path, scan_id, scan_time, path, parent_path, name, ext_low, ftype, inode, size, uid, gid, mtime, atime, ctime)`
 
 	rollupsBatchSQL := `
 		INSERT INTO ancestor_rollups_raw 
-		(mount_path, scan_id, ancestor, size, atime, mtime, uid, gid, ext_low)`
+		(mount_path, scan_id, scan_time, ancestor, size, atime, mtime, uid, gid, ext_low)`
 
 	filesBatch, err := c.conn.PrepareBatch(ctx, filesBatchSQL)
 	if err != nil {
@@ -112,6 +114,7 @@ func (c *Clickhouse) newBatchProcessor(ctx context.Context, mountPath string, sc
 		conn:            c.conn,
 		mountPath:       mountPath,
 		scanID:          scanID,
+		scanTime:        scanTime,
 		filesBatchSQL:   filesBatchSQL,
 		rollupsBatchSQL: rollupsBatchSQL,
 	}, nil
@@ -121,7 +124,7 @@ func (c *Clickhouse) newBatchProcessor(ctx context.Context, mountPath string, sc
 func (bp *BatchProcessor) AddFile(path string, parent string, name string, ext string,
 	ft FileType, inode uint64, size uint64, uid uint32, gid uint32, mtime, atime, ctime time.Time) error {
 	if err := bp.filesBatch.Append(
-		bp.mountPath, bp.scanID, path, parent, name, ext, uint8(ft),
+		bp.mountPath, bp.scanID, bp.scanTime, path, parent, name, ext, uint8(ft),
 		inode, size, uid, gid, mtime, atime, ctime,
 	); err != nil {
 		return err
@@ -136,7 +139,7 @@ func (bp *BatchProcessor) AddFile(path string, parent string, name string, ext s
 func (bp *BatchProcessor) AddRollup(ancestor string, size uint64,
 	atime, mtime time.Time, uid, gid uint32, ext string) error {
 	if err := bp.rollupsBatch.Append(
-		bp.mountPath, bp.scanID, ancestor, size, atime, mtime, uid, gid, ext); err != nil {
+		bp.mountPath, bp.scanID, bp.scanTime, ancestor, size, atime, mtime, uid, gid, ext); err != nil {
 		return err
 	}
 
@@ -208,10 +211,10 @@ func (bp *BatchProcessor) flushRollupsBatch(ctx context.Context) error {
 }
 
 // ingestScan processes a stats file and loads it into ClickHouse.
-func (c *Clickhouse) ingestScan(ctx context.Context, mountPath string, scanID uint64, r io.Reader) error {
-	debugf("ingestScan: start mount=%s scan=%d", mountPath, scanID)
+func (c *Clickhouse) ingestScan(ctx context.Context, mountPath string, scanID uuid.UUID, scanTime time.Time, r io.Reader) error {
+	debugf("ingestScan: start mount=%s scan=%s", mountPath, scanID.String())
 	// Create batch processor
-	bp, err := c.newBatchProcessor(ctx, mountPath, scanID)
+	bp, err := c.newBatchProcessor(ctx, mountPath, scanID, scanTime)
 	if err != nil {
 		return err
 	}
@@ -233,7 +236,7 @@ func (c *Clickhouse) ingestScan(ctx context.Context, mountPath string, scanID ui
 		return err
 	}
 
-	debugf("ingestScan: done mount=%s scan=%d filesAppended=%d rollupsAppended=%d", mountPath, scanID, bp.filesCount, bp.rollupsCount)
+	debugf("ingestScan: done mount=%s scan=%s filesAppended=%d rollupsAppended=%d", mountPath, scanID.String(), bp.filesCount, bp.rollupsCount)
 
 	return nil
 }
@@ -460,8 +463,7 @@ func insertSyntheticAncestorDirs(bp *BatchProcessor, mountPath string, dirsSeen 
 	}
 
 	// Use the scan time as a consistent timestamp for synthetic dirs.
-	// scanID originated from time.Now().Unix() and is safe to cast back.
-	t := time.Unix(int64(bp.scanID), 0) //nolint:gosec // scanID comes from Unix seconds
+	t := bp.scanTime
 
 	// Walk ancestors up to root, excluding root itself as an entry
 	var firstErr error

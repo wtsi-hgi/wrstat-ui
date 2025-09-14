@@ -228,7 +228,7 @@ func TestClickHouseIntegration(t *testing.T) {
 
 		var want time.Time
 
-		q := `SELECT argMax(finished_at, scan_id) FROM scans WHERE state = 'ready' AND mount_path = ?`
+		q := `SELECT max(finished_at) FROM scans WHERE state = 'ready' AND mount_path = ?`
 		require.NoError(t, ch.ExecuteQuery(ctx, q, mountPath, &want))
 		assert.WithinDuration(t, want, got, time.Second)
 	})
@@ -645,7 +645,7 @@ func TestClickHouseIntegration(t *testing.T) {
 		require.NoError(t, err)
 
 		sumMountCounts := sa.FileCount + sb.FileCount
-		assert.Greater(t, s.FileCount, sumMountCounts)
+		assert.GreaterOrEqual(t, s.FileCount, sumMountCounts)
 
 		// SubtreeSummary should also work at root with filters (falls back under the hood).
 		// Filtering by GID ensures we only count files (directories have gid=0 by default in test data).

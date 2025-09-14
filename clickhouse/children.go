@@ -131,14 +131,14 @@ func buildChildrenSummariesQuery(dir string, f Filters) (string, []any) {
 
 		// Add atime bucket filter if provided
 		if f.ATimeBucket != "" {
-			if pred, err := buildBucketPredicateWithScanExpr("toDateTime(scan_id)", "atime", f.ATimeBucket); err == nil && pred != "" {
+			if pred, err := buildBucketPredicateWithScanExpr("scan_time", "atime", f.ATimeBucket); err == nil && pred != "" {
 				predicates = append(predicates, pred)
 			}
 		}
 
 		// Add mtime bucket filter if provided
 		if f.MTimeBucket != "" {
-			if pred, err := buildBucketPredicateWithScanExpr("toDateTime(scan_id)", "mtime", f.MTimeBucket); err == nil && pred != "" {
+			if pred, err := buildBucketPredicateWithScanExpr("scan_time", "mtime", f.MTimeBucket); err == nil && pred != "" {
 				predicates = append(predicates, pred)
 			}
 		}
