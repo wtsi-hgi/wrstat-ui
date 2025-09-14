@@ -35,13 +35,6 @@ import (
 )
 
 var (
-	defaultDir string
-
-	quotaPath      string
-	basedirsConfig string
-	mounts         string
-
-	// ClickHouse connection settings.
 	chHost     string
 	chPort     string
 	chDatabase string
@@ -82,7 +75,7 @@ func init() {
 
 // Run executes the clickhouse command with the given arguments.
 func Run(args []string) (err error) {
-	mountPath, statsPath, err := checkArgs(args)
+	mountPath, statsPath, err := checkClickhouseArgs(args)
 	if err != nil {
 		return err
 	}
@@ -109,7 +102,7 @@ func Run(args []string) (err error) {
 	return ch.UpdateClickhouse(ctx, mountPath, r)
 }
 
-func checkArgs(args []string) (string, string, error) {
+func checkClickhouseArgs(args []string) (string, string, error) {
 	// Command line arguments.
 	const expectedArgCount = 2
 
