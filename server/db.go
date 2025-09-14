@@ -27,6 +27,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"io/fs"
 	"net/http"
 	"os"
@@ -38,7 +39,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
-	"github.com/wtsi-hgi/wrstat-ui/clickhouse"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 )
 
@@ -108,15 +108,6 @@ func (s *Server) LoadDBs(basePaths []string, dgutaDBName, basedirDBName, ownersP
 	s.tree = tree
 	s.dataTimeStamp = mts
 
-	// If ClickHouse mode is enabled, bootstrap fs_entries from the loaded Bolt DBs
-	// so that ClickHouse-backed endpoints can answer queries in tests.
-	if useClickHouseFeatureFlag() {
-		// Expose the DB directories to the CH bootstrap via env (test-only convenience)
-		_ = os.Setenv("WRSTAT_TEST_DB_DIRS", strings.Join(basePaths, ","))
-
-		go s.ensureClickHousePopulated()
-	}
-
 	if !loaded {
 		s.addBaseDGUTARoutes()
 		s.addBaseDirRoutes()
@@ -125,78 +116,56 @@ func (s *Server) LoadDBs(basePaths []string, dgutaDBName, basedirDBName, ownersP
 	return nil
 }
 
-// ensureClickHousePopulated performs a best-effort population of ClickHouse using
-// the most recent stats files backing the Bolt DBs, if ClickHouse has no scans yet.
-func (s *Server) ensureClickHousePopulated() {
-	ch, ctx, cancel := s.getCHAndContext()
-	if ch == nil {
-		return
-	}
-	defer cancel()
-
-	if !s.ensureSchemaAndEmpty(ctx, ch) {
-		return
-	}
-
-	// Ingest any test stats indicated by environment variable
-	dirs := os.Getenv("WRSTAT_TEST_DB_DIRS")
-	if dirs == "" {
-		return
-	}
-
-	for _, dir := range strings.Split(dirs, ",") {
-		if err := s.ingestStatsIfPresent(ctx, ch, dir); err != nil {
-			// Best effort: log and continue
-			s.Logger.Printf("clickhouse bootstrap ingest failed for %s: %v", dir, err)
-		}
-	}
-}
-
-// getCHAndContext returns a ClickHouse client and a bounded context for bootstrap operations.
-func (s *Server) getCHAndContext() (*clickhouse.Clickhouse, context.Context, context.CancelFunc) {
+// InitClickHouseTreeFromStats initialises ClickHouse for tree-only functionality by
+// creating the schema (if required) and ingesting the given stats files under the
+// root mount path. It sets a minimal data timestamp so the UI can query freshness.
+// This is intended to be used in ClickHouse mode instead of LoadDBs during tests
+// or early rollout when only tree endpoints are implemented.
+func (s *Server) InitClickHouseTreeFromStats(statsPaths ...string) error { //nolint:funlen,gocognit,gocyclo
 	ch, err := s.getClickHouse()
-	if err != nil || ch == nil {
-		return nil, nil, func() {}
-	}
-
-	const chBootstrapTimeout = 30 * time.Second
-
-	ctx, cancel := context.WithTimeout(context.Background(), chBootstrapTimeout)
-
-	return ch, ctx, cancel
-}
-
-// ensureSchemaAndEmpty creates schema and returns true if there are no ready scans yet.
-func (s *Server) ensureSchemaAndEmpty(ctx context.Context, ch *clickhouse.Clickhouse) bool {
-	if err := ch.CreateSchema(ctx); err != nil {
-		return false
-	}
-
-	// Check if scans table has any ready rows
-	var count uint64
-	if err := ch.ExecuteQuery(ctx, "SELECT count() FROM scans WHERE state = 'ready'", &count); err != nil {
-		return false
-	}
-
-	return count == 0
-}
-
-// ingestStatsIfPresent ingests a stats.tsv located in dir into ClickHouse under a mount path
-// based on the directory key name.
-func (s *Server) ingestStatsIfPresent(ctx context.Context, ch *clickhouse.Clickhouse, dir string) error {
-	statsPath := filepath.Join(dir, "stats.tsv")
-
-	f, err := os.Open(statsPath)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
 
-	// For tests, ingest under the root mount so global listings work as expected.
-	// The test data already includes '/a' and '/k' under root.
-	mount := "/"
+	// Use a bounded context for schema + ingests
+	const chTimeout = 60 * time.Second
 
-	return ch.UpdateClickhouse(ctx, mount, f)
+	ctx, cancel := context.WithTimeout(context.Background(), chTimeout)
+	defer cancel()
+
+	if err := ch.CreateSchema(ctx); err != nil {
+		return fmt.Errorf("clickhouse schema: %w", err)
+	}
+
+	// Ingest each provided stats file under root mount
+	for _, p := range statsPaths {
+		f, errop := os.Open(p)
+		if errop != nil {
+			return errop
+		}
+
+		if err := ch.UpdateClickhouse(ctx, "/", f); err != nil {
+			_ = f.Close()
+
+			return fmt.Errorf("clickhouse ingest %s: %w", p, err)
+		}
+
+		if err := f.Close(); err != nil {
+			return err
+		}
+	}
+
+	// Provide a minimal timestamp map for the UI; use a fixed key
+	s.mu.Lock()
+
+	if s.dataTimeStamp == nil {
+		s.dataTimeStamp = map[string]int64{}
+	}
+
+	s.dataTimeStamp["clickhouse"] = time.Now().Unix()
+	s.mu.Unlock()
+
+	return nil
 }
 
 func (s *Server) getDBTimestamps(paths []string) (map[string]int64, error) {

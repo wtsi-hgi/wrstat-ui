@@ -52,6 +52,11 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/internal/split"
 )
 
+// clickHouseMode returns true if tests should run in ClickHouse mode.
+func clickHouseMode() bool {
+	return os.Getenv("WRSTAT_USE_CLICKHOUSE") == "1"
+}
+
 func TestIDsToWanted(t *testing.T) {
 	Convey("restrictGIDs returns bad query if you don't want any of the given ids", t, func() {
 		_, err := restrictGIDs(map[uint32]bool{1: true}, []uint32{2})
@@ -172,6 +177,11 @@ func TestServer(t *testing.T) {
 		})
 
 		Convey("You can query the endpoints", func() {
+			if clickHouseMode() {
+				SkipConvey("ClickHouse mode: where/basedirs endpoints are not implemented in phase 1", func() {})
+
+				return
+			}
 			response, err := queryWhere(s, "")
 			So(err, ShouldBeNil)
 			So(response.Code, ShouldEqual, http.StatusNotFound)
@@ -660,6 +670,11 @@ func TestServer(t *testing.T) {
 		})
 
 		Convey("serveGzippedCache serves group and user usage with gzip handling", func() {
+			if clickHouseMode() {
+				SkipConvey("ClickHouse mode: basedirs cache tests are not applicable in phase 1", func() {})
+
+				return
+			}
 			err := s.prewarmCaches(s.basedirs)
 			So(err, ShouldBeNil)
 
@@ -755,15 +770,25 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 		So(err, ShouldBeNil)
 
 		Convey("You can't get where data is or add the tree page without auth", func() {
-			err = s.LoadDBs([]string{path}, "dirguta", "basedir.db", ownersPath)
-			So(err, ShouldBeNil)
+			if clickHouseMode() {
+				// CH mode: prepare CH for tree only; skip where tests
+				statsPath := filepath.Join(path, "stats.tsv")
+				err = s.InitClickHouseTreeFromStats(statsPath)
+				So(err, ShouldBeNil)
 
-			_, _, err = GetWhereDataIs(c, "/", "", "", "", db.DGUTAgeAll, "")
-			So(err, ShouldNotBeNil)
-			So(err, ShouldEqual, gas.ErrNoAuth)
+				err = s.AddTreePage()
+				So(err, ShouldNotBeNil)
+			} else {
+				err = s.LoadDBs([]string{path}, "dirguta", "basedir.db", ownersPath)
+				So(err, ShouldBeNil)
 
-			err = s.AddTreePage()
-			So(err, ShouldNotBeNil)
+				_, _, err = GetWhereDataIs(c, "/", "", "", "", db.DGUTAgeAll, "")
+				So(err, ShouldNotBeNil)
+				So(err, ShouldEqual, gas.ErrNoAuth)
+
+				err = s.AddTreePage()
+				So(err, ShouldNotBeNil)
+			}
 		})
 
 		Convey("Root can see everything", func() {
@@ -772,42 +797,55 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 			})
 			So(err, ShouldBeNil)
 
-			err = s.LoadDBs([]string{path}, "dirguta", "basedir.db", ownersPath)
-			So(err, ShouldBeNil)
+			if clickHouseMode() {
+				statsPath := filepath.Join(path, "stats.tsv")
+				err = s.InitClickHouseTreeFromStats(statsPath)
+				So(err, ShouldBeNil)
+			} else {
+				err = s.LoadDBs([]string{path}, "dirguta", "basedir.db", ownersPath)
+				So(err, ShouldBeNil)
+			}
 
 			err = c.Login("user", "pass")
 			So(err, ShouldBeNil)
 
-			_, _, err = GetWhereDataIs(c, " ", "", "", "", db.DGUTAgeAll, "")
-			So(err, ShouldNotBeNil)
-			So(err, ShouldEqual, ErrBadQuery)
+			if !clickHouseMode() {
+				_, _, err = GetWhereDataIs(c, " ", "", "", "", db.DGUTAgeAll, "")
+				So(err, ShouldNotBeNil)
+				So(err, ShouldEqual, ErrBadQuery)
 
-			json, dcss, errg := GetWhereDataIs(c, "/", "", "", "", db.DGUTAgeAll, "0")
-			So(errg, ShouldBeNil)
-			So(string(json), ShouldNotBeBlank)
-			So(len(dcss), ShouldEqual, 1)
-			So(dcss[0].Count, ShouldEqual, 24)
+				json, dcss, errg := GetWhereDataIs(c, "/", "", "", "", db.DGUTAgeAll, "0")
+				So(errg, ShouldBeNil)
+				So(string(json), ShouldNotBeBlank)
+				So(len(dcss), ShouldEqual, 1)
+				So(dcss[0].Count, ShouldEqual, 24)
 
-			json, dcss, errg = GetWhereDataIs(c, "/", g.Name, "", "", db.DGUTAgeAll, "0")
-			So(errg, ShouldBeNil)
-			So(string(json), ShouldNotBeBlank)
-			So(len(dcss), ShouldEqual, 1)
-			So(dcss[0].Count, ShouldEqual, 13)
+				json, dcss, errg = GetWhereDataIs(c, "/", g.Name, "", "", db.DGUTAgeAll, "0")
+				So(errg, ShouldBeNil)
+				So(string(json), ShouldNotBeBlank)
+				So(len(dcss), ShouldEqual, 1)
+				So(dcss[0].Count, ShouldEqual, 13)
 
-			json, dcss, errg = GetWhereDataIs(c, "/", "", "root", "", db.DGUTAgeAll, "0")
-			So(errg, ShouldBeNil)
-			So(string(json), ShouldNotBeBlank)
-			So(len(dcss), ShouldEqual, 1)
-			So(dcss[0].Count, ShouldEqual, 14)
+				json, dcss, errg = GetWhereDataIs(c, "/", "", "root", "", db.DGUTAgeAll, "0")
+				So(errg, ShouldBeNil)
+				So(string(json), ShouldNotBeBlank)
+				So(len(dcss), ShouldEqual, 1)
+				So(dcss[0].Count, ShouldEqual, 14)
 
-			json, dcss, errg = GetWhereDataIs(c, "/", "", "", "", db.DGUTAgeA7Y, "0")
-			So(errg, ShouldBeNil)
-			So(string(json), ShouldNotBeBlank)
-			So(len(dcss), ShouldEqual, 1)
-			So(dcss[0].Count, ShouldEqual, 19)
+				json, dcss, errg = GetWhereDataIs(c, "/", "", "", "", db.DGUTAgeA7Y, "0")
+				So(errg, ShouldBeNil)
+				So(string(json), ShouldNotBeBlank)
+				So(len(dcss), ShouldEqual, 1)
+				So(dcss[0].Count, ShouldEqual, 19)
+			}
 		})
 
 		Convey("Normal users have access restricted only by group", func() {
+			if clickHouseMode() {
+				SkipConvey("ClickHouse mode: where endpoint not implemented in phase 1", func() {})
+
+				return
+			}
 			err = s.EnableAuth(cert, key, func(username, password string) (bool, string) {
 				return true, uid
 			})
@@ -847,7 +885,12 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 			})
 			So(err, ShouldBeNil)
 
-			err = s.LoadDBs([]string{path}, "dirguta", "basedir.db", ownersPath)
+			if clickHouseMode() {
+				statsPath := filepath.Join(path, "stats.tsv")
+				err = s.InitClickHouseTreeFromStats(statsPath)
+			} else {
+				err = s.LoadDBs([]string{path}, "dirguta", "basedir.db", ownersPath)
+			}
 			So(err, ShouldBeNil)
 
 			s.dataTimeStamp = map[string]int64{}
@@ -861,14 +904,16 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 			s.uidToNameCache[103] = "UserC"
 			s.uidToNameCache[88888] = "88888"
 
-			s.basedirs.SetCachedGroup(1, "GroupA")
-			s.basedirs.SetCachedGroup(2, "GroupB")
-			s.basedirs.SetCachedGroup(3, "GroupC")
-			s.basedirs.SetCachedUser(77777, "77777")
-			s.basedirs.SetCachedUser(101, "UserA")
-			s.basedirs.SetCachedUser(102, "UserB")
-			s.basedirs.SetCachedUser(103, "UserC")
-			s.basedirs.SetCachedUser(88888, "88888")
+			if !clickHouseMode() {
+				s.basedirs.SetCachedGroup(1, "GroupA")
+				s.basedirs.SetCachedGroup(2, "GroupB")
+				s.basedirs.SetCachedGroup(3, "GroupC")
+				s.basedirs.SetCachedUser(77777, "77777")
+				s.basedirs.SetCachedUser(101, "UserA")
+				s.basedirs.SetCachedUser(102, "UserB")
+				s.basedirs.SetCachedUser(103, "UserC")
+				s.basedirs.SetCachedUser(88888, "88888")
+			}
 
 			err = s.AddTreePage()
 			So(err, ShouldBeNil)
@@ -1294,6 +1339,11 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 			})
 
 			Convey("You can access the secure basedirs endpoints after LoadDBs()", func() {
+				if clickHouseMode() {
+					SkipConvey("ClickHouse mode: basedirs endpoints not implemented in phase 1", func() {})
+
+					return
+				}
 				r := gas.NewAuthenticatedClientRequest(addr, cert, token)
 
 				var usage []*basedirs.Usage

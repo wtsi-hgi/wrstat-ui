@@ -197,19 +197,36 @@ func buildGlobalTimeBucketFilter(f Filters) string {
 // buildAllSummaryQuery builds the summary query across all mounts (no mount_path filter),
 // using per-row scan time for any time buckets.
 func buildAllSummaryQuery(where []string, bucketFilter string) string {
+	// Aggregate per unique path first to avoid duplicate rows for the same path
+	// that can occur due to stats expansion of ancestors. Use max(size) to prefer
+	// real directory sizes over zero from synthetic/missing rows, and max(uid/gid)
+	// to prefer non-zero owners when present.
 	return `
-SELECT 
+SELECT
 	sum(size) AS total_size,
 	count() AS file_count,
-  max(atime) AS most_recent_atime,
-  min(atime) AS oldest_atime,
-  max(mtime) AS most_recent_mtime,
-  min(mtime) AS oldest_mtime,
-  groupUniqArray(uid) AS uids,
-  groupUniqArray(gid) AS gids,
-  groupUniqArray(ext_low) AS exts
-FROM fs_entries_current
-WHERE ` + strings.Join(where, " AND ") + bucketFilter
+	max(atime) AS most_recent_atime,
+	min(atime) AS oldest_atime,
+	max(mtime) AS most_recent_mtime,
+	min(mtime) AS oldest_mtime,
+	groupUniqArray(uid) AS uids,
+	groupUniqArray(gid) AS gids,
+	groupUniqArray(ext_low) AS exts
+FROM (
+	SELECT
+		-- Normalize by trimming a trailing slash so '/x' and '/x/' group together
+		if(endsWith(path, '/'), substring(path, 1, length(path) - 1), path) AS norm_path,
+		max(size) AS size,
+		max(atime) AS atime,
+		max(mtime) AS mtime,
+		max(uid) AS uid,
+		max(gid) AS gid,
+		anyLast(ext_low) AS ext_low
+	FROM fs_entries_current
+	WHERE ` + strings.Join(where, " AND ") + bucketFilter + `
+	GROUP BY norm_path
+)
+`
 }
 
 // Execute the summary query and return results.
@@ -231,18 +248,16 @@ func (c *Clickhouse) executeSummaryQuery(ctx context.Context, query string, args
 // SubtreeSummary uses rollups when possible (no filters) and falls back to a scan for filtered queries.
 // This keeps optimization as an implementation detail behind a single public API.
 func (c *Clickhouse) SubtreeSummary(ctx context.Context, dir string, f Filters) (Summary, error) {
-	d := EnsureDir(dir)
-
-	// For filtered queries, always use scan-based summary.
-	if !isNoFilters(f) {
-		return c.subtreeSummaryScan(ctx, d, f)
-	}
-
-	return c.getRollupSummaryGlobal(ctx, d)
+	// For phase 1 correctness, prefer scan-based summaries which align with Bolt semantics
+	// (unique paths) and avoid rollup double-counting complexities.
+	return c.subtreeSummaryScan(ctx, dir, f)
 }
 
 // Helper function to retrieve summary from the rollups table.
 // getRollupSummaryGlobal aggregates precomputed rollups across all mounts for the given ancestor path.
+// getRollupSummaryGlobal is retained for future optimization phases using rollups.
+//
+//nolint:unused
 func (c *Clickhouse) getRollupSummaryGlobal(ctx context.Context, dir string) (Summary, error) {
 	query := `
 SELECT
@@ -305,20 +320,32 @@ func buildAllWhere(dir string, f Filters) ([]string, []any) {
 }
 
 // getUnfilteredAllSummary is the unfiltered fast path across all mounts.
-func (c *Clickhouse) getUnfilteredAllSummary(ctx context.Context, dir string) (Summary, error) {
+func (c *Clickhouse) getUnfilteredAllSummary(ctx context.Context, dir string) (Summary, error) { //nolint:funlen
 	row := c.conn.QueryRow(ctx, `
-SELECT 
+SELECT
 	sum(size),
 	count(),
-  max(atime),
-  min(atime),
-  max(mtime),
-  min(mtime),
-  groupUniqArray(uid),
-  groupUniqArray(gid),
-  groupUniqArray(ext_low)
-FROM fs_entries_current
-WHERE path LIKE ?`, dir+"%")
+	max(atime),
+	min(atime),
+	max(mtime),
+	min(mtime),
+	groupUniqArray(uid),
+	groupUniqArray(gid),
+	groupUniqArray(ext_low)
+FROM (
+	SELECT
+		if(endsWith(path, '/'), substring(path, 1, length(path) - 1), path) AS norm_path,
+		max(size) AS size,
+		max(atime) AS atime,
+		max(mtime) AS mtime,
+		max(uid) AS uid,
+		max(gid) AS gid,
+		anyLast(ext_low) AS ext_low
+	FROM fs_entries_current
+	WHERE path LIKE ?
+	GROUP BY norm_path
+)
+`, dir+"%")
 
 	var s Summary
 	if err := row.Scan(&s.TotalSize, &s.FileCount, &s.MostRecentATime, &s.OldestATime,

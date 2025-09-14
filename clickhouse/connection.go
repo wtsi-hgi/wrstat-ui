@@ -252,7 +252,7 @@ FROM ancestor_rollups_raw
 GROUP BY mount_path, scan_id, ancestor`
 
 	createFilesCurrentView = `
-CREATE OR REPLACE VIEW fs_entries_current AS
+CREATE VIEW IF NOT EXISTS fs_entries_current AS
 SELECT e.*
 FROM fs_entries e
 INNER JOIN (
@@ -263,7 +263,7 @@ INNER JOIN (
 ) r USING (mount_path, scan_id)`
 
 	createRollupsCurrentView = `
-CREATE OR REPLACE VIEW ancestor_rollups_current AS
+CREATE VIEW IF NOT EXISTS ancestor_rollups_current AS
 SELECT s.mount_path,
        s.scan_id,
        s.ancestor,

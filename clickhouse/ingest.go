@@ -37,8 +37,9 @@ import (
 
 // UpdateClickhouse ingests a scan into ClickHouse.
 func (c *Clickhouse) UpdateClickhouse(ctx context.Context, mountPath string, r io.Reader) (retErr error) {
-	// Use current time as scan ID
-	scanID := uint64(time.Now().Unix()) //nolint:gosec // monotonic timestamp scan identifier
+	// Use high-resolution time as scan ID to ensure uniqueness even for rapid successive ingests
+	// This avoids accidental duplicate partitions when multiple ingests occur within the same second.
+	scanID := uint64(time.Now().UnixNano()) //nolint:gosec // monotonic timestamp scan identifier
 	started := time.Now()
 
 	// Register scan as loading
@@ -275,6 +276,7 @@ func processFileEntry(bp *BatchProcessor, fi *stats.FileInfo, mountPath string) 
 	if !strings.HasPrefix(path, "/") {
 		path = "/" + path
 	}
+	// Determine if this entry is a directory
 	isDir := fi.EntryType == stats.DirType || IsDirPath(path)
 
 	parent, name := SplitParentAndName(path)
@@ -352,6 +354,11 @@ func addRollupsAboveMount(bp *BatchProcessor, fi *stats.FileInfo, mountPath stri
 	size uint64, atime, mtime time.Time, ext string) error {
 	mp := EnsureDir(mountPath)
 	parentOfMount, _ := SplitParentAndName(mp)
+
+	// If there are no ancestors above the mount (eg. mount is "/"), do nothing.
+	if parentOfMount == mp {
+		return nil
+	}
 
 	var firstErr error
 
