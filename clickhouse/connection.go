@@ -42,6 +42,7 @@ type ConnectionParams struct {
 
 // New creates and configures a new Clickhouse instance.
 func New(params ConnectionParams) (*Clickhouse, error) {
+	debugf("New connection: host=%s port=%s db=%s user=%s", params.Host, params.Port, params.Database, params.Username)
 	conn, err := chdriver.Open(&chdriver.Options{
 		Addr:        []string{fmt.Sprintf("%s:%s", params.Host, params.Port)},
 		Auth:        chdriver.Auth{Database: params.Database, Username: params.Username, Password: params.Password},
@@ -56,6 +57,8 @@ func New(params ConnectionParams) (*Clickhouse, error) {
 	if err != nil {
 		return nil, fmt.Errorf("connect: %w", err)
 	}
+
+	debugf("Connected to ClickHouse")
 
 	return &Clickhouse{conn: conn}, nil
 }
@@ -322,28 +325,39 @@ GROUP BY s.mount_path, s.scan_id, s.ancestor`
 
 // CreateSchema creates all necessary tables and views in the ClickHouse database.
 func (c *Clickhouse) CreateSchema(ctx context.Context) error {
+	debugf("CreateSchema: start")
 	// Create scans table first
 	if err := c.createTableWithStatement(ctx, createScansTable); err != nil {
+		debugf("CreateSchema: scans table error: %v", err)
 		return err
 	}
 
 	// Create fs_entries table with fallback
 	if err := c.createFsEntriesTableWithFallback(ctx); err != nil {
+		debugf("CreateSchema: fs_entries error: %v", err)
 		return err
 	}
 
 	// Create rollup raw table
 	if err := c.createTableWithStatement(ctx, createRollupRawTable); err != nil {
+		debugf("CreateSchema: rollup raw error: %v", err)
 		return err
 	}
 
 	// Create state table
 	if err := c.createTableWithStatement(ctx, createRollupStateTable); err != nil {
+		debugf("CreateSchema: rollup state error: %v", err)
 		return err
 	}
 
 	// Create all views
-	return c.createViews(ctx)
+	if err := c.createViews(ctx); err != nil {
+		debugf("CreateSchema: create views error: %v", err)
+		return err
+	}
+
+	debugf("CreateSchema: done")
+	return nil
 }
 
 // createTableWithStatement executes a CREATE TABLE statement and returns any error.
@@ -386,6 +400,7 @@ func (c *Clickhouse) createViews(ctx context.Context) error {
 
 // RegisterScan adds a new scan record with 'loading' state.
 func (c *Clickhouse) registerScan(ctx context.Context, mountPath string, scanID uint64, started time.Time) error {
+	debugf("registerScan: mount=%s scan=%d started=%s", mountPath, scanID, started.Format(time.RFC3339))
 	err := c.conn.Exec(ctx, `
 		INSERT INTO scans (mount_path, scan_id, state, started_at, finished_at) 
 		VALUES (?, ?, 'loading', ?, NULL)`,
@@ -393,7 +408,7 @@ func (c *Clickhouse) registerScan(ctx context.Context, mountPath string, scanID 
 	if err != nil {
 		return fmt.Errorf("insert scan: %w", err)
 	}
-
+	debugf("registerScan: ok")
 	return nil
 }
 
@@ -404,6 +419,7 @@ func (c *Clickhouse) promoteScan(
 	scanID uint64,
 	started, finished time.Time,
 ) error {
+	debugf("promoteScan: mount=%s scan=%d started=%s finished=%s", mountPath, scanID, started.Format(time.RFC3339), finished.Format(time.RFC3339))
 	return c.conn.Exec(ctx, `
 		INSERT INTO scans (mount_path, scan_id, state, started_at, finished_at)
 		VALUES (?, ?, 'ready', ?, ?)`,
@@ -438,6 +454,7 @@ func (c *Clickhouse) setupRollbackHandler(ctx context.Context, mountPath string,
 
 // DropOlderScans removes older scans for a specific mount path.
 func (c *Clickhouse) dropOlderScans(ctx context.Context, mountPath string, keepScanID uint64) error {
+	debugf("dropOlderScans: mount=%s keep=%d", mountPath, keepScanID)
 	// Get older scan_ids for this mount
 	rows, err := c.conn.Query(ctx, `
 		SELECT scan_id 
@@ -456,7 +473,7 @@ func (c *Clickhouse) dropOlderScans(ctx context.Context, mountPath string, keepS
 		if err := rows.Scan(&sid); err != nil {
 			return err
 		}
-
+		debugf("dropOlderScans: dropping scan %d", sid)
 		if err := c.dropSingleScan(ctx, mountPath, sid); err != nil {
 			return err
 		}
@@ -467,6 +484,7 @@ func (c *Clickhouse) dropOlderScans(ctx context.Context, mountPath string, keepS
 
 // DropSingleScan drops all data for a single scan ID.
 func (c *Clickhouse) dropSingleScan(ctx context.Context, mountPath string, scanID uint64) error {
+	debugf("dropSingleScan: mount=%s scan=%d", mountPath, scanID)
 	// Construct partition tuple literal safely
 	part := fmt.Sprintf("('%s', %d)", EscapeCHSingleQuotes(mountPath), scanID)
 

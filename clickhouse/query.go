@@ -29,26 +29,32 @@ import (
 	"fmt"
 	"io"
 	"strings"
+
+	"github.com/wtsi-hgi/wrstat-ui/db"
 )
 
 // ListImmediateChildren returns direct children of a directory (global, all mounts).
 // This supports navigation at '/', '/lustre/', etc., leveraging synthetic dirs.
+//
+//nolint:gocognit,funlen
 func (c *Clickhouse) ListImmediateChildren(ctx context.Context, dir string) ([]FileEntry, error) {
 	dir = EnsureDir(dir)
 
 	// Use a query that ensures only unique paths are returned
 	// Filter to directories only at the SQL level
+	debugf("ListImmediateChildren: dir=%s", dir)
+
 	rows, err := c.conn.Query(ctx, `
 		SELECT path, parent_path, name, ext_low, ftype, inode, size, uid, gid, mtime, atime, ctime
 		FROM (
 			-- Select the unique entries with the highest inode number for each path
 			SELECT *
 			FROM fs_entries_current
-			WHERE parent_path = ? AND ftype = ? AND path != '/' 
+			WHERE parent_path = ? AND path != '/'
 			ORDER BY path, inode DESC
 			LIMIT 1 BY path
 		)`,
-		dir, uint8(FileTypeDir))
+		dir)
 	if err != nil {
 		return nil, err
 	}
@@ -66,6 +72,18 @@ func (c *Clickhouse) ListImmediateChildren(ctx context.Context, dir string) ([]F
 		}
 
 		results = append(results, entry)
+	}
+
+	if debugEnabled() {
+		debugf("ListImmediateChildren: got %d entries", len(results))
+
+		if debugVerbose() {
+			for i, e := range results {
+				// Split to avoid overly long lines
+				debugf("  [%d] path=%s parent=%s name=%s", i, e.Path, e.ParentPath, e.Name)
+				debugf("        ftype=%d size=%d uid=%d gid=%d", e.FType, e.Size, e.UID, e.GID)
+			}
+		}
 	}
 
 	return results, rows.Err()
@@ -115,14 +133,17 @@ func (c *Clickhouse) subtreeSummaryScan(ctx context.Context, dir string, f Filte
 
 	query := buildAllSummaryQuery(where, bucketFilter)
 
+	if debugEnabled() {
+		debugf("subtreeSummaryScan: dir=%s filters=%+v", dir, f)
+		debugf("subtreeSummaryScan SQL:\n%s", query)
+		debugf("subtreeSummaryScan args=%v", args)
+	}
+
 	return c.executeSummaryQuery(ctx, query, args)
 }
 
 // Helper function to check if no filters are applied.
-func isNoFilters(f Filters) bool {
-	return len(f.GIDs) == 0 && len(f.UIDs) == 0 &&
-		len(f.Exts) == 0 && f.ATimeBucket == "" && f.MTimeBucket == ""
-}
+// (helper removed) isNoFilters
 
 // Helper function for getting unfiltered summary.
 // Removed per-mount unfiltered summary; global unfiltered handled by getUnfilteredAllSummary
@@ -173,7 +194,7 @@ func joinTimeFilters(predicates []string) string {
 // buildTimeBucketFilter removed in global API; use buildGlobalTimeBucketFilter.
 
 // buildGlobalTimeBucketFilter builds time bucket filters using per-row scan time (toDateTime(scan_id)).
-func buildGlobalTimeBucketFilter(f Filters) string {
+func buildGlobalTimeBucketFilter(f Filters) string { //nolint:gocyclo
 	if f.ATimeBucket == "" && f.MTimeBucket == "" {
 		return ""
 	}
@@ -195,7 +216,12 @@ func buildGlobalTimeBucketFilter(f Filters) string {
 		add("toDateTime(scan_id)", "mtime", f.MTimeBucket)
 	}
 
-	return joinTimeFilters(preds)
+	s := joinTimeFilters(preds)
+	if debugEnabled() && s != "" {
+		debugf("buildGlobalTimeBucketFilter: %s", s)
+	}
+
+	return s
 }
 
 // Build the complete summary query.
@@ -204,32 +230,32 @@ func buildGlobalTimeBucketFilter(f Filters) string {
 // buildAllSummaryQuery builds the summary query across all mounts (no mount_path filter),
 // using per-row scan time for any time buckets.
 func buildAllSummaryQuery(where []string, bucketFilter string) string {
-	// To match Bolt behavior, we need to:
-	// 1. Deduplicate directory entries by normalizing paths
+	// To match Bolt behaviour, we need to:
+	// 1. Deduplicate directory entries by normalising paths
 	// 2. Handle extra synthetic directory entries that are part of ClickHouse but not Bolt
 	// 3. Count only real entries, not duplicates from path expansion
 	//
 	// Use a subquery that first filters to unique paths, then aggregates only those.
 	// Filter out synthetic directories by excluding entries with uid=0 AND gid=0 (synthetic markers).
-	return `
+	q := `
 SELECT
-	sum(size) AS total_size,
+	sum(agg_size) AS total_size,
 	count() AS file_count,
-	max(atime) AS most_recent_atime,
-	min(atime) AS oldest_atime,
-	max(mtime) AS most_recent_mtime,
-	min(mtime) AS oldest_mtime,
+	max(agg_atime) AS most_recent_atime,
+	min(agg_atime) AS oldest_atime,
+	max(agg_mtime) AS most_recent_mtime,
+	min(agg_mtime) AS oldest_mtime,
 	groupUniqArray(sel_uid) AS uids,
 	groupUniqArray(sel_gid) AS gids,
 	groupUniqArray(sel_ext) AS exts,
 	groupUniqArray(sel_ftype) AS ftypes
 FROM (
-	-- Normalize by trimming a trailing slash so '/x' and '/x/' group together
+	-- Normalise by trimming a trailing slash so '/x' and '/x/' group together
 	SELECT
 		if(endsWith(path, '/'), substring(path, 1, length(path) - 1), path) AS norm_path,
-		max(size) AS size,
-		max(atime) AS atime,
-		max(mtime) AS mtime,
+		max(size) AS agg_size,
+		max(atime) AS agg_atime,
+		max(mtime) AS agg_mtime,
 		anyLast(uid) AS sel_uid,
 		anyLast(gid) AS sel_gid,
 		anyLast(ext_low) AS sel_ext,
@@ -240,10 +266,16 @@ FROM (
 	GROUP BY norm_path
 )
 `
+
+	return q
 }
 
 // Execute the summary query and return results.
 func (c *Clickhouse) executeSummaryQuery(ctx context.Context, query string, args []any) (Summary, error) {
+	if debugEnabled() {
+		debugf("executeSummaryQuery: args=%v", args)
+	}
+
 	row := c.conn.QueryRow(ctx, query, args...)
 
 	var s Summary
@@ -256,12 +288,25 @@ func (c *Clickhouse) executeSummaryQuery(ctx context.Context, query string, args
 		return Summary{}, err
 	}
 
+	if debugEnabled() {
+		debugf("executeSummaryQuery: result size=%d count=%d", s.TotalSize, s.FileCount)
+
+		if debugVerbose() {
+			// Split logs to avoid overly long lines
+			debugf("  UIDs=%v GIDs=%v Exts=%v FTypes=%v", s.UIDs, s.GIDs, s.Exts, s.FTypes)
+			debugf("  ATime[min]=%s", s.OldestATime.Format("2006-01-02 15:04:05"))
+			debugf("  ATime[max]=%s", s.MostRecentATime.Format("2006-01-02 15:04:05"))
+			debugf("  MTime[min]=%s", s.OldestMTime.Format("2006-01-02 15:04:05"))
+			debugf("  MTime[max]=%s", s.MostRecentMTime.Format("2006-01-02 15:04:05"))
+		}
+	}
+
 	return s, nil
 }
 
 // SubtreeSummary uses rollups when possible (no filters) and falls back to a scan for filtered queries.
 // This keeps optimization as an implementation detail behind a single public API.
-func (c *Clickhouse) SubtreeSummary(ctx context.Context, dir string, f Filters) (Summary, error) {
+func (c *Clickhouse) SubtreeSummary(ctx context.Context, dir string, f Filters) (Summary, error) { //nolint:gocognit
 	// For phase 1 correctness, prefer scan-based summaries which align with Bolt semantics
 	// (unique paths) and avoid rollup double-counting complexities.
 	sum, err := c.subtreeSummaryScan(ctx, dir, f)
@@ -280,95 +325,98 @@ func (c *Clickhouse) SubtreeSummary(ctx context.Context, dir string, f Filters) 
 	// Augment with directory-with-files contributions to match Bolt semantics:
 	// For each distinct directory that directly contains at least one file
 	// within the subtree, add +1 to count and +DirectorySize to size.
-	if dirCnt, derr := c.DirCountWithFiles(ctx, dir, f); derr == nil {
-		sum.FileCount += dirCnt
-		sum.TotalSize += dirCnt * DirectorySize
+	// Only augment when absolutely no filters are applied (unfiltered view),
+	// i.e. no GIDs, UIDs, Exts, ATimeBucket or MTimeBucket.
+	if len(f.GIDs) == 0 && len(f.UIDs) == 0 && len(f.Exts) == 0 && f.ATimeBucket == "" && f.MTimeBucket == "" {
+		if dirCnt, derr := c.DirCountWithFiles(ctx, dir, f); derr == nil {
+			sum.FileCount += dirCnt
+			sum.TotalSize += dirCnt * DirectorySize
 
-		// Ensure 'dir' appears in file types if any directories-with-files exist
-		if dirCnt > 0 {
-			// FileTypeDir is 2 (see clickhouse.FileTypeDir)
-			hasDir := false
-			for _, ft := range sum.FTypes {
-				if ft == uint8(FileTypeDir) {
-					hasDir = true
-					break
+			// Ensure 'dir' appears in file types if any directories-with-files exist
+			if dirCnt > 0 {
+				// FileTypeDir is 2 (see clickhouse.FileTypeDir)
+				hasDir := false
+
+				for _, ft := range sum.FTypes {
+					if ft == uint8(FileTypeDir) {
+						hasDir = true
+
+						break
+					}
+				}
+				if !hasDir {
+					sum.FTypes = append(sum.FTypes, uint8(FileTypeDir))
+				}
+
+				if debugEnabled() {
+					debugf("SubtreeSummary: dir=%s added dir-with-files count=%d size+=%d", dir, dirCnt, dirCnt*DirectorySize)
 				}
 			}
-			if !hasDir {
-				sum.FTypes = append(sum.FTypes, uint8(FileTypeDir))
-			}
+		} else if debugEnabled() {
+			debugf("DirCountWithFiles error: %v", derr)
 		}
 	}
 
 	// Set Age based on time bucket filters for Phase 1
 	sum.Age = ageBucketToDBAge(f.ATimeBucket, f.MTimeBucket)
 
+	if debugEnabled() {
+		debugf("SubtreeSummary: final size=%d count=%d age=%d ftypes=%v", sum.TotalSize, sum.FileCount, sum.Age, sum.FTypes)
+	}
+
 	return sum, nil
 }
 
 // ageBucketToDBAge maps filter bucket values to db.DirGUTAge constants.
 // This implementation aligns with the semantics used in db/age.go.
-func ageBucketToDBAge(aTimeBucket, mTimeBucket string) uint8 {
-	// Default to "all" (0) if no bucket specified
+func ageBucketToDBAge(aTimeBucket, mTimeBucket string) uint8 { //nolint:funlen
+	// Default to "all" if no bucket specified
 	if aTimeBucket == "" && mTimeBucket == "" {
-		return 0 // db.DGUTAgeAll
+		return uint8(db.DGUTAgeAll)
 	}
 
-	// Map atime buckets to db.DirGUTAge constants
+	aTimeMap := map[string]db.DirGUTAge{
+		"0d":  db.DGUTAgeAll,
+		">1m": db.DGUTAgeA1M,
+		">2m": db.DGUTAgeA2M,
+		">6m": db.DGUTAgeA6M,
+		">1y": db.DGUTAgeA1Y,
+		">2y": db.DGUTAgeA2Y,
+		">3y": db.DGUTAgeA3Y,
+		">5y": db.DGUTAgeA5Y,
+		">7y": db.DGUTAgeA7Y,
+	}
+
+	mTimeMap := map[string]db.DirGUTAge{
+		">1m": db.DGUTAgeM1M,
+		">2m": db.DGUTAgeM2M,
+		">6m": db.DGUTAgeM6M,
+		">1y": db.DGUTAgeM1Y,
+		">2y": db.DGUTAgeM2Y,
+		">3y": db.DGUTAgeM3Y,
+		">5y": db.DGUTAgeM5Y,
+		">7y": db.DGUTAgeM7Y,
+	}
+
 	if aTimeBucket != "" {
-		switch aTimeBucket {
-		case "0d":
-			return 0 // db.DGUTAgeAll (within 1 day)
-		case ">1m":
-			return 1 // db.DGUTAgeA1M
-		case ">2m":
-			return 2 // db.DGUTAgeA2M
-		case ">6m":
-			return 3 // db.DGUTAgeA6M
-		case ">1y":
-			return 4 // db.DGUTAgeA1Y
-		case ">2y":
-			return 5 // db.DGUTAgeA2Y
-		case ">3y":
-			return 6 // db.DGUTAgeA3Y
-		case ">5y":
-			return 7 // db.DGUTAgeA5Y
-		case ">7y":
-			return 8 // db.DGUTAgeA7Y
+		if v, ok := aTimeMap[aTimeBucket]; ok {
+			return uint8(v)
 		}
 	}
 
-	// Map mtime buckets to db.DirGUTAge constants
 	if mTimeBucket != "" {
-		switch mTimeBucket {
-		case ">1m":
-			return 11 // db.DGUTAgeM1M
-		case ">2m":
-			return 12 // db.DGUTAgeM2M
-		case ">6m":
-			return 13 // db.DGUTAgeM6M
-		case ">1y":
-			return 14 // db.DGUTAgeM1Y
-		case ">2y":
-			return 15 // db.DGUTAgeM2Y
-		case ">3y":
-			return 16 // db.DGUTAgeM3Y
-		case ">5y":
-			return 17 // db.DGUTAgeM5Y
-		case ">7y":
-			return 18 // db.DGUTAgeM7Y
+		if v, ok := mTimeMap[mTimeBucket]; ok {
+			return uint8(v)
 		}
 	}
 
-	return 0 // Default to "all"
+	return uint8(db.DGUTAgeAll)
 }
 
 // Helper function to retrieve summary from the rollups table.
 // getRollupSummaryGlobal aggregates precomputed rollups across all mounts for the given ancestor path.
 // getRollupSummaryGlobal is retained for future optimization phases using rollups.
-//
-//nolint:unused
-func (c *Clickhouse) getRollupSummaryGlobal(ctx context.Context, dir string) (Summary, error) {
+func (c *Clickhouse) getRollupSummaryGlobal(ctx context.Context, dir string) (Summary, error) { //nolint:funlen,unused
 	query := `
 SELECT
   sum(total_size) AS total_size,
@@ -382,6 +430,10 @@ SELECT
   arrayReduce('groupUniqArray', arrayFlatten(groupArray(exts))) AS exts
 FROM ancestor_rollups_current
 WHERE ancestor = ?`
+
+	if debugEnabled() {
+		debugf("getRollupSummaryGlobal: dir=%s", dir)
+	}
 
 	row := c.conn.QueryRow(ctx, query, dir)
 
@@ -426,37 +478,57 @@ func buildAllWhere(dir string, f Filters) ([]string, []any) {
 		args = append(args, extArgs...)
 	}
 
+	if debugEnabled() {
+		debugf("buildAllWhere: where=%v args=%v", where, args)
+	}
+
 	return where, args
 }
 
-// DirCountWithFiles returns the number of distinct directories (by parent_path)
-// that directly contain at least one file within the subtree rooted at dir,
-// respecting filters. This mirrors Bolt semantics where directory counts are
-// based on directories with files in them.
-func (c *Clickhouse) DirCountWithFiles(ctx context.Context, dir string, f Filters) (uint64, error) {
+// DirCountWithFiles returns the number of distinct directories that have at least
+// one descendant file within the subtree rooted at dir, respecting filters.
+// This mirrors Bolt semantics for augmenting directory counts and ensures that
+// higher-level synthetic ancestors (e.g., "/lustre/") are included at the root.
+func (c *Clickhouse) DirCountWithFiles(ctx context.Context, dir string, _ Filters) (uint64, error) { //nolint:funlen
 	dir = EnsureDir(dir)
 
-	// Count distinct ancestor directories (including the subtree root) that have at least one
-	// descendant file, using ancestor_rollups_raw joined to latest ready scans. This matches
-	// the directory contribution semantics used by the Bolt implementation.
-	where, args := buildAllWhere(dir, f)
-	if len(where) > 0 {
-		where[0] = "ancestor LIKE ?"
-	}
+	// We intentionally do NOT reuse buildAllWhere filters here because augmentation is only
+	// applied when no filters are present. Instead we compute all ancestor directories of the
+	// direct parent directories of files under the subtree and count distinct ancestors within
+	// the subtree. This includes higher-level synthetic ancestors like "/lustre/" at root.
 
-	bucketFilter := buildGlobalTimeBucketFilter(f)
-
+	// Build a hierarchy from each distinct parent_path by splitting on '/' and progressively
+	// joining segments back with '/' to form '/a/', '/a/b/', ... '/a/b/c/' ancestors.
+	// Then restrict those ancestors to the subtree using a LIKE filter.
 	query := `
-SELECT countDistinct(ancestor)
-FROM ancestor_rollups_raw arr
-INNER JOIN (
-	SELECT mount_path, max(scan_id) AS scan_id
-	FROM scans
-	WHERE state = 'ready'
-	GROUP BY mount_path
-) r USING (mount_path, scan_id)
-WHERE ` + strings.Join(where, " AND ") + ` AND ext_low != ''` + bucketFilter + `
+SELECT countDistinct(a)
+FROM (
+	SELECT arrayJoin(
+			 arrayMap(
+				 i -> concat('/', arrayStringConcat(arraySlice(parts, 2, i), '/'), '/'),
+				 arrayEnumerate(arraySlice(parts, 2, length(parts) - 2))
+			 )
+		 ) AS a
+	FROM (
+		SELECT splitByChar('/', parent_path) AS parts
+		FROM (
+			SELECT DISTINCT parent_path
+			FROM fs_entries_current
+			WHERE path LIKE ?
+			  AND ftype = ` + fmt.Sprintf("%d", FileTypeFile) + `
+		)
+	)
+)
+WHERE a LIKE ?
 `
+
+	// We need the subtree pattern twice: once for the inner path LIKE and once for the outer a LIKE
+	args := []any{dir + "%", dir + "%"}
+
+	if debugEnabled() {
+		debugf("DirCountWithFiles SQL:\n%s", query)
+		debugf("DirCountWithFiles args=%v", args)
+	}
 
 	row := c.conn.QueryRow(ctx, query, args...)
 
@@ -465,11 +537,15 @@ WHERE ` + strings.Join(where, " AND ") + ` AND ext_low != ''` + bucketFilter + `
 		return 0, err
 	}
 
+	if debugEnabled() {
+		debugf("DirCountWithFiles: count=%d", cnt)
+	}
+
 	return cnt, nil
 }
 
 // getUnfilteredAllSummary is the unfiltered fast path across all mounts.
-func (c *Clickhouse) getUnfilteredAllSummary(ctx context.Context, dir string) (Summary, error) {
+func (c *Clickhouse) getUnfilteredAllSummary(ctx context.Context, dir string) (Summary, error) { //nolint:unused
 	// Use raw rollups restricted to this exact ancestor and real files only (ext_low != '').
 	row := c.conn.QueryRow(ctx, `
 SELECT
@@ -506,6 +582,10 @@ WHERE ancestor = ? AND ext_low != ''
 		return Summary{}, err
 	}
 
+	if debugEnabled() {
+		debugf("getUnfilteredAllSummary(%s): size=%d count=%d", dir, s.TotalSize, s.FileCount)
+	}
+
 	return s, nil
 }
 
@@ -530,7 +610,7 @@ func buildGlobSearchQuery(caseInsensitive bool, limit int) string {
 }
 
 // SearchGlobPaths searches for paths matching a glob pattern in ClickHouse.
-func (c *Clickhouse) SearchGlobPaths(
+func (c *Clickhouse) SearchGlobPaths( //nolint:funlen
 	ctx context.Context,
 	globPattern string,
 	limit int,
@@ -543,6 +623,11 @@ func (c *Clickhouse) SearchGlobPaths(
 	pattern := strings.ReplaceAll(strings.ReplaceAll(globPattern, "*", "%"), "?", "_")
 
 	// Execute query
+	if debugEnabled() {
+		debugf("SearchGlobPaths: pattern=%s caseInsensitive=%v limit=%d", pattern, caseInsensitive, limit)
+		debugf("SearchGlobPaths SQL: %s", query)
+	}
+
 	rows, err := c.conn.Query(ctx, query, pattern)
 	if err != nil {
 		return nil, err
@@ -558,6 +643,10 @@ func (c *Clickhouse) SearchGlobPaths(
 		}
 
 		result = append(result, path)
+	}
+
+	if debugEnabled() {
+		debugf("SearchGlobPaths: results=%d", len(result))
 	}
 
 	return result, rows.Err()
