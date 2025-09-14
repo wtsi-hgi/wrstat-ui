@@ -37,17 +37,11 @@ import (
 func (c *Clickhouse) ListImmediateChildren(ctx context.Context, dir string) ([]FileEntry, error) {
 	dir = EnsureDir(dir)
 
-	// Query that ensures only unique paths are returned
+	// Direct query without duplicate handling since we're guaranteed unique paths
 	rows, err := c.conn.Query(ctx, `
 		SELECT path, parent_path, name, ext_low, ftype, inode, size, uid, gid, mtime, atime, ctime
-		FROM (
-			-- Select the unique entries with the highest inode number for each path
-			SELECT *
-			FROM fs_entries_current
-			WHERE parent_path = ? AND path != '/'
-			ORDER BY path, inode DESC
-			LIMIT 1 BY path
-		)`,
+		FROM fs_entries_current
+		WHERE parent_path = ? AND path != '/'`,
 		dir)
 	if err != nil {
 		return nil, err
@@ -125,15 +119,6 @@ func isNoFilters(f Filters) bool {
 		f.ATimeBucket == "" &&
 		f.MTimeBucket == ""
 }
-
-// Helper function for getting unfiltered summary.
-// Removed per-mount unfiltered summary; global unfiltered handled by getUnfilteredAllSummary function.
-// Note: getUnfilteredAllSummary is kept as a reference implementation for potential future optimization.
-
-// Build basic where clause and args for the query.
-// Removed per-mount where builder (API unified to global)
-
-// appendFilterClauses removed; buildAllWhere handles filters directly
 
 // buildInClause constructs an SQL IN clause for filtering.
 func buildInClause(field string, values []uint32) (string, []any) {
