@@ -229,7 +229,7 @@ func buildGlobalTimeBucketFilter(f Filters) string { //nolint:gocyclo
 
 // buildAllSummaryQuery builds the summary query across all mounts (no mount_path filter),
 // using per-row scan time for any time buckets.
-func buildAllSummaryQuery(where []string, bucketFilter string) string {
+func buildAllSummaryQuery(where []string, bucketFilter string) string { //nolint:funlen
 	// To match Bolt behaviour, we need to:
 	// 1. Deduplicate directory entries by normalising paths
 	// 2. Handle extra synthetic directory entries that are part of ClickHouse but not Bolt

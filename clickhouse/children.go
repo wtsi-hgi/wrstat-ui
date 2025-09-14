@@ -39,7 +39,7 @@ type SummaryChild struct {
 
 // ChildrenSummaries returns summaries for the immediate children of the given directory.
 // This aggregates files and stats by parent_path and name for immediate children.
-func (c *Clickhouse) ChildrenSummaries(ctx context.Context, dir string, f Filters) ([]SummaryChild, error) {
+func (c *Clickhouse) ChildrenSummaries(ctx context.Context, dir string, f Filters) ([]SummaryChild, error) { //nolint:funlen,gocognit
 	dir = EnsureDir(dir)
 
 	// We use a direct query approach instead of doing a summary for each child

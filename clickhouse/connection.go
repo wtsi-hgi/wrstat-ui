@@ -331,7 +331,7 @@ GROUP BY s.mount_path, s.scan_id, s.scan_time, s.ancestor`
 )
 
 // CreateSchema creates all necessary tables and views in the ClickHouse database.
-func (c *Clickhouse) CreateSchema(ctx context.Context) error {
+func (c *Clickhouse) CreateSchema(ctx context.Context) error { //nolint:funlen // procedural setup is clearer inline
 	debugf("CreateSchema: start")
 	// Create scans table first
 	if err := c.createTableWithStatement(ctx, createScansTable); err != nil {
@@ -395,12 +395,12 @@ func (c *Clickhouse) createFsEntriesTableWithFallback(ctx context.Context) error
 // createViews creates all the necessary views for the schema.
 func (c *Clickhouse) createViews(ctx context.Context) error {
 	// Drop views/MV if they exist to ensure we get the latest definitions
-	// Materialized views are dropped with DROP TABLE
-	_ = c.conn.Exec(ctx, "DROP VIEW IF EXISTS fs_entries_current")
-	_ = c.conn.Exec(ctx, "DROP VIEW IF EXISTS ancestor_rollups_current")
-	_ = c.conn.Exec(ctx, "DROP TABLE IF EXISTS ancestor_rollups_mv")
+	// Materialised views are dropped with DROP TABLE
+	c.dropPartitionIgnoreErrors(ctx, "DROP VIEW IF EXISTS fs_entries_current")
+	c.dropPartitionIgnoreErrors(ctx, "DROP VIEW IF EXISTS ancestor_rollups_current")
+	c.dropPartitionIgnoreErrors(ctx, "DROP TABLE IF EXISTS ancestor_rollups_mv")
 
-	//nolint:misspell // ClickHouse requires American English spelling "materialized"
+	//nolint:misspell // ClickHouse requires American English spelling "materialized".
 	// Create materialized view and current views
 	if err := c.conn.Exec(ctx, createRollupMV); err != nil {
 		return err
@@ -418,7 +418,7 @@ func (c *Clickhouse) createViews(ctx context.Context) error {
 }
 
 // RegisterScan adds a new scan record with 'loading' state.
-func (c *Clickhouse) registerScan(ctx context.Context, mountPath string, scanID uuid.UUID, scanTime, started time.Time) error {
+func (c *Clickhouse) registerScan(ctx context.Context, mountPath string, scanID uuid.UUID, scanTime, started time.Time) error { //nolint:lll // long signature ok
 	debugf("registerScan: mount=%s scan=%s started=%s", mountPath, scanID.String(), started.Format(time.RFC3339))
 	err := c.conn.Exec(ctx, `
 		INSERT INTO scans (mount_path, scan_id, scan_time, state, started_at, finished_at) 
@@ -438,7 +438,9 @@ func (c *Clickhouse) promoteScan(
 	scanID uuid.UUID,
 	scanTime, started, finished time.Time,
 ) error {
+	//nolint:lll // debug line is intentionally verbose and clearer unwrapped
 	debugf("promoteScan: mount=%s scan=%s started=%s finished=%s", mountPath, scanID.String(), started.Format(time.RFC3339), finished.Format(time.RFC3339))
+
 	return c.conn.Exec(ctx, `
 		INSERT INTO scans (mount_path, scan_id, scan_time, state, started_at, finished_at)
 		VALUES (?, ?, ?, 'ready', ?, ?)`,
@@ -460,7 +462,11 @@ func (c *Clickhouse) setupRollbackHandler(ctx context.Context, mountPath string,
 			return
 		}
 		// Construct partition tuple literal using scan_time
-		part := fmt.Sprintf("('%s', toDateTime('%s'))", EscapeCHSingleQuotes(mountPath), scanTime.Format("2006-01-02 15:04:05"))
+		part := fmt.Sprintf(
+			"('%s', toDateTime('%s'))",
+			EscapeCHSingleQuotes(mountPath),
+			scanTime.Format("2006-01-02 15:04:05"),
+		)
 
 		// Drop partitions - ignoring errors on cleanup
 		// We use a separate function to avoid the empty block lint warnings
@@ -504,8 +510,13 @@ func (c *Clickhouse) dropOlderScans(ctx context.Context, mountPath string, keepF
 // DropSingleScan drops all data for a single scan ID.
 func (c *Clickhouse) dropSingleScan(ctx context.Context, mountPath string, scanTime time.Time) error {
 	debugf("dropSingleScan: mount=%s scan_time=%s", mountPath, scanTime.Format(time.RFC3339))
+
 	// Construct partition tuple literal safely
-	part := fmt.Sprintf("('%s', toDateTime('%s'))", EscapeCHSingleQuotes(mountPath), scanTime.Format("2006-01-02 15:04:05"))
+	part := fmt.Sprintf(
+		"('%s', toDateTime('%s'))",
+		EscapeCHSingleQuotes(mountPath),
+		scanTime.Format("2006-01-02 15:04:05"),
+	)
 
 	// Drop partitions from tables
 	// Try drop using (mount_path, scan_time) partition; on failure, fall back to legacy
@@ -572,7 +583,7 @@ func (c *Clickhouse) migrateSchema(ctx context.Context) error { //nolint:funlen
 	}
 	for _, q := range addScanTime {
 		// Ignore errors to keep migration idempotent across CH versions
-		_ = c.conn.Exec(ctx, q)
+		c.dropPartitionIgnoreErrors(ctx, q)
 	}
 
 	// Ensure scan_id columns are UUID (new type); attempt MODIFY or recreate table
@@ -592,7 +603,7 @@ func (c *Clickhouse) migrateSchema(ctx context.Context) error { //nolint:funlen
 		return err
 	}
 
-	// Recreate views/materialized view to pick up new definitions
+	// Recreate views/materialised view to pick up new definitions
 	if err := c.createViews(ctx); err != nil {
 		return err
 	}
@@ -624,7 +635,7 @@ func (c *Clickhouse) ensureScanIDUUID(ctx context.Context, table string, createS
 
 	// As a last resort (eg. incompatible engine settings), drop and recreate
 	debugf("migrateSchema: recreating table %s with correct schema (was %s)", table, typ)
-	if err := c.conn.Exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s", table)); err != nil {
+	if err := c.conn.Exec(ctx, "DROP TABLE IF EXISTS "+table); err != nil { //nolint:perfsprint
 		return err
 	}
 	return c.conn.Exec(ctx, createStmt)
@@ -640,5 +651,6 @@ func (c *Clickhouse) getColumnType(ctx context.Context, table, column string) (s
 	if err := row.Scan(&typ); err != nil {
 		return "", err
 	}
+
 	return typ, nil
 }

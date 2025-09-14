@@ -23,10 +23,10 @@
 
 package clickhouse
 
-// Constants used in ClickHouse operations
+// Constants used in ClickHouse operations.
 
 const (
-	// DirectorySize is the default size of directories (4KB)
-	// This matches the size used in the Bolt implementation
+	// DirectorySize is the default size of directories (4KB).
+	// This matches the size used in the Bolt implementation.
 	DirectorySize = 4096
 )

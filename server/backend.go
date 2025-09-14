@@ -72,8 +72,9 @@ func NewClickHouseBackend(ch *clickhouse.Clickhouse) *ClickHouseBackend {
 }
 
 // DirInfo returns a directory summary and its immediate children summaries.
-// Phase 1: Implemented using ClickHouse SubtreeSummary and ChildrenSummaries
+// Phase 1: Implemented using ClickHouse SubtreeSummary and ChildrenSummaries.
 func (b *ClickHouseBackend) DirInfo(dir string, filter *db.Filter) (*db.DirInfo, error) {
+	//nolint:funlen // straight-line orchestration; splitting would harm readability
 	// Convert db.Filter to clickhouse.Filters
 	chFilters := convertFilters(filter)
 
@@ -128,7 +129,7 @@ func (b *ClickHouseBackend) DirInfo(dir string, filter *db.Filter) (*db.DirInfo,
 }
 
 // DirHasChildren reports if dir has any child dirs with matching files.
-// Phase 1: Implemented to check if a directory has any children
+// Phase 1: Implemented to check if a directory has any children.
 func (b *ClickHouseBackend) DirHasChildren(dir string, filter *db.Filter) bool {
 	// Convert db.Filter to clickhouse.Filters
 	chFilters := convertFilters(filter)
@@ -146,8 +147,8 @@ func (b *ClickHouseBackend) DirHasChildren(dir string, filter *db.Filter) bool {
 	return len(children) > 0
 }
 
-// convertFilters converts a db.Filter to clickhouse.Filters
-func convertFilters(filter *db.Filter) clickhouse.Filters {
+// convertFilters converts a db.Filter to clickhouse.Filters.
+func convertFilters(filter *db.Filter) clickhouse.Filters { //nolint:exhaustive // Phase 1 supports the common Age buckets
 	if filter == nil {
 		return clickhouse.Filters{}
 	}
@@ -156,6 +157,8 @@ func convertFilters(filter *db.Filter) clickhouse.Filters {
 
 	// Convert age filter to appropriate bucket
 	switch filter.Age {
+	case db.DGUTAgeAll:
+		// no time buckets
 	case db.DGUTAgeA1M:
 		aTimeBucket = ">1m"
 	case db.DGUTAgeA2M:
@@ -200,7 +203,7 @@ func convertFilters(filter *db.Filter) clickhouse.Filters {
 	}
 }
 
-// convertFTypesToDirGUTAFileTypes converts ClickHouse FTypes to db.DirGUTAFileType slice
+// convertFTypesToDirGUTAFileTypes converts ClickHouse FTypes to db.DirGUTAFileType slice.
 func convertFTypesToDirGUTAFileTypes(ftypes []uint8) []db.DirGUTAFileType {
 	// If no file types, return nil
 	if len(ftypes) == 0 {
@@ -216,7 +219,7 @@ func convertFTypesToDirGUTAFileTypes(ftypes []uint8) []db.DirGUTAFileType {
 		// We'll map based on our understanding of the file types
 		var dgft db.DirGUTAFileType
 
-		if ft == 2 { // clickhouse.FileTypeDir (uint8 value is 2)
+		if ft == 2 { //nolint:mnd // clickhouse.FileTypeDir (uint8 value is 2)
 			dgft = 15 // Value of db.DirGUTAFileTypeDir
 			result = append(result, dgft)
 		}
@@ -226,8 +229,9 @@ func convertFTypesToDirGUTAFileTypes(ftypes []uint8) []db.DirGUTAFileType {
 	return result
 }
 
-// convertDGUTAFileTypesToExts converts db.DirGUTAFileType slice to extensions for filtering
-func convertDGUTAFileTypesToExts(fts []db.DirGUTAFileType) []string {
+// convertDGUTAFileTypesToExts converts db.DirGUTAFileType slice to extensions for filtering.
+func convertDGUTAFileTypesToExts(fts []db.DirGUTAFileType) []string { //nolint:exhaustive // Phase 1 supports a subset
+	//nolint:gocyclo,mnd // mapping constants; readability over refactor, magic numbers are enum values
 	if len(fts) == 0 {
 		return nil
 	}
@@ -236,8 +240,8 @@ func convertDGUTAFileTypesToExts(fts []db.DirGUTAFileType) []string {
 	extMap := make(map[string]struct{})
 
 	// This mapping should align with extToDGUTA in server/tree.go
-	for _, ft := range fts {
-		switch ft {
+	for _, ft := range fts { //nolint:mnd // values map to enum constants in db package
+		switch ft { //nolint:exhaustive
 		case 2: // db.DirGUTAFileTypeVCF
 			extMap["vcf"] = struct{}{}
 		case 3: // db.DirGUTAFileTypeVCFGz

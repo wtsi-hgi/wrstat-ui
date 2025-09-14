@@ -468,41 +468,41 @@ func TestClickHouseIntegration(t *testing.T) {
 
 		base := mountPath3 + "humgen/projects/C/"
 
-		// ATime bucket >1y selects only old1.log (size 100)
+		// ATime bucket >1y selects only old1.log (size 100), plus directory augmentation (+4096, +1)
 		s, err := ch.SubtreeSummary(ctx, base, clickhouse.Filters{ATimeBucket: ">1y"})
 		require.NoError(t, err)
-		assert.Equal(t, uint64(100), s.TotalSize)
-		assert.Equal(t, uint64(1), s.FileCount)
+		assert.Equal(t, uint64(4096+100), s.TotalSize)
+		assert.Equal(t, uint64(2), s.FileCount)
 
-		// MTime bucket >2m selects only old1.log (size 100)
+		// MTime bucket >2m selects only old1.log (size 100), plus directory augmentation
 		s, err = ch.SubtreeSummary(ctx, base, clickhouse.Filters{MTimeBucket: ">2m"})
 		require.NoError(t, err)
-		assert.Equal(t, uint64(100), s.TotalSize)
-		assert.Equal(t, uint64(1), s.FileCount)
+		assert.Equal(t, uint64(4096+100), s.TotalSize)
+		assert.Equal(t, uint64(2), s.FileCount)
 
-		// Ext filter 'log' -> old1.log (100)
+		// Ext filter 'log' -> old1.log (100), plus directory augmentation
 		s, err = ch.SubtreeSummary(ctx, base, clickhouse.Filters{Exts: []string{"log"}})
 		require.NoError(t, err)
-		assert.Equal(t, uint64(100), s.TotalSize)
-		assert.Equal(t, uint64(1), s.FileCount)
+		assert.Equal(t, uint64(4096+100), s.TotalSize)
+		assert.Equal(t, uint64(2), s.FileCount)
 
-		// Ext filter 'txt' -> recent.txt (200)
+		// Ext filter 'txt' -> recent.txt (200), plus directory augmentation
 		s, err = ch.SubtreeSummary(ctx, base, clickhouse.Filters{Exts: []string{"txt"}})
 		require.NoError(t, err)
-		assert.Equal(t, uint64(200), s.TotalSize)
-		assert.Equal(t, uint64(1), s.FileCount)
+		assert.Equal(t, uint64(4096+200), s.TotalSize)
+		assert.Equal(t, uint64(2), s.FileCount)
 
-		// GID filter 4242 -> gidfile.bin (300)
+		// GID filter 4242 -> gidfile.bin (300), plus directory augmentation
 		s, err = ch.SubtreeSummary(ctx, base, clickhouse.Filters{GIDs: []uint32{4242}})
 		require.NoError(t, err)
-		assert.Equal(t, uint64(300), s.TotalSize)
-		assert.Equal(t, uint64(1), s.FileCount)
+		assert.Equal(t, uint64(4096+300), s.TotalSize)
+		assert.Equal(t, uint64(2), s.FileCount)
 
-		// UID filter 4242 -> uidfile.dat (400)
+		// UID filter 4242 -> uidfile.dat (400), plus directory augmentation
 		s, err = ch.SubtreeSummary(ctx, base, clickhouse.Filters{UIDs: []uint32{4242}})
 		require.NoError(t, err)
-		assert.Equal(t, uint64(400), s.TotalSize)
-		assert.Equal(t, uint64(1), s.FileCount)
+		assert.Equal(t, uint64(4096+400), s.TotalSize)
+		assert.Equal(t, uint64(2), s.FileCount)
 	})
 
 	// Concurrent ingests on different mount points should not interfere with each other

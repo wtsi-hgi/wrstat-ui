@@ -45,6 +45,7 @@ func (s *Server) debugClickHouseEntries(c *gin.Context, path string) {
 	ch, err := s.getClickHouse()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error getting ClickHouse connection: %v\n", err)
+
 		return
 	}
 
@@ -52,6 +53,7 @@ func (s *Server) debugClickHouseEntries(c *gin.Context, path string) {
 	entries, err := ch.ListImmediateChildren(context.Background(), path)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error listing entries: %v\n", err)
+
 		return
 	}
 
@@ -68,6 +70,7 @@ func (s *Server) debugClickHouseEntries(c *gin.Context, path string) {
 	sum, err := ch.SubtreeSummary(context.Background(), path, clickhouse.Filters{})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error getting subtree summary: %v\n", err)
+
 		return
 	}
 
@@ -94,12 +97,14 @@ func (s *Server) debugClickHouseEntries(c *gin.Context, path string) {
 		fmt.Fprintf(os.Stderr, "DEBUG: distinct file paths under %s: %d\n", path, n)
 	}
 
+	//nolint:lll // SQL string is clearer unwrapped
 	if err := ch.ExecuteQuery(ctx,
 		"SELECT count() FROM (SELECT path, count() AS c FROM fs_entries_current WHERE path LIKE ? AND ftype = ? GROUP BY path HAVING c > 1)",
 		clickhouse.EnsureDir(path)+"%", uint8(clickhouse.FileTypeFile), &n); err == nil {
 		fmt.Fprintf(os.Stderr, "DEBUG: num duplicate path groups under %s: %d\n", path, n)
 	}
 
+	//nolint:lll // SQL string is clearer unwrapped
 	if err := ch.ExecuteQuery(ctx,
 		"SELECT countDistinct(parent_path) FROM (SELECT anyLast(parent_path) AS parent_path FROM fs_entries_current WHERE path LIKE ? AND ftype = ? GROUP BY path)",
 		clickhouse.EnsureDir(path)+"%", uint8(clickhouse.FileTypeFile), &n); err == nil {

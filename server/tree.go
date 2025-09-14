@@ -186,7 +186,7 @@ func (s *Server) getTree(c *gin.Context) {
 
 // getTreeCH is a ClickHouse-backed implementation of getTree.
 // It produces the same TreeElement payload using ClickHouse summaries.
-func (s *Server) getTreeCH(c *gin.Context) { //nolint:funlen
+func (s *Server) getTreeCH(c *gin.Context) { //nolint:funlen,gocognit
 	path := c.DefaultQuery("path", "/")
 
 	// Add debug to see what entries we have for the root path
@@ -238,11 +238,12 @@ func (s *Server) getTreeCH(c *gin.Context) { //nolint:funlen
 		}
 		if empty && (current.Count == 0 && current.Size == 0) {
 			c.AbortWithStatus(http.StatusBadRequest)
+
 			return
 		}
 	}
 
-	// Build the current tree element and honor NoAuth semantics as in Bolt
+	// Build the current tree element and honour NoAuth semantics as in Bolt
 	te := s.ddsToTreeElement(current, allowedGIDs)
 	te.Areas = s.areas
 

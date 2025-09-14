@@ -203,17 +203,18 @@ func TestBucketPredicatesViaSubtreeSummary(t *testing.T) {
 	r := root.AsReader()
 	require.NoError(t, ch.UpdateClickhouse(ctx, mount, r))
 
-	// >1y ATime picks old.log only
+	// >1y ATime picks old.log only; implementation augments with the directory that contains
+	// at least one matching file, adding +1 count and +DirectorySize (4096) to size.
 	s, err := ch.SubtreeSummary(ctx, base, clickhouse.Filters{ATimeBucket: ">1y"})
 	require.NoError(t, err)
-	assert.Equal(t, uint64(10), s.TotalSize)
-	assert.Equal(t, uint64(1), s.FileCount)
+	assert.Equal(t, uint64(4096+10), s.TotalSize)
+	assert.Equal(t, uint64(2), s.FileCount)
 
-	// >2m MTime picks old.log only
+	// >2m MTime picks old.log only; same augmentation applies
 	s, err = ch.SubtreeSummary(ctx, base, clickhouse.Filters{MTimeBucket: ">2m"})
 	require.NoError(t, err)
-	assert.Equal(t, uint64(10), s.TotalSize)
-	assert.Equal(t, uint64(1), s.FileCount)
+	assert.Equal(t, uint64(4096+10), s.TotalSize)
+	assert.Equal(t, uint64(2), s.FileCount)
 }
 
 // Public-API validation for glob query generation via SearchGlobPaths.

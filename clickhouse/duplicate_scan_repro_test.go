@@ -19,7 +19,10 @@ import (
 func ingestWithScanID(t *testing.T, ch *Clickhouse, mount string, scanID uint64, data []byte) {
 	t.Helper()
 	ctx := context.Background()
-	started := time.Unix(int64(scanID), 0)
+
+	// Use scanID as seconds since epoch for reproducibility in tests.
+	sec := int64(scanID)
+	started := time.Unix(sec, 0)
 	finished := started.Add(1 * time.Second)
 	scanUUID := uuid.NewSHA1(uuid.NameSpaceOID, []byte(fmt.Sprintf("%s-%d", mount, scanID)))
 
@@ -91,7 +94,7 @@ func TestDuplicateScanIDReproducesDoubleCount(t *testing.T) {
 	ref := time.Unix(100, 0).Unix()
 	root := internaldata.CreateDefaultTestData(1, 2, 0, 101, 0, ref)
 
-	// Materialize to bytes so we can reuse it for two ingests
+	// Materialise to bytes so we can reuse it for two ingests
 	tmp := t.TempDir()
 	fp := filepath.Join(tmp, "stats.tsv")
 	f, err := os.Create(fp)

@@ -492,7 +492,7 @@ func insertSyntheticAncestorDirs(bp *BatchProcessor, mountPath string, dirsSeen 
 
 // addSyntheticDirAndRollups inserts a synthetic directory entry for 'a' and adds
 // rollup rows for 'a' and all its ancestors up to and including root.
-func addSyntheticDirAndRollups(bp *BatchProcessor, a string, t time.Time, dirsSeen map[string]bool) error {
+func addSyntheticDirAndRollups(bp *BatchProcessor, a string, t time.Time, dirsSeen map[string]bool) error { //nolint:funlen
 	p, name := SplitParentAndName(a)
 
 	// Insert a single directory entry with zero size/ids; duplicates across mounts will be
