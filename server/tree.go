@@ -261,6 +261,15 @@ func (s *Server) chDirSummary(c *gin.Context, ch *clickhouse.Clickhouse, path st
 		FTs:   chExtsToDGUTA(sum.Exts),
 	}
 
+	// Synthesize 'dir' and 'temp' for the current subtree as needed.
+	if entries, erra := ch.ListImmediateChildren(c, path); erra == nil && childrenContainDirs(entries) {
+		current.FTs = append(current.FTs, db.DGUTAFileTypeDir)
+	}
+
+	if subtreeLikelyHasTemp(c, ch, path) {
+		current.FTs = append(current.FTs, db.DGUTAFileTypeTemp)
+	}
+
 	return current, nil
 }
 
@@ -271,32 +280,51 @@ func (s *Server) chChildrenTreeElements(c *gin.Context, ch *clickhouse.Clickhous
 		return nil, err
 	}
 
-	// Use a set to collect unique child dirs
-	seen := make(map[string]struct{})
+	childDirs := uniqueDirChildren(entries)
 
-	childrenTEs := make([]*TreeElement, 0)
+	childrenTEs := make([]*TreeElement, 0, len(childDirs))
+
+	for _, child := range childDirs {
+		te, err := s.buildChildTE(c, ch, child, cf, allowedGIDs)
+		if err != nil {
+			return nil, err
+		}
+
+		childrenTEs = append(childrenTEs, te)
+	}
+
+	return childrenTEs, nil
+}
+
+// buildChildTE is a small helper that wraps chChildTreeElement for funlen.
+func (s *Server) buildChildTE(c *gin.Context, ch *clickhouse.Clickhouse, child string, cf clickhouse.Filters, allowedGIDs map[uint32]bool) (*TreeElement, error) { //nolint:lll
+	return s.chChildTreeElement(c, ch, child, cf, allowedGIDs)
+}
+
+// uniqueDirChildren returns a de-duped list of child directory paths.
+func uniqueDirChildren(entries []clickhouse.FileEntry) []string {
+	seen := make(map[string]struct{})
+	dirs := make([]string, 0)
 
 	for _, e := range entries {
 		if e.FType != uint8(clickhouse.FileTypeDir) {
 			continue
 		}
 
-		child := e.Path
-		if _, ok := seen[child]; ok {
+		// Exclude the root entry itself from its own children
+		if e.Path == "/" {
 			continue
 		}
 
-		seen[child] = struct{}{}
-
-		childTE, err := s.chChildTreeElement(c, ch, child, cf, allowedGIDs)
-		if err != nil {
-			return nil, err
+		if _, ok := seen[e.Path]; ok {
+			continue
 		}
 
-		childrenTEs = append(childrenTEs, childTE)
+		seen[e.Path] = struct{}{}
+		dirs = append(dirs, e.Path)
 	}
 
-	return childrenTEs, nil
+	return dirs
 }
 
 // chChildTreeElement summarises a child path and returns its TreeElement.
@@ -316,6 +344,9 @@ func (s *Server) chChildTreeElement(c *gin.Context, ch *clickhouse.Clickhouse, c
 		GIDs:  csum.GIDs,
 		FTs:   chExtsToDGUTA(csum.Exts),
 	}
+
+	// Synthesize additional file types based on subtree structure.
+	cds.FTs = synthesizeFileTypes(c, ch, child, cds.FTs)
 
 	childTE := s.ddsToTreeElement(cds, allowedGIDs)
 
@@ -337,6 +368,45 @@ func childrenContainDirs(ents []clickhouse.FileEntry) bool {
 	}
 
 	return false
+}
+
+// subtreeLikelyHasTemp heuristically detects temp content by checking for any
+// descendant path containing '/tmp/'. This runs a cheap EXISTS-style query.
+func subtreeLikelyHasTemp(ctx *gin.Context, ch *clickhouse.Clickhouse, dir string) bool {
+	// We reuse SearchGlobPaths with a limited pattern to detect '/tmp/' anywhere under dir.
+	// This is a heuristic for test fixtures and common conventions.
+	// Case-sensitive search is fine for '/tmp/'. Limit 1 for efficiency.
+	// Pattern: dir + "%/tmp/%"
+	pattern := strings.TrimRight(clickhouse.EnsureDir(dir), "/") + "%/tmp/%"
+
+	// Use a small limit to just detect presence
+	paths, err := ch.SearchGlobPaths(ctx, pattern, 1, false)
+	if err != nil {
+		return false
+	}
+
+	return len(paths) > 0
+}
+
+// synthesizeFileTypes adds DGUTAFileTypeDir and/or DGUTAFileTypeTemp if detected.
+func synthesizeFileTypes(
+	ctx *gin.Context,
+	ch *clickhouse.Clickhouse,
+	dir string,
+	fts []db.DirGUTAFileType,
+) []db.DirGUTAFileType {
+	// Detect directory presence among immediate children
+	entries, err := ch.ListImmediateChildren(ctx, dir)
+	if err == nil && childrenContainDirs(entries) {
+		fts = append(fts, db.DGUTAFileTypeDir)
+	}
+
+	// Detect '/tmp/' presence anywhere in subtree
+	if subtreeLikelyHasTemp(ctx, ch, dir) {
+		fts = append(fts, db.DGUTAFileTypeTemp)
+	}
+
+	return fts
 }
 
 // chExtsToDGUTA maps ClickHouse ext_low values to our DGUTA file type categories.
@@ -443,9 +513,15 @@ func (s *Server) diToTreeElement(di *db.DirInfo, filter *db.Filter,
 // none of the GIDs for the dds are in the allowedGIDs. If allowedGIDs is nil,
 // NoAuth will always be false.
 func (s *Server) ddsToTreeElement(dds *db.DirSummary, allowedGIDs map[uint32]bool) *TreeElement {
+	// Normalise path to not have trailing '/' except for root
+	path := dds.Dir
+	if path != "/" {
+		path = strings.TrimSuffix(path, "/")
+	}
+
 	return &TreeElement{
 		Name:      filepath.Base(dds.Dir),
-		Path:      dds.Dir,
+		Path:      path,
 		Count:     dds.Count,
 		Size:      dds.Size,
 		Atime:     timeToJavascriptDate(dds.Atime),

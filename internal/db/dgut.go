@@ -73,8 +73,40 @@ func CreateExampleDBsCustomIDs(t *testing.T, uid, gidA, gidB string, refTime int
 func CreateExampleDBsCustomIDsWithDir(t *testing.T, dir, uid, gidA, gidB string, refTime int64) error {
 	t.Helper()
 
-	dbData := exampleDBData(t, uid, gidA, gidB, refTime)
-	s := summary.NewSummariser(stats.NewStatsParser(dbData))
+	// Build the in-memory test stats tree once so we can both summarise it
+	// into Bolt DBs and persist a raw stats file alongside for ClickHouse
+	// ingestion during tests.
+	data := internaldata.CreateDefaultTestData(
+		mustAtoi32(t, gidA), mustAtoi32(t, gidB), 0,
+		mustAtoi32(t, uid), 0, refTime,
+	)
+
+	// Write a raw stats file next to the generated DBs for ClickHouse ingest.
+	// Server code will look for this file during tests when CH mode is enabled.
+	statsPath := filepath.Join(dir, "stats.tsv")
+
+	if err := os.MkdirAll(dir, DirPerms); err != nil {
+		return err
+	}
+
+	f, err := os.Create(statsPath)
+	if err != nil {
+		return err
+	}
+
+	_, err = data.WriteTo(f)
+	if err != nil {
+		_ = f.Close()
+
+		return err
+	}
+
+	if err = f.Close(); err != nil {
+		return err
+	}
+
+	// Now create the summariser over the same data stream to populate Bolt DBs.
+	s := summary.NewSummariser(stats.NewStatsParser(data.AsReader()))
 
 	fn, err := addDirgutaSummariser(s, dir)
 	if err != nil {
@@ -91,6 +123,18 @@ func CreateExampleDBsCustomIDsWithDir(t *testing.T, dir, uid, gidA, gidB string,
 	}
 
 	return fn()
+}
+
+// mustAtoi32 converts a base-10 numeric string to uint32, failing the test on error.
+func mustAtoi32(t *testing.T, s string) uint32 {
+	t.Helper()
+
+	v, err := strconv.ParseUint(s, 10, 32)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return uint32(v)
 }
 
 func addDirgutaSummariser(s *summary.Summariser, path string) (func() error, error) {

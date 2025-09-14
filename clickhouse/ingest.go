@@ -28,6 +28,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	chdriver "github.com/ClickHouse/clickhouse-go/v2"
@@ -269,6 +270,11 @@ func processScanEntry(ctx context.Context, bp *BatchProcessor, fi *stats.FileInf
 // processFileEntry handles a single file entry during scan ingestion.
 func processFileEntry(bp *BatchProcessor, fi *stats.FileInfo, mountPath string) error {
 	path := string(fi.Path)
+
+	// Ensure all paths are absolute (start with '/') to align with server queries/tests
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
 	isDir := fi.EntryType == stats.DirType || IsDirPath(path)
 
 	parent, name := SplitParentAndName(path)

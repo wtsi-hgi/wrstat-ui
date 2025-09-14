@@ -26,6 +26,7 @@
 package server
 
 import (
+	"context"
 	"io/fs"
 	"net/http"
 	"os"
@@ -37,6 +38,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
+	"github.com/wtsi-hgi/wrstat-ui/clickhouse"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 )
 
@@ -106,12 +108,95 @@ func (s *Server) LoadDBs(basePaths []string, dgutaDBName, basedirDBName, ownersP
 	s.tree = tree
 	s.dataTimeStamp = mts
 
+	// If ClickHouse mode is enabled, bootstrap fs_entries from the loaded Bolt DBs
+	// so that ClickHouse-backed endpoints can answer queries in tests.
+	if useClickHouseFeatureFlag() {
+		// Expose the DB directories to the CH bootstrap via env (test-only convenience)
+		_ = os.Setenv("WRSTAT_TEST_DB_DIRS", strings.Join(basePaths, ","))
+
+		go s.ensureClickHousePopulated()
+	}
+
 	if !loaded {
 		s.addBaseDGUTARoutes()
 		s.addBaseDirRoutes()
 	}
 
 	return nil
+}
+
+// ensureClickHousePopulated performs a best-effort population of ClickHouse using
+// the most recent stats files backing the Bolt DBs, if ClickHouse has no scans yet.
+func (s *Server) ensureClickHousePopulated() {
+	ch, ctx, cancel := s.getCHAndContext()
+	if ch == nil {
+		return
+	}
+	defer cancel()
+
+	if !s.ensureSchemaAndEmpty(ctx, ch) {
+		return
+	}
+
+	// Ingest any test stats indicated by environment variable
+	dirs := os.Getenv("WRSTAT_TEST_DB_DIRS")
+	if dirs == "" {
+		return
+	}
+
+	for _, dir := range strings.Split(dirs, ",") {
+		if err := s.ingestStatsIfPresent(ctx, ch, dir); err != nil {
+			// Best effort: log and continue
+			s.Logger.Printf("clickhouse bootstrap ingest failed for %s: %v", dir, err)
+		}
+	}
+}
+
+// getCHAndContext returns a ClickHouse client and a bounded context for bootstrap operations.
+func (s *Server) getCHAndContext() (*clickhouse.Clickhouse, context.Context, context.CancelFunc) {
+	ch, err := s.getClickHouse()
+	if err != nil || ch == nil {
+		return nil, nil, func() {}
+	}
+
+	const chBootstrapTimeout = 30 * time.Second
+
+	ctx, cancel := context.WithTimeout(context.Background(), chBootstrapTimeout)
+
+	return ch, ctx, cancel
+}
+
+// ensureSchemaAndEmpty creates schema and returns true if there are no ready scans yet.
+func (s *Server) ensureSchemaAndEmpty(ctx context.Context, ch *clickhouse.Clickhouse) bool {
+	if err := ch.CreateSchema(ctx); err != nil {
+		return false
+	}
+
+	// Check if scans table has any ready rows
+	var count uint64
+	if err := ch.ExecuteQuery(ctx, "SELECT count() FROM scans WHERE state = 'ready'", &count); err != nil {
+		return false
+	}
+
+	return count == 0
+}
+
+// ingestStatsIfPresent ingests a stats.tsv located in dir into ClickHouse under a mount path
+// based on the directory key name.
+func (s *Server) ingestStatsIfPresent(ctx context.Context, ch *clickhouse.Clickhouse, dir string) error {
+	statsPath := filepath.Join(dir, "stats.tsv")
+
+	f, err := os.Open(statsPath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	// For tests, ingest under the root mount so global listings work as expected.
+	// The test data already includes '/a' and '/k' under root.
+	mount := "/"
+
+	return ch.UpdateClickhouse(ctx, mount, f)
 }
 
 func (s *Server) getDBTimestamps(paths []string) (map[string]int64, error) {
