@@ -39,7 +39,11 @@ type SummaryChild struct {
 
 // ChildrenSummaries returns summaries for the immediate children of the given directory.
 // This aggregates files and stats by parent_path and name for immediate children.
-func (c *Clickhouse) ChildrenSummaries(ctx context.Context, dir string, f Filters) ([]SummaryChild, error) { //nolint:funlen,gocognit
+func (c *Clickhouse) ChildrenSummaries(
+	ctx context.Context,
+	dir string,
+	f Filters,
+) ([]SummaryChild, error) { //nolint:funlen,gocognit
 	dir = EnsureDir(dir)
 
 	// We use a direct query approach instead of doing a summary for each child
@@ -55,10 +59,13 @@ func (c *Clickhouse) ChildrenSummaries(ctx context.Context, dir string, f Filter
 	results := make([]SummaryChild, 0, DefaultResultCapacity)
 
 	for rows.Next() {
-		var child SummaryChild
-		var childPath, childName string
+		var (
+			child                SummaryChild
+			childPath, childName string
+		)
 
 		// Scan the base fields
+
 		if err := rows.Scan(
 			&childPath,
 			&childName,
@@ -126,6 +133,7 @@ func buildChildrenSummariesQuery(dir string, f Filters) (string, []any) {
 
 	// Build the time bucket filter
 	bucketFilter := ""
+
 	if f.ATimeBucket != "" || f.MTimeBucket != "" {
 		var predicates []string
 

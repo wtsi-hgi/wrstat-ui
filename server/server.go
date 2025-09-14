@@ -256,6 +256,7 @@ func (s *Server) prewarmCaches(bd basedirs.MultiReader) error {
 	// In ClickHouse mode (phase 1), we don't use basedirs
 	if useClickHouseFeatureFlag() {
 		emptyJSON := []byte("[]")
+
 		emptyGzip, err := compressGzip(emptyJSON)
 		if err != nil {
 			// Fallback to uncompressed bytes if gzip fails

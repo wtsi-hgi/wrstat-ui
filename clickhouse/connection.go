@@ -44,6 +44,7 @@ type ConnectionParams struct {
 // New creates and configures a new Clickhouse instance.
 func New(params ConnectionParams) (*Clickhouse, error) {
 	debugf("New connection: host=%s port=%s db=%s user=%s", params.Host, params.Port, params.Database, params.Username)
+
 	conn, err := chdriver.Open(&chdriver.Options{
 		Addr:        []string{fmt.Sprintf("%s:%s", params.Host, params.Port)},
 		Auth:        chdriver.Auth{Database: params.Database, Username: params.Username, Password: params.Password},
@@ -336,40 +337,47 @@ func (c *Clickhouse) CreateSchema(ctx context.Context) error { //nolint:funlen /
 	// Create scans table first
 	if err := c.createTableWithStatement(ctx, createScansTable); err != nil {
 		debugf("CreateSchema: scans table error: %v", err)
+
 		return err
 	}
 
 	// Create fs_entries table with fallback
 	if err := c.createFsEntriesTableWithFallback(ctx); err != nil {
 		debugf("CreateSchema: fs_entries error: %v", err)
+
 		return err
 	}
 
 	// Create rollup raw table
 	if err := c.createTableWithStatement(ctx, createRollupRawTable); err != nil {
 		debugf("CreateSchema: rollup raw error: %v", err)
+
 		return err
 	}
 
 	// Create state table
 	if err := c.createTableWithStatement(ctx, createRollupStateTable); err != nil {
 		debugf("CreateSchema: rollup state error: %v", err)
+
 		return err
 	}
 
 	// Best-effort migration for legacy installations: ensure new columns/types exist
 	if err := c.migrateSchema(ctx); err != nil {
 		debugf("CreateSchema: migrate error: %v", err)
+
 		return err
 	}
 
 	// Create all views
 	if err := c.createViews(ctx); err != nil {
 		debugf("CreateSchema: create views error: %v", err)
+
 		return err
 	}
 
 	debugf("CreateSchema: done")
+
 	return nil
 }
 
@@ -420,6 +428,7 @@ func (c *Clickhouse) createViews(ctx context.Context) error {
 // RegisterScan adds a new scan record with 'loading' state.
 func (c *Clickhouse) registerScan(ctx context.Context, mountPath string, scanID uuid.UUID, scanTime, started time.Time) error { //nolint:lll // long signature ok
 	debugf("registerScan: mount=%s scan=%s started=%s", mountPath, scanID.String(), started.Format(time.RFC3339))
+
 	err := c.conn.Exec(ctx, `
 		INSERT INTO scans (mount_path, scan_id, scan_time, state, started_at, finished_at) 
 		VALUES (?, ?, ?, 'loading', ?, NULL)`,
@@ -427,7 +436,9 @@ func (c *Clickhouse) registerScan(ctx context.Context, mountPath string, scanID 
 	if err != nil {
 		return fmt.Errorf("insert scan: %w", err)
 	}
+
 	debugf("registerScan: ok")
+
 	return nil
 }
 
@@ -498,7 +509,9 @@ func (c *Clickhouse) dropOlderScans(ctx context.Context, mountPath string, keepF
 		if err := rows.Scan(&st); err != nil {
 			return err
 		}
+
 		debugf("dropOlderScans: dropping scan with scan_time=%s", st.Format(time.RFC3339))
+
 		if err := c.dropSingleScan(ctx, mountPath, st); err != nil {
 			return err
 		}
@@ -590,15 +603,18 @@ func (c *Clickhouse) migrateSchema(ctx context.Context) error { //nolint:funlen
 	if err := c.ensureScanIDUUID(ctx, "scans", createScansTable); err != nil {
 		return err
 	}
+
 	if err := c.ensureScanIDUUID(ctx, "fs_entries", createFsEntriesTable); err != nil {
 		// try fallback schema if needed
 		if err2 := c.ensureScanIDUUID(ctx, "fs_entries", createFsEntriesTableNoPathIdx); err2 != nil {
 			return err
 		}
 	}
+
 	if err := c.ensureScanIDUUID(ctx, "ancestor_rollups_raw", createRollupRawTable); err != nil {
 		return err
 	}
+
 	if err := c.ensureScanIDUUID(ctx, "ancestor_rollups_state", createRollupStateTable); err != nil {
 		return err
 	}
@@ -609,6 +625,7 @@ func (c *Clickhouse) migrateSchema(ctx context.Context) error { //nolint:funlen
 	}
 
 	debugf("migrateSchema: done")
+
 	return nil
 }
 
@@ -621,6 +638,7 @@ func (c *Clickhouse) ensureScanIDUUID(ctx context.Context, table string, createS
 		if execErr := c.conn.Exec(ctx, createStmt); execErr != nil {
 			return execErr
 		}
+
 		return nil
 	}
 
@@ -635,9 +653,11 @@ func (c *Clickhouse) ensureScanIDUUID(ctx context.Context, table string, createS
 
 	// As a last resort (eg. incompatible engine settings), drop and recreate
 	debugf("migrateSchema: recreating table %s with correct schema (was %s)", table, typ)
-	if err := c.conn.Exec(ctx, "DROP TABLE IF EXISTS "+table); err != nil { //nolint:perfsprint
+
+	if err := c.conn.Exec(ctx, "DROP TABLE IF EXISTS "+table); err != nil {
 		return err
 	}
+
 	return c.conn.Exec(ctx, createStmt)
 }
 
@@ -647,6 +667,7 @@ func (c *Clickhouse) getColumnType(ctx context.Context, table, column string) (s
 		SELECT type FROM system.columns
 		WHERE database = currentDatabase() AND table = ? AND name = ?
 		LIMIT 1`, table, column)
+
 	var typ string
 	if err := row.Scan(&typ); err != nil {
 		return "", err

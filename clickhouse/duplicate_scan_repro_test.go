@@ -16,12 +16,19 @@ import (
 )
 
 // ingestWithScanID performs a full ingest cycle using a fixed scanID.
-func ingestWithScanID(t *testing.T, ch *Clickhouse, mount string, scanID uint64, data []byte) {
+func ingestWithScanID(t *testing.T, ch *Clickhouse, _ string, scanID uint64, data []byte) {
 	t.Helper()
+
+	const mount = "/"
+
 	ctx := context.Background()
 
 	// Use scanID as seconds since epoch for reproducibility in tests.
-	sec := int64(scanID)
+	sec := int64(scanID) //nolint:gosec // scanID is test value, overflow checked below
+	if sec < 0 {
+		t.Fatal("scanID too large for int64")
+	}
+
 	started := time.Unix(sec, 0)
 	finished := started.Add(1 * time.Second)
 	scanUUID := uuid.NewSHA1(uuid.NameSpaceOID, []byte(fmt.Sprintf("%s-%d", mount, scanID)))
@@ -75,6 +82,7 @@ func TestDuplicateScanIDReproducesDoubleCount(t *testing.T) {
 
 	ctx := context.Background()
 	require.NoError(t, admin.ExecuteQuery(ctx, "DROP DATABASE IF EXISTS "+testDB))
+
 	require.NoError(t, admin.ExecuteQuery(ctx, "CREATE DATABASE "+testDB))
 	defer admin.ExecuteQuery(ctx, "DROP DATABASE IF EXISTS "+testDB) //nolint:errcheck
 
@@ -86,6 +94,7 @@ func TestDuplicateScanIDReproducesDoubleCount(t *testing.T) {
 		Password: chPassword,
 	})
 	require.NoError(t, err)
+
 	defer ch.Close()
 
 	require.NoError(t, ch.CreateSchema(ctx))
@@ -102,10 +111,11 @@ func TestDuplicateScanIDReproducesDoubleCount(t *testing.T) {
 	_, err = root.WriteTo(f)
 	require.NoError(t, err)
 	require.NoError(t, f.Close())
+
 	b, err := os.ReadFile(fp)
 	require.NoError(t, err)
 
-	// Use a fixed scanID for both ingests to simulate the server behavior where
+	// Use a fixed scanID for both ingests to simulate the server behaviour where
 	// two separate ingests within the same second can produce identical scan_ids.
 	const scanID uint64 = 1_700_000_000 // arbitrary stable value (represents a DateTime)
 
@@ -119,18 +129,21 @@ func TestDuplicateScanIDReproducesDoubleCount(t *testing.T) {
 
 	s, err := ch.SubtreeSummary(ctx, "/", Filters{})
 	require.NoError(t, err)
+
 	if s.FileCount != 38 {
 		t.Fatalf("root count mismatch (dup scan): got %d want %d", s.FileCount, 38)
 	}
 
 	sa, err := ch.SubtreeSummary(ctx, "/a", Filters{})
 	require.NoError(t, err)
+
 	if sa.FileCount != 31 {
 		t.Fatalf("/a count mismatch (dup scan): got %d want %d", sa.FileCount, 31)
 	}
 
 	sk, err := ch.SubtreeSummary(ctx, "/k", Filters{})
 	require.NoError(t, err)
+
 	if sk.FileCount != 6 {
 		t.Fatalf("/k count mismatch (dup scan): got %d want %d", sk.FileCount, 6)
 	}
@@ -179,6 +192,7 @@ func TestNoDoubleCountWithUniqueScanID(t *testing.T) {
 
 	ctx := context.Background()
 	require.NoError(t, admin.ExecuteQuery(ctx, "DROP DATABASE IF EXISTS "+testDB))
+
 	require.NoError(t, admin.ExecuteQuery(ctx, "CREATE DATABASE "+testDB))
 	defer admin.ExecuteQuery(ctx, "DROP DATABASE IF EXISTS "+testDB) //nolint:errcheck
 
@@ -190,6 +204,7 @@ func TestNoDoubleCountWithUniqueScanID(t *testing.T) {
 		Password: chPassword,
 	})
 	require.NoError(t, err)
+
 	defer ch.Close()
 
 	require.NoError(t, ch.CreateSchema(ctx))
@@ -205,12 +220,15 @@ func TestNoDoubleCountWithUniqueScanID(t *testing.T) {
 	_, err = root.WriteTo(f)
 	require.NoError(t, err)
 	require.NoError(t, f.Close())
+
 	b, err := os.ReadFile(fp)
 	require.NoError(t, err)
 
 	// Use two different scanIDs to simulate nanosecond uniqueness
-	const scanID1 uint64 = 1_700_000_000
-	const scanID2 uint64 = 1_700_000_001
+	const (
+		scanID1 uint64 = 1_700_000_000
+		scanID2 uint64 = 1_700_000_001
+	)
 
 	ingestWithScanID(t, ch, "/", scanID1, b)
 	ingestWithScanID(t, ch, "/", scanID2, b)
@@ -219,18 +237,21 @@ func TestNoDoubleCountWithUniqueScanID(t *testing.T) {
 	// Expect baseline counts (file-only 24 at root) + directory augmentation (14) = 38.
 	s, err := ch.SubtreeSummary(ctx, "/", Filters{})
 	require.NoError(t, err)
+
 	if s.FileCount != 38 {
 		t.Fatalf("root count mismatch (unique scans): got %d want %d", s.FileCount, 38)
 	}
 
 	sa, err := ch.SubtreeSummary(ctx, "/a", Filters{})
 	require.NoError(t, err)
+
 	if sa.FileCount != 31 {
 		t.Fatalf("/a count mismatch (unique scans): got %d want %d", sa.FileCount, 31)
 	}
 
 	sk, err := ch.SubtreeSummary(ctx, "/k", Filters{})
 	require.NoError(t, err)
+
 	if sk.FileCount != 6 {
 		t.Fatalf("/k count mismatch (unique scans): got %d want %d", sk.FileCount, 6)
 	}

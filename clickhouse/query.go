@@ -327,7 +327,12 @@ func (c *Clickhouse) SubtreeSummary(ctx context.Context, dir string, f Filters) 
 	// within the subtree, add +1 to count and +DirectorySize to size.
 	// Augment regardless of filters; count only directories that have at least one
 	// matching descendant file according to the filters provided.
-	if dirCnt, derr := c.DirCountWithFiles(ctx, dir, f); derr == nil {
+	dirCnt, derr := c.DirCountWithFiles(ctx, dir, f)
+	if derr != nil {
+		if debugEnabled() {
+			debugf("DirCountWithFiles error: %v", derr)
+		}
+	} else {
 		sum.FileCount += dirCnt
 		sum.TotalSize += dirCnt * DirectorySize
 
@@ -343,6 +348,7 @@ func (c *Clickhouse) SubtreeSummary(ctx context.Context, dir string, f Filters) 
 					break
 				}
 			}
+
 			if !hasDir {
 				sum.FTypes = append(sum.FTypes, uint8(FileTypeDir))
 			}
@@ -351,8 +357,6 @@ func (c *Clickhouse) SubtreeSummary(ctx context.Context, dir string, f Filters) 
 				debugf("SubtreeSummary: dir=%s added dir-with-files count=%d size+=%d", dir, dirCnt, dirCnt*DirectorySize)
 			}
 		}
-	} else if debugEnabled() {
-		debugf("DirCountWithFiles error: %v", derr)
 	}
 
 	// Set Age based on time bucket filters for Phase 1
@@ -514,11 +518,13 @@ WHERE ancestor LIKE ? AND ext_low != ''`
 		where = append(where, "AND "+clause)
 		args = append(args, a...)
 	}
+
 	if len(f.UIDs) > 0 {
 		clause, a := buildInClause("uid", f.UIDs)
 		where = append(where, "AND "+clause)
 		args = append(args, a...)
 	}
+
 	if len(f.Exts) > 0 {
 		clause, a := buildExtensionClause(f.Exts)
 		where = append(where, "AND "+clause)
@@ -529,6 +535,7 @@ WHERE ancestor LIKE ? AND ext_low != ''`
 	if pred, err := buildBucketPredicateWithScanExpr("scan_time", "atime", f.ATimeBucket); err == nil && pred != "" {
 		where = append(where, "AND "+pred)
 	}
+
 	if pred, err := buildBucketPredicateWithScanExpr("scan_time", "mtime", f.MTimeBucket); err == nil && pred != "" {
 		where = append(where, "AND "+pred)
 	}
@@ -589,6 +596,7 @@ WHERE ancestor = ? AND ext_low != ''
 		if errors.Is(err, io.EOF) {
 			return Summary{}, nil
 		}
+
 		return Summary{}, err
 	}
 

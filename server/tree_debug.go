@@ -67,6 +67,7 @@ func (s *Server) debugClickHouseEntries(c *gin.Context, path string) {
 
 	// Get subtree summary to see file count and size
 	fmt.Fprintf(os.Stderr, "\n==== DEBUG: SUBTREE SUMMARY FOR %s ====\n", path)
+
 	sum, err := ch.SubtreeSummary(context.Background(), path, clickhouse.Filters{})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error getting subtree summary: %v\n", err)
@@ -83,6 +84,7 @@ func (s *Server) debugClickHouseEntries(c *gin.Context, path string) {
 
 	// Extra diagnostics to investigate duplication in scan-based summaries
 	ctx := context.Background()
+
 	var n uint64
 
 	if err := ch.ExecuteQuery(ctx,

@@ -73,8 +73,10 @@ func NewClickHouseBackend(ch *clickhouse.Clickhouse) *ClickHouseBackend {
 
 // DirInfo returns a directory summary and its immediate children summaries.
 // Phase 1: Implemented using ClickHouse SubtreeSummary and ChildrenSummaries.
-func (b *ClickHouseBackend) DirInfo(dir string, filter *db.Filter) (*db.DirInfo, error) {
-	//nolint:funlen // straight-line orchestration; splitting would harm readability
+func (b *ClickHouseBackend) DirInfo(
+	dir string,
+	filter *db.Filter,
+) (*db.DirInfo, error) { //nolint:funlen // straight-line orchestration; splitting would harm readability
 	// Convert db.Filter to clickhouse.Filters
 	chFilters := convertFilters(filter)
 
@@ -148,15 +150,26 @@ func (b *ClickHouseBackend) DirHasChildren(dir string, filter *db.Filter) bool {
 }
 
 // convertFilters converts a db.Filter to clickhouse.Filters.
-func convertFilters(filter *db.Filter) clickhouse.Filters { //nolint:exhaustive // Phase 1 supports the common Age buckets
+func convertFilters(filter *db.Filter) clickhouse.Filters {
 	if filter == nil {
 		return clickhouse.Filters{}
 	}
 
-	var aTimeBucket, mTimeBucket string
+	aTimeBucket, mTimeBucket := convertAgeToBuckets(filter.Age)
 
-	// Convert age filter to appropriate bucket
-	switch filter.Age {
+	// Build and return the ClickHouse filters
+	return clickhouse.Filters{
+		GIDs:        filter.GIDs,
+		UIDs:        filter.UIDs,
+		Exts:        convertDGUTAFileTypesToExts(filter.FTs),
+		ATimeBucket: aTimeBucket,
+		MTimeBucket: mTimeBucket,
+	}
+}
+
+// convertAgeToBuckets converts a db.DirGUTAge to appropriate time bucket strings.
+func convertAgeToBuckets(age db.DirGUTAge) (aTimeBucket, mTimeBucket string) {
+	switch age {
 	case db.DGUTAgeAll:
 		// no time buckets
 	case db.DGUTAgeA1M:
@@ -193,14 +206,7 @@ func convertFilters(filter *db.Filter) clickhouse.Filters { //nolint:exhaustive 
 		mTimeBucket = ">7y"
 	}
 
-	// Build and return the ClickHouse filters
-	return clickhouse.Filters{
-		GIDs:        filter.GIDs,
-		UIDs:        filter.UIDs,
-		Exts:        convertDGUTAFileTypesToExts(filter.FTs),
-		ATimeBucket: aTimeBucket,
-		MTimeBucket: mTimeBucket,
-	}
+	return aTimeBucket, mTimeBucket
 }
 
 // convertFTypesToDirGUTAFileTypes converts ClickHouse FTypes to db.DirGUTAFileType slice.
@@ -230,8 +236,7 @@ func convertFTypesToDirGUTAFileTypes(ftypes []uint8) []db.DirGUTAFileType {
 }
 
 // convertDGUTAFileTypesToExts converts db.DirGUTAFileType slice to extensions for filtering.
-func convertDGUTAFileTypesToExts(fts []db.DirGUTAFileType) []string { //nolint:exhaustive // Phase 1 supports a subset
-	//nolint:gocyclo,mnd // mapping constants; readability over refactor, magic numbers are enum values
+func convertDGUTAFileTypesToExts(fts []db.DirGUTAFileType) []string { //nolint:exhaustive,gocyclo,mnd,cyclop // Phase 1 supports a subset; mapping constants; readability over refactor, magic numbers are enum values
 	if len(fts) == 0 {
 		return nil
 	}
@@ -240,36 +245,36 @@ func convertDGUTAFileTypesToExts(fts []db.DirGUTAFileType) []string { //nolint:e
 	extMap := make(map[string]struct{})
 
 	// This mapping should align with extToDGUTA in server/tree.go
-	for _, ft := range fts { //nolint:mnd // values map to enum constants in db package
+	for _, ft := range fts {
 		switch ft { //nolint:exhaustive
-		case 2: // db.DirGUTAFileTypeVCF
+		case db.DGUTAFileTypeVCF:
 			extMap["vcf"] = struct{}{}
-		case 3: // db.DirGUTAFileTypeVCFGz
+		case db.DGUTAFileTypeVCFGz:
 			extMap["vcf.gz"] = struct{}{}
-		case 4: // db.DirGUTAFileTypeBCF
+		case db.DGUTAFileTypeBCF:
 			extMap["bcf"] = struct{}{}
-		case 5: // db.DirGUTAFileTypeSam
+		case db.DGUTAFileTypeSam:
 			extMap["sam"] = struct{}{}
-		case 6: // db.DirGUTAFileTypeBam
+		case db.DGUTAFileTypeBam:
 			extMap["bam"] = struct{}{}
-		case 7: // db.DirGUTAFileTypeCram
+		case db.DGUTAFileTypeCram:
 			extMap["cram"] = struct{}{}
-		case 8: // db.DirGUTAFileTypeFasta
+		case db.DGUTAFileTypeFasta:
 			extMap["fa"] = struct{}{}
 			extMap["fasta"] = struct{}{}
-		case 9: // db.DirGUTAFileTypeFastq
+		case db.DGUTAFileTypeFastq:
 			extMap["fastq"] = struct{}{}
 			extMap["fq"] = struct{}{}
-		case 10: // db.DirGUTAFileTypeFastqGz
+		case db.DGUTAFileTypeFastqGz:
 			extMap["fastq.gz"] = struct{}{}
 			extMap["fq.gz"] = struct{}{}
-		case 11: // db.DirGUTAFileTypePedBed
+		case db.DGUTAFileTypePedBed:
 			extMap["ped"] = struct{}{}
 			extMap["bed"] = struct{}{}
 			extMap["bim"] = struct{}{}
 			extMap["fam"] = struct{}{}
 			extMap["map"] = struct{}{}
-		case 13: // db.DirGUTAFileTypeText
+		case db.DGUTAFileTypeText:
 			extMap["csv"] = struct{}{}
 			extMap["dat"] = struct{}{}
 			extMap["md"] = struct{}{}
@@ -277,12 +282,12 @@ func convertDGUTAFileTypesToExts(fts []db.DirGUTAFileType) []string { //nolint:e
 			extMap["text"] = struct{}{}
 			extMap["txt"] = struct{}{}
 			extMap["tsv"] = struct{}{}
-		case 14: // db.DirGUTAFileTypeLog
+		case db.DGUTAFileTypeLog:
 			extMap["log"] = struct{}{}
 			extMap["err"] = struct{}{}
 			extMap["e"] = struct{}{}
 			extMap["oe"] = struct{}{}
-		case 12: // db.DirGUTAFileTypeCompressed
+		case db.DGUTAFileTypeCompressed:
 			extMap["gz"] = struct{}{}
 			extMap["bz2"] = struct{}{}
 			extMap["xz"] = struct{}{}

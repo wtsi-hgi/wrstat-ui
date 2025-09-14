@@ -521,6 +521,7 @@ func TestServer(t *testing.T) {
 		Convey("You can enable automatic reloading", func() {
 			if clickHouseMode() {
 				SkipConvey("ClickHouse mode: automatic reloading not applicable as it will be removed", func() {})
+
 				return
 			}
 
@@ -610,6 +611,7 @@ func TestServer(t *testing.T) {
 		Convey("prewarmCaches fills caches with JSON and gzip", func() {
 			if clickHouseMode() {
 				SkipConvey("ClickHouse mode: prewarmCaches test not applicable in phase 1", func() {})
+
 				return
 			}
 
@@ -627,6 +629,7 @@ func TestServer(t *testing.T) {
 		Convey("serveGzippedCache serves group and user usage via HTTP", func() {
 			if clickHouseMode() {
 				SkipConvey("ClickHouse mode: basedirs cache tests are not applicable in phase 1", func() {})
+
 				return
 			}
 

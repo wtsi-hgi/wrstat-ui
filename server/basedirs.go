@@ -86,10 +86,11 @@ func (s *Server) getBasedirsUserUsage(c *gin.Context) {
 	userCache := s.userUsageCache
 	s.mu.RUnlock()
 
-	// In ClickHouse mode (phase 1), initialize empty cache
+	// In ClickHouse mode (phase 1), initialise empty cache
 	if useClickHouseFeatureFlag() {
 		c.Header("Content-Encoding", "gzip")
 		c.Data(http.StatusOK, "application/json", []byte("[]"))
+
 		return
 	}
 
@@ -171,6 +172,7 @@ func (s *Server) serveGzippedCache(c *gin.Context, cache usageCache) {
 	// In ClickHouse mode (phase 1), we should return empty JSON data for basedirs endpoints
 	if useClickHouseFeatureFlag() {
 		c.IndentedJSON(http.StatusOK, []any{})
+
 		return
 	}
 

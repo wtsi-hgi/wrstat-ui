@@ -78,6 +78,7 @@ func TestSubtreeSummaryAddsDirectoryContributions(t *testing.T) {
 
 	ctx := context.Background()
 	require.NoError(t, admin.ExecuteQuery(ctx, "DROP DATABASE IF EXISTS "+testDB))
+
 	require.NoError(t, admin.ExecuteQuery(ctx, "CREATE DATABASE "+testDB))
 	defer admin.ExecuteQuery(ctx, "DROP DATABASE IF EXISTS "+testDB) //nolint:errcheck
 
@@ -89,6 +90,7 @@ func TestSubtreeSummaryAddsDirectoryContributions(t *testing.T) {
 		Password: chPassword,
 	})
 	require.NoError(t, err)
+
 	defer ch.Close()
 
 	require.NoError(t, ch.CreateSchema(ctx))
@@ -112,6 +114,7 @@ func TestSubtreeSummaryAddsDirectoryContributions(t *testing.T) {
 
 	r, _, err := clickhouse.OpenStatsFile(fp)
 	require.NoError(t, err)
+
 	defer r.Close()
 
 	require.NoError(t, ch.UpdateClickhouse(ctx, mnt, r))
@@ -126,11 +129,14 @@ func TestSubtreeSummaryAddsDirectoryContributions(t *testing.T) {
 
 	// Should include directory type in FTypes
 	hasDir := false
+
 	for _, ft := range s.FTypes {
 		if ft == uint8(clickhouse.FileTypeDir) {
 			hasDir = true
+
 			break
 		}
 	}
+
 	assert.True(t, hasDir, "expected directory type in Summary.FTypes")
 }

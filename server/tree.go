@@ -231,11 +231,13 @@ func (s *Server) getTreeCH(c *gin.Context) { //nolint:funlen,gocognit
 	// If the requested non-root path has no entries and no files, align with Bolt by returning 400
 	if path != "/" {
 		empty := true
+
 		if ents, erra := ch.ListImmediateChildren(c, path); erra == nil {
 			if len(ents) > 0 {
 				empty = false
 			}
 		}
+
 		if empty && (current.Count == 0 && current.Size == 0) {
 			c.AbortWithStatus(http.StatusBadRequest)
 
@@ -302,6 +304,7 @@ func (s *Server) chDirSummary(c *gin.Context, ch *clickhouse.Clickhouse, path st
 	for _, ft := range sum.FTypes {
 		if ft == uint8(clickhouse.FileTypeDir) {
 			current.FTs = append(current.FTs, db.DGUTAFileTypeDir)
+
 			break
 		}
 	}
@@ -359,7 +362,7 @@ func uniqueDirChildren(entries []clickhouse.FileEntry) []string {
 			continue
 		}
 
-		// Normalize path (remove trailing slash)
+		// Normalise path (remove trailing slash)
 		normPath := e.Path
 		if strings.HasSuffix(normPath, "/") && normPath != "/" {
 			normPath = normPath[:len(normPath)-1]
@@ -386,6 +389,7 @@ func (s *Server) chChildTreeElement(c *gin.Context, ch *clickhouse.Clickhouse, c
 	if err != nil {
 		return nil, err
 	}
+
 	cds := &db.DirSummary{
 		Dir:   child,
 		Count: csum.FileCount,
@@ -401,6 +405,7 @@ func (s *Server) chChildTreeElement(c *gin.Context, ch *clickhouse.Clickhouse, c
 	for _, ft := range csum.FTypes {
 		if ft == uint8(clickhouse.FileTypeDir) {
 			cds.FTs = append(cds.FTs, db.DGUTAFileTypeDir)
+
 			break
 		}
 	}
@@ -457,17 +462,7 @@ func synthesizeFileTypes(
 	// Detect directory presence among immediate children
 	entries, err := ch.ListImmediateChildren(ctx, dir)
 	if err == nil && childrenContainDirs(entries) {
-		// only add if not already present
-		hasDir := false
-		for _, t := range fts {
-			if t == db.DGUTAFileTypeDir {
-				hasDir = true
-				break
-			}
-		}
-		if !hasDir {
-			fts = append(fts, db.DGUTAFileTypeDir)
-		}
+		fts = addDirTypeIfMissing(fts)
 	}
 
 	// Detect '/tmp/' presence anywhere in subtree
@@ -476,6 +471,17 @@ func synthesizeFileTypes(
 	}
 
 	return fts
+}
+
+// addDirTypeIfMissing adds DGUTAFileTypeDir to fts if not already present.
+func addDirTypeIfMissing(fts []db.DirGUTAFileType) []db.DirGUTAFileType {
+	for _, t := range fts {
+		if t == db.DGUTAFileTypeDir {
+			return fts
+		}
+	}
+
+	return append(fts, db.DGUTAFileTypeDir)
 }
 
 // chExtsToDGUTA maps ClickHouse ext_low values to our DGUTA file type categories.
