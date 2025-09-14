@@ -43,8 +43,6 @@ type ConnectionParams struct {
 
 // New creates and configures a new Clickhouse instance.
 func New(params ConnectionParams) (*Clickhouse, error) {
-	debugf("New connection: host=%s port=%s db=%s user=%s", params.Host, params.Port, params.Database, params.Username)
-
 	conn, err := chdriver.Open(&chdriver.Options{
 		Addr:        []string{fmt.Sprintf("%s:%s", params.Host, params.Port)},
 		Auth:        chdriver.Auth{Database: params.Database, Username: params.Username, Password: params.Password},
@@ -59,8 +57,6 @@ func New(params ConnectionParams) (*Clickhouse, error) {
 	if err != nil {
 		return nil, fmt.Errorf("connect: %w", err)
 	}
-
-	debugf("Connected to ClickHouse")
 
 	return &Clickhouse{conn: conn}, nil
 }
@@ -332,51 +328,36 @@ GROUP BY s.mount_path, s.scan_id, s.scan_time, s.ancestor`
 )
 
 // CreateSchema creates all necessary tables and views in the ClickHouse database.
-func (c *Clickhouse) CreateSchema(ctx context.Context) error { //nolint:funlen // procedural setup is clearer inline
-	debugf("CreateSchema: start")
+func (c *Clickhouse) CreateSchema(ctx context.Context) error {
 	// Create scans table first
 	if err := c.createTableWithStatement(ctx, createScansTable); err != nil {
-		debugf("CreateSchema: scans table error: %v", err)
-
 		return err
 	}
 
 	// Create fs_entries table with fallback
 	if err := c.createFsEntriesTableWithFallback(ctx); err != nil {
-		debugf("CreateSchema: fs_entries error: %v", err)
-
 		return err
 	}
 
 	// Create rollup raw table
 	if err := c.createTableWithStatement(ctx, createRollupRawTable); err != nil {
-		debugf("CreateSchema: rollup raw error: %v", err)
-
 		return err
 	}
 
 	// Create state table
 	if err := c.createTableWithStatement(ctx, createRollupStateTable); err != nil {
-		debugf("CreateSchema: rollup state error: %v", err)
-
 		return err
 	}
 
 	// Best-effort migration for legacy installations: ensure new columns/types exist
 	if err := c.migrateSchema(ctx); err != nil {
-		debugf("CreateSchema: migrate error: %v", err)
-
 		return err
 	}
 
 	// Create all views
 	if err := c.createViews(ctx); err != nil {
-		debugf("CreateSchema: create views error: %v", err)
-
 		return err
 	}
-
-	debugf("CreateSchema: done")
 
 	return nil
 }
@@ -426,9 +407,7 @@ func (c *Clickhouse) createViews(ctx context.Context) error {
 }
 
 // RegisterScan adds a new scan record with 'loading' state.
-func (c *Clickhouse) registerScan(ctx context.Context, mountPath string, scanID uuid.UUID, scanTime, started time.Time) error { //nolint:lll // long signature ok
-	debugf("registerScan: mount=%s scan=%s started=%s", mountPath, scanID.String(), started.Format(time.RFC3339))
-
+func (c *Clickhouse) registerScan(ctx context.Context, mountPath string, scanID uuid.UUID, scanTime, started time.Time) error {
 	err := c.conn.Exec(ctx, `
 		INSERT INTO scans (mount_path, scan_id, scan_time, state, started_at, finished_at) 
 		VALUES (?, ?, ?, 'loading', ?, NULL)`,
@@ -436,8 +415,6 @@ func (c *Clickhouse) registerScan(ctx context.Context, mountPath string, scanID 
 	if err != nil {
 		return fmt.Errorf("insert scan: %w", err)
 	}
-
-	debugf("registerScan: ok")
 
 	return nil
 }
@@ -449,9 +426,6 @@ func (c *Clickhouse) promoteScan(
 	scanID uuid.UUID,
 	scanTime, started, finished time.Time,
 ) error {
-	//nolint:lll // debug line is intentionally verbose and clearer unwrapped
-	debugf("promoteScan: mount=%s scan=%s started=%s finished=%s", mountPath, scanID.String(), started.Format(time.RFC3339), finished.Format(time.RFC3339))
-
 	return c.conn.Exec(ctx, `
 		INSERT INTO scans (mount_path, scan_id, scan_time, state, started_at, finished_at)
 		VALUES (?, ?, ?, 'ready', ?, ?)`,
@@ -490,7 +464,6 @@ func (c *Clickhouse) setupRollbackHandler(ctx context.Context, mountPath string,
 
 // DropOlderScans removes older scans for a specific mount path.
 func (c *Clickhouse) dropOlderScans(ctx context.Context, mountPath string, keepFinishedAt time.Time) error {
-	debugf("dropOlderScans: mount=%s keepFinishedAt=%s", mountPath, keepFinishedAt.Format(time.RFC3339))
 	// Get older scans for this mount by finished_at and their scan_time for partition drops
 	rows, err := c.conn.Query(ctx, `
 		SELECT scan_time 
@@ -510,8 +483,6 @@ func (c *Clickhouse) dropOlderScans(ctx context.Context, mountPath string, keepF
 			return err
 		}
 
-		debugf("dropOlderScans: dropping scan with scan_time=%s", st.Format(time.RFC3339))
-
 		if err := c.dropSingleScan(ctx, mountPath, st); err != nil {
 			return err
 		}
@@ -522,8 +493,6 @@ func (c *Clickhouse) dropOlderScans(ctx context.Context, mountPath string, keepF
 
 // DropSingleScan drops all data for a single scan ID.
 func (c *Clickhouse) dropSingleScan(ctx context.Context, mountPath string, scanTime time.Time) error {
-	debugf("dropSingleScan: mount=%s scan_time=%s", mountPath, scanTime.Format(time.RFC3339))
-
 	// Construct partition tuple literal safely
 	part := fmt.Sprintf(
 		"('%s', toDateTime('%s'))",
@@ -585,8 +554,7 @@ func (c *Clickhouse) GetLastScanTimes(ctx context.Context) (map[string]time.Time
 // migrateSchema applies best-effort migrations for pre-existing installations
 // that were created before scan_time/UUID scan_id were introduced.
 // It ensures columns exist with the right types and recreates dependent views.
-func (c *Clickhouse) migrateSchema(ctx context.Context) error { //nolint:funlen
-	debugf("migrateSchema: start")
+func (c *Clickhouse) migrateSchema(ctx context.Context) error {
 	// Ensure scan_time column exists on all tables used by queries/MVs
 	addScanTime := []string{
 		"ALTER TABLE scans ADD COLUMN IF NOT EXISTS scan_time DateTime AFTER scan_id",
@@ -623,8 +591,6 @@ func (c *Clickhouse) migrateSchema(ctx context.Context) error { //nolint:funlen
 	if err := c.createViews(ctx); err != nil {
 		return err
 	}
-
-	debugf("migrateSchema: done")
 
 	return nil
 }

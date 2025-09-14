@@ -170,6 +170,12 @@ type Filters struct {
 	MTimeBucket string // same set
 }
 
+// ChildSummary represents a child directory with its summary statistics.
+type ChildSummary struct {
+	Path    string
+	Summary Summary
+}
+
 // Common errors.
 var (
 	ErrInvalidBucket = errors.New("invalid bucket")

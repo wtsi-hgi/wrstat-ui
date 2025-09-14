@@ -26,7 +26,6 @@
 package server
 
 import (
-	"fmt"
 	"io/fs"
 	"net/http"
 	"os"
@@ -189,9 +188,6 @@ func (s *Server) getTree(c *gin.Context) {
 func (s *Server) getTreeCH(c *gin.Context) { //nolint:funlen,gocognit
 	path := c.DefaultQuery("path", "/")
 
-	// Add debug to see what entries we have for the root path
-	s.debugClickHouseEntries(c, path)
-
 	filter, err := makeFilterFromContext(c)
 	if err != nil {
 		c.AbortWithError(http.StatusBadRequest, err) //nolint:errcheck
@@ -215,11 +211,6 @@ func (s *Server) getTreeCH(c *gin.Context) { //nolint:funlen,gocognit
 
 		return
 	}
-
-	// Debug the current summary we're building
-	fmt.Fprintf(os.Stderr, "\nDEBUG: Current Summary for path=%s:\n", path)
-	fmt.Fprintf(os.Stderr, "  Count: %d\n  Size: %d\n  UIDs: %v\n  GIDs: %v\n  FileTypes: %v\n\n",
-		current.Count, current.Size, current.UIDs, current.GIDs, current.FTs)
 
 	allowedGIDs, err := s.getAllowedGIDsSafe(c)
 	if err != nil {
@@ -369,15 +360,6 @@ func uniqueDirChildren(entries []clickhouse.FileEntry) []string {
 		}
 
 		dirs = append(dirs, normPath)
-	}
-
-	// Debug directory paths if enabled
-	if os.Getenv("WRSTAT_DEBUG") == "1" {
-		fmt.Fprintf(os.Stderr, "DEBUG: uniqueDirChildren found %d directories\n", len(dirs))
-
-		for i, dir := range dirs {
-			fmt.Fprintf(os.Stderr, "  - Dir %d: %s\n", i+1, dir)
-		}
 	}
 
 	return dirs

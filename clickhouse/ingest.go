@@ -43,8 +43,6 @@ func (c *Clickhouse) UpdateClickhouse(ctx context.Context, mountPath string, r i
 	scanTime := time.Now()
 	started := scanTime
 
-	debugf("UpdateClickhouse: mount=%s scan=%s", mountPath, scanUUID.String())
-
 	// Register scan as loading
 	if err := c.registerScan(ctx, mountPath, scanUUID, scanTime, started); err != nil {
 		return err
@@ -54,8 +52,6 @@ func (c *Clickhouse) UpdateClickhouse(ctx context.Context, mountPath string, r i
 	defer c.setupRollbackHandler(ctx, mountPath, scanTime)(retErr)
 
 	if err := c.ingestScan(ctx, mountPath, scanUUID, scanTime, r); err != nil {
-		debugf("UpdateClickhouse: ingestScan error: %v", err)
-
 		return err
 	}
 
@@ -69,8 +65,6 @@ func (c *Clickhouse) UpdateClickhouse(ctx context.Context, mountPath string, r i
 	if err := c.dropOlderScans(ctx, mountPath, finished); err != nil {
 		return fmt.Errorf("retention: %w", err)
 	}
-
-	debugf("UpdateClickhouse: done mount=%s scan=%s", mountPath, scanUUID.String())
 
 	return nil
 }
@@ -224,7 +218,6 @@ func (c *Clickhouse) ingestScan(
 	scanTime time.Time,
 	r io.Reader,
 ) error {
-	debugf("ingestScan: start mount=%s scan=%s", mountPath, scanID.String())
 	// Create batch processor
 	bp, err := c.newBatchProcessor(ctx, mountPath, scanID, scanTime)
 	if err != nil {
@@ -248,9 +241,6 @@ func (c *Clickhouse) ingestScan(
 		return err
 	}
 
-	debugf("ingestScan: done mount=%s scan=%s filesAppended=%d rollupsAppended=%d",
-		mountPath, scanID.String(), bp.filesCount, bp.rollupsCount)
-
 	return nil
 }
 
@@ -261,25 +251,15 @@ func scanAndProcessEntries(ctx context.Context, bp *BatchProcessor, r io.Reader,
 
 	var parseErr error
 
-	var nLines, nDirs, nFiles int
-
 	for {
 		// Read the next entry
 		if parseErr = parser.Scan(fi); parseErr != nil {
 			break
 		}
 
-		nLines++
-
 		shouldContinue, err := processScanEntry(ctx, bp, fi, mountPath, dirsSeen)
 		if !shouldContinue || err != nil {
 			return err
-		}
-
-		if fi.IsDir() {
-			nDirs++
-		} else {
-			nFiles++
 		}
 	}
 
@@ -287,8 +267,6 @@ func scanAndProcessEntries(ctx context.Context, bp *BatchProcessor, r io.Reader,
 	if !errors.Is(parseErr, io.EOF) {
 		return fmt.Errorf("parser error: %w", parseErr)
 	}
-
-	debugf("scanAndProcessEntries: parsed lines=%d files=%d dirs=%d", nLines, nFiles, nDirs)
 
 	return nil
 }
@@ -354,10 +332,6 @@ func processFileEntry(bp *BatchProcessor, fi *stats.FileInfo, mountPath string, 
 	// For directories, check if we've already seen this directory
 	if isDir && dirsSeen[path] {
 		// Skip adding duplicate directory entries
-		if debugVerbose() {
-			debugf("processFileEntry: skip duplicate dir path=%s", path)
-		}
-
 		return nil
 	}
 
@@ -369,12 +343,6 @@ func processFileEntry(bp *BatchProcessor, fi *stats.FileInfo, mountPath string, 
 	if err := bp.AddFile(path, parent, name, ext, ft, inode, size,
 		fi.UID, fi.GID, mtime, atime, ctime); err != nil {
 		return fmt.Errorf("failed to add file entry: %w", err)
-	}
-
-	if debugVerbose() {
-		debugf("AddFile: path=%s parent=%s name=%s ext=%s ftype=%d inode=%d size=%d uid=%d gid=%d at=%s mt=%s",
-			path, parent, name, ext, ft, inode, size, fi.UID, fi.GID,
-			atime.Format(time.RFC3339), mtime.Format(time.RFC3339))
 	}
 
 	return processAncestorRollups(bp, fi, path, parent, isDir, size, atime, mtime, ext, mountPath, dirsSeen)
@@ -410,11 +378,6 @@ func addRollupsWithinMount(bp *BatchProcessor, fi *stats.FileInfo, base, mountPa
 		// Ensure we're tracking that we've seen this directory
 		dirsSeen[a] = true
 
-		if debugVerbose() {
-			debugf("AddRollup(within): ancestor=%s size=%d uid=%d gid=%d ext=%s at=%s mt=%s",
-				a, size, fi.UID, fi.GID, ext, atime.Format(time.RFC3339), mtime.Format(time.RFC3339))
-		}
-
 		if err := bp.AddRollup(a, size, atime, mtime, fi.UID, fi.GID, ext); err != nil {
 			firstErr = err
 
@@ -449,11 +412,6 @@ func addRollupsAboveMount(bp *BatchProcessor, fi *stats.FileInfo, mountPath stri
 		// used to de-duplicate fs_entries for real directories, and marking these
 		// would prevent insertSyntheticAncestorDirs() from inserting the synthetic
 		// ancestor directory entries (eg. "/lustre/") needed for global listings.
-		if debugVerbose() {
-			debugf("AddRollup(above): ancestor=%s size=%d uid=%d gid=%d ext=%s at=%s mt=%s",
-				a, size, fi.UID, fi.GID, ext, atime.Format(time.RFC3339), mtime.Format(time.RFC3339))
-		}
-
 		if err := bp.AddRollup(a, size, atime, mtime, fi.UID, fi.GID, ext); err != nil {
 			firstErr = err
 
@@ -517,7 +475,7 @@ func addSyntheticDirAndRollups(
 	a string,
 	t time.Time,
 	dirsSeen map[string]bool,
-) error { //nolint:funlen
+) error {
 	p, name := SplitParentAndName(a)
 
 	// Insert a single directory entry with zero size/ids; duplicates across mounts will be
@@ -526,10 +484,6 @@ func addSyntheticDirAndRollups(
 	// Use DirectorySize for synthetic directories to ensure consistent directory sizing
 	if err := bp.AddFile(a, p, name, "", FileTypeDir, 0, DirectorySize, 0, 0, t, t, t); err != nil {
 		return err
-	}
-
-	if debugVerbose() {
-		debugf("AddSyntheticDir: path=%s parent=%s name=%s size=%d", a, p, name, DirectorySize)
 	}
 
 	// Mark this directory as seen
@@ -546,10 +500,6 @@ func addSyntheticDirAndRollups(
 			firstErr = err
 
 			return false
-		}
-
-		if debugVerbose() {
-			debugf("AddSyntheticRollup: ancestor=%s size=0", ra)
 		}
 
 		return true
