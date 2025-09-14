@@ -77,7 +77,7 @@ func TestSubtreeSummaryAddsDirectoryContributions(t *testing.T) {
 	defer admin.Close()
 
 	ctx := context.Background()
-	_ = admin.ExecuteQuery(ctx, "DROP DATABASE IF EXISTS "+testDB)
+	require.NoError(t, admin.ExecuteQuery(ctx, "DROP DATABASE IF EXISTS "+testDB))
 	require.NoError(t, admin.ExecuteQuery(ctx, "CREATE DATABASE "+testDB))
 	defer admin.ExecuteQuery(ctx, "DROP DATABASE IF EXISTS "+testDB) //nolint:errcheck
 

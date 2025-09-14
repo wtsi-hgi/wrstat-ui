@@ -492,38 +492,23 @@ func buildAllWhere(dir string, f Filters) ([]string, []any) {
 func (c *Clickhouse) DirCountWithFiles(ctx context.Context, dir string, _ Filters) (uint64, error) { //nolint:funlen
 	dir = EnsureDir(dir)
 
-	// We intentionally do NOT reuse buildAllWhere filters here because augmentation is only
-	// applied when no filters are present. Instead we compute all ancestor directories of the
-	// direct parent directories of files under the subtree and count distinct ancestors within
-	// the subtree. This includes higher-level synthetic ancestors like "/lustre/" at root.
-
-	// Build a hierarchy from each distinct parent_path by splitting on '/' and progressively
-	// joining segments back with '/' to form '/a/', '/a/b/', ... '/a/b/c/' ancestors.
-	// Then restrict those ancestors to the subtree using a LIKE filter.
+	// Count distinct ancestor directories (within the subtree rooted at 'dir')
+	// that have at least one descendant file. This leverages the rollups table
+	// which contains one row per (file, ancestor) pair with ext_low for files.
+	// We restrict to the latest ready scan per mount to match current views.
 	query := `
-SELECT countDistinct(a)
-FROM (
-	SELECT arrayJoin(
-			 arrayMap(
-				 i -> concat('/', arrayStringConcat(arraySlice(parts, 2, i), '/'), '/'),
-				 arrayEnumerate(arraySlice(parts, 2, length(parts) - 2))
-			 )
-		 ) AS a
-	FROM (
-		SELECT splitByChar('/', parent_path) AS parts
-		FROM (
-			SELECT DISTINCT parent_path
-			FROM fs_entries_current
-			WHERE path LIKE ?
-			  AND ftype = ` + fmt.Sprintf("%d", FileTypeFile) + `
-		)
-	)
-)
-WHERE a LIKE ?
+SELECT countDistinct(ancestor) AS dir_count
+FROM ancestor_rollups_raw arr
+INNER JOIN (
+	SELECT mount_path, max(scan_id) AS scan_id
+	FROM scans
+	WHERE state = 'ready'
+	GROUP BY mount_path
+) r USING (mount_path, scan_id)
+WHERE ancestor LIKE ? AND ext_low != ''
 `
 
-	// We need the subtree pattern twice: once for the inner path LIKE and once for the outer a LIKE
-	args := []any{dir + "%", dir + "%"}
+	args := []any{dir + "%"}
 
 	if debugEnabled() {
 		debugf("DirCountWithFiles SQL:\n%s", query)
