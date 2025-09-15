@@ -15,10 +15,8 @@ import (
 )
 
 func TestCreateSchemaCreatesDatabase(t *testing.T) {
-	host := getenv("TEST_CLICKHOUSE_HOST", "127.0.0.1")
-	port := getenv("TEST_CLICKHOUSE_PORT", "9000")
-	chUser := getenv("TEST_CLICKHOUSE_USERNAME", "default")
-	pass := getenv("TEST_CLICKHOUSE_PASSWORD", "")
+	// Force test environment for dotenv/env resolution
+	_ = os.Setenv("WRSTATUI_ENV", "test")
 
 	u, uErr := user.Current()
 
@@ -29,13 +27,8 @@ func TestCreateSchemaCreatesDatabase(t *testing.T) {
 
 	dbName := "test_wrstatui_schema_" + uname + "_" + time.Now().Format("20060102150405")
 
-	params := clickhouse.ConnectionParams{
-		Host:     host,
-		Port:     port,
-		Database: dbName,
-		Username: chUser,
-		Password: pass,
-	}
+	params := clickhouse.ConnectionParamsFromEnv()
+	params.Database = dbName
 
 	ch, err := clickhouse.New(params)
 	if err != nil {
@@ -58,17 +51,11 @@ func TestCreateSchemaCreatesDatabase(t *testing.T) {
 
 	admin, err := clickhouse.New(adminParams)
 	if err == nil {
+		// Best-effort cleanup in tests; ignore errors
+		//nolint:errcheck
 		_ = admin.ExecuteQuery(ctx, "DROP DATABASE IF EXISTS "+dbName)
 		_ = admin.Close()
 	}
 }
 
-// getenv returns the value of the environment variable named by the key,
-// or the provided default if not set. Only for tests in package clickhouse_test.
-func getenv(key, def string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-
-	return def
-}
+// Note: env resolution now handled by ConnectionParamsFromEnv.

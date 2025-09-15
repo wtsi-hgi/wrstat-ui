@@ -32,6 +32,8 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/db"
 )
 
+var errGlobMustStartWithSlash = errors.New("glob must start with '/'")
+
 // ListImmediateChildren returns direct children of a directory (global, all mounts).
 func (c *Clickhouse) ListImmediateChildren(ctx context.Context, dir string) ([]FileEntry, error) {
 	dir = EnsureDir(dir)
@@ -443,7 +445,7 @@ func (c *Clickhouse) execPathQuery(ctx context.Context, query string, args ...an
 func (c *Clickhouse) SearchGlobPaths(ctx context.Context, globPattern string, limit int) ([]string, error) {
 	// Validate input: must start with '/'
 	if !strings.HasPrefix(globPattern, "/") {
-		return nil, errors.New("glob must start with '/'")
+		return nil, errGlobMustStartWithSlash
 	}
 
 	if err := c.ensureMounts(ctx); err != nil {

@@ -35,11 +35,12 @@ import (
 )
 
 var (
-	chHost     string
-	chPort     string
-	chDatabase string
-	chUsername string
-	chPassword string
+	chHost       string
+	chPort       string
+	chDatabase   string
+	chUsername   string
+	chPassword   string
+	errNoMatches = errors.New("no matches found for pattern")
 )
 
 // clickhouseCmd represents the clickhouse command.
@@ -51,7 +52,20 @@ var (
 var clickhouseCmd = &cobra.Command{
 	Use:   "clickhouse",
 	Short: "ClickHouse backend operations",
-	Long:  `ClickHouse backend operations: ingest/update and client queries.`,
+	Long: `ClickHouse backend operations: ingest/update and client queries.
+
+Connection defaults can be provided via environment variables and .env files:
+	WRSTATUI_ENV: one of production, development, test (defaults to development)
+								determines which .env files are loaded first. The loading order is:
+									.env.$WRSTATUI_ENV.local, .env.$WRSTATUI_ENV, .env.local, .env
+								Earlier files take precedence for variables defined there.
+	WRSTATUI_CLICKHOUSE_HOST     (default: 127.0.0.1)
+	WRSTATUI_CLICKHOUSE_PORT     (default: 9000)
+	WRSTATUI_CLICKHOUSE_DATABASE (default: default)
+	WRSTATUI_CLICKHOUSE_USERNAME (default: default)
+	WRSTATUI_CLICKHOUSE_PASSWORD (default: "")
+
+Command-line flags override these values.`,
 }
 
 var chUpdateCmd = &cobra.Command{
@@ -61,7 +75,9 @@ var chUpdateCmd = &cobra.Command{
 
 This command ingests a single mount's scan into ClickHouse with atomic promotion
 semantics (loading -> ready), maintains only the latest ready scan per mount,
-and provides precomputed subtree rollups.`,
+and provides precomputed subtree rollups.
+
+Note: See parent 'clickhouse' command help for environment variables and .env file details.`,
 	Run: func(_ *cobra.Command, args []string) {
 		if err := RunUpdate(args); err != nil {
 			die("%s", err)
@@ -80,6 +96,8 @@ var chGlobCmd = &cobra.Command{
 
 Eg:
 wrstat-ui clickhouse glob --limit 10 '/path/to/dir/*/subdir/*.fastq.gz'
+
+Note: See parent 'clickhouse' command help for environment variables and .env file details.
 `,
 	Args: cobra.MaximumNArgs(1),
 	Run: func(_ *cobra.Command, args []string) {
@@ -97,12 +115,15 @@ func init() {
 	clickhouseCmd.AddCommand(chUpdateCmd)
 	clickhouseCmd.AddCommand(chGlobCmd)
 
+	// Resolve defaults from environment/.env files
+	params := clickhouse.ConnectionParamsFromEnv()
+
 	// Add ClickHouse connection settings to parent
-	clickhouseCmd.PersistentFlags().StringVar(&chHost, "host", "127.0.0.1", "ClickHouse host")
-	clickhouseCmd.PersistentFlags().StringVar(&chPort, "port", "9000", "ClickHouse port")
-	clickhouseCmd.PersistentFlags().StringVar(&chDatabase, "database", "default", "ClickHouse database")
-	clickhouseCmd.PersistentFlags().StringVar(&chUsername, "username", "default", "ClickHouse username")
-	clickhouseCmd.PersistentFlags().StringVar(&chPassword, "password", "", "ClickHouse password")
+	clickhouseCmd.PersistentFlags().StringVar(&chHost, "host", params.Host, "ClickHouse host")
+	clickhouseCmd.PersistentFlags().StringVar(&chPort, "port", params.Port, "ClickHouse port")
+	clickhouseCmd.PersistentFlags().StringVar(&chDatabase, "database", params.Database, "ClickHouse database")
+	clickhouseCmd.PersistentFlags().StringVar(&chUsername, "username", params.Username, "ClickHouse username")
+	clickhouseCmd.PersistentFlags().StringVar(&chPassword, "password", params.Password, "ClickHouse password")
 
 	// Glob query flags
 	chGlobCmd.Flags().IntVar(&globLimit, "limit", 0, "Limit number of results (0 = unlimited)")
@@ -153,7 +174,7 @@ func RunGlob(pattern string, limit int) error {
 	}
 
 	if len(results) == 0 {
-		return fmt.Errorf("no matches found for pattern: %s", pattern)
+		return fmt.Errorf("glob %q: %w", pattern, errNoMatches)
 	}
 
 	for _, p := range results {

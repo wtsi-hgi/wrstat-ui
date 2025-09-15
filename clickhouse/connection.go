@@ -26,10 +26,13 @@ package clickhouse
 import (
 	"context"
 	"fmt"
+	"os"
+	"strings"
 	"time"
 
 	chdriver "github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/google/uuid"
+	"github.com/joho/godotenv"
 )
 
 // ConnectionParams contains parameters for creating a new ClickHouse connection.
@@ -39,6 +42,71 @@ type ConnectionParams struct {
 	Database string
 	Username string
 	Password string
+}
+
+// ConnectionParamsFromEnv builds ConnectionParams using environment variables.
+//
+// It first attempts to load variables from .env files based on WRSTATUI_ENV.
+// Allowed WRSTATUI_ENV values: production, development, test. If unset or
+// invalid, defaults to "development". Files are loaded in the following order
+// (first file wins; later files do not override earlier values):
+//
+//	.env.<env>.local, .env.<env>, .env.local, .env
+//
+// The following environment variables are read with defaults maintained:
+//
+//	WRSTATUI_CLICKHOUSE_HOST     (default: 127.0.0.1)
+//	WRSTATUI_CLICKHOUSE_PORT     (default: 9000)
+//	WRSTATUI_CLICKHOUSE_DATABASE (default: default)
+//	WRSTATUI_CLICKHOUSE_USERNAME (default: default)
+//	WRSTATUI_CLICKHOUSE_PASSWORD (default: "")
+func ConnectionParamsFromEnv() ConnectionParams {
+	// Load dotenv files with priority based on WRSTATUI_ENV
+	env := resolveRuntimeEnv()
+	loadDotenvFiles(env)
+
+	getenv := func(key, def string) string {
+		if v := os.Getenv(key); v != "" {
+			return v
+		}
+
+		return def
+	}
+
+	return ConnectionParams{
+		Host:     getenv("WRSTATUI_CLICKHOUSE_HOST", "127.0.0.1"),
+		Port:     getenv("WRSTATUI_CLICKHOUSE_PORT", "9000"),
+		Database: getenv("WRSTATUI_CLICKHOUSE_DATABASE", "default"),
+		Username: getenv("WRSTATUI_CLICKHOUSE_USERNAME", "default"),
+		Password: getenv("WRSTATUI_CLICKHOUSE_PASSWORD", ""),
+	}
+}
+
+// resolveRuntimeEnv returns a normalised environment name.
+func resolveRuntimeEnv() string {
+	env := strings.ToLower(strings.TrimSpace(os.Getenv("WRSTATUI_ENV")))
+	switch env {
+	case "production", "development", "test":
+		return env
+	default:
+		return "development"
+	}
+}
+
+// loadDotenvFiles loads .env files in priority order, ignoring missing files and parse errors.
+func loadDotenvFiles(env string) {
+	files := []string{
+		".env." + env + ".local",
+		".env." + env,
+		".env.local",
+		".env",
+	}
+
+	for _, f := range files {
+		if _, statErr := os.Stat(f); statErr == nil {
+			_ = godotenv.Load(f) //nolint:errcheck // allow missing/partial .env files
+		}
+	}
 }
 
 // New creates and configures a new Clickhouse instance.
