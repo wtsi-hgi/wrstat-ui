@@ -423,6 +423,7 @@ func (s *Server) computeChildDirSummary(
 	for _, ft := range csum.FTypes {
 		if ft == uint8(clickhouse.FileTypeDir) {
 			cds.FTs = append(cds.FTs, db.DGUTAFileTypeDir)
+
 			break
 		}
 	}

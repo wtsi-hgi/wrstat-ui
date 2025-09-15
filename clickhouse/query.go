@@ -532,54 +532,73 @@ func (c *Clickhouse) SearchGlobPaths(ctx context.Context, globPattern string, li
 	seen := make(map[string]struct{})
 	out := make([]string, 0, DefaultResultCapacity)
 
-	// Compute longest literal prefix for parent_path for this mount
-	literalPrefix := computeLiteralPrefix(mount, parentGlob)
+	// appendUnique adds paths to out ensuring uniqueness and respecting limit.
+	appendUnique := func(paths []string) {
+		for _, p := range paths {
+			if _, ok := seen[p]; ok {
+				continue
+			}
 
-	// Target depth equals mount depth plus number of segments in parentGlob
-	targetDepth := computeTargetDepth(mount, parentGlob)
+			seen[p] = struct{}{}
 
-	lo := literalPrefix
-	hi := prefixUpperBound(literalPrefix)
-
-	nameLike := toLike(nameGlob)
-	if nameLike == "" {
-		nameLike = "%"
-	}
-
-	q := `SELECT path FROM fs_entries_current WHERE mount_path = ? AND parent_path >= ? AND parent_path < ?`
-	args := []any{mount, lo, hi}
-
-	if parentGlob != "" {
-		q += " AND depth = ?"
-		args = append(args, targetDepth)
-	}
-
-	if parentGlob != "" && (strings.ContainsAny(parentGlob, "*?") || len(parentGlob) > len(strings.TrimPrefix(literalPrefix, mount))) {
-		parentLike := toLike(parentGlob)
-		q += " AND parent_path LIKE ?"
-		args = append(args, mount+parentLike)
-	}
-
-	q += " AND basename LIKE ?"
-	args = append(args, nameLike)
-
-	q += " ORDER BY mount_path, parent_path, basename"
-
-	if limit > 0 {
-		q += fmt.Sprintf(" LIMIT %d", limit)
-	}
-
-	paths, err := c.execPathQuery(ctx, q, args...)
-	if err != nil {
-		return nil, err
-	}
-
-	for _, p := range paths {
-		if _, ok := seen[p]; ok {
-			continue
+			out = append(out, p)
+			if limit > 0 && len(out) >= limit {
+				return
+			}
 		}
-		seen[p] = struct{}{}
-		out = append(out, p)
+	}
+
+	// Fast-path: if we are matching 'dir/*' without wildcards in the parent glob,
+	// skip the parent_path query and only do the descendant range scan further below.
+	doParentRange := !(parentGlob != "" && !strings.ContainsAny(parentGlob, "*?") && nameGlob == "*")
+
+	if doParentRange {
+		// Compute longest literal prefix for parent_path for this mount
+		literalPrefix := computeLiteralPrefix(mount, parentGlob)
+
+		// Target depth equals mount depth plus number of segments in parentGlob
+		targetDepth := computeTargetDepth(mount, parentGlob)
+
+		lo := literalPrefix
+		hi := prefixUpperBound(literalPrefix)
+
+		nameLike := toLike(nameGlob)
+		if nameLike == "" {
+			nameLike = "%"
+		}
+
+		q := `SELECT path FROM fs_entries_current WHERE mount_path = ? AND parent_path >= ? AND parent_path < ?`
+		args := []any{mount, lo, hi}
+
+		if parentGlob != "" {
+			q += " AND depth = ?"
+
+			args = append(args, targetDepth)
+		}
+
+		if parentGlob != "" && (strings.ContainsAny(parentGlob, "*?") || len(parentGlob) > len(strings.TrimPrefix(literalPrefix, mount))) {
+			parentLike := toLike(parentGlob)
+			q += " AND parent_path LIKE ?"
+
+			args = append(args, mount+parentLike)
+		}
+
+		q += " AND basename LIKE ?"
+
+		args = append(args, nameLike)
+
+		q += " ORDER BY mount_path, parent_path, basename"
+
+		if limit > 0 {
+			q += fmt.Sprintf(" LIMIT %d", limit)
+		}
+
+		paths, err := c.execPathQuery(ctx, q, args...)
+		if err != nil {
+			return nil, err
+		}
+
+		appendUnique(paths)
 	}
 
 	// Also include directory-self and/or recursive descendants when applicable.
@@ -612,6 +631,7 @@ func (c *Clickhouse) SearchGlobPaths(ctx context.Context, globPattern string, li
 				if _, ok := seen[p]; ok {
 					continue
 				}
+
 				seen[p] = struct{}{}
 				out = append(out, p)
 			}
@@ -619,63 +639,34 @@ func (c *Clickhouse) SearchGlobPaths(ctx context.Context, globPattern string, li
 			return out, nil
 		}
 
-		// Case 2: parentGlob has no wildcards and nameGlob is '*' => directory self + all descendants
+		// Case 2: parentGlob has no wildcards and nameGlob is '*' => all descendants (exclude directory itself)
 		if parentGlob != "" && !parentHasWild && nameGlob == "*" {
-			// Include the directory itself
-			qeq := `SELECT path FROM fs_entries_current WHERE mount_path = ? AND path = ?`
-			argsEq := []any{mount, dirPrefix}
-
-			more, err := c.execPathQuery(ctx, qeq, argsEq...)
-			if err != nil {
-				return nil, err
-			}
-
-			for _, p := range more {
-				if _, ok := seen[p]; ok {
-					continue
-				}
-				seen[p] = struct{}{}
-				out = append(out, p)
-				if limit > 0 && len(out) >= limit {
-					return out, nil
-				}
-			}
-
 			// Then include all descendants via fast range scan on 'path'
-			qrange := `SELECT path FROM fs_entries_current WHERE mount_path = ? AND path >= ? AND path < ?
+			qrange := `SELECT path FROM fs_entries_current WHERE mount_path = ? AND path >= ? AND path < ? AND path != ?
 			 ORDER BY mount_path, parent_path, basename`
-			argsRange := []any{mount, dirPrefix, prefixUpperBound(dirPrefix)}
+			argsRange := []any{mount, dirPrefix, prefixUpperBound(dirPrefix), dirPrefix}
 
 			if remain > 0 {
-				// Adjust remaining after equality inclusion
-				remain = limit - len(out)
 				if remain > 0 {
 					qrange += fmt.Sprintf(" LIMIT %d", remain)
 				}
 			}
 
-			more, err = c.execPathQuery(ctx, qrange, argsRange...)
+			more, err := c.execPathQuery(ctx, qrange, argsRange...)
 			if err != nil {
 				return nil, err
 			}
 
-			for _, p := range more {
-				if _, ok := seen[p]; ok {
-					continue
-				}
-				seen[p] = struct{}{}
-				out = append(out, p)
-				if limit > 0 && len(out) >= limit {
-					return out, nil
-				}
-			}
+			appendUnique(more)
 
 			return out, nil
 		}
 
 		// Case 3: Fallback for complex patterns (wildcards in parent glob): use LIKE but limited
+		// Only use this when the parent glob itself contains wildcards to avoid
+		// accidentally including the directory self for simple 'dir/*' patterns.
 		pathPattern := toLike(parentGlob + nameGlob)
-		if pathPattern != "" {
+		if parentHasWild && pathPattern != "" {
 			q2 := `SELECT path FROM fs_entries_current WHERE mount_path = ? AND path LIKE ?
 			 ORDER BY mount_path, parent_path, basename`
 			args2 := []any{mount, mount + pathPattern}
@@ -689,16 +680,7 @@ func (c *Clickhouse) SearchGlobPaths(ctx context.Context, globPattern string, li
 				return nil, err
 			}
 
-			for _, p := range more {
-				if _, ok := seen[p]; ok {
-					continue
-				}
-				seen[p] = struct{}{}
-				out = append(out, p)
-				if limit > 0 && len(out) >= limit {
-					break
-				}
-			}
+			appendUnique(more)
 		}
 	}
 

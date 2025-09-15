@@ -321,9 +321,8 @@ func TestSearchGlobPathsPublic(t *testing.T) {
 	t.Run("directory and file wildcard", func(t *testing.T) {
 		paths, err := ch.SearchGlobPaths(ctx, mount+"p/q/dirOnly/*", 0)
 		require.NoError(t, err)
-		// Should match all descendants under dirOnly/ (files and directories, recursively)
+		// Should match all descendants under dirOnly/ (files and directories, recursively), excluding the directory itself
 		assert.ElementsMatch(t, []string{
-			mount + "p/q/dirOnly/",
 			mount + "p/q/dirOnly/fileC.txt",
 			mount + "p/q/dirOnly/subdir/",
 			mount + "p/q/dirOnly/subdir/fileD.txt",
