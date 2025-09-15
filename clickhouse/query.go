@@ -412,7 +412,7 @@ func buildGlobSearchQuery(caseInsensitive bool, limit int) string {
 			WHERE lowerUTF8(path) LIKE lowerUTF8(?)`
 	} else {
 		query = `SELECT path FROM fs_entries_current 
-			WHERE path LIKE ?`
+			WHERE path >= ? AND path < ?`
 	}
 
 	if limit > 0 {
@@ -422,27 +422,23 @@ func buildGlobSearchQuery(caseInsensitive bool, limit int) string {
 	return query
 }
 
-// SearchGlobPaths searches for paths matching a glob pattern in ClickHouse.
-func (c *Clickhouse) SearchGlobPaths(
-	ctx context.Context,
-	globPattern string,
-	limit int,
-	caseInsensitive bool,
-) ([]string, error) {
-	// Convert glob pattern to SQL LIKE pattern
-	pattern := strings.ReplaceAll(strings.ReplaceAll(globPattern, "*", "%"), "?", "_")
+// prefixUpperBound returns an upper bound string for prefix range scans: [prefix, prefix\xFF).
+// It appends a single 0xFF byte which is beyond all valid UTF-8 continuation bytes,
+// ensuring all strings starting with the prefix are covered by the half-open interval.
+func prefixUpperBound(prefix string) string {
+	return prefix + string([]byte{0xFF})
+}
 
-	// Build and execute query
-	query := buildGlobSearchQuery(caseInsensitive, limit)
-
-	rows, err := c.conn.Query(ctx, query, pattern)
+// execPathQuery runs a simple single-column path query and collects results.
+func (c *Clickhouse) execPathQuery(ctx context.Context, query string, args ...any) ([]string, error) {
+	rows, err := c.conn.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	// Collect results
 	result := make([]string, 0, DefaultResultCapacity)
+
 	for rows.Next() {
 		var path string
 		if err := rows.Scan(&path); err != nil {
@@ -453,4 +449,61 @@ func (c *Clickhouse) SearchGlobPaths(
 	}
 
 	return result, rows.Err()
+}
+
+// SearchGlobPaths searches for paths matching a glob pattern in ClickHouse.
+func (c *Clickhouse) SearchGlobPaths(
+	ctx context.Context,
+	globPattern string,
+	limit int,
+	caseInsensitive bool,
+) ([]string, error) {
+	// If case-insensitive search is requested, fall back to LIKE with lowerUTF8.
+	// Range-based prefix scans cannot be case-insensitive without a dedicated lowercase column.
+	if caseInsensitive {
+		pattern := strings.ReplaceAll(strings.ReplaceAll(globPattern, "*", "%"), "?", "_")
+
+		query := buildGlobSearchQuery(true, limit)
+
+		return c.execPathQuery(ctx, query, pattern)
+	}
+
+	// For prefix-based patterns, rewrite to a range scan: path >= prefix AND path < prefix\xFF
+	// Determine the fixed prefix up to the first wildcard. If wildcards are only trailing '*',
+	// treat as prefix; otherwise, fall back to LIKE.
+	wildcardIdx := strings.IndexAny(globPattern, "*?")
+	var prefix string
+	fallbackLike := false
+
+	if wildcardIdx == -1 {
+		// Exact string match – can still use a tight range [s, s\xFF)
+		prefix = globPattern
+	} else {
+		// Ensure all remaining chars after the first wildcard are '*'
+		rest := globPattern[wildcardIdx:]
+		if strings.Trim(rest, "*") == "" && globPattern[wildcardIdx] == '*' {
+			prefix = globPattern[:wildcardIdx]
+		} else {
+			fallbackLike = true
+		}
+	}
+
+	if fallbackLike {
+		pattern := strings.ReplaceAll(strings.ReplaceAll(globPattern, "*", "%"), "?", "_")
+
+		query := `SELECT path FROM fs_entries_current WHERE path LIKE ?`
+		if limit > 0 {
+			query += fmt.Sprintf(" LIMIT %d", limit)
+		}
+
+		return c.execPathQuery(ctx, query, pattern)
+	}
+
+	// Execute range scan for prefix
+	lo := prefix
+	hi := prefixUpperBound(prefix)
+
+	query := buildGlobSearchQuery(false, limit)
+
+	return c.execPathQuery(ctx, query, lo, hi)
 }

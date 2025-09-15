@@ -73,7 +73,8 @@ CREATE TABLE IF NOT EXISTS scans (
 	finished_at Nullable(DateTime)
 ) ENGINE = MergeTree
 PARTITION BY (mount_path, scan_time)
-ORDER BY (mount_path, scan_time)`
+ORDER BY (mount_path, scan_time)
+SETTINGS index_granularity = 8192, compression_codec = 'ZSTD'`
 
 	createFsEntriesTable = `
 CREATE TABLE IF NOT EXISTS fs_entries (
@@ -96,14 +97,12 @@ CREATE TABLE IF NOT EXISTS fs_entries (
 	INDEX idx_gid gid TYPE minmax GRANULARITY 8192,
 	INDEX idx_mtime mtime TYPE minmax GRANULARITY 8192,
 	INDEX idx_atime atime TYPE minmax GRANULARITY 8192,
-	INDEX idx_path_bf path TYPE tokenbf_v1(256) GRANULARITY 4,
 	INDEX idx_parent_path parent_path TYPE minmax GRANULARITY 8192
 ) ENGINE = MergeTree
 PARTITION BY (mount_path, scan_time)
 ORDER BY (mount_path, parent_path, name)
-SETTINGS index_granularity = 8192`
+SETTINGS index_granularity = 8192, compression_codec = 'ZSTD'`
 
-	// Fallback without tokenbf index in case the server doesn't support it.
 	createFsEntriesTableNoPathIdx = `
 CREATE TABLE IF NOT EXISTS fs_entries (
 	mount_path String,
@@ -129,7 +128,7 @@ CREATE TABLE IF NOT EXISTS fs_entries (
 ) ENGINE = MergeTree
 PARTITION BY (mount_path, scan_time)
 ORDER BY (mount_path, parent_path, name)
-SETTINGS index_granularity = 8192`
+SETTINGS index_granularity = 8192, compression_codec = 'ZSTD'`
 
 	createRollupRawTable = `
 CREATE TABLE IF NOT EXISTS ancestor_rollups_raw (
@@ -146,7 +145,7 @@ CREATE TABLE IF NOT EXISTS ancestor_rollups_raw (
 ) ENGINE = MergeTree
 PARTITION BY (mount_path, scan_time)
 ORDER BY (mount_path, ancestor)
-SETTINGS index_granularity = 8192`
+SETTINGS index_granularity = 8192, compression_codec = 'ZSTD'`
 
 	createRollupStateTable = `
 CREATE TABLE IF NOT EXISTS ancestor_rollups_state (
@@ -200,7 +199,7 @@ CREATE TABLE IF NOT EXISTS ancestor_rollups_state (
 ) ENGINE = AggregatingMergeTree
 	PARTITION BY (mount_path, scan_time)
 ORDER BY (mount_path, ancestor)
-SETTINGS index_granularity = 8192`
+SETTINGS index_granularity = 8192, compression_codec = 'ZSTD'`
 
 	//nolint:misspell // ClickHouse requires American English spelling "MATERIALIZED"
 	createRollupMV = `
@@ -335,7 +334,7 @@ func (c *Clickhouse) CreateSchema(ctx context.Context) error {
 	}
 
 	// Create fs_entries table with fallback
-	if err := c.createFsEntriesTableWithFallback(ctx); err != nil {
+	if err := c.createFsEntriesTable(ctx); err != nil {
 		return err
 	}
 
@@ -346,11 +345,6 @@ func (c *Clickhouse) CreateSchema(ctx context.Context) error {
 
 	// Create state table
 	if err := c.createTableWithStatement(ctx, createRollupStateTable); err != nil {
-		return err
-	}
-
-	// Best-effort migration for legacy installations: ensure new columns/types exist
-	if err := c.migrateSchema(ctx); err != nil {
 		return err
 	}
 
@@ -367,18 +361,9 @@ func (c *Clickhouse) createTableWithStatement(ctx context.Context, statement str
 	return c.conn.Exec(ctx, statement)
 }
 
-// createFsEntriesTableWithFallback tries to create the fs_entries table with path bloom filter,
-// but falls back to no path index if the server doesn't support it.
-func (c *Clickhouse) createFsEntriesTableWithFallback(ctx context.Context) error {
-	// Try fs_entries with path bloom filter, fallback if server doesn't support it
-	if err := c.conn.Exec(ctx, createFsEntriesTable); err != nil {
-		// Retry with no path index
-		if err2 := c.conn.Exec(ctx, createFsEntriesTableNoPathIdx); err2 != nil {
-			return err2
-		}
-	}
-
-	return nil
+func (c *Clickhouse) createFsEntriesTable(ctx context.Context) error {
+	// Use schema without path bloom/secondary indexes for prefix-only queries
+	return c.conn.Exec(ctx, createFsEntriesTableNoPathIdx)
 }
 
 // createViews creates all the necessary views for the schema.
@@ -549,50 +534,6 @@ func (c *Clickhouse) GetLastScanTimes(ctx context.Context) (map[string]time.Time
 	}
 
 	return result, rows.Err()
-}
-
-// migrateSchema applies best-effort migrations for pre-existing installations
-// that were created before scan_time/UUID scan_id were introduced.
-// It ensures columns exist with the right types and recreates dependent views.
-func (c *Clickhouse) migrateSchema(ctx context.Context) error {
-	// Ensure scan_time column exists on all tables used by queries/MVs
-	addScanTime := []string{
-		"ALTER TABLE scans ADD COLUMN IF NOT EXISTS scan_time DateTime AFTER scan_id",
-		"ALTER TABLE fs_entries ADD COLUMN IF NOT EXISTS scan_time DateTime AFTER scan_id",
-		"ALTER TABLE ancestor_rollups_raw ADD COLUMN IF NOT EXISTS scan_time DateTime AFTER scan_id",
-		"ALTER TABLE ancestor_rollups_state ADD COLUMN IF NOT EXISTS scan_time DateTime AFTER scan_id",
-	}
-	for _, q := range addScanTime {
-		// Ignore errors to keep migration idempotent across CH versions
-		c.dropPartitionIgnoreErrors(ctx, q)
-	}
-
-	// Ensure scan_id columns are UUID (new type); attempt MODIFY or recreate table
-	if err := c.ensureScanIDUUID(ctx, "scans", createScansTable); err != nil {
-		return err
-	}
-
-	if err := c.ensureScanIDUUID(ctx, "fs_entries", createFsEntriesTable); err != nil {
-		// try fallback schema if needed
-		if err2 := c.ensureScanIDUUID(ctx, "fs_entries", createFsEntriesTableNoPathIdx); err2 != nil {
-			return err
-		}
-	}
-
-	if err := c.ensureScanIDUUID(ctx, "ancestor_rollups_raw", createRollupRawTable); err != nil {
-		return err
-	}
-
-	if err := c.ensureScanIDUUID(ctx, "ancestor_rollups_state", createRollupStateTable); err != nil {
-		return err
-	}
-
-	// Recreate views/materialised view to pick up new definitions
-	if err := c.createViews(ctx); err != nil {
-		return err
-	}
-
-	return nil
 }
 
 // ensureScanIDUUID verifies the column type of scan_id is UUID for the given table.
