@@ -74,10 +74,14 @@ var (
 )
 
 var chGlobCmd = &cobra.Command{
-	Use:   "glob <glob_pattern> [--limit N]",
+	Use:   "glob [--limit N] '<glob_pattern>'",
 	Short: "Query ClickHouse for paths matching a glob pattern",
-	Long:  `Query ClickHouse for paths matching a glob pattern using SearchGlobPaths API.`,
-	Args:  cobra.MaximumNArgs(1),
+	Long: `Query ClickHouse for paths matching a glob pattern
+
+Eg:
+wrstat-ui clickhouse glob --limit 10 '/path/to/dir/*/subdir/*.fastq.gz'
+`,
+	Args: cobra.MaximumNArgs(1),
 	Run: func(_ *cobra.Command, args []string) {
 		if len(args) == 0 || args[0] == "" {
 			die("pattern must not be empty")
