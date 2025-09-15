@@ -409,10 +409,6 @@ WHERE ancestor LIKE ? AND ext_low != ''`
 	return cnt, nil
 }
 
-// buildGlobSearchQuery constructs a SQL query for searching paths with a glob pattern.
-// buildGlobSearchQuery removed; we avoid LIKE on parent_path and instead
-// apply range conditions with optional basename LIKE.
-
 // prefixUpperBound returns an upper bound string for prefix range scans: [prefix, prefix\xFF).
 // It appends a single 0xFF byte which is beyond all valid UTF-8 continuation bytes,
 // ensuring all strings starting with the prefix are covered by the half-open interval.
@@ -496,7 +492,7 @@ func (c *Clickhouse) execPathQuery(ctx context.Context, query string, args ...an
 
 // SearchGlobPaths searches for paths matching a glob pattern in ClickHouse using
 // mount-constrained parent_path range scans. Case-insensitive globs are not supported.
-func (c *Clickhouse) SearchGlobPaths(ctx context.Context, globPattern string, limit int) ([]string, error) {
+func (c *Clickhouse) SearchGlobPathsComplex(ctx context.Context, globPattern string, limit int) ([]string, error) {
 	// Validate input: must start with '/'
 	if !strings.HasPrefix(globPattern, "/") {
 		return nil, errGlobMustStartWithSlash
@@ -685,4 +681,148 @@ func (c *Clickhouse) SearchGlobPaths(ctx context.Context, globPattern string, li
 	}
 
 	return out, nil
+}
+
+// globToLike converts glob syntax to SQL LIKE.
+func globToLike(glob string) string {
+	var b strings.Builder
+	for _, r := range glob {
+		switch r {
+		case '*':
+			b.WriteRune('%')
+		case '?':
+			b.WriteRune('_')
+		case '%', '_':
+			b.WriteRune('\\')
+			b.WriteRune(r)
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// SearchGlobPaths executes a glob query against fs_entries.
+// Semantics: "*" matches recursively at any depth.
+func (c *Clickhouse) SearchGlobPaths(ctx context.Context, glob string, limit int) ([]string, error) {
+	if !strings.HasPrefix(glob, "/") {
+		return nil, fmt.Errorf("glob must start with '/'")
+	}
+	if err := c.ensureMounts(ctx); err != nil {
+		return nil, err
+	}
+	mount := c.findMountForPrefix(glob)
+	if mount == "" {
+		return nil, nil
+	}
+
+	rel := strings.TrimPrefix(glob, mount)
+	if strings.HasPrefix(rel, "/") {
+		rel = rel[1:]
+	}
+
+	// Case 1: no wildcards → exact match
+	if !strings.ContainsAny(rel, "*?") {
+		q := `SELECT path FROM fs_entries_current
+		      WHERE mount_path = ? AND path = ? ORDER BY path`
+		if limit > 0 {
+			q += fmt.Sprintf(" LIMIT %d", limit)
+		}
+		// Preserve trailing slash semantics by concatenating directly
+		return c.execPathQuery(ctx, q, mount, mount+rel)
+	}
+
+	// Case 2: "*.ext" suffix optimisation
+	parts := strings.Split(rel, "/")
+	if len(parts) > 0 && strings.HasPrefix(parts[len(parts)-1], "*.") &&
+		!strings.ContainsAny(parts[len(parts)-1], "?") {
+		// Everything before the last part is the fixed prefix
+		prefix := mount
+		if len(parts) > 1 {
+			prefix += strings.Join(parts[:len(parts)-1], "/") + "/"
+		}
+		ext := strings.ToLower(strings.TrimPrefix(parts[len(parts)-1], "*."))
+
+		q := `SELECT path FROM fs_entries_current
+		      WHERE mount_path = ?
+		        AND path >= ?
+		        AND path < ?
+		        AND ext_low = ?
+		      ORDER BY path`
+		if limit > 0 {
+			q += fmt.Sprintf(" LIMIT %d", limit)
+		}
+		return c.execPathQuery(ctx, q, mount, prefix, prefixUpperBound(prefix), ext)
+	}
+
+	// Case 2b: explicit directory with trailing wildcard "dir/*"
+	if strings.HasSuffix(rel, "/*") {
+		base := strings.TrimSuffix(rel, "/*")
+		if base != "" && !strings.ContainsAny(base, "*?") {
+			dir := mount + base + "/"
+
+			// All descendants (exclude the directory to avoid duplication)
+			descQ := `SELECT path FROM fs_entries_current
+					  WHERE mount_path = ? AND path LIKE ? AND path != ?
+					  ORDER BY path`
+			if limit > 0 {
+				descQ += fmt.Sprintf(" LIMIT %d", limit)
+			}
+
+			desc, err := c.execPathQuery(ctx, descQ, mount, dir+"%", dir)
+			if err != nil {
+				return nil, err
+			}
+
+			return desc, nil
+		}
+	}
+
+	// Case 3: prefix scan when there are '*' but no '?', and the pattern is a simple
+	//          trailing star (e.g., "prefix*" or "dir/*"). Otherwise, use LIKE.
+	if !strings.ContainsAny(rel, "?") {
+		firstStar := strings.Index(rel, "*")
+		if firstStar > 0 { // prefix must be non-empty to anchor the range
+			literal := rel[:firstStar]
+			suffix := rel[firstStar+1:]
+
+			// Eligible for fast prefix scan if suffix is empty (e.g., "file*")
+			// or exactly "/" (e.g., "dir/*"). Any more complex suffix uses LIKE.
+			if suffix == "" || suffix == "/" {
+				dir := mount + literal
+
+				if suffix == "/" { // dir/*: descendants only
+					descQ := `SELECT path FROM fs_entries_current
+							  WHERE mount_path = ? AND path LIKE ? AND path != ?
+							  ORDER BY path`
+					if limit > 0 {
+						descQ += fmt.Sprintf(" LIMIT %d", limit)
+					}
+					return c.execPathQuery(ctx, descQ, mount, dir+"%", dir)
+				}
+
+				// prefix* with no '?': use range scan and exclude the exact prefix path
+				q := `SELECT path FROM fs_entries_current
+					  WHERE mount_path = ?
+						AND path >= ?
+						AND path < ?
+						AND path != ?
+					  ORDER BY path`
+				if limit > 0 {
+					q += fmt.Sprintf(" LIMIT %d", limit)
+				}
+				return c.execPathQuery(ctx, q, mount, dir, prefixUpperBound(dir), dir)
+			}
+		}
+	}
+
+	// Case 4: fallback → LIKE
+	like := globToLike(mount + rel)
+	q := `SELECT path FROM fs_entries_current
+	      WHERE mount_path = ? AND path LIKE ?
+	      ORDER BY path`
+	if limit > 0 {
+		q += fmt.Sprintf(" LIMIT %d", limit)
+	}
+	return c.execPathQuery(ctx, q, mount, like)
 }
