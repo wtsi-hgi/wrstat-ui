@@ -80,7 +80,7 @@ var chGlobCmd = &cobra.Command{
 	Long:  `Query ClickHouse for paths matching a glob pattern using SearchGlobPaths API.`,
 	Run: func(_ *cobra.Command, args []string) {
 		if globPattern == "" {
-			die("--pattern is required")
+			die("pattern must not be empty")
 		}
 		if err := RunGlob(globPattern, globLimit); err != nil {
 			die("%s", err)
@@ -103,6 +103,7 @@ func init() {
 	// Glob query flags
 	chGlobCmd.Flags().StringVar(&globPattern, "pattern", "", "Glob pattern to search for (required)")
 	chGlobCmd.Flags().IntVar(&globLimit, "limit", 0, "Limit number of results (0 = unlimited)")
+	_ = chGlobCmd.MarkFlagRequired("pattern")
 }
 
 // RunUpdate executes the update (ingest) command.
@@ -146,6 +147,10 @@ func RunGlob(pattern string, limit int) error {
 	results, err := ch.SearchGlobPaths(ctx, pattern, limit)
 	if err != nil {
 		return err
+	}
+
+	if len(results) == 0 {
+		return fmt.Errorf("no matches found for pattern: %s", pattern)
 	}
 
 	for _, p := range results {

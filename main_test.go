@@ -556,6 +556,51 @@ func TestClickHouse(t *testing.T) {
 			So(len(lines), ShouldEqual, 1)
 			So(lines[0] == mountPath+"humgen/projects/A/file1" || lines[0] == mountPath+"humgen/projects/A/file2" || lines[0] == mountPath+"humgen/projects/B/file3", ShouldBeTrue)
 		})
+
+		Convey("glob CLI returns understandable errors for negative cases", func() {
+			// 1. Unknown mount path (pattern that doesn't match any mount)
+			// Should exit non-zero and print a clear error message
+			badMountPattern := "/not_a_mount/doesnotexist/*"
+			output, stderr, _, err := runWRStat(
+				"clickhouse", "glob",
+				"--host", chHost,
+				"--port", chPort,
+				"--database", testDatabase,
+				"--username", chUsername,
+				"--password", chPassword,
+				"--pattern", badMountPattern,
+			)
+			So(err, ShouldNotBeNil)
+			So(output, ShouldBeBlank)
+			So(stderr, ShouldContainSubstring, "no matches found")
+
+			// 2. Malformed pattern (e.g. empty pattern)
+			output, stderr, _, err = runWRStat(
+				"clickhouse", "glob",
+				"--host", chHost,
+				"--port", chPort,
+				"--database", testDatabase,
+				"--username", chUsername,
+				"--password", chPassword,
+				"--pattern", "",
+			)
+			So(err, ShouldNotBeNil)
+			So(output, ShouldBeBlank)
+			So(stderr, ShouldContainSubstring, "pattern must not be empty")
+
+			// 3. Missing required --pattern flag
+			output, stderr, _, err = runWRStat(
+				"clickhouse", "glob",
+				"--host", chHost,
+				"--port", chPort,
+				"--database", testDatabase,
+				"--username", chUsername,
+				"--password", chPassword,
+			)
+			So(err, ShouldNotBeNil)
+			So(output, ShouldBeBlank)
+			So(stderr, ShouldContainSubstring, "required flag(s) \"pattern\" not set")
+		})
 	})
 }
 
