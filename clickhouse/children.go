@@ -152,12 +152,7 @@ func childrenQueryConditions(dir string, f Filters) ([]any, []string) {
 }
 
 // childrenQuerySQL returns the SQL template for the children summaries query given WHERE and bucket filter strings.
-func childrenQuerySQL(whereClause, bucketFilter string) string {
-	return childrenQueryPrefix() + whereClause + bucketFilter + childrenQuerySuffix()
-}
-
-func childrenQueryPrefix() string {
-	return `
+const childrenQueryPrefix = `
 SELECT
 	children.path,
 	children.basename,
@@ -185,16 +180,17 @@ FROM (
 		anyLast(ftype) AS ftype
 	FROM fs_entries_current
 	WHERE `
-}
 
-func childrenQuerySuffix() string {
-	return `
+const childrenQuerySuffix = `
 	GROUP BY path, parent_path, basename
 ) AS children
 WHERE children.ftype = ?
 GROUP BY children.path, children.basename
 ORDER BY children.basename
 `
+
+func childrenQuerySQL(whereClause, bucketFilter string) string {
+	return childrenQueryPrefix + whereClause + bucketFilter + childrenQuerySuffix
 }
 
 // buildChildrenBucketFilter builds the time bucket filter used in buildChildrenSummariesQuery.

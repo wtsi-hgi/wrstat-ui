@@ -180,11 +180,10 @@ func buildGlobalTimeBucketFilter(f Filters) string {
 func buildAllSummaryQuery(where []string, bucketFilter string) string {
 	// To match Bolt behaviour, we need to deduplicate directory entries
 	// by normalising paths and count only real entries.
-	return allSummaryQueryPrefix() + strings.Join(where, " AND ") + bucketFilter + allSummaryQuerySuffix()
+	return allSummaryQueryPrefix + strings.Join(where, " AND ") + bucketFilter + allSummaryQuerySuffix
 }
 
-func allSummaryQueryPrefix() string {
-	return `
+const allSummaryQueryPrefix = `
 SELECT
 	sum(agg_size) AS total_size,
 	count() AS file_count,
@@ -209,15 +208,13 @@ FROM (
 		anyLast(ftype) AS sel_ftype
 	FROM fs_entries_current
 	WHERE `
-}
 
-func allSummaryQuerySuffix() string {
-	return `
-	  AND ftype = ` + fmt.Sprintf("%d", FileTypeFile) + `
-	GROUP BY norm_path
+// allSummaryQuerySuffix uses ftype FileTypeFile (1).
+const allSummaryQuerySuffix = `
+	AND ftype = 1
+GROUP BY norm_path
 )
 `
-}
 
 // executeSummaryQuery executes a summary query and returns the results.
 func (c *Clickhouse) executeSummaryQuery(ctx context.Context, query string, args []any) (Summary, error) {

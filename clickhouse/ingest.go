@@ -90,8 +90,8 @@ func (c *Clickhouse) newBatchProcessor(
 	scanID uuid.UUID,
 	scanTime time.Time,
 ) (*BatchProcessor, error) {
-	filesBatchSQL := filesInsertSQL()
-	rollupsBatchSQL := rollupsInsertSQL()
+	filesBatchSQL := filesInsertSQL
+	rollupsBatchSQL := rollupsInsertSQL
 
 	filesBatch, err := prepareBatch(ctx, c.conn, filesBatchSQL)
 	if err != nil {
@@ -115,20 +115,16 @@ func (c *Clickhouse) newBatchProcessor(
 	}, nil
 }
 
-// filesInsertSQL returns the SQL string used to insert file entries.
-func filesInsertSQL() string {
-	return `
-		INSERT INTO fs_entries
-		(mount_path, scan_id, scan_time, path, parent_path, basename,
-		 depth, ext_low, ftype, inode, size, uid, gid, mtime, atime, ctime)`
-}
+// filesInsertSQL is the SQL string used to insert file entries.
+const filesInsertSQL = `
+	INSERT INTO fs_entries
+	(mount_path, scan_id, scan_time, path, parent_path, basename,
+	 depth, ext_low, ftype, inode, size, uid, gid, mtime, atime, ctime)`
 
-// rollupsInsertSQL returns the SQL string used to insert rollup entries.
-func rollupsInsertSQL() string {
-	return `
-		INSERT INTO ancestor_rollups_raw 
-		(mount_path, scan_id, scan_time, ancestor, size, atime, mtime, uid, gid, ext_low)`
-}
+// rollupsInsertSQL is the SQL string used to insert rollup entries.
+const rollupsInsertSQL = `
+	INSERT INTO ancestor_rollups_raw 
+	(mount_path, scan_id, scan_time, ancestor, size, atime, mtime, uid, gid, ext_low)`
 
 // prepareBatch prepares a ClickHouse batch from the given SQL string.
 // It's acceptable to return the CHBatch interface here as the concrete batch
