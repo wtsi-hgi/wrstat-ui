@@ -175,9 +175,9 @@ func buildGlobalTimeBucketFilter(f Filters) string {
 // buildAllSummaryQuery builds the summary query across all mounts,
 // using per-row scan time for any time buckets.
 func buildAllSummaryQuery(where []string, bucketFilter string) string {
-	// To match Bolt behaviour:
-	// 1) Deduplicate entries by normalising paths
-	// 2) Count only real files here; directory contribution is added separately
+	// To match Bolt behaviour, we need to:
+	// 1. Deduplicate directory entries by normalising paths
+	// 2. Count only real entries, not duplicates from path expansion
 	q := `
 SELECT
 	sum(agg_size) AS total_size,
