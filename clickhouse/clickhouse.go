@@ -116,6 +116,7 @@ type FileEntry struct {
 	Path       string
 	ParentPath string
 	Basename   string
+	Depth      uint16
 	Ext        string
 	FType      uint8
 	INode      uint64

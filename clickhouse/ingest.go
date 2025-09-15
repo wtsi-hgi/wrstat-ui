@@ -92,7 +92,7 @@ func (c *Clickhouse) newBatchProcessor(
 ) (*BatchProcessor, error) {
 	filesBatchSQL := `
 		INSERT INTO fs_entries 
-		(mount_path, scan_id, scan_time, path, parent_path, basename, ext_low, ftype, inode, size, uid, gid, mtime, atime, ctime)`
+		(mount_path, scan_id, scan_time, path, parent_path, basename, depth, ext_low, ftype, inode, size, uid, gid, mtime, atime, ctime)`
 
 	rollupsBatchSQL := `
 		INSERT INTO ancestor_rollups_raw 
@@ -121,10 +121,10 @@ func (c *Clickhouse) newBatchProcessor(
 }
 
 // AddFile adds a file entry to the batch.
-func (bp *BatchProcessor) AddFile(path string, parent string, name string, ext string,
+func (bp *BatchProcessor) AddFile(path string, parent string, name string, depth uint16, ext string,
 	ft FileType, inode uint64, size uint64, uid uint32, gid uint32, mtime, atime, ctime time.Time) error {
 	if err := bp.filesBatch.Append(
-		bp.mountPath, bp.scanID, bp.scanTime, path, parent, name, ext, uint8(ft),
+		bp.mountPath, bp.scanID, bp.scanTime, path, parent, name, depth, ext, uint8(ft),
 		inode, size, uid, gid, mtime, atime, ctime,
 	); err != nil {
 		return err
@@ -317,8 +317,11 @@ func processFileEntry(bp *BatchProcessor, fi *stats.FileInfo, mountPath string, 
 		dirsSeen[path] = true
 	}
 
+	// Compute depth: number of '/' separators excluding leading root; ensure directories end with '/'
+	dpth := computeDepth(path)
+
 	// Add file entry to batch
-	if err := bp.AddFile(path, parent, name, ext, ft, inode, size,
+	if err := bp.AddFile(path, parent, name, dpth, ext, ft, inode, size,
 		fi.UID, fi.GID, mtime, atime, ctime); err != nil {
 		return fmt.Errorf("failed to add file entry: %w", err)
 	}
@@ -460,7 +463,7 @@ func addSyntheticDirAndRollups(
 	// deduplicated at query time for global listings.
 	//
 	// Use DirectorySize for synthetic directories to ensure consistent directory sizing
-	if err := bp.AddFile(a, p, name, "", FileTypeDir, 0, DirectorySize, 0, 0, t, t, t); err != nil {
+	if err := bp.AddFile(a, p, name, computeDepth(a), "", FileTypeDir, 0, DirectorySize, 0, 0, t, t, t); err != nil {
 		return err
 	}
 

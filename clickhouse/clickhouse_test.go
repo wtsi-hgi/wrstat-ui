@@ -236,13 +236,21 @@ func TestSearchGlobPathsPublic(t *testing.T) {
 	r := root.AsReader()
 	require.NoError(t, ch.UpdateClickhouse(ctx, mount, r))
 
-	// Case-sensitive search; pattern must match full path, so include a leading wildcard
-	paths, err := ch.SearchGlobPaths(ctx, "*/p/q/file*", 0)
+	// Invalid: does not start with '/'
+	_, err = ch.SearchGlobPaths(ctx, "p/q/*", 0)
+	require.Error(t, err)
+
+	// Invalid: '/dir/*' where '/dir' is not a known mount
+	_, err = ch.SearchGlobPaths(ctx, "/dir/*", 0)
+	require.Error(t, err)
+
+	// Valid simple glob anchored at known mount
+	paths, err := ch.SearchGlobPaths(ctx, mount+"p/q/file*", 0)
 	require.NoError(t, err)
 	assert.Len(t, paths, 2)
 
 	// Limit works
-	paths, err = ch.SearchGlobPaths(ctx, "*/p/q/file*", 1)
+	paths, err = ch.SearchGlobPaths(ctx, mount+"p/q/file*", 1)
 	require.NoError(t, err)
 	assert.Len(t, paths, 1)
 }

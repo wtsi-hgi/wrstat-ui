@@ -249,3 +249,37 @@ func EnsureDir(path string) string {
 
 	return path
 }
+
+// computeDepth returns the directory depth of a path, counting segments.
+// Root '/' has depth 0, '/a/' has depth 1, '/a/b/' depth 2, and files
+// are measured by their parent directory depth (eg. '/a/b/file' => 2).
+func computeDepth(p string) uint16 {
+	if p == "/" {
+		return 0
+	}
+
+	// For files, use parent directory depth
+	parent, name := SplitParentAndName(p)
+	if name != "" && !IsDirPath(p) {
+		p = parent
+	}
+
+	s := strings.Trim(p, "/")
+	if s == "" {
+		return 0
+	}
+
+	// Count segments split by '/'
+	n := 1
+	for i := 0; i < len(s); i++ {
+		if s[i] == '/' {
+			n++
+		}
+	}
+
+	if n < 0 {
+		return 0
+	}
+
+	return uint16(n)
+}

@@ -424,6 +424,7 @@ func subtreeLikelyHasTemp(ctx *gin.Context, ch *clickhouse.Clickhouse, dir strin
 	// Case-sensitive search is fine for '/tmp/'. Limit 1 for efficiency.
 	// Pattern: EnsureDir(dir) + "*/tmp/*" so we anchor at the directory boundary
 	// Example: "/k/" + "*/tmp/*" => "/k/*/tmp/*"
+	// Anchor at the provided directory. Our API requires patterns start at '/'.
 	pattern := clickhouse.EnsureDir(dir) + "*/tmp/*"
 
 	// Use a small limit to just detect presence

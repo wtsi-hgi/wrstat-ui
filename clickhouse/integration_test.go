@@ -213,7 +213,7 @@ func TestClickHouseIntegration(t *testing.T) {
 	})
 
 	t.Run("SearchGlobPathsCheck", func(t *testing.T) {
-		paths, err := ch.SearchGlobPaths(ctx, "*/projects/*/file*", 10)
+		paths, err := ch.SearchGlobPaths(ctx, mountPath+"humgen/projects/*/file*", 10)
 		require.NoError(t, err)
 		assert.Equal(t, 3, len(paths)) // All 3 files match the pattern
 	})

@@ -84,6 +84,7 @@ CREATE TABLE IF NOT EXISTS fs_entries (
 	path String CODEC(ZSTD),
 	parent_path String CODEC(ZSTD),
 	basename String CODEC(ZSTD),
+		depth UInt16 CODEC(T64, ZSTD),
 	ext_low String CODEC(ZSTD),
 	ftype UInt8 CODEC(ZSTD),
 	inode UInt64 CODEC(T64, ZSTD),
@@ -97,7 +98,8 @@ CREATE TABLE IF NOT EXISTS fs_entries (
 	INDEX idx_gid gid TYPE minmax GRANULARITY 8192,
 	INDEX idx_mtime mtime TYPE minmax GRANULARITY 8192,
 	INDEX idx_atime atime TYPE minmax GRANULARITY 8192,
-	INDEX idx_parent_path parent_path TYPE minmax GRANULARITY 8192
+		INDEX idx_parent_path parent_path TYPE minmax GRANULARITY 8192,
+		INDEX idx_depth depth TYPE minmax GRANULARITY 8192
 ) ENGINE = MergeTree
 PARTITION BY (mount_path, scan_time)
 ORDER BY (mount_path, parent_path, basename)

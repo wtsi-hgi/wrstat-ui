@@ -37,7 +37,7 @@ func (c *Clickhouse) ListImmediateChildren(ctx context.Context, dir string) ([]F
 
 	// Direct query without duplicate handling since we're guaranteed unique paths
 	rows, err := c.conn.Query(ctx, `
-		SELECT path, parent_path, basename, ext_low, ftype, inode, size, uid, gid, mtime, atime, ctime
+		SELECT path, parent_path, basename, depth, ext_low, ftype, inode, size, uid, gid, mtime, atime, ctime
 		FROM fs_entries_current
 		WHERE parent_path = ? AND path != '/'`,
 		dir)
@@ -50,7 +50,7 @@ func (c *Clickhouse) ListImmediateChildren(ctx context.Context, dir string) ([]F
 	for rows.Next() {
 		var entry FileEntry
 		if err := rows.Scan(
-			&entry.Path, &entry.ParentPath, &entry.Basename, &entry.Ext,
+			&entry.Path, &entry.ParentPath, &entry.Basename, &entry.Depth, &entry.Ext,
 			&entry.FType, &entry.INode, &entry.Size,
 			&entry.UID, &entry.GID,
 			&entry.MTime, &entry.ATime, &entry.CTime); err != nil {
@@ -440,192 +440,115 @@ func (c *Clickhouse) execPathQuery(ctx context.Context, query string, args ...an
 // SearchGlobPaths searches for paths matching a glob pattern in ClickHouse using
 // mount-constrained parent_path range scans. Case-insensitive globs are not supported.
 func (c *Clickhouse) SearchGlobPaths(ctx context.Context, globPattern string, limit int) ([]string, error) {
-	// We only support case-sensitive globs and optimise for prefix-based patterns.
-	// Strategy:
-	// 1) Determine the mount from the provided pattern and ensure we know mounts.
-	// 2) Extract the parent_path prefix from the glob: everything up to the last '/'
-	//    before a wildcard is used as the range prefix; range on parent_path.
-	// 3) Constrain mount_path = ? so ClickHouse can prune partitions.
-	// 4) Avoid LIKE on parent_path; use LIKE only on basename or full path if needed.
+	// Validate input: must start with '/'
+	if !strings.HasPrefix(globPattern, "/") {
+		return nil, fmt.Errorf("glob must start with '/'")
+	}
+
 	if err := c.ensureMounts(ctx); err != nil {
 		return nil, err
 	}
 
-	// Build list of mounts to query. If the pattern has a known mount prefix,
-	// query just that mount; otherwise iterate all known mounts.
+	// Determine mount; refresh once if unknown
 	mount := c.findMountForPrefix(globPattern)
 	if mount == "" {
-		// Unknown mount: refresh once (eg. first query after startup) and retry.
 		if err := c.refreshMounts(ctx); err != nil {
 			return nil, err
 		}
-
 		mount = c.findMountForPrefix(globPattern)
 	}
 
-	mounts := c.cachedMounts
-	if mount != "" {
-		mounts = []string{mount}
+	// Split into (mount, remainder). If no mount matched, we'll iterate all mounts.
+	remainder := strings.TrimPrefix(globPattern, mount)
+	remainder = strings.TrimPrefix(remainder, "/")
+
+	// Find parent_path glob and name pattern
+	lastSlash := strings.LastIndex(remainder, "/")
+	parentGlob := ""
+	nameGlob := remainder
+	if lastSlash >= 0 {
+		parentGlob = remainder[:lastSlash+1]
+		nameGlob = remainder[lastSlash+1:]
 	}
 
-	// Compose a per-mount absolute pattern from the input glob.
-	compose := func(mnt string) string {
-		if strings.HasPrefix(globPattern, "*/") {
-			return mnt + strings.TrimPrefix(globPattern[2:], "/")
-		}
-		if strings.HasPrefix(globPattern, "/") {
-			return mnt + strings.TrimPrefix(globPattern, "/")
-		}
+	toLike := func(g string) string { return strings.ReplaceAll(strings.ReplaceAll(g, "*", "%"), "?", "_") }
 
-		return mnt + globPattern
+	mounts := []string{mount}
+	if mount == "" {
+		mounts = c.cachedMounts
 	}
 
 	seen := make(map[string]struct{}, 64)
 	out := make([]string, 0, DefaultResultCapacity)
 
 	for _, mnt := range mounts {
-		if limit > 0 && len(out) >= limit {
-			break
-		}
-
-		effective := compose(mnt)
-
-		// If the original pattern begins with "*/", we cannot derive a stable
-		// parent_path prefix. Fall back to a path LIKE constrained by mount.
-		if strings.HasPrefix(globPattern, "*/") {
-			// Build a path LIKE pattern from the suffix after the leading '*/',
-			// matching at any depth under the mount: path LIKE CONCAT(mount, '%/', suffix)
-			suffix := strings.TrimPrefix(globPattern[2:], "/")
-			like := strings.ReplaceAll(strings.ReplaceAll(suffix, "*", "%"), "?", "_")
-			q := `SELECT path FROM fs_entries_current WHERE mount_path = ? AND path LIKE ?`
-			likeArg := mnt + "%/" + like
-			if limit > 0 {
-				perLimit := limit - len(out)
-				if perLimit < 1 {
-					break
-				}
-
-				q += fmt.Sprintf(" LIMIT %d", perLimit)
-			}
-
-			paths, err := c.execPathQuery(ctx, q, mnt, likeArg)
-			if err != nil {
-				return nil, err
-			}
-			for _, p := range paths {
-				if _, ok := seen[p]; ok {
+		// Compute longest literal prefix for parent_path for this mount
+		current := mnt
+		_ = computeDepth(current)
+		segs := strings.Split(parentGlob, "/")
+		for i, s := range segs {
+			if s == "" {
+				if i == 0 {
 					continue
 				}
-				seen[p] = struct{}{}
-				out = append(out, p)
-			}
-
-			continue
-		}
-
-		// Determine fixed portion up to first wildcard.
-		wc := strings.IndexAny(effective, "*?")
-		fixed := effective
-		if wc >= 0 {
-			fixed = effective[:wc]
-		}
-
-		// If the pattern has a slash following the first wildcard, it's a complex
-		// multi-segment match (e.g., "/k*/tmp/*" or "/a/*/b/*.txt"). In this case,
-		// fall back to a mount-constrained path LIKE which preserves the interior
-		// directory semantics of the glob. This avoids losing segments like "/tmp/".
-		if wc >= 0 && strings.Contains(effective[wc:], "/") {
-			like := strings.ReplaceAll(strings.ReplaceAll(effective, "*", "%"), "?", "_")
-			q := `SELECT path FROM fs_entries_current WHERE mount_path = ? AND path LIKE ?`
-			if limit > 0 {
-				perLimit := limit - len(out)
-				if perLimit < 1 {
-					break
-				}
-
-				q += fmt.Sprintf(" LIMIT %d", perLimit)
-			}
-
-			paths, err := c.execPathQuery(ctx, q, mnt, like)
-			if err != nil {
-				return nil, err
-			}
-			for _, p := range paths {
-				if _, ok := seen[p]; ok {
-					continue
-				}
-				seen[p] = struct{}{}
-				out = append(out, p)
-			}
-
-			continue
-		}
-
-		// Ensure fixed covers at least the mount; if not, use the mount as prefix.
-		if !strings.HasPrefix(fixed, mnt) {
-			fixed = mnt
-		}
-
-		// Use the fixed portion directly as the parent_path range prefix (eg. '/k').
-		parentPrefix := fixed
-
-		// Range bounds for parent_path
-		lo := parentPrefix
-		hi := prefixUpperBound(parentPrefix)
-
-		// Per-mount remaining limit
-		perLimit := 0
-		if limit > 0 {
-			perLimit = limit - len(out)
-			if perLimit < 1 {
 				break
 			}
+			if strings.ContainsAny(s, "*?") {
+				break
+			}
+			current = EnsureDir(current + s)
 		}
+		literalPrefix := current
 
-		if wc == -1 {
-			// Exact path match
-			q := `SELECT path FROM fs_entries_current
-WHERE mount_path = ? AND parent_path >= ? AND parent_path < ? AND path = ?`
-			if perLimit > 0 {
-				q += fmt.Sprintf(" LIMIT %d", perLimit)
-			}
-
-			paths, err := c.execPathQuery(ctx, q, mnt, lo, hi, effective)
-			if err != nil {
-				return nil, err
-			}
-
-			for _, p := range paths {
-				if _, ok := seen[p]; ok {
-					continue
+		// Target depth equals mount depth plus number of segments in parentGlob
+		totalSegs := 0
+		if parentGlob != "" {
+			parts := strings.Split(strings.TrimSuffix(parentGlob, "/"), "/")
+			for _, p := range parts {
+				if p != "" {
+					totalSegs++
 				}
-				seen[p] = struct{}{}
-				out = append(out, p)
 			}
+		}
+		targetDepth := uint16(int(computeDepth(mnt)) + totalSegs)
 
-			continue
+		lo := literalPrefix
+		hi := prefixUpperBound(literalPrefix)
+		nameLike := toLike(nameGlob)
+		if nameLike == "" {
+			nameLike = "%"
 		}
 
-		// Basename LIKE while keeping parent_path a range
-		lastSlashGlobal := strings.LastIndex(effective, "/")
-		basenameGlob := effective
-		if lastSlashGlobal >= 0 {
-			basenameGlob = effective[lastSlashGlobal+1:]
-		}
-		basenamePattern := strings.ReplaceAll(strings.ReplaceAll(basenameGlob, "*", "%"), "?", "_")
-		if basenamePattern == "" {
-			basenamePattern = "%"
+		q := `SELECT path FROM fs_entries_current WHERE mount_path = ? AND parent_path >= ? AND parent_path < ?`
+		args := []any{mnt, lo, hi}
+
+		if parentGlob != "" {
+			q += " AND depth = ?"
+			args = append(args, targetDepth)
 		}
 
-		// Add a path LIKE constraint to ensure matches stay under the fixed prefix
-		pathLike := fixed + "%"
-		q := `SELECT path FROM fs_entries_current
-WHERE mount_path = ? AND parent_path >= ? AND parent_path < ? AND path LIKE ? AND basename LIKE ?`
-		if perLimit > 0 {
+		if parentGlob != "" && (strings.ContainsAny(parentGlob, "*?") || len(parentGlob) > len(strings.TrimPrefix(literalPrefix, mnt))) {
+			parentLike := toLike(parentGlob)
+			q += " AND parent_path LIKE ?"
+			args = append(args, mnt+parentLike)
+		}
+
+		q += " AND basename LIKE ?"
+		args = append(args, nameLike)
+
+		q += " ORDER BY mount_path, parent_path, basename"
+
+		perLimit := limit
+		if limit > 0 {
+			remain := limit - len(out)
+			if remain <= 0 {
+				break
+			}
+			perLimit = remain
 			q += fmt.Sprintf(" LIMIT %d", perLimit)
 		}
 
-		paths, err := c.execPathQuery(ctx, q, mnt, lo, hi, pathLike, basenamePattern)
+		paths, err := c.execPathQuery(ctx, q, args...)
 		if err != nil {
 			return nil, err
 		}
@@ -636,6 +559,38 @@ WHERE mount_path = ? AND parent_path >= ? AND parent_path < ? AND path LIKE ? AN
 			}
 			seen[p] = struct{}{}
 			out = append(out, p)
+		}
+
+		// Also attempt a direct path LIKE to catch directory-only matches
+		if limit > 0 && len(out) >= limit {
+			break
+		}
+
+		pathPattern := toLike(parentGlob + nameGlob)
+		if pathPattern != "" {
+			q2 := `SELECT path FROM fs_entries_current WHERE mount_path = ? AND path LIKE ? ORDER BY mount_path, parent_path, basename`
+			args2 := []any{mnt, mnt + pathPattern}
+			if limit > 0 {
+				remain := limit - len(out)
+				if remain > 0 {
+					q2 += fmt.Sprintf(" LIMIT %d", remain)
+				}
+			}
+
+			more, err := c.execPathQuery(ctx, q2, args2...)
+			if err != nil {
+				return nil, err
+			}
+			for _, p := range more {
+				if _, ok := seen[p]; ok {
+					continue
+				}
+				seen[p] = struct{}{}
+				out = append(out, p)
+				if limit > 0 && len(out) >= limit {
+					break
+				}
+			}
 		}
 	}
 
