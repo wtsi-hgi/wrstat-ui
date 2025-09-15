@@ -43,6 +43,7 @@ type ConnectionParams struct {
 
 // New creates and configures a new Clickhouse instance.
 func New(params ConnectionParams) (*Clickhouse, error) {
+	// First try to connect directly to the requested database
 	conn, err := chdriver.Open(&chdriver.Options{
 		Addr:        []string{fmt.Sprintf("%s:%s", params.Host, params.Port)},
 		Auth:        chdriver.Auth{Database: params.Database, Username: params.Username, Password: params.Password},
@@ -55,7 +56,33 @@ func New(params ConnectionParams) (*Clickhouse, error) {
 		},
 	})
 	if err != nil {
-		return nil, fmt.Errorf("connect: %w", err)
+		// Best effort: connect to default DB and create the requested database
+		admin, aerr := chdriver.Open(&chdriver.Options{
+			Addr:        []string{fmt.Sprintf("%s:%s", params.Host, params.Port)},
+			Auth:        chdriver.Auth{Database: "default", Username: params.Username, Password: params.Password},
+			DialTimeout: DialTimeoutSeconds * time.Second,
+		})
+		if aerr == nil {
+			//nolint:errcheck // best effort to create database
+			_ = admin.Exec(context.Background(), "CREATE DATABASE IF NOT EXISTS "+params.Database)
+			_ = admin.Close()
+		}
+
+		// Try connecting again to the requested database
+		conn, err = chdriver.Open(&chdriver.Options{
+			Addr:        []string{fmt.Sprintf("%s:%s", params.Host, params.Port)},
+			Auth:        chdriver.Auth{Database: params.Database, Username: params.Username, Password: params.Password},
+			DialTimeout: DialTimeoutSeconds * time.Second,
+			Compression: &chdriver.Compression{Method: chdriver.CompressionLZ4},
+			Settings: chdriver.Settings{
+				"max_insert_block_size":       MaxInsertBlockSize,
+				"min_insert_block_size_rows":  MinInsertBlockRows,
+				"min_insert_block_size_bytes": MinInsertBlockBytes, // 10MB
+			},
+		})
+		if err != nil {
+			return nil, fmt.Errorf("connect: %w", err)
+		}
 	}
 
 	return &Clickhouse{conn: conn}, nil
