@@ -529,7 +529,7 @@ func TestClickHouse(t *testing.T) {
 				"--database", testDatabase,
 				"--username", chUsername,
 				"--password", chPassword,
-				"--pattern", pattern,
+				pattern,
 			)
 			So(err, ShouldBeNil)
 			So(stderr, ShouldBeBlank)
@@ -547,7 +547,7 @@ func TestClickHouse(t *testing.T) {
 				"--database", testDatabase,
 				"--username", chUsername,
 				"--password", chPassword,
-				"--pattern", pattern,
+				pattern,
 				"--limit", "1",
 			)
 			So(err, ShouldBeNil)
@@ -568,7 +568,7 @@ func TestClickHouse(t *testing.T) {
 				"--database", testDatabase,
 				"--username", chUsername,
 				"--password", chPassword,
-				"--pattern", badMountPattern,
+				badMountPattern,
 			)
 			So(err, ShouldNotBeNil)
 			So(output, ShouldBeBlank)
@@ -582,13 +582,13 @@ func TestClickHouse(t *testing.T) {
 				"--database", testDatabase,
 				"--username", chUsername,
 				"--password", chPassword,
-				"--pattern", "",
+				"",
 			)
 			So(err, ShouldNotBeNil)
 			So(output, ShouldBeBlank)
 			So(stderr, ShouldContainSubstring, "pattern must not be empty")
 
-			// 3. Missing required --pattern flag
+			// 3. Missing required positional pattern
 			output, stderr, _, err = runWRStat(
 				"clickhouse", "glob",
 				"--host", chHost,
@@ -599,7 +599,7 @@ func TestClickHouse(t *testing.T) {
 			)
 			So(err, ShouldNotBeNil)
 			So(output, ShouldBeBlank)
-			So(stderr, ShouldContainSubstring, "required flag(s) \"pattern\" not set")
+			So(stderr, ShouldContainSubstring, "pattern must not be empty")
 		})
 	})
 }

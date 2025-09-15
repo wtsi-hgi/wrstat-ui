@@ -70,19 +70,19 @@ and provides precomputed subtree rollups.`,
 }
 
 var (
-	globPattern string
-	globLimit   int
+	globLimit int
 )
 
 var chGlobCmd = &cobra.Command{
-	Use:   "glob --pattern <glob_pattern> [--limit N]",
+	Use:   "glob <glob_pattern> [--limit N]",
 	Short: "Query ClickHouse for paths matching a glob pattern",
 	Long:  `Query ClickHouse for paths matching a glob pattern using SearchGlobPaths API.`,
+	Args:  cobra.MaximumNArgs(1),
 	Run: func(_ *cobra.Command, args []string) {
-		if globPattern == "" {
+		if len(args) == 0 || args[0] == "" {
 			die("pattern must not be empty")
 		}
-		if err := RunGlob(globPattern, globLimit); err != nil {
+		if err := RunGlob(args[0], globLimit); err != nil {
 			die("%s", err)
 		}
 	},
@@ -101,9 +101,7 @@ func init() {
 	clickhouseCmd.PersistentFlags().StringVar(&chPassword, "password", "", "ClickHouse password")
 
 	// Glob query flags
-	chGlobCmd.Flags().StringVar(&globPattern, "pattern", "", "Glob pattern to search for (required)")
 	chGlobCmd.Flags().IntVar(&globLimit, "limit", 0, "Limit number of results (0 = unlimited)")
-	_ = chGlobCmd.MarkFlagRequired("pattern")
 }
 
 // RunUpdate executes the update (ingest) command.
