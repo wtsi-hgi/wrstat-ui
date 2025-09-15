@@ -472,7 +472,9 @@ func (c *Clickhouse) SearchGlobPaths(
 	// Determine the fixed prefix up to the first wildcard. If wildcards are only trailing '*',
 	// treat as prefix; otherwise, fall back to LIKE.
 	wildcardIdx := strings.IndexAny(globPattern, "*?")
+
 	var prefix string
+
 	fallbackLike := false
 
 	if wildcardIdx == -1 {

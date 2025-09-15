@@ -65,61 +65,34 @@ func New(params ConnectionParams) (*Clickhouse, error) {
 const (
 	createScansTable = `
 CREATE TABLE IF NOT EXISTS scans (
-	mount_path String,
-	scan_id UUID,
-	scan_time DateTime,
-	state Enum8('loading' = 0, 'ready' = 1),
-	started_at DateTime,
-	finished_at Nullable(DateTime)
+	mount_path String CODEC(ZSTD),
+	scan_id UUID CODEC(ZSTD),
+	scan_time DateTime CODEC(DoubleDelta, ZSTD),
+	state Enum8('loading' = 0, 'ready' = 1) CODEC(ZSTD),
+	started_at DateTime CODEC(DoubleDelta, ZSTD),
+	finished_at Nullable(DateTime) CODEC(DoubleDelta, ZSTD)
 ) ENGINE = MergeTree
 PARTITION BY (mount_path, scan_time)
 ORDER BY (mount_path, scan_time)
 SETTINGS index_granularity = 8192`
 
-	createFsEntriesTable = `
-CREATE TABLE IF NOT EXISTS fs_entries (
-	mount_path String,
-	scan_id UUID,
-	scan_time DateTime,
-	path String,
-	parent_path String,
-	basename String,
-	ext_low String,
-	ftype UInt8,
-	inode UInt64,
-	size UInt64,
-	uid UInt32,
-	gid UInt32,
-	mtime DateTime,
-	atime DateTime,
-	ctime DateTime,
-	INDEX idx_uid uid TYPE minmax GRANULARITY 8192,
-	INDEX idx_gid gid TYPE minmax GRANULARITY 8192,
-	INDEX idx_mtime mtime TYPE minmax GRANULARITY 8192,
-	INDEX idx_atime atime TYPE minmax GRANULARITY 8192,
-	INDEX idx_parent_path parent_path TYPE minmax GRANULARITY 8192
-) ENGINE = MergeTree
-PARTITION BY (mount_path, scan_time)
-ORDER BY (mount_path, parent_path, basename)
-SETTINGS index_granularity = 8192`
-
 	createFsEntriesTableNoPathIdx = `
 CREATE TABLE IF NOT EXISTS fs_entries (
-	mount_path String,
-	scan_id UUID,
-	scan_time DateTime,
-	path String,
-	parent_path String,
-	basename String,
-	ext_low String,
-	ftype UInt8,
-	inode UInt64,
-	size UInt64,
-	uid UInt32,
-	gid UInt32,
-	mtime DateTime,
-	atime DateTime,
-	ctime DateTime,
+	mount_path String CODEC(ZSTD),
+	scan_id UUID CODEC(ZSTD),
+	scan_time DateTime CODEC(DoubleDelta, ZSTD),
+	path String CODEC(ZSTD),
+	parent_path String CODEC(ZSTD),
+	basename String CODEC(ZSTD),
+	ext_low String CODEC(ZSTD),
+	ftype UInt8 CODEC(ZSTD),
+	inode UInt64 CODEC(T64, ZSTD),
+	size UInt64 CODEC(T64, ZSTD),
+	uid UInt32 CODEC(T64, ZSTD),
+	gid UInt32 CODEC(T64, ZSTD),
+	mtime DateTime CODEC(DoubleDelta, ZSTD),
+	atime DateTime CODEC(DoubleDelta, ZSTD),
+	ctime DateTime CODEC(DoubleDelta, ZSTD),
 	INDEX idx_uid uid TYPE minmax GRANULARITY 8192,
 	INDEX idx_gid gid TYPE minmax GRANULARITY 8192,
 	INDEX idx_mtime mtime TYPE minmax GRANULARITY 8192,
@@ -132,16 +105,16 @@ SETTINGS index_granularity = 8192`
 
 	createRollupRawTable = `
 CREATE TABLE IF NOT EXISTS ancestor_rollups_raw (
-	mount_path String,
-	scan_id UUID,
-	scan_time DateTime,
-	ancestor String,
-	size UInt64,
-	atime DateTime,
-	mtime DateTime,
-	uid UInt32,
-	gid UInt32,
-	ext_low String
+	mount_path String CODEC(ZSTD),
+	scan_id UUID CODEC(ZSTD),
+	scan_time DateTime CODEC(DoubleDelta, ZSTD),
+	ancestor String CODEC(ZSTD),
+	size UInt64 CODEC(T64, ZSTD),
+	atime DateTime CODEC(DoubleDelta, ZSTD),
+	mtime DateTime CODEC(DoubleDelta, ZSTD),
+	uid UInt32 CODEC(T64, ZSTD),
+	gid UInt32 CODEC(T64, ZSTD),
+	ext_low String CODEC(ZSTD)
 ) ENGINE = MergeTree
 PARTITION BY (mount_path, scan_time)
 ORDER BY (mount_path, ancestor)
@@ -149,57 +122,57 @@ SETTINGS index_granularity = 8192`
 
 	createRollupStateTable = `
 CREATE TABLE IF NOT EXISTS ancestor_rollups_state (
-	mount_path String,
-		scan_id UUID,
-		scan_time DateTime,
-	ancestor String,
-  total_size AggregateFunction(sum, UInt64),
-  file_count AggregateFunction(sum, UInt64),
-  atime_min AggregateFunction(min, DateTime),
-  atime_max AggregateFunction(max, DateTime),
-  mtime_min AggregateFunction(min, DateTime),
-  mtime_max AggregateFunction(max, DateTime),
-	uids AggregateFunction(groupUniqArray, UInt32),
-	gids AggregateFunction(groupUniqArray, UInt32),
-	exts AggregateFunction(groupUniqArray, String),
-  at_within_0d_size AggregateFunction(sum, UInt64),
-  at_within_0d_count AggregateFunction(sum, UInt64),
-  at_older_1m_size AggregateFunction(sum, UInt64),
-  at_older_1m_count AggregateFunction(sum, UInt64),
-  at_older_2m_size AggregateFunction(sum, UInt64),
-  at_older_2m_count AggregateFunction(sum, UInt64),
-  at_older_6m_size AggregateFunction(sum, UInt64),
-  at_older_6m_count AggregateFunction(sum, UInt64),
-  at_older_1y_size AggregateFunction(sum, UInt64),
-  at_older_1y_count AggregateFunction(sum, UInt64),
-  at_older_2y_size AggregateFunction(sum, UInt64),
-  at_older_2y_count AggregateFunction(sum, UInt64),
-  at_older_3y_size AggregateFunction(sum, UInt64),
-  at_older_3y_count AggregateFunction(sum, UInt64),
-  at_older_5y_size AggregateFunction(sum, UInt64),
-  at_older_5y_count AggregateFunction(sum, UInt64),
-  at_older_7y_size AggregateFunction(sum, UInt64),
-  at_older_7y_count AggregateFunction(sum, UInt64),
-  mt_older_1m_size AggregateFunction(sum, UInt64),
-  mt_older_1m_count AggregateFunction(sum, UInt64),
-  mt_older_2m_size AggregateFunction(sum, UInt64),
-  mt_older_2m_count AggregateFunction(sum, UInt64),
-  mt_older_6m_size AggregateFunction(sum, UInt64),
-  mt_older_6m_count AggregateFunction(sum, UInt64),
-  mt_older_1y_size AggregateFunction(sum, UInt64),
-  mt_older_1y_count AggregateFunction(sum, UInt64),
-  mt_older_2y_size AggregateFunction(sum, UInt64),
-  mt_older_2y_count AggregateFunction(sum, UInt64),
-  mt_older_3y_size AggregateFunction(sum, UInt64),
-  mt_older_3y_count AggregateFunction(sum, UInt64),
-  mt_older_5y_size AggregateFunction(sum, UInt64),
-  mt_older_5y_count AggregateFunction(sum, UInt64),
-  mt_older_7y_size AggregateFunction(sum, UInt64),
-  mt_older_7y_count AggregateFunction(sum, UInt64)
+		mount_path String CODEC(ZSTD),
+				scan_id UUID CODEC(ZSTD),
+				scan_time DateTime CODEC(DoubleDelta, ZSTD),
+		ancestor String CODEC(ZSTD),
+	total_size AggregateFunction(sum, UInt64) CODEC(ZSTD),
+	file_count AggregateFunction(sum, UInt64) CODEC(ZSTD),
+	atime_min AggregateFunction(min, DateTime) CODEC(ZSTD),
+	atime_max AggregateFunction(max, DateTime) CODEC(ZSTD),
+	mtime_min AggregateFunction(min, DateTime) CODEC(ZSTD),
+	mtime_max AggregateFunction(max, DateTime) CODEC(ZSTD),
+		uids AggregateFunction(groupUniqArray, UInt32) CODEC(ZSTD),
+		gids AggregateFunction(groupUniqArray, UInt32) CODEC(ZSTD),
+		exts AggregateFunction(groupUniqArray, String) CODEC(ZSTD),
+	at_within_0d_size AggregateFunction(sum, UInt64) CODEC(ZSTD),
+	at_within_0d_count AggregateFunction(sum, UInt64) CODEC(ZSTD),
+	at_older_1m_size AggregateFunction(sum, UInt64) CODEC(ZSTD),
+	at_older_1m_count AggregateFunction(sum, UInt64) CODEC(ZSTD),
+	at_older_2m_size AggregateFunction(sum, UInt64) CODEC(ZSTD),
+	at_older_2m_count AggregateFunction(sum, UInt64) CODEC(ZSTD),
+	at_older_6m_size AggregateFunction(sum, UInt64) CODEC(ZSTD),
+	at_older_6m_count AggregateFunction(sum, UInt64) CODEC(ZSTD),
+	at_older_1y_size AggregateFunction(sum, UInt64) CODEC(ZSTD),
+	at_older_1y_count AggregateFunction(sum, UInt64) CODEC(ZSTD),
+	at_older_2y_size AggregateFunction(sum, UInt64) CODEC(ZSTD),
+	at_older_2y_count AggregateFunction(sum, UInt64) CODEC(ZSTD),
+	at_older_3y_size AggregateFunction(sum, UInt64) CODEC(ZSTD),
+	at_older_3y_count AggregateFunction(sum, UInt64) CODEC(ZSTD),
+	at_older_5y_size AggregateFunction(sum, UInt64) CODEC(ZSTD),
+	at_older_5y_count AggregateFunction(sum, UInt64) CODEC(ZSTD),
+	at_older_7y_size AggregateFunction(sum, UInt64) CODEC(ZSTD),
+	at_older_7y_count AggregateFunction(sum, UInt64) CODEC(ZSTD),
+	mt_older_1m_size AggregateFunction(sum, UInt64) CODEC(ZSTD),
+	mt_older_1m_count AggregateFunction(sum, UInt64) CODEC(ZSTD),
+	mt_older_2m_size AggregateFunction(sum, UInt64) CODEC(ZSTD),
+	mt_older_2m_count AggregateFunction(sum, UInt64) CODEC(ZSTD),
+	mt_older_6m_size AggregateFunction(sum, UInt64) CODEC(ZSTD),
+	mt_older_6m_count AggregateFunction(sum, UInt64) CODEC(ZSTD),
+	mt_older_1y_size AggregateFunction(sum, UInt64) CODEC(ZSTD),
+	mt_older_1y_count AggregateFunction(sum, UInt64) CODEC(ZSTD),
+	mt_older_2y_size AggregateFunction(sum, UInt64) CODEC(ZSTD),
+	mt_older_2y_count AggregateFunction(sum, UInt64) CODEC(ZSTD),
+	mt_older_3y_size AggregateFunction(sum, UInt64) CODEC(ZSTD),
+	mt_older_3y_count AggregateFunction(sum, UInt64) CODEC(ZSTD),
+	mt_older_5y_size AggregateFunction(sum, UInt64) CODEC(ZSTD),
+	mt_older_5y_count AggregateFunction(sum, UInt64) CODEC(ZSTD),
+	mt_older_7y_size AggregateFunction(sum, UInt64) CODEC(ZSTD),
+	mt_older_7y_count AggregateFunction(sum, UInt64) CODEC(ZSTD)
 ) ENGINE = AggregatingMergeTree
 	PARTITION BY (mount_path, scan_time)
 ORDER BY (mount_path, ancestor)
-SETTINGS index_granularity = 8192, compression_codec = 'ZSTD'`
+SETTINGS index_granularity = 8192`
 
 	//nolint:misspell // ClickHouse requires American English spelling "MATERIALIZED"
 	createRollupMV = `
@@ -328,11 +301,6 @@ GROUP BY s.mount_path, s.scan_id, s.scan_time, s.ancestor`
 
 // CreateSchema creates all necessary tables and views in the ClickHouse database.
 func (c *Clickhouse) CreateSchema(ctx context.Context) error {
-	// Not production: ensure a clean slate to pick up schema changes
-	// Drop dependent view if present, then drop table so we can recreate with new columns
-	_ = c.conn.Exec(ctx, "DROP VIEW IF EXISTS fs_entries_current")
-	_ = c.conn.Exec(ctx, "DROP TABLE IF EXISTS fs_entries")
-
 	// Create scans table first
 	if err := c.createTableWithStatement(ctx, createScansTable); err != nil {
 		return err
@@ -397,7 +365,12 @@ func (c *Clickhouse) createViews(ctx context.Context) error {
 }
 
 // RegisterScan adds a new scan record with 'loading' state.
-func (c *Clickhouse) registerScan(ctx context.Context, mountPath string, scanID uuid.UUID, scanTime, started time.Time) error {
+func (c *Clickhouse) registerScan(
+	ctx context.Context,
+	mountPath string,
+	scanID uuid.UUID,
+	scanTime, started time.Time,
+) error {
 	err := c.conn.Exec(ctx, `
 		INSERT INTO scans (mount_path, scan_id, scan_time, state, started_at, finished_at) 
 		VALUES (?, ?, ?, 'loading', ?, NULL)`,
@@ -539,19 +512,4 @@ func (c *Clickhouse) GetLastScanTimes(ctx context.Context) (map[string]time.Time
 	}
 
 	return result, rows.Err()
-}
-
-// getColumnType returns the data type of a column from system.columns, or an error if not found.
-func (c *Clickhouse) getColumnType(ctx context.Context, table, column string) (string, error) {
-	row := c.conn.QueryRow(ctx, `
-		SELECT type FROM system.columns
-		WHERE database = currentDatabase() AND table = ? AND name = ?
-		LIMIT 1`, table, column)
-
-	var typ string
-	if err := row.Scan(&typ); err != nil {
-		return "", err
-	}
-
-	return typ, nil
 }
