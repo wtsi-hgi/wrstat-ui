@@ -74,7 +74,7 @@ CREATE TABLE IF NOT EXISTS scans (
 ) ENGINE = MergeTree
 PARTITION BY (mount_path, scan_time)
 ORDER BY (mount_path, scan_time)
-SETTINGS index_granularity = 8192, compression_codec = 'ZSTD'`
+SETTINGS index_granularity = 8192`
 
 	createFsEntriesTable = `
 CREATE TABLE IF NOT EXISTS fs_entries (
@@ -83,7 +83,7 @@ CREATE TABLE IF NOT EXISTS fs_entries (
 	scan_time DateTime,
 	path String,
 	parent_path String,
-	name String,
+	basename String,
 	ext_low String,
 	ftype UInt8,
 	inode UInt64,
@@ -100,8 +100,8 @@ CREATE TABLE IF NOT EXISTS fs_entries (
 	INDEX idx_parent_path parent_path TYPE minmax GRANULARITY 8192
 ) ENGINE = MergeTree
 PARTITION BY (mount_path, scan_time)
-ORDER BY (mount_path, parent_path, name)
-SETTINGS index_granularity = 8192, compression_codec = 'ZSTD'`
+ORDER BY (mount_path, parent_path, basename)
+SETTINGS index_granularity = 8192`
 
 	createFsEntriesTableNoPathIdx = `
 CREATE TABLE IF NOT EXISTS fs_entries (
@@ -110,7 +110,7 @@ CREATE TABLE IF NOT EXISTS fs_entries (
 	scan_time DateTime,
 	path String,
 	parent_path String,
-	name String,
+	basename String,
 	ext_low String,
 	ftype UInt8,
 	inode UInt64,
@@ -127,8 +127,8 @@ CREATE TABLE IF NOT EXISTS fs_entries (
 	INDEX idx_parent_path parent_path TYPE minmax GRANULARITY 8192
 ) ENGINE = MergeTree
 PARTITION BY (mount_path, scan_time)
-ORDER BY (mount_path, parent_path, name)
-SETTINGS index_granularity = 8192, compression_codec = 'ZSTD'`
+ORDER BY (mount_path, parent_path, basename)
+SETTINGS index_granularity = 8192`
 
 	createRollupRawTable = `
 CREATE TABLE IF NOT EXISTS ancestor_rollups_raw (
@@ -145,7 +145,7 @@ CREATE TABLE IF NOT EXISTS ancestor_rollups_raw (
 ) ENGINE = MergeTree
 PARTITION BY (mount_path, scan_time)
 ORDER BY (mount_path, ancestor)
-SETTINGS index_granularity = 8192, compression_codec = 'ZSTD'`
+SETTINGS index_granularity = 8192`
 
 	createRollupStateTable = `
 CREATE TABLE IF NOT EXISTS ancestor_rollups_state (
@@ -328,6 +328,11 @@ GROUP BY s.mount_path, s.scan_id, s.scan_time, s.ancestor`
 
 // CreateSchema creates all necessary tables and views in the ClickHouse database.
 func (c *Clickhouse) CreateSchema(ctx context.Context) error {
+	// Not production: ensure a clean slate to pick up schema changes
+	// Drop dependent view if present, then drop table so we can recreate with new columns
+	_ = c.conn.Exec(ctx, "DROP VIEW IF EXISTS fs_entries_current")
+	_ = c.conn.Exec(ctx, "DROP TABLE IF EXISTS fs_entries")
+
 	// Create scans table first
 	if err := c.createTableWithStatement(ctx, createScansTable); err != nil {
 		return err
@@ -534,36 +539,6 @@ func (c *Clickhouse) GetLastScanTimes(ctx context.Context) (map[string]time.Time
 	}
 
 	return result, rows.Err()
-}
-
-// ensureScanIDUUID verifies the column type of scan_id is UUID for the given table.
-// If the type differs, it tries to ALTER; if that fails, it drops and recreates the table.
-func (c *Clickhouse) ensureScanIDUUID(ctx context.Context, table string, createStmt string) error {
-	typ, err := c.getColumnType(ctx, table, "scan_id")
-	if err != nil {
-		// If table doesn't exist yet, just create it
-		if execErr := c.conn.Exec(ctx, createStmt); execErr != nil {
-			return execErr
-		}
-
-		return nil
-	}
-
-	if typ == "UUID" { // already correct
-		return nil
-	}
-
-	// Try to modify in-place
-	if err := c.conn.Exec(ctx, fmt.Sprintf("ALTER TABLE %s MODIFY COLUMN scan_id UUID", table)); err == nil {
-		return nil
-	}
-
-	// As a last resort (eg. incompatible engine settings), drop and recreate
-	if err := c.conn.Exec(ctx, "DROP TABLE IF EXISTS "+table); err != nil {
-		return err
-	}
-
-	return c.conn.Exec(ctx, createStmt)
 }
 
 // getColumnType returns the data type of a column from system.columns, or an error if not found.

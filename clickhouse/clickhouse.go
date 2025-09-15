@@ -110,7 +110,7 @@ const (
 type FileEntry struct {
 	Path       string
 	ParentPath string
-	Name       string
+	Basename   string
 	Ext        string
 	FType      uint8
 	INode      uint64

@@ -92,7 +92,7 @@ func (c *Clickhouse) newBatchProcessor(
 ) (*BatchProcessor, error) {
 	filesBatchSQL := `
 		INSERT INTO fs_entries 
-		(mount_path, scan_id, scan_time, path, parent_path, name, ext_low, ftype, inode, size, uid, gid, mtime, atime, ctime)`
+		(mount_path, scan_id, scan_time, path, parent_path, basename, ext_low, ftype, inode, size, uid, gid, mtime, atime, ctime)`
 
 	rollupsBatchSQL := `
 		INSERT INTO ancestor_rollups_raw 

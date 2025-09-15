@@ -33,7 +33,7 @@ import (
 type SummaryChild struct {
 	Path       string
 	ParentPath string
-	Name       string
+	Basename   string
 	Summary    Summary
 }
 
@@ -61,14 +61,14 @@ func (c *Clickhouse) ChildrenSummaries(
 	for rows.Next() {
 		var (
 			child                SummaryChild
-			childPath, childName string
+			childPath, childBase string
 		)
 
 		// Scan the base fields
 
 		if err := rows.Scan(
 			&childPath,
-			&childName,
+			&childBase,
 			&child.Summary.TotalSize,
 			&child.Summary.FileCount,
 			&child.Summary.MostRecentATime,
@@ -87,7 +87,7 @@ func (c *Clickhouse) ChildrenSummaries(
 
 		child.Path = childPath
 		child.ParentPath = dir
-		child.Name = childName
+		child.Basename = childBase
 
 		results = append(results, child)
 	}
@@ -160,7 +160,7 @@ func buildChildrenSummariesQuery(dir string, f Filters) (string, []any) {
 	query := `
 SELECT
 	children.path,
-	children.name,
+	children.basename,
 	sum(children.size) AS total_size,
 	count() AS file_count,
 	max(children.atime) AS most_recent_atime,
@@ -174,7 +174,7 @@ SELECT
 FROM (
 	SELECT
 		path,
-		name,
+		basename,
 		parent_path,
 		max(size) AS size,
 		max(atime) AS atime,
@@ -185,11 +185,11 @@ FROM (
 		anyLast(ftype) AS ftype
 	FROM fs_entries_current
 	WHERE ` + strings.Join(conditions, " AND ") + bucketFilter + `
-	GROUP BY path, parent_path, name
+	GROUP BY path, parent_path, basename
 ) AS children
 WHERE children.ftype = ?
-GROUP BY children.path, children.name
-ORDER BY children.name
+GROUP BY children.path, children.basename
+ORDER BY children.basename
 `
 
 	// Constrain to directories only at the output stage

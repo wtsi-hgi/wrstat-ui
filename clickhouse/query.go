@@ -37,7 +37,7 @@ func (c *Clickhouse) ListImmediateChildren(ctx context.Context, dir string) ([]F
 
 	// Direct query without duplicate handling since we're guaranteed unique paths
 	rows, err := c.conn.Query(ctx, `
-		SELECT path, parent_path, name, ext_low, ftype, inode, size, uid, gid, mtime, atime, ctime
+		SELECT path, parent_path, basename, ext_low, ftype, inode, size, uid, gid, mtime, atime, ctime
 		FROM fs_entries_current
 		WHERE parent_path = ? AND path != '/'`,
 		dir)
@@ -50,7 +50,7 @@ func (c *Clickhouse) ListImmediateChildren(ctx context.Context, dir string) ([]F
 	for rows.Next() {
 		var entry FileEntry
 		if err := rows.Scan(
-			&entry.Path, &entry.ParentPath, &entry.Name, &entry.Ext,
+			&entry.Path, &entry.ParentPath, &entry.Basename, &entry.Ext,
 			&entry.FType, &entry.INode, &entry.Size,
 			&entry.UID, &entry.GID,
 			&entry.MTime, &entry.ATime, &entry.CTime); err != nil {
