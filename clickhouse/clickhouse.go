@@ -45,11 +45,20 @@ type Clickhouse struct {
 	// cachedMounts stores normalised mount paths (with trailing slash),
 	// sorted longest-first for efficient prefix matching.
 	cachedMounts []string
+	// params stores the connection parameters used to construct this instance.
+	params ConnectionParams
 }
 
 // Close closes the connection to the ClickHouse database.
 func (c *Clickhouse) Close() error {
 	return c.conn.Close()
+}
+
+// Params returns the connection parameters used to create this client.
+// Callers can reuse these to create additional independent connections
+// to the same database, or to extract the database name.
+func (c *Clickhouse) Params() ConnectionParams {
+	return c.params
 }
 
 // ExecuteQuery executes a query that returns a single row and scans the result into dest.

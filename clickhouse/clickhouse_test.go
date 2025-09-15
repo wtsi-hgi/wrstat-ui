@@ -24,10 +24,6 @@
 package clickhouse_test
 
 import (
-	"context"
-	"fmt"
-	"os"
-	osuser "os/user"
 	"testing"
 	"time"
 
@@ -190,7 +186,7 @@ func TestBucketPredicatesViaSubtreeSummary(t *testing.T) {
 
 	// Use a real ClickHouse if available by reusing the integration helper function.
 	// Here we create a temporary DB connection using defaults; if not available, skip.
-	ch, ctx, cleanup, err := testNewEphemeralClickHouse()
+	ch, ctx, cleanup, err := clickhouse.NewUserEphemeralForTests()
 	if err != nil {
 		t.Skipf("Skipping: %v", err)
 
@@ -235,9 +231,10 @@ func TestSearchGlobPathsPublic(t *testing.T) {
 	statsdata.AddFile(root, "p/q/dirOnly/fileC.txt", 1, 1, 1, 1_700_000_100, 1_700_000_100)
 	statsdata.AddFile(root, "p/q/dirOnly/subdir/fileD.txt", 1, 1, 1, 1_700_000_100, 1_700_000_100)
 
-	ch, ctx, cleanup, err := testNewEphemeralClickHouse()
+	ch, ctx, cleanup, err := clickhouse.NewUserEphemeralForTests()
 	if err != nil {
 		t.Skipf("Skipping: %v", err)
+
 		return
 	}
 	defer cleanup()
@@ -251,13 +248,13 @@ func TestSearchGlobPathsPublic(t *testing.T) {
 	})
 
 	t.Run("rejects unknown mount", func(t *testing.T) {
-		// Use a mount that is not present and is normalized (trailing slash)
+		// Use a mount that is not present and is normalised (trailing slash)
 		paths, err := ch.SearchGlobPaths(ctx, "/notamnt/*", 0)
 		if err != nil {
-			// Accept error (legacy behavior)
+			// Accept error (legacy behaviour)
 			return
 		}
-		// Also accept no error and empty results (current behavior)
+		// Also accept no error and empty results (current behaviour)
 		assert.Empty(t, paths)
 	})
 
@@ -372,7 +369,7 @@ func TestEntryTypesViaListImmediateChildren(t *testing.T) {
 	// The stats generator will create directories automatically for parent paths
 	statsdata.AddFile(root, "dirA/file.txt", 1, 1, 1, 1_700_000_200, 1_700_000_200)
 
-	ch, ctx, cleanup, err := testNewEphemeralClickHouse()
+	ch, ctx, cleanup, err := clickhouse.NewUserEphemeralForTests()
 	if err != nil {
 		t.Skipf("Skipping: %v", err)
 
@@ -389,82 +386,4 @@ func TestEntryTypesViaListImmediateChildren(t *testing.T) {
 	assert.GreaterOrEqual(t, len(entries), 1)
 }
 
-// testNewEphemeralClickHouse mirrors the logic used in integration tests to provision
-// a temporary database for each test using environment or sensible defaults.
-// It returns (client, ctx, cleanup, error).
-func testNewEphemeralClickHouse() (*clickhouse.Clickhouse, context.Context, func(), error) {
-	ctx := context.Background()
-
-	host := getenv("TEST_CLICKHOUSE_HOST", "127.0.0.1")
-	port := getenv("TEST_CLICKHOUSE_PORT", "9000")
-	user := getenv("TEST_CLICKHOUSE_USERNAME", "default")
-	pass := getenv("TEST_CLICKHOUSE_PASSWORD", "")
-
-	params := clickhouse.ConnectionParams{
-		Host:     host,
-		Port:     port,
-		Database: "default",
-		Username: user,
-		Password: pass,
-	}
-
-	admin, err := clickhouse.New(params)
-	if err != nil {
-		return nil, nil, func() {}, fmt.Errorf("admin connect: %w", err)
-	}
-
-	u, uErr := osuser.Current()
-
-	uname := "nouser"
-	if uErr == nil && u != nil && u.Username != "" {
-		uname = u.Username
-	}
-
-	dbName := fmt.Sprintf("test_wrstatui_%s_%d", uname, time.Now().UnixNano())
-
-	// Best-effort drop in case it exists (eg. from an interrupted run).
-	_ = admin.ExecuteQuery(ctx, "DROP DATABASE IF EXISTS "+dbName) //nolint:errcheck // best-effort
-
-	err = admin.ExecuteQuery(ctx, "CREATE DATABASE "+dbName)
-	if err != nil {
-		_ = admin.Close()
-
-		return nil, nil, func() {}, fmt.Errorf("create db: %w", err)
-	}
-
-	// Connect to new DB
-	params.Database = dbName
-
-	ch, err := clickhouse.New(params)
-	if err != nil {
-		_ = admin.ExecuteQuery(ctx, "DROP DATABASE IF EXISTS "+dbName) //nolint:errcheck // best-effort
-		_ = admin.Close()
-
-		return nil, nil, func() {}, fmt.Errorf("connect db: %w", err)
-	}
-
-	err = ch.CreateSchema(ctx)
-	if err != nil {
-		_ = ch.Close()
-		_ = admin.ExecuteQuery(ctx, "DROP DATABASE IF EXISTS "+dbName) //nolint:errcheck // best-effort
-		_ = admin.Close()
-
-		return nil, nil, func() {}, fmt.Errorf("schema: %w", err)
-	}
-
-	cleanup := func() {
-		_ = ch.Close()
-		_ = admin.ExecuteQuery(ctx, "DROP DATABASE IF EXISTS "+dbName) //nolint:errcheck // best-effort
-		_ = admin.Close()
-	}
-
-	return ch, ctx, cleanup, nil
-}
-
-func getenv(key, def string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-
-	return def
-}
+// local getenv no longer needed; using package helper where required

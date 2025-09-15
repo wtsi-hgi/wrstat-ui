@@ -23,10 +23,8 @@
 package clickhouse_test
 
 import (
-	"context"
 	"io"
 	"os"
-	"os/user"
 	"path/filepath"
 	"testing"
 	"time"
@@ -40,60 +38,13 @@ import (
 // TestSubtreeSummaryAddsDirectoryContributions ensures SubtreeSummary includes
 // directory-with-files contributions and exposes directory type in FTypes.
 func TestSubtreeSummaryAddsDirectoryContributions(t *testing.T) {
-	chHost := os.Getenv("TEST_CLICKHOUSE_HOST")
-	if chHost == "" {
-		chHost = "127.0.0.1"
-	}
-
-	chPort := os.Getenv("TEST_CLICKHOUSE_PORT")
-	if chPort == "" {
-		chPort = "9000"
-	}
-
-	chUsername := os.Getenv("TEST_CLICKHOUSE_USERNAME")
-	if chUsername == "" {
-		chUsername = "default"
-	}
-
-	chPassword := os.Getenv("TEST_CLICKHOUSE_PASSWORD")
-
-	currentUser, err := user.Current()
-	if err != nil {
-		t.Skip("no user")
-	}
-
-	testDB := "test_wrstatui_tree_" + currentUser.Username
-
-	admin, err := clickhouse.New(clickhouse.ConnectionParams{
-		Host:     chHost,
-		Port:     chPort,
-		Database: "default",
-		Username: chUsername,
-		Password: chPassword,
-	})
+	ch, ctx, cleanup, err := clickhouse.NewUserEphemeralForTests()
 	if err != nil {
 		t.Skipf("no ClickHouse: %v", err)
+
+		return
 	}
-	defer admin.Close()
-
-	ctx := context.Background()
-	require.NoError(t, admin.ExecuteQuery(ctx, "DROP DATABASE IF EXISTS "+testDB))
-
-	require.NoError(t, admin.ExecuteQuery(ctx, "CREATE DATABASE "+testDB))
-	defer admin.ExecuteQuery(ctx, "DROP DATABASE IF EXISTS "+testDB) //nolint:errcheck
-
-	ch, err := clickhouse.New(clickhouse.ConnectionParams{
-		Host:     chHost,
-		Port:     chPort,
-		Database: testDB,
-		Username: chUsername,
-		Password: chPassword,
-	})
-	require.NoError(t, err)
-
-	defer ch.Close()
-
-	require.NoError(t, ch.CreateSchema(ctx))
+	defer cleanup()
 
 	// Build a tiny tree: /mnt/A/{x.txt,y.txt} and /mnt/B/z.txt
 	uid, gid := uint32(1001), uint32(2001)

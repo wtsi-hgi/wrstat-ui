@@ -20,10 +20,12 @@ func TestCreateSchemaCreatesDatabase(t *testing.T) {
 	pass := getenv("TEST_CLICKHOUSE_PASSWORD", "")
 
 	u, uErr := user.Current()
+
 	uname := "nouser"
 	if uErr == nil && u != nil && u.Username != "" {
 		uname = u.Username
 	}
+
 	dbName := "test_wrstatui_schema_" + uname + "_" + time.Now().Format("20060102150405")
 
 	params := clickhouse.ConnectionParams{
@@ -52,6 +54,7 @@ func TestCreateSchemaCreatesDatabase(t *testing.T) {
 	// Clean up
 	adminParams := params
 	adminParams.Database = "default"
+
 	admin, err := clickhouse.New(adminParams)
 	if err == nil {
 		_ = admin.ExecuteQuery(ctx, "DROP DATABASE IF EXISTS "+dbName)

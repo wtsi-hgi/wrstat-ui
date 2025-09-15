@@ -26,13 +26,11 @@ package main
 
 import (
 	"compress/gzip"
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
-	"os/user"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -40,11 +38,11 @@ import (
 	"testing"
 	"time"
 
-	clickhouse "github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/VertebrateResequencing/wr/jobqueue"
 	"github.com/VertebrateResequencing/wr/jobqueue/scheduler"
 	. "github.com/smartystreets/goconvey/convey"
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
+	"github.com/wtsi-hgi/wrstat-ui/clickhouse"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 	internaldata "github.com/wtsi-hgi/wrstat-ui/internal/data"
 	"github.com/wtsi-hgi/wrstat-ui/internal/statsdata"
@@ -340,85 +338,22 @@ func fixTZs(h []basedirs.History) {
 }
 
 func TestClickHouse(t *testing.T) {
-	// Check if TEST_CLICKHOUSE_HOST environment variable is set
-	// If not, skip the test
-	chHost := os.Getenv("TEST_CLICKHOUSE_HOST")
-	if chHost == "" {
-		chHost = "127.0.0.1" // default host
-	}
-
-	chPort := os.Getenv("TEST_CLICKHOUSE_PORT")
-	if chPort == "" {
-		chPort = "9000" // default port
-	}
-
-	chUsername := os.Getenv("TEST_CLICKHOUSE_USERNAME")
-	if chUsername == "" {
-		chUsername = "default" // default username
-	}
-
-	chPassword := os.Getenv("TEST_CLICKHOUSE_PASSWORD")
-	// No default password
-
-	// Create a unique test database name based on the current username
-	currentUser, err := user.Current()
+	// Provision an ephemeral ClickHouse DB for testing
+	ch, ctx, cleanup, err := clickhouse.NewUserEphemeralForTests()
 	if err != nil {
-		t.Fatalf("Failed to get current user: %v", err)
-	}
-
-	testDatabase := "test_wrstatui_" + currentUser.Username
-
-	// Connect to check if ClickHouse is available
-	ctx := context.Background()
-
-	// Use the clickhouse-go driver only to verify if the server is available
-	// and to setup/teardown the test database
-	adminConn, err := clickhouse.Open(&clickhouse.Options{
-		Addr:        []string{fmt.Sprintf("%s:%s", chHost, chPort)},
-		Auth:        clickhouse.Auth{Database: "default", Username: chUsername, Password: chPassword},
-		DialTimeout: 5 * time.Second,
-	})
-	if err != nil {
-		t.Skipf("Skipping TestSummariseClickHouse - could not connect to ClickHouse: %v", err)
+		t.Skipf("Skipping TestClickHouse - ClickHouse unavailable: %v", err)
 
 		return
 	}
+	defer cleanup()
 
-	// First drop the test database if it exists
-	if dropErr := adminConn.Exec(ctx, "DROP DATABASE IF EXISTS "+testDatabase); dropErr != nil {
-		t.Logf("Warning: failed to drop existing test DB: %v", dropErr)
-	}
-
-	// Create a fresh test database
-	err = adminConn.Exec(ctx, "CREATE DATABASE "+testDatabase)
-	if err != nil {
-		adminConn.Close()
-		t.Fatalf("Failed to create test database: %v", err)
-	}
-
-	// Close admin connection
-	adminConn.Close()
-
-	// Clean up the test database after the test
-	defer func() {
-		// Create a new connection to default database for cleanup
-		cleanupConn, err := clickhouse.Open(&clickhouse.Options{
-			Addr:        []string{fmt.Sprintf("%s:%s", chHost, chPort)},
-			Auth:        clickhouse.Auth{Database: "default", Username: chUsername, Password: chPassword},
-			DialTimeout: 5 * time.Second,
-		})
-		if err != nil {
-			t.Errorf("Failed to connect for cleanup: %v", err)
-
-			return
-		}
-
-		if err := cleanupConn.Exec(ctx, "DROP DATABASE IF EXISTS "+testDatabase); err != nil {
-			t.Errorf("Failed to drop test database during cleanup: %v", err)
-		}
-
-		cleanupConn.Close()
-	}()
+	// Use the connection parameters from the helper for CLI flags
+	params := ch.Params()
+	testDatabase := params.Database
+	chHost := params.Host
+	chPort := params.Port
+	chUsername := params.Username
+	chPassword := params.Password
 
 	Convey("clickhouse update CLI command works", t, func() {
 		// Prepare test data
@@ -461,59 +396,43 @@ func TestClickHouse(t *testing.T) {
 		So(strings.Contains(stderr, "error"), ShouldBeFalse)
 		So(output, ShouldEqual, "") // Command should not produce output on success
 
-		// Now we need to verify the data was ingested correctly
-		// We'll connect directly to ClickHouse only for verification
-		conn, err := clickhouse.Open(&clickhouse.Options{
-			Addr:        []string{fmt.Sprintf("%s:%s", chHost, chPort)},
-			Auth:        clickhouse.Auth{Database: testDatabase, Username: chUsername, Password: chPassword},
-			DialTimeout: 5 * time.Second,
-		})
-		So(err, ShouldBeNil)
-
-		defer conn.Close()
-
-		// Check scans table
+		// Verify via Clickhouse client
 		var scanCount uint64
 
-		err = conn.QueryRow(ctx, "SELECT count() FROM scans WHERE state = 'ready' AND mount_path = ?",
-			mountPath).Scan(&scanCount)
+		qScanCount := "SELECT count() FROM scans WHERE state = 'ready' AND mount_path = ?"
+		err = ch.ExecuteQuery(ctx, qScanCount, mountPath, &scanCount)
 		So(err, ShouldBeNil)
 		So(scanCount, ShouldBeGreaterThanOrEqualTo, 1)
 
 		// Check fs_entries table
 		var fileCount uint64
 
-		err = conn.QueryRow(ctx, "SELECT count() FROM fs_entries_current WHERE mount_path = ?",
-			mountPath).Scan(&fileCount)
+		qFileCount := "SELECT count() FROM fs_entries_current WHERE mount_path = ?"
+		err = ch.ExecuteQuery(ctx, qFileCount, mountPath, &fileCount)
 		So(err, ShouldBeNil)
 		So(fileCount, ShouldBeGreaterThan, 3) // Should have at least our 3 files plus directories
 
 		// Check ancestor_rollups_raw table
 		var rollupCount uint64
 
-		err = conn.QueryRow(ctx, "SELECT count() FROM ancestor_rollups_current WHERE mount_path = ?",
-			mountPath).Scan(&rollupCount)
+		qRollupCount := "SELECT count() FROM ancestor_rollups_current WHERE mount_path = ?"
+		err = ch.ExecuteQuery(ctx, qRollupCount, mountPath, &rollupCount)
 		So(err, ShouldBeNil)
 		So(rollupCount, ShouldBeGreaterThan, 3) // Should have multiple rollups per file
 
 		// Check total size
 		var totalSize uint64
 
-		err = conn.QueryRow(ctx, `
-			SELECT total_size 
-			FROM ancestor_rollups_current 
-			WHERE mount_path = ? AND ancestor = ?`,
-			mountPath, mountPath).Scan(&totalSize)
+		qTotal := `SELECT total_size FROM ancestor_rollups_current WHERE mount_path = ? AND ancestor = ?`
+		err = ch.ExecuteQuery(ctx, qTotal, mountPath, mountPath, &totalSize)
 		So(err, ShouldBeNil)
 		So(totalSize, ShouldBeGreaterThanOrEqualTo, 6000) // At least 1000 + 2000 + 3000
 
 		// Check specific file size
 		var fileSize uint64
 
-		err = conn.QueryRow(ctx, `
-			SELECT size FROM fs_entries_current 
-			WHERE path = ?`,
-			mountPath+"humgen/projects/A/file1").Scan(&fileSize)
+		qFileSize := `SELECT size FROM fs_entries_current WHERE path = ?`
+		err = ch.ExecuteQuery(ctx, qFileSize, mountPath+"humgen/projects/A/file1", &fileSize)
 		So(err, ShouldBeNil)
 		So(fileSize, ShouldEqual, 1000)
 
@@ -533,6 +452,7 @@ func TestClickHouse(t *testing.T) {
 			)
 			So(err, ShouldBeNil)
 			So(stderr, ShouldBeBlank)
+
 			lines := strings.FieldsFunc(output, func(r rune) bool { return r == '\n' || r == '\r' })
 			So(len(lines), ShouldEqual, 3)
 			So(lines, ShouldContain, mountPath+"humgen/projects/A/file1")
@@ -552,9 +472,13 @@ func TestClickHouse(t *testing.T) {
 			)
 			So(err, ShouldBeNil)
 			So(stderr, ShouldBeBlank)
+
 			lines = strings.FieldsFunc(output, func(r rune) bool { return r == '\n' || r == '\r' })
 			So(len(lines), ShouldEqual, 1)
-			So(lines[0] == mountPath+"humgen/projects/A/file1" || lines[0] == mountPath+"humgen/projects/A/file2" || lines[0] == mountPath+"humgen/projects/B/file3", ShouldBeTrue)
+			oneOf := lines[0] == mountPath+"humgen/projects/A/file1" ||
+				lines[0] == mountPath+"humgen/projects/A/file2" ||
+				lines[0] == mountPath+"humgen/projects/B/file3"
+			So(oneOf, ShouldBeTrue)
 		})
 
 		Convey("glob CLI returns understandable errors for negative cases", func() {

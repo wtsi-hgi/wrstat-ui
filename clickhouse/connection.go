@@ -85,7 +85,7 @@ func New(params ConnectionParams) (*Clickhouse, error) {
 		}
 	}
 
-	return &Clickhouse{conn: conn}, nil
+	return &Clickhouse{conn: conn, params: params}, nil
 }
 
 // SQL constants for table and view creation.
@@ -330,6 +330,28 @@ GROUP BY s.mount_path, s.scan_id, s.scan_time, s.ancestor`
 
 // CreateSchema creates all necessary tables and views in the ClickHouse database.
 func (c *Clickhouse) CreateSchema(ctx context.Context) error {
+	// Ensure the target database exists for subsequent DDL
+	dbName := c.params.Database
+	if dbName == "" {
+		dbName = "default"
+	}
+
+	if err := c.conn.Exec(ctx, "CREATE DATABASE IF NOT EXISTS "+dbName); err != nil {
+		// Fallback: create via admin connection to default database
+		admin, aerr := chdriver.Open(&chdriver.Options{
+			Addr:        []string{fmt.Sprintf("%s:%s", c.params.Host, c.params.Port)},
+			Auth:        chdriver.Auth{Database: "default", Username: c.params.Username, Password: c.params.Password},
+			DialTimeout: DialTimeoutSeconds * time.Second,
+		})
+		if aerr == nil {
+			//nolint:errcheck // best-effort
+			_ = admin.Exec(ctx, "CREATE DATABASE IF NOT EXISTS "+dbName)
+			_ = admin.Close()
+		} else {
+			return err
+		}
+	}
+
 	// Create scans table first
 	if err := c.createTableWithStatement(ctx, createScansTable); err != nil {
 		return err

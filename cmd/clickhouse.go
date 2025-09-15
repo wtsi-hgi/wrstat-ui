@@ -140,6 +140,7 @@ func RunUpdate(args []string) (err error) {
 // RunGlob executes the glob query command.
 func RunGlob(pattern string, limit int) error {
 	ctx := context.Background()
+
 	ch, err := setupClickHouseConnection()
 	if err != nil {
 		return err
@@ -158,6 +159,7 @@ func RunGlob(pattern string, limit int) error {
 	for _, p := range results {
 		fmt.Println(p)
 	}
+
 	return nil
 }
 

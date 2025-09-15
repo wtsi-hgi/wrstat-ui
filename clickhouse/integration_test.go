@@ -28,7 +28,6 @@ import (
 	"context"
 	"io"
 	"os"
-	"os/user"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -43,81 +42,18 @@ import (
 // TestClickHouseIntegration performs integration tests with a real ClickHouse
 // instance. This test will be skipped if no ClickHouse connection is available.
 func TestClickHouseIntegration(t *testing.T) {
-	// Check if TEST_CLICKHOUSE_HOST environment variable is set
-	// If not, use default host
-	chHost := os.Getenv("TEST_CLICKHOUSE_HOST")
-	if chHost == "" {
-		chHost = "127.0.0.1" // default host
-	}
-
-	chPort := os.Getenv("TEST_CLICKHOUSE_PORT")
-	if chPort == "" {
-		chPort = "9000" // default port
-	}
-
-	chUsername := os.Getenv("TEST_CLICKHOUSE_USERNAME")
-	if chUsername == "" {
-		chUsername = "default" // default username
-	}
-
-	chPassword := os.Getenv("TEST_CLICKHOUSE_PASSWORD")
-
-	// Create a unique test database name based on the current username
-	currentUser, err := user.Current()
+	// Use the unified ephemeral DB helper
+	ch, ctx, cleanup, err := clickhouse.NewUserEphemeralForTests()
 	if err != nil {
-		t.Fatalf("Failed to get current user: %v", err)
-	}
-
-	testDatabase := "test_wrstatui_" + currentUser.Username
-
-	// Create connection parameters
-	params := clickhouse.ConnectionParams{
-		Host:     chHost,
-		Port:     chPort,
-		Database: "default", // connect to default first
-		Username: chUsername,
-		Password: chPassword,
-	}
-
-	// Try connecting
-	ctx := context.Background()
-
-	adminCh, err := clickhouse.New(params)
-	if err != nil {
-		t.Skipf("Skipping ClickHouse integration tests - could not connect to ClickHouse: %v", err)
+		t.Skipf("Skipping ClickHouse integration tests - ClickHouse unavailable: %v", err)
 
 		return
 	}
+	defer cleanup()
 
-	defer adminCh.Close()
-
-	// Drop test database if it exists (cleanup from previous failed tests)
-	err = adminCh.ExecuteQuery(ctx, "DROP DATABASE IF EXISTS "+testDatabase)
-	if err != nil {
-		t.Logf("Warning: failed to drop existing test DB: %v", err)
-	}
-
-	// Create a fresh test database
-	err = adminCh.ExecuteQuery(ctx, "CREATE DATABASE "+testDatabase)
-	if err != nil {
-		t.Fatalf("Failed to create test database: %v", err)
-	}
-
-	// Clean up the test database after the test
-	defer func() {
-		err = adminCh.ExecuteQuery(ctx, "DROP DATABASE IF EXISTS "+testDatabase)
-		if err != nil {
-			t.Errorf("Failed to drop test database during cleanup: %v", err)
-		}
-	}()
-
-	// Now connect to the test database
-	params.Database = testDatabase
-	ch, err := clickhouse.New(params)
-	require.NoError(t, err)
-
-	// Ensure schema exists in the test database
-	require.NoError(t, ch.CreateSchema(ctx))
+	// Get the current ephemeral DB name for possible auxiliary DB creation later
+	var testDatabase string
+	require.NoError(t, ch.ExecuteQuery(ctx, "SELECT currentDatabase()", &testDatabase))
 
 	// Prepare test data
 	uid := uint32(1000) // standard test user ID
@@ -507,23 +443,16 @@ func TestClickHouseIntegration(t *testing.T) {
 
 	// Concurrent ingests on different mount points should not interfere with each other
 	t.Run("ConcurrentMountIngests", func(t *testing.T) {
-		// Use a fresh database for this subtest to avoid interference from earlier ingests
-		tempDB := testDatabase + "_conc_" + time.Now().Format("150405")
-		require.NoError(t, adminCh.ExecuteQuery(ctx, "CREATE DATABASE "+tempDB))
+		// Use a fresh ephemeral database for this subtest
+		ch2, _, cleanup2, err2 := clickhouse.NewUserEphemeralForTests()
+		if err2 != nil {
+			t.Skipf("no ClickHouse: %v", err2)
 
-		defer func() {
-			require.NoError(t, adminCh.ExecuteQuery(ctx, "DROP DATABASE IF EXISTS "+tempDB))
-		}()
+			return
+		}
+		defer cleanup2()
 
-		params2 := params
-		params2.Database = tempDB
-
-		ch2, err2 := clickhouse.New(params2)
-		require.NoError(t, err2)
-
-		defer ch2.Close()
-
-		require.NoError(t, ch2.CreateSchema(ctx))
+		params2 := ch2.Params()
 
 		mountA := "/lustre/scratch128/"
 		mountB := "/lustre/scratch129/"

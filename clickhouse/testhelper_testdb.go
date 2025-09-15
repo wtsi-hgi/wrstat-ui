@@ -27,10 +27,12 @@ func NewUserEphemeralForTests() (*Clickhouse, context.Context, func(), error) {
 	pass := getenv("TEST_CLICKHOUSE_PASSWORD", "")
 
 	u, _ := osuser.Current()
+
 	uname := "nouser"
 	if u != nil && u.Username != "" {
 		uname = u.Username
 	}
+
 	dbName := fmt.Sprintf("test_wrstatui_%s_%d", uname, time.Now().UnixNano())
 
 	// Admin connection to default for setup/teardown
@@ -43,6 +45,7 @@ func NewUserEphemeralForTests() (*Clickhouse, context.Context, func(), error) {
 	_ = admin.ExecuteQuery(ctx, "DROP DATABASE IF EXISTS "+dbName)
 	if err := admin.ExecuteQuery(ctx, "CREATE DATABASE "+dbName); err != nil {
 		_ = admin.Close()
+
 		return nil, nil, func() {}, fmt.Errorf("create db: %w", err)
 	}
 
@@ -51,12 +54,15 @@ func NewUserEphemeralForTests() (*Clickhouse, context.Context, func(), error) {
 	if err != nil {
 		_ = admin.ExecuteQuery(ctx, "DROP DATABASE IF EXISTS "+dbName)
 		_ = admin.Close()
+
 		return nil, nil, func() {}, fmt.Errorf("connect db: %w", err)
 	}
+
 	if err := ch.CreateSchema(ctx); err != nil {
 		_ = ch.Close()
 		_ = admin.ExecuteQuery(ctx, "DROP DATABASE IF EXISTS "+dbName)
 		_ = admin.Close()
+
 		return nil, nil, func() {}, fmt.Errorf("schema: %w", err)
 	}
 
@@ -73,5 +79,6 @@ func getenv(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
 	}
+
 	return def
 }

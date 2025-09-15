@@ -25,6 +25,7 @@ package clickhouse
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -442,7 +443,7 @@ func (c *Clickhouse) execPathQuery(ctx context.Context, query string, args ...an
 func (c *Clickhouse) SearchGlobPaths(ctx context.Context, globPattern string, limit int) ([]string, error) {
 	// Validate input: must start with '/'
 	if !strings.HasPrefix(globPattern, "/") {
-		return nil, fmt.Errorf("glob must start with '/'")
+		return nil, errors.New("glob must start with '/'")
 	}
 
 	if err := c.ensureMounts(ctx); err != nil {
@@ -455,6 +456,7 @@ func (c *Clickhouse) SearchGlobPaths(ctx context.Context, globPattern string, li
 		if err := c.refreshMounts(ctx); err != nil {
 			return nil, err
 		}
+
 		mount = c.findMountForPrefix(globPattern)
 	}
 
@@ -465,6 +467,7 @@ func (c *Clickhouse) SearchGlobPaths(ctx context.Context, globPattern string, li
 	// Find parent_path glob and name pattern
 	lastSlash := strings.LastIndex(remainder, "/")
 	parentGlob := ""
+
 	nameGlob := remainder
 	if lastSlash >= 0 {
 		parentGlob = remainder[:lastSlash+1]
@@ -485,23 +488,29 @@ func (c *Clickhouse) SearchGlobPaths(ctx context.Context, globPattern string, li
 		// Compute longest literal prefix for parent_path for this mount
 		current := mnt
 		_ = computeDepth(current)
+
 		segs := strings.Split(parentGlob, "/")
 		for i, s := range segs {
 			if s == "" {
 				if i == 0 {
 					continue
 				}
+
 				break
 			}
+
 			if strings.ContainsAny(s, "*?") {
 				break
 			}
+
 			current = EnsureDir(current + s)
 		}
+
 		literalPrefix := current
 
 		// Target depth equals mount depth plus number of segments in parentGlob
 		totalSegs := 0
+
 		if parentGlob != "" {
 			parts := strings.Split(strings.TrimSuffix(parentGlob, "/"), "/")
 			for _, p := range parts {
@@ -510,10 +519,12 @@ func (c *Clickhouse) SearchGlobPaths(ctx context.Context, globPattern string, li
 				}
 			}
 		}
+
 		targetDepth := uint16(int(computeDepth(mnt)) + totalSegs)
 
 		lo := literalPrefix
 		hi := prefixUpperBound(literalPrefix)
+
 		nameLike := toLike(nameGlob)
 		if nameLike == "" {
 			nameLike = "%"
@@ -524,16 +535,19 @@ func (c *Clickhouse) SearchGlobPaths(ctx context.Context, globPattern string, li
 
 		if parentGlob != "" {
 			q += " AND depth = ?"
+
 			args = append(args, targetDepth)
 		}
 
 		if parentGlob != "" && (strings.ContainsAny(parentGlob, "*?") || len(parentGlob) > len(strings.TrimPrefix(literalPrefix, mnt))) {
 			parentLike := toLike(parentGlob)
 			q += " AND parent_path LIKE ?"
+
 			args = append(args, mnt+parentLike)
 		}
 
 		q += " AND basename LIKE ?"
+
 		args = append(args, nameLike)
 
 		q += " ORDER BY mount_path, parent_path, basename"
@@ -544,6 +558,7 @@ func (c *Clickhouse) SearchGlobPaths(ctx context.Context, globPattern string, li
 			if remain <= 0 {
 				break
 			}
+
 			perLimit = remain
 			q += fmt.Sprintf(" LIMIT %d", perLimit)
 		}
@@ -557,6 +572,7 @@ func (c *Clickhouse) SearchGlobPaths(ctx context.Context, globPattern string, li
 			if _, ok := seen[p]; ok {
 				continue
 			}
+
 			seen[p] = struct{}{}
 			out = append(out, p)
 		}
@@ -570,6 +586,7 @@ func (c *Clickhouse) SearchGlobPaths(ctx context.Context, globPattern string, li
 		if pathPattern != "" {
 			q2 := `SELECT path FROM fs_entries_current WHERE mount_path = ? AND path LIKE ? ORDER BY mount_path, parent_path, basename`
 			args2 := []any{mnt, mnt + pathPattern}
+
 			if limit > 0 {
 				remain := limit - len(out)
 				if remain > 0 {
@@ -581,11 +598,14 @@ func (c *Clickhouse) SearchGlobPaths(ctx context.Context, globPattern string, li
 			if err != nil {
 				return nil, err
 			}
+
 			for _, p := range more {
 				if _, ok := seen[p]; ok {
 					continue
 				}
+
 				seen[p] = struct{}{}
+
 				out = append(out, p)
 				if limit > 0 && len(out) >= limit {
 					break
