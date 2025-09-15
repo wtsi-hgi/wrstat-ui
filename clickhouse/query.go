@@ -506,17 +506,14 @@ func (c *Clickhouse) SearchGlobPaths(ctx context.Context, globPattern string, li
 		return nil, err
 	}
 
-	// Determine mount; refresh once if unknown
+	// Determine mount and only search within it; do not fan out across all mounts.
 	mount := c.findMountForPrefix(globPattern)
 	if mount == "" {
-		if err := c.refreshMounts(ctx); err != nil {
-			return nil, err
-		}
-
-		mount = c.findMountForPrefix(globPattern)
+		// If no matching mount, simplify by returning no results.
+		return []string{}, nil
 	}
 
-	// Split into (mount, remainder). If no mount matched, we'll iterate all mounts.
+	// Split into (mount, remainder).
 	remainder := strings.TrimPrefix(globPattern, mount)
 	remainder = strings.TrimPrefix(remainder, "/")
 
@@ -532,87 +529,66 @@ func (c *Clickhouse) SearchGlobPaths(ctx context.Context, globPattern string, li
 
 	toLike := func(g string) string { return strings.ReplaceAll(strings.ReplaceAll(g, "*", "%"), "?", "_") }
 
-	mounts := []string{mount}
-	if mount == "" {
-		mounts = c.cachedMounts
-	}
-
 	seen := make(map[string]struct{})
 	out := make([]string, 0, DefaultResultCapacity)
 
-	for _, mnt := range mounts {
-		// Compute longest literal prefix for parent_path for this mount
-		literalPrefix := computeLiteralPrefix(mnt, parentGlob)
+	// Compute longest literal prefix for parent_path for this mount
+	literalPrefix := computeLiteralPrefix(mount, parentGlob)
 
-		// Target depth equals mount depth plus number of segments in parentGlob
-		targetDepth := computeTargetDepth(mnt, parentGlob)
+	// Target depth equals mount depth plus number of segments in parentGlob
+	targetDepth := computeTargetDepth(mount, parentGlob)
 
-		lo := literalPrefix
-		hi := prefixUpperBound(literalPrefix)
+	lo := literalPrefix
+	hi := prefixUpperBound(literalPrefix)
 
-		nameLike := toLike(nameGlob)
-		if nameLike == "" {
-			nameLike = "%"
+	nameLike := toLike(nameGlob)
+	if nameLike == "" {
+		nameLike = "%"
+	}
+
+	q := `SELECT path FROM fs_entries_current WHERE mount_path = ? AND parent_path >= ? AND parent_path < ?`
+	args := []any{mount, lo, hi}
+
+	if parentGlob != "" {
+		q += " AND depth = ?"
+		args = append(args, targetDepth)
+	}
+
+	if parentGlob != "" && (strings.ContainsAny(parentGlob, "*?") || len(parentGlob) > len(strings.TrimPrefix(literalPrefix, mount))) {
+		parentLike := toLike(parentGlob)
+		q += " AND parent_path LIKE ?"
+		args = append(args, mount+parentLike)
+	}
+
+	q += " AND basename LIKE ?"
+	args = append(args, nameLike)
+
+	q += " ORDER BY mount_path, parent_path, basename"
+
+	if limit > 0 {
+		q += fmt.Sprintf(" LIMIT %d", limit)
+	}
+
+	paths, err := c.execPathQuery(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, p := range paths {
+		if _, ok := seen[p]; ok {
+			continue
 		}
+		seen[p] = struct{}{}
+		out = append(out, p)
+	}
 
-		q := `SELECT path FROM fs_entries_current WHERE mount_path = ? AND parent_path >= ? AND parent_path < ?`
-		args := []any{mnt, lo, hi}
-
-		if parentGlob != "" {
-			q += " AND depth = ?"
-
-			args = append(args, targetDepth)
-		}
-
-		if parentGlob != "" &&
-			(strings.ContainsAny(parentGlob, "*?") || len(parentGlob) > len(strings.TrimPrefix(literalPrefix, mnt))) {
-
-			parentLike := toLike(parentGlob)
-			q += " AND parent_path LIKE ?"
-
-			args = append(args, mnt+parentLike)
-		}
-
-		q += " AND basename LIKE ?"
-
-		args = append(args, nameLike)
-
-		q += " ORDER BY mount_path, parent_path, basename"
-
-		if limit > 0 {
-			remain := limit - len(out)
-			if remain <= 0 {
-				break
-			}
-
-			perLimit := remain
-			q += fmt.Sprintf(" LIMIT %d", perLimit)
-		}
-
-		paths, err := c.execPathQuery(ctx, q, args...)
-		if err != nil {
-			return nil, err
-		}
-
-		for _, p := range paths {
-			if _, ok := seen[p]; ok {
-				continue
-			}
-
-			seen[p] = struct{}{}
-			out = append(out, p)
-		}
-
-		// Also attempt a direct path LIKE to catch directory-only matches
-		if limit > 0 && len(out) >= limit {
-			break
-		}
-
+	// Also attempt a direct path LIKE to catch directory-only matches
+	if limit <= 0 || len(out) < limit {
 		pathPattern := toLike(parentGlob + nameGlob)
 		if pathPattern != "" {
 			q2 := `SELECT path FROM fs_entries_current WHERE mount_path = ? AND path LIKE ?
 			 ORDER BY mount_path, parent_path, basename`
-			args2 := []any{mnt, mnt + pathPattern}
+			args2 := []any{mount, mount + pathPattern}
 
 			if limit > 0 {
 				remain := limit - len(out)
@@ -630,9 +606,7 @@ func (c *Clickhouse) SearchGlobPaths(ctx context.Context, globPattern string, li
 				if _, ok := seen[p]; ok {
 					continue
 				}
-
 				seen[p] = struct{}{}
-
 				out = append(out, p)
 				if limit > 0 && len(out) >= limit {
 					break
