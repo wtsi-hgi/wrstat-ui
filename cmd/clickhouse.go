@@ -47,8 +47,15 @@ var (
 // This command ingests a single mount's scan into ClickHouse with atomic
 // promotion semantics (loading -> ready), maintains only the latest ready scan
 // per mount, and provides precomputed subtree rollups.
+
 var clickhouseCmd = &cobra.Command{
-	Use:   "clickhouse <mount_path> <stats_file|->",
+	Use:   "clickhouse",
+	Short: "ClickHouse backend operations",
+	Long:  `ClickHouse backend operations: ingest/update and client queries.`,
+}
+
+var chUpdateCmd = &cobra.Command{
+	Use:   "update <mount_path> <stats_file|->",
 	Short: "Load and summarise stat data into ClickHouse",
 	Long: `Load and summarise stat data into ClickHouse for fast, interactive queries.
 
@@ -56,7 +63,26 @@ This command ingests a single mount's scan into ClickHouse with atomic promotion
 semantics (loading -> ready), maintains only the latest ready scan per mount,
 and provides precomputed subtree rollups.`,
 	Run: func(_ *cobra.Command, args []string) {
-		if err := Run(args); err != nil {
+		if err := RunUpdate(args); err != nil {
+			die("%s", err)
+		}
+	},
+}
+
+var (
+	globPattern string
+	globLimit   int
+)
+
+var chGlobCmd = &cobra.Command{
+	Use:   "glob --pattern <glob_pattern> [--limit N]",
+	Short: "Query ClickHouse for paths matching a glob pattern",
+	Long:  `Query ClickHouse for paths matching a glob pattern using SearchGlobPaths API.`,
+	Run: func(_ *cobra.Command, args []string) {
+		if globPattern == "" {
+			die("--pattern is required")
+		}
+		if err := RunGlob(globPattern, globLimit); err != nil {
 			die("%s", err)
 		}
 	},
@@ -64,17 +90,23 @@ and provides precomputed subtree rollups.`,
 
 func init() {
 	RootCmd.AddCommand(clickhouseCmd)
+	clickhouseCmd.AddCommand(chUpdateCmd)
+	clickhouseCmd.AddCommand(chGlobCmd)
 
-	// Add ClickHouse connection settings
-	clickhouseCmd.Flags().StringVar(&chHost, "host", "127.0.0.1", "ClickHouse host")
-	clickhouseCmd.Flags().StringVar(&chPort, "port", "9000", "ClickHouse port")
-	clickhouseCmd.Flags().StringVar(&chDatabase, "database", "default", "ClickHouse database")
-	clickhouseCmd.Flags().StringVar(&chUsername, "username", "default", "ClickHouse username")
-	clickhouseCmd.Flags().StringVar(&chPassword, "password", "", "ClickHouse password")
+	// Add ClickHouse connection settings to parent
+	clickhouseCmd.PersistentFlags().StringVar(&chHost, "host", "127.0.0.1", "ClickHouse host")
+	clickhouseCmd.PersistentFlags().StringVar(&chPort, "port", "9000", "ClickHouse port")
+	clickhouseCmd.PersistentFlags().StringVar(&chDatabase, "database", "default", "ClickHouse database")
+	clickhouseCmd.PersistentFlags().StringVar(&chUsername, "username", "default", "ClickHouse username")
+	clickhouseCmd.PersistentFlags().StringVar(&chPassword, "password", "", "ClickHouse password")
+
+	// Glob query flags
+	chGlobCmd.Flags().StringVar(&globPattern, "pattern", "", "Glob pattern to search for (required)")
+	chGlobCmd.Flags().IntVar(&globLimit, "limit", 0, "Limit number of results (0 = unlimited)")
 }
 
-// Run executes the clickhouse command with the given arguments.
-func Run(args []string) (err error) {
+// RunUpdate executes the update (ingest) command.
+func RunUpdate(args []string) (err error) {
 	mountPath, statsPath, err := checkClickhouseArgs(args)
 	if err != nil {
 		return err
@@ -100,6 +132,26 @@ func Run(args []string) (err error) {
 	}
 
 	return ch.UpdateClickhouse(ctx, mountPath, r)
+}
+
+// RunGlob executes the glob query command.
+func RunGlob(pattern string, limit int) error {
+	ctx := context.Background()
+	ch, err := setupClickHouseConnection()
+	if err != nil {
+		return err
+	}
+	defer ch.Close()
+
+	results, err := ch.SearchGlobPaths(ctx, pattern, limit)
+	if err != nil {
+		return err
+	}
+
+	for _, p := range results {
+		fmt.Println(p)
+	}
+	return nil
 }
 
 func checkClickhouseArgs(args []string) (string, string, error) {
