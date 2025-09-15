@@ -25,9 +25,7 @@ package clickhouse
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"io"
 	"strings"
 
 	"github.com/wtsi-hgi/wrstat-ui/db"
@@ -108,18 +106,6 @@ func (c *Clickhouse) subtreeSummaryScan(ctx context.Context, dir string, f Filte
 	return c.executeSummaryQuery(ctx, query, args)
 }
 
-// Helper function to check if no filters are applied.
-// isNoFilters checks if no filters are applied.
-// Note: This is unused but kept for documentation purposes.
-// It would be used if getUnfilteredAllSummary was integrated as a fast path.
-func isNoFilters(f Filters) bool {
-	return len(f.UIDs) == 0 &&
-		len(f.GIDs) == 0 &&
-		len(f.Exts) == 0 &&
-		f.ATimeBucket == "" &&
-		f.MTimeBucket == ""
-}
-
 // buildInClause constructs an SQL IN clause for filtering.
 func buildInClause(field string, values []uint32) (string, []any) {
 	placeholders := make([]string, len(values))
@@ -186,15 +172,12 @@ func buildGlobalTimeBucketFilter(f Filters) string {
 	return joinTimeFilters(preds)
 }
 
-// Build the complete summary query.
-// Removed per-mount summary query builder (API unified to global)
-
 // buildAllSummaryQuery builds the summary query across all mounts,
 // using per-row scan time for any time buckets.
 func buildAllSummaryQuery(where []string, bucketFilter string) string {
-	// To match Bolt behaviour, we need to:
-	// 1. Deduplicate directory entries by normalising paths
-	// 2. Count only real entries, not duplicates from path expansion
+	// To match Bolt behaviour:
+	// 1) Deduplicate entries by normalising paths
+	// 2) Count only real files here; directory contribution is added separately
 	q := `
 SELECT
 	sum(agg_size) AS total_size,
@@ -419,52 +402,6 @@ WHERE ancestor LIKE ? AND ext_low != ''`
 	}
 
 	return cnt, nil
-}
-
-// getUnfilteredAllSummary is an unimplemented fast path across all mounts.
-// Note: This function is not currently used in production code but is kept
-// as a reference for a potential optimization for unfiltered queries.
-// Tests show that integrating this function would require adapting it to
-// match the current implementation's behavior and expectations.
-func (c *Clickhouse) getUnfilteredAllSummary(ctx context.Context, dir string) (Summary, error) {
-	// Use raw rollups restricted to this exact ancestor and real files only (ext_low != '').
-	row := c.conn.QueryRow(ctx, `
-SELECT
-	sum(size) AS total_size,
-	count() AS file_count,
-	max(atime) AS most_recent_atime,
-	min(atime) AS oldest_atime,
-	max(mtime) AS most_recent_mtime,
-	min(mtime) AS oldest_mtime,
-	groupUniqArray(uid) AS uids,
-	groupUniqArray(gid) AS gids,
-	groupUniqArray(ext_low) AS exts,
-	array() AS ftypes
-FROM ancestor_rollups_raw arr
-INNER JOIN (
-	SELECT mount_path, argMax(scan_id, finished_at) AS scan_id
-	FROM scans
-	WHERE state = 'ready'
-	GROUP BY mount_path
-) r USING (mount_path, scan_id)
-WHERE ancestor = ? AND ext_low != ''
-`, dir)
-
-	var s Summary
-	if err := row.Scan(
-		&s.TotalSize, &s.FileCount,
-		&s.MostRecentATime, &s.OldestATime,
-		&s.MostRecentMTime, &s.OldestMTime,
-		&s.UIDs, &s.GIDs, &s.Exts, &s.FTypes,
-	); err != nil {
-		if errors.Is(err, io.EOF) {
-			return Summary{}, nil
-		}
-
-		return Summary{}, err
-	}
-
-	return s, nil
 }
 
 // buildGlobSearchQuery constructs a SQL query for searching paths with a glob pattern.
