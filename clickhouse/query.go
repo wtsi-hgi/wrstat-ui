@@ -178,10 +178,13 @@ func buildGlobalTimeBucketFilter(f Filters) string {
 // buildAllSummaryQuery builds the summary query across all mounts,
 // using per-row scan time for any time buckets.
 func buildAllSummaryQuery(where []string, bucketFilter string) string {
-	// To match Bolt behaviour, we need to:
-	// 1. Deduplicate directory entries by normalising paths
-	// 2. Count only real entries, not duplicates from path expansion
-	q := `
+	// To match Bolt behaviour, we need to deduplicate directory entries
+	// by normalising paths and count only real entries.
+	return allSummaryQueryPrefix() + strings.Join(where, " AND ") + bucketFilter + allSummaryQuerySuffix()
+}
+
+func allSummaryQueryPrefix() string {
+	return `
 SELECT
 	sum(agg_size) AS total_size,
 	count() AS file_count,
@@ -205,13 +208,15 @@ FROM (
 		anyLast(ext_low) AS sel_ext,
 		anyLast(ftype) AS sel_ftype
 	FROM fs_entries_current
-	WHERE ` + strings.Join(where, " AND ") + bucketFilter + `
+	WHERE `
+}
+
+func allSummaryQuerySuffix() string {
+	return `
 	  AND ftype = ` + fmt.Sprintf("%d", FileTypeFile) + `
 	GROUP BY norm_path
 )
 `
-
-	return q
 }
 
 // executeSummaryQuery executes a summary query and returns the results.
@@ -418,6 +423,58 @@ func prefixUpperBound(prefix string) string {
 	return prefix + string([]byte{0xFF})
 }
 
+// computeLiteralPrefix returns the longest literal prefix for parent_path
+// by walking segments until a glob character is encountered.
+func computeLiteralPrefix(mnt, parentGlob string) string {
+	current := mnt
+
+	segs := strings.Split(parentGlob, "/")
+	for i, s := range segs {
+		if s == "" {
+			if i == 0 {
+				continue
+			}
+
+			break
+		}
+
+		if strings.ContainsAny(s, "*?") {
+			break
+		}
+
+		current = EnsureDir(current + s)
+	}
+
+	return current
+}
+
+// computeTargetDepth computes the target depth for a mount and parentGlob
+// by adding the mount's depth and the number of non-empty segments in parentGlob.
+// It returns a uint16 clamped to the maximum value.
+func computeTargetDepth(mnt, parentGlob string) uint16 {
+	totalSegs := uint32(0)
+
+	if parentGlob != "" {
+		parts := strings.Split(strings.TrimSuffix(parentGlob, "/"), "/")
+		for _, p := range parts {
+			if p != "" {
+				totalSegs++
+			}
+		}
+	}
+
+	baseDepth := uint32(computeDepth(mnt))
+	sum32 := baseDepth + totalSegs
+
+	const maxUint16 = 1<<16 - 1
+
+	if sum32 > uint32(maxUint16) {
+		return uint16(maxUint16)
+	}
+
+	return uint16(sum32)
+}
+
 // execPathQuery runs a simple single-column path query and collects results.
 func (c *Clickhouse) execPathQuery(ctx context.Context, query string, args ...any) ([]string, error) {
 	rows, err := c.conn.Query(ctx, query, args...)
@@ -483,46 +540,15 @@ func (c *Clickhouse) SearchGlobPaths(ctx context.Context, globPattern string, li
 		mounts = c.cachedMounts
 	}
 
-	seen := make(map[string]struct{}, 64)
+	seen := make(map[string]struct{})
 	out := make([]string, 0, DefaultResultCapacity)
 
 	for _, mnt := range mounts {
 		// Compute longest literal prefix for parent_path for this mount
-		current := mnt
-		_ = computeDepth(current)
-
-		segs := strings.Split(parentGlob, "/")
-		for i, s := range segs {
-			if s == "" {
-				if i == 0 {
-					continue
-				}
-
-				break
-			}
-
-			if strings.ContainsAny(s, "*?") {
-				break
-			}
-
-			current = EnsureDir(current + s)
-		}
-
-		literalPrefix := current
+		literalPrefix := computeLiteralPrefix(mnt, parentGlob)
 
 		// Target depth equals mount depth plus number of segments in parentGlob
-		totalSegs := 0
-
-		if parentGlob != "" {
-			parts := strings.Split(strings.TrimSuffix(parentGlob, "/"), "/")
-			for _, p := range parts {
-				if p != "" {
-					totalSegs++
-				}
-			}
-		}
-
-		targetDepth := uint16(int(computeDepth(mnt)) + totalSegs)
+		targetDepth := computeTargetDepth(mnt, parentGlob)
 
 		lo := literalPrefix
 		hi := prefixUpperBound(literalPrefix)
@@ -541,7 +567,9 @@ func (c *Clickhouse) SearchGlobPaths(ctx context.Context, globPattern string, li
 			args = append(args, targetDepth)
 		}
 
-		if parentGlob != "" && (strings.ContainsAny(parentGlob, "*?") || len(parentGlob) > len(strings.TrimPrefix(literalPrefix, mnt))) {
+		if parentGlob != "" &&
+			(strings.ContainsAny(parentGlob, "*?") || len(parentGlob) > len(strings.TrimPrefix(literalPrefix, mnt))) {
+
 			parentLike := toLike(parentGlob)
 			q += " AND parent_path LIKE ?"
 
@@ -554,14 +582,13 @@ func (c *Clickhouse) SearchGlobPaths(ctx context.Context, globPattern string, li
 
 		q += " ORDER BY mount_path, parent_path, basename"
 
-		perLimit := limit
 		if limit > 0 {
 			remain := limit - len(out)
 			if remain <= 0 {
 				break
 			}
 
-			perLimit = remain
+			perLimit := remain
 			q += fmt.Sprintf(" LIMIT %d", perLimit)
 		}
 
@@ -586,7 +613,8 @@ func (c *Clickhouse) SearchGlobPaths(ctx context.Context, globPattern string, li
 
 		pathPattern := toLike(parentGlob + nameGlob)
 		if pathPattern != "" {
-			q2 := `SELECT path FROM fs_entries_current WHERE mount_path = ? AND path LIKE ? ORDER BY mount_path, parent_path, basename`
+			q2 := `SELECT path FROM fs_entries_current WHERE mount_path = ? AND path LIKE ?
+			 ORDER BY mount_path, parent_path, basename`
 			args2 := []any{mnt, mnt + pathPattern}
 
 			if limit > 0 {

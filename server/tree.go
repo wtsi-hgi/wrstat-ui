@@ -273,7 +273,12 @@ func (s *Server) getAllowedGIDsSafe(c *gin.Context) (map[uint32]bool, error) {
 }
 
 // chDirSummary returns a DirSummary for the given path using ClickHouse.
-func (s *Server) chDirSummary(c *gin.Context, ch *clickhouse.Clickhouse, path string, cf clickhouse.Filters) (*db.DirSummary, error) { //nolint:lll
+func (s *Server) chDirSummary(
+	c *gin.Context,
+	ch *clickhouse.Clickhouse,
+	path string,
+	cf clickhouse.Filters,
+) (*db.DirSummary, error) {
 	sum, err := ch.SubtreeSummary(c, path, cf)
 	if err != nil {
 		return nil, err
@@ -309,7 +314,13 @@ func (s *Server) chDirSummary(c *gin.Context, ch *clickhouse.Clickhouse, path st
 }
 
 // chChildrenTreeElements builds TreeElements for immediate child directories.
-func (s *Server) chChildrenTreeElements(c *gin.Context, ch *clickhouse.Clickhouse, path string, cf clickhouse.Filters, allowedGIDs map[uint32]bool) ([]*TreeElement, error) { //nolint:lll
+func (s *Server) chChildrenTreeElements(
+	c *gin.Context,
+	ch *clickhouse.Clickhouse,
+	path string,
+	cf clickhouse.Filters,
+	allowedGIDs map[uint32]bool,
+) ([]*TreeElement, error) {
 	entries, err := ch.ListImmediateChildren(c, path)
 	if err != nil {
 		return nil, err
@@ -337,7 +348,13 @@ func (s *Server) chChildrenTreeElements(c *gin.Context, ch *clickhouse.Clickhous
 }
 
 // buildChildTE is a small helper that wraps chChildTreeElement for funlen.
-func (s *Server) buildChildTE(c *gin.Context, ch *clickhouse.Clickhouse, child string, cf clickhouse.Filters, allowedGIDs map[uint32]bool) (*TreeElement, error) { //nolint:lll
+func (s *Server) buildChildTE(
+	c *gin.Context,
+	ch *clickhouse.Clickhouse,
+	child string,
+	cf clickhouse.Filters,
+	allowedGIDs map[uint32]bool,
+) (*TreeElement, error) {
 	return s.chChildTreeElement(c, ch, child, cf, allowedGIDs)
 }
 
@@ -366,8 +383,28 @@ func uniqueDirChildren(entries []clickhouse.FileEntry) []string {
 }
 
 // chChildTreeElement summarises a child path and returns its TreeElement.
-func (s *Server) chChildTreeElement(c *gin.Context, ch *clickhouse.Clickhouse, child string, cf clickhouse.Filters, allowedGIDs map[uint32]bool) (*TreeElement, error) { //nolint:lll
-	csum, err := ch.SubtreeSummary(c, child, cf)
+func (s *Server) chChildTreeElement(c *gin.Context, ch *clickhouse.Clickhouse, child string, cf clickhouse.Filters, allowedGIDs map[uint32]bool) (*TreeElement, error) {
+	cds, err := s.computeChildDirSummary(c, ch, child, cf)
+	if err != nil {
+		return nil, err
+	}
+
+	childTE := s.ddsToTreeElement(cds, allowedGIDs)
+
+	// Determine if child has children with files (heuristic)
+	childTE.HasChildren = s.determineHasChildren(c, ch, child)
+
+	return childTE, nil
+}
+
+// computeChildDirSummary builds a db.DirSummary for child using ClickHouse and synthesised types.
+func (s *Server) computeChildDirSummary(
+	ctx *gin.Context,
+	ch *clickhouse.Clickhouse,
+	child string,
+	cf clickhouse.Filters,
+) (*db.DirSummary, error) {
+	csum, err := ch.SubtreeSummary(ctx, child, cf)
 	if err != nil {
 		return nil, err
 	}
@@ -383,26 +420,26 @@ func (s *Server) chChildTreeElement(c *gin.Context, ch *clickhouse.Clickhouse, c
 		FTs:   chExtsToDGUTA(csum.Exts),
 	}
 
-	// Include 'dir' from ClickHouse Summary.FTypes; also add 'temp' if detected
 	for _, ft := range csum.FTypes {
 		if ft == uint8(clickhouse.FileTypeDir) {
 			cds.FTs = append(cds.FTs, db.DGUTAFileTypeDir)
-
 			break
 		}
 	}
 
-	cds.FTs = synthesizeFileTypes(c, ch, child, cds.FTs)
+	cds.FTs = synthesizeFileTypes(ctx, ch, child, cds.FTs)
 
-	childTE := s.ddsToTreeElement(cds, allowedGIDs)
+	return cds, nil
+}
 
-	// Determine if child has children with files (heuristic: list its children)
-	gkids, err := ch.ListImmediateChildren(c, child)
-	if err == nil {
-		childTE.HasChildren = childrenContainDirs(gkids)
+// determineHasChildren returns true if the path has child directories.
+func (s *Server) determineHasChildren(ctx *gin.Context, ch *clickhouse.Clickhouse, child string) bool {
+	gkids, err := ch.ListImmediateChildren(ctx, child)
+	if err != nil {
+		return false
 	}
 
-	return childTE, nil
+	return childrenContainDirs(gkids)
 }
 
 // childrenContainDirs returns true if any entry is a directory.

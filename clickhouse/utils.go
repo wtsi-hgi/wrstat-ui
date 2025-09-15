@@ -25,6 +25,7 @@ package clickhouse
 
 import (
 	"io"
+	"math"
 	"os"
 	"path"
 	"strings"
@@ -280,6 +281,10 @@ func computeDepth(p string) uint16 {
 
 	if n < 0 {
 		return 0
+	}
+
+	if n > math.MaxUint16 {
+		return math.MaxUint16
 	}
 
 	return uint16(n)

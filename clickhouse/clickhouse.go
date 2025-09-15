@@ -195,7 +195,7 @@ func (c *Clickhouse) refreshMounts(ctx context.Context) error {
 	}
 	defer rows.Close()
 
-	var mounts []string
+	mounts := make([]string, 0)
 	for rows.Next() {
 		var m string
 		if err := rows.Scan(&m); err != nil {

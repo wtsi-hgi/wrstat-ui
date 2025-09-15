@@ -26,6 +26,8 @@ package clickhouse
 import (
 	"context"
 	"strings"
+
+	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 )
 
 // SummaryChild represents a summary for a single child directory.
@@ -43,7 +45,7 @@ func (c *Clickhouse) ChildrenSummaries(
 	ctx context.Context,
 	dir string,
 	f Filters,
-) ([]SummaryChild, error) { //nolint:funlen,gocognit
+) ([]SummaryChild, error) {
 	dir = EnsureDir(dir)
 
 	// We use a direct query approach instead of doing a summary for each child
@@ -56,38 +58,18 @@ func (c *Clickhouse) ChildrenSummaries(
 	}
 	defer rows.Close()
 
+	return scanChildrenSummaries(rows, dir, f)
+}
+
+// scanChildrenSummaries scans the rows and returns the children summaries.
+func scanChildrenSummaries(rows driver.Rows, dir string, f Filters) ([]SummaryChild, error) {
 	results := make([]SummaryChild, 0, DefaultResultCapacity)
 
 	for rows.Next() {
-		var (
-			child                SummaryChild
-			childPath, childBase string
-		)
-
-		// Scan the base fields
-
-		if err := rows.Scan(
-			&childPath,
-			&childBase,
-			&child.Summary.TotalSize,
-			&child.Summary.FileCount,
-			&child.Summary.MostRecentATime,
-			&child.Summary.OldestATime,
-			&child.Summary.MostRecentMTime,
-			&child.Summary.OldestMTime,
-			&child.Summary.UIDs,
-			&child.Summary.GIDs,
-			&child.Summary.Exts,
-			&child.Summary.FTypes); err != nil {
+		child, err := scanChildRow(rows, dir, f)
+		if err != nil {
 			return nil, err
 		}
-
-		// Set Age based on time bucket filters (same as in SubtreeSummary)
-		child.Summary.Age = ageBucketToDBAge(f.ATimeBucket, f.MTimeBucket)
-
-		child.Path = childPath
-		child.ParentPath = dir
-		child.Basename = childBase
 
 		results = append(results, child)
 	}
@@ -99,65 +81,83 @@ func (c *Clickhouse) ChildrenSummaries(
 	return results, nil
 }
 
+// scanChildRow scans a single row into a SummaryChild and applies age mapping.
+func scanChildRow(rows driver.Rows, dir string, f Filters) (SummaryChild, error) {
+	var (
+		child                SummaryChild
+		childPath, childBase string
+	)
+
+	if err := rows.Scan(
+		&childPath,
+		&childBase,
+		&child.Summary.TotalSize,
+		&child.Summary.FileCount,
+		&child.Summary.MostRecentATime,
+		&child.Summary.OldestATime,
+		&child.Summary.MostRecentMTime,
+		&child.Summary.OldestMTime,
+		&child.Summary.UIDs,
+		&child.Summary.GIDs,
+		&child.Summary.Exts,
+		&child.Summary.FTypes); err != nil {
+		return SummaryChild{}, err
+	}
+
+	// Set Age based on time bucket filters (same as in SubtreeSummary)
+	child.Summary.Age = ageBucketToDBAge(f.ATimeBucket, f.MTimeBucket)
+
+	child.Path = childPath
+	child.ParentPath = dir
+	child.Basename = childBase
+
+	return child, nil
+}
+
 // buildChildrenSummariesQuery builds a query to get summaries for immediate children directories.
 func buildChildrenSummariesQuery(dir string, f Filters) (string, []any) {
-	// Start with the directory as the first parameter
+	args, conditions := childrenQueryConditions(dir, f)
+	query := childrenQuerySQL(strings.Join(conditions, " AND "), buildChildrenBucketFilter(f))
+
+	// Constrain to directories only at the output stage
+	args = append(args, uint8(FileTypeDir))
+
+	return query, args
+}
+
+// childrenQueryConditions builds the WHERE clause conditions and corresponding args for the children query.
+func childrenQueryConditions(dir string, f Filters) ([]any, []string) {
 	args := []any{dir}
+	conditions := []string{"parent_path = ?"}
 
-	// Build the filter conditions
-	var conditions []string
-
-	// Always filter for immediate children of the given directory
-	conditions = append(conditions, "parent_path = ?")
-
-	// Add GID filters if provided
 	if len(f.GIDs) > 0 {
 		gidClause, gidArgs := buildInClause("gid", f.GIDs)
 		conditions = append(conditions, gidClause)
 		args = append(args, gidArgs...)
 	}
 
-	// Add UID filters if provided
 	if len(f.UIDs) > 0 {
 		uidClause, uidArgs := buildInClause("uid", f.UIDs)
 		conditions = append(conditions, uidClause)
 		args = append(args, uidArgs...)
 	}
 
-	// Add extension filters if provided
 	if len(f.Exts) > 0 {
 		extClause, extArgs := buildExtensionClause(f.Exts)
 		conditions = append(conditions, extClause)
 		args = append(args, extArgs...)
 	}
 
-	// Build the time bucket filter
-	bucketFilter := ""
+	return args, conditions
+}
 
-	if f.ATimeBucket != "" || f.MTimeBucket != "" {
-		var predicates []string
+// childrenQuerySQL returns the SQL template for the children summaries query given WHERE and bucket filter strings.
+func childrenQuerySQL(whereClause, bucketFilter string) string {
+	return childrenQueryPrefix() + whereClause + bucketFilter + childrenQuerySuffix()
+}
 
-		// Add atime bucket filter if provided
-		if f.ATimeBucket != "" {
-			if pred, err := buildBucketPredicateWithScanExpr("scan_time", "atime", f.ATimeBucket); err == nil && pred != "" {
-				predicates = append(predicates, pred)
-			}
-		}
-
-		// Add mtime bucket filter if provided
-		if f.MTimeBucket != "" {
-			if pred, err := buildBucketPredicateWithScanExpr("scan_time", "mtime", f.MTimeBucket); err == nil && pred != "" {
-				predicates = append(predicates, pred)
-			}
-		}
-
-		if len(predicates) > 0 {
-			bucketFilter = " AND " + "(" + strings.Join(predicates, " AND ") + ")"
-		}
-	}
-
-	// Build the complete SQL query
-	query := `
+func childrenQueryPrefix() string {
+	return `
 SELECT
 	children.path,
 	children.basename,
@@ -184,16 +184,43 @@ FROM (
 		anyLast(ext_low) AS ext_low,
 		anyLast(ftype) AS ftype
 	FROM fs_entries_current
-	WHERE ` + strings.Join(conditions, " AND ") + bucketFilter + `
+	WHERE `
+}
+
+func childrenQuerySuffix() string {
+	return `
 	GROUP BY path, parent_path, basename
 ) AS children
 WHERE children.ftype = ?
 GROUP BY children.path, children.basename
 ORDER BY children.basename
 `
+}
 
-	// Constrain to directories only at the output stage
-	args = append(args, uint8(FileTypeDir))
+// buildChildrenBucketFilter builds the time bucket filter used in buildChildrenSummariesQuery.
+func buildChildrenBucketFilter(f Filters) string {
+	if f.ATimeBucket == "" && f.MTimeBucket == "" {
+		return ""
+	}
 
-	return query, args
+	var predicates []string
+
+	maybeAddBucketPred := func(expr, col, bucket string) {
+		if bucket == "" {
+			return
+		}
+
+		if pred, err := buildBucketPredicateWithScanExpr(expr, col, bucket); err == nil && pred != "" {
+			predicates = append(predicates, pred)
+		}
+	}
+
+	maybeAddBucketPred("scan_time", "atime", f.ATimeBucket)
+	maybeAddBucketPred("scan_time", "mtime", f.MTimeBucket)
+
+	if len(predicates) > 0 {
+		return " AND (" + strings.Join(predicates, " AND ") + ")"
+	}
+
+	return ""
 }

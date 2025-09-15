@@ -90,20 +90,15 @@ func (c *Clickhouse) newBatchProcessor(
 	scanID uuid.UUID,
 	scanTime time.Time,
 ) (*BatchProcessor, error) {
-	filesBatchSQL := `
-		INSERT INTO fs_entries 
-		(mount_path, scan_id, scan_time, path, parent_path, basename, depth, ext_low, ftype, inode, size, uid, gid, mtime, atime, ctime)`
+	filesBatchSQL := filesInsertSQL()
+	rollupsBatchSQL := rollupsInsertSQL()
 
-	rollupsBatchSQL := `
-		INSERT INTO ancestor_rollups_raw 
-		(mount_path, scan_id, scan_time, ancestor, size, atime, mtime, uid, gid, ext_low)`
-
-	filesBatch, err := c.conn.PrepareBatch(ctx, filesBatchSQL)
+	filesBatch, err := prepareBatch(ctx, c.conn, filesBatchSQL)
 	if err != nil {
 		return nil, err
 	}
 
-	rollupsBatch, err := c.conn.PrepareBatch(ctx, rollupsBatchSQL)
+	rollupsBatch, err := prepareBatch(ctx, c.conn, rollupsBatchSQL)
 	if err != nil {
 		return nil, err
 	}
@@ -118,6 +113,30 @@ func (c *Clickhouse) newBatchProcessor(
 		filesBatchSQL:   filesBatchSQL,
 		rollupsBatchSQL: rollupsBatchSQL,
 	}, nil
+}
+
+// filesInsertSQL returns the SQL string used to insert file entries.
+func filesInsertSQL() string {
+	return `
+		INSERT INTO fs_entries
+		(mount_path, scan_id, scan_time, path, parent_path, basename,
+		 depth, ext_low, ftype, inode, size, uid, gid, mtime, atime, ctime)`
+}
+
+// rollupsInsertSQL returns the SQL string used to insert rollup entries.
+func rollupsInsertSQL() string {
+	return `
+		INSERT INTO ancestor_rollups_raw 
+		(mount_path, scan_id, scan_time, ancestor, size, atime, mtime, uid, gid, ext_low)`
+}
+
+// prepareBatch prepares a ClickHouse batch from the given SQL string.
+// It's acceptable to return the CHBatch interface here as the concrete batch
+// type from the driver is not exposed in a stable way.
+//
+//nolint:ireturn
+func prepareBatch(ctx context.Context, conn chdriver.Conn, sql string) (CHBatch, error) {
+	return conn.PrepareBatch(ctx, sql)
 }
 
 // AddFile adds a file entry to the batch.
@@ -463,13 +482,27 @@ func addSyntheticDirAndRollups(
 	// deduplicated at query time for global listings.
 	//
 	// Use DirectorySize for synthetic directories to ensure consistent directory sizing
-	if err := bp.AddFile(a, p, name, computeDepth(a), "", FileTypeDir, 0, DirectorySize, 0, 0, t, t, t); err != nil {
+	if err := insertSyntheticDir(bp, a, p, name, t); err != nil {
 		return err
 	}
 
 	// Mark this directory as seen
 	dirsSeen[a] = true
 
+	if err := addAncestorRollupsForSynthetic(bp, a, t, dirsSeen); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// insertSyntheticDir inserts a single synthetic directory entry.
+func insertSyntheticDir(bp *BatchProcessor, a, parent, name string, t time.Time) error {
+	return bp.AddFile(a, parent, name, computeDepth(a), "", FileTypeDir, 0, DirectorySize, 0, 0, t, t, t)
+}
+
+// addAncestorRollupsForSynthetic adds zero-sized rollups for the synthetic directory and its ancestors.
+func addAncestorRollupsForSynthetic(bp *BatchProcessor, a string, t time.Time, dirsSeen map[string]bool) error {
 	var firstErr error
 
 	ForEachAncestor(a, "/", func(ra string) bool {
@@ -486,9 +519,5 @@ func addSyntheticDirAndRollups(
 		return true
 	})
 
-	if firstErr != nil {
-		return firstErr
-	}
-
-	return nil
+	return firstErr
 }

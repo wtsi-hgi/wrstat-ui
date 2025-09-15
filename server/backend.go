@@ -35,6 +35,26 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/internal/split"
 )
 
+// extMapping maps db.DirGUTAFileType to file extensions used for filtering.
+// getExtMapping returns the extension mapping used by convertDGUTAFileTypesToExts.
+func getExtMapping() map[db.DirGUTAFileType][]string {
+	return map[db.DirGUTAFileType][]string{
+		db.DGUTAFileTypeVCF:        {"vcf"},
+		db.DGUTAFileTypeVCFGz:      {"vcf.gz"},
+		db.DGUTAFileTypeBCF:        {"bcf"},
+		db.DGUTAFileTypeSam:        {"sam"},
+		db.DGUTAFileTypeBam:        {"bam"},
+		db.DGUTAFileTypeCram:       {"cram"},
+		db.DGUTAFileTypeFasta:      {"fa", "fasta"},
+		db.DGUTAFileTypeFastq:      {"fastq", "fq"},
+		db.DGUTAFileTypeFastqGz:    {"fastq.gz", "fq.gz"},
+		db.DGUTAFileTypePedBed:     {"ped", "bed", "bim", "fam", "map"},
+		db.DGUTAFileTypeText:       {"csv", "dat", "md", "readme", "text", "txt", "tsv"},
+		db.DGUTAFileTypeLog:        {"log", "err", "e", "oe"},
+		db.DGUTAFileTypeCompressed: {"gz", "bz2", "xz", "zip", "tgz", "bzip2", "bgz", "zst", "lz4", "lz", "br"},
+	}
+}
+
 // Backend captures the operations the server needs from a data backend.
 //
 // Implementations may be backed by Bolt (db.Tree + basedirs.MultiReader)
@@ -90,17 +110,7 @@ func (b *ClickHouseBackend) DirInfo(
 	}
 
 	// Convert the ClickHouse summary to a db.DirSummary
-	current := &db.DirSummary{
-		Dir:   dir,
-		Count: sum.FileCount,
-		Size:  sum.TotalSize,
-		Atime: sum.OldestATime,     // Oldest atime matches Bolt semantics
-		Mtime: sum.MostRecentMTime, // Most recent mtime matches Bolt semantics
-		UIDs:  sum.UIDs,
-		GIDs:  sum.GIDs,
-		FTs:   convertFTypesToDirGUTAFileTypes(sum.FTypes),
-		Age:   db.DirGUTAge(sum.Age),
-	}
+	current := b.convertSummaryToDirSummary(sum, dir)
 
 	// Get the children summaries
 	children, err := b.ch.ChildrenSummaries(ctx, dir, chFilters)
@@ -109,6 +119,31 @@ func (b *ClickHouseBackend) DirInfo(
 	}
 
 	// Convert the ClickHouse child summaries to db.DirSummary slice
+	childSummaries := b.convertChildrenToDirSummaries(children)
+
+	return &db.DirInfo{
+		Current:  current,
+		Children: childSummaries,
+	}, nil
+}
+
+// convertSummaryToDirSummary converts a ClickHouse summary to db.DirSummary.
+func (b *ClickHouseBackend) convertSummaryToDirSummary(sum clickhouse.Summary, dir string) *db.DirSummary {
+	return &db.DirSummary{
+		Dir:   dir,
+		Count: sum.FileCount,
+		Size:  sum.TotalSize,
+		Atime: sum.OldestATime,
+		Mtime: sum.MostRecentMTime,
+		UIDs:  sum.UIDs,
+		GIDs:  sum.GIDs,
+		FTs:   convertFTypesToDirGUTAFileTypes(sum.FTypes),
+		Age:   db.DirGUTAge(sum.Age),
+	}
+}
+
+// convertChildrenToDirSummaries converts ClickHouse child summaries to []*db.DirSummary.
+func (b *ClickHouseBackend) convertChildrenToDirSummaries(children []clickhouse.SummaryChild) []*db.DirSummary {
 	childSummaries := make([]*db.DirSummary, len(children))
 	for i, child := range children {
 		childSummaries[i] = &db.DirSummary{
@@ -124,10 +159,7 @@ func (b *ClickHouseBackend) DirInfo(
 		}
 	}
 
-	return &db.DirInfo{
-		Current:  current,
-		Children: childSummaries,
-	}, nil
+	return childSummaries
 }
 
 // DirHasChildren reports if dir has any child dirs with matching files.
@@ -163,44 +195,29 @@ func convertFilters(filter *db.Filter) clickhouse.Filters {
 
 // convertAgeToBuckets converts a db.DirGUTAge to appropriate time bucket strings.
 func convertAgeToBuckets(age db.DirGUTAge) (aTimeBucket, mTimeBucket string) {
-	switch age {
-	case db.DGUTAgeAll:
-		// no time buckets
-	case db.DGUTAgeA1M:
-		aTimeBucket = ">1m"
-	case db.DGUTAgeA2M:
-		aTimeBucket = ">2m"
-	case db.DGUTAgeA6M:
-		aTimeBucket = ">6m"
-	case db.DGUTAgeA1Y:
-		aTimeBucket = ">1y"
-	case db.DGUTAgeA2Y:
-		aTimeBucket = ">2y"
-	case db.DGUTAgeA3Y:
-		aTimeBucket = ">3y"
-	case db.DGUTAgeA5Y:
-		aTimeBucket = ">5y"
-	case db.DGUTAgeA7Y:
-		aTimeBucket = ">7y"
-	case db.DGUTAgeM1M:
-		mTimeBucket = ">1m"
-	case db.DGUTAgeM2M:
-		mTimeBucket = ">2m"
-	case db.DGUTAgeM6M:
-		mTimeBucket = ">6m"
-	case db.DGUTAgeM1Y:
-		mTimeBucket = ">1y"
-	case db.DGUTAgeM2Y:
-		mTimeBucket = ">2y"
-	case db.DGUTAgeM3Y:
-		mTimeBucket = ">3y"
-	case db.DGUTAgeM5Y:
-		mTimeBucket = ">5y"
-	case db.DGUTAgeM7Y:
-		mTimeBucket = ">7y"
+	aTimeMap := map[db.DirGUTAge]string{
+		db.DGUTAgeA1M: ">1m",
+		db.DGUTAgeA2M: ">2m",
+		db.DGUTAgeA6M: ">6m",
+		db.DGUTAgeA1Y: ">1y",
+		db.DGUTAgeA2Y: ">2y",
+		db.DGUTAgeA3Y: ">3y",
+		db.DGUTAgeA5Y: ">5y",
+		db.DGUTAgeA7Y: ">7y",
 	}
 
-	return aTimeBucket, mTimeBucket
+	mTimeMap := map[db.DirGUTAge]string{
+		db.DGUTAgeM1M: ">1m",
+		db.DGUTAgeM2M: ">2m",
+		db.DGUTAgeM6M: ">6m",
+		db.DGUTAgeM1Y: ">1y",
+		db.DGUTAgeM2Y: ">2y",
+		db.DGUTAgeM3Y: ">3y",
+		db.DGUTAgeM5Y: ">5y",
+		db.DGUTAgeM7Y: ">7y",
+	}
+
+	return aTimeMap[age], mTimeMap[age]
 }
 
 // convertFTypesToDirGUTAFileTypes converts ClickHouse FTypes to db.DirGUTAFileType slice.
@@ -215,7 +232,7 @@ func convertFTypesToDirGUTAFileTypes(ftypes []uint8) []db.DirGUTAFileType {
 	for _, ft := range ftypes {
 		// FileTypeDir (2) in ClickHouse maps to 15 (DirGUTAFileTypeDir) in db
 		if ft == uint8(clickhouse.FileTypeDir) {
-			result = append(result, 15) // DirGUTAFileTypeDir value
+			result = append(result, db.DGUTAFileTypeDir) // DirGUTAFileTypeDir value
 		}
 		// For non-directory types, we skip as they're handled via extensions
 	}
@@ -229,81 +246,23 @@ func convertDGUTAFileTypesToExts(fts []db.DirGUTAFileType) []string {
 		return nil
 	}
 
-	// Create a map to avoid duplicates
 	extMap := make(map[string]struct{})
 
-	// This mapping should align with extToDGUTA in server/tree.go
+	mapping := getExtMapping()
 	for _, ft := range fts {
-		switch ft {
-		case db.DGUTAFileTypeVCF:
-			extMap["vcf"] = struct{}{}
-		case db.DGUTAFileTypeVCFGz:
-			extMap["vcf.gz"] = struct{}{}
-		case db.DGUTAFileTypeBCF:
-			extMap["bcf"] = struct{}{}
-		case db.DGUTAFileTypeSam:
-			extMap["sam"] = struct{}{}
-		case db.DGUTAFileTypeBam:
-			extMap["bam"] = struct{}{}
-		case db.DGUTAFileTypeCram:
-			extMap["cram"] = struct{}{}
-		case db.DGUTAFileTypeFasta:
-			extMap["fa"] = struct{}{}
-			extMap["fasta"] = struct{}{}
-		case db.DGUTAFileTypeFastq:
-			extMap["fastq"] = struct{}{}
-			extMap["fq"] = struct{}{}
-		case db.DGUTAFileTypeFastqGz:
-			extMap["fastq.gz"] = struct{}{}
-			extMap["fq.gz"] = struct{}{}
-		case db.DGUTAFileTypePedBed:
-			extMap["ped"] = struct{}{}
-			extMap["bed"] = struct{}{}
-			extMap["bim"] = struct{}{}
-			extMap["fam"] = struct{}{}
-			extMap["map"] = struct{}{}
-		case db.DGUTAFileTypeText:
-			extMap["csv"] = struct{}{}
-			extMap["dat"] = struct{}{}
-			extMap["md"] = struct{}{}
-			extMap["readme"] = struct{}{}
-			extMap["text"] = struct{}{}
-			extMap["txt"] = struct{}{}
-			extMap["tsv"] = struct{}{}
-		case db.DGUTAFileTypeLog:
-			extMap["log"] = struct{}{}
-			extMap["err"] = struct{}{}
-			extMap["e"] = struct{}{}
-			extMap["oe"] = struct{}{}
-		case db.DGUTAFileTypeCompressed:
-			extMap["gz"] = struct{}{}
-			extMap["bz2"] = struct{}{}
-			extMap["xz"] = struct{}{}
-			extMap["zip"] = struct{}{}
-			extMap["tgz"] = struct{}{}
-			extMap["bzip2"] = struct{}{}
-			extMap["bgz"] = struct{}{}
-			extMap["zst"] = struct{}{}
-			extMap["lz4"] = struct{}{}
-			extMap["lz"] = struct{}{}
-			extMap["br"] = struct{}{}
-		case db.DGUTAFileTypeDir:
-			// No ext filter for directories; handled separately
-		case db.DGUTAFileTypeTemp:
-			// No ext filter for temp; detected heuristically via path patterns
-		case db.DGUTAFileTypeOther:
-			// No specific extension mapping for 'other'
+		if exts, ok := mapping[ft]; ok {
+			for _, e := range exts {
+				extMap[e] = struct{}{}
+			}
 		}
-		// Skip db.DirGUTAFileTypeDir (15) and db.DirGUTAFileTypeTemp (1) - these are handled separately
 	}
 
-	// Convert the map to a slice
-	exts := make([]string, 0, len(extMap))
-	for ext := range extMap {
-		exts = append(exts, ext)
+	res := make([]string, 0, len(extMap))
+	for e := range extMap {
+		res = append(res, e)
 	}
 
-	return exts
+	return res
 }
 
 // Where implements where-splits style aggregation.
