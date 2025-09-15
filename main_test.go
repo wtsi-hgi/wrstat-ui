@@ -420,7 +420,7 @@ func TestClickHouse(t *testing.T) {
 		cleanupConn.Close()
 	}()
 
-	Convey("summarise CLI command with ClickHouse integration", t, func() {
+	Convey("clickhouse update CLI command works", t, func() {
 		// Prepare test data
 		uid := uint32(1000) // standard test user ID
 		gid := uint32(1000) // standard test group ID
@@ -445,10 +445,10 @@ func TestClickHouse(t *testing.T) {
 		So(err, ShouldBeNil)
 		So(f.Close(), ShouldBeNil)
 
-		// Run the clickhouse command using the CLI
+		// Run the clickhouse update subcommand using the CLI
 		t.Logf("Running clickhouse command with database %s", testDatabase)
 		output, stderr, _, err := runWRStat(
-			"clickhouse",
+			"clickhouse", "update",
 			"--host", chHost,
 			"--port", chPort,
 			"--database", testDatabase,
@@ -516,6 +516,46 @@ func TestClickHouse(t *testing.T) {
 			mountPath+"humgen/projects/A/file1").Scan(&fileSize)
 		So(err, ShouldBeNil)
 		So(fileSize, ShouldEqual, 1000)
+
+		// Nested: run glob subcommand queries now that DB is populated
+		Convey("glob CLI returns all matches without --limit and respects --limit", func() {
+			pattern := mountPath + "humgen/projects/*/file*"
+
+			// No limit: expect all 3 files
+			output, stderr, _, err := runWRStat(
+				"clickhouse", "glob",
+				"--host", chHost,
+				"--port", chPort,
+				"--database", testDatabase,
+				"--username", chUsername,
+				"--password", chPassword,
+				"--pattern", pattern,
+			)
+			So(err, ShouldBeNil)
+			So(stderr, ShouldBeBlank)
+			lines := strings.FieldsFunc(output, func(r rune) bool { return r == '\n' || r == '\r' })
+			So(len(lines), ShouldEqual, 3)
+			So(lines, ShouldContain, mountPath+"humgen/projects/A/file1")
+			So(lines, ShouldContain, mountPath+"humgen/projects/A/file2")
+			So(lines, ShouldContain, mountPath+"humgen/projects/B/file3")
+
+			// With limit: expect exactly 1 line
+			output, stderr, _, err = runWRStat(
+				"clickhouse", "glob",
+				"--host", chHost,
+				"--port", chPort,
+				"--database", testDatabase,
+				"--username", chUsername,
+				"--password", chPassword,
+				"--pattern", pattern,
+				"--limit", "1",
+			)
+			So(err, ShouldBeNil)
+			So(stderr, ShouldBeBlank)
+			lines = strings.FieldsFunc(output, func(r rune) bool { return r == '\n' || r == '\r' })
+			So(len(lines), ShouldEqual, 1)
+			So(lines[0] == mountPath+"humgen/projects/A/file1" || lines[0] == mountPath+"humgen/projects/A/file2" || lines[0] == mountPath+"humgen/projects/B/file3", ShouldBeTrue)
+		})
 	})
 }
 
