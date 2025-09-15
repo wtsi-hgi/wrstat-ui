@@ -582,19 +582,106 @@ func (c *Clickhouse) SearchGlobPaths(ctx context.Context, globPattern string, li
 		out = append(out, p)
 	}
 
-	// Also attempt a direct path LIKE to catch directory-only matches
+	// Also include directory-self and/or recursive descendants when applicable.
+	// We prefer fast prefix range scans on 'path' and an equality check for the
+	// directory itself, falling back to path LIKE only when the parent glob
+	// contains wildcards (eg. '*/tmp/*').
 	if limit <= 0 || len(out) < limit {
+		remain := -1
+		if limit > 0 {
+			remain = limit - len(out)
+			if remain <= 0 {
+				return out, nil
+			}
+		}
+
+		parentHasWild := parentGlob != "" && strings.ContainsAny(parentGlob, "*?")
+		dirPrefix := mount + parentGlob
+
+		// Case 1: parentGlob has no wildcards and nameGlob is empty => directory self
+		if parentGlob != "" && !parentHasWild && nameGlob == "" {
+			qeq := `SELECT path FROM fs_entries_current WHERE mount_path = ? AND path = ?`
+			argsEq := []any{mount, dirPrefix}
+
+			more, err := c.execPathQuery(ctx, qeq, argsEq...)
+			if err != nil {
+				return nil, err
+			}
+
+			for _, p := range more {
+				if _, ok := seen[p]; ok {
+					continue
+				}
+				seen[p] = struct{}{}
+				out = append(out, p)
+			}
+
+			return out, nil
+		}
+
+		// Case 2: parentGlob has no wildcards and nameGlob is '*' => directory self + all descendants
+		if parentGlob != "" && !parentHasWild && nameGlob == "*" {
+			// Include the directory itself
+			qeq := `SELECT path FROM fs_entries_current WHERE mount_path = ? AND path = ?`
+			argsEq := []any{mount, dirPrefix}
+
+			more, err := c.execPathQuery(ctx, qeq, argsEq...)
+			if err != nil {
+				return nil, err
+			}
+
+			for _, p := range more {
+				if _, ok := seen[p]; ok {
+					continue
+				}
+				seen[p] = struct{}{}
+				out = append(out, p)
+				if limit > 0 && len(out) >= limit {
+					return out, nil
+				}
+			}
+
+			// Then include all descendants via fast range scan on 'path'
+			qrange := `SELECT path FROM fs_entries_current WHERE mount_path = ? AND path >= ? AND path < ?
+			 ORDER BY mount_path, parent_path, basename`
+			argsRange := []any{mount, dirPrefix, prefixUpperBound(dirPrefix)}
+
+			if remain > 0 {
+				// Adjust remaining after equality inclusion
+				remain = limit - len(out)
+				if remain > 0 {
+					qrange += fmt.Sprintf(" LIMIT %d", remain)
+				}
+			}
+
+			more, err = c.execPathQuery(ctx, qrange, argsRange...)
+			if err != nil {
+				return nil, err
+			}
+
+			for _, p := range more {
+				if _, ok := seen[p]; ok {
+					continue
+				}
+				seen[p] = struct{}{}
+				out = append(out, p)
+				if limit > 0 && len(out) >= limit {
+					return out, nil
+				}
+			}
+
+			return out, nil
+		}
+
+		// Case 3: Fallback for complex patterns (wildcards in parent glob): use LIKE but limited
 		pathPattern := toLike(parentGlob + nameGlob)
 		if pathPattern != "" {
 			q2 := `SELECT path FROM fs_entries_current WHERE mount_path = ? AND path LIKE ?
 			 ORDER BY mount_path, parent_path, basename`
 			args2 := []any{mount, mount + pathPattern}
 
-			if limit > 0 {
-				remain := limit - len(out)
-				if remain > 0 {
-					q2 += fmt.Sprintf(" LIMIT %d", remain)
-				}
+			if remain > 0 {
+				q2 += fmt.Sprintf(" LIMIT %d", remain)
 			}
 
 			more, err := c.execPathQuery(ctx, q2, args2...)
