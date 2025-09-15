@@ -27,6 +27,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path"
 	"strings"
 
 	"github.com/wtsi-hgi/wrstat-ui/db"
@@ -728,15 +729,14 @@ func (c *Clickhouse) SearchGlobPaths(ctx context.Context, glob string, limit int
 		if limit > 0 {
 			q += fmt.Sprintf(" LIMIT %d", limit)
 		}
-		// Preserve trailing slash semantics by concatenating directly
-		return c.execPathQuery(ctx, q, mount, mount+rel)
+		return c.execPathQuery(ctx, q, mount, path.Join(mount, rel))
 	}
 
-	// Case 2: "*.ext" suffix optimisation
+	// Case 2: "*.ext" optimisation
 	parts := strings.Split(rel, "/")
 	if len(parts) > 0 && strings.HasPrefix(parts[len(parts)-1], "*.") &&
 		!strings.ContainsAny(parts[len(parts)-1], "?") {
-		// Everything before the last part is the fixed prefix
+		// mount already ends with '/'
 		prefix := mount
 		if len(parts) > 1 {
 			prefix += strings.Join(parts[:len(parts)-1], "/") + "/"
@@ -755,68 +755,26 @@ func (c *Clickhouse) SearchGlobPaths(ctx context.Context, glob string, limit int
 		return c.execPathQuery(ctx, q, mount, prefix, prefixUpperBound(prefix), ext)
 	}
 
-	// Case 2b: explicit directory with trailing wildcard "dir/*"
-	if strings.HasSuffix(rel, "/*") {
-		base := strings.TrimSuffix(rel, "/*")
-		if base != "" && !strings.ContainsAny(base, "*?") {
-			dir := mount + base + "/"
-
-			// All descendants (exclude the directory to avoid duplication)
-			descQ := `SELECT path FROM fs_entries_current
-					  WHERE mount_path = ? AND path LIKE ? AND path != ?
-					  ORDER BY path`
-			if limit > 0 {
-				descQ += fmt.Sprintf(" LIMIT %d", limit)
-			}
-
-			desc, err := c.execPathQuery(ctx, descQ, mount, dir+"%", dir)
-			if err != nil {
-				return nil, err
-			}
-
-			return desc, nil
-		}
-	}
-
-	// Case 3: prefix scan when there are '*' but no '?', and the pattern is a simple
-	//          trailing star (e.g., "prefix*" or "dir/*"). Otherwise, use LIKE.
+	// Case 3: simple recursive "*" → fast prefix scan
 	if !strings.ContainsAny(rel, "?") {
-		firstStar := strings.Index(rel, "*")
-		if firstStar > 0 { // prefix must be non-empty to anchor the range
-			literal := rel[:firstStar]
-			suffix := rel[firstStar+1:]
-
-			// Eligible for fast prefix scan if suffix is empty (e.g., "file*")
-			// or exactly "/" (e.g., "dir/*"). Any more complex suffix uses LIKE.
-			if suffix == "" || suffix == "/" {
-				dir := mount + literal
-
-				if suffix == "/" { // dir/*: descendants only
-					descQ := `SELECT path FROM fs_entries_current
-							  WHERE mount_path = ? AND path LIKE ? AND path != ?
-							  ORDER BY path`
-					if limit > 0 {
-						descQ += fmt.Sprintf(" LIMIT %d", limit)
-					}
-					return c.execPathQuery(ctx, descQ, mount, dir+"%", dir)
-				}
-
-				// prefix* with no '?': use range scan and exclude the exact prefix path
-				q := `SELECT path FROM fs_entries_current
-					  WHERE mount_path = ?
-						AND path >= ?
-						AND path < ?
-						AND path != ?
-					  ORDER BY path`
-				if limit > 0 {
-					q += fmt.Sprintf(" LIMIT %d", limit)
-				}
-				return c.execPathQuery(ctx, q, mount, dir, prefixUpperBound(dir), dir)
+		literal := strings.SplitN(rel, "*", 2)[0]
+		if literal != "" {
+			// mount already ends with '/'
+			prefix := mount + literal
+			q := `SELECT path FROM fs_entries_current
+			      WHERE mount_path = ?
+			        AND path >= ?
+			        AND path < ?
+			      ORDER BY path`
+			if limit > 0 {
+				q += fmt.Sprintf(" LIMIT %d", limit)
 			}
+			return c.execPathQuery(ctx, q, mount, prefix, prefixUpperBound(prefix))
 		}
 	}
 
 	// Case 4: fallback → LIKE
+	// mount already ends with '/'
 	like := globToLike(mount + rel)
 	q := `SELECT path FROM fs_entries_current
 	      WHERE mount_path = ? AND path LIKE ?
