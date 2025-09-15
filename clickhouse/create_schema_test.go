@@ -5,6 +5,7 @@ package clickhouse_test
 
 import (
 	"context"
+	"os"
 	"os/user"
 	"testing"
 	"time"
@@ -60,4 +61,14 @@ func TestCreateSchemaCreatesDatabase(t *testing.T) {
 		_ = admin.ExecuteQuery(ctx, "DROP DATABASE IF EXISTS "+dbName)
 		_ = admin.Close()
 	}
+}
+
+// getenv returns the value of the environment variable named by the key,
+// or the provided default if not set. Only for tests in package clickhouse_test.
+func getenv(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+
+	return def
 }

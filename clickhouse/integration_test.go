@@ -51,10 +51,6 @@ func TestClickHouseIntegration(t *testing.T) {
 	}
 	defer cleanup()
 
-	// Get the current ephemeral DB name for possible auxiliary DB creation later
-	var testDatabase string
-	require.NoError(t, ch.ExecuteQuery(ctx, "SELECT currentDatabase()", &testDatabase))
-
 	// Prepare test data
 	uid := uint32(1000) // standard test user ID
 	gid := uint32(1000) // standard test group ID

@@ -56,22 +56,10 @@ func New(params ConnectionParams) (*Clickhouse, error) {
 		},
 	})
 	if err != nil {
-		// Best effort: connect to default DB and create the requested database
-		admin, aerr := chdriver.Open(&chdriver.Options{
-			Addr:        []string{fmt.Sprintf("%s:%s", params.Host, params.Port)},
-			Auth:        chdriver.Auth{Database: "default", Username: params.Username, Password: params.Password},
-			DialTimeout: DialTimeoutSeconds * time.Second,
-		})
-		if aerr == nil {
-			//nolint:errcheck // best effort to create database
-			_ = admin.Exec(context.Background(), "CREATE DATABASE IF NOT EXISTS "+params.Database)
-			_ = admin.Close()
-		}
-
-		// Try connecting again to the requested database
+		// Fallback: connect to default DB (do not create the requested DB here)
 		conn, err = chdriver.Open(&chdriver.Options{
 			Addr:        []string{fmt.Sprintf("%s:%s", params.Host, params.Port)},
-			Auth:        chdriver.Auth{Database: params.Database, Username: params.Username, Password: params.Password},
+			Auth:        chdriver.Auth{Database: "default", Username: params.Username, Password: params.Password},
 			DialTimeout: DialTimeoutSeconds * time.Second,
 			Compression: &chdriver.Compression{Method: chdriver.CompressionLZ4},
 			Settings: chdriver.Settings{
@@ -350,6 +338,11 @@ func (c *Clickhouse) CreateSchema(ctx context.Context) error {
 		} else {
 			return err
 		}
+	}
+
+	// Ensure subsequent DDL is executed in the target database
+	if err := c.conn.Exec(ctx, "USE "+dbName); err != nil {
+		return fmt.Errorf("select db: %w", err)
 	}
 
 	// Create scans table first
