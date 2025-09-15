@@ -422,11 +422,12 @@ func subtreeLikelyHasTemp(ctx *gin.Context, ch *clickhouse.Clickhouse, dir strin
 	// We reuse SearchGlobPaths with a limited pattern to detect '/tmp/' anywhere under dir.
 	// This is a heuristic for test fixtures and common conventions.
 	// Case-sensitive search is fine for '/tmp/'. Limit 1 for efficiency.
-	// Pattern: dir + "*/tmp/*"
-	pattern := strings.TrimRight(clickhouse.EnsureDir(dir), "/") + "*/tmp/*"
+	// Pattern: EnsureDir(dir) + "*/tmp/*" so we anchor at the directory boundary
+	// Example: "/k/" + "*/tmp/*" => "/k/*/tmp/*"
+	pattern := clickhouse.EnsureDir(dir) + "*/tmp/*"
 
 	// Use a small limit to just detect presence
-	paths, err := ch.SearchGlobPaths(ctx, pattern, 1, false)
+	paths, err := ch.SearchGlobPaths(ctx, pattern, 1)
 	if err != nil {
 		return false
 	}

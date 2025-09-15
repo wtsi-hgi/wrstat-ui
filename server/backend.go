@@ -287,6 +287,12 @@ func convertDGUTAFileTypesToExts(fts []db.DirGUTAFileType) []string {
 			extMap["lz4"] = struct{}{}
 			extMap["lz"] = struct{}{}
 			extMap["br"] = struct{}{}
+		case db.DGUTAFileTypeDir:
+			// No ext filter for directories; handled separately
+		case db.DGUTAFileTypeTemp:
+			// No ext filter for temp; detected heuristically via path patterns
+		case db.DGUTAFileTypeOther:
+			// No specific extension mapping for 'other'
 		}
 		// Skip db.DirGUTAFileTypeDir (15) and db.DirGUTAFileTypeTemp (1) - these are handled separately
 	}

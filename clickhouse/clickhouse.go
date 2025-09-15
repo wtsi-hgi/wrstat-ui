@@ -31,6 +31,8 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"sort"
+	"strings"
 	"time"
 
 	chdriver "github.com/ClickHouse/clickhouse-go/v2"
@@ -40,6 +42,9 @@ import (
 // It encapsulates the third-party ClickHouse client implementation.
 type Clickhouse struct {
 	conn chdriver.Conn
+	// cachedMounts stores normalised mount paths (with trailing slash),
+	// sorted longest-first for efficient prefix matching.
+	cachedMounts []string
 }
 
 // Close closes the connection to the ClickHouse database.
@@ -156,3 +161,61 @@ type ChildSummary struct {
 var (
 	ErrInvalidBucket = errors.New("invalid bucket")
 )
+
+// ensureMounts populates the cached mount paths if empty.
+func (c *Clickhouse) ensureMounts(ctx context.Context) error {
+	if len(c.cachedMounts) > 0 {
+		return nil
+	}
+
+	return c.refreshMounts(ctx)
+}
+
+// refreshMounts queries ClickHouse for known mount paths and caches them.
+// It pulls distinct mount_path values from ready scans and sorts them
+// longest-first for deterministic prefix matching.
+func (c *Clickhouse) refreshMounts(ctx context.Context) error {
+	rows, err := c.conn.Query(ctx, `
+		SELECT DISTINCT mount_path
+		FROM scans
+		WHERE state = 'ready'
+	`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	var mounts []string
+	for rows.Next() {
+		var m string
+		if err := rows.Scan(&m); err != nil {
+			return err
+		}
+
+		mounts = append(mounts, NormalizeMount(m))
+	}
+
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	// Sort by length desc so the most specific mount matches first
+	sort.Slice(mounts, func(i, j int) bool { return len(mounts[i]) > len(mounts[j]) })
+
+	c.cachedMounts = mounts
+
+	return nil
+}
+
+// findMountForPrefix returns the mount that contains the given absolute path prefix.
+// It assumes cachedMounts is populated and normalised; returns "" if none match.
+func (c *Clickhouse) findMountForPrefix(prefix string) string {
+	p := NormalizeMount(prefix)
+	for _, m := range c.cachedMounts {
+		if strings.HasPrefix(p, m) {
+			return m
+		}
+	}
+
+	return ""
+}

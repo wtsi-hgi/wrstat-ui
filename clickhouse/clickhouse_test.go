@@ -237,12 +237,12 @@ func TestSearchGlobPathsPublic(t *testing.T) {
 	require.NoError(t, ch.UpdateClickhouse(ctx, mount, r))
 
 	// Case-sensitive search; pattern must match full path, so include a leading wildcard
-	paths, err := ch.SearchGlobPaths(ctx, "*/p/q/file*", 0, false)
+	paths, err := ch.SearchGlobPaths(ctx, "*/p/q/file*", 0)
 	require.NoError(t, err)
 	assert.Len(t, paths, 2)
 
 	// Limit works
-	paths, err = ch.SearchGlobPaths(ctx, "*/p/q/file*", 1, false)
+	paths, err = ch.SearchGlobPaths(ctx, "*/p/q/file*", 1)
 	require.NoError(t, err)
 	assert.Len(t, paths, 1)
 }
