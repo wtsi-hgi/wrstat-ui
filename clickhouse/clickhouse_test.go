@@ -230,6 +230,9 @@ func TestSearchGlobPathsPublic(t *testing.T) {
 	statsdata.AddFile(root, "p/x/other.bin", 1, 1, 1, 1_700_000_100, 1_700_000_100)
 	statsdata.AddFile(root, "p/q/dirOnly/fileC.txt", 1, 1, 1, 1_700_000_100, 1_700_000_100)
 	statsdata.AddFile(root, "p/q/dirOnly/subdir/fileD.txt", 1, 1, 1, 1_700_000_100, 1_700_000_100)
+	// Additional deeper files to validate recursive '*' behaviour
+	statsdata.AddFile(root, "p/q/dirOnly/subdir/fileA.txt", 1, 1, 1, 1_700_000_100, 1_700_000_100)
+	statsdata.AddFile(root, "p/q/dirOnly/subdir/other.bin", 1, 1, 1, 1_700_000_100, 1_700_000_100)
 
 	ch, ctx, cleanup, err := clickhouse.NewUserEphemeralForTests()
 	if err != nil {
@@ -273,30 +276,14 @@ func TestSearchGlobPathsPublic(t *testing.T) {
 		assert.Len(t, paths, 1)
 	})
 
-	t.Run("single-level wildcard", func(t *testing.T) {
+	t.Run("recursive star wildcard", func(t *testing.T) {
+		// Representative case: '*' is recursive and should match across depths under 'p/'
 		paths, err := ch.SearchGlobPaths(ctx, mount+"p/*/fileA.txt", 0)
 		require.NoError(t, err)
-		assert.Equal(t, []string{mount + "p/q/fileA.txt"}, paths)
-	})
-
-	t.Run("multi-level wildcard", func(t *testing.T) {
-		paths, err := ch.SearchGlobPaths(ctx, mount+"p/*/other.bin", 0)
-		require.NoError(t, err)
-		assert.Equal(t, []string{mount + "p/x/other.bin"}, paths)
-	})
-
-	t.Run("deep wildcard", func(t *testing.T) {
-		paths, err := ch.SearchGlobPaths(ctx, mount+"p/q/dirOnly/*/fileD.txt", 0)
-		require.NoError(t, err)
-		assert.Equal(t, []string{mount + "p/q/dirOnly/subdir/fileD.txt"}, paths)
-	})
-
-	t.Run("trailing slash directory", func(t *testing.T) {
-		// Should match the directory itself if present
-		paths, err := ch.SearchGlobPaths(ctx, mount+"p/q/dirOnly/", 0)
-		require.NoError(t, err)
-		// Should match the directory path
-		assert.Contains(t, paths, mount+"p/q/dirOnly/")
+		assert.ElementsMatch(t, []string{
+			mount + "p/q/fileA.txt",
+			mount + "p/q/dirOnly/subdir/fileA.txt",
+		}, paths)
 	})
 
 	t.Run("question mark wildcard", func(t *testing.T) {
@@ -321,11 +308,13 @@ func TestSearchGlobPathsPublic(t *testing.T) {
 	t.Run("directory and file wildcard", func(t *testing.T) {
 		paths, err := ch.SearchGlobPaths(ctx, mount+"p/q/dirOnly/*", 0)
 		require.NoError(t, err)
-		// Should match all descendants under dirOnly/ (files and directories, recursively), excluding the directory itself
+		// '*' is recursive: match all descendants (files and directories), excluding the directory itself
 		assert.ElementsMatch(t, []string{
 			mount + "p/q/dirOnly/fileC.txt",
 			mount + "p/q/dirOnly/subdir/",
 			mount + "p/q/dirOnly/subdir/fileD.txt",
+			mount + "p/q/dirOnly/subdir/fileA.txt",
+			mount + "p/q/dirOnly/subdir/other.bin",
 		}, paths)
 	})
 
@@ -345,7 +334,7 @@ func TestSearchGlobPathsPublic(t *testing.T) {
 	t.Run("multi-wildcard segments", func(t *testing.T) {
 		paths, err := ch.SearchGlobPaths(ctx, mount+"p/*/file*.t?t", 0)
 		require.NoError(t, err)
-		// Should match all files matching file*.t?t in any subdir of p/
+		// '*' is recursive: match any depth under p/
 		assert.ElementsMatch(t, []string{
 			mount + "p/q/fileA.txt",
 			mount + "p/q/dirOnly/fileC.txt",

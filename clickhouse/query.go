@@ -722,7 +722,7 @@ func (c *Clickhouse) SearchGlobPaths(ctx context.Context, glob string, limit int
 		rel = rel[1:]
 	}
 
-	// Case 1: no wildcards → exact match
+	// --- Case 1: no wildcards → exact match
 	if !strings.ContainsAny(rel, "*?") {
 		q := `SELECT path FROM fs_entries_current
 		      WHERE mount_path = ? AND path = ? ORDER BY path`
@@ -732,17 +732,15 @@ func (c *Clickhouse) SearchGlobPaths(ctx context.Context, glob string, limit int
 		return c.execPathQuery(ctx, q, mount, path.Join(mount, rel))
 	}
 
-	// Case 2: "*.ext" optimisation
+	// --- Case 2: "*.ext" optimisation
 	parts := strings.Split(rel, "/")
 	if len(parts) > 0 && strings.HasPrefix(parts[len(parts)-1], "*.") &&
 		!strings.ContainsAny(parts[len(parts)-1], "?") {
-		// mount already ends with '/'
 		prefix := mount
 		if len(parts) > 1 {
 			prefix += strings.Join(parts[:len(parts)-1], "/") + "/"
 		}
 		ext := strings.ToLower(strings.TrimPrefix(parts[len(parts)-1], "*."))
-
 		q := `SELECT path FROM fs_entries_current
 		      WHERE mount_path = ?
 		        AND path >= ?
@@ -755,11 +753,10 @@ func (c *Clickhouse) SearchGlobPaths(ctx context.Context, glob string, limit int
 		return c.execPathQuery(ctx, q, mount, prefix, prefixUpperBound(prefix), ext)
 	}
 
-	// Case 3: simple recursive "*" → fast prefix scan
-	if !strings.ContainsAny(rel, "?") {
-		literal := strings.SplitN(rel, "*", 2)[0]
+	// --- Case 3: simple trailing '*' → fast prefix scan
+	if !strings.ContainsAny(rel, "?") && strings.Count(rel, "*") == 1 && strings.HasSuffix(rel, "*") {
+		literal := strings.TrimSuffix(rel, "*")
 		if literal != "" {
-			// mount already ends with '/'
 			prefix := mount + literal
 			q := `SELECT path FROM fs_entries_current
 			      WHERE mount_path = ?
@@ -773,8 +770,26 @@ func (c *Clickhouse) SearchGlobPaths(ctx context.Context, glob string, limit int
 		}
 	}
 
-	// Case 4: fallback → LIKE
-	// mount already ends with '/'
+	// --- Case 4: anchored multi-segment glob like "*/file*" or "*/*.bam"
+	// Optimise with depth.
+	if strings.Contains(rel, "*") {
+		baseDepth := strings.Count(strings.Trim(mount, "/"), "/")
+		segCount := strings.Count(strings.Trim(rel, "/"), "/") + 1
+		targetDepth := baseDepth + segCount
+
+		like := globToLike(mount + rel)
+		q := `SELECT path FROM fs_entries_current
+		      WHERE mount_path = ?
+		        AND depth = ?
+		        AND path LIKE ?
+		      ORDER BY path`
+		if limit > 0 {
+			q += fmt.Sprintf(" LIMIT %d", limit)
+		}
+		return c.execPathQuery(ctx, q, mount, targetDepth, like)
+	}
+
+	// --- Case 5: fallback full LIKE
 	like := globToLike(mount + rel)
 	q := `SELECT path FROM fs_entries_current
 	      WHERE mount_path = ? AND path LIKE ?
