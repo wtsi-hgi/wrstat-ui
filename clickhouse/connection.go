@@ -332,9 +332,13 @@ func (c *Clickhouse) CreateSchema(ctx context.Context) error {
 			DialTimeout: DialTimeoutSeconds * time.Second,
 		})
 		if aerr == nil {
-			//nolint:errcheck // best-effort
-			_ = admin.Exec(ctx, "CREATE DATABASE IF NOT EXISTS "+dbName)
+			// Attempt creation via admin connection and fail fast if it doesn't work
+			execErr := admin.Exec(ctx, "CREATE DATABASE IF NOT EXISTS "+dbName)
 			_ = admin.Close()
+
+			if execErr != nil {
+				return fmt.Errorf("create database via admin: %w", execErr)
+			}
 		} else {
 			return err
 		}
