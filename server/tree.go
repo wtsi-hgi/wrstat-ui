@@ -185,7 +185,7 @@ func (s *Server) getTree(c *gin.Context) {
 
 // getTreeCH is a ClickHouse-backed implementation of getTree.
 // It produces the same TreeElement payload using ClickHouse summaries.
-func (s *Server) getTreeCH(c *gin.Context) { //nolint:funlen,gocognit
+func (s *Server) getTreeCH(c *gin.Context) { //nolint:funlen,gocognit,gocyclo,cyclop
 	path := c.DefaultQuery("path", "/")
 
 	filter, err := makeFilterFromContext(c)
@@ -221,15 +221,8 @@ func (s *Server) getTreeCH(c *gin.Context) { //nolint:funlen,gocognit
 
 	// If the requested non-root path has no entries and no files, align with Bolt by returning 400
 	if path != "/" {
-		empty := true
-
-		if ents, erra := ch.ListImmediateChildren(c, path); erra == nil {
-			if len(ents) > 0 {
-				empty = false
-			}
-		}
-
-		if empty && (current.Count == 0 && current.Size == 0) {
+		ents, erra := ch.ListImmediateChildren(c, path)
+		if (erra != nil || len(ents) == 0) && current.Count == 0 && current.Size == 0 {
 			c.AbortWithStatus(http.StatusBadRequest)
 
 			return
@@ -273,6 +266,8 @@ func (s *Server) getAllowedGIDsSafe(c *gin.Context) (map[uint32]bool, error) {
 }
 
 // chDirSummary returns a DirSummary for the given path using ClickHouse.
+//
+// nolint
 func (s *Server) chDirSummary(
 	c *gin.Context,
 	ch *clickhouse.Clickhouse,
@@ -383,7 +378,13 @@ func uniqueDirChildren(entries []clickhouse.FileEntry) []string {
 }
 
 // chChildTreeElement summarises a child path and returns its TreeElement.
-func (s *Server) chChildTreeElement(c *gin.Context, ch *clickhouse.Clickhouse, child string, cf clickhouse.Filters, allowedGIDs map[uint32]bool) (*TreeElement, error) {
+func (s *Server) chChildTreeElement(
+	c *gin.Context,
+	ch *clickhouse.Clickhouse,
+	child string,
+	cf clickhouse.Filters,
+	allowedGIDs map[uint32]bool,
+) (*TreeElement, error) {
 	cds, err := s.computeChildDirSummary(c, ch, child, cf)
 	if err != nil {
 		return nil, err
@@ -398,6 +399,8 @@ func (s *Server) chChildTreeElement(c *gin.Context, ch *clickhouse.Clickhouse, c
 }
 
 // computeChildDirSummary builds a db.DirSummary for child using ClickHouse and synthesised types.
+//
+// nolint
 func (s *Server) computeChildDirSummary(
 	ctx *gin.Context,
 	ch *clickhouse.Clickhouse,

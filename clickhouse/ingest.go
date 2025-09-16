@@ -130,7 +130,7 @@ const rollupsInsertSQL = `
 // It's acceptable to return the CHBatch interface here as the concrete batch
 // type from the driver is not exposed in a stable way.
 //
-//nolint:ireturn
+// nolint
 func prepareBatch(ctx context.Context, conn chdriver.Conn, sql string) (CHBatch, error) {
 	return conn.PrepareBatch(ctx, sql)
 }
@@ -260,7 +260,15 @@ func (c *Clickhouse) ingestScan(
 }
 
 // scanAndProcessEntries scans through the file records and processes each entry.
-func scanAndProcessEntries(ctx context.Context, bp *BatchProcessor, r io.Reader, mountPath string, dirsSeen map[string]bool) error {
+//
+//nolint:gocognit,funlen
+func scanAndProcessEntries(
+	ctx context.Context,
+	bp *BatchProcessor,
+	r io.Reader,
+	mountPath string,
+	dirsSeen map[string]bool,
+) error {
 	parser := stats.NewStatsParser(r)
 	fi := new(stats.FileInfo)
 
@@ -292,6 +300,8 @@ func scanAndProcessEntries(ctx context.Context, bp *BatchProcessor, r io.Reader,
 }
 
 // processFileEntry handles a single file entry during scan ingestion.
+//
+//nolint:gocyclo,funlen
 func processFileEntry(bp *BatchProcessor, fi *stats.FileInfo, mountPath string, dirsSeen map[string]bool) error {
 	path := string(fi.Path)
 

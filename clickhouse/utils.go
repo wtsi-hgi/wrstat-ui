@@ -25,7 +25,6 @@ package clickhouse
 
 import (
 	"io"
-	"math"
 	"os"
 	"path"
 	"strings"
@@ -260,8 +259,8 @@ func computeDepth(p string) uint16 {
 	}
 
 	// For files, use parent directory depth
-	parent, name := SplitParentAndName(p)
-	if name != "" && !IsDirPath(p) {
+	if !IsDirPath(p) {
+		parent, _ := SplitParentAndName(p)
 		p = parent
 	}
 
@@ -271,21 +270,12 @@ func computeDepth(p string) uint16 {
 	}
 
 	// Count segments split by '/'
-	n := 1
+	n := strings.Count(s, "/") + 1
 
-	for i := 0; i < len(s); i++ {
-		if s[i] == '/' {
-			n++
-		}
+	const maxDepth = 65535
+	if n > maxDepth {
+		return uint16(maxDepth)
 	}
 
-	if n < 0 {
-		return 0
-	}
-
-	if n > math.MaxUint16 {
-		return math.MaxUint16
-	}
-
-	return uint16(n)
+	return uint16(n) //nolint:gosec // n is clamped to a safe range above
 }

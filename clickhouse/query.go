@@ -353,9 +353,20 @@ func buildAllWhere(dir string, f Filters) ([]string, []any) {
 // This mirrors Bolt semantics for augmenting directory counts.
 func (c *Clickhouse) DirCountWithFiles(ctx context.Context, dir string, f Filters) (uint64, error) {
 	dir = EnsureDir(dir)
+	query, args := buildDirCountQuery(dir, f)
 
-	// Count distinct ancestor directories (within the subtree rooted at 'dir')
-	// that have at least one descendant file.
+	row := c.conn.QueryRow(ctx, query, args...)
+
+	var cnt uint64
+	if err := row.Scan(&cnt); err != nil {
+		return 0, err
+	}
+
+	return cnt, nil
+}
+
+// buildDirCountQuery constructs the query and args for DirCountWithFiles.
+func buildDirCountQuery(dir string, f Filters) (string, []any) {
 	base := `
 SELECT countDistinct(ancestor) AS dir_count
 FROM ancestor_rollups_raw arr
@@ -367,10 +378,19 @@ INNER JOIN (
 ) r USING (mount_path, scan_id)
 WHERE ancestor LIKE ? AND ext_low != ''`
 
-	// Build optional filters
 	where := []string{base}
 	args := []any{dir + "%"}
 
+	where, args = appendInClauses(where, args, f)
+	where = appendBucketPredicates(where, f)
+
+	query := strings.Join(where, " ")
+
+	return query, args
+}
+
+// appendInClauses adds IN/extension clauses for gid, uid and ext filters.
+func appendInClauses(where []string, args []any, f Filters) ([]string, []any) {
 	if len(f.GIDs) > 0 {
 		clause, a := buildInClause("gid", f.GIDs)
 		where = append(where, "AND "+clause)
@@ -389,7 +409,11 @@ WHERE ancestor LIKE ? AND ext_low != ''`
 		args = append(args, a...)
 	}
 
-	// Time bucket filters against per-row scan_time
+	return where, args
+}
+
+// appendBucketPredicates adds time-bucket predicates to the WHERE clause.
+func appendBucketPredicates(where []string, f Filters) []string {
 	if pred, err := buildBucketPredicateWithScanExpr("scan_time", "atime", f.ATimeBucket); err == nil && pred != "" {
 		where = append(where, "AND "+pred)
 	}
@@ -398,110 +422,213 @@ WHERE ancestor LIKE ? AND ext_low != ''`
 		where = append(where, "AND "+pred)
 	}
 
-	query := strings.Join(where, " ")
-	row := c.conn.QueryRow(ctx, query, args...)
-
-	var cnt uint64
-	if err := row.Scan(&cnt); err != nil {
-		return 0, err
-	}
-
-	return cnt, nil
+	return where
 }
 
 // SearchGlobPaths executes a glob query against fs_entries.
 // Semantics: "*" matches recursively at any depth.
 func (c *Clickhouse) SearchGlobPaths(ctx context.Context, glob string, limit int) ([]string, error) {
-	if !strings.HasPrefix(glob, "/") {
-		return nil, fmt.Errorf("glob must start with '/'")
-	}
-	if err := c.ensureMounts(ctx); err != nil {
+	mount, rel, err := c.resolveMountAndRel(ctx, glob)
+	if err != nil {
 		return nil, err
 	}
-	mount := c.findMountForPrefix(glob)
+
+	// No mount found
 	if mount == "" {
 		return nil, nil
 	}
 
-	rel := strings.TrimPrefix(glob, mount)
-
-	// --- Case 1: no wildcards → exact match
+	// Case 1: no wildcards → exact match
 	if !strings.ContainsAny(rel, "*?") {
-		q := `SELECT path FROM fs_entries_current
-		      WHERE mount_path = ? AND path = ? ORDER BY path`
-		if limit > 0 {
-			q += fmt.Sprintf(" LIMIT %d", limit)
-		}
-		return c.execPathQuery(ctx, q, mount, glob)
+		// rel currently is the raw path relative to mount, but searchGlobExact
+		// expects the full glob path, so rebuild it.
+		return c.searchGlobExact(ctx, mount, glob, limit)
 	}
 
+	// Trim any leading slash for classifier
 	rel = strings.TrimPrefix(rel, "/")
 
-	// --- Case 2: "*.ext" optimisation
+	switch classifyGlob(rel) {
+	case globExt:
+		return c.searchGlobByExt(ctx, mount, rel, limit)
+	case globPrefix:
+		return c.searchGlobByPrefix(ctx, mount, rel, limit)
+	case globDepth:
+		return c.searchGlobByDepth(ctx, mount, rel, limit)
+	default:
+		return c.searchGlobByLike(ctx, mount, rel, limit)
+	}
+}
+
+// resolveMountAndRel encapsulates initial validation and mount resolution for a glob.
+func (c *Clickhouse) resolveMountAndRel(ctx context.Context, glob string) (mount string, rel string, err error) {
+	if !strings.HasPrefix(glob, "/") {
+		return "", "", errGlobMustStartWithSlash
+	}
+
+	if err := c.ensureMounts(ctx); err != nil {
+		return "", "", err
+	}
+
+	mount = c.findMountForPrefix(glob)
+	if mount == "" {
+		return "", "", nil
+	}
+
+	relRaw := strings.TrimPrefix(glob, mount)
+
+	return mount, relRaw, nil
+}
+
+type globKind int
+
+const (
+	globUnknown globKind = iota
+	globExact
+	globExt
+	globPrefix
+	globDepth
+	globLike
+)
+
+// classifyGlob returns a kind describing the glob pattern for optimised handling.
+//
+//nolint:gocyclo
+func classifyGlob(rel string) globKind {
+	if rel == "" {
+		return globLike
+	}
+
+	// If last segment is "*.ext" and contains no '?', it's an extension pattern.
 	parts := strings.Split(rel, "/")
-	if len(parts) > 0 && strings.HasPrefix(parts[len(parts)-1], "*.") &&
-		!strings.ContainsAny(parts[len(parts)-1], "?") {
-		prefix := mount
-		if len(parts) > 1 {
-			prefix += strings.Join(parts[:len(parts)-1], "/") + "/"
-		}
-		ext := strings.ToLower(strings.TrimPrefix(parts[len(parts)-1], "*."))
-		q := `SELECT path FROM fs_entries_current
-		      WHERE mount_path = ?
-		        AND path >= ?
-		        AND path < ?
-		        AND ext_low = ?
-		      ORDER BY path`
-		if limit > 0 {
-			q += fmt.Sprintf(" LIMIT %d", limit)
-		}
-		return c.execPathQuery(ctx, q, mount, prefix, prefixUpperBound(prefix), ext)
+
+	last := parts[len(parts)-1]
+	if strings.HasPrefix(last, "*.") && !strings.ContainsAny(last, "?") {
+		return globExt
 	}
 
-	// --- Case 3: simple trailing '*' → fast prefix scan
+	// Simple trailing '*' with single '*' and no '?' is a prefix scan.
 	if !strings.ContainsAny(rel, "?") && strings.Count(rel, "*") == 1 && strings.HasSuffix(rel, "*") {
-		literal := strings.TrimSuffix(rel, "*")
-		if literal != "" {
-			prefix := mount + literal
-			q := `SELECT path FROM fs_entries_current
-			      WHERE mount_path = ?
-			        AND path > ?
-			        AND path < ?
-			      ORDER BY path`
-			if limit > 0 {
-				q += fmt.Sprintf(" LIMIT %d", limit)
-			}
-			return c.execPathQuery(ctx, q, mount, prefix, prefixUpperBound(prefix))
-		}
+		return globPrefix
 	}
 
-	// --- Case 4: anchored multi-segment glob like "*/file*" or "*/*.bam"
-	// Optimise with depth.
+	// If glob contains any '*' (not just trailing), prefer depth-optimised path.
 	if strings.Contains(rel, "*") {
-		baseDepth := strings.Count(strings.Trim(mount, "/"), "/")
-		segCount := strings.Count(strings.Trim(rel, "/"), "/") + 1
-		targetDepth := baseDepth + segCount
-
-		like := globToLike(mount + rel)
-		q := `SELECT path FROM fs_entries_current
-		      WHERE mount_path = ?
-		        AND depth >= ?
-		        AND path LIKE ?
-		      ORDER BY path`
-		if limit > 0 {
-			q += fmt.Sprintf(" LIMIT %d", limit)
-		}
-		return c.execPathQuery(ctx, q, mount, targetDepth, like)
+		return globDepth
 	}
 
-	// --- Case 5: fallback full LIKE
-	like := globToLike(mount + rel)
+	return globLike
+}
+
+// helper: exact match
+func (c *Clickhouse) searchGlobExact(ctx context.Context, mount, glob string, limit int) ([]string, error) {
 	q := `SELECT path FROM fs_entries_current
-	      WHERE mount_path = ? AND path LIKE ?
-	      ORDER BY path`
+		  WHERE mount_path = ? AND path = ? ORDER BY path`
 	if limit > 0 {
 		q += fmt.Sprintf(" LIMIT %d", limit)
 	}
+
+	return c.execPathQuery(ctx, q, mount, glob)
+}
+
+// helper: extension optimisation returns (paths, matched, err)
+func (c *Clickhouse) searchGlobByExt(ctx context.Context, mount, rel string, limit int) ([]string, error) {
+	parts := strings.Split(rel, "/")
+	if len(parts) == 0 {
+		return nil, nil
+	}
+
+	last := parts[len(parts)-1]
+	if !strings.HasPrefix(last, "*.") || strings.ContainsAny(last, "?") {
+		return nil, nil
+	}
+
+	prefix := mount
+	if len(parts) > 1 {
+		prefix += strings.Join(parts[:len(parts)-1], "/") + "/"
+	}
+
+	ext := strings.ToLower(strings.TrimPrefix(last, "*."))
+
+	q := `SELECT path FROM fs_entries_current
+		  WHERE mount_path = ?
+			AND path >= ?
+			AND path < ?
+			AND ext_low = ?
+		  ORDER BY path`
+	if limit > 0 {
+		q += fmt.Sprintf(" LIMIT %d", limit)
+	}
+
+	return c.execPathQuery(ctx, q, mount, prefix, prefixUpperBound(prefix), ext)
+}
+
+// helper: trailing prefix star optimisation returns (paths, matched, err)
+func (c *Clickhouse) searchGlobByPrefix(ctx context.Context, mount, rel string, limit int) ([]string, error) {
+	if strings.ContainsAny(rel, "?") || strings.Count(rel, "*") != 1 || !strings.HasSuffix(rel, "*") {
+		return nil, nil
+	}
+
+	literal := strings.TrimSuffix(rel, "*")
+	var prefix string
+	if literal == "" {
+		prefix = mount
+	} else {
+		prefix = mount + literal
+	}
+
+	var q string
+	if literal == "" {
+		q = `SELECT path FROM fs_entries_current
+					WHERE mount_path = ?
+						AND path >= ?
+						AND path < ?
+					ORDER BY path`
+	} else {
+		q = `SELECT path FROM fs_entries_current
+					WHERE mount_path = ?
+						AND path > ?
+						AND path < ?
+					ORDER BY path`
+	}
+	if limit > 0 {
+		q += fmt.Sprintf(" LIMIT %d", limit)
+	}
+
+	return c.execPathQuery(ctx, q, mount, prefix, prefixUpperBound(prefix))
+}
+
+// helper: anchored multi-segment glob using depth optimisation
+func (c *Clickhouse) searchGlobByDepth(ctx context.Context, mount, rel string, limit int) ([]string, error) {
+	baseDepth := strings.Count(strings.Trim(mount, "/"), "/")
+	segCount := strings.Count(strings.Trim(rel, "/"), "/") + 1
+	targetDepth := baseDepth + segCount
+
+	like := globToLike(mount + rel)
+
+	q := `SELECT path FROM fs_entries_current
+		  WHERE mount_path = ?
+			AND depth >= ?
+			AND path LIKE ?
+		  ORDER BY path`
+	if limit > 0 {
+		q += fmt.Sprintf(" LIMIT %d", limit)
+	}
+
+	return c.execPathQuery(ctx, q, mount, targetDepth, like)
+}
+
+// helper: fallback full LIKE
+func (c *Clickhouse) searchGlobByLike(ctx context.Context, mount, rel string, limit int) ([]string, error) {
+	like := globToLike(mount + rel)
+
+	q := `SELECT path FROM fs_entries_current
+		  WHERE mount_path = ? AND path LIKE ?
+		  ORDER BY path`
+	if limit > 0 {
+		q += fmt.Sprintf(" LIMIT %d", limit)
+	}
+
 	return c.execPathQuery(ctx, q, mount, like)
 }
 
@@ -515,6 +642,7 @@ func prefixUpperBound(prefix string) string {
 // globToLike converts glob syntax to SQL LIKE.
 func globToLike(glob string) string {
 	var b strings.Builder
+
 	for _, r := range glob {
 		switch r {
 		case '*':
@@ -528,6 +656,7 @@ func globToLike(glob string) string {
 			b.WriteRune(r)
 		}
 	}
+
 	return b.String()
 }
 

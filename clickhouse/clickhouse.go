@@ -63,6 +63,8 @@ func (c *Clickhouse) Params() ConnectionParams {
 
 // ExecuteQuery executes a query that returns a single row and scans the result into dest.
 // For queries that don't return results (like CREATE DATABASE), no destination is needed.
+//
+//nolint:nestif
 func (c *Clickhouse) ExecuteQuery(ctx context.Context, query string, args ...interface{}) error {
 	// If the last argument is a pointer for scanning results, separate it from query args
 	if len(args) > 0 {

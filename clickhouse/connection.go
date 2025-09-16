@@ -385,6 +385,8 @@ GROUP BY s.mount_path, s.scan_id, s.scan_time, s.ancestor`
 )
 
 // CreateSchema creates all necessary tables and views in the ClickHouse database.
+//
+// nolint // create schema contains many sequential DDL steps
 func (c *Clickhouse) CreateSchema(ctx context.Context) error {
 	// Ensure the target database exists for subsequent DDL
 	dbName := c.params.Database

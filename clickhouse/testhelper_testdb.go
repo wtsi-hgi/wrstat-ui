@@ -18,6 +18,8 @@ import (
 // the current user. It drops any existing DB with that name (best-effort),
 // creates it, calls CreateSchema, and returns (client, ctx, cleanup, error).
 // If ClickHouse is unavailable, returns a non-nil error so callers can t.Skip.
+//
+//nolint:gocyclo,funlen
 func NewUserEphemeralForTests() (*Clickhouse, context.Context, func(), error) {
 	ctx := context.Background()
 
