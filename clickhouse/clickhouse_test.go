@@ -324,11 +324,11 @@ func TestSearchGlobPathsPublic(t *testing.T) {
 		assert.Empty(t, paths)
 	})
 
-	t.Run("wildcard at root", func(t *testing.T) {
+	t.Run("wildcard at mount", func(t *testing.T) {
 		paths, err := ch.SearchGlobPaths(ctx, mount+"*", 0)
 		require.NoError(t, err)
-		// Should match p/
 		assert.Contains(t, paths, mount+"p/")
+		assert.Len(t, paths, 13)
 	})
 
 	t.Run("multi-wildcard segments", func(t *testing.T) {
@@ -339,6 +339,7 @@ func TestSearchGlobPathsPublic(t *testing.T) {
 			mount + "p/q/fileA.txt",
 			mount + "p/q/dirOnly/fileC.txt",
 			mount + "p/q/dirOnly/subdir/fileD.txt",
+			mount + "p/q/dirOnly/subdir/fileA.txt",
 		}, paths)
 	})
 

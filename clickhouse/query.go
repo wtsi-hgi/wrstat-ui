@@ -27,7 +27,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"path"
 	"strings"
 
 	"github.com/wtsi-hgi/wrstat-ui/db"
@@ -410,299 +409,6 @@ WHERE ancestor LIKE ? AND ext_low != ''`
 	return cnt, nil
 }
 
-// prefixUpperBound returns an upper bound string for prefix range scans: [prefix, prefix\xFF).
-// It appends a single 0xFF byte which is beyond all valid UTF-8 continuation bytes,
-// ensuring all strings starting with the prefix are covered by the half-open interval.
-func prefixUpperBound(prefix string) string {
-	return prefix + string([]byte{0xFF})
-}
-
-// computeLiteralPrefix returns the longest literal prefix for parent_path
-// by walking segments until a glob character is encountered.
-func computeLiteralPrefix(mnt, parentGlob string) string {
-	current := mnt
-
-	segs := strings.Split(parentGlob, "/")
-	for i, s := range segs {
-		if s == "" {
-			if i == 0 {
-				continue
-			}
-
-			break
-		}
-
-		if strings.ContainsAny(s, "*?") {
-			break
-		}
-
-		current = EnsureDir(current + s)
-	}
-
-	return current
-}
-
-// computeTargetDepth computes the target depth for a mount and parentGlob
-// by adding the mount's depth and the number of non-empty segments in parentGlob.
-// It returns a uint16 clamped to the maximum value.
-func computeTargetDepth(mnt, parentGlob string) uint16 {
-	totalSegs := uint32(0)
-
-	if parentGlob != "" {
-		parts := strings.Split(strings.TrimSuffix(parentGlob, "/"), "/")
-		for _, p := range parts {
-			if p != "" {
-				totalSegs++
-			}
-		}
-	}
-
-	baseDepth := uint32(computeDepth(mnt))
-	sum32 := baseDepth + totalSegs
-
-	const maxUint16 = 1<<16 - 1
-
-	if sum32 > uint32(maxUint16) {
-		return uint16(maxUint16)
-	}
-
-	return uint16(sum32)
-}
-
-// execPathQuery runs a simple single-column path query and collects results.
-func (c *Clickhouse) execPathQuery(ctx context.Context, query string, args ...any) ([]string, error) {
-	rows, err := c.conn.Query(ctx, query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	result := make([]string, 0, DefaultResultCapacity)
-
-	for rows.Next() {
-		var path string
-		if err := rows.Scan(&path); err != nil {
-			return nil, err
-		}
-
-		result = append(result, path)
-	}
-
-	return result, rows.Err()
-}
-
-// SearchGlobPaths searches for paths matching a glob pattern in ClickHouse using
-// mount-constrained parent_path range scans. Case-insensitive globs are not supported.
-func (c *Clickhouse) SearchGlobPathsComplex(ctx context.Context, globPattern string, limit int) ([]string, error) {
-	// Validate input: must start with '/'
-	if !strings.HasPrefix(globPattern, "/") {
-		return nil, errGlobMustStartWithSlash
-	}
-
-	if err := c.ensureMounts(ctx); err != nil {
-		return nil, err
-	}
-
-	// Determine mount and only search within it; do not fan out across all mounts.
-	mount := c.findMountForPrefix(globPattern)
-	if mount == "" {
-		// If no matching mount, simplify by returning no results.
-		return []string{}, nil
-	}
-
-	// Split into (mount, remainder).
-	remainder := strings.TrimPrefix(globPattern, mount)
-	remainder = strings.TrimPrefix(remainder, "/")
-
-	// Find parent_path glob and name pattern
-	lastSlash := strings.LastIndex(remainder, "/")
-	parentGlob := ""
-
-	nameGlob := remainder
-	if lastSlash >= 0 {
-		parentGlob = remainder[:lastSlash+1]
-		nameGlob = remainder[lastSlash+1:]
-	}
-
-	toLike := func(g string) string { return strings.ReplaceAll(strings.ReplaceAll(g, "*", "%"), "?", "_") }
-
-	seen := make(map[string]struct{})
-	out := make([]string, 0, DefaultResultCapacity)
-
-	// appendUnique adds paths to out ensuring uniqueness and respecting limit.
-	appendUnique := func(paths []string) {
-		for _, p := range paths {
-			if _, ok := seen[p]; ok {
-				continue
-			}
-
-			seen[p] = struct{}{}
-
-			out = append(out, p)
-			if limit > 0 && len(out) >= limit {
-				return
-			}
-		}
-	}
-
-	// Fast-path: if we are matching 'dir/*' without wildcards in the parent glob,
-	// skip the parent_path query and only do the descendant range scan further below.
-	doParentRange := !(parentGlob != "" && !strings.ContainsAny(parentGlob, "*?") && nameGlob == "*")
-
-	if doParentRange {
-		// Compute longest literal prefix for parent_path for this mount
-		literalPrefix := computeLiteralPrefix(mount, parentGlob)
-
-		// Target depth equals mount depth plus number of segments in parentGlob
-		targetDepth := computeTargetDepth(mount, parentGlob)
-
-		lo := literalPrefix
-		hi := prefixUpperBound(literalPrefix)
-
-		nameLike := toLike(nameGlob)
-		if nameLike == "" {
-			nameLike = "%"
-		}
-
-		q := `SELECT path FROM fs_entries_current WHERE mount_path = ? AND parent_path >= ? AND parent_path < ?`
-		args := []any{mount, lo, hi}
-
-		if parentGlob != "" {
-			q += " AND depth = ?"
-
-			args = append(args, targetDepth)
-		}
-
-		if parentGlob != "" && (strings.ContainsAny(parentGlob, "*?") || len(parentGlob) > len(strings.TrimPrefix(literalPrefix, mount))) {
-			parentLike := toLike(parentGlob)
-			q += " AND parent_path LIKE ?"
-
-			args = append(args, mount+parentLike)
-		}
-
-		q += " AND basename LIKE ?"
-
-		args = append(args, nameLike)
-
-		q += " ORDER BY mount_path, parent_path, basename"
-
-		if limit > 0 {
-			q += fmt.Sprintf(" LIMIT %d", limit)
-		}
-
-		paths, err := c.execPathQuery(ctx, q, args...)
-		if err != nil {
-			return nil, err
-		}
-
-		appendUnique(paths)
-	}
-
-	// Also include directory-self and/or recursive descendants when applicable.
-	// We prefer fast prefix range scans on 'path' and an equality check for the
-	// directory itself, falling back to path LIKE only when the parent glob
-	// contains wildcards (eg. '*/tmp/*').
-	if limit <= 0 || len(out) < limit {
-		remain := -1
-		if limit > 0 {
-			remain = limit - len(out)
-			if remain <= 0 {
-				return out, nil
-			}
-		}
-
-		parentHasWild := parentGlob != "" && strings.ContainsAny(parentGlob, "*?")
-		dirPrefix := mount + parentGlob
-
-		// Case 1: parentGlob has no wildcards and nameGlob is empty => directory self
-		if parentGlob != "" && !parentHasWild && nameGlob == "" {
-			qeq := `SELECT path FROM fs_entries_current WHERE mount_path = ? AND path = ?`
-			argsEq := []any{mount, dirPrefix}
-
-			more, err := c.execPathQuery(ctx, qeq, argsEq...)
-			if err != nil {
-				return nil, err
-			}
-
-			for _, p := range more {
-				if _, ok := seen[p]; ok {
-					continue
-				}
-
-				seen[p] = struct{}{}
-				out = append(out, p)
-			}
-
-			return out, nil
-		}
-
-		// Case 2: parentGlob has no wildcards and nameGlob is '*' => all descendants (exclude directory itself)
-		if parentGlob != "" && !parentHasWild && nameGlob == "*" {
-			// Then include all descendants via fast range scan on 'path'
-			qrange := `SELECT path FROM fs_entries_current WHERE mount_path = ? AND path >= ? AND path < ? AND path != ?
-			 ORDER BY mount_path, parent_path, basename`
-			argsRange := []any{mount, dirPrefix, prefixUpperBound(dirPrefix), dirPrefix}
-
-			if remain > 0 {
-				if remain > 0 {
-					qrange += fmt.Sprintf(" LIMIT %d", remain)
-				}
-			}
-
-			more, err := c.execPathQuery(ctx, qrange, argsRange...)
-			if err != nil {
-				return nil, err
-			}
-
-			appendUnique(more)
-
-			return out, nil
-		}
-
-		// Case 3: Fallback for complex patterns (wildcards in parent glob): use LIKE but limited
-		// Only use this when the parent glob itself contains wildcards to avoid
-		// accidentally including the directory self for simple 'dir/*' patterns.
-		pathPattern := toLike(parentGlob + nameGlob)
-		if parentHasWild && pathPattern != "" {
-			q2 := `SELECT path FROM fs_entries_current WHERE mount_path = ? AND path LIKE ?
-			 ORDER BY mount_path, parent_path, basename`
-			args2 := []any{mount, mount + pathPattern}
-
-			if remain > 0 {
-				q2 += fmt.Sprintf(" LIMIT %d", remain)
-			}
-
-			more, err := c.execPathQuery(ctx, q2, args2...)
-			if err != nil {
-				return nil, err
-			}
-
-			appendUnique(more)
-		}
-	}
-
-	return out, nil
-}
-
-// globToLike converts glob syntax to SQL LIKE.
-func globToLike(glob string) string {
-	var b strings.Builder
-	for _, r := range glob {
-		switch r {
-		case '*':
-			b.WriteRune('%')
-		case '?':
-			b.WriteRune('_')
-		case '%', '_':
-			b.WriteRune('\\')
-			b.WriteRune(r)
-		default:
-			b.WriteRune(r)
-		}
-	}
-	return b.String()
-}
-
 // SearchGlobPaths executes a glob query against fs_entries.
 // Semantics: "*" matches recursively at any depth.
 func (c *Clickhouse) SearchGlobPaths(ctx context.Context, glob string, limit int) ([]string, error) {
@@ -718,9 +424,6 @@ func (c *Clickhouse) SearchGlobPaths(ctx context.Context, glob string, limit int
 	}
 
 	rel := strings.TrimPrefix(glob, mount)
-	if strings.HasPrefix(rel, "/") {
-		rel = rel[1:]
-	}
 
 	// --- Case 1: no wildcards → exact match
 	if !strings.ContainsAny(rel, "*?") {
@@ -729,8 +432,10 @@ func (c *Clickhouse) SearchGlobPaths(ctx context.Context, glob string, limit int
 		if limit > 0 {
 			q += fmt.Sprintf(" LIMIT %d", limit)
 		}
-		return c.execPathQuery(ctx, q, mount, path.Join(mount, rel))
+		return c.execPathQuery(ctx, q, mount, glob)
 	}
+
+	rel = strings.TrimPrefix(rel, "/")
 
 	// --- Case 2: "*.ext" optimisation
 	parts := strings.Split(rel, "/")
@@ -760,7 +465,7 @@ func (c *Clickhouse) SearchGlobPaths(ctx context.Context, glob string, limit int
 			prefix := mount + literal
 			q := `SELECT path FROM fs_entries_current
 			      WHERE mount_path = ?
-			        AND path >= ?
+			        AND path > ?
 			        AND path < ?
 			      ORDER BY path`
 			if limit > 0 {
@@ -780,7 +485,7 @@ func (c *Clickhouse) SearchGlobPaths(ctx context.Context, glob string, limit int
 		like := globToLike(mount + rel)
 		q := `SELECT path FROM fs_entries_current
 		      WHERE mount_path = ?
-		        AND depth = ?
+		        AND depth >= ?
 		        AND path LIKE ?
 		      ORDER BY path`
 		if limit > 0 {
@@ -798,4 +503,52 @@ func (c *Clickhouse) SearchGlobPaths(ctx context.Context, glob string, limit int
 		q += fmt.Sprintf(" LIMIT %d", limit)
 	}
 	return c.execPathQuery(ctx, q, mount, like)
+}
+
+// prefixUpperBound returns an upper bound string for prefix range scans: [prefix, prefix\xFF).
+// It appends a single 0xFF byte which is beyond all valid UTF-8 continuation bytes,
+// ensuring all strings starting with the prefix are covered by the half-open interval.
+func prefixUpperBound(prefix string) string {
+	return prefix + string([]byte{0xFF})
+}
+
+// globToLike converts glob syntax to SQL LIKE.
+func globToLike(glob string) string {
+	var b strings.Builder
+	for _, r := range glob {
+		switch r {
+		case '*':
+			b.WriteRune('%')
+		case '?':
+			b.WriteRune('_')
+		case '%', '_':
+			b.WriteRune('\\')
+			b.WriteRune(r)
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// execPathQuery runs a simple single-column path query and collects results.
+func (c *Clickhouse) execPathQuery(ctx context.Context, query string, args ...any) ([]string, error) {
+	rows, err := c.conn.Query(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	result := make([]string, 0, DefaultResultCapacity)
+
+	for rows.Next() {
+		var path string
+		if err := rows.Scan(&path); err != nil {
+			return nil, err
+		}
+
+		result = append(result, path)
+	}
+
+	return result, rows.Err()
 }
