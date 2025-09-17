@@ -28,11 +28,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 	"time"
 
 	chdriver "github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/google/uuid"
+	"github.com/wtsi-hgi/wrstat-ui/db"
 	"github.com/wtsi-hgi/wrstat-ui/stats"
 )
 
@@ -69,49 +71,57 @@ func (c *Clickhouse) UpdateClickhouse(ctx context.Context, mountPath string, r i
 	return nil
 }
 
-// BatchProcessor handles batched processing of file entries and rollups.
+// BatchProcessor handles batched processing of file entries and in-memory aggregation for rollups.
 type BatchProcessor struct {
-	filesBatch      CHBatch
-	rollupsBatch    CHBatch
-	conn            chdriver.Conn
-	filesCount      int
-	rollupsCount    int
-	mountPath       string
-	scanID          uuid.UUID
-	scanTime        time.Time
-	filesBatchSQL   string
-	rollupsBatchSQL string
+	filesBatch    CHBatch
+	conn          chdriver.Conn
+	filesCount    int
+	mountPath     string
+	scanID        uuid.UUID
+	scanTime      time.Time
+	filesBatchSQL string
+	dirAgg        map[string]*dirSummaryAgg
+}
+
+// dirSummaryAgg aggregates directory level stats (single age bucket for now).
+type dirSummaryAgg struct {
+	totalSize uint64
+	fileCount uint64
+	oldestAT  time.Time
+	newestAT  time.Time
+	oldestMT  time.Time
+	newestMT  time.Time
+	uids      map[uint32]struct{}
+	gids      map[uint32]struct{}
+	exts      map[string]struct{}
+	ftypes    map[uint8]struct{}
+}
+
+func newDirSummaryAgg() *dirSummaryAgg { //nolint:ireturn
+	return &dirSummaryAgg{
+		uids:   make(map[uint32]struct{}),
+		gids:   make(map[uint32]struct{}),
+		exts:   make(map[string]struct{}),
+		ftypes: make(map[uint8]struct{}),
+	}
 }
 
 // NewBatchProcessor creates a new batch processor for files and rollups.
-func (c *Clickhouse) newBatchProcessor(
-	ctx context.Context,
-	mountPath string,
-	scanID uuid.UUID,
-	scanTime time.Time,
-) (*BatchProcessor, error) {
+func (c *Clickhouse) newBatchProcessor(ctx context.Context, mountPath string, scanID uuid.UUID, scanTime time.Time) (*BatchProcessor, error) { //nolint:lll
 	filesBatchSQL := filesInsertSQL
-	rollupsBatchSQL := rollupsInsertSQL
-
 	filesBatch, err := prepareBatch(ctx, c.conn, filesBatchSQL)
 	if err != nil {
 		return nil, err
 	}
 
-	rollupsBatch, err := prepareBatch(ctx, c.conn, rollupsBatchSQL)
-	if err != nil {
-		return nil, err
-	}
-
 	return &BatchProcessor{
-		filesBatch:      filesBatch,
-		rollupsBatch:    rollupsBatch,
-		conn:            c.conn,
-		mountPath:       mountPath,
-		scanID:          scanID,
-		scanTime:        scanTime,
-		filesBatchSQL:   filesBatchSQL,
-		rollupsBatchSQL: rollupsBatchSQL,
+		filesBatch:    filesBatch,
+		conn:          c.conn,
+		mountPath:     mountPath,
+		scanID:        scanID,
+		scanTime:      scanTime,
+		filesBatchSQL: filesBatchSQL,
+		dirAgg:        make(map[string]*dirSummaryAgg),
 	}, nil
 }
 
@@ -121,10 +131,10 @@ const filesInsertSQL = `
 	(mount_path, scan_id, scan_time, path, parent_path, basename,
 	 depth, ext_low, ftype, inode, size, uid, gid, mtime, atime, ctime)`
 
-// rollupsInsertSQL is the SQL string used to insert rollup entries.
+// rollupsInsertSQL inserts aggregated directory summaries.
 const rollupsInsertSQL = `
-	INSERT INTO ancestor_rollups_raw 
-	(mount_path, scan_id, scan_time, ancestor, size, atime, mtime, uid, gid, ext_low)`
+    INSERT INTO ancestor_rollups
+    (mount_path, scan_id, scan_time, ancestor, total_size, file_count, oldest_atime, newest_atime, oldest_mtime, newest_mtime, uids, gids, exts, ftypes, age)`
 
 // prepareBatch prepares a ClickHouse batch from the given SQL string.
 // It's acceptable to return the CHBatch interface here as the concrete batch
@@ -150,36 +160,48 @@ func (bp *BatchProcessor) AddFile(path string, parent string, name string, depth
 	return nil
 }
 
-// AddRollup adds an ancestor rollup entry to the batch.
-func (bp *BatchProcessor) AddRollup(ancestor string, size uint64,
-	atime, mtime time.Time, uid, gid uint32, ext string) error {
-	if err := bp.rollupsBatch.Append(
-		bp.mountPath, bp.scanID, bp.scanTime, ancestor, size, atime, mtime, uid, gid, ext); err != nil {
-		return err
+// aggregateRollup updates in-memory aggregation for a directory.
+func (bp *BatchProcessor) aggregateRollup(ancestor string, size uint64, atime, mtime time.Time, uid, gid uint32, ext string, ftype uint8) { //nolint:lll
+	agg := bp.dirAgg[ancestor]
+	if agg == nil {
+		agg = newDirSummaryAgg()
+		bp.dirAgg[ancestor] = agg
 	}
 
-	bp.rollupsCount++
+	agg.totalSize += size
+	agg.fileCount++
 
-	return nil
+	if agg.oldestAT.IsZero() || atime.Before(agg.oldestAT) {
+		agg.oldestAT = atime
+	}
+	if atime.After(agg.newestAT) {
+		agg.newestAT = atime
+	}
+	if agg.oldestMT.IsZero() || mtime.Before(agg.oldestMT) {
+		agg.oldestMT = mtime
+	}
+	if mtime.After(agg.newestMT) {
+		agg.newestMT = mtime
+	}
+
+	if uid != 0 {
+		agg.uids[uid] = struct{}{}
+	}
+	if gid != 0 {
+		agg.gids[gid] = struct{}{}
+	}
+	if ext != "" {
+		agg.exts[ext] = struct{}{}
+	}
+
+	agg.ftypes[ftype] = struct{}{}
 }
 
 // NeedsFlush checks if either batch needs flushing.
-func (bp *BatchProcessor) NeedsFlush() bool {
-	return bp.filesCount >= FileBatchSize || bp.rollupsCount >= RollupBatchSize
-}
+func (bp *BatchProcessor) NeedsFlush() bool { return bp.filesCount >= FileBatchSize }
 
 // Flush sends both batches if they contain any data.
-func (bp *BatchProcessor) Flush(ctx context.Context) error {
-	if err := bp.flushFilesBatch(ctx); err != nil {
-		return err
-	}
-
-	if err := bp.flushRollupsBatch(ctx); err != nil {
-		return err
-	}
-
-	return nil
-}
+func (bp *BatchProcessor) Flush(ctx context.Context) error { return bp.flushFilesBatch(ctx) }
 
 // flushFilesBatch sends the files batch if it's non-empty.
 func (bp *BatchProcessor) flushFilesBatch(ctx context.Context) error {
@@ -203,26 +225,67 @@ func (bp *BatchProcessor) flushFilesBatch(ctx context.Context) error {
 	return nil
 }
 
-// flushRollupsBatch sends the rollups batch if it's non-empty.
-func (bp *BatchProcessor) flushRollupsBatch(ctx context.Context) error {
-	if bp.rollupsCount == 0 {
+// afterScanInsertRollups sends aggregated directory rows to ClickHouse.
+func (bp *BatchProcessor) afterScanInsertRollups(ctx context.Context) error { //nolint:funlen
+	if len(bp.dirAgg) == 0 {
 		return nil
 	}
 
-	if err := bp.rollupsBatch.Send(); err != nil {
-		return err
-	}
-
-	bp.rollupsCount = 0
-
-	rollupsBatch, err := bp.conn.PrepareBatch(ctx, bp.rollupsBatchSQL)
+	batch, err := bp.conn.PrepareBatch(ctx, rollupsInsertSQL)
 	if err != nil {
 		return err
 	}
 
-	bp.rollupsBatch = rollupsBatch
+	keys := make([]string, 0, len(bp.dirAgg))
+	for k := range bp.dirAgg {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
 
-	return nil
+	for _, k := range keys {
+		a := bp.dirAgg[k]
+
+		uids := collectUint32(a.uids)
+		gids := collectUint32(a.gids)
+		exts := collectString(a.exts)
+		ftypes := collectUint8(a.ftypes)
+
+		if err := batch.Append(
+			bp.mountPath, bp.scanID, bp.scanTime, k,
+			a.totalSize, a.fileCount,
+			a.oldestAT, a.newestAT, a.oldestMT, a.newestMT,
+			uids, gids, exts, ftypes,
+			uint8(db.DGUTAgeAll),
+		); err != nil { //nolint:lll
+			return err
+		}
+	}
+
+	return batch.Send()
+}
+
+func collectUint32(m map[uint32]struct{}) []uint32 { //nolint:ireturn
+	out := make([]uint32, 0, len(m))
+	for v := range m {
+		out = append(out, v)
+	}
+	return out
+}
+
+func collectUint8(m map[uint8]struct{}) []uint8 { //nolint:ireturn
+	out := make([]uint8, 0, len(m))
+	for v := range m {
+		out = append(out, v)
+	}
+	return out
+}
+
+func collectString(m map[string]struct{}) []string { //nolint:ireturn
+	out := make([]string, 0, len(m))
+	for v := range m {
+		out = append(out, v)
+	}
+	return out
 }
 
 // ingestScan processes a stats file and loads it into ClickHouse.
@@ -254,6 +317,11 @@ func (c *Clickhouse) ingestScan(
 	// Final flush
 	if err := bp.Flush(ctx); err != nil {
 		return err
+	}
+
+	// Insert aggregated directory rollups after processing all entries
+	if err := bp.afterScanInsertRollups(ctx); err != nil {
+		return fmt.Errorf("insert aggregated rollups: %w", err)
 	}
 
 	return nil
@@ -378,24 +446,15 @@ func processAncestorRollups(bp *BatchProcessor, fi *stats.FileInfo, path, parent
 // addRollupsWithinMount adds rollups for the path and its ancestors inside the mount.
 func addRollupsWithinMount(bp *BatchProcessor, fi *stats.FileInfo, base, mountPath string,
 	size uint64, atime, mtime time.Time, ext string, dirsSeen map[string]bool) error {
-	var firstErr error
-
 	ForEachAncestor(base, mountPath, func(a string) bool {
-		// Ensure we're tracking that we've seen this directory
+		// Track directory
 		dirsSeen[a] = true
 
-		if err := bp.AddRollup(a, size, atime, mtime, fi.UID, fi.GID, ext); err != nil {
-			firstErr = err
-
-			return false
-		}
+		ft := MapEntryType(fi.EntryType)
+		bp.aggregateRollup(a, size, atime, mtime, fi.UID, fi.GID, ext, uint8(ft))
 
 		return true
 	})
-
-	if firstErr != nil {
-		return fmt.Errorf("failed to add ancestor rollup: %w", firstErr)
-	}
 
 	return nil
 }
@@ -411,25 +470,16 @@ func addRollupsAboveMount(bp *BatchProcessor, fi *stats.FileInfo, mountPath stri
 		return nil
 	}
 
-	var firstErr error
-
 	ForEachAncestor(parentOfMount, "/", func(a string) bool {
 		// Do not mark ancestors above the mount as seen in dirsSeen; that map is
 		// used to de-duplicate fs_entries for real directories, and marking these
 		// would prevent insertSyntheticAncestorDirs() from inserting the synthetic
 		// ancestor directory entries (eg. "/lustre/") needed for global listings.
-		if err := bp.AddRollup(a, size, atime, mtime, fi.UID, fi.GID, ext); err != nil {
-			firstErr = err
-
-			return false
-		}
+		ft := MapEntryType(fi.EntryType)
+		bp.aggregateRollup(a, size, atime, mtime, fi.UID, fi.GID, ext, uint8(ft))
 
 		return true
 	})
-
-	if firstErr != nil {
-		return fmt.Errorf("failed to add ancestor rollup above mount: %w", firstErr)
-	}
 
 	return nil
 }
@@ -509,21 +559,11 @@ func insertSyntheticDir(bp *BatchProcessor, a, parent, name string, t time.Time)
 
 // addAncestorRollupsForSynthetic adds zero-sized rollups for the synthetic directory and its ancestors.
 func addAncestorRollupsForSynthetic(bp *BatchProcessor, a string, t time.Time, dirsSeen map[string]bool) error {
-	var firstErr error
-
 	ForEachAncestor(a, "/", func(ra string) bool {
-		// Mark ancestor as seen
 		dirsSeen[ra] = true
-
-		// Zero-size, zero-uid/gid, empty ext to avoid affecting size while counting entries.
-		if err := bp.AddRollup(ra, 0, t, t, 0, 0, ""); err != nil {
-			firstErr = err
-
-			return false
-		}
-
+		bp.aggregateRollup(ra, 0, t, t, 0, 0, "", uint8(FileTypeDir))
 		return true
 	})
 
-	return firstErr
+	return nil
 }

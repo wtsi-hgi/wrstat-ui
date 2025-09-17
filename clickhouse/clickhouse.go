@@ -94,9 +94,8 @@ type CHBatch interface {
 
 // Constants for ClickHouse connection and processing.
 const (
-	// Lower batch sizes to balance performance and memory usage.
-	FileBatchSize   = 100_000
-	RollupBatchSize = 100_000
+	// Lower batch size to balance performance and memory usage.
+	FileBatchSize = 100_000
 
 	// ClickHouse connection settings.
 	DialTimeoutSeconds  = 10

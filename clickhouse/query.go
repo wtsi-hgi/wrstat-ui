@@ -366,27 +366,70 @@ func (c *Clickhouse) DirCountWithFiles(ctx context.Context, dir string, f Filter
 }
 
 // buildDirCountQuery constructs the query and args for DirCountWithFiles.
-func buildDirCountQuery(dir string, f Filters) (string, []any) {
+func buildDirCountQuery(dir string, f Filters) (string, []any) { //nolint:funlen
 	base := `
 SELECT countDistinct(ancestor) AS dir_count
-FROM ancestor_rollups_raw arr
-INNER JOIN (
-	SELECT mount_path, argMax(scan_id, finished_at) AS scan_id
-	FROM scans
-	WHERE state = 'ready'
-	GROUP BY mount_path
-) r USING (mount_path, scan_id)
-WHERE ancestor LIKE ? AND ext_low != ''`
+FROM ancestor_rollups_current arr
+WHERE ancestor LIKE ?`
 
 	where := []string{base}
 	args := []any{dir + "%"}
 
-	where, args = appendInClauses(where, args, f)
-	where = appendBucketPredicates(where, f)
+	// Adapt filters: arrays contain distinct values per directory summary
+	if len(f.Exts) > 0 {
+		clause, a := buildArrayAnyClause("exts", f.Exts)
+		where = append(where, "AND "+clause)
+		args = append(args, a...)
+	}
+	if len(f.GIDs) > 0 {
+		clause, a := buildArrayAnyUIntClause("gids", f.GIDs)
+		where = append(where, "AND "+clause)
+		args = append(args, a...)
+	}
+	if len(f.UIDs) > 0 {
+		clause, a := buildArrayAnyUIntClause("uids", f.UIDs)
+		where = append(where, "AND "+clause)
+		args = append(args, a...)
+	}
+
+	// Time bucket predicates use oldest/newest times; approximate using any overlap
+	// Reuse existing predicate builder on oldest/newest atime/mtime if needed (future enhancement)
 
 	query := strings.Join(where, " ")
 
 	return query, args
+}
+
+// buildArrayAnyClause builds a clause checking any string in array column matches provided list.
+func buildArrayAnyClause(col string, vals []string) (string, []any) {
+	placeholders := make([]string, len(vals))
+	args := make([]any, len(vals))
+	for i, v := range vals {
+		placeholders[i] = "?"
+		args[i] = v
+	}
+
+	return fmt.Sprintf(
+		"arrayExists(x -> x IN (%s), %s)",
+		strings.Join(placeholders, ","),
+		col,
+	), args
+}
+
+// buildArrayAnyUIntClause builds a clause checking any uint value in array column matches provided list.
+func buildArrayAnyUIntClause[T ~uint32 | ~uint64](col string, vals []T) (string, []any) { //nolint:ireturn
+	placeholders := make([]string, len(vals))
+	args := make([]any, len(vals))
+	for i, v := range vals {
+		placeholders[i] = "?"
+		args[i] = v
+	}
+
+	return fmt.Sprintf(
+		"arrayExists(x -> x IN (%s), %s)",
+		strings.Join(placeholders, ","),
+		col,
+	), args
 }
 
 // appendInClauses adds IN/extension clauses for gid, uid and ext filters.

@@ -412,7 +412,7 @@ func TestClickHouse(t *testing.T) {
 		So(err, ShouldBeNil)
 		So(fileCount, ShouldBeGreaterThan, 3) // Should have at least our 3 files plus directories
 
-		// Check ancestor_rollups_raw table
+		// Check ancestor_rollups table (aggregated directory summaries)
 		var rollupCount uint64
 
 		qRollupCount := "SELECT count() FROM ancestor_rollups_current WHERE mount_path = ?"
