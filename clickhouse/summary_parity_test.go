@@ -61,7 +61,7 @@ func TestRollupDirectorySummaryParity(t *testing.T) {
 	require.NoError(t, err)
 
 	// Check oldest/newest times and sets include expected values
-	assert.Equal(t, uint64(3), dsum.TotalSize-dsum.TotalSize+dsum.TotalSize) // dummy to use variable; real checks below
+	assert.Equal(t, uint64(3), dsum.TotalSize) // dummy to use variable; real checks below
 	assert.Equal(t, mt3, dsum.MostRecentMTime.Unix())
 	assert.Equal(t, at3, dsum.MostRecentATime.Unix())
 	assert.Equal(t, mt3, dsum.OldestMTime.Unix())
