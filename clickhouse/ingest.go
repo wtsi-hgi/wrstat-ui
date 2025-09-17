@@ -162,6 +162,11 @@ func (bp *BatchProcessor) AddFile(path string, parent string, name string, depth
 
 // aggregateRollup updates in-memory aggregation for a directory.
 func (bp *BatchProcessor) aggregateRollup(ancestor string, size uint64, atime, mtime time.Time, uid, gid uint32, ext string, ftype uint8) { //nolint:lll
+	// Only aggregate from files; ignore directories and other special entries.
+	if ftype != uint8(FileTypeFile) {
+		return
+	}
+
 	agg := bp.dirAgg[ancestor]
 	if agg == nil {
 		agg = newDirSummaryAgg()
@@ -193,7 +198,7 @@ func (bp *BatchProcessor) aggregateRollup(ancestor string, size uint64, atime, m
 	if ext != "" {
 		agg.exts[ext] = struct{}{}
 	}
-
+	// Record the file type for files (eg. regular files only here)
 	agg.ftypes[ftype] = struct{}{}
 }
 
