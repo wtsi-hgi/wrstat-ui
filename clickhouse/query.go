@@ -25,12 +25,16 @@ package clickhouse
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/wtsi-hgi/wrstat-ui/db"
 )
+
+// isNoRowsErr returns true if err represents a no rows condition.
+func isNoRowsErr(err error) bool { return err != nil && errors.Is(err, sql.ErrNoRows) }
 
 var errGlobMustStartWithSlash = errors.New("glob must start with '/'")
 
@@ -263,6 +267,82 @@ func (c *Clickhouse) SubtreeSummary(ctx context.Context, dir string, f Filters) 
 	return sum, nil
 }
 
+// GetDirectorySummary returns the aggregated summary for a single directory
+// path as recorded in ancestor_rollups_current. If no row exists, returns
+// a zero Summary and nil error.
+func (c *Clickhouse) GetDirectorySummary(ctx context.Context, dir string) (Summary, error) {
+	dir = EnsureDir(dir)
+
+	q := `SELECT total_size, file_count, newest_atime, oldest_atime, newest_mtime, oldest_mtime, uids, gids, exts, ftypes, age
+		  FROM ancestor_rollups_current WHERE ancestor = ? LIMIT 1`
+
+	row := c.conn.QueryRow(ctx, q, dir)
+
+	var s Summary
+	if err := row.Scan(&s.TotalSize, &s.FileCount, &s.MostRecentATime, &s.OldestATime, &s.MostRecentMTime, &s.OldestMTime, &s.UIDs, &s.GIDs, &s.Exts, &s.FTypes, &s.Age); err != nil { //nolint:lll
+		if isNoRowsErr(err) {
+			return Summary{}, nil
+		}
+
+		return Summary{}, err
+	}
+
+	return s, nil
+}
+
+// ListChildDirectorySummaries returns summary rows for immediate child
+// directories of the given dir (including mount boundaries) by looking for
+// ancestors that have the dir as their parent.
+func (c *Clickhouse) ListChildDirectorySummaries(ctx context.Context, dir string, limit int) ([]ChildSummary, error) { //nolint:lll
+	dir = EnsureDir(dir)
+
+	// Pattern: dir + '%' but exclude deeper levels by splitting on next '/'
+	// We'll fetch candidates then filter in Go to ensure immediate children only.
+	q := `SELECT ancestor, total_size, file_count, newest_atime, oldest_atime, newest_mtime, oldest_mtime, uids, gids, exts, ftypes, age
+		  FROM ancestor_rollups_current WHERE ancestor LIKE ?`
+	if limit > 0 {
+		q += fmt.Sprintf(" LIMIT %d", limit*5) // oversample to allow filtering
+	}
+
+	rows, err := c.conn.Query(ctx, q, dir+"%")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]ChildSummary, 0, DefaultResultCapacity)
+	prefixLen := len(dir)
+	for rows.Next() {
+		var (
+			path string
+			s    Summary
+		)
+		if err := rows.Scan(&path, &s.TotalSize, &s.FileCount, &s.MostRecentATime, &s.OldestATime, &s.MostRecentMTime, &s.OldestMTime, &s.UIDs, &s.GIDs, &s.Exts, &s.FTypes, &s.Age); err != nil { //nolint:lll
+			return nil, err
+		}
+
+		if path == dir { // skip the directory itself
+			continue
+		}
+
+		// Immediate child if no additional '/' after trimming prefix
+		rest := path[prefixLen:]
+		if rest == "" {
+			continue
+		}
+		if strings.Count(rest, "/") > 1 { // more than one '/' means deeper than immediate child
+			continue
+		}
+
+		out = append(out, ChildSummary{Path: path, Summary: s})
+		if limit > 0 && len(out) >= limit {
+			break
+		}
+	}
+
+	return out, rows.Err()
+}
+
 // containsFileType checks if a slice of file types contains a specific type.
 func containsFileType(types []uint8, fileType uint8) bool {
 	for _, ft := range types {
@@ -367,36 +447,54 @@ func (c *Clickhouse) DirCountWithFiles(ctx context.Context, dir string, f Filter
 
 // buildDirCountQuery constructs the query and args for DirCountWithFiles.
 func buildDirCountQuery(dir string, f Filters) (string, []any) { //nolint:funlen
+	// Count distinct directories that have at least one DESCENDANT file
+	// matching the filters within the subtree rooted at 'dir'. We do this by
+	// scanning directory rows and checking existence of a matching file under
+	// each directory using an EXISTS subquery. This matches Bolt semantics for
+	// directory augmentation (counting all ancestor directories with files).
 	base := `
-SELECT countDistinct(ancestor) AS dir_count
-FROM ancestor_rollups_current arr
-WHERE ancestor LIKE ?`
+SELECT countDistinct(d.path) AS dir_count
+FROM fs_entries_current d
+WHERE d.ftype = 2 AND d.path LIKE ?
+  AND EXISTS (
+	SELECT 1 FROM fs_entries_current f
+	WHERE f.ftype = 1
+	  AND f.path LIKE concat(d.path, '%')`
 
 	where := []string{base}
 	args := []any{dir + "%"}
 
-	// Adapt filters: arrays contain distinct values per directory summary
-	if len(f.Exts) > 0 {
-		clause, a := buildArrayAnyClause("exts", f.Exts)
-		where = append(where, "AND "+clause)
-		args = append(args, a...)
-	}
+	// Apply UID/GID/EXT filters to the file rows in the EXISTS subquery
 	if len(f.GIDs) > 0 {
-		clause, a := buildArrayAnyUIntClause("gids", f.GIDs)
+		clause, a := buildInClause("f.gid", f.GIDs)
 		where = append(where, "AND "+clause)
 		args = append(args, a...)
 	}
 	if len(f.UIDs) > 0 {
-		clause, a := buildArrayAnyUIntClause("uids", f.UIDs)
+		clause, a := buildInClause("f.uid", f.UIDs)
+		where = append(where, "AND "+clause)
+		args = append(args, a...)
+	}
+	if len(f.Exts) > 0 {
+		clause, a := buildExtensionClause(f.Exts)
+		// Qualify column with alias 'f.'
+		clause = strings.Replace(clause, "ext_low", "f.ext_low", 1)
 		where = append(where, "AND "+clause)
 		args = append(args, a...)
 	}
 
-	// Time bucket predicates use oldest/newest times; approximate using any overlap
-	// Reuse existing predicate builder on oldest/newest atime/mtime if needed (future enhancement)
+	// Time bucket predicates using file atime/mtime and its scan_time
+	if pred, err := buildBucketPredicateWithScanExpr("f.scan_time", "f.atime", f.ATimeBucket); err == nil && pred != "" {
+		where = append(where, "AND "+pred)
+	}
+	if pred, err := buildBucketPredicateWithScanExpr("f.scan_time", "f.mtime", f.MTimeBucket); err == nil && pred != "" {
+		where = append(where, "AND "+pred)
+	}
+
+	// Close EXISTS subquery
+	where = append(where, ")")
 
 	query := strings.Join(where, " ")
-
 	return query, args
 }
 
