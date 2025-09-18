@@ -1,4 +1,4 @@
-package dirstore
+package db
 
 import "sync"
 

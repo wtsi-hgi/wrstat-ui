@@ -37,7 +37,6 @@ import (
 
 	"github.com/hashicorp/go-multierror"
 	"github.com/ugorji/go/codec"
-	"github.com/wtsi-hgi/wrstat-ui/internal/dirstore"
 )
 
 const (
@@ -61,7 +60,7 @@ const (
 // a dbSet is 2 databases, one for storing DGUTAs, one for storing children.
 type dbSet struct {
 	dir     string
-	store   dirstore.Store
+	store   Store
 	modtime time.Time
 }
 
@@ -88,7 +87,7 @@ func (s *dbSet) Create() error {
 		return ErrDBExists
 	}
 
-	f := dirstore.Default()
+	f := Default()
 	if f == nil {
 		return errors.New("no storage factory registered")
 	}
@@ -125,7 +124,7 @@ func (s *dbSet) pathsExist(paths []string) bool {
 func (s *dbSet) Open() error {
 	paths := s.Paths()
 
-	f := dirstore.Default()
+	f := Default()
 	if f == nil {
 		return errors.New("no storage factory registered")
 	}
@@ -168,7 +167,7 @@ func (s *dbSet) Info() (*DBInfo, error) {
 	ch := new(codec.BincHandle)
 	paths := s.Paths()
 
-	f := dirstore.Default()
+	f := Default()
 	if f == nil {
 		return nil, errors.New("no storage factory registered")
 	}
@@ -306,7 +305,7 @@ func (d *DB) buildChildrenPairs() [][2][]byte {
 // getChildrenFromDB retrieves the child directory values associated with the
 // given directory key in the given db. Returns an empty slice if the dir wasn't
 // found.
-func (d *DB) getChildrenFromStore(st dirstore.Store, dir string) []string {
+func (d *DB) getChildrenFromStore(st Store, dir string) []string {
 	key := []byte(dir)
 	if !strings.HasSuffix(dir, "/") {
 		key = append(key, '/')
@@ -463,7 +462,7 @@ func (d *DB) combineDGUTAsFromReadSets(dir string) (*DGUTA, int, time.Time) {
 // getDGUTAFromDBAndAppend calls getDGUTAFromDB() and appends the result
 // to the given dguta. If the given dguta is empty, it will be populated with the
 // content of the result instead.
-func getDGUTAFromStoreAndAppend(st dirstore.Store, dir string, dguta *DGUTA) error {
+func getDGUTAFromStoreAndAppend(st Store, dir string, dguta *DGUTA) error {
 	thisDGUTA, err := getDGUTAFromStore(st, dir)
 	if err != nil {
 		return err
@@ -480,7 +479,7 @@ func getDGUTAFromStoreAndAppend(st dirstore.Store, dir string, dguta *DGUTA) err
 }
 
 // getDGUTAFromStore gets and decodes a dguta from the given store.
-func getDGUTAFromStore(st dirstore.Store, dir string) (*DGUTA, error) {
+func getDGUTAFromStore(st Store, dir string) (*DGUTA, error) {
 	bdir := make([]byte, 0, 2+len(dir)) //nolint:mnd
 	bdir = append(bdir, dir...)
 
@@ -537,7 +536,6 @@ func mapToSortedKeys(things map[string]bool) []string {
 	}
 
 	sort.Strings(keys)
-
 	return keys
 }
 
@@ -553,11 +551,6 @@ func (d *DB) Info() (*DBInfo, error) {
 		if err != nil {
 			return nil, err
 		}
-
-		if !readSet.pathsExist(readSet.Paths()) {
-			return nil, ErrDBNotExists
-		}
-
 		readSets[i] = readSet
 	}
 

@@ -3,22 +3,20 @@ package bolt
 import (
 	"errors"
 
-	"github.com/wtsi-hgi/wrstat-ui/internal/dirstore"
+	"github.com/wtsi-hgi/wrstat-ui/db"
 )
 
 // boltFactory implements dirstore.Factory backed by bolt DBs.
 type boltFactory struct{}
 
 // NewDirStoreFactory returns a dirstore.Factory backed by bolt.
-func NewDirStoreFactory() dirstore.Factory { //nolint:ireturn
+func NewDirStoreFactory() db.Factory { //nolint:ireturn
 	return &boltFactory{}
 }
 
-func init() {
-	dirstore.Register("bolt", NewDirStoreFactory())
-}
+func init() { db.Register("bolt", NewDirStoreFactory()) }
 
-func (boltFactory) Create(dgutaPath, childrenPath string) (dirstore.Store, error) { //nolint:ireturn
+func (boltFactory) Create(dgutaPath, childrenPath string) (db.Store, error) { //nolint:ireturn
 	gdb, err := Open(dgutaPath, 0640, &Options{ //nolint:mnd
 		NoFreelistSync: true,
 		NoGrowSync:     true,
@@ -56,7 +54,7 @@ func (boltFactory) Create(dgutaPath, childrenPath string) (dirstore.Store, error
 	return &boltStore{gdb: gdb, cdb: cdb, ro: false}, nil
 }
 
-func (boltFactory) OpenReadOnly(dgutaPath, childrenPath string) (dirstore.Store, error) { //nolint:ireturn
+func (boltFactory) OpenReadOnly(dgutaPath, childrenPath string) (db.Store, error) { //nolint:ireturn
 	gdb, err := Open(dgutaPath, 0640, &Options{ReadOnly: true}) //nolint:mnd
 	if err != nil {
 		return nil, err
@@ -69,7 +67,7 @@ func (boltFactory) OpenReadOnly(dgutaPath, childrenPath string) (dirstore.Store,
 	return &boltStore{gdb: gdb, cdb: cdb, ro: true}, nil
 }
 
-func (boltFactory) OpenReadOnlyUnPopulated(dgutaPath, childrenPath string) (dirstore.Store, error) { //nolint:ireturn
+func (boltFactory) OpenReadOnlyUnPopulated(dgutaPath, childrenPath string) (db.Store, error) { //nolint:ireturn
 	return (&boltFactory{}).OpenReadOnly(dgutaPath, childrenPath)
 }
 
