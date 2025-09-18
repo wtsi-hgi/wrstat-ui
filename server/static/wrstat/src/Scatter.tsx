@@ -61,6 +61,8 @@ type Data = {
 
 let scatterKey = 0;
 
+let isDragging = false;
+
 const minDaysAgo = (date: string) => {
     const daysAgo = asDaysAgo(date);
     if (daysAgo < 0) {
@@ -159,7 +161,6 @@ const minDaysAgo = (date: string) => {
     const xScale = graphWidth / (maxDate - minDate),
       yScale = graphHeight / (maxSize - minSize);
 
-    // ---- Draw points on canvas ----
     useEffect(() => {
       if (!canvasRef.current || data.length === 0) return;
 
@@ -178,14 +179,17 @@ const minDaysAgo = (date: string) => {
         ctx.fillStyle = isSelected(d) ? "red" : "black";
         ctx.fill();
       }
-    }, [data, dateToX, sizeToY, isSelected]);
+    }, [data]);
 
-    // ---- Handle click detection ----
     useEffect(() => {
       if (!canvasRef.current) return;
       const canvas = canvasRef.current;
 
       const handleClick = (e: MouseEvent) => {
+        if (isDragging) {
+          isDragging = false;
+          return;
+        }
         const rect = canvas.getBoundingClientRect();
         const mouseX = e.clientX - rect.left;
         const mouseY = e.clientY - rect.top;
@@ -219,18 +223,17 @@ const minDaysAgo = (date: string) => {
 
       canvas.addEventListener("click", handleClick);
       return () => canvas.removeEventListener("click", handleClick);
-    }, [data, dateToX, sizeToY, setLimits]);
+    }, [data]);
 
-    // ---- Cursor hover over points ----
     useEffect(() => {
       if (!canvasRef.current) return;
+
       const canvas = canvasRef.current;
 
       const handleMouseMove = (e: MouseEvent) => {
         const rect = canvas.getBoundingClientRect();
         const mouseX = e.clientX - rect.left;
         const mouseY = e.clientY - rect.top;
-
         let hovering = false;
         for (const d of data) {
           const x = dateToX(minDaysAgo(d.Mtime));
@@ -246,10 +249,9 @@ const minDaysAgo = (date: string) => {
 
       canvas.addEventListener("mousemove", handleMouseMove);
       return () => canvas.removeEventListener("mousemove", handleMouseMove);
-    }, [data, dateToX, sizeToY]);
+    }, [data]);
 
-    // ---- Drag-to-zoom selection ----
-    const onDrag = (e: React.MouseEvent<SVGSVGElement>) => {
+    const onDrag = (e: React.MouseEvent<Element>) => {
       if (e.button !== 0) return;
 
       const rect = e.currentTarget.getBoundingClientRect();
@@ -258,7 +260,14 @@ const minDaysAgo = (date: string) => {
       const startX = e.clientX - graphLeft;
       const startY = e.clientY - graphTop;
 
+      isDragging = false;
+
       const mousemove = (ev: MouseEvent, cb = previewLimits) => {
+        const dx = Math.abs(ev.clientX - e.clientX);
+        const dy = Math.abs(ev.clientY - e.clientY);
+
+        isDragging ||= dx > 3 || dy > 3;
+
         const x = ev.clientX - graphLeft;
         const y = ev.clientY - graphTop;
 
@@ -395,107 +404,110 @@ const minDaysAgo = (date: string) => {
     }
 
     return (
-      <svg
-        id="scatter"
-        key={`scatter_${++scatterKey}`}
-        xmlns="http://www.w3.org/2000/svg"
-        width={width}
-        height={height}
-        viewBox={`0 0 ${width} ${height}`}
-        onMouseDown={onDrag}
-      >
-        <rect
-          rx={4}
-          className="back"
-          x={paddingXL}
-          y={paddingYT}
-          width={graphWidth + 2 * innerPadding}
-          height={graphHeight + 2 * innerPadding}
-          style={{ fill: "var(--graphBack, #ddd)" }}
-          stroke="currentColor"
+      <div className="scatter-wrapper" style={{ width, height }}>
+        <canvas
+          ref={canvasRef}
+          width={width}
+          height={height}
+          className="scatter-canvas"
+          onMouseDown={onDrag}
         />
-        {Array.from({ length: 6 }, (_, n) => (
-          <line
-            key={`scatter_hl_${n}`}
-            x1={dateToX(nonLogFractionToDate(0), false) - innerPadding}
-            x2={dateToX(nonLogFractionToDate(1), false) + innerPadding}
-            y1={sizeToY(nonLogFractionToSize(n / 5), false)}
-            y2={sizeToY(nonLogFractionToSize(n / 5), false)}
-            className="graphLines"
-          />
-        ))}
-        {Array.from({ length: 6 }, (_, n) => (
-          <text
-            key={`scatter_ht_${n}`}
-            x={dateToX(nonLogFractionToDate(0), false) - innerPadding - 5}
-            y={
-              Math.max(sizeToY(nonLogFractionToSize(n / 5), false), paddingYT) +
-              5
-            }
-            fill="currentColor"
-            textAnchor="end"
-          >
-            {formatBytes(fractionToSize(n / 5))}
-          </text>
-        ))}
-        {Array.from({ length: 6 }, (_, n) => (
-          <line
-            key={`scatter_vl_${n}`}
-            x1={dateToX(nonLogFractionToDate(n / 5), false)}
-            x2={dateToX(nonLogFractionToDate(n / 5), false)}
-            y1={sizeToY(nonLogFractionToSize(1), false) - innerPadding}
-            y2={sizeToY(nonLogFractionToSize(0), false) + innerPadding}
-            className="graphLines"
-          />
-        ))}
-        {Array.from({ length: 6 }, (_, n) => (
-          <text
-            key={`scatter_vt_${n}`}
-            x={-10}
-            y={20}
-            transform={`translate(${dateToX(
-              nonLogFractionToDate(n / 5),
-              false
-            )} ${sizeToY(nonLogFractionToSize(0), false)}) rotate(-45)`}
-            fill="currentColor"
-            textAnchor="end"
-          >
-            {formatNumber(fractionToDate(n / 5))}
-          </text>
-        ))}
-        <foreignObject x={0} y={0} width={width} height={height}>
-          <canvas
-            ref={canvasRef}
-            width={width}
-            height={height}
-            style={{ width: "100%", height: "100%", cursor: "crosshair" }}
-          />
-        </foreignObject>
-        {highlightCoords &&
-        highlightCoords.every((v) => v !== -Infinity && v !== Infinity) ? (
-          <rect
-            className="back"
-            x={highlightCoords[0] + paddingXL}
-            width={highlightCoords[1]}
-            y={highlightCoords[2] + paddingYT}
-            height={highlightCoords[3]}
-            fill="#9cf"
-            fillOpacity={0.25}
-            stroke="#036"
-            strokeOpacity={0.25}
-          />
-        ) : (
-          []
-        )}
-        <text
-          x={paddingXL + (width - paddingXL - paddingXR) / 2}
-          y={height - 5}
-          textAnchor="middle"
-          fill="currentColor"
+        <svg
+          id="scatter"
+          key={`scatter_${++scatterKey}`}
+          xmlns="http://www.w3.org/2000/svg"
+          width={width}
+          height={height}
+          viewBox={`0 0 ${width} ${height}`}
         >
-          Last Modified (Days)
-        </text>
-      </svg>
+          <rect
+            rx={4}
+            className="back"
+            x={paddingXL}
+            y={paddingYT}
+            width={graphWidth + 2 * innerPadding}
+            height={graphHeight + 2 * innerPadding}
+            style={{ fill: "var(--graphBack, #ddd)" }}
+            stroke="currentColor"
+          />
+          {Array.from({ length: 6 }, (_, n) => (
+            <line
+              key={`scatter_hl_${n}`}
+              x1={dateToX(nonLogFractionToDate(0), false) - innerPadding}
+              x2={dateToX(nonLogFractionToDate(1), false) + innerPadding}
+              y1={sizeToY(nonLogFractionToSize(n / 5), false)}
+              y2={sizeToY(nonLogFractionToSize(n / 5), false)}
+              className="graphLines"
+            />
+          ))}
+          {Array.from({ length: 6 }, (_, n) => (
+            <text
+              key={`scatter_ht_${n}`}
+              x={dateToX(nonLogFractionToDate(0), false) - innerPadding - 5}
+              y={
+                Math.max(
+                  sizeToY(nonLogFractionToSize(n / 5), false),
+                  paddingYT
+                ) + 5
+              }
+              fill="currentColor"
+              textAnchor="end"
+            >
+              {formatBytes(fractionToSize(n / 5))}
+            </text>
+          ))}
+          {Array.from({ length: 6 }, (_, n) => (
+            <line
+              key={`scatter_vl_${n}`}
+              x1={dateToX(nonLogFractionToDate(n / 5), false)}
+              x2={dateToX(nonLogFractionToDate(n / 5), false)}
+              y1={sizeToY(nonLogFractionToSize(1), false) - innerPadding}
+              y2={sizeToY(nonLogFractionToSize(0), false) + innerPadding}
+              className="graphLines"
+            />
+          ))}
+          {Array.from({ length: 6 }, (_, n) => (
+            <text
+              key={`scatter_vt_${n}`}
+              x={-10}
+              y={20}
+              transform={`translate(${dateToX(
+                nonLogFractionToDate(n / 5),
+                false
+              )} ${sizeToY(nonLogFractionToSize(0), false)}) rotate(-45)`}
+              fill="currentColor"
+              textAnchor="end"
+            >
+              {formatNumber(fractionToDate(n / 5))}
+            </text>
+          ))}
+
+          {highlightCoords &&
+          highlightCoords.every((v) => v !== -Infinity && v !== Infinity) ? (
+            <rect
+              className="back"
+              x={highlightCoords[0] + paddingXL}
+              width={highlightCoords[1]}
+              y={highlightCoords[2] + paddingYT}
+              height={highlightCoords[3]}
+              fill="#9cf"
+              fillOpacity={0.25}
+              stroke="#036"
+              strokeOpacity={0.25}
+            />
+          ) : (
+            []
+          )}
+          <text
+            x={paddingXL + (width - paddingXL - paddingXR) / 2}
+            y={height - 5}
+            textAnchor="middle"
+            fill="currentColor"
+          >
+            Last Modified (Days)
+          </text>
+        </svg>
+      </div>
     );
   };
 
