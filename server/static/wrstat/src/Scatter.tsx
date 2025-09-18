@@ -59,8 +59,6 @@ type Data = {
   Mtime: string;
 };
 
-let scatterKey = 0;
-
 let isDragging = false;
 
 const minDaysAgo = (date: string) => {
@@ -414,7 +412,6 @@ const minDaysAgo = (date: string) => {
         />
         <svg
           id="scatter"
-          key={`scatter_${++scatterKey}`}
           xmlns="http://www.w3.org/2000/svg"
           width={width}
           height={height}
