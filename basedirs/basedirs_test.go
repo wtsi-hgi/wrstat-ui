@@ -43,6 +43,7 @@ import (
 
 	. "github.com/smartystreets/goconvey/convey"
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
+	bolt "github.com/wtsi-hgi/wrstat-ui/bolt"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 	internaldata "github.com/wtsi-hgi/wrstat-ui/internal/data"
 	"github.com/wtsi-hgi/wrstat-ui/internal/fixtimes"
@@ -51,7 +52,6 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/stats"
 	"github.com/wtsi-hgi/wrstat-ui/summary"
 	sbasedirs "github.com/wtsi-hgi/wrstat-ui/summary/basedirs"
-	bolt "go.etcd.io/bbolt"
 )
 
 func TestBaseDirs(t *testing.T) {

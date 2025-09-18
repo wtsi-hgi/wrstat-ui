@@ -34,13 +34,13 @@ import (
 	"time"
 
 	. "github.com/smartystreets/goconvey/convey"
+	bolt "github.com/wtsi-hgi/wrstat-ui/bolt"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 	internaldata "github.com/wtsi-hgi/wrstat-ui/internal/data"
 	"github.com/wtsi-hgi/wrstat-ui/internal/statsdata"
 	"github.com/wtsi-hgi/wrstat-ui/stats"
 	"github.com/wtsi-hgi/wrstat-ui/summary"
 	"github.com/wtsi-hgi/wrstat-ui/summary/dirguta"
-	bolt "go.etcd.io/bbolt"
 )
 
 func TestDGUTA(t *testing.T) {

@@ -28,7 +28,7 @@ package basedirs
 import (
 	"bytes"
 
-	"go.etcd.io/bbolt"
+	bolt "github.com/wtsi-hgi/wrstat-ui/bolt"
 )
 
 const idLen = 4 + 1
@@ -36,14 +36,14 @@ const idLen = 4 + 1
 // CleanInvalidDBHistory removes irrelevant paths from the history bucket,
 // leaving only those with the specified path prefix.
 func CleanInvalidDBHistory(dbPath, prefix string) error { //nolint:gocognit
-	db, err := bbolt.Open(dbPath, dbOpenMode, &bbolt.Options{})
+	db, err := bolt.Open(dbPath, dbOpenMode, &bolt.Options{})
 	if err != nil {
 		return err
 	}
 
 	prefixB := []byte(prefix)
 
-	if err := db.Update(func(tx *bbolt.Tx) error {
+	if err := db.Update(func(tx *bolt.Tx) error {
 		c := tx.Bucket([]byte(GroupHistoricalBucket)).Cursor()
 
 		for k, _ := c.First(); k != nil; k, _ = c.Next() {
@@ -65,7 +65,7 @@ func CleanInvalidDBHistory(dbPath, prefix string) error { //nolint:gocognit
 // FindInvalidHistoryKeys returns a list of the keys from the history bucket
 // that do not contain the specified prefix.
 func FindInvalidHistoryKeys(dbPath, prefix string) ([][]byte, error) {
-	db, err := bbolt.Open(dbPath, dbOpenMode, &bbolt.Options{
+	db, err := bolt.Open(dbPath, dbOpenMode, &bolt.Options{
 		ReadOnly: true,
 	})
 	if err != nil {
@@ -78,7 +78,7 @@ func FindInvalidHistoryKeys(dbPath, prefix string) ([][]byte, error) {
 
 	prefixB := []byte(prefix)
 
-	if err := db.View(func(tx *bbolt.Tx) error {
+	if err := db.View(func(tx *bolt.Tx) error {
 		return tx.Bucket([]byte(GroupHistoricalBucket)).ForEach(func(k, _ []byte) error {
 			if len(k) > idLen && !bytes.HasPrefix(k[idLen:], prefixB) {
 				toRemove = append(toRemove, append(make([]byte, 0, len(k)), k...))

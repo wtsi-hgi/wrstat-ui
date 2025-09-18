@@ -33,8 +33,8 @@ import (
 	"time"
 
 	"github.com/ugorji/go/codec"
+	bolt "github.com/wtsi-hgi/wrstat-ui/bolt"
 	"github.com/wtsi-hgi/wrstat-ui/db"
-	bolt "go.etcd.io/bbolt"
 )
 
 const (

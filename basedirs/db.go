@@ -36,9 +36,8 @@ import (
 	"time"
 
 	"github.com/ugorji/go/codec"
+	bolt "github.com/wtsi-hgi/wrstat-ui/bolt"
 	"github.com/wtsi-hgi/wrstat-ui/db"
-	bolt "go.etcd.io/bbolt"
-	berrors "go.etcd.io/bbolt/errors"
 )
 
 const (
@@ -139,11 +138,11 @@ func (b *BaseDirs) updateDatabase(users, groups IDAgeDirs) func(*bolt.Tx) error 
 }
 
 func clearUsageBuckets(tx *bolt.Tx) error {
-	if err := tx.DeleteBucket([]byte(GroupUsageBucket)); err != nil && !errors.Is(err, berrors.ErrBucketNotFound) {
+	if err := tx.DeleteBucket([]byte(GroupUsageBucket)); err != nil && !errors.Is(err, bolt.ErrBucketNotFound) {
 		return err
 	}
 
-	if err := tx.DeleteBucket([]byte(UserUsageBucket)); err != nil && !errors.Is(err, berrors.ErrBucketNotFound) {
+	if err := tx.DeleteBucket([]byte(UserUsageBucket)); err != nil && !errors.Is(err, bolt.ErrBucketNotFound) {
 		return err
 	}
 

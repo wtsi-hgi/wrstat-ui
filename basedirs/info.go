@@ -30,7 +30,7 @@ import (
 	"bytes"
 
 	"github.com/ugorji/go/codec"
-	bolt "go.etcd.io/bbolt"
+	bolt "github.com/wtsi-hgi/wrstat-ui/bolt"
 )
 
 // DBInfo holds summary information about the database file produced by

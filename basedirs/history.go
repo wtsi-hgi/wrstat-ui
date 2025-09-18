@@ -34,8 +34,8 @@ import (
 	"time"
 
 	"github.com/moby/sys/mountinfo"
+	bolt "github.com/wtsi-hgi/wrstat-ui/bolt"
 	db "github.com/wtsi-hgi/wrstat-ui/db"
-	bolt "go.etcd.io/bbolt"
 )
 
 var (

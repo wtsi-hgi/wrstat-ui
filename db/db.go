@@ -27,6 +27,35 @@
 
 package db
 
+/*
+*******************************************************************************
+* Copyright (c) 2022, 2025 Genome Research Ltd.
+*
+* Authors:
+*   Sendu Bala <sb10@sanger.ac.uk>
+*   Michael Woolnough <mw31@sanger.ac.uk>
+*
+* Permission is hereby granted, free of charge, to any person obtaining
+* a copy of this software and associated documentation files (the
+* "Software"), to deal in the Software without restriction, including
+* without limitation the rights to use, copy, modify, merge, publish,
+* distribute, sublicense, and/or sell copies of the Software, and to
+* permit persons to whom the Software is furnished to do so, subject to
+* the following conditions:
+*
+* The above copyright notice and this permission notice shall be included
+* in all copies or substantial portions of the Software.
+*
+* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+* IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+* CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+* TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+* SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+*******************************************************************************
+ */
+
 import (
 	"log/slog"
 	"os"
@@ -37,7 +66,6 @@ import (
 
 	"github.com/hashicorp/go-multierror"
 	"github.com/ugorji/go/codec"
-	bolt "go.etcd.io/bbolt"
 )
 
 const (
@@ -61,8 +89,8 @@ const (
 // a dbSet is 2 databases, one for storing DGUTAs, one for storing children.
 type dbSet struct {
 	dir      string
-	dgutas   *bolt.DB
-	children *bolt.DB
+	dgutas   KVDB
+	children KVDB
 	modtime  time.Time
 }
 
@@ -89,14 +117,14 @@ func (s *dbSet) Create() error {
 		return ErrDBExists
 	}
 
-	db, err := openBoltWritable(paths[0], GUTABucket)
+	db, err := storageFactory.OpenWritable(paths[0], GUTABucket)
 	if err != nil {
 		return err
 	}
 
 	s.dgutas = db
 
-	db, err = openBoltWritable(paths[1], ChildBucket)
+	db, err = storageFactory.OpenWritable(paths[1], ChildBucket)
 	s.children = db
 
 	return err
@@ -123,39 +151,18 @@ func (s *dbSet) pathsExist(paths []string) bool {
 	return false
 }
 
-// openBoltWritable creates a new database at the given path with the given
-// bucket inside.
-func openBoltWritable(path, bucket string) (*bolt.DB, error) {
-	db, err := bolt.Open(path, DBOpenMode, &bolt.Options{
-		NoFreelistSync: true,
-		NoGrowSync:     true,
-		FreelistType:   bolt.FreelistMapType,
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	err = db.Update(func(tx *bolt.Tx) error {
-		_, errc := tx.CreateBucketIfNotExists([]byte(bucket))
-
-		return errc
-	})
-
-	return db, err
-}
-
 // Open opens our constituent databases read-only.
 func (s *dbSet) Open() error {
 	paths := s.Paths()
 
-	db, err := openBoltReadOnly(paths[0])
+	db, err := storageFactory.OpenReadOnly(paths[0])
 	if err != nil {
 		return err
 	}
 
 	s.dgutas = db
 
-	db, err = openBoltReadOnly(paths[1])
+	db, err = storageFactory.OpenReadOnly(paths[1])
 	if err != nil {
 		return err
 	}
@@ -163,13 +170,6 @@ func (s *dbSet) Open() error {
 	s.children = db
 
 	return nil
-}
-
-// openBoltReadOnly opens a bolt database at the given path in read-only mode.
-func openBoltReadOnly(path string) (*bolt.DB, error) {
-	return bolt.Open(path, DBOpenMode, &bolt.Options{
-		ReadOnly: true,
-	})
 }
 
 // Close closes our constituent databases.
@@ -214,12 +214,12 @@ func (s *dbSet) Info() (*DBInfo, error) {
 }
 
 func gutaDBInfo(path string, info *DBInfo) error {
-	gutaDB, err := openBoltReadOnlyUnPopulated(path)
+	gutaDB, err := storageFactory.OpenReadOnlyUnPopulated(path)
 	if err != nil {
 		return err
 	}
 
-	slog.Debug("opened bolt file", "path", path)
+	slog.Debug("opened db file", "path", path)
 
 	defer gutaDB.Close()
 
@@ -234,16 +234,10 @@ func gutaDBInfo(path string, info *DBInfo) error {
 	return nil
 }
 
-// openBoltReadOnlyUnPopulated opens a bolt database at the given path in
-// read-only mode, without MAP_POPULATE.
-func openBoltReadOnlyUnPopulated(path string) (*bolt.DB, error) {
-	return bolt.Open(path, DBOpenMode, &bolt.Options{
-		ReadOnly: true,
-	})
-}
+// opened via storageFactory.OpenReadOnlyUnPopulated
 
-func fullBucketScan(db *bolt.DB, bucketName string, cb func(k, v []byte)) {
-	db.View(func(tx *bolt.Tx) error { //nolint:errcheck
+func fullBucketScan(db KVDB, bucketName string, cb func(k, v []byte)) {
+	db.View(func(tx Tx) error { //nolint:errcheck
 		b := tx.Bucket([]byte(bucketName))
 
 		return b.ForEach(func(k, v []byte) error {
@@ -255,12 +249,12 @@ func fullBucketScan(db *bolt.DB, bucketName string, cb func(k, v []byte)) {
 }
 
 func childrenDBInfo(path string, info *DBInfo, ch codec.Handle) error {
-	childDB, err := openBoltReadOnlyUnPopulated(path)
+	childDB, err := storageFactory.OpenReadOnlyUnPopulated(path)
 	if err != nil {
 		return err
 	}
 
-	slog.Debug("opened bolt file", "path", path)
+	slog.Debug("opened db file", "path", path)
 
 	defer childDB.Close()
 
@@ -324,14 +318,6 @@ func (d *DB) CreateDB() error {
 	return err
 }
 
-// storeData parses the data and stores it in our database file. Only call this
-// after calling createDB(), and only call it once.
-// func (d *DB) storeData(data io.Reader) error {
-// 	d.resetBatch()
-
-// 	return parseDGUTALines(data, d.parserCB)
-// }
-
 // resetBatch prepares us to receive a new batch of DGUTAs from the parser.
 func (d *DB) resetBatch() {
 	d.writeBatch = d.writeBatch[:0]
@@ -373,7 +359,7 @@ func (d *DB) storeBatch() {
 }
 
 // storeChildren stores the Dirs of the current DGUTA batch in the db.
-func (d *DB) storeChildren(txn *bolt.Tx) error {
+func (d *DB) storeChildren(txn Tx) error {
 	b := txn.Bucket([]byte(ChildBucket))
 
 	for _, r := range d.writeBatch {
@@ -398,7 +384,7 @@ func (d *DB) storeChildren(txn *bolt.Tx) error {
 // getChildrenFromDB retrieves the child directory values associated with the
 // given directory key in the given db. Returns an empty slice if the dir wasn't
 // found.
-func (d *DB) getChildrenFromDB(b *bolt.Bucket, dir string) []string {
+func (d *DB) getChildrenFromDB(b Bucket, dir string) []string {
 	key := []byte(dir)
 
 	if !strings.HasSuffix(dir, "/") {
@@ -436,7 +422,7 @@ func (d *DB) encodeChildren(dirs []string) []byte {
 }
 
 // storeDGUTAs stores the current batch of DGUTAs in the db.
-func (d *DB) storeDGUTAs(tx *bolt.Tx) error {
+func (d *DB) storeDGUTAs(tx Tx) error {
 	b := tx.Bucket([]byte(GUTABucket))
 
 	for _, dguta := range d.writeBatch {
@@ -450,7 +436,7 @@ func (d *DB) storeDGUTAs(tx *bolt.Tx) error {
 
 // storeDGUTA stores a DGUTA in the db. DGUTAs are expected to be unique per
 // Store() operation and database.
-func (d *DB) storeDGUTA(b *bolt.Bucket, dguta RecordDGUTA) error {
+func (d *DB) storeDGUTA(b Bucket, dguta RecordDGUTA) error {
 	if err := b.Put(dguta.EncodeToBytes()); err != nil {
 		return err
 	}
@@ -541,7 +527,7 @@ func (d *DB) combineDGUTAsFromReadSets(dir string) (*DGUTA, int, time.Time) {
 	dguta := &DGUTA{}
 
 	for _, readSet := range d.readSets {
-		if err := readSet.dgutas.View(func(tx *bolt.Tx) error {
+		if err := readSet.dgutas.View(func(tx Tx) error {
 			b := tx.Bucket([]byte(GUTABucket))
 
 			if readSet.modtime.After(lastUpdated) {
@@ -560,7 +546,7 @@ func (d *DB) combineDGUTAsFromReadSets(dir string) (*DGUTA, int, time.Time) {
 // getDGUTAFromDBAndAppend calls getDGUTAFromDB() and appends the result
 // to the given dguta. If the given dguta is empty, it will be populated with the
 // content of the result instead.
-func getDGUTAFromDBAndAppend(b *bolt.Bucket, dir string, dguta *DGUTA) error {
+func getDGUTAFromDBAndAppend(b Bucket, dir string, dguta *DGUTA) error {
 	thisDGUTA, err := getDGUTAFromDB(b, dir)
 	if err != nil {
 		return err
@@ -577,7 +563,7 @@ func getDGUTAFromDBAndAppend(b *bolt.Bucket, dir string, dguta *DGUTA) error {
 }
 
 // getDGUTAFromDB gets and decodes a dguta from the given database.
-func getDGUTAFromDB(b *bolt.Bucket, dir string) (*DGUTA, error) {
+func getDGUTAFromDB(b Bucket, dir string) (*DGUTA, error) {
 	bdir := make([]byte, 0, 2+len(dir)) //nolint:mnd
 	bdir = append(bdir, dir...)
 
@@ -613,7 +599,7 @@ func (d *DB) Children(dir string) []string {
 		// no error is possible here, but the View function requires we return
 		// one.
 		//nolint:errcheck
-		readSet.children.View(func(tx *bolt.Tx) error {
+		readSet.children.View(func(tx Tx) error {
 			b := tx.Bucket([]byte(ChildBucket))
 
 			for _, child := range d.getChildrenFromDB(b, dir) {
