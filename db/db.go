@@ -27,37 +27,8 @@
 
 package db
 
-/*
-*******************************************************************************
-* Copyright (c) 2022, 2025 Genome Research Ltd.
-*
-* Authors:
-*   Sendu Bala <sb10@sanger.ac.uk>
-*   Michael Woolnough <mw31@sanger.ac.uk>
-*
-* Permission is hereby granted, free of charge, to any person obtaining
-* a copy of this software and associated documentation files (the
-* "Software"), to deal in the Software without restriction, including
-* without limitation the rights to use, copy, modify, merge, publish,
-* distribute, sublicense, and/or sell copies of the Software, and to
-* permit persons to whom the Software is furnished to do so, subject to
-* the following conditions:
-*
-* The above copyright notice and this permission notice shall be included
-* in all copies or substantial portions of the Software.
-*
-* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
-* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
-* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
-* IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
-* CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
-* TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
-* SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
-*******************************************************************************
- */
-
 import (
-	"log/slog"
+	"errors"
 	"os"
 	"path/filepath"
 	"sort"
@@ -66,6 +37,7 @@ import (
 
 	"github.com/hashicorp/go-multierror"
 	"github.com/ugorji/go/codec"
+	"github.com/wtsi-hgi/wrstat-ui/internal/dirstore"
 )
 
 const (
@@ -88,10 +60,9 @@ const (
 
 // a dbSet is 2 databases, one for storing DGUTAs, one for storing children.
 type dbSet struct {
-	dir      string
-	dgutas   KVDB
-	children KVDB
-	modtime  time.Time
+	dir     string
+	store   dirstore.Store
+	modtime time.Time
 }
 
 // NewDBSet creates a new NewDBSet that knows where its database files are
@@ -117,17 +88,16 @@ func (s *dbSet) Create() error {
 		return ErrDBExists
 	}
 
-	db, err := storageFactory.OpenWritable(paths[0], GUTABucket)
+	f := dirstore.Default()
+	if f == nil {
+		return errors.New("no storage factory registered")
+	}
+	st, err := f.Create(paths[0], paths[1])
 	if err != nil {
 		return err
 	}
-
-	s.dgutas = db
-
-	db, err = storageFactory.OpenWritable(paths[1], ChildBucket)
-	s.children = db
-
-	return err
+	s.store = st
+	return nil
 }
 
 // Paths returns the expected Paths for our dguta and children databases
@@ -155,19 +125,15 @@ func (s *dbSet) pathsExist(paths []string) bool {
 func (s *dbSet) Open() error {
 	paths := s.Paths()
 
-	db, err := storageFactory.OpenReadOnly(paths[0])
+	f := dirstore.Default()
+	if f == nil {
+		return errors.New("no storage factory registered")
+	}
+	st, err := f.OpenReadOnly(paths[0], paths[1])
 	if err != nil {
 		return err
 	}
-
-	s.dgutas = db
-
-	db, err = storageFactory.OpenReadOnly(paths[1])
-	if err != nil {
-		return err
-	}
-
-	s.children = db
+	s.store = st
 
 	return nil
 }
@@ -180,11 +146,10 @@ func (s *dbSet) Close() error {
 
 	var errm *multierror.Error
 
-	err := s.dgutas.Close()
-	errm = multierror.Append(errm, err)
-
-	err = s.children.Close()
-	errm = multierror.Append(errm, err)
+	if s.store != nil {
+		err := s.store.Close()
+		errm = multierror.Append(errm, err)
+	}
 
 	return errm.ErrorOrNil()
 }
@@ -199,80 +164,43 @@ type DBInfo struct { //nolint:revive
 // Info opens our constituent databases read-only, gets summary info about their
 // contents, returns that info and closes the databases.
 func (s *dbSet) Info() (*DBInfo, error) {
-	paths := s.Paths()
 	info := &DBInfo{}
 	ch := new(codec.BincHandle)
+	paths := s.Paths()
 
-	err := gutaDBInfo(paths[0], info)
+	f := dirstore.Default()
+	if f == nil {
+		return nil, errors.New("no storage factory registered")
+	}
+	st, err := f.OpenReadOnlyUnPopulated(paths[0], paths[1])
 	if err != nil {
 		return nil, err
 	}
+	defer st.Close()
 
-	err = childrenDBInfo(paths[1], info, ch)
-
-	return info, err
-}
-
-func gutaDBInfo(path string, info *DBInfo) error {
-	gutaDB, err := storageFactory.OpenReadOnlyUnPopulated(path)
-	if err != nil {
-		return err
-	}
-
-	slog.Debug("opened db file", "path", path)
-
-	defer gutaDB.Close()
-
-	fullBucketScan(gutaDB, GUTABucket, func(k, v []byte) {
+	// DGUTA info
+	if err := st.ForEachDGUTA(func(k, v []byte) error {
 		info.NumDirs++
 		dguta := DecodeDGUTAbytes(k, v)
 		info.NumDGUTAs += len(dguta.GUTAs)
-	})
-
-	slog.Debug("went through bucket", "name", GUTABucket)
-
-	return nil
-}
-
-// opened via storageFactory.OpenReadOnlyUnPopulated
-
-func fullBucketScan(db KVDB, bucketName string, cb func(k, v []byte)) {
-	db.View(func(tx Tx) error { //nolint:errcheck
-		b := tx.Bucket([]byte(bucketName))
-
-		return b.ForEach(func(k, v []byte) error {
-			cb(k, v)
-
-			return nil
-		})
-	})
-}
-
-func childrenDBInfo(path string, info *DBInfo, ch codec.Handle) error {
-	childDB, err := storageFactory.OpenReadOnlyUnPopulated(path)
-	if err != nil {
-		return err
+		return nil
+	}); err != nil {
+		return nil, err
 	}
 
-	slog.Debug("opened db file", "path", path)
-
-	defer childDB.Close()
-
-	fullBucketScan(childDB, ChildBucket, func(_, v []byte) {
+	// Children info
+	if err := st.ForEachChildren(func(v []byte) error {
 		info.NumParents++
-
 		dec := codec.NewDecoderBytes(v, ch)
-
 		var children []string
-
 		dec.MustDecode(&children)
-
 		info.NumChildren += len(children)
-	})
+		return nil
+	}); err != nil {
+		return nil, err
+	}
 
-	slog.Debug("went through bucket", "name", ChildBucket)
-
-	return nil
+	return info, nil
 }
 
 // DB is used to create and query a database made from a dguta file, which is the
@@ -344,58 +272,49 @@ func (d *DB) storeBatch() {
 		return
 	}
 
-	var errm *multierror.Error
-
-	err := d.writeSet.children.Update(d.storeChildren)
-	errm = multierror.Append(errm, err)
-
-	d.writeErr = d.writeSet.dgutas.Update(d.storeDGUTAs)
-	errm = multierror.Append(errm, err)
-
-	err = errm.ErrorOrNil()
-	if err != nil {
+	// Build and write children first, then DGUTAs
+	childrenPairs := d.buildChildrenPairs()
+	if err := d.writeSet.store.PutChildren(childrenPairs); err != nil {
 		d.writeErr = err
+		return
+	}
+	dgutaPairs := d.buildDGUTAPairs()
+	if err := d.writeSet.store.PutDGUTAs(dgutaPairs); err != nil {
+		d.writeErr = err
+		return
 	}
 }
 
 // storeChildren stores the Dirs of the current DGUTA batch in the db.
-func (d *DB) storeChildren(txn Tx) error {
-	b := txn.Bucket([]byte(ChildBucket))
-
+func (d *DB) buildChildrenPairs() [][2][]byte {
+	var pairs [][2][]byte
 	for _, r := range d.writeBatch {
 		if len(r.Children) == 0 {
 			continue
 		}
-
 		parent := string(r.Dir.AppendTo(nil))
-
 		for n := range r.Children {
 			r.Children[n] = parent + strings.TrimSuffix(r.Children[n], "/")
 		}
-
-		if err := b.Put(r.pathBytes(), d.encodeChildren(r.Children)); err != nil {
-			return err
-		}
+		key := cloneBytes(r.pathBytes())
+		val := cloneBytes(d.encodeChildren(r.Children))
+		pairs = append(pairs, [2][]byte{key, val})
 	}
-
-	return nil
+	return pairs
 }
 
 // getChildrenFromDB retrieves the child directory values associated with the
 // given directory key in the given db. Returns an empty slice if the dir wasn't
 // found.
-func (d *DB) getChildrenFromDB(b Bucket, dir string) []string {
+func (d *DB) getChildrenFromStore(st dirstore.Store, dir string) []string {
 	key := []byte(dir)
-
 	if !strings.HasSuffix(dir, "/") {
 		key = append(key, '/')
 	}
-
-	v := b.Get(key)
-	if v == nil {
+	v, err := st.GetChildren(key)
+	if err != nil || v == nil {
 		return []string{}
 	}
-
 	return d.decodeChildrenBytes(v)
 }
 
@@ -422,27 +341,27 @@ func (d *DB) encodeChildren(dirs []string) []byte {
 }
 
 // storeDGUTAs stores the current batch of DGUTAs in the db.
-func (d *DB) storeDGUTAs(tx Tx) error {
-	b := tx.Bucket([]byte(GUTABucket))
-
+func (d *DB) buildDGUTAPairs() [][2][]byte {
+	var pairs [][2][]byte
 	for _, dguta := range d.writeBatch {
-		if err := d.storeDGUTA(b, dguta); err != nil {
-			return err
-		}
+		k, v := dguta.EncodeToBytes()
+		pairs = append(pairs, [2][]byte{cloneBytes(k), v})
 	}
+	return pairs
+}
 
-	return nil
+func cloneBytes(b []byte) []byte {
+	if len(b) == 0 {
+		return nil
+	}
+	out := make([]byte, len(b))
+	copy(out, b)
+	return out
 }
 
 // storeDGUTA stores a DGUTA in the db. DGUTAs are expected to be unique per
 // Store() operation and database.
-func (d *DB) storeDGUTA(b Bucket, dguta RecordDGUTA) error {
-	if err := b.Put(dguta.EncodeToBytes()); err != nil {
-		return err
-	}
-
-	return nil
-}
+// removed storeDGUTA; handled by buildDGUTAPairs
 
 // Open opens the database(s) for reading. You need to call this before using
 // the query methods like DirInfo() and Which(). You should call Close() after
@@ -493,7 +412,10 @@ func (d *DB) Close() error {
 		return d.writeErr
 	}
 
-	return d.writeSet.Close()
+	if d.writeSet != nil {
+		return d.writeSet.Close()
+	}
+	return nil
 }
 
 // DirInfo tells you the total number of files, their total size, oldest atime
@@ -527,15 +449,10 @@ func (d *DB) combineDGUTAsFromReadSets(dir string) (*DGUTA, int, time.Time) {
 	dguta := &DGUTA{}
 
 	for _, readSet := range d.readSets {
-		if err := readSet.dgutas.View(func(tx Tx) error {
-			b := tx.Bucket([]byte(GUTABucket))
-
-			if readSet.modtime.After(lastUpdated) {
-				lastUpdated = readSet.modtime
-			}
-
-			return getDGUTAFromDBAndAppend(b, dir, dguta)
-		}); err != nil {
+		if readSet.modtime.After(lastUpdated) {
+			lastUpdated = readSet.modtime
+		}
+		if err := getDGUTAFromStoreAndAppend(readSet.store, dir, dguta); err != nil {
 			notFound++
 		}
 	}
@@ -546,8 +463,8 @@ func (d *DB) combineDGUTAsFromReadSets(dir string) (*DGUTA, int, time.Time) {
 // getDGUTAFromDBAndAppend calls getDGUTAFromDB() and appends the result
 // to the given dguta. If the given dguta is empty, it will be populated with the
 // content of the result instead.
-func getDGUTAFromDBAndAppend(b Bucket, dir string, dguta *DGUTA) error {
-	thisDGUTA, err := getDGUTAFromDB(b, dir)
+func getDGUTAFromStoreAndAppend(st dirstore.Store, dir string, dguta *DGUTA) error {
+	thisDGUTA, err := getDGUTAFromStore(st, dir)
 	if err != nil {
 		return err
 	}
@@ -562,8 +479,8 @@ func getDGUTAFromDBAndAppend(b Bucket, dir string, dguta *DGUTA) error {
 	return nil
 }
 
-// getDGUTAFromDB gets and decodes a dguta from the given database.
-func getDGUTAFromDB(b Bucket, dir string) (*DGUTA, error) {
+// getDGUTAFromStore gets and decodes a dguta from the given store.
+func getDGUTAFromStore(st dirstore.Store, dir string) (*DGUTA, error) {
 	bdir := make([]byte, 0, 2+len(dir)) //nolint:mnd
 	bdir = append(bdir, dir...)
 
@@ -573,8 +490,8 @@ func getDGUTAFromDB(b Bucket, dir string) (*DGUTA, error) {
 
 	bdir = append(bdir, endByte)
 
-	v := b.Get(bdir)
-	if v == nil {
+	v, err := st.GetDGUTA(bdir)
+	if err != nil || v == nil {
 		return nil, ErrDirNotFound
 	}
 
@@ -596,18 +513,9 @@ func (d *DB) Children(dir string) []string {
 	children := make(map[string]bool)
 
 	for _, readSet := range d.readSets {
-		// no error is possible here, but the View function requires we return
-		// one.
-		//nolint:errcheck
-		readSet.children.View(func(tx Tx) error {
-			b := tx.Bucket([]byte(ChildBucket))
-
-			for _, child := range d.getChildrenFromDB(b, dir) {
-				children[child] = true
-			}
-
-			return nil
-		})
+		for _, child := range d.getChildrenFromStore(readSet.store, dir) {
+			children[child] = true
+		}
 	}
 
 	return mapToSortedKeys(children)
