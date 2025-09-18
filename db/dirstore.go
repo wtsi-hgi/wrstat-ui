@@ -1,6 +1,9 @@
 package db
 
-import "sync"
+import (
+	"sync"
+	"time"
+)
 
 // Store is a domain-level interface for persisting DGUTA and children.
 type Store interface {
@@ -22,17 +25,34 @@ type Store interface {
 	ForEachChildren(func(value []byte) error) error
 }
 
-// Factory constructs Store instances for given file paths.
+// Source represents a backend-agnostic database source (eg. a directory of bolt files,
+// or a ClickHouse DSN). Implementations live in backend packages.
+type Source interface {
+	// ModTime returns the last modification time for the source (used for
+	// reporting freshness in summaries). If unknown, return time.Time{}.
+	ModTime() time.Time
+	// Exists reports whether a database already exists at this source.
+	Exists() (bool, error)
+}
+
+// Factory constructs Store instances for a given Source.
 type Factory interface {
-	Create(dgutaPath, childrenPath string) (Store, error)
-	OpenReadOnly(dgutaPath, childrenPath string) (Store, error)
-	OpenReadOnlyUnPopulated(dgutaPath, childrenPath string) (Store, error)
+	Create(src Source) (Store, error)
+	OpenReadOnly(src Source) (Store, error)
+	OpenReadOnlyUnPopulated(src Source) (Store, error)
+}
+
+// SourceFactory creates Source objects from path-like inputs. This keeps
+// callers agnostic: they can pass a string and the backend turns it into a Source.
+type SourceFactory interface {
+	FromPath(path string) (Source, error)
 }
 
 var (
-	regMu       sync.RWMutex
-	reg         = map[string]Factory{}
-	defaultName string
+	regMu                sync.RWMutex
+	reg                  = map[string]Factory{}
+	defaultName          string
+	defaultSourceFactory SourceFactory
 )
 
 // Register makes a Factory available under a name.
@@ -61,4 +81,19 @@ func Default() Factory {
 		return nil
 	}
 	return reg[defaultName]
+}
+
+// SetDefaultSourceFactory sets the factory used to translate string inputs
+// into Sources.
+func SetDefaultSourceFactory(sf SourceFactory) {
+	regMu.Lock()
+	defer regMu.Unlock()
+	defaultSourceFactory = sf
+}
+
+// DefaultSourceFactory returns the SourceFactory used for string inputs.
+func DefaultSourceFactory() SourceFactory {
+	regMu.RLock()
+	defer regMu.RUnlock()
+	return defaultSourceFactory
 }

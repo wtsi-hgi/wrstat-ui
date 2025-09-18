@@ -16,8 +16,12 @@ func NewDirStoreFactory() db.Factory { //nolint:ireturn
 
 func init() { db.Register("bolt", NewDirStoreFactory()) }
 
-func (boltFactory) Create(dgutaPath, childrenPath string) (db.Store, error) { //nolint:ireturn
-	gdb, err := Open(dgutaPath, 0640, &Options{ //nolint:mnd
+func (boltFactory) Create(src db.Source) (db.Store, error) { //nolint:ireturn
+	ds, ok := src.(*DirSource)
+	if !ok {
+		return nil, errors.New("unsupported source type for bolt")
+	}
+	gdb, err := Open(ds.dgutaPath(), OpenMode, &Options{
 		NoFreelistSync: true,
 		NoGrowSync:     true,
 		FreelistType:   FreelistMapType,
@@ -25,7 +29,7 @@ func (boltFactory) Create(dgutaPath, childrenPath string) (db.Store, error) { //
 	if err != nil {
 		return nil, err
 	}
-	cdb, err := Open(childrenPath, 0640, &Options{ //nolint:mnd
+	cdb, err := Open(ds.childrenPath(), OpenMode, &Options{
 		NoFreelistSync: true,
 		NoGrowSync:     true,
 		FreelistType:   FreelistMapType,
@@ -54,12 +58,16 @@ func (boltFactory) Create(dgutaPath, childrenPath string) (db.Store, error) { //
 	return &boltStore{gdb: gdb, cdb: cdb, ro: false}, nil
 }
 
-func (boltFactory) OpenReadOnly(dgutaPath, childrenPath string) (db.Store, error) { //nolint:ireturn
-	gdb, err := Open(dgutaPath, 0640, &Options{ReadOnly: true}) //nolint:mnd
+func (boltFactory) OpenReadOnly(src db.Source) (db.Store, error) { //nolint:ireturn
+	ds, ok := src.(*DirSource)
+	if !ok {
+		return nil, errors.New("unsupported source type for bolt")
+	}
+	gdb, err := Open(ds.dgutaPath(), OpenMode, &Options{ReadOnly: true})
 	if err != nil {
 		return nil, err
 	}
-	cdb, err := Open(childrenPath, 0640, &Options{ReadOnly: true}) //nolint:mnd
+	cdb, err := Open(ds.childrenPath(), OpenMode, &Options{ReadOnly: true})
 	if err != nil {
 		_ = gdb.Close()
 		return nil, err
@@ -67,8 +75,8 @@ func (boltFactory) OpenReadOnly(dgutaPath, childrenPath string) (db.Store, error
 	return &boltStore{gdb: gdb, cdb: cdb, ro: true}, nil
 }
 
-func (boltFactory) OpenReadOnlyUnPopulated(dgutaPath, childrenPath string) (db.Store, error) { //nolint:ireturn
-	return (&boltFactory{}).OpenReadOnly(dgutaPath, childrenPath)
+func (boltFactory) OpenReadOnlyUnPopulated(src db.Source) (db.Store, error) { //nolint:ireturn
+	return (&boltFactory{}).OpenReadOnly(src)
 }
 
 type boltStore struct {

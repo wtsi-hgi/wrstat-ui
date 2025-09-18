@@ -700,19 +700,13 @@ func testMakeDBPaths(t *testing.T) ([]string, error) {
 
 	dir := t.TempDir()
 
-	set, err := db.NewDBSet(dir)
-	if err != nil {
-		return nil, err
-	}
-
-	paths := set.Paths()
-
-	return append([]string{dir}, paths...), nil
+	dg, ch := bolt.DirDBPaths(dir)
+	return append([]string{dir}, dg, ch), nil
 }
 
 // testGetDBKeys returns all the keys in the db at the given path.
 func testGetDBKeys(path, bucket string) ([]string, error) {
-	rdb, err := bolt.Open(path, db.DBOpenMode, nil)
+	rdb, err := bolt.Open(path, bolt.OpenMode, nil)
 	if err != nil {
 		return nil, err
 	}

@@ -29,8 +29,6 @@ package db
 
 import (
 	"errors"
-	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -40,11 +38,8 @@ import (
 )
 
 const (
-	GUTABucket         = "gut"
-	ChildBucket        = "children"
-	dbBasenameDGUTA    = "dguta.db"
-	dbBasenameChildren = dbBasenameDGUTA + ".children"
-	DBOpenMode         = 0640
+	GUTABucket  = "gut"
+	ChildBucket = "children"
 )
 
 type Error string
@@ -59,39 +54,31 @@ const (
 
 // a dbSet is 2 databases, one for storing DGUTAs, one for storing children.
 type dbSet struct {
-	dir     string
+	src     Source
 	store   Store
 	modtime time.Time
 }
 
-// NewDBSet creates a new NewDBSet that knows where its database files are
-// located or should be created.
-func NewDBSet(dir string) (*dbSet, error) { //nolint:revive
-	fi, err := os.Lstat(dir)
-	if err != nil {
-		return nil, err
-	}
-
-	return &dbSet{
-		dir:     dir,
-		modtime: fi.ModTime(),
-	}, nil
+// NewDBSetFromSource creates a new dbSet from a Source implementation.
+func NewDBSetFromSource(src Source) *dbSet { //nolint:revive
+	return &dbSet{src: src, modtime: src.ModTime()}
 }
 
 // Create creates new database files in our directory. Returns an error if those
 // files already exist.
 func (s *dbSet) Create() error {
-	paths := s.Paths()
-
-	if s.pathsExist(paths) {
+	exists, err := s.src.Exists()
+	if err != nil {
+		return err
+	}
+	if exists {
 		return ErrDBExists
 	}
-
 	f := Default()
 	if f == nil {
 		return errors.New("no storage factory registered")
 	}
-	st, err := f.Create(paths[0], paths[1])
+	st, err := f.Create(s.src)
 	if err != nil {
 		return err
 	}
@@ -101,39 +88,22 @@ func (s *dbSet) Create() error {
 
 // Paths returns the expected Paths for our dguta and children databases
 // respectively.
-func (s *dbSet) Paths() []string {
-	return []string{
-		filepath.Join(s.dir, dbBasenameDGUTA),
-		filepath.Join(s.dir, dbBasenameChildren),
-	}
-}
+// Paths removed: path computation is backend-specific; handled by Source.
 
 // pathsExist tells you if the databases at the given paths already exist.
-func (s *dbSet) pathsExist(paths []string) bool {
-	for _, path := range paths {
-		info, err := os.Stat(path)
-		if err == nil && info.Size() != 0 {
-			return true
-		}
-	}
-
-	return false
-}
+// pathsExist removed: use Source.Exists instead.
 
 // Open opens our constituent databases read-only.
 func (s *dbSet) Open() error {
-	paths := s.Paths()
-
 	f := Default()
 	if f == nil {
 		return errors.New("no storage factory registered")
 	}
-	st, err := f.OpenReadOnly(paths[0], paths[1])
+	st, err := f.OpenReadOnly(s.src)
 	if err != nil {
 		return err
 	}
 	s.store = st
-
 	return nil
 }
 
@@ -165,13 +135,11 @@ type DBInfo struct { //nolint:revive
 func (s *dbSet) Info() (*DBInfo, error) {
 	info := &DBInfo{}
 	ch := new(codec.BincHandle)
-	paths := s.Paths()
-
 	f := Default()
 	if f == nil {
 		return nil, errors.New("no storage factory registered")
 	}
-	st, err := f.OpenReadOnlyUnPopulated(paths[0], paths[1])
+	st, err := f.OpenReadOnlyUnPopulated(s.src)
 	if err != nil {
 		return nil, err
 	}
@@ -206,7 +174,7 @@ func (s *dbSet) Info() (*DBInfo, error) {
 // directory,group,user,type,age summary output produced by the summary packages'
 // DirGroupUserTypeAge.Output() method.
 type DB struct {
-	paths      []string
+	sources    []Source
 	writeSet   *dbSet
 	readSets   []*dbSet
 	batchSize  int
@@ -219,9 +187,23 @@ type DB struct {
 // Provide the path to directory that (will) store(s) the database files. In the
 // case of only reading databases with Open(), you can supply multiple directory
 // paths to query all of them simultaneously.
+// NewDB preserves the original path-based constructor by converting paths to
+// Sources using the DefaultSourceFactory. Backend implementations should set
+// the default SourceFactory during init().
 func NewDB(paths ...string) *DB {
-	return &DB{paths: paths, batchSize: 1}
+	var srcs []Source
+	if sf := DefaultSourceFactory(); sf != nil {
+		for _, p := range paths {
+			if s, err := sf.FromPath(p); err == nil {
+				srcs = append(srcs, s)
+			}
+		}
+	}
+	return &DB{sources: srcs, batchSize: 1}
 }
+
+// NewDBFromSources constructs a DB from backend-agnostic Sources.
+func NewDBFromSources(srcs ...Source) *DB { return &DB{sources: srcs, batchSize: 1} }
 
 func (d *DB) SetBatchSize(batchSize int) {
 	d.batchSize = batchSize
@@ -229,12 +211,8 @@ func (d *DB) SetBatchSize(batchSize int) {
 
 // CreateDB creates a new database set, but only if it doesn't already exist.
 func (d *DB) CreateDB() error {
-	set, err := NewDBSet(d.paths[0])
-	if err != nil {
-		return err
-	}
-
-	err = set.Create()
+	set := NewDBSetFromSource(d.sources[0])
+	err := set.Create()
 	if err != nil {
 		return err
 	}
@@ -366,20 +344,20 @@ func cloneBytes(b []byte) []byte {
 // the query methods like DirInfo() and Which(). You should call Close() after
 // you've finished.
 func (d *DB) Open() error {
-	readSets := make([]*dbSet, len(d.paths))
+	readSets := make([]*dbSet, len(d.sources))
 
-	for i, path := range d.paths {
-		readSet, err := NewDBSet(path)
+	for i, src := range d.sources {
+		readSet := NewDBSetFromSource(src)
+
+		exists, err := src.Exists()
 		if err != nil {
 			return err
 		}
-
-		if !readSet.pathsExist(readSet.Paths()) {
+		if !exists {
 			return ErrDBNotExists
 		}
 
-		err = readSet.Open()
-		if err != nil {
+		if err = readSet.Open(); err != nil {
 			return err
 		}
 
@@ -544,14 +522,9 @@ func mapToSortedKeys(things map[string]bool) []string {
 func (d *DB) Info() (*DBInfo, error) {
 	infos := &DBInfo{}
 
-	readSets := make([]*dbSet, len(d.paths))
-
-	for i, path := range d.paths {
-		readSet, err := NewDBSet(path)
-		if err != nil {
-			return nil, err
-		}
-		readSets[i] = readSet
+	readSets := make([]*dbSet, len(d.sources))
+	for i, src := range d.sources {
+		readSets[i] = NewDBSetFromSource(src)
 	}
 
 	for _, rs := range readSets {
