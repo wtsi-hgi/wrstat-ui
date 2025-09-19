@@ -32,6 +32,7 @@ import (
 
 	. "github.com/smartystreets/goconvey/convey"
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
+	"github.com/wtsi-hgi/wrstat-ui/boltbasedirs"
 	internaldata "github.com/wtsi-hgi/wrstat-ui/internal/data"
 	"github.com/wtsi-hgi/wrstat-ui/internal/split"
 	"github.com/wtsi-hgi/wrstat-ui/internal/statsdata"
@@ -80,7 +81,9 @@ func TestClean(t *testing.T) {
 		tmp := t.TempDir()
 		dbPath := filepath.Join(tmp, "basedirs.db")
 
-		db, err := basedirs.NewCreator(dbPath, &basedirs.Quotas{})
+		store, err := boltbasedirs.New(dbPath)
+		So(err, ShouldBeNil)
+		db, err := basedirs.NewCreator(store, &basedirs.Quotas{})
 		So(err, ShouldBeNil)
 
 		db.SetMountPoints(mps)
@@ -96,9 +99,15 @@ func TestClean(t *testing.T) {
 		s.AddDirectoryOperation(sbasedirs.NewBaseDirs(defaultConfig.PathShouldOutput, db))
 
 		So(s.Summarise(), ShouldBeNil)
+		// Close the writable store before opening any read-only handles to the
+		// same DB file to avoid bbolt flock timeouts.
+		So(store.Close(), ShouldBeNil)
 
 		Convey("We can find the keys for all by a single prefix", func() {
-			toRemove, err := basedirs.FindInvalidHistoryKeys(dbPath, "/lustre/scratch123/")
+			ro, err := boltbasedirs.OpenReadOnly(dbPath)
+			So(err, ShouldBeNil)
+			defer ro.Close()
+			toRemove, err := basedirs.FindInvalidHistoryKeys(ro, "/lustre/scratch123/")
 			So(err, ShouldBeNil)
 			So(toRemove, ShouldResemble, [][]byte{
 				append([]byte{0, 0, 0, 0, 45}, "/lustre/scratch125/"...),
@@ -107,12 +116,18 @@ func TestClean(t *testing.T) {
 		})
 
 		Convey("We can remove all but a single prefix", func() {
-			So(basedirs.CleanInvalidDBHistory(dbPath, "/lustre/scratch123/"), ShouldBeNil)
+			// Re-open a writable store now that the earlier one has been closed.
+			wstore, err := boltbasedirs.New(dbPath)
+			So(err, ShouldBeNil)
+			So(basedirs.CleanInvalidDBHistory(wstore, "/lustre/scratch123/"), ShouldBeNil)
+			So(wstore.Close(), ShouldBeNil)
 
 			ownersPath, err := internaldata.CreateOwnersCSV(t, internaldata.ExampleOwnersCSV)
 			So(err, ShouldBeNil)
 
-			db, err := basedirs.NewReader(dbPath, ownersPath)
+			ro, err := boltbasedirs.OpenReadOnly(dbPath)
+			So(err, ShouldBeNil)
+			db, err := basedirs.NewReader(ro, ownersPath)
 			So(err, ShouldBeNil)
 
 			db.SetMountPoints(mps)

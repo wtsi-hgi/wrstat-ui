@@ -34,7 +34,6 @@ import (
 	"time"
 
 	"github.com/moby/sys/mountinfo"
-	bolt "github.com/wtsi-hgi/wrstat-ui/bolt"
 	db "github.com/wtsi-hgi/wrstat-ui/db"
 )
 
@@ -65,11 +64,9 @@ func (b *BaseDirReader) History(gid uint32, path string) ([]History, error) {
 
 	var history []History
 
-	if err := b.db.View(func(tx *bolt.Tx) error {
-		bucket := tx.Bucket([]byte(GroupHistoricalBucket))
+	if err := b.store.View(func(tx KVTx) error {
 		key := historyKey(gid, mp)
-
-		data := bucket.Get(key)
+		data, _ := tx.Get(GroupHistoricalBucket, key)
 		if data == nil {
 			return ErrNoBaseDirHistory
 		}
@@ -201,29 +198,15 @@ func calculateTrend(maxV uint64, latestTime, oldestTime time.Time, latestValue, 
 	return t
 }
 
-func (b *BaseDirs) CopyHistoryFrom(db *bolt.DB) (err error) {
-	bd, err := openDB(b.dbPath)
-	if err != nil {
-		return err
-	}
-
-	defer func() {
-		if errr := bd.Close(); err == nil {
-			err = errr
-		}
-	}()
-
-	return bd.Update(func(dest *bolt.Tx) error {
-		key := []byte(GroupHistoricalBucket)
-
-		bucket, err := dest.CreateBucketIfNotExists(key)
-		if err != nil {
+// CopyHistoryFrom copies GroupHistoricalBucket data from another store.
+func (b *BaseDirs) CopyHistoryFrom(source BasedirsStore) error {
+	return b.store.Update(func(destTx KVTx) error {
+		if err := destTx.CreateBucketIfNotExists(GroupHistoricalBucket); err != nil {
 			return err
 		}
-
-		return db.View(func(source *bolt.Tx) error {
-			return source.Bucket(key).ForEach(func(k, v []byte) error {
-				return bucket.Put(k, v)
+		return source.View(func(srcTx KVTx) error {
+			return srcTx.ForEach(GroupHistoricalBucket, func(k, v []byte) error {
+				return destTx.Put(GroupHistoricalBucket, k, v)
 			})
 		})
 	})

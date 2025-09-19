@@ -33,6 +33,7 @@ import (
 
 	. "github.com/smartystreets/goconvey/convey"
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
+	boltbasedirs "github.com/wtsi-hgi/wrstat-ui/boltbasedirs"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 	internaldata "github.com/wtsi-hgi/wrstat-ui/internal/data"
 	"github.com/wtsi-hgi/wrstat-ui/internal/fixtimes"
@@ -148,9 +149,12 @@ func TestMulti(t *testing.T) {
 		baseDirCreator := func(modtime time.Time, root *statsdata.Directory, dbPath string) {
 			t.Helper()
 
-			bd, errr := basedirs.NewCreator(dbPath, quotas)
+			store, errr := boltbasedirs.New(dbPath)
 			So(errr, ShouldBeNil)
-			So(bd, ShouldNotBeNil)
+			So(store, ShouldNotBeNil)
+
+			bd, errr := basedirs.NewCreator(store, quotas)
+			So(errr, ShouldBeNil)
 
 			bd.SetMountPoints(mps)
 			bd.SetModTime(modtime)
@@ -160,6 +164,8 @@ func TestMulti(t *testing.T) {
 
 			errr = s.Summarise()
 			So(errr, ShouldBeNil)
+
+			So(store.Close(), ShouldBeNil)
 		}
 
 		basedirsCreator := func(modtime time.Time) {
@@ -178,12 +184,12 @@ func TestMulti(t *testing.T) {
 			baseDirsReader := func() basedirs.MultiReader {
 				t.Helper()
 
-				dbA, errr := basedirs.OpenDBRO(dbPathA)
+				storeA, errr := boltbasedirs.OpenReadOnly(dbPathA)
 				So(errr, ShouldBeNil)
-				dbB, errr := basedirs.OpenDBRO(dbPathB)
+				storeB, errr := boltbasedirs.OpenReadOnly(dbPathB)
 				So(errr, ShouldBeNil)
 
-				bdr, errr := basedirs.OpenMulti(ownersPath, dbA, dbB)
+				bdr, errr := basedirs.OpenMulti(ownersPath, storeA, storeB)
 				So(errr, ShouldBeNil)
 
 				bdr.SetMountPoints(mps)

@@ -33,7 +33,6 @@ import (
 	"time"
 
 	"github.com/ugorji/go/codec"
-	bolt "github.com/wtsi-hgi/wrstat-ui/bolt"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 )
 
@@ -46,7 +45,7 @@ const (
 
 // BaseDirReader is used to read the information stored in a BaseDir database.
 type BaseDirReader struct {
-	db          *bolt.DB
+	store       BasedirsStore
 	ch          codec.Handle
 	mountPoints mountPoints
 	groupCache  *GroupCache
@@ -57,12 +56,7 @@ type BaseDirReader struct {
 // NewReader returns a BaseDirReader that can return the summary information
 // stored in a BaseDir database. It takes an owners file (gid,name csv) to
 // associate groups with their owners in certain output.
-func NewReader(dbPath, ownersPath string) (*BaseDirReader, error) {
-	db, err := OpenDBRO(dbPath)
-	if err != nil {
-		return nil, err
-	}
-
+func NewReader(store BasedirsStore, ownersPath string) (*BaseDirReader, error) {
 	mp, err := getMountPoints()
 	if err != nil {
 		return nil, err
@@ -74,7 +68,7 @@ func NewReader(dbPath, ownersPath string) (*BaseDirReader, error) {
 	}
 
 	return &BaseDirReader{
-		db:          db,
+		store:       store,
 		ch:          new(codec.BincHandle),
 		mountPoints: mp,
 		groupCache:  NewGroupCache(),
@@ -83,16 +77,9 @@ func NewReader(dbPath, ownersPath string) (*BaseDirReader, error) {
 	}, nil
 }
 
-// OpenDBRO opens a database as readonly.
-func OpenDBRO(dbPath string) (*bolt.DB, error) {
-	return bolt.Open(dbPath, dbOpenMode, &bolt.Options{
-		ReadOnly: true,
-	})
-}
-
 // Close closes the database.
 func (b *BaseDirReader) Close() error {
-	return b.db.Close()
+	return b.store.Close()
 }
 
 // GroupUsage returns the usage for every GID-BaseDir combination in the
@@ -104,10 +91,8 @@ func (b *BaseDirReader) GroupUsage(age db.DirGUTAge) ([]*Usage, error) {
 func (b *BaseDirReader) usage(bucketName string, age db.DirGUTAge) ([]*Usage, error) {
 	var uwms []*Usage
 
-	if err := b.db.View(func(tx *bolt.Tx) error {
-		bucket := tx.Bucket([]byte(bucketName))
-
-		return bucket.ForEach(func(_, data []byte) error {
+	if err := b.store.View(func(tx KVTx) error {
+		return tx.ForEach(bucketName, func(_, data []byte) error {
 			uwm := new(Usage)
 			if err := b.decodeFromBytes(data, uwm); err != nil {
 				return err
@@ -160,9 +145,8 @@ func (b *BaseDirReader) GroupSubDirs(gid uint32, basedir string, age db.DirGUTAg
 func (b *BaseDirReader) subDirs(bucket string, id uint32, basedir string, age db.DirGUTAge) ([]*SubDir, error) {
 	var sds []*SubDir
 
-	if err := b.db.View(func(tx *bolt.Tx) error {
-		bucket := tx.Bucket([]byte(bucket))
-		data := bucket.Get(keyName(id, basedir, age))
+	if err := b.store.View(func(tx KVTx) error {
+		data, _ := tx.Get(bucket, keyName(id, basedir, age))
 
 		if data == nil {
 			return nil

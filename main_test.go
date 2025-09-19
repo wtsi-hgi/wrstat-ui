@@ -43,6 +43,7 @@ import (
 	. "github.com/smartystreets/goconvey/convey"
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
 	bolt "github.com/wtsi-hgi/wrstat-ui/bolt"
+	boltbasedirs "github.com/wtsi-hgi/wrstat-ui/boltbasedirs"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 	internaldata "github.com/wtsi-hgi/wrstat-ui/internal/data"
 	"github.com/wtsi-hgi/wrstat-ui/internal/statsdata"
@@ -265,7 +266,9 @@ func TestSummarise(t *testing.T) {
 				internaluser.GetUsername(t, strconv.Itoa(int(uid))), internaluser.GetGroupName(t, strconv.Itoa(int(gid))),
 				internaluser.GetUsername(t, "102"), internaluser.GetGroupName(t, "77777"))))
 
-		bddb, err := basedirs.NewReader(filepath.Join(outputA, "basedirs.db"), ownersPath)
+		storeA, err := boltbasedirs.OpenReadOnly(filepath.Join(outputA, "basedirs.db"))
+		So(err, ShouldBeNil)
+		bddb, err := basedirs.NewReader(storeA, ownersPath)
 		So(err, ShouldBeNil)
 
 		bddb.SetMountPoints([]string{
@@ -282,7 +285,7 @@ func TestSummarise(t *testing.T) {
 			{Date: yesterday.In(time.UTC), UsageSize: 15, UsageInodes: 5},
 		})
 
-		bddb.Close()
+		So(bddb.Close(), ShouldBeNil)
 
 		tree, err := db.NewTree(bolt.NewDirSource(filepath.Join(outputA, "dguta.dbs")))
 		So(err, ShouldBeNil)
@@ -308,7 +311,9 @@ func TestSummarise(t *testing.T) {
 			"-d", outputB, "-q", quotaFile, "-c", basedirsConfig, "-m", mounts, inputB)
 		So(err, ShouldBeNil)
 
-		bddb, err = basedirs.NewReader(filepath.Join(outputB, "basedirs.db"), ownersPath)
+		storeB, err := boltbasedirs.OpenReadOnly(filepath.Join(outputB, "basedirs.db"))
+		So(err, ShouldBeNil)
+		bddb, err = basedirs.NewReader(storeB, ownersPath)
 		So(err, ShouldBeNil)
 
 		bddb.SetMountPoints([]string{
@@ -326,7 +331,7 @@ func TestSummarise(t *testing.T) {
 			{Date: refTime.In(time.UTC), UsageSize: 15, UsageInodes: 5},
 		})
 
-		bddb.Close()
+		So(bddb.Close(), ShouldBeNil)
 	})
 }
 

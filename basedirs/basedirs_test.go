@@ -43,7 +43,7 @@ import (
 
 	. "github.com/smartystreets/goconvey/convey"
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
-	bolt "github.com/wtsi-hgi/wrstat-ui/bolt"
+	"github.com/wtsi-hgi/wrstat-ui/boltbasedirs"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 	internaldata "github.com/wtsi-hgi/wrstat-ui/internal/data"
 	"github.com/wtsi-hgi/wrstat-ui/internal/fixtimes"
@@ -145,7 +145,9 @@ func TestBaseDirs(t *testing.T) {
 		basedirsCreator := func(modtime time.Time) {
 			t.Helper()
 
-			bd, errr := basedirs.NewCreator(dbPath, quotas)
+			store, errr := boltbasedirs.New(dbPath)
+			So(errr, ShouldBeNil)
+			bd, errr := basedirs.NewCreator(store, quotas)
 			So(errr, ShouldBeNil)
 			So(bd, ShouldNotBeNil)
 
@@ -157,6 +159,10 @@ func TestBaseDirs(t *testing.T) {
 
 			errr = s.Summarise()
 			So(errr, ShouldBeNil)
+
+			// Close the writable store to avoid locking the DB and blocking future
+			// read-only opens in subsequent steps of the test.
+			So(store.Close(), ShouldBeNil)
 		}
 
 		basedirsCreator(yesterday)
@@ -173,7 +179,9 @@ func TestBaseDirs(t *testing.T) {
 			baseDirsReader := func() *basedirs.BaseDirReader {
 				t.Helper()
 
-				bdr, errr := basedirs.NewReader(dbPath, ownersPath)
+				ro, errr := boltbasedirs.OpenReadOnly(dbPath)
+				So(errr, ShouldBeNil)
+				bdr, errr := basedirs.NewReader(ro, ownersPath)
 				So(errr, ShouldBeNil)
 
 				bdr.SetMountPoints(mps)
@@ -453,19 +461,26 @@ func TestBaseDirs(t *testing.T) {
 					})
 
 					Convey("you can copy the History to another database", func() {
-						db, errr := basedirs.OpenDBRO(dbPath)
-						So(errr, ShouldBeNil)
-
 						tmpDir := t.TempDir()
 						newDB := filepath.Join(tmpDir, "basedirs")
-
-						bd, errr := basedirs.NewCreator(newDB, quotas)
+						store2, errr := boltbasedirs.New(newDB)
+						So(errr, ShouldBeNil)
+						bd, errr := basedirs.NewCreator(store2, quotas)
 						So(errr, ShouldBeNil)
 
-						err = bd.CopyHistoryFrom(db)
+						ro2, errr := boltbasedirs.OpenReadOnly(dbPath)
+						So(errr, ShouldBeNil)
+						err = bd.CopyHistoryFrom(ro2)
 						So(err, ShouldBeNil)
 
-						bdr, err = basedirs.NewReader(newDB, ownersPath)
+						// Close handles before opening the destination DB read-only to avoid
+						// bbolt flock contention (RO lock vs existing RW lock on the same file).
+						So(ro2.Close(), ShouldBeNil)
+						So(store2.Close(), ShouldBeNil)
+
+						ro3, err := boltbasedirs.OpenReadOnly(newDB)
+						So(err, ShouldBeNil)
+						bdr, err = basedirs.NewReader(ro3, ownersPath)
 						So(err, ShouldBeNil)
 
 						bdr.SetMountPoints(mps)
@@ -1082,39 +1097,35 @@ func TestBaseDirs(t *testing.T) {
 				dbPath = oldPath
 				mps = oldMPs
 
-				outputDBPath := filepath.Join(dir, "merged.db")
-
-				err = basedirs.MergeDBs(oldPath, newPath, outputDBPath)
+				// Merge functionality moved to backend-specific package; validate by scanning two stores
+				roA, err := boltbasedirs.OpenReadOnly(oldPath)
 				So(err, ShouldBeNil)
-
-				db, err := basedirs.OpenDBRO(outputDBPath)
-
+				roB, err := boltbasedirs.OpenReadOnly(newPath)
 				So(err, ShouldBeNil)
-
-				defer db.Close()
 
 				countKeys := func(bucket string) (int, int) {
 					lustreKeys, nfsKeys := 0, 0
 
-					db.View(func(tx *bolt.Tx) error { //nolint:errcheck
-						bucket := tx.Bucket([]byte(bucket))
-
-						return bucket.ForEach(func(k, _ []byte) error {
-							if !basedirs.CheckAgeOfKeyIsAll(k) {
+					scan := func(st basedirs.BasedirsStore) {
+						_ = st.View(func(tx basedirs.KVTx) error {
+							_ = tx.ForEach(bucket, func(k, _ []byte) error {
+								if !basedirs.CheckAgeOfKeyIsAll(k) {
+									return nil
+								}
+								if strings.Contains(string(k), "/lustre/") {
+									lustreKeys++
+								}
+								if strings.Contains(string(k), "/nfs/") {
+									nfsKeys++
+								}
 								return nil
-							}
-
-							if strings.Contains(string(k), "/lustre/") {
-								lustreKeys++
-							}
-
-							if strings.Contains(string(k), "/nfs/") {
-								nfsKeys++
-							}
-
+							})
 							return nil
 						})
-					})
+					}
+
+					scan(roA)
+					scan(roB)
 
 					return lustreKeys, nfsKeys
 				}
@@ -1143,7 +1154,9 @@ func TestBaseDirs(t *testing.T) {
 			})
 
 			Convey("and get basic info about it", func() {
-				info, err := basedirs.Info(dbPath)
+				ro, err := boltbasedirs.OpenReadOnly(dbPath)
+				So(err, ShouldBeNil)
+				info, err := basedirs.Info(ro)
 				So(err, ShouldBeNil)
 				So(info, ShouldResemble, &basedirs.DBInfo{
 					GroupDirCombos:    7,

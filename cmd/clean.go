@@ -30,6 +30,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
+	"github.com/wtsi-hgi/wrstat-ui/boltbasedirs"
 )
 
 var (
@@ -61,16 +62,27 @@ the flag were not supplied.
 		}
 
 		if viewOnly {
-			toRemove, err := basedirs.FindInvalidHistoryKeys(args[0], prefix)
+			store, err := boltbasedirs.OpenReadOnly(args[0])
+			if err != nil {
+				die("failed to open basedirs store: %s", err)
+			}
+			defer store.Close()
+			toRemove, err := basedirs.FindInvalidHistoryKeys(store, prefix)
 			if err != nil {
 				die("failed to read basedirs db: %s", err)
 			}
-
 			for _, k := range toRemove {
 				fmt.Printf("%s\n", k)
 			}
-		} else if err := basedirs.CleanInvalidDBHistory(args[0], prefix); err != nil {
-			die("error cleaning basedirs db: %s", err)
+		} else {
+			store, err := boltbasedirs.New(args[0])
+			if err != nil {
+				die("failed to open basedirs store: %s", err)
+			}
+			defer store.Close()
+			if err := basedirs.CleanInvalidDBHistory(store, prefix); err != nil {
+				die("error cleaning basedirs db: %s", err)
+			}
 		}
 	},
 }

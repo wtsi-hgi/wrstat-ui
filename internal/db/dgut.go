@@ -38,6 +38,7 @@ import (
 
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
 	bolt "github.com/wtsi-hgi/wrstat-ui/bolt"
+	"github.com/wtsi-hgi/wrstat-ui/boltbasedirs"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 	internaldata "github.com/wtsi-hgi/wrstat-ui/internal/data"
 	"github.com/wtsi-hgi/wrstat-ui/internal/fs"
@@ -82,13 +83,20 @@ func CreateExampleDBsCustomIDsWithDir(t *testing.T, dir, uid, gidA, gidB string,
 		return err
 	}
 
-	err = addBasedirsSummariser(t, s, dir)
+	closer, err := addBasedirsSummariser(t, s, dir)
 	if err != nil {
 		return err
 	}
 
 	if err := s.Summarise(); err != nil {
 		return err
+	}
+
+	// Close basedirs store first to release any file locks, then close dirguta.
+	if closer != nil {
+		if err := closer(); err != nil {
+			return err
+		}
 	}
 
 	return fn()
@@ -114,14 +122,14 @@ func addDirgutaSummariser(s *summary.Summariser, path string, refTime int64) (fu
 	return d.Close, nil
 }
 
-func addBasedirsSummariser(t *testing.T, s *summary.Summariser, path string) error {
+func addBasedirsSummariser(t *testing.T, s *summary.Summariser, path string) (func() error, error) {
 	t.Helper()
 
 	csvPath := internaldata.CreateQuotasCSV(t, internaldata.ExampleQuotaCSV)
 
 	quotas, err := basedirs.ParseQuotas(csvPath)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	dbPath := filepath.Join(path, "basedir.db")
@@ -137,9 +145,13 @@ func addBasedirsSummariser(t *testing.T, s *summary.Summariser, path string) err
 		},
 	}
 
-	bd, err := basedirs.NewCreator(dbPath, quotas)
+	store, err := boltbasedirs.New(dbPath)
 	if err != nil {
-		return err
+		return nil, err
+	}
+	bd, err := basedirs.NewCreator(store, quotas)
+	if err != nil {
+		return nil, err
 	}
 
 	bd.SetMountPoints([]string{
@@ -149,7 +161,8 @@ func addBasedirsSummariser(t *testing.T, s *summary.Summariser, path string) err
 
 	s.AddDirectoryOperation(sbasedirs.NewBaseDirs(config.PathShouldOutput, bd))
 
-	return nil
+	// Return a closer that will close the writable basedirs store after summarise.
+	return store.Close, nil
 }
 
 // createExampleDgutaDir creates a temp directory structure to hold dguta db

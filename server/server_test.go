@@ -46,6 +46,7 @@ import (
 	gas "github.com/wtsi-hgi/go-authserver"
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
 	bolt "github.com/wtsi-hgi/wrstat-ui/bolt"
+	boltbasedirs "github.com/wtsi-hgi/wrstat-ui/boltbasedirs"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 	internaldata "github.com/wtsi-hgi/wrstat-ui/internal/data"
 	internaldb "github.com/wtsi-hgi/wrstat-ui/internal/db"
@@ -211,7 +212,7 @@ func TestServer(t *testing.T) {
 				s.SetSourceFromPath(func(p string) db.Source { return bolt.NewDirSource(p) })
 				// Build assets for new LoadDBs signature
 				srcs := []db.Source{bolt.NewDirSource(filepath.Join(path, "dirguta"))}
-				bdb, err := basedirs.OpenDBRO(filepath.Join(path, "basedir.db"))
+				bdb, err := boltbasedirs.OpenReadOnly(filepath.Join(path, "basedir.db"))
 				So(err, ShouldBeNil)
 				bmr, err := basedirs.OpenMulti(ownersPath, bdb)
 				So(err, ShouldBeNil)
@@ -637,7 +638,7 @@ func TestServer(t *testing.T) {
 
 			s.SetSourceFromPath(func(p string) db.Source { return bolt.NewDirSource(p) })
 			srcs := []db.Source{bolt.NewDirSource(filepath.Join(path, "dirguta"))}
-			bdb, err := basedirs.OpenDBRO(filepath.Join(path, "basedir.db"))
+			bdb, err := boltbasedirs.OpenReadOnly(filepath.Join(path, "basedir.db"))
 			So(err, ShouldBeNil)
 			bmr, err := basedirs.OpenMulti(ownersPath, bdb)
 			So(err, ShouldBeNil)
@@ -790,7 +791,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 		Convey("You can't get where data is or add the tree page without auth", func() {
 			s.SetSourceFromPath(func(p string) db.Source { return bolt.NewDirSource(p) })
 			srcs := []db.Source{bolt.NewDirSource(filepath.Join(path, "dirguta"))}
-			bdb, err := basedirs.OpenDBRO(filepath.Join(path, "basedir.db"))
+			bdb, err := boltbasedirs.OpenReadOnly(filepath.Join(path, "basedir.db"))
 			So(err, ShouldBeNil)
 			bmr, err := basedirs.OpenMulti(ownersPath, bdb)
 			So(err, ShouldBeNil)
@@ -816,7 +817,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 
 			s.SetSourceFromPath(func(p string) db.Source { return bolt.NewDirSource(p) })
 			srcs := []db.Source{bolt.NewDirSource(filepath.Join(path, "dirguta"))}
-			bdb, err := basedirs.OpenDBRO(filepath.Join(path, "basedir.db"))
+			bdb, err := boltbasedirs.OpenReadOnly(filepath.Join(path, "basedir.db"))
 			So(err, ShouldBeNil)
 			bmr, err := basedirs.OpenMulti(ownersPath, bdb)
 			So(err, ShouldBeNil)
@@ -865,7 +866,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 			So(err, ShouldBeNil)
 
 			srcs := []db.Source{bolt.NewDirSource(filepath.Join(path, "dirguta"))}
-			bdb, err := basedirs.OpenDBRO(filepath.Join(path, "basedir.db"))
+			bdb, err := boltbasedirs.OpenReadOnly(filepath.Join(path, "basedir.db"))
 			So(err, ShouldBeNil)
 			bmr, err := basedirs.OpenMulti(ownersPath, bdb)
 			So(err, ShouldBeNil)
@@ -910,7 +911,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 			s.SetSourceFromPath(func(p string) db.Source { return bolt.NewDirSource(p) })
 
 			srcs := []db.Source{bolt.NewDirSource(filepath.Join(path, "dirguta"))}
-			bdb, err := basedirs.OpenDBRO(filepath.Join(path, "basedir.db"))
+			bdb, err := boltbasedirs.OpenReadOnly(filepath.Join(path, "basedir.db"))
 			So(err, ShouldBeNil)
 			bmr, err := basedirs.OpenMulti(ownersPath, bdb)
 			So(err, ShouldBeNil)

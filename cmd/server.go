@@ -41,6 +41,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
 	bolt "github.com/wtsi-hgi/wrstat-ui/bolt"
+	boltbasedirs "github.com/wtsi-hgi/wrstat-ui/boltbasedirs"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 	ireloader "github.com/wtsi-hgi/wrstat-ui/internal/reloader"
 	"github.com/wtsi-hgi/wrstat-ui/server"
@@ -190,15 +191,15 @@ files. It will use the mtime of the file as the data creation time in reports.
 		}
 
 		// Open basedirs DBs read-only and build a MultiReader
-		var bdbs []*bolt.DB
+		var bstores []basedirs.BasedirsStore
 		for _, d := range dbDirs {
-			bdb, err := basedirs.OpenDBRO(filepath.Join(d, basedirBasename))
+			bdb, err := boltbasedirs.OpenReadOnly(filepath.Join(d, basedirBasename))
 			if err != nil {
 				die("failed to open basedirs db: %s", err)
 			}
-			bdbs = append(bdbs, bdb)
+			bstores = append(bstores, bdb)
 		}
-		bdReader, err := basedirs.OpenMulti(ownersPath, bdbs...)
+		bdReader, err := basedirs.OpenMulti(ownersPath, bstores...)
 		if err != nil {
 			die("failed to construct basedirs reader: %s", err)
 		}

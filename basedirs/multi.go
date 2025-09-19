@@ -30,16 +30,14 @@ import (
 
 	"github.com/hashicorp/go-multierror"
 	"github.com/ugorji/go/codec"
-	bolt "github.com/wtsi-hgi/wrstat-ui/bolt"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 )
 
 type MultiReader []*BaseDirReader
 
-// OpenMultiFromDBs constructs a MultiReader from already-open basedirs bolt DBs.
-// This avoids any path-based assumptions in callers by letting them manage how
-// DBs are opened and simply passing the handles here.
-func OpenMulti(ownersPath string, dbs ...*bolt.DB) (MultiReader, error) { //nolint:funlen
+// OpenMulti constructs a MultiReader from already-open basedirs stores.
+// Callers supply store implementations appropriate for their backend.
+func OpenMulti(ownersPath string, stores ...BasedirsStore) (MultiReader, error) { //nolint:funlen
 	mp, err := getMountPoints()
 	if err != nil {
 		return nil, err
@@ -50,13 +48,13 @@ func OpenMulti(ownersPath string, dbs ...*bolt.DB) (MultiReader, error) { //noli
 		return nil, err
 	}
 
-	mr := make(MultiReader, len(dbs))
+	mr := make(MultiReader, len(stores))
 	ch := new(codec.BincHandle)
 	groupCache, userCache := NewGroupCache(), NewUserCache()
 
-	for n, bdb := range dbs {
+	for n, st := range stores {
 		mr[n] = &BaseDirReader{
-			db:          bdb,
+			store:       st,
 			ch:          ch,
 			mountPoints: mp,
 			groupCache:  groupCache,

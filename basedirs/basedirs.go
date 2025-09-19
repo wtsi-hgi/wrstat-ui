@@ -40,7 +40,7 @@ import (
 // BaseDirs is used to summarise disk usage information by base directory and
 // group or user.
 type BaseDirs struct {
-	dbPath      string
+	store       BasedirsStore
 	quotas      *Quotas
 	ch          codec.Handle
 	mountPoints mountPoints
@@ -49,14 +49,14 @@ type BaseDirs struct {
 
 // NewCreator returns a BaseDirs that lets you create a database summarising
 // usage information by base directory, taken from the given quotas.
-func NewCreator(dbPath string, quotas *Quotas) (*BaseDirs, error) {
+func NewCreator(store BasedirsStore, quotas *Quotas) (*BaseDirs, error) {
 	mp, err := getMountPoints()
 	if err != nil {
 		return nil, err
 	}
 
 	return &BaseDirs{
-		dbPath:      dbPath,
+		store:       store,
 		quotas:      quotas,
 		ch:          new(codec.BincHandle),
 		mountPoints: mp,

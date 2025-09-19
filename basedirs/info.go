@@ -30,7 +30,6 @@ import (
 	"bytes"
 
 	"github.com/ugorji/go/codec"
-	bolt "github.com/wtsi-hgi/wrstat-ui/bolt"
 )
 
 // DBInfo holds summary information about the database file produced by
@@ -46,50 +45,34 @@ type DBInfo struct {
 	UserSubDirs       int
 }
 
-// Info returns summary information about the given basedirs database file
-// itself.
-func Info(dbPath string) (*DBInfo, error) {
-	db, err := OpenDBRO(dbPath)
-	if err != nil {
-		return nil, err
-	}
-
+// Info returns summary information by scanning the provided store.
+func Info(store BasedirsStore) (*DBInfo, error) {
 	info := &DBInfo{}
 	ch := new(codec.BincHandle)
 
-	db.View(func(tx *bolt.Tx) error { //nolint:errcheck
+	err := store.View(func(tx KVTx) error {
 		info.GroupDirCombos, _ = countFromFullBucketScan(tx, GroupUsageBucket, countOnly, ch)
-
 		info.GroupMountCombos, info.GroupHistories = countFromFullBucketScan(tx, GroupHistoricalBucket, countHistories, ch)
-
 		info.GroupSubDirCombos, info.GroupSubDirs = countFromFullBucketScan(tx, GroupSubDirsBucket, countSubDirs, ch)
-
 		info.UserDirCombos, _ = countFromFullBucketScan(tx, UserUsageBucket, countOnly, ch)
-
 		info.UserSubDirCombos, info.UserSubDirs = countFromFullBucketScan(tx, UserSubDirsBucket, countSubDirs, ch)
-
 		return nil
 	})
-
-	return info, nil
+	return info, err
 }
 
-func countFromFullBucketScan(tx *bolt.Tx, bucketName string,
+func countFromFullBucketScan(tx KVTx, bucketName string,
 	cb func(v []byte, ch codec.Handle) int, ch codec.Handle,
 ) (int, int) {
-	b := tx.Bucket([]byte(bucketName))
-
 	count := 0
 	sliceLen := 0
 
-	b.ForEach(func(k, v []byte) error { //nolint:errcheck
+	_ = tx.ForEach(bucketName, func(k, v []byte) error {
 		if !CheckAgeOfKeyIsAll(k) {
 			return nil
 		}
-
 		count++
 		sliceLen += cb(v, ch)
-
 		return nil
 	})
 

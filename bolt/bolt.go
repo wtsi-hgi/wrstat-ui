@@ -134,6 +134,11 @@ func (b *Bucket) Put(key, value []byte) error { //nolint:wrapcheck
 	return b.inner.Put(key, value)
 }
 
+// Delete removes a key from the bucket.
+func (b *Bucket) Delete(key []byte) error { //nolint:wrapcheck
+	return b.inner.Delete(key)
+}
+
 // ForEach iterates over all key/value pairs in a bucket.
 func (b *Bucket) ForEach(fn func(k, v []byte) error) error { //nolint:wrapcheck
 	return b.inner.ForEach(fn)

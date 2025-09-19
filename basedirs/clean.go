@@ -27,68 +27,46 @@ package basedirs
 
 import (
 	"bytes"
-
-	bolt "github.com/wtsi-hgi/wrstat-ui/bolt"
 )
 
 const idLen = 4 + 1
 
 // CleanInvalidDBHistory removes irrelevant paths from the history bucket,
 // leaving only those with the specified path prefix.
-func CleanInvalidDBHistory(dbPath, prefix string) error { //nolint:gocognit
-	db, err := bolt.Open(dbPath, dbOpenMode, &bolt.Options{})
-	if err != nil {
-		return err
-	}
-
+func CleanInvalidDBHistory(store BasedirsStore, prefix string) error { //nolint:gocognit
 	prefixB := []byte(prefix)
-
-	if err := db.Update(func(tx *bolt.Tx) error {
-		c := tx.Bucket([]byte(GroupHistoricalBucket)).Cursor()
-
-		for k, _ := c.First(); k != nil; k, _ = c.Next() {
+	return store.Update(func(tx KVTx) error {
+		// iterate using ForEach and delete matching entries
+		var toDelete [][]byte
+		if err := tx.ForEach(GroupHistoricalBucket, func(k, _ []byte) error {
 			if len(k) > idLen && !bytes.HasPrefix(k[idLen:], prefixB) {
-				if err := c.Delete(); err != nil {
-					return err
-				}
+				toDelete = append(toDelete, append([]byte(nil), k...))
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+		for _, k := range toDelete {
+			if err := tx.Delete(GroupHistoricalBucket, k); err != nil {
+				return err
 			}
 		}
-
 		return nil
-	}); err != nil {
-		return err
-	}
-
-	return db.Close()
+	})
 }
 
 // FindInvalidHistoryKeys returns a list of the keys from the history bucket
 // that do not contain the specified prefix.
-func FindInvalidHistoryKeys(dbPath, prefix string) ([][]byte, error) {
-	db, err := bolt.Open(dbPath, dbOpenMode, &bolt.Options{
-		ReadOnly: true,
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	defer db.Close()
-
+func FindInvalidHistoryKeys(store BasedirsStore, prefix string) ([][]byte, error) {
 	var toRemove [][]byte
-
 	prefixB := []byte(prefix)
-
-	if err := db.View(func(tx *bolt.Tx) error {
-		return tx.Bucket([]byte(GroupHistoricalBucket)).ForEach(func(k, _ []byte) error {
+	err := store.View(func(tx KVTx) error {
+		return tx.ForEach(GroupHistoricalBucket, func(k, _ []byte) error {
 			if len(k) > idLen && !bytes.HasPrefix(k[idLen:], prefixB) {
 				toRemove = append(toRemove, append(make([]byte, 0, len(k)), k...))
 			}
-
 			return nil
 		})
-	}); err != nil {
-		return nil, err
-	}
-
-	return toRemove, nil
+	})
+	return toRemove, err
 }

@@ -29,20 +29,16 @@ package basedirs
 
 import (
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/ugorji/go/codec"
-	bolt "github.com/wtsi-hgi/wrstat-ui/bolt"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 )
 
 const (
-	dbOpenMode = 0640
-
 	bucketKeySeparator     = "-"
 	bucketKeySeparatorByte = '-'
 	gBytes                 = 1024 * 1024 * 1024
@@ -89,34 +85,14 @@ type Usage struct {
 // Output creates a database containing usage information for each of
 // our groups and users by calculated base directory.
 func (b *BaseDirs) Output(users, groups IDAgeDirs) error {
-	db, err := openDB(b.dbPath)
-	if err != nil {
+	if err := b.store.Update(b.updateDatabase(users, groups)); err != nil {
 		return err
 	}
-
-	err = db.Update(b.updateDatabase(users, groups))
-	if err != nil {
-		return err
-	}
-
-	err = db.Update(b.storeDateQuotasFill())
-	if err != nil {
-		return err
-	}
-
-	return db.Close()
+	return b.store.Update(b.storeDateQuotasFill())
 }
 
-func openDB(dbPath string) (*bolt.DB, error) {
-	return bolt.Open(dbPath, dbOpenMode, &bolt.Options{
-		NoFreelistSync: true,
-		NoGrowSync:     true,
-		FreelistType:   bolt.FreelistMapType,
-	})
-}
-
-func (b *BaseDirs) updateDatabase(users, groups IDAgeDirs) func(*bolt.Tx) error {
-	return func(tx *bolt.Tx) error {
+func (b *BaseDirs) updateDatabase(users, groups IDAgeDirs) func(KVTx) error {
+	return func(tx KVTx) error {
 		if err := clearUsageBuckets(tx); err != nil {
 			return err
 		}
@@ -137,24 +113,21 @@ func (b *BaseDirs) updateDatabase(users, groups IDAgeDirs) func(*bolt.Tx) error 
 	}
 }
 
-func clearUsageBuckets(tx *bolt.Tx) error {
-	if err := tx.DeleteBucket([]byte(GroupUsageBucket)); err != nil && !errors.Is(err, bolt.ErrBucketNotFound) {
-		return err
-	}
-
-	if err := tx.DeleteBucket([]byte(UserUsageBucket)); err != nil && !errors.Is(err, bolt.ErrBucketNotFound) {
-		return err
-	}
-
+func clearUsageBuckets(tx KVTx) error {
+	// Best-effort deletes; ignore missing buckets.
+	_ = tx.DeleteBucket(GroupUsageBucket)
+	_ = tx.DeleteBucket(UserUsageBucket)
 	return nil
 }
 
-func createBucketsIfNotExist(tx *bolt.Tx) error {
+func createBucketsIfNotExists(tx KVTx) error { return createBucketsIfNotExist(tx) }
+
+func createBucketsIfNotExist(tx KVTx) error {
 	for _, bucket := range [...]string{
 		GroupUsageBucket, GroupHistoricalBucket,
 		GroupSubDirsBucket, UserUsageBucket, UserSubDirsBucket,
 	} {
-		if _, errc := tx.CreateBucketIfNotExists([]byte(bucket)); errc != nil {
+		if errc := tx.CreateBucketIfNotExists(bucket); errc != nil {
 			return errc
 		}
 	}
@@ -162,7 +135,7 @@ func createBucketsIfNotExist(tx *bolt.Tx) error {
 	return nil
 }
 
-func (b *BaseDirs) calculateUsage(tx *bolt.Tx, gidBase IDAgeDirs, uidBase IDAgeDirs) error {
+func (b *BaseDirs) calculateUsage(tx KVTx, gidBase IDAgeDirs, uidBase IDAgeDirs) error {
 	if errc := b.storeGIDBaseDirs(tx, gidBase); errc != nil {
 		return errc
 	}
@@ -170,8 +143,7 @@ func (b *BaseDirs) calculateUsage(tx *bolt.Tx, gidBase IDAgeDirs, uidBase IDAgeD
 	return b.storeUIDBaseDirs(tx, uidBase)
 }
 
-func (b *BaseDirs) storeGIDBaseDirs(tx *bolt.Tx, gidBase IDAgeDirs) error { //nolint:gocognit
-	gub := tx.Bucket([]byte(GroupUsageBucket))
+func (b *BaseDirs) storeGIDBaseDirs(tx KVTx, gidBase IDAgeDirs) error { //nolint:gocognit
 
 	for gid, dcss := range gidBase {
 		for _, adcs := range dcss {
@@ -190,7 +162,7 @@ func (b *BaseDirs) storeGIDBaseDirs(tx *bolt.Tx, gidBase IDAgeDirs) error { //no
 					Age:         dcs.Age,
 				}
 
-				if err := gub.Put(keyName(gid, dcs.Dir, uwm.Age), b.encodeToBytes(uwm)); err != nil {
+				if err := tx.Put(GroupUsageBucket, keyName(gid, dcs.Dir, uwm.Age), b.encodeToBytes(uwm)); err != nil {
 					return err
 				}
 			}
@@ -224,8 +196,7 @@ func (b *BaseDirs) encodeToBytes(data any) []byte {
 	return encoded
 }
 
-func (b *BaseDirs) storeUIDBaseDirs(tx *bolt.Tx, uidBase IDAgeDirs) error { //nolint:gocognit
-	uub := tx.Bucket([]byte(UserUsageBucket))
+func (b *BaseDirs) storeUIDBaseDirs(tx KVTx, uidBase IDAgeDirs) error { //nolint:gocognit
 
 	for uid, dcss := range uidBase {
 		for _, adcs := range dcss {
@@ -240,7 +211,7 @@ func (b *BaseDirs) storeUIDBaseDirs(tx *bolt.Tx, uidBase IDAgeDirs) error { //no
 					Age:         dcs.Age,
 				}
 
-				if err := uub.Put(keyName(uid, dcs.Dir, uwm.Age), b.encodeToBytes(uwm)); err != nil {
+				if err := tx.Put(UserUsageBucket, keyName(uid, dcs.Dir, uwm.Age), b.encodeToBytes(uwm)); err != nil {
 					return err
 				}
 			}
@@ -250,13 +221,12 @@ func (b *BaseDirs) storeUIDBaseDirs(tx *bolt.Tx, uidBase IDAgeDirs) error { //no
 	return nil
 }
 
-func (b *BaseDirs) updateHistories(tx *bolt.Tx, gidBase IDAgeDirs) error {
-	ghb := tx.Bucket([]byte(GroupHistoricalBucket))
+func (b *BaseDirs) updateHistories(tx KVTx, gidBase IDAgeDirs) error {
 
 	gidMounts := b.gidsToMountpoints(gidBase)
 
 	for gid, mounts := range gidMounts {
-		if err := b.updateGroupHistories(ghb, gid, mounts); err != nil {
+		if err := b.updateGroupHistories(tx, gid, mounts); err != nil {
 			return err
 		}
 	}
@@ -300,22 +270,21 @@ func (b *BaseDirs) dcssToMountPoints(dcss *AgeDirs) map[string]db.DirSummary {
 	return mounts
 }
 
-func (b *BaseDirs) updateGroupHistories(ghb *bolt.Bucket, gid uint32,
+func (b *BaseDirs) updateGroupHistories(tx KVTx, gid uint32,
 	mounts map[string]db.DirSummary,
 ) error {
 	for mount, ds := range mounts {
 		quotaSize, quotaInode := b.quotas.Get(gid, mount)
 
 		key := keyName(gid, mount, ds.Age)
-
-		existing := ghb.Get(key)
+		existing, _ := tx.Get(GroupHistoricalBucket, key)
 
 		histories, err := b.updateHistory(ds, quotaSize, quotaInode, b.modTime, existing)
 		if err != nil {
 			return err
 		}
 
-		if err = ghb.Put(key, histories); err != nil {
+		if err = tx.Put(GroupHistoricalBucket, key, histories); err != nil {
 			return err
 		}
 	}
@@ -390,7 +359,7 @@ type SubDir struct {
 	FileUsage    UsageBreakdownByType
 }
 
-func (b *BaseDirs) calculateSubDirUsage(tx *bolt.Tx, gidBase, uidBase IDAgeDirs) error {
+func (b *BaseDirs) calculateSubDirUsage(tx KVTx, gidBase, uidBase IDAgeDirs) error {
 	if errc := b.storeGIDSubDirs(tx, gidBase); errc != nil {
 		return errc
 	}
@@ -398,13 +367,12 @@ func (b *BaseDirs) calculateSubDirUsage(tx *bolt.Tx, gidBase, uidBase IDAgeDirs)
 	return b.storeUIDSubDirs(tx, uidBase)
 }
 
-func (b *BaseDirs) storeGIDSubDirs(tx *bolt.Tx, gidBase IDAgeDirs) error { //nolint:gocognit
-	bucket := tx.Bucket([]byte(GroupSubDirsBucket))
+func (b *BaseDirs) storeGIDSubDirs(tx KVTx, gidBase IDAgeDirs) error { //nolint:gocognit
 
 	for gid, dcss := range gidBase {
 		for _, adcs := range dcss {
 			for _, dcs := range adcs {
-				if err := b.storeSubDirs(bucket, gid, dcs); err != nil {
+				if err := b.storeSubDirs(tx, GroupSubDirsBucket, gid, dcs); err != nil {
 					return err
 				}
 			}
@@ -414,17 +382,16 @@ func (b *BaseDirs) storeGIDSubDirs(tx *bolt.Tx, gidBase IDAgeDirs) error { //nol
 	return nil
 }
 
-func (b *BaseDirs) storeSubDirs(bucket *bolt.Bucket, id uint32, dcs SummaryWithChildren) error {
-	return bucket.Put(keyName(id, dcs.Dir, dcs.Age), b.encodeToBytes(dcs.Children))
+func (b *BaseDirs) storeSubDirs(tx KVTx, bucket string, id uint32, dcs SummaryWithChildren) error {
+	return tx.Put(bucket, keyName(id, dcs.Dir, dcs.Age), b.encodeToBytes(dcs.Children))
 }
 
-func (b *BaseDirs) storeUIDSubDirs(tx *bolt.Tx, uidBase IDAgeDirs) error { //nolint:gocognit
-	bucket := tx.Bucket([]byte(UserSubDirsBucket))
+func (b *BaseDirs) storeUIDSubDirs(tx KVTx, uidBase IDAgeDirs) error { //nolint:gocognit
 
 	for uid, dcss := range uidBase {
 		for _, adcs := range dcss {
 			for _, dcs := range adcs {
-				if err := b.storeSubDirs(bucket, uid, dcs); err != nil {
+				if err := b.storeSubDirs(tx, UserSubDirsBucket, uid, dcs); err != nil {
 					return err
 				}
 			}
@@ -442,12 +409,10 @@ func (b *BaseDirs) storeUIDSubDirs(tx *bolt.Tx, uidBase IDAgeDirs) error { //nol
 //
 // This is done as a separate transaction to updateDatabase() so we have access
 // to the latest stored history, without having to have all histories in memory.
-func (b *BaseDirs) storeDateQuotasFill() func(*bolt.Tx) error {
-	return func(tx *bolt.Tx) error {
-		bucket := tx.Bucket([]byte(GroupUsageBucket))
-		hbucket := tx.Bucket([]byte(GroupHistoricalBucket))
-
-		return bucket.ForEach(func(_, data []byte) error {
+func (b *BaseDirs) storeDateQuotasFill() func(KVTx) error {
+	return func(tx KVTx) error {
+		// iterate over all items in GroupUsage and update DateNoSpace/DateNoFiles
+		return tx.ForEach(GroupUsageBucket, func(_, data []byte) error {
 			gu := new(Usage)
 
 			if err := b.decodeFromBytes(data, gu); err != nil {
@@ -458,7 +423,7 @@ func (b *BaseDirs) storeDateQuotasFill() func(*bolt.Tx) error {
 				return nil
 			}
 
-			h, err := b.history(hbucket, gu.GID, gu.BaseDir)
+			h, err := b.history(tx, gu.GID, gu.BaseDir)
 			if err != nil {
 				return err
 			}
@@ -467,12 +432,12 @@ func (b *BaseDirs) storeDateQuotasFill() func(*bolt.Tx) error {
 			gu.DateNoSpace = sizeExceedDate
 			gu.DateNoFiles = inodeExceedDate
 
-			return bucket.Put(keyName(gu.GID, gu.BaseDir, db.DGUTAgeAll), b.encodeToBytes(gu))
+			return tx.Put(GroupUsageBucket, keyName(gu.GID, gu.BaseDir, db.DGUTAgeAll), b.encodeToBytes(gu))
 		})
 	}
 }
 
-func (b *BaseDirs) history(bucket *bolt.Bucket, gid uint32, path string) ([]History, error) {
+func (b *BaseDirs) history(tx KVTx, gid uint32, path string) ([]History, error) {
 	mp := b.mountPoints.prefixOf(path)
 	if mp == "" {
 		return nil, ErrInvalidBasePath
@@ -482,7 +447,7 @@ func (b *BaseDirs) history(bucket *bolt.Bucket, gid uint32, path string) ([]Hist
 
 	key := historyKey(gid, mp)
 
-	data := bucket.Get(key)
+	data, _ := tx.Get(GroupHistoricalBucket, key)
 	if data == nil {
 		return nil, ErrNoBaseDirHistory
 	}
@@ -492,76 +457,5 @@ func (b *BaseDirs) history(bucket *bolt.Bucket, gid uint32, path string) ([]Hist
 	return history, err
 }
 
-// MergeDBs merges the basedirs.db database at the given A and B paths and
-// creates a new database file at outputPath.
-func MergeDBs(pathA, pathB, outputPath string) (err error) { //nolint:funlen
-	var dbA, dbB, dbC *bolt.DB
-
-	closeDB := func(db *bolt.DB) {
-		errc := db.Close()
-		if err == nil {
-			err = errc
-		}
-	}
-
-	dbA, err = OpenDBRO(pathA)
-	if err != nil {
-		return err
-	}
-
-	defer closeDB(dbA)
-
-	dbB, err = OpenDBRO(pathB)
-	if err != nil {
-		return err
-	}
-
-	defer closeDB(dbB)
-
-	dbC, err = openDB(outputPath)
-	if err != nil {
-		return err
-	}
-
-	defer closeDB(dbC)
-
-	err = dbC.Update(func(tx *bolt.Tx) error {
-		err = transferAllBucketContents(tx, dbA)
-		if err != nil {
-			return err
-		}
-
-		return transferAllBucketContents(tx, dbB)
-	})
-
-	return err
-}
-
-func transferAllBucketContents(utx *bolt.Tx, source *bolt.DB) error {
-	if err := createBucketsIfNotExist(utx); err != nil {
-		return err
-	}
-
-	return source.View(func(vtx *bolt.Tx) error {
-		for _, bucket := range []string{
-			GroupUsageBucket, GroupHistoricalBucket,
-			GroupSubDirsBucket, UserUsageBucket, UserSubDirsBucket,
-		} {
-			err := transferBucketContents(vtx, utx, bucket)
-			if err != nil {
-				return err
-			}
-		}
-
-		return nil
-	})
-}
-
-func transferBucketContents(vtx, utx *bolt.Tx, bucketName string) error {
-	sourceBucket := vtx.Bucket([]byte(bucketName))
-	destBucket := utx.Bucket([]byte(bucketName))
-
-	return sourceBucket.ForEach(func(k, v []byte) error {
-		return destBucket.Put(k, v)
-	})
-}
+// Merge and open-helper functions are backend-specific and have been removed from this
+// backend-agnostic package. Implementations should live alongside the backend adapters.
