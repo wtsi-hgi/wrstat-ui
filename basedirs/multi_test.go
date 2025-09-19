@@ -33,7 +33,7 @@ import (
 
 	. "github.com/smartystreets/goconvey/convey"
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
-	boltbasedirs "github.com/wtsi-hgi/wrstat-ui/boltbasedirs"
+	bolt "github.com/wtsi-hgi/wrstat-ui/bolt"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 	internaldata "github.com/wtsi-hgi/wrstat-ui/internal/data"
 	"github.com/wtsi-hgi/wrstat-ui/internal/fixtimes"
@@ -149,7 +149,7 @@ func TestMulti(t *testing.T) {
 		baseDirCreator := func(modtime time.Time, root *statsdata.Directory, dbPath string) {
 			t.Helper()
 
-			store, errr := boltbasedirs.New(dbPath)
+			store, errr := bolt.NewBasedirs(dbPath)
 			So(errr, ShouldBeNil)
 			So(store, ShouldNotBeNil)
 
@@ -184,9 +184,9 @@ func TestMulti(t *testing.T) {
 			baseDirsReader := func() basedirs.MultiReader {
 				t.Helper()
 
-				storeA, errr := boltbasedirs.OpenReadOnly(dbPathA)
+				storeA, errr := bolt.OpenReadOnlyBasedirs(dbPathA)
 				So(errr, ShouldBeNil)
-				storeB, errr := boltbasedirs.OpenReadOnly(dbPathB)
+				storeB, errr := bolt.OpenReadOnlyBasedirs(dbPathB)
 				So(errr, ShouldBeNil)
 
 				bdr, errr := basedirs.OpenMulti(ownersPath, storeA, storeB)

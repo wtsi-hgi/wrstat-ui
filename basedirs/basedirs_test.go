@@ -43,7 +43,7 @@ import (
 
 	. "github.com/smartystreets/goconvey/convey"
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
-	"github.com/wtsi-hgi/wrstat-ui/boltbasedirs"
+	bolt "github.com/wtsi-hgi/wrstat-ui/bolt"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 	internaldata "github.com/wtsi-hgi/wrstat-ui/internal/data"
 	"github.com/wtsi-hgi/wrstat-ui/internal/fixtimes"
@@ -145,7 +145,7 @@ func TestBaseDirs(t *testing.T) {
 		basedirsCreator := func(modtime time.Time) {
 			t.Helper()
 
-			store, errr := boltbasedirs.New(dbPath)
+			store, errr := bolt.NewBasedirs(dbPath)
 			So(errr, ShouldBeNil)
 			bd, errr := basedirs.NewCreator(store, quotas)
 			So(errr, ShouldBeNil)
@@ -179,7 +179,7 @@ func TestBaseDirs(t *testing.T) {
 			baseDirsReader := func() *basedirs.BaseDirReader {
 				t.Helper()
 
-				ro, errr := boltbasedirs.OpenReadOnly(dbPath)
+				ro, errr := bolt.OpenReadOnlyBasedirs(dbPath)
 				So(errr, ShouldBeNil)
 				bdr, errr := basedirs.NewReader(ro, ownersPath)
 				So(errr, ShouldBeNil)
@@ -463,12 +463,12 @@ func TestBaseDirs(t *testing.T) {
 					Convey("you can copy the History to another database", func() {
 						tmpDir := t.TempDir()
 						newDB := filepath.Join(tmpDir, "basedirs")
-						store2, errr := boltbasedirs.New(newDB)
+						store2, errr := bolt.NewBasedirs(newDB)
 						So(errr, ShouldBeNil)
 						bd, errr := basedirs.NewCreator(store2, quotas)
 						So(errr, ShouldBeNil)
 
-						ro2, errr := boltbasedirs.OpenReadOnly(dbPath)
+						ro2, errr := bolt.OpenReadOnlyBasedirs(dbPath)
 						So(errr, ShouldBeNil)
 						err = bd.CopyHistoryFrom(ro2)
 						So(err, ShouldBeNil)
@@ -478,7 +478,7 @@ func TestBaseDirs(t *testing.T) {
 						So(ro2.Close(), ShouldBeNil)
 						So(store2.Close(), ShouldBeNil)
 
-						ro3, err := boltbasedirs.OpenReadOnly(newDB)
+						ro3, err := bolt.OpenReadOnlyBasedirs(newDB)
 						So(err, ShouldBeNil)
 						bdr, err = basedirs.NewReader(ro3, ownersPath)
 						So(err, ShouldBeNil)
@@ -1098,9 +1098,9 @@ func TestBaseDirs(t *testing.T) {
 				mps = oldMPs
 
 				// Merge functionality moved to backend-specific package; validate by scanning two stores
-				roA, err := boltbasedirs.OpenReadOnly(oldPath)
+				roA, err := bolt.OpenReadOnlyBasedirs(oldPath)
 				So(err, ShouldBeNil)
-				roB, err := boltbasedirs.OpenReadOnly(newPath)
+				roB, err := bolt.OpenReadOnlyBasedirs(newPath)
 				So(err, ShouldBeNil)
 
 				countKeys := func(bucket string) (int, int) {
@@ -1154,7 +1154,7 @@ func TestBaseDirs(t *testing.T) {
 			})
 
 			Convey("and get basic info about it", func() {
-				ro, err := boltbasedirs.OpenReadOnly(dbPath)
+				ro, err := bolt.OpenReadOnlyBasedirs(dbPath)
 				So(err, ShouldBeNil)
 				info, err := basedirs.Info(ro)
 				So(err, ShouldBeNil)

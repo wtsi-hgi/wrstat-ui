@@ -6,7 +6,6 @@ import (
 
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
 	bolt "github.com/wtsi-hgi/wrstat-ui/bolt"
-	"github.com/wtsi-hgi/wrstat-ui/boltbasedirs"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 )
 
@@ -52,7 +51,7 @@ func StartServerReloader(
 		var stores []basedirs.BasedirsStore
 		for _, d := range dirs {
 			srcs = append(srcs, bolt.NewDirSource(filepath.Join(d, dgutaDirBasename)))
-			bdb, err := boltbasedirs.OpenReadOnly(filepath.Join(d, basedirBasename))
+			bdb, err := bolt.OpenReadOnlyBasedirs(filepath.Join(d, basedirBasename))
 			if err != nil {
 				return false
 			}

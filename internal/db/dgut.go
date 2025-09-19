@@ -38,7 +38,6 @@ import (
 
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
 	bolt "github.com/wtsi-hgi/wrstat-ui/bolt"
-	"github.com/wtsi-hgi/wrstat-ui/boltbasedirs"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 	internaldata "github.com/wtsi-hgi/wrstat-ui/internal/data"
 	"github.com/wtsi-hgi/wrstat-ui/internal/fs"
@@ -145,7 +144,7 @@ func addBasedirsSummariser(t *testing.T, s *summary.Summariser, path string) (fu
 		},
 	}
 
-	store, err := boltbasedirs.New(dbPath)
+	store, err := bolt.NewBasedirs(dbPath)
 	if err != nil {
 		return nil, err
 	}

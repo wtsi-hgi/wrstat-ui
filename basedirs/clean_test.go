@@ -32,7 +32,7 @@ import (
 
 	. "github.com/smartystreets/goconvey/convey"
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
-	"github.com/wtsi-hgi/wrstat-ui/boltbasedirs"
+	bolt "github.com/wtsi-hgi/wrstat-ui/bolt"
 	internaldata "github.com/wtsi-hgi/wrstat-ui/internal/data"
 	"github.com/wtsi-hgi/wrstat-ui/internal/split"
 	"github.com/wtsi-hgi/wrstat-ui/internal/statsdata"
@@ -81,7 +81,7 @@ func TestClean(t *testing.T) {
 		tmp := t.TempDir()
 		dbPath := filepath.Join(tmp, "basedirs.db")
 
-		store, err := boltbasedirs.New(dbPath)
+		store, err := bolt.NewBasedirs(dbPath)
 		So(err, ShouldBeNil)
 		db, err := basedirs.NewCreator(store, &basedirs.Quotas{})
 		So(err, ShouldBeNil)
@@ -104,7 +104,7 @@ func TestClean(t *testing.T) {
 		So(store.Close(), ShouldBeNil)
 
 		Convey("We can find the keys for all by a single prefix", func() {
-			ro, err := boltbasedirs.OpenReadOnly(dbPath)
+			ro, err := bolt.OpenReadOnlyBasedirs(dbPath)
 			So(err, ShouldBeNil)
 			defer ro.Close()
 			toRemove, err := basedirs.FindInvalidHistoryKeys(ro, "/lustre/scratch123/")
@@ -117,7 +117,7 @@ func TestClean(t *testing.T) {
 
 		Convey("We can remove all but a single prefix", func() {
 			// Re-open a writable store now that the earlier one has been closed.
-			wstore, err := boltbasedirs.New(dbPath)
+			wstore, err := bolt.NewBasedirs(dbPath)
 			So(err, ShouldBeNil)
 			So(basedirs.CleanInvalidDBHistory(wstore, "/lustre/scratch123/"), ShouldBeNil)
 			So(wstore.Close(), ShouldBeNil)
@@ -125,7 +125,7 @@ func TestClean(t *testing.T) {
 			ownersPath, err := internaldata.CreateOwnersCSV(t, internaldata.ExampleOwnersCSV)
 			So(err, ShouldBeNil)
 
-			ro, err := boltbasedirs.OpenReadOnly(dbPath)
+			ro, err := bolt.OpenReadOnlyBasedirs(dbPath)
 			So(err, ShouldBeNil)
 			db, err := basedirs.NewReader(ro, ownersPath)
 			So(err, ShouldBeNil)

@@ -30,7 +30,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
-	"github.com/wtsi-hgi/wrstat-ui/boltbasedirs"
+	bolt "github.com/wtsi-hgi/wrstat-ui/bolt"
 )
 
 var (
@@ -62,7 +62,7 @@ the flag were not supplied.
 		}
 
 		if viewOnly {
-			store, err := boltbasedirs.OpenReadOnly(args[0])
+			store, err := bolt.OpenReadOnlyBasedirs(args[0])
 			if err != nil {
 				die("failed to open basedirs store: %s", err)
 			}
@@ -75,7 +75,7 @@ the flag were not supplied.
 				fmt.Printf("%s\n", k)
 			}
 		} else {
-			store, err := boltbasedirs.New(args[0])
+			store, err := bolt.NewBasedirs(args[0])
 			if err != nil {
 				die("failed to open basedirs store: %s", err)
 			}

@@ -40,7 +40,6 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
 	bolt "github.com/wtsi-hgi/wrstat-ui/bolt"
-	"github.com/wtsi-hgi/wrstat-ui/boltbasedirs"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 	"github.com/wtsi-hgi/wrstat-ui/stats"
 	"github.com/wtsi-hgi/wrstat-ui/summary"
@@ -299,7 +298,7 @@ func addBasedirsSummariser(s *summary.Summariser, basedirsDB, basedirsHistoryDB,
 		return err
 	}
 
-	store, err := boltbasedirs.New(basedirsDB)
+	store, err := bolt.NewBasedirs(basedirsDB)
 	if err != nil {
 		return fmt.Errorf("failed to create basedirs store: %w", err)
 	}
@@ -378,7 +377,7 @@ func parseBasedirConfig(quotaPath, basedirsConfig string) (*basedirs.Quotas, bas
 }
 
 func copyHistory(bd *basedirs.BaseDirs, basedirsHistoryDB string) error {
-	src, err := boltbasedirs.OpenReadOnly(basedirsHistoryDB)
+	src, err := bolt.OpenReadOnlyBasedirs(basedirsHistoryDB)
 	if err != nil {
 		return err
 	}

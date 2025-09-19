@@ -43,7 +43,6 @@ import (
 	. "github.com/smartystreets/goconvey/convey"
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
 	bolt "github.com/wtsi-hgi/wrstat-ui/bolt"
-	boltbasedirs "github.com/wtsi-hgi/wrstat-ui/boltbasedirs"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 	internaldata "github.com/wtsi-hgi/wrstat-ui/internal/data"
 	"github.com/wtsi-hgi/wrstat-ui/internal/statsdata"
@@ -266,7 +265,7 @@ func TestSummarise(t *testing.T) {
 				internaluser.GetUsername(t, strconv.Itoa(int(uid))), internaluser.GetGroupName(t, strconv.Itoa(int(gid))),
 				internaluser.GetUsername(t, "102"), internaluser.GetGroupName(t, "77777"))))
 
-		storeA, err := boltbasedirs.OpenReadOnly(filepath.Join(outputA, "basedirs.db"))
+		storeA, err := bolt.OpenReadOnlyBasedirs(filepath.Join(outputA, "basedirs.db"))
 		So(err, ShouldBeNil)
 		bddb, err := basedirs.NewReader(storeA, ownersPath)
 		So(err, ShouldBeNil)
@@ -311,7 +310,7 @@ func TestSummarise(t *testing.T) {
 			"-d", outputB, "-q", quotaFile, "-c", basedirsConfig, "-m", mounts, inputB)
 		So(err, ShouldBeNil)
 
-		storeB, err := boltbasedirs.OpenReadOnly(filepath.Join(outputB, "basedirs.db"))
+		storeB, err := bolt.OpenReadOnlyBasedirs(filepath.Join(outputB, "basedirs.db"))
 		So(err, ShouldBeNil)
 		bddb, err = basedirs.NewReader(storeB, ownersPath)
 		So(err, ShouldBeNil)

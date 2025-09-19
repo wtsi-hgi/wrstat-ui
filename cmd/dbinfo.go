@@ -33,7 +33,6 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
 	bolt "github.com/wtsi-hgi/wrstat-ui/bolt"
-	"github.com/wtsi-hgi/wrstat-ui/boltbasedirs"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 )
 
@@ -86,7 +85,7 @@ NB: for large databases, this can take hours to run.
 		var basedirsInfo basedirs.DBInfo
 
 		for _, path := range basedirsDBPaths {
-			store, err := boltbasedirs.OpenReadOnly(path)
+			store, err := bolt.OpenReadOnlyBasedirs(path)
 			if err != nil {
 				die("failed to open basedirs store: %s", err)
 			}
