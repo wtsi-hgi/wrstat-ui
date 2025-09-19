@@ -42,7 +42,6 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
 	bolt "github.com/wtsi-hgi/wrstat-ui/bolt"
 	"github.com/wtsi-hgi/wrstat-ui/db"
-	ireloader "github.com/wtsi-hgi/wrstat-ui/internal/reloader"
 	"github.com/wtsi-hgi/wrstat-ui/server"
 )
 
@@ -226,7 +225,7 @@ files. It will use the mtime of the file as the data creation time in reports.
 
 		// Enable automatic reloading using a helper that wires bolt's reloader to the server.
 		required := []string{dgutaDBsSuffix, basedirBasename}
-		if _, err := ireloader.StartServerReloader(s, args[0], required, dgutaDirBasename, basedirBasename, ownersPath, sentinelPollFrequencty, true, mountpoints); err != nil {
+		if _, err := bolt.StartServerReloader(s, args[0], required, dgutaDirBasename, basedirBasename, ownersPath, sentinelPollFrequencty, true, mountpoints); err != nil {
 			die("failed to enable db reloading: %s", err)
 		}
 

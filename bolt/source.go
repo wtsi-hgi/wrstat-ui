@@ -4,9 +4,11 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"regexp"
 	"slices"
+	"strings"
 	"time"
+
+	"github.com/wtsi-hgi/wrstat-ui/internal/dbdirs"
 )
 
 // DirSource is a bolt implementation of db.Source backed by a directory
@@ -83,32 +85,19 @@ func FindDBDirs(basepath string, required ...string) ([]string, []string, error)
 	return dirs, toDelete, nil
 }
 
-var validDBDir = regexp.MustCompile(`^[^.][^_]*_.`)
-
 // IsValidDBDir returns true if the given entry is a directory named with the
 // correct format and containing the required files.
 func IsValidDBDir(entry fs.DirEntry, basepath string, required ...string) bool {
-	name := entry.Name()
-	if !entry.IsDir() || !validDBDir.MatchString(name) {
-		return false
-	}
-	for _, req := range required {
-		if !entryExists(filepath.Join(basepath, name, req)) {
-			return false
-		}
-	}
-	return true
+	return dbdirs.IsValidDBDir(entry, basepath, required...)
 }
 
-func entryExists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
-}
+// entryExists is retained for backward compatibility within this package.
+func entryExists(path string) bool { return dbdirs.EntryExists(path) }
 
 type nameVersion struct{ name, version string }
 
 func addEntryToMap(entry fs.DirEntry, latest map[string]nameVersion, toDelete []string) []string {
-	parts := regexp.MustCompile("_").Split(entry.Name(), 2)
+	parts := strings.SplitN(entry.Name(), "_", 2)
 	key := parts[1]
 	version := parts[0]
 	if previous, ok := latest[key]; ok && previous.version > version {

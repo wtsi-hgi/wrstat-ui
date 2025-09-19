@@ -40,8 +40,9 @@ import (
 	"sync"
 	"time"
 
-	bolt "github.com/wtsi-hgi/wrstat-ui/bolt"
 	"vimagination.zapto.org/httpfile"
+
+	"github.com/wtsi-hgi/wrstat-ui/internal/dbdirs"
 )
 
 var (
@@ -122,7 +123,7 @@ func getDBPaths(dbs []string) ([]string, error) { //nolint:gocognit
 				return err
 			}
 
-			if bolt.IsValidDBDir(entry, db, "logs.gz") || bolt.IsValidDBDir(entry, db, "walk.log") {
+			if dbdirs.IsValidDBDir(entry, db, "logs.gz") || dbdirs.IsValidDBDir(entry, db, "walk.log") {
 				dbDirs = append(dbDirs, filepath.Join(db, path))
 			}
 

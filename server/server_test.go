@@ -46,11 +46,11 @@ import (
 	gas "github.com/wtsi-hgi/go-authserver"
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
 	bolt "github.com/wtsi-hgi/wrstat-ui/bolt"
+	breloader "github.com/wtsi-hgi/wrstat-ui/bolt"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 	internaldata "github.com/wtsi-hgi/wrstat-ui/internal/data"
 	internaldb "github.com/wtsi-hgi/wrstat-ui/internal/db"
 	fixtimes "github.com/wtsi-hgi/wrstat-ui/internal/fixtimes"
-	ireloader "github.com/wtsi-hgi/wrstat-ui/internal/reloader"
 	"github.com/wtsi-hgi/wrstat-ui/internal/split"
 )
 
@@ -531,7 +531,7 @@ func TestServer(t *testing.T) {
 
 			// Start the reloader using the internal helper; it will immediately load the current dirs
 			s.SetSourceFromPath(func(p string) db.Source { return bolt.NewDirSource(p) })
-			reloader, err := ireloader.StartServerReloader(s, tmp, []string{"dirguta", "basedir.db"}, "dirguta", "basedir.db", ownersPath, sentinelPollFrequency, true, nil)
+			reloader, err := breloader.StartServerReloader(s, tmp, []string{"dirguta", "basedir.db"}, "dirguta", "basedir.db", ownersPath, sentinelPollFrequency, true, nil)
 			So(err, ShouldBeNil)
 
 			// Wait for initial load (keyA)
