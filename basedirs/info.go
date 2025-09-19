@@ -46,28 +46,28 @@ type DBInfo struct {
 }
 
 // Info returns summary information by scanning the provided store.
-func Info(store BasedirsStore) (*DBInfo, error) {
+func Info(store Store) (*DBInfo, error) {
 	info := &DBInfo{}
 	ch := new(codec.BincHandle)
 
-	err := store.View(func(tx KVTx) error {
-		info.GroupDirCombos, _ = countFromFullBucketScan(tx, GroupUsageBucket, countOnly, ch)
-		info.GroupMountCombos, info.GroupHistories = countFromFullBucketScan(tx, GroupHistoricalBucket, countHistories, ch)
-		info.GroupSubDirCombos, info.GroupSubDirs = countFromFullBucketScan(tx, GroupSubDirsBucket, countSubDirs, ch)
-		info.UserDirCombos, _ = countFromFullBucketScan(tx, UserUsageBucket, countOnly, ch)
-		info.UserSubDirCombos, info.UserSubDirs = countFromFullBucketScan(tx, UserSubDirsBucket, countSubDirs, ch)
+	err := store.View(func(r Reader) error {
+		info.GroupDirCombos, _ = countFromFullBucketScan(r, GroupUsageBucket, countOnly, ch)
+		info.GroupMountCombos, info.GroupHistories = countFromFullBucketScan(r, GroupHistoricalBucket, countHistories, ch)
+		info.GroupSubDirCombos, info.GroupSubDirs = countFromFullBucketScan(r, GroupSubDirsBucket, countSubDirs, ch)
+		info.UserDirCombos, _ = countFromFullBucketScan(r, UserUsageBucket, countOnly, ch)
+		info.UserSubDirCombos, info.UserSubDirs = countFromFullBucketScan(r, UserSubDirsBucket, countSubDirs, ch)
 		return nil
 	})
 	return info, err
 }
 
-func countFromFullBucketScan(tx KVTx, bucketName string,
+func countFromFullBucketScan(tx Reader, bucketName string,
 	cb func(v []byte, ch codec.Handle) int, ch codec.Handle,
 ) (int, int) {
 	count := 0
 	sliceLen := 0
 
-	_ = tx.ForEach(bucketName, func(k, v []byte) error {
+	_ = tx.ForEachRaw(bucketName, func(k, v []byte) error {
 		if !CheckAgeOfKeyIsAll(k) {
 			return nil
 		}

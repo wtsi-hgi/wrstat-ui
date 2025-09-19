@@ -1,29 +1,31 @@
-/*******************************************************************************
- * Copyright (c) 2022, 2023 Genome Research Ltd.
- *
- * Authors:
- *   Sendu Bala <sb10@sanger.ac.uk>
- *   Michael Woolnough <mw31@sanger.ac.uk>
- *
- * Permission is hereby granted, free of charge, to any person obtaining
- * a copy of this software and associated documentation files (the
- * "Software"), to deal in the Software without restriction, including
- * without limitation the rights to use, copy, modify, merge, publish,
- * distribute, sublicense, and/or sell copies of the Software, and to
- * permit persons to whom the Software is furnished to do so, subject to
- * the following conditions:
- *
- * The above copyright notice and this permission notice shall be included
- * in all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
- * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
- * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
- * IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
- * CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
- * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
- * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
- ******************************************************************************/
+/*
+*******************************************************************************
+* Copyright (c) 2022, 2023 Genome Research Ltd.
+*
+* Authors:
+*   Sendu Bala <sb10@sanger.ac.uk>
+*   Michael Woolnough <mw31@sanger.ac.uk>
+*
+* Permission is hereby granted, free of charge, to any person obtaining
+* a copy of this software and associated documentation files (the
+* "Software"), to deal in the Software without restriction, including
+* without limitation the rights to use, copy, modify, merge, publish,
+* distribute, sublicense, and/or sell copies of the Software, and to
+* permit persons to whom the Software is furnished to do so, subject to
+* the following conditions:
+*
+* The above copyright notice and this permission notice shall be included
+* in all copies or substantial portions of the Software.
+*
+* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+* IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+* CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+* TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+* SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+*******************************************************************************
+ */
 
 package basedirs
 
@@ -34,7 +36,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ugorji/go/codec"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 )
 
@@ -91,65 +92,31 @@ func (b *BaseDirs) Output(users, groups IDAgeDirs) error {
 	return b.store.Update(b.storeDateQuotasFill())
 }
 
-func (b *BaseDirs) updateDatabase(users, groups IDAgeDirs) func(KVTx) error {
-	return func(tx KVTx) error {
-		if err := clearUsageBuckets(tx); err != nil {
-			return err
-		}
-
-		if err := createBucketsIfNotExist(tx); err != nil {
-			return err
-		}
-
-		if errc := b.calculateUsage(tx, groups, users); errc != nil {
+func (b *BaseDirs) updateDatabase(users, groups IDAgeDirs) func(Writer) error {
+	return func(w Writer) error {
+		if errc := b.calculateUsage(w, groups, users); errc != nil {
 			return errc
 		}
-
-		if errc := b.updateHistories(tx, groups); errc != nil {
+		if errc := b.updateHistories(w, groups); errc != nil {
 			return errc
 		}
-
-		return b.calculateSubDirUsage(tx, groups, users)
+		return b.calculateSubDirUsage(w, groups, users)
 	}
 }
 
-func clearUsageBuckets(tx KVTx) error {
-	// Best-effort deletes; ignore missing buckets.
-	_ = tx.DeleteBucket(GroupUsageBucket)
-	_ = tx.DeleteBucket(UserUsageBucket)
-	return nil
-}
-
-func createBucketsIfNotExists(tx KVTx) error { return createBucketsIfNotExist(tx) }
-
-func createBucketsIfNotExist(tx KVTx) error {
-	for _, bucket := range [...]string{
-		GroupUsageBucket, GroupHistoricalBucket,
-		GroupSubDirsBucket, UserUsageBucket, UserSubDirsBucket,
-	} {
-		if errc := tx.CreateBucketIfNotExists(bucket); errc != nil {
-			return errc
-		}
-	}
-
-	return nil
-}
-
-func (b *BaseDirs) calculateUsage(tx KVTx, gidBase IDAgeDirs, uidBase IDAgeDirs) error {
-	if errc := b.storeGIDBaseDirs(tx, gidBase); errc != nil {
+func (b *BaseDirs) calculateUsage(w Writer, gidBase IDAgeDirs, uidBase IDAgeDirs) error {
+	if errc := b.storeGIDBaseDirs(w, gidBase); errc != nil {
 		return errc
 	}
 
-	return b.storeUIDBaseDirs(tx, uidBase)
+	return b.storeUIDBaseDirs(w, uidBase)
 }
 
-func (b *BaseDirs) storeGIDBaseDirs(tx KVTx, gidBase IDAgeDirs) error { //nolint:gocognit
-
+func (b *BaseDirs) storeGIDBaseDirs(w Writer, gidBase IDAgeDirs) error { //nolint:gocognit
 	for gid, dcss := range gidBase {
 		for _, adcs := range dcss {
 			for _, dcs := range adcs {
 				quotaSize, quotaInode := b.quotas.Get(gid, dcs.Dir)
-
 				uwm := &Usage{
 					GID:         gid,
 					UIDs:        dcs.UIDs,
@@ -161,14 +128,12 @@ func (b *BaseDirs) storeGIDBaseDirs(tx KVTx, gidBase IDAgeDirs) error { //nolint
 					Mtime:       dcs.Mtime,
 					Age:         dcs.Age,
 				}
-
-				if err := tx.Put(GroupUsageBucket, keyName(gid, dcs.Dir, uwm.Age), b.encodeToBytes(uwm)); err != nil {
+				if err := w.PutGroupUsage(uwm); err != nil {
 					return err
 				}
 			}
 		}
 	}
-
 	return nil
 }
 
@@ -188,15 +153,9 @@ func keyName(id uint32, path string, age db.DirGUTAge) []byte {
 	return b
 }
 
-func (b *BaseDirs) encodeToBytes(data any) []byte {
-	var encoded []byte
-	enc := codec.NewEncoderBytes(&encoded, b.ch)
-	enc.MustEncode(data)
+// Removed encodeToBytes; encoding is handled by backend adapters.
 
-	return encoded
-}
-
-func (b *BaseDirs) storeUIDBaseDirs(tx KVTx, uidBase IDAgeDirs) error { //nolint:gocognit
+func (b *BaseDirs) storeUIDBaseDirs(w Writer, uidBase IDAgeDirs) error { //nolint:gocognit
 
 	for uid, dcss := range uidBase {
 		for _, adcs := range dcss {
@@ -211,7 +170,7 @@ func (b *BaseDirs) storeUIDBaseDirs(tx KVTx, uidBase IDAgeDirs) error { //nolint
 					Age:         dcs.Age,
 				}
 
-				if err := tx.Put(UserUsageBucket, keyName(uid, dcs.Dir, uwm.Age), b.encodeToBytes(uwm)); err != nil {
+				if err := w.PutUserUsage(uwm); err != nil {
 					return err
 				}
 			}
@@ -221,12 +180,12 @@ func (b *BaseDirs) storeUIDBaseDirs(tx KVTx, uidBase IDAgeDirs) error { //nolint
 	return nil
 }
 
-func (b *BaseDirs) updateHistories(tx KVTx, gidBase IDAgeDirs) error {
+func (b *BaseDirs) updateHistories(w Writer, gidBase IDAgeDirs) error {
 
 	gidMounts := b.gidsToMountpoints(gidBase)
 
 	for gid, mounts := range gidMounts {
-		if err := b.updateGroupHistories(tx, gid, mounts); err != nil {
+		if err := b.updateGroupHistories(w, gid, mounts); err != nil {
 			return err
 		}
 	}
@@ -270,21 +229,29 @@ func (b *BaseDirs) dcssToMountPoints(dcss *AgeDirs) map[string]db.DirSummary {
 	return mounts
 }
 
-func (b *BaseDirs) updateGroupHistories(tx KVTx, gid uint32,
+func (b *BaseDirs) updateGroupHistories(w Writer, gid uint32,
 	mounts map[string]db.DirSummary,
 ) error {
 	for mount, ds := range mounts {
 		quotaSize, quotaInode := b.quotas.Get(gid, mount)
 
-		key := keyName(gid, mount, ds.Age)
-		existing, _ := tx.Get(GroupHistoricalBucket, key)
-
-		histories, err := b.updateHistory(ds, quotaSize, quotaInode, b.modTime, existing)
+		// Merge new history with existing: append only if newer than last entry
+		existing, err := w.History(gid, mount)
 		if err != nil {
 			return err
 		}
-
-		if err = tx.Put(GroupHistoricalBucket, key, histories); err != nil {
+		if len(existing) > 0 && !b.modTime.After(existing[len(existing)-1].Date) {
+			// existing history already up-to-date for this timestamp or newer; skip
+			continue
+		}
+		updated := append(existing, History{
+			Date:        b.modTime,
+			UsageSize:   ds.Size,
+			UsageInodes: ds.Count,
+			QuotaSize:   quotaSize,
+			QuotaInodes: quotaInode,
+		})
+		if err = w.PutHistory(gid, mount, updated); err != nil {
 			return err
 		}
 	}
@@ -292,35 +259,7 @@ func (b *BaseDirs) updateGroupHistories(tx KVTx, gid uint32,
 	return nil
 }
 
-func (b *BaseDirs) updateHistory(ds db.DirSummary, quotaSize, quotaInode uint64,
-	historyDate time.Time, existing []byte,
-) ([]byte, error) {
-	var histories []History
-
-	if existing != nil { //nolint:nestif
-		if err := b.decodeFromBytes(existing, &histories); err != nil {
-			return nil, err
-		}
-
-		if len(histories) > 0 && !historyDate.After(histories[len(histories)-1].Date) {
-			return existing, nil
-		}
-	}
-
-	histories = append(histories, History{
-		Date:        historyDate,
-		UsageSize:   ds.Size,
-		UsageInodes: ds.Count,
-		QuotaSize:   quotaSize,
-		QuotaInodes: quotaInode,
-	})
-
-	return b.encodeToBytes(histories), nil
-}
-
-func (b *BaseDirs) decodeFromBytes(encoded []byte, data any) error {
-	return codec.NewDecoderBytes(encoded, b.ch).Decode(data)
-}
+// updateHistory and decode/encode helpers removed; storage encoding is handled by the backend adapter.
 
 // UsageBreakdownByType is a map of file type to total size of files in bytes
 // with that type.
@@ -359,20 +298,20 @@ type SubDir struct {
 	FileUsage    UsageBreakdownByType
 }
 
-func (b *BaseDirs) calculateSubDirUsage(tx KVTx, gidBase, uidBase IDAgeDirs) error {
-	if errc := b.storeGIDSubDirs(tx, gidBase); errc != nil {
+func (b *BaseDirs) calculateSubDirUsage(w Writer, gidBase, uidBase IDAgeDirs) error {
+	if errc := b.storeGIDSubDirs(w, gidBase); errc != nil {
 		return errc
 	}
 
-	return b.storeUIDSubDirs(tx, uidBase)
+	return b.storeUIDSubDirs(w, uidBase)
 }
 
-func (b *BaseDirs) storeGIDSubDirs(tx KVTx, gidBase IDAgeDirs) error { //nolint:gocognit
+func (b *BaseDirs) storeGIDSubDirs(w Writer, gidBase IDAgeDirs) error { //nolint:gocognit
 
 	for gid, dcss := range gidBase {
 		for _, adcs := range dcss {
 			for _, dcs := range adcs {
-				if err := b.storeSubDirs(tx, GroupSubDirsBucket, gid, dcs); err != nil {
+				if err := b.storeSubDirs(w, GroupSubDirsBucket, gid, dcs); err != nil {
 					return err
 				}
 			}
@@ -382,16 +321,19 @@ func (b *BaseDirs) storeGIDSubDirs(tx KVTx, gidBase IDAgeDirs) error { //nolint:
 	return nil
 }
 
-func (b *BaseDirs) storeSubDirs(tx KVTx, bucket string, id uint32, dcs SummaryWithChildren) error {
-	return tx.Put(bucket, keyName(id, dcs.Dir, dcs.Age), b.encodeToBytes(dcs.Children))
+func (b *BaseDirs) storeSubDirs(w Writer, bucket string, id uint32, dcs SummaryWithChildren) error {
+	if bucket == GroupSubDirsBucket {
+		return w.PutGroupSubDirs(id, dcs.Dir, uint16(dcs.Age), dcs.Children)
+	}
+	return w.PutUserSubDirs(id, dcs.Dir, uint16(dcs.Age), dcs.Children)
 }
 
-func (b *BaseDirs) storeUIDSubDirs(tx KVTx, uidBase IDAgeDirs) error { //nolint:gocognit
+func (b *BaseDirs) storeUIDSubDirs(w Writer, uidBase IDAgeDirs) error { //nolint:gocognit
 
 	for uid, dcss := range uidBase {
 		for _, adcs := range dcss {
 			for _, dcs := range adcs {
-				if err := b.storeSubDirs(tx, UserSubDirsBucket, uid, dcs); err != nil {
+				if err := b.storeSubDirs(w, UserSubDirsBucket, uid, dcs); err != nil {
 					return err
 				}
 			}
@@ -409,53 +351,29 @@ func (b *BaseDirs) storeUIDSubDirs(tx KVTx, uidBase IDAgeDirs) error { //nolint:
 //
 // This is done as a separate transaction to updateDatabase() so we have access
 // to the latest stored history, without having to have all histories in memory.
-func (b *BaseDirs) storeDateQuotasFill() func(KVTx) error {
-	return func(tx KVTx) error {
-		// iterate over all items in GroupUsage and update DateNoSpace/DateNoFiles
-		return tx.ForEach(GroupUsageBucket, func(_, data []byte) error {
-			gu := new(Usage)
-
-			if err := b.decodeFromBytes(data, gu); err != nil {
-				return err
-			}
-
+func (b *BaseDirs) storeDateQuotasFill() func(Writer) error {
+	return func(w Writer) error {
+		return w.ForEachGroupUsage(func(gu *Usage) error {
 			if gu.Age != db.DGUTAgeAll {
 				return nil
 			}
-
-			h, err := b.history(tx, gu.GID, gu.BaseDir)
+			mp := b.mountPoints.prefixOf(gu.BaseDir)
+			if mp == "" {
+				return nil
+			}
+			h, err := w.History(gu.GID, mp)
 			if err != nil {
 				return err
 			}
-
 			sizeExceedDate, inodeExceedDate := DateQuotaFull(h)
 			gu.DateNoSpace = sizeExceedDate
 			gu.DateNoFiles = inodeExceedDate
-
-			return tx.Put(GroupUsageBucket, keyName(gu.GID, gu.BaseDir, db.DGUTAgeAll), b.encodeToBytes(gu))
+			return w.PutGroupUsage(gu)
 		})
 	}
 }
 
-func (b *BaseDirs) history(tx KVTx, gid uint32, path string) ([]History, error) {
-	mp := b.mountPoints.prefixOf(path)
-	if mp == "" {
-		return nil, ErrInvalidBasePath
-	}
-
-	var history []History
-
-	key := historyKey(gid, mp)
-
-	data, _ := tx.Get(GroupHistoricalBucket, key)
-	if data == nil {
-		return nil, ErrNoBaseDirHistory
-	}
-
-	err := b.decodeFromBytes(data, &history)
-
-	return history, err
-}
+// mustDecodeHistories removed.
 
 // Merge and open-helper functions are backend-specific and have been removed from this
 // backend-agnostic package. Implementations should live alongside the backend adapters.

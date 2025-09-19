@@ -1,12 +1,15 @@
 package bolt
 
 import (
+	"encoding/binary"
 	"os"
 
+	"github.com/ugorji/go/codec"
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
+	"github.com/wtsi-hgi/wrstat-ui/db"
 )
 
-// Basedirs is a Bolt-backed implementation of basedirs.BasedirsStore.
+// Basedirs is a Bolt-backed implementation of basedirs.Store.
 // Use NewBasedirs for writable and OpenReadOnlyBasedirs for read-only access.
 type Basedirs struct{ db *DB }
 
@@ -35,59 +38,226 @@ func OpenReadOnlyBasedirs(path string) (*Basedirs, error) {
 // Close closes the underlying database.
 func (s *Basedirs) Close() error { return s.db.Close() }
 
-// Update runs a read-write transaction using the basedirs KVTx adapter.
-func (s *Basedirs) Update(fn func(basedirs.KVTx) error) error {
-	return s.db.Update(func(tx *Tx) error { return fn(&bdTx{tx}) })
+// Update runs a read-write transaction providing a basedirs.Writer.
+func (s *Basedirs) Update(fn func(basedirs.Writer) error) error {
+	return s.db.Update(func(tx *Tx) error { return fn(&bdWriter{tx}) })
 }
 
-// View runs a read-only transaction using the basedirs KVTx adapter.
-func (s *Basedirs) View(fn func(basedirs.KVTx) error) error {
-	return s.db.View(func(tx *Tx) error { return fn(&bdTx{tx}) })
+// View runs a read-only transaction providing a basedirs.Reader.
+func (s *Basedirs) View(fn func(basedirs.Reader) error) error {
+	return s.db.View(func(tx *Tx) error { return fn(&bdReader{tx}) })
 }
 
-// bdTx adapts bolt.Tx to the basedirs.KVTx interface.
-type bdTx struct{ *Tx }
+// bdReader adapts bolt.Tx to the basedirs.Reader interface.
+type bdReader struct{ *Tx }
 
-func (t *bdTx) Put(bucket string, key, value []byte) error {
-	if _, err := t.Tx.CreateBucketIfNotExists([]byte(bucket)); err != nil {
-		return err
-	}
-	b := t.Tx.Bucket([]byte(bucket))
-	if b == nil {
-		return nil
-	}
-	return b.Put(key, value)
-}
-
-func (t *bdTx) Get(bucket string, key []byte) ([]byte, error) {
-	b := t.Bucket([]byte(bucket))
+func (r *bdReader) GroupUsage(age uint16) ([]*basedirs.Usage, error) {
+	var out []*basedirs.Usage
+	b := r.Bucket([]byte(basedirs.GroupUsageBucket))
 	if b == nil {
 		return nil, nil
 	}
-	return b.Get(key), nil
+	err := b.ForEach(func(_, v []byte) error {
+		var u basedirs.Usage
+		if err := codecDecode(v, &u); err != nil {
+			return err
+		}
+		if uint16(u.Age) == age {
+			out = append(out, &u)
+		}
+		return nil
+	})
+	return out, err
 }
 
-func (t *bdTx) ForEach(bucket string, fn func(k, v []byte) error) error {
-	b := t.Bucket([]byte(bucket))
+func (r *bdReader) UserUsage(age uint16) ([]*basedirs.Usage, error) {
+	var out []*basedirs.Usage
+	b := r.Bucket([]byte(basedirs.UserUsageBucket))
+	if b == nil {
+		return nil, nil
+	}
+	err := b.ForEach(func(_, v []byte) error {
+		var u basedirs.Usage
+		if err := codecDecode(v, &u); err != nil {
+			return err
+		}
+		if uint16(u.Age) == age {
+			out = append(out, &u)
+		}
+		return nil
+	})
+	return out, err
+}
+
+func (r *bdReader) GroupSubDirs(gid uint32, basedir string, age uint16) ([]*basedirs.SubDir, error) {
+	b := r.Bucket([]byte(basedirs.GroupSubDirsBucket))
+	if b == nil {
+		return nil, nil
+	}
+	v := b.Get(basedirsKey(gid, basedir, age))
+	if v == nil {
+		return nil, nil
+	}
+	var out []*basedirs.SubDir
+	if err := codecDecode(v, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (r *bdReader) UserSubDirs(uid uint32, basedir string, age uint16) ([]*basedirs.SubDir, error) {
+	b := r.Bucket([]byte(basedirs.UserSubDirsBucket))
+	if b == nil {
+		return nil, nil
+	}
+	v := b.Get(basedirsKey(uid, basedir, age))
+	if v == nil {
+		return nil, nil
+	}
+	var out []*basedirs.SubDir
+	if err := codecDecode(v, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (r *bdReader) History(gid uint32, mountpoint string) ([]basedirs.History, error) {
+	b := r.Bucket([]byte(basedirs.GroupHistoricalBucket))
+	if b == nil {
+		return nil, nil
+	}
+	v := b.Get(basedirsKey(gid, mountpoint, 0))
+	if v == nil {
+		return nil, nil
+	}
+	var out []basedirs.History
+	if err := codecDecode(v, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (r *bdReader) ForEachRaw(bucket string, fn func(k, v []byte) error) error {
+	b := r.Bucket([]byte(bucket))
 	if b == nil {
 		return nil
 	}
 	return b.ForEach(fn)
 }
 
-func (t *bdTx) Delete(bucket string, key []byte) error {
-	b := t.Bucket([]byte(bucket))
+// bdWriter adapts bolt.Tx to the basedirs.Writer interface.
+type bdWriter struct{ *Tx }
+
+func (w *bdWriter) ensure(bucket string) *Bucket {
+	b := w.Bucket([]byte(bucket))
+	if b != nil {
+		return b
+	}
+	nb, _ := w.CreateBucketIfNotExists([]byte(bucket))
+	return nb
+}
+
+func (w *bdWriter) PutGroupUsage(u *basedirs.Usage) error {
+	b := w.ensure(basedirs.GroupUsageBucket)
+	return b.Put(basedirsKey(u.GID, u.BaseDir, uint16(u.Age)), codecEncode(u))
+}
+
+func (w *bdWriter) PutUserUsage(u *basedirs.Usage) error {
+	b := w.ensure(basedirs.UserUsageBucket)
+	return b.Put(basedirsKey(u.UID, u.BaseDir, uint16(u.Age)), codecEncode(u))
+}
+
+func (w *bdWriter) PutGroupSubDirs(gid uint32, basedir string, age uint16, subs []*basedirs.SubDir) error {
+	b := w.ensure(basedirs.GroupSubDirsBucket)
+	return b.Put(basedirsKey(gid, basedir, age), codecEncode(subs))
+}
+
+func (w *bdWriter) PutUserSubDirs(uid uint32, basedir string, age uint16, subs []*basedirs.SubDir) error {
+	b := w.ensure(basedirs.UserSubDirsBucket)
+	return b.Put(basedirsKey(uid, basedir, age), codecEncode(subs))
+}
+
+func (w *bdWriter) PutHistory(gid uint32, mountpoint string, histories []basedirs.History) error {
+	if err := w.EnsureHistoryBucket(); err != nil {
+		return err
+	}
+	b := w.Bucket([]byte(basedirs.GroupHistoricalBucket))
+	return b.Put(basedirsKey(gid, mountpoint, 0), codecEncode(histories))
+}
+
+func (w *bdWriter) ForEachGroupUsage(fn func(*basedirs.Usage) error) error {
+	b := w.Bucket([]byte(basedirs.GroupUsageBucket))
+	if b == nil {
+		return nil
+	}
+	return b.ForEach(func(_, v []byte) error {
+		var u basedirs.Usage
+		if err := codecDecode(v, &u); err != nil {
+			return err
+		}
+		return fn(&u)
+	})
+}
+
+func (w *bdWriter) History(gid uint32, mountpoint string) ([]basedirs.History, error) {
+	b := w.Bucket([]byte(basedirs.GroupHistoricalBucket))
+	if b == nil {
+		return nil, nil
+	}
+	v := b.Get(basedirsKey(gid, mountpoint, 0))
+	if v == nil {
+		return nil, nil
+	}
+	var out []basedirs.History
+	if err := codecDecode(v, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (w *bdWriter) EnsureHistoryBucket() error {
+	_, err := w.CreateBucketIfNotExists([]byte(basedirs.GroupHistoricalBucket))
+	return err
+}
+
+func (w *bdWriter) PutRawHistory(key, value []byte) error {
+	b := w.ensure(basedirs.GroupHistoricalBucket)
+	return b.Put(key, value)
+}
+
+func (w *bdWriter) DeleteHistoryKey(key []byte) error {
+	b := w.Bucket([]byte(basedirs.GroupHistoricalBucket))
 	if b == nil {
 		return nil
 	}
 	return b.Delete(key)
 }
 
-func (t *bdTx) CreateBucketIfNotExists(bucket string) error {
-	_, err := t.Tx.CreateBucketIfNotExists([]byte(bucket))
-	return err
+// helpers
+func basedirsKey(id uint32, path string, age uint16) []byte {
+	// mirror basedirs.keyName implementation
+	length := 4 + 2 + 2 + len(path)
+	// id as little-endian uint32
+	b := make([]byte, 4, length)
+	binary.LittleEndian.PutUint32(b, id)
+	b = append(b, '-')
+	b = append(b, path...)
+	if db.DirGUTAge(age) != db.DGUTAgeAll {
+		b = append(b, '-')
+		b = b[:length]
+		binary.LittleEndian.PutUint16(b[length-2:], age)
+	}
+	return b
 }
 
-func (t *bdTx) DeleteBucket(bucket string) error {
-	return t.Tx.DeleteBucket([]byte(bucket))
+// codec helpers use the same encoding as basedirs (binc)
+func codecEncode(v any) []byte {
+	var out []byte
+	enc := codec.NewEncoderBytes(&out, new(codec.BincHandle))
+	enc.MustEncode(v)
+	return out
+}
+
+func codecDecode(bts []byte, v any) error {
+	return codec.NewDecoderBytes(bts, new(codec.BincHandle)).Decode(v)
 }

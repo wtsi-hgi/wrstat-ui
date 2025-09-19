@@ -1,43 +1,19 @@
 package basedirs
 
-// KVTx represents a transactional key-value accessor scoped by logical bucket names.
-// Backends map these to collections/tables as appropriate.
-//
-// Deprecated: This low-level KV abstraction will be replaced by domain-level
-// Reader/Writer interfaces. New backends should target the domain interfaces
-// defined below. Existing code will be migrated in a follow-up.
-type KVTx interface {
-	// Put stores a value for a key within a logical bucket.
-	Put(bucket string, key, value []byte) error
-	// Get retrieves a value for a key within a logical bucket.
-	Get(bucket string, key []byte) ([]byte, error)
-	// ForEach iterates all key/value pairs within a logical bucket.
-	ForEach(bucket string, fn func(k, v []byte) error) error
-	// Delete removes a key within a logical bucket.
-	Delete(bucket string, key []byte) error
-	// CreateBucketIfNotExists ensures a logical bucket exists.
-	CreateBucketIfNotExists(bucket string) error
-	// DeleteBucket removes a logical bucket if it exists.
-	DeleteBucket(bucket string) error
-}
-
-// BasedirsStore abstracts storage for basedirs data independent of any backend.
+// Store coordinates domain-level read/write transactions.
 // Implementations live in backend packages (eg. bolt, clickhouse).
-type BasedirsStore interface {
-	// Update performs a read-write transaction.
-	Update(func(KVTx) error) error
-	// View performs a read-only transaction.
-	View(func(KVTx) error) error
-	// Close releases any resources.
+type Store interface {
+	// Update provides a Writer-backed transaction for modifications.
+	Update(func(Writer) error) error
+	// View provides a Reader-backed transaction for reads.
+	View(func(Reader) error) error
+	// Close releases resources.
 	Close() error
 }
 
 // Reader is a domain-level read interface for basedirs data. Implementations
 // should provide efficient access to usage, subdirs, history and info without
 // exposing buckets or keys.
-//
-// Note: This is introduced for future migration; current code paths still use
-// KVTx via BasedirsStore. Adapters in backend packages will implement this.
 type Reader interface {
 	// GroupUsage returns usage for every GID-BaseDir for a given age.
 	GroupUsage(age uint16) ([]*Usage, error)
@@ -47,6 +23,10 @@ type Reader interface {
 	GroupSubDirs(gid uint32, basedir string, age uint16) ([]*SubDir, error)
 	// UserSubDirs returns the subdirectory details for a user's basedir.
 	UserSubDirs(uid uint32, basedir string, age uint16) ([]*SubDir, error)
+	// History returns the history for a gid and mountpoint path.
+	History(gid uint32, path string) ([]History, error)
+	// ForEachRaw allows scanning a logical collection for utilities like Info/Clean.
+	ForEachRaw(bucket string, fn func(k, v []byte) error) error
 }
 
 // Writer is a domain-level write interface covering updates used by summarise
@@ -65,14 +45,12 @@ type Writer interface {
 	// ForEachGroupUsage iterates all group usage records (age==All) to allow
 	// precomputations like DateQuotaFull. Return error to abort.
 	ForEachGroupUsage(func(*Usage) error) error
-}
-
-// Store coordinates domain-level read/write transactions.
-type Store interface {
-	// Update provides a Writer-backed transaction for modifications.
-	Update(func(Writer) error) error
-	// View provides a Reader-backed transaction for reads.
-	View(func(Reader) error) error
-	// Close releases resources.
-	Close() error
+	// History returns the history for a gid and mountpoint path (within write txn).
+	History(gid uint32, path string) ([]History, error)
+	// EnsureHistoryBucket ensures the history collection exists.
+	EnsureHistoryBucket() error
+	// PutRawHistory writes a raw history key/value (used for copying from another store).
+	PutRawHistory(key, value []byte) error
+	// DeleteHistoryKey deletes a raw key from the history collection (used for cleaning).
+	DeleteHistoryKey(key []byte) error
 }

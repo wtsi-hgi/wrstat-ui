@@ -1106,9 +1106,9 @@ func TestBaseDirs(t *testing.T) {
 				countKeys := func(bucket string) (int, int) {
 					lustreKeys, nfsKeys := 0, 0
 
-					scan := func(st basedirs.BasedirsStore) {
-						_ = st.View(func(tx basedirs.KVTx) error {
-							_ = tx.ForEach(bucket, func(k, _ []byte) error {
+					scan := func(st basedirs.Store) {
+						_ = st.View(func(r basedirs.Reader) error {
+							return r.ForEachRaw(bucket, func(k, _ []byte) error {
 								if !basedirs.CheckAgeOfKeyIsAll(k) {
 									return nil
 								}
@@ -1120,7 +1120,6 @@ func TestBaseDirs(t *testing.T) {
 								}
 								return nil
 							})
-							return nil
 						})
 					}
 

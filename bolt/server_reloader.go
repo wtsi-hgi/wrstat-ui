@@ -33,7 +33,7 @@ func StartServerReloader(
 
 	onChange := func(dirs, _ []string) bool {
 		var srcs []db.Source
-		var stores []basedirs.BasedirsStore
+		var stores []basedirs.Store
 		for _, d := range dirs {
 			srcs = append(srcs, NewDirSource(filepath.Join(d, dgutaDirBasename)))
 			bdb, err := OpenReadOnlyBasedirs(filepath.Join(d, basedirBasename))

@@ -33,21 +33,22 @@ const idLen = 4 + 1
 
 // CleanInvalidDBHistory removes irrelevant paths from the history bucket,
 // leaving only those with the specified path prefix.
-func CleanInvalidDBHistory(store BasedirsStore, prefix string) error { //nolint:gocognit
+func CleanInvalidDBHistory(store Store, prefix string) error { //nolint:gocognit
 	prefixB := []byte(prefix)
-	return store.Update(func(tx KVTx) error {
-		// iterate using ForEach and delete matching entries
-		var toDelete [][]byte
-		if err := tx.ForEach(GroupHistoricalBucket, func(k, _ []byte) error {
+	var toDelete [][]byte
+	if err := store.View(func(r Reader) error {
+		return r.ForEachRaw(GroupHistoricalBucket, func(k, _ []byte) error {
 			if len(k) > idLen && !bytes.HasPrefix(k[idLen:], prefixB) {
 				toDelete = append(toDelete, append([]byte(nil), k...))
 			}
 			return nil
-		}); err != nil {
-			return err
-		}
+		})
+	}); err != nil {
+		return err
+	}
+	return store.Update(func(w Writer) error {
 		for _, k := range toDelete {
-			if err := tx.Delete(GroupHistoricalBucket, k); err != nil {
+			if err := w.DeleteHistoryKey(k); err != nil {
 				return err
 			}
 		}
@@ -57,11 +58,11 @@ func CleanInvalidDBHistory(store BasedirsStore, prefix string) error { //nolint:
 
 // FindInvalidHistoryKeys returns a list of the keys from the history bucket
 // that do not contain the specified prefix.
-func FindInvalidHistoryKeys(store BasedirsStore, prefix string) ([][]byte, error) {
+func FindInvalidHistoryKeys(store Store, prefix string) ([][]byte, error) {
 	var toRemove [][]byte
 	prefixB := []byte(prefix)
-	err := store.View(func(tx KVTx) error {
-		return tx.ForEach(GroupHistoricalBucket, func(k, _ []byte) error {
+	err := store.View(func(tx Reader) error {
+		return tx.ForEachRaw(GroupHistoricalBucket, func(k, _ []byte) error {
 			if len(k) > idLen && !bytes.HasPrefix(k[idLen:], prefixB) {
 				toRemove = append(toRemove, append(make([]byte, 0, len(k)), k...))
 			}

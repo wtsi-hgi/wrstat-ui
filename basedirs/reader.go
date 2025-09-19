@@ -45,7 +45,7 @@ const (
 
 // BaseDirReader is used to read the information stored in a BaseDir database.
 type BaseDirReader struct {
-	store       BasedirsStore
+	store       Store
 	ch          codec.Handle
 	mountPoints mountPoints
 	groupCache  *GroupCache
@@ -56,7 +56,7 @@ type BaseDirReader struct {
 // NewReader returns a BaseDirReader that can return the summary information
 // stored in a BaseDir database. It takes an owners file (gid,name csv) to
 // associate groups with their owners in certain output.
-func NewReader(store BasedirsStore, ownersPath string) (*BaseDirReader, error) {
+func NewReader(store Store, ownersPath string) (*BaseDirReader, error) {
 	mp, err := getMountPoints()
 	if err != nil {
 		return nil, err
@@ -90,30 +90,27 @@ func (b *BaseDirReader) GroupUsage(age db.DirGUTAge) ([]*Usage, error) {
 
 func (b *BaseDirReader) usage(bucketName string, age db.DirGUTAge) ([]*Usage, error) {
 	var uwms []*Usage
-
-	if err := b.store.View(func(tx KVTx) error {
-		return tx.ForEach(bucketName, func(_, data []byte) error {
-			uwm := new(Usage)
-			if err := b.decodeFromBytes(data, uwm); err != nil {
-				return err
-			}
-
-			if uwm.Age != age {
-				return nil
-			}
-
+	if err := b.store.View(func(r Reader) error {
+		var err error
+		switch bucketName {
+		case GroupUsageBucket:
+			uwms, err = r.GroupUsage(uint16(age))
+		case UserUsageBucket:
+			uwms, err = r.UserUsage(uint16(age))
+		default:
+			err = fmt.Errorf("unknown bucket: %s", bucketName)
+		}
+		if err != nil {
+			return err
+		}
+		for _, uwm := range uwms {
 			uwm.Owner = b.owners[uwm.GID]
-
 			uwm.Name = b.getNameBasedOnBucket(bucketName, uwm)
-
-			uwms = append(uwms, uwm)
-
-			return nil
-		})
+		}
+		return nil
 	}); err != nil {
 		return nil, err
 	}
-
 	return uwms, nil
 }
 
@@ -144,15 +141,17 @@ func (b *BaseDirReader) GroupSubDirs(gid uint32, basedir string, age db.DirGUTAg
 
 func (b *BaseDirReader) subDirs(bucket string, id uint32, basedir string, age db.DirGUTAge) ([]*SubDir, error) {
 	var sds []*SubDir
-
-	if err := b.store.View(func(tx KVTx) error {
-		data, _ := tx.Get(bucket, keyName(id, basedir, age))
-
-		if data == nil {
-			return nil
+	if err := b.store.View(func(r Reader) error {
+		var err error
+		switch bucket {
+		case GroupSubDirsBucket:
+			sds, err = r.GroupSubDirs(id, basedir, uint16(age))
+		case UserSubDirsBucket:
+			sds, err = r.UserSubDirs(id, basedir, uint16(age))
+		default:
+			err = fmt.Errorf("unknown bucket: %s", bucket)
 		}
-
-		return b.decodeFromBytes(data, &sds)
+		return err
 	}); err != nil {
 		return nil, err
 	}

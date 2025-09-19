@@ -64,14 +64,16 @@ func (b *BaseDirReader) History(gid uint32, path string) ([]History, error) {
 
 	var history []History
 
-	if err := b.store.View(func(tx KVTx) error {
-		key := historyKey(gid, mp)
-		data, _ := tx.Get(GroupHistoricalBucket, key)
-		if data == nil {
+	if err := b.store.View(func(r Reader) error {
+		var err error
+		history, err = r.History(gid, mp)
+		if err != nil {
+			return err
+		}
+		if history == nil {
 			return ErrNoBaseDirHistory
 		}
-
-		return b.decodeFromBytes(data, &history)
+		return nil
 	}); err != nil {
 		return nil, err
 	}
@@ -199,14 +201,14 @@ func calculateTrend(maxV uint64, latestTime, oldestTime time.Time, latestValue, 
 }
 
 // CopyHistoryFrom copies GroupHistoricalBucket data from another store.
-func (b *BaseDirs) CopyHistoryFrom(source BasedirsStore) error {
-	return b.store.Update(func(destTx KVTx) error {
-		if err := destTx.CreateBucketIfNotExists(GroupHistoricalBucket); err != nil {
+func (b *BaseDirs) CopyHistoryFrom(source Store) error {
+	return b.store.Update(func(w Writer) error {
+		if err := w.EnsureHistoryBucket(); err != nil {
 			return err
 		}
-		return source.View(func(srcTx KVTx) error {
-			return srcTx.ForEach(GroupHistoricalBucket, func(k, v []byte) error {
-				return destTx.Put(GroupHistoricalBucket, k, v)
+		return source.View(func(r Reader) error {
+			return r.ForEachRaw(GroupHistoricalBucket, func(k, v []byte) error {
+				return w.PutRawHistory(k, v)
 			})
 		})
 	})
