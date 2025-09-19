@@ -190,7 +190,7 @@ func TestDGUTA(t *testing.T) {
 				paths, err := testMakeDBPaths(t)
 				So(err, ShouldBeNil)
 
-				d := db.NewDB(paths[0])
+				d := db.NewDB(bolt.NewDirSource(paths[0]))
 				So(d, ShouldNotBeNil)
 
 				Convey("You can store it in a database file", func() {
@@ -218,7 +218,7 @@ func TestDGUTA(t *testing.T) {
 						So(errt, ShouldBeNil)
 						So(keys, ShouldResemble, []string{"/", "/a/", "/a/b/", "/a/b/d/", "/a/b/e/", "/a/b/e/h/", "/a/c/"})
 						Convey("You can query a database after Open()ing it", func() {
-							d = db.NewDB(paths[0])
+							d = db.NewDB(bolt.NewDirSource(paths[0]))
 
 							d.Close()
 
@@ -336,7 +336,7 @@ func TestDGUTA(t *testing.T) {
 						})
 
 						Convey("Open()s fail on invalid databases", func() {
-							d = db.NewDB(paths[0])
+							d = db.NewDB(bolt.NewDirSource(paths[0]))
 
 							d.Close()
 
@@ -382,11 +382,11 @@ func TestDGUTA(t *testing.T) {
 								err = os.Mkdir(path2, os.ModePerm)
 								So(err, ShouldBeNil)
 
-								db2 := db.NewDB(path2)
+								db2 := db.NewDB(bolt.NewDirSource(path2))
 								err = store(db2, data, 4)
 								So(err, ShouldBeNil)
 
-								d = db.NewDB(paths[0], path2)
+								d = db.NewDB(bolt.NewDirSource(paths[0]), bolt.NewDirSource(path2))
 								err = d.Open()
 								So(err, ShouldBeNil)
 
@@ -471,7 +471,7 @@ func TestDGUTA(t *testing.T) {
 			})
 
 			Convey("You can't Store to or Open an unwritable location", func() {
-				d := db.NewDB("/dguta.db")
+				d := db.NewDB(bolt.NewDirSource("/dguta.db"))
 				So(d, ShouldNotBeNil)
 
 				err := store(d, data, 4)
@@ -483,7 +483,7 @@ func TestDGUTA(t *testing.T) {
 				paths, err := testMakeDBPaths(t)
 				So(err, ShouldBeNil)
 
-				d = db.NewDB(paths[0])
+				d = db.NewDB(bolt.NewDirSource(paths[0]))
 
 				err = os.WriteFile(paths[2], []byte("foo"), 0o600)
 				So(err, ShouldBeNil)

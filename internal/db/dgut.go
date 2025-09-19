@@ -37,6 +37,7 @@ import (
 	"time"
 
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
+	bolt "github.com/wtsi-hgi/wrstat-ui/bolt"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 	internaldata "github.com/wtsi-hgi/wrstat-ui/internal/data"
 	"github.com/wtsi-hgi/wrstat-ui/internal/fs"
@@ -100,7 +101,7 @@ func addDirgutaSummariser(s *summary.Summariser, path string) (func() error, err
 		return nil, err
 	}
 
-	d := db.NewDB(path)
+	d := db.NewDB(bolt.NewDirSource(path))
 	d.SetBatchSize(exampleDBBatchSize)
 
 	if err := d.CreateDB(); err != nil {

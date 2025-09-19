@@ -30,6 +30,7 @@ import (
 	"time"
 
 	. "github.com/smartystreets/goconvey/convey"
+	bolt "github.com/wtsi-hgi/wrstat-ui/bolt"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 	internaldata "github.com/wtsi-hgi/wrstat-ui/internal/data"
 	"github.com/wtsi-hgi/wrstat-ui/internal/fs"
@@ -306,7 +307,7 @@ func TestTree(t *testing.T) {
 		paths1, err := testMakeDBPaths(t)
 		So(err, ShouldBeNil)
 
-		adb := db.NewDB(paths1[0])
+		adb := db.NewDB(bolt.NewDirSource(paths1[0]))
 
 		adb.SetBatchSize(20)
 
@@ -321,7 +322,7 @@ func TestTree(t *testing.T) {
 		paths2, err := testMakeDBPaths(t)
 		So(err, ShouldBeNil)
 
-		adb = db.NewDB(paths2[0])
+		adb = db.NewDB(bolt.NewDirSource(paths2[0]))
 
 		adb.SetBatchSize(20)
 
@@ -381,7 +382,7 @@ func TestTree(t *testing.T) {
 func testCreateDB(t *testing.T, path string, refUnixTime int64) error {
 	t.Helper()
 
-	return fillTestDB(db.NewDB(path), internaldata.CreateDefaultTestData(1, 2, 1, 101, 102, refUnixTime))
+	return fillTestDB(db.NewDB(bolt.NewDirSource(path)), internaldata.CreateDefaultTestData(1, 2, 1, 101, 102, refUnixTime))
 }
 
 func fillTestDB(adb *db.DB, files *statsdata.Directory) error {

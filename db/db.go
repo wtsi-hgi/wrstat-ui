@@ -183,27 +183,8 @@ type DB struct {
 	ch         codec.Handle
 }
 
-// NewDB returns a *DB that can be used to create or query a dguta database.
-// Provide the path to directory that (will) store(s) the database files. In the
-// case of only reading databases with Open(), you can supply multiple directory
-// paths to query all of them simultaneously.
-// NewDB preserves the original path-based constructor by converting paths to
-// Sources using the DefaultSourceFactory. Backend implementations should set
-// the default SourceFactory during init().
-func NewDB(paths ...string) *DB {
-	var srcs []Source
-	if sf := DefaultSourceFactory(); sf != nil {
-		for _, p := range paths {
-			if s, err := sf.FromPath(p); err == nil {
-				srcs = append(srcs, s)
-			}
-		}
-	}
-	return &DB{sources: srcs, batchSize: 1}
-}
-
-// NewDBFromSources constructs a DB from backend-agnostic Sources.
-func NewDBFromSources(srcs ...Source) *DB { return &DB{sources: srcs, batchSize: 1} }
+// NewDB constructs a DB from backend-agnostic Sources.
+func NewDB(srcs ...Source) *DB { return &DB{sources: srcs, batchSize: 1} }
 
 func (d *DB) SetBatchSize(batchSize int) {
 	d.batchSize = batchSize

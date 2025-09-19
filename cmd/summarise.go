@@ -393,7 +393,7 @@ func addDirgutaSummariser(s *summary.Summariser, dirgutaDB string) (func() error
 	}
 
 	src := bolt.NewDirSource(dirgutaDB)
-	d := db.NewDBFromSources(src)
+	d := db.NewDB(src)
 
 	if err := d.CreateDB(); err != nil {
 		return nil, err
