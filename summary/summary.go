@@ -64,7 +64,9 @@ func (s *SummaryWithTimes) Add(size int64, atime int64, mtime int64) {
 		s.Atime = atime
 	}
 
-	if mtime > 0 && (s.Mtime == 0 || mtime > s.Mtime) {
+	// Allow negative mtimes (pre-epoch) so newest modification time across
+	// filtered results is preserved even when all mtimes are before epoch.
+	if s.Mtime == 0 || mtime > s.Mtime {
 		s.Mtime = mtime
 	}
 }
@@ -79,7 +81,9 @@ func (s *SummaryWithTimes) AddSummary(t *SummaryWithTimes) {
 		s.Atime = t.Atime
 	}
 
-	if t.Mtime > 0 && (s.Mtime == 0 || t.Mtime > s.Mtime) {
+	// Allow negative mtimes (pre-epoch) when merging summaries so that the
+	// newest modification time across aggregates is preserved consistently.
+	if s.Mtime == 0 || t.Mtime > s.Mtime {
 		s.Mtime = t.Mtime
 	}
 }

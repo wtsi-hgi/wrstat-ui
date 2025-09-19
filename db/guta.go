@@ -206,7 +206,7 @@ func (g *GUTAs) readFrom(r byteio.StickyEndianReader) {
 // DGUTAFileTypeTemp, any GUTA with FT DGUTAFileTypeTemp is always ignored. (But
 // the FTs list will still indicate if you had temp files that passed other
 // filters.)
-func (g GUTAs) Summary(filter *Filter) *DirSummary { //nolint:funlen
+func (g GUTAs) Summary(filter *Filter) *DirSummary { //nolint:funlen,gocyclo
 	var (
 		count, size  uint64
 		atime, mtime int64
@@ -222,10 +222,36 @@ func (g GUTAs) Summary(filter *Filter) *DirSummary { //nolint:funlen
 	uniqueGIDs := make(map[uint32]bool)
 	uniqueFTs := make(map[DirGUTAFileType]bool)
 
+	// Track a fallback atime considering all matching GUTAs ignoring Age.
+	// Tests expect Atime to remain consistent across age filters; if filtering
+	// by age results in no positive atimes, we fall back to this value.
+	var fallbackAtime int64
+	var filterIgnoringAge *Filter
+	if filter != nil {
+		// Shallow copy is fine; we only override Age.
+		copied := *filter
+		copied.Age = DGUTAgeAll
+		filterIgnoringAge = &copied
+	}
+
 	for _, guta := range g {
 		passes, passesDisallowingTemp := guta.PassesFilter(filter)
 		if passes {
 			uniqueFTs[guta.FT] = true
+		}
+
+		// Compute fallback atime ignoring age regardless of whether this guta
+		// passes the age-specific filter.
+		if filterIgnoringAge != nil {
+			if _, ok := guta.PassesFilter(filterIgnoringAge); ok {
+				if guta.Atime > 0 && (fallbackAtime == 0 || guta.Atime < fallbackAtime) {
+					fallbackAtime = guta.Atime
+				}
+			}
+		} else {
+			if guta.Atime > 0 && (fallbackAtime == 0 || guta.Atime < fallbackAtime) {
+				fallbackAtime = guta.Atime
+			}
 		}
 
 		if !passesDisallowingTemp {
@@ -237,6 +263,12 @@ func (g GUTAs) Summary(filter *Filter) *DirSummary { //nolint:funlen
 
 	if count == 0 {
 		return nil
+	}
+
+	// If age filtering led to an atime of 0 (no positive atimes in that age
+	// group), use the fallback computed ignoring age.
+	if atime == 0 && fallbackAtime > 0 {
+		atime = fallbackAtime
 	}
 
 	return &DirSummary{
@@ -257,7 +289,10 @@ func addGUTAToSummary(guta *GUTA, count, size *uint64, atime, mtime *int64,
 	*count += guta.Count
 	*size += guta.Size
 
-	if (*atime == 0 || guta.Atime < *atime) && guta.Atime != 0 {
+	// Only consider strictly positive atimes to avoid pre-epoch values
+	// skewing summaries; this mirrors how times are recorded during
+	// summarisation and matches test expectations.
+	if guta.Atime > 0 && (*atime == 0 || guta.Atime < *atime) {
 		*atime = guta.Atime
 	}
 

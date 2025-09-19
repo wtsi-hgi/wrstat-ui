@@ -398,8 +398,23 @@ func (p *StatsParser) parseNumberColumn(v *int64) bool {
 
 	*v = 0
 
-	for _, c := range col {
-		*v = *v*10 + int64(c) - '0'
+	if len(col) == 0 {
+		return true
+	}
+
+	neg := false
+	start := 0
+	if col[0] == '-' { // handle negative numbers
+		neg = true
+		start = 1
+	}
+
+	for _, c := range col[start:] {
+		*v = *v*10 + int64(c-'0')
+	}
+
+	if neg {
+		*v = -*v
 	}
 
 	return true

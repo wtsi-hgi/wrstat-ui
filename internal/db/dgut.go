@@ -77,7 +77,7 @@ func CreateExampleDBsCustomIDsWithDir(t *testing.T, dir, uid, gidA, gidB string,
 	dbData := exampleDBData(t, uid, gidA, gidB, refTime)
 	s := summary.NewSummariser(stats.NewStatsParser(dbData))
 
-	fn, err := addDirgutaSummariser(s, dir)
+	fn, err := addDirgutaSummariser(s, dir, refTime)
 	if err != nil {
 		return err
 	}
@@ -94,7 +94,7 @@ func CreateExampleDBsCustomIDsWithDir(t *testing.T, dir, uid, gidA, gidB string,
 	return fn()
 }
 
-func addDirgutaSummariser(s *summary.Summariser, path string) (func() error, error) {
+func addDirgutaSummariser(s *summary.Summariser, path string, refTime int64) (func() error, error) {
 	path = filepath.Join(path, "dirguta")
 
 	if err := os.MkdirAll(path, 0755); err != nil {
@@ -108,7 +108,8 @@ func addDirgutaSummariser(s *summary.Summariser, path string) (func() error, err
 		return nil, err
 	}
 
-	s.AddDirectoryOperation(dirguta.NewDirGroupUserTypeAge(d))
+	// Use the provided refTime to ensure deterministic age buckets in tests
+	s.AddDirectoryOperation(dirguta.NewDirGroupUserTypeAgeWithRefTime(d, refTime))
 
 	return d.Close, nil
 }

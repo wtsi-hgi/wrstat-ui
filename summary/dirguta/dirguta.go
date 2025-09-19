@@ -112,6 +112,14 @@ func NewDirGroupUserTypeAge(db DB) summary.OperationGenerator {
 	return newDirGroupUserTypeAge(db, time.Now().Unix())
 }
 
+// NewDirGroupUserTypeAgeWithRefTime returns a DirGroupUserTypeAge using the
+// provided refTime instead of time.Now().Unix(). This is primarily intended
+// for tests to generate deterministic age buckets relative to a fixed
+// reference time.
+func NewDirGroupUserTypeAgeWithRefTime(db DB, refTime int64) summary.OperationGenerator {
+	return newDirGroupUserTypeAge(db, refTime)
+}
+
 func newDirGroupUserTypeAge(db DB, refTime int64) summary.OperationGenerator {
 	now := time.Now().Unix()
 
@@ -171,7 +179,7 @@ func (d *DirGroupUserTypeAge) Add(info *summary.FileInfo) error { //nolint:funle
 		gKeys.append(info.GID, info.UID, db.DGUTAFileTypeTemp)
 	}
 
-	d.addForEach(gKeys, info.Size, atime, maxInt(0, info.MTime))
+	d.addForEach(gKeys, info.Size, atime, info.MTime)
 	gutaKeyPool.Put(gutaKeysA)
 
 	return nil

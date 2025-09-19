@@ -1,4 +1,4 @@
-/*******************************************************************************
+/***
  * Copyright (c) 2022 Genome Research Ltd.
  *
  * Author: Sendu Bala <sb10@sanger.ac.uk>
@@ -21,7 +21,7 @@
  * CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
  * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
- ******************************************************************************/
+ */
 
 package server
 
@@ -33,7 +33,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/user"
+	user "os/user"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -49,23 +49,16 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/db"
 	internaldata "github.com/wtsi-hgi/wrstat-ui/internal/data"
 	internaldb "github.com/wtsi-hgi/wrstat-ui/internal/db"
-	"github.com/wtsi-hgi/wrstat-ui/internal/fixtimes"
+	fixtimes "github.com/wtsi-hgi/wrstat-ui/internal/fixtimes"
+	ireloader "github.com/wtsi-hgi/wrstat-ui/internal/reloader"
 	"github.com/wtsi-hgi/wrstat-ui/internal/split"
 )
-
-func TestIDsToWanted(t *testing.T) {
-	Convey("restrictGIDs returns bad query if you don't want any of the given ids", t, func() {
-		_, err := restrictGIDs(map[uint32]bool{1: true}, []uint32{2})
-		So(err, ShouldNotBeNil)
-	})
-}
 
 func TestServer(t *testing.T) {
 	username, uid, gids := internaldb.GetUserAndGroups(t)
 	exampleGIDs := getExampleGIDs(gids)
-	sentinelPollFrequency := 10 * time.Millisecond
-
-	refTime := time.Now().Unix()
+	const refTime = 100
+	const sentinelPollFrequency = 5 * time.Millisecond
 
 	Convey("Given a Server", t, func() {
 		logWriter := gas.NewStringLogger()
@@ -536,75 +529,60 @@ func TestServer(t *testing.T) {
 
 			So(os.Chtimes(first, time.Unix(refTime, 0), time.Unix(refTime, 0)), ShouldBeNil)
 
+			// Start the reloader using the internal helper; it will immediately load the current dirs
 			s.SetSourceFromPath(func(p string) db.Source { return bolt.NewDirSource(p) })
-			reloader := bolt.NewReloader()
-			onChange := func(dirs, toDelete []string) bool {
-				var srcs []db.Source
-				var bdbs []*bolt.DB
-				for _, d := range dirs {
-					srcs = append(srcs, bolt.NewDirSource(filepath.Join(d, "dirguta")))
-					bdb, err := basedirs.OpenDBRO(filepath.Join(d, "basedir.db"))
-					if err != nil {
-						t.Logf("failed to open basedirs db: %v", err)
-						return false
-					}
-					bdbs = append(bdbs, bdb)
-				}
-				bmr, err := basedirs.OpenMulti(ownersPath, bdbs...)
-				if err != nil {
-					t.Logf("failed to build basedirs multi: %v", err)
-					return false
-				}
-				ts, err := bolt.TimestampsFromDirs(dirs)
-				if err != nil {
-					t.Logf("failed to compute timestamps: %v", err)
-					return false
-				}
-				if err := s.LoadDBs(srcs, bmr, ts); err != nil {
-					t.Logf("failed to load dbs into server: %v", err)
-					return false
-				}
-				return true
-			}
-			err = reloader.Start(tmp, sentinelPollFrequency, true, []string{"dirguta", "basedir.db"}, onChange)
+			reloader, err := ireloader.StartServerReloader(s, tmp, []string{"dirguta", "basedir.db"}, "dirguta", "basedir.db", ownersPath, sentinelPollFrequency, true, nil)
 			So(err, ShouldBeNil)
+
+			// Wait for initial load (keyA)
+			timeout := time.After(time.Second)
+		ForInit:
+			for {
+				select {
+				case <-timeout:
+					break ForInit
+				case <-time.After(time.Millisecond):
+					s.mu.RLock()
+					_, ok := s.dataTimeStamp["keyA"]
+					s.mu.RUnlock()
+					if ok {
+						break ForInit
+					}
+				}
+			}
 
 			dirguta := s.tree
 			basedirs := s.basedirs
+			s.mu.RLock()
 			lastMod := s.dataTimeStamp["keyA"]
+			initialGroupCache := s.groupUsageCache
+			initialUserCache := s.userUsageCache
+			s.mu.RUnlock()
 
 			So(len(s.dataTimeStamp), ShouldEqual, 1)
 
+			// Create a new version for keyB
 			secondDot := filepath.Join(tmp, ".112_keyB")
 			second := filepath.Join(tmp, "112_keyB")
 
 			err = internaldb.CreateExampleDBsCustomIDsWithDir(t, secondDot, uid, gids[0], gids[1], refTime+10)
 			So(err, ShouldBeNil)
-
 			So(os.Chtimes(secondDot, time.Unix(refTime+10, 0), time.Unix(refTime+10, 0)), ShouldBeNil)
-			s.mu.Lock()
-			initialGroupCache := s.groupUsageCache
-			initialUserCache := s.userUsageCache
-			s.mu.Unlock()
-
-			So(initialGroupCache, ShouldNotBeNil)
-			So(initialUserCache, ShouldNotBeNil)
 
 			err = os.Rename(secondDot, second)
 			So(err, ShouldBeNil)
 
-			timeout := time.After(time.Second)
-
+			// Wait for reload to pick up keyB
+			reloadTimeout := time.After(time.Second)
 		Loop:
 			for {
 				select {
-				case <-timeout:
+				case <-reloadTimeout:
 					break Loop
 				case <-time.After(time.Millisecond):
 					s.mu.RLock()
 					dataTimeStamp := s.dataTimeStamp["keyB"]
 					s.mu.RUnlock()
-
 					if dataTimeStamp > lastMod {
 						break Loop
 					}

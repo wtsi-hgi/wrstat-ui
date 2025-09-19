@@ -232,7 +232,7 @@ func setSummarisers(s *summary.Summariser, mountpoints string, //nolint:gocognit
 	}
 
 	if dirgutaDB != "" {
-		return addDirgutaSummariser(s, dirgutaDB)
+		return addDirgutaSummariser(s, dirgutaDB, time.Now().Unix())
 	}
 
 	return nil, nil //nolint:nilnil
@@ -383,7 +383,7 @@ func copyHistory(bd *basedirs.BaseDirs, basedirsHistoryDB string) error {
 	return bd.CopyHistoryFrom(db)
 }
 
-func addDirgutaSummariser(s *summary.Summariser, dirgutaDB string) (func() error, error) {
+func addDirgutaSummariser(s *summary.Summariser, dirgutaDB string, refTime int64) (func() error, error) {
 	if err := os.RemoveAll(dirgutaDB); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return nil, err
 	}
@@ -401,7 +401,7 @@ func addDirgutaSummariser(s *summary.Summariser, dirgutaDB string) (func() error
 
 	d.SetBatchSize(dbBatchSize)
 
-	s.AddDirectoryOperation(dirguta.NewDirGroupUserTypeAge(d))
+	s.AddDirectoryOperation(dirguta.NewDirGroupUserTypeAgeWithRefTime(d, refTime))
 
 	return d.Close, nil
 }
