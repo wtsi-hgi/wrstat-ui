@@ -42,6 +42,7 @@ import (
 	"github.com/VertebrateResequencing/wr/jobqueue/scheduler"
 	. "github.com/smartystreets/goconvey/convey"
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
+	bolt "github.com/wtsi-hgi/wrstat-ui/bolt"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 	internaldata "github.com/wtsi-hgi/wrstat-ui/internal/data"
 	"github.com/wtsi-hgi/wrstat-ui/internal/statsdata"
@@ -283,7 +284,7 @@ func TestSummarise(t *testing.T) {
 
 		bddb.Close()
 
-		tree, err := db.NewTree(filepath.Join(outputA, "dguta.dbs"))
+		tree, err := db.NewTree(bolt.NewDirSource(filepath.Join(outputA, "dguta.dbs")))
 		So(err, ShouldBeNil)
 
 		childrenExist := tree.DirHasChildren("/", nil)

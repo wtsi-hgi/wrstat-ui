@@ -37,18 +37,10 @@ type Tree struct {
 	db *DB
 }
 
-// NewTree, given the paths to one or more dguta database files (as created by
+// NewTree, given one or more Sources to dguta databases (as created by
 // DB.Store()), returns a *Tree that can be used to do high-level queries on the
 // stats of a tree of disk folders. You should Close() the tree after use.
-func NewTree(paths ...string) (*Tree, error) {
-	var srcs []Source
-	if sf := DefaultSourceFactory(); sf != nil {
-		for _, p := range paths {
-			if s, err := sf.FromPath(p); err == nil {
-				srcs = append(srcs, s)
-			}
-		}
-	}
+func NewTree(srcs ...Source) (*Tree, error) { //nolint:ireturn
 	db := NewDB(srcs...)
 
 	if err := db.Open(); err != nil {

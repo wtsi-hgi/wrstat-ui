@@ -110,6 +110,7 @@ type Server struct {
 	mu             sync.RWMutex
 	basedirs       basedirs.MultiReader
 	tree           *db.Tree
+	srcFromPath    func(string) db.Source
 	whiteCB        WhiteListCallback
 	uidToNameCache map[uint32]string
 	gidToNameCache map[uint32]string
@@ -150,6 +151,11 @@ func New(logWriter io.Writer) *Server {
 
 	return s
 }
+
+// SetSourceFromPath sets a function that converts a backend-specific path into
+// a db.Source. This lets callers (eg. main/cmd) choose the storage backend
+// without the server importing it. Must be set before LoadDBs.
+func (s *Server) SetSourceFromPath(f func(string) db.Source) { s.srcFromPath = f }
 
 // stop is called when the server is Stop()ped, cleaning up our additional
 // properties.

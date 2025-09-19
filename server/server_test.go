@@ -45,6 +45,7 @@ import (
 	. "github.com/smartystreets/goconvey/convey"
 	gas "github.com/wtsi-hgi/go-authserver"
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
+	bolt "github.com/wtsi-hgi/wrstat-ui/bolt"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 	internaldata "github.com/wtsi-hgi/wrstat-ui/internal/data"
 	internaldb "github.com/wtsi-hgi/wrstat-ui/internal/db"
@@ -124,6 +125,9 @@ func TestServer(t *testing.T) {
 				So(errd, ShouldBeNil)
 			}()
 
+			// Provide path->Source conversion for the server (bolt backend)
+			s.SetSourceFromPath(func(p string) db.Source { return bolt.NewDirSource(p) })
+
 			Convey("The jwt endpoint works after enabling it", func() {
 				err = s.EnableAuth(certPath, keyPath, func(u, p string) (bool, string) {
 					returnUID := uid
@@ -192,7 +196,7 @@ func TestServer(t *testing.T) {
 				groupA := gidToGroup(t, gids[0])
 				groupB := gidToGroup(t, gids[1])
 
-				tree, err := db.NewTree(filepath.Join(path, "dirguta"))
+				tree, err := db.NewTree(bolt.NewDirSource(filepath.Join(path, "dirguta")))
 				So(err, ShouldBeNil)
 
 				expectedRaw, err := tree.Where("/", nil, split.SplitsToSplitFn(2))
@@ -211,6 +215,8 @@ func TestServer(t *testing.T) {
 				ownersPath, err := internaldata.CreateOwnersCSV(t, fmt.Sprintf("0,Alan\n%s,Barbara\n%s,Dellilah", gids[0], gids[1]))
 				So(err, ShouldBeNil)
 
+				s.SetSourceFromPath(func(p string) db.Source { return bolt.NewDirSource(p) })
+				s.SetSourceFromPath(func(p string) db.Source { return bolt.NewDirSource(p) })
 				err = s.LoadDBs([]string{path}, "dirguta", "basedir.db", ownersPath)
 				So(err, ShouldBeNil)
 
@@ -521,6 +527,7 @@ func TestServer(t *testing.T) {
 
 			So(os.Chtimes(first, time.Unix(refTime, 0), time.Unix(refTime, 0)), ShouldBeNil)
 
+			s.SetSourceFromPath(func(p string) db.Source { return bolt.NewDirSource(p) })
 			err = s.EnableDBReloading(tmp, "dirguta", "basedir.db", ownersPath, sentinelPollFrequency, true)
 			So(err, ShouldBeNil)
 
@@ -611,6 +618,7 @@ func TestServer(t *testing.T) {
 			ownersPath, err := internaldata.CreateOwnersCSV(t, fmt.Sprintf("0,Alan\n%s,Barbara\n%s,Dellilah", gids[0], gids[1]))
 			So(err, ShouldBeNil)
 
+			s.SetSourceFromPath(func(p string) db.Source { return bolt.NewDirSource(p) })
 			err = s.LoadDBs([]string{path}, "dirguta", "basedir.db", ownersPath)
 			So(err, ShouldBeNil)
 
@@ -755,6 +763,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 		So(err, ShouldBeNil)
 
 		Convey("You can't get where data is or add the tree page without auth", func() {
+			s.SetSourceFromPath(func(p string) db.Source { return bolt.NewDirSource(p) })
 			err = s.LoadDBs([]string{path}, "dirguta", "basedir.db", ownersPath)
 			So(err, ShouldBeNil)
 
@@ -772,6 +781,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 			})
 			So(err, ShouldBeNil)
 
+			s.SetSourceFromPath(func(p string) db.Source { return bolt.NewDirSource(p) })
 			err = s.LoadDBs([]string{path}, "dirguta", "basedir.db", ownersPath)
 			So(err, ShouldBeNil)
 
@@ -846,6 +856,9 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 				return true, uid
 			})
 			So(err, ShouldBeNil)
+
+			// Provide path->Source conversion for the server (bolt backend)
+			s.SetSourceFromPath(func(p string) db.Source { return bolt.NewDirSource(p) })
 
 			err = s.LoadDBs([]string{path}, "dirguta", "basedir.db", ownersPath)
 			So(err, ShouldBeNil)

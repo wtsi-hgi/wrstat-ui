@@ -42,17 +42,10 @@ type Factory interface {
 	OpenReadOnlyUnPopulated(src Source) (Store, error)
 }
 
-// SourceFactory creates Source objects from path-like inputs. This keeps
-// callers agnostic: they can pass a string and the backend turns it into a Source.
-type SourceFactory interface {
-	FromPath(path string) (Source, error)
-}
-
 var (
-	regMu                sync.RWMutex
-	reg                  = map[string]Factory{}
-	defaultName          string
-	defaultSourceFactory SourceFactory
+	regMu       sync.RWMutex
+	reg         = map[string]Factory{}
+	defaultName string
 )
 
 // Register makes a Factory available under a name.
@@ -81,19 +74,4 @@ func Default() Factory {
 		return nil
 	}
 	return reg[defaultName]
-}
-
-// SetDefaultSourceFactory sets the factory used to translate string inputs
-// into Sources.
-func SetDefaultSourceFactory(sf SourceFactory) {
-	regMu.Lock()
-	defer regMu.Unlock()
-	defaultSourceFactory = sf
-}
-
-// DefaultSourceFactory returns the SourceFactory used for string inputs.
-func DefaultSourceFactory() SourceFactory {
-	regMu.RLock()
-	defer regMu.RUnlock()
-	return defaultSourceFactory
 }

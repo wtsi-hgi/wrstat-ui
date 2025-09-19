@@ -4,8 +4,6 @@ import (
 	"os"
 	"path/filepath"
 	"time"
-
-	"github.com/wtsi-hgi/wrstat-ui/db"
 )
 
 // DirSource is a bolt implementation of db.Source backed by a directory
@@ -51,18 +49,4 @@ const OpenMode = 0640
 func DirDBPaths(dir string) (dgutaPath, childrenPath string) {
 	ds := NewDirSource(dir)
 	return ds.dgutaPath(), ds.childrenPath()
-}
-
-// dirSourceFactory adapts string paths into DirSource.
-type dirSourceFactory struct{}
-
-func (dirSourceFactory) FromPath(path string) (db.Source, error) { //nolint:ireturn
-	return NewDirSource(path), nil
-}
-
-func init() {
-	// Ensure the db package knows how to convert string paths to a Source when
-	// callers use NewDB(paths...). Also ensure the bolt storage factory is the
-	// default one already via dirstore.go's init.
-	db.SetDefaultSourceFactory(dirSourceFactory{})
 }

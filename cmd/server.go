@@ -37,6 +37,8 @@ import (
 
 	"github.com/inconshreveable/log15"
 	"github.com/spf13/cobra"
+	bolt "github.com/wtsi-hgi/wrstat-ui/bolt"
+	"github.com/wtsi-hgi/wrstat-ui/db"
 	"github.com/wtsi-hgi/wrstat-ui/server"
 )
 
@@ -166,6 +168,8 @@ files. It will use the mtime of the file as the data creation time in reports.
 		}
 
 		info("opening databases, please wait...")
+		// Inject bolt backend for converting paths to db.Source
+		s.SetSourceFromPath(func(p string) db.Source { return bolt.NewDirSource(p) })
 		err = s.EnableDBReloading(args[0], dgutaDBsSuffix, basedirBasename,
 			ownersPath, sentinelPollFrequencty, true, mountpoints...)
 		if err != nil {

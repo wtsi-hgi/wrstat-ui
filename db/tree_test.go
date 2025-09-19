@@ -50,14 +50,14 @@ func TestTree(t *testing.T) {
 		paths, err := testMakeDBPaths(t)
 		So(err, ShouldBeNil)
 
-		tree, errc := db.NewTree(paths[0])
+		tree, errc := db.NewTree(bolt.NewDirSource(paths[0]))
 		So(errc, ShouldNotBeNil)
 		So(tree, ShouldBeNil)
 
 		errc = testCreateDB(t, paths[0], refUnixTime)
 		So(errc, ShouldBeNil)
 
-		tree, errc = db.NewTree(paths[0])
+		tree, errc = db.NewTree(bolt.NewDirSource(paths[0]))
 		So(errc, ShouldBeNil)
 		So(tree, ShouldNotBeNil)
 
@@ -334,7 +334,7 @@ func TestTree(t *testing.T) {
 		err = fillTestDB(adb, files)
 		So(err, ShouldBeNil)
 
-		tree, err := db.NewTree(paths1[0], paths2[0])
+		tree, err := db.NewTree(bolt.NewDirSource(paths1[0]), bolt.NewDirSource(paths2[0]))
 		So(err, ShouldBeNil)
 		So(tree, ShouldNotBeNil)
 

@@ -79,7 +79,15 @@ func (s *Server) LoadDBs(basePaths []string, dgutaDBName, basedirDBName, ownersP
 		return err
 	}
 
-	tree, err := db.NewTree(dirgutaPaths...)
+	var srcs []db.Source
+	for _, p := range dirgutaPaths {
+		if s.srcFromPath == nil {
+			return basedirs.Error("no source converter set")
+		}
+		srcs = append(srcs, s.srcFromPath(p))
+	}
+
+	tree, err := db.NewTree(srcs...)
 	if err != nil {
 		return err
 	}
@@ -220,7 +228,15 @@ func (s *Server) reloadDBs(dgutaDBName, basedirDBName, //nolint:funlen
 
 	s.Logger.Printf("reloading dirguta db from %v", dirgutaPaths)
 
-	tree, err := db.NewTree(dirgutaPaths...)
+	var srcs []db.Source
+	for _, p := range dirgutaPaths {
+		if s.srcFromPath == nil {
+			return s.logReloadError("no source converter set")
+		}
+		srcs = append(srcs, s.srcFromPath(p))
+	}
+
+	tree, err := db.NewTree(srcs...)
 	if err != nil {
 		return s.logReloadError("reloading dirguta db failed: %s", err)
 	}
