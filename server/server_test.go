@@ -537,7 +537,36 @@ func TestServer(t *testing.T) {
 			So(os.Chtimes(first, time.Unix(refTime, 0), time.Unix(refTime, 0)), ShouldBeNil)
 
 			s.SetSourceFromPath(func(p string) db.Source { return bolt.NewDirSource(p) })
-			err = s.EnableDBReloading(tmp, "dirguta", "basedir.db", ownersPath, sentinelPollFrequency, true)
+			reloader := bolt.NewReloader()
+			onChange := func(dirs, toDelete []string) bool {
+				var srcs []db.Source
+				var bdbs []*bolt.DB
+				for _, d := range dirs {
+					srcs = append(srcs, bolt.NewDirSource(filepath.Join(d, "dirguta")))
+					bdb, err := basedirs.OpenDBRO(filepath.Join(d, "basedir.db"))
+					if err != nil {
+						t.Logf("failed to open basedirs db: %v", err)
+						return false
+					}
+					bdbs = append(bdbs, bdb)
+				}
+				bmr, err := basedirs.OpenMulti(ownersPath, bdbs...)
+				if err != nil {
+					t.Logf("failed to build basedirs multi: %v", err)
+					return false
+				}
+				ts, err := bolt.TimestampsFromDirs(dirs)
+				if err != nil {
+					t.Logf("failed to compute timestamps: %v", err)
+					return false
+				}
+				if err := s.LoadDBs(srcs, bmr, ts); err != nil {
+					t.Logf("failed to load dbs into server: %v", err)
+					return false
+				}
+				return true
+			}
+			err = reloader.Start(tmp, sentinelPollFrequency, true, []string{"dirguta", "basedir.db"}, onChange)
 			So(err, ShouldBeNil)
 
 			dirguta := s.tree
@@ -604,6 +633,7 @@ func TestServer(t *testing.T) {
 			So(err, ShouldBeNil)
 
 			waitForFileToBeDeleted(t, first)
+			reloader.Stop()
 			_, err = os.Stat(first)
 			So(os.IsNotExist(err), ShouldBeTrue)
 		})

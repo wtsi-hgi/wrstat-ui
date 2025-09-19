@@ -223,11 +223,40 @@ files. It will use the mtime of the file as the data creation time in reports.
 			die("failed to load databases into server: %s", err)
 		}
 
-		// Also enable automatic reloading using server's existing mechanism
-		// Inject bolt backend for converting paths to db.Source for reloader
+		// Enable automatic reloading using bolt's reloader. Reloader remains bolt-specific in cmd.
 		s.SetSourceFromPath(func(p string) db.Source { return bolt.NewDirSource(p) })
-		if err := s.EnableDBReloading(args[0], dgutaDBsSuffix, basedirBasename,
-			ownersPath, sentinelPollFrequencty, true, mountpoints...); err != nil {
+		reloader := bolt.NewReloader()
+		required := []string{dgutaDBsSuffix, basedirBasename}
+		onChange := func(dirs, toDelete []string) bool {
+			// Build sources and basedirs for new dirs
+			var srcs []db.Source
+			var bdbs []*bolt.DB
+			for _, d := range dirs {
+				srcs = append(srcs, bolt.NewDirSource(filepath.Join(d, dgutaDirBasename)))
+				bdb, err := basedirs.OpenDBRO(filepath.Join(d, basedirBasename))
+				if err != nil {
+					appLogger.Error("failed to open basedirs db", "dir", d, "err", err)
+					return false
+				}
+				bdbs = append(bdbs, bdb)
+			}
+			bdReader, err := basedirs.OpenMulti(ownersPath, bdbs...)
+			if err != nil {
+				appLogger.Error("failed to construct basedirs reader", "err", err)
+				return false
+			}
+			ts, err := bolt.TimestampsFromDirs(dirs)
+			if err != nil {
+				appLogger.Error("failed to compute timestamps", "err", err)
+				return false
+			}
+			if err := s.LoadDBs(srcs, bdReader, ts, mountpoints...); err != nil {
+				appLogger.Error("failed to load databases into server", "err", err)
+				return false
+			}
+			return true
+		}
+		if err := reloader.Start(args[0], sentinelPollFrequencty, true, required, onChange); err != nil {
 			die("failed to enable db reloading: %s", err)
 		}
 

@@ -28,12 +28,12 @@ package cmd
 
 import (
 	"log/slog"
+	"path/filepath"
 
 	"github.com/spf13/cobra"
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
 	bolt "github.com/wtsi-hgi/wrstat-ui/bolt"
 	"github.com/wtsi-hgi/wrstat-ui/db"
-	"github.com/wtsi-hgi/wrstat-ui/server"
 )
 
 // dbinfoCmd represents the server command.
@@ -57,7 +57,12 @@ NB: for large databases, this can take hours to run.
 			die("failed to find database paths: %s", err)
 		}
 
-		durgutaPaths, basedirsDBPaths := server.JoinDBPaths(dbPaths, dgutaDBsSuffix, basedirBasename)
+		var durgutaPaths []string
+		var basedirsDBPaths []string
+		for _, base := range dbPaths {
+			durgutaPaths = append(durgutaPaths, filepath.Join(base, dgutaDirBasename))
+			basedirsDBPaths = append(basedirsDBPaths, filepath.Join(base, basedirBasename))
+		}
 
 		slog.SetLogLoggerLevel(slog.LevelDebug)
 
