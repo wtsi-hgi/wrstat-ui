@@ -122,6 +122,39 @@ func (s *Server) LoadDBs(basePaths []string, dgutaDBName, basedirDBName, ownersP
 	return nil
 }
 
+// LoadDBAssets loads pre-constructed assets into the server without using paths.
+// Callers provide dguta sources, a basedirs.MultiReader, and timestamps map.
+// If mounts are provided, they will be set on the basedirs reader.
+func (s *Server) LoadDBAssets(srcs []db.Source, bd basedirs.MultiReader, timestamps map[string]int64, mounts ...string) error {
+	tree, err := db.NewTree(srcs...)
+	if err != nil {
+		return err
+	}
+
+	if len(mounts) > 0 {
+		bd.SetMountPoints(mounts)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if err := s.prewarmCaches(bd); err != nil {
+		return err
+	}
+
+	loaded := s.basedirs != nil
+	s.basedirs = bd
+	s.tree = tree
+	s.dataTimeStamp = timestamps
+
+	if !loaded {
+		s.addBaseDGUTARoutes()
+		s.addBaseDirRoutes()
+	}
+
+	return nil
+}
+
 func (s *Server) getDBTimestamps(paths []string) (map[string]int64, error) {
 	timestamps := make(map[string]int64, len(paths))
 

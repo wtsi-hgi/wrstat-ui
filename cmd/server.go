@@ -33,10 +33,13 @@ import (
 	"io"
 	"log/syslog"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/inconshreveable/log15"
 	"github.com/spf13/cobra"
+	"github.com/wtsi-hgi/wrstat-ui/basedirs"
 	bolt "github.com/wtsi-hgi/wrstat-ui/bolt"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 	"github.com/wtsi-hgi/wrstat-ui/server"
@@ -46,6 +49,7 @@ const (
 	sentinelPollFrequencty   = 1 * time.Minute
 	serverTokenBasename      = ".wrstat.servertoken"
 	dgutaDBsSuffix           = "dguta.dbs"
+	dgutaDirBasename         = "dirguta"
 	basedirBasename          = "basedirs.db"
 	dgutaDBsSentinelBasename = ".dguta.dbs.updated"
 )
@@ -168,12 +172,63 @@ files. It will use the mtime of the file as the data creation time in reports.
 		}
 
 		info("opening databases, please wait...")
-		// Inject bolt backend for converting paths to db.Source
-		s.SetSourceFromPath(func(p string) db.Source { return bolt.NewDirSource(p) })
-		err = s.EnableDBReloading(args[0], dgutaDBsSuffix, basedirBasename,
-			ownersPath, sentinelPollFrequencty, true, mountpoints...)
+		// Initial load: handle paths here, build backend-agnostic assets, then inject.
+		dbDirs, err := server.FindDBDirs(args[0], dgutaDBsSuffix, basedirBasename)
+		if err != nil || len(dbDirs) == 0 {
+			if err == nil {
+				die("failed to find database directories in %s", args[0])
+			}
+			die("failed to find database directories: %s", err)
+		}
+
+		// Build dguta sources (bolt directory sources). The versioned DB dirs
+		// contain a subdirectory named 'dirguta' which holds the dguta DBs.
+		var srcs []db.Source
+		for _, d := range dbDirs {
+			srcs = append(srcs, bolt.NewDirSource(filepath.Join(d, dgutaDirBasename)))
+		}
+
+		// Open basedirs DBs read-only and build a MultiReader
+		var bdbs []*bolt.DB
+		for _, d := range dbDirs {
+			bdb, err := basedirs.OpenDBRO(filepath.Join(d, basedirBasename))
+			if err != nil {
+				die("failed to open basedirs db: %s", err)
+			}
+			bdbs = append(bdbs, bdb)
+		}
+		bdReader, err := basedirs.OpenMultiFromDBs(ownersPath, bdbs...)
 		if err != nil {
-			die("failed to load databases: %s", err)
+			die("failed to construct basedirs reader: %s", err)
+		}
+
+		// Compute timestamps keyed by mountpoint/key derived from directory names
+		timestamps := make(map[string]int64, len(dbDirs))
+		for _, d := range dbDirs {
+			fi, err := os.Stat(d)
+			if err != nil {
+				die("failed to stat db dir: %s", err)
+			}
+			base := filepath.Base(d)
+			// Expect format '<version>_<key>'
+			parts := strings.SplitN(base, "_", 2)
+			key := base
+			if len(parts) == 2 {
+				key = parts[1]
+			}
+			timestamps[key] = fi.ModTime().Unix()
+		}
+
+		if err := s.LoadDBAssets(srcs, bdReader, timestamps, mountpoints...); err != nil {
+			die("failed to load databases into server: %s", err)
+		}
+
+		// Also enable automatic reloading using server's existing mechanism
+		// Inject bolt backend for converting paths to db.Source for reloader
+		s.SetSourceFromPath(func(p string) db.Source { return bolt.NewDirSource(p) })
+		if err := s.EnableDBReloading(args[0], dgutaDBsSuffix, basedirBasename,
+			ownersPath, sentinelPollFrequencty, true, mountpoints...); err != nil {
+			die("failed to enable db reloading: %s", err)
 		}
 
 		err = s.AddTreePage()
