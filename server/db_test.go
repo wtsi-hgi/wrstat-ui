@@ -31,6 +31,7 @@ import (
 	"testing"
 
 	. "github.com/smartystreets/goconvey/convey"
+	bolt "github.com/wtsi-hgi/wrstat-ui/bolt"
 )
 
 const testDB = "testDIR"
@@ -44,7 +45,7 @@ func TestFindDBDirs(t *testing.T) {
 		c := createFakeDB(t, tmp, "123_def")
 		createFakeDB(t, tmp, ".124_def")
 
-		found, err := FindDBDirs(tmp, testDB)
+		found, _, err := bolt.FindDBDirs(tmp, testDB)
 		So(err, ShouldBeNil)
 		So(found, ShouldResemble, []string{c, b})
 	})

@@ -178,7 +178,12 @@ func TestMulti(t *testing.T) {
 			baseDirsReader := func() basedirs.MultiReader {
 				t.Helper()
 
-				bdr, errr := basedirs.OpenMulti(ownersPath, dbPathA, dbPathB)
+				dbA, errr := basedirs.OpenDBRO(dbPathA)
+				So(errr, ShouldBeNil)
+				dbB, errr := basedirs.OpenDBRO(dbPathB)
+				So(errr, ShouldBeNil)
+
+				bdr, errr := basedirs.OpenMulti(ownersPath, dbA, dbB)
 				So(errr, ShouldBeNil)
 
 				bdr.SetMountPoints(mps)

@@ -173,7 +173,7 @@ files. It will use the mtime of the file as the data creation time in reports.
 
 		info("opening databases, please wait...")
 		// Initial load: handle paths here, build backend-agnostic assets, then inject.
-		dbDirs, err := server.FindDBDirs(args[0], dgutaDBsSuffix, basedirBasename)
+		dbDirs, _, err := bolt.FindDBDirs(args[0], dgutaDBsSuffix, basedirBasename)
 		if err != nil || len(dbDirs) == 0 {
 			if err == nil {
 				die("failed to find database directories in %s", args[0])
@@ -197,7 +197,7 @@ files. It will use the mtime of the file as the data creation time in reports.
 			}
 			bdbs = append(bdbs, bdb)
 		}
-		bdReader, err := basedirs.OpenMultiFromDBs(ownersPath, bdbs...)
+		bdReader, err := basedirs.OpenMulti(ownersPath, bdbs...)
 		if err != nil {
 			die("failed to construct basedirs reader: %s", err)
 		}
@@ -219,7 +219,7 @@ files. It will use the mtime of the file as the data creation time in reports.
 			timestamps[key] = fi.ModTime().Unix()
 		}
 
-		if err := s.LoadDBAssets(srcs, bdReader, timestamps, mountpoints...); err != nil {
+		if err := s.LoadDBs(srcs, bdReader, timestamps, mountpoints...); err != nil {
 			die("failed to load databases into server: %s", err)
 		}
 

@@ -35,7 +35,7 @@ import (
 	"github.com/VertebrateResequencing/wr/client"
 	"github.com/VertebrateResequencing/wr/jobqueue"
 	"github.com/inconshreveable/log15"
-	"github.com/wtsi-hgi/wrstat-ui/server"
+	bolt "github.com/wtsi-hgi/wrstat-ui/bolt"
 )
 
 const (
@@ -90,7 +90,7 @@ func watch(inputDirs []string, outputDir, quotaPath, basedirsConfig, mounts stri
 	}
 
 	for _, inputDir := range inputDirs {
-		inputPaths, err := server.FindDBDirs(inputDir, "stats.gz")
+		inputPaths, _, err := bolt.FindDBDirs(inputDir, "stats.gz")
 		if err != nil {
 			return fmt.Errorf("error getting input DB paths: %w", err)
 		}
@@ -190,7 +190,7 @@ func getJobCommand(dotOutputBase, previousBasedirsDB, quotaPath, basedirsConfig,
 }
 
 func getPreviousBasedirsDB(outputDir, base string) (string, error) {
-	possibleBasedirs, err := server.FindDBDirs(outputDir, basedirBasename)
+	possibleBasedirs, _, err := bolt.FindDBDirs(outputDir, basedirBasename)
 	if err != nil {
 		return "", err
 	}

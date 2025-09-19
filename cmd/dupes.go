@@ -35,7 +35,7 @@ import (
 
 	"github.com/klauspost/pgzip"
 	"github.com/spf13/cobra"
-	"github.com/wtsi-hgi/wrstat-ui/server"
+	bolt "github.com/wtsi-hgi/wrstat-ui/bolt"
 	"github.com/wtsi-hgi/wrstat-ui/stats"
 	"github.com/wtsi-hgi/wrstat-ui/summary"
 	"github.com/wtsi-hgi/wrstat-ui/summary/dedupe"
@@ -96,7 +96,7 @@ func parseFiles(args []string) ([]string, error) { //nolint:gocognit
 			continue
 		}
 
-		dirs, err := server.FindDBDirs(arg, inputStatsFile)
+		dirs, _, err := bolt.FindDBDirs(arg, inputStatsFile)
 		if err != nil {
 			return nil, err
 		}

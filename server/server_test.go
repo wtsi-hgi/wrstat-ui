@@ -216,8 +216,16 @@ func TestServer(t *testing.T) {
 				So(err, ShouldBeNil)
 
 				s.SetSourceFromPath(func(p string) db.Source { return bolt.NewDirSource(p) })
-				s.SetSourceFromPath(func(p string) db.Source { return bolt.NewDirSource(p) })
-				err = s.LoadDBs([]string{path}, "dirguta", "basedir.db", ownersPath)
+				// Build assets for new LoadDBs signature
+				srcs := []db.Source{bolt.NewDirSource(filepath.Join(path, "dirguta"))}
+				bdb, err := basedirs.OpenDBRO(filepath.Join(path, "basedir.db"))
+				So(err, ShouldBeNil)
+				bmr, err := basedirs.OpenMulti(ownersPath, bdb)
+				So(err, ShouldBeNil)
+				fi, err := os.Stat(path)
+				So(err, ShouldBeNil)
+				timestamps := map[string]int64{filepath.Base(path): fi.ModTime().Unix()}
+				err = s.LoadDBs(srcs, bmr, timestamps)
 				So(err, ShouldBeNil)
 
 				Convey("You can get dirguta results", func() {
@@ -508,7 +516,8 @@ func TestServer(t *testing.T) {
 		})
 
 		Convey("LoadDBs fails on an invalid path", func() {
-			err := s.LoadDBs([]string{"/foo"}, "something", "anything", "")
+			// New API: provide bad assets to force error
+			err := s.LoadDBs(nil, nil, nil)
 			So(err, ShouldNotBeNil)
 		})
 
@@ -619,7 +628,15 @@ func TestServer(t *testing.T) {
 			So(err, ShouldBeNil)
 
 			s.SetSourceFromPath(func(p string) db.Source { return bolt.NewDirSource(p) })
-			err = s.LoadDBs([]string{path}, "dirguta", "basedir.db", ownersPath)
+			srcs := []db.Source{bolt.NewDirSource(filepath.Join(path, "dirguta"))}
+			bdb, err := basedirs.OpenDBRO(filepath.Join(path, "basedir.db"))
+			So(err, ShouldBeNil)
+			bmr, err := basedirs.OpenMulti(ownersPath, bdb)
+			So(err, ShouldBeNil)
+			fi, err := os.Stat(path)
+			So(err, ShouldBeNil)
+			timestamps := map[string]int64{filepath.Base(path): fi.ModTime().Unix()}
+			err = s.LoadDBs(srcs, bmr, timestamps)
 			So(err, ShouldBeNil)
 
 			timeout := time.After(time.Second)
@@ -764,7 +781,15 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 
 		Convey("You can't get where data is or add the tree page without auth", func() {
 			s.SetSourceFromPath(func(p string) db.Source { return bolt.NewDirSource(p) })
-			err = s.LoadDBs([]string{path}, "dirguta", "basedir.db", ownersPath)
+			srcs := []db.Source{bolt.NewDirSource(filepath.Join(path, "dirguta"))}
+			bdb, err := basedirs.OpenDBRO(filepath.Join(path, "basedir.db"))
+			So(err, ShouldBeNil)
+			bmr, err := basedirs.OpenMulti(ownersPath, bdb)
+			So(err, ShouldBeNil)
+			fi, err := os.Stat(path)
+			So(err, ShouldBeNil)
+			timestamps := map[string]int64{filepath.Base(path): fi.ModTime().Unix()}
+			err = s.LoadDBs(srcs, bmr, timestamps)
 			So(err, ShouldBeNil)
 
 			_, _, err = GetWhereDataIs(c, "/", "", "", "", db.DGUTAgeAll, "")
@@ -782,7 +807,15 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 			So(err, ShouldBeNil)
 
 			s.SetSourceFromPath(func(p string) db.Source { return bolt.NewDirSource(p) })
-			err = s.LoadDBs([]string{path}, "dirguta", "basedir.db", ownersPath)
+			srcs := []db.Source{bolt.NewDirSource(filepath.Join(path, "dirguta"))}
+			bdb, err := basedirs.OpenDBRO(filepath.Join(path, "basedir.db"))
+			So(err, ShouldBeNil)
+			bmr, err := basedirs.OpenMulti(ownersPath, bdb)
+			So(err, ShouldBeNil)
+			fi, err := os.Stat(path)
+			So(err, ShouldBeNil)
+			timestamps := map[string]int64{filepath.Base(path): fi.ModTime().Unix()}
+			err = s.LoadDBs(srcs, bmr, timestamps)
 			So(err, ShouldBeNil)
 
 			err = c.Login("user", "pass")
@@ -823,7 +856,15 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 			})
 			So(err, ShouldBeNil)
 
-			err = s.LoadDBs([]string{path}, "dirguta", "basedir.db", ownersPath)
+			srcs := []db.Source{bolt.NewDirSource(filepath.Join(path, "dirguta"))}
+			bdb, err := basedirs.OpenDBRO(filepath.Join(path, "basedir.db"))
+			So(err, ShouldBeNil)
+			bmr, err := basedirs.OpenMulti(ownersPath, bdb)
+			So(err, ShouldBeNil)
+			fi, err := os.Stat(path)
+			So(err, ShouldBeNil)
+			timestamps := map[string]int64{filepath.Base(path): fi.ModTime().Unix()}
+			err = s.LoadDBs(srcs, bmr, timestamps)
 			So(err, ShouldBeNil)
 
 			err = c.Login("user", "pass")
@@ -860,7 +901,15 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 			// Provide path->Source conversion for the server (bolt backend)
 			s.SetSourceFromPath(func(p string) db.Source { return bolt.NewDirSource(p) })
 
-			err = s.LoadDBs([]string{path}, "dirguta", "basedir.db", ownersPath)
+			srcs := []db.Source{bolt.NewDirSource(filepath.Join(path, "dirguta"))}
+			bdb, err := basedirs.OpenDBRO(filepath.Join(path, "basedir.db"))
+			So(err, ShouldBeNil)
+			bmr, err := basedirs.OpenMulti(ownersPath, bdb)
+			So(err, ShouldBeNil)
+			fi, err := os.Stat(path)
+			So(err, ShouldBeNil)
+			timestamps := map[string]int64{filepath.Base(path): fi.ModTime().Unix()}
+			err = s.LoadDBs(srcs, bmr, timestamps)
 			So(err, ShouldBeNil)
 
 			s.dataTimeStamp = map[string]int64{}

@@ -52,7 +52,7 @@ NB: for large databases, this can take hours to run.
 			die("you must supply the path to your 'wrstat multi -f' output directory")
 		}
 
-		dbPaths, err := server.FindDBDirs(args[0], dgutaDBsSuffix, basedirBasename)
+		dbPaths, _, err := bolt.FindDBDirs(args[0], dgutaDBsSuffix, basedirBasename)
 		if err != nil {
 			die("failed to find database paths: %s", err)
 		}

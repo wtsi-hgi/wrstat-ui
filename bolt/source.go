@@ -1,8 +1,11 @@
 package bolt
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"time"
 )
 
@@ -49,4 +52,73 @@ const OpenMode = 0640
 func DirDBPaths(dir string) (dgutaPath, childrenPath string) {
 	ds := NewDirSource(dir)
 	return ds.dgutaPath(), ds.childrenPath()
+}
+
+// FindDBDirs finds the latest db directories under basepath that contain the
+// required entries (eg, "dguta.dbs" and "basedirs.db"). It returns the full
+// paths to the selected directories sorted by name, and a list of older
+// directories that can be deleted.
+func FindDBDirs(basepath string, required ...string) ([]string, []string, error) {
+	entries, err := os.ReadDir(basepath)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	latest := make(map[string]nameVersion)
+	var toDelete []string
+
+	for _, entry := range entries {
+		if !IsValidDBDir(entry, basepath, required...) {
+			continue
+		}
+		toDelete = addEntryToMap(entry, latest, toDelete)
+	}
+
+	dirs := make([]string, 0, len(latest))
+	for _, nt := range latest {
+		dirs = append(dirs, filepath.Join(basepath, nt.name))
+	}
+	slices.Sort(dirs)
+
+	return dirs, toDelete, nil
+}
+
+var validDBDir = regexp.MustCompile(`^[^.][^_]*_.`)
+
+// IsValidDBDir returns true if the given entry is a directory named with the
+// correct format and containing the required files.
+func IsValidDBDir(entry fs.DirEntry, basepath string, required ...string) bool {
+	name := entry.Name()
+	if !entry.IsDir() || !validDBDir.MatchString(name) {
+		return false
+	}
+	for _, req := range required {
+		if !entryExists(filepath.Join(basepath, name, req)) {
+			return false
+		}
+	}
+	return true
+}
+
+func entryExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+type nameVersion struct{ name, version string }
+
+func addEntryToMap(entry fs.DirEntry, latest map[string]nameVersion, toDelete []string) []string {
+	parts := regexp.MustCompile("_").Split(entry.Name(), 2)
+	key := parts[1]
+	version := parts[0]
+	if previous, ok := latest[key]; ok && previous.version > version {
+		// Current is older, mark it for deletion
+		toDelete = append(toDelete, entry.Name())
+	} else {
+		if ok {
+			toDelete = append(toDelete, previous.name)
+		}
+		latest[key] = nameVersion{name: entry.Name(), version: version}
+	}
+	return toDelete
 }

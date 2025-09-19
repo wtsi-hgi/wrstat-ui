@@ -36,45 +36,10 @@ import (
 
 type MultiReader []*BaseDirReader
 
-// OpenMulti opens a BaseDirReader for each path specified.
-func OpenMulti(ownersPath string, paths ...string) (MultiReader, error) { //nolint:funlen
-	mp, err := getMountPoints()
-	if err != nil {
-		return nil, err
-	}
-
-	owners, err := parseOwners(ownersPath)
-	if err != nil {
-		return nil, err
-	}
-
-	mr := make(MultiReader, len(paths))
-	ch := new(codec.BincHandle)
-	groupCache, userCache := NewGroupCache(), NewUserCache()
-
-	for n, path := range paths {
-		db, err := OpenDBRO(path)
-		if err != nil {
-			return nil, err
-		}
-
-		mr[n] = &BaseDirReader{
-			db:          db,
-			ch:          ch,
-			mountPoints: mp,
-			groupCache:  groupCache,
-			userCache:   userCache,
-			owners:      owners,
-		}
-	}
-
-	return mr, nil
-}
-
 // OpenMultiFromDBs constructs a MultiReader from already-open basedirs bolt DBs.
 // This avoids any path-based assumptions in callers by letting them manage how
 // DBs are opened and simply passing the handles here.
-func OpenMultiFromDBs(ownersPath string, dbs ...*bolt.DB) (MultiReader, error) { //nolint:funlen
+func OpenMulti(ownersPath string, dbs ...*bolt.DB) (MultiReader, error) { //nolint:funlen
 	mp, err := getMountPoints()
 	if err != nil {
 		return nil, err

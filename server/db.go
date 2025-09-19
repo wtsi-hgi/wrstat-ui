@@ -26,17 +26,16 @@
 package server
 
 import (
-	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
+	bolt "github.com/wtsi-hgi/wrstat-ui/bolt"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 )
 
@@ -71,61 +70,14 @@ const (
 // The subdir endpoints require id (gid or uid) and basedir parameters. The
 // history endpoint requires a gid and basedir (can be basedir, actually a
 // mountpoint) parameter.
-func (s *Server) LoadDBs(basePaths []string, dgutaDBName, basedirDBName, ownersPath string, mounts ...string) error { //nolint:funlen,lll
-	dirgutaPaths, baseDirPaths := JoinDBPaths(basePaths, dgutaDBName, basedirDBName)
-
-	mts, err := s.getDBTimestamps(baseDirPaths)
-	if err != nil {
-		return err
-	}
-
-	var srcs []db.Source
-	for _, p := range dirgutaPaths {
-		if s.srcFromPath == nil {
-			return basedirs.Error("no source converter set")
-		}
-		srcs = append(srcs, s.srcFromPath(p))
-	}
-
-	tree, err := db.NewTree(srcs...)
-	if err != nil {
-		return err
-	}
-
-	bd, err := basedirs.OpenMulti(ownersPath, baseDirPaths...)
-	if err != nil {
-		return err
-	}
-
-	if len(mounts) > 0 {
-		bd.SetMountPoints(mounts)
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	err = s.prewarmCaches(bd)
-	if err != nil {
-		return err
-	}
-
-	loaded := s.basedirs != nil
-	s.basedirs = bd
-	s.tree = tree
-	s.dataTimeStamp = mts
-
-	if !loaded {
-		s.addBaseDGUTARoutes()
-		s.addBaseDirRoutes()
-	}
-
-	return nil
-}
-
-// LoadDBAssets loads pre-constructed assets into the server without using paths.
+// LoadDBs loads pre-constructed assets into the server without using paths.
 // Callers provide dguta sources, a basedirs.MultiReader, and timestamps map.
 // If mounts are provided, they will be set on the basedirs reader.
-func (s *Server) LoadDBAssets(srcs []db.Source, bd basedirs.MultiReader, timestamps map[string]int64, mounts ...string) error {
+func (s *Server) LoadDBs(srcs []db.Source, bd basedirs.MultiReader, timestamps map[string]int64, mounts ...string) error {
+	// Basic validation: require non-empty sources, a basedirs reader, and timestamps
+	if len(srcs) == 0 || bd == nil || timestamps == nil {
+		return basedirs.Error("invalid assets to load")
+	}
 	tree, err := db.NewTree(srcs...)
 	if err != nil {
 		return err
@@ -155,18 +107,21 @@ func (s *Server) LoadDBAssets(srcs []db.Source, bd basedirs.MultiReader, timesta
 	return nil
 }
 
-func (s *Server) getDBTimestamps(paths []string) (map[string]int64, error) {
+// LoadDBAssets loads pre-constructed assets into the server without using paths.
+// Callers provide dguta sources, a basedirs.MultiReader, and timestamps map.
+// If mounts are provided, they will be set on the basedirs reader.
+// LoadDBAssets removed in favor of LoadDBs.
+
+func (s *Server) getDBTimestamps(paths []string) (map[string]int64, error) { // kept for reloader path-only flow; will be removed
 	timestamps := make(map[string]int64, len(paths))
 
 	for _, path := range paths {
 		dbDir := filepath.Dir(path)
-
-		st, err := os.Stat(dbDir)
+		fi, err := os.Stat(dbDir)
 		if err != nil {
 			return nil, err
 		}
-
-		timestamps[strings.SplitN(filepath.Base(dbDir), "_", numDBDirParts)[keyPart]] = st.ModTime().Unix()
+		timestamps[strings.SplitN(filepath.Base(dbDir), "_", numDBDirParts)[keyPart]] = fi.ModTime().Unix()
 	}
 
 	return timestamps, nil
@@ -195,14 +150,31 @@ func (s *Server) getDBTimestamps(paths []string) (map[string]int64, error) {
 // to be removed from the base path after each reload.
 func (s *Server) EnableDBReloading(basepath, dgutaDBName, basedirDBName, ownersPath string,
 	pollFrequency time.Duration, removeOldPaths bool, mounts ...string) error {
-	dbPaths, toDelete, err := findDBDirs(basepath, dgutaDBName, basedirDBName)
+	dbPaths, toDelete, err := bolt.FindDBDirs(basepath, dgutaDBName, basedirDBName)
 	if err != nil {
 		return err
 	} else if len(dbPaths) == 0 {
 		return ErrNoPaths
 	}
 
-	if err := s.LoadDBs(dbPaths, dgutaDBName, basedirDBName, ownersPath, mounts...); err != nil {
+	// Initial load keeps using old path-based joining: build assets and call LoadDBs
+	dirgutaPaths, baseDirPaths := JoinDBPaths(dbPaths, dgutaDBName, basedirDBName)
+	mts, err := s.getDBTimestamps(baseDirPaths)
+	if err != nil {
+		return err
+	}
+	var srcs []db.Source
+	for _, p := range dirgutaPaths {
+		if s.srcFromPath == nil {
+			return basedirs.Error("no source converter set")
+		}
+		srcs = append(srcs, s.srcFromPath(p))
+	}
+	bd, err := basedirs.OpenMulti(ownersPath, mustOpenBasedirs(baseDirPaths)...)
+	if err != nil {
+		return err
+	}
+	if err := s.LoadDBs(srcs, bd, mts, mounts...); err != nil {
 		return err
 	}
 
@@ -227,7 +199,7 @@ func (s *Server) reloadLoop(basepath, dgutaDBName, basedirDBName, ownersPath str
 			return
 		}
 
-		newDBPaths, toDelete, err := findDBDirs(basepath, dgutaDBName, basedirDBName)
+		newDBPaths, toDelete, err := bolt.FindDBDirs(basepath, dgutaDBName, basedirDBName)
 		if err != nil {
 			s.Logger.Printf("finding new database directories failed: %s", err)
 
@@ -250,7 +222,7 @@ func (s *Server) reloadLoop(basepath, dgutaDBName, basedirDBName, ownersPath str
 	}
 }
 
-func (s *Server) reloadDBs(dgutaDBName, basedirDBName, //nolint:funlen
+func (s *Server) reloadDBs(dgutaDBName, basedirDBName,
 	ownersPath string, dbPaths, mounts []string) bool {
 	dirgutaPaths, baseDirPaths := JoinDBPaths(dbPaths, dgutaDBName, basedirDBName)
 
@@ -269,34 +241,18 @@ func (s *Server) reloadDBs(dgutaDBName, basedirDBName, //nolint:funlen
 		srcs = append(srcs, s.srcFromPath(p))
 	}
 
-	tree, err := db.NewTree(srcs...)
-	if err != nil {
-		return s.logReloadError("reloading dirguta db failed: %s", err)
-	}
-
 	s.Logger.Printf("reloading basedirs db from %v", baseDirPaths)
 
-	bd, err := basedirs.OpenMulti(ownersPath, baseDirPaths...)
+	bd, err := basedirs.OpenMulti(ownersPath, mustOpenBasedirs(baseDirPaths)...)
 	if err != nil {
 		return s.logReloadError("reloading basedirs db failed: %s", err)
 	}
 
-	if len(mounts) > 0 {
-		bd.SetMountPoints(mounts)
+	if err := s.LoadDBs(srcs, bd, mt, mounts...); err != nil {
+		return s.logReloadError("building prewarmCaches failed: %s", err)
 	}
 
 	s.Logger.Printf("server ready again after reloading")
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	err = s.prewarmCaches(bd)
-	if err != nil {
-		return s.logReloadError("building prewarmCaches failed: %s", err)
-	}
-	s.tree = tree
-	s.basedirs = bd
-	s.dataTimeStamp = mt
 
 	return true
 }
@@ -305,15 +261,6 @@ func (s *Server) logReloadError(format string, v ...any) bool {
 	s.Logger.Printf(format, v...)
 
 	return false
-}
-
-// FindDBDirs finds the latest dirguta and basedir databases in the given base
-// directory, returning the paths to the dirguta dbs and basedir dbs for each
-// key/mountpoint.
-func FindDBDirs(basepath string, required ...string) ([]string, error) {
-	dbPaths, _, err := findDBDirs(basepath, required...)
-
-	return dbPaths, err
 }
 
 // JoinDBPaths produces a list of a dgutaDB paths and basedirDB paths from the
@@ -328,84 +275,6 @@ func JoinDBPaths(dbPaths []string, dgutaDBName, basedirDBName string) ([]string,
 	}
 
 	return dirgutaPaths, baseDirPaths
-}
-
-type nameVersion struct {
-	name    string
-	version string
-}
-
-func findDBDirs(basepath string, required ...string) ([]string, []string, error) {
-	entries, err := os.ReadDir(basepath)
-	if err != nil {
-		return nil, nil, err
-	}
-	var toDelete []string
-
-	latest := make(map[string]nameVersion)
-
-	for _, entry := range entries {
-		if !IsValidDBDir(entry, basepath, required...) {
-			continue
-		}
-
-		toDelete = addEntryToMap(entry, latest, toDelete)
-	}
-
-	dirs := make([]string, 0, len(latest))
-
-	for _, nt := range latest {
-		dirs = append(dirs, filepath.Join(basepath, nt.name))
-	}
-
-	slices.Sort(dirs)
-
-	return dirs, toDelete, nil
-}
-
-var validDBDir = regexp.MustCompile(`^[^.][^_]*_.`)
-
-// IsValidDBDir returns true if the given entry is a directory named with the
-// correct format and containing the required files.
-func IsValidDBDir(entry fs.DirEntry, basepath string, required ...string) bool {
-	name := entry.Name()
-
-	if !entry.IsDir() || !validDBDir.MatchString(name) {
-		return false
-	}
-
-	for _, entry := range required {
-		if !entryExists(filepath.Join(basepath, name, entry)) {
-			return false
-		}
-	}
-
-	return true
-}
-
-func entryExists(path string) bool {
-	_, err := os.Stat(path)
-
-	return err == nil
-}
-
-func addEntryToMap(entry fs.DirEntry, latest map[string]nameVersion, toDelete []string) []string {
-	parts := strings.SplitN(entry.Name(), "_", numDBDirParts)
-	key := parts[1]
-
-	version := parts[0]
-
-	if previous, ok := latest[key]; previous.version > version { //nolint:nestif
-		toDelete = append(toDelete, key)
-	} else {
-		if ok {
-			toDelete = append(toDelete, previous.name)
-		}
-
-		latest[key] = nameVersion{name: entry.Name(), version: version}
-	}
-
-	return toDelete
 }
 
 func removeAll(baseDirectory string, toDelete []string) error {
@@ -426,6 +295,20 @@ func removeAll(baseDirectory string, toDelete []string) error {
 	}
 
 	return nil
+}
+
+// mustOpenBasedirs opens each basedirs DB path read-only and returns the handles.
+// It panics on error since callers treat failures as exceptional and abort.
+func mustOpenBasedirs(paths []string) []*bolt.DB {
+	dbs := make([]*bolt.DB, 0, len(paths))
+	for _, p := range paths {
+		bdb, err := basedirs.OpenDBRO(p)
+		if err != nil {
+			panic(err)
+		}
+		dbs = append(dbs, bdb)
+	}
+	return dbs
 }
 
 func (s *Server) dbUpdateTimestamps(c *gin.Context) {
