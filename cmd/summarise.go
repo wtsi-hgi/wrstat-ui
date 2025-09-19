@@ -39,6 +39,7 @@ import (
 	"github.com/klauspost/pgzip"
 	"github.com/spf13/cobra"
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
+	bolt "github.com/wtsi-hgi/wrstat-ui/bolt"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 	"github.com/wtsi-hgi/wrstat-ui/stats"
 	"github.com/wtsi-hgi/wrstat-ui/summary"
@@ -391,17 +392,18 @@ func addDirgutaSummariser(s *summary.Summariser, dirgutaDB string) (func() error
 		return nil, err
 	}
 
-	db := db.NewDB(dirgutaDB)
+	src := bolt.NewDirSource(dirgutaDB)
+	d := db.NewDBFromSources(src)
 
-	if err := db.CreateDB(); err != nil {
+	if err := d.CreateDB(); err != nil {
 		return nil, err
 	}
 
-	db.SetBatchSize(dbBatchSize)
+	d.SetBatchSize(dbBatchSize)
 
-	s.AddDirectoryOperation(dirguta.NewDirGroupUserTypeAge(db))
+	s.AddDirectoryOperation(dirguta.NewDirGroupUserTypeAge(d))
 
-	return db.Close, nil
+	return d.Close, nil
 }
 
 func init() {
