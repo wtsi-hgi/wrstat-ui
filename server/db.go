@@ -98,13 +98,6 @@ func (s *Server) LoadDBs(srcs []db.Source, bd basedirs.MultiReader, timestamps m
 	return nil
 }
 
-// LoadDBAssets loads pre-constructed assets into the server without using paths.
-// Callers provide dguta sources, a basedirs.MultiReader, and timestamps map.
-// If mounts are provided, they will be set on the basedirs reader.
-// LoadDBAssets removed in favor of LoadDBs.
-
-// Removed: path-based timestamp helper; handled by backend-specific reloader.
-
 func (s *Server) dbUpdateTimestamps(c *gin.Context) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
