@@ -158,28 +158,46 @@ func IsValidDBDir(entry fs.DirEntry, basepath string, required ...string) bool {
 
 type nameVersion struct{ name, version string }
 
-func addEntryToMap(entry fs.DirEntry, latest map[string]nameVersion, toDelete []string) []string { //nolint:gocyclo
-	parts := strings.SplitN(entry.Name(), partSep, partCount)
-	if len(parts) != partCount {
+func addEntryToMap(entry fs.DirEntry, latest map[string]nameVersion, toDelete []string) []string {
+	key, version, ok := parseEntryName(entry.Name())
+	if !ok {
 		return toDelete
 	}
 
-	key := parts[1]
+	return updateLatest(key, version, entry.Name(), latest, toDelete)
+}
 
-	version := parts[0]
+// parseEntryName splits an entry name into version and key; returns ok=false
+// if the format is invalid.
+func parseEntryName(name string) (key, version string, ok bool) {
+	parts := strings.SplitN(name, partSep, partCount)
+	if len(parts) != partCount {
+		return "", "", false
+	}
+
+	return parts[1], parts[0], true
+}
+
+// updateLatest updates the latest map and toDelete slice based on version
+// comparisons and returns the new toDelete slice.
+func updateLatest(key, version, fullname string, latest map[string]nameVersion, toDelete []string) []string {
 	previous, ok := latest[key]
 
-	if ok && previous.version > version {
-		toDelete = append(toDelete, entry.Name())
+	if !ok {
+		latest[key] = nameVersion{name: fullname, version: version}
+
+		return toDelete
 	}
 
-	if ok && previous.version <= version {
-		toDelete = append(toDelete, previous.name)
+	if previous.version > version {
+		toDelete = append(toDelete, fullname)
+
+		return toDelete
 	}
 
-	if !ok || previous.version <= version {
-		latest[key] = nameVersion{name: entry.Name(), version: version}
-	}
+	// previous.version <= version
+	toDelete = append(toDelete, previous.name)
+	latest[key] = nameVersion{name: fullname, version: version}
 
 	return toDelete
 }
