@@ -81,6 +81,14 @@ type Source interface {
 	// For bolt implementations, this might be extracted from directory names.
 	// For ClickHouse implementations, this would be stored as metadata.
 	MountPoint() string
+
+	// GetMountTimestamps returns a map of mount points to their last update timestamps.
+	// For a bolt implementation with a single mount point, this would typically
+	// return a map with a single entry where the key is MountPoint() and the value
+	// is ModTime() converted to Unix timestamp.
+	// For a ClickHouse implementation that handles multiple mount points in a single
+	// source, this would return a map with an entry for each mount point in the database.
+	GetMountTimestamps() map[string]time.Time
 } // Factory constructs Store instances for a given Source.
 // The Factory interface provides methods to create and open Store instances
 // for a specific database backend (e.g., bolt, clickhouse). Each backend must

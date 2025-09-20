@@ -111,6 +111,7 @@ type Server struct {
 	basedirs       basedirs.MultiReader
 	tree           *db.Tree
 	srcFromPath    func(string) db.Source
+	sources        []db.Source
 	whiteCB        WhiteListCallback
 	uidToNameCache map[uint32]string
 	gidToNameCache map[uint32]string

@@ -33,40 +33,36 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/db"
 )
 
-// Note: Any filesystem path scanning/loading is backend-specific and must live
-// outside the server package. The server only accepts pre-constructed assets.
+// getMountTimestamps extracts mount points and timestamps from a slice of sources
+// by merging the results of GetMountTimestamps() calls.
+func getMountTimestamps(sources []db.Source) (map[string]int64, []string) {
+	timestamps := make(map[string]int64)
+	var mountPoints []string
 
-// LoadDBs loads dirguta and basedir databases from the given
-// directory/directories, and adds the relevant endpoints to the REST API.
-//
-// For the dirguta databases (as produced by one or more invocations of
-// dguta.DB.Store()) it adds the /rest/v1/where GET endpoint to the REST API. If
-// you call EnableAuth() first, then this endpoint will be secured and be
-// available at /rest/v1/auth/where.
-//
-// The where endpoint can take the dir, splits, groups, users and types
-// parameters, which correspond to arguments that dguta.Tree.Where() takes.
-//
-// For the basedirs database (as produced by basedirs.CreateDatabase()), in
-// combination with an owners file (a gid,owner csv), it adds the following GET
-// endpoints to the REST API:
-//
-// /rest/v1/basedirs/usage/groups /rest/v1/basedirs/usage/users
-// /rest/v1/basedirs/subdirs/group /rest/v1/basedirs/subdirs/user
-// /rest/v1/basedirs/history
-//
-// If you call EnableAuth() first, then these endpoints will be secured and be
-// available at /rest/v1/auth/basedirs/*.
-//
-// The subdir endpoints require id (gid or uid) and basedir parameters. The
-// history endpoint requires a gid and basedir (can be basedir, actually a
-// mountpoint) parameter.
+	// Collect mount points and timestamps from all sources
+	for _, src := range sources {
+		// Get mount timestamps from the source
+		mountTimesMap := src.GetMountTimestamps()
+
+		// Add each mount point and its timestamp to our collections
+		for mount, modTime := range mountTimesMap {
+			if mount != "" {
+				timestamps[mount] = modTime.Unix()
+				mountPoints = append(mountPoints, mount)
+			}
+		}
+	}
+
+	return timestamps, mountPoints
+}
+
 // LoadDBs loads pre-constructed assets into the server without using paths.
-// Callers provide dguta sources, a basedirs.MultiReader, and timestamps map.
-// If mounts are provided, they will be set on the basedirs reader.
-func (s *Server) LoadDBs(srcs []db.Source, bd basedirs.MultiReader, timestamps map[string]int64, mounts ...string) error {
-	// Basic validation: require non-empty sources, a basedirs reader, and timestamps
-	if len(srcs) == 0 || bd == nil || timestamps == nil {
+// Callers provide dguta sources and a basedirs.MultiReader.
+// This method extracts mount points and timestamps directly from the sources,
+// eliminating the need for external timestamp tracking.
+func (s *Server) LoadDBs(srcs []db.Source, bd basedirs.MultiReader) error {
+	// Basic validation: require non-empty sources and a basedirs reader
+	if len(srcs) == 0 || bd == nil {
 		return basedirs.Error("invalid assets to load")
 	}
 	tree, err := db.NewTree(srcs...)
@@ -74,23 +70,12 @@ func (s *Server) LoadDBs(srcs []db.Source, bd basedirs.MultiReader, timestamps m
 		return err
 	}
 
-	// Extract mount points from sources if not explicitly provided
-	if len(mounts) == 0 {
-		extractedMounts := make([]string, 0, len(srcs))
-		for _, src := range srcs {
-			mp := src.MountPoint()
-			if mp != "" {
-				extractedMounts = append(extractedMounts, mp)
-			}
-		}
+	// Get mount points and timestamps using our helper function
+	timestamps, mountPoints := getMountTimestamps(srcs)
 
-		if len(extractedMounts) > 0 {
-			mounts = extractedMounts
-		}
-	}
-
-	if len(mounts) > 0 {
-		bd.SetMountPoints(mounts)
+	// Set mount points on the basedirs reader if any were found
+	if len(mountPoints) > 0 {
+		bd.SetMountPoints(mountPoints)
 	}
 
 	s.mu.Lock()
@@ -103,6 +88,7 @@ func (s *Server) LoadDBs(srcs []db.Source, bd basedirs.MultiReader, timestamps m
 	loaded := s.basedirs != nil
 	s.basedirs = bd
 	s.tree = tree
+	s.sources = srcs // Store sources for later use in dbUpdateTimestamps
 	s.dataTimeStamp = timestamps
 
 	if !loaded {
@@ -116,6 +102,14 @@ func (s *Server) LoadDBs(srcs []db.Source, bd basedirs.MultiReader, timestamps m
 func (s *Server) dbUpdateTimestamps(c *gin.Context) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+
+	// Update timestamps using the sources stored on the server
+	if s.tree != nil && len(s.sources) > 0 {
+		// Use the same helper function we use in LoadDBs
+		timestamps, _ := getMountTimestamps(s.sources)
+		// Update the server's cached timestamps
+		s.dataTimeStamp = timestamps
+	}
 
 	c.JSON(http.StatusOK, s.dataTimeStamp)
 }

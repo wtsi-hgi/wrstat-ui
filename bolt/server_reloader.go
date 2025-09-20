@@ -11,7 +11,7 @@ import (
 // Loader is the minimal server surface needed for reloading.
 type Loader interface {
 	SetSourceFromPath(func(string) db.Source)
-	LoadDBs([]db.Source, basedirs.MultiReader, map[string]int64, ...string) error
+	LoadDBs([]db.Source, basedirs.MultiReader) error
 }
 
 // StartServerReloader wires a Reloader to a server via the Loader interface.
@@ -35,7 +35,8 @@ func StartServerReloader(
 		var srcs []db.Source
 		var stores []basedirs.Store
 		for _, d := range dirs {
-			srcs = append(srcs, NewDirSource(filepath.Join(d, dgutaDirBasename)))
+			dirSrc := NewDirSource(filepath.Join(d, dgutaDirBasename))
+			srcs = append(srcs, dirSrc)
 			bdb, err := OpenReadOnlyBasedirs(filepath.Join(d, basedirBasename))
 			if err != nil {
 				return false
@@ -48,17 +49,8 @@ func StartServerReloader(
 			return false
 		}
 
-		// Generate timestamps using the MountPoint method from each source
-		ts := make(map[string]int64, len(srcs))
-		for _, src := range srcs {
-			mountPoint := src.MountPoint()
-			if mountPoint == "" {
-				continue
-			}
-			ts[mountPoint] = src.ModTime().Unix()
-		}
-
-		if err := s.LoadDBs(srcs, bmr, ts, mounts...); err != nil {
+		// No need to manually extract timestamps anymore, as they are derived from sources
+		if err := s.LoadDBs(srcs, bmr); err != nil {
 			return false
 		}
 		return true

@@ -34,7 +34,6 @@ import (
 	"log/syslog"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/inconshreveable/log15"
@@ -202,24 +201,9 @@ files. It will use the mtime of the file as the data creation time in reports.
 			die("failed to construct basedirs reader: %s", err)
 		}
 
-		// Compute timestamps keyed by mountpoint/key derived from directory names
-		timestamps := make(map[string]int64, len(dbDirs))
-		for _, d := range dbDirs {
-			fi, err := os.Stat(d)
-			if err != nil {
-				die("failed to stat db dir: %s", err)
-			}
-			base := filepath.Base(d)
-			// Expect format '<version>_<key>'
-			parts := strings.SplitN(base, "_", 2)
-			key := base
-			if len(parts) == 2 {
-				key = parts[1]
-			}
-			timestamps[key] = fi.ModTime().Unix()
-		}
-
-		if err := s.LoadDBs(srcs, bdReader, timestamps, mountpoints...); err != nil {
+		// Load databases into the server
+		// The server will extract mount points and timestamps from the sources
+		if err := s.LoadDBs(srcs, bdReader); err != nil {
 			die("failed to load databases into server: %s", err)
 		}
 

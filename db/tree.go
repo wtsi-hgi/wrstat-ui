@@ -34,7 +34,8 @@ import (
 
 // Tree is used to do high-level queries on DB.Store() database files.
 type Tree struct {
-	db *DB
+	db      *DB
+	sources []Source
 }
 
 // NewTree, given one or more Sources to dguta databases (as created by
@@ -47,7 +48,16 @@ func NewTree(srcs ...Source) (*Tree, error) { //nolint:ireturn
 		return nil, err
 	}
 
-	return &Tree{db: db}, nil
+	return &Tree{
+		db:      db,
+		sources: srcs,
+	}, nil
+}
+
+// Sources returns the slice of Source objects that this Tree was created with.
+// This allows access to mount point and timestamp information from the sources.
+func (t *Tree) Sources() []Source {
+	return t.sources
 }
 
 // DirSummary holds nested file count, size, atime and mtime information on a
