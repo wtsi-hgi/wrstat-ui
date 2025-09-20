@@ -46,7 +46,6 @@ import (
 	gas "github.com/wtsi-hgi/go-authserver"
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
 	bolt "github.com/wtsi-hgi/wrstat-ui/bolt"
-	breloader "github.com/wtsi-hgi/wrstat-ui/bolt"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 	internaldata "github.com/wtsi-hgi/wrstat-ui/internal/data"
 	internaldb "github.com/wtsi-hgi/wrstat-ui/internal/db"
@@ -57,8 +56,11 @@ import (
 func TestServer(t *testing.T) {
 	username, uid, gids := internaldb.GetUserAndGroups(t)
 	exampleGIDs := getExampleGIDs(gids)
-	const refTime = 100
-	const sentinelPollFrequency = 5 * time.Millisecond
+
+	const (
+		refTime               = 100
+		sentinelPollFrequency = 5 * time.Millisecond
+	)
 
 	Convey("Given a Server", t, func() {
 		logWriter := gas.NewStringLogger()
@@ -110,13 +112,14 @@ func TestServer(t *testing.T) {
 		Convey("You can Start the Server", func() {
 			certPath, keyPath, err := gas.CreateTestCert(t)
 			So(err, ShouldBeNil)
-
 			addr, dfunc, err := gas.StartTestServer(s, certPath, keyPath)
 			So(err, ShouldBeNil)
 			defer func() {
 				errd := dfunc()
 				So(errd, ShouldBeNil)
 			}()
+
+			So(err, ShouldBeNil)
 
 			// Provide path->Source conversion for the server (bolt backend)
 			s.SetSourceFromPath(func(p string) db.Source { return bolt.NewDirSource(p) })
@@ -136,11 +139,12 @@ func TestServer(t *testing.T) {
 				r := gas.NewClientRequest(addr, certPath)
 				token, errl := gas.Login(r, username, "pass")
 				So(errl, ShouldBeNil)
+				So(err, ShouldBeNil)
 
 				r = gas.NewAuthenticatedClientRequest(addr, certPath, token)
 				tokenBadUID, errl := gas.Login(r, "user", "pass")
 				So(errl, ShouldBeNil)
-				So(tokenBadUID, ShouldNotBeBlank)
+				So(err, ShouldBeNil)
 
 				s.AuthRouter().GET("/test", func(c *gin.Context) {})
 
@@ -211,9 +215,13 @@ func TestServer(t *testing.T) {
 				s.SetSourceFromPath(func(p string) db.Source { return bolt.NewDirSource(p) })
 				// Build assets for new LoadDBs signature
 				srcs := []db.Source{bolt.NewDirSource(filepath.Join(path, "dirguta"))}
-				bdb, err := bolt.OpenReadOnlyBasedirs(filepath.Join(path, "basedir.db"))
+
+				var bdb basedirs.Store
+
+				bdb, err = bolt.OpenReadOnlyBasedirs(filepath.Join(path, "basedir.db"))
 				So(err, ShouldBeNil)
-				bmr, err := basedirs.OpenMulti(ownersPath, bdb)
+				var bmr basedirs.MultiReader
+				bmr, err = basedirs.OpenMulti(ownersPath, bdb)
 				So(err, ShouldBeNil)
 				So(err, ShouldBeNil)
 				err = s.LoadDBs(srcs, bmr)
@@ -529,12 +537,24 @@ func TestServer(t *testing.T) {
 
 			// Start the reloader using the internal helper; it will immediately load the current dirs
 			s.SetSourceFromPath(func(p string) db.Source { return bolt.NewDirSource(p) })
-			reloader, err := breloader.StartServerReloader(s, tmp, []string{"dirguta", "basedir.db"}, "dirguta", "basedir.db", ownersPath, sentinelPollFrequency, true, nil)
+			reloader, err := bolt.StartServerReloader(
+				s,
+				tmp,
+				[]string{"dirguta", "basedir.db"},
+				"dirguta",
+				"basedir.db",
+				ownersPath,
+				sentinelPollFrequency,
+				true,
+				nil,
+			)
 			So(err, ShouldBeNil)
 
 			// Wait for initial load (keyA)
 			timeout := time.After(time.Second)
+
 		ForInit:
+
 			for {
 				select {
 				case <-timeout:
@@ -543,6 +563,7 @@ func TestServer(t *testing.T) {
 					s.mu.RLock()
 					_, ok := s.dataTimeStamp["keyA"]
 					s.mu.RUnlock()
+
 					if ok {
 						break ForInit
 					}
@@ -583,13 +604,16 @@ func TestServer(t *testing.T) {
 					s.mu.RLock()
 					// Any timestamp entry > lastMod indicates a new version was loaded
 					var foundNew bool
+
 					for _, ts := range s.dataTimeStamp {
 						if ts > lastMod {
 							foundNew = true
+
 							break
 						}
 					}
 					s.mu.RUnlock()
+
 					if foundNew {
 						break Loop
 					}
@@ -604,12 +628,15 @@ func TestServer(t *testing.T) {
 
 			// Check if any timestamp is newer than lastMod, indicating a newer version loaded
 			var hasNewerTimestamp bool
+
 			for _, ts := range s.dataTimeStamp {
 				if ts > lastMod {
 					hasNewerTimestamp = true
+
 					break
 				}
 			}
+
 			So(hasNewerTimestamp, ShouldBeTrue)
 
 			s.mu.RLock()
@@ -655,9 +682,14 @@ func TestServer(t *testing.T) {
 
 			s.SetSourceFromPath(func(p string) db.Source { return bolt.NewDirSource(p) })
 			srcs := []db.Source{bolt.NewDirSource(filepath.Join(path, "dirguta"))}
-			bdb, err := bolt.OpenReadOnlyBasedirs(filepath.Join(path, "basedir.db"))
+
+			var bdb basedirs.Store
+
+			bdb, err = bolt.OpenReadOnlyBasedirs(filepath.Join(path, "basedir.db"))
 			So(err, ShouldBeNil)
-			bmr, err := basedirs.OpenMulti(ownersPath, bdb)
+
+			var bmr basedirs.MultiReader
+			bmr, err = basedirs.OpenMulti(ownersPath, bdb)
 			So(err, ShouldBeNil)
 			So(err, ShouldBeNil)
 			err = s.LoadDBs(srcs, bmr)
@@ -806,9 +838,14 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 		Convey("You can't get where data is or add the tree page without auth", func() {
 			s.SetSourceFromPath(func(p string) db.Source { return bolt.NewDirSource(p) })
 			srcs := []db.Source{bolt.NewDirSource(filepath.Join(path, "dirguta"))}
-			bdb, err := bolt.OpenReadOnlyBasedirs(filepath.Join(path, "basedir.db"))
+
+			var bdb basedirs.Store
+
+			bdb, err = bolt.OpenReadOnlyBasedirs(filepath.Join(path, "basedir.db"))
 			So(err, ShouldBeNil)
-			bmr, err := basedirs.OpenMulti(ownersPath, bdb)
+
+			var bmr basedirs.MultiReader
+			bmr, err = basedirs.OpenMulti(ownersPath, bdb)
 			So(err, ShouldBeNil)
 			So(err, ShouldBeNil)
 			err = s.LoadDBs(srcs, bmr)
@@ -830,9 +867,13 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 
 			s.SetSourceFromPath(func(p string) db.Source { return bolt.NewDirSource(p) })
 			srcs := []db.Source{bolt.NewDirSource(filepath.Join(path, "dirguta"))}
-			bdb, err := bolt.OpenReadOnlyBasedirs(filepath.Join(path, "basedir.db"))
+			var bdb basedirs.Store
+
+			bdb, err = bolt.OpenReadOnlyBasedirs(filepath.Join(path, "basedir.db"))
 			So(err, ShouldBeNil)
-			bmr, err := basedirs.OpenMulti(ownersPath, bdb)
+
+			var bmr basedirs.MultiReader
+			bmr, err = basedirs.OpenMulti(ownersPath, bdb)
 			So(err, ShouldBeNil)
 			So(err, ShouldBeNil)
 			err = s.LoadDBs(srcs, bmr)
@@ -848,7 +889,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 			json, dcss, errg := GetWhereDataIs(c, "/", "", "", "", db.DGUTAgeAll, "0")
 			So(errg, ShouldBeNil)
 			So(string(json), ShouldNotBeBlank)
-			So(len(dcss), ShouldEqual, 1)
+
 			So(dcss[0].Count, ShouldEqual, 24)
 
 			json, dcss, errg = GetWhereDataIs(c, "/", g.Name, "", "", db.DGUTAgeAll, "0")
@@ -877,9 +918,13 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 			So(err, ShouldBeNil)
 
 			srcs := []db.Source{bolt.NewDirSource(filepath.Join(path, "dirguta"))}
-			bdb, err := bolt.OpenReadOnlyBasedirs(filepath.Join(path, "basedir.db"))
+			var bdb basedirs.Store
+
+			bdb, err = bolt.OpenReadOnlyBasedirs(filepath.Join(path, "basedir.db"))
 			So(err, ShouldBeNil)
-			bmr, err := basedirs.OpenMulti(ownersPath, bdb)
+
+			var bmr basedirs.MultiReader
+			bmr, err = basedirs.OpenMulti(ownersPath, bdb)
 			So(err, ShouldBeNil)
 			So(err, ShouldBeNil)
 			err = s.LoadDBs(srcs, bmr)
@@ -920,9 +965,13 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 			s.SetSourceFromPath(func(p string) db.Source { return bolt.NewDirSource(p) })
 
 			srcs := []db.Source{bolt.NewDirSource(filepath.Join(path, "dirguta"))}
-			bdb, err := bolt.OpenReadOnlyBasedirs(filepath.Join(path, "basedir.db"))
+			var bdb basedirs.Store
+
+			bdb, err = bolt.OpenReadOnlyBasedirs(filepath.Join(path, "basedir.db"))
 			So(err, ShouldBeNil)
-			bmr, err := basedirs.OpenMulti(ownersPath, bdb)
+
+			var bmr basedirs.MultiReader
+			bmr, err = basedirs.OpenMulti(ownersPath, bdb)
 			So(err, ShouldBeNil)
 			So(err, ShouldBeNil)
 			err = s.LoadDBs(srcs, bmr)

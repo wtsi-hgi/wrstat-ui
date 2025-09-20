@@ -37,7 +37,7 @@ type MultiReader []*BaseDirReader
 
 // OpenMulti constructs a MultiReader from already-open basedirs stores.
 // Callers supply store implementations appropriate for their backend.
-func OpenMulti(ownersPath string, stores ...Store) (MultiReader, error) { //nolint:funlen
+func OpenMulti(ownersPath string, stores ...Store) (MultiReader, error) {
 	mp, err := getMountPoints()
 	if err != nil {
 		return nil, err

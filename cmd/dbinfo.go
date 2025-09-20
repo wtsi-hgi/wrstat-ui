@@ -90,7 +90,7 @@ NB: for large databases, this can take hours to run.
 				die("failed to open basedirs store: %s", err)
 			}
 			bdInfo, err := basedirs.Info(store)
-			store.Close() //nolint:errcheck
+			store.Close()
 			if err != nil {
 				die("failed to get basedirs db info: %s", err)
 			}

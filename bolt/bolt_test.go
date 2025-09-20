@@ -1,6 +1,7 @@
 package bolt_test
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -12,7 +13,7 @@ func TestOpenUpdateViewAndBuckets(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.db")
 
-	db, err := bolt.Open(path, 0o640, &bolt.Options{ //nolint:mnd
+	db, err := bolt.Open(path, 0o640, &bolt.Options{
 		NoFreelistSync: true,
 		NoGrowSync:     true,
 		FreelistType:   bolt.FreelistMapType,
@@ -35,6 +36,7 @@ func TestOpenUpdateViewAndBuckets(t *testing.T) {
 
 		// Idempotent create
 		_, errc = tx.CreateBucketIfNotExists([]byte("bucket1"))
+
 		return errc
 	})
 	if err != nil {
@@ -53,15 +55,19 @@ func TestOpenUpdateViewAndBuckets(t *testing.T) {
 		}
 
 		count := 0
+
 		if errf := b.ForEach(func(k, v []byte) error {
 			count++
+
 			return nil
 		}); errf != nil {
 			return errf
 		}
+
 		if count != 1 {
 			t.Fatalf("unexpected count: %d", count)
 		}
+
 		return nil
 	})
 	if err != nil {
@@ -73,7 +79,7 @@ func TestCursorDeleteAndDeleteBucket(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.db")
 
-	db, err := bolt.Open(path, 0o640, &bolt.Options{}) //nolint:mnd
+	db, err := bolt.Open(path, 0o640, &bolt.Options{})
 	if err != nil {
 		t.Fatalf("open failed: %v", err)
 	}
@@ -99,6 +105,7 @@ func TestCursorDeleteAndDeleteBucket(t *testing.T) {
 		if errc = c.Delete(); errc != nil {
 			return errc
 		}
+
 		return nil
 	}); err != nil {
 		t.Fatalf("update failed: %v", err)
@@ -110,6 +117,7 @@ func TestCursorDeleteAndDeleteBucket(t *testing.T) {
 		count := 0
 		_ = b.ForEach(func(k, v []byte) error { //nolint:errcheck
 			count++
+
 			return nil
 		})
 		if count != 1 {
@@ -118,9 +126,10 @@ func TestCursorDeleteAndDeleteBucket(t *testing.T) {
 		if errc := tx.DeleteBucket([]byte("b2")); errc != nil {
 			return errc
 		}
-		if errc := tx.DeleteBucket([]byte("b2")); errc == nil || errc != bolt.ErrBucketNotFound {
+		if errc := tx.DeleteBucket([]byte("b2")); errc == nil || !errors.Is(errc, bolt.ErrBucketNotFound) {
 			t.Fatalf("expected ErrBucketNotFound, got %v", errc)
 		}
+
 		return nil
 	}); err != nil {
 		t.Fatalf("update failed: %v", err)
@@ -132,15 +141,16 @@ func TestReadOnlyOption(t *testing.T) {
 	path := filepath.Join(dir, "ro.db")
 
 	// Create a DB then reopen read-only and ensure update fails.
-	db, err := bolt.Open(path, 0o640, &bolt.Options{}) //nolint:mnd
+	db, err := bolt.Open(path, 0o640, &bolt.Options{})
 	if err != nil {
 		t.Fatalf("open failed: %v", err)
 	}
+
 	if err = db.Close(); err != nil {
 		t.Fatalf("close failed: %v", err)
 	}
 
-	ro, err := bolt.Open(path, 0o640, &bolt.Options{ReadOnly: true}) //nolint:mnd
+	ro, err := bolt.Open(path, 0o640, &bolt.Options{ReadOnly: true})
 	if err != nil {
 		t.Fatalf("open RO failed: %v", err)
 	}
@@ -148,6 +158,7 @@ func TestReadOnlyOption(t *testing.T) {
 
 	if err = ro.Update(func(tx *bolt.Tx) error { // should fail on read-only DB
 		_, errc := tx.CreateBucketIfNotExists([]byte("x"))
+
 		return errc
 	}); err == nil {
 		t.Fatalf("expected update to fail on read-only DB")
@@ -163,11 +174,13 @@ func TestMaxKeySizeExposed(t *testing.T) {
 func TestOpenCreatesFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "create.db")
-	db, err := bolt.Open(path, 0o640, &bolt.Options{}) //nolint:mnd
+
+	db, err := bolt.Open(path, 0o640, &bolt.Options{})
 	if err != nil {
 		t.Fatalf("open failed: %v", err)
 	}
 	defer db.Close()
+
 	if _, err = os.Stat(path); err != nil {
 		t.Fatalf("expected db file to exist: %v", err)
 	}

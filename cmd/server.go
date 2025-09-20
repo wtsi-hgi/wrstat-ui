@@ -189,8 +189,9 @@ files. It will use the mtime of the file as the data creation time in reports.
 
 		// Open basedirs DBs read-only and build a MultiReader
 		var bstores []basedirs.Store
+		var bdb basedirs.Store
 		for _, d := range dbDirs {
-			bdb, err := bolt.OpenReadOnlyBasedirs(filepath.Join(d, basedirBasename))
+			bdb, err = bolt.OpenReadOnlyBasedirs(filepath.Join(d, basedirBasename))
 			if err != nil {
 				die("failed to open basedirs db: %s", err)
 			}
@@ -203,13 +204,24 @@ files. It will use the mtime of the file as the data creation time in reports.
 
 		// Load databases into the server
 		// The server will extract mount points and timestamps from the sources
-		if err := s.LoadDBs(srcs, bdReader); err != nil {
+		if err = s.LoadDBs(srcs, bdReader); err != nil {
 			die("failed to load databases into server: %s", err)
 		}
 
 		// Enable automatic reloading using a helper that wires bolt's reloader to the server.
 		required := []string{dgutaDBsSuffix, basedirBasename}
-		if _, err := bolt.StartServerReloader(s, args[0], required, dgutaDirBasename, basedirBasename, ownersPath, sentinelPollFrequencty, true, mountpoints); err != nil {
+		_, err = bolt.StartServerReloader(
+			s,
+			args[0],
+			required,
+			dgutaDirBasename,
+			basedirBasename,
+			ownersPath,
+			sentinelPollFrequencty,
+			true,
+			mountpoints,
+		)
+		if err != nil {
 			die("failed to enable db reloading: %s", err)
 		}
 

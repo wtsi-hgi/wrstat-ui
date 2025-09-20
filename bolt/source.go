@@ -11,6 +11,11 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/internal/dbdirs"
 )
 
+const (
+	partSep   = "_"
+	partCount = 2
+)
+
 // DirSource is a bolt implementation of db.Source backed by a directory
 // containing dguta and children db files.
 type DirSource struct {
@@ -33,6 +38,7 @@ func (s *DirSource) modTime() time.Time {
 	if err != nil {
 		return time.Time{}
 	}
+
 	return fi.ModTime()
 }
 
@@ -42,12 +48,18 @@ func (s *DirSource) Exists() (bool, error) {
 	for _, p := range paths {
 		fi, err := os.Stat(p)
 		if err != nil {
-			return false, nil
+			if os.IsNotExist(err) {
+				return false, nil
+			}
+
+			return false, err
 		}
+
 		if fi.Size() == 0 {
 			return false, nil
 		}
 	}
+
 	return true, nil
 }
 
@@ -63,10 +75,11 @@ func (s *DirSource) mountPoint() string {
 	dirName := filepath.Base(parentDir)
 
 	// Extract from directory name (format: timestamp_mountpoint)
-	parts := strings.SplitN(dirName, "_", 2)
-	if len(parts) != 2 {
+	parts := strings.SplitN(dirName, partSep, partCount)
+	if len(parts) != partCount {
 		return "" // Invalid format
 	}
+
 	return parts[1]
 }
 
@@ -101,6 +114,7 @@ const OpenMode = 0640
 // DirDBPaths returns the two bolt file paths for a given directory.
 func DirDBPaths(dir string) (dgutaPath, childrenPath string) {
 	ds := NewDirSource(dir)
+
 	return ds.dgutaPath(), ds.childrenPath()
 }
 
@@ -115,12 +129,14 @@ func FindDBDirs(basepath string, required ...string) ([]string, []string, error)
 	}
 
 	latest := make(map[string]nameVersion)
+
 	var toDelete []string
 
 	for _, entry := range entries {
 		if !IsValidDBDir(entry, basepath, required...) {
 			continue
 		}
+
 		toDelete = addEntryToMap(entry, latest, toDelete)
 	}
 
@@ -128,6 +144,7 @@ func FindDBDirs(basepath string, required ...string) ([]string, []string, error)
 	for _, nt := range latest {
 		dirs = append(dirs, filepath.Join(basepath, nt.name))
 	}
+
 	slices.Sort(dirs)
 
 	return dirs, toDelete, nil
@@ -142,8 +159,13 @@ func IsValidDBDir(entry fs.DirEntry, basepath string, required ...string) bool {
 type nameVersion struct{ name, version string }
 
 func addEntryToMap(entry fs.DirEntry, latest map[string]nameVersion, toDelete []string) []string {
-	parts := strings.SplitN(entry.Name(), "_", 2)
+	parts := strings.SplitN(entry.Name(), partSep, partCount)
+	if len(parts) != partCount {
+		return toDelete
+	}
+
 	key := parts[1]
+
 	version := parts[0]
 	if previous, ok := latest[key]; ok && previous.version > version {
 		// Current is older, mark it for deletion
@@ -152,7 +174,9 @@ func addEntryToMap(entry fs.DirEntry, latest map[string]nameVersion, toDelete []
 		if ok {
 			toDelete = append(toDelete, previous.name)
 		}
+
 		latest[key] = nameVersion{name: entry.Name(), version: version}
 	}
+
 	return toDelete
 }

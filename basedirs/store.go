@@ -16,13 +16,13 @@ type Store interface {
 	// The function should execute the provided callback within a transaction,
 	// committing changes if the callback returns nil, or rolling back if an error occurs.
 	// Any error from the callback or transaction handling should be returned.
-	Update(func(Writer) error) error
+	Update(fn func(Writer) error) error
 
 	// View provides a Reader-backed transaction for reads.
 	// The function should execute the provided callback within a read-only transaction.
-	// Implementations should optimize for concurrent read access.
+	// Implementations should optimise for concurrent read access.
 	// Any error from the callback or transaction handling should be returned.
-	View(func(Reader) error) error
+	View(fn func(Reader) error) error
 
 	// Close releases resources associated with this store.
 	// This should close any open connections, file handles, or other resources.
@@ -111,7 +111,7 @@ type Writer interface {
 	// ForEachGroupUsage iterates all group usage records (age==All) to allow
 	// precomputations like DateQuotaFull. Return error to abort.
 	// This is used for aggregate calculations across all group records.
-	ForEachGroupUsage(func(*Usage) error) error
+	ForEachGroupUsage(fn func(*Usage) error) error
 
 	// History returns the history for a gid and mountpoint path (within write txn).
 	// This allows reading history data within a write transaction for atomic update patterns.

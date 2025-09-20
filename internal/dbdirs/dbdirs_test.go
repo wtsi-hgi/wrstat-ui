@@ -18,22 +18,27 @@ func TestIsValidDBDir(t *testing.T) {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Fatalf("mkdir: %v", err)
 		}
+
 		for _, f := range files {
 			p := filepath.Join(dir, f)
-			if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
 				t.Fatalf("writefile: %v", err)
 			}
 		}
+
 		entry, err := os.ReadDir(base)
 		if err != nil {
 			t.Fatalf("readdir: %v", err)
 		}
+
 		for _, e := range entry {
 			if e.Name() == name {
 				return e, dir
 			}
 		}
+
 		t.Fatalf("direntry not found for %s", name)
+
 		return nil, ""
 	}
 
@@ -51,20 +56,29 @@ func TestIsValidDBDir(t *testing.T) {
 
 	// invalid: not a dir simulated by file entryExists is used only after dir check
 	file := filepath.Join(base, "20250101_ok")
-	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
+	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
 		t.Fatalf("writefile: %v", err)
 	}
-	entries, _ := os.ReadDir(base)
+
+	entries, err := os.ReadDir(base)
+	if err != nil {
+		t.Fatalf("readdir base: %v", err)
+	}
+
 	var fileEntry fs.DirEntry
+
 	for _, e := range entries {
 		if e.Name() == filepath.Base(file) {
 			fileEntry = e
+
 			break
 		}
 	}
+
 	if fileEntry == nil {
 		t.Fatalf("expected file entry")
 	}
+
 	if IsValidDBDir(fileEntry, base, "req1") {
 		t.Errorf("expected invalid for non-directory entry")
 	}
@@ -90,13 +104,16 @@ func TestIsValidDBDir(t *testing.T) {
 // TestEntryExists covers positive and negative cases.
 func TestEntryExists(t *testing.T) {
 	base := t.TempDir()
+
 	p := filepath.Join(base, "a")
 	if EntryExists(p) {
 		t.Fatalf("expected false when path does not exist")
 	}
-	if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+
+	if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
 		t.Fatalf("writefile: %v", err)
 	}
+
 	if !EntryExists(p) {
 		t.Fatalf("expected true when path exists")
 	}

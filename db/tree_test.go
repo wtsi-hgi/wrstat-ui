@@ -377,7 +377,10 @@ func TestTree(t *testing.T) {
 func testCreateDB(t *testing.T, path string, refUnixTime int64) error {
 	t.Helper()
 
-	return fillTestDB(db.NewDB(bolt.NewDirSource(path)), internaldata.CreateDefaultTestData(1, 2, 1, 101, 102, refUnixTime))
+	return fillTestDB(
+		db.NewDB(bolt.NewDirSource(path)),
+		internaldata.CreateDefaultTestData(1, 2, 1, 101, 102, refUnixTime),
+	)
 }
 
 func fillTestDB(adb *db.DB, files *statsdata.Directory) error {

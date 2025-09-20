@@ -225,8 +225,11 @@ func (g GUTAs) Summary(filter *Filter) *DirSummary { //nolint:funlen,gocyclo
 	// Track a fallback atime considering all matching GUTAs ignoring Age.
 	// Tests expect Atime to remain consistent across age filters; if filtering
 	// by age results in no positive atimes, we fall back to this value.
-	var fallbackAtime int64
-	var filterIgnoringAge *Filter
+	var (
+		fallbackAtime     int64
+		filterIgnoringAge *Filter
+	)
+
 	if filter != nil {
 		// Shallow copy is fine; we only override Age.
 		copied := *filter

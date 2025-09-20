@@ -148,6 +148,7 @@ func addBasedirsSummariser(t *testing.T, s *summary.Summariser, path string) (fu
 	if err != nil {
 		return nil, err
 	}
+
 	bd, err := basedirs.NewCreator(store, quotas)
 	if err != nil {
 		return nil, err

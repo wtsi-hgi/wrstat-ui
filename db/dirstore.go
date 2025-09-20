@@ -44,12 +44,12 @@ type Store interface {
 	// ForEachDGUTA iterates all DGUTA key/value pairs.
 	// Implementations should call the provided function for each DGUTA entry.
 	// If the callback returns an error, iteration should stop and return that error.
-	ForEachDGUTA(func(key, value []byte) error) error
+	ForEachDGUTA(fn func(key, value []byte) error) error
 
 	// ForEachChildren iterates all children values.
 	// Implementations should call the provided function for each children entry.
 	// If the callback returns an error, iteration should stop and return that error.
-	ForEachChildren(func(value []byte) error) error
+	ForEachChildren(fn func(value []byte) error) error
 }
 
 // Source represents a backend-agnostic database source (eg. a directory of bolt files,
@@ -64,7 +64,7 @@ type Store interface {
 // backends without knowing their specific implementation details.
 type Source interface {
 	// Exists reports whether a database already exists at this source.
-	// This method should check if the database structure is already initialized
+	// This method should check if the database structure is already initialised
 	// at the given source location and is ready to be opened.
 	// Should return (false, nil) if the database doesn't exist but there was no error
 	// in checking.
@@ -95,7 +95,7 @@ type Source interface {
 type Factory interface {
 	// Create creates a new Store at the specified Source with write access.
 	// This method should:
-	// 1. Initialize the database schema if it doesn't exist
+	// 1. Initialise the database schema if it doesn't exist
 	// 2. Create any necessary tables, buckets, or structures
 	// 3. Return a Store instance ready for read/write operations
 	// If the Source already exists, the implementation may choose to fail or reuse it.
@@ -113,6 +113,7 @@ type Factory interface {
 	OpenReadOnlyUnPopulated(src Source) (Store, error)
 }
 
+//nolint:gochecknoglobals
 var (
 	regMu       sync.RWMutex
 	reg         = map[string]Factory{}
@@ -123,6 +124,7 @@ var (
 func Register(name string, f Factory) {
 	regMu.Lock()
 	defer regMu.Unlock()
+
 	reg[name] = f
 	if defaultName == "" {
 		defaultName = name
@@ -130,19 +132,29 @@ func Register(name string, f Factory) {
 }
 
 // Get returns a Factory by name and whether it exists.
+// Get returns a Factory by name and whether it exists.
+//
+//nolint:ireturn // returning interface is intentional for registry access
 func Get(name string) (Factory, bool) {
 	regMu.RLock()
 	defer regMu.RUnlock()
+
 	f, ok := reg[name]
+
 	return f, ok
 }
 
 // Default returns the first registered factory, or nil if none.
+// Default returns the default registered Factory (or nil if none).
+//
+//nolint:ireturn // returning interface intentionally
 func Default() Factory {
 	regMu.RLock()
 	defer regMu.RUnlock()
+
 	if defaultName == "" {
 		return nil
 	}
+
 	return reg[defaultName]
 }

@@ -49,34 +49,63 @@ type DBInfo struct {
 func Info(store Store) (*DBInfo, error) {
 	info := &DBInfo{}
 	ch := new(codec.BincHandle)
+	err := store.View(func(r Reader) error { return populateDBInfo(r, info, ch) })
 
-	err := store.View(func(r Reader) error {
-		info.GroupDirCombos, _ = countFromFullBucketScan(r, GroupUsageBucket, countOnly, ch)
-		info.GroupMountCombos, info.GroupHistories = countFromFullBucketScan(r, GroupHistoricalBucket, countHistories, ch)
-		info.GroupSubDirCombos, info.GroupSubDirs = countFromFullBucketScan(r, GroupSubDirsBucket, countSubDirs, ch)
-		info.UserDirCombos, _ = countFromFullBucketScan(r, UserUsageBucket, countOnly, ch)
-		info.UserSubDirCombos, info.UserSubDirs = countFromFullBucketScan(r, UserSubDirsBucket, countSubDirs, ch)
-		return nil
-	})
 	return info, err
+}
+
+// populateDBInfo is a package-level helper that performs the full bucket
+// scans and fills the provided DBInfo. Moving this out of Info reduces the
+// cognitive complexity of Info itself (gocognit).
+func populateDBInfo(r Reader, info *DBInfo, ch codec.Handle) error {
+	var e error
+
+	info.GroupDirCombos, _, e = countFromFullBucketScan(r, GroupUsageBucket, countOnly, ch)
+	if e != nil {
+		return e
+	}
+
+	info.GroupMountCombos, info.GroupHistories, e = countFromFullBucketScan(r, GroupHistoricalBucket, countHistories, ch)
+	if e != nil {
+		return e
+	}
+
+	info.GroupSubDirCombos, info.GroupSubDirs, e = countFromFullBucketScan(r, GroupSubDirsBucket, countSubDirs, ch)
+	if e != nil {
+		return e
+	}
+
+	info.UserDirCombos, _, e = countFromFullBucketScan(r, UserUsageBucket, countOnly, ch)
+	if e != nil {
+		return e
+	}
+
+	info.UserSubDirCombos, info.UserSubDirs, e = countFromFullBucketScan(r, UserSubDirsBucket, countSubDirs, ch)
+	if e != nil {
+		return e
+	}
+
+	return nil
 }
 
 func countFromFullBucketScan(tx Reader, bucketName string,
 	cb func(v []byte, ch codec.Handle) int, ch codec.Handle,
-) (int, int) {
+) (int, int, error) {
 	count := 0
 	sliceLen := 0
 
-	_ = tx.ForEachRaw(bucketName, func(k, v []byte) error {
+	if err := tx.ForEachRaw(bucketName, func(k, v []byte) error {
 		if !CheckAgeOfKeyIsAll(k) {
 			return nil
 		}
 		count++
 		sliceLen += cb(v, ch)
 		return nil
-	})
+	}); err != nil {
+		return 0, 0, err
+	}
 
-	return count, sliceLen
+	return count, sliceLen, nil
 }
 
 // CheckAgeOfKeyIsAll returns true if the key represents the db.DGUTAgeAll key.

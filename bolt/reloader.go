@@ -24,45 +24,87 @@ func NewReloader() *Reloader { return &Reloader{stopCh: make(chan struct{})} }
 // It should return true if the change was successfully applied (e.g., server reloaded),
 // so the reloader can proceed with deletion of old directories when configured.
 // required lists the filenames that must exist in each directory (e.g., "dguta.dbs", "basedirs.db").
-func (r *Reloader) Start(basepath string, pollFrequency time.Duration, removeOld bool, required []string, onChange func(dirs, toDelete []string) bool) error {
+func (r *Reloader) Start(
+	basepath string,
+	pollFrequency time.Duration,
+	removeOld bool,
+	required []string,
+	onChange func(dirs, toDelete []string) bool,
+) error {
 	// initial scan
 	dirs, toDelete, err := FindDBDirs(basepath, required...)
 	if err != nil {
 		return err
 	}
+
 	if len(dirs) == 0 {
 		return os.ErrNotExist
 	}
+
 	if ok := onChange(dirs, toDelete); ok && removeOld {
-		_ = removeAll(basepath, toDelete) // best-effort
+		if err := removeAll(basepath, toDelete); err != nil {
+			// best-effort: report via debug / ignore
+			_ = err
+		}
 	}
 
 	prev := slices.Clone(dirs)
 	go r.loop(basepath, pollFrequency, removeOld, required, prev, onChange)
+
 	return nil
 }
 
 // Stop terminates the reloader.
 func (r *Reloader) Stop() { close(r.stopCh) }
 
-func (r *Reloader) loop(basepath string, pollFrequency time.Duration, removeOld bool, required, prev []string, onChange func([]string, []string) bool) {
+func (r *Reloader) loop(
+	basepath string,
+	pollFrequency time.Duration,
+	removeOld bool,
+	required, prev []string,
+	onChange func([]string, []string) bool,
+) {
 	for {
 		select {
 		case <-time.After(pollFrequency):
 		case <-r.stopCh:
 			return
 		}
+
 		dirs, toDelete, err := FindDBDirs(basepath, required...)
 		if err != nil || slices.Equal(dirs, prev) {
 			continue
 		}
-		if ok := onChange(dirs, toDelete); ok {
+
+		if r.applyChange(basepath, removeOld, dirs, toDelete, onChange) {
 			prev = dirs
-			if removeOld {
-				_ = removeAll(basepath, toDelete)
-			}
 		}
 	}
+}
+
+// applyChange invokes the onChange callback and performs optional removal of old
+// directories. It returns true when the change was applied successfully and the
+// caller should update its previous state.
+func (r *Reloader) applyChange(
+	basepath string,
+	removeOld bool,
+	dirs, toDelete []string,
+	onChange func([]string, []string) bool,
+) bool {
+	if ok := onChange(dirs, toDelete); !ok {
+		return false
+	}
+
+	if !removeOld {
+		return true
+	}
+
+	if err := removeAll(basepath, toDelete); err != nil {
+		// best-effort: report via debug / ignore
+		_ = err
+	}
+
+	return true
 }
 
 // removeAll deletes the listed directories from baseDirectory after writing a marker file.
@@ -73,12 +115,15 @@ func removeAll(baseDirectory string, toDelete []string) error {
 		if err != nil {
 			return err
 		}
+
 		if err := f.Close(); err != nil {
 			return err
 		}
+
 		if err := os.RemoveAll(filepath.Join(baseDirectory, path)); err != nil {
 			return err
 		}
 	}
+
 	return nil
 }

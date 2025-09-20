@@ -72,6 +72,7 @@ func (b *BaseDirReader) History(gid uint32, path string) ([]History, error) {
 		if history == nil {
 			return ErrNoBaseDirHistory
 		}
+
 		return nil
 	}); err != nil {
 		return nil, err
@@ -201,6 +202,7 @@ func (b *BaseDirs) CopyHistoryFrom(source Store) error {
 		if err := w.EnsureHistoryBucket(); err != nil {
 			return err
 		}
+
 		return source.View(func(r Reader) error {
 			return r.ForEachRaw(GroupHistoricalBucket, func(k, v []byte) error {
 				return w.PutRawHistory(k, v)

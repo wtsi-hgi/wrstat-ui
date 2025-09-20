@@ -28,12 +28,19 @@
 package basedirs
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/ugorji/go/codec"
 	"github.com/wtsi-hgi/wrstat-ui/db"
+)
+
+var (
+	// ErrUnknownBucket is returned when an internal helper is called with an
+	// unsupported bucket name.
+	ErrUnknownBucket = errors.New("unknown bucket")
 )
 
 const (
@@ -90,6 +97,7 @@ func (b *BaseDirReader) GroupUsage(age db.DirGUTAge) ([]*Usage, error) {
 
 func (b *BaseDirReader) usage(bucketName string, age db.DirGUTAge) ([]*Usage, error) {
 	var uwms []*Usage
+
 	if err := b.store.View(func(r Reader) error {
 		var err error
 		switch bucketName {
@@ -98,7 +106,7 @@ func (b *BaseDirReader) usage(bucketName string, age db.DirGUTAge) ([]*Usage, er
 		case UserUsageBucket:
 			uwms, err = r.UserUsage(uint16(age))
 		default:
-			err = fmt.Errorf("unknown bucket: %s", bucketName)
+			err = fmt.Errorf("%w: %s", ErrUnknownBucket, bucketName)
 		}
 		if err != nil {
 			return err
@@ -107,6 +115,7 @@ func (b *BaseDirReader) usage(bucketName string, age db.DirGUTAge) ([]*Usage, er
 			uwm.Owner = b.owners[uwm.GID]
 			uwm.Name = b.getNameBasedOnBucket(bucketName, uwm)
 		}
+
 		return nil
 	}); err != nil {
 		return nil, err
@@ -137,6 +146,7 @@ func (b *BaseDirReader) GroupSubDirs(gid uint32, basedir string, age db.DirGUTAg
 
 func (b *BaseDirReader) subDirs(bucket string, id uint32, basedir string, age db.DirGUTAge) ([]*SubDir, error) {
 	var sds []*SubDir
+
 	if err := b.store.View(func(r Reader) error {
 		var err error
 		switch bucket {
@@ -145,8 +155,9 @@ func (b *BaseDirReader) subDirs(bucket string, id uint32, basedir string, age db
 		case UserSubDirsBucket:
 			sds, err = r.UserSubDirs(id, basedir, uint16(age))
 		default:
-			err = fmt.Errorf("unknown bucket: %s", bucket)
+			err = fmt.Errorf("%w: %s", ErrUnknownBucket, bucket)
 		}
+
 		return err
 	}); err != nil {
 		return nil, err

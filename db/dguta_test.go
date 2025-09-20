@@ -701,6 +701,7 @@ func testMakeDBPaths(t *testing.T) ([]string, error) {
 	dir := t.TempDir()
 
 	dg, ch := bolt.DirDBPaths(dir)
+
 	return append([]string{dir}, dg, ch), nil
 }
 

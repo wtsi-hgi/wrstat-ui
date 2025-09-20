@@ -88,6 +88,7 @@ func (b *BaseDirs) Output(users, groups IDAgeDirs) error {
 	if err := b.store.Update(b.updateDatabase(users, groups)); err != nil {
 		return err
 	}
+
 	return b.store.Update(b.storeDateQuotasFill())
 }
 
@@ -96,9 +97,11 @@ func (b *BaseDirs) updateDatabase(users, groups IDAgeDirs) func(Writer) error {
 		if errc := b.calculateUsage(w, groups, users); errc != nil {
 			return errc
 		}
+
 		if errc := b.updateHistories(w, groups); errc != nil {
 			return errc
 		}
+
 		return b.calculateSubDirUsage(w, groups, users)
 	}
 }
@@ -137,7 +140,6 @@ func (b *BaseDirs) storeGIDBaseDirs(w Writer, gidBase IDAgeDirs) error { //nolin
 }
 
 func (b *BaseDirs) storeUIDBaseDirs(w Writer, uidBase IDAgeDirs) error { //nolint:gocognit
-
 	for uid, dcss := range uidBase {
 		for _, adcs := range dcss {
 			for _, dcs := range adcs {
@@ -162,7 +164,6 @@ func (b *BaseDirs) storeUIDBaseDirs(w Writer, uidBase IDAgeDirs) error { //nolin
 }
 
 func (b *BaseDirs) updateHistories(w Writer, gidBase IDAgeDirs) error {
-
 	gidMounts := b.gidsToMountpoints(gidBase)
 
 	for gid, mounts := range gidMounts {
@@ -217,18 +218,20 @@ func (b *BaseDirs) updateGroupHistories(w Writer, gid uint32,
 		if err != nil {
 			return err
 		}
+
 		if len(existing) > 0 && !b.modTime.After(existing[len(existing)-1].Date) {
 			// existing history already up-to-date for this timestamp or newer; skip
 			continue
 		}
-		updated := append(existing, History{
+
+		existing = append(existing, History{
 			Date:        b.modTime,
 			UsageSize:   ds.Size,
 			UsageInodes: ds.Count,
 			QuotaSize:   quotaSize,
 			QuotaInodes: quotaInode,
 		})
-		if err = w.PutHistory(gid, mount, updated); err != nil {
+		if err = w.PutHistory(gid, mount, existing); err != nil {
 			return err
 		}
 	}
@@ -284,7 +287,6 @@ func (b *BaseDirs) calculateSubDirUsage(w Writer, gidBase, uidBase IDAgeDirs) er
 }
 
 func (b *BaseDirs) storeGIDSubDirs(w Writer, gidBase IDAgeDirs) error { //nolint:gocognit
-
 	for gid, dcss := range gidBase {
 		for _, adcs := range dcss {
 			for _, dcs := range adcs {
@@ -302,11 +304,11 @@ func (b *BaseDirs) storeSubDirs(w Writer, bucket string, id uint32, dcs SummaryW
 	if bucket == GroupSubDirsBucket {
 		return w.PutGroupSubDirs(id, dcs.Dir, uint16(dcs.Age), dcs.Children)
 	}
+
 	return w.PutUserSubDirs(id, dcs.Dir, uint16(dcs.Age), dcs.Children)
 }
 
 func (b *BaseDirs) storeUIDSubDirs(w Writer, uidBase IDAgeDirs) error { //nolint:gocognit
-
 	for uid, dcss := range uidBase {
 		for _, adcs := range dcss {
 			for _, dcs := range adcs {
@@ -334,10 +336,12 @@ func (b *BaseDirs) storeDateQuotasFill() func(Writer) error {
 			if gu.Age != db.DGUTAgeAll {
 				return nil
 			}
+
 			mp := b.mountPoints.prefixOf(gu.BaseDir)
 			if mp == "" {
 				return nil
 			}
+
 			h, err := w.History(gu.GID, mp)
 			if err != nil {
 				return err
@@ -345,6 +349,7 @@ func (b *BaseDirs) storeDateQuotasFill() func(Writer) error {
 			sizeExceedDate, inodeExceedDate := DateQuotaFull(h)
 			gu.DateNoSpace = sizeExceedDate
 			gu.DateNoFiles = inodeExceedDate
+
 			return w.PutGroupUsage(gu)
 		})
 	}

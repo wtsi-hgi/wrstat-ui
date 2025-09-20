@@ -106,7 +106,9 @@ func TestClean(t *testing.T) {
 		Convey("We can find the keys for all by a single prefix", func() {
 			ro, err := bolt.OpenReadOnlyBasedirs(dbPath)
 			So(err, ShouldBeNil)
+
 			defer ro.Close()
+
 			toRemove, err := basedirs.FindInvalidHistoryKeys(ro, "/lustre/scratch123/")
 			So(err, ShouldBeNil)
 			So(toRemove, ShouldResemble, [][]byte{

@@ -302,6 +302,7 @@ func addBasedirsSummariser(s *summary.Summariser, basedirsDB, basedirsHistoryDB,
 	if err != nil {
 		return fmt.Errorf("failed to create basedirs store: %w", err)
 	}
+
 	bd, err := basedirs.NewCreator(store, quotas)
 	if err != nil {
 		return fmt.Errorf("failed to create new basedirs creator: %w", err)
@@ -382,6 +383,7 @@ func copyHistory(bd *basedirs.BaseDirs, basedirsHistoryDB string) error {
 		return err
 	}
 	defer src.Close()
+
 	return bd.CopyHistoryFrom(src)
 }
 

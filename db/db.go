@@ -37,6 +37,11 @@ import (
 	"github.com/ugorji/go/codec"
 )
 
+var (
+	// ErrNoStorageFactory indicates no storage factory has been registered.
+	ErrNoStorageFactory = errors.New("no storage factory registered")
+)
+
 const (
 	GUTABucket  = "gut"
 	ChildBucket = "children"
@@ -70,18 +75,23 @@ func (s *dbSet) Create() error {
 	if err != nil {
 		return err
 	}
+
 	if exists {
 		return ErrDBExists
 	}
+
 	f := Default()
 	if f == nil {
-		return errors.New("no storage factory registered")
+		return ErrNoStorageFactory
 	}
+
 	st, err := f.Create(s.src)
 	if err != nil {
 		return err
 	}
+
 	s.store = st
+
 	return nil
 }
 
@@ -96,12 +106,14 @@ func (s *dbSet) Create() error {
 func (s *dbSet) Open() error {
 	f := Default()
 	if f == nil {
-		return errors.New("no storage factory registered")
+		return ErrNoStorageFactory
 	}
+
 	st, err := f.OpenReadOnly(s.src)
 	if err != nil {
 		return err
 	}
+
 	s.store = st
 	return nil
 }
@@ -134,10 +146,12 @@ type DBInfo struct { //nolint:revive
 func (s *dbSet) Info() (*DBInfo, error) {
 	info := &DBInfo{}
 	ch := new(codec.BincHandle)
+
 	f := Default()
 	if f == nil {
-		return nil, errors.New("no storage factory registered")
+		return nil, ErrNoStorageFactory
 	}
+
 	st, err := f.OpenReadOnlyUnPopulated(s.src)
 	if err != nil {
 		return nil, err
@@ -149,6 +163,7 @@ func (s *dbSet) Info() (*DBInfo, error) {
 		info.NumDirs++
 		dguta := DecodeDGUTAbytes(k, v)
 		info.NumDGUTAs += len(dguta.GUTAs)
+
 		return nil
 	}); err != nil {
 		return nil, err
@@ -161,6 +176,7 @@ func (s *dbSet) Info() (*DBInfo, error) {
 		var children []string
 		dec.MustDecode(&children)
 		info.NumChildren += len(children)
+
 		return nil
 	}); err != nil {
 		return nil, err
@@ -192,6 +208,7 @@ func (d *DB) SetBatchSize(batchSize int) {
 // CreateDB creates a new database set, but only if it doesn't already exist.
 func (d *DB) CreateDB() error {
 	set := NewDBSetFromSource(d.sources[0])
+
 	err := set.Create()
 	if err != nil {
 		return err
@@ -233,18 +250,21 @@ func (d *DB) storeBatch() {
 	childrenPairs := d.buildChildrenPairs()
 	if err := d.writeSet.store.PutChildren(childrenPairs); err != nil {
 		d.writeErr = err
+
 		return
 	}
+
 	dgutaPairs := d.buildDGUTAPairs()
 	if err := d.writeSet.store.PutDGUTAs(dgutaPairs); err != nil {
 		d.writeErr = err
+
 		return
 	}
 }
 
 // storeChildren stores the Dirs of the current DGUTA batch in the db.
 func (d *DB) buildChildrenPairs() [][2][]byte {
-	var pairs [][2][]byte
+	pairs := make([][2][]byte, 0, len(d.writeBatch))
 	for _, r := range d.writeBatch {
 		if len(r.Children) == 0 {
 			continue
@@ -253,10 +273,12 @@ func (d *DB) buildChildrenPairs() [][2][]byte {
 		for n := range r.Children {
 			r.Children[n] = parent + strings.TrimSuffix(r.Children[n], "/")
 		}
+
 		key := cloneBytes(r.pathBytes())
 		val := cloneBytes(d.encodeChildren(r.Children))
 		pairs = append(pairs, [2][]byte{key, val})
 	}
+
 	return pairs
 }
 
@@ -268,6 +290,7 @@ func (d *DB) getChildrenFromStore(st Store, dir string) []string {
 	if !strings.HasSuffix(dir, "/") {
 		key = append(key, '/')
 	}
+
 	v, err := st.GetChildren(key)
 	if err != nil || v == nil {
 		return []string{}
@@ -299,11 +322,12 @@ func (d *DB) encodeChildren(dirs []string) []byte {
 
 // storeDGUTAs stores the current batch of DGUTAs in the db.
 func (d *DB) buildDGUTAPairs() [][2][]byte {
-	var pairs [][2][]byte
+	pairs := make([][2][]byte, 0, len(d.writeBatch))
 	for _, dguta := range d.writeBatch {
 		k, v := dguta.EncodeToBytes()
 		pairs = append(pairs, [2][]byte{cloneBytes(k), v})
 	}
+
 	return pairs
 }
 
@@ -311,8 +335,10 @@ func cloneBytes(b []byte) []byte {
 	if len(b) == 0 {
 		return nil
 	}
+
 	out := make([]byte, len(b))
 	copy(out, b)
+
 	return out
 }
 
@@ -333,6 +359,7 @@ func (d *DB) Open() error {
 		if err != nil {
 			return err
 		}
+
 		if !exists {
 			return ErrDBNotExists
 		}
@@ -372,6 +399,7 @@ func (d *DB) Close() error {
 	if d.writeSet != nil {
 		return d.writeSet.Close()
 	}
+
 	return nil
 }
 

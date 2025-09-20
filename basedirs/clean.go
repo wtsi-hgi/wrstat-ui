@@ -35,23 +35,28 @@ const idLen = 4 + 1
 // leaving only those with the specified path prefix.
 func CleanInvalidDBHistory(store Store, prefix string) error { //nolint:gocognit
 	prefixB := []byte(prefix)
+
 	var toDelete [][]byte
+
 	if err := store.View(func(r Reader) error {
 		return r.ForEachRaw(GroupHistoricalBucket, func(k, _ []byte) error {
 			if len(k) > idLen && !bytes.HasPrefix(k[idLen:], prefixB) {
 				toDelete = append(toDelete, append([]byte(nil), k...))
 			}
+
 			return nil
 		})
 	}); err != nil {
 		return err
 	}
+
 	return store.Update(func(w Writer) error {
 		for _, k := range toDelete {
 			if err := w.DeleteHistoryKey(k); err != nil {
 				return err
 			}
 		}
+
 		return nil
 	})
 }
@@ -69,5 +74,6 @@ func FindInvalidHistoryKeys(store Store, prefix string) ([][]byte, error) {
 			return nil
 		})
 	})
+
 	return toRemove, err
 }

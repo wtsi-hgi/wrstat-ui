@@ -40,9 +40,8 @@ import (
 	"sync"
 	"time"
 
-	"vimagination.zapto.org/httpfile"
-
 	"github.com/wtsi-hgi/wrstat-ui/internal/dbdirs"
+	"vimagination.zapto.org/httpfile"
 )
 
 var (

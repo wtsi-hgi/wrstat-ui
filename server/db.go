@@ -37,6 +37,7 @@ import (
 // by merging the results of GetMountTimestamps() calls.
 func getMountTimestamps(sources []db.Source) (map[string]int64, []string) {
 	timestamps := make(map[string]int64)
+
 	var mountPoints []string
 
 	// Collect mount points and timestamps from all sources
@@ -65,6 +66,7 @@ func (s *Server) LoadDBs(srcs []db.Source, bd basedirs.MultiReader) error {
 	if len(srcs) == 0 || bd == nil {
 		return basedirs.Error("invalid assets to load")
 	}
+
 	tree, err := db.NewTree(srcs...)
 	if err != nil {
 		return err
@@ -78,6 +80,17 @@ func (s *Server) LoadDBs(srcs []db.Source, bd basedirs.MultiReader) error {
 		bd.SetMountPoints(mountPoints)
 	}
 
+	return s.setLoaded(tree, bd, srcs, timestamps)
+}
+
+// setLoaded applies the loaded assets to the server state, protected by the
+// server mutex. Extracted to reduce function length in LoadDBs.
+func (s *Server) setLoaded(
+	tree *db.Tree,
+	bd basedirs.MultiReader,
+	srcs []db.Source,
+	timestamps map[string]int64,
+) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

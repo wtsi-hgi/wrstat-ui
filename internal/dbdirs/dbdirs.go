@@ -16,16 +16,19 @@ func IsValidDBDir(entry fs.DirEntry, basepath string, required ...string) bool {
 	if !entry.IsDir() || !validDBDir.MatchString(name) {
 		return false
 	}
+
 	for _, req := range required {
 		if !EntryExists(filepath.Join(basepath, name, req)) {
 			return false
 		}
 	}
+
 	return true
 }
 
 // EntryExists returns true if the path exists.
 func EntryExists(path string) bool {
 	_, err := os.Stat(path)
+
 	return err == nil
 }

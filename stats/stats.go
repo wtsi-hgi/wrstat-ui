@@ -51,9 +51,11 @@ func (e Error) Error() string { return string(e) }
 
 const (
 	defaultAge                 = 7
+	recentAgeThreshold         = 10
 	secsPerYear                = 3600 * 24 * 365
 	maxLineLength              = 64 * 1024
 	maxBase64EncodedPathLength = 1024
+	decimalBase                = 10
 
 	ErrBadPath       = Error("invalid file format: path is not base64 encoded")
 	ErrTooFewColumns = Error("invalid file format: too few tab separated columns")
@@ -404,13 +406,14 @@ func (p *StatsParser) parseNumberColumn(v *int64) bool {
 
 	neg := false
 	start := 0
+
 	if col[0] == '-' { // handle negative numbers
 		neg = true
 		start = 1
 	}
 
 	for _, c := range col[start:] {
-		*v = *v*10 + int64(c-'0')
+		*v = *v*int64(decimalBase) + int64(c-'0')
 	}
 
 	if neg {

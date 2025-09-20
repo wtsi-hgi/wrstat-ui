@@ -470,6 +470,7 @@ func TestBaseDirs(t *testing.T) {
 
 						ro2, errr := bolt.OpenReadOnlyBasedirs(dbPath)
 						So(errr, ShouldBeNil)
+
 						err = bd.CopyHistoryFrom(ro2)
 						So(err, ShouldBeNil)
 
@@ -478,10 +479,10 @@ func TestBaseDirs(t *testing.T) {
 						So(ro2.Close(), ShouldBeNil)
 						So(store2.Close(), ShouldBeNil)
 
-						ro3, err := bolt.OpenReadOnlyBasedirs(newDB)
-						So(err, ShouldBeNil)
-						bdr, err = basedirs.NewReader(ro3, ownersPath)
-						So(err, ShouldBeNil)
+						ro3, errInner := bolt.OpenReadOnlyBasedirs(newDB)
+						So(errInner, ShouldBeNil)
+						bdr, errInner = basedirs.NewReader(ro3, ownersPath)
+						So(errInner, ShouldBeNil)
 
 						bdr.SetMountPoints(mps)
 
@@ -1107,20 +1108,23 @@ func TestBaseDirs(t *testing.T) {
 					lustreKeys, nfsKeys := 0, 0
 
 					scan := func(st basedirs.Store) {
-						_ = st.View(func(r basedirs.Reader) error {
+						So(st.View(func(r basedirs.Reader) error {
 							return r.ForEachRaw(bucket, func(k, _ []byte) error {
 								if !basedirs.CheckAgeOfKeyIsAll(k) {
 									return nil
 								}
+
 								if strings.Contains(string(k), "/lustre/") {
 									lustreKeys++
 								}
+
 								if strings.Contains(string(k), "/nfs/") {
 									nfsKeys++
 								}
+
 								return nil
 							})
-						})
+						}), ShouldBeNil)
 					}
 
 					scan(roA)
