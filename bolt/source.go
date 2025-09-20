@@ -158,7 +158,7 @@ func IsValidDBDir(entry fs.DirEntry, basepath string, required ...string) bool {
 
 type nameVersion struct{ name, version string }
 
-func addEntryToMap(entry fs.DirEntry, latest map[string]nameVersion, toDelete []string) []string {
+func addEntryToMap(entry fs.DirEntry, latest map[string]nameVersion, toDelete []string) []string { //nolint:gocyclo
 	parts := strings.SplitN(entry.Name(), partSep, partCount)
 	if len(parts) != partCount {
 		return toDelete
@@ -167,14 +167,17 @@ func addEntryToMap(entry fs.DirEntry, latest map[string]nameVersion, toDelete []
 	key := parts[1]
 
 	version := parts[0]
-	if previous, ok := latest[key]; ok && previous.version > version {
-		// Current is older, mark it for deletion
-		toDelete = append(toDelete, entry.Name())
-	} else {
-		if ok {
-			toDelete = append(toDelete, previous.name)
-		}
+	previous, ok := latest[key]
 
+	if ok && previous.version > version {
+		toDelete = append(toDelete, entry.Name())
+	}
+
+	if ok && previous.version <= version {
+		toDelete = append(toDelete, previous.name)
+	}
+
+	if !ok || previous.version <= version {
 		latest[key] = nameVersion{name: entry.Name(), version: version}
 	}
 

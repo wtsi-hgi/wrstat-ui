@@ -32,7 +32,7 @@ import (
 	"strconv"
 	"strings"
 
-	. "github.com/smartystreets/goconvey/convey" //nolint:revive,stylecheck
+	. "github.com/smartystreets/goconvey/convey" //nolint:revive,staticcheck
 	"github.com/wtsi-hgi/wrstat-ui/stats"
 	"github.com/wtsi-hgi/wrstat-ui/summary"
 )

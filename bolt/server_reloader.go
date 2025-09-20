@@ -14,6 +14,38 @@ type Loader interface {
 	LoadDBs(srcs []db.Source, bd basedirs.MultiReader) error
 }
 
+// loadForDirs handles loading sources and basedirs for the given directories.
+func loadForDirs(loader Loader, dirs []string, dgutaBase, basedirBase, owners string) bool {
+	var (
+		srcs   = make([]db.Source, 0, len(dirs))
+		stores = make([]basedirs.Store, 0, len(dirs))
+	)
+
+	for _, d := range dirs {
+		dirSrc := NewDirSource(filepath.Join(d, dgutaBase))
+		srcs = append(srcs, dirSrc)
+
+		bdb, err := OpenReadOnlyBasedirs(filepath.Join(d, basedirBase))
+		if err != nil {
+			return false
+		}
+
+		stores = append(stores, bdb)
+	}
+
+	bmr, err := basedirs.OpenMulti(owners, stores...)
+	if err != nil {
+		return false
+	}
+
+	// No need to manually extract timestamps anymore, as they are derived from sources
+	if err := loader.LoadDBs(srcs, bmr); err != nil {
+		return false
+	}
+
+	return true
+}
+
 // StartServerReloader wires a Reloader to a server via the Loader interface.
 func StartServerReloader(
 	s Loader,
@@ -30,40 +62,6 @@ func StartServerReloader(
 	s.SetSourceFromPath(func(p string) db.Source { return NewDirSource(p) })
 
 	r := NewReloader()
-
-	// loadForDirs handles loading sources and basedirs for the given directories.
-	// Extracted out of StartServerReloader to reduce the cognitive complexity of
-	// the parent function.
-	loadForDirs := func(loader Loader, dirs []string, dgutaBase, basedirBase, owners string) bool {
-		var (
-			srcs   []db.Source
-			stores []basedirs.Store
-		)
-
-		for _, d := range dirs {
-			dirSrc := NewDirSource(filepath.Join(d, dgutaBase))
-			srcs = append(srcs, dirSrc)
-
-			bdb, err := OpenReadOnlyBasedirs(filepath.Join(d, basedirBase))
-			if err != nil {
-				return false
-			}
-
-			stores = append(stores, bdb)
-		}
-
-		bmr, err := basedirs.OpenMulti(owners, stores...)
-		if err != nil {
-			return false
-		}
-
-		// No need to manually extract timestamps anymore, as they are derived from sources
-		if err := loader.LoadDBs(srcs, bmr); err != nil {
-			return false
-		}
-
-		return true
-	}
 
 	onChange := func(dirs, _ []string) bool {
 		return loadForDirs(s, dirs, dgutaDirBasename, basedirBasename, ownersPath)

@@ -220,7 +220,9 @@ func TestServer(t *testing.T) {
 
 				bdb, err = bolt.OpenReadOnlyBasedirs(filepath.Join(path, "basedir.db"))
 				So(err, ShouldBeNil)
+
 				var bmr basedirs.MultiReader
+
 				bmr, err = basedirs.OpenMulti(ownersPath, bdb)
 				So(err, ShouldBeNil)
 				So(err, ShouldBeNil)
@@ -689,6 +691,7 @@ func TestServer(t *testing.T) {
 			So(err, ShouldBeNil)
 
 			var bmr basedirs.MultiReader
+
 			bmr, err = basedirs.OpenMulti(ownersPath, bdb)
 			So(err, ShouldBeNil)
 			So(err, ShouldBeNil)
@@ -845,6 +848,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 			So(err, ShouldBeNil)
 
 			var bmr basedirs.MultiReader
+
 			bmr, err = basedirs.OpenMulti(ownersPath, bdb)
 			So(err, ShouldBeNil)
 			So(err, ShouldBeNil)
@@ -867,12 +871,14 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 
 			s.SetSourceFromPath(func(p string) db.Source { return bolt.NewDirSource(p) })
 			srcs := []db.Source{bolt.NewDirSource(filepath.Join(path, "dirguta"))}
+
 			var bdb basedirs.Store
 
 			bdb, err = bolt.OpenReadOnlyBasedirs(filepath.Join(path, "basedir.db"))
 			So(err, ShouldBeNil)
 
 			var bmr basedirs.MultiReader
+
 			bmr, err = basedirs.OpenMulti(ownersPath, bdb)
 			So(err, ShouldBeNil)
 			So(err, ShouldBeNil)
@@ -918,12 +924,14 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 			So(err, ShouldBeNil)
 
 			srcs := []db.Source{bolt.NewDirSource(filepath.Join(path, "dirguta"))}
+
 			var bdb basedirs.Store
 
 			bdb, err = bolt.OpenReadOnlyBasedirs(filepath.Join(path, "basedir.db"))
 			So(err, ShouldBeNil)
 
 			var bmr basedirs.MultiReader
+
 			bmr, err = basedirs.OpenMulti(ownersPath, bdb)
 			So(err, ShouldBeNil)
 			So(err, ShouldBeNil)
@@ -965,12 +973,14 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 			s.SetSourceFromPath(func(p string) db.Source { return bolt.NewDirSource(p) })
 
 			srcs := []db.Source{bolt.NewDirSource(filepath.Join(path, "dirguta"))}
+
 			var bdb basedirs.Store
 
 			bdb, err = bolt.OpenReadOnlyBasedirs(filepath.Join(path, "basedir.db"))
 			So(err, ShouldBeNil)
 
 			var bmr basedirs.MultiReader
+
 			bmr, err = basedirs.OpenMulti(ownersPath, bdb)
 			So(err, ShouldBeNil)
 			So(err, ShouldBeNil)

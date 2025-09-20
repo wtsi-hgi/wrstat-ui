@@ -206,7 +206,7 @@ func (g *GUTAs) readFrom(r byteio.StickyEndianReader) {
 // DGUTAFileTypeTemp, any GUTA with FT DGUTAFileTypeTemp is always ignored. (But
 // the FTs list will still indicate if you had temp files that passed other
 // filters.)
-func (g GUTAs) Summary(filter *Filter) *DirSummary { //nolint:funlen,gocyclo
+func (g GUTAs) Summary(filter *Filter) *DirSummary { //nolint:funlen
 	var (
 		count, size  uint64
 		atime, mtime int64
@@ -225,10 +225,7 @@ func (g GUTAs) Summary(filter *Filter) *DirSummary { //nolint:funlen,gocyclo
 	// Track a fallback atime considering all matching GUTAs ignoring Age.
 	// Tests expect Atime to remain consistent across age filters; if filtering
 	// by age results in no positive atimes, we fall back to this value.
-	var (
-		fallbackAtime     int64
-		filterIgnoringAge *Filter
-	)
+	var filterIgnoringAge *Filter
 
 	if filter != nil {
 		// Shallow copy is fine; we only override Age.
@@ -237,32 +234,9 @@ func (g GUTAs) Summary(filter *Filter) *DirSummary { //nolint:funlen,gocyclo
 		filterIgnoringAge = &copied
 	}
 
-	for _, guta := range g {
-		passes, passesDisallowingTemp := guta.PassesFilter(filter)
-		if passes {
-			uniqueFTs[guta.FT] = true
-		}
+	fallbackAtime := computeFallbackAtime(g, filterIgnoringAge)
 
-		// Compute fallback atime ignoring age regardless of whether this guta
-		// passes the age-specific filter.
-		if filterIgnoringAge != nil {
-			if _, ok := guta.PassesFilter(filterIgnoringAge); ok {
-				if guta.Atime > 0 && (fallbackAtime == 0 || guta.Atime < fallbackAtime) {
-					fallbackAtime = guta.Atime
-				}
-			}
-		} else {
-			if guta.Atime > 0 && (fallbackAtime == 0 || guta.Atime < fallbackAtime) {
-				fallbackAtime = guta.Atime
-			}
-		}
-
-		if !passesDisallowingTemp {
-			continue
-		}
-
-		addGUTAToSummary(guta, &count, &size, &atime, &mtime, &updateTime, uniqueUIDs, uniqueGIDs)
-	}
+	processGUTAs(g, filter, &count, &size, &atime, &mtime, &updateTime, uniqueUIDs, uniqueGIDs, uniqueFTs)
 
 	if count == 0 {
 		return nil
@@ -309,6 +283,49 @@ func addGUTAToSummary(guta *GUTA, count, size *uint64, atime, mtime *int64,
 
 	uniqueUIDs[guta.UID] = true
 	uniqueGIDs[guta.GID] = true
+}
+
+// processGUTAs processes the GUTAs with the filter and updates the summary variables.
+func processGUTAs(
+	g GUTAs,
+	filter *Filter,
+	count, size *uint64,
+	atime, mtime *int64,
+	updateTime *time.Time,
+	uniqueUIDs, uniqueGIDs map[uint32]bool,
+	uniqueFTs map[DirGUTAFileType]bool,
+) {
+	for _, guta := range g {
+		passes, passesDisallowingTemp := guta.PassesFilter(filter)
+		if passes {
+			uniqueFTs[guta.FT] = true
+		}
+
+		if !passesDisallowingTemp {
+			continue
+		}
+
+		addGUTAToSummary(guta, count, size, atime, mtime, updateTime, uniqueUIDs, uniqueGIDs)
+	}
+}
+
+// computeFallbackAtime computes the fallback atime by considering all GUTAs
+// that pass the filter ignoring age.
+func computeFallbackAtime(g GUTAs, filterIgnoringAge *Filter) int64 {
+	var fallbackAtime int64
+
+	for _, guta := range g {
+		passesIgnoringAge := true
+		if filterIgnoringAge != nil {
+			_, passesIgnoringAge = guta.PassesFilter(filterIgnoringAge)
+		}
+
+		if passesIgnoringAge && guta.Atime > 0 && (fallbackAtime == 0 || guta.Atime < fallbackAtime) {
+			fallbackAtime = guta.Atime
+		}
+	}
+
+	return fallbackAtime
 }
 
 // boolMapToSortedKeys returns a sorted slice of the given keys.
