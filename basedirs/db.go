@@ -200,10 +200,6 @@ func (b *BaseDirs) dcssToMountPoints(dcss *AgeDirs) map[string]db.DirSummary {
 		ds.Count += dcs.Count
 		ds.Size += dcs.Size
 
-		if dcs.Modtime.After(ds.Modtime) {
-			ds.Modtime = dcs.Modtime
-		}
-
 		mounts[mp] = ds
 	}
 

@@ -63,11 +63,6 @@ type Store interface {
 // This interface allows the rest of the application to work with different database
 // backends without knowing their specific implementation details.
 type Source interface {
-	// ModTime returns the last modification time for the source (used for
-	// reporting freshness in summaries). If unknown, return time.Time{}.
-	// This is important for showing users when data was last updated.
-	ModTime() time.Time
-
 	// Exists reports whether a database already exists at this source.
 	// This method should check if the database structure is already initialized
 	// at the given source location and is ready to be opened.
@@ -75,21 +70,20 @@ type Source interface {
 	// in checking.
 	Exists() (bool, error)
 
-	// MountPoint returns the identifier for the filesystem mount point
-	// that this source represents data for. This is used to identify
-	// the data source in UI elements and track timestamps per mount point.
-	// For bolt implementations, this might be extracted from directory names.
-	// For ClickHouse implementations, this would be stored as metadata.
-	MountPoint() string
-
 	// GetMountTimestamps returns a map of mount points to their last update timestamps.
+	// Each mount point identifies a filesystem that the source contains data for.
+	//
 	// For a bolt implementation with a single mount point, this would typically
-	// return a map with a single entry where the key is MountPoint() and the value
-	// is ModTime() converted to Unix timestamp.
+	// return a map with a single entry extracted from the directory name.
 	// For a ClickHouse implementation that handles multiple mount points in a single
 	// source, this would return a map with an entry for each mount point in the database.
+	//
+	// This method is used both for identifying which mount points the source represents
+	// and for determining when the data was last updated.
 	GetMountTimestamps() map[string]time.Time
-} // Factory constructs Store instances for a given Source.
+}
+
+// Factory constructs Store instances for a given Source.
 // The Factory interface provides methods to create and open Store instances
 // for a specific database backend (e.g., bolt, clickhouse). Each backend must
 // register a Factory implementation using the Register function.

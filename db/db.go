@@ -54,14 +54,13 @@ const (
 
 // a dbSet is 2 databases, one for storing DGUTAs, one for storing children.
 type dbSet struct {
-	src     Source
-	store   Store
-	modtime time.Time
+	src   Source
+	store Store
 }
 
 // NewDBSetFromSource creates a new dbSet from a Source implementation.
 func NewDBSetFromSource(src Source) *dbSet { //nolint:revive
-	return &dbSet{src: src, modtime: src.ModTime()}
+	return &dbSet{src: src}
 }
 
 // Create creates new database files in our directory. Returns an error if those
@@ -384,16 +383,13 @@ func (d *DB) Close() error {
 //
 // You must call Open() before calling this.
 func (d *DB) DirInfo(dir string, filter *Filter) (*DirSummary, error) {
-	dguta, notFound, lastUpdated := d.combineDGUTAsFromReadSets(dir)
+	dguta, notFound, _ := d.combineDGUTAsFromReadSets(dir)
 
 	if notFound == len(d.readSets) {
-		return &DirSummary{Modtime: lastUpdated}, ErrDirNotFound
+		return &DirSummary{}, ErrDirNotFound
 	}
 
 	ds := dguta.Summary(filter)
-	if ds != nil {
-		ds.Modtime = lastUpdated
-	}
 
 	return ds, nil
 }
@@ -407,9 +403,6 @@ func (d *DB) combineDGUTAsFromReadSets(dir string) (*DGUTA, int, time.Time) {
 	dguta := &DGUTA{}
 
 	for _, readSet := range d.readSets {
-		if readSet.modtime.After(lastUpdated) {
-			lastUpdated = readSet.modtime
-		}
 		if err := getDGUTAFromStoreAndAppend(readSet.store, dir, dguta); err != nil {
 			notFound++
 		}

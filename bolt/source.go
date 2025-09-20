@@ -26,8 +26,9 @@ func (s *DirSource) Dir() string {
 	return s.dir
 }
 
-// ModTime returns the directory modification time.
-func (s *DirSource) ModTime() time.Time {
+// modTime returns the directory modification time.
+// This is a private helper for GetMountTimestamps.
+func (s *DirSource) modTime() time.Time {
 	fi, err := os.Lstat(s.dir)
 	if err != nil {
 		return time.Time{}
@@ -50,11 +51,12 @@ func (s *DirSource) Exists() (bool, error) {
 	return true, nil
 }
 
-// MountPoint returns the identifier for the filesystem mount point
+// mountPoint returns the identifier for the filesystem mount point
 // represented by this source. For bolt implementations, this is
 // extracted from the directory name, which follows the format:
 // timestamp_mountpoint (e.g., "20230425_lustre01")
-func (s *DirSource) MountPoint() string {
+// This is a private helper for GetMountTimestamps.
+func (s *DirSource) mountPoint() string {
 	// The path we receive is typically /path/to/timestamp_mountpoint/dirguta
 	// So we need to extract the parent directory name first
 	parentDir := filepath.Dir(s.dir)
@@ -72,7 +74,7 @@ func (s *DirSource) MountPoint() string {
 // associated with this source) and its modification time. For bolt
 // implementations, each DirSource represents exactly one mount point.
 func (s *DirSource) GetMountTimestamps() map[string]time.Time {
-	mountPoint := s.MountPoint()
+	mountPoint := s.mountPoint()
 	if mountPoint == "" {
 		return nil
 	}
@@ -80,7 +82,7 @@ func (s *DirSource) GetMountTimestamps() map[string]time.Time {
 	// For test compatibility: if the mount is 'keyB', add 1 second to the timestamp
 	// to ensure it's always newer than keyA. This is needed to pass the test that expects
 	// keyB's timestamp to be greater than keyA's timestamp.
-	timestamp := s.ModTime()
+	timestamp := s.modTime()
 	if mountPoint == "keyB" {
 		timestamp = timestamp.Add(1 * time.Second)
 	}

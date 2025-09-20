@@ -61,8 +61,6 @@ func TestTree(t *testing.T) {
 		So(errc, ShouldBeNil)
 		So(tree, ShouldNotBeNil)
 
-		dbModTime := fs.ModTime(paths[0])
-
 		expectedUIDs := []uint32{101, 102, 103}
 		expectedGIDs := []uint32{1, 2, 3}
 		expectedFTs := []db.DirGUTAFileType{
@@ -87,7 +85,7 @@ func TestTree(t *testing.T) {
 			So(di, ShouldResemble, &db.DirInfo{
 				Current: &db.DirSummary{
 					"/", 21 + numDirectories + 1, 92 + (numDirectories+1)*directorySize,
-					expectedAtime, expectedMtime, expectedUIDs, expectedGIDs, expectedFTs, db.DGUTAgeAll, dbModTime,
+					expectedAtime, expectedMtime, expectedUIDs, expectedGIDs, expectedFTs, db.DGUTAgeAll,
 				},
 				Children: []*db.DirSummary{
 					{
