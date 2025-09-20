@@ -44,6 +44,20 @@ func (s *DirSource) Exists() (bool, error) {
 	return true, nil
 }
 
+// MountPoint returns the identifier for the filesystem mount point
+// represented by this source. For bolt implementations, this is
+// extracted from the directory name, which follows the format:
+// timestamp_mountpoint (e.g., "20230425_lustre01")
+func (s *DirSource) MountPoint() string {
+	// Extract from directory name (format: timestamp_mountpoint)
+	dirName := filepath.Base(s.dir)
+	parts := strings.SplitN(dirName, "_", 2)
+	if len(parts) != 2 {
+		return "" // Invalid format
+	}
+	return parts[1]
+}
+
 func (s *DirSource) dgutaPath() string    { return filepath.Join(s.dir, "dguta.db") }
 func (s *DirSource) childrenPath() string { return filepath.Join(s.dir, "dguta.db.children") }
 
@@ -90,9 +104,6 @@ func FindDBDirs(basepath string, required ...string) ([]string, []string, error)
 func IsValidDBDir(entry fs.DirEntry, basepath string, required ...string) bool {
 	return dbdirs.IsValidDBDir(entry, basepath, required...)
 }
-
-// entryExists is retained for backward compatibility within this package.
-func entryExists(path string) bool { return dbdirs.EntryExists(path) }
 
 type nameVersion struct{ name, version string }
 

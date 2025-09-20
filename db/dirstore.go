@@ -74,10 +74,14 @@ type Source interface {
 	// Should return (false, nil) if the database doesn't exist but there was no error
 	// in checking.
 	Exists() (bool, error)
-}
 
-// Factory constructs Store instances for a given Source.
-//
+	// MountPoint returns the identifier for the filesystem mount point
+	// that this source represents data for. This is used to identify
+	// the data source in UI elements and track timestamps per mount point.
+	// For bolt implementations, this might be extracted from directory names.
+	// For ClickHouse implementations, this would be stored as metadata.
+	MountPoint() string
+} // Factory constructs Store instances for a given Source.
 // The Factory interface provides methods to create and open Store instances
 // for a specific database backend (e.g., bolt, clickhouse). Each backend must
 // register a Factory implementation using the Register function.

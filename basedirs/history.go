@@ -34,7 +34,6 @@ import (
 	"time"
 
 	"github.com/moby/sys/mountinfo"
-	db "github.com/wtsi-hgi/wrstat-ui/db"
 )
 
 var (
@@ -79,10 +78,6 @@ func (b *BaseDirReader) History(gid uint32, path string) ([]History, error) {
 	}
 
 	return history, nil
-}
-
-func historyKey(gid uint32, mountPoint string) []byte {
-	return keyName(gid, mountPoint, db.DGUTAgeAll)
 }
 
 type mountPoints []string

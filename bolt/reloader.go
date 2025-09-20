@@ -4,7 +4,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strings"
 	"time"
 )
 
@@ -82,24 +81,4 @@ func removeAll(baseDirectory string, toDelete []string) error {
 		}
 	}
 	return nil
-}
-
-// TimestampsFromDirs computes a timestamps map keyed by the suffix after the first underscore.
-// If parsing fails, falls back to using the whole basename as key.
-func TimestampsFromDirs(dirs []string) (map[string]int64, error) {
-	ts := make(map[string]int64, len(dirs))
-	for _, d := range dirs {
-		fi, err := os.Stat(d)
-		if err != nil {
-			return nil, err
-		}
-		base := filepath.Base(d)
-		parts := strings.SplitN(base, "_", 2)
-		key := base
-		if len(parts) == 2 {
-			key = parts[1]
-		}
-		ts[key] = fi.ModTime().Unix()
-	}
-	return ts, nil
 }

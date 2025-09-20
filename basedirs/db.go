@@ -30,7 +30,6 @@
 package basedirs
 
 import (
-	"encoding/binary"
 	"fmt"
 	"sort"
 	"strings"
@@ -136,24 +135,6 @@ func (b *BaseDirs) storeGIDBaseDirs(w Writer, gidBase IDAgeDirs) error { //nolin
 	}
 	return nil
 }
-
-func keyName(id uint32, path string, age db.DirGUTAge) []byte {
-	length := sizeOfKeyWithoutPath + len(path)
-	b := make([]byte, sizeOfUint32, length)
-	binary.LittleEndian.PutUint32(b, id)
-	b = append(b, bucketKeySeparatorByte)
-	b = append(b, path...)
-
-	if age != db.DGUTAgeAll {
-		b = append(b, bucketKeySeparatorByte)
-		b = b[:length]
-		binary.LittleEndian.PutUint16(b[length-sizeOfUint16:], uint16(age))
-	}
-
-	return b
-}
-
-// Removed encodeToBytes; encoding is handled by backend adapters.
 
 func (b *BaseDirs) storeUIDBaseDirs(w Writer, uidBase IDAgeDirs) error { //nolint:gocognit
 

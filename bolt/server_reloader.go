@@ -48,9 +48,14 @@ func StartServerReloader(
 			return false
 		}
 
-		ts, err := TimestampsFromDirs(dirs)
-		if err != nil {
-			return false
+		// Generate timestamps using the MountPoint method from each source
+		ts := make(map[string]int64, len(srcs))
+		for _, src := range srcs {
+			mountPoint := src.MountPoint()
+			if mountPoint == "" {
+				continue
+			}
+			ts[mountPoint] = src.ModTime().Unix()
 		}
 
 		if err := s.LoadDBs(srcs, bmr, ts, mounts...); err != nil {

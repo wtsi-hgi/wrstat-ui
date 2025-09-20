@@ -114,10 +114,6 @@ func (b *BaseDirReader) usage(bucketName string, age db.DirGUTAge) ([]*Usage, er
 	return uwms, nil
 }
 
-func (b *BaseDirReader) decodeFromBytes(encoded []byte, data any) error {
-	return codec.NewDecoderBytes(encoded, b.ch).Decode(data)
-}
-
 func (b *BaseDirReader) getNameBasedOnBucket(bucketName string, uwm *Usage) string {
 	if bucketName == GroupUsageBucket {
 		return b.groupCache.GroupName(uwm.GID)

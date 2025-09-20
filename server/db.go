@@ -74,6 +74,21 @@ func (s *Server) LoadDBs(srcs []db.Source, bd basedirs.MultiReader, timestamps m
 		return err
 	}
 
+	// Extract mount points from sources if not explicitly provided
+	if len(mounts) == 0 {
+		extractedMounts := make([]string, 0, len(srcs))
+		for _, src := range srcs {
+			mp := src.MountPoint()
+			if mp != "" {
+				extractedMounts = append(extractedMounts, mp)
+			}
+		}
+
+		if len(extractedMounts) > 0 {
+			mounts = extractedMounts
+		}
+	}
+
 	if len(mounts) > 0 {
 		bd.SetMountPoints(mounts)
 	}
