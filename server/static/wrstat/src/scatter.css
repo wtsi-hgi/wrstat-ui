@@ -25,23 +25,31 @@
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  ******************************************************************************/
 
-#scatter {
-	justify-self: end;
-	padding-right: 0.5em;
+.scatter-wrapper {
+  position: relative;
+  justify-self: end;
+  padding-right: 0.5em;
+}
+
+.scatter-canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
 }
 
 #scatter use {
-	cursor: pointer;
-	fill: currentColor;
-	fill-opacity: 0.4;
+  cursor: pointer;
+  fill: currentColor;
+  fill-opacity: 0.4;
 }
 
 #scatter .back {
-	cursor: crosshair;
+  cursor: crosshair;
 }
 
-
 #scatter use.selected {
-	fill: var(--scatterHighlight);
-	fill-opacity: 1;
+  fill: var(--scatterHighlight);
+  fill-opacity: 1;
 }
