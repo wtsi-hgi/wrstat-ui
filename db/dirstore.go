@@ -132,6 +132,7 @@ func Register(name string, f Factory) {
 }
 
 // Get returns a Factory by name and whether it exists.
+// It returns the Factory interface so callers don't depend on concrete types.
 func Get(name string) (Factory, bool) { //nolint:ireturn
 	regMu.RLock()
 	defer regMu.RUnlock()
@@ -142,6 +143,7 @@ func Get(name string) (Factory, bool) { //nolint:ireturn
 }
 
 // Default returns the first registered factory, or nil if none.
+// It intentionally returns the Factory interface.
 func Default() Factory { //nolint:ireturn
 	regMu.RLock()
 	defer regMu.RUnlock()

@@ -19,6 +19,8 @@ var (
 type boltFactory struct{}
 
 // NewDirStoreFactory returns a dirstore.Factory backed by bolt.
+// NewDirStoreFactory returns a dirstore.Factory backed by bolt.
+// It returns the interface type to avoid exposing the concrete factory type.
 func NewDirStoreFactory() db.Factory { //nolint:ireturn
 	return &boltFactory{}
 }

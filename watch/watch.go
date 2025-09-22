@@ -79,10 +79,8 @@ func watch(inputDirs []string, outputDir, quotaPath, basedirsConfig, mounts stri
 
 	defer s.Disconnect() //nolint:errcheck
 
-	for n := range inputDirs {
-		if inputDirs[n], err = filepath.Abs(inputDirs[n]); err != nil {
-			return err
-		}
+	if inputDirs, err = absPaths(inputDirs); err != nil {
+		return err
 	}
 
 	if outputDir, err = filepath.Abs(outputDir); err != nil {
@@ -90,19 +88,7 @@ func watch(inputDirs []string, outputDir, quotaPath, basedirsConfig, mounts stri
 	}
 
 	for _, inputDir := range inputDirs {
-		inputPaths, _, err := bolt.FindDBDirs(inputDir, "stats.gz")
-		if err != nil {
-			return fmt.Errorf("error getting input DB paths: %w", err)
-		}
-
-		inputPaths = slices.DeleteFunc(inputPaths, func(p string) bool {
-			base := filepath.Base(p)
-
-			return entryExists(filepath.Join(outputDir, base)) || entryExists(filepath.Join(outputDir, "."+base))
-		})
-
-		if err := scheduleSummarisers(s, inputDir, outputDir, quotaPath,
-			basedirsConfig, mounts, inputPaths, logger); err != nil {
+		if err := processInputDir(s, inputDir, outputDir, quotaPath, basedirsConfig, mounts, logger); err != nil {
 			return err
 		}
 	}
@@ -114,6 +100,36 @@ func entryExists(path string) bool {
 	_, err := os.Stat(path)
 
 	return err == nil
+}
+
+func absPaths(paths []string) ([]string, error) {
+	for n := range paths {
+		p, err := filepath.Abs(paths[n])
+		if err != nil {
+			return nil, err
+		}
+
+		paths[n] = p
+	}
+
+	return paths, nil
+}
+
+func processInputDir(s *client.Scheduler,
+	inputDir, outputDir, quotaPath, basedirsConfig, mounts string,
+	logger log15.Logger) error {
+	inputPaths, _, err := bolt.FindDBDirs(inputDir, "stats.gz")
+	if err != nil {
+		return fmt.Errorf("error getting input DB paths: %w", err)
+	}
+
+	inputPaths = slices.DeleteFunc(inputPaths, func(p string) bool {
+		base := filepath.Base(p)
+
+		return entryExists(filepath.Join(outputDir, base)) || entryExists(filepath.Join(outputDir, "."+base))
+	})
+
+	return scheduleSummarisers(s, inputDir, outputDir, quotaPath, basedirsConfig, mounts, inputPaths, logger)
 }
 
 func scheduleSummarisers(s *client.Scheduler, inputDir, outputDir, quotaPath, basedirsConfig, mounts string,

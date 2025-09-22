@@ -81,65 +81,76 @@ stdout. Files ending in '.gz' will be compressed.
 	},
 }
 
-func parseFiles(args []string) ([]string, error) { //nolint:gocognit
-	var files []string
-
-	for _, arg := range args {
-		fi, err := os.Stat(arg)
-		if err != nil {
-			return nil, err
-		}
-
-		if !fi.IsDir() {
-			files = append(files, arg)
-
-			continue
-		}
-
-		dirs, _, err := bolt.FindDBDirs(arg, inputStatsFile)
-		if err != nil {
-			return nil, err
-		}
-
-		for _, dir := range dirs {
-			files = append(files, filepath.Join(dir, inputStatsFile))
-		}
+func collectFilesFromArg(arg string) ([]string, error) {
+	fi, err := os.Stat(arg)
+	if err != nil {
+		return nil, err
 	}
 
-	if len(args) == 0 {
-		return nil, ErrNoStatsFiles
+	if !fi.IsDir() {
+		return []string{arg}, nil
+	}
+
+	dirs, _, err := bolt.FindDBDirs(arg, inputStatsFile)
+	if err != nil {
+		return nil, err
+	}
+
+	var files []string
+	for _, dir := range dirs {
+		files = append(files, filepath.Join(dir, inputStatsFile))
 	}
 
 	return files, nil
 }
 
-func findDupes(files []string, minSize int64, output string) error { //nolint:gocognit
+func parseFiles(args []string) ([]string, error) {
+	if len(args) == 0 {
+		return nil, ErrNoStatsFiles
+	}
+
+	var files []string
+	for _, arg := range args {
+		f, err := collectFilesFromArg(arg)
+		if err != nil {
+			return nil, err
+		}
+
+		files = append(files, f...)
+	}
+
+	return files, nil
+}
+
+func processStatsFile(statsFile string, sp *stats.StatsParser, s *summary.Summariser) error {
+	f, err := os.Open(statsFile)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	var r io.Reader = f
+	if strings.HasSuffix(statsFile, ".gz") {
+		if r, err = pgzip.NewReader(f); err != nil {
+			return err
+		}
+	}
+
+	*sp = *stats.NewStatsParser(r)
+
+	return s.Summarise()
+}
+
+func findDupes(files []string, minSize int64, output string) error {
 	sp := stats.NewStatsParser(nil)
 	deduper := dedupe.Deduper{MinFileSize: minSize}
 	s := summary.NewSummariser(sp)
 	s.AddGlobalOperation(deduper.Operation())
 
 	for _, statsFile := range files {
-		f, err := os.Open(statsFile)
-		if err != nil {
+		if err := processStatsFile(statsFile, sp, s); err != nil {
 			return err
 		}
-
-		var r io.Reader = f
-
-		if strings.HasSuffix(statsFile, ".gz") {
-			if r, err = pgzip.NewReader(f); err != nil {
-				return err
-			}
-		}
-
-		*sp = *stats.NewStatsParser(r)
-
-		if err = s.Summarise(); err != nil {
-			return err
-		}
-
-		f.Close()
 	}
 
 	return outputDupes(output, &deduper)

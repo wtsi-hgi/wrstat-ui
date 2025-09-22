@@ -113,21 +113,25 @@ func (l *logAnalyzer) load(dbs []string, reload uint) error {
 	return nil
 }
 
-func getDBPaths(dbs []string) ([]string, error) { //nolint:gocognit
+func walkAndCollect(base string, out *[]string) error {
+	return fs.WalkDir(os.DirFS(base), ".", func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+
+		if dbdirs.IsValidDBDir(entry, base, "logs.gz") || dbdirs.IsValidDBDir(entry, base, "walk.log") {
+			*out = append(*out, filepath.Join(base, path))
+		}
+
+		return nil
+	})
+}
+
+func collectDBDirs(dbs []string) ([]string, error) {
 	var dbDirs []string
 
 	for _, db := range dbs {
-		if err := fs.WalkDir(os.DirFS(db), ".", func(path string, entry fs.DirEntry, err error) error {
-			if err != nil {
-				return err
-			}
-
-			if dbdirs.IsValidDBDir(entry, db, "logs.gz") || dbdirs.IsValidDBDir(entry, db, "walk.log") {
-				dbDirs = append(dbDirs, filepath.Join(db, path))
-			}
-
-			return nil
-		}); err != nil {
+		if err := walkAndCollect(db, &dbDirs); err != nil {
 			return nil, err
 		}
 	}
@@ -135,6 +139,10 @@ func getDBPaths(dbs []string) ([]string, error) { //nolint:gocognit
 	sort.Strings(dbDirs)
 
 	return dbDirs, nil
+}
+
+func getDBPaths(dbs []string) ([]string, error) {
+	return collectDBDirs(dbs)
 }
 
 func (l *logAnalyzer) loadDirs(dirs []string) {
