@@ -1,5 +1,3 @@
-//go:build tools_min
-
 package main
 
 import (
@@ -10,19 +8,17 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
-	"sort"
 )
 
 var (
-	dry   = flag.Bool("dry", true, "dry run (default true)")
-	apply = flag.Bool("apply", false, "write changes and create .bak backup (overrides -dry)")
+	dry = flag.Bool("dry", false, "dry run: print full altered file then summary; without, write in place")
 )
 
 func main() {
 	flag.Parse()
 	args := flag.Args()
 	if len(args) != 1 {
-		fmt.Fprintf(os.Stderr, "usage: reorder_min <file.go>\n")
+		fmt.Fprintf(os.Stderr, "usage: reorder <file.go>\n")
 		os.Exit(2)
 	}
 	fn := args[0]
@@ -42,11 +38,15 @@ func main() {
 		key        string
 		start, end int
 	}
+	type declBlock struct {
+		start, end int
+		isFunc     bool
+		key        string
+	}
 	var funcBlocks []block
-	var nonFuncBlocks []block
+	var declBlocks []declBlock
 	nameByIdent := map[string]string{}
-	firstDeclStart := -1
-	lastDeclEnd := -1
+
 	for _, decl := range file.Decls {
 		s := fset.Position(decl.Pos()).Offset
 		e := fset.Position(decl.End()).Offset
@@ -62,14 +62,9 @@ func main() {
 				s = fset.Position(fd.Doc.Pos()).Offset
 			}
 			funcBlocks = append(funcBlocks, block{key: key, start: s, end: e})
+			declBlocks = append(declBlocks, declBlock{start: s, end: e, isFunc: true, key: key})
 		} else {
-			nonFuncBlocks = append(nonFuncBlocks, block{key: "", start: s, end: e})
-		}
-		if firstDeclStart == -1 || s < firstDeclStart {
-			firstDeclStart = s
-		}
-		if e > lastDeclEnd {
-			lastDeclEnd = e
+			declBlocks = append(declBlocks, declBlock{start: s, end: e, isFunc: false})
 		}
 	}
 	if len(funcBlocks) <= 1 {
@@ -77,11 +72,10 @@ func main() {
 		return
 	}
 
+	// Build adjacency (caller->callee) and reverse (callee->callers)
 	adj := map[string]map[string]struct{}{}
-	indeg := map[string]int{}
-	for _, b := range funcBlocks {
-		adj[b.key] = map[string]struct{}{}
-		indeg[b.key] = 0
+	for _, fb := range funcBlocks {
+		adj[fb.key] = map[string]struct{}{}
 	}
 	for _, decl := range file.Decls {
 		if fd, ok := decl.(*ast.FuncDecl); ok && fd.Body != nil {
@@ -91,17 +85,11 @@ func main() {
 					switch fun := ce.Fun.(type) {
 					case *ast.Ident:
 						if callee, ok := nameByIdent[fun.Name]; ok && caller != callee {
-							if _, ex := adj[caller][callee]; !ex {
-								adj[caller][callee] = struct{}{}
-								indeg[callee]++
-							}
+							adj[caller][callee] = struct{}{}
 						}
 					case *ast.SelectorExpr:
 						if callee, ok := nameByIdent[fun.Sel.Name]; ok && caller != callee {
-							if _, ex := adj[caller][callee]; !ex {
-								adj[caller][callee] = struct{}{}
-								indeg[callee]++
-							}
+							adj[caller][callee] = struct{}{}
 						}
 					}
 				}
@@ -109,104 +97,132 @@ func main() {
 			})
 		}
 	}
-
-	zero := []string{}
-	for k, v := range indeg {
-		if v == 0 {
-			zero = append(zero, k)
-		}
-	}
-	sort.Strings(zero)
-	var order []string
-	for len(zero) > 0 {
-		n := zero[0]
-		zero = zero[1:]
-		order = append(order, n)
-		for neigh := range adj[n] {
-			indeg[neigh]--
-			if indeg[neigh] == 0 {
-				zero = append(zero, neigh)
-			}
-		}
-		sort.Strings(zero)
-	}
-	if len(order) != len(funcBlocks) {
+	if hasCycle(adj) {
 		fmt.Println("cycle or unresolved; skipping")
 		return
 	}
 
-	var orig []string
-	for _, b := range funcBlocks {
-		orig = append(orig, b.key)
+	// Original and working order
+	origOrder := make([]string, 0)
+	for _, db := range declBlocks {
+		if db.isFunc {
+			origOrder = append(origOrder, db.key)
+		}
 	}
-	if equalStringSlices(orig, order) {
+	order := make([]string, len(origOrder))
+	copy(order, origOrder)
+	pos := map[string]int{}
+	for i, k := range order {
+		pos[k] = i
+	}
+
+	// Build reverse map: callee -> callers
+	rev := map[string]map[string]struct{}{}
+	for c, m := range adj {
+		for g := range m {
+			if _, ok := rev[g]; !ok {
+				rev[g] = map[string]struct{}{}
+			}
+			rev[g][c] = struct{}{}
+		}
+	}
+
+	// Minimal-change: move a callee just after its latest caller when needed
+	changed := true
+	guard := len(order) * len(order) * 2
+	for changed && guard > 0 {
+		changed = false
+		guard--
+		for i := 0; i < len(order); i++ {
+			g := order[i]
+			callers := rev[g]
+			if len(callers) == 0 {
+				continue
+			}
+			maxIdx := -1
+			for c := range callers {
+				if idx, ok := pos[c]; ok && idx > maxIdx {
+					maxIdx = idx
+				}
+			}
+			if maxIdx >= 0 && maxIdx >= pos[g] {
+				from := pos[g]
+				to := maxIdx + 1
+				if to > len(order) {
+					to = len(order)
+				}
+				if to-1 == from {
+					continue
+				}
+				// remove from
+				order = append(order[:from], order[from+1:]...)
+				if to > from {
+					to--
+				}
+				// insert at to
+				order = append(order[:to], append([]string{g}, order[to:]...)...)
+				for j, k := range order {
+					pos[k] = j
+				}
+				changed = true
+			}
+		}
+	}
+
+	if equalStringSlices(origOrder, order) {
 		fmt.Println("already ordered")
 		return
 	}
 
-	fmt.Printf("file: %s\n", fn)
-	fmt.Printf("  original order:\n")
-	for i, k := range orig {
-		fmt.Printf("    %2d: %s\n", i, k)
-	}
-	fmt.Printf("  proposed order:\n")
-	for i, k := range order {
-		fmt.Printf("    %2d: %s\n", i, k)
-	}
-
-	fmt.Printf("\nByte ranges (start..end) for functions (preserved verbatim):\n")
+	// Build full altered content: keep non-func blocks and gaps verbatim; replace function decls by new order
+	// Map func key to block
+	fbByKey := map[string]block{}
 	for _, b := range funcBlocks {
-		fmt.Printf("  %s: %d..%d\n", b.key, b.start, b.end)
+		fbByKey[b.key] = b
 	}
 
-	if *apply && !*dry {
-		// build new content: keep file prefix before first decl, then non-funcs in original order,
-		// then functions in topo order, then file suffix after last decl.
-		buf := &bytes.Buffer{}
-		if firstDeclStart > 0 {
-			buf.Write(src[:firstDeclStart])
-		}
-		// write non-funcs
-		for i, b := range nonFuncBlocks {
-			if i > 0 {
-				ensureTrailingNewline(buf)
-			}
-			buf.Write(src[b.start:b.end])
-			ensureSingleBlankLine(buf)
-		}
-		// map func key to block
-		fbByKey := map[string]block{}
-		for _, b := range funcBlocks {
-			fbByKey[b.key] = b
-		}
-		for idx, k := range order {
-			if len(nonFuncBlocks) == 0 && idx == 0 && buf.Len() == 0 && firstDeclStart > 0 {
-				// ensure at least one newline after header
-				buf.WriteByte('\n')
-			}
-			b := fbByKey[k]
-			buf.Write(src[b.start:b.end])
-			ensureSingleBlankLine(buf)
-		}
-		// append suffix
-		if lastDeclEnd >= 0 && lastDeclEnd < len(src) {
-			ensureTrailingNewline(buf)
-			buf.Write(src[lastDeclEnd:])
-		}
-
-		bak := fn + ".bak"
-		if err := os.WriteFile(bak, src, 0644); err != nil {
-			fmt.Fprintf(os.Stderr, "failed to write backup: %v\n", err)
-			os.Exit(1)
-		}
-		if err := os.WriteFile(fn, buf.Bytes(), 0644); err != nil {
-			fmt.Fprintf(os.Stderr, "failed to write updated file: %v\n", err)
-			os.Exit(1)
-		}
-		fmt.Printf("wrote %s (backup %s)\n", fn, bak)
-	} else {
-		fmt.Println("(dry-run; pass -apply=false -dry=false to write)")
+	out := &bytes.Buffer{}
+	if len(declBlocks) > 0 && declBlocks[0].start > 0 {
+		out.Write(src[:declBlocks[0].start])
 	}
+	fIdx := 0
+	for i := 0; i < len(declBlocks); i++ {
+		db := declBlocks[i]
+		if db.isFunc {
+			key := order[fIdx]
+			fb := fbByKey[key]
+			out.Write(src[fb.start:fb.end])
+			fIdx++
+		} else {
+			out.Write(src[db.start:db.end])
+		}
+		if i+1 < len(declBlocks) {
+			gapStart := declBlocks[i].end
+			gapEnd := declBlocks[i+1].start
+			if gapEnd > gapStart {
+				out.Write(src[gapStart:gapEnd])
+			}
+		}
+	}
+	if len(declBlocks) > 0 {
+		tail := declBlocks[len(declBlocks)-1].end
+		if tail < len(src) {
+			out.Write(src[tail:])
+		}
+	}
+
+	if *dry {
+		os.Stdout.Write(out.Bytes())
+		fmt.Println()
+		printSummary(fn, origOrder, order)
+		return
+	}
+
+	if err := os.WriteFile(fn, out.Bytes(), 0644); err != nil {
+		fmt.Fprintf(os.Stderr, "failed to write updated file: %v\n", err)
+		os.Exit(1)
+	}
+	printSummary(fn, origOrder, order)
 }
 
 func equalStringSlices(a, b []string) bool {
@@ -221,28 +237,43 @@ func equalStringSlices(a, b []string) bool {
 	return true
 }
 
-// ensureSingleBlankLine ensures exactly one trailing blank line after current buffer content.
-func ensureSingleBlankLine(buf *bytes.Buffer) {
-	bs := buf.Bytes()
-	// count trailing newlines
-	n := 0
-	for i := len(bs) - 1; i >= 0 && (bs[i] == '\n' || bs[i] == '\r'); i-- {
-		if bs[i] == '\n' {
-			n++
-		}
+func printSummary(fn string, orig, order []string) {
+	fmt.Printf("file: %s\n", fn)
+	fmt.Printf("  original order:\n")
+	for i, k := range orig {
+		fmt.Printf("    %2d: %s\n", i, k)
 	}
-	if n == 0 {
-		buf.WriteByte('\n')
-	}
-	if n <= 1 {
-		buf.WriteByte('\n')
+	fmt.Printf("  proposed order:\n")
+	for i, k := range order {
+		fmt.Printf("    %2d: %s\n", i, k)
 	}
 }
 
-// ensureTrailingNewline ensures at least one trailing newline.
-func ensureTrailingNewline(buf *bytes.Buffer) {
-	bs := buf.Bytes()
-	if len(bs) == 0 || bs[len(bs)-1] != '\n' {
-		buf.WriteByte('\n')
+func hasCycle(adj map[string]map[string]struct{}) bool {
+	state := map[string]int{} // 0=unseen,1=visiting,2=done
+	var dfs func(string) bool
+	dfs = func(u string) bool {
+		if state[u] == 1 {
+			return true
+		}
+		if state[u] == 2 {
+			return false
+		}
+		state[u] = 1
+		for v := range adj[u] {
+			if dfs(v) {
+				return true
+			}
+		}
+		state[u] = 2
+		return false
 	}
+	for u := range adj {
+		if state[u] == 0 {
+			if dfs(u) {
+				return true
+			}
+		}
+	}
+	return false
 }
