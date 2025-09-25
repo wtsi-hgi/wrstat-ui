@@ -8,6 +8,7 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
+	"sort"
 	"strings"
 )
 
@@ -138,6 +139,9 @@ func main() {
 	funcBlocks := []funcBlock{}
 	funcByKey := map[string]funcBlock{}
 
+	// Track original order index of functions as they appear in the file
+	origFuncIdx := map[string]int{}
+
 	firstDeclStart := -1
 	lastImportEnd := -1
 	lastDeclEnd := -1
@@ -202,6 +206,10 @@ func main() {
 			fb := funcBlock{key: key, start: fs, end: fe, recvType: recv, isMethod: recv != ""}
 			funcBlocks = append(funcBlocks, fb)
 			funcByKey[key] = fb
+			// record original index in order of appearance
+			if _, seen := origFuncIdx[key]; !seen {
+				origFuncIdx[key] = len(origFuncIdx)
+			}
 		}
 		if firstDeclStart == -1 || s < firstDeclStart {
 			firstDeclStart = s
@@ -221,9 +229,11 @@ func main() {
 		nameToKey[fb.key] = fb.key
 	}
 
-	// Build call graph (file-local)
+	// Build call graph (file-local) and call sequence order per caller
 	adj := map[string]map[string]struct{}{}
 	callersOf := map[string]map[string]struct{}{}
+	callSeq := map[string][]string{}            // caller -> ordered unique callees by first occurrence
+	callFirstPos := map[string]map[string]int{} // caller -> callee -> first offset
 	for _, fb := range funcBlocks {
 		adj[fb.key] = map[string]struct{}{}
 	}
@@ -233,29 +243,51 @@ func main() {
 			continue
 		}
 		caller := fd.Name.Name
+		if _, ok := callFirstPos[caller]; !ok {
+			callFirstPos[caller] = map[string]int{}
+		}
 		ast.Inspect(fd.Body, func(n ast.Node) bool {
-			if ce, ok := n.(*ast.CallExpr); ok {
-				switch fun := ce.Fun.(type) {
-				case *ast.Ident:
-					if callee, ok := nameToKey[fun.Name]; ok && callee != caller {
-						adj[caller][callee] = struct{}{}
-						if _, ok := callersOf[callee]; !ok {
-							callersOf[callee] = map[string]struct{}{}
-						}
-						callersOf[callee][caller] = struct{}{}
-					}
-				case *ast.SelectorExpr:
-					if callee, ok := nameToKey[fun.Sel.Name]; ok && callee != caller {
-						adj[caller][callee] = struct{}{}
-						if _, ok := callersOf[callee]; !ok {
-							callersOf[callee] = map[string]struct{}{}
-						}
-						callersOf[callee][caller] = struct{}{}
-					}
+			ce, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			var name string
+			switch fun := ce.Fun.(type) {
+			case *ast.Ident:
+				name = fun.Name
+			case *ast.SelectorExpr:
+				name = fun.Sel.Name
+			}
+			if callee, ok := nameToKey[name]; ok && callee != caller {
+				adj[caller][callee] = struct{}{}
+				if _, ok := callersOf[callee]; !ok {
+					callersOf[callee] = map[string]struct{}{}
+				}
+				callersOf[callee][caller] = struct{}{}
+				// record first position
+				if _, seen := callFirstPos[caller][callee]; !seen {
+					callFirstPos[caller][callee] = fset.Position(ce.Pos()).Offset
 				}
 			}
 			return true
 		})
+		// build sequence list
+		if len(callFirstPos[caller]) > 0 {
+			type pair struct {
+				name string
+				pos  int
+			}
+			arr := make([]pair, 0, len(callFirstPos[caller]))
+			for k, p := range callFirstPos[caller] {
+				arr = append(arr, pair{k, p})
+			}
+			sort.Slice(arr, func(i, j int) bool { return arr[i].pos < arr[j].pos })
+			seq := make([]string, len(arr))
+			for i := range arr {
+				seq[i] = arr[i].name
+			}
+			callSeq[caller] = seq
+		}
 	}
 
 	// Detect types declared in this file
@@ -376,20 +408,7 @@ func main() {
 		}
 	}
 
-	// Independent free funcs: not constructors, not helpers of any type, not users of any type
-	inHelpers := map[string]struct{}{}
-	for _, hs := range helpers {
-		for k := range hs {
-			inHelpers[k] = struct{}{}
-		}
-	}
-	inUsers := map[string]struct{}{}
-	for _, us := range users {
-		for k := range us {
-			inUsers[k] = struct{}{}
-		}
-	}
-
+	// Independent free funcs: zero-degree (no in/out edges within file)
 	independent := []string{}
 	for _, fb := range funcBlocks {
 		if fb.isMethod {
@@ -399,22 +418,69 @@ func main() {
 		if strings.HasPrefix(name, "New") {
 			continue
 		}
-		if _, ok := inHelpers[name]; ok {
+		if len(adj[name]) > 0 {
 			continue
 		}
-		if _, ok := inUsers[name]; ok {
+		if len(callersOf[name]) > 0 {
 			continue
 		}
 		independent = append(independent, name)
 	}
 
-	// Helper: minimal change reorder for a subset
-	minimalReorder := func(keys []string, pinned int) []string {
+	// Helper to sort a list of function keys by their original order in the file
+	sortByOriginal := func(keys []string) []string {
+		out := append([]string(nil), keys...)
+		sort.SliceStable(out, func(i, j int) bool { return origFuncIdx[out[i]] < origFuncIdx[out[j]] })
+		return out
+	}
+
+	// Helper: minimal change reorder for a subset honoring predecessors
+	minimalReorderSubset := func(keys []string, pinned int) []string {
 		order := append([]string(nil), keys...)
 		pos := map[string]int{}
+		keysSet := map[string]struct{}{}
 		for i, k := range order {
 			pos[k] = i
+			keysSet[k] = struct{}{}
 		}
+		// Build predecessor map for subset
+		pred := map[string]map[string]struct{}{}
+		getPred := func(k string) map[string]struct{} {
+			if m, ok := pred[k]; ok {
+				return m
+			}
+			m := map[string]struct{}{}
+			pred[k] = m
+			return m
+		}
+		// 1) real call edges restricted to subset
+		for caller, neigh := range adj {
+			if _, ok := keysSet[caller]; !ok {
+				continue
+			}
+			for callee := range neigh {
+				if _, ok := keysSet[callee]; ok {
+					getPred(callee)[caller] = struct{}{}
+				}
+			}
+		}
+		// 2) sequence edges among callees by first-use order in any caller
+		for _, seq := range callSeq {
+			// filter to subset
+			filt := make([]string, 0, len(seq))
+			for _, c := range seq {
+				if _, ok := keysSet[c]; ok {
+					filt = append(filt, c)
+				}
+			}
+			for i := 0; i < len(filt); i++ {
+				for j := i + 1; j < len(filt); j++ {
+					a, b := filt[i], filt[j]
+					getPred(b)[a] = struct{}{}
+				}
+			}
+		}
+		// Minimal move respecting predecessors
 		changed := true
 		guard := len(order)*len(order) + 5
 		for changed && guard > 0 {
@@ -425,16 +491,10 @@ func main() {
 					continue
 				}
 				g := order[i]
-				// compute callers of g within the subset
 				maxIdx := -1
-				for caller, neigh := range adj {
-					if _, ok := pos[caller]; !ok {
-						continue
-					}
-					if _, calls := neigh[g]; calls {
-						if idx := pos[caller]; idx > maxIdx {
-							maxIdx = idx
-						}
+				for p := range getPred(g) {
+					if idx, ok := pos[p]; ok && idx > maxIdx {
+						maxIdx = idx
 					}
 				}
 				if maxIdx >= 0 && maxIdx >= pos[g] {
@@ -516,56 +576,67 @@ func main() {
 
 	// Independent free funcs near the top
 	if len(independent) > 0 {
-		ord := minimalReorder(independent, 0)
+		ord := minimalReorderSubset(sortByOriginal(independent), 0)
 		for _, k := range ord {
 			writeFuncIfNotWritten(k)
 		}
 		writeNL()
 	}
 
-	// Write type clusters in order of appearance
+	// For each type cluster
 	for _, tn := range typeNames {
 		b, ok := typeDeclFor[tn]
 		if !ok {
 			continue
 		}
-		if !isWritten(b) {
-			writeNL()
-			out.Write(src[b.start:b.end])
-			markWritten(b)
-		}
-		// constructors in original order
-		ctors := constructors[tn]
-		for _, name := range ctors {
-			writeFuncIfNotWritten(name)
-		}
-		// methods + helpers: start with methods in original order, then helpers in original order
-		methodList := methods[tn]
-		helperList := []string{}
-		for _, fb := range funcBlocks {
-			if _, ok := helpers[tn][fb.key]; ok {
-				helperList = append(helperList, fb.key)
+		// Primary types are those with methods or constructors
+		hasCtors := len(constructors[tn]) > 0
+		hasMethods := len(methods[tn]) > 0
+		if hasCtors || hasMethods {
+			if !isWritten(b) {
+				writeNL()
+				out.Write(src[b.start:b.end])
+				markWritten(b)
 			}
-		}
-		cluster := append(append([]string{}, methodList...), helperList...)
-		ord := minimalReorder(cluster, len(methodList))
-		for _, k := range ord {
-			writeFuncIfNotWritten(k)
-		}
-		// After cluster, write users assigned to this type (in original order, then minimal within subset)
-		userList := []string{}
-		for _, fb := range funcBlocks {
-			if _, ok := users[tn][fb.key]; ok && !fb.isMethod {
-				userList = append(userList, fb.key)
+			// constructors
+			for _, name := range constructors[tn] {
+				writeFuncIfNotWritten(name)
 			}
-		}
-		if len(userList) > 0 {
-			uord := minimalReorder(userList, 0)
-			for _, k := range uord {
+			// methods + helpers together, allow full reordering based on constraints
+			methodList := methods[tn]
+			helperList := []string{}
+			for _, fb := range funcBlocks {
+				if _, ok := helpers[tn][fb.key]; ok {
+					helperList = append(helperList, fb.key)
+				}
+			}
+			cluster := append(append([]string{}, methodList...), helperList...)
+			ord := minimalReorderSubset(sortByOriginal(cluster), 0)
+			for _, k := range ord {
 				writeFuncIfNotWritten(k)
 			}
+			// users of this type
+			userList := []string{}
+			for _, fb := range funcBlocks {
+				if _, ok := users[tn][fb.key]; ok && !fb.isMethod {
+					userList = append(userList, fb.key)
+				}
+			}
+			if len(userList) > 0 {
+				uord := minimalReorderSubset(sortByOriginal(userList), 0)
+				for _, k := range uord {
+					writeFuncIfNotWritten(k)
+				}
+			}
+			writeNL()
+		} else {
+			// Non-primary type: just emit the type declaration now; do not cluster users
+			if !isWritten(b) {
+				writeNL()
+				out.Write(src[b.start:b.end])
+				markWritten(b)
+			}
 		}
-		writeNL()
 	}
 
 	// Append any remaining type blocks not yet written
@@ -577,12 +648,56 @@ func main() {
 		}
 	}
 
-	// Append any remaining free funcs not yet written: those not in independent, not in ctors/methods/helpers/users
-	writtenKeys := map[string]struct{}{}
-	for _, k := range independent {
-		writtenKeys[k] = struct{}{}
+	// Append remaining free-func clusters (connected components), ordered by constraints
+	remainingSet := map[string]struct{}{}
+	for _, fb := range funcBlocks {
+		if fb.isMethod {
+			continue
+		}
+		if _, ok := writtenFunc[fb.key]; !ok {
+			remainingSet[fb.key] = struct{}{}
+		}
 	}
-	for tn := range typeSet {
+
+	// Build components via undirected connectivity using adj and callersOf
+	for key := range remainingSet {
+		if _, ok := remainingSet[key]; !ok {
+			continue
+		}
+		// BFS
+		comp := []string{}
+		queue := []string{key}
+		delete(remainingSet, key)
+		for len(queue) > 0 {
+			u := queue[0]
+			queue = queue[1:]
+			comp = append(comp, u)
+			// neighbors: outgoing
+			for v := range adj[u] {
+				if _, ok := remainingSet[v]; ok {
+					delete(remainingSet, v)
+					queue = append(queue, v)
+				}
+			}
+			// neighbors: incoming
+			for v := range callersOf[u] {
+				if _, ok := remainingSet[v]; ok {
+					delete(remainingSet, v)
+					queue = append(queue, v)
+				}
+			}
+		}
+		// Order this component starting from original order
+		ord := minimalReorderSubset(sortByOriginal(comp), 0)
+		for _, k := range ord {
+			writeFuncIfNotWritten(k)
+		}
+		writeNL()
+	}
+
+	// Append any remaining free funcs not yet written
+	writtenKeys := map[string]struct{}{}
+	for _, tn := range typeNames {
 		for _, k := range constructors[tn] {
 			writtenKeys[k] = struct{}{}
 		}
@@ -595,6 +710,9 @@ func main() {
 		for k := range users[tn] {
 			writtenKeys[k] = struct{}{}
 		}
+	}
+	for _, k := range independent {
+		writtenKeys[k] = struct{}{}
 	}
 	for _, fb := range funcBlocks {
 		if _, ok := writtenKeys[fb.key]; ok {
