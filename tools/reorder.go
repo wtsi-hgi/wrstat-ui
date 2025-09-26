@@ -16,108 +16,6 @@ var (
 	dry = flag.Bool("dry", false, "dry run: print full altered file then summary; without, write in place")
 )
 
-// typeContains recursively checks whether the ast.Expr contains a given
-// identifier name.
-func typeContains(t ast.Expr, typeName string) bool {
-	if t == nil {
-		return false
-	}
-
-	switch tt := t.(type) {
-	case *ast.Ident:
-		return tt.Name == typeName
-	case *ast.StarExpr:
-		return typeContains(tt.X, typeName)
-	case *ast.ArrayType:
-		return typeContains(tt.Elt, typeName)
-	case *ast.MapType:
-		return typeContains(tt.Key, typeName) || typeContains(tt.Value, typeName)
-	case *ast.FuncType:
-		checkFL := func(fl *ast.FieldList) bool {
-			if fl == nil {
-				return false
-			}
-
-			for _, f := range fl.List {
-				if typeContains(f.Type, typeName) {
-					return true
-				}
-			}
-
-			return false
-		}
-
-		return checkFL(tt.Params) || checkFL(tt.Results)
-	case *ast.IndexExpr:
-		return typeContains(tt.X, typeName) || typeContains(tt.Index, typeName)
-	case *ast.SelectorExpr:
-		return tt.Sel != nil && tt.Sel.Name == typeName
-	case *ast.StructType:
-		if tt.Fields == nil {
-			return false
-		}
-
-		for _, f := range tt.Fields.List {
-			if typeContains(f.Type, typeName) {
-				return true
-			}
-		}
-
-		return false
-	case *ast.InterfaceType:
-		if tt.Methods == nil {
-			return false
-		}
-
-		for _, f := range tt.Methods.List {
-			if typeContains(f.Type, typeName) {
-				return true
-			}
-		}
-
-		return false
-	default:
-		return false
-	}
-}
-
-// usesType checks whether a free function references a type by name in its
-// signature or body.
-func usesType(fd *ast.FuncDecl, typeName string) bool {
-	hasTypeInFieldList := func(fl *ast.FieldList) bool {
-		if fl == nil {
-			return false
-		}
-
-		for _, f := range fl.List {
-			if typeContains(f.Type, typeName) {
-				return true
-			}
-		}
-
-		return false
-	}
-	if hasTypeInFieldList(fd.Type.Params) || hasTypeInFieldList(fd.Type.Results) {
-		return true
-	}
-
-	found := false
-
-	if fd.Body != nil {
-		ast.Inspect(fd.Body, func(n ast.Node) bool {
-			if id, ok := n.(*ast.Ident); ok && id.Name == typeName {
-				found = true
-
-				return false
-			}
-
-			return true
-		})
-	}
-
-	return found
-}
-
 func main() {
 	flag.Parse()
 
@@ -1085,3 +983,108 @@ func main() {
 		os.Exit(1)
 	}
 }
+
+// usesType checks whether a free function references a type by name in its
+// signature or body.
+func usesType(fd *ast.FuncDecl, typeName string) bool {
+	hasTypeInFieldList := func(fl *ast.FieldList) bool {
+		if fl == nil {
+			return false
+		}
+
+		for _, f := range fl.List {
+			if typeContains(f.Type, typeName) {
+				return true
+			}
+		}
+
+		return false
+	}
+	if hasTypeInFieldList(fd.Type.Params) || hasTypeInFieldList(fd.Type.Results) {
+		return true
+	}
+
+	found := false
+
+	if fd.Body != nil {
+		ast.Inspect(fd.Body, func(n ast.Node) bool {
+			if id, ok := n.(*ast.Ident); ok && id.Name == typeName {
+				found = true
+
+				return false
+			}
+
+			return true
+		})
+	}
+
+	return found
+}
+
+// typeContains recursively checks whether the ast.Expr contains a given
+// identifier name.
+func typeContains(t ast.Expr, typeName string) bool {
+	if t == nil {
+		return false
+	}
+
+	switch tt := t.(type) {
+	case *ast.Ident:
+		return tt.Name == typeName
+	case *ast.StarExpr:
+		return typeContains(tt.X, typeName)
+	case *ast.ArrayType:
+		return typeContains(tt.Elt, typeName)
+	case *ast.MapType:
+		return typeContains(tt.Key, typeName) || typeContains(tt.Value, typeName)
+	case *ast.FuncType:
+		checkFL := func(fl *ast.FieldList) bool {
+			if fl == nil {
+				return false
+			}
+
+			for _, f := range fl.List {
+				if typeContains(f.Type, typeName) {
+					return true
+				}
+			}
+
+			return false
+		}
+
+		return checkFL(tt.Params) || checkFL(tt.Results)
+	case *ast.IndexExpr:
+		return typeContains(tt.X, typeName) || typeContains(tt.Index, typeName)
+	case *ast.SelectorExpr:
+		return tt.Sel != nil && tt.Sel.Name == typeName
+	case *ast.StructType:
+		if tt.Fields == nil {
+			return false
+		}
+
+		for _, f := range tt.Fields.List {
+			if typeContains(f.Type, typeName) {
+				return true
+			}
+		}
+
+		return false
+	case *ast.InterfaceType:
+		if tt.Methods == nil {
+			return false
+		}
+
+		for _, f := range tt.Methods.List {
+			if typeContains(f.Type, typeName) {
+				return true
+			}
+		}
+
+		return false
+	default:
+		return false
+	}
+}
+
+
+
