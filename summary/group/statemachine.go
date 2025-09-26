@@ -190,7 +190,7 @@ func (s *StateMachine[T]) clone(state uint32, done map[uint32]uint32) uint32 {
 		return d
 	}
 
-	nextState := uint32(len(*s))
+	nextState := uint32(len(*s)) //nolint:gosec
 	*s = append(*s, charState[T]{Group: (*s)[state].Group})
 	done[state] = nextState
 
@@ -211,7 +211,7 @@ func (s StateMachine[T]) fillState(state, loopState uint32, group *T, done map[u
 	}
 
 	for c, child := range sc.chars {
-		if child == 0 {
+		if child == 0 { //nolint:nestif
 			if ls.chars[c] != 0 {
 				sc.chars[c] = ls.chars[c]
 			} else {
