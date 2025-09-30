@@ -254,6 +254,7 @@ func (s *Server) reloadDBs(dgutaDBName, basedirDBName, ownersPath string, dbPath
 	s.mu.Unlock()
 
 	s.Logger.Printf("server ready again after reloading")
+
 	return true
 }
 
