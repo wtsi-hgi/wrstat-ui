@@ -171,13 +171,13 @@ func (s *Server) EnableDBReloading(basepath, dgutaDBName, basedirDBName, ownersP
 		}
 	}
 
-	go s.reloadLoop(basepath, dgutaDBName, basedirDBName, ownersPath,
+	go s.reloadLoop(basepath, dgutaDBName, basedirDBName,
 		pollFrequency, removeOldPaths, dbPaths, mounts)
 
 	return nil
 }
 
-func (s *Server) reloadLoop(basepath, dgutaDBName, basedirDBName, ownersPath string, //nolint:gocognit,gocyclo
+func (s *Server) reloadLoop(basepath, dgutaDBName, basedirDBName string, //nolint:gocognit,gocyclo
 	pollFrequency time.Duration, removeOldPaths bool, dbPaths, mounts []string) {
 	for {
 		select {
@@ -225,14 +225,18 @@ func (s *Server) reloadDBs(dgutaDBName, basedirDBName string, dbPaths, mounts, t
 	oldBD := s.basedirs
 	s.mu.RUnlock()
 
-	newTree, err := s.reloadTreeIncrementally(oldTree, dirgutaPaths, toDelete)
+	newTree, err := oldTree.OpenFrom(dirgutaPaths, toDelete)
 	if err != nil {
-		return s.logReloadError("%s", err)
+		s.Logger.Printf("incremental tree reload failed, falling back: %s", err)
+
+		return false
 	}
 
-	newBD, err := s.reloadBaseDirsIncrementally(oldBD, baseDirPaths, toDelete)
+	newBD, err := oldBD.OpenFrom(baseDirPaths, toDelete)
 	if err != nil {
-		return s.logReloadError("%s", err)
+		s.Logger.Printf("incremental basedirs reload failed, falling back: %s", err)
+
+		return false
 	}
 
 	if len(mounts) > 0 {
@@ -256,35 +260,6 @@ func (s *Server) reloadDBs(dgutaDBName, basedirDBName string, dbPaths, mounts, t
 	s.Logger.Printf("server ready again after reloading")
 
 	return true
-}
-
-// reloadTreeIncrementally attempts to reload an existing db.Tree incrementally
-// using the provided new paths and paths to remove. Returns an error if it
-// fails.
-func (s *Server) reloadTreeIncrementally(oldTree *db.Tree, dirgutaPaths, toDelete []string) (*db.Tree, error) {
-	newTree, err := oldTree.OpenFrom(dirgutaPaths, toDelete)
-	if err != nil {
-		s.Logger.Printf("incremental tree reload failed, falling back: %s", err)
-
-		return nil, err
-	}
-
-	return newTree, nil
-}
-
-// reloadBaseDirsIncrementally attempts to reload an existing
-// basedirs.MultiReader incrementally using the provided new paths and paths to
-// remove. Returns an error if it fail.
-func (s *Server) reloadBaseDirsIncrementally(oldBD basedirs.MultiReader,
-	paths, toDelete []string) (basedirs.MultiReader, error) {
-	newBD, err := oldBD.OpenFrom(paths, toDelete)
-	if err != nil {
-		s.Logger.Printf("incremental basedirs reload failed, falling back: %s", err)
-
-		return nil, err
-	}
-
-	return newBD, nil
 }
 
 // closeObsoleteDBs closes databases that are no longer needed after a reload.

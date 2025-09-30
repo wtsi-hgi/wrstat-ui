@@ -621,8 +621,6 @@ func TestServer(t *testing.T) {
 			s.mu.RLock()
 			oldTree := s.tree
 			oldBD := s.basedirs
-			oldGroupCache := s.groupUsageCache
-			oldUserCache := s.userUsageCache
 			oldTS := s.dataTimeStamp["keyA"]
 			s.mu.RUnlock()
 
@@ -653,8 +651,6 @@ func TestServer(t *testing.T) {
 			s.mu.RLock()
 			newTree := s.tree
 			newBD := s.basedirs
-			newGroupCache := s.groupUsageCache
-			newUserCache := s.userUsageCache
 			newTS := s.dataTimeStamp["keyB"]
 			s.mu.RUnlock()
 
@@ -664,9 +660,6 @@ func TestServer(t *testing.T) {
 
 			So(newTree, ShouldNotEqual, oldTree)
 			So(newBD, ShouldNotEqual, oldBD)
-
-			So(newGroupCache, ShouldNotResemble, oldGroupCache)
-			So(newUserCache, ShouldNotResemble, oldUserCache)
 
 			So(oldBD[0], ShouldEqual, newBD[0])
 		})
