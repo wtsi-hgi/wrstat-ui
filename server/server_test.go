@@ -604,6 +604,73 @@ func TestServer(t *testing.T) {
 			So(len(s.userUsageCache.gzipData), ShouldBeGreaterThan, 0)
 		})
 
+		Convey("Incremental reload updates only new or modified databases", func() {
+			ownersPath, err := internaldata.CreateOwnersCSV(t, internaldata.ExampleOwnersCSV)
+			So(err, ShouldBeNil)
+
+			tmp := t.TempDir()
+
+			first := filepath.Join(tmp, "111_keyA")
+			err = internaldb.CreateExampleDBsCustomIDsWithDir(t, first, uid, gids[0], gids[1], refTime)
+			So(err, ShouldBeNil)
+			So(os.Chtimes(first, time.Unix(refTime, 0), time.Unix(refTime, 0)), ShouldBeNil)
+
+			err = s.EnableDBReloading(tmp, "dirguta", "basedir.db", ownersPath, sentinelPollFrequency, false)
+			So(err, ShouldBeNil)
+
+			s.mu.RLock()
+			oldTree := s.tree
+			oldBD := s.basedirs
+			oldGroupCache := s.groupUsageCache
+			oldUserCache := s.userUsageCache
+			oldTS := s.dataTimeStamp["keyA"]
+			s.mu.RUnlock()
+
+			secondDot := filepath.Join(tmp, ".112_keyB")
+			second := filepath.Join(tmp, "112_keyB")
+			err = internaldb.CreateExampleDBsCustomIDsWithDir(t, secondDot, uid, gids[0], gids[1], refTime+10)
+			So(err, ShouldBeNil)
+			So(os.Chtimes(secondDot, time.Unix(refTime+10, 0), time.Unix(refTime+10, 0)), ShouldBeNil)
+			err = os.Rename(secondDot, second)
+			So(err, ShouldBeNil)
+
+			timeout := time.After(2 * time.Second)
+		Loop:
+			for {
+				select {
+				case <-timeout:
+					t.Fatal("timeout waiting for incremental reload")
+				case <-time.After(10 * time.Millisecond):
+					s.mu.RLock()
+					ts, ok := s.dataTimeStamp["keyB"]
+					s.mu.RUnlock()
+					if ok && ts > oldTS {
+						break Loop
+					}
+				}
+			}
+
+			s.mu.RLock()
+			newTree := s.tree
+			newBD := s.basedirs
+			newGroupCache := s.groupUsageCache
+			newUserCache := s.userUsageCache
+			newTS := s.dataTimeStamp["keyB"]
+			s.mu.RUnlock()
+
+			So(s.dataTimeStamp["keyA"], ShouldEqual, oldTS)
+
+			So(newTS, ShouldBeGreaterThan, oldTS)
+
+			So(newTree, ShouldNotEqual, oldTree)
+			So(newBD, ShouldNotEqual, oldBD)
+
+			So(newGroupCache, ShouldNotResemble, oldGroupCache)
+			So(newUserCache, ShouldNotResemble, oldUserCache)
+
+			So(oldBD[0], ShouldEqual, newBD[0])
+		})
+
 		Convey("serveGzippedCache serves group and user usage via HTTP", func() {
 			path, err := internaldb.CreateExampleDBsCustomIDs(t, uid, gids[0], gids[1], refTime)
 			So(err, ShouldBeNil)
