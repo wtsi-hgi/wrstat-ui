@@ -197,7 +197,7 @@ func (s *Server) reloadLoop(basepath, dgutaDBName, basedirDBName, ownersPath str
 			continue
 		}
 
-		if s.reloadDBs(dgutaDBName, basedirDBName, ownersPath, newDBPaths, mounts, toDelete) { //nolint:nestif
+		if s.reloadDBs(dgutaDBName, basedirDBName, newDBPaths, mounts, toDelete) { //nolint:nestif
 			dbPaths = newDBPaths
 
 			if removeOldPaths {
@@ -212,7 +212,7 @@ func (s *Server) reloadLoop(basepath, dgutaDBName, basedirDBName, ownersPath str
 // reloadDBs performs a full or incremental reload of the DirGUTAge tree and
 // basedirs MultiReader. It updates only new or changed databases while closing
 // obsolete ones and prewarming caches.
-func (s *Server) reloadDBs(dgutaDBName, basedirDBName, ownersPath string, dbPaths, mounts, toDelete []string) bool { //nolint:funlen,lll
+func (s *Server) reloadDBs(dgutaDBName, basedirDBName string, dbPaths, mounts, toDelete []string) bool { //nolint:funlen,lll
 	dirgutaPaths, baseDirPaths := JoinDBPaths(dbPaths, dgutaDBName, basedirDBName)
 
 	mt, err := s.getDBTimestamps(baseDirPaths)
@@ -225,22 +225,18 @@ func (s *Server) reloadDBs(dgutaDBName, basedirDBName, ownersPath string, dbPath
 	oldBD := s.basedirs
 	s.mu.RUnlock()
 
-	newTree, err := s.reloadTreeIncrementally(oldTree, dirgutaPaths)
+	newTree, err := s.reloadTreeIncrementally(oldTree, dirgutaPaths, toDelete)
 	if err != nil {
 		return s.logReloadError("%s", err)
 	}
 
-	newBD, err := s.reloadBaseDirsIncrementally(oldBD, baseDirPaths, ownersPath)
+	newBD, err := s.reloadBaseDirsIncrementally(oldBD, baseDirPaths, toDelete)
 	if err != nil {
 		return s.logReloadError("%s", err)
 	}
 
 	if len(mounts) > 0 {
 		newBD.SetMountPoints(mounts)
-	}
-
-	if err := s.closeObsoleteDBs(oldTree, newBD, toDelete); err != nil {
-		return s.logReloadError("%s", err)
 	}
 
 	if err := s.prewarmCaches(newBD); err != nil {
@@ -253,52 +249,60 @@ func (s *Server) reloadDBs(dgutaDBName, basedirDBName, ownersPath string, dbPath
 	s.dataTimeStamp = mt
 	s.mu.Unlock()
 
+	if err := s.closeObsoleteDBs(oldTree, oldBD, toDelete); err != nil {
+		return s.logReloadError("%s", err)
+	}
+
 	s.Logger.Printf("server ready again after reloading")
 
 	return true
 }
 
 // reloadTreeIncrementally attempts to reload an existing db.Tree incrementally
-// using the provided paths. If incremental reload fails, it falls back to a full
-// reload.
-func (s *Server) reloadTreeIncrementally(oldTree *db.Tree, paths []string) (*db.Tree, error) {
-	newTree, err := oldTree.OpenFrom(paths, nil)
+// using the provided new paths and paths to remove. Returns an error if it
+// fails.
+func (s *Server) reloadTreeIncrementally(oldTree *db.Tree, dirgutaPaths, toDelete []string) (*db.Tree, error) {
+	newTree, err := oldTree.OpenFrom(dirgutaPaths, toDelete)
 	if err != nil {
 		s.Logger.Printf("incremental tree reload failed, falling back: %s", err)
 
-		return db.NewTree(paths...)
+		return nil, err
 	}
 
 	return newTree, nil
 }
 
-// reloadBaseDirsIncrementally attempts to reload an existing basedirs.MultiReader
-// incrementally using the provided paths. If incremental reload fails, it falls
-// back to a full reload of all specified directories.
+// reloadBaseDirsIncrementally attempts to reload an existing
+// basedirs.MultiReader incrementally using the provided new paths and paths to
+// remove. Returns an error if it fail.
 func (s *Server) reloadBaseDirsIncrementally(oldBD basedirs.MultiReader,
-	paths []string, ownersPath string) (basedirs.MultiReader, error) {
-	newBD, err := oldBD.OpenFrom(paths, nil)
+	paths, toDelete []string) (basedirs.MultiReader, error) {
+	newBD, err := oldBD.OpenFrom(paths, toDelete)
 	if err != nil {
 		s.Logger.Printf("incremental basedirs reload failed, falling back: %s", err)
 
-		return basedirs.OpenMulti(ownersPath, paths...)
+		return nil, err
 	}
 
 	return newBD, nil
 }
 
 // closeObsoleteDBs closes databases that are no longer needed after a reload.
-func (s *Server) closeObsoleteDBs(oldTree *db.Tree, newBD basedirs.MultiReader, toDelete []string) error {
-	if err := oldTree.CloseOnly(toDelete); err != nil {
-		s.Logger.Printf("error closing obsolete tree dbs: %s", err)
+func (s *Server) closeObsoleteDBs(oldTree *db.Tree, oldBD basedirs.MultiReader, toDelete []string) error {
+	if oldTree != nil {
+		if err := oldTree.CloseOnly(toDelete); err != nil {
+			s.Logger.Printf("error closing obsolete tree dbs: %s", err)
 
-		return err
+			return err
+		}
 	}
 
-	if err := newBD.CloseOnly(toDelete); err != nil {
-		s.Logger.Printf("error closing obsolete basedirs dbs: %s", err)
+	if oldBD != nil {
+		if err := oldBD.CloseOnly(toDelete); err != nil {
+			s.Logger.Printf("error closing obsolete basedirs dbs: %s", err)
 
-		return err
+			return err
+		}
 	}
 
 	return nil
