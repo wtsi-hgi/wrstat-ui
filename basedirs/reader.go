@@ -52,7 +52,6 @@ type BaseDirReader struct {
 	groupCache  *GroupCache
 	userCache   *UserCache
 	owners      map[uint32]string
-	Path        string
 }
 
 // NewReader returns a BaseDirReader that can return the summary information

@@ -65,7 +65,6 @@ func OpenMulti(ownersPath string, paths ...string) (MultiReader, error) { //noli
 			groupCache:  groupCache,
 			userCache:   userCache,
 			owners:      owners,
-			Path:        path,
 		}
 	}
 
@@ -99,7 +98,7 @@ func (m MultiReader) OpenFrom(add, remove []string) (MultiReader, error) { //nol
 	)
 
 	for _, r := range m {
-		if p := r.Path; !slices.Contains(remove, p) {
+		if p := r.db.Path(); !slices.Contains(remove, p) {
 			n = append(n, r)
 			existing = append(existing, p)
 		}
@@ -122,7 +121,6 @@ func (m MultiReader) OpenFrom(add, remove []string) (MultiReader, error) { //nol
 			groupCache:  m[0].groupCache,
 			userCache:   m[0].userCache,
 			owners:      m[0].owners,
-			Path:        path,
 		})
 	}
 
@@ -135,7 +133,7 @@ func (m MultiReader) OpenFrom(add, remove []string) (MultiReader, error) { //nol
 // the old MultiReader.
 func (m MultiReader) CloseOnly(paths []string) (err error) {
 	for _, r := range m {
-		if !slices.Contains(paths, r.Path) {
+		if !slices.Contains(paths, r.db.Path()) {
 			continue
 		}
 

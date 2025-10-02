@@ -69,20 +69,6 @@ func (t *Tree) CloseOnly(paths []string) error {
 	return t.db.CloseOnly(paths)
 }
 
-// Paths returns the list of directory paths of the DB readSets.
-func (t *Tree) Paths() []string {
-	if t == nil || t.db == nil {
-		return nil
-	}
-
-	paths := make([]string, len(t.db.readSets))
-	for i, rs := range t.db.readSets {
-		paths[i] = rs.dir
-	}
-
-	return paths
-}
-
 // DirSummary holds nested file count, size, atime and mtime information on a
 // directory. It also holds which users and groups own files nested under the
 // directory, what the file types are, and the age group.
