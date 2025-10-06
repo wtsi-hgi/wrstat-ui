@@ -209,9 +209,9 @@ func (s *Server) reloadLoop(basepath, dgutaDBName, basedirDBName string, //nolin
 	}
 }
 
-// reloadDBs performs a full or incremental reload of the DirGUTAge tree and
-// basedirs MultiReader. It updates only new or changed databases while closing
-// obsolete ones and prewarming caches.
+// reloadDBs performs incremental reload of the DirGUTAge tree and basedirs
+// MultiReader. It updates only new or changed databases while closing obsolete
+// ones and prewarming caches.
 func (s *Server) reloadDBs(dgutaDBName, basedirDBName string, dbPaths, mounts, toDelete []string) bool { //nolint:funlen,lll
 	dirgutaPaths, baseDirPaths := JoinDBPaths(dbPaths, dgutaDBName, basedirDBName)
 
@@ -227,14 +227,14 @@ func (s *Server) reloadDBs(dgutaDBName, basedirDBName string, dbPaths, mounts, t
 
 	newTree, err := oldTree.OpenFrom(dirgutaPaths, toDelete)
 	if err != nil {
-		s.Logger.Printf("incremental tree reload failed, falling back: %s", err)
+		s.Logger.Printf("incremental tree reload failed: %s", err)
 
 		return false
 	}
 
 	newBD, err := oldBD.OpenFrom(baseDirPaths, toDelete)
 	if err != nil {
-		s.Logger.Printf("incremental basedirs reload failed, falling back: %s", err)
+		s.Logger.Printf("incremental basedirs reload failed: %s", err)
 
 		return false
 	}

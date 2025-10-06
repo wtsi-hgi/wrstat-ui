@@ -513,6 +513,10 @@ func (d *DB) Close() error {
 
 // OpenFrom creates a new DB from an existing one, potentially removing some
 // databases and adding others.
+//
+// Parameters:
+//   - add:    Database file paths to *open and include* in the new DB.
+//   - remove: Database file paths from the current DB that should be *excluded*.
 func (d *DB) OpenFrom(add, remove []string) (*DB, error) { //nolint:funlen,gocognit,gocyclo
 	e := &DB{
 		batchSize: d.batchSize,
@@ -538,6 +542,7 @@ func (d *DB) OpenFrom(add, remove []string) (*DB, error) { //nolint:funlen,gocog
 		}
 
 		e.readSets = append(e.readSets, readSet)
+		e.paths = append(e.paths, path)
 	}
 
 	for _, r := range d.readSets {

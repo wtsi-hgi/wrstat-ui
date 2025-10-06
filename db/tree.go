@@ -52,6 +52,10 @@ func NewTree(paths ...string) (*Tree, error) {
 
 // OpenFrom create a new Tree, potentially removing some database sources and
 // adding others.
+//
+// Parameters:
+//   - add:    New underlying database file paths to include.
+//   - remove: Existing database paths that should be excluded.
 func (t *Tree) OpenFrom(add, remove []string) (*Tree, error) {
 	db, err := t.db.OpenFrom(add, remove)
 	if err != nil {

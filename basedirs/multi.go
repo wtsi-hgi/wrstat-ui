@@ -84,6 +84,9 @@ func (m MultiReader) Close() (err error) {
 
 // OpenFrom creates a new MultiReader from an existing one, potentially removing
 // some databases and adding others.
+// Parameters:
+//   - add:    A list of database file paths that should be *added* to the new MultiReader.
+//   - remove: A list of existing database file paths that should be *excluded*.
 //
 // It is recommended to call CloseOnly when replacing a MultiReader to close the
 // unused databases.
@@ -92,10 +95,8 @@ func (m MultiReader) OpenFrom(add, remove []string) (MultiReader, error) { //nol
 		return nil, db.ErrDBNotExists
 	}
 
-	var ( //nolint:prealloc
-		n        MultiReader
-		existing []string
-	)
+	n := make(MultiReader, 0, len(m))
+	existing := make([]string, 0, len(m))
 
 	for _, r := range m {
 		if p := r.db.Path(); !slices.Contains(remove, p) {
