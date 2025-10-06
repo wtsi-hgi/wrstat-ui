@@ -74,6 +74,31 @@ caption {
   padding-right: 2px;
   position: relative;
   cursor: pointer;
+  max-width: fit-content;
+}
+
+#timestamp .timestamp-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25em;
+  border-bottom: 1px dotted currentColor;
+  transition: color 0.2s;
+  white-space: nowrap;
+}
+
+#timestamp:hover .timestamp-label {
+  color: var(--accent);
+}
+
+#timestamp .chevron {
+  font-size: 0.8em;
+  transition: transform 0.2s;
+  display: inline-block;
+  transform: rotate(0deg);
+}
+
+#timestamp:hover .chevron {
+  transform: rotate(-90deg);
 }
 
 #timestamp .timestamp-popup {
