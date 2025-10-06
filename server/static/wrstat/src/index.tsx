@@ -266,7 +266,7 @@ auth
           <span className="timestamp-label">
             Database updated:
             {approxTimeAgo(1000 * Math.max(...Object.values(timestamps)))}
-            <span className="chevron">◀</span>
+            <span className="chevron-icon"></span>
           </span>
           <div className="timestamp-popup">
             <CollapsibleDBList timestamps={timestamps} />
