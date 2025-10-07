@@ -50,6 +50,29 @@ func NewTree(paths ...string) (*Tree, error) {
 	return &Tree{db: db}, nil
 }
 
+// OpenFrom create a new Tree, potentially removing some database sources and
+// adding others.
+//
+// Parameters:
+//   - add:    New underlying database file paths to include.
+//   - remove: Existing database paths that should be excluded.
+func (t *Tree) OpenFrom(add, remove []string) (*Tree, error) {
+	db, err := t.db.OpenFrom(add, remove)
+	if err != nil {
+		return nil, err
+	}
+
+	return &Tree{db}, nil
+}
+
+// CloseOnly closes the databases corresponding to the given paths.
+//
+// Should only be used after calling OpenFrom to close the unused databases in
+// the old Tree.
+func (t *Tree) CloseOnly(paths []string) error {
+	return t.db.CloseOnly(paths)
+}
+
 // DirSummary holds nested file count, size, atime and mtime information on a
 // directory. It also holds which users and groups own files nested under the
 // directory, what the file types are, and the age group.

@@ -171,13 +171,13 @@ func (s *Server) EnableDBReloading(basepath, dgutaDBName, basedirDBName, ownersP
 		}
 	}
 
-	go s.reloadLoop(basepath, dgutaDBName, basedirDBName, ownersPath,
+	go s.reloadLoop(basepath, dgutaDBName, basedirDBName,
 		pollFrequency, removeOldPaths, dbPaths, mounts)
 
 	return nil
 }
 
-func (s *Server) reloadLoop(basepath, dgutaDBName, basedirDBName, ownersPath string, //nolint:gocognit,gocyclo
+func (s *Server) reloadLoop(basepath, dgutaDBName, basedirDBName string, //nolint:gocognit,gocyclo
 	pollFrequency time.Duration, removeOldPaths bool, dbPaths, mounts []string) {
 	for {
 		select {
@@ -197,7 +197,7 @@ func (s *Server) reloadLoop(basepath, dgutaDBName, basedirDBName, ownersPath str
 			continue
 		}
 
-		if s.reloadDBs(dgutaDBName, basedirDBName, ownersPath, newDBPaths, mounts) { //nolint:nestif
+		if s.reloadDBs(dgutaDBName, basedirDBName, newDBPaths, mounts, toDelete) { //nolint:nestif
 			dbPaths = newDBPaths
 
 			if removeOldPaths {
@@ -209,8 +209,10 @@ func (s *Server) reloadLoop(basepath, dgutaDBName, basedirDBName, ownersPath str
 	}
 }
 
-func (s *Server) reloadDBs(dgutaDBName, basedirDBName, //nolint:funlen
-	ownersPath string, dbPaths, mounts []string) bool {
+// reloadDBs performs incremental reload of the DirGUTAge tree and basedirs
+// MultiReader. It updates only new or changed databases while closing obsolete
+// ones and prewarming caches.
+func (s *Server) reloadDBs(dgutaDBName, basedirDBName string, dbPaths, mounts, toDelete []string) bool { //nolint:funlen,lll
 	dirgutaPaths, baseDirPaths := JoinDBPaths(dbPaths, dgutaDBName, basedirDBName)
 
 	mt, err := s.getDBTimestamps(baseDirPaths)
@@ -218,38 +220,67 @@ func (s *Server) reloadDBs(dgutaDBName, basedirDBName, //nolint:funlen
 		return s.logReloadError("reloading dbs failed: %s", err)
 	}
 
-	s.Logger.Printf("reloading dirguta db from %v", dirgutaPaths)
+	s.mu.RLock()
+	oldTree := s.tree
+	oldBD := s.basedirs
+	s.mu.RUnlock()
 
-	tree, err := db.NewTree(dirgutaPaths...)
+	newTree, err := oldTree.OpenFrom(dirgutaPaths, toDelete)
 	if err != nil {
-		return s.logReloadError("reloading dirguta db failed: %s", err)
+		s.Logger.Printf("incremental tree reload failed: %s", err)
+
+		return false
 	}
 
-	s.Logger.Printf("reloading basedirs db from %v", baseDirPaths)
-
-	bd, err := basedirs.OpenMulti(ownersPath, baseDirPaths...)
+	newBD, err := oldBD.OpenFrom(baseDirPaths, toDelete)
 	if err != nil {
-		return s.logReloadError("reloading basedirs db failed: %s", err)
+		s.Logger.Printf("incremental basedirs reload failed: %s", err)
+
+		return false
 	}
 
 	if len(mounts) > 0 {
-		bd.SetMountPoints(mounts)
+		newBD.SetMountPoints(mounts)
+	}
+
+	if err := s.prewarmCaches(newBD); err != nil {
+		return s.logReloadError("prewarming caches failed: %s", err)
+	}
+
+	s.mu.Lock()
+	s.tree = newTree
+	s.basedirs = newBD
+	s.dataTimeStamp = mt
+	s.mu.Unlock()
+
+	if err := s.closeObsoleteDBs(oldTree, oldBD, toDelete); err != nil {
+		return s.logReloadError("%s", err)
 	}
 
 	s.Logger.Printf("server ready again after reloading")
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	err = s.prewarmCaches(bd)
-	if err != nil {
-		return s.logReloadError("building prewarmCaches failed: %s", err)
-	}
-	s.tree = tree
-	s.basedirs = bd
-	s.dataTimeStamp = mt
-
 	return true
+}
+
+// closeObsoleteDBs closes databases that are no longer needed after a reload.
+func (s *Server) closeObsoleteDBs(oldTree *db.Tree, oldBD basedirs.MultiReader, toDelete []string) error {
+	if oldTree != nil {
+		if err := oldTree.CloseOnly(toDelete); err != nil {
+			s.Logger.Printf("error closing obsolete tree dbs: %s", err)
+
+			return err
+		}
+	}
+
+	if oldBD != nil {
+		if err := oldBD.CloseOnly(toDelete); err != nil {
+			s.Logger.Printf("error closing obsolete basedirs dbs: %s", err)
+
+			return err
+		}
+	}
+
+	return nil
 }
 
 func (s *Server) logReloadError(format string, v ...any) bool {
