@@ -69,40 +69,29 @@ caption {
   visibility: hidden;
 }
 
-#timestamp {
+.timestamp {
   float: right;
   padding-right: 2px;
   position: relative;
   cursor: pointer;
+  margin: 0;
+  min-width: auto;
 }
 
-#timestamp .timestamp-label {
+.timestamp .timestamp-label {
   display: inline-flex;
   align-items: center;
   gap: 0.25em;
-  border-bottom: 1px dotted currentColor;
   transition: color 0.2s;
   white-space: nowrap;
+  padding-right: 3em;
 }
 
-#timestamp:hover .timestamp-label {
+.timestamp:hover .timestamp-label {
   color: var(--accent);
 }
 
-#timestamp .chevron-icon {
-  display: inline-block;
-  width: 1em;
-  height: 1em;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 10'%3E%3Cpath d='M7,0 v10 l-5,-5 z' fill='currentColor' /%3E%3C/svg%3E");
-  transition: transform 0.2s;
-  transform: rotate(0deg);
-}
-
-#timestamp:hover .chevron-icon {
-  transform: rotate(-90deg);
-}
-
-#timestamp .timestamp-popup {
+.timestamp .timestamp-popup {
   display: none;
   position: absolute;
   top: 100%;
@@ -119,7 +108,7 @@ caption {
   overscroll-behavior: contain;
 }
 
-#timestamp:hover .timestamp-popup {
+.timestamp[open] .timestamp-popup {
   display: block;
 }
 

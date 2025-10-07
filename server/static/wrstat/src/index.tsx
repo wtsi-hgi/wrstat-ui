@@ -262,16 +262,17 @@ auth
           </button>
         </div>
 
-        <div id="timestamp">
-          <span className="timestamp-label">
-            Database updated:
-            {approxTimeAgo(1000 * Math.max(...Object.values(timestamps)))}
-            <span className="chevron-icon"></span>
-          </span>
+        <details open className="timestamp">
+          <summary className="timestamp-label">
+            <h1>
+              Database updated:
+              {approxTimeAgo(1000 * Math.max(...Object.values(timestamps)))}
+            </h1>
+          </summary>
           <div className="timestamp-popup">
             <CollapsibleDBList timestamps={timestamps} />
           </div>
-        </div>
+        </details>
 
         <App groupUsage={groupUsage} userUsage={userUsage} areas={areas} />
       </StrictMode>
