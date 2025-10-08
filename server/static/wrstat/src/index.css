@@ -81,6 +81,7 @@ caption {
 }
 
 .timestamp .timestamp-label {
+  text-align: right;
   align-items: center;
   gap: 0.25em;
   transition: color 0.2s;
