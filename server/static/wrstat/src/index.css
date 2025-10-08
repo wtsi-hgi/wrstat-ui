@@ -81,8 +81,6 @@ caption {
 }
 
 .timestamp .timestamp-label {
-  display: flex;
-  justify-content: flex-end;
   align-items: center;
   gap: 0.25em;
   transition: color 0.2s;
@@ -90,10 +88,6 @@ caption {
   padding-right: 3em;
   margin-bottom: 0 !important;
   border-bottom: 0 !important;
-}
-
-.timestamp:hover .timestamp-label {
-  color: var(--accent);
 }
 
 .timestamp .timestamp-popup {
