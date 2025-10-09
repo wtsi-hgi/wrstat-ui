@@ -72,7 +72,6 @@ caption {
 .timestamp {
   float: right;
   position: absolute;
-  cursor: pointer;
   margin: 0;
   min-width: auto;
   top: 0;
