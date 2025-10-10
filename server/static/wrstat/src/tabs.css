@@ -36,6 +36,7 @@
 	white-space: nowrap;
 	user-select: none;
 	pointer-events: none;
+	margin-top: 1.2em;
 }
 
 .tabs:after {
