@@ -70,6 +70,41 @@ func (s StateMachine[T]) GetGroup(info *summary.FileInfo) *T {
 	return s[s.getState(s.getPathState(info.Path), info.Name)].Group
 }
 
+type State[T any] struct {
+	s     StateMachine[T]
+	state uint32
+}
+
+func (s State[T]) GetState(match []byte) State[T] {
+	return State[T]{
+		s:     s.s,
+		state: s.s.getState(s.state, match),
+	}
+}
+
+func (s State[T]) GetStateString(match string) State[T] {
+	return s.GetState(unsafe.Slice(unsafe.StringData(match), len(match)))
+}
+
+func (s State[T]) GetGroup() *T {
+	return s.s[s.state].Group
+}
+
+func (s State[T]) IsUnmatched() bool {
+	return s.state == 0
+}
+
+func (s StateMachine[T]) GetState(match []byte) State[T] {
+	return State[T]{
+		s:     s,
+		state: s.getState(1, match),
+	}
+}
+
+func (s StateMachine[T]) GetStateString(match string) State[T] {
+	return s.GetState(unsafe.Slice(unsafe.StringData(match), len(match)))
+}
+
 func (s StateMachine[T]) getPathState(path *summary.DirectoryPath) uint32 {
 	if path == nil {
 		return 1
