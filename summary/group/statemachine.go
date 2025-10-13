@@ -70,6 +70,50 @@ func (s StateMachine[T]) GetGroup(info *summary.FileInfo) *T {
 	return s[s.getState(s.getPathState(info.Path), info.Name)].Group
 }
 
+// State represents a partial match that can be continued or completed.
+type State[T any] struct {
+	s     StateMachine[T]
+	state uint32
+}
+
+// GetState continues matching with the given match bytes, returning a new
+// State.
+func (s State[T]) GetState(match []byte) State[T] {
+	return State[T]{
+		s:     s.s,
+		state: s.s.getState(s.state, match),
+	}
+}
+
+// GetStateString acts like GetState, but takes a String.
+func (s State[T]) GetStateString(match string) State[T] {
+	return s.GetState(unsafe.Slice(unsafe.StringData(match), len(match)))
+}
+
+// GetGroup returns the group at the current state.
+func (s State[T]) GetGroup() *T {
+	return s.s[s.state].Group
+}
+
+// IsUnmatched returns true if we're in state 0, which will always return a nil
+// group.
+func (s State[T]) IsUnmatched() bool {
+	return s.state == 0
+}
+
+// GetState create a intermediary state given the initial match bytes.
+func (s StateMachine[T]) GetState(match []byte) State[T] {
+	return State[T]{
+		s:     s,
+		state: s.getState(1, match),
+	}
+}
+
+// GetStateString acts like GetState, but takes a String.
+func (s StateMachine[T]) GetStateString(match string) State[T] {
+	return s.GetState(unsafe.Slice(unsafe.StringData(match), len(match)))
+}
+
 func (s StateMachine[T]) getPathState(path *summary.DirectoryPath) uint32 {
 	if path == nil {
 		return 1
