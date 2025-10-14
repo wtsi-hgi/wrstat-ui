@@ -185,7 +185,10 @@ func (s *StateMachine[T]) mergeWildcards(state, wildcard uint32) {
 
 	if hasWildcard {
 		s.mergeWildcards(wc, 0)
-		s.merge(wc, wildcard, map[uint32]struct{}{})
+
+		if (*s)[wc].Group == nil {
+			s.merge(wc, wildcard, map[uint32]struct{}{})
+		}
 
 		wildcard = wc
 	}
