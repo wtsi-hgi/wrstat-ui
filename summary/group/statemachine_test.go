@@ -64,6 +64,10 @@ var testGroups = []PathGroup[name]{ //nolint:gochecknoglobals
 		Path:  []byte("/some/other/path/b/*.other"),
 		Group: &name{"testGroup[5]"},
 	},
+	{
+		Path:  []byte("/some/other/path/b/c/*"),
+		Group: &name{"testGroup[6]"},
+	},
 }
 
 func TestStateMachine(t *testing.T) {
@@ -94,6 +98,7 @@ func TestStateMachine(t *testing.T) {
 			So(sm.getGroup("/some/other/path/file.tx.txt"), ShouldEqual, testGroups[3].Group)
 			So(sm.getGroup("/some/other/path/file.txt.txt"), ShouldEqual, testGroups[3].Group)
 			So(sm.getGroup("/some/other/path/subdir/file.txt.tsv"), ShouldEqual, testGroups[4].Group)
+			So(sm.getGroup("/some/other/path/b/c/*.other"), ShouldEqual, testGroups[6].Group)
 		})
 	})
 }
