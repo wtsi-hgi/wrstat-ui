@@ -40,6 +40,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/gin-gonic/gin"
 	. "github.com/smartystreets/goconvey/convey"
@@ -624,8 +625,10 @@ func TestServer(t *testing.T) {
 			oldTS := s.dataTimeStamp["keyA"]
 			s.mu.RUnlock()
 
-			secondDot := filepath.Join(tmp, ".112_keyB")
-			second := filepath.Join(tmp, "112_keyB")
+			So(**(**[]string)(unsafe.Pointer(oldTree)), ShouldResemble, []string{filepath.Join(first, "dirguta")})
+
+			secondDot := filepath.Join(tmp, ".112_keyA")
+			second := filepath.Join(tmp, "112_keyA")
 			err = internaldb.CreateExampleDBsCustomIDsWithDir(t, secondDot, uid, gids[0], gids[1], refTime+10)
 			So(err, ShouldBeNil)
 			So(os.Chtimes(secondDot, time.Unix(refTime+10, 0), time.Unix(refTime+10, 0)), ShouldBeNil)
@@ -640,7 +643,7 @@ func TestServer(t *testing.T) {
 					t.Fatal("timeout waiting for incremental reload")
 				case <-time.After(10 * time.Millisecond):
 					s.mu.RLock()
-					ts, ok := s.dataTimeStamp["keyB"]
+					ts, ok := s.dataTimeStamp["keyA"]
 					s.mu.RUnlock()
 					if ok && ts > oldTS {
 						break Loop
@@ -651,17 +654,17 @@ func TestServer(t *testing.T) {
 			s.mu.RLock()
 			newTree := s.tree
 			newBD := s.basedirs
-			newTS := s.dataTimeStamp["keyB"]
+			newTS := s.dataTimeStamp["keyA"]
 			s.mu.RUnlock()
 
-			So(s.dataTimeStamp["keyA"], ShouldEqual, oldTS)
+			So(**(**[]string)(unsafe.Pointer(newTree)), ShouldResemble, []string{filepath.Join(second, "dirguta")})
+
+			So(s.dataTimeStamp["keyA"], ShouldEqual, newTS)
 
 			So(newTS, ShouldBeGreaterThan, oldTS)
 
 			So(newTree, ShouldNotEqual, oldTree)
 			So(newBD, ShouldNotEqual, oldBD)
-
-			So(oldBD[0], ShouldEqual, newBD[0])
 		})
 
 		Convey("serveGzippedCache serves group and user usage via HTTP", func() {
