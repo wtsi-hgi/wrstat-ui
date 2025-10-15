@@ -223,7 +223,12 @@ func addBaseToDelete(basepath string, toDelete []string) []string {
 // MultiReader. It updates only new or changed databases while closing obsolete
 // ones and prewarming caches.
 func (s *Server) reloadDBs(dgutaDBName, basedirDBName string, dbPaths, mounts, toDelete []string) bool { //nolint:funlen,lll
-	dirgutaPaths, baseDirPaths, removeDirgutaPaths, removeBaseDirPaths := joinPaths(dbPaths, toDelete, dgutaDBName, basedirDBName)
+	dirgutaPaths, baseDirPaths, removeDirgutaPaths, removeBaseDirPaths := joinPaths(
+		dbPaths,
+		toDelete,
+		dgutaDBName,
+		basedirDBName,
+	)
 
 	mt, err := s.getDBTimestamps(baseDirPaths)
 	if err != nil {
@@ -279,7 +284,7 @@ func (s *Server) reloadDBs(dgutaDBName, basedirDBName string, dbPaths, mounts, t
 }
 
 // closeObsoleteDBs closes databases that are no longer needed after a reload.
-func (s *Server) closeObsoleteDBs(old interface{ CloseOnly([]string) error }, toDelete []string) error {
+func (s *Server) closeObsoleteDBs(old interface{ CloseOnly(toDelete []string) error }, toDelete []string) error {
 	if old == nil {
 		return nil
 	}
