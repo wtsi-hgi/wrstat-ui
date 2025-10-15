@@ -197,7 +197,7 @@ func (s *Server) reloadLoop(basepath, dgutaDBName, basedirDBName string, //nolin
 			continue
 		}
 
-		if s.reloadDBs(dgutaDBName, basedirDBName, newDBPaths, mounts, toDelete) { //nolint:nestif
+		if s.reloadDBs(dgutaDBName, basedirDBName, newDBPaths, mounts, addBaseToDelete(basepath, toDelete)) { //nolint:nestif
 			dbPaths = newDBPaths
 
 			if removeOldPaths {
@@ -209,11 +209,26 @@ func (s *Server) reloadLoop(basepath, dgutaDBName, basedirDBName string, //nolin
 	}
 }
 
+func addBaseToDelete(basepath string, toDelete []string) []string {
+	t := make([]string, len(toDelete))
+
+	for n, path := range toDelete {
+		t[n] = filepath.Join(basepath, path)
+	}
+
+	return t
+}
+
 // reloadDBs performs incremental reload of the DirGUTAge tree and basedirs
 // MultiReader. It updates only new or changed databases while closing obsolete
 // ones and prewarming caches.
 func (s *Server) reloadDBs(dgutaDBName, basedirDBName string, dbPaths, mounts, toDelete []string) bool { //nolint:funlen,lll
-	dirgutaPaths, baseDirPaths := JoinDBPaths(dbPaths, dgutaDBName, basedirDBName)
+	dirgutaPaths, baseDirPaths, removeDirgutaPaths, removeBaseDirPaths := joinPaths(
+		dbPaths,
+		toDelete,
+		dgutaDBName,
+		basedirDBName,
+	)
 
 	mt, err := s.getDBTimestamps(baseDirPaths)
 	if err != nil {
@@ -225,14 +240,14 @@ func (s *Server) reloadDBs(dgutaDBName, basedirDBName string, dbPaths, mounts, t
 	oldBD := s.basedirs
 	s.mu.RUnlock()
 
-	newTree, err := oldTree.OpenFrom(dirgutaPaths, toDelete)
+	newTree, err := oldTree.OpenFrom(dirgutaPaths, removeDirgutaPaths)
 	if err != nil {
 		s.Logger.Printf("incremental tree reload failed: %s", err)
 
 		return false
 	}
 
-	newBD, err := oldBD.OpenFrom(baseDirPaths, toDelete)
+	newBD, err := oldBD.OpenFrom(baseDirPaths, removeBaseDirPaths)
 	if err != nil {
 		s.Logger.Printf("incremental basedirs reload failed: %s", err)
 
@@ -243,19 +258,25 @@ func (s *Server) reloadDBs(dgutaDBName, basedirDBName string, dbPaths, mounts, t
 		newBD.SetMountPoints(mounts)
 	}
 
+	s.mu.Lock()
+	defer func() {
+		if err := s.closeObsoleteDBs(oldTree, removeDirgutaPaths); err != nil {
+			s.logReloadError("%s", err)
+		}
+
+		if err := s.closeObsoleteDBs(oldBD, removeBaseDirPaths); err != nil {
+			s.logReloadError("%s", err)
+		}
+	}()
+	defer s.mu.Unlock()
+
 	if err := s.prewarmCaches(newBD); err != nil {
 		return s.logReloadError("prewarming caches failed: %s", err)
 	}
 
-	s.mu.Lock()
 	s.tree = newTree
 	s.basedirs = newBD
 	s.dataTimeStamp = mt
-	s.mu.Unlock()
-
-	if err := s.closeObsoleteDBs(oldTree, oldBD, toDelete); err != nil {
-		return s.logReloadError("%s", err)
-	}
 
 	s.Logger.Printf("server ready again after reloading")
 
@@ -263,21 +284,15 @@ func (s *Server) reloadDBs(dgutaDBName, basedirDBName string, dbPaths, mounts, t
 }
 
 // closeObsoleteDBs closes databases that are no longer needed after a reload.
-func (s *Server) closeObsoleteDBs(oldTree *db.Tree, oldBD basedirs.MultiReader, toDelete []string) error {
-	if oldTree != nil {
-		if err := oldTree.CloseOnly(toDelete); err != nil {
-			s.Logger.Printf("error closing obsolete tree dbs: %s", err)
-
-			return err
-		}
+func (s *Server) closeObsoleteDBs(old interface{ CloseOnly(toDelete []string) error }, toDelete []string) error {
+	if old == nil {
+		return nil
 	}
 
-	if oldBD != nil {
-		if err := oldBD.CloseOnly(toDelete); err != nil {
-			s.Logger.Printf("error closing obsolete basedirs dbs: %s", err)
+	if err := old.CloseOnly(toDelete); err != nil {
+		s.Logger.Printf("error closing obsolete tree dbs: %s", err)
 
-			return err
-		}
+		return err
 	}
 
 	return nil
@@ -310,6 +325,13 @@ func JoinDBPaths(dbPaths []string, dgutaDBName, basedirDBName string) ([]string,
 	}
 
 	return dirgutaPaths, baseDirPaths
+}
+
+func joinPaths(dbPaths, toDelete []string, dgutaDBName, basedirDBName string) ([]string, []string, []string, []string) {
+	dirgutaPaths, baseDirPaths := JoinDBPaths(dbPaths, dgutaDBName, basedirDBName)
+	removeDirgutaPaths, removeBaseDirPaths := JoinDBPaths(toDelete, dgutaDBName, basedirDBName)
+
+	return dirgutaPaths, baseDirPaths, removeDirgutaPaths, removeBaseDirPaths
 }
 
 type nameVersion struct {
