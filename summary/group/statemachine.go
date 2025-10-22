@@ -183,8 +183,10 @@ type stateLines[T any] struct {
 	lines     []PathGroup[T]
 }
 
-func (s *StateMachine[T]) buildChildren(ct [256][]PathGroup[T], state, wildcard uint32, wildcardGroups []PathGroup[T]) error {
-	var toBuild []stateLines[T]
+func (s *StateMachine[T]) buildChildren(
+	ct [256][]PathGroup[T], state, wildcard uint32, wildcardGroups []PathGroup[T],
+) error {
+	var toBuild []stateLines[T] //nolint:prealloc
 
 	for c, lines := range ct {
 		if c == '*' {
@@ -203,7 +205,6 @@ func (s *StateMachine[T]) buildChildren(ct [256][]PathGroup[T], state, wildcard 
 		(*s)[state].chars[c] = nextState
 
 		toBuild = append(toBuild, stateLines[T]{c: byte(c), state: nextState, wc: wc, lines: lines})
-
 	}
 
 	for _, sl := range toBuild {
@@ -222,7 +223,9 @@ func (s *StateMachine[T]) newState() uint32 {
 	return nextState
 }
 
-func (s *StateMachine[T]) buildWildcard(groups []PathGroup[T], state uint32, wildcardGroups []PathGroup[T]) ([]PathGroup[T], error) {
+func (s *StateMachine[T]) buildWildcard(
+	groups []PathGroup[T], state uint32, wildcardGroups []PathGroup[T],
+) ([]PathGroup[T], error) {
 	nextState := s.newState()
 	(*s)[state].chars['*'] = nextState
 
@@ -259,7 +262,9 @@ func (s *StateMachine[T]) loopState(state uint32) {
 	}
 }
 
-func (s *StateMachine[T]) filterWildcardGroups(groups []PathGroup[T], state uint32, wildcardGroups []PathGroup[T]) []PathGroup[T] {
+func (s *StateMachine[T]) filterWildcardGroups(
+	groups []PathGroup[T], state uint32, wildcardGroups []PathGroup[T],
+) []PathGroup[T] {
 	for _, group := range wildcardGroups {
 		if (*s)[s.getState(state, group.Path)].Group == nil {
 			groups = append(groups, group)
