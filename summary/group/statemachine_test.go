@@ -39,7 +39,7 @@ type name struct {
 	name string
 }
 
-var testGroups = []PathGroup[name]{ //nolint:gochecknoglobals
+var testGroups = [...]PathGroup[name]{ //nolint:gochecknoglobals
 	{
 		Path:  []byte("/some/path/*"),
 		Group: &name{"testGroup[0]"},
@@ -68,11 +68,31 @@ var testGroups = []PathGroup[name]{ //nolint:gochecknoglobals
 		Path:  []byte("/some/other/path/b/c/*"),
 		Group: &name{"testGroup[6]"},
 	},
+	{
+		Path:  []byte("/some/other/path/b/c/"),
+		Group: &name{"testGroup[7]"},
+	},
+	{
+		Path:  []byte("/some/test/path/b/*.cram"),
+		Group: &name{"testGroup[8]"},
+	},
+	{
+		Path:  []byte("/some/test/path/b/c/*cram"),
+		Group: &name{"testGroup[9]"},
+	},
+	{
+		Path:  []byte("/some/test/path/b/e/*cram"),
+		Group: &name{"testGroup[10]"},
+	},
+	{
+		Path:  []byte("/some/test/path/b/e/*.cram"),
+		Group: &name{"testGroup[11]"},
+	},
 }
 
 func TestStateMachine(t *testing.T) {
 	Convey("With a compiled state machine", t, func() {
-		sm, err := NewStatemachine(testGroups)
+		sm, err := NewStatemachine(testGroups[:])
 		So(err, ShouldBeNil)
 
 		Convey("You can get the correct lines for given paths", func() {
@@ -81,10 +101,11 @@ func TestStateMachine(t *testing.T) {
 			So(sm.getGroup("/some/path/"), ShouldEqual, testGroups[0].Group)
 			So(sm.getGroup("/some/path/file"), ShouldEqual, testGroups[0].Group)
 			So(sm.getGroup("/some/path/temp-file"), ShouldEqual, testGroups[1].Group)
-			So(sm.getGroup("/some/path/noBacku"), ShouldEqual, testGroups[0].Group)
+			So(sm.getGroup("/some/path/noBackup"), ShouldEqual, testGroups[0].Group)
 			So(sm.getGroup("/some/path/noBackup/"), ShouldEqual, testGroups[2].Group)
 			So(sm.getGroup("/some/path/noBackup/someFile"), ShouldEqual, testGroups[2].Group)
 			So(sm.getGroup("/some/other/path/file"), ShouldEqual, nil)
+			So(sm.getGroup("/some/other/path/.txt"), ShouldEqual, testGroups[3].Group)
 			So(sm.getGroup("/some/other/path/file.txt"), ShouldEqual, testGroups[3].Group)
 			So(sm.getGroup("/some/other/path/b/file.txt"), ShouldEqual, testGroups[3].Group)
 			So(sm.getGroup("/some/other/path/file.txta.txt"), ShouldEqual, testGroups[3].Group)
@@ -99,6 +120,10 @@ func TestStateMachine(t *testing.T) {
 			So(sm.getGroup("/some/other/path/file.txt.txt"), ShouldEqual, testGroups[3].Group)
 			So(sm.getGroup("/some/other/path/subdir/file.txt.tsv"), ShouldEqual, testGroups[4].Group)
 			So(sm.getGroup("/some/other/path/b/c/*.other"), ShouldEqual, testGroups[6].Group)
+			So(sm.getGroup("/some/other/path/b/c/"), ShouldEqual, testGroups[7].Group)
+			So(sm.getGroup("/some/test/path/b/d/a.cram"), ShouldEqual, testGroups[8].Group)
+			So(sm.getGroup("/some/test/path/b/e/acram"), ShouldEqual, testGroups[10].Group)
+			So(sm.getGroup("/some/test/path/b/e/a.cram"), ShouldEqual, testGroups[11].Group)
 		})
 	})
 }
