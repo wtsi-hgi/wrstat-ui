@@ -48,7 +48,7 @@ func (t testHandler) Handle(file *summary.FileInfo, group *name) error {
 
 func TestGrouper(t *testing.T) {
 	Convey("Given a Statemachine and stats file data", t, func() {
-		sm, err := NewStatemachine(testGroups)
+		sm, err := NewStatemachine(testGroups[:])
 		So(err, ShouldBeNil)
 
 		f := statsdata.NewRoot("/", 0)
