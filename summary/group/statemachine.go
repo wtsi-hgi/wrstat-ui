@@ -130,19 +130,37 @@ func (s StateMachine[T]) getState(state uint32, path []byte) uint32 {
 	return state
 }
 
-func (s *StateMachine[T]) build(groups []PathGroup[T], state uint32) error {
+func (s *StateMachine[T]) build(groups []PathGroup[T], state, wildcard uint32, wildcardGroups []PathGroup[T]) error {
 	ct, err := s.buildCharTable(groups, state)
 	if err != nil {
 		return err
 	}
 
-	return s.buildChildren(ct, state)
+	if ct['*'] != nil {
+		var err error
+
+		if wildcardGroups, err = s.buildWildcard(ct['*'], state, wildcardGroups); err != nil {
+			return err
+		}
+
+		wildcard = (*s)[state].chars['*']
+	}
+
+	if (*s)[state].Group == nil {
+		(*s)[state].Group = (*s)[wildcard].Group
+	}
+
+	return s.buildChildren(ct, state, wildcard, wildcardGroups)
 }
 
 func (s StateMachine[T]) buildCharTable(groups []PathGroup[T], state uint32) (ct [256][]PathGroup[T], err error) {
 	ended := false
 
 	for _, group := range groups {
+		if group.Group == nil {
+			continue
+		}
+
 		if len(group.Path) == 0 { //nolint:nestif
 			if ended {
 				return ct, ErrAmbiguous
@@ -159,18 +177,38 @@ func (s StateMachine[T]) buildCharTable(groups []PathGroup[T], state uint32) (ct
 	return ct, nil
 }
 
-func (s *StateMachine[T]) buildChildren(ct [256][]PathGroup[T], state uint32) error {
+type stateLines[T any] struct {
+	c         byte
+	state, wc uint32
+	lines     []PathGroup[T]
+}
+
+func (s *StateMachine[T]) buildChildren(
+	ct [256][]PathGroup[T], state, wildcard uint32, wildcardGroups []PathGroup[T],
+) error {
+	var toBuild []stateLines[T] //nolint:prealloc
+
 	for c, lines := range ct {
-		if len(lines) == 0 {
+		if c == '*' {
 			continue
 		}
 
-		nextState := uint32(len(*s)) //nolint:gosec
+		wc := (*s)[wildcard].chars[c]
 
+		if len(lines) == 0 {
+			(*s)[state].chars[c] = wc
+
+			continue
+		}
+
+		nextState := s.newState()
 		(*s)[state].chars[c] = nextState
-		*s = append(*s, charState[T]{Group: (*s)[state].Group})
 
-		if err := s.build(lines, nextState); err != nil {
+		toBuild = append(toBuild, stateLines[T]{c: byte(c), state: nextState, wc: wc, lines: lines})
+	}
+
+	for _, sl := range toBuild {
+		if err := s.build(sl.lines, sl.state, sl.wc, wildcardGroups); err != nil {
 			return err
 		}
 	}
@@ -178,96 +216,63 @@ func (s *StateMachine[T]) buildChildren(ct [256][]PathGroup[T], state uint32) er
 	return nil
 }
 
-func (s *StateMachine[T]) mergeWildcards(state, wildcard uint32) {
-	st := &(*s)[state]
-	wc := st.chars['*']
-	hasWildcard := wc != 0
-
-	if hasWildcard {
-		s.mergeWildcards(wc, 0)
-
-		if (*s)[wc].Group == nil {
-			s.merge(wc, wildcard, map[uint32]struct{}{})
-		}
-
-		wildcard = wc
-	}
-
-	if st.Group == nil {
-		st.Group = (*s)[wildcard].Group
-	}
-
-	for c, child := range (*s)[state].chars {
-		if child == 0 {
-			st.chars[c] = wildcard
-		} else if c != '*' {
-			s.mergeWildcards(child, wildcard)
-		}
-	}
-
-	if hasWildcard {
-		s.fillState(wildcard, wildcard, (*s)[wildcard].Group, map[uint32]struct{}{})
-	}
-}
-
-func (s *StateMachine[T]) merge(state, oldState uint32, done map[uint32]struct{}) {
-	done[state] = struct{}{}
-	sc := &(*s)[state]
-	nsc := &(*s)[oldState]
-
-	if sc.Group == nil {
-		sc.Group = nsc.Group
-	}
-
-	for c, child := range sc.chars {
-		if child == 0 {
-			sc.chars[c] = s.clone(nsc.chars[c], map[uint32]uint32{})
-		} else if _, ok := done[child]; !ok {
-			s.merge(child, nsc.chars[c], done)
-		}
-	}
-}
-
-func (s *StateMachine[T]) clone(state uint32, done map[uint32]uint32) uint32 {
-	if state == 0 {
-		return 0
-	}
-
-	if d, ok := done[state]; ok {
-		return d
-	}
-
+func (s *StateMachine[T]) newState() uint32 {
 	nextState := uint32(len(*s)) //nolint:gosec
-	*s = append(*s, charState[T]{Group: (*s)[state].Group})
-	done[state] = nextState
-
-	for c, child := range (*s)[state].chars {
-		(*s)[nextState].chars[c] = s.clone(child, done)
-	}
+	*s = append(*s, charState[T]{})
 
 	return nextState
 }
 
-func (s StateMachine[T]) fillState(state, loopState uint32, group *T, done map[uint32]struct{}) {
-	done[state] = struct{}{}
-	sc := &s[state]
-	ls := &s[loopState]
+func (s *StateMachine[T]) buildWildcard(
+	groups []PathGroup[T], state uint32, wildcardGroups []PathGroup[T],
+) ([]PathGroup[T], error) {
+	nextState := s.newState()
+	(*s)[state].chars['*'] = nextState
 
-	if sc.Group == nil {
-		sc.Group = group
+	s.loopState(nextState)
+
+	if err := s.build(groups, nextState, nextState, wildcardGroups); err != nil {
+		return groups, err
 	}
 
-	for c, child := range sc.chars {
-		if child == 0 { //nolint:nestif
-			if ls.chars[c] != 0 {
-				sc.chars[c] = ls.chars[c]
-			} else {
-				sc.chars[c] = loopState
-			}
-		} else if _, ok := done[child]; !ok {
-			s.fillState(child, loopState, group, done)
+	if len(wildcardGroups) == 0 {
+		return groups, nil
+	}
+
+	curr := len(groups)
+
+	if groups = s.filterWildcardGroups(groups, nextState, wildcardGroups); curr == len(groups) {
+		return groups, nil
+	}
+
+	*s = (*s)[:nextState+1]
+
+	if err := s.build(groups, nextState, nextState, wildcardGroups); err != nil {
+		return nil, err
+	}
+
+	return groups, nil
+}
+
+func (s *StateMachine[T]) loopState(state uint32) {
+	chars := &(*s)[state].chars
+
+	for c := range chars {
+		chars[c] = state
+	}
+}
+
+func (s *StateMachine[T]) filterWildcardGroups(
+	groups []PathGroup[T], state uint32, wildcardGroups []PathGroup[T],
+) []PathGroup[T] {
+	for _, group := range wildcardGroups {
+		if (*s)[s.getState(state, group.Path)].Group == nil {
+			groups = append(groups, group)
+
 		}
 	}
+
+	return groups
 }
 
 // NewStateMachine compiles a StateMachine from the given slice of PathGroups.
@@ -280,11 +285,9 @@ func (s StateMachine[T]) fillState(state, loopState uint32, group *T, done map[u
 func NewStatemachine[T any](lines []PathGroup[T]) (StateMachine[T], error) {
 	states := make(StateMachine[T], 2, 1024) //nolint:mnd
 
-	if err := states.build(lines, 1); err != nil {
+	if err := states.build(lines, 1, 0, nil); err != nil {
 		return nil, err
 	}
-
-	states.mergeWildcards(1, 0)
 
 	return states, nil
 }
