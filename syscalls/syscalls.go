@@ -33,9 +33,11 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -43,7 +45,12 @@ import (
 	"vimagination.zapto.org/httpfile"
 )
 
-var errNoDBPath = errors.New("no db paths given")
+var (
+	errNoDBPath    = errors.New("no db paths given")
+	errNotFound    = errors.New("not found")
+	errNoData      = errors.New("no data available")
+	errInvalidPath = errors.New("invalid path")
+)
 
 // StartServer starts a webserver that displays wrstat logged syscall data in
 // order to analyse potential issues.
@@ -67,20 +74,23 @@ func StartServer(serverBind string, reload uint, dbs ...string) error {
 
 	http.Handle("/", index)
 	http.Handle("/data.json", l)
+	http.HandleFunc("/logs/", l.handleRunRequest)
 
 	return http.ListenAndServe(serverBind, nil) //nolint:gosec
 }
 
 type logAnalyzer struct {
-	mu    sync.RWMutex
-	stats map[string]json.RawMessage
+	mu        sync.RWMutex
+	stats     map[string]json.RawMessage
+	summaries map[string]json.RawMessage
 	*httpfile.File
 }
 
 func newLogAnalyzer() *logAnalyzer {
 	return &logAnalyzer{
-		stats: make(map[string]json.RawMessage),
-		File:  httpfile.NewWithData("data.json", []byte{'{', '}'}),
+		stats:     make(map[string]json.RawMessage),
+		summaries: make(map[string]json.RawMessage),
+		File:      httpfile.NewWithData("data.json", []byte{'{', '}'}),
 	}
 }
 
@@ -146,7 +156,7 @@ func (l *logAnalyzer) loadDirs(dirs []string) {
 
 	w := l.File.Create()
 
-	json.NewEncoder(w).Encode(l.stats) //nolint:errcheck,errchkjson
+	json.NewEncoder(w).Encode(l.summaries) //nolint:errcheck,errchkjson
 	w.Close()
 
 	slog.Info("done loading logs")
@@ -188,14 +198,74 @@ func (l *logAnalyzer) loadDir(dir string) error {
 
 	l.setData(name, d)
 
+	complete := len(d.Errors) == 0
+
+	l.setComplete(name, complete)
+
 	slog.Info("loaded logs", "path", name)
 
 	return nil
+}
+func (l *logAnalyzer) handleRunRequest(w http.ResponseWriter, r *http.Request) {
+	runName, err := l.extractRunName(r.URL.Path)
+	if err != nil {
+		http.Error(w, errInvalidPath.Error(), http.StatusBadRequest)
+
+		return
+	}
+
+	dataBytes, err := l.getRunData(runName)
+	if err != nil {
+		http.Error(w, errNoData.Error(), http.StatusNotFound)
+
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+
+	if _, err := w.Write(dataBytes); err != nil {
+		slog.Warn("failed to write response", "run", runName, "err", err)
+	}
+}
+
+func (l *logAnalyzer) extractRunName(path string) (string, error) {
+	runPath := strings.TrimPrefix(path, "/logs/")
+
+	return url.PathUnescape(runPath)
+}
+
+func (l *logAnalyzer) getRunData(runName string) ([]byte, error) {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+
+	dataBytes, ok := l.stats[runName]
+	if !ok {
+		return nil, errNotFound
+	}
+
+	if dataBytes == nil {
+		return nil, errNoData
+	}
+
+	return dataBytes, nil
 }
 
 func (l *logAnalyzer) setNull(name string) {
 	l.mu.Lock()
 	l.stats[name] = nil
+	l.mu.Unlock()
+}
+
+func (l *logAnalyzer) setComplete(name string, complete bool) {
+	entry := map[string]bool{"complete": complete}
+
+	var buf bytes.Buffer
+
+	json.NewEncoder(&buf).Encode(entry) //nolint:errcheck,errchkjson
+
+	l.mu.Lock()
+	l.summaries[name] = buf.Bytes()
 	l.mu.Unlock()
 }
 

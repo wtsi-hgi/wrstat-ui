@@ -1,9 +1,12 @@
 package syscalls
 
 import (
+	"bytes"
 	"compress/gzip"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
@@ -71,10 +74,74 @@ func TestLogAnalyzer(t *testing.T) {
 
 	l.File.WriteTo(&sb) //nolint:errcheck
 
-	expected := `{"123_abc":{"events":[{"time":1741798802,"file":"walk","host":"host1"},{"time":1741799402,"file":"walk","host":"host1","opens":259918,"reads":585308,"bytes":436687248,"closes":259902},{"time":1741834915,"file":"walk","host":"host1","reads":238,"bytes":936128,"closes":1},{"time":1742266915,"file":"walk","host":"host1","reads":238,"bytes":936128,"closes":1},{"time":1742337561,"file":"walk.1","host":"host2"},{"time":1742337562,"file":"walk.2","host":"host3"},{"time":1742338161,"file":"walk.2","host":"host3","stats":236081},{"time":1742338161,"file":"walk.1","host":"host2","stats":236102}],"errors":null,"complete":true},"124_def":{"events":[{"time":1741834915,"file":"walk.2","host":"host1"},{"time":1741834915,"file":"walk.1","host":"host2"},{"time":1741835515,"file":"walk.2","host":"host1","stats":5624},{"time":1741835515,"file":"walk.1","host":"host2","stats":5625},{"time":1742231056,"file":"walk","host":"host2"},{"time":1742231656,"file":"walk","host":"host2","opens":1508655,"reads":3119571,"bytes":821857992,"closes":1508654},{"time":1742337066,"file":"walk","host":"host2","opens":956665,"reads":1994960,"bytes":699646056,"closes":956666}],"errors":[{"time":1750417523,"message":"Timeout: wrstat-combine","file":"jobs","host":""}],"complete":false}}` + "\n" //nolint:lll
+	expected := `{"123_abc":{"complete":true},"124_def":{"complete":false}}` + "\n"
 
 	if sb.String() != expected {
 		t.Errorf("expecting output JSON:\n%s\ngot:\n%s", expected, sb.String())
+	}
+
+	if _, ok := l.stats["123_abc"]; !ok {
+		t.Errorf("expected 123_abc in stats map")
+	}
+
+	if _, ok := l.stats["124_def"]; !ok {
+		t.Errorf("expected 124_def in stats map")
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/logs/123_abc", nil)
+	w := httptest.NewRecorder()
+	l.handleRunRequest(w, req)
+
+	res := w.Result()
+	defer res.Body.Close()
+
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 OK for /logs/123_abc, got %d", res.StatusCode)
+	}
+
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatalf("failed to read response body for /logs/123_abc: %v", err)
+	}
+
+	if !bytes.Contains(body, []byte(`"complete"`)) {
+		t.Errorf("expected 'complete' key in /logs/123_abc response, got: %s", string(body))
+	}
+
+	if !bytes.Contains(body, []byte(`"events"`)) {
+		t.Errorf("expected 'events' key in /logs/123_abc response, got: %s", string(body))
+	}
+
+	if !bytes.Contains(body, []byte(`"errors"`)) {
+		t.Errorf("expected 'errors' key in /logs/123_abc response, got: %s", string(body))
+	}
+
+	req2 := httptest.NewRequest(http.MethodGet, "/logs/124_def", nil)
+	w2 := httptest.NewRecorder()
+	l.handleRunRequest(w2, req2)
+	res2 := w2.Result()
+
+	defer res2.Body.Close()
+
+	if res2.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 OK for /logs/124_def, got %d", res2.StatusCode)
+	}
+
+	body2, err := io.ReadAll(res2.Body)
+	if err != nil {
+		t.Fatalf("failed to read response body for /logs/124_def: %v", err)
+	}
+
+	if !bytes.Contains(body2, []byte(`"complete":false`)) {
+		t.Errorf("expected complete:false in /logs/124_def response, got: %s", string(body2))
+	}
+
+	req404 := httptest.NewRequest(http.MethodGet, "/logs/missing_run", nil)
+	w404 := httptest.NewRecorder()
+	l.handleRunRequest(w404, req404)
+
+	if w404.Code != http.StatusNotFound {
+		t.Errorf("expected 404 for missing run, got %d", w404.Code)
 	}
 
 	if err := createLog(filepath.Join(tmp, "125_def", "logs.gz"), `t=2025-03-26T17:00:02+0000 lvl=info msg="syscall logging" host=host4`); err != nil { //nolint:lll
@@ -83,7 +150,7 @@ func TestLogAnalyzer(t *testing.T) {
 
 	l.loadDirs([]string{filepath.Join(tmp, "124_def"), filepath.Join(tmp, "125_def")})
 
-	expected = expected[:len(expected)-2] + `,"125_def":{"events":[{"time":1743008402,"file":"walk","host":"host4"}],"errors":null,"complete":true}}` + "\n" //nolint:lll
+	expected = expected[:len(expected)-2] + `,"125_def":{"complete":true}}` + "\n"
 
 	sb.Reset()
 
