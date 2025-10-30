@@ -48,7 +48,6 @@ import (
 var (
 	errNoDBPath    = errors.New("no db paths given")
 	errNotFound    = errors.New("not found")
-	errNoData      = errors.New("no data available")
 	errInvalidPath = errors.New("invalid path")
 )
 
@@ -216,13 +215,12 @@ func (l *logAnalyzer) handleRunRequest(w http.ResponseWriter, r *http.Request) {
 
 	dataBytes, err := l.getRunData(runName)
 	if err != nil {
-		http.Error(w, errNoData.Error(), http.StatusNotFound)
+		http.Error(w, err.Error(), http.StatusNotFound)
 
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
 
 	if _, err := w.Write(dataBytes); err != nil {
 		slog.Warn("failed to write response", "run", runName, "err", err)
@@ -244,10 +242,6 @@ func (l *logAnalyzer) getRunData(runName string) ([]byte, error) {
 		return nil, errNotFound
 	}
 
-	if dataBytes == nil {
-		return nil, errNoData
-	}
-
 	return dataBytes, nil
 }
 
@@ -258,14 +252,15 @@ func (l *logAnalyzer) setNull(name string) {
 }
 
 func (l *logAnalyzer) setComplete(name string, complete bool) {
-	entry := map[string]bool{"complete": complete}
-
-	var buf bytes.Buffer
-
-	json.NewEncoder(&buf).Encode(entry) //nolint:errcheck,errchkjson
+	completeTrue := json.RawMessage(`{"complete":true}`)
+	completeFalse := json.RawMessage(`{"complete":false}`)
 
 	l.mu.Lock()
-	l.summaries[name] = buf.Bytes()
+	if complete {
+		l.summaries[name] = completeTrue
+	} else {
+		l.summaries[name] = completeFalse
+	}
 	l.mu.Unlock()
 }
 

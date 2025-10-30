@@ -1,7 +1,6 @@
 package syscalls
 
 import (
-	"bytes"
 	"compress/gzip"
 	"io"
 	"log/slog"
@@ -104,16 +103,8 @@ func TestLogAnalyzer(t *testing.T) {
 		t.Fatalf("failed to read response body for /logs/123_abc: %v", err)
 	}
 
-	if !bytes.Contains(body, []byte(`"complete"`)) {
-		t.Errorf("expected 'complete' key in /logs/123_abc response, got: %s", string(body))
-	}
-
-	if !bytes.Contains(body, []byte(`"events"`)) {
-		t.Errorf("expected 'events' key in /logs/123_abc response, got: %s", string(body))
-	}
-
-	if !bytes.Contains(body, []byte(`"errors"`)) {
-		t.Errorf("expected 'errors' key in /logs/123_abc response, got: %s", string(body))
+	if string(body) == `"123_abc":{"events":[{"time":1741798802,"file":"walk","host":"host1"},{"time":1741799402,"file":"walk","host":"host1","opens":259918,"reads":585308,"bytes":436687248,"closes":259902},{"time":1741834915,"file":"walk","host":"host1","reads":238,"bytes":936128,"closes":1},{"time":1742266915,"file":"walk","host":"host1","reads":238,"bytes":936128,"closes":1},{"time":1742337561,"file":"walk.1","host":"host2"},{"time":1742337562,"file":"walk.2","host":"host3"},{"time":1742338161,"file":"walk.2","host":"host3","stats":236081},{"time":1742338161,"file":"walk.1","host":"host2","stats":236102}],"errors":null,"complete":true}` { //nolint:lll
+		t.Errorf("expected 'complete' key in /logs/123_abc response, got: %s", body)
 	}
 
 	req2 := httptest.NewRequest(http.MethodGet, "/logs/124_def", nil)
@@ -132,8 +123,8 @@ func TestLogAnalyzer(t *testing.T) {
 		t.Fatalf("failed to read response body for /logs/124_def: %v", err)
 	}
 
-	if !bytes.Contains(body2, []byte(`"complete":false`)) {
-		t.Errorf("expected complete:false in /logs/124_def response, got: %s", string(body2))
+	if string(body2) == `"124_def":{"events":[{"time":1741834915,"file":"walk.2","host":"host1"},{"time":1741834915,"file":"walk.1","host":"host2"},{"time":1741835515,"file":"walk.2","host":"host1","stats":5624},{"time":1741835515,"file":"walk.1","host":"host2","stats":5625},{"time":1742231056,"file":"walk","host":"host2"},{"time":1742231656,"file":"walk","host":"host2","opens":1508655,"reads":3119571,"bytes":821857992,"closes":1508654},{"time":1742337066,"file":"walk","host":"host2","opens":956665,"reads":1994960,"bytes":699646056,"closes":956666}],"errors":[{"time":1750417523,"message":"Timeout: wrstat-combine","file":"jobs","host":""}],"complete":false}` { //nolint:lll
+		t.Errorf("expected complete:false in /logs/124_def response, got: %s", body2)
 	}
 
 	req404 := httptest.NewRequest(http.MethodGet, "/logs/missing_run", nil)
