@@ -49,6 +49,9 @@ var (
 	errNoDBPath    = errors.New("no db paths given")
 	errNotFound    = errors.New("not found")
 	errInvalidPath = errors.New("invalid path")
+
+	completeTrue  = json.RawMessage(`{"complete":true}`)  //nolint:gochecknoglobals
+	completeFalse = json.RawMessage(`{"complete":false}`) //nolint:gochecknoglobals
 )
 
 // StartServer starts a webserver that displays wrstat logged syscall data in
@@ -222,9 +225,7 @@ func (l *logAnalyzer) handleRunRequest(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 
-	if _, err := w.Write(dataBytes); err != nil {
-		slog.Warn("failed to write response", "run", runName, "err", err)
-	}
+	w.Write(dataBytes) //nolint:errcheck
 }
 
 func (l *logAnalyzer) extractRunName(path string) (string, error) {
@@ -252,9 +253,6 @@ func (l *logAnalyzer) setNull(name string) {
 }
 
 func (l *logAnalyzer) setComplete(name string, complete bool) {
-	completeTrue := json.RawMessage(`{"complete":true}`)
-	completeFalse := json.RawMessage(`{"complete":false}`)
-
 	l.mu.Lock()
 	if complete {
 		l.summaries[name] = completeTrue
