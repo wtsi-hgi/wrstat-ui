@@ -209,7 +209,7 @@ func (l *logAnalyzer) loadDir(dir string) error {
 	return nil
 }
 func (l *logAnalyzer) handleRunRequest(w http.ResponseWriter, r *http.Request) {
-	runName, err := l.extractRunName(r.URL.Path)
+	runName, err := extractRunName(r.URL.Path)
 	if err != nil {
 		http.Error(w, errInvalidPath.Error(), http.StatusBadRequest)
 
@@ -228,7 +228,7 @@ func (l *logAnalyzer) handleRunRequest(w http.ResponseWriter, r *http.Request) {
 	w.Write(dataBytes) //nolint:errcheck
 }
 
-func (l *logAnalyzer) extractRunName(path string) (string, error) {
+func extractRunName(path string) (string, error) {
 	runPath := strings.TrimPrefix(path, "/logs/")
 
 	return url.PathUnescape(runPath)
