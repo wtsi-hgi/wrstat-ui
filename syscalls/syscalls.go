@@ -33,7 +33,6 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -46,9 +45,8 @@ import (
 )
 
 var (
-	errNoDBPath    = errors.New("no db paths given")
-	errNotFound    = errors.New("not found")
-	errInvalidPath = errors.New("invalid path")
+	errNoDBPath = errors.New("no db paths given")
+	errNotFound = errors.New("not found")
 
 	completeTrue  = json.RawMessage(`{"complete":true}`)  //nolint:gochecknoglobals
 	completeFalse = json.RawMessage(`{"complete":false}`) //nolint:gochecknoglobals
@@ -208,13 +206,9 @@ func (l *logAnalyzer) loadDir(dir string) error {
 
 	return nil
 }
-func (l *logAnalyzer) handleRunRequest(w http.ResponseWriter, r *http.Request) {
-	runName, err := extractRunName(r.URL.Path)
-	if err != nil {
-		http.Error(w, errInvalidPath.Error(), http.StatusBadRequest)
 
-		return
-	}
+func (l *logAnalyzer) handleRunRequest(w http.ResponseWriter, r *http.Request) {
+	runName := strings.TrimPrefix(r.URL.Path, "/logs/")
 
 	dataBytes, err := l.getRunData(runName)
 	if err != nil {
@@ -226,12 +220,6 @@ func (l *logAnalyzer) handleRunRequest(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
 	w.Write(dataBytes) //nolint:errcheck
-}
-
-func extractRunName(path string) (string, error) {
-	runPath := strings.TrimPrefix(path, "/logs/")
-
-	return url.PathUnescape(runPath)
 }
 
 func (l *logAnalyzer) getRunData(runName string) ([]byte, error) {
