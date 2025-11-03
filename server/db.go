@@ -222,7 +222,7 @@ func addBaseToDelete(basepath string, toDelete []string) []string {
 // reloadDBs performs incremental reload of the DirGUTAge tree and basedirs
 // MultiReader. It updates only new or changed databases while closing obsolete
 // ones and prewarming caches.
-func (s *Server) reloadDBs(dgutaDBName, basedirDBName string, dbPaths, mounts, toDelete []string) bool { //nolint:funlen,lll
+func (s *Server) reloadDBs(dgutaDBName, basedirDBName string, dbPaths, mounts, toDelete []string) bool { //nolint:funlen,lll,gocyclo
 	dirgutaPaths, baseDirPaths, removeDirgutaPaths, removeBaseDirPaths := joinPaths(
 		dbPaths,
 		toDelete,

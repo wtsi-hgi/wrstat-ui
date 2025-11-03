@@ -262,7 +262,7 @@ const amendNode = (node: Element, propertiesOrChildren: PropertiesOrChildren, ch
 (document.readyState === "complete" ? Promise.resolve() : new Promise(successFn => window.addEventListener("load", successFn, {"once": true})))
 .then(() => fetch("/data.json"))
 .then(j => j.json())
-.then((data: Record<string, Data>) => {
+.then((data: Record<string, { complete: boolean }>) => {
 	amendNode(document.body, [
 		select({"multiple": "multiple", "change": function(this: HTMLSelectElement) {
 			const selected = Array.from(this.getElementsByTagName("option")).filter(e => e.selected).map(e => e.value);
@@ -270,10 +270,18 @@ const amendNode = (node: Element, propertiesOrChildren: PropertiesOrChildren, ch
 			if (selected.length === 0) {
 				body.replaceChildren();
 			} else {
-				display(selected.join(", "), selected.map(v => [v, data[v]] as [string, Data]).reduce((data, [runName, run]) => (data.events = data.events.concat((run?.events ?? []).map(e => (e.file += "/" + runName + "/", e))).sort(timeSort), data.errors = data.errors.concat(run?.errors ?? []).sort(timeSort), data.complete &&= run.complete, data), {"events": [], "errors": [], "complete": true} as Data));
-			}
+        Promise.all(
+					selected.map((path) =>
+						fetch("/logs/" + encodeURIComponent(path))
+							.then((r) => r.json())
+							.then((run) => [path, run] as [string, Data])
+					)
+				).then((results) => {
+						display(selected.join(", "), results.reduce((data, [runName, run]) => (data.events = data.events.concat((run?.events ?? []).map(e => (e.file += "/" + runName + "/", e))).sort(timeSort), data.errors = data.errors.concat(run?.errors ?? []).sort(timeSort), data.complete &&= run.complete, data), {"events": [], "errors": [], "complete": true} as Data));
+				});
+		  }
 		}}, optgroup({"label": "Please select one or more runs"}, [
-			reverse(Object.entries(data).filter(([, e]) => e?.events)).map(([key, val]) => option({"value": key}, (val.complete ? "✓ " : "❌ ") + key))
+			reverse(Object.entries(data).map(([key, val]) => option({"value": key}, (val.complete ? "✓ " : "❌ ") + key)))
 		])),
 		body
 	]);

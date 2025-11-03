@@ -21,8 +21,8 @@ require (
 	golang.org/x/exp v0.0.0-20250218142911-aa4b98e5adaa
 	vimagination.zapto.org/byteio v1.0.5
 	vimagination.zapto.org/httpfile v1.0.0
-	vimagination.zapto.org/parser v1.2.2
-	vimagination.zapto.org/tsserver v1.0.11
+	vimagination.zapto.org/parser v1.2.3
+	vimagination.zapto.org/tsserver v1.0.16
 )
 
 require (
@@ -162,7 +162,7 @@ require (
 	k8s.io/client-go v11.0.0+incompatible // indirect
 	nanomsg.org/go-mangos v1.4.0 // indirect
 	vimagination.zapto.org/httpencoding v1.0.0 // indirect
-	vimagination.zapto.org/javascript v1.4.15 // indirect
+	vimagination.zapto.org/javascript v1.5.3 // indirect
 )
 
 // we need to specify these due to github.com/VertebrateResequencing/wr's deps
@@ -180,17 +180,3 @@ replace github.com/docker/spdystream => github.com/docker/spdystream v0.1.0
 
 // mergo moved to a vanity URL in v1.0.0
 replace github.com/imdario/mergo => github.com/imdario/mergo v0.3.16
-
-replace vimagination.zapto.org/byteio => github.com/mjkwoolnough/byteio v1.0.5
-
-replace vimagination.zapto.org/httpfile => github.com/mjkwoolnough/httpfile v1.0.0
-
-replace vimagination.zapto.org/parser => github.com/mjkwoolnough/parser v1.1.1
-
-replace vimagination.zapto.org/tsserver => github.com/mjkwoolnough/tsserver v1.0.11
-
-replace vimagination.zapto.org/httpencoding => github.com/mjkwoolnough/httpencoding v1.0.0
-
-replace vimagination.zapto.org/javascript => github.com/mjkwoolnough/javascript v1.4.15
-
-replace vimagination.zapto.org/rwcount => github.com/mjkwoolnough/rwcount v1.1.1
