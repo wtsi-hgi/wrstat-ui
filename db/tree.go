@@ -32,14 +32,14 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/internal/split"
 )
 
-// Tree is used to do high-level queries on DB.Store() database files.
+// Tree is used to do high-level queries on DGUTA database files.
 type Tree struct {
 	db      *DB
 	sources []Source
 }
 
 // NewTree, given one or more Sources to dguta databases (as created by
-// DB.Store()), returns a *Tree that can be used to do high-level queries on the
+// DB.CreateDB()), returns a *Tree that can be used to do high-level queries on the
 // stats of a tree of disk folders. You should Close() the tree after use.
 func NewTree(srcs ...Source) (*Tree, error) {
 	db := NewDB(srcs...)

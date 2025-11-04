@@ -84,12 +84,12 @@ func (s *dbSet) Create() error {
 		return ErrNoStorageFactory
 	}
 
-	st, err := f.Create(s.src)
+	repo, err := f.Create(s.src)
 	if err != nil {
 		return err
 	}
 
-	s.repo = NewStoreAdapter(st)
+	s.repo = repo
 
 	return nil
 }
@@ -108,12 +108,12 @@ func (s *dbSet) Open() error {
 		return ErrNoStorageFactory
 	}
 
-	st, err := f.OpenReadOnly(s.src)
+	repo, err := f.OpenReadOnly(s.src)
 	if err != nil {
 		return err
 	}
 
-	s.repo = NewStoreAdapter(st)
+	s.repo = repo
 	return nil
 }
 
@@ -150,13 +150,11 @@ func (s *dbSet) Info() (*DBInfo, error) {
 		return nil, ErrNoStorageFactory
 	}
 
-	st, err := f.OpenReadOnlyUnPopulated(s.src)
+	repo, err := f.OpenReadOnlyUnPopulated(s.src)
 	if err != nil {
 		return nil, err
 	}
-	defer st.Close()
-
-	repo := NewStoreAdapter(st)
+	defer repo.Close()
 
 	// DGUTA info
 	if err := repo.ForEachDGUTA(func(d *DGUTA) error {

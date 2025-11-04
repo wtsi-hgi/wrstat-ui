@@ -2,7 +2,9 @@ package bolt
 
 import (
 	"errors"
+	"strings"
 
+	"github.com/ugorji/go/codec"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 )
 
@@ -19,7 +21,10 @@ type boltStore struct {
 	gdb *bdb
 	cdb *bdb
 	ro  bool
+	ch  codec.Handle
 }
+
+const endByte = 255
 
 func (s *boltStore) Close() error {
 	var err error
@@ -34,15 +39,18 @@ func (s *boltStore) Close() error {
 	return err
 }
 
-func (s *boltStore) PutDGUTAs(pairs [][2][]byte) error {
+// DGUTARepository implementation
+
+func (s *boltStore) PutDGUTARecords(records []db.RecordDGUTA) error {
 	if s.ro {
 		return ErrReadOnlyStore
 	}
 
 	return s.gdb.Update(func(tx *btx) error {
 		b := tx.Bucket([]byte("gut"))
-		for _, kv := range pairs {
-			if err := b.Put(kv[0], kv[1]); err != nil {
+		for i := range records {
+			k, v := records[i].EncodeToBytes()
+			if err := b.Put(k, v); err != nil {
 				return err
 			}
 		}
@@ -51,15 +59,21 @@ func (s *boltStore) PutDGUTAs(pairs [][2][]byte) error {
 	})
 }
 
-func (s *boltStore) PutChildren(pairs [][2][]byte) error {
+func (s *boltStore) PutChildrenMap(children map[string][]string) error {
 	if s.ro {
 		return ErrReadOnlyStore
 	}
 
 	return s.cdb.Update(func(tx *btx) error {
 		b := tx.Bucket([]byte("children"))
-		for _, kv := range pairs {
-			if err := b.Put(kv[0], kv[1]); err != nil {
+		for parent, list := range children {
+			key := []byte(parent)
+			if !strings.HasSuffix(parent, "/") {
+				key = append(key, '/')
+			}
+
+			val := s.encodeChildren(list)
+			if err := b.Put(key, val); err != nil {
 				return err
 			}
 		}
@@ -68,18 +82,24 @@ func (s *boltStore) PutChildren(pairs [][2][]byte) error {
 	})
 }
 
-func (s *boltStore) GetDGUTA(key []byte) ([]byte, error) {
-	var out []byte
+func (s *boltStore) GetDGUTAByDir(dir string) (*db.DGUTA, error) {
+	var out *db.DGUTA
 
 	err := s.gdb.View(func(tx *btx) error {
 		b := tx.Bucket([]byte("gut"))
 
+		key := []byte(dir)
+		if !strings.HasSuffix(dir, "/") {
+			key = append(key, '/')
+		}
+		key = append(key, endByte)
+
 		v := b.Get(key)
 		if v == nil {
-			return ErrNotFound
+			return db.ErrDirNotFound
 		}
 
-		out = append([]byte(nil), v...)
+		out = db.DecodeDGUTAbytes(key, v)
 
 		return nil
 	})
@@ -87,20 +107,23 @@ func (s *boltStore) GetDGUTA(key []byte) ([]byte, error) {
 	return out, err
 }
 
-func (s *boltStore) GetChildren(key []byte) ([]byte, error) {
-	var out []byte
-
+func (s *boltStore) GetChildrenByDir(parent string) ([]string, error) {
+	var out []string
 	err := s.cdb.View(func(tx *btx) error {
 		b := tx.Bucket([]byte("children"))
 
+		key := []byte(parent)
+		if !strings.HasSuffix(parent, "/") {
+			key = append(key, '/')
+		}
+
 		v := b.Get(key)
 		if v == nil {
-			out = nil
-
+			out = []string{}
 			return nil
 		}
 
-		out = append([]byte(nil), v...)
+		out = s.decodeChildrenBytes(v)
 
 		return nil
 	})
@@ -108,26 +131,46 @@ func (s *boltStore) GetChildren(key []byte) ([]byte, error) {
 	return out, err
 }
 
-func (s *boltStore) ForEachDGUTA(fn func(key, value []byte) error) error {
+func (s *boltStore) ForEachDGUTA(fn func(*db.DGUTA) error) error {
 	return s.gdb.View(func(tx *btx) error {
 		b := tx.Bucket([]byte("gut"))
 
-		return b.ForEach(func(k, v []byte) error { return fn(k, v) })
+		return b.ForEach(func(k, v []byte) error {
+			dg := db.DecodeDGUTAbytes(k, v)
+			return fn(dg)
+		})
 	})
 }
 
-func (s *boltStore) ForEachChildren(fn func(value []byte) error) error {
+func (s *boltStore) ForEachChildren(fn func(children []string) error) error {
 	return s.cdb.View(func(tx *btx) error {
 		b := tx.Bucket([]byte("children"))
 
-		return b.ForEach(func(_, v []byte) error { return fn(v) })
+		return b.ForEach(func(_, v []byte) error {
+			children := s.decodeChildrenBytes(v)
+			return fn(children)
+		})
 	})
+}
+
+func (s *boltStore) encodeChildren(dirs []string) []byte {
+	var encoded []byte
+	enc := codec.NewEncoderBytes(&encoded, s.ch)
+	enc.MustEncode(dirs)
+	return encoded
+}
+
+func (s *boltStore) decodeChildrenBytes(encoded []byte) []string {
+	dec := codec.NewDecoderBytes(encoded, s.ch)
+	var children []string
+	dec.MustDecode(&children)
+	return children
 }
 
 // boltFactory implements dirstore.Factory backed by bolt DBs.
 type boltFactory struct{}
 
-func (boltFactory) Create(src db.Source) (db.Store, error) {
+func (boltFactory) Create(src db.Source) (db.DGUTARepository, error) {
 	ds, ok := src.(*DirSource)
 	if !ok {
 		return nil, ErrUnsupportedSourceType
@@ -138,7 +181,7 @@ func (boltFactory) Create(src db.Source) (db.Store, error) {
 		return nil, err
 	}
 
-	return &boltStore{gdb: gdb, cdb: cdb, ro: false}, nil
+	return &boltStore{gdb: gdb, cdb: cdb, ro: false, ch: new(codec.BincHandle)}, nil
 }
 
 // openStorePair opens the dguta and children DBs for the given DirSource and
@@ -168,7 +211,7 @@ func openStorePair(ds *DirSource, readOnly bool) (*bdb, *bdb, error) {
 	return gdb, cdb, nil
 }
 
-func (boltFactory) OpenReadOnly(src db.Source) (db.Store, error) {
+func (boltFactory) OpenReadOnly(src db.Source) (db.DGUTARepository, error) {
 	ds, ok := src.(*DirSource)
 	if !ok {
 		return nil, ErrUnsupportedSourceType
@@ -186,10 +229,10 @@ func (boltFactory) OpenReadOnly(src db.Source) (db.Store, error) {
 		return nil, err
 	}
 
-	return &boltStore{gdb: gdb, cdb: cdb, ro: true}, nil
+	return &boltStore{gdb: gdb, cdb: cdb, ro: true, ch: new(codec.BincHandle)}, nil
 }
 
-func (boltFactory) OpenReadOnlyUnPopulated(src db.Source) (db.Store, error) {
+func (boltFactory) OpenReadOnlyUnPopulated(src db.Source) (db.DGUTARepository, error) {
 	return (&boltFactory{}).OpenReadOnly(src)
 }
 
