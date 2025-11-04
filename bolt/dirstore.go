@@ -131,28 +131,6 @@ func (s *boltStore) GetChildrenByDir(parent string) ([]string, error) {
 	return out, err
 }
 
-func (s *boltStore) ForEachDGUTA(fn func(*db.DGUTA) error) error {
-	return s.gdb.View(func(tx *btx) error {
-		b := tx.Bucket([]byte("gut"))
-
-		return b.ForEach(func(k, v []byte) error {
-			dg := db.DecodeDGUTAbytes(k, v)
-			return fn(dg)
-		})
-	})
-}
-
-func (s *boltStore) ForEachChildren(fn func(children []string) error) error {
-	return s.cdb.View(func(tx *btx) error {
-		b := tx.Bucket([]byte("children"))
-
-		return b.ForEach(func(_, v []byte) error {
-			children := s.decodeChildrenBytes(v)
-			return fn(children)
-		})
-	})
-}
-
 // GetInfo implements db.DGUTARepository.GetInfo by scanning the buckets and
 // aggregating counts without materialising full datasets in memory.
 func (s *boltStore) GetInfo() (*db.DBInfo, error) {
