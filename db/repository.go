@@ -18,10 +18,7 @@ type DGUTARepository interface {
 	// GetChildrenByDir returns the direct children of the given parent directory path.
 	GetChildrenByDir(parent string) ([]string, error)
 
-	// ForEachDGUTA iterates all DGUTAs, calling fn for each.
-	ForEachDGUTA(fn func(*DGUTA) error) error
-
-	// ForEachChildren iterates all children lists, calling fn for each value.
-	ForEachChildren(fn func(children []string) error) error
+	// GetInfo returns summary information about the repository without
+	// materialising all records.
+	GetInfo() (*DBInfo, error)
 }
- 

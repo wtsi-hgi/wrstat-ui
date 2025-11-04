@@ -143,8 +143,6 @@ type DBInfo struct { //nolint:revive
 // Info opens our constituent databases read-only, gets summary info about their
 // contents, returns that info and closes the databases.
 func (s *dbSet) Info() (*DBInfo, error) {
-	info := &DBInfo{}
-
 	f := Default()
 	if f == nil {
 		return nil, ErrNoStorageFactory
@@ -156,27 +154,7 @@ func (s *dbSet) Info() (*DBInfo, error) {
 	}
 	defer repo.Close()
 
-	// DGUTA info
-	if err := repo.ForEachDGUTA(func(d *DGUTA) error {
-		info.NumDirs++
-		info.NumDGUTAs += len(d.GUTAs)
-
-		return nil
-	}); err != nil {
-		return nil, err
-	}
-
-	// Children info
-	if err := repo.ForEachChildren(func(children []string) error {
-		info.NumParents++
-		info.NumChildren += len(children)
-
-		return nil
-	}); err != nil {
-		return nil, err
-	}
-
-	return info, nil
+	return repo.GetInfo()
 }
 
 // DB is used to create and query a database made from a dguta file, which is the

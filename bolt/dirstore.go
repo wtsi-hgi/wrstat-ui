@@ -153,6 +153,48 @@ func (s *boltStore) ForEachChildren(fn func(children []string) error) error {
 	})
 }
 
+// GetInfo implements db.DGUTARepository.GetInfo by scanning the buckets and
+// aggregating counts without materialising full datasets in memory.
+func (s *boltStore) GetInfo() (*db.DBInfo, error) {
+	info := &db.DBInfo{}
+
+	// DGUTA bucket: one record per directory; value encodes GUTAs slice.
+	if err := s.gdb.View(func(tx *btx) error {
+		b := tx.Bucket([]byte("gut"))
+		if b == nil {
+			return nil
+		}
+
+		return b.ForEach(func(k, v []byte) error {
+			dg := db.DecodeDGUTAbytes(k, v)
+			info.NumDirs++
+			info.NumDGUTAs += len(dg.GUTAs)
+			return nil
+		})
+	}); err != nil {
+		return nil, err
+	}
+
+	// Children bucket: one record per parent; value encodes children slice.
+	if err := s.cdb.View(func(tx *btx) error {
+		b := tx.Bucket([]byte("children"))
+		if b == nil {
+			return nil
+		}
+
+		return b.ForEach(func(_, v []byte) error {
+			children := s.decodeChildrenBytes(v)
+			info.NumParents++
+			info.NumChildren += len(children)
+			return nil
+		})
+	}); err != nil {
+		return nil, err
+	}
+
+	return info, nil
+}
+
 func (s *boltStore) encodeChildren(dirs []string) []byte {
 	var encoded []byte
 	enc := codec.NewEncoderBytes(&encoded, s.ch)
