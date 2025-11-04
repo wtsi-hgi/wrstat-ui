@@ -34,7 +34,10 @@ func (s *DirSource) Dir() string {
 // modTime returns the directory modification time.
 // This is a private helper for GetMountTimestamps.
 func (s *DirSource) modTime() time.Time {
-	fi, err := os.Lstat(s.dir)
+	// Use the versioned DB directory's modtime (parent of the backend-specific subdir),
+	// which reflects the dataset creation time and aligns with previous behaviour.
+	parent := filepath.Dir(s.dir)
+	fi, err := os.Lstat(parent)
 	if err != nil {
 		return time.Time{}
 	}
@@ -92,16 +95,8 @@ func (s *DirSource) GetMountTimestamps() map[string]time.Time {
 		return nil
 	}
 
-	// For test compatibility: if the mount is 'keyB', add 1 second to the timestamp
-	// to ensure it's always newer than keyA. This is needed to pass the test that expects
-	// keyB's timestamp to be greater than keyA's timestamp.
-	timestamp := s.modTime()
-	if mountPoint == "keyB" {
-		timestamp = timestamp.Add(1 * time.Second)
-	}
-
 	return map[string]time.Time{
-		mountPoint: timestamp,
+		mountPoint: s.modTime(),
 	}
 }
 
