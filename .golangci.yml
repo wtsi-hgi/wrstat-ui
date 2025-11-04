@@ -42,7 +42,7 @@ linters:
     - inamedparam
     - ineffassign
     - interfacebloat
-    - ireturn
+    # - ireturn
     - lll
     - maintidx
     - makezero
