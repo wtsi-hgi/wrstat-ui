@@ -34,7 +34,6 @@ import (
 	"time"
 
 	"github.com/hashicorp/go-multierror"
-	"github.com/ugorji/go/codec"
 )
 
 var (
@@ -59,8 +58,8 @@ const (
 
 // a dbSet is 2 databases, one for storing DGUTAs, one for storing children.
 type dbSet struct {
-	src   Source
-	store Store
+	src  Source
+	repo DGUTARepository
 }
 
 // NewDBSetFromSource creates a new dbSet from a Source implementation.
@@ -90,7 +89,7 @@ func (s *dbSet) Create() error {
 		return err
 	}
 
-	s.store = st
+	s.repo = NewStoreAdapter(st)
 
 	return nil
 }
@@ -114,7 +113,7 @@ func (s *dbSet) Open() error {
 		return err
 	}
 
-	s.store = st
+	s.repo = NewStoreAdapter(st)
 	return nil
 }
 
@@ -126,8 +125,8 @@ func (s *dbSet) Close() error {
 
 	var errm *multierror.Error
 
-	if s.store != nil {
-		err := s.store.Close()
+	if s.repo != nil {
+		err := s.repo.Close()
 		errm = multierror.Append(errm, err)
 	}
 
@@ -145,7 +144,6 @@ type DBInfo struct { //nolint:revive
 // contents, returns that info and closes the databases.
 func (s *dbSet) Info() (*DBInfo, error) {
 	info := &DBInfo{}
-	ch := new(codec.BincHandle)
 
 	f := Default()
 	if f == nil {
@@ -158,11 +156,12 @@ func (s *dbSet) Info() (*DBInfo, error) {
 	}
 	defer st.Close()
 
+	repo := NewStoreAdapter(st)
+
 	// DGUTA info
-	if err := st.ForEachDGUTA(func(k, v []byte) error {
+	if err := repo.ForEachDGUTA(func(d *DGUTA) error {
 		info.NumDirs++
-		dguta := DecodeDGUTAbytes(k, v)
-		info.NumDGUTAs += len(dguta.GUTAs)
+		info.NumDGUTAs += len(d.GUTAs)
 
 		return nil
 	}); err != nil {
@@ -170,11 +169,8 @@ func (s *dbSet) Info() (*DBInfo, error) {
 	}
 
 	// Children info
-	if err := st.ForEachChildren(func(v []byte) error {
+	if err := repo.ForEachChildren(func(children []string) error {
 		info.NumParents++
-		dec := codec.NewDecoderBytes(v, ch)
-		var children []string
-		dec.MustDecode(&children)
 		info.NumChildren += len(children)
 
 		return nil
@@ -195,7 +191,6 @@ type DB struct {
 	batchSize  int
 	writeBatch []RecordDGUTA
 	writeErr   error
-	ch         codec.Handle
 }
 
 // NewDB constructs a DB from backend-agnostic Sources.
@@ -215,7 +210,6 @@ func (d *DB) CreateDB() error {
 	}
 
 	d.writeSet = set
-	d.ch = new(codec.BincHandle)
 
 	return err
 }
@@ -247,15 +241,14 @@ func (d *DB) storeBatch() {
 	}
 
 	// Build and write children first, then DGUTAs
-	childrenPairs := d.buildChildrenPairs()
-	if err := d.writeSet.store.PutChildren(childrenPairs); err != nil {
+	childrenMap := d.buildChildrenMap()
+	if err := d.writeSet.repo.PutChildrenMap(childrenMap); err != nil {
 		d.writeErr = err
 
 		return
 	}
 
-	dgutaPairs := d.buildDGUTAPairs()
-	if err := d.writeSet.store.PutDGUTAs(dgutaPairs); err != nil {
+	if err := d.writeSet.repo.PutDGUTARecords(d.writeBatch); err != nil {
 		d.writeErr = err
 
 		return
@@ -263,8 +256,8 @@ func (d *DB) storeBatch() {
 }
 
 // storeChildren stores the Dirs of the current DGUTA batch in the db.
-func (d *DB) buildChildrenPairs() [][2][]byte {
-	pairs := make([][2][]byte, 0, len(d.writeBatch))
+func (d *DB) buildChildrenMap() map[string][]string {
+	children := make(map[string][]string, len(d.writeBatch))
 	for _, r := range d.writeBatch {
 		if len(r.Children) == 0 {
 			continue
@@ -273,74 +266,30 @@ func (d *DB) buildChildrenPairs() [][2][]byte {
 		for n := range r.Children {
 			r.Children[n] = parent + strings.TrimSuffix(r.Children[n], "/")
 		}
-
-		key := cloneBytes(r.pathBytes())
-		val := cloneBytes(d.encodeChildren(r.Children))
-		pairs = append(pairs, [2][]byte{key, val})
+		// Normalise parent to not end with a '/'
+		p := strings.TrimSuffix(parent, "/")
+		children[p] = append(children[p], r.Children...)
 	}
 
-	return pairs
+	return children
 }
 
 // getChildrenFromDB retrieves the child directory values associated with the
 // given directory key in the given db. Returns an empty slice if the dir wasn't
 // found.
-func (d *DB) getChildrenFromStore(st Store, dir string) []string {
-	key := []byte(dir)
-	if !strings.HasSuffix(dir, "/") {
-		key = append(key, '/')
-	}
-
-	v, err := st.GetChildren(key)
-	if err != nil || v == nil {
+func (d *DB) getChildrenFromRepo(repo DGUTARepository, dir string) []string {
+	out, err := repo.GetChildrenByDir(dir)
+	if err != nil {
 		return []string{}
 	}
-	return d.decodeChildrenBytes(v)
-}
-
-// decodeChildBytes converts the byte slice returned by encodeChildren() back
-// in to a []string.
-func (d *DB) decodeChildrenBytes(encoded []byte) []string {
-	dec := codec.NewDecoderBytes(encoded, d.ch)
-
-	var children []string
-
-	dec.MustDecode(&children)
-
-	return children
-}
-
-// encodeChildren returns converts the given string slice into a []byte suitable
-// for storing on disk.
-func (d *DB) encodeChildren(dirs []string) []byte {
-	var encoded []byte
-	enc := codec.NewEncoderBytes(&encoded, d.ch)
-	enc.MustEncode(dirs)
-
-	return encoded
-}
-
-// storeDGUTAs stores the current batch of DGUTAs in the db.
-func (d *DB) buildDGUTAPairs() [][2][]byte {
-	pairs := make([][2][]byte, 0, len(d.writeBatch))
-	for _, dguta := range d.writeBatch {
-		k, v := dguta.EncodeToBytes()
-		pairs = append(pairs, [2][]byte{cloneBytes(k), v})
-	}
-
-	return pairs
-}
-
-func cloneBytes(b []byte) []byte {
-	if len(b) == 0 {
-		return nil
-	}
-
-	out := make([]byte, len(b))
-	copy(out, b)
 
 	return out
 }
+
+// encode/decode moved into repository adapter
+
+// storeDGUTAs stores the current batch of DGUTAs in the db.
+// buildDGUTAPairs and cloneBytes removed; repository handles encoding
 
 // storeDGUTA stores a DGUTA in the db. DGUTAs are expected to be unique per
 // Store() operation and database.
@@ -372,8 +321,6 @@ func (d *DB) Open() error {
 	}
 
 	d.readSets = readSets
-
-	d.ch = new(codec.BincHandle)
 
 	return nil
 }
@@ -431,7 +378,7 @@ func (d *DB) combineDGUTAsFromReadSets(dir string) (*DGUTA, int, time.Time) {
 	dguta := &DGUTA{}
 
 	for _, readSet := range d.readSets {
-		if err := getDGUTAFromStoreAndAppend(readSet.store, dir, dguta); err != nil {
+		if err := getDGUTAFromRepoAndAppend(readSet.repo, dir, dguta); err != nil {
 			notFound++
 		}
 	}
@@ -442,8 +389,8 @@ func (d *DB) combineDGUTAsFromReadSets(dir string) (*DGUTA, int, time.Time) {
 // getDGUTAFromDBAndAppend calls getDGUTAFromDB() and appends the result
 // to the given dguta. If the given dguta is empty, it will be populated with the
 // content of the result instead.
-func getDGUTAFromStoreAndAppend(st Store, dir string, dguta *DGUTA) error {
-	thisDGUTA, err := getDGUTAFromStore(st, dir)
+func getDGUTAFromRepoAndAppend(repo DGUTARepository, dir string, dguta *DGUTA) error {
+	thisDGUTA, err := repo.GetDGUTAByDir(dir)
 	if err != nil {
 		return err
 	}
@@ -458,26 +405,7 @@ func getDGUTAFromStoreAndAppend(st Store, dir string, dguta *DGUTA) error {
 	return nil
 }
 
-// getDGUTAFromStore gets and decodes a dguta from the given store.
-func getDGUTAFromStore(st Store, dir string) (*DGUTA, error) {
-	bdir := make([]byte, 0, 2+len(dir)) //nolint:mnd
-	bdir = append(bdir, dir...)
-
-	if !strings.HasSuffix(dir, "/") {
-		bdir = append(bdir, '/')
-	}
-
-	bdir = append(bdir, endByte)
-
-	v, err := st.GetDGUTA(bdir)
-	if err != nil || v == nil {
-		return nil, ErrDirNotFound
-	}
-
-	dguta := DecodeDGUTAbytes(bdir, v)
-
-	return dguta, nil
-}
+// getDGUTAFromStore removed; repository handles decoding
 
 // Children returns the directory paths that are directly inside the given
 // directory.
@@ -492,7 +420,7 @@ func (d *DB) Children(dir string) []string {
 	children := make(map[string]bool)
 
 	for _, readSet := range d.readSets {
-		for _, child := range d.getChildrenFromStore(readSet.store, dir) {
+		for _, child := range d.getChildrenFromRepo(readSet.repo, dir) {
 			children[child] = true
 		}
 	}
