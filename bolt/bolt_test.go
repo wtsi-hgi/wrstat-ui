@@ -1,22 +1,20 @@
-package bolt_test
+package bolt
 
 import (
 	"errors"
 	"os"
 	"path/filepath"
 	"testing"
-
-	"github.com/wtsi-hgi/wrstat-ui/bolt"
 )
 
 func TestOpenUpdateViewAndBuckets(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.db")
 
-	db, err := bolt.Open(path, 0o640, &bolt.Options{
+	db, err := open(path, 0o640, &boptions{
 		NoFreelistSync: true,
 		NoGrowSync:     true,
-		FreelistType:   bolt.FreelistMapType,
+		FreelistType:   bfreelistMapType,
 	})
 	if err != nil {
 		t.Fatalf("failed to open db: %v", err)
@@ -24,7 +22,7 @@ func TestOpenUpdateViewAndBuckets(t *testing.T) {
 	defer db.Close()
 
 	// Create bucket and put a value.
-	err = db.Update(func(tx *bolt.Tx) error {
+	err = db.Update(func(tx *btx) error {
 		b, errc := tx.CreateBucketIfNotExists([]byte("bucket1"))
 		if errc != nil {
 			return errc
@@ -44,7 +42,7 @@ func TestOpenUpdateViewAndBuckets(t *testing.T) {
 	}
 
 	// Read the value back and count items with ForEach.
-	err = db.View(func(tx *bolt.Tx) error {
+	err = db.View(func(tx *btx) error {
 		b := tx.Bucket([]byte("bucket1"))
 		if b == nil {
 			t.Fatalf("bucket1 missing in view")
@@ -79,14 +77,14 @@ func TestCursorDeleteAndDeleteBucket(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.db")
 
-	db, err := bolt.Open(path, 0o640, &bolt.Options{})
+	db, err := open(path, 0o640, &boptions{})
 	if err != nil {
 		t.Fatalf("open failed: %v", err)
 	}
 	defer db.Close()
 
 	// Populate two entries then delete one with a cursor, then delete the bucket.
-	if err = db.Update(func(tx *bolt.Tx) error {
+	if err = db.Update(func(tx *btx) error {
 		b, errc := tx.CreateBucketIfNotExists([]byte("b2"))
 		if errc != nil {
 			return errc
@@ -112,7 +110,7 @@ func TestCursorDeleteAndDeleteBucket(t *testing.T) {
 	}
 
 	// Verify only one key remains, then delete the bucket and check error on second delete.
-	if err = db.Update(func(tx *bolt.Tx) error {
+	if err = db.Update(func(tx *btx) error {
 		b := tx.Bucket([]byte("b2"))
 		count := 0
 		_ = b.ForEach(func(k, v []byte) error { //nolint:errcheck
@@ -126,7 +124,7 @@ func TestCursorDeleteAndDeleteBucket(t *testing.T) {
 		if errc := tx.DeleteBucket([]byte("b2")); errc != nil {
 			return errc
 		}
-		if errc := tx.DeleteBucket([]byte("b2")); errc == nil || !errors.Is(errc, bolt.ErrBucketNotFound) {
+		if errc := tx.DeleteBucket([]byte("b2")); errc == nil || !errors.Is(errc, ErrBucketNotFound) {
 			t.Fatalf("expected ErrBucketNotFound, got %v", errc)
 		}
 
@@ -141,7 +139,7 @@ func TestReadOnlyOption(t *testing.T) {
 	path := filepath.Join(dir, "ro.db")
 
 	// Create a DB then reopen read-only and ensure update fails.
-	db, err := bolt.Open(path, 0o640, &bolt.Options{})
+	db, err := open(path, 0o640, &boptions{})
 	if err != nil {
 		t.Fatalf("open failed: %v", err)
 	}
@@ -150,13 +148,13 @@ func TestReadOnlyOption(t *testing.T) {
 		t.Fatalf("close failed: %v", err)
 	}
 
-	ro, err := bolt.Open(path, 0o640, &bolt.Options{ReadOnly: true})
+	ro, err := open(path, 0o640, &boptions{ReadOnly: true})
 	if err != nil {
 		t.Fatalf("open RO failed: %v", err)
 	}
 	defer ro.Close()
 
-	if err = ro.Update(func(tx *bolt.Tx) error { // should fail on read-only DB
+	if err = ro.Update(func(tx *btx) error { // should fail on read-only DB
 		_, errc := tx.CreateBucketIfNotExists([]byte("x"))
 
 		return errc
@@ -166,8 +164,8 @@ func TestReadOnlyOption(t *testing.T) {
 }
 
 func TestMaxKeySizeExposed(t *testing.T) {
-	if bolt.MaxKeySize <= 0 {
-		t.Fatalf("expected MaxKeySize to be > 0, got %d", bolt.MaxKeySize)
+	if MaxKeySize <= 0 {
+		t.Fatalf("expected MaxKeySize to be > 0, got %d", MaxKeySize)
 	}
 }
 
@@ -175,7 +173,7 @@ func TestOpenCreatesFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "create.db")
 
-	db, err := bolt.Open(path, 0o640, &bolt.Options{})
+	db, err := open(path, 0o640, &boptions{})
 	if err != nil {
 		t.Fatalf("open failed: %v", err)
 	}

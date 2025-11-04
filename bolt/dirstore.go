@@ -15,20 +15,119 @@ var (
 	ErrNotFound = errors.New("not found")
 )
 
+type boltStore struct {
+	gdb *bdb
+	cdb *bdb
+	ro  bool
+}
+
+func (s *boltStore) Close() error {
+	var err error
+	if e := s.gdb.Close(); e != nil {
+		err = e
+	}
+
+	if e := s.cdb.Close(); e != nil && err == nil {
+		err = e
+	}
+
+	return err
+}
+
+func (s *boltStore) PutDGUTAs(pairs [][2][]byte) error {
+	if s.ro {
+		return ErrReadOnlyStore
+	}
+
+	return s.gdb.Update(func(tx *btx) error {
+		b := tx.Bucket([]byte("gut"))
+		for _, kv := range pairs {
+			if err := b.Put(kv[0], kv[1]); err != nil {
+				return err
+			}
+		}
+
+		return nil
+	})
+}
+
+func (s *boltStore) PutChildren(pairs [][2][]byte) error {
+	if s.ro {
+		return ErrReadOnlyStore
+	}
+
+	return s.cdb.Update(func(tx *btx) error {
+		b := tx.Bucket([]byte("children"))
+		for _, kv := range pairs {
+			if err := b.Put(kv[0], kv[1]); err != nil {
+				return err
+			}
+		}
+
+		return nil
+	})
+}
+
+func (s *boltStore) GetDGUTA(key []byte) ([]byte, error) {
+	var out []byte
+
+	err := s.gdb.View(func(tx *btx) error {
+		b := tx.Bucket([]byte("gut"))
+
+		v := b.Get(key)
+		if v == nil {
+			return ErrNotFound
+		}
+
+		out = append([]byte(nil), v...)
+
+		return nil
+	})
+
+	return out, err
+}
+
+func (s *boltStore) GetChildren(key []byte) ([]byte, error) {
+	var out []byte
+
+	err := s.cdb.View(func(tx *btx) error {
+		b := tx.Bucket([]byte("children"))
+
+		v := b.Get(key)
+		if v == nil {
+			out = nil
+
+			return nil
+		}
+
+		out = append([]byte(nil), v...)
+
+		return nil
+	})
+
+	return out, err
+}
+
+func (s *boltStore) ForEachDGUTA(fn func(key, value []byte) error) error {
+	return s.gdb.View(func(tx *btx) error {
+		b := tx.Bucket([]byte("gut"))
+
+		return b.ForEach(func(k, v []byte) error { return fn(k, v) })
+	})
+}
+
+func (s *boltStore) ForEachChildren(fn func(value []byte) error) error {
+	return s.cdb.View(func(tx *btx) error {
+		b := tx.Bucket([]byte("children"))
+
+		return b.ForEach(func(_, v []byte) error { return fn(v) })
+	})
+}
+
 // boltFactory implements dirstore.Factory backed by bolt DBs.
 type boltFactory struct{}
 
-// NewDirStoreFactory returns a dirstore.Factory backed by bolt.
-// NewDirStoreFactory returns a dirstore.Factory backed by bolt.
-// It returns the interface type to avoid exposing the concrete factory type.
-func NewDirStoreFactory() db.Factory { //nolint:ireturn
-	return &boltFactory{}
-}
-
-//nolint:gochecknoinits
-func init() { db.Register("bolt", NewDirStoreFactory()) }
-
-func (boltFactory) Create(src db.Source) (db.Store, error) { //nolint:ireturn
+func (boltFactory) Create(src db.Source) (db.Store, error) {
 	ds, ok := src.(*DirSource)
 	if !ok {
 		return nil, ErrUnsupportedSourceType
@@ -44,7 +143,7 @@ func (boltFactory) Create(src db.Source) (db.Store, error) { //nolint:ireturn
 
 // openStorePair opens the dguta and children DBs for the given DirSource and
 // ensures required buckets exist when opening writable DBs.
-func openStorePair(ds *DirSource, readOnly bool) (*DB, *DB, error) {
+func openStorePair(ds *DirSource, readOnly bool) (*bdb, *bdb, error) {
 	gdb, err := openDBForPath(ds.dgutaPath(), readOnly)
 	if err != nil {
 		return nil, nil, err
@@ -69,16 +168,43 @@ func openStorePair(ds *DirSource, readOnly bool) (*DB, *DB, error) {
 	return gdb, cdb, nil
 }
 
-func ensureBucketExists(db *DB, name string) error {
-	return db.Update(func(tx *Tx) error {
-		_, e := tx.CreateBucketIfNotExists([]byte(name))
+func (boltFactory) OpenReadOnly(src db.Source) (db.Store, error) {
+	ds, ok := src.(*DirSource)
+	if !ok {
+		return nil, ErrUnsupportedSourceType
+	}
 
-		return e
-	})
+	gdb, err := open(ds.dgutaPath(), OpenMode, &boptions{ReadOnly: true})
+	if err != nil {
+		return nil, err
+	}
+
+	cdb, err := open(ds.childrenPath(), OpenMode, &boptions{ReadOnly: true})
+	if err != nil {
+		_ = gdb.Close()
+
+		return nil, err
+	}
+
+	return &boltStore{gdb: gdb, cdb: cdb, ro: true}, nil
 }
 
+func (boltFactory) OpenReadOnlyUnPopulated(src db.Source) (db.Store, error) {
+	return (&boltFactory{}).OpenReadOnly(src)
+}
+
+// NewDirStoreFactory returns a dirstore.Factory backed by bolt.
+// NewDirStoreFactory returns a dirstore.Factory backed by bolt.
+// It returns the interface type to avoid exposing the concrete factory type.
+func NewDirStoreFactory() db.Factory {
+	return &boltFactory{}
+}
+
+//nolint:gochecknoinits
+func init() { db.Register("bolt", NewDirStoreFactory()) }
+
 // ensureRequiredBuckets ensures the expected buckets exist in both DBs.
-func ensureRequiredBuckets(gdb, cdb *DB) error {
+func ensureRequiredBuckets(gdb, cdb *bdb) error {
 	if err := ensureBucketExists(gdb, "gut"); err != nil {
 		return err
 	}
@@ -90,148 +216,22 @@ func ensureRequiredBuckets(gdb, cdb *DB) error {
 	return nil
 }
 
+func ensureBucketExists(db *bdb, name string) error {
+	return db.Update(func(tx *btx) error {
+		_, e := tx.CreateBucketIfNotExists([]byte(name))
+
+		return e
+	})
+}
+
 // openDBForPath prepares options and opens a DB at the given path.
-func openDBForPath(path string, readOnly bool) (*DB, error) {
-	opts := &Options{ReadOnly: readOnly}
+func openDBForPath(path string, readOnly bool) (*bdb, error) {
+	opts := &boptions{ReadOnly: readOnly}
 	if !readOnly {
 		opts.NoFreelistSync = true
 		opts.NoGrowSync = true
-		opts.FreelistType = FreelistMapType
+		opts.FreelistType = bfreelistMapType
 	}
 
-	return Open(path, OpenMode, opts)
-}
-
-func (boltFactory) OpenReadOnly(src db.Source) (db.Store, error) { //nolint:ireturn
-	ds, ok := src.(*DirSource)
-	if !ok {
-		return nil, ErrUnsupportedSourceType
-	}
-
-	gdb, err := Open(ds.dgutaPath(), OpenMode, &Options{ReadOnly: true})
-	if err != nil {
-		return nil, err
-	}
-
-	cdb, err := Open(ds.childrenPath(), OpenMode, &Options{ReadOnly: true})
-	if err != nil {
-		_ = gdb.Close()
-
-		return nil, err
-	}
-
-	return &boltStore{gdb: gdb, cdb: cdb, ro: true}, nil
-}
-
-func (boltFactory) OpenReadOnlyUnPopulated(src db.Source) (db.Store, error) { //nolint:ireturn
-	return (&boltFactory{}).OpenReadOnly(src)
-}
-
-type boltStore struct {
-	gdb *DB
-	cdb *DB
-	ro  bool
-}
-
-func (s *boltStore) Close() error {
-	var err error
-	if e := s.gdb.Close(); e != nil {
-		err = e
-	}
-
-	if e := s.cdb.Close(); e != nil && err == nil {
-		err = e
-	}
-
-	return err
-}
-
-func (s *boltStore) PutDGUTAs(pairs [][2][]byte) error {
-	if s.ro {
-		return ErrReadOnlyStore
-	}
-
-	return s.gdb.Update(func(tx *Tx) error {
-		b := tx.Bucket([]byte("gut"))
-		for _, kv := range pairs {
-			if err := b.Put(kv[0], kv[1]); err != nil {
-				return err
-			}
-		}
-
-		return nil
-	})
-}
-
-func (s *boltStore) PutChildren(pairs [][2][]byte) error {
-	if s.ro {
-		return ErrReadOnlyStore
-	}
-
-	return s.cdb.Update(func(tx *Tx) error {
-		b := tx.Bucket([]byte("children"))
-		for _, kv := range pairs {
-			if err := b.Put(kv[0], kv[1]); err != nil {
-				return err
-			}
-		}
-
-		return nil
-	})
-}
-
-func (s *boltStore) GetDGUTA(key []byte) ([]byte, error) {
-	var out []byte
-
-	err := s.gdb.View(func(tx *Tx) error {
-		b := tx.Bucket([]byte("gut"))
-
-		v := b.Get(key)
-		if v == nil {
-			return ErrNotFound
-		}
-
-		out = append([]byte(nil), v...)
-
-		return nil
-	})
-
-	return out, err
-}
-
-func (s *boltStore) GetChildren(key []byte) ([]byte, error) {
-	var out []byte
-
-	err := s.cdb.View(func(tx *Tx) error {
-		b := tx.Bucket([]byte("children"))
-
-		v := b.Get(key)
-		if v == nil {
-			out = nil
-
-			return nil
-		}
-
-		out = append([]byte(nil), v...)
-
-		return nil
-	})
-
-	return out, err
-}
-
-func (s *boltStore) ForEachDGUTA(fn func(key, value []byte) error) error {
-	return s.gdb.View(func(tx *Tx) error {
-		b := tx.Bucket([]byte("gut"))
-
-		return b.ForEach(func(k, v []byte) error { return fn(k, v) })
-	})
-}
-
-func (s *boltStore) ForEachChildren(fn func(value []byte) error) error {
-	return s.cdb.View(func(tx *Tx) error {
-		b := tx.Bucket([]byte("children"))
-
-		return b.ForEach(func(_, v []byte) error { return fn(v) })
-	})
+	return open(path, OpenMode, opts)
 }

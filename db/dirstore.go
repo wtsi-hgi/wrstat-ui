@@ -5,6 +5,43 @@ import (
 	"time"
 )
 
+// Factory constructs Store instances for a given Source.
+// The Factory interface provides methods to create and open Store instances
+// for a specific database backend (e.g., bolt, clickhouse). Each backend must
+// register a Factory implementation using the Register function.
+//
+// Factories enable the application to dynamically select which database backend
+// to use at runtime without changing application code. They abstract away the
+// details of store creation, such as connection establishment, schema initialization,
+// and configuration.
+type Factory interface {
+	// Create creates a new Store at the specified Source with write access.
+	// This method should:
+	// 1. Initialise the database schema if it doesn't exist
+	// 2. Create any necessary tables, buckets, or structures
+	// 3. Return a Store instance ready for read/write operations
+	// If the Source already exists, the implementation may choose to fail or reuse it.
+	Create(src Source) (Store, error)
+
+	// OpenReadOnly opens an existing Store at the specified Source with read-only access.
+	// The Source must already exist (Exists() returns true).
+	// This method is used for normal operation of the application.
+	OpenReadOnly(src Source) (Store, error)
+
+	// OpenReadOnlyUnPopulated opens an existing Store with minimal initialization.
+	// This is used primarily for obtaining database statistics and information.
+	// The implementation may choose to skip loading indexes or other optimizations
+	// that are not needed for basic queries.
+	OpenReadOnlyUnPopulated(src Source) (Store, error)
+}
+
+//nolint:gochecknoglobals
+var (
+	regMu       sync.RWMutex
+	reg         = map[string]Factory{}
+	defaultName string
+)
+
 // Store is a domain-level interface for persisting DGUTA and children.
 //
 // The Store interface abstracts the storage operations needed by the application,
@@ -83,57 +120,9 @@ type Source interface {
 	GetMountTimestamps() map[string]time.Time
 }
 
-// Factory constructs Store instances for a given Source.
-// The Factory interface provides methods to create and open Store instances
-// for a specific database backend (e.g., bolt, clickhouse). Each backend must
-// register a Factory implementation using the Register function.
-//
-// Factories enable the application to dynamically select which database backend
-// to use at runtime without changing application code. They abstract away the
-// details of store creation, such as connection establishment, schema initialization,
-// and configuration.
-type Factory interface {
-	// Create creates a new Store at the specified Source with write access.
-	// This method should:
-	// 1. Initialise the database schema if it doesn't exist
-	// 2. Create any necessary tables, buckets, or structures
-	// 3. Return a Store instance ready for read/write operations
-	// If the Source already exists, the implementation may choose to fail or reuse it.
-	Create(src Source) (Store, error)
-
-	// OpenReadOnly opens an existing Store at the specified Source with read-only access.
-	// The Source must already exist (Exists() returns true).
-	// This method is used for normal operation of the application.
-	OpenReadOnly(src Source) (Store, error)
-
-	// OpenReadOnlyUnPopulated opens an existing Store with minimal initialization.
-	// This is used primarily for obtaining database statistics and information.
-	// The implementation may choose to skip loading indexes or other optimizations
-	// that are not needed for basic queries.
-	OpenReadOnlyUnPopulated(src Source) (Store, error)
-}
-
-//nolint:gochecknoglobals
-var (
-	regMu       sync.RWMutex
-	reg         = map[string]Factory{}
-	defaultName string
-)
-
-// Register makes a Factory available under a name.
-func Register(name string, f Factory) {
-	regMu.Lock()
-	defer regMu.Unlock()
-
-	reg[name] = f
-	if defaultName == "" {
-		defaultName = name
-	}
-}
-
 // Get returns a Factory by name and whether it exists.
 // It returns the Factory interface so callers don't depend on concrete types.
-func Get(name string) (Factory, bool) { //nolint:ireturn
+func Get(name string) (Factory, bool) {
 	regMu.RLock()
 	defer regMu.RUnlock()
 
@@ -144,7 +133,7 @@ func Get(name string) (Factory, bool) { //nolint:ireturn
 
 // Default returns the first registered factory, or nil if none.
 // It intentionally returns the Factory interface.
-func Default() Factory { //nolint:ireturn
+func Default() Factory {
 	regMu.RLock()
 	defer regMu.RUnlock()
 
@@ -153,4 +142,15 @@ func Default() Factory { //nolint:ireturn
 	}
 
 	return reg[defaultName]
+}
+
+// Register makes a Factory available under a name.
+func Register(name string, f Factory) {
+	regMu.Lock()
+	defer regMu.Unlock()
+
+	reg[name] = f
+	if defaultName == "" {
+		defaultName = name
+	}
 }

@@ -37,6 +37,7 @@ func (s *DirSource) modTime() time.Time {
 	// Use the versioned DB directory's modtime (parent of the backend-specific subdir),
 	// which reflects the dataset creation time and aligns with previous behaviour.
 	parent := filepath.Dir(s.dir)
+
 	fi, err := os.Lstat(parent)
 	if err != nil {
 		return time.Time{}

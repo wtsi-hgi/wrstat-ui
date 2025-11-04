@@ -11,14 +11,14 @@ import (
 
 // Basedirs is a Bolt-backed implementation of basedirs.Store.
 // Use NewBasedirs for writable and OpenReadOnlyBasedirs for read-only access.
-type Basedirs struct{ db *DB }
+type Basedirs struct{ db *bdb }
 
 // NewBasedirs creates a new writable basedirs store at the given path.
 func NewBasedirs(path string) (*Basedirs, error) {
-	db, err := Open(path, 0640, &Options{ //nolint:mnd
+	db, err := open(path, 0640, &boptions{ //nolint:mnd
 		NoFreelistSync: true,
 		NoGrowSync:     true,
-		FreelistType:   FreelistMapType,
+		FreelistType:   bfreelistMapType,
 	})
 	if err != nil {
 		return nil, err
@@ -29,7 +29,7 @@ func NewBasedirs(path string) (*Basedirs, error) {
 
 // OpenReadOnlyBasedirs opens a read-only basedirs store at the given path.
 func OpenReadOnlyBasedirs(path string) (*Basedirs, error) {
-	db, err := Open(path, os.FileMode(0640), &Options{ReadOnly: true}) //nolint:mnd
+	db, err := open(path, os.FileMode(0640), &boptions{ReadOnly: true}) //nolint:mnd
 	if err != nil {
 		return nil, err
 	}
@@ -42,16 +42,16 @@ func (s *Basedirs) Close() error { return s.db.Close() }
 
 // Update runs a read-write transaction providing a basedirs.Writer.
 func (s *Basedirs) Update(fn func(basedirs.Writer) error) error {
-	return s.db.Update(func(tx *Tx) error { return fn(&bdWriter{tx}) })
+	return s.db.Update(func(tx *btx) error { return fn(&bdWriter{tx}) })
 }
 
 // View runs a read-only transaction providing a basedirs.Reader.
 func (s *Basedirs) View(fn func(basedirs.Reader) error) error {
-	return s.db.View(func(tx *Tx) error { return fn(&bdReader{tx}) })
+	return s.db.View(func(tx *btx) error { return fn(&bdReader{tx}) })
 }
 
 // bdReader adapts bolt.Tx to the basedirs.Reader interface.
-type bdReader struct{ *Tx }
+type bdReader struct{ *btx }
 
 func (r *bdReader) GroupUsage(age uint16) ([]*basedirs.Usage, error) {
 	return r.usageFromBucket(basedirs.GroupUsageBucket, age)
@@ -152,9 +152,9 @@ func (r *bdReader) ForEachRaw(bucket string, fn func(k, v []byte) error) error {
 }
 
 // bdWriter adapts bolt.Tx to the basedirs.Writer interface.
-type bdWriter struct{ *Tx }
+type bdWriter struct{ *btx }
 
-func (w *bdWriter) ensure(bucket string) (*Bucket, error) {
+func (w *bdWriter) ensure(bucket string) (*bbucket, error) {
 	b := w.Bucket([]byte(bucket))
 	if b != nil {
 		return b, nil

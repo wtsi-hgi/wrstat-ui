@@ -707,26 +707,5 @@ func testMakeDBPaths(t *testing.T) ([]string, error) {
 
 // testGetDBKeys returns all the keys in the db at the given path.
 func testGetDBKeys(path, bucket string) ([]string, error) {
-	rdb, err := bolt.Open(path, bolt.OpenMode, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	defer func() {
-		err = rdb.Close()
-	}()
-
-	var keys []string
-
-	err = rdb.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte(bucket))
-
-		return b.ForEach(func(k, v []byte) error {
-			keys = append(keys, string(k))
-
-			return nil
-		})
-	})
-
-	return keys, err
+	return bolt.ReadBucketKeys(path, bucket)
 }
