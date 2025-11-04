@@ -25,25 +25,20 @@
 
 package basedirs
 
-import (
-	"bytes"
-)
-
 const idLen = 4 + 1
 
 // CleanInvalidDBHistory removes irrelevant paths from the history bucket,
 // leaving only those with the specified path prefix.
 func CleanInvalidDBHistory(store Store, prefix string) error { //nolint:gocognit
-	prefixB := []byte(prefix)
-
-	var toDelete [][]byte
+	var toDelete [][2]interface { /* gid,uint32; path,string */
+	}
 
 	if err := store.View(func(r Reader) error {
-		return r.ForEachRaw(GroupHistoricalBucket, func(k, _ []byte) error {
-			if len(k) > idLen && !bytes.HasPrefix(k[idLen:], prefixB) {
-				toDelete = append(toDelete, append([]byte(nil), k...))
+		return r.ForEachGroupHistory(func(gid uint32, path string, _ []History) error {
+			if len(path) > 0 && pathHasPrefix(path, prefix) {
+				return nil
 			}
-
+			toDelete = append(toDelete, [2]interface{}{gid, path})
 			return nil
 		})
 	}); err != nil {
@@ -51,12 +46,11 @@ func CleanInvalidDBHistory(store Store, prefix string) error { //nolint:gocognit
 	}
 
 	return store.Update(func(w Writer) error {
-		for _, k := range toDelete {
-			if err := w.DeleteHistoryKey(k); err != nil {
+		for _, pair := range toDelete {
+			if err := w.DeleteHistory(pair[0].(uint32), pair[1].(string)); err != nil {
 				return err
 			}
 		}
-
 		return nil
 	})
 }
@@ -64,16 +58,35 @@ func CleanInvalidDBHistory(store Store, prefix string) error { //nolint:gocognit
 // FindInvalidHistoryKeys returns a list of the keys from the history bucket
 // that do not contain the specified prefix.
 func FindInvalidHistoryKeys(store Store, prefix string) ([][]byte, error) {
+	// For compatibility, we still return [][]byte, but construct keys from domain fields.
 	var toRemove [][]byte
-	prefixB := []byte(prefix)
-	err := store.View(func(tx Reader) error {
-		return tx.ForEachRaw(GroupHistoricalBucket, func(k, _ []byte) error {
-			if len(k) > idLen && !bytes.HasPrefix(k[idLen:], prefixB) {
-				toRemove = append(toRemove, append(make([]byte, 0, len(k)), k...))
+	err := store.View(func(r Reader) error {
+		return r.ForEachGroupHistory(func(gid uint32, path string, _ []History) error {
+			if pathHasPrefix(path, prefix) {
+				return nil
 			}
+			// Recreate raw key shape for callers expecting it
+			toRemove = append(toRemove, recreateHistoryKey(gid, path))
 			return nil
 		})
 	})
 
 	return toRemove, err
+}
+
+// helpers maintain original behavior without exposing raw access in interfaces.
+func pathHasPrefix(path, prefix string) bool {
+	return len(prefix) == 0 || (len(path) >= len(prefix) && path[:len(prefix)] == prefix)
+}
+
+func recreateHistoryKey(gid uint32, path string) []byte {
+	// key: gid(4 bytes LE) + '-' + path
+	b := make([]byte, 4, 5+len(path))
+	b[0] = byte(gid)
+	b[1] = byte(gid >> 8)
+	b[2] = byte(gid >> 16)
+	b[3] = byte(gid >> 24)
+	b = append(b, '-')
+	b = append(b, path...)
+	return b
 }

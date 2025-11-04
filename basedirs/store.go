@@ -40,6 +40,10 @@ type Store interface {
 //
 // All Reader methods should be safe to call from multiple goroutines.
 type Reader interface {
+	// Info returns summary information for the basedirs store without
+	// materialising full datasets.
+	Info() (*DBInfo, error)
+
 	// GroupUsage returns usage for every GID-BaseDir for a given age.
 	// The age parameter filters records to a specific time period.
 	// Returns an empty slice if no records match.
@@ -67,10 +71,13 @@ type Reader interface {
 	// Returns nil if no history exists for the given gid and mountpoint.
 	History(gid uint32, path string) ([]History, error)
 
-	// ForEachRaw allows scanning a logical collection for utilities like Info/Clean.
-	// The bucket parameter identifies which logical collection to scan.
-	// This is primarily for administrative and maintenance operations.
-	// The callback receives the raw key and value bytes.
+	// ForEachGroupHistory applies fn to each group history entry: gid, path,
+	// and the decoded history slice. Return an error to abort iteration.
+	ForEachGroupHistory(fn func(gid uint32, path string, histories []History) error) error
+
+	// ForEachRaw is retained for testing and admin utilities that need
+	// low-level scans. Backends may implement this efficiently; avoid in
+	// production paths where purpose-driven methods exist.
 	ForEachRaw(bucket string, fn func(k, v []byte) error) error
 }
 
@@ -117,15 +124,6 @@ type Writer interface {
 	// This allows reading history data within a write transaction for atomic update patterns.
 	History(gid uint32, path string) ([]History, error)
 
-	// EnsureHistoryBucket ensures the history collection exists.
-	// This should create the collection if it doesn't exist, or do nothing if it does.
-	EnsureHistoryBucket() error
-
-	// PutRawHistory writes a raw history key/value (used for copying from another store).
-	// This is a low-level operation primarily used for migration and admin functions.
-	PutRawHistory(key, value []byte) error
-
-	// DeleteHistoryKey deletes a raw key from the history collection (used for cleaning).
-	// This is a low-level operation primarily used for maintenance and cleanup.
-	DeleteHistoryKey(key []byte) error
+	// DeleteHistory deletes the history entry for the gid and mountpoint.
+	DeleteHistory(gid uint32, mountpoint string) error
 }

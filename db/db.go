@@ -216,17 +216,9 @@ func (d *DB) storeBatch() {
 		return
 	}
 
-	// Build and write children first, then DGUTAs
-	childrenMap := d.buildChildrenMap()
-	if err := d.writeSet.repo.PutChildrenMap(childrenMap); err != nil {
+	// Atomically write directory summaries and their relationships
+	if err := d.writeSet.repo.WriteDirs(d.writeBatch); err != nil {
 		d.writeErr = err
-
-		return
-	}
-
-	if err := d.writeSet.repo.PutDGUTARecords(d.writeBatch); err != nil {
-		d.writeErr = err
-
 		return
 	}
 }
@@ -254,7 +246,7 @@ func (d *DB) buildChildrenMap() map[string][]string {
 // given directory key in the given db. Returns an empty slice if the dir wasn't
 // found.
 func (d *DB) getChildrenFromRepo(repo DGUTARepository, dir string) []string {
-	out, err := repo.GetChildrenByDir(dir)
+	out, err := repo.ListChildren(dir)
 	if err != nil {
 		return []string{}
 	}
@@ -366,7 +358,7 @@ func (d *DB) combineDGUTAsFromReadSets(dir string) (*DGUTA, int, time.Time) {
 // to the given dguta. If the given dguta is empty, it will be populated with the
 // content of the result instead.
 func getDGUTAFromRepoAndAppend(repo DGUTARepository, dir string, dguta *DGUTA) error {
-	thisDGUTA, err := repo.GetDGUTAByDir(dir)
+	thisDGUTA, err := repo.GetDirSummary(dir)
 	if err != nil {
 		return err
 	}

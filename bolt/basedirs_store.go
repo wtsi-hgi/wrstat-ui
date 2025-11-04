@@ -53,6 +53,95 @@ func (s *Basedirs) View(fn func(basedirs.Reader) error) error {
 // bdReader adapts bolt.Tx to the basedirs.Reader interface.
 type bdReader struct{ *btx }
 
+func (r *bdReader) Info() (*basedirs.DBInfo, error) {
+	info := &basedirs.DBInfo{}
+
+	// Helper to count entries with age==All (no second '-')
+	countAgeAll := func(bucket string) (int, error) {
+		b := r.Bucket([]byte(bucket))
+		if b == nil {
+			return 0, nil
+		}
+		total := 0
+		err := b.ForEach(func(k, _ []byte) error {
+			// same criteria as basedirs.CheckAgeOfKeyIsAll
+			if bytesCountDash(k) == 1 {
+				total++
+			}
+			return nil
+		})
+		return total, err
+	}
+
+	// Count group/user dir combos
+	if c, err := countAgeAll(basedirs.GroupUsageBucket); err != nil {
+		return nil, err
+	} else {
+		info.GroupDirCombos = c
+	}
+
+	if c, err := countAgeAll(basedirs.UserUsageBucket); err != nil {
+		return nil, err
+	} else {
+		info.UserDirCombos = c
+	}
+
+	// Count group histories (combos and total entries)
+	{
+		b := r.Bucket([]byte(basedirs.GroupHistoricalBucket))
+		if b != nil {
+			err := b.ForEach(func(_, v []byte) error {
+				var histories []basedirs.History
+				if err := codecDecode(v, &histories); err != nil {
+					return err
+				}
+				info.GroupMountCombos++
+				info.GroupHistories += len(histories)
+				return nil
+			})
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	// Count subdirs
+	countSubDirs := func(bucket string) (int, int, error) {
+		b := r.Bucket([]byte(bucket))
+		if b == nil {
+			return 0, 0, nil
+		}
+		combos, total := 0, 0
+		err := b.ForEach(func(k, v []byte) error {
+			if bytesCountDash(k) != 1 {
+				return nil
+			}
+			combos++
+			var subs []*basedirs.SubDir
+			if err := codecDecode(v, &subs); err != nil {
+				return err
+			}
+			total += len(subs)
+			return nil
+		})
+		return combos, total, err
+	}
+
+	if c, t, err := countSubDirs(basedirs.GroupSubDirsBucket); err != nil {
+		return nil, err
+	} else {
+		info.GroupSubDirCombos, info.GroupSubDirs = c, t
+	}
+
+	if c, t, err := countSubDirs(basedirs.UserSubDirsBucket); err != nil {
+		return nil, err
+	} else {
+		info.UserSubDirCombos, info.UserSubDirs = c, t
+	}
+
+	return info, nil
+}
+
 func (r *bdReader) GroupUsage(age uint16) ([]*basedirs.Usage, error) {
 	return r.usageFromBucket(basedirs.GroupUsageBucket, age)
 }
@@ -142,12 +231,26 @@ func (r *bdReader) History(gid uint32, mountpoint string) ([]basedirs.History, e
 	return out, nil
 }
 
+func (r *bdReader) ForEachGroupHistory(fn func(gid uint32, path string, histories []basedirs.History) error) error {
+	b := r.Bucket([]byte(basedirs.GroupHistoricalBucket))
+	if b == nil {
+		return nil
+	}
+	return b.ForEach(func(k, v []byte) error {
+		gid, path := parseGIDPath(k)
+		var histories []basedirs.History
+		if err := codecDecode(v, &histories); err != nil {
+			return err
+		}
+		return fn(gid, path, histories)
+	})
+}
+
 func (r *bdReader) ForEachRaw(bucket string, fn func(k, v []byte) error) error {
 	b := r.Bucket([]byte(bucket))
 	if b == nil {
 		return nil
 	}
-
 	return b.ForEach(fn)
 }
 
@@ -255,22 +358,12 @@ func (w *bdWriter) EnsureHistoryBucket() error {
 	return err
 }
 
-func (w *bdWriter) PutRawHistory(key, value []byte) error {
-	b, err := w.ensure(basedirs.GroupHistoricalBucket)
-	if err != nil {
-		return err
-	}
-
-	return b.Put(key, value)
-}
-
-func (w *bdWriter) DeleteHistoryKey(key []byte) error {
+func (w *bdWriter) DeleteHistory(gid uint32, mountpoint string) error {
 	b := w.Bucket([]byte(basedirs.GroupHistoricalBucket))
 	if b == nil {
 		return nil
 	}
-
-	return b.Delete(key)
+	return b.Delete(basedirsKey(gid, mountpoint, 0))
 }
 
 // helpers.
@@ -312,4 +405,25 @@ func codecEncode(v any) []byte {
 
 func codecDecode(bts []byte, v any) error {
 	return codec.NewDecoderBytes(bts, new(codec.BincHandle)).Decode(v)
+}
+
+// parseGIDPath parses a key produced by basedirsKey(id,path,0) and returns gid and path.
+func parseGIDPath(k []byte) (uint32, string) {
+	if len(k) < 5 {
+		return 0, ""
+	}
+	gid := uint32(k[0]) | uint32(k[1])<<8 | uint32(k[2])<<16 | uint32(k[3])<<24
+	// k[4] is '-'
+	return gid, string(k[5:])
+}
+
+// bytesCountDash counts '-' occurrences to detect presence of age in keys.
+func bytesCountDash(b []byte) int {
+	n := 0
+	for _, c := range b {
+		if c == '-' {
+			n++
+		}
+	}
+	return n
 }

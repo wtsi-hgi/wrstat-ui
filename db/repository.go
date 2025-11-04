@@ -6,17 +6,16 @@ type DGUTARepository interface {
 	// Close releases resources associated with the repository.
 	Close() error
 
-	// PutDGUTARecords stores DGUTA records in batch.
-	PutDGUTARecords(records []RecordDGUTA) error
+	// WriteDirs stores a batch of directory summaries and their direct-child
+	// relationships atomically. Implementations should upsert per-directory
+	// DGUTA snapshots and update parent->children mappings accordingly.
+	WriteDirs(records []RecordDGUTA) error
 
-	// PutChildrenMap stores parent->children relationships in batch.
-	PutChildrenMap(children map[string][]string) error
+	// GetDirSummary returns the DGUTA summary for the given directory path.
+	GetDirSummary(dir string) (*DGUTA, error)
 
-	// GetDGUTAByDir returns the DGUTA for the given directory path.
-	GetDGUTAByDir(dir string) (*DGUTA, error)
-
-	// GetChildrenByDir returns the direct children of the given parent directory path.
-	GetChildrenByDir(parent string) ([]string, error)
+	// ListChildren returns the direct child directory paths for the given parent.
+	ListChildren(parent string) ([]string, error)
 
 	// GetInfo returns summary information about the repository without
 	// materialising all records.

@@ -41,9 +41,45 @@ func (s *boltStore) Close() error {
 
 // DGUTARepository implementation
 
-func (s *boltStore) PutDGUTARecords(records []db.RecordDGUTA) error {
+// WriteDirs writes directory summaries and updates parent->children
+// relationships in a single logical operation.
+func (s *boltStore) WriteDirs(records []db.RecordDGUTA) error {
 	if s.ro {
 		return ErrReadOnlyStore
+	}
+
+	// First update children map, then DGUTAs
+	if err := s.cdb.Update(func(tx *btx) error {
+		b := tx.Bucket([]byte("children"))
+		for i := range records {
+			r := &records[i]
+			if len(r.Children) == 0 {
+				continue
+			}
+
+			// Normalise parent and child paths consistent with prior logic
+			parent := string(r.Dir.AppendTo(nil))
+			// build absolute children with no trailing '/'
+			absChildren := make([]string, len(r.Children))
+			for n := range r.Children {
+				absChildren[n] = parent + strings.TrimSuffix(r.Children[n], "/")
+			}
+			// parent key should not end with '/'
+			pkey := strings.TrimSuffix(parent, "/")
+
+			key := []byte(pkey)
+			if !strings.HasSuffix(pkey, "/") {
+				key = append(key, '/')
+			}
+
+			val := s.encodeChildren(absChildren)
+			if err := b.Put(key, val); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		return err
 	}
 
 	return s.gdb.Update(func(tx *btx) error {
@@ -54,35 +90,11 @@ func (s *boltStore) PutDGUTARecords(records []db.RecordDGUTA) error {
 				return err
 			}
 		}
-
 		return nil
 	})
 }
 
-func (s *boltStore) PutChildrenMap(children map[string][]string) error {
-	if s.ro {
-		return ErrReadOnlyStore
-	}
-
-	return s.cdb.Update(func(tx *btx) error {
-		b := tx.Bucket([]byte("children"))
-		for parent, list := range children {
-			key := []byte(parent)
-			if !strings.HasSuffix(parent, "/") {
-				key = append(key, '/')
-			}
-
-			val := s.encodeChildren(list)
-			if err := b.Put(key, val); err != nil {
-				return err
-			}
-		}
-
-		return nil
-	})
-}
-
-func (s *boltStore) GetDGUTAByDir(dir string) (*db.DGUTA, error) {
+func (s *boltStore) GetDirSummary(dir string) (*db.DGUTA, error) {
 	var out *db.DGUTA
 
 	err := s.gdb.View(func(tx *btx) error {
@@ -107,7 +119,7 @@ func (s *boltStore) GetDGUTAByDir(dir string) (*db.DGUTA, error) {
 	return out, err
 }
 
-func (s *boltStore) GetChildrenByDir(parent string) ([]string, error) {
+func (s *boltStore) ListChildren(parent string) ([]string, error) {
 	var out []string
 	err := s.cdb.View(func(tx *btx) error {
 		b := tx.Bucket([]byte("children"))

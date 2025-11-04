@@ -28,8 +28,6 @@ package basedirs
 
 import (
 	"bytes"
-
-	"github.com/ugorji/go/codec"
 )
 
 // DBInfo holds summary information about the database file produced by
@@ -47,88 +45,18 @@ type DBInfo struct {
 
 // Info returns summary information by scanning the provided store.
 func Info(store Store) (*DBInfo, error) {
-	info := &DBInfo{}
-	ch := new(codec.BincHandle)
-	err := store.View(func(r Reader) error { return populateDBInfo(r, info, ch) })
+	var info *DBInfo
+	err := store.View(func(r Reader) error {
+		var e error
+		info, e = r.Info()
+		return e
+	})
 
 	return info, err
 }
 
-// populateDBInfo is a package-level helper that performs the full bucket
-// scans and fills the provided DBInfo. Moving this out of Info reduces the
-// cognitive complexity of Info itself (gocognit).
-func populateDBInfo(r Reader, info *DBInfo, ch codec.Handle) error {
-	var e error
-
-	info.GroupDirCombos, _, e = countFromFullBucketScan(r, GroupUsageBucket, countOnly, ch)
-	if e != nil {
-		return e
-	}
-
-	info.GroupMountCombos, info.GroupHistories, e = countFromFullBucketScan(r, GroupHistoricalBucket, countHistories, ch)
-	if e != nil {
-		return e
-	}
-
-	info.GroupSubDirCombos, info.GroupSubDirs, e = countFromFullBucketScan(r, GroupSubDirsBucket, countSubDirs, ch)
-	if e != nil {
-		return e
-	}
-
-	info.UserDirCombos, _, e = countFromFullBucketScan(r, UserUsageBucket, countOnly, ch)
-	if e != nil {
-		return e
-	}
-
-	info.UserSubDirCombos, info.UserSubDirs, e = countFromFullBucketScan(r, UserSubDirsBucket, countSubDirs, ch)
-	if e != nil {
-		return e
-	}
-
-	return nil
-}
-
-func countFromFullBucketScan(tx Reader, bucketName string,
-	cb func(v []byte, ch codec.Handle) int, ch codec.Handle,
-) (int, int, error) {
-	count := 0
-	sliceLen := 0
-
-	if err := tx.ForEachRaw(bucketName, func(k, v []byte) error {
-		if !CheckAgeOfKeyIsAll(k) {
-			return nil
-		}
-		count++
-		sliceLen += cb(v, ch)
-		return nil
-	}); err != nil {
-		return 0, 0, err
-	}
-
-	return count, sliceLen, nil
-}
-
 // CheckAgeOfKeyIsAll returns true if the key represents the db.DGUTAgeAll key.
+// Kept exported for tests and admin utilities that need to interpret raw keys.
 func CheckAgeOfKeyIsAll(key []byte) bool {
 	return bytes.Count(key, bucketKeySeparatorByteSlice) == 1
-}
-
-func countOnly(_ []byte, _ codec.Handle) int {
-	return 0
-}
-
-func countHistories(v []byte, ch codec.Handle) int {
-	var histories []History
-
-	codec.NewDecoderBytes(v, ch).MustDecode(&histories)
-
-	return len(histories)
-}
-
-func countSubDirs(v []byte, ch codec.Handle) int {
-	var subdirs []*SubDir
-
-	codec.NewDecoderBytes(v, ch).MustDecode(&subdirs)
-
-	return len(subdirs)
 }

@@ -199,13 +199,9 @@ func calculateTrend(maxV uint64, latestTime, oldestTime time.Time, latestValue, 
 // CopyHistoryFrom copies GroupHistoricalBucket data from another store.
 func (b *BaseDirs) CopyHistoryFrom(source Store) error {
 	return b.store.Update(func(w Writer) error {
-		if err := w.EnsureHistoryBucket(); err != nil {
-			return err
-		}
-
 		return source.View(func(r Reader) error {
-			return r.ForEachRaw(GroupHistoricalBucket, func(k, v []byte) error {
-				return w.PutRawHistory(k, v)
+			return r.ForEachGroupHistory(func(gid uint32, path string, histories []History) error {
+				return w.PutHistory(gid, path, histories)
 			})
 		})
 	})
