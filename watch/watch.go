@@ -35,7 +35,7 @@ import (
 	"github.com/VertebrateResequencing/wr/client"
 	"github.com/VertebrateResequencing/wr/jobqueue"
 	"github.com/inconshreveable/log15"
-	bolt "github.com/wtsi-hgi/wrstat-ui/bolt"
+	"github.com/wtsi-hgi/wrstat-ui/internal/dbdirs"
 )
 
 const (
@@ -118,7 +118,7 @@ func absPaths(paths []string) ([]string, error) {
 func processInputDir(s *client.Scheduler,
 	inputDir, outputDir, quotaPath, basedirsConfig, mounts string,
 	logger log15.Logger) error {
-	inputPaths, _, err := bolt.FindDBDirs(inputDir, "stats.gz")
+	inputPaths, _, err := dbdirs.FindLatestDirs(inputDir, "stats.gz")
 	if err != nil {
 		return fmt.Errorf("error getting input DB paths: %w", err)
 	}
@@ -206,7 +206,7 @@ func getJobCommand(dotOutputBase, previousBasedirsDB, quotaPath, basedirsConfig,
 }
 
 func getPreviousBasedirsDB(outputDir, base string) (string, error) {
-	possibleBasedirs, _, err := bolt.FindDBDirs(outputDir, basedirBasename)
+	possibleBasedirs, _, err := dbdirs.FindLatestDirs(outputDir, basedirBasename)
 	if err != nil {
 		return "", err
 	}
