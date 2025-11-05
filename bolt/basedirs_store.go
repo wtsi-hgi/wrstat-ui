@@ -64,7 +64,6 @@ func (r *bdReader) Info() (*basedirs.DBInfo, error) {
 		}
 		total := 0
 		err := b.ForEach(func(k, _ []byte) error {
-			// same criteria as basedirs.CheckAgeOfKeyIsAll
 			if bytesCountDash(k) == 1 {
 				total++
 			}
@@ -79,7 +78,6 @@ func (r *bdReader) Info() (*basedirs.DBInfo, error) {
 	} else {
 		info.GroupDirCombos = c
 	}
-
 	if c, err := countAgeAll(basedirs.UserUsageBucket); err != nil {
 		return nil, err
 	} else {
@@ -87,21 +85,17 @@ func (r *bdReader) Info() (*basedirs.DBInfo, error) {
 	}
 
 	// Count group histories (combos and total entries)
-	{
-		b := r.Bucket([]byte(basedirs.GroupHistoricalBucket))
-		if b != nil {
-			err := b.ForEach(func(_, v []byte) error {
-				var histories []basedirs.History
-				if err := codecDecode(v, &histories); err != nil {
-					return err
-				}
-				info.GroupMountCombos++
-				info.GroupHistories += len(histories)
-				return nil
-			})
-			if err != nil {
-				return nil, err
+	if b := r.Bucket([]byte(basedirs.GroupHistoricalBucket)); b != nil {
+		if err := b.ForEach(func(_, v []byte) error {
+			var histories []basedirs.History
+			if err := codecDecode(v, &histories); err != nil {
+				return err
 			}
+			info.GroupMountCombos++
+			info.GroupHistories += len(histories)
+			return nil
+		}); err != nil {
+			return nil, err
 		}
 	}
 
@@ -132,7 +126,6 @@ func (r *bdReader) Info() (*basedirs.DBInfo, error) {
 	} else {
 		info.GroupSubDirCombos, info.GroupSubDirs = c, t
 	}
-
 	if c, t, err := countSubDirs(basedirs.UserSubDirsBucket); err != nil {
 		return nil, err
 	} else {
@@ -163,14 +156,11 @@ func (r *bdReader) usageFromBucket(bucketName string, age uint16) ([]*basedirs.U
 		if err := codecDecode(v, &u); err != nil {
 			return err
 		}
-
 		if uint16(u.Age) == age {
 			out = append(out, &u)
 		}
-
 		return nil
 	})
-
 	return out, err
 }
 
@@ -179,17 +169,14 @@ func (r *bdReader) GroupSubDirs(gid uint32, basedir string, age uint16) ([]*base
 	if b == nil {
 		return nil, nil
 	}
-
 	v := b.Get(basedirsKey(gid, basedir, age))
 	if v == nil {
 		return nil, nil
 	}
-
 	var out []*basedirs.SubDir
 	if err := codecDecode(v, &out); err != nil {
 		return nil, err
 	}
-
 	return out, nil
 }
 
@@ -198,17 +185,14 @@ func (r *bdReader) UserSubDirs(uid uint32, basedir string, age uint16) ([]*based
 	if b == nil {
 		return nil, nil
 	}
-
 	v := b.Get(basedirsKey(uid, basedir, age))
 	if v == nil {
 		return nil, nil
 	}
-
 	var out []*basedirs.SubDir
 	if err := codecDecode(v, &out); err != nil {
 		return nil, err
 	}
-
 	return out, nil
 }
 
@@ -217,17 +201,14 @@ func (r *bdReader) History(gid uint32, mountpoint string) ([]basedirs.History, e
 	if b == nil {
 		return nil, nil
 	}
-
 	v := b.Get(basedirsKey(gid, mountpoint, 0))
 	if v == nil {
 		return nil, nil
 	}
-
 	var out []basedirs.History
 	if err := codecDecode(v, &out); err != nil {
 		return nil, err
 	}
-
 	return out, nil
 }
 
@@ -246,12 +227,67 @@ func (r *bdReader) ForEachGroupHistory(fn func(gid uint32, path string, historie
 	})
 }
 
-func (r *bdReader) ForEachRaw(bucket string, fn func(k, v []byte) error) error {
-	b := r.Bucket([]byte(bucket))
+// Domain iterators (age=All)
+func (r *bdReader) ForEachGroupUsageAll(fn func(*basedirs.Usage) error) error {
+	usages, err := r.usageFromBucket(basedirs.GroupUsageBucket, uint16(db.DGUTAgeAll))
+	if err != nil {
+		return err
+	}
+	for _, u := range usages {
+		if err := fn(u); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *bdReader) ForEachUserUsageAll(fn func(*basedirs.Usage) error) error {
+	usages, err := r.usageFromBucket(basedirs.UserUsageBucket, uint16(db.DGUTAgeAll))
+	if err != nil {
+		return err
+	}
+	for _, u := range usages {
+		if err := fn(u); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *bdReader) ForEachGroupSubDirsAll(fn func(gid uint32, basedir string, subs []*basedirs.SubDir) error) error {
+	b := r.Bucket([]byte(basedirs.GroupSubDirsBucket))
 	if b == nil {
 		return nil
 	}
-	return b.ForEach(fn)
+	return b.ForEach(func(k, v []byte) error {
+		if bytesCountDash(k) != 1 {
+			return nil
+		}
+		gid, basedir := parseIDPath(k)
+		var subs []*basedirs.SubDir
+		if err := codecDecode(v, &subs); err != nil {
+			return err
+		}
+		return fn(gid, basedir, subs)
+	})
+}
+
+func (r *bdReader) ForEachUserSubDirsAll(fn func(uid uint32, basedir string, subs []*basedirs.SubDir) error) error {
+	b := r.Bucket([]byte(basedirs.UserSubDirsBucket))
+	if b == nil {
+		return nil
+	}
+	return b.ForEach(func(k, v []byte) error {
+		if bytesCountDash(k) != 1 {
+			return nil
+		}
+		uid, basedir := parseIDPath(k)
+		var subs []*basedirs.SubDir
+		if err := codecDecode(v, &subs); err != nil {
+			return err
+		}
+		return fn(uid, basedir, subs)
+	})
 }
 
 // bdWriter adapts bolt.Tx to the basedirs.Writer interface.
@@ -262,12 +298,10 @@ func (w *bdWriter) ensure(bucket string) (*bbucket, error) {
 	if b != nil {
 		return b, nil
 	}
-
 	nb, err := w.CreateBucketIfNotExists([]byte(bucket))
 	if err != nil {
 		return nil, err
 	}
-
 	return nb, nil
 }
 
@@ -276,7 +310,6 @@ func (w *bdWriter) PutGroupUsage(u *basedirs.Usage) error {
 	if err != nil {
 		return err
 	}
-
 	return b.Put(basedirsKey(u.GID, u.BaseDir, uint16(u.Age)), codecEncode(u))
 }
 
@@ -285,7 +318,6 @@ func (w *bdWriter) PutUserUsage(u *basedirs.Usage) error {
 	if err != nil {
 		return err
 	}
-
 	return b.Put(basedirsKey(u.UID, u.BaseDir, uint16(u.Age)), codecEncode(u))
 }
 
@@ -294,7 +326,6 @@ func (w *bdWriter) PutGroupSubDirs(gid uint32, basedir string, age uint16, subs 
 	if err != nil {
 		return err
 	}
-
 	return b.Put(basedirsKey(gid, basedir, age), codecEncode(subs))
 }
 
@@ -303,7 +334,6 @@ func (w *bdWriter) PutUserSubDirs(uid uint32, basedir string, age uint16, subs [
 	if err != nil {
 		return err
 	}
-
 	return b.Put(basedirsKey(uid, basedir, age), codecEncode(subs))
 }
 
@@ -311,9 +341,7 @@ func (w *bdWriter) PutHistory(gid uint32, mountpoint string, histories []basedir
 	if err := w.EnsureHistoryBucket(); err != nil {
 		return err
 	}
-
 	b := w.Bucket([]byte(basedirs.GroupHistoricalBucket))
-
 	return b.Put(basedirsKey(gid, mountpoint, 0), codecEncode(histories))
 }
 
@@ -322,13 +350,11 @@ func (w *bdWriter) ForEachGroupUsage(fn func(*basedirs.Usage) error) error {
 	if b == nil {
 		return nil
 	}
-
 	return b.ForEach(func(_, v []byte) error {
 		var u basedirs.Usage
 		if err := codecDecode(v, &u); err != nil {
 			return err
 		}
-
 		return fn(&u)
 	})
 }
@@ -338,23 +364,19 @@ func (w *bdWriter) History(gid uint32, mountpoint string) ([]basedirs.History, e
 	if b == nil {
 		return nil, nil
 	}
-
 	v := b.Get(basedirsKey(gid, mountpoint, 0))
 	if v == nil {
 		return nil, nil
 	}
-
 	var out []basedirs.History
 	if err := codecDecode(v, &out); err != nil {
 		return nil, err
 	}
-
 	return out, nil
 }
 
 func (w *bdWriter) EnsureHistoryBucket() error {
 	_, err := w.CreateBucketIfNotExists([]byte(basedirs.GroupHistoricalBucket))
-
 	return err
 }
 
@@ -396,10 +418,8 @@ func basedirsKey(id uint32, path string, age uint16) []byte {
 // codec helpers use the same encoding as basedirs (binc).
 func codecEncode(v any) []byte {
 	var out []byte
-
 	enc := codec.NewEncoderBytes(&out, new(codec.BincHandle))
 	enc.MustEncode(v)
-
 	return out
 }
 
@@ -415,6 +435,15 @@ func parseGIDPath(k []byte) (uint32, string) {
 	gid := uint32(k[0]) | uint32(k[1])<<8 | uint32(k[2])<<16 | uint32(k[3])<<24
 	// k[4] is '-'
 	return gid, string(k[5:])
+}
+
+// parseIDPath parses a key produced by basedirsKey(id,path,age) for age=All (no trailing age bytes).
+func parseIDPath(k []byte) (uint32, string) {
+	if len(k) < 5 {
+		return 0, ""
+	}
+	id := uint32(k[0]) | uint32(k[1])<<8 | uint32(k[2])<<16 | uint32(k[3])<<24
+	return id, string(k[5:])
 }
 
 // bytesCountDash counts '-' occurrences to detect presence of age in keys.

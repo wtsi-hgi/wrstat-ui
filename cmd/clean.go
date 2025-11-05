@@ -67,12 +67,12 @@ the flag were not supplied.
 				die("failed to open basedirs store: %s", err)
 			}
 			defer store.Close()
-			toRemove, err := basedirs.FindInvalidHistoryKeys(store, prefix)
+			refs, err := basedirs.FindInvalidHistories(store, prefix)
 			if err != nil {
 				die("failed to read basedirs db: %s", err)
 			}
-			for _, k := range toRemove {
-				fmt.Printf("%s\n", k)
+			for _, ref := range refs {
+				fmt.Printf("%d %s\n", ref.GID, ref.Path)
 			}
 		} else {
 			store, err := bolt.NewBasedirs(args[0])

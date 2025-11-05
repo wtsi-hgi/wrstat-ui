@@ -35,7 +35,7 @@ func CleanInvalidDBHistory(store Store, prefix string) error { //nolint:gocognit
 
 	if err := store.View(func(r Reader) error {
 		return r.ForEachGroupHistory(func(gid uint32, path string, _ []History) error {
-			if len(path) > 0 && pathHasPrefix(path, prefix) {
+			if len(path) > 0 && (len(prefix) == 0 || (len(path) >= len(prefix) && path[:len(prefix)] == prefix)) {
 				return nil
 			}
 			toDelete = append(toDelete, [2]interface{}{gid, path})
@@ -55,38 +55,24 @@ func CleanInvalidDBHistory(store Store, prefix string) error { //nolint:gocognit
 	})
 }
 
-// FindInvalidHistoryKeys returns a list of the keys from the history bucket
-// that do not contain the specified prefix.
-func FindInvalidHistoryKeys(store Store, prefix string) ([][]byte, error) {
-	// For compatibility, we still return [][]byte, but construct keys from domain fields.
-	var toRemove [][]byte
+// FindInvalidHistories returns a list of (gid,path) entries from the history
+// collection that do not contain the specified prefix.
+type HistoryRef struct {
+	GID  uint32
+	Path string
+}
+
+func FindInvalidHistories(store Store, prefix string) ([]HistoryRef, error) {
+	var toRemove []HistoryRef
 	err := store.View(func(r Reader) error {
 		return r.ForEachGroupHistory(func(gid uint32, path string, _ []History) error {
-			if pathHasPrefix(path, prefix) {
+			if len(prefix) == 0 || (len(path) >= len(prefix) && path[:len(prefix)] == prefix) {
 				return nil
 			}
-			// Recreate raw key shape for callers expecting it
-			toRemove = append(toRemove, recreateHistoryKey(gid, path))
+			toRemove = append(toRemove, HistoryRef{GID: gid, Path: path})
 			return nil
 		})
 	})
 
 	return toRemove, err
-}
-
-// helpers maintain original behavior without exposing raw access in interfaces.
-func pathHasPrefix(path, prefix string) bool {
-	return len(prefix) == 0 || (len(path) >= len(prefix) && path[:len(prefix)] == prefix)
-}
-
-func recreateHistoryKey(gid uint32, path string) []byte {
-	// key: gid(4 bytes LE) + '-' + path
-	b := make([]byte, 4, 5+len(path))
-	b[0] = byte(gid)
-	b[1] = byte(gid >> 8)
-	b[2] = byte(gid >> 16)
-	b[3] = byte(gid >> 24)
-	b = append(b, '-')
-	b = append(b, path...)
-	return b
 }

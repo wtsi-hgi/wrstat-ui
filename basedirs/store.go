@@ -75,10 +75,12 @@ type Reader interface {
 	// and the decoded history slice. Return an error to abort iteration.
 	ForEachGroupHistory(fn func(gid uint32, path string, histories []History) error) error
 
-	// ForEachRaw is retained for testing and admin utilities that need
-	// low-level scans. Backends may implement this efficiently; avoid in
-	// production paths where purpose-driven methods exist.
-	ForEachRaw(bucket string, fn func(k, v []byte) error) error
+	// Domain iterators for tests/admin and future non-bolt backends.
+	// These avoid exposing raw key/value shapes.
+	ForEachGroupUsageAll(fn func(*Usage) error) error
+	ForEachUserUsageAll(fn func(*Usage) error) error
+	ForEachGroupSubDirsAll(fn func(gid uint32, basedir string, subs []*SubDir) error) error
+	ForEachUserSubDirsAll(fn func(uid uint32, basedir string, subs []*SubDir) error) error
 }
 
 // Writer is a domain-level write interface covering updates used by summarise

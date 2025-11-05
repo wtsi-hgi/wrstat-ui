@@ -109,12 +109,9 @@ func TestClean(t *testing.T) {
 
 			defer ro.Close()
 
-			toRemove, err := basedirs.FindInvalidHistoryKeys(ro, "/lustre/scratch123/")
+			toRemove, err := basedirs.FindInvalidHistories(ro, "/lustre/scratch123/")
 			So(err, ShouldBeNil)
-			So(toRemove, ShouldResemble, [][]byte{
-				append([]byte{0, 0, 0, 0, 45}, "/lustre/scratch125/"...),
-				append([]byte{0, 0, 0, 0, 45}, "/nfs/"...),
-			})
+			So(toRemove, ShouldResemble, []basedirs.HistoryRef{{GID: 0, Path: "/lustre/scratch125/"}, {GID: 0, Path: "/nfs/"}})
 		})
 
 		Convey("We can remove all but a single prefix", func() {

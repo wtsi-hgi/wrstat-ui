@@ -26,10 +26,6 @@
 
 package basedirs
 
-import (
-	"bytes"
-)
-
 // DBInfo holds summary information about the database file produced by
 // NewCreator().CreateDatabase().
 type DBInfo struct {
@@ -57,6 +53,4 @@ func Info(store Store) (*DBInfo, error) {
 
 // CheckAgeOfKeyIsAll returns true if the key represents the db.DGUTAgeAll key.
 // Kept exported for tests and admin utilities that need to interpret raw keys.
-func CheckAgeOfKeyIsAll(key []byte) bool {
-	return bytes.Count(key, bucketKeySeparatorByteSlice) == 1
-}
+// CheckAgeOfKeyIsAll removed; tests now use domain-level iterators.

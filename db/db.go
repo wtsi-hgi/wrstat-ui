@@ -30,7 +30,6 @@ package db
 import (
 	"errors"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/hashicorp/go-multierror"
@@ -223,24 +222,7 @@ func (d *DB) storeBatch() {
 	}
 }
 
-// storeChildren stores the Dirs of the current DGUTA batch in the db.
-func (d *DB) buildChildrenMap() map[string][]string {
-	children := make(map[string][]string, len(d.writeBatch))
-	for _, r := range d.writeBatch {
-		if len(r.Children) == 0 {
-			continue
-		}
-		parent := string(r.Dir.AppendTo(nil))
-		for n := range r.Children {
-			r.Children[n] = parent + strings.TrimSuffix(r.Children[n], "/")
-		}
-		// Normalise parent to not end with a '/'
-		p := strings.TrimSuffix(parent, "/")
-		children[p] = append(children[p], r.Children...)
-	}
-
-	return children
-}
+// buildChildrenMap removed; handled within repository.WriteDirs
 
 // getChildrenFromDB retrieves the child directory values associated with the
 // given directory key in the given db. Returns an empty slice if the dir wasn't

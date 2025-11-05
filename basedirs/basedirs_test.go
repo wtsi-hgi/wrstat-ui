@@ -1105,32 +1105,71 @@ func TestBaseDirs(t *testing.T) {
 				So(err, ShouldBeNil)
 
 				countKeys := func(bucket string) (int, int) {
-					lustreKeys, nfsKeys := 0, 0
+					lustre, nfs := 0, 0
 
 					scan := func(st basedirs.Store) {
 						So(st.View(func(r basedirs.Reader) error {
-							return r.ForEachRaw(bucket, func(k, _ []byte) error {
-								if !basedirs.CheckAgeOfKeyIsAll(k) {
+							switch bucket {
+							case basedirs.GroupUsageBucket:
+								return r.ForEachGroupUsageAll(func(u *basedirs.Usage) error {
+									if strings.Contains(u.BaseDir, "/lustre/") {
+										lustre++
+									}
+									if strings.Contains(u.BaseDir, "/nfs/") {
+										nfs++
+									}
 									return nil
-								}
-
-								if strings.Contains(string(k), "/lustre/") {
-									lustreKeys++
-								}
-
-								if strings.Contains(string(k), "/nfs/") {
-									nfsKeys++
-								}
-
+								})
+							case basedirs.UserUsageBucket:
+								return r.ForEachUserUsageAll(func(u *basedirs.Usage) error {
+									if strings.Contains(u.BaseDir, "/lustre/") {
+										lustre++
+									}
+									if strings.Contains(u.BaseDir, "/nfs/") {
+										nfs++
+									}
+									return nil
+								})
+							case basedirs.GroupSubDirsBucket:
+								return r.ForEachGroupSubDirsAll(func(_ uint32, basedir string, _ []*basedirs.SubDir) error {
+									if strings.Contains(basedir, "/lustre/") {
+										lustre++
+									}
+									if strings.Contains(basedir, "/nfs/") {
+										nfs++
+									}
+									return nil
+								})
+							case basedirs.UserSubDirsBucket:
+								return r.ForEachUserSubDirsAll(func(_ uint32, basedir string, _ []*basedirs.SubDir) error {
+									if strings.Contains(basedir, "/lustre/") {
+										lustre++
+									}
+									if strings.Contains(basedir, "/nfs/") {
+										nfs++
+									}
+									return nil
+								})
+							case basedirs.GroupHistoricalBucket:
+								return r.ForEachGroupHistory(func(_ uint32, path string, _ []basedirs.History) error {
+									if strings.Contains(path, "/lustre/") {
+										lustre++
+									}
+									if strings.Contains(path, "/nfs/") {
+										nfs++
+									}
+									return nil
+								})
+							default:
 								return nil
-							})
+							}
 						}), ShouldBeNil)
 					}
 
 					scan(roA)
 					scan(roB)
 
-					return lustreKeys, nfsKeys
+					return lustre, nfs
 				}
 
 				expectedKeys := 7
