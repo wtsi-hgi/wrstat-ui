@@ -306,7 +306,7 @@ func (b *baseDirs) Output() error {
 	if b.output(b.thisDir) {
 		b.groups.Add(b.root.addGroupBase)
 		b.users.Add(b.root.addUserBase)
-		//clear the set inode
+		clear(b.root.seenInodes)
 	} else {
 		b.addToParent()
 	}
