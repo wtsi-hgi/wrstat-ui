@@ -221,6 +221,7 @@ type baseDirs struct {
 	thisDir       *summary.DirectoryPath
 	users, groups baseDirsMap
 	isTempDir     bool
+	seenInodes    map[int64]struct{}
 }
 
 type rootBaseDirs struct {
@@ -234,9 +235,10 @@ type rootBaseDirs struct {
 func NewBaseDirs(output outputForDir, db output) summary.OperationGenerator { //nolint:funlen
 	root := &rootBaseDirs{
 		baseDirs: baseDirs{
-			output: output,
-			users:  make(baseDirsMap),
-			groups: make(baseDirsMap),
+			output:     output,
+			users:      make(baseDirsMap),
+			groups:     make(baseDirsMap),
+			seenInodes: make(map[int64]struct{}),
 		},
 		db:     db,
 		users:  make(basedirs.IDAgeDirs),
@@ -256,12 +258,13 @@ func NewBaseDirs(output outputForDir, db output) summary.OperationGenerator { //
 		}
 
 		parent = &baseDirs{
-			parent:  parent,
-			output:  output,
-			root:    root,
-			refTime: now,
-			users:   make(baseDirsMap),
-			groups:  make(baseDirsMap),
+			parent:     parent,
+			output:     output,
+			root:       root,
+			refTime:    now,
+			users:      make(baseDirsMap),
+			groups:     make(baseDirsMap),
+			seenInodes: make(map[int64]struct{}),
 		}
 
 		return parent
@@ -275,6 +278,11 @@ func (b *baseDirs) Add(info *summary.FileInfo) error { //nolint:gocyclo
 		b.isTempDir = b.parent != nil && b.parent.isTempDir ||
 			dirguta.IsTemp(unsafe.Slice(unsafe.StringData(info.Path.Name), len(info.Path.Name)))
 	}
+
+	if _, seen := b.seenInodes[info.Inode]; seen && !info.IsDir() {
+		return nil
+	}
+	b.seenInodes[info.Inode] = struct{}{}
 
 	if info.Path != b.thisDir || info.IsDir() {
 		return nil
@@ -298,6 +306,7 @@ func (b *baseDirs) Output() error {
 	if b.output(b.thisDir) {
 		b.groups.Add(b.root.addGroupBase)
 		b.users.Add(b.root.addUserBase)
+		//clear the set inode
 	} else {
 		b.addToParent()
 	}
