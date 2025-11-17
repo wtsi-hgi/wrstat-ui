@@ -696,3 +696,19 @@ func hasTempSuffix(name []byte) bool {
 
 	return tmpSuffixes[place].typ == db.DGUTAFileTypeTemp
 }
+
+// FileTypeWithTemp returns the file type OR'd with the Temp bit if appropriate.
+func FileTypeWithTemp(name []byte, isTempDir bool) db.DirGUTAFileType {
+
+	base := FilenameToType(name)
+
+	if base == 0 {
+		base = db.DGUTAFileTypeOther
+	}
+
+	if isTempDir || IsTemp(name) {
+		base |= db.DGUTAFileTypeTemp
+	}
+
+	return base
+}
