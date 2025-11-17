@@ -27,29 +27,31 @@
 
 package db
 
+import "strings"
+
 const ErrInvalidType = Error("not a valid file type")
 
 // DirGUTAFileType is one of the special file types that the
 // directory,group,user,filetype,age summaries group on.
-type DirGUTAFileType uint8
+type DirGUTAFileType uint16
 
 const (
-	DGUTAFileTypeOther      DirGUTAFileType = 0
 	DGUTAFileTypeTemp       DirGUTAFileType = 1
 	DGUTAFileTypeVCF        DirGUTAFileType = 2
-	DGUTAFileTypeVCFGz      DirGUTAFileType = 3
-	DGUTAFileTypeBCF        DirGUTAFileType = 4
-	DGUTAFileTypeSam        DirGUTAFileType = 5
-	DGUTAFileTypeBam        DirGUTAFileType = 6
-	DGUTAFileTypeCram       DirGUTAFileType = 7
-	DGUTAFileTypeFasta      DirGUTAFileType = 8
-	DGUTAFileTypeFastq      DirGUTAFileType = 9
-	DGUTAFileTypeFastqGz    DirGUTAFileType = 10
-	DGUTAFileTypePedBed     DirGUTAFileType = 11
-	DGUTAFileTypeCompressed DirGUTAFileType = 12
-	DGUTAFileTypeText       DirGUTAFileType = 13
-	DGUTAFileTypeLog        DirGUTAFileType = 14
-	DGUTAFileTypeDir        DirGUTAFileType = 15
+	DGUTAFileTypeVCFGz      DirGUTAFileType = 4
+	DGUTAFileTypeBCF        DirGUTAFileType = 8
+	DGUTAFileTypeSam        DirGUTAFileType = 16
+	DGUTAFileTypeBam        DirGUTAFileType = 32
+	DGUTAFileTypeCram       DirGUTAFileType = 64
+	DGUTAFileTypeFasta      DirGUTAFileType = 128
+	DGUTAFileTypeFastq      DirGUTAFileType = 256
+	DGUTAFileTypeFastqGz    DirGUTAFileType = 512
+	DGUTAFileTypePedBed     DirGUTAFileType = 1024
+	DGUTAFileTypeCompressed DirGUTAFileType = 2048
+	DGUTAFileTypeText       DirGUTAFileType = 4096
+	DGUTAFileTypeLog        DirGUTAFileType = 8192
+	DGUTAFileTypeDir        DirGUTAFileType = 16384
+	DGUTAFileTypeOther      DirGUTAFileType = 32768
 )
 
 var AllTypesExceptDirectories = [...]DirGUTAFileType{ //nolint:gochecknoglobals
@@ -72,11 +74,58 @@ var AllTypesExceptDirectories = [...]DirGUTAFileType{ //nolint:gochecknoglobals
 
 // String lets you convert a DirGUTAFileType to a meaningful string.
 func (d DirGUTAFileType) String() string {
-	return [...]string{
-		"other", "temp", "vcf", "vcf.gz", "bcf", "sam", "bam",
-		"cram", "fasta", "fastq", "fastq.gz", "ped/bed", "compressed", "text",
-		"log", "dir",
-	}[d]
+	var out []string
+
+	if d&DGUTAFileTypeTemp != 0 {
+		out = append(out, "temp")
+	}
+	if d&DGUTAFileTypeVCF != 0 {
+		out = append(out, "vcf")
+	}
+	if d&DGUTAFileTypeVCFGz != 0 {
+		out = append(out, "vcf.gz")
+	}
+	if d&DGUTAFileTypeBCF != 0 {
+		out = append(out, "bcf")
+	}
+	if d&DGUTAFileTypeSam != 0 {
+		out = append(out, "sam")
+	}
+	if d&DGUTAFileTypeBam != 0 {
+		out = append(out, "bam")
+	}
+	if d&DGUTAFileTypeCram != 0 {
+		out = append(out, "cram")
+	}
+	if d&DGUTAFileTypeFasta != 0 {
+		out = append(out, "fasta")
+	}
+	if d&DGUTAFileTypeFastq != 0 {
+		out = append(out, "fastq")
+	}
+	if d&DGUTAFileTypeFastqGz != 0 {
+		out = append(out, "fastq.gz")
+	}
+	if d&DGUTAFileTypePedBed != 0 {
+		out = append(out, "ped/bed")
+	}
+	if d&DGUTAFileTypeCompressed != 0 {
+		out = append(out, "compressed")
+	}
+	if d&DGUTAFileTypeText != 0 {
+		out = append(out, "text")
+	}
+	if d&DGUTAFileTypeLog != 0 {
+		out = append(out, "log")
+	}
+	if d&DGUTAFileTypeDir != 0 {
+		out = append(out, "dir")
+	}
+	if d&DGUTAFileTypeOther != 0 {
+		out = append(out, "other")
+	}
+
+	return strings.Join(out, "|")
 }
 
 // FileTypeStringToDirGUTAFileType converts the String() representation of a

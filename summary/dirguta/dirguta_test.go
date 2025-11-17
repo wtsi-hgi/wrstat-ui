@@ -26,6 +26,7 @@
 package dirguta
 
 import (
+	"fmt"
 	"testing"
 	"time"
 	"unsafe"
@@ -174,24 +175,24 @@ func TestDirGUTAFileType(t *testing.T) {
 		}{
 			{"path/", true, db.DGUTAFileTypeDir, false},
 			{"bar.asd", false, db.DGUTAFileTypeOther, false},
-			{".tmp.asd", false, db.DGUTAFileTypeOther, true},
+			{".tmp.asd", false, db.DGUTAFileTypeTemp | db.DGUTAFileTypeOther, false},
 			{"bar.vcf", false, db.DGUTAFileTypeVCF, false},
 			{"bar.vcf.gz", false, db.DGUTAFileTypeVCFGz, false},
 			{"bar.bcf", false, db.DGUTAFileTypeBCF, false},
 			{"bar.sam", false, db.DGUTAFileTypeSam, false},
 			{"bar.bam", false, db.DGUTAFileTypeBam, false},
-			{".tmp.cram", false, db.DGUTAFileTypeCram, true},
-			{"bar.fa", false, db.DGUTAFileTypeFasta, false},
+			{".tmp.cram", false, db.DGUTAFileTypeCram | db.DGUTAFileTypeTemp, false},
+			{"bar.fa", false, db.DGUTAFileTypeFasta | db.DGUTAFileTypeTemp, true},
 			{"bar.fq", false, db.DGUTAFileTypeFastq, false},
 			{"bar.fq.gz", false, db.DGUTAFileTypeFastqGz, false},
 			{"bar.bzip2", false, db.DGUTAFileTypeCompressed, false},
 			{"bar.csv", false, db.DGUTAFileTypeText, false},
 			{"bar.o", false, db.DGUTAFileTypeLog, false},
+			{".tmp", false, db.DGUTAFileTypeTemp | db.DGUTAFileTypeOther, true},
+			{".tmp", false, db.DGUTAFileTypeTemp | db.DGUTAFileTypeOther, false},
 		} {
-			ft := FilenameToType(strToBS(test.Name))
-			tmp := IsTemp(strToBS(test.Name))
+			ft := FileTypeWithTemp(strToBS(test.Name), test.IsTmp)
 			So(ft, ShouldEqual, test.FileType)
-			So(tmp, ShouldEqual, test.IsTmp)
 		}
 	})
 }
@@ -223,8 +224,10 @@ func (m *mockDB) has(dir string, gid, uid uint32, ft db.DirGUTAFileType,
 		Atime: atime,
 		Mtime: mtime,
 	}
-
+	fmt.Println("expected:", expected)
 	for _, dguta := range dgutas {
+		fmt.Println("dguta:", dguta)
+
 		if *dguta == expected {
 			return true
 		}
@@ -263,29 +266,29 @@ func TestDirGUTA(t *testing.T) {
 
 		atime1 := refTime - (db.SecondsInAMonth*2 + 100000)
 		mtime1 := refTime - (db.SecondsInAMonth * 3)
-		statsdata.AddFile(f, "a/b/c/1.bam", uid, gid, 2, atime1, mtime1)
+		statsdata.AddFileWithInode(f, "a/b/c/1.bam", uid, gid, 2, atime1, mtime1, 1, 1)
 
 		atime2 := refTime - (db.SecondsInAMonth * 7)
 		mtime2 := refTime - (db.SecondsInAMonth * 8)
-		statsdata.AddFile(f, "a/b/c/2.bam", uid, gid, 3, atime2, mtime2)
+		statsdata.AddFileWithInode(f, "a/b/c/2.bam", uid, gid, 3, atime2, mtime2, 2, 1)
 
 		atime3 := refTime - (db.SecondsInAYear + db.SecondsInAMonth)
 		mtime3 := refTime - (db.SecondsInAYear + db.SecondsInAMonth*6)
-		statsdata.AddFile(f, "a/b/c/3.txt", uid, gid, 4, atime3, mtime3)
+		statsdata.AddFileWithInode(f, "a/b/c/3.txt", uid, gid, 4, atime3, mtime3, 3, 1)
 
 		atime4 := refTime - (db.SecondsInAYear * 4)
 		mtime4 := refTime - (db.SecondsInAYear * 6)
-		statsdata.AddFile(f, "a/b/c/4.bam", uid, gid, 5, atime4, mtime4)
+		statsdata.AddFileWithInode(f, "a/b/c/4.bam", uid, gid, 5, atime4, mtime4, 4, 1)
 
 		atime5 := refTime - (db.SecondsInAYear*5 + db.SecondsInAMonth)
 		mtime5 := refTime - (db.SecondsInAYear*7 + db.SecondsInAMonth)
-		statsdata.AddFile(f, "a/b/c/5.cram", uid, gid, 6, atime5, mtime5)
+		statsdata.AddFileWithInode(f, "a/b/c/5.cram", uid, gid, 6, atime5, mtime5, 5, 1)
 
 		atime6 := refTime - (db.SecondsInAYear*7 + db.SecondsInAMonth)
 		mtime6 := refTime - (db.SecondsInAYear*7 + db.SecondsInAMonth)
-		statsdata.AddFile(f, "a/b/c/6.cram", uid, gid, 7, atime6, mtime6)
+		statsdata.AddFileWithInode(f, "a/b/c/6.cram", uid, gid, 7, atime6, mtime6, 6, 1)
 
-		statsdata.AddFile(f, "a/b/c/6.tmp", uid, gid, 8, mtime3, mtime3)
+		statsdata.AddFileWithInode(f, "a/b/c/6.tmp", uid, gid, 8, mtime3, mtime3, 7, 1)
 
 		s := summary.NewSummariser(stats.NewStatsParser(f.AsReader()))
 		m := &mockDB{make(map[string]db.GUTAs)}
@@ -359,7 +362,7 @@ func TestDirGUTA(t *testing.T) {
 		So(m.hasNot(dir, gid, uid, ft, db.DGUTAgeM5Y), ShouldBeTrue)
 		So(m.hasNot(dir, gid, uid, ft, db.DGUTAgeM7Y), ShouldBeTrue)
 
-		ft, count, size = db.DGUTAFileTypeTemp, 1, 8
+		ft, count, size = db.DGUTAFileTypeTemp|db.DGUTAFileTypeOther, 1, 8
 		testAtime, testMtime = mtime3, mtime3
 
 		So(m.has(dir, gid, uid, ft, db.DGUTAgeAll, count, size, testAtime, testMtime), ShouldBeTrue)
@@ -386,19 +389,19 @@ func TestDirGUTA(t *testing.T) {
 
 		atime1 := int64(100)
 		mtime1 := int64(0)
-		statsdata.AddFile(f, "c/3.bam", 2, 2, 1, atime1, mtime1)
+		statsdata.AddFileWithInode(f, "c/3.bam", 2, 2, 1, atime1, mtime1, 11, 1)
 
 		atime2 := int64(250)
 		mtime2 := int64(250)
-		statsdata.AddFile(f, "c/7.cram", 10, 2, 2, atime2, mtime2)
+		statsdata.AddFileWithInode(f, "c/7.cram", 10, 2, 2, atime2, mtime2, 12, 1)
 
 		atime3 := int64(201)
 		mtime3 := int64(200)
-		statsdata.AddFile(f, "c/d/9.cram", 10, 2, 3, atime3, mtime3)
+		statsdata.AddFileWithInode(f, "c/d/9.cram", 10, 2, 3, atime3, mtime3, 13, 1)
 
 		atime4 := int64(300)
 		mtime4 := int64(301)
-		statsdata.AddFile(f, "c/8.cram", 2, 10, 4, atime4, mtime4)
+		statsdata.AddFileWithInode(f, "c/8.cram", 2, 10, 4, atime4, mtime4, 14, 1)
 
 		dDir := f.AddDirectory("c").AddDirectory("d")
 		dDir.UID = 10
@@ -426,6 +429,56 @@ func TestDirGUTA(t *testing.T) {
 		So(m.has("/a/", 10, 2, db.DGUTAFileTypeCram, db.DGUTAgeAll, 1, 4, atime4, mtime4), ShouldBeTrue)
 		So(m.has("/a/b/", 10, 2, db.DGUTAFileTypeCram, db.DGUTAgeAll, 1, 4, atime4, mtime4), ShouldBeTrue)
 	})
+
+	Convey("DirGUTA correctly handles hardlinks and filetypes", t, func() {
+		f := statsdata.NewRoot("/", 0)
+		f.UID = uid
+		f.GID = gid
+
+		refTime := time.Now().Unix()
+		atimeRecent := refTime - db.SecondsInAMonth
+		mtimeRecent := refTime - db.SecondsInAMonth
+		atimeOld := refTime - (db.SecondsInAYear * 3)
+		mtimeOld := refTime - (db.SecondsInAYear * 2)
+
+		statsdata.AddFileWithInode(f, "a/b/c/1.bam", uid, gid, 100, atimeRecent, mtimeRecent, 42, 4)
+		statsdata.AddFileWithInode(f, "a/b/c/2.bam", uid, gid, 100, atimeRecent, mtimeRecent, 42, 4) // same inode/type → skipped
+		statsdata.AddFileWithInode(f, "a/b/c/3.bam", uid, gid, 200, atimeOld, mtimeOld, 43, 1)       // different inode → counted
+		statsdata.AddFileWithInode(f, "a/b/c/4.cram", uid, gid, 100, atimeOld, mtimeOld, 42, 4)      // same inode, different type → counted
+		statsdata.AddFileWithInode(f, "a/x/4.bam", uid, gid, 100, atimeOld, mtimeOld, 42, 4)         // same inode/type → skipped
+
+		s := summary.NewSummariser(stats.NewStatsParser(f.AsReader()))
+		m := &mockDB{make(map[string]db.GUTAs)}
+		op := newDirGroupUserTypeAge(m, refTime)
+		s.AddDirectoryOperation(op)
+
+		err := s.Summarise()
+		So(err, ShouldBeNil)
+
+		dirC := "/a/b/c/"
+		ft := db.DGUTAFileTypeBam
+		count := uint64(2)
+		size := uint64(300)
+		So(m.has(dirC, gid, uid, ft, db.DGUTAgeAll, count, size, atimeOld, mtimeRecent), ShouldBeTrue)
+
+		ft = db.DGUTAFileTypeCram
+		count = uint64(1)
+		size = uint64(100)
+		So(m.has(dirC, gid, uid, ft, db.DGUTAgeAll, count, size, atimeOld, mtimeOld), ShouldBeTrue)
+
+		dirX := "/a/x/"
+		ft = db.DGUTAFileTypeBam
+		count = uint64(1)
+		size = uint64(100)
+		So(m.has(dirX, gid, uid, ft, db.DGUTAgeAll, count, size, atimeOld, mtimeOld), ShouldBeTrue)
+
+		dirA := "/a/"
+		ft = db.DGUTAFileTypeBam
+		count = uint64(1)
+		size = uint64(100)
+		So(m.has(dirA, gid, uid, ft, db.DGUTAgeAll, count, size, atimeOld, mtimeOld), ShouldBeTrue)
+	})
+
 }
 
 func isVCF(name string) bool {

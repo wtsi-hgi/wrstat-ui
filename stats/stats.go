@@ -77,6 +77,7 @@ type StatsParser struct { //nolint:revive
 	ctime        int64
 	entryType    byte
 	inode        int64
+	nlink        int64
 	error        error
 }
 
@@ -91,6 +92,7 @@ type FileInfo struct {
 	ATime        int64
 	CTime        int64
 	Inode        int64
+	Nlink        int64
 	EntryType    byte
 }
 
@@ -216,6 +218,7 @@ func (p *StatsParser) fillMissingOrFullInfo(info *FileInfo) bool {
 	info.MTime = p.mtime
 	info.ATime = p.atime
 	info.CTime = p.ctime
+	info.Nlink = p.nlink
 
 	if p.indexes = p.indexes[:len(p.indexes)-1]; len(p.indexes) == 0 {
 		info.Size = p.size
@@ -243,6 +246,7 @@ func (p *StatsParser) fillFullInfo(info *FileInfo) {
 	info.CTime = p.ctime
 	info.EntryType = p.entryType
 	info.Inode = p.inode
+	info.Nlink = p.nlink
 }
 
 func unquote(path []byte) []byte { //nolint:funlen,gocognit,gocyclo,cyclop
@@ -354,7 +358,7 @@ func (p *StatsParser) parseLine() bool {
 
 	var none int64
 
-	if !p.parseNumberColumn(&p.inode) || !p.parseNumberColumn(&none) || !p.parseNumberColumn(&none) {
+	if !p.parseNumberColumn(&p.inode) || !p.parseNumberColumn(&p.nlink) || !p.parseNumberColumn(&none) {
 		return false
 	}
 

@@ -28,6 +28,7 @@
 package basedirs
 
 import (
+	"fmt"
 	"slices"
 	"strings"
 	"time"
@@ -280,9 +281,11 @@ func (b *baseDirs) Add(info *summary.FileInfo) error { //nolint:gocyclo
 	}
 
 	if _, seen := b.seenInodes[info.Inode]; seen && !info.IsDir() {
+		fmt.Printf("SKIP: inode %d for %s\n", info.Inode, info.Name)
 		return nil
 	}
 	b.seenInodes[info.Inode] = struct{}{}
+	fmt.Printf("ADD: inode %d for %s\n", info.Inode, info.Name)
 
 	if info.Path != b.thisDir || info.IsDir() {
 		return nil

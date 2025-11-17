@@ -163,12 +163,13 @@ type File struct {
 	UID, GID            uint32
 	Inode               uint64
 	Type                byte
+	Nlink               uint64
 }
 
 // WriteTo writes the stats data for a file entry.
 func (f *File) WriteTo(w io.Writer) (int64, error) {
-	n, err := fmt.Fprintf(w, "%q\t%d\t%d\t%d\t%d\t%d\t%d\t%c\t%d\t1\t1\t%d\n",
-		f.Path, f.Size, f.UID, f.GID, f.ATime, f.MTime, f.CTime, f.Type, f.Inode, f.Size)
+	n, err := fmt.Fprintf(w, "%q\t%d\t%d\t%d\t%d\t%d\t%d\t%c\t%d\t%d\t1\t%d\n",
+		f.Path, f.Size, f.UID, f.GID, f.ATime, f.MTime, f.CTime, f.Type, f.Inode, f.Nlink, f.Size)
 
 	return int64(n), err
 }
@@ -186,6 +187,25 @@ func AddFile(d *Directory, path string, uid, gid uint32, size, atime, mtime int6
 	file.Size = size
 	file.ATime = atime
 	file.MTime = mtime
+
+	return file
+}
+
+// AddFileWithInode adds file data to a directory, creating the directory in the tree if
+// necessary, and assigns an explicit inode number.
+func AddFileWithInode(d *Directory, path string, uid, gid uint32, size, atime, mtime int64, inode uint64, nlink uint64) *File {
+	for part := range strings.SplitSeq(filepath.Dir(path), "/") {
+		d = d.AddDirectory(part)
+	}
+
+	file := d.AddFile(filepath.Base(path))
+	file.UID = uid
+	file.GID = gid
+	file.Size = size
+	file.ATime = atime
+	file.MTime = mtime
+	file.Inode = inode
+	file.Nlink = nlink
 
 	return file
 }
