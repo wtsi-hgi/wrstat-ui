@@ -32,7 +32,6 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
-	bolt "github.com/wtsi-hgi/wrstat-ui/bolt"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 )
 
@@ -52,7 +51,7 @@ NB: for large databases, this can take hours to run.
 			die("you must supply the path to your 'wrstat multi -f' output directory")
 		}
 
-		dbPaths, _, err := bolt.FindDBDirs(args[0], dgutaDBsSuffix, basedirBasename)
+	dbPaths, _, err := findDBDirs(args[0], dgutaDBsSuffix, basedirBasename)
 		if err != nil {
 			die("failed to find database paths: %s", err)
 		}
@@ -69,7 +68,7 @@ NB: for large databases, this can take hours to run.
 		info("opening dguta databases...")
 		var srcs []db.Source
 		for _, p := range durgutaPaths {
-			srcs = append(srcs, bolt.NewDirSource(p))
+			srcs = append(srcs, newDirSource(p))
 		}
 		dgutaDB := db.NewDB(srcs...)
 		dbInfo, err := dgutaDB.Info()
@@ -85,7 +84,7 @@ NB: for large databases, this can take hours to run.
 		var basedirsInfo basedirs.DBInfo
 
 		for _, path := range basedirsDBPaths {
-			store, err := bolt.OpenReadOnlyBasedirs(path)
+			store, err := openBasedirsReadOnly(path)
 			if err != nil {
 				die("failed to open basedirs store: %s", err)
 			}

@@ -2,7 +2,6 @@
  * Copyright (c) 2022, 2023 Genome Research Ltd.
  *
  * Authors:
- *	- Sendu Bala <sb10@sanger.ac.uk>
  *	- Michael Grace <mg38@sanger.ac.uk>
  *
  * Permission is hereby granted, free of charge, to any person obtaining
@@ -39,7 +38,6 @@ import (
 	"github.com/inconshreveable/log15"
 	"github.com/spf13/cobra"
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
-	bolt "github.com/wtsi-hgi/wrstat-ui/bolt"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 	"github.com/wtsi-hgi/wrstat-ui/server"
 )
@@ -172,7 +170,7 @@ files. It will use the mtime of the file as the data creation time in reports.
 
 		info("opening databases, please wait...")
 		// Initial load: handle paths here, build backend-agnostic assets, then inject.
-		dbDirs, _, err := bolt.FindDBDirs(args[0], dgutaDBsSuffix, basedirBasename)
+		dbDirs, _, err := findDBDirs(args[0], dgutaDBsSuffix, basedirBasename)
 		if err != nil || len(dbDirs) == 0 {
 			if err == nil {
 				die("failed to find database directories in %s", args[0])
@@ -184,14 +182,14 @@ files. It will use the mtime of the file as the data creation time in reports.
 		// contain a subdirectory named 'dirguta' which holds the dguta DBs.
 		var srcs []db.Source
 		for _, d := range dbDirs {
-			srcs = append(srcs, bolt.NewDirSource(filepath.Join(d, dgutaDirBasename)))
+			srcs = append(srcs, newDirSource(filepath.Join(d, dgutaDirBasename)))
 		}
 
 		// Open basedirs DBs read-only and build a MultiReader
 		var bstores []basedirs.Store
 		var bdb basedirs.Store
 		for _, d := range dbDirs {
-			bdb, err = bolt.OpenReadOnlyBasedirs(filepath.Join(d, basedirBasename))
+			bdb, err = openBasedirsReadOnly(filepath.Join(d, basedirBasename))
 			if err != nil {
 				die("failed to open basedirs db: %s", err)
 			}
@@ -210,7 +208,7 @@ files. It will use the mtime of the file as the data creation time in reports.
 
 		// Enable automatic reloading using a helper that wires bolt's reloader to the server.
 		required := []string{dgutaDBsSuffix, basedirBasename}
-		_, err = bolt.StartServerReloader(
+		_, err = startServerReloader(
 			s,
 			args[0],
 			required,

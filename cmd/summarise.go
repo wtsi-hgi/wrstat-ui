@@ -39,7 +39,6 @@ import (
 	"github.com/klauspost/pgzip"
 	"github.com/spf13/cobra"
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
-	bolt "github.com/wtsi-hgi/wrstat-ui/bolt"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 	"github.com/wtsi-hgi/wrstat-ui/stats"
 	"github.com/wtsi-hgi/wrstat-ui/summary"
@@ -298,7 +297,7 @@ func addBasedirsSummariser(s *summary.Summariser, basedirsDB, basedirsHistoryDB,
 		return err
 	}
 
-	store, err := bolt.NewBasedirs(basedirsDB)
+	store, err := newBasedirs(basedirsDB)
 	if err != nil {
 		return fmt.Errorf("failed to create basedirs store: %w", err)
 	}
@@ -378,7 +377,7 @@ func parseBasedirConfig(quotaPath, basedirsConfig string) (*basedirs.Quotas, bas
 }
 
 func copyHistory(bd *basedirs.BaseDirs, basedirsHistoryDB string) error {
-	src, err := bolt.OpenReadOnlyBasedirs(basedirsHistoryDB)
+	src, err := openBasedirsReadOnly(basedirsHistoryDB)
 	if err != nil {
 		return err
 	}
@@ -396,7 +395,7 @@ func addDirgutaSummariser(s *summary.Summariser, dirgutaDB string, refTime int64
 		return nil, err
 	}
 
-	src := bolt.NewDirSource(dirgutaDB)
+	src := newDirSource(dirgutaDB)
 	d := db.NewDB(src)
 
 	if err := d.CreateDB(); err != nil {

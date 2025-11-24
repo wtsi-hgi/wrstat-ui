@@ -35,7 +35,6 @@ import (
 
 	"github.com/klauspost/pgzip"
 	"github.com/spf13/cobra"
-	bolt "github.com/wtsi-hgi/wrstat-ui/bolt"
 	"github.com/wtsi-hgi/wrstat-ui/stats"
 	"github.com/wtsi-hgi/wrstat-ui/summary"
 	"github.com/wtsi-hgi/wrstat-ui/summary/dedupe"
@@ -91,7 +90,7 @@ func collectFilesFromArg(arg string) ([]string, error) {
 		return []string{arg}, nil
 	}
 
-	dirs, _, err := bolt.FindDBDirs(arg, inputStatsFile)
+	dirs, _, err := findDBDirs(arg, inputStatsFile)
 	if err != nil {
 		return nil, err
 	}
