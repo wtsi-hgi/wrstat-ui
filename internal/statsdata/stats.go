@@ -174,6 +174,8 @@ func (f *File) WriteTo(w io.Writer) (int64, error) {
 	return int64(n), err
 }
 
+var nextInode = 1000
+
 // AddFile adds file data to a directory, creating the directory in the tree if
 // necessary.
 func AddFile(d *Directory, path string, uid, gid uint32, size, atime, mtime int64) *File {
@@ -187,23 +189,22 @@ func AddFile(d *Directory, path string, uid, gid uint32, size, atime, mtime int6
 	file.Size = size
 	file.ATime = atime
 	file.MTime = mtime
+	file.Inode = uint64(nextInode)
+	file.Nlink = 1
+
+	nextInode++
 
 	return file
 }
 
 // AddFileWithInode adds file data to a directory, creating the directory in the tree if
 // necessary, and assigns an explicit inode number.
-func AddFileWithInode(d *Directory, path string, uid, gid uint32, size, atime, mtime int64, inode uint64, nlink uint64) *File {
-	for part := range strings.SplitSeq(filepath.Dir(path), "/") {
-		d = d.AddDirectory(part)
-	}
-
-	file := d.AddFile(filepath.Base(path))
-	file.UID = uid
-	file.GID = gid
-	file.Size = size
-	file.ATime = atime
-	file.MTime = mtime
+func AddFileWithInode(d *Directory,
+	path string,
+	uid, gid uint32,
+	size, atime, mtime int64,
+	inode, nlink uint64) *File {
+	file := AddFile(d, path, uid, gid, size, atime, mtime)
 	file.Inode = inode
 	file.Nlink = nlink
 

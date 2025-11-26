@@ -28,7 +28,6 @@ package dirguta
 
 import (
 	"encoding/binary"
-	"fmt"
 	"maps"
 	"slices"
 	"sort"
@@ -99,9 +98,9 @@ type DB interface {
 type inodeEntry struct {
 	fileType db.DirGUTAFileType
 	size     int64
-	count    int
 	atime    int64
 	mtime    int64
+	gutaKeys gutaKeys
 }
 
 // DirGroupUserTypeAge is used to summarise file stats by directory, group,
@@ -170,54 +169,12 @@ func (d *DirGroupUserTypeAge) Add(info *summary.FileInfo) error { //nolint:funle
 
 	ft := FileTypeWithTemp(info.Name, d.isTempDir)
 
-	fmt.Printf("[Add] inode=%d name=%s size=%d ft=%d nlink=%d\n",
-		info.Inode, string(info.Name), info.Size, ft, info.Nlink)
-
 	atime := info.ATime
 	if info.IsDir() {
 		atime = d.now
 	}
 
-	if info.Nlink > 1 && info.Inode != 0 {
-		entry, exists := d.seenHardlinks[info.Inode]
-		fmt.Printf("Checking inode map: key exists? %v\n", d.seenHardlinks[info.Inode])
-
-		if !exists {
-			fmt.Printf("  [First seen inode] Adding new inodeEntry\n")
-
-			entry = &inodeEntry{
-				fileType: ft,
-				size:     info.Size,
-				count:    1,
-				atime:    atime,
-				mtime:    info.MTime,
-			}
-			d.seenHardlinks[info.Inode] = entry
-			d.addForEach(gutaKeysFromEntry(info.GID, info.UID, ft), info.Size, atime, info.MTime)
-			return nil
-		}
-
-		fmt.Printf("  [Seen before] fileType=%d size=%v count=%d atime=%d mtime=%d\n",
-			entry.fileType, entry.size, entry.count, entry.atime, entry.mtime)
-
-		if entry.fileType&ft != 0 {
-			fmt.Printf("  [Same filetype] Skipping inode\n")
-			return nil
-		}
-
-		d.addForEach(gutaKeysFromEntry(info.GID, info.UID, ft), info.Size, atime, info.MTime)
-
-		entry.fileType |= ft
-		entry.size += info.Size ////entry.fileType & currentFiletype > 0
-		entry.count++
-		entry.atime = minInt64(entry.atime, atime) //when need to undo, current max or min filetype am changing
-		entry.mtime = maxInt(entry.mtime, info.MTime)
-		// entry.count++
-
-		fmt.Printf("  [Updated inodeEntry] fileType=%d size=%v count=%d atime=%d mtime=%d\n",
-			entry.fileType, entry.size, entry.count, entry.atime, entry.mtime)
-
-		// d.addForEach(gutaKeysFromEntry(info.GID, info.UID, entry.fileType), delta, entry.atime, entry.mtime)
+	if d.handleHardlink(info, ft, atime) {
 		return nil
 	}
 
@@ -226,28 +183,54 @@ func (d *DirGroupUserTypeAge) Add(info *summary.FileInfo) error { //nolint:funle
 
 	gKeys.append(info.GID, info.UID, ft)
 
-	fmt.Printf("[Normal file] Adding size=%d atime=%d mtime=%d\n", info.Size, atime, info.MTime)
-
-	d.addForEach(gKeys, info.Size, atime, maxInt(0, info.MTime))
+	d.store.addForEach(gKeys, info.Size, atime, max(0, info.MTime))
 	gutaKeyPool.Put(gutaKeysA)
 
 	return nil
 }
+
+func (d *DirGroupUserTypeAge) handleHardlink(info *summary.FileInfo, //nolint:funlen
+	ft db.DirGUTAFileType, atime int64) bool {
+	if info.Nlink <= 1 || info.Inode == 0 {
+		return false
+	}
+
+	entry, exists := d.seenHardlinks[info.Inode]
+	keys := gutaKeysFromEntry(info.GID, info.UID, ft)
+
+	if !exists {
+		entry = &inodeEntry{
+			fileType: ft,
+			size:     info.Size,
+			atime:    atime,
+			mtime:    info.MTime,
+			gutaKeys: keys,
+		}
+		d.seenHardlinks[info.Inode] = entry
+		d.store.addForEach(keys, info.Size, atime, info.MTime)
+
+		return true
+	}
+
+	if entry.fileType&ft != 0 {
+		return true
+	}
+
+	d.store.addForEach(keys, info.Size, atime, info.MTime)
+
+	entry.fileType |= ft
+	entry.size = max(entry.size, info.Size)
+	entry.atime = min(entry.atime, atime)
+	entry.mtime = max(entry.mtime, info.MTime)
+
+	return true
+}
 func gutaKeysFromEntry(gid, uid uint32, ft db.DirGUTAFileType) gutaKeys {
 	var keys gutaKeys
-	// for _, t := range db.AllTypesExceptDirectories {
-	// 	if ft&t != 0 {
-	keys.append(gid, uid, ft)
-	// 	}
-	// }
-	return keys
-}
 
-func minInt64(a, b int64) int64 {
-	if a < b {
-		return a
-	}
-	return b
+	keys.append(gid, uid, ft)
+
+	return keys
 }
 
 type gutaKey struct {
@@ -313,24 +296,11 @@ func (g *gutaKeys) append(gid, uid uint32, fileType db.DirGUTAFileType) {
 	}
 }
 
-// maxInt returns the greatest of the inputs.
-func maxInt(ints ...int64) int64 {
-	var maxInt int64
-
-	for _, i := range ints {
-		if i > maxInt {
-			maxInt = i
-		}
-	}
-
-	return maxInt
-}
-
 // addForEach breaks path into each directory, gets a gutaStore for each and
 // adds a file of the given size to them under the given gutaKeys.
-func (d *DirGroupUserTypeAge) addForEach(gutaKeys []gutaKey, size int64, atime int64, mtime int64) {
+func (store *gutaStore) addForEach(gutaKeys []gutaKey, size int64, atime int64, mtime int64) {
 	for _, agutaKey := range gutaKeys {
-		d.store.add(agutaKey, size, atime, mtime)
+		store.add(agutaKey, size, atime, mtime)
 	}
 }
 
@@ -402,7 +372,7 @@ func (d *DirGroupUserTypeAge) Output() error {
 			return err
 		}
 	} else {
-		d.parent.addChild(d.store) //inode dedpuing
+		d.parent.addChild(d.store, d.seenHardlinks)
 	}
 
 	d.clear()
@@ -410,12 +380,57 @@ func (d *DirGroupUserTypeAge) Output() error {
 	return nil
 }
 
-func (d *DirGroupUserTypeAge) addChild(child gutaStore) {
+func (d *DirGroupUserTypeAge) addChild(child gutaStore, childSeen map[int64]*inodeEntry) {
+	d.mergeSeenHardlinks(child, childSeen)
+	d.mergeSumMaps(child)
+}
+
+func (d *DirGroupUserTypeAge) mergeSeenHardlinks(child gutaStore, childSeen map[int64]*inodeEntry) {
+	for inode, cEntry := range childSeen {
+		if pEntry, exists := d.seenHardlinks[inode]; exists {
+			d.updateExistingHardlink(child, pEntry, cEntry)
+		} else {
+			d.seenHardlinks[inode] = cEntry
+		}
+	}
+}
+
+func (d *DirGroupUserTypeAge) updateExistingHardlink(child gutaStore, pEntry, cEntry *inodeEntry) {
+	existingPKeys := gutaKeysFromEntry(pEntry.gutaKeys[0].GID, pEntry.gutaKeys[0].UID, pEntry.fileType)
+	d.store.subtractFromStore(existingPKeys, pEntry.size, pEntry.atime, pEntry.mtime)
+
+	existingCKeys := gutaKeysFromEntry(cEntry.gutaKeys[0].GID, cEntry.gutaKeys[0].UID, cEntry.fileType)
+	child.subtractFromStore(existingCKeys, cEntry.size, cEntry.atime, cEntry.mtime)
+
+	newTypes := cEntry.fileType &^ pEntry.fileType
+	if newTypes != 0 {
+		pEntry.fileType |= newTypes
+		pEntry.size = max(pEntry.size, cEntry.size)
+		pEntry.atime = min(pEntry.atime, cEntry.atime)
+		pEntry.mtime = max(pEntry.mtime, cEntry.mtime)
+	}
+
+	updatedKeys := gutaKeysFromEntry(pEntry.gutaKeys[0].GID, pEntry.gutaKeys[0].UID, pEntry.fileType)
+	child.addForEach(updatedKeys, pEntry.size, pEntry.atime, pEntry.mtime)
+}
+
+func (d *DirGroupUserTypeAge) mergeSumMaps(child gutaStore) {
 	for key, summary := range child.sumMap {
 		if existing, ok := d.store.sumMap[key]; ok {
 			existing.AddSummary(summary)
 		} else {
 			d.store.sumMap[key] = summary
+		}
+	}
+}
+
+func (store *gutaStore) subtractFromStore(keys gutaKeys, size int64, atime, mtime int64) {
+	for _, key := range keys {
+		if summary, ok := store.sumMap[key]; ok {
+			summary.Count--
+			summary.Size -= size
+			// summary.Atime = min(summary.Atime, atime)
+			// summary.Mtime = max(summary.Mtime, mtime)
 		}
 	}
 }
@@ -449,9 +464,8 @@ func (d *DirGroupUserTypeAge) outputRoot(dguta db.RecordDGUTA) error {
 }
 
 func (d *DirGroupUserTypeAge) clear() {
-	for k := range d.store.sumMap {
-		delete(d.store.sumMap, k)
-	}
+	clear(d.store.sumMap)
+	clear(d.seenHardlinks)
 
 	d.thisDir = nil
 	d.children = nil
