@@ -79,48 +79,63 @@ func (d DirGUTAFileType) String() string {
 	if d&DGUTAFileTypeTemp != 0 {
 		out = append(out, "temp")
 	}
+
 	if d&DGUTAFileTypeVCF != 0 {
 		out = append(out, "vcf")
 	}
+
 	if d&DGUTAFileTypeVCFGz != 0 {
 		out = append(out, "vcf.gz")
 	}
+
 	if d&DGUTAFileTypeBCF != 0 {
 		out = append(out, "bcf")
 	}
+
 	if d&DGUTAFileTypeSam != 0 {
 		out = append(out, "sam")
 	}
+
 	if d&DGUTAFileTypeBam != 0 {
 		out = append(out, "bam")
 	}
+
 	if d&DGUTAFileTypeCram != 0 {
 		out = append(out, "cram")
 	}
+
 	if d&DGUTAFileTypeFasta != 0 {
 		out = append(out, "fasta")
 	}
+
 	if d&DGUTAFileTypeFastq != 0 {
 		out = append(out, "fastq")
 	}
+
 	if d&DGUTAFileTypeFastqGz != 0 {
 		out = append(out, "fastq.gz")
 	}
+
 	if d&DGUTAFileTypePedBed != 0 {
 		out = append(out, "ped/bed")
 	}
+
 	if d&DGUTAFileTypeCompressed != 0 {
 		out = append(out, "compressed")
 	}
+
 	if d&DGUTAFileTypeText != 0 {
 		out = append(out, "text")
 	}
+
 	if d&DGUTAFileTypeLog != 0 {
 		out = append(out, "log")
 	}
+
 	if d&DGUTAFileTypeDir != 0 {
 		out = append(out, "dir")
 	}
+
 	if d&DGUTAFileTypeOther != 0 {
 		out = append(out, "other")
 	}

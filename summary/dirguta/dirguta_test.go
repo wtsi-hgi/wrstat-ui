@@ -442,15 +442,17 @@ func TestDirGUTA(t *testing.T) {
 		mtimeOld := refTime - (db.SecondsInAYear * 2)
 
 		statsdata.AddFileWithInode(f, "a/b/c/1.bam", uid, gid, 100, atimeRecent, mtimeRecent, 42, 4)
-		statsdata.AddFileWithInode(f, "a/b/c/2.bam", uid, gid, 100, atimeRecent, mtimeRecent, 42, 4) // same inode/type → skipped
-		statsdata.AddFileWithInode(f, "a/b/c/3.bam", uid, gid, 200, atimeOld, mtimeOld, 43, 1)       // different inode → counted
-		statsdata.AddFileWithInode(f, "a/b/c/4.cram", uid, gid, 100, atimeOld, mtimeOld, 42, 4)      // same inode, different type → counted
-		statsdata.AddFileWithInode(f, "a/x/4.bam", uid, gid, 100, atimeOld, mtimeOld, 42, 4)         // same inode/type → skipped
+		statsdata.AddFileWithInode(f, "a/b/c/2.bam", uid, gid, 100, atimeRecent, mtimeRecent, 42, 4) // same inode & same file type -> skipped
+		statsdata.AddFileWithInode(f, "a/b/c/3.bam", uid, gid, 200, atimeOld, mtimeOld, 43, 1)       // different inode -> counted
+		statsdata.AddFileWithInode(f, "a/b/c/4.cram", uid, gid, 100, atimeOld, mtimeOld, 42, 4)      // same inode, different type -> counted
+		statsdata.AddFileWithInode(f, "a/x/4.bam", uid, gid, 100, atimeOld, mtimeOld, 42, 4)         // same inode & same file type -> skipped
 
 		s := summary.NewSummariser(stats.NewStatsParser(f.AsReader()))
 		m := &mockDB{make(map[string]db.GUTAs)}
 		op := newDirGroupUserTypeAge(m, refTime)
 		s.AddDirectoryOperation(op)
+
+		// io.Copy(os.Stdout, f.AsReader())
 
 		err := s.Summarise()
 		So(err, ShouldBeNil)
@@ -473,10 +475,43 @@ func TestDirGUTA(t *testing.T) {
 		So(m.has(dirX, gid, uid, ft, db.DGUTAgeAll, count, size, atimeOld, mtimeOld), ShouldBeTrue)
 
 		dirA := "/a/"
-		ft = db.DGUTAFileTypeBam
+		ft = db.DGUTAFileTypeBam | db.DGUTAFileTypeCram
 		count = uint64(1)
 		size = uint64(100)
-		So(m.has(dirA, gid, uid, ft, db.DGUTAgeAll, count, size, atimeOld, mtimeOld), ShouldBeTrue)
+		So(m.has(dirA, gid, uid, ft, db.DGUTAgeAll, count, size, atimeOld, mtimeRecent), ShouldBeTrue)
+
+		// Same inode, different size , atime, mtime
+		statsdata.AddFileWithInode(f, "a/b/d/1.bam", uid, gid, 150, atimeRecent, mtimeRecent, 44, 2)
+		statsdata.AddFileWithInode(f, "a/b/d/2.bam", uid, gid, 100, atimeOld, mtimeOld, 44, 2)
+
+		s2 := summary.NewSummariser(stats.NewStatsParser(f.AsReader()))
+		op2 := newDirGroupUserTypeAge(m, refTime)
+		s2.AddDirectoryOperation(op2)
+		err = s2.Summarise()
+		So(err, ShouldBeNil)
+
+		ft = db.DGUTAFileTypeBam
+		count = 1
+		size = 150 // max(150 & 100)
+		// So(m.has("/a/b/d/", gid, uid, ft, db.DGUTAgeAll, count, size, atimeOld, mtimeRecent), ShouldBeTrue)
+
+		// Hardlink inode 50 appears in 3 different directories
+		statsdata.AddFileWithInode(f, "a/b/c/5.bam", uid, gid, 100, atimeRecent, mtimeRecent, 50, 3)
+		statsdata.AddFileWithInode(f, "a/b/d/5.bam", uid, gid, 200, atimeOld, mtimeOld, 50, 3)
+		statsdata.AddFileWithInode(f, "a/x/5.bam", uid, gid, 150, atimeRecent, mtimeOld, 50, 3)
+
+		s3 := summary.NewSummariser(stats.NewStatsParser(f.AsReader()))
+		op3 := newDirGroupUserTypeAge(m, refTime)
+		s3.AddDirectoryOperation(op3)
+		err = s3.Summarise()
+		So(err, ShouldBeNil)
+
+		// Parent /a/ should merge all 3 contributions of inode 50
+		ft = db.DGUTAFileTypeBam
+		count = 1
+		size = 200 // max size
+		So(m.has("/a/", gid, uid, ft, db.DGUTAgeAll, count, size, atimeOld, mtimeRecent), ShouldBeTrue)
+
 	})
 
 }
