@@ -397,20 +397,22 @@ func (d *DirGroupUserTypeAge) mergeSeenHardlinks(child gutaStore, childSeen map[
 
 func (d *DirGroupUserTypeAge) updateExistingHardlink(child gutaStore, pEntry, cEntry *inodeEntry) {
 	existingPKeys := gutaKeysFromEntry(pEntry.gutaKeys[0].GID, pEntry.gutaKeys[0].UID, pEntry.fileType)
-	d.store.subtractFromStore(existingPKeys, pEntry.size, pEntry.atime, pEntry.mtime)
+
+	d.store.subtractFromStore(existingPKeys, pEntry.size)
 
 	existingCKeys := gutaKeysFromEntry(cEntry.gutaKeys[0].GID, cEntry.gutaKeys[0].UID, cEntry.fileType)
-	child.subtractFromStore(existingCKeys, cEntry.size, cEntry.atime, cEntry.mtime)
+
+	child.subtractFromStore(existingCKeys, cEntry.size)
 
 	newTypes := cEntry.fileType &^ pEntry.fileType
-	if newTypes != 0 {
-		pEntry.fileType |= newTypes
-		pEntry.size = max(pEntry.size, cEntry.size)
-		pEntry.atime = min(pEntry.atime, cEntry.atime)
-		pEntry.mtime = max(pEntry.mtime, cEntry.mtime)
-	}
+
+	pEntry.fileType |= newTypes
+	pEntry.size = max(pEntry.size, cEntry.size)
+	pEntry.atime = min(pEntry.atime, cEntry.atime)
+	pEntry.mtime = max(pEntry.mtime, cEntry.mtime)
 
 	updatedKeys := gutaKeysFromEntry(pEntry.gutaKeys[0].GID, pEntry.gutaKeys[0].UID, pEntry.fileType)
+
 	child.addForEach(updatedKeys, pEntry.size, pEntry.atime, pEntry.mtime)
 }
 
@@ -424,13 +426,11 @@ func (d *DirGroupUserTypeAge) mergeSumMaps(child gutaStore) {
 	}
 }
 
-func (store *gutaStore) subtractFromStore(keys gutaKeys, size int64, atime, mtime int64) {
+func (store *gutaStore) subtractFromStore(keys gutaKeys, size int64) {
 	for _, key := range keys {
 		if summary, ok := store.sumMap[key]; ok {
 			summary.Count--
 			summary.Size -= size
-			// summary.Atime = min(summary.Atime, atime)
-			// summary.Mtime = max(summary.Mtime, mtime)
 		}
 	}
 }
