@@ -174,11 +174,12 @@ func (f *File) WriteTo(w io.Writer) (int64, error) {
 	return int64(n), err
 }
 
-var nextInode = 1000
+var nextInode uint64 = 1000 //nolint:gochecknoglobals
 
 // AddFile adds file data to a directory, creating the directory in the tree if
 // necessary.
 func AddFile(d *Directory, path string, uid, gid uint32, size, atime, mtime int64) *File {
+
 	for part := range strings.SplitSeq(filepath.Dir(path), "/") {
 		d = d.AddDirectory(part)
 	}
@@ -189,7 +190,7 @@ func AddFile(d *Directory, path string, uid, gid uint32, size, atime, mtime int6
 	file.Size = size
 	file.ATime = atime
 	file.MTime = mtime
-	file.Inode = uint64(nextInode)
+	file.Inode = nextInode
 	file.Nlink = 1
 
 	nextInode++
