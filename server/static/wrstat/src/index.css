@@ -165,7 +165,7 @@ caption {
   display: none;
 }
 
-summary > h1 {
+summary>h1 {
   margin: 0;
   font-size: inherit;
   font-weight: normal;
@@ -236,15 +236,15 @@ details[open] summary:after {
   justify-self: end;
 }
 
-.treeFilter > label:after {
+.treeFilter>label:after {
   content: ":";
 }
 
-.treeFilter > .multiSelect {
+.treeFilter>.multiSelect {
   grid-column: 2 / span 3;
 }
 
-.treeFilter > select:not(.ageFilter) {
+.treeFilter>select:not(.ageFilter) {
   grid-column: 2 / span 2;
 }
 
@@ -447,7 +447,8 @@ button {
     --dbToggleHoverBG: #ccc;
   }
 
-  details summary:after {
+  details summary:after,
+  .scatter-canvas {
     filter: invert(1);
   }
 
