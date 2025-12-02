@@ -28,6 +28,7 @@
 package db
 
 import (
+	"strings"
 	"testing"
 
 	. "github.com/smartystreets/goconvey/convey"
@@ -35,7 +36,6 @@ import (
 
 func TestDirGUTAFileType(t *testing.T) {
 	Convey("DGUTAFileType* consts are ints that can be stringified", t, func() {
-		So(DirGUTAFileType(0).String(), ShouldEqual, "other")
 		So(DGUTAFileTypeOther.String(), ShouldEqual, "other")
 		So(DGUTAFileTypeTemp.String(), ShouldEqual, "temp")
 		So(DGUTAFileTypeVCF.String(), ShouldEqual, "vcf")
@@ -53,6 +53,34 @@ func TestDirGUTAFileType(t *testing.T) {
 		So(DGUTAFileTypeLog.String(), ShouldEqual, "log")
 
 		So(int(DGUTAFileTypeTemp), ShouldEqual, 1)
+	})
+
+	Convey("String() returns multiple types joined with '|'", t, func() {
+		ft := DGUTAFileTypeTemp | DGUTAFileTypeFastq
+
+		s := ft.String()
+		parts := strings.Split(s, "|")
+
+		So(len(parts), ShouldEqual, 2)
+		So(parts, ShouldContain, "temp")
+		So(parts, ShouldContain, "fastq")
+	})
+
+	Convey("String() ordering is based on provided bit checks order", t, func() {
+		ft := DGUTAFileTypeCram | DGUTAFileTypeTemp | DGUTAFileTypeText
+
+		So(ft.String(), ShouldEqual, "temp|cram|text")
+	})
+
+	Convey("Multiple flags include all mapped names", t, func() {
+		ft := DGUTAFileTypeFastq | DGUTAFileTypeFastqGz | DGUTAFileTypeCompressed
+
+		s := ft.String()
+		parts := strings.Split(s, "|")
+
+		So(parts, ShouldContain, "fastq")
+		So(parts, ShouldContain, "fastq.gz")
+		So(parts, ShouldContain, "compressed")
 	})
 
 	Convey("You can go from a string to a DGUTAFileType", t, func() {

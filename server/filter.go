@@ -172,18 +172,19 @@ func addTypesToFilter(filter *db.Filter, types string) error {
 	}
 
 	tnames := splitCommaSeparatedString(types)
-	fts := make([]db.DirGUTAFileType, len(tnames))
 
-	for i, name := range tnames {
+	var fileType db.DirGUTAFileType
+
+	for _, name := range tnames {
 		ft, err := db.FileTypeStringToDirGUTAFileType(name)
 		if err != nil {
 			return err
 		}
 
-		fts[i] = ft
+		fileType |= ft
 	}
 
-	filter.FTs = fts
+	filter.FT = fileType
 
 	return nil
 }

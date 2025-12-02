@@ -168,11 +168,9 @@ func (b baseDirsMap) Add(fn func(uint32, basedirs.SummaryWithChildren, db.DirGUT
 
 				for n, c := range ds.Children[0].FileUsage {
 					if c > 0 {
-						ds.FTs = append(ds.FTs, n)
+						ds.FT |= n
 					}
 				}
-
-				slices.Sort(ds.FTs)
 
 				ds.Children[0].SubDir = "."
 				ds.Children[0].LastModified = ds.Mtime

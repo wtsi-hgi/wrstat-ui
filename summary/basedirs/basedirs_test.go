@@ -28,7 +28,6 @@
 package basedirs
 
 import (
-	"maps"
 	"slices"
 	"testing"
 	"time"
@@ -108,11 +107,11 @@ func userSummary(path string, uid uint32, gids []uint32, atime int64,
 
 func dirsummary(path string, uids []uint32, gids []uint32, atime int64,
 	children []*basedirs.SubDir) basedirs.SummaryWithChildren {
-	ftsMap := make(map[db.DirGUTAFileType]struct{})
 
 	var (
 		size, num uint64
 		mod       time.Time
+		fileType  db.DirGUTAFileType
 	)
 
 	for _, c := range children {
@@ -124,13 +123,9 @@ func dirsummary(path string, uids []uint32, gids []uint32, atime int64,
 		}
 
 		for ft := range c.FileUsage {
-			ftsMap[ft] = struct{}{}
+			fileType |= ft
 		}
 	}
-
-	fts := slices.Collect(maps.Keys(ftsMap))
-
-	slices.Sort(fts)
 
 	s := basedirs.SummaryWithChildren{
 		DirSummary: db.DirSummary{
@@ -141,7 +136,7 @@ func dirsummary(path string, uids []uint32, gids []uint32, atime int64,
 			GIDs:  gids,
 			Atime: time.Unix(atime, 0),
 			Mtime: mod,
-			FTs:   fts,
+			FT:    fileType,
 		},
 		Children: children,
 	}
@@ -173,16 +168,16 @@ func TestBaseDirs(t *testing.T) {
 		}
 
 		f := statsdata.NewRoot("/", 0)
-		statsdata.AddFile(f, "opt/teams/teamA/user1/aFile.txt", 1, 10, 3, times[3], times[1]).Inode = 1
-		statsdata.AddFile(f, "opt/teams/teamA/user2/aDir/aFile.bam", 2, 11, 5, times[2], times[1]).Inode = 2
-		statsdata.AddFile(f, "opt/teams/teamA/user2/bDir/bFile.gz", 2, 11, 7, times[3], times[1]).Inode = 3
-		statsdata.AddFile(f, "opt/teams/teamB/user3/aDir/bDir/cDir/aFile.vcf", 3, 12, 11, times[0], times[0]).Inode = 4
-		statsdata.AddFile(f, "opt/teams/teamB/user3/eDir/tmp.cram", 3, 12, 13, times[0], times[0]).Inode = 5
-		statsdata.AddFile(f, "opt/teams/teamB/user3/fDir/aFile", 3, 12, 17, times[0], times[0]).Inode = 1
-		statsdata.AddFile(f, "opt/teams/teamB/user4/aDir/bDir/cDir/aFile", 4, 12, 19, times[0], times[0]).Inode = 7
-		statsdata.AddFile(f, "opt/teams/teamB/user4/aDir/dDir/eDir/aFile", 4, 12, 23, times[0], times[0]).Inode = 5
-		statsdata.AddFile(f, "opt/teams/teamC/user4/aDir/bDir/cDir/aFile", 4, 12, 29, times[0], times[0]).Inode = 1
-		statsdata.AddFile(f, "opt/teams/teamC/user4/aDir/dDir/eDir/aFile", 4, 12, 31, times[0], times[0]).Inode = 9
+		statsdata.AddFile(f, "opt/teams/teamA/user1/aFile.txt", 1, 10, 3, times[3], times[1])
+		statsdata.AddFile(f, "opt/teams/teamA/user2/aDir/aFile.bam", 2, 11, 5, times[2], times[1])
+		statsdata.AddFile(f, "opt/teams/teamA/user2/bDir/bFile.gz", 2, 11, 7, times[3], times[1])
+		statsdata.AddFile(f, "opt/teams/teamB/user3/aDir/bDir/cDir/aFile.vcf", 3, 12, 11, times[0], times[0])
+		statsdata.AddFile(f, "opt/teams/teamB/user3/eDir/tmp.cram", 3, 12, 13, times[0], times[0])
+		statsdata.AddFile(f, "opt/teams/teamB/user3/fDir/aFile", 3, 12, 17, times[0], times[0])
+		statsdata.AddFile(f, "opt/teams/teamB/user4/aDir/bDir/cDir/aFile", 4, 12, 19, times[0], times[0])
+		statsdata.AddFile(f, "opt/teams/teamB/user4/aDir/dDir/eDir/aFile", 4, 12, 23, times[0], times[0])
+		statsdata.AddFile(f, "opt/teams/teamC/user4/aDir/bDir/cDir/aFile", 4, 12, 29, times[0], times[0])
+		statsdata.AddFile(f, "opt/teams/teamC/user4/aDir/dDir/eDir/aFile", 4, 12, 31, times[0], times[0])
 
 		user1Dir := []basedirs.SummaryWithChildren{
 			userSummary("/opt/teams/teamA/user1", 1, ids(10), times[3],

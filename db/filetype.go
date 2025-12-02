@@ -54,23 +54,20 @@ const (
 	DGUTAFileTypeOther      DirGUTAFileType = 32768
 )
 
-var AllTypesExceptDirectories = [...]DirGUTAFileType{ //nolint:gochecknoglobals
-	DGUTAFileTypeOther,
-	DGUTAFileTypeTemp,
-	DGUTAFileTypeVCF,
-	DGUTAFileTypeVCFGz,
-	DGUTAFileTypeBCF,
-	DGUTAFileTypeSam,
-	DGUTAFileTypeBam,
-	DGUTAFileTypeCram,
-	DGUTAFileTypeFasta,
-	DGUTAFileTypeFastq,
-	DGUTAFileTypeFastqGz,
-	DGUTAFileTypePedBed,
-	DGUTAFileTypeCompressed,
-	DGUTAFileTypeText,
-	DGUTAFileTypeLog,
-}
+var AllTypesExceptDirectories = DGUTAFileTypeOther | //nolint:gochecknoglobals
+	DGUTAFileTypeVCF |
+	DGUTAFileTypeVCFGz |
+	DGUTAFileTypeBCF |
+	DGUTAFileTypeSam |
+	DGUTAFileTypeBam |
+	DGUTAFileTypeCram |
+	DGUTAFileTypeFasta |
+	DGUTAFileTypeFastq |
+	DGUTAFileTypeFastqGz |
+	DGUTAFileTypePedBed |
+	DGUTAFileTypeCompressed |
+	DGUTAFileTypeText |
+	DGUTAFileTypeLog
 
 // String lets you convert a DirGUTAFileType to a meaningful string.
 func (d DirGUTAFileType) String() string {

@@ -215,7 +215,7 @@ func (s *Server) ddsToTreeElement(dds *db.DirSummary, allowedGIDs map[uint32]boo
 		Age:       dds.Age,
 		Users:     s.uidsToUsernames(dds.UIDs),
 		Groups:    s.gidsToNames(dds.GIDs),
-		FileTypes: s.ftsToNames(dds.FTs),
+		FileTypes: s.ftsToNames(dds.FT),
 		NoAuth:    areDisjoint(allowedGIDs, dds.GIDs),
 	}
 }
