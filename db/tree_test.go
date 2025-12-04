@@ -63,13 +63,8 @@ func TestTree(t *testing.T) {
 
 		expectedUIDs := []uint32{101, 102, 103}
 		expectedGIDs := []uint32{1, 2, 3}
-		expectedFTs :=
-			db.DGUTAFileTypeTemp |
-				db.DGUTAFileTypeBam | db.DGUTAFileTypeCram | db.DGUTAFileTypeDir
-		expectedFTsNoDir :=
-			db.DGUTAFileTypeTemp |
-				db.DGUTAFileTypeBam | db.DGUTAFileTypeCram
-
+		expectedFTs := db.DGUTAFileTypeTemp | db.DGUTAFileTypeBam | db.DGUTAFileTypeCram | db.DGUTAFileTypeDir
+		expectedFTsNoDir := db.DGUTAFileTypeTemp | db.DGUTAFileTypeBam | db.DGUTAFileTypeCram
 		expectedUIDsOne := []uint32{101}
 		expectedGIDsOne := []uint32{1}
 		expectedFTsCram := db.DGUTAFileTypeCram

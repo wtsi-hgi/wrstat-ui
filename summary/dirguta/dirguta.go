@@ -205,9 +205,10 @@ func (d *DirGroupUserTypeAge) handleHardlink(info *summary.FileInfo, //nolint:fu
 	}
 
 	entry, exists := d.seenHardlinks[info.Inode]
-	keys := gutaKeysFromEntry(info.GID, info.UID, ft)
 
 	if !exists {
+		keys := gutaKeysFromEntry(info.GID, info.UID, ft)
+
 		entry = &inodeEntry{
 			fileType: ft,
 			size:     info.Size,
@@ -221,7 +222,7 @@ func (d *DirGroupUserTypeAge) handleHardlink(info *summary.FileInfo, //nolint:fu
 		return true
 	}
 
-	keys = gutaKeysFromEntry(info.GID, info.UID, entry.fileType)
+	keys := gutaKeysFromEntry(info.GID, info.UID, entry.fileType)
 
 	d.store.subtractFromStore(keys, entry.size)
 

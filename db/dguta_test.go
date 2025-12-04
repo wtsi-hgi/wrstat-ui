@@ -136,7 +136,6 @@ func TestDGUTA(t *testing.T) {
 		defaultFilter := &db.Filter{Age: db.DGUTAgeAll}
 
 		Convey("GUTAs can sum the count and size and provide UIDs, GIDs and FTs of their GUTA elements", func() {
-
 			ds := expectedRootGUTAs.Summary(defaultFilter)
 			So(ds.Count, ShouldEqual, 21+numDirectories)
 			So(ds.Size, ShouldEqual, 92+numDirectories*directorySize)

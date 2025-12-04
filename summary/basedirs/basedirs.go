@@ -277,11 +277,13 @@ func (b *baseDirs) Add(info *summary.FileInfo) error { //nolint:gocyclo
 			dirguta.IsTemp(unsafe.Slice(unsafe.StringData(info.Path.Name), len(info.Path.Name)))
 	}
 
-	if _, seen := b.seenInodes[info.Inode]; seen && !info.IsDir() {
-		return nil
-	}
+	if !info.IsDir() && info.Nlink > 1 && info.Inode != 0 {
+		if _, seen := b.seenInodes[info.Inode]; seen {
+			return nil
+		}
 
-	b.seenInodes[info.Inode] = struct{}{}
+		b.seenInodes[info.Inode] = struct{}{}
+	}
 
 	if info.Path != b.thisDir || info.IsDir() {
 		return nil

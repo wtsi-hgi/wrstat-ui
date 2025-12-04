@@ -89,9 +89,7 @@ type Filter struct {
 // PassesFilter checks to see if this GUTA has a GID in the filter's GIDs
 // (considered true if GIDs is nil), and has a UID in the filter's UIDs
 // (considered true if UIDs is nil), and an Age the same as the filter's Age,
-// and has an FT in the filter's FTs (considered true if FTs is nil). The second
-// bool returned will match the first unless FT is DGUTAFileTypeTemp, in which
-// case it will be false, unless the filter FTs == []{DGUTAFileTypeTemp}).
+// and has an FT in the filter's FTs (considered true if FTs is nil).
 func (g *GUTA) PassesFilter(filter *Filter) bool {
 	if !g.passesGIDFilter(filter) || !g.passesUIDFilter(filter) || !g.passesAgeFilter(filter) {
 		return false
