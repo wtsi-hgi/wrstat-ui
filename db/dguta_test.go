@@ -144,7 +144,7 @@ func TestDGUTA(t *testing.T) {
 			So(ds.Mtime, ShouldHappenBetween, expectedMtime.Add(-5*time.Second), expectedMtime.Add(5*time.Second))
 			So(ds.UIDs, ShouldResemble, expectedUIDs)
 			So(ds.GIDs, ShouldResemble, expectedGIDs)
-			So(ds.FT&expectedFTs, ShouldEqual, expectedFTs)
+			So(ds.FT, ShouldEqual, expectedFTs)
 		})
 
 		Convey("A DGUTA can be encoded and decoded", func() {

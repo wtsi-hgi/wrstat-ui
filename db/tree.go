@@ -243,7 +243,7 @@ func (t *Tree) Where(dir string, filter *Filter, recurseCount split.SplitFn) (DC
 	}
 
 	if filter.FT == 0 {
-		filter.FT = AllTypesExceptDirectories //
+		filter.FT = AllTypesExceptDirectories
 	}
 
 	dcss, err := t.recurseWhere(dir, filter, recurseCount, 0)

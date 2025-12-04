@@ -214,7 +214,7 @@ func (s *Server) buildCache(
 func (s *Server) collectUsage(
 	usageFunc func(db.DirGUTAge) ([]*basedirs.Usage, error),
 ) ([]*basedirs.Usage, error) {
-	var results []*basedirs.Usage
+	results := make([]*basedirs.Usage, 0)
 
 	for _, age := range db.DirGUTAges {
 		result, err := usageFunc(age)

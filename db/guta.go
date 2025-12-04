@@ -132,12 +132,7 @@ func (g *GUTA) passesUIDFilter(filter *Filter) bool {
 	return false
 }
 
-// passesFTFilter tells you if our FT is in the filter's FTs. Also returns true
-// if filter or filter.FTs in nil.
-//
-// The second return bool will match the first, unless our FT is
-// DGUTAFileTypeTemp, in which case it will always be false, unless the filter's
-// FTs only hold DGUTAFileTypeTemp.
+// passesFTFilter returns true if this GUTA's file type matches the filter's file types.
 func (g *GUTA) passesFTFilter(filter *Filter) bool {
 	if filter == nil || filter.FT == 0 {
 		return true
@@ -145,12 +140,6 @@ func (g *GUTA) passesFTFilter(filter *Filter) bool {
 
 	return g.FT&filter.FT > 0
 }
-
-// amTempAndNotFilteredJustForTemp tells you if our FT is DGUTAFileTypeTemp and
-// the filter has more than one type set.
-// func (g *GUTA) amTempAndNotFilteredJustForTemp(filter *Filter) bool {
-// 	return g.FT == DGUTAFileTypeTemp && len(filter.FT) > 1
-// }
 
 // passesAgeFilter tells you if our age is the same as the filter's Age. Also
 // returns true if filter is nil.
