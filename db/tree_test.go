@@ -134,11 +134,7 @@ func TestTree(t *testing.T) {
 			So(di, ShouldResemble, &db.DirInfo{
 				Current: &db.DirSummary{
 					"/a/b/e/h/tmp", 2, 5 + directorySize, time.Unix(80, 0), time.Unix(80, 0),
-					expectedUIDsOne, expectedGIDsOne,
-
-					db.DGUTAFileTypeTemp |
-						db.DGUTAFileTypeBam | db.DGUTAFileTypeDir,
-
+					expectedUIDsOne, expectedGIDsOne, db.DGUTAFileTypeTemp | db.DGUTAFileTypeBam | db.DGUTAFileTypeDir,
 					db.DGUTAgeAll, dbModTime,
 				},
 				Children: nil,
