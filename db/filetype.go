@@ -71,70 +71,18 @@ var AllTypesExceptDirectories = DGUTAFileTypeOther | //nolint:gochecknoglobals
 
 // String lets you convert a DirGUTAFileType to a meaningful string.
 func (d DirGUTAFileType) String() string {
-	var out []string
-
-	if d&DGUTAFileTypeTemp != 0 {
-		out = append(out, "temp")
+	names := [...]string{
+		"temp", "vcf", "vcf.gz", "bcf", "sam", "bam",
+		"cram", "fasta", "fastq", "fastq.gz", "ped/bed",
+		"compressed", "text", "log", "dir", "other",
 	}
 
-	if d&DGUTAFileTypeVCF != 0 {
-		out = append(out, "vcf")
-	}
+	out := make([]string, 0, len(names))
 
-	if d&DGUTAFileTypeVCFGz != 0 {
-		out = append(out, "vcf.gz")
-	}
-
-	if d&DGUTAFileTypeBCF != 0 {
-		out = append(out, "bcf")
-	}
-
-	if d&DGUTAFileTypeSam != 0 {
-		out = append(out, "sam")
-	}
-
-	if d&DGUTAFileTypeBam != 0 {
-		out = append(out, "bam")
-	}
-
-	if d&DGUTAFileTypeCram != 0 {
-		out = append(out, "cram")
-	}
-
-	if d&DGUTAFileTypeFasta != 0 {
-		out = append(out, "fasta")
-	}
-
-	if d&DGUTAFileTypeFastq != 0 {
-		out = append(out, "fastq")
-	}
-
-	if d&DGUTAFileTypeFastqGz != 0 {
-		out = append(out, "fastq.gz")
-	}
-
-	if d&DGUTAFileTypePedBed != 0 {
-		out = append(out, "ped/bed")
-	}
-
-	if d&DGUTAFileTypeCompressed != 0 {
-		out = append(out, "compressed")
-	}
-
-	if d&DGUTAFileTypeText != 0 {
-		out = append(out, "text")
-	}
-
-	if d&DGUTAFileTypeLog != 0 {
-		out = append(out, "log")
-	}
-
-	if d&DGUTAFileTypeDir != 0 {
-		out = append(out, "dir")
-	}
-
-	if d&DGUTAFileTypeOther != 0 {
-		out = append(out, "other")
+	for n, name := range names {
+		if d&(1<<n) != 0 {
+			out = append(out, name)
+		}
 	}
 
 	return strings.Join(out, "|")

@@ -104,7 +104,8 @@ type inodeEntry struct {
 	size     int64
 	atime    int64
 	mtime    int64
-	gutaKeys gutaKeys
+	gid      uint32
+	uid      uint32
 }
 
 // DirGroupUserTypeAge is used to summarise file stats by directory, group,
@@ -214,7 +215,8 @@ func (d *DirGroupUserTypeAge) handleHardlink(info *summary.FileInfo, //nolint:fu
 			size:     info.Size,
 			atime:    atime,
 			mtime:    info.MTime,
-			gutaKeys: keys,
+			gid:      info.GID,
+			uid:      info.UID,
 		}
 		d.seenHardlinks[info.Inode] = entry
 		d.store.addForEach(keys, info.Size, atime, info.MTime)
@@ -415,11 +417,11 @@ func (d *DirGroupUserTypeAge) mergeSeenHardlinks(child gutaStore, childSeen map[
 
 // updateExistingHardlink merges two inode entries (parent & child) and updates store accordingly.
 func (d *DirGroupUserTypeAge) updateExistingHardlink(child gutaStore, pEntry, cEntry *inodeEntry) {
-	existingPKeys := gutaKeysFromEntry(pEntry.gutaKeys[0].GID, pEntry.gutaKeys[0].UID, pEntry.fileType)
+	existingPKeys := gutaKeysFromEntry(pEntry.gid, pEntry.uid, pEntry.fileType)
 
 	d.store.subtractFromStore(existingPKeys, pEntry.size)
 
-	existingCKeys := gutaKeysFromEntry(cEntry.gutaKeys[0].GID, cEntry.gutaKeys[0].UID, cEntry.fileType)
+	existingCKeys := gutaKeysFromEntry(cEntry.gid, cEntry.uid, cEntry.fileType)
 
 	child.subtractFromStore(existingCKeys, cEntry.size)
 
@@ -430,7 +432,7 @@ func (d *DirGroupUserTypeAge) updateExistingHardlink(child gutaStore, pEntry, cE
 	pEntry.atime = min(pEntry.atime, cEntry.atime)
 	pEntry.mtime = max(pEntry.mtime, cEntry.mtime)
 
-	updatedKeys := gutaKeysFromEntry(pEntry.gutaKeys[0].GID, pEntry.gutaKeys[0].UID, pEntry.fileType)
+	updatedKeys := gutaKeysFromEntry(pEntry.gid, pEntry.uid, pEntry.fileType)
 
 	child.addForEach(updatedKeys, pEntry.size, pEntry.atime, pEntry.mtime)
 }

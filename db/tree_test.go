@@ -41,7 +41,6 @@ import (
 )
 
 func TestTree(t *testing.T) {
-
 	refUnixTime := time.Now().Unix()
 
 	Convey("You can make a Tree from a dguta database", t, func() {
