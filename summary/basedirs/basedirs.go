@@ -168,11 +168,9 @@ func (b baseDirsMap) Add(fn func(uint32, basedirs.SummaryWithChildren, db.DirGUT
 
 				for n, c := range ds.Children[0].FileUsage {
 					if c > 0 {
-						ds.FTs = append(ds.FTs, n)
+						ds.FT |= n
 					}
 				}
-
-				slices.Sort(ds.FTs)
 
 				ds.Children[0].SubDir = "."
 				ds.Children[0].LastModified = ds.Mtime
@@ -221,6 +219,7 @@ type baseDirs struct {
 	thisDir       *summary.DirectoryPath
 	users, groups baseDirsMap
 	isTempDir     bool
+	seenInodes    map[int64]struct{}
 }
 
 type rootBaseDirs struct {
@@ -234,9 +233,10 @@ type rootBaseDirs struct {
 func NewBaseDirs(output outputForDir, db output) summary.OperationGenerator { //nolint:funlen
 	root := &rootBaseDirs{
 		baseDirs: baseDirs{
-			output: output,
-			users:  make(baseDirsMap),
-			groups: make(baseDirsMap),
+			output:     output,
+			users:      make(baseDirsMap),
+			groups:     make(baseDirsMap),
+			seenInodes: make(map[int64]struct{}),
 		},
 		db:     db,
 		users:  make(basedirs.IDAgeDirs),
@@ -256,12 +256,13 @@ func NewBaseDirs(output outputForDir, db output) summary.OperationGenerator { //
 		}
 
 		parent = &baseDirs{
-			parent:  parent,
-			output:  output,
-			root:    root,
-			refTime: now,
-			users:   make(baseDirsMap),
-			groups:  make(baseDirsMap),
+			parent:     parent,
+			output:     output,
+			root:       root,
+			refTime:    now,
+			users:      make(baseDirsMap),
+			groups:     make(baseDirsMap),
+			seenInodes: make(map[int64]struct{}),
 		}
 
 		return parent
@@ -274,6 +275,14 @@ func (b *baseDirs) Add(info *summary.FileInfo) error { //nolint:gocyclo
 		b.thisDir = info.Path
 		b.isTempDir = b.parent != nil && b.parent.isTempDir ||
 			dirguta.IsTemp(unsafe.Slice(unsafe.StringData(info.Path.Name), len(info.Path.Name)))
+	}
+
+	if !info.IsDir() && info.Nlink > 1 && info.Inode != 0 {
+		if _, seen := b.seenInodes[info.Inode]; seen {
+			return nil
+		}
+
+		b.seenInodes[info.Inode] = struct{}{}
 	}
 
 	if info.Path != b.thisDir || info.IsDir() {
@@ -298,6 +307,7 @@ func (b *baseDirs) Output() error {
 	if b.output(b.thisDir) {
 		b.groups.Add(b.root.addGroupBase)
 		b.users.Add(b.root.addUserBase)
+		clear(b.root.seenInodes)
 	} else {
 		b.addToParent()
 	}

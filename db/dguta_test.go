@@ -52,92 +52,80 @@ func TestDGUTA(t *testing.T) {
 			numGutas := 17
 			emptyGutas := 8
 			testIndex := func(index int) int {
-				if index > 4 {
+				switch {
+				case index > 5:
+					return index*numGutas - emptyGutas*3
+				case index > 4:
 					return index*numGutas - emptyGutas*2
-				} else if index > 3 {
+				case index > 3:
 					return index*numGutas - emptyGutas
+				default:
+					return index * numGutas
 				}
-
-				return index * numGutas
 			}
 
 			filter := &db.Filter{}
-			a, b := expectedRootGUTAs[testIndex(2)].PassesFilter(filter)
+			a := expectedRootGUTAs[testIndex(2)].PassesFilter(filter)
 			So(a, ShouldBeTrue)
-			So(b, ShouldBeTrue)
 
-			a, b = expectedRootGUTAs[0].PassesFilter(filter)
+			a = expectedRootGUTAs[0].PassesFilter(filter)
 			So(a, ShouldBeTrue)
-			So(b, ShouldBeFalse)
 
 			filter.GIDs = []uint32{3, 4, 5}
-			a, b = expectedRootGUTAs[testIndex(2)].PassesFilter(filter)
+			a = expectedRootGUTAs[testIndex(2)].PassesFilter(filter)
 			So(a, ShouldBeFalse)
-			So(b, ShouldBeFalse)
 
 			filter.GIDs = []uint32{3, 2, 1}
-			a, b = expectedRootGUTAs[testIndex(2)].PassesFilter(filter)
+			a = expectedRootGUTAs[testIndex(2)].PassesFilter(filter)
 			So(a, ShouldBeTrue)
-			So(b, ShouldBeTrue)
 
 			filter.UIDs = []uint32{103}
-			a, b = expectedRootGUTAs[testIndex(2)].PassesFilter(filter)
+			a = expectedRootGUTAs[testIndex(2)].PassesFilter(filter)
 			So(a, ShouldBeFalse)
-			So(b, ShouldBeFalse)
 
 			filter.UIDs = []uint32{103, 102, 101}
-			a, b = expectedRootGUTAs[testIndex(1)].PassesFilter(filter)
+			a = expectedRootGUTAs[testIndex(1)].PassesFilter(filter)
 			So(a, ShouldBeTrue)
-			So(b, ShouldBeTrue)
 
-			filter.FTs = []db.DirGUTAFileType{db.DGUTAFileTypeTemp}
-			a, b = expectedRootGUTAs[testIndex(2)].PassesFilter(filter)
+			filter.FT = db.DGUTAFileTypeTemp
+			a = expectedRootGUTAs[testIndex(2)].PassesFilter(filter)
 			So(a, ShouldBeFalse)
-			So(b, ShouldBeFalse)
-			a, b = expectedRootGUTAs[0].PassesFilter(filter)
+			a = expectedRootGUTAs[0].PassesFilter(filter)
 			So(a, ShouldBeTrue)
-			So(b, ShouldBeTrue)
 
-			filter.FTs = []db.DirGUTAFileType{db.DGUTAFileTypeTemp, db.DGUTAFileTypeCram}
-			a, b = expectedRootGUTAs[testIndex(2)].PassesFilter(filter)
+			filter.FT = db.DGUTAFileTypeTemp | db.DGUTAFileTypeCram
+			a = expectedRootGUTAs[testIndex(2)].PassesFilter(filter)
 			So(a, ShouldBeTrue)
-			So(b, ShouldBeTrue)
-			a, b = expectedRootGUTAs[0].PassesFilter(filter)
+			a = expectedRootGUTAs[0].PassesFilter(filter)
 			So(a, ShouldBeTrue)
-			So(b, ShouldBeFalse)
 
 			filter.UIDs = nil
-			a, b = expectedRootGUTAs[testIndex(2)].PassesFilter(filter)
+			a = expectedRootGUTAs[testIndex(2)].PassesFilter(filter)
 			So(a, ShouldBeTrue)
-			So(b, ShouldBeTrue)
 
 			filter.GIDs = nil
-			a, b = expectedRootGUTAs[testIndex(2)].PassesFilter(filter)
+			a = expectedRootGUTAs[testIndex(2)].PassesFilter(filter)
 			So(a, ShouldBeTrue)
-			So(b, ShouldBeTrue)
 
-			filter.FTs = []db.DirGUTAFileType{db.DGUTAFileTypeDir}
-			a, b = expectedRootGUTAs[testIndex(3)].PassesFilter(filter)
+			filter.FT = db.DGUTAFileTypeDir
+			a = expectedRootGUTAs[testIndex(3)].PassesFilter(filter)
 			So(a, ShouldBeTrue)
-			So(b, ShouldBeTrue)
 
 			filter = &db.Filter{Age: db.DGUTAgeA1M}
-			a, b = expectedRootGUTAs[testIndex(7)+1].PassesFilter(filter)
+			a = expectedRootGUTAs[testIndex(8)+1].PassesFilter(filter)
 			So(a, ShouldBeTrue)
-			So(b, ShouldBeTrue)
 
 			filter.Age = db.DGUTAgeA7Y
-			a, b = expectedRootGUTAs[testIndex(7)+1].PassesFilter(filter)
+			a = expectedRootGUTAs[testIndex(8)+1].PassesFilter(filter)
 			So(a, ShouldBeFalse)
-			So(b, ShouldBeFalse)
 		})
 
 		expectedUIDs := []uint32{101, 102, 103}
 		expectedGIDs := []uint32{1, 2, 3}
-		expectedFTs := []db.DirGUTAFileType{
-			db.DGUTAFileTypeTemp,
-			db.DGUTAFileTypeBam, db.DGUTAFileTypeCram, db.DGUTAFileTypeDir,
-		}
+		expectedFTs := db.DGUTAFileTypeTemp |
+			db.DGUTAFileTypeBam |
+			db.DGUTAFileTypeCram |
+			db.DGUTAFileTypeDir
 
 		const numDirectories = 11
 
@@ -155,7 +143,7 @@ func TestDGUTA(t *testing.T) {
 			So(ds.Mtime, ShouldHappenBetween, expectedMtime.Add(-5*time.Second), expectedMtime.Add(5*time.Second))
 			So(ds.UIDs, ShouldResemble, expectedUIDs)
 			So(ds.GIDs, ShouldResemble, expectedGIDs)
-			So(ds.FTs, ShouldResemble, expectedFTs)
+			So(ds.FT, ShouldEqual, expectedFTs)
 		})
 
 		Convey("A DGUTA can be encoded and decoded", func() {
@@ -168,7 +156,7 @@ func TestDGUTA(t *testing.T) {
 
 			dirb, b := r.EncodeToBytes()
 			So(len(dirb), ShouldEqual, 2) // 98, 255
-			So(len(b), ShouldEqual, 1471)
+			So(len(b), ShouldEqual, 1755)
 
 			dd := db.DecodeDGUTAbytes(dirb, b)
 			So(dd, ShouldResemble, expected[0])
@@ -182,7 +170,7 @@ func TestDGUTA(t *testing.T) {
 			So(ds.Mtime, ShouldHappenBetween, expectedMtime.Add(-5*time.Second), expectedMtime.Add(5*time.Second))
 			So(ds.UIDs, ShouldResemble, expectedUIDs)
 			So(ds.GIDs, ShouldResemble, expectedGIDs)
-			So(ds.FTs, ShouldResemble, expectedFTs)
+			So(ds.FT, ShouldResemble, expectedFTs)
 		})
 
 		Convey("Given multiline dguta data", func() {
@@ -233,7 +221,7 @@ func TestDGUTA(t *testing.T) {
 							So(ds.Mtime, ShouldHappenBetween, expectedMtime.Add(-5*time.Second), expectedMtime.Add(5*time.Second))
 							So(ds.UIDs, ShouldResemble, expectedUIDs)
 							So(ds.GIDs, ShouldResemble, expectedGIDs)
-							So(ds.FTs, ShouldResemble, expectedFTs)
+							So(ds.FT, ShouldResemble, expectedFTs)
 
 							ds, errd = d.DirInfo("/", &db.Filter{Age: db.DGUTAgeA7Y})
 							So(errd, ShouldBeNil)
@@ -243,10 +231,9 @@ func TestDGUTA(t *testing.T) {
 							So(ds.Mtime, ShouldEqual, time.Unix(90, 0))
 							So(ds.UIDs, ShouldResemble, []uint32{101, 102})
 							So(ds.GIDs, ShouldResemble, []uint32{1, 2})
-							So(ds.FTs, ShouldResemble, []db.DirGUTAFileType{
-								db.DGUTAFileTypeTemp,
-								db.DGUTAFileTypeBam, db.DGUTAFileTypeCram,
-							})
+							So(ds.FT, ShouldResemble,
+								db.DGUTAFileTypeTemp|db.DGUTAFileTypeBam|db.DGUTAFileTypeCram,
+							)
 
 							ds, errd = d.DirInfo("/a/c/d", defaultFilter)
 							So(errd, ShouldBeNil)
@@ -256,7 +243,7 @@ func TestDGUTA(t *testing.T) {
 							So(ds.Mtime, ShouldHappenBetween, expectedMtime.Add(-5*time.Second), expectedMtime.Add(5*time.Second))
 							So(ds.UIDs, ShouldResemble, []uint32{102, 103})
 							So(ds.GIDs, ShouldResemble, []uint32{2, 3})
-							So(ds.FTs, ShouldResemble, []db.DirGUTAFileType{db.DGUTAFileTypeCram, db.DGUTAFileTypeDir})
+							So(ds.FT, ShouldResemble, db.DGUTAFileTypeCram|db.DGUTAFileTypeDir)
 
 							ds, errd = d.DirInfo("/a/b/d/g", defaultFilter)
 							So(errd, ShouldBeNil)
@@ -266,7 +253,7 @@ func TestDGUTA(t *testing.T) {
 							So(ds.Mtime, ShouldEqual, time.Unix(75, 0))
 							So(ds.UIDs, ShouldResemble, []uint32{101, 102})
 							So(ds.GIDs, ShouldResemble, []uint32{1})
-							So(ds.FTs, ShouldResemble, []db.DirGUTAFileType{db.DGUTAFileTypeCram, db.DGUTAFileTypeDir})
+							So(ds.FT, ShouldResemble, db.DGUTAFileTypeCram|db.DGUTAFileTypeDir)
 
 							_, errd = d.DirInfo("/foo", defaultFilter)
 							So(errd, ShouldNotBeNil)
@@ -280,7 +267,7 @@ func TestDGUTA(t *testing.T) {
 							So(ds.Mtime, ShouldEqual, time.Unix(80, 0))
 							So(ds.UIDs, ShouldResemble, []uint32{101, 102})
 							So(ds.GIDs, ShouldResemble, []uint32{1})
-							So(ds.FTs, ShouldResemble, expectedFTs)
+							So(ds.FT, ShouldResemble, expectedFTs)
 
 							ds, errd = d.DirInfo("/", &db.Filter{UIDs: []uint32{102}})
 							So(errd, ShouldBeNil)
@@ -290,7 +277,7 @@ func TestDGUTA(t *testing.T) {
 							So(ds.Mtime, ShouldEqual, time.Unix(90, 0))
 							So(ds.UIDs, ShouldResemble, []uint32{102})
 							So(ds.GIDs, ShouldResemble, []uint32{1, 2})
-							So(ds.FTs, ShouldResemble, []db.DirGUTAFileType{db.DGUTAFileTypeCram, db.DGUTAFileTypeDir})
+							So(ds.FT, ShouldResemble, db.DGUTAFileTypeCram|db.DGUTAFileTypeDir)
 
 							ds, errd = d.DirInfo("/", &db.Filter{GIDs: []uint32{1}, UIDs: []uint32{102}})
 							So(errd, ShouldBeNil)
@@ -300,17 +287,17 @@ func TestDGUTA(t *testing.T) {
 							So(ds.Mtime, ShouldEqual, time.Unix(75, 0))
 							So(ds.UIDs, ShouldResemble, []uint32{102})
 							So(ds.GIDs, ShouldResemble, []uint32{1})
-							So(ds.FTs, ShouldResemble, []db.DirGUTAFileType{db.DGUTAFileTypeCram})
+							So(ds.FT, ShouldResemble, db.DGUTAFileTypeCram)
 
 							ds, errd = d.DirInfo("/", &db.Filter{
 								GIDs: []uint32{1},
 								UIDs: []uint32{102},
-								FTs:  []db.DirGUTAFileType{db.DGUTAFileTypeTemp},
+								FT:   db.DGUTAFileTypeTemp,
 							})
 							So(errd, ShouldBeNil)
 							So(ds, ShouldBeNil)
 
-							ds, errd = d.DirInfo("/", &db.Filter{FTs: []db.DirGUTAFileType{db.DGUTAFileTypeTemp}})
+							ds, errd = d.DirInfo("/", &db.Filter{FT: db.DGUTAFileTypeTemp})
 							So(errd, ShouldBeNil)
 							So(ds.Count, ShouldEqual, 2)
 							So(ds.Size, ShouldEqual, 5+directorySize)
@@ -318,7 +305,7 @@ func TestDGUTA(t *testing.T) {
 							So(ds.Mtime, ShouldEqual, time.Unix(80, 0))
 							So(ds.UIDs, ShouldResemble, []uint32{101})
 							So(ds.GIDs, ShouldResemble, []uint32{1})
-							So(ds.FTs, ShouldResemble, []db.DirGUTAFileType{db.DGUTAFileTypeTemp})
+							So(ds.FT, ShouldResemble, db.DGUTAFileTypeTemp|db.DGUTAFileTypeBam|db.DGUTAFileTypeDir)
 
 							children := d.Children("/a")
 							So(children, ShouldResemble, []string{"/a/b", "/a/c"})
@@ -398,7 +385,7 @@ func TestDGUTA(t *testing.T) {
 								So(ds.Mtime, ShouldHappenBetween, expectedMtime.Add(-5*time.Second), expectedMtime.Add(5*time.Second))
 								So(ds.UIDs, ShouldResemble, []uint32{101, 102, 103})
 								So(ds.GIDs, ShouldResemble, []uint32{1, 2, 3})
-								So(ds.FTs, ShouldResemble, expectedFTs)
+								So(ds.FT, ShouldResemble, expectedFTs)
 
 								children := d.Children("/")
 								So(children, ShouldResemble, []string{"/a", "/i"})
@@ -414,7 +401,7 @@ func TestDGUTA(t *testing.T) {
 						So(err, ShouldBeNil)
 						So(info, ShouldResemble, &db.DBInfo{
 							NumDirs:     numDirectories,
-							NumDGUTAs:   620,
+							NumDGUTAs:   648,
 							NumParents:  7,
 							NumChildren: 10,
 						})
@@ -542,10 +529,11 @@ func testData(t *testing.T, refUnixTime int64) (dgutaData io.Reader, expectedRoo
 	}
 
 	expectedRootGUTAs = addGUTAs(t, []gutaInfo{
-		{1, 101, db.DGUTAFileTypeTemp, 1, 2, 5, 1029, 80, 80, orderOfOldAges},
-		{1, 101, db.DGUTAFileTypeBam, 2, 2, 10, 10, 80, 80, orderOfOldAges},
+		{1, 101, db.DGUTAFileTypeTemp | db.DGUTAFileTypeBam, 1, 1, 5, 5, 80, 80, orderOfOldAges},
+		{1, 101, db.DGUTAFileTypeBam, 1, 1, 5, 5, 80, 80, orderOfOldAges},
 		{1, 101, db.DGUTAFileTypeCram, 3, 3, 30, 30, 50, 60, orderOfOldAges},
-		{1, 101, db.DGUTAFileTypeDir, 0, 8, 0, 32768, math.MaxInt, 1, orderOfOldAges},
+		{1, 101, db.DGUTAFileTypeDir | db.DGUTAFileTypeTemp, 0, 1, 0, 4096, math.MaxInt, 1, orderOfOldAges},
+		{1, 101, db.DGUTAFileTypeDir, 0, 7, 0, 28672, math.MaxInt, 1, orderOfOldAges},
 		{1, 102, db.DGUTAFileTypeCram, 4, 4, 40, 40, 75, 75, orderOfOldAges},
 		{2, 102, db.DGUTAFileTypeCram, 5, 5, 5, 5, 90, 90, orderOfOldAges},
 		{2, 102, db.DGUTAFileTypeDir, 0, 2, 0, 8192, math.MaxInt, 1, orderOfOldAges},
@@ -565,10 +553,12 @@ func testData(t *testing.T, refUnixTime int64) (dgutaData io.Reader, expectedRoo
 		},
 		{
 			Dir: "/a/b/", GUTAs: addGUTAs(t, []gutaInfo{
-				{1, 101, db.DGUTAFileTypeTemp, 1, 2, 5, 1029, 80, 80, orderOfOldAges},
-				{1, 101, db.DGUTAFileTypeBam, 2, 2, 10, 10, 80, 80, orderOfOldAges},
+				{1, 101, db.DGUTAFileTypeBam | db.DGUTAFileTypeTemp, 1, 1, 5, 5, 80, 80, orderOfOldAges},
+				{1, 101, db.DGUTAFileTypeBam, 1, 1, 5, 5, 80, 80, orderOfOldAges},
 				{1, 101, db.DGUTAFileTypeCram, 3, 3, 30, 30, 50, 60, orderOfOldAges},
-				{1, 101, db.DGUTAFileTypeDir, 0, 7, 0, 28672, math.MaxInt, 1, orderOfOldAges},
+				{1, 101, db.DGUTAFileTypeDir, 0, 1, 0, 24576, math.MaxInt, 1, orderOfOldAges},
+				{1, 101, db.DGUTAFileTypeDir | db.DGUTAFileTypeTemp, 0, 1, 0, 4096, math.MaxInt, 1, orderOfOldAges},
+
 				{1, 102, db.DGUTAFileTypeCram, 4, 4, 40, 40, 75, 75, orderOfOldAges},
 			}),
 		},
@@ -594,23 +584,24 @@ func testData(t *testing.T, refUnixTime int64) (dgutaData io.Reader, expectedRoo
 		},
 		{
 			Dir: "/a/b/e/", GUTAs: addGUTAs(t, []gutaInfo{
-				{1, 101, db.DGUTAFileTypeTemp, 1, 2, 5, 1029, 80, 80, orderOfOldAges},
-				{1, 101, db.DGUTAFileTypeBam, 2, 2, 10, 10, 80, 80, orderOfOldAges},
-				{1, 101, db.DGUTAFileTypeDir, 0, 3, 0, 12288, math.MaxInt, 1, orderOfOldAges},
+				{1, 101, db.DGUTAFileTypeBam | db.DGUTAFileTypeTemp, 1, 1, 5, 5, 80, 80, orderOfOldAges},
+				{1, 101, db.DGUTAFileTypeBam, 1, 1, 5, 5, 80, 80, orderOfOldAges},
+				{1, 101, db.DGUTAFileTypeDir, 0, 2, 0, 8192, math.MaxInt, 1, orderOfOldAges},
+				{1, 101, db.DGUTAFileTypeDir | db.DGUTAFileTypeTemp, 0, 1, 0, 4096, math.MaxInt, 1, orderOfOldAges},
 			}),
 		},
 		{
 			Dir: "/a/b/e/h/", GUTAs: addGUTAs(t, []gutaInfo{
-				{1, 101, db.DGUTAFileTypeTemp, 1, 2, 5, 1029, 80, 80, orderOfOldAges},
-				{1, 101, db.DGUTAFileTypeBam, 2, 2, 10, 10, 80, 80, orderOfOldAges},
-				{1, 101, db.DGUTAFileTypeDir, 0, 2, 0, 8192, math.MaxInt, 1, orderOfOldAges},
+				{1, 101, db.DGUTAFileTypeBam | db.DGUTAFileTypeTemp, 1, 1, 5, 5, 80, 80, orderOfOldAges},
+				{1, 101, db.DGUTAFileTypeBam, 1, 1, 5, 5, 80, 80, orderOfOldAges},
+				{1, 101, db.DGUTAFileTypeDir, 0, 1, 0, 4096, math.MaxInt, 1, orderOfOldAges},
+				{1, 101, db.DGUTAFileTypeDir | db.DGUTAFileTypeTemp, 0, 1, 0, 4096, math.MaxInt, 1, orderOfOldAges},
 			}),
 		},
 		{
 			Dir: "/a/b/e/h/tmp/", GUTAs: addGUTAs(t, []gutaInfo{
-				{1, 101, db.DGUTAFileTypeTemp, 1, 2, 5, 1029, 80, 80, orderOfOldAges},
-				{1, 101, db.DGUTAFileTypeBam, 1, 1, 5, 5, 80, 80, orderOfOldAges},
-				{1, 101, db.DGUTAFileTypeDir, 0, 1, 0, 4096, math.MaxInt, 1, orderOfOldAges},
+				{1, 101, db.DGUTAFileTypeBam | db.DGUTAFileTypeTemp, 1, 1, 5, 5, 80, 80, orderOfOldAges},
+				{1, 101, db.DGUTAFileTypeDir | db.DGUTAFileTypeTemp, 0, 1, 0, 4096, math.MaxInt, 1, orderOfOldAges},
 			}),
 		},
 		{

@@ -28,7 +28,6 @@
 package basedirs
 
 import (
-	"maps"
 	"slices"
 	"testing"
 	"time"
@@ -108,11 +107,11 @@ func userSummary(path string, uid uint32, gids []uint32, atime int64,
 
 func dirsummary(path string, uids []uint32, gids []uint32, atime int64,
 	children []*basedirs.SubDir) basedirs.SummaryWithChildren {
-	ftsMap := make(map[db.DirGUTAFileType]struct{})
 
 	var (
 		size, num uint64
 		mod       time.Time
+		fileType  db.DirGUTAFileType
 	)
 
 	for _, c := range children {
@@ -124,13 +123,9 @@ func dirsummary(path string, uids []uint32, gids []uint32, atime int64,
 		}
 
 		for ft := range c.FileUsage {
-			ftsMap[ft] = struct{}{}
+			fileType |= ft
 		}
 	}
-
-	fts := slices.Collect(maps.Keys(ftsMap))
-
-	slices.Sort(fts)
 
 	s := basedirs.SummaryWithChildren{
 		DirSummary: db.DirSummary{
@@ -141,7 +136,7 @@ func dirsummary(path string, uids []uint32, gids []uint32, atime int64,
 			GIDs:  gids,
 			Atime: time.Unix(atime, 0),
 			Mtime: mod,
-			FTs:   fts,
+			FT:    fileType,
 		},
 		Children: children,
 	}

@@ -122,6 +122,7 @@ type FileInfo struct {
 	ATime        int64
 	CTime        int64
 	Inode        int64
+	Nlink        int64
 	EntryType    byte
 }
 
@@ -137,6 +138,7 @@ func fileInfoFromStatsInfo(currentDir *DirectoryPath, statsInfo *stats.FileInfo)
 		ATime:        statsInfo.ATime,
 		CTime:        statsInfo.CTime,
 		Inode:        statsInfo.Inode,
+		Nlink:        statsInfo.Nlink,
 		EntryType:    statsInfo.EntryType,
 	}
 }

@@ -84,7 +84,7 @@ type DirSummary struct {
 	Mtime   time.Time
 	UIDs    []uint32
 	GIDs    []uint32
-	FTs     []DirGUTAFileType
+	FT      DirGUTAFileType
 	Age     DirGUTAge
 	Modtime time.Time
 }
@@ -242,8 +242,8 @@ func (t *Tree) Where(dir string, filter *Filter, recurseCount split.SplitFn) (DC
 		filter = new(Filter)
 	}
 
-	if filter.FTs == nil {
-		filter.FTs = AllTypesExceptDirectories[:]
+	if filter.FT == 0 {
+		filter.FT = AllTypesExceptDirectories
 	}
 
 	dcss, err := t.recurseWhere(dir, filter, recurseCount, 0)

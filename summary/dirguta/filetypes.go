@@ -69,6 +69,7 @@ var filenameSuffixes = [...]state{ //nolint:gochecknoglobals
 			'Z': 66, // Compressed, FastQGZ, VCFGz
 			'z': 66, // Compressed, FastQGZ, VCFGz
 		},
+		typ: db.DGUTAFileTypeOther,
 	},
 	{ // 1: "/"
 		typ: db.DGUTAFileTypeDir,
@@ -78,29 +79,34 @@ var filenameSuffixes = [...]state{ //nolint:gochecknoglobals
 			'P': 3, // Compressed
 			'p': 3, // Compressed
 		},
+		typ: db.DGUTAFileTypeOther,
 	},
 	{ // 3: "p2"
 		chars: chars{
 			'I': 4, // Compressed
 			'i': 4, // Compressed
 		},
+		typ: db.DGUTAFileTypeOther,
 	},
 	{ // 4: "ip2"
 		chars: chars{
 			'Z': 5, // Compressed
 			'z': 5, // Compressed
 		},
+		typ: db.DGUTAFileTypeOther,
 	},
 	{ // 5: "zip2"
 		chars: chars{
 			'B': 6, // Compressed
 			'b': 6, // Compressed
 		},
+		typ: db.DGUTAFileTypeOther,
 	},
 	{ // 6: "bgz", "bzip2", "tgz", "xz", "zip"
 		chars: chars{
 			'.': 7, // Compressed
 		},
+		typ: db.DGUTAFileTypeOther,
 	},
 	{ // 7: ".bgz", ".bzip2", ".tgz", ".xz", ".zip"
 		typ: db.DGUTAFileTypeCompressed,
@@ -112,6 +118,7 @@ var filenameSuffixes = [...]state{ //nolint:gochecknoglobals
 			'T': 11, // FastA
 			't': 11, // FastA
 		},
+		typ: db.DGUTAFileTypeOther,
 	},
 	{ // 9: "fa", "fasta"
 		chars: chars{
@@ -126,18 +133,21 @@ var filenameSuffixes = [...]state{ //nolint:gochecknoglobals
 			'S': 12, // FastA
 			's': 12, // FastA
 		},
+		typ: db.DGUTAFileTypeOther,
 	},
 	{ // 12: "sta"
 		chars: chars{
 			'A': 13, // FastA
 			'a': 13, // FastA
 		},
+		typ: db.DGUTAFileTypeOther,
 	},
 	{ // 13: "asta"
 		chars: chars{
 			'F': 9, // FastA
 			'f': 9, // FastA
 		},
+		typ: db.DGUTAFileTypeOther,
 	},
 	{ // 14: "d"
 		chars: chars{
@@ -146,6 +156,7 @@ var filenameSuffixes = [...]state{ //nolint:gochecknoglobals
 			'M': 18, // Text
 			'm': 18, // Text
 		},
+		typ: db.DGUTAFileTypeOther,
 	},
 	{ // 15: "ed"
 		chars: chars{
@@ -154,11 +165,13 @@ var filenameSuffixes = [...]state{ //nolint:gochecknoglobals
 			'P': 16, // PedBed
 			'p': 16, // PedBed
 		},
+		typ: db.DGUTAFileTypeOther,
 	},
 	{ // 16: "bed", "ped"
 		chars: chars{
 			'.': 17, // PedBed
 		},
+		typ: db.DGUTAFileTypeOther,
 	},
 	{ // 17: ".bed", ".ped"
 		typ: db.DGUTAFileTypePedBed,
@@ -167,6 +180,7 @@ var filenameSuffixes = [...]state{ //nolint:gochecknoglobals
 		chars: chars{
 			'.': 19, // Text
 		},
+		typ: db.DGUTAFileTypeOther,
 	},
 	{ // 19: ".csv", ".dat", ".md", ".readme", ".text", ".txt", ".tsv"
 		typ: db.DGUTAFileTypeText,
@@ -179,6 +193,7 @@ var filenameSuffixes = [...]state{ //nolint:gochecknoglobals
 			'O': 26, // Log
 			'o': 26, // Log
 		},
+		typ: db.DGUTAFileTypeOther,
 	},
 	{ // 21: ".e", ".err", ".log", ".oe"
 		typ: db.DGUTAFileTypeLog,
@@ -188,35 +203,41 @@ var filenameSuffixes = [...]state{ //nolint:gochecknoglobals
 			'D': 23, // Text
 			'd': 23, // Text
 		},
+		typ: db.DGUTAFileTypeOther,
 	},
 	{ // 23: "dme"
 		chars: chars{
 			'A': 24, // Text
 			'a': 24, // Text
 		},
+		typ: db.DGUTAFileTypeOther,
 	},
 	{ // 24: "adme"
 		chars: chars{
 			'E': 25, // Text
 			'e': 25, // Text
 		},
+		typ: db.DGUTAFileTypeOther,
 	},
 	{ // 25: "eadme"
 		chars: chars{
 			'R': 19, // Text
 			'r': 19, // Text
 		},
+		typ: db.DGUTAFileTypeOther,
 	},
 	{ // 26: "oe", "log"
 		chars: chars{
 			'.': 21, // Log
 		},
+		typ: db.DGUTAFileTypeOther,
 	},
 	{ // 27: "f"
 		chars: chars{
 			'C': 28, // BCF, VCF
 			'c': 28, // BCF, VCF
 		},
+		typ: db.DGUTAFileTypeOther,
 	},
 	{ // 28: "cf"
 		chars: chars{
@@ -225,11 +246,13 @@ var filenameSuffixes = [...]state{ //nolint:gochecknoglobals
 			'V': 31, // VCF
 			'v': 31, // VCF
 		},
+		typ: db.DGUTAFileTypeOther,
 	},
 	{ // 29: "bcf"
 		chars: chars{
 			'.': 30, // BCF
 		},
+		typ: db.DGUTAFileTypeOther,
 	},
 	{ // 30: ".bcf"
 		typ: db.DGUTAFileTypeBCF,
@@ -238,6 +261,7 @@ var filenameSuffixes = [...]state{ //nolint:gochecknoglobals
 		chars: chars{
 			'.': 32, // VCF
 		},
+		typ: db.DGUTAFileTypeOther,
 	},
 	{ // 32: ".vcf"
 		typ: db.DGUTAFileTypeVCF,
@@ -247,12 +271,14 @@ var filenameSuffixes = [...]state{ //nolint:gochecknoglobals
 			'O': 34, // Log
 			'o': 34, // Log
 		},
+		typ: db.DGUTAFileTypeOther,
 	},
 	{ // 34: "og"
 		chars: chars{
 			'L': 26, // Log
 			'l': 26, // Log
 		},
+		typ: db.DGUTAFileTypeOther,
 	},
 	{ // 35: "m"
 		chars: chars{
@@ -261,6 +287,7 @@ var filenameSuffixes = [...]state{ //nolint:gochecknoglobals
 			'I': 46, // PedBed
 			'i': 46, // PedBed
 		},
+		typ: db.DGUTAFileTypeOther,
 	},
 	{ // 36: "am"
 		chars: chars{
@@ -273,11 +300,13 @@ var filenameSuffixes = [...]state{ //nolint:gochecknoglobals
 			'S': 44, // Sam
 			's': 44, // Sam
 		},
+		typ: db.DGUTAFileTypeOther,
 	},
 	{ // 37: "bam"
 		chars: chars{
 			'.': 38, // Bam
 		},
+		typ: db.DGUTAFileTypeOther,
 	},
 	{ // 38: ".bam"
 		typ: db.DGUTAFileTypeBam,
@@ -286,6 +315,7 @@ var filenameSuffixes = [...]state{ //nolint:gochecknoglobals
 		chars: chars{
 			'.': 40, // PedBed
 		},
+		typ: db.DGUTAFileTypeOther,
 	},
 	{ // 40: ".bim", ".fam", ".map"
 		typ: db.DGUTAFileTypePedBed,
@@ -295,11 +325,13 @@ var filenameSuffixes = [...]state{ //nolint:gochecknoglobals
 			'C': 42, // Cram
 			'c': 42, // Cram
 		},
+		typ: db.DGUTAFileTypeOther,
 	},
 	{ // 42: "cram"
 		chars: chars{
 			'.': 43, // Cram
 		},
+		typ: db.DGUTAFileTypeOther,
 	},
 	{ // 43: ".cram"
 		typ: db.DGUTAFileTypeCram,
@@ -308,6 +340,7 @@ var filenameSuffixes = [...]state{ //nolint:gochecknoglobals
 		chars: chars{
 			'.': 45, // Sam
 		},
+		typ: db.DGUTAFileTypeOther,
 	},
 	{ // 45: ".sam"
 		typ: db.DGUTAFileTypeSam,
@@ -317,11 +350,13 @@ var filenameSuffixes = [...]state{ //nolint:gochecknoglobals
 			'B': 39, // PedBed
 			'b': 39, // PedBed
 		},
+		typ: db.DGUTAFileTypeOther,
 	},
 	{ // 47: "err", "o"
 		chars: chars{
 			'.': 21, // Log
 		},
+		typ: db.DGUTAFileTypeOther,
 	},
 	{ // 48: "p"
 		chars: chars{
@@ -330,18 +365,21 @@ var filenameSuffixes = [...]state{ //nolint:gochecknoglobals
 			'I': 50, // Compressed
 			'i': 50, // Compressed
 		},
+		typ: db.DGUTAFileTypeOther,
 	},
 	{ // 49: "ap"
 		chars: chars{
 			'M': 39, // PedBed
 			'm': 39, // PedBed
 		},
+		typ: db.DGUTAFileTypeOther,
 	},
 	{ // 50: "ip"
 		chars: chars{
 			'Z': 6, // Compressed
 			'z': 6, // Compressed
 		},
+		typ: db.DGUTAFileTypeOther,
 	},
 	{ // 51: "q"
 		chars: chars{
@@ -350,11 +388,13 @@ var filenameSuffixes = [...]state{ //nolint:gochecknoglobals
 			'T': 54, // FastQ
 			't': 54, // FastQ
 		},
+		typ: db.DGUTAFileTypeOther,
 	},
 	{ // 52: "fq"
 		chars: chars{
 			'.': 53, // FastQ
 		},
+		typ: db.DGUTAFileTypeOther,
 	},
 	{ // 53: ".fastq", ".fq"
 		typ: db.DGUTAFileTypeFastq,
@@ -364,30 +404,35 @@ var filenameSuffixes = [...]state{ //nolint:gochecknoglobals
 			'S': 55, // FastQ
 			's': 55, // FastQ
 		},
+		typ: db.DGUTAFileTypeOther,
 	},
 	{ // 55: "stq"
 		chars: chars{
 			'A': 56, // FastQ
 			'a': 56, // FastQ
 		},
+		typ: db.DGUTAFileTypeOther,
 	},
 	{ // 56: "astq"
 		chars: chars{
 			'F': 52, // FastQ
 			'f': 52, // FastQ
 		},
+		typ: db.DGUTAFileTypeOther,
 	},
 	{ // 57: "r"
 		chars: chars{
 			'R': 58, // Log
 			'r': 58, // Log
 		},
+		typ: db.DGUTAFileTypeOther,
 	},
 	{ // 58: "rr"
 		chars: chars{
 			'E': 47, // Log
 			'e': 47, // Log
 		},
+		typ: db.DGUTAFileTypeOther,
 	},
 	{ // 59: "t"
 		chars: chars{
@@ -398,18 +443,21 @@ var filenameSuffixes = [...]state{ //nolint:gochecknoglobals
 			'X': 62, // Text
 			'x': 62, // Text
 		},
+		typ: db.DGUTAFileTypeOther,
 	},
 	{ // 60: "at"
 		chars: chars{
 			'D': 18, // Text
 			'd': 18, // Text
 		},
+		typ: db.DGUTAFileTypeOther,
 	},
 	{ // 61: "ut"
 		chars: chars{
 			'O': 47, // Log
 			'o': 47, // Log
 		},
+		typ: db.DGUTAFileTypeOther,
 	},
 	{ // 62: "xt"
 		chars: chars{
@@ -418,18 +466,21 @@ var filenameSuffixes = [...]state{ //nolint:gochecknoglobals
 			'T': 18, // Text
 			't': 18, // Text
 		},
+		typ: db.DGUTAFileTypeOther,
 	},
 	{ // 63: "ext"
 		chars: chars{
 			'T': 18, // Text
 			't': 18, // Text
 		},
+		typ: db.DGUTAFileTypeOther,
 	},
 	{ // 64: "v"
 		chars: chars{
 			'S': 65, // Text
 			's': 65, // Text
 		},
+		typ: db.DGUTAFileTypeOther,
 	},
 	{ // 65: "sv"
 		chars: chars{
@@ -438,6 +489,7 @@ var filenameSuffixes = [...]state{ //nolint:gochecknoglobals
 			'T': 18, // Text
 			't': 18, // Text
 		},
+		typ: db.DGUTAFileTypeOther,
 	},
 	{ // 66: "z"
 		chars: chars{
@@ -446,6 +498,7 @@ var filenameSuffixes = [...]state{ //nolint:gochecknoglobals
 			'X': 6,  // Compressed
 			'x': 6,  // Compressed
 		},
+		typ: db.DGUTAFileTypeOther,
 	},
 	{ // 67: "gz"
 		chars: chars{
@@ -455,6 +508,7 @@ var filenameSuffixes = [...]state{ //nolint:gochecknoglobals
 			'T': 6,  // Compressed
 			't': 6,  // Compressed
 		},
+		typ: db.DGUTAFileTypeOther,
 	},
 	{ // 68: ".gz"
 		chars: chars{
@@ -695,4 +749,15 @@ func hasTempSuffix(name []byte) bool {
 	}
 
 	return tmpSuffixes[place].typ == db.DGUTAFileTypeTemp
+}
+
+// FileTypeWithTemp returns the file type OR'd with the Temp bit if appropriate.
+func FileTypeWithTemp(name []byte, isTempDir bool) db.DirGUTAFileType {
+	base := FilenameToType(name)
+
+	if isTempDir || IsTemp(name) {
+		base |= db.DGUTAFileTypeTemp
+	}
+
+	return base
 }

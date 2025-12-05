@@ -49,7 +49,7 @@ type GUTA struct {
 func (g GUTA) writeTo(w byteio.StickyEndianWriter) {
 	w.WriteUintX(uint64(g.GID))
 	w.WriteUintX(uint64(g.UID))
-	w.WriteUint8(uint8(g.FT))
+	w.WriteUint16(uint16(g.FT))
 	w.WriteUint8(uint8(g.Age))
 	w.WriteUintX(g.Count)
 	w.WriteUintX(g.Size)
@@ -60,7 +60,7 @@ func (g GUTA) writeTo(w byteio.StickyEndianWriter) {
 func (g *GUTA) readFrom(r byteio.StickyEndianReader) {
 	g.GID = uint32(r.ReadUintX()) //nolint:gosec
 	g.UID = uint32(r.ReadUintX()) //nolint:gosec
-	g.FT = DirGUTAFileType(r.ReadUint8())
+	g.FT = DirGUTAFileType(r.ReadUint16())
 	g.Age = DirGUTAge(r.ReadUint8())
 	g.Count = r.ReadUintX()
 	g.Size = r.ReadUintX()
@@ -82,19 +82,17 @@ func (g *GUTA) readFrom(r byteio.StickyEndianReader) {
 type Filter struct {
 	GIDs []uint32
 	UIDs []uint32
-	FTs  []DirGUTAFileType
+	FT   DirGUTAFileType
 	Age  DirGUTAge
 }
 
 // PassesFilter checks to see if this GUTA has a GID in the filter's GIDs
 // (considered true if GIDs is nil), and has a UID in the filter's UIDs
 // (considered true if UIDs is nil), and an Age the same as the filter's Age,
-// and has an FT in the filter's FTs (considered true if FTs is nil). The second
-// bool returned will match the first unless FT is DGUTAFileTypeTemp, in which
-// case it will be false, unless the filter FTs == []{DGUTAFileTypeTemp}).
-func (g *GUTA) PassesFilter(filter *Filter) (bool, bool) {
+// and has an FT in the filter's FTs (considered true if FTs is nil).
+func (g *GUTA) PassesFilter(filter *Filter) bool {
 	if !g.passesGIDFilter(filter) || !g.passesUIDFilter(filter) || !g.passesAgeFilter(filter) {
-		return false, false
+		return false
 	}
 
 	return g.passesFTFilter(filter)
@@ -132,30 +130,13 @@ func (g *GUTA) passesUIDFilter(filter *Filter) bool {
 	return false
 }
 
-// passesFTFilter tells you if our FT is in the filter's FTs. Also returns true
-// if filter or filter.FTs in nil.
-//
-// The second return bool will match the first, unless our FT is
-// DGUTAFileTypeTemp, in which case it will always be false, unless the filter's
-// FTs only hold DGUTAFileTypeTemp.
-func (g *GUTA) passesFTFilter(filter *Filter) (bool, bool) {
-	if filter == nil || filter.FTs == nil {
-		return true, g.FT != DGUTAFileTypeTemp
+// passesFTFilter returns true if this GUTA's file type matches the filter's file types.
+func (g *GUTA) passesFTFilter(filter *Filter) bool {
+	if filter == nil || filter.FT == 0 {
+		return true
 	}
 
-	for _, ft := range filter.FTs {
-		if ft == g.FT {
-			return true, !g.amTempAndNotFilteredJustForTemp(filter)
-		}
-	}
-
-	return false, false
-}
-
-// amTempAndNotFilteredJustForTemp tells you if our FT is DGUTAFileTypeTemp and
-// the filter has more than one type set.
-func (g *GUTA) amTempAndNotFilteredJustForTemp(filter *Filter) bool {
-	return g.FT == DGUTAFileTypeTemp && len(filter.FTs) > 1
+	return g.FT&filter.FT > 0
 }
 
 // passesAgeFilter tells you if our age is the same as the filter's Age. Also
@@ -220,17 +201,16 @@ func (g GUTAs) Summary(filter *Filter) *DirSummary { //nolint:funlen
 
 	uniqueUIDs := make(map[uint32]bool)
 	uniqueGIDs := make(map[uint32]bool)
-	uniqueFTs := make(map[DirGUTAFileType]bool)
+
+	var fileType DirGUTAFileType
 
 	for _, guta := range g {
-		passes, passesDisallowingTemp := guta.PassesFilter(filter)
-		if passes {
-			uniqueFTs[guta.FT] = true
-		}
-
-		if !passesDisallowingTemp {
+		passes := guta.PassesFilter(filter)
+		if !passes {
 			continue
 		}
+
+		fileType |= guta.FT
 
 		addGUTAToSummary(guta, &count, &size, &atime, &mtime, &updateTime, uniqueUIDs, uniqueGIDs)
 	}
@@ -246,7 +226,7 @@ func (g GUTAs) Summary(filter *Filter) *DirSummary { //nolint:funlen
 		Mtime: time.Unix(mtime, 0),
 		UIDs:  boolMapToSortedKeys(uniqueUIDs),
 		GIDs:  boolMapToSortedKeys(uniqueGIDs),
-		FTs:   boolMapToSortedKeys(uniqueFTs),
+		FT:    fileType,
 		Age:   age,
 	}
 }

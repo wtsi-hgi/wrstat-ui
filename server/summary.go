@@ -74,7 +74,7 @@ func (s *Server) dgutaDStoSummary(dds *db.DirSummary) *DirSummary {
 		Mtime:     dds.Mtime,
 		Users:     s.uidsToUsernames(dds.UIDs),
 		Groups:    s.gidsToNames(dds.GIDs),
-		FileTypes: s.ftsToNames(dds.FTs),
+		FileTypes: s.ftsToNames(dds.FT),
 		Age:       dds.Age,
 	}
 }
@@ -150,11 +150,30 @@ func (s *Server) gidsToNames(gids []uint32) []string {
 }
 
 // ftsToNames converts the given file types to their names, sorted on the names.
-func (s *Server) ftsToNames(fts []db.DirGUTAFileType) []string {
-	names := make([]string, len(fts))
+func (s *Server) ftsToNames(fts db.DirGUTAFileType) []string {
+	names := make([]string, 0)
 
-	for i, ft := range fts {
-		names[i] = ft.String()
+	for _, ft := range []db.DirGUTAFileType{
+		db.DGUTAFileTypeTemp,
+		db.DGUTAFileTypeVCF,
+		db.DGUTAFileTypeVCFGz,
+		db.DGUTAFileTypeBCF,
+		db.DGUTAFileTypeSam,
+		db.DGUTAFileTypeBam,
+		db.DGUTAFileTypeCram,
+		db.DGUTAFileTypeFasta,
+		db.DGUTAFileTypeFastq,
+		db.DGUTAFileTypeFastqGz,
+		db.DGUTAFileTypePedBed,
+		db.DGUTAFileTypeCompressed,
+		db.DGUTAFileTypeText,
+		db.DGUTAFileTypeLog,
+		db.DGUTAFileTypeDir,
+		db.DGUTAFileTypeOther,
+	} {
+		if fts&ft != 0 {
+			names = append(names, ft.String())
+		}
 	}
 
 	sort.Strings(names)
