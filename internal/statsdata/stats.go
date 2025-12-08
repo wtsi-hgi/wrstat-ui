@@ -179,7 +179,6 @@ var nextInode uint64 = 1000 //nolint:gochecknoglobals
 // AddFile adds file data to a directory, creating the directory in the tree if
 // necessary.
 func AddFile(d *Directory, path string, uid, gid uint32, size, atime, mtime int64) *File {
-
 	for part := range strings.SplitSeq(filepath.Dir(path), "/") {
 		d = d.AddDirectory(part)
 	}
