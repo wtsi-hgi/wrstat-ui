@@ -95,16 +95,30 @@ type DB interface {
 	Add(dguta db.RecordDGUTA) error
 }
 
+// inodeEntry stores metadata for a specific inode to track hardlinks.
+// It records the file type(s), the size among all hardlinks,
+// the oldest access time, the newest modification time, and the associated
+// GUTA keys for group, user, and filetype tracking.
+type inodeEntry struct {
+	fileType db.DirGUTAFileType
+	size     int64
+	atime    int64
+	mtime    int64
+	gid      uint32
+	uid      uint32
+}
+
 // DirGroupUserTypeAge is used to summarise file stats by directory, group,
 // user, file type and age.
 type DirGroupUserTypeAge struct {
-	parent    *DirGroupUserTypeAge
-	db        DB
-	store     gutaStore
-	thisDir   *summary.DirectoryPath
-	children  []string
-	now       int64
-	isTempDir bool
+	parent        *DirGroupUserTypeAge
+	db            DB
+	store         gutaStore
+	thisDir       *summary.DirectoryPath
+	children      []string
+	now           int64
+	isTempDir     bool
+	seenHardlinks map[int64]*inodeEntry
 }
 
 // NewDirGroupUserTypeAge returns a DirGroupUserTypeAge.
@@ -112,17 +126,18 @@ func NewDirGroupUserTypeAge(db DB) summary.OperationGenerator {
 	return newDirGroupUserTypeAge(db, time.Now().Unix())
 }
 
-func newDirGroupUserTypeAge(db DB, refTime int64) summary.OperationGenerator {
+func newDirGroupUserTypeAge(d DB, refTime int64) summary.OperationGenerator {
 	now := time.Now().Unix()
 
 	var last *DirGroupUserTypeAge
 
 	return func() summary.Operation {
 		last = &DirGroupUserTypeAge{
-			parent: last,
-			db:     db,
-			store:  gutaStore{make(map[gutaKey]*summary.SummaryWithTimes), refTime},
-			now:    now,
+			parent:        last,
+			db:            d,
+			store:         gutaStore{make(map[gutaKey]*summary.SummaryWithTimes), refTime},
+			now:           now,
+			seenHardlinks: make(map[int64]*inodeEntry),
 		}
 
 		return last
@@ -157,24 +172,82 @@ func (d *DirGroupUserTypeAge) Add(info *summary.FileInfo) error { //nolint:funle
 		return nil
 	}
 
-	gutaKeysA := gutaKeyPool.Get().(*[maxNumOfGUTAKeys]gutaKey) //nolint:errcheck,forcetypeassert
-	gKeys := gutaKeys(gutaKeysA[:0])
-	atime := info.ATime
+	ft := FileTypeWithTemp(info.Name, d.isTempDir)
 
+	atime := info.ATime
 	if info.IsDir() {
 		atime = d.now
 	}
 
-	gKeys.append(info.GID, info.UID, FilenameToType(info.Name))
-
-	if d.isTempDir || IsTemp(info.Name) {
-		gKeys.append(info.GID, info.UID, db.DGUTAFileTypeTemp)
+	if d.handleHardlink(info, ft, atime) {
+		return nil
 	}
 
-	d.addForEach(gKeys, info.Size, atime, maxInt(0, info.MTime))
+	gutaKeysA := gutaKeyPool.Get().(*[maxNumOfGUTAKeys]gutaKey) //nolint:errcheck,forcetypeassert
+	gKeys := gutaKeys(gutaKeysA[:0])
+
+	gKeys.append(info.GID, info.UID, ft)
+
+	d.store.addForEach(gKeys, info.Size, atime, max(0, info.MTime))
 	gutaKeyPool.Put(gutaKeysA)
 
 	return nil
+}
+
+// handleHardlink checks if a file is a hardlink that has been seen before.
+// If it is a new inode, it adds it to the seenHardlinks map and updates the store.
+// If it is an existing inode, it adjusts counts and sizes to avoid double-counting,
+// merging file types and updating atime and mtime as needed. Returns true if the
+// file was handled as a hardlink, false otherwise.
+func (d *DirGroupUserTypeAge) handleHardlink(info *summary.FileInfo, //nolint:funlen
+	ft db.DirGUTAFileType, atime int64) bool {
+	if info.Nlink <= 1 || info.Inode == 0 {
+		return false
+	}
+
+	entry, exists := d.seenHardlinks[info.Inode]
+
+	if !exists {
+		keys := gutaKeysFromEntry(info.GID, info.UID, ft)
+
+		entry = &inodeEntry{
+			fileType: ft,
+			size:     info.Size,
+			atime:    atime,
+			mtime:    info.MTime,
+			gid:      info.GID,
+			uid:      info.UID,
+		}
+		d.seenHardlinks[info.Inode] = entry
+		d.store.addForEach(keys, info.Size, atime, info.MTime)
+
+		return true
+	}
+
+	keys := gutaKeysFromEntry(info.GID, info.UID, entry.fileType)
+
+	d.store.subtractFromStore(keys, entry.size)
+
+	entry.fileType |= ft
+	entry.size = max(entry.size, info.Size)
+	entry.atime = min(entry.atime, atime)
+	entry.mtime = max(entry.mtime, info.MTime)
+
+	keys = gutaKeysFromEntry(info.GID, info.UID, entry.fileType)
+
+	d.store.addForEach(keys, entry.size, entry.atime, entry.mtime)
+
+	return true
+}
+
+// gutaKeysFromEntry returns a gutaKeys slice containing the single key
+// for a given GID, UID, and file type. Used when merging or adding inode info.
+func gutaKeysFromEntry(gid, uid uint32, ft db.DirGUTAFileType) gutaKeys {
+	var keys gutaKeys
+
+	keys.append(gid, uid, ft)
+
+	return keys
 }
 
 type gutaKey struct {
@@ -240,24 +313,11 @@ func (g *gutaKeys) append(gid, uid uint32, fileType db.DirGUTAFileType) {
 	}
 }
 
-// maxInt returns the greatest of the inputs.
-func maxInt(ints ...int64) int64 {
-	var maxInt int64
-
-	for _, i := range ints {
-		if i > maxInt {
-			maxInt = i
-		}
-	}
-
-	return maxInt
-}
-
 // addForEach breaks path into each directory, gets a gutaStore for each and
 // adds a file of the given size to them under the given gutaKeys.
-func (d *DirGroupUserTypeAge) addForEach(gutaKeys []gutaKey, size int64, atime int64, mtime int64) {
+func (store *gutaStore) addForEach(gutaKeys []gutaKey, size int64, atime int64, mtime int64) {
 	for _, agutaKey := range gutaKeys {
-		d.store.add(agutaKey, size, atime, mtime)
+		store.add(agutaKey, size, atime, mtime)
 	}
 }
 
@@ -329,7 +389,7 @@ func (d *DirGroupUserTypeAge) Output() error {
 			return err
 		}
 	} else {
-		d.parent.addChild(d.store)
+		d.parent.addChild(d.store, d.seenHardlinks)
 	}
 
 	d.clear()
@@ -337,12 +397,64 @@ func (d *DirGroupUserTypeAge) Output() error {
 	return nil
 }
 
-func (d *DirGroupUserTypeAge) addChild(child gutaStore) {
+// addChild merges a child directory's store and seen inodes into this DirGroupUserTypeAge.
+func (d *DirGroupUserTypeAge) addChild(child gutaStore, childSeen map[int64]*inodeEntry) {
+	d.mergeSeenHardlinks(child, childSeen)
+	d.mergeSumMaps(child)
+}
+
+// mergeSeenHardlinks merges the child's inode map into the parent's
+// updating existing entries if needed.
+func (d *DirGroupUserTypeAge) mergeSeenHardlinks(child gutaStore, childSeen map[int64]*inodeEntry) {
+	for inode, cEntry := range childSeen {
+		if pEntry, exists := d.seenHardlinks[inode]; exists {
+			d.updateExistingHardlink(child, pEntry, cEntry)
+		} else {
+			d.seenHardlinks[inode] = cEntry
+		}
+	}
+}
+
+// updateExistingHardlink merges two inode entries (parent & child) and updates store accordingly.
+func (d *DirGroupUserTypeAge) updateExistingHardlink(child gutaStore, pEntry, cEntry *inodeEntry) {
+	existingPKeys := gutaKeysFromEntry(pEntry.gid, pEntry.uid, pEntry.fileType)
+
+	d.store.subtractFromStore(existingPKeys, pEntry.size)
+
+	existingCKeys := gutaKeysFromEntry(cEntry.gid, cEntry.uid, cEntry.fileType)
+
+	child.subtractFromStore(existingCKeys, cEntry.size)
+
+	newTypes := cEntry.fileType &^ pEntry.fileType
+
+	pEntry.fileType |= newTypes
+	pEntry.size = max(pEntry.size, cEntry.size)
+	pEntry.atime = min(pEntry.atime, cEntry.atime)
+	pEntry.mtime = max(pEntry.mtime, cEntry.mtime)
+
+	updatedKeys := gutaKeysFromEntry(pEntry.gid, pEntry.uid, pEntry.fileType)
+
+	child.addForEach(updatedKeys, pEntry.size, pEntry.atime, pEntry.mtime)
+}
+
+// mergeSumMaps combines a child gutaStore's summaries into the parent.
+func (d *DirGroupUserTypeAge) mergeSumMaps(child gutaStore) {
 	for key, summary := range child.sumMap {
 		if existing, ok := d.store.sumMap[key]; ok {
 			existing.AddSummary(summary)
 		} else {
 			d.store.sumMap[key] = summary
+		}
+	}
+}
+
+// subtractFromStore subtracts a size and count from the store summaries
+// for each key.
+func (store *gutaStore) subtractFromStore(keys gutaKeys, size int64) {
+	for _, key := range keys {
+		if summary, ok := store.sumMap[key]; ok {
+			summary.Count--
+			summary.Size -= size
 		}
 	}
 }
@@ -376,9 +488,8 @@ func (d *DirGroupUserTypeAge) outputRoot(dguta db.RecordDGUTA) error {
 }
 
 func (d *DirGroupUserTypeAge) clear() {
-	for k := range d.store.sumMap {
-		delete(d.store.sumMap, k)
-	}
+	clear(d.store.sumMap)
+	clear(d.seenHardlinks)
 
 	d.thisDir = nil
 	d.children = nil

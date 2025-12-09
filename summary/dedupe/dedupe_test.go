@@ -40,13 +40,13 @@ import (
 func TestDedupe(t *testing.T) {
 	Convey("Dedupe should be able to sort stats.gz data by size, and inode-mountpoint", t, func() {
 		f := statsdata.NewRoot("/", 0)
-		statsdata.AddFile(f, "opt/teams/teamA/user1/bFile.txt", 0, 0, 200, 0, 0)
-		statsdata.AddFile(f, "opt/teams/teamB/user2/aFile.txt", 0, 0, 400, 0, 0)
+		statsdata.AddFileWithInode(f, "opt/teams/teamA/user1/bFile.txt", 0, 0, 200, 0, 0, 0, 2)
+		statsdata.AddFileWithInode(f, "opt/teams/teamB/user2/aFile.txt", 0, 0, 400, 0, 0, 0, 2)
 
-		statsdata.AddFile(f, "opt/teams/teamA/user1/aFile.txt", 0, 0, 300, 0, 0).Inode = 1
-		statsdata.AddFile(f, "opt/teams/teamA/user2/aFile.txt", 0, 0, 300, 0, 0).Inode = 3
-		statsdata.AddFile(f, "opt/teams/teamA/user3/cFile.txt", 0, 0, 300, 0, 0).Inode = 1
-		statsdata.AddFile(f, "opt/teams/teamB/user3/cFile.txt", 0, 0, 400, 0, 0).Inode = 2
+		statsdata.AddFileWithInode(f, "opt/teams/teamA/user1/aFile.txt", 0, 0, 300, 0, 0, 1, 2)
+		statsdata.AddFileWithInode(f, "opt/teams/teamA/user2/aFile.txt", 0, 0, 300, 0, 0, 3, 1)
+		statsdata.AddFileWithInode(f, "opt/teams/teamA/user3/cFile.txt", 0, 0, 300, 0, 0, 1, 2)
+		statsdata.AddFileWithInode(f, "opt/teams/teamB/user3/cFile.txt", 0, 0, 400, 0, 0, 2, 1)
 
 		s := summary.NewSummariser(stats.NewStatsParser(f.AsReader()))
 
