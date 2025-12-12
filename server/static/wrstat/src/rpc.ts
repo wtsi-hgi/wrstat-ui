@@ -40,7 +40,9 @@ export type Child = {
 	count: number;
 	size: number;
 	atime: string;
+	common_atime: number;
 	mtime: string;
+	common_mtime: number;
 	users: string[];
 	groups: string[];
 	filetypes: string[];

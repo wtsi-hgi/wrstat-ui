@@ -77,16 +77,18 @@ func (t *Tree) CloseOnly(paths []string) error {
 // directory. It also holds which users and groups own files nested under the
 // directory, what the file types are, and the age group.
 type DirSummary struct {
-	Dir     string
-	Count   uint64
-	Size    uint64
-	Atime   time.Time
-	Mtime   time.Time
-	UIDs    []uint32
-	GIDs    []uint32
-	FT      DirGUTAFileType
-	Age     DirGUTAge
-	Modtime time.Time
+	Dir         string
+	Count       uint64
+	Size        uint64
+	Atime       time.Time
+	CommonATime uint8
+	Mtime       time.Time
+	CommonMTime uint8
+	UIDs        []uint32
+	GIDs        []uint32
+	FT          DirGUTAFileType
+	Age         DirGUTAge
+	Modtime     time.Time
 }
 
 // DCSs is a Size-sortable slice of DirSummary.

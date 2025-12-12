@@ -200,3 +200,7 @@ details #disktree>div:first-child {
 #treeTabs {
 	margin-top: 1em;
 }
+
+.treeFilter label.wrap-label {
+    white-space: normal;                 
+}

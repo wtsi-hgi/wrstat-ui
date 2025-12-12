@@ -41,7 +41,7 @@ interface State {
 	groups?: number[];
 	users?: number[];
 	useCount?: boolean;
-	useMTime?: boolean;
+	colourBy?: number;
 	byUser?: boolean;
 	viewDiskList?: boolean;
 	[x: string]: any;

@@ -225,7 +225,12 @@ func (m *mockDB) has(dir string, gid, uid uint32, ft db.DirGUTAFileType,
 	}
 
 	for _, dguta := range dgutas {
-		if *dguta == expected {
+		got := *dguta
+
+		got.ATimeRanges = [9]uint64{}
+		got.MTimeRanges = [9]uint64{}
+
+		if got == expected {
 			return true
 		}
 	}
