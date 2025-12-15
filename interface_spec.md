@@ -232,7 +232,8 @@ type DGUTAWriter interface {
   // Implementations persist this so MountTimestamps() can return it.
   SetMountPath(mountPath string)
 
-  // SetUpdatedAt sets the dataset snapshot time (typically from stats.gz mtime).
+  // SetUpdatedAt sets the dataset snapshot time (typically from stats.gz
+  // mtime).
   // MUST be called before Add().
   // Implementations persist this so MountTimestamps() can return it, and
   // DirSummary.Modtime can be populated correctly.
@@ -281,32 +282,18 @@ The current `basedirs.BaseDirs` struct:
 - Stores everything in a Bolt transaction
 
 The refactored design keeps the calculation logic in
-`basedirs.BaseDirs.Output()` but delegates all storage operations to a `Store`
-interface. Storage must remain streaming-friendly: `BaseDirs.Output()` iterates
-its computed `IDAgeDirs`, hands references to the Store as it goes, and must
-not create extra copies of large slices or maps. The Store consumes data as it
-is delivered and must not require callers to materialise everything in memory
-at once.
+`basedirs.BaseDirs.Output()` but delegates all persistence to a storage-neutral
+`Store` interface.
+
+Hard requirement (streaming + minimal copies): `BaseDirs.Output()` MUST NOT
+build a second full in-memory representation of the data (no “OutputData”
+containing full slices/maps of everything). Instead, it must call the Store as
+it iterates its existing computed structures.
 
 Define in `basedirs`:
 
 ```go
 package basedirs
-
-// OutputData contains all calculated basedirs data ready for persistence.
-// BaseDirs.Output() populates this struct, then calls Store.Persist().
-type OutputData struct {
-  GroupUsage   []*Usage
-  UserUsage    []*Usage
-  GroupSubDirs map[SubDirKey][]*SubDir
-  UserSubDirs  map[SubDirKey][]*SubDir
-  // HistoryUpdates contains new history points to append.
-  // Key is (gid, mountpoint). Value is the new History point.
-  // The Store must only append if the point's Date > last stored date.
-  HistoryUpdates map[HistoryKey]History
-  // UpdatedAt is the dataset timestamp for this run.
-  UpdatedAt time.Time
-}
 
 // SubDirKey identifies a subdir entry.
 type SubDirKey struct {
@@ -316,20 +303,64 @@ type SubDirKey struct {
 }
 
 // HistoryKey identifies a history series.
+// MountPath MUST be an absolute mount directory path ending with '/'.
 type HistoryKey struct {
-  GID        uint32
-  MountPoint string
+  GID       uint32
+  MountPath string
 }
 
 // Store is the storage backend interface for basedirs persistence.
+//
+// This interface is domain-oriented (no buckets/tx/cursors/[]byte), and is
+// designed so BaseDirs.Output() can stream its writes without materialising
+// extra large slices.
 type Store interface {
-  // Persist stores all the calculated basedirs data.
-  // The Store handles all storage details (transactions, encoding, etc.) and
-  // must accept that callers reuse slices while iterating; Persist must not
-  // require callers to copy or buffer the whole dataset. After storing, it
-  // must compute DateNoSpace/DateNoFiles for each group usage entry based on
-  // the stored history and update those fields.
-  Persist(data *OutputData) error
+  // SetMountPath sets the mount directory path for this dataset.
+  // MUST be called before any write methods.
+  SetMountPath(mountPath string)
+
+  // SetUpdatedAt sets the dataset snapshot time (stats.gz mtime).
+  // MUST be called before any write methods.
+  SetUpdatedAt(updatedAt time.Time)
+
+  // Reset prepares the destination for a new summarise run for this mount.
+  //
+  // It MUST remove/overwrite all non-history data for this mount (group/user
+  // usage and subdir breakdown) so the run produces a full replacement of
+  // those views.
+  //
+  // It MUST NOT delete history; history continuity is append-only and is
+  // handled via AppendGroupHistory (and, for Bolt, optional seeding from a
+  // previous DB in the constructor).
+  //
+  // Notes:
+  // - For Bolt, which writes to a fresh file per run, Reset will typically be
+  //   a no-op beyond internal initialisation.
+  // - For ClickHouse (single logical database), Reset corresponds to
+  //   truncating/deleting rows for this mount in the relevant tables.
+  Reset() error
+
+  // Put* methods persist one logical record.
+  PutGroupUsage(u *Usage) error
+  PutUserUsage(u *Usage) error
+  PutGroupSubDirs(key SubDirKey, subdirs []*SubDir) error
+  PutUserSubDirs(key SubDirKey, subdirs []*SubDir) error
+
+  // AppendGroupHistory applies the append-only rule for histories.
+  // It MUST append only if point.Date is strictly after the last stored
+  // history point for (key.GID, key.MountPath).
+  AppendGroupHistory(key HistoryKey, point History) error
+
+  // Finalize is called once after all Put*/Append calls.
+  // It MUST update DateNoSpace/DateNoFiles for each stored group usage entry
+  // based on the stored history (matching current storeDateQuotasFill).
+  //
+  // Transaction semantics: the Store MAY implement Reset() as "begin" and
+  // Finalize() as "commit" (i.e. keep one internal transaction open across
+  // Put*/Append calls) to preserve atomic updates. This is the mechanism by
+  // which implementations get a single-transaction write without requiring the
+  // caller to pass a monolithic Persist() payload.
+  Finalize() error
 
   Close() error
 }
@@ -346,16 +377,18 @@ func NewCreator(store Store, quotas *Quotas) (*BaseDirs, error)
 ```
 
 The `BaseDirs.Output()` method changes from directly using Bolt to:
-1. Calculate all Usage, SubDir, and History data (same logic as today)
-2. Populate an `OutputData` struct
-3. Call `store.Persist(data)`
+1. Call `store.Reset()`
+2. Iterate the already-computed usage/subdir/history structures (same logic as
+  today) and call the appropriate `store.Put*` / `store.AppendGroupHistory`
+  methods
+3. Call `store.Finalize()`
 
 The Bolt `Store` implementation:
 - Opens/creates the basedirs.db file in its constructor
 - If `previousDBPath` is provided, seeds history from that file first
-- `Persist()` stores all data in Bolt transactions
-- After storing, reads back history to compute and update
-  DateNoSpace/DateNoFiles
+- `Reset()` clears usage/subdir data for the destination
+- `Put*` and `AppendGroupHistory` store data in Bolt transactions
+- `Finalize()` computes and persists DateNoSpace/DateNoFiles
 - Handles codec encoding internally
 
 ```go
@@ -475,7 +508,9 @@ which would create an import cycle. Defining it in `server` avoids this since
 package server
 
 type Provider interface {
-  Tree() db.Database
+  // Tree returns a query object used by server endpoints (tree + where).
+  // The returned value must already be ready for use.
+  Tree() *db.Tree
   BaseDirs() basedirs.Reader
 
   // OnUpdate registers a callback that will be invoked whenever the
@@ -535,6 +570,9 @@ fields including `PollInterval` and `RemoveOldPaths`.
 
 **Write-side constructors**: `cmd/summarise` uses `bolt.NewDGUTAWriter()` and
 `bolt.NewBaseDirsStore()` to create the writers.
+For basedirs, `cmd/summarise` MUST call `store.SetMountPath()` and
+`store.SetUpdatedAt()` on the returned `basedirs.Store` before the summariser
+invokes `BaseDirs.Output()`.
 
 ## Required package boundary changes
 
@@ -556,11 +594,9 @@ Timestamp source of truth:
 - `DGUTAWriter` receives `mountPath` and `updatedAt` via `SetMountPath()` and
   `SetUpdatedAt()` (defined in the interface). Implementations persist these
   so readers can return them via `MountTimestamps()`.
-- `basedirs.Store.Persist()` receives `mountPath` values in `HistoryKey` and
-  `updatedAt` in `OutputData.UpdatedAt`. The store extracts and persists these
-  for `MountTimestamps()`. Note: basedirs history can span multiple mount
-  points, but in practice each `cmd/summarise` run creates one basedirs.db
-  per mount, so there's typically one mount per file.
+- `basedirs.Store` receives `mountPath` and `updatedAt` via
+  `Store.SetMountPath()` and `Store.SetUpdatedAt()` (both required by the
+  interface). The store persists these for `MountTimestamps()`.
 - Bolt storage mechanism: Each database file stores its `(mountPath, updatedAt)`
   in a metadata bucket (e.g., `_meta` with keys `mountPath` and `updatedAt`).
 - Legacy fallback (only when explicit timestamps are absent in older DBs):
@@ -599,7 +635,8 @@ type Config struct {
     // OwnersCSVPath is required for basedirs name resolution.
     OwnersCSVPath string
 
-    // MountPoints overrides mount auto-discovery for basedirs history resolution.
+    // MountPoints overrides mount auto-discovery for basedirs history
+    // resolution.
     // When empty, the backend must auto-discover mountpoints from the OS.
     MountPoints []string
 
@@ -649,7 +686,7 @@ func NewHistoryMaintainer(dbPath string) (basedirs.HistoryMaintainer, error)
     `RecordDGUTA`, age/filetype enums and parsing, `DBInfo` struct,
     `Database` interface (new), `DGUTAWriter` interface (new).
   - Keeps: `Tree` type and its methods (`DirInfo`, `DirHasChildren`, `Where`,
-    `FileLocations`, `Close`).
+    `FileLocations`, `Info`, `Close`).
   - Keeps: `RecordDGUTA.EncodeToBytes()` and `DecodeDGUTAbytes()` (these use
     simple binary encoding via `byteio`, not bolt-specific; the Bolt package
     calls them when storing/reading).
@@ -664,7 +701,7 @@ func NewHistoryMaintainer(dbPath string) (basedirs.HistoryMaintainer, error)
     `SummaryWithChildren`, `Quotas`, `Config`, `DBInfo` struct, `DateQuotaFull`
     function, `GroupCache`, `UserCache`, `Error` type, mountpoint utilities,
     `BaseDirs` struct (domain logic for calculating usage from IDAgeDirs),
-    `OutputData`, `SubDirKey`, `HistoryKey` (new types for Store interface).
+    `SubDirKey`, `HistoryKey` (new types for Store interface).
   - Keeps: `Store` interface (new), `Reader` interface (new),
     `HistoryMaintainer` interface (new).
   - Removes: all bbolt imports, `BaseDirReader` type, `MultiReader` type,
@@ -801,6 +838,8 @@ In ClickHouse mode, the backend must maintain equivalent timestamps in
    - Replace `basedirs.NewCreator(basedirsDB, quotas)` with:
      ```go
      store, err := bolt.NewBaseDirsStore(basedirsDB, basedirsHistoryDB)
+     store.SetMountPath(mountPath)
+     store.SetUpdatedAt(modtime)
      bd, err := basedirs.NewCreator(store, quotas)
      bd.SetMountPoints(mps)  // if mounts were provided
      bd.SetModTime(modtime)  // stats.gz mtime, used for History.Date
