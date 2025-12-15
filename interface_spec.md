@@ -77,9 +77,40 @@
 - Today: server derives timestamps from filesystem `mtime` of per-mount database
   directories.
 - Required change: timestamps must be provided by storage, so ClickHouse can
-  return mount-path timestamps too.
+  return mount-path timestamps too. Server should call
+  `provider.BaseDirs().MountTimestamps()`, merge/normalise via the backend,
+  and convert to Unix seconds for the response.
 
 ## Domain model summary (what storage must support)
+
+### Current Bolt behaviour (reference)
+
+- DirGUTA data is split across two Bolt files per dataset: `dguta.db`
+  (bucket `gut`) and `dguta.db.children` (bucket `children`). Keys are the
+  directory path with a trailing `0xff` byte; values are codec-encoded GUTAs.
+  Children are codec-encoded `[]string` keyed by the parent dir.
+- `db.Tree` combines results across all opened datasets. `DirInfo` merges
+  GUTAs from every dataset for the requested dir, returns `ErrDirNotFound` if
+  the dir is missing from all, and `Children()` de-dupes and sorts children
+  from every dataset.
+- Basedirs writer stores usage in `groupUsage`/`userUsage`, histories in
+  `groupHistorical`, subdirs in `groupSubDirs`/`userSubDirs`. History append is
+  skipped if the new timestamp is not strictly newer than the latest entry.
+  `CopyHistoryFrom()` seeds histories from a previous DB before appending.
+  `storeDateQuotasFill()` precomputes `DateNoSpace`/`DateNoFiles` using
+  histories.
+- Basedirs reader resolves mountpoints via longest-prefix match of the
+  configured mount list (auto-discovered by default, overridable). Usage
+  responses populate `Usage.Owner` from the owners CSV and `Usage.Name` via
+  cached UID/GID lookups. `MultiReader` concatenates usage across DBs, returns
+  the first non-nil subdir/history hit, and exposes `SetCachedGroup/User` for
+  test convenience. History cleaning CLIs operate by deleting history keys not
+  starting with a supplied prefix.
+- Server today scans `<base>/<version>_<mountkey>/` dirs containing
+  `dguta.db*` and `basedirs.db`, picks the highest numeric version per mount,
+  and sets `/rest/v1/auth/dbsUpdated` from the `mtime` of each mount dir.
+  Reloading is incremental via `Tree.OpenFrom` / `MultiReader.OpenFrom` and
+  caches are rebuilt across all ages.
 
 ### DirGUTA (“tree/where”)
 
@@ -142,7 +173,10 @@ package db
 func NewTree(db Database) *Tree
 ```
 
-The Bolt package provides the `Database` implementation.
+The Bolt package provides the `Database` implementation. It must preserve the
+current multi-source semantics: combining DGUTA results across all underlying
+datasets, returning `ErrDirNotFound` only if a directory is missing from all
+sources, and de-duplicating + sorting children across sources.
 
 ### 2) Tree ingest interface (write-side)
 
@@ -162,6 +196,11 @@ type DGUTAWriter interface {
   // Add adds a DGUTA record to the database.
   Add(dguta RecordDGUTA) error
 
+  // SetBatchSize controls flush batching. cmd/summarise sets this to 10_000
+  // today. Implementations must keep streaming semantics (no requirement to
+  // hold the whole dataset in memory).
+  SetBatchSize(batchSize int)
+
   // SetMountPath is the mount directory path the stats were produced for.
   // It must be an absolute path and must end with '/'.
   // Example: "/lustre/scratch123/".
@@ -178,6 +217,9 @@ type DGUTAWriter interface {
 Normative requirement:
 - Every successful ingest must persist `(mountPath, updatedAt)` so it can be
   returned later via `MountTimestamps()`.
+- `cmd/summarise` must set `SetMountPath` and `SetUpdatedAt` on both writers
+  using a required `--mount` flag (absolute path with trailing `/`) and the
+  stats input `mtime`. Do not attempt to derive mount paths inside the server.
 
 - Implementations must support streaming ingestion: callers never need to hold
   the entire dataset in memory; backends are responsible for batching and
@@ -266,6 +308,11 @@ type Reader interface {
   // Matches current behaviour: used to override mountpoint auto-discovery.
   SetMountPoints(mountpoints []string)
 
+  // Optional caches used in tests and to avoid repeated lookups when caller
+  // already knows the names. No-ops are acceptable.
+  SetCachedGroup(gid uint32, name string)
+  SetCachedUser(uid uint32, name string)
+
   // Returns mount directory path -> last updated time.
   // Keys MUST be mount paths (absolute) and MUST end with '/'.
   MountTimestamps() (map[string]time.Time, error)
@@ -305,7 +352,8 @@ the latest `updatedAt` per mount path.
 Group/user name caching: The `basedirs` types `Usage` includes `Name` which is
 resolved from UID/GID. The current implementation uses `GroupCache` and
 `UserCache` in `basedirs`. The Bolt backend must continue to populate
-`Usage.Name` and `Usage.Owner` fields.
+`Usage.Name` and `Usage.Owner` fields; name caches should still be honoured if
+set via `SetCachedGroup` / `SetCachedUser`.
 
 ### 5) Backend bundle interface (required)
 
@@ -385,7 +433,9 @@ incremental open/close logic.
 See `bolt.Config` in the "The new `bolt` package" section for configuration
 fields including `PollInterval` and `RemoveOldPaths`.
 
-**Write-side constructors remain unchanged** (used only by `cmd/summarise`).
+**Write-side constructors are the new `bolt.NewDGUTAWriter` and
+`bolt.NewBaseDirsWriter` helpers**; `cmd/summarise` must switch to them and set
+mount path / timestamps explicitly.
 
 ## Required package boundary changes
 
@@ -507,7 +557,8 @@ Instead:
 - `server.LoadDBs` becomes `server.SetProvider(provider db.Provider)` which
   takes an already-opened provider.
 - On `SetProvider`, the server registers its cache rebuild callback via
-  `provider.OnUpdate(s.rebuildCaches)`.
+  `provider.OnUpdate(s.rebuildCaches)`, rebuilds caches immediately, and sets
+  `dataTimeStamp` from `provider.BaseDirs().MountTimestamps()`.
 - The server no longer has `EnableDBReloading`; reloading is handled internally
   by the provider.
 
@@ -545,7 +596,9 @@ implementation but remain **non-public**:
 - They may live in the `bolt` package as unexported functions or in an
   `internal` sub-package used only by tests.
 - No exported Bolt API must expose database path layout or directory naming
-  conventions; those are backend implementation details.
+  conventions; those are backend implementation details. CLI commands should
+  just pass the bolt DB paths they already take to the bolt constructors. If
+  tests need discovery, provide it in `bolt/internal` helpers only.
 
 ## ClickHouse backend notes (future work)
 
@@ -606,6 +659,8 @@ summarise ingests data for a mount, it must update that mount’s `updated_at`.
 4. **Refactor `cmd/summarise`**:
    - Replace `db.NewDB()` with `bolt.NewDGUTAWriter()`.
    - Replace `basedirs.NewCreator()` with `bolt.NewBaseDirsWriter()`.
+   - Require a `--mount` flag; pass it to both writers via `SetMountPath` and
+     set `SetUpdatedAt` from the stats input `mtime`.
    - Pass `--basedirsHistoryDB` as `previousDBPath` to the bolt writer.
 
 5. **Refactor `server` package**:
@@ -627,19 +682,17 @@ summarise ingests data for a mount, it must update that mount’s `updated_at`.
    - No reload loop needed; the backend handles it internally.
 
 7. **Refactor `cmd/dbinfo` and `cmd/clean`**:
-   - Use storage-neutral interfaces so the same commands can work with Bolt
-     or ClickHouse backends.
-   - For DB info:
-     - Construct a `db.Provider` using the chosen backend (Bolt today,
-       ClickHouse in future) and call `DGUTAInfo()` / `BasedirsInfo()` to get
-       `db.DBInfo` and `basedirs.DBInfo`.
-   - For cleaning basedirs history:
-     - Obtain a `basedirs.HistoryMaintainer` from the chosen backend (for
-       Bolt, via a constructor that wraps the on-disk DB; for ClickHouse, via
-       a constructor that wraps the DB connection).
-     - Call `CleanHistoryForMount(prefix)` to perform the cleanup and
-       `FindInvalidHistory(prefix)` for view-only mode.
-     - Do not depend on any Bolt-specific path layout or exported helpers.
+   - Keep commands backend-neutral by delegating all layout discovery and Bolt
+     details to backend helpers.
+   - For DB info: call Bolt helpers that *internally* discover the latest
+     datasets for a base path (same logic the provider uses) and return
+     `db.DBInfo` / `basedirs.DBInfo`. The CLI should not replicate directory
+     scanning logic.
+   - For cleaning basedirs history: obtain a backend-specific
+     `basedirs.HistoryMaintainer` (Bolt: wrap a single `basedirs.db`; future
+     ClickHouse: wrap a connection) and call `CleanHistoryForMount` or
+     `FindInvalidHistory`. The CLI supplies the prefix and, for Bolt, the
+     database path; the backend owns how that path is opened.
 
 8. **Final verification**:
    - Ensure no package outside `bolt` imports `go.etcd.io/bbolt`.
