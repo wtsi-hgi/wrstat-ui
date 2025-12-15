@@ -70,16 +70,25 @@
 
 - Endpoint: `GET /rest/v1/auth/dbsUpdated`
 - Response shape: JSON object mapping `mountPath` → Unix seconds.
-  - `mountPath` is the mount directory path (string) that the stats were created
-    for, e.g. `/some/mount/point/`.
-  - The server must treat these keys as opaque mount paths; it must not derive
-    them from directory names.
-- Today: server derives timestamps from filesystem `mtime` of per-mount database
-  directories.
-- Required change: timestamps must be provided by storage, so ClickHouse can
-  return mount-path timestamps too. Server should call
-  `provider.BaseDirs().MountTimestamps()`, merge/normalise via the backend,
-  and convert to Unix seconds for the response.
+  - `mountPath` is the mount directory path (string), e.g. `/some/mount/point/`.
+  - Keys MUST be treated as opaque by `server` and the frontend.
+- Required change: timestamps must be provided by storage so ClickHouse can
+  return mount-path timestamps too. `server` must call
+  `provider.BaseDirs().MountTimestamps()` and convert to Unix seconds.
+
+Bolt mount-path derivation (for multi-directory Bolt layouts):
+- Dataset directories are named `<version>_<mountKey>`.
+- `<mountKey>` is the mount path with `/` replaced by `／` (U+FF0F FULLWIDTH
+  SOLIDUS) to avoid nested directories.
+- The Bolt backend MUST derive `mountPath` by splitting the directory name at
+  the first `_`, taking the remainder as `<mountKey>`, then replacing all
+  `／` with `/`.
+- The derived `mountPath` MUST be normalised to end with `/`.
+- `updatedAt` is the snapshot time of the dataset, derived from the input
+  `stats.gz` file `mtime`.
+- Bolt datasets written before this change may not have a persisted
+  `updatedAt`; for those, the Bolt backend MUST fall back to dataset directory
+  `mtime` to preserve backwards compatibility.
 
 ## Domain model summary (what storage must support)
 
@@ -144,21 +153,26 @@ These interfaces must live in the domain packages `db` and `basedirs`.
 ### 1) Tree query interface (read-side)
 
 `db.Tree` currently wraps `db.DB` which is tightly coupled to Bolt.
-`db.DB` should be replaced by `db.Database` interface.
+`db.DB` should be replaced by a `db.Database` interface.
 
 ```go
 package db
 
-// Database is the low-level storage interface that db.Tree uses internally.
-// This is implemented by the bolt package.
+// Database is the storage interface that db.Tree uses internally.
+// Implementations MUST NOT expose Bolt concepts (tx/bucket/cursor) or []byte
+// values. This is implemented by the bolt package.
 type Database interface {
-  // GetDGUTA retrieves the DGUTA record for a directory.
-  // Returns nil, ErrDirNotFound if the directory is not in the database.
-  GetDGUTA(dir string) (*DGUTA, error)
+  // DirInfo returns the directory summary for dir, after applying filter.
+  // It MUST preserve current multi-source semantics:
+  // - return ErrDirNotFound only if dir is missing from all sources
+  // - merge GUTA state across sources before applying the filter
+  // - set DirSummary.Modtime to the latest dataset updatedAt across sources
+  DirInfo(dir string, filter *Filter) (*DirSummary, error)
 
-  // GetChildren returns the child directory paths for a directory.
-  // Returns empty slice if no children exist.
-  GetChildren(dir string) ([]string, error)
+  // Children returns the immediate child directory paths for dir.
+  // It MUST de-duplicate and sort children across all sources.
+  // It MUST return nil/empty if no children exist (leaf or missing dir).
+  Children(dir string) []string
 
   Close() error
 }
@@ -196,34 +210,34 @@ type DGUTAWriter interface {
   // Add adds a DGUTA record to the database.
   Add(dguta RecordDGUTA) error
 
-  // SetBatchSize controls flush batching. cmd/summarise sets this to 10_000
-  // today. Implementations must keep streaming semantics (no requirement to
-  // hold the whole dataset in memory).
-  SetBatchSize(batchSize int)
-
-  // SetMountPath is the mount directory path the stats were produced for.
+  // SetMountPath sets the mount directory path the stats were produced for.
   // It must be an absolute path and must end with '/'.
   // Example: "/lustre/scratch123/".
   SetMountPath(mountPath string)
 
-  // SetUpdatedAt sets the dataset creation time used for mount timestamps.
-  // cmd/summarise currently uses the stats.gz file mtime for this purpose.
+  // SetUpdatedAt sets the dataset snapshot time.
+  // This must be the time the information was retrieved from the filesystem.
+  // `cmd/summarise` derives it from the input `stats.gz` file `mtime`.
   SetUpdatedAt(t time.Time)
+
+  // SetBatchSize controls flush batching. cmd/summarise sets this to 10_000
+  // today. Implementations must keep streaming semantics (no requirement to
+  // hold the whole dataset in memory).
+  SetBatchSize(batchSize int)
 
   Close() error
 }
 ```
 
 Normative requirement:
-- Every successful ingest must persist `(mountPath, updatedAt)` so it can be
-  returned later via `MountTimestamps()`.
-- `cmd/summarise` must set `SetMountPath` and `SetUpdatedAt` on both writers
-  using a required `--mount` flag (absolute path with trailing `/`) and the
-  stats input `mtime`. Do not attempt to derive mount paths inside the server.
-
 - Implementations must support streaming ingestion: callers never need to hold
   the entire dataset in memory; backends are responsible for batching and
   flushing as needed.
+- Every ingest MUST associate records with exactly one `(mountPath, updatedAt)`
+  pair so that:
+  - `MountTimestamps()` can return the last `updatedAt` per mount.
+  - `DirSummary.Modtime` can be populated as the latest `updatedAt` across all
+    mounts contributing to a query (matching current behaviour).
 
 ### 3) Basedirs ingest interface (write-side)
 
@@ -278,9 +292,9 @@ History update rule (must match current behaviour):
 Backend-specific history continuity:
 - ClickHouse: read the last stored point for `(gid, mountPath)` and
   append/update in-place.
-- Bolt: seed the new output DB’s history from a previous `basedirs.db` provided
-  to the Bolt writer constructor (see Bolt package section), then apply the
-  append rule above.
+- Bolt: read history entries from the previous run’s `basedirs.db` (provided to
+  the Bolt writer constructor) and apply them as logical upserts into the new
+  output, then apply the append rule above.
 
 All backends must implement history updates as logical upserts into a single
 history series per `(gid, mountPath)`; there must be no domain-level "copy
@@ -454,14 +468,15 @@ The new root package `bolt` owns:
 
 Timestamp source of truth (Bolt backend):
 - Preferred: the backend persists and reads explicit `(mountPath, updatedAt)`
-  written by `db.DGUTAWriter`.
+  written by the ingest writers (`db.DGUTAWriter` / `basedirs.Writer`).
 - Legacy fallback (only when explicit timestamps are absent):
   - Derive `mountPath` from the dataset directory name using the existing
     on-disk convention from `server/db.go`:
     - split the dataset directory basename on the first underscore (`_`)
     - treat the suffix (the part after the underscore) as the mount path string
-  - Normalise by ensuring it is absolute and ends with '/'.
-  - Use the dataset directory `mtime` as `updatedAt`.
+  - Decode the suffix by replacing `／` with `/`, then normalise to ensure it
+    ends with '/'.
+  - Use the dataset directory `mtime` as `updatedAt` (legacy behaviour only).
   - This derivation happens inside the Bolt backend; the server still must not
     derive mount paths or timestamps from filesystem paths.
 
@@ -477,7 +492,8 @@ func OpenProvider(cfg Config) (db.Provider, error)
 
 type Config struct {
     // BasePath is the directory scanned for database subdirectories.
-    // Each subdirectory must be named "<version>_<mountpath>" and contain
+    // Each subdirectory must be named "<version>_<mountKey>" (mount path with
+    // '/' replaced by '／') and contain
     // files named DGUTADBName and BaseDirDBName.
     BasePath string
 
@@ -610,7 +626,7 @@ ClickHouse must implement the same read/write interfaces.
 - Ingest `db.RecordDGUTA` at scale.
 - Support the same filter semantics:
   - GID list, UID list, file types bitmask, age buckets.
- - Provide `MountTimestamps()` keyed by mount directory paths.
+- Provide `MountTimestamps()` keyed by mount directory paths.
 
 ### Suggested schema (guidance, not final)
 
@@ -625,15 +641,17 @@ ClickHouse must implement the same read/write interfaces.
 
 ### Timestamp semantics for ClickHouse
 
-In bolt mode, timestamps are persisted by the writer as `(mountPath, updatedAt)`
-and returned via `MountTimestamps()`. In ClickHouse mode, the backend must
-maintain equivalent timestamps in `mount_updates` keyed by `mount_path`. When
-summarise ingests data for a mount, it must update that mount’s `updated_at`.
+In Bolt mode, mount timestamps are derived from dataset directory names (mount
+paths) and persisted `updatedAt` (stats snapshot time). Legacy Bolt datasets
+fall back to dataset directory `mtime` (see "Bolt mount-path derivation").
+
+In ClickHouse mode, the backend must maintain equivalent timestamps in
+`mount_updates` keyed by `mount_path`.
 
 ## Migration steps (implementation order)
 
 1. **Create `db.Database` and `db.DGUTAWriter` interfaces** in the `db` package:
-   - Define the low-level store interface (`GetDGUTA`, `GetChildren`, `Close`).
+   - Define the store interface (`DirInfo`, `Children`, `Close`).
    - Refactor `db.Tree` to use `Database` instead of directly opening bolt
      databases.
    - Remove all bbolt imports from `db` package.
@@ -660,8 +678,11 @@ summarise ingests data for a mount, it must update that mount’s `updated_at`.
 4. **Refactor `cmd/summarise`**:
    - Replace `db.NewDB()` with `bolt.NewDGUTAWriter()`.
    - Replace `basedirs.NewCreator()` with `bolt.NewBaseDirsWriter()`.
-   - Require a `--mount` flag; pass it to both writers via `SetMountPath` and
-     set `SetUpdatedAt` from the stats input `mtime`.
+   - Do not add a new `--mount` flag.
+   - Derive `mountPath` from the output dataset directory name
+     (`<version>_<mountKey>`, where mount key uses `／` for `/`) and pass it to
+     both writers via `SetMountPath`.
+   - Set `SetUpdatedAt` on both writers from the input `stats.gz` `mtime`.
    - Pass `--basedirsHistoryDB` as `previousDBPath` to the bolt writer.
 
 5. **Refactor `server` package**:
@@ -702,7 +723,7 @@ summarise ingests data for a mount, it must update that mount’s `updated_at`.
 ## Testing checklist
 
 - Unit tests in `bolt` package for:
-  - `Database` implementation: `GetDGUTA`, `GetChildren`.
+  - `Database` implementation: `DirInfo`, `Children`.
   - `basedirs.Reader`: `GroupUsage`, `UserUsage`, `GroupSubDirs`, `UserSubDirs`,
     `History`.
   - `MountTimestampsProvider`: timestamp derivation from directory names and
