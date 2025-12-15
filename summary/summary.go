@@ -63,6 +63,14 @@ func (s *Summary) Add(size int64) {
 	s.Size += size
 }
 
+// AgeRange represents a time-based bucket index for file ages.
+// It is used to index into age bucket arrays.
+type AgeRange uint8
+
+// AgeBuckets stores counts per AgeRange.
+// The index corresponds directly to the AgeRange constants.
+type AgeBuckets [9]uint64
+
 // SummaryWithTimes is like summary, but also holds the reference time, oldest
 // atime, newest mtime add()ed.
 type SummaryWithTimes struct { //nolint:revive
@@ -72,14 +80,6 @@ type SummaryWithTimes struct { //nolint:revive
 	AtimeBuckets AgeBuckets
 	MtimeBuckets AgeBuckets
 }
-
-// AgeRange represents a time-based bucket index for file ages.
-// It is used to index into age bucket arrays.
-type AgeRange uint8
-
-// AgeBuckets stores counts per AgeRange.
-// The index corresponds directly to the AgeRange constants.
-type AgeBuckets [9]uint64
 
 // bucketForAge returns the correct age bucket for a given file age in seconds.
 // The checks go from oldest to newest. The first matching range is returned.

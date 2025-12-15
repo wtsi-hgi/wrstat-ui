@@ -213,8 +213,8 @@ func (g GUTAs) Summary(filter *Filter) *DirSummary { //nolint:funlen
 		atime, mtime int64
 		updateTime   time.Time
 		age          DirGUTAge
-		aTimeRanges  [9]uint64
-		mTimeRanges  [9]uint64
+		aTimeRanges  summary.AgeBuckets
+		mTimeRanges  summary.AgeBuckets
 	)
 
 	if filter != nil {
@@ -257,7 +257,7 @@ func (g GUTAs) Summary(filter *Filter) *DirSummary { //nolint:funlen
 
 // addGUTAToSummary alters the incoming arg summary values based on the gut.
 func addGUTAToSummary(guta *GUTA, count, size *uint64, atime, mtime *int64,
-	updateTime *time.Time, aTimeRanges, mTimeRanges *[9]uint64, uniqueUIDs, uniqueGIDs map[uint32]bool) {
+	updateTime *time.Time, aTimeRanges, mTimeRanges *summary.AgeBuckets, uniqueUIDs, uniqueGIDs map[uint32]bool) {
 	*count += guta.Count
 	*size += guta.Size
 

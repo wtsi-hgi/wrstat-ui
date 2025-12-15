@@ -277,16 +277,16 @@ func (b *baseDirs) Add(info *summary.FileInfo) error { //nolint:gocyclo
 			dirguta.IsTemp(unsafe.Slice(unsafe.StringData(info.Path.Name), len(info.Path.Name)))
 	}
 
-	if !info.IsDir() && info.Nlink > 1 && info.Inode != 0 {
+	if info.Path != b.thisDir || info.IsDir() {
+		return nil
+	}
+
+	if info.Nlink > 1 && info.Inode != 0 {
 		if _, seen := b.seenInodes[info.Inode]; seen {
 			return nil
 		}
 
 		b.seenInodes[info.Inode] = struct{}{}
-	}
-
-	if info.Path != b.thisDir || info.IsDir() {
-		return nil
 	}
 
 	gidBasedir := b.groups.Get(info.GID)
@@ -307,7 +307,6 @@ func (b *baseDirs) Output() error {
 	if b.output(b.thisDir) {
 		b.groups.Add(b.root.addGroupBase)
 		b.users.Add(b.root.addUserBase)
-		clear(b.root.seenInodes)
 	} else {
 		b.addToParent()
 	}
@@ -329,13 +328,9 @@ func (b *baseDirs) addToParent() {
 func (b *baseDirs) cleanup() {
 	b.thisDir = nil
 
-	for k := range b.groups {
-		delete(b.groups, k)
-	}
-
-	for k := range b.users {
-		delete(b.users, k)
-	}
+	clear(b.seenInodes)
+	clear(b.groups)
+	clear(b.users)
 }
 
 // Output is a summary.Operation method.

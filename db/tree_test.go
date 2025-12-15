@@ -82,12 +82,12 @@ func TestTree(t *testing.T) {
 			So(di, ShouldResemble, &db.DirInfo{
 				Current: &db.DirSummary{
 					"/", 21 + numDirectories + 1, 92 + (numDirectories+1)*directorySize,
-					expectedAtime, 0, expectedMtime, 0, expectedUIDs, expectedGIDs, expectedFTs, db.DGUTAgeAll, dbModTime,
+					expectedAtime, summary.Range7Years, expectedMtime, summary.Range7Years, expectedUIDs, expectedGIDs, expectedFTs, db.DGUTAgeAll, dbModTime,
 				},
 				Children: []*db.DirSummary{
 					{
 						"/a", 21 + numDirectories, 92 + numDirectories*directorySize,
-						expectedAtime, 0, expectedMtime, 0, expectedUIDs, expectedGIDs, expectedFTs, db.DGUTAgeAll, dbModTime,
+						expectedAtime, summary.Range7Years, expectedMtime, summary.Range7Years, expectedUIDs, expectedGIDs, expectedFTs, db.DGUTAgeAll, dbModTime,
 					},
 				},
 			})
@@ -97,16 +97,16 @@ func TestTree(t *testing.T) {
 			So(di, ShouldResemble, &db.DirInfo{
 				Current: &db.DirSummary{
 					"/a", 21 + numDirectories, 92 + numDirectories*directorySize,
-					expectedAtime, 0, expectedMtime, 0, expectedUIDs, expectedGIDs, expectedFTs, db.DGUTAgeAll, dbModTime,
+					expectedAtime, summary.Range7Years, expectedMtime, summary.Range7Years, expectedUIDs, expectedGIDs, expectedFTs, db.DGUTAgeAll, dbModTime,
 				},
 				Children: []*db.DirSummary{
 					{
-						"/a/b", 9 + 7, 80 + 7*directorySize, expectedAtime, 0, time.Unix(80, 0), 0,
+						"/a/b", 9 + 7, 80 + 7*directorySize, expectedAtime, summary.Range7Years, time.Unix(80, 0), summary.Range7Years,
 						[]uint32{101, 102},
 						expectedGIDsOne, expectedFTs, db.DGUTAgeAll, dbModTime,
 					},
 					{
-						"/a/c", 5 + 2 + 7, 5 + 7 + 2*directorySize, time.Unix(90, 0), 4, expectedMtime, 2,
+						"/a/c", 5 + 2 + 7, 5 + 7 + 2*directorySize, time.Unix(90, 0), summary.Range1Year, expectedMtime, summary.Range3Years,
 						[]uint32{102, 103},
 						[]uint32{2, 3},
 						expectedFTsCramAndDir, db.DGUTAgeAll, dbModTime,
@@ -118,12 +118,12 @@ func TestTree(t *testing.T) {
 			So(err, ShouldBeNil)
 			So(di, ShouldResemble, &db.DirInfo{
 				Current: &db.DirSummary{
-					"/a", 2, 10, time.Unix(80, 0), 0, time.Unix(80, 0), 0,
+					"/a", 2, 10, time.Unix(80, 0), summary.Range7Years, time.Unix(80, 0), summary.Range7Years,
 					expectedUIDsOne, expectedGIDsOne, db.DGUTAFileTypeBam | db.DGUTAFileTypeTemp, db.DGUTAgeAll, dbModTime,
 				},
 				Children: []*db.DirSummary{
 					{
-						"/a/b", 2, 10, time.Unix(80, 0), 0, time.Unix(80, 0), 0,
+						"/a/b", 2, 10, time.Unix(80, 0), summary.Range7Years, time.Unix(80, 0), summary.Range7Years,
 						expectedUIDsOne, expectedGIDsOne, db.DGUTAFileTypeBam | db.DGUTAFileTypeTemp, db.DGUTAgeAll, dbModTime,
 					},
 				},
@@ -133,7 +133,7 @@ func TestTree(t *testing.T) {
 			So(err, ShouldBeNil)
 			So(di, ShouldResemble, &db.DirInfo{
 				Current: &db.DirSummary{
-					"/a/b/e/h/tmp", 2, 5 + directorySize, time.Unix(80, 0), 8, time.Unix(80, 0), 0,
+					"/a/b/e/h/tmp", 2, 5 + directorySize, time.Unix(80, 0), summary.RangeLess1Month, time.Unix(80, 0), summary.Range7Years,
 					expectedUIDsOne, expectedGIDsOne, db.DGUTAFileTypeTemp | db.DGUTAFileTypeBam | db.DGUTAFileTypeDir,
 					db.DGUTAgeAll, dbModTime,
 				},
@@ -167,7 +167,7 @@ func TestTree(t *testing.T) {
 			So(err, ShouldBeNil)
 			So(dcss, ShouldResemble, db.DCSs{
 				{
-					"/a/b/d", 3, 30, expectedAtime, 0, time.Unix(60, 0), 0, expectedUIDsOne,
+					"/a/b/d", 3, 30, expectedAtime, summary.Range7Years, time.Unix(60, 0), summary.Range7Years, expectedUIDsOne,
 					expectedGIDsOne, expectedFTsCram, db.DGUTAgeAll, dbModTime,
 				},
 			})
@@ -176,7 +176,7 @@ func TestTree(t *testing.T) {
 			So(err, ShouldBeNil)
 			So(dcss, ShouldResemble, db.DCSs{
 				{
-					"/a/b", 5, 40, expectedAtime, 0, time.Unix(80, 0), 0, expectedUIDsOne,
+					"/a/b", 5, 40, expectedAtime, summary.Range7Years, time.Unix(80, 0), summary.Range7Years, expectedUIDsOne,
 					expectedGIDsOne, expectedFTsNoDir, db.DGUTAgeAll, dbModTime,
 				},
 			})
@@ -186,15 +186,15 @@ func TestTree(t *testing.T) {
 			So(err, ShouldBeNil)
 			So(dcss, ShouldResemble, db.DCSs{
 				{
-					"/a/b/d", 3, 30, expectedAtime, 0, time.Unix(60, 0), 0, expectedUIDsOne,
+					"/a/b/d", 3, 30, expectedAtime, summary.Range7Years, time.Unix(60, 0), summary.Range7Years, expectedUIDsOne,
 					expectedGIDsOne, expectedFTsCram, db.DGUTAgeAll, dbModTime,
 				},
 				{
-					"/a/b/d/g", 2, 20, expectedAtimeG, 0, time.Unix(60, 0), 0, expectedUIDsOne,
+					"/a/b/d/g", 2, 20, expectedAtimeG, summary.Range7Years, time.Unix(60, 0), summary.Range7Years, expectedUIDsOne,
 					expectedGIDsOne, expectedFTsCram, db.DGUTAgeAll, dbModTime,
 				},
 				{
-					"/a/b/d/f", 1, 10, expectedAtime, 0, time.Unix(50, 0), 0, expectedUIDsOne,
+					"/a/b/d/f", 1, 10, expectedAtime, summary.Range7Years, time.Unix(50, 0), summary.Range7Years, expectedUIDsOne,
 					expectedGIDsOne, expectedFTsCram, db.DGUTAgeAll, dbModTime,
 				},
 			})
@@ -202,15 +202,15 @@ func TestTree(t *testing.T) {
 			dcss.SortByDirAndAge()
 			So(dcss, ShouldResemble, db.DCSs{
 				{
-					"/a/b/d", 3, 30, expectedAtime, 0, time.Unix(60, 0), 0, expectedUIDsOne,
+					"/a/b/d", 3, 30, expectedAtime, summary.Range7Years, time.Unix(60, 0), summary.Range7Years, expectedUIDsOne,
 					expectedGIDsOne, expectedFTsCram, db.DGUTAgeAll, dbModTime,
 				},
 				{
-					"/a/b/d/f", 1, 10, expectedAtime, 0, time.Unix(50, 0), 0, expectedUIDsOne,
+					"/a/b/d/f", 1, 10, expectedAtime, summary.Range7Years, time.Unix(50, 0), summary.Range7Years, expectedUIDsOne,
 					expectedGIDsOne, expectedFTsCram, db.DGUTAgeAll, dbModTime,
 				},
 				{
-					"/a/b/d/g", 2, 20, expectedAtimeG, 0, time.Unix(60, 0), 0, expectedUIDsOne,
+					"/a/b/d/g", 2, 20, expectedAtimeG, summary.Range7Years, time.Unix(60, 0), summary.Range7Years, expectedUIDsOne,
 					expectedGIDsOne, expectedFTsCram, db.DGUTAgeAll, dbModTime,
 				},
 			})
@@ -220,15 +220,15 @@ func TestTree(t *testing.T) {
 			So(err, ShouldBeNil)
 			So(dcss, ShouldResemble, db.DCSs{
 				{
-					"/a/b/d", 3, 30, expectedAtime, 0, time.Unix(60, 0), 0, expectedUIDsOne,
+					"/a/b/d", 3, 30, expectedAtime, summary.Range7Years, time.Unix(60, 0), summary.Range7Years, expectedUIDsOne,
 					expectedGIDsOne, expectedFTsCram, db.DGUTAgeAll, dbModTime,
 				},
 				{
-					"/a/b/d/g", 2, 20, expectedAtimeG, 0, time.Unix(60, 0), 0, expectedUIDsOne,
+					"/a/b/d/g", 2, 20, expectedAtimeG, summary.Range7Years, time.Unix(60, 0), summary.Range7Years, expectedUIDsOne,
 					expectedGIDsOne, expectedFTsCram, db.DGUTAgeAll, dbModTime,
 				},
 				{
-					"/a/b/d/f", 1, 10, expectedAtime, 0, time.Unix(50, 0), 0, expectedUIDsOne,
+					"/a/b/d/f", 1, 10, expectedAtime, summary.Range7Years, time.Unix(50, 0), summary.Range7Years, expectedUIDsOne,
 					expectedGIDsOne, expectedFTsCram, db.DGUTAgeAll, dbModTime,
 				},
 			})
@@ -237,16 +237,16 @@ func TestTree(t *testing.T) {
 			So(err, ShouldBeNil)
 			So(dcss, ShouldResemble, db.DCSs{
 				{
-					"/a", 21, 92, expectedAtime, 0, expectedMtime, 0, expectedUIDs, expectedGIDs,
+					"/a", 21, 92, expectedAtime, summary.Range7Years, expectedMtime, summary.Range7Years, expectedUIDs, expectedGIDs,
 					expectedFTsNoDir, db.DGUTAgeAll, dbModTime,
 				},
 				{
-					"/a/b", 9, 80, expectedAtime, 0, time.Unix(80, 0), 0,
+					"/a/b", 9, 80, expectedAtime, summary.Range7Years, time.Unix(80, 0), summary.Range7Years,
 					[]uint32{101, 102},
 					expectedGIDsOne, expectedFTsNoDir, db.DGUTAgeAll, dbModTime,
 				},
 				{
-					"/a/c/d", 12, 12, time.Unix(90, 0), 4, expectedMtime, 2,
+					"/a/c/d", 12, 12, time.Unix(90, 0), summary.Range1Year, expectedMtime, summary.Range3Years,
 					[]uint32{102, 103},
 					[]uint32{2, 3},
 					expectedFTsCram, db.DGUTAgeAll, dbModTime,
@@ -264,11 +264,11 @@ func TestTree(t *testing.T) {
 
 			So(dcss, ShouldResemble, db.DCSs{
 				{
-					"/a/b/d/f", 1, 10, expectedAtime, 0, time.Unix(50, 0), 0, expectedUIDsOne,
+					"/a/b/d/f", 1, 10, expectedAtime, summary.Range7Years, time.Unix(50, 0), summary.Range7Years, expectedUIDsOne,
 					expectedGIDsOne, expectedFTsCram, db.DGUTAgeAll, dbModTime,
 				},
 				{
-					"/a/b/d/g", 2, 20, expectedAtimeG, 0, time.Unix(60, 0), 0, expectedUIDsOne,
+					"/a/b/d/g", 2, 20, expectedAtimeG, summary.Range7Years, time.Unix(60, 0), summary.Range7Years, expectedUIDsOne,
 					expectedGIDsOne, expectedFTsCram, db.DGUTAgeAll, dbModTime,
 				},
 			})
@@ -338,7 +338,7 @@ func TestTree(t *testing.T) {
 		So(err, ShouldBeNil)
 		So(dcss, ShouldResemble, db.DCSs{
 			{
-				"/a/b/c", 2, 2, expectedAtime, 0, expectedMtime, 0,
+				"/a/b/c", 2, 2, expectedAtime, summary.Range7Years, expectedMtime, summary.Range7Years,
 				[]uint32{11},
 				[]uint32{1},
 				db.DGUTAFileTypeBam, db.DGUTAgeAll, mtime2,
@@ -349,19 +349,19 @@ func TestTree(t *testing.T) {
 		So(err, ShouldBeNil)
 		So(dcss, ShouldResemble, db.DCSs{
 			{
-				"/a/b/c", 2, 2, expectedAtime, 0, expectedMtime, 0,
+				"/a/b/c", 2, 2, expectedAtime, summary.Range7Years, expectedMtime, summary.Range7Years,
 				[]uint32{11},
 				[]uint32{1},
 				db.DGUTAFileTypeBam, db.DGUTAgeAll, mtime2,
 			},
 			{
-				"/a/b/c/d", 1, 1, time.Unix(20, 0), 0, expectedMtime, 0,
+				"/a/b/c/d", 1, 1, time.Unix(20, 0), summary.Range7Years, expectedMtime, summary.Range7Years,
 				[]uint32{11},
 				[]uint32{1},
 				db.DGUTAFileTypeBam, db.DGUTAgeAll, mtime2,
 			},
 			{
-				"/a/b/c/e", 1, 1, expectedAtime, 0, expectedAtime, 0,
+				"/a/b/c/e", 1, 1, expectedAtime, summary.Range7Years, expectedAtime, summary.Range7Years,
 				[]uint32{11},
 				[]uint32{1},
 				db.DGUTAFileTypeBam, db.DGUTAgeAll, mtime2,

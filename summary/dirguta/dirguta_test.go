@@ -227,8 +227,8 @@ func (m *mockDB) has(dir string, gid, uid uint32, ft db.DirGUTAFileType,
 	for _, dguta := range dgutas {
 		got := *dguta
 
-		got.ATimeRanges = [9]uint64{}
-		got.MTimeRanges = [9]uint64{}
+		got.ATimeRanges = summary.AgeBuckets{}
+		got.MTimeRanges = summary.AgeBuckets{}
 
 		if got == expected {
 			return true

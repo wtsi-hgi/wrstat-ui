@@ -29,6 +29,33 @@ import type { Child } from "./rpc";
 import { formatBytes, formatDate, formatNumber } from "./format";
 import type React from "react";
 
+const ageRangeLabel = (r?: number) => {
+  if (r === undefined || r === null) return "";
+
+  switch (r) {
+    case 0:
+      return "> 7 years";
+    case 1:
+      return "5 - 7 years";
+    case 2:
+      return "3 - 5 years";
+    case 3:
+      return "2 - 3 years";
+    case 4:
+      return "1 - 2 years";
+    case 5:
+      return "6 - 12 months";
+    case 6:
+      return "6 - 12 months";
+    case 7:
+      return "1 - 2 months";
+    case 8:
+      return "< 1 month";
+    default:
+      return "";
+  }
+};
+
 const TreedetailsComponent = ({
   details,
   ...rest
@@ -36,33 +63,6 @@ const TreedetailsComponent = ({
   if (!details) {
     return <></>;
   }
-
-  const ageRangeLabel = (r?: number) => {
-    if (r === undefined || r === null) return "";
-
-    switch (r) {
-      case 0:
-        return "> 7 years";
-      case 1:
-        return "5 – 7 years";
-      case 2:
-        return "3 – 5 years";
-      case 3:
-        return "2 – 3 years";
-      case 4:
-        return "1 – 2 years";
-      case 5:
-        return "6 – 12 months";
-      case 6:
-        return "6 – 12 months";
-      case 7:
-        return "1 – 2 months";
-      case 8:
-        return "< 1 month";
-      default:
-        return "";
-    }
-  };
 
   return (
     <div id="details" {...rest}>
