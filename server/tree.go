@@ -36,6 +36,7 @@ import (
 	"github.com/gin-gonic/gin"
 	gas "github.com/wtsi-hgi/go-authserver"
 	"github.com/wtsi-hgi/wrstat-ui/db"
+	"github.com/wtsi-hgi/wrstat-ui/summary"
 )
 
 // javascriptToJSONFormat is the date format emitted by javascript's Date's
@@ -126,9 +127,9 @@ type TreeElement struct {
 	Count       uint64              `json:"count"`
 	Size        uint64              `json:"size"`
 	Atime       string              `json:"atime"`
-	CommonATime uint8               `json:"common_atime"`
+	CommonATime summary.AgeRange    `json:"common_atime"`
 	Mtime       string              `json:"mtime"`
-	CommonMTime uint8               `json:"common_mtime"`
+	CommonMTime summary.AgeRange    `json:"common_mtime"`
 	Age         db.DirGUTAge        `json:"age"`
 	Users       []string            `json:"users"`
 	Groups      []string            `json:"groups"`

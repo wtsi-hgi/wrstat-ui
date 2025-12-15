@@ -29,6 +29,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/wtsi-hgi/wrstat-ui/summary"
 	"golang.org/x/exp/constraints"
 	"vimagination.zapto.org/byteio"
 )
@@ -41,11 +42,12 @@ type GUTA struct {
 	Age         DirGUTAge
 	Count       uint64
 	Size        uint64
-	Atime       int64 // seconds since Unix epoch
-	ATimeRanges [9]uint64
-	Mtime       int64 // seconds since Unix epoch
-	MTimeRanges [9]uint64
-	updateTime  time.Time
+	Atime       int64              // seconds since Unix epoch
+	ATimeRanges summary.AgeBuckets // Counts of files by access-time age bucket
+	Mtime       int64              // seconds since Unix epoch
+	MTimeRanges summary.AgeBuckets // Counts of files by modification-time age bucket
+
+	updateTime time.Time
 }
 
 func (g GUTA) writeTo(w byteio.StickyEndianWriter) {
@@ -243,9 +245,9 @@ func (g GUTAs) Summary(filter *Filter) *DirSummary { //nolint:funlen
 		Count:       count,
 		Size:        size,
 		Atime:       time.Unix(atime, 0),
-		CommonATime: mostCommonBucket(aTimeRanges),
+		CommonATime: summary.MostCommonBucket(aTimeRanges),
 		Mtime:       time.Unix(mtime, 0),
-		CommonMTime: mostCommonBucket(mTimeRanges),
+		CommonMTime: summary.MostCommonBucket(mTimeRanges),
 		UIDs:        boolMapToSortedKeys(uniqueUIDs),
 		GIDs:        boolMapToSortedKeys(uniqueGIDs),
 		FT:          fileType,
@@ -281,23 +283,6 @@ func addGUTAToSummary(guta *GUTA, count, size *uint64, atime, mtime *int64,
 	for n, c := range guta.MTimeRanges {
 		mTimeRanges[n] += c
 	}
-}
-
-// mostCommonBucket returns the index of the bucket with the highest count.
-// If multiple buckets have the same count, the later (higher-index) bucket
-// is chosen. This matches the expected tie-breaking behaviour.
-func mostCommonBucket(ranges [9]uint64) uint8 {
-	bestIdx := uint8(0)
-	bestCount := ranges[0]
-
-	for i := 1; i < len(ranges); i++ {
-		if ranges[i] >= bestCount {
-			bestIdx = uint8(i) //nolint:gosec
-			bestCount = ranges[i]
-		}
-	}
-
-	return bestIdx
 }
 
 // boolMapToSortedKeys returns a sorted slice of the given keys.

@@ -99,8 +99,8 @@ func TestSummaryWithTimes(t *testing.T) {
 			So(s.Atime, ShouldEqual, now-(7*year+1))
 			So(s.Mtime, ShouldEqual, now-(month/2))
 
-			So(mostCommonBucket(s.AtimeBuckets), ShouldEqual, RangeLess1Month)
-			So(mostCommonBucket(s.MtimeBuckets), ShouldEqual, RangeLess1Month)
+			So(MostCommonBucket(s.AtimeBuckets), ShouldEqual, RangeLess1Month)
+			So(MostCommonBucket(s.MtimeBuckets), ShouldEqual, RangeLess1Month)
 		})
 
 		Convey("Tie-breaking in most common bucket", func() {
@@ -115,7 +115,7 @@ func TestSummaryWithTimes(t *testing.T) {
 			So(s.AtimeBuckets[RangeLess1Month], ShouldEqual, 2)
 			So(s.AtimeBuckets[Range1Month], ShouldEqual, 2)
 
-			So(mostCommonBucket(s.AtimeBuckets), ShouldEqual, RangeLess1Month)
+			So(MostCommonBucket(s.AtimeBuckets), ShouldEqual, RangeLess1Month)
 		})
 
 		Convey("Boundary ages", func() {
@@ -160,21 +160,7 @@ func TestSummaryWithTimes(t *testing.T) {
 			So(s1.AtimeBuckets[RangeLess1Month], ShouldEqual, 2)
 			So(s1.AtimeBuckets[Range2Months], ShouldEqual, 1)
 
-			So(mostCommonBucket(s1.AtimeBuckets), ShouldEqual, RangeLess1Month)
+			So(MostCommonBucket(s1.AtimeBuckets), ShouldEqual, RangeLess1Month)
 		})
 	})
-}
-
-func mostCommonBucket(buckets [9]uint64) uint8 {
-	bestIdx := uint8(0)
-	bestCount := buckets[0]
-
-	for i := 1; i < len(buckets); i++ {
-		if buckets[i] >= bestCount {
-			bestIdx = uint8(i) //nolint:gosec
-			bestCount = buckets[i]
-		}
-	}
-
-	return bestIdx
 }

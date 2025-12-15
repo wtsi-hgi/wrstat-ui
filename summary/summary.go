@@ -34,7 +34,7 @@ import (
 )
 
 const (
-	Range7Years = iota
+	Range7Years AgeRange = iota
 	Range5Years
 	Range3Years
 	Range2Years
@@ -69,14 +69,22 @@ type SummaryWithTimes struct { //nolint:revive
 	Summary
 	Atime        int64 // seconds since Unix epoch
 	Mtime        int64 // seconds since Unix epoch
-	AtimeBuckets [9]uint64
-	MtimeBuckets [9]uint64
+	AtimeBuckets AgeBuckets
+	MtimeBuckets AgeBuckets
 }
+
+// AgeRange represents a time-based bucket index for file ages.
+// It is used to index into age bucket arrays.
+type AgeRange uint8
+
+// AgeBuckets stores counts per AgeRange.
+// The index corresponds directly to the AgeRange constants.
+type AgeBuckets [9]uint64
 
 // bucketForAge returns the correct age bucket for a given file age in seconds.
 // The checks go from oldest to newest. The first matching range is returned.
 // Ages under one month always fall into the "less than 1 month" bucket.
-func bucketForAge(ageSeconds int64) uint8 { //nolint:gocyclo
+func bucketForAge(ageSeconds int64) AgeRange { //nolint:gocyclo
 	switch {
 	case ageSeconds >= 7*year:
 		return Range7Years
@@ -157,6 +165,23 @@ func (s *SummaryWithTimes) AddSummary(t *SummaryWithTimes) {
 		s.AtimeBuckets[i] += t.AtimeBuckets[i]
 		s.MtimeBuckets[i] += t.MtimeBuckets[i]
 	}
+}
+
+// MostCommonBucket returns the index of the bucket with the highest count.
+// If multiple buckets have the same count, the later (higher-index) bucket
+// is chosen. This matches the expected tie-breaking behaviour.
+func MostCommonBucket(ranges AgeBuckets) AgeRange {
+	var bestIdx AgeRange
+	bestCount := ranges[0]
+
+	for i := 1; i < len(ranges); i++ {
+		if ranges[i] >= bestCount {
+			bestIdx = AgeRange(i) //nolint:gosec
+			bestCount = ranges[i]
+		}
+	}
+
+	return bestIdx
 }
 
 // GroupUserID is a combined GID and UID.

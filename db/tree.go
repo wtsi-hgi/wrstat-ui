@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/wtsi-hgi/wrstat-ui/internal/split"
+	"github.com/wtsi-hgi/wrstat-ui/summary"
 )
 
 // Tree is used to do high-level queries on DB.Store() database files.
@@ -81,9 +82,9 @@ type DirSummary struct {
 	Count       uint64
 	Size        uint64
 	Atime       time.Time
-	CommonATime uint8
+	CommonATime summary.AgeRange
 	Mtime       time.Time
-	CommonMTime uint8
+	CommonMTime summary.AgeRange
 	UIDs        []uint32
 	GIDs        []uint32
 	FT          DirGUTAFileType
