@@ -238,8 +238,8 @@ type Writer interface {
   // It must be an absolute path and must end with '/'.
   SetMountPath(mountPath string)
 
-  // SetMountPoints can be used to manually set mountpoints for history key resolution.
-  // If not called, the writer must use auto-discovery from the OS.
+  // SetMountPoints overrides mountpoint discovery for history key resolution.
+  // When not called, the writer must auto-discover mountpoints from the OS.
   SetMountPoints(mountpoints []string)
 
   // SetUpdatedAt sets the dataset creation time used for history timestamps.
@@ -368,9 +368,9 @@ type Provider interface {
   BaseDirs() basedirs.Reader
 
   // DGUTAInfo returns summary information about all DirGUTA data that this
-  // provider serves. Implementations may aggregate over multiple physical
-  // sources (eg. many Bolt files or ClickHouse tables), but callers see a
-  // single logical summary.
+  // provider serves. Implementations must support aggregating over multiple
+  // physical sources (eg. many Bolt files or ClickHouse tables) while
+  // presenting a single logical summary to callers.
   DGUTAInfo() (*DBInfo, error)
 
   // BasedirsInfo returns summary information about all basedirs data that
@@ -415,9 +415,8 @@ incremental open/close logic.
 - If `Config.PollInterval` is zero or negative, automatic reloading is disabled.
 
 **ClickHouse implementation (future):**
-- May use a similar polling approach or rely on database-side change
-  notifications.
-- Must invoke `OnUpdate` when underlying data changes so the server can rebuild
+- Must either poll for changes or hook into database-side notifications and
+  invoke `OnUpdate` whenever underlying data changes so the server can rebuild
   caches.
 
 **Server cache invalidation:**
@@ -472,7 +471,7 @@ Minimal public API (required shape; keep as small as possible):
 package bolt
 
 // OpenProvider constructs a backend bundle that implements db.Provider.
-// If cfg.PollInterval > 0, the backend starts an internal goroutine that
+// When cfg.PollInterval > 0, the backend starts an internal goroutine that
 // watches cfg.BasePath for new databases and triggers OnUpdate callbacks.
 func OpenProvider(cfg Config) (db.Provider, error)
 
@@ -491,15 +490,16 @@ type Config struct {
     OwnersCSVPath string
 
     // MountPoints overrides mount auto-discovery for basedirs history resolution.
-    // If empty, the backend uses auto-discovery from the OS.
+    // When empty, the backend must auto-discover mountpoints from the OS.
     MountPoints []string
 
     // PollInterval is how often to scan BasePath for new databases.
-    // If zero or negative, automatic reloading is disabled.
+    // Zero or negative disables automatic reloading.
     PollInterval time.Duration
 
-    // RemoveOldPaths, if true, causes older database directories to be
-    // deleted from BasePath after a successful reload.
+    // RemoveOldPaths controls removal of older database directories from
+    // BasePath after a successful reload. When true, old paths are deleted;
+    // when false, they are retained.
     RemoveOldPaths bool
 }
 ```
@@ -510,8 +510,8 @@ Write-side construction is used only by `cmd/summarise`:
 package bolt
 
 func NewDGUTAWriter(outputDir string) (db.DGUTAWriter, error)
-// previousDBPath is the path to the previous run’s basedirs.db.
-// It may be empty; if empty, the writer starts with no history.
+// previousDBPath is the path to the previous run’s basedirs.db. Empty means
+// start with no seeded history.
 func NewBaseDirsWriter(dbPath string, quotas *basedirs.Quotas, previousDBPath string) (basedirs.Writer, error)
 ```
 
@@ -598,7 +598,7 @@ implementation but remain **non-public**:
 - No exported Bolt API must expose database path layout or directory naming
   conventions; those are backend implementation details. CLI commands should
   just pass the bolt DB paths they already take to the bolt constructors. If
-  tests need discovery, provide it in `bolt/internal` helpers only.
+  tests need discovery, it must live in `bolt/internal` helpers only.
 
 ## ClickHouse backend notes (future work)
 
