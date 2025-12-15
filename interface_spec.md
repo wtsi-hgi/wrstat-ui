@@ -195,6 +195,8 @@ The Bolt package provides the `Database` implementation. It must preserve the
 current multi-source semantics: combining DGUTA results across all underlying
 datasets, returning `ErrDirNotFound` only if a directory is missing from all
 sources, and de-duplicating + sorting children across sources.
+`Database.Info()` must aggregate counts across all mounts the backend has
+opened, matching the current `DB.Info()` behaviour.
 
 ### 2) Tree ingest interface (write-side)
 
@@ -280,9 +282,11 @@ The current `basedirs.BaseDirs` struct:
 
 The refactored design keeps the calculation logic in
 `basedirs.BaseDirs.Output()` but delegates all storage operations to a `Store`
-interface. The current tight coupling between calculation and Bolt transactions
-is broken by having `BaseDirs` calculate all data first, then pass the complete
-calculated data to the Store for persistence.
+interface. Storage must remain streaming-friendly: `BaseDirs.Output()` iterates
+its computed `IDAgeDirs`, hands references to the Store as it goes, and must
+not create extra copies of large slices or maps. The Store consumes data as it
+is delivered and must not require callers to materialise everything in memory
+at once.
 
 Define in `basedirs`:
 
@@ -320,9 +324,11 @@ type HistoryKey struct {
 // Store is the storage backend interface for basedirs persistence.
 type Store interface {
   // Persist stores all the calculated basedirs data.
-  // The Store handles all storage details (transactions, encoding, etc.).
-  // After storing, it must compute DateNoSpace/DateNoFiles for each group
-  // usage entry based on the stored history and update those fields.
+  // The Store handles all storage details (transactions, encoding, etc.) and
+  // must accept that callers reuse slices while iterating; Persist must not
+  // require callers to copy or buffer the whole dataset. After storing, it
+  // must compute DateNoSpace/DateNoFiles for each group usage entry based on
+  // the stored history and update those fields.
   Persist(data *OutputData) error
 
   Close() error
@@ -444,6 +450,7 @@ Aggregation behaviour across mounts (current `basedirs.MultiReader`) must be
 preserved by the storage implementation:
 - Usage methods: concatenate results across all mounts.
 - Subdirs/history: return the first successful result.
+- Info: sum the counts across all mounts that are open.
 
 `MountTimestamps` must merge entries across all physical sources, returning
 the latest `updatedAt` per mount path.
@@ -473,15 +480,15 @@ type Provider interface {
 
   // OnUpdate registers a callback that will be invoked whenever the
   // underlying data changes (e.g., new databases discovered, ClickHouse
-  // tables updated). The callback receives the updated Provider so the
-  // server can rebuild caches from the new data.
+  // tables updated). The server rebuilds caches using the same Provider
+  // instance on which the callback was registered.
   //
   // Implementations must:
   // - Call the callback on a separate goroutine (non-blocking).
   // - Guarantee the callback is not called concurrently with itself.
-  // - Provide a fully-usable Provider when the callback is invoked
-  //   (queries must work; old data connections are still valid until
-  //    the callback returns).
+  // - Provide a fully-usable Provider when the callback is invoked. The
+  //   provider has already swapped to new data before cb runs; old
+  //   connections stay valid until cb returns.
   //
   // If cb is nil, any previously registered callback is removed.
   OnUpdate(cb func())
