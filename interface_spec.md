@@ -59,7 +59,7 @@
   - `GET /rest/v1/auth/basedirs/usage/groups`
   - `GET /rest/v1/auth/basedirs/usage/users`
     - These are served from server caches; cache is built by calling the
-      underlying `storage.BaseDirsReader` across all `db.DirGUTAges`.
+      underlying `basedirs.Reader` across all `db.DirGUTAges`.
   - `GET /rest/v1/auth/basedirs/subdirs/group`
   - `GET /rest/v1/auth/basedirs/subdirs/user`
     - Query params: `id`, `basedir`, optional `age` (default `0`)
@@ -108,53 +108,26 @@
 
 ## Storage-neutral interfaces
 
-These interfaces must live in a new root package `storage`.
-
-Rationale: `server` and `cmd/*` need stable, backend-agnostic types to wire
-dependencies without importing the Bolt implementation.
+These interfaces must live in the domain packages `db` and `basedirs`.
 
 ### 1) Tree query interface (read-side)
 
-`server` must depend on this interface, not on Bolt paths.
-
-```go
-package storage
-
-type TreeQuerier interface {
-  DirInfo(dir string, filter *db.Filter) (*db.DirInfo, error)
-  DirHasChildren(dir string, filter *db.Filter) bool
-
-  // recurseCount controls how far to descend when computing “where”.
-  // Existing behaviour uses internal/split.SplitFn.
-  Where(dir string, filter *db.Filter, recurseCount split.SplitFn) (db.DCSs, error)
-
-  Close() error
-}
-```
-
-Notes:
-- `filter == nil` must behave as the current code (no filtering).
-- File type defaults (all non-dir types) and age defaults must remain identical.
-
-Internal store interface for `db.Tree` (defined in `db` package, implemented by
-`bolt`):
+`db.Tree` currently wraps `db.DB` which is tightly coupled to Bolt.
+`db.DB` should be replaced by `db.Database` interface.
 
 ```go
 package db
 
-// TreeStore is the low-level storage interface that db.Tree uses internally.
-// This is not exported from the storage package; it lives in db and is implemented by bolt.
-type TreeStore interface {
+// Database is the low-level storage interface that db.Tree uses internally.
+// This is implemented by the bolt package.
+type Database interface {
   // GetDGUTA retrieves the DGUTA record for a directory.
   // Returns nil, ErrDirNotFound if the directory is not in the database.
   GetDGUTA(dir string) (*DGUTA, error)
 
   // GetChildren returns the child directory paths for a directory.
   // Returns empty slice if no children exist.
-  GetChildren(dir string) []string
-
-  // Modtime returns the modification time of the data source.
-  Modtime() time.Time
+  GetChildren(dir string) ([]string, error)
 
   Close() error
 }
@@ -165,13 +138,11 @@ type TreeStore interface {
 ```go
 package db
 
-// NewTree creates a Tree that queries the given stores.
-// Multiple stores allow combining data from multiple mounts.
-func NewTree(stores ...TreeStore) *Tree
+// NewTree creates a Tree that queries the given database.
+func NewTree(db Database) *Tree
 ```
 
-The Bolt package provides the `TreeStore` implementation and the
-`storage.TreeQuerier` wraps a `*db.Tree`.
+The Bolt package provides the `Database` implementation.
 
 ### 2) Tree ingest interface (write-side)
 
@@ -182,14 +153,16 @@ The Bolt package provides the `TreeStore` implementation and the
 // type DB interface { Add(dguta db.RecordDGUTA) error }
 ```
 
-To make backend selection explicit and testable, define the following in
-`storage`:
+To make backend selection explicit and testable, define the following in `db`:
 
 ```go
-package storage
+package db
 
 type DGUTAWriter interface {
-  // MountPath is the mount directory path the stats were produced for.
+  // Add adds a DGUTA record to the database.
+  Add(dguta RecordDGUTA) error
+
+  // SetMountPath is the mount directory path the stats were produced for.
   // It must be an absolute path and must end with '/'.
   // Example: "/lustre/scratch123/".
   SetMountPath(mountPath string)
@@ -198,7 +171,6 @@ type DGUTAWriter interface {
   // cmd/summarise currently uses the stats.gz file mtime for this purpose.
   SetUpdatedAt(t time.Time)
 
-  Add(rec db.RecordDGUTA) error
   Close() error
 }
 ```
@@ -210,13 +182,12 @@ Normative requirement:
 ### 3) Basedirs ingest interface (write-side)
 
 This is the storage-neutral contract used by `cmd/summarise` to build basedirs
-data and update history. The caller does not provide a “previous DB path” to
-this interface.
+data and update history.
 
 ```go
-package storage
+package basedirs
 
-type BaseDirsWriter interface {
+type Writer interface {
   // SetMountPath sets the mount directory path the stats were produced for.
   // It must be an absolute path and must end with '/'.
   SetMountPath(mountPath string)
@@ -229,13 +200,27 @@ type BaseDirsWriter interface {
   // cmd/summarise currently uses the stats.gz file mtime for this purpose.
   SetUpdatedAt(t time.Time)
 
-  // Output writes the full basedirs snapshot (usage, subdirs) and updates history.
-  // It must be safe to call exactly once per writer.
-  Output(users, groups basedirs.IDAgeDirs) error
+  // StoreGroupUsage stores usage information for groups.
+  StoreGroupUsage(usage []*Usage) error
+
+  // StoreUserUsage stores usage information for users.
+  StoreUserUsage(usage []*Usage) error
+
+  // StoreGroupSubDirs stores sub-directory information for groups.
+  StoreGroupSubDirs(subdirs []*SubDir) error
+
+  // StoreUserSubDirs stores sub-directory information for users.
+  StoreUserSubDirs(subdirs []*SubDir) error
+
+  // StoreHistory stores history information.
+  // The implementation handles appending to existing history.
+  StoreHistory(history []History) error
 
   Close() error
 }
 ```
+
+Note: `basedirs.BaseDirs` (the domain logic struct) will retain the logic to calculate `Usage`, `SubDir`, and `History` from `IDAgeDirs`. It will then call the `Writer` methods to persist them.
 
 History update rule (must match current behaviour):
 - For each `(gid, mountPath)` history series, append the new point only if
@@ -254,21 +239,26 @@ Backend-specific history continuity:
 `server` uses these methods (directly or via caching):
 
 ```go
-package storage
+package basedirs
 
-type BaseDirsReader interface {
+type Reader interface {
   // Usage is requested per age; server will call this for all ages.
-  GroupUsage(age db.DirGUTAge) ([]*basedirs.Usage, error)
-  UserUsage(age db.DirGUTAge) ([]*basedirs.Usage, error)
+  GroupUsage(age db.DirGUTAge) ([]*Usage, error)
+  UserUsage(age db.DirGUTAge) ([]*Usage, error)
 
-  GroupSubDirs(gid uint32, basedir string, age db.DirGUTAge) ([]*basedirs.SubDir, error)
-  UserSubDirs(uid uint32, basedir string, age db.DirGUTAge) ([]*basedirs.SubDir, error)
+  GroupSubDirs(gid uint32, basedir string, age db.DirGUTAge) ([]*SubDir, error)
+  UserSubDirs(uid uint32, basedir string, age db.DirGUTAge) ([]*SubDir, error)
 
   // Returns history for a group for the mountpoint that contains `path`.
-  History(gid uint32, path string) ([]basedirs.History, error)
+  // The implementation must resolve `path` to a mountpoint.
+  History(gid uint32, path string) ([]History, error)
 
   // Matches current behaviour: used to override mountpoint auto-discovery.
   SetMountPoints(mountpoints []string)
+
+  // Returns mount directory path -> last updated time.
+  // Keys MUST be mount paths (absolute) and MUST end with '/'.
+  MountTimestamps() (map[string]time.Time, error)
 
   Close() error
 }
@@ -284,44 +274,27 @@ resolved from UID/GID. The current implementation uses `GroupCache` and
 `UserCache` in `basedirs`. The Bolt backend must continue to populate
 `Usage.Name` and `Usage.Owner` fields.
 
-### 5) Mount update timestamps (read-side metadata)
-
-Define a small metadata interface so `server` does not infer timestamps:
-
-```go
-package storage
-
-type MountTimestampsProvider interface {
-  // Returns mount directory path -> last updated time.
-  // Keys MUST be mount paths (absolute) and MUST end with '/'.
-  MountTimestamps() (map[string]time.Time, error)
-}
-```
-
-The HTTP handler continues to return Unix seconds, but converts from
-`time.Time`.
-
-### 6) Backend bundle interface (required)
+### 5) Backend bundle interface (required)
 
 `server` must be wired to a single backend bundle, provided by `cmd/server`.
+This interface can be defined in `server` package or `db` package. Let's place it in `db` as `Provider`.
 
 ```go
-package storage
+package db
 
-type Backend interface {
-  Tree() TreeQuerier
-  BaseDirs() BaseDirsReader
-  Mounts() MountTimestampsProvider
+type Provider interface {
+  Tree() Database
+  BaseDirs() basedirs.Reader
 
   // OnUpdate registers a callback that will be invoked whenever the
   // underlying data changes (e.g., new databases discovered, ClickHouse
-  // tables updated). The callback receives the updated Backend so the
+  // tables updated). The callback receives the updated Provider so the
   // server can rebuild caches from the new data.
   //
   // Implementations must:
   // - Call the callback on a separate goroutine (non-blocking).
   // - Guarantee the callback is not called concurrently with itself.
-  // - Provide a fully-usable Backend when the callback is invoked
+  // - Provide a fully-usable Provider when the callback is invoked
   //   (queries must work; old data connections are still valid until
   //    the callback returns).
   //
@@ -332,20 +305,19 @@ type Backend interface {
 }
 ```
 
-### 7) Backend reloading (internal implementation detail)
+### 6) Backend reloading (internal implementation detail)
 
 Reloading is an **internal concern** of each backend implementation; neither
 `server` nor `cmd/server` should manage reload loops, filesystem scanning, or
 incremental open/close logic.
 
 **Bolt implementation:**
-- The `bolt.OpenBackend(cfg)` constructor starts an internal goroutine that
+- The `bolt.OpenProvider(cfg)` constructor starts an internal goroutine that
   periodically scans the configured base path for new/changed database
   directories.
 - When changes are detected, the backend:
   1. Opens the new databases.
-  2. Updates its internal `TreeQuerier`, `BaseDirsReader`, and
-     `MountTimestampsProvider`.
+  2. Updates its internal `Database` and `BaseDirsReader`.
   3. Invokes the registered `OnUpdate` callback (if any).
   4. Closes obsolete database connections after the callback returns.
 - The scan interval is configured via `Config.PollInterval`.
@@ -361,7 +333,7 @@ incremental open/close logic.
 - The server's `groupUsageCache` and `userUsageCache` are pre-serialized
   JSON/gzip payloads for the `/basedirs/usage/*` endpoints.
 - On startup, `server` registers a callback via
-  `backend.OnUpdate(s.rebuildCaches)`.
+  `provider.OnUpdate(s.rebuildCaches)`.
 - When the backend detects new data and calls the callback, the server rebuilds
   these caches from the (now-updated) `BaseDirsReader`.
 - The `uidToNameCache` and `gidToNameCache` are append-only lookups and do not
@@ -390,7 +362,7 @@ The new root package `bolt` owns:
 
 Timestamp source of truth (Bolt backend):
 - Preferred: the backend persists and reads explicit `(mountPath, updatedAt)`
-  written by `storage.DGUTAWriter`.
+  written by `db.DGUTAWriter`.
 - Legacy fallback (only when explicit timestamps are absent):
   - Derive `mountPath` from the dataset directory name using the existing
     on-disk convention from `server/db.go`:
@@ -406,10 +378,10 @@ Minimal public API (required shape; keep as small as possible):
 ```go
 package bolt
 
-// OpenBackend constructs a backend bundle that implements storage.Backend.
+// OpenProvider constructs a backend bundle that implements db.Provider.
 // If cfg.PollInterval > 0, the backend starts an internal goroutine that
 // watches cfg.BasePath for new databases and triggers OnUpdate callbacks.
-func OpenBackend(cfg Config) (storage.Backend, error)
+func OpenProvider(cfg Config) (db.Provider, error)
 
 type Config struct {
     // BasePath is the directory scanned for database subdirectories.
@@ -444,26 +416,25 @@ Write-side construction is used only by `cmd/summarise`:
 ```go
 package bolt
 
-func NewDGUTAWriter(outputDir string) (storage.DGUTAWriter, error)
+func NewDGUTAWriter(outputDir string) (db.DGUTAWriter, error)
 // previousDBPath is the path to the previous run’s basedirs.db.
 // It may be empty; if empty, the writer starts with no history.
-func NewBaseDirsWriter(dbPath string, quotas *basedirs.Quotas, previousDBPath string) (storage.BaseDirsWriter, error)
+func NewBaseDirsWriter(dbPath string, quotas *basedirs.Quotas, previousDBPath string) (basedirs.Writer, error)
 ```
 
 ### Domain packages after refactor
 
 - `db/` becomes a pure domain package plus query algorithms.
   - Keeps: `Filter`, `DirSummary`, `DirInfo`, `DCSs`, `DGUTA`, `GUTAs`,
-    `RecordDGUTA`, `TreeStore` interface, age/filetype enums and parsing,
-    `DBInfo` struct.
+    `RecordDGUTA`, age/filetype enums and parsing, `DBInfo` struct.
   - Keeps: `Tree` type and its methods (`DirInfo`, `DirHasChildren`, `Where`,
     `FileLocations`, `Close`).
   - Removes: all bbolt imports, `DB` type entirely (its write functionality
     moves to bolt), `dbSet` type.
   - Removes: `EncodeToBytes`, `DecodeDGUTAbytes`, and all bolt-specific
     encoding/decoding (these move to bolt).
-  - New: `Tree` takes `TreeStore` interfaces in its constructor. The Bolt
-    package provides the `TreeStore` implementation.
+  - New: `Tree` takes `Database` interface in its constructor. The Bolt
+    package provides the `Database` implementation.
   - `db` must not import `go.etcd.io/bbolt` or `github.com/ugorji/go/codec`
     (codec is bolt-specific serialization).
 
@@ -471,7 +442,7 @@ func NewBaseDirsWriter(dbPath string, quotas *basedirs.Quotas, previousDBPath st
   - Keeps: `Usage`, `SubDir`, `History`, `IDAgeDirs`, `AgeDirs`,
     `SummaryWithChildren`, `Quotas`, `Config`, `DBInfo` struct, `DateQuotaFull`
     function, `GroupCache`, `UserCache`, `Error` type, mountpoint utilities.
-  - Removes: all bbolt imports, `BaseDirs` writer type, `BaseDirReader` type,
+  - Removes: all bbolt imports, `BaseDirs` writer type (replaced by domain logic calling `Writer`), `BaseDirReader` type,
     `MultiReader` type, `OpenDBRO`, `CleanInvalidDBHistory`,
     `FindInvalidHistoryKeys`, `MergeDBs`, `Info`, all encoding/decoding.
   - Removes: `github.com/ugorji/go/codec` import (codec is bolt-specific
@@ -486,21 +457,21 @@ func NewBaseDirsWriter(dbPath string, quotas *basedirs.Quotas, previousDBPath st
   - import `go.etcd.io/bbolt`.
 
 Instead:
-- `server` stores only the `storage.Backend` and uses it to serve requests.
+- `server` stores only the `db.Provider` and uses it to serve requests.
 - `server.Server` changes its fields from `basedirs.MultiReader` and `*db.Tree`
-  to `storage.Backend`.
-- `server.LoadDBs` becomes `server.SetBackend(backend storage.Backend)` which
-  takes an already-opened backend.
-- On `SetBackend`, the server registers its cache rebuild callback via
-  `backend.OnUpdate(s.rebuildCaches)`.
+  to `db.Provider`.
+- `server.LoadDBs` becomes `server.SetProvider(provider db.Provider)` which
+  takes an already-opened provider.
+- On `SetProvider`, the server registers its cache rebuild callback via
+  `provider.OnUpdate(s.rebuildCaches)`.
 - The server no longer has `EnableDBReloading`; reloading is handled internally
-  by the backend.
+  by the provider.
 
 `cmd/server` becomes simpler:
 - Constructs `bolt.Config` with `BasePath`, `PollInterval`, etc.
-- Calls `bolt.OpenBackend(cfg)` to get a `storage.Backend`.
-- Calls `server.SetBackend(backend)` once.
-- The backend handles its own reloading and notifies the server via the
+- Calls `bolt.OpenProvider(cfg)` to get a `db.Provider`.
+- Calls `server.SetProvider(provider)` once.
+- The provider handles its own reloading and notifies the server via the
   callback.
 
 Maintenance functions (used by `cmd/dbinfo` and `cmd/clean`) move to `bolt`
@@ -527,7 +498,7 @@ func MergeDBs(pathA, pathB, outputPath string) error
 
 Directory discovery helpers (`findDBDirs`, `isValidDBDir`, `joinDBPaths`) move
 from `server/db.go` to `bolt` but remain **internal** (unexported). They are
-used by the backend's internal reload loop and `OpenBackend`.
+used by the backend's internal reload loop and `OpenProvider`.
 
 ## ClickHouse backend notes (future work)
 
@@ -560,88 +531,71 @@ summarise ingests data for a mount, it must update that mount’s `updated_at`.
 
 ## Migration steps (implementation order)
 
-1. **Create `storage` package with interfaces**:
-   - Define `TreeQuerier`, `BaseDirsReader`, `MountTimestampsProvider`,
-     `DGUTAWriter`, `BaseDirsWriter`, and `Backend`.
-   - This package has no implementation, only interface definitions and domain
-     type re-exports if needed.
-
-2. **Create `db.TreeStore` interface** in the `db` package:
-   - Define the low-level store interface (`GetDGUTA`, `GetChildren`, `Modtime`,
-     `Close`).
-   - Refactor `db.Tree` to use `TreeStore` instead of directly opening bolt
+1. **Create `db.Database` and `db.DGUTAWriter` interfaces** in the `db` package:
+   - Define the low-level store interface (`GetDGUTA`, `GetChildren`, `Close`).
+   - Refactor `db.Tree` to use `Database` instead of directly opening bolt
      databases.
    - Remove all bbolt imports from `db` package.
+
+2. **Create `basedirs.Reader` and `basedirs.Writer` interfaces** in the `basedirs` package:
+   - Define the interfaces.
+   - Refactor `basedirs` to use these interfaces.
+   - Remove all bbolt imports from `basedirs` package.
 
 3. **Create the new root `bolt` package**:
    - Move all bbolt opening/closing, bucket logic, encoding/decoding from `db`
      and `basedirs`.
-   - Implement `db.TreeStore` interface.
-   - Implement `storage.TreeQuerier` by wrapping `*db.Tree`.
-   - Implement `storage.BaseDirsReader` (current `MultiReader` logic).
-   - Implement `storage.MountTimestampsProvider`.
-   - Implement `storage.Backend` bundle with internal reload loop.
-   - Implement `storage.DGUTAWriter` (current `db.DB.Add` + batching logic).
-   - Implement `storage.BaseDirsWriter` (current `basedirs.BaseDirs.Output`
-     logic).
+   - Implement `db.Database` interface.
+   - Implement `basedirs.Reader` (current `MultiReader` logic).
+   - Implement `db.Provider` bundle with internal reload loop.
+   - Implement `db.DGUTAWriter` (current `db.DB.Add` + batching logic).
+   - Implement `basedirs.Writer` (current `basedirs.BaseDirs.Output` logic).
    - Move maintenance functions: `DGUTAInfo`, `BaseDirsInfo`,
      `CleanInvalidDBHistory`, `FindInvalidHistoryKeys`, `MergeDBs`.
    - Implement internal reload goroutine that watches `BasePath` and calls
      `OnUpdate` callbacks.
 
-4. **Refactor `basedirs` package**:
-   - Keep only domain types: `Usage`, `SubDir`, `History`, `IDAgeDirs`,
-     `Quotas`, `Config`, `DBInfo`, `GroupCache`, `UserCache`, `DateQuotaFull`.
-   - Remove: `BaseDirs`, `BaseDirReader`, `MultiReader`, `OpenDBRO`, all bbolt
-     imports.
-   - Remove: `CleanInvalidDBHistory`, `FindInvalidHistoryKeys`, `MergeDBs`,
-     `Info`.
-
-5. **Refactor `cmd/summarise`**:
+4. **Refactor `cmd/summarise`**:
    - Replace `db.NewDB()` with `bolt.NewDGUTAWriter()`.
    - Replace `basedirs.NewCreator()` with `bolt.NewBaseDirsWriter()`.
    - Pass `--basedirsHistoryDB` as `previousDBPath` to the bolt writer.
-   - The `summary/dirguta` and `summary/basedirs` packages continue to use their
-     existing interfaces (`DB interface { Add(...) }` and `output interface {
-     Output(...) }`).
 
-6. **Refactor `server` package**:
+5. **Refactor `server` package**:
    - Change `Server` fields from `basedirs.MultiReader` and `*db.Tree` to
-     `storage.Backend`.
-   - Replace `LoadDBs(basePaths, ...)` with `SetBackend(backend
-     storage.Backend)`.
-   - In `SetBackend`, register cache rebuild callback via
-     `backend.OnUpdate(s.rebuildCaches)`.
-   - Remove `EnableDBReloading` entirely; reloading is internal to the backend.
+     `db.Provider`.
+   - Replace `LoadDBs(basePaths, ...)` with `SetProvider(provider
+     db.Provider)`.
+   - In `SetProvider`, register cache rebuild callback via
+     `provider.OnUpdate(s.rebuildCaches)`.
+   - Remove `EnableDBReloading` entirely; reloading is internal to the provider.
    - Change `dbUpdateTimestamps` handler to call
-     `backend.Mounts().MountTimestamps()`.
+     `provider.BaseDirs().MountTimestamps()`.
    - Remove bbolt-related imports.
 
-7. **Refactor `cmd/server`**:
+6. **Refactor `cmd/server`**:
    - Build `bolt.Config` with `BasePath`, `PollInterval`, `OwnersCSVPath`, etc.
-   - Call `bolt.OpenBackend(cfg)` to get a `storage.Backend`.
-   - Call `server.SetBackend(backend)` once.
+   - Call `bolt.OpenProvider(cfg)` to get a `db.Provider`.
+   - Call `server.SetProvider(provider)` once.
    - No reload loop needed; the backend handles it internally.
 
-8. **Refactor `cmd/dbinfo` and `cmd/clean`**:
+7. **Refactor `cmd/dbinfo` and `cmd/clean`**:
    - Use `bolt.DGUTAInfo`, `bolt.BaseDirsInfo` for dbinfo.
    - Use `bolt.CleanInvalidDBHistory`, `bolt.FindInvalidHistoryKeys` for clean.
 
-9. **Final verification**:
+8. **Final verification**:
    - Ensure no package outside `bolt` imports `go.etcd.io/bbolt`.
    - Run all existing tests to verify behaviour is unchanged.
 
 ## Testing checklist
 
 - Unit tests in `bolt` package for:
-  - `TreeStore` implementation: `GetDGUTA`, `GetChildren`, `Modtime`.
-  - `TreeQuerier` via `db.Tree`: `DirInfo`, `DirHasChildren`, `Where`.
-  - `BaseDirsReader`: `GroupUsage`, `UserUsage`, `GroupSubDirs`, `UserSubDirs`,
+  - `Database` implementation: `GetDGUTA`, `GetChildren`.
+  - `basedirs.Reader`: `GroupUsage`, `UserUsage`, `GroupSubDirs`, `UserSubDirs`,
     `History`.
   - `MountTimestampsProvider`: timestamp derivation from directory names and
     mtimes.
   - `DGUTAWriter`: batched writes, children storage.
-  - `BaseDirsWriter`: usage, subdirs, history with proper update semantics.
+  - `basedirs.Writer`: usage, subdirs, history with proper update semantics.
   - Internal reload loop: verify `OnUpdate` callback is invoked when new
     databases appear.
   - Maintenance functions: `DGUTAInfo`, `BaseDirsInfo`, `CleanInvalidDBHistory`.
