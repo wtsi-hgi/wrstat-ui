@@ -172,7 +172,11 @@ type Database interface {
   // Children returns the immediate child directory paths for dir.
   // It MUST de-duplicate and sort children across all sources.
   // It MUST return nil/empty if no children exist (leaf or missing dir).
-  Children(dir string) []string
+  Children(dir string) ([]string, error)
+
+  // Info returns summary information about the database (e.g. counts).
+  // Used by cmd/dbinfo.
+  Info() (*DBInfo, error)
 
   Close() error
 }
@@ -269,15 +273,16 @@ to calculate and store usage data.
 
 The current `basedirs.BaseDirs` struct:
 - Takes a db path, quotas, mountpoints, and modTime
-- Receives `IDAgeDirs` (computed by summary/basedirs) via `Output(users, groups)`
+- Receives `IDAgeDirs` (computed by summary/basedirs) via `Output(users,
+  groups)`
 - Internally calculates `Usage`, `SubDir`, and `History` from the IDAgeDirs
 - Stores everything in a Bolt transaction
 
-The refactored design keeps the calculation logic in `basedirs.BaseDirs.Output()`
-but delegates all storage operations to a `Store` interface. The current tight
-coupling between calculation and Bolt transactions is broken by having
-`BaseDirs` calculate all data first, then pass the complete calculated data
-to the Store for persistence.
+The refactored design keeps the calculation logic in
+`basedirs.BaseDirs.Output()` but delegates all storage operations to a `Store`
+interface. The current tight coupling between calculation and Bolt transactions
+is broken by having `BaseDirs` calculate all data first, then pass the complete
+calculated data to the Store for persistence.
 
 Define in `basedirs`:
 
@@ -343,7 +348,8 @@ The Bolt `Store` implementation:
 - Opens/creates the basedirs.db file in its constructor
 - If `previousDBPath` is provided, seeds history from that file first
 - `Persist()` stores all data in Bolt transactions
-- After storing, reads back history to compute and update DateNoSpace/DateNoFiles
+- After storing, reads back history to compute and update
+  DateNoSpace/DateNoFiles
 - Handles codec encoding internally
 
 ```go
@@ -406,6 +412,10 @@ type Reader interface {
   // The implementation aggregates across all open databases.
   MountTimestamps() (map[string]time.Time, error)
 
+  // Info returns summary information about the database (e.g. counts).
+  // Used by cmd/dbinfo.
+  Info() (*DBInfo, error)
+
   Close() error
 }
 
@@ -460,16 +470,6 @@ package server
 type Provider interface {
   Tree() db.Database
   BaseDirs() basedirs.Reader
-
-  // DGUTAInfo returns summary information about all DirGUTA data that this
-  // provider serves. Implementations must support aggregating over multiple
-  // physical sources (eg. many Bolt files or ClickHouse tables) while
-  // presenting a single logical summary to callers.
-  DGUTAInfo() (*db.DBInfo, error)
-
-  // BasedirsInfo returns summary information about all basedirs data that
-  // this provider serves.
-  BasedirsInfo() (*basedirs.DBInfo, error)
 
   // OnUpdate registers a callback that will be invoked whenever the
   // underlying data changes (e.g., new databases discovered, ClickHouse
@@ -625,6 +625,16 @@ func NewDGUTAWriter(outputDir string) (db.DGUTAWriter, error)
 func NewBaseDirsStore(dbPath, previousDBPath string) (basedirs.Store, error)
 ```
 
+Maintenance functions (used by `cmd/clean`):
+
+```go
+package bolt
+
+// NewHistoryMaintainer returns a basedirs.HistoryMaintainer backed by the
+// Bolt database at dbPath.
+func NewHistoryMaintainer(dbPath string) (basedirs.HistoryMaintainer, error)
+```
+
 ### Domain packages after refactor
 
 - `db/` becomes a pure domain package plus query algorithms.
@@ -684,27 +694,17 @@ Instead:
 - The provider handles its own reloading and notifies the server via the
   callback.
 
-Maintenance functions (used by `cmd/dbinfo` and `cmd/clean`) move to `bolt`
-package:
+`cmd/dbinfo` becomes simpler:
+- Constructs `bolt.Config` with `BasePath` (from args).
+- Calls `bolt.OpenProvider(cfg)` to get a `server.Provider`.
+- Calls `provider.Tree().Info()` and `provider.BaseDirs().Info()` to get stats.
+- Prints the stats.
 
-```go
-package bolt
-
-// DGUTAInfo returns summary info about dguta databases at the given paths.
-func DGUTAInfo(paths []string) (*db.DBInfo, error)
-
-// BaseDirsInfo returns summary info about a basedirs database.
-func BaseDirsInfo(dbPath string) (*basedirs.DBInfo, error)
-
-// CleanInvalidDBHistory removes irrelevant paths from the history bucket.
-func CleanInvalidDBHistory(dbPath, prefix string) error
-
-// FindInvalidHistoryKeys returns keys that would be removed by CleanInvalidDBHistory.
-func FindInvalidHistoryKeys(dbPath, prefix string) ([][]byte, error)
-
-// MergeDBs merges two basedirs databases into a new output file.
-func MergeDBs(pathA, pathB, outputPath string) error
-```
+`cmd/clean` uses `bolt` to get the interface:
+- Calls `bolt.NewHistoryMaintainer(path)` to obtain a
+  `basedirs.HistoryMaintainer`.
+- Calls `maintainer.CleanHistoryForMount(prefix)` or
+  `maintainer.FindInvalidHistory(prefix)`.
 
 Directory discovery helpers currently in `server/db.go` move into
 `bolt/internal` and remain **non-public**:
@@ -750,14 +750,14 @@ In ClickHouse mode, the backend must maintain equivalent timestamps in
 ## Migration steps (implementation order)
 
 1. **Create `db.Database` and `db.DGUTAWriter` interfaces** in the `db` package:
-   - Define the store interface (`DirInfo`, `Children`, `Close`).
+   - Define the store interface (`DirInfo`, `Children`, `Info`, `Close`).
    - Refactor `db.Tree` to use `Database` instead of directly opening bolt
      databases.
    - Remove all bbolt imports from `db` package.
 
 2. **Create `basedirs.Reader` and `basedirs.Store` interfaces** in the
    `basedirs` package:
-   - Define the `Reader` interface for query operations.
+   - Define the `Reader` interface for query operations (including `Info`).
    - Define the `Store` interface for write operations.
    - Refactor `basedirs.BaseDirs` to accept a `Store` in its constructor.
    - Remove all bbolt imports from `basedirs` package.
@@ -771,8 +771,8 @@ In ClickHouse mode, the backend must maintain equivalent timestamps in
    - Implement `db.DGUTAWriter` (current `db.DB.Add` + batching logic).
    - Implement `basedirs.Store` (current `basedirs.BaseDirs.Output` storage
      logic, including history seeding from a previous DB).
-   - Move maintenance functions: `DGUTAInfo`, `BaseDirsInfo`,
-     `CleanInvalidDBHistory`, `FindInvalidHistoryKeys`, `MergeDBs`.
+   - Implement `basedirs.HistoryMaintainer` (wrapping the clean logic).
+   - Export `NewHistoryMaintainer(dbPath)`.
    - Implement internal reload goroutine that watches `BasePath` and calls
      `OnUpdate` callbacks.
 
@@ -821,17 +821,13 @@ In ClickHouse mode, the backend must maintain equivalent timestamps in
    - No reload loop needed; the backend handles it internally.
 
 7. **Refactor `cmd/dbinfo` and `cmd/clean`**:
-   - Keep commands backend-neutral by delegating all layout discovery and Bolt
-     details to backend helpers.
-   - For DB info: call Bolt helpers that *internally* discover the latest
-     datasets for a base path (same logic the provider uses) and return
-     `db.DBInfo` / `basedirs.DBInfo`. The CLI should not replicate directory
-     scanning logic.
-   - For cleaning basedirs history: obtain a backend-specific
-     `basedirs.HistoryMaintainer` (Bolt: wrap a single `basedirs.db`; future
-     ClickHouse: wrap a connection) and call `CleanHistoryForMount` or
-     `FindInvalidHistory`. The CLI supplies the prefix and, for Bolt, the
-     database path; the backend owns how that path is opened.
+   - `cmd/dbinfo`:
+     - Construct `bolt.Config` with `BasePath` (from args).
+     - Call `bolt.OpenProvider(cfg)` to get a `server.Provider`.
+     - Call `provider.Tree().Info()` and `provider.BaseDirs().Info()`.
+   - `cmd/clean`:
+     - Call `bolt.NewHistoryMaintainer(path)`.
+     - Use `CleanHistoryForMount` or `FindInvalidHistory`.
 
 8. **Final verification**:
    - Ensure no package outside `bolt` imports `go.etcd.io/bbolt`.
@@ -840,9 +836,9 @@ In ClickHouse mode, the backend must maintain equivalent timestamps in
 ## Testing checklist
 
 - Unit tests in `bolt` package for:
-  - `Database` implementation: `DirInfo`, `Children`.
+  - `Database` implementation: `DirInfo`, `Children`, `Info`.
   - `basedirs.Reader`: `GroupUsage`, `UserUsage`, `GroupSubDirs`, `UserSubDirs`,
-    `History`, `MountTimestamps`.
+    `History`, `MountTimestamps`, `Info`.
   - Timestamp derivation: from explicit persisted values, and legacy fallback
     from directory names and mtimes.
   - `DGUTAWriter`: batched writes, children storage, metadata persistence
@@ -851,7 +847,7 @@ In ClickHouse mode, the backend must maintain equivalent timestamps in
     history seeding from a previous database, DateNoSpace/DateNoFiles updates.
   - Internal reload loop: verify `OnUpdate` callback is invoked when new
     databases appear.
-  - Maintenance functions: `DGUTAInfo`, `BaseDirsInfo`, `CleanInvalidDBHistory`.
+  - Maintenance functions: `HistoryMaintainer` implementation.
 - A repository-wide check (CI or a small test) that fails if any non-`bolt`
   package imports `go.etcd.io/bbolt`.
 - Server tests should pass unchanged in behaviour (JSON shapes, auth
