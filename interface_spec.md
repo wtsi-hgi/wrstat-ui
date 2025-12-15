@@ -179,6 +179,10 @@ Normative requirement:
 - Every successful ingest must persist `(mountPath, updatedAt)` so it can be
   returned later via `MountTimestamps()`.
 
+- Implementations must support streaming ingestion: callers never need to hold
+  the entire dataset in memory; backends are responsible for batching and
+  flushing as needed.
+
 ### 3) Basedirs ingest interface (write-side)
 
 This is the storage-neutral contract used by `cmd/summarise` to build basedirs
@@ -234,6 +238,10 @@ Backend-specific history continuity:
   to the Bolt writer constructor (see Bolt package section), then apply the
   append rule above.
 
+All backends must implement history updates as logical upserts into a single
+history series per `(gid, mountPath)`; there must be no domain-level "copy
+entire bucket" operations.
+
 ### 4) Basedirs query interface (read-side)
 
 `server` uses these methods (directly or via caching):
@@ -269,6 +277,9 @@ preserved by the storage implementation:
 - Usage methods: concatenate results across all mounts.
 - Subdirs/history: return the first successful result.
 
+`MountTimestamps` must merge entries across all physical sources, returning
+the latest `updatedAt` per mount path.
+
 Group/user name caching: The `basedirs` types `Usage` includes `Name` which is
 resolved from UID/GID. The current implementation uses `GroupCache` and
 `UserCache` in `basedirs`. The Bolt backend must continue to populate
@@ -277,7 +288,7 @@ resolved from UID/GID. The current implementation uses `GroupCache` and
 ### 5) Backend bundle interface (required)
 
 `server` must be wired to a single backend bundle, provided by `cmd/server`.
-This interface can be defined in `server` package or `db` package. Let's place it in `db` as `Provider`.
+Define this interface in the `db` package as `Provider`.
 
 ```go
 package db
@@ -496,9 +507,12 @@ func FindInvalidHistoryKeys(dbPath, prefix string) ([][]byte, error)
 func MergeDBs(pathA, pathB, outputPath string) error
 ```
 
-Directory discovery helpers (`findDBDirs`, `isValidDBDir`, `joinDBPaths`) move
-from `server/db.go` to `bolt` but remain **internal** (unexported). They are
-used by the backend's internal reload loop and `OpenProvider`.
+Directory discovery helpers currently in `server/db.go` move into `bolt`:
+- Export `FindDBDirs(basepath string, required ...string) ([]string, []string,
+  error)` and `JoinDBPaths(dbPaths []string, dgutaDBName, basedirDBName string)
+  ([]string, []string)` for use by `cmd/dbinfo` and tests.
+- Additional helper functions may remain unexported and be used only by the
+  backend's internal reload loop and `OpenProvider`.
 
 ## ClickHouse backend notes (future work)
 
@@ -580,7 +594,9 @@ summarise ingests data for a mount, it must update that mount’s `updated_at`.
 
 7. **Refactor `cmd/dbinfo` and `cmd/clean`**:
    - Use `bolt.DGUTAInfo`, `bolt.BaseDirsInfo` for dbinfo.
-   - Use `bolt.CleanInvalidDBHistory`, `bolt.FindInvalidHistoryKeys` for clean.
+  - Replace `server.FindDBDirs`/`server.JoinDBPaths` with
+    `bolt.FindDBDirs`/`bolt.JoinDBPaths`.
+  - Use `bolt.CleanInvalidDBHistory`, `bolt.FindInvalidHistoryKeys` for clean.
 
 8. **Final verification**:
    - Ensure no package outside `bolt` imports `go.etcd.io/bbolt`.
