@@ -9,8 +9,8 @@
    - Interfaces must not expose buckets, cursors, `[]byte` values, or caller-built keys.
 4. Public API surface of the new `bolt` package must be **minimal** and **fully tested**.
 5. Only these may import `github.com/wtsi-hgi/wrstat-ui/bolt`:
-   - `cmd/*`, `main.go`, and tests.
-   - Domain packages like `db`, `basedirs`, and `server` must not import it.
+   - `cmd/*`, `main.go`, test files (`*_test.go`), and `internal/*` test helper packages.
+   - Domain packages like `db`, `basedirs`, and `server` must not import it in production code.
 6. Must preserve all current user-visible behaviour:
    - Web UI and `wrstat-ui where` filters and results.
    - Multi-mount behaviour today (multiple Bolt “sources”).
@@ -118,6 +118,41 @@ Notes:
 - `filter == nil` must behave as the current code (no filtering).
 - File type defaults (all non-dir types) and age defaults must remain identical.
 
+Internal store interface for `db.Tree` (defined in `db` package, implemented by `bolt`):
+
+```go
+package db
+
+// TreeStore is the low-level storage interface that db.Tree uses internally.
+// This is not exported from the storage package; it lives in db and is implemented by bolt.
+type TreeStore interface {
+  // GetDGUTA retrieves the DGUTA record for a directory.
+  // Returns nil, ErrDirNotFound if the directory is not in the database.
+  GetDGUTA(dir string) (*DGUTA, error)
+
+  // GetChildren returns the child directory paths for a directory.
+  // Returns empty slice if no children exist.
+  GetChildren(dir string) []string
+
+  // Modtime returns the modification time of the data source.
+  Modtime() time.Time
+
+  Close() error
+}
+```
+
+`db.Tree` constructor changes from `NewTree(paths ...string)` to:
+
+```go
+package db
+
+// NewTree creates a Tree that queries the given stores.
+// Multiple stores allow combining data from multiple mounts.
+func NewTree(stores ...TreeStore) *Tree
+```
+
+The Bolt package provides the `TreeStore` implementation and the `storage.TreeQuerier` wraps a `*db.Tree`.
+
 ### 2) Tree ingest interface (write-side)
 
 `summary/dirguta` already depends on a minimal interface:
@@ -158,9 +193,13 @@ This is the storage-neutral contract used by `cmd/summarise` to build basedirs d
 package storage
 
 type BaseDirsWriter interface {
-  // MountPath is the mount directory path the stats were produced for.
+  // SetMountPath sets the mount directory path the stats were produced for.
   // It must be an absolute path and must end with '/'.
   SetMountPath(mountPath string)
+
+  // SetMountPoints can be used to manually set mountpoints for history key resolution.
+  // If not called, the writer must use auto-discovery from the OS.
+  SetMountPoints(mountpoints []string)
 
   // SetUpdatedAt sets the dataset creation time used for history timestamps.
   // cmd/summarise currently uses the stats.gz file mtime for this purpose.
@@ -210,6 +249,8 @@ Aggregation behaviour across mounts (current `basedirs.MultiReader`) must be pre
 - Usage methods: concatenate results across all mounts.
 - Subdirs/history: return the first successful result.
 
+Group/user name caching: The `basedirs` types `Usage` includes `Name` which is resolved from UID/GID. The current implementation uses `GroupCache` and `UserCache` in `basedirs`. The Bolt backend must continue to populate `Usage.Name` and `Usage.Owner` fields.
+
 ### 5) Mount update timestamps (read-side metadata)
 
 Define a small metadata interface so `server` does not infer timestamps:
@@ -240,6 +281,29 @@ type Backend interface {
   Close() error
 }
 ```
+
+### 7) Backend reloading (incremental database updates)
+
+The current server uses incremental reloading via `OpenFrom`/`CloseOnly` methods on `db.Tree` and `basedirs.MultiReader`. This allows adding/removing database sources without closing all existing connections.
+
+For the abstraction, reloading logic must move to `cmd/server` or bolt-specific helpers. The `bolt` package provides:
+
+```go
+package bolt
+
+// OpenBackendFrom creates a new Backend from an existing one, adding and removing sources.
+// This is used for incremental database reloading when new summarise runs complete.
+// - add: new database directory paths to include
+// - remove: existing paths that should be excluded
+// Returns a new Backend; the caller must call CloseOnly on the old backend for removed paths.
+func (b *Backend) OpenBackendFrom(add, remove []string) (*Backend, error)
+
+// CloseOnly closes only the database connections for the given paths.
+// Used after OpenBackendFrom to clean up the old backend's removed sources.
+func (b *Backend) CloseOnly(paths []string) error
+```
+
+The `server` package stores a `storage.Backend` and does not call these methods directly. Instead, `cmd/server` manages the reload loop and swaps backends atomically.
 
 ## Required package boundary changes
 
@@ -304,24 +368,69 @@ func NewBaseDirsWriter(dbPath string, quotas *basedirs.Quotas, previousDBPath st
 
 ### Domain packages after refactor
 
-
 - `db/` becomes a pure domain package plus query algorithms.
-  - `db.Tree` remains in `db` and is the implementation used by the Bolt backend.
-  - All persistence/IO details are pushed behind an internal (non-bbolt) store interface (defined in `db`), which is implemented in the `bolt` package.
-  - `db` must not import `go.etcd.io/bbolt`.
+  - Keeps: `Filter`, `DirSummary`, `DirInfo`, `DCSs`, `DGUTA`, `GUTAs`, `RecordDGUTA`, `TreeStore` interface, age/filetype enums and parsing, `DBInfo` struct.
+  - Keeps: `Tree` type and its methods (`DirInfo`, `DirHasChildren`, `Where`, `FileLocations`, `Close`).
+  - Removes: all bbolt imports, `DB` type entirely (its write functionality moves to bolt), `dbSet` type.
+  - Removes: `EncodeToBytes`, `DecodeDGUTAbytes`, and all bolt-specific encoding/decoding (these move to bolt).
+  - New: `Tree` takes `TreeStore` interfaces in its constructor. The Bolt package provides the `TreeStore` implementation.
+  - `db` must not import `go.etcd.io/bbolt` or `github.com/ugorji/go/codec` (codec is bolt-specific serialization).
 
-- `basedirs/` becomes domain types + encoding/decoding logic (if still used), and/or pure query interfaces.
-  - Any code that directly uses `*bolt.DB` must move behind the `bolt` package boundary.
+- `basedirs/` becomes domain types + pure interfaces.
+  - Keeps: `Usage`, `SubDir`, `History`, `IDAgeDirs`, `AgeDirs`, `SummaryWithChildren`, `Quotas`, `Config`, `DBInfo` struct, `DateQuotaFull` function, `GroupCache`, `UserCache`, `Error` type, mountpoint utilities.
+  - Removes: all bbolt imports, `BaseDirs` writer type, `BaseDirReader` type, `MultiReader` type, `OpenDBRO`, `CleanInvalidDBHistory`, `FindInvalidHistoryKeys`, `MergeDBs`, `Info`, all encoding/decoding.
+  - Removes: `github.com/ugorji/go/codec` import (codec is bolt-specific serialization).
+  - The Bolt package reimplements the reader/writer using the domain types.
 
 - `server/` must not:
   - open databases from filesystem paths,
   - scan filesystem for “latest version” dirs,
   - stat dirs for timestamps,
-  - call `OpenFrom` / `CloseOnly` on bolt-backed concrete types.
+  - call `OpenFrom` / `CloseOnly` on bolt-backed concrete types,
+  - import `go.etcd.io/bbolt`.
 
 Instead:
 - `cmd/server` is responsible for discovery/reloading and for supplying `storage.Backend` to `server`.
 - `server` stores only the `storage.Backend` and uses it to serve requests.
+- `server.Server` changes its fields from `basedirs.MultiReader` and `*db.Tree` to `storage.Backend`.
+- `server.LoadDBs` becomes `server.SetBackend(backend storage.Backend)` which takes an already-opened backend.
+- The reload loop moves to `cmd/server`, calling `bolt.OpenBackendFrom` and swapping backends via `server.SetBackend`.
+
+Maintenance functions (used by `cmd/dbinfo` and `cmd/clean`) move to `bolt` package:
+
+```go
+package bolt
+
+// DGUTAInfo returns summary info about dguta databases at the given paths.
+func DGUTAInfo(paths []string) (*db.DBInfo, error)
+
+// BaseDirsInfo returns summary info about a basedirs database.
+func BaseDirsInfo(dbPath string) (*basedirs.DBInfo, error)
+
+// CleanInvalidDBHistory removes irrelevant paths from the history bucket.
+func CleanInvalidDBHistory(dbPath, prefix string) error
+
+// FindInvalidHistoryKeys returns keys that would be removed by CleanInvalidDBHistory.
+func FindInvalidHistoryKeys(dbPath, prefix string) ([][]byte, error)
+
+// MergeDBs merges two basedirs databases into a new output file.
+func MergeDBs(pathA, pathB, outputPath string) error
+```
+
+Directory discovery helpers (move from `server/db.go` to `bolt`):
+
+```go
+package bolt
+
+// FindDBDirs finds the latest database directories in the given base path.
+func FindDBDirs(basepath string, required ...string) (dbPaths, toDelete []string, err error)
+
+// IsValidDBDir checks if a directory entry is a valid database directory.
+func IsValidDBDir(entry fs.DirEntry, basepath string, required ...string) bool
+
+// JoinDBPaths produces dgutaDB and basedirDB paths from base dbPaths.
+func JoinDBPaths(dbPaths []string, dgutaDBName, basedirDBName string) (dirgutaPaths, baseDirPaths []string)
+```
 
 ## ClickHouse backend notes (future work)
 
@@ -350,27 +459,70 @@ When summarise ingests data for a mount, it must update that mount’s `updated_
 
 ## Migration steps (implementation order)
 
-1. Introduce interfaces (in `storage`): `storage.TreeQuerier`, `storage.BaseDirsReader`, `storage.MountTimestampsProvider`, `storage.DGUTAWriter`, `storage.BaseDirsWriter`, and `storage.Backend`.
-2. Create the new root `bolt` package:
-   - move all bbolt opening/closing, bucket logic, and bolt-specific helpers into it.
-   - ensure no bbolt imports remain outside `bolt`.
-3. Refactor `cmd/summarise`:
-   - replace `db.NewDB` / `basedirs.NewCreator` usage with constructors from `bolt`.
-  - for basedirs history continuity, pass `--basedirsHistoryDB` as `previousDBPath` to `bolt.NewBaseDirsWriter(...)`.
-  - ensure `summary/dirguta` and `summary/basedirs` depend only on the minimal interfaces.
-4. Refactor `server` wiring:
-   - change `Server.LoadDBs`/`EnableDBReloading` so `server` no longer accepts file paths.
-   - move path discovery + reloading into `cmd/server` or `bolt` helpers.
-   - change `/dbsUpdated` to call the injected `MountTimestampsProvider`.
-5. Refactor bolt-only maintenance helpers (`basedirs/clean.go`, `basedirs/info.go`, any bucket-copy helpers):
-  - move them into `bolt`.
-6. Delete/replace any remaining bbolt imports outside `bolt`.
+1. **Create `storage` package with interfaces**:
+   - Define `TreeQuerier`, `BaseDirsReader`, `MountTimestampsProvider`, `DGUTAWriter`, `BaseDirsWriter`, and `Backend`.
+   - This package has no implementation, only interface definitions and domain type re-exports if needed.
+
+2. **Create `db.TreeStore` interface** in the `db` package:
+   - Define the low-level store interface (`GetDGUTA`, `GetChildren`, `Modtime`, `Close`).
+   - Refactor `db.Tree` to use `TreeStore` instead of directly opening bolt databases.
+   - Remove all bbolt imports from `db` package.
+
+3. **Create the new root `bolt` package**:
+   - Move all bbolt opening/closing, bucket logic, encoding/decoding from `db` and `basedirs`.
+   - Implement `db.TreeStore` interface.
+   - Implement `storage.TreeQuerier` by wrapping `*db.Tree`.
+   - Implement `storage.BaseDirsReader` (current `MultiReader` logic).
+   - Implement `storage.MountTimestampsProvider`.
+   - Implement `storage.Backend` bundle.
+   - Implement `storage.DGUTAWriter` (current `db.DB.Add` + batching logic).
+   - Implement `storage.BaseDirsWriter` (current `basedirs.BaseDirs.Output` logic).
+   - Move maintenance functions: `DGUTAInfo`, `BaseDirsInfo`, `CleanInvalidDBHistory`, `FindInvalidHistoryKeys`, `MergeDBs`.
+   - Move discovery helpers: `FindDBDirs`, `IsValidDBDir`, `JoinDBPaths`.
+   - Implement `OpenBackendFrom` and `CloseOnly` for incremental reloading.
+
+4. **Refactor `basedirs` package**:
+   - Keep only domain types: `Usage`, `SubDir`, `History`, `IDAgeDirs`, `Quotas`, `Config`, `DBInfo`, `GroupCache`, `UserCache`, `DateQuotaFull`.
+   - Remove: `BaseDirs`, `BaseDirReader`, `MultiReader`, `OpenDBRO`, all bbolt imports.
+   - Remove: `CleanInvalidDBHistory`, `FindInvalidHistoryKeys`, `MergeDBs`, `Info`.
+
+5. **Refactor `cmd/summarise`**:
+   - Replace `db.NewDB()` with `bolt.NewDGUTAWriter()`.
+   - Replace `basedirs.NewCreator()` with `bolt.NewBaseDirsWriter()`.
+   - Pass `--basedirsHistoryDB` as `previousDBPath` to the bolt writer.
+   - The `summary/dirguta` and `summary/basedirs` packages continue to use their existing interfaces (`DB interface { Add(...) }` and `output interface { Output(...) }`).
+
+6. **Refactor `server` package**:
+   - Change `Server` fields from `basedirs.MultiReader` and `*db.Tree` to `storage.Backend`.
+   - Replace `LoadDBs(basePaths, ...)` with `SetBackend(backend storage.Backend)`.
+   - Remove `EnableDBReloading` from server; the reload loop moves to `cmd/server`.
+   - Change `dbUpdateTimestamps` handler to call `backend.Mounts().MountTimestamps()`.
+   - Remove bbolt-related imports.
+
+7. **Refactor `cmd/server`**:
+   - Use `bolt.FindDBDirs` and `bolt.JoinDBPaths` for discovery.
+   - Use `bolt.OpenBackend` to create the initial backend.
+   - Implement reload loop using `bolt.OpenBackendFrom` and `bolt.CloseOnly`.
+   - Call `server.SetBackend` to swap backends atomically.
+
+8. **Refactor `cmd/dbinfo` and `cmd/clean`**:
+   - Use `bolt.DGUTAInfo`, `bolt.BaseDirsInfo` for dbinfo.
+   - Use `bolt.CleanInvalidDBHistory`, `bolt.FindInvalidHistoryKeys` for clean.
+
+9. **Final verification**:
+   - Ensure no package outside `bolt` imports `go.etcd.io/bbolt`.
+   - Run all existing tests to verify behaviour is unchanged.
 
 ## Testing checklist
 
 - Unit tests in `bolt` package for:
-  - Opening/reading DGUTA tree (`DirInfo`, `DirHasChildren`, `Where`).
-  - Opening/reading basedirs (`GroupUsage`, `UserUsage`, `SubDirs`, `History`).
-  - Timestamp derivation for bolt mode.
+  - `TreeStore` implementation: `GetDGUTA`, `GetChildren`, `Modtime`.
+  - `TreeQuerier` via `db.Tree`: `DirInfo`, `DirHasChildren`, `Where`.
+  - `BaseDirsReader`: `GroupUsage`, `UserUsage`, `GroupSubDirs`, `UserSubDirs`, `History`.
+  - `MountTimestampsProvider`: timestamp derivation from directory names and mtimes.
+  - `DGUTAWriter`: batched writes, children storage.
+  - `BaseDirsWriter`: usage, subdirs, history with proper update semantics.
+  - `OpenBackendFrom` and `CloseOnly` for incremental reload.
+  - Maintenance functions: `DGUTAInfo`, `BaseDirsInfo`, `CleanInvalidDBHistory`.
 - A repository-wide check (CI or a small test) that fails if any non-`bolt` package imports `go.etcd.io/bbolt`.
-- Server tests should pass unchanged in behaviour (JSON shapes, auth restrictions, and caches).
+- Server tests should pass unchanged in behaviour (JSON shapes, auth restrictions, caches, and reload semantics).
