@@ -224,7 +224,9 @@ type Writer interface {
 }
 ```
 
-Note: `basedirs.BaseDirs` (the domain logic struct) will retain the logic to calculate `Usage`, `SubDir`, and `History` from `IDAgeDirs`. It will then call the `Writer` methods to persist them.
+Note: `basedirs.BaseDirs` (the domain logic struct) will retain the logic to
+calculate `Usage`, `SubDir`, and `History` from `IDAgeDirs`. It will then call
+the `Writer` methods to persist them.
 
 History update rule (must match current behaviour):
 - For each `(gid, mountPath)` history series, append the new point only if
@@ -270,6 +272,26 @@ type Reader interface {
 
   Close() error
 }
+
+// HistoryIssue describes a history entry that would be considered invalid for
+// a given mount-path prefix.
+type HistoryIssue struct {
+  GID       uint32
+  MountPath string
+}
+
+// HistoryMaintainer defines storage-neutral maintenance operations over
+// basedirs history.
+type HistoryMaintainer interface {
+  // CleanHistoryForMount keeps only history entries whose mount path has the
+  // given prefix and removes all others.
+  CleanHistoryForMount(prefix string) error
+
+  // FindInvalidHistory returns the list of (gid, mountPath) pairs that would
+  // be removed by CleanHistoryForMount for the same prefix. This is used by
+  // the `clean` CLI in view-only mode.
+  FindInvalidHistory(prefix string) ([]HistoryIssue, error)
+}
 ```
 
 Aggregation behaviour across mounts (current `basedirs.MultiReader`) must be
@@ -296,6 +318,16 @@ package db
 type Provider interface {
   Tree() Database
   BaseDirs() basedirs.Reader
+
+  // DGUTAInfo returns summary information about all DirGUTA data that this
+  // provider serves. Implementations may aggregate over multiple physical
+  // sources (eg. many Bolt files or ClickHouse tables), but callers see a
+  // single logical summary.
+  DGUTAInfo() (*DBInfo, error)
+
+  // BasedirsInfo returns summary information about all basedirs data that
+  // this provider serves.
+  BasedirsInfo() (*basedirs.DBInfo, error)
 
   // OnUpdate registers a callback that will be invoked whenever the
   // underlying data changes (e.g., new databases discovered, ClickHouse
@@ -453,9 +485,10 @@ func NewBaseDirsWriter(dbPath string, quotas *basedirs.Quotas, previousDBPath st
   - Keeps: `Usage`, `SubDir`, `History`, `IDAgeDirs`, `AgeDirs`,
     `SummaryWithChildren`, `Quotas`, `Config`, `DBInfo` struct, `DateQuotaFull`
     function, `GroupCache`, `UserCache`, `Error` type, mountpoint utilities.
-  - Removes: all bbolt imports, `BaseDirs` writer type (replaced by domain logic calling `Writer`), `BaseDirReader` type,
-    `MultiReader` type, `OpenDBRO`, `CleanInvalidDBHistory`,
-    `FindInvalidHistoryKeys`, `MergeDBs`, `Info`, all encoding/decoding.
+  - Removes: all bbolt imports, `BaseDirs` writer type (replaced by domain logic
+    calling `Writer`), `BaseDirReader` type, `MultiReader` type, `OpenDBRO`,
+    `CleanInvalidDBHistory`, `FindInvalidHistoryKeys`, `MergeDBs`, `Info`, all
+    encoding/decoding.
   - Removes: `github.com/ugorji/go/codec` import (codec is bolt-specific
     serialization).
   - The Bolt package reimplements the reader/writer using the domain types.
@@ -507,12 +540,12 @@ func FindInvalidHistoryKeys(dbPath, prefix string) ([][]byte, error)
 func MergeDBs(pathA, pathB, outputPath string) error
 ```
 
-Directory discovery helpers currently in `server/db.go` move into `bolt`:
-- Export `FindDBDirs(basepath string, required ...string) ([]string, []string,
-  error)` and `JoinDBPaths(dbPaths []string, dgutaDBName, basedirDBName string)
-  ([]string, []string)` for use by `cmd/dbinfo` and tests.
-- Additional helper functions may remain unexported and be used only by the
-  backend's internal reload loop and `OpenProvider`.
+Directory discovery helpers currently in `server/db.go` move into the Bolt
+implementation but remain **non-public**:
+- They may live in the `bolt` package as unexported functions or in an
+  `internal` sub-package used only by tests.
+- No exported Bolt API must expose database path layout or directory naming
+  conventions; those are backend implementation details.
 
 ## ClickHouse backend notes (future work)
 
@@ -551,7 +584,8 @@ summarise ingests data for a mount, it must update that mount’s `updated_at`.
      databases.
    - Remove all bbolt imports from `db` package.
 
-2. **Create `basedirs.Reader` and `basedirs.Writer` interfaces** in the `basedirs` package:
+2. **Create `basedirs.Reader` and `basedirs.Writer` interfaces** in the
+   `basedirs` package:
    - Define the interfaces.
    - Refactor `basedirs` to use these interfaces.
    - Remove all bbolt imports from `basedirs` package.
@@ -593,10 +627,19 @@ summarise ingests data for a mount, it must update that mount’s `updated_at`.
    - No reload loop needed; the backend handles it internally.
 
 7. **Refactor `cmd/dbinfo` and `cmd/clean`**:
-   - Use `bolt.DGUTAInfo`, `bolt.BaseDirsInfo` for dbinfo.
-  - Replace `server.FindDBDirs`/`server.JoinDBPaths` with
-    `bolt.FindDBDirs`/`bolt.JoinDBPaths`.
-  - Use `bolt.CleanInvalidDBHistory`, `bolt.FindInvalidHistoryKeys` for clean.
+   - Use storage-neutral interfaces so the same commands can work with Bolt
+     or ClickHouse backends.
+   - For DB info:
+     - Construct a `db.Provider` using the chosen backend (Bolt today,
+       ClickHouse in future) and call `DGUTAInfo()` / `BasedirsInfo()` to get
+       `db.DBInfo` and `basedirs.DBInfo`.
+   - For cleaning basedirs history:
+     - Obtain a `basedirs.HistoryMaintainer` from the chosen backend (for
+       Bolt, via a constructor that wraps the on-disk DB; for ClickHouse, via
+       a constructor that wraps the DB connection).
+     - Call `CleanHistoryForMount(prefix)` to perform the cleanup and
+       `FindInvalidHistory(prefix)` for view-only mode.
+     - Do not depend on any Bolt-specific path layout or exported helpers.
 
 8. **Final verification**:
    - Ensure no package outside `bolt` imports `go.etcd.io/bbolt`.
