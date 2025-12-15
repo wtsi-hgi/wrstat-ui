@@ -707,10 +707,10 @@ Instead:
   `maintainer.FindInvalidHistory(prefix)`.
 
 Directory discovery helpers currently in `server/db.go` move into
-`bolt/internal` and remain **non-public**:
-- Implement them only in `bolt/internal` helpers used by tests; do not expose
-  them from the public `bolt` package and do not reimplement discovery in
-  production code.
+`bolt/internal` and remain **non-public**. They must not be part of the
+public `bolt` API, and no other package should depend on their exact
+behaviour.
+
 - No exported Bolt API must expose database path layout or directory naming
   conventions; those are backend implementation details. CLI commands should
   just pass the bolt DB paths they already take to the bolt constructors. Any
