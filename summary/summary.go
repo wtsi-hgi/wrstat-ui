@@ -172,6 +172,7 @@ func (s *SummaryWithTimes) AddSummary(t *SummaryWithTimes) {
 // is chosen. This matches the expected tie-breaking behaviour.
 func MostCommonBucket(ranges AgeBuckets) AgeRange {
 	var bestIdx AgeRange
+
 	bestCount := ranges[0]
 
 	for i := 1; i < len(ranges); i++ {
