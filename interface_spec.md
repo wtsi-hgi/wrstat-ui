@@ -4,8 +4,9 @@
 
 1. Replace direct use of `go.etcd.io/bbolt` throughout the codebase with a
    storage-neutral design, enabling a future ClickHouse backend.
-2. Create a new root package `bolt` that is the **only** production package
-   allowed to import `go.etcd.io/bbolt`.
+2. Create a new root package `bolt` (and its subpackages, e.g. `bolt/internal`)
+  that are the **only** production packages allowed to import
+  `go.etcd.io/bbolt`.
 3. No bbolt types may leak across the boundary:
    - Do **not** re-export `*bolt.DB`, `*bolt.Tx`, `*bolt.Bucket`, cursors, or
      transaction semantics.
@@ -403,8 +404,14 @@ func NewBaseDirsStore(dbPath, previousDBPath string) (basedirs.Store, error)
 
 History update rule (must match current behaviour):
 - For each `(gid, mountPath)` history series, append the new point only if
-  `updatedAt` is strictly after the last stored point’s date; otherwise leave
+  `point.Date` is strictly after the last stored point’s date; otherwise leave
   history unchanged.
+
+Terminology note:
+- In the summarise pipeline, the new point’s `History.Date` is derived from the
+  dataset snapshot time (stats input `mtime`). This is also the value passed to
+  `Store.SetUpdatedAt(updatedAt)` for the run, so `point.Date` and `updatedAt`
+  refer to the same timestamp.
 
 Backend-specific history continuity:
 - **ClickHouse:** history is stored in the single database and updated in-place;
@@ -622,9 +629,11 @@ func OpenProvider(cfg Config) (server.Provider, error)
 
 type Config struct {
     // BasePath is the directory scanned for database subdirectories.
-    // Each subdirectory must be named "<version>_<mountKey>" (mount path with
-    // '/' replaced by '／') and contain
-    // files named DGUTADBName and BaseDirDBName.
+  // Bolt's provider implementation scans this directory for dataset
+  // subdirectories using the existing on-disk naming convention
+  // "<version>_<mountKey>" (mount path with '/' replaced by '／'), and expects
+  // each dataset directory to contain files named DGUTADBName and
+  // BaseDirDBName.
     BasePath string
 
     // DGUTADBName and BaseDirDBName are the filenames expected inside each
@@ -756,9 +765,13 @@ public `bolt` API, and no other package should depend on their exact
 behaviour.
 
 - No exported Bolt API must expose database path layout or directory naming
-  conventions; those are backend implementation details. CLI commands should
-  just pass the bolt DB paths they already take to the bolt constructors. Any
-  test-only discovery logic stays in `bolt/internal`.
+  conventions; those are backend implementation details.
+
+  The only exception is `bolt.Config` used by `bolt.OpenProvider`: it describes
+  how the provider locates datasets under a base path. Outside of provider
+  configuration, CLI commands should just pass the bolt DB paths they already
+  take to the bolt constructors. Any test-only discovery logic stays in
+  `bolt/internal`.
 
 ## ClickHouse backend notes (future work)
 
@@ -822,13 +835,14 @@ In ClickHouse mode, the backend must maintain equivalent timestamps in
 
 4. **Refactor `cmd/summarise`**:
    - Derive `mountPath` from the output directory name:
-     - The `--tree` (dirgutaDB) and `--basedirsDB` paths are inside a directory
-       named `<version>_<mountKey>` (e.g., `123_／lustre／scratch123／`).
+     - The `--tree` (treeOutputDir) and `--basedirsDB` paths are inside a
+       directory named `<version>_<mountKey>` (e.g.,
+       `123_／lustre／scratch123／`).
      - Extract the directory name from the output path, split on the first `_`,
        take the suffix, replace all `／` with `/`, ensure it ends with `/`.
-   - Replace `db.NewDB(dirgutaDB)` with:
+   - Replace `db.NewDB(treeOutputDir)` with:
      ```go
-     writer, err := bolt.NewDGUTAWriter(dirgutaDB)
+     writer, err := bolt.NewDGUTAWriter(treeOutputDir)
      writer.SetMountPath(mountPath)
      writer.SetUpdatedAt(modtime)
      writer.SetBatchSize(dbBatchSize)
