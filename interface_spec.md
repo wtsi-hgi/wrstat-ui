@@ -278,32 +278,53 @@ type Backend interface {
   Tree() TreeQuerier
   BaseDirs() BaseDirsReader
   Mounts() MountTimestampsProvider
+
+  // OnUpdate registers a callback that will be invoked whenever the
+  // underlying data changes (e.g., new databases discovered, ClickHouse
+  // tables updated). The callback receives the updated Backend so the
+  // server can rebuild caches from the new data.
+  //
+  // Implementations must:
+  // - Call the callback on a separate goroutine (non-blocking).
+  // - Guarantee the callback is not called concurrently with itself.
+  // - Provide a fully-usable Backend when the callback is invoked
+  //   (queries must work; old data connections are still valid until
+  //    the callback returns).
+  //
+  // If cb is nil, any previously registered callback is removed.
+  OnUpdate(cb func())
+
   Close() error
 }
 ```
 
-### 7) Backend reloading (incremental database updates)
+### 7) Backend reloading (internal implementation detail)
 
-The current server uses incremental reloading via `OpenFrom`/`CloseOnly` methods on `db.Tree` and `basedirs.MultiReader`. This allows adding/removing database sources without closing all existing connections.
+Reloading is an **internal concern** of each backend implementation; neither `server` nor `cmd/server` should manage reload loops, filesystem scanning, or incremental open/close logic.
 
-For the abstraction, reloading logic must move to `cmd/server` or bolt-specific helpers. The `bolt` package provides:
+**Bolt implementation:**
+- The `bolt.OpenBackend(cfg)` constructor starts an internal goroutine that periodically scans the configured base path for new/changed database directories.
+- When changes are detected, the backend:
+  1. Opens the new databases.
+  2. Updates its internal `TreeQuerier`, `BaseDirsReader`, and `MountTimestampsProvider`.
+  3. Invokes the registered `OnUpdate` callback (if any).
+  4. Closes obsolete database connections after the callback returns.
+- The scan interval is configured via `Config.PollInterval`.
+- If `Config.PollInterval` is zero or negative, automatic reloading is disabled.
 
-```go
-package bolt
+**ClickHouse implementation (future):**
+- May use a similar polling approach or rely on database-side change notifications.
+- Must invoke `OnUpdate` when underlying data changes so the server can rebuild caches.
 
-// OpenBackendFrom creates a new Backend from an existing one, adding and removing sources.
-// This is used for incremental database reloading when new summarise runs complete.
-// - add: new database directory paths to include
-// - remove: existing paths that should be excluded
-// Returns a new Backend; the caller must call CloseOnly on the old backend for removed paths.
-func (b *Backend) OpenBackendFrom(add, remove []string) (*Backend, error)
+**Server cache invalidation:**
+- The server's `groupUsageCache` and `userUsageCache` are pre-serialized JSON/gzip payloads for the `/basedirs/usage/*` endpoints.
+- On startup, `server` registers a callback via `backend.OnUpdate(s.rebuildCaches)`.
+- When the backend detects new data and calls the callback, the server rebuilds these caches from the (now-updated) `BaseDirsReader`.
+- The `uidToNameCache` and `gidToNameCache` are append-only lookups and do not require invalidation.
 
-// CloseOnly closes only the database connections for the given paths.
-// Used after OpenBackendFrom to clean up the old backend's removed sources.
-func (b *Backend) CloseOnly(paths []string) error
-```
+See `bolt.Config` in the "The new `bolt` package" section for configuration fields including `PollInterval` and `RemoveOldPaths`.
 
-The `server` package stores a `storage.Backend` and does not call these methods directly. Instead, `cmd/server` manages the reload loop and swaps backends atomically.
+**Write-side constructors remain unchanged** (used only by `cmd/summarise`).
 
 ## Required package boundary changes
 
@@ -336,22 +357,35 @@ Minimal public API (required shape; keep as small as possible):
 package bolt
 
 // OpenBackend constructs a backend bundle that implements storage.Backend.
-// It must support multiple Bolt sources (multi-mount) by taking multiple paths.
+// If cfg.PollInterval > 0, the backend starts an internal goroutine that
+// watches cfg.BasePath for new databases and triggers OnUpdate callbacks.
 func OpenBackend(cfg Config) (storage.Backend, error)
 
 type Config struct {
-    // OwnersCSVPath is required for basedirs.
+    // BasePath is the directory scanned for database subdirectories.
+    // Each subdirectory must be named "<version>_<mountpath>" and contain
+    // files named DGUTADBName and BaseDirDBName.
+    BasePath string
+
+    // DGUTADBName and BaseDirDBName are the filenames expected inside each
+    // database directory (e.g., "dguta.db", "basedirs.db").
+    DGUTADBName   string
+    BaseDirDBName string
+
+    // OwnersCSVPath is required for basedirs name resolution.
     OwnersCSVPath string
 
-    // DirGUTASourcePaths are paths to dguta.dbs datasets (one per mount/run).
-    DirGUTASourcePaths []string
-
-    // BaseDirsDBPaths are paths to basedirs.db files (one per mount/run).
-    BaseDirsDBPaths []string
-
     // MountPoints overrides mount auto-discovery for basedirs history resolution.
-    // If empty, the backend must use auto-discovery.
+    // If empty, the backend uses auto-discovery from the OS.
     MountPoints []string
+
+    // PollInterval is how often to scan BasePath for new databases.
+    // If zero or negative, automatic reloading is disabled.
+    PollInterval time.Duration
+
+    // RemoveOldPaths, if true, causes older database directories to be
+    // deleted from BasePath after a successful reload.
+    RemoveOldPaths bool
 }
 ```
 
@@ -386,15 +420,21 @@ func NewBaseDirsWriter(dbPath string, quotas *basedirs.Quotas, previousDBPath st
   - open databases from filesystem paths,
   - scan filesystem for “latest version” dirs,
   - stat dirs for timestamps,
-  - call `OpenFrom` / `CloseOnly` on bolt-backed concrete types,
+  - manage reload loops or polling,
   - import `go.etcd.io/bbolt`.
 
 Instead:
-- `cmd/server` is responsible for discovery/reloading and for supplying `storage.Backend` to `server`.
 - `server` stores only the `storage.Backend` and uses it to serve requests.
 - `server.Server` changes its fields from `basedirs.MultiReader` and `*db.Tree` to `storage.Backend`.
 - `server.LoadDBs` becomes `server.SetBackend(backend storage.Backend)` which takes an already-opened backend.
-- The reload loop moves to `cmd/server`, calling `bolt.OpenBackendFrom` and swapping backends via `server.SetBackend`.
+- On `SetBackend`, the server registers its cache rebuild callback via `backend.OnUpdate(s.rebuildCaches)`.
+- The server no longer has `EnableDBReloading`; reloading is handled internally by the backend.
+
+`cmd/server` becomes simpler:
+- Constructs `bolt.Config` with `BasePath`, `PollInterval`, etc.
+- Calls `bolt.OpenBackend(cfg)` to get a `storage.Backend`.
+- Calls `server.SetBackend(backend)` once.
+- The backend handles its own reloading and notifies the server via the callback.
 
 Maintenance functions (used by `cmd/dbinfo` and `cmd/clean`) move to `bolt` package:
 
@@ -417,20 +457,7 @@ func FindInvalidHistoryKeys(dbPath, prefix string) ([][]byte, error)
 func MergeDBs(pathA, pathB, outputPath string) error
 ```
 
-Directory discovery helpers (move from `server/db.go` to `bolt`):
-
-```go
-package bolt
-
-// FindDBDirs finds the latest database directories in the given base path.
-func FindDBDirs(basepath string, required ...string) (dbPaths, toDelete []string, err error)
-
-// IsValidDBDir checks if a directory entry is a valid database directory.
-func IsValidDBDir(entry fs.DirEntry, basepath string, required ...string) bool
-
-// JoinDBPaths produces dgutaDB and basedirDB paths from base dbPaths.
-func JoinDBPaths(dbPaths []string, dgutaDBName, basedirDBName string) (dirgutaPaths, baseDirPaths []string)
-```
+Directory discovery helpers (`findDBDirs`, `isValidDBDir`, `joinDBPaths`) move from `server/db.go` to `bolt` but remain **internal** (unexported). They are used by the backend's internal reload loop and `OpenBackend`.
 
 ## ClickHouse backend notes (future work)
 
@@ -474,12 +501,11 @@ When summarise ingests data for a mount, it must update that mount’s `updated_
    - Implement `storage.TreeQuerier` by wrapping `*db.Tree`.
    - Implement `storage.BaseDirsReader` (current `MultiReader` logic).
    - Implement `storage.MountTimestampsProvider`.
-   - Implement `storage.Backend` bundle.
+   - Implement `storage.Backend` bundle with internal reload loop.
    - Implement `storage.DGUTAWriter` (current `db.DB.Add` + batching logic).
    - Implement `storage.BaseDirsWriter` (current `basedirs.BaseDirs.Output` logic).
    - Move maintenance functions: `DGUTAInfo`, `BaseDirsInfo`, `CleanInvalidDBHistory`, `FindInvalidHistoryKeys`, `MergeDBs`.
-   - Move discovery helpers: `FindDBDirs`, `IsValidDBDir`, `JoinDBPaths`.
-   - Implement `OpenBackendFrom` and `CloseOnly` for incremental reloading.
+   - Implement internal reload goroutine that watches `BasePath` and calls `OnUpdate` callbacks.
 
 4. **Refactor `basedirs` package**:
    - Keep only domain types: `Usage`, `SubDir`, `History`, `IDAgeDirs`, `Quotas`, `Config`, `DBInfo`, `GroupCache`, `UserCache`, `DateQuotaFull`.
@@ -495,15 +521,16 @@ When summarise ingests data for a mount, it must update that mount’s `updated_
 6. **Refactor `server` package**:
    - Change `Server` fields from `basedirs.MultiReader` and `*db.Tree` to `storage.Backend`.
    - Replace `LoadDBs(basePaths, ...)` with `SetBackend(backend storage.Backend)`.
-   - Remove `EnableDBReloading` from server; the reload loop moves to `cmd/server`.
+   - In `SetBackend`, register cache rebuild callback via `backend.OnUpdate(s.rebuildCaches)`.
+   - Remove `EnableDBReloading` entirely; reloading is internal to the backend.
    - Change `dbUpdateTimestamps` handler to call `backend.Mounts().MountTimestamps()`.
    - Remove bbolt-related imports.
 
 7. **Refactor `cmd/server`**:
-   - Use `bolt.FindDBDirs` and `bolt.JoinDBPaths` for discovery.
-   - Use `bolt.OpenBackend` to create the initial backend.
-   - Implement reload loop using `bolt.OpenBackendFrom` and `bolt.CloseOnly`.
-   - Call `server.SetBackend` to swap backends atomically.
+   - Build `bolt.Config` with `BasePath`, `PollInterval`, `OwnersCSVPath`, etc.
+   - Call `bolt.OpenBackend(cfg)` to get a `storage.Backend`.
+   - Call `server.SetBackend(backend)` once.
+   - No reload loop needed; the backend handles it internally.
 
 8. **Refactor `cmd/dbinfo` and `cmd/clean`**:
    - Use `bolt.DGUTAInfo`, `bolt.BaseDirsInfo` for dbinfo.
@@ -522,7 +549,7 @@ When summarise ingests data for a mount, it must update that mount’s `updated_
   - `MountTimestampsProvider`: timestamp derivation from directory names and mtimes.
   - `DGUTAWriter`: batched writes, children storage.
   - `BaseDirsWriter`: usage, subdirs, history with proper update semantics.
-  - `OpenBackendFrom` and `CloseOnly` for incremental reload.
+  - Internal reload loop: verify `OnUpdate` callback is invoked when new databases appear.
   - Maintenance functions: `DGUTAInfo`, `BaseDirsInfo`, `CleanInvalidDBHistory`.
 - A repository-wide check (CI or a small test) that fails if any non-`bolt` package imports `go.etcd.io/bbolt`.
 - Server tests should pass unchanged in behaviour (JSON shapes, auth restrictions, caches, and reload semantics).
