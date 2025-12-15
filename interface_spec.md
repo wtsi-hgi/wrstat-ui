@@ -200,21 +200,21 @@ type Writer interface {
   // cmd/summarise currently uses the stats.gz file mtime for this purpose.
   SetUpdatedAt(t time.Time)
 
-  // StoreGroupUsage stores usage information for groups.
-  StoreGroupUsage(usage []*Usage) error
+  // StoreGroupUsage adds a single group usage record.
+  StoreGroupUsage(usage *Usage) error
 
-  // StoreUserUsage stores usage information for users.
-  StoreUserUsage(usage []*Usage) error
+  // StoreUserUsage adds a single user usage record.
+  StoreUserUsage(usage *Usage) error
 
-  // StoreGroupSubDirs stores sub-directory information for groups.
-  StoreGroupSubDirs(subdirs []*SubDir) error
+  // StoreGroupSubDirs adds sub-directory information for a specific group and basedir.
+  StoreGroupSubDirs(gid uint32, basedir string, age db.DirGUTAge, subdirs []*SubDir) error
 
-  // StoreUserSubDirs stores sub-directory information for users.
-  StoreUserSubDirs(subdirs []*SubDir) error
+  // StoreUserSubDirs adds sub-directory information for a specific user and basedir.
+  StoreUserSubDirs(uid uint32, basedir string, age db.DirGUTAge, subdirs []*SubDir) error
 
-  // StoreHistory stores history information.
+  // StoreHistory adds history information for a specific group and mountpoint.
   // The implementation handles appending to existing history.
-  StoreHistory(history []History) error
+  StoreHistory(gid uint32, mountpoint string, history []History) error
 
   Close() error
 }
