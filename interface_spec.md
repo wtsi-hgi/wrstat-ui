@@ -591,14 +591,15 @@ func FindInvalidHistoryKeys(dbPath, prefix string) ([][]byte, error)
 func MergeDBs(pathA, pathB, outputPath string) error
 ```
 
-Directory discovery helpers currently in `server/db.go` move into the Bolt
-implementation but remain **non-public**:
-- They may live in the `bolt` package as unexported functions or in an
-  `internal` sub-package used only by tests.
+Directory discovery helpers currently in `server/db.go` move into
+`bolt/internal` and remain **non-public**:
+- Implement them only in `bolt/internal` helpers used by tests; do not expose
+  them from the public `bolt` package and do not reimplement discovery in
+  production code.
 - No exported Bolt API must expose database path layout or directory naming
   conventions; those are backend implementation details. CLI commands should
-  just pass the bolt DB paths they already take to the bolt constructors. If
-  tests need discovery, it must live in `bolt/internal` helpers only.
+  just pass the bolt DB paths they already take to the bolt constructors. Any
+  test-only discovery logic stays in `bolt/internal`.
 
 ## ClickHouse backend notes (future work)
 
