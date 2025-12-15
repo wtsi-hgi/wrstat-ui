@@ -96,8 +96,8 @@ Bolt mount-path derivation (for multi-directory Bolt layouts):
 
 - DirGUTA data is split across two Bolt files per dataset: `dguta.db`
   (bucket `gut`) and `dguta.db.children` (bucket `children`). Keys are the
-  directory path with a trailing `0xff` byte; values are codec-encoded GUTAs.
-  Children are codec-encoded `[]string` keyed by the parent dir.
+  directory path with a trailing `0xff` byte; values are binary-encoded GUTAs
+  (via `byteio`). Children are codec-encoded `[]string` keyed by the parent dir.
 - `db.Tree` combines results across all opened datasets. `DirInfo` merges
   GUTAs from every dataset for the requested dir, returns `ErrDirNotFound` if
   the dir is missing from all, and `Children()` de-dupes and sorts children
@@ -197,37 +197,59 @@ sources, and de-duplicating + sorting children across sources.
 `summary/dirguta` already depends on a minimal interface:
 
 ```go
-// package summary/dirguta
-// type DB interface { Add(dguta db.RecordDGUTA) error }
+// package summary/dirguta (unchanged)
+type DB interface { Add(dguta db.RecordDGUTA) error }
 ```
 
-To make backend selection explicit and testable, define the following in `db`:
+This interface remains unchanged. `cmd/summarise` creates a writer and passes it
+to `dirguta.NewDirGroupUserTypeAge()`.
+
+For the full writer lifecycle, define in `db`:
 
 ```go
 package db
 
+// DGUTAWriter is the full interface for writing DGUTA data.
+// cmd/summarise uses this to configure the writer before passing it to
+// summary/dirguta (which only uses the Add method).
 type DGUTAWriter interface {
   // Add adds a DGUTA record to the database.
   Add(dguta RecordDGUTA) error
-
-  // SetMountPath sets the mount directory path the stats were produced for.
-  // It must be an absolute path and must end with '/'.
-  // Example: "/lustre/scratch123/".
-  SetMountPath(mountPath string)
-
-  // SetUpdatedAt sets the dataset snapshot time.
-  // This must be the time the information was retrieved from the filesystem.
-  // `cmd/summarise` derives it from the input `stats.gz` file `mtime`.
-  SetUpdatedAt(t time.Time)
 
   // SetBatchSize controls flush batching. cmd/summarise sets this to 10_000
   // today. Implementations must keep streaming semantics (no requirement to
   // hold the whole dataset in memory).
   SetBatchSize(batchSize int)
 
+  // SetMountPath sets the mount directory path for this dataset.
+  // MUST be called before Add(). The path must be absolute and end with '/'.
+  // Implementations persist this so MountTimestamps() can return it.
+  SetMountPath(mountPath string)
+
+  // SetUpdatedAt sets the dataset snapshot time (typically from stats.gz mtime).
+  // MUST be called before Add().
+  // Implementations persist this so MountTimestamps() can return it, and
+  // DirSummary.Modtime can be populated correctly.
+  SetUpdatedAt(updatedAt time.Time)
+
   Close() error
 }
 ```
+
+The Bolt constructor:
+
+```go
+package bolt
+
+// NewDGUTAWriter creates a db.DGUTAWriter backed by Bolt.
+// outputDir is the directory where dguta.db and dguta.db.children will be
+// created. The directory must already exist.
+func NewDGUTAWriter(outputDir string) (db.DGUTAWriter, error)
+```
+
+The caller must call `SetMountPath()` and `SetUpdatedAt()` before calling
+`Add()`. These are defined in the interface so that any backend implementation
+(Bolt, ClickHouse, etc.) is guided to implement them.
 
 Normative requirement:
 - Implementations must support streaming ingestion: callers never need to hold
@@ -241,48 +263,98 @@ Normative requirement:
 
 ### 3) Basedirs ingest interface (write-side)
 
-This is the storage-neutral contract used by `cmd/summarise` to build basedirs
-data and update history.
+The basedirs write path is used by `summary/basedirs.NewBaseDirs()` which
+receives directory information from the summariser and calls `basedirs.BaseDirs`
+to calculate and store usage data.
+
+The current `basedirs.BaseDirs` struct:
+- Takes a db path, quotas, mountpoints, and modTime
+- Receives `IDAgeDirs` (computed by summary/basedirs) via `Output(users, groups)`
+- Internally calculates `Usage`, `SubDir`, and `History` from the IDAgeDirs
+- Stores everything in a Bolt transaction
+
+The refactored design keeps the calculation logic in `basedirs.BaseDirs.Output()`
+but delegates all storage operations to a `Store` interface. The current tight
+coupling between calculation and Bolt transactions is broken by having
+`BaseDirs` calculate all data first, then pass the complete calculated data
+to the Store for persistence.
+
+Define in `basedirs`:
 
 ```go
 package basedirs
 
-type Writer interface {
-  // SetMountPath sets the mount directory path the stats were produced for.
-  // It must be an absolute path and must end with '/'.
-  SetMountPath(mountPath string)
+// OutputData contains all calculated basedirs data ready for persistence.
+// BaseDirs.Output() populates this struct, then calls Store.Persist().
+type OutputData struct {
+  GroupUsage   []*Usage
+  UserUsage    []*Usage
+  GroupSubDirs map[SubDirKey][]*SubDir
+  UserSubDirs  map[SubDirKey][]*SubDir
+  // HistoryUpdates contains new history points to append.
+  // Key is (gid, mountpoint). Value is the new History point.
+  // The Store must only append if the point's Date > last stored date.
+  HistoryUpdates map[HistoryKey]History
+  // UpdatedAt is the dataset timestamp for this run.
+  UpdatedAt time.Time
+}
 
-  // SetMountPoints overrides mountpoint discovery for history key resolution.
-  // When not called, the writer must auto-discover mountpoints from the OS.
-  SetMountPoints(mountpoints []string)
+// SubDirKey identifies a subdir entry.
+type SubDirKey struct {
+  ID      uint32 // GID or UID
+  BaseDir string
+  Age     db.DirGUTAge
+}
 
-  // SetUpdatedAt sets the dataset creation time used for history timestamps.
-  // cmd/summarise currently uses the stats.gz file mtime for this purpose.
-  SetUpdatedAt(t time.Time)
+// HistoryKey identifies a history series.
+type HistoryKey struct {
+  GID        uint32
+  MountPoint string
+}
 
-  // StoreGroupUsage adds a single group usage record.
-  StoreGroupUsage(usage *Usage) error
-
-  // StoreUserUsage adds a single user usage record.
-  StoreUserUsage(usage *Usage) error
-
-  // StoreGroupSubDirs adds sub-directory information for a specific group and basedir.
-  StoreGroupSubDirs(gid uint32, basedir string, age db.DirGUTAge, subdirs []*SubDir) error
-
-  // StoreUserSubDirs adds sub-directory information for a specific user and basedir.
-  StoreUserSubDirs(uid uint32, basedir string, age db.DirGUTAge, subdirs []*SubDir) error
-
-  // StoreHistory adds history information for a specific group and mountpoint.
-  // The implementation handles appending to existing history.
-  StoreHistory(gid uint32, mountpoint string, history []History) error
+// Store is the storage backend interface for basedirs persistence.
+type Store interface {
+  // Persist stores all the calculated basedirs data.
+  // The Store handles all storage details (transactions, encoding, etc.).
+  // After storing, it must compute DateNoSpace/DateNoFiles for each group
+  // usage entry based on the stored history and update those fields.
+  Persist(data *OutputData) error
 
   Close() error
 }
 ```
 
-Note: `basedirs.BaseDirs` (the domain logic struct) will retain the logic to
-calculate `Usage`, `SubDir`, and `History` from `IDAgeDirs`. It will then call
-the `Writer` methods to persist them.
+`basedirs.BaseDirs` changes from holding a `dbPath string` to holding a `Store`:
+
+```go
+package basedirs
+
+// NewCreator returns a BaseDirs that can create basedirs data.
+// The store parameter is the backend that will persist the data.
+func NewCreator(store Store, quotas *Quotas) (*BaseDirs, error)
+```
+
+The `BaseDirs.Output()` method changes from directly using Bolt to:
+1. Calculate all Usage, SubDir, and History data (same logic as today)
+2. Populate an `OutputData` struct
+3. Call `store.Persist(data)`
+
+The Bolt `Store` implementation:
+- Opens/creates the basedirs.db file in its constructor
+- If `previousDBPath` is provided, seeds history from that file first
+- `Persist()` stores all data in Bolt transactions
+- After storing, reads back history to compute and update DateNoSpace/DateNoFiles
+- Handles codec encoding internally
+
+```go
+package bolt
+
+// NewBaseDirsStore creates a basedirs.Store backed by Bolt.
+// dbPath is the path to the new basedirs.db file.
+// previousDBPath, if non-empty, is the path to a previous basedirs.db from
+// which history will be seeded (used by cmd/summarise --basedirsHistoryDB).
+func NewBaseDirsStore(dbPath, previousDBPath string) (basedirs.Store, error)
+```
 
 History update rule (must match current behaviour):
 - For each `(gid, mountPath)` history series, append the new point only if
@@ -290,15 +362,16 @@ History update rule (must match current behaviour):
   history unchanged.
 
 Backend-specific history continuity:
-- ClickHouse: read the last stored point for `(gid, mountPath)` and
-  append/update in-place.
-- Bolt: read history entries from the previous run’s `basedirs.db` (provided to
-  the Bolt writer constructor) and apply them as logical upserts into the new
-  output, then apply the append rule above.
+- **ClickHouse:** history is stored in the single database and updated in-place;
+  the implementation reads the last stored point for `(gid, mountPath)` and
+  appends if the new date is strictly newer.
+- **Bolt:** the `bolt.NewBaseDirsStore()` constructor accepts a `previousDBPath`
+  parameter. When non-empty, the implementation seeds the new database's history
+  bucket by copying all entries from the previous database before any new data
+  is written. The `Output()` method then applies the append-only rule.
 
-All backends must implement history updates as logical upserts into a single
-history series per `(gid, mountPath)`; there must be no domain-level "copy
-entire bucket" operations.
+The Bolt implementation owns all history seeding logic (the current
+`CopyHistoryFrom()` functionality); domain code does not manage this.
 
 ### 4) Basedirs query interface (read-side)
 
@@ -329,6 +402,8 @@ type Reader interface {
 
   // Returns mount directory path -> last updated time.
   // Keys MUST be mount paths (absolute) and MUST end with '/'.
+  // For Bolt, each basedirs.db stores one (mountPath, updatedAt) pair.
+  // The implementation aggregates across all open databases.
   MountTimestamps() (map[string]time.Time, error)
 
   Close() error
@@ -372,20 +447,25 @@ set via `SetCachedGroup` / `SetCachedUser`.
 ### 5) Backend bundle interface (required)
 
 `server` must be wired to a single backend bundle, provided by `cmd/server`.
-Define this interface in the `db` package as `Provider`.
+Define this interface in the `server` package as `Provider`.
+
+Note: The Provider interface cannot be defined in `db` because it references
+`basedirs.Reader`, and `basedirs` already imports `db` (for `DirGUTAge` etc.),
+which would create an import cycle. Defining it in `server` avoids this since
+`server` already imports both `db` and `basedirs`.
 
 ```go
-package db
+package server
 
 type Provider interface {
-  Tree() Database
+  Tree() db.Database
   BaseDirs() basedirs.Reader
 
   // DGUTAInfo returns summary information about all DirGUTA data that this
   // provider serves. Implementations must support aggregating over multiple
   // physical sources (eg. many Bolt files or ClickHouse tables) while
   // presenting a single logical summary to callers.
-  DGUTAInfo() (*DBInfo, error)
+  DGUTAInfo() (*db.DBInfo, error)
 
   // BasedirsInfo returns summary information about all basedirs data that
   // this provider serves.
@@ -446,9 +526,8 @@ incremental open/close logic.
 See `bolt.Config` in the "The new `bolt` package" section for configuration
 fields including `PollInterval` and `RemoveOldPaths`.
 
-**Write-side constructors are the new `bolt.NewDGUTAWriter` and
-`bolt.NewBaseDirsWriter` helpers**; `cmd/summarise` must switch to them and set
-mount path / timestamps explicitly.
+**Write-side constructors**: `cmd/summarise` uses `bolt.NewDGUTAWriter()` and
+`bolt.NewBaseDirsStore()` to create the writers.
 
 ## Required package boundary changes
 
@@ -466,29 +545,37 @@ The new root package `bolt` owns:
   - reading directory `mtime` as a fallback when older Bolt DBs do not contain
     explicit mount timestamps
 
-Timestamp source of truth (Bolt backend):
-- Preferred: the backend persists and reads explicit `(mountPath, updatedAt)`
-  written by the ingest writers (`db.DGUTAWriter` / `basedirs.Writer`).
-- Legacy fallback (only when explicit timestamps are absent):
+Timestamp source of truth:
+- `DGUTAWriter` receives `mountPath` and `updatedAt` via `SetMountPath()` and
+  `SetUpdatedAt()` (defined in the interface). Implementations persist these
+  so readers can return them via `MountTimestamps()`.
+- `basedirs.Store.Persist()` receives `mountPath` values in `HistoryKey` and
+  `updatedAt` in `OutputData.UpdatedAt`. The store extracts and persists these
+  for `MountTimestamps()`. Note: basedirs history can span multiple mount
+  points, but in practice each `cmd/summarise` run creates one basedirs.db
+  per mount, so there's typically one mount per file.
+- Bolt storage mechanism: Each database file stores its `(mountPath, updatedAt)`
+  in a metadata bucket (e.g., `_meta` with keys `mountPath` and `updatedAt`).
+- Legacy fallback (only when explicit timestamps are absent in older DBs):
   - Derive `mountPath` from the dataset directory name using the existing
     on-disk convention from `server/db.go`:
     - split the dataset directory basename on the first underscore (`_`)
     - treat the suffix (the part after the underscore) as the mount path string
   - Decode the suffix by replacing `／` with `/`, then normalise to ensure it
     ends with '/'.
-  - Use the dataset directory `mtime` as `updatedAt` (legacy behaviour only).
-  - This derivation happens inside the Bolt backend; the server still must not
-    derive mount paths or timestamps from filesystem paths.
+  - Use the dataset directory `mtime` as `updatedAt`.
+  - This derivation happens inside the Bolt backend; the server never derives
+    mount paths or timestamps from filesystem paths.
 
 Minimal public API (required shape; keep as small as possible):
 
 ```go
 package bolt
 
-// OpenProvider constructs a backend bundle that implements db.Provider.
+// OpenProvider constructs a backend bundle that implements server.Provider.
 // When cfg.PollInterval > 0, the backend starts an internal goroutine that
 // watches cfg.BasePath for new databases and triggers OnUpdate callbacks.
-func OpenProvider(cfg Config) (db.Provider, error)
+func OpenProvider(cfg Config) (server.Provider, error)
 
 type Config struct {
     // BasePath is the directory scanned for database subdirectories.
@@ -525,39 +612,51 @@ Write-side construction is used only by `cmd/summarise`:
 ```go
 package bolt
 
+// NewDGUTAWriter creates a db.DGUTAWriter backed by Bolt.
+// outputDir is the directory where dguta.db and dguta.db.children will be
+// created. The directory must already exist.
+// Caller must call SetMountPath() and SetUpdatedAt() before Add().
 func NewDGUTAWriter(outputDir string) (db.DGUTAWriter, error)
-// previousDBPath is the path to the previous run’s basedirs.db. Empty means
-// start with no seeded history.
-func NewBaseDirsWriter(dbPath string, quotas *basedirs.Quotas, previousDBPath string) (basedirs.Writer, error)
+
+// NewBaseDirsStore creates a basedirs.Store backed by Bolt.
+// dbPath is the path to the new basedirs.db file.
+// previousDBPath, if non-empty, is the path to a previous basedirs.db from
+// which history will be seeded.
+func NewBaseDirsStore(dbPath, previousDBPath string) (basedirs.Store, error)
 ```
 
 ### Domain packages after refactor
 
 - `db/` becomes a pure domain package plus query algorithms.
   - Keeps: `Filter`, `DirSummary`, `DirInfo`, `DCSs`, `DGUTA`, `GUTAs`,
-    `RecordDGUTA`, age/filetype enums and parsing, `DBInfo` struct.
+    `RecordDGUTA`, age/filetype enums and parsing, `DBInfo` struct,
+    `Database` interface (new), `DGUTAWriter` interface (new).
   - Keeps: `Tree` type and its methods (`DirInfo`, `DirHasChildren`, `Where`,
     `FileLocations`, `Close`).
-  - Removes: all bbolt imports, `DB` type entirely (its write functionality
-    moves to bolt), `dbSet` type.
-  - Removes: `EncodeToBytes`, `DecodeDGUTAbytes`, and all bolt-specific
-    encoding/decoding (these move to bolt).
+  - Keeps: `RecordDGUTA.EncodeToBytes()` and `DecodeDGUTAbytes()` (these use
+    simple binary encoding via `byteio`, not bolt-specific; the Bolt package
+    calls them when storing/reading).
+  - Removes: all bbolt imports, `DB` type entirely (its functionality moves to
+    bolt), `dbSet` type.
   - New: `Tree` takes `Database` interface in its constructor. The Bolt
     package provides the `Database` implementation.
-  - `db` must not import `go.etcd.io/bbolt` or `github.com/ugorji/go/codec`
-    (codec is bolt-specific serialization).
+  - `db` must not import `go.etcd.io/bbolt` or `github.com/ugorji/go/codec`.
 
 - `basedirs/` becomes domain types + pure interfaces.
   - Keeps: `Usage`, `SubDir`, `History`, `IDAgeDirs`, `AgeDirs`,
     `SummaryWithChildren`, `Quotas`, `Config`, `DBInfo` struct, `DateQuotaFull`
-    function, `GroupCache`, `UserCache`, `Error` type, mountpoint utilities.
-  - Removes: all bbolt imports, `BaseDirs` writer type (replaced by domain logic
-    calling `Writer`), `BaseDirReader` type, `MultiReader` type, `OpenDBRO`,
-    `CleanInvalidDBHistory`, `FindInvalidHistoryKeys`, `MergeDBs`, `Info`, all
-    encoding/decoding.
+    function, `GroupCache`, `UserCache`, `Error` type, mountpoint utilities,
+    `BaseDirs` struct (domain logic for calculating usage from IDAgeDirs),
+    `OutputData`, `SubDirKey`, `HistoryKey` (new types for Store interface).
+  - Keeps: `Store` interface (new), `Reader` interface (new),
+    `HistoryMaintainer` interface (new).
+  - Removes: all bbolt imports, `BaseDirReader` type, `MultiReader` type,
+    `OpenDBRO`, `CleanInvalidDBHistory`, `FindInvalidHistoryKeys`, `MergeDBs`,
+    `Info`, `CopyHistoryFrom`, all encoding/decoding.
   - Removes: `github.com/ugorji/go/codec` import (codec is bolt-specific
     serialization).
-  - The Bolt package reimplements the reader/writer using the domain types.
+  - The Bolt package implements the `Store` and `Reader` interfaces using the
+    domain types.
 
 - `server/` must not:
   - open databases from filesystem paths,
@@ -567,10 +666,10 @@ func NewBaseDirsWriter(dbPath string, quotas *basedirs.Quotas, previousDBPath st
   - import `go.etcd.io/bbolt`.
 
 Instead:
-- `server` stores only the `db.Provider` and uses it to serve requests.
+- `server` stores only the `server.Provider` and uses it to serve requests.
 - `server.Server` changes its fields from `basedirs.MultiReader` and `*db.Tree`
-  to `db.Provider`.
-- `server.LoadDBs` becomes `server.SetProvider(provider db.Provider)` which
+  to `server.Provider`.
+- `server.LoadDBs` becomes `server.SetProvider(provider Provider)` which
   takes an already-opened provider.
 - On `SetProvider`, the server registers its cache rebuild callback via
   `provider.OnUpdate(s.rebuildCaches)`, rebuilds caches immediately, and sets
@@ -580,7 +679,7 @@ Instead:
 
 `cmd/server` becomes simpler:
 - Constructs `bolt.Config` with `BasePath`, `PollInterval`, etc.
-- Calls `bolt.OpenProvider(cfg)` to get a `db.Provider`.
+- Calls `bolt.OpenProvider(cfg)` to get a `server.Provider`.
 - Calls `server.SetProvider(provider)` once.
 - The provider handles its own reloading and notifies the server via the
   callback.
@@ -656,10 +755,11 @@ In ClickHouse mode, the backend must maintain equivalent timestamps in
      databases.
    - Remove all bbolt imports from `db` package.
 
-2. **Create `basedirs.Reader` and `basedirs.Writer` interfaces** in the
+2. **Create `basedirs.Reader` and `basedirs.Store` interfaces** in the
    `basedirs` package:
-   - Define the interfaces.
-   - Refactor `basedirs` to use these interfaces.
+   - Define the `Reader` interface for query operations.
+   - Define the `Store` interface for write operations.
+   - Refactor `basedirs.BaseDirs` to accept a `Store` in its constructor.
    - Remove all bbolt imports from `basedirs` package.
 
 3. **Create the new root `bolt` package**:
@@ -667,29 +767,46 @@ In ClickHouse mode, the backend must maintain equivalent timestamps in
      and `basedirs`.
    - Implement `db.Database` interface.
    - Implement `basedirs.Reader` (current `MultiReader` logic).
-   - Implement `db.Provider` bundle with internal reload loop.
+   - Implement `server.Provider` bundle with internal reload loop.
    - Implement `db.DGUTAWriter` (current `db.DB.Add` + batching logic).
-   - Implement `basedirs.Writer` (current `basedirs.BaseDirs.Output` logic).
+   - Implement `basedirs.Store` (current `basedirs.BaseDirs.Output` storage
+     logic, including history seeding from a previous DB).
    - Move maintenance functions: `DGUTAInfo`, `BaseDirsInfo`,
      `CleanInvalidDBHistory`, `FindInvalidHistoryKeys`, `MergeDBs`.
    - Implement internal reload goroutine that watches `BasePath` and calls
      `OnUpdate` callbacks.
 
 4. **Refactor `cmd/summarise`**:
-   - Replace `db.NewDB()` with `bolt.NewDGUTAWriter()`.
-   - Replace `basedirs.NewCreator()` with `bolt.NewBaseDirsWriter()`.
-   - Do not add a new `--mount` flag.
-   - Derive `mountPath` from the output dataset directory name
-     (`<version>_<mountKey>`, where mount key uses `／` for `/`) and pass it to
-     both writers via `SetMountPath`.
-   - Set `SetUpdatedAt` on both writers from the input `stats.gz` `mtime`.
-   - Pass `--basedirsHistoryDB` as `previousDBPath` to the bolt writer.
+   - Derive `mountPath` from the output directory name:
+     - The `--tree` (dirgutaDB) and `--basedirsDB` paths are inside a directory
+       named `<version>_<mountKey>` (e.g., `123_／lustre／scratch123／`).
+     - Extract the directory name from the output path, split on the first `_`,
+       take the suffix, replace all `／` with `/`, ensure it ends with `/`.
+   - Replace `db.NewDB(dirgutaDB)` with:
+     ```go
+     writer, err := bolt.NewDGUTAWriter(dirgutaDB)
+     writer.SetMountPath(mountPath)
+     writer.SetUpdatedAt(modtime)
+     writer.SetBatchSize(dbBatchSize)
+     s.AddDirectoryOperation(dirguta.NewDirGroupUserTypeAge(writer))
+     // later: writer.Close()
+     ```
+   - Replace `basedirs.NewCreator(basedirsDB, quotas)` with:
+     ```go
+     store, err := bolt.NewBaseDirsStore(basedirsDB, basedirsHistoryDB)
+     bd, err := basedirs.NewCreator(store, quotas)
+     bd.SetMountPoints(mps)  // if mounts were provided
+     bd.SetModTime(modtime)  // stats.gz mtime, used for History.Date
+     ```
+   - The `--basedirsHistoryDB` path is passed to `bolt.NewBaseDirsStore()` as
+     the `previousDBPath` parameter; no separate `CopyHistoryFrom()` call is
+     needed since the Bolt store handles history seeding internally.
 
 5. **Refactor `server` package**:
    - Change `Server` fields from `basedirs.MultiReader` and `*db.Tree` to
-     `db.Provider`.
+     `Provider`.
    - Replace `LoadDBs(basePaths, ...)` with `SetProvider(provider
-     db.Provider)`.
+     Provider)`.
    - In `SetProvider`, register cache rebuild callback via
      `provider.OnUpdate(s.rebuildCaches)`.
    - Remove `EnableDBReloading` entirely; reloading is internal to the provider.
@@ -699,7 +816,7 @@ In ClickHouse mode, the backend must maintain equivalent timestamps in
 
 6. **Refactor `cmd/server`**:
    - Build `bolt.Config` with `BasePath`, `PollInterval`, `OwnersCSVPath`, etc.
-   - Call `bolt.OpenProvider(cfg)` to get a `db.Provider`.
+   - Call `bolt.OpenProvider(cfg)` to get a `server.Provider`.
    - Call `server.SetProvider(provider)` once.
    - No reload loop needed; the backend handles it internally.
 
@@ -725,11 +842,13 @@ In ClickHouse mode, the backend must maintain equivalent timestamps in
 - Unit tests in `bolt` package for:
   - `Database` implementation: `DirInfo`, `Children`.
   - `basedirs.Reader`: `GroupUsage`, `UserUsage`, `GroupSubDirs`, `UserSubDirs`,
-    `History`.
-  - `MountTimestampsProvider`: timestamp derivation from directory names and
-    mtimes.
-  - `DGUTAWriter`: batched writes, children storage.
-  - `basedirs.Writer`: usage, subdirs, history with proper update semantics.
+    `History`, `MountTimestamps`.
+  - Timestamp derivation: from explicit persisted values, and legacy fallback
+    from directory names and mtimes.
+  - `DGUTAWriter`: batched writes, children storage, metadata persistence
+    (mountPath, updatedAt).
+  - `basedirs.Store`: usage, subdirs, history with proper update semantics,
+    history seeding from a previous database, DateNoSpace/DateNoFiles updates.
   - Internal reload loop: verify `OnUpdate` callback is invoked when new
     databases appear.
   - Maintenance functions: `DGUTAInfo`, `BaseDirsInfo`, `CleanInvalidDBHistory`.
