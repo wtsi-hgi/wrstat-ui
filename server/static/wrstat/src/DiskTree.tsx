@@ -255,8 +255,8 @@ const colours = [
 									<div className="title">Colour By</div>
 									<label aria-label="Colour by Oldest Access Time" title="Oldest Access Time" htmlFor="aTime">Access Time</label><input type="radio" id="aTime" checked={colourBy === ACCESS_TIME} onChange={() => setColourBy(ACCESS_TIME)} />
 									<label aria-label="Colour by Latest Modified Time" title="Latest Modified Time" htmlFor="mTime">Modified Time</label><input type="radio" id="mTime" checked={colourBy === MODIFIED_TIME} onChange={() => setColourBy(MODIFIED_TIME)} />
-									<label className="wrap-label" aria-label="Colour by Most Common Access Time" title="Most Common Access Time" htmlFor="commonATime">Common Access Time</label><input type="radio" id="commonATime" checked={colourBy === COMMON_ACCESS_TIME} onChange={() => setColourBy(COMMON_ACCESS_TIME)} />
-									<label className="wrap-label" aria-label="Colour by Most Common Modified Time" title="Most Common Modified Time" htmlFor="commonMTime">Common Modified Time</label><input type="radio" id="commonMTime" checked={colourBy === COMMON_MODIFIED_TIME} onChange={() => setColourBy(COMMON_MODIFIED_TIME)} />
+									<label aria-label="Colour by Most Common Access Time" title="Most Common Access Time" htmlFor="commonATime">Common Access Time</label><input type="radio" id="commonATime" checked={colourBy === COMMON_ACCESS_TIME} onChange={() => setColourBy(COMMON_ACCESS_TIME)} />
+									<label aria-label="Colour by Most Common Modified Time" title="Most Common Modified Time" htmlFor="commonMTime">Common Modified Time</label><input type="radio" id="commonMTime" checked={colourBy === COMMON_MODIFIED_TIME} onChange={() => setColourBy(COMMON_MODIFIED_TIME)} />
 									<div className="title">Area Represents</div>
 									<label aria-label="Area represents File Size" htmlFor="useSize">File Size</label><input type="radio" id="useSize" checked={!useCount} onChange={() => setUseCount(false)} />
 									<label aria-label="Area represents File Count" htmlFor="useCount">File Count</label><input type="radio" id="useCount" checked={useCount} onChange={() => setUseCount(true)} />

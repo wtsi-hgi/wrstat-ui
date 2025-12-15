@@ -165,7 +165,7 @@ caption {
   display: none;
 }
 
-summary>h1 {
+summary > h1 {
   margin: 0;
   font-size: inherit;
   font-weight: normal;
@@ -232,18 +232,18 @@ details[open] summary:after {
 }
 
 .treeFilter label {
-  white-space: nowrap;
+  text-align: right;
 }
 
-.treeFilter>label:after {
+.treeFilter > label:after {
   content: ":";
 }
 
-.treeFilter>.multiSelect {
+.treeFilter > .multiSelect {
   grid-column: 2 / span 3;
 }
 
-.treeFilter>select:not(.ageFilter) {
+.treeFilter > select:not(.ageFilter) {
   grid-column: 2 / span 2;
 }
 
