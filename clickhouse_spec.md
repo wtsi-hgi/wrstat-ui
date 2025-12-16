@@ -1,8 +1,9 @@
 # ClickHouse backend spec (replacement for Bolt)
 
 This document specifies the ClickHouse backend that replaces the Bolt backend.
-This spec supersedes the Bolt sections of `interface_spec.md`. The `bolt`
-package may remain in the repository as unused code.
+This spec supersedes the Bolt-related sections and the earlier "ClickHouse
+backend notes" section of `interface_spec.md`. The `bolt` package may remain
+in the repository as unused code.
 
 The goal is that another agent can implement a new root package `clickhouse`
 that satisfies the storage-neutral interfaces defined in `interface_spec.md`
@@ -1212,18 +1213,13 @@ Hard safety checks (normative):
 Snapshot partition drops are part of normal operation and are permitted in all
 environments.
 
-### CI runner (allowed)
+### CI runner (normative)
 
-In GitHub Actions, use one of these approaches:
+In GitHub Actions, run tests against a ClickHouse service container. Add a
+ClickHouse service to the workflow and set `WRSTAT_CLICKHOUSE_DSN` to point to
+it. Tests must use this DSN instead of starting a local server.
 
-1. **Service container (preferred)**: Add a ClickHouse service container to the
-   workflow and set `WRSTAT_CLICKHOUSE_DSN` to point to it. Tests will use this
-   DSN instead of starting a local server.
-
-2. **testcontainers-go**: Alternatively, use `testcontainers-go` to start
-   ClickHouse `25.11.2.24` in Docker. This is more complex but self-contained.
-
-Example workflow snippet for service container:
+Example workflow snippet:
 
 ```yaml
 services:
