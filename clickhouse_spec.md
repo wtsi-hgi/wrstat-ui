@@ -424,7 +424,10 @@ The provider must not expose any ClickHouse concepts. It returns:
 
 The clickhouse implementation must:
 
-- Merge across all mountpoints by querying all rows for active snapshots.
+- Preserve the current multi-mount semantics:
+  - For directories that are "above" mountpoints (eg `/` or `/lustre/`), merge
+    results across all mounts that are under that directory.
+  - For directories that are within a single mount, query only that mount.
 - Return `ErrDirNotFound` only when the directory is absent from *all* active
   snapshots.
 - Return `nil, nil` (no error) when the directory exists but the filter removes
@@ -436,18 +439,61 @@ Normalization:
 
 - When querying by directory, normalize `dir` to have a trailing `/`.
 
+Mount scoping (normative):
+
+Given a normalized `dir`:
+
+1. If `dir` is within a mountpoint, use that single mountpoint:
+   - Resolve `mount_path` by longest-prefix match of `dir` against the
+     configured/auto-discovered mountpoint list (same algorithm as
+     basedirs mount resolution).
+   - Query only that `mount_path`.
+2. Otherwise, `dir` is treated as an ancestor directory:
+   - Query all mounts where `startsWith(mount_path, dir)`.
+
+This is required for performance: it ensures that almost all UI queries (which
+are typically within one mount) prune to a single `(mount_path, snapshot_id)`
+partition, while still allowing browsing from `/`.
+
 Queries:
 
-- Existence check (unfiltered):
+Existence check (unfiltered):
+
+- If `dir` is within a mountpoint (single-mount scope):
 
   - ```sql
     SELECT 1
     FROM wrstat_dguta d
     ANY INNER JOIN wrstat_mounts_active a
       ON d.mount_path = a.mount_path AND d.snapshot_id = a.snapshot_id
+    PREWHERE d.mount_path = ?
     WHERE d.dir = ?
     LIMIT 1
     ```
+
+  Parameter order:
+
+  1. mount_path
+  2. dir
+
+- Otherwise (ancestor scope):
+
+  - ```sql
+    SELECT 1
+    FROM wrstat_dguta d
+    ANY INNER JOIN (
+      SELECT mount_path, snapshot_id
+      FROM wrstat_mounts_active
+      WHERE startsWith(mount_path, ?)
+    ) a ON d.mount_path = a.mount_path AND d.snapshot_id = a.snapshot_id
+    WHERE d.dir = ?
+    LIMIT 1
+    ```
+
+  Parameter order:
+
+  1. dir (as ancestor prefix)
+  2. dir
 
 - Summary query (filtered):
 
@@ -472,6 +518,55 @@ Queries:
     - `Age`   = `filter.Age`
     - `Modtime` = `max(a.updated_at)`
 
+Summary query SQL (normative):
+
+- If `dir` is within a mountpoint (single-mount scope), the query is the same
+  as the ancestor-scope query below but with `wrstat_mounts_active` filtered by
+  `mount_path = ?` and with `PREWHERE d.mount_path = ?`.
+
+- Otherwise (ancestor scope):
+
+  - ```sql
+    SELECT
+      sum(d.count) AS count,
+      sum(d.size) AS size,
+      toDateTime(min(d.atime_min)) AS atime,
+      toDateTime(max(d.mtime_max)) AS mtime,
+      arraySort(groupUniqArray(d.uid)) AS uids,
+      arraySort(groupUniqArray(d.gid)) AS gids,
+      bitOr(d.ft) AS ft,
+      max(a.updated_at) AS modtime
+    FROM wrstat_dguta d
+    ANY INNER JOIN (
+      SELECT mount_path, snapshot_id, updated_at
+      FROM wrstat_mounts_active
+      WHERE startsWith(mount_path, ?)
+    ) a ON d.mount_path = a.mount_path AND d.snapshot_id = a.snapshot_id
+    WHERE d.dir = ?
+      AND d.age = ?
+      AND (? = 0 OR bitAnd(d.ft, ?) != 0)
+      AND (? = 0 OR has(?, d.gid))
+      AND (? = 0 OR has(?, d.uid))
+    ```
+
+  Parameter order:
+
+  1. dir (as ancestor prefix)
+  2. dir
+  3. age
+  4. ft_enabled (0/1)
+  5. ft_mask
+  6. gids_enabled (0/1)
+  7. gids Array(UInt32)
+  8. uids_enabled (0/1)
+  9. uids Array(UInt32)
+
+Filter binding (normative):
+
+- `ft_enabled` is 0 if `filter.FT == 0`, else 1.
+- `gids_enabled` is 0 if `filter.GIDs == nil`, else 1.
+- `uids_enabled` is 0 if `filter.UIDs == nil`, else 1.
+
 ### `db.Database.Children(dir string) ([]string, error)`
 
 Behaviour must match current Bolt behaviour:
@@ -485,14 +580,31 @@ Normalization:
 
 Query:
 
-- ```sql
-  SELECT DISTINCT c.child
-  FROM wrstat_children c
-  ANY INNER JOIN wrstat_mounts_active a
-    ON c.mount_path = a.mount_path AND c.snapshot_id = a.snapshot_id
-  WHERE c.parent_dir = ?
-  ORDER BY c.child ASC
-  ```
+- If `dir` is within a mountpoint (single-mount scope):
+
+  - ```sql
+    SELECT DISTINCT c.child
+    FROM wrstat_children c
+    ANY INNER JOIN wrstat_mounts_active a
+      ON c.mount_path = a.mount_path AND c.snapshot_id = a.snapshot_id
+    PREWHERE c.mount_path = ?
+    WHERE c.parent_dir = ?
+    ORDER BY c.child ASC
+    ```
+
+- Otherwise (ancestor scope):
+
+  - ```sql
+    SELECT DISTINCT c.child
+    FROM wrstat_children c
+    ANY INNER JOIN (
+      SELECT mount_path, snapshot_id
+      FROM wrstat_mounts_active
+      WHERE startsWith(mount_path, ?)
+    ) a ON c.mount_path = a.mount_path AND c.snapshot_id = a.snapshot_id
+    WHERE c.parent_dir = ?
+    ORDER BY c.child ASC
+    ```
 
 ### `db.Database.Info()`
 
