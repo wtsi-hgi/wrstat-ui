@@ -1419,6 +1419,10 @@ Parameter order:
 
 `IsDir(ctx, path)`
 
+Normalize `path` using the same parent/name split as `StatPath` so the query
+hits the `(parent_dir, name)` prefix of the primary key instead of scanning a
+full mount partition.
+
 Required SQL:
 
 ```sql
@@ -1427,7 +1431,8 @@ FROM wrstat_files f
 ANY INNER JOIN wrstat_mounts_active a
   ON f.mount_path = a.mount_path AND f.snapshot_id = a.snapshot_id
 WHERE f.mount_path = ?
-  AND f.path = ?
+  AND f.parent_dir = ?
+  AND f.name = ?
 LIMIT 1
 ```
 
