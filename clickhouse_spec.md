@@ -332,8 +332,8 @@ CREATE TABLE IF NOT EXISTS wrstat_files (
   name String CODEC(ZSTD(3)),
   ext LowCardinality(String) CODEC(ZSTD(3)),
   entry_type UInt8,
-  size Int64 CODEC(Delta, ZSTD(3)),
-  apparent_size Int64 CODEC(Delta, ZSTD(3)),
+  size UInt64 CODEC(Delta, ZSTD(3)),
+  apparent_size UInt64 CODEC(Delta, ZSTD(3)),
   uid UInt32,
   gid UInt32,
   atime Int64 CODEC(Delta, ZSTD(3)),
@@ -1120,6 +1120,7 @@ FROM wrstat_files f
 ANY INNER JOIN wrstat_mounts_active a
   ON f.mount_path = a.mount_path AND f.snapshot_id = a.snapshot_id
 WHERE f.mount_path = ?
+  AND startsWith(f.path, ?)
   AND (
     match(f.path, ?) OR match(f.path, ?) OR match(f.path, ?)
   )
@@ -1130,6 +1131,7 @@ LIMIT ? OFFSET ?
 
 Parameter notes:
 
+- The `startsWith` parameter is the base directory path (normalized).
 - The `match` parameters are the precomputed regex strings.
 - The permission clause is required:
   - if `opts.RequireOwner` is false, pass `0` for the first `?` and still pass
