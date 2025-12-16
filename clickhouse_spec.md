@@ -1322,13 +1322,13 @@ Reports (normative):
 
 `clickhouse-perf query`
 
-- `--mountPath <abs/>` (required)
 - `--dir <abs/>` (optional; when omitted, a directory is chosen automatically)
 - `--uid <n>` and `--gids <csv>` (optional; used for permission query)
 - `--repeat <n>` (optional; default 20)
 
 Behaviour:
 
+- Queries run across all active mounts (same as the real server).
 - Runs the fixed query suite below and reports per-query latency for each run
   and summary percentiles p50/p95/p99.
 
@@ -1351,37 +1351,32 @@ Implementation rule (normative):
 
 Fixed query suite (normative):
 
-The query suite is *mount-focused* around the single `--mountPath` passed to
-the command.
-
-Note: some storage-neutral interfaces (eg `basedirs.Reader.GroupUsage`) do not
-take a mount argument. In those cases, the perf CLI must:
-
-- still call the real interface method (so SQL is not duplicated), and
-- filter the returned rows in Go to those whose `BaseDir` resolves to
-  `--mountPath` using the same mount resolution rule.
+Queries run across all active mounts, matching how the real server operates.
 
 Directory selection (normative):
 
 - If `--dir` is supplied, use it.
-- Otherwise, automatically pick a "representative" directory under
-  `--mountPath` by walking the directory tree using the storage-neutral tree
-  API (no filesystem calls):
-  1. Start at `dir = --mountPath`.
-  2. Repeatedly call `provider.Tree().DirInfo(dir, filter)` (Age=all, no UID/GID
-    restriction).
-  3. If `DirInfo.Current.Count` is between 1,000 and 20,000 inclusive, stop and
-    use this `dir`.
-  4. Otherwise, choose the child directory with the largest `Count` and set
-    `dir = child.Dir`, repeating up to 64 steps.
-  5. If no children exist before reaching the target range, use the last dir.
+- Otherwise, automatically pick a "representative" directory by:
+  1. Call `provider.BaseDirs().MountTimestamps()` to get the list of active
+     mounts.
+  2. Pick the first mount (sorted lexicographically) as `startDir`.
+  3. Walk the directory tree using the storage-neutral tree API (no filesystem
+     calls):
+     a. Call `provider.Tree().DirInfo(startDir, filter)` (Age=all, no UID/GID
+        restriction).
+     b. If `DirInfo.Current.Count` is between 1,000 and 20,000 inclusive, stop
+        and use this directory.
+     c. Otherwise, choose the child directory with the largest `Count` and
+        repeat up to 64 steps.
+     d. If no children exist before reaching the target range, use the last
+        directory.
 
 The chosen `dir` is used for the file-glob tests and the list/stat tests.
 
 1) Active snapshot freshness:
 
-- Call `provider.BaseDirs().MountTimestamps()` and read the `updated_at` value
-  for `--mountPath`.
+- Call `provider.BaseDirs().MountTimestamps()` and report the `updated_at`
+  values for all active mounts.
 
 2) Tree directory summary:
 
