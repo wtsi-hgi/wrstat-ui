@@ -40,6 +40,16 @@ Plus the extra-goal file APIs:
 - `NewFileIngestOperation(cfg Config, mountPath string, updatedAt time.Time)
   (summary.OperationGenerator, error)`
 
+`Client` is exported and its query methods are part of the public API:
+
+- `(*Client) ListDir(ctx, dir string, opts ListOptions) ([]FileRow, error)`
+- `(*Client) StatPath(ctx, path string, opts StatOptions) (*FileRow, error)`
+- `(*Client) IsDir(ctx, path string) (bool, error)`
+- `(*Client) FindByGlob(ctx, baseDirs []string, patterns []string,
+  opts FindOptions) ([]FileRow, error)`
+- `(*Client) PermissionAnyInDir(ctx, dir string, uid uint32,
+  gids []uint32) (bool, error)`
+
 The extra-goal APIs require a small number of exported helper types
 (`Client`, `FileRow`, and options structs). These types must not expose
 clickhouse-go types.
@@ -468,6 +478,46 @@ Caller responsibility (normative):
   must close the basedirs store and file ingest operation before closing the
   DGUTA writer.
 
+Write-side SQL statements (normative)
+
+Partition drop syntax:
+
+- All tables that use `PARTITION BY (mount_path, snapshot_id)` must drop
+  partitions using:
+
+  `ALTER TABLE <table>
+   DROP PARTITION tuple(?, toUUID(?))`
+
+  Parameter order:
+  1. mount_path (String)
+  2. snapshot_id (UUID string)
+
+Active snapshot read:
+
+  `SELECT a.snapshot_id, a.updated_at
+   FROM wrstat_mounts_active a
+   WHERE a.mount_path = ?`
+
+Switch active snapshot (must be executed only once per run, in
+`DGUTAWriter.Close()`):
+
+  `INSERT INTO wrstat_mounts (mount_path, switched_at, active_snapshot,
+   updated_at)
+   VALUES (?, now64(3), toUUID(?), ?)`
+
+Insert DGUTA rows (batch):
+
+  `INSERT INTO wrstat_dguta
+   (mount_path, snapshot_id, dir, gid, uid, ft, age, count, size,
+    atime_min, mtime_max)
+   VALUES (?, toUUID(?), ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+
+Insert children rows (batch):
+
+  `INSERT INTO wrstat_children
+   (mount_path, snapshot_id, parent_dir, child)
+   VALUES (?, toUUID(?), ?, ?)`
+
 ----------------------------------------------------------------------
 
 ## Basedirs store + reader
@@ -511,6 +561,49 @@ Implementation requirement:
      WHERE mount_path = {mount} AND gid = {gid}`
 
   - If max(date) is NULL or < point.Date, insert the new row.
+
+Basedirs SQL statements (normative)
+
+Insert group usage (batch):
+
+  `INSERT INTO wrstat_basedirs_group_usage
+   (mount_path, snapshot_id, gid, basedir, age, uids, usage_size, quota_size,
+    usage_inodes, quota_inodes, mtime, date_no_space, date_no_files)
+   VALUES (?, toUUID(?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+
+Insert user usage (batch):
+
+  `INSERT INTO wrstat_basedirs_user_usage
+   (mount_path, snapshot_id, uid, basedir, age, gids, usage_size, quota_size,
+    usage_inodes, quota_inodes, mtime)
+   VALUES (?, toUUID(?), ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+
+Insert group subdir rows (batch):
+
+  `INSERT INTO wrstat_basedirs_group_subdirs
+   (mount_path, snapshot_id, gid, basedir, age, pos, subdir, num_files,
+    size_files, last_modified, file_usage)
+   VALUES (?, toUUID(?), ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+
+Insert user subdir rows (batch):
+
+  `INSERT INTO wrstat_basedirs_user_subdirs
+   (mount_path, snapshot_id, uid, basedir, age, pos, subdir, num_files,
+    size_files, last_modified, file_usage)
+   VALUES (?, toUUID(?), ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+
+History last-point lookup:
+
+  `SELECT max(date)
+   FROM wrstat_basedirs_history
+   WHERE mount_path = ?
+     AND gid = ?`
+
+History append:
+
+  `INSERT INTO wrstat_basedirs_history
+   (mount_path, gid, date, usage_size, quota_size, usage_inodes, quota_inodes)
+   VALUES (?, ?, ?, ?, ?, ?, ?)`
 
 Finalize:
 
@@ -561,6 +654,99 @@ Ordering:
 
 Return the same counts as the existing `basedirs.DBInfo`, computed over active
 snapshots only.
+
+Reader SQL statements (normative)
+
+Group usage:
+
+  `SELECT
+      gid,
+      basedir,
+      uids,
+      usage_size,
+      quota_size,
+      usage_inodes,
+      quota_inodes,
+      mtime,
+      date_no_space,
+      date_no_files,
+      age
+   FROM wrstat_basedirs_group_usage u
+   ANY INNER JOIN wrstat_mounts_active a
+     ON u.mount_path = a.mount_path AND u.snapshot_id = a.snapshot_id
+   WHERE u.age = ?
+   ORDER BY gid ASC, basedir ASC`
+
+User usage:
+
+  `SELECT
+      uid,
+      basedir,
+      gids,
+      usage_size,
+      quota_size,
+      usage_inodes,
+      quota_inodes,
+      mtime,
+      age
+   FROM wrstat_basedirs_user_usage u
+   ANY INNER JOIN wrstat_mounts_active a
+     ON u.mount_path = a.mount_path AND u.snapshot_id = a.snapshot_id
+   WHERE u.age = ?
+   ORDER BY uid ASC, basedir ASC`
+
+Group subdirs:
+
+  `SELECT
+      subdir,
+      num_files,
+      size_files,
+      last_modified,
+      file_usage
+   FROM wrstat_basedirs_group_subdirs s
+   ANY INNER JOIN wrstat_mounts_active a
+     ON s.mount_path = a.mount_path AND s.snapshot_id = a.snapshot_id
+   WHERE s.gid = ?
+     AND s.basedir = ?
+     AND s.age = ?
+   ORDER BY s.pos ASC`
+
+User subdirs:
+
+  `SELECT
+      subdir,
+      num_files,
+      size_files,
+      last_modified,
+      file_usage
+   FROM wrstat_basedirs_user_subdirs s
+   ANY INNER JOIN wrstat_mounts_active a
+     ON s.mount_path = a.mount_path AND s.snapshot_id = a.snapshot_id
+   WHERE s.uid = ?
+     AND s.basedir = ?
+     AND s.age = ?
+   ORDER BY s.pos ASC`
+
+History:
+
+- Resolve mount_path for the input `path` using the same longest-prefix mount
+  resolution as current basedirs.
+
+  `SELECT
+      date,
+      usage_size,
+      quota_size,
+      usage_inodes,
+      quota_inodes
+   FROM wrstat_basedirs_history
+   WHERE mount_path = ?
+     AND gid = ?
+   ORDER BY date ASC`
+
+Mount timestamps:
+
+  `SELECT mount_path, updated_at
+   FROM wrstat_mounts_active`
 
 ### `basedirs.HistoryMaintainer`
 
@@ -661,6 +847,27 @@ Required methods:
   opts FindOptions) ([]FileRow, error)`
 - `PermissionAnyInDir(ctx, dir string, uid uint32, gids []uint32) (bool, error)`
 
+Mount resolution (normative):
+
+- For any API taking an absolute `path`/`dir`, first resolve the mount by
+  longest-prefix match against the reader's mountpoint list (either the
+  configured override or auto-discovered, identical to current basedirs
+  mount resolution).
+- The resolved mount path is the `mount_path` used in SQL. If no mount matches,
+  return the existing domain error `basedirs.ErrInvalidBasePath`.
+
+Active snapshot join pattern (required):
+
+All file queries must join to the active snapshot pointer:
+
+  `ANY INNER JOIN wrstat_mounts_active a
+    ON f.mount_path = a.mount_path AND f.snapshot_id = a.snapshot_id`
+
+SQL parameter style (required):
+
+- Use positional parameters (`?`) with clickhouse-go v2.
+- For `gids []uint32`, pass as `Array(UInt32)`.
+
 Semantics:
 
 - All methods operate over the active snapshot for the mount containing the
@@ -683,6 +890,166 @@ Implementation guidance:
   - `match` for patterns that require `**`
   - always restrict by mount active snapshot first
 
+### SQL statements (normative)
+
+The following statements must be used. Optional projection/secondary indexes
+may change the query plan, but the SQL text must remain logically equivalent.
+
+`ListDir(ctx, dir, opts)`
+
+Normalize `dir` to end with `/`.
+
+Required SQL (columns list depends on opts, but WHERE/ORDER/LIMIT must match):
+
+  `SELECT
+      f.path,
+      f.parent_dir,
+      f.name,
+      f.ext,
+      f.entry_type,
+      f.size,
+      f.apparent_size,
+      f.uid,
+      f.gid,
+      f.atime,
+      f.mtime,
+      f.ctime,
+      f.inode,
+      f.nlink
+   FROM wrstat_files f
+   ANY INNER JOIN wrstat_mounts_active a
+     ON f.mount_path = a.mount_path AND f.snapshot_id = a.snapshot_id
+   WHERE f.mount_path = ?
+     AND f.parent_dir = ?
+   ORDER BY f.name ASC
+   LIMIT ? OFFSET ?`
+
+Parameter order:
+
+1. mount_path
+2. dir (as parent_dir)
+3. limit
+4. offset
+
+`StatPath(ctx, path, opts)`
+
+Required SQL:
+
+  `SELECT
+      f.path,
+      f.parent_dir,
+      f.name,
+      f.ext,
+      f.entry_type,
+      f.size,
+      f.apparent_size,
+      f.uid,
+      f.gid,
+      f.atime,
+      f.mtime,
+      f.ctime,
+      f.inode,
+      f.nlink
+   FROM wrstat_files f
+   ANY INNER JOIN wrstat_mounts_active a
+     ON f.mount_path = a.mount_path AND f.snapshot_id = a.snapshot_id
+   WHERE f.mount_path = ?
+     AND f.path = ?
+   LIMIT 1`
+
+Parameter order:
+
+1. mount_path
+2. path
+
+`IsDir(ctx, path)`
+
+Required SQL:
+
+  `SELECT f.entry_type
+   FROM wrstat_files f
+   ANY INNER JOIN wrstat_mounts_active a
+     ON f.mount_path = a.mount_path AND f.snapshot_id = a.snapshot_id
+   WHERE f.mount_path = ?
+     AND f.path = ?
+   LIMIT 1`
+
+Return true iff `entry_type == stats.DirType`.
+
+`FindByGlob(ctx, baseDirs, patterns, opts)`
+
+Pattern translation (required):
+
+- Translate gitignore-style patterns into RE2 regex and query using `match`.
+- `**` => `.*`
+- `*`  => `[^/]*`
+- `?`  => `[^/]`
+- Escape all other regex metacharacters.
+- Anchor to the provided base dir by prefixing the regex with
+  `^<escaped_base_dir>`.
+
+The query must be executed once per mount. For each mount, build one SQL query
+with an OR of each `(baseDir, pattern)` pair that belongs to that mount.
+
+Required SQL skeleton:
+
+  `SELECT
+      f.path,
+      f.parent_dir,
+      f.name,
+      f.ext,
+      f.entry_type,
+      f.size,
+      f.apparent_size,
+      f.uid,
+      f.gid,
+      f.atime,
+      f.mtime,
+      f.ctime,
+      f.inode,
+      f.nlink
+   FROM wrstat_files f
+   ANY INNER JOIN wrstat_mounts_active a
+     ON f.mount_path = a.mount_path AND f.snapshot_id = a.snapshot_id
+   WHERE f.mount_path = ?
+     AND (
+       match(f.path, ?) OR match(f.path, ?) OR match(f.path, ?)
+     )
+     AND ( ? = 0 OR f.uid = ? OR has(?, f.gid) )
+   ORDER BY f.path ASC
+   LIMIT ? OFFSET ?`
+
+Parameter notes:
+
+- The `match` parameters are the precomputed regex strings.
+- The permission clause is required:
+  - if `opts.RequireOwner` is false, pass `0` for the first `?` and still pass
+    placeholder values for the remaining parameters
+  - if true, pass `1`, then `uid`, then `gids` as Array(UInt32)
+
+`PermissionAnyInDir(ctx, dir, uid, gids)`
+
+Normalize `dir` to end with `/`.
+
+Required SQL:
+
+  `SELECT 1
+   FROM wrstat_files f
+   ANY INNER JOIN wrstat_mounts_active a
+     ON f.mount_path = a.mount_path AND f.snapshot_id = a.snapshot_id
+   WHERE f.mount_path = ?
+     AND (f.path = ? OR startsWith(f.path, ?))
+     AND (f.uid = ? OR has(?, f.gid))
+   LIMIT 1`
+
+Parameter order:
+
+1. mount_path
+2. dir
+3. dir
+4. uid
+5. gids
+
 ----------------------------------------------------------------------
 
 ## Testing (clickhouse package)
@@ -691,44 +1058,185 @@ All public methods of the clickhouse package must be tested.
 
 Tests must run against a real ClickHouse server started automatically.
 
-Required approach:
+Local development must not require root.
 
-- Use `testcontainers-go` to start ClickHouse `25.11.2.24` for tests.
-- Create a unique database per test package run:
+### Local test runner (required)
 
-  `wrstat_ui_test_${USER}_${PID}_${RAND}`
+By default, clickhouse package tests must start a local ClickHouse server using
+the `clickhouse` binary available in `PATH`.
 
-- The tests must never connect to a non-local host.
-- The clickhouse package must refuse to run destructive schema operations when
-  `Database` does not start with `wrstat_ui_test_` while `WRSTAT_ENV=test`.
+Required behaviour:
 
-"Destructive schema operations" here means `DROP DATABASE` and any deletion of
-history across mounts (eg, `CleanHistoryForMount`). Snapshot partition drops are
-part of normal operation and are permitted in all environments.
+- Start the server with a generated config under `t.TempDir()` so it is fully
+  isolated (data path, logs, tmp, etc).
+- Bind only to `127.0.0.1`.
+- Pick a free TCP port at runtime and write it into the generated config.
+- Wait until the server answers a simple query before running tests.
 
-This ensures:
+Required database name convention:
 
-- no conflicts between developers on the same machine
-- no possibility of tests wiping or mutating production
+- Create a unique database per test run:
+  `wrstat_ui_test_${USER}_${PID}_${RAND}`.
+
+Hard safety checks (normative):
+
+- Tests must refuse to connect to any DSN that does not resolve to localhost.
+- When `WRSTAT_ENV=test`, the clickhouse package must refuse to execute:
+  - `DROP DATABASE`
+  - any deletion of history across mounts (eg `CleanHistoryForMount`)
+  unless `cfg.Database` starts with `wrstat_ui_test_`.
+
+Snapshot partition drops are part of normal operation and are permitted in all
+environments.
+
+### CI runner (allowed)
+
+In GitHub Actions, it is allowed to use `testcontainers-go` to start ClickHouse
+`25.11.2.24` (or a service container), because Docker is typically available
+there.
+
+### README update requirement
+
+The implementation agent must update `README.md` with:
+
+- how to install a local ClickHouse binary suitable for running tests
+- how to run a ClickHouse server on a custom port (so multiple developers can
+  run test servers on the same machine)
+- which env vars/flags control the test server port/DSN
 
 ----------------------------------------------------------------------
 
 ## Performance hooks
 
-To enable iterative schema/perf tuning, the clickhouse package must include
-benchmarks (in `_test.go`) that:
+To enable iterative schema/perf tuning, add a CLI command that can:
 
-- measure `DGUTAWriter.Add` throughput (records/sec) with configurable batch
-  sizes
-- measure `db.Database.DirInfo` latency under a loaded dataset
+1. import stats.gz into ClickHouse (optionally only the first N lines)
+2. run a fixed suite of read queries and report latencies
 
-Benchmarks must log:
+Command name (normative):
 
-- total rows inserted
-- wall time
-- rows/sec
+- `wrstat-ui clickhouse-perf`
 
-No new CLI commands are added for performance testing.
+This command lives under `cmd/` and may import the `clickhouse` package.
+
+### Configuration
+
+Connection details are supplied the same way as the server/summarise commands
+(same env + flags conventions used by the implementer for other ClickHouse
+commands). The clickhouse package itself does not load `.env`.
+
+### Subcommands and flags
+
+`clickhouse-perf import`
+
+- `--mountPath <abs/>` (required)
+- `--stats <file|->` (required; supports `.gz`)
+- `--maxLines <n>` (optional; 0 means all lines)
+- `--batchSize <n>` (optional; defaults to 10000)
+
+Behaviour:
+
+- Performs the same ingestion as `cmd/summarise` would for ClickHouse:
+  - DGUTA rows + children rows
+  - basedirs snapshot rows
+  - file rows (`wrstat_files`)
+- Uses `updated_at` from the stats file mtime (or `time.Now()` for `-`).
+- Reports:
+  - total lines processed
+  - rows inserted per table
+  - wall time for each phase:
+    - partition drop / reset
+    - insert time per table
+    - mount switch time
+    - old snapshot partition drop time
+
+`clickhouse-perf query`
+
+- `--mountPath <abs/>` (required)
+- `--dir <abs/>` (required; used for tree and file queries)
+- `--uid <n>` and `--gids <csv>` (optional; used for permission query)
+- `--repeat <n>` (optional; default 20)
+
+Behaviour:
+
+- Runs the fixed query suite below (exact SQL) and reports per-query latency
+  for each run and summary percentiles p50/p95/p99.
+
+### Query suite SQL (normative)
+
+The perf CLI must execute these SQL statements directly (not via server
+handlers) so it isolates database query performance.
+
+All queries join to `wrstat_mounts_active` and scope to one mount.
+
+1) Active snapshot lookup:
+
+  `SELECT a.snapshot_id
+   FROM wrstat_mounts_active a
+   WHERE a.mount_path = ?`
+
+2) Tree summary for a directory (unfiltered, age = all):
+
+  `SELECT
+      sum(d.count) AS count,
+      sum(d.size) AS size,
+      min(d.atime_min) AS atime_min,
+      max(d.mtime_max) AS mtime_max,
+      arraySort(groupUniqArray(d.uid)) AS uids,
+      arraySort(groupUniqArray(d.gid)) AS gids,
+      bitOr(d.ft) AS ft,
+      max(a.updated_at) AS modtime
+   FROM wrstat_dguta d
+   ANY INNER JOIN wrstat_mounts_active a
+     ON d.mount_path = a.mount_path AND d.snapshot_id = a.snapshot_id
+   WHERE d.mount_path = ?
+     AND d.dir = ?
+     AND d.age = ?`
+
+3) Children for a directory:
+
+  `SELECT DISTINCT c.child
+   FROM wrstat_children c
+   ANY INNER JOIN wrstat_mounts_active a
+     ON c.mount_path = a.mount_path AND c.snapshot_id = a.snapshot_id
+   WHERE c.mount_path = ?
+     AND c.parent_dir = ?
+   ORDER BY c.child ASC`
+
+4) Basedirs group usage for age all (scoped to mount):
+
+  `SELECT
+      gid,
+      basedir,
+      uids,
+      usage_size,
+      quota_size,
+      usage_inodes,
+      quota_inodes,
+      mtime,
+      date_no_space,
+      date_no_files
+   FROM wrstat_basedirs_group_usage u
+   ANY INNER JOIN wrstat_mounts_active a
+     ON u.mount_path = a.mount_path AND u.snapshot_id = a.snapshot_id
+   WHERE u.mount_path = ?
+     AND u.age = ?
+   ORDER BY gid ASC, basedir ASC`
+
+5) Files: list a directory:
+
+  Use the `ListDir` SQL from the Client section.
+
+6) Files: stat a path:
+
+  Use the `StatPath` SQL from the Client section.
+
+7) Permission check:
+
+  Use the `PermissionAnyInDir` SQL from the Client section.
+
+The perf CLI must print the exact SQL text it executes (with `?` placeholders)
+so results are reproducible.
 
 ----------------------------------------------------------------------
 
