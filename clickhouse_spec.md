@@ -20,6 +20,7 @@ Hard constraints (must hold when implementation is complete):
   - constructors used by `cmd/*` and `main.go` to obtain interface instances
   - methods required by the interfaces in `interface_spec.md`
   - extra-goal query methods defined in this spec
+  - performance inspection helpers defined in this spec (Inspector API)
 - Only tests, `main.go`, and packages under `cmd/` import
   `github.com/wtsi-hgi/wrstat-ui/clickhouse`.
 
@@ -42,6 +43,16 @@ Plus the extra-goal file APIs:
 - `NewClient(cfg Config) (*Client, error)`
 - `NewFileIngestOperation(cfg Config, mountPath string, updatedAt time.Time)
   (summary.OperationGenerator, io.Closer, error)`
+
+Plus performance inspection helpers (used only by `cmd/clickhouse-perf`):
+
+- `type QueryMetrics struct { ... }` (see Performance hooks)
+- `NewInspector(cfg Config) (*Inspector, error)`
+- `(*Inspector) ExplainListDir(ctx, mountPath, dir string,
+  limit, offset int64) (string, error)`
+- `(*Inspector) ExplainStatPath(ctx, mountPath, path string) (string, error)`
+- `(*Inspector) Measure(ctx, run func(ctx context.Context) error)
+  (*QueryMetrics, error)`
 
 `Client` is exported and its query methods are part of the public API:
 
@@ -1506,6 +1517,95 @@ Command name (normative):
 
 This command lives under `cmd/` and may import the `clickhouse` package.
 
+Instrumentation constraint (normative):
+
+- `cmd/clickhouse-perf` must not import clickhouse-go.
+- To support plan/IO verification, the clickhouse package must provide the
+  `Inspector` API defined below.
+
+### `clickhouse.Inspector` (normative)
+
+The clickhouse package must export:
+
+```go
+// QueryMetrics are pulled from ClickHouse query logs.
+type QueryMetrics struct {
+  DurationMs  uint64
+  ReadRows    uint64
+  ReadBytes   uint64
+  ResultRows  uint64
+  ResultBytes uint64
+}
+
+// Inspector can run EXPLAIN and query system.query_log without exposing
+// clickhouse-go types.
+type Inspector struct{ /* unexported */ }
+
+func NewInspector(cfg Config) (*Inspector, error)
+
+// ExplainListDir returns EXPLAIN output for the ListDir SQL statement.
+// It must use the same SQL text as Client.ListDir.
+func (i *Inspector) ExplainListDir(ctx context.Context,
+  mountPath, dir string, limit, offset int64) (string, error)
+
+// ExplainStatPath returns EXPLAIN output for the StatPath SQL statement.
+// It must use the same SQL text as Client.StatPath.
+func (i *Inspector) ExplainStatPath(ctx context.Context,
+  mountPath, path string) (string, error)
+
+// Measure runs the provided function, then returns metrics for the last
+// completed query executed on the configured server after the run started.
+// This is best-effort and assumes the perf CLI runs queries serially.
+func (i *Inspector) Measure(ctx context.Context,
+  run func(ctx context.Context) error) (*QueryMetrics, error)
+
+func (i *Inspector) Close() error
+```
+
+Implementation requirements (normative):
+
+- `Measure` must:
+  - record a start time `t0` using the ClickHouse server clock
+  - run `run(ctx)`
+  - execute `SYSTEM FLUSH LOGS`
+  - query `system.query_log` for the most recent finished query with
+    `event_time >= t0` and exclude the `SYSTEM FLUSH LOGS` statement itself
+  - return metrics from that row
+
+Server time SQL (normative):
+
+```sql
+SELECT now()
+```
+
+Query-log SQL (normative):
+
+EXPLAIN requirements (normative):
+
+- `ExplainListDir` and `ExplainStatPath` must execute the underlying query
+  prefixed by `EXPLAIN indexes = 1`.
+- The SQL body must be identical to the corresponding Client query (same
+  WHERE/JOIN shape and parameters).
+
+```sql
+SYSTEM FLUSH LOGS
+```
+
+```sql
+SELECT
+  toUInt64(query_duration_ms) AS duration_ms,
+  toUInt64(read_rows) AS read_rows,
+  toUInt64(read_bytes) AS read_bytes,
+  toUInt64(result_rows) AS result_rows,
+  toUInt64(result_bytes) AS result_bytes
+FROM system.query_log
+WHERE type = 'QueryFinish'
+  AND event_time >= ?
+  AND NOT startsWith(trimLeft(query), 'SYSTEM FLUSH LOGS')
+ORDER BY event_time DESC
+LIMIT 1
+```
+
 ### Configuration
 
 Connection details are supplied the same way as the server/summarise commands
@@ -1573,6 +1673,19 @@ Behaviour:
 - Queries run across all active mounts (same as the real server).
 - Runs the fixed query suite below and reports per-query latency for each run
   and summary percentiles p50/p95/p99.
+
+Plan + IO verification (normative):
+
+- Before the timing loop begins, the perf CLI must verify pruning for
+  `ListDir` and `StatPath` using `clickhouse.NewInspector(cfg)`.
+- It must run `ExplainListDir` and `ExplainStatPath` for the chosen `dir` and
+  `pickedPath` and fail the command if:
+  - `ExplainListDir` output does not mention both `mount_path` and
+    `parent_dir`.
+  - `ExplainStatPath` output does not mention projection `by_path`.
+- For every timed operation (each repeat), the perf CLI must also print the
+  `QueryMetrics` returned by `Inspector.Measure` (duration/read/result rows
+  and bytes).
 
 ### Query suite (normative)
 
