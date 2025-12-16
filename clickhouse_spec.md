@@ -1169,7 +1169,7 @@ The implementation agent must update `README.md` with:
 
 To enable iterative schema/perf tuning, add a CLI command that can:
 
-1. import stats.gz into ClickHouse (optionally only the first N lines)
+1. import one or more stats.gz files into ClickHouse (optionally only the first N lines)
 2. run a fixed suite of read queries and report latencies
 
 Command name (normative):
@@ -1188,31 +1188,59 @@ commands). The clickhouse package itself does not load `.env`.
 
 `clickhouse-perf import`
 
-- `--mountPath <abs/>` (required)
-- `--stats <file|->` (required; supports `.gz`)
-- `--maxLines <n>` (optional; 0 means all lines)
+- `--stats <file>` (repeatable; each file may be plain or `.gz`)
+- `--maxLines <n>` (optional; 0 means all lines; applies per input file)
 - `--batchSize <n>` (optional; defaults to 10000)
+- `--parallelism <n>` (optional; default 1)
 
 Behaviour:
 
-- Performs the same ingestion as `cmd/summarise` would for ClickHouse:
+- Performs the same ingestion as `cmd/summarise` would for ClickHouse, for each
+  input stats file:
   - DGUTA rows + children rows
   - basedirs snapshot rows
   - file rows (`wrstat_files`)
-- Uses `updated_at` from the stats file mtime (or `time.Now()` for `-`).
-- Reports:
-  - total lines processed
-  - rows inserted per table
-  - wall time for each phase:
-    - partition drop / reset
-    - insert time per table
-    - mount switch time
-    - old snapshot partition drop time
+
+Mount inference (normative):
+
+- The perf CLI must not require `--mountPath` for import.
+- For each `--stats` file, infer its `mount_path` by:
+  1. reading the first parsed path from that stats stream, and
+  2. resolving `mount_path` using the same longest-prefix mount resolution rule
+     described in the Client section (configured mountpoints override, else
+     auto-discovered).
+- If no mount matches, fail the import for that stats file.
+- During ingest, validate that all parsed paths in that stats file are within
+  the inferred mount (ie they start with `mount_path`). If not, fail that file.
+
+Serial vs parallel ingest (normative):
+
+- When `--parallelism=1`, ingest the input stats files serially in the order
+  provided.
+- When `--parallelism>1`, ingest up to N stats files concurrently.
+- Each stats file ingest is still internally streamed and must not load the
+  entire file into memory.
+
+`updated_at` (normative):
+
+- Use `updated_at` from each stats file mtime.
+
+Reports (normative):
+
+- total lines processed per file
+- inferred `mount_path` per file
+- rows inserted per table per file
+- wall time for each phase per file:
+  - partition drop / reset
+  - insert time per table
+  - mount switch time
+  - old snapshot partition drop time
+- overall wall time and effective throughput (serial vs parallel)
 
 `clickhouse-perf query`
 
 - `--mountPath <abs/>` (required)
-- `--dir <abs/>` (required; used for tree and file queries)
+- `--dir <abs/>` (optional; when omitted, a directory is chosen automatically)
 - `--uid <n>` and `--gids <csv>` (optional; used for permission query)
 - `--repeat <n>` (optional; default 20)
 
@@ -1240,7 +1268,32 @@ Implementation rule (normative):
 
 Fixed query suite (normative):
 
-All queries are scoped to the single `--mountPath` passed to the command.
+The query suite is *mount-focused* around the single `--mountPath` passed to
+the command.
+
+Note: some storage-neutral interfaces (eg `basedirs.Reader.GroupUsage`) do not
+take a mount argument. In those cases, the perf CLI must:
+
+- still call the real interface method (so SQL is not duplicated), and
+- filter the returned rows in Go to those whose `BaseDir` resolves to
+  `--mountPath` using the same mount resolution rule.
+
+Directory selection (normative):
+
+- If `--dir` is supplied, use it.
+- Otherwise, automatically pick a "representative" directory under
+  `--mountPath` by walking the directory tree using the storage-neutral tree
+  API (no filesystem calls):
+  1. Start at `dir = --mountPath`.
+  2. Repeatedly call `provider.Tree().DirInfo(dir, filter)` (Age=all, no UID/GID
+    restriction).
+  3. If `DirInfo.Current.Count` is between 1,000 and 20,000 inclusive, stop and
+    use this `dir`.
+  4. Otherwise, choose the child directory with the largest `Count` and set
+    `dir = child.Dir`, repeating up to 64 steps.
+  5. If no children exist before reaching the target range, use the last dir.
+
+The chosen `dir` is used for the file-glob tests and the list/stat tests.
 
 1) Active snapshot freshness:
 
@@ -1249,7 +1302,7 @@ All queries are scoped to the single `--mountPath` passed to the command.
 
 2) Tree directory summary:
 
-- Call `provider.Tree().DirInfo(--dir, filter)` with an unfiltered filter
+- Call `provider.Tree().DirInfo(dir, filter)` with an unfiltered filter
   (no UID/GID restriction) and with Age set to the equivalent of
   `DGUTAgeAll`.
 
@@ -1259,18 +1312,47 @@ All queries are scoped to the single `--mountPath` passed to the command.
 
 4) Files list directory:
 
-- Call `client.ListDir(ctx, --dir, opts)`.
+- Call `client.ListDir(ctx, dir, opts)`.
 
 5) Files stat a path:
 
-- First call `client.ListDir(ctx, --dir, opts)` once (outside the timing loop)
+- First call `client.ListDir(ctx, dir, opts)` once (outside the timing loop)
   and pick the first returned `FileRow.Path` (sorted order).
 - Then call `client.StatPath(ctx, pickedPath, opts)`.
 - If the directory is empty, skip this operation.
 
 6) Permission check:
 
-- Call `client.PermissionAnyInDir(ctx, --dir, --uid, --gids)`.
+- Call `client.PermissionAnyInDir(ctx, dir, --uid, --gids)`.
+
+7) Glob query matrix:
+
+- Exercise `client.FindByGlob(ctx, baseDirs, patterns, opts)` with a fixed set
+  of gitignore-style patterns to cover `*` and `**` cases, and to compare
+  extension-limited vs non-limited matches, with and without permission
+  filtering.
+
+Pattern and option generation (normative):
+
+- Let `baseDirs = []string{dir}`.
+- Determine an extension candidate `ext` as follows:
+  - Call `client.ListDir(ctx, dir, opts)` once (outside timing loops).
+  - Pick the first returned file row where `ext != ""` and `entry_type` is not
+    a directory.
+  - If no such row exists, set `ext = ""` and skip the ext-limited cases.
+
+Run these cases (normative):
+
+- Case A: patterns = [`*`], RequireOwner=false
+- Case B: patterns = [`*`], RequireOwner=true
+- Case C: patterns = [`**`], RequireOwner=false
+- Case D: patterns = [`**`], RequireOwner=true
+- Case E (only if ext != ""): patterns = [`*.${ext}`], RequireOwner=false
+- Case F (only if ext != ""): patterns = [`*.${ext}`], RequireOwner=true
+- Case G (only if ext != ""): patterns = [`**/*.${ext}`], RequireOwner=false
+- Case H (only if ext != ""): patterns = [`**/*.${ext}`], RequireOwner=true
+
+The CLI must report latency per case separately.
 
 Reporting (normative):
 
