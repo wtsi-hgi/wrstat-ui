@@ -1218,92 +1218,66 @@ Behaviour:
 
 Behaviour:
 
-- Runs the fixed query suite below (exact SQL) and reports per-query latency
-  for each run and summary percentiles p50/p95/p99.
+- Runs the fixed query suite below and reports per-query latency for each run
+  and summary percentiles p50/p95/p99.
 
-### Query suite SQL (normative)
+### Query suite (normative)
 
-The perf CLI must execute these SQL statements directly (not via server
-handlers) so it isolates database query performance.
+The perf CLI must not re-specify SQL statements.
 
-All queries join to `wrstat_mounts_active` and scope to one mount.
+Instead, it must exercise the exact same query methods used by the rest of
+the program (so the SQL is defined once, in the clickhouse implementation).
 
-1) Active snapshot lookup:
+Implementation rule (normative):
 
-```sql
-SELECT a.snapshot_id
-FROM wrstat_mounts_active a
-WHERE a.mount_path = ?
-```
+- The perf CLI must not embed any SQL text in `cmd/`.
+- For tree + basedirs queries, it must call the storage-neutral interfaces
+  via `clickhouse.OpenProvider(cfg)`:
+  - `provider.Tree()` for tree queries
+  - `provider.BaseDirs()` for basedirs queries
+- For file-level queries, it must call the public ClickHouse query helpers via
+  `clickhouse.NewClient(cfg)` (see the Client section).
 
-2) Tree summary for a directory (unfiltered, age = all):
+Fixed query suite (normative):
 
-```sql
-SELECT
-  sum(d.count) AS count,
-  sum(d.size) AS size,
-  min(d.atime_min) AS atime_min,
-  max(d.mtime_max) AS mtime_max,
-  arraySort(groupUniqArray(d.uid)) AS uids,
-  arraySort(groupUniqArray(d.gid)) AS gids,
-  bitOr(d.ft) AS ft,
-  max(a.updated_at) AS modtime
-FROM wrstat_dguta d
-ANY INNER JOIN wrstat_mounts_active a
-  ON d.mount_path = a.mount_path AND d.snapshot_id = a.snapshot_id
-WHERE d.mount_path = ?
-  AND d.dir = ?
-  AND d.age = ?
-```
+All queries are scoped to the single `--mountPath` passed to the command.
 
-3) Children for a directory:
+1) Active snapshot freshness:
 
-```sql
-SELECT DISTINCT c.child
-FROM wrstat_children c
-ANY INNER JOIN wrstat_mounts_active a
-  ON c.mount_path = a.mount_path AND c.snapshot_id = a.snapshot_id
-WHERE c.mount_path = ?
-  AND c.parent_dir = ?
-ORDER BY c.child ASC
-```
+- Call `provider.BaseDirs().MountTimestamps()` and read the `updated_at` value
+  for `--mountPath`.
 
-4) Basedirs group usage for age all (scoped to mount):
+2) Tree directory summary:
 
-```sql
-SELECT
-  gid,
-  basedir,
-  uids,
-  usage_size,
-  quota_size,
-  usage_inodes,
-  quota_inodes,
-  mtime,
-  date_no_space,
-  date_no_files
-FROM wrstat_basedirs_group_usage u
-ANY INNER JOIN wrstat_mounts_active a
-  ON u.mount_path = a.mount_path AND u.snapshot_id = a.snapshot_id
-WHERE u.mount_path = ?
-  AND u.age = ?
-ORDER BY gid ASC, basedir ASC
-```
+- Call `provider.Tree().DirInfo(--dir, filter)` with an unfiltered filter
+  (no UID/GID restriction) and with Age set to the equivalent of
+  `DGUTAgeAll`.
 
-5) Files: list a directory:
+3) Basedirs group usage:
 
-  Use the `ListDir` SQL from the Client section.
+- Call `provider.BaseDirs().GroupUsage(DGUTAgeAll)`.
 
-6) Files: stat a path:
+4) Files list directory:
 
-  Use the `StatPath` SQL from the Client section.
+- Call `client.ListDir(ctx, --dir, opts)`.
 
-7) Permission check:
+5) Files stat a path:
 
-  Use the `PermissionAnyInDir` SQL from the Client section.
+- First call `client.ListDir(ctx, --dir, opts)` once (outside the timing loop)
+  and pick the first returned `FileRow.Path` (sorted order).
+- Then call `client.StatPath(ctx, pickedPath, opts)`.
+- If the directory is empty, skip this operation.
 
-The perf CLI must print the exact SQL text it executes (with `?` placeholders)
-so results are reproducible.
+6) Permission check:
+
+- Call `client.PermissionAnyInDir(ctx, --dir, --uid, --gids)`.
+
+Reporting (normative):
+
+- Print per-operation latency and p50/p95/p99 across repeats.
+- Print the operation name and the key inputs.
+- If the clickhouse package provides debug logging of SQL text, the perf CLI
+  may enable it for reproducibility, but it must not contain its own SQL.
 
 ----------------------------------------------------------------------
 
