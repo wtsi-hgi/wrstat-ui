@@ -183,8 +183,14 @@ Performance note:
 - Target batch sizes of 100,000–500,000 rows for optimal ingest throughput.
   - With 1.3 billion rows and a 1-hour target, we need ~360,000 rows/second.
   - Larger batches reduce per-batch overhead and part creation frequency.
-- All read queries must `ANY INNER JOIN` to `wrstat_mounts_active` and filter
-  by directory/path in `PREWHERE` when possible.
+- All read queries must restrict results to the active snapshot(s) using
+  `wrstat_mounts_active`.
+  - For single-mount queries, prefer resolving the active snapshot into a
+    constant and filtering by it in `PREWHERE`:
+    `WITH (SELECT snapshot_id FROM wrstat_mounts_active WHERE mount_path = ?) AS sid`
+  - For multi-mount queries (ancestor-scope), join to a filtered set of active
+    snapshots (often written as `WITH active AS (...)` then `ANY INNER JOIN active`).
+  - Always place partition keys early (ideally in `PREWHERE`) when possible.
 - For `wrstat_files` (the largest table), the implementation MUST use columnar
   inserts (`batch.Column(i).Append(slice)`) to avoid the reflection overhead of
   row-based inserts. This is critical to meeting the 1-hour ingest requirement.
@@ -562,34 +568,32 @@ Existence check (unfiltered):
 - If `dir` is within a mountpoint (single-mount scope):
 
   - ```sql
+    WITH (SELECT snapshot_id FROM wrstat_mounts_active WHERE mount_path = ?) AS sid
     SELECT 1
     FROM wrstat_dguta d
-    ANY INNER JOIN wrstat_mounts_active a
-      ON d.mount_path = a.mount_path AND d.snapshot_id = a.snapshot_id
     PREWHERE d.mount_path = ?
-      AND d.snapshot_id = a.snapshot_id
+      AND d.snapshot_id = sid
       AND d.dir = ?
     LIMIT 1
     ```
 
   Parameter order:
 
-  1. mount_path
-  2. dir
-
-  Note: Including `snapshot_id` in PREWHERE enables partition pruning before
-  the join is fully evaluated, which is critical for performance.
+  1. mount_path (for snapshot lookup)
+  2. mount_path
+  3. dir
 
 - Otherwise (ancestor scope):
 
   - ```sql
-    SELECT 1
-    FROM wrstat_dguta d
-    ANY INNER JOIN (
+    WITH active AS (
       SELECT mount_path, snapshot_id
       FROM wrstat_mounts_active
       WHERE startsWith(mount_path, ?)
-    ) a ON d.mount_path = a.mount_path AND d.snapshot_id = a.snapshot_id
+    )
+    SELECT 1
+    FROM wrstat_dguta d
+    ANY INNER JOIN active a ON d.mount_path = a.mount_path AND d.snapshot_id = a.snapshot_id
     WHERE d.dir = ?
     LIMIT 1
     ```
@@ -624,15 +628,51 @@ Existence check (unfiltered):
 
 Summary query SQL (normative):
 
-- If `dir` is within a mountpoint (single-mount scope), the query is the same
-  as the ancestor-scope query below but with `wrstat_mounts_active` filtered by
-  `mount_path = ?` and with:
-  - `PREWHERE d.mount_path = ? AND d.dir = ?`
-  - `WHERE d.age = ? ...` (the remaining filter clauses are unchanged)
+- If `dir` is within a mountpoint (single-mount scope):
+
+  - ```sql
+    WITH (SELECT snapshot_id FROM wrstat_mounts_active WHERE mount_path = ?) AS sid
+    SELECT
+      sum(d.count) AS count,
+      sum(d.size) AS size,
+      toDateTime(min(d.atime_min)) AS atime,
+      toDateTime(max(d.mtime_max)) AS mtime,
+      arraySort(groupUniqArray(d.uid)) AS uids,
+      arraySort(groupUniqArray(d.gid)) AS gids,
+      bitOr(d.ft) AS ft,
+      (SELECT updated_at FROM wrstat_mounts_active WHERE mount_path = ?) AS modtime
+    FROM wrstat_dguta d
+    PREWHERE d.mount_path = ?
+      AND d.snapshot_id = sid
+      AND d.dir = ?
+    WHERE d.age = ?
+      AND (? = 0 OR bitAnd(d.ft, ?) != 0)
+      AND (? = 0 OR has(?, d.gid))
+      AND (? = 0 OR has(?, d.uid))
+    ```
+
+  Parameter order:
+
+  1. mount_path (for snapshot lookup)
+  2. mount_path (for updated_at lookup)
+  3. mount_path
+  4. dir
+  5. age
+  6. ft_enabled (0/1)
+  7. ft_mask
+  8. gids_enabled (0/1)
+  9. gids Array(UInt32)
+  10. uids_enabled (0/1)
+  11. uids Array(UInt32)
 
 - Otherwise (ancestor scope):
 
   - ```sql
+    WITH active AS (
+      SELECT mount_path, snapshot_id, updated_at
+      FROM wrstat_mounts_active
+      WHERE startsWith(mount_path, ?)
+    )
     SELECT
       sum(d.count) AS count,
       sum(d.size) AS size,
@@ -643,11 +683,7 @@ Summary query SQL (normative):
       bitOr(d.ft) AS ft,
       max(a.updated_at) AS modtime
     FROM wrstat_dguta d
-    ANY INNER JOIN (
-      SELECT mount_path, snapshot_id, updated_at
-      FROM wrstat_mounts_active
-      WHERE startsWith(mount_path, ?)
-    ) a ON d.mount_path = a.mount_path AND d.snapshot_id = a.snapshot_id
+    ANY INNER JOIN active a ON d.mount_path = a.mount_path AND d.snapshot_id = a.snapshot_id
     WHERE d.dir = ?
       AND d.age = ?
       AND (? = 0 OR bitAnd(d.ft, ?) != 0)
@@ -689,25 +725,32 @@ Query:
 - If `dir` is within a mountpoint (single-mount scope):
 
   - ```sql
+    WITH (SELECT snapshot_id FROM wrstat_mounts_active WHERE mount_path = ?) AS sid
     SELECT DISTINCT c.child
     FROM wrstat_children c
-    ANY INNER JOIN wrstat_mounts_active a
-      ON c.mount_path = a.mount_path AND c.snapshot_id = a.snapshot_id
     PREWHERE c.mount_path = ?
+      AND c.snapshot_id = sid
       AND c.parent_dir = ?
     ORDER BY c.child ASC
     ```
 
+  Parameter order:
+
+  1. mount_path (for snapshot lookup)
+  2. mount_path
+  3. parent_dir
+
 - Otherwise (ancestor scope):
 
   - ```sql
-    SELECT DISTINCT c.child
-    FROM wrstat_children c
-    ANY INNER JOIN (
+    WITH active AS (
       SELECT mount_path, snapshot_id
       FROM wrstat_mounts_active
       WHERE startsWith(mount_path, ?)
-    ) a ON c.mount_path = a.mount_path AND c.snapshot_id = a.snapshot_id
+    )
+    SELECT DISTINCT c.child
+    FROM wrstat_children c
+    ANY INNER JOIN active a ON c.mount_path = a.mount_path AND c.snapshot_id = a.snapshot_id
     WHERE c.parent_dir = ?
     ORDER BY c.child ASC
     ```
@@ -728,22 +771,30 @@ Info SQL statements (normative)
 DGUTA counts:
 
 ```sql
+WITH active AS (
+  SELECT mount_path, snapshot_id
+  FROM wrstat_mounts_active
+)
 SELECT
   countDistinct(d.dir) AS num_dirs,
   count() AS num_dgutas
 FROM wrstat_dguta d
-ANY INNER JOIN wrstat_mounts_active a
+ANY INNER JOIN active a
   ON d.mount_path = a.mount_path AND d.snapshot_id = a.snapshot_id
 ```
 
 Children counts:
 
 ```sql
+WITH active AS (
+  SELECT mount_path, snapshot_id
+  FROM wrstat_mounts_active
+)
 SELECT
   countDistinct(c.parent_dir) AS num_parents,
   count() AS num_children
 FROM wrstat_children c
-ANY INNER JOIN wrstat_mounts_active a
+ANY INNER JOIN active a
   ON c.mount_path = a.mount_path AND c.snapshot_id = a.snapshot_id
 ```
 
@@ -1008,6 +1059,10 @@ Reader SQL statements (normative)
 Group usage:
 
 ```sql
+WITH active AS (
+  SELECT mount_path, snapshot_id
+  FROM wrstat_mounts_active
+)
 SELECT
   gid,
   basedir,
@@ -1021,7 +1076,7 @@ SELECT
   date_no_files,
   age
 FROM wrstat_basedirs_group_usage u
-ANY INNER JOIN wrstat_mounts_active a
+ANY INNER JOIN active a
   ON u.mount_path = a.mount_path AND u.snapshot_id = a.snapshot_id
 WHERE u.age = ?
 ORDER BY gid ASC, basedir ASC
@@ -1030,6 +1085,10 @@ ORDER BY gid ASC, basedir ASC
 User usage:
 
 ```sql
+WITH active AS (
+  SELECT mount_path, snapshot_id
+  FROM wrstat_mounts_active
+)
 SELECT
   uid,
   basedir,
@@ -1041,7 +1100,7 @@ SELECT
   mtime,
   age
 FROM wrstat_basedirs_user_usage u
-ANY INNER JOIN wrstat_mounts_active a
+ANY INNER JOIN active a
   ON u.mount_path = a.mount_path AND u.snapshot_id = a.snapshot_id
 WHERE u.age = ?
 ORDER BY uid ASC, basedir ASC
@@ -1050,6 +1109,10 @@ ORDER BY uid ASC, basedir ASC
 Group subdirs:
 
 ```sql
+WITH active AS (
+  SELECT mount_path, snapshot_id
+  FROM wrstat_mounts_active
+)
 SELECT
   subdir,
   num_files,
@@ -1057,7 +1120,7 @@ SELECT
   last_modified,
   file_usage
 FROM wrstat_basedirs_group_subdirs s
-ANY INNER JOIN wrstat_mounts_active a
+ANY INNER JOIN active a
   ON s.mount_path = a.mount_path AND s.snapshot_id = a.snapshot_id
 WHERE s.gid = ?
   AND s.basedir = ?
@@ -1068,6 +1131,10 @@ ORDER BY s.pos ASC
 User subdirs:
 
 ```sql
+WITH active AS (
+  SELECT mount_path, snapshot_id
+  FROM wrstat_mounts_active
+)
 SELECT
   subdir,
   num_files,
@@ -1075,7 +1142,7 @@ SELECT
   last_modified,
   file_usage
 FROM wrstat_basedirs_user_subdirs s
-ANY INNER JOIN wrstat_mounts_active a
+ANY INNER JOIN active a
   ON s.mount_path = a.mount_path AND s.snapshot_id = a.snapshot_id
 WHERE s.uid = ?
   AND s.basedir = ?
@@ -1116,9 +1183,13 @@ For the following, `age_all` is the numeric value of `db.DGUTAgeAll`.
 Group usage combos:
 
 ```sql
+WITH active AS (
+  SELECT mount_path, snapshot_id
+  FROM wrstat_mounts_active
+)
 SELECT count()
 FROM wrstat_basedirs_group_usage u
-ANY INNER JOIN wrstat_mounts_active a
+ANY INNER JOIN active a
   ON u.mount_path = a.mount_path AND u.snapshot_id = a.snapshot_id
 WHERE u.age = ?
 ```
@@ -1126,9 +1197,13 @@ WHERE u.age = ?
 User usage combos:
 
 ```sql
+WITH active AS (
+  SELECT mount_path, snapshot_id
+  FROM wrstat_mounts_active
+)
 SELECT count()
 FROM wrstat_basedirs_user_usage u
-ANY INNER JOIN wrstat_mounts_active a
+ANY INNER JOIN active a
   ON u.mount_path = a.mount_path AND u.snapshot_id = a.snapshot_id
 WHERE u.age = ?
 ```
@@ -1145,11 +1220,15 @@ FROM wrstat_basedirs_history
 Group subdir combos + subdir rows:
 
 ```sql
+WITH active AS (
+  SELECT mount_path, snapshot_id
+  FROM wrstat_mounts_active
+)
 SELECT
   countDistinct((gid, basedir)) AS group_subdir_combos,
   count() AS group_subdirs
 FROM wrstat_basedirs_group_subdirs s
-ANY INNER JOIN wrstat_mounts_active a
+ANY INNER JOIN active a
   ON s.mount_path = a.mount_path AND s.snapshot_id = a.snapshot_id
 WHERE s.age = ?
 ```
@@ -1157,11 +1236,15 @@ WHERE s.age = ?
 User subdir combos + subdir rows:
 
 ```sql
+WITH active AS (
+  SELECT mount_path, snapshot_id
+  FROM wrstat_mounts_active
+)
 SELECT
   countDistinct((uid, basedir)) AS user_subdir_combos,
   count() AS user_subdirs
 FROM wrstat_basedirs_user_subdirs s
-ANY INNER JOIN wrstat_mounts_active a
+ANY INNER JOIN active a
   ON s.mount_path = a.mount_path AND s.snapshot_id = a.snapshot_id
 WHERE s.age = ?
 ```
