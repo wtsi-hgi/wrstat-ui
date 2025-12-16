@@ -382,11 +382,14 @@ Queries:
 
 - Existence check (unfiltered):
 
-  - `SELECT 1 FROM wrstat_dguta d
-     ANY INNER JOIN wrstat_mounts_active a
-       ON d.mount_path = a.mount_path AND d.snapshot_id = a.snapshot_id
-     WHERE d.dir = {dir}
-     LIMIT 1`
+  - ```sql
+    SELECT 1
+    FROM wrstat_dguta d
+    ANY INNER JOIN wrstat_mounts_active a
+      ON d.mount_path = a.mount_path AND d.snapshot_id = a.snapshot_id
+    WHERE d.dir = ?
+    LIMIT 1
+    ```
 
 - Summary query (filtered):
 
@@ -424,12 +427,14 @@ Normalization:
 
 Query:
 
-- `SELECT DISTINCT c.child
-   FROM wrstat_children c
-   ANY INNER JOIN wrstat_mounts_active a
-     ON c.mount_path = a.mount_path AND c.snapshot_id = a.snapshot_id
-   WHERE c.parent_dir = {dir}
-   ORDER BY c.child ASC`
+- ```sql
+  SELECT DISTINCT c.child
+  FROM wrstat_children c
+  ANY INNER JOIN wrstat_mounts_active a
+    ON c.mount_path = a.mount_path AND c.snapshot_id = a.snapshot_id
+  WHERE c.parent_dir = ?
+  ORDER BY c.child ASC
+  ```
 
 ### `db.Database.Info()`
 
@@ -485,8 +490,10 @@ Partition drop syntax:
 - All tables that use `PARTITION BY (mount_path, snapshot_id)` must drop
   partitions using:
 
-  `ALTER TABLE <table>
-   DROP PARTITION tuple(?, toUUID(?))`
+  ```sql
+  ALTER TABLE <table>
+  DROP PARTITION tuple(?, toUUID(?))
+  ```
 
   Parameter order:
   1. mount_path (String)
@@ -494,29 +501,36 @@ Partition drop syntax:
 
 Active snapshot read:
 
-  `SELECT a.snapshot_id, a.updated_at
-   FROM wrstat_mounts_active a
-   WHERE a.mount_path = ?`
+```sql
+SELECT a.snapshot_id, a.updated_at
+FROM wrstat_mounts_active a
+WHERE a.mount_path = ?
+```
 
 Switch active snapshot (must be executed only once per run, in
 `DGUTAWriter.Close()`):
 
-  `INSERT INTO wrstat_mounts (mount_path, switched_at, active_snapshot,
-   updated_at)
-   VALUES (?, now64(3), toUUID(?), ?)`
+```sql
+INSERT INTO wrstat_mounts (mount_path, switched_at, active_snapshot, updated_at)
+VALUES (?, now64(3), toUUID(?), ?)
+```
 
 Insert DGUTA rows (batch):
 
-  `INSERT INTO wrstat_dguta
-   (mount_path, snapshot_id, dir, gid, uid, ft, age, count, size,
-    atime_min, mtime_max)
-   VALUES (?, toUUID(?), ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+```sql
+INSERT INTO wrstat_dguta
+  (mount_path, snapshot_id, dir, gid, uid, ft, age, count, size,
+   atime_min, mtime_max)
+VALUES (?, toUUID(?), ?, ?, ?, ?, ?, ?, ?, ?, ?)
+```
 
 Insert children rows (batch):
 
-  `INSERT INTO wrstat_children
-   (mount_path, snapshot_id, parent_dir, child)
-   VALUES (?, toUUID(?), ?, ?)`
+```sql
+INSERT INTO wrstat_children
+  (mount_path, snapshot_id, parent_dir, child)
+VALUES (?, toUUID(?), ?, ?)
+```
 
 ----------------------------------------------------------------------
 
@@ -557,8 +571,12 @@ Implementation requirement:
 
   - Query the last date:
 
-    `SELECT max(date) FROM wrstat_basedirs_history
-     WHERE mount_path = {mount} AND gid = {gid}`
+    ```sql
+    SELECT max(date)
+    FROM wrstat_basedirs_history
+    WHERE mount_path = ?
+      AND gid = ?
+    ```
 
   - If max(date) is NULL or < point.Date, insert the new row.
 
@@ -566,44 +584,56 @@ Basedirs SQL statements (normative)
 
 Insert group usage (batch):
 
-  `INSERT INTO wrstat_basedirs_group_usage
-   (mount_path, snapshot_id, gid, basedir, age, uids, usage_size, quota_size,
-    usage_inodes, quota_inodes, mtime, date_no_space, date_no_files)
-   VALUES (?, toUUID(?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+```sql
+INSERT INTO wrstat_basedirs_group_usage
+  (mount_path, snapshot_id, gid, basedir, age, uids, usage_size, quota_size,
+   usage_inodes, quota_inodes, mtime, date_no_space, date_no_files)
+VALUES (?, toUUID(?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+```
 
 Insert user usage (batch):
 
-  `INSERT INTO wrstat_basedirs_user_usage
-   (mount_path, snapshot_id, uid, basedir, age, gids, usage_size, quota_size,
-    usage_inodes, quota_inodes, mtime)
-   VALUES (?, toUUID(?), ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+```sql
+INSERT INTO wrstat_basedirs_user_usage
+  (mount_path, snapshot_id, uid, basedir, age, gids, usage_size, quota_size,
+   usage_inodes, quota_inodes, mtime)
+VALUES (?, toUUID(?), ?, ?, ?, ?, ?, ?, ?, ?, ?)
+```
 
 Insert group subdir rows (batch):
 
-  `INSERT INTO wrstat_basedirs_group_subdirs
-   (mount_path, snapshot_id, gid, basedir, age, pos, subdir, num_files,
-    size_files, last_modified, file_usage)
-   VALUES (?, toUUID(?), ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+```sql
+INSERT INTO wrstat_basedirs_group_subdirs
+  (mount_path, snapshot_id, gid, basedir, age, pos, subdir, num_files,
+   size_files, last_modified, file_usage)
+VALUES (?, toUUID(?), ?, ?, ?, ?, ?, ?, ?, ?, ?)
+```
 
 Insert user subdir rows (batch):
 
-  `INSERT INTO wrstat_basedirs_user_subdirs
-   (mount_path, snapshot_id, uid, basedir, age, pos, subdir, num_files,
-    size_files, last_modified, file_usage)
-   VALUES (?, toUUID(?), ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+```sql
+INSERT INTO wrstat_basedirs_user_subdirs
+  (mount_path, snapshot_id, uid, basedir, age, pos, subdir, num_files,
+   size_files, last_modified, file_usage)
+VALUES (?, toUUID(?), ?, ?, ?, ?, ?, ?, ?, ?, ?)
+```
 
 History last-point lookup:
 
-  `SELECT max(date)
-   FROM wrstat_basedirs_history
-   WHERE mount_path = ?
-     AND gid = ?`
+```sql
+SELECT max(date)
+FROM wrstat_basedirs_history
+WHERE mount_path = ?
+  AND gid = ?
+```
 
 History append:
 
-  `INSERT INTO wrstat_basedirs_history
-   (mount_path, gid, date, usage_size, quota_size, usage_inodes, quota_inodes)
-   VALUES (?, ?, ?, ?, ?, ?, ?)`
+```sql
+INSERT INTO wrstat_basedirs_history
+  (mount_path, gid, date, usage_size, quota_size, usage_inodes, quota_inodes)
+VALUES (?, ?, ?, ?, ?, ?, ?)
+```
 
 Finalize:
 
@@ -659,94 +689,107 @@ Reader SQL statements (normative)
 
 Group usage:
 
-  `SELECT
-      gid,
-      basedir,
-      uids,
-      usage_size,
-      quota_size,
-      usage_inodes,
-      quota_inodes,
-      mtime,
-      date_no_space,
-      date_no_files,
-      age
-   FROM wrstat_basedirs_group_usage u
-   ANY INNER JOIN wrstat_mounts_active a
-     ON u.mount_path = a.mount_path AND u.snapshot_id = a.snapshot_id
-   WHERE u.age = ?
-   ORDER BY gid ASC, basedir ASC`
+```sql
+SELECT
+  gid,
+  basedir,
+  uids,
+  usage_size,
+  quota_size,
+  usage_inodes,
+  quota_inodes,
+  mtime,
+  date_no_space,
+  date_no_files,
+  age
+FROM wrstat_basedirs_group_usage u
+ANY INNER JOIN wrstat_mounts_active a
+  ON u.mount_path = a.mount_path AND u.snapshot_id = a.snapshot_id
+WHERE u.age = ?
+ORDER BY gid ASC, basedir ASC
+```
 
 User usage:
 
-  `SELECT
-      uid,
-      basedir,
-      gids,
-      usage_size,
-      quota_size,
-      usage_inodes,
-      quota_inodes,
-      mtime,
-      age
-   FROM wrstat_basedirs_user_usage u
-   ANY INNER JOIN wrstat_mounts_active a
-     ON u.mount_path = a.mount_path AND u.snapshot_id = a.snapshot_id
-   WHERE u.age = ?
-   ORDER BY uid ASC, basedir ASC`
+```sql
+SELECT
+  uid,
+  basedir,
+  gids,
+  usage_size,
+  quota_size,
+  usage_inodes,
+  quota_inodes,
+  mtime,
+  age
+FROM wrstat_basedirs_user_usage u
+ANY INNER JOIN wrstat_mounts_active a
+  ON u.mount_path = a.mount_path AND u.snapshot_id = a.snapshot_id
+WHERE u.age = ?
+ORDER BY uid ASC, basedir ASC
+```
 
 Group subdirs:
 
-  `SELECT
-      subdir,
-      num_files,
-      size_files,
-      last_modified,
-      file_usage
-   FROM wrstat_basedirs_group_subdirs s
-   ANY INNER JOIN wrstat_mounts_active a
-     ON s.mount_path = a.mount_path AND s.snapshot_id = a.snapshot_id
-   WHERE s.gid = ?
-     AND s.basedir = ?
-     AND s.age = ?
-   ORDER BY s.pos ASC`
+```sql
+SELECT
+  subdir,
+  num_files,
+  size_files,
+  last_modified,
+  file_usage
+FROM wrstat_basedirs_group_subdirs s
+ANY INNER JOIN wrstat_mounts_active a
+  ON s.mount_path = a.mount_path AND s.snapshot_id = a.snapshot_id
+WHERE s.gid = ?
+  AND s.basedir = ?
+  AND s.age = ?
+ORDER BY s.pos ASC
+```
 
 User subdirs:
 
-  `SELECT
-      subdir,
-      num_files,
-      size_files,
-      last_modified,
-      file_usage
-   FROM wrstat_basedirs_user_subdirs s
-   ANY INNER JOIN wrstat_mounts_active a
-     ON s.mount_path = a.mount_path AND s.snapshot_id = a.snapshot_id
-   WHERE s.uid = ?
-     AND s.basedir = ?
-     AND s.age = ?
-   ORDER BY s.pos ASC`
+```sql
+SELECT
+  subdir,
+  num_files,
+  size_files,
+  last_modified,
+  file_usage
+FROM wrstat_basedirs_user_subdirs s
+ANY INNER JOIN wrstat_mounts_active a
+  ON s.mount_path = a.mount_path AND s.snapshot_id = a.snapshot_id
+WHERE s.uid = ?
+  AND s.basedir = ?
+  AND s.age = ?
+ORDER BY s.pos ASC
+```
 
 History:
 
 - Resolve mount_path for the input `path` using the same longest-prefix mount
   resolution as current basedirs.
 
-  `SELECT
-      date,
-      usage_size,
-      quota_size,
-      usage_inodes,
-      quota_inodes
-   FROM wrstat_basedirs_history
-   WHERE mount_path = ?
-     AND gid = ?
-   ORDER BY date ASC`
+
+```sql
+SELECT
+  date,
+  usage_size,
+  quota_size,
+  usage_inodes,
+  quota_inodes
+FROM wrstat_basedirs_history
+WHERE mount_path = ?
+  AND gid = ?
+ORDER BY date ASC
+```
 
 Mount timestamps:
 
-  `SELECT mount_path, updated_at
-   FROM wrstat_mounts_active`
+```sql
+SELECT mount_path, updated_at
+FROM wrstat_mounts_active
+```
 
 ### `basedirs.HistoryMaintainer`
 
@@ -901,28 +944,30 @@ Normalize `dir` to end with `/`.
 
 Required SQL (columns list depends on opts, but WHERE/ORDER/LIMIT must match):
 
-  `SELECT
-      f.path,
-      f.parent_dir,
-      f.name,
-      f.ext,
-      f.entry_type,
-      f.size,
-      f.apparent_size,
-      f.uid,
-      f.gid,
-      f.atime,
-      f.mtime,
-      f.ctime,
-      f.inode,
-      f.nlink
-   FROM wrstat_files f
-   ANY INNER JOIN wrstat_mounts_active a
-     ON f.mount_path = a.mount_path AND f.snapshot_id = a.snapshot_id
-   WHERE f.mount_path = ?
-     AND f.parent_dir = ?
-   ORDER BY f.name ASC
-   LIMIT ? OFFSET ?`
+```sql
+SELECT
+  f.path,
+  f.parent_dir,
+  f.name,
+  f.ext,
+  f.entry_type,
+  f.size,
+  f.apparent_size,
+  f.uid,
+  f.gid,
+  f.atime,
+  f.mtime,
+  f.ctime,
+  f.inode,
+  f.nlink
+FROM wrstat_files f
+ANY INNER JOIN wrstat_mounts_active a
+  ON f.mount_path = a.mount_path AND f.snapshot_id = a.snapshot_id
+WHERE f.mount_path = ?
+  AND f.parent_dir = ?
+ORDER BY f.name ASC
+LIMIT ? OFFSET ?
+```
 
 Parameter order:
 
@@ -935,27 +980,29 @@ Parameter order:
 
 Required SQL:
 
-  `SELECT
-      f.path,
-      f.parent_dir,
-      f.name,
-      f.ext,
-      f.entry_type,
-      f.size,
-      f.apparent_size,
-      f.uid,
-      f.gid,
-      f.atime,
-      f.mtime,
-      f.ctime,
-      f.inode,
-      f.nlink
-   FROM wrstat_files f
-   ANY INNER JOIN wrstat_mounts_active a
-     ON f.mount_path = a.mount_path AND f.snapshot_id = a.snapshot_id
-   WHERE f.mount_path = ?
-     AND f.path = ?
-   LIMIT 1`
+```sql
+SELECT
+  f.path,
+  f.parent_dir,
+  f.name,
+  f.ext,
+  f.entry_type,
+  f.size,
+  f.apparent_size,
+  f.uid,
+  f.gid,
+  f.atime,
+  f.mtime,
+  f.ctime,
+  f.inode,
+  f.nlink
+FROM wrstat_files f
+ANY INNER JOIN wrstat_mounts_active a
+  ON f.mount_path = a.mount_path AND f.snapshot_id = a.snapshot_id
+WHERE f.mount_path = ?
+  AND f.path = ?
+LIMIT 1
+```
 
 Parameter order:
 
@@ -966,13 +1013,15 @@ Parameter order:
 
 Required SQL:
 
-  `SELECT f.entry_type
-   FROM wrstat_files f
-   ANY INNER JOIN wrstat_mounts_active a
-     ON f.mount_path = a.mount_path AND f.snapshot_id = a.snapshot_id
-   WHERE f.mount_path = ?
-     AND f.path = ?
-   LIMIT 1`
+```sql
+SELECT f.entry_type
+FROM wrstat_files f
+ANY INNER JOIN wrstat_mounts_active a
+  ON f.mount_path = a.mount_path AND f.snapshot_id = a.snapshot_id
+WHERE f.mount_path = ?
+  AND f.path = ?
+LIMIT 1
+```
 
 Return true iff `entry_type == stats.DirType`.
 
@@ -988,36 +1037,44 @@ Pattern translation (required):
 - Anchor to the provided base dir by prefixing the regex with
   `^<escaped_base_dir>`.
 
-The query must be executed once per mount. For each mount, build one SQL query
-with an OR of each `(baseDir, pattern)` pair that belongs to that mount.
+Mount grouping rule (clarification):
+
+- `baseDirs` may contain directories on different mounts.
+- Resolve the mount for each base dir using the mount resolution rule.
+- Group the `(baseDir, pattern)` work by `mount_path` and execute one SQL query
+  per mount group.
+- In the common case where all baseDirs are on one mount (eg you pass a single
+  directory), this means exactly one query.
 
 Required SQL skeleton:
 
-  `SELECT
-      f.path,
-      f.parent_dir,
-      f.name,
-      f.ext,
-      f.entry_type,
-      f.size,
-      f.apparent_size,
-      f.uid,
-      f.gid,
-      f.atime,
-      f.mtime,
-      f.ctime,
-      f.inode,
-      f.nlink
-   FROM wrstat_files f
-   ANY INNER JOIN wrstat_mounts_active a
-     ON f.mount_path = a.mount_path AND f.snapshot_id = a.snapshot_id
-   WHERE f.mount_path = ?
-     AND (
-       match(f.path, ?) OR match(f.path, ?) OR match(f.path, ?)
-     )
-     AND ( ? = 0 OR f.uid = ? OR has(?, f.gid) )
-   ORDER BY f.path ASC
-   LIMIT ? OFFSET ?`
+```sql
+SELECT
+  f.path,
+  f.parent_dir,
+  f.name,
+  f.ext,
+  f.entry_type,
+  f.size,
+  f.apparent_size,
+  f.uid,
+  f.gid,
+  f.atime,
+  f.mtime,
+  f.ctime,
+  f.inode,
+  f.nlink
+FROM wrstat_files f
+ANY INNER JOIN wrstat_mounts_active a
+  ON f.mount_path = a.mount_path AND f.snapshot_id = a.snapshot_id
+WHERE f.mount_path = ?
+  AND (
+    match(f.path, ?) OR match(f.path, ?) OR match(f.path, ?)
+  )
+  AND (? = 0 OR f.uid = ? OR has(?, f.gid))
+ORDER BY f.path ASC
+LIMIT ? OFFSET ?
+```
 
 Parameter notes:
 
@@ -1033,14 +1090,16 @@ Normalize `dir` to end with `/`.
 
 Required SQL:
 
-  `SELECT 1
-   FROM wrstat_files f
-   ANY INNER JOIN wrstat_mounts_active a
-     ON f.mount_path = a.mount_path AND f.snapshot_id = a.snapshot_id
-   WHERE f.mount_path = ?
-     AND (f.path = ? OR startsWith(f.path, ?))
-     AND (f.uid = ? OR has(?, f.gid))
-   LIMIT 1`
+```sql
+SELECT 1
+FROM wrstat_files f
+ANY INNER JOIN wrstat_mounts_active a
+  ON f.mount_path = a.mount_path AND f.snapshot_id = a.snapshot_id
+WHERE f.mount_path = ?
+  AND (f.path = ? OR startsWith(f.path, ?))
+  AND (f.uid = ? OR has(?, f.gid))
+LIMIT 1
+```
 
 Parameter order:
 
@@ -1171,57 +1230,65 @@ All queries join to `wrstat_mounts_active` and scope to one mount.
 
 1) Active snapshot lookup:
 
-  `SELECT a.snapshot_id
-   FROM wrstat_mounts_active a
-   WHERE a.mount_path = ?`
+```sql
+SELECT a.snapshot_id
+FROM wrstat_mounts_active a
+WHERE a.mount_path = ?
+```
 
 2) Tree summary for a directory (unfiltered, age = all):
 
-  `SELECT
-      sum(d.count) AS count,
-      sum(d.size) AS size,
-      min(d.atime_min) AS atime_min,
-      max(d.mtime_max) AS mtime_max,
-      arraySort(groupUniqArray(d.uid)) AS uids,
-      arraySort(groupUniqArray(d.gid)) AS gids,
-      bitOr(d.ft) AS ft,
-      max(a.updated_at) AS modtime
-   FROM wrstat_dguta d
-   ANY INNER JOIN wrstat_mounts_active a
-     ON d.mount_path = a.mount_path AND d.snapshot_id = a.snapshot_id
-   WHERE d.mount_path = ?
-     AND d.dir = ?
-     AND d.age = ?`
+```sql
+SELECT
+  sum(d.count) AS count,
+  sum(d.size) AS size,
+  min(d.atime_min) AS atime_min,
+  max(d.mtime_max) AS mtime_max,
+  arraySort(groupUniqArray(d.uid)) AS uids,
+  arraySort(groupUniqArray(d.gid)) AS gids,
+  bitOr(d.ft) AS ft,
+  max(a.updated_at) AS modtime
+FROM wrstat_dguta d
+ANY INNER JOIN wrstat_mounts_active a
+  ON d.mount_path = a.mount_path AND d.snapshot_id = a.snapshot_id
+WHERE d.mount_path = ?
+  AND d.dir = ?
+  AND d.age = ?
+```
 
 3) Children for a directory:
 
-  `SELECT DISTINCT c.child
-   FROM wrstat_children c
-   ANY INNER JOIN wrstat_mounts_active a
-     ON c.mount_path = a.mount_path AND c.snapshot_id = a.snapshot_id
-   WHERE c.mount_path = ?
-     AND c.parent_dir = ?
-   ORDER BY c.child ASC`
+```sql
+SELECT DISTINCT c.child
+FROM wrstat_children c
+ANY INNER JOIN wrstat_mounts_active a
+  ON c.mount_path = a.mount_path AND c.snapshot_id = a.snapshot_id
+WHERE c.mount_path = ?
+  AND c.parent_dir = ?
+ORDER BY c.child ASC
+```
 
 4) Basedirs group usage for age all (scoped to mount):
 
-  `SELECT
-      gid,
-      basedir,
-      uids,
-      usage_size,
-      quota_size,
-      usage_inodes,
-      quota_inodes,
-      mtime,
-      date_no_space,
-      date_no_files
-   FROM wrstat_basedirs_group_usage u
-   ANY INNER JOIN wrstat_mounts_active a
-     ON u.mount_path = a.mount_path AND u.snapshot_id = a.snapshot_id
-   WHERE u.mount_path = ?
-     AND u.age = ?
-   ORDER BY gid ASC, basedir ASC`
+```sql
+SELECT
+  gid,
+  basedir,
+  uids,
+  usage_size,
+  quota_size,
+  usage_inodes,
+  quota_inodes,
+  mtime,
+  date_no_space,
+  date_no_files
+FROM wrstat_basedirs_group_usage u
+ANY INNER JOIN wrstat_mounts_active a
+  ON u.mount_path = a.mount_path AND u.snapshot_id = a.snapshot_id
+WHERE u.mount_path = ?
+  AND u.age = ?
+ORDER BY gid ASC, basedir ASC
+```
 
 5) Files: list a directory:
 
