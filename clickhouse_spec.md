@@ -182,6 +182,17 @@ Schema creation is the responsibility of the clickhouse package. It must:
 - Verify an internal schema version table matches the expected version.
 - Run in all constructors (provider + writers) so any entrypoint can bootstrap.
 
+Schema versioning (normative):
+
+- The expected schema version is `1`.
+- `wrstat_schema_version` must contain exactly one row.
+- On startup, the clickhouse package must:
+  - `SELECT count(), min(version), max(version)` from `wrstat_schema_version`.
+  - If count is 0, `INSERT INTO wrstat_schema_version (version) VALUES (1)`.
+  - If count is 1 and version is 1, continue.
+  - Otherwise, return an error instructing the operator to migrate or drop the
+    database.
+
 Embed all DDL as `.sql` files in the clickhouse package using `//go:embed`.
 Do not build SQL dynamically.
 
@@ -396,6 +407,14 @@ This section is normative: implement exactly this behaviour.
     the callback on a new goroutine.
   - Callbacks must not run concurrently with themselves.
 
+Update swap semantics (normative):
+
+- When a change is detected, the provider must build new reader instances,
+  publish them (so subsequent `Tree()`/`BaseDirs()` calls use the new data),
+  then invoke the callback.
+- Any old reader instances must remain usable until the callback returns.
+- After the callback returns, the provider must close the old readers.
+
 The provider must not expose any ClickHouse concepts. It returns:
 
 - `Tree() *db.Tree` (constructed as `db.NewTree(dbImpl)` after the refactor)
@@ -486,6 +505,30 @@ Return values must match the existing `db.DBInfo` meaning:
 
 Compute over active snapshots only.
 
+Info SQL statements (normative)
+
+DGUTA counts:
+
+```sql
+SELECT
+  countDistinct(d.dir) AS num_dirs,
+  count() AS num_dgutas
+FROM wrstat_dguta d
+ANY INNER JOIN wrstat_mounts_active a
+  ON d.mount_path = a.mount_path AND d.snapshot_id = a.snapshot_id
+```
+
+Children counts:
+
+```sql
+SELECT
+  countDistinct(c.parent_dir) AS num_parents,
+  count() AS num_children
+FROM wrstat_children c
+ANY INNER JOIN wrstat_mounts_active a
+  ON c.mount_path = a.mount_path AND c.snapshot_id = a.snapshot_id
+```
+
 ### `db.DGUTAWriter` (write-side tree ingest)
 
 The writer streams `db.RecordDGUTA` into ClickHouse.
@@ -507,7 +550,8 @@ Required behaviour:
   - Flush all batches.
   - Switch the active snapshot by inserting into `wrstat_mounts`.
   - Drop old snapshot partitions for this mount in `wrstat_dguta`,
-    `wrstat_children`, and all basedirs snapshot tables (usage/subdirs/files).
+    `wrstat_children`, and all other snapshot tables (basedirs usage/subdirs
+    and files).
     The old snapshot id is read from `wrstat_mounts_active`.
   - If Close fails before switching the snapshot, the new snapshot must be
     dropped (cleanup) so it is not leaked.
@@ -723,6 +767,16 @@ Ordering:
 Return the same counts as the existing `basedirs.DBInfo`, computed over active
 snapshots only.
 
+Required methods from `basedirs.Reader` (normative):
+
+- `SetMountPoints(mountpoints []string)` must override mount auto-discovery and
+  must affect mount resolution for:
+  - `History(gid, path)` in the reader
+  - all `Client` methods that resolve a mount from a path
+- `SetCachedGroup(gid, name)` and `SetCachedUser(uid, name)` must populate the
+  same caches used for filling `Usage.Name` so tests that pre-seed names remain
+  stable. These must not be no-ops.
+
 Reader SQL statements (normative)
 
 Group usage:
@@ -829,6 +883,63 @@ SELECT mount_path, updated_at
 FROM wrstat_mounts_active
 ```
 
+Info SQL statements (normative)
+
+For the following, `age_all` is the numeric value of `db.DGUTAgeAll`.
+
+Group usage combos:
+
+```sql
+SELECT count()
+FROM wrstat_basedirs_group_usage u
+ANY INNER JOIN wrstat_mounts_active a
+  ON u.mount_path = a.mount_path AND u.snapshot_id = a.snapshot_id
+WHERE u.age = ?
+```
+
+User usage combos:
+
+```sql
+SELECT count()
+FROM wrstat_basedirs_user_usage u
+ANY INNER JOIN wrstat_mounts_active a
+  ON u.mount_path = a.mount_path AND u.snapshot_id = a.snapshot_id
+WHERE u.age = ?
+```
+
+Group history series + points:
+
+```sql
+SELECT
+  countDistinct((mount_path, gid)) AS group_mount_combos,
+  count() AS group_histories
+FROM wrstat_basedirs_history
+```
+
+Group subdir combos + subdir rows:
+
+```sql
+SELECT
+  countDistinct((gid, basedir)) AS group_subdir_combos,
+  count() AS group_subdirs
+FROM wrstat_basedirs_group_subdirs s
+ANY INNER JOIN wrstat_mounts_active a
+  ON s.mount_path = a.mount_path AND s.snapshot_id = a.snapshot_id
+WHERE s.age = ?
+```
+
+User subdir combos + subdir rows:
+
+```sql
+SELECT
+  countDistinct((uid, basedir)) AS user_subdir_combos,
+  count() AS user_subdirs
+FROM wrstat_basedirs_user_subdirs s
+ANY INNER JOIN wrstat_mounts_active a
+  ON s.mount_path = a.mount_path AND s.snapshot_id = a.snapshot_id
+WHERE s.age = ?
+```
+
 ### `basedirs.HistoryMaintainer`
 
 `CleanHistoryForMount(prefix)`:
@@ -840,6 +951,27 @@ FROM wrstat_mounts_active
 
 - Return distinct `(gid, mount_path)` pairs that would be deleted by
   `CleanHistoryForMount(prefix)`.
+
+History maintenance SQL statements (normative)
+
+`FindInvalidHistory(prefix)`:
+
+```sql
+SELECT DISTINCT
+  gid,
+  mount_path
+FROM wrstat_basedirs_history
+WHERE NOT startsWith(mount_path, ?)
+ORDER BY mount_path ASC, gid ASC
+```
+
+`CleanHistoryForMount(prefix)` must run a synchronous mutation:
+
+```sql
+ALTER TABLE wrstat_basedirs_history
+DELETE WHERE NOT startsWith(mount_path, ?)
+SETTINGS mutations_sync = 2
+```
 
 ----------------------------------------------------------------------
 
@@ -988,8 +1120,8 @@ Implementation guidance:
 
 ### SQL statements (normative)
 
-The following statements must be used. Optional projection/secondary indexes
-may change the query plan, but the SQL text must remain logically equivalent.
+The following statements must be used. Projections and secondary indexes are
+permitted, but the SQL text and semantics in this section must not change.
 
 `ListDir(ctx, dir, opts)`
 
