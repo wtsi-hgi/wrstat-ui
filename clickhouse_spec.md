@@ -1,7 +1,8 @@
 # ClickHouse backend spec (replacement for Bolt)
 
-This document specifies the ClickHouse backend that replaces the Bolt backend
-previously described in `interface_spec.md`.
+This document specifies the ClickHouse backend that replaces the Bolt backend.
+This spec supersedes the Bolt sections of `interface_spec.md`. The `bolt`
+package may remain in the repository as unused code.
 
 The goal is that another agent can implement a new root package `clickhouse`
 that satisfies the storage-neutral interfaces defined in `interface_spec.md`
@@ -29,6 +30,7 @@ The new root package is `github.com/wtsi-hgi/wrstat-ui/clickhouse`.
 
 It exports only:
 
+- `type Config struct { ... }` (see Configuration section)
 - `OpenProvider(cfg Config) (server.Provider, error)`
 - `NewDGUTAWriter(cfg Config) (db.DGUTAWriter, error)`
 - `NewBaseDirsStore(cfg Config) (basedirs.Store, error)`
@@ -38,7 +40,7 @@ Plus the extra-goal file APIs:
 
 - `NewClient(cfg Config) (*Client, error)`
 - `NewFileIngestOperation(cfg Config, mountPath string, updatedAt time.Time)
-  (summary.OperationGenerator, error)`
+  (summary.OperationGenerator, io.Closer, error)`
 
 `Client` is exported and its query methods are part of the public API:
 
@@ -49,10 +51,11 @@ Plus the extra-goal file APIs:
   opts FindOptions) ([]FileRow, error)`
 - `(*Client) PermissionAnyInDir(ctx, dir string, uid uint32,
   gids []uint32) (bool, error)`
+- `(*Client) Close() error`
 
 The extra-goal APIs require a small number of exported helper types
-(`Client`, `FileRow`, and options structs). These types must not expose
-clickhouse-go types.
+(`Client`, `FileRow`, `ListOptions`, `StatOptions`, `FindOptions`). These
+types must not expose clickhouse-go types.
 
 ----------------------------------------------------------------------
 
@@ -96,14 +99,32 @@ Bootstrap rule (normative):
 
 The clickhouse package itself must not read `.env` files.
 
-For developer convenience, `cmd/server` and `cmd/summarise` should load:
+For developer convenience, `cmd/server` and `cmd/summarise` must load `.env`
+files using `github.com/joho/godotenv` (in order, later files override earlier):
 
-- `.env` (defaults)
-- `.env.local` (developer overrides)
+1. `.env` (defaults, committed to repo for development)
+2. `.env.local` (developer overrides, gitignored)
 
-using `github.com/joho/godotenv`.
+Environment variables for ClickHouse configuration:
 
-Tests should not require `.env` files.
+- `WRSTAT_CLICKHOUSE_DSN` (required): ClickHouse DSN for native protocol, eg
+  `clickhouse://user:pass@localhost:9000/wrstat?dial_timeout=5s&compress=lz4`
+- `WRSTAT_CLICKHOUSE_DATABASE` (required): database name, must match DSN
+- `WRSTAT_POLL_INTERVAL` (optional): duration string for mount update polling,
+  eg `1m`. Default `1m` for server, disabled for summarise.
+- `WRSTAT_QUERY_TIMEOUT` (optional): per-query timeout, default `30s`.
+
+CLI flags (must override env vars if specified):
+
+- `--clickhouse-dsn` / `-C`
+- `--clickhouse-database` / `-D`
+- `--poll-interval` (server only)
+- `--query-timeout`
+
+Existing flags like `--owners`, `--mounts` remain unchanged and populate
+`cfg.OwnersCSVPath` and `cfg.MountPoints`.
+
+Tests must not require `.env` files; they construct `Config` directly.
 
 ----------------------------------------------------------------------
 
@@ -163,179 +184,196 @@ Schema creation is the responsibility of the clickhouse package. It must:
 Embed all DDL as `.sql` files in the clickhouse package using `//go:embed`.
 Do not build SQL dynamically.
 
-### 1. Schema version
+### Complete embedded DDL (normative)
 
-- Table: `wrstat_schema_version`
+The following CREATE statements must be embedded in the clickhouse package.
+Each statement should be in a separate `.sql` file under `clickhouse/schema/`.
 
-DDL:
+```sql
+-- schema/001_schema_version.sql
+CREATE TABLE IF NOT EXISTS wrstat_schema_version (
+  version UInt32
+) ENGINE = TinyLog;
 
-- `version UInt32`
-- Engine: `TinyLog`
+-- schema/002_mounts.sql
+CREATE TABLE IF NOT EXISTS wrstat_mounts (
+  mount_path LowCardinality(String) CODEC(ZSTD(3)),
+  switched_at DateTime64(3) CODEC(Delta, ZSTD(3)),
+  active_snapshot UUID,
+  updated_at DateTime CODEC(Delta, ZSTD(3))
+) ENGINE = ReplacingMergeTree(switched_at)
+ORDER BY mount_path;
 
-Exactly one row is stored. Current version is `1`.
+-- schema/003_mounts_active.sql
+CREATE VIEW IF NOT EXISTS wrstat_mounts_active AS
+SELECT
+  mount_path,
+  argMax(active_snapshot, switched_at) AS snapshot_id,
+  argMax(updated_at, switched_at) AS updated_at
+FROM wrstat_mounts
+GROUP BY mount_path;
 
-### 2. Active snapshot pointer
+-- schema/004_dguta.sql
+CREATE TABLE IF NOT EXISTS wrstat_dguta (
+  mount_path LowCardinality(String) CODEC(ZSTD(3)),
+  snapshot_id UUID,
+  dir String CODEC(ZSTD(3)),
+  gid UInt32,
+  uid UInt32,
+  ft UInt16,
+  age UInt8,
+  count UInt64 CODEC(Delta, ZSTD(3)),
+  size UInt64 CODEC(Delta, ZSTD(3)),
+  atime_min Int64 CODEC(Delta, ZSTD(3)),
+  mtime_max Int64 CODEC(Delta, ZSTD(3))
+) ENGINE = MergeTree
+PARTITION BY (mount_path, snapshot_id)
+ORDER BY (mount_path, snapshot_id, dir, age, gid, uid, ft);
 
-- Table: `wrstat_mounts`
+-- schema/005_children.sql
+CREATE TABLE IF NOT EXISTS wrstat_children (
+  mount_path LowCardinality(String) CODEC(ZSTD(3)),
+  snapshot_id UUID,
+  parent_dir String CODEC(ZSTD(3)),
+  child String CODEC(ZSTD(3))
+) ENGINE = MergeTree
+PARTITION BY (mount_path, snapshot_id)
+ORDER BY (mount_path, snapshot_id, parent_dir, child);
 
-DDL:
+-- schema/006_basedirs_group_usage.sql
+CREATE TABLE IF NOT EXISTS wrstat_basedirs_group_usage (
+  mount_path LowCardinality(String) CODEC(ZSTD(3)),
+  snapshot_id UUID,
+  gid UInt32,
+  basedir String CODEC(ZSTD(3)),
+  age UInt8,
+  uids Array(UInt32),
+  usage_size UInt64 CODEC(Delta, ZSTD(3)),
+  quota_size UInt64 CODEC(Delta, ZSTD(3)),
+  usage_inodes UInt64 CODEC(Delta, ZSTD(3)),
+  quota_inodes UInt64 CODEC(Delta, ZSTD(3)),
+  mtime DateTime CODEC(Delta, ZSTD(3)),
+  date_no_space DateTime CODEC(Delta, ZSTD(3)),
+  date_no_files DateTime CODEC(Delta, ZSTD(3))
+) ENGINE = MergeTree
+PARTITION BY (mount_path, snapshot_id)
+ORDER BY (mount_path, snapshot_id, gid, age, basedir);
 
-- `mount_path LowCardinality(String) CODEC(ZSTD(3))`
-- `switched_at DateTime64(3) CODEC(Delta, ZSTD(3))`
-- `active_snapshot UUID`
-- `updated_at DateTime CODEC(Delta, ZSTD(3))`
+-- schema/007_basedirs_user_usage.sql
+CREATE TABLE IF NOT EXISTS wrstat_basedirs_user_usage (
+  mount_path LowCardinality(String) CODEC(ZSTD(3)),
+  snapshot_id UUID,
+  uid UInt32,
+  basedir String CODEC(ZSTD(3)),
+  age UInt8,
+  gids Array(UInt32),
+  usage_size UInt64 CODEC(Delta, ZSTD(3)),
+  quota_size UInt64 CODEC(Delta, ZSTD(3)),
+  usage_inodes UInt64 CODEC(Delta, ZSTD(3)),
+  quota_inodes UInt64 CODEC(Delta, ZSTD(3)),
+  mtime DateTime CODEC(Delta, ZSTD(3))
+) ENGINE = MergeTree
+PARTITION BY (mount_path, snapshot_id)
+ORDER BY (mount_path, snapshot_id, uid, age, basedir);
 
-Engine:
+-- schema/008_basedirs_group_subdirs.sql
+CREATE TABLE IF NOT EXISTS wrstat_basedirs_group_subdirs (
+  mount_path LowCardinality(String) CODEC(ZSTD(3)),
+  snapshot_id UUID,
+  gid UInt32,
+  basedir String CODEC(ZSTD(3)),
+  age UInt8,
+  pos UInt32,
+  subdir String CODEC(ZSTD(3)),
+  num_files UInt64 CODEC(Delta, ZSTD(3)),
+  size_files UInt64 CODEC(Delta, ZSTD(3)),
+  last_modified DateTime CODEC(Delta, ZSTD(3)),
+  file_usage Map(UInt16, UInt64)
+) ENGINE = MergeTree
+PARTITION BY (mount_path, snapshot_id)
+ORDER BY (mount_path, snapshot_id, gid, age, basedir, pos);
 
-- `ReplacingMergeTree(switched_at)`
-- `ORDER BY mount_path`
+-- schema/009_basedirs_user_subdirs.sql
+CREATE TABLE IF NOT EXISTS wrstat_basedirs_user_subdirs (
+  mount_path LowCardinality(String) CODEC(ZSTD(3)),
+  snapshot_id UUID,
+  uid UInt32,
+  basedir String CODEC(ZSTD(3)),
+  age UInt8,
+  pos UInt32,
+  subdir String CODEC(ZSTD(3)),
+  num_files UInt64 CODEC(Delta, ZSTD(3)),
+  size_files UInt64 CODEC(Delta, ZSTD(3)),
+  last_modified DateTime CODEC(Delta, ZSTD(3)),
+  file_usage Map(UInt16, UInt64)
+) ENGINE = MergeTree
+PARTITION BY (mount_path, snapshot_id)
+ORDER BY (mount_path, snapshot_id, uid, age, basedir, pos);
 
-View:
+-- schema/010_basedirs_history.sql
+CREATE TABLE IF NOT EXISTS wrstat_basedirs_history (
+  mount_path LowCardinality(String) CODEC(ZSTD(3)),
+  gid UInt32,
+  date DateTime CODEC(Delta, ZSTD(3)),
+  usage_size UInt64 CODEC(Delta, ZSTD(3)),
+  quota_size UInt64 CODEC(Delta, ZSTD(3)),
+  usage_inodes UInt64 CODEC(Delta, ZSTD(3)),
+  quota_inodes UInt64 CODEC(Delta, ZSTD(3))
+) ENGINE = MergeTree
+PARTITION BY mount_path
+ORDER BY (mount_path, gid, date);
 
-- `wrstat_mounts_active`
+-- schema/011_files.sql
+CREATE TABLE IF NOT EXISTS wrstat_files (
+  mount_path LowCardinality(String) CODEC(ZSTD(3)),
+  snapshot_id UUID,
+  path String CODEC(ZSTD(3)),
+  parent_dir String CODEC(ZSTD(3)),
+  name String CODEC(ZSTD(3)),
+  ext LowCardinality(String) CODEC(ZSTD(3)),
+  entry_type UInt8,
+  size Int64 CODEC(Delta, ZSTD(3)),
+  apparent_size Int64 CODEC(Delta, ZSTD(3)),
+  uid UInt32,
+  gid UInt32,
+  atime Int64 CODEC(Delta, ZSTD(3)),
+  mtime Int64 CODEC(Delta, ZSTD(3)),
+  ctime Int64 CODEC(Delta, ZSTD(3)),
+  inode Int64,
+  nlink Int64,
+  INDEX path_bf path TYPE bloom_filter(0.01) GRANULARITY 8,
+  INDEX name_bf name TYPE bloom_filter(0.01) GRANULARITY 8,
+  INDEX ext_bf ext TYPE bloom_filter(0.01) GRANULARITY 8,
+  PROJECTION by_path (SELECT * ORDER BY (mount_path, snapshot_id, path))
+) ENGINE = MergeTree
+PARTITION BY (mount_path, snapshot_id)
+ORDER BY (mount_path, snapshot_id, parent_dir, name, path);
+```
 
-DDL:
+### Schema field reference (for prose)
 
-- `mount_path`
-- `snapshot_id` = `argMax(active_snapshot, switched_at)`
-- `updated_at` = `argMax(updated_at, switched_at)`
+The following sections describe the schema tables for reference. The definitive
+DDL is in the "Complete embedded DDL" section above.
 
-This view is the single source of truth for `MountTimestamps()`.
+Conventions:
 
-### 3. DGUTA aggregates (tree/where)
+- `child` in `wrstat_children` is the full child path, without a trailing `/`
+  (matching the current Bolt behaviour).
+- User usage does not have `date_no_space` or `date_no_files` columns because
+  quota projections are only computed for groups.
+- `pos` in subdir tables preserves the slice ordering passed to `PutSubDirs()`.
+- `path` in `wrstat_files` is stored exactly as seen in stats.gz (directories
+  end with `/`). `parent_dir` ends with `/`. `name` for directories includes
+  trailing `/`. `ext` is derived from the filename: for files, it is the part
+  after the last `.` in the name (lowercased), or empty if there is no `.` or
+  the name starts with `.` and has no other `.`. For directories, `ext` is
+  always empty.
 
-- Table: `wrstat_dguta`
+History notes:
 
-DDL:
-
-- `mount_path LowCardinality(String) CODEC(ZSTD(3))`
-- `snapshot_id UUID`
-- `dir String CODEC(ZSTD(3))`
-- `gid UInt32`
-- `uid UInt32`
-- `ft UInt16`
-- `age UInt8`
-- `count UInt64 CODEC(Delta, ZSTD(3))`
-- `size UInt64 CODEC(Delta, ZSTD(3))`
-- `atime_min Int64 CODEC(Delta, ZSTD(3))`
-- `mtime_max Int64 CODEC(Delta, ZSTD(3))`
-
-Engine:
-
-- `MergeTree`
-- `PARTITION BY (mount_path, snapshot_id)`
-- `ORDER BY (mount_path, snapshot_id, dir, age, gid, uid, ft)`
-
-### 4. Children edges
-
-- Table: `wrstat_children`
-
-DDL:
-
-- `mount_path LowCardinality(String) CODEC(ZSTD(3))`
-- `snapshot_id UUID`
-- `parent_dir String CODEC(ZSTD(3))`
-- `child String CODEC(ZSTD(3))`
-
-Engine:
-
-- `MergeTree`
-- `PARTITION BY (mount_path, snapshot_id)`
-- `ORDER BY (mount_path, snapshot_id, parent_dir, child)`
-
-`child` is the full child path, without a trailing `/` (matching the current
-Bolt behaviour).
-
-### 5. Basedirs usage
-
-Two tables, mirroring `basedirs.Usage` without name/owner fields.
-
-- Table: `wrstat_basedirs_group_usage`
-
-Columns:
-
-- `mount_path LowCardinality(String) CODEC(ZSTD(3))`
-- `snapshot_id UUID`
-- `gid UInt32`
-- `basedir String CODEC(ZSTD(3))`
-- `age UInt8`
-- `uids Array(UInt32)`
-- `usage_size UInt64 CODEC(Delta, ZSTD(3))`
-- `quota_size UInt64 CODEC(Delta, ZSTD(3))`
-- `usage_inodes UInt64 CODEC(Delta, ZSTD(3))`
-- `quota_inodes UInt64 CODEC(Delta, ZSTD(3))`
-- `mtime DateTime CODEC(Delta, ZSTD(3))`
-- `date_no_space DateTime CODEC(Delta, ZSTD(3))`
-- `date_no_files DateTime CODEC(Delta, ZSTD(3))`
-
-Engine:
-
-- `MergeTree`
-- `PARTITION BY (mount_path, snapshot_id)`
-- `ORDER BY (mount_path, snapshot_id, gid, age, basedir)`
-
-- Table: `wrstat_basedirs_user_usage`
-
-Same as above but with:
-
-- `uid UInt32`
-- `gids Array(UInt32)`
-
-and `ORDER BY (mount_path, snapshot_id, uid, age, basedir)`.
-
-### 6. Basedirs subdirs
-
-Subdirs are stored row-per-subdir to avoid large encoded blobs.
-
-- Table: `wrstat_basedirs_group_subdirs`
-
-Columns:
-
-- `mount_path LowCardinality(String) CODEC(ZSTD(3))`
-- `snapshot_id UUID`
-- `gid UInt32`
-- `basedir String CODEC(ZSTD(3))`
-- `age UInt8`
-- `pos UInt32`
-- `subdir String CODEC(ZSTD(3))`
-- `num_files UInt64 CODEC(Delta, ZSTD(3))`
-- `size_files UInt64 CODEC(Delta, ZSTD(3))`
-- `last_modified DateTime CODEC(Delta, ZSTD(3))`
-- `file_usage Map(UInt16, UInt64)`
-
-Engine:
-
-- `MergeTree`
-- `PARTITION BY (mount_path, snapshot_id)`
-- `ORDER BY (mount_path, snapshot_id, gid, age, basedir, pos)`
-
-`pos` preserves the slice ordering passed to `PutGroupSubDirs()`.
-
-- Table: `wrstat_basedirs_user_subdirs`
-
-Same as above but keyed by `uid UInt32`.
-
-### 7. Basedirs history
-
-- Table: `wrstat_basedirs_history`
-
-DDL:
-
-- `mount_path LowCardinality(String) CODEC(ZSTD(3))`
-- `gid UInt32`
-- `date DateTime CODEC(Delta, ZSTD(3))`
-- `usage_size UInt64 CODEC(Delta, ZSTD(3))`
-- `quota_size UInt64 CODEC(Delta, ZSTD(3))`
-- `usage_inodes UInt64 CODEC(Delta, ZSTD(3))`
-- `quota_inodes UInt64 CODEC(Delta, ZSTD(3))`
-
-Engine:
-
-- `MergeTree`
-- `PARTITION BY mount_path`
-- `ORDER BY (mount_path, gid, date)`
-
-History is append-only with a strict-newer rule (see Store semantics below).
+- History is append-only with a strict-newer rule (see Store semantics).
+- History is partitioned by `mount_path` only (not snapshot_id) because it
+  persists across snapshots.
 
 ----------------------------------------------------------------------
 
@@ -544,7 +582,6 @@ Mapping:
 
 - `SetMountPath(mountPath)` sets `mount_path` for all subsequent writes.
 - `SetUpdatedAt(updatedAt)` is stored in `wrstat_mounts` on snapshot switch.
-- `Reset()` deletes any prior *staged* data for the current in-progress
 - `Reset()` must ensure the snapshot partitions for `(mount_path, snapshot_id)`
   are empty by dropping those partitions in:
   - `wrstat_basedirs_group_usage`
@@ -808,60 +845,16 @@ FROM wrstat_mounts_active
 ## Extra-goal file APIs
 
 To support other apps, the clickhouse package must also store file-level rows
-from stats.gz and expose query helpers.
-
-### Schema: `wrstat_files`
-
-DDL:
-
-- `mount_path LowCardinality(String) CODEC(ZSTD(3))`
-- `snapshot_id UUID`
-- `path String CODEC(ZSTD(3))`
-- `parent_dir String CODEC(ZSTD(3))`
-- `name String CODEC(ZSTD(3))`
-- `ext LowCardinality(String) CODEC(ZSTD(3))`
-- `entry_type UInt8`
-- `size Int64 CODEC(Delta, ZSTD(3))`
-- `apparent_size Int64 CODEC(Delta, ZSTD(3))`
-- `uid UInt32`
-- `gid UInt32`
-- `atime Int64 CODEC(Delta, ZSTD(3))`
-- `mtime Int64 CODEC(Delta, ZSTD(3))`
-- `ctime Int64 CODEC(Delta, ZSTD(3))`
-- `inode Int64`
-- `nlink Int64`
-
-Engine:
-
-- `MergeTree`
-- `PARTITION BY (mount_path, snapshot_id)`
-- `ORDER BY (mount_path, snapshot_id, parent_dir, name, path)`
-
-Projection (required):
-
-- Add a projection to accelerate point lookups by absolute path:
-
-  - `PROJECTION by_path (SELECT * ORDER BY (mount_path, snapshot_id, path))`
-
-Indexes:
-
-- `INDEX path_bf path TYPE bloom_filter(0.01) GRANULARITY 8`
-- `INDEX name_bf name TYPE bloom_filter(0.01) GRANULARITY 8`
-- `INDEX ext_bf ext TYPE bloom_filter(0.01) GRANULARITY 8`
-
-Conventions:
-
-- `path` is stored exactly as seen in stats.gz (directories end with `/`).
-- `parent_dir` ends with `/`.
-- `name` for directories includes trailing `/` (matching stats.gz).
-- `ext` is empty for directories and for names without an extension.
+from stats.gz and expose query helpers. The `wrstat_files` table DDL is defined
+in the "Complete embedded DDL" section above.
 
 ### Ingestion changes
 
 `cmd/summarise` must register an additional *global* summariser operation when
 using ClickHouse:
 
-- `NewFileIngestOperation(cfg, mountPath, updatedAt)`
+- `NewFileIngestOperation(cfg, mountPath, updatedAt) (summary.OperationGenerator,
+  io.Closer, error)`
 
 This operation streams every file and directory from stats.gz into
 `wrstat_files` for the same `(mount_path, snapshot_id)` as the DGUTA writer.
@@ -871,6 +864,16 @@ Before inserting any rows, it must drop the `wrstat_files` partition for
 
 `snapshot_id` derivation is defined in the lifecycle section above. All
 ClickHouse writers for a mount must use that same derived id.
+
+Close order in `cmd/summarise` (normative):
+
+After `Summariser.Summarise()` returns, close resources in this order:
+1. Close the file ingest operation (flushes file batches)
+2. Close the basedirs store (flushes basedirs batches)
+3. Close the DGUTA writer (flushes DGUTA batches, switches active snapshot,
+   drops old partitions)
+
+This ensures all data is written before the snapshot switch makes it visible.
 
 ### Public query helpers
 
@@ -917,6 +920,55 @@ Semantics:
   queried path, using `wrstat_mounts_active`.
 - Permission checks are ownership-based (uid/gid matching), because stats.gz
   does not contain POSIX mode bits.
+
+### Option types (exported)
+
+```go
+// FileRow represents a file or directory from wrstat_files.
+type FileRow struct {
+  Path         string
+  ParentDir    string
+  Name         string
+  Ext          string
+  EntryType    byte      // stats.FileType, stats.DirType, etc.
+  Size         int64
+  ApparentSize int64
+  UID          uint32
+  GID          uint32
+  ATime        time.Time
+  MTime        time.Time
+  CTime        time.Time
+  Inode        int64
+  Nlink        int64
+}
+
+// ListOptions controls ListDir behaviour.
+type ListOptions struct {
+  // Fields to retrieve; empty means all fields.
+  Fields []string
+  Limit  int64  // 0 means no limit (use with caution)
+  Offset int64
+}
+
+// StatOptions controls StatPath behaviour.
+type StatOptions struct {
+  // Fields to retrieve; empty means all fields.
+  Fields []string
+}
+
+// FindOptions controls FindByGlob behaviour.
+type FindOptions struct {
+  // Fields to retrieve; empty means all fields.
+  Fields       []string
+  Limit        int64
+  Offset       int64
+  // RequireOwner filters results to files where uid matches UID or gid matches
+  // one of GIDs.
+  RequireOwner bool
+  UID          uint32
+  GIDs         []uint32
+}
+```
 
 Selection/paging:
 
@@ -1124,13 +1176,23 @@ Local development must not require root.
 By default, clickhouse package tests must start a local ClickHouse server using
 the `clickhouse` binary available in `PATH`.
 
-Required behaviour:
+Skip behaviour (normative):
+
+- If `clickhouse` is not in PATH, tests must call `t.Skip("clickhouse binary
+  not found in PATH")`.
+- If the environment variable `WRSTAT_CLICKHOUSE_DSN` is set, tests must use
+  that DSN instead of starting a local server (this allows CI to provide a
+  pre-started server).
+
+Required behaviour when starting a local server:
 
 - Start the server with a generated config under `t.TempDir()` so it is fully
   isolated (data path, logs, tmp, etc).
 - Bind only to `127.0.0.1`.
 - Pick a free TCP port at runtime and write it into the generated config.
-- Wait until the server answers a simple query before running tests.
+- Wait until the server answers `SELECT 1` before running tests (max 30s
+  timeout, then fail).
+- Stop the server and clean up the temp dir when the test completes.
 
 Required database name convention:
 
@@ -1150,9 +1212,33 @@ environments.
 
 ### CI runner (allowed)
 
-In GitHub Actions, it is allowed to use `testcontainers-go` to start ClickHouse
-`25.11.2.24` (or a service container), because Docker is typically available
-there.
+In GitHub Actions, use one of these approaches:
+
+1. **Service container (preferred)**: Add a ClickHouse service container to the
+   workflow and set `WRSTAT_CLICKHOUSE_DSN` to point to it. Tests will use this
+   DSN instead of starting a local server.
+
+2. **testcontainers-go**: Alternatively, use `testcontainers-go` to start
+   ClickHouse `25.11.2.24` in Docker. This is more complex but self-contained.
+
+Example workflow snippet for service container:
+
+```yaml
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:25.11.2.24
+    ports:
+      - 9000:9000
+    options: >-
+      --health-cmd "clickhouse-client --query 'SELECT 1'"
+      --health-interval 5s
+      --health-timeout 2s
+      --health-retries 10
+env:
+  WRSTAT_CLICKHOUSE_DSN: clickhouse://default@localhost:9000/default
+```
+
+CI must not skip any tests; all tests must run.
 
 ### README update requirement
 
@@ -1186,44 +1272,41 @@ commands). The clickhouse package itself does not load `.env`.
 
 ### Subcommands and flags
 
-`clickhouse-perf import`
+`clickhouse-perf import <inputDir>`
 
-- `--stats <file>` (repeatable; each file may be plain or `.gz`)
+- `<inputDir>` (required; positional argument): base directory containing
+  `<version>_<mountKey>` subdirectories with `stats.gz` files (same structure
+  as `wrstat multi` outputs)
 - `--maxLines <n>` (optional; 0 means all lines; applies per input file)
 - `--batchSize <n>` (optional; defaults to 10000)
 - `--parallelism <n>` (optional; default 1)
+- `--quota <file>` (optional; CSV for basedirs quotas)
+- `--config <file>` (optional; basedirs config file)
 
 Behaviour:
 
-- Performs the same ingestion as `cmd/summarise` would for ClickHouse, for each
-  input stats file:
+- Discovers subdirectories using `server.FindDBDirs(inputDir, "stats.gz")`.
+- For each discovered subdirectory, performs the same ingestion as
+  `cmd/summarise` would for ClickHouse:
   - DGUTA rows + children rows
-  - basedirs snapshot rows
   - file rows (`wrstat_files`)
+  - basedirs snapshot rows (only if both `--quota` and `--config` are provided)
 
-Mount inference (normative):
+Mount path derivation (normative):
 
-- The perf CLI must not require `--mountPath` for import.
-- For each `--stats` file, infer its `mount_path` by:
-  1. reading the first parsed path from that stats stream, and
-  2. resolving `mount_path` using the same longest-prefix mount resolution rule
-     described in the Client section (configured mountpoints override, else
-     auto-discovered).
-- If no mount matches, fail the import for that stats file.
-- During ingest, validate that all parsed paths in that stats file are within
-  the inferred mount (ie they start with `mount_path`). If not, fail that file.
+- Mount path is derived from each discovered subdirectory name.
+- The subdirectory follows the `<version>_<mountKey>` naming convention.
+- Use the shared `mountpath.FromOutputDir()` helper to derive `mount_path` from
+  the subdirectory path.
+- `updated_at` is taken from the `stats.gz` file mtime.
 
 Serial vs parallel ingest (normative):
 
-- When `--parallelism=1`, ingest the input stats files serially in the order
-  provided.
-- When `--parallelism>1`, ingest up to N stats files concurrently.
+- When `--parallelism=1`, ingest the discovered subdirectories serially in
+  lexicographic order.
+- When `--parallelism>1`, ingest up to N subdirectories concurrently.
 - Each stats file ingest is still internally streamed and must not load the
   entire file into memory.
-
-`updated_at` (normative):
-
-- Use `updated_at` from each stats file mtime.
 
 Reports (normative):
 
@@ -1368,13 +1451,71 @@ Reporting (normative):
 After the interfaces in `interface_spec.md` are in place, update only
 constructors/wiring in:
 
-- `cmd/server`: call `clickhouse.OpenProvider(cfg)` and pass the returned
-  `server.Provider` into the server.
-- `cmd/summarise`: replace Bolt writer/store constructors with the ClickHouse
-  ones, ensure the close order matches the rule in the DGUTAWriter section, and
-  add `NewFileIngestOperation` as a global summariser operation.
-- `cmd/clean`: use `clickhouse.NewHistoryMaintainer(cfg)`.
-- Tests: use `clickhouse` constructors; no other production package imports it.
+### `cmd/server`
 
-When finished, there must be no remaining `go.etcd.io/bbolt` imports anywhere
-in the repository.
+Call `clickhouse.OpenProvider(cfg)` and pass the returned `server.Provider`
+into the server via `server.SetProvider()`.
+
+### `cmd/summarise`
+
+Keep the existing mount path derivation mechanism. The output directory path
+follows the naming convention `<version>_<mountKey>`, where `<mountKey>` is
+the mount path with `/` replaced by `／` (U+FF0F FULLWIDTH SOLIDUS).
+
+Add a shared helper function (e.g. in `internal/mountpath/mountpath.go`):
+
+```go
+package mountpath
+
+// FromOutputDir derives the mount path from an output directory path.
+// The directory basename must be `<version>_<mountKey>` where mountKey
+// uses ／ (U+FF0F) instead of /.
+// Returns the mount path ending with /.
+func FromOutputDir(outputDir string) (string, error)
+```
+
+Replace Bolt writer/store constructors:
+
+```go
+// Derive mount path from output directory
+mountPath, err := mountpath.FromOutputDir(dirgutaDB)
+
+// Create writers
+dw, err := clickhouse.NewDGUTAWriter(cfg)
+dw.SetMountPath(mountPath)
+dw.SetUpdatedAt(modtime)
+dw.SetBatchSize(dbBatchSize)
+
+bs, err := clickhouse.NewBaseDirsStore(cfg)
+bs.SetMountPath(mountPath)
+bs.SetUpdatedAt(modtime)
+
+fi, closer, err := clickhouse.NewFileIngestOperation(cfg, mountPath, modtime)
+
+// Register summarisers
+s.AddDirectoryOperation(dirguta.NewDirGroupUserTypeAge(dw))
+s.AddDirectoryOperation(sbasedirs.NewBaseDirs(config.PathShouldOutput, bd))
+s.AddGlobalOperation(fi)
+
+// After Summarise() returns, close in order:
+closer.Close()
+bs.Close()
+dw.Close()
+```
+
+### `cmd/dbinfo`
+
+Call `clickhouse.OpenProvider(cfg)` and use `provider.Tree().Info()` and
+`provider.BaseDirs().Info()` to print stats.
+
+### `cmd/clean`
+
+Use `clickhouse.NewHistoryMaintainer(cfg)`.
+
+### Tests
+
+Use `clickhouse` constructors; no other production package imports it.
+
+Note: The `bolt` package may remain in the repository as unused code. The
+requirement is that no production code *uses* bolt, not that bolt must be
+deleted.
