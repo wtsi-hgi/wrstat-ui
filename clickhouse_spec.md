@@ -387,25 +387,25 @@ ORDER BY (mount_path, gid, date);
 
 -- schema/011_files.sql
 CREATE TABLE IF NOT EXISTS wrstat_files (
-  mount_path LowCardinality(String) CODEC(ZSTD(1)),
+  mount_path LowCardinality(String) CODEC(LZ4),
   snapshot_id UUID,
-  parent_dir String CODEC(ZSTD(1)),
-  name String CODEC(ZSTD(1)),
+  parent_dir String CODEC(LZ4),
+  name String CODEC(LZ4),
   -- path is derived from (parent_dir, name) so we don't store it twice.
   -- This keeps directory lookups fast (via ORDER BY) while avoiding
   -- redundant storage at ~1.3B rows.
   path String ALIAS concat(parent_dir, name),
-  ext LowCardinality(String) CODEC(ZSTD(1)),
+  ext LowCardinality(String) CODEC(LZ4),
   entry_type UInt8,
-  size UInt64 CODEC(Delta, ZSTD(1)),
-  apparent_size UInt64 CODEC(Delta, ZSTD(1)),
+  size UInt64 CODEC(Delta, LZ4),
+  apparent_size UInt64 CODEC(Delta, LZ4),
   uid UInt32,
   gid UInt32,
-  atime DateTime CODEC(Delta, ZSTD(1)),
-  mtime DateTime CODEC(Delta, ZSTD(1)),
-  ctime DateTime CODEC(Delta, ZSTD(1)),
-  inode UInt64 CODEC(Delta, ZSTD(1)),
-  nlink UInt64 CODEC(Delta, ZSTD(1)),
+  atime DateTime CODEC(Delta, LZ4),
+  mtime DateTime CODEC(Delta, LZ4),
+  ctime DateTime CODEC(Delta, LZ4),
+  inode UInt64 CODEC(Delta, LZ4),
+  nlink UInt64 CODEC(Delta, LZ4),
   INDEX ext_idx ext TYPE set(256) GRANULARITY 4
 ) ENGINE = MergeTree
 PARTITION BY (mount_path, snapshot_id)
@@ -425,7 +425,7 @@ Conventions:
 - User usage does not have `date_no_space` or `date_no_files` columns because
   quota projections are only computed for groups.
 - `pos` in subdir tables preserves the slice ordering passed to `PutSubDirs()`.
-- `path` in `wrstat_files` is stored exactly as seen in stats.gz (directories
+- `pos` in subdir tables preserves the slice ordering passed to `PutSubDirs()`.
 - `path` in `wrstat_files` is derived as `parent_dir + name` and must match the
   exact stats.gz representation (directories end with `/`). `parent_dir` ends
   with `/`. `name` for directories includes trailing `/`. `ext` is derived from
