@@ -185,8 +185,9 @@ Performance note:
   - Larger batches reduce per-batch overhead and part creation frequency.
 - All read queries must `ANY INNER JOIN` to `wrstat_mounts_active` and filter
   by directory/path in `PREWHERE` when possible.
-- For wrstat_files (the largest table), consider columnar inserts if feasible
-  since data may already be column-oriented from stats.gz parsing.
+- For `wrstat_files` (the largest table), the implementation MUST use columnar
+  inserts (`batch.Column(i).Append(slice)`) to avoid the reflection overhead of
+  row-based inserts. This is critical to meeting the 1-hour ingest requirement.
 
 Ingest throughput target (normative):
 
@@ -201,9 +202,9 @@ Ingest throughput target (normative):
 Driver guidance (normative):
 
 - Use clickhouse-go v2's native API (not `database/sql`) for performance.
-- Enable native protocol compression via DSN (`compress=lz4` or `compress=zstd`).
-  - Prefer LZ4 for maximum ingest throughput.
-  - Prefer ZSTD when network bandwidth is the limiting factor.
+- Enable native protocol compression via DSN (`compress=lz4`).
+  - LZ4 is required for the main tables (`wrstat_files`, `wrstat_dguta`,
+    `wrstat_children`) to maximize ingest throughput.
 - Do not share a prepared batch between goroutines; always `Close()` batches
   to avoid leaking connections.
 - Connection pool settings for high-throughput ingest:
@@ -274,17 +275,17 @@ GROUP BY mount_path;
 
 -- schema/004_dguta.sql
 CREATE TABLE IF NOT EXISTS wrstat_dguta (
-  mount_path LowCardinality(String) CODEC(ZSTD(3)),
+  mount_path LowCardinality(String) CODEC(LZ4),
   snapshot_id UUID,
-  dir String CODEC(ZSTD(3)),
+  dir String CODEC(LZ4),
   gid UInt32,
   uid UInt32,
   ft UInt16,
   age UInt8,
-  count UInt64 CODEC(Delta, ZSTD(3)),
-  size UInt64 CODEC(Delta, ZSTD(3)),
-  atime_min Int64 CODEC(Delta, ZSTD(3)),
-  mtime_max Int64 CODEC(Delta, ZSTD(3))
+  count UInt64 CODEC(Delta, LZ4),
+  size UInt64 CODEC(Delta, LZ4),
+  atime_min Int64 CODEC(Delta, LZ4),
+  mtime_max Int64 CODEC(Delta, LZ4)
 ) ENGINE = MergeTree
 PARTITION BY (mount_path, snapshot_id)
 ORDER BY (mount_path, snapshot_id, dir, age, gid, uid, ft)
@@ -292,10 +293,10 @@ SETTINGS index_granularity = 8192;
 
 -- schema/005_children.sql
 CREATE TABLE IF NOT EXISTS wrstat_children (
-  mount_path LowCardinality(String) CODEC(ZSTD(3)),
+  mount_path LowCardinality(String) CODEC(LZ4),
   snapshot_id UUID,
-  parent_dir String CODEC(ZSTD(3)),
-  child String CODEC(ZSTD(3))
+  parent_dir String CODEC(LZ4),
+  child String CODEC(LZ4)
 ) ENGINE = MergeTree
 PARTITION BY (mount_path, snapshot_id)
 ORDER BY (mount_path, snapshot_id, parent_dir, child)
@@ -386,24 +387,23 @@ ORDER BY (mount_path, gid, date);
 
 -- schema/011_files.sql
 CREATE TABLE IF NOT EXISTS wrstat_files (
-  mount_path LowCardinality(String) CODEC(ZSTD(3)),
+  mount_path LowCardinality(String) CODEC(LZ4),
   snapshot_id UUID,
-  path String CODEC(ZSTD(3)),
-  parent_dir String CODEC(ZSTD(3)),
-  name String CODEC(ZSTD(3)),
-  ext LowCardinality(String) CODEC(ZSTD(3)),
+  path String CODEC(LZ4),
+  parent_dir String CODEC(LZ4),
+  name String CODEC(LZ4),
+  ext LowCardinality(String) CODEC(LZ4),
   entry_type UInt8,
-  size UInt64 CODEC(Delta, ZSTD(3)),
-  apparent_size UInt64 CODEC(Delta, ZSTD(3)),
+  size UInt64 CODEC(Delta, LZ4),
+  apparent_size UInt64 CODEC(Delta, LZ4),
   uid UInt32,
   gid UInt32,
-  atime Int64 CODEC(Delta, ZSTD(3)),
-  mtime Int64 CODEC(Delta, ZSTD(3)),
-  ctime Int64 CODEC(Delta, ZSTD(3)),
+  atime Int64 CODEC(Delta, LZ4),
+  mtime Int64 CODEC(Delta, LZ4),
+  ctime Int64 CODEC(Delta, LZ4),
   inode Int64,
   nlink Int64,
-  INDEX ext_idx ext TYPE set(256) GRANULARITY 4,
-  PROJECTION by_path (SELECT * ORDER BY (mount_path, snapshot_id, path))
+  INDEX ext_idx ext TYPE set(256) GRANULARITY 4
 ) ENGINE = MergeTree
 PARTITION BY (mount_path, snapshot_id)
 ORDER BY (mount_path, snapshot_id, parent_dir, name)
@@ -467,11 +467,16 @@ ClickHouse to seek directly to the relevant rows without scanning.
 
 ### Projection usage
 
-The `wrstat_files` table has a `by_path` projection ordered by `path`. Queries
-that filter by exact `path = ?` should use this projection for O(log n) lookup.
+The `wrstat_files` table is ordered by `(parent_dir, name)`. Queries that
+filter by exact `path = ?` (like `StatPath`) must split the path into
+`parent_dir` and `name` in the client to use the primary key index.
 
-ClickHouse automatically selects projections when beneficial. The perf CLI
-must verify that `StatPath` queries use the `by_path` projection via EXPLAIN.
+- `parent_dir` is the path up to and including the last `/`.
+- `name` is the remainder.
+- Example: `/a/b/` -> parent=`/a/`, name=`b/`.
+- Example: `/a/b` -> parent=`/a/`, name=`b`.
+
+This avoids the need for a secondary projection, saving write overhead.
 
 ## Interface implementation mapping
 
@@ -1336,8 +1341,8 @@ Implementation guidance:
 
 ### SQL statements (normative)
 
-The following statements must be used. Projections and secondary indexes are
-permitted, but the SQL text and semantics in this section must not change.
+The following statements must be used. The SQL text and semantics in this
+section must not change.
 
 `ListDir(ctx, dir, opts)`
 
@@ -1781,7 +1786,6 @@ Plan + IO verification (normative):
   `pickedPath` and fail the command if:
   - `ExplainListDir` output does not mention both `mount_path` and
     `parent_dir`.
-  - `ExplainStatPath` output does not mention projection `by_path`.
 - For every timed operation (each repeat), the perf CLI must also print the
   `QueryMetrics` returned by `Inspector.Measure` (duration/read/result rows
   and bytes).
