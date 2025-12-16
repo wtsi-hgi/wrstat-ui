@@ -1406,14 +1406,16 @@ FROM wrstat_files f
 ANY INNER JOIN wrstat_mounts_active a
   ON f.mount_path = a.mount_path AND f.snapshot_id = a.snapshot_id
 WHERE f.mount_path = ?
-  AND f.path = ?
+  AND f.parent_dir = ?
+  AND f.name = ?
 LIMIT 1
 ```
 
 Parameter order:
 
 1. mount_path
-2. path
+2. parent_dir (derived from path)
+3. name (derived from path)
 
 `IsDir(ctx, path)`
 
@@ -1506,12 +1508,13 @@ Required SQL:
 
 ```sql
 SELECT 1
-FROM wrstat_files f
+FROM wrstat_dguta d
 ANY INNER JOIN wrstat_mounts_active a
-  ON f.mount_path = a.mount_path AND f.snapshot_id = a.snapshot_id
-WHERE f.mount_path = ?
-  AND (f.path = ? OR startsWith(f.path, ?))
-  AND (f.uid = ? OR has(?, f.gid))
+  ON d.mount_path = a.mount_path AND d.snapshot_id = a.snapshot_id
+WHERE d.mount_path = ?
+  AND d.dir = ?
+  AND d.age = ?
+  AND (d.uid = ? OR has(?, d.gid))
 LIMIT 1
 ```
 
@@ -1519,7 +1522,7 @@ Parameter order:
 
 1. mount_path
 2. dir
-3. dir
+3. age_all (numeric value of db.DGUTAgeAll)
 4. uid
 5. gids
 
