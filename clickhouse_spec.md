@@ -431,7 +431,6 @@ Conventions:
 - User usage does not have `date_no_space` or `date_no_files` columns because
   quota projections are only computed for groups.
 - `pos` in subdir tables preserves the slice ordering passed to `PutSubDirs()`.
-- `pos` in subdir tables preserves the slice ordering passed to `PutSubDirs()`.
 - `path` in `wrstat_files` is derived as `parent_dir + name` and must match the
   exact stats.gz representation (directories end with `/`). `parent_dir` ends
   with `/`. `name` for directories includes trailing `/`. `ext` is derived from
@@ -484,9 +483,9 @@ ClickHouse to seek directly to the relevant rows without scanning.
 
 ### Projection usage
 
-The `wrstat_files` table is ordered by `(parent_dir, name)`. Queries that
-filter by exact `path = ?` (like `StatPath`) must split the path into
-`parent_dir` and `name` in the client to use the primary key index.
+The `wrstat_files` table is ordered by `(mount_path, snapshot_id, parent_dir, name)`.
+Queries that filter by exact `path = ?` (like `StatPath`) must split the path
+into `parent_dir` and `name` in the client to use the primary key index.
 
 - `parent_dir` is the path up to and including the last `/`.
 - `name` is the remainder.
@@ -608,8 +607,10 @@ Existence check (unfiltered):
   - Apply filters only if they are non-empty / non-zero, matching current Go
     semantics:
 
-    - GIDs: `d.gid IN (...)` when `filter.GIDs != nil`
-    - UIDs: `d.uid IN (...)` when `filter.UIDs != nil`
+    - GIDs: apply only when `filter.GIDs != nil` (membership check against an
+      Array parameter; see the `has(?, d.gid)` pattern in the SQL below)
+    - UIDs: apply only when `filter.UIDs != nil` (membership check against an
+      Array parameter; see the `has(?, d.uid)` pattern in the SQL below)
     - Age:  always apply `d.age = {filter.Age}` (callers set this)
     - FT:   apply only when `filter.FT != 0`:
       `bitAnd(d.ft, {filter.FT}) != 0`
@@ -754,6 +755,11 @@ Query:
     WHERE c.parent_dir = ?
     ORDER BY c.child ASC
     ```
+
+  Parameter order:
+
+  1. dir (as ancestor prefix)
+  2. parent_dir
 
 ### `db.Database.Info()`
 
@@ -1047,9 +1053,14 @@ snapshots only.
 Required methods from `basedirs.Reader` (normative):
 
 - `SetMountPoints(mountpoints []string)` must override mount auto-discovery and
-  must affect mount resolution for:
-  - `History(gid, path)` in the reader
-  - all `Client` methods that resolve a mount from a path
+  must affect mount resolution for `History(gid, path)` in the reader.
+
+Mount resolution for the extra-goal `Client` APIs is configured independently:
+
+- `Client` mount resolution must use `cfg.MountPoints` when non-empty;
+  otherwise it uses the same mount auto-discovery logic as the reader.
+- There is no requirement that calling `basedirs.Reader.SetMountPoints()`
+  mutates already-constructed `Client` instances.
 - `SetCachedGroup(gid, name)` and `SetCachedUser(uid, name)` must populate the
   same caches used for filling `Usage.Name` so tests that pre-seed names remain
   stable. These must not be no-ops.
@@ -1562,7 +1573,7 @@ Mount grouping rule (clarification):
 
 Required SQL (normative):
 
--- The `match(f.path, ?)` OR-list must contain exactly one placeholder per
+- Note: The `match(f.path, ?)` OR-list must contain exactly one placeholder per
   compiled regex.
 - If `patterns` is empty, return an empty result without querying.
 - If `patterns` is longer than 32, split into multiple queries (per mount
@@ -1796,18 +1807,13 @@ Server time SQL (normative):
 SELECT now()
 ```
 
-Query-log SQL (normative):
-
-EXPLAIN requirements (normative):
-
-- `ExplainListDir` and `ExplainStatPath` must execute the underlying query
-  prefixed by `EXPLAIN indexes = 1`.
-- The SQL body must be identical to the corresponding Client query (same
-  WHERE/JOIN shape and parameters).
+Flush logs SQL (normative):
 
 ```sql
 SYSTEM FLUSH LOGS
 ```
+
+Query-log SQL (normative):
 
 ```sql
 SELECT
@@ -1823,6 +1829,13 @@ WHERE type = 'QueryFinish'
 ORDER BY event_time DESC
 LIMIT 1
 ```
+
+EXPLAIN requirements (normative):
+
+- `ExplainListDir` and `ExplainStatPath` must execute the underlying query
+  prefixed by `EXPLAIN indexes = 1`.
+- The SQL body must be identical to the corresponding Client query (same
+  WHERE/JOIN shape and parameters).
 
 ### Configuration
 
