@@ -387,22 +387,25 @@ ORDER BY (mount_path, gid, date);
 
 -- schema/011_files.sql
 CREATE TABLE IF NOT EXISTS wrstat_files (
-  mount_path LowCardinality(String) CODEC(LZ4),
+  mount_path LowCardinality(String) CODEC(ZSTD(1)),
   snapshot_id UUID,
-  path String CODEC(LZ4),
-  parent_dir String CODEC(LZ4),
-  name String CODEC(LZ4),
-  ext LowCardinality(String) CODEC(LZ4),
+  parent_dir String CODEC(ZSTD(1)),
+  name String CODEC(ZSTD(1)),
+  -- path is derived from (parent_dir, name) so we don't store it twice.
+  -- This keeps directory lookups fast (via ORDER BY) while avoiding
+  -- redundant storage at ~1.3B rows.
+  path String ALIAS concat(parent_dir, name),
+  ext LowCardinality(String) CODEC(ZSTD(1)),
   entry_type UInt8,
-  size UInt64 CODEC(Delta, LZ4),
-  apparent_size UInt64 CODEC(Delta, LZ4),
+  size UInt64 CODEC(Delta, ZSTD(1)),
+  apparent_size UInt64 CODEC(Delta, ZSTD(1)),
   uid UInt32,
   gid UInt32,
-  atime Int64 CODEC(Delta, LZ4),
-  mtime Int64 CODEC(Delta, LZ4),
-  ctime Int64 CODEC(Delta, LZ4),
-  inode Int64,
-  nlink Int64,
+  atime DateTime CODEC(Delta, ZSTD(1)),
+  mtime DateTime CODEC(Delta, ZSTD(1)),
+  ctime DateTime CODEC(Delta, ZSTD(1)),
+  inode UInt64 CODEC(Delta, ZSTD(1)),
+  nlink UInt64 CODEC(Delta, ZSTD(1)),
   INDEX ext_idx ext TYPE set(256) GRANULARITY 4
 ) ENGINE = MergeTree
 PARTITION BY (mount_path, snapshot_id)
@@ -423,11 +426,12 @@ Conventions:
   quota projections are only computed for groups.
 - `pos` in subdir tables preserves the slice ordering passed to `PutSubDirs()`.
 - `path` in `wrstat_files` is stored exactly as seen in stats.gz (directories
-  end with `/`). `parent_dir` ends with `/`. `name` for directories includes
-  trailing `/`. `ext` is derived from the filename: for files, it is the part
-  after the last `.` in the name (lowercased), or empty if there is no `.` or
-  the name starts with `.` and has no other `.`. For directories, `ext` is
-  always empty.
+- `path` in `wrstat_files` is derived as `parent_dir + name` and must match the
+  exact stats.gz representation (directories end with `/`). `parent_dir` ends
+  with `/`. `name` for directories includes trailing `/`. `ext` is derived from
+  the filename: for files, it is the part after the last `.` in the name
+  (lowercased), or empty if there is no `.` or the name starts with `.` and has
+  no other `.`. For directories, `ext` is always empty.
 
 History notes:
 
@@ -443,12 +447,19 @@ All read queries must follow these patterns for millisecond performance:
 
 Every query must ensure ClickHouse can prune to the active snapshot partition:
 
-1. **Join to `wrstat_mounts_active`** - All queries join to this view to get
-   the active `snapshot_id` per mount.
+1. **Resolve the active snapshot first** - For single-mount queries, resolve
+  the active `snapshot_id` into a constant using a scalar subquery:
 
-2. **Include partition keys in PREWHERE** - When querying within a single
-   mount, include both `mount_path` and (implicitly via join) `snapshot_id`
-   in PREWHERE to enable partition pruning before data is read.
+  `WITH (SELECT snapshot_id FROM wrstat_mounts_active WHERE mount_path = ?) AS sid`
+
+  This avoids relying on join-dependent predicate pushdown.
+
+2. **Use partition keys in PREWHERE** - When querying within a single mount,
+  include both `mount_path` and `snapshot_id = sid` in PREWHERE.
+
+  This is important during the brief window after a snapshot switch and before
+  old partitions are dropped: without `snapshot_id` in PREWHERE, ClickHouse can
+  scan both the new and old partitions for that mount.
 
 3. **Subquery pattern for ancestor queries** - When querying across mounts
    (e.g., browsing `/`), use a subquery on `wrstat_mounts_active` with
@@ -1250,12 +1261,17 @@ Mount resolution (normative):
 - The resolved mount path is the `mount_path` used in SQL. If no mount matches,
   return the existing domain error `basedirs.ErrInvalidBasePath`.
 
-Active snapshot join pattern (required):
+Active snapshot resolution (required):
 
-All file queries must join to the active snapshot pointer:
+All file queries must restrict results to the active snapshot for the resolved
+mount.
 
-  `ANY INNER JOIN wrstat_mounts_active a
-    ON f.mount_path = a.mount_path AND f.snapshot_id = a.snapshot_id`
+For single-mount queries, implementations MUST resolve the active snapshot id
+into a constant using a scalar subquery and then filter by it:
+
+  `WITH (SELECT snapshot_id FROM wrstat_mounts_active WHERE mount_path = ?) AS sid`
+
+This avoids accidental scans of multiple snapshot partitions.
 
 SQL parameter style (required):
 
@@ -1351,6 +1367,7 @@ Normalize `dir` to end with `/`.
 Required SQL (columns list depends on opts, but WHERE/ORDER/LIMIT must match):
 
 ```sql
+WITH (SELECT snapshot_id FROM wrstat_mounts_active WHERE mount_path = ?) AS sid
 SELECT
   f.path,
   f.parent_dir,
@@ -1367,9 +1384,8 @@ SELECT
   f.inode,
   f.nlink
 FROM wrstat_files f
-ANY INNER JOIN wrstat_mounts_active a
-  ON f.mount_path = a.mount_path AND f.snapshot_id = a.snapshot_id
-WHERE f.mount_path = ?
+PREWHERE f.mount_path = ?
+  AND f.snapshot_id = sid
   AND f.parent_dir = ?
 ORDER BY f.name ASC
 LIMIT ? OFFSET ?
@@ -1377,16 +1393,18 @@ LIMIT ? OFFSET ?
 
 Parameter order:
 
-1. mount_path
-2. dir (as parent_dir)
-3. limit
-4. offset
+1. mount_path (for snapshot lookup)
+2. mount_path
+3. dir (as parent_dir)
+4. limit
+5. offset
 
 `StatPath(ctx, path, opts)`
 
 Required SQL:
 
 ```sql
+WITH (SELECT snapshot_id FROM wrstat_mounts_active WHERE mount_path = ?) AS sid
 SELECT
   f.path,
   f.parent_dir,
@@ -1403,9 +1421,8 @@ SELECT
   f.inode,
   f.nlink
 FROM wrstat_files f
-ANY INNER JOIN wrstat_mounts_active a
-  ON f.mount_path = a.mount_path AND f.snapshot_id = a.snapshot_id
-WHERE f.mount_path = ?
+PREWHERE f.mount_path = ?
+  AND f.snapshot_id = sid
   AND f.parent_dir = ?
   AND f.name = ?
 LIMIT 1
@@ -1413,9 +1430,10 @@ LIMIT 1
 
 Parameter order:
 
-1. mount_path
-2. parent_dir (derived from path)
-3. name (derived from path)
+1. mount_path (for snapshot lookup)
+2. mount_path
+3. parent_dir (derived from path)
+4. name (derived from path)
 
 `IsDir(ctx, path)`
 
@@ -1426,11 +1444,11 @@ full mount partition.
 Required SQL:
 
 ```sql
+WITH (SELECT snapshot_id FROM wrstat_mounts_active WHERE mount_path = ?) AS sid
 SELECT f.entry_type
 FROM wrstat_files f
-ANY INNER JOIN wrstat_mounts_active a
-  ON f.mount_path = a.mount_path AND f.snapshot_id = a.snapshot_id
-WHERE f.mount_path = ?
+PREWHERE f.mount_path = ?
+  AND f.snapshot_id = sid
   AND f.parent_dir = ?
   AND f.name = ?
 LIMIT 1
@@ -1461,13 +1479,14 @@ Mount grouping rule (clarification):
 
 Required SQL (normative):
 
-- The `match(f.path, ?)` OR-list must contain exactly one placeholder per
+-- The `match(f.path, ?)` OR-list must contain exactly one placeholder per
   compiled regex.
 - If `patterns` is empty, return an empty result without querying.
 - If `patterns` is longer than 32, split into multiple queries (per mount
   group) and concatenate results, preserving overall `ORDER BY f.path ASC`.
 
 ```sql
+WITH (SELECT snapshot_id FROM wrstat_mounts_active WHERE mount_path = ?) AS sid
 SELECT
   f.path,
   f.parent_dir,
@@ -1484,21 +1503,24 @@ SELECT
   f.inode,
   f.nlink
 FROM wrstat_files f
-ANY INNER JOIN wrstat_mounts_active a
-  ON f.mount_path = a.mount_path AND f.snapshot_id = a.snapshot_id
-WHERE f.mount_path = ?
-  AND startsWith(f.path, ?)
+PREWHERE f.mount_path = ?
+  AND f.snapshot_id = sid
+WHERE f.parent_dir >= ?
+  AND f.parent_dir < ?
   AND (
     match(f.path, ?) OR match(f.path, ?)
   )
   AND (? = 0 OR f.uid = ? OR has(?, f.gid))
-ORDER BY f.path ASC
+ORDER BY f.parent_dir ASC, f.name ASC
 LIMIT ? OFFSET ?
 ```
 
 Parameter notes:
 
-- The `startsWith` parameter is the base directory path (normalized).
+- The parent_dir range parameters are:
+  - lower bound: base directory path (normalized, ends with `/`)
+  - upper bound: the smallest string strictly greater than all strings with that
+    prefix (compute in Go; sometimes called `prefixNext(baseDir)`).
 - The `match` parameters are the precomputed regex strings.
 - The permission clause is required:
   - if `opts.RequireOwner` is false, pass `0` for the first `?` and still pass
@@ -1512,11 +1534,11 @@ Normalize `dir` to end with `/`.
 Required SQL:
 
 ```sql
+WITH (SELECT snapshot_id FROM wrstat_mounts_active WHERE mount_path = ?) AS sid
 SELECT 1
 FROM wrstat_dguta d
-ANY INNER JOIN wrstat_mounts_active a
-  ON d.mount_path = a.mount_path AND d.snapshot_id = a.snapshot_id
-WHERE d.mount_path = ?
+PREWHERE d.mount_path = ?
+  AND d.snapshot_id = sid
   AND d.dir = ?
   AND d.age = ?
   AND (d.uid = ? OR has(?, d.gid))
@@ -1525,11 +1547,12 @@ LIMIT 1
 
 Parameter order:
 
-1. mount_path
-2. dir
-3. age_all (numeric value of db.DGUTAgeAll)
-4. uid
-5. gids
+1. mount_path (for snapshot lookup)
+2. mount_path
+3. dir
+4. age_all (numeric value of db.DGUTAgeAll)
+5. uid
+6. gids
 
 ----------------------------------------------------------------------
 
