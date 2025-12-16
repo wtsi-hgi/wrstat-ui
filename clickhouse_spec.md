@@ -177,6 +177,15 @@ Performance note:
 - All read queries must `ANY INNER JOIN` to `wrstat_mounts_active` and filter
   by directory/path in `PREWHERE` when possible.
 
+Driver guidance (normative):
+
+- Use clickhouse-go v2's native API (not `database/sql`) for performance.
+- Enable native protocol compression via DSN (`compress=lz4` or `compress=zstd`).
+  - Prefer LZ4 for maximum ingest throughput.
+  - Prefer ZSTD when network bandwidth is the limiting factor.
+- Do not share a prepared batch between goroutines; always `Close()` batches
+  to avoid leaking connections.
+
 A mountpoint may be missing for some days. The system must always return the
 latest available snapshot per mount, which may mean different `updated_at`
 values across mounts.
@@ -478,7 +487,7 @@ Existence check (unfiltered):
     ANY INNER JOIN wrstat_mounts_active a
       ON d.mount_path = a.mount_path AND d.snapshot_id = a.snapshot_id
     PREWHERE d.mount_path = ?
-    WHERE d.dir = ?
+      AND d.dir = ?
     LIMIT 1
     ```
 
@@ -533,7 +542,9 @@ Summary query SQL (normative):
 
 - If `dir` is within a mountpoint (single-mount scope), the query is the same
   as the ancestor-scope query below but with `wrstat_mounts_active` filtered by
-  `mount_path = ?` and with `PREWHERE d.mount_path = ?`.
+  `mount_path = ?` and with:
+  - `PREWHERE d.mount_path = ? AND d.dir = ?`
+  - `WHERE d.age = ? ...` (the remaining filter clauses are unchanged)
 
 - Otherwise (ancestor scope):
 
@@ -599,7 +610,7 @@ Query:
     ANY INNER JOIN wrstat_mounts_active a
       ON c.mount_path = a.mount_path AND c.snapshot_id = a.snapshot_id
     PREWHERE c.mount_path = ?
-    WHERE c.parent_dir = ?
+      AND c.parent_dir = ?
     ORDER BY c.child ASC
     ```
 
@@ -671,11 +682,14 @@ Required behaviour:
   - A `SetBatchSize` value of `10_000` must work without OOM.
 - Close:
   - Flush all batches.
+  - Read the *previous* active snapshot id for this mount (if any) from
+    `wrstat_mounts_active`.
   - Switch the active snapshot by inserting into `wrstat_mounts`.
-  - Drop old snapshot partitions for this mount in `wrstat_dguta`,
+  - Drop the *previous* snapshot partitions for this mount in `wrstat_dguta`,
     `wrstat_children`, and all other snapshot tables (basedirs usage/subdirs
     and files).
-    The old snapshot id is read from `wrstat_mounts_active`.
+    - This drop must use the snapshot id read *before* the switch.
+    - If there was no previous snapshot, skip the old-partition drop.
   - If Close fails before switching the snapshot, the new snapshot must be
     dropped (cleanup) so it is not leaked.
 
@@ -706,6 +720,9 @@ Partition drop syntax:
   2. snapshot_id (UUID string)
 
 Active snapshot read:
+
+This query is used to find the previous snapshot id and updated_at for a mount.
+It MUST be executed before inserting the new `wrstat_mounts` row.
 
 ```sql
 SELECT a.snapshot_id, a.updated_at
@@ -1202,7 +1219,10 @@ type FileRow struct {
 type ListOptions struct {
   // Fields to retrieve; empty means all fields.
   Fields []string
-  Limit  int64  // 0 means no limit (use with caution)
+  // Limit must be > 0.
+  // If 0, implementations MUST substitute a large internal cap (e.g. 1_000_000)
+  // to avoid accidental unbounded reads.
+  Limit  int64
   Offset int64
 }
 
@@ -1216,6 +1236,9 @@ type StatOptions struct {
 type FindOptions struct {
   // Fields to retrieve; empty means all fields.
   Fields       []string
+  // Limit must be > 0.
+  // If 0, implementations MUST substitute a large internal cap (e.g. 1_000_000)
+  // to avoid accidental unbounded reads.
   Limit        int64
   Offset       int64
   // RequireOwner filters results to files where uid matches UID or gid matches
@@ -1354,7 +1377,13 @@ Mount grouping rule (clarification):
 - In the common case where all baseDirs are on one mount (eg you pass a single
   directory), this means exactly one query.
 
-Required SQL skeleton:
+Required SQL (normative):
+
+- The `match(f.path, ?)` OR-list must contain exactly one placeholder per
+  compiled regex.
+- If `patterns` is empty, return an empty result without querying.
+- If `patterns` is longer than 32, split into multiple queries (per mount
+  group) and concatenate results, preserving overall `ORDER BY f.path ASC`.
 
 ```sql
 SELECT
@@ -1378,7 +1407,7 @@ ANY INNER JOIN wrstat_mounts_active a
 WHERE f.mount_path = ?
   AND startsWith(f.path, ?)
   AND (
-    match(f.path, ?) OR match(f.path, ?) OR match(f.path, ?)
+    match(f.path, ?) OR match(f.path, ?)
   )
   AND (? = 0 OR f.uid = ? OR has(?, f.gid))
 ORDER BY f.path ASC
