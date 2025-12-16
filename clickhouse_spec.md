@@ -94,6 +94,13 @@ constructors. It must contain exactly the following fields:
   - Zero or negative disables polling and therefore disables `OnUpdate`.
 - `QueryTimeout time.Duration`
   - Per-query timeout applied inside the clickhouse package.
+- `MaxOpenConns int`
+  - Optional. Maximum open connections in the pool.
+  - Default: 10. For high-throughput ingest, set to the number of concurrent
+    batch writers.
+- `MaxIdleConns int`
+  - Optional. Maximum idle connections to keep in the pool.
+  - Default: same as MaxOpenConns. Should match MaxOpenConns to avoid churn.
 
 No other knobs are exported.
 
@@ -173,9 +180,23 @@ through the active snapshot pointer.
 Performance note:
 
 - Use the native protocol with LZ4 compression (via DSN) and `PrepareBatch`.
-- Prefer fewer, larger batches (eg 50k-200k rows) over many small inserts.
+- Target batch sizes of 100,000–500,000 rows for optimal ingest throughput.
+  - With 1.3 billion rows and a 1-hour target, we need ~360,000 rows/second.
+  - Larger batches reduce per-batch overhead and part creation frequency.
 - All read queries must `ANY INNER JOIN` to `wrstat_mounts_active` and filter
   by directory/path in `PREWHERE` when possible.
+- For wrstat_files (the largest table), consider columnar inserts if feasible
+  since data may already be column-oriented from stats.gz parsing.
+
+Ingest throughput target (normative):
+
+- Given ~1.3 billion file/dir entries across ~7 main mountpoints, the pipeline
+  must sustain at least 400,000 rows/second aggregate write throughput.
+- The bottleneck tables are `wrstat_dguta`, `wrstat_children`, and
+  `wrstat_files`.
+- Recommended batch size for all tables: 100,000 rows minimum.
+- If using parallel ingest per mount, limit concurrent batch flushes to avoid
+  "too many parts" errors; use at most 3–4 concurrent writers per table.
 
 Driver guidance (normative):
 
@@ -185,6 +206,12 @@ Driver guidance (normative):
   - Prefer ZSTD when network bandwidth is the limiting factor.
 - Do not share a prepared batch between goroutines; always `Close()` batches
   to avoid leaking connections.
+- Connection pool settings for high-throughput ingest:
+  - `MaxOpenConns`: at least equal to the number of concurrent batch writers.
+  - `MaxIdleConns`: same as MaxOpenConns to avoid connection churn.
+  - `ConnMaxLifetime`: 30 minutes minimum to avoid reconnection during ingest.
+- For batch inserts, call `batch.Send()` rather than relying on auto-flush;
+  this ensures deterministic part creation timing.
 
 A mountpoint may be missing for some days. The system must always return the
 latest available snapshot per mount, which may mean different `updated_at`
@@ -260,7 +287,8 @@ CREATE TABLE IF NOT EXISTS wrstat_dguta (
   mtime_max Int64 CODEC(Delta, ZSTD(3))
 ) ENGINE = MergeTree
 PARTITION BY (mount_path, snapshot_id)
-ORDER BY (mount_path, snapshot_id, dir, age, gid, uid, ft);
+ORDER BY (mount_path, snapshot_id, dir, age, gid, uid, ft)
+SETTINGS index_granularity = 8192;
 
 -- schema/005_children.sql
 CREATE TABLE IF NOT EXISTS wrstat_children (
@@ -270,7 +298,8 @@ CREATE TABLE IF NOT EXISTS wrstat_children (
   child String CODEC(ZSTD(3))
 ) ENGINE = MergeTree
 PARTITION BY (mount_path, snapshot_id)
-ORDER BY (mount_path, snapshot_id, parent_dir, child);
+ORDER BY (mount_path, snapshot_id, parent_dir, child)
+SETTINGS index_granularity = 8192;
 
 -- schema/006_basedirs_group_usage.sql
 CREATE TABLE IF NOT EXISTS wrstat_basedirs_group_usage (
@@ -373,13 +402,12 @@ CREATE TABLE IF NOT EXISTS wrstat_files (
   ctime Int64 CODEC(Delta, ZSTD(3)),
   inode Int64,
   nlink Int64,
-  INDEX path_bf path TYPE bloom_filter(0.01) GRANULARITY 8,
-  INDEX name_bf name TYPE bloom_filter(0.01) GRANULARITY 8,
-  INDEX ext_bf ext TYPE bloom_filter(0.01) GRANULARITY 8,
+  INDEX ext_idx ext TYPE set(256) GRANULARITY 4,
   PROJECTION by_path (SELECT * ORDER BY (mount_path, snapshot_id, path))
 ) ENGINE = MergeTree
 PARTITION BY (mount_path, snapshot_id)
-ORDER BY (mount_path, snapshot_id, parent_dir, name, path);
+ORDER BY (mount_path, snapshot_id, parent_dir, name)
+SETTINGS index_granularity = 8192, min_bytes_for_wide_part = 0;
 ```
 
 ### Schema field reference (for prose)
@@ -407,7 +435,43 @@ History notes:
 - History is partitioned by `mount_path` only (not snapshot_id) because it
   persists across snapshots.
 
-----------------------------------------------------------------------
+## Query optimization requirements (normative)
+
+All read queries must follow these patterns for millisecond performance:
+
+### Partition pruning
+
+Every query must ensure ClickHouse can prune to the active snapshot partition:
+
+1. **Join to `wrstat_mounts_active`** - All queries join to this view to get
+   the active `snapshot_id` per mount.
+
+2. **Include partition keys in PREWHERE** - When querying within a single
+   mount, include both `mount_path` and (implicitly via join) `snapshot_id`
+   in PREWHERE to enable partition pruning before data is read.
+
+3. **Subquery pattern for ancestor queries** - When querying across mounts
+   (e.g., browsing `/`), use a subquery on `wrstat_mounts_active` with
+   `startsWith(mount_path, ?)` to limit the join to relevant mounts.
+
+### ORDER BY prefix matching
+
+Queries that filter on directory paths benefit from ORDER BY prefix matching:
+
+- `wrstat_dguta` is ordered by `(mount_path, snapshot_id, dir, ...)`.
+- `wrstat_children` is ordered by `(mount_path, snapshot_id, parent_dir, ...)`.
+- `wrstat_files` is ordered by `(mount_path, snapshot_id, parent_dir, name)`.
+
+Filtering on the leading columns (e.g., `dir = ?` or `parent_dir = ?`) enables
+ClickHouse to seek directly to the relevant rows without scanning.
+
+### Projection usage
+
+The `wrstat_files` table has a `by_path` projection ordered by `path`. Queries
+that filter by exact `path = ?` should use this projection for O(log n) lookup.
+
+ClickHouse automatically selects projections when beneficial. The perf CLI
+must verify that `StatPath` queries use the `by_path` projection via EXPLAIN.
 
 ## Interface implementation mapping
 
@@ -487,6 +551,7 @@ Existence check (unfiltered):
     ANY INNER JOIN wrstat_mounts_active a
       ON d.mount_path = a.mount_path AND d.snapshot_id = a.snapshot_id
     PREWHERE d.mount_path = ?
+      AND d.snapshot_id = a.snapshot_id
       AND d.dir = ?
     LIMIT 1
     ```
@@ -495,6 +560,9 @@ Existence check (unfiltered):
 
   1. mount_path
   2. dir
+
+  Note: Including `snapshot_id` in PREWHERE enables partition pruning before
+  the join is fully evaluated, which is critical for performance.
 
 - Otherwise (ancestor scope):
 
@@ -679,7 +747,9 @@ Required behaviour:
   - one row per child in `RecordDGUTA.Children` into `wrstat_children`
 - Batching:
   - Implement batching using clickhouse-go v2 `PrepareBatch`.
-  - A `SetBatchSize` value of `10_000` must work without OOM.
+  - Default batch size should be 100,000 rows for optimal throughput.
+  - A `SetBatchSize` value of `10_000` must work without OOM (for testing).
+  - For production ingest, batch sizes of 100,000–500,000 are recommended.
 - Close:
   - Flush all batches.
   - Read the *previous* active snapshot id for this mount (if any) from
