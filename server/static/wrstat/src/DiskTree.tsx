@@ -226,10 +226,10 @@ const colours = [
 				colourKeyLabel = "Least time since a file nested within the directory was modifed:";
 				break;
 			case COMMON_ACCESS_TIME:
-				colourKeyLabel = "Most common access time among all files within this directory:";
+				colourKeyLabel = "Most common access time among all files nested within this directory:";
 				break;
 			case COMMON_MODIFIED_TIME:
-				colourKeyLabel = "Most common modified time among all files within this directory:";
+				colourKeyLabel = "Most common modified time among all files nested within this directory:";
 				break;
 		}
 
