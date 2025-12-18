@@ -88,9 +88,7 @@ const colours = [
 		}
 		return colours[8];
 	},
-	colourFromBucket = (bucket: number) => {
-    if (bucket < 0 || bucket >= colours.length) return colours[colours.length - 1];
-    return colours[bucket];},
+	colourFromBucket = (bucket: number) => (bucket < 0 || bucket >= colours.length) ? colours[colours.length - 1] : colours[bucket],
 	base64Encode = (path: string) => btoa(Array.from(new TextEncoder().encode(path), b => String.fromCodePoint(b)).join("")),
 	Breadcrumb = ({ path, part, setPath }: { path: string; part: string; setPath: (path: string) => void }) => <li>
 		<button title={`Jump To: ${part}`} onClick={e => {
