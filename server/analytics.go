@@ -192,13 +192,14 @@ func createStateData(state url.Values) string {
 
 func getPoolFromKey(key string) *sync.Pool {
 	switch key {
-	case "filterMinSize", "filterMaxSize", "filterMinDaysAgo", "filterMaxDaysAgo", "sinceLastAccess", "selectedID":
+	case "filterMinSize", "filterMaxSize", "filterMinDaysAgo", "filterMaxDaysAgo", "sinceLastAccess", "selectedID",
+		"colourBy":
 		return &intPool
 	case "owners", "treeTypes":
 		return &stringSlicePool
 	case "groups", "users":
 		return &intSlicePool
-	case "useCount", "useMTime", "byUser", "viewDiskList":
+	case "useCount", "byUser", "viewDiskList":
 		return &boolPool
 	}
 

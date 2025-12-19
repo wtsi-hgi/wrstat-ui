@@ -156,7 +156,7 @@ func TestDGUTA(t *testing.T) {
 
 			dirb, b := r.EncodeToBytes()
 			So(len(dirb), ShouldEqual, 2) // 98, 255
-			So(len(b), ShouldEqual, 1755)
+			So(len(b), ShouldEqual, 4275)
 
 			dd := db.DecodeDGUTAbytes(dirb, b)
 			So(dd, ShouldResemble, expected[0])

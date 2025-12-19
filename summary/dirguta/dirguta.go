@@ -76,7 +76,7 @@ func (store gutaStore) add(gkey gutaKey, size int64, atime int64, mtime int64) {
 		store.sumMap[gkey] = s
 	}
 
-	s.Add(size, atime, mtime)
+	s.Add(size, atime, mtime, store.refTime)
 }
 
 // sort returns a slice of our summaryWithAtime values, sorted by our dguta keys
@@ -463,14 +463,16 @@ func (d *DirGroupUserTypeAge) getGUTA(guta gutaKey) *db.GUTA {
 	s := d.store.sumMap[guta]
 
 	return &db.GUTA{
-		GID:   guta.GID,
-		UID:   guta.UID,
-		FT:    guta.FileType,
-		Age:   guta.Age,
-		Count: uint64(s.Count), //nolint:gosec
-		Size:  uint64(s.Size),  //nolint:gosec
-		Atime: s.Atime,
-		Mtime: s.Mtime,
+		GID:         guta.GID,
+		UID:         guta.UID,
+		FT:          guta.FileType,
+		Age:         guta.Age,
+		Count:       uint64(s.Count), //nolint:gosec
+		Size:        uint64(s.Size),  //nolint:gosec
+		Atime:       s.Atime,
+		ATimeRanges: s.AtimeBuckets,
+		Mtime:       s.Mtime,
+		MTimeRanges: s.MtimeBuckets,
 	}
 }
 

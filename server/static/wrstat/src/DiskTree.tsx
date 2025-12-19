@@ -47,6 +47,11 @@ type DiskTreeParams = {
 	guf: GroupUserFilterParams;
 }
 
+const ACCESS_TIME = 0;
+const MODIFIED_TIME = 1;
+const COMMON_ACCESS_TIME = 2;
+const COMMON_MODIFIED_TIME = 3;
+
 const colours = [
 	"#d73027",
 	"#f46c43",
@@ -83,6 +88,7 @@ const colours = [
 		}
 		return colours[8];
 	},
+	colourFromBucket = (bucket: number) => (bucket < 0 || bucket >= colours.length) ? colours[colours.length - 1] : colours[bucket],
 	base64Encode = (path: string) => btoa(Array.from(new TextEncoder().encode(path), b => String.fromCodePoint(b)).join("")),
 	Breadcrumb = ({ path, part, setPath }: { path: string; part: string; setPath: (path: string) => void }) => <li>
 		<button title={`Jump To: ${part}`} onClick={e => {
@@ -145,7 +151,7 @@ const colours = [
 			[childDetails, setChildDetails] = useState<Child | null>(null),
 			[tableDetails, setTableDetails] = useState<Child | null>(null),
 			[dirDetails, setDirDetails] = useState<Child | null>(childDetails),
-			[useMTime, setUseMTime] = useSavedState("useMTime", false),
+			[colourBy, setColourBy] = useSavedState("colourBy", ACCESS_TIME),
 			[useCount, setUseCount] = useSavedState("useCount", false),
 			[treeWidth, setTreeWidth] = useState(determineTreeWidth()),
 			[filterFileTypes, setFilterFileTypes] = useSavedState<string[]>("treeTypes", []),
@@ -166,12 +172,30 @@ const colours = [
 						if (new Date(child.atime).valueOf() > since) {
 							continue;
 						}
+						let bg: string;
+						switch (colourBy) {
+							case ACCESS_TIME:
+								bg = colourFromAge(+new Date(child.atime));
+								break;
+							case MODIFIED_TIME:
+								bg = colourFromAge(+new Date(child.mtime));
+								break;
+							case COMMON_ACCESS_TIME:
+								bg = colourFromBucket(child.common_atime);
+								break;
+							case COMMON_MODIFIED_TIME:
+								bg = colourFromBucket(child.common_mtime);
+								break;
 
+							default:
+								bg = colours[colours.length-1];	
+						}
+						
 						entries.push({
 							key: base64Encode(child.path),
 							name: child.name,
 							value: useCount ? child.count : child.size,
-							backgroundColour: colourFromAge(+(new Date(useMTime ? child.mtime : child.atime))),
+							backgroundColour: bg,
 							onclick: child.has_children && !child.noauth ? () => setTreePath(child.path) : undefined,
 							onmouseover: () => setChildDetails(child),
 							noauth: child.noauth
@@ -188,7 +212,24 @@ const colours = [
 				});
 
 			setBreadcrumbs(makeBreadcrumbs(treePath, setTreePath));
-		}, [treePath, useMTime, useCount, filterFileTypes, age, sinceLastAccess, guf.groups, guf.users]);
+		}, [treePath, colourBy, useCount, filterFileTypes, age, sinceLastAccess, guf.groups, guf.users]);
+
+		let colourKeyLabel = "";
+
+		switch (colourBy) {
+			case ACCESS_TIME:
+				colourKeyLabel = "Greatest time since a file nested within the directory was accessed:";
+				break;
+			case MODIFIED_TIME:
+				colourKeyLabel = "Least time since a file nested within the directory was modifed:";
+				break;
+			case COMMON_ACCESS_TIME:
+				colourKeyLabel = "Most common access time among all files nested within this directory:";
+				break;
+			case COMMON_MODIFIED_TIME:
+				colourKeyLabel = "Most common modified time among all files nested within this directory:";
+				break;
+		}
 
 		return <>
 			<div>
@@ -210,8 +251,10 @@ const colours = [
 							{!viewList &&
 								<>
 									<div className="title">Colour By</div>
-									<label aria-label="Colour by Oldest Access Time" title="Oldest Access Time" htmlFor="aTime">Access Time</label><input type="radio" id="aTime" checked={!useMTime} onChange={() => setUseMTime(false)} />
-									<label aria-label="Colour by Latest Modified Time" title="Latest Modified Time" htmlFor="mTime">Modified Time</label><input type="radio" id="mTime" checked={useMTime} onChange={() => setUseMTime(true)} />
+									<label aria-label="Colour by Oldest Access Time" title="Oldest Access Time" htmlFor="aTime">Access Time</label><input type="radio" id="aTime" checked={colourBy === ACCESS_TIME} onChange={() => setColourBy(ACCESS_TIME)} />
+									<label aria-label="Colour by Latest Modified Time" title="Latest Modified Time" htmlFor="mTime">Modified Time</label><input type="radio" id="mTime" checked={colourBy === MODIFIED_TIME} onChange={() => setColourBy(MODIFIED_TIME)} />
+									<label aria-label="Colour by Most Common Access Time" title="Most Common Access Time" htmlFor="commonATime">Common Access Time</label><input type="radio" id="commonATime" checked={colourBy === COMMON_ACCESS_TIME} onChange={() => setColourBy(COMMON_ACCESS_TIME)} />
+									<label aria-label="Colour by Most Common Modified Time" title="Most Common Modified Time" htmlFor="commonMTime">Common Modified Time</label><input type="radio" id="commonMTime" checked={colourBy === COMMON_MODIFIED_TIME} onChange={() => setColourBy(COMMON_MODIFIED_TIME)} />
 									<div className="title">Area Represents</div>
 									<label aria-label="Area represents File Size" htmlFor="useSize">File Size</label><input type="radio" id="useSize" checked={!useCount} onChange={() => setUseCount(false)} />
 									<label aria-label="Area represents File Count" htmlFor="useCount">File Count</label><input type="radio" id="useCount" checked={useCount} onChange={() => setUseCount(true)} />
@@ -240,7 +283,7 @@ const colours = [
 							<div id="treeKey">
 								<div>
 									<span>Colour Key</span>
-									{useMTime ? "Least" : "Greatest"} time since a file nested within the directory was {useMTime ? "modified" : "accessed"}:
+									{colourKeyLabel}
 								</div>
 								<ol>
 									<li className="age_2years">&gt; 7 years</li>

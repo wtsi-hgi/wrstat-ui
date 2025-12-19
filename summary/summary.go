@@ -33,6 +33,23 @@ import (
 	"strconv"
 )
 
+const (
+	Range7Years AgeRange = iota
+	Range5Years
+	Range3Years
+	Range2Years
+	Range1Year
+	Range6Months
+	Range2Months
+	Range1Month
+	RangeLess1Month
+)
+
+const (
+	month = int64(30 * 24 * 3600)
+	year  = int64(365 * 24 * 3600)
+)
+
 // Summary holds count and size and lets you accumulate count and size as you
 // add more things with a size.
 type Summary struct {
@@ -46,31 +63,92 @@ func (s *Summary) Add(size int64) {
 	s.Size += size
 }
 
+// AgeRange represents a time-based bucket index for file ages.
+// It is used to index into age bucket arrays.
+type AgeRange uint8
+
+// AgeBuckets stores counts per AgeRange.
+// The index corresponds directly to the AgeRange constants.
+type AgeBuckets [9]uint64
+
 // SummaryWithTimes is like summary, but also holds the reference time, oldest
 // atime, newest mtime add()ed.
 type SummaryWithTimes struct { //nolint:revive
 	Summary
-	Atime int64 // seconds since Unix epoch
-	Mtime int64 // seconds since Unix epoch
+	Atime        int64 // seconds since Unix epoch
+	Mtime        int64 // seconds since Unix epoch
+	AtimeBuckets AgeBuckets
+	MtimeBuckets AgeBuckets
+}
+
+// bucketForAge returns the correct age bucket for a given file age in seconds.
+// The checks go from oldest to newest. The first matching range is returned.
+// Ages under one month always fall into the "less than 1 month" bucket.
+func bucketForAge(ageSeconds int64) AgeRange { //nolint:gocyclo
+	switch {
+	case ageSeconds >= 7*year:
+		return Range7Years
+	case ageSeconds >= 5*year:
+		return Range5Years
+	case ageSeconds >= 3*year:
+		return Range3Years
+	case ageSeconds >= 2*year:
+		return Range2Years
+	case ageSeconds >= year:
+		return Range1Year
+	case ageSeconds >= 6*month:
+		return Range6Months
+	case ageSeconds >= 2*month:
+		return Range2Months
+	case ageSeconds >= month:
+		return Range1Month
+	default:
+		return RangeLess1Month
+	}
 }
 
 // Add will increment our count and add the given size to our size. It also
 // stores the given atime if it is older than our current one, and the given
-// mtime if it is newer than our current one.
-func (s *SummaryWithTimes) Add(size int64, atime int64, mtime int64) {
+// mtime if it is newer than our current one. It also updates corresponding
+// access-time and modified-time buckets based on the file's age.
+func (s *SummaryWithTimes) Add(size int64, atime int64, mtime int64, now int64) {
 	s.Summary.Add(size)
 
+	s.updateAtime(atime)
+	s.updateMtime(mtime)
+	s.addAtimeBucket(atime, now)
+	s.addMtimeBucket(mtime, now)
+}
+
+func (s *SummaryWithTimes) updateAtime(atime int64) {
 	if atime > 0 && (s.Atime == 0 || atime < s.Atime) {
 		s.Atime = atime
 	}
+}
 
+func (s *SummaryWithTimes) updateMtime(mtime int64) {
 	if mtime > 0 && (s.Mtime == 0 || mtime > s.Mtime) {
 		s.Mtime = mtime
 	}
 }
 
+func (s *SummaryWithTimes) addAtimeBucket(atime int64, now int64) {
+	if atime > 0 {
+		age := now - atime
+		s.AtimeBuckets[bucketForAge(age)]++
+	}
+}
+
+func (s *SummaryWithTimes) addMtimeBucket(mtime int64, now int64) {
+	if mtime > 0 {
+		age := now - mtime
+		s.MtimeBuckets[bucketForAge(age)]++
+	}
+}
+
 // AddSummary add the data in the passed SummaryWithTimes to the existing
-// SummaryWithTimes.
+// SummaryWithTimes. It also merges the access-time and modified-time
+// bucket counts from the provided summary.
 func (s *SummaryWithTimes) AddSummary(t *SummaryWithTimes) {
 	s.Count += t.Count
 	s.Size += t.Size
@@ -82,6 +160,29 @@ func (s *SummaryWithTimes) AddSummary(t *SummaryWithTimes) {
 	if t.Mtime > 0 && (s.Mtime == 0 || t.Mtime > s.Mtime) {
 		s.Mtime = t.Mtime
 	}
+
+	for i := range t.AtimeBuckets {
+		s.AtimeBuckets[i] += t.AtimeBuckets[i]
+		s.MtimeBuckets[i] += t.MtimeBuckets[i]
+	}
+}
+
+// MostCommonBucket returns the index of the bucket with the highest count.
+// If multiple buckets have the same count, the later (higher-index) bucket
+// is chosen. This matches the expected tie-breaking behaviour.
+func MostCommonBucket(ranges AgeBuckets) AgeRange {
+	var bestIdx AgeRange
+
+	bestCount := ranges[0]
+
+	for i := 1; i < len(ranges); i++ {
+		if ranges[i] >= bestCount {
+			bestIdx = AgeRange(i) //nolint:gosec
+			bestCount = ranges[i]
+		}
+	}
+
+	return bestIdx
 }
 
 // GroupUserID is a combined GID and UID.

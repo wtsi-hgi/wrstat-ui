@@ -36,6 +36,7 @@ import (
 	"github.com/gin-gonic/gin"
 	gas "github.com/wtsi-hgi/go-authserver"
 	"github.com/wtsi-hgi/wrstat-ui/db"
+	"github.com/wtsi-hgi/wrstat-ui/summary"
 )
 
 // javascriptToJSONFormat is the date format emitted by javascript's Date's
@@ -126,7 +127,9 @@ type TreeElement struct {
 	Count       uint64              `json:"count"`
 	Size        uint64              `json:"size"`
 	Atime       string              `json:"atime"`
+	CommonATime summary.AgeRange    `json:"common_atime"`
 	Mtime       string              `json:"mtime"`
+	CommonMTime summary.AgeRange    `json:"common_mtime"`
 	Age         db.DirGUTAge        `json:"age"`
 	Users       []string            `json:"users"`
 	Groups      []string            `json:"groups"`
@@ -206,17 +209,19 @@ func (s *Server) diToTreeElement(di *db.DirInfo, filter *db.Filter,
 // NoAuth will always be false.
 func (s *Server) ddsToTreeElement(dds *db.DirSummary, allowedGIDs map[uint32]bool) *TreeElement {
 	return &TreeElement{
-		Name:      filepath.Base(dds.Dir),
-		Path:      dds.Dir,
-		Count:     dds.Count,
-		Size:      dds.Size,
-		Atime:     timeToJavascriptDate(dds.Atime),
-		Mtime:     timeToJavascriptDate(dds.Mtime),
-		Age:       dds.Age,
-		Users:     s.uidsToUsernames(dds.UIDs),
-		Groups:    s.gidsToNames(dds.GIDs),
-		FileTypes: s.ftsToNames(dds.FT),
-		NoAuth:    areDisjoint(allowedGIDs, dds.GIDs),
+		Name:        filepath.Base(dds.Dir),
+		Path:        dds.Dir,
+		Count:       dds.Count,
+		Size:        dds.Size,
+		Atime:       timeToJavascriptDate(dds.Atime),
+		CommonATime: dds.CommonATime,
+		Mtime:       timeToJavascriptDate(dds.Mtime),
+		CommonMTime: dds.CommonMTime,
+		Age:         dds.Age,
+		Users:       s.uidsToUsernames(dds.UIDs),
+		Groups:      s.gidsToNames(dds.GIDs),
+		FileTypes:   s.ftsToNames(dds.FT),
+		NoAuth:      areDisjoint(allowedGIDs, dds.GIDs),
 	}
 }
 

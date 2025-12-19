@@ -29,20 +29,24 @@ import (
 	"sort"
 	"time"
 
+	"github.com/wtsi-hgi/wrstat-ui/summary"
 	"golang.org/x/exp/constraints"
 	"vimagination.zapto.org/byteio"
 )
 
 // GUTA handles group,user,type,age,count,size information.
 type GUTA struct {
-	GID        uint32
-	UID        uint32
-	FT         DirGUTAFileType
-	Age        DirGUTAge
-	Count      uint64
-	Size       uint64
-	Atime      int64 // seconds since Unix epoch
-	Mtime      int64 // seconds since Unix epoch
+	GID         uint32
+	UID         uint32
+	FT          DirGUTAFileType
+	Age         DirGUTAge
+	Count       uint64
+	Size        uint64
+	Atime       int64              // seconds since Unix epoch
+	ATimeRanges summary.AgeBuckets // Counts of files by access-time age bucket
+	Mtime       int64              // seconds since Unix epoch
+	MTimeRanges summary.AgeBuckets // Counts of files by modification-time age bucket
+
 	updateTime time.Time
 }
 
@@ -55,6 +59,14 @@ func (g GUTA) writeTo(w byteio.StickyEndianWriter) {
 	w.WriteUintX(g.Size)
 	w.WriteIntX(g.Atime)
 	w.WriteIntX(g.Mtime)
+
+	for _, c := range g.ATimeRanges {
+		w.WriteUintX(c)
+	}
+
+	for _, c := range g.MTimeRanges {
+		w.WriteUintX(c)
+	}
 }
 
 func (g *GUTA) readFrom(r byteio.StickyEndianReader) {
@@ -66,6 +78,14 @@ func (g *GUTA) readFrom(r byteio.StickyEndianReader) {
 	g.Size = r.ReadUintX()
 	g.Atime = r.ReadIntX()
 	g.Mtime = r.ReadIntX()
+
+	for n := range g.ATimeRanges {
+		g.ATimeRanges[n] = r.ReadUintX()
+	}
+
+	for n := range g.MTimeRanges {
+		g.MTimeRanges[n] = r.ReadUintX()
+	}
 }
 
 // Filter can be applied to a GUTA to see if it has one of the specified GIDs,
@@ -193,6 +213,8 @@ func (g GUTAs) Summary(filter *Filter) *DirSummary { //nolint:funlen
 		atime, mtime int64
 		updateTime   time.Time
 		age          DirGUTAge
+		aTimeRanges  summary.AgeBuckets
+		mTimeRanges  summary.AgeBuckets
 	)
 
 	if filter != nil {
@@ -212,7 +234,7 @@ func (g GUTAs) Summary(filter *Filter) *DirSummary { //nolint:funlen
 
 		fileType |= guta.FT
 
-		addGUTAToSummary(guta, &count, &size, &atime, &mtime, &updateTime, uniqueUIDs, uniqueGIDs)
+		addGUTAToSummary(guta, &count, &size, &atime, &mtime, &updateTime, &aTimeRanges, &mTimeRanges, uniqueUIDs, uniqueGIDs)
 	}
 
 	if count == 0 {
@@ -220,20 +242,22 @@ func (g GUTAs) Summary(filter *Filter) *DirSummary { //nolint:funlen
 	}
 
 	return &DirSummary{
-		Count: count,
-		Size:  size,
-		Atime: time.Unix(atime, 0),
-		Mtime: time.Unix(mtime, 0),
-		UIDs:  boolMapToSortedKeys(uniqueUIDs),
-		GIDs:  boolMapToSortedKeys(uniqueGIDs),
-		FT:    fileType,
-		Age:   age,
+		Count:       count,
+		Size:        size,
+		Atime:       time.Unix(atime, 0),
+		CommonATime: summary.MostCommonBucket(aTimeRanges),
+		Mtime:       time.Unix(mtime, 0),
+		CommonMTime: summary.MostCommonBucket(mTimeRanges),
+		UIDs:        boolMapToSortedKeys(uniqueUIDs),
+		GIDs:        boolMapToSortedKeys(uniqueGIDs),
+		FT:          fileType,
+		Age:         age,
 	}
 }
 
 // addGUTAToSummary alters the incoming arg summary values based on the gut.
 func addGUTAToSummary(guta *GUTA, count, size *uint64, atime, mtime *int64,
-	updateTime *time.Time, uniqueUIDs, uniqueGIDs map[uint32]bool) {
+	updateTime *time.Time, aTimeRanges, mTimeRanges *summary.AgeBuckets, uniqueUIDs, uniqueGIDs map[uint32]bool) {
 	*count += guta.Count
 	*size += guta.Size
 
@@ -251,6 +275,14 @@ func addGUTAToSummary(guta *GUTA, count, size *uint64, atime, mtime *int64,
 
 	uniqueUIDs[guta.UID] = true
 	uniqueGIDs[guta.GID] = true
+
+	for n, c := range guta.ATimeRanges {
+		aTimeRanges[n] += c
+	}
+
+	for n, c := range guta.MTimeRanges {
+		mTimeRanges[n] += c
+	}
 }
 
 // boolMapToSortedKeys returns a sorted slice of the given keys.
