@@ -45,6 +45,12 @@
     - `users` (comma-separated usernames)
     - `types` (comma-separated file type strings; parsed via
       `db.FileTypeStringToDirGUTAFileType`)
+      - Semantics: each string maps to a single filetype bit.
+      - The backend ORs all requested bits into a single mask; a record passes
+        if `(recordFT & requestedMask) != 0`.
+      - `temp` is a bit-flag that may be present *in addition to* another type
+        (e.g. a temporary BAM may be both `temp` and `bam`). Filtering by
+        `bam` therefore includes both non-temp BAM and temp BAM.
     - `age` (string; parsed via `db.AgeStringToDirGUTAge`, `0` means all)
 
 - Endpoint: `GET /rest/v1/auth/where`
@@ -53,6 +59,27 @@
     - `splits` (default `2`)
     - plus the same filter params as above (`groups`, `users`, `types`, `age`)
   - Behaviour: returns directory summaries sorted by size.
+
+Tree JSON additions (must remain):
+
+- The tree endpoint response objects (both the root object and child entries)
+  include two additional fields:
+  - `common_atime`: numeric age-bucket index representing the most common
+    access-time age among files nested under the directory.
+  - `common_mtime`: numeric age-bucket index representing the most common
+    modification-time age among files nested under the directory.
+- These are `summary.AgeRange` values with this mapping (index → bucket):
+  - `0`: >= 7 years
+  - `1`: 5–7 years
+  - `2`: 3–5 years
+  - `3`: 2–3 years
+  - `4`: 1–2 years
+  - `5`: 6–12 months
+  - `6`: 2–6 months
+  - `7`: 1–2 months
+  - `8`: < 1 month
+- Tie-breaking rule (normative): if multiple buckets share the maximum count,
+  the *newest* bucket (highest index) is chosen.
 
 ### Basedirs
 
@@ -130,6 +157,25 @@ Bolt mount-path derivation (for multi-directory Bolt layouts):
   - `DirHasChildren(dir, filter)`.
   - `Where(dir, filter, splits)`.
 - Filter semantics are defined in `db.Filter` / `db.GUTAs.Summary()`.
+
+Hardlink and filetype semantics (current behaviour, must be preserved):
+
+- The summarise pipeline is hardlink-aware.
+  - Each stats entry includes `inode` and `nlink` (link count).
+  - Hardlinked files (same inode, with `nlink > 1`) must be collapsed so they
+    do not double-count `Count` and `Size` within a directory subtree.
+- When collapsing hardlinks, the logical “file” contributes:
+  - `Count`: incremented once per inode (not per path).
+  - `Size`: counted once per inode, using the maximum observed size for that
+    inode within the collapsed set.
+  - `Atime`: the minimum observed atime for that inode.
+  - `Mtime`: the maximum observed mtime for that inode.
+  - `FT`: a bitmask union of all observed filetype bits for that inode (so a
+    hardlink that appears under different names/suffixes can contribute
+    multiple type bits).
+- Temporary classification is a bit flag:
+  - the `temp` bit may be OR’d with any other type bit, and callers may filter
+    by `temp` alone or alongside other types.
 
 ### Basedirs
 

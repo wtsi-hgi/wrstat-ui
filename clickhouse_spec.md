@@ -286,12 +286,19 @@ CREATE TABLE IF NOT EXISTS wrstat_dguta (
   dir String CODEC(LZ4),
   gid UInt32,
   uid UInt32,
+  -- ft is a bitmask (db.DirGUTAFileType). Multiple bits may be set (e.g.
+  -- temp|bam). Readers must treat it as a set of flags.
   ft UInt16,
   age UInt8,
   count UInt64 CODEC(Delta, LZ4),
   size UInt64 CODEC(Delta, LZ4),
   atime_min Int64 CODEC(Delta, LZ4),
-  mtime_max Int64 CODEC(Delta, LZ4)
+  mtime_max Int64 CODEC(Delta, LZ4),
+  -- Per-age-bucket counts used to compute DirSummary.CommonATime/CommonMTime.
+  -- Each array MUST have length 9 and the bucket index mapping MUST match
+  -- summary.AgeRange (0..8).
+  atime_buckets Array(UInt64) CODEC(LZ4),
+  mtime_buckets Array(UInt64) CODEC(LZ4)
 ) ENGINE = MergeTree
 PARTITION BY (mount_path, snapshot_id)
 ORDER BY (mount_path, snapshot_id, dir, age, gid, uid, ft)
@@ -621,6 +628,16 @@ Existence check (unfiltered):
     - `Size`  = `sum(d.size)`
     - `Atime` = `toDateTime(min(d.atime_min))`
     - `Mtime` = `toDateTime(max(d.mtime_max))`
+    - `CommonATime` and `CommonMTime` must match the Go behaviour of
+      `summary.MostCommonBucket` on the *summed* bucket arrays across all rows
+      included by the query.
+      - Tie-breaking is required: if multiple buckets share the maximum count,
+        choose the highest index (newest bucket).
+      - Suggested SQL pattern (normative output semantics; implementation may
+        compute in Go instead of SQL if it yields the same result):
+        - `atime_ranges := sumForEach(d.atime_buckets)`
+        - `common_atime := 8 - (arrayMaxIndex(arrayReverse(atime_ranges)) - 1)`
+        - same for mtime.
     - `UIDs`  = `arraySort(groupUniqArray(d.uid))`
     - `GIDs`  = `arraySort(groupUniqArray(d.gid))`
     - `FT`    = `bitOr(d.ft)`
@@ -637,7 +654,9 @@ Summary query SQL (normative):
       sum(d.count) AS count,
       sum(d.size) AS size,
       toDateTime(min(d.atime_min)) AS atime,
+      toUInt8(8 - (arrayMaxIndex(arrayReverse(sumForEach(d.atime_buckets))) - 1)) AS common_atime,
       toDateTime(max(d.mtime_max)) AS mtime,
+      toUInt8(8 - (arrayMaxIndex(arrayReverse(sumForEach(d.mtime_buckets))) - 1)) AS common_mtime,
       arraySort(groupUniqArray(d.uid)) AS uids,
       arraySort(groupUniqArray(d.gid)) AS gids,
       bitOr(d.ft) AS ft,
@@ -678,7 +697,9 @@ Summary query SQL (normative):
       sum(d.count) AS count,
       sum(d.size) AS size,
       toDateTime(min(d.atime_min)) AS atime,
+      toUInt8(8 - (arrayMaxIndex(arrayReverse(sumForEach(d.atime_buckets))) - 1)) AS common_atime,
       toDateTime(max(d.mtime_max)) AS mtime,
+      toUInt8(8 - (arrayMaxIndex(arrayReverse(sumForEach(d.mtime_buckets))) - 1)) AS common_mtime,
       arraySort(groupUniqArray(d.uid)) AS uids,
       arraySort(groupUniqArray(d.gid)) AS gids,
       bitOr(d.ft) AS ft,
@@ -886,8 +907,8 @@ Insert DGUTA rows (batch):
 ```sql
 INSERT INTO wrstat_dguta
   (mount_path, snapshot_id, dir, gid, uid, ft, age, count, size,
-   atime_min, mtime_max)
-VALUES (?, toUUID(?), ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  atime_min, mtime_max, atime_buckets, mtime_buckets)
+VALUES (?, toUUID(?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ```
 
 Insert children rows (batch):
