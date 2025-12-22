@@ -532,17 +532,44 @@ func TestPerfImport(t *testing.T) {
 		// expect output dataset dir exists with db files
 		dsOut := filepath.Join(out, "1_／mountA")
 
+		dgutaPath := filepath.Join(dsOut, "dguta.dbs")
+
 		So(func() error {
-			_, err2 := os.Stat(filepath.Join(dsOut, "dguta.dbs"))
+			_, err2 := os.Stat(dgutaPath)
 
 			return err2
 		}(), ShouldBeNil)
 
+		basedirsPath := filepath.Join(dsOut, "basedirs.db")
+
 		So(func() error {
-			_, err2 := os.Stat(filepath.Join(dsOut, "basedirs.db"))
+			_, err2 := os.Stat(basedirsPath)
 
 			return err2
 		}(), ShouldBeNil)
+
+		// basedirs DB mtime should match stats.gz mtime used as input
+		si, err := os.Stat(statsPath)
+		So(err, ShouldBeNil)
+
+		bi, err := os.Stat(basedirsPath)
+		So(err, ShouldBeNil)
+
+		So(bi.ModTime().Unix(), ShouldEqual, si.ModTime().Unix())
+
+		// try opening dbs to ensure they are valid
+		tree, err := db.NewTree(dgutaPath)
+		So(err, ShouldBeNil)
+		So(tree, ShouldNotBeNil)
+		tree.Close()
+
+		ownersPath2, err := internaldata.CreateOwnersCSV(t, internaldata.ExampleOwnersCSV)
+		So(err, ShouldBeNil)
+
+		bdr, err := basedirs.NewReader(basedirsPath, ownersPath2)
+		So(err, ShouldBeNil)
+		So(bdr, ShouldNotBeNil)
+		bdr.Close()
 
 		// ensure JSON report exists and contains import_total
 		b, err := os.ReadFile(jsonPath)

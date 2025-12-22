@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -9,8 +10,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/klauspost/pgzip"
 	"github.com/spf13/cobra"
 	"github.com/wtsi-hgi/wrstat-ui/server"
+	"github.com/wtsi-hgi/wrstat-ui/stats"
+	"github.com/wtsi-hgi/wrstat-ui/summary"
 )
 
 var (
@@ -114,18 +118,84 @@ var perfImportCmd = &cobra.Command{
 			if errMk := os.MkdirAll(outDir, dirPerm); errMk != nil {
 				die("%s", errMk)
 			}
+			// use real summariser to build DBs
+			statsPath := filepath.Join(d, "stats.gz")
 
-			// create placeholder DB files
-			var errF error
-			if _, errF = os.Create(filepath.Join(outDir, "dguta.dbs")); errF != nil {
-				die("%s", errF)
+			// count records by scanning the (possibly gzipped) file
+			rf, errOpen := os.Open(statsPath)
+			if errOpen != nil {
+				die("%s", errOpen)
 			}
 
-			if _, errF = os.Create(filepath.Join(outDir, "basedirs.db")); errF != nil {
-				die("%s", errF)
+			var rcount int
+			var scanner *bufio.Scanner
+			if strings.HasSuffix(statsPath, ".gz") {
+				gr, errr := pgzip.NewReader(rf)
+				if errr != nil {
+					rf.Close()
+					die("%s", errr)
+				}
+
+				scanner = bufio.NewScanner(gr)
+				for scanner.Scan() {
+					rcount++
+				}
+				gr.Close()
+			} else {
+				scanner = bufio.NewScanner(rf)
+				for scanner.Scan() {
+					rcount++
+				}
 			}
 
-			// derive mount path from basename per spec
+			rf.Close()
+
+			// open stats file for summariser and get modtime
+			r, modtime, errOpen2 := openStatsFile(statsPath)
+			if errOpen2 != nil {
+				die("%s", errOpen2)
+			}
+
+			s := summary.NewSummariser(stats.NewStatsParser(r))
+
+			// prepare output paths
+			dirgutaPath := filepath.Join(outDir, "dguta.dbs")
+			basedirsPath := filepath.Join(outDir, "basedirs.db")
+
+			if errRem := os.Remove(basedirsPath); errRem != nil && !os.IsNotExist(errRem) {
+				die("%s", errRem)
+			}
+
+			// add basedirs summariser
+			if errAdd := addBasedirsSummariser(s, basedirsPath, "", perfQuota, perfConfig, "", modtime); errAdd != nil {
+				die("%s", errAdd)
+			}
+
+			// add dirguta summariser and get closer
+			closeFn, errAdd2 := addDirgutaSummariser(s, dirgutaPath)
+			if errAdd2 != nil {
+				die("%s", errAdd2)
+			}
+
+			start := time.Now()
+			if errSumm := s.Summarise(); errSumm != nil {
+				if errc := closeFn(); errc != nil {
+					die("%s", errc)
+				}
+
+				die("%s", errSumm)
+			}
+			if errc := closeFn(); errc != nil {
+				die("%s", errc)
+			}
+
+			// set basedirs file mtime to stats file mtime
+			if errCht := os.Chtimes(basedirsPath, modtime, modtime); errCht != nil {
+				die("%s", errCht)
+			}
+
+			dur := time.Since(start)
+
 			mount := deriveMountPath(base)
 
 			op := map[string]any{
@@ -134,12 +204,12 @@ var perfImportCmd = &cobra.Command{
 					"dataset_dir": base,
 					"mount_path":  mount,
 					"max_lines":   perfMax,
-					"records":     0,
+					"records":     rcount,
 				},
-				"durations_ms": []int{0},
-				"p50_ms":       0,
-				"p95_ms":       0,
-				"p99_ms":       0,
+				"durations_ms": []float64{float64(dur.Milliseconds())},
+				"p50_ms":       float64(dur.Milliseconds()),
+				"p95_ms":       float64(dur.Milliseconds()),
+				"p99_ms":       float64(dur.Milliseconds()),
 			}
 
 			ops = append(ops, op)
