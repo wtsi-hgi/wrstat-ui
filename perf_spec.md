@@ -2,10 +2,6 @@
 
 This document defines a repeatable performance test harness for wrstat-ui.
 
-It is written so that another agent can implement the performance tooling
-without needing this prompt and without needing to read the whole codebase
-for context.
-
 The harness must allow three comparable runs:
 
 1. **Bolt (current code, before interface refactor)**
