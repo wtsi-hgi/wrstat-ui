@@ -26,6 +26,7 @@ package main
 
 import (
 	"compress/gzip"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -61,7 +62,7 @@ func TestMain(m *testing.M) {
 }
 
 func buildSelf() func() {
-	cmd := exec.Command(
+	cmd := exec.CommandContext(context.Background(),
 		"go", "build", "-tags", "netgo",
 		"-ldflags=-X github.com/VertebrateResequencing/wr/client.PretendSubmissions=3 "+
 			"-X github.com/wtsi-hgi/wrstat-ui/cmd.Version=TESTVERSION",
@@ -445,7 +446,7 @@ func TestPerfCLI(t *testing.T) {
 		So(os.Mkdir(outDir, 0755), ShouldBeNil)
 
 		// create a dataset dir named version_mount
-		ds := filepath.Join(outDir, "1_/mountA")
+		ds := filepath.Join(outDir, "1_／mountA")
 		So(os.MkdirAll(ds, 0755), ShouldBeNil)
 		// touch required files
 		So(os.WriteFile(filepath.Join(ds, "dguta.dbs"), nil, 0600), ShouldBeNil)
@@ -477,6 +478,106 @@ func TestPerfCLI(t *testing.T) {
 	})
 }
 
+func TestPerfImport(t *testing.T) {
+	Convey("bolt-perf import creates Bolt DBs and writes JSON report", t, func() {
+		gid, uid, _, _, err := internaluser.RealGIDAndUID()
+		So(err, ShouldBeNil)
+
+		tmp := t.TempDir()
+
+		// prepare input stats dir structure
+		inputDir := filepath.Join(tmp, "input")
+		So(os.MkdirAll(inputDir, 0755), ShouldBeNil)
+
+		ds := filepath.Join(inputDir, "1_／mountA")
+		So(os.MkdirAll(ds, 0755), ShouldBeNil)
+
+		_, root := internaldata.FakeFilesForDGUTADBForBasedirsTesting(gid, uid,
+			"lustre", 1, 1<<29, 1<<31, true, time.Now().Unix())
+
+		statsPath := filepath.Join(ds, "stats.gz")
+		f, err := os.Create(statsPath)
+		So(err, ShouldBeNil)
+
+		gw := gzip.NewWriter(f)
+		_, err = io.Copy(gw, root.AsReader())
+		So(err, ShouldBeNil)
+		So(gw.Close(), ShouldBeNil)
+		So(f.Close(), ShouldBeNil)
+
+		// owners/quota/config files
+		ownersPath, err := internaldata.CreateOwnersCSV(t, internaldata.ExampleOwnersCSV)
+		So(err, ShouldBeNil)
+
+		quota := internaldata.CreateQuotasCSV(t, internaldata.ExampleQuotaCSV)
+
+		basedirsConfig := filepath.Join(tmp, "basedirs.config")
+		So(os.WriteFile(basedirsConfig, []byte(`/lustre/scratch123/hgi/mdt	5	5
+/ 	4	4`), 0600), ShouldBeNil)
+
+		out := filepath.Join(tmp, "out")
+		jsonPath := filepath.Join(tmp, "report_import.json")
+
+		_, stderr, _, err := runWRStat(
+			"bolt-perf", "import", inputDir,
+			"--out", out,
+			"--quota", quota,
+			"--config", basedirsConfig,
+			"--owners", ownersPath,
+			"--json", jsonPath,
+		)
+		So(err, ShouldBeNil)
+		So(stderr, ShouldBeBlank)
+
+		// expect output dataset dir exists with db files
+		dsOut := filepath.Join(out, "1_／mountA")
+
+		So(func() error {
+			_, err2 := os.Stat(filepath.Join(dsOut, "dguta.dbs"))
+
+			return err2
+		}(), ShouldBeNil)
+
+		So(func() error {
+			_, err2 := os.Stat(filepath.Join(dsOut, "basedirs.db"))
+
+			return err2
+		}(), ShouldBeNil)
+
+		// ensure JSON report exists and contains import_total
+		b, err := os.ReadFile(jsonPath)
+		So(err, ShouldBeNil)
+
+		var j map[string]any
+
+		err = json.Unmarshal(b, &j)
+		So(err, ShouldBeNil)
+
+		opsAny, ok := j["operations"]
+		So(ok, ShouldBeTrue)
+
+		ops, ok := opsAny.([]any)
+		So(ok, ShouldBeTrue)
+
+		found := false
+
+		for _, o := range ops {
+			m, ok := o.(map[string]any)
+			if !ok {
+				continue
+			}
+
+			if m["name"] == "import_total" {
+				found = true
+
+				break
+			}
+		}
+
+		So(found, ShouldBeTrue)
+	})
+}
+
 func runWRStat(args ...string) (string, string, []*jobqueue.Job, error) {
 	var (
 		stdout, stderr strings.Builder
@@ -488,7 +589,7 @@ func runWRStat(args ...string) (string, string, []*jobqueue.Job, error) {
 		return "", "", nil, err
 	}
 
-	cmd := exec.Command("./"+app, args...)
+	cmd := exec.CommandContext(context.Background(), "./"+app, args...)
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	cmd.ExtraFiles = append(cmd.ExtraFiles, pw)
