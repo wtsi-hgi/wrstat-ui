@@ -55,12 +55,12 @@ func RealGIDAndUID() (uint32, uint32, string, string, error) {
 		return 0, 0, "", "", err
 	}
 
-	group, err := user.LookupGroupId(groups[0])
-	if err != nil {
-		return 0, 0, "", "", err
+	groupName := "id" + groups[0]
+	if group, err := user.LookupGroupId(groups[0]); err == nil {
+		groupName = group.Name
 	}
 
-	return uint32(gid64), uint32(uid64), group.Name, u.Username, nil
+	return uint32(gid64), uint32(uid64), groupName, u.Username, nil
 }
 
 func GetUsername(t *testing.T, uid string) string {
