@@ -781,8 +781,8 @@ func (l *lineCountingReader) Read(p []byte) (int, error) {
 		return 0, nil
 	}
 
-	if n := l.readPending(p); n > 0 {
-		return n, nil
+	if n, ok, err := l.readPendingOrDone(p); ok {
+		return n, err
 	}
 
 	if l.reachedMax {
@@ -802,11 +802,32 @@ func (l *lineCountingReader) Read(p []byte) (int, error) {
 		l.pending = append(l.pending[:0], allowed[nn:]...)
 	}
 
-	if l.reachedMax {
-		return nn, nil
+	return nn, l.errAfterRead(err)
+}
+
+func (l *lineCountingReader) readPendingOrDone(p []byte) (int, bool, error) {
+	n := l.readPending(p)
+	if n == 0 {
+		return 0, false, nil
 	}
 
-	return nn, err
+	if l.reachedMax && len(l.pending) == 0 {
+		return n, true, io.EOF
+	}
+
+	return n, true, nil
+}
+
+func (l *lineCountingReader) errAfterRead(underlyingErr error) error {
+	if l.reachedMax {
+		if len(l.pending) == 0 {
+			return io.EOF
+		}
+
+		return nil
+	}
+
+	return underlyingErr
 }
 
 func (l *lineCountingReader) readPending(p []byte) int {
