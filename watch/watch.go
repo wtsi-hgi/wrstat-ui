@@ -166,6 +166,25 @@ func createSummariseJob(inputDir, outputDir, base, quotaPath, basedirsConfig, mo
 	), nil
 }
 
+func getPreviousBasedirsDB(outputDir, base string) (string, error) {
+	possibleBasedirs, err := server.FindDBDirs(outputDir, basedirBasename)
+	if err != nil {
+		return "", err
+	}
+
+	splitBase := strings.Split(base, "_")
+
+	for _, possibleBasedirDB := range possibleBasedirs {
+		key := strings.SplitN(filepath.Base(possibleBasedirDB), "_", 2) //nolint:mnd
+
+		if key[1] == splitBase[1] {
+			return filepath.Join(possibleBasedirDB, basedirBasename), nil
+		}
+	}
+
+	return "", nil
+}
+
 func getJobCommand(dotOutputBase, previousBasedirsDB, quotaPath, basedirsConfig, mounts,
 	inputDir, base, outputDir string) string {
 	cmdFormat := "%[1]q summarise -d %[2]q"
@@ -187,23 +206,4 @@ func getJobCommand(dotOutputBase, previousBasedirsDB, quotaPath, basedirsConfig,
 		filepath.Join(outputDir, base),
 		mounts,
 	)
-}
-
-func getPreviousBasedirsDB(outputDir, base string) (string, error) {
-	possibleBasedirs, err := server.FindDBDirs(outputDir, basedirBasename)
-	if err != nil {
-		return "", err
-	}
-
-	splitBase := strings.Split(base, "_")
-
-	for _, possibleBasedirDB := range possibleBasedirs {
-		key := strings.SplitN(filepath.Base(possibleBasedirDB), "_", 2) //nolint:mnd
-
-		if key[1] == splitBase[1] {
-			return filepath.Join(possibleBasedirDB, basedirBasename), nil
-		}
-	}
-
-	return "", nil
 }

@@ -33,43 +33,6 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/summary"
 )
 
-// GroupUser is used to summarise file stats by group and user.
-type GroupUser struct {
-	w     io.WriteCloser
-	store map[summary.GroupUserID]*summary.Summary
-}
-
-// NewByGroupUser returns a GroupUser.
-func NewByGroupUser(w io.WriteCloser) summary.OperationGenerator {
-	return func() summary.Operation {
-		return &GroupUser{
-			w:     w,
-			store: make(map[summary.GroupUserID]*summary.Summary),
-		}
-	}
-}
-
-// Add is a github.com/wtsi-ssg/wrstat/stat Operation. It will add the file size
-// and increment the file count summed for the info's group and user. If path is
-// a directory, it is ignored.
-func (g *GroupUser) Add(info *summary.FileInfo) error {
-	if info.IsDir() {
-		return nil
-	}
-
-	id := summary.NewGroupUserID(info.GID, info.UID)
-
-	ss, ok := g.store[id]
-	if !ok {
-		ss = new(summary.Summary)
-		g.store[id] = ss
-	}
-
-	ss.Add(info.Size)
-
-	return nil
-}
-
 type groupUserSummary struct {
 	Group, User string
 	*summary.Summary
@@ -95,6 +58,33 @@ func (g groupUserSummaries) Less(i, j int) bool {
 
 func (g groupUserSummaries) Swap(i, j int) {
 	g[i], g[j] = g[j], g[i]
+}
+
+// GroupUser is used to summarise file stats by group and user.
+type GroupUser struct {
+	w     io.WriteCloser
+	store map[summary.GroupUserID]*summary.Summary
+}
+
+// Add is a github.com/wtsi-ssg/wrstat/stat Operation. It will add the file size
+// and increment the file count summed for the info's group and user. If path is
+// a directory, it is ignored.
+func (g *GroupUser) Add(info *summary.FileInfo) error {
+	if info.IsDir() {
+		return nil
+	}
+
+	id := summary.NewGroupUserID(info.GID, info.UID)
+
+	ss, ok := g.store[id]
+	if !ok {
+		ss = new(summary.Summary)
+		g.store[id] = ss
+	}
+
+	ss.Add(info.Size)
+
+	return nil
 }
 
 // Output will write summary information for all the paths previously added. The
@@ -132,4 +122,14 @@ func (g *GroupUser) Output() error {
 	}
 
 	return g.w.Close()
+}
+
+// NewByGroupUser returns a GroupUser.
+func NewByGroupUser(w io.WriteCloser) summary.OperationGenerator {
+	return func() summary.Operation {
+		return &GroupUser{
+			w:     w,
+			store: make(map[summary.GroupUserID]*summary.Summary),
+		}
+	}
 }

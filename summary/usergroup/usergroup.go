@@ -33,85 +33,6 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/summary"
 )
 
-type rootUserGroup struct {
-	w              io.WriteCloser
-	store          userGroupDirectories
-	uidLookupCache map[uint32]string
-	gidLookupCache map[uint32]string
-	userGroup
-}
-
-func (r *rootUserGroup) addToStore(u *userGroup) {
-	for id, s := range u.summaries {
-		r.store = append(r.store, userGroupDirectory{
-			Group:     summary.GIDToName(id.GID(), r.gidLookupCache),
-			User:      summary.UIDToName(id.UID(), r.uidLookupCache),
-			Directory: u.thisDir,
-			Summary:   s,
-		})
-	}
-}
-
-// userGroup is used to summarise file stats by user and group.
-type userGroup struct {
-	root      *rootUserGroup
-	summaries map[summary.GroupUserID]*summary.Summary
-	thisDir   *summary.DirectoryPath
-}
-
-// NewByUserGroup returns a Usergroup.
-func NewByUserGroup(w io.WriteCloser) summary.OperationGenerator {
-	root := &rootUserGroup{
-		w:              w,
-		uidLookupCache: make(map[uint32]string),
-		gidLookupCache: make(map[uint32]string),
-		userGroup: userGroup{
-			summaries: make(map[summary.GroupUserID]*summary.Summary),
-		},
-	}
-
-	root.userGroup.root = root
-	first := true
-
-	return func() summary.Operation {
-		if first {
-			first = false
-
-			return root
-		}
-
-		return &userGroup{
-			root:      root,
-			summaries: make(map[summary.GroupUserID]*summary.Summary),
-		}
-	}
-}
-
-// Add is a github.com/wtsi-ssg/wrstat/stat Operation. It will break path in to
-// its directories and add the file size and increment the file count to each,
-// summed for the info's user and group. If path is a directory, it is ignored.
-func (u *userGroup) Add(info *summary.FileInfo) error {
-	if info.IsDir() {
-		if u.thisDir == nil {
-			u.thisDir = info.Path
-		}
-
-		return nil
-	}
-
-	id := summary.NewGroupUserID(info.GID, info.UID)
-
-	s, ok := u.summaries[id]
-	if !ok {
-		s = new(summary.Summary)
-		u.summaries[id] = s
-	}
-
-	s.Add(info.Size)
-
-	return nil
-}
-
 type userGroupDirectory struct {
 	Group, User string
 	Directory   *summary.DirectoryPath
@@ -148,6 +69,25 @@ func (u userGroupDirectories) Swap(i, j int) {
 	u[i], u[j] = u[j], u[i]
 }
 
+type rootUserGroup struct {
+	w              io.WriteCloser
+	store          userGroupDirectories
+	uidLookupCache map[uint32]string
+	gidLookupCache map[uint32]string
+	userGroup
+}
+
+func (r *rootUserGroup) addToStore(u *userGroup) {
+	for id, s := range u.summaries {
+		r.store = append(r.store, userGroupDirectory{
+			Group:     summary.GIDToName(id.GID(), r.gidLookupCache),
+			User:      summary.UIDToName(id.UID(), r.uidLookupCache),
+			Directory: u.thisDir,
+			Summary:   s,
+		})
+	}
+}
+
 // Output will write summary information for all the paths previously added. The
 // format is (tab separated):
 //
@@ -175,6 +115,66 @@ func (r *rootUserGroup) Output() error {
 	}
 
 	return r.w.Close()
+}
+
+// NewByUserGroup returns a Usergroup.
+func NewByUserGroup(w io.WriteCloser) summary.OperationGenerator {
+	root := &rootUserGroup{
+		w:              w,
+		uidLookupCache: make(map[uint32]string),
+		gidLookupCache: make(map[uint32]string),
+		userGroup: userGroup{
+			summaries: make(map[summary.GroupUserID]*summary.Summary),
+		},
+	}
+
+	root.root = root
+	first := true
+
+	return func() summary.Operation {
+		if first {
+			first = false
+
+			return root
+		}
+
+		return &userGroup{
+			root:      root,
+			summaries: make(map[summary.GroupUserID]*summary.Summary),
+		}
+	}
+}
+
+// userGroup is used to summarise file stats by user and group.
+type userGroup struct {
+	root      *rootUserGroup
+	summaries map[summary.GroupUserID]*summary.Summary
+	thisDir   *summary.DirectoryPath
+}
+
+// Add is a github.com/wtsi-ssg/wrstat/stat Operation. It will break path in to
+// its directories and add the file size and increment the file count to each,
+// summed for the info's user and group. If path is a directory, it is ignored.
+func (u *userGroup) Add(info *summary.FileInfo) error {
+	if info.IsDir() {
+		if u.thisDir == nil {
+			u.thisDir = info.Path
+		}
+
+		return nil
+	}
+
+	id := summary.NewGroupUserID(info.GID, info.UID)
+
+	s, ok := u.summaries[id]
+	if !ok {
+		s = new(summary.Summary)
+		u.summaries[id] = s
+	}
+
+	s.Add(info.Size)
+
+	return nil
 }
 
 func (u *userGroup) Output() error {

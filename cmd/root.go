@@ -51,6 +51,21 @@ The 'where' subcommand can be used to find out where data is on disk.
 The 'server' subcommand can be used to start the web server.`,
 }
 
+func init() {
+	// set up logging to stderr
+	appLogger.SetHandler(log15.LvlFilterHandler(log15.LvlInfo, log15.StderrHandler))
+}
+
+// cliPrint outputs the message to STDOUT.
+func cliPrint(msg string, a ...interface{}) {
+	fmt.Fprintf(os.Stdout, msg, a...)
+}
+
+// info is a convenience to log a message at the Info level.
+func info(msg string, a ...interface{}) { //nolint:unparam
+	appLogger.Info(fmt.Sprintf(msg, a...))
+}
+
 // Execute adds all child commands to the root command and sets flags
 // appropriately. This is called by main.main(). It only needs to happen once to
 // the rootCmd.
@@ -60,9 +75,10 @@ func Execute() {
 	}
 }
 
-func init() {
-	// set up logging to stderr
-	appLogger.SetHandler(log15.LvlFilterHandler(log15.LvlInfo, log15.StderrHandler))
+// die is a convenience to log a message at the Error level and exit non zero.
+func die(msg string, a ...interface{}) {
+	appLogger.Error(fmt.Sprintf(msg, a...))
+	os.Exit(1)
 }
 
 // logToFile logs to the given file.
@@ -75,6 +91,11 @@ func logToFile(path string) {
 	}
 
 	appLogger.SetHandler(fh)
+}
+
+// warn is a convenience to log a message at the Warn level.
+func warn(msg string, a ...interface{}) {
+	appLogger.Warn(fmt.Sprintf(msg, a...))
 }
 
 // setCLIFormat logs plain text log messages to STDERR.
@@ -90,25 +111,4 @@ func cliFormat() log15.Format { //nolint:ireturn
 
 		return b.Bytes()
 	})
-}
-
-// cliPrint outputs the message to STDOUT.
-func cliPrint(msg string, a ...interface{}) {
-	fmt.Fprintf(os.Stdout, msg, a...)
-}
-
-// info is a convenience to log a message at the Info level.
-func info(msg string, a ...interface{}) {
-	appLogger.Info(fmt.Sprintf(msg, a...))
-}
-
-// warn is a convenience to log a message at the Warn level.
-func warn(msg string, a ...interface{}) {
-	appLogger.Warn(fmt.Sprintf(msg, a...))
-}
-
-// die is a convenience to log a message at the Error level and exit non zero.
-func die(msg string, a ...interface{}) {
-	appLogger.Error(fmt.Sprintf(msg, a...))
-	os.Exit(1)
 }

@@ -43,6 +43,45 @@ import (
 // toJSON method. It conforms to ISO 8601 and is like RFC3339 and in UTC.
 const javascriptToJSONFormat = "2006-01-02T15:04:05.999Z"
 
+// getStaticFS returns an FS for the static files needed for the tree webpage.
+// Returns embedded files by default, or a live view of the git repo files if
+// env var WRSTAT_SERVER_DEV is set to 1.
+func getStaticFS() fs.FS {
+	var fsys fs.FS
+
+	treeDir := "static/wrstat/build"
+
+	if os.Getenv(gas.DevEnvKey) == gas.DevEnvVal {
+		fsys = os.DirFS(treeDir)
+	} else {
+		fsys, _ = fs.Sub(staticFS, treeDir) //nolint:errcheck
+	}
+
+	return fsys
+}
+
+// timeToJavascriptDate returns the given time in javascript Date's toJSON
+// format.
+func timeToJavascriptDate(t time.Time) string {
+	return t.UTC().Format(javascriptToJSONFormat)
+}
+
+// areDisjoint returns true if none of the keys of `a` are the same as any
+// element of `b`. As a special case, returns false if `a` is nil.
+func areDisjoint(a map[uint32]bool, b []uint32) bool {
+	if a == nil {
+		return false
+	}
+
+	for _, id := range b {
+		if a[id] {
+			return false
+		}
+	}
+
+	return true
+}
+
 func (s *Server) addBaseDGUTARoutes() {
 	authGroup := s.AuthRouter()
 
@@ -81,23 +120,6 @@ func (s *Server) AddTreePage() error {
 	return nil
 }
 
-// getStaticFS returns an FS for the static files needed for the tree webpage.
-// Returns embedded files by default, or a live view of the git repo files if
-// env var WRSTAT_SERVER_DEV is set to 1.
-func getStaticFS() fs.FS {
-	var fsys fs.FS
-
-	treeDir := "static/wrstat/build"
-
-	if os.Getenv(gas.DevEnvKey) == gas.DevEnvVal {
-		fsys = os.DirFS(treeDir)
-	} else {
-		fsys, _ = fs.Sub(staticFS, treeDir) //nolint:errcheck
-	}
-
-	return fsys
-}
-
 // AddGroupAreas takes a map of area keys and group slice values. Clients will
 // then receive this map on TreeElements in the "areas" field.
 //
@@ -115,29 +137,6 @@ func (s *Server) AddGroupAreas(areas map[string][]string) {
 // getGroupAreas serves up our areas hash as JSON.
 func (s *Server) getGroupAreas(c *gin.Context) {
 	c.IndentedJSON(http.StatusOK, s.areas)
-}
-
-// TreeElement holds tree.DirInfo type information in a form suited to passing
-// to the treemap web interface. It also includes the server's dataTimeStamp so
-// interfaces can report on how long ago the data forming the tree was
-// captured.
-type TreeElement struct {
-	Name        string              `json:"name"`
-	Path        string              `json:"path"`
-	Count       uint64              `json:"count"`
-	Size        uint64              `json:"size"`
-	Atime       string              `json:"atime"`
-	CommonATime summary.AgeRange    `json:"common_atime"`
-	Mtime       string              `json:"mtime"`
-	CommonMTime summary.AgeRange    `json:"common_mtime"`
-	Age         db.DirGUTAge        `json:"age"`
-	Users       []string            `json:"users"`
-	Groups      []string            `json:"groups"`
-	FileTypes   []string            `json:"filetypes"`
-	HasChildren bool                `json:"has_children"`
-	Children    []*TreeElement      `json:"children,omitempty"`
-	Areas       map[string][]string `json:"areas"`
-	NoAuth      bool                `json:"noauth"`
 }
 
 // getTree responds with the data needed by the tree web interface.
@@ -171,6 +170,29 @@ func (s *Server) getTree(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, s.diToTreeElement(di, filter, allowedGIDs, path))
+}
+
+// TreeElement holds tree.DirInfo type information in a form suited to passing
+// to the treemap web interface. It also includes the server's dataTimeStamp so
+// interfaces can report on how long ago the data forming the tree was
+// captured.
+type TreeElement struct {
+	Name        string              `json:"name"`
+	Path        string              `json:"path"`
+	Count       uint64              `json:"count"`
+	Size        uint64              `json:"size"`
+	Atime       string              `json:"atime"`
+	CommonATime summary.AgeRange    `json:"common_atime"`
+	Mtime       string              `json:"mtime"`
+	CommonMTime summary.AgeRange    `json:"common_mtime"`
+	Age         db.DirGUTAge        `json:"age"`
+	Users       []string            `json:"users"`
+	Groups      []string            `json:"groups"`
+	FileTypes   []string            `json:"filetypes"`
+	HasChildren bool                `json:"has_children"`
+	Children    []*TreeElement      `json:"children,omitempty"`
+	Areas       map[string][]string `json:"areas"`
+	NoAuth      bool                `json:"noauth"`
 }
 
 // diToTreeElement converts the given dguta.DirInfo to our own TreeElement. It
@@ -223,26 +245,4 @@ func (s *Server) ddsToTreeElement(dds *db.DirSummary, allowedGIDs map[uint32]boo
 		FileTypes:   s.ftsToNames(dds.FT),
 		NoAuth:      areDisjoint(allowedGIDs, dds.GIDs),
 	}
-}
-
-// timeToJavascriptDate returns the given time in javascript Date's toJSON
-// format.
-func timeToJavascriptDate(t time.Time) string {
-	return t.UTC().Format(javascriptToJSONFormat)
-}
-
-// areDisjoint returns true if none of the keys of `a` are the same as any
-// element of `b`. As a special case, returns false if `a` is nil.
-func areDisjoint(a map[uint32]bool, b []uint32) bool {
-	if a == nil {
-		return false
-	}
-
-	for _, id := range b {
-		if a[id] {
-			return false
-		}
-	}
-
-	return true
 }

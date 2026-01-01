@@ -45,6 +45,47 @@ type output interface {
 	Output(users, groups basedirs.IDAgeDirs) error
 }
 
+// NewBaseDirs returns a summary.OperationGenerator that calculates base
+// directory information.
+func NewBaseDirs(output outputForDir, db output) summary.OperationGenerator { //nolint:funlen
+	root := &rootBaseDirs{
+		baseDirs: baseDirs{
+			output:     output,
+			users:      make(baseDirsMap),
+			groups:     make(baseDirsMap),
+			seenInodes: make(map[int64]struct{}),
+		},
+		db:     db,
+		users:  make(basedirs.IDAgeDirs),
+		groups: make(basedirs.IDAgeDirs),
+	}
+
+	root.root = root
+	now := time.Now().Unix()
+
+	var parent *baseDirs
+
+	return func() summary.Operation {
+		if parent == nil {
+			parent = &root.baseDirs
+
+			return root
+		}
+
+		parent = &baseDirs{
+			parent:     parent,
+			output:     output,
+			root:       root,
+			refTime:    now,
+			users:      make(baseDirsMap),
+			groups:     make(baseDirsMap),
+			seenInodes: make(map[int64]struct{}),
+		}
+
+		return parent
+	}
+}
+
 type outputForDir func(*summary.DirectoryPath) bool
 
 type dirSummary struct {
@@ -65,17 +106,6 @@ func newDirSummary(parent *summary.DirectoryPath, age db.DirGUTAge) *dirSummary 
 				},
 			},
 		},
-	}
-}
-
-func setTimes(d *basedirs.SummaryWithChildren, atime, mtime time.Time) {
-	if atime.Before(d.Atime) || d.Atime.IsZero() {
-		d.Atime = atime
-	}
-
-	if mtime.After(d.Mtime) {
-		d.Mtime = mtime
-		d.Children[0].LastModified = mtime
 	}
 }
 
@@ -136,6 +166,17 @@ func (b *ageBaseDirs) Set(i db.DirGUTAge, fi *summary.FileInfo, parent *summary.
 
 	b[i].GIDs = addToSlice(b[i].GIDs, fi.GID)
 	b[i].UIDs = addToSlice(b[i].UIDs, fi.UID)
+}
+
+func setTimes(d *basedirs.SummaryWithChildren, atime, mtime time.Time) {
+	if atime.Before(d.Atime) || d.Atime.IsZero() {
+		d.Atime = atime
+	}
+
+	if mtime.After(d.Mtime) {
+		d.Mtime = mtime
+		d.Children[0].LastModified = mtime
+	}
 }
 
 func addToSlice(s []uint32, id uint32) []uint32 {
@@ -222,53 +263,6 @@ type baseDirs struct {
 	seenInodes    map[int64]struct{}
 }
 
-type rootBaseDirs struct {
-	baseDirs
-	db            output
-	users, groups basedirs.IDAgeDirs
-}
-
-// NewBaseDirs returns a summary.OperationGenerator that calculates base
-// directory information.
-func NewBaseDirs(output outputForDir, db output) summary.OperationGenerator { //nolint:funlen
-	root := &rootBaseDirs{
-		baseDirs: baseDirs{
-			output:     output,
-			users:      make(baseDirsMap),
-			groups:     make(baseDirsMap),
-			seenInodes: make(map[int64]struct{}),
-		},
-		db:     db,
-		users:  make(basedirs.IDAgeDirs),
-		groups: make(basedirs.IDAgeDirs),
-	}
-
-	root.root = root
-	now := time.Now().Unix()
-
-	var parent *baseDirs
-
-	return func() summary.Operation {
-		if parent == nil {
-			parent = &root.baseDirs
-
-			return root
-		}
-
-		parent = &baseDirs{
-			parent:     parent,
-			output:     output,
-			root:       root,
-			refTime:    now,
-			users:      make(baseDirsMap),
-			groups:     make(baseDirsMap),
-			seenInodes: make(map[int64]struct{}),
-		}
-
-		return parent
-	}
-}
-
 // Add is a summary.Operation method.
 func (b *baseDirs) Add(info *summary.FileInfo) error { //nolint:gocyclo
 	if b.thisDir == nil {
@@ -331,6 +325,12 @@ func (b *baseDirs) cleanup() {
 	clear(b.seenInodes)
 	clear(b.groups)
 	clear(b.users)
+}
+
+type rootBaseDirs struct {
+	baseDirs
+	db            output
+	users, groups basedirs.IDAgeDirs
 }
 
 // Output is a summary.Operation method.

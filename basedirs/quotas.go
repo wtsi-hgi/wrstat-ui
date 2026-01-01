@@ -37,12 +37,12 @@ import (
 // Error is a custom error type.
 type Error string
 
-func (e Error) Error() string { return string(e) }
-
 const (
 	quotaCSVCols       = 4
 	errBadQuotaCSVFile = Error("invalid number of columns in quota csv file")
 )
+
+func (e Error) Error() string { return string(e) }
 
 // diskQuota stores the quota in bytes for a particular disk location.
 type diskQuota struct {
@@ -87,37 +87,6 @@ func ParseQuotas(path string) (*Quotas, error) {
 	}
 }
 
-// parseRowAndStore parses a row from a quotas csv file and stores in the given
-// Quotas.
-func parseRowAndStore(row []string, q *Quotas) error {
-	if len(row) != quotaCSVCols {
-		return errBadQuotaCSVFile
-	}
-
-	gid, err := strconv.ParseUint(row[0], 10, 32)
-	if err != nil {
-		return err
-	}
-
-	quotaSize, err := strconv.ParseUint(row[2], 10, 64)
-	if err != nil {
-		return err
-	}
-
-	quotaInode, err := strconv.ParseUint(row[3], 10, 64)
-	if err != nil {
-		return err
-	}
-
-	if !strings.HasSuffix(row[1], "/") {
-		row[1] += "/"
-	}
-
-	q.store(uint32(gid), row[1], quotaSize, quotaInode)
-
-	return nil
-}
-
 // store stores the given quota information.
 func (q *Quotas) store(gid uint32, disk string, quotaSize, quotaInode uint64) {
 	q.gids[gid] = append(q.gids[gid], &diskQuota{
@@ -147,4 +116,35 @@ func (q *Quotas) Get(gid uint32, path string) (uint64, uint64) {
 	}
 
 	return 0, 0
+}
+
+// parseRowAndStore parses a row from a quotas csv file and stores in the given
+// Quotas.
+func parseRowAndStore(row []string, q *Quotas) error {
+	if len(row) != quotaCSVCols {
+		return errBadQuotaCSVFile
+	}
+
+	gid, err := strconv.ParseUint(row[0], 10, 32)
+	if err != nil {
+		return err
+	}
+
+	quotaSize, err := strconv.ParseUint(row[2], 10, 64)
+	if err != nil {
+		return err
+	}
+
+	quotaInode, err := strconv.ParseUint(row[3], 10, 64)
+	if err != nil {
+		return err
+	}
+
+	if !strings.HasSuffix(row[1], "/") {
+		row[1] += "/"
+	}
+
+	q.store(uint32(gid), row[1], quotaSize, quotaInode)
+
+	return nil
 }

@@ -31,6 +31,21 @@ import "strings"
 
 const ErrInvalidType = Error("not a valid file type")
 
+var AllTypesExceptDirectories = DGUTAFileTypeOther | //nolint:gochecknoglobals
+	DGUTAFileTypeVCF |
+	DGUTAFileTypeVCFGz |
+	DGUTAFileTypeBCF |
+	DGUTAFileTypeSam |
+	DGUTAFileTypeBam |
+	DGUTAFileTypeCram |
+	DGUTAFileTypeFasta |
+	DGUTAFileTypeFastq |
+	DGUTAFileTypeFastqGz |
+	DGUTAFileTypePedBed |
+	DGUTAFileTypeCompressed |
+	DGUTAFileTypeText |
+	DGUTAFileTypeLog
+
 // DirGUTAFileType is one of the special file types that the
 // directory,group,user,filetype,age summaries group on.
 type DirGUTAFileType uint16
@@ -53,40 +68,6 @@ const (
 	DGUTAFileTypeDir        DirGUTAFileType = 16384
 	DGUTAFileTypeOther      DirGUTAFileType = 32768
 )
-
-var AllTypesExceptDirectories = DGUTAFileTypeOther | //nolint:gochecknoglobals
-	DGUTAFileTypeVCF |
-	DGUTAFileTypeVCFGz |
-	DGUTAFileTypeBCF |
-	DGUTAFileTypeSam |
-	DGUTAFileTypeBam |
-	DGUTAFileTypeCram |
-	DGUTAFileTypeFasta |
-	DGUTAFileTypeFastq |
-	DGUTAFileTypeFastqGz |
-	DGUTAFileTypePedBed |
-	DGUTAFileTypeCompressed |
-	DGUTAFileTypeText |
-	DGUTAFileTypeLog
-
-// String lets you convert a DirGUTAFileType to a meaningful string.
-func (d DirGUTAFileType) String() string {
-	names := [...]string{
-		"temp", "vcf", "vcf.gz", "bcf", "sam", "bam",
-		"cram", "fasta", "fastq", "fastq.gz", "ped/bed",
-		"compressed", "text", "log", "dir", "other",
-	}
-
-	out := make([]string, 0, len(names))
-
-	for n, name := range names {
-		if d&(1<<n) != 0 {
-			out = append(out, name)
-		}
-	}
-
-	return strings.Join(out, "|")
-}
 
 // FileTypeStringToDirGUTAFileType converts the String() representation of a
 // DirGUTAFileType back in to a DirGUTAFileType. Errors if an invalid string
@@ -118,4 +99,23 @@ func FileTypeStringToDirGUTAFileType(ft string) (DirGUTAFileType, error) {
 	}
 
 	return dgft, nil
+}
+
+// String lets you convert a DirGUTAFileType to a meaningful string.
+func (d DirGUTAFileType) String() string {
+	names := [...]string{
+		"temp", "vcf", "vcf.gz", "bcf", "sam", "bam",
+		"cram", "fasta", "fastq", "fastq.gz", "ped/bed",
+		"compressed", "text", "log", "dir", "other",
+	}
+
+	out := make([]string, 0, len(names))
+
+	for n, name := range names {
+		if d&(1<<n) != 0 {
+			out = append(out, name)
+		}
+	}
+
+	return strings.Join(out, "|")
 }

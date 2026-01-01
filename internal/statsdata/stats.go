@@ -37,6 +37,68 @@ import (
 	"strings"
 )
 
+var nextInode uint64 = 1000 //nolint:gochecknoglobals
+
+// File represents a pseudo-file entry.
+type File struct {
+	Path                string
+	Size                int64
+	ATime, MTime, CTime int64
+	UID, GID            uint32
+	Inode               uint64
+	Type                byte
+	Nlink               uint64
+}
+
+// AddFile adds file data to a directory, creating the directory in the tree if
+// necessary.
+func AddFile(d *Directory, path string, uid, gid uint32, size, atime, mtime int64) *File {
+	for part := range strings.SplitSeq(filepath.Dir(path), "/") {
+		d = d.AddDirectory(part)
+	}
+
+	file := d.AddFile(filepath.Base(path))
+	file.UID = uid
+	file.GID = gid
+	file.Size = size
+	file.ATime = atime
+	file.MTime = mtime
+	file.Inode = nextInode
+	file.Nlink = 1
+
+	nextInode++
+
+	return file
+}
+
+// AddFileWithInode adds file data to a directory, creating the directory in the tree if
+// necessary, and assigns an explicit inode number.
+func AddFileWithInode(d *Directory,
+	path string,
+	uid, gid uint32,
+	size, atime, mtime int64,
+	inode, nlink uint64) *File {
+	file := AddFile(d, path, uid, gid, size, atime, mtime)
+	file.Inode = inode
+	file.Nlink = nlink
+
+	return file
+}
+
+// WriteTo writes the stats data for a file entry.
+func (f *File) WriteTo(w io.Writer) (int64, error) {
+	n, err := fmt.Fprintf(w, "%q\t%d\t%d\t%d\t%d\t%d\t%d\t%c\t%d\t%d\t1\t%d\n",
+		f.Path, f.Size, f.UID, f.GID, f.ATime, f.MTime, f.CTime, f.Type, f.Inode, f.Nlink, f.Size)
+
+	return int64(n), err
+}
+
+// Directory represents the stat information for a directory and its children.
+type Directory struct {
+	children map[string]io.WriterTo
+	File
+}
+
 // TestStats creates a new Directory filled with pseudo content.
 func TestStats(width, depth int, rootPath string, refTime int64) *Directory {
 	d := NewRoot(rootPath, refTime)
@@ -44,20 +106,6 @@ func TestStats(width, depth int, rootPath string, refTime int64) *Directory {
 	addChildren(d, width, depth)
 
 	return d
-}
-
-func addChildren(d *Directory, width, depth int) {
-	for n := range width {
-		addChildren(d.AddDirectory(fmt.Sprintf("dir%d", n)), width-1, depth-1)
-
-		d.AddFile(fmt.Sprintf("file%d", n)).Size = 1
-	}
-}
-
-// Directory represents the stat information for a directory and its children.
-type Directory struct {
-	children map[string]io.WriterTo
-	File
 }
 
 // NewRoot creates a new Directory root with the specified time as the atime,
@@ -155,58 +203,10 @@ func (d *Directory) AsReader() io.ReadCloser {
 	return pr
 }
 
-// File represents a pseudo-file entry.
-type File struct {
-	Path                string
-	Size                int64
-	ATime, MTime, CTime int64
-	UID, GID            uint32
-	Inode               uint64
-	Type                byte
-	Nlink               uint64
-}
+func addChildren(d *Directory, width, depth int) {
+	for n := range width {
+		addChildren(d.AddDirectory(fmt.Sprintf("dir%d", n)), width-1, depth-1)
 
-// WriteTo writes the stats data for a file entry.
-func (f *File) WriteTo(w io.Writer) (int64, error) {
-	n, err := fmt.Fprintf(w, "%q\t%d\t%d\t%d\t%d\t%d\t%d\t%c\t%d\t%d\t1\t%d\n",
-		f.Path, f.Size, f.UID, f.GID, f.ATime, f.MTime, f.CTime, f.Type, f.Inode, f.Nlink, f.Size)
-
-	return int64(n), err
-}
-
-var nextInode uint64 = 1000 //nolint:gochecknoglobals
-
-// AddFile adds file data to a directory, creating the directory in the tree if
-// necessary.
-func AddFile(d *Directory, path string, uid, gid uint32, size, atime, mtime int64) *File {
-	for part := range strings.SplitSeq(filepath.Dir(path), "/") {
-		d = d.AddDirectory(part)
+		d.AddFile(fmt.Sprintf("file%d", n)).Size = 1
 	}
-
-	file := d.AddFile(filepath.Base(path))
-	file.UID = uid
-	file.GID = gid
-	file.Size = size
-	file.ATime = atime
-	file.MTime = mtime
-	file.Inode = nextInode
-	file.Nlink = 1
-
-	nextInode++
-
-	return file
-}
-
-// AddFileWithInode adds file data to a directory, creating the directory in the tree if
-// necessary, and assigns an explicit inode number.
-func AddFileWithInode(d *Directory,
-	path string,
-	uid, gid uint32,
-	size, atime, mtime int64,
-	inode, nlink uint64) *File {
-	file := AddFile(d, path, uid, gid, size, atime, mtime)
-	file.Inode = inode
-	file.Nlink = nlink
-
-	return file
 }

@@ -58,24 +58,23 @@ func (p *PathGroup[T]) shiftPath() byte {
 	return b
 }
 
-// StateMachine is a collection of states that can be used to match a
-// summary.FileInfo to a particular grouping.
-type StateMachine[T any] []charState[T]
+// NewStateMachine compiles a StateMachine from the given slice of PathGroups.
+//
+// Once compiled, the returned StateMachine can be used to match arbitrary paths
+// and to get the matching Group data.
+//
+// Paths can contain wildcards (*) that will match zero or more arbitrary
+// characters.
+func NewStatemachine[T any](lines []PathGroup[T]) (StateMachine[T], error) {
+	b := &builder[T]{sm: make(StateMachine[T], 2, 1024)} //nolint:mnd
 
-type stateLines[T any] struct {
-	state, wc      uint32
-	lines, wcLines []PathGroup[T]
-}
+	b.queueBuild(1, 0, lines, nil)
 
-type builder[T any] struct {
-	sm    StateMachine[T]
-	queue []stateLines[T]
-}
+	if err := b.buildQueue(); err != nil {
+		return nil, err
+	}
 
-// GetGroup matches the given summary.FileInfo to a group, or nil if no group is
-// matched.
-func (s StateMachine[T]) GetGroup(info *summary.FileInfo) *T {
-	return s[s.getState(s.getPathState(info.Path), info.Name)].Group
+	return b.sm, nil
 }
 
 // State represents a partial match that can be continued or completed.
@@ -109,6 +108,16 @@ func (s State[T]) IsUnmatched() bool {
 	return s.state == 0
 }
 
+// StateMachine is a collection of states that can be used to match a
+// summary.FileInfo to a particular grouping.
+type StateMachine[T any] []charState[T]
+
+// GetGroup matches the given summary.FileInfo to a group, or nil if no group is
+// matched.
+func (s StateMachine[T]) GetGroup(info *summary.FileInfo) *T {
+	return s[s.getState(s.getPathState(info.Path), info.Name)].Group
+}
+
 // GetState create a intermediary state given the initial match bytes.
 func (s StateMachine[T]) GetState(match []byte) State[T] {
 	return State[T]{
@@ -136,6 +145,16 @@ func (s StateMachine[T]) getState(state uint32, path []byte) uint32 {
 	}
 
 	return state
+}
+
+type stateLines[T any] struct {
+	state, wc      uint32
+	lines, wcLines []PathGroup[T]
+}
+
+type builder[T any] struct {
+	sm    StateMachine[T]
+	queue []stateLines[T]
 }
 
 func (b *builder[T]) build(state, wildcard uint32, groups, wildcardGroups []PathGroup[T]) error {
@@ -306,23 +325,4 @@ func (b *builder[T]) buildQueue() error {
 	}
 
 	return nil
-}
-
-// NewStateMachine compiles a StateMachine from the given slice of PathGroups.
-//
-// Once compiled, the returned StateMachine can be used to match arbitrary paths
-// and to get the matching Group data.
-//
-// Paths can contain wildcards (*) that will match zero or more arbitrary
-// characters.
-func NewStatemachine[T any](lines []PathGroup[T]) (StateMachine[T], error) {
-	b := &builder[T]{sm: make(StateMachine[T], 2, 1024)} //nolint:mnd
-
-	b.queueBuild(1, 0, lines, nil)
-
-	if err := b.buildQueue(); err != nil {
-		return nil, err
-	}
-
-	return b.sm, nil
 }

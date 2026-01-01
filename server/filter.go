@@ -35,6 +35,16 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/db"
 )
 
+// groupNameToGID converts group name to GID.
+func groupNameToGID(name string) (string, error) {
+	g, err := user.LookupGroup(name)
+	if err != nil {
+		return "", err
+	}
+
+	return g.Gid, nil
+}
+
 // makeFilterFromContext extracts the user's filter requests, and returns a tree
 // filter.
 func makeFilterFromContext(c *gin.Context) (*db.Filter, error) {
@@ -57,16 +67,6 @@ func getFilterArgsFromContext(c *gin.Context) (groups string, users string, type
 	return
 }
 
-// groupNameToGID converts group name to GID.
-func groupNameToGID(name string) (string, error) {
-	g, err := user.LookupGroup(name)
-	if err != nil {
-		return "", err
-	}
-
-	return g.Gid, nil
-}
-
 // getWantedIDs splits the given comma separated names in to a slice and then
 // passes each name to the given callback to convert it to an id, then returns
 // a slice of the ids. Returns nil if names is blank.
@@ -85,27 +85,6 @@ func getWantedIDs(names string, cb func(name string) (string, error)) ([]uint32,
 	}
 
 	return ids, nil
-}
-
-// splitCommaSeparatedString splits the given comma separated string in to a
-// slice of string. Returns nil if value is blank.
-func splitCommaSeparatedString(value string) []string {
-	var parts []string
-	if value != "" {
-		parts = strings.Split(value, ",")
-	}
-
-	return parts
-}
-
-// idStringToInt converts a an id string to a uint32.
-func idStringsToInts(idString string) uint32 {
-	// no error is possible here, with the number string coming from an OS
-	// lookup.
-	//nolint:errcheck
-	id, _ := strconv.ParseUint(idString, 10, 32)
-
-	return uint32(id)
 }
 
 func makeFilterGivenGIDs(filterGIDs []uint32, users, types, age string) (*db.Filter, error) {
@@ -189,6 +168,17 @@ func addTypesToFilter(filter *db.Filter, types string) error {
 	return nil
 }
 
+// splitCommaSeparatedString splits the given comma separated string in to a
+// slice of string. Returns nil if value is blank.
+func splitCommaSeparatedString(value string) []string {
+	var parts []string
+	if value != "" {
+		parts = strings.Split(value, ",")
+	}
+
+	return parts
+}
+
 // addAgeToFilter adds a filter for age to the given filter.
 func addAgeToFilter(filter *db.Filter, ageStr string) error {
 	if ageStr == "" || ageStr == "0" {
@@ -203,6 +193,51 @@ func addAgeToFilter(filter *db.Filter, ageStr string) error {
 	filter.Age = age
 
 	return nil
+}
+
+// idStringToInt converts a an id string to a uint32.
+func idStringsToInts(idString string) uint32 {
+	// no error is possible here, with the number string coming from an OS
+	// lookup.
+	//nolint:errcheck
+	id, _ := strconv.ParseUint(idString, 10, 32)
+
+	return uint32(id)
+}
+
+// restrictGIDs returns the keys of allowedIDs that are in wantedIDs. Will
+// return allowedIDs if wanted is empty; will return wantedIDs if allowedIDs is
+// nil. Returns an error if you don't want any of the allowedIDs.
+func restrictGIDs(allowedIDs map[uint32]bool, wantedIDs []uint32) ([]uint32, error) {
+	if allowedIDs == nil {
+		return wantedIDs, nil
+	}
+
+	ids := make([]uint32, 0, len(allowedIDs))
+
+	for id := range allowedIDs {
+		ids = append(ids, id)
+	}
+
+	if len(wantedIDs) == 0 {
+		return ids, nil
+	}
+
+	var final []uint32 //nolint:prealloc
+
+	for _, id := range wantedIDs {
+		if !allowedIDs[id] {
+			continue
+		}
+
+		final = append(final, id)
+	}
+
+	if final == nil {
+		return nil, ErrBadQuery
+	}
+
+	return final, nil
 }
 
 // allowedGIDs checks our JWT if present, and will return the GIDs that
@@ -272,39 +307,4 @@ func (s *Server) getRestrictedGIDs(c *gin.Context, groups string) ([]uint32, err
 	}
 
 	return restrictGIDs(allowedGIDs, filterGIDs)
-}
-
-// restrictGIDs returns the keys of allowedIDs that are in wantedIDs. Will
-// return allowedIDs if wanted is empty; will return wantedIDs if allowedIDs is
-// nil. Returns an error if you don't want any of the allowedIDs.
-func restrictGIDs(allowedIDs map[uint32]bool, wantedIDs []uint32) ([]uint32, error) {
-	if allowedIDs == nil {
-		return wantedIDs, nil
-	}
-
-	ids := make([]uint32, 0, len(allowedIDs))
-
-	for id := range allowedIDs {
-		ids = append(ids, id)
-	}
-
-	if len(wantedIDs) == 0 {
-		return ids, nil
-	}
-
-	var final []uint32 //nolint:prealloc
-
-	for _, id := range wantedIDs {
-		if !allowedIDs[id] {
-			continue
-		}
-
-		final = append(final, id)
-	}
-
-	if final == nil {
-		return nil, ErrBadQuery
-	}
-
-	return final, nil
 }

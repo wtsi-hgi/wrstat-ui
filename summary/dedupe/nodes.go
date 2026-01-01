@@ -27,13 +27,6 @@ package dedupe
 
 import "github.com/wtsi-hgi/wrstat-ui/summary"
 
-var nullNode = &Node{Size: -1} //nolint:gochecknoglobals
-
-func init() { //nolint:gochecknoinits
-	nullNode.left = nullNode
-	nullNode.right = nullNode
-}
-
 // Node represents a single file in the sorted tree.
 type Node struct {
 	left, right *Node
@@ -44,6 +37,8 @@ type Node struct {
 	Size        int64
 	Inode       int64
 }
+
+var nullNode = &Node{Size: -1} //nolint:gochecknoglobals
 
 func (n *Node) compare(e *Node) int64 {
 	if n.Size == e.Size {
@@ -141,4 +136,9 @@ func (n *Node) iter(yield func(*Node) bool) bool {
 	}
 
 	return right.iter(yield)
+}
+
+func init() { //nolint:gochecknoinits
+	nullNode.left = nullNode
+	nullNode.right = nullNode
 }

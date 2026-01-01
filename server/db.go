@@ -46,6 +46,145 @@ const (
 	keyPart       = 1
 )
 
+var validDBDir = regexp.MustCompile(`^[^.][^_]*_.`)
+
+type nameVersion struct {
+	name    string
+	version string
+}
+
+func findDBDirs(basepath string, required ...string) ([]string, []string, error) {
+	entries, err := os.ReadDir(basepath)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	var toDelete []string
+
+	latest := make(map[string]nameVersion)
+
+	for _, entry := range entries {
+		if !IsValidDBDir(entry, basepath, required...) {
+			continue
+		}
+
+		toDelete = addEntryToMap(entry, latest, toDelete)
+	}
+
+	dirs := make([]string, 0, len(latest))
+
+	for _, nt := range latest {
+		dirs = append(dirs, filepath.Join(basepath, nt.name))
+	}
+
+	slices.Sort(dirs)
+
+	return dirs, toDelete, nil
+}
+
+// IsValidDBDir returns true if the given entry is a directory named with the
+// correct format and containing the required files.
+func IsValidDBDir(entry fs.DirEntry, basepath string, required ...string) bool {
+	name := entry.Name()
+
+	if !entry.IsDir() || !validDBDir.MatchString(name) {
+		return false
+	}
+
+	for _, entry := range required {
+		if !entryExists(filepath.Join(basepath, name, entry)) {
+			return false
+		}
+	}
+
+	return true
+}
+
+func entryExists(path string) bool {
+	_, err := os.Stat(path)
+
+	return err == nil
+}
+
+func addEntryToMap(entry fs.DirEntry, latest map[string]nameVersion, toDelete []string) []string {
+	parts := strings.SplitN(entry.Name(), "_", numDBDirParts)
+	key := parts[1]
+
+	version := parts[0]
+
+	if previous, ok := latest[key]; previous.version > version { //nolint:nestif
+		toDelete = append(toDelete, key)
+	} else {
+		if ok {
+			toDelete = append(toDelete, previous.name)
+		}
+
+		latest[key] = nameVersion{name: entry.Name(), version: version}
+	}
+
+	return toDelete
+}
+
+// FindDBDirs finds the latest dirguta and basedir databases in the given base
+// directory, returning the paths to the dirguta dbs and basedir dbs for each
+// key/mountpoint.
+func FindDBDirs(basepath string, required ...string) ([]string, error) {
+	dbPaths, _, err := findDBDirs(basepath, required...)
+
+	return dbPaths, err
+}
+
+func joinPaths(dbPaths, toDelete []string, dgutaDBName, basedirDBName string) ([]string, []string, []string, []string) {
+	dirgutaPaths, baseDirPaths := JoinDBPaths(dbPaths, dgutaDBName, basedirDBName)
+	removeDirgutaPaths, removeBaseDirPaths := JoinDBPaths(toDelete, dgutaDBName, basedirDBName)
+
+	return dirgutaPaths, baseDirPaths, removeDirgutaPaths, removeBaseDirPaths
+}
+
+// JoinDBPaths produces a list of a dgutaDB paths and basedirDB paths from the
+// provided base dbPaths and the basenames of the DBs.
+func JoinDBPaths(dbPaths []string, dgutaDBName, basedirDBName string) ([]string, []string) {
+	dirgutaPaths := make([]string, len(dbPaths))
+	baseDirPaths := make([]string, len(dbPaths))
+
+	for n, path := range dbPaths {
+		dirgutaPaths[n] = filepath.Join(path, dgutaDBName)
+		baseDirPaths[n] = filepath.Join(path, basedirDBName)
+	}
+
+	return dirgutaPaths, baseDirPaths
+}
+
+func addBaseToDelete(basepath string, toDelete []string) []string {
+	t := make([]string, len(toDelete))
+
+	for n, path := range toDelete {
+		t[n] = filepath.Join(basepath, path)
+	}
+
+	return t
+}
+
+func removeAll(baseDirectory string, toDelete []string) error {
+	for _, path := range toDelete {
+		// Create marker to avoid the watch subcommand re-running a summarise.
+		f, err := os.Create(filepath.Join(baseDirectory, "."+path))
+		if err != nil {
+			return err
+		}
+
+		if err := f.Close(); err != nil {
+			return err
+		}
+
+		if err := os.RemoveAll(filepath.Join(baseDirectory, path)); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 // LoadDBs loads dirguta and basedir databases from the given
 // directory/directories, and adds the relevant endpoints to the REST API.
 //
@@ -209,16 +348,6 @@ func (s *Server) reloadLoop(basepath, dgutaDBName, basedirDBName string, //nolin
 	}
 }
 
-func addBaseToDelete(basepath string, toDelete []string) []string {
-	t := make([]string, len(toDelete))
-
-	for n, path := range toDelete {
-		t[n] = filepath.Join(basepath, path)
-	}
-
-	return t
-}
-
 // reloadDBs performs incremental reload of the DirGUTAge tree and basedirs
 // MultiReader. It updates only new or changed databases while closing obsolete
 // ones and prewarming caches.
@@ -302,134 +431,6 @@ func (s *Server) logReloadError(format string, v ...any) bool {
 	s.Logger.Printf(format, v...)
 
 	return false
-}
-
-// FindDBDirs finds the latest dirguta and basedir databases in the given base
-// directory, returning the paths to the dirguta dbs and basedir dbs for each
-// key/mountpoint.
-func FindDBDirs(basepath string, required ...string) ([]string, error) {
-	dbPaths, _, err := findDBDirs(basepath, required...)
-
-	return dbPaths, err
-}
-
-// JoinDBPaths produces a list of a dgutaDB paths and basedirDB paths from the
-// provided base dbPaths and the basenames of the DBs.
-func JoinDBPaths(dbPaths []string, dgutaDBName, basedirDBName string) ([]string, []string) {
-	dirgutaPaths := make([]string, len(dbPaths))
-	baseDirPaths := make([]string, len(dbPaths))
-
-	for n, path := range dbPaths {
-		dirgutaPaths[n] = filepath.Join(path, dgutaDBName)
-		baseDirPaths[n] = filepath.Join(path, basedirDBName)
-	}
-
-	return dirgutaPaths, baseDirPaths
-}
-
-func joinPaths(dbPaths, toDelete []string, dgutaDBName, basedirDBName string) ([]string, []string, []string, []string) {
-	dirgutaPaths, baseDirPaths := JoinDBPaths(dbPaths, dgutaDBName, basedirDBName)
-	removeDirgutaPaths, removeBaseDirPaths := JoinDBPaths(toDelete, dgutaDBName, basedirDBName)
-
-	return dirgutaPaths, baseDirPaths, removeDirgutaPaths, removeBaseDirPaths
-}
-
-type nameVersion struct {
-	name    string
-	version string
-}
-
-func findDBDirs(basepath string, required ...string) ([]string, []string, error) {
-	entries, err := os.ReadDir(basepath)
-	if err != nil {
-		return nil, nil, err
-	}
-	var toDelete []string
-
-	latest := make(map[string]nameVersion)
-
-	for _, entry := range entries {
-		if !IsValidDBDir(entry, basepath, required...) {
-			continue
-		}
-
-		toDelete = addEntryToMap(entry, latest, toDelete)
-	}
-
-	dirs := make([]string, 0, len(latest))
-
-	for _, nt := range latest {
-		dirs = append(dirs, filepath.Join(basepath, nt.name))
-	}
-
-	slices.Sort(dirs)
-
-	return dirs, toDelete, nil
-}
-
-var validDBDir = regexp.MustCompile(`^[^.][^_]*_.`)
-
-// IsValidDBDir returns true if the given entry is a directory named with the
-// correct format and containing the required files.
-func IsValidDBDir(entry fs.DirEntry, basepath string, required ...string) bool {
-	name := entry.Name()
-
-	if !entry.IsDir() || !validDBDir.MatchString(name) {
-		return false
-	}
-
-	for _, entry := range required {
-		if !entryExists(filepath.Join(basepath, name, entry)) {
-			return false
-		}
-	}
-
-	return true
-}
-
-func entryExists(path string) bool {
-	_, err := os.Stat(path)
-
-	return err == nil
-}
-
-func addEntryToMap(entry fs.DirEntry, latest map[string]nameVersion, toDelete []string) []string {
-	parts := strings.SplitN(entry.Name(), "_", numDBDirParts)
-	key := parts[1]
-
-	version := parts[0]
-
-	if previous, ok := latest[key]; previous.version > version { //nolint:nestif
-		toDelete = append(toDelete, key)
-	} else {
-		if ok {
-			toDelete = append(toDelete, previous.name)
-		}
-
-		latest[key] = nameVersion{name: entry.Name(), version: version}
-	}
-
-	return toDelete
-}
-
-func removeAll(baseDirectory string, toDelete []string) error {
-	for _, path := range toDelete {
-		// Create marker to avoid the watch subcommand re-running a summarise.
-		f, err := os.Create(filepath.Join(baseDirectory, "."+path))
-		if err != nil {
-			return err
-		}
-
-		if err := f.Close(); err != nil {
-			return err
-		}
-
-		if err := os.RemoveAll(filepath.Join(baseDirectory, path)); err != nil {
-			return err
-		}
-	}
-
-	return nil
 }
 
 func (s *Server) dbUpdateTimestamps(c *gin.Context) {

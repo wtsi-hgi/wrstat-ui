@@ -61,30 +61,164 @@ const (
 
 var bucketKeySeparatorByteSlice = []byte{bucketKeySeparatorByte} //nolint:gochecknoglobals
 
-// Usage holds information summarising usage by a particular GID/UID-BaseDir.
-//
-// Only one of GID or UID will be set, and Owner will always be blank when UID
-// is set. If GID is set, then UIDs will be set, showing which users own files
-// in the BaseDir. If UID is set, then GIDs will be set, showing which groups
-// own files in the BaseDir.
-type Usage struct {
-	GID         uint32
-	UID         uint32
-	GIDs        []uint32
-	UIDs        []uint32
-	Name        string // the group or user name
-	Owner       string
-	BaseDir     string
-	UsageSize   uint64
-	QuotaSize   uint64
-	UsageInodes uint64
-	QuotaInodes uint64
-	Mtime       time.Time
-	// DateNoSpace is an estimate of when there will be no space quota left.
-	DateNoSpace time.Time
-	// DateNoFiles is an estimate of when there will be no inode quota left.
-	DateNoFiles time.Time
-	Age         db.DirGUTAge
+// UsageBreakdownByType is a map of file type to total size of files in bytes
+// with that type.
+type UsageBreakdownByType map[db.DirGUTAFileType]uint64
+
+func (u UsageBreakdownByType) String() string {
+	var sb strings.Builder
+
+	types := make([]db.DirGUTAFileType, 0, len(u))
+
+	for ft := range u {
+		types = append(types, ft)
+	}
+
+	sort.Slice(types, func(i, j int) bool {
+		return types[i] < types[j]
+	})
+
+	for n, ft := range types {
+		if n > 0 {
+			sb.WriteByte(' ')
+		}
+
+		fmt.Fprintf(&sb, "%s: %.2f", ft, float64(u[ft])/gBytes)
+	}
+
+	return sb.String()
+}
+
+// SubDir contains information about a sub-directory of a base directory.
+type SubDir struct {
+	SubDir       string
+	NumFiles     uint64
+	SizeFiles    uint64
+	LastModified time.Time
+	FileUsage    UsageBreakdownByType
+}
+
+// MergeDBs merges the basedirs.db database at the given A and B paths and
+// creates a new database file at outputPath.
+func MergeDBs(pathA, pathB, outputPath string) (err error) { //nolint:funlen
+	var dbA, dbB, dbC *bolt.DB
+
+	closeDB := func(db *bolt.DB) {
+		errc := db.Close()
+		if err == nil {
+			err = errc
+		}
+	}
+
+	dbA, err = OpenDBRO(pathA)
+	if err != nil {
+		return err
+	}
+
+	defer closeDB(dbA)
+
+	dbB, err = OpenDBRO(pathB)
+	if err != nil {
+		return err
+	}
+
+	defer closeDB(dbB)
+
+	dbC, err = openDB(outputPath)
+	if err != nil {
+		return err
+	}
+
+	defer closeDB(dbC)
+
+	err = dbC.Update(func(tx *bolt.Tx) error {
+		err = transferAllBucketContents(tx, dbA)
+		if err != nil {
+			return err
+		}
+
+		return transferAllBucketContents(tx, dbB)
+	})
+
+	return err
+}
+
+func openDB(dbPath string) (*bolt.DB, error) {
+	return bolt.Open(dbPath, dbOpenMode, &bolt.Options{
+		NoFreelistSync: true,
+		NoGrowSync:     true,
+		FreelistType:   bolt.FreelistMapType,
+	})
+}
+
+func transferAllBucketContents(utx *bolt.Tx, source *bolt.DB) error {
+	if err := createBucketsIfNotExist(utx); err != nil {
+		return err
+	}
+
+	return source.View(func(vtx *bolt.Tx) error {
+		for _, bucket := range []string{
+			GroupUsageBucket, GroupHistoricalBucket,
+			GroupSubDirsBucket, UserUsageBucket, UserSubDirsBucket,
+		} {
+			err := transferBucketContents(vtx, utx, bucket)
+			if err != nil {
+				return err
+			}
+		}
+
+		return nil
+	})
+}
+
+func createBucketsIfNotExist(tx *bolt.Tx) error {
+	for _, bucket := range [...]string{
+		GroupUsageBucket, GroupHistoricalBucket,
+		GroupSubDirsBucket, UserUsageBucket, UserSubDirsBucket,
+	} {
+		if _, errc := tx.CreateBucketIfNotExists([]byte(bucket)); errc != nil {
+			return errc
+		}
+	}
+
+	return nil
+}
+
+func transferBucketContents(vtx, utx *bolt.Tx, bucketName string) error {
+	sourceBucket := vtx.Bucket([]byte(bucketName))
+	destBucket := utx.Bucket([]byte(bucketName))
+
+	return sourceBucket.ForEach(func(k, v []byte) error {
+		return destBucket.Put(k, v)
+	})
+}
+
+func clearUsageBuckets(tx *bolt.Tx) error {
+	if err := tx.DeleteBucket([]byte(GroupUsageBucket)); err != nil && !errors.Is(err, berrors.ErrBucketNotFound) {
+		return err
+	}
+
+	if err := tx.DeleteBucket([]byte(UserUsageBucket)); err != nil && !errors.Is(err, berrors.ErrBucketNotFound) {
+		return err
+	}
+
+	return nil
+}
+
+func keyName(id uint32, path string, age db.DirGUTAge) []byte {
+	length := sizeOfKeyWithoutPath + len(path)
+	b := make([]byte, sizeOfUint32, length)
+	binary.LittleEndian.PutUint32(b, id)
+	b = append(b, bucketKeySeparatorByte)
+	b = append(b, path...)
+
+	if age != db.DGUTAgeAll {
+		b = append(b, bucketKeySeparatorByte)
+		b = b[:length]
+		binary.LittleEndian.PutUint16(b[length-sizeOfUint16:], uint16(age))
+	}
+
+	return b
 }
 
 // Output creates a database containing usage information for each of
@@ -106,14 +240,6 @@ func (b *BaseDirs) Output(users, groups IDAgeDirs) error {
 	}
 
 	return db.Close()
-}
-
-func openDB(dbPath string) (*bolt.DB, error) {
-	return bolt.Open(dbPath, dbOpenMode, &bolt.Options{
-		NoFreelistSync: true,
-		NoGrowSync:     true,
-		FreelistType:   bolt.FreelistMapType,
-	})
 }
 
 func (b *BaseDirs) updateDatabase(users, groups IDAgeDirs) func(*bolt.Tx) error {
@@ -138,37 +264,38 @@ func (b *BaseDirs) updateDatabase(users, groups IDAgeDirs) func(*bolt.Tx) error 
 	}
 }
 
-func clearUsageBuckets(tx *bolt.Tx) error {
-	if err := tx.DeleteBucket([]byte(GroupUsageBucket)); err != nil && !errors.Is(err, berrors.ErrBucketNotFound) {
-		return err
-	}
-
-	if err := tx.DeleteBucket([]byte(UserUsageBucket)); err != nil && !errors.Is(err, berrors.ErrBucketNotFound) {
-		return err
-	}
-
-	return nil
-}
-
-func createBucketsIfNotExist(tx *bolt.Tx) error {
-	for _, bucket := range [...]string{
-		GroupUsageBucket, GroupHistoricalBucket,
-		GroupSubDirsBucket, UserUsageBucket, UserSubDirsBucket,
-	} {
-		if _, errc := tx.CreateBucketIfNotExists([]byte(bucket)); errc != nil {
-			return errc
-		}
-	}
-
-	return nil
-}
-
 func (b *BaseDirs) calculateUsage(tx *bolt.Tx, gidBase IDAgeDirs, uidBase IDAgeDirs) error {
 	if errc := b.storeGIDBaseDirs(tx, gidBase); errc != nil {
 		return errc
 	}
 
 	return b.storeUIDBaseDirs(tx, uidBase)
+}
+
+// Usage holds information summarising usage by a particular GID/UID-BaseDir.
+//
+// Only one of GID or UID will be set, and Owner will always be blank when UID
+// is set. If GID is set, then UIDs will be set, showing which users own files
+// in the BaseDir. If UID is set, then GIDs will be set, showing which groups
+// own files in the BaseDir.
+type Usage struct {
+	GID         uint32
+	UID         uint32
+	GIDs        []uint32
+	UIDs        []uint32
+	Name        string // the group or user name
+	Owner       string
+	BaseDir     string
+	UsageSize   uint64
+	QuotaSize   uint64
+	UsageInodes uint64
+	QuotaInodes uint64
+	Mtime       time.Time
+	// DateNoSpace is an estimate of when there will be no space quota left.
+	DateNoSpace time.Time
+	// DateNoFiles is an estimate of when there will be no inode quota left.
+	DateNoFiles time.Time
+	Age         db.DirGUTAge
 }
 
 func (b *BaseDirs) storeGIDBaseDirs(tx *bolt.Tx, gidBase IDAgeDirs) error { //nolint:gocognit
@@ -199,22 +326,6 @@ func (b *BaseDirs) storeGIDBaseDirs(tx *bolt.Tx, gidBase IDAgeDirs) error { //no
 	}
 
 	return nil
-}
-
-func keyName(id uint32, path string, age db.DirGUTAge) []byte {
-	length := sizeOfKeyWithoutPath + len(path)
-	b := make([]byte, sizeOfUint32, length)
-	binary.LittleEndian.PutUint32(b, id)
-	b = append(b, bucketKeySeparatorByte)
-	b = append(b, path...)
-
-	if age != db.DGUTAgeAll {
-		b = append(b, bucketKeySeparatorByte)
-		b = b[:length]
-		binary.LittleEndian.PutUint16(b[length-sizeOfUint16:], uint16(age))
-	}
-
-	return b
 }
 
 func (b *BaseDirs) encodeToBytes(data any) []byte {
@@ -354,43 +465,6 @@ func (b *BaseDirs) decodeFromBytes(encoded []byte, data any) error {
 	return codec.NewDecoderBytes(encoded, b.ch).Decode(data)
 }
 
-// UsageBreakdownByType is a map of file type to total size of files in bytes
-// with that type.
-type UsageBreakdownByType map[db.DirGUTAFileType]uint64
-
-func (u UsageBreakdownByType) String() string {
-	var sb strings.Builder
-
-	types := make([]db.DirGUTAFileType, 0, len(u))
-
-	for ft := range u {
-		types = append(types, ft)
-	}
-
-	sort.Slice(types, func(i, j int) bool {
-		return types[i] < types[j]
-	})
-
-	for n, ft := range types {
-		if n > 0 {
-			sb.WriteByte(' ')
-		}
-
-		fmt.Fprintf(&sb, "%s: %.2f", ft, float64(u[ft])/gBytes)
-	}
-
-	return sb.String()
-}
-
-// SubDir contains information about a sub-directory of a base directory.
-type SubDir struct {
-	SubDir       string
-	NumFiles     uint64
-	SizeFiles    uint64
-	LastModified time.Time
-	FileUsage    UsageBreakdownByType
-}
-
 func (b *BaseDirs) calculateSubDirUsage(tx *bolt.Tx, gidBase, uidBase IDAgeDirs) error {
 	if errc := b.storeGIDSubDirs(tx, gidBase); errc != nil {
 		return errc
@@ -491,78 +565,4 @@ func (b *BaseDirs) history(bucket *bolt.Bucket, gid uint32, path string) ([]Hist
 	err := b.decodeFromBytes(data, &history)
 
 	return history, err
-}
-
-// MergeDBs merges the basedirs.db database at the given A and B paths and
-// creates a new database file at outputPath.
-func MergeDBs(pathA, pathB, outputPath string) (err error) { //nolint:funlen
-	var dbA, dbB, dbC *bolt.DB
-
-	closeDB := func(db *bolt.DB) {
-		errc := db.Close()
-		if err == nil {
-			err = errc
-		}
-	}
-
-	dbA, err = OpenDBRO(pathA)
-	if err != nil {
-		return err
-	}
-
-	defer closeDB(dbA)
-
-	dbB, err = OpenDBRO(pathB)
-	if err != nil {
-		return err
-	}
-
-	defer closeDB(dbB)
-
-	dbC, err = openDB(outputPath)
-	if err != nil {
-		return err
-	}
-
-	defer closeDB(dbC)
-
-	err = dbC.Update(func(tx *bolt.Tx) error {
-		err = transferAllBucketContents(tx, dbA)
-		if err != nil {
-			return err
-		}
-
-		return transferAllBucketContents(tx, dbB)
-	})
-
-	return err
-}
-
-func transferAllBucketContents(utx *bolt.Tx, source *bolt.DB) error {
-	if err := createBucketsIfNotExist(utx); err != nil {
-		return err
-	}
-
-	return source.View(func(vtx *bolt.Tx) error {
-		for _, bucket := range []string{
-			GroupUsageBucket, GroupHistoricalBucket,
-			GroupSubDirsBucket, UserUsageBucket, UserSubDirsBucket,
-		} {
-			err := transferBucketContents(vtx, utx, bucket)
-			if err != nil {
-				return err
-			}
-		}
-
-		return nil
-	})
-}
-
-func transferBucketContents(vtx, utx *bolt.Tx, bucketName string) error {
-	sourceBucket := vtx.Bucket([]byte(bucketName))
-	destBucket := utx.Bucket([]byte(bucketName))
-
-	return sourceBucket.ForEach(func(k, v []byte) error {
-		return destBucket.Put(k, v)
-	})
 }

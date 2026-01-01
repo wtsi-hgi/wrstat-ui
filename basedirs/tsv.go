@@ -61,6 +61,31 @@ type configAttrs struct {
 	MinDirs int
 }
 
+func parseLine(line []byte) (configAttrs, error) {
+	attr := bytes.Split(line, tabByte)
+	if len(attr) != numColumns {
+		return configAttrs{}, ErrBadTSV
+	}
+
+	prefix := string(attr[0])
+
+	splits, err := strconv.ParseUint(string(attr[1]), 10, 0)
+	if err != nil {
+		return configAttrs{}, err
+	}
+
+	minDirs, err := strconv.ParseUint(string(attr[2]), 10, 0)
+	if err != nil {
+		return configAttrs{}, err
+	}
+
+	return configAttrs{
+		Prefix:  split.SplitPath(prefix),
+		Splits:  int(splits),
+		MinDirs: int(minDirs),
+	}, nil
+}
+
 func (c *configAttrs) PathShouldOutput(path *summary.DirectoryPath) bool {
 	return path.Depth >= c.MinDirs && path.Depth < c.MinDirs+c.Splits
 }
@@ -131,31 +156,6 @@ func ParseConfig(r io.Reader) (Config, error) {
 	sort.Slice(result, func(i, j int) bool { return len(result[i].Prefix) > len(result[j].Prefix) })
 
 	return result, nil
-}
-
-func parseLine(line []byte) (configAttrs, error) {
-	attr := bytes.Split(line, tabByte)
-	if len(attr) != numColumns {
-		return configAttrs{}, ErrBadTSV
-	}
-
-	prefix := string(attr[0])
-
-	splits, err := strconv.ParseUint(string(attr[1]), 10, 0)
-	if err != nil {
-		return configAttrs{}, err
-	}
-
-	minDirs, err := strconv.ParseUint(string(attr[2]), 10, 0)
-	if err != nil {
-		return configAttrs{}, err
-	}
-
-	return configAttrs{
-		Prefix:  split.SplitPath(prefix),
-		Splits:  int(splits),  //nolint:gosec
-		MinDirs: int(minDirs), //nolint:gosec
-	}, nil
 }
 
 // PathShouldOutput returns true if, according to the parsed config, basedirs

@@ -33,6 +33,67 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/summary"
 )
 
+// DirSummary holds nested file count, size, atime and mtime information on a
+// directory. It also holds which users and groups own files nested under the
+// directory, what the file types are, and the age group.
+type DirSummary struct {
+	Dir         string
+	Count       uint64
+	Size        uint64
+	Atime       time.Time
+	CommonATime summary.AgeRange
+	Mtime       time.Time
+	CommonMTime summary.AgeRange
+	UIDs        []uint32
+	GIDs        []uint32
+	FT          DirGUTAFileType
+	Age         DirGUTAge
+	Modtime     time.Time
+}
+
+// DCSs is a Size-sortable slice of DirSummary.
+type DCSs []*DirSummary
+
+func (d DCSs) Len() int {
+	return len(d)
+}
+
+func (d DCSs) Swap(i, j int) {
+	d[i], d[j] = d[j], d[i]
+}
+
+func (d DCSs) Less(i, j int) bool {
+	if d[i].Size == d[j].Size {
+		return d[i].Dir < d[j].Dir
+	}
+
+	return d[i].Size > d[j].Size
+}
+
+// SortByDirAndAge sorts by Dir first then Age instead of Size.
+func (d DCSs) SortByDirAndAge() {
+	sort.Slice(d, func(i, j int) bool {
+		if d[i].Dir != d[j].Dir {
+			return d[i].Dir < d[j].Dir
+		}
+
+		return d[i].Age < d[j].Age
+	})
+}
+
+// DirInfo holds nested file count, size, UID and GID information on a
+// directory, and also its immediate child directories.
+type DirInfo struct {
+	Current  *DirSummary
+	Children []*DirSummary
+}
+
+// IsSameAsChild tells you if this DirInfo has only 1 child, and the child
+// has the same file count. Ie. our child contains the same files as us.
+func (d *DirInfo) IsSameAsChild() bool {
+	return len(d.Children) == 1 && d.Children[0].Count == d.Current.Count
+}
+
 // Tree is used to do high-level queries on DB.Store() database files.
 type Tree struct {
 	db *DB
@@ -72,65 +133,6 @@ func (t *Tree) OpenFrom(add, remove []string) (*Tree, error) {
 // the old Tree.
 func (t *Tree) CloseOnly(paths []string) error {
 	return t.db.CloseOnly(paths)
-}
-
-// DirSummary holds nested file count, size, atime and mtime information on a
-// directory. It also holds which users and groups own files nested under the
-// directory, what the file types are, and the age group.
-type DirSummary struct {
-	Dir         string
-	Count       uint64
-	Size        uint64
-	Atime       time.Time
-	CommonATime summary.AgeRange
-	Mtime       time.Time
-	CommonMTime summary.AgeRange
-	UIDs        []uint32
-	GIDs        []uint32
-	FT          DirGUTAFileType
-	Age         DirGUTAge
-	Modtime     time.Time
-}
-
-// DCSs is a Size-sortable slice of DirSummary.
-type DCSs []*DirSummary
-
-func (d DCSs) Len() int {
-	return len(d)
-}
-func (d DCSs) Swap(i, j int) {
-	d[i], d[j] = d[j], d[i]
-}
-func (d DCSs) Less(i, j int) bool {
-	if d[i].Size == d[j].Size {
-		return d[i].Dir < d[j].Dir
-	}
-
-	return d[i].Size > d[j].Size
-}
-
-// SortByDirAndAge sorts by Dir first then Age instead of Size.
-func (d DCSs) SortByDirAndAge() {
-	sort.Slice(d, func(i, j int) bool {
-		if d[i].Dir != d[j].Dir {
-			return d[i].Dir < d[j].Dir
-		}
-
-		return d[i].Age < d[j].Age
-	})
-}
-
-// DirInfo holds nested file count, size, UID and GID information on a
-// directory, and also its immediate child directories.
-type DirInfo struct {
-	Current  *DirSummary
-	Children []*DirSummary
-}
-
-// IsSameAsChild tells you if this DirInfo has only 1 child, and the child
-// has the same file count. Ie. our child contains the same files as us.
-func (d *DirInfo) IsSameAsChild() bool {
-	return len(d.Children) == 1 && d.Children[0].Count == d.Current.Count
 }
 
 // DirInfo tells you the total number of files and their total size nested under

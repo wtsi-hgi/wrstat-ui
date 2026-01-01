@@ -102,6 +102,14 @@ const (
 	unknown    = "#unknown"
 )
 
+// usageCache holds precomputed JSON data for a response.
+// jsonData: the uncompressed JSON payload.
+// gzipData: the gzip-compressed JSON payload for clients that support it.
+type usageCache struct {
+	jsonData []byte
+	gzipData []byte
+}
+
 // Server is used to start a web server that provides a REST API to the dgut
 // package's database, and a website that displays the information nicely.
 type Server struct {
@@ -123,14 +131,6 @@ type Server struct {
 	analyticsStmt   *sql.Stmt
 	groupUsageCache usageCache
 	userUsageCache  usageCache
-}
-
-// usageCache holds precomputed JSON data for a response.
-// jsonData: the uncompressed JSON payload.
-// gzipData: the gzip-compressed JSON payload for clients that support it.
-type usageCache struct {
-	jsonData []byte
-	gzipData []byte
 }
 
 // New creates a Server which can serve a REST API and website.
@@ -209,6 +209,23 @@ func (s *Server) buildCache(
 	return nil
 }
 
+// compressGzip compresses JSON into gzip format.
+func compressGzip(data []byte) ([]byte, error) {
+	var buf bytes.Buffer
+
+	gz := gzip.NewWriter(&buf)
+
+	if _, err := gz.Write(data); err != nil {
+		return nil, err
+	}
+
+	if err := gz.Close(); err != nil {
+		return nil, err
+	}
+
+	return buf.Bytes(), nil
+}
+
 // collectUsage runs the usage function across all DirGUTAge values and combines
 // results.
 func (s *Server) collectUsage(
@@ -226,20 +243,4 @@ func (s *Server) collectUsage(
 	}
 
 	return results, nil
-}
-
-// compressGzip compresses JSON into gzip format.
-func compressGzip(data []byte) ([]byte, error) {
-	var buf bytes.Buffer
-	gz := gzip.NewWriter(&buf)
-
-	if _, err := gz.Write(data); err != nil {
-		return nil, err
-	}
-
-	if err := gz.Close(); err != nil {
-		return nil, err
-	}
-
-	return buf.Bytes(), nil
 }

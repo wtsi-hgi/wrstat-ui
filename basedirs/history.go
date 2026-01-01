@@ -86,13 +86,61 @@ func historyKey(gid uint32, mountPoint string) []byte {
 	return keyName(gid, mountPoint, db.DGUTAgeAll)
 }
 
-type mountPoints []string
+// DateQuotaFull returns our estimate of when the quota will fill based on the
+// history of usage over time. Returns date when size full, and date when inodes
+// full.
+//
+// Returns a zero time value if the estimate is infinite.
+func DateQuotaFull(history []History) (time.Time, time.Time) {
+	var oldest History
 
-// SetMountPoints can be used to manually set your mountpoints, if the automatic
-// discovery of mountpoints on your system doesn't work.
-func (b *BaseDirReader) SetMountPoints(mountpoints []string) {
-	b.mountPoints = validateMountPoints(mountpoints)
+	switch len(history) {
+	case 0:
+		return time.Time{}, time.Time{}
+	case 1, 2: //nolint:mnd
+		oldest = history[0]
+	default:
+		oldest = history[len(history)-3]
+	}
+
+	latest := history[len(history)-1]
+
+	untilSize := calculateTrend(latest.QuotaSize, latest.Date, oldest.Date, latest.UsageSize, oldest.UsageSize)
+	untilInodes := calculateTrend(latest.QuotaInodes, latest.Date, oldest.Date, latest.UsageInodes, oldest.UsageInodes)
+
+	return untilSize, untilInodes
 }
+
+func calculateTrend(maxV uint64, latestTime, oldestTime time.Time, latestValue, oldestValue uint64) time.Time {
+	if latestValue >= maxV {
+		return latestTime
+	}
+
+	if latestTime.Equal(oldestTime) || latestValue <= oldestValue {
+		return time.Time{}
+	}
+
+	latestSecs := float64(latestTime.Unix())
+	oldestSecs := float64(oldestTime.Unix())
+
+	dt := latestSecs - oldestSecs
+
+	dy := float64(latestValue - oldestValue)
+
+	c := float64(latestValue) - latestSecs*dy/dt
+
+	secs := (float64(maxV) - c) * dt / dy
+
+	t := time.Unix(int64(secs), 0)
+
+	if t.After(time.Now().Add(fiveYearsInHours * time.Hour)) {
+		return time.Time{}
+	}
+
+	return t
+}
+
+type mountPoints []string
 
 func validateMountPoints(mountpoints []string) mountPoints {
 	mps := make(mountPoints, len(mountpoints))
@@ -147,58 +195,10 @@ func (m mountPoints) prefixOf(basedir string) string {
 	return ""
 }
 
-// DateQuotaFull returns our estimate of when the quota will fill based on the
-// history of usage over time. Returns date when size full, and date when inodes
-// full.
-//
-// Returns a zero time value if the estimate is infinite.
-func DateQuotaFull(history []History) (time.Time, time.Time) {
-	var oldest History
-
-	switch len(history) {
-	case 0:
-		return time.Time{}, time.Time{}
-	case 1, 2: //nolint:mnd
-		oldest = history[0]
-	default:
-		oldest = history[len(history)-3]
-	}
-
-	latest := history[len(history)-1]
-
-	untilSize := calculateTrend(latest.QuotaSize, latest.Date, oldest.Date, latest.UsageSize, oldest.UsageSize)
-	untilInodes := calculateTrend(latest.QuotaInodes, latest.Date, oldest.Date, latest.UsageInodes, oldest.UsageInodes)
-
-	return untilSize, untilInodes
-}
-
-func calculateTrend(maxV uint64, latestTime, oldestTime time.Time, latestValue, oldestValue uint64) time.Time {
-	if latestValue >= maxV {
-		return latestTime
-	}
-
-	if latestTime.Equal(oldestTime) || latestValue <= oldestValue {
-		return time.Time{}
-	}
-
-	latestSecs := float64(latestTime.Unix())
-	oldestSecs := float64(oldestTime.Unix())
-
-	dt := latestSecs - oldestSecs
-
-	dy := float64(latestValue - oldestValue)
-
-	c := float64(latestValue) - latestSecs*dy/dt
-
-	secs := (float64(maxV) - c) * dt / dy
-
-	t := time.Unix(int64(secs), 0)
-
-	if t.After(time.Now().Add(fiveYearsInHours * time.Hour)) {
-		return time.Time{}
-	}
-
-	return t
+// SetMountPoints can be used to manually set your mountpoints, if the automatic
+// discovery of mountpoints on your system doesn't work.
+func (b *BaseDirReader) SetMountPoints(mountpoints []string) {
+	b.mountPoints = validateMountPoints(mountpoints)
 }
 
 func (b *BaseDirs) CopyHistoryFrom(db *bolt.DB) (err error) {

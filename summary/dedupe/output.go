@@ -32,50 +32,6 @@ import (
 
 const minNodeGroups = 2
 
-// Print writes sized matched files to the output Writer. If all of the files in
-// a group are hardlinks of each other, nothing is printed.
-//
-// Each group of matched files will print a small header in the following
-// format:
-//
-// Size: %d
-//
-// …followed by a list of the filenames of the matching files.
-//
-// Hardlinks to previously printed files are prefixed with a tab character.
-func (d *Deduper) Print(output io.Writer) error { //nolint:gocognit
-	var (
-		lastSize       int64 = -1
-		lastMountPoint int32 = -1
-		lastInode      int64 = -1
-
-		matches [][]*Node
-	)
-
-	for node := range d.Iter {
-		if node.Size != lastSize {
-			if err := outputNodes(output, matches); err != nil {
-				return err
-			}
-
-			lastSize = node.Size
-			lastMountPoint = -1
-			lastInode = -1
-			matches = nil
-		}
-
-		if node.Mountpoint != lastMountPoint || node.Inode != lastInode {
-			matches = append(matches, []*Node{node})
-			lastMountPoint = node.Mountpoint
-			lastInode = node.Inode
-		} else {
-			matches[len(matches)-1] = append(matches[len(matches)-1], node)
-		}
-	}
-
-	return outputNodes(output, matches)
-}
-
 func outputNodes(output io.Writer, nodes [][]*Node) error {
 	var buffer [4096]byte
 
@@ -118,4 +74,48 @@ func outputNode(output io.Writer, node *Node, buffer *[4096]byte) error {
 	_, err := fmt.Fprintf(output, "%q\n", append(node.Path.AppendTo(buffer[:0]), node.Name...))
 
 	return err
+}
+
+// Print writes sized matched files to the output Writer. If all of the files in
+// a group are hardlinks of each other, nothing is printed.
+//
+// Each group of matched files will print a small header in the following
+// format:
+//
+// Size: %d
+//
+// …followed by a list of the filenames of the matching files.
+//
+// Hardlinks to previously printed files are prefixed with a tab character.
+func (d *Deduper) Print(output io.Writer) error { //nolint:gocognit
+	var (
+		lastSize       int64 = -1
+		lastMountPoint int32 = -1
+		lastInode      int64 = -1
+
+		matches [][]*Node
+	)
+
+	for node := range d.Iter {
+		if node.Size != lastSize {
+			if err := outputNodes(output, matches); err != nil {
+				return err
+			}
+
+			lastSize = node.Size
+			lastMountPoint = -1
+			lastInode = -1
+			matches = nil
+		}
+
+		if node.Mountpoint != lastMountPoint || node.Inode != lastInode {
+			matches = append(matches, []*Node{node})
+			lastMountPoint = node.Mountpoint
+			lastInode = node.Inode
+		} else {
+			matches[len(matches)-1] = append(matches[len(matches)-1], node)
+		}
+	}
+
+	return outputNodes(output, matches)
 }

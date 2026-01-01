@@ -44,19 +44,6 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/server"
 )
 
-type Error string
-
-func (e Error) Error() string { return string(e) }
-
-const (
-	defaultWhereSplits             = 2
-	defaultSize                    = "50M"
-	hoursPerDay                    = 24
-	jwtBasename                    = ".wrstat.jwt"
-	errBadGroupArea                = Error("unknown group area")
-	privatePerms       os.FileMode = 0600
-)
-
 // options for this cmd.
 var (
 	whereQueryDir        string
@@ -212,6 +199,17 @@ with refreshes possible up to 5 days after expiry.
 	},
 }
 
+type Error string
+
+const (
+	defaultWhereSplits             = 2
+	defaultSize                    = "50M"
+	hoursPerDay                    = 24
+	jwtBasename                    = ".wrstat.jwt"
+	errBadGroupArea                = Error("unknown group area")
+	privatePerms       os.FileMode = 0600
+)
+
 func init() { //nolint:funlen
 	RootCmd.AddCommand(whereCmd)
 
@@ -267,33 +265,6 @@ func getServerURL(args []string) string {
 	return url
 }
 
-// showSupergroups does a query just to get details about the group areas.
-func showSupergroups(c *gas.ClientCLI) error {
-	areas, err := getSupergroups(c)
-	if err != nil {
-		return err
-	}
-
-	m, err := json.MarshalIndent(areas, "", "  ")
-	if err != nil {
-		return err
-	}
-
-	cliPrint("%s", string(m))
-
-	return nil
-}
-
-// getSupergroups returns the map of the server's configured group areas.
-func getSupergroups(c *gas.ClientCLI) (map[string][]string, error) {
-	areas, err := server.GetGroupAreas(c)
-	if err != nil {
-		return nil, err
-	}
-
-	return areas, nil
-}
-
 func stringToAge(ageStr string) db.DirGUTAge { //nolint:funlen,gocyclo,cyclop
 	switch ageStr {
 	case "A1M":
@@ -333,6 +304,25 @@ func stringToAge(ageStr string) db.DirGUTAge { //nolint:funlen,gocyclo,cyclop
 	die("invalid age")
 
 	return db.DGUTAgeAll
+}
+
+func (e Error) Error() string { return string(e) }
+
+// showSupergroups does a query just to get details about the group areas.
+func showSupergroups(c *gas.ClientCLI) error {
+	areas, err := getSupergroups(c)
+	if err != nil {
+		return err
+	}
+
+	m, err := json.MarshalIndent(areas, "", "  ")
+	if err != nil {
+		return err
+	}
+
+	cliPrint("%s", string(m))
+
+	return nil
 }
 
 // where does the main job of querying the server to answer where the data is on
@@ -388,6 +378,16 @@ func mergeGroupsWithAreaGroups(c *gas.ClientCLI, groups, supergroup string) (str
 	noDups := deDup(append(strings.Split(groups, ","), superGroups...))
 
 	return strings.Join(noDups, ","), nil
+}
+
+// getSupergroups returns the map of the server's configured group areas.
+func getSupergroups(c *gas.ClientCLI) (map[string][]string, error) {
+	areas, err := server.GetGroupAreas(c)
+	if err != nil {
+		return nil, err
+	}
+
+	return areas, nil
 }
 
 // deDup returns the given slice with duplicates removed.

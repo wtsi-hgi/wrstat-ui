@@ -194,6 +194,19 @@ files. It will use the mtime of the file as the data creation time in reports.
 	},
 }
 
+var whiteListGIDs = map[string]struct{}{
+	"0":     {},
+	"1105":  {},
+	"1313":  {},
+	"1818":  {},
+	"15306": {},
+	"1662":  {},
+	"15394": {},
+	"1527":  {},
+	"15705": {},
+	"15449": {},
+}
+
 func init() {
 	RootCmd.AddCommand(serverCmd)
 
@@ -231,6 +244,42 @@ func checkOAuthArgs() {
 	}
 }
 
+// authenticateDeny always returns false, since we don't do basic auth, but Okta
+// instead.
+func authenticateDeny(_, _ string) (bool, string) {
+	return false, ""
+}
+
+// whiteLister is currently hard-coded to say that membership of certain gids
+// means users should be treated like root.
+func whiteLister(gid string) bool {
+	_, ok := whiteListGIDs[gid]
+
+	return ok
+}
+
+// sayStarted logs to console that the server stated. It does this a second
+// after being calling in a goroutine, when we can assume the server has
+// actually started; if it failed, we expect it to do so in less than a second
+// and exit.
+func sayStarted() {
+	<-time.After(1 * time.Second)
+
+	info("server started")
+}
+
+// log15Writer wraps a log15.Logger to make it conform to io.Writer interface.
+type log15Writer struct {
+	logger log15.Logger
+}
+
+// Write conforms to the io.Writer interface.
+func (w *log15Writer) Write(p []byte) (n int, err error) {
+	w.logger.Info(string(p))
+
+	return len(p), nil
+}
+
 // setServerLogger makes our appLogger log to the given path if non-blank,
 // otherwise to syslog. Returns an io.Writer version of our appLogger for the
 // server to log to.
@@ -252,45 +301,6 @@ func logToSyslog() {
 	}
 
 	appLogger.SetHandler(fh)
-}
-
-// log15Writer wraps a log15.Logger to make it conform to io.Writer interface.
-type log15Writer struct {
-	logger log15.Logger
-}
-
-// Write conforms to the io.Writer interface.
-func (w *log15Writer) Write(p []byte) (n int, err error) {
-	w.logger.Info(string(p))
-
-	return len(p), nil
-}
-
-// authenticateDeny always returns false, since we don't do basic auth, but Okta
-// instead.
-func authenticateDeny(_, _ string) (bool, string) {
-	return false, ""
-}
-
-var whiteListGIDs = map[string]struct{}{
-	"0":     {},
-	"1105":  {},
-	"1313":  {},
-	"1818":  {},
-	"15306": {},
-	"1662":  {},
-	"15394": {},
-	"1527":  {},
-	"15705": {},
-	"15449": {},
-}
-
-// whiteLister is currently hard-coded to say that membership of certain gids
-// means users should be treated like root.
-func whiteLister(gid string) bool {
-	_, ok := whiteListGIDs[gid]
-
-	return ok
 }
 
 // areasCSVToMap takes a group,area csv file and converts it in to a map of
@@ -336,14 +346,4 @@ func makeCSVReader(path string) (*csv.Reader, *os.File) {
 	r.ReuseRecord = true
 
 	return r, f
-}
-
-// sayStarted logs to console that the server stated. It does this a second
-// after being calling in a goroutine, when we can assume the server has
-// actually started; if it failed, we expect it to do so in less than a second
-// and exit.
-func sayStarted() {
-	<-time.After(1 * time.Second)
-
-	info("server started")
 }

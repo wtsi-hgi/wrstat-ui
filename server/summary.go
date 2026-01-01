@@ -26,13 +26,57 @@
 package server
 
 import (
-	"fmt"
 	"os/user"
 	"sort"
+	"strconv"
 	"time"
 
 	"github.com/wtsi-hgi/wrstat-ui/db"
 )
+
+// idsToSortedNames uses the given callback to convert the given ids to names
+// (skipping if the cb errors), and sorts them. It caches results in the given
+// map, avoiding the use of the cb if we already have the answer.
+func idsToSortedNames(ids []uint32, cache map[uint32]string, cb func(string) (string, error)) []string {
+	names := make([]string, len(ids))
+
+	for i, id := range ids {
+		name, found := cache[id]
+		if found {
+			names[i] = name
+
+			continue
+		}
+
+		name, err := cb(strconv.FormatUint(uint64(id), 10))
+		if err != nil {
+			names[i] = unknown
+		} else {
+			names[i] = name
+		}
+
+		cache[id] = names[i]
+	}
+
+	names = removeUnknown(names)
+
+	sort.Strings(names)
+
+	return names
+}
+
+// removeUnknown does a no-allocation filter of slice to remove unknown entries.
+func removeUnknown(slice []string) []string {
+	filtered := slice[:0]
+
+	for _, item := range slice {
+		if item != unknown {
+			filtered = append(filtered, item)
+		}
+	}
+
+	return filtered
+}
 
 // DirSummary holds nested file count, size and atime information on a
 // directory. It also holds which users and groups own files nested under the
@@ -90,50 +134,6 @@ func (s *Server) uidsToUsernames(uids []uint32) []string {
 
 		return u.Username, nil
 	})
-}
-
-// idsToSortedNames uses the given callback to convert the given ids to names
-// (skipping if the cb errors), and sorts them. It caches results in the given
-// map, avoiding the use of the cb if we already have the answer.
-func idsToSortedNames(ids []uint32, cache map[uint32]string, cb func(string) (string, error)) []string {
-	names := make([]string, len(ids))
-
-	for i, id := range ids {
-		name, found := cache[id]
-		if found {
-			names[i] = name
-
-			continue
-		}
-
-		name, err := cb(fmt.Sprintf("%d", id))
-		if err != nil {
-			names[i] = unknown
-		} else {
-			names[i] = name
-		}
-
-		cache[id] = names[i]
-	}
-
-	names = removeUnknown(names)
-
-	sort.Strings(names)
-
-	return names
-}
-
-// removeUnknown does a no-allocation filter of slice to remove unknown entries.
-func removeUnknown(slice []string) []string {
-	filtered := slice[:0]
-
-	for _, item := range slice {
-		if item != unknown {
-			filtered = append(filtered, item)
-		}
-	}
-
-	return filtered
 }
 
 // gidsToNames converts the given unix group IDs to group names, sorted

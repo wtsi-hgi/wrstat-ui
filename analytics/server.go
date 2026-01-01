@@ -39,27 +39,12 @@ import (
 	_ "github.com/mattn/go-sqlite3" //
 )
 
-// StartServer will start an anlytics viewing server on the given server address
-// and using the given sqlite database.
-func StartServer(addr, dbPath, host string) error {
-	db, err := newDB(dbPath, host)
-	if err != nil {
-		return err
-	}
-
-	mux := http.NewServeMux()
-
-	mux.Handle("/", index)
-	mux.Handle("/analytics", handle[summaryInput](db.summary))
-	mux.Handle("/host", handle[byte](db.host))
-
-	return http.ListenAndServe(addr, mux) //nolint:gosec
-}
-
 type httpError struct {
 	code int
 	msg  string
 }
+
+var errInvalidRange = httpError{http.StatusBadRequest, "invalid date range"}
 
 func (h httpError) Error() string {
 	return fmt.Sprintf("%d: %s", h.code, h.msg)
@@ -102,10 +87,21 @@ func handleError(w http.ResponseWriter, err error) {
 	}
 }
 
-type database struct {
-	db          *sql.DB
-	summaryStmt *sql.Stmt
-	hostname    string
+// StartServer will start an anlytics viewing server on the given server address
+// and using the given sqlite database.
+func StartServer(addr, dbPath, host string) error {
+	db, err := newDB(dbPath, host)
+	if err != nil {
+		return err
+	}
+
+	mux := http.NewServeMux()
+
+	mux.Handle("/", index)
+	mux.Handle("/analytics", handle[summaryInput](db.summary))
+	mux.Handle("/host", handle[byte](db.host))
+
+	return http.ListenAndServe(addr, mux) //nolint:gosec
 }
 
 func newDB(dbPath, host string) (*database, error) {
@@ -152,6 +148,12 @@ func (r response) add(username, session, state string, timestamp uint64) {
 	u[session] = slices.Insert(s, pos, ne)
 }
 
+type database struct {
+	db          *sql.DB
+	summaryStmt *sql.Stmt
+	hostname    string
+}
+
 func (d *database) host(_ byte) (any, error) {
 	return d.hostname, nil
 }
@@ -185,5 +187,3 @@ func (d *database) summary(i summaryInput) (any, error) {
 
 	return r, nil
 }
-
-var errInvalidRange = httpError{http.StatusBadRequest, "invalid date range"}

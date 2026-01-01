@@ -56,32 +56,6 @@ const (
 	EndPointAuthSpyware = gas.EndPointAuth + spywarePath
 )
 
-// InitAnalyticsDB adds user activity recording to the server, saving users
-// sessions to an SQLite database stored at the given path.
-func (s *Server) InitAnalyticsDB(dbPath string) error {
-	authGroup := s.AuthRouter()
-	if authGroup == nil {
-		return gas.ErrNeedsAuth
-	}
-
-	db, err := sql.Open("sqlite3", dbPath)
-	if err != nil {
-		return err
-	}
-
-	db.SetMaxOpenConns(1)
-
-	if s.analyticsStmt, err = initDB(db); err != nil {
-		return err
-	}
-
-	s.analyticsDB = db
-
-	authGroup.POST(spywarePath, s.recordAnalytics)
-
-	return nil
-}
-
 func initDB(db *sql.DB) (*sql.Stmt, error) {
 	var err error
 
@@ -92,65 +66,12 @@ func initDB(db *sql.DB) (*sql.Stmt, error) {
 		`CREATE INDEX IF NOT EXISTS eventTime ON [events] (time)`,
 		`VACUUM;`,
 	} {
-		if _, err = db.Exec(cmd); err != nil {
+		if _, err = db.Exec(cmd); err != nil { //nolint:noctx
 			return nil, err
 		}
 	}
 
-	return db.Prepare("INSERT INTO [events] (user, session, state, time) VALUES (?, ?, ?, ?);")
-}
-
-func (s *Server) recordAnalytics(c *gin.Context) {
-	code, err := s.handleAnalytics(c)
-	if err != nil {
-		c.AbortWithError(code, err) //nolint:errcheck
-	} else {
-		c.AbortWithStatus(code)
-	}
-}
-
-func (s *Server) handleAnalytics(c *gin.Context) (int, error) {
-	if s.analyticsDB == nil {
-		return http.StatusServiceUnavailable, nil
-	}
-
-	username, state, code, err := s.dataFromHeaders(c)
-	if username == "" {
-		return code, err
-	}
-
-	sessionID, l, code, err := dataFromBody(c)
-
-	defer sessionPool.Put(sessionID)
-
-	if err != nil {
-		return code, err
-	}
-
-	if _, err := s.analyticsStmt.Exec(
-		username,
-		unsafe.String(&sessionID[0], l),
-		createStateData(state),
-		time.Now().Unix(),
-	); err != nil {
-		return http.StatusInternalServerError, nil
-	}
-
-	return http.StatusNoContent, nil
-}
-
-func (s *Server) dataFromHeaders(c *gin.Context) (string, url.Values, int, error) {
-	u, err := url.Parse(c.Request.Referer())
-	if err != nil {
-		return "", nil, http.StatusBadRequest, err
-	}
-
-	username := s.GetUser(c)
-	if username == nil {
-		return "", nil, http.StatusUnauthorized, nil
-	}
-
-	return username.Username, u.Query(), 0, nil
+	return db.Prepare("INSERT INTO [events] (user, session, state, time) VALUES (?, ?, ?, ?);") //nolint:noctx
 }
 
 func dataFromBody(c *gin.Context) (*[14]byte, int, int, error) {
@@ -204,4 +125,83 @@ func getPoolFromKey(key string) *sync.Pool {
 	}
 
 	return &stringPool
+}
+
+// InitAnalyticsDB adds user activity recording to the server, saving users
+// sessions to an SQLite database stored at the given path.
+func (s *Server) InitAnalyticsDB(dbPath string) error {
+	authGroup := s.AuthRouter()
+	if authGroup == nil {
+		return gas.ErrNeedsAuth
+	}
+
+	db, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		return err
+	}
+
+	db.SetMaxOpenConns(1)
+
+	if s.analyticsStmt, err = initDB(db); err != nil {
+		return err
+	}
+
+	s.analyticsDB = db
+
+	authGroup.POST(spywarePath, s.recordAnalytics)
+
+	return nil
+}
+
+func (s *Server) recordAnalytics(c *gin.Context) {
+	code, err := s.handleAnalytics(c)
+	if err != nil {
+		c.AbortWithError(code, err) //nolint:errcheck
+	} else {
+		c.AbortWithStatus(code)
+	}
+}
+
+func (s *Server) handleAnalytics(c *gin.Context) (int, error) {
+	if s.analyticsDB == nil {
+		return http.StatusServiceUnavailable, nil
+	}
+
+	username, state, code, err := s.dataFromHeaders(c)
+	if username == "" {
+		return code, err
+	}
+
+	sessionID, l, code, err := dataFromBody(c)
+
+	defer sessionPool.Put(sessionID)
+
+	if err != nil {
+		return code, err
+	}
+
+	if _, err := s.analyticsStmt.Exec(
+		username,
+		unsafe.String(&sessionID[0], l),
+		createStateData(state),
+		time.Now().Unix(),
+	); err != nil {
+		return http.StatusInternalServerError, nil
+	}
+
+	return http.StatusNoContent, nil
+}
+
+func (s *Server) dataFromHeaders(c *gin.Context) (string, url.Values, int, error) {
+	u, err := url.Parse(c.Request.Referer())
+	if err != nil {
+		return "", nil, http.StatusBadRequest, err
+	}
+
+	username := s.GetUser(c)
+	if username == nil {
+		return "", nil, http.StatusUnauthorized, nil
+	}
+
+	return username.Username, u.Query(), 0, nil
 }
