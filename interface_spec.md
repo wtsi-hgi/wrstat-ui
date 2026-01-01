@@ -22,10 +22,10 @@
 6. Must preserve all current user-visible behaviour:
    - Web UI and `wrstat-ui where` filters and results.
    - Multi-mount behaviour today (multiple Bolt “sources”).
-   - `dbsUpdated` behaviour, but **timestamps must come from the storage
-     layer**.
-     - The only identifier exposed to callers is the **mount directory path**.
-     - The timestamps map keys are mount paths only (no version prefixes).
+   - `dbsUpdated` behaviour.
+     - The only identifier exposed to callers is the **mount key** (the
+       dataset directory suffix after `<version>_`, with `/` encoded as `／`).
+     - The timestamps map keys are mount keys only (no version prefixes).
 
 ## Non-goals
 
@@ -97,21 +97,29 @@ Tree JSON additions (must remain):
 ### Database update timestamps
 
 - Endpoint: `GET /rest/v1/auth/dbsUpdated`
-- Response shape: JSON object mapping `mountPath` → Unix seconds.
-  - `mountPath` is the mount directory path (string), e.g. `/some/mount/point/`.
+- Response shape: JSON object mapping `mountKey` → Unix seconds.
+  - `mountKey` is the dataset directory key suffix from `<version>_<mountKey>`.
+  - `mountKey` is typically derived from the true mount path by replacing every
+    `/` with `／` (U+FF0F FULLWIDTH SOLIDUS).
   - Keys MUST be treated as opaque by `server` and the frontend.
-- Required change: timestamps must be provided by storage so ClickHouse can
-  return mount-path timestamps too. `server` must call
-  `provider.BaseDirs().MountTimestamps()` and convert to Unix seconds.
 
-Bolt mount-path derivation (for multi-directory Bolt layouts):
+Notes:
+
+- Today the server derives these timestamps from the dataset directory `mtime`
+  and uses the raw `<mountKey>` as the JSON key.
+- A future ClickHouse provider should preserve this external shape (mountKey
+  keys) even if it stores/queries using decoded mount paths internally.
+
+Bolt mount-key and mount-path derivation (for multi-directory Bolt layouts):
 - Dataset directories are named `<version>_<mountKey>`.
 - `<mountKey>` is the mount path with `/` replaced by `／` (U+FF0F FULLWIDTH
   SOLIDUS) to avoid nested directories.
-- The Bolt backend MUST derive `mountPath` by splitting the directory name at
-  the first `_`, taking the remainder as `<mountKey>`, then replacing all
-  `／` with `/`.
-- The derived `mountPath` MUST be normalised to end with `/`.
+- The Bolt backend MUST be able to:
+  - return `<mountKey>` exactly as found in the dataset directory name for
+    `/rest/v1/auth/dbsUpdated` compatibility.
+  - derive the decoded `mountPath` by splitting the directory name at the first
+    `_`, taking the remainder as `<mountKey>`, then replacing all `／` with `/`.
+  - normalise the derived `mountPath` to end with `/`.
 - `updatedAt` is the snapshot time of the dataset, derived from the input
   `stats.gz` file `mtime`.
 - Bolt datasets written before this change may not have a persisted
@@ -145,7 +153,7 @@ Bolt mount-path derivation (for multi-directory Bolt layouts):
   starting with a supplied prefix.
 - Server today scans `<base>/<version>_<mountkey>/` dirs containing
   `dguta.db*` and `basedirs.db`, picks the highest numeric version per mount,
-  and sets `/rest/v1/auth/dbsUpdated` from the `mtime` of each mount dir.
+  and sets `/rest/v1/auth/dbsUpdated` from the `mtime` of each dataset dir.
   Reloading is incremental via `Tree.OpenFrom` / `MultiReader.OpenFrom` and
   caches are rebuilt across all ages.
 
@@ -498,10 +506,11 @@ type Reader interface {
   SetCachedGroup(gid uint32, name string)
   SetCachedUser(uid uint32, name string)
 
-  // Returns mount directory path -> last updated time.
-  // Keys MUST be mount paths (absolute) and MUST end with '/'.
-  // For Bolt, each basedirs.db stores one (mountPath, updatedAt) pair.
-  // The implementation aggregates across all open databases.
+  // Returns mountKey -> last updated time.
+  // The mountKey MUST match the dataset directory naming convention used by
+  // the server for /rest/v1/auth/dbsUpdated (suffix after '<version>_').
+  // Implementations may store/compute this from a decoded mountPath, but the
+  // returned map keys must be mount keys for compatibility.
   MountTimestamps() (map[string]time.Time, error)
 
   // Info returns summary information about the database (e.g. counts).
@@ -539,7 +548,7 @@ preserved by the storage implementation:
 - Info: sum the counts across all mounts that are open.
 
 `MountTimestamps` must merge entries across all physical sources, returning
-the latest `updatedAt` per mount path.
+the latest `updatedAt` per mount key.
 
 Group/user name caching: The `basedirs` types `Usage` includes `Name` which is
 resolved from UID/GID. The current implementation uses `GroupCache` and
@@ -828,7 +837,7 @@ ClickHouse must implement the same read/write interfaces.
 - Ingest `db.RecordDGUTA` at scale.
 - Support the same filter semantics:
   - GID list, UID list, file types bitmask, age buckets.
-- Provide `MountTimestamps()` keyed by mount directory paths.
+- Provide `MountTimestamps()` keyed by mount keys (for dbsUpdated compatibility).
 
 ### Suggested schema (guidance, not final)
 

@@ -154,8 +154,16 @@ ClickHouse stores multiple snapshots per mountpoint. Reads always use the
 
 Terms:
 
-- `mount_path`: the mount directory path (absolute, ends with `/`). This is the
-  same key used by `/rest/v1/auth/dbsUpdated`.
+- `mount_path`: the decoded mount directory path (absolute, ends with `/`).
+  This is the canonical identifier used inside ClickHouse tables and queries.
+- `mount_key`: the external mount identifier used by the existing
+  `/rest/v1/auth/dbsUpdated` endpoint.
+  - It corresponds to the `<mountKey>` suffix of dataset output directories
+    named `<version>_<mountKey>`.
+  - It is typically derived from `mount_path` by replacing every `/` with `／`
+    (U+FF0F FULLWIDTH SOLIDUS).
+  - ClickHouse implementations SHOULD compute `mount_key` from `mount_path` at
+    the API boundary rather than storing it in tables.
 - `updated_at`: the dataset snapshot time (stats.gz mtime).
 - `snapshot_id`: a UUID identifying one ingested snapshot for one mount.
 
@@ -1964,8 +1972,11 @@ Directory selection (normative):
 - If `--dir` is supplied, use it.
 - Otherwise, automatically pick a "representative" directory by:
   1. Call `provider.BaseDirs().MountTimestamps()` to get the list of active
-     mounts.
-  2. Pick the first mount (sorted lexicographically) as `startDir`.
+    mounts.
+    - Note: this call returns a map keyed by `mount_key` for compatibility.
+  2. Decode `mount_key` to a `mount_path` by replacing `／` with `/` and
+    ensuring it ends with `/`.
+  3. Pick the first decoded mount path (sorted lexicographically) as `startDir`.
   3. Walk the directory tree using the storage-neutral tree API (no filesystem
      calls):
      a. Call `provider.Tree().DirInfo(startDir, filter)` (Age=all, no UID/GID
