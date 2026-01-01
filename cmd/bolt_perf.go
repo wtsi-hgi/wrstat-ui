@@ -122,6 +122,38 @@ type boltPerfFlags struct {
 
 var boltPerf boltPerfFlags
 
+func runBoltPerfImport(inputDir string) error {
+	opts := boltperf.ImportOptions{
+		Backend:  boltPerf.backend,
+		Owners:   boltPerf.owners,
+		Mounts:   boltPerf.mounts,
+		JSONOut:  boltPerf.jsonOut,
+		OutDir:   boltPerf.outDir,
+		Quota:    boltPerf.quota,
+		Config:   boltPerf.config,
+		MaxLines: boltPerf.maxLines,
+		Repeat:   boltPerf.repeat,
+		Warmup:   boltPerf.warmup,
+	}
+
+	return boltperf.Import(inputDir, opts, cliPrint)
+}
+
+func runBoltPerfQuery(inputDir string) error {
+	opts := boltperf.QueryOptions{
+		Backend: boltPerf.backend,
+		Owners:  boltPerf.owners,
+		Mounts:  boltPerf.mounts,
+		JSONOut: boltPerf.jsonOut,
+		Dir:     boltPerf.dir,
+		Repeat:  boltPerf.repeat,
+		Warmup:  boltPerf.warmup,
+		Splits:  boltPerf.splits,
+	}
+
+	return boltperf.Query(inputDir, opts, cliPrint)
+}
+
 func init() {
 	RootCmd.AddCommand(boltPerfCmd)
 	boltPerfCmd.AddCommand(boltPerfImportCmd)
@@ -164,46 +196,14 @@ func markBoltPerfRequiredFlags() {
 	mustMarkRequired(boltPerfImportCmd, "config")
 }
 
-func mustMarkRequired(cmd *cobra.Command, name string) {
-	if err := cmd.MarkFlagRequired(name); err != nil {
-		panic(err)
-	}
-}
-
 func mustMarkPersistentRequired(cmd *cobra.Command, name string) {
 	if err := cmd.MarkPersistentFlagRequired(name); err != nil {
 		panic(err)
 	}
 }
 
-func runBoltPerfImport(inputDir string) error {
-	opts := boltperf.ImportOptions{
-		Backend:  boltPerf.backend,
-		Owners:   boltPerf.owners,
-		Mounts:   boltPerf.mounts,
-		JSONOut:  boltPerf.jsonOut,
-		OutDir:   boltPerf.outDir,
-		Quota:    boltPerf.quota,
-		Config:   boltPerf.config,
-		MaxLines: boltPerf.maxLines,
-		Repeat:   boltPerf.repeat,
-		Warmup:   boltPerf.warmup,
+func mustMarkRequired(cmd *cobra.Command, name string) {
+	if err := cmd.MarkFlagRequired(name); err != nil {
+		panic(err)
 	}
-
-	return boltperf.Import(inputDir, opts, cliPrint)
-}
-
-func runBoltPerfQuery(inputDir string) error {
-	opts := boltperf.QueryOptions{
-		Backend: boltPerf.backend,
-		Owners:  boltPerf.owners,
-		Mounts:  boltPerf.mounts,
-		JSONOut: boltPerf.jsonOut,
-		Dir:     boltPerf.dir,
-		Repeat:  boltPerf.repeat,
-		Warmup:  boltPerf.warmup,
-		Splits:  boltPerf.splits,
-	}
-
-	return boltperf.Query(inputDir, opts, cliPrint)
 }

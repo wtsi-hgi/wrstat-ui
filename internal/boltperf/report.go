@@ -70,6 +70,11 @@ func (r *Report) AddOperation(name string, inputs map[string]any, durationsMS []
 	})
 }
 
+// PercentilesMS returns the p50, p95, and p99 percentiles of values.
+func PercentilesMS(values []float64) (float64, float64, float64) {
+	return percentileMS(values, 0.50), percentileMS(values, 0.95), percentileMS(values, 0.99)
+}
+
 // WriteReport writes report as pretty-printed JSON to the given path.
 func WriteReport(path string, report Report) error {
 	fh, err := os.Create(path)
@@ -82,11 +87,6 @@ func WriteReport(path string, report Report) error {
 	enc.SetIndent("", "  ")
 
 	return enc.Encode(report)
-}
-
-// PercentilesMS returns the p50, p95, and p99 percentiles of values.
-func PercentilesMS(values []float64) (float64, float64, float64) {
-	return percentileMS(values, 0.50), percentileMS(values, 0.95), percentileMS(values, 0.99)
 }
 
 func percentileMS(values []float64, p float64) float64 {

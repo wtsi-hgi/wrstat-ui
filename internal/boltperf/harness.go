@@ -20,37 +20,6 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/summary"
 )
 
-// PrintfFunc matches fmt.Printf-style output and is used by the harness
-// to emit human-readable timing summaries.
-type PrintfFunc func(string, ...any)
-
-// ImportOptions configures the bolt-perf import harness.
-type ImportOptions struct {
-	Backend  string
-	Owners   string
-	Mounts   string
-	JSONOut  string
-	OutDir   string
-	Quota    string
-	Config   string
-	MaxLines int
-	Repeat   int
-	Warmup   int
-}
-
-// QueryOptions configures the bolt-perf query harness.
-type QueryOptions struct {
-	Backend string
-	Owners  string
-	Mounts  string
-	JSONOut string
-
-	Dir    string
-	Repeat int
-	Warmup int
-	Splits int
-}
-
 const (
 	defaultDirPerm = 0o755
 
@@ -70,6 +39,10 @@ var (
 	// ErrNoDatasets indicates no matching dataset directories were discovered.
 	ErrNoDatasets = errors.New("no datasets found")
 )
+
+// PrintfFunc matches fmt.Printf-style output and is used by the harness
+// to emit human-readable timing summaries.
+type PrintfFunc func(string, ...any)
 
 // Import runs the in-process import harness over all discovered datasets in
 // inputDir and writes a JSON report to opts.JSONOut.
@@ -104,37 +77,6 @@ func Import(inputDir string, opts ImportOptions, printf PrintfFunc) error {
 	return WriteReport(opts.JSONOut, report)
 }
 
-// Query runs the in-process query timing harness against Bolt DBs discovered
-// under inputDir and writes a JSON report to opts.JSONOut.
-func Query(inputDir string, opts QueryOptions, printf PrintfFunc) (err error) {
-	if printf == nil {
-		printf = func(string, ...any) {}
-	}
-
-	if validateErr := validateBackend(opts.Backend); validateErr != nil {
-		return validateErr
-	}
-
-	ctx, err := buildQueryContext(inputDir, opts, printf)
-	if err != nil {
-		return err
-	}
-
-	defer func() {
-		if cerr := ctx.closeFn(); err == nil {
-			err = cerr
-		}
-	}()
-
-	report := NewReport(opts.Backend, inputDir, opts.Repeat, opts.Warmup)
-
-	if err := runQuerySuite(&report, ctx, opts, printf); err != nil {
-		return err
-	}
-
-	return WriteReport(opts.JSONOut, report)
-}
-
 func validateBackend(backend string) error {
 	switch backend {
 	case "bolt", "bolt_interfaces":
@@ -144,17 +86,23 @@ func validateBackend(backend string) error {
 	}
 }
 
-type importSpec struct {
-	statsGZPath    string
-	basedirsDBPath string
-	dgutaDBDir     string
-	modtime        time.Time
-	maxLines       int
+func findDatasetDirs(baseDir string, required ...string) ([]string, error) {
+	dirs, err := server.FindDBDirs(baseDir, required...)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(dirs) == 0 {
+		return nil, fmt.Errorf("%w: %q", ErrNoDatasets, baseDir)
+	}
+
+	sort.Strings(dirs)
+
+	return dirs, nil
 }
 
-type importTargets struct {
-	basedirsDBPath string
-	dgutaDBDir     string
+func durationMS(d time.Duration) float64 {
+	return float64(d) / float64(time.Millisecond)
 }
 
 func importDatasets(datasetDirs []string, opts ImportOptions, printf PrintfFunc) (uint64, error) {
@@ -246,27 +194,6 @@ func importOneDataset(spec importSpec, opts ImportOptions) (_ uint64, err error)
 	return lr.linesRead(), nil
 }
 
-func addSummarisers(
-	ss *summary.Summariser,
-	targets importTargets,
-	modtime time.Time,
-	opts ImportOptions,
-) (func() error, error) {
-	if err := summariseutil.AddBasedirsSummariser(
-		ss,
-		targets.basedirsDBPath,
-		"",
-		opts.Quota,
-		opts.Config,
-		opts.Mounts,
-		modtime,
-	); err != nil {
-		return nil, err
-	}
-
-	return summariseutil.AddDirgutaSummariser(ss, targets.dgutaDBDir)
-}
-
 func openStatsGZReader(path string) (*pgzip.Reader, func() error, error) {
 	fh, err := os.Open(path)
 	if err != nil {
@@ -290,39 +217,69 @@ func openStatsGZReader(path string) (*pgzip.Reader, func() error, error) {
 	return gz, closeFn, nil
 }
 
-func durationMS(d time.Duration) float64 {
-	return float64(d) / float64(time.Millisecond)
+func newLineCountingReader(r io.Reader, maxLines int) *lineCountingReader {
+	var ml uint64
+	if maxLines > 0 {
+		ml = uint64(maxLines)
+	}
+
+	return &lineCountingReader{
+		underlying: r,
+		maxLines:   ml,
+		buf:        make([]byte, lineReaderBufSize),
+	}
 }
 
-func findDatasetDirs(baseDir string, required ...string) ([]string, error) {
-	dirs, err := server.FindDBDirs(baseDir, required...)
-	if err != nil {
+func addSummarisers(
+	ss *summary.Summariser,
+	targets importTargets,
+	modtime time.Time,
+	opts ImportOptions,
+) (func() error, error) {
+	if err := summariseutil.AddBasedirsSummariser(
+		ss,
+		targets.basedirsDBPath,
+		"",
+		opts.Quota,
+		opts.Config,
+		opts.Mounts,
+		modtime,
+	); err != nil {
 		return nil, err
 	}
 
-	if len(dirs) == 0 {
-		return nil, fmt.Errorf("%w: %q", ErrNoDatasets, baseDir)
+	return summariseutil.AddDirgutaSummariser(ss, targets.dgutaDBDir)
+}
+
+// Query runs the in-process query timing harness against Bolt DBs discovered
+// under inputDir and writes a JSON report to opts.JSONOut.
+func Query(inputDir string, opts QueryOptions, printf PrintfFunc) (err error) {
+	if printf == nil {
+		printf = func(string, ...any) {}
 	}
 
-	sort.Strings(dirs)
+	if validateErr := validateBackend(opts.Backend); validateErr != nil {
+		return validateErr
+	}
 
-	return dirs, nil
-}
+	ctx, err := buildQueryContext(inputDir, opts, printf)
+	if err != nil {
+		return err
+	}
 
-type queryIDs struct {
-	gid     uint32
-	groupBD string
-	uid     uint32
-	userBD  string
-}
+	defer func() {
+		if cerr := ctx.closeFn(); err == nil {
+			err = cerr
+		}
+	}()
 
-type queryContext struct {
-	datasetDirs []string
-	tree        *db.Tree
-	mr          basedirs.MultiReader
-	closeFn     func() error
-	queryDir    string
-	ids         queryIDs
+	report := NewReport(opts.Backend, inputDir, opts.Repeat, opts.Warmup)
+
+	if err := runQuerySuite(&report, ctx, opts, printf); err != nil {
+		return err
+	}
+
+	return WriteReport(opts.JSONOut, report)
 }
 
 func buildQueryContext(inputDir string, opts QueryOptions, printf PrintfFunc) (queryContext, error) {
@@ -361,126 +318,6 @@ func buildQueryContext(inputDir string, opts QueryOptions, printf PrintfFunc) (q
 		queryDir:    queryDir,
 		ids:         ids,
 	}, nil
-}
-
-func discoverQueryDatasets(inputDir string, printf PrintfFunc) ([]string, string, error) {
-	datasetDirs, err := findDatasetDirs(inputDir, dgutaDBsSuffix, basedirsBasename)
-	if err != nil {
-		return nil, "", err
-	}
-
-	datasetDir := datasetDirs[0]
-	if len(datasetDirs) > 1 {
-		printf("query: %d datasets found; using %s\n", len(datasetDirs), filepath.Base(datasetDir))
-	}
-
-	return datasetDirs, datasetDir, nil
-}
-
-func openQueryDBs(datasetDir string, ownersPath string) (*db.Tree, basedirs.MultiReader, func() error, error) {
-	dgutaPath := filepath.Join(datasetDir, dgutaDBsSuffix)
-	basedirsPath := filepath.Join(datasetDir, basedirsBasename)
-
-	tree, err := db.NewTree(dgutaPath)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-
-	mr, err := basedirs.OpenMulti(ownersPath, basedirsPath)
-	if err != nil {
-		tree.Close()
-
-		return nil, nil, nil, err
-	}
-
-	closeFn := func() error {
-		err := mr.Close()
-		tree.Close()
-
-		return err
-	}
-
-	return tree, mr, closeFn, nil
-}
-
-func prepareMultiReader(mr basedirs.MultiReader, mountsPath string) error {
-	if mountsPath == "" {
-		return prewarmBasedirsCaches(mr)
-	}
-
-	mounts, err := summariseutil.ParseMountpointsFromFile(mountsPath)
-	if err != nil {
-		return err
-	}
-
-	if len(mounts) > 0 {
-		mr.SetMountPoints(mounts)
-	}
-
-	return prewarmBasedirsCaches(mr)
-}
-
-func prewarmBasedirsCaches(mr basedirs.MultiReader) error {
-	for _, age := range db.DirGUTAges {
-		if _, err := mr.GroupUsage(age); err != nil {
-			return err
-		}
-
-		if _, err := mr.UserUsage(age); err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-func pickRepresentativeIDs(mr basedirs.MultiReader, fallbackDir string) (queryIDs, error) {
-	ids := queryIDs{groupBD: fallbackDir, userBD: fallbackDir}
-
-	groups, err := mr.GroupUsage(db.DGUTAgeAll)
-	if err != nil {
-		return queryIDs{}, err
-	}
-
-	if g := pickLargestUsage(groups); g != nil {
-		ids.gid = g.GID
-		ids.groupBD = g.BaseDir
-	}
-
-	users, err := mr.UserUsage(db.DGUTAgeAll)
-	if err != nil {
-		return queryIDs{}, err
-	}
-
-	if u := pickLargestUsage(users); u != nil {
-		ids.uid = u.UID
-		ids.userBD = u.BaseDir
-	}
-
-	return ids, nil
-}
-
-func pickLargestUsage(usages []*basedirs.Usage) *basedirs.Usage {
-	var best *basedirs.Usage
-	for _, u := range usages {
-		if best == nil || u.UsageSize > best.UsageSize {
-			best = u
-		}
-	}
-
-	return best
-}
-
-func closeAndJoinErr(closeFn func() error, err error) error {
-	if closeFn == nil {
-		return err
-	}
-
-	if cerr := closeFn(); cerr != nil {
-		return errors.Join(err, cerr)
-	}
-
-	return err
 }
 
 func resolveQueryDir(datasetDir, mountPath, override string) string {
@@ -566,6 +403,112 @@ func pickLargestChild(children []*db.DirSummary) *db.DirSummary {
 	return best
 }
 
+func openQueryDBs(datasetDir string, ownersPath string) (*db.Tree, basedirs.MultiReader, func() error, error) {
+	dgutaPath := filepath.Join(datasetDir, dgutaDBsSuffix)
+	basedirsPath := filepath.Join(datasetDir, basedirsBasename)
+
+	tree, err := db.NewTree(dgutaPath)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	mr, err := basedirs.OpenMulti(ownersPath, basedirsPath)
+	if err != nil {
+		tree.Close()
+
+		return nil, nil, nil, err
+	}
+
+	closeFn := func() error {
+		err := mr.Close()
+		tree.Close()
+
+		return err
+	}
+
+	return tree, mr, closeFn, nil
+}
+
+func prepareMultiReader(mr basedirs.MultiReader, mountsPath string) error {
+	if mountsPath == "" {
+		return prewarmBasedirsCaches(mr)
+	}
+
+	mounts, err := summariseutil.ParseMountpointsFromFile(mountsPath)
+	if err != nil {
+		return err
+	}
+
+	if len(mounts) > 0 {
+		mr.SetMountPoints(mounts)
+	}
+
+	return prewarmBasedirsCaches(mr)
+}
+
+func prewarmBasedirsCaches(mr basedirs.MultiReader) error {
+	for _, age := range db.DirGUTAges {
+		if _, err := mr.GroupUsage(age); err != nil {
+			return err
+		}
+
+		if _, err := mr.UserUsage(age); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func closeAndJoinErr(closeFn func() error, err error) error {
+	if closeFn == nil {
+		return err
+	}
+
+	if cerr := closeFn(); cerr != nil {
+		return errors.Join(err, cerr)
+	}
+
+	return err
+}
+
+func pickRepresentativeIDs(mr basedirs.MultiReader, fallbackDir string) (queryIDs, error) {
+	ids := queryIDs{groupBD: fallbackDir, userBD: fallbackDir}
+
+	groups, err := mr.GroupUsage(db.DGUTAgeAll)
+	if err != nil {
+		return queryIDs{}, err
+	}
+
+	if g := pickLargestUsage(groups); g != nil {
+		ids.gid = g.GID
+		ids.groupBD = g.BaseDir
+	}
+
+	users, err := mr.UserUsage(db.DGUTAgeAll)
+	if err != nil {
+		return queryIDs{}, err
+	}
+
+	if u := pickLargestUsage(users); u != nil {
+		ids.uid = u.UID
+		ids.userBD = u.BaseDir
+	}
+
+	return ids, nil
+}
+
+func pickLargestUsage(usages []*basedirs.Usage) *basedirs.Usage {
+	var best *basedirs.Usage
+	for _, u := range usages {
+		if best == nil || u.UsageSize > best.UsageSize {
+			best = u
+		}
+	}
+
+	return best
+}
+
 func runQuerySuite(report *Report, ctx queryContext, opts QueryOptions, printf PrintfFunc) error {
 	for _, op := range buildQuerySuiteOps(ctx, opts) {
 		if err := timeAndReportQueryOp(report, opts, printf, op.name, op.inputs, op.op); err != nil {
@@ -574,12 +517,6 @@ func runQuerySuite(report *Report, ctx queryContext, opts QueryOptions, printf P
 	}
 
 	return nil
-}
-
-type querySuiteOp struct {
-	name   string
-	inputs map[string]any
-	op     func() error
 }
 
 func buildQuerySuiteOps(ctx queryContext, opts QueryOptions) []querySuiteOp {
@@ -637,27 +574,6 @@ func buildQuerySuiteOps(ctx queryContext, opts QueryOptions) []querySuiteOp {
 			op:     func() error { return opBasedirsHistory(ctx) },
 		},
 	}
-}
-
-func timeAndReportQueryOp(
-	report *Report,
-	opts QueryOptions,
-	printf PrintfFunc,
-	name string,
-	inputs map[string]any,
-	op func() error,
-) error {
-	durations, err := measureOperation(opts.Warmup, opts.Repeat, op)
-	if err != nil {
-		return err
-	}
-
-	report.AddOperation(name, inputs, durations)
-
-	p50, p95, p99 := PercentilesMS(durations)
-	printf("%s repeats=%d p50_ms=%.3f p95_ms=%.3f p99_ms=%.3f\n", name, len(durations), p50, p95, p99)
-
-	return nil
 }
 
 func opMountTimestamps(ctx queryContext) error {
@@ -723,6 +639,27 @@ func opBasedirsHistory(ctx queryContext) error {
 	return err
 }
 
+func timeAndReportQueryOp(
+	report *Report,
+	opts QueryOptions,
+	printf PrintfFunc,
+	name string,
+	inputs map[string]any,
+	op func() error,
+) error {
+	durations, err := measureOperation(opts.Warmup, opts.Repeat, op)
+	if err != nil {
+		return err
+	}
+
+	report.AddOperation(name, inputs, durations)
+
+	p50, p95, p99 := PercentilesMS(durations)
+	printf("%s repeats=%d p50_ms=%.3f p95_ms=%.3f p99_ms=%.3f\n", name, len(durations), p50, p95, p99)
+
+	return nil
+}
+
 func measureOperation(warmup, repeat int, op func() error) ([]float64, error) {
 	for i := 0; i < warmup; i++ {
 		if err := op(); err != nil {
@@ -744,6 +681,82 @@ func measureOperation(warmup, repeat int, op func() error) ([]float64, error) {
 	return durations, nil
 }
 
+func discoverQueryDatasets(inputDir string, printf PrintfFunc) ([]string, string, error) {
+	datasetDirs, err := findDatasetDirs(inputDir, dgutaDBsSuffix, basedirsBasename)
+	if err != nil {
+		return nil, "", err
+	}
+
+	datasetDir := datasetDirs[0]
+	if len(datasetDirs) > 1 {
+		printf("query: %d datasets found; using %s\n", len(datasetDirs), filepath.Base(datasetDir))
+	}
+
+	return datasetDirs, datasetDir, nil
+}
+
+// ImportOptions configures the bolt-perf import harness.
+type ImportOptions struct {
+	Backend  string
+	Owners   string
+	Mounts   string
+	JSONOut  string
+	OutDir   string
+	Quota    string
+	Config   string
+	MaxLines int
+	Repeat   int
+	Warmup   int
+}
+
+// QueryOptions configures the bolt-perf query harness.
+type QueryOptions struct {
+	Backend string
+	Owners  string
+	Mounts  string
+	JSONOut string
+
+	Dir    string
+	Repeat int
+	Warmup int
+	Splits int
+}
+
+type importSpec struct {
+	statsGZPath    string
+	basedirsDBPath string
+	dgutaDBDir     string
+	modtime        time.Time
+	maxLines       int
+}
+
+type importTargets struct {
+	basedirsDBPath string
+	dgutaDBDir     string
+}
+
+type queryIDs struct {
+	gid     uint32
+	groupBD string
+	uid     uint32
+	userBD  string
+}
+
+type queryContext struct {
+	datasetDirs []string
+	tree        *db.Tree
+	mr          basedirs.MultiReader
+	closeFn     func() error
+	queryDir    string
+	ids         queryIDs
+}
+
+type querySuiteOp struct {
+	name   string
+	inputs map[string]any
+	op     func() error
+}
+
 // lineCountingReader is used to optionally cap stats parsing at a number of lines.
 // This is testable and shared by bolt-perf import.
 type lineCountingReader struct {
@@ -754,19 +767,6 @@ type lineCountingReader struct {
 	pending    []byte
 	seenLines  uint64
 	reachedMax bool
-}
-
-func newLineCountingReader(r io.Reader, maxLines int) *lineCountingReader {
-	var ml uint64
-	if maxLines > 0 {
-		ml = uint64(maxLines)
-	}
-
-	return &lineCountingReader{
-		underlying: r,
-		maxLines:   ml,
-		buf:        make([]byte, lineReaderBufSize),
-	}
 }
 
 func (l *lineCountingReader) linesRead() uint64 {
