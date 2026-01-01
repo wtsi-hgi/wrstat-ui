@@ -26,6 +26,7 @@ package main
 
 import (
 	"compress/gzip"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -49,6 +50,16 @@ import (
 )
 
 const app = "wrstat-ui_test"
+
+func TestMain(m *testing.M) {
+	d1 := buildSelf()
+	if d1 == nil {
+		return
+	}
+
+	defer os.Exit(m.Run())
+	defer d1()
+}
 
 func buildSelf() func() {
 	cmd := exec.Command(
@@ -75,58 +86,6 @@ func buildSelf() func() {
 
 func failMainTest(err string) {
 	fmt.Println(err) //nolint:forbidigo
-}
-
-func TestMain(m *testing.M) {
-	d1 := buildSelf()
-	if d1 == nil {
-		return
-	}
-
-	defer os.Exit(m.Run())
-	defer d1()
-}
-
-func runWRStat(args ...string) (string, string, []*jobqueue.Job, error) {
-	var (
-		stdout, stderr strings.Builder
-		jobs           []*jobqueue.Job
-	)
-
-	pr, pw, err := os.Pipe()
-	if err != nil {
-		return "", "", nil, err
-	}
-
-	cmd := exec.Command("./"+app, args...)
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	cmd.ExtraFiles = append(cmd.ExtraFiles, pw)
-
-	jd := json.NewDecoder(pr)
-	done := make(chan struct{})
-
-	go func() {
-		for {
-			var j []*jobqueue.Job
-
-			if errr := jd.Decode(&j); errr != nil {
-				break
-			}
-
-			jobs = append(jobs, j...)
-		}
-
-		close(done)
-	}()
-
-	err = cmd.Run()
-
-	pw.Close()
-
-	<-done
-
-	return stdout.String(), stderr.String(), jobs, err
 }
 
 func TestVersion(t *testing.T) {
@@ -329,50 +288,146 @@ func TestSummarise(t *testing.T) {
 	})
 }
 
-func fixTZs(h []basedirs.History) {
-	for n := range h {
-		h[n].Date = h[n].Date.In(time.UTC)
-	}
-}
-
-func sortLines(data string) string {
-	nl := strings.HasSuffix(data, "\n")
-	if nl {
-		data = data[:len(data)-1]
-	}
-
-	lines := strings.Split(data, "\n")
-
-	slices.Sort(lines)
-
-	data = strings.Join(lines, "\n")
-
-	if nl {
-		data += "\n"
-	}
-
-	return data
-}
-
-func compareFileContents(t *testing.T, path, expectation string) {
-	t.Helper()
-
-	f, err := os.Open(path)
-	So(err, ShouldBeNil)
-
-	defer f.Close()
-
-	var r io.Reader = f
-
-	if strings.HasSuffix(path, ".gz") {
-		r, err = gzip.NewReader(f)
+func TestBoltPerf(t *testing.T) {
+	Convey("bolt-perf can import and query and write a schema v1 report", t, func() {
+		gid, uid, _, _, err := internaluser.RealGIDAndUID()
 		So(err, ShouldBeNil)
-	}
 
-	contents, err := io.ReadAll(r)
-	So(err, ShouldBeNil)
+		refTime := time.Now().Truncate(time.Second)
+		_, root := internaldata.FakeFilesForDGUTADBForBasedirsTesting(
+			gid,
+			uid,
+			"lustre",
+			1,
+			1<<20,
+			1<<20,
+			true,
+			refTime.Unix(),
+		)
 
-	So(string(contents), ShouldEqual, expectation)
+		statsInputDir := t.TempDir()
+		datasetDir := filepath.Join(statsInputDir, "1_／lustre")
+		So(os.MkdirAll(datasetDir, 0755), ShouldBeNil)
+
+		statsGZPath := filepath.Join(datasetDir, "stats.gz")
+		fh, err := os.Create(statsGZPath)
+		So(err, ShouldBeNil)
+
+		gz := gzip.NewWriter(fh)
+		_, err = io.Copy(gz, root.AsReader())
+		So(err, ShouldBeNil)
+		So(gz.Close(), ShouldBeNil)
+		So(fh.Close(), ShouldBeNil)
+
+		So(os.Chtimes(statsGZPath, refTime, refTime), ShouldBeNil)
+
+		metaDir := t.TempDir()
+		quotaFile := filepath.Join(metaDir, "quota.csv")
+		basedirsConfig := filepath.Join(metaDir, "basedirs.config")
+
+		So(os.WriteFile(quotaFile, []byte(""), 0600), ShouldBeNil)
+		So(os.WriteFile(basedirsConfig, []byte("\t1\t1\n"), 0600), ShouldBeNil)
+
+		ownersPath, err := internaldata.CreateOwnersCSV(t, internaldata.ExampleOwnersCSV)
+		So(err, ShouldBeNil)
+
+		boltOutDir := t.TempDir()
+		importJSON := filepath.Join(metaDir, "bolt_import.json")
+		queryJSON := filepath.Join(metaDir, "bolt_query.json")
+
+		_, _, _, err = runWRStat(
+			"bolt-perf",
+			"import",
+			statsInputDir,
+			"--out",
+			boltOutDir,
+			"--quota",
+			quotaFile,
+			"--config",
+			basedirsConfig,
+			"--owners",
+			ownersPath,
+			"--json",
+			importJSON,
+		)
+		So(err, ShouldBeNil)
+
+		_, _, _, err = runWRStat(
+			"bolt-perf",
+			"query",
+			boltOutDir,
+			"--owners",
+			ownersPath,
+			"--dir",
+			"/lustre/",
+			"--repeat",
+			"2",
+			"--warmup",
+			"0",
+			"--splits",
+			"2",
+			"--json",
+			queryJSON,
+		)
+		So(err, ShouldBeNil)
+
+		data, err := os.ReadFile(queryJSON)
+		So(err, ShouldBeNil)
+
+		var report struct {
+			SchemaVersion int    `json:"schema_version"`
+			Backend       string `json:"backend"`
+			GitCommit     string `json:"git_commit"`
+			GoVersion     string `json:"go_version"`
+			OS            string `json:"os"`
+			Arch          string `json:"arch"`
+			StartedAt     string `json:"started_at"`
+			InputDir      string `json:"input_dir"`
+			Repeat        int    `json:"repeat"`
+			Warmup        int    `json:"warmup"`
+			Operations    []struct {
+				Name        string                 `json:"name"`
+				Inputs      map[string]any         `json:"inputs"`
+				DurationsMS []float64              `json:"durations_ms"`
+				P50MS       float64                `json:"p50_ms"`
+				P95MS       float64                `json:"p95_ms"`
+				P99MS       float64                `json:"p99_ms"`
+				Extra       map[string]interface{} `json:"-"`
+			} `json:"operations"`
+		}
+
+		dec := json.NewDecoder(strings.NewReader(string(data)))
+		dec.DisallowUnknownFields()
+		So(dec.Decode(&report), ShouldBeNil)
+
+		So(report.SchemaVersion, ShouldEqual, 1)
+		So(report.Backend, ShouldEqual, "bolt")
+		So(report.GoVersion, ShouldNotBeBlank)
+		So(report.OS, ShouldNotBeBlank)
+		So(report.Arch, ShouldNotBeBlank)
+		So(report.StartedAt, ShouldNotBeBlank)
+		So(report.InputDir, ShouldEqual, boltOutDir)
+		So(report.Repeat, ShouldEqual, 2)
+		So(report.Warmup, ShouldEqual, 0)
+
+		opNames := make([]string, 0, len(report.Operations))
+		for _, op := range report.Operations {
+			opNames = append(opNames, op.Name)
+			So(len(op.DurationsMS), ShouldEqual, 2)
+		}
+
+		So(opNames, ShouldResemble, []string{
+			"mount_timestamps",
+			"tree_dirinfo",
+			"tree_where",
+			"basedirs_group_usage",
+			"basedirs_user_usage",
+			"basedirs_group_subdirs",
+			"basedirs_user_subdirs",
+			"basedirs_history",
+		})
+		So(report.GitCommit, ShouldNotBeNil)
+	})
 }
 
 func TestWatch(t *testing.T) {
@@ -518,4 +573,92 @@ Size: 101
 "/mount/B/anotherDir/big_files/2"
 `)
 	})
+}
+
+func runWRStat(args ...string) (string, string, []*jobqueue.Job, error) {
+	var (
+		stdout, stderr strings.Builder
+		jobs           []*jobqueue.Job
+	)
+
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		return "", "", nil, err
+	}
+
+	cmd := exec.CommandContext(context.Background(), "./"+app, args...)
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	cmd.ExtraFiles = append(cmd.ExtraFiles, pw)
+
+	jd := json.NewDecoder(pr)
+	done := make(chan struct{})
+
+	go func() {
+		for {
+			var j []*jobqueue.Job
+
+			if errr := jd.Decode(&j); errr != nil {
+				break
+			}
+
+			jobs = append(jobs, j...)
+		}
+
+		close(done)
+	}()
+
+	err = cmd.Run()
+
+	pw.Close()
+
+	<-done
+
+	return stdout.String(), stderr.String(), jobs, err
+}
+
+func compareFileContents(t *testing.T, path, expectation string) {
+	t.Helper()
+
+	f, err := os.Open(path)
+	So(err, ShouldBeNil)
+
+	defer f.Close()
+
+	var r io.Reader = f
+
+	if strings.HasSuffix(path, ".gz") {
+		r, err = gzip.NewReader(f)
+		So(err, ShouldBeNil)
+	}
+
+	contents, err := io.ReadAll(r)
+	So(err, ShouldBeNil)
+
+	So(string(contents), ShouldEqual, expectation)
+}
+
+func sortLines(data string) string {
+	nl := strings.HasSuffix(data, "\n")
+	if nl {
+		data = data[:len(data)-1]
+	}
+
+	lines := strings.Split(data, "\n")
+
+	slices.Sort(lines)
+
+	data = strings.Join(lines, "\n")
+
+	if nl {
+		data += "\n"
+	}
+
+	return data
+}
+
+func fixTZs(h []basedirs.History) {
+	for n := range h {
+		h[n].Date = h[n].Date.In(time.UTC)
+	}
 }

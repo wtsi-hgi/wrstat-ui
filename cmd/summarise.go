@@ -29,21 +29,16 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/klauspost/pgzip"
 	"github.com/spf13/cobra"
-	"github.com/wtsi-hgi/wrstat-ui/basedirs"
-	"github.com/wtsi-hgi/wrstat-ui/db"
+	"github.com/wtsi-hgi/wrstat-ui/internal/summariseutil"
 	"github.com/wtsi-hgi/wrstat-ui/stats"
 	"github.com/wtsi-hgi/wrstat-ui/summary"
-	sbasedirs "github.com/wtsi-hgi/wrstat-ui/summary/basedirs"
-	"github.com/wtsi-hgi/wrstat-ui/summary/dirguta"
 	"github.com/wtsi-hgi/wrstat-ui/summary/groupuser"
 	"github.com/wtsi-hgi/wrstat-ui/summary/usergroup"
 )
@@ -60,8 +55,6 @@ var (
 	basedirsConfig string
 	mounts         string
 )
-
-const dbBatchSize = 10000
 
 // summariseCmd represents the stat command.
 var summariseCmd = &cobra.Command{
@@ -162,40 +155,6 @@ func wrapCompressed(wc *os.File) io.WriteCloser {
 		Writer: pgzip.NewWriter(wc),
 		file:   wc,
 	}
-}
-
-func parseBasedirConfig(quotaPath, basedirsConfig string) (*basedirs.Quotas, basedirs.Config, error) {
-	quotas, err := basedirs.ParseQuotas(quotaPath)
-	if err != nil {
-		return nil, nil, fmt.Errorf("error parsing quotas file: %w", err)
-	}
-
-	cf, err := os.Open(basedirsConfig)
-	if err != nil {
-		return nil, nil, fmt.Errorf("error opening basedirs config: %w", err)
-	}
-
-	defer cf.Close()
-
-	config, err := basedirs.ParseConfig(cf)
-	if err != nil {
-		return nil, nil, fmt.Errorf("error parsing basedirs config: %w", err)
-	}
-
-	cf.Close()
-
-	return quotas, config, nil
-}
-
-func copyHistory(bd *basedirs.BaseDirs, basedirsHistoryDB string) error {
-	db, err := basedirs.OpenDBRO(basedirsHistoryDB)
-	if err != nil {
-		return err
-	}
-
-	defer db.Close()
-
-	return bd.CopyHistoryFrom(db)
 }
 
 func run(args []string) (err error) {
@@ -337,84 +296,17 @@ func addGroupUserSummariser(s *summary.Summariser, groupUser string) error {
 
 func addBasedirsSummariser(s *summary.Summariser, basedirsDB, basedirsHistoryDB,
 	quotaPath, basedirsConfig, mountpoints string, modtime time.Time) error {
-	quotas, config, err := parseBasedirConfig(quotaPath, basedirsConfig)
-	if err != nil {
-		return err
-	}
-
-	if err = os.Remove(basedirsDB); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return err
-	}
-
-	bd, err := basedirs.NewCreator(basedirsDB, quotas)
-	if err != nil {
-		return fmt.Errorf("failed to create new basedirs creator: %w", err)
-	} else if mps, errr := parseMountpointsFromFile(mountpoints); errr != nil {
-		return errr
-	} else if len(mps) > 0 {
-		bd.SetMountPoints(mps)
-	}
-
-	bd.SetModTime(modtime)
-
-	if basedirsHistoryDB != "" {
-		if err = copyHistory(bd, basedirsHistoryDB); err != nil {
-			return err
-		}
-	}
-
-	s.AddDirectoryOperation(sbasedirs.NewBaseDirs(config.PathShouldOutput, bd))
-
-	return nil
-}
-
-func parseMountpointsFromFile(mountpoints string) ([]string, error) {
-	if mountpoints == "" {
-		return nil, nil
-	}
-
-	data, err := os.ReadFile(mountpoints)
-	if err != nil {
-		return nil, err
-	}
-
-	lines := strings.Split(string(data), "\n")
-	mounts := make([]string, 0, len(lines))
-
-	for _, line := range lines {
-		if len(line) == 0 {
-			continue
-		}
-
-		mountpoint, err := strconv.Unquote(line)
-		if err != nil {
-			return nil, err
-		}
-
-		mounts = append(mounts, mountpoint)
-	}
-
-	return mounts, nil
+	return summariseutil.AddBasedirsSummariser(
+		s,
+		basedirsDB,
+		basedirsHistoryDB,
+		quotaPath,
+		basedirsConfig,
+		mountpoints,
+		modtime,
+	)
 }
 
 func addDirgutaSummariser(s *summary.Summariser, dirgutaDB string) (func() error, error) {
-	if err := os.RemoveAll(dirgutaDB); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return nil, err
-	}
-
-	if err := os.MkdirAll(dirgutaDB, 0755); err != nil { //nolint:mnd
-		return nil, err
-	}
-
-	db := db.NewDB(dirgutaDB)
-
-	if err := db.CreateDB(); err != nil {
-		return nil, err
-	}
-
-	db.SetBatchSize(dbBatchSize)
-
-	s.AddDirectoryOperation(dirguta.NewDirGroupUserTypeAge(db))
-
-	return db.Close, nil
+	return summariseutil.AddDirgutaSummariser(s, dirgutaDB)
 }

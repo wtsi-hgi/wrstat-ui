@@ -37,6 +37,7 @@ import (
 
 	"github.com/inconshreveable/log15"
 	"github.com/spf13/cobra"
+	"github.com/wtsi-hgi/wrstat-ui/internal/summariseutil"
 	"github.com/wtsi-hgi/wrstat-ui/server"
 )
 
@@ -134,7 +135,7 @@ files. It will use the mtime of the file as the data creation time in reports.
 		var mountpoints []string
 
 		if mounts != "" {
-			mps, err := parseMountpointsFromFile(mounts)
+			mps, err := summariseutil.ParseMountpointsFromFile(mounts)
 			if err != nil {
 				die("failed to parse mounts file: %s", err)
 			}
