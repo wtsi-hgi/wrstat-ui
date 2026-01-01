@@ -18,6 +18,7 @@ import (
 
 const dbBatchSize = 10000
 
+// ParseBasedirConfig parses quotas and basedirs config files.
 func ParseBasedirConfig(quotaPath, basedirsConfig string) (*basedirs.Quotas, basedirs.Config, error) {
 	quotas, err := basedirs.ParseQuotas(quotaPath)
 	if err != nil {
@@ -38,6 +39,7 @@ func ParseBasedirConfig(quotaPath, basedirsConfig string) (*basedirs.Quotas, bas
 	return quotas, config, nil
 }
 
+// CopyHistory copies history entries from an existing basedirs DB into bd.
 func CopyHistory(bd *basedirs.BaseDirs, basedirsHistoryDB string) error {
 	db, err := basedirs.OpenDBRO(basedirsHistoryDB)
 	if err != nil {
@@ -48,6 +50,10 @@ func CopyHistory(bd *basedirs.BaseDirs, basedirsHistoryDB string) error {
 	return bd.CopyHistoryFrom(db)
 }
 
+// ParseMountpointsFromFile parses a file containing quoted mountpoints.
+//
+// Each non-empty line must be a Go-quoted string (as produced by
+// 'findmnt ... | sed ...'), and the returned slice preserves file order.
 func ParseMountpointsFromFile(mountpoints string) ([]string, error) {
 	if mountpoints == "" {
 		return nil, nil
@@ -77,6 +83,8 @@ func ParseMountpointsFromFile(mountpoints string) ([]string, error) {
 	return mounts, nil
 }
 
+// AddBasedirsSummariser adds the basedirs summariser to s and configures it
+// from the provided quota/config/mountpoints files.
 func AddBasedirsSummariser(
 	s *summary.Summariser,
 	basedirsDB, basedirsHistoryDB, quotaPath, basedirsConfig, mountpoints string,
@@ -136,6 +144,8 @@ func newBasedirsCreator(
 	return bd, config, nil
 }
 
+// AddDirgutaSummariser adds the dirguta summariser to s and returns a close
+// function for the underlying DB.
 func AddDirgutaSummariser(s *summary.Summariser, dirgutaDB string) (func() error, error) {
 	if err := os.RemoveAll(dirgutaDB); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return nil, err

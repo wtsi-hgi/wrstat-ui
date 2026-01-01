@@ -10,8 +10,10 @@ import (
 	"time"
 )
 
+// SchemaVersion is the current JSON report schema version.
 const SchemaVersion = 1
 
+// Operation represents a single measured operation in a perf report.
 type Operation struct {
 	Name        string         `json:"name"`
 	Inputs      map[string]any `json:"inputs"`
@@ -21,6 +23,7 @@ type Operation struct {
 	P99MS       float64        `json:"p99_ms"`
 }
 
+// Report is the top-level JSON report written by the perf harness.
 type Report struct {
 	SchemaVersion int         `json:"schema_version"`
 	Backend       string      `json:"backend"`
@@ -35,6 +38,7 @@ type Report struct {
 	Operations    []Operation `json:"operations"`
 }
 
+// NewReport constructs a new report with build and environment metadata.
 func NewReport(backend, inputDir string, repeat, warmup int) Report {
 	return Report{
 		SchemaVersion: SchemaVersion,
@@ -51,6 +55,8 @@ func NewReport(backend, inputDir string, repeat, warmup int) Report {
 	}
 }
 
+// AddOperation appends a measured operation and computes p50/p95/p99 from
+// the provided durations.
 func (r *Report) AddOperation(name string, inputs map[string]any, durationsMS []float64) {
 	p50, p95, p99 := PercentilesMS(durationsMS)
 
@@ -64,6 +70,7 @@ func (r *Report) AddOperation(name string, inputs map[string]any, durationsMS []
 	})
 }
 
+// WriteReport writes report as pretty-printed JSON to the given path.
 func WriteReport(path string, report Report) error {
 	fh, err := os.Create(path)
 	if err != nil {
@@ -77,6 +84,7 @@ func WriteReport(path string, report Report) error {
 	return enc.Encode(report)
 }
 
+// PercentilesMS returns the p50, p95, and p99 percentiles of values.
 func PercentilesMS(values []float64) (float64, float64, float64) {
 	return percentileMS(values, 0.50), percentileMS(values, 0.95), percentileMS(values, 0.99)
 }

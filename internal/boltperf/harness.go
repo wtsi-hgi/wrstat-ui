@@ -20,8 +20,11 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/summary"
 )
 
+// PrintfFunc matches fmt.Printf-style output and is used by the harness
+// to emit human-readable timing summaries.
 type PrintfFunc func(string, ...any)
 
+// ImportOptions configures the bolt-perf import harness.
 type ImportOptions struct {
 	Backend  string
 	Owners   string
@@ -35,6 +38,7 @@ type ImportOptions struct {
 	Warmup   int
 }
 
+// QueryOptions configures the bolt-perf query harness.
 type QueryOptions struct {
 	Backend string
 	Owners  string
@@ -61,10 +65,14 @@ const (
 )
 
 var (
+	// ErrUnknownBackend indicates an unsupported backend name was provided.
 	ErrUnknownBackend = errors.New("unknown backend")
-	ErrNoDatasets     = errors.New("no datasets found")
+	// ErrNoDatasets indicates no matching dataset directories were discovered.
+	ErrNoDatasets = errors.New("no datasets found")
 )
 
+// Import runs the in-process import harness over all discovered datasets in
+// inputDir and writes a JSON report to opts.JSONOut.
 func Import(inputDir string, opts ImportOptions, printf PrintfFunc) error {
 	if printf == nil {
 		printf = func(string, ...any) {}
@@ -96,6 +104,8 @@ func Import(inputDir string, opts ImportOptions, printf PrintfFunc) error {
 	return WriteReport(opts.JSONOut, report)
 }
 
+// Query runs the in-process query timing harness against Bolt DBs discovered
+// under inputDir and writes a JSON report to opts.JSONOut.
 func Query(inputDir string, opts QueryOptions, printf PrintfFunc) (err error) {
 	if printf == nil {
 		printf = func(string, ...any) {}
@@ -736,7 +746,6 @@ func measureOperation(warmup, repeat int, op func() error) ([]float64, error) {
 
 // lineCountingReader is used to optionally cap stats parsing at a number of lines.
 // This is testable and shared by bolt-perf import.
-
 type lineCountingReader struct {
 	underlying io.Reader
 	maxLines   uint64
