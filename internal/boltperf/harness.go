@@ -294,6 +294,9 @@ func buildQueryContext(inputDir string, opts QueryOptions, printf PrintfFunc) (q
 	}
 
 	queryDir := resolveQueryDir(datasetDir, mountPath, opts.Dir)
+	if strings.TrimSpace(opts.Dir) == "" {
+		printf("query: auto-selected dir=%s\n", queryDir)
+	}
 
 	tree, mr, closeFn, err := openQueryDBs(datasetDir, opts.Owners)
 	if err != nil {
