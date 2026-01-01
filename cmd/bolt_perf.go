@@ -24,7 +24,41 @@ Use the query subcommand to run a repeatable timing suite and write a JSON repor
 var boltPerfImportCmd = &cobra.Command{
 	Use:   "import <inputDir>",
 	Short: "Import stats.gz datasets into Bolt databases",
-	Args:  cobra.ExactArgs(1),
+	Long: `Import reads one or more datasets under <inputDir> and creates Bolt
+databases for each dataset.
+
+The positional argument <inputDir> is a directory containing dataset
+subdirectories (as produced by 'wrstat multi'), each named:
+
+	<version>_<mountKey>
+
+For import, each dataset directory must contain a 'stats.gz'.
+
+This command writes output under --out, creating:
+
+	<out>/<version>_<mountKey>/dguta.dbs/
+	<out>/<version>_<mountKey>/basedirs.db
+
+Examples:
+
+	# Import all discovered stats.gz datasets into Bolt DBs.
+	wrstat-ui bolt-perf import /path/to/stats-input \
+		--out /path/to/bolt-out \
+		--owners /path/to/owners.csv \
+		--quota /path/to/quota.csv \
+		--config /path/to/basedirs.config \
+		--json /tmp/bolt_import.json
+
+	# Import only the first 1,000,000 lines of each stats.gz (for quick trials).
+	wrstat-ui bolt-perf import /path/to/stats-input \
+		--out /path/to/bolt-out \
+		--owners /path/to/owners.csv \
+		--quota /path/to/quota.csv \
+		--config /path/to/basedirs.config \
+		--max-lines 1000000 \
+		--json /tmp/bolt_import_1m.json
+`,
+	Args: cobra.ExactArgs(1),
 	RunE: func(_ *cobra.Command, args []string) error {
 		return runBoltPerfImport(args[0])
 	},
@@ -33,7 +67,37 @@ var boltPerfImportCmd = &cobra.Command{
 var boltPerfQueryCmd = &cobra.Command{
 	Use:   "query <inputDir>",
 	Short: "Run query timing suite against imported Bolt databases",
-	Args:  cobra.ExactArgs(1),
+	Long: `Query runs a repeatable timing suite against Bolt databases.
+
+The positional argument <inputDir> is a directory containing dataset
+subdirectories created by 'bolt-perf import' (or by 'wrstat summarise'), each
+named:
+
+	<version>_<mountKey>
+
+For query, each dataset directory must contain both:
+
+	dguta.dbs/
+	basedirs.db
+
+The report is always written to --json, and a human-readable summary is printed
+to stdout.
+
+Examples:
+
+	# Run the timing suite against the imported Bolt DBs.
+	wrstat-ui bolt-perf query /path/to/bolt-out \
+		--owners /path/to/owners.csv \
+		--json /tmp/bolt_query.json
+
+	# Pin the tree queries to a specific directory and adjust where() splits.
+	wrstat-ui bolt-perf query /path/to/bolt-out \
+		--owners /path/to/owners.csv \
+		--dir /lustre/some/project/ \
+		--splits 4 \
+		--json /tmp/bolt_query_dir.json
+`,
+	Args: cobra.ExactArgs(1),
 	RunE: func(_ *cobra.Command, args []string) error {
 		return runBoltPerfQuery(args[0])
 	},
