@@ -27,10 +27,6 @@ const (
 
 	defaultDirPerm = 0o755
 
-	boltPerfDgutaDBsSuffix     = "dguta.dbs"
-	boltPerfBasedirsDBBasename = "basedirs.db"
-	boltPerfStatsGZBasename    = "stats.gz"
-
 	lineReaderBufSize = 32 * 1024
 
 	dirPickMinCount      = 1000
@@ -302,7 +298,7 @@ func importDataset(datasetDir string) (uint64, error) {
 
 func buildBoltPerfImportSpec(datasetDir string) (string, boltPerfImportSpec, error) {
 	base := filepath.Base(datasetDir)
-	statsGZPath := filepath.Join(datasetDir, boltPerfStatsGZBasename)
+	statsGZPath := filepath.Join(datasetDir, inputStatsFile)
 
 	st, err := os.Stat(statsGZPath)
 	if err != nil {
@@ -316,8 +312,8 @@ func buildBoltPerfImportSpec(datasetDir string) (string, boltPerfImportSpec, err
 
 	spec := boltPerfImportSpec{
 		statsGZPath:    statsGZPath,
-		basedirsDBPath: filepath.Join(outDatasetDir, boltPerfBasedirsDBBasename),
-		dgutaDBDir:     filepath.Join(outDatasetDir, boltPerfDgutaDBsSuffix),
+		basedirsDBPath: filepath.Join(outDatasetDir, basedirBasename),
+		dgutaDBDir:     filepath.Join(outDatasetDir, dgutaDBsSuffix),
 		modtime:        st.ModTime(),
 		maxLines:       boltPerf.maxLines,
 	}
@@ -500,7 +496,7 @@ func runMountTimestampsOp(report *perfReport, datasetDirs []string) error {
 				return err
 			}
 
-			_, err = os.Stat(filepath.Join(datasetDir, boltPerfDgutaDBsSuffix))
+			_, err = os.Stat(filepath.Join(datasetDir, dgutaDBsSuffix))
 			if err != nil {
 				return err
 			}
@@ -696,7 +692,7 @@ func normaliseDirPath(dir string) string {
 }
 
 func pickRepresentativeDir(datasetDir, mountPath string) string {
-	tree, err := db.NewTree(filepath.Join(datasetDir, boltPerfDgutaDBsSuffix))
+	tree, err := db.NewTree(filepath.Join(datasetDir, dgutaDBsSuffix))
 	if err != nil {
 		return mountPath
 	}
@@ -767,7 +763,7 @@ func closeAndJoinErr(closeFn func() error, err error) error {
 }
 
 func discoverBoltPerfQueryDatasets(inputDir string) ([]string, string, error) {
-	datasetDirs, err := findDatasetDirs(inputDir, boltPerfDgutaDBsSuffix, boltPerfBasedirsDBBasename)
+	datasetDirs, err := findDatasetDirs(inputDir, dgutaDBsSuffix, basedirBasename)
 	if err != nil {
 		return nil, "", err
 	}
@@ -785,7 +781,7 @@ func runBoltPerfImport(inputDir string) error {
 		return err
 	}
 
-	datasetDirs, err := findDatasetDirs(inputDir, boltPerfStatsGZBasename)
+	datasetDirs, err := findDatasetDirs(inputDir, inputStatsFile)
 	if err != nil {
 		return err
 	}
@@ -859,8 +855,8 @@ func maybeSetMountPointsFromFile(mr basedirs.MultiReader, mountsPath string) err
 }
 
 func openBoltQueryDBs(datasetDir string) (*db.Tree, basedirs.MultiReader, func() error, error) {
-	dgutaPath := filepath.Join(datasetDir, boltPerfDgutaDBsSuffix)
-	basedirsPath := filepath.Join(datasetDir, boltPerfBasedirsDBBasename)
+	dgutaPath := filepath.Join(datasetDir, dgutaDBsSuffix)
+	basedirsPath := filepath.Join(datasetDir, basedirBasename)
 
 	tree, err := db.NewTree(dgutaPath)
 	if err != nil {
