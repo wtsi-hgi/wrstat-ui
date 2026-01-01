@@ -66,12 +66,12 @@ func initDB(db *sql.DB) (*sql.Stmt, error) {
 		`CREATE INDEX IF NOT EXISTS eventTime ON [events] (time)`,
 		`VACUUM;`,
 	} {
-		if _, err = db.Exec(cmd); err != nil {
+		if _, err = db.Exec(cmd); err != nil { //nolint:noctx
 			return nil, err
 		}
 	}
 
-	return db.Prepare("INSERT INTO [events] (user, session, state, time) VALUES (?, ?, ?, ?);")
+	return db.Prepare("INSERT INTO [events] (user, session, state, time) VALUES (?, ?, ?, ?);") //nolint:noctx
 }
 
 func dataFromBody(c *gin.Context) (*[14]byte, int, int, error) {

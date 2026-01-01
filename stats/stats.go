@@ -259,6 +259,18 @@ func (p *StatsParser) parseLine() bool {
 
 	p.lineIndex = 0
 
+	if !p.parsePathAndColumns() {
+		return false
+	}
+
+	if !p.parseEntryType() {
+		return false
+	}
+
+	return p.parseTailNumbers()
+}
+
+func (p *StatsParser) parsePathAndColumns() bool {
 	var ok bool
 
 	p.path, ok = p.parseNextColumn()
@@ -268,28 +280,7 @@ func (p *StatsParser) parseLine() bool {
 
 	p.path = unquote(p.path)
 
-	if !p.parseColumns2to7() {
-		return false
-	}
-
-	entryTypeCol, ok := p.parseNextColumn()
-	if !ok {
-		return false
-	}
-
-	p.entryType = entryTypeCol[0]
-
-	if bytes.HasSuffix(p.path, slash) {
-		p.entryType = DirType
-	}
-
-	var none int64
-
-	if !p.parseNumberColumn(&p.inode) || !p.parseNumberColumn(&p.nlink) || !p.parseNumberColumn(&none) {
-		return false
-	}
-
-	return p.parseNumberColumn(&p.apparentSize)
+	return p.parseColumns2to7()
 }
 
 func unquote(path []byte) []byte { //nolint:funlen,gocognit,gocyclo,cyclop
@@ -363,6 +354,39 @@ func unquote(path []byte) []byte { //nolint:funlen,gocognit,gocyclo,cyclop
 	}
 
 	return path
+}
+
+func (p *StatsParser) parseEntryType() bool {
+	entryTypeCol, ok := p.parseNextColumn()
+	if !ok {
+		return false
+	}
+
+	p.entryType = entryTypeCol[0]
+
+	if bytes.HasSuffix(p.path, slash) {
+		p.entryType = DirType
+	}
+
+	return true
+}
+
+func (p *StatsParser) parseTailNumbers() bool {
+	var none int64
+
+	if !p.parseNumberColumn(&p.inode) {
+		return false
+	}
+
+	if !p.parseNumberColumn(&p.nlink) {
+		return false
+	}
+
+	if !p.parseNumberColumn(&none) {
+		return false
+	}
+
+	return p.parseNumberColumn(&p.apparentSize)
 }
 
 func (p *StatsParser) parseColumns2to7() bool {

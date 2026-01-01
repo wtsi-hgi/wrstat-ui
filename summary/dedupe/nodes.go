@@ -40,11 +40,6 @@ type Node struct {
 
 var nullNode = &Node{Size: -1} //nolint:gochecknoglobals
 
-func init() { //nolint:gochecknoinits
-	nullNode.left = nullNode
-	nullNode.right = nullNode
-}
-
 func (n *Node) compare(e *Node) int64 {
 	if n.Size == e.Size {
 		if n.Mountpoint == e.Mountpoint {
@@ -141,4 +136,9 @@ func (n *Node) iter(yield func(*Node) bool) bool {
 	}
 
 	return right.iter(yield)
+}
+
+func init() { //nolint:gochecknoinits
+	nullNode.left = nullNode
+	nullNode.right = nullNode
 }

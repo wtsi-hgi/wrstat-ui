@@ -54,19 +54,6 @@ const (
 	RangeLess1Month
 )
 
-// Summary holds count and size and lets you accumulate count and size as you
-// add more things with a size.
-type Summary struct {
-	Count int64
-	Size  int64
-}
-
-// Add will increment our count and add the given size to our size.
-func (s *Summary) Add(size int64) {
-	s.Count++
-	s.Size += size
-}
-
 // bucketForAge returns the correct age bucket for a given file age in seconds.
 // The checks go from oldest to newest. The first matching range is returned.
 // Ages under one month always fall into the "less than 1 month" bucket.
@@ -109,6 +96,19 @@ func MostCommonBucket(ranges AgeBuckets) AgeRange {
 	}
 
 	return bestIdx
+}
+
+// Summary holds count and size and lets you accumulate count and size as you
+// add more things with a size.
+type Summary struct {
+	Count int64
+	Size  int64
+}
+
+// Add will increment our count and add the given size to our size.
+func (s *Summary) Add(size int64) {
+	s.Count++
+	s.Size += size
 }
 
 // AgeBuckets stores counts per AgeRange.

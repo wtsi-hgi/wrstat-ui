@@ -67,7 +67,7 @@ func (g gutaKey) String() string {
 
 	binary.BigEndian.PutUint32(a[:4], g.GID)
 	binary.BigEndian.PutUint32(a[4:8], g.UID)
-	a[8] = uint8(g.FileType)
+	a[8] = uint8(g.FileType) //nolint:gosec // filetype values are constrained to <= 255 in this context
 	a[9] = uint8(g.Age)
 
 	return unsafe.String(&a[0], len(a))
