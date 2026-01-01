@@ -605,6 +605,124 @@ func TestPerfImport(t *testing.T) {
 	})
 }
 
+func TestPerfQuery(t *testing.T) {
+	Convey("bolt-perf query runs the full suite and writes JSON report", t, func() {
+		gid, uid, _, _, err := internaluser.RealGIDAndUID()
+		So(err, ShouldBeNil)
+
+		tmp := t.TempDir()
+
+		// prepare and import dataset using the import subcommand
+		inputDir := filepath.Join(tmp, "input")
+		So(os.MkdirAll(inputDir, 0755), ShouldBeNil)
+
+		ds := filepath.Join(inputDir, "1_／mountA")
+		So(os.MkdirAll(ds, 0755), ShouldBeNil)
+
+		_, root := internaldata.FakeFilesForDGUTADBForBasedirsTesting(gid, uid,
+			"lustre", 1, 1<<29, 1<<31, true, time.Now().Unix())
+
+		statsPath := filepath.Join(ds, "stats.gz")
+		f, err := os.Create(statsPath)
+		So(err, ShouldBeNil)
+
+		gw := gzip.NewWriter(f)
+		_, err = io.Copy(gw, root.AsReader())
+		So(err, ShouldBeNil)
+		So(gw.Close(), ShouldBeNil)
+		So(f.Close(), ShouldBeNil)
+
+		ownersPath, err := internaldata.CreateOwnersCSV(t, internaldata.ExampleOwnersCSV)
+		So(err, ShouldBeNil)
+
+		quota := internaldata.CreateQuotasCSV(t, internaldata.ExampleQuotaCSV)
+
+		basedirsConfig := filepath.Join(tmp, "basedirs.config")
+		So(os.WriteFile(basedirsConfig, []byte(`/lustre/scratch123/hgi/mdt	5	5
+/ 	4	4`), 0600), ShouldBeNil)
+
+		out := filepath.Join(tmp, "out")
+
+		// import
+		_, stderr, _, err := runWRStat(
+			"bolt-perf", "import", inputDir,
+			"--out", out,
+			"--quota", quota,
+			"--config", basedirsConfig,
+			"--owners", ownersPath,
+			"--json", filepath.Join(tmp, "report_import.json"),
+		)
+		So(err, ShouldBeNil)
+		So(stderr, ShouldBeBlank)
+
+		// run query suite
+		jsonPath := filepath.Join(tmp, "report_query.json")
+
+		_, stderr, _, err = runWRStat(
+			"bolt-perf", "query", out,
+			"--owners", ownersPath,
+			"--json", jsonPath,
+			"--repeat", "2",
+			"--warmup", "1",
+			"--splits", "1",
+			"--dir", "/",
+		)
+		So(err, ShouldBeNil)
+		So(stderr, ShouldBeBlank)
+
+		b, err := os.ReadFile(jsonPath)
+		So(err, ShouldBeNil)
+
+		var j map[string]any
+
+		err = json.Unmarshal(b, &j)
+		So(err, ShouldBeNil)
+
+		opsAny, ok := j["operations"]
+		So(ok, ShouldBeTrue)
+
+		ops, ok := opsAny.([]any)
+		So(ok, ShouldBeTrue)
+
+		// expect the named operations in order (subset may be present)
+		names := []string{
+			"mount_timestamps",
+			"tree_dirinfo",
+			"tree_where",
+			"basedirs_group_usage",
+			"basedirs_user_usage",
+			"basedirs_group_subdirs",
+			"basedirs_user_subdirs",
+			"basedirs_history",
+		}
+
+		// build a map of operation name to entry
+		found := make(map[string]map[string]any)
+
+		for _, o := range ops {
+			m, ok := o.(map[string]any)
+			if !ok {
+				continue
+			}
+
+			if n, ok := m["name"].(string); ok {
+				found[n] = m
+			}
+		}
+
+		for _, n := range names {
+			So(found[n], ShouldNotBeNil)
+
+			// check durations length for query ops
+			if n != "mount_timestamps" {
+				d, ok := found[n]["durations_ms"].([]any)
+				So(ok, ShouldBeTrue)
+				So(len(d), ShouldEqual, 2)
+			}
+		}
+	})
+}
+
 func runWRStat(args ...string) (string, string, []*jobqueue.Job, error) {
 	var (
 		stdout, stderr strings.Builder
