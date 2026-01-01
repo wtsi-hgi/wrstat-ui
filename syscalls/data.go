@@ -42,14 +42,6 @@ import (
 
 const timeFormat = "2006-01-02T15:04:05-0700"
 
-type data struct {
-	Events   []Event `json:"events"`
-	Errors   []Error `json:"errors"`
-	Complete bool    `json:"complete"`
-	hosts    map[string]string
-	lastFile string
-}
-
 type Event struct {
 	Time       int64  `json:"time"`
 	File       string `json:"file"`
@@ -69,6 +61,21 @@ type Error struct {
 	File    string            `json:"file"`
 	Host    string            `json:"host"`
 	Data    map[string]string `json:"data,omitempty"`
+}
+
+type Job struct {
+	ID        string    `json:"ReqGroup"`
+	StartTime time.Time `json:"StartTime"`
+	EndTime   time.Time `json:"EndTime"`
+	Host      string    `json:"Host"`
+}
+
+type data struct {
+	Events   []Event `json:"events"`
+	Errors   []Error `json:"errors"`
+	Complete bool    `json:"complete"`
+	hosts    map[string]string
+	lastFile string
 }
 
 func (d *data) loadFiles(files []string) error {
@@ -225,13 +232,6 @@ func (d *data) parseErrorLine(line [][2]string) error {
 	d.Errors = append(d.Errors, event)
 
 	return nil
-}
-
-type Job struct {
-	ID        string    `json:"ReqGroup"`
-	StartTime time.Time `json:"StartTime"`
-	EndTime   time.Time `json:"EndTime"`
-	Host      string    `json:"Host"`
 }
 
 func (d *data) loadJobsData(r io.Reader) error {

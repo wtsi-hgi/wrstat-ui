@@ -68,6 +68,19 @@ func CreateExampleDBsCustomIDs(t *testing.T, uid, gidA, gidB string, refTime int
 	return dir, CreateExampleDBsCustomIDsWithDir(t, dir, uid, gidA, gidB, refTime)
 }
 
+// createExampleDgutaDir creates a temp directory structure to hold dguta db
+// files in the same way that 'wrstat tidy' organises them.
+func createExampleDgutaDir(t *testing.T) (string, error) {
+	t.Helper()
+
+	tmp := t.TempDir()
+	name := strconv.FormatInt(time.Now().Unix()-10, 10) + "_test"
+	dir := filepath.Join(tmp, name)
+	err := os.MkdirAll(dir, DirPerms)
+
+	return dir, err
+}
+
 // CreateExampleDBsCustomIDsWithDir creates a temporary dguta.db, in the path
 // provided, from some example data that uses the given uid and gids.
 func CreateExampleDBsCustomIDsWithDir(t *testing.T, dir, uid, gidA, gidB string, refTime int64) error {
@@ -91,6 +104,29 @@ func CreateExampleDBsCustomIDsWithDir(t *testing.T, dir, uid, gidA, gidB string,
 	}
 
 	return fn()
+}
+
+// exampleDBData is some example DGUTA data that uses the given uid and gids,
+// along with root's uid.
+func exampleDBData(t *testing.T, uidStr, gidAStr, gidBStr string, refTime int64) io.Reader {
+	t.Helper()
+
+	uid, err := strconv.ParseUint(uidStr, 10, 32)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	gidA, err := strconv.ParseUint(gidAStr, 10, 32)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	gidB, err := strconv.ParseUint(gidBStr, 10, 32)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return internaldata.CreateDefaultTestData(uint32(gidA), uint32(gidB), 0, uint32(uid), 0, refTime).AsReader()
 }
 
 func addDirgutaSummariser(s *summary.Summariser, path string) (func() error, error) {
@@ -148,40 +184,4 @@ func addBasedirsSummariser(t *testing.T, s *summary.Summariser, path string) err
 	s.AddDirectoryOperation(sbasedirs.NewBaseDirs(config.PathShouldOutput, bd))
 
 	return nil
-}
-
-// createExampleDgutaDir creates a temp directory structure to hold dguta db
-// files in the same way that 'wrstat tidy' organises them.
-func createExampleDgutaDir(t *testing.T) (string, error) {
-	t.Helper()
-
-	tmp := t.TempDir()
-	name := strconv.FormatInt(time.Now().Unix()-10, 10) + "_test"
-	dir := filepath.Join(tmp, name)
-	err := os.MkdirAll(dir, DirPerms)
-
-	return dir, err
-}
-
-// exampleDBData is some example DGUTA data that uses the given uid and gids,
-// along with root's uid.
-func exampleDBData(t *testing.T, uidStr, gidAStr, gidBStr string, refTime int64) io.Reader {
-	t.Helper()
-
-	uid, err := strconv.ParseUint(uidStr, 10, 32)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	gidA, err := strconv.ParseUint(gidAStr, 10, 32)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	gidB, err := strconv.ParseUint(gidBStr, 10, 32)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	return internaldata.CreateDefaultTestData(uint32(gidA), uint32(gidB), 0, uint32(uid), 0, refTime).AsReader()
 }

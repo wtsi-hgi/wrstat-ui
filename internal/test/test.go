@@ -41,6 +41,19 @@ import (
 // path.
 type DirectoryPathCreator map[string]*summary.DirectoryPath
 
+// NewDirectoryPathCreator allows for the simple creation of
+// summary.DirectoryPath structures.
+func NewDirectoryPathCreator() DirectoryPathCreator {
+	d := make(DirectoryPathCreator)
+
+	d["/"] = &summary.DirectoryPath{
+		Name:  "/",
+		Depth: 0,
+	}
+
+	return d
+}
+
 // ToDirectoryPath creates a summary.DirectoryPath for the given full path,
 // reusing existing parents.
 func (d DirectoryPathCreator) ToDirectoryPath(p string) *summary.DirectoryPath {
@@ -67,19 +80,6 @@ func (d DirectoryPathCreator) ToDirectoryPath(p string) *summary.DirectoryPath {
 	return dp
 }
 
-// NewDirectoryPathCreator allows for the simple creation of
-// summary.DirectoryPath structures.
-func NewDirectoryPathCreator() DirectoryPathCreator {
-	d := make(DirectoryPathCreator)
-
-	d["/"] = &summary.DirectoryPath{
-		Name:  "/",
-		Depth: 0,
-	}
-
-	return d
-}
-
 // StringBuilder gives the strings.Builder type a no-op Close method.
 type StringBuilder struct {
 	strings.Builder
@@ -88,6 +88,18 @@ type StringBuilder struct {
 // Close is a no-op Close method to satisfy the io.Closer interface.
 func (StringBuilder) Close() error {
 	return nil
+}
+
+// TestBadIDs tests how a summary.Operation responds to invalid ids.
+func TestBadIDs(err error, a summary.Operation, w *StringBuilder) {
+	So(err, ShouldBeNil)
+
+	err = a.Output()
+	So(err, ShouldBeNil)
+
+	output := w.String()
+
+	So(output, ShouldContainSubstring, "id999999999")
 }
 
 // BadWriter is a io.riteCloser that always returns that it is closed.
@@ -101,6 +113,28 @@ func (BadWriter) Write([]byte) (int, error) {
 // Close is a method that always returns fs.ErrClosed.
 func (BadWriter) Close() error {
 	return fs.ErrClosed
+}
+
+// NewMockInfoWithAtime is similar to NewMockInfo but you can also provide an
+// atime.
+func NewMockInfoWithAtime(path *summary.DirectoryPath, uid, gid uint32,
+	size int64, dir bool, atime int64) *summary.FileInfo {
+	mi := NewMockInfo(path, uid, gid, size, dir)
+	mi.ATime = atime
+
+	return mi
+}
+
+// NewMockInfoWithTimes is similar to NewMockInfo but you can also provide an
+// atime, mtime, and ctime.
+func NewMockInfoWithTimes(path *summary.DirectoryPath, uid, gid uint32,
+	size int64, dir bool, tim int64) *summary.FileInfo {
+	mi := NewMockInfo(path, uid, gid, size, dir)
+	mi.ATime = tim
+	mi.MTime = tim
+	mi.CTime = tim
+
+	return mi
 }
 
 // NewMockInfo is a function that creates a summary.FileInfo from a
@@ -126,28 +160,6 @@ func NewMockInfo(path *summary.DirectoryPath, uid, gid uint32, size int64, dir b
 		Size:      size,
 		EntryType: byte(entryType),
 	}
-}
-
-// NewMockInfoWithAtime is similar to NewMockInfo but you can also provide an
-// atime.
-func NewMockInfoWithAtime(path *summary.DirectoryPath, uid, gid uint32,
-	size int64, dir bool, atime int64) *summary.FileInfo {
-	mi := NewMockInfo(path, uid, gid, size, dir)
-	mi.ATime = atime
-
-	return mi
-}
-
-// NewMockInfoWithTimes is similar to NewMockInfo but you can also provide an
-// atime, mtime, and ctime.
-func NewMockInfoWithTimes(path *summary.DirectoryPath, uid, gid uint32,
-	size int64, dir bool, tim int64) *summary.FileInfo {
-	mi := NewMockInfo(path, uid, gid, size, dir)
-	mi.ATime = tim
-	mi.MTime = tim
-	mi.CTime = tim
-
-	return mi
 }
 
 // CheckDataIsSorted returns true if the data provided is sorted. The first
@@ -180,16 +192,4 @@ func CheckDataIsSorted(data string, textCols int) bool { //nolint:gocognit
 
 		return 0
 	})
-}
-
-// TestBadIDs tests how a summary.Operation responds to invalid ids.
-func TestBadIDs(err error, a summary.Operation, w *StringBuilder) {
-	So(err, ShouldBeNil)
-
-	err = a.Output()
-	So(err, ShouldBeNil)
-
-	output := w.String()
-
-	So(output, ShouldContainSubstring, "id999999999")
 }

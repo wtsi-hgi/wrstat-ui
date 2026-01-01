@@ -39,6 +39,86 @@ import (
 
 const ErrBadBasedirsQuery = gas.Error("bad query; check id and basedir")
 
+// wantsGzipEncoding reports whether the client accepts gzip encoding
+// according to the Accept-Encoding header and HTTP semantics.
+// - If no header is present, defaults to true (any encoding is acceptable).
+// - If gzip is listed with q=0, returns false.
+// - If gzip is listed with q>0, returns true.
+// - If not listed, but "*" is listed with q>0, returns true.
+func wantsGzipEncoding(acceptEnc string) bool {
+	if strings.TrimSpace(acceptEnc) == "" {
+		return true
+	}
+
+	qWildcard := 0.0
+	maxQParts := 2
+
+	for _, enc := range strings.Split(acceptEnc, ",") {
+		enc = strings.TrimSpace(enc)
+		parts := strings.SplitN(enc, ";", maxQParts)
+		name := strings.ToLower(strings.TrimSpace(parts[0]))
+
+		switch name {
+		case "gzip":
+			return parseQ(parts) > 0
+		case "*":
+			qWildcard = parseQ(parts)
+		}
+	}
+
+	return qWildcard > 0
+}
+
+// parseQ extracts the q-value (quality factor) from an Accept-Encoding
+// parameter slice.
+//
+// - If no q-value is specified, it defaults to 1.0. - If the q-value is
+// malformed, the default 1.0 is returned. - If present and valid (e.g.,
+// "q=0.5"), that float value is returned.
+func parseQ(parts []string) float64 {
+	q := 1.0
+
+	if len(parts) == 2 && strings.HasPrefix(strings.TrimSpace(parts[1]), "q=") {
+		if v, err := strconv.ParseFloat(strings.TrimPrefix(strings.TrimSpace(parts[1]), "q="), 64); err == nil {
+			q = v
+		}
+	}
+
+	return q
+}
+
+func getSubdirsArgs(c *gin.Context) (int, string, db.DirGUTAge, bool) {
+	idStr := c.Query("id")
+	basedir := c.Query("basedir")
+	ageStr := c.Query("age")
+
+	if idStr == "" || basedir == "" {
+		c.AbortWithError(http.StatusBadRequest, ErrBadBasedirsQuery) //nolint:errcheck
+
+		return 0, "", db.DGUTAgeAll, false
+	}
+
+	id, err := strconv.Atoi(idStr)
+	if err != nil {
+		c.AbortWithError(http.StatusBadRequest, ErrBadBasedirsQuery) //nolint:errcheck
+
+		return 0, "", db.DGUTAgeAll, false
+	}
+
+	if ageStr == "" {
+		ageStr = "0"
+	}
+
+	age, err := db.AgeStringToDirGUTAge(ageStr)
+	if err != nil {
+		c.AbortWithError(http.StatusBadRequest, ErrBadBasedirsQuery) //nolint:errcheck
+
+		return 0, "", db.DGUTAgeAll, false
+	}
+
+	return id, basedir, age, true
+}
+
 func (s *Server) addBaseDirRoutes() {
 	authGroup := s.AuthRouter()
 
@@ -91,54 +171,6 @@ func (s *Server) getBasedirs(c *gin.Context, cb func() (any, error)) {
 	c.IndentedJSON(http.StatusOK, result)
 }
 
-// wantsGzipEncoding reports whether the client accepts gzip encoding
-// according to the Accept-Encoding header and HTTP semantics.
-// - If no header is present, defaults to true (any encoding is acceptable).
-// - If gzip is listed with q=0, returns false.
-// - If gzip is listed with q>0, returns true.
-// - If not listed, but "*" is listed with q>0, returns true.
-func wantsGzipEncoding(acceptEnc string) bool {
-	if strings.TrimSpace(acceptEnc) == "" {
-		return true
-	}
-
-	qWildcard := 0.0
-	maxQParts := 2
-
-	for _, enc := range strings.Split(acceptEnc, ",") {
-		enc = strings.TrimSpace(enc)
-		parts := strings.SplitN(enc, ";", maxQParts)
-		name := strings.ToLower(strings.TrimSpace(parts[0]))
-
-		switch name {
-		case "gzip":
-			return parseQ(parts) > 0
-		case "*":
-			qWildcard = parseQ(parts)
-		}
-	}
-
-	return qWildcard > 0
-}
-
-// parseQ extracts the q-value (quality factor) from an Accept-Encoding
-// parameter slice.
-//
-// - If no q-value is specified, it defaults to 1.0. - If the q-value is
-// malformed, the default 1.0 is returned. - If present and valid (e.g.,
-// "q=0.5"), that float value is returned.
-func parseQ(parts []string) float64 {
-	q := 1.0
-
-	if len(parts) == 2 && strings.HasPrefix(strings.TrimSpace(parts[1]), "q=") {
-		if v, err := strconv.ParseFloat(strings.TrimPrefix(strings.TrimSpace(parts[1]), "q="), 64); err == nil {
-			q = v
-		}
-	}
-
-	return q
-}
-
 // serveGzippedCache serves a cached JSON payload to a client.
 // It automatically selects gzip or plain JSON based on the
 // "Accept-Encoding" header.
@@ -188,38 +220,6 @@ func (s *Server) getBasedirsGroupSubdirs(c *gin.Context) {
 
 		return results, nil
 	})
-}
-
-func getSubdirsArgs(c *gin.Context) (int, string, db.DirGUTAge, bool) {
-	idStr := c.Query("id")
-	basedir := c.Query("basedir")
-	ageStr := c.Query("age")
-
-	if idStr == "" || basedir == "" {
-		c.AbortWithError(http.StatusBadRequest, ErrBadBasedirsQuery) //nolint:errcheck
-
-		return 0, "", db.DGUTAgeAll, false
-	}
-
-	id, err := strconv.Atoi(idStr)
-	if err != nil {
-		c.AbortWithError(http.StatusBadRequest, ErrBadBasedirsQuery) //nolint:errcheck
-
-		return 0, "", db.DGUTAgeAll, false
-	}
-
-	if ageStr == "" {
-		ageStr = "0"
-	}
-
-	age, err := db.AgeStringToDirGUTAge(ageStr)
-	if err != nil {
-		c.AbortWithError(http.StatusBadRequest, ErrBadBasedirsQuery) //nolint:errcheck
-
-		return 0, "", db.DGUTAgeAll, false
-	}
-
-	return id, basedir, age, true
 }
 
 func (s *Server) getBasedirsUserSubdirs(c *gin.Context) {

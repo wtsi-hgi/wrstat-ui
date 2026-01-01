@@ -52,33 +52,6 @@ var (
 	completeFalse = json.RawMessage(`{"complete":false}`) //nolint:gochecknoglobals
 )
 
-// StartServer starts a webserver that displays wrstat logged syscall data in
-// order to analyse potential issues.
-//
-// The reload param represents the delay, in minutes, between the checks for new
-// logs. If set to zero, no log checks are performed after the server has
-// started.
-//
-// The dbs should be the 'wrstat multi -f' output directories that should be
-// scanned for logs.
-func StartServer(serverBind string, reload uint, dbs ...string) error {
-	if len(dbs) == 0 {
-		return errNoDBPath
-	}
-
-	l := newLogAnalyzer()
-
-	if err := l.load(dbs, reload); err != nil {
-		return fmt.Errorf("error during initial log discovery: %w", err)
-	}
-
-	http.Handle("/", index)
-	http.Handle("/data.json", l)
-	http.HandleFunc("/logs/", l.handleRunRequest)
-
-	return http.ListenAndServe(serverBind, nil) //nolint:gosec
-}
-
 type logAnalyzer struct {
 	mu        sync.RWMutex
 	stats     map[string]json.RawMessage
@@ -258,4 +231,31 @@ func (l *logAnalyzer) setData(name string, data any) {
 	l.mu.Lock()
 	l.stats[name] = buf.Bytes()
 	l.mu.Unlock()
+}
+
+// StartServer starts a webserver that displays wrstat logged syscall data in
+// order to analyse potential issues.
+//
+// The reload param represents the delay, in minutes, between the checks for new
+// logs. If set to zero, no log checks are performed after the server has
+// started.
+//
+// The dbs should be the 'wrstat multi -f' output directories that should be
+// scanned for logs.
+func StartServer(serverBind string, reload uint, dbs ...string) error {
+	if len(dbs) == 0 {
+		return errNoDBPath
+	}
+
+	l := newLogAnalyzer()
+
+	if err := l.load(dbs, reload); err != nil {
+		return fmt.Errorf("error during initial log discovery: %w", err)
+	}
+
+	http.Handle("/", index)
+	http.Handle("/data.json", l)
+	http.HandleFunc("/logs/", l.handleRunRequest)
+
+	return http.ListenAndServe(serverBind, nil) //nolint:gosec
 }

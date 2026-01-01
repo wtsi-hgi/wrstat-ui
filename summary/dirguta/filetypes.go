@@ -715,11 +715,6 @@ func FilenameToType(name []byte) db.DirGUTAFileType {
 	return filenameSuffixes[place].typ
 }
 
-// IsTemp tells you if path is named like a temporary file.
-func IsTemp(name []byte) bool {
-	return hasTempPrefix(name) || hasTempSuffix(name)
-}
-
 func hasTempPrefix(name []byte) bool {
 	var place uint8
 
@@ -760,4 +755,9 @@ func FileTypeWithTemp(name []byte, isTempDir bool) db.DirGUTAFileType {
 	}
 
 	return base
+}
+
+// IsTemp tells you if path is named like a temporary file.
+func IsTemp(name []byte) bool {
+	return hasTempPrefix(name) || hasTempSuffix(name)
 }

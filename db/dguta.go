@@ -34,34 +34,12 @@ import (
 
 const endByte = 255
 
+var pathBuf [4098]byte //nolint:gochecknoglobals
+
 // DGUTA handles all the *GUTA information for a directory.
 type DGUTA struct {
 	Dir   string
 	GUTAs GUTAs
-}
-
-type RecordDGUTA struct {
-	Dir      *summary.DirectoryPath
-	GUTAs    GUTAs
-	Children []string
-}
-
-var pathBuf [4098]byte //nolint:gochecknoglobals
-
-// EncodeToBytes returns our Dir as a []byte and our GUTAs encoded in another
-// []byte suitable for storing on disk.
-func (d *RecordDGUTA) EncodeToBytes() ([]byte, []byte) {
-	var encoded bytes.Buffer
-
-	d.GUTAs.writeTo(&byteio.StickyLittleEndianWriter{Writer: &encoded})
-
-	dir := append(d.pathBytes(), endByte)
-
-	return dir, encoded.Bytes()
-}
-
-func (d *RecordDGUTA) pathBytes() []byte {
-	return d.Dir.AppendTo(pathBuf[:0])
 }
 
 // DecodeDGUTAbytes converts the byte slices returned by DGUTA.Encode() back in to
@@ -92,4 +70,26 @@ func (d *DGUTA) Summary(filter *Filter) *DirSummary {
 // directories.
 func (d *DGUTA) Append(other *DGUTA) {
 	d.GUTAs = append(d.GUTAs, other.GUTAs...)
+}
+
+type RecordDGUTA struct {
+	Dir      *summary.DirectoryPath
+	GUTAs    GUTAs
+	Children []string
+}
+
+// EncodeToBytes returns our Dir as a []byte and our GUTAs encoded in another
+// []byte suitable for storing on disk.
+func (d *RecordDGUTA) EncodeToBytes() ([]byte, []byte) {
+	var encoded bytes.Buffer
+
+	d.GUTAs.writeTo(&byteio.StickyLittleEndianWriter{Writer: &encoded})
+
+	dir := append(d.pathBytes(), endByte)
+
+	return dir, encoded.Bytes()
+}
+
+func (d *RecordDGUTA) pathBytes() []byte {
+	return d.Dir.AppendTo(pathBuf[:0])
 }

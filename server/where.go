@@ -38,6 +38,18 @@ const (
 	defaultSplitsStr = "2"
 )
 
+// convertSplitsValue returns a split.SplitFn that always returns the value
+// specified. If the given value fails to be parsed as a Uint, the default value
+// of 2 will be used.
+func convertSplitsValue(splits string) split.SplitFn {
+	splitsN, err := strconv.ParseUint(splits, 10, 8)
+	if err != nil {
+		return split.SplitsToSplitFn(defaultSplits)
+	}
+
+	return split.SplitsToSplitFn(int(splitsN))
+}
+
 // getWhere responds with a list of directory stats describing where data is on
 // disks. LoadDGUTADB() must already have been called. This is called when there
 // is a GET on /rest/v1/where or /rest/v1/auth/where.
@@ -63,16 +75,4 @@ func (s *Server) getWhere(c *gin.Context) {
 	}
 
 	c.IndentedJSON(http.StatusOK, s.dcssToSummaries(dcss))
-}
-
-// convertSplitsValue returns a split.SplitFn that always returns the value
-// specified. If the given value fails to be parsed as a Uint, the default value
-// of 2 will be used.
-func convertSplitsValue(splits string) split.SplitFn {
-	splitsN, err := strconv.ParseUint(splits, 10, 8)
-	if err != nil {
-		return split.SplitsToSplitFn(defaultSplits)
-	}
-
-	return split.SplitsToSplitFn(int(splitsN))
 }

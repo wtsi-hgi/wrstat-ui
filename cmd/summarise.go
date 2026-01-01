@@ -122,6 +122,82 @@ An example command would be the following:
 	},
 }
 
+func init() {
+	RootCmd.AddCommand(summariseCmd)
+
+	summariseCmd.Flags().StringVarP(&defaultDir, "defaultDir", "d", "", "output all summarisers to here")
+	summariseCmd.Flags().StringVarP(&userGroup, "userGroup", "u", "", "usergroup output file")
+	summariseCmd.Flags().StringVarP(&groupUser, "groupUser", "g", "", "groupUser output file")
+	summariseCmd.Flags().StringVarP(&basedirsDB, "basedirsDB", "b", "", "basedirs output file")
+	summariseCmd.Flags().StringVarP(&basedirsHistoryDB, "basedirsHistoryDB", "s", "",
+		"basedirs file containing previous history")
+	summariseCmd.Flags().StringVarP(&dirgutaDB, "tree", "t", "", "tree output dir")
+	summariseCmd.Flags().StringVarP(&quotaPath, "quota", "q", "", "csv of gid,disk,size_quota,inode_quota")
+	summariseCmd.Flags().StringVarP(&basedirsConfig, "config", "c", "", "path to basedirs config file")
+	summariseCmd.Flags().StringVarP(&mounts, "mounts", "m", "", "path to a file containing a list of quoted mountpoints")
+}
+
+type compressedFile struct {
+	*pgzip.Writer
+	file *os.File
+}
+
+func (c *compressedFile) Close() error {
+	err := c.Writer.Close()
+	errr := c.file.Close()
+
+	if err != nil {
+		return err
+	}
+
+	return errr
+}
+
+func wrapCompressed(wc *os.File) io.WriteCloser {
+	if !strings.HasSuffix(wc.Name(), ".gz") {
+		return wc
+	}
+
+	return &compressedFile{
+		Writer: pgzip.NewWriter(wc),
+		file:   wc,
+	}
+}
+
+func parseBasedirConfig(quotaPath, basedirsConfig string) (*basedirs.Quotas, basedirs.Config, error) {
+	quotas, err := basedirs.ParseQuotas(quotaPath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("error parsing quotas file: %w", err)
+	}
+
+	cf, err := os.Open(basedirsConfig)
+	if err != nil {
+		return nil, nil, fmt.Errorf("error opening basedirs config: %w", err)
+	}
+
+	defer cf.Close()
+
+	config, err := basedirs.ParseConfig(cf)
+	if err != nil {
+		return nil, nil, fmt.Errorf("error parsing basedirs config: %w", err)
+	}
+
+	cf.Close()
+
+	return quotas, config, nil
+}
+
+func copyHistory(bd *basedirs.BaseDirs, basedirsHistoryDB string) error {
+	db, err := basedirs.OpenDBRO(basedirsHistoryDB)
+	if err != nil {
+		return err
+	}
+
+	defer db.Close()
+
+	return bd.CopyHistoryFrom(db)
+}
+
 func run(args []string) (err error) {
 	if err = checkArgs(args); err != nil {
 		return err
@@ -248,33 +324,6 @@ func addUserGroupSummariser(s *summary.Summariser, userGroup string) error {
 	return nil
 }
 
-type compressedFile struct {
-	*pgzip.Writer
-	file *os.File
-}
-
-func (c *compressedFile) Close() error {
-	err := c.Writer.Close()
-	errr := c.file.Close()
-
-	if err != nil {
-		return err
-	}
-
-	return errr
-}
-
-func wrapCompressed(wc *os.File) io.WriteCloser {
-	if !strings.HasSuffix(wc.Name(), ".gz") {
-		return wc
-	}
-
-	return &compressedFile{
-		Writer: pgzip.NewWriter(wc),
-		file:   wc,
-	}
-}
-
 func addGroupUserSummariser(s *summary.Summariser, groupUser string) error {
 	gf, err := os.Create(groupUser)
 	if err != nil {
@@ -348,40 +397,6 @@ func parseMountpointsFromFile(mountpoints string) ([]string, error) {
 	return mounts, nil
 }
 
-func parseBasedirConfig(quotaPath, basedirsConfig string) (*basedirs.Quotas, basedirs.Config, error) {
-	quotas, err := basedirs.ParseQuotas(quotaPath)
-	if err != nil {
-		return nil, nil, fmt.Errorf("error parsing quotas file: %w", err)
-	}
-
-	cf, err := os.Open(basedirsConfig)
-	if err != nil {
-		return nil, nil, fmt.Errorf("error opening basedirs config: %w", err)
-	}
-
-	defer cf.Close()
-
-	config, err := basedirs.ParseConfig(cf)
-	if err != nil {
-		return nil, nil, fmt.Errorf("error parsing basedirs config: %w", err)
-	}
-
-	cf.Close()
-
-	return quotas, config, nil
-}
-
-func copyHistory(bd *basedirs.BaseDirs, basedirsHistoryDB string) error {
-	db, err := basedirs.OpenDBRO(basedirsHistoryDB)
-	if err != nil {
-		return err
-	}
-
-	defer db.Close()
-
-	return bd.CopyHistoryFrom(db)
-}
-
 func addDirgutaSummariser(s *summary.Summariser, dirgutaDB string) (func() error, error) {
 	if err := os.RemoveAll(dirgutaDB); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return nil, err
@@ -402,19 +417,4 @@ func addDirgutaSummariser(s *summary.Summariser, dirgutaDB string) (func() error
 	s.AddDirectoryOperation(dirguta.NewDirGroupUserTypeAge(db))
 
 	return db.Close, nil
-}
-
-func init() {
-	RootCmd.AddCommand(summariseCmd)
-
-	summariseCmd.Flags().StringVarP(&defaultDir, "defaultDir", "d", "", "output all summarisers to here")
-	summariseCmd.Flags().StringVarP(&userGroup, "userGroup", "u", "", "usergroup output file")
-	summariseCmd.Flags().StringVarP(&groupUser, "groupUser", "g", "", "groupUser output file")
-	summariseCmd.Flags().StringVarP(&basedirsDB, "basedirsDB", "b", "", "basedirs output file")
-	summariseCmd.Flags().StringVarP(&basedirsHistoryDB, "basedirsHistoryDB", "s", "",
-		"basedirs file containing previous history")
-	summariseCmd.Flags().StringVarP(&dirgutaDB, "tree", "t", "", "tree output dir")
-	summariseCmd.Flags().StringVarP(&quotaPath, "quota", "q", "", "csv of gid,disk,size_quota,inode_quota")
-	summariseCmd.Flags().StringVarP(&basedirsConfig, "config", "c", "", "path to basedirs config file")
-	summariseCmd.Flags().StringVarP(&mounts, "mounts", "m", "", "path to a file containing a list of quoted mountpoints")
 }

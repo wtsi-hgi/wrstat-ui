@@ -46,9 +46,6 @@ var slash = []byte{'/'} //nolint:gochecknoglobals
 // Error is the type of the constant Err* variables.
 type Error string
 
-// Error returns a string version of the error.
-func (e Error) Error() string { return string(e) }
-
 const (
 	defaultAge                 = 7
 	secsPerYear                = 3600 * 24 * 365
@@ -59,27 +56,8 @@ const (
 	ErrTooFewColumns = Error("invalid file format: too few tab separated columns")
 )
 
-// StatsParser is used to parse wrstat stats files.
-type StatsParser struct { //nolint:revive
-	scanner      *bufio.Scanner
-	lineBytes    []byte
-	lineLength   int
-	lineIndex    int
-	lastPath     []byte
-	indexes      []int
-	path         []byte
-	size         int64
-	apparentSize int64
-	uid          int64
-	gid          int64
-	mtime        int64
-	atime        int64
-	ctime        int64
-	entryType    byte
-	inode        int64
-	nlink        int64
-	error        error
-}
+// Error returns a string version of the error.
+func (e Error) Error() string { return string(e) }
 
 // FileInfo represents a parsed line of data from a stats file.
 type FileInfo struct {
@@ -104,6 +82,28 @@ func (f *FileInfo) IsDir() bool {
 // BaseName returns the name of the file.
 func (f *FileInfo) BaseName() []byte {
 	return f.Path[bytes.LastIndexByte(f.Path[:len(f.Path)-1], '/')+1:]
+}
+
+// StatsParser is used to parse wrstat stats files.
+type StatsParser struct { //nolint:revive
+	scanner      *bufio.Scanner
+	lineBytes    []byte
+	lineLength   int
+	lineIndex    int
+	lastPath     []byte
+	indexes      []int
+	path         []byte
+	size         int64
+	apparentSize int64
+	uid          int64
+	gid          int64
+	mtime        int64
+	atime        int64
+	ctime        int64
+	entryType    byte
+	inode        int64
+	nlink        int64
+	error        error
 }
 
 // NewStatsParser is used to create a new StatsParser, given uncompressed wrstat
@@ -249,6 +249,49 @@ func (p *StatsParser) fillFullInfo(info *FileInfo) {
 	info.Nlink = p.nlink
 }
 
+func (p *StatsParser) parseLine() bool {
+	p.lineBytes = p.scanner.Bytes()
+	p.lineLength = len(p.lineBytes)
+
+	if p.lineLength <= 1 {
+		return true
+	}
+
+	p.lineIndex = 0
+
+	var ok bool
+
+	p.path, ok = p.parseNextColumn()
+	if !ok {
+		return false
+	}
+
+	p.path = unquote(p.path)
+
+	if !p.parseColumns2to7() {
+		return false
+	}
+
+	entryTypeCol, ok := p.parseNextColumn()
+	if !ok {
+		return false
+	}
+
+	p.entryType = entryTypeCol[0]
+
+	if bytes.HasSuffix(p.path, slash) {
+		p.entryType = DirType
+	}
+
+	var none int64
+
+	if !p.parseNumberColumn(&p.inode) || !p.parseNumberColumn(&p.nlink) || !p.parseNumberColumn(&none) {
+		return false
+	}
+
+	return p.parseNumberColumn(&p.apparentSize)
+}
+
 func unquote(path []byte) []byte { //nolint:funlen,gocognit,gocyclo,cyclop
 	if path == nil {
 		return path
@@ -320,49 +363,6 @@ func unquote(path []byte) []byte { //nolint:funlen,gocognit,gocyclo,cyclop
 	}
 
 	return path
-}
-
-func (p *StatsParser) parseLine() bool {
-	p.lineBytes = p.scanner.Bytes()
-	p.lineLength = len(p.lineBytes)
-
-	if p.lineLength <= 1 {
-		return true
-	}
-
-	p.lineIndex = 0
-
-	var ok bool
-
-	p.path, ok = p.parseNextColumn()
-	if !ok {
-		return false
-	}
-
-	p.path = unquote(p.path)
-
-	if !p.parseColumns2to7() {
-		return false
-	}
-
-	entryTypeCol, ok := p.parseNextColumn()
-	if !ok {
-		return false
-	}
-
-	p.entryType = entryTypeCol[0]
-
-	if bytes.HasSuffix(p.path, slash) {
-		p.entryType = DirType
-	}
-
-	var none int64
-
-	if !p.parseNumberColumn(&p.inode) || !p.parseNumberColumn(&p.nlink) || !p.parseNumberColumn(&none) {
-		return false
-	}
-
-	return p.parseNumberColumn(&p.apparentSize)
 }
 
 func (p *StatsParser) parseColumns2to7() bool {

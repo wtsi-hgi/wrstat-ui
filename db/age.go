@@ -72,27 +72,6 @@ var DirGUTAges = [17]DirGUTAge{ //nolint:gochecknoglobals
 	DGUTAgeM5Y, DGUTAgeM7Y,
 }
 
-// FitsAgeInterval takes a dguta and the mtime and atime and reference time. It
-// checks the value of age inside the dguta, and then returns true if the mtime
-// or atime respectively fits inside the age interval. E.g. if age = 3, this
-// corresponds to DGUTAgeA6M, so atime is checked to see if it is older than 6
-// months.
-func (d DirGUTAge) FitsAgeInterval(atime, mtime, refTime int64) bool {
-	age := int(d)
-
-	if age > len(AgeThresholds) {
-		return checkTimeIsInInterval(mtime, refTime, age-(len(AgeThresholds)+1))
-	} else if age > 0 {
-		return checkTimeIsInInterval(atime, refTime, age-1)
-	}
-
-	return true
-}
-
-func checkTimeIsInInterval(amtime, refTime int64, thresholdIndex int) bool {
-	return amtime <= refTime-AgeThresholds[thresholdIndex]
-}
-
 // AgeStringToDirGUTAge converts the String() representation of a DirGUTAge
 // back in to a DirGUTAge. Errors if an invalid string supplied.
 func AgeStringToDirGUTAge(age string) (DirGUTAge, error) {
@@ -123,4 +102,25 @@ func AgeStringToDirGUTAge(age string) (DirGUTAge, error) {
 	}
 
 	return dgage, nil
+}
+
+// FitsAgeInterval takes a dguta and the mtime and atime and reference time. It
+// checks the value of age inside the dguta, and then returns true if the mtime
+// or atime respectively fits inside the age interval. E.g. if age = 3, this
+// corresponds to DGUTAgeA6M, so atime is checked to see if it is older than 6
+// months.
+func (d DirGUTAge) FitsAgeInterval(atime, mtime, refTime int64) bool {
+	age := int(d)
+
+	if age > len(AgeThresholds) {
+		return checkTimeIsInInterval(mtime, refTime, age-(len(AgeThresholds)+1))
+	} else if age > 0 {
+		return checkTimeIsInInterval(atime, refTime, age-1)
+	}
+
+	return true
+}
+
+func checkTimeIsInInterval(amtime, refTime int64, thresholdIndex int) bool {
+	return amtime <= refTime-AgeThresholds[thresholdIndex]
 }

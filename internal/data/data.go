@@ -42,6 +42,32 @@ import (
 
 const filePerms = 0644
 
+var i int //nolint:gochecknoglobals
+
+const ExampleQuotaCSV = `1,/disk/1,10,20
+1,/disk/2,11,21
+2,/disk/1,12,22
+`
+
+const ExampleOwnersCSV = `1,Alan
+2,Barbara
+4,Dellilah`
+
+// CreateQuotasCSV creates a quotas csv file in a temp directory. Returns its
+// path. You can use ExampleQuotaCSV as the csv data.
+func CreateQuotasCSV(t *testing.T, csv string) string {
+	t.Helper()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "quotas.csv")
+
+	if err := os.WriteFile(path, []byte(csv), filePerms); err != nil {
+		t.Fatalf("could not write test csv file: %s", err)
+	}
+
+	return path
+}
+
 type TestFile struct {
 	Path           string
 	UID, GID       uint32
@@ -50,15 +76,41 @@ type TestFile struct {
 	ATime, MTime   int
 }
 
-var i int //nolint:gochecknoglobals
+type DirectoryPathCreator map[string]*summary.DirectoryPath
 
-func addFiles(d *statsdata.Directory, directory, suffix string, numFiles int,
-	sizeOfEachFile, atime, mtime int64, gid, uid uint32) {
-	for range numFiles {
-		statsdata.AddFile(d, filepath.Join(directory, strconv.Itoa(i)+suffix), uid, gid, sizeOfEachFile, atime, mtime)
+func NewDirectoryPathCreator() DirectoryPathCreator {
+	d := make(DirectoryPathCreator)
 
-		i++
+	d["/"] = &summary.DirectoryPath{
+		Name:  "/",
+		Depth: -1,
 	}
+
+	return d
+}
+
+func (d DirectoryPathCreator) ToDirectoryPath(p string) *summary.DirectoryPath {
+	pos := strings.LastIndexByte(p[:len(p)-1], '/')
+	dir := p[:pos+1]
+	base := p[pos+1:]
+
+	if dp, ok := d[p]; ok {
+		dp.Name = base
+
+		return dp
+	}
+
+	parent := d.ToDirectoryPath(dir)
+
+	dp := &summary.DirectoryPath{
+		Name:   base,
+		Depth:  strings.Count(p, "/"),
+		Parent: parent,
+	}
+
+	d[p] = dp
+
+	return dp
 }
 
 func CreateDefaultTestData(gidA, gidB, gidC, uidA, uidB uint32, refTime int64) *statsdata.Directory {
@@ -137,29 +189,14 @@ func FakeFilesForDGUTADBForBasedirsTesting(gid, uid uint32, prefix string, numFi
 	return []string{projectA, projectB125, projectB123, projectC1, projectC2, user2, projectD}, dir
 }
 
-const ExampleQuotaCSV = `1,/disk/1,10,20
-1,/disk/2,11,21
-2,/disk/1,12,22
-`
+func addFiles(d *statsdata.Directory, directory, suffix string, numFiles int,
+	sizeOfEachFile, atime, mtime int64, gid, uid uint32) {
+	for range numFiles {
+		statsdata.AddFile(d, filepath.Join(directory, strconv.Itoa(i)+suffix), uid, gid, sizeOfEachFile, atime, mtime)
 
-// CreateQuotasCSV creates a quotas csv file in a temp directory. Returns its
-// path. You can use ExampleQuotaCSV as the csv data.
-func CreateQuotasCSV(t *testing.T, csv string) string {
-	t.Helper()
-
-	dir := t.TempDir()
-	path := filepath.Join(dir, "quotas.csv")
-
-	if err := os.WriteFile(path, []byte(csv), filePerms); err != nil {
-		t.Fatalf("could not write test csv file: %s", err)
+		i++
 	}
-
-	return path
 }
-
-const ExampleOwnersCSV = `1,Alan
-2,Barbara
-4,Dellilah`
 
 // CreateOwnersCSV creates an owners csv files in a temp directory. Returns its
 // path. You can use ExampleOwnersCSV as the csv data.
@@ -186,41 +223,4 @@ func writeFile(path, contents string) error {
 	}
 
 	return f.Close()
-}
-
-type DirectoryPathCreator map[string]*summary.DirectoryPath
-
-func (d DirectoryPathCreator) ToDirectoryPath(p string) *summary.DirectoryPath {
-	pos := strings.LastIndexByte(p[:len(p)-1], '/')
-	dir := p[:pos+1]
-	base := p[pos+1:]
-
-	if dp, ok := d[p]; ok {
-		dp.Name = base
-
-		return dp
-	}
-
-	parent := d.ToDirectoryPath(dir)
-
-	dp := &summary.DirectoryPath{
-		Name:   base,
-		Depth:  strings.Count(p, "/"),
-		Parent: parent,
-	}
-
-	d[p] = dp
-
-	return dp
-}
-
-func NewDirectoryPathCreator() DirectoryPathCreator {
-	d := make(DirectoryPathCreator)
-
-	d["/"] = &summary.DirectoryPath{
-		Name:  "/",
-		Depth: -1,
-	}
-
-	return d
 }

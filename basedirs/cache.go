@@ -34,14 +34,6 @@ import (
 	"sync"
 )
 
-// SetCachedGroup sets the name of a specified GID.
-func (b *BaseDirReader) SetCachedGroup(gid uint32, name string) {
-	b.groupCache.mu.Lock()
-	defer b.groupCache.mu.Unlock()
-
-	b.groupCache.data[gid] = name
-}
-
 // GroupCache caches the names associated with GIDs.
 type GroupCache struct {
 	mu   sync.RWMutex
@@ -91,19 +83,6 @@ func (g *GroupCache) Iter(yield func(k uint32, v string) bool) {
 	}
 }
 
-// IterCachedGroups returns an iterator for the group cache.
-func (b *BaseDirReader) IterCachedGroups() iter.Seq2[uint32, string] {
-	return b.groupCache.Iter
-}
-
-// SetCachedUser sets the name of a specified UID.
-func (b *BaseDirReader) SetCachedUser(uid uint32, name string) {
-	b.userCache.mu.Lock()
-	defer b.userCache.mu.Unlock()
-
-	b.userCache.data[uid] = name
-}
-
 // UserCache caches the names associated with UIDs.
 type UserCache struct {
 	mu   sync.RWMutex
@@ -151,6 +130,27 @@ func (u *UserCache) Iter(yield func(k uint32, v string) bool) {
 			return
 		}
 	}
+}
+
+// SetCachedGroup sets the name of a specified GID.
+func (b *BaseDirReader) SetCachedGroup(gid uint32, name string) {
+	b.groupCache.mu.Lock()
+	defer b.groupCache.mu.Unlock()
+
+	b.groupCache.data[gid] = name
+}
+
+// IterCachedGroups returns an iterator for the group cache.
+func (b *BaseDirReader) IterCachedGroups() iter.Seq2[uint32, string] {
+	return b.groupCache.Iter
+}
+
+// SetCachedUser sets the name of a specified UID.
+func (b *BaseDirReader) SetCachedUser(uid uint32, name string) {
+	b.userCache.mu.Lock()
+	defer b.userCache.mu.Unlock()
+
+	b.userCache.data[uid] = name
 }
 
 // IterCachedGroups returns an iterator for the user cache.

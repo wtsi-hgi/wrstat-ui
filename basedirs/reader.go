@@ -83,13 +83,6 @@ func NewReader(dbPath, ownersPath string) (*BaseDirReader, error) {
 	}, nil
 }
 
-// OpenDBRO opens a database as readonly.
-func OpenDBRO(dbPath string) (*bolt.DB, error) {
-	return bolt.Open(dbPath, dbOpenMode, &bolt.Options{
-		ReadOnly: true,
-	})
-}
-
 // Close closes the database.
 func (b *BaseDirReader) Close() error {
 	return b.db.Close()
@@ -226,6 +219,10 @@ func (b *BaseDirReader) usageTable(usage []*Usage) (string, error) {
 	return sb.String(), nil
 }
 
+func daysSince(mtime time.Time) uint64 {
+	return uint64(time.Since(mtime) / secondsInDay) //nolint:gosec
+}
+
 func usageStatus(sizeExceedDate, inodeExceedDate time.Time) string {
 	threeDaysFromNow := time.Now().Add(threeDays)
 
@@ -261,10 +258,6 @@ func (b *BaseDirReader) UserUsageTable(age db.DirGUTAge) (string, error) {
 	}
 
 	return b.usageTable(uu)
-}
-
-func daysSince(mtime time.Time) uint64 {
-	return uint64(time.Since(mtime) / secondsInDay) //nolint:gosec
 }
 
 // GroupSubDirUsageTable returns GroupSubDirs() information formatted with the
@@ -322,4 +315,11 @@ func (b *BaseDirReader) UserSubDirUsageTable(uid uint32, basedir string, age db.
 	}
 
 	return subDirUsageTable(basedir, usdut), nil
+}
+
+// OpenDBRO opens a database as readonly.
+func OpenDBRO(dbPath string) (*bolt.DB, error) {
+	return bolt.Open(dbPath, dbOpenMode, &bolt.Options{
+		ReadOnly: true,
+	})
 }

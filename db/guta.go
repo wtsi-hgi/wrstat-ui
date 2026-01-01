@@ -34,6 +34,24 @@ import (
 	"vimagination.zapto.org/byteio"
 )
 
+// Filter can be applied to a GUTA to see if it has one of the specified GIDs,
+// UIDs and FTs or has the specified Age, in which case it passes the filter.
+//
+// If the Filter has one of those properties set to nil, or the whole Filter is
+// nil, a GUTA will be considered to pass the filter.
+//
+// The exeception to this is when FTs != []{DGUTFileTypeTemp}, and the GUTA has
+// an FT of DGUTAFileTypeTemp. A GUTA for a temporary file will always fail to
+// pass the filter unless filtering specifically for temporary files, because
+// other GUTA objects will represent the same file on disk but with another file
+// type, and you won't want to double-count.
+type Filter struct {
+	GIDs []uint32
+	UIDs []uint32
+	FT   DirGUTAFileType
+	Age  DirGUTAge
+}
+
 // GUTA handles group,user,type,age,count,size information.
 type GUTA struct {
 	GID         uint32
@@ -86,24 +104,6 @@ func (g *GUTA) readFrom(r byteio.StickyEndianReader) {
 	for n := range g.MTimeRanges {
 		g.MTimeRanges[n] = r.ReadUintX()
 	}
-}
-
-// Filter can be applied to a GUTA to see if it has one of the specified GIDs,
-// UIDs and FTs or has the specified Age, in which case it passes the filter.
-//
-// If the Filter has one of those properties set to nil, or the whole Filter is
-// nil, a GUTA will be considered to pass the filter.
-//
-// The exeception to this is when FTs != []{DGUTFileTypeTemp}, and the GUTA has
-// an FT of DGUTAFileTypeTemp. A GUTA for a temporary file will always fail to
-// pass the filter unless filtering specifically for temporary files, because
-// other GUTA objects will represent the same file on disk but with another file
-// type, and you won't want to double-count.
-type Filter struct {
-	GIDs []uint32
-	UIDs []uint32
-	FT   DirGUTAFileType
-	Age  DirGUTAge
 }
 
 // PassesFilter checks to see if this GUTA has a GID in the filter's GIDs

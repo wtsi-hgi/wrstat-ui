@@ -45,6 +45,47 @@ type output interface {
 	Output(users, groups basedirs.IDAgeDirs) error
 }
 
+// NewBaseDirs returns a summary.OperationGenerator that calculates base
+// directory information.
+func NewBaseDirs(output outputForDir, db output) summary.OperationGenerator { //nolint:funlen
+	root := &rootBaseDirs{
+		baseDirs: baseDirs{
+			output:     output,
+			users:      make(baseDirsMap),
+			groups:     make(baseDirsMap),
+			seenInodes: make(map[int64]struct{}),
+		},
+		db:     db,
+		users:  make(basedirs.IDAgeDirs),
+		groups: make(basedirs.IDAgeDirs),
+	}
+
+	root.root = root
+	now := time.Now().Unix()
+
+	var parent *baseDirs
+
+	return func() summary.Operation {
+		if parent == nil {
+			parent = &root.baseDirs
+
+			return root
+		}
+
+		parent = &baseDirs{
+			parent:     parent,
+			output:     output,
+			root:       root,
+			refTime:    now,
+			users:      make(baseDirsMap),
+			groups:     make(baseDirsMap),
+			seenInodes: make(map[int64]struct{}),
+		}
+
+		return parent
+	}
+}
+
 type outputForDir func(*summary.DirectoryPath) bool
 
 type dirSummary struct {
@@ -65,17 +106,6 @@ func newDirSummary(parent *summary.DirectoryPath, age db.DirGUTAge) *dirSummary 
 				},
 			},
 		},
-	}
-}
-
-func setTimes(d *basedirs.SummaryWithChildren, atime, mtime time.Time) {
-	if atime.Before(d.Atime) || d.Atime.IsZero() {
-		d.Atime = atime
-	}
-
-	if mtime.After(d.Mtime) {
-		d.Mtime = mtime
-		d.Children[0].LastModified = mtime
 	}
 }
 
@@ -136,6 +166,17 @@ func (b *ageBaseDirs) Set(i db.DirGUTAge, fi *summary.FileInfo, parent *summary.
 
 	b[i].GIDs = addToSlice(b[i].GIDs, fi.GID)
 	b[i].UIDs = addToSlice(b[i].UIDs, fi.UID)
+}
+
+func setTimes(d *basedirs.SummaryWithChildren, atime, mtime time.Time) {
+	if atime.Before(d.Atime) || d.Atime.IsZero() {
+		d.Atime = atime
+	}
+
+	if mtime.After(d.Mtime) {
+		d.Mtime = mtime
+		d.Children[0].LastModified = mtime
+	}
 }
 
 func addToSlice(s []uint32, id uint32) []uint32 {
@@ -211,126 +252,10 @@ func (b baseDirsMap) mergeTo(pbm baseDirsMap, parent *summary.DirectoryPath) { /
 	}
 }
 
-type baseDirs struct {
-	root          *rootBaseDirs
-	parent        *baseDirs
-	output        outputForDir
-	refTime       int64
-	thisDir       *summary.DirectoryPath
-	users, groups baseDirsMap
-	isTempDir     bool
-	seenInodes    map[int64]struct{}
-}
-
 type rootBaseDirs struct {
 	baseDirs
 	db            output
 	users, groups basedirs.IDAgeDirs
-}
-
-// NewBaseDirs returns a summary.OperationGenerator that calculates base
-// directory information.
-func NewBaseDirs(output outputForDir, db output) summary.OperationGenerator { //nolint:funlen
-	root := &rootBaseDirs{
-		baseDirs: baseDirs{
-			output:     output,
-			users:      make(baseDirsMap),
-			groups:     make(baseDirsMap),
-			seenInodes: make(map[int64]struct{}),
-		},
-		db:     db,
-		users:  make(basedirs.IDAgeDirs),
-		groups: make(basedirs.IDAgeDirs),
-	}
-
-	root.root = root
-	now := time.Now().Unix()
-
-	var parent *baseDirs
-
-	return func() summary.Operation {
-		if parent == nil {
-			parent = &root.baseDirs
-
-			return root
-		}
-
-		parent = &baseDirs{
-			parent:     parent,
-			output:     output,
-			root:       root,
-			refTime:    now,
-			users:      make(baseDirsMap),
-			groups:     make(baseDirsMap),
-			seenInodes: make(map[int64]struct{}),
-		}
-
-		return parent
-	}
-}
-
-// Add is a summary.Operation method.
-func (b *baseDirs) Add(info *summary.FileInfo) error { //nolint:gocyclo
-	if b.thisDir == nil {
-		b.thisDir = info.Path
-		b.isTempDir = b.parent != nil && b.parent.isTempDir ||
-			dirguta.IsTemp(unsafe.Slice(unsafe.StringData(info.Path.Name), len(info.Path.Name)))
-	}
-
-	if info.Path != b.thisDir || info.IsDir() {
-		return nil
-	}
-
-	if info.Nlink > 1 && info.Inode != 0 {
-		if _, seen := b.seenInodes[info.Inode]; seen {
-			return nil
-		}
-
-		b.seenInodes[info.Inode] = struct{}{}
-	}
-
-	gidBasedir := b.groups.Get(info.GID)
-	uidBasedir := b.users.Get(info.UID)
-
-	for _, threshold := range db.DirGUTAges {
-		if threshold.FitsAgeInterval(info.ATime, info.MTime, b.refTime) {
-			gidBasedir.Set(threshold, info, b.thisDir, b.isTempDir)
-			uidBasedir.Set(threshold, info, b.thisDir, b.isTempDir)
-		}
-	}
-
-	return nil
-}
-
-// Output is a summary.Operation method.
-func (b *baseDirs) Output() error {
-	if b.output(b.thisDir) {
-		b.groups.Add(b.root.addGroupBase)
-		b.users.Add(b.root.addUserBase)
-	} else {
-		b.addToParent()
-	}
-
-	b.cleanup()
-
-	return nil
-}
-
-func (b *baseDirs) addToParent() {
-	if b.parent == nil {
-		return
-	}
-
-	b.groups.mergeTo(b.parent.groups, b.parent.thisDir)
-	b.users.mergeTo(b.parent.users, b.parent.thisDir)
-}
-
-func (b *baseDirs) cleanup() {
-	b.thisDir = nil
-
-	clear(b.seenInodes)
-	clear(b.groups)
-	clear(b.users)
 }
 
 // Output is a summary.Operation method.
@@ -396,4 +321,79 @@ func addIDAgePath(m basedirs.IDAgeDirs, id uint32, ds basedirs.SummaryWithChildr
 
 func (r *rootBaseDirs) addGroupBase(uid uint32, ds basedirs.SummaryWithChildren, age db.DirGUTAge) {
 	addIDAgePath(r.groups, uid, ds, age)
+}
+
+type baseDirs struct {
+	root          *rootBaseDirs
+	parent        *baseDirs
+	output        outputForDir
+	refTime       int64
+	thisDir       *summary.DirectoryPath
+	users, groups baseDirsMap
+	isTempDir     bool
+	seenInodes    map[int64]struct{}
+}
+
+// Add is a summary.Operation method.
+func (b *baseDirs) Add(info *summary.FileInfo) error { //nolint:gocyclo
+	if b.thisDir == nil {
+		b.thisDir = info.Path
+		b.isTempDir = b.parent != nil && b.parent.isTempDir ||
+			dirguta.IsTemp(unsafe.Slice(unsafe.StringData(info.Path.Name), len(info.Path.Name)))
+	}
+
+	if info.Path != b.thisDir || info.IsDir() {
+		return nil
+	}
+
+	if info.Nlink > 1 && info.Inode != 0 {
+		if _, seen := b.seenInodes[info.Inode]; seen {
+			return nil
+		}
+
+		b.seenInodes[info.Inode] = struct{}{}
+	}
+
+	gidBasedir := b.groups.Get(info.GID)
+	uidBasedir := b.users.Get(info.UID)
+
+	for _, threshold := range db.DirGUTAges {
+		if threshold.FitsAgeInterval(info.ATime, info.MTime, b.refTime) {
+			gidBasedir.Set(threshold, info, b.thisDir, b.isTempDir)
+			uidBasedir.Set(threshold, info, b.thisDir, b.isTempDir)
+		}
+	}
+
+	return nil
+}
+
+// Output is a summary.Operation method.
+func (b *baseDirs) Output() error {
+	if b.output(b.thisDir) {
+		b.groups.Add(b.root.addGroupBase)
+		b.users.Add(b.root.addUserBase)
+	} else {
+		b.addToParent()
+	}
+
+	b.cleanup()
+
+	return nil
+}
+
+func (b *baseDirs) addToParent() {
+	if b.parent == nil {
+		return
+	}
+
+	b.groups.mergeTo(b.parent.groups, b.parent.thisDir)
+	b.users.mergeTo(b.parent.users, b.parent.thisDir)
+}
+
+func (b *baseDirs) cleanup() {
+	b.thisDir = nil
+
+	clear(b.seenInodes)
+	clear(b.groups)
+	clear(b.users)
 }

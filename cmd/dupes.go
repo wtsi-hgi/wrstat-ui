@@ -113,6 +113,13 @@ func parseFiles(args []string) ([]string, error) { //nolint:gocognit
 	return files, nil
 }
 
+func init() {
+	RootCmd.AddCommand(dupescmd)
+
+	dupescmd.Flags().Int64VarP(&minSize, "minsize", "m", 0, "minimum file size to consider a possible duplicate")
+	dupescmd.Flags().StringVarP(&output, "output", "o", "-", "file to output possible duplicate file data")
+}
+
 func findDupes(files []string, minSize int64, output string) error { //nolint:gocognit
 	sp := stats.NewStatsParser(nil)
 	deduper := dedupe.Deduper{MinFileSize: minSize}
@@ -182,11 +189,4 @@ func deferClose(fn func() error, err *error) {
 	if errr := fn(); *err == nil {
 		*err = errr
 	}
-}
-
-func init() {
-	RootCmd.AddCommand(dupescmd)
-
-	dupescmd.Flags().Int64VarP(&minSize, "minsize", "m", 0, "minimum file size to consider a possible duplicate")
-	dupescmd.Flags().StringVarP(&output, "output", "o", "-", "file to output possible duplicate file data")
 }
