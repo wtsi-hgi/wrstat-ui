@@ -26,7 +26,6 @@ package main
 
 import (
 	"compress/gzip"
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -51,18 +50,8 @@ import (
 
 const app = "wrstat-ui_test"
 
-func TestMain(m *testing.M) {
-	d1 := buildSelf()
-	if d1 == nil {
-		return
-	}
-
-	defer os.Exit(m.Run())
-	defer d1()
-}
-
 func buildSelf() func() {
-	cmd := exec.CommandContext(context.Background(),
+	cmd := exec.Command(
 		"go", "build", "-tags", "netgo",
 		"-ldflags=-X github.com/VertebrateResequencing/wr/client.PretendSubmissions=3 "+
 			"-X github.com/wtsi-hgi/wrstat-ui/cmd.Version=TESTVERSION",
@@ -86,6 +75,58 @@ func buildSelf() func() {
 
 func failMainTest(err string) {
 	fmt.Println(err) //nolint:forbidigo
+}
+
+func TestMain(m *testing.M) {
+	d1 := buildSelf()
+	if d1 == nil {
+		return
+	}
+
+	defer os.Exit(m.Run())
+	defer d1()
+}
+
+func runWRStat(args ...string) (string, string, []*jobqueue.Job, error) {
+	var (
+		stdout, stderr strings.Builder
+		jobs           []*jobqueue.Job
+	)
+
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		return "", "", nil, err
+	}
+
+	cmd := exec.Command("./"+app, args...)
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	cmd.ExtraFiles = append(cmd.ExtraFiles, pw)
+
+	jd := json.NewDecoder(pr)
+	done := make(chan struct{})
+
+	go func() {
+		for {
+			var j []*jobqueue.Job
+
+			if errr := jd.Decode(&j); errr != nil {
+				break
+			}
+
+			jobs = append(jobs, j...)
+		}
+
+		close(done)
+	}()
+
+	err = cmd.Run()
+
+	pw.Close()
+
+	<-done
+
+	return stdout.String(), stderr.String(), jobs, err
 }
 
 func TestVersion(t *testing.T) {
@@ -288,6 +329,52 @@ func TestSummarise(t *testing.T) {
 	})
 }
 
+func fixTZs(h []basedirs.History) {
+	for n := range h {
+		h[n].Date = h[n].Date.In(time.UTC)
+	}
+}
+
+func sortLines(data string) string {
+	nl := strings.HasSuffix(data, "\n")
+	if nl {
+		data = data[:len(data)-1]
+	}
+
+	lines := strings.Split(data, "\n")
+
+	slices.Sort(lines)
+
+	data = strings.Join(lines, "\n")
+
+	if nl {
+		data += "\n"
+	}
+
+	return data
+}
+
+func compareFileContents(t *testing.T, path, expectation string) {
+	t.Helper()
+
+	f, err := os.Open(path)
+	So(err, ShouldBeNil)
+
+	defer f.Close()
+
+	var r io.Reader = f
+
+	if strings.HasSuffix(path, ".gz") {
+		r, err = gzip.NewReader(f)
+		So(err, ShouldBeNil)
+	}
+
+	contents, err := io.ReadAll(r)
+	So(err, ShouldBeNil)
+
+	So(string(contents), ShouldEqual, expectation)
+}
+
 func TestWatch(t *testing.T) {
 	Convey("watch starts the correct jobs", t, func() {
 		tmp := t.TempDir()
@@ -431,382 +518,4 @@ Size: 101
 "/mount/B/anotherDir/big_files/2"
 `)
 	})
-}
-
-func TestPerfCLI(t *testing.T) {
-	Convey("bolt-perf query writes a JSON report with required fields", t, func() {
-		tmp := t.TempDir()
-
-		// create a minimal owners csv
-		ownersPath := filepath.Join(tmp, "owners.csv")
-		So(os.WriteFile(ownersPath, []byte("0,root\n"), 0600), ShouldBeNil)
-
-		// create a fake bolt output dir with expected files to satisfy discovery
-		outDir := filepath.Join(tmp, "out")
-		So(os.Mkdir(outDir, 0755), ShouldBeNil)
-
-		// create a dataset dir named version_mount
-		ds := filepath.Join(outDir, "1_／mountA")
-		So(os.MkdirAll(ds, 0755), ShouldBeNil)
-		// touch required files
-		So(os.WriteFile(filepath.Join(ds, "dguta.dbs"), nil, 0600), ShouldBeNil)
-		So(os.WriteFile(filepath.Join(ds, "basedirs.db"), nil, 0600), ShouldBeNil)
-
-		jsonPath := filepath.Join(tmp, "report.json")
-
-		_, stderr, _, err := runWRStat(
-			"bolt-perf", "query", outDir,
-			"--owners", ownersPath,
-			"--json", jsonPath,
-			"--repeat", "1",
-			"--warmup", "0",
-		)
-		So(err, ShouldBeNil)
-		So(stderr, ShouldBeBlank)
-
-		// ensure json file exists and contains required fields
-		b, err := os.ReadFile(jsonPath)
-		So(err, ShouldBeNil)
-
-		var j map[string]any
-
-		err = json.Unmarshal(b, &j)
-		So(err, ShouldBeNil)
-
-		So(j["schema_version"], ShouldNotBeNil)
-		So(j["backend"], ShouldNotBeNil)
-	})
-}
-
-func TestPerfImport(t *testing.T) {
-	Convey("bolt-perf import creates Bolt DBs and writes JSON report", t, func() {
-		gid, uid, _, _, err := internaluser.RealGIDAndUID()
-		So(err, ShouldBeNil)
-
-		tmp := t.TempDir()
-
-		// prepare input stats dir structure
-		inputDir := filepath.Join(tmp, "input")
-		So(os.MkdirAll(inputDir, 0755), ShouldBeNil)
-
-		ds := filepath.Join(inputDir, "1_／mountA")
-		So(os.MkdirAll(ds, 0755), ShouldBeNil)
-
-		_, root := internaldata.FakeFilesForDGUTADBForBasedirsTesting(gid, uid,
-			"lustre", 1, 1<<29, 1<<31, true, time.Now().Unix())
-
-		statsPath := filepath.Join(ds, "stats.gz")
-		f, err := os.Create(statsPath)
-		So(err, ShouldBeNil)
-
-		gw := gzip.NewWriter(f)
-		_, err = io.Copy(gw, root.AsReader())
-		So(err, ShouldBeNil)
-		So(gw.Close(), ShouldBeNil)
-		So(f.Close(), ShouldBeNil)
-
-		// owners/quota/config files
-		ownersPath, err := internaldata.CreateOwnersCSV(t, internaldata.ExampleOwnersCSV)
-		So(err, ShouldBeNil)
-
-		quota := internaldata.CreateQuotasCSV(t, internaldata.ExampleQuotaCSV)
-
-		basedirsConfig := filepath.Join(tmp, "basedirs.config")
-		So(os.WriteFile(basedirsConfig, []byte(`/lustre/scratch123/hgi/mdt	5	5
-/ 	4	4`), 0600), ShouldBeNil)
-
-		out := filepath.Join(tmp, "out")
-		jsonPath := filepath.Join(tmp, "report_import.json")
-
-		_, stderr, _, err := runWRStat(
-			"bolt-perf", "import", inputDir,
-			"--out", out,
-			"--quota", quota,
-			"--config", basedirsConfig,
-			"--owners", ownersPath,
-			"--json", jsonPath,
-		)
-		So(err, ShouldBeNil)
-		So(stderr, ShouldBeBlank)
-
-		// expect output dataset dir exists with db files
-		dsOut := filepath.Join(out, "1_／mountA")
-
-		dgutaPath := filepath.Join(dsOut, "dguta.dbs")
-
-		So(func() error {
-			_, err2 := os.Stat(dgutaPath)
-
-			return err2
-		}(), ShouldBeNil)
-
-		basedirsPath := filepath.Join(dsOut, "basedirs.db")
-
-		So(func() error {
-			_, err2 := os.Stat(basedirsPath)
-
-			return err2
-		}(), ShouldBeNil)
-
-		// basedirs DB mtime should match stats.gz mtime used as input
-		si, err := os.Stat(statsPath)
-		So(err, ShouldBeNil)
-
-		bi, err := os.Stat(basedirsPath)
-		So(err, ShouldBeNil)
-
-		So(bi.ModTime().Unix(), ShouldEqual, si.ModTime().Unix())
-
-		// try opening dbs to ensure they are valid
-		tree, err := db.NewTree(dgutaPath)
-		So(err, ShouldBeNil)
-		So(tree, ShouldNotBeNil)
-		tree.Close()
-
-		ownersPath2, err := internaldata.CreateOwnersCSV(t, internaldata.ExampleOwnersCSV)
-		So(err, ShouldBeNil)
-
-		bdr, err := basedirs.NewReader(basedirsPath, ownersPath2)
-		So(err, ShouldBeNil)
-		So(bdr, ShouldNotBeNil)
-		bdr.Close()
-
-		// ensure JSON report exists and contains import_total
-		b, err := os.ReadFile(jsonPath)
-		So(err, ShouldBeNil)
-
-		var j map[string]any
-
-		err = json.Unmarshal(b, &j)
-		So(err, ShouldBeNil)
-
-		opsAny, ok := j["operations"]
-		So(ok, ShouldBeTrue)
-
-		ops, ok := opsAny.([]any)
-		So(ok, ShouldBeTrue)
-
-		found := false
-
-		for _, o := range ops {
-			m, ok := o.(map[string]any)
-			if !ok {
-				continue
-			}
-
-			if m["name"] == "import_total" {
-				found = true
-
-				break
-			}
-		}
-
-		So(found, ShouldBeTrue)
-	})
-}
-
-func TestPerfQuery(t *testing.T) {
-	Convey("bolt-perf query runs the full suite and writes JSON report", t, func() {
-		gid, uid, _, _, err := internaluser.RealGIDAndUID()
-		So(err, ShouldBeNil)
-
-		tmp := t.TempDir()
-
-		// prepare and import dataset using the import subcommand
-		inputDir := filepath.Join(tmp, "input")
-		So(os.MkdirAll(inputDir, 0755), ShouldBeNil)
-
-		ds := filepath.Join(inputDir, "1_／mountA")
-		So(os.MkdirAll(ds, 0755), ShouldBeNil)
-
-		_, root := internaldata.FakeFilesForDGUTADBForBasedirsTesting(gid, uid,
-			"lustre", 1, 1<<29, 1<<31, true, time.Now().Unix())
-
-		statsPath := filepath.Join(ds, "stats.gz")
-		f, err := os.Create(statsPath)
-		So(err, ShouldBeNil)
-
-		gw := gzip.NewWriter(f)
-		_, err = io.Copy(gw, root.AsReader())
-		So(err, ShouldBeNil)
-		So(gw.Close(), ShouldBeNil)
-		So(f.Close(), ShouldBeNil)
-
-		ownersPath, err := internaldata.CreateOwnersCSV(t, internaldata.ExampleOwnersCSV)
-		So(err, ShouldBeNil)
-
-		quota := internaldata.CreateQuotasCSV(t, internaldata.ExampleQuotaCSV)
-
-		basedirsConfig := filepath.Join(tmp, "basedirs.config")
-		So(os.WriteFile(basedirsConfig, []byte(`/lustre/scratch123/hgi/mdt	5	5
-/ 	4	4`), 0600), ShouldBeNil)
-
-		out := filepath.Join(tmp, "out")
-
-		// import
-		_, stderr, _, err := runWRStat(
-			"bolt-perf", "import", inputDir,
-			"--out", out,
-			"--quota", quota,
-			"--config", basedirsConfig,
-			"--owners", ownersPath,
-			"--json", filepath.Join(tmp, "report_import.json"),
-		)
-		So(err, ShouldBeNil)
-		So(stderr, ShouldBeBlank)
-
-		// run query suite
-		jsonPath := filepath.Join(tmp, "report_query.json")
-
-		_, stderr, _, err = runWRStat(
-			"bolt-perf", "query", out,
-			"--owners", ownersPath,
-			"--json", jsonPath,
-			"--repeat", "2",
-			"--warmup", "1",
-			"--splits", "1",
-			"--dir", "/",
-		)
-		So(err, ShouldBeNil)
-		So(stderr, ShouldBeBlank)
-
-		b, err := os.ReadFile(jsonPath)
-		So(err, ShouldBeNil)
-
-		var j map[string]any
-
-		err = json.Unmarshal(b, &j)
-		So(err, ShouldBeNil)
-
-		opsAny, ok := j["operations"]
-		So(ok, ShouldBeTrue)
-
-		ops, ok := opsAny.([]any)
-		So(ok, ShouldBeTrue)
-
-		// expect the named operations in order (subset may be present)
-		names := []string{
-			"mount_timestamps",
-			"tree_dirinfo",
-			"tree_where",
-			"basedirs_group_usage",
-			"basedirs_user_usage",
-			"basedirs_group_subdirs",
-			"basedirs_user_subdirs",
-			"basedirs_history",
-		}
-
-		// build a map of operation name to entry
-		found := make(map[string]map[string]any)
-
-		for _, o := range ops {
-			m, ok := o.(map[string]any)
-			if !ok {
-				continue
-			}
-
-			if n, ok := m["name"].(string); ok {
-				found[n] = m
-			}
-		}
-
-		for _, n := range names {
-			So(found[n], ShouldNotBeNil)
-
-			// check durations length for query ops
-			if n != "mount_timestamps" {
-				d, ok := found[n]["durations_ms"].([]any)
-				So(ok, ShouldBeTrue)
-				So(len(d), ShouldEqual, 2)
-			}
-		}
-	})
-}
-
-func runWRStat(args ...string) (string, string, []*jobqueue.Job, error) {
-	var (
-		stdout, stderr strings.Builder
-		jobs           []*jobqueue.Job
-	)
-
-	pr, pw, err := os.Pipe()
-	if err != nil {
-		return "", "", nil, err
-	}
-
-	cmd := exec.CommandContext(context.Background(), "./"+app, args...)
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	cmd.ExtraFiles = append(cmd.ExtraFiles, pw)
-
-	jd := json.NewDecoder(pr)
-	done := make(chan struct{})
-
-	go func() {
-		for {
-			var j []*jobqueue.Job
-
-			if errr := jd.Decode(&j); errr != nil {
-				break
-			}
-
-			jobs = append(jobs, j...)
-		}
-
-		close(done)
-	}()
-
-	err = cmd.Run()
-
-	pw.Close()
-
-	<-done
-
-	return stdout.String(), stderr.String(), jobs, err
-}
-
-func compareFileContents(t *testing.T, path, expectation string) {
-	t.Helper()
-
-	f, err := os.Open(path)
-	So(err, ShouldBeNil)
-
-	defer f.Close()
-
-	var r io.Reader = f
-
-	if strings.HasSuffix(path, ".gz") {
-		r, err = gzip.NewReader(f)
-		So(err, ShouldBeNil)
-	}
-
-	contents, err := io.ReadAll(r)
-	So(err, ShouldBeNil)
-
-	So(string(contents), ShouldEqual, expectation)
-}
-
-func sortLines(data string) string {
-	nl := strings.HasSuffix(data, "\n")
-	if nl {
-		data = data[:len(data)-1]
-	}
-
-	lines := strings.Split(data, "\n")
-
-	slices.Sort(lines)
-
-	data = strings.Join(lines, "\n")
-
-	if nl {
-		data += "\n"
-	}
-
-	return data
-}
-
-func fixTZs(h []basedirs.History) {
-	for n := range h {
-		h[n].Date = h[n].Date.In(time.UTC)
-	}
 }
