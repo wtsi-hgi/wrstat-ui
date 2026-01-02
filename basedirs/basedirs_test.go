@@ -147,7 +147,9 @@ func TestBaseDirs(t *testing.T) {
 				if !defaultConfig.PathShouldOutput(p) {
 					return false
 				}
+
 				full := string(p.AppendTo(nil))
+
 				return strings.HasPrefix(full, mountPrefix)
 			}
 		}
@@ -163,7 +165,7 @@ func TestBaseDirs(t *testing.T) {
 				{mountPath: "/lustre/scratch125/", dbPath: dbPath125},
 			} {
 				previousDBPath := ""
-				if _, err := os.Stat(cfg.dbPath); err == nil {
+				if _, statErr := os.Stat(cfg.dbPath); statErr == nil {
 					previousDBPath = cfg.dbPath
 				}
 
@@ -205,6 +207,7 @@ func TestBaseDirs(t *testing.T) {
 
 			baseDirsReader := func() basedirs.Reader {
 				t.Helper()
+
 				bdr, errr := wrbolt.OpenMultiBaseDirsReader(ownersPath, dbPath123, dbPath125)
 				So(errr, ShouldBeNil)
 				bdr.SetMountPoints(mps)
@@ -502,7 +505,9 @@ func TestBaseDirs(t *testing.T) {
 
 						r, errr := wrbolt.OpenBaseDirsReader(newDB, ownersPath)
 						So(errr, ShouldBeNil)
+
 						defer r.Close()
+
 						r.SetMountPoints(mps)
 
 						history, errr := r.History(1, projectA)

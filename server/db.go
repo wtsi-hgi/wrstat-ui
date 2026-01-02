@@ -33,6 +33,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
@@ -46,14 +47,18 @@ const (
 
 var validDBDir = regexp.MustCompile(`^[^.][^_]*_.`)
 
-func addBaseToDelete(basepath string, toDelete []string) []string {
-	t := make([]string, len(toDelete))
+// JoinDBPaths produces a list of a dgutaDB paths and basedirDB paths from the
+// provided base dbPaths and the basenames of the DBs.
+func JoinDBPaths(dbPaths []string, dgutaDBName, basedirDBName string) ([]string, []string) {
+	dirgutaPaths := make([]string, len(dbPaths))
+	baseDirPaths := make([]string, len(dbPaths))
 
-	for n, path := range toDelete {
-		t[n] = filepath.Join(basepath, path)
+	for n, path := range dbPaths {
+		dirgutaPaths[n] = filepath.Join(path, dgutaDBName)
+		baseDirPaths[n] = filepath.Join(path, basedirDBName)
 	}
 
-	return t
+	return dirgutaPaths, baseDirPaths
 }
 
 type nameVersion struct {
@@ -142,18 +147,27 @@ func FindDBDirs(basepath string, required ...string) ([]string, error) {
 	return dbPaths, err
 }
 
-// JoinDBPaths produces a list of a dgutaDB paths and basedirDB paths from the
-// provided base dbPaths and the basenames of the DBs.
-func JoinDBPaths(dbPaths []string, dgutaDBName, basedirDBName string) ([]string, []string) {
-	dirgutaPaths := make([]string, len(dbPaths))
-	baseDirPaths := make([]string, len(dbPaths))
-
-	for n, path := range dbPaths {
-		dirgutaPaths[n] = filepath.Join(path, dgutaDBName)
-		baseDirPaths[n] = filepath.Join(path, basedirDBName)
+func validateProvider(p Provider) (basedirs.Reader, error) {
+	if p == nil {
+		return nil, basedirs.Error("provider is nil")
 	}
 
-	return dirgutaPaths, baseDirPaths
+	bd := p.BaseDirs()
+	if bd == nil {
+		return nil, basedirs.Error("provider returned nil basedirs")
+	}
+
+	return bd, nil
+}
+
+func mountTimestampsToUnixSeconds(mt map[string]time.Time) map[string]int64 {
+	out := make(map[string]int64, len(mt))
+
+	for mountKey, t := range mt {
+		out[mountKey] = t.Unix()
+	}
+
+	return out
 }
 
 // SetProvider wires a backend bundle into the server.
@@ -161,13 +175,9 @@ func JoinDBPaths(dbPaths []string, dgutaDBName, basedirDBName string) ([]string,
 // This replaces the legacy LoadDBs/EnableDBReloading flow; reloading is an
 // implementation detail of the provider.
 func (s *Server) SetProvider(p Provider) error {
-	if p == nil {
-		return basedirs.Error("provider is nil")
-	}
-
-	bd := p.BaseDirs()
-	if bd == nil {
-		return basedirs.Error("provider returned nil basedirs")
+	bd, err := validateProvider(p)
+	if err != nil {
+		return err
 	}
 
 	mt, err := bd.MountTimestamps()
@@ -175,10 +185,7 @@ func (s *Server) SetProvider(p Provider) error {
 		return err
 	}
 
-	dataTimeStamp := make(map[string]int64, len(mt))
-	for mountKey, t := range mt {
-		dataTimeStamp[mountKey] = t.Unix()
-	}
+	dataTimeStamp := mountTimestampsToUnixSeconds(mt)
 
 	if err := s.prewarmCaches(bd); err != nil {
 		return err
@@ -228,16 +235,15 @@ func (s *Server) handleProviderUpdate() {
 	mt, err := bd.MountTimestamps()
 	if err != nil {
 		s.Logger.Printf("refreshing db timestamps failed: %s", err)
+
 		return
 	}
 
-	dataTimeStamp := make(map[string]int64, len(mt))
-	for mountKey, t := range mt {
-		dataTimeStamp[mountKey] = t.Unix()
-	}
+	dataTimeStamp := mountTimestampsToUnixSeconds(mt)
 
 	if err := s.prewarmCaches(bd); err != nil {
 		s.Logger.Printf("prewarming caches failed after update: %s", err)
+
 		return
 	}
 

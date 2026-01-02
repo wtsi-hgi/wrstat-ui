@@ -255,6 +255,7 @@ func addSummarisers(
 		if bdClose != nil {
 			return nil, errors.Join(err, bdClose())
 		}
+
 		return nil, err
 	}
 
@@ -263,9 +264,11 @@ func addSummarisers(
 		if bdClose != nil {
 			err = errors.Join(err, bdClose())
 		}
+
 		if dgClose != nil {
 			err = errors.Join(err, dgClose())
 		}
+
 		return err
 	}, nil
 }
@@ -373,6 +376,7 @@ func pickRepresentativeDir(datasetDir, mountPath string) string {
 	if err != nil {
 		return mountPath
 	}
+
 	defer func() {
 		_ = database.Close()
 	}()

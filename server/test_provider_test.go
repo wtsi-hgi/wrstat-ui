@@ -75,6 +75,7 @@ func newMemBaseDirs(ownersPath string) (*memBaseDirs, error) {
 		userSubdirs:     make(map[basedirs.SubDirKey][]*basedirs.SubDir),
 		groupHistory:    make(map[basedirs.HistoryKey][]basedirs.History),
 	}
+
 	return m, nil
 }
 
@@ -88,12 +89,14 @@ func (m *memBaseDirs) Reset() error { return nil }
 func (m *memBaseDirs) PutGroupUsage(u *basedirs.Usage) error {
 	m.groupUsage[u.Age] = append(m.groupUsage[u.Age], u)
 	m.info.GroupDirCombos++
+
 	return nil
 }
 
 func (m *memBaseDirs) PutUserUsage(u *basedirs.Usage) error {
 	m.userUsage[u.Age] = append(m.userUsage[u.Age], u)
 	m.info.UserDirCombos++
+
 	return nil
 }
 
@@ -101,6 +104,7 @@ func (m *memBaseDirs) PutGroupSubDirs(key basedirs.SubDirKey, subdirs []*basedir
 	m.groupSubdirs[key] = append([]*basedirs.SubDir(nil), subdirs...)
 	m.info.GroupSubDirCombos++
 	m.info.GroupSubDirs += len(subdirs)
+
 	return nil
 }
 
@@ -108,6 +112,7 @@ func (m *memBaseDirs) PutUserSubDirs(key basedirs.SubDirKey, subdirs []*basedirs
 	m.userSubdirs[key] = append([]*basedirs.SubDir(nil), subdirs...)
 	m.info.UserSubDirCombos++
 	m.info.UserSubDirs += len(subdirs)
+
 	return nil
 }
 
@@ -115,6 +120,7 @@ func (m *memBaseDirs) AppendGroupHistory(key basedirs.HistoryKey, point basedirs
 	m.groupHistory[key] = append(m.groupHistory[key], point)
 	m.info.GroupMountCombos++
 	m.info.GroupHistories++
+
 	return nil
 }
 
@@ -130,33 +136,39 @@ func (m *memBaseDirs) SetCachedUser(uid uint32, name string)  { m.cachedUsers[ui
 func (m *memBaseDirs) GroupUsage(age db.DirGUTAge) ([]*basedirs.Usage, error) {
 	out := cloneUsage(m.groupUsage[age])
 	fillUsageNamesAndOwners(out, m.cachedGroups, m.cachedUsers, m.owners)
+
 	return out, nil
 }
 
 func (m *memBaseDirs) UserUsage(age db.DirGUTAge) ([]*basedirs.Usage, error) {
 	out := cloneUsage(m.userUsage[age])
 	fillUsageNamesAndOwners(out, m.cachedGroups, m.cachedUsers, m.owners)
+
 	return out, nil
 }
 
 func (m *memBaseDirs) GroupSubDirs(gid uint32, basedir string, age db.DirGUTAge) ([]*basedirs.SubDir, error) {
 	key := basedirs.SubDirKey{ID: gid, BaseDir: basedir, Age: age}
+
 	return cloneSubDirs(m.groupSubdirs[key]), nil
 }
 
 func (m *memBaseDirs) UserSubDirs(uid uint32, basedir string, age db.DirGUTAge) ([]*basedirs.SubDir, error) {
 	key := basedirs.SubDirKey{ID: uid, BaseDir: basedir, Age: age}
+
 	return cloneSubDirs(m.userSubdirs[key]), nil
 }
 
 func (m *memBaseDirs) History(gid uint32, path string) ([]basedirs.History, error) {
 	key := basedirs.HistoryKey{GID: gid, MountPath: path}
 	out := append([]basedirs.History(nil), m.groupHistory[key]...)
+
 	return out, nil
 }
 
 func (m *memBaseDirs) Info() (*basedirs.DBInfo, error) {
 	v := m.info
+
 	return &v, nil
 }
 
@@ -165,6 +177,7 @@ func (m *memBaseDirs) MountTimestamps() (map[string]time.Time, error) {
 	for k, v := range m.mountTimestamps {
 		out[k] = v
 	}
+
 	return out, nil
 }
 
@@ -174,11 +187,13 @@ func cloneUsage(in []*basedirs.Usage) []*basedirs.Usage {
 	if len(in) == 0 {
 		return nil
 	}
+
 	out := make([]*basedirs.Usage, len(in))
 	for i, u := range in {
 		du := *u
 		out[i] = &du
 	}
+
 	return out
 }
 
@@ -186,36 +201,43 @@ func cloneSubDirs(in []*basedirs.SubDir) []*basedirs.SubDir {
 	if len(in) == 0 {
 		return nil
 	}
+
 	out := make([]*basedirs.SubDir, len(in))
 	for i, sd := range in {
 		d := *sd
 		out[i] = &d
 	}
+
 	return out
 }
 
-func fillUsageNamesAndOwners(us []*basedirs.Usage, cachedGroups map[uint32]string, cachedUsers map[uint32]string, owners map[uint32]string) {
+func fillUsageNamesAndOwners(
+	us []*basedirs.Usage,
+	cachedGroups map[uint32]string,
+	cachedUsers map[uint32]string,
+	owners map[uint32]string,
+) {
 	for _, u := range us {
 		if u == nil {
 			continue
 		}
-		if u.GID == 0 && u.UID == 0 {
+
+		switch {
+		case u.GID == 0 && u.UID == 0:
 			if u.Name == "" {
 				u.Name = "root"
 			}
 			if u.Owner == "" {
 				u.Owner = owners[0]
 			}
-			continue
-		}
-		if u.GID != 0 {
+		case u.GID != 0:
 			if n, ok := cachedGroups[u.GID]; ok {
 				u.Name = n
 			} else if g, err := user.LookupGroupId(strconv.FormatUint(uint64(u.GID), 10)); err == nil {
 				u.Name = g.Name
 			}
 			u.Owner = owners[u.GID]
-		} else if u.UID != 0 {
+		case u.UID != 0:
 			if n, ok := cachedUsers[u.UID]; ok {
 				u.Name = n
 			} else if uu, err := user.LookupId(strconv.FormatUint(uint64(u.UID), 10)); err == nil {
@@ -239,14 +261,17 @@ func (p *testProvider) Close() error {
 	if p.bd != nil {
 		_ = p.bd.Close()
 	}
+
 	if p.tree != nil {
 		p.tree.Close()
 	}
+
 	return nil
 }
 
 func (p *testProvider) triggerUpdate(newTree *db.Tree, newBD basedirs.Reader) {
 	p.tree = newTree
+
 	p.bd = newBD
 	if p.cb != nil {
 		go p.cb()
@@ -260,14 +285,17 @@ func GetUserAndGroups(t *testing.T) (string, string, []string) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	gids, err := os.Getgroups()
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	out := make([]string, 0, len(gids))
 	for _, gid := range gids {
 		out = append(out, strconv.Itoa(gid))
 	}
+
 	return u.Username, u.Uid, out
 }
 
@@ -276,10 +304,12 @@ func CreateExampleDBsCustomIDs(t *testing.T, uid, gidA, gidB string, refTime int
 
 	tmp := t.TempDir()
 	name := strconv.FormatInt(time.Now().Unix()-10, 10) + "_test"
+
 	dir := filepath.Join(tmp, name)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return dir, err
 	}
+
 	return dir, CreateExampleDBsCustomIDsWithDir(t, dir, uid, gidA, gidB, refTime)
 }
 
@@ -291,19 +321,31 @@ func CreateExampleDBsCustomIDsWithDir(t *testing.T, dir, uid, gidA, gidB string,
 	if err := os.MkdirAll(dgutaDir, 0o755); err != nil {
 		return err
 	}
+
 	d := db.NewDB(dgutaDir)
 	d.SetBatchSize(20)
+
 	if err := d.CreateDB(); err != nil {
 		return err
 	}
 
-	data := internaldata.CreateDefaultTestData(parse32(t, gidA), parse32(t, gidB), 0, parse32(t, uid), 0, refTime).AsReader()
+	data := internaldata.CreateDefaultTestData(
+		parse32(t, gidA),
+		parse32(t, gidB),
+		0,
+		parse32(t, uid),
+		0,
+		refTime,
+	).AsReader()
 	s := summary.NewSummariser(stats.NewStatsParser(data))
 	s.AddDirectoryOperation(dirguta.NewDirGroupUserTypeAge(d))
+
 	if err := s.Summarise(); err != nil {
 		_ = d.Close()
+
 		return err
 	}
+
 	if err := d.Close(); err != nil {
 		return err
 	}
@@ -313,15 +355,18 @@ func CreateExampleDBsCustomIDsWithDir(t *testing.T, dir, uid, gidA, gidB string,
 	if err := os.WriteFile(filepath.Join(dir, "basedirs.db"), []byte("test"), 0o600); err != nil {
 		return err
 	}
+
 	return nil
 }
 
 func parse32(t *testing.T, s string) uint32 {
 	t.Helper()
+
 	n, err := strconv.ParseUint(strings.TrimSpace(s), 10, 32)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	return uint32(n)
 }
 
@@ -330,6 +375,7 @@ func mountKeyFromDatasetDir(dir string) string {
 	if parts := strings.SplitN(base, "_", 2); len(parts) == 2 {
 		return parts[1]
 	}
+
 	return ""
 }
 
@@ -339,6 +385,7 @@ func BuildTestProvider(t *testing.T, datasetDirs []string, ownersPath string, up
 	t.Helper()
 
 	mountTimestamps := make(map[string]time.Time)
+
 	for _, dsDir := range datasetDirs {
 		if mk := mountKeyFromDatasetDir(dsDir); mk != "" {
 			mountTimestamps[mk] = updatedAt
@@ -350,7 +397,12 @@ func BuildTestProvider(t *testing.T, datasetDirs []string, ownersPath string, up
 
 // BuildTestProviderWithMountTimestamps is a test helper that allows callers to
 // specify per-mount timestamps (keyed by mountKey).
-func BuildTestProviderWithMountTimestamps(t *testing.T, datasetDirs []string, ownersPath string, mountTimestamps map[string]time.Time) (Provider, error) {
+func BuildTestProviderWithMountTimestamps(
+	t *testing.T,
+	datasetDirs []string,
+	ownersPath string,
+	mountTimestamps map[string]time.Time,
+) (Provider, error) {
 	t.Helper()
 
 	if len(datasetDirs) == 0 {
@@ -362,18 +414,22 @@ func BuildTestProviderWithMountTimestamps(t *testing.T, datasetDirs []string, ow
 	for _, dsDir := range datasetDirs {
 		dgutaDirs = append(dgutaDirs, filepath.Join(dsDir, "dirguta"))
 	}
+
 	d := db.NewDB(dgutaDirs...)
 	if err := d.Open(); err != nil {
 		return nil, err
 	}
+
 	tree := db.NewTree(&dbAdapter{d: d})
 
 	// BaseDirs
 	mbd, err := newMemBaseDirs(ownersPath)
 	if err != nil {
 		tree.Close()
+
 		return nil, err
 	}
+
 	mbd.SetMountPath("/a/")
 
 	// Use the latest timestamp as the overall dataset "updatedAt".
@@ -383,9 +439,11 @@ func BuildTestProviderWithMountTimestamps(t *testing.T, datasetDirs []string, ow
 			latest = ts
 		}
 	}
+
 	if latest.IsZero() {
 		latest = time.Now()
 	}
+
 	mbd.SetUpdatedAt(latest)
 
 	for _, dsDir := range datasetDirs {
@@ -393,10 +451,12 @@ func BuildTestProviderWithMountTimestamps(t *testing.T, datasetDirs []string, ow
 		if mk == "" {
 			continue
 		}
+
 		ts := mountTimestamps[mk]
 		if ts.IsZero() {
 			ts = latest
 		}
+
 		mbd.mountTimestamps[mk] = ts
 	}
 

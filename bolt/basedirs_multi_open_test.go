@@ -27,9 +27,20 @@ func TestOpenMultiBaseDirsReader(t *testing.T) {
 		storeA.SetMountPath("/mnt/a/")
 		storeA.SetUpdatedAt(tA)
 		So(storeA.Reset(), ShouldBeNil)
-		So(storeA.PutGroupUsage(&basedirs.Usage{GID: 1, BaseDir: "/mnt/a/projects/A", Age: db.DGUTAgeAll, UsageSize: 1}), ShouldBeNil)
-		So(storeA.AppendGroupHistory(basedirs.HistoryKey{GID: 1, MountPath: "/mnt/a/"}, basedirs.History{Date: tA}), ShouldBeNil)
-		So(storeA.PutGroupSubDirs(basedirs.SubDirKey{ID: 1, BaseDir: "/mnt/a/projects/A", Age: db.DGUTAgeAll}, []*basedirs.SubDir{{SubDir: "x"}}), ShouldBeNil)
+		So(storeA.PutGroupUsage(&basedirs.Usage{
+			GID:       1,
+			BaseDir:   "/mnt/a/projects/A",
+			Age:       db.DGUTAgeAll,
+			UsageSize: 1,
+		}), ShouldBeNil)
+		So(storeA.AppendGroupHistory(
+			basedirs.HistoryKey{GID: 1, MountPath: "/mnt/a/"},
+			basedirs.History{Date: tA},
+		), ShouldBeNil)
+		So(storeA.PutGroupSubDirs(
+			basedirs.SubDirKey{ID: 1, BaseDir: "/mnt/a/projects/A", Age: db.DGUTAgeAll},
+			[]*basedirs.SubDir{{SubDir: "x"}},
+		), ShouldBeNil)
 		So(storeA.Finalise(), ShouldBeNil)
 		So(storeA.Close(), ShouldBeNil)
 
@@ -38,14 +49,26 @@ func TestOpenMultiBaseDirsReader(t *testing.T) {
 		storeB.SetMountPath("/mnt/b/")
 		storeB.SetUpdatedAt(tB)
 		So(storeB.Reset(), ShouldBeNil)
-		So(storeB.PutGroupUsage(&basedirs.Usage{GID: 2, BaseDir: "/mnt/b/projects/B", Age: db.DGUTAgeAll, UsageSize: 2}), ShouldBeNil)
-		So(storeB.AppendGroupHistory(basedirs.HistoryKey{GID: 2, MountPath: "/mnt/b/"}, basedirs.History{Date: tB}), ShouldBeNil)
-		So(storeB.PutGroupSubDirs(basedirs.SubDirKey{ID: 2, BaseDir: "/mnt/b/projects/B", Age: db.DGUTAgeAll}, []*basedirs.SubDir{{SubDir: "y"}}), ShouldBeNil)
+		So(storeB.PutGroupUsage(&basedirs.Usage{
+			GID:       2,
+			BaseDir:   "/mnt/b/projects/B",
+			Age:       db.DGUTAgeAll,
+			UsageSize: 2,
+		}), ShouldBeNil)
+		So(storeB.AppendGroupHistory(
+			basedirs.HistoryKey{GID: 2, MountPath: "/mnt/b/"},
+			basedirs.History{Date: tB},
+		), ShouldBeNil)
+		So(storeB.PutGroupSubDirs(
+			basedirs.SubDirKey{ID: 2, BaseDir: "/mnt/b/projects/B", Age: db.DGUTAgeAll},
+			[]*basedirs.SubDir{{SubDir: "y"}},
+		), ShouldBeNil)
 		So(storeB.Finalise(), ShouldBeNil)
 		So(storeB.Close(), ShouldBeNil)
 
 		r, err := OpenMultiBaseDirsReader(ownersPath, pathA, pathB)
 		So(err, ShouldBeNil)
+
 		defer r.Close()
 
 		Convey("usage concatenates across sources", func() {

@@ -75,18 +75,22 @@ type provider struct {
 func (p *provider) Tree() *db.Tree {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
+
 	if p.state == nil {
 		return nil
 	}
+
 	return p.state.tree
 }
 
 func (p *provider) BaseDirs() basedirs.Reader {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
+
 	if p.state == nil {
 		return nil
 	}
+
 	return p.state.basedirs
 }
 
@@ -109,7 +113,22 @@ func (p *provider) Close() error {
 	if st != nil {
 		return closeState(st)
 	}
+
 	return nil
+}
+
+func closeState(st *providerState) error {
+	var err error
+
+	for _, c := range st.closers {
+		if c == nil {
+			continue
+		}
+
+		err = errors.Join(err, c())
+	}
+
+	return err
 }
 
 func (p *provider) pollLoop() {
@@ -143,6 +162,7 @@ func (p *provider) maybeReload() {
 	if old != nil && slices.Equal(old.datasetDirs, st.datasetDirs) {
 		closeErr := closeState(st)
 		_ = closeErr
+
 		return
 	}
 
@@ -166,28 +186,6 @@ func (p *provider) maybeReload() {
 	}
 }
 
-func closeAll(closers []func() error) error {
-	var err error
-	for _, c := range closers {
-		if c == nil {
-			continue
-		}
-		err = errors.Join(err, c())
-	}
-	return err
-}
-
-func closeState(st *providerState) error {
-	var err error
-	for _, c := range st.closers {
-		if c == nil {
-			continue
-		}
-		err = errors.Join(err, c())
-	}
-	return err
-}
-
 func removeDatasetDirs(baseDirectory string, toDelete []string) error {
 	for _, path := range toDelete {
 		// Create marker to avoid the watch subcommand re-running a summarise.
@@ -195,6 +193,7 @@ func removeDatasetDirs(baseDirectory string, toDelete []string) error {
 		if err != nil {
 			return err
 		}
+
 		if err := f.Close(); err != nil {
 			return err
 		}
@@ -212,6 +211,7 @@ func (p *provider) loadOnce() (*providerState, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	if len(datasetDirs) == 0 {
 		return nil, server.ErrNoPaths
 	}
@@ -235,10 +235,12 @@ func (p *provider) loadOnce() (*providerState, error) {
 		dgutaDirs = append(dgutaDirs, filepath.Join(dsDir, p.cfg.DGUTADBName))
 
 		bdPath := filepath.Join(dsDir, p.cfg.BaseDirDBName)
+
 		r, openErr := OpenBaseDirsReader(bdPath, p.cfg.OwnersCSVPath)
 		if openErr != nil {
 			return nil, errors.Join(openErr, closeAll(closers))
 		}
+
 		r.SetMountPoints(mountPoints)
 
 		wrapped := timestampOverrideReader{
@@ -256,6 +258,7 @@ func (p *provider) loadOnce() (*providerState, error) {
 	if err != nil {
 		return nil, errors.Join(err, closeAll(closers))
 	}
+
 	closers = append(closers, database.Close)
 
 	state := &providerState{
@@ -295,8 +298,10 @@ func findDatasetDirs(basepath string, required ...string) ([]string, []string, e
 		if prev, ok := latest[key]; ok {
 			if prev.version > version {
 				toDelete = append(toDelete, entry.Name())
+
 				continue
 			}
+
 			toDelete = append(toDelete, prev.name)
 		}
 
@@ -310,6 +315,7 @@ func findDatasetDirs(basepath string, required ...string) ([]string, []string, e
 	for _, v := range latest {
 		dirs = append(dirs, filepath.Join(basepath, v.name))
 	}
+
 	slices.Sort(dirs)
 
 	return dirs, toDelete, nil
@@ -317,12 +323,14 @@ func findDatasetDirs(basepath string, required ...string) ([]string, []string, e
 
 func deriveMountInfoFromDatasetDir(datasetDir string) (mountKey, mountPath string, updatedAt time.Time, err error) {
 	base := filepath.Base(datasetDir)
+
 	parts := strings.SplitN(base, "_", 2)
 	if len(parts) != 2 {
 		return "", "", time.Time{}, fmt.Errorf("%w: %q", ErrInvalidDatasetDirName, base)
 	}
 
 	mountKey = parts[1]
+
 	mountPath = strings.ReplaceAll(mountKey, "／", "/")
 	if !strings.HasSuffix(mountPath, "/") {
 		mountPath += "/"
@@ -333,6 +341,20 @@ func deriveMountInfoFromDatasetDir(datasetDir string) (mountKey, mountPath strin
 	}
 
 	return mountKey, mountPath, updatedAt, nil
+}
+
+func closeAll(closers []func() error) error {
+	var err error
+
+	for _, c := range closers {
+		if c == nil {
+			continue
+		}
+
+		err = errors.Join(err, c())
+	}
+
+	return err
 }
 
 func (p *provider) mountPoints() ([]string, error) {
@@ -355,12 +377,15 @@ func OpenProvider(cfg Config) (server.Provider, error) {
 	if cfg.BasePath == "" {
 		return nil, ErrInvalidConfig
 	}
+
 	if cfg.DGUTADBName == "" {
 		return nil, ErrInvalidConfig
 	}
+
 	if cfg.BaseDirDBName == "" {
 		return nil, ErrInvalidConfig
 	}
+
 	if cfg.OwnersCSVPath == "" {
 		return nil, ErrInvalidConfig
 	}
@@ -374,10 +399,12 @@ func OpenProvider(cfg Config) (server.Provider, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	p.state = st
 
 	if cfg.PollInterval > 0 {
 		p.wg.Add(1)
+
 		go p.pollLoop()
 	}
 
@@ -389,10 +416,12 @@ func isValidDatasetDir(entry fs.DirEntry, basepath string, required ...string) b
 	if !entry.IsDir() || !validDatasetDir.MatchString(name) {
 		return false
 	}
+
 	for _, req := range required {
 		if _, err := os.Stat(filepath.Join(basepath, name, req)); err != nil {
 			return false
 		}
 	}
+
 	return true
 }

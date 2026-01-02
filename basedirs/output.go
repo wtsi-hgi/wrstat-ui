@@ -9,55 +9,61 @@ func (b *BaseDirs) Output(users, groups IDAgeDirs) error {
 		return Error("store not set")
 	}
 
-	if err := b.store.Reset(); err != nil {
-		return err
+	steps := []func() error{
+		b.store.Reset,
+		func() error { return b.storeGroupUsage(groups) },
+		func() error { return b.storeUserUsage(users) },
+		func() error { return b.storeGroupHistories(groups) },
+		func() error { return b.storeGroupSubDirs(groups) },
+		func() error { return b.storeUserSubDirs(users) },
+		b.store.Finalise,
 	}
 
-	if err := b.storeGroupUsage(groups); err != nil {
-		return err
+	for _, step := range steps {
+		if err := step(); err != nil {
+			return err
+		}
 	}
 
-	if err := b.storeUserUsage(users); err != nil {
-		return err
+	return nil
+}
+
+func forEachSummaryWithChildren(dcss *AgeDirs, fn func(dcs SummaryWithChildren) error) error {
+	if dcss == nil {
+		return nil
 	}
 
-	if err := b.storeGroupHistories(groups); err != nil {
-		return err
+	for _, adcs := range dcss {
+		for i := range adcs {
+			if err := fn(adcs[i]); err != nil {
+				return err
+			}
+		}
 	}
 
-	if err := b.storeGroupSubDirs(groups); err != nil {
-		return err
-	}
-
-	if err := b.storeUserSubDirs(users); err != nil {
-		return err
-	}
-
-	return b.store.Finalise()
+	return nil
 }
 
 func (b *BaseDirs) storeGroupUsage(gidBase IDAgeDirs) error {
 	for gid, dcss := range gidBase {
-		for _, adcs := range dcss {
-			for _, dcs := range adcs {
-				quotaSize, quotaInode := b.quotas.Get(gid, dcs.Dir)
+		if err := forEachSummaryWithChildren(dcss, func(dcs SummaryWithChildren) error {
+			quotaSize, quotaInode := b.quotas.Get(gid, dcs.Dir)
 
-				u := &Usage{
-					GID:         gid,
-					UIDs:        dcs.UIDs,
-					BaseDir:     dcs.Dir,
-					UsageSize:   dcs.Size,
-					QuotaSize:   quotaSize,
-					UsageInodes: dcs.Count,
-					QuotaInodes: quotaInode,
-					Mtime:       dcs.Mtime,
-					Age:         dcs.Age,
-				}
-
-				if err := b.store.PutGroupUsage(u); err != nil {
-					return err
-				}
+			u := &Usage{
+				GID:         gid,
+				UIDs:        dcs.UIDs,
+				BaseDir:     dcs.Dir,
+				UsageSize:   dcs.Size,
+				QuotaSize:   quotaSize,
+				UsageInodes: dcs.Count,
+				QuotaInodes: quotaInode,
+				Mtime:       dcs.Mtime,
+				Age:         dcs.Age,
 			}
+
+			return b.store.PutGroupUsage(u)
+		}); err != nil {
+			return err
 		}
 	}
 
@@ -66,22 +72,20 @@ func (b *BaseDirs) storeGroupUsage(gidBase IDAgeDirs) error {
 
 func (b *BaseDirs) storeUserUsage(uidBase IDAgeDirs) error {
 	for uid, dcss := range uidBase {
-		for _, adcs := range dcss {
-			for _, dcs := range adcs {
-				u := &Usage{
-					UID:         uid,
-					GIDs:        dcs.GIDs,
-					BaseDir:     dcs.Dir,
-					UsageSize:   dcs.Size,
-					UsageInodes: dcs.Count,
-					Mtime:       dcs.Mtime,
-					Age:         dcs.Age,
-				}
-
-				if err := b.store.PutUserUsage(u); err != nil {
-					return err
-				}
+		if err := forEachSummaryWithChildren(dcss, func(dcs SummaryWithChildren) error {
+			u := &Usage{
+				UID:         uid,
+				GIDs:        dcs.GIDs,
+				BaseDir:     dcs.Dir,
+				UsageSize:   dcs.Size,
+				UsageInodes: dcs.Count,
+				Mtime:       dcs.Mtime,
+				Age:         dcs.Age,
 			}
+
+			return b.store.PutUserUsage(u)
+		}); err != nil {
+			return err
 		}
 	}
 
@@ -136,6 +140,7 @@ func (b *BaseDirs) dcssToMountPoints(dcss *AgeDirs) map[string]db.DirSummary {
 
 		ds := mounts[mp]
 		ds.Count += dcs.Count
+
 		ds.Size += dcs.Size
 		if dcs.Modtime.After(ds.Modtime) {
 			ds.Modtime = dcs.Modtime
@@ -149,13 +154,11 @@ func (b *BaseDirs) dcssToMountPoints(dcss *AgeDirs) map[string]db.DirSummary {
 
 func (b *BaseDirs) storeGroupSubDirs(gidBase IDAgeDirs) error {
 	for gid, dcss := range gidBase {
-		for _, adcs := range dcss {
-			for _, dcs := range adcs {
-				key := SubDirKey{ID: gid, BaseDir: dcs.Dir, Age: dcs.Age}
-				if err := b.store.PutGroupSubDirs(key, dcs.Children); err != nil {
-					return err
-				}
-			}
+		if err := forEachSummaryWithChildren(dcss, func(dcs SummaryWithChildren) error {
+			key := SubDirKey{ID: gid, BaseDir: dcs.Dir, Age: dcs.Age}
+			return b.store.PutGroupSubDirs(key, dcs.Children)
+		}); err != nil {
+			return err
 		}
 	}
 
@@ -164,13 +167,11 @@ func (b *BaseDirs) storeGroupSubDirs(gidBase IDAgeDirs) error {
 
 func (b *BaseDirs) storeUserSubDirs(uidBase IDAgeDirs) error {
 	for uid, dcss := range uidBase {
-		for _, adcs := range dcss {
-			for _, dcs := range adcs {
-				key := SubDirKey{ID: uid, BaseDir: dcs.Dir, Age: dcs.Age}
-				if err := b.store.PutUserSubDirs(key, dcs.Children); err != nil {
-					return err
-				}
-			}
+		if err := forEachSummaryWithChildren(dcss, func(dcs SummaryWithChildren) error {
+			key := SubDirKey{ID: uid, BaseDir: dcs.Dir, Age: dcs.Age}
+			return b.store.PutUserSubDirs(key, dcs.Children)
+		}); err != nil {
+			return err
 		}
 	}
 

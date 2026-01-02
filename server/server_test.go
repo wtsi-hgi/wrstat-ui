@@ -514,6 +514,7 @@ func TestServer(t *testing.T) {
 				"keyA": time.Unix(refTime, 0),
 			})
 			So(err, ShouldBeNil)
+
 			tp, ok := p.(*testProvider)
 			So(ok, ShouldBeTrue)
 
@@ -542,6 +543,7 @@ func TestServer(t *testing.T) {
 				"keyB": time.Unix(refTime+10, 0),
 			})
 			So(err, ShouldBeNil)
+
 			tp2, ok := p2.(*testProvider)
 			So(ok, ShouldBeTrue)
 			tp.triggerUpdate(tp2.tree, tp2.bd)
@@ -614,6 +616,7 @@ func TestServer(t *testing.T) {
 				"keyA": time.Unix(refTime, 0),
 			})
 			So(err, ShouldBeNil)
+
 			tp, ok := p.(*testProvider)
 			So(ok, ShouldBeTrue)
 
@@ -634,6 +637,7 @@ func TestServer(t *testing.T) {
 				"keyA": time.Unix(refTime+10, 0),
 			})
 			So(err, ShouldBeNil)
+
 			tp2, ok := p2.(*testProvider)
 			So(ok, ShouldBeTrue)
 			tp.triggerUpdate(tp2.tree, tp2.bd)
@@ -831,10 +835,10 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 		So(err, ShouldBeNil)
 
 		Convey("You can't get where data is or add the tree page without auth", func() {
-			p, err := BuildTestProvider(t, []string{path}, ownersPath, time.Unix(refTime, 0))
-			So(err, ShouldBeNil)
-			err = s.SetProvider(p)
-			So(err, ShouldBeNil)
+			p, provErr := BuildTestProvider(t, []string{path}, ownersPath, time.Unix(refTime, 0))
+			So(provErr, ShouldBeNil)
+			setErr := s.SetProvider(p)
+			So(setErr, ShouldBeNil)
 
 			_, _, err = GetWhereDataIs(c, "/", "", "", "", db.DGUTAgeAll, "")
 			So(err, ShouldNotBeNil)
@@ -850,10 +854,10 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 			})
 			So(err, ShouldBeNil)
 
-			p, err := BuildTestProvider(t, []string{path}, ownersPath, time.Unix(refTime, 0))
-			So(err, ShouldBeNil)
-			err = s.SetProvider(p)
-			So(err, ShouldBeNil)
+			p, provErr := BuildTestProvider(t, []string{path}, ownersPath, time.Unix(refTime, 0))
+			So(provErr, ShouldBeNil)
+			setErr := s.SetProvider(p)
+			So(setErr, ShouldBeNil)
 
 			err = c.Login("user", "pass")
 			So(err, ShouldBeNil)
@@ -893,10 +897,10 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 			})
 			So(err, ShouldBeNil)
 
-			p, err := BuildTestProvider(t, []string{path}, ownersPath, time.Unix(refTime, 0))
-			So(err, ShouldBeNil)
-			err = s.SetProvider(p)
-			So(err, ShouldBeNil)
+			p, provErr := BuildTestProvider(t, []string{path}, ownersPath, time.Unix(refTime, 0))
+			So(provErr, ShouldBeNil)
+			setErr := s.SetProvider(p)
+			So(setErr, ShouldBeNil)
 
 			err = c.Login("user", "pass")
 			So(err, ShouldBeNil)

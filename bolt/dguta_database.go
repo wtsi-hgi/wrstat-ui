@@ -21,15 +21,29 @@ type dgutaReadSet struct {
 	updatedAt time.Time
 }
 
-func openDGUTAReadSet(dir string) (*dgutaReadSet, error) {
+const (
+	dgutaKeyExtraCap   = 2
+	dgutaKeyTerminator = 0xFF
+)
+
+func openDGUTADBPairs(dir string) (*bolt.DB, *bolt.DB, error) {
 	dgutaDB, err := openBoltReadOnly(filepathJoin(dir, dgutaDBBasename))
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	childrenDB, err := openBoltReadOnly(filepathJoin(dir, childrenDBBasename))
 	if err != nil {
 		_ = dgutaDB.Close()
+		return nil, nil, err
+	}
+
+	return dgutaDB, childrenDB, nil
+}
+
+func openDGUTAReadSet(dir string) (*dgutaReadSet, error) {
+	dgutaDB, childrenDB, err := openDGUTADBPairs(dir)
+	if err != nil {
 		return nil, err
 	}
 
@@ -41,7 +55,7 @@ func openDGUTAReadSet(dir string) (*dgutaReadSet, error) {
 	}
 
 	if updatedAt.IsZero() {
-		if st, err := os.Stat(filepathParent(dir)); err == nil {
+		if st, statErr := os.Stat(filepathParent(dir)); statErr == nil {
 			updatedAt = st.ModTime()
 		}
 	}
@@ -63,12 +77,14 @@ func (s *dgutaReadSet) Close() error {
 
 	if s.dgutas != nil {
 		err := s.dgutas.Close()
-		errm = multierror.Append(errm, err)
+		errM := multierror.Append(errm, err)
+		errm = errM
 	}
 
 	if s.children != nil {
 		err := s.children.Close()
-		errm = multierror.Append(errm, err)
+		errM := multierror.Append(errm, err)
+		errm = errM
 	}
 
 	return errm.ErrorOrNil()
@@ -80,23 +96,28 @@ type dgutaDatabase struct {
 	ch    codec.Handle
 }
 
+func closeReadSets(sets []*dgutaReadSet) {
+	for _, s := range sets {
+		if s == nil {
+			continue
+		}
+		_ = s.Close()
+	}
+}
+
 func openDGUTADatabase(paths []string) (*dgutaDatabase, error) {
 	if len(paths) == 0 {
 		return nil, db.ErrDBNotExists
 	}
 
-	sets := make([]*dgutaReadSet, len(paths))
-	for i, dir := range paths {
+	sets := make([]*dgutaReadSet, 0, len(paths))
+	for _, dir := range paths {
 		set, err := openDGUTAReadSet(dir)
 		if err != nil {
-			for _, s := range sets {
-				if s != nil {
-					_ = s.Close()
-				}
-			}
+			closeReadSets(sets)
 			return nil, err
 		}
-		sets[i] = set
+		sets = append(sets, set)
 	}
 
 	return &dgutaDatabase{
@@ -114,7 +135,8 @@ func (d *dgutaDatabase) Close() error {
 	var errm *multierror.Error
 	for _, s := range d.sets {
 		err := s.Close()
-		errm = multierror.Append(errm, err)
+		errM := multierror.Append(errm, err)
+		errm = errM
 	}
 
 	return errm.ErrorOrNil()
@@ -263,7 +285,7 @@ func readUpdatedAt(dbh *bolt.DB) (time.Time, error) {
 		}
 
 		v := b.Get([]byte(metaKeyUpdatedAt))
-		if len(v) != 8 {
+		if len(v) != unixSecondsBytesLen {
 			return nil
 		}
 
@@ -279,14 +301,14 @@ func readUpdatedAt(dbh *bolt.DB) (time.Time, error) {
 }
 
 func getDGUTAFromDB(b *bolt.Bucket, dir string) (*db.DGUTA, error) {
-	bdir := make([]byte, 0, 2+len(dir))
+	bdir := make([]byte, 0, dgutaKeyExtraCap+len(dir))
 	bdir = append(bdir, dir...)
 
 	if !strings.HasSuffix(dir, "/") {
 		bdir = append(bdir, '/')
 	}
 
-	bdir = append(bdir, 255)
+	bdir = append(bdir, dgutaKeyTerminator)
 
 	v := b.Get(bdir)
 	if v == nil {

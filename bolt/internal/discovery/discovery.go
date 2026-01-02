@@ -75,21 +75,24 @@ func entryExists(path string) bool {
 func addEntryToMap(entry fs.DirEntry, latest map[string]nameVersion, toDelete []string) []string {
 	parts := strings.SplitN(entry.Name(), "_", numDatasetDirParts)
 	key := parts[keyPart]
+
 	version, err := strconv.ParseInt(parts[0], 10, 64)
 	if err != nil {
 		// If the version is not numeric, treat it as very old.
 		version = -1
 	}
 
-	if previous, ok := latest[key]; previous.version > version {
+	previous, ok := latest[key]
+	if ok && previous.version > version {
 		toDelete = append(toDelete, entry.Name())
-	} else {
-		if ok {
-			toDelete = append(toDelete, previous.name)
-		}
-
-		latest[key] = nameVersion{name: entry.Name(), version: version}
+		return toDelete
 	}
+
+	if ok {
+		toDelete = append(toDelete, previous.name)
+	}
+
+	latest[key] = nameVersion{name: entry.Name(), version: version}
 
 	return toDelete
 }

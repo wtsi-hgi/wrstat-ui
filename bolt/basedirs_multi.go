@@ -20,15 +20,19 @@ func (m multiBaseDirsReader) UserUsage(age db.DirGUTAge) ([]*basedirs.Usage, err
 }
 
 func (m multiBaseDirsReader) usage(fn func(basedirs.Reader) ([]*basedirs.Usage, error)) ([]*basedirs.Usage, error) {
-	var out []*basedirs.Usage
-	var merr error
+	var (
+		out  []*basedirs.Usage
+		merr error
+	)
 
 	for _, r := range m {
 		vals, err := fn(r)
 		if err != nil {
 			merr = multierror.Append(merr, err)
+
 			continue
 		}
+
 		out = append(out, vals...)
 	}
 
@@ -51,10 +55,13 @@ func (m multiBaseDirsReader) subDirs(fn func(basedirs.Reader) ([]*basedirs.SubDi
 		if err == nil {
 			return vals, nil
 		}
+
 		if errors.Is(err, basedirs.ErrNoSuchUserOrGroup) {
 			sawNoSuch = true
+
 			continue
 		}
+
 		return nil, err
 	}
 
@@ -69,21 +76,26 @@ func (m multiBaseDirsReader) subDirs(fn func(basedirs.Reader) ([]*basedirs.SubDi
 
 func (m multiBaseDirsReader) History(gid uint32, path string) ([]basedirs.History, error) {
 	var sawNoHistory bool
+
 	for _, r := range m {
 		h, err := r.History(gid, path)
 		if err == nil {
 			return h, nil
 		}
+
 		if errors.Is(err, basedirs.ErrNoBaseDirHistory) {
 			sawNoHistory = true
+
 			continue
 		}
+
 		return nil, err
 	}
 
 	if sawNoHistory {
 		return nil, basedirs.ErrNoBaseDirHistory
 	}
+
 	return nil, basedirs.ErrNoBaseDirHistory
 }
 
@@ -107,14 +119,17 @@ func (m multiBaseDirsReader) SetCachedUser(uid uint32, name string) {
 
 func (m multiBaseDirsReader) MountTimestamps() (map[string]time.Time, error) {
 	out := make(map[string]time.Time)
+
 	var merr error
 
 	for _, r := range m {
 		ts, err := r.MountTimestamps()
 		if err != nil {
 			merr = multierror.Append(merr, err)
+
 			continue
 		}
+
 		for k, v := range ts {
 			if v.After(out[k]) {
 				out[k] = v
@@ -126,15 +141,17 @@ func (m multiBaseDirsReader) MountTimestamps() (map[string]time.Time, error) {
 }
 
 func (m multiBaseDirsReader) Info() (*basedirs.DBInfo, error) {
-	var out basedirs.DBInfo
+	out := new(basedirs.DBInfo)
 	var merr error
 
 	for _, r := range m {
 		info, err := r.Info()
 		if err != nil {
 			merr = multierror.Append(merr, err)
+
 			continue
 		}
+
 		if info == nil {
 			continue
 		}
@@ -149,10 +166,7 @@ func (m multiBaseDirsReader) Info() (*basedirs.DBInfo, error) {
 		out.UserSubDirs += info.UserSubDirs
 	}
 
-	if merr != nil {
-		return &out, merr
-	}
-	return &out, nil
+	return out, merr
 }
 
 func (m multiBaseDirsReader) Close() (err error) {
@@ -161,5 +175,6 @@ func (m multiBaseDirsReader) Close() (err error) {
 			err = multierror.Append(err, errr)
 		}
 	}
+
 	return err
 }

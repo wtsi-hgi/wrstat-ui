@@ -266,6 +266,7 @@ func setSummarisers(s *summary.Summariser, mountpoints string, //nolint:gocognit
 		if err != nil {
 			return nil, err
 		}
+
 		if c != nil {
 			closers = append(closers, c)
 		}
@@ -276,6 +277,7 @@ func setSummarisers(s *summary.Summariser, mountpoints string, //nolint:gocognit
 		if err != nil {
 			return nil, err
 		}
+
 		if c != nil {
 			closers = append(closers, c)
 		}
@@ -287,12 +289,15 @@ func setSummarisers(s *summary.Summariser, mountpoints string, //nolint:gocognit
 
 	return func() error {
 		var err error
+
 		for _, c := range closers {
 			if c == nil {
 				continue
 			}
+
 			err = errors.Join(err, c())
 		}
+
 		return err
 	}, nil
 }

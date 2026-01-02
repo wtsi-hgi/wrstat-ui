@@ -24,14 +24,15 @@ var (
 )
 
 const (
-	dgutaBucketName    = "gut"
-	childrenBucketName = "children"
-	metaBucketName     = "_meta"
-	metaKeyMountPath   = "mountPath"
-	metaKeyUpdatedAt   = "updatedAt"
-	boltFilePerms      = 0o640
-	dgutaDBBasename    = "dguta.db"
-	childrenDBBasename = dgutaDBBasename + ".children"
+	dgutaBucketName     = "gut"
+	childrenBucketName  = "children"
+	metaBucketName      = "_meta"
+	metaKeyMountPath    = "mountPath"
+	metaKeyUpdatedAt    = "updatedAt"
+	unixSecondsBytesLen = 8
+	boltFilePerms       = 0o640
+	dgutaDBBasename     = "dguta.db"
+	childrenDBBasename  = dgutaDBBasename + ".children"
 )
 
 // Config configures the Bolt backend.
@@ -99,6 +100,7 @@ func (w *dgutaWriter) Add(dguta db.RecordDGUTA) error {
 	if w.writeErr != nil {
 		return w.writeErr
 	}
+
 	if err := w.ensureMetadataPersisted(); err != nil {
 		return err
 	}
@@ -116,24 +118,36 @@ func (w *dgutaWriter) ensureMetadataPersisted() error {
 	if w.metaDone {
 		return nil
 	}
-	if w.mountPath == "" || w.updatedAt.IsZero() {
-		return ErrMetadataNotSet
-	}
-	if len(w.mountPath) == 0 || w.mountPath[0] != '/' || w.mountPath[len(w.mountPath)-1] != '/' {
-		return ErrInvalidMountPath
-	}
-
-	if err := persistMeta(w.dgutaDB, w.mountPath, w.updatedAt); err != nil {
+	if err := w.validateMetadata(); err != nil {
 		return err
 	}
-
-	if err := persistMeta(w.childrenDB, w.mountPath, w.updatedAt); err != nil {
+	if err := persistMetaBoth(w.dgutaDB, w.childrenDB, w.mountPath, w.updatedAt); err != nil {
 		return err
 	}
 
 	w.metaDone = true
 
 	return nil
+}
+
+func (w *dgutaWriter) validateMetadata() error {
+	if w.mountPath == "" || w.updatedAt.IsZero() {
+		return ErrMetadataNotSet
+	}
+
+	if w.mountPath[0] != '/' || w.mountPath[len(w.mountPath)-1] != '/' {
+		return ErrInvalidMountPath
+	}
+
+	return nil
+}
+
+func persistMetaBoth(dgutaDB, childrenDB *bolt.DB, mountPath string, updatedAt time.Time) error {
+	if err := persistMeta(dgutaDB, mountPath, updatedAt); err != nil {
+		return err
+	}
+
+	return persistMeta(childrenDB, mountPath, updatedAt)
 }
 
 func persistMeta(db *bolt.DB, mountPath string, updatedAt time.Time) error {
@@ -144,7 +158,7 @@ func persistMeta(db *bolt.DB, mountPath string, updatedAt time.Time) error {
 	return db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte(metaBucketName))
 		if b == nil {
-			return fmt.Errorf("meta bucket missing") //nolint:err113
+			return errors.New("meta bucket missing") //nolint:err113
 		}
 
 		if err := b.Put([]byte(metaKeyMountPath), []byte(mountPath)); err != nil {
@@ -156,8 +170,9 @@ func persistMeta(db *bolt.DB, mountPath string, updatedAt time.Time) error {
 			return ErrInvalidUpdatedAt
 		}
 
-		buf := make([]byte, 8)
+		buf := make([]byte, unixSecondsBytesLen)
 		binary.LittleEndian.PutUint64(buf, uint64(sec))
+
 		return b.Put([]byte(metaKeyUpdatedAt), buf)
 	})
 }
@@ -169,11 +184,13 @@ func (w *dgutaWriter) storeBatch() {
 
 	if err := w.childrenDB.Update(w.storeChildren); err != nil {
 		w.writeErr = err
+
 		return
 	}
 
 	if err := w.dgutaDB.Update(w.storeDGUTAs); err != nil {
 		w.writeErr = err
+
 		return
 	}
 }
@@ -187,6 +204,7 @@ func (w *dgutaWriter) storeChildren(tx *bolt.Tx) error {
 		}
 
 		parent := string(r.Dir.AppendTo(nil))
+
 		children := make([]string, len(r.Children))
 		for i := range r.Children {
 			children[i] = parent + strings.TrimSuffix(r.Children[i], "/")
@@ -215,6 +233,7 @@ func (w *dgutaWriter) storeDGUTAs(tx *bolt.Tx) error {
 
 func (w *dgutaWriter) encodeChildren(children []string) []byte {
 	var encoded []byte
+
 	enc := codec.NewEncoderBytes(&encoded, w.codecHandle)
 	enc.MustEncode(children)
 
@@ -252,11 +271,7 @@ func (w *dgutaWriter) Close() error {
 // outputDir is the directory where dguta.db and dguta.db.children will be
 // created. The directory must already exist.
 func NewDGUTAWriter(outputDir string) (db.DGUTAWriter, error) {
-	fi, err := os.Stat(outputDir)
-	if err != nil {
-		return nil, ErrOutputDirMissing
-	}
-	if !fi.IsDir() {
+	if err := validateOutputDir(outputDir); err != nil {
 		return nil, ErrOutputDirMissing
 	}
 
@@ -271,6 +286,7 @@ func NewDGUTAWriter(outputDir string) (db.DGUTAWriter, error) {
 	childrenDB, err := openBoltWritable(childrenPath, childrenBucketName)
 	if err != nil {
 		_ = dgutaDB.Close()
+
 		return nil, err
 	}
 
@@ -283,6 +299,17 @@ func NewDGUTAWriter(outputDir string) (db.DGUTAWriter, error) {
 		writeBatch:  make([]db.RecordDGUTA, 0, 1),
 		metaDone:    false,
 	}, nil
+}
+
+func validateOutputDir(outputDir string) error {
+	fi, err := os.Stat(outputDir)
+	if err != nil {
+		return err
+	}
+	if !fi.IsDir() {
+		return ErrOutputDirMissing
+	}
+	return nil
 }
 
 func filepathJoin(dir, base string) string {
@@ -307,11 +334,14 @@ func openBoltWritable(path, bucket string) (*bolt.DB, error) {
 		if _, errc := tx.CreateBucketIfNotExists([]byte(bucket)); errc != nil {
 			return errc
 		}
+
 		_, errc := tx.CreateBucketIfNotExists([]byte(metaBucketName))
+
 		return errc
 	})
 	if err != nil {
 		_ = db.Close()
+
 		return nil, err
 	}
 

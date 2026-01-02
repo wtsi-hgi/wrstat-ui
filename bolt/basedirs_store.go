@@ -13,6 +13,8 @@ import (
 	berrors "go.etcd.io/bbolt/errors"
 )
 
+var errRequiredBucketsMissing = errors.New("required buckets missing")
+
 type baseDirsStore struct {
 	db *bolt.DB
 	ch codec.Handle
@@ -21,8 +23,6 @@ type baseDirsStore struct {
 	mountPath string
 	updatedAt time.Time
 }
-
-var errRequiredBucketsMissing = errors.New("required buckets missing")
 
 func (s *baseDirsStore) SetMountPath(mountPath string) {
 	s.mountPath = mountPath
@@ -34,11 +34,13 @@ func (s *baseDirsStore) SetUpdatedAt(updatedAt time.Time) {
 
 func (s *baseDirsStore) Reset() error {
 	if s.db == nil {
-		return fmt.Errorf("nil db") //nolint:err113
+		return errors.New("nil db") //nolint:err113
 	}
+
 	if s.mountPath == "" || s.updatedAt.IsZero() {
 		return ErrMetadataNotSet
 	}
+
 	if !strings.HasPrefix(s.mountPath, "/") || !strings.HasSuffix(s.mountPath, "/") {
 		return ErrInvalidMountPath
 	}
@@ -49,6 +51,7 @@ func (s *baseDirsStore) Reset() error {
 		if err := s.tx.Rollback(); err != nil {
 			return err
 		}
+
 		s.tx = nil
 	}
 
@@ -65,12 +68,15 @@ func (s *baseDirsStore) Reset() error {
 	if err := clearAndRecreateBucket(tx, basedirs.GroupUsageBucket); err != nil {
 		return errors.Join(err, tx.Rollback())
 	}
+
 	if err := clearAndRecreateBucket(tx, basedirs.UserUsageBucket); err != nil {
 		return errors.Join(err, tx.Rollback())
 	}
+
 	if err := clearAndRecreateBucket(tx, basedirs.GroupSubDirsBucket); err != nil {
 		return errors.Join(err, tx.Rollback())
 	}
+
 	if err := clearAndRecreateBucket(tx, basedirs.UserSubDirsBucket); err != nil {
 		return errors.Join(err, tx.Rollback())
 	}
@@ -84,13 +90,15 @@ func clearAndRecreateBucket(tx *bolt.Tx, name string) error {
 	if err := tx.DeleteBucket([]byte(name)); err != nil && !errors.Is(err, berrors.ErrBucketNotFound) {
 		return err
 	}
+
 	_, err := tx.CreateBucketIfNotExists([]byte(name))
+
 	return err
 }
 
 func (s *baseDirsStore) PutGroupUsage(u *basedirs.Usage) error {
 	if s.tx == nil {
-		return fmt.Errorf("store not reset") //nolint:err113
+		return errors.New("store not reset") //nolint:err113
 	}
 
 	b := s.tx.Bucket([]byte(basedirs.GroupUsageBucket))
@@ -103,7 +111,7 @@ func (s *baseDirsStore) PutGroupUsage(u *basedirs.Usage) error {
 
 func (s *baseDirsStore) PutUserUsage(u *basedirs.Usage) error {
 	if s.tx == nil {
-		return fmt.Errorf("store not reset") //nolint:err113
+		return errors.New("store not reset") //nolint:err113
 	}
 
 	b := s.tx.Bucket([]byte(basedirs.UserUsageBucket))
@@ -116,7 +124,7 @@ func (s *baseDirsStore) PutUserUsage(u *basedirs.Usage) error {
 
 func (s *baseDirsStore) PutGroupSubDirs(key basedirs.SubDirKey, subdirs []*basedirs.SubDir) error {
 	if s.tx == nil {
-		return fmt.Errorf("store not reset") //nolint:err113
+		return errors.New("store not reset") //nolint:err113
 	}
 
 	b := s.tx.Bucket([]byte(basedirs.GroupSubDirsBucket))
@@ -129,7 +137,7 @@ func (s *baseDirsStore) PutGroupSubDirs(key basedirs.SubDirKey, subdirs []*based
 
 func (s *baseDirsStore) PutUserSubDirs(key basedirs.SubDirKey, subdirs []*basedirs.SubDir) error {
 	if s.tx == nil {
-		return fmt.Errorf("store not reset") //nolint:err113
+		return errors.New("store not reset") //nolint:err113
 	}
 
 	b := s.tx.Bucket([]byte(basedirs.UserSubDirsBucket))
@@ -142,7 +150,7 @@ func (s *baseDirsStore) PutUserSubDirs(key basedirs.SubDirKey, subdirs []*basedi
 
 func (s *baseDirsStore) AppendGroupHistory(key basedirs.HistoryKey, point basedirs.History) error {
 	if s.tx == nil {
-		return fmt.Errorf("store not reset") //nolint:err113
+		return errors.New("store not reset") //nolint:err113
 	}
 
 	b := s.tx.Bucket([]byte(basedirs.GroupHistoricalBucket))
@@ -158,12 +166,14 @@ func (s *baseDirsStore) AppendGroupHistory(key basedirs.HistoryKey, point basedi
 		if err := s.decode(existing, &histories); err != nil {
 			return err
 		}
-		if len(histories) > 0 && !point.Date.After(histories[len(histories)-1].Date) {
-			return nil
-		}
+	}
+
+	if len(histories) > 0 && !point.Date.After(histories[len(histories)-1].Date) {
+		return nil
 	}
 
 	histories = append(histories, point)
+
 	return b.Put(k, s.encode(histories))
 }
 
@@ -173,10 +183,12 @@ func (s *baseDirsStore) Finalise() error {
 	}
 
 	gub := s.tx.Bucket([]byte(basedirs.GroupUsageBucket))
+
 	ghb := s.tx.Bucket([]byte(basedirs.GroupHistoricalBucket))
 	if gub == nil || ghb == nil {
 		rollbackErr := s.tx.Rollback()
 		s.tx = nil
+
 		return errors.Join(errRequiredBucketsMissing, rollbackErr)
 	}
 
@@ -211,11 +223,13 @@ func (s *baseDirsStore) Finalise() error {
 	}); err != nil {
 		rollbackErr := s.tx.Rollback()
 		s.tx = nil
+
 		return errors.Join(err, rollbackErr)
 	}
 
 	err := s.tx.Commit()
 	s.tx = nil
+
 	return err
 }
 
@@ -237,8 +251,10 @@ func (s *baseDirsStore) Close() error {
 
 func (s *baseDirsStore) encode(v any) []byte {
 	var out []byte
+
 	enc := codec.NewEncoderBytes(&out, s.ch)
 	enc.MustEncode(v)
+
 	return out
 }
 
@@ -259,6 +275,7 @@ func NewBaseDirsStore(dbPath, previousDBPath string) (basedirs.Store, error) {
 	if previousDBPath != "" {
 		if err := seedBasedirsHistory(db, previousDBPath); err != nil {
 			_ = db.Close()
+
 			return nil, err
 		}
 	}
@@ -284,24 +301,30 @@ func openBasedirsWritable(path string) (*bolt.DB, error) {
 		if _, errc := tx.CreateBucketIfNotExists([]byte(basedirs.GroupUsageBucket)); errc != nil {
 			return errc
 		}
+
 		if _, errc := tx.CreateBucketIfNotExists([]byte(basedirs.UserUsageBucket)); errc != nil {
 			return errc
 		}
+
 		if _, errc := tx.CreateBucketIfNotExists([]byte(basedirs.GroupSubDirsBucket)); errc != nil {
 			return errc
 		}
+
 		if _, errc := tx.CreateBucketIfNotExists([]byte(basedirs.UserSubDirsBucket)); errc != nil {
 			return errc
 		}
+
 		if _, errc := tx.CreateBucketIfNotExists([]byte(basedirs.GroupHistoricalBucket)); errc != nil {
 			return errc
 		}
 		// Meta bucket
 		_, errc := tx.CreateBucketIfNotExists([]byte(metaBucketName))
+
 		return errc
 	})
 	if err != nil {
 		_ = db.Close()
+
 		return nil, err
 	}
 
@@ -324,7 +347,7 @@ func seedBasedirsHistory(dest *bolt.DB, previousDBPath string) error {
 		return dest.Update(func(dtx *bolt.Tx) error {
 			db := dtx.Bucket([]byte(basedirs.GroupHistoricalBucket))
 			if db == nil {
-				return fmt.Errorf("dest history bucket missing") //nolint:err113
+				return errors.New("dest history bucket missing") //nolint:err113
 			}
 
 			return pb.ForEach(func(k, v []byte) error {

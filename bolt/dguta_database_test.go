@@ -20,6 +20,7 @@ func TestDGUTADatabase(t *testing.T) {
 		So(err, ShouldBeNil)
 
 		updatedAt := time.Unix(999, 0)
+
 		w.SetMountPath("/a/")
 		w.SetUpdatedAt(updatedAt)
 
@@ -35,6 +36,7 @@ func TestDGUTADatabase(t *testing.T) {
 
 		database, err := openDGUTADatabase([]string{dgutaDir})
 		So(err, ShouldBeNil)
+
 		defer database.Close()
 
 		ds, err := database.DirInfo("/", nil)

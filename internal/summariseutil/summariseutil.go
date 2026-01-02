@@ -97,12 +97,14 @@ func newBasedirsCreator(
 	if len(mps) > 0 {
 		storeMountPath = basedirs.ValidateMountPoints(mps)[0]
 	}
+
 	store.SetMountPath(storeMountPath)
 	store.SetUpdatedAt(modtime)
 
 	bd, err := basedirs.NewCreator(store, quotas)
 	if err != nil {
 		_ = store.Close()
+
 		return nil, nil, nil, fmt.Errorf("failed to create new basedirs creator: %w", err)
 	}
 

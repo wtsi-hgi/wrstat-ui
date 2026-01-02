@@ -154,7 +154,9 @@ func TestMulti(t *testing.T) {
 				if !defaultConfig.PathShouldOutput(p) {
 					return false
 				}
+
 				full := string(p.AppendTo(nil))
+
 				return strings.HasPrefix(full, mountPrefix)
 			}
 		}
@@ -164,7 +166,9 @@ func TestMulti(t *testing.T) {
 
 			store, errr := bolt.NewBaseDirsStore(dbPath, "")
 			So(errr, ShouldBeNil)
+
 			defer store.Close()
+
 			store.SetMountPath(mountPath)
 			store.SetUpdatedAt(modtime)
 

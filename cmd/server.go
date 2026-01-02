@@ -180,9 +180,9 @@ files. It will use the mtime of the file as the data creation time in reports.
 		if err != nil {
 			die("failed to load databases: %s", err)
 		}
-		if err := s.SetProvider(p); err != nil {
+		if setErr := s.SetProvider(p); setErr != nil {
 			_ = p.Close()
-			die("failed to set provider: %s", err)
+			die("failed to set provider: %s", setErr)
 		}
 
 		err = s.AddTreePage()

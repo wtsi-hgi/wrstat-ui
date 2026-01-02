@@ -34,10 +34,12 @@ type History struct {
 func DateQuotaFull(history []History) (time.Time, time.Time) {
 	var oldest History
 
+	const maxShortHistory = 2
+
 	switch len(history) {
 	case 0:
 		return time.Time{}, time.Time{}
-	case 1, 2:
+	case 1, maxShortHistory:
 		oldest = history[0]
 	default:
 		oldest = history[len(history)-3]

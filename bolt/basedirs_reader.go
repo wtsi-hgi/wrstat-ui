@@ -17,12 +17,14 @@ func countOnly(_ []byte, _ codec.Handle) int { return 0 }
 func countHistories(v []byte, ch codec.Handle) int {
 	var histories []basedirs.History
 	codec.NewDecoderBytes(v, ch).MustDecode(&histories)
+
 	return len(histories)
 }
 
 func countSubDirs(v []byte, ch codec.Handle) int {
 	var subdirs []*basedirs.SubDir
 	codec.NewDecoderBytes(v, ch).MustDecode(&subdirs)
+
 	return len(subdirs)
 }
 
@@ -51,7 +53,7 @@ func (r *baseDirsReader) loadMeta() error {
 			r.mountPath = string(mp)
 		}
 
-		if u := b.Get([]byte(metaKeyUpdatedAt)); len(u) == 8 {
+		if u := b.Get([]byte(metaKeyUpdatedAt)); len(u) == unixSecondsBytesLen {
 			raw := binary.LittleEndian.Uint64(u)
 			if raw <= uint64(math.MaxInt64) {
 				r.updatedAt = time.Unix(int64(raw), 0)
@@ -96,6 +98,7 @@ func (r *baseDirsReader) usage(bucketName string, age db.DirGUTAge) ([]*basedirs
 			}
 
 			out = append(out, u)
+
 			return nil
 		})
 	}); err != nil {
@@ -113,7 +116,12 @@ func (r *baseDirsReader) UserSubDirs(uid uint32, basedir string, age db.DirGUTAg
 	return r.subDirs(basedirs.UserSubDirsBucket, uid, basedir, age)
 }
 
-func (r *baseDirsReader) subDirs(bucketName string, id uint32, basedir string, age db.DirGUTAge) ([]*basedirs.SubDir, error) {
+func (r *baseDirsReader) subDirs(
+	bucketName string,
+	id uint32,
+	basedir string,
+	age db.DirGUTAge,
+) ([]*basedirs.SubDir, error) {
 	var out []*basedirs.SubDir
 
 	if err := r.db.View(func(tx *bolt.Tx) error {
@@ -142,6 +150,7 @@ func (r *baseDirsReader) History(gid uint32, path string) ([]basedirs.History, e
 	}
 
 	var history []basedirs.History
+
 	k := basedirsKeyName(gid, mp, db.DGUTAgeAll)
 
 	if err := r.db.View(func(tx *bolt.Tx) error {
@@ -189,6 +198,7 @@ func (r *baseDirsReader) MountTimestamps() (map[string]time.Time, error) {
 	}
 
 	mountKey := strings.ReplaceAll(r.mountPath, "/", "／")
+
 	return map[string]time.Time{mountKey: r.updatedAt}, nil
 }
 
@@ -216,6 +226,7 @@ func (r *baseDirsReader) Info() (*basedirs.DBInfo, error) {
 			countSubDirs,
 			r.ch,
 		)
+
 		return nil
 	}); err != nil {
 		return nil, err
@@ -224,7 +235,12 @@ func (r *baseDirsReader) Info() (*basedirs.DBInfo, error) {
 	return info, nil
 }
 
-func countFromFullBucketScan(tx *bolt.Tx, bucketName string, cb func(v []byte, ch codec.Handle) int, ch codec.Handle) (int, int) {
+func countFromFullBucketScan(
+	tx *bolt.Tx,
+	bucketName string,
+	cb func(v []byte, ch codec.Handle) int,
+	ch codec.Handle,
+) (int, int) {
 	b := tx.Bucket([]byte(bucketName))
 	if b == nil {
 		return 0, 0
@@ -239,6 +255,7 @@ func countFromFullBucketScan(tx *bolt.Tx, bucketName string, cb func(v []byte, c
 		}
 		count++
 		sliceLen += cb(v, ch)
+
 		return nil
 	}); err != nil {
 		return 0, 0
@@ -254,6 +271,7 @@ func (r *baseDirsReader) Close() error {
 
 	err := r.db.Close()
 	r.db = nil
+
 	return err
 }
 
@@ -285,6 +303,7 @@ func OpenBaseDirsReader(dbPath, ownersPath string) (basedirs.Reader, error) {
 	// Absent meta is allowed for legacy dbs; load errors are not.
 	if err := r.loadMeta(); err != nil {
 		_ = db.Close()
+
 		return nil, err
 	}
 

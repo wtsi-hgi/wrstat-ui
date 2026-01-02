@@ -245,6 +245,7 @@ func TestSummarise(t *testing.T) {
 
 		database, err := bolt.OpenDatabase(filepath.Join(outputA, "dguta.dbs"))
 		So(err, ShouldBeNil)
+
 		tree := db.NewTree(database)
 
 		childrenExist := tree.DirHasChildren("/", nil)

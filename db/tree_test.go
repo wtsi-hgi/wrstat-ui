@@ -57,6 +57,7 @@ func TestTree(t *testing.T) {
 
 		database, errc = bolt.OpenDatabase(paths[0])
 		So(errc, ShouldBeNil)
+
 		tree := db.NewTree(database)
 		So(tree, ShouldNotBeNil)
 		defer tree.Close()
@@ -327,6 +328,7 @@ func TestTree(t *testing.T) {
 
 		database, err := bolt.OpenDatabase(paths1[0], paths2[0])
 		So(err, ShouldBeNil)
+
 		tree := db.NewTree(database)
 		So(tree, ShouldNotBeNil)
 		defer tree.Close()
@@ -383,6 +385,7 @@ func fillTestDB(outputDir string, files *statsdata.Directory, updatedAt time.Tim
 	if err != nil {
 		return err
 	}
+
 	defer func() {
 		_ = w.Close()
 	}()

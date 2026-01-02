@@ -125,7 +125,9 @@ func TestClean(t *testing.T) {
 
 			r, err := bolt.OpenBaseDirsReader(dbPath, ownersPath)
 			So(err, ShouldBeNil)
+
 			defer r.Close()
+
 			r.SetMountPoints(mps)
 
 			h, err := r.History(0, "/lustre/scratch123/")

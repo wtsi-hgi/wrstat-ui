@@ -28,6 +28,7 @@ func (m *baseDirsHistoryMaintainer) CleanHistoryForMount(prefix string) error {
 		if b == nil {
 			return nil
 		}
+
 		c := b.Cursor()
 
 		for k, _ := c.First(); k != nil; k, _ = c.Next() {
@@ -50,6 +51,7 @@ func (m *baseDirsHistoryMaintainer) FindInvalidHistory(prefix string) ([]basedir
 	defer db.Close()
 
 	prefixB := []byte(prefix)
+
 	var out []basedirs.HistoryIssue
 
 	if err := db.View(func(tx *bolt.Tx) error {
@@ -57,11 +59,13 @@ func (m *baseDirsHistoryMaintainer) FindInvalidHistory(prefix string) ([]basedir
 		if b == nil {
 			return nil
 		}
+
 		return b.ForEach(func(k, _ []byte) error {
 			if len(k) > idKeyLen && !bytes.HasPrefix(k[idKeyLen:], prefixB) {
 				gid := binary.LittleEndian.Uint32(k[:4])
 				out = append(out, basedirs.HistoryIssue{GID: gid, MountPath: string(k[idKeyLen:])})
 			}
+
 			return nil
 		})
 	}); err != nil {
@@ -77,5 +81,6 @@ func NewHistoryMaintainer(dbPath string) (basedirs.HistoryMaintainer, error) {
 	if dbPath == "" {
 		return nil, ErrInvalidConfig
 	}
+
 	return &baseDirsHistoryMaintainer{dbPath: dbPath}, nil
 }
