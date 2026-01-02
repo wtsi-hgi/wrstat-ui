@@ -3,21 +3,18 @@ package bolt
 import (
 	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
+	"github.com/wtsi-hgi/wrstat-ui/bolt/internal/discovery"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 	"github.com/wtsi-hgi/wrstat-ui/provider"
 )
-
-var validDatasetDir = regexp.MustCompile(`^[^.][^_]*_.`)
 
 var (
 	ErrInvalidDatasetDirName = errors.New("invalid dataset dir name")
@@ -34,32 +31,6 @@ type providerState struct {
 	basedirs basedirs.Reader
 
 	closers []func() error
-}
-
-type nameVersion struct {
-	name    string
-	version string
-}
-
-func addEntryToLatest(entry fs.DirEntry, latest map[string]nameVersion, toDelete []string) []string {
-	parts := strings.SplitN(entry.Name(), "_", splitN)
-	if len(parts) != splitN {
-		return toDelete
-	}
-
-	key, version := parts[1], parts[0]
-
-	if prev, ok := latest[key]; ok {
-		if prev.version > version {
-			return append(toDelete, entry.Name())
-		}
-
-		toDelete = append(toDelete, prev.name)
-	}
-
-	latest[key] = nameVersion{entry.Name(), version}
-
-	return toDelete
 }
 
 type timestampOverrideReader struct {
@@ -243,7 +214,7 @@ func closeState(st *providerState) error {
 }
 
 func (p *boltProvider) loadOnce() (*providerState, error) {
-	datasetDirs, toDelete, err := findDatasetDirs(p.cfg.BasePath, p.cfg.DGUTADBName, p.cfg.BaseDirDBName)
+	datasetDirs, toDelete, err := discovery.FindDatasetDirs(p.cfg.BasePath, p.cfg.DGUTADBName, p.cfg.BaseDirDBName)
 	if err != nil {
 		return nil, err
 	}
@@ -253,34 +224,6 @@ func (p *boltProvider) loadOnce() (*providerState, error) {
 	}
 
 	return p.createStateFromDatasets(datasetDirs, toDelete)
-}
-
-func findDatasetDirs(basepath string, required ...string) ([]string, []string, error) {
-	entries, err := os.ReadDir(basepath)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	latest := make(map[string]nameVersion)
-
-	var toDelete []string
-
-	for _, entry := range entries {
-		if !isValidDatasetDir(entry, basepath, required...) {
-			continue
-		}
-
-		toDelete = addEntryToLatest(entry, latest, toDelete)
-	}
-
-	dirs := make([]string, 0, len(latest))
-	for _, v := range latest {
-		dirs = append(dirs, filepath.Join(basepath, v.name))
-	}
-
-	slices.Sort(dirs)
-
-	return dirs, toDelete, nil
 }
 
 func (p *boltProvider) createStateFromDatasets(datasetDirs, toDelete []string) (*providerState, error) {
@@ -456,19 +399,4 @@ func validateConfig(cfg Config) error {
 	}
 
 	return nil
-}
-
-func isValidDatasetDir(entry fs.DirEntry, basepath string, required ...string) bool {
-	name := entry.Name()
-	if !entry.IsDir() || !validDatasetDir.MatchString(name) {
-		return false
-	}
-
-	for _, req := range required {
-		if _, err := os.Stat(filepath.Join(basepath, name, req)); err != nil {
-			return false
-		}
-	}
-
-	return true
 }
