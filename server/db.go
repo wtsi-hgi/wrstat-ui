@@ -46,6 +46,16 @@ const (
 
 var validDBDir = regexp.MustCompile(`^[^.][^_]*_.`)
 
+func addBaseToDelete(basepath string, toDelete []string) []string {
+	t := make([]string, len(toDelete))
+
+	for n, path := range toDelete {
+		t[n] = filepath.Join(basepath, path)
+	}
+
+	return t
+}
+
 type nameVersion struct {
 	name    string
 	version string
@@ -132,13 +142,6 @@ func FindDBDirs(basepath string, required ...string) ([]string, error) {
 	return dbPaths, err
 }
 
-func joinPaths(dbPaths, toDelete []string, dgutaDBName, basedirDBName string) ([]string, []string, []string, []string) {
-	dirgutaPaths, baseDirPaths := JoinDBPaths(dbPaths, dgutaDBName, basedirDBName)
-	removeDirgutaPaths, removeBaseDirPaths := JoinDBPaths(toDelete, dgutaDBName, basedirDBName)
-
-	return dirgutaPaths, baseDirPaths, removeDirgutaPaths, removeBaseDirPaths
-}
-
 // JoinDBPaths produces a list of a dgutaDB paths and basedirDB paths from the
 // provided base dbPaths and the basenames of the DBs.
 func JoinDBPaths(dbPaths []string, dgutaDBName, basedirDBName string) ([]string, []string) {
@@ -151,36 +154,6 @@ func JoinDBPaths(dbPaths []string, dgutaDBName, basedirDBName string) ([]string,
 	}
 
 	return dirgutaPaths, baseDirPaths
-}
-
-func addBaseToDelete(basepath string, toDelete []string) []string {
-	t := make([]string, len(toDelete))
-
-	for n, path := range toDelete {
-		t[n] = filepath.Join(basepath, path)
-	}
-
-	return t
-}
-
-func removeAll(baseDirectory string, toDelete []string) error {
-	for _, path := range toDelete {
-		// Create marker to avoid the watch subcommand re-running a summarise.
-		f, err := os.Create(filepath.Join(baseDirectory, "."+path))
-		if err != nil {
-			return err
-		}
-
-		if err := f.Close(); err != nil {
-			return err
-		}
-
-		if err := os.RemoveAll(filepath.Join(baseDirectory, path)); err != nil {
-			return err
-		}
-	}
-
-	return nil
 }
 
 // SetProvider wires a backend bundle into the server.

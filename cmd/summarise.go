@@ -246,6 +246,8 @@ func setArgsDefaults() {
 
 func setSummarisers(s *summary.Summariser, mountpoints string, //nolint:gocognit,gocyclo
 	modtime time.Time) (func() error, error) {
+	var closers []func() error
+
 	if userGroup != "" {
 		if err := addUserGroupSummariser(s, userGroup); err != nil {
 			return nil, err
@@ -259,17 +261,40 @@ func setSummarisers(s *summary.Summariser, mountpoints string, //nolint:gocognit
 	}
 
 	if basedirsDB != "" {
-		if err := addBasedirsSummariser(s, basedirsDB, basedirsHistoryDB,
-			quotaPath, basedirsConfig, mountpoints, modtime); err != nil {
+		c, err := addBasedirsSummariser(s, basedirsDB, basedirsHistoryDB,
+			quotaPath, basedirsConfig, mountpoints, modtime)
+		if err != nil {
 			return nil, err
+		}
+		if c != nil {
+			closers = append(closers, c)
 		}
 	}
 
 	if dirgutaDB != "" {
-		return addDirgutaSummariser(s, dirgutaDB)
+		c, err := addDirgutaSummariser(s, dirgutaDB)
+		if err != nil {
+			return nil, err
+		}
+		if c != nil {
+			closers = append(closers, c)
+		}
 	}
 
-	return nil, nil //nolint:nilnil
+	if len(closers) == 0 {
+		return nil, nil //nolint:nilnil
+	}
+
+	return func() error {
+		var err error
+		for _, c := range closers {
+			if c == nil {
+				continue
+			}
+			err = errors.Join(err, c())
+		}
+		return err
+	}, nil
 }
 
 func addUserGroupSummariser(s *summary.Summariser, userGroup string) error {
@@ -295,7 +320,7 @@ func addGroupUserSummariser(s *summary.Summariser, groupUser string) error {
 }
 
 func addBasedirsSummariser(s *summary.Summariser, basedirsDB, basedirsHistoryDB,
-	quotaPath, basedirsConfig, mountpoints string, modtime time.Time) error {
+	quotaPath, basedirsConfig, mountpoints string, modtime time.Time) (func() error, error) {
 	return summariseutil.AddBasedirsSummariser(
 		s,
 		basedirsDB,

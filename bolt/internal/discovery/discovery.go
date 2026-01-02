@@ -22,12 +22,6 @@ type nameVersion struct {
 	version int64
 }
 
-// FindDatasetDirs returns the latest dataset directory for each mount key, and
-// a list of older dataset directories that may be removed.
-func FindDatasetDirs(basepath string, required ...string) ([]string, []string, error) {
-	return findDBDirs(basepath, required...)
-}
-
 func findDBDirs(basepath string, required ...string) ([]string, []string, error) {
 	entries, err := os.ReadDir(basepath)
 	if err != nil {
@@ -98,4 +92,10 @@ func addEntryToMap(entry fs.DirEntry, latest map[string]nameVersion, toDelete []
 	}
 
 	return toDelete
+}
+
+// FindDatasetDirs returns the latest dataset directory for each mount key, and
+// a list of older dataset directories that may be removed.
+func FindDatasetDirs(basepath string, required ...string) ([]string, []string, error) {
+	return findDBDirs(basepath, required...)
 }

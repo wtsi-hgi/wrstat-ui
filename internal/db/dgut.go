@@ -29,6 +29,7 @@
 package internaldb
 
 import (
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -37,6 +38,7 @@ import (
 	"time"
 
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
+	"github.com/wtsi-hgi/wrstat-ui/bolt"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 	internaldata "github.com/wtsi-hgi/wrstat-ui/internal/data"
 	"github.com/wtsi-hgi/wrstat-ui/internal/fs"
@@ -94,13 +96,24 @@ func CreateExampleDBsCustomIDsWithDir(t *testing.T, dir, uid, gidA, gidB string,
 		return err
 	}
 
-	err = addBasedirsSummariser(t, s, dir)
+	bdClose, err := addBasedirsSummariser(t, s, dir)
 	if err != nil {
-		return err
+		return errors.Join(err, fn())
 	}
 
 	if err := s.Summarise(); err != nil {
-		return err
+		closeErr := fn()
+		if bdClose != nil {
+			closeErr = errors.Join(closeErr, bdClose())
+		}
+
+		return errors.Join(err, closeErr)
+	}
+
+	if bdClose != nil {
+		if err := bdClose(); err != nil {
+			return errors.Join(err, fn())
+		}
 	}
 
 	return fn()
@@ -148,14 +161,14 @@ func addDirgutaSummariser(s *summary.Summariser, path string) (func() error, err
 	return d.Close, nil
 }
 
-func addBasedirsSummariser(t *testing.T, s *summary.Summariser, path string) error {
+func addBasedirsSummariser(t *testing.T, s *summary.Summariser, path string) (func() error, error) {
 	t.Helper()
 
 	csvPath := internaldata.CreateQuotasCSV(t, internaldata.ExampleQuotaCSV)
 
 	quotas, err := basedirs.ParseQuotas(csvPath)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	dbPath := filepath.Join(path, "basedir.db")
@@ -171,9 +184,15 @@ func addBasedirsSummariser(t *testing.T, s *summary.Summariser, path string) err
 		},
 	}
 
-	bd, err := basedirs.NewCreator(dbPath, quotas)
+	store, err := bolt.NewBaseDirsStore(dbPath, "")
 	if err != nil {
-		return err
+		return nil, err
+	}
+
+	bd, err := basedirs.NewCreator(store, quotas)
+	if err != nil {
+		_ = store.Close()
+		return nil, err
 	}
 
 	bd.SetMountPoints([]string{
@@ -183,5 +202,5 @@ func addBasedirsSummariser(t *testing.T, s *summary.Summariser, path string) err
 
 	s.AddDirectoryOperation(sbasedirs.NewBaseDirs(config.PathShouldOutput, bd))
 
-	return nil
+	return store.Close, nil
 }

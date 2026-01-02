@@ -44,7 +44,7 @@ func (m multiBaseDirsReader) UserSubDirs(uid uint32, basedir string, age db.DirG
 }
 
 func (m multiBaseDirsReader) subDirs(fn func(basedirs.Reader) ([]*basedirs.SubDir, error)) ([]*basedirs.SubDir, error) {
-	var lastNoSuch error
+	var sawNoSuch bool
 
 	for _, r := range m {
 		vals, err := fn(r)
@@ -52,17 +52,19 @@ func (m multiBaseDirsReader) subDirs(fn func(basedirs.Reader) ([]*basedirs.SubDi
 			return vals, nil
 		}
 		if errors.Is(err, basedirs.ErrNoSuchUserOrGroup) {
-			lastNoSuch = err
+			sawNoSuch = true
 			continue
 		}
 		return nil, err
 	}
 
-	if lastNoSuch != nil {
-		return nil, basedirs.ErrNoSuchUserOrGroup
+	// If none of the sources have an entry for this (id, basedir, age), treat it
+	// as "not found" rather than an error.
+	if sawNoSuch {
+		return nil, nil
 	}
 
-	return nil, basedirs.ErrNoSuchUserOrGroup
+	return nil, nil
 }
 
 func (m multiBaseDirsReader) History(gid uint32, path string) ([]basedirs.History, error) {

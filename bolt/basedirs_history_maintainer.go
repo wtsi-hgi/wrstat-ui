@@ -8,17 +8,10 @@ import (
 	bolt "go.etcd.io/bbolt"
 )
 
+const idKeyLen = 4 + 1
+
 type baseDirsHistoryMaintainer struct {
 	dbPath string
-}
-
-// NewHistoryMaintainer returns a basedirs.HistoryMaintainer backed by the
-// Bolt database at dbPath.
-func NewHistoryMaintainer(dbPath string) (basedirs.HistoryMaintainer, error) {
-	if dbPath == "" {
-		return nil, ErrInvalidConfig
-	}
-	return &baseDirsHistoryMaintainer{dbPath: dbPath}, nil
 }
 
 func (m *baseDirsHistoryMaintainer) CleanHistoryForMount(prefix string) error {
@@ -78,4 +71,11 @@ func (m *baseDirsHistoryMaintainer) FindInvalidHistory(prefix string) ([]basedir
 	return out, nil
 }
 
-const idKeyLen = 4 + 1
+// NewHistoryMaintainer returns a basedirs.HistoryMaintainer backed by the
+// Bolt database at dbPath.
+func NewHistoryMaintainer(dbPath string) (basedirs.HistoryMaintainer, error) {
+	if dbPath == "" {
+		return nil, ErrInvalidConfig
+	}
+	return &baseDirsHistoryMaintainer{dbPath: dbPath}, nil
+}

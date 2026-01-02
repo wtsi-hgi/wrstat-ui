@@ -13,8 +13,6 @@ import (
 	berrors "go.etcd.io/bbolt/errors"
 )
 
-const basedirsDBBasename = "basedirs.db"
-
 type baseDirsStore struct {
 	db *bolt.DB
 	ch codec.Handle
@@ -24,28 +22,7 @@ type baseDirsStore struct {
 	updatedAt time.Time
 }
 
-// NewBaseDirsStore creates a basedirs.Store backed by Bolt.
-// dbPath is the path to the new basedirs.db file.
-// previousDBPath, if non-empty, is the path to a previous basedirs.db from
-// which history will be seeded.
-func NewBaseDirsStore(dbPath, previousDBPath string) (basedirs.Store, error) {
-	db, err := openBasedirsWritable(dbPath)
-	if err != nil {
-		return nil, err
-	}
-
-	if previousDBPath != "" {
-		if err := seedBasedirsHistory(db, previousDBPath); err != nil {
-			_ = db.Close()
-			return nil, err
-		}
-	}
-
-	return &baseDirsStore{
-		db: db,
-		ch: new(codec.BincHandle),
-	}, nil
-}
+var errRequiredBucketsMissing = errors.New("required buckets missing")
 
 func (s *baseDirsStore) SetMountPath(mountPath string) {
 	s.mountPath = mountPath
@@ -66,13 +43,17 @@ func (s *baseDirsStore) Reset() error {
 		return ErrInvalidMountPath
 	}
 
-	if err := persistMeta(s.db, s.mountPath, s.updatedAt); err != nil {
-		return err
+	// Ensure any previous write transaction is closed before taking the writer
+	// lock again (persistMeta uses its own Update transaction).
+	if s.tx != nil {
+		if err := s.tx.Rollback(); err != nil {
+			return err
+		}
+		s.tx = nil
 	}
 
-	if s.tx != nil {
-		_ = s.tx.Rollback()
-		s.tx = nil
+	if err := persistMeta(s.db, s.mountPath, s.updatedAt); err != nil {
+		return err
 	}
 
 	tx, err := s.db.Begin(true)
@@ -82,25 +63,29 @@ func (s *baseDirsStore) Reset() error {
 
 	// Replace usage/subdir buckets; keep history.
 	if err := clearAndRecreateBucket(tx, basedirs.GroupUsageBucket); err != nil {
-		_ = tx.Rollback()
-		return err
+		return errors.Join(err, tx.Rollback())
 	}
 	if err := clearAndRecreateBucket(tx, basedirs.UserUsageBucket); err != nil {
-		_ = tx.Rollback()
-		return err
+		return errors.Join(err, tx.Rollback())
 	}
 	if err := clearAndRecreateBucket(tx, basedirs.GroupSubDirsBucket); err != nil {
-		_ = tx.Rollback()
-		return err
+		return errors.Join(err, tx.Rollback())
 	}
 	if err := clearAndRecreateBucket(tx, basedirs.UserSubDirsBucket); err != nil {
-		_ = tx.Rollback()
-		return err
+		return errors.Join(err, tx.Rollback())
 	}
 
 	s.tx = tx
 
 	return nil
+}
+
+func clearAndRecreateBucket(tx *bolt.Tx, name string) error {
+	if err := tx.DeleteBucket([]byte(name)); err != nil && !errors.Is(err, berrors.ErrBucketNotFound) {
+		return err
+	}
+	_, err := tx.CreateBucketIfNotExists([]byte(name))
+	return err
 }
 
 func (s *baseDirsStore) PutGroupUsage(u *basedirs.Usage) error {
@@ -182,7 +167,7 @@ func (s *baseDirsStore) AppendGroupHistory(key basedirs.HistoryKey, point basedi
 	return b.Put(k, s.encode(histories))
 }
 
-func (s *baseDirsStore) Finalize() error {
+func (s *baseDirsStore) Finalise() error {
 	if s.tx == nil {
 		return nil
 	}
@@ -190,9 +175,9 @@ func (s *baseDirsStore) Finalize() error {
 	gub := s.tx.Bucket([]byte(basedirs.GroupUsageBucket))
 	ghb := s.tx.Bucket([]byte(basedirs.GroupHistoricalBucket))
 	if gub == nil || ghb == nil {
-		_ = s.tx.Rollback()
+		rollbackErr := s.tx.Rollback()
 		s.tx = nil
-		return fmt.Errorf("required buckets missing") //nolint:err113
+		return errors.Join(errRequiredBucketsMissing, rollbackErr)
 	}
 
 	// Precompute DateNoSpace/DateNoFiles for group usage at age=all.
@@ -224,9 +209,9 @@ func (s *baseDirsStore) Finalize() error {
 
 		return gub.Put(k, s.encode(gu))
 	}); err != nil {
-		_ = s.tx.Rollback()
+		rollbackErr := s.tx.Rollback()
 		s.tx = nil
-		return err
+		return errors.Join(err, rollbackErr)
 	}
 
 	err := s.tx.Commit()
@@ -259,6 +244,29 @@ func (s *baseDirsStore) encode(v any) []byte {
 
 func (s *baseDirsStore) decode(encoded []byte, v any) error {
 	return codec.NewDecoderBytes(encoded, s.ch).Decode(v)
+}
+
+// NewBaseDirsStore creates a basedirs.Store backed by Bolt.
+// dbPath is the path to the new basedirs.db file.
+// previousDBPath, if non-empty, is the path to a previous basedirs.db from
+// which history will be seeded.
+func NewBaseDirsStore(dbPath, previousDBPath string) (basedirs.Store, error) {
+	db, err := openBasedirsWritable(dbPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if previousDBPath != "" {
+		if err := seedBasedirsHistory(db, previousDBPath); err != nil {
+			_ = db.Close()
+			return nil, err
+		}
+	}
+
+	return &baseDirsStore{
+		db: db,
+		ch: new(codec.BincHandle),
+	}, nil
 }
 
 func openBasedirsWritable(path string) (*bolt.DB, error) {
@@ -298,14 +306,6 @@ func openBasedirsWritable(path string) (*bolt.DB, error) {
 	}
 
 	return db, nil
-}
-
-func clearAndRecreateBucket(tx *bolt.Tx, name string) error {
-	if err := tx.DeleteBucket([]byte(name)); err != nil && !errors.Is(err, berrors.ErrBucketNotFound) {
-		return err
-	}
-	_, err := tx.CreateBucketIfNotExists([]byte(name))
-	return err
 }
 
 func seedBasedirsHistory(dest *bolt.DB, previousDBPath string) error {

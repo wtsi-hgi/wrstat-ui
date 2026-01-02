@@ -33,7 +33,7 @@ func (b *BaseDirs) Output(users, groups IDAgeDirs) error {
 		return err
 	}
 
-	return b.store.Finalize()
+	return b.store.Finalise()
 }
 
 func (b *BaseDirs) storeGroupUsage(gidBase IDAgeDirs) error {
@@ -88,8 +88,6 @@ func (b *BaseDirs) storeUserUsage(uidBase IDAgeDirs) error {
 	return nil
 }
 
-type gidMountsMap map[uint32]map[string]db.DirSummary
-
 func (b *BaseDirs) storeGroupHistories(gidBase IDAgeDirs) error {
 	gidMounts := b.gidsToMountpoints(gidBase)
 
@@ -114,6 +112,8 @@ func (b *BaseDirs) storeGroupHistories(gidBase IDAgeDirs) error {
 
 	return nil
 }
+
+type gidMountsMap map[uint32]map[string]db.DirSummary
 
 func (b *BaseDirs) gidsToMountpoints(gidBase IDAgeDirs) gidMountsMap {
 	gidMounts := make(gidMountsMap, len(gidBase))

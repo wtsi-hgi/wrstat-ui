@@ -2,6 +2,7 @@ package bolt
 
 import (
 	"encoding/binary"
+	"math"
 	"strings"
 	"time"
 
@@ -10,6 +11,20 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/db"
 	bolt "go.etcd.io/bbolt"
 )
+
+func countOnly(_ []byte, _ codec.Handle) int { return 0 }
+
+func countHistories(v []byte, ch codec.Handle) int {
+	var histories []basedirs.History
+	codec.NewDecoderBytes(v, ch).MustDecode(&histories)
+	return len(histories)
+}
+
+func countSubDirs(v []byte, ch codec.Handle) int {
+	var subdirs []*basedirs.SubDir
+	codec.NewDecoderBytes(v, ch).MustDecode(&subdirs)
+	return len(subdirs)
+}
 
 type baseDirsReader struct {
 	db *bolt.DB
@@ -25,37 +40,6 @@ type baseDirsReader struct {
 	userCache  *basedirs.UserCache
 }
 
-// OpenBaseDirsReader opens a basedirs.db file for reading.
-// ownersPath is the owners CSV path used to populate Usage.Owner.
-func OpenBaseDirsReader(dbPath, ownersPath string) (basedirs.Reader, error) {
-	owners, err := basedirs.ParseOwners(ownersPath)
-	if err != nil {
-		return nil, err
-	}
-
-	db, err := openBoltReadOnly(dbPath)
-	if err != nil {
-		return nil, err
-	}
-
-	r := &baseDirsReader{
-		db:         db,
-		ch:         new(codec.BincHandle),
-		owners:     owners,
-		groupCache: basedirs.NewGroupCache(),
-		userCache:  basedirs.NewUserCache(),
-	}
-
-	// Best-effort load meta; absent meta is allowed for legacy dbs.
-	_ = r.loadMeta()
-
-	if r.mountPath != "" {
-		r.mountPoints = basedirs.ValidateMountPoints([]string{r.mountPath})
-	}
-
-	return r, nil
-}
-
 func (r *baseDirsReader) loadMeta() error {
 	return r.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte(metaBucketName))
@@ -68,8 +52,10 @@ func (r *baseDirsReader) loadMeta() error {
 		}
 
 		if u := b.Get([]byte(metaKeyUpdatedAt)); len(u) == 8 {
-			sec := int64(binary.LittleEndian.Uint64(u))
-			r.updatedAt = time.Unix(sec, 0)
+			raw := binary.LittleEndian.Uint64(u)
+			if raw <= uint64(math.MaxInt64) {
+				r.updatedAt = time.Unix(int64(raw), 0)
+			}
 		}
 
 		return nil
@@ -211,10 +197,25 @@ func (r *baseDirsReader) Info() (*basedirs.DBInfo, error) {
 
 	if err := r.db.View(func(tx *bolt.Tx) error {
 		info.GroupDirCombos, _ = countFromFullBucketScan(tx, basedirs.GroupUsageBucket, countOnly, r.ch)
-		info.GroupMountCombos, info.GroupHistories = countFromFullBucketScan(tx, basedirs.GroupHistoricalBucket, countHistories, r.ch)
-		info.GroupSubDirCombos, info.GroupSubDirs = countFromFullBucketScan(tx, basedirs.GroupSubDirsBucket, countSubDirs, r.ch)
+		info.GroupMountCombos, info.GroupHistories = countFromFullBucketScan(
+			tx,
+			basedirs.GroupHistoricalBucket,
+			countHistories,
+			r.ch,
+		)
+		info.GroupSubDirCombos, info.GroupSubDirs = countFromFullBucketScan(
+			tx,
+			basedirs.GroupSubDirsBucket,
+			countSubDirs,
+			r.ch,
+		)
 		info.UserDirCombos, _ = countFromFullBucketScan(tx, basedirs.UserUsageBucket, countOnly, r.ch)
-		info.UserSubDirCombos, info.UserSubDirs = countFromFullBucketScan(tx, basedirs.UserSubDirsBucket, countSubDirs, r.ch)
+		info.UserSubDirCombos, info.UserSubDirs = countFromFullBucketScan(
+			tx,
+			basedirs.UserSubDirsBucket,
+			countSubDirs,
+			r.ch,
+		)
 		return nil
 	}); err != nil {
 		return nil, err
@@ -232,36 +233,25 @@ func countFromFullBucketScan(tx *bolt.Tx, bucketName string, cb func(v []byte, c
 	count := 0
 	sliceLen := 0
 
-	_ = b.ForEach(func(k, v []byte) error {
+	if err := b.ForEach(func(k, v []byte) error {
 		if !basedirsKeyAgeIsAll(k) {
 			return nil
 		}
 		count++
 		sliceLen += cb(v, ch)
 		return nil
-	})
+	}); err != nil {
+		return 0, 0
+	}
 
 	return count, sliceLen
-}
-
-func countOnly(_ []byte, _ codec.Handle) int { return 0 }
-
-func countHistories(v []byte, ch codec.Handle) int {
-	var histories []basedirs.History
-	codec.NewDecoderBytes(v, ch).MustDecode(&histories)
-	return len(histories)
-}
-
-func countSubDirs(v []byte, ch codec.Handle) int {
-	var subdirs []*basedirs.SubDir
-	codec.NewDecoderBytes(v, ch).MustDecode(&subdirs)
-	return len(subdirs)
 }
 
 func (r *baseDirsReader) Close() error {
 	if r.db == nil {
 		return nil
 	}
+
 	err := r.db.Close()
 	r.db = nil
 	return err
@@ -269,4 +259,38 @@ func (r *baseDirsReader) Close() error {
 
 func (r *baseDirsReader) decode(encoded []byte, v any) error {
 	return codec.NewDecoderBytes(encoded, r.ch).Decode(v)
+}
+
+// OpenBaseDirsReader opens a basedirs.db file for reading.
+// ownersPath is the owners CSV path used to populate Usage.Owner.
+func OpenBaseDirsReader(dbPath, ownersPath string) (basedirs.Reader, error) {
+	owners, err := basedirs.ParseOwners(ownersPath)
+	if err != nil {
+		return nil, err
+	}
+
+	db, err := openBoltReadOnly(dbPath)
+	if err != nil {
+		return nil, err
+	}
+
+	r := &baseDirsReader{
+		db:         db,
+		ch:         new(codec.BincHandle),
+		owners:     owners,
+		groupCache: basedirs.NewGroupCache(),
+		userCache:  basedirs.NewUserCache(),
+	}
+
+	// Absent meta is allowed for legacy dbs; load errors are not.
+	if err := r.loadMeta(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+
+	if r.mountPath != "" {
+		r.mountPoints = basedirs.ValidateMountPoints([]string{r.mountPath})
+	}
+
+	return r, nil
 }

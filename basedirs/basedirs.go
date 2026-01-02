@@ -48,7 +48,9 @@ type BaseDirs struct {
 func NewCreator(store Store, quotas *Quotas) (*BaseDirs, error) {
 	mp, err := GetMountPoints()
 	if err != nil {
-		return nil, err
+		// Some environments (eg. restricted CI containers) may not expose mount
+		// information. Fall back to a single root mountpoint.
+		mp = ValidateMountPoints([]string{"/"})
 	}
 
 	return &BaseDirs{

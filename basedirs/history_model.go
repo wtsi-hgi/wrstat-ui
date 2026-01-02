@@ -80,10 +80,10 @@ func calculateTrend(maxV uint64, latestTime, oldestTime time.Time, latestValue, 
 }
 
 // MountPoints is a list of mountpoint paths, sorted by descending length.
-// Paths are normalized to end with '/'.
+// Paths are normalised to end with '/'.
 type MountPoints []string
 
-// ValidateMountPoints normalizes mountpoints and sorts them for longest-prefix matching.
+// ValidateMountPoints normalises mountpoints and sorts them for longest-prefix matching.
 func ValidateMountPoints(mountpoints []string) MountPoints {
 	mps := make(MountPoints, len(mountpoints))
 

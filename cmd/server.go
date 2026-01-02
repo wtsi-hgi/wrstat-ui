@@ -37,6 +37,7 @@ import (
 
 	"github.com/inconshreveable/log15"
 	"github.com/spf13/cobra"
+	"github.com/wtsi-hgi/wrstat-ui/bolt"
 	"github.com/wtsi-hgi/wrstat-ui/internal/summariseutil"
 	"github.com/wtsi-hgi/wrstat-ui/server"
 )
@@ -167,10 +168,21 @@ files. It will use the mtime of the file as the data creation time in reports.
 		}
 
 		info("opening databases, please wait...")
-		err = s.EnableDBReloading(args[0], dgutaDBsSuffix, basedirBasename,
-			ownersPath, sentinelPollFrequencty, true, mountpoints...)
+		p, err := bolt.OpenProvider(bolt.Config{
+			BasePath:       args[0],
+			DGUTADBName:    dgutaDBsSuffix,
+			BaseDirDBName:  basedirBasename,
+			OwnersCSVPath:  ownersPath,
+			MountPoints:    mountpoints,
+			PollInterval:   sentinelPollFrequencty,
+			RemoveOldPaths: true,
+		})
 		if err != nil {
 			die("failed to load databases: %s", err)
+		}
+		if err := s.SetProvider(p); err != nil {
+			_ = p.Close()
+			die("failed to set provider: %s", err)
 		}
 
 		err = s.AddTreePage()

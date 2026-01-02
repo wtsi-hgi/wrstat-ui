@@ -12,6 +12,7 @@ import (
 
 	"github.com/klauspost/pgzip"
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
+	"github.com/wtsi-hgi/wrstat-ui/bolt"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 	"github.com/wtsi-hgi/wrstat-ui/internal/split"
 	"github.com/wtsi-hgi/wrstat-ui/internal/summariseutil"
@@ -236,7 +237,7 @@ func addSummarisers(
 	modtime time.Time,
 	opts ImportOptions,
 ) (func() error, error) {
-	if err := summariseutil.AddBasedirsSummariser(
+	bdClose, err := summariseutil.AddBasedirsSummariser(
 		ss,
 		targets.basedirsDBPath,
 		"",
@@ -244,11 +245,29 @@ func addSummarisers(
 		opts.Config,
 		opts.Mounts,
 		modtime,
-	); err != nil {
+	)
+	if err != nil {
 		return nil, err
 	}
 
-	return summariseutil.AddDirgutaSummariser(ss, targets.dgutaDBDir)
+	dgClose, err := summariseutil.AddDirgutaSummariser(ss, targets.dgutaDBDir)
+	if err != nil {
+		if bdClose != nil {
+			return nil, errors.Join(err, bdClose())
+		}
+		return nil, err
+	}
+
+	return func() error {
+		var err error
+		if bdClose != nil {
+			err = errors.Join(err, bdClose())
+		}
+		if dgClose != nil {
+			err = errors.Join(err, dgClose())
+		}
+		return err
+	}, nil
 }
 
 // Query runs the in-process query timing harness against Bolt DBs discovered
@@ -350,11 +369,15 @@ func normaliseDirPath(dir string) string {
 }
 
 func pickRepresentativeDir(datasetDir, mountPath string) string {
-	tree, err := db.NewTree(filepath.Join(datasetDir, dgutaDBsSuffix))
+	database, err := bolt.OpenDatabase(filepath.Join(datasetDir, dgutaDBsSuffix))
 	if err != nil {
 		return mountPath
 	}
+	defer func() {
+		_ = database.Close()
+	}()
 
+	tree := db.NewTree(database)
 	defer tree.Close()
 
 	filter := &db.Filter{Age: db.DGUTAgeAll}
@@ -406,16 +429,18 @@ func pickLargestChild(children []*db.DirSummary) *db.DirSummary {
 	return best
 }
 
-func openQueryDBs(datasetDir string, ownersPath string) (*db.Tree, basedirs.MultiReader, func() error, error) {
+func openQueryDBs(datasetDir string, ownersPath string) (*db.Tree, basedirs.Reader, func() error, error) {
 	dgutaPath := filepath.Join(datasetDir, dgutaDBsSuffix)
 	basedirsPath := filepath.Join(datasetDir, basedirsBasename)
 
-	tree, err := db.NewTree(dgutaPath)
+	database, err := bolt.OpenDatabase(dgutaPath)
 	if err != nil {
 		return nil, nil, nil, err
 	}
 
-	mr, err := basedirs.OpenMulti(ownersPath, basedirsPath)
+	tree := db.NewTree(database)
+
+	mr, err := bolt.OpenMultiBaseDirsReader(ownersPath, basedirsPath)
 	if err != nil {
 		tree.Close()
 
@@ -432,7 +457,7 @@ func openQueryDBs(datasetDir string, ownersPath string) (*db.Tree, basedirs.Mult
 	return tree, mr, closeFn, nil
 }
 
-func prepareMultiReader(mr basedirs.MultiReader, mountsPath string) error {
+func prepareMultiReader(mr basedirs.Reader, mountsPath string) error {
 	if mountsPath == "" {
 		return prewarmBasedirsCaches(mr)
 	}
@@ -449,7 +474,7 @@ func prepareMultiReader(mr basedirs.MultiReader, mountsPath string) error {
 	return prewarmBasedirsCaches(mr)
 }
 
-func prewarmBasedirsCaches(mr basedirs.MultiReader) error {
+func prewarmBasedirsCaches(mr basedirs.Reader) error {
 	for _, age := range db.DirGUTAges {
 		if _, err := mr.GroupUsage(age); err != nil {
 			return err
@@ -475,7 +500,7 @@ func closeAndJoinErr(closeFn func() error, err error) error {
 	return err
 }
 
-func pickRepresentativeIDs(mr basedirs.MultiReader, fallbackDir string) (queryIDs, error) {
+func pickRepresentativeIDs(mr basedirs.Reader, fallbackDir string) (queryIDs, error) {
 	ids := queryIDs{groupBD: fallbackDir, userBD: fallbackDir}
 
 	groups, err := mr.GroupUsage(db.DGUTAgeAll)
@@ -748,7 +773,7 @@ type queryIDs struct {
 type queryContext struct {
 	datasetDirs []string
 	tree        *db.Tree
-	mr          basedirs.MultiReader
+	mr          basedirs.Reader
 	closeFn     func() error
 	queryDir    string
 	ids         queryIDs

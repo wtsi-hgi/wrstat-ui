@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
+	"github.com/wtsi-hgi/wrstat-ui/bolt"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 	"github.com/wtsi-hgi/wrstat-ui/summary"
 	sbasedirs "github.com/wtsi-hgi/wrstat-ui/summary/basedirs"
@@ -48,50 +49,61 @@ func AddBasedirsSummariser(
 	s *summary.Summariser,
 	basedirsDB, basedirsHistoryDB, quotaPath, basedirsConfig, mountpoints string,
 	modtime time.Time,
-) error {
-	bd, config, err := newBasedirsCreator(
+) (func() error, error) {
+	bd, config, closeFn, err := newBasedirsCreator(
 		basedirsDB,
+		basedirsHistoryDB,
 		quotaPath,
 		basedirsConfig,
 		mountpoints,
 		modtime,
 	)
 	if err != nil {
-		return err
-	}
-
-	if basedirsHistoryDB != "" {
-		if err := CopyHistory(bd, basedirsHistoryDB); err != nil {
-			return err
-		}
+		return nil, err
 	}
 
 	s.AddDirectoryOperation(sbasedirs.NewBaseDirs(config.PathShouldOutput, bd))
 
-	return nil
+	return closeFn, nil
 }
 
 func newBasedirsCreator(
-	basedirsDB, quotaPath, basedirsConfig, mountpoints string,
+	basedirsDB, basedirsHistoryDB, quotaPath, basedirsConfig, mountpoints string,
 	modtime time.Time,
-) (*basedirs.BaseDirs, basedirs.Config, error) {
+) (*basedirs.BaseDirs, basedirs.Config, func() error, error) {
 	quotas, config, err := ParseBasedirConfig(quotaPath, basedirsConfig)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	if err = os.Remove(basedirsDB); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return nil, nil, err
-	}
-
-	bd, err := basedirs.NewCreator(basedirsDB, quotas)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to create new basedirs creator: %w", err)
+		return nil, nil, nil, err
 	}
 
 	mps, err := ParseMountpointsFromFile(mountpoints)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
+	}
+
+	store, err := bolt.NewBaseDirsStore(basedirsDB, basedirsHistoryDB)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("failed to create basedirs store: %w", err)
+	}
+
+	// Pick a reasonable mount-path for this DB's metadata/precomputation.
+	// The underlying basedirs logic still uses the full mountpoint list for
+	// history attribution.
+	storeMountPath := "/"
+	if len(mps) > 0 {
+		storeMountPath = basedirs.ValidateMountPoints(mps)[0]
+	}
+	store.SetMountPath(storeMountPath)
+	store.SetUpdatedAt(modtime)
+
+	bd, err := basedirs.NewCreator(store, quotas)
+	if err != nil {
+		_ = store.Close()
+		return nil, nil, nil, fmt.Errorf("failed to create new basedirs creator: %w", err)
 	}
 
 	if len(mps) > 0 {
@@ -100,7 +112,7 @@ func newBasedirsCreator(
 
 	bd.SetModTime(modtime)
 
-	return bd, config, nil
+	return bd, config, store.Close, nil
 }
 
 // ParseBasedirConfig parses quotas and basedirs config files.
@@ -158,12 +170,3 @@ func ParseMountpointsFromFile(mountpoints string) ([]string, error) {
 }
 
 // CopyHistory copies history entries from an existing basedirs DB into bd.
-func CopyHistory(bd *basedirs.BaseDirs, basedirsHistoryDB string) error {
-	db, err := basedirs.OpenDBRO(basedirsHistoryDB)
-	if err != nil {
-		return err
-	}
-	defer db.Close()
-
-	return bd.CopyHistoryFrom(db)
-}

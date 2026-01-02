@@ -43,6 +43,7 @@ import (
 	"github.com/VertebrateResequencing/wr/jobqueue/scheduler"
 	. "github.com/smartystreets/goconvey/convey"
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
+	"github.com/wtsi-hgi/wrstat-ui/bolt"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 	internaldata "github.com/wtsi-hgi/wrstat-ui/internal/data"
 	"github.com/wtsi-hgi/wrstat-ui/internal/statsdata"
@@ -223,7 +224,7 @@ func TestSummarise(t *testing.T) {
 				internaluser.GetUsername(t, strconv.Itoa(int(uid))), internaluser.GetGroupName(t, strconv.Itoa(int(gid))),
 				internaluser.GetUsername(t, "102"), internaluser.GetGroupName(t, "77777"))))
 
-		bddb, err := basedirs.NewReader(filepath.Join(outputA, "basedirs.db"), ownersPath)
+		bddb, err := bolt.OpenBaseDirsReader(filepath.Join(outputA, "basedirs.db"), ownersPath)
 		So(err, ShouldBeNil)
 
 		bddb.SetMountPoints([]string{
@@ -242,8 +243,9 @@ func TestSummarise(t *testing.T) {
 
 		bddb.Close()
 
-		tree, err := db.NewTree(filepath.Join(outputA, "dguta.dbs"))
+		database, err := bolt.OpenDatabase(filepath.Join(outputA, "dguta.dbs"))
 		So(err, ShouldBeNil)
+		tree := db.NewTree(database)
 
 		childrenExist := tree.DirHasChildren("/", nil)
 		So(childrenExist, ShouldBeTrue)
@@ -266,7 +268,7 @@ func TestSummarise(t *testing.T) {
 			"-d", outputB, "-q", quotaFile, "-c", basedirsConfig, "-m", mounts, inputB)
 		So(err, ShouldBeNil)
 
-		bddb, err = basedirs.NewReader(filepath.Join(outputB, "basedirs.db"), ownersPath)
+		bddb, err = bolt.OpenBaseDirsReader(filepath.Join(outputB, "basedirs.db"), ownersPath)
 		So(err, ShouldBeNil)
 
 		bddb.SetMountPoints([]string{
@@ -324,9 +326,11 @@ func TestBoltPerf(t *testing.T) {
 		metaDir := t.TempDir()
 		quotaFile := filepath.Join(metaDir, "quota.csv")
 		basedirsConfig := filepath.Join(metaDir, "basedirs.config")
+		mountsFile := filepath.Join(metaDir, "mounts.txt")
 
 		So(os.WriteFile(quotaFile, []byte(""), 0600), ShouldBeNil)
 		So(os.WriteFile(basedirsConfig, []byte("\t1\t1\n"), 0600), ShouldBeNil)
+		So(os.WriteFile(mountsFile, []byte("\"/lustre\"\n\"/\"\n"), 0600), ShouldBeNil)
 
 		ownersPath, err := internaldata.CreateOwnersCSV(t, internaldata.ExampleOwnersCSV)
 		So(err, ShouldBeNil)
@@ -335,7 +339,7 @@ func TestBoltPerf(t *testing.T) {
 		importJSON := filepath.Join(metaDir, "bolt_import.json")
 		queryJSON := filepath.Join(metaDir, "bolt_query.json")
 
-		_, _, _, err = runWRStat(
+		stdout, stderr, _, err := runWRStat(
 			"bolt-perf",
 			"import",
 			statsInputDir,
@@ -345,17 +349,23 @@ func TestBoltPerf(t *testing.T) {
 			quotaFile,
 			"--config",
 			basedirsConfig,
+			"--mounts",
+			mountsFile,
 			"--owners",
 			ownersPath,
 			"--json",
 			importJSON,
 		)
-		So(err, ShouldBeNil)
+		if err != nil {
+			t.Fatalf("bolt-perf import failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+		}
 
 		_, _, _, err = runWRStat(
 			"bolt-perf",
 			"query",
 			boltOutDir,
+			"--mounts",
+			mountsFile,
 			"--owners",
 			ownersPath,
 			"--dir",

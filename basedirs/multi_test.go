@@ -28,11 +28,13 @@ package basedirs_test
 import (
 	"os/user"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	. "github.com/smartystreets/goconvey/convey"
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
+	"github.com/wtsi-hgi/wrstat-ui/bolt"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 	internaldata "github.com/wtsi-hgi/wrstat-ui/internal/data"
 	"github.com/wtsi-hgi/wrstat-ui/internal/fixtimes"
@@ -142,29 +144,49 @@ func TestMulti(t *testing.T) {
 		So(err, ShouldBeNil)
 
 		dir := t.TempDir()
-		dbPathA := filepath.Join(dir, "basedirA.db")
-		dbPathB := filepath.Join(dir, "basedirB.db")
+		dbPathA123 := filepath.Join(dir, "basedirA123.db")
+		dbPathA125 := filepath.Join(dir, "basedirA125.db")
+		dbPathB123 := filepath.Join(dir, "basedirB123.db")
+		dbPathB125 := filepath.Join(dir, "basedirB125.db")
 
-		baseDirCreator := func(modtime time.Time, root *statsdata.Directory, dbPath string) {
+		pathShouldOutputForMount := func(mountPrefix string) func(*summary.DirectoryPath) bool {
+			return func(p *summary.DirectoryPath) bool {
+				if !defaultConfig.PathShouldOutput(p) {
+					return false
+				}
+				full := string(p.AppendTo(nil))
+				return strings.HasPrefix(full, mountPrefix)
+			}
+		}
+
+		baseDirCreator := func(modtime time.Time, root *statsdata.Directory, dbPath string, mountPath string) {
 			t.Helper()
 
-			bd, errr := basedirs.NewCreator(dbPath, quotas)
+			store, errr := bolt.NewBaseDirsStore(dbPath, "")
+			So(errr, ShouldBeNil)
+			defer store.Close()
+			store.SetMountPath(mountPath)
+			store.SetUpdatedAt(modtime)
+
+			bd, errr := basedirs.NewCreator(store, quotas)
 			So(errr, ShouldBeNil)
 			So(bd, ShouldNotBeNil)
 
-			bd.SetMountPoints(mps)
+			bd.SetMountPoints([]string{mountPath})
 			bd.SetModTime(modtime)
 
 			s := summary.NewSummariser(stats.NewStatsParser(root.AsReader()))
-			s.AddDirectoryOperation(sbasedirs.NewBaseDirs(defaultConfig.PathShouldOutput, bd))
+			s.AddDirectoryOperation(sbasedirs.NewBaseDirs(pathShouldOutputForMount(mountPath), bd))
 
 			errr = s.Summarise()
 			So(errr, ShouldBeNil)
 		}
 
 		basedirsCreator := func(modtime time.Time) {
-			baseDirCreator(modtime, rootA, dbPathA)
-			baseDirCreator(modtime, rootB, dbPathB)
+			baseDirCreator(modtime, rootA, dbPathA123, "/lustre/scratch123/")
+			baseDirCreator(modtime, rootA, dbPathA125, "/lustre/scratch125/")
+			baseDirCreator(modtime, rootB, dbPathB123, "/nfs/scratch123/")
+			baseDirCreator(modtime, rootB, dbPathB125, "/nfs/scratch125/")
 		}
 
 		basedirsCreator(yesterday)
@@ -175,10 +197,10 @@ func TestMulti(t *testing.T) {
 			ownersPath, err := internaldata.CreateOwnersCSV(t, internaldata.ExampleOwnersCSV)
 			So(err, ShouldBeNil)
 
-			baseDirsReader := func() basedirs.MultiReader {
+			baseDirsReader := func() basedirs.Reader {
 				t.Helper()
 
-				bdr, errr := basedirs.OpenMulti(ownersPath, dbPathA, dbPathB)
+				bdr, errr := bolt.OpenMultiBaseDirsReader(ownersPath, dbPathA123, dbPathA125, dbPathB123, dbPathB125)
 				So(errr, ShouldBeNil)
 
 				bdr.SetMountPoints(mps)
@@ -191,8 +213,10 @@ func TestMulti(t *testing.T) {
 			Convey("and then read the database", func() {
 				bdr.SetCachedGroup(1, "group1")
 				bdr.SetCachedGroup(2, "group2")
+				bdr.SetCachedGroup(gid, groupName)
 				bdr.SetCachedUser(101, "user101")
 				bdr.SetCachedUser(102, "user102")
+				bdr.SetCachedUser(uid, username)
 
 				expectedMtime := fixtimes.FixTime(time.Unix(50, 0))
 				expectedMtimeA := fixtimes.FixTime(time.Unix(100, 0))
@@ -200,6 +224,7 @@ func TestMulti(t *testing.T) {
 				Convey("getting group and user usage info", func() {
 					mainTable, errr := bdr.GroupUsage(db.DGUTAgeAll)
 					fixUsageTimes(mainTable)
+					sortByDatabaseKeyOrder(mainTable)
 
 					expectedUsageTable := sortByDatabaseKeyOrder([]*basedirs.Usage{ //nolint:dupl
 						{
@@ -268,12 +293,14 @@ func TestMulti(t *testing.T) {
 						},
 					})...)
 
+					sortByDatabaseKeyOrder(expectedUsageTable)
 					So(errr, ShouldBeNil)
 					So(len(mainTable), ShouldEqual, 14)
 					So(mainTable, ShouldResemble, expectedUsageTable)
 
 					mainTable, errr = bdr.GroupUsage(db.DGUTAgeA3Y)
 					fixUsageTimes(mainTable)
+					sortByDatabaseKeyOrder(mainTable)
 
 					expectedUsageTable = sortByDatabaseKeyOrder([]*basedirs.Usage{ //nolint:dupl
 						{
@@ -351,12 +378,15 @@ func TestMulti(t *testing.T) {
 						},
 					})...)
 
+					sortByDatabaseKeyOrder(expectedUsageTable)
+
 					So(errr, ShouldBeNil)
 					So(len(mainTable), ShouldEqual, 14)
 					So(mainTable, ShouldResemble, expectedUsageTable)
 
 					mainTable, errr = bdr.GroupUsage(db.DGUTAgeA7Y)
 					fixUsageTimes(mainTable)
+					sortByDatabaseKeyOrder(mainTable)
 
 					expectedUsageTable = sortByDatabaseKeyOrder([]*basedirs.Usage{ //nolint:dupl
 						{
@@ -424,12 +454,15 @@ func TestMulti(t *testing.T) {
 						},
 					})...)
 
+					sortByDatabaseKeyOrder(expectedUsageTable)
+
 					So(errr, ShouldBeNil)
 					So(len(mainTable), ShouldEqual, 12)
 					So(mainTable, ShouldResemble, expectedUsageTable)
 
 					mainTable, errr = bdr.UserUsage(db.DGUTAgeAll)
 					fixUsageTimes(mainTable)
+					sortByDatabaseKeyOrder(mainTable)
 
 					expectedMainTable := sortByDatabaseKeyOrder([]*basedirs.Usage{ //nolint:dupl
 						{
@@ -492,6 +525,8 @@ func TestMulti(t *testing.T) {
 							UsageInodes: 2, Mtime: expectedFixedAgeMtime,
 						},
 					})...)
+
+					sortByDatabaseKeyOrder(expectedMainTable)
 
 					So(errr, ShouldBeNil)
 					So(len(mainTable), ShouldEqual, 14)
