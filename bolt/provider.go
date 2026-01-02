@@ -69,6 +69,9 @@ type boltProvider struct {
 
 	stopCh chan struct{}
 	wg     sync.WaitGroup
+
+	cbMu sync.Mutex
+	cbWG sync.WaitGroup
 }
 
 func (p *boltProvider) Tree() *db.Tree {
@@ -100,8 +103,13 @@ func (p *boltProvider) OnUpdate(cb func()) {
 }
 
 func (p *boltProvider) Close() error {
-	close(p.stopCh)
+	if p.stopCh != nil {
+		close(p.stopCh)
+		p.stopCh = nil
+	}
+
 	p.wg.Wait()
+	p.cbWG.Wait()
 
 	p.mu.Lock()
 	st := p.state
@@ -161,13 +169,36 @@ func (p *boltProvider) swapStateAndHandle(st *providerState, cb func(), old *pro
 	p.state = st
 	p.mu.Unlock()
 
-	if cb != nil {
-		cb()
+	p.runCallbackAndCleanup(cb, st, old)
+}
+
+func (p *boltProvider) runCallbackAndCleanup(cb func(), st *providerState, old *providerState) {
+	cleanup := func() {
+		p.cleanupAfterCallback(st, old)
 	}
 
-	if p.cfg.RemoveOldPaths {
+	if cb == nil {
+		cleanup()
+
+		return
+	}
+
+	p.cbWG.Add(1)
+
+	go func() {
+		defer p.cbWG.Done()
+
+		p.cbMu.Lock()
+		defer p.cbMu.Unlock()
+		defer cleanup()
+
+		cb()
+	}()
+}
+
+func (p *boltProvider) cleanupAfterCallback(st *providerState, old *providerState) {
+	if p.cfg.RemoveOldPaths && st != nil {
 		if err := removeDatasetDirs(p.cfg.BasePath, st.toDelete); err != nil {
-			// Intentionally ignore removal errors; nothing better to do here
 			_ = err
 		}
 	}
