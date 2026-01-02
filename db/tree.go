@@ -332,3 +332,8 @@ func (t *Tree) Close() {
 
 	_ = t.db.Close()
 }
+
+// Info returns summary information about the database.
+func (t *Tree) Info() (*DBInfo, error) {
+	return t.db.Info()
+}

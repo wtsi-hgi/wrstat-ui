@@ -27,12 +27,8 @@
 package cmd
 
 import (
-	"log/slog"
-
 	"github.com/spf13/cobra"
-	"github.com/wtsi-hgi/wrstat-ui/basedirs"
 	"github.com/wtsi-hgi/wrstat-ui/bolt"
-	"github.com/wtsi-hgi/wrstat-ui/server"
 )
 
 // dbinfoCmd represents the server command.
@@ -51,69 +47,46 @@ NB: for large databases, this can take hours to run.
 			die("you must supply the path to your 'wrstat multi -f' output directory")
 		}
 
-		dbPaths, err := server.FindDBDirs(args[0], dgutaDBsSuffix, basedirBasename)
-		if err != nil {
-			die("failed to find database paths: %s", err)
+		if ownersPath == "" {
+			die("you must supply --owners")
 		}
 
-		durgutaPaths, basedirsDBPaths := server.JoinDBPaths(dbPaths, dgutaDBsSuffix, basedirBasename)
-
-		slog.SetLogLoggerLevel(slog.LevelDebug)
-
-		info("opening dguta databases...")
-		dgutaDB, err := bolt.OpenDatabase(durgutaPaths...)
-		if err != nil {
-			die("failed to open dguta db: %s", err)
+		cfg := bolt.Config{
+			BasePath:      args[0],
+			DGUTADBName:   dgutaDBsSuffix,
+			BaseDirDBName: basedirBasename,
+			OwnersCSVPath: ownersPath,
 		}
 
-		dbInfo, err := dgutaDB.Info()
+		p, err := bolt.OpenProvider(cfg)
 		if err != nil {
-			_ = dgutaDB.Close()
+			die("failed to open provider: %s", err)
+		}
+		defer p.Close()
+
+		dbInfo, err := p.Tree().Info()
+		if err != nil {
 			die("failed to get dguta db info: %s", err)
 		}
-
-		_ = dgutaDB.Close()
 
 		cliPrint("\nDirs: %d\nDGUTAs: %d\nParents: %d\nChildren: %d\n\n",
 			dbInfo.NumDirs, dbInfo.NumDGUTAs, dbInfo.NumParents, dbInfo.NumChildren)
 
-		info("opening basedir database...\n")
-
-		var basedirsInfo basedirs.DBInfo
-
-		for _, path := range basedirsDBPaths {
-			r, err := bolt.OpenBaseDirsReader(path, "")
-			if err != nil {
-				die("failed to open basedirs db: %s", err)
-			}
-
-			bdInfo, err := r.Info()
-			_ = r.Close()
-			if err != nil {
-				die("failed to get basedirs db info: %s", err)
-			}
-
-			basedirsInfo.GroupDirCombos += bdInfo.GroupDirCombos
-			basedirsInfo.GroupHistories += bdInfo.GroupHistories
-			basedirsInfo.GroupMountCombos += bdInfo.GroupMountCombos
-			basedirsInfo.GroupSubDirCombos += bdInfo.GroupSubDirCombos
-			basedirsInfo.GroupSubDirs += bdInfo.GroupSubDirs
-			basedirsInfo.UserDirCombos += bdInfo.UserDirCombos
-			basedirsInfo.UserSubDirCombos += bdInfo.UserSubDirCombos
-			basedirsInfo.UserSubDirs += bdInfo.UserSubDirs
+		bdInfo, err := p.BaseDirs().Info()
+		if err != nil {
+			die("failed to get basedirs db info: %s", err)
 		}
 
-		cliPrint("Group usage group-dir combinations: %d\n", basedirsInfo.GroupDirCombos)
-		cliPrint("Group history group-mount combinations: %d\n", basedirsInfo.GroupMountCombos)
-		cliPrint("Group histories: %d\n", basedirsInfo.GroupHistories)
-		cliPrint("Group subdir group-dir combinations: %d\n", basedirsInfo.GroupSubDirCombos)
-		cliPrint("Group subdirs: %d\n", basedirsInfo.GroupSubDirs)
-		cliPrint("User usage user-dir combinations: %d\n", basedirsInfo.UserDirCombos)
-		cliPrint("User subdir user-dir combinations: %d\n", basedirsInfo.UserSubDirCombos)
-		cliPrint("User subdirs: %d\n", basedirsInfo.UserSubDirs)
+		cliPrint("GroupDirCombos: %d\nGroupHistories: %d\nGroupMountCombos: %d\n"+
+			"GroupSubDirCombos: %d\nGroupSubDirs: %d\n"+
+			"UserDirCombos: %d\nUserSubDirCombos: %d\nUserSubDirs: %d\n",
+			bdInfo.GroupDirCombos, bdInfo.GroupHistories, bdInfo.GroupMountCombos,
+			bdInfo.GroupSubDirCombos, bdInfo.GroupSubDirs,
+			bdInfo.UserDirCombos, bdInfo.UserSubDirCombos, bdInfo.UserSubDirs)
 	},
 }
 
 func init() {
 	RootCmd.AddCommand(dbinfoCmd)
+	dbinfoCmd.Flags().StringVarP(&ownersPath, "owners", "o", "", "path to owners csv file")
 }

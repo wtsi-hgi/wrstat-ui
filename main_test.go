@@ -48,6 +48,7 @@ import (
 	internaldata "github.com/wtsi-hgi/wrstat-ui/internal/data"
 	"github.com/wtsi-hgi/wrstat-ui/internal/statsdata"
 	internaluser "github.com/wtsi-hgi/wrstat-ui/internal/user"
+	"github.com/wtsi-hgi/wrstat-ui/summary"
 )
 
 const app = "wrstat-ui_test"
@@ -156,7 +157,12 @@ func TestSummarise(t *testing.T) {
 
 		So(os.Chtimes(inputA, yesterday, yesterday), ShouldBeNil)
 
-		_, _, _, err = runWRStat("summarise", "-d", outputA, "-q", quotaFile, "-c", basedirsConfig, "-m", mounts, inputA)
+		stdout, stderr, _, err := runWRStat("summarise", "-d", outputA, "-q", quotaFile,
+			"-c", basedirsConfig, "-m", mounts, inputA)
+		if err != nil {
+			t.Logf("stdout: %s", stdout)
+			t.Logf("stderr: %s", stderr)
+		}
 		So(err, ShouldBeNil)
 
 		compareFileContents(t, filepath.Join(outputA, "bygroup"), sortLines(fmt.Sprintf("%[1]s\t%[2]s\t2\t2684354560\n"+
@@ -672,4 +678,59 @@ func fixTZs(h []basedirs.History) {
 	for n := range h {
 		h[n].Date = h[n].Date.In(time.UTC)
 	}
+}
+
+func TestDBInfo(t *testing.T) {
+	Convey("dbinfo prints the correct information", t, func() {
+		// Setup temp dir
+		tmpDir := t.TempDir()
+		mountKey := "mount"
+		datasetDir := filepath.Join(tmpDir, "1_"+mountKey)
+		err := os.MkdirAll(datasetDir, 0755)
+		So(err, ShouldBeNil)
+
+		// Create DGUTA DB
+		dgutaPath := filepath.Join(datasetDir, "dguta.dbs")
+		err = os.MkdirAll(dgutaPath, 0755)
+		So(err, ShouldBeNil)
+
+		w, err := bolt.NewDGUTAWriter(dgutaPath)
+		So(err, ShouldBeNil)
+		w.SetMountPath("/mount/")
+		w.SetUpdatedAt(time.Now())
+
+		dirPath := &summary.DirectoryPath{Name: "mount", Depth: 0}
+
+		err = w.Add(db.RecordDGUTA{
+			Dir: dirPath,
+			GUTAs: db.GUTAs{
+				{
+					GID: 1, UID: 1, FT: 1, Age: 0, Size: 100, Count: 1,
+				},
+			},
+		})
+		So(err, ShouldBeNil)
+		w.Close()
+
+		// Create Basedirs DB
+		basedirsPath := filepath.Join(datasetDir, "basedirs.db")
+		store, err := bolt.NewBaseDirsStore(basedirsPath, "")
+		So(err, ShouldBeNil)
+		store.SetMountPath("/mount/")
+		store.SetUpdatedAt(time.Now())
+		store.Close()
+
+		// Create dummy owners file
+		ownersPath := filepath.Join(tmpDir, "owners.csv")
+		err = os.WriteFile(ownersPath, []byte("1,owner1\n"), 0600)
+		So(err, ShouldBeNil)
+
+		// Run command
+		output, stderr, _, err := runWRStat("dbinfo", "--owners", ownersPath, tmpDir)
+		So(err, ShouldBeNil)
+		So(stderr, ShouldBeBlank)
+
+		So(output, ShouldContainSubstring, "Dirs: 1")
+		So(output, ShouldContainSubstring, "DGUTAs: 1")
+	})
 }

@@ -252,6 +252,77 @@ func (b baseDirsMap) mergeTo(pbm baseDirsMap, parent *summary.DirectoryPath) { /
 	}
 }
 
+type rootBaseDirs struct {
+	baseDirs
+	db            output
+	users, groups basedirs.IDAgeDirs
+}
+
+// Output is a summary.Operation method.
+func (r *rootBaseDirs) Output() error {
+	r.baseDirs.Output() //nolint:errcheck
+
+	removeChildDirFilesFromDot(r.users)
+	removeChildDirFilesFromDot(r.groups)
+
+	return r.db.Output(r.users, r.groups)
+}
+
+func removeChildDirFilesFromDot(idag basedirs.IDAgeDirs) { //nolint:gocognit,gocyclo
+	for _, ad := range idag {
+		for _, c := range ad {
+			for n := range c {
+				swc := &c[n]
+				swc.Dir = strings.TrimSuffix(swc.Dir, "/")
+				dot := swc.Children[0]
+
+				for _, sd := range swc.Children[1:] {
+					sd.SubDir = strings.TrimSuffix(sd.SubDir, "/")
+					dot.NumFiles -= sd.NumFiles
+					dot.SizeFiles -= sd.SizeFiles
+
+					for typ, count := range sd.FileUsage {
+						dot.FileUsage[typ] -= count
+					}
+				}
+
+				if dot.NumFiles == 0 { //nolint:nestif
+					swc.Children = swc.Children[1:]
+				} else {
+					for typ, count := range dot.FileUsage {
+						if count == 0 {
+							delete(dot.FileUsage, typ)
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+func (r *rootBaseDirs) addUserBase(uid uint32, ds basedirs.SummaryWithChildren, age db.DirGUTAge) {
+	addIDAgePath(r.users, uid, ds, age)
+}
+
+func addIDAgePath(m basedirs.IDAgeDirs, id uint32, ds basedirs.SummaryWithChildren, age db.DirGUTAge) {
+	ap := m.Get(id)
+
+	ap[age] = append(slices.DeleteFunc(ap[age], func(p basedirs.SummaryWithChildren) bool {
+		if strings.HasPrefix(p.Dir, ds.Dir) {
+			pos := strings.LastIndexByte(p.Dir[:len(p.Dir)-1], '/')
+			merge(&ds, &p, p.Dir[pos+1:])
+
+			return true
+		}
+
+		return false
+	}), ds)
+}
+
+func (r *rootBaseDirs) addGroupBase(uid uint32, ds basedirs.SummaryWithChildren, age db.DirGUTAge) {
+	addIDAgePath(r.groups, uid, ds, age)
+}
+
 type baseDirs struct {
 	root          *rootBaseDirs
 	parent        *baseDirs
@@ -325,75 +396,4 @@ func (b *baseDirs) cleanup() {
 	clear(b.seenInodes)
 	clear(b.groups)
 	clear(b.users)
-}
-
-type rootBaseDirs struct {
-	baseDirs
-	db            output
-	users, groups basedirs.IDAgeDirs
-}
-
-// Output is a summary.Operation method.
-func (r *rootBaseDirs) Output() error {
-	r.baseDirs.Output() //nolint:errcheck
-
-	removeChildDirFilesFromDot(r.users)
-	removeChildDirFilesFromDot(r.groups)
-
-	return r.db.Output(r.users, r.groups)
-}
-
-func removeChildDirFilesFromDot(idag basedirs.IDAgeDirs) { //nolint:gocognit,gocyclo
-	for _, ad := range idag {
-		for _, c := range ad {
-			for n := range c {
-				swc := &c[n]
-				swc.Dir = strings.TrimSuffix(swc.Dir, "/")
-				dot := swc.Children[0]
-
-				for _, sd := range swc.Children[1:] {
-					sd.SubDir = strings.TrimSuffix(sd.SubDir, "/")
-					dot.NumFiles -= sd.NumFiles
-					dot.SizeFiles -= sd.SizeFiles
-
-					for typ, count := range sd.FileUsage {
-						dot.FileUsage[typ] -= count
-					}
-				}
-
-				if dot.NumFiles == 0 { //nolint:nestif
-					swc.Children = swc.Children[1:]
-				} else {
-					for typ, count := range dot.FileUsage {
-						if count == 0 {
-							delete(dot.FileUsage, typ)
-						}
-					}
-				}
-			}
-		}
-	}
-}
-
-func (r *rootBaseDirs) addUserBase(uid uint32, ds basedirs.SummaryWithChildren, age db.DirGUTAge) {
-	addIDAgePath(r.users, uid, ds, age)
-}
-
-func addIDAgePath(m basedirs.IDAgeDirs, id uint32, ds basedirs.SummaryWithChildren, age db.DirGUTAge) {
-	ap := m.Get(id)
-
-	ap[age] = append(slices.DeleteFunc(ap[age], func(p basedirs.SummaryWithChildren) bool {
-		if strings.HasPrefix(p.Dir, ds.Dir) {
-			pos := strings.LastIndexByte(p.Dir[:len(p.Dir)-1], '/')
-			merge(&ds, &p, p.Dir[pos+1:])
-
-			return true
-		}
-
-		return false
-	}), ds)
-}
-
-func (r *rootBaseDirs) addGroupBase(uid uint32, ds basedirs.SummaryWithChildren, age db.DirGUTAge) {
-	addIDAgePath(r.groups, uid, ds, age)
 }

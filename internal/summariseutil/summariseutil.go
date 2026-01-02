@@ -56,34 +56,6 @@ func AddDirgutaSummariser(s *summary.Summariser, dirgutaDB string,
 	return writer.Close, nil
 }
 
-// deriveMountPathFromOutputDir extracts the mount path from the parent
-// directory of the output path.
-//
-// The parent directory is expected to have the form '<version>_<mountKey>'
-// where <mountKey> is the mount path with '/' replaced by '／' (fullwidth
-// solidus).
-//
-// If the directory name doesn't match the expected format, "/" is returned
-// as a fallback for backwards compatibility.
-func deriveMountPathFromOutputDir(outputPath string) string {
-	parentDir := filepath.Base(filepath.Dir(outputPath))
-
-	parts := strings.SplitN(parentDir, "_", numDatasetDirParts)
-	if len(parts) != numDatasetDirParts {
-		// Fallback to root mount path for backwards compatibility
-		return "/"
-	}
-
-	mountKey := parts[1]
-	mountPath := strings.ReplaceAll(mountKey, fullwidthSolidus, fullwidthReplacement)
-
-	if !strings.HasSuffix(mountPath, "/") {
-		mountPath += "/"
-	}
-
-	return mountPath
-}
-
 // AddBasedirsSummariser adds the basedirs summariser to s and configures it
 // from the provided quota/config/mountpoints files.
 func AddBasedirsSummariser(
@@ -132,7 +104,7 @@ func newBasedirsCreator(
 	}
 
 	// Configure store metadata and create the basedirs creator.
-	configureStoreMounts(store, mps, modtime)
+	configureStoreMounts(store, basedirsDB, modtime)
 
 	bd, err := basedirs.NewCreator(store, quotas)
 	if err != nil {
@@ -212,17 +184,39 @@ func ParseMountpointsFromFile(mountpoints string) ([]string, error) {
 	return mounts, nil
 }
 
-func configureStoreMounts(store basedirs.Store, mps []string, modtime time.Time) {
-	// Pick a reasonable mount-path for this DB's metadata/precomputation.
-	// The underlying basedirs logic still uses the full mountpoint list for
-	// history attribution.
-	storeMountPath := "/"
-	if len(mps) > 0 {
-		storeMountPath = basedirs.ValidateMountPoints(mps)[0]
-	}
+func configureStoreMounts(store basedirs.Store, basedirsDB string, modtime time.Time) {
+	storeMountPath := deriveMountPathFromOutputDir(basedirsDB)
 
 	store.SetMountPath(storeMountPath)
 	store.SetUpdatedAt(modtime)
+}
+
+// deriveMountPathFromOutputDir extracts the mount path from the parent
+// directory of the output path.
+//
+// The parent directory is expected to have the form '<version>_<mountKey>'
+// where <mountKey> is the mount path with '/' replaced by '／' (fullwidth
+// solidus).
+//
+// If the directory name doesn't match the expected format, "/" is returned
+// as a fallback for backwards compatibility.
+func deriveMountPathFromOutputDir(outputPath string) string {
+	parentDir := filepath.Base(filepath.Dir(outputPath))
+
+	parts := strings.SplitN(parentDir, "_", numDatasetDirParts)
+	if len(parts) != numDatasetDirParts {
+		// Fallback to root mount path for backwards compatibility
+		return "/"
+	}
+
+	mountKey := parts[1]
+	mountPath := strings.ReplaceAll(mountKey, fullwidthSolidus, fullwidthReplacement)
+
+	if !strings.HasSuffix(mountPath, "/") {
+		mountPath += "/"
+	}
+
+	return mountPath
 }
 
 // CopyHistory copies history entries from an existing basedirs DB into bd.

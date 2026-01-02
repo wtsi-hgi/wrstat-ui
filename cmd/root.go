@@ -62,7 +62,7 @@ func cliPrint(msg string, a ...interface{}) {
 }
 
 // info is a convenience to log a message at the Info level.
-func info(msg string, a ...interface{}) { //nolint:unparam
+func info(msg string, a ...interface{}) {
 	appLogger.Info(fmt.Sprintf(msg, a...))
 }
 

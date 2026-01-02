@@ -1,6 +1,7 @@
 package bolt
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"strings"
@@ -210,19 +211,19 @@ func (s *baseDirsStore) Finalise() error {
 		return nil
 	}
 
-	gub := s.tx.Bucket([]byte(basedirs.GroupUsageBucket))
+	gub, ghb, err := s.getFinaliseBuckets()
+	if err != nil {
+		return err
+	}
 
-	ghb := s.tx.Bucket([]byte(basedirs.GroupHistoricalBucket))
-	if gub == nil || ghb == nil {
-		rollbackErr := s.tx.Rollback()
-		s.tx = nil
-
-		return errors.Join(errRequiredBucketsMissing, rollbackErr)
+	gidMounts, err := s.getGIDMounts(ghb)
+	if err != nil {
+		return err
 	}
 
 	// Precompute DateNoSpace/DateNoFiles for group usage at age=all.
-	if err := gub.ForEach(func(k, v []byte) error {
-		return s.processFinaliseEntry(gub, ghb, k, v)
+	if err = gub.ForEach(func(k, v []byte) error {
+		return s.processFinaliseEntry(gub, ghb, k, v, gidMounts)
 	}); err != nil {
 		rollbackErr := s.tx.Rollback()
 		s.tx = nil
@@ -230,10 +231,112 @@ func (s *baseDirsStore) Finalise() error {
 		return errors.Join(err, rollbackErr)
 	}
 
-	err := s.tx.Commit()
+	err = s.tx.Commit()
 	s.tx = nil
 
 	return err
+}
+
+func (s *baseDirsStore) getFinaliseBuckets() (*bolt.Bucket, *bolt.Bucket, error) {
+	gub := s.tx.Bucket([]byte(basedirs.GroupUsageBucket))
+	ghb := s.tx.Bucket([]byte(basedirs.GroupHistoricalBucket))
+
+	if gub == nil || ghb == nil {
+		rollbackErr := s.tx.Rollback()
+		s.tx = nil
+
+		return nil, nil, errors.Join(errRequiredBucketsMissing, rollbackErr)
+	}
+
+	return gub, ghb, nil
+}
+
+func (s *baseDirsStore) getGIDMounts(ghb *bolt.Bucket) (map[uint32][]string, error) {
+	gidMounts := make(map[uint32][]string)
+
+	if err := ghb.ForEach(func(k, _ []byte) error {
+		gid, mountPath := decodeHistoryKey(k)
+		gidMounts[gid] = append(gidMounts[gid], mountPath)
+
+		return nil
+	}); err != nil {
+		rollbackErr := s.tx.Rollback()
+		s.tx = nil
+
+		return nil, errors.Join(err, rollbackErr)
+	}
+
+	return gidMounts, nil
+}
+
+const minHistoryKeyLen = 5
+
+func decodeHistoryKey(k []byte) (uint32, string) {
+	if len(k) < minHistoryKeyLen {
+		return 0, ""
+	}
+
+	gid := binary.LittleEndian.Uint32(k[:4])
+	path := string(k[5:])
+
+	return gid, path
+}
+
+func (s *baseDirsStore) processFinaliseEntry(gub, ghb *bolt.Bucket, k, v []byte,
+	gidMounts map[uint32][]string) error {
+	gu := new(basedirs.Usage)
+	if err := s.decode(v, gu); err != nil {
+		return err
+	}
+
+	if gu.Age != db.DGUTAgeAll {
+		return nil
+	}
+
+	mountPath := findMountPath(gu, gidMounts)
+	if mountPath == "" {
+		return nil
+	}
+
+	return s.updateUsageWithHistory(gub, ghb, k, gu, mountPath)
+}
+
+func (s *baseDirsStore) updateUsageWithHistory(gub, ghb *bolt.Bucket, k []byte,
+	gu *basedirs.Usage, mountPath string) error {
+	// Histories are stored per (gid, mountPath).
+	hkey := basedirsKeyName(gu.GID, mountPath, db.DGUTAgeAll)
+
+	data := ghb.Get(hkey)
+	if data == nil {
+		return nil
+	}
+
+	var history []basedirs.History
+	if err := s.decode(data, &history); err != nil {
+		return err
+	}
+
+	sizeExceedDate, inodeExceedDate := basedirs.DateQuotaFull(history)
+	gu.DateNoSpace = sizeExceedDate
+	gu.DateNoFiles = inodeExceedDate
+
+	return gub.Put(k, s.encode(gu))
+}
+
+func findMountPath(gu *basedirs.Usage, gidMounts map[uint32][]string) string {
+	mounts, ok := gidMounts[gu.GID]
+	if !ok {
+		return ""
+	}
+
+	var mountPath string
+	for _, mp := range mounts {
+		if strings.HasPrefix(gu.BaseDir, mp) && len(mp) > len(mountPath) {
+			mountPath = mp
+		}
+	}
+
+	return mountPath
 }
 
 func (s *baseDirsStore) Close() error {
@@ -262,36 +365,6 @@ func (s *baseDirsStore) encode(v any) []byte {
 
 func (s *baseDirsStore) decode(encoded []byte, v any) error {
 	return codec.NewDecoderBytes(encoded, s.ch).Decode(v)
-}
-
-func (s *baseDirsStore) processFinaliseEntry(gub, ghb *bolt.Bucket, k, v []byte) error {
-	gu := new(basedirs.Usage)
-	if err := s.decode(v, gu); err != nil {
-		return err
-	}
-
-	if gu.Age != db.DGUTAgeAll {
-		return nil
-	}
-
-	// Histories are stored per (gid, mountPath).
-	hkey := basedirsKeyName(gu.GID, s.mountPath, db.DGUTAgeAll)
-
-	data := ghb.Get(hkey)
-	if data == nil {
-		return basedirs.ErrNoBaseDirHistory
-	}
-
-	var history []basedirs.History
-	if err := s.decode(data, &history); err != nil {
-		return err
-	}
-
-	sizeExceedDate, inodeExceedDate := basedirs.DateQuotaFull(history)
-	gu.DateNoSpace = sizeExceedDate
-	gu.DateNoFiles = inodeExceedDate
-
-	return gub.Put(k, s.encode(gu))
 }
 
 func (s *baseDirsStore) rollbackExistingTx() error {
