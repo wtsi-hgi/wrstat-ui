@@ -1,9 +1,8 @@
 /*******************************************************************************
- * Copyright (c) 2023 Genome Research Ltd.
+ * Copyright (c) 2026 Genome Research Ltd.
  *
  * Authors:
- *   Sendu Bala <sb10@sanger.ac.uk>
- *   Michael Woolnough <mw31@sanger.ac.uk>
+ *   GitHub Copilot
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -25,50 +24,26 @@
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  ******************************************************************************/
 
-package basedirs
+package server
 
 import (
-	"bufio"
-	"errors"
-	"os"
-	"strconv"
-	"strings"
+	"github.com/wtsi-hgi/wrstat-ui/basedirs"
+	"github.com/wtsi-hgi/wrstat-ui/db"
 )
 
-const colsInOwnersFile = 2
+// Provider bundles the backend implementations required by the server.
+//
+// Reloading is an implementation detail of each Provider.
+type Provider interface {
+	// Tree returns a query object used by tree + where endpoints.
+	Tree() *db.Tree
 
-// Error for invalid owners file format.
-var ErrInvalidOwnersFile = errors.New("invalid owners file format")
+	// BaseDirs returns a query object used by basedirs endpoints.
+	BaseDirs() basedirs.Reader
 
-// ParseOwners parses the owners CSV file (gid,owner) into a gid->owner map.
-func ParseOwners(path string) (map[uint32]string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
+	// OnUpdate registers a callback that is called whenever underlying data
+	// changes such that server caches should be rebuilt.
+	OnUpdate(cb func())
 
-	defer f.Close()
-
-	scanner := bufio.NewScanner(f)
-	scanner.Split(bufio.ScanLines)
-
-	owners := make(map[uint32]string)
-
-	for scanner.Scan() {
-		line := scanner.Text()
-
-		cols := strings.Split(line, ",")
-		if len(cols) != colsInOwnersFile {
-			return nil, ErrInvalidOwnersFile
-		}
-
-		gid, err := strconv.ParseUint(cols[0], 10, 32)
-		if err != nil {
-			return nil, err
-		}
-
-		owners[uint32(gid)] = cols[1]
-	}
-
-	return owners, nil
+	Close() error
 }

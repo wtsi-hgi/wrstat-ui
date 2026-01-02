@@ -33,11 +33,9 @@ import (
 	"regexp"
 	"slices"
 	"strings"
-	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
-	"github.com/wtsi-hgi/wrstat-ui/db"
 )
 
 const (
@@ -185,252 +183,98 @@ func removeAll(baseDirectory string, toDelete []string) error {
 	return nil
 }
 
-// LoadDBs loads dirguta and basedir databases from the given
-// directory/directories, and adds the relevant endpoints to the REST API.
+// SetProvider wires a backend bundle into the server.
 //
-// For the dirguta databases (as produced by one or more invocations of
-// dguta.DB.Store()) it adds the /rest/v1/where GET endpoint to the REST API. If
-// you call EnableAuth() first, then this endpoint will be secured and be
-// available at /rest/v1/auth/where.
-//
-// The where endpoint can take the dir, splits, groups, users and types
-// parameters, which correspond to arguments that dguta.Tree.Where() takes.
-//
-// For the basedirs database (as produced by basedirs.CreateDatabase()), in
-// combination with an owners file (a gid,owner csv), it adds the following GET
-// endpoints to the REST API:
-//
-// /rest/v1/basedirs/usage/groups /rest/v1/basedirs/usage/users
-// /rest/v1/basedirs/subdirs/group /rest/v1/basedirs/subdirs/user
-// /rest/v1/basedirs/history
-//
-// If you call EnableAuth() first, then these endpoints will be secured and be
-// available at /rest/v1/auth/basedirs/*.
-//
-// The subdir endpoints require id (gid or uid) and basedir parameters. The
-// history endpoint requires a gid and basedir (can be basedir, actually a
-// mountpoint) parameter.
-func (s *Server) LoadDBs(basePaths []string, dgutaDBName, basedirDBName, ownersPath string, mounts ...string) error { //nolint:funlen,lll
-	dirgutaPaths, baseDirPaths := JoinDBPaths(basePaths, dgutaDBName, basedirDBName)
+// This replaces the legacy LoadDBs/EnableDBReloading flow; reloading is an
+// implementation detail of the provider.
+func (s *Server) SetProvider(p Provider) error {
+	if p == nil {
+		return basedirs.Error("provider is nil")
+	}
 
-	mts, err := s.getDBTimestamps(baseDirPaths)
+	bd := p.BaseDirs()
+	if bd == nil {
+		return basedirs.Error("provider returned nil basedirs")
+	}
+
+	mt, err := bd.MountTimestamps()
 	if err != nil {
 		return err
 	}
 
-	tree, err := db.NewTree(dirgutaPaths...)
-	if err != nil {
-		return err
+	dataTimeStamp := make(map[string]int64, len(mt))
+	for mountKey, t := range mt {
+		dataTimeStamp[mountKey] = t.Unix()
 	}
 
-	bd, err := basedirs.OpenMulti(ownersPath, baseDirPaths...)
-	if err != nil {
+	if err := s.prewarmCaches(bd); err != nil {
 		return err
-	}
-
-	if len(mounts) > 0 {
-		bd.SetMountPoints(mounts)
 	}
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	loaded := s.provider != nil
+	old := s.provider
 
-	err = s.prewarmCaches(bd)
-	if err != nil {
-		return err
-	}
-
-	loaded := s.basedirs != nil
+	s.provider = p
+	s.tree = p.Tree()
 	s.basedirs = bd
-	s.tree = tree
-	s.dataTimeStamp = mts
+	s.dataTimeStamp = dataTimeStamp
 
 	if !loaded {
 		s.addBaseDGUTARoutes()
 		s.addBaseDirRoutes()
 	}
 
-	return nil
-}
+	s.mu.Unlock()
 
-func (s *Server) getDBTimestamps(paths []string) (map[string]int64, error) {
-	timestamps := make(map[string]int64, len(paths))
-
-	for _, path := range paths {
-		dbDir := filepath.Dir(path)
-
-		st, err := os.Stat(dbDir)
-		if err != nil {
-			return nil, err
-		}
-
-		timestamps[strings.SplitN(filepath.Base(dbDir), "_", numDBDirParts)[keyPart]] = st.ModTime().Unix()
+	if old != nil {
+		_ = old.Close()
 	}
 
-	return timestamps, nil
-}
-
-// EnableDBReloading will periodically scan the basepath for the latest
-// directories that contains dirguta and basedir databases and update the server
-// to use the new databases.
-//
-// The scan will looks for directories within the base path with names that
-// match the following regular expression:
-//
-// ^\d+_.
-//
-// The directory name consists of two parts, a numeric version identifier and a
-// mountpoint/key, separated by an underscore.
-//
-// The directory must contain entries with names equal to both the dgutaDBName
-// and basedirDBName to be considered valid.
-//
-// For each mountpoint/key, the databases in the directory with the greatest
-// (numerical) version will be considered the most up-to-date version and those
-// that will be loaded.
-//
-// You can set the removeOldPaths to true to cause valid, but older directories
-// to be removed from the base path after each reload.
-func (s *Server) EnableDBReloading(basepath, dgutaDBName, basedirDBName, ownersPath string,
-	pollFrequency time.Duration, removeOldPaths bool, mounts ...string) error {
-	dbPaths, toDelete, err := findDBDirs(basepath, dgutaDBName, basedirDBName)
-	if err != nil {
-		return err
-	} else if len(dbPaths) == 0 {
-		return ErrNoPaths
-	}
-
-	if err := s.LoadDBs(dbPaths, dgutaDBName, basedirDBName, ownersPath, mounts...); err != nil {
-		return err
-	}
-
-	if removeOldPaths {
-		if err := removeAll(basepath, toDelete); err != nil {
-			return err
-		}
-	}
-
-	go s.reloadLoop(basepath, dgutaDBName, basedirDBName,
-		pollFrequency, removeOldPaths, dbPaths, mounts)
+	p.OnUpdate(func() {
+		s.handleProviderUpdate()
+	})
 
 	return nil
 }
 
-func (s *Server) reloadLoop(basepath, dgutaDBName, basedirDBName string, //nolint:gocognit,gocyclo
-	pollFrequency time.Duration, removeOldPaths bool, dbPaths, mounts []string) {
-	for {
-		select {
-		case <-time.After(pollFrequency):
-		case <-s.stopCh:
-			return
-		}
-
-		newDBPaths, toDelete, err := findDBDirs(basepath, dgutaDBName, basedirDBName)
-		if err != nil {
-			s.Logger.Printf("finding new database directories failed: %s", err)
-
-			continue
-		}
-
-		if slices.Equal(newDBPaths, dbPaths) {
-			continue
-		}
-
-		if s.reloadDBs(dgutaDBName, basedirDBName, newDBPaths, mounts, addBaseToDelete(basepath, toDelete)) { //nolint:nestif
-			dbPaths = newDBPaths
-
-			if removeOldPaths {
-				if err := removeAll(basepath, toDelete); err != nil {
-					s.Logger.Printf("deleting old database failed: %s", err)
-				}
-			}
-		}
-	}
-}
-
-// reloadDBs performs incremental reload of the DirGUTAge tree and basedirs
-// MultiReader. It updates only new or changed databases while closing obsolete
-// ones and prewarming caches.
-func (s *Server) reloadDBs(dgutaDBName, basedirDBName string, dbPaths, mounts, toDelete []string) bool { //nolint:funlen,lll,gocyclo
-	dirgutaPaths, baseDirPaths, removeDirgutaPaths, removeBaseDirPaths := joinPaths(
-		dbPaths,
-		toDelete,
-		dgutaDBName,
-		basedirDBName,
-	)
-
-	mt, err := s.getDBTimestamps(baseDirPaths)
-	if err != nil {
-		return s.logReloadError("reloading dbs failed: %s", err)
-	}
-
+func (s *Server) handleProviderUpdate() {
 	s.mu.RLock()
-	oldTree := s.tree
-	oldBD := s.basedirs
+	p := s.provider
 	s.mu.RUnlock()
 
-	newTree, err := oldTree.OpenFrom(dirgutaPaths, removeDirgutaPaths)
-	if err != nil {
-		s.Logger.Printf("incremental tree reload failed: %s", err)
-
-		return false
+	if p == nil {
+		return
 	}
 
-	newBD, err := oldBD.OpenFrom(baseDirPaths, removeBaseDirPaths)
-	if err != nil {
-		s.Logger.Printf("incremental basedirs reload failed: %s", err)
-
-		return false
+	bd := p.BaseDirs()
+	if bd == nil {
+		return
 	}
 
-	if len(mounts) > 0 {
-		newBD.SetMountPoints(mounts)
+	mt, err := bd.MountTimestamps()
+	if err != nil {
+		s.Logger.Printf("refreshing db timestamps failed: %s", err)
+		return
+	}
+
+	dataTimeStamp := make(map[string]int64, len(mt))
+	for mountKey, t := range mt {
+		dataTimeStamp[mountKey] = t.Unix()
+	}
+
+	if err := s.prewarmCaches(bd); err != nil {
+		s.Logger.Printf("prewarming caches failed after update: %s", err)
+		return
 	}
 
 	s.mu.Lock()
-	defer func() {
-		if err := s.closeObsoleteDBs(oldTree, removeDirgutaPaths); err != nil {
-			s.logReloadError("%s", err)
-		}
+	s.tree = p.Tree()
+	s.basedirs = bd
+	s.dataTimeStamp = dataTimeStamp
+	s.mu.Unlock()
 
-		if err := s.closeObsoleteDBs(oldBD, removeBaseDirPaths); err != nil {
-			s.logReloadError("%s", err)
-		}
-	}()
-	defer s.mu.Unlock()
-
-	if err := s.prewarmCaches(newBD); err != nil {
-		return s.logReloadError("prewarming caches failed: %s", err)
-	}
-
-	s.tree = newTree
-	s.basedirs = newBD
-	s.dataTimeStamp = mt
-
-	s.Logger.Printf("server ready again after reloading")
-
-	return true
-}
-
-// closeObsoleteDBs closes databases that are no longer needed after a reload.
-func (s *Server) closeObsoleteDBs(old interface{ CloseOnly(toDelete []string) error }, toDelete []string) error {
-	if old == nil {
-		return nil
-	}
-
-	if err := old.CloseOnly(toDelete); err != nil {
-		s.Logger.Printf("error closing obsolete tree dbs: %s", err)
-
-		return err
-	}
-
-	return nil
-}
-
-func (s *Server) logReloadError(format string, v ...any) bool {
-	s.Logger.Printf(format, v...)
-
-	return false
+	s.Logger.Printf("server ready again after provider update")
 }
 
 func (s *Server) dbUpdateTimestamps(c *gin.Context) {

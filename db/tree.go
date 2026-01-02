@@ -96,43 +96,12 @@ func (d *DirInfo) IsSameAsChild() bool {
 
 // Tree is used to do high-level queries on DB.Store() database files.
 type Tree struct {
-	db *DB
+	db Database
 }
 
-// NewTree, given the paths to one or more dguta database files (as created by
-// DB.Store()), returns a *Tree that can be used to do high-level queries on the
-// stats of a tree of disk folders. You should Close() the tree after use.
-func NewTree(paths ...string) (*Tree, error) {
-	db := NewDB(paths...)
-
-	if err := db.Open(); err != nil {
-		return nil, err
-	}
-
-	return &Tree{db: db}, nil
-}
-
-// OpenFrom create a new Tree, potentially removing some database sources and
-// adding others.
-//
-// Parameters:
-//   - add:    New underlying database file paths to include.
-//   - remove: Existing database paths that should be excluded.
-func (t *Tree) OpenFrom(add, remove []string) (*Tree, error) {
-	db, err := t.db.OpenFrom(add, remove)
-	if err != nil {
-		return nil, err
-	}
-
-	return &Tree{db}, nil
-}
-
-// CloseOnly closes the databases corresponding to the given paths.
-//
-// Should only be used after calling OpenFrom to close the unused databases in
-// the old Tree.
-func (t *Tree) CloseOnly(paths []string) error {
-	return t.db.CloseOnly(paths)
+// NewTree creates a Tree that queries the given database.
+func NewTree(db Database) *Tree {
+	return &Tree{db: db}
 }
 
 // DirInfo tells you the total number of files and their total size nested under
@@ -158,7 +127,11 @@ func (t *Tree) DirInfo(dir string, filter *Filter) (*DirInfo, error) {
 		Current: dcs,
 	}
 
-	children := t.db.Children(di.Current.Dir)
+	children, err := t.db.Children(di.Current.Dir)
+	if err != nil {
+		return nil, err
+	}
+
 	err = t.addChildInfo(di, children, filter)
 
 	return di, err
@@ -168,7 +141,10 @@ func (t *Tree) DirInfo(dir string, filter *Filter) (*DirInfo, error) {
 // with files in them that pass the filter. See GUTAs.Summary for an explanation
 // of the filter.
 func (t *Tree) DirHasChildren(dir string, filter *Filter) bool {
-	children := t.db.Children(dir)
+	children, err := t.db.Children(dir)
+	if err != nil {
+		return false
+	}
 
 	for _, child := range children {
 		ds, _ := t.getSummaryInfo(child, filter) //nolint:errcheck
@@ -350,7 +326,9 @@ func (t *Tree) FileLocations(dir string, filter *Filter) (DCSs, error) {
 // Close should be called after you've finished querying the tree to release its
 // database locks.
 func (t *Tree) Close() {
-	if t.db != nil {
-		t.db.Close()
+	if t.db == nil {
+		return
 	}
+
+	_ = t.db.Close()
 }

@@ -1,0 +1,178 @@
+package basedirs
+
+import "github.com/wtsi-hgi/wrstat-ui/db"
+
+// Output persists a database containing usage information for each of our
+// groups and users by calculated base directory.
+func (b *BaseDirs) Output(users, groups IDAgeDirs) error {
+	if b.store == nil {
+		return Error("store not set")
+	}
+
+	if err := b.store.Reset(); err != nil {
+		return err
+	}
+
+	if err := b.storeGroupUsage(groups); err != nil {
+		return err
+	}
+
+	if err := b.storeUserUsage(users); err != nil {
+		return err
+	}
+
+	if err := b.storeGroupHistories(groups); err != nil {
+		return err
+	}
+
+	if err := b.storeGroupSubDirs(groups); err != nil {
+		return err
+	}
+
+	if err := b.storeUserSubDirs(users); err != nil {
+		return err
+	}
+
+	return b.store.Finalize()
+}
+
+func (b *BaseDirs) storeGroupUsage(gidBase IDAgeDirs) error {
+	for gid, dcss := range gidBase {
+		for _, adcs := range dcss {
+			for _, dcs := range adcs {
+				quotaSize, quotaInode := b.quotas.Get(gid, dcs.Dir)
+
+				u := &Usage{
+					GID:         gid,
+					UIDs:        dcs.UIDs,
+					BaseDir:     dcs.Dir,
+					UsageSize:   dcs.Size,
+					QuotaSize:   quotaSize,
+					UsageInodes: dcs.Count,
+					QuotaInodes: quotaInode,
+					Mtime:       dcs.Mtime,
+					Age:         dcs.Age,
+				}
+
+				if err := b.store.PutGroupUsage(u); err != nil {
+					return err
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
+func (b *BaseDirs) storeUserUsage(uidBase IDAgeDirs) error {
+	for uid, dcss := range uidBase {
+		for _, adcs := range dcss {
+			for _, dcs := range adcs {
+				u := &Usage{
+					UID:         uid,
+					GIDs:        dcs.GIDs,
+					BaseDir:     dcs.Dir,
+					UsageSize:   dcs.Size,
+					UsageInodes: dcs.Count,
+					Mtime:       dcs.Mtime,
+					Age:         dcs.Age,
+				}
+
+				if err := b.store.PutUserUsage(u); err != nil {
+					return err
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
+type gidMountsMap map[uint32]map[string]db.DirSummary
+
+func (b *BaseDirs) storeGroupHistories(gidBase IDAgeDirs) error {
+	gidMounts := b.gidsToMountpoints(gidBase)
+
+	for gid, mounts := range gidMounts {
+		for mount, ds := range mounts {
+			quotaSize, quotaInode := b.quotas.Get(gid, mount)
+
+			key := HistoryKey{GID: gid, MountPath: mount}
+			point := History{
+				Date:        b.modTime,
+				UsageSize:   ds.Size,
+				UsageInodes: ds.Count,
+				QuotaSize:   quotaSize,
+				QuotaInodes: quotaInode,
+			}
+
+			if err := b.store.AppendGroupHistory(key, point); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+func (b *BaseDirs) gidsToMountpoints(gidBase IDAgeDirs) gidMountsMap {
+	gidMounts := make(gidMountsMap, len(gidBase))
+
+	for gid, dcss := range gidBase {
+		gidMounts[gid] = b.dcssToMountPoints(dcss)
+	}
+
+	return gidMounts
+}
+
+func (b *BaseDirs) dcssToMountPoints(dcss *AgeDirs) map[string]db.DirSummary {
+	mounts := make(map[string]db.DirSummary)
+
+	for _, dcs := range dcss[0] {
+		mp := b.mountPoints.PrefixOf(dcs.Dir)
+		if mp == "" {
+			continue
+		}
+
+		ds := mounts[mp]
+		ds.Count += dcs.Count
+		ds.Size += dcs.Size
+		if dcs.Modtime.After(ds.Modtime) {
+			ds.Modtime = dcs.Modtime
+		}
+
+		mounts[mp] = ds
+	}
+
+	return mounts
+}
+
+func (b *BaseDirs) storeGroupSubDirs(gidBase IDAgeDirs) error {
+	for gid, dcss := range gidBase {
+		for _, adcs := range dcss {
+			for _, dcs := range adcs {
+				key := SubDirKey{ID: gid, BaseDir: dcs.Dir, Age: dcs.Age}
+				if err := b.store.PutGroupSubDirs(key, dcs.Children); err != nil {
+					return err
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
+func (b *BaseDirs) storeUserSubDirs(uidBase IDAgeDirs) error {
+	for uid, dcss := range uidBase {
+		for _, adcs := range dcss {
+			for _, dcs := range adcs {
+				key := SubDirKey{ID: uid, BaseDir: dcs.Dir, Age: dcs.Age}
+				if err := b.store.PutUserSubDirs(key, dcs.Children); err != nil {
+					return err
+				}
+			}
+		}
+	}
+
+	return nil
+}

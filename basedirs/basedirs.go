@@ -32,33 +32,28 @@ package basedirs
 
 import (
 	"time"
-
-	"github.com/ugorji/go/codec"
-	"github.com/wtsi-hgi/wrstat-ui/db"
 )
 
 // BaseDirs is used to summarise disk usage information by base directory and
 // group or user.
 type BaseDirs struct {
-	dbPath      string
+	store       Store
 	quotas      *Quotas
-	ch          codec.Handle
-	mountPoints mountPoints
+	mountPoints MountPoints
 	modTime     time.Time
 }
 
 // NewCreator returns a BaseDirs that lets you create a database summarising
 // usage information by base directory, taken from the given quotas.
-func NewCreator(dbPath string, quotas *Quotas) (*BaseDirs, error) {
-	mp, err := getMountPoints()
+func NewCreator(store Store, quotas *Quotas) (*BaseDirs, error) {
+	mp, err := GetMountPoints()
 	if err != nil {
 		return nil, err
 	}
 
 	return &BaseDirs{
-		dbPath:      dbPath,
+		store:       store,
 		quotas:      quotas,
-		ch:          new(codec.BincHandle),
 		mountPoints: mp,
 		modTime:     time.Now(),
 	}, nil
@@ -67,39 +62,11 @@ func NewCreator(dbPath string, quotas *Quotas) (*BaseDirs, error) {
 // SetMountPoints can be used to manually set your mountpoints, if the automatic
 // discovery of mountpoints on your system doesn't work.
 func (b *BaseDirs) SetMountPoints(mountpoints []string) {
-	b.mountPoints = validateMountPoints(mountpoints)
+	b.mountPoints = ValidateMountPoints(mountpoints)
 }
 
 // SetModTime sets the time used for the new History date. Defaults to
 // time.Now() if not set.
 func (b *BaseDirs) SetModTime(t time.Time) {
 	b.modTime = t
-}
-
-// SummaryWithChildren contains all of the information for a basedirectory and
-// it's direct children.
-type SummaryWithChildren struct {
-	db.DirSummary
-	Children []*SubDir
-}
-
-// AgeDirs contains all of the basedirectory information for a particular user
-// or group at various time intervals.
-type AgeDirs [len(db.DirGUTAges)][]SummaryWithChildren
-
-// IDAgeDirs is a map of all of the user or group base directories at various
-// time intervals.
-type IDAgeDirs map[uint32]*AgeDirs
-
-// Get retrieves the base directory information for a given user or group ID.
-func (i IDAgeDirs) Get(id uint32) *AgeDirs {
-	ap := i[id]
-
-	if ap == nil {
-		ap = new(AgeDirs)
-
-		i[id] = ap
-	}
-
-	return ap
 }

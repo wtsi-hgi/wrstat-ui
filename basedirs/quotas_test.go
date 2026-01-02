@@ -93,7 +93,7 @@ func TestOwners(t *testing.T) {
 		ownersPath, err := internaldata.CreateOwnersCSV(t, internaldata.ExampleOwnersCSV)
 		So(err, ShouldBeNil)
 
-		owners, err := parseOwners(ownersPath)
+		owners, err := ParseOwners(ownersPath)
 		So(err, ShouldBeNil)
 		So(owners, ShouldResemble, map[uint32]string{
 			1: "Alan",
