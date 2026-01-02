@@ -26,8 +26,10 @@ package watch
 
 import (
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -35,7 +37,6 @@ import (
 	"github.com/VertebrateResequencing/wr/client"
 	"github.com/VertebrateResequencing/wr/jobqueue"
 	"github.com/inconshreveable/log15"
-	"github.com/wtsi-hgi/wrstat-ui/server"
 )
 
 const (
@@ -44,9 +45,88 @@ const (
 	basedirBasename = "basedirs.db"
 	summariseCPU    = 2
 	summariseMem    = 8192
+
+	datasetDirSeparator = "_"
+	datasetDirParts     = 2
 )
 
 var connectTimeout = 10 * time.Second //nolint:gochecknoglobals
+
+var validDatasetDir = regexp.MustCompile(`^[^.][^_]*_.`)
+
+type nameVersion struct {
+	name    string
+	version string
+}
+
+func findLatestDatasetDirs(basepath string, required ...string) ([]string, error) {
+	entries, err := os.ReadDir(basepath)
+	if err != nil {
+		return nil, err
+	}
+
+	latest := make(map[string]nameVersion)
+
+	for _, entry := range entries {
+		considerDatasetDirEntry(latest, basepath, entry, required)
+	}
+
+	dirs := make([]string, 0, len(latest))
+	for _, nv := range latest {
+		dirs = append(dirs, filepath.Join(basepath, nv.name))
+	}
+
+	slices.Sort(dirs)
+
+	return dirs, nil
+}
+
+func considerDatasetDirEntry(latest map[string]nameVersion, basepath string, entry fs.DirEntry, required []string) {
+	name := entry.Name()
+	if !entry.IsDir() || !validDatasetDir.MatchString(name) {
+		return
+	}
+
+	if !hasRequiredDatasetFiles(basepath, name, required) {
+		return
+	}
+
+	version, key, ok := splitDatasetDirName(name)
+	if !ok {
+		return
+	}
+
+	if previous, ok := latest[key]; ok && previous.version > version {
+		return
+	}
+
+	latest[key] = nameVersion{name: name, version: version}
+}
+
+func hasRequiredDatasetFiles(basepath, name string, required []string) bool {
+	for _, req := range required {
+		if !entryExists(filepath.Join(basepath, name, req)) {
+			return false
+		}
+	}
+
+	return true
+}
+
+func entryExists(path string) bool {
+	_, err := os.Stat(path)
+
+	return err == nil
+}
+
+func splitDatasetDirName(name string) (version, key string, ok bool) {
+	parts := strings.SplitN(name, datasetDirSeparator, datasetDirParts)
+	if len(parts) != datasetDirParts {
+		return "", "", false
+	}
+
+	return parts[0], parts[1], true
+}
 
 // Watch watches an input directory (which should be the output directory of a
 // wrstat multi run) for new stats.gz files, upon which it will run the
@@ -90,7 +170,7 @@ func watch(inputDirs []string, outputDir, quotaPath, basedirsConfig, mounts stri
 	}
 
 	for _, inputDir := range inputDirs {
-		inputPaths, err := server.FindDBDirs(inputDir, "stats.gz")
+		inputPaths, err := findLatestDatasetDirs(inputDir, "stats.gz")
 		if err != nil {
 			return fmt.Errorf("error getting input DB paths: %w", err)
 		}
@@ -108,12 +188,6 @@ func watch(inputDirs []string, outputDir, quotaPath, basedirsConfig, mounts stri
 	}
 
 	return nil
-}
-
-func entryExists(path string) bool {
-	_, err := os.Stat(path)
-
-	return err == nil
 }
 
 func scheduleSummarisers(s *client.Scheduler, inputDir, outputDir, quotaPath, basedirsConfig, mounts string,
@@ -167,7 +241,7 @@ func createSummariseJob(inputDir, outputDir, base, quotaPath, basedirsConfig, mo
 }
 
 func getPreviousBasedirsDB(outputDir, base string) (string, error) {
-	possibleBasedirs, err := server.FindDBDirs(outputDir, basedirBasename)
+	possibleBasedirs, err := findLatestDatasetDirs(outputDir, basedirBasename)
 	if err != nil {
 		return "", err
 	}

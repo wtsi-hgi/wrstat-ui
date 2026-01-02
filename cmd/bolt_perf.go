@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"github.com/spf13/cobra"
+	"github.com/wtsi-hgi/wrstat-ui/bolt"
 	"github.com/wtsi-hgi/wrstat-ui/internal/boltperf"
 )
 
@@ -124,16 +125,18 @@ var boltPerf boltPerfFlags
 
 func runBoltPerfImport(inputDir string) error {
 	opts := boltperf.ImportOptions{
-		Backend:  boltPerf.backend,
-		Owners:   boltPerf.owners,
-		Mounts:   boltPerf.mounts,
-		JSONOut:  boltPerf.jsonOut,
-		OutDir:   boltPerf.outDir,
-		Quota:    boltPerf.quota,
-		Config:   boltPerf.config,
-		MaxLines: boltPerf.maxLines,
-		Repeat:   boltPerf.repeat,
-		Warmup:   boltPerf.warmup,
+		Backend:          boltPerf.backend,
+		Owners:           boltPerf.owners,
+		Mounts:           boltPerf.mounts,
+		JSONOut:          boltPerf.jsonOut,
+		OutDir:           boltPerf.outDir,
+		Quota:            boltPerf.quota,
+		Config:           boltPerf.config,
+		MaxLines:         boltPerf.maxLines,
+		Repeat:           boltPerf.repeat,
+		Warmup:           boltPerf.warmup,
+		NewDGUTAWriter:   bolt.NewDGUTAWriter,
+		NewBaseDirsStore: bolt.NewBaseDirsStore,
 	}
 
 	return boltperf.Import(inputDir, opts, cliPrint)
@@ -141,14 +144,16 @@ func runBoltPerfImport(inputDir string) error {
 
 func runBoltPerfQuery(inputDir string) error {
 	opts := boltperf.QueryOptions{
-		Backend: boltPerf.backend,
-		Owners:  boltPerf.owners,
-		Mounts:  boltPerf.mounts,
-		JSONOut: boltPerf.jsonOut,
-		Dir:     boltPerf.dir,
-		Repeat:  boltPerf.repeat,
-		Warmup:  boltPerf.warmup,
-		Splits:  boltPerf.splits,
+		Backend:                 boltPerf.backend,
+		Owners:                  boltPerf.owners,
+		Mounts:                  boltPerf.mounts,
+		JSONOut:                 boltPerf.jsonOut,
+		Dir:                     boltPerf.dir,
+		Repeat:                  boltPerf.repeat,
+		Warmup:                  boltPerf.warmup,
+		Splits:                  boltPerf.splits,
+		OpenDatabase:            bolt.OpenDatabase,
+		OpenMultiBaseDirsReader: bolt.OpenMultiBaseDirsReader,
 	}
 
 	return boltperf.Query(inputDir, opts, cliPrint)

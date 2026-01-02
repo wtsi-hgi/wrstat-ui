@@ -66,6 +66,84 @@ func TestNoExternalBBoltImports(t *testing.T) {
 	}
 }
 
+func TestNoExternalBoltImports(t *testing.T) {
+	root := moduleRoot(t)
+
+	var offenders []string
+
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+
+		if d.IsDir() {
+			if shouldSkipDir(d.Name()) {
+				return filepath.SkipDir
+			}
+
+			return nil
+		}
+
+		if filepath.Ext(path) != ".go" {
+			return nil
+		}
+
+		rel, relErr := filepath.Rel(root, path)
+		if relErr != nil {
+			return relErr
+		}
+
+		rel = filepath.ToSlash(rel)
+
+		imports, parseErr := parseImports(path)
+		if parseErr != nil {
+			return parseErr
+		}
+
+		importsBolt := false
+		importsTesting := false
+
+		for _, imp := range imports {
+			switch imp {
+			case "github.com/wtsi-hgi/wrstat-ui/bolt":
+				importsBolt = true
+			case "testing":
+				importsTesting = true
+			}
+		}
+
+		if !importsBolt {
+			return nil
+		}
+
+		allowed := false
+
+		switch {
+		case strings.HasPrefix(rel, "cmd/"):
+			allowed = true
+		case rel == "main.go":
+			allowed = true
+		case strings.HasSuffix(rel, "_test.go"):
+			allowed = true
+		case strings.HasPrefix(rel, "internal/") && importsTesting:
+			allowed = true
+		}
+
+		if !allowed {
+			offenders = append(offenders, rel)
+		}
+
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk failed: %v", err)
+	}
+
+	if len(offenders) > 0 {
+		t.Fatalf("bolt imported from disallowed packages: %v", offenders)
+	}
+}
+
 func moduleRoot(t *testing.T) string {
 	t.Helper()
 

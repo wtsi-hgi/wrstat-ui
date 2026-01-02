@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -12,17 +13,18 @@ import (
 
 	"github.com/klauspost/pgzip"
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
-	"github.com/wtsi-hgi/wrstat-ui/bolt"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 	"github.com/wtsi-hgi/wrstat-ui/internal/split"
 	"github.com/wtsi-hgi/wrstat-ui/internal/summariseutil"
-	"github.com/wtsi-hgi/wrstat-ui/server"
 	"github.com/wtsi-hgi/wrstat-ui/stats"
 	"github.com/wtsi-hgi/wrstat-ui/summary"
+	sbasedirs "github.com/wtsi-hgi/wrstat-ui/summary/basedirs"
+	dirguta "github.com/wtsi-hgi/wrstat-ui/summary/dirguta"
 )
 
 const (
-	defaultDirPerm = 0o755
+	defaultDirPerm       = 0o755
+	summariseDBBatchSize = 10000
 
 	dgutaDBsSuffix    = "dguta.dbs"
 	basedirsBasename  = "basedirs.db"
@@ -88,7 +90,7 @@ func validateBackend(backend string) error {
 }
 
 func findDatasetDirs(baseDir string, required ...string) ([]string, error) {
-	dirs, err := server.FindDBDirs(baseDir, required...)
+	dirs, err := findLatestDatasetDirs(baseDir, required...)
 	if err != nil {
 		return nil, err
 	}
@@ -100,6 +102,82 @@ func findDatasetDirs(baseDir string, required ...string) ([]string, error) {
 	sort.Strings(dirs)
 
 	return dirs, nil
+}
+
+func findLatestDatasetDirs(baseDir string, required ...string) ([]string, error) {
+	entries, err := os.ReadDir(baseDir)
+	if err != nil {
+		return nil, err
+	}
+
+	latest := make(map[string]datasetNameVersion)
+
+	for _, entry := range entries {
+		considerDatasetDirEntry(latest, baseDir, entry, required)
+	}
+
+	dirs := make([]string, 0, len(latest))
+	for _, entry := range latest {
+		dirs = append(dirs, filepath.Join(baseDir, entry.name))
+	}
+
+	sort.Strings(dirs)
+
+	return dirs, nil
+}
+
+func considerDatasetDirEntry(
+	latest map[string]datasetNameVersion,
+	baseDir string,
+	entry fs.DirEntry,
+	required []string,
+) {
+	if !isValidDatasetDir(entry, baseDir, required...) {
+		return
+	}
+
+	key, version, ok := datasetKeyAndVersion(entry.Name())
+	if !ok {
+		return
+	}
+
+	if previous, ok := latest[key]; ok && previous.version > version {
+		return
+	}
+
+	latest[key] = datasetNameVersion{name: entry.Name(), version: version}
+}
+
+func isValidDatasetDir(entry os.DirEntry, baseDir string, required ...string) bool {
+	name := entry.Name()
+	if !entry.IsDir() {
+		return false
+	}
+
+	if name == "" || strings.HasPrefix(name, ".") {
+		return false
+	}
+
+	if !strings.Contains(name, "_") {
+		return false
+	}
+
+	for _, req := range required {
+		if _, err := os.Stat(filepath.Join(baseDir, name, req)); err != nil {
+			return false
+		}
+	}
+
+	return true
+}
+
+func datasetKeyAndVersion(name string) (key, version string, ok bool) {
+	parts := strings.SplitN(name, "_", 2)
+	if len(parts) != 2 {
+		return "", "", false
+	}
+
+	return parts[1], parts[0], true
 }
 
 func durationMS(d time.Duration) float64 {
@@ -237,40 +315,152 @@ func addSummarisers(
 	modtime time.Time,
 	opts ImportOptions,
 ) (func() error, error) {
-	bdClose, err := summariseutil.AddBasedirsSummariser(
-		ss,
-		targets.basedirsDBPath,
-		"",
-		opts.Quota,
-		opts.Config,
-		opts.Mounts,
-		modtime,
-	)
+	store, err := addBasedirsSummariser(ss, targets.basedirsDBPath, modtime, opts)
 	if err != nil {
 		return nil, err
 	}
 
-	dgClose, err := summariseutil.AddDirgutaSummariser(ss, targets.dgutaDBDir, modtime)
+	writer, err := addDGUTASummariser(ss, targets.dgutaDBDir, modtime, opts)
 	if err != nil {
-		if bdClose != nil {
-			return nil, errors.Join(err, bdClose())
-		}
+		_ = store.Close()
 
 		return nil, err
 	}
 
 	return func() error {
-		var err error
-		if bdClose != nil {
-			err = errors.Join(err, bdClose())
-		}
-
-		if dgClose != nil {
-			err = errors.Join(err, dgClose())
-		}
-
-		return err
+		return errors.Join(store.Close(), writer.Close())
 	}, nil
+}
+
+func addBasedirsSummariser(
+	ss *summary.Summariser,
+	basedirsDBPath string,
+	modtime time.Time,
+	opts ImportOptions,
+) (basedirs.Store, error) {
+	store, bd, shouldOutput, err := buildBasedirsSummariser(basedirsDBPath, modtime, opts)
+	if err != nil {
+		return nil, err
+	}
+
+	ss.AddDirectoryOperation(sbasedirs.NewBaseDirs(shouldOutput, bd))
+
+	return store, nil
+}
+
+func buildBasedirsSummariser(
+	basedirsDBPath string,
+	modtime time.Time,
+	opts ImportOptions,
+) (basedirs.Store, *basedirs.BaseDirs, func(*summary.DirectoryPath) bool, error) {
+	quotas, shouldOutput, mps, err := parseBasedirsInputs(opts)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	store, err := openBasedirsStoreForImport(basedirsDBPath, modtime, opts)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	bd, err := createBaseDirsCreatorForImport(store, quotas, mps, modtime)
+	if err != nil {
+		_ = store.Close()
+
+		return nil, nil, nil, err
+	}
+
+	return store, bd, shouldOutput, nil
+}
+
+func parseBasedirsInputs(
+	opts ImportOptions,
+) (*basedirs.Quotas, func(*summary.DirectoryPath) bool, []string, error) {
+	quotas, config, err := summariseutil.ParseBasedirConfig(opts.Quota, opts.Config)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	mps, err := summariseutil.ParseMountpointsFromFile(opts.Mounts)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	return quotas, config.PathShouldOutput, mps, nil
+}
+
+func openBasedirsStoreForImport(basedirsDBPath string, modtime time.Time, opts ImportOptions) (basedirs.Store, error) {
+	if opts.NewBaseDirsStore == nil {
+		return nil, errors.New("NewBaseDirsStore is required") //nolint:err113
+	}
+
+	removeErr := os.Remove(basedirsDBPath)
+	if removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+		return nil, removeErr
+	}
+
+	store, err := opts.NewBaseDirsStore(basedirsDBPath, "")
+	if err != nil {
+		return nil, err
+	}
+
+	mountPath := summariseutil.DeriveMountPathFromOutputDir(basedirsDBPath)
+	store.SetMountPath(mountPath)
+	store.SetUpdatedAt(modtime)
+
+	return store, nil
+}
+
+func createBaseDirsCreatorForImport(
+	store basedirs.Store,
+	quotas *basedirs.Quotas,
+	mountpoints []string,
+	modtime time.Time,
+) (*basedirs.BaseDirs, error) {
+	bd, err := basedirs.NewCreator(store, quotas)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(mountpoints) > 0 {
+		bd.SetMountPoints(mountpoints)
+	}
+
+	bd.SetModTime(modtime)
+
+	return bd, nil
+}
+
+func addDGUTASummariser(
+	ss *summary.Summariser,
+	dgutaDBDir string,
+	modtime time.Time,
+	opts ImportOptions,
+) (db.DGUTAWriter, error) {
+	if opts.NewDGUTAWriter == nil {
+		return nil, errors.New("NewDGUTAWriter is required") //nolint:err113
+	}
+
+	removeErr := os.RemoveAll(dgutaDBDir)
+	if removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+		return nil, removeErr
+	}
+
+	if mkErr := os.MkdirAll(dgutaDBDir, defaultDirPerm); mkErr != nil {
+		return nil, mkErr
+	}
+
+	writer, err := opts.NewDGUTAWriter(dgutaDBDir)
+	if err != nil {
+		return nil, err
+	}
+
+	writer.SetMountPath(summariseutil.DeriveMountPathFromOutputDir(dgutaDBDir))
+	writer.SetUpdatedAt(modtime)
+	writer.SetBatchSize(summariseDBBatchSize)
+	ss.AddDirectoryOperation(dirguta.NewDirGroupUserTypeAge(writer))
+
+	return writer, nil
 }
 
 // Query runs the in-process query timing harness against Bolt DBs discovered
@@ -315,14 +505,14 @@ func buildQueryContext(inputDir string, opts QueryOptions, printf PrintfFunc) (q
 		return queryContext{}, err
 	}
 
-	queryDir := resolveQueryDir(datasetDir, mountPath, opts.Dir)
-	if strings.TrimSpace(opts.Dir) == "" {
-		printf("query: auto-selected dir=%s\n", queryDir)
-	}
-
-	tree, mr, closeFn, err := openQueryDBs(datasetDir, opts.Owners)
+	tree, mr, closeFn, err := openQueryDBs(opts, datasetDir, opts.Owners)
 	if err != nil {
 		return queryContext{}, err
+	}
+
+	queryDir := resolveQueryDir(tree, mountPath, opts.Dir)
+	if strings.TrimSpace(opts.Dir) == "" {
+		printf("query: auto-selected dir=%s\n", queryDir)
 	}
 
 	prepErr := prepareMultiReader(mr, opts.Mounts)
@@ -345,13 +535,53 @@ func buildQueryContext(inputDir string, opts QueryOptions, printf PrintfFunc) (q
 	}, nil
 }
 
-func resolveQueryDir(datasetDir, mountPath, override string) string {
+func openQueryDBs(
+	opts QueryOptions,
+	datasetDir string,
+	ownersPath string,
+) (*db.Tree, basedirs.Reader, func() error, error) {
+	if opts.OpenDatabase == nil {
+		return nil, nil, nil, errors.New("OpenDatabase is required") //nolint:err113
+	}
+
+	if opts.OpenMultiBaseDirsReader == nil {
+		return nil, nil, nil, errors.New("OpenMultiBaseDirsReader is required") //nolint:err113
+	}
+
+	dgutaPath := filepath.Join(datasetDir, dgutaDBsSuffix)
+	basedirsPath := filepath.Join(datasetDir, basedirsBasename)
+
+	database, err := opts.OpenDatabase(dgutaPath)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	tree := db.NewTree(database)
+
+	mr, err := opts.OpenMultiBaseDirsReader(ownersPath, basedirsPath)
+	if err != nil {
+		tree.Close()
+
+		return nil, nil, nil, err
+	}
+
+	closeFn := func() error {
+		err := mr.Close()
+		tree.Close()
+
+		return err
+	}
+
+	return tree, mr, closeFn, nil
+}
+
+func resolveQueryDir(tree *db.Tree, mountPath, override string) string {
 	queryDir := normaliseDirPath(override)
 	if queryDir != "" {
 		return queryDir
 	}
 
-	return pickRepresentativeDir(datasetDir, mountPath)
+	return pickRepresentativeDirFromTree(tree, mountPath)
 }
 
 func normaliseDirPath(dir string) string {
@@ -371,19 +601,7 @@ func normaliseDirPath(dir string) string {
 	return d
 }
 
-func pickRepresentativeDir(datasetDir, mountPath string) string {
-	database, err := bolt.OpenDatabase(filepath.Join(datasetDir, dgutaDBsSuffix))
-	if err != nil {
-		return mountPath
-	}
-
-	defer func() {
-		_ = database.Close()
-	}()
-
-	tree := db.NewTree(database)
-	defer tree.Close()
-
+func pickRepresentativeDirFromTree(tree *db.Tree, mountPath string) string {
 	filter := &db.Filter{Age: db.DGUTAgeAll}
 	current := mountPath
 
@@ -431,34 +649,6 @@ func pickLargestChild(children []*db.DirSummary) *db.DirSummary {
 	}
 
 	return best
-}
-
-func openQueryDBs(datasetDir string, ownersPath string) (*db.Tree, basedirs.Reader, func() error, error) {
-	dgutaPath := filepath.Join(datasetDir, dgutaDBsSuffix)
-	basedirsPath := filepath.Join(datasetDir, basedirsBasename)
-
-	database, err := bolt.OpenDatabase(dgutaPath)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-
-	tree := db.NewTree(database)
-
-	mr, err := bolt.OpenMultiBaseDirsReader(ownersPath, basedirsPath)
-	if err != nil {
-		tree.Close()
-
-		return nil, nil, nil, err
-	}
-
-	closeFn := func() error {
-		err := mr.Close()
-		tree.Close()
-
-		return err
-	}
-
-	return tree, mr, closeFn, nil
 }
 
 func prepareMultiReader(mr basedirs.Reader, mountsPath string) error {
@@ -727,6 +917,11 @@ func discoverQueryDatasets(inputDir string, printf PrintfFunc) ([]string, string
 	return datasetDirs, datasetDir, nil
 }
 
+type datasetNameVersion struct {
+	name    string
+	version string
+}
+
 // ImportOptions configures the bolt-perf import harness.
 type ImportOptions struct {
 	Backend  string
@@ -739,6 +934,9 @@ type ImportOptions struct {
 	MaxLines int
 	Repeat   int
 	Warmup   int
+
+	NewDGUTAWriter   func(outputDir string) (db.DGUTAWriter, error)
+	NewBaseDirsStore func(dbPath, previousDBPath string) (basedirs.Store, error)
 }
 
 // QueryOptions configures the bolt-perf query harness.
@@ -752,6 +950,9 @@ type QueryOptions struct {
 	Repeat int
 	Warmup int
 	Splits int
+
+	OpenDatabase            func(paths ...string) (db.Database, error)
+	OpenMultiBaseDirsReader func(ownersPath string, dbPaths ...string) (basedirs.Reader, error)
 }
 
 type importSpec struct {
