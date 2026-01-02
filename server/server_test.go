@@ -27,12 +27,12 @@ package server
 
 import (
 	"compress/gzip"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"os/user"
 	"path/filepath"
 	"sort"
@@ -59,6 +59,746 @@ func TestIDsToWanted(t *testing.T) {
 	})
 }
 
+type analyticsData struct {
+	Name, Session, Data string
+	Time                int64
+}
+
+// testClientsOnRealServer tests our client method GetWhereDataIs and the tree
+// webpage on a real listening server, if we have at least 2 gids to test with.
+func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, s *Server, addr, cert, key string) {
+	t.Helper()
+
+	if len(gids) < 2 {
+		return
+	}
+
+	g, errg := user.LookupGroupId(gids[0])
+	So(errg, ShouldBeNil)
+
+	refTime := time.Now().Unix()
+
+	Convey("Given databases", func() {
+		jwtBasename := ".wrstat.test.jwt"
+		serverTokenBasename := ".wrstat.test.servertoken" //nolint:gosec
+
+		c, err := gas.NewClientCLI(jwtBasename, serverTokenBasename, "localhost:1", cert, true)
+		So(err, ShouldBeNil)
+
+		_, _, err = GetWhereDataIs(c, "", "", "", "", db.DGUTAgeAll, "")
+		So(err, ShouldNotBeNil)
+
+		path, err := CreateExampleDBsCustomIDs(t, uid, gids[0], gids[1], refTime)
+		So(err, ShouldBeNil)
+
+		ownersPath, err := internaldata.CreateOwnersCSV(t, internaldata.ExampleOwnersCSV)
+		So(err, ShouldBeNil)
+
+		c, err = gas.NewClientCLI(jwtBasename, serverTokenBasename, addr, cert, false)
+		So(err, ShouldBeNil)
+
+		Convey("You can't get where data is or add the tree page without auth", func() {
+			p, provErr := BuildTestProvider(t, []string{path}, ownersPath, time.Unix(refTime, 0))
+			So(provErr, ShouldBeNil)
+
+			setErr := s.SetProvider(p)
+			So(setErr, ShouldBeNil)
+
+			_, _, err = GetWhereDataIs(c, "/", "", "", "", db.DGUTAgeAll, "")
+			So(err, ShouldNotBeNil)
+			So(err, ShouldEqual, gas.ErrNoAuth)
+
+			err = s.AddTreePage()
+			So(err, ShouldNotBeNil)
+		})
+
+		Convey("Root can see everything", func() {
+			err = s.EnableAuthWithServerToken(cert, key, serverTokenBasename, func(username, password string) (bool, string) {
+				return true, ""
+			})
+			So(err, ShouldBeNil)
+
+			p, provErr := BuildTestProvider(t, []string{path}, ownersPath, time.Unix(refTime, 0))
+			So(provErr, ShouldBeNil)
+
+			setErr := s.SetProvider(p)
+			So(setErr, ShouldBeNil)
+
+			err = c.Login("user", "pass")
+			So(err, ShouldBeNil)
+
+			_, _, err = GetWhereDataIs(c, " ", "", "", "", db.DGUTAgeAll, "")
+			So(err, ShouldNotBeNil)
+			So(err, ShouldEqual, ErrBadQuery)
+
+			json, dcss, errg := GetWhereDataIs(c, "/", "", "", "", db.DGUTAgeAll, "0")
+			So(errg, ShouldBeNil)
+			So(string(json), ShouldNotBeBlank)
+			So(len(dcss), ShouldEqual, 1)
+			So(dcss[0].Count, ShouldEqual, 24)
+
+			json, dcss, errg = GetWhereDataIs(c, "/", g.Name, "", "", db.DGUTAgeAll, "0")
+			So(errg, ShouldBeNil)
+			So(string(json), ShouldNotBeBlank)
+			So(len(dcss), ShouldEqual, 1)
+			So(dcss[0].Count, ShouldEqual, 13)
+
+			json, dcss, errg = GetWhereDataIs(c, "/", "", "root", "", db.DGUTAgeAll, "0")
+			So(errg, ShouldBeNil)
+			So(string(json), ShouldNotBeBlank)
+			So(len(dcss), ShouldEqual, 1)
+			So(dcss[0].Count, ShouldEqual, 14)
+
+			json, dcss, errg = GetWhereDataIs(c, "/", "", "", "", db.DGUTAgeA7Y, "0")
+			So(errg, ShouldBeNil)
+			So(string(json), ShouldNotBeBlank)
+			So(len(dcss), ShouldEqual, 1)
+			So(dcss[0].Count, ShouldEqual, 19)
+		})
+
+		Convey("Normal users have access restricted only by group", func() {
+			err = s.EnableAuth(cert, key, func(username, password string) (bool, string) {
+				return true, uid
+			})
+			So(err, ShouldBeNil)
+
+			p, provErr := BuildTestProvider(t, []string{path}, ownersPath, time.Unix(refTime, 0))
+			So(provErr, ShouldBeNil)
+
+			setErr := s.SetProvider(p)
+			So(setErr, ShouldBeNil)
+
+			err = c.Login("user", "pass")
+			So(err, ShouldBeNil)
+
+			json, dcss, errg := GetWhereDataIs(c, "/", "", "", "", db.DGUTAgeAll, "0")
+			So(errg, ShouldBeNil)
+			So(string(json), ShouldNotBeBlank)
+			So(len(dcss), ShouldEqual, 1)
+			So(dcss[0].Count, ShouldEqual, 23)
+
+			json, dcss, errg = GetWhereDataIs(c, "/", g.Name, "", "", db.DGUTAgeAll, "0")
+			So(errg, ShouldBeNil)
+			So(string(json), ShouldNotBeBlank)
+			So(len(dcss), ShouldEqual, 1)
+			So(dcss[0].Count, ShouldEqual, 13)
+
+			_, _, errg = GetWhereDataIs(c, "/", "", "root", "", db.DGUTAgeAll, "0")
+			So(errg, ShouldBeNil)
+			So(string(json), ShouldNotBeBlank)
+			So(len(dcss), ShouldEqual, 1)
+			So(dcss[0].Count, ShouldEqual, 13)
+		})
+
+		Convey("Once you add the tree page", func() {
+			var logWriter strings.Builder
+
+			s := New(&logWriter)
+
+			err = s.EnableAuth(cert, key, func(username, password string) (bool, string) {
+				return true, uid
+			})
+			So(err, ShouldBeNil)
+
+			p, err := BuildTestProvider(t, []string{path}, ownersPath, time.Unix(refTime, 0))
+			So(err, ShouldBeNil)
+			err = s.SetProvider(p)
+			So(err, ShouldBeNil)
+
+			s.dataTimeStamp = map[string]int64{}
+
+			s.gidToNameCache[1] = "GroupA"
+			s.gidToNameCache[2] = "GroupB"
+			s.gidToNameCache[3] = "GroupC"
+			s.gidToNameCache[77777] = "77777"
+			s.uidToNameCache[101] = "UserA"
+			s.uidToNameCache[102] = "UserB"
+			s.uidToNameCache[103] = "UserC"
+			s.uidToNameCache[88888] = "88888"
+
+			s.basedirs.SetCachedGroup(1, "GroupA")
+			s.basedirs.SetCachedGroup(2, "GroupB")
+			s.basedirs.SetCachedGroup(3, "GroupC")
+			s.basedirs.SetCachedUser(77777, "77777")
+			s.basedirs.SetCachedUser(101, "UserA")
+			s.basedirs.SetCachedUser(102, "UserB")
+			s.basedirs.SetCachedUser(103, "UserC")
+			s.basedirs.SetCachedUser(88888, "88888")
+
+			err = s.AddTreePage()
+			So(err, ShouldBeNil)
+
+			addr, dfunc, err := gas.StartTestServer(s, cert, key)
+			So(err, ShouldBeNil)
+
+			defer func() {
+				errd := dfunc()
+				So(errd, ShouldBeNil)
+			}()
+
+			token, err := gas.Login(gas.NewClientRequest(addr, cert), "user", "pass")
+			So(err, ShouldBeNil)
+
+			Convey("You can get the static tree web page", func() {
+				r := gas.NewAuthenticatedClientRequest(addr, cert, token)
+
+				resp, errGet := r.Get("tree/tree.html")
+				So(errGet, ShouldBeNil)
+				So(strings.ToUpper(string(resp.Body())), ShouldStartWith, "<!DOCTYPE HTML>")
+
+				resp, err = r.Get("")
+				So(err, ShouldBeNil)
+				So(strings.ToUpper(string(resp.Body())), ShouldStartWith, "<!DOCTYPE HTML>")
+			})
+
+			Convey("You can send data to the analytics endpoint", func() {
+				So(s.InitAnalyticsDB(filepath.Join(t.TempDir(), "db")), ShouldBeNil)
+
+				getAndClear := func() []analyticsData {
+					r, errr := s.analyticsDB.QueryContext(context.Background(), "SELECT user, session, state, time FROM [events];")
+					So(errr, ShouldBeNil)
+
+					var rows []analyticsData
+
+					for r.Next() {
+						var ad analyticsData
+
+						So(r.Scan(&ad.Name, &ad.Session, &ad.Data, &ad.Time), ShouldBeNil)
+
+						rows = append(rows, ad)
+					}
+
+					r.Close()
+
+					_, err = s.analyticsDB.ExecContext(context.Background(), "DELETE FROM [events];")
+					So(err, ShouldBeNil)
+
+					return rows
+				}
+
+				var start, end int64
+
+				sessionID := "AAA"
+				sendBeacon := func(referers ...string) {
+					start = time.Now().Unix()
+
+					for _, referer := range referers {
+						r := gas.NewClientRequest(addr, cert)
+						r.Cookies = append(r.Cookies, &http.Cookie{Name: "jwt", Value: token})
+						r.Body = sessionID
+
+						r.Header.Set("Referer", referer)
+
+						_, err = r.Post(EndPointAuthSpyware)
+						So(err, ShouldBeNil)
+					}
+
+					end = time.Now().Unix() + 1
+				}
+
+				checkTimes := func(data []analyticsData) {
+					for n := range data {
+						So(data[n].Time, ShouldBeBetweenOrEqual, start, end)
+
+						data[n].Time = 0
+					}
+				}
+
+				sendBeacon("")
+
+				d := getAndClear()
+
+				checkTimes(d)
+
+				So(d, ShouldResemble, []analyticsData{
+					{Name: "user", Session: "AAA", Data: "{}\n"},
+				})
+
+				sendBeacon(`?useCount=true&owners=["a","bc"]`, `?filterMaxSize=123&users=[1,2,3]&byUser="badString"`)
+
+				d = getAndClear()
+
+				checkTimes(d)
+
+				So(d, ShouldResemble, []analyticsData{
+					{Name: "user", Session: "AAA", Data: "{\"owners\":[\"a\",\"bc\"],\"useCount\":true}\n"},
+					{Name: "user", Session: "AAA", Data: "{\"filterMaxSize\":123,\"users\":[1,2,3]}\n"},
+				})
+			})
+
+			Convey("You can access the tree API", func() {
+				r := gas.NewAuthenticatedClientRequest(addr, cert, token)
+				resp, errTree := r.SetResult(&TreeElement{}).
+					ForceContentType("application/json").
+					Get(EndPointAuthTree)
+
+				So(errTree, ShouldBeNil)
+				So(resp.Result(), ShouldNotBeNil)
+
+				users := []string{"root", username}
+				sort.Strings(users)
+
+				unsortedGroups := gidsToGroups(t, gids[0], gids[1], "0")
+				groups := make([]string, len(unsortedGroups))
+				copy(groups, unsortedGroups)
+				sort.Strings(groups)
+
+				expectedFTs := []string{"bam", "cram", "dir", "temp"}
+				expectedAtime := "1970-01-01T00:00:50Z"
+				expectedMtime := "1970-01-01T00:01:30Z"
+
+				const numRootDirectories = 13
+
+				const numADirectories = 12
+
+				const directorySize = 4096
+
+				tm := *resp.Result().(*TreeElement) //nolint:forcetypeassert,errcheck
+
+				rootExpectedMtime := tm.Mtime
+				So(len(tm.Children), ShouldBeGreaterThan, 1)
+				kExpectedAtime := tm.Children[1].Atime
+				So(tm, ShouldResemble, TreeElement{
+					Name:        "/",
+					Path:        "/",
+					Count:       24 + numRootDirectories + 1,
+					Size:        141 + (numRootDirectories+1)*directorySize,
+					Atime:       expectedAtime,
+					CommonATime: summary.Range7Years,
+					Mtime:       rootExpectedMtime,
+					CommonMTime: summary.Range7Years,
+					Users:       users,
+					Groups:      groups,
+					FileTypes:   expectedFTs,
+					HasChildren: true,
+					Children: []*TreeElement{
+						{
+							Name:        "a",
+							Path:        "/a",
+							Count:       19 + numADirectories,
+							Size:        126 + numADirectories*directorySize,
+							Atime:       expectedAtime,
+							CommonATime: summary.Range7Years,
+							Mtime:       expectedMtime,
+							CommonMTime: summary.Range7Years,
+							Users:       users,
+							Groups:      groups,
+							FileTypes:   expectedFTs,
+							HasChildren: true,
+							Children:    nil,
+						},
+						{
+							Name:        "k",
+							Path:        "/k",
+							Count:       5 + 1,
+							Size:        15 + 1*directorySize,
+							Atime:       kExpectedAtime,
+							CommonATime: summary.RangeLess1Month,
+							Mtime:       rootExpectedMtime,
+							CommonMTime: summary.RangeLess1Month,
+							Users:       []string{username},
+							Groups:      []string{unsortedGroups[1]},
+							FileTypes:   []string{"cram", "dir"},
+							HasChildren: false,
+							Children:    nil,
+						},
+					},
+				})
+
+				r = gas.NewAuthenticatedClientRequest(addr, cert, token)
+				resp, err = r.SetResult(&TreeElement{}).
+					ForceContentType("application/json").
+					SetQueryParams(map[string]string{
+						"path":   "/",
+						"groups": g.Name,
+					}).
+					Get(EndPointAuthTree)
+
+				So(err, ShouldBeNil)
+				So(resp.Result(), ShouldNotBeNil)
+
+				expectedMtime2 := "1970-01-01T00:01:20Z"
+
+				tm = *resp.Result().(*TreeElement) //nolint:forcetypeassert,errcheck
+				So(tm, ShouldResemble, TreeElement{
+					Name:        "/",
+					Path:        "/",
+					Count:       13 + 9,
+					Size:        120 + 9*directorySize,
+					Atime:       expectedAtime,
+					CommonATime: summary.Range7Years,
+					Mtime:       expectedMtime2,
+					CommonMTime: summary.Range7Years,
+					Users:       users,
+					Groups:      []string{g.Name},
+					FileTypes:   expectedFTs,
+					HasChildren: true,
+					Children: []*TreeElement{
+						{
+							Name:        "a",
+							Path:        "/a",
+							Count:       13 + 8,
+							Size:        120 + 8*directorySize,
+							Atime:       expectedAtime,
+							CommonATime: summary.Range7Years,
+							Mtime:       expectedMtime2,
+							CommonMTime: summary.Range7Years,
+							Users:       users,
+							Groups:      []string{g.Name},
+							FileTypes:   expectedFTs,
+							HasChildren: true,
+							Children:    nil,
+						},
+					},
+				})
+
+				r = gas.NewAuthenticatedClientRequest(addr, cert, token)
+				resp, err = r.SetResult(&TreeElement{}).
+					ForceContentType("application/json").
+					SetQueryParams(map[string]string{
+						"path": "/a",
+					}).
+					Get(EndPointAuthTree)
+
+				So(err, ShouldBeNil)
+				So(resp.Result(), ShouldNotBeNil)
+
+				abgroups := gidsToGroups(t, g.Gid, "0")
+				sort.Strings(abgroups)
+
+				acgroups := gidsToGroups(t, gids[1])
+				cramAndDir := []string{"cram", "dir"}
+
+				tm = *resp.Result().(*TreeElement) //nolint:forcetypeassert,errcheck
+				So(tm, ShouldResemble, TreeElement{
+					Name:        "a",
+					Path:        "/a",
+					Count:       19 + numADirectories,
+					Size:        126 + numADirectories*directorySize,
+					Atime:       expectedAtime,
+					CommonATime: summary.Range7Years,
+					Mtime:       expectedMtime,
+					CommonMTime: summary.Range7Years,
+					Users:       users,
+					Groups:      groups,
+					FileTypes:   expectedFTs,
+					HasChildren: true,
+					Children: []*TreeElement{
+						{
+							Name:        "b",
+							Path:        "/a/b",
+							Count:       19 - 5 + numADirectories - 3,
+							Size:        126 - 5 + (numADirectories-3)*directorySize,
+							Atime:       expectedAtime,
+							CommonATime: summary.Range7Years,
+							Mtime:       expectedMtime2,
+							CommonMTime: summary.Range7Years,
+							Users:       users,
+							Groups:      abgroups,
+							FileTypes:   expectedFTs,
+							HasChildren: true,
+							Children:    nil,
+						},
+						{
+							Name:        "c",
+							Path:        "/a/c",
+							Count:       7,
+							Size:        5 + 2*directorySize,
+							Atime:       "1970-01-01T00:01:30Z",
+							CommonATime: summary.Range7Years,
+							Mtime:       expectedMtime,
+							CommonMTime: summary.Range7Years,
+							Users:       []string{"root"},
+							Groups:      acgroups,
+							FileTypes:   cramAndDir,
+							HasChildren: true,
+							Children:    nil,
+						},
+					},
+				})
+
+				r = gas.NewAuthenticatedClientRequest(addr, cert, token)
+				resp, err = r.SetResult(&TreeElement{}).
+					ForceContentType("application/json").
+					SetQueryParams(map[string]string{
+						"path": "/a/b/d",
+					}).
+					Get(EndPointAuthTree)
+
+				So(err, ShouldBeNil)
+				So(resp.Result(), ShouldNotBeNil)
+
+				dgroups := gidsToGroups(t, gids[0], "0")
+				sort.Strings(dgroups)
+
+				root := []string{"root"}
+
+				tm = *resp.Result().(*TreeElement) //nolint:forcetypeassert,errcheck
+				So(tm, ShouldResemble, TreeElement{
+					Name:        "d",
+					Path:        "/a/b/d",
+					Count:       12 + 5,
+					Size:        111 + 5*directorySize,
+					Atime:       expectedAtime,
+					CommonATime: summary.Range7Years,
+					Mtime:       "1970-01-01T00:01:15Z",
+					CommonMTime: summary.Range7Years,
+					Users:       users,
+					Groups:      dgroups,
+					FileTypes:   cramAndDir,
+					HasChildren: true,
+					NoAuth:      false,
+					Children: []*TreeElement{
+						{
+							Name:        "f",
+							Path:        "/a/b/d/f",
+							Count:       2,
+							Size:        10 + directorySize,
+							Atime:       expectedAtime,
+							CommonATime: summary.RangeLess1Month,
+							Mtime:       "1970-01-01T00:00:50Z",
+							CommonMTime: summary.Range7Years,
+							Users:       []string{username},
+							Groups:      []string{g.Name},
+							FileTypes:   cramAndDir,
+							HasChildren: false,
+							Children:    nil,
+							NoAuth:      false,
+						},
+						{
+							Name:        "g",
+							Path:        "/a/b/d/g",
+							Count:       11,
+							Size:        100 + directorySize,
+							Atime:       "1970-01-01T00:00:50Z",
+							CommonATime: summary.Range7Years,
+							Mtime:       "1970-01-01T00:01:15Z",
+							CommonMTime: summary.Range7Years,
+							Users:       users,
+							Groups:      []string{g.Name},
+							FileTypes:   cramAndDir,
+							HasChildren: false,
+							Children:    nil,
+							NoAuth:      false,
+						},
+						{
+							Name:        "i",
+							Path:        "/a/b/d/i",
+							Count:       3,
+							Size:        1 + 2*directorySize,
+							Atime:       expectedAtime,
+							CommonATime: summary.RangeLess1Month,
+							Mtime:       "1970-01-01T00:00:50Z",
+							CommonMTime: summary.Range7Years,
+							Users:       root,
+							Groups:      root,
+							FileTypes:   cramAndDir,
+							HasChildren: true,
+							Children:    nil,
+							NoAuth:      true,
+						},
+					},
+				})
+
+				r = gas.NewAuthenticatedClientRequest(addr, cert, token)
+				resp, err = r.SetResult(&TreeElement{}).
+					ForceContentType("application/json").
+					SetQueryParams(map[string]string{
+						"path": "/a/b/d/i",
+					}).
+					Get(EndPointAuthTree)
+
+				So(err, ShouldBeNil)
+				So(resp.Result(), ShouldNotBeNil)
+
+				tm = *resp.Result().(*TreeElement) //nolint:forcetypeassert,errcheck
+				So(tm, ShouldResemble, TreeElement{
+					Name:        "i",
+					Path:        "/a/b/d/i",
+					Count:       3,
+					Size:        1 + 2*directorySize,
+					Atime:       expectedAtime,
+					CommonATime: summary.RangeLess1Month,
+					Mtime:       "1970-01-01T00:00:50Z",
+					CommonMTime: summary.Range7Years,
+					Users:       root,
+					Groups:      root,
+					FileTypes:   cramAndDir,
+					HasChildren: true,
+					Children:    nil,
+					NoAuth:      true,
+				})
+
+				r = gas.NewAuthenticatedClientRequest(addr, cert, token)
+				resp, err = r.SetResult(&TreeElement{}).
+					ForceContentType("application/json").
+					SetQueryParams(map[string]string{
+						"path":   "/",
+						"groups": "adsf@£$",
+					}).
+					Get(EndPointAuthTree)
+
+				So(err, ShouldBeNil)
+				So(resp.StatusCode(), ShouldEqual, http.StatusBadRequest)
+
+				r = gas.NewAuthenticatedClientRequest(addr, cert, token)
+				resp, err = r.SetResult(&TreeElement{}).
+					ForceContentType("application/json").
+					SetQueryParams(map[string]string{
+						"path": "/foo",
+					}).
+					Get(EndPointAuthTree)
+
+				So(err, ShouldBeNil)
+				So(resp.StatusCode(), ShouldEqual, http.StatusBadRequest)
+			})
+
+			Convey("You can access the group-areas endpoint after AddGroupAreas()", func() {
+				c, err = gas.NewClientCLI(jwtBasename, serverTokenBasename, addr, cert, false)
+				So(err, ShouldBeNil)
+
+				err = c.Login("user", "pass")
+				So(err, ShouldBeNil)
+
+				_, err := GetGroupAreas(c)
+				So(err, ShouldNotBeNil)
+
+				expectedAreas := map[string][]string{
+					"a": {"1", "2"},
+					"b": {"3", "4"},
+				}
+
+				s.AddGroupAreas(expectedAreas)
+
+				areas, err := GetGroupAreas(c)
+				So(err, ShouldBeNil)
+				So(areas, ShouldResemble, expectedAreas)
+			})
+
+			Convey("You can access the secure basedirs endpoints after LoadDBs()", func() {
+				r := gas.NewAuthenticatedClientRequest(addr, cert, token)
+
+				var usage []*basedirs.Usage
+
+				resp, err := r.SetResult(&usage).
+					ForceContentType("application/json").
+					Get(EndPointAuthBasedirUsageUser)
+				So(err, ShouldBeNil)
+				So(resp.Result(), ShouldNotBeNil)
+				So(len(usage), ShouldBeGreaterThan, 0)
+				So(usage[0].UID, ShouldEqual, 0)
+
+				userUsageUID := usage[0].UID
+				userUsageBasedir := usage[0].BaseDir
+
+				resp, err = r.SetResult(&usage).
+					ForceContentType("application/json").
+					Get(EndPointAuthBasedirUsageGroup)
+				So(err, ShouldBeNil)
+				So(resp.Result(), ShouldNotBeNil)
+				So(len(usage), ShouldBeGreaterThan, 0)
+				So(usage[0].GID, ShouldEqual, 0)
+
+				var subdirs []*basedirs.SubDir
+
+				resp, err = r.SetResult(&subdirs).
+					ForceContentType("application/json").
+					SetQueryParams(map[string]string{
+						"id":      strconv.FormatUint(uint64(usage[0].GID), 10),
+						"basedir": usage[0].BaseDir,
+					}).
+					Get(EndPointAuthBasedirSubdirGroup)
+				So(err, ShouldBeNil)
+				So(resp.Result(), ShouldNotBeNil)
+				So(len(subdirs), ShouldEqual, 0)
+
+				resp, err = r.SetResult(&subdirs).
+					ForceContentType("application/json").
+					SetQueryParams(map[string]string{
+						"id":      strconv.FormatUint(uint64(userUsageUID), 10),
+						"basedir": userUsageBasedir,
+					}).
+					Get(EndPointAuthBasedirSubdirUser)
+				So(err, ShouldBeNil)
+				So(resp.Result(), ShouldNotBeNil)
+				So(len(subdirs), ShouldEqual, 2)
+
+				var history []basedirs.History
+
+				resp, err = r.SetResult(&history).
+					ForceContentType("application/json").
+					SetQueryParams(map[string]string{
+						"id":      strconv.FormatUint(uint64(usage[0].GID), 10),
+						"basedir": usage[0].BaseDir,
+					}).
+					Get(EndPointAuthBasedirHistory)
+				So(err, ShouldBeNil)
+				So(resp.Result(), ShouldNotBeNil)
+
+				Convey("and can read subdirs from a different group if you're on the whitelist", func() {
+					s.WhiteListGroups(func(_ string) bool {
+						return true
+					})
+
+					s.userToGIDs = make(map[string][]string)
+
+					resp, err = r.SetResult(&subdirs).
+						ForceContentType("application/json").
+						SetQueryParams(map[string]string{
+							"id":      strconv.FormatUint(uint64(usage[0].GID), 10),
+							"basedir": usage[0].BaseDir,
+						}).
+						Get(EndPointAuthBasedirSubdirGroup)
+					So(err, ShouldBeNil)
+					So(resp.Result(), ShouldNotBeNil)
+					So(len(subdirs), ShouldEqual, 1)
+
+					resp, err = r.SetResult(&subdirs).
+						ForceContentType("application/json").
+						SetQueryParams(map[string]string{
+							"id":      strconv.FormatUint(uint64(userUsageUID), 10),
+							"basedir": userUsageBasedir,
+						}).
+						Get(EndPointAuthBasedirSubdirUser)
+					So(err, ShouldBeNil)
+					So(resp.Result(), ShouldNotBeNil)
+					So(len(subdirs), ShouldEqual, 2)
+				})
+			})
+		})
+	})
+}
+
+// gidsToGroups converts the given gids to group names.
+func gidsToGroups(t *testing.T, gids ...string) []string {
+	t.Helper()
+
+	groups := make([]string, len(gids))
+
+	for i, gid := range gids {
+		groups[i] = gidToGroup(t, gid)
+	}
+
+	return groups
+}
+
+// gidToGroup converts the given gid to a group name.
+func gidToGroup(t *testing.T, gid string) string {
+	t.Helper()
+
+	g, err := user.LookupGroupId(gid)
+	if err != nil {
+		t.Fatalf("LookupGroupId(%s) failed: %s", gid, err)
+	}
+
+	return g.Name
+}
+
+type matrixElement struct {
+	filter string
+	dss    []*DirSummary
+}
+
 func TestServer(t *testing.T) {
 	username, uid, gids := GetUserAndGroups(t)
 	exampleGIDs := getExampleGIDs(gids)
@@ -80,15 +820,15 @@ func TestServer(t *testing.T) {
 					Dir:   "/foo",
 					Count: 1,
 					Size:  2,
-					UIDs:  []uint32{uint32(uid32), 9999999},
-					GIDs:  []uint32{uint32(gid32), 9999999},
+					UIDs:  []uint32{uint32(uid32), 9999999}, //nolint:gosec
+					GIDs:  []uint32{uint32(gid32), 9999999}, //nolint:gosec
 				},
 				{
 					Dir:   "/bar",
 					Count: 1,
 					Size:  2,
-					UIDs:  []uint32{uint32(uid32), 9999999},
-					GIDs:  []uint32{uint32(gid32), 9999999},
+					UIDs:  []uint32{uint32(uid32), 9999999}, //nolint:gosec
+					GIDs:  []uint32{uint32(gid32), 9999999}, //nolint:gosec
 				},
 			}
 
@@ -118,6 +858,7 @@ func TestServer(t *testing.T) {
 
 			addr, dfunc, err := gas.StartTestServer(s, certPath, keyPath)
 			So(err, ShouldBeNil)
+
 			defer func() {
 				errd := dfunc()
 				So(errd, ShouldBeNil)
@@ -188,6 +929,7 @@ func TestServer(t *testing.T) {
 			Convey("And given dirguta and basedir databases", func() {
 				path, err := CreateExampleDBsCustomIDs(t, uid, gids[0], gids[1], refTime)
 				So(err, ShouldBeNil)
+
 				groupA := gidToGroup(t, gids[0])
 				groupB := gidToGroup(t, gids[1])
 
@@ -222,12 +964,14 @@ func TestServer(t *testing.T) {
 
 						expectedUsers := expectedNonRoot[0].Users
 						sort.Strings(expectedUsers)
+
 						expectedUser := []string{username}
 						expectedRoot := []string{"root"}
 						expectedGroupsA := []string{groupA}
 						expectedGroupsB := []string{groupB}
 						expectedGroupsRootA := []string{groupA, "root"}
 						sort.Strings(expectedGroupsRootA)
+
 						expectedFTs := expectedNonRoot[0].FileTypes
 						expectedBams := []string{"bam", "temp"}
 						expectedCrams := []string{"cram"}
@@ -643,6 +1387,7 @@ func TestServer(t *testing.T) {
 			tp.triggerUpdate(tp2.tree, tp2.bd)
 
 			timeout := time.After(2 * time.Second)
+
 		Loop:
 			for {
 				select {
@@ -652,6 +1397,7 @@ func TestServer(t *testing.T) {
 					s.mu.RLock()
 					ts, ok := s.dataTimeStamp["keyA"]
 					s.mu.RUnlock()
+
 					if ok && ts > oldTS {
 						break Loop
 					}
@@ -695,6 +1441,7 @@ func TestServer(t *testing.T) {
 					s.mu.RLock()
 					userReady := len(s.userUsageCache.jsonData) > 0
 					s.mu.RUnlock()
+
 					if userReady {
 						break Loop
 					}
@@ -747,7 +1494,7 @@ func TestServer(t *testing.T) {
 				w := httptest.NewRecorder()
 				c, _ := gin.CreateTestContext(w)
 
-				req, err := http.NewRequest(http.MethodGet, "/", nil)
+				req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)
 				So(err, ShouldBeNil)
 
 				if acceptEnc != "" {
@@ -777,11 +1524,6 @@ func TestServer(t *testing.T) {
 	})
 }
 
-type analyticsData struct {
-	Name, Session, Data string
-	Time                int64
-}
-
 // getExampleGIDs returns some example GIDs to test with, using 2 real ones from
 // the given slice if the slice is long enough.
 func getExampleGIDs(gids []string) []string {
@@ -792,736 +1534,6 @@ func getExampleGIDs(gids []string) []string {
 	}
 
 	return exampleGIDs
-}
-
-func fixDirSummaryTimes(summaries []*DirSummary) {
-	for _, dcss := range summaries {
-		dcss.Atime = fixtimes.FixTime(dcss.Atime)
-		dcss.Mtime = fixtimes.FixTime(dcss.Mtime)
-	}
-}
-
-// testClientsOnRealServer tests our client method GetWhereDataIs and the tree
-// webpage on a real listening server, if we have at least 2 gids to test with.
-func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, s *Server, addr, cert, key string) {
-	t.Helper()
-
-	if len(gids) < 2 {
-		return
-	}
-
-	g, errg := user.LookupGroupId(gids[0])
-	So(errg, ShouldBeNil)
-
-	refTime := time.Now().Unix()
-
-	Convey("Given databases", func() {
-		jwtBasename := ".wrstat.test.jwt"
-		serverTokenBasename := ".wrstat.test.servertoken" //nolint:gosec
-
-		c, err := gas.NewClientCLI(jwtBasename, serverTokenBasename, "localhost:1", cert, true)
-		So(err, ShouldBeNil)
-
-		_, _, err = GetWhereDataIs(c, "", "", "", "", db.DGUTAgeAll, "")
-		So(err, ShouldNotBeNil)
-
-		path, err := CreateExampleDBsCustomIDs(t, uid, gids[0], gids[1], refTime)
-		So(err, ShouldBeNil)
-
-		ownersPath, err := internaldata.CreateOwnersCSV(t, internaldata.ExampleOwnersCSV)
-		So(err, ShouldBeNil)
-
-		c, err = gas.NewClientCLI(jwtBasename, serverTokenBasename, addr, cert, false)
-		So(err, ShouldBeNil)
-
-		Convey("You can't get where data is or add the tree page without auth", func() {
-			p, provErr := BuildTestProvider(t, []string{path}, ownersPath, time.Unix(refTime, 0))
-			So(provErr, ShouldBeNil)
-
-			setErr := s.SetProvider(p)
-			So(setErr, ShouldBeNil)
-
-			_, _, err = GetWhereDataIs(c, "/", "", "", "", db.DGUTAgeAll, "")
-			So(err, ShouldNotBeNil)
-			So(err, ShouldEqual, gas.ErrNoAuth)
-
-			err = s.AddTreePage()
-			So(err, ShouldNotBeNil)
-		})
-
-		Convey("Root can see everything", func() {
-			err = s.EnableAuthWithServerToken(cert, key, serverTokenBasename, func(username, password string) (bool, string) {
-				return true, ""
-			})
-			So(err, ShouldBeNil)
-
-			p, provErr := BuildTestProvider(t, []string{path}, ownersPath, time.Unix(refTime, 0))
-			So(provErr, ShouldBeNil)
-
-			setErr := s.SetProvider(p)
-			So(setErr, ShouldBeNil)
-
-			err = c.Login("user", "pass")
-			So(err, ShouldBeNil)
-
-			_, _, err = GetWhereDataIs(c, " ", "", "", "", db.DGUTAgeAll, "")
-			So(err, ShouldNotBeNil)
-			So(err, ShouldEqual, ErrBadQuery)
-
-			json, dcss, errg := GetWhereDataIs(c, "/", "", "", "", db.DGUTAgeAll, "0")
-			So(errg, ShouldBeNil)
-			So(string(json), ShouldNotBeBlank)
-			So(len(dcss), ShouldEqual, 1)
-			So(dcss[0].Count, ShouldEqual, 24)
-
-			json, dcss, errg = GetWhereDataIs(c, "/", g.Name, "", "", db.DGUTAgeAll, "0")
-			So(errg, ShouldBeNil)
-			So(string(json), ShouldNotBeBlank)
-			So(len(dcss), ShouldEqual, 1)
-			So(dcss[0].Count, ShouldEqual, 13)
-
-			json, dcss, errg = GetWhereDataIs(c, "/", "", "root", "", db.DGUTAgeAll, "0")
-			So(errg, ShouldBeNil)
-			So(string(json), ShouldNotBeBlank)
-			So(len(dcss), ShouldEqual, 1)
-			So(dcss[0].Count, ShouldEqual, 14)
-
-			json, dcss, errg = GetWhereDataIs(c, "/", "", "", "", db.DGUTAgeA7Y, "0")
-			So(errg, ShouldBeNil)
-			So(string(json), ShouldNotBeBlank)
-			So(len(dcss), ShouldEqual, 1)
-			So(dcss[0].Count, ShouldEqual, 19)
-		})
-
-		Convey("Normal users have access restricted only by group", func() {
-			err = s.EnableAuth(cert, key, func(username, password string) (bool, string) {
-				return true, uid
-			})
-			So(err, ShouldBeNil)
-
-			p, provErr := BuildTestProvider(t, []string{path}, ownersPath, time.Unix(refTime, 0))
-			So(provErr, ShouldBeNil)
-
-			setErr := s.SetProvider(p)
-			So(setErr, ShouldBeNil)
-
-			err = c.Login("user", "pass")
-			So(err, ShouldBeNil)
-
-			json, dcss, errg := GetWhereDataIs(c, "/", "", "", "", db.DGUTAgeAll, "0")
-			So(errg, ShouldBeNil)
-			So(string(json), ShouldNotBeBlank)
-			So(len(dcss), ShouldEqual, 1)
-			So(dcss[0].Count, ShouldEqual, 23)
-
-			json, dcss, errg = GetWhereDataIs(c, "/", g.Name, "", "", db.DGUTAgeAll, "0")
-			So(errg, ShouldBeNil)
-			So(string(json), ShouldNotBeBlank)
-			So(len(dcss), ShouldEqual, 1)
-			So(dcss[0].Count, ShouldEqual, 13)
-
-			_, _, errg = GetWhereDataIs(c, "/", "", "root", "", db.DGUTAgeAll, "0")
-			So(errg, ShouldBeNil)
-			So(string(json), ShouldNotBeBlank)
-			So(len(dcss), ShouldEqual, 1)
-			So(dcss[0].Count, ShouldEqual, 13)
-		})
-
-		Convey("Once you add the tree page", func() {
-			var logWriter strings.Builder
-			s := New(&logWriter)
-
-			err = s.EnableAuth(cert, key, func(username, password string) (bool, string) {
-				return true, uid
-			})
-			So(err, ShouldBeNil)
-
-			p, err := BuildTestProvider(t, []string{path}, ownersPath, time.Unix(refTime, 0))
-			So(err, ShouldBeNil)
-			err = s.SetProvider(p)
-			So(err, ShouldBeNil)
-
-			s.dataTimeStamp = map[string]int64{}
-
-			s.gidToNameCache[1] = "GroupA"
-			s.gidToNameCache[2] = "GroupB"
-			s.gidToNameCache[3] = "GroupC"
-			s.gidToNameCache[77777] = "77777"
-			s.uidToNameCache[101] = "UserA"
-			s.uidToNameCache[102] = "UserB"
-			s.uidToNameCache[103] = "UserC"
-			s.uidToNameCache[88888] = "88888"
-
-			s.basedirs.SetCachedGroup(1, "GroupA")
-			s.basedirs.SetCachedGroup(2, "GroupB")
-			s.basedirs.SetCachedGroup(3, "GroupC")
-			s.basedirs.SetCachedUser(77777, "77777")
-			s.basedirs.SetCachedUser(101, "UserA")
-			s.basedirs.SetCachedUser(102, "UserB")
-			s.basedirs.SetCachedUser(103, "UserC")
-			s.basedirs.SetCachedUser(88888, "88888")
-
-			err = s.AddTreePage()
-			So(err, ShouldBeNil)
-
-			addr, dfunc, err := gas.StartTestServer(s, cert, key)
-			So(err, ShouldBeNil)
-			defer func() {
-				errd := dfunc()
-				So(errd, ShouldBeNil)
-			}()
-
-			token, err := gas.Login(gas.NewClientRequest(addr, cert), "user", "pass")
-			So(err, ShouldBeNil)
-
-			Convey("You can get the static tree web page", func() {
-				r := gas.NewAuthenticatedClientRequest(addr, cert, token)
-
-				resp, err := r.Get("tree/tree.html")
-				So(err, ShouldBeNil)
-				So(strings.ToUpper(string(resp.Body())), ShouldStartWith, "<!DOCTYPE HTML>")
-
-				resp, err = r.Get("")
-				So(err, ShouldBeNil)
-				So(strings.ToUpper(string(resp.Body())), ShouldStartWith, "<!DOCTYPE HTML>")
-			})
-
-			Convey("You can send data to the analytics endpoint", func() {
-				So(s.InitAnalyticsDB(filepath.Join(t.TempDir(), "db")), ShouldBeNil)
-
-				getAndClear := func() []analyticsData {
-					r, errr := s.analyticsDB.Query("SELECT user, session, state, time FROM [events];")
-					So(errr, ShouldBeNil)
-
-					var rows []analyticsData
-
-					for r.Next() {
-						var ad analyticsData
-
-						So(r.Scan(&ad.Name, &ad.Session, &ad.Data, &ad.Time), ShouldBeNil)
-
-						rows = append(rows, ad)
-					}
-
-					r.Close()
-
-					_, err = s.analyticsDB.Exec("DELETE FROM [events];")
-					So(err, ShouldBeNil)
-
-					return rows
-				}
-
-				var start, end int64
-
-				sessionID := "AAA"
-				sendBeacon := func(referers ...string) {
-					start = time.Now().Unix()
-
-					for _, referer := range referers {
-						r := gas.NewClientRequest(addr, cert)
-						r.Cookies = append(r.Cookies, &http.Cookie{Name: "jwt", Value: token})
-						r.Body = sessionID
-
-						r.Header.Set("Referer", referer)
-
-						_, err = r.Post(EndPointAuthSpyware)
-						So(err, ShouldBeNil)
-					}
-
-					end = time.Now().Unix() + 1
-				}
-
-				checkTimes := func(data []analyticsData) {
-					for n := range data {
-						So(data[n].Time, ShouldBeBetweenOrEqual, start, end)
-
-						data[n].Time = 0
-					}
-				}
-
-				sendBeacon("")
-
-				d := getAndClear()
-
-				checkTimes(d)
-
-				So(d, ShouldResemble, []analyticsData{
-					{Name: "user", Session: "AAA", Data: "{}\n"},
-				})
-
-				sendBeacon(`?useCount=true&owners=["a","bc"]`, `?filterMaxSize=123&users=[1,2,3]&byUser="badString"`)
-
-				d = getAndClear()
-
-				checkTimes(d)
-
-				So(d, ShouldResemble, []analyticsData{
-					{Name: "user", Session: "AAA", Data: "{\"owners\":[\"a\",\"bc\"],\"useCount\":true}\n"},
-					{Name: "user", Session: "AAA", Data: "{\"filterMaxSize\":123,\"users\":[1,2,3]}\n"},
-				})
-			})
-
-			Convey("You can access the tree API", func() {
-				r := gas.NewAuthenticatedClientRequest(addr, cert, token)
-				resp, err := r.SetResult(&TreeElement{}).
-					ForceContentType("application/json").
-					Get(EndPointAuthTree)
-
-				So(err, ShouldBeNil)
-				So(resp.Result(), ShouldNotBeNil)
-
-				users := []string{"root", username}
-				sort.Strings(users)
-
-				unsortedGroups := gidsToGroups(t, gids[0], gids[1], "0")
-				groups := make([]string, len(unsortedGroups))
-				copy(groups, unsortedGroups)
-				sort.Strings(groups)
-
-				expectedFTs := []string{"bam", "cram", "dir", "temp"}
-				expectedAtime := "1970-01-01T00:00:50Z"
-				expectedMtime := "1970-01-01T00:01:30Z"
-
-				const numRootDirectories = 13
-
-				const numADirectories = 12
-
-				const directorySize = 4096
-
-				tm := *resp.Result().(*TreeElement) //nolint:forcetypeassert
-
-				rootExpectedMtime := tm.Mtime
-				So(len(tm.Children), ShouldBeGreaterThan, 1)
-				kExpectedAtime := tm.Children[1].Atime
-				So(tm, ShouldResemble, TreeElement{
-					Name:        "/",
-					Path:        "/",
-					Count:       24 + numRootDirectories + 1,
-					Size:        141 + (numRootDirectories+1)*directorySize,
-					Atime:       expectedAtime,
-					CommonATime: summary.Range7Years,
-					Mtime:       rootExpectedMtime,
-					CommonMTime: summary.Range7Years,
-					Users:       users,
-					Groups:      groups,
-					FileTypes:   expectedFTs,
-					HasChildren: true,
-					Children: []*TreeElement{
-						{
-							Name:        "a",
-							Path:        "/a",
-							Count:       19 + numADirectories,
-							Size:        126 + numADirectories*directorySize,
-							Atime:       expectedAtime,
-							CommonATime: summary.Range7Years,
-							Mtime:       expectedMtime,
-							CommonMTime: summary.Range7Years,
-							Users:       users,
-							Groups:      groups,
-							FileTypes:   expectedFTs,
-							HasChildren: true,
-							Children:    nil,
-						},
-						{
-							Name:        "k",
-							Path:        "/k",
-							Count:       5 + 1,
-							Size:        15 + 1*directorySize,
-							Atime:       kExpectedAtime,
-							CommonATime: summary.RangeLess1Month,
-							Mtime:       rootExpectedMtime,
-							CommonMTime: summary.RangeLess1Month,
-							Users:       []string{username},
-							Groups:      []string{unsortedGroups[1]},
-							FileTypes:   []string{"cram", "dir"},
-							HasChildren: false,
-							Children:    nil,
-						},
-					},
-				})
-
-				r = gas.NewAuthenticatedClientRequest(addr, cert, token)
-				resp, err = r.SetResult(&TreeElement{}).
-					ForceContentType("application/json").
-					SetQueryParams(map[string]string{
-						"path":   "/",
-						"groups": g.Name,
-					}).
-					Get(EndPointAuthTree)
-
-				So(err, ShouldBeNil)
-				So(resp.Result(), ShouldNotBeNil)
-
-				expectedMtime2 := "1970-01-01T00:01:20Z"
-
-				tm = *resp.Result().(*TreeElement) //nolint:forcetypeassert
-				So(tm, ShouldResemble, TreeElement{
-					Name:        "/",
-					Path:        "/",
-					Count:       13 + 9,
-					Size:        120 + 9*directorySize,
-					Atime:       expectedAtime,
-					CommonATime: summary.Range7Years,
-					Mtime:       expectedMtime2,
-					CommonMTime: summary.Range7Years,
-					Users:       users,
-					Groups:      []string{g.Name},
-					FileTypes:   expectedFTs,
-					HasChildren: true,
-					Children: []*TreeElement{
-						{
-							Name:        "a",
-							Path:        "/a",
-							Count:       13 + 8,
-							Size:        120 + 8*directorySize,
-							Atime:       expectedAtime,
-							CommonATime: summary.Range7Years,
-							Mtime:       expectedMtime2,
-							CommonMTime: summary.Range7Years,
-							Users:       users,
-							Groups:      []string{g.Name},
-							FileTypes:   expectedFTs,
-							HasChildren: true,
-							Children:    nil,
-						},
-					},
-				})
-
-				r = gas.NewAuthenticatedClientRequest(addr, cert, token)
-				resp, err = r.SetResult(&TreeElement{}).
-					ForceContentType("application/json").
-					SetQueryParams(map[string]string{
-						"path": "/a",
-					}).
-					Get(EndPointAuthTree)
-
-				So(err, ShouldBeNil)
-				So(resp.Result(), ShouldNotBeNil)
-
-				abgroups := gidsToGroups(t, g.Gid, "0")
-				sort.Strings(abgroups)
-
-				acgroups := gidsToGroups(t, gids[1])
-				cramAndDir := []string{"cram", "dir"}
-
-				tm = *resp.Result().(*TreeElement) //nolint:forcetypeassert
-				So(tm, ShouldResemble, TreeElement{
-					Name:        "a",
-					Path:        "/a",
-					Count:       19 + numADirectories,
-					Size:        126 + numADirectories*directorySize,
-					Atime:       expectedAtime,
-					CommonATime: summary.Range7Years,
-					Mtime:       expectedMtime,
-					CommonMTime: summary.Range7Years,
-					Users:       users,
-					Groups:      groups,
-					FileTypes:   expectedFTs,
-					HasChildren: true,
-					Children: []*TreeElement{
-						{
-							Name:        "b",
-							Path:        "/a/b",
-							Count:       19 - 5 + numADirectories - 3,
-							Size:        126 - 5 + (numADirectories-3)*directorySize,
-							Atime:       expectedAtime,
-							CommonATime: summary.Range7Years,
-							Mtime:       expectedMtime2,
-							CommonMTime: summary.Range7Years,
-							Users:       users,
-							Groups:      abgroups,
-							FileTypes:   expectedFTs,
-							HasChildren: true,
-							Children:    nil,
-						},
-						{
-							Name:        "c",
-							Path:        "/a/c",
-							Count:       7,
-							Size:        5 + 2*directorySize,
-							Atime:       "1970-01-01T00:01:30Z",
-							CommonATime: summary.Range7Years,
-							Mtime:       expectedMtime,
-							CommonMTime: summary.Range7Years,
-							Users:       []string{"root"},
-							Groups:      acgroups,
-							FileTypes:   cramAndDir,
-							HasChildren: true,
-							Children:    nil,
-						},
-					},
-				})
-
-				r = gas.NewAuthenticatedClientRequest(addr, cert, token)
-				resp, err = r.SetResult(&TreeElement{}).
-					ForceContentType("application/json").
-					SetQueryParams(map[string]string{
-						"path": "/a/b/d",
-					}).
-					Get(EndPointAuthTree)
-
-				So(err, ShouldBeNil)
-				So(resp.Result(), ShouldNotBeNil)
-
-				dgroups := gidsToGroups(t, gids[0], "0")
-				sort.Strings(dgroups)
-
-				root := []string{"root"}
-
-				tm = *resp.Result().(*TreeElement) //nolint:forcetypeassert
-				So(tm, ShouldResemble, TreeElement{
-					Name:        "d",
-					Path:        "/a/b/d",
-					Count:       12 + 5,
-					Size:        111 + 5*directorySize,
-					Atime:       expectedAtime,
-					CommonATime: summary.Range7Years,
-					Mtime:       "1970-01-01T00:01:15Z",
-					CommonMTime: summary.Range7Years,
-					Users:       users,
-					Groups:      dgroups,
-					FileTypes:   cramAndDir,
-					HasChildren: true,
-					NoAuth:      false,
-					Children: []*TreeElement{
-						{
-							Name:        "f",
-							Path:        "/a/b/d/f",
-							Count:       2,
-							Size:        10 + directorySize,
-							Atime:       expectedAtime,
-							CommonATime: summary.RangeLess1Month,
-							Mtime:       "1970-01-01T00:00:50Z",
-							CommonMTime: summary.Range7Years,
-							Users:       []string{username},
-							Groups:      []string{g.Name},
-							FileTypes:   cramAndDir,
-							HasChildren: false,
-							Children:    nil,
-							NoAuth:      false,
-						},
-						{
-							Name:        "g",
-							Path:        "/a/b/d/g",
-							Count:       11,
-							Size:        100 + directorySize,
-							Atime:       "1970-01-01T00:00:50Z",
-							CommonATime: summary.Range7Years,
-							Mtime:       "1970-01-01T00:01:15Z",
-							CommonMTime: summary.Range7Years,
-							Users:       users,
-							Groups:      []string{g.Name},
-							FileTypes:   cramAndDir,
-							HasChildren: false,
-							Children:    nil,
-							NoAuth:      false,
-						},
-						{
-							Name:        "i",
-							Path:        "/a/b/d/i",
-							Count:       3,
-							Size:        1 + 2*directorySize,
-							Atime:       expectedAtime,
-							CommonATime: summary.RangeLess1Month,
-							Mtime:       "1970-01-01T00:00:50Z",
-							CommonMTime: summary.Range7Years,
-							Users:       root,
-							Groups:      root,
-							FileTypes:   cramAndDir,
-							HasChildren: true,
-							Children:    nil,
-							NoAuth:      true,
-						},
-					},
-				})
-
-				r = gas.NewAuthenticatedClientRequest(addr, cert, token)
-				resp, err = r.SetResult(&TreeElement{}).
-					ForceContentType("application/json").
-					SetQueryParams(map[string]string{
-						"path": "/a/b/d/i",
-					}).
-					Get(EndPointAuthTree)
-
-				So(err, ShouldBeNil)
-				So(resp.Result(), ShouldNotBeNil)
-
-				tm = *resp.Result().(*TreeElement) //nolint:forcetypeassert
-				So(tm, ShouldResemble, TreeElement{
-					Name:        "i",
-					Path:        "/a/b/d/i",
-					Count:       3,
-					Size:        1 + 2*directorySize,
-					Atime:       expectedAtime,
-					CommonATime: summary.RangeLess1Month,
-					Mtime:       "1970-01-01T00:00:50Z",
-					CommonMTime: summary.Range7Years,
-					Users:       root,
-					Groups:      root,
-					FileTypes:   cramAndDir,
-					HasChildren: true,
-					Children:    nil,
-					NoAuth:      true,
-				})
-
-				r = gas.NewAuthenticatedClientRequest(addr, cert, token)
-				resp, err = r.SetResult(&TreeElement{}).
-					ForceContentType("application/json").
-					SetQueryParams(map[string]string{
-						"path":   "/",
-						"groups": "adsf@£$",
-					}).
-					Get(EndPointAuthTree)
-
-				So(err, ShouldBeNil)
-				So(resp.StatusCode(), ShouldEqual, http.StatusBadRequest)
-
-				r = gas.NewAuthenticatedClientRequest(addr, cert, token)
-				resp, err = r.SetResult(&TreeElement{}).
-					ForceContentType("application/json").
-					SetQueryParams(map[string]string{
-						"path": "/foo",
-					}).
-					Get(EndPointAuthTree)
-
-				So(err, ShouldBeNil)
-				So(resp.StatusCode(), ShouldEqual, http.StatusBadRequest)
-			})
-
-			Convey("You can access the group-areas endpoint after AddGroupAreas()", func() {
-				c, err = gas.NewClientCLI(jwtBasename, serverTokenBasename, addr, cert, false)
-				So(err, ShouldBeNil)
-
-				err = c.Login("user", "pass")
-				So(err, ShouldBeNil)
-
-				_, err := GetGroupAreas(c)
-				So(err, ShouldNotBeNil)
-
-				expectedAreas := map[string][]string{
-					"a": {"1", "2"},
-					"b": {"3", "4"},
-				}
-
-				s.AddGroupAreas(expectedAreas)
-
-				areas, err := GetGroupAreas(c)
-				So(err, ShouldBeNil)
-				So(areas, ShouldResemble, expectedAreas)
-			})
-
-			Convey("You can access the secure basedirs endpoints after LoadDBs()", func() {
-				r := gas.NewAuthenticatedClientRequest(addr, cert, token)
-
-				var usage []*basedirs.Usage
-
-				resp, err := r.SetResult(&usage).
-					ForceContentType("application/json").
-					Get(EndPointAuthBasedirUsageUser)
-				So(err, ShouldBeNil)
-				So(resp.Result(), ShouldNotBeNil)
-				So(len(usage), ShouldBeGreaterThan, 0)
-				So(usage[0].UID, ShouldEqual, 0)
-
-				userUsageUID := usage[0].UID
-				userUsageBasedir := usage[0].BaseDir
-
-				resp, err = r.SetResult(&usage).
-					ForceContentType("application/json").
-					Get(EndPointAuthBasedirUsageGroup)
-				So(err, ShouldBeNil)
-				So(resp.Result(), ShouldNotBeNil)
-				So(len(usage), ShouldBeGreaterThan, 0)
-				So(usage[0].GID, ShouldEqual, 0)
-
-				var subdirs []*basedirs.SubDir
-
-				resp, err = r.SetResult(&subdirs).
-					ForceContentType("application/json").
-					SetQueryParams(map[string]string{
-						"id":      fmt.Sprintf("%d", usage[0].GID),
-						"basedir": usage[0].BaseDir,
-					}).
-					Get(EndPointAuthBasedirSubdirGroup)
-				So(err, ShouldBeNil)
-				So(resp.Result(), ShouldNotBeNil)
-				So(len(subdirs), ShouldEqual, 0)
-
-				resp, err = r.SetResult(&subdirs).
-					ForceContentType("application/json").
-					SetQueryParams(map[string]string{
-						"id":      fmt.Sprintf("%d", userUsageUID),
-						"basedir": userUsageBasedir,
-					}).
-					Get(EndPointAuthBasedirSubdirUser)
-				So(err, ShouldBeNil)
-				So(resp.Result(), ShouldNotBeNil)
-				So(len(subdirs), ShouldEqual, 2)
-
-				var history []basedirs.History
-
-				resp, err = r.SetResult(&history).
-					ForceContentType("application/json").
-					SetQueryParams(map[string]string{
-						"id":      fmt.Sprintf("%d", usage[0].GID),
-						"basedir": usage[0].BaseDir,
-					}).
-					Get(EndPointAuthBasedirHistory)
-				So(err, ShouldBeNil)
-				So(resp.Result(), ShouldNotBeNil)
-
-				Convey("and can read subdirs from a different group if you're on the whitelist", func() {
-					s.WhiteListGroups(func(_ string) bool {
-						return true
-					})
-
-					s.userToGIDs = make(map[string][]string)
-
-					resp, err = r.SetResult(&subdirs).
-						ForceContentType("application/json").
-						SetQueryParams(map[string]string{
-							"id":      fmt.Sprintf("%d", usage[0].GID),
-							"basedir": usage[0].BaseDir,
-						}).
-						Get(EndPointAuthBasedirSubdirGroup)
-					So(err, ShouldBeNil)
-					So(resp.Result(), ShouldNotBeNil)
-					So(len(subdirs), ShouldEqual, 1)
-
-					resp, err = r.SetResult(&subdirs).
-						ForceContentType("application/json").
-						SetQueryParams(map[string]string{
-							"id":      fmt.Sprintf("%d", userUsageUID),
-							"basedir": userUsageBasedir,
-						}).
-						Get(EndPointAuthBasedirSubdirUser)
-					So(err, ShouldBeNil)
-					So(resp.Result(), ShouldNotBeNil)
-					So(len(subdirs), ShouldEqual, 2)
-				})
-			})
-		})
-	})
-}
-
-// queryWhere does a test GET of /rest/v1/where, with extra appended (start it
-// with ?).
-func queryWhere(s *Server, extra string) (*httptest.ResponseRecorder, error) {
-	return query(s, EndPointWhere, extra)
-}
-
-func query(s *Server, endpoint, extra string) (*httptest.ResponseRecorder, error) {
-	return gas.QueryREST(s.Router(), endpoint, extra)
-}
-
-// decodeWhereResult decodes the result of a Where query.
-func decodeWhereResult(response *httptest.ResponseRecorder) ([]*DirSummary, error) {
-	var result []*DirSummary
-	err := json.NewDecoder(response.Body).Decode(&result)
-
-	fixDirSummaryTimes(result)
-
-	return result, err
 }
 
 // testRestrictedGroups does tests for s.getRestrictedGIDs() if user running the
@@ -1602,29 +1614,21 @@ func testRestrictedGroups(t *testing.T, gids []string, s *Server, exampleGIDs []
 	So(filterGIDs, ShouldBeNil)
 }
 
-// gidsToGroups converts the given gids to group names.
-func gidsToGroups(t *testing.T, gids ...string) []string {
-	t.Helper()
-
-	groups := make([]string, len(gids))
-
-	for i, gid := range gids {
-		groups[i] = gidToGroup(t, gid)
-	}
-
-	return groups
+// queryWhere does a test GET of /rest/v1/where, with extra appended (start it
+// with ?).
+func queryWhere(s *Server, extra string) (*httptest.ResponseRecorder, error) {
+	return query(s, EndPointWhere, extra)
 }
 
-// gidToGroup converts the given gid to a group name.
-func gidToGroup(t *testing.T, gid string) string {
-	t.Helper()
+func query(s *Server, endpoint, extra string) (*httptest.ResponseRecorder, error) {
+	return gas.QueryREST(s.Router(), endpoint, extra)
+}
 
-	g, err := user.LookupGroupId(gid)
-	if err != nil {
-		t.Fatalf("LookupGroupId(%s) failed: %s", gid, err)
+func fixDirSummaryTimes(summaries []*DirSummary) {
+	for _, dcss := range summaries {
+		dcss.Atime = fixtimes.FixTime(dcss.Atime)
+		dcss.Mtime = fixtimes.FixTime(dcss.Mtime)
 	}
-
-	return g.Name
 }
 
 // adjustedExpectations returns expected altered so that /a only has the given
@@ -1682,26 +1686,15 @@ func adjustedExpectations(expected []*DirSummary, groupA, groupB string) ([]*Dir
 	return expectedNonRoot, expectedGroupsRoot
 }
 
-type matrixElement struct {
-	filter string
-	dss    []*DirSummary
-}
+// decodeWhereResult decodes the result of a Where query.
+func decodeWhereResult(response *httptest.ResponseRecorder) ([]*DirSummary, error) {
+	var result []*DirSummary
 
-// runMapMatrixTest tests queries against expected results on the Server.
-func runMapMatrixTest(t *testing.T, matrix []*matrixElement, s *Server) {
-	t.Helper()
+	err := json.NewDecoder(response.Body).Decode(&result)
 
-	for _, m := range matrix {
-		fixDirSummaryTimes(m.dss)
+	fixDirSummaryTimes(result)
 
-		response, err := queryWhere(s, m.filter)
-		So(err, ShouldBeNil)
-		So(response.Code, ShouldEqual, http.StatusOK)
-
-		result, err := decodeWhereResult(response)
-		So(err, ShouldBeNil)
-		So(result, ShouldResemble, m.dss)
-	}
+	return result, err
 }
 
 // runSliceMatrixTest tests queries that are expected to fail on the Server.
@@ -1713,42 +1706,6 @@ func runSliceMatrixTest(t *testing.T, matrix []string, s *Server) {
 		So(err, ShouldBeNil)
 		So(response.Code, ShouldEqual, http.StatusBadRequest)
 	}
-}
-
-// waitForFileToBeDeleted waits for the given file to not exist. Times out after
-// 10 seconds.
-func waitForFileToBeDeleted(t *testing.T, path string) {
-	t.Helper()
-
-	wait := make(chan bool, 1)
-
-	go func() {
-		defer func() {
-			wait <- true
-		}()
-
-		limit := time.After(10 * time.Second)
-		ticker := time.NewTicker(50 * time.Millisecond)
-
-		for {
-			select {
-			case <-ticker.C:
-				_, err := os.Stat(path)
-				if err != nil {
-					ticker.Stop()
-
-					return
-				}
-			case <-limit:
-				ticker.Stop()
-				t.Logf("timed out waiting for deletion; %s still exists\n", path)
-
-				return
-			}
-		}
-	}()
-
-	<-wait
 }
 
 // decodeUsageResult decodes the result of a basedirs usage query.
@@ -1784,4 +1741,21 @@ func decodeHistoryResult(response *httptest.ResponseRecorder) ([]basedirs.Histor
 	err := json.NewDecoder(response.Body).Decode(&result)
 
 	return result, err
+}
+
+// runMapMatrixTest tests queries against expected results on the Server.
+func runMapMatrixTest(t *testing.T, matrix []*matrixElement, s *Server) {
+	t.Helper()
+
+	for _, m := range matrix {
+		fixDirSummaryTimes(m.dss)
+
+		response, err := queryWhere(s, m.filter)
+		So(err, ShouldBeNil)
+		So(response.Code, ShouldEqual, http.StatusOK)
+
+		result, err := decodeWhereResult(response)
+		So(err, ShouldBeNil)
+		So(result, ShouldResemble, m.dss)
+	}
 }
