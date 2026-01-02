@@ -227,6 +227,7 @@ func fillUsageNamesAndOwners(
 			if u.Name == "" {
 				u.Name = "root"
 			}
+
 			if u.Owner == "" {
 				u.Owner = owners[0]
 			}
@@ -236,6 +237,7 @@ func fillUsageNamesAndOwners(
 			} else if g, err := user.LookupGroupId(strconv.FormatUint(uint64(u.GID), 10)); err == nil {
 				u.Name = g.Name
 			}
+
 			u.Owner = owners[u.GID]
 		case u.UID != 0:
 			if n, ok := cachedUsers[u.UID]; ok {
@@ -243,6 +245,7 @@ func fillUsageNamesAndOwners(
 			} else if uu, err := user.LookupId(strconv.FormatUint(uint64(u.UID), 10)); err == nil {
 				u.Name = uu.Username
 			}
+
 			u.Owner = owners[u.GID]
 		}
 	}

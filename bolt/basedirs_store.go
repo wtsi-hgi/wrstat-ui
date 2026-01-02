@@ -15,6 +15,25 @@ import (
 
 var errRequiredBucketsMissing = errors.New("required buckets missing")
 
+func createInitialBuckets(tx *bolt.Tx) error {
+	buckets := []string{
+		basedirs.GroupUsageBucket,
+		basedirs.UserUsageBucket,
+		basedirs.GroupSubDirsBucket,
+		basedirs.UserSubDirsBucket,
+		basedirs.GroupHistoricalBucket,
+		metaBucketName,
+	}
+
+	for _, bk := range buckets {
+		if _, errc := tx.CreateBucketIfNotExists([]byte(bk)); errc != nil {
+			return errc
+		}
+	}
+
+	return nil
+}
+
 type baseDirsStore struct {
 	db *bolt.DB
 	ch codec.Handle
@@ -33,6 +52,63 @@ func (s *baseDirsStore) SetUpdatedAt(updatedAt time.Time) {
 }
 
 func (s *baseDirsStore) Reset() error {
+	if err := s.validateResetPreconditions(); err != nil {
+		return err
+	}
+	// Ensure any previous write transaction is closed before taking the writer
+	// lock again (persistMeta uses its own Update transaction).
+	if err := s.rollbackExistingTx(); err != nil {
+		return err
+	}
+
+	tx, err := s.prepareTx()
+	if err != nil {
+		return err
+	}
+
+	s.tx = tx
+
+	return nil
+}
+
+func (s *baseDirsStore) prepareTx() (*bolt.Tx, error) {
+	if err := persistMeta(s.db, s.mountPath, s.updatedAt); err != nil {
+		return nil, err
+	}
+
+	tx, err := s.db.Begin(true)
+	if err != nil {
+		return nil, err
+	}
+
+	// Replace usage/subdir buckets; keep history.
+	buckets := []string{
+		basedirs.GroupUsageBucket,
+		basedirs.UserUsageBucket,
+		basedirs.GroupSubDirsBucket,
+		basedirs.UserSubDirsBucket,
+	}
+
+	for _, bk := range buckets {
+		if err := clearAndRecreateBucket(tx, bk); err != nil {
+			return nil, errors.Join(err, tx.Rollback())
+		}
+	}
+
+	return tx, nil
+}
+
+func clearAndRecreateBucket(tx *bolt.Tx, name string) error {
+	if err := tx.DeleteBucket([]byte(name)); err != nil && !errors.Is(err, berrors.ErrBucketNotFound) {
+		return err
+	}
+
+	_, err := tx.CreateBucketIfNotExists([]byte(name))
+
+	return err
+}
+
+func (s *baseDirsStore) validateResetPreconditions() error {
 	if s.db == nil {
 		return errors.New("nil db") //nolint:err113
 	}
@@ -45,55 +121,7 @@ func (s *baseDirsStore) Reset() error {
 		return ErrInvalidMountPath
 	}
 
-	// Ensure any previous write transaction is closed before taking the writer
-	// lock again (persistMeta uses its own Update transaction).
-	if s.tx != nil {
-		if err := s.tx.Rollback(); err != nil {
-			return err
-		}
-
-		s.tx = nil
-	}
-
-	if err := persistMeta(s.db, s.mountPath, s.updatedAt); err != nil {
-		return err
-	}
-
-	tx, err := s.db.Begin(true)
-	if err != nil {
-		return err
-	}
-
-	// Replace usage/subdir buckets; keep history.
-	if err := clearAndRecreateBucket(tx, basedirs.GroupUsageBucket); err != nil {
-		return errors.Join(err, tx.Rollback())
-	}
-
-	if err := clearAndRecreateBucket(tx, basedirs.UserUsageBucket); err != nil {
-		return errors.Join(err, tx.Rollback())
-	}
-
-	if err := clearAndRecreateBucket(tx, basedirs.GroupSubDirsBucket); err != nil {
-		return errors.Join(err, tx.Rollback())
-	}
-
-	if err := clearAndRecreateBucket(tx, basedirs.UserSubDirsBucket); err != nil {
-		return errors.Join(err, tx.Rollback())
-	}
-
-	s.tx = tx
-
 	return nil
-}
-
-func clearAndRecreateBucket(tx *bolt.Tx, name string) error {
-	if err := tx.DeleteBucket([]byte(name)); err != nil && !errors.Is(err, berrors.ErrBucketNotFound) {
-		return err
-	}
-
-	_, err := tx.CreateBucketIfNotExists([]byte(name))
-
-	return err
 }
 
 func (s *baseDirsStore) PutGroupUsage(u *basedirs.Usage) error {
@@ -194,32 +222,7 @@ func (s *baseDirsStore) Finalise() error {
 
 	// Precompute DateNoSpace/DateNoFiles for group usage at age=all.
 	if err := gub.ForEach(func(k, v []byte) error {
-		gu := new(basedirs.Usage)
-		if err := s.decode(v, gu); err != nil {
-			return err
-		}
-
-		if gu.Age != db.DGUTAgeAll {
-			return nil
-		}
-
-		// Histories are stored per (gid, mountPath).
-		hkey := basedirsKeyName(gu.GID, s.mountPath, db.DGUTAgeAll)
-		data := ghb.Get(hkey)
-		if data == nil {
-			return basedirs.ErrNoBaseDirHistory
-		}
-
-		var history []basedirs.History
-		if err := s.decode(data, &history); err != nil {
-			return err
-		}
-
-		sizeExceedDate, inodeExceedDate := basedirs.DateQuotaFull(history)
-		gu.DateNoSpace = sizeExceedDate
-		gu.DateNoFiles = inodeExceedDate
-
-		return gub.Put(k, s.encode(gu))
+		return s.processFinaliseEntry(gub, ghb, k, v)
 	}); err != nil {
 		rollbackErr := s.tx.Rollback()
 		s.tx = nil
@@ -237,8 +240,7 @@ func (s *baseDirsStore) Close() error {
 	var closeErr error
 
 	if s.tx != nil {
-		closeErr = errors.Join(closeErr, s.tx.Rollback())
-		s.tx = nil
+		closeErr = errors.Join(closeErr, s.rollbackExistingTx())
 	}
 
 	if s.db != nil {
@@ -260,6 +262,47 @@ func (s *baseDirsStore) encode(v any) []byte {
 
 func (s *baseDirsStore) decode(encoded []byte, v any) error {
 	return codec.NewDecoderBytes(encoded, s.ch).Decode(v)
+}
+
+func (s *baseDirsStore) processFinaliseEntry(gub, ghb *bolt.Bucket, k, v []byte) error {
+	gu := new(basedirs.Usage)
+	if err := s.decode(v, gu); err != nil {
+		return err
+	}
+
+	if gu.Age != db.DGUTAgeAll {
+		return nil
+	}
+
+	// Histories are stored per (gid, mountPath).
+	hkey := basedirsKeyName(gu.GID, s.mountPath, db.DGUTAgeAll)
+
+	data := ghb.Get(hkey)
+	if data == nil {
+		return basedirs.ErrNoBaseDirHistory
+	}
+
+	var history []basedirs.History
+	if err := s.decode(data, &history); err != nil {
+		return err
+	}
+
+	sizeExceedDate, inodeExceedDate := basedirs.DateQuotaFull(history)
+	gu.DateNoSpace = sizeExceedDate
+	gu.DateNoFiles = inodeExceedDate
+
+	return gub.Put(k, s.encode(gu))
+}
+
+func (s *baseDirsStore) rollbackExistingTx() error {
+	if s.tx == nil {
+		return nil
+	}
+
+	err := s.tx.Rollback()
+	s.tx = nil
+
+	return err
 }
 
 // NewBaseDirsStore creates a basedirs.Store backed by Bolt.
@@ -296,32 +339,7 @@ func openBasedirsWritable(path string) (*bolt.DB, error) {
 		return nil, err
 	}
 
-	err = db.Update(func(tx *bolt.Tx) error {
-		// Data buckets
-		if _, errc := tx.CreateBucketIfNotExists([]byte(basedirs.GroupUsageBucket)); errc != nil {
-			return errc
-		}
-
-		if _, errc := tx.CreateBucketIfNotExists([]byte(basedirs.UserUsageBucket)); errc != nil {
-			return errc
-		}
-
-		if _, errc := tx.CreateBucketIfNotExists([]byte(basedirs.GroupSubDirsBucket)); errc != nil {
-			return errc
-		}
-
-		if _, errc := tx.CreateBucketIfNotExists([]byte(basedirs.UserSubDirsBucket)); errc != nil {
-			return errc
-		}
-
-		if _, errc := tx.CreateBucketIfNotExists([]byte(basedirs.GroupHistoricalBucket)); errc != nil {
-			return errc
-		}
-		// Meta bucket
-		_, errc := tx.CreateBucketIfNotExists([]byte(metaBucketName))
-
-		return errc
-	})
+	err = db.Update(createInitialBuckets)
 	if err != nil {
 		_ = db.Close()
 

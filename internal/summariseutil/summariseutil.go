@@ -76,7 +76,7 @@ func newBasedirsCreator(
 		return nil, nil, nil, err
 	}
 
-	if err = os.Remove(basedirsDB); err != nil && !errors.Is(err, fs.ErrNotExist) {
+	if err = removeFileIfNotNotExist(basedirsDB); err != nil {
 		return nil, nil, nil, err
 	}
 
@@ -90,16 +90,8 @@ func newBasedirsCreator(
 		return nil, nil, nil, fmt.Errorf("failed to create basedirs store: %w", err)
 	}
 
-	// Pick a reasonable mount-path for this DB's metadata/precomputation.
-	// The underlying basedirs logic still uses the full mountpoint list for
-	// history attribution.
-	storeMountPath := "/"
-	if len(mps) > 0 {
-		storeMountPath = basedirs.ValidateMountPoints(mps)[0]
-	}
-
-	store.SetMountPath(storeMountPath)
-	store.SetUpdatedAt(modtime)
+	// Configure store metadata and create the basedirs creator.
+	configureStoreMounts(store, mps, modtime)
 
 	bd, err := basedirs.NewCreator(store, quotas)
 	if err != nil {
@@ -169,6 +161,27 @@ func ParseMountpointsFromFile(mountpoints string) ([]string, error) {
 	}
 
 	return mounts, nil
+}
+
+func removeFileIfNotNotExist(path string) error {
+	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+
+	return nil
+}
+
+func configureStoreMounts(store basedirs.Store, mps []string, modtime time.Time) {
+	// Pick a reasonable mount-path for this DB's metadata/precomputation.
+	// The underlying basedirs logic still uses the full mountpoint list for
+	// history attribution.
+	storeMountPath := "/"
+	if len(mps) > 0 {
+		storeMountPath = basedirs.ValidateMountPoints(mps)[0]
+	}
+
+	store.SetMountPath(storeMountPath)
+	store.SetUpdatedAt(modtime)
 }
 
 // CopyHistory copies history entries from an existing basedirs DB into bd.

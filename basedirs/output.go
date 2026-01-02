@@ -2,6 +2,22 @@ package basedirs
 
 import "github.com/wtsi-hgi/wrstat-ui/db"
 
+func forEachSummaryWithChildren(dcss *AgeDirs, fn func(dcs SummaryWithChildren) error) error {
+	if dcss == nil {
+		return nil
+	}
+
+	for _, adcs := range dcss {
+		for i := range adcs {
+			if err := fn(adcs[i]); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
 // Output persists a database containing usage information for each of our
 // groups and users by calculated base directory.
 func (b *BaseDirs) Output(users, groups IDAgeDirs) error {
@@ -22,22 +38,6 @@ func (b *BaseDirs) Output(users, groups IDAgeDirs) error {
 	for _, step := range steps {
 		if err := step(); err != nil {
 			return err
-		}
-	}
-
-	return nil
-}
-
-func forEachSummaryWithChildren(dcss *AgeDirs, fn func(dcs SummaryWithChildren) error) error {
-	if dcss == nil {
-		return nil
-	}
-
-	for _, adcs := range dcss {
-		for i := range adcs {
-			if err := fn(adcs[i]); err != nil {
-				return err
-			}
 		}
 	}
 
@@ -156,6 +156,7 @@ func (b *BaseDirs) storeGroupSubDirs(gidBase IDAgeDirs) error {
 	for gid, dcss := range gidBase {
 		if err := forEachSummaryWithChildren(dcss, func(dcs SummaryWithChildren) error {
 			key := SubDirKey{ID: gid, BaseDir: dcs.Dir, Age: dcs.Age}
+
 			return b.store.PutGroupSubDirs(key, dcs.Children)
 		}); err != nil {
 			return err
@@ -169,6 +170,7 @@ func (b *BaseDirs) storeUserSubDirs(uidBase IDAgeDirs) error {
 	for uid, dcss := range uidBase {
 		if err := forEachSummaryWithChildren(dcss, func(dcs SummaryWithChildren) error {
 			key := SubDirKey{ID: uid, BaseDir: dcs.Dir, Age: dcs.Age}
+
 			return b.store.PutUserSubDirs(key, dcs.Children)
 		}); err != nil {
 			return err

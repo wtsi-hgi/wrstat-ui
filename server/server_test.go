@@ -837,6 +837,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 		Convey("You can't get where data is or add the tree page without auth", func() {
 			p, provErr := BuildTestProvider(t, []string{path}, ownersPath, time.Unix(refTime, 0))
 			So(provErr, ShouldBeNil)
+
 			setErr := s.SetProvider(p)
 			So(setErr, ShouldBeNil)
 
@@ -856,6 +857,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 
 			p, provErr := BuildTestProvider(t, []string{path}, ownersPath, time.Unix(refTime, 0))
 			So(provErr, ShouldBeNil)
+
 			setErr := s.SetProvider(p)
 			So(setErr, ShouldBeNil)
 
@@ -899,6 +901,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 
 			p, provErr := BuildTestProvider(t, []string{path}, ownersPath, time.Unix(refTime, 0))
 			So(provErr, ShouldBeNil)
+
 			setErr := s.SetProvider(p)
 			So(setErr, ShouldBeNil)
 

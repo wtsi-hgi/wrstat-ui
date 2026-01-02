@@ -142,6 +142,7 @@ func (m multiBaseDirsReader) MountTimestamps() (map[string]time.Time, error) {
 
 func (m multiBaseDirsReader) Info() (*basedirs.DBInfo, error) {
 	out := new(basedirs.DBInfo)
+
 	var merr error
 
 	for _, r := range m {

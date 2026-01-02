@@ -14,31 +14,16 @@ import (
 	bolt "go.etcd.io/bbolt"
 )
 
-type dgutaReadSet struct {
-	dir       string
-	dgutas    *bolt.DB
-	children  *bolt.DB
-	updatedAt time.Time
-}
-
 const (
 	dgutaKeyExtraCap   = 2
 	dgutaKeyTerminator = 0xFF
 )
 
-func openDGUTADBPairs(dir string) (*bolt.DB, *bolt.DB, error) {
-	dgutaDB, err := openBoltReadOnly(filepathJoin(dir, dgutaDBBasename))
-	if err != nil {
-		return nil, nil, err
-	}
-
-	childrenDB, err := openBoltReadOnly(filepathJoin(dir, childrenDBBasename))
-	if err != nil {
-		_ = dgutaDB.Close()
-		return nil, nil, err
-	}
-
-	return dgutaDB, childrenDB, nil
+type dgutaReadSet struct {
+	dir       string
+	dgutas    *bolt.DB
+	children  *bolt.DB
+	updatedAt time.Time
 }
 
 func openDGUTAReadSet(dir string) (*dgutaReadSet, error) {
@@ -51,6 +36,7 @@ func openDGUTAReadSet(dir string) (*dgutaReadSet, error) {
 	if err != nil {
 		_ = dgutaDB.Close()
 		_ = childrenDB.Close()
+
 		return nil, err
 	}
 
@@ -90,19 +76,20 @@ func (s *dgutaReadSet) Close() error {
 	return errm.ErrorOrNil()
 }
 
-type dgutaDatabase struct {
-	paths []string
-	sets  []*dgutaReadSet
-	ch    codec.Handle
-}
-
 func closeReadSets(sets []*dgutaReadSet) {
 	for _, s := range sets {
 		if s == nil {
 			continue
 		}
+
 		_ = s.Close()
 	}
+}
+
+type dgutaDatabase struct {
+	paths []string
+	sets  []*dgutaReadSet
+	ch    codec.Handle
 }
 
 func openDGUTADatabase(paths []string) (*dgutaDatabase, error) {
@@ -115,8 +102,10 @@ func openDGUTADatabase(paths []string) (*dgutaDatabase, error) {
 		set, err := openDGUTAReadSet(dir)
 		if err != nil {
 			closeReadSets(sets)
+
 			return nil, err
 		}
+
 		sets = append(sets, set)
 	}
 
@@ -133,6 +122,7 @@ func (d *dgutaDatabase) Close() error {
 	}
 
 	var errm *multierror.Error
+
 	for _, s := range d.sets {
 		err := s.Close()
 		errM := multierror.Append(errm, err)
@@ -195,6 +185,7 @@ func getDGUTAFromDBAndAppend(b *bolt.Bucket, dir string, combined *db.DGUTA) err
 	if combined.Dir == "" {
 		combined.Dir = thisDGUTA.Dir
 		combined.GUTAs = thisDGUTA.GUTAs
+
 		return nil
 	}
 
@@ -254,6 +245,7 @@ func (d *dgutaDatabase) getChildrenFromDB(b *bolt.Bucket, dir string) []string {
 	}
 
 	dec := codec.NewDecoderBytes(v, d.ch)
+
 	var children []string
 	dec.MustDecode(&children)
 
@@ -269,6 +261,22 @@ func (d *dgutaDatabase) Info() (*db.DBInfo, error) {
 // dguta.db and dguta.db.children.
 func OpenDatabase(paths ...string) (db.Database, error) {
 	return openDGUTADatabase(paths)
+}
+
+func openDGUTADBPairs(dir string) (*bolt.DB, *bolt.DB, error) {
+	dgutaDB, err := openBoltReadOnly(filepathJoin(dir, dgutaDBBasename))
+	if err != nil {
+		return nil, nil, err
+	}
+
+	childrenDB, err := openBoltReadOnly(filepathJoin(dir, childrenDBBasename))
+	if err != nil {
+		_ = dgutaDB.Close()
+
+		return nil, nil, err
+	}
+
+	return dgutaDB, childrenDB, nil
 }
 
 func openBoltReadOnly(path string) (*bolt.DB, error) {

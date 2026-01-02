@@ -2,6 +2,7 @@ package bolt
 
 import (
 	"encoding/binary"
+	"errors"
 	"math"
 	"strings"
 	"time"
@@ -11,6 +12,8 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/db"
 	bolt "go.etcd.io/bbolt"
 )
+
+var errSkipUsage = errors.New("skip usage entry")
 
 func countOnly(_ []byte, _ codec.Handle) int { return 0 }
 
@@ -82,19 +85,12 @@ func (r *baseDirsReader) usage(bucketName string, age db.DirGUTAge) ([]*basedirs
 		}
 
 		return bucket.ForEach(func(_, data []byte) error {
-			u := new(basedirs.Usage)
-			if err := r.decode(data, u); err != nil {
-				return err
-			}
-			if u.Age != age {
+			u, err := r.parseUsageEntry(bucketName, data, age)
+			if errors.Is(err, errSkipUsage) {
 				return nil
 			}
-
-			u.Owner = r.owners[u.GID]
-			if bucketName == basedirs.GroupUsageBucket {
-				u.Name = r.groupCache.GroupName(u.GID)
-			} else {
-				u.Name = r.userCache.UserName(u.UID)
+			if err != nil {
+				return err
 			}
 
 			out = append(out, u)
@@ -106,6 +102,26 @@ func (r *baseDirsReader) usage(bucketName string, age db.DirGUTAge) ([]*basedirs
 	}
 
 	return out, nil
+}
+
+func (r *baseDirsReader) parseUsageEntry(bucketName string, data []byte, age db.DirGUTAge) (*basedirs.Usage, error) {
+	u := new(basedirs.Usage)
+	if err := r.decode(data, u); err != nil {
+		return nil, err
+	}
+
+	if u.Age != age {
+		return nil, errSkipUsage
+	}
+
+	u.Owner = r.owners[u.GID]
+	if bucketName == basedirs.GroupUsageBucket {
+		u.Name = r.groupCache.GroupName(u.GID)
+	} else {
+		u.Name = r.userCache.UserName(u.UID)
+	}
+
+	return u, nil
 }
 
 func (r *baseDirsReader) GroupSubDirs(gid uint32, basedir string, age db.DirGUTAge) ([]*basedirs.SubDir, error) {

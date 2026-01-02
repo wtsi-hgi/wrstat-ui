@@ -23,7 +23,11 @@ func (m *baseDirsHistoryMaintainer) CleanHistoryForMount(prefix string) error {
 
 	prefixB := []byte(prefix)
 
-	return db.Update(func(tx *bolt.Tx) error {
+	return db.Update(m.cleanHistoryTxFn(prefixB))
+}
+
+func (m *baseDirsHistoryMaintainer) cleanHistoryTxFn(prefixB []byte) func(tx *bolt.Tx) error {
+	return func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte(basedirs.GroupHistoricalBucket))
 		if b == nil {
 			return nil
@@ -31,16 +35,20 @@ func (m *baseDirsHistoryMaintainer) CleanHistoryForMount(prefix string) error {
 
 		c := b.Cursor()
 
-		for k, _ := c.First(); k != nil; k, _ = c.Next() {
-			if len(k) > idKeyLen && !bytes.HasPrefix(k[idKeyLen:], prefixB) {
-				if err := c.Delete(); err != nil {
-					return err
-				}
+		return iterateAndClean(c, prefixB)
+	}
+}
+
+func iterateAndClean(c *bolt.Cursor, prefixB []byte) error {
+	for k, _ := c.First(); k != nil; k, _ = c.Next() {
+		if shouldDeleteHistoryKey(k, prefixB) {
+			if err := c.Delete(); err != nil {
+				return err
 			}
 		}
+	}
 
-		return nil
-	})
+	return nil
 }
 
 func (m *baseDirsHistoryMaintainer) FindInvalidHistory(prefix string) ([]basedirs.HistoryIssue, error) {
@@ -83,4 +91,12 @@ func NewHistoryMaintainer(dbPath string) (basedirs.HistoryMaintainer, error) {
 	}
 
 	return &baseDirsHistoryMaintainer{dbPath: dbPath}, nil
+}
+
+func shouldDeleteHistoryKey(k, prefix []byte) bool {
+	if len(k) <= idKeyLen {
+		return false
+	}
+
+	return !bytes.HasPrefix(k[idKeyLen:], prefix)
 }

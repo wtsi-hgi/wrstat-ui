@@ -170,31 +170,58 @@ func mountTimestampsToUnixSeconds(mt map[string]time.Time) map[string]int64 {
 	return out
 }
 
-// SetProvider wires a backend bundle into the server.
-//
-// This replaces the legacy LoadDBs/EnableDBReloading flow; reloading is an
-// implementation detail of the provider.
-func (s *Server) SetProvider(p Provider) error {
+func (s *Server) prepareProvider(p Provider) (basedirs.Reader, map[string]int64, error) {
 	bd, err := validateProvider(p)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 
 	mt, err := bd.MountTimestamps()
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 
 	dataTimeStamp := mountTimestampsToUnixSeconds(mt)
 
 	if err := s.prewarmCaches(bd); err != nil {
+		return nil, nil, err
+	}
+
+	return bd, dataTimeStamp, nil
+}
+
+// SetProvider wires a backend bundle into the server.
+//
+// This replaces the legacy LoadDBs/EnableDBReloading flow; reloading is an
+// implementation detail of the provider.
+func (s *Server) SetProvider(p Provider) error {
+	bd, dataTimeStamp, err := s.prepareProvider(p)
+	if err != nil {
 		return err
 	}
 
-	s.mu.Lock()
-	loaded := s.provider != nil
-	old := s.provider
+	old := func() Provider {
+		s.mu.RLock()
+		defer s.mu.RUnlock()
 
+		return s.provider
+	}()
+
+	loaded := old != nil
+
+	s.assignProviderFields(p, bd, dataTimeStamp, loaded)
+
+	if old != nil {
+		_ = old.Close()
+	}
+
+	p.OnUpdate(s.handleProviderUpdate)
+
+	return nil
+}
+
+func (s *Server) assignProviderFields(p Provider, bd basedirs.Reader, dataTimeStamp map[string]int64, loaded bool) {
+	s.mu.Lock()
 	s.provider = p
 	s.tree = p.Tree()
 	s.basedirs = bd
@@ -206,16 +233,6 @@ func (s *Server) SetProvider(p Provider) error {
 	}
 
 	s.mu.Unlock()
-
-	if old != nil {
-		_ = old.Close()
-	}
-
-	p.OnUpdate(func() {
-		s.handleProviderUpdate()
-	})
-
-	return nil
 }
 
 func (s *Server) handleProviderUpdate() {
@@ -227,24 +244,28 @@ func (s *Server) handleProviderUpdate() {
 		return
 	}
 
+	if err := s.refreshProviderFrom(p); err != nil {
+		s.Logger.Printf("provider update failed: %s", err)
+	} else {
+		s.Logger.Printf("server ready again after provider update")
+	}
+}
+
+func (s *Server) refreshProviderFrom(p Provider) error {
 	bd := p.BaseDirs()
 	if bd == nil {
-		return
+		return basedirs.Error("provider returned nil basedirs")
 	}
 
 	mt, err := bd.MountTimestamps()
 	if err != nil {
-		s.Logger.Printf("refreshing db timestamps failed: %s", err)
-
-		return
+		return err
 	}
 
 	dataTimeStamp := mountTimestampsToUnixSeconds(mt)
 
 	if err := s.prewarmCaches(bd); err != nil {
-		s.Logger.Printf("prewarming caches failed after update: %s", err)
-
-		return
+		return err
 	}
 
 	s.mu.Lock()
@@ -253,7 +274,7 @@ func (s *Server) handleProviderUpdate() {
 	s.dataTimeStamp = dataTimeStamp
 	s.mu.Unlock()
 
-	s.Logger.Printf("server ready again after provider update")
+	return nil
 }
 
 func (s *Server) dbUpdateTimestamps(c *gin.Context) {

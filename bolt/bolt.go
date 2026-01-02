@@ -118,26 +118,16 @@ func (w *dgutaWriter) ensureMetadataPersisted() error {
 	if w.metaDone {
 		return nil
 	}
+
 	if err := w.validateMetadata(); err != nil {
 		return err
 	}
+
 	if err := persistMetaBoth(w.dgutaDB, w.childrenDB, w.mountPath, w.updatedAt); err != nil {
 		return err
 	}
 
 	w.metaDone = true
-
-	return nil
-}
-
-func (w *dgutaWriter) validateMetadata() error {
-	if w.mountPath == "" || w.updatedAt.IsZero() {
-		return ErrMetadataNotSet
-	}
-
-	if w.mountPath[0] != '/' || w.mountPath[len(w.mountPath)-1] != '/' {
-		return ErrInvalidMountPath
-	}
 
 	return nil
 }
@@ -150,31 +140,16 @@ func persistMetaBoth(dgutaDB, childrenDB *bolt.DB, mountPath string, updatedAt t
 	return persistMeta(childrenDB, mountPath, updatedAt)
 }
 
-func persistMeta(db *bolt.DB, mountPath string, updatedAt time.Time) error {
-	if db == nil {
-		return fmt.Errorf("nil db: %w", ErrInvalidConfig)
+func (w *dgutaWriter) validateMetadata() error {
+	if w.mountPath == "" || w.updatedAt.IsZero() {
+		return ErrMetadataNotSet
 	}
 
-	return db.Update(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte(metaBucketName))
-		if b == nil {
-			return errors.New("meta bucket missing") //nolint:err113
-		}
+	if w.mountPath[0] != '/' || w.mountPath[len(w.mountPath)-1] != '/' {
+		return ErrInvalidMountPath
+	}
 
-		if err := b.Put([]byte(metaKeyMountPath), []byte(mountPath)); err != nil {
-			return err
-		}
-
-		sec := updatedAt.Unix()
-		if sec < 0 {
-			return ErrInvalidUpdatedAt
-		}
-
-		buf := make([]byte, unixSecondsBytesLen)
-		binary.LittleEndian.PutUint64(buf, uint64(sec))
-
-		return b.Put([]byte(metaKeyUpdatedAt), buf)
-	})
+	return nil
 }
 
 func (w *dgutaWriter) storeBatch() {
@@ -306,9 +281,11 @@ func validateOutputDir(outputDir string) error {
 	if err != nil {
 		return err
 	}
+
 	if !fi.IsDir() {
 		return ErrOutputDirMissing
 	}
+
 	return nil
 }
 
@@ -346,4 +323,31 @@ func openBoltWritable(path, bucket string) (*bolt.DB, error) {
 	}
 
 	return db, nil
+}
+
+func persistMeta(db *bolt.DB, mountPath string, updatedAt time.Time) error {
+	if db == nil {
+		return fmt.Errorf("nil db: %w", ErrInvalidConfig)
+	}
+
+	return db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte(metaBucketName))
+		if b == nil {
+			return errors.New("meta bucket missing") //nolint:err113
+		}
+
+		if err := b.Put([]byte(metaKeyMountPath), []byte(mountPath)); err != nil {
+			return err
+		}
+
+		sec := updatedAt.Unix()
+		if sec < 0 {
+			return ErrInvalidUpdatedAt
+		}
+
+		buf := make([]byte, unixSecondsBytesLen)
+		binary.LittleEndian.PutUint64(buf, uint64(sec))
+
+		return b.Put([]byte(metaKeyUpdatedAt), buf)
+	})
 }

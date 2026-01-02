@@ -85,6 +85,7 @@ func addEntryToMap(entry fs.DirEntry, latest map[string]nameVersion, toDelete []
 	previous, ok := latest[key]
 	if ok && previous.version > version {
 		toDelete = append(toDelete, entry.Name())
+
 		return toDelete
 	}
 
