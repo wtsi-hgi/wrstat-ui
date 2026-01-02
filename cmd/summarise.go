@@ -273,7 +273,7 @@ func setSummarisers(s *summary.Summariser, mountpoints string, //nolint:gocognit
 	}
 
 	if dirgutaDB != "" {
-		c, err := addDirgutaSummariser(s, dirgutaDB)
+		c, err := addDirgutaSummariser(s, dirgutaDB, modtime)
 		if err != nil {
 			return nil, err
 		}
@@ -337,6 +337,7 @@ func addBasedirsSummariser(s *summary.Summariser, basedirsDB, basedirsHistoryDB,
 	)
 }
 
-func addDirgutaSummariser(s *summary.Summariser, dirgutaDB string) (func() error, error) {
-	return summariseutil.AddDirgutaSummariser(s, dirgutaDB)
+func addDirgutaSummariser(s *summary.Summariser, dirgutaDB string,
+	modtime time.Time) (func() error, error) {
+	return summariseutil.AddDirgutaSummariser(s, dirgutaDB, modtime)
 }

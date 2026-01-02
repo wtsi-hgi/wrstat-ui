@@ -14,7 +14,7 @@ import (
 
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
 	"github.com/wtsi-hgi/wrstat-ui/db"
-	"github.com/wtsi-hgi/wrstat-ui/server"
+	wrprovider "github.com/wtsi-hgi/wrstat-ui/provider"
 )
 
 var validDatasetDir = regexp.MustCompile(`^[^.][^_]*_.`)
@@ -249,35 +249,10 @@ func (p *provider) loadOnce() (*providerState, error) {
 	}
 
 	if len(datasetDirs) == 0 {
-		return nil, server.ErrNoPaths
+		return nil, wrprovider.ErrNoPaths
 	}
 
 	return p.createStateFromDatasets(datasetDirs, toDelete)
-}
-
-func (p *provider) createStateFromDatasets(datasetDirs, toDelete []string) (*providerState, error) {
-	dgutaDirs, basedirsReaders, closers, err := p.openAllDatasets(datasetDirs)
-	if err != nil {
-		return nil, errors.Join(err, closeAll(closers))
-	}
-
-	database, err := OpenDatabase(dgutaDirs...)
-	if err != nil {
-		return nil, errors.Join(err, closeAll(closers))
-	}
-
-	closers = append(closers, database.Close)
-
-	state := &providerState{
-		datasetDirs: datasetDirs,
-		toDelete:    toDelete,
-		database:    database,
-		tree:        db.NewTree(database),
-		basedirs:    multiBaseDirsReader(basedirsReaders),
-		closers:     closers,
-	}
-
-	return state, nil
 }
 
 func findDatasetDirs(basepath string, required ...string) ([]string, []string, error) {
@@ -306,6 +281,31 @@ func findDatasetDirs(basepath string, required ...string) ([]string, []string, e
 	slices.Sort(dirs)
 
 	return dirs, toDelete, nil
+}
+
+func (p *provider) createStateFromDatasets(datasetDirs, toDelete []string) (*providerState, error) {
+	dgutaDirs, basedirsReaders, closers, err := p.openAllDatasets(datasetDirs)
+	if err != nil {
+		return nil, errors.Join(err, closeAll(closers))
+	}
+
+	database, err := OpenDatabase(dgutaDirs...)
+	if err != nil {
+		return nil, errors.Join(err, closeAll(closers))
+	}
+
+	closers = append(closers, database.Close)
+
+	state := &providerState{
+		datasetDirs: datasetDirs,
+		toDelete:    toDelete,
+		database:    database,
+		tree:        db.NewTree(database),
+		basedirs:    multiBaseDirsReader(basedirsReaders),
+		closers:     closers,
+	}
+
+	return state, nil
 }
 
 func closeAll(closers []func() error) error {
@@ -415,10 +415,10 @@ func (p *provider) maybeStartPoll() {
 	}
 }
 
-// OpenProvider constructs a backend bundle that implements server.Provider.
+// OpenProvider constructs a backend bundle that implements wrprovider.Provider.
 // When cfg.PollInterval > 0, the backend starts an internal goroutine that
 // watches cfg.BasePath for new databases and triggers OnUpdate callbacks.
-func OpenProvider(cfg Config) (server.Provider, error) {
+func OpenProvider(cfg Config) (wrprovider.Provider, error) {
 	if err := validateConfig(cfg); err != nil {
 		return nil, err
 	}

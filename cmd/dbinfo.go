@@ -32,7 +32,6 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
 	"github.com/wtsi-hgi/wrstat-ui/bolt"
-	"github.com/wtsi-hgi/wrstat-ui/db"
 	"github.com/wtsi-hgi/wrstat-ui/server"
 )
 
@@ -62,11 +61,18 @@ NB: for large databases, this can take hours to run.
 		slog.SetLogLoggerLevel(slog.LevelDebug)
 
 		info("opening dguta databases...")
-		dgutaDB := db.NewDB(durgutaPaths...)
+		dgutaDB, err := bolt.OpenDatabase(durgutaPaths...)
+		if err != nil {
+			die("failed to open dguta db: %s", err)
+		}
+
 		dbInfo, err := dgutaDB.Info()
 		if err != nil {
+			_ = dgutaDB.Close()
 			die("failed to get dguta db info: %s", err)
 		}
+
+		_ = dgutaDB.Close()
 
 		cliPrint("\nDirs: %d\nDGUTAs: %d\nParents: %d\nChildren: %d\n\n",
 			dbInfo.NumDirs, dbInfo.NumDGUTAs, dbInfo.NumParents, dbInfo.NumChildren)

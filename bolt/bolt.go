@@ -77,6 +77,18 @@ type dgutaWriter struct {
 	metaDone  bool
 }
 
+func newDGUTAWriterFromDBs(outputDir string, dgutaDB, childrenDB *bolt.DB) *dgutaWriter {
+	return &dgutaWriter{
+		outputDir:   outputDir,
+		batchSize:   1,
+		dgutaDB:     dgutaDB,
+		childrenDB:  childrenDB,
+		codecHandle: new(codec.BincHandle),
+		writeBatch:  make([]db.RecordDGUTA, 0, 1),
+		metaDone:    false,
+	}
+}
+
 func (w *dgutaWriter) SetBatchSize(batchSize int) {
 	if batchSize <= 0 {
 		batchSize = 1
@@ -245,35 +257,18 @@ func (w *dgutaWriter) Close() error {
 // NewDGUTAWriter creates a db.DGUTAWriter backed by Bolt.
 // outputDir is the directory where dguta.db and dguta.db.children will be
 // created. The directory must already exist.
+// Returns db.ErrDBExists if the database files already exist.
 func NewDGUTAWriter(outputDir string) (db.DGUTAWriter, error) {
 	if err := validateOutputDir(outputDir); err != nil {
 		return nil, ErrOutputDirMissing
 	}
 
-	dgutaPath := filepathJoin(outputDir, dgutaDBBasename)
-	childrenPath := filepathJoin(outputDir, childrenDBBasename)
-
-	dgutaDB, err := openBoltWritable(dgutaPath, dgutaBucketName)
+	dgutaDB, childrenDB, err := openDGUTAWriterDBs(outputDir)
 	if err != nil {
 		return nil, err
 	}
 
-	childrenDB, err := openBoltWritable(childrenPath, childrenBucketName)
-	if err != nil {
-		_ = dgutaDB.Close()
-
-		return nil, err
-	}
-
-	return &dgutaWriter{
-		outputDir:   outputDir,
-		batchSize:   1,
-		dgutaDB:     dgutaDB,
-		childrenDB:  childrenDB,
-		codecHandle: new(codec.BincHandle),
-		writeBatch:  make([]db.RecordDGUTA, 0, 1),
-		metaDone:    false,
-	}, nil
+	return newDGUTAWriterFromDBs(outputDir, dgutaDB, childrenDB), nil
 }
 
 func validateOutputDir(outputDir string) error {
@@ -289,12 +284,41 @@ func validateOutputDir(outputDir string) error {
 	return nil
 }
 
+func openDGUTAWriterDBs(outputDir string) (*bolt.DB, *bolt.DB, error) {
+	dgutaPath := filepathJoin(outputDir, dgutaDBBasename)
+	childrenPath := filepathJoin(outputDir, childrenDBBasename)
+
+	if pathExists(dgutaPath) || pathExists(childrenPath) {
+		return nil, nil, db.ErrDBExists
+	}
+
+	dgutaDB, err := openBoltWritable(dgutaPath, dgutaBucketName)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	childrenDB, err := openBoltWritable(childrenPath, childrenBucketName)
+	if err != nil {
+		_ = dgutaDB.Close()
+
+		return nil, nil, err
+	}
+
+	return dgutaDB, childrenDB, nil
+}
+
 func filepathJoin(dir, base string) string {
 	if strings.HasSuffix(dir, "/") {
 		return dir + base
 	}
 
 	return dir + "/" + base
+}
+
+func pathExists(path string) bool {
+	info, err := os.Stat(path)
+
+	return err == nil && info.Size() > 0
 }
 
 func openBoltWritable(path, bucket string) (*bolt.DB, error) {

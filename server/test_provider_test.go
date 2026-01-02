@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
+	wrbolt "github.com/wtsi-hgi/wrstat-ui/bolt"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 	internaldata "github.com/wtsi-hgi/wrstat-ui/internal/data"
 	"github.com/wtsi-hgi/wrstat-ui/stats"
@@ -19,26 +20,6 @@ import (
 )
 
 var errNoDatasetDirectoriesSupplied = errors.New("no dataset directories supplied")
-
-type dbAdapter struct {
-	d *db.DB
-}
-
-func (a *dbAdapter) DirInfo(dir string, filter *db.Filter) (*db.DirSummary, error) {
-	return a.d.DirInfo(dir, filter)
-}
-
-func (a *dbAdapter) Children(dir string) ([]string, error) {
-	return a.d.Children(dir), nil
-}
-
-func (a *dbAdapter) Info() (*db.DBInfo, error) {
-	return a.d.Info()
-}
-
-func (a *dbAdapter) Close() error {
-	return a.d.Close()
-}
 
 type memBaseDirs struct {
 	mountPath string
@@ -325,12 +306,14 @@ func CreateExampleDBsCustomIDsWithDir(t *testing.T, dir, uid, gidA, gidB string,
 		return err
 	}
 
-	d := db.NewDB(dgutaDir)
-	d.SetBatchSize(20)
-
-	if err := d.CreateDB(); err != nil {
+	writer, err := wrbolt.NewDGUTAWriter(dgutaDir)
+	if err != nil {
 		return err
 	}
+
+	writer.SetMountPath("/")
+	writer.SetUpdatedAt(time.Unix(refTime, 0))
+	writer.SetBatchSize(20)
 
 	data := internaldata.CreateDefaultTestData(
 		parse32(t, gidA),
@@ -341,15 +324,15 @@ func CreateExampleDBsCustomIDsWithDir(t *testing.T, dir, uid, gidA, gidB string,
 		refTime,
 	).AsReader()
 	s := summary.NewSummariser(stats.NewStatsParser(data))
-	s.AddDirectoryOperation(dirguta.NewDirGroupUserTypeAge(d))
+	s.AddDirectoryOperation(dirguta.NewDirGroupUserTypeAge(writer))
 
 	if err := s.Summarise(); err != nil {
-		_ = d.Close()
+		_ = writer.Close()
 
 		return err
 	}
 
-	if err := d.Close(); err != nil {
+	if err := writer.Close(); err != nil {
 		return err
 	}
 
@@ -412,18 +395,18 @@ func BuildTestProviderWithMountTimestamps(
 		return nil, errNoDatasetDirectoriesSupplied
 	}
 
-	// Tree: db.DB supports querying multiple databases simultaneously.
+	// Tree: bolt.OpenDatabase supports querying multiple databases simultaneously.
 	dgutaDirs := make([]string, 0, len(datasetDirs))
 	for _, dsDir := range datasetDirs {
 		dgutaDirs = append(dgutaDirs, filepath.Join(dsDir, "dirguta"))
 	}
 
-	d := db.NewDB(dgutaDirs...)
-	if err := d.Open(); err != nil {
+	database, err := wrbolt.OpenDatabase(dgutaDirs...)
+	if err != nil {
 		return nil, err
 	}
 
-	tree := db.NewTree(&dbAdapter{d: d})
+	tree := db.NewTree(database)
 
 	// BaseDirs
 	mbd, err := newMemBaseDirs(ownersPath)

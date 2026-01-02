@@ -39,7 +39,6 @@ import (
 
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
 	"github.com/wtsi-hgi/wrstat-ui/bolt"
-	"github.com/wtsi-hgi/wrstat-ui/db"
 	internaldata "github.com/wtsi-hgi/wrstat-ui/internal/data"
 	"github.com/wtsi-hgi/wrstat-ui/internal/fs"
 	"github.com/wtsi-hgi/wrstat-ui/internal/split"
@@ -149,16 +148,18 @@ func addDirgutaSummariser(s *summary.Summariser, path string) (func() error, err
 		return nil, err
 	}
 
-	d := db.NewDB(path)
-	d.SetBatchSize(exampleDBBatchSize)
-
-	if err := d.CreateDB(); err != nil {
+	writer, err := bolt.NewDGUTAWriter(path)
+	if err != nil {
 		return nil, err
 	}
 
-	s.AddDirectoryOperation(dirguta.NewDirGroupUserTypeAge(d))
+	writer.SetMountPath("/")
+	writer.SetUpdatedAt(time.Now())
+	writer.SetBatchSize(exampleDBBatchSize)
 
-	return d.Close, nil
+	s.AddDirectoryOperation(dirguta.NewDirGroupUserTypeAge(writer))
+
+	return writer.Close, nil
 }
 
 func addBasedirsSummariser(t *testing.T, s *summary.Summariser, path string) (func() error, error) {

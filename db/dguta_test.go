@@ -29,11 +29,13 @@ import (
 	"io"
 	"math"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	. "github.com/smartystreets/goconvey/convey"
+	wrbolt "github.com/wtsi-hgi/wrstat-ui/bolt"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 	internaldata "github.com/wtsi-hgi/wrstat-ui/internal/data"
 	"github.com/wtsi-hgi/wrstat-ui/internal/statsdata"
@@ -41,6 +43,14 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/summary"
 	"github.com/wtsi-hgi/wrstat-ui/summary/dirguta"
 	bolt "go.etcd.io/bbolt"
+)
+
+const (
+	gutaBucket     = "gut"
+	childBucket    = "children"
+	boltOpenMode   = 0o640
+	dgutaDBName    = "dguta.db"
+	childrenDBName = "dguta.db.children"
 )
 
 func TestDGUTA(t *testing.T) {
@@ -178,16 +188,13 @@ func TestDGUTA(t *testing.T) {
 				paths, err := testMakeDBPaths(t)
 				So(err, ShouldBeNil)
 
-				d := db.NewDB(paths[0])
-				So(d, ShouldNotBeNil)
-
 				Convey("You can store it in a database file", func() {
 					_, errs := os.Stat(paths[1])
 					So(errs, ShouldNotBeNil)
 					_, errs = os.Stat(paths[2])
 					So(errs, ShouldNotBeNil)
 
-					err := store(d, data, 4)
+					err := store(paths[0], data, 4)
 					So(err, ShouldBeNil)
 
 					Convey("The resulting database files have the expected content", func() {
@@ -198,20 +205,18 @@ func TestDGUTA(t *testing.T) {
 						So(errs, ShouldBeNil)
 						So(info.Size(), ShouldBeGreaterThan, 10)
 
-						keys, errt := testGetDBKeys(paths[1], db.GUTABucket)
+						keys, errt := testGetDBKeys(paths[1], gutaBucket)
 						So(errt, ShouldBeNil)
 						So(keys, ShouldResemble, expectedKeys)
 
-						keys, errt = testGetDBKeys(paths[2], db.ChildBucket)
+						keys, errt = testGetDBKeys(paths[2], childBucket)
 						So(errt, ShouldBeNil)
 						So(keys, ShouldResemble, []string{"/", "/a/", "/a/b/", "/a/b/d/", "/a/b/e/", "/a/b/e/h/", "/a/c/"})
-						Convey("You can query a database after Open()ing it", func() {
-							d = db.NewDB(paths[0])
+						Convey("You can query a database after opening it", func() {
+							d, errOpen := wrbolt.OpenDatabase(paths[0])
+							So(errOpen, ShouldBeNil)
 
-							d.Close()
-
-							err = d.Open()
-							So(err, ShouldBeNil)
+							defer d.Close()
 
 							ds, errd := d.DirInfo("/", defaultFilter)
 							So(errd, ShouldBeNil)
@@ -307,34 +312,32 @@ func TestDGUTA(t *testing.T) {
 							So(ds.GIDs, ShouldResemble, []uint32{1})
 							So(ds.FT, ShouldResemble, db.DGUTAFileTypeTemp|db.DGUTAFileTypeBam|db.DGUTAFileTypeDir)
 
-							children := d.Children("/a")
+							children, errCh := d.Children("/a")
+							So(errCh, ShouldBeNil)
 							So(children, ShouldResemble, []string{"/a/b", "/a/c"})
 
-							children = d.Children("/a/b/e/h")
+							children, errCh = d.Children("/a/b/e/h")
+							So(errCh, ShouldBeNil)
 							So(children, ShouldResemble, []string{"/a/b/e/h/tmp"})
 
-							children = d.Children("/a/c/d")
+							children, errCh = d.Children("/a/c/d")
+							So(errCh, ShouldBeNil)
 							So(children, ShouldBeNil)
 
-							children = d.Children("/foo")
+							children, errCh = d.Children("/foo")
+							So(errCh, ShouldBeNil)
 							So(children, ShouldBeNil)
-
-							d.Close()
 						})
 
-						Convey("Open()s fail on invalid databases", func() {
-							d = db.NewDB(paths[0])
-
-							d.Close()
-
+						Convey("Opens fail on invalid databases", func() {
 							err = os.RemoveAll(paths[2])
 							So(err, ShouldBeNil)
 
 							err = os.WriteFile(paths[2], []byte("foo"), 0o600)
 							So(err, ShouldBeNil)
 
-							err = d.Open()
-							So(err, ShouldNotBeNil)
+							_, errOpen := wrbolt.OpenDatabase(paths[0])
+							So(errOpen, ShouldNotBeNil)
 
 							err = os.RemoveAll(paths[1])
 							So(err, ShouldBeNil)
@@ -342,8 +345,8 @@ func TestDGUTA(t *testing.T) {
 							err = os.WriteFile(paths[1], []byte("foo"), 0o600)
 							So(err, ShouldBeNil)
 
-							err = d.Open()
-							So(err, ShouldNotBeNil)
+							_, errOpen = wrbolt.OpenDatabase(paths[0])
+							So(errOpen, ShouldNotBeNil)
 						})
 
 						Convey("Store()ing multiple times", func() {
@@ -359,7 +362,7 @@ func TestDGUTA(t *testing.T) {
 							data = pd.AsReader()
 
 							Convey("to the same db file doesn't work", func() {
-								err = store(d, data, 4)
+								err = store(paths[0], data, 4)
 								So(err, ShouldNotBeNil)
 								So(err, ShouldEqual, db.ErrDBExists)
 							})
@@ -369,13 +372,13 @@ func TestDGUTA(t *testing.T) {
 								err = os.Mkdir(path2, os.ModePerm)
 								So(err, ShouldBeNil)
 
-								db2 := db.NewDB(path2)
-								err = store(db2, data, 4)
+								err = store(path2, data, 4)
 								So(err, ShouldBeNil)
 
-								d = db.NewDB(paths[0], path2)
-								err = d.Open()
-								So(err, ShouldBeNil)
+								d, errOpen := wrbolt.OpenDatabase(paths[0], path2)
+								So(errOpen, ShouldBeNil)
+
+								defer d.Close()
 
 								ds, errd := d.DirInfo("/", &db.Filter{})
 								So(errd, ShouldBeNil)
@@ -387,16 +390,23 @@ func TestDGUTA(t *testing.T) {
 								So(ds.GIDs, ShouldResemble, []uint32{1, 2, 3})
 								So(ds.FT, ShouldResemble, expectedFTs)
 
-								children := d.Children("/")
+								children, errCh := d.Children("/")
+								So(errCh, ShouldBeNil)
 								So(children, ShouldResemble, []string{"/a", "/i"})
 
-								children = d.Children("/a")
+								children, errCh = d.Children("/a")
+								So(errCh, ShouldBeNil)
 								So(children, ShouldResemble, []string{"/a/b", "/a/c", "/a/i"})
 							})
 						})
 					})
 
 					Convey("You can get info on the database files", func() {
+						d, errOpen := wrbolt.OpenDatabase(paths[0])
+						So(errOpen, ShouldBeNil)
+
+						defer d.Close()
+
 						info, err := d.Info()
 						So(err, ShouldBeNil)
 						So(info, ShouldResemble, &db.DBInfo{
@@ -409,94 +419,98 @@ func TestDGUTA(t *testing.T) {
 				})
 
 				Convey("Storing with a batch size == directories works", func() {
-					err := store(d, data, len(expectedKeys))
+					err := store(paths[0], data, len(expectedKeys))
 					So(err, ShouldBeNil)
 
-					keys, errt := testGetDBKeys(paths[1], db.GUTABucket)
+					keys, errt := testGetDBKeys(paths[1], gutaBucket)
 					So(errt, ShouldBeNil)
 					So(keys, ShouldResemble, expectedKeys)
 				})
 
 				Convey("Storing with a batch size > directories works", func() {
-					err := store(d, data, len(expectedKeys)+2)
+					err := store(paths[0], data, len(expectedKeys)+2)
 					So(err, ShouldBeNil)
 
-					keys, errt := testGetDBKeys(paths[1], db.GUTABucket)
+					keys, errt := testGetDBKeys(paths[1], gutaBucket)
 					So(errt, ShouldBeNil)
 					So(keys, ShouldResemble, expectedKeys)
 				})
 
 				Convey("You can't store to db if data is invalid", func() {
-					err := store(d, strings.NewReader("foo"), 4)
+					err := store(paths[0], strings.NewReader("foo"), 4)
 					So(err, ShouldNotBeNil)
 				})
 
-				Convey("You can't store to db if", func() {
-					err := d.CreateDB()
+				Convey("You can't store to db if db already exists", func() {
+					err := store(paths[0], data, 4)
 					So(err, ShouldBeNil)
 
-					Convey("the db gets closed", func() {
-						err = d.Close()
-						So(err, ShouldBeNil)
+					// Try to store again - should fail
+					err = store(paths[0], data, 4)
+					So(err, ShouldNotBeNil)
+					So(err, ShouldEqual, db.ErrDBExists)
+				})
 
-						err = store(d, data, 4)
-						So(err, ShouldNotBeNil)
+				Convey("Writer add fails on too-long keys", func() {
+					writer, err := wrbolt.NewDGUTAWriter(paths[0])
+					So(err, ShouldBeNil)
+
+					writer.SetMountPath("/")
+					writer.SetUpdatedAt(time.Now())
+					writer.SetBatchSize(1)
+
+					err = writer.Add(db.RecordDGUTA{
+						Dir: &summary.DirectoryPath{
+							Name: strings.Repeat("a", bolt.MaxKeySize),
+						},
+						GUTAs: expected[0].GUTAs,
 					})
+					So(err, ShouldNotBeNil)
 
-					Convey("the put fails", func() {
-						d.SetBatchSize(1)
-
-						err := d.Add(db.RecordDGUTA{
-							Dir: &summary.DirectoryPath{
-								Name: strings.Repeat("a", bolt.MaxKeySize),
-							},
-							GUTAs: expected[0].GUTAs,
-						})
-						So(err, ShouldNotBeNil)
-					})
+					writer.Close()
 				})
 			})
 
 			Convey("You can't Store to or Open an unwritable location", func() {
-				d := db.NewDB("/dguta.db")
-				So(d, ShouldNotBeNil)
-
-				err := store(d, data, 4)
+				err := store("/dguta.db", data, 4)
 				So(err, ShouldNotBeNil)
 
-				err = d.Open()
-				So(err, ShouldNotBeNil)
+				_, errOpen := wrbolt.OpenDatabase("/nonexistent")
+				So(errOpen, ShouldNotBeNil)
 
 				paths, err := testMakeDBPaths(t)
 				So(err, ShouldBeNil)
 
-				d = db.NewDB(paths[0])
-
 				err = os.WriteFile(paths[2], []byte("foo"), 0o600)
 				So(err, ShouldBeNil)
 
-				err = store(d, data, 4)
+				err = store(paths[0], data, 4)
 				So(err, ShouldNotBeNil)
 			})
 		})
 	})
 }
 
-func store(d *db.DB, r io.Reader, batchSize int) error {
-	d.SetBatchSize(batchSize)
-
-	if err := d.CreateDB(); err != nil {
+func store(dir string, r io.Reader, batchSize int) error {
+	writer, err := wrbolt.NewDGUTAWriter(dir)
+	if err != nil {
 		return err
 	}
+
+	writer.SetMountPath("/")
+	writer.SetUpdatedAt(time.Now())
+	writer.SetBatchSize(batchSize)
 
 	s := summary.NewSummariser(stats.NewStatsParser(r))
-	s.AddDirectoryOperation(dirguta.NewDirGroupUserTypeAge(d))
+	s.AddDirectoryOperation(dirguta.NewDirGroupUserTypeAge(writer))
 
 	if err := s.Summarise(); err != nil {
+		_ = writer.Close()
+
 		return err
 	}
 
-	return d.Close()
+	return writer.Close()
 }
 
 type gutaInfo struct {
@@ -691,19 +705,16 @@ func testMakeDBPaths(t *testing.T) ([]string, error) {
 
 	dir := t.TempDir()
 
-	set, err := db.NewDBSet(dir)
-	if err != nil {
-		return nil, err
-	}
-
-	paths := set.Paths()
-
-	return append([]string{dir}, paths...), nil
+	return []string{
+		dir,
+		filepath.Join(dir, dgutaDBName),
+		filepath.Join(dir, childrenDBName),
+	}, nil
 }
 
 // testGetDBKeys returns all the keys in the db at the given path.
 func testGetDBKeys(path, bucket string) ([]string, error) {
-	rdb, err := bolt.Open(path, db.DBOpenMode, nil)
+	rdb, err := bolt.Open(path, boltOpenMode, nil)
 	if err != nil {
 		return nil, err
 	}

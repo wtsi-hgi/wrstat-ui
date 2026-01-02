@@ -253,7 +253,75 @@ func (d *dgutaDatabase) getChildrenFromDB(b *bolt.Bucket, dir string) []string {
 }
 
 func (d *dgutaDatabase) Info() (*db.DBInfo, error) {
-	return nil, ErrNotImplemented
+	info := &db.DBInfo{}
+
+	for _, s := range d.sets {
+		setInfo, err := d.setInfo(s)
+		if err != nil {
+			return nil, err
+		}
+
+		info.NumDirs += setInfo.NumDirs
+		info.NumDGUTAs += setInfo.NumDGUTAs
+		info.NumParents += setInfo.NumParents
+		info.NumChildren += setInfo.NumChildren
+	}
+
+	return info, nil
+}
+
+func (d *dgutaDatabase) setInfo(s *dgutaReadSet) (*db.DBInfo, error) {
+	info := &db.DBInfo{}
+
+	if err := d.scanGUTAInfo(s.dgutas, info); err != nil {
+		return nil, err
+	}
+
+	if err := d.scanChildrenInfo(s.children, info); err != nil {
+		return nil, err
+	}
+
+	return info, nil
+}
+
+func (d *dgutaDatabase) scanGUTAInfo(dbh *bolt.DB, info *db.DBInfo) error {
+	return dbh.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte(dgutaBucketName))
+		if b == nil {
+			return nil
+		}
+
+		return b.ForEach(func(k, v []byte) error {
+			info.NumDirs++
+
+			dguta := db.DecodeDGUTAbytes(k, v)
+			info.NumDGUTAs += len(dguta.GUTAs)
+
+			return nil
+		})
+	})
+}
+
+func (d *dgutaDatabase) scanChildrenInfo(dbh *bolt.DB, info *db.DBInfo) error {
+	return dbh.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte(childrenBucketName))
+		if b == nil {
+			return nil
+		}
+
+		return b.ForEach(func(_, v []byte) error {
+			info.NumParents++
+
+			var children []string
+
+			dec := codec.NewDecoderBytes(v, d.ch)
+			dec.MustDecode(&children)
+
+			info.NumChildren += len(children)
+
+			return nil
+		})
+	})
 }
 
 // OpenDatabase opens a Bolt-backed database implementation that satisfies the

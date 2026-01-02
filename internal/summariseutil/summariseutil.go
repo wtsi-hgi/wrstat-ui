@@ -5,23 +5,33 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
 	"github.com/wtsi-hgi/wrstat-ui/bolt"
-	"github.com/wtsi-hgi/wrstat-ui/db"
 	"github.com/wtsi-hgi/wrstat-ui/summary"
 	sbasedirs "github.com/wtsi-hgi/wrstat-ui/summary/basedirs"
 	dirguta "github.com/wtsi-hgi/wrstat-ui/summary/dirguta"
 )
 
-const dbBatchSize = 10000
+const (
+	dbBatchSize          = 10000
+	numDatasetDirParts   = 2
+	fullwidthSolidus     = "／"
+	fullwidthReplacement = "/"
+)
+
+// ErrDatasetDirMissingUnderscore is returned when a dataset directory name
+// does not contain the expected '<version>_<mountKey>' underscore separator.
+var ErrDatasetDirMissingUnderscore = errors.New("dataset dir missing '_' separator")
 
 // AddDirgutaSummariser adds the dirguta summariser to s and returns a close
 // function for the underlying DB.
-func AddDirgutaSummariser(s *summary.Summariser, dirgutaDB string) (func() error, error) {
+func AddDirgutaSummariser(s *summary.Summariser, dirgutaDB string,
+	modtime time.Time) (func() error, error) {
 	if err := os.RemoveAll(dirgutaDB); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return nil, err
 	}
@@ -30,17 +40,48 @@ func AddDirgutaSummariser(s *summary.Summariser, dirgutaDB string) (func() error
 		return nil, err
 	}
 
-	dg := db.NewDB(dirgutaDB)
-
-	if err := dg.CreateDB(); err != nil {
-		return nil, err
+	writer, err := bolt.NewDGUTAWriter(dirgutaDB)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create dguta writer: %w", err)
 	}
 
-	dg.SetBatchSize(dbBatchSize)
+	mountPath := deriveMountPathFromOutputDir(dirgutaDB)
 
-	s.AddDirectoryOperation(dirguta.NewDirGroupUserTypeAge(dg))
+	writer.SetMountPath(mountPath)
+	writer.SetUpdatedAt(modtime)
+	writer.SetBatchSize(dbBatchSize)
 
-	return dg.Close, nil
+	s.AddDirectoryOperation(dirguta.NewDirGroupUserTypeAge(writer))
+
+	return writer.Close, nil
+}
+
+// deriveMountPathFromOutputDir extracts the mount path from the parent
+// directory of the output path.
+//
+// The parent directory is expected to have the form '<version>_<mountKey>'
+// where <mountKey> is the mount path with '/' replaced by '／' (fullwidth
+// solidus).
+//
+// If the directory name doesn't match the expected format, "/" is returned
+// as a fallback for backwards compatibility.
+func deriveMountPathFromOutputDir(outputPath string) string {
+	parentDir := filepath.Base(filepath.Dir(outputPath))
+
+	parts := strings.SplitN(parentDir, "_", numDatasetDirParts)
+	if len(parts) != numDatasetDirParts {
+		// Fallback to root mount path for backwards compatibility
+		return "/"
+	}
+
+	mountKey := parts[1]
+	mountPath := strings.ReplaceAll(mountKey, fullwidthSolidus, fullwidthReplacement)
+
+	if !strings.HasSuffix(mountPath, "/") {
+		mountPath += "/"
+	}
+
+	return mountPath
 }
 
 // AddBasedirsSummariser adds the basedirs summariser to s and configures it
@@ -130,6 +171,14 @@ func ParseBasedirConfig(quotaPath, basedirsConfig string) (*basedirs.Quotas, bas
 	return quotas, config, nil
 }
 
+func removeFileIfNotNotExist(path string) error {
+	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+
+	return nil
+}
+
 // ParseMountpointsFromFile parses a file containing quoted mountpoints.
 //
 // Each non-empty line must be a Go-quoted string (as produced by
@@ -161,14 +210,6 @@ func ParseMountpointsFromFile(mountpoints string) ([]string, error) {
 	}
 
 	return mounts, nil
-}
-
-func removeFileIfNotNotExist(path string) error {
-	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return err
-	}
-
-	return nil
 }
 
 func configureStoreMounts(store basedirs.Store, mps []string, modtime time.Time) {

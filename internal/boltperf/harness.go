@@ -250,7 +250,7 @@ func addSummarisers(
 		return nil, err
 	}
 
-	dgClose, err := summariseutil.AddDirgutaSummariser(ss, targets.dgutaDBDir)
+	dgClose, err := summariseutil.AddDirgutaSummariser(ss, targets.dgutaDBDir, modtime)
 	if err != nil {
 		if bdClose != nil {
 			return nil, errors.Join(err, bdClose())
