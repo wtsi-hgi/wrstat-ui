@@ -16,6 +16,8 @@ import (
 
 var errRequiredBucketsMissing = errors.New("required buckets missing")
 
+const minHistoryKeyLen = 5
+
 func createInitialBuckets(tx *bolt.Tx) error {
 	buckets := []string{
 		basedirs.GroupUsageBucket,
@@ -206,12 +208,13 @@ func (s *baseDirsStore) AppendGroupHistory(key basedirs.HistoryKey, point basedi
 	return b.Put(k, s.encode(histories))
 }
 
-func (s *baseDirsStore) Finalise() error {
+//nolint:misspell // Finalize spelling follows interface_spec
+func (s *baseDirsStore) Finalize() error {
 	if s.tx == nil {
 		return nil
 	}
 
-	gub, ghb, err := s.getFinaliseBuckets()
+	gub, ghb, err := s.getFinalizeBuckets()
 	if err != nil {
 		return err
 	}
@@ -223,7 +226,7 @@ func (s *baseDirsStore) Finalise() error {
 
 	// Precompute DateNoSpace/DateNoFiles for group usage at age=all.
 	if err = gub.ForEach(func(k, v []byte) error {
-		return s.processFinaliseEntry(gub, ghb, k, v, gidMounts)
+		return s.processFinalizeEntry(gub, ghb, k, v, gidMounts)
 	}); err != nil {
 		rollbackErr := s.tx.Rollback()
 		s.tx = nil
@@ -237,7 +240,7 @@ func (s *baseDirsStore) Finalise() error {
 	return err
 }
 
-func (s *baseDirsStore) getFinaliseBuckets() (*bolt.Bucket, *bolt.Bucket, error) {
+func (s *baseDirsStore) getFinalizeBuckets() (*bolt.Bucket, *bolt.Bucket, error) {
 	gub := s.tx.Bucket([]byte(basedirs.GroupUsageBucket))
 	ghb := s.tx.Bucket([]byte(basedirs.GroupHistoricalBucket))
 
@@ -269,8 +272,6 @@ func (s *baseDirsStore) getGIDMounts(ghb *bolt.Bucket) (map[uint32][]string, err
 	return gidMounts, nil
 }
 
-const minHistoryKeyLen = 5
-
 func decodeHistoryKey(k []byte) (uint32, string) {
 	if len(k) < minHistoryKeyLen {
 		return 0, ""
@@ -282,7 +283,7 @@ func decodeHistoryKey(k []byte) (uint32, string) {
 	return gid, path
 }
 
-func (s *baseDirsStore) processFinaliseEntry(gub, ghb *bolt.Bucket, k, v []byte,
+func (s *baseDirsStore) processFinalizeEntry(gub, ghb *bolt.Bucket, k, v []byte,
 	gidMounts map[uint32][]string) error {
 	gu := new(basedirs.Usage)
 	if err := s.decode(v, gu); err != nil {
@@ -299,6 +300,22 @@ func (s *baseDirsStore) processFinaliseEntry(gub, ghb *bolt.Bucket, k, v []byte,
 	}
 
 	return s.updateUsageWithHistory(gub, ghb, k, gu, mountPath)
+}
+
+func findMountPath(gu *basedirs.Usage, gidMounts map[uint32][]string) string {
+	mounts, ok := gidMounts[gu.GID]
+	if !ok {
+		return ""
+	}
+
+	var mountPath string
+	for _, mp := range mounts {
+		if strings.HasPrefix(gu.BaseDir, mp) && len(mp) > len(mountPath) {
+			mountPath = mp
+		}
+	}
+
+	return mountPath
 }
 
 func (s *baseDirsStore) updateUsageWithHistory(gub, ghb *bolt.Bucket, k []byte,
@@ -321,22 +338,6 @@ func (s *baseDirsStore) updateUsageWithHistory(gub, ghb *bolt.Bucket, k []byte,
 	gu.DateNoFiles = inodeExceedDate
 
 	return gub.Put(k, s.encode(gu))
-}
-
-func findMountPath(gu *basedirs.Usage, gidMounts map[uint32][]string) string {
-	mounts, ok := gidMounts[gu.GID]
-	if !ok {
-		return ""
-	}
-
-	var mountPath string
-	for _, mp := range mounts {
-		if strings.HasPrefix(gu.BaseDir, mp) && len(mp) > len(mountPath) {
-			mountPath = mp
-		}
-	}
-
-	return mountPath
 }
 
 func (s *baseDirsStore) Close() error {

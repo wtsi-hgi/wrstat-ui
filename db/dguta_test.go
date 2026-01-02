@@ -42,16 +42,197 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/stats"
 	"github.com/wtsi-hgi/wrstat-ui/summary"
 	"github.com/wtsi-hgi/wrstat-ui/summary/dirguta"
-	bolt "go.etcd.io/bbolt"
 )
 
 const (
-	gutaBucket     = "gut"
-	childBucket    = "children"
-	boltOpenMode   = 0o640
 	dgutaDBName    = "dguta.db"
 	childrenDBName = "dguta.db.children"
+	maxKeySize     = 32768
 )
+
+type gutaInfo struct {
+	GID         uint32
+	UID         uint32
+	FT          db.DirGUTAFileType
+	aCount      uint64
+	mCount      uint64
+	aSize       uint64
+	mSize       uint64
+	aTime       int64
+	mTime       int64
+	orderOfAges []db.DirGUTAge
+}
+
+// testData provides some test data and expected results.
+func testData(t *testing.T, refUnixTime int64) (dgutaData io.Reader, expectedRootGUTAs db.GUTAs,
+	expected []*db.DGUTA, expectedKeys []string,
+) {
+	t.Helper()
+
+	dgutaData = internaldata.CreateDefaultTestData(1, 2, 1, 101, 102, refUnixTime).AsReader()
+
+	orderOfOldAges := db.DirGUTAges[:]
+
+	orderOfDiffAMtimesAges := []db.DirGUTAge{
+		db.DGUTAgeAll, db.DGUTAgeA1M, db.DGUTAgeA2M, db.DGUTAgeA6M,
+		db.DGUTAgeA1Y, db.DGUTAgeM1M, db.DGUTAgeM2M, db.DGUTAgeM6M,
+		db.DGUTAgeM1Y, db.DGUTAgeM2Y, db.DGUTAgeM3Y,
+	}
+
+	expectedRootGUTAs = addGUTAs(t, []gutaInfo{
+		{1, 101, db.DGUTAFileTypeTemp | db.DGUTAFileTypeBam, 1, 1, 5, 5, 80, 80, orderOfOldAges},
+		{1, 101, db.DGUTAFileTypeBam, 1, 1, 5, 5, 80, 80, orderOfOldAges},
+		{1, 101, db.DGUTAFileTypeCram, 3, 3, 30, 30, 50, 60, orderOfOldAges},
+		{1, 101, db.DGUTAFileTypeDir | db.DGUTAFileTypeTemp, 0, 1, 0, 4096, math.MaxInt, 1, orderOfOldAges},
+		{1, 101, db.DGUTAFileTypeDir, 0, 7, 0, 28672, math.MaxInt, 1, orderOfOldAges},
+		{1, 102, db.DGUTAFileTypeCram, 4, 4, 40, 40, 75, 75, orderOfOldAges},
+		{2, 102, db.DGUTAFileTypeCram, 5, 5, 5, 5, 90, 90, orderOfOldAges},
+		{2, 102, db.DGUTAFileTypeDir, 0, 2, 0, 8192, math.MaxInt, 1, orderOfOldAges},
+		{
+			3, 103, db.DGUTAFileTypeCram, 7, 7, 7, 7, time.Now().Unix() - db.SecondsInAYear,
+			time.Now().Unix() - (db.SecondsInAYear * 3), orderOfDiffAMtimesAges,
+		},
+		{1, 101, db.DGUTAFileTypeDir, 1, 1, 4096, 4096, 0, 0, orderOfOldAges},
+	})
+
+	expected = []*db.DGUTA{
+		{
+			Dir: "/", GUTAs: expectedRootGUTAs,
+		},
+		{
+			Dir: "/a/", GUTAs: expectedRootGUTAs,
+		},
+		{
+			Dir: "/a/b/", GUTAs: addGUTAs(t, []gutaInfo{
+				{1, 101, db.DGUTAFileTypeBam | db.DGUTAFileTypeTemp, 1, 1, 5, 5, 80, 80, orderOfOldAges},
+				{1, 101, db.DGUTAFileTypeBam, 1, 1, 5, 5, 80, 80, orderOfOldAges},
+				{1, 101, db.DGUTAFileTypeCram, 3, 3, 30, 30, 50, 60, orderOfOldAges},
+				{1, 101, db.DGUTAFileTypeDir, 0, 1, 0, 24576, math.MaxInt, 1, orderOfOldAges},
+				{1, 101, db.DGUTAFileTypeDir | db.DGUTAFileTypeTemp, 0, 1, 0, 4096, math.MaxInt, 1, orderOfOldAges},
+
+				{1, 102, db.DGUTAFileTypeCram, 4, 4, 40, 40, 75, 75, orderOfOldAges},
+			}),
+		},
+		{
+			Dir: "/a/b/d/", GUTAs: addGUTAs(t, []gutaInfo{
+				{1, 101, db.DGUTAFileTypeCram, 3, 3, 30, 30, 50, 60, orderOfOldAges},
+				{1, 101, db.DGUTAFileTypeDir, 0, 3, 0, 12288, math.MaxInt, 1, orderOfOldAges},
+				{1, 102, db.DGUTAFileTypeCram, 4, 4, 40, 40, 75, 75, orderOfOldAges},
+			}),
+		},
+		{
+			Dir: "/a/b/d/f/", GUTAs: addGUTAs(t, []gutaInfo{
+				{1, 101, db.DGUTAFileTypeCram, 1, 1, 10, 10, 50, 50, orderOfOldAges},
+				{1, 101, db.DGUTAFileTypeDir, 0, 1, 0, 4096, math.MaxInt, 1, orderOfOldAges},
+			}),
+		},
+		{
+			Dir: "/a/b/d/g/", GUTAs: addGUTAs(t, []gutaInfo{
+				{1, 101, db.DGUTAFileTypeCram, 2, 2, 20, 20, 60, 60, orderOfOldAges},
+				{1, 101, db.DGUTAFileTypeDir, 0, 1, 0, 4096, math.MaxInt, 1, orderOfOldAges},
+				{1, 102, db.DGUTAFileTypeCram, 4, 4, 40, 40, 75, 75, orderOfOldAges},
+			}),
+		},
+		{
+			Dir: "/a/b/e/", GUTAs: addGUTAs(t, []gutaInfo{
+				{1, 101, db.DGUTAFileTypeBam | db.DGUTAFileTypeTemp, 1, 1, 5, 5, 80, 80, orderOfOldAges},
+				{1, 101, db.DGUTAFileTypeBam, 1, 1, 5, 5, 80, 80, orderOfOldAges},
+				{1, 101, db.DGUTAFileTypeDir, 0, 2, 0, 8192, math.MaxInt, 1, orderOfOldAges},
+				{1, 101, db.DGUTAFileTypeDir | db.DGUTAFileTypeTemp, 0, 1, 0, 4096, math.MaxInt, 1, orderOfOldAges},
+			}),
+		},
+		{
+			Dir: "/a/b/e/h/", GUTAs: addGUTAs(t, []gutaInfo{
+				{1, 101, db.DGUTAFileTypeBam | db.DGUTAFileTypeTemp, 1, 1, 5, 5, 80, 80, orderOfOldAges},
+				{1, 101, db.DGUTAFileTypeBam, 1, 1, 5, 5, 80, 80, orderOfOldAges},
+				{1, 101, db.DGUTAFileTypeDir, 0, 1, 0, 4096, math.MaxInt, 1, orderOfOldAges},
+				{1, 101, db.DGUTAFileTypeDir | db.DGUTAFileTypeTemp, 0, 1, 0, 4096, math.MaxInt, 1, orderOfOldAges},
+			}),
+		},
+		{
+			Dir: "/a/b/e/h/tmp/", GUTAs: addGUTAs(t, []gutaInfo{
+				{1, 101, db.DGUTAFileTypeBam | db.DGUTAFileTypeTemp, 1, 1, 5, 5, 80, 80, orderOfOldAges},
+				{1, 101, db.DGUTAFileTypeDir | db.DGUTAFileTypeTemp, 0, 1, 0, 4096, math.MaxInt, 1, orderOfOldAges},
+			}),
+		},
+		{
+			Dir: "/a/c/", GUTAs: addGUTAs(t, []gutaInfo{
+				{2, 102, db.DGUTAFileTypeCram, 5, 5, 5, 5, 90, 90, orderOfOldAges},
+				{2, 102, db.DGUTAFileTypeDir, 0, 2, 0, 8192, math.MaxInt, 1, orderOfOldAges},
+				{
+					3, 103, db.DGUTAFileTypeCram, 7, 7, 7, 7, time.Now().Unix() - db.SecondsInAYear,
+					time.Now().Unix() - (db.SecondsInAYear * 3), orderOfDiffAMtimesAges,
+				},
+			}),
+		},
+		{
+			Dir: "/a/c/d/", GUTAs: addGUTAs(t, []gutaInfo{
+				{2, 102, db.DGUTAFileTypeCram, 5, 5, 5, 5, 90, 90, orderOfOldAges},
+				{2, 102, db.DGUTAFileTypeDir, 0, 1, 0, 4096, math.MaxInt, 1, orderOfOldAges},
+				{
+					3, 103, db.DGUTAFileTypeCram, 7, 7, 7, 7, time.Now().Unix() - db.SecondsInAYear,
+					time.Now().Unix() - (db.SecondsInAYear * 3), orderOfDiffAMtimesAges,
+				},
+			}),
+		},
+	}
+
+	for _, dir := range []string{
+		"/a/b/d/f/",
+		"/a/b/d/g/",
+		"/a/b/d/",
+		"/a/b/e/h/tmp/",
+		"/a/b/e/h/",
+		"/a/b/e/",
+		"/a/b/",
+		"/a/c/d/",
+		"/a/c/",
+		"/a/",
+		"/",
+	} {
+		expectedKeys = append(expectedKeys, dir+"\xff")
+	}
+
+	return dgutaData, expectedRootGUTAs, expected, expectedKeys
+}
+
+func addGUTAs(t *testing.T, gutaInfo []gutaInfo) []*db.GUTA {
+	t.Helper()
+
+	GUTAs := []*db.GUTA{}
+
+	for _, info := range gutaInfo {
+		for _, age := range info.orderOfAges {
+			count, size, exists := determineCountSize(age, info.aCount, info.mCount, info.aSize, info.mSize)
+			if !exists {
+				continue
+			}
+
+			GUTAs = append(GUTAs, &db.GUTA{
+				GID: info.GID, UID: info.UID, FT: info.FT,
+				Age: age, Count: count, Size: size, Atime: info.aTime, Mtime: info.mTime,
+			})
+		}
+	}
+
+	return GUTAs
+}
+
+func determineCountSize(age db.DirGUTAge, aCount, mCount, aSize, mSize uint64) (count, size uint64, exists bool) {
+	if ageIsForAtime(age) {
+		if aCount == 0 {
+			return 0, 0, false
+		}
+
+		return aCount, aSize, true
+	}
+
+	return mCount, mSize, true
+}
+
+func ageIsForAtime(age db.DirGUTAge) bool {
+	return age < 9 && age != 0
+}
 
 func TestDGUTA(t *testing.T) {
 	Convey("", t, func() {
@@ -204,14 +385,6 @@ func TestDGUTA(t *testing.T) {
 						info, errs = os.Stat(paths[2])
 						So(errs, ShouldBeNil)
 						So(info.Size(), ShouldBeGreaterThan, 10)
-
-						keys, errt := testGetDBKeys(paths[1], gutaBucket)
-						So(errt, ShouldBeNil)
-						So(keys, ShouldResemble, expectedKeys)
-
-						keys, errt = testGetDBKeys(paths[2], childBucket)
-						So(errt, ShouldBeNil)
-						So(keys, ShouldResemble, []string{"/", "/a/", "/a/b/", "/a/b/d/", "/a/b/e/", "/a/b/e/h/", "/a/c/"})
 						Convey("You can query a database after opening it", func() {
 							d, errOpen := wrbolt.OpenDatabase(paths[0])
 							So(errOpen, ShouldBeNil)
@@ -422,18 +595,28 @@ func TestDGUTA(t *testing.T) {
 					err := store(paths[0], data, len(expectedKeys))
 					So(err, ShouldBeNil)
 
-					keys, errt := testGetDBKeys(paths[1], gutaBucket)
-					So(errt, ShouldBeNil)
-					So(keys, ShouldResemble, expectedKeys)
+					d, errOpen := wrbolt.OpenDatabase(paths[0])
+					So(errOpen, ShouldBeNil)
+
+					info, errInfo := d.Info()
+					So(errInfo, ShouldBeNil)
+					So(info.NumDirs, ShouldEqual, len(expectedKeys))
+
+					So(d.Close(), ShouldBeNil)
 				})
 
 				Convey("Storing with a batch size > directories works", func() {
 					err := store(paths[0], data, len(expectedKeys)+2)
 					So(err, ShouldBeNil)
 
-					keys, errt := testGetDBKeys(paths[1], gutaBucket)
-					So(errt, ShouldBeNil)
-					So(keys, ShouldResemble, expectedKeys)
+					d, errOpen := wrbolt.OpenDatabase(paths[0])
+					So(errOpen, ShouldBeNil)
+
+					info, errInfo := d.Info()
+					So(errInfo, ShouldBeNil)
+					So(info.NumDirs, ShouldEqual, len(expectedKeys))
+
+					So(d.Close(), ShouldBeNil)
 				})
 
 				Convey("You can't store to db if data is invalid", func() {
@@ -461,7 +644,7 @@ func TestDGUTA(t *testing.T) {
 
 					err = writer.Add(db.RecordDGUTA{
 						Dir: &summary.DirectoryPath{
-							Name: strings.Repeat("a", bolt.MaxKeySize),
+							Name: strings.Repeat("a", maxKeySize+1),
 						},
 						GUTAs: expected[0].GUTAs,
 					})
@@ -491,6 +674,21 @@ func TestDGUTA(t *testing.T) {
 	})
 }
 
+// testMakeDBPaths creates a temp dir that will be cleaned up automatically, and
+// returns the paths to the directory and dguta and children database files
+// inside that would be created. The files aren't actually created.
+func testMakeDBPaths(t *testing.T) ([]string, error) {
+	t.Helper()
+
+	dir := t.TempDir()
+
+	return []string{
+		dir,
+		filepath.Join(dir, dgutaDBName),
+		filepath.Join(dir, childrenDBName),
+	}, nil
+}
+
 func store(dir string, r io.Reader, batchSize int) error {
 	writer, err := wrbolt.NewDGUTAWriter(dir)
 	if err != nil {
@@ -511,229 +709,4 @@ func store(dir string, r io.Reader, batchSize int) error {
 	}
 
 	return writer.Close()
-}
-
-type gutaInfo struct {
-	GID         uint32
-	UID         uint32
-	FT          db.DirGUTAFileType
-	aCount      uint64
-	mCount      uint64
-	aSize       uint64
-	mSize       uint64
-	aTime       int64
-	mTime       int64
-	orderOfAges []db.DirGUTAge
-}
-
-// testData provides some test data and expected results.
-func testData(t *testing.T, refUnixTime int64) (dgutaData io.Reader, expectedRootGUTAs db.GUTAs,
-	expected []*db.DGUTA, expectedKeys []string,
-) {
-	t.Helper()
-
-	dgutaData = internaldata.CreateDefaultTestData(1, 2, 1, 101, 102, refUnixTime).AsReader()
-
-	orderOfOldAges := db.DirGUTAges[:]
-
-	orderOfDiffAMtimesAges := []db.DirGUTAge{
-		db.DGUTAgeAll, db.DGUTAgeA1M, db.DGUTAgeA2M, db.DGUTAgeA6M,
-		db.DGUTAgeA1Y, db.DGUTAgeM1M, db.DGUTAgeM2M, db.DGUTAgeM6M,
-		db.DGUTAgeM1Y, db.DGUTAgeM2Y, db.DGUTAgeM3Y,
-	}
-
-	expectedRootGUTAs = addGUTAs(t, []gutaInfo{
-		{1, 101, db.DGUTAFileTypeTemp | db.DGUTAFileTypeBam, 1, 1, 5, 5, 80, 80, orderOfOldAges},
-		{1, 101, db.DGUTAFileTypeBam, 1, 1, 5, 5, 80, 80, orderOfOldAges},
-		{1, 101, db.DGUTAFileTypeCram, 3, 3, 30, 30, 50, 60, orderOfOldAges},
-		{1, 101, db.DGUTAFileTypeDir | db.DGUTAFileTypeTemp, 0, 1, 0, 4096, math.MaxInt, 1, orderOfOldAges},
-		{1, 101, db.DGUTAFileTypeDir, 0, 7, 0, 28672, math.MaxInt, 1, orderOfOldAges},
-		{1, 102, db.DGUTAFileTypeCram, 4, 4, 40, 40, 75, 75, orderOfOldAges},
-		{2, 102, db.DGUTAFileTypeCram, 5, 5, 5, 5, 90, 90, orderOfOldAges},
-		{2, 102, db.DGUTAFileTypeDir, 0, 2, 0, 8192, math.MaxInt, 1, orderOfOldAges},
-		{
-			3, 103, db.DGUTAFileTypeCram, 7, 7, 7, 7, time.Now().Unix() - db.SecondsInAYear,
-			time.Now().Unix() - (db.SecondsInAYear * 3), orderOfDiffAMtimesAges,
-		},
-		{1, 101, db.DGUTAFileTypeDir, 1, 1, 4096, 4096, 0, 0, orderOfOldAges},
-	})
-
-	expected = []*db.DGUTA{
-		{
-			Dir: "/", GUTAs: expectedRootGUTAs,
-		},
-		{
-			Dir: "/a/", GUTAs: expectedRootGUTAs,
-		},
-		{
-			Dir: "/a/b/", GUTAs: addGUTAs(t, []gutaInfo{
-				{1, 101, db.DGUTAFileTypeBam | db.DGUTAFileTypeTemp, 1, 1, 5, 5, 80, 80, orderOfOldAges},
-				{1, 101, db.DGUTAFileTypeBam, 1, 1, 5, 5, 80, 80, orderOfOldAges},
-				{1, 101, db.DGUTAFileTypeCram, 3, 3, 30, 30, 50, 60, orderOfOldAges},
-				{1, 101, db.DGUTAFileTypeDir, 0, 1, 0, 24576, math.MaxInt, 1, orderOfOldAges},
-				{1, 101, db.DGUTAFileTypeDir | db.DGUTAFileTypeTemp, 0, 1, 0, 4096, math.MaxInt, 1, orderOfOldAges},
-
-				{1, 102, db.DGUTAFileTypeCram, 4, 4, 40, 40, 75, 75, orderOfOldAges},
-			}),
-		},
-		{
-			Dir: "/a/b/d/", GUTAs: addGUTAs(t, []gutaInfo{
-				{1, 101, db.DGUTAFileTypeCram, 3, 3, 30, 30, 50, 60, orderOfOldAges},
-				{1, 101, db.DGUTAFileTypeDir, 0, 3, 0, 12288, math.MaxInt, 1, orderOfOldAges},
-				{1, 102, db.DGUTAFileTypeCram, 4, 4, 40, 40, 75, 75, orderOfOldAges},
-			}),
-		},
-		{
-			Dir: "/a/b/d/f/", GUTAs: addGUTAs(t, []gutaInfo{
-				{1, 101, db.DGUTAFileTypeCram, 1, 1, 10, 10, 50, 50, orderOfOldAges},
-				{1, 101, db.DGUTAFileTypeDir, 0, 1, 0, 4096, math.MaxInt, 1, orderOfOldAges},
-			}),
-		},
-		{
-			Dir: "/a/b/d/g/", GUTAs: addGUTAs(t, []gutaInfo{
-				{1, 101, db.DGUTAFileTypeCram, 2, 2, 20, 20, 60, 60, orderOfOldAges},
-				{1, 101, db.DGUTAFileTypeDir, 0, 1, 0, 4096, math.MaxInt, 1, orderOfOldAges},
-				{1, 102, db.DGUTAFileTypeCram, 4, 4, 40, 40, 75, 75, orderOfOldAges},
-			}),
-		},
-		{
-			Dir: "/a/b/e/", GUTAs: addGUTAs(t, []gutaInfo{
-				{1, 101, db.DGUTAFileTypeBam | db.DGUTAFileTypeTemp, 1, 1, 5, 5, 80, 80, orderOfOldAges},
-				{1, 101, db.DGUTAFileTypeBam, 1, 1, 5, 5, 80, 80, orderOfOldAges},
-				{1, 101, db.DGUTAFileTypeDir, 0, 2, 0, 8192, math.MaxInt, 1, orderOfOldAges},
-				{1, 101, db.DGUTAFileTypeDir | db.DGUTAFileTypeTemp, 0, 1, 0, 4096, math.MaxInt, 1, orderOfOldAges},
-			}),
-		},
-		{
-			Dir: "/a/b/e/h/", GUTAs: addGUTAs(t, []gutaInfo{
-				{1, 101, db.DGUTAFileTypeBam | db.DGUTAFileTypeTemp, 1, 1, 5, 5, 80, 80, orderOfOldAges},
-				{1, 101, db.DGUTAFileTypeBam, 1, 1, 5, 5, 80, 80, orderOfOldAges},
-				{1, 101, db.DGUTAFileTypeDir, 0, 1, 0, 4096, math.MaxInt, 1, orderOfOldAges},
-				{1, 101, db.DGUTAFileTypeDir | db.DGUTAFileTypeTemp, 0, 1, 0, 4096, math.MaxInt, 1, orderOfOldAges},
-			}),
-		},
-		{
-			Dir: "/a/b/e/h/tmp/", GUTAs: addGUTAs(t, []gutaInfo{
-				{1, 101, db.DGUTAFileTypeBam | db.DGUTAFileTypeTemp, 1, 1, 5, 5, 80, 80, orderOfOldAges},
-				{1, 101, db.DGUTAFileTypeDir | db.DGUTAFileTypeTemp, 0, 1, 0, 4096, math.MaxInt, 1, orderOfOldAges},
-			}),
-		},
-		{
-			Dir: "/a/c/", GUTAs: addGUTAs(t, []gutaInfo{
-				{2, 102, db.DGUTAFileTypeCram, 5, 5, 5, 5, 90, 90, orderOfOldAges},
-				{2, 102, db.DGUTAFileTypeDir, 0, 2, 0, 8192, math.MaxInt, 1, orderOfOldAges},
-				{
-					3, 103, db.DGUTAFileTypeCram, 7, 7, 7, 7, time.Now().Unix() - db.SecondsInAYear,
-					time.Now().Unix() - (db.SecondsInAYear * 3), orderOfDiffAMtimesAges,
-				},
-			}),
-		},
-		{
-			Dir: "/a/c/d/", GUTAs: addGUTAs(t, []gutaInfo{
-				{2, 102, db.DGUTAFileTypeCram, 5, 5, 5, 5, 90, 90, orderOfOldAges},
-				{2, 102, db.DGUTAFileTypeDir, 0, 1, 0, 4096, math.MaxInt, 1, orderOfOldAges},
-				{
-					3, 103, db.DGUTAFileTypeCram, 7, 7, 7, 7, time.Now().Unix() - db.SecondsInAYear,
-					time.Now().Unix() - (db.SecondsInAYear * 3), orderOfDiffAMtimesAges,
-				},
-			}),
-		},
-	}
-
-	for _, dir := range []string{
-		"/a/b/d/f/",
-		"/a/b/d/g/",
-		"/a/b/d/",
-		"/a/b/e/h/tmp/",
-		"/a/b/e/h/",
-		"/a/b/e/",
-		"/a/b/",
-		"/a/c/d/",
-		"/a/c/",
-		"/a/",
-		"/",
-	} {
-		expectedKeys = append(expectedKeys, dir+"\xff")
-	}
-
-	return dgutaData, expectedRootGUTAs, expected, expectedKeys
-}
-
-func addGUTAs(t *testing.T, gutaInfo []gutaInfo) []*db.GUTA {
-	t.Helper()
-
-	GUTAs := []*db.GUTA{}
-
-	for _, info := range gutaInfo {
-		for _, age := range info.orderOfAges {
-			count, size, exists := determineCountSize(age, info.aCount, info.mCount, info.aSize, info.mSize)
-			if !exists {
-				continue
-			}
-
-			GUTAs = append(GUTAs, &db.GUTA{
-				GID: info.GID, UID: info.UID, FT: info.FT,
-				Age: age, Count: count, Size: size, Atime: info.aTime, Mtime: info.mTime,
-			})
-		}
-	}
-
-	return GUTAs
-}
-
-func determineCountSize(age db.DirGUTAge, aCount, mCount, aSize, mSize uint64) (count, size uint64, exists bool) {
-	if ageIsForAtime(age) {
-		if aCount == 0 {
-			return 0, 0, false
-		}
-
-		return aCount, aSize, true
-	}
-
-	return mCount, mSize, true
-}
-
-func ageIsForAtime(age db.DirGUTAge) bool {
-	return age < 9 && age != 0
-}
-
-// testMakeDBPaths creates a temp dir that will be cleaned up automatically, and
-// returns the paths to the directory and dguta and children database files
-// inside that would be created. The files aren't actually created.
-func testMakeDBPaths(t *testing.T) ([]string, error) {
-	t.Helper()
-
-	dir := t.TempDir()
-
-	return []string{
-		dir,
-		filepath.Join(dir, dgutaDBName),
-		filepath.Join(dir, childrenDBName),
-	}, nil
-}
-
-// testGetDBKeys returns all the keys in the db at the given path.
-func testGetDBKeys(path, bucket string) ([]string, error) {
-	rdb, err := bolt.Open(path, boltOpenMode, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	defer func() {
-		err = rdb.Close()
-	}()
-
-	var keys []string
-
-	err = rdb.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte(bucket))
-
-		return b.ForEach(func(k, v []byte) error {
-			keys = append(keys, string(k))
-
-			return nil
-		})
-	})
-
-	return keys, err
 }

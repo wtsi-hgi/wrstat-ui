@@ -41,7 +41,7 @@ func TestOpenMultiBaseDirsReader(t *testing.T) {
 			basedirs.SubDirKey{ID: 1, BaseDir: "/mnt/a/projects/A", Age: db.DGUTAgeAll},
 			[]*basedirs.SubDir{{SubDir: "x"}},
 		), ShouldBeNil)
-		So(storeA.Finalise(), ShouldBeNil)
+		So(storeA.Finalize(), ShouldBeNil) //nolint:misspell // Finalize spelling follows interface_spec
 		So(storeA.Close(), ShouldBeNil)
 
 		storeB, err := NewBaseDirsStore(pathB, "")
@@ -63,7 +63,7 @@ func TestOpenMultiBaseDirsReader(t *testing.T) {
 			basedirs.SubDirKey{ID: 2, BaseDir: "/mnt/b/projects/B", Age: db.DGUTAgeAll},
 			[]*basedirs.SubDir{{SubDir: "y"}},
 		), ShouldBeNil)
-		So(storeB.Finalise(), ShouldBeNil)
+		So(storeB.Finalize(), ShouldBeNil) //nolint:misspell // Finalize spelling follows interface_spec
 		So(storeB.Close(), ShouldBeNil)
 
 		r, err := OpenMultiBaseDirsReader(ownersPath, pathA, pathB)

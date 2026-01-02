@@ -53,6 +53,48 @@ import (
 	sbasedirs "github.com/wtsi-hgi/wrstat-ui/summary/basedirs"
 )
 
+func TestCaches(t *testing.T) {
+	Convey("Given a GroupCache, accessing it in multiple threads should be safe.", t, func() {
+		var wg sync.WaitGroup
+
+		g := basedirs.NewGroupCache()
+
+		wg.Add(2)
+
+		go func() {
+			g.GroupName(0)
+			wg.Done()
+		}()
+
+		go func() {
+			g.GroupName(0)
+			wg.Done()
+		}()
+
+		wg.Wait()
+	})
+
+	Convey("Given a UserCache, accessing it in multiple threads should be safe.", t, func() {
+		var wg sync.WaitGroup
+
+		u := basedirs.NewUserCache()
+
+		wg.Add(2)
+
+		go func() {
+			u.UserName(0)
+			wg.Done()
+		}()
+
+		go func() {
+			u.UserName(0)
+			wg.Done()
+		}()
+
+		wg.Wait()
+	})
+}
+
 func TestBaseDirs(t *testing.T) {
 	const (
 		defaultSplits  = 4
@@ -500,7 +542,7 @@ func TestBaseDirs(t *testing.T) {
 						store.SetMountPath("/lustre/scratch125/")
 						store.SetUpdatedAt(yesterday)
 						So(store.Reset(), ShouldBeNil)
-						So(store.Finalise(), ShouldBeNil)
+						So(store.Finalize(), ShouldBeNil) //nolint:misspell // Finalize spelling follows interface_spec
 						So(store.Close(), ShouldBeNil)
 
 						r, errr := wrbolt.OpenBaseDirsReader(newDB, ownersPath)
@@ -847,48 +889,6 @@ func TestBaseDirs(t *testing.T) {
 	})
 }
 
-func TestCaches(t *testing.T) {
-	Convey("Given a GroupCache, accessing it in multiple threads should be safe.", t, func() {
-		var wg sync.WaitGroup
-
-		g := basedirs.NewGroupCache()
-
-		wg.Add(2)
-
-		go func() {
-			g.GroupName(0)
-			wg.Done()
-		}()
-
-		go func() {
-			g.GroupName(0)
-			wg.Done()
-		}()
-
-		wg.Wait()
-	})
-
-	Convey("Given a UserCache, accessing it in multiple threads should be safe.", t, func() {
-		var wg sync.WaitGroup
-
-		u := basedirs.NewUserCache()
-
-		wg.Add(2)
-
-		go func() {
-			u.UserName(0)
-			wg.Done()
-		}()
-
-		go func() {
-			u.UserName(0)
-			wg.Done()
-		}()
-
-		wg.Wait()
-	})
-}
-
 func fixUsageTimes(mt []*basedirs.Usage) {
 	for _, u := range mt {
 		u.Mtime = fixtimes.FixTime(u.Mtime)
@@ -897,18 +897,6 @@ func fixUsageTimes(mt []*basedirs.Usage) {
 			u.DateNoSpace = fixtimes.FixTime(u.DateNoSpace)
 			u.DateNoFiles = fixtimes.FixTime(u.DateNoFiles)
 		}
-	}
-}
-
-func fixHistoryTimes(history []basedirs.History) {
-	for n := range history {
-		history[n].Date = fixtimes.FixTime(history[n].Date)
-	}
-}
-
-func fixSubDirTimes(sds []*basedirs.SubDir) {
-	for n := range sds {
-		sds[n].LastModified = fixtimes.FixTime(sds[n].LastModified)
 	}
 }
 
@@ -928,11 +916,18 @@ func sortByDatabaseKeyOrder(usageTable []*basedirs.Usage) []*basedirs.Usage {
 	return usageTable
 }
 
-func idToByteSlice(id uint32) []byte {
-	bs := make([]byte, 4)
-	binary.LittleEndian.PutUint32(bs, id)
+func sortByUID(usageTable []*basedirs.Usage) {
+	sort.Slice(usageTable, func(i, j int) bool {
+		iID := idToByteSlice(usageTable[i].UID)
+		jID := idToByteSlice(usageTable[j].UID)
 
-	return bs
+		comparison := bytes.Compare(iID, jID)
+		if comparison != 0 {
+			return comparison == -1
+		}
+
+		return usageTable[i].BaseDir < usageTable[j].BaseDir
+	})
 }
 
 func sortByGID(usageTable []*basedirs.Usage) {
@@ -948,15 +943,21 @@ func sortByGID(usageTable []*basedirs.Usage) {
 	})
 }
 
-func sortByUID(usageTable []*basedirs.Usage) {
-	sort.Slice(usageTable, func(i, j int) bool {
-		iID := idToByteSlice(usageTable[i].UID)
-		jID := idToByteSlice(usageTable[j].UID)
-		comparison := bytes.Compare(iID, jID)
-		if comparison != 0 {
-			return comparison == -1
-		}
+func fixHistoryTimes(history []basedirs.History) {
+	for n := range history {
+		history[n].Date = fixtimes.FixTime(history[n].Date)
+	}
+}
 
-		return usageTable[i].BaseDir < usageTable[j].BaseDir
-	})
+func idToByteSlice(id uint32) []byte {
+	bs := make([]byte, 4)
+	binary.LittleEndian.PutUint32(bs, id)
+
+	return bs
+}
+
+func fixSubDirTimes(sds []*basedirs.SubDir) {
+	for n := range sds {
+		sds[n].LastModified = fixtimes.FixTime(sds[n].LastModified)
+	}
 }

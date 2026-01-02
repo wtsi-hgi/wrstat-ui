@@ -14,7 +14,7 @@ import (
 
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
 	"github.com/wtsi-hgi/wrstat-ui/db"
-	wrprovider "github.com/wtsi-hgi/wrstat-ui/provider"
+	"github.com/wtsi-hgi/wrstat-ui/provider"
 )
 
 var validDatasetDir = regexp.MustCompile(`^[^.][^_]*_.`)
@@ -89,7 +89,7 @@ func (r timestampOverrideReader) MountTimestamps() (map[string]time.Time, error)
 	return map[string]time.Time{}, nil
 }
 
-type provider struct {
+type boltProvider struct {
 	cfg Config
 
 	mu    sync.RWMutex
@@ -100,7 +100,7 @@ type provider struct {
 	wg     sync.WaitGroup
 }
 
-func (p *provider) Tree() *db.Tree {
+func (p *boltProvider) Tree() *db.Tree {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
@@ -111,7 +111,7 @@ func (p *provider) Tree() *db.Tree {
 	return p.state.tree
 }
 
-func (p *provider) BaseDirs() basedirs.Reader {
+func (p *boltProvider) BaseDirs() basedirs.Reader {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
@@ -122,13 +122,13 @@ func (p *provider) BaseDirs() basedirs.Reader {
 	return p.state.basedirs
 }
 
-func (p *provider) OnUpdate(cb func()) {
+func (p *boltProvider) OnUpdate(cb func()) {
 	p.mu.Lock()
 	p.cb = cb
 	p.mu.Unlock()
 }
 
-func (p *provider) Close() error {
+func (p *boltProvider) Close() error {
 	close(p.stopCh)
 	p.wg.Wait()
 
@@ -145,7 +145,7 @@ func (p *provider) Close() error {
 	return nil
 }
 
-func (p *provider) pollLoop() {
+func (p *boltProvider) pollLoop() {
 	defer p.wg.Done()
 
 	ticker := time.NewTicker(p.cfg.PollInterval)
@@ -161,7 +161,7 @@ func (p *provider) pollLoop() {
 	}
 }
 
-func (p *provider) maybeReload() {
+func (p *boltProvider) maybeReload() {
 	st, err := p.loadOnce()
 	if err != nil {
 		// Nothing better to do here without a logger; server still has old state.
@@ -185,7 +185,7 @@ func (p *provider) maybeReload() {
 	p.swapStateAndHandle(st, cb, old)
 }
 
-func (p *provider) swapStateAndHandle(st *providerState, cb func(), old *providerState) {
+func (p *boltProvider) swapStateAndHandle(st *providerState, cb func(), old *providerState) {
 	p.mu.Lock()
 	p.state = st
 	p.mu.Unlock()
@@ -242,14 +242,14 @@ func closeState(st *providerState) error {
 	return err
 }
 
-func (p *provider) loadOnce() (*providerState, error) {
+func (p *boltProvider) loadOnce() (*providerState, error) {
 	datasetDirs, toDelete, err := findDatasetDirs(p.cfg.BasePath, p.cfg.DGUTADBName, p.cfg.BaseDirDBName)
 	if err != nil {
 		return nil, err
 	}
 
 	if len(datasetDirs) == 0 {
-		return nil, wrprovider.ErrNoPaths
+		return nil, provider.ErrNoPaths
 	}
 
 	return p.createStateFromDatasets(datasetDirs, toDelete)
@@ -283,7 +283,7 @@ func findDatasetDirs(basepath string, required ...string) ([]string, []string, e
 	return dirs, toDelete, nil
 }
 
-func (p *provider) createStateFromDatasets(datasetDirs, toDelete []string) (*providerState, error) {
+func (p *boltProvider) createStateFromDatasets(datasetDirs, toDelete []string) (*providerState, error) {
 	dgutaDirs, basedirsReaders, closers, err := p.openAllDatasets(datasetDirs)
 	if err != nil {
 		return nil, errors.Join(err, closeAll(closers))
@@ -322,7 +322,7 @@ func closeAll(closers []func() error) error {
 	return err
 }
 
-func (p *provider) openAllDatasets(datasetDirs []string) ([]string, []basedirs.Reader, []func() error, error) {
+func (p *boltProvider) openAllDatasets(datasetDirs []string) ([]string, []basedirs.Reader, []func() error, error) {
 	dgutaDirs := make([]string, 0, len(datasetDirs))
 	basedirsReaders := make([]basedirs.Reader, 0, len(datasetDirs))
 	closers := make([]func() error, 0, 1+len(datasetDirs))
@@ -347,7 +347,7 @@ func (p *provider) openAllDatasets(datasetDirs []string) ([]string, []basedirs.R
 	return dgutaDirs, basedirsReaders, closers, nil
 }
 
-func (p *provider) openWrappedBaseDirs(dsDir string, mountPoints []string) (basedirs.Reader, func() error, error) {
+func (p *boltProvider) openWrappedBaseDirs(dsDir string, mountPoints []string) (basedirs.Reader, func() error, error) {
 	mountKey, mountPath, fallbackUpdatedAt, deriveErr := deriveMountInfoFromDatasetDir(dsDir)
 	if deriveErr != nil {
 		return nil, nil, deriveErr
@@ -394,7 +394,7 @@ func deriveMountInfoFromDatasetDir(datasetDir string) (mountKey, mountPath strin
 	return mountKey, mountPath, updatedAt, nil
 }
 
-func (p *provider) mountPoints() ([]string, error) {
+func (p *boltProvider) mountPoints() ([]string, error) {
 	if len(p.cfg.MountPoints) > 0 {
 		return p.cfg.MountPoints, nil
 	}
@@ -407,7 +407,7 @@ func (p *provider) mountPoints() ([]string, error) {
 	return []string(mps), nil
 }
 
-func (p *provider) maybeStartPoll() {
+func (p *boltProvider) maybeStartPoll() {
 	if p.cfg.PollInterval > 0 {
 		p.wg.Add(1)
 
@@ -415,15 +415,16 @@ func (p *provider) maybeStartPoll() {
 	}
 }
 
-// OpenProvider constructs a backend bundle that implements wrprovider.Provider.
+// OpenProvider constructs a backend bundle that implements server.Provider.
 // When cfg.PollInterval > 0, the backend starts an internal goroutine that
 // watches cfg.BasePath for new databases and triggers OnUpdate callbacks.
-func OpenProvider(cfg Config) (wrprovider.Provider, error) {
+// OpenProvider constructs a backend bundle that implements the Provider contract.
+func OpenProvider(cfg Config) (provider.Provider, error) {
 	if err := validateConfig(cfg); err != nil {
 		return nil, err
 	}
 
-	p := &provider{cfg: cfg, stopCh: make(chan struct{})}
+	p := &boltProvider{cfg: cfg, stopCh: make(chan struct{})}
 
 	st, err := p.loadOnce()
 	if err != nil {

@@ -37,11 +37,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
-	"github.com/wtsi-hgi/wrstat-ui/provider"
 )
-
-// ErrNoPaths is an alias to provider.ErrNoPaths for backward compatibility.
-const ErrNoPaths = provider.ErrNoPaths
 
 const (
 	numDBDirParts = 2

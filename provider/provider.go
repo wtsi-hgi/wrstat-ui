@@ -25,8 +25,6 @@
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  ******************************************************************************/
 
-// Package provider defines the Provider interface used by the server package.
-// This package exists to break the import cycle between bolt and server.
 package provider
 
 import (
@@ -43,18 +41,10 @@ const ErrNoPaths = Error("no db paths found")
 func (e Error) Error() string { return string(e) }
 
 // Provider bundles the backend implementations required by the server.
-//
-// Reloading is an implementation detail of each Provider.
+// This mirrors server.Provider to avoid an import cycle when bolt imports it.
 type Provider interface {
-	// Tree returns a query object used by tree + where endpoints.
 	Tree() *db.Tree
-
-	// BaseDirs returns a query object used by basedirs endpoints.
 	BaseDirs() basedirs.Reader
-
-	// OnUpdate registers a callback that is called whenever underlying data
-	// changes such that server caches should be rebuilt.
 	OnUpdate(cb func())
-
 	Close() error
 }

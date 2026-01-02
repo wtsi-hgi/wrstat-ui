@@ -2,5 +2,9 @@ package server
 
 import "github.com/wtsi-hgi/wrstat-ui/provider"
 
-// Provider is an alias for provider.Provider to avoid breaking the API.
+const ErrNoPaths = provider.ErrNoPaths
+
+// Re-export provider contracts to satisfy interface_spec while avoiding import cycles.
+type Error = provider.Error
+
 type Provider = provider.Provider
