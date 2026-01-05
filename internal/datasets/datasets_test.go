@@ -26,6 +26,8 @@ func TestFindLatestDatasetDirs(t *testing.T) {
 	mkDataset("20240101_alpha", "stats.gz")
 	mkDataset("20240102_alpha", "stats.gz")
 	mkDataset("20240101_beta", "stats.gz")
+	mkDataset("9_delta", "stats.gz")
+	mkDataset("10_delta", "stats.gz")
 	mkDataset("20240103_beta")                // missing required file
 	mkDataset(".hidden_zzz", "stats.gz")      // invalid
 	mkDataset("nounderscore", "stats.gz")     // invalid
@@ -39,6 +41,7 @@ func TestFindLatestDatasetDirs(t *testing.T) {
 	}
 
 	want := []string{
+		filepath.Join(baseDir, "10_delta"),
 		filepath.Join(baseDir, "20240101_beta"),
 		filepath.Join(baseDir, "20240102_alpha"),
 	}

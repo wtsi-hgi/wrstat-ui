@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -20,7 +21,8 @@ type nameVersion struct {
 //
 //	<version>_<key>
 //
-// "Latest" is determined by lexicographic comparison of <version>.
+// "Latest" is determined by numeric comparison of <version> when possible.
+// If one or both versions are non-numeric, lexicographic comparison is used.
 // If required is provided, each returned dataset directory must contain all
 // those file basenames.
 func FindLatestDatasetDirs(baseDir string, required ...string) ([]string, error) {
@@ -60,8 +62,10 @@ func considerDatasetDirEntry(latest map[string]nameVersion, baseDir string, entr
 		return
 	}
 
-	if previous, ok := latest[key]; ok && previous.version > version {
-		return
+	if previous, ok := latest[key]; ok {
+		if compareDatasetVersions(previous.version, version) > 0 {
+			return
+		}
 	}
 
 	latest[key] = nameVersion{name: name, version: version}
@@ -103,4 +107,23 @@ func splitDatasetDirName(name string) (version, key string, ok bool) {
 	}
 
 	return parts[0], parts[1], true
+}
+
+func compareDatasetVersions(a, b string) int {
+	ai, aerr := strconv.Atoi(a)
+
+	bi, berr := strconv.Atoi(b)
+	if aerr == nil && berr == nil {
+		return ai - bi
+	}
+
+	if a < b {
+		return -1
+	}
+
+	if a > b {
+		return 1
+	}
+
+	return 0
 }
