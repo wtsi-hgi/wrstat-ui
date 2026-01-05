@@ -50,7 +50,8 @@ type nameVersion struct {
 //	<version>_<key>
 //
 // "Latest" is determined by numeric comparison of <version> when possible.
-// If one or both versions are non-numeric, lexicographic comparison is used.
+// Numeric versions are always considered newer than non-numeric versions.
+// If both versions are non-numeric, lexicographic comparison is used.
 // If required is provided, each returned dataset directory must contain all
 // those file basenames.
 func FindLatestDatasetDirs(baseDir string, required ...string) ([]string, error) {
@@ -138,20 +139,26 @@ func splitDatasetDirName(name string) (version, key string, ok bool) {
 }
 
 func compareDatasetVersions(a, b string) int {
-	ai, aerr := strconv.Atoi(a)
+	ai, aOK := parsePositiveInt(a)
+	bi, bOK := parsePositiveInt(b)
 
-	bi, berr := strconv.Atoi(b)
-	if aerr == nil && berr == nil {
+	switch {
+	case aOK && bOK:
 		return ai - bi
-	}
-
-	if a < b {
-		return -1
-	}
-
-	if a > b {
+	case aOK && !bOK:
 		return 1
+	case !aOK && bOK:
+		return -1
+	default:
+		return strings.Compare(a, b)
+	}
+}
+
+func parsePositiveInt(s string) (int, bool) {
+	v, err := strconv.Atoi(s)
+	if err != nil {
+		return 0, false
 	}
 
-	return 0
+	return v, true
 }
