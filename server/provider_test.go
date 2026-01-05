@@ -189,8 +189,6 @@ func (m *memBaseDirs) MountTimestamps() (map[string]time.Time, error) {
 	return out, nil
 }
 
-// Close is already defined above for Store; satisfies Reader too.
-
 func cloneUsage(in []*basedirs.Usage) []*basedirs.Usage {
 	if len(in) == 0 {
 		return nil

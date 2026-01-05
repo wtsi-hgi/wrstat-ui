@@ -1,9 +1,8 @@
 /*******************************************************************************
- * Copyright (c) 2022, 2025 Genome Research Ltd.
+ * Copyright (c) 2026 Genome Research Ltd.
  *
  * Authors:
  *   Sendu Bala <sb10@sanger.ac.uk>
- *   Michael Woolnough <mw31@sanger.ac.uk>
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -27,16 +26,10 @@
 
 package db
 
-// Error is the custom error type for the db package.
-type Error string
-
-const (
-	// ErrDBExists is returned when attempting to create a database that already exists.
-	ErrDBExists = Error("database already exists")
-	// ErrDBNotExists is returned when attempting to open a database that doesn't exist.
-	ErrDBNotExists = Error("database doesn't exist")
-	// ErrDirNotFound is returned when a directory is not found in the database.
-	ErrDirNotFound = Error("directory not found")
-)
-
-func (e Error) Error() string { return string(e) }
+// Info holds summary information about a database.
+type Info struct {
+	NumDirs     int
+	NumDGUTAs   int
+	NumParents  int
+	NumChildren int
+}

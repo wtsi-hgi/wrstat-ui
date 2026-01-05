@@ -582,7 +582,7 @@ func TestDGUTA(t *testing.T) {
 
 						info, err := d.Info()
 						So(err, ShouldBeNil)
-						So(info, ShouldResemble, &db.DBInfo{
+						So(info, ShouldResemble, &db.Info{
 							NumDirs:     numDirectories,
 							NumDGUTAs:   648,
 							NumParents:  7,

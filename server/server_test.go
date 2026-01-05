@@ -29,6 +29,7 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -51,6 +52,24 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/internal/split"
 	"github.com/wtsi-hgi/wrstat-ui/summary"
 )
+
+var errMountTimestamps = errors.New("mount timestamps error")
+
+type badMountTSReader struct {
+	basedirs.Reader
+	err error
+}
+
+func (b badMountTSReader) MountTimestamps() (map[string]time.Time, error) {
+	return nil, b.err
+}
+
+type nilBaseDirsProvider struct{}
+
+func (p nilBaseDirsProvider) Tree() *db.Tree            { return nil }
+func (p nilBaseDirsProvider) BaseDirs() basedirs.Reader { return nil }
+func (p nilBaseDirsProvider) OnUpdate(cb func())        {}
+func (p nilBaseDirsProvider) Close() error              { return nil }
 
 func TestIDsToWanted(t *testing.T) {
 	Convey("restrictGIDs returns bad query if you don't want any of the given ids", t, func() {
@@ -1240,6 +1259,30 @@ func TestServer(t *testing.T) {
 		Convey("SetProvider fails on a nil provider", func() {
 			err := s.SetProvider(nil)
 			So(err, ShouldNotBeNil)
+		})
+
+		Convey("SetProvider fails when provider returns nil basedirs", func() {
+			err := s.SetProvider(nilBaseDirsProvider{})
+			So(err, ShouldNotBeNil)
+		})
+
+		Convey("SetProvider fails when MountTimestamps fails", func() {
+			path, err := CreateExampleDBsCustomIDs(t, uid, gids[0], gids[1], refTime)
+			So(err, ShouldBeNil)
+
+			ownersPath, err := internaldata.CreateOwnersCSV(t, internaldata.ExampleOwnersCSV)
+			So(err, ShouldBeNil)
+
+			p, err := BuildTestProvider(t, []string{path}, ownersPath, time.Unix(refTime, 0))
+			So(err, ShouldBeNil)
+
+			tp, ok := p.(*testProvider)
+			So(ok, ShouldBeTrue)
+
+			tp.bd = badMountTSReader{Reader: tp.bd, err: errMountTimestamps}
+			err = s.SetProvider(tp)
+			So(err, ShouldNotBeNil)
+			So(err.Error(), ShouldContainSubstring, "mount timestamps error")
 		})
 
 		Reset(func() { s.Stop() })

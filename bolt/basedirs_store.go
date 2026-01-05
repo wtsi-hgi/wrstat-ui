@@ -239,7 +239,7 @@ func (s *baseDirsStore) Finalise() error {
 		return nil
 	}
 
-	gub, ghb, err := s.getFinalizeBuckets()
+	gub, ghb, err := s.getFinaliseBuckets()
 	if err != nil {
 		return err
 	}
@@ -251,7 +251,7 @@ func (s *baseDirsStore) Finalise() error {
 
 	// Precompute DateNoSpace/DateNoFiles for group usage at age=all.
 	if err = gub.ForEach(func(k, v []byte) error {
-		return s.processFinalizeEntry(gub, ghb, k, v, gidMounts)
+		return s.processFinaliseEntry(gub, ghb, k, v, gidMounts)
 	}); err != nil {
 		rollbackErr := s.tx.Rollback()
 		s.tx = nil
@@ -265,7 +265,7 @@ func (s *baseDirsStore) Finalise() error {
 	return err
 }
 
-func (s *baseDirsStore) getFinalizeBuckets() (*bolt.Bucket, *bolt.Bucket, error) {
+func (s *baseDirsStore) getFinaliseBuckets() (*bolt.Bucket, *bolt.Bucket, error) {
 	gub := s.tx.Bucket([]byte(basedirs.GroupUsageBucket))
 	ghb := s.tx.Bucket([]byte(basedirs.GroupHistoricalBucket))
 
@@ -308,7 +308,7 @@ func decodeHistoryKey(k []byte) (uint32, string) {
 	return gid, path
 }
 
-func (s *baseDirsStore) processFinalizeEntry(gub, ghb *bolt.Bucket, k, v []byte,
+func (s *baseDirsStore) processFinaliseEntry(gub, ghb *bolt.Bucket, k, v []byte,
 	gidMounts map[uint32][]string) error {
 	gu := new(basedirs.Usage)
 	if err := s.decode(v, gu); err != nil {

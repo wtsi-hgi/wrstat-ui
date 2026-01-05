@@ -334,6 +334,6 @@ func (t *Tree) Close() {
 }
 
 // Info returns summary information about the database.
-func (t *Tree) Info() (*DBInfo, error) {
+func (t *Tree) Info() (*Info, error) {
 	return t.db.Info()
 }

@@ -278,8 +278,8 @@ func (d *dgutaDatabase) getChildrenFromDB(b *bolt.Bucket, dir string) []string {
 	return children
 }
 
-func (d *dgutaDatabase) Info() (*db.DBInfo, error) {
-	info := &db.DBInfo{}
+func (d *dgutaDatabase) Info() (*db.Info, error) {
+	info := &db.Info{}
 
 	for _, s := range d.sets {
 		setInfo, err := d.setInfo(s)
@@ -296,8 +296,8 @@ func (d *dgutaDatabase) Info() (*db.DBInfo, error) {
 	return info, nil
 }
 
-func (d *dgutaDatabase) setInfo(s *dgutaReadSet) (*db.DBInfo, error) {
-	info := &db.DBInfo{}
+func (d *dgutaDatabase) setInfo(s *dgutaReadSet) (*db.Info, error) {
+	info := &db.Info{}
 
 	if err := d.scanGUTAInfo(s.dgutas, info); err != nil {
 		return nil, err
@@ -310,7 +310,7 @@ func (d *dgutaDatabase) setInfo(s *dgutaReadSet) (*db.DBInfo, error) {
 	return info, nil
 }
 
-func (d *dgutaDatabase) scanGUTAInfo(dbh *bolt.DB, info *db.DBInfo) error {
+func (d *dgutaDatabase) scanGUTAInfo(dbh *bolt.DB, info *db.Info) error {
 	return dbh.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte(dgutaBucketName))
 		if b == nil {
@@ -328,7 +328,7 @@ func (d *dgutaDatabase) scanGUTAInfo(dbh *bolt.DB, info *db.DBInfo) error {
 	})
 }
 
-func (d *dgutaDatabase) scanChildrenInfo(dbh *bolt.DB, info *db.DBInfo) error {
+func (d *dgutaDatabase) scanChildrenInfo(dbh *bolt.DB, info *db.Info) error {
 	return dbh.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte(childrenBucketName))
 		if b == nil {
