@@ -40,6 +40,7 @@ import (
 	gas "github.com/wtsi-hgi/go-authserver"
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
 	"github.com/wtsi-hgi/wrstat-ui/db"
+	"github.com/wtsi-hgi/wrstat-ui/provider"
 )
 
 //go:embed static
@@ -116,7 +117,7 @@ type Server struct {
 	gas.Server
 
 	mu             sync.RWMutex
-	provider       Provider
+	provider       provider.Provider
 	basedirs       basedirs.Reader
 	tree           *db.Tree
 	whiteCB        WhiteListCallback

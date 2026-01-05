@@ -3,7 +3,6 @@
  *
  * Authors:
  *   Sendu Bala <sb10@sanger.ac.uk>
- *   Michael Woolnough <mw31@sanger.ac.uk>
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -41,7 +40,8 @@ const ErrNoPaths = Error("no db paths found")
 func (e Error) Error() string { return string(e) }
 
 // Provider bundles the backend implementations required by the server.
-// This mirrors server.Provider to avoid an import cycle when bolt imports it.
+// This lives in a dedicated package so backends and the server can depend on it
+// without creating import cycles.
 type Provider interface {
 	Tree() *db.Tree
 	BaseDirs() basedirs.Reader

@@ -31,9 +31,10 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
+	"github.com/wtsi-hgi/wrstat-ui/provider"
 )
 
-func validateProvider(p Provider) (basedirs.Reader, error) {
+func validateProvider(p provider.Provider) (basedirs.Reader, error) {
 	if p == nil {
 		return nil, basedirs.Error("provider is nil")
 	}
@@ -56,7 +57,7 @@ func mountTimestampsToUnixSeconds(mt map[string]time.Time) map[string]int64 {
 	return out
 }
 
-func (s *Server) prepareProvider(p Provider) (basedirs.Reader, map[string]int64, error) {
+func (s *Server) prepareProvider(p provider.Provider) (basedirs.Reader, map[string]int64, error) {
 	bd, err := validateProvider(p)
 	if err != nil {
 		return nil, nil, err
@@ -80,13 +81,13 @@ func (s *Server) prepareProvider(p Provider) (basedirs.Reader, map[string]int64,
 //
 // This replaces the legacy LoadDBs/EnableDBReloading flow; reloading is an
 // implementation detail of the provider.
-func (s *Server) SetProvider(p Provider) error {
+func (s *Server) SetProvider(p provider.Provider) error {
 	bd, dataTimeStamp, err := s.prepareProvider(p)
 	if err != nil {
 		return err
 	}
 
-	old := func() Provider {
+	old := func() provider.Provider {
 		s.mu.RLock()
 		defer s.mu.RUnlock()
 
@@ -106,7 +107,8 @@ func (s *Server) SetProvider(p Provider) error {
 	return nil
 }
 
-func (s *Server) assignProviderFields(p Provider, bd basedirs.Reader, dataTimeStamp map[string]int64, loaded bool) {
+func (s *Server) assignProviderFields(p provider.Provider, bd basedirs.Reader,
+	dataTimeStamp map[string]int64, loaded bool) {
 	s.mu.Lock()
 	s.provider = p
 	s.tree = p.Tree()
@@ -137,7 +139,7 @@ func (s *Server) handleProviderUpdate() {
 	}
 }
 
-func (s *Server) refreshProviderFrom(p Provider) error {
+func (s *Server) refreshProviderFrom(p provider.Provider) error {
 	bd := p.BaseDirs()
 	if bd == nil {
 		return basedirs.Error("provider returned nil basedirs")
