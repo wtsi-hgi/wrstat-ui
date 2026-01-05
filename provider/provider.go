@@ -26,6 +26,9 @@
 
 package provider
 
+// Package provider defines the interface the server uses to interact with a
+// storage backend implementation.
+
 import (
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
 	"github.com/wtsi-hgi/wrstat-ui/db"
