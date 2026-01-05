@@ -542,7 +542,7 @@ func TestBaseDirs(t *testing.T) {
 						store.SetMountPath("/lustre/scratch125/")
 						store.SetUpdatedAt(yesterday)
 						So(store.Reset(), ShouldBeNil)
-						So(store.Finalize(), ShouldBeNil) //nolint:misspell // Finalize spelling follows interface_spec
+						So(store.Finalise(), ShouldBeNil)
 						So(store.Close(), ShouldBeNil)
 
 						r, errr := wrbolt.OpenBaseDirsReader(newDB, ownersPath)

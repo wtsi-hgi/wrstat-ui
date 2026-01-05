@@ -71,9 +71,8 @@ type Store interface {
 	// AppendGroupHistory applies the append-only rule for histories.
 	AppendGroupHistory(key HistoryKey, point History) error
 
-	//nolint:misspell // Finalize spelling follows interface_spec
-	// Finalize is called once after all Put*/Append calls.
-	Finalize() error
+	// Finalise is called once after all Put*/Append calls.
+	Finalise() error
 
 	Close() error
 }

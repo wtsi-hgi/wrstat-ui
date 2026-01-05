@@ -234,8 +234,7 @@ func (s *baseDirsStore) AppendGroupHistory(key basedirs.HistoryKey, point basedi
 	return b.Put(k, s.encode(histories))
 }
 
-//nolint:misspell // Finalize spelling follows interface_spec
-func (s *baseDirsStore) Finalize() error {
+func (s *baseDirsStore) Finalise() error {
 	if s.tx == nil {
 		return nil
 	}

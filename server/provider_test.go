@@ -132,8 +132,7 @@ func (m *memBaseDirs) AppendGroupHistory(key basedirs.HistoryKey, point basedirs
 	return nil
 }
 
-//nolint:misspell // Finalize spelling follows interface_spec
-func (m *memBaseDirs) Finalize() error { return nil }
+func (m *memBaseDirs) Finalise() error { return nil }
 func (m *memBaseDirs) Close() error    { return nil }
 
 // ---- basedirs.Reader ----

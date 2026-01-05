@@ -58,7 +58,7 @@ func (b *BaseDirs) Output(users, groups IDAgeDirs) error {
 		func() error { return b.storeGroupHistories(groups) },
 		func() error { return b.storeGroupSubDirs(groups) },
 		func() error { return b.storeUserSubDirs(users) },
-		b.store.Finalize, //nolint:misspell // Finalize spelling follows interface_spec
+		b.store.Finalise,
 	}
 
 	for _, step := range steps {
