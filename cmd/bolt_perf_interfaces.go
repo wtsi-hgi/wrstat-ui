@@ -46,6 +46,7 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
 	"github.com/wtsi-hgi/wrstat-ui/bolt"
 	"github.com/wtsi-hgi/wrstat-ui/db"
+	"github.com/wtsi-hgi/wrstat-ui/internal/datasets"
 	"github.com/wtsi-hgi/wrstat-ui/internal/split"
 	"github.com/wtsi-hgi/wrstat-ui/internal/summariseutil"
 	"github.com/wtsi-hgi/wrstat-ui/stats"
@@ -132,7 +133,7 @@ func boltPerfImportInterfacesReport(inputDir string, printf perfPrintfFunc) (per
 }
 
 func boltPerfIFindDatasetDirs(baseDir string, required ...string) ([]string, error) {
-	dirs, err := boltPerfIFindLatestDatasetDirs(baseDir, required...)
+	dirs, err := datasets.FindLatestDatasetDirs(baseDir, required...)
 	if err != nil {
 		return nil, err
 	}
@@ -144,82 +145,6 @@ func boltPerfIFindDatasetDirs(baseDir string, required ...string) ([]string, err
 	sort.Strings(dirs)
 
 	return dirs, nil
-}
-
-func boltPerfIFindLatestDatasetDirs(baseDir string, required ...string) ([]string, error) {
-	entries, err := os.ReadDir(baseDir)
-	if err != nil {
-		return nil, err
-	}
-
-	latest := make(map[string]perfDatasetNameVersion)
-
-	for _, entry := range entries {
-		boltPerfIConsiderDatasetDirEntry(latest, baseDir, entry, required)
-	}
-
-	dirs := make([]string, 0, len(latest))
-	for _, entry := range latest {
-		dirs = append(dirs, filepath.Join(baseDir, entry.name))
-	}
-
-	sort.Strings(dirs)
-
-	return dirs, nil
-}
-
-func boltPerfIConsiderDatasetDirEntry(
-	latest map[string]perfDatasetNameVersion,
-	baseDir string,
-	entry fs.DirEntry,
-	required []string,
-) {
-	if !isValidDatasetDir(entry, baseDir, required...) {
-		return
-	}
-
-	key, version, ok := datasetKeyAndVersion(entry.Name())
-	if !ok {
-		return
-	}
-
-	if previous, ok := latest[key]; ok && previous.version > version {
-		return
-	}
-
-	latest[key] = perfDatasetNameVersion{name: entry.Name(), version: version}
-}
-
-func isValidDatasetDir(entry fs.DirEntry, baseDir string, required ...string) bool {
-	name := entry.Name()
-	if !entry.IsDir() {
-		return false
-	}
-
-	if name == "" || strings.HasPrefix(name, ".") {
-		return false
-	}
-
-	if !strings.Contains(name, "_") {
-		return false
-	}
-
-	for _, req := range required {
-		if _, err := os.Stat(filepath.Join(baseDir, name, req)); err != nil {
-			return false
-		}
-	}
-
-	return true
-}
-
-func datasetKeyAndVersion(name string) (key, version string, ok bool) {
-	parts := strings.SplitN(name, "_", perfDatasetSplitParts)
-	if len(parts) != perfDatasetSplitParts {
-		return "", "", false
-	}
-
-	return parts[1], parts[0], true
 }
 
 func newPerfReport(backend, inputDir string, repeat, warmup int) perfReport {
@@ -1085,11 +1010,6 @@ func (r *perfReport) addOperation(name string, inputs map[string]any, durationsM
 		P95MS:       p95,
 		P99MS:       p99,
 	})
-}
-
-type perfDatasetNameVersion struct {
-	name    string
-	version string
 }
 
 type lineCountingReader struct {

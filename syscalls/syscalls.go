@@ -35,16 +35,14 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/wtsi-hgi/wrstat-ui/internal/datasets"
 	"vimagination.zapto.org/httpfile"
 )
-
-var validDatasetDir = regexp.MustCompile(`^[^.][^_]*_.`)
 
 var (
 	errNoDBPath = errors.New("no db paths given")
@@ -97,8 +95,11 @@ func getDBPaths(dbs []string) ([]string, error) { //nolint:gocognit
 				return err
 			}
 
-			if isValidDatasetDir(path, entry, db, "logs.gz") || isValidDatasetDir(path, entry, db, "walk.log") {
-				dbDirs = append(dbDirs, filepath.Join(db, path))
+			if entry.IsDir() && datasets.IsValidDatasetDirName(entry.Name()) {
+				dir := filepath.Join(db, path)
+				if datasets.HasRequiredFiles(dir, "logs.gz") || datasets.HasRequiredFiles(dir, "walk.log") {
+					dbDirs = append(dbDirs, filepath.Join(db, path))
+				}
 			}
 
 			return nil
@@ -260,18 +261,4 @@ func StartServer(serverBind string, reload uint, dbs ...string) error {
 	http.HandleFunc("/logs/", l.handleRunRequest)
 
 	return http.ListenAndServe(serverBind, nil) //nolint:gosec
-}
-
-func isValidDatasetDir(path string, entry fs.DirEntry, basepath string, required string) bool {
-	if !entry.IsDir() {
-		return false
-	}
-
-	if !validDatasetDir.MatchString(entry.Name()) {
-		return false
-	}
-
-	_, err := os.Stat(filepath.Join(basepath, path, required))
-
-	return err == nil
 }

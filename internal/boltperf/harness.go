@@ -30,7 +30,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -40,6 +39,7 @@ import (
 	"github.com/klauspost/pgzip"
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
 	"github.com/wtsi-hgi/wrstat-ui/db"
+	"github.com/wtsi-hgi/wrstat-ui/internal/datasets"
 	"github.com/wtsi-hgi/wrstat-ui/internal/split"
 	"github.com/wtsi-hgi/wrstat-ui/internal/summariseutil"
 	"github.com/wtsi-hgi/wrstat-ui/stats"
@@ -116,7 +116,7 @@ func validateBackend(backend string) error {
 }
 
 func findDatasetDirs(baseDir string, required ...string) ([]string, error) {
-	dirs, err := findLatestDatasetDirs(baseDir, required...)
+	dirs, err := datasets.FindLatestDatasetDirs(baseDir, required...)
 	if err != nil {
 		return nil, err
 	}
@@ -128,82 +128,6 @@ func findDatasetDirs(baseDir string, required ...string) ([]string, error) {
 	sort.Strings(dirs)
 
 	return dirs, nil
-}
-
-func findLatestDatasetDirs(baseDir string, required ...string) ([]string, error) {
-	entries, err := os.ReadDir(baseDir)
-	if err != nil {
-		return nil, err
-	}
-
-	latest := make(map[string]datasetNameVersion)
-
-	for _, entry := range entries {
-		considerDatasetDirEntry(latest, baseDir, entry, required)
-	}
-
-	dirs := make([]string, 0, len(latest))
-	for _, entry := range latest {
-		dirs = append(dirs, filepath.Join(baseDir, entry.name))
-	}
-
-	sort.Strings(dirs)
-
-	return dirs, nil
-}
-
-func considerDatasetDirEntry(
-	latest map[string]datasetNameVersion,
-	baseDir string,
-	entry fs.DirEntry,
-	required []string,
-) {
-	if !isValidDatasetDir(entry, baseDir, required...) {
-		return
-	}
-
-	key, version, ok := datasetKeyAndVersion(entry.Name())
-	if !ok {
-		return
-	}
-
-	if previous, ok := latest[key]; ok && previous.version > version {
-		return
-	}
-
-	latest[key] = datasetNameVersion{name: entry.Name(), version: version}
-}
-
-func isValidDatasetDir(entry os.DirEntry, baseDir string, required ...string) bool {
-	name := entry.Name()
-	if !entry.IsDir() {
-		return false
-	}
-
-	if name == "" || strings.HasPrefix(name, ".") {
-		return false
-	}
-
-	if !strings.Contains(name, "_") {
-		return false
-	}
-
-	for _, req := range required {
-		if _, err := os.Stat(filepath.Join(baseDir, name, req)); err != nil {
-			return false
-		}
-	}
-
-	return true
-}
-
-func datasetKeyAndVersion(name string) (key, version string, ok bool) {
-	parts := strings.SplitN(name, "_", 2)
-	if len(parts) != 2 {
-		return "", "", false
-	}
-
-	return parts[1], parts[0], true
 }
 
 func durationMS(d time.Duration) float64 {
@@ -941,11 +865,6 @@ func discoverQueryDatasets(inputDir string, printf PrintfFunc) ([]string, string
 	}
 
 	return datasetDirs, datasetDir, nil
-}
-
-type datasetNameVersion struct {
-	name    string
-	version string
 }
 
 // ImportOptions configures the bolt-perf import harness.

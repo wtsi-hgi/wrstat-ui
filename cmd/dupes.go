@@ -29,15 +29,13 @@ import (
 	"bufio"
 	"errors"
 	"io"
-	"io/fs"
 	"os"
 	"path/filepath"
-	"regexp"
-	"slices"
 	"strings"
 
 	"github.com/klauspost/pgzip"
 	"github.com/spf13/cobra"
+	"github.com/wtsi-hgi/wrstat-ui/internal/datasets"
 	"github.com/wtsi-hgi/wrstat-ui/stats"
 	"github.com/wtsi-hgi/wrstat-ui/summary"
 	"github.com/wtsi-hgi/wrstat-ui/summary/dedupe"
@@ -45,19 +43,12 @@ import (
 
 const inputStatsFile = "stats.gz"
 
-const (
-	datasetDirSeparator = "_"
-	datasetDirParts     = 2
-)
-
 var (
 	minSize int64
 	output  string
 
 	ErrNoStatsFiles = errors.New("no stats files specified")
 )
-
-var validDatasetDir = regexp.MustCompile(`^[^.][^_]*_.`)
 
 var dupescmd = &cobra.Command{
 	Use:   "dupes",
@@ -97,74 +88,6 @@ func init() {
 	dupescmd.Flags().StringVarP(&output, "output", "o", "-", "file to output possible duplicate file data")
 }
 
-type nameVersion struct {
-	name    string
-	version string
-}
-
-func findLatestDatasetDirs(basepath string, required ...string) ([]string, error) {
-	entries, err := os.ReadDir(basepath)
-	if err != nil {
-		return nil, err
-	}
-
-	latest := make(map[string]nameVersion)
-
-	for _, entry := range entries {
-		considerDatasetDirEntry(latest, basepath, entry, required)
-	}
-
-	dirs := make([]string, 0, len(latest))
-	for _, nv := range latest {
-		dirs = append(dirs, filepath.Join(basepath, nv.name))
-	}
-
-	slices.Sort(dirs)
-
-	return dirs, nil
-}
-
-func considerDatasetDirEntry(latest map[string]nameVersion, basepath string, entry fs.DirEntry, required []string) {
-	name := entry.Name()
-	if !entry.IsDir() || !validDatasetDir.MatchString(name) {
-		return
-	}
-
-	if !hasRequiredDatasetFiles(basepath, name, required) {
-		return
-	}
-
-	version, key, ok := splitDatasetDirName(name)
-	if !ok {
-		return
-	}
-
-	if previous, ok := latest[key]; ok && previous.version > version {
-		return
-	}
-
-	latest[key] = nameVersion{name: name, version: version}
-}
-
-func hasRequiredDatasetFiles(basepath, name string, required []string) bool {
-	for _, req := range required {
-		if _, err := os.Stat(filepath.Join(basepath, name, req)); err != nil {
-			return false
-		}
-	}
-
-	return true
-}
-
-func splitDatasetDirName(name string) (version, key string, ok bool) {
-	parts := strings.SplitN(name, datasetDirSeparator, datasetDirParts)
-	if len(parts) != datasetDirParts {
-		return "", "", false
-	}
-
-	return parts[0], parts[1], true
-}
-
 func parseFiles(args []string) ([]string, error) { //nolint:gocognit
 	var files []string
 
@@ -180,7 +103,7 @@ func parseFiles(args []string) ([]string, error) { //nolint:gocognit
 			continue
 		}
 
-		dirs, err := findLatestDatasetDirs(arg, inputStatsFile)
+		dirs, err := datasets.FindLatestDatasetDirs(arg, inputStatsFile)
 		if err != nil {
 			return nil, err
 		}

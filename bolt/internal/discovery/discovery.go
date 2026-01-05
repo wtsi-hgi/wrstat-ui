@@ -30,18 +30,17 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
+
+	"github.com/wtsi-hgi/wrstat-ui/internal/datasets"
 )
 
 const (
 	numDatasetDirParts = 2
 	keyPart            = 1
 )
-
-var validDatasetDir = regexp.MustCompile(`^[^.][^_]*_.`)
 
 type nameVersion struct {
 	name    string
@@ -79,23 +78,11 @@ func findDBDirs(basepath string, required ...string) ([]string, []string, error)
 func isValidDatasetDir(entry fs.DirEntry, basepath string, required ...string) bool {
 	name := entry.Name()
 
-	if !entry.IsDir() || !validDatasetDir.MatchString(name) {
+	if !entry.IsDir() || !datasets.IsValidDatasetDirName(name) {
 		return false
 	}
 
-	for _, requiredEntry := range required {
-		if !entryExists(filepath.Join(basepath, name, requiredEntry)) {
-			return false
-		}
-	}
-
-	return true
-}
-
-func entryExists(path string) bool {
-	_, err := os.Stat(path)
-
-	return err == nil
+	return datasets.HasRequiredFiles(filepath.Join(basepath, name), required...)
 }
 
 func addEntryToMap(entry fs.DirEntry, latest map[string]nameVersion, toDelete []string) []string {

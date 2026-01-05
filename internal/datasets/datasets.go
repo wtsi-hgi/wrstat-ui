@@ -1,0 +1,106 @@
+package datasets
+
+import (
+	"io/fs"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+)
+
+type nameVersion struct {
+	name    string
+	version string
+}
+
+// FindLatestDatasetDirs returns the latest dataset directory for each dataset
+// key found directly under baseDir.
+//
+// Dataset directory names are expected to be of the form:
+//
+//	<version>_<key>
+//
+// "Latest" is determined by lexicographic comparison of <version>.
+// If required is provided, each returned dataset directory must contain all
+// those file basenames.
+func FindLatestDatasetDirs(baseDir string, required ...string) ([]string, error) {
+	entries, err := os.ReadDir(baseDir)
+	if err != nil {
+		return nil, err
+	}
+
+	latest := make(map[string]nameVersion)
+
+	for _, entry := range entries {
+		considerDatasetDirEntry(latest, baseDir, entry, required)
+	}
+
+	dirs := make([]string, 0, len(latest))
+	for _, nv := range latest {
+		dirs = append(dirs, filepath.Join(baseDir, nv.name))
+	}
+
+	slices.Sort(dirs)
+
+	return dirs, nil
+}
+
+func considerDatasetDirEntry(latest map[string]nameVersion, baseDir string, entry fs.DirEntry, required []string) {
+	name := entry.Name()
+	if !entry.IsDir() || !IsValidDatasetDirName(name) {
+		return
+	}
+
+	if !HasRequiredFiles(filepath.Join(baseDir, name), required...) {
+		return
+	}
+
+	version, key, ok := splitDatasetDirName(name)
+	if !ok {
+		return
+	}
+
+	if previous, ok := latest[key]; ok && previous.version > version {
+		return
+	}
+
+	latest[key] = nameVersion{name: name, version: version}
+}
+
+// IsValidDatasetDirName validates a dataset directory name.
+//
+// It is compatible with the previous regexp used across the codebase:
+//
+//	`^[^.][^_]*_.`
+func IsValidDatasetDirName(name string) bool {
+	if name == "" || strings.HasPrefix(name, ".") {
+		return false
+	}
+
+	parts := strings.SplitN(name, "_", 2)
+	if len(parts) != 2 {
+		return false
+	}
+
+	return parts[0] != "" && parts[1] != ""
+}
+
+// HasRequiredFiles checks that all required basenames exist within dir.
+func HasRequiredFiles(dir string, required ...string) bool {
+	for _, req := range required {
+		if _, err := os.Stat(filepath.Join(dir, req)); err != nil {
+			return false
+		}
+	}
+
+	return true
+}
+
+func splitDatasetDirName(name string) (version, key string, ok bool) {
+	parts := strings.SplitN(name, "_", 2)
+	if len(parts) != 2 {
+		return "", "", false
+	}
+
+	return parts[0], parts[1], true
+}
