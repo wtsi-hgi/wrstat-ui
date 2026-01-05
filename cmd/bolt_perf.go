@@ -10,6 +10,8 @@ const (
 	boltPerfDefaultRepeat = 20
 	boltPerfDefaultWarmup = 1
 	boltPerfDefaultSplits = 4
+
+	boltPerfBackendInterfaces = "bolt_interfaces"
 )
 
 var boltPerfCmd = &cobra.Command{
@@ -124,6 +126,10 @@ type boltPerfFlags struct {
 var boltPerf boltPerfFlags
 
 func runBoltPerfImport(inputDir string) error {
+	if boltPerf.backend == boltPerfBackendInterfaces {
+		return runBoltPerfImportInterfaces(inputDir, cliPrint)
+	}
+
 	opts := boltperf.ImportOptions{
 		Backend:          boltPerf.backend,
 		Owners:           boltPerf.owners,
@@ -143,6 +149,10 @@ func runBoltPerfImport(inputDir string) error {
 }
 
 func runBoltPerfQuery(inputDir string) error {
+	if boltPerf.backend == boltPerfBackendInterfaces {
+		return runBoltPerfQueryInterfaces(inputDir, cliPrint)
+	}
+
 	opts := boltperf.QueryOptions{
 		Backend:                 boltPerf.backend,
 		Owners:                  boltPerf.owners,
