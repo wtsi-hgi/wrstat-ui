@@ -418,7 +418,6 @@ func (p *boltProvider) maybeStartPoll() {
 // OpenProvider constructs a backend bundle that implements provider.Provider.
 // When cfg.PollInterval > 0, the backend starts an internal goroutine that
 // watches cfg.BasePath for new databases and triggers OnUpdate callbacks.
-// OpenProvider constructs a backend bundle that implements the Provider contract.
 func OpenProvider(cfg Config) (provider.Provider, error) {
 	if err := validateConfig(cfg); err != nil {
 		return nil, err

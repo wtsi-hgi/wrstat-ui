@@ -24,10 +24,9 @@
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  ******************************************************************************/
 
-package provider
-
 // Package provider defines the interface the server uses to interact with a
 // storage backend implementation.
+package provider
 
 import (
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
