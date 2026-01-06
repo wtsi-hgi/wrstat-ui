@@ -219,10 +219,6 @@ func (r *baseDirsReader) SetMountPoints(mountpoints []string) {
 }
 
 func (r *baseDirsReader) prefixOf(path string) string {
-	if r.mountPoints == nil {
-		return ""
-	}
-
 	return r.mountPoints.PrefixOf(path)
 }
 
@@ -236,7 +232,7 @@ func (r *baseDirsReader) SetCachedUser(uid uint32, name string) {
 
 func (r *baseDirsReader) MountTimestamps() (map[string]time.Time, error) {
 	if r.mountPath == "" || r.updatedAt.IsZero() {
-		return map[string]time.Time{}, nil
+		return nil, nil
 	}
 
 	mountKey := strings.ReplaceAll(r.mountPath, "/", "／")

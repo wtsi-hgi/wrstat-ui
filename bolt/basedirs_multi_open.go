@@ -27,8 +27,6 @@
 package bolt
 
 import (
-	"errors"
-
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
 )
 
@@ -38,7 +36,7 @@ import (
 // ownersPath is the owners CSV path used to populate Usage.Owner.
 func OpenMultiBaseDirsReader(ownersPath string, dbPaths ...string) (basedirs.Reader, error) {
 	if len(dbPaths) == 0 {
-		return nil, errors.New("no basedirs db paths provided") //nolint:err113
+		return nil, ErrNoBasedirsDBPaths
 	}
 
 	readers := make([]basedirs.Reader, 0, len(dbPaths))

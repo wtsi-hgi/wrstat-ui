@@ -35,7 +35,7 @@ import (
 	"github.com/VertebrateResequencing/wr/client"
 	"github.com/VertebrateResequencing/wr/jobqueue"
 	"github.com/inconshreveable/log15"
-	"github.com/wtsi-hgi/wrstat-ui/internal/datasets"
+	"github.com/wtsi-hgi/wrstat-ui/datasets"
 )
 
 const (

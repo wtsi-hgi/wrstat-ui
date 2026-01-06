@@ -40,7 +40,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/wtsi-hgi/wrstat-ui/internal/datasets"
+	"github.com/wtsi-hgi/wrstat-ui/datasets"
 	"vimagination.zapto.org/httpfile"
 )
 

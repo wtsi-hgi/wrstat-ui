@@ -42,6 +42,46 @@ type nameVersion struct {
 	version string
 }
 
+// FindDatasetDirs returns the latest dataset directory for each dataset key
+// found directly under baseDir, and a list of older dataset directory names
+// that may be removed.
+//
+// Dataset directory names are expected to be of the form:
+//
+//	<version>_<key>
+//
+// "Latest" is determined by numeric comparison of <version> when possible.
+// Numeric versions are always considered newer than non-numeric versions.
+// If both versions are non-numeric, lexicographic comparison is used.
+//
+// If required is provided, each considered dataset directory must contain all
+// those file or directory basenames.
+//
+// Returned dataset directories are full paths. Returned toDelete entries are
+// directory names (basenames) relative to baseDir.
+func FindDatasetDirs(baseDir string, required ...string) ([]string, []string, error) {
+	entries, err := os.ReadDir(baseDir)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	latest := make(map[string]nameVersion)
+	toDelete := make([]string, 0)
+
+	for _, entry := range entries {
+		considerDatasetDirEntryWithDeletes(latest, &toDelete, baseDir, entry, required)
+	}
+
+	dirs := make([]string, 0, len(latest))
+	for _, nv := range latest {
+		dirs = append(dirs, filepath.Join(baseDir, nv.name))
+	}
+
+	slices.Sort(dirs)
+
+	return dirs, toDelete, nil
+}
+
 // FindLatestDatasetDirs returns the latest dataset directory for each dataset
 // key found directly under baseDir.
 //
@@ -53,30 +93,14 @@ type nameVersion struct {
 // Numeric versions are always considered newer than non-numeric versions.
 // If both versions are non-numeric, lexicographic comparison is used.
 // If required is provided, each returned dataset directory must contain all
-// those file basenames.
+// those file or directory basenames.
 func FindLatestDatasetDirs(baseDir string, required ...string) ([]string, error) {
-	entries, err := os.ReadDir(baseDir)
-	if err != nil {
-		return nil, err
-	}
+	dirs, _, err := FindDatasetDirs(baseDir, required...)
 
-	latest := make(map[string]nameVersion)
-
-	for _, entry := range entries {
-		considerDatasetDirEntry(latest, baseDir, entry, required)
-	}
-
-	dirs := make([]string, 0, len(latest))
-	for _, nv := range latest {
-		dirs = append(dirs, filepath.Join(baseDir, nv.name))
-	}
-
-	slices.Sort(dirs)
-
-	return dirs, nil
+	return dirs, err
 }
 
-func considerDatasetDirEntry(latest map[string]nameVersion, baseDir string, entry fs.DirEntry, required []string) {
+func considerDatasetDirEntryWithDeletes(latest map[string]nameVersion, toDelete *[]string, baseDir string, entry fs.DirEntry, required []string) {
 	name := entry.Name()
 	if !entry.IsDir() || !IsValidDatasetDirName(name) {
 		return
@@ -86,14 +110,22 @@ func considerDatasetDirEntry(latest map[string]nameVersion, baseDir string, entr
 		return
 	}
 
-	version, key, ok := splitDatasetDirName(name)
+	version, key, ok := strings.Cut(name, "_")
 	if !ok {
 		return
 	}
 
 	if previous, ok := latest[key]; ok {
 		if compareDatasetVersions(previous.version, version) > 0 {
+			if toDelete != nil {
+				*toDelete = append(*toDelete, name)
+			}
+
 			return
+		}
+
+		if toDelete != nil {
+			*toDelete = append(*toDelete, previous.name)
 		}
 	}
 
@@ -119,6 +151,7 @@ func IsValidDatasetDirName(name string) bool {
 }
 
 // HasRequiredFiles checks that all required basenames exist within dir.
+// A required basename may refer to either a file or a directory.
 func HasRequiredFiles(dir string, required ...string) bool {
 	for _, req := range required {
 		if _, err := os.Stat(filepath.Join(dir, req)); err != nil {
@@ -127,15 +160,6 @@ func HasRequiredFiles(dir string, required ...string) bool {
 	}
 
 	return true
-}
-
-func splitDatasetDirName(name string) (version, key string, ok bool) {
-	parts := strings.SplitN(name, "_", 2)
-	if len(parts) != 2 {
-		return "", "", false
-	}
-
-	return parts[0], parts[1], true
 }
 
 func compareDatasetVersions(a, b string) int {

@@ -37,7 +37,7 @@ import (
 	"time"
 
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
-	"github.com/wtsi-hgi/wrstat-ui/bolt/internal/discovery"
+	"github.com/wtsi-hgi/wrstat-ui/datasets"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 	"github.com/wtsi-hgi/wrstat-ui/provider"
 )
@@ -83,7 +83,7 @@ func (r timestampOverrideReader) MountTimestamps() (map[string]time.Time, error)
 		return map[string]time.Time{r.mountKey: r.updatedAt}, nil
 	}
 
-	return map[string]time.Time{}, nil
+	return nil, nil
 }
 
 type boltProvider struct {
@@ -271,7 +271,7 @@ func closeState(st *providerState) error {
 }
 
 func (p *boltProvider) loadOnce() (*providerState, error) {
-	datasetDirs, toDelete, err := discovery.FindDatasetDirs(p.cfg.BasePath, p.cfg.DGUTADBName, p.cfg.BaseDirDBName)
+	datasetDirs, toDelete, err := datasets.FindDatasetDirs(p.cfg.BasePath, p.cfg.DGUTADBName, p.cfg.BaseDirDBName)
 	if err != nil {
 		return nil, err
 	}

@@ -31,6 +31,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -39,14 +40,14 @@ import (
 	bolt "go.etcd.io/bbolt"
 )
 
-var ErrInvalidConfig = errors.New("invalid config")
-
 var (
-	ErrOutputDirMissing = errors.New("output directory missing")
-	ErrMetadataNotSet   = errors.New("mountPath/updatedAt not set")
-	ErrInvalidMountPath = errors.New("invalid mountPath")
-	ErrNotImplemented   = errors.New("not implemented")
-	ErrInvalidUpdatedAt = errors.New("invalid updatedAt")
+	ErrInvalidConfig     = errors.New("invalid config")
+	ErrOutputDirInvalid  = errors.New("output directory not a directory")
+	ErrMetadataNotSet    = errors.New("mountPath/updatedAt not set")
+	ErrInvalidMountPath  = errors.New("invalid mountPath")
+	ErrInvalidUpdatedAt  = errors.New("invalid updatedAt")
+	ErrNoBasedirsDBPaths = errors.New("no basedirs db paths provided")
+	ErrDBClosed          = errors.New("db closed")
 )
 
 const (
@@ -286,7 +287,7 @@ func (w *dgutaWriter) Close() error {
 // Returns db.ErrDBExists if the database files already exist.
 func NewDGUTAWriter(outputDir string) (db.DGUTAWriter, error) {
 	if err := validateOutputDir(outputDir); err != nil {
-		return nil, ErrOutputDirMissing
+		return nil, err
 	}
 
 	dgutaDB, childrenDB, err := openDGUTAWriterDBs(outputDir)
@@ -304,15 +305,15 @@ func validateOutputDir(outputDir string) error {
 	}
 
 	if !fi.IsDir() {
-		return ErrOutputDirMissing
+		return ErrOutputDirInvalid
 	}
 
 	return nil
 }
 
 func openDGUTAWriterDBs(outputDir string) (*bolt.DB, *bolt.DB, error) {
-	dgutaPath := filepathJoin(outputDir, dgutaDBBasename)
-	childrenPath := filepathJoin(outputDir, childrenDBBasename)
+	dgutaPath := filepath.Join(outputDir, dgutaDBBasename)
+	childrenPath := filepath.Join(outputDir, childrenDBBasename)
 
 	if pathExists(dgutaPath) || pathExists(childrenPath) {
 		return nil, nil, db.ErrDBExists
@@ -331,14 +332,6 @@ func openDGUTAWriterDBs(outputDir string) (*bolt.DB, *bolt.DB, error) {
 	}
 
 	return dgutaDB, childrenDB, nil
-}
-
-func filepathJoin(dir, base string) string {
-	if strings.HasSuffix(dir, "/") {
-		return dir + base
-	}
-
-	return dir + "/" + base
 }
 
 func pathExists(path string) bool {

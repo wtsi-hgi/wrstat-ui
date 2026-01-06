@@ -28,13 +28,15 @@ package bolt
 
 import (
 	"encoding/binary"
-	"math"
+	"errors"
+	"maps"
 	"os"
+	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
 
-	"github.com/hashicorp/go-multierror"
 	"github.com/ugorji/go/codec"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 	bolt "go.etcd.io/bbolt"
@@ -85,21 +87,17 @@ func (s *dgutaReadSet) Close() error {
 		return nil
 	}
 
-	var errm *multierror.Error
+	var err error
 
 	if s.dgutas != nil {
-		err := s.dgutas.Close()
-		errM := multierror.Append(errm, err)
-		errm = errM
+		err = errors.Join(err, s.dgutas.Close())
 	}
 
 	if s.children != nil {
-		err := s.children.Close()
-		errM := multierror.Append(errm, err)
-		errm = errM
+		err = errors.Join(err, s.children.Close())
 	}
 
-	return errm.ErrorOrNil()
+	return err
 }
 
 func closeReadSets(sets []*dgutaReadSet) {
@@ -147,21 +145,19 @@ func (d *dgutaDatabase) Close() error {
 		return nil
 	}
 
-	var errm *multierror.Error
+	var err error
 
 	for _, s := range d.sets {
-		err := s.Close()
-		errM := multierror.Append(errm, err)
-		errm = errM
+		err = errors.Join(err, s.Close())
 	}
 
-	return errm.ErrorOrNil()
+	return err
 }
 
 func (d *dgutaDatabase) DirInfo(dir string, filter *db.Filter) (*db.DirSummary, error) {
-	combined, notFound, lastUpdated := d.combineDGUTAs(dir)
+	combined, found, lastUpdated := d.combineDGUTAs(dir)
 
-	if notFound == len(d.sets) {
+	if !found {
 		return &db.DirSummary{Modtime: lastUpdated}, db.ErrDirNotFound
 	}
 
@@ -173,9 +169,9 @@ func (d *dgutaDatabase) DirInfo(dir string, filter *db.Filter) (*db.DirSummary, 
 	return ds, nil
 }
 
-func (d *dgutaDatabase) combineDGUTAs(dir string) (*db.DGUTA, int, time.Time) {
+func (d *dgutaDatabase) combineDGUTAs(dir string) (*db.DGUTA, bool, time.Time) {
 	var (
-		notFound    int
+		found       bool
 		lastUpdated time.Time
 	)
 
@@ -194,12 +190,12 @@ func (d *dgutaDatabase) combineDGUTAs(dir string) (*db.DGUTA, int, time.Time) {
 
 			return getDGUTAFromDBAndAppend(b, dir, combined)
 		})
-		if err != nil {
-			notFound++
+		if err == nil {
+			found = true
 		}
 	}
 
-	return combined, notFound, lastUpdated
+	return combined, found, lastUpdated
 }
 
 func getDGUTAFromDBAndAppend(b *bolt.Bucket, dir string, combined *db.DGUTA) error {
@@ -249,11 +245,7 @@ func mapToSortedKeys(m map[string]bool) []string {
 		return nil
 	}
 
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-
+	keys := slices.Collect(maps.Keys(m))
 	sort.Strings(keys)
 
 	return keys
@@ -358,12 +350,12 @@ func OpenDatabase(paths ...string) (db.Database, error) {
 }
 
 func openDGUTADBPairs(dir string) (*bolt.DB, *bolt.DB, error) {
-	dgutaDB, err := openBoltReadOnly(filepathJoin(dir, dgutaDBBasename))
+	dgutaDB, err := openBoltReadOnly(filepath.Join(dir, dgutaDBBasename))
 	if err != nil {
 		return nil, nil, err
 	}
 
-	childrenDB, err := openBoltReadOnly(filepathJoin(dir, childrenDBBasename))
+	childrenDB, err := openBoltReadOnly(filepath.Join(dir, childrenDBBasename))
 	if err != nil {
 		_ = dgutaDB.Close()
 
@@ -392,9 +384,7 @@ func readUpdatedAt(dbh *bolt.DB) (time.Time, error) {
 		}
 
 		raw := binary.LittleEndian.Uint64(v)
-		if raw <= uint64(math.MaxInt64) {
-			t = time.Unix(int64(raw), 0)
-		}
+		t = time.Unix(int64(raw), 0)
 
 		return nil
 	})

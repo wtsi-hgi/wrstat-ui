@@ -57,12 +57,12 @@ func init() {
 }
 
 // cliPrint outputs the message to STDOUT.
-func cliPrint(msg string, a ...interface{}) {
+func cliPrint(msg string, a ...any) {
 	fmt.Fprintf(os.Stdout, msg, a...)
 }
 
 // info is a convenience to log a message at the Info level.
-func info(msg string, a ...interface{}) {
+func info(msg string, a ...any) {
 	appLogger.Info(fmt.Sprintf(msg, a...))
 }
 
@@ -76,7 +76,7 @@ func Execute() {
 }
 
 // die is a convenience to log a message at the Error level and exit non zero.
-func die(msg string, a ...interface{}) {
+func die(msg string, a ...any) {
 	appLogger.Error(fmt.Sprintf(msg, a...))
 	os.Exit(1)
 }
@@ -94,7 +94,7 @@ func logToFile(path string) {
 }
 
 // warn is a convenience to log a message at the Warn level.
-func warn(msg string, a ...interface{}) {
+func warn(msg string, a ...any) {
 	appLogger.Warn(fmt.Sprintf(msg, a...))
 }
 

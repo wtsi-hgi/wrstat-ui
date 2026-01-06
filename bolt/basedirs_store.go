@@ -139,7 +139,7 @@ func clearAndRecreateBucket(tx *bolt.Tx, name string) error {
 
 func (s *baseDirsStore) validateResetPreconditions() error {
 	if s.db == nil {
-		return errors.New("nil db") //nolint:err113
+		return ErrDBClosed
 	}
 
 	if s.mountPath == "" || s.updatedAt.IsZero() {
@@ -366,18 +366,18 @@ func (s *baseDirsStore) updateUsageWithHistory(gub, ghb *bolt.Bucket, k []byte,
 }
 
 func (s *baseDirsStore) Close() error {
-	var closeErr error
+	var err error
 
 	if s.tx != nil {
-		closeErr = errors.Join(closeErr, s.rollbackExistingTx())
+		err = errors.Join(err, s.rollbackExistingTx())
 	}
 
 	if s.db != nil {
-		closeErr = errors.Join(closeErr, s.db.Close())
+		err = errors.Join(err, s.db.Close())
 		s.db = nil
 	}
 
-	return closeErr
+	return err
 }
 
 func (s *baseDirsStore) encode(v any) []byte {

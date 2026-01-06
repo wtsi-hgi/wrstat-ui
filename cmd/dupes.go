@@ -35,7 +35,7 @@ import (
 
 	"github.com/klauspost/pgzip"
 	"github.com/spf13/cobra"
-	"github.com/wtsi-hgi/wrstat-ui/internal/datasets"
+	"github.com/wtsi-hgi/wrstat-ui/datasets"
 	"github.com/wtsi-hgi/wrstat-ui/stats"
 	"github.com/wtsi-hgi/wrstat-ui/summary"
 	"github.com/wtsi-hgi/wrstat-ui/summary/dedupe"
