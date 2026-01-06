@@ -48,12 +48,6 @@ const (
 
 var connectTimeout = 10 * time.Second //nolint:gochecknoglobals
 
-func entryExists(path string) bool {
-	_, err := os.Stat(path)
-
-	return err == nil
-}
-
 // Watch watches an input directory (which should be the output directory of a
 // wrstat multi run) for new stats.gz files, upon which it will run the
 // summarise subcommand on that data, if it has not already been run.
@@ -114,6 +108,12 @@ func watch(inputDirs []string, outputDir, quotaPath, basedirsConfig, mounts stri
 	}
 
 	return nil
+}
+
+func entryExists(path string) bool {
+	_, err := os.Stat(path)
+
+	return err == nil
 }
 
 func scheduleSummarisers(s *client.Scheduler, inputDir, outputDir, quotaPath, basedirsConfig, mounts string,

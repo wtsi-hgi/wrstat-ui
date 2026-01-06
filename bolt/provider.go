@@ -83,7 +83,7 @@ func (r timestampOverrideReader) MountTimestamps() (map[string]time.Time, error)
 		return map[string]time.Time{r.mountKey: r.updatedAt}, nil
 	}
 
-	return nil, nil
+	return nil, nil //nolint: nilnil
 }
 
 type boltProvider struct {

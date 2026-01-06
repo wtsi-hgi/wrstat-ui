@@ -384,7 +384,7 @@ func readUpdatedAt(dbh *bolt.DB) (time.Time, error) {
 		}
 
 		raw := binary.LittleEndian.Uint64(v)
-		t = time.Unix(int64(raw), 0)
+		t = time.Unix(int64(raw), 0) //nolint: gosec
 
 		return nil
 	})

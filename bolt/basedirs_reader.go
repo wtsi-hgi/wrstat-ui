@@ -232,7 +232,7 @@ func (r *baseDirsReader) SetCachedUser(uid uint32, name string) {
 
 func (r *baseDirsReader) MountTimestamps() (map[string]time.Time, error) {
 	if r.mountPath == "" || r.updatedAt.IsZero() {
-		return nil, nil
+		return nil, nil //nolint: nilnil
 	}
 
 	mountKey := strings.ReplaceAll(r.mountPath, "/", "／")
