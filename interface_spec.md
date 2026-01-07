@@ -406,16 +406,16 @@ type Store interface {
   // history point for (key.GID, key.MountPath).
   AppendGroupHistory(key HistoryKey, point History) error
 
-  // Finalize is called once after all Put*/Append calls.
+  // Finalise is called once after all Put*/Append calls.
   // It MUST update DateNoSpace/DateNoFiles for each stored group usage entry
   // based on the stored history (matching current storeDateQuotasFill).
   //
   // Transaction semantics: the Store MAY implement Reset() as "begin" and
-  // Finalize() as "commit" (i.e. keep one internal transaction open across
+  // Finalise() as "commit" (i.e. keep one internal transaction open across
   // Put*/Append calls) to preserve atomic updates. This is the mechanism by
   // which implementations get a single-transaction write without requiring the
   // caller to pass a monolithic Persist() payload.
-  Finalize() error
+  Finalise() error
 
   Close() error
 }
@@ -436,14 +436,14 @@ The `BaseDirs.Output()` method changes from directly using Bolt to:
 2. Iterate the already-computed usage/subdir/history structures (same logic as
   today) and call the appropriate `store.Put*` / `store.AppendGroupHistory`
   methods
-3. Call `store.Finalize()`
+3. Call `store.Finalise()`
 
 The Bolt `Store` implementation:
 - Opens/creates the basedirs.db file in its constructor
 - If `previousDBPath` is provided, seeds history from that file first
 - `Reset()` clears usage/subdir data for the destination
 - `Put*` and `AppendGroupHistory` store data in Bolt transactions
-- `Finalize()` computes and persists DateNoSpace/DateNoFiles
+- `Finalise()` computes and persists DateNoSpace/DateNoFiles
 - Handles codec encoding internally
 
 ```go
@@ -559,15 +559,16 @@ set via `SetCachedGroup` / `SetCachedUser`.
 ### 5) Backend bundle interface (required)
 
 `server` must be wired to a single backend bundle, provided by `cmd/server`.
-Define this interface in the `server` package as `Provider`.
+Define this interface in the dedicated `provider` package as `provider.Provider`.
 
-Note: The Provider interface cannot be defined in `db` because it references
+Note: This interface cannot live in `db` because it references
 `basedirs.Reader`, and `basedirs` already imports `db` (for `DirGUTAge` etc.),
-which would create an import cycle. Defining it in `server` avoids this since
-`server` already imports both `db` and `basedirs`.
+which would create an import cycle. Placing it in `provider` keeps the domain
+packages (`db`, `basedirs`) decoupled from `server` while avoiding import
+cycles.
 
 ```go
-package server
+package provider
 
 type Provider interface {
   // Tree returns a query object used by server endpoints (tree + where).
@@ -589,6 +590,16 @@ type Provider interface {
   //
   // If cb is nil, any previously registered callback is removed.
   OnUpdate(cb func())
+
+  // OnError registers a callback that will be invoked whenever the provider
+  // encounters an internal asynchronous error (eg. reload cleanup failures).
+  //
+  // Implementations must:
+  // - Call the callback on a separate goroutine (non-blocking).
+  // - Guarantee the callback is not called concurrently with itself.
+  //
+  // If cb is nil, any previously registered callback is removed.
+  OnError(cb func(error))
 
   Close() error
 }
@@ -677,10 +688,10 @@ Minimal public API (required shape; keep as small as possible):
 ```go
 package bolt
 
-// OpenProvider constructs a backend bundle that implements server.Provider.
+// OpenProvider constructs a backend bundle that implements provider.Provider.
 // When cfg.PollInterval > 0, the backend starts an internal goroutine that
 // watches cfg.BasePath for new databases and triggers OnUpdate callbacks.
-func OpenProvider(cfg Config) (server.Provider, error)
+func OpenProvider(cfg Config) (provider.Provider, error)
 
 type Config struct {
     // BasePath is the directory scanned for database subdirectories.
@@ -784,11 +795,11 @@ func NewHistoryMaintainer(dbPath string) (basedirs.HistoryMaintainer, error)
   - import `go.etcd.io/bbolt`.
 
 Instead:
-- `server` stores only the `server.Provider` and uses it to serve requests.
+- `server` stores only the `provider.Provider` and uses it to serve requests.
 - `server.Server` changes its fields from `basedirs.MultiReader` and `*db.Tree`
-  to `server.Provider`.
-- `server.LoadDBs` becomes `server.SetProvider(provider Provider)` which
-  takes an already-opened provider.
+  to `provider.Provider`.
+- `server.LoadDBs` becomes `server.SetProvider(provider provider.Provider)`
+  which takes an already-opened provider.
 - On `SetProvider`, the server registers its cache rebuild callback via
   `provider.OnUpdate(s.rebuildCaches)`, rebuilds caches immediately, and sets
   `dataTimeStamp` from `provider.BaseDirs().MountTimestamps()`.
@@ -797,14 +808,14 @@ Instead:
 
 `cmd/server` becomes simpler:
 - Constructs `bolt.Config` with `BasePath`, `PollInterval`, etc.
-- Calls `bolt.OpenProvider(cfg)` to get a `server.Provider`.
+- Calls `bolt.OpenProvider(cfg)` to get a `provider.Provider`.
 - Calls `server.SetProvider(provider)` once.
 - The provider handles its own reloading and notifies the server via the
   callback.
 
 `cmd/dbinfo` becomes simpler:
 - Constructs `bolt.Config` with `BasePath` (from args).
-- Calls `bolt.OpenProvider(cfg)` to get a `server.Provider`.
+- Calls `bolt.OpenProvider(cfg)` to get a `provider.Provider`.
 - Calls `provider.Tree().Info()` and `provider.BaseDirs().Info()` to get stats.
 - Prints the stats.
 
@@ -837,7 +848,8 @@ ClickHouse must implement the same read/write interfaces.
 - Ingest `db.RecordDGUTA` at scale.
 - Support the same filter semantics:
   - GID list, UID list, file types bitmask, age buckets.
-- Provide `MountTimestamps()` keyed by mount keys (for dbsUpdated compatibility).
+- Provide `MountTimestamps()` keyed by mount keys (for dbsUpdated
+  compatibility).
 
 ### Suggested schema (guidance, not final)
 
@@ -879,7 +891,7 @@ In ClickHouse mode, the backend must maintain equivalent timestamps in
      and `basedirs`.
    - Implement `db.Database` interface.
    - Implement `basedirs.Reader` (current `MultiReader` logic).
-   - Implement `server.Provider` bundle with internal reload loop.
+   - Implement `provider.Provider` bundle with internal reload loop.
    - Implement `db.DGUTAWriter` (current `db.DB.Add` + batching logic).
    - Implement `basedirs.Store` (current `basedirs.BaseDirs.Output` storage
      logic, including history seeding from a previous DB).
@@ -919,9 +931,9 @@ In ClickHouse mode, the backend must maintain equivalent timestamps in
 
 5. **Refactor `server` package**:
    - Change `Server` fields from `basedirs.MultiReader` and `*db.Tree` to
-     `Provider`.
+     `provider.Provider`.
    - Replace `LoadDBs(basePaths, ...)` with `SetProvider(provider
-     Provider)`.
+     provider.Provider)`.
    - In `SetProvider`, register cache rebuild callback via
      `provider.OnUpdate(s.rebuildCaches)`.
    - Remove `EnableDBReloading` entirely; reloading is internal to the provider.
@@ -931,14 +943,14 @@ In ClickHouse mode, the backend must maintain equivalent timestamps in
 
 6. **Refactor `cmd/server`**:
    - Build `bolt.Config` with `BasePath`, `PollInterval`, `OwnersCSVPath`, etc.
-   - Call `bolt.OpenProvider(cfg)` to get a `server.Provider`.
+  - Call `bolt.OpenProvider(cfg)` to get a `provider.Provider`.
    - Call `server.SetProvider(provider)` once.
    - No reload loop needed; the backend handles it internally.
 
 7. **Refactor `cmd/dbinfo` and `cmd/clean`**:
    - `cmd/dbinfo`:
      - Construct `bolt.Config` with `BasePath` (from args).
-     - Call `bolt.OpenProvider(cfg)` to get a `server.Provider`.
+  - Call `bolt.OpenProvider(cfg)` to get a `provider.Provider`.
      - Call `provider.Tree().Info()` and `provider.BaseDirs().Info()`.
    - `cmd/clean`:
      - Call `bolt.NewHistoryMaintainer(path)`.
