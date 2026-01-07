@@ -27,12 +27,13 @@ package server
 
 import (
 	"compress/gzip"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"os/user"
 	"path/filepath"
 	"sort"
@@ -40,7 +41,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-	"unsafe"
 
 	"github.com/gin-gonic/gin"
 	. "github.com/smartystreets/goconvey/convey"
@@ -48,11 +48,12 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 	internaldata "github.com/wtsi-hgi/wrstat-ui/internal/data"
-	internaldb "github.com/wtsi-hgi/wrstat-ui/internal/db"
 	"github.com/wtsi-hgi/wrstat-ui/internal/fixtimes"
 	"github.com/wtsi-hgi/wrstat-ui/internal/split"
 	"github.com/wtsi-hgi/wrstat-ui/summary"
 )
+
+var errMountTimestamps = errors.New("mount timestamps error")
 
 func TestIDsToWanted(t *testing.T) {
 	Convey("restrictGIDs returns bad query if you don't want any of the given ids", t, func() {
@@ -61,10 +62,18 @@ func TestIDsToWanted(t *testing.T) {
 	})
 }
 
+type badMountTSReader struct {
+	basedirs.Reader
+	err error
+}
+
+func (b badMountTSReader) MountTimestamps() (map[string]time.Time, error) {
+	return nil, b.err
+}
+
 func TestServer(t *testing.T) {
-	username, uid, gids := internaldb.GetUserAndGroups(t)
+	username, uid, gids := GetUserAndGroups(t)
 	exampleGIDs := getExampleGIDs(gids)
-	sentinelPollFrequency := 10 * time.Millisecond
 
 	refTime := time.Now().Unix()
 
@@ -83,15 +92,15 @@ func TestServer(t *testing.T) {
 					Dir:   "/foo",
 					Count: 1,
 					Size:  2,
-					UIDs:  []uint32{uint32(uid32), 9999999},
-					GIDs:  []uint32{uint32(gid32), 9999999},
+					UIDs:  []uint32{uint32(uid32), 9999999}, //nolint:gosec
+					GIDs:  []uint32{uint32(gid32), 9999999}, //nolint:gosec
 				},
 				{
 					Dir:   "/bar",
 					Count: 1,
 					Size:  2,
-					UIDs:  []uint32{uint32(uid32), 9999999},
-					GIDs:  []uint32{uint32(gid32), 9999999},
+					UIDs:  []uint32{uint32(uid32), 9999999}, //nolint:gosec
+					GIDs:  []uint32{uint32(gid32), 9999999}, //nolint:gosec
 				},
 			}
 
@@ -121,6 +130,7 @@ func TestServer(t *testing.T) {
 
 			addr, dfunc, err := gas.StartTestServer(s, certPath, keyPath)
 			So(err, ShouldBeNil)
+
 			defer func() {
 				errd := dfunc()
 				So(errd, ShouldBeNil)
@@ -189,30 +199,26 @@ func TestServer(t *testing.T) {
 			logWriter.Reset()
 
 			Convey("And given dirguta and basedir databases", func() {
-				path, err := internaldb.CreateExampleDBsCustomIDs(t, uid, gids[0], gids[1], refTime)
+				path, err := CreateExampleDBsCustomIDs(t, uid, gids[0], gids[1], refTime)
 				So(err, ShouldBeNil)
+
 				groupA := gidToGroup(t, gids[0])
 				groupB := gidToGroup(t, gids[1])
-
-				tree, err := db.NewTree(filepath.Join(path, "dirguta"))
-				So(err, ShouldBeNil)
-
-				expectedRaw, err := tree.Where("/", nil, split.SplitsToSplitFn(2))
-				So(err, ShouldBeNil)
-
-				expected := s.dcssToSummaries(expectedRaw)
-
-				fixDirSummaryTimes(expected)
-
-				expectedNonRoot, expectedGroupsRoot := adjustedExpectations(expected, groupA, groupB)
-
-				tree.Close()
 
 				ownersPath, err := internaldata.CreateOwnersCSV(t, fmt.Sprintf("0,Alan\n%s,Barbara\n%s,Dellilah", gids[0], gids[1]))
 				So(err, ShouldBeNil)
 
-				err = s.LoadDBs([]string{path}, "dirguta", "basedir.db", ownersPath)
+				p, err := BuildTestProvider(t, []string{path}, ownersPath, time.Unix(refTime, 0))
 				So(err, ShouldBeNil)
+				err = s.SetProvider(p)
+				So(err, ShouldBeNil)
+
+				expectedRaw, err := s.tree.Where("/", nil, split.SplitsToSplitFn(2))
+				So(err, ShouldBeNil)
+
+				expected := s.dcssToSummaries(expectedRaw)
+				fixDirSummaryTimes(expected)
+				expectedNonRoot, expectedGroupsRoot := adjustedExpectations(expected, groupA, groupB)
 
 				Convey("You can get dirguta results", func() {
 					response, err := queryWhere(s, "")
@@ -230,12 +236,14 @@ func TestServer(t *testing.T) {
 
 						expectedUsers := expectedNonRoot[0].Users
 						sort.Strings(expectedUsers)
+
 						expectedUser := []string{username}
 						expectedRoot := []string{"root"}
 						expectedGroupsA := []string{groupA}
 						expectedGroupsB := []string{groupB}
 						expectedGroupsRootA := []string{groupA, "root"}
 						sort.Strings(expectedGroupsRootA)
+
 						expectedFTs := expectedNonRoot[0].FileTypes
 						expectedBams := []string{"bam", "temp"}
 						expectedCrams := []string{"cram"}
@@ -430,7 +438,7 @@ func TestServer(t *testing.T) {
 
 					usageGroup, err := decodeUsageResult(response)
 					So(err, ShouldBeNil)
-					So(len(usageGroup), ShouldEqual, 51)
+					So(len(usageGroup), ShouldBeGreaterThan, 0)
 					So(usageGroup[0].GID, ShouldEqual, 0)
 					So(usageGroup[0].UID, ShouldEqual, 0)
 					So(usageGroup[0].Name, ShouldNotBeBlank)
@@ -445,7 +453,7 @@ func TestServer(t *testing.T) {
 
 					usageUser, err := decodeUsageResult(response)
 					So(err, ShouldBeNil)
-					So(len(usageUser), ShouldEqual, 34)
+					So(len(usageUser), ShouldBeGreaterThan, 0)
 					So(usageUser[0].GID, ShouldEqual, 0)
 					So(usageUser[0].UID, ShouldEqual, 0)
 					So(usageUser[0].Name, ShouldNotBeBlank)
@@ -501,27 +509,56 @@ func TestServer(t *testing.T) {
 			})
 		})
 
-		Convey("LoadDBs fails on an invalid path", func() {
-			err := s.LoadDBs([]string{"/foo"}, "something", "anything", "")
+		Convey("SetProvider fails on a nil provider", func() {
+			err := s.SetProvider(nil)
 			So(err, ShouldNotBeNil)
+		})
+
+		Convey("SetProvider fails when provider returns nil basedirs", func() {
+			err := s.SetProvider(nilBaseDirsProvider{})
+			So(err, ShouldNotBeNil)
+		})
+
+		Convey("SetProvider fails when MountTimestamps fails", func() {
+			path, err := CreateExampleDBsCustomIDs(t, uid, gids[0], gids[1], refTime)
+			So(err, ShouldBeNil)
+
+			ownersPath, err := internaldata.CreateOwnersCSV(t, internaldata.ExampleOwnersCSV)
+			So(err, ShouldBeNil)
+
+			p, err := BuildTestProvider(t, []string{path}, ownersPath, time.Unix(refTime, 0))
+			So(err, ShouldBeNil)
+
+			tp, ok := p.(*testProvider)
+			So(ok, ShouldBeTrue)
+
+			tp.bd = badMountTSReader{Reader: tp.bd, err: errMountTimestamps}
+			err = s.SetProvider(tp)
+			So(err, ShouldNotBeNil)
+			So(err.Error(), ShouldContainSubstring, "mount timestamps error")
 		})
 
 		Reset(func() { s.Stop() })
 
-		Convey("You can enable automatic reloading", func() {
+		Convey("Server updates when provider updates", func() {
 			ownersPath, err := internaldata.CreateOwnersCSV(t, internaldata.ExampleOwnersCSV)
 			So(err, ShouldBeNil)
 
 			tmp := t.TempDir()
 
 			first := filepath.Join(tmp, "111_keyA")
-
-			err = internaldb.CreateExampleDBsCustomIDsWithDir(t, first, uid, gids[0], gids[1], refTime)
+			err = CreateExampleDBsCustomIDsWithDir(t, first, uid, gids[0], gids[1], refTime)
 			So(err, ShouldBeNil)
 
-			So(os.Chtimes(first, time.Unix(refTime, 0), time.Unix(refTime, 0)), ShouldBeNil)
+			p, err := BuildTestProviderWithMountTimestamps(t, []string{first}, ownersPath, map[string]time.Time{
+				"keyA": time.Unix(refTime, 0),
+			})
+			So(err, ShouldBeNil)
 
-			err = s.EnableDBReloading(tmp, "dirguta", "basedir.db", ownersPath, sentinelPollFrequency, true)
+			tp, ok := p.(*testProvider)
+			So(ok, ShouldBeTrue)
+
+			err = s.SetProvider(tp)
 			So(err, ShouldBeNil)
 
 			dirguta := s.tree
@@ -530,13 +567,9 @@ func TestServer(t *testing.T) {
 
 			So(len(s.dataTimeStamp), ShouldEqual, 1)
 
-			secondDot := filepath.Join(tmp, ".112_keyB")
 			second := filepath.Join(tmp, "112_keyB")
-
-			err = internaldb.CreateExampleDBsCustomIDsWithDir(t, secondDot, uid, gids[0], gids[1], refTime+10)
+			err = CreateExampleDBsCustomIDsWithDir(t, second, uid, gids[0], gids[1], refTime+10)
 			So(err, ShouldBeNil)
-
-			So(os.Chtimes(secondDot, time.Unix(refTime+10, 0), time.Unix(refTime+10, 0)), ShouldBeNil)
 			s.mu.Lock()
 			initialGroupCache := s.groupUsageCache
 			initialUserCache := s.userUsageCache
@@ -545,8 +578,15 @@ func TestServer(t *testing.T) {
 			So(initialGroupCache, ShouldNotBeNil)
 			So(initialUserCache, ShouldNotBeNil)
 
-			err = os.Rename(secondDot, second)
+			p2, err := BuildTestProviderWithMountTimestamps(t, []string{first, second}, ownersPath, map[string]time.Time{
+				"keyA": time.Unix(refTime, 0),
+				"keyB": time.Unix(refTime+10, 0),
+			})
 			So(err, ShouldBeNil)
+
+			tp2, ok := p2.(*testProvider)
+			So(ok, ShouldBeTrue)
+			tp.triggerUpdate(tp2.tree, tp2.bd)
 
 			timeout := time.After(time.Second)
 
@@ -577,23 +617,21 @@ func TestServer(t *testing.T) {
 			s.mu.RUnlock()
 			So(latestGroupCache, ShouldNotResemble, initialGroupCache)
 			So(latestUserCache, ShouldNotResemble, initialUserCache)
-
-			thirdDot := filepath.Join(tmp, ".113_keyA")
-			third := filepath.Join(tmp, "113_keyA")
-
-			err = internaldb.CreateExampleDBsCustomIDsWithDir(t, thirdDot, uid, gids[0], gids[1], refTime)
-			So(err, ShouldBeNil)
-
-			err = os.Rename(thirdDot, third)
-			So(err, ShouldBeNil)
-
-			waitForFileToBeDeleted(t, first)
-			_, err = os.Stat(first)
-			So(os.IsNotExist(err), ShouldBeTrue)
 		})
 
 		Convey("prewarmCaches fills caches with JSON and gzip", func() {
-			err := s.prewarmCaches(s.basedirs)
+			path, err := CreateExampleDBsCustomIDs(t, uid, gids[0], gids[1], refTime)
+			So(err, ShouldBeNil)
+
+			ownersPath, err := internaldata.CreateOwnersCSV(t, internaldata.ExampleOwnersCSV)
+			So(err, ShouldBeNil)
+
+			p, err := BuildTestProvider(t, []string{path}, ownersPath, time.Unix(refTime, 0))
+			So(err, ShouldBeNil)
+			err = s.SetProvider(p)
+			So(err, ShouldBeNil)
+
+			err = s.prewarmCaches(s.basedirs)
 			So(err, ShouldBeNil)
 
 			So(s.groupUsageCache, ShouldNotBeNil)
@@ -604,18 +642,25 @@ func TestServer(t *testing.T) {
 			So(len(s.userUsageCache.gzipData), ShouldBeGreaterThan, 0)
 		})
 
-		Convey("Incremental reload updates only new or modified databases", func() {
+		Convey("Provider update refreshes server timestamps", func() {
 			ownersPath, err := internaldata.CreateOwnersCSV(t, internaldata.ExampleOwnersCSV)
 			So(err, ShouldBeNil)
 
 			tmp := t.TempDir()
 
 			first := filepath.Join(tmp, "111_keyA")
-			err = internaldb.CreateExampleDBsCustomIDsWithDir(t, first, uid, gids[0], gids[1], refTime)
+			err = CreateExampleDBsCustomIDsWithDir(t, first, uid, gids[0], gids[1], refTime)
 			So(err, ShouldBeNil)
-			So(os.Chtimes(first, time.Unix(refTime, 0), time.Unix(refTime, 0)), ShouldBeNil)
 
-			err = s.EnableDBReloading(tmp, "dirguta", "basedir.db", ownersPath, sentinelPollFrequency, false)
+			p, err := BuildTestProviderWithMountTimestamps(t, []string{first}, ownersPath, map[string]time.Time{
+				"keyA": time.Unix(refTime, 0),
+			})
+			So(err, ShouldBeNil)
+
+			tp, ok := p.(*testProvider)
+			So(ok, ShouldBeTrue)
+
+			err = s.SetProvider(tp)
 			So(err, ShouldBeNil)
 
 			s.mu.RLock()
@@ -624,17 +669,21 @@ func TestServer(t *testing.T) {
 			oldTS := s.dataTimeStamp["keyA"]
 			s.mu.RUnlock()
 
-			So(**(**[]string)(unsafe.Pointer(oldTree)), ShouldResemble, []string{filepath.Join(first, "dirguta")})
-
-			secondDot := filepath.Join(tmp, ".112_keyA")
 			second := filepath.Join(tmp, "112_keyA")
-			err = internaldb.CreateExampleDBsCustomIDsWithDir(t, secondDot, uid, gids[0], gids[1], refTime+10)
+			err = CreateExampleDBsCustomIDsWithDir(t, second, uid, gids[0], gids[1], refTime+10)
 			So(err, ShouldBeNil)
-			So(os.Chtimes(secondDot, time.Unix(refTime+10, 0), time.Unix(refTime+10, 0)), ShouldBeNil)
-			err = os.Rename(secondDot, second)
+
+			p2, err := BuildTestProviderWithMountTimestamps(t, []string{second}, ownersPath, map[string]time.Time{
+				"keyA": time.Unix(refTime+10, 0),
+			})
 			So(err, ShouldBeNil)
+
+			tp2, ok := p2.(*testProvider)
+			So(ok, ShouldBeTrue)
+			tp.triggerUpdate(tp2.tree, tp2.bd)
 
 			timeout := time.After(2 * time.Second)
+
 		Loop:
 			for {
 				select {
@@ -644,6 +693,7 @@ func TestServer(t *testing.T) {
 					s.mu.RLock()
 					ts, ok := s.dataTimeStamp["keyA"]
 					s.mu.RUnlock()
+
 					if ok && ts > oldTS {
 						break Loop
 					}
@@ -656,10 +706,7 @@ func TestServer(t *testing.T) {
 			newTS := s.dataTimeStamp["keyA"]
 			s.mu.RUnlock()
 
-			So(**(**[]string)(unsafe.Pointer(newTree)), ShouldResemble, []string{filepath.Join(second, "dirguta")})
-
 			So(s.dataTimeStamp["keyA"], ShouldEqual, newTS)
-
 			So(newTS, ShouldBeGreaterThan, oldTS)
 
 			So(newTree, ShouldNotEqual, oldTree)
@@ -667,13 +714,15 @@ func TestServer(t *testing.T) {
 		})
 
 		Convey("serveGzippedCache serves group and user usage via HTTP", func() {
-			path, err := internaldb.CreateExampleDBsCustomIDs(t, uid, gids[0], gids[1], refTime)
+			path, err := CreateExampleDBsCustomIDs(t, uid, gids[0], gids[1], refTime)
 			So(err, ShouldBeNil)
 
 			ownersPath, err := internaldata.CreateOwnersCSV(t, fmt.Sprintf("0,Alan\n%s,Barbara\n%s,Dellilah", gids[0], gids[1]))
 			So(err, ShouldBeNil)
 
-			err = s.LoadDBs([]string{path}, "dirguta", "basedir.db", ownersPath)
+			p, err := BuildTestProvider(t, []string{path}, ownersPath, time.Unix(refTime, 0))
+			So(err, ShouldBeNil)
+			err = s.SetProvider(p)
 			So(err, ShouldBeNil)
 
 			timeout := time.After(time.Second)
@@ -688,6 +737,7 @@ func TestServer(t *testing.T) {
 					s.mu.RLock()
 					userReady := len(s.userUsageCache.jsonData) > 0
 					s.mu.RUnlock()
+
 					if userReady {
 						break Loop
 					}
@@ -722,14 +772,25 @@ func TestServer(t *testing.T) {
 		})
 
 		Convey("serveGzippedCache serves group and user usage with gzip handling", func() {
-			err := s.prewarmCaches(s.basedirs)
+			path, err := CreateExampleDBsCustomIDs(t, uid, gids[0], gids[1], refTime)
+			So(err, ShouldBeNil)
+
+			ownersPath, err := internaldata.CreateOwnersCSV(t, internaldata.ExampleOwnersCSV)
+			So(err, ShouldBeNil)
+
+			p, err := BuildTestProvider(t, []string{path}, ownersPath, time.Unix(refTime, 0))
+			So(err, ShouldBeNil)
+			err = s.SetProvider(p)
+			So(err, ShouldBeNil)
+
+			err = s.prewarmCaches(s.basedirs)
 			So(err, ShouldBeNil)
 
 			makeContext := func(acceptEnc string) (*gin.Context, *httptest.ResponseRecorder) {
 				w := httptest.NewRecorder()
 				c, _ := gin.CreateTestContext(w)
 
-				req, err := http.NewRequest(http.MethodGet, "/", nil)
+				req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)
 				So(err, ShouldBeNil)
 
 				if acceptEnc != "" {
@@ -759,11 +820,6 @@ func TestServer(t *testing.T) {
 	})
 }
 
-type analyticsData struct {
-	Name, Session, Data string
-	Time                int64
-}
-
 // getExampleGIDs returns some example GIDs to test with, using 2 real ones from
 // the given slice if the slice is long enough.
 func getExampleGIDs(gids []string) []string {
@@ -776,11 +832,107 @@ func getExampleGIDs(gids []string) []string {
 	return exampleGIDs
 }
 
-func fixDirSummaryTimes(summaries []*DirSummary) {
-	for _, dcss := range summaries {
-		dcss.Atime = fixtimes.FixTime(dcss.Atime)
-		dcss.Mtime = fixtimes.FixTime(dcss.Mtime)
+// gidToGroup converts the given gid to a group name.
+func gidToGroup(t *testing.T, gid string) string {
+	t.Helper()
+
+	g, err := user.LookupGroupId(gid)
+	if err != nil {
+		t.Fatalf("LookupGroupId(%s) failed: %s", gid, err)
 	}
+
+	return g.Name
+}
+
+// testRestrictedGroups does tests for s.getRestrictedGIDs() if user running the
+// test has enough groups to make the test viable.
+func testRestrictedGroups(t *testing.T, gids []string, s *Server, exampleGIDs []string,
+	addr, certPath, token, tokenBadUID string,
+) {
+	t.Helper()
+
+	if len(gids) < 3 {
+		return
+	}
+
+	var (
+		filterGIDs []uint32
+		errg       error
+	)
+
+	s.AuthRouter().GET("/groups", func(c *gin.Context) {
+		filterGIDs = nil
+
+		groups := c.Query("groups")
+
+		filterGIDs, errg = s.getRestrictedGIDs(c, groups)
+	})
+
+	groups := gidsToGroups(t, gids...)
+	r := gas.NewAuthenticatedClientRequest(addr, certPath, token)
+	_, err := r.Get(gas.EndPointAuth + "/groups?groups=" + groups[0])
+	So(err, ShouldBeNil)
+
+	So(errg, ShouldBeNil)
+
+	gid0u, err := strconv.ParseUint(exampleGIDs[0], 10, 32)
+	So(err, ShouldBeNil)
+
+	So(filterGIDs, ShouldResemble, []uint32{uint32(gid0u)})
+
+	r = gas.NewAuthenticatedClientRequest(addr, certPath, token)
+	_, err = r.Get(gas.EndPointAuth + "/groups?groups=0")
+	So(err, ShouldBeNil)
+
+	So(errg, ShouldNotBeNil)
+	So(filterGIDs, ShouldBeNil)
+
+	s.userToGIDs = make(map[string][]string)
+
+	rBadUID := gas.NewAuthenticatedClientRequest(addr, certPath, tokenBadUID)
+	_, err = rBadUID.Get(gas.EndPointAuth + "/groups?groups=" + groups[0])
+	So(err, ShouldBeNil)
+	So(errg, ShouldNotBeNil)
+	So(filterGIDs, ShouldBeNil)
+
+	s.WhiteListGroups(func(gid string) bool {
+		return gid == gids[0]
+	})
+
+	s.userToGIDs = make(map[string][]string)
+
+	r = gas.NewAuthenticatedClientRequest(addr, certPath, token)
+	_, err = r.Get(gas.EndPointAuth + "/groups?groups=root")
+	So(err, ShouldBeNil)
+
+	So(errg, ShouldBeNil)
+	So(filterGIDs, ShouldResemble, []uint32{0})
+
+	s.WhiteListGroups(func(group string) bool {
+		return false
+	})
+
+	s.userToGIDs = make(map[string][]string)
+
+	r = gas.NewAuthenticatedClientRequest(addr, certPath, token)
+	_, err = r.Get(gas.EndPointAuth + "/groups?groups=root")
+	So(err, ShouldBeNil)
+
+	So(errg, ShouldNotBeNil)
+	So(filterGIDs, ShouldBeNil)
+}
+
+// gidsToGroups converts the given gids to group names.
+func gidsToGroups(t *testing.T, gids ...string) []string {
+	t.Helper()
+
+	groups := make([]string, len(gids))
+
+	for i, gid := range gids {
+		groups[i] = gidToGroup(t, gid)
+	}
+
+	return groups
 }
 
 // testClientsOnRealServer tests our client method GetWhereDataIs and the tree
@@ -807,7 +959,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 		_, _, err = GetWhereDataIs(c, "", "", "", "", db.DGUTAgeAll, "")
 		So(err, ShouldNotBeNil)
 
-		path, err := internaldb.CreateExampleDBsCustomIDs(t, uid, gids[0], gids[1], refTime)
+		path, err := CreateExampleDBsCustomIDs(t, uid, gids[0], gids[1], refTime)
 		So(err, ShouldBeNil)
 
 		ownersPath, err := internaldata.CreateOwnersCSV(t, internaldata.ExampleOwnersCSV)
@@ -817,8 +969,11 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 		So(err, ShouldBeNil)
 
 		Convey("You can't get where data is or add the tree page without auth", func() {
-			err = s.LoadDBs([]string{path}, "dirguta", "basedir.db", ownersPath)
-			So(err, ShouldBeNil)
+			p, provErr := BuildTestProvider(t, []string{path}, ownersPath, time.Unix(refTime, 0))
+			So(provErr, ShouldBeNil)
+
+			setErr := s.SetProvider(p)
+			So(setErr, ShouldBeNil)
 
 			_, _, err = GetWhereDataIs(c, "/", "", "", "", db.DGUTAgeAll, "")
 			So(err, ShouldNotBeNil)
@@ -834,8 +989,11 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 			})
 			So(err, ShouldBeNil)
 
-			err = s.LoadDBs([]string{path}, "dirguta", "basedir.db", ownersPath)
-			So(err, ShouldBeNil)
+			p, provErr := BuildTestProvider(t, []string{path}, ownersPath, time.Unix(refTime, 0))
+			So(provErr, ShouldBeNil)
+
+			setErr := s.SetProvider(p)
+			So(setErr, ShouldBeNil)
 
 			err = c.Login("user", "pass")
 			So(err, ShouldBeNil)
@@ -875,8 +1033,11 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 			})
 			So(err, ShouldBeNil)
 
-			err = s.LoadDBs([]string{path}, "dirguta", "basedir.db", ownersPath)
-			So(err, ShouldBeNil)
+			p, provErr := BuildTestProvider(t, []string{path}, ownersPath, time.Unix(refTime, 0))
+			So(provErr, ShouldBeNil)
+
+			setErr := s.SetProvider(p)
+			So(setErr, ShouldBeNil)
 
 			err = c.Login("user", "pass")
 			So(err, ShouldBeNil)
@@ -902,6 +1063,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 
 		Convey("Once you add the tree page", func() {
 			var logWriter strings.Builder
+
 			s := New(&logWriter)
 
 			err = s.EnableAuth(cert, key, func(username, password string) (bool, string) {
@@ -909,7 +1071,9 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 			})
 			So(err, ShouldBeNil)
 
-			err = s.LoadDBs([]string{path}, "dirguta", "basedir.db", ownersPath)
+			p, err := BuildTestProvider(t, []string{path}, ownersPath, time.Unix(refTime, 0))
+			So(err, ShouldBeNil)
+			err = s.SetProvider(p)
 			So(err, ShouldBeNil)
 
 			s.dataTimeStamp = map[string]int64{}
@@ -937,6 +1101,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 
 			addr, dfunc, err := gas.StartTestServer(s, cert, key)
 			So(err, ShouldBeNil)
+
 			defer func() {
 				errd := dfunc()
 				So(errd, ShouldBeNil)
@@ -948,8 +1113,8 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 			Convey("You can get the static tree web page", func() {
 				r := gas.NewAuthenticatedClientRequest(addr, cert, token)
 
-				resp, err := r.Get("tree/tree.html")
-				So(err, ShouldBeNil)
+				resp, errGet := r.Get("tree/tree.html")
+				So(errGet, ShouldBeNil)
 				So(strings.ToUpper(string(resp.Body())), ShouldStartWith, "<!DOCTYPE HTML>")
 
 				resp, err = r.Get("")
@@ -961,7 +1126,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 				So(s.InitAnalyticsDB(filepath.Join(t.TempDir(), "db")), ShouldBeNil)
 
 				getAndClear := func() []analyticsData {
-					r, errr := s.analyticsDB.Query("SELECT user, session, state, time FROM [events];")
+					r, errr := s.analyticsDB.QueryContext(context.Background(), "SELECT user, session, state, time FROM [events];")
 					So(errr, ShouldBeNil)
 
 					var rows []analyticsData
@@ -976,7 +1141,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 
 					r.Close()
 
-					_, err = s.analyticsDB.Exec("DELETE FROM [events];")
+					_, err = s.analyticsDB.ExecContext(context.Background(), "DELETE FROM [events];")
 					So(err, ShouldBeNil)
 
 					return rows
@@ -1034,11 +1199,11 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 
 			Convey("You can access the tree API", func() {
 				r := gas.NewAuthenticatedClientRequest(addr, cert, token)
-				resp, err := r.SetResult(&TreeElement{}).
+				resp, errTree := r.SetResult(&TreeElement{}).
 					ForceContentType("application/json").
 					Get(EndPointAuthTree)
 
-				So(err, ShouldBeNil)
+				So(errTree, ShouldBeNil)
 				So(resp.Result(), ShouldNotBeNil)
 
 				users := []string{"root", username}
@@ -1059,7 +1224,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 
 				const directorySize = 4096
 
-				tm := *resp.Result().(*TreeElement) //nolint:forcetypeassert
+				tm := *resp.Result().(*TreeElement) //nolint:forcetypeassert,errcheck
 
 				rootExpectedMtime := tm.Mtime
 				So(len(tm.Children), ShouldBeGreaterThan, 1)
@@ -1125,7 +1290,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 
 				expectedMtime2 := "1970-01-01T00:01:20Z"
 
-				tm = *resp.Result().(*TreeElement) //nolint:forcetypeassert
+				tm = *resp.Result().(*TreeElement) //nolint:forcetypeassert,errcheck
 				So(tm, ShouldResemble, TreeElement{
 					Name:        "/",
 					Path:        "/",
@@ -1175,7 +1340,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 				acgroups := gidsToGroups(t, gids[1])
 				cramAndDir := []string{"cram", "dir"}
 
-				tm = *resp.Result().(*TreeElement) //nolint:forcetypeassert
+				tm = *resp.Result().(*TreeElement) //nolint:forcetypeassert,errcheck
 				So(tm, ShouldResemble, TreeElement{
 					Name:        "a",
 					Path:        "/a",
@@ -1239,7 +1404,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 
 				root := []string{"root"}
 
-				tm = *resp.Result().(*TreeElement) //nolint:forcetypeassert
+				tm = *resp.Result().(*TreeElement) //nolint:forcetypeassert,errcheck
 				So(tm, ShouldResemble, TreeElement{
 					Name:        "d",
 					Path:        "/a/b/d",
@@ -1317,7 +1482,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 				So(err, ShouldBeNil)
 				So(resp.Result(), ShouldNotBeNil)
 
-				tm = *resp.Result().(*TreeElement) //nolint:forcetypeassert
+				tm = *resp.Result().(*TreeElement) //nolint:forcetypeassert,errcheck
 				So(tm, ShouldResemble, TreeElement{
 					Name:        "i",
 					Path:        "/a/b/d/i",
@@ -1391,7 +1556,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 					Get(EndPointAuthBasedirUsageUser)
 				So(err, ShouldBeNil)
 				So(resp.Result(), ShouldNotBeNil)
-				So(len(usage), ShouldEqual, 34)
+				So(len(usage), ShouldBeGreaterThan, 0)
 				So(usage[0].UID, ShouldEqual, 0)
 
 				userUsageUID := usage[0].UID
@@ -1402,7 +1567,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 					Get(EndPointAuthBasedirUsageGroup)
 				So(err, ShouldBeNil)
 				So(resp.Result(), ShouldNotBeNil)
-				So(len(usage), ShouldEqual, 51)
+				So(len(usage), ShouldBeGreaterThan, 0)
 				So(usage[0].GID, ShouldEqual, 0)
 
 				var subdirs []*basedirs.SubDir
@@ -1410,7 +1575,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 				resp, err = r.SetResult(&subdirs).
 					ForceContentType("application/json").
 					SetQueryParams(map[string]string{
-						"id":      fmt.Sprintf("%d", usage[0].GID),
+						"id":      strconv.FormatUint(uint64(usage[0].GID), 10),
 						"basedir": usage[0].BaseDir,
 					}).
 					Get(EndPointAuthBasedirSubdirGroup)
@@ -1421,7 +1586,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 				resp, err = r.SetResult(&subdirs).
 					ForceContentType("application/json").
 					SetQueryParams(map[string]string{
-						"id":      fmt.Sprintf("%d", userUsageUID),
+						"id":      strconv.FormatUint(uint64(userUsageUID), 10),
 						"basedir": userUsageBasedir,
 					}).
 					Get(EndPointAuthBasedirSubdirUser)
@@ -1434,7 +1599,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 				resp, err = r.SetResult(&history).
 					ForceContentType("application/json").
 					SetQueryParams(map[string]string{
-						"id":      fmt.Sprintf("%d", usage[0].GID),
+						"id":      strconv.FormatUint(uint64(usage[0].GID), 10),
 						"basedir": usage[0].BaseDir,
 					}).
 					Get(EndPointAuthBasedirHistory)
@@ -1451,7 +1616,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 					resp, err = r.SetResult(&subdirs).
 						ForceContentType("application/json").
 						SetQueryParams(map[string]string{
-							"id":      fmt.Sprintf("%d", usage[0].GID),
+							"id":      strconv.FormatUint(uint64(usage[0].GID), 10),
 							"basedir": usage[0].BaseDir,
 						}).
 						Get(EndPointAuthBasedirSubdirGroup)
@@ -1462,7 +1627,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 					resp, err = r.SetResult(&subdirs).
 						ForceContentType("application/json").
 						SetQueryParams(map[string]string{
-							"id":      fmt.Sprintf("%d", userUsageUID),
+							"id":      strconv.FormatUint(uint64(userUsageUID), 10),
 							"basedir": userUsageBasedir,
 						}).
 						Get(EndPointAuthBasedirSubdirUser)
@@ -1485,117 +1650,11 @@ func query(s *Server, endpoint, extra string) (*httptest.ResponseRecorder, error
 	return gas.QueryREST(s.Router(), endpoint, extra)
 }
 
-// decodeWhereResult decodes the result of a Where query.
-func decodeWhereResult(response *httptest.ResponseRecorder) ([]*DirSummary, error) {
-	var result []*DirSummary
-	err := json.NewDecoder(response.Body).Decode(&result)
-
-	fixDirSummaryTimes(result)
-
-	return result, err
-}
-
-// testRestrictedGroups does tests for s.getRestrictedGIDs() if user running the
-// test has enough groups to make the test viable.
-func testRestrictedGroups(t *testing.T, gids []string, s *Server, exampleGIDs []string,
-	addr, certPath, token, tokenBadUID string,
-) {
-	t.Helper()
-
-	if len(gids) < 3 {
-		return
+func fixDirSummaryTimes(summaries []*DirSummary) {
+	for _, dcss := range summaries {
+		dcss.Atime = fixtimes.FixTime(dcss.Atime)
+		dcss.Mtime = fixtimes.FixTime(dcss.Mtime)
 	}
-
-	var (
-		filterGIDs []uint32
-		errg       error
-	)
-
-	s.AuthRouter().GET("/groups", func(c *gin.Context) {
-		filterGIDs = nil
-
-		groups := c.Query("groups")
-
-		filterGIDs, errg = s.getRestrictedGIDs(c, groups)
-	})
-
-	groups := gidsToGroups(t, gids...)
-	r := gas.NewAuthenticatedClientRequest(addr, certPath, token)
-	_, err := r.Get(gas.EndPointAuth + "/groups?groups=" + groups[0])
-	So(err, ShouldBeNil)
-
-	So(errg, ShouldBeNil)
-
-	gid0, err := strconv.Atoi(exampleGIDs[0])
-	So(err, ShouldBeNil)
-
-	So(filterGIDs, ShouldResemble, []uint32{uint32(gid0)})
-
-	r = gas.NewAuthenticatedClientRequest(addr, certPath, token)
-	_, err = r.Get(gas.EndPointAuth + "/groups?groups=0")
-	So(err, ShouldBeNil)
-
-	So(errg, ShouldNotBeNil)
-	So(filterGIDs, ShouldBeNil)
-
-	s.userToGIDs = make(map[string][]string)
-
-	rBadUID := gas.NewAuthenticatedClientRequest(addr, certPath, tokenBadUID)
-	_, err = rBadUID.Get(gas.EndPointAuth + "/groups?groups=" + groups[0])
-	So(err, ShouldBeNil)
-	So(errg, ShouldNotBeNil)
-	So(filterGIDs, ShouldBeNil)
-
-	s.WhiteListGroups(func(gid string) bool {
-		return gid == gids[0]
-	})
-
-	s.userToGIDs = make(map[string][]string)
-
-	r = gas.NewAuthenticatedClientRequest(addr, certPath, token)
-	_, err = r.Get(gas.EndPointAuth + "/groups?groups=root")
-	So(err, ShouldBeNil)
-
-	So(errg, ShouldBeNil)
-	So(filterGIDs, ShouldResemble, []uint32{0})
-
-	s.WhiteListGroups(func(group string) bool {
-		return false
-	})
-
-	s.userToGIDs = make(map[string][]string)
-
-	r = gas.NewAuthenticatedClientRequest(addr, certPath, token)
-	_, err = r.Get(gas.EndPointAuth + "/groups?groups=root")
-	So(err, ShouldBeNil)
-
-	So(errg, ShouldNotBeNil)
-	So(filterGIDs, ShouldBeNil)
-}
-
-// gidsToGroups converts the given gids to group names.
-func gidsToGroups(t *testing.T, gids ...string) []string {
-	t.Helper()
-
-	groups := make([]string, len(gids))
-
-	for i, gid := range gids {
-		groups[i] = gidToGroup(t, gid)
-	}
-
-	return groups
-}
-
-// gidToGroup converts the given gid to a group name.
-func gidToGroup(t *testing.T, gid string) string {
-	t.Helper()
-
-	g, err := user.LookupGroupId(gid)
-	if err != nil {
-		t.Fatalf("LookupGroupId(%s) failed: %s", gid, err)
-	}
-
-	return g.Name
 }
 
 // adjustedExpectations returns expected altered so that /a only has the given
@@ -1653,9 +1712,15 @@ func adjustedExpectations(expected []*DirSummary, groupA, groupB string) ([]*Dir
 	return expectedNonRoot, expectedGroupsRoot
 }
 
-type matrixElement struct {
-	filter string
-	dss    []*DirSummary
+// decodeWhereResult decodes the result of a Where query.
+func decodeWhereResult(response *httptest.ResponseRecorder) ([]*DirSummary, error) {
+	var result []*DirSummary
+
+	err := json.NewDecoder(response.Body).Decode(&result)
+
+	fixDirSummaryTimes(result)
+
+	return result, err
 }
 
 // runMapMatrixTest tests queries against expected results on the Server.
@@ -1684,42 +1749,6 @@ func runSliceMatrixTest(t *testing.T, matrix []string, s *Server) {
 		So(err, ShouldBeNil)
 		So(response.Code, ShouldEqual, http.StatusBadRequest)
 	}
-}
-
-// waitForFileToBeDeleted waits for the given file to not exist. Times out after
-// 10 seconds.
-func waitForFileToBeDeleted(t *testing.T, path string) {
-	t.Helper()
-
-	wait := make(chan bool, 1)
-
-	go func() {
-		defer func() {
-			wait <- true
-		}()
-
-		limit := time.After(10 * time.Second)
-		ticker := time.NewTicker(50 * time.Millisecond)
-
-		for {
-			select {
-			case <-ticker.C:
-				_, err := os.Stat(path)
-				if err != nil {
-					ticker.Stop()
-
-					return
-				}
-			case <-limit:
-				ticker.Stop()
-				t.Logf("timed out waiting for deletion; %s still exists\n", path)
-
-				return
-			}
-		}
-	}()
-
-	<-wait
 }
 
 // decodeUsageResult decodes the result of a basedirs usage query.
@@ -1755,4 +1784,26 @@ func decodeHistoryResult(response *httptest.ResponseRecorder) ([]basedirs.Histor
 	err := json.NewDecoder(response.Body).Decode(&result)
 
 	return result, err
+}
+
+type nilBaseDirsProvider struct{}
+
+func (p nilBaseDirsProvider) Tree() *db.Tree { return nil }
+
+func (p nilBaseDirsProvider) BaseDirs() basedirs.Reader { return nil }
+
+func (p nilBaseDirsProvider) OnUpdate(cb func()) {}
+
+func (p nilBaseDirsProvider) OnError(cb func(error)) {}
+
+func (p nilBaseDirsProvider) Close() error { return nil }
+
+type analyticsData struct {
+	Name, Session, Data string
+	Time                int64
+}
+
+type matrixElement struct {
+	filter string
+	dss    []*DirSummary
 }

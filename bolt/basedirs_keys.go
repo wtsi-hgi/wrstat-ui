@@ -1,7 +1,8 @@
 /*******************************************************************************
- * Copyright (c) 2025 Genome Research Ltd.
+ * Copyright (c) 2026 Genome Research Ltd.
  *
- * Authors: Michael Woolnough <mw31@sanger.ac.uk>
+ * Authors:
+ *   Sendu Bala <sb10@sanger.ac.uk>
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -23,40 +24,40 @@
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  ******************************************************************************/
 
-package server
+package bolt
 
 import (
-	"os"
-	"path/filepath"
-	"testing"
+	"bytes"
+	"encoding/binary"
 
-	. "github.com/smartystreets/goconvey/convey"
+	"github.com/wtsi-hgi/wrstat-ui/db"
 )
 
-const testDB = "testDIR"
+const (
+	bucketKeySeparatorByte = '-'
+	sizeOfUint32           = 4
+	sizeOfUint16           = 2
+	sizeOfKeyWithoutPath   = sizeOfUint32 + sizeOfUint16 + 2
+)
 
-func TestFindDBDirs(t *testing.T) {
-	Convey("You can find new DBs for the server to load", t, func() {
-		tmp := t.TempDir()
+var bucketKeySeparatorByteSlice = []byte{bucketKeySeparatorByte} //nolint:gochecknoglobals
 
-		createFakeDB(t, tmp, "123_abc")
-		b := createFakeDB(t, tmp, "124_abc")
-		c := createFakeDB(t, tmp, "123_def")
-		createFakeDB(t, tmp, ".124_def")
+func basedirsKeyName(id uint32, path string, age db.DirGUTAge) []byte {
+	length := sizeOfKeyWithoutPath + len(path)
+	b := make([]byte, sizeOfUint32, length)
+	binary.LittleEndian.PutUint32(b, id)
+	b = append(b, bucketKeySeparatorByte)
+	b = append(b, path...)
 
-		found, err := FindDBDirs(tmp, testDB)
-		So(err, ShouldBeNil)
-		So(found, ShouldResemble, []string{c, b})
-	})
+	if age != db.DGUTAgeAll {
+		b = append(b, bucketKeySeparatorByte)
+		b = b[:length]
+		binary.LittleEndian.PutUint16(b[length-sizeOfUint16:], uint16(age))
+	}
+
+	return b
 }
 
-func createFakeDB(t *testing.T, base, name string) string {
-	t.Helper()
-
-	p := filepath.Join(base, name)
-
-	So(os.Mkdir(p, 0700), ShouldBeNil)
-	So(os.Mkdir(filepath.Join(p, testDB), 0700), ShouldBeNil)
-
-	return p
+func basedirsKeyAgeIsAll(key []byte) bool {
+	return bytes.Count(key, bucketKeySeparatorByteSlice) == 1
 }

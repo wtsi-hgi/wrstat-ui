@@ -40,7 +40,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/wtsi-hgi/wrstat-ui/server"
+	"github.com/wtsi-hgi/wrstat-ui/datasets"
 	"vimagination.zapto.org/httpfile"
 )
 
@@ -95,8 +95,11 @@ func getDBPaths(dbs []string) ([]string, error) { //nolint:gocognit
 				return err
 			}
 
-			if server.IsValidDBDir(entry, db, "logs.gz") || server.IsValidDBDir(entry, db, "walk.log") {
-				dbDirs = append(dbDirs, filepath.Join(db, path))
+			if entry.IsDir() && datasets.IsValidDatasetDirName(entry.Name()) {
+				dir := filepath.Join(db, path)
+				if datasets.HasRequiredFiles(dir, "logs.gz") || datasets.HasRequiredFiles(dir, "walk.log") {
+					dbDirs = append(dbDirs, filepath.Join(db, path))
+				}
 			}
 
 			return nil

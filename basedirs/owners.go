@@ -40,7 +40,8 @@ const colsInOwnersFile = 2
 // Error for invalid owners file format.
 var ErrInvalidOwnersFile = errors.New("invalid owners file format")
 
-func parseOwners(path string) (map[uint32]string, error) {
+// ParseOwners parses the owners CSV file (gid,owner) into a gid->owner map.
+func ParseOwners(path string) (map[uint32]string, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err

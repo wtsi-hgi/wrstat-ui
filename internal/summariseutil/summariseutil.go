@@ -1,107 +1,51 @@
+/*******************************************************************************
+ * Copyright (c) 2026 Genome Research Ltd.
+ *
+ * Authors:
+ *   Sendu Bala <sb10@sanger.ac.uk>
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining
+ * a copy of this software and associated documentation files (the
+ * "Software"), to deal in the Software without restriction, including
+ * without limitation the rights to use, copy, modify, merge, publish,
+ * distribute, sublicense, and/or sell copies of the Software, and to
+ * permit persons to whom the Software is furnished to do so, subject to
+ * the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included
+ * in all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+ * IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+ * CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+ * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+ * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ ******************************************************************************/
+
 package summariseutil
 
 import (
 	"errors"
 	"fmt"
-	"io/fs"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
-	"github.com/wtsi-hgi/wrstat-ui/db"
-	"github.com/wtsi-hgi/wrstat-ui/summary"
-	sbasedirs "github.com/wtsi-hgi/wrstat-ui/summary/basedirs"
-	dirguta "github.com/wtsi-hgi/wrstat-ui/summary/dirguta"
 )
 
-const dbBatchSize = 10000
+const (
+	numDatasetDirParts   = 2
+	fullwidthSolidus     = "／"
+	fullwidthReplacement = "/"
+)
 
-// AddDirgutaSummariser adds the dirguta summariser to s and returns a close
-// function for the underlying DB.
-func AddDirgutaSummariser(s *summary.Summariser, dirgutaDB string) (func() error, error) {
-	if err := os.RemoveAll(dirgutaDB); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return nil, err
-	}
-
-	if err := os.MkdirAll(dirgutaDB, 0o755); err != nil {
-		return nil, err
-	}
-
-	dg := db.NewDB(dirgutaDB)
-
-	if err := dg.CreateDB(); err != nil {
-		return nil, err
-	}
-
-	dg.SetBatchSize(dbBatchSize)
-
-	s.AddDirectoryOperation(dirguta.NewDirGroupUserTypeAge(dg))
-
-	return dg.Close, nil
-}
-
-// AddBasedirsSummariser adds the basedirs summariser to s and configures it
-// from the provided quota/config/mountpoints files.
-func AddBasedirsSummariser(
-	s *summary.Summariser,
-	basedirsDB, basedirsHistoryDB, quotaPath, basedirsConfig, mountpoints string,
-	modtime time.Time,
-) error {
-	bd, config, err := newBasedirsCreator(
-		basedirsDB,
-		quotaPath,
-		basedirsConfig,
-		mountpoints,
-		modtime,
-	)
-	if err != nil {
-		return err
-	}
-
-	if basedirsHistoryDB != "" {
-		if err := CopyHistory(bd, basedirsHistoryDB); err != nil {
-			return err
-		}
-	}
-
-	s.AddDirectoryOperation(sbasedirs.NewBaseDirs(config.PathShouldOutput, bd))
-
-	return nil
-}
-
-func newBasedirsCreator(
-	basedirsDB, quotaPath, basedirsConfig, mountpoints string,
-	modtime time.Time,
-) (*basedirs.BaseDirs, basedirs.Config, error) {
-	quotas, config, err := ParseBasedirConfig(quotaPath, basedirsConfig)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	if err = os.Remove(basedirsDB); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return nil, nil, err
-	}
-
-	bd, err := basedirs.NewCreator(basedirsDB, quotas)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to create new basedirs creator: %w", err)
-	}
-
-	mps, err := ParseMountpointsFromFile(mountpoints)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	if len(mps) > 0 {
-		bd.SetMountPoints(mps)
-	}
-
-	bd.SetModTime(modtime)
-
-	return bd, config, nil
-}
+// ErrDatasetDirMissingUnderscore is returned when a dataset directory name
+// does not contain the expected '<version>_<mountKey>' underscore separator.
+var ErrDatasetDirMissingUnderscore = errors.New("dataset dir missing '_' separator")
 
 // ParseBasedirConfig parses quotas and basedirs config files.
 func ParseBasedirConfig(quotaPath, basedirsConfig string) (*basedirs.Quotas, basedirs.Config, error) {
@@ -157,13 +101,30 @@ func ParseMountpointsFromFile(mountpoints string) ([]string, error) {
 	return mounts, nil
 }
 
-// CopyHistory copies history entries from an existing basedirs DB into bd.
-func CopyHistory(bd *basedirs.BaseDirs, basedirsHistoryDB string) error {
-	db, err := basedirs.OpenDBRO(basedirsHistoryDB)
-	if err != nil {
-		return err
-	}
-	defer db.Close()
+// DeriveMountPathFromOutputDir extracts the mount path from the parent
+// directory of the output path.
+//
+// The parent directory is expected to have the form '<version>_<mountKey>'
+// where <mountKey> is the mount path with '/' replaced by '／' (fullwidth
+// solidus).
+//
+// If the directory name doesn't match the expected format, "/" is returned
+// as a fallback for backwards compatibility.
+func DeriveMountPathFromOutputDir(outputPath string) string {
+	parentDir := filepath.Base(filepath.Dir(outputPath))
 
-	return bd.CopyHistoryFrom(db)
+	parts := strings.SplitN(parentDir, "_", numDatasetDirParts)
+	if len(parts) != numDatasetDirParts {
+		// Fallback to root mount path for backwards compatibility
+		return "/"
+	}
+
+	mountKey := parts[1]
+	mountPath := strings.ReplaceAll(mountKey, fullwidthSolidus, fullwidthReplacement)
+
+	if !strings.HasSuffix(mountPath, "/") {
+		mountPath += "/"
+	}
+
+	return mountPath
 }

@@ -35,7 +35,7 @@ import (
 
 	"github.com/klauspost/pgzip"
 	"github.com/spf13/cobra"
-	"github.com/wtsi-hgi/wrstat-ui/server"
+	"github.com/wtsi-hgi/wrstat-ui/datasets"
 	"github.com/wtsi-hgi/wrstat-ui/stats"
 	"github.com/wtsi-hgi/wrstat-ui/summary"
 	"github.com/wtsi-hgi/wrstat-ui/summary/dedupe"
@@ -52,7 +52,7 @@ var (
 
 var dupescmd = &cobra.Command{
 	Use:   "dupes",
-	Short: "dupes searches for potentially duplicated files in wrstat output",
+	Short: "Find possible duplicate files",
 	Long: `dupes searches wrstat output for files with the same size,
 flagging them as potential duplicates. Useful as a pre-step for a more absolute
 check of same-ness.
@@ -81,6 +81,13 @@ stdout. Files ending in '.gz' will be compressed.
 	},
 }
 
+func init() {
+	RootCmd.AddCommand(dupescmd)
+
+	dupescmd.Flags().Int64VarP(&minSize, "minsize", "m", 0, "minimum file size to consider a possible duplicate")
+	dupescmd.Flags().StringVarP(&output, "output", "o", "-", "file to output possible duplicate file data")
+}
+
 func parseFiles(args []string) ([]string, error) { //nolint:gocognit
 	var files []string
 
@@ -96,7 +103,7 @@ func parseFiles(args []string) ([]string, error) { //nolint:gocognit
 			continue
 		}
 
-		dirs, err := server.FindDBDirs(arg, inputStatsFile)
+		dirs, err := datasets.FindLatestDatasetDirs(arg, inputStatsFile)
 		if err != nil {
 			return nil, err
 		}
@@ -111,13 +118,6 @@ func parseFiles(args []string) ([]string, error) { //nolint:gocognit
 	}
 
 	return files, nil
-}
-
-func init() {
-	RootCmd.AddCommand(dupescmd)
-
-	dupescmd.Flags().Int64VarP(&minSize, "minsize", "m", 0, "minimum file size to consider a possible duplicate")
-	dupescmd.Flags().StringVarP(&output, "output", "o", "-", "file to output possible duplicate file data")
 }
 
 func findDupes(files []string, minSize int64, output string) error { //nolint:gocognit

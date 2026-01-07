@@ -35,7 +35,7 @@ import (
 	"github.com/VertebrateResequencing/wr/client"
 	"github.com/VertebrateResequencing/wr/jobqueue"
 	"github.com/inconshreveable/log15"
-	"github.com/wtsi-hgi/wrstat-ui/server"
+	"github.com/wtsi-hgi/wrstat-ui/datasets"
 )
 
 const (
@@ -90,7 +90,7 @@ func watch(inputDirs []string, outputDir, quotaPath, basedirsConfig, mounts stri
 	}
 
 	for _, inputDir := range inputDirs {
-		inputPaths, err := server.FindDBDirs(inputDir, "stats.gz")
+		inputPaths, err := datasets.FindLatestDatasetDirs(inputDir, "stats.gz")
 		if err != nil {
 			return fmt.Errorf("error getting input DB paths: %w", err)
 		}
@@ -167,7 +167,7 @@ func createSummariseJob(inputDir, outputDir, base, quotaPath, basedirsConfig, mo
 }
 
 func getPreviousBasedirsDB(outputDir, base string) (string, error) {
-	possibleBasedirs, err := server.FindDBDirs(outputDir, basedirBasename)
+	possibleBasedirs, err := datasets.FindLatestDatasetDirs(outputDir, basedirBasename)
 	if err != nil {
 		return "", err
 	}

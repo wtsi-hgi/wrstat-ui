@@ -30,9 +30,9 @@ import (
 	"time"
 
 	. "github.com/smartystreets/goconvey/convey"
+	"github.com/wtsi-hgi/wrstat-ui/bolt"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 	internaldata "github.com/wtsi-hgi/wrstat-ui/internal/data"
-	"github.com/wtsi-hgi/wrstat-ui/internal/fs"
 	"github.com/wtsi-hgi/wrstat-ui/internal/split"
 	"github.com/wtsi-hgi/wrstat-ui/internal/statsdata"
 	"github.com/wtsi-hgi/wrstat-ui/stats"
@@ -47,18 +47,22 @@ func TestTree(t *testing.T) {
 		paths, err := testMakeDBPaths(t)
 		So(err, ShouldBeNil)
 
-		tree, errc := db.NewTree(paths[0])
+		var database db.Database
+
+		_, errc := bolt.OpenDatabase(paths[0])
 		So(errc, ShouldNotBeNil)
-		So(tree, ShouldBeNil)
 
 		errc = testCreateDB(t, paths[0], refUnixTime)
 		So(errc, ShouldBeNil)
 
-		tree, errc = db.NewTree(paths[0])
+		database, errc = bolt.OpenDatabase(paths[0])
 		So(errc, ShouldBeNil)
-		So(tree, ShouldNotBeNil)
 
-		dbModTime := fs.ModTime(paths[0])
+		tree := db.NewTree(database)
+		So(tree, ShouldNotBeNil)
+		defer tree.Close()
+
+		dbModTime := time.Unix(refUnixTime, 0)
 
 		expectedUIDs := []uint32{101, 102, 103}
 		expectedGIDs := []uint32{1, 2, 3}
@@ -299,41 +303,40 @@ func TestTree(t *testing.T) {
 		paths1, err := testMakeDBPaths(t)
 		So(err, ShouldBeNil)
 
-		adb := db.NewDB(paths1[0])
-
-		adb.SetBatchSize(20)
+		adbUpdatedAt1 := time.Unix(100, 0)
 
 		files := statsdata.NewRoot("/", 20)
 		files.GID = 1
 		files.UID = 11
 		files.AddDirectory("a").AddDirectory("b").AddDirectory("c").AddDirectory("d").AddFile("file.bam").Size = 1
 
-		err = fillTestDB(adb, files)
+		err = fillTestDB(paths1[0], files, adbUpdatedAt1)
 		So(err, ShouldBeNil)
 
 		paths2, err := testMakeDBPaths(t)
 		So(err, ShouldBeNil)
 
-		adb = db.NewDB(paths2[0])
-
-		adb.SetBatchSize(20)
+		adbUpdatedAt2 := time.Unix(200, 0)
 
 		files = statsdata.NewRoot("/", 15)
 		files.GID = 1
 		files.UID = 11
 		files.AddDirectory("a").AddDirectory("b").AddDirectory("c").AddDirectory("e").AddFile("file2.bam").Size = 1
 
-		err = fillTestDB(adb, files)
+		err = fillTestDB(paths2[0], files, adbUpdatedAt2)
 		So(err, ShouldBeNil)
 
-		tree, err := db.NewTree(paths1[0], paths2[0])
+		database, err := bolt.OpenDatabase(paths1[0], paths2[0])
 		So(err, ShouldBeNil)
+
+		tree := db.NewTree(database)
 		So(tree, ShouldNotBeNil)
+		defer tree.Close()
 
 		expectedAtime := time.Unix(15, 0)
 		expectedMtime := time.Unix(20, 0)
 
-		mtime2 := fs.ModTime(paths2[0])
+		mtime2 := adbUpdatedAt2
 
 		dcss, err := tree.Where("/", nil, split.SplitsToSplitFn(0))
 		So(err, ShouldBeNil)
@@ -374,21 +377,30 @@ func TestTree(t *testing.T) {
 func testCreateDB(t *testing.T, path string, refUnixTime int64) error {
 	t.Helper()
 
-	return fillTestDB(db.NewDB(path), internaldata.CreateDefaultTestData(1, 2, 1, 101, 102, refUnixTime))
+	return fillTestDB(path, internaldata.CreateDefaultTestData(1, 2, 1, 101, 102, refUnixTime), time.Unix(refUnixTime, 0))
 }
 
-func fillTestDB(adb *db.DB, files *statsdata.Directory) error {
-	if err := adb.CreateDB(); err != nil {
+func fillTestDB(outputDir string, files *statsdata.Directory, updatedAt time.Time) error {
+	w, err := bolt.NewDGUTAWriter(outputDir)
+	if err != nil {
 		return err
 	}
 
+	defer func() {
+		_ = w.Close()
+	}()
+
+	w.SetBatchSize(20)
+	w.SetMountPath("/a/")
+	w.SetUpdatedAt(updatedAt)
+
 	s := summary.NewSummariser(stats.NewStatsParser(files.AsReader()))
 
-	s.AddDirectoryOperation(dirguta.NewDirGroupUserTypeAge(adb))
+	s.AddDirectoryOperation(dirguta.NewDirGroupUserTypeAge(w))
 
 	if err := s.Summarise(); err != nil {
 		return err
 	}
 
-	return adb.Close()
+	return w.Close()
 }

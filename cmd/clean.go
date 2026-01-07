@@ -29,7 +29,7 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
-	"github.com/wtsi-hgi/wrstat-ui/basedirs"
+	"github.com/wtsi-hgi/wrstat-ui/bolt"
 )
 
 var (
@@ -61,16 +61,27 @@ the flag were not supplied.
 		}
 
 		if viewOnly {
-			toRemove, err := basedirs.FindInvalidHistoryKeys(args[0], prefix)
+			m, err := bolt.NewHistoryMaintainer(args[0])
+			if err != nil {
+				die("failed to open basedirs db: %s", err)
+			}
+
+			toRemove, err := m.FindInvalidHistory(prefix)
 			if err != nil {
 				die("failed to read basedirs db: %s", err)
 			}
 
 			for _, k := range toRemove {
-				fmt.Printf("%s\n", k)
+				fmt.Printf("%d:%s\n", k.GID, k.MountPath)
 			}
-		} else if err := basedirs.CleanInvalidDBHistory(args[0], prefix); err != nil {
-			die("error cleaning basedirs db: %s", err)
+		} else {
+			m, err := bolt.NewHistoryMaintainer(args[0])
+			if err != nil {
+				die("failed to open basedirs db: %s", err)
+			}
+			if err := m.CleanHistoryForMount(prefix); err != nil {
+				die("error cleaning basedirs db: %s", err)
+			}
 		}
 	},
 }

@@ -32,6 +32,7 @@ import (
 
 	. "github.com/smartystreets/goconvey/convey"
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
+	"github.com/wtsi-hgi/wrstat-ui/bolt"
 	internaldata "github.com/wtsi-hgi/wrstat-ui/internal/data"
 	"github.com/wtsi-hgi/wrstat-ui/internal/split"
 	"github.com/wtsi-hgi/wrstat-ui/internal/statsdata"
@@ -80,11 +81,16 @@ func TestClean(t *testing.T) {
 		tmp := t.TempDir()
 		dbPath := filepath.Join(tmp, "basedirs.db")
 
-		db, err := basedirs.NewCreator(dbPath, &basedirs.Quotas{})
+		store, err := bolt.NewBaseDirsStore(dbPath, "")
 		So(err, ShouldBeNil)
+		store.SetMountPath("/lustre/scratch125/")
+		store.SetUpdatedAt(time.Now())
+		So(store.Reset(), ShouldBeNil)
 
-		db.SetMountPoints(mps)
-		db.SetModTime(modTime)
+		creator, err := basedirs.NewCreator(store, &basedirs.Quotas{})
+		So(err, ShouldBeNil)
+		creator.SetMountPoints(mps)
+		creator.SetModTime(modTime)
 
 		f := statsdata.NewRoot("/", 0)
 		statsdata.AddFile(f, "lustre/scratch123/hgi/mdt0/teamA/projectB/myFile.txt", 0, 0, 1, 0, 0)
@@ -93,38 +99,45 @@ func TestClean(t *testing.T) {
 		statsdata.AddFile(f, "nfs/scratch123/hgi/mdt0/teamA/projectB/myFile.txt", 0, 0, 1, 0, 0)
 
 		s := summary.NewSummariser(stats.NewStatsParser(f.AsReader()))
-		s.AddDirectoryOperation(sbasedirs.NewBaseDirs(defaultConfig.PathShouldOutput, db))
-
+		s.AddDirectoryOperation(sbasedirs.NewBaseDirs(defaultConfig.PathShouldOutput, creator))
 		So(s.Summarise(), ShouldBeNil)
+		So(store.Close(), ShouldBeNil)
 
-		Convey("We can find the keys for all by a single prefix", func() {
-			toRemove, err := basedirs.FindInvalidHistoryKeys(dbPath, "/lustre/scratch123/")
+		Convey("We can find the (gid, mountpath) pairs removable by a prefix", func() {
+			m, err := bolt.NewHistoryMaintainer(dbPath)
 			So(err, ShouldBeNil)
-			So(toRemove, ShouldResemble, [][]byte{
-				append([]byte{0, 0, 0, 0, 45}, "/lustre/scratch125/"...),
-				append([]byte{0, 0, 0, 0, 45}, "/nfs/"...),
+
+			toRemove, err := m.FindInvalidHistory("/lustre/scratch123/")
+			So(err, ShouldBeNil)
+			So(toRemove, ShouldResemble, []basedirs.HistoryIssue{
+				{GID: 0, MountPath: "/lustre/scratch125/"},
+				{GID: 0, MountPath: "/nfs/"},
 			})
 		})
 
 		Convey("We can remove all but a single prefix", func() {
-			So(basedirs.CleanInvalidDBHistory(dbPath, "/lustre/scratch123/"), ShouldBeNil)
+			m, err := bolt.NewHistoryMaintainer(dbPath)
+			So(err, ShouldBeNil)
+			So(m.CleanHistoryForMount("/lustre/scratch123/"), ShouldBeNil)
 
 			ownersPath, err := internaldata.CreateOwnersCSV(t, internaldata.ExampleOwnersCSV)
 			So(err, ShouldBeNil)
 
-			db, err := basedirs.NewReader(dbPath, ownersPath)
+			r, err := bolt.OpenBaseDirsReader(dbPath, ownersPath)
 			So(err, ShouldBeNil)
 
-			db.SetMountPoints(mps)
+			defer r.Close()
 
-			h, err := db.History(0, "/lustre/scratch123/")
+			r.SetMountPoints(mps)
+
+			h, err := r.History(0, "/lustre/scratch123/")
 			So(err, ShouldBeNil)
 			So(h, ShouldResemble, []basedirs.History{{Date: modTime, UsageSize: 3, UsageInodes: 2}})
 
-			_, err = db.History(0, "/lustre/scratch125/")
+			_, err = r.History(0, "/lustre/scratch125/")
 			So(err, ShouldEqual, basedirs.ErrNoBaseDirHistory)
 
-			_, err = db.History(0, "/nfs/")
+			_, err = r.History(0, "/nfs/")
 			So(err, ShouldEqual, basedirs.ErrNoBaseDirHistory)
 		})
 	})

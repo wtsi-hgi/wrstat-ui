@@ -116,8 +116,8 @@ func TestHistory(t *testing.T) {
 					QuotaInodes: 20,
 				},
 			},
-			UntilSize:   now.Add(secondsInDay*5 + 8*time.Hour),
-			UntilInodes: now.Add(secondsInDay * 1),
+			UntilSize:   now.Add((24*time.Hour)*5 + 8*time.Hour),
+			UntilInodes: now.Add((24 * time.Hour) * 1),
 		},
 		{
 			Name: "Two items in history, with no change in size, and inodes at quota" +
@@ -187,8 +187,8 @@ func TestHistory(t *testing.T) {
 					QuotaInodes: 20,
 				},
 			},
-			UntilSize:   now.Add(secondsInDay * 38),
-			UntilInodes: now.Add(secondsInDay * 2),
+			UntilSize:   now.Add((24 * time.Hour) * 38),
+			UntilInodes: now.Add((24 * time.Hour) * 2),
 		},
 		{
 			Name: "Four items in history correctly uses the last and third from last items to predict dates.",
@@ -222,8 +222,8 @@ func TestHistory(t *testing.T) {
 					QuotaInodes: 20,
 				},
 			},
-			UntilSize:   now.Add(secondsInDay * 38),
-			UntilInodes: now.Add(secondsInDay * 2),
+			UntilSize:   now.Add((24 * time.Hour) * 38),
+			UntilInodes: now.Add((24 * time.Hour) * 2),
 		},
 		{
 			Name: "Predictions beyond 5 years are treated as not running out.",
@@ -251,7 +251,7 @@ func TestHistory(t *testing.T) {
 				},
 			},
 			UntilSize:   time.Time{},
-			UntilInodes: now.Add(secondsInDay * 4 * 365),
+			UntilInodes: now.Add((24 * time.Hour) * 4 * 365),
 		},
 	} {
 		Convey(test.Name, t, func() {
@@ -271,7 +271,7 @@ func TestHistory(t *testing.T) {
 
 func TestMountpoints(t *testing.T) {
 	Convey("Given a set of mountpoints, you can match basedirs to a mountpoint", t, func() {
-		mps := validateMountPoints([]string{
+		mps := ValidateMountPoints([]string{
 			"/some/path",
 			"/some/other/path/",
 			"/another/path/",
@@ -287,7 +287,7 @@ func TestMountpoints(t *testing.T) {
 			"/another/path/another/day":               "/another/path/",
 			"/another/path/here/there/and/everywhere": "/another/path/here/",
 		} {
-			So(mountpoint, ShouldEqual, mps.prefixOf(basedir))
+			So(mountpoint, ShouldEqual, mps.PrefixOf(basedir))
 		}
 	})
 }

@@ -1,0 +1,397 @@
+/*******************************************************************************
+ * Copyright (c) 2026 Genome Research Ltd.
+ *
+ * Authors:
+ *   Sendu Bala <sb10@sanger.ac.uk>
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining
+ * a copy of this software and associated documentation files (the
+ * "Software"), to deal in the Software without restriction, including
+ * without limitation the rights to use, copy, modify, merge, publish,
+ * distribute, sublicense, and/or sell copies of the Software, and to
+ * permit persons to whom the Software is furnished to do so, subject to
+ * the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included
+ * in all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+ * IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+ * CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+ * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+ * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ ******************************************************************************/
+
+package bolt
+
+import (
+	"encoding/binary"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/ugorji/go/codec"
+	"github.com/wtsi-hgi/wrstat-ui/db"
+	bolt "go.etcd.io/bbolt"
+)
+
+var (
+	ErrInvalidConfig     = errors.New("invalid config")
+	ErrOutputDirInvalid  = errors.New("output directory not a directory")
+	ErrMetadataNotSet    = errors.New("mountPath/updatedAt not set")
+	ErrInvalidMountPath  = errors.New("invalid mountPath")
+	ErrInvalidUpdatedAt  = errors.New("invalid updatedAt")
+	ErrNoBasedirsDBPaths = errors.New("no basedirs db paths provided")
+	ErrDBClosed          = errors.New("db closed")
+	ErrMetaBucketMissing = errors.New("meta bucket missing")
+)
+
+const (
+	dgutaBucketName     = "gut"
+	childrenBucketName  = "children"
+	metaBucketName      = "_meta"
+	metaKeyMountPath    = "mountPath"
+	metaKeyUpdatedAt    = "updatedAt"
+	unixSecondsBytesLen = 8
+	boltFilePerms       = 0o640
+	dgutaDBBasename     = "dguta.db"
+	childrenDBBasename  = dgutaDBBasename + ".children"
+)
+
+// Config configures the Bolt backend.
+type Config struct {
+	// BasePath is the directory scanned for dataset subdirectories.
+	BasePath string
+
+	// DGUTADBName and BaseDirDBName are the entry names expected inside each
+	// dataset directory (e.g. "dguta.dbs" and "basedirs.db").
+	DGUTADBName   string
+	BaseDirDBName string
+
+	// OwnersCSVPath is required for basedirs name resolution.
+	OwnersCSVPath string
+
+	// MountPoints overrides mount auto-discovery for basedirs history resolution.
+	// When empty, the backend auto-discovers mountpoints from the OS.
+	MountPoints []string
+
+	// PollInterval controls how often BasePath is rescanned for updates.
+	// If zero or negative, automatic reloading is disabled.
+	PollInterval time.Duration
+
+	// RemoveOldPaths controls whether older dataset directories are removed
+	// after a successful reload.
+	RemoveOldPaths bool
+}
+
+type dgutaWriter struct {
+	outputDir string
+
+	batchSize  int
+	writeBatch []db.RecordDGUTA
+	writeErr   error
+
+	dgutaDB     *bolt.DB
+	childrenDB  *bolt.DB
+	codecHandle codec.Handle
+
+	mountPath string
+	updatedAt time.Time
+	metaDone  bool
+}
+
+func newDGUTAWriterFromDBs(outputDir string, dgutaDB, childrenDB *bolt.DB) *dgutaWriter {
+	return &dgutaWriter{
+		outputDir:   outputDir,
+		batchSize:   1,
+		dgutaDB:     dgutaDB,
+		childrenDB:  childrenDB,
+		codecHandle: new(codec.BincHandle),
+		writeBatch:  make([]db.RecordDGUTA, 0, 1),
+		metaDone:    false,
+	}
+}
+
+func (w *dgutaWriter) SetBatchSize(batchSize int) {
+	if batchSize <= 0 {
+		batchSize = 1
+	}
+
+	w.batchSize = batchSize
+	if cap(w.writeBatch) < batchSize {
+		w.writeBatch = make([]db.RecordDGUTA, 0, batchSize)
+	}
+}
+
+func (w *dgutaWriter) SetMountPath(mountPath string) {
+	w.mountPath = mountPath
+}
+
+func (w *dgutaWriter) SetUpdatedAt(updatedAt time.Time) {
+	w.updatedAt = updatedAt
+}
+
+func (w *dgutaWriter) Add(dguta db.RecordDGUTA) error {
+	if w.writeErr != nil {
+		return w.writeErr
+	}
+
+	if err := w.ensureMetadataPersisted(); err != nil {
+		return err
+	}
+
+	w.writeBatch = append(w.writeBatch, dguta)
+	if len(w.writeBatch) >= w.batchSize {
+		w.storeBatch()
+		w.writeBatch = w.writeBatch[:0]
+	}
+
+	return w.writeErr
+}
+
+func (w *dgutaWriter) ensureMetadataPersisted() error {
+	if w.metaDone {
+		return nil
+	}
+
+	if err := w.validateMetadata(); err != nil {
+		return err
+	}
+
+	if err := persistMetaBoth(w.dgutaDB, w.childrenDB, w.mountPath, w.updatedAt); err != nil {
+		return err
+	}
+
+	w.metaDone = true
+
+	return nil
+}
+
+func persistMetaBoth(dgutaDB, childrenDB *bolt.DB, mountPath string, updatedAt time.Time) error {
+	if err := persistMeta(dgutaDB, mountPath, updatedAt); err != nil {
+		return err
+	}
+
+	return persistMeta(childrenDB, mountPath, updatedAt)
+}
+
+func (w *dgutaWriter) validateMetadata() error {
+	if w.mountPath == "" || w.updatedAt.IsZero() {
+		return ErrMetadataNotSet
+	}
+
+	if w.mountPath[0] != '/' || w.mountPath[len(w.mountPath)-1] != '/' {
+		return ErrInvalidMountPath
+	}
+
+	return nil
+}
+
+func (w *dgutaWriter) storeBatch() {
+	if w.writeErr != nil || len(w.writeBatch) == 0 {
+		return
+	}
+
+	if err := w.childrenDB.Update(w.storeChildren); err != nil {
+		w.writeErr = err
+
+		return
+	}
+
+	if err := w.dgutaDB.Update(w.storeDGUTAs); err != nil {
+		w.writeErr = err
+
+		return
+	}
+}
+
+func (w *dgutaWriter) storeChildren(tx *bolt.Tx) error {
+	b := tx.Bucket([]byte(childrenBucketName))
+
+	for _, r := range w.writeBatch {
+		if len(r.Children) == 0 {
+			continue
+		}
+
+		parent := string(r.Dir.AppendTo(nil))
+
+		children := make([]string, len(r.Children))
+		for i := range r.Children {
+			children[i] = parent + strings.TrimSuffix(r.Children[i], "/")
+		}
+
+		if err := b.Put(r.Dir.AppendTo(nil), w.encodeChildren(children)); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (w *dgutaWriter) storeDGUTAs(tx *bolt.Tx) error {
+	b := tx.Bucket([]byte(dgutaBucketName))
+
+	for _, r := range w.writeBatch {
+		k, v := r.EncodeToBytes()
+		if err := b.Put(k, v); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (w *dgutaWriter) encodeChildren(children []string) []byte {
+	var encoded []byte
+
+	enc := codec.NewEncoderBytes(&encoded, w.codecHandle)
+	enc.MustEncode(children)
+
+	return encoded
+}
+
+func (w *dgutaWriter) Close() error {
+	if len(w.writeBatch) > 0 {
+		w.storeBatch()
+		w.writeBatch = w.writeBatch[:0]
+	}
+
+	var closeErr error
+
+	if w.childrenDB != nil {
+		if err := w.childrenDB.Close(); err != nil {
+			closeErr = errors.Join(closeErr, err)
+		}
+	}
+
+	if w.dgutaDB != nil {
+		if err := w.dgutaDB.Close(); err != nil {
+			closeErr = errors.Join(closeErr, err)
+		}
+	}
+
+	if w.writeErr != nil {
+		closeErr = errors.Join(closeErr, w.writeErr)
+	}
+
+	return closeErr
+}
+
+// NewDGUTAWriter creates a db.DGUTAWriter backed by Bolt.
+// outputDir is the directory where dguta.db and dguta.db.children will be
+// created. The directory must already exist.
+// Returns db.ErrDBExists if the database files already exist.
+func NewDGUTAWriter(outputDir string) (db.DGUTAWriter, error) {
+	if err := validateOutputDir(outputDir); err != nil {
+		return nil, err
+	}
+
+	dgutaDB, childrenDB, err := openDGUTAWriterDBs(outputDir)
+	if err != nil {
+		return nil, err
+	}
+
+	return newDGUTAWriterFromDBs(outputDir, dgutaDB, childrenDB), nil
+}
+
+func validateOutputDir(outputDir string) error {
+	fi, err := os.Stat(outputDir)
+	if err != nil {
+		return err
+	}
+
+	if !fi.IsDir() {
+		return ErrOutputDirInvalid
+	}
+
+	return nil
+}
+
+func openDGUTAWriterDBs(outputDir string) (*bolt.DB, *bolt.DB, error) {
+	dgutaPath := filepath.Join(outputDir, dgutaDBBasename)
+	childrenPath := filepath.Join(outputDir, childrenDBBasename)
+
+	if pathExists(dgutaPath) || pathExists(childrenPath) {
+		return nil, nil, db.ErrDBExists
+	}
+
+	dgutaDB, err := openBoltWritable(dgutaPath, dgutaBucketName)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	childrenDB, err := openBoltWritable(childrenPath, childrenBucketName)
+	if err != nil {
+		_ = dgutaDB.Close()
+
+		return nil, nil, err
+	}
+
+	return dgutaDB, childrenDB, nil
+}
+
+func pathExists(path string) bool {
+	info, err := os.Stat(path)
+
+	return err == nil && info.Size() > 0
+}
+
+func openBoltWritable(path, bucket string) (*bolt.DB, error) {
+	db, err := bolt.Open(path, boltFilePerms, &bolt.Options{
+		NoFreelistSync: true,
+		NoGrowSync:     true,
+		FreelistType:   bolt.FreelistMapType,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	err = db.Update(func(tx *bolt.Tx) error {
+		if _, errc := tx.CreateBucketIfNotExists([]byte(bucket)); errc != nil {
+			return errc
+		}
+
+		_, errc := tx.CreateBucketIfNotExists([]byte(metaBucketName))
+
+		return errc
+	})
+	if err != nil {
+		_ = db.Close()
+
+		return nil, err
+	}
+
+	return db, nil
+}
+
+func persistMeta(db *bolt.DB, mountPath string, updatedAt time.Time) error {
+	if db == nil {
+		return fmt.Errorf("nil db: %w", ErrInvalidConfig)
+	}
+
+	return db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte(metaBucketName))
+		if b == nil {
+			return ErrMetaBucketMissing
+		}
+
+		if err := b.Put([]byte(metaKeyMountPath), []byte(mountPath)); err != nil {
+			return err
+		}
+
+		sec := updatedAt.Unix()
+		if sec < 0 {
+			return ErrInvalidUpdatedAt
+		}
+
+		buf := make([]byte, unixSecondsBytesLen)
+		binary.LittleEndian.PutUint64(buf, uint64(sec))
+
+		return b.Put([]byte(metaKeyUpdatedAt), buf)
+	})
+}

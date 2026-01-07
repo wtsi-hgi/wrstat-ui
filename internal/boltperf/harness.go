@@ -1,3 +1,29 @@
+/*******************************************************************************
+ * Copyright (c) 2026 Genome Research Ltd.
+ *
+ * Authors:
+ *   Sendu Bala <sb10@sanger.ac.uk>
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining
+ * a copy of this software and associated documentation files (the
+ * "Software"), to deal in the Software without restriction, including
+ * without limitation the rights to use, copy, modify, merge, publish,
+ * distribute, sublicense, and/or sell copies of the Software, and to
+ * permit persons to whom the Software is furnished to do so, subject to
+ * the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included
+ * in all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+ * IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+ * CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+ * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+ * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ ******************************************************************************/
+
 package boltperf
 
 import (
@@ -12,16 +38,19 @@ import (
 
 	"github.com/klauspost/pgzip"
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
+	"github.com/wtsi-hgi/wrstat-ui/datasets"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 	"github.com/wtsi-hgi/wrstat-ui/internal/split"
 	"github.com/wtsi-hgi/wrstat-ui/internal/summariseutil"
-	"github.com/wtsi-hgi/wrstat-ui/server"
 	"github.com/wtsi-hgi/wrstat-ui/stats"
 	"github.com/wtsi-hgi/wrstat-ui/summary"
+	sbasedirs "github.com/wtsi-hgi/wrstat-ui/summary/basedirs"
+	dirguta "github.com/wtsi-hgi/wrstat-ui/summary/dirguta"
 )
 
 const (
-	defaultDirPerm = 0o755
+	defaultDirPerm       = 0o755
+	summariseDBBatchSize = 10000
 
 	dgutaDBsSuffix    = "dguta.dbs"
 	basedirsBasename  = "basedirs.db"
@@ -38,6 +67,14 @@ var (
 	ErrUnknownBackend = errors.New("unknown backend")
 	// ErrNoDatasets indicates no matching dataset directories were discovered.
 	ErrNoDatasets = errors.New("no datasets found")
+	// ErrNewBaseDirsStoreRequired indicates the import options must supply NewBaseDirsStore.
+	ErrNewBaseDirsStoreRequired = errors.New("NewBaseDirsStore is required")
+	// ErrNewDGUTAWriterRequired indicates the import options must supply NewDGUTAWriter.
+	ErrNewDGUTAWriterRequired = errors.New("NewDGUTAWriter is required")
+	// ErrOpenDatabaseRequired indicates the query options must supply OpenDatabase.
+	ErrOpenDatabaseRequired = errors.New("OpenDatabase is required")
+	// ErrOpenMultiBaseDirsReaderRequired indicates the query options must supply OpenMultiBaseDirsReader.
+	ErrOpenMultiBaseDirsReaderRequired = errors.New("OpenMultiBaseDirsReader is required")
 )
 
 // PrintfFunc matches fmt.Printf-style output and is used by the harness
@@ -87,7 +124,7 @@ func validateBackend(backend string) error {
 }
 
 func findDatasetDirs(baseDir string, required ...string) ([]string, error) {
-	dirs, err := server.FindDBDirs(baseDir, required...)
+	dirs, err := datasets.FindLatestDatasetDirs(baseDir, required...)
 	if err != nil {
 		return nil, err
 	}
@@ -236,19 +273,152 @@ func addSummarisers(
 	modtime time.Time,
 	opts ImportOptions,
 ) (func() error, error) {
-	if err := summariseutil.AddBasedirsSummariser(
-		ss,
-		targets.basedirsDBPath,
-		"",
-		opts.Quota,
-		opts.Config,
-		opts.Mounts,
-		modtime,
-	); err != nil {
+	store, err := addBasedirsSummariser(ss, targets.basedirsDBPath, modtime, opts)
+	if err != nil {
 		return nil, err
 	}
 
-	return summariseutil.AddDirgutaSummariser(ss, targets.dgutaDBDir)
+	writer, err := addDGUTASummariser(ss, targets.dgutaDBDir, modtime, opts)
+	if err != nil {
+		_ = store.Close()
+
+		return nil, err
+	}
+
+	return func() error {
+		return errors.Join(store.Close(), writer.Close())
+	}, nil
+}
+
+func addBasedirsSummariser(
+	ss *summary.Summariser,
+	basedirsDBPath string,
+	modtime time.Time,
+	opts ImportOptions,
+) (basedirs.Store, error) {
+	store, bd, shouldOutput, err := buildBasedirsSummariser(basedirsDBPath, modtime, opts)
+	if err != nil {
+		return nil, err
+	}
+
+	ss.AddDirectoryOperation(sbasedirs.NewBaseDirs(shouldOutput, bd))
+
+	return store, nil
+}
+
+func buildBasedirsSummariser(
+	basedirsDBPath string,
+	modtime time.Time,
+	opts ImportOptions,
+) (basedirs.Store, *basedirs.BaseDirs, func(*summary.DirectoryPath) bool, error) {
+	quotas, shouldOutput, mps, err := parseBasedirsInputs(opts)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	store, err := openBasedirsStoreForImport(basedirsDBPath, modtime, opts)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	bd, err := createBaseDirsCreatorForImport(store, quotas, mps, modtime)
+	if err != nil {
+		_ = store.Close()
+
+		return nil, nil, nil, err
+	}
+
+	return store, bd, shouldOutput, nil
+}
+
+func parseBasedirsInputs(
+	opts ImportOptions,
+) (*basedirs.Quotas, func(*summary.DirectoryPath) bool, []string, error) {
+	quotas, config, err := summariseutil.ParseBasedirConfig(opts.Quota, opts.Config)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	mps, err := summariseutil.ParseMountpointsFromFile(opts.Mounts)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	return quotas, config.PathShouldOutput, mps, nil
+}
+
+func openBasedirsStoreForImport(basedirsDBPath string, modtime time.Time, opts ImportOptions) (basedirs.Store, error) {
+	if opts.NewBaseDirsStore == nil {
+		return nil, ErrNewBaseDirsStoreRequired
+	}
+
+	removeErr := os.Remove(basedirsDBPath)
+	if removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+		return nil, removeErr
+	}
+
+	store, err := opts.NewBaseDirsStore(basedirsDBPath, "")
+	if err != nil {
+		return nil, err
+	}
+
+	mountPath := summariseutil.DeriveMountPathFromOutputDir(basedirsDBPath)
+	store.SetMountPath(mountPath)
+	store.SetUpdatedAt(modtime)
+
+	return store, nil
+}
+
+func createBaseDirsCreatorForImport(
+	store basedirs.Store,
+	quotas *basedirs.Quotas,
+	mountpoints []string,
+	modtime time.Time,
+) (*basedirs.BaseDirs, error) {
+	bd, err := basedirs.NewCreator(store, quotas)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(mountpoints) > 0 {
+		bd.SetMountPoints(mountpoints)
+	}
+
+	bd.SetModTime(modtime)
+
+	return bd, nil
+}
+
+func addDGUTASummariser(
+	ss *summary.Summariser,
+	dgutaDBDir string,
+	modtime time.Time,
+	opts ImportOptions,
+) (db.DGUTAWriter, error) {
+	if opts.NewDGUTAWriter == nil {
+		return nil, ErrNewDGUTAWriterRequired
+	}
+
+	removeErr := os.RemoveAll(dgutaDBDir)
+	if removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+		return nil, removeErr
+	}
+
+	if mkErr := os.MkdirAll(dgutaDBDir, defaultDirPerm); mkErr != nil {
+		return nil, mkErr
+	}
+
+	writer, err := opts.NewDGUTAWriter(dgutaDBDir)
+	if err != nil {
+		return nil, err
+	}
+
+	writer.SetMountPath(summariseutil.DeriveMountPathFromOutputDir(dgutaDBDir))
+	writer.SetUpdatedAt(modtime)
+	writer.SetBatchSize(summariseDBBatchSize)
+	ss.AddDirectoryOperation(dirguta.NewDirGroupUserTypeAge(writer))
+
+	return writer, nil
 }
 
 // Query runs the in-process query timing harness against Bolt DBs discovered
@@ -293,14 +463,14 @@ func buildQueryContext(inputDir string, opts QueryOptions, printf PrintfFunc) (q
 		return queryContext{}, err
 	}
 
-	queryDir := resolveQueryDir(datasetDir, mountPath, opts.Dir)
-	if strings.TrimSpace(opts.Dir) == "" {
-		printf("query: auto-selected dir=%s\n", queryDir)
-	}
-
-	tree, mr, closeFn, err := openQueryDBs(datasetDir, opts.Owners)
+	tree, mr, closeFn, err := openQueryDBs(opts, datasetDir, opts.Owners)
 	if err != nil {
 		return queryContext{}, err
+	}
+
+	queryDir := resolveQueryDir(tree, mountPath, opts.Dir)
+	if strings.TrimSpace(opts.Dir) == "" {
+		printf("query: auto-selected dir=%s\n", queryDir)
 	}
 
 	prepErr := prepareMultiReader(mr, opts.Mounts)
@@ -323,13 +493,53 @@ func buildQueryContext(inputDir string, opts QueryOptions, printf PrintfFunc) (q
 	}, nil
 }
 
-func resolveQueryDir(datasetDir, mountPath, override string) string {
+func openQueryDBs(
+	opts QueryOptions,
+	datasetDir string,
+	ownersPath string,
+) (*db.Tree, basedirs.Reader, func() error, error) {
+	if opts.OpenDatabase == nil {
+		return nil, nil, nil, ErrOpenDatabaseRequired
+	}
+
+	if opts.OpenMultiBaseDirsReader == nil {
+		return nil, nil, nil, ErrOpenMultiBaseDirsReaderRequired
+	}
+
+	dgutaPath := filepath.Join(datasetDir, dgutaDBsSuffix)
+	basedirsPath := filepath.Join(datasetDir, basedirsBasename)
+
+	database, err := opts.OpenDatabase(dgutaPath)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	tree := db.NewTree(database)
+
+	mr, err := opts.OpenMultiBaseDirsReader(ownersPath, basedirsPath)
+	if err != nil {
+		tree.Close()
+
+		return nil, nil, nil, err
+	}
+
+	closeFn := func() error {
+		err := mr.Close()
+		tree.Close()
+
+		return err
+	}
+
+	return tree, mr, closeFn, nil
+}
+
+func resolveQueryDir(tree *db.Tree, mountPath, override string) string {
 	queryDir := normaliseDirPath(override)
 	if queryDir != "" {
 		return queryDir
 	}
 
-	return pickRepresentativeDir(datasetDir, mountPath)
+	return pickRepresentativeDirFromTree(tree, mountPath)
 }
 
 func normaliseDirPath(dir string) string {
@@ -349,14 +559,7 @@ func normaliseDirPath(dir string) string {
 	return d
 }
 
-func pickRepresentativeDir(datasetDir, mountPath string) string {
-	tree, err := db.NewTree(filepath.Join(datasetDir, dgutaDBsSuffix))
-	if err != nil {
-		return mountPath
-	}
-
-	defer tree.Close()
-
+func pickRepresentativeDirFromTree(tree *db.Tree, mountPath string) string {
 	filter := &db.Filter{Age: db.DGUTAgeAll}
 	current := mountPath
 
@@ -406,33 +609,7 @@ func pickLargestChild(children []*db.DirSummary) *db.DirSummary {
 	return best
 }
 
-func openQueryDBs(datasetDir string, ownersPath string) (*db.Tree, basedirs.MultiReader, func() error, error) {
-	dgutaPath := filepath.Join(datasetDir, dgutaDBsSuffix)
-	basedirsPath := filepath.Join(datasetDir, basedirsBasename)
-
-	tree, err := db.NewTree(dgutaPath)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-
-	mr, err := basedirs.OpenMulti(ownersPath, basedirsPath)
-	if err != nil {
-		tree.Close()
-
-		return nil, nil, nil, err
-	}
-
-	closeFn := func() error {
-		err := mr.Close()
-		tree.Close()
-
-		return err
-	}
-
-	return tree, mr, closeFn, nil
-}
-
-func prepareMultiReader(mr basedirs.MultiReader, mountsPath string) error {
+func prepareMultiReader(mr basedirs.Reader, mountsPath string) error {
 	if mountsPath == "" {
 		return prewarmBasedirsCaches(mr)
 	}
@@ -449,7 +626,7 @@ func prepareMultiReader(mr basedirs.MultiReader, mountsPath string) error {
 	return prewarmBasedirsCaches(mr)
 }
 
-func prewarmBasedirsCaches(mr basedirs.MultiReader) error {
+func prewarmBasedirsCaches(mr basedirs.Reader) error {
 	for _, age := range db.DirGUTAges {
 		if _, err := mr.GroupUsage(age); err != nil {
 			return err
@@ -475,7 +652,7 @@ func closeAndJoinErr(closeFn func() error, err error) error {
 	return err
 }
 
-func pickRepresentativeIDs(mr basedirs.MultiReader, fallbackDir string) (queryIDs, error) {
+func pickRepresentativeIDs(mr basedirs.Reader, fallbackDir string) (queryIDs, error) {
 	ids := queryIDs{groupBD: fallbackDir, userBD: fallbackDir}
 
 	groups, err := mr.GroupUsage(db.DGUTAgeAll)
@@ -710,6 +887,9 @@ type ImportOptions struct {
 	MaxLines int
 	Repeat   int
 	Warmup   int
+
+	NewDGUTAWriter   func(outputDir string) (db.DGUTAWriter, error)
+	NewBaseDirsStore func(dbPath, previousDBPath string) (basedirs.Store, error)
 }
 
 // QueryOptions configures the bolt-perf query harness.
@@ -723,6 +903,9 @@ type QueryOptions struct {
 	Repeat int
 	Warmup int
 	Splits int
+
+	OpenDatabase            func(paths ...string) (db.Database, error)
+	OpenMultiBaseDirsReader func(ownersPath string, dbPaths ...string) (basedirs.Reader, error)
 }
 
 type importSpec struct {
@@ -748,7 +931,7 @@ type queryIDs struct {
 type queryContext struct {
 	datasetDirs []string
 	tree        *db.Tree
-	mr          basedirs.MultiReader
+	mr          basedirs.Reader
 	closeFn     func() error
 	queryDir    string
 	ids         queryIDs

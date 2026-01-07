@@ -35,7 +35,6 @@ import (
 	"os/user"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -43,6 +42,7 @@ import (
 
 	. "github.com/smartystreets/goconvey/convey"
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
+	wrbolt "github.com/wtsi-hgi/wrstat-ui/bolt"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 	internaldata "github.com/wtsi-hgi/wrstat-ui/internal/data"
 	"github.com/wtsi-hgi/wrstat-ui/internal/fixtimes"
@@ -51,8 +51,49 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/stats"
 	"github.com/wtsi-hgi/wrstat-ui/summary"
 	sbasedirs "github.com/wtsi-hgi/wrstat-ui/summary/basedirs"
-	bolt "go.etcd.io/bbolt"
 )
+
+func TestCaches(t *testing.T) {
+	Convey("Given a GroupCache, accessing it in multiple threads should be safe.", t, func() {
+		var wg sync.WaitGroup
+
+		g := basedirs.NewGroupCache()
+
+		wg.Add(2)
+
+		go func() {
+			g.GroupName(0)
+			wg.Done()
+		}()
+
+		go func() {
+			g.GroupName(0)
+			wg.Done()
+		}()
+
+		wg.Wait()
+	})
+
+	Convey("Given a UserCache, accessing it in multiple threads should be safe.", t, func() {
+		var wg sync.WaitGroup
+
+		u := basedirs.NewUserCache()
+
+		wg.Add(2)
+
+		go func() {
+			u.UserName(0)
+			wg.Done()
+		}()
+
+		go func() {
+			u.UserName(0)
+			wg.Done()
+		}()
+
+		wg.Wait()
+	})
+}
 
 func TestBaseDirs(t *testing.T) {
 	const (
@@ -140,23 +181,57 @@ func TestBaseDirs(t *testing.T) {
 		So(err, ShouldBeNil)
 
 		dir := t.TempDir()
-		dbPath := filepath.Join(dir, "basedir.db")
+		dbPath123 := filepath.Join(dir, "basedirs_123.db")
+		dbPath125 := filepath.Join(dir, "basedirs_125.db")
+
+		pathShouldOutputForMount := func(mountPrefix string) func(*summary.DirectoryPath) bool {
+			return func(p *summary.DirectoryPath) bool {
+				if !defaultConfig.PathShouldOutput(p) {
+					return false
+				}
+
+				full := string(p.AppendTo(nil))
+
+				return strings.HasPrefix(full, mountPrefix)
+			}
+		}
 
 		basedirsCreator := func(modtime time.Time) {
 			t.Helper()
 
-			bd, errr := basedirs.NewCreator(dbPath, quotas)
-			So(errr, ShouldBeNil)
-			So(bd, ShouldNotBeNil)
+			for _, cfg := range []struct {
+				mountPath string
+				dbPath    string
+			}{
+				{mountPath: "/lustre/scratch123/", dbPath: dbPath123},
+				{mountPath: "/lustre/scratch125/", dbPath: dbPath125},
+			} {
+				previousDBPath := ""
+				if _, statErr := os.Stat(cfg.dbPath); statErr == nil {
+					previousDBPath = cfg.dbPath
+				}
 
-			bd.SetMountPoints(mps)
-			bd.SetModTime(modtime)
+				newDBPath := cfg.dbPath + ".new"
+				store, errr := wrbolt.NewBaseDirsStore(newDBPath, previousDBPath)
+				So(errr, ShouldBeNil)
+				store.SetMountPath(cfg.mountPath)
+				store.SetUpdatedAt(modtime)
+				So(store.Reset(), ShouldBeNil)
 
-			s := summary.NewSummariser(stats.NewStatsParser(root.AsReader()))
-			s.AddDirectoryOperation(sbasedirs.NewBaseDirs(defaultConfig.PathShouldOutput, bd))
+				bd, errr := basedirs.NewCreator(store, quotas)
+				So(errr, ShouldBeNil)
+				So(bd, ShouldNotBeNil)
+				bd.SetMountPoints([]string{cfg.mountPath})
+				bd.SetModTime(modtime)
 
-			errr = s.Summarise()
-			So(errr, ShouldBeNil)
+				s := summary.NewSummariser(stats.NewStatsParser(root.AsReader()))
+				s.AddDirectoryOperation(sbasedirs.NewBaseDirs(pathShouldOutputForMount(cfg.mountPath), bd))
+
+				errr = s.Summarise()
+				So(errr, ShouldBeNil)
+				So(store.Close(), ShouldBeNil)
+				So(os.Rename(newDBPath, cfg.dbPath), ShouldBeNil)
+			}
 		}
 
 		basedirsCreator(yesterday)
@@ -164,20 +239,20 @@ func TestBaseDirs(t *testing.T) {
 		_ = expectedAgeAtime2
 
 		Convey("With which you can store group and user summary info in a database", func() {
-			_, err = os.Stat(dbPath)
+			_, err = os.Stat(dbPath123)
+			So(err, ShouldBeNil)
+			_, err = os.Stat(dbPath125)
 			So(err, ShouldBeNil)
 
 			ownersPath, err := internaldata.CreateOwnersCSV(t, internaldata.ExampleOwnersCSV)
 			So(err, ShouldBeNil)
 
-			baseDirsReader := func() *basedirs.BaseDirReader {
+			baseDirsReader := func() basedirs.Reader {
 				t.Helper()
 
-				bdr, errr := basedirs.NewReader(dbPath, ownersPath)
+				bdr, errr := wrbolt.OpenMultiBaseDirsReader(ownersPath, dbPath123, dbPath125)
 				So(errr, ShouldBeNil)
-
 				bdr.SetMountPoints(mps)
-
 				return bdr
 			}
 
@@ -186,8 +261,10 @@ func TestBaseDirs(t *testing.T) {
 			Convey("and then read the database", func() {
 				bdr.SetCachedGroup(1, "group1")
 				bdr.SetCachedGroup(2, "group2")
+				bdr.SetCachedGroup(gid, groupName)
 				bdr.SetCachedUser(101, "user101")
 				bdr.SetCachedUser(102, "user102")
+				bdr.SetCachedUser(uid, username)
 
 				expectedMtime := fixtimes.FixTime(time.Unix(50, 0))
 				expectedMtimeA := fixtimes.FixTime(time.Unix(100, 0))
@@ -195,6 +272,7 @@ func TestBaseDirs(t *testing.T) {
 				Convey("getting group and user usage info", func() {
 					mainTable, errr := bdr.GroupUsage(db.DGUTAgeAll)
 					fixUsageTimes(mainTable)
+					sortByDatabaseKeyOrder(mainTable)
 
 					expectedUsageTable := []*basedirs.Usage{ //nolint:dupl
 						{
@@ -237,6 +315,7 @@ func TestBaseDirs(t *testing.T) {
 
 					mainTable, errr = bdr.GroupUsage(db.DGUTAgeA3Y)
 					fixUsageTimes(mainTable)
+					sortByDatabaseKeyOrder(mainTable)
 
 					expectedUsageTable = []*basedirs.Usage{ //nolint:dupl
 						{
@@ -283,6 +362,7 @@ func TestBaseDirs(t *testing.T) {
 
 					mainTable, errr = bdr.GroupUsage(db.DGUTAgeA7Y)
 					fixUsageTimes(mainTable)
+					sortByDatabaseKeyOrder(mainTable)
 
 					expectedUsageTable = []*basedirs.Usage{ //nolint:dupl
 						{
@@ -324,6 +404,7 @@ func TestBaseDirs(t *testing.T) {
 
 					mainTable, errr = bdr.UserUsage(db.DGUTAgeAll)
 					fixUsageTimes(mainTable)
+					sortByDatabaseKeyOrder(mainTable)
 
 					expectedMainTable := []*basedirs.Usage{ //nolint:dupl
 						{
@@ -452,27 +533,27 @@ func TestBaseDirs(t *testing.T) {
 						So(err, ShouldBeNil)
 					})
 
-					Convey("you can copy the History to another database", func() {
-						db, errr := basedirs.OpenDBRO(dbPath)
-						So(errr, ShouldBeNil)
-
+					Convey("you can seed the History into another database", func() {
 						tmpDir := t.TempDir()
 						newDB := filepath.Join(tmpDir, "basedirs")
 
-						bd, errr := basedirs.NewCreator(newDB, quotas)
+						store, errr := wrbolt.NewBaseDirsStore(newDB, dbPath125)
+						So(errr, ShouldBeNil)
+						store.SetMountPath("/lustre/scratch125/")
+						store.SetUpdatedAt(yesterday)
+						So(store.Reset(), ShouldBeNil)
+						So(store.Finalise(), ShouldBeNil)
+						So(store.Close(), ShouldBeNil)
+
+						r, errr := wrbolt.OpenBaseDirsReader(newDB, ownersPath)
 						So(errr, ShouldBeNil)
 
-						err = bd.CopyHistoryFrom(db)
-						So(err, ShouldBeNil)
+						defer r.Close()
 
-						bdr, err = basedirs.NewReader(newDB, ownersPath)
-						So(err, ShouldBeNil)
+						r.SetMountPoints(mps)
 
-						bdr.SetMountPoints(mps)
-
-						history, errr := bdr.History(1, projectA)
+						history, errr := r.History(1, projectA)
 						fixHistoryTimes(history)
-
 						So(errr, ShouldBeNil)
 						So(len(history), ShouldEqual, 1)
 						So(history, ShouldResemble, []basedirs.History{expectedAHistory})
@@ -504,12 +585,15 @@ func TestBaseDirs(t *testing.T) {
 
 						bdr.SetCachedGroup(1, "group1")
 						bdr.SetCachedGroup(2, "group2")
+						bdr.SetCachedGroup(gid, groupName)
 						bdr.SetCachedUser(101, "user101")
 						bdr.SetCachedUser(102, "user102")
+						bdr.SetCachedUser(uid, username)
 
 						mainTable, errr := bdr.GroupUsage(db.DGUTAgeAll)
 						So(errr, ShouldBeNil)
 						fixUsageTimes(mainTable)
+						sortByDatabaseKeyOrder(mainTable)
 
 						leeway := 5 * time.Minute
 
@@ -785,365 +869,10 @@ func TestBaseDirs(t *testing.T) {
 					})
 				})
 
-				joinWithNewLines := func(rows ...string) string {
-					return strings.Join(rows, "\n") + "\n"
-				}
-
-				joinWithTabs := func(cols ...string) string {
-					return strings.Join(cols, "\t")
-				}
-
-				daysSince := func(mtime time.Time) uint64 {
-					return uint64(time.Since(mtime) / (time.Hour * 24)) //nolint:gosec
-				}
-
-				daysSinceString := func(mtime time.Time) string {
-					return strconv.FormatUint(daysSince(mtime), 10)
-				}
-
-				expectedDaysSince := daysSinceString(expectedMtime)
-				expectedAgeDaysSince := daysSinceString(expectedFixedAgeMtime)
-
-				Convey("getting weaver-like output for group base-dirs", func() {
-					wbo, errr := bdr.GroupUsageTable(db.DGUTAgeAll)
-					So(errr, ShouldBeNil)
-
-					groupsToID := make(map[string]uint32)
-
-					for gid, name := range bdr.IterCachedGroups() {
-						groupsToID[name] = gid
-					}
-
-					rowsData := [][]string{
-						{
-							"group1",
-							"Alan",
-							projectA,
-							expectedDaysSince,
-							"2684354560",
-							"4000000000",
-							"2",
-							"20",
-							basedirs.QuotaStatusOK,
-						},
-						{
-							groupName,
-							"",
-							projectD,
-							expectedDaysSince,
-							"15",
-							"0",
-							"5",
-							"0",
-							basedirs.QuotaStatusNotOK,
-						},
-						{
-							"group2",
-							"Barbara",
-							projectC1,
-							expectedDaysSince,
-							"40",
-							"400",
-							"1",
-							"40",
-							basedirs.QuotaStatusOK,
-						},
-						{
-							"group2",
-							"Barbara",
-							projectB123,
-							expectedDaysSince,
-							"30",
-							"400",
-							"1",
-							"40",
-							basedirs.QuotaStatusOK,
-						},
-						{
-							"group2",
-							"Barbara",
-							projectB125,
-							expectedDaysSince,
-							"20",
-							"300",
-							"1",
-							"30",
-							basedirs.QuotaStatusOK,
-						},
-						{
-							ageGroupName,
-							"",
-							projectA,
-							expectedAgeDaysSince,
-							"100",
-							"300",
-							"2",
-							"30",
-							basedirs.QuotaStatusOK,
-						},
-						{
-							"77777",
-							"",
-							user2,
-							expectedDaysSince,
-							"60",
-							"500",
-							"1",
-							"50",
-							basedirs.QuotaStatusOK,
-						},
-					}
-
-					sort.Slice(rowsData, func(i, j int) bool {
-						iIDbs := idToByteSlice(groupsToID[rowsData[i][0]])
-						jIDbs := idToByteSlice(groupsToID[rowsData[j][0]])
-						comparison := bytes.Compare(iIDbs, jIDbs)
-
-						return comparison == -1
-					})
-
-					rows := make([]string, len(rowsData))
-					for n, r := range rowsData {
-						rows[n] = joinWithTabs(r...)
-					}
-
-					So(wbo, ShouldEqual, joinWithNewLines(rows...))
-				})
-
-				Convey("getting weaver-like output for user base-dirs", func() {
-					wbo, errr := bdr.UserUsageTable(db.DGUTAgeAll)
-					So(errr, ShouldBeNil)
-
-					groupsToID := make(map[string]uint32)
-
-					for uid, name := range bdr.IterCachedUsers() {
-						groupsToID[name] = uid
-					}
-
-					rowsData := [][]string{
-						{
-							ageUserName,
-							"",
-							projectA,
-							expectedAgeDaysSince,
-							"100",
-							"0",
-							"2",
-							"0",
-							basedirs.QuotaStatusOK,
-						},
-						{
-							"user101",
-							"",
-							projectA,
-							expectedDaysSince,
-							"2684354560",
-							"0",
-							"2",
-							"0",
-							basedirs.QuotaStatusOK,
-						},
-						{
-							"user102",
-							"",
-							projectB123,
-							expectedDaysSince,
-							"30",
-							"0",
-							"1",
-							"0",
-							basedirs.QuotaStatusOK,
-						},
-						{
-							"user102",
-							"",
-							projectB125,
-							expectedDaysSince,
-							"20",
-							"0",
-							"1",
-							"0",
-							basedirs.QuotaStatusOK,
-						},
-						{
-							"user102",
-							"",
-							user2,
-							expectedDaysSince,
-							"60",
-							"0",
-							"1",
-							"0",
-							basedirs.QuotaStatusOK,
-						},
-						{
-							"88888",
-							"",
-							projectC1,
-							expectedDaysSince,
-							"40",
-							"0",
-							"1",
-							"0",
-							basedirs.QuotaStatusOK,
-						},
-						{
-							username,
-							"",
-							projectD,
-							expectedDaysSince,
-							"15",
-							"0",
-							"5",
-							"0",
-							basedirs.QuotaStatusOK,
-						},
-					}
-
-					sort.Slice(rowsData, func(i, j int) bool {
-						iIDbs := idToByteSlice(groupsToID[rowsData[i][0]])
-						jIDbs := idToByteSlice(groupsToID[rowsData[j][0]])
-						comparison := bytes.Compare(iIDbs, jIDbs)
-
-						return comparison == -1
-					})
-
-					rows := make([]string, len(rowsData))
-					for n, r := range rowsData {
-						rows[n] = joinWithTabs(r...)
-					}
-
-					So(wbo, ShouldEqual, joinWithNewLines(rows...))
-				})
-
-				expectedProjectASubDirUsage := joinWithNewLines(
-					joinWithTabs(
-						projectA,
-						".",
-						"1",
-						"536870912",
-						expectedDaysSince,
-						"bam: 0.50",
-					),
-					joinWithTabs(
-						projectA,
-						"sub",
-						"1",
-						"2147483648",
-						expectedDaysSince,
-						"bam: 2.00",
-					),
-				)
-
-				Convey("getting weaver-like output for group sub-dirs", func() {
-					unknown, errr := bdr.GroupSubDirUsageTable(1, "unknown", db.DGUTAgeAll)
-					So(errr, ShouldBeNil)
-					So(unknown, ShouldBeEmpty)
-
-					badgroup, errr := bdr.GroupSubDirUsageTable(999, projectA, db.DGUTAgeAll)
-					So(errr, ShouldBeNil)
-					So(badgroup, ShouldBeEmpty)
-
-					wso, errr := bdr.GroupSubDirUsageTable(1, projectA, db.DGUTAgeAll)
-					So(errr, ShouldBeNil)
-					So(wso, ShouldEqual, expectedProjectASubDirUsage)
-				})
-
-				Convey("getting weaver-like output for user sub-dirs", func() {
-					unknown, errr := bdr.UserSubDirUsageTable(1, "unknown", db.DGUTAgeAll)
-					So(errr, ShouldBeNil)
-					So(unknown, ShouldBeEmpty)
-
-					badgroup, errr := bdr.UserSubDirUsageTable(999, projectA, db.DGUTAgeAll)
-					So(errr, ShouldBeNil)
-					So(badgroup, ShouldBeEmpty)
-
-					wso, errr := bdr.UserSubDirUsageTable(101, projectA, db.DGUTAgeAll)
-					So(errr, ShouldBeNil)
-					So(wso, ShouldEqual, expectedProjectASubDirUsage)
-				})
-			})
-
-			Convey("and merge with another database", func() {
-				_, root = internaldata.FakeFilesForDGUTADBForBasedirsTesting(gid, uid, "nfs", 1, 10, 11, true, refTime)
-				oldPath := dbPath
-				newPath := filepath.Join(dir, "newdir.db")
-				oldMPs := mps
-				mps = []string{
-					"/nfs/scratch123/",
-					"/nfs/scratch125/",
-				}
-
-				dbPath = newPath
-
-				basedirsCreator(yesterday)
-
-				bdr = baseDirsReader()
-				dbPath = oldPath
-				mps = oldMPs
-
-				outputDBPath := filepath.Join(dir, "merged.db")
-
-				err = basedirs.MergeDBs(oldPath, newPath, outputDBPath)
-				So(err, ShouldBeNil)
-
-				db, err := basedirs.OpenDBRO(outputDBPath)
-
-				So(err, ShouldBeNil)
-
-				defer db.Close()
-
-				countKeys := func(bucket string) (int, int) {
-					lustreKeys, nfsKeys := 0, 0
-
-					db.View(func(tx *bolt.Tx) error { //nolint:errcheck
-						bucket := tx.Bucket([]byte(bucket))
-
-						return bucket.ForEach(func(k, _ []byte) error {
-							if !basedirs.CheckAgeOfKeyIsAll(k) {
-								return nil
-							}
-
-							if strings.Contains(string(k), "/lustre/") {
-								lustreKeys++
-							}
-
-							if strings.Contains(string(k), "/nfs/") {
-								nfsKeys++
-							}
-
-							return nil
-						})
-					})
-
-					return lustreKeys, nfsKeys
-				}
-
-				expectedKeys := 7
-
-				lustreKeys, nfsKeys := countKeys(basedirs.GroupUsageBucket)
-				So(lustreKeys, ShouldEqual, expectedKeys)
-				So(nfsKeys, ShouldEqual, expectedKeys)
-
-				lustreKeys, nfsKeys = countKeys(basedirs.GroupHistoricalBucket)
-				So(lustreKeys, ShouldEqual, 6)
-				So(nfsKeys, ShouldEqual, 6)
-
-				lustreKeys, nfsKeys = countKeys(basedirs.GroupSubDirsBucket)
-				So(lustreKeys, ShouldEqual, expectedKeys)
-				So(nfsKeys, ShouldEqual, expectedKeys)
-
-				lustreKeys, nfsKeys = countKeys(basedirs.UserUsageBucket)
-				So(lustreKeys, ShouldEqual, expectedKeys)
-				So(nfsKeys, ShouldEqual, expectedKeys)
-
-				lustreKeys, nfsKeys = countKeys(basedirs.UserSubDirsBucket)
-				So(lustreKeys, ShouldEqual, expectedKeys)
-				So(nfsKeys, ShouldEqual, expectedKeys)
 			})
 
 			Convey("and get basic info about it", func() {
-				info, err := basedirs.Info(dbPath)
+				info, err := bdr.Info()
 				So(err, ShouldBeNil)
 				So(info, ShouldResemble, &basedirs.DBInfo{
 					GroupDirCombos:    7,
@@ -1160,48 +889,6 @@ func TestBaseDirs(t *testing.T) {
 	})
 }
 
-func TestCaches(t *testing.T) {
-	Convey("Given a GroupCache, accessing it in multiple threads should be safe.", t, func() {
-		var wg sync.WaitGroup
-
-		g := basedirs.NewGroupCache()
-
-		wg.Add(2)
-
-		go func() {
-			g.GroupName(0)
-			wg.Done()
-		}()
-
-		go func() {
-			g.GroupName(0)
-			wg.Done()
-		}()
-
-		wg.Wait()
-	})
-
-	Convey("Given a UserCache, accessing it in multiple threads should be safe.", t, func() {
-		var wg sync.WaitGroup
-
-		u := basedirs.NewUserCache()
-
-		wg.Add(2)
-
-		go func() {
-			u.UserName(0)
-			wg.Done()
-		}()
-
-		go func() {
-			u.UserName(0)
-			wg.Done()
-		}()
-
-		wg.Wait()
-	})
-}
-
 func fixUsageTimes(mt []*basedirs.Usage) {
 	for _, u := range mt {
 		u.Mtime = fixtimes.FixTime(u.Mtime)
@@ -1213,19 +900,11 @@ func fixUsageTimes(mt []*basedirs.Usage) {
 	}
 }
 
-func fixHistoryTimes(history []basedirs.History) {
-	for n := range history {
-		history[n].Date = fixtimes.FixTime(history[n].Date)
-	}
-}
-
-func fixSubDirTimes(sds []*basedirs.SubDir) {
-	for n := range sds {
-		sds[n].LastModified = fixtimes.FixTime(sds[n].LastModified)
-	}
-}
-
 func sortByDatabaseKeyOrder(usageTable []*basedirs.Usage) []*basedirs.Usage {
+	if len(usageTable) == 0 {
+		return usageTable
+	}
+
 	if usageTable[0].UID != 0 {
 		sortByUID(usageTable)
 
@@ -1237,11 +916,18 @@ func sortByDatabaseKeyOrder(usageTable []*basedirs.Usage) []*basedirs.Usage {
 	return usageTable
 }
 
-func idToByteSlice(id uint32) []byte {
-	bs := make([]byte, 4)
-	binary.LittleEndian.PutUint32(bs, id)
+func sortByUID(usageTable []*basedirs.Usage) {
+	sort.Slice(usageTable, func(i, j int) bool {
+		iID := idToByteSlice(usageTable[i].UID)
+		jID := idToByteSlice(usageTable[j].UID)
 
-	return bs
+		comparison := bytes.Compare(iID, jID)
+		if comparison != 0 {
+			return comparison == -1
+		}
+
+		return usageTable[i].BaseDir < usageTable[j].BaseDir
+	})
 }
 
 func sortByGID(usageTable []*basedirs.Usage) {
@@ -1249,17 +935,29 @@ func sortByGID(usageTable []*basedirs.Usage) {
 		iID := idToByteSlice(usageTable[i].GID)
 		jID := idToByteSlice(usageTable[j].GID)
 		comparison := bytes.Compare(iID, jID)
+		if comparison != 0 {
+			return comparison == -1
+		}
 
-		return comparison == -1
+		return usageTable[i].BaseDir < usageTable[j].BaseDir
 	})
 }
 
-func sortByUID(usageTable []*basedirs.Usage) {
-	sort.Slice(usageTable, func(i, j int) bool {
-		iID := idToByteSlice(usageTable[i].UID)
-		jID := idToByteSlice(usageTable[j].UID)
-		comparison := bytes.Compare(iID, jID)
+func fixHistoryTimes(history []basedirs.History) {
+	for n := range history {
+		history[n].Date = fixtimes.FixTime(history[n].Date)
+	}
+}
 
-		return comparison == -1
-	})
+func idToByteSlice(id uint32) []byte {
+	bs := make([]byte, 4)
+	binary.LittleEndian.PutUint32(bs, id)
+
+	return bs
+}
+
+func fixSubDirTimes(sds []*basedirs.SubDir) {
+	for n := range sds {
+		sds[n].LastModified = fixtimes.FixTime(sds[n].LastModified)
+	}
 }

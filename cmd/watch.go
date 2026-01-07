@@ -70,21 +70,28 @@ subcommand and will be passed along to it.
 	},
 }
 
+var (
+	errWatchNeedInput        = errors.New("at least 1 input directory should be provided")
+	errWatchNoOutput         = errors.New("no output files specified")
+	errWatchNoQuota          = errors.New("no quota file specified")
+	errWatchNoBasedirsConfig = errors.New("no basedirs config file specified")
+)
+
 func checkWatchArgs(args []string) error {
 	if len(args) < 1 {
-		return errors.New("at least 1 input directory should be provided") //nolint:err113
+		return errWatchNeedInput
 	}
 
 	if defaultDir == "" {
-		return errors.New("no output files specified") //nolint:err113
+		return errWatchNoOutput
 	}
 
 	if quotaPath == "" {
-		return errors.New("no quota file specified") //nolint:err113
+		return errWatchNoQuota
 	}
 
 	if basedirsConfig == "" {
-		return errors.New("no basedirs config file specified") //nolint:err113
+		return errWatchNoBasedirsConfig
 	}
 
 	return nil

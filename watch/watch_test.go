@@ -43,6 +43,8 @@ import (
 	gas "github.com/wtsi-hgi/go-authserver"
 )
 
+var errTimedOut = errors.New("timed out")
+
 func TestWatch(t *testing.T) {
 	Convey("Given the expected setup", t, func() {
 		inputDir := t.TempDir()
@@ -296,7 +298,6 @@ func TestWatch(t *testing.T) {
 			logger := log15.New()
 
 			errCh := make(chan error, 1)
-			errTimedOut := errors.New("timed out") //nolint:err113
 
 			connectTimeout = time.Second
 

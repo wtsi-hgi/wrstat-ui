@@ -40,6 +40,7 @@ import (
 	gas "github.com/wtsi-hgi/go-authserver"
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
 	"github.com/wtsi-hgi/wrstat-ui/db"
+	"github.com/wtsi-hgi/wrstat-ui/provider"
 )
 
 //go:embed static
@@ -116,7 +117,8 @@ type Server struct {
 	gas.Server
 
 	mu             sync.RWMutex
-	basedirs       basedirs.MultiReader
+	provider       provider.Provider
+	basedirs       basedirs.Reader
 	tree           *db.Tree
 	whiteCB        WhiteListCallback
 	uidToNameCache map[uint32]string
@@ -159,9 +161,11 @@ func (s *Server) stop() {
 
 	close(s.stopCh)
 
-	if s.tree != nil {
-		s.tree.Close()
+	if s.provider != nil {
+		_ = s.provider.Close()
+		s.provider = nil
 		s.tree = nil
+		s.basedirs = nil
 	}
 
 	if s.analyticsDB != nil {
@@ -172,7 +176,7 @@ func (s *Server) stop() {
 // prewarmCaches precomputes the group and user usage caches. It serialises
 // usage data into JSON and gzip. so serveGzippedCache can serve quickly.
 // Returns an error if any cache build fails.
-func (s *Server) prewarmCaches(bd basedirs.MultiReader) error {
+func (s *Server) prewarmCaches(bd basedirs.Reader) error {
 	if err := s.buildCache(bd.GroupUsage, &s.groupUsageCache); err != nil {
 		return err
 	}

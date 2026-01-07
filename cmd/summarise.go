@@ -29,6 +29,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -36,11 +37,20 @@ import (
 
 	"github.com/klauspost/pgzip"
 	"github.com/spf13/cobra"
+	"github.com/wtsi-hgi/wrstat-ui/basedirs"
+	"github.com/wtsi-hgi/wrstat-ui/bolt"
 	"github.com/wtsi-hgi/wrstat-ui/internal/summariseutil"
 	"github.com/wtsi-hgi/wrstat-ui/stats"
 	"github.com/wtsi-hgi/wrstat-ui/summary"
+	sbasedirs "github.com/wtsi-hgi/wrstat-ui/summary/basedirs"
+	dirguta "github.com/wtsi-hgi/wrstat-ui/summary/dirguta"
 	"github.com/wtsi-hgi/wrstat-ui/summary/groupuser"
 	"github.com/wtsi-hgi/wrstat-ui/summary/usergroup"
+)
+
+const (
+	summariseDBBatchSize = 10000
+	summariseDirPerm     = 0o755
 )
 
 var (
@@ -54,6 +64,11 @@ var (
 	quotaPath      string
 	basedirsConfig string
 	mounts         string
+)
+
+var (
+	errSummariseExactlyOneInput = errors.New("exactly 1 input file should be provided")
+	errSummariseNoOutput        = errors.New("no output files specified")
 )
 
 // summariseCmd represents the stat command.
@@ -157,6 +172,81 @@ func wrapCompressed(wc *os.File) io.WriteCloser {
 	}
 }
 
+func addBasedirsSummariser(s *summary.Summariser, basedirsDB, basedirsHistoryDB,
+	quotaPath, basedirsConfig, mountpoints string, modtime time.Time) (func() error, error) {
+	quotas, config, err := summariseutil.ParseBasedirConfig(quotaPath, basedirsConfig)
+	if err != nil {
+		return nil, err
+	}
+
+	if err = removeIfExists(basedirsDB); err != nil {
+		return nil, err
+	}
+
+	mps, err := summariseutil.ParseMountpointsFromFile(mountpoints)
+	if err != nil {
+		return nil, err
+	}
+
+	store, err := createBasedirsStore(basedirsDB, basedirsHistoryDB, modtime)
+	if err != nil {
+		return nil, err
+	}
+
+	bd, err := configureBaseDirsCreator(store, quotas, mps, modtime)
+	if err != nil {
+		_ = store.Close()
+
+		return nil, err
+	}
+
+	s.AddDirectoryOperation(sbasedirs.NewBaseDirs(config.PathShouldOutput, bd))
+
+	return store.Close, nil
+}
+
+func removeIfExists(path string) error {
+	err := os.Remove(path)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+
+	return nil
+}
+
+func createBasedirsStore(basedirsDB, basedirsHistoryDB string, modtime time.Time) (basedirs.Store, error) {
+	store, err := bolt.NewBaseDirsStore(basedirsDB, basedirsHistoryDB)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create basedirs store: %w", err)
+	}
+
+	mountPath := summariseutil.DeriveMountPathFromOutputDir(basedirsDB)
+	store.SetMountPath(mountPath)
+	store.SetUpdatedAt(modtime)
+
+	return store, nil
+}
+
+func configureBaseDirsCreator(
+	store basedirs.Store,
+	quotas *basedirs.Quotas,
+	mountpoints []string,
+	modtime time.Time,
+) (*basedirs.BaseDirs, error) {
+	bd, err := basedirs.NewCreator(store, quotas)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create new basedirs creator: %w", err)
+	}
+
+	if len(mountpoints) > 0 {
+		bd.SetMountPoints(mountpoints)
+	}
+
+	bd.SetModTime(modtime)
+
+	return bd, nil
+}
+
 func run(args []string) (err error) {
 	if err = checkArgs(args); err != nil {
 		return err
@@ -186,11 +276,11 @@ func run(args []string) (err error) {
 
 func checkArgs(args []string) error {
 	if len(args) != 1 {
-		return errors.New("exactly 1 input file should be provided") //nolint:err113
+		return errSummariseExactlyOneInput
 	}
 
 	if defaultDir == "" && userGroup == "" && groupUser == "" && basedirsDB == "" && dirgutaDB == "" {
-		return errors.New("no output files specified") //nolint:err113
+		return errSummariseNoOutput
 	}
 
 	return nil
@@ -246,6 +336,8 @@ func setArgsDefaults() {
 
 func setSummarisers(s *summary.Summariser, mountpoints string, //nolint:gocognit,gocyclo
 	modtime time.Time) (func() error, error) {
+	var closers []func() error
+
 	if userGroup != "" {
 		if err := addUserGroupSummariser(s, userGroup); err != nil {
 			return nil, err
@@ -259,17 +351,45 @@ func setSummarisers(s *summary.Summariser, mountpoints string, //nolint:gocognit
 	}
 
 	if basedirsDB != "" {
-		if err := addBasedirsSummariser(s, basedirsDB, basedirsHistoryDB,
-			quotaPath, basedirsConfig, mountpoints, modtime); err != nil {
+		c, err := addBasedirsSummariser(s, basedirsDB, basedirsHistoryDB,
+			quotaPath, basedirsConfig, mountpoints, modtime)
+		if err != nil {
 			return nil, err
+		}
+
+		if c != nil {
+			closers = append(closers, c)
 		}
 	}
 
 	if dirgutaDB != "" {
-		return addDirgutaSummariser(s, dirgutaDB)
+		c, err := addDirgutaSummariser(s, dirgutaDB, modtime)
+		if err != nil {
+			return nil, err
+		}
+
+		if c != nil {
+			closers = append(closers, c)
+		}
 	}
 
-	return nil, nil //nolint:nilnil
+	if len(closers) == 0 {
+		return nil, nil //nolint:nilnil
+	}
+
+	return func() error {
+		var err error
+
+		for _, c := range closers {
+			if c == nil {
+				continue
+			}
+
+			err = errors.Join(err, c())
+		}
+
+		return err
+	}, nil
 }
 
 func addUserGroupSummariser(s *summary.Summariser, userGroup string) error {
@@ -294,19 +414,28 @@ func addGroupUserSummariser(s *summary.Summariser, groupUser string) error {
 	return nil
 }
 
-func addBasedirsSummariser(s *summary.Summariser, basedirsDB, basedirsHistoryDB,
-	quotaPath, basedirsConfig, mountpoints string, modtime time.Time) error {
-	return summariseutil.AddBasedirsSummariser(
-		s,
-		basedirsDB,
-		basedirsHistoryDB,
-		quotaPath,
-		basedirsConfig,
-		mountpoints,
-		modtime,
-	)
-}
+func addDirgutaSummariser(s *summary.Summariser, dirgutaDB string,
+	modtime time.Time) (func() error, error) {
+	if err := os.RemoveAll(dirgutaDB); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return nil, err
+	}
 
-func addDirgutaSummariser(s *summary.Summariser, dirgutaDB string) (func() error, error) {
-	return summariseutil.AddDirgutaSummariser(s, dirgutaDB)
+	if err := os.MkdirAll(dirgutaDB, summariseDirPerm); err != nil {
+		return nil, err
+	}
+
+	writer, err := bolt.NewDGUTAWriter(dirgutaDB)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create dguta writer: %w", err)
+	}
+
+	mountPath := summariseutil.DeriveMountPathFromOutputDir(dirgutaDB)
+
+	writer.SetMountPath(mountPath)
+	writer.SetUpdatedAt(modtime)
+	writer.SetBatchSize(summariseDBBatchSize)
+
+	s.AddDirectoryOperation(dirguta.NewDirGroupUserTypeAge(writer))
+
+	return writer.Close, nil
 }

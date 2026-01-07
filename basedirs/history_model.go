@@ -1,9 +1,8 @@
 /*******************************************************************************
- * Copyright (c) 2023 Genome Research Ltd.
+ * Copyright (c) 2026 Genome Research Ltd.
  *
  * Authors:
  *   Sendu Bala <sb10@sanger.ac.uk>
- *   Michael Woolnough <mw31@sanger.ac.uk>
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -34,8 +33,6 @@ import (
 	"time"
 
 	"github.com/moby/sys/mountinfo"
-	db "github.com/wtsi-hgi/wrstat-ui/db"
-	bolt "go.etcd.io/bbolt"
 )
 
 var (
@@ -55,37 +52,6 @@ type History struct {
 	QuotaInodes uint64
 }
 
-// History returns a slice of History values for the given gid and path, one
-// value per Date the information was calculated.
-func (b *BaseDirReader) History(gid uint32, path string) ([]History, error) {
-	mp := b.mountPoints.prefixOf(path)
-	if mp == "" {
-		return nil, ErrInvalidBasePath
-	}
-
-	var history []History
-
-	if err := b.db.View(func(tx *bolt.Tx) error {
-		bucket := tx.Bucket([]byte(GroupHistoricalBucket))
-		key := historyKey(gid, mp)
-
-		data := bucket.Get(key)
-		if data == nil {
-			return ErrNoBaseDirHistory
-		}
-
-		return b.decodeFromBytes(data, &history)
-	}); err != nil {
-		return nil, err
-	}
-
-	return history, nil
-}
-
-func historyKey(gid uint32, mountPoint string) []byte {
-	return keyName(gid, mountPoint, db.DGUTAgeAll)
-}
-
 // DateQuotaFull returns our estimate of when the quota will fill based on the
 // history of usage over time. Returns date when size full, and date when inodes
 // full.
@@ -94,10 +60,12 @@ func historyKey(gid uint32, mountPoint string) []byte {
 func DateQuotaFull(history []History) (time.Time, time.Time) {
 	var oldest History
 
+	const maxShortHistory = 2
+
 	switch len(history) {
 	case 0:
 		return time.Time{}, time.Time{}
-	case 1, 2: //nolint:mnd
+	case 1, maxShortHistory:
 		oldest = history[0]
 	default:
 		oldest = history[len(history)-3]
@@ -124,7 +92,6 @@ func calculateTrend(maxV uint64, latestTime, oldestTime time.Time, latestValue, 
 	oldestSecs := float64(oldestTime.Unix())
 
 	dt := latestSecs - oldestSecs
-
 	dy := float64(latestValue - oldestValue)
 
 	c := float64(latestValue) - latestSecs*dy/dt
@@ -140,10 +107,13 @@ func calculateTrend(maxV uint64, latestTime, oldestTime time.Time, latestValue, 
 	return t
 }
 
-type mountPoints []string
+// MountPoints is a list of mountpoint paths, sorted by descending length.
+// Paths are normalised to end with '/'.
+type MountPoints []string
 
-func validateMountPoints(mountpoints []string) mountPoints {
-	mps := make(mountPoints, len(mountpoints))
+// ValidateMountPoints normalises mountpoints and sorts them for longest-prefix matching.
+func ValidateMountPoints(mountpoints []string) MountPoints {
+	mps := make(MountPoints, len(mountpoints))
 
 	for n, mp := range mountpoints {
 		if !strings.HasSuffix(mp, "/") {
@@ -158,13 +128,14 @@ func validateMountPoints(mountpoints []string) mountPoints {
 	return mps
 }
 
-func getMountPoints() (mountPoints, error) {
+// GetMountPoints returns mountpoints auto-discovered from the OS.
+func GetMountPoints() (MountPoints, error) {
 	mounts, err := mountinfo.GetMounts(nil)
 	if err != nil {
 		return nil, err
 	}
 
-	mountList := make(mountPoints, len(mounts))
+	mountList := make(MountPoints, len(mounts))
 
 	for n, mp := range mounts {
 		if !strings.HasSuffix(mp.Mountpoint, "/") {
@@ -181,7 +152,8 @@ func getMountPoints() (mountPoints, error) {
 	return mountList, nil
 }
 
-func (m mountPoints) prefixOf(basedir string) string {
+// PrefixOf returns the longest mountpoint that prefixes basedir.
+func (m MountPoints) PrefixOf(basedir string) string {
 	if !strings.HasSuffix(basedir, "/") {
 		basedir += "/"
 	}
@@ -193,38 +165,4 @@ func (m mountPoints) prefixOf(basedir string) string {
 	}
 
 	return ""
-}
-
-// SetMountPoints can be used to manually set your mountpoints, if the automatic
-// discovery of mountpoints on your system doesn't work.
-func (b *BaseDirReader) SetMountPoints(mountpoints []string) {
-	b.mountPoints = validateMountPoints(mountpoints)
-}
-
-func (b *BaseDirs) CopyHistoryFrom(db *bolt.DB) (err error) {
-	bd, err := openDB(b.dbPath)
-	if err != nil {
-		return err
-	}
-
-	defer func() {
-		if errr := bd.Close(); err == nil {
-			err = errr
-		}
-	}()
-
-	return bd.Update(func(dest *bolt.Tx) error {
-		key := []byte(GroupHistoricalBucket)
-
-		bucket, err := dest.CreateBucketIfNotExists(key)
-		if err != nil {
-			return err
-		}
-
-		return db.View(func(source *bolt.Tx) error {
-			return source.Bucket(key).ForEach(func(k, v []byte) error {
-				return bucket.Put(k, v)
-			})
-		})
-	})
 }

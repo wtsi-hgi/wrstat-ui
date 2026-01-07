@@ -43,10 +43,12 @@ import (
 	"github.com/VertebrateResequencing/wr/jobqueue/scheduler"
 	. "github.com/smartystreets/goconvey/convey"
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
+	"github.com/wtsi-hgi/wrstat-ui/bolt"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 	internaldata "github.com/wtsi-hgi/wrstat-ui/internal/data"
 	"github.com/wtsi-hgi/wrstat-ui/internal/statsdata"
 	internaluser "github.com/wtsi-hgi/wrstat-ui/internal/user"
+	"github.com/wtsi-hgi/wrstat-ui/summary"
 )
 
 const app = "wrstat-ui_test"
@@ -155,7 +157,12 @@ func TestSummarise(t *testing.T) {
 
 		So(os.Chtimes(inputA, yesterday, yesterday), ShouldBeNil)
 
-		_, _, _, err = runWRStat("summarise", "-d", outputA, "-q", quotaFile, "-c", basedirsConfig, "-m", mounts, inputA)
+		stdout, stderr, _, err := runWRStat("summarise", "-d", outputA, "-q", quotaFile,
+			"-c", basedirsConfig, "-m", mounts, inputA)
+		if err != nil {
+			t.Logf("stdout: %s", stdout)
+			t.Logf("stderr: %s", stderr)
+		}
 		So(err, ShouldBeNil)
 
 		compareFileContents(t, filepath.Join(outputA, "bygroup"), sortLines(fmt.Sprintf("%[1]s\t%[2]s\t2\t2684354560\n"+
@@ -223,7 +230,7 @@ func TestSummarise(t *testing.T) {
 				internaluser.GetUsername(t, strconv.Itoa(int(uid))), internaluser.GetGroupName(t, strconv.Itoa(int(gid))),
 				internaluser.GetUsername(t, "102"), internaluser.GetGroupName(t, "77777"))))
 
-		bddb, err := basedirs.NewReader(filepath.Join(outputA, "basedirs.db"), ownersPath)
+		bddb, err := bolt.OpenBaseDirsReader(filepath.Join(outputA, "basedirs.db"), ownersPath)
 		So(err, ShouldBeNil)
 
 		bddb.SetMountPoints([]string{
@@ -242,8 +249,10 @@ func TestSummarise(t *testing.T) {
 
 		bddb.Close()
 
-		tree, err := db.NewTree(filepath.Join(outputA, "dguta.dbs"))
+		database, err := bolt.OpenDatabase(filepath.Join(outputA, "dguta.dbs"))
 		So(err, ShouldBeNil)
+
+		tree := db.NewTree(database)
 
 		childrenExist := tree.DirHasChildren("/", nil)
 		So(childrenExist, ShouldBeTrue)
@@ -266,7 +275,7 @@ func TestSummarise(t *testing.T) {
 			"-d", outputB, "-q", quotaFile, "-c", basedirsConfig, "-m", mounts, inputB)
 		So(err, ShouldBeNil)
 
-		bddb, err = basedirs.NewReader(filepath.Join(outputB, "basedirs.db"), ownersPath)
+		bddb, err = bolt.OpenBaseDirsReader(filepath.Join(outputB, "basedirs.db"), ownersPath)
 		So(err, ShouldBeNil)
 
 		bddb.SetMountPoints([]string{
@@ -324,9 +333,11 @@ func TestBoltPerf(t *testing.T) {
 		metaDir := t.TempDir()
 		quotaFile := filepath.Join(metaDir, "quota.csv")
 		basedirsConfig := filepath.Join(metaDir, "basedirs.config")
+		mountsFile := filepath.Join(metaDir, "mounts.txt")
 
 		So(os.WriteFile(quotaFile, []byte(""), 0600), ShouldBeNil)
 		So(os.WriteFile(basedirsConfig, []byte("\t1\t1\n"), 0600), ShouldBeNil)
+		So(os.WriteFile(mountsFile, []byte("\"/lustre\"\n\"/\"\n"), 0600), ShouldBeNil)
 
 		ownersPath, err := internaldata.CreateOwnersCSV(t, internaldata.ExampleOwnersCSV)
 		So(err, ShouldBeNil)
@@ -335,7 +346,7 @@ func TestBoltPerf(t *testing.T) {
 		importJSON := filepath.Join(metaDir, "bolt_import.json")
 		queryJSON := filepath.Join(metaDir, "bolt_query.json")
 
-		_, _, _, err = runWRStat(
+		stdout, stderr, _, err := runWRStat(
 			"bolt-perf",
 			"import",
 			statsInputDir,
@@ -345,17 +356,23 @@ func TestBoltPerf(t *testing.T) {
 			quotaFile,
 			"--config",
 			basedirsConfig,
+			"--mounts",
+			mountsFile,
 			"--owners",
 			ownersPath,
 			"--json",
 			importJSON,
 		)
-		So(err, ShouldBeNil)
+		if err != nil {
+			t.Fatalf("bolt-perf import failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+		}
 
 		_, _, _, err = runWRStat(
 			"bolt-perf",
 			"query",
 			boltOutDir,
+			"--mounts",
+			mountsFile,
 			"--owners",
 			ownersPath,
 			"--dir",
@@ -427,6 +444,115 @@ func TestBoltPerf(t *testing.T) {
 			"basedirs_history",
 		})
 		So(report.GitCommit, ShouldNotBeNil)
+
+		Convey("bolt-perf can run in bolt_interfaces mode", func() {
+			boltOutDir2 := t.TempDir()
+			importJSON2 := filepath.Join(metaDir, "bolt_import_interfaces.json")
+			queryJSON2 := filepath.Join(metaDir, "bolt_query_interfaces.json")
+
+			stdout, stderr, _, err := runWRStat(
+				"bolt-perf",
+				"import",
+				statsInputDir,
+				"--backend",
+				"bolt_interfaces",
+				"--out",
+				boltOutDir2,
+				"--quota",
+				quotaFile,
+				"--config",
+				basedirsConfig,
+				"--mounts",
+				mountsFile,
+				"--owners",
+				ownersPath,
+				"--json",
+				importJSON2,
+			)
+			if err != nil {
+				t.Fatalf("bolt-perf import (bolt_interfaces) failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+			}
+
+			_, _, _, err = runWRStat(
+				"bolt-perf",
+				"query",
+				boltOutDir2,
+				"--backend",
+				"bolt_interfaces",
+				"--mounts",
+				mountsFile,
+				"--owners",
+				ownersPath,
+				"--dir",
+				"/lustre/",
+				"--repeat",
+				"2",
+				"--warmup",
+				"0",
+				"--splits",
+				"2",
+				"--json",
+				queryJSON2,
+			)
+			So(err, ShouldBeNil)
+
+			data, err := os.ReadFile(queryJSON2)
+			So(err, ShouldBeNil)
+
+			var report2 struct {
+				SchemaVersion int    `json:"schema_version"`
+				Backend       string `json:"backend"`
+				GitCommit     string `json:"git_commit"`
+				GoVersion     string `json:"go_version"`
+				OS            string `json:"os"`
+				Arch          string `json:"arch"`
+				StartedAt     string `json:"started_at"`
+				InputDir      string `json:"input_dir"`
+				Repeat        int    `json:"repeat"`
+				Warmup        int    `json:"warmup"`
+				Operations    []struct {
+					Name        string                 `json:"name"`
+					Inputs      map[string]any         `json:"inputs"`
+					DurationsMS []float64              `json:"durations_ms"`
+					P50MS       float64                `json:"p50_ms"`
+					P95MS       float64                `json:"p95_ms"`
+					P99MS       float64                `json:"p99_ms"`
+					Extra       map[string]interface{} `json:"-"`
+				} `json:"operations"`
+			}
+
+			dec := json.NewDecoder(strings.NewReader(string(data)))
+			dec.DisallowUnknownFields()
+			So(dec.Decode(&report2), ShouldBeNil)
+
+			So(report2.SchemaVersion, ShouldEqual, 1)
+			So(report2.Backend, ShouldEqual, "bolt_interfaces")
+			So(report2.GoVersion, ShouldNotBeBlank)
+			So(report2.OS, ShouldNotBeBlank)
+			So(report2.Arch, ShouldNotBeBlank)
+			So(report2.StartedAt, ShouldNotBeBlank)
+			So(report2.InputDir, ShouldEqual, boltOutDir2)
+			So(report2.Repeat, ShouldEqual, 2)
+			So(report2.Warmup, ShouldEqual, 0)
+
+			opNames2 := make([]string, 0, len(report2.Operations))
+			for _, op := range report2.Operations {
+				opNames2 = append(opNames2, op.Name)
+				So(len(op.DurationsMS), ShouldEqual, 2)
+			}
+
+			So(opNames2, ShouldResemble, []string{
+				"mount_timestamps",
+				"tree_dirinfo",
+				"tree_where",
+				"basedirs_group_usage",
+				"basedirs_user_usage",
+				"basedirs_group_subdirs",
+				"basedirs_user_subdirs",
+				"basedirs_history",
+			})
+			So(report2.GitCommit, ShouldNotBeNil)
+		})
 	})
 }
 
@@ -572,6 +698,61 @@ Size: 101
 	"/mount/A/someDir/big_files/4"
 "/mount/B/anotherDir/big_files/2"
 `)
+	})
+}
+
+func TestDBInfo(t *testing.T) {
+	Convey("dbinfo prints the correct information", t, func() {
+		// Setup temp dir
+		tmpDir := t.TempDir()
+		mountKey := "mount"
+		datasetDir := filepath.Join(tmpDir, "1_"+mountKey)
+		err := os.MkdirAll(datasetDir, 0755)
+		So(err, ShouldBeNil)
+
+		// Create DGUTA DB
+		dgutaPath := filepath.Join(datasetDir, "dguta.dbs")
+		err = os.MkdirAll(dgutaPath, 0755)
+		So(err, ShouldBeNil)
+
+		w, err := bolt.NewDGUTAWriter(dgutaPath)
+		So(err, ShouldBeNil)
+		w.SetMountPath("/mount/")
+		w.SetUpdatedAt(time.Now())
+
+		dirPath := &summary.DirectoryPath{Name: "mount", Depth: 0}
+
+		err = w.Add(db.RecordDGUTA{
+			Dir: dirPath,
+			GUTAs: db.GUTAs{
+				{
+					GID: 1, UID: 1, FT: 1, Age: 0, Size: 100, Count: 1,
+				},
+			},
+		})
+		So(err, ShouldBeNil)
+		w.Close()
+
+		// Create Basedirs DB
+		basedirsPath := filepath.Join(datasetDir, "basedirs.db")
+		store, err := bolt.NewBaseDirsStore(basedirsPath, "")
+		So(err, ShouldBeNil)
+		store.SetMountPath("/mount/")
+		store.SetUpdatedAt(time.Now())
+		store.Close()
+
+		// Create dummy owners file
+		ownersPath := filepath.Join(tmpDir, "owners.csv")
+		err = os.WriteFile(ownersPath, []byte("1,owner1\n"), 0600)
+		So(err, ShouldBeNil)
+
+		// Run command
+		output, stderr, _, err := runWRStat("dbinfo", "--owners", ownersPath, tmpDir)
+		So(err, ShouldBeNil)
+		So(stderr, ShouldBeBlank)
+
+		So(output, ShouldContainSubstring, "Dirs: 1")
+		So(output, ShouldContainSubstring, "DGUTAs: 1")
 	})
 }
 
