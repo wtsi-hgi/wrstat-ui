@@ -224,15 +224,11 @@ func (p *boltProvider) runCallbackAndCleanup(cb func(), st *providerState, old *
 
 func (p *boltProvider) cleanupAfterCallback(st *providerState, old *providerState) {
 	if p.cfg.RemoveOldPaths && st != nil {
-		if err := removeDatasetDirs(p.cfg.BasePath, st.toDelete); err != nil {
-			_ = err
-		}
+		removeDatasetDirs(p.cfg.BasePath, st.toDelete) //nolint: errcheck
 	}
 
 	if old != nil {
-		if err := closeState(old); err != nil {
-			_ = err
-		}
+		closeState(old) //nolint: errcheck
 	}
 }
 

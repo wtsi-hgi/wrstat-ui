@@ -141,10 +141,6 @@ func openDGUTADatabase(paths []string) (*dgutaDatabase, error) {
 }
 
 func (d *dgutaDatabase) Close() error {
-	if d == nil {
-		return nil
-	}
-
 	var err error
 
 	for _, s := range d.sets {
