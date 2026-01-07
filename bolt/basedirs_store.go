@@ -45,10 +45,6 @@ var (
 	ErrDestHistoryBucketMissing = errors.New("dest history bucket missing")
 )
 
-type BucketMissingError string
-
-func (e BucketMissingError) Error() string { return "bucket missing: " + string(e) }
-
 const minHistoryKeyLen = 5
 
 func createInitialBuckets(tx *bolt.Tx) error {
@@ -69,6 +65,10 @@ func createInitialBuckets(tx *bolt.Tx) error {
 
 	return nil
 }
+
+type BucketMissingError string
+
+func (e BucketMissingError) Error() string { return "bucket missing: " + string(e) }
 
 type baseDirsStore struct {
 	db *bolt.DB

@@ -67,7 +67,7 @@ func TestProviderOnUpdateContract(t *testing.T) {
 			p.swapStateAndHandle(st, func() {
 				close(cbStarted)
 				<-cbRelease
-			}, old)
+			}, nil, old)
 			close(done)
 		}()
 
@@ -95,7 +95,7 @@ func TestProviderOnUpdateContract(t *testing.T) {
 			p.swapStateAndHandle(&providerState{}, func() {
 				close(firstStarted)
 				<-firstRelease
-			}, nil)
+			}, nil, nil)
 		}()
 
 		So(waitWithTimeout(firstStarted, 200*time.Millisecond), ShouldBeTrue)
@@ -103,7 +103,7 @@ func TestProviderOnUpdateContract(t *testing.T) {
 		go func() {
 			p.swapStateAndHandle(&providerState{}, func() {
 				close(secondStarted)
-			}, nil)
+			}, nil, nil)
 		}()
 
 		So(waitWithTimeout(secondStarted, 100*time.Millisecond), ShouldBeFalse)

@@ -92,6 +92,7 @@ type boltProvider struct {
 	mu    sync.RWMutex
 	state *providerState
 	cb    func()
+	errCb func(error)
 
 	stopCh chan struct{}
 	wg     sync.WaitGroup
@@ -125,6 +126,12 @@ func (p *boltProvider) BaseDirs() basedirs.Reader {
 func (p *boltProvider) OnUpdate(cb func()) {
 	p.mu.Lock()
 	p.cb = cb
+	p.mu.Unlock()
+}
+
+func (p *boltProvider) OnError(cb func(error)) {
+	p.mu.Lock()
+	p.errCb = cb
 	p.mu.Unlock()
 }
 
@@ -176,6 +183,7 @@ func (p *boltProvider) maybeReload() {
 	p.mu.RLock()
 	old := p.state
 	cb := p.cb
+	errCb := p.errCb
 	p.mu.RUnlock()
 
 	if old != nil && slices.Equal(old.datasetDirs, st.datasetDirs) {
@@ -187,20 +195,20 @@ func (p *boltProvider) maybeReload() {
 
 	// Swap state and handle post-swap actions via a helper to reduce the
 	// length and complexity of this function.
-	p.swapStateAndHandle(st, cb, old)
+	p.swapStateAndHandle(st, cb, errCb, old)
 }
 
-func (p *boltProvider) swapStateAndHandle(st *providerState, cb func(), old *providerState) {
+func (p *boltProvider) swapStateAndHandle(st *providerState, cb func(), errCb func(error), old *providerState) {
 	p.mu.Lock()
 	p.state = st
 	p.mu.Unlock()
 
-	p.runCallbackAndCleanup(cb, st, old)
+	p.runCallbackAndCleanup(cb, errCb, st, old)
 }
 
-func (p *boltProvider) runCallbackAndCleanup(cb func(), st *providerState, old *providerState) {
+func (p *boltProvider) runCallbackAndCleanup(cb func(), errCb func(error), st *providerState, old *providerState) {
 	cleanup := func() {
-		p.cleanupAfterCallback(st, old)
+		p.cleanupAfterCallback(errCb, st, old)
 	}
 
 	if cb == nil {
@@ -222,13 +230,17 @@ func (p *boltProvider) runCallbackAndCleanup(cb func(), st *providerState, old *
 	}()
 }
 
-func (p *boltProvider) cleanupAfterCallback(st *providerState, old *providerState) {
+func (p *boltProvider) cleanupAfterCallback(errCb func(error), st *providerState, old *providerState) {
 	if p.cfg.RemoveOldPaths && st != nil {
-		removeDatasetDirs(p.cfg.BasePath, st.toDelete) //nolint: errcheck
+		if err := removeDatasetDirs(p.cfg.BasePath, st.toDelete); err != nil {
+			p.reportError(errCb, err)
+		}
 	}
 
 	if old != nil {
-		closeState(old) //nolint: errcheck
+		if err := closeState(old); err != nil {
+			p.reportError(errCb, err)
+		}
 	}
 }
 
@@ -264,6 +276,14 @@ func closeState(st *providerState) error {
 	}
 
 	return err
+}
+
+func (p *boltProvider) reportError(errCb func(error), err error) {
+	if err == nil || errCb == nil {
+		return
+	}
+
+	errCb(err)
 }
 
 func (p *boltProvider) loadOnce() (*providerState, error) {

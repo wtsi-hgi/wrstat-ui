@@ -48,5 +48,6 @@ type Provider interface {
 	Tree() *db.Tree
 	BaseDirs() basedirs.Reader
 	OnUpdate(cb func())
+	OnError(cb func(error))
 	Close() error
 }

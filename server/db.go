@@ -103,6 +103,13 @@ func (s *Server) SetProvider(p provider.Provider) error {
 	}
 
 	p.OnUpdate(s.handleProviderUpdate)
+	p.OnError(func(err error) {
+		if err == nil {
+			return
+		}
+
+		s.Logger.Printf("provider error: %s", err)
+	})
 
 	return nil
 }

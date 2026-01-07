@@ -258,14 +258,16 @@ func fillUsageNamesAndOwners(
 }
 
 type testProvider struct {
-	tree *db.Tree
-	bd   basedirs.Reader
-	cb   func()
+	tree  *db.Tree
+	bd    basedirs.Reader
+	cb    func()
+	errCb func(error)
 }
 
 func (p *testProvider) Tree() *db.Tree            { return p.tree }
 func (p *testProvider) BaseDirs() basedirs.Reader { return p.bd }
 func (p *testProvider) OnUpdate(cb func())        { p.cb = cb }
+func (p *testProvider) OnError(cb func(error))    { p.errCb = cb }
 func (p *testProvider) Close() error {
 	if p.bd != nil {
 		_ = p.bd.Close()
