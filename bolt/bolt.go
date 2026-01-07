@@ -48,6 +48,7 @@ var (
 	ErrInvalidUpdatedAt  = errors.New("invalid updatedAt")
 	ErrNoBasedirsDBPaths = errors.New("no basedirs db paths provided")
 	ErrDBClosed          = errors.New("db closed")
+	ErrMetaBucketMissing = errors.New("meta bucket missing")
 )
 
 const (
@@ -376,7 +377,7 @@ func persistMeta(db *bolt.DB, mountPath string, updatedAt time.Time) error {
 	return db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte(metaBucketName))
 		if b == nil {
-			return errors.New("meta bucket missing") //nolint:err113
+			return ErrMetaBucketMissing
 		}
 
 		if err := b.Put([]byte(metaKeyMountPath), []byte(mountPath)); err != nil {

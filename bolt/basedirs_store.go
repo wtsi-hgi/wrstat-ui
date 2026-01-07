@@ -29,7 +29,6 @@ package bolt
 import (
 	"encoding/binary"
 	"errors"
-	"fmt"
 	"strings"
 	"time"
 
@@ -40,7 +39,15 @@ import (
 	berrors "go.etcd.io/bbolt/errors"
 )
 
-var errRequiredBucketsMissing = errors.New("required buckets missing")
+var (
+	ErrRequiredBucketsMissing   = errors.New("required buckets missing")
+	ErrStoreNotReset            = errors.New("store not reset")
+	ErrDestHistoryBucketMissing = errors.New("dest history bucket missing")
+)
+
+type BucketMissingError string
+
+func (e BucketMissingError) Error() string { return "bucket missing: " + string(e) }
 
 const minHistoryKeyLen = 5
 
@@ -155,12 +162,12 @@ func (s *baseDirsStore) validateResetPreconditions() error {
 
 func (s *baseDirsStore) PutGroupUsage(u *basedirs.Usage) error {
 	if s.tx == nil {
-		return errors.New("store not reset") //nolint:err113
+		return ErrStoreNotReset
 	}
 
 	b := s.tx.Bucket([]byte(basedirs.GroupUsageBucket))
 	if b == nil {
-		return fmt.Errorf("bucket missing: %s", basedirs.GroupUsageBucket) //nolint:err113
+		return BucketMissingError(basedirs.GroupUsageBucket)
 	}
 
 	return b.Put(basedirsKeyName(u.GID, u.BaseDir, u.Age), s.encode(u))
@@ -168,12 +175,12 @@ func (s *baseDirsStore) PutGroupUsage(u *basedirs.Usage) error {
 
 func (s *baseDirsStore) PutUserUsage(u *basedirs.Usage) error {
 	if s.tx == nil {
-		return errors.New("store not reset") //nolint:err113
+		return ErrStoreNotReset
 	}
 
 	b := s.tx.Bucket([]byte(basedirs.UserUsageBucket))
 	if b == nil {
-		return fmt.Errorf("bucket missing: %s", basedirs.UserUsageBucket) //nolint:err113
+		return BucketMissingError(basedirs.UserUsageBucket)
 	}
 
 	return b.Put(basedirsKeyName(u.UID, u.BaseDir, u.Age), s.encode(u))
@@ -181,12 +188,12 @@ func (s *baseDirsStore) PutUserUsage(u *basedirs.Usage) error {
 
 func (s *baseDirsStore) PutGroupSubDirs(key basedirs.SubDirKey, subdirs []*basedirs.SubDir) error {
 	if s.tx == nil {
-		return errors.New("store not reset") //nolint:err113
+		return ErrStoreNotReset
 	}
 
 	b := s.tx.Bucket([]byte(basedirs.GroupSubDirsBucket))
 	if b == nil {
-		return fmt.Errorf("bucket missing: %s", basedirs.GroupSubDirsBucket) //nolint:err113
+		return BucketMissingError(basedirs.GroupSubDirsBucket)
 	}
 
 	return b.Put(basedirsKeyName(key.ID, key.BaseDir, key.Age), s.encode(subdirs))
@@ -194,12 +201,12 @@ func (s *baseDirsStore) PutGroupSubDirs(key basedirs.SubDirKey, subdirs []*based
 
 func (s *baseDirsStore) PutUserSubDirs(key basedirs.SubDirKey, subdirs []*basedirs.SubDir) error {
 	if s.tx == nil {
-		return errors.New("store not reset") //nolint:err113
+		return ErrStoreNotReset
 	}
 
 	b := s.tx.Bucket([]byte(basedirs.UserSubDirsBucket))
 	if b == nil {
-		return fmt.Errorf("bucket missing: %s", basedirs.UserSubDirsBucket) //nolint:err113
+		return BucketMissingError(basedirs.UserSubDirsBucket)
 	}
 
 	return b.Put(basedirsKeyName(key.ID, key.BaseDir, key.Age), s.encode(subdirs))
@@ -207,12 +214,12 @@ func (s *baseDirsStore) PutUserSubDirs(key basedirs.SubDirKey, subdirs []*basedi
 
 func (s *baseDirsStore) AppendGroupHistory(key basedirs.HistoryKey, point basedirs.History) error {
 	if s.tx == nil {
-		return errors.New("store not reset") //nolint:err113
+		return ErrStoreNotReset
 	}
 
 	b := s.tx.Bucket([]byte(basedirs.GroupHistoricalBucket))
 	if b == nil {
-		return fmt.Errorf("bucket missing: %s", basedirs.GroupHistoricalBucket) //nolint:err113
+		return BucketMissingError(basedirs.GroupHistoricalBucket)
 	}
 
 	k := basedirsKeyName(key.GID, key.MountPath, db.DGUTAgeAll)
@@ -273,7 +280,7 @@ func (s *baseDirsStore) getFinaliseBuckets() (*bolt.Bucket, *bolt.Bucket, error)
 		rollbackErr := s.tx.Rollback()
 		s.tx = nil
 
-		return nil, nil, errors.Join(errRequiredBucketsMissing, rollbackErr)
+		return nil, nil, errors.Join(ErrRequiredBucketsMissing, rollbackErr)
 	}
 
 	return gub, ghb, nil
@@ -464,7 +471,7 @@ func seedBasedirsHistory(dest *bolt.DB, previousDBPath string) error {
 		return dest.Update(func(dtx *bolt.Tx) error {
 			db := dtx.Bucket([]byte(basedirs.GroupHistoricalBucket))
 			if db == nil {
-				return errors.New("dest history bucket missing") //nolint:err113
+				return ErrDestHistoryBucketMissing
 			}
 
 			return pb.ForEach(func(k, v []byte) error {

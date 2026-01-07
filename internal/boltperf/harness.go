@@ -67,6 +67,14 @@ var (
 	ErrUnknownBackend = errors.New("unknown backend")
 	// ErrNoDatasets indicates no matching dataset directories were discovered.
 	ErrNoDatasets = errors.New("no datasets found")
+	// ErrNewBaseDirsStoreRequired indicates the import options must supply NewBaseDirsStore.
+	ErrNewBaseDirsStoreRequired = errors.New("NewBaseDirsStore is required")
+	// ErrNewDGUTAWriterRequired indicates the import options must supply NewDGUTAWriter.
+	ErrNewDGUTAWriterRequired = errors.New("NewDGUTAWriter is required")
+	// ErrOpenDatabaseRequired indicates the query options must supply OpenDatabase.
+	ErrOpenDatabaseRequired = errors.New("OpenDatabase is required")
+	// ErrOpenMultiBaseDirsReaderRequired indicates the query options must supply OpenMultiBaseDirsReader.
+	ErrOpenMultiBaseDirsReaderRequired = errors.New("OpenMultiBaseDirsReader is required")
 )
 
 // PrintfFunc matches fmt.Printf-style output and is used by the harness
@@ -341,7 +349,7 @@ func parseBasedirsInputs(
 
 func openBasedirsStoreForImport(basedirsDBPath string, modtime time.Time, opts ImportOptions) (basedirs.Store, error) {
 	if opts.NewBaseDirsStore == nil {
-		return nil, errors.New("NewBaseDirsStore is required") //nolint:err113
+		return nil, ErrNewBaseDirsStoreRequired
 	}
 
 	removeErr := os.Remove(basedirsDBPath)
@@ -388,7 +396,7 @@ func addDGUTASummariser(
 	opts ImportOptions,
 ) (db.DGUTAWriter, error) {
 	if opts.NewDGUTAWriter == nil {
-		return nil, errors.New("NewDGUTAWriter is required") //nolint:err113
+		return nil, ErrNewDGUTAWriterRequired
 	}
 
 	removeErr := os.RemoveAll(dgutaDBDir)
@@ -491,11 +499,11 @@ func openQueryDBs(
 	ownersPath string,
 ) (*db.Tree, basedirs.Reader, func() error, error) {
 	if opts.OpenDatabase == nil {
-		return nil, nil, nil, errors.New("OpenDatabase is required") //nolint:err113
+		return nil, nil, nil, ErrOpenDatabaseRequired
 	}
 
 	if opts.OpenMultiBaseDirsReader == nil {
-		return nil, nil, nil, errors.New("OpenMultiBaseDirsReader is required") //nolint:err113
+		return nil, nil, nil, ErrOpenMultiBaseDirsReaderRequired
 	}
 
 	dgutaPath := filepath.Join(datasetDir, dgutaDBsSuffix)

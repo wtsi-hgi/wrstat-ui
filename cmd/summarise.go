@@ -66,6 +66,11 @@ var (
 	mounts         string
 )
 
+var (
+	errSummariseExactlyOneInput = errors.New("exactly 1 input file should be provided")
+	errSummariseNoOutput        = errors.New("no output files specified")
+)
+
 // summariseCmd represents the stat command.
 var summariseCmd = &cobra.Command{
 	Use:   "summarise",
@@ -271,11 +276,11 @@ func run(args []string) (err error) {
 
 func checkArgs(args []string) error {
 	if len(args) != 1 {
-		return errors.New("exactly 1 input file should be provided") //nolint:err113
+		return errSummariseExactlyOneInput
 	}
 
 	if defaultDir == "" && userGroup == "" && groupUser == "" && basedirsDB == "" && dirgutaDB == "" {
-		return errors.New("no output files specified") //nolint:err113
+		return errSummariseNoOutput
 	}
 
 	return nil
