@@ -27,9 +27,12 @@
 package clickhouse
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/url"
+	"strings"
+	"time"
 
 	ch "github.com/ClickHouse/clickhouse-go/v2"
 )
@@ -37,9 +40,12 @@ import (
 var (
 	errDSNRequired         = errors.New("clickhouse: DSN is required")
 	errDatabaseRequired    = errors.New("clickhouse: Database is required")
+	errDatabaseInvalid     = errors.New("clickhouse: Database contains invalid characters")
 	errDSNMissingDatabase  = errors.New("clickhouse: DSN must include database=")
 	errDSNDatabaseMismatch = errors.New("clickhouse: DSN database does not match Database")
 )
+
+const defaultQueryTimeout = 10 * time.Second
 
 // Client is the public ClickHouse-backed client for the extra-goal file APIs.
 //
@@ -48,29 +54,21 @@ type Client struct {
 	conn ch.Conn
 }
 
+// NewClient returns a new Client configured to use the ClickHouse database.
 func NewClient(cfg Config) (*Client, error) {
 	if err := validateConfig(cfg); err != nil {
 		return nil, err
 	}
 
-	opts, err := ch.ParseDSN(cfg.DSN)
+	opts, err := optionsFromConfig(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("clickhouse: invalid DSN: %w", err)
+		return nil, err
 	}
 
-	if cfg.MaxOpenConns > 0 {
-		opts.MaxOpenConns = cfg.MaxOpenConns
+	ctx, cancel := context.WithTimeout(context.Background(), queryTimeout(cfg))
+	defer cancel()
 
-		if cfg.MaxIdleConns <= 0 {
-			opts.MaxIdleConns = cfg.MaxOpenConns
-		}
-	}
-
-	if cfg.MaxIdleConns > 0 {
-		opts.MaxIdleConns = cfg.MaxIdleConns
-	}
-
-	conn, err := ch.Open(opts)
+	conn, err := connectAndBootstrap(ctx, opts, cfg.Database)
 	if err != nil {
 		return nil, err
 	}
@@ -86,6 +84,54 @@ func (c *Client) Close() error {
 	return c.conn.Close()
 }
 
+func connectAndBootstrap(ctx context.Context, opts *ch.Options, database string) (ch.Conn, error) {
+	bootErr := ensureDatabaseExists(ctx, opts, database)
+	if bootErr != nil {
+		return nil, bootErr
+	}
+
+	conn, err := ch.Open(opts)
+	if err != nil {
+		return nil, err
+	}
+
+	bootErr = ensureSchema(ctx, conn)
+	if bootErr != nil {
+		_ = conn.Close()
+
+		return nil, bootErr
+	}
+
+	return conn, nil
+}
+
+func ensureDatabaseExists(ctx context.Context, opts *ch.Options, database string) error {
+	if database == "default" {
+		return nil
+	}
+
+	adminOpts := *opts
+	adminOpts.Auth.Database = "default"
+
+	conn, err := ch.Open(&adminOpts)
+	if err != nil {
+		return fmt.Errorf("clickhouse: failed to connect for bootstrap: %w", err)
+	}
+
+	defer func() { _ = conn.Close() }()
+
+	stmt := "CREATE DATABASE IF NOT EXISTS " + quoteIdent(database)
+	if err := conn.Exec(ctx, stmt); err != nil {
+		return fmt.Errorf("clickhouse: failed to create database %q: %w", database, err)
+	}
+
+	return nil
+}
+
+func quoteIdent(s string) string {
+	return "`" + strings.ReplaceAll(s, "`", "``") + "`"
+}
+
 func validateConfig(cfg Config) error {
 	if cfg.DSN == "" {
 		return errDSNRequired
@@ -93,6 +139,10 @@ func validateConfig(cfg Config) error {
 
 	if cfg.Database == "" {
 		return errDatabaseRequired
+	}
+
+	if strings.ContainsAny(cfg.Database, "`\x00") {
+		return errDatabaseInvalid
 	}
 
 	dsnDB, err := databaseFromDSN(cfg.DSN)
@@ -124,4 +174,34 @@ func databaseFromDSN(dsn string) (string, error) {
 	}
 
 	return db, nil
+}
+
+func optionsFromConfig(cfg Config) (*ch.Options, error) {
+	opts, err := ch.ParseDSN(cfg.DSN)
+	if err != nil {
+		return nil, fmt.Errorf("clickhouse: invalid DSN: %w", err)
+	}
+
+	opts.Auth.Database = cfg.Database
+
+	if cfg.MaxOpenConns > 0 {
+		opts.MaxOpenConns = cfg.MaxOpenConns
+		if cfg.MaxIdleConns <= 0 {
+			opts.MaxIdleConns = cfg.MaxOpenConns
+		}
+	}
+
+	if cfg.MaxIdleConns > 0 {
+		opts.MaxIdleConns = cfg.MaxIdleConns
+	}
+
+	return opts, nil
+}
+
+func queryTimeout(cfg Config) time.Duration {
+	if cfg.QueryTimeout > 0 {
+		return cfg.QueryTimeout
+	}
+
+	return defaultQueryTimeout
 }
