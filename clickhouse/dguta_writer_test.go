@@ -28,14 +28,21 @@ package clickhouse
 
 import (
 	"context"
+	"errors"
 	"os"
 	"testing"
 	"time"
 
+	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	. "github.com/smartystreets/goconvey/convey"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 	internaltest "github.com/wtsi-hgi/wrstat-ui/internal/test"
+	"github.com/wtsi-hgi/wrstat-ui/summary"
 )
+
+var errForcedFailure = errors.New("forced failure")
+
+const testMountPath = "/mnt/test/"
 
 func TestClickHouseDGUTAWriter(t *testing.T) {
 	Convey("DGUTAWriter enforces required metadata", t, func() {
@@ -73,11 +80,9 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 		So(err, ShouldBeNil)
 		So(w, ShouldNotBeNil)
 
-		const mountPath = "/mnt/test/"
-
 		updatedAt := time.Date(2026, 1, 9, 12, 0, 0, 0, time.UTC)
 
-		w.SetMountPath(mountPath)
+		w.SetMountPath(testMountPath)
 		w.SetUpdatedAt(updatedAt)
 		So(w.Close(), ShouldBeNil)
 
@@ -90,7 +95,7 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 
 		rows, err := conn.Query(ctx,
 			"SELECT toString(snapshot_id), updated_at FROM wrstat_mounts_active WHERE mount_path = ?",
-			mountPath,
+			testMountPath,
 		)
 		So(err, ShouldBeNil)
 
@@ -105,7 +110,7 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 
 		So(rows.Scan(&gotSID, &gotUpdatedAt), ShouldBeNil)
 
-		expectedSID := snapshotID(mountPath, updatedAt)
+		expectedSID := snapshotID(testMountPath, updatedAt)
 		So(gotSID, ShouldEqual, expectedSID.String())
 		So(gotUpdatedAt, ShouldEqual, updatedAt)
 	})
@@ -118,44 +123,14 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 		cfg := th.newConfig()
 		cfg.QueryTimeout = 2 * time.Second
 
-		const mountPath = "/mnt/test/"
-
 		updatedAt := time.Date(2026, 1, 9, 12, 0, 0, 0, time.UTC)
-		expectedSID := snapshotID(mountPath, updatedAt)
+		expectedSID := snapshotID(testMountPath, updatedAt)
 
 		paths := internaltest.NewDirectoryPathCreator()
 		dir := paths.ToDirectoryPath("/")
 
-		writeOnce := func(gid uint32, child string) {
-			w, err := NewDGUTAWriter(cfg)
-			So(err, ShouldBeNil)
-			So(w, ShouldNotBeNil)
-
-			w.SetMountPath(mountPath)
-			w.SetUpdatedAt(updatedAt)
-
-			err = w.Add(db.RecordDGUTA{
-				Dir: dir,
-				GUTAs: db.GUTAs{&db.GUTA{
-					GID:         gid,
-					UID:         123,
-					FT:          db.DGUTAFileTypeBam,
-					Age:         db.DGUTAgeA1M,
-					Count:       7,
-					Size:        99,
-					Atime:       1,
-					Mtime:       2,
-					ATimeRanges: [9]uint64{1, 0, 0, 0, 0, 0, 0, 0, 0},
-					MTimeRanges: [9]uint64{0, 1, 0, 0, 0, 0, 0, 0, 0},
-				}},
-				Children: []string{child},
-			})
-			So(err, ShouldBeNil)
-			So(w.Close(), ShouldBeNil)
-		}
-
-		writeOnce(42, "/foo/")
-		writeOnce(77, "/bar/")
+		writeSingleDGUTARecord(cfg, updatedAt, dir, 42, "/foo/")
+		writeSingleDGUTARecord(cfg, updatedAt, dir, 77, "/bar/")
 
 		conn := th.openConn(cfg.DSN)
 
@@ -166,7 +141,7 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 
 		rows, err := conn.Query(ctx,
 			"SELECT gid FROM wrstat_dguta WHERE mount_path = ? AND snapshot_id = toUUID(?) AND dir = ?",
-			mountPath,
+			testMountPath,
 			expectedSID.String(),
 			"/",
 		)
@@ -183,7 +158,7 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 
 		childRows, err := conn.Query(ctx,
 			"SELECT child FROM wrstat_children WHERE mount_path = ? AND snapshot_id = toUUID(?) AND parent_dir = ?",
-			mountPath,
+			testMountPath,
 			expectedSID.String(),
 			"/",
 		)
@@ -198,4 +173,174 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 		So(gotChild, ShouldEqual, "/bar")
 		So(childRows.Next(), ShouldBeFalse)
 	})
+
+	Convey("DGUTAWriter drops previous snapshot partitions on Close", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 5 * time.Second
+
+		updatedAt1 := time.Date(2026, 1, 9, 12, 0, 0, 0, time.UTC)
+		updatedAt2 := updatedAt1.Add(1 * time.Hour)
+
+		sid1 := snapshotID(testMountPath, updatedAt1)
+		sid2 := snapshotID(testMountPath, updatedAt2)
+
+		paths := internaltest.NewDirectoryPathCreator()
+		dir := paths.ToDirectoryPath("/")
+
+		writeSingleDGUTARecord(cfg, updatedAt1, dir, 111, "/old/")
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		So(countRows(ctx, conn,
+			"SELECT count() FROM wrstat_dguta WHERE mount_path = ? AND snapshot_id = toUUID(?)",
+			testMountPath,
+			sid1.String(),
+		), ShouldEqual, 1)
+		So(countRows(ctx, conn,
+			"SELECT count() FROM wrstat_children WHERE mount_path = ? AND snapshot_id = toUUID(?)",
+			testMountPath,
+			sid1.String(),
+		), ShouldEqual, 1)
+
+		writeSingleDGUTARecord(cfg, updatedAt2, dir, 222, "/new/")
+
+		So(countRows(ctx, conn,
+			"SELECT count() FROM wrstat_dguta WHERE mount_path = ? AND snapshot_id = toUUID(?)",
+			testMountPath,
+			sid1.String(),
+		), ShouldEqual, 0)
+		So(countRows(ctx, conn,
+			"SELECT count() FROM wrstat_children WHERE mount_path = ? AND snapshot_id = toUUID(?)",
+			testMountPath,
+			sid1.String(),
+		), ShouldEqual, 0)
+
+		So(countRows(ctx, conn,
+			"SELECT count() FROM wrstat_dguta WHERE mount_path = ? AND snapshot_id = toUUID(?)",
+			testMountPath,
+			sid2.String(),
+		), ShouldEqual, 1)
+		So(countRows(ctx, conn,
+			"SELECT count() FROM wrstat_children WHERE mount_path = ? AND snapshot_id = toUUID(?)",
+			testMountPath,
+			sid2.String(),
+		), ShouldEqual, 1)
+	})
+
+	Convey("DGUTAWriter cleans up new snapshot if Close fails before switching", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 5 * time.Second
+
+		updatedAt := time.Date(2026, 1, 9, 12, 0, 0, 0, time.UTC)
+		sid := snapshotID(testMountPath, updatedAt)
+
+		w, err := NewDGUTAWriter(cfg)
+		So(err, ShouldBeNil)
+		So(w, ShouldNotBeNil)
+
+		w.SetMountPath(testMountPath)
+		w.SetUpdatedAt(updatedAt)
+
+		paths := internaltest.NewDirectoryPathCreator()
+		dir := paths.ToDirectoryPath("/")
+		err = w.Add(singleDGUTARecord(dir, 111, "/child/"))
+		So(err, ShouldBeNil)
+
+		impl, ok := w.(*dgutaWriter)
+		So(ok, ShouldBeTrue)
+
+		impl.failBeforeSwitchErr = errForcedFailure
+
+		So(w.Close(), ShouldNotBeNil)
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		So(countRows(ctx, conn,
+			"SELECT count() FROM wrstat_mounts_active WHERE mount_path = ?",
+			testMountPath,
+		), ShouldEqual, 0)
+		So(countRows(ctx, conn,
+			"SELECT count() FROM wrstat_dguta WHERE mount_path = ? AND snapshot_id = toUUID(?)",
+			testMountPath,
+			sid.String(),
+		), ShouldEqual, 0)
+		So(countRows(ctx, conn,
+			"SELECT count() FROM wrstat_children WHERE mount_path = ? AND snapshot_id = toUUID(?)",
+			testMountPath,
+			sid.String(),
+		), ShouldEqual, 0)
+	})
+}
+
+func countRows(ctx context.Context, conn interface {
+	Query(ctx context.Context, query string, args ...any) (driver.Rows, error)
+}, query string, args ...any) uint64 {
+	rows, err := conn.Query(ctx, query, args...)
+	So(err, ShouldBeNil)
+
+	defer func() { _ = rows.Close() }()
+
+	So(rows.Next(), ShouldBeTrue)
+
+	var n uint64
+	So(rows.Scan(&n), ShouldBeNil)
+	So(rows.Next(), ShouldBeFalse)
+
+	return n
+}
+
+func writeSingleDGUTARecord(
+	cfg Config,
+	updatedAt time.Time,
+	dir *summary.DirectoryPath,
+	gid uint32,
+	child string,
+) {
+	w, err := NewDGUTAWriter(cfg)
+	So(err, ShouldBeNil)
+	So(w, ShouldNotBeNil)
+
+	w.SetMountPath(testMountPath)
+	w.SetUpdatedAt(updatedAt)
+
+	err = w.Add(singleDGUTARecord(dir, gid, child))
+	So(err, ShouldBeNil)
+	So(w.Close(), ShouldBeNil)
+}
+
+func singleDGUTARecord(dir *summary.DirectoryPath, gid uint32, child string) db.RecordDGUTA {
+	return db.RecordDGUTA{
+		Dir: dir,
+		GUTAs: db.GUTAs{&db.GUTA{
+			GID:         gid,
+			UID:         123,
+			FT:          db.DGUTAFileTypeBam,
+			Age:         db.DGUTAgeA1M,
+			Count:       7,
+			Size:        99,
+			Atime:       1,
+			Mtime:       2,
+			ATimeRanges: [9]uint64{1, 0, 0, 0, 0, 0, 0, 0, 0},
+			MTimeRanges: [9]uint64{0, 1, 0, 0, 0, 0, 0, 0, 0},
+		}},
+		Children: []string{child},
+	}
 }

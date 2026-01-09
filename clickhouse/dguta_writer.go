@@ -50,6 +50,12 @@ const (
 
 	dropDGUTAPartitionQuery    = "ALTER TABLE wrstat_dguta DROP PARTITION tuple(?, toUUID(?))"
 	dropChildrenPartitionQuery = "ALTER TABLE wrstat_children DROP PARTITION tuple(?, toUUID(?))"
+	dropFilesPartitionQuery    = "ALTER TABLE wrstat_files DROP PARTITION tuple(?, toUUID(?))"
+
+	dropBasedirsGroupUsagePartitionQuery   = "ALTER TABLE wrstat_basedirs_group_usage DROP PARTITION tuple(?, toUUID(?))"
+	dropBasedirsUserUsagePartitionQuery    = "ALTER TABLE wrstat_basedirs_user_usage DROP PARTITION tuple(?, toUUID(?))"
+	dropBasedirsGroupSubdirsPartitionQuery = "ALTER TABLE wrstat_basedirs_group_subdirs DROP PARTITION tuple(?, toUUID(?))"
+	dropBasedirsUserSubdirsPartitionQuery  = "ALTER TABLE wrstat_basedirs_user_subdirs DROP PARTITION tuple(?, toUUID(?))"
 
 	insertDGUTAQuery = "INSERT INTO wrstat_dguta " +
 		"(mount_path, snapshot_id, dir, gid, uid, ft, age, count, size, " +
@@ -82,6 +88,10 @@ type dgutaWriter struct {
 
 	dgutaBatch    driver.Batch
 	childrenBatch driver.Batch
+
+	// failBeforeSwitchErr forces Close() to fail before switching snapshots.
+	// Used only by integration tests.
+	failBeforeSwitchErr error
 
 	closed bool
 }
@@ -140,13 +150,11 @@ func (w *dgutaWriter) Close() error {
 	defer cancel()
 
 	if err := w.flushAllBatches(); err != nil {
-		_ = w.conn.Close()
-
-		return err
+		return w.closeWithNewSnapshotCleanup(ctx, err)
 	}
 
 	if w.shouldSwitchSnapshot() {
-		if err := w.switchActiveSnapshot(ctx); err != nil {
+		if err := w.switchSnapshotAndDropOld(ctx); err != nil {
 			_ = w.conn.Close()
 
 			return err
@@ -197,6 +205,93 @@ func (w *dgutaWriter) switchActiveSnapshot(ctx context.Context) error {
 
 	if err := w.conn.Exec(ctx, switchSnapshotQuery, w.mountPath, w.snapshot.String(), w.updatedAt); err != nil {
 		return fmt.Errorf("clickhouse: failed to switch active snapshot: %w", err)
+	}
+
+	return nil
+}
+
+func (w *dgutaWriter) switchSnapshotAndDropOld(ctx context.Context) error {
+	previousSID, hasPrevious, err := w.readPreviousActiveSnapshotID(ctx)
+	if err != nil {
+		return w.closeWithNewSnapshotCleanup(ctx, err)
+	}
+
+	if w.failBeforeSwitchErr != nil {
+		return w.closeWithNewSnapshotCleanup(ctx, w.failBeforeSwitchErr)
+	}
+
+	if err := w.switchActiveSnapshot(ctx); err != nil {
+		return w.closeWithNewSnapshotCleanup(ctx, err)
+	}
+
+	if !hasPrevious {
+		return nil
+	}
+
+	// Idempotent retry: if previous snapshot id equals the new snapshot id,
+	// do not drop partitions (we would drop the data we just wrote).
+	if previousSID == w.snapshot.String() {
+		return nil
+	}
+
+	if err := w.dropAllSnapshotPartitions(ctx, previousSID); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (w *dgutaWriter) readPreviousActiveSnapshotID(ctx context.Context) (string, bool, error) {
+	rows, err := w.conn.Query(ctx, activeSnapshotQuery, w.mountPath)
+	if err != nil {
+		return "", false, fmt.Errorf("clickhouse: failed to read active snapshot: %w", err)
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	if !rows.Next() {
+		return "", false, nil
+	}
+
+	var (
+		sid       string
+		updatedAt time.Time
+	)
+	if err := rows.Scan(&sid, &updatedAt); err != nil {
+		return "", false, fmt.Errorf("clickhouse: failed to scan active snapshot: %w", err)
+	}
+
+	return sid, true, nil
+}
+
+func (w *dgutaWriter) closeWithNewSnapshotCleanup(ctx context.Context, cause error) error {
+	w.ensureSnapshotID()
+
+	cleanupErr := w.dropAllSnapshotPartitions(ctx, w.snapshot.String())
+	_ = w.conn.Close()
+
+	if cleanupErr == nil {
+		return cause
+	}
+
+	return errors.Join(cause, cleanupErr)
+}
+
+func (w *dgutaWriter) dropAllSnapshotPartitions(ctx context.Context, sid string) error {
+	queries := [...]string{
+		dropDGUTAPartitionQuery,
+		dropChildrenPartitionQuery,
+		dropFilesPartitionQuery,
+		dropBasedirsGroupUsagePartitionQuery,
+		dropBasedirsUserUsagePartitionQuery,
+		dropBasedirsGroupSubdirsPartitionQuery,
+		dropBasedirsUserSubdirsPartitionQuery,
+	}
+
+	for _, query := range queries {
+		if err := w.dropPartition(ctx, query, sid); err != nil {
+			return err
+		}
 	}
 
 	return nil
