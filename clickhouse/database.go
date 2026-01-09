@@ -30,19 +30,26 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	ch "github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/wtsi-hgi/wrstat-ui/db"
+	"github.com/wtsi-hgi/wrstat-ui/summary"
 )
 
 const (
 	childrenInitialCap = 16
 
+	dgutaInitialCap = 8
+
 	childrenQuery = "SELECT DISTINCT child FROM wrstat_children " +
 		"PREWHERE mount_path = ? AND snapshot_id = ? AND parent_dir = ? " +
 		"ORDER BY child"
 
-	resolveMountQuery = "SELECT mount_path, snapshot_id FROM wrstat_mounts_active " +
+	dgutaQuery = "SELECT gid, uid, ft, age, count, size, atime_min, mtime_max, atime_buckets, mtime_buckets " +
+		"FROM wrstat_dguta PREWHERE mount_path = ? AND snapshot_id = ? AND dir = ?"
+
+	resolveMountQuery = "SELECT mount_path, snapshot_id, updated_at FROM wrstat_mounts_active " +
 		"WHERE startsWith(?, mount_path) " +
 		"ORDER BY length(mount_path) DESC LIMIT 1"
 )
@@ -57,14 +64,34 @@ func newClickHouseDatabase(cfg Config, conn ch.Conn) *clickHouseDatabase {
 }
 
 func (d *clickHouseDatabase) DirInfo(dir string, filter *db.Filter) (*db.DirSummary, error) {
-	_ = dir
-	_ = filter
+	mountPath, snapshotID, updatedAt, ok, err := d.resolveMountAndSnapshot(dir)
+	if err != nil {
+		return nil, err
+	}
 
-	return nil, db.ErrDirNotFound
+	if !ok {
+		return &db.DirSummary{}, db.ErrDirNotFound
+	}
+
+	gutas, err := d.gutasForDir(mountPath, snapshotID, ensureTrailingSlash(dir))
+	if err != nil {
+		return nil, err
+	}
+
+	if len(gutas) == 0 {
+		return &db.DirSummary{Modtime: updatedAt}, db.ErrDirNotFound
+	}
+
+	sum := gutas.Summary(filter)
+	if sum != nil {
+		sum.Modtime = updatedAt
+	}
+
+	return sum, nil
 }
 
 func (d *clickHouseDatabase) Children(dir string) ([]string, error) {
-	mountPath, snapshotID, ok, err := d.resolveMountAndSnapshot(dir)
+	mountPath, snapshotID, _, ok, err := d.resolveMountAndSnapshot(dir)
 	if err != nil {
 		return nil, err
 	}
@@ -76,14 +103,6 @@ func (d *clickHouseDatabase) Children(dir string) ([]string, error) {
 	parentDir := ensureTrailingSlash(dir)
 
 	return d.childrenForMount(mountPath, snapshotID, parentDir)
-}
-
-func ensureTrailingSlash(dir string) string {
-	if strings.HasSuffix(dir, "/") {
-		return dir
-	}
-
-	return dir + "/"
 }
 
 func (d *clickHouseDatabase) childrenForMount(mountPath, snapshotID, parentDir string) ([]string, error) {
@@ -138,39 +157,143 @@ func (d *clickHouseDatabase) Close() error {
 	return nil
 }
 
-func (d *clickHouseDatabase) resolveMountAndSnapshot(dir string) (string, string, bool, error) {
+func (d *clickHouseDatabase) resolveMountAndSnapshot(dir string) (string, string, time.Time, bool, error) {
 	dirForMatch := ensureTrailingSlash(dir)
 
 	ctx, cancel := context.WithTimeout(context.Background(), queryTimeout(d.cfg))
 	defer cancel()
 
-	rows, err := d.conn.Query(
-		ctx,
-		resolveMountQuery,
-		dirForMatch,
-	)
+	rows, err := d.conn.Query(ctx, resolveMountQuery, dirForMatch)
 	if err != nil {
-		return "", "", false, fmt.Errorf("clickhouse: failed to resolve active mount: %w", err)
+		return "", "", time.Time{}, false, fmt.Errorf("clickhouse: failed to resolve active mount: %w", err)
 	}
 
 	defer func() { _ = rows.Close() }()
 
 	if !rows.Next() {
-		return "", "", false, nil
+		return "", "", time.Time{}, false, nil
 	}
 
+	mountPath, snapshotID, updatedAt, err := scanActiveMountRow(rows)
+	if err != nil {
+		return "", "", time.Time{}, false, err
+	}
+
+	return mountPath, snapshotID, updatedAt.UTC(), true, nil
+}
+
+func ensureTrailingSlash(dir string) string {
+	if strings.HasSuffix(dir, "/") {
+		return dir
+	}
+
+	return dir + "/"
+}
+
+func scanActiveMountRow(rows rowsScanner) (string, string, time.Time, error) {
 	var (
-		mountPath  string
-		snapshotID string
+		mountPath, snapshotID string
+		updatedAt             time.Time
 	)
-	if err := rows.Scan(&mountPath, &snapshotID); err != nil {
-		return "", "", false, fmt.Errorf("clickhouse: failed to scan active mount: %w", err)
+
+	if err := rows.Scan(&mountPath, &snapshotID, &updatedAt); err != nil {
+		return "", "", time.Time{}, fmt.Errorf("clickhouse: failed to scan active mount: %w", err)
 	}
 
-	return mountPath, snapshotID, true, nil
+	return mountPath, snapshotID, updatedAt, nil
+}
+
+func (d *clickHouseDatabase) gutasForDir(mountPath, snapshotID, dir string) (db.GUTAs, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), queryTimeout(d.cfg))
+	defer cancel()
+
+	rows, err := d.conn.Query(ctx, dgutaQuery, mountPath, snapshotID, dir)
+	if err != nil {
+		return nil, fmt.Errorf("clickhouse: failed to query dguta: %w", err)
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	gutas := make(db.GUTAs, 0, dgutaInitialCap)
+
+	for rows.Next() {
+		g, err := scanDGUTARow(rows)
+		if err != nil {
+			return nil, err
+		}
+
+		gutas = append(gutas, g)
+	}
+
+	return gutas, nil
+}
+
+func scanDGUTARow(rows rowsScanner) (*db.GUTA, error) {
+	var s dgutaScanned
+	if err := s.scanFrom(rows); err != nil {
+		return nil, err
+	}
+
+	g := &db.GUTA{
+		GID:   s.gid,
+		UID:   s.uid,
+		FT:    db.DirGUTAFileType(s.ft),
+		Age:   db.DirGUTAge(s.age),
+		Count: s.count,
+		Size:  s.size,
+		Atime: s.atimeMin,
+		Mtime: s.mtimeMax,
+	}
+
+	g.ATimeRanges = sliceToAgeBuckets(s.atimeBuckets)
+	g.MTimeRanges = sliceToAgeBuckets(s.mtimeBuckets)
+
+	return g, nil
 }
 
 type rowsScanner interface {
 	Next() bool
 	Scan(dest ...any) error
+}
+
+type dgutaScanned struct {
+	gid          uint32
+	uid          uint32
+	ft           uint16
+	age          uint8
+	count        uint64
+	size         uint64
+	atimeMin     int64
+	mtimeMax     int64
+	atimeBuckets []uint64
+	mtimeBuckets []uint64
+}
+
+func (s *dgutaScanned) scanFrom(rows rowsScanner) error {
+	if err := rows.Scan(
+		&s.gid,
+		&s.uid,
+		&s.ft,
+		&s.age,
+		&s.count,
+		&s.size,
+		&s.atimeMin,
+		&s.mtimeMax,
+		&s.atimeBuckets,
+		&s.mtimeBuckets,
+	); err != nil {
+		return fmt.Errorf("clickhouse: failed to scan dguta: %w", err)
+	}
+
+	return nil
+}
+
+func sliceToAgeBuckets(in []uint64) summary.AgeBuckets {
+	var out summary.AgeBuckets
+
+	for i := 0; i < len(out) && i < len(in); i++ {
+		out[i] = in[i]
+	}
+
+	return out
 }
