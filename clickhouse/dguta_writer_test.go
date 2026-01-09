@@ -109,4 +109,93 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 		So(gotSID, ShouldEqual, expectedSID.String())
 		So(gotUpdatedAt, ShouldEqual, updatedAt)
 	})
+
+	Convey("DGUTAWriter writes dguta + children rows and supports idempotent retry", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 2 * time.Second
+
+		const mountPath = "/mnt/test/"
+
+		updatedAt := time.Date(2026, 1, 9, 12, 0, 0, 0, time.UTC)
+		expectedSID := snapshotID(mountPath, updatedAt)
+
+		paths := internaltest.NewDirectoryPathCreator()
+		dir := paths.ToDirectoryPath("/")
+
+		writeOnce := func(gid uint32, child string) {
+			w, err := NewDGUTAWriter(cfg)
+			So(err, ShouldBeNil)
+			So(w, ShouldNotBeNil)
+
+			w.SetMountPath(mountPath)
+			w.SetUpdatedAt(updatedAt)
+
+			err = w.Add(db.RecordDGUTA{
+				Dir: dir,
+				GUTAs: db.GUTAs{&db.GUTA{
+					GID:         gid,
+					UID:         123,
+					FT:          db.DGUTAFileTypeBam,
+					Age:         db.DGUTAgeA1M,
+					Count:       7,
+					Size:        99,
+					Atime:       1,
+					Mtime:       2,
+					ATimeRanges: [9]uint64{1, 0, 0, 0, 0, 0, 0, 0, 0},
+					MTimeRanges: [9]uint64{0, 1, 0, 0, 0, 0, 0, 0, 0},
+				}},
+				Children: []string{child},
+			})
+			So(err, ShouldBeNil)
+			So(w.Close(), ShouldBeNil)
+		}
+
+		writeOnce(42, "/foo/")
+		writeOnce(77, "/bar/")
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		rows, err := conn.Query(ctx,
+			"SELECT gid FROM wrstat_dguta WHERE mount_path = ? AND snapshot_id = toUUID(?) AND dir = ?",
+			mountPath,
+			expectedSID.String(),
+			"/",
+		)
+		So(err, ShouldBeNil)
+
+		defer func() { _ = rows.Close() }()
+
+		So(rows.Next(), ShouldBeTrue)
+
+		var gotGID uint32
+		So(rows.Scan(&gotGID), ShouldBeNil)
+		So(gotGID, ShouldEqual, 77)
+		So(rows.Next(), ShouldBeFalse)
+
+		childRows, err := conn.Query(ctx,
+			"SELECT child FROM wrstat_children WHERE mount_path = ? AND snapshot_id = toUUID(?) AND parent_dir = ?",
+			mountPath,
+			expectedSID.String(),
+			"/",
+		)
+		So(err, ShouldBeNil)
+
+		defer func() { _ = childRows.Close() }()
+
+		So(childRows.Next(), ShouldBeTrue)
+
+		var gotChild string
+		So(childRows.Scan(&gotChild), ShouldBeNil)
+		So(gotChild, ShouldEqual, "/bar")
+		So(childRows.Next(), ShouldBeFalse)
+	})
 }
