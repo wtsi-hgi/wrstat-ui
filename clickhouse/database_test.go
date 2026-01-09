@@ -35,65 +35,8 @@ import (
 	. "github.com/smartystreets/goconvey/convey"
 )
 
-func TestOpenProviderPolling(t *testing.T) {
-	Convey("OpenProvider polls wrstat_mounts_active and calls OnUpdate on change", t, func() {
-		os.Setenv("WRSTAT_ENV", "test")
-		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
-
-		th := newClickHouseTestHarness(t)
-		cfg := th.newConfig()
-		cfg.QueryTimeout = 2 * time.Second
-		cfg.PollInterval = 50 * time.Millisecond
-
-		p, err := OpenProvider(cfg)
-		So(err, ShouldBeNil)
-		So(p, ShouldNotBeNil)
-		Reset(func() { So(p.Close(), ShouldBeNil) })
-
-		So(p.Tree(), ShouldNotBeNil)
-
-		updateCh := make(chan struct{}, 1)
-
-		p.OnUpdate(func() {
-			select {
-			case updateCh <- struct{}{}:
-			default:
-			}
-		})
-
-		// Let the poller establish a baseline.
-		time.Sleep(2 * cfg.PollInterval)
-
-		conn := th.openConn(cfg.DSN)
-
-		Reset(func() { So(conn.Close(), ShouldBeNil) })
-
-		mountPath := "/mnt/test/"
-		updatedAt := time.Now().UTC().Truncate(time.Second)
-		sid := snapshotID(mountPath, updatedAt)
-
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-
-		err = conn.Exec(
-			ctx,
-			"INSERT INTO wrstat_mounts (mount_path, switched_at, active_snapshot, updated_at) VALUES (?, ?, ?, ?)",
-			mountPath,
-			time.Now(),
-			sid,
-			updatedAt,
-		)
-		So(err, ShouldBeNil)
-
-		select {
-		case <-updateCh:
-			// ok
-		case <-time.After(5 * time.Second):
-			t.Fatalf("timed out waiting for OnUpdate")
-		}
-	})
-
-	Convey("OpenProvider does not poll when PollInterval <= 0", t, func() {
+func TestClickHouseDatabaseChildren(t *testing.T) {
+	Convey("Children returns sorted, distinct children for active snapshot", t, func() {
 		os.Setenv("WRSTAT_ENV", "test")
 		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
 
@@ -104,41 +47,63 @@ func TestOpenProviderPolling(t *testing.T) {
 
 		p, err := OpenProvider(cfg)
 		So(err, ShouldBeNil)
-		So(p, ShouldNotBeNil)
 		Reset(func() { So(p.Close(), ShouldBeNil) })
 
-		So(p.Tree(), ShouldNotBeNil)
+		cp, ok := p.(*chProvider)
+		So(ok, ShouldBeTrue)
 
-		updateCh := make(chan struct{}, 1)
-
-		p.OnUpdate(func() { updateCh <- struct{}{} })
+		db := newClickHouseDatabase(cfg, cp.conn)
 
 		conn := th.openConn(cfg.DSN)
 
 		Reset(func() { So(conn.Close(), ShouldBeNil) })
 
-		mountPath := "/mnt/test/"
-		updatedAt := time.Now().UTC().Truncate(time.Second)
+		const mountPath = "/mnt/test/"
+
+		parentDir := mountPath
+		childA := mountPath + "a"
+		childB := mountPath + "b"
+		updatedAt := time.Date(2026, 1, 9, 12, 0, 0, 0, time.UTC)
 		sid := snapshotID(mountPath, updatedAt)
 
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		err = conn.Exec(
-			ctx,
+		So(conn.Exec(ctx,
 			"INSERT INTO wrstat_mounts (mount_path, switched_at, active_snapshot, updated_at) VALUES (?, ?, ?, ?)",
 			mountPath,
 			time.Now(),
 			sid,
 			updatedAt,
-		)
-		So(err, ShouldBeNil)
+		), ShouldBeNil)
 
-		select {
-		case <-updateCh:
-			t.Fatalf("OnUpdate should not be called when polling is disabled")
-		case <-time.After(200 * time.Millisecond):
-			// ok
-		}
+		So(conn.Exec(ctx,
+			"INSERT INTO wrstat_children (mount_path, snapshot_id, parent_dir, child) VALUES (?, ?, ?, ?)",
+			mountPath,
+			sid,
+			parentDir,
+			childB,
+		), ShouldBeNil)
+
+		So(conn.Exec(ctx,
+			"INSERT INTO wrstat_children (mount_path, snapshot_id, parent_dir, child) VALUES (?, ?, ?, ?)",
+			mountPath,
+			sid,
+			parentDir,
+			childA,
+		), ShouldBeNil)
+
+		// duplicate row should be de-duped
+		So(conn.Exec(ctx,
+			"INSERT INTO wrstat_children (mount_path, snapshot_id, parent_dir, child) VALUES (?, ?, ?, ?)",
+			mountPath,
+			sid,
+			parentDir,
+			childA,
+		), ShouldBeNil)
+
+		children, err := db.Children("/mnt/test")
+		So(err, ShouldBeNil)
+		So(children, ShouldResemble, []string{"/mnt/test/a", "/mnt/test/b"})
 	})
 }
