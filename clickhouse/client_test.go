@@ -63,7 +63,7 @@ func TestNewClient(t *testing.T) {
 			So(c, ShouldBeNil)
 		})
 
-		Convey("it accepts a minimal valid config (even if the server is unreachable)", func() {
+		Convey("it accepts a minimal valid config and then attempts to connect", func() {
 			cfg := clickhouse.Config{
 				DSN:           "clickhouse://127.0.0.1:65535/?database=wrstat",
 				Database:      "wrstat",
@@ -76,8 +76,8 @@ func TestNewClient(t *testing.T) {
 			}
 
 			c, err := clickhouse.NewClient(cfg)
-			So(err, ShouldBeNil)
-			So(c, ShouldNotBeNil)
+			So(err, ShouldNotBeNil)
+			So(c, ShouldBeNil)
 		})
 	})
 }
