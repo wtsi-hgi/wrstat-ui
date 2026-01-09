@@ -231,7 +231,7 @@ type Database interface {
 
   // Info returns summary information about the database (e.g. counts).
   // Used by cmd/dbinfo.
-  Info() (*DBInfo, error)
+  Info() (*Info, error)
 
   Close() error
 }
@@ -515,7 +515,7 @@ type Reader interface {
 
   // Info returns summary information about the database (e.g. counts).
   // Used by cmd/dbinfo.
-  Info() (*DBInfo, error)
+  Info() (*Info, error)
 
   Close() error
 }
@@ -758,7 +758,7 @@ func NewHistoryMaintainer(dbPath string) (basedirs.HistoryMaintainer, error)
 
 - `db/` becomes a pure domain package plus query algorithms.
   - Keeps: `Filter`, `DirSummary`, `DirInfo`, `DCSs`, `DGUTA`, `GUTAs`,
-    `RecordDGUTA`, age/filetype enums and parsing, `DBInfo` struct,
+    `RecordDGUTA`, age/filetype enums and parsing, `Info` struct,
     `Database` interface (new), `DGUTAWriter` interface (new).
   - Keeps: `Tree` type and its methods (`DirInfo`, `DirHasChildren`, `Where`,
     `FileLocations`, `Info`, `Close`).

@@ -8,7 +8,7 @@ in the repository as unused code.
 The goal is that another agent can implement a new root package `clickhouse`
 that satisfies the storage-neutral interfaces defined in `interface_spec.md`
 (`db.Database`, `db.DGUTAWriter`, `basedirs.Store`, `basedirs.Reader`,
-`basedirs.HistoryMaintainer`, and `server.Provider`), and then update `cmd/*`,
+`basedirs.HistoryMaintainer`, and `provider.Provider`), and then update `cmd/*`,
 `main.go`, and tests to use `clickhouse` constructors.
 
 Hard constraints (must hold when implementation is complete):
@@ -33,7 +33,7 @@ The new root package is `github.com/wtsi-hgi/wrstat-ui/clickhouse`.
 It exports only:
 
 - `type Config struct { ... }` (see Configuration section)
-- `OpenProvider(cfg Config) (server.Provider, error)`
+- `OpenProvider(cfg Config) (provider.Provider, error)`
 - `NewDGUTAWriter(cfg Config) (db.DGUTAWriter, error)`
 - `NewBaseDirsStore(cfg Config) (basedirs.Store, error)`
 - `NewHistoryMaintainer(cfg Config) (basedirs.HistoryMaintainer, error)`
@@ -513,7 +513,7 @@ This avoids the need for a secondary projection, saving write overhead.
 
 This section is normative: implement exactly this behaviour.
 
-### `server.Provider` (`clickhouse.OpenProvider`)
+### `provider.Provider` (`clickhouse.OpenProvider`)
 
 `OpenProvider(cfg)` returns an object that:
 
@@ -526,6 +526,10 @@ This section is normative: implement exactly this behaviour.
   - If the map differs from the previous poll, swap internal readers and call
     the callback on a new goroutine.
   - Callbacks must not run concurrently with themselves.
+- Implements `OnError(cb func(error))`:
+  - Invoke the callback (on a new goroutine) for internal asynchronous errors
+    (e.g. poll/query failures).
+  - Callbacks must not run concurrently with themselves.
 
 Update swap semantics (normative):
 
@@ -537,7 +541,7 @@ Update swap semantics (normative):
 
 The provider must not expose any ClickHouse concepts. It returns:
 
-- `Tree() *db.Tree` (constructed as `db.NewTree(dbImpl)` after the refactor)
+- `Tree() *db.Tree` (constructed as `db.NewTree(dbImpl)`)
 - `BaseDirs() basedirs.Reader`
 
 ### `db.Database` (read-side tree)
@@ -792,7 +796,7 @@ Query:
 
 ### `db.Database.Info()`
 
-Return values must match the existing `db.DBInfo` meaning:
+Return values must match the existing `db.Info` meaning:
 
 - `NumDirs`: number of directory keys present
 - `NumDGUTAs`: number of dguta rows (dir+gid+uid+ft+age combos)
@@ -1029,9 +1033,9 @@ INSERT INTO wrstat_basedirs_history
 VALUES (?, ?, ?, ?, ?, ?, ?)
 ```
 
-Finalize:
+Finalise:
 
-- `Finalize()` must ensure that every inserted group usage row where
+- `Finalise()` must ensure that every inserted group usage row where
   `age == DGUTAgeAll` has correct `date_no_space` and `date_no_files` values.
 - Compute these in Go using the existing `basedirs.DateQuotaFull` algorithm,
   by reading the full history series for `(gid, mount_path)`.
@@ -1045,7 +1049,7 @@ Required insertion strategy:
   - if `u.Age != DGUTAgeAll`, insert the row immediately (with
     `date_no_space`/`date_no_files` as zero values)
   - if `u.Age == DGUTAgeAll`, buffer the row in memory
-- In `Finalize()`:
+- In `Finalise()`:
   1. For each buffered gid, query the full history series for the gid.
   2. Compute quota dates.
   3. Insert the buffered `DGUTAgeAll` rows with computed quota dates.
@@ -1072,7 +1076,10 @@ Ordering:
 
 `MountTimestamps()`:
 
-- Returns `mount_path -> updated_at` from `wrstat_mounts_active`.
+- Returns `mountKey -> updated_at`.
+  - `mountKey` is derived from `mount_path` by replacing `/` with `／`
+    (U+FF0F FULLWIDTH SOLIDUS), matching the legacy dataset directory suffix
+    convention.
 
 `Info()`:
 
@@ -2065,7 +2072,7 @@ constructors/wiring in:
 
 ### `cmd/server`
 
-Call `clickhouse.OpenProvider(cfg)` and pass the returned `server.Provider`
+Call `clickhouse.OpenProvider(cfg)` and pass the returned `provider.Provider`
 into the server via `server.SetProvider()`.
 
 ### `cmd/summarise`
