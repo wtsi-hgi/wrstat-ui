@@ -1,15 +1,11 @@
 # ClickHouse backend spec (replacement for Bolt)
 
 This document specifies the ClickHouse backend that replaces the Bolt backend.
-This spec supersedes the Bolt-related sections and the earlier "ClickHouse
-backend notes" section of `interface_spec.md`. The `bolt` package may remain
-in the repository as unused code.
+The `bolt` package will remain in the repository used only to support bolt-perf.
 
-The goal is that another agent can implement a new root package `clickhouse`
-that satisfies the storage-neutral interfaces defined in `interface_spec.md`
-(`db.Database`, `db.DGUTAWriter`, `basedirs.Store`, `basedirs.Reader`,
-`basedirs.HistoryMaintainer`, and `provider.Provider`), and then update `cmd/*`,
-`main.go`, and tests to use `clickhouse` constructors.
+This document defines the requirements for the `clickhouse` package
+implementation (constructors, schema, ingest, query behaviour, and performance
+constraints) and the expected wiring from entrypoints.
 
 Hard constraints (must hold when implementation is complete):
 
@@ -18,7 +14,7 @@ Hard constraints (must hold when implementation is complete):
 - The `clickhouse` package does not re-export *any* clickhouse-go types.
   The only public API is:
   - constructors used by `cmd/*` and `main.go` to obtain interface instances
-  - methods required by the interfaces in `interface_spec.md`
+  - methods required by the storage-neutral interfaces implemented by this repo
   - extra-goal query methods defined in this spec
   - performance inspection helpers defined in this spec (Inspector API)
 - Only tests, `main.go`, and packages under `cmd/` import
@@ -1758,9 +1754,9 @@ env:
 
 CI must not skip any tests; all tests must run.
 
-### README update requirement
+### README content requirements
 
-The implementation agent must update `README.md` with:
+`README.md` must document:
 
 - how to install a local ClickHouse binary suitable for running tests
 - how to run a ClickHouse server on a custom port (so multiple developers can
@@ -2067,21 +2063,20 @@ Reporting (normative):
 
 ## Repository wiring (what other packages must do)
 
-After the interfaces in `interface_spec.md` are in place, update only
-constructors/wiring in:
+Constructors/wiring:
 
 ### `cmd/server`
 
-Call `clickhouse.OpenProvider(cfg)` and pass the returned `provider.Provider`
+Use `clickhouse.OpenProvider(cfg)` and pass the returned `provider.Provider`
 into the server via `server.SetProvider()`.
 
 ### `cmd/summarise`
 
-Keep the existing mount path derivation mechanism. The output directory path
+Use the existing mount path derivation mechanism. The output directory path
 follows the naming convention `<version>_<mountKey>`, where `<mountKey>` is
 the mount path with `/` replaced by `／` (U+FF0F FULLWIDTH SOLIDUS).
 
-Add a shared helper function (e.g. in `internal/mountpath/mountpath.go`):
+Provide a shared helper function (e.g. in `internal/mountpath/mountpath.go`):
 
 ```go
 package mountpath
@@ -2093,7 +2088,7 @@ package mountpath
 func FromOutputDir(outputDir string) (string, error)
 ```
 
-Replace Bolt writer/store constructors:
+Use clickhouse writer/store constructors (replacing Bolt constructors):
 
 ```go
 // Derive mount path from output directory
