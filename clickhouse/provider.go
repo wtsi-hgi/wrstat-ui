@@ -52,6 +52,9 @@ type chProvider struct {
 
 	conn ch.Conn
 
+	db   db.Database
+	tree *db.Tree
+
 	mu       sync.RWMutex
 	onUpdate func()
 	onError  func(error)
@@ -61,7 +64,20 @@ type chProvider struct {
 }
 
 func (p *chProvider) Tree() *db.Tree {
-	return nil
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.tree != nil {
+		return p.tree
+	}
+
+	if p.db == nil {
+		p.db = newClickHouseDatabase(p.cfg, p.conn)
+	}
+
+	p.tree = db.NewTree(p.db)
+
+	return p.tree
 }
 
 func (p *chProvider) BaseDirs() basedirs.Reader {
