@@ -28,6 +28,7 @@ package clickhouse
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -49,10 +50,28 @@ const (
 	dgutaQuery = "SELECT gid, uid, ft, age, count, size, atime_min, mtime_max, atime_buckets, mtime_buckets " +
 		"FROM wrstat_dguta PREWHERE mount_path = ? AND snapshot_id = ? AND dir = ?"
 
+	infoDGUTAQuery = "SELECT " +
+		"uniqExact(dir) AS num_dirs, " +
+		"count() AS num_dgutas " +
+		"FROM wrstat_dguta " +
+		"WHERE (mount_path, snapshot_id) IN (" +
+		"SELECT mount_path, snapshot_id FROM wrstat_mounts_active" +
+		")"
+
+	infoChildrenQuery = "SELECT " +
+		"uniqExact(parent_dir) AS num_parents, " +
+		"count() AS num_children " +
+		"FROM wrstat_children " +
+		"WHERE (mount_path, snapshot_id) IN (" +
+		"SELECT mount_path, snapshot_id FROM wrstat_mounts_active" +
+		")"
+
 	resolveMountQuery = "SELECT mount_path, snapshot_id, updated_at FROM wrstat_mounts_active " +
 		"WHERE startsWith(?, mount_path) " +
 		"ORDER BY length(mount_path) DESC LIMIT 1"
 )
+
+var errIntOverflow = errors.New("value overflows int")
 
 type clickHouseDatabase struct {
 	cfg  Config
@@ -150,7 +169,74 @@ func scanChildrenRows(rows rowsScanner) ([]string, error) {
 }
 
 func (d *clickHouseDatabase) Info() (*db.Info, error) {
-	return &db.Info{}, nil
+	ctx, cancel := context.WithTimeout(context.Background(), queryTimeout(d.cfg))
+	defer cancel()
+
+	numDirs, numDGUTAs, err := d.infoCounts(ctx, infoDGUTAQuery, "dguta")
+	if err != nil {
+		return nil, err
+	}
+
+	numParents, numChildren, err := d.infoCounts(ctx, infoChildrenQuery, "children")
+	if err != nil {
+		return nil, err
+	}
+
+	info, err := makeDBInfo(numDirs, numDGUTAs, numParents, numChildren)
+	if err != nil {
+		return nil, err
+	}
+
+	return info, nil
+}
+
+func makeDBInfo(numDirs, numDGUTAs, numParents, numChildren uint64) (*db.Info, error) {
+	dirs, err := safeUint64ToInt(numDirs)
+	if err != nil {
+		return nil, fmt.Errorf("clickhouse: invalid num_dirs: %w", err)
+	}
+
+	dgutas, err := safeUint64ToInt(numDGUTAs)
+	if err != nil {
+		return nil, fmt.Errorf("clickhouse: invalid num_dgutas: %w", err)
+	}
+
+	parents, err := safeUint64ToInt(numParents)
+	if err != nil {
+		return nil, fmt.Errorf("clickhouse: invalid num_parents: %w", err)
+	}
+
+	children, err := safeUint64ToInt(numChildren)
+	if err != nil {
+		return nil, fmt.Errorf("clickhouse: invalid num_children: %w", err)
+	}
+
+	return &db.Info{
+		NumDirs:     dirs,
+		NumDGUTAs:   dgutas,
+		NumParents:  parents,
+		NumChildren: children,
+	}, nil
+}
+
+func (d *clickHouseDatabase) infoCounts(ctx context.Context, query, desc string) (uint64, uint64, error) {
+	rows, err := d.conn.Query(ctx, query)
+	if err != nil {
+		return 0, 0, fmt.Errorf("clickhouse: failed to query %s counts: %w", desc, err)
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	if !rows.Next() {
+		return 0, 0, nil
+	}
+
+	var a, b uint64
+	if err := rows.Scan(&a, &b); err != nil {
+		return 0, 0, fmt.Errorf("clickhouse: failed to scan %s counts: %w", desc, err)
+	}
+
+	return a, b, nil
 }
 
 func (d *clickHouseDatabase) Close() error {
@@ -286,6 +372,15 @@ func (s *dgutaScanned) scanFrom(rows rowsScanner) error {
 	}
 
 	return nil
+}
+
+func safeUint64ToInt(v uint64) (int, error) {
+	maxInt := uint64(^uint(0) >> 1)
+	if v > maxInt {
+		return 0, fmt.Errorf("%w: %d", errIntOverflow, v)
+	}
+
+	return int(v), nil
 }
 
 func sliceToAgeBuckets(in []uint64) summary.AgeBuckets {
