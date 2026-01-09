@@ -33,6 +33,7 @@ import (
 	"fmt"
 	"io/fs"
 	"sort"
+	"strconv"
 	"strings"
 
 	ch "github.com/ClickHouse/clickhouse-go/v2"
@@ -112,54 +113,85 @@ func applySchemaDDL(ctx context.Context, execer ch.Conn, stmts []string) error {
 }
 
 func ensureSchemaVersion(ctx context.Context, execer ch.Conn) error {
-	versions, err := ensureSchemaVersionRow(ctx, execer)
+	count, minVersion, maxVersion, err := schemaVersionStatsFromDB(ctx, execer)
 	if err != nil {
 		return err
 	}
 
-	if len(versions) != 1 || versions[0] != 1 {
-		return fmt.Errorf("%w: %v", errUnexpectedSchemaVersion, versions)
+	if count != 0 {
+		return validateSchemaVersionStats(count, minVersion, maxVersion)
 	}
 
-	return nil
+	if insertErr := insertSchemaVersion(ctx, execer); insertErr != nil {
+		return insertErr
+	}
+
+	count, minVersion, maxVersion, err = schemaVersionStatsFromDB(ctx, execer)
+	if err != nil {
+		return err
+	}
+
+	return validateSchemaVersionStats(count, minVersion, maxVersion)
 }
 
-func ensureSchemaVersionRow(ctx context.Context, execer ch.Conn) ([]uint32, error) {
-	versions, err := schemaVersionsFromDB(ctx, execer)
+func schemaVersionStatsFromDB(ctx context.Context, q ch.Conn) (uint64, *uint32, *uint32, error) {
+	rows, err := q.Query(ctx, "SELECT count(), min(version), max(version) FROM wrstat_schema_version")
 	if err != nil {
-		return nil, err
-	}
-
-	if len(versions) != 0 {
-		return versions, nil
-	}
-
-	execErr := execer.Exec(ctx, "INSERT INTO wrstat_schema_version (version) VALUES (1)")
-	if execErr != nil {
-		return nil, fmt.Errorf("clickhouse: failed to set schema version: %w", execErr)
-	}
-
-	return schemaVersionsFromDB(ctx, execer)
-}
-
-func schemaVersionsFromDB(ctx context.Context, q ch.Conn) ([]uint32, error) {
-	rows, err := q.Query(ctx, "SELECT version FROM wrstat_schema_version ORDER BY version")
-	if err != nil {
-		return nil, fmt.Errorf("clickhouse: failed to query schema versions: %w", err)
+		return 0, nil, nil, fmt.Errorf("clickhouse: failed to query schema version stats: %w", err)
 	}
 
 	defer func() { _ = rows.Close() }()
 
-	versions := make([]uint32, 0, 1)
-
-	for rows.Next() {
-		var v uint32
-		if err := rows.Scan(&v); err != nil {
-			return nil, fmt.Errorf("clickhouse: failed to scan schema version: %w", err)
-		}
-
-		versions = append(versions, v)
+	if !rows.Next() {
+		return 0, nil, nil, fmt.Errorf("clickhouse: failed to query schema version stats: %w", rows.Err())
 	}
 
-	return versions, nil
+	var (
+		count      uint64
+		minVersion *uint32
+		maxVersion *uint32
+	)
+
+	if err := rows.Scan(&count, &minVersion, &maxVersion); err != nil {
+		return 0, nil, nil, fmt.Errorf("clickhouse: failed to scan schema version stats: %w", err)
+	}
+
+	return count, minVersion, maxVersion, nil
+}
+
+func validateSchemaVersionStats(count uint64, minVersion, maxVersion *uint32) error {
+	if schemaVersionStatsOK(count, minVersion, maxVersion) {
+		return nil
+	}
+
+	return fmt.Errorf(
+		"%w: count=%d min=%s max=%s; please migrate or drop the database",
+		errUnexpectedSchemaVersion,
+		count,
+		formatNullableUint32(minVersion),
+		formatNullableUint32(maxVersion),
+	)
+}
+
+func schemaVersionStatsOK(count uint64, minVersion, maxVersion *uint32) bool {
+	return count == 1 &&
+		minVersion != nil && maxVersion != nil &&
+		*minVersion == 1 && *maxVersion == 1
+}
+
+func formatNullableUint32(v *uint32) string {
+	if v == nil {
+		return "NULL"
+	}
+
+	return strconv.FormatUint(uint64(*v), 10)
+}
+
+func insertSchemaVersion(ctx context.Context, execer ch.Conn) error {
+	execErr := execer.Exec(ctx, "INSERT INTO wrstat_schema_version (version) VALUES (1)")
+	if execErr != nil {
+		return fmt.Errorf("clickhouse: failed to set schema version: %w", execErr)
+	}
+
+	return nil
 }

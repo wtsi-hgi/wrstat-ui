@@ -27,16 +27,20 @@
 package clickhouse
 
 import (
+	"context"
 	"os"
+	"sort"
 	"testing"
 	"time"
 
+	ch "github.com/ClickHouse/clickhouse-go/v2"
 	. "github.com/smartystreets/goconvey/convey"
 )
 
 func TestNewClientBootstrapsSchema(t *testing.T) {
 	Convey("NewClient bootstraps database and schema", t, func() {
 		os.Setenv("WRSTAT_ENV", "test")
+
 		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
 
 		th := newClickHouseTestHarness(t)
@@ -52,4 +56,108 @@ func TestNewClientBootstrapsSchema(t *testing.T) {
 		versions := th.schemaVersions(cfg)
 		So(versions, ShouldResemble, []uint32{1})
 	})
+
+	Convey("NewClient bootstraps the full schema", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.PollInterval = time.Second
+		cfg.QueryTimeout = 5 * time.Second
+
+		c, err := NewClient(cfg)
+		So(err, ShouldBeNil)
+		So(c, ShouldNotBeNil)
+		Reset(func() { So(c.Close(), ShouldBeNil) })
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		tables := listTableNames(ctx, t, conn, cfg.Database)
+		So(tables, ShouldContain, "wrstat_schema_version")
+		So(tables, ShouldContain, "wrstat_mounts")
+		So(tables, ShouldContain, "wrstat_mounts_active")
+		So(tables, ShouldContain, "wrstat_dguta")
+		So(tables, ShouldContain, "wrstat_children")
+		So(tables, ShouldContain, "wrstat_basedirs_group_usage")
+		So(tables, ShouldContain, "wrstat_basedirs_user_usage")
+		So(tables, ShouldContain, "wrstat_basedirs_group_subdirs")
+		So(tables, ShouldContain, "wrstat_basedirs_user_subdirs")
+		So(tables, ShouldContain, "wrstat_basedirs_history")
+		So(tables, ShouldContain, "wrstat_files")
+
+		cols := listColumnNames(ctx, t, conn, cfg.Database, "wrstat_mounts_active")
+		So(cols, ShouldContain, "mount_path")
+		So(cols, ShouldContain, "snapshot_id")
+		So(cols, ShouldContain, "updated_at")
+	})
+}
+
+func listTableNames(ctx context.Context, t *testing.T, conn ch.Conn, database string) []string {
+	t.Helper()
+
+	rows, err := conn.Query(ctx, "SELECT name FROM system.tables WHERE database = ? ORDER BY name", database)
+	if err != nil {
+		t.Fatalf("failed to query system.tables: %v", err)
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	names := make([]string, 0, 16)
+
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			t.Fatalf("failed to scan table name: %v", err)
+		}
+
+		names = append(names, name)
+	}
+
+	sort.Strings(names)
+
+	return names
+}
+
+func listColumnNames(
+	ctx context.Context,
+	t *testing.T,
+	conn ch.Conn,
+	database string,
+	table string,
+) []string {
+	t.Helper()
+
+	rows, err := conn.Query(
+		ctx,
+		"SELECT name FROM system.columns WHERE database = ? AND table = ? ORDER BY name",
+		database,
+		table,
+	)
+	if err != nil {
+		t.Fatalf("failed to query system.columns: %v", err)
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	names := make([]string, 0, 16)
+
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			t.Fatalf("failed to scan column name: %v", err)
+		}
+
+		names = append(names, name)
+	}
+
+	sort.Strings(names)
+
+	return names
 }
