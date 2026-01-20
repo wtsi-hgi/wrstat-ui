@@ -44,6 +44,21 @@ var errForcedFailure = errors.New("forced failure")
 
 const testMountPath = "/mnt/test/"
 
+const (
+	dgutaWriterTestActiveSnapshotQuery = "SELECT toString(snapshot_id), updated_at FROM wrstat_mounts_active " +
+		"WHERE mount_path = ?"
+	dgutaWriterTestSelectGIDQuery = "SELECT gid FROM wrstat_dguta WHERE mount_path = ? " +
+		"AND snapshot_id = toUUID(?) AND dir = ?"
+	dgutaWriterTestSelectChildQuery = "SELECT child FROM wrstat_children WHERE mount_path = ? " +
+		"AND snapshot_id = toUUID(?) AND parent_dir = ?"
+
+	dgutaWriterTestCountActiveMountQuery = "SELECT count() FROM wrstat_mounts_active WHERE mount_path = ?"
+	dgutaWriterTestCountDGUTAQuery       = "SELECT count() FROM wrstat_dguta WHERE mount_path = ? " +
+		"AND snapshot_id = toUUID(?)"
+	dgutaWriterTestCountChildrenQuery = "SELECT count() FROM wrstat_children WHERE mount_path = ? " +
+		"AND snapshot_id = toUUID(?)"
+)
+
 func TestClickHouseDGUTAWriter(t *testing.T) {
 	Convey("DGUTAWriter enforces required metadata", t, func() {
 		os.Setenv("WRSTAT_ENV", "test")
@@ -94,7 +109,7 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 		defer cancel()
 
 		rows, err := conn.Query(ctx,
-			"SELECT toString(snapshot_id), updated_at FROM wrstat_mounts_active WHERE mount_path = ?",
+			dgutaWriterTestActiveSnapshotQuery,
 			testMountPath,
 		)
 		So(err, ShouldBeNil)
@@ -140,7 +155,7 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 		defer cancel()
 
 		rows, err := conn.Query(ctx,
-			"SELECT gid FROM wrstat_dguta WHERE mount_path = ? AND snapshot_id = toUUID(?) AND dir = ?",
+			dgutaWriterTestSelectGIDQuery,
 			testMountPath,
 			expectedSID.String(),
 			"/",
@@ -157,7 +172,7 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 		So(rows.Next(), ShouldBeFalse)
 
 		childRows, err := conn.Query(ctx,
-			"SELECT child FROM wrstat_children WHERE mount_path = ? AND snapshot_id = toUUID(?) AND parent_dir = ?",
+			dgutaWriterTestSelectChildQuery,
 			testMountPath,
 			expectedSID.String(),
 			"/",
@@ -201,12 +216,12 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 		defer cancel()
 
 		So(countRows(ctx, conn,
-			"SELECT count() FROM wrstat_dguta WHERE mount_path = ? AND snapshot_id = toUUID(?)",
+			dgutaWriterTestCountDGUTAQuery,
 			testMountPath,
 			sid1.String(),
 		), ShouldEqual, 1)
 		So(countRows(ctx, conn,
-			"SELECT count() FROM wrstat_children WHERE mount_path = ? AND snapshot_id = toUUID(?)",
+			dgutaWriterTestCountChildrenQuery,
 			testMountPath,
 			sid1.String(),
 		), ShouldEqual, 1)
@@ -214,23 +229,23 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 		writeSingleDGUTARecord(cfg, updatedAt2, dir, 222, "/new/")
 
 		So(countRows(ctx, conn,
-			"SELECT count() FROM wrstat_dguta WHERE mount_path = ? AND snapshot_id = toUUID(?)",
+			dgutaWriterTestCountDGUTAQuery,
 			testMountPath,
 			sid1.String(),
 		), ShouldEqual, 0)
 		So(countRows(ctx, conn,
-			"SELECT count() FROM wrstat_children WHERE mount_path = ? AND snapshot_id = toUUID(?)",
+			dgutaWriterTestCountChildrenQuery,
 			testMountPath,
 			sid1.String(),
 		), ShouldEqual, 0)
 
 		So(countRows(ctx, conn,
-			"SELECT count() FROM wrstat_dguta WHERE mount_path = ? AND snapshot_id = toUUID(?)",
+			dgutaWriterTestCountDGUTAQuery,
 			testMountPath,
 			sid2.String(),
 		), ShouldEqual, 1)
 		So(countRows(ctx, conn,
-			"SELECT count() FROM wrstat_children WHERE mount_path = ? AND snapshot_id = toUUID(?)",
+			dgutaWriterTestCountChildrenQuery,
 			testMountPath,
 			sid2.String(),
 		), ShouldEqual, 1)
@@ -274,16 +289,16 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 		defer cancel()
 
 		So(countRows(ctx, conn,
-			"SELECT count() FROM wrstat_mounts_active WHERE mount_path = ?",
+			dgutaWriterTestCountActiveMountQuery,
 			testMountPath,
 		), ShouldEqual, 0)
 		So(countRows(ctx, conn,
-			"SELECT count() FROM wrstat_dguta WHERE mount_path = ? AND snapshot_id = toUUID(?)",
+			dgutaWriterTestCountDGUTAQuery,
 			testMountPath,
 			sid.String(),
 		), ShouldEqual, 0)
 		So(countRows(ctx, conn,
-			"SELECT count() FROM wrstat_children WHERE mount_path = ? AND snapshot_id = toUUID(?)",
+			dgutaWriterTestCountChildrenQuery,
 			testMountPath,
 			sid.String(),
 		), ShouldEqual, 0)

@@ -70,7 +70,7 @@ func TestClickHouseDatabaseInfo(t *testing.T) {
 		defer cancel()
 
 		So(conn.Exec(ctx,
-			"INSERT INTO wrstat_mounts (mount_path, switched_at, active_snapshot, updated_at) VALUES (?, ?, ?, ?)",
+			testInsertMountStmt,
 			mountPath,
 			time.Date(2026, 1, 8, 12, 0, 0, 0, time.UTC),
 			oldSID,
@@ -78,9 +78,7 @@ func TestClickHouseDatabaseInfo(t *testing.T) {
 		), ShouldBeNil)
 
 		So(conn.Exec(ctx,
-			"INSERT INTO wrstat_dguta (mount_path, snapshot_id, dir, gid, uid, ft, age, count, size, "+
-				"atime_min, mtime_max, atime_buckets, mtime_buckets) "+
-				"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+			testInsertDGUTAStmt,
 			mountPath,
 			oldSID,
 			mountPath,
@@ -97,7 +95,7 @@ func TestClickHouseDatabaseInfo(t *testing.T) {
 		), ShouldBeNil)
 
 		So(conn.Exec(ctx,
-			"INSERT INTO wrstat_children (mount_path, snapshot_id, parent_dir, child) VALUES (?, ?, ?, ?)",
+			testInsertChildrenStmt,
 			mountPath,
 			oldSID,
 			mountPath,
@@ -105,7 +103,7 @@ func TestClickHouseDatabaseInfo(t *testing.T) {
 		), ShouldBeNil)
 
 		So(conn.Exec(ctx,
-			"INSERT INTO wrstat_mounts (mount_path, switched_at, active_snapshot, updated_at) VALUES (?, ?, ?, ?)",
+			testInsertMountStmt,
 			mountPath,
 			time.Date(2026, 1, 9, 12, 0, 0, 0, time.UTC),
 			newSID,
@@ -119,9 +117,7 @@ func TestClickHouseDatabaseInfo(t *testing.T) {
 		dirB := mountPath + "a/"
 
 		So(conn.Exec(ctx,
-			"INSERT INTO wrstat_dguta (mount_path, snapshot_id, dir, gid, uid, ft, age, count, size, "+
-				"atime_min, mtime_max, atime_buckets, mtime_buckets) "+
-				"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+			testInsertDGUTAStmt,
 			mountPath,
 			newSID,
 			dirA,
@@ -138,9 +134,7 @@ func TestClickHouseDatabaseInfo(t *testing.T) {
 		), ShouldBeNil)
 
 		So(conn.Exec(ctx,
-			"INSERT INTO wrstat_dguta (mount_path, snapshot_id, dir, gid, uid, ft, age, count, size, "+
-				"atime_min, mtime_max, atime_buckets, mtime_buckets) "+
-				"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+			testInsertDGUTAStmt,
 			mountPath,
 			newSID,
 			dirA,
@@ -157,9 +151,7 @@ func TestClickHouseDatabaseInfo(t *testing.T) {
 		), ShouldBeNil)
 
 		So(conn.Exec(ctx,
-			"INSERT INTO wrstat_dguta (mount_path, snapshot_id, dir, gid, uid, ft, age, count, size, "+
-				"atime_min, mtime_max, atime_buckets, mtime_buckets) "+
-				"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+			testInsertDGUTAStmt,
 			mountPath,
 			newSID,
 			dirB,
@@ -176,7 +168,7 @@ func TestClickHouseDatabaseInfo(t *testing.T) {
 		), ShouldBeNil)
 
 		So(conn.Exec(ctx,
-			"INSERT INTO wrstat_children (mount_path, snapshot_id, parent_dir, child) VALUES (?, ?, ?, ?)",
+			testInsertChildrenStmt,
 			mountPath,
 			newSID,
 			dirA,
@@ -184,7 +176,7 @@ func TestClickHouseDatabaseInfo(t *testing.T) {
 		), ShouldBeNil)
 
 		So(conn.Exec(ctx,
-			"INSERT INTO wrstat_children (mount_path, snapshot_id, parent_dir, child) VALUES (?, ?, ?, ?)",
+			testInsertChildrenStmt,
 			mountPath,
 			newSID,
 			dirA,
@@ -192,7 +184,7 @@ func TestClickHouseDatabaseInfo(t *testing.T) {
 		), ShouldBeNil)
 
 		So(conn.Exec(ctx,
-			"INSERT INTO wrstat_children (mount_path, snapshot_id, parent_dir, child) VALUES (?, ?, ?, ?)",
+			testInsertChildrenStmt,
 			mountPath,
 			newSID,
 			dirB,

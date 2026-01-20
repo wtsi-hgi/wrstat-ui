@@ -47,6 +47,8 @@ var (
 
 const defaultQueryTimeout = 10 * time.Second
 
+const createDatabaseStmtPrefix = "CREATE DATABASE IF NOT EXISTS "
+
 // Client is the public ClickHouse-backed client for the extra-goal file APIs.
 //
 // It intentionally does not expose any clickhouse-go types.
@@ -120,7 +122,7 @@ func ensureDatabaseExists(ctx context.Context, opts *ch.Options, database string
 
 	defer func() { _ = conn.Close() }()
 
-	stmt := "CREATE DATABASE IF NOT EXISTS " + quoteIdent(database)
+	stmt := createDatabaseStmtPrefix + quoteIdent(database)
 	if err := conn.Exec(ctx, stmt); err != nil {
 		return fmt.Errorf("clickhouse: failed to create database %q: %w", database, err)
 	}

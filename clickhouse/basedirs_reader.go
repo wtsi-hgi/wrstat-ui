@@ -121,6 +121,8 @@ WHERE mount_path = ? AND gid = ?
 ORDER BY date ASC
 `
 
+const mountTimestampsQuery = "SELECT mount_path, updated_at FROM wrstat_mounts_active"
+
 type groupUsageScanned struct {
 	gid         uint32
 	basedir     string
@@ -419,9 +421,7 @@ func (r *chBaseDirsReader) MountTimestamps() (map[string]time.Time, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), queryTimeout(r.cfg))
 	defer cancel()
 
-	query := "SELECT mount_path, updated_at FROM wrstat_mounts_active"
-
-	rows, err := r.conn.Query(ctx, query)
+	rows, err := r.conn.Query(ctx, mountTimestampsQuery)
 	if err != nil {
 		return nil, fmt.Errorf("clickhouse: failed to query mount timestamps: %w", err)
 	}

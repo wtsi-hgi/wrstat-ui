@@ -37,6 +37,11 @@ import (
 	. "github.com/smartystreets/goconvey/convey"
 )
 
+const (
+	testSystemTablesQuery  = "SELECT name FROM system.tables WHERE database = ? ORDER BY name"
+	testSystemColumnsQuery = "SELECT name FROM system.columns WHERE database = ? AND table = ? ORDER BY name"
+)
+
 func TestNewClientBootstrapsSchema(t *testing.T) {
 	Convey("NewClient bootstraps database and schema", t, func() {
 		os.Setenv("WRSTAT_ENV", "test")
@@ -102,7 +107,7 @@ func TestNewClientBootstrapsSchema(t *testing.T) {
 func listTableNames(ctx context.Context, t *testing.T, conn ch.Conn, database string) []string {
 	t.Helper()
 
-	rows, err := conn.Query(ctx, "SELECT name FROM system.tables WHERE database = ? ORDER BY name", database)
+	rows, err := conn.Query(ctx, testSystemTablesQuery, database)
 	if err != nil {
 		t.Fatalf("failed to query system.tables: %v", err)
 	}
@@ -136,7 +141,7 @@ func listColumnNames(
 
 	rows, err := conn.Query(
 		ctx,
-		"SELECT name FROM system.columns WHERE database = ? AND table = ? ORDER BY name",
+		testSystemColumnsQuery,
 		database,
 		table,
 	)
