@@ -28,6 +28,7 @@ package clickhouse
 
 import (
 	"context"
+	"errors"
 	"os"
 	"sync/atomic"
 	"testing"
@@ -215,6 +216,12 @@ func TestOpenProviderPolling(t *testing.T) {
 
 const providerTestMountPath = "/mnt/test/"
 
+var (
+	errProviderTestErr1 = errors.New("provider test err1")
+	errProviderTestErr2 = errors.New("provider test err2")
+	errProviderTestErr3 = errors.New("provider test err3")
+)
+
 func TestOpenProviderBaseDirs(t *testing.T) {
 	Convey("OpenProvider returns a basedirs reader", t, func() {
 		os.Setenv("WRSTAT_ENV", "test")
@@ -395,5 +402,85 @@ func TestOpenProviderUpdateSwapSemantics(t *testing.T) {
 
 		So(builtDB1.closed.Load(), ShouldBeTrue)
 		So(builtBD1.closed.Load(), ShouldBeTrue)
+	})
+}
+
+func TestProviderOnErrorQueueAndSerialization(t *testing.T) {
+	Convey("OnError callbacks are serialised and errors are not dropped", t, func() {
+		cp := &chProvider{errCh: make(chan struct{}, 1)}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+
+		go func() {
+			defer close(done)
+
+			cp.errorLoop(ctx)
+		}()
+
+		Reset(func() {
+			cancel()
+
+			select {
+			case <-done:
+				// ok
+			case <-time.After(2 * time.Second):
+				t.Fatalf("timed out waiting for error loop to stop")
+			}
+		})
+
+		allowFirstReturn := make(chan struct{})
+		got := make(chan error, 3)
+
+		var (
+			inCallback atomic.Int32
+			calls      atomic.Int32
+			concurrent atomic.Bool
+		)
+
+		cp.OnError(func(err error) {
+			if inCallback.Add(1) != 1 {
+				concurrent.Store(true)
+			}
+			defer inCallback.Add(-1)
+
+			got <- err
+
+			if calls.Add(1) == 1 {
+				<-allowFirstReturn
+			}
+		})
+
+		cp.queueError(errProviderTestErr1)
+
+		select {
+		case err := <-got:
+			So(err, ShouldEqual, errProviderTestErr1)
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for first OnError")
+		}
+
+		// While the callback is blocked, queue multiple errors. None should be
+		// dropped, and callback invocations must not overlap.
+		cp.queueError(errProviderTestErr2)
+		cp.queueError(errProviderTestErr3)
+
+		close(allowFirstReturn)
+
+		select {
+		case err := <-got:
+			So(err, ShouldEqual, errProviderTestErr2)
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for second OnError")
+		}
+
+		select {
+		case err := <-got:
+			So(err, ShouldEqual, errProviderTestErr3)
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for third OnError")
+		}
+
+		So(concurrent.Load(), ShouldBeFalse)
 	})
 }
