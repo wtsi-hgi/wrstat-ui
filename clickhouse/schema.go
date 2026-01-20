@@ -44,6 +44,11 @@ var (
 	errUnexpectedSchemaVersion = errors.New("clickhouse: unexpected schema versions")
 )
 
+const (
+	schemaVersionStatsQuery = "SELECT count(), min(version), max(version) FROM wrstat_schema_version"
+	insertSchemaVersionStmt = "INSERT INTO wrstat_schema_version (version) VALUES (1)"
+)
+
 //go:embed schema/*.sql
 var schemaFS embed.FS
 
@@ -135,7 +140,7 @@ func ensureSchemaVersion(ctx context.Context, execer ch.Conn) error {
 }
 
 func schemaVersionStatsFromDB(ctx context.Context, q ch.Conn) (uint64, *uint32, *uint32, error) {
-	rows, err := q.Query(ctx, "SELECT count(), min(version), max(version) FROM wrstat_schema_version")
+	rows, err := q.Query(ctx, schemaVersionStatsQuery)
 	if err != nil {
 		return 0, nil, nil, fmt.Errorf("clickhouse: failed to query schema version stats: %w", err)
 	}
@@ -188,7 +193,7 @@ func formatNullableUint32(v *uint32) string {
 }
 
 func insertSchemaVersion(ctx context.Context, execer ch.Conn) error {
-	execErr := execer.Exec(ctx, "INSERT INTO wrstat_schema_version (version) VALUES (1)")
+	execErr := execer.Exec(ctx, insertSchemaVersionStmt)
 	if execErr != nil {
 		return fmt.Errorf("clickhouse: failed to set schema version: %w", execErr)
 	}

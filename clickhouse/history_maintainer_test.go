@@ -29,15 +29,21 @@ package clickhouse
 import (
 	"context"
 	"os"
+	"sort"
 	"testing"
 	"time"
 
 	. "github.com/smartystreets/goconvey/convey"
-	"github.com/wtsi-hgi/wrstat-ui/db"
 )
 
-func TestClickHouseDatabaseDirInfo(t *testing.T) {
-	Convey("DirInfo returns a summary from wrstat_dguta for active snapshot", t, func() {
+const (
+	testInsertBasedirsHistoryStmt = "INSERT INTO wrstat_basedirs_history (mount_path, gid, date, " +
+		"usage_size, quota_size, usage_inodes, quota_inodes) VALUES (?, ?, ?, ?, ?, ?, ?)"
+	testSelectBasedirsHistoryRowsQuery = "SELECT gid, mount_path FROM wrstat_basedirs_history ORDER BY gid"
+)
+
+func TestClickHouseHistoryMaintainer(t *testing.T) {
+	Convey("NewHistoryMaintainer can find and clean invalid history rows", t, func() {
 		os.Setenv("WRSTAT_ENV", "test")
 		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
 
@@ -46,63 +52,70 @@ func TestClickHouseDatabaseDirInfo(t *testing.T) {
 		cfg.QueryTimeout = 2 * time.Second
 		cfg.PollInterval = 0
 
-		p, err := OpenProvider(cfg)
+		m, err := NewHistoryMaintainer(cfg)
 		So(err, ShouldBeNil)
-		Reset(func() { So(p.Close(), ShouldBeNil) })
-
-		cp, ok := p.(*chProvider)
-		So(ok, ShouldBeTrue)
-
-		dbch := newClickHouseDatabase(cfg, cp.conn)
+		So(m, ShouldNotBeNil)
 
 		conn := th.openConn(cfg.DSN)
 
 		Reset(func() { So(conn.Close(), ShouldBeNil) })
 
-		const (
-			mountPath = "/mnt/test/"
-			dir       = mountPath
-		)
-
-		updatedAt := time.Date(2026, 1, 9, 12, 0, 0, 0, time.UTC)
-		sid := snapshotID(mountPath, updatedAt)
-
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		So(conn.Exec(ctx,
-			testInsertMountStmt,
-			mountPath,
-			time.Now(),
-			sid,
-			updatedAt,
-		), ShouldBeNil)
-
-		atimeBuckets := []uint64{1, 0, 0, 0, 0, 0, 0, 0, 0}
-		mtimeBuckets := []uint64{0, 1, 0, 0, 0, 0, 0, 0, 0}
+		keepPrefix := "/mnt/keep/"
+		keepMount := "/mnt/keep/a/"
+		dropMount := "/mnt/drop/b/"
 
 		So(conn.Exec(ctx,
-			testInsertDGUTAStmt,
-			mountPath,
-			sid,
-			dir,
+			testInsertBasedirsHistoryStmt,
+			keepMount,
 			uint32(7),
-			uint32(9),
-			uint16(db.DGUTAFileTypeBam),
-			uint8(db.DGUTAgeAll),
+			time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+			uint64(1),
 			uint64(2),
-			uint64(123),
-			int64(10),
-			int64(20),
-			atimeBuckets,
-			mtimeBuckets,
+			uint64(3),
+			uint64(4),
 		), ShouldBeNil)
 
-		sum, err := dbch.DirInfo(dir, &db.Filter{Age: db.DGUTAgeAll})
+		So(conn.Exec(ctx,
+			testInsertBasedirsHistoryStmt,
+			dropMount,
+			uint32(9),
+			time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC),
+			uint64(10),
+			uint64(20),
+			uint64(30),
+			uint64(40),
+		), ShouldBeNil)
+
+		issues, err := m.FindInvalidHistory(keepPrefix)
 		So(err, ShouldBeNil)
-		So(sum, ShouldNotBeNil)
-		So(sum.Count, ShouldEqual, 2)
-		So(sum.Size, ShouldEqual, 123)
-		So(sum.Modtime, ShouldResemble, updatedAt)
+		So(issues, ShouldNotBeNil)
+		So(len(issues), ShouldEqual, 1)
+		So(issues[0].GID, ShouldEqual, 9)
+		So(issues[0].MountPath, ShouldEqual, dropMount)
+
+		So(m.CleanHistoryForMount(keepPrefix), ShouldBeNil)
+
+		rows, err := conn.Query(ctx, testSelectBasedirsHistoryRowsQuery)
+		So(err, ShouldBeNil)
+
+		defer func() { _ = rows.Close() }()
+
+		types := make([]string, 0, 2)
+
+		for rows.Next() {
+			var (
+				gid       uint32
+				mountPath string
+			)
+
+			So(rows.Scan(&gid, &mountPath), ShouldBeNil)
+			types = append(types, mountPath)
+		}
+
+		sort.Strings(types)
+		So(types, ShouldResemble, []string{keepMount})
 	})
 }

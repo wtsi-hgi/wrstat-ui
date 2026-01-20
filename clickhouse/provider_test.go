@@ -79,7 +79,7 @@ func TestOpenProviderPolling(t *testing.T) {
 
 		err = conn.Exec(
 			ctx,
-			"INSERT INTO wrstat_mounts (mount_path, switched_at, active_snapshot, updated_at) VALUES (?, ?, ?, ?)",
+			testInsertMountStmt,
 			mountPath,
 			time.Now(),
 			sid,
@@ -128,7 +128,7 @@ func TestOpenProviderPolling(t *testing.T) {
 
 		err = conn.Exec(
 			ctx,
-			"INSERT INTO wrstat_mounts (mount_path, switched_at, active_snapshot, updated_at) VALUES (?, ?, ?, ?)",
+			testInsertMountStmt,
 			mountPath,
 			time.Now(),
 			sid,
