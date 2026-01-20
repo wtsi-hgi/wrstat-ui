@@ -370,9 +370,7 @@ func (w *dgutaWriter) dropPartition(ctx context.Context, query, sid string) erro
 	var ex *proto.Exception
 	if errors.As(err, &ex) {
 		// ClickHouse returns UNKNOWN_PARTITION for first-time snapshots.
-		if strings.Contains(ex.Message, "UNKNOWN_PARTITION") ||
-			strings.Contains(ex.Message, "Unknown partition") {
-
+		if strings.Contains(ex.Message, "UNKNOWN_PARTITION") || strings.Contains(ex.Message, "Unknown partition") {
 			return nil
 		}
 	}
