@@ -67,7 +67,8 @@ type chProvider struct {
 	errCh    chan struct{}
 
 	pendingFingerprint string
-	pendingErr         error
+	pendingErrs        []error
+	pendingErrHead     int
 
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
@@ -306,7 +307,7 @@ func (p *chProvider) queueError(err error) {
 	}
 
 	p.mu.Lock()
-	p.pendingErr = err
+	p.pendingErrs = append(p.pendingErrs, err)
 	p.mu.Unlock()
 
 	select {
@@ -409,21 +410,51 @@ func (p *chProvider) closeOldReaders(oldDB db.Database, oldBD basedirs.Reader) {
 
 func (p *chProvider) errorLoop(ctx context.Context) {
 	for {
-		select {
-		case <-ctx.Done():
+		if !p.waitForSignal(ctx, p.errCh) {
 			return
-		case <-p.errCh:
 		}
 
-		p.mu.RLock()
-		err := p.pendingErr
-		cb := p.onError
-		p.mu.RUnlock()
+		p.drainErrors(ctx)
+	}
+}
 
-		if cb != nil && err != nil {
+func (p *chProvider) drainErrors(ctx context.Context) {
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+
+		cb, err := p.pendingError()
+		if err == nil {
+			return
+		}
+
+		if cb != nil {
 			cb(err)
 		}
 	}
+}
+
+func (p *chProvider) pendingError() (func(error), error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.pendingErrHead >= len(p.pendingErrs) {
+		p.pendingErrs = nil
+		p.pendingErrHead = 0
+
+		return p.onError, nil
+	}
+
+	err := p.pendingErrs[p.pendingErrHead]
+	p.pendingErrHead++
+
+	if p.pendingErrHead >= len(p.pendingErrs) {
+		p.pendingErrs = nil
+		p.pendingErrHead = 0
+	}
+
+	return p.onError, err
 }
 
 func OpenProvider(cfg Config) (provider.Provider, error) {
