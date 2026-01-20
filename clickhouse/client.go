@@ -35,6 +35,7 @@ import (
 	"time"
 
 	ch "github.com/ClickHouse/clickhouse-go/v2"
+	"github.com/wtsi-hgi/wrstat-ui/basedirs"
 )
 
 var (
@@ -53,12 +54,21 @@ const createDatabaseStmtPrefix = "CREATE DATABASE IF NOT EXISTS "
 //
 // It intentionally does not expose any clickhouse-go types.
 type Client struct {
+	cfg Config
+
 	conn ch.Conn
+
+	mountPoints basedirs.MountPoints
 }
 
 // NewClient returns a new Client configured to use the ClickHouse database.
 func NewClient(cfg Config) (*Client, error) {
 	if err := validateConfig(cfg); err != nil {
+		return nil, err
+	}
+
+	mountPoints, err := mountPointsFromConfig(cfg)
+	if err != nil {
 		return nil, err
 	}
 
@@ -75,7 +85,20 @@ func NewClient(cfg Config) (*Client, error) {
 		return nil, err
 	}
 
-	return &Client{conn: conn}, nil
+	return &Client{cfg: cfg, conn: conn, mountPoints: mountPoints}, nil
+}
+
+func mountPointsFromConfig(cfg Config) (basedirs.MountPoints, error) {
+	if len(cfg.MountPoints) > 0 {
+		return basedirs.ValidateMountPoints(cfg.MountPoints), nil
+	}
+
+	mountPoints, err := basedirs.GetMountPoints()
+	if err != nil {
+		return nil, fmt.Errorf("clickhouse: failed to auto-discover mountpoints: %w", err)
+	}
+
+	return mountPoints, nil
 }
 
 func (c *Client) Close() error {
