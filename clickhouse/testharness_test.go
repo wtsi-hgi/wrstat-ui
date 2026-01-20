@@ -50,6 +50,18 @@ import (
 	ch "github.com/ClickHouse/clickhouse-go/v2"
 )
 
+const (
+	testSchemaVersionsQuery = "SELECT version FROM wrstat_schema_version"
+	testPingQuery           = "SELECT 1"
+	testInsertMountStmt     = "INSERT INTO wrstat_mounts (mount_path, switched_at, " +
+		"active_snapshot, updated_at) VALUES (?, ?, ?, ?)"
+	testInsertChildrenStmt = "INSERT INTO wrstat_children (mount_path, snapshot_id, " +
+		"parent_dir, child) VALUES (?, ?, ?, ?)"
+	testInsertDGUTAStmt = "INSERT INTO wrstat_dguta (mount_path, snapshot_id, dir, gid, uid, ft, age, count, size, " +
+		"atime_min, mtime_max, atime_buckets, mtime_buckets) " +
+		"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+)
+
 type clickHouseTestHarness struct {
 	t        *testing.T
 	tcpPort  int
@@ -169,7 +181,7 @@ func (h *clickHouseTestHarness) schemaVersions(cfg Config) []uint32 {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	rows, err := conn.Query(ctx, "SELECT version FROM wrstat_schema_version")
+	rows, err := conn.Query(ctx, testSchemaVersionsQuery)
 	if err != nil {
 		h.t.Fatalf("failed to query schema versions: %v", err)
 	}
@@ -215,7 +227,7 @@ func (h *clickHouseTestHarness) waitUntilReady() {
 		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
-		err := conn.Exec(ctx, "SELECT 1")
+		err := conn.Exec(ctx, testPingQuery)
 
 		cancel()
 

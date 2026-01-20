@@ -41,6 +41,8 @@ import (
 
 const mountsActiveRowsInitialCap = 16
 
+const mountsActiveRowsQuery = "SELECT mount_path, snapshot_id, updated_at FROM wrstat_mounts_active ORDER BY mount_path"
+
 type mountsActiveRow struct {
 	mountPath  string
 	snapshotID string
@@ -203,9 +205,7 @@ func fingerprintForMountsActive(rows []mountsActiveRow) string {
 }
 
 func (p *chProvider) mountsActiveRows(ctx context.Context) ([]mountsActiveRow, error) {
-	query := "SELECT mount_path, snapshot_id, updated_at FROM wrstat_mounts_active ORDER BY mount_path"
-
-	rows, err := p.conn.Query(ctx, query)
+	rows, err := p.conn.Query(ctx, mountsActiveRowsQuery)
 	if err != nil {
 		return nil, fmt.Errorf("clickhouse: failed to query mounts_active: %w", err)
 	}

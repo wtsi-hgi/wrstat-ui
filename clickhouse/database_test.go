@@ -70,7 +70,7 @@ func TestClickHouseDatabaseChildren(t *testing.T) {
 		defer cancel()
 
 		So(conn.Exec(ctx,
-			"INSERT INTO wrstat_mounts (mount_path, switched_at, active_snapshot, updated_at) VALUES (?, ?, ?, ?)",
+			testInsertMountStmt,
 			mountPath,
 			time.Now(),
 			sid,
@@ -78,7 +78,7 @@ func TestClickHouseDatabaseChildren(t *testing.T) {
 		), ShouldBeNil)
 
 		So(conn.Exec(ctx,
-			"INSERT INTO wrstat_children (mount_path, snapshot_id, parent_dir, child) VALUES (?, ?, ?, ?)",
+			testInsertChildrenStmt,
 			mountPath,
 			sid,
 			parentDir,
@@ -86,7 +86,7 @@ func TestClickHouseDatabaseChildren(t *testing.T) {
 		), ShouldBeNil)
 
 		So(conn.Exec(ctx,
-			"INSERT INTO wrstat_children (mount_path, snapshot_id, parent_dir, child) VALUES (?, ?, ?, ?)",
+			testInsertChildrenStmt,
 			mountPath,
 			sid,
 			parentDir,
@@ -95,7 +95,7 @@ func TestClickHouseDatabaseChildren(t *testing.T) {
 
 		// duplicate row should be de-duped
 		So(conn.Exec(ctx,
-			"INSERT INTO wrstat_children (mount_path, snapshot_id, parent_dir, child) VALUES (?, ?, ?, ?)",
+			testInsertChildrenStmt,
 			mountPath,
 			sid,
 			parentDir,
