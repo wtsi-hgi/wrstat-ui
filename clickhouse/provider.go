@@ -41,12 +41,11 @@ import (
 
 const mountsActiveRowsInitialCap = 16
 
-const mountsActiveRowsQuery = "SELECT mount_path, snapshot_id, updated_at FROM wrstat_mounts_active ORDER BY mount_path"
+const mountsActiveRowsQuery = "SELECT mount_path, updated_at FROM wrstat_mounts_active ORDER BY mount_path"
 
 type mountsActiveRow struct {
-	mountPath  string
-	snapshotID string
-	updatedAt  time.Time
+	mountPath string
+	updatedAt time.Time
 }
 
 type chProvider struct {
@@ -58,42 +57,75 @@ type chProvider struct {
 	tree *db.Tree
 	bd   basedirs.Reader
 
+	buildReaders func() (db.Database, *db.Tree, basedirs.Reader)
+
 	mu       sync.RWMutex
 	onUpdate func()
 	onError  func(error)
+
+	updateCh chan struct{}
+	errCh    chan struct{}
+
+	pendingFingerprint string
+	pendingErr         error
 
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 }
 
 func (p *chProvider) Tree() *db.Tree {
+	p.mu.RLock()
+	tree := p.tree
+	p.mu.RUnlock()
+
+	if tree != nil {
+		return tree
+	}
+
 	p.mu.Lock()
-	defer p.mu.Unlock()
+	p.ensureReadersLocked()
+	tree = p.tree
+	p.mu.Unlock()
 
-	if p.tree != nil {
-		return p.tree
-	}
-
-	if p.db == nil {
-		p.db = newClickHouseDatabase(p.cfg, p.conn)
-	}
-
-	p.tree = db.NewTree(p.db)
-
-	return p.tree
+	return tree
 }
 
 func (p *chProvider) BaseDirs() basedirs.Reader {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	p.mu.RLock()
+	bd := p.bd
+	p.mu.RUnlock()
 
-	if p.bd != nil {
-		return p.bd
+	if bd != nil {
+		return bd
 	}
 
-	p.bd = newClickHouseBaseDirsReader(p.cfg, p.conn)
+	p.mu.Lock()
+	p.ensureReadersLocked()
+	bd = p.bd
+	p.mu.Unlock()
 
-	return p.bd
+	return bd
+}
+
+func (p *chProvider) ensureReadersLocked() {
+	if p.tree != nil && p.bd != nil {
+		return
+	}
+
+	if p.buildReaders == nil {
+		p.buildReaders = p.defaultBuildReaders
+	}
+
+	dbImpl, tree, bd := p.buildReaders()
+	p.db = dbImpl
+	p.tree = tree
+	p.bd = bd
+}
+
+func (p *chProvider) defaultBuildReaders() (db.Database, *db.Tree, basedirs.Reader) {
+	dbImpl := newClickHouseDatabase(p.cfg, p.conn)
+
+	return dbImpl, db.NewTree(dbImpl), newClickHouseBaseDirsReader(p.cfg, p.conn)
 }
 
 func (p *chProvider) OnUpdate(cb func()) {
@@ -113,17 +145,38 @@ func (p *chProvider) Close() error {
 		return nil
 	}
 
-	if p.cancel != nil {
-		p.cancel()
-	}
+	p.stopPolling()
 
-	p.wg.Wait()
+	bd, dbImpl := p.detachReaders()
+	p.closeOldReaders(dbImpl, bd)
 
 	if p.conn == nil {
 		return nil
 	}
 
 	return p.conn.Close()
+}
+
+func (p *chProvider) stopPolling() {
+	if p.cancel != nil {
+		p.cancel()
+	}
+
+	p.wg.Wait()
+}
+
+func (p *chProvider) detachReaders() (basedirs.Reader, db.Database) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	bd := p.bd
+	dbImpl := p.db
+
+	p.bd = nil
+	p.db = nil
+	p.tree = nil
+
+	return bd, dbImpl
 }
 
 func (p *chProvider) startPolling() {
@@ -138,12 +191,21 @@ func (p *chProvider) startPolling() {
 	ctx, cancel := context.WithCancel(context.Background())
 	p.cancel = cancel
 
+	p.updateCh = make(chan struct{}, 1)
+	p.errCh = make(chan struct{}, 1)
+
+	p.startWorker(ctx, p.pollLoop)
+	p.startWorker(ctx, p.updateLoop)
+	p.startWorker(ctx, p.errorLoop)
+}
+
+func (p *chProvider) startWorker(ctx context.Context, fn func(context.Context)) {
 	p.wg.Add(1)
 
 	go func() {
 		defer p.wg.Done()
 
-		p.pollLoop(ctx)
+		fn(ctx)
 	}()
 }
 
@@ -153,7 +215,7 @@ func (p *chProvider) pollLoop(ctx context.Context) {
 
 	last, err := p.mountsActiveFingerprint(ctx)
 	if err != nil {
-		p.notifyError(err)
+		p.queueError(err)
 	}
 
 	for range ticker.C {
@@ -163,7 +225,7 @@ func (p *chProvider) pollLoop(ctx context.Context) {
 
 		fp, err := p.mountsActiveFingerprint(ctx)
 		if err != nil {
-			p.notifyError(err)
+			p.queueError(err)
 
 			continue
 		}
@@ -173,8 +235,7 @@ func (p *chProvider) pollLoop(ctx context.Context) {
 		}
 
 		last = fp
-
-		p.notifyUpdate()
+		p.queueUpdate(fp)
 	}
 }
 
@@ -195,8 +256,6 @@ func fingerprintForMountsActive(rows []mountsActiveRow) string {
 	for _, row := range rows {
 		b.WriteString(row.mountPath)
 		b.WriteString("|")
-		b.WriteString(row.snapshotID)
-		b.WriteString("|")
 		b.WriteString(row.updatedAt.UTC().Format(time.RFC3339Nano))
 		b.WriteString("\n")
 	}
@@ -216,38 +275,154 @@ func (p *chProvider) mountsActiveRows(ctx context.Context) ([]mountsActiveRow, e
 
 	for rows.Next() {
 		var (
-			mountPath  string
-			snapshotID string
-			updatedAt  time.Time
+			mountPath string
+			updatedAt time.Time
 		)
 
-		if err := rows.Scan(&mountPath, &snapshotID, &updatedAt); err != nil {
+		if err := rows.Scan(&mountPath, &updatedAt); err != nil {
 			return nil, fmt.Errorf("clickhouse: failed to scan mounts_active: %w", err)
 		}
 
-		out = append(out, mountsActiveRow{mountPath: mountPath, snapshotID: snapshotID, updatedAt: updatedAt})
+		out = append(out, mountsActiveRow{mountPath: mountPath, updatedAt: updatedAt})
 	}
 
 	return out, nil
 }
 
-func (p *chProvider) notifyUpdate() {
+func (p *chProvider) queueUpdate(fp string) {
+	p.mu.Lock()
+	p.pendingFingerprint = fp
+	p.mu.Unlock()
+
+	select {
+	case p.updateCh <- struct{}{}:
+	default:
+	}
+}
+
+func (p *chProvider) queueError(err error) {
+	if err == nil {
+		return
+	}
+
+	p.mu.Lock()
+	p.pendingErr = err
+	p.mu.Unlock()
+
+	select {
+	case p.errCh <- struct{}{}:
+	default:
+	}
+}
+
+func (p *chProvider) updateLoop(ctx context.Context) {
+	processed := ""
+
+	for {
+		if !p.waitForSignal(ctx, p.updateCh) {
+			return
+		}
+
+		processed = p.drainUpdates(ctx, processed)
+	}
+}
+
+func (p *chProvider) drainUpdates(ctx context.Context, processed string) string {
+	for {
+		if ctx.Err() != nil {
+			return processed
+		}
+
+		fp, cb := p.pendingUpdate()
+		if fp == "" || fp == processed {
+			return processed
+		}
+
+		processed = fp
+
+		p.swapReadersAndInvoke(cb)
+	}
+}
+
+func (p *chProvider) waitForSignal(ctx context.Context, ch <-chan struct{}) bool {
+	select {
+	case <-ctx.Done():
+		return false
+	case <-ch:
+		return true
+	}
+}
+
+func (p *chProvider) pendingUpdate() (string, func()) {
 	p.mu.RLock()
-	cb := p.onUpdate
-	p.mu.RUnlock()
+	defer p.mu.RUnlock()
+
+	return p.pendingFingerprint, p.onUpdate
+}
+
+func (p *chProvider) swapReadersAndInvoke(cb func()) {
+	newDB, newTree, newBD := p.buildReadersNow()
+	oldDB, oldBD := p.publishReaders(newDB, newTree, newBD)
 
 	if cb != nil {
 		cb()
 	}
+
+	p.closeOldReaders(oldDB, oldBD)
 }
 
-func (p *chProvider) notifyError(err error) {
+func (p *chProvider) buildReadersNow() (db.Database, *db.Tree, basedirs.Reader) {
 	p.mu.RLock()
-	cb := p.onError
+	build := p.buildReaders
 	p.mu.RUnlock()
 
-	if cb != nil {
-		cb(err)
+	if build == nil {
+		return p.defaultBuildReaders()
+	}
+
+	return build()
+}
+
+func (p *chProvider) publishReaders(
+	newDB db.Database,
+	newTree *db.Tree,
+	newBD basedirs.Reader,
+) (db.Database, basedirs.Reader) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	oldDB, oldBD := p.db, p.bd
+	p.db, p.tree, p.bd = newDB, newTree, newBD
+
+	return oldDB, oldBD
+}
+
+func (p *chProvider) closeOldReaders(oldDB db.Database, oldBD basedirs.Reader) {
+	if oldBD != nil {
+		_ = oldBD.Close()
+	}
+
+	if oldDB != nil {
+		_ = oldDB.Close()
+	}
+}
+
+func (p *chProvider) errorLoop(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-p.errCh:
+		}
+
+		p.mu.RLock()
+		err := p.pendingErr
+		cb := p.onError
+		p.mu.RUnlock()
+
+		if cb != nil && err != nil {
+			cb(err)
+		}
 	}
 }
 
@@ -270,6 +445,7 @@ func OpenProvider(cfg Config) (provider.Provider, error) {
 	}
 
 	p := &chProvider{cfg: cfg, conn: conn}
+	p.buildReaders = p.defaultBuildReaders
 	p.startPolling()
 
 	return p, nil
