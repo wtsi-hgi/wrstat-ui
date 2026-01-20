@@ -22,7 +22,7 @@ intervals=(
     ""
 );
 
-output_csv="PI,Programme,Area,3Y (GB),5Y (GB),7Y (GB),Total (GB)\n"
+output_csv="Programme,Area,3Y (GB),5Y (GB),7Y (GB),Total Size(GB)\n"
 
 # Get all team/project directories
 dirpaths=$(wrstat-ui where -d /lustre/ --splits 2)
@@ -51,12 +51,7 @@ for subdir in "${progdirs[@]}"; do
             programme=$(basename $(dirname $(dirname "$area_dir")))
             echo "Processing $subdir - $programme - $area"
 
-            if [[ "$programme" == "humgen" ]]; then
-                PI=$(timeout 2s sg wrstat-share -c "grep '^'$(getent group $area | cut -d: -f3)',' /nfs/wrstat/owners | cut -d, -f2")
-            else
-                PI=""
-            fi
-            line="${PI},${programme},${area}"
+            line="${programme},${area}"
 
             for time in "${intervals[@]}"; do
                 json_output=$(wrstat-ui where -j -d "$area_dir" --unused "$time" --splits 0 --show_ug)
@@ -74,6 +69,6 @@ for subdir in "${progdirs[@]}"; do
     done
 done
 
-echo -e "$output_csv" > tb_report.csv
+echo -e "$output_csv" > backup_summary_report.csv
 
-echo "Report saved to tb_report.csv"
+echo "Report saved to backup_summary_report.csv"
