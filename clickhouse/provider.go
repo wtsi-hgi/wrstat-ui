@@ -54,6 +54,7 @@ type chProvider struct {
 
 	db   db.Database
 	tree *db.Tree
+	bd   basedirs.Reader
 
 	mu       sync.RWMutex
 	onUpdate func()
@@ -81,7 +82,16 @@ func (p *chProvider) Tree() *db.Tree {
 }
 
 func (p *chProvider) BaseDirs() basedirs.Reader {
-	return nil
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.bd != nil {
+		return p.bd
+	}
+
+	p.bd = newClickHouseBaseDirsReader(p.cfg, p.conn)
+
+	return p.bd
 }
 
 func (p *chProvider) OnUpdate(cb func()) {

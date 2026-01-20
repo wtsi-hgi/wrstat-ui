@@ -33,6 +33,8 @@ import (
 	"time"
 
 	. "github.com/smartystreets/goconvey/convey"
+	"github.com/wtsi-hgi/wrstat-ui/db"
+	internaldata "github.com/wtsi-hgi/wrstat-ui/internal/data"
 )
 
 func TestOpenProviderPolling(t *testing.T) {
@@ -140,5 +142,44 @@ func TestOpenProviderPolling(t *testing.T) {
 		case <-time.After(200 * time.Millisecond):
 			// ok
 		}
+	})
+}
+
+func TestOpenProviderBaseDirs(t *testing.T) {
+	Convey("OpenProvider returns a basedirs reader", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 2 * time.Second
+
+		ownersPath, err := internaldata.CreateOwnersCSV(t, internaldata.ExampleOwnersCSV)
+		So(err, ShouldBeNil)
+
+		cfg.OwnersCSVPath = ownersPath
+
+		p, err := OpenProvider(cfg)
+		So(err, ShouldBeNil)
+		So(p, ShouldNotBeNil)
+		Reset(func() { So(p.Close(), ShouldBeNil) })
+
+		bd := p.BaseDirs()
+		So(bd, ShouldNotBeNil)
+
+		mt, err := bd.MountTimestamps()
+		So(err, ShouldBeNil)
+		So(mt, ShouldNotBeNil)
+		So(len(mt), ShouldEqual, 0)
+
+		gu, err := bd.GroupUsage(db.DGUTAgeAll)
+		So(err, ShouldBeNil)
+		So(gu, ShouldNotBeNil)
+		So(len(gu), ShouldEqual, 0)
+
+		uu, err := bd.UserUsage(db.DGUTAgeAll)
+		So(err, ShouldBeNil)
+		So(uu, ShouldNotBeNil)
+		So(len(uu), ShouldEqual, 0)
 	})
 }
