@@ -112,9 +112,15 @@ const statPathQueryTemplate = "WITH (SELECT snapshot_id FROM wrstat_mounts_activ
 	"SELECT %s FROM wrstat_files f PREWHERE f.mount_path = ? AND f.snapshot_id = sid " +
 	"AND f.parent_dir = ? AND f.name = ? LIMIT 1"
 
+const listDirQueryTemplate = "WITH (SELECT snapshot_id FROM wrstat_mounts_active WHERE mount_path = ?) AS sid " +
+	"SELECT %s FROM wrstat_files f PREWHERE f.mount_path = ? AND f.snapshot_id = sid " +
+	"AND f.parent_dir = ? ORDER BY f.name ASC LIMIT ? OFFSET ?"
+
 const isDirQuery = "WITH (SELECT snapshot_id FROM wrstat_mounts_active WHERE mount_path = ?) AS sid " +
 	"SELECT f.entry_type FROM wrstat_files f PREWHERE f.mount_path = ? AND f.snapshot_id = sid " +
 	"AND f.parent_dir = ? AND f.name = ? LIMIT 1"
+
+const defaultFileLimit = 1_000_000
 
 // StatPath returns metadata for an exact file path over the active snapshot of
 // the mount containing the path.
@@ -144,6 +150,86 @@ func (c *Client) StatPath(ctx context.Context, path string, opts StatOptions) (*
 	defer func() { _ = rows.Close() }()
 
 	return firstFileRow(rows, fields)
+}
+
+// ListDir lists direct children (by parent_dir) for the given directory.
+func (c *Client) ListDir(ctx context.Context, dir string, opts ListOptions) ([]FileRow, error) {
+	if c == nil || c.conn == nil {
+		return nil, errClientClosed
+	}
+
+	mountPath, parentDir, err := c.resolveMountAndDir(dir)
+	if err != nil {
+		return nil, err
+	}
+
+	q, fields, err := listDirQuery(opts)
+	if err != nil {
+		return nil, err
+	}
+
+	limit := listLimit(opts.Limit)
+
+	qctx, cancel := context.WithTimeout(ctx, queryTimeout(c.cfg))
+	defer cancel()
+
+	return c.listDirRows(qctx, q, fields, mountPath, parentDir, limit, opts.Offset)
+}
+
+func (c *Client) listDirRows(
+	ctx context.Context,
+	query string,
+	fields []string,
+	mountPath string,
+	parentDir string,
+	limit int64,
+	offset int64,
+) ([]FileRow, error) {
+	rows, err := c.conn.Query(ctx, query, mountPath, mountPath, parentDir, limit, offset)
+	if err != nil {
+		return nil, fmt.Errorf("clickhouse: failed to query ListDir: %w", err)
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	out := make([]FileRow, 0)
+
+	for rows.Next() {
+		var row FileRow
+		if err := scanFileRow(rows, fields, &row); err != nil {
+			return nil, err
+		}
+
+		out = append(out, row)
+	}
+
+	return out, nil
+}
+
+func (c *Client) resolveMountAndDir(dir string) (string, string, error) {
+	mountPath := c.mountPoints.PrefixOf(dir)
+	if mountPath == "" {
+		return "", "", basedirs.ErrInvalidBasePath
+	}
+
+	return mountPath, ensureTrailingSlash(dir), nil
+}
+
+func listLimit(limit int64) int64 {
+	if limit > 0 {
+		return limit
+	}
+
+	return defaultFileLimit
+}
+
+func listDirQuery(opts ListOptions) (string, []string, error) {
+	selectList, fields, err := fileRowSelectList(opts.Fields)
+	if err != nil {
+		return "", nil, err
+	}
+
+	return fmt.Sprintf(listDirQueryTemplate, selectList), fields, nil
 }
 
 func statPathQuery(opts StatOptions) (string, []string, error) {
