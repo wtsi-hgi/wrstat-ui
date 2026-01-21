@@ -35,6 +35,7 @@ import (
 	"time"
 
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
+	"github.com/wtsi-hgi/wrstat-ui/db"
 	"github.com/wtsi-hgi/wrstat-ui/stats"
 )
 
@@ -119,6 +120,10 @@ const listDirQueryTemplate = "WITH (SELECT snapshot_id FROM wrstat_mounts_active
 const isDirQuery = "WITH (SELECT snapshot_id FROM wrstat_mounts_active WHERE mount_path = ?) AS sid " +
 	"SELECT f.entry_type FROM wrstat_files f PREWHERE f.mount_path = ? AND f.snapshot_id = sid " +
 	"AND f.parent_dir = ? AND f.name = ? LIMIT 1"
+
+const permissionAnyInDirQuery = "WITH (SELECT snapshot_id FROM wrstat_mounts_active WHERE mount_path = ?) AS sid " +
+	"SELECT 1 FROM wrstat_dguta d PREWHERE d.mount_path = ? AND d.snapshot_id = sid " +
+	"AND d.dir = ? AND d.age = ? AND (d.uid = ? OR has(?, d.gid)) LIMIT 1"
 
 const defaultFileLimit = 1_000_000
 
@@ -272,6 +277,61 @@ func (c *Client) IsDir(ctx context.Context, path string) (bool, error) {
 	}
 
 	return entryType == uint8(stats.DirType), nil
+}
+
+// PermissionAnyInDir reports whether, in the active snapshot for the mount
+// containing dir, there exists any directory summary row indicating ownership by
+// uid or any gid in gids.
+func (c *Client) PermissionAnyInDir(ctx context.Context, dir string, uid uint32, gids []uint32) (bool, error) {
+	if c == nil || c.conn == nil {
+		return false, errClientClosed
+	}
+
+	mountPath, normalisedDir, err := c.resolveMountAndDir(dir)
+	if err != nil {
+		return false, err
+	}
+
+	gids = ensureNonNilUInt32s(gids)
+
+	return c.permissionAnyInDir(ctx, mountPath, normalisedDir, uid, gids)
+}
+
+func (c *Client) permissionAnyInDir(
+	ctx context.Context,
+	mountPath string,
+	dir string,
+	uid uint32,
+	gids []uint32,
+) (bool, error) {
+	qctx, cancel := context.WithTimeout(ctx, queryTimeout(c.cfg))
+	defer cancel()
+
+	rows, err := c.conn.Query(
+		qctx,
+		permissionAnyInDirQuery,
+		mountPath,
+		mountPath,
+		dir,
+		uint8(db.DGUTAgeAll),
+		uid,
+		gids,
+	)
+	if err != nil {
+		return false, fmt.Errorf("clickhouse: failed to query PermissionAnyInDir: %w", err)
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	return rows.Next(), nil
+}
+
+func ensureNonNilUInt32s(in []uint32) []uint32 {
+	if in == nil {
+		return []uint32{}
+	}
+
+	return in
 }
 
 func (c *Client) resolveMountParentName(path string) (string, string, string, error) {

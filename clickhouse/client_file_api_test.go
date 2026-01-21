@@ -33,6 +33,7 @@ import (
 	"time"
 
 	. "github.com/smartystreets/goconvey/convey"
+	"github.com/wtsi-hgi/wrstat-ui/db"
 	"github.com/wtsi-hgi/wrstat-ui/stats"
 )
 
@@ -337,5 +338,68 @@ func TestClientListDir(t *testing.T) {
 		So(len(rows), ShouldEqual, 2)
 		So(rows[0].Name, ShouldEqual, "b.txt")
 		So(rows[1].Name, ShouldEqual, "c.txt")
+	})
+}
+
+func TestClientPermissionAnyInDir(t *testing.T) {
+	Convey("Client.PermissionAnyInDir checks ownership against dguta rows", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 2 * time.Second
+		cfg.MountPoints = []string{providerTestMountPath}
+
+		c, err := NewClient(cfg)
+		So(err, ShouldBeNil)
+		So(c, ShouldNotBeNil)
+		Reset(func() { So(c.Close(), ShouldBeNil) })
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		const mountPath = providerTestMountPath
+
+		dir := mountPath + "dir/"
+
+		updatedAt := time.Now().UTC().Truncate(time.Second)
+		sid := snapshotID(mountPath, updatedAt)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		So(conn.Exec(ctx, testInsertMountStmt, mountPath, time.Now(), sid, updatedAt), ShouldBeNil)
+
+		So(conn.Exec(
+			ctx,
+			testInsertDGUTAStmt,
+			mountPath,
+			sid,
+			dir,
+			uint32(111),
+			uint32(222),
+			uint16(db.DGUTAFileTypeBam),
+			uint8(db.DGUTAgeAll),
+			uint64(1),
+			uint64(1),
+			int64(1),
+			int64(1),
+			[]uint64{1, 0, 0, 0, 0, 0, 0, 0, 0},
+			[]uint64{1, 0, 0, 0, 0, 0, 0, 0, 0},
+		), ShouldBeNil)
+
+		ok, err := c.PermissionAnyInDir(ctx, mountPath+"dir", 222, nil)
+		So(err, ShouldBeNil)
+		So(ok, ShouldBeTrue)
+
+		ok, err = c.PermissionAnyInDir(ctx, dir, 999, []uint32{111})
+		So(err, ShouldBeNil)
+		So(ok, ShouldBeTrue)
+
+		ok, err = c.PermissionAnyInDir(ctx, dir, 999, []uint32{999})
+		So(err, ShouldBeNil)
+		So(ok, ShouldBeFalse)
 	})
 }
