@@ -29,7 +29,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -38,7 +37,8 @@ import (
 	"github.com/klauspost/pgzip"
 	"github.com/spf13/cobra"
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
-	"github.com/wtsi-hgi/wrstat-ui/bolt"
+	"github.com/wtsi-hgi/wrstat-ui/clickhouse"
+	"github.com/wtsi-hgi/wrstat-ui/internal/mountpath"
 	"github.com/wtsi-hgi/wrstat-ui/internal/summariseutil"
 	"github.com/wtsi-hgi/wrstat-ui/stats"
 	"github.com/wtsi-hgi/wrstat-ui/summary"
@@ -143,6 +143,14 @@ func init() {
 	summariseCmd.Flags().StringVarP(&quotaPath, "quota", "q", "", "csv of gid,disk,size_quota,inode_quota")
 	summariseCmd.Flags().StringVarP(&basedirsConfig, "config", "c", "", "path to basedirs config file")
 	summariseCmd.Flags().StringVarP(&mounts, "mounts", "m", "", "path to a file containing a list of quoted mountpoints")
+
+	// ClickHouse flags (must override env vars if specified).
+	summariseCmd.Flags().StringVarP(&clickhouseDSN, "clickhouse-dsn", "C", "",
+		"ClickHouse DSN (default $WRSTAT_CLICKHOUSE_DSN)")
+	summariseCmd.Flags().StringVarP(&clickhouseDatabase, "clickhouse-database", "D", "",
+		"ClickHouse database name (default $WRSTAT_CLICKHOUSE_DATABASE)")
+	summariseCmd.Flags().StringVar(&clickhouseQueryTO, "query-timeout", "",
+		"Per-query timeout (default $WRSTAT_QUERY_TIMEOUT)")
 }
 
 type compressedFile struct {
@@ -172,59 +180,62 @@ func wrapCompressed(wc *os.File) io.WriteCloser {
 	}
 }
 
-func addBasedirsSummariser(s *summary.Summariser, basedirsDB, basedirsHistoryDB,
-	quotaPath, basedirsConfig, mountpoints string, modtime time.Time) (func() error, error) {
+func addBasedirsSummariser(
+	s *summary.Summariser,
+	store basedirs.Store,
+	quotaPath string,
+	basedirsConfig string,
+	mountpoints string,
+	modtime time.Time,
+) error {
 	quotas, config, err := summariseutil.ParseBasedirConfig(quotaPath, basedirsConfig)
 	if err != nil {
-		return nil, err
-	}
-
-	if err = removeIfExists(basedirsDB); err != nil {
-		return nil, err
+		return err
 	}
 
 	mps, err := summariseutil.ParseMountpointsFromFile(mountpoints)
 	if err != nil {
-		return nil, err
-	}
-
-	store, err := createBasedirsStore(basedirsDB, basedirsHistoryDB, modtime)
-	if err != nil {
-		return nil, err
+		return err
 	}
 
 	bd, err := configureBaseDirsCreator(store, quotas, mps, modtime)
 	if err != nil {
-		_ = store.Close()
-
-		return nil, err
+		return err
 	}
 
 	s.AddDirectoryOperation(sbasedirs.NewBaseDirs(config.PathShouldOutput, bd))
 
-	return store.Close, nil
-}
-
-func removeIfExists(path string) error {
-	err := os.Remove(path)
-	if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return err
-	}
-
 	return nil
 }
 
-func createBasedirsStore(basedirsDB, basedirsHistoryDB string, modtime time.Time) (basedirs.Store, error) {
-	store, err := bolt.NewBaseDirsStore(basedirsDB, basedirsHistoryDB)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create basedirs store: %w", err)
+func deriveMountPathForClickHouseSummarise(basedirsDB, dirgutaDB, defaultDir string) (string, error) {
+	candidates := make([]string, 0, 4)
+
+	if defaultDir != "" {
+		candidates = append(candidates, defaultDir)
+	}
+	if dirgutaDB != "" {
+		candidates = append(candidates, dirgutaDB)
+		candidates = append(candidates, filepath.Dir(dirgutaDB))
+	}
+	if basedirsDB != "" {
+		candidates = append(candidates, filepath.Dir(basedirsDB))
 	}
 
-	mountPath := summariseutil.DeriveMountPathFromOutputDir(basedirsDB)
-	store.SetMountPath(mountPath)
-	store.SetUpdatedAt(modtime)
+	var lastErr error
+	for _, c := range candidates {
+		mp, err := mountpath.FromOutputDir(c)
+		if err == nil {
+			return mp, nil
+		}
+		lastErr = err
+	}
 
-	return store, nil
+	if lastErr == nil {
+		lastErr = errors.New("no output directory available for mount-path derivation")
+	}
+
+	return "", lastErr
 }
 
 func configureBaseDirsCreator(
@@ -350,27 +361,81 @@ func setSummarisers(s *summary.Summariser, mountpoints string, //nolint:gocognit
 		}
 	}
 
-	if basedirsDB != "" {
-		c, err := addBasedirsSummariser(s, basedirsDB, basedirsHistoryDB,
-			quotaPath, basedirsConfig, mountpoints, modtime)
+	if basedirsDB != "" || dirgutaDB != "" {
+		loadClickhouseDotEnv()
+
+		mountPath, err := deriveMountPathForClickHouseSummarise(basedirsDB, dirgutaDB, defaultDir)
 		if err != nil {
 			return nil, err
 		}
 
-		if c != nil {
-			closers = append(closers, c)
-		}
-	}
-
-	if dirgutaDB != "" {
-		c, err := addDirgutaSummariser(s, dirgutaDB, modtime)
+		mps, err := summariseutil.ParseMountpointsFromFile(mountpoints)
 		if err != nil {
 			return nil, err
 		}
 
-		if c != nil {
-			closers = append(closers, c)
+		cfg, err := clickhouseConfigFromEnvAndFlags(
+			clickhouseDSN,
+			clickhouseDatabase,
+			"",
+			mps,
+			"",
+			0,
+			clickhouseQueryTO,
+			defaultQueryTimeout,
+		)
+		if err != nil {
+			return nil, err
 		}
+
+		dw, err := clickhouse.NewDGUTAWriter(cfg)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create dguta writer: %w", err)
+		}
+		dw.SetMountPath(mountPath)
+		dw.SetUpdatedAt(modtime)
+		dw.SetBatchSize(summariseDBBatchSize)
+
+		fi, fiCloser, err := clickhouse.NewFileIngestOperation(cfg, mountPath, modtime)
+		if err != nil {
+			_ = dw.Close()
+			return nil, fmt.Errorf("failed to create file ingest operation: %w", err)
+		}
+
+		var bs basedirs.Store
+		if basedirsDB != "" {
+			bs, err = clickhouse.NewBaseDirsStore(cfg)
+			if err != nil {
+				_ = fiCloser.Close()
+				_ = dw.Close()
+				return nil, fmt.Errorf("failed to create basedirs store: %w", err)
+			}
+
+			bs.SetMountPath(mountPath)
+			bs.SetUpdatedAt(modtime)
+
+			if err := addBasedirsSummariser(s, bs, quotaPath, basedirsConfig, mountpoints, modtime); err != nil {
+				_ = bs.Close()
+				_ = fiCloser.Close()
+				_ = dw.Close()
+				return nil, err
+			}
+		}
+
+		s.AddDirectoryOperation(dirguta.NewDirGroupUserTypeAge(dw))
+		s.AddGlobalOperation(fi)
+
+		closers = append(closers, func() error {
+			// Close order per spec: file ingest -> basedirs store -> DGUTA writer.
+			var cerr error
+			cerr = errors.Join(cerr, fiCloser.Close())
+			if bs != nil {
+				cerr = errors.Join(cerr, bs.Close())
+			}
+			cerr = errors.Join(cerr, dw.Close())
+
+			return cerr
+		})
 	}
 
 	if len(closers) == 0 {
@@ -412,30 +477,4 @@ func addGroupUserSummariser(s *summary.Summariser, groupUser string) error {
 	s.AddGlobalOperation(groupuser.NewByGroupUser(wrapCompressed(gf)))
 
 	return nil
-}
-
-func addDirgutaSummariser(s *summary.Summariser, dirgutaDB string,
-	modtime time.Time) (func() error, error) {
-	if err := os.RemoveAll(dirgutaDB); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return nil, err
-	}
-
-	if err := os.MkdirAll(dirgutaDB, summariseDirPerm); err != nil {
-		return nil, err
-	}
-
-	writer, err := bolt.NewDGUTAWriter(dirgutaDB)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create dguta writer: %w", err)
-	}
-
-	mountPath := summariseutil.DeriveMountPathFromOutputDir(dirgutaDB)
-
-	writer.SetMountPath(mountPath)
-	writer.SetUpdatedAt(modtime)
-	writer.SetBatchSize(summariseDBBatchSize)
-
-	s.AddDirectoryOperation(dirguta.NewDirGroupUserTypeAge(writer))
-
-	return writer.Close, nil
 }
