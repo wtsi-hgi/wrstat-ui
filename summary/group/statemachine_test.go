@@ -41,31 +41,31 @@ type name struct {
 
 var testGroups = [...]PathGroup[name]{ //nolint:gochecknoglobals
 	{
-		Path:  []byte("/some/path/*"),
+		Path:  []byte("/some/path/**"),
 		Group: &name{"testGroup[0]"},
 	},
 	{
-		Path:  []byte("/some/path/temp-*"),
+		Path:  []byte("/some/path/temp-**"),
 		Group: &name{"testGroup[1]"},
 	},
 	{
-		Path:  []byte("/some/path/noBackup/*"),
+		Path:  []byte("/some/path/noBackup/**"),
 		Group: &name{"testGroup[2]"},
 	},
 	{
-		Path:  []byte("/some/other/path/*.txt"),
+		Path:  []byte("/some/other/path/**.txt"),
 		Group: &name{"testGroup[3]"},
 	},
 	{
-		Path:  []byte("/some/other/path/*.tsv*"),
+		Path:  []byte("/some/other/path/**.tsv*"),
 		Group: &name{"testGroup[4]"},
 	},
 	{
-		Path:  []byte("/some/other/path/b/*.other"),
+		Path:  []byte("/some/other/path/b/**.other"),
 		Group: &name{"testGroup[5]"},
 	},
 	{
-		Path:  []byte("/some/other/path/b/c/*"),
+		Path:  []byte("/some/other/path/b/c/**"),
 		Group: &name{"testGroup[6]"},
 	},
 	{
@@ -73,24 +73,40 @@ var testGroups = [...]PathGroup[name]{ //nolint:gochecknoglobals
 		Group: &name{"testGroup[7]"},
 	},
 	{
-		Path:  []byte("/some/test/path/b/*.cram"),
+		Path:  []byte("/some/test/path/b/**.cram"),
 		Group: &name{"testGroup[8]"},
 	},
 	{
-		Path:  []byte("/some/test/path/b/c/*cram"),
+		Path:  []byte("/some/test/path/b/c/**cram"),
 		Group: &name{"testGroup[9]"},
 	},
 	{
-		Path:  []byte("/some/test/path/b/e/*cram"),
+		Path:  []byte("/some/test/path/b/e/**cram"),
 		Group: &name{"testGroup[10]"},
 	},
 	{
-		Path:  []byte("/some/test/path/b/e/*.cram"),
+		Path:  []byte("/some/test/path/b/e/**.cram"),
 		Group: &name{"testGroup[11]"},
 	},
 	{
-		Path:  []byte("/some/test/path/*"),
+		Path:  []byte("/some/test/path/**"),
 		Group: &name{"testGroup[12]"},
+	},
+	{
+		Path:  []byte("/path/dir/a/**.txt"),
+		Group: &name{"testGroup[13]"},
+	},
+	{
+		Path:  []byte("/path/dir/a/*.txt"),
+		Group: &name{"testGroup[14]"},
+	},
+	{
+		Path:  []byte("/path/dir/b/*.txt"),
+		Group: &name{"testGroup[15]"},
+	},
+	{
+		Path:  []byte("/path/dir/c/*/*/*.txt"),
+		Group: &name{"testGroup[16]"},
 	},
 }
 
@@ -133,6 +149,14 @@ func TestStateMachine(t *testing.T) {
 			So(sm.getGroup("/some/test/path/b/e/a.c"), ShouldEqual, testGroups[12].Group)
 			So(sm.getGroup("/some/test/path/b/e/a.cr"), ShouldEqual, testGroups[12].Group)
 			So(sm.getGroup("/some/test/path/b/e/a.cra"), ShouldEqual, testGroups[12].Group)
+			So(sm.getGroup("/path/dir/a/b.txt"), ShouldEqual, testGroups[14].Group)
+			So(sm.getGroup("/path/dir/a/b/c.txt"), ShouldEqual, testGroups[13].Group)
+			So(sm.getGroup("/path/dir/b/c.txt"), ShouldEqual, testGroups[15].Group)
+			So(sm.getGroup("/path/dir/b/c/d.txt"), ShouldEqual, nil)
+			So(sm.getGroup("/path/dir/c/d.txt"), ShouldEqual, nil)
+			So(sm.getGroup("/path/dir/c/d/e.txt"), ShouldEqual, nil)
+			So(sm.getGroup("/path/dir/c/d/e/f.txt"), ShouldEqual, testGroups[16].Group)
+			So(sm.getGroup("/path/dir/c/d/e/f/g.txt"), ShouldEqual, nil)
 		})
 	})
 }
