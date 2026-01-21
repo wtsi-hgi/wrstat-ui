@@ -28,7 +28,7 @@ package cmd
 
 import (
 	"github.com/spf13/cobra"
-	"github.com/wtsi-hgi/wrstat-ui/bolt"
+	"github.com/wtsi-hgi/wrstat-ui/clickhouse"
 )
 
 // dbinfoCmd represents the server command.
@@ -38,29 +38,34 @@ var dbinfoCmd = &cobra.Command{
 	Long: `Get summary information on the databases.
 
 This sub-command reports some summary information about the databases used by
-the server. Provide the path to your 'wrstat multi -f' output directory.
+the server.
 
 NB: for large databases, this can take hours to run.
 `,
 	Run: func(_ *cobra.Command, args []string) {
-		if len(args) != 1 {
-			die("you must supply the path to your 'wrstat multi -f' output directory")
+		loadClickhouseDotEnv()
+
+		if len(args) > 0 {
+			warn("dbinfo: ignoring legacy output directory argument")
 		}
 
-		if ownersPath == "" {
-			die("you must supply --owners")
-		}
-
-		cfg := bolt.Config{
-			BasePath:      args[0],
-			DGUTADBName:   dgutaDBsSuffix,
-			BaseDirDBName: basedirBasename,
-			OwnersCSVPath: ownersPath,
-		}
-
-		p, err := bolt.OpenProvider(cfg)
+		cfg, err := clickhouseConfigFromEnvAndFlags(
+			clickhouseDSN,
+			clickhouseDatabase,
+			ownersPath,
+			nil,
+			"",
+			0,
+			clickhouseQueryTO,
+			defaultQueryTimeout,
+		)
 		if err != nil {
-			die("failed to open provider: %s", err)
+			die("failed to build ClickHouse config: %s", err)
+		}
+
+		p, err := clickhouse.OpenProvider(cfg)
+		if err != nil {
+			die("failed to open clickhouse provider: %s", err)
 		}
 		defer p.Close()
 
@@ -88,5 +93,11 @@ NB: for large databases, this can take hours to run.
 
 func init() {
 	RootCmd.AddCommand(dbinfoCmd)
-	dbinfoCmd.Flags().StringVarP(&ownersPath, "owners", "o", "", "path to owners csv file")
+	dbinfoCmd.Flags().StringVarP(&clickhouseDSN, "clickhouse-dsn", "C", "",
+		"ClickHouse DSN (default $WRSTAT_CLICKHOUSE_DSN)")
+	dbinfoCmd.Flags().StringVarP(&clickhouseDatabase, "clickhouse-database", "D", "",
+		"ClickHouse database name (default $WRSTAT_CLICKHOUSE_DATABASE)")
+	dbinfoCmd.Flags().StringVar(&clickhouseQueryTO, "query-timeout", "",
+		"per-query timeout (default $WRSTAT_QUERY_TIMEOUT or 30s)")
+	dbinfoCmd.Flags().StringVarP(&ownersPath, "owners", "o", "", "path to owners csv file (optional)")
 }

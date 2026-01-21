@@ -37,17 +37,17 @@ import (
 
 	"github.com/inconshreveable/log15"
 	"github.com/spf13/cobra"
-	"github.com/wtsi-hgi/wrstat-ui/bolt"
+	"github.com/wtsi-hgi/wrstat-ui/clickhouse"
 	"github.com/wtsi-hgi/wrstat-ui/internal/summariseutil"
 	"github.com/wtsi-hgi/wrstat-ui/server"
 )
 
 const (
-	sentinelPollFrequencty   = 1 * time.Minute
-	serverTokenBasename      = ".wrstat.servertoken"
-	dgutaDBsSuffix           = "dguta.dbs"
-	basedirBasename          = "basedirs.db"
-	dgutaDBsSentinelBasename = ".dguta.dbs.updated"
+	sentinelPollFrequencty = 1 * time.Minute
+	defaultQueryTimeout    = 30 * time.Second
+	serverTokenBasename    = ".wrstat.servertoken"
+	dgutaDBsSuffix         = "dguta.dbs"
+	basedirBasename        = "basedirs.db"
 )
 
 // options for this cmd.
@@ -56,6 +56,10 @@ var (
 	serverBind            string
 	serverCert            string
 	serverKey             string
+	clickhouseDSN         string
+	clickhouseDatabase    string
+	clickhousePoll        string
+	clickhouseQueryTO     string
 	oktaURL               string
 	oktaOAuthIssuer       string
 	oktaOAuthClientID     string
@@ -113,6 +117,8 @@ base output directory. After reloading, will delete the previous run's database
 files. It will use the mtime of the file as the data creation time in reports.
 `,
 	Run: func(cmd *cobra.Command, args []string) {
+		loadClickhouseDotEnv()
+
 		if len(args) != 1 {
 			die("you must supply the path to your 'wrstat multi -f' output directory")
 		}
@@ -168,17 +174,23 @@ files. It will use the mtime of the file as the data creation time in reports.
 		}
 
 		info("opening databases, please wait...")
-		p, err := bolt.OpenProvider(bolt.Config{
-			BasePath:       args[0],
-			DGUTADBName:    dgutaDBsSuffix,
-			BaseDirDBName:  basedirBasename,
-			OwnersCSVPath:  ownersPath,
-			MountPoints:    mountpoints,
-			PollInterval:   sentinelPollFrequencty,
-			RemoveOldPaths: true,
-		})
+		cfg, err := clickhouseConfigFromEnvAndFlags(
+			clickhouseDSN,
+			clickhouseDatabase,
+			ownersPath,
+			mountpoints,
+			clickhousePoll,
+			sentinelPollFrequencty,
+			clickhouseQueryTO,
+			defaultQueryTimeout,
+		)
 		if err != nil {
-			die("failed to load databases: %s", err)
+			die("failed to build ClickHouse config: %s", err)
+		}
+
+		p, err := clickhouse.OpenProvider(cfg)
+		if err != nil {
+			die("failed to open clickhouse provider: %s", err)
 		}
 		if setErr := s.SetProvider(p); setErr != nil {
 			_ = p.Close()
@@ -230,6 +242,14 @@ func init() {
 		"path to certificate file")
 	serverCmd.Flags().StringVarP(&serverKey, "key", "k", "",
 		"path to key file")
+	serverCmd.Flags().StringVarP(&clickhouseDSN, "clickhouse-dsn", "C", "",
+		"ClickHouse DSN (default $WRSTAT_CLICKHOUSE_DSN)")
+	serverCmd.Flags().StringVarP(&clickhouseDatabase, "clickhouse-database", "D", "",
+		"ClickHouse database name (default $WRSTAT_CLICKHOUSE_DATABASE)")
+	serverCmd.Flags().StringVar(&clickhousePoll, "poll-interval", "",
+		"how often to poll ClickHouse for mount updates (default $WRSTAT_POLL_INTERVAL or 1m)")
+	serverCmd.Flags().StringVar(&clickhouseQueryTO, "query-timeout", "",
+		"per-query timeout (default $WRSTAT_QUERY_TIMEOUT or 30s)")
 	serverCmd.Flags().StringVar(&oktaURL, "okta_url", "",
 		"Okta application URL, eg host:port (defaults to --bind)")
 	serverCmd.Flags().StringVar(&oktaOAuthIssuer, "okta_issuer", os.Getenv("OKTA_OAUTH2_ISSUER"),
