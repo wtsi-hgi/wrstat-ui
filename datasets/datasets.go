@@ -90,12 +90,33 @@ func considerDatasetDirEntryWithDeletes(latest map[string]nameVersion,
 		return
 	}
 
-	version, key, ok := strings.Cut(name, "_")
+	version, key, ok := SplitDatasetDirName(name)
 	if !ok {
 		return
 	}
 
 	updateLatestWithDeletes(latest, toDelete, name, version, key)
+}
+
+// SplitDatasetDirName splits a dataset directory name into its <version> and
+// <key> parts.
+//
+// Dataset directory names are expected to be of the form:
+//
+//	<version>_<key>
+//
+// It returns ok=false if the name is not a valid dataset directory name.
+func SplitDatasetDirName(name string) (version string, key string, ok bool) {
+	if !IsValidDatasetDirName(name) {
+		return "", "", false
+	}
+
+	before, after, ok := strings.Cut(name, "_")
+	if !ok {
+		return "", "", false
+	}
+
+	return before, after, true
 }
 
 func isValidDatasetEntry(entry fs.DirEntry, name, baseDir string, required []string) bool {
