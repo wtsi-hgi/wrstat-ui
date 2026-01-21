@@ -27,6 +27,7 @@ package group
 
 import (
 	"errors"
+	"slices"
 	"unsafe"
 
 	"github.com/wtsi-hgi/wrstat-ui/summary"
@@ -55,7 +56,20 @@ func (p *PathGroup[T]) shiftPath() byte {
 	b := p.Path[0]
 	p.Path = p.Path[1:]
 
+	if b == '*' && len(p.Path) > 0 && p.Path[0] == '*' {
+		for len(p.Path) > 0 && p.Path[0] == '*' {
+			p.Path = p.Path[1:]
+		}
+
+		return 0
+	}
+
 	return b
+}
+
+type pathGroup[T any] struct {
+	PathGroup[T]
+	AllowSlash bool
 }
 
 // NewStateMachine compiles a StateMachine from the given slice of PathGroups.
@@ -65,10 +79,16 @@ func (p *PathGroup[T]) shiftPath() byte {
 //
 // Paths can contain wildcards (*) that will match zero or more arbitrary
 // characters.
-func NewStatemachine[T any](lines []PathGroup[T]) (StateMachine[T], error) {
+func NewStatemachine[T any](groups []PathGroup[T]) (StateMachine[T], error) {
 	b := &builder[T]{sm: make(StateMachine[T], 2, 1024)} //nolint:mnd
 
-	b.queueBuild(1, 0, lines, nil)
+	pgs := make([]pathGroup[T], len(groups))
+
+	for n, group := range groups {
+		pgs[n] = pathGroup[T]{group, true}
+	}
+
+	b.queueBuild(1, 0, pgs, nil)
 
 	if err := b.buildQueue(); err != nil {
 		return nil, err
@@ -149,7 +169,7 @@ func (s StateMachine[T]) getState(state uint32, path []byte) uint32 {
 
 type stateLines[T any] struct {
 	state, wc      uint32
-	lines, wcLines []PathGroup[T]
+	lines, wcLines []pathGroup[T]
 }
 
 type builder[T any] struct {
@@ -157,16 +177,22 @@ type builder[T any] struct {
 	queue []stateLines[T]
 }
 
-func (b *builder[T]) build(state, wildcard uint32, groups, wildcardGroups []PathGroup[T]) error {
+func (b *builder[T]) build(state, wildcard uint32, groups, wildcardGroups []pathGroup[T]) error {
 	ct, err := b.buildCharTable(groups, state)
 	if err != nil {
 		return err
 	}
 
-	if ct['*'] != nil {
-		var err error
+	if ct[0] != nil {
+		if wildcardGroups, err = b.buildWildcard(ct[0], state, wildcardGroups, wildcard, true); err != nil {
+			return err
+		}
 
-		if wildcardGroups, err = b.buildWildcard(ct['*'], state, wildcardGroups); err != nil {
+		wildcard = b.sm[state].chars['*']
+	}
+
+	if ct['*'] != nil {
+		if wildcardGroups, err = b.buildWildcard(ct['*'], state, wildcardGroups, wildcard, false); err != nil {
 			return err
 		}
 
@@ -182,7 +208,7 @@ func (b *builder[T]) build(state, wildcard uint32, groups, wildcardGroups []Path
 	return nil
 }
 
-func (b *builder[T]) buildCharTable(groups []PathGroup[T], state uint32) (ct [256][]PathGroup[T], err error) {
+func (b *builder[T]) buildCharTable(groups []pathGroup[T], state uint32) (ct [256][]pathGroup[T], err error) {
 	ended := false
 
 	for _, group := range groups {
@@ -199,7 +225,7 @@ func (b *builder[T]) buildCharTable(groups []PathGroup[T], state uint32) (ct [25
 			b.sm[state].Group = group.Group
 		} else {
 			b := group.shiftPath()
-			ct[b] = append(ct[b], group)
+			ct[b] = append(ct[b], pathGroup[T]{group.PathGroup, b != '*'})
 		}
 	}
 
@@ -207,10 +233,10 @@ func (b *builder[T]) buildCharTable(groups []PathGroup[T], state uint32) (ct [25
 }
 
 func (b *builder[T]) buildChildren(
-	ct [256][]PathGroup[T], state, wildcard uint32, wildcardGroups []PathGroup[T],
+	ct [256][]pathGroup[T], state, wildcard uint32, wildcardGroups []pathGroup[T],
 ) {
 	for c, lines := range ct {
-		if c == '*' {
+		if c == '*' || c == 0 {
 			b.sm[state].chars[c] = wildcard
 
 			continue
@@ -227,11 +253,33 @@ func (b *builder[T]) buildChildren(
 		nextState := b.newState()
 		b.sm[state].chars[c] = nextState
 
-		b.queueBuild(nextState, wc, lines, wildcardGroups)
+		wcGroups := wildcardGroups
+
+		if c == '/' {
+			wcGroups = filterSlashes(wcGroups)
+		}
+
+		b.queueBuild(nextState, wc, lines, wcGroups)
 	}
 }
 
-func (b *builder[T]) queueBuild(state, wildcard uint32, lines, wcLines []PathGroup[T]) {
+func filterSlashes[T any](wildcardGroups []pathGroup[T]) []pathGroup[T] {
+	if !slices.ContainsFunc(wildcardGroups, func(wg pathGroup[T]) bool { return !wg.AllowSlash }) {
+		return wildcardGroups
+	}
+
+	var wcs []pathGroup[T]
+
+	for _, wg := range wildcardGroups {
+		if wg.AllowSlash {
+			wcs = append(wcs, wg)
+		}
+	}
+
+	return wcs
+}
+
+func (b *builder[T]) queueBuild(state, wildcard uint32, lines, wcLines []pathGroup[T]) {
 	b.queue = append(b.queue, stateLines[T]{
 		state:   state,
 		wc:      wildcard,
@@ -248,12 +296,13 @@ func (b *builder[T]) newState() uint32 {
 }
 
 func (b *builder[T]) buildWildcard(
-	groups []PathGroup[T], state uint32, wildcardGroups []PathGroup[T],
-) ([]PathGroup[T], error) {
+	groups []pathGroup[T], state uint32,
+	wildcardGroups []pathGroup[T], wildcard uint32, allowSlashes bool,
+) ([]pathGroup[T], error) {
 	nextState := b.newState()
 	b.sm[state].chars['*'] = nextState
 
-	if err := b.buildWildcardSM(nextState, groups); err != nil {
+	if err := b.buildWildcardSM(nextState, groups, wildcard, allowSlashes); err != nil {
 		return nil, err
 	}
 
@@ -269,19 +318,20 @@ func (b *builder[T]) buildWildcard(
 
 	b.sm = b.sm[:nextState+1]
 
-	b.loopState(nextState)
-
-	if err := b.buildWildcardSM(nextState, groups); err != nil {
+	if err := b.buildWildcardSM(nextState, groups, wildcard, allowSlashes); err != nil {
 		return nil, err
 	}
 
 	return groups, nil
 }
 
-func (b *builder[T]) buildWildcardSM(nextState uint32, groups []PathGroup[T]) error {
+func (b *builder[T]) buildWildcardSM(
+	nextState uint32, groups []pathGroup[T],
+	wildcard uint32, allowSlashes bool,
+) error {
 	c := &builder[T]{sm: b.sm}
 
-	b.loopState(nextState)
+	b.loopState(nextState, wildcard, allowSlashes)
 	c.queueBuild(nextState, nextState, groups, groups)
 
 	if err := c.buildQueue(); err != nil {
@@ -293,17 +343,21 @@ func (b *builder[T]) buildWildcardSM(nextState uint32, groups []PathGroup[T]) er
 	return nil
 }
 
-func (b *builder[T]) loopState(state uint32) {
+func (b *builder[T]) loopState(state, wildcard uint32, allowSlashes bool) {
 	chars := &b.sm[state].chars
 
 	for c := range chars {
-		chars[c] = state
+		if c == '/' && !allowSlashes {
+			chars[c] = b.sm[wildcard].chars['/']
+		} else {
+			chars[c] = state
+		}
 	}
 }
 
 func (b *builder[T]) filterWildcardGroups(
-	groups []PathGroup[T], state uint32, wildcardGroups []PathGroup[T],
-) []PathGroup[T] {
+	groups []pathGroup[T], state uint32, wildcardGroups []pathGroup[T],
+) []pathGroup[T] {
 	for _, group := range wildcardGroups {
 		if b.sm[b.sm.getState(state, group.Path)].Group == nil {
 			groups = append(groups, group)
