@@ -186,3 +186,156 @@ func TestClientIsDir(t *testing.T) {
 		So(isDir, ShouldBeTrue)
 	})
 }
+
+func TestClientListDir(t *testing.T) {
+	Convey("Client.ListDir lists directory entries from the active snapshot", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 2 * time.Second
+		cfg.MountPoints = []string{providerTestMountPath}
+
+		c, err := NewClient(cfg)
+		So(err, ShouldBeNil)
+		So(c, ShouldNotBeNil)
+		Reset(func() { So(c.Close(), ShouldBeNil) })
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		const mountPath = providerTestMountPath
+
+		base := mountPath + "dir/"
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		// Insert two snapshots; second becomes active.
+		updatedAt1 := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+		sid1 := snapshotID(mountPath, updatedAt1)
+		So(conn.Exec(ctx, testInsertMountStmt, mountPath, time.Now(), sid1, updatedAt1), ShouldBeNil)
+
+		updatedAt2 := time.Now().UTC().Truncate(time.Second)
+		sid2 := snapshotID(mountPath, updatedAt2)
+		So(conn.Exec(ctx, testInsertMountStmt, mountPath, time.Now().Add(time.Millisecond), sid2, updatedAt2), ShouldBeNil)
+
+		now := time.Now().UTC().Truncate(time.Second)
+
+		// Old snapshot entry that must not appear.
+		So(conn.Exec(
+			ctx,
+			testInsertFileStmt,
+			mountPath,
+			sid1,
+			base,
+			"zzz_old.txt",
+			"txt",
+			uint8(stats.FileType),
+			uint64(1),
+			uint64(1),
+			uint32(1),
+			uint32(1),
+			now,
+			now,
+			now,
+			uint64(1),
+			uint64(1),
+		), ShouldBeNil)
+
+		// Active snapshot entries.
+		names := []string{"b.txt", "a.txt", "c.txt"}
+		for _, name := range names {
+			So(conn.Exec(
+				ctx,
+				testInsertFileStmt,
+				mountPath,
+				sid2,
+				base,
+				name,
+				"txt",
+				uint8(stats.FileType),
+				uint64(10),
+				uint64(10),
+				uint32(1000),
+				uint32(100),
+				now,
+				now,
+				now,
+				uint64(2),
+				uint64(1),
+			), ShouldBeNil)
+		}
+
+		// Pass dir without trailing slash to ensure normalisation.
+		rows, err := c.ListDir(ctx, mountPath+"dir", ListOptions{Limit: 100, Offset: 0})
+		So(err, ShouldBeNil)
+		So(len(rows), ShouldEqual, 3)
+		So(rows[0].Name, ShouldEqual, "a.txt")
+		So(rows[1].Name, ShouldEqual, "b.txt")
+		So(rows[2].Name, ShouldEqual, "c.txt")
+		So(rows[0].ParentDir, ShouldEqual, base)
+		So(rows[0].Path, ShouldEqual, base+"a.txt")
+	})
+
+	Convey("Client.ListDir supports limit and offset", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 2 * time.Second
+		cfg.MountPoints = []string{providerTestMountPath}
+
+		c, err := NewClient(cfg)
+		So(err, ShouldBeNil)
+		So(c, ShouldNotBeNil)
+		Reset(func() { So(c.Close(), ShouldBeNil) })
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		const mountPath = providerTestMountPath
+
+		base := mountPath + "dir/"
+		updatedAt := time.Now().UTC().Truncate(time.Second)
+		sid := snapshotID(mountPath, updatedAt)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		So(conn.Exec(ctx, testInsertMountStmt, mountPath, time.Now(), sid, updatedAt), ShouldBeNil)
+
+		now := time.Now().UTC().Truncate(time.Second)
+		for _, name := range []string{"a.txt", "b.txt", "c.txt"} {
+			So(conn.Exec(
+				ctx,
+				testInsertFileStmt,
+				mountPath,
+				sid,
+				base,
+				name,
+				"txt",
+				uint8(stats.FileType),
+				uint64(10),
+				uint64(10),
+				uint32(1000),
+				uint32(100),
+				now,
+				now,
+				now,
+				uint64(2),
+				uint64(1),
+			), ShouldBeNil)
+		}
+
+		rows, err := c.ListDir(ctx, base, ListOptions{Limit: 2, Offset: 1})
+		So(err, ShouldBeNil)
+		So(len(rows), ShouldEqual, 2)
+		So(rows[0].Name, ShouldEqual, "b.txt")
+		So(rows[1].Name, ShouldEqual, "c.txt")
+	})
+}
