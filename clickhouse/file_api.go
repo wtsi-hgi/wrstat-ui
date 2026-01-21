@@ -31,6 +31,8 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -117,6 +119,12 @@ const listDirQueryTemplate = "WITH (SELECT snapshot_id FROM wrstat_mounts_active
 	"SELECT %s FROM wrstat_files f PREWHERE f.mount_path = ? AND f.snapshot_id = sid " +
 	"AND f.parent_dir = ? ORDER BY f.name ASC LIMIT ? OFFSET ?"
 
+const findByGlobQueryTemplate = "WITH (SELECT snapshot_id FROM wrstat_mounts_active WHERE mount_path = ?) AS sid " +
+	"SELECT %s FROM wrstat_files f PREWHERE f.mount_path = ? AND f.snapshot_id = sid " +
+	"WHERE f.parent_dir >= ? AND f.parent_dir < ? AND (%s) " +
+	"AND (? = 0 OR f.uid = ? OR has(?, f.gid)) " +
+	"ORDER BY f.parent_dir ASC, f.name ASC LIMIT ? OFFSET ?"
+
 const isDirQuery = "WITH (SELECT snapshot_id FROM wrstat_mounts_active WHERE mount_path = ?) AS sid " +
 	"SELECT f.entry_type FROM wrstat_files f PREWHERE f.mount_path = ? AND f.snapshot_id = sid " +
 	"AND f.parent_dir = ? AND f.name = ? LIMIT 1"
@@ -126,6 +134,14 @@ const permissionAnyInDirQuery = "WITH (SELECT snapshot_id FROM wrstat_mounts_act
 	"AND d.dir = ? AND d.age = ? AND (d.uid = ? OR has(?, d.gid)) LIMIT 1"
 
 const defaultFileLimit = 1_000_000
+
+const (
+	maxGlobPatternsPerQuery = 32
+	findByGlobParamsBaseCap = 8
+	minDedupeByPathLen      = 2
+	growExtraForAnchors     = 2
+	maxByte                 = 0xFF
+)
 
 // StatPath returns metadata for an exact file path over the active snapshot of
 // the mount containing the path.
@@ -179,6 +195,449 @@ func (c *Client) ListDir(ctx context.Context, dir string, opts ListOptions) ([]F
 	defer cancel()
 
 	return c.listDirRows(qctx, q, fields, mountPath, parentDir, limit, opts.Offset)
+}
+
+// FindByGlob finds file rows matching gitignore-style patterns under the given
+// base directories.
+func (c *Client) FindByGlob(
+	ctx context.Context,
+	baseDirs []string,
+	patterns []string,
+	opts FindOptions,
+) ([]FileRow, error) {
+	if c == nil || c.conn == nil {
+		return nil, errClientClosed
+	}
+
+	if len(patterns) == 0 {
+		return []FileRow{}, nil
+	}
+
+	return c.findByGlob(ctx, baseDirs, patterns, opts)
+}
+
+func (c *Client) findByGlob(
+	ctx context.Context,
+	baseDirs []string,
+	patterns []string,
+	opts FindOptions,
+) ([]FileRow, error) {
+	selectList, fields, plan, useDirectOffset, limit, qLimit, qOffset, ownerEnabled, uid, gids, err := c.prepareFindByGlob(
+		baseDirs,
+		patterns,
+		opts,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	all, err := c.runFindByGlobPlan(ctx, selectList, fields, plan, ownerEnabled, uid, gids, qLimit, qOffset)
+	if err != nil {
+		return nil, err
+	}
+
+	all = c.finishFindByGlob(all)
+
+	if useDirectOffset {
+		return all, nil
+	}
+
+	return sliceLimitOffset(all, limit, opts.Offset), nil
+}
+
+func (c *Client) prepareFindByGlob(
+	baseDirs []string,
+	patterns []string,
+	opts FindOptions,
+) (string, []string, findByGlobExecPlan, bool, int64, int64, int64, int64, uint32, []uint32, error) {
+	selectList, fields, err := fileRowSelectList(opts.Fields)
+	if err != nil {
+		return "", nil, findByGlobExecPlan{}, false, 0, 0, 0, 0, 0, nil, err
+	}
+
+	baseDirsByMount, err := c.groupBaseDirsByMount(baseDirs)
+	if err != nil {
+		return "", nil, findByGlobExecPlan{}, false, 0, 0, 0, 0, 0, nil, err
+	}
+
+	plan := c.findByGlobPlan(baseDirsByMount, patterns)
+	useDirectOffset := plan.queryCount == 1
+
+	ownerEnabled, uid, gids := ownerFilterArgs(opts)
+
+	limit := listLimit(opts.Limit)
+	qLimit, qOffset := findByGlobQueryLimitOffset(limit, opts.Offset, useDirectOffset)
+
+	return selectList, fields, plan, useDirectOffset, limit, qLimit, qOffset, ownerEnabled, uid, gids, nil
+}
+
+func (c *Client) runFindByGlobPlan(
+	ctx context.Context,
+	selectList string,
+	fields []string,
+	plan findByGlobExecPlan,
+	ownerEnabled int64,
+	uid uint32,
+	gids []uint32,
+	qLimit int64,
+	qOffset int64,
+) ([]FileRow, error) {
+	out := make([]FileRow, 0)
+
+	for _, q := range plan.queries {
+		rows, err := c.runFindByGlobQuerySpec(ctx, selectList, fields, q, ownerEnabled, uid, gids, qLimit, qOffset)
+		if err != nil {
+			return nil, err
+		}
+
+		out = append(out, rows...)
+	}
+
+	return out, nil
+}
+
+func (c *Client) runFindByGlobQuerySpec(
+	ctx context.Context,
+	selectList string,
+	fields []string,
+	spec findByGlobQuerySpec,
+	ownerEnabled int64,
+	uid uint32,
+	gids []uint32,
+	qLimit int64,
+	qOffset int64,
+) ([]FileRow, error) {
+	return c.findByGlobQuery(
+		ctx,
+		selectList,
+		fields,
+		spec.mountPath,
+		spec.baseDir,
+		spec.patternChunk,
+		ownerEnabled,
+		uid,
+		gids,
+		qLimit,
+		qOffset,
+	)
+}
+
+func (c *Client) finishFindByGlob(in []FileRow) []FileRow {
+	sort.Slice(in, func(i, j int) bool { return in[i].Path < in[j].Path })
+
+	return dedupeByPath(in)
+}
+
+type findByGlobQuerySpec struct {
+	mountPath    string
+	baseDir      string
+	patternChunk []string
+}
+
+type findByGlobExecPlan struct {
+	queries    []findByGlobQuerySpec
+	queryCount int
+}
+
+func (c *Client) findByGlobPlan(baseDirsByMount map[string][]string, patterns []string) findByGlobExecPlan {
+	queries := make([]findByGlobQuerySpec, 0)
+
+	for mountPath, dirs := range baseDirsByMount {
+		for _, baseDir := range dirs {
+			for _, chunk := range chunkStrings(patterns, maxGlobPatternsPerQuery) {
+				queries = append(queries, findByGlobQuerySpec{
+					mountPath:    mountPath,
+					baseDir:      baseDir,
+					patternChunk: chunk,
+				})
+			}
+		}
+	}
+
+	return findByGlobExecPlan{
+		queries:    queries,
+		queryCount: len(queries),
+	}
+}
+
+func (c *Client) groupBaseDirsByMount(baseDirs []string) (map[string][]string, error) {
+	if len(baseDirs) == 0 {
+		return map[string][]string{}, nil
+	}
+
+	seen := make(map[string]map[string]bool)
+	out := make(map[string][]string)
+
+	for _, bd := range baseDirs {
+		mountPath, normalised, err := c.resolveMountAndDir(bd)
+		if err != nil {
+			return nil, err
+		}
+
+		if seen[mountPath] == nil {
+			seen[mountPath] = make(map[string]bool)
+		}
+
+		if seen[mountPath][normalised] {
+			continue
+		}
+
+		seen[mountPath][normalised] = true
+		out[mountPath] = append(out[mountPath], normalised)
+	}
+
+	return out, nil
+}
+
+func (c *Client) findByGlobQuery(
+	ctx context.Context,
+	selectList string,
+	fields []string,
+	mountPath string,
+	baseDir string,
+	patterns []string,
+	ownerEnabled int64,
+	uid uint32,
+	gids []uint32,
+	limit int64,
+	offset int64,
+) ([]FileRow, error) {
+	q, params := buildFindByGlobQueryAndParams(
+		selectList,
+		mountPath,
+		baseDir,
+		patterns,
+		ownerEnabled,
+		uid,
+		gids,
+		limit,
+		offset,
+	)
+
+	qctx, cancel := context.WithTimeout(ctx, queryTimeout(c.cfg))
+	defer cancel()
+
+	return c.queryFileRows(qctx, "FindByGlob", q, fields, params...)
+}
+
+func (c *Client) queryFileRows(
+	ctx context.Context,
+	op string,
+	query string,
+	fields []string,
+	params ...any,
+) ([]FileRow, error) {
+	rows, err := c.conn.Query(ctx, query, params...)
+	if err != nil {
+		return nil, fmt.Errorf("clickhouse: failed to query %s: %w", op, err)
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	out := make([]FileRow, 0)
+
+	for rows.Next() {
+		var row FileRow
+		if err := scanFileRow(rows, fields, &row); err != nil {
+			return nil, err
+		}
+
+		out = append(out, row)
+	}
+
+	return out, nil
+}
+
+func buildFindByGlobQueryAndParams(
+	selectList string,
+	mountPath string,
+	baseDir string,
+	patterns []string,
+	ownerEnabled int64,
+	uid uint32,
+	gids []uint32,
+	limit int64,
+	offset int64,
+) (string, []any) {
+	compiled := compileGlobRegexes(baseDir, patterns)
+
+	orList := matchOrList(len(compiled))
+	q := fmt.Sprintf(findByGlobQueryTemplate, selectList, orList)
+
+	params := make([]any, 0, findByGlobParamsBaseCap+len(compiled))
+	params = append(params, mountPath, mountPath, baseDir, prefixNext(baseDir))
+
+	for _, re := range compiled {
+		params = append(params, re)
+	}
+
+	params = append(params, ownerEnabled, uid, gids, limit, offset)
+
+	return q, params
+}
+
+func findByGlobQueryLimitOffset(limit int64, offset int64, useDirectOffset bool) (int64, int64) {
+	if useDirectOffset {
+		return limit, offset
+	}
+
+	if offset <= 0 {
+		return limit, 0
+	}
+
+	if limit > math.MaxInt64-offset {
+		return math.MaxInt64, 0
+	}
+
+	return limit + offset, 0
+}
+
+func sliceLimitOffset(in []FileRow, limit int64, offset int64) []FileRow {
+	if offset > 0 {
+		if offset >= int64(len(in)) {
+			return []FileRow{}
+		}
+
+		in = in[offset:]
+	}
+
+	if limit >= int64(len(in)) {
+		return in
+	}
+
+	return in[:limit]
+}
+
+func dedupeByPath(in []FileRow) []FileRow {
+	if len(in) < minDedupeByPathLen {
+		return in
+	}
+
+	out := in[:0]
+
+	var last string
+
+	for i, row := range in {
+		if i == 0 || row.Path != last {
+			out = append(out, row)
+			last = row.Path
+		}
+	}
+
+	return out
+}
+
+func chunkStrings(in []string, maxChunk int) [][]string {
+	if maxChunk <= 0 || len(in) == 0 {
+		return nil
+	}
+
+	if len(in) <= maxChunk {
+		return [][]string{in}
+	}
+
+	out := make([][]string, 0, (len(in)+maxChunk-1)/maxChunk)
+	for start := 0; start < len(in); start += maxChunk {
+		end := start + maxChunk
+		if end > len(in) {
+			end = len(in)
+		}
+
+		out = append(out, in[start:end])
+	}
+
+	return out
+}
+
+func matchOrList(n int) string {
+	if n <= 0 {
+		return "0"
+	}
+
+	out := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		out = append(out, "match(f.path, ?)")
+	}
+
+	return strings.Join(out, " OR ")
+}
+
+func compileGlobRegexes(baseDir string, patterns []string) []string {
+	escapedBase := regexp.QuoteMeta(baseDir)
+
+	out := make([]string, 0, len(patterns))
+	for _, p := range patterns {
+		out = append(out, globToRE2(escapedBase, p))
+	}
+
+	return out
+}
+
+func globToRE2(escapedBase string, pattern string) string {
+	var b strings.Builder
+	b.Grow(len(escapedBase) + len(pattern) + growExtraForAnchors)
+
+	b.WriteByte('^')
+	b.WriteString(escapedBase)
+
+	for i := 0; i < len(pattern); i++ {
+		switch pattern[i] {
+		case '*':
+			if i+1 < len(pattern) && pattern[i+1] == '*' {
+				b.WriteString(".*")
+
+				i++
+
+				continue
+			}
+
+			b.WriteString("[^/]*")
+		case '?':
+			b.WriteString("[^/]")
+		default:
+			writeRE2LiteralByte(&b, pattern[i])
+		}
+	}
+
+	b.WriteByte('$')
+
+	return b.String()
+}
+
+func writeRE2LiteralByte(b *strings.Builder, c byte) {
+	switch c {
+	case '.', '+', '(', ')', '|', '[', ']', '{', '}', '^', '$', '\\':
+		b.WriteByte('\\')
+		b.WriteByte(c)
+	default:
+		b.WriteByte(c)
+	}
+}
+
+func prefixNext(prefix string) string {
+	if prefix == "" {
+		return "\x00"
+	}
+
+	b := []byte(prefix)
+	for i := len(b) - 1; i >= 0; i-- {
+		if b[i] != maxByte {
+			b[i]++
+
+			return string(b[:i+1])
+		}
+	}
+
+	return prefix + "\x00"
+}
+
+func ownerFilterArgs(opts FindOptions) (int64, uint32, []uint32) {
+	ownerEnabled := int64(0)
+	if opts.RequireOwner {
+		ownerEnabled = 1
+	}
+
+	return ownerEnabled, opts.UID, ensureNonNilUInt32s(opts.GIDs)
 }
 
 func (c *Client) listDirRows(
