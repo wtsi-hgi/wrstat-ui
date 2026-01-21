@@ -131,3 +131,27 @@ func TestIsValidDatasetDirName(t *testing.T) {
 		}
 	})
 }
+
+func TestSplitDatasetDirName(t *testing.T) {
+	Convey("SplitDatasetDirName splits <version>_<key> dataset dir names", t, func() {
+		version, key, ok := SplitDatasetDirName("20240101_alpha")
+		So(ok, ShouldBeTrue)
+		So(version, ShouldEqual, "20240101")
+		So(key, ShouldEqual, "alpha")
+	})
+
+	Convey("SplitDatasetDirName rejects invalid dataset dir names", t, func() {
+		cases := []string{
+			"",
+			".hidden_a",
+			"nounderscore",
+			"_missingversion",
+			"missingkey_",
+		}
+
+		for _, tc := range cases {
+			_, _, ok := SplitDatasetDirName(tc)
+			So(ok, ShouldBeFalse)
+		}
+	})
+}

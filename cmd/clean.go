@@ -29,7 +29,7 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
-	"github.com/wtsi-hgi/wrstat-ui/bolt"
+	"github.com/wtsi-hgi/wrstat-ui/clickhouse"
 )
 
 var (
@@ -52,35 +52,47 @@ The --view/-v flag can be used to view the keys that would have be removed if
 the flag were not supplied.
 `,
 	Run: func(_ *cobra.Command, args []string) {
-		if len(args) != 1 {
-			die("need a basedirs db path")
+		loadClickhouseDotEnv()
+
+		if len(args) > 0 {
+			warn("clean: ignoring legacy basedirs DB path argument")
 		}
 
 		if prefix == "" {
 			die("need to specify a path prefix to keep")
 		}
 
-		if viewOnly {
-			m, err := bolt.NewHistoryMaintainer(args[0])
-			if err != nil {
-				die("failed to open basedirs db: %s", err)
-			}
+		cfg, err := clickhouseConfigFromEnvAndFlags(
+			clickhouseDSN,
+			clickhouseDatabase,
+			"",
+			nil,
+			"",
+			0,
+			clickhouseQueryTO,
+			defaultQueryTimeout,
+		)
+		if err != nil {
+			die("failed to build ClickHouse config: %s", err)
+		}
 
+		m, err := clickhouse.NewHistoryMaintainer(cfg)
+		if err != nil {
+			die("failed to open clickhouse history maintainer: %s", err)
+		}
+
+		if viewOnly {
 			toRemove, err := m.FindInvalidHistory(prefix)
 			if err != nil {
-				die("failed to read basedirs db: %s", err)
+				die("failed to read clickhouse history: %s", err)
 			}
 
 			for _, k := range toRemove {
 				fmt.Printf("%d:%s\n", k.GID, k.MountPath)
 			}
 		} else {
-			m, err := bolt.NewHistoryMaintainer(args[0])
-			if err != nil {
-				die("failed to open basedirs db: %s", err)
-			}
 			if err := m.CleanHistoryForMount(prefix); err != nil {
-				die("error cleaning basedirs db: %s", err)
+				die("error cleaning clickhouse history: %s", err)
 			}
 		}
 	},
@@ -91,4 +103,10 @@ func init() {
 
 	cleancmd.Flags().StringVarP(&prefix, "prefix", "p", "", "path prefix to keep in history")
 	cleancmd.Flags().BoolVarP(&viewOnly, "view", "v", false, "show the keys that will be removed without deleting them")
+	cleancmd.Flags().StringVarP(&clickhouseDSN, "clickhouse-dsn", "C", "",
+		"ClickHouse DSN (default $WRSTAT_CLICKHOUSE_DSN)")
+	cleancmd.Flags().StringVarP(&clickhouseDatabase, "clickhouse-database", "D", "",
+		"ClickHouse database name (default $WRSTAT_CLICKHOUSE_DATABASE)")
+	cleancmd.Flags().StringVar(&clickhouseQueryTO, "query-timeout", "",
+		"per-query timeout (default $WRSTAT_QUERY_TIMEOUT or 30s)")
 }
