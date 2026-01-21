@@ -403,3 +403,122 @@ func TestClientPermissionAnyInDir(t *testing.T) {
 		So(ok, ShouldBeFalse)
 	})
 }
+
+func TestClientFindByGlob(t *testing.T) {
+	Convey("Client.FindByGlob finds files matching gitignore-style patterns", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 2 * time.Second
+		cfg.MountPoints = []string{providerTestMountPath}
+
+		c, err := NewClient(cfg)
+		So(err, ShouldBeNil)
+		So(c, ShouldNotBeNil)
+		Reset(func() { So(c.Close(), ShouldBeNil) })
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		const mountPath = providerTestMountPath
+
+		base := mountPath + "dir/"
+
+		updatedAt := time.Now().UTC().Truncate(time.Second)
+		sid := snapshotID(mountPath, updatedAt)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		So(conn.Exec(ctx, testInsertMountStmt, mountPath, time.Now(), sid, updatedAt), ShouldBeNil)
+
+		atime := time.Now().UTC().Truncate(time.Second)
+		mtime := atime.Add(-time.Minute)
+		ctime := atime.Add(-2 * time.Minute)
+
+		path1 := base + "a.txt"
+		So(conn.Exec(
+			ctx,
+			testInsertFileStmt,
+			mountPath,
+			sid,
+			base,
+			"a.txt",
+			"txt",
+			uint8(stats.FileType),
+			uint64(1),
+			uint64(1),
+			uint32(222),
+			uint32(111),
+			atime,
+			mtime,
+			ctime,
+			uint64(1),
+			uint64(1),
+		), ShouldBeNil)
+
+		path2 := base + "sub/nested.txt"
+		So(conn.Exec(
+			ctx,
+			testInsertFileStmt,
+			mountPath,
+			sid,
+			base+"sub/",
+			"nested.txt",
+			"txt",
+			uint8(stats.FileType),
+			uint64(2),
+			uint64(2),
+			uint32(333),
+			uint32(999),
+			atime,
+			mtime,
+			ctime,
+			uint64(2),
+			uint64(1),
+		), ShouldBeNil)
+
+		rows, err := c.FindByGlob(ctx, []string{base}, nil, FindOptions{})
+		So(err, ShouldBeNil)
+		So(rows, ShouldBeEmpty)
+
+		rows, err = c.FindByGlob(ctx, []string{base}, []string{"*"}, FindOptions{})
+		So(err, ShouldBeNil)
+		So(rows, ShouldHaveLength, 1)
+		So(rows[0].Path, ShouldEqual, path1)
+
+		rows, err = c.FindByGlob(ctx, []string{base}, []string{"**"}, FindOptions{})
+		So(err, ShouldBeNil)
+		So(rows, ShouldHaveLength, 2)
+		So([]string{rows[0].Path, rows[1].Path}, ShouldResemble, []string{path1, path2})
+
+		rows, err = c.FindByGlob(ctx, []string{base}, []string{"**"}, FindOptions{RequireOwner: true, UID: 999})
+		So(err, ShouldBeNil)
+		So(rows, ShouldBeEmpty)
+
+		rows, err = c.FindByGlob(
+			ctx,
+			[]string{base},
+			[]string{"**"},
+			FindOptions{RequireOwner: true, UID: 999, GIDs: []uint32{111}},
+		)
+		So(err, ShouldBeNil)
+		So(rows, ShouldHaveLength, 1)
+		So(rows[0].Path, ShouldEqual, path1)
+
+		patterns := make([]string, 0, 33)
+		for i := 0; i < 32; i++ {
+			patterns = append(patterns, "does-not-match")
+		}
+
+		patterns = append(patterns, "*")
+
+		rows, err = c.FindByGlob(ctx, []string{base}, patterns, FindOptions{})
+		So(err, ShouldBeNil)
+		So(rows, ShouldHaveLength, 1)
+		So(rows[0].Path, ShouldEqual, path1)
+	})
+}
