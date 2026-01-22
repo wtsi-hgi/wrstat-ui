@@ -68,7 +68,7 @@ func Watch(inputDirs []string, group, outputDir, quotaPath, basedirsConfig, moun
 	}
 }
 
-func watch(inputDirs []string, group, outputDir, quotaPath, basedirsConfig, mounts string, logger log15.Logger) error { //nolint:gocognit,gocyclo,lll
+func watch(inputDirs []string, group, outputDir, quotaPath, basedirsConfig, mounts string, logger log15.Logger) error { //nolint:gocognit,gocyclo,lll,funlen
 	s, err := client.New(client.SchedulerSettings{
 		Logger:  logger,
 		Timeout: connectTimeout,
