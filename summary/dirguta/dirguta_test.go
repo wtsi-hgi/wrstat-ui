@@ -505,6 +505,14 @@ func TestDirGUTA(t *testing.T) {
 		count = 3
 		size = 550
 		So(m.has("/a/", gid, uid, ft, db.DGUTAgeAll, count, size, atimeOld, mtimeRecent), ShouldBeTrue)
+
+		count = 1
+		size = 200
+		So(m.has("/a/b/c/", gid, uid, ft, db.DGUTAgeA2Y, count, size, atimeOld, mtimeOld), ShouldBeTrue)
+
+		count = 3
+		size = 550
+		So(m.has("/a/b/", gid, uid, ft, db.DGUTAgeA2Y, count, size, atimeOld, mtimeRecent), ShouldBeTrue)
 	})
 
 	Convey("DirGUTA hardlink merging across nested directories", t, func() {
