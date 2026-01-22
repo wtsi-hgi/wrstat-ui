@@ -4,7 +4,7 @@ go 1.24.1
 
 require (
 	code.cloudfoundry.org/bytefmt v0.40.0
-	github.com/VertebrateResequencing/wr v0.36.1
+	github.com/VertebrateResequencing/wr v0.36.3
 	github.com/dustin/go-humanize v1.0.1
 	github.com/gin-gonic/gin v1.10.0
 	github.com/hashicorp/go-multierror v1.1.1

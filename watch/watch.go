@@ -54,9 +54,9 @@ var connectTimeout = 10 * time.Second //nolint:gochecknoglobals
 //
 // The scheduled summarise subcommands will be given the output directory, quota
 // path and basedirs config path.
-func Watch(inputDirs []string, outputDir, quotaPath, basedirsConfig, mounts string, logger log15.Logger) error {
+func Watch(inputDirs []string, group, outputDir, quotaPath, basedirsConfig, mounts string, logger log15.Logger) error {
 	for {
-		if err := watch(inputDirs, outputDir, quotaPath, basedirsConfig, mounts, logger); err != nil {
+		if err := watch(inputDirs, group, outputDir, quotaPath, basedirsConfig, mounts, logger); err != nil {
 			return err
 		}
 
@@ -68,7 +68,7 @@ func Watch(inputDirs []string, outputDir, quotaPath, basedirsConfig, mounts stri
 	}
 }
 
-func watch(inputDirs []string, outputDir, quotaPath, basedirsConfig, mounts string, logger log15.Logger) error { //nolint:gocognit,gocyclo,lll
+func watch(inputDirs []string, group, outputDir, quotaPath, basedirsConfig, mounts string, logger log15.Logger) error { //nolint:gocognit,gocyclo,lll,funlen
 	s, err := client.New(client.SchedulerSettings{
 		Logger:  logger,
 		Timeout: connectTimeout,
@@ -101,7 +101,7 @@ func watch(inputDirs []string, outputDir, quotaPath, basedirsConfig, mounts stri
 			return entryExists(filepath.Join(outputDir, base)) || entryExists(filepath.Join(outputDir, "."+base))
 		})
 
-		if err := scheduleSummarisers(s, inputDir, outputDir, quotaPath,
+		if err := scheduleSummarisers(s, group, inputDir, outputDir, quotaPath,
 			basedirsConfig, mounts, inputPaths, logger); err != nil {
 			return err
 		}
@@ -116,12 +116,12 @@ func entryExists(path string) bool {
 	return err == nil
 }
 
-func scheduleSummarisers(s *client.Scheduler, inputDir, outputDir, quotaPath, basedirsConfig, mounts string,
+func scheduleSummarisers(s *client.Scheduler, group, inputDir, outputDir, quotaPath, basedirsConfig, mounts string,
 	inputPaths []string, logger log15.Logger) error {
 	jobs := make([]*jobqueue.Job, 0, len(inputPaths))
 
 	for _, p := range inputPaths {
-		job, errr := createSummariseJob(inputDir, outputDir, filepath.Base(p), quotaPath, basedirsConfig, mounts, s)
+		job, errr := createSummariseJob(group, inputDir, outputDir, filepath.Base(p), quotaPath, basedirsConfig, mounts, s)
 		if errr != nil {
 			return fmt.Errorf("error scheduling summarise (%s): %w", filepath.Base(p), errr)
 		}
@@ -138,7 +138,7 @@ func scheduleSummarisers(s *client.Scheduler, inputDir, outputDir, quotaPath, ba
 	return nil
 }
 
-func createSummariseJob(inputDir, outputDir, base, quotaPath, basedirsConfig, mounts string,
+func createSummariseJob(group, inputDir, outputDir, base, quotaPath, basedirsConfig, mounts string,
 	s *client.Scheduler) (*jobqueue.Job, error) {
 	dotOutputBase := filepath.Join(outputDir, "."+base)
 
@@ -155,7 +155,7 @@ func createSummariseJob(inputDir, outputDir, base, quotaPath, basedirsConfig, mo
 	reqs.Cores = summariseCPU
 	reqs.RAM = summariseMem
 
-	return s.NewJob(
+	job := s.NewJob(
 		getJobCommand(dotOutputBase, previousBasedirsDB, quotaPath, basedirsConfig, mounts,
 			inputDir, base, outputDir),
 		"wrstat-ui-summarise-"+time.Now().Format("20060102150405"),
@@ -163,7 +163,11 @@ func createSummariseJob(inputDir, outputDir, base, quotaPath, basedirsConfig, mo
 		"",
 		"",
 		reqs,
-	), nil
+	)
+
+	job.Group = group
+
+	return job, nil
 }
 
 func getPreviousBasedirsDB(outputDir, base string) (string, error) {
