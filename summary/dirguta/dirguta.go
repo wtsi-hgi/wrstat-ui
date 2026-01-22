@@ -156,7 +156,7 @@ type gutaStore struct {
 
 // add will auto-vivify a summary for the given key (which should have been
 // generated with statToGUTAKey()) and call add(size, atime, mtime) on it.
-func (store gutaStore) add(gkey gutaKey, size int64, atime int64, mtime int64) {
+func (store *gutaStore) add(gkey gutaKey, size int64, atime int64, mtime int64) {
 	if !gkey.Age.FitsAgeInterval(atime, mtime, store.refTime) {
 		return
 	}
@@ -190,12 +190,15 @@ func (store *gutaStore) addForEach(gutaKeys []gutaKey, size int64, atime int64, 
 
 // subtractFromStore subtracts a size and count from the store summaries
 // for each key.
-func (store *gutaStore) subtractFromStore(keys gutaKeys, size int64) {
+func (store *gutaStore) subtractFromStore(keys gutaKeys, size int64, atime int64, mtime int64) {
 	for _, key := range keys {
-		if summary, ok := store.sumMap[key]; ok {
-			summary.Count--
-			summary.Size -= size
+		if !key.Age.FitsAgeInterval(atime, mtime, store.refTime) {
+			continue
 		}
+
+		summary := store.sumMap[key]
+		summary.Count--
+		summary.Size -= size
 	}
 }
 
@@ -316,16 +319,16 @@ func (d *DirGroupUserTypeAge) handleHardlink(info *summary.FileInfo, //nolint:fu
 		return true
 	}
 
-	keys := gutaKeysFromEntry(info.GID, info.UID, entry.fileType)
+	keys := gutaKeysFromEntry(entry.gid, entry.uid, entry.fileType)
 
-	d.store.subtractFromStore(keys, entry.size)
+	d.store.subtractFromStore(keys, entry.size, entry.atime, entry.mtime)
 
 	entry.fileType |= ft
 	entry.size = max(entry.size, info.Size)
 	entry.atime = min(entry.atime, atime)
 	entry.mtime = max(entry.mtime, info.MTime)
 
-	keys = gutaKeysFromEntry(info.GID, info.UID, entry.fileType)
+	keys = gutaKeysFromEntry(entry.gid, entry.uid, entry.fileType)
 
 	d.store.addForEach(keys, entry.size, entry.atime, entry.mtime)
 
@@ -430,15 +433,13 @@ func (d *DirGroupUserTypeAge) mergeSeenHardlinks(child gutaStore, childSeen map[
 func (d *DirGroupUserTypeAge) updateExistingHardlink(child gutaStore, pEntry, cEntry *inodeEntry) {
 	existingPKeys := gutaKeysFromEntry(pEntry.gid, pEntry.uid, pEntry.fileType)
 
-	d.store.subtractFromStore(existingPKeys, pEntry.size)
+	d.store.subtractFromStore(existingPKeys, pEntry.size, pEntry.atime, pEntry.mtime)
 
 	existingCKeys := gutaKeysFromEntry(cEntry.gid, cEntry.uid, cEntry.fileType)
 
-	child.subtractFromStore(existingCKeys, cEntry.size)
+	child.subtractFromStore(existingCKeys, cEntry.size, cEntry.atime, cEntry.mtime)
 
-	newTypes := cEntry.fileType &^ pEntry.fileType
-
-	pEntry.fileType |= newTypes
+	pEntry.fileType |= cEntry.fileType
 	pEntry.size = max(pEntry.size, cEntry.size)
 	pEntry.atime = min(pEntry.atime, cEntry.atime)
 	pEntry.mtime = max(pEntry.mtime, cEntry.mtime)
