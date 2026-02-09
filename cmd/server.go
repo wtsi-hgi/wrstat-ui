@@ -182,7 +182,6 @@ files. It will use the mtime of the file as the data creation time in reports.
 			clickhousePoll,
 			sentinelPollFrequencty,
 			clickhouseQueryTO,
-			defaultQueryTimeout,
 		)
 		if err != nil {
 			die("failed to build ClickHouse config: %s", err)

@@ -61,43 +61,6 @@ import (
 
 const app = "wrstat-ui_test"
 
-func TestMain(m *testing.M) {
-	d1 := buildSelf()
-	if d1 == nil {
-		return
-	}
-
-	defer os.Exit(m.Run())
-	defer d1()
-}
-
-func buildSelf() func() {
-	cmd := exec.Command(
-		"go", "build", "-tags", "netgo",
-		"-ldflags=-X github.com/VertebrateResequencing/wr/client.PretendSubmissions=3 "+
-			"-X github.com/wtsi-hgi/wrstat-ui/cmd.Version=TESTVERSION",
-		"-o", app,
-	)
-
-	cmd.Env = append(os.Environ(), "CGO_ENABLED=1")
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
-	if err := cmd.Run(); err != nil {
-		failMainTest(err.Error())
-
-		return nil
-	}
-
-	return func() {
-		os.Remove(app)
-	}
-}
-
-func failMainTest(err string) {
-	fmt.Println(err) //nolint:forbidigo
-}
-
 type clickHouseCLIEnv struct {
 	DSN      string
 	Database string
@@ -122,6 +85,7 @@ func setupClickHouseCLIEnv(t *testing.T) clickHouseCLIEnv {
 	baseDir := t.TempDir()
 
 	tcpPort := pickFreePort(t)
+
 	httpPort := pickFreePort(t)
 	for httpPort == tcpPort {
 		httpPort = pickFreePort(t)
@@ -141,276 +105,6 @@ func setupClickHouseCLIEnv(t *testing.T) clickHouseCLIEnv {
 	t.Setenv("WRSTAT_CLICKHOUSE_DATABASE", db)
 
 	return clickHouseCLIEnv{DSN: dsn, Database: db}
-}
-
-func waitForTCPPort(t *testing.T, host string, port int) {
-	t.Helper()
-
-	addr := net.JoinHostPort(host, strconv.Itoa(port))
-	deadline := time.Now().Add(30 * time.Second)
-
-	for {
-		conn, err := net.DialTimeout("tcp", addr, 200*time.Millisecond)
-		if err == nil {
-			_ = conn.Close()
-			return
-		}
-
-		if time.Now().After(deadline) {
-			t.Fatalf("clickhouse server did not become ready at %s: %v", addr, err)
-		}
-
-		time.Sleep(200 * time.Millisecond)
-	}
-}
-
-func refuseNonLocalhostDSN(t *testing.T, dsn string) {
-	t.Helper()
-
-	u, err := url.Parse(dsn)
-	if err != nil {
-		t.Fatalf("invalid DSN: %v", err)
-	}
-
-	host := u.Hostname()
-	if host == "" {
-		t.Fatalf("invalid DSN host")
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-
-	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
-	if err != nil {
-		t.Fatalf("failed to resolve DSN host %q: %v", host, err)
-	}
-
-	for _, ip := range ips {
-		if !ip.IP.IsLoopback() {
-			t.Fatalf("refusing non-localhost DSN host %q (%v)", host, ip.IP)
-		}
-	}
-}
-
-func withDatabaseInDSN(t *testing.T, dsn string, database string) string {
-	t.Helper()
-
-	u, err := url.Parse(dsn)
-	if err != nil {
-		t.Fatalf("invalid DSN: %v", err)
-	}
-
-	q := u.Query()
-	q.Set("database", database)
-	u.RawQuery = q.Encode()
-
-	return u.String()
-}
-
-func findClickHouseBinary(t *testing.T) string {
-	t.Helper()
-
-	bin, err := exec.LookPath("clickhouse")
-	if err == nil {
-		return bin
-	}
-
-	fallback := "/software/hgi/installs/clickhouse/clickhouse"
-	if _, statErr := os.Stat(fallback); statErr == nil {
-		return fallback
-	}
-
-	t.Skip("clickhouse binary not found")
-
-	return ""
-}
-
-func pickFreePort(t *testing.T) int {
-	t.Helper()
-
-	lc := net.ListenConfig{}
-
-	l, err := lc.Listen(context.Background(), "tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("failed to pick free port: %v", err)
-	}
-
-	defer func() { _ = l.Close() }()
-
-	addr := l.Addr().String()
-
-	_, portStr, err := net.SplitHostPort(addr)
-	if err != nil {
-		t.Fatalf("failed to parse listener addr %q: %v", addr, err)
-	}
-
-	port, err := strconv.Atoi(portStr)
-	if err != nil {
-		t.Fatalf("failed to parse listener port %q: %v", portStr, err)
-	}
-
-	return port
-}
-
-func startClickHouseServer(
-	t *testing.T,
-	binPath string,
-	baseDir string,
-	tcpPort int,
-	httpPort int,
-) {
-	t.Helper()
-
-	dataPath := filepath.Join(baseDir, "data")
-	stdoutPath := filepath.Join(baseDir, "clickhouse.stdout.log")
-	stderrPath := filepath.Join(baseDir, "clickhouse.stderr.log")
-
-	if err := os.MkdirAll(dataPath, 0o755); err != nil {
-		t.Fatalf("failed to create clickhouse data dir: %v", err)
-	}
-
-	crtPath, keyPath := writeSelfSignedTLSCertPair(t, baseDir)
-
-	args := []string{
-		"server",
-		"--",
-		"--listen_host=127.0.0.1",
-		"--tcp_port=" + strconv.Itoa(tcpPort),
-		"--tcp_port_secure=0",
-		"--http_port=" + strconv.Itoa(httpPort),
-		"--https_port=0",
-		"--mysql_port=0",
-		"--postgresql_port=0",
-		"--grpc_port=0",
-		"--openSSL.server.certificateFile=" + crtPath,
-		"--openSSL.server.privateKeyFile=" + keyPath,
-		"--path=" + dataPath + string(os.PathSeparator),
-	}
-
-	cmdCtx, cancel := context.WithCancel(context.Background())
-	cmd := exec.CommandContext(cmdCtx, binPath, args...)
-	cmd.Dir = baseDir
-	cmd.Env = append(os.Environ(), "CLICKHOUSE_WATCHDOG_ENABLE=0")
-
-	stdoutFile, err := os.Create(stdoutPath)
-	if err != nil {
-		cancel()
-		t.Fatalf("failed to create clickhouse stdout log: %v", err)
-	}
-
-	stderrFile, err := os.Create(stderrPath)
-	if err != nil {
-		_ = stdoutFile.Close()
-		cancel()
-		t.Fatalf("failed to create clickhouse stderr log: %v", err)
-	}
-
-	cmd.Stdout = stdoutFile
-	cmd.Stderr = stderrFile
-
-	if err := cmd.Start(); err != nil {
-		_ = stdoutFile.Close()
-		_ = stderrFile.Close()
-		cancel()
-		t.Fatalf("failed to start clickhouse: %v", err)
-	}
-
-	doneCh := make(chan struct{})
-
-	go func() {
-		_ = cmd.Wait()
-		close(doneCh)
-		_ = stdoutFile.Close()
-		_ = stderrFile.Close()
-	}()
-
-	t.Cleanup(func() {
-		defer cancel()
-
-		if cmd.Process == nil {
-			return
-		}
-
-		_ = cmd.Process.Signal(os.Interrupt)
-
-		select {
-		case <-doneCh:
-			return
-		case <-time.After(5 * time.Second):
-			_ = cmd.Process.Kill()
-			<-doneCh
-		}
-	})
-}
-
-func writeSelfSignedTLSCertPair(t *testing.T, dir string) (string, string) {
-	t.Helper()
-
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatalf("failed to generate TLS key: %v", err)
-	}
-
-	now := time.Now()
-	tmpl := x509.Certificate{
-		SerialNumber: big.NewInt(1),
-		NotBefore:    now.Add(-1 * time.Hour),
-		NotAfter:     now.Add(24 * time.Hour),
-		KeyUsage:     x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		DNSNames:     []string{"localhost"},
-		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
-	}
-
-	der, err := x509.CreateCertificate(rand.Reader, &tmpl, &tmpl, &key.PublicKey, key)
-	if err != nil {
-		t.Fatalf("failed to create TLS certificate: %v", err)
-	}
-
-	crtPath := filepath.Join(dir, "server.crt")
-	keyPath := filepath.Join(dir, "server.key")
-
-	crtPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
-	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
-
-	if err := os.WriteFile(crtPath, crtPEM, 0o600); err != nil {
-		t.Fatalf("failed to write TLS certificate: %v", err)
-	}
-
-	if err := os.WriteFile(keyPath, keyPEM, 0o600); err != nil {
-		t.Fatalf("failed to write TLS private key: %v", err)
-	}
-
-	return crtPath, keyPath
-}
-
-func newTestDatabaseName(t *testing.T) string {
-	t.Helper()
-
-	rnd := make([]byte, 6)
-	if _, err := rand.Read(rnd); err != nil {
-		t.Fatalf("failed to generate random suffix: %v", err)
-	}
-
-	randHex := hex.EncodeToString(rnd)
-
-	// Keep it short; ClickHouse DB names are identifiers.
-	base := fmt.Sprintf("wrstat_ui_test_%d_%s", os.Getpid(), randHex)
-
-	base = strings.ReplaceAll(base, "-", "_")
-	base = strings.ReplaceAll(base, ".", "_")
-	base = strings.ReplaceAll(base, "@", "_")
-
-	return base
-}
-
-func TestVersion(t *testing.T) {
-	Convey("wrstat-ui prints the correct version", t, func() {
-		output, stderr, _, err := runWRStat("version")
-		So(err, ShouldBeNil)
-		So(strings.TrimSpace(output), ShouldEqual, "TESTVERSION")
-		So(stderr, ShouldBeBlank)
-	})
 }
 
 func TestSummarise(t *testing.T) {
@@ -561,6 +255,7 @@ func TestSummarise(t *testing.T) {
 			},
 		})
 		So(err, ShouldBeNil)
+
 		defer p.Close()
 
 		p.BaseDirs().SetMountPoints([]string{
@@ -602,7 +297,177 @@ func TestSummarise(t *testing.T) {
 			{Date: yesterday.In(time.UTC), UsageSize: 15, UsageInodes: 5},
 			{Date: refTime.In(time.UTC), UsageSize: 15, UsageInodes: 5},
 		})
+	})
+}
 
+func runWRStat(args ...string) (string, string, []*jobqueue.Job, error) {
+	var (
+		stdout, stderr strings.Builder
+		jobs           []*jobqueue.Job
+	)
+
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		return "", "", nil, err
+	}
+
+	cmd := exec.CommandContext(context.Background(), "./"+app, args...)
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	cmd.ExtraFiles = append(cmd.ExtraFiles, pw)
+
+	jd := json.NewDecoder(pr)
+	done := make(chan struct{})
+
+	go func() {
+		for {
+			var j []*jobqueue.Job
+
+			if errr := jd.Decode(&j); errr != nil {
+				break
+			}
+
+			jobs = append(jobs, j...)
+		}
+
+		close(done)
+	}()
+
+	err = cmd.Run()
+
+	pw.Close()
+
+	<-done
+
+	return stdout.String(), stderr.String(), jobs, err
+}
+
+func compareFileContents(t *testing.T, path, expectation string) {
+	t.Helper()
+
+	f, err := os.Open(path)
+	So(err, ShouldBeNil)
+
+	defer f.Close()
+
+	var r io.Reader = f
+
+	if strings.HasSuffix(path, ".gz") {
+		r, err = gzip.NewReader(f)
+		So(err, ShouldBeNil)
+	}
+
+	contents, err := io.ReadAll(r)
+	So(err, ShouldBeNil)
+
+	So(string(contents), ShouldEqual, expectation)
+}
+
+func sortLines(data string) string {
+	nl := strings.HasSuffix(data, "\n")
+	if nl {
+		data = data[:len(data)-1]
+	}
+
+	lines := strings.Split(data, "\n")
+
+	slices.Sort(lines)
+
+	data = strings.Join(lines, "\n")
+
+	if nl {
+		data += "\n"
+	}
+
+	return data
+}
+
+func fixTZs(h []basedirs.History) {
+	for n := range h {
+		h[n].Date = h[n].Date.In(time.UTC)
+	}
+}
+
+func TestDBInfo(t *testing.T) {
+	Convey("dbinfo prints the correct information", t, func() {
+		chEnv := setupClickHouseCLIEnv(t)
+
+		tmpDir := t.TempDir()
+		ownersPath := filepath.Join(tmpDir, "owners.csv")
+		err := os.WriteFile(ownersPath, []byte("1,owner1\n"), 0600)
+		So(err, ShouldBeNil)
+
+		cfg := clickhouse.Config{DSN: chEnv.DSN, Database: chEnv.Database, OwnersCSVPath: ownersPath}
+
+		w, err := clickhouse.NewDGUTAWriter(cfg)
+		So(err, ShouldBeNil)
+		w.SetMountPath("/mount/")
+		w.SetUpdatedAt(time.Now().Truncate(time.Second))
+
+		dpc := internaltest.NewDirectoryPathCreator()
+		dirPath := dpc.ToDirectoryPath("/mount/")
+
+		err = w.Add(db.RecordDGUTA{
+			Dir:   dirPath,
+			GUTAs: db.GUTAs{{GID: 1, UID: 1, FT: 1, Age: 0, Size: 100, Count: 1}},
+		})
+		So(err, ShouldBeNil)
+		So(w.Close(), ShouldBeNil)
+
+		// Run command
+		output, stderr, _, err := runWRStat("dbinfo", "--owners", ownersPath)
+		So(err, ShouldBeNil)
+		So(stderr, ShouldBeBlank)
+
+		So(output, ShouldContainSubstring, "Dirs: 1")
+		So(output, ShouldContainSubstring, "DGUTAs: 1")
+	})
+}
+
+func TestMain(m *testing.M) {
+	d1 := buildSelf()
+	if d1 == nil {
+		return
+	}
+
+	defer os.Exit(m.Run())
+	defer d1()
+}
+
+func buildSelf() func() {
+	cmd := exec.CommandContext(
+		context.Background(),
+		"go", "build", "-tags", "netgo",
+		"-ldflags=-X github.com/VertebrateResequencing/wr/client.PretendSubmissions=3 "+
+			"-X github.com/wtsi-hgi/wrstat-ui/cmd.Version=TESTVERSION",
+		"-o", app,
+	)
+
+	cmd.Env = append(os.Environ(), "CGO_ENABLED=1")
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Run(); err != nil {
+		failMainTest(err.Error())
+
+		return nil
+	}
+
+	return func() {
+		os.Remove(app)
+	}
+}
+
+func failMainTest(err string) {
+	fmt.Println(err) //nolint:forbidigo
+}
+
+func TestVersion(t *testing.T) {
+	Convey("wrstat-ui prints the correct version", t, func() {
+		output, stderr, _, err := runWRStat("version")
+		So(err, ShouldBeNil)
+		So(strings.TrimSpace(output), ShouldEqual, "TESTVERSION")
+		So(stderr, ShouldBeBlank)
 	})
 }
 
@@ -1010,126 +875,274 @@ Size: 101
 	})
 }
 
-func TestDBInfo(t *testing.T) {
-	Convey("dbinfo prints the correct information", t, func() {
-		chEnv := setupClickHouseCLIEnv(t)
+func waitForTCPPort(t *testing.T, host string, port int) {
+	t.Helper()
 
-		tmpDir := t.TempDir()
-		ownersPath := filepath.Join(tmpDir, "owners.csv")
-		err := os.WriteFile(ownersPath, []byte("1,owner1\n"), 0600)
-		So(err, ShouldBeNil)
+	addr := net.JoinHostPort(host, strconv.Itoa(port))
+	deadline := time.Now().Add(30 * time.Second)
 
-		cfg := clickhouse.Config{DSN: chEnv.DSN, Database: chEnv.Database, OwnersCSVPath: ownersPath}
+	for {
+		dialer := net.Dialer{Timeout: 200 * time.Millisecond}
 
-		w, err := clickhouse.NewDGUTAWriter(cfg)
-		So(err, ShouldBeNil)
-		w.SetMountPath("/mount/")
-		w.SetUpdatedAt(time.Now().Truncate(time.Second))
+		conn, err := dialer.DialContext(
+			context.Background(), "tcp", addr,
+		)
+		if err == nil {
+			_ = conn.Close()
 
-		dpc := internaltest.NewDirectoryPathCreator()
-		dirPath := dpc.ToDirectoryPath("/mount/")
+			return
+		}
 
-		err = w.Add(db.RecordDGUTA{
-			Dir:   dirPath,
-			GUTAs: db.GUTAs{{GID: 1, UID: 1, FT: 1, Age: 0, Size: 100, Count: 1}},
-		})
-		So(err, ShouldBeNil)
-		So(w.Close(), ShouldBeNil)
+		if time.Now().After(deadline) {
+			t.Fatalf("clickhouse server did not become ready at %s: %v", addr, err)
+		}
 
-		// Run command
-		output, stderr, _, err := runWRStat("dbinfo", "--owners", ownersPath)
-		So(err, ShouldBeNil)
-		So(stderr, ShouldBeBlank)
+		time.Sleep(200 * time.Millisecond)
+	}
+}
 
-		So(output, ShouldContainSubstring, "Dirs: 1")
-		So(output, ShouldContainSubstring, "DGUTAs: 1")
+func refuseNonLocalhostDSN(t *testing.T, dsn string) {
+	t.Helper()
+
+	u, err := url.Parse(dsn)
+	if err != nil {
+		t.Fatalf("invalid DSN: %v", err)
+	}
+
+	host := u.Hostname()
+	if host == "" {
+		t.Fatalf("invalid DSN host")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		t.Fatalf("failed to resolve DSN host %q: %v", host, err)
+	}
+
+	for _, ip := range ips {
+		if !ip.IP.IsLoopback() {
+			t.Fatalf("refusing non-localhost DSN host %q (%v)", host, ip.IP)
+		}
+	}
+}
+
+func withDatabaseInDSN(t *testing.T, dsn string, database string) string {
+	t.Helper()
+
+	u, err := url.Parse(dsn)
+	if err != nil {
+		t.Fatalf("invalid DSN: %v", err)
+	}
+
+	q := u.Query()
+	q.Set("database", database)
+	u.RawQuery = q.Encode()
+
+	return u.String()
+}
+
+func findClickHouseBinary(t *testing.T) string {
+	t.Helper()
+
+	bin, err := exec.LookPath("clickhouse")
+	if err == nil {
+		return bin
+	}
+
+	fallback := "/software/hgi/installs/clickhouse/clickhouse"
+	if _, statErr := os.Stat(fallback); statErr == nil {
+		return fallback
+	}
+
+	t.Skip("clickhouse binary not found")
+
+	return ""
+}
+
+func pickFreePort(t *testing.T) int {
+	t.Helper()
+
+	lc := net.ListenConfig{}
+
+	l, err := lc.Listen(context.Background(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to pick free port: %v", err)
+	}
+
+	defer func() { _ = l.Close() }()
+
+	addr := l.Addr().String()
+
+	_, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		t.Fatalf("failed to parse listener addr %q: %v", addr, err)
+	}
+
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		t.Fatalf("failed to parse listener port %q: %v", portStr, err)
+	}
+
+	return port
+}
+
+func startClickHouseServer(
+	t *testing.T,
+	binPath string,
+	baseDir string,
+	tcpPort int,
+	httpPort int,
+) {
+	t.Helper()
+
+	dataPath := filepath.Join(baseDir, "data")
+	stdoutPath := filepath.Join(baseDir, "clickhouse.stdout.log")
+	stderrPath := filepath.Join(baseDir, "clickhouse.stderr.log")
+
+	if err := os.MkdirAll(dataPath, 0o755); err != nil {
+		t.Fatalf("failed to create clickhouse data dir: %v", err)
+	}
+
+	crtPath, keyPath := writeSelfSignedTLSCertPair(t, baseDir)
+
+	args := []string{
+		"server",
+		"--",
+		"--listen_host=127.0.0.1",
+		"--tcp_port=" + strconv.Itoa(tcpPort),
+		"--tcp_port_secure=0",
+		"--http_port=" + strconv.Itoa(httpPort),
+		"--https_port=0",
+		"--mysql_port=0",
+		"--postgresql_port=0",
+		"--grpc_port=0",
+		"--openSSL.server.certificateFile=" + crtPath,
+		"--openSSL.server.privateKeyFile=" + keyPath,
+		"--path=" + dataPath + string(os.PathSeparator),
+	}
+
+	cmdCtx, cancel := context.WithCancel(context.Background())
+	cmd := exec.CommandContext(cmdCtx, binPath, args...)
+	cmd.Dir = baseDir
+
+	cmd.Env = append(os.Environ(), "CLICKHOUSE_WATCHDOG_ENABLE=0")
+
+	stdoutFile, err := os.Create(stdoutPath)
+	if err != nil {
+		cancel()
+		t.Fatalf("failed to create clickhouse stdout log: %v", err)
+	}
+
+	stderrFile, err := os.Create(stderrPath)
+	if err != nil {
+		_ = stdoutFile.Close()
+
+		cancel()
+		t.Fatalf("failed to create clickhouse stderr log: %v", err)
+	}
+
+	cmd.Stdout = stdoutFile
+	cmd.Stderr = stderrFile
+
+	if err := cmd.Start(); err != nil {
+		_ = stdoutFile.Close()
+		_ = stderrFile.Close()
+
+		cancel()
+		t.Fatalf("failed to start clickhouse: %v", err)
+	}
+
+	doneCh := make(chan struct{})
+
+	go func() {
+		_ = cmd.Wait() //nolint:errcheck
+
+		close(doneCh)
+
+		_ = stdoutFile.Close()
+		_ = stderrFile.Close()
+	}()
+
+	t.Cleanup(func() {
+		defer cancel()
+
+		if cmd.Process == nil {
+			return
+		}
+
+		_ = cmd.Process.Signal(os.Interrupt) //nolint:errcheck
+
+		select {
+		case <-doneCh:
+			return
+		case <-time.After(5 * time.Second):
+			_ = cmd.Process.Kill() //nolint:errcheck
+
+			<-doneCh
+		}
 	})
 }
 
-func runWRStat(args ...string) (string, string, []*jobqueue.Job, error) {
-	var (
-		stdout, stderr strings.Builder
-		jobs           []*jobqueue.Job
-	)
-
-	pr, pw, err := os.Pipe()
-	if err != nil {
-		return "", "", nil, err
-	}
-
-	cmd := exec.CommandContext(context.Background(), "./"+app, args...)
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	cmd.ExtraFiles = append(cmd.ExtraFiles, pw)
-
-	jd := json.NewDecoder(pr)
-	done := make(chan struct{})
-
-	go func() {
-		for {
-			var j []*jobqueue.Job
-
-			if errr := jd.Decode(&j); errr != nil {
-				break
-			}
-
-			jobs = append(jobs, j...)
-		}
-
-		close(done)
-	}()
-
-	err = cmd.Run()
-
-	pw.Close()
-
-	<-done
-
-	return stdout.String(), stderr.String(), jobs, err
-}
-
-func compareFileContents(t *testing.T, path, expectation string) {
+func writeSelfSignedTLSCertPair(t *testing.T, dir string) (string, string) {
 	t.Helper()
 
-	f, err := os.Open(path)
-	So(err, ShouldBeNil)
-
-	defer f.Close()
-
-	var r io.Reader = f
-
-	if strings.HasSuffix(path, ".gz") {
-		r, err = gzip.NewReader(f)
-		So(err, ShouldBeNil)
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("failed to generate TLS key: %v", err)
 	}
 
-	contents, err := io.ReadAll(r)
-	So(err, ShouldBeNil)
+	now := time.Now()
+	tmpl := x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		NotBefore:    now.Add(-1 * time.Hour),
+		NotAfter:     now.Add(24 * time.Hour),
+		KeyUsage:     x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		DNSNames:     []string{"localhost"},
+		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
+	}
 
-	So(string(contents), ShouldEqual, expectation)
+	der, err := x509.CreateCertificate(rand.Reader, &tmpl, &tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("failed to create TLS certificate: %v", err)
+	}
+
+	crtPath := filepath.Join(dir, "server.crt")
+	keyPath := filepath.Join(dir, "server.key")
+
+	crtPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
+
+	if err := os.WriteFile(crtPath, crtPEM, 0o600); err != nil {
+		t.Fatalf("failed to write TLS certificate: %v", err)
+	}
+
+	if err := os.WriteFile(keyPath, keyPEM, 0o600); err != nil {
+		t.Fatalf("failed to write TLS private key: %v", err)
+	}
+
+	return crtPath, keyPath
 }
 
-func sortLines(data string) string {
-	nl := strings.HasSuffix(data, "\n")
-	if nl {
-		data = data[:len(data)-1]
+func newTestDatabaseName(t *testing.T) string {
+	t.Helper()
+
+	rnd := make([]byte, 6)
+	if _, err := rand.Read(rnd); err != nil {
+		t.Fatalf("failed to generate random suffix: %v", err)
 	}
 
-	lines := strings.Split(data, "\n")
+	randHex := hex.EncodeToString(rnd)
 
-	slices.Sort(lines)
+	// Keep it short; ClickHouse DB names are identifiers.
+	base := fmt.Sprintf("wrstat_ui_test_%d_%s", os.Getpid(), randHex)
 
-	data = strings.Join(lines, "\n")
+	base = strings.ReplaceAll(base, "-", "_")
+	base = strings.ReplaceAll(base, ".", "_")
+	base = strings.ReplaceAll(base, "@", "_")
 
-	if nl {
-		data += "\n"
-	}
-
-	return data
-}
-
-func fixTZs(h []basedirs.History) {
-	for n := range h {
-		h[n].Date = h[n].Date.In(time.UTC)
-	}
+	return base
 }

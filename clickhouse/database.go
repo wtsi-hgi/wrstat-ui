@@ -47,8 +47,40 @@ const (
 		"PREWHERE mount_path = ? AND snapshot_id = ? AND parent_dir = ? " +
 		"ORDER BY child"
 
-	dgutaQuery = "SELECT gid, uid, ft, age, count, size, atime_min, mtime_max, atime_buckets, mtime_buckets " +
-		"FROM wrstat_dguta PREWHERE mount_path = ? AND snapshot_id = ? AND dir = ?"
+	childrenAncestorQuery = "WITH active AS (" +
+		"SELECT mount_path, snapshot_id " +
+		"FROM wrstat_mounts_active " +
+		"WHERE startsWith(mount_path, ?)" +
+		") " +
+		"SELECT DISTINCT c.child " +
+		"FROM wrstat_children c " +
+		"ANY INNER JOIN active a " +
+		"ON c.mount_path = a.mount_path " +
+		"AND c.snapshot_id = a.snapshot_id " +
+		"WHERE c.parent_dir = ? " +
+		"ORDER BY c.child ASC"
+
+	dgutaQuery = "SELECT gid, uid, ft, age, count, size, " +
+		"atime_min, mtime_max, atime_buckets, mtime_buckets " +
+		"FROM wrstat_dguta " +
+		"PREWHERE mount_path = ? AND snapshot_id = ? AND dir = ?"
+
+	dgutaAncestorQuery = "WITH active AS (" +
+		"SELECT mount_path, snapshot_id " +
+		"FROM wrstat_mounts_active " +
+		"WHERE startsWith(mount_path, ?)" +
+		") " +
+		"SELECT d.gid, d.uid, d.ft, d.age, d.count, d.size, " +
+		"d.atime_min, d.mtime_max, d.atime_buckets, d.mtime_buckets " +
+		"FROM wrstat_dguta d " +
+		"ANY INNER JOIN active a " +
+		"ON d.mount_path = a.mount_path " +
+		"AND d.snapshot_id = a.snapshot_id " +
+		"WHERE d.dir = ?"
+
+	ancestorMaxUpdatedAtQuery = "SELECT max(updated_at) " +
+		"FROM wrstat_mounts_active " +
+		"WHERE startsWith(mount_path, ?)"
 
 	infoDGUTAQuery = "SELECT " +
 		"uniqExact(dir) AS num_dirs, " +
@@ -82,17 +114,33 @@ func newClickHouseDatabase(cfg Config, conn ch.Conn) *clickHouseDatabase {
 	return &clickHouseDatabase{cfg: cfg, conn: conn}
 }
 
-func (d *clickHouseDatabase) DirInfo(dir string, filter *db.Filter) (*db.DirSummary, error) {
+func (d *clickHouseDatabase) DirInfo(
+	dir string,
+	filter *db.Filter,
+) (*db.DirSummary, error) {
 	mountPath, snapshotID, updatedAt, ok, err := d.resolveMountAndSnapshot(dir)
 	if err != nil {
 		return nil, err
 	}
 
-	if !ok {
-		return &db.DirSummary{}, db.ErrDirNotFound
+	if ok {
+		return d.dirInfoSingleMount(
+			mountPath, snapshotID, updatedAt, dir, filter,
+		)
 	}
 
-	gutas, err := d.gutasForDir(mountPath, snapshotID, ensureTrailingSlash(dir))
+	return d.dirInfoAncestor(dir, filter)
+}
+
+func (d *clickHouseDatabase) dirInfoSingleMount(
+	mountPath, snapshotID string,
+	updatedAt time.Time,
+	dir string,
+	filter *db.Filter,
+) (*db.DirSummary, error) {
+	gutas, err := d.gutasForDir(
+		mountPath, snapshotID, ensureTrailingSlash(dir),
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -109,19 +157,49 @@ func (d *clickHouseDatabase) DirInfo(dir string, filter *db.Filter) (*db.DirSumm
 	return sum, nil
 }
 
+func (d *clickHouseDatabase) dirInfoAncestor(
+	dir string,
+	filter *db.Filter,
+) (*db.DirSummary, error) {
+	normDir := ensureTrailingSlash(dir)
+
+	gutas, err := d.gutasForAncestor(normDir)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(gutas) == 0 {
+		return &db.DirSummary{}, db.ErrDirNotFound
+	}
+
+	updatedAt, err := d.ancestorMaxUpdatedAt(normDir)
+	if err != nil {
+		return nil, err
+	}
+
+	sum := gutas.Summary(filter)
+	if sum != nil {
+		sum.Modtime = updatedAt
+	}
+
+	return sum, nil
+}
+
 func (d *clickHouseDatabase) Children(dir string) ([]string, error) {
 	mountPath, snapshotID, _, ok, err := d.resolveMountAndSnapshot(dir)
 	if err != nil {
 		return nil, err
 	}
 
-	if !ok {
-		return nil, nil
-	}
-
 	parentDir := ensureTrailingSlash(dir)
 
-	return d.childrenForMount(mountPath, snapshotID, parentDir)
+	if ok {
+		return d.childrenForMount(
+			mountPath, snapshotID, parentDir,
+		)
+	}
+
+	return d.childrenForAncestor(parentDir)
 }
 
 func (d *clickHouseDatabase) childrenForMount(mountPath, snapshotID, parentDir string) ([]string, error) {
@@ -163,6 +241,37 @@ func scanChildrenRows(rows rowsScanner) ([]string, error) {
 		}
 
 		children = append(children, child)
+	}
+
+	return children, nil
+}
+
+func (d *clickHouseDatabase) childrenForAncestor(
+	parentDir string,
+) ([]string, error) {
+	ctx, cancel := context.WithTimeout(
+		context.Background(), queryTimeout(d.cfg),
+	)
+	defer cancel()
+
+	rows, err := d.conn.Query(
+		ctx, childrenAncestorQuery, parentDir, parentDir,
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"clickhouse: failed to query ancestor children: %w", err,
+		)
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	children, err := scanChildrenRows(rows)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(children) == 0 {
+		return nil, nil
 	}
 
 	return children, nil
@@ -289,17 +398,29 @@ func scanActiveMountRow(rows rowsScanner) (string, string, time.Time, error) {
 	return mountPath, snapshotID, updatedAt, nil
 }
 
-func (d *clickHouseDatabase) gutasForDir(mountPath, snapshotID, dir string) (db.GUTAs, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), queryTimeout(d.cfg))
+func (d *clickHouseDatabase) gutasForDir(
+	mountPath, snapshotID, dir string,
+) (db.GUTAs, error) {
+	ctx, cancel := context.WithTimeout(
+		context.Background(), queryTimeout(d.cfg),
+	)
 	defer cancel()
 
-	rows, err := d.conn.Query(ctx, dgutaQuery, mountPath, snapshotID, dir)
+	rows, err := d.conn.Query(
+		ctx, dgutaQuery, mountPath, snapshotID, dir,
+	)
 	if err != nil {
-		return nil, fmt.Errorf("clickhouse: failed to query dguta: %w", err)
+		return nil, fmt.Errorf(
+			"clickhouse: failed to query dguta: %w", err,
+		)
 	}
 
 	defer func() { _ = rows.Close() }()
 
+	return scanDGUTARows(rows)
+}
+
+func scanDGUTARows(rows rowsScanner) (db.GUTAs, error) {
 	gutas := make(db.GUTAs, 0, dgutaInitialCap)
 
 	for rows.Next() {
@@ -312,6 +433,73 @@ func (d *clickHouseDatabase) gutasForDir(mountPath, snapshotID, dir string) (db.
 	}
 
 	return gutas, nil
+}
+
+func (d *clickHouseDatabase) gutasForAncestor(
+	dir string,
+) (db.GUTAs, error) {
+	ctx, cancel := context.WithTimeout(
+		context.Background(), queryTimeout(d.cfg),
+	)
+	defer cancel()
+
+	rows, err := d.conn.Query(
+		ctx, dgutaAncestorQuery, dir, dir,
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"clickhouse: failed to query ancestor dguta: %w", err,
+		)
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	return scanDGUTARows(rows)
+}
+
+func (d *clickHouseDatabase) ancestorMaxUpdatedAt(
+	dir string,
+) (time.Time, error) {
+	ctx, cancel := context.WithTimeout(
+		context.Background(), queryTimeout(d.cfg),
+	)
+	defer cancel()
+
+	rows, err := d.conn.Query(
+		ctx, ancestorMaxUpdatedAtQuery, dir,
+	)
+	if err != nil {
+		return time.Time{}, fmt.Errorf(
+			"clickhouse: failed to query ancestor max updated_at: %w",
+			err,
+		)
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	return scanMaxUpdatedAt(rows)
+}
+
+func scanMaxUpdatedAt(rows rowsScanner) (time.Time, error) {
+	if !rows.Next() {
+		return time.Time{}, nil
+	}
+
+	var updatedAt time.Time
+
+	if err := rows.Scan(&updatedAt); err != nil {
+		return time.Time{}, fmt.Errorf(
+			"clickhouse: failed to scan ancestor max updated_at: %w",
+			err,
+		)
+	}
+
+	return updatedAt.UTC(), nil
+}
+
+type rowsScanner interface {
+	Next() bool
+	Scan(dest ...any) error
 }
 
 func scanDGUTARow(rows rowsScanner) (*db.GUTA, error) {
@@ -337,9 +525,14 @@ func scanDGUTARow(rows rowsScanner) (*db.GUTA, error) {
 	return g, nil
 }
 
-type rowsScanner interface {
-	Next() bool
-	Scan(dest ...any) error
+func sliceToAgeBuckets(in []uint64) summary.AgeBuckets {
+	var out summary.AgeBuckets
+
+	for i := 0; i < len(out) && i < len(in); i++ {
+		out[i] = in[i]
+	}
+
+	return out
 }
 
 type dgutaScanned struct {
@@ -381,14 +574,4 @@ func safeUint64ToInt(v uint64) (int, error) {
 	}
 
 	return int(v), nil
-}
-
-func sliceToAgeBuckets(in []uint64) summary.AgeBuckets {
-	var out summary.AgeBuckets
-
-	for i := 0; i < len(out) && i < len(in); i++ {
-		out[i] = in[i]
-	}
-
-	return out
 }

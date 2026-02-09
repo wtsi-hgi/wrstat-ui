@@ -45,23 +45,20 @@ const insertFilesBatchQuery = "INSERT INTO wrstat_files " +
 	"(mount_path, snapshot_id, parent_dir, name, ext, entry_type, size, apparent_size, " +
 	"uid, gid, atime, mtime, ctime, inode, nlink)"
 
-type fileIngestWriter struct {
-	cfg Config
-
-	conn ch.Conn
-
-	mountPath string
-	updatedAt time.Time
-	snapshot  uuid.UUID
-
-	prepared bool
-	batch    driver.Batch
-	buf      fileIngestBuffer
-
-	batchSize int
-
-	closed bool
-}
+var (
+	errFileIngestNoDirPath = errors.New(
+		"clickhouse: file ingest requires directory path",
+	)
+	errFileIngestNoName = errors.New(
+		"clickhouse: file ingest requires entry name",
+	)
+	errFileIngestNegativeSize = errors.New(
+		"clickhouse: file ingest requires non-negative sizes",
+	)
+	errFileIngestNegativeInode = errors.New(
+		"clickhouse: file ingest requires non-negative inode and nlink",
+	)
+)
 
 type fileIngestBuffer struct {
 	mountPath    []string
@@ -103,7 +100,7 @@ func (b *fileIngestBuffer) reset() {
 	b.nlink = b.nlink[:0]
 }
 
-func (b *fileIngestBuffer) appendRow(
+func (b *fileIngestBuffer) appendRow( //nolint:funlen
 	mountPath string,
 	snapshot uuid.UUID,
 	parentDir string,
@@ -137,21 +134,22 @@ func (b *fileIngestBuffer) appendRow(
 	b.nlink = append(b.nlink, nlink)
 }
 
-type fileIngestOperation struct {
-	w *fileIngestWriter
-}
+type fileIngestWriter struct {
+	cfg Config
 
-func (o *fileIngestOperation) Add(info *summary.FileInfo) error {
-	if o == nil || o.w == nil {
-		return errClientClosed
-	}
+	conn ch.Conn
 
-	return o.w.append(info)
-}
+	mountPath string
+	updatedAt time.Time
+	snapshot  uuid.UUID
 
-func (o *fileIngestOperation) Output() error {
-	// Global operation output is a no-op; flushing happens in Close() per spec.
-	return nil
+	prepared bool
+	batch    driver.Batch
+	buf      fileIngestBuffer
+
+	batchSize int
+
+	closed bool
 }
 
 func (w *fileIngestWriter) Close() error {
@@ -162,9 +160,11 @@ func (w *fileIngestWriter) Close() error {
 	w.closed = true
 
 	var out error
+
 	if w.conn != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), queryTimeout(w.cfg))
 		out = errors.Join(out, w.flushBuffer(ctx, false))
+
 		cancel()
 
 		w.batch = nil
@@ -183,162 +183,76 @@ func (w *fileIngestWriter) append(info *summary.FileInfo) error {
 	if w == nil || w.conn == nil {
 		return errClientClosed
 	}
+
 	if info == nil {
 		return nil
 	}
-	if w.mountPath == "" {
-		return errMountPathRequired
-	}
-	if w.updatedAt.IsZero() {
-		return errUpdatedAtRequired
-	}
-	if info.Path == nil {
-		return fmt.Errorf("clickhouse: file ingest requires directory path")
-	}
-	if len(info.Name) == 0 {
-		return fmt.Errorf("clickhouse: file ingest requires entry name")
-	}
-	if info.Size < 0 || info.ApparentSize < 0 {
-		return fmt.Errorf("clickhouse: file ingest requires non-negative sizes")
-	}
-	if info.Inode < 0 || info.Nlink < 0 {
-		return fmt.Errorf("clickhouse: file ingest requires non-negative inode and nlink")
+
+	if err := w.validateWriteState(); err != nil {
+		return err
 	}
 
-	parentDir := string(info.Path.AppendTo(make([]byte, 0, info.Path.Len())))
-	name := string(info.Name)
-	ext := extFromName(name)
+	if err := validateFileInfo(info); err != nil {
+		return err
+	}
 
-	// We can buffer without touching ClickHouse until a flush boundary.
-	w.buf.appendRow(
-		w.mountPath,
-		w.snapshot,
-		parentDir,
-		name,
-		ext,
-		uint8(info.EntryType),
-		uint64(info.Size),
-		uint64(info.ApparentSize),
-		info.UID,
-		info.GID,
-		time.Unix(info.ATime, 0),
-		time.Unix(info.MTime, 0),
-		time.Unix(info.CTime, 0),
-		uint64(info.Inode),
-		uint64(info.Nlink),
-	)
+	w.bufferFileInfo(info)
 
 	if w.buf.rows() < w.batchSize {
 		return nil
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), queryTimeout(w.cfg))
+	ctx, cancel := context.WithTimeout(
+		context.Background(), queryTimeout(w.cfg),
+	)
 	defer cancel()
 
 	return w.flushBuffer(ctx, true)
 }
 
-func (w *fileIngestWriter) flushBuffer(ctx context.Context, reprepare bool) error {
-	if w == nil || w.conn == nil {
-		return errClientClosed
-	}
-	if w.buf.rows() == 0 {
-		return nil
+func validateFileInfo(info *summary.FileInfo) error {
+	if info.Path == nil {
+		return errFileIngestNoDirPath
 	}
 
-	if err := w.ensureWriteReady(ctx); err != nil {
-		return err
+	if len(info.Name) == 0 {
+		return errFileIngestNoName
 	}
 
-	// Spec-required columnar append: Append(slice) per column.
-	if err := w.batch.Column(0).Append(w.buf.mountPath); err != nil {
-		return fmt.Errorf("clickhouse: failed to append files column 0: %w", err)
-	}
-	if err := w.batch.Column(1).Append(w.buf.snapshot); err != nil {
-		return fmt.Errorf("clickhouse: failed to append files column 1: %w", err)
-	}
-	if err := w.batch.Column(2).Append(w.buf.parentDir); err != nil {
-		return fmt.Errorf("clickhouse: failed to append files column 2: %w", err)
-	}
-	if err := w.batch.Column(3).Append(w.buf.name); err != nil {
-		return fmt.Errorf("clickhouse: failed to append files column 3: %w", err)
-	}
-	if err := w.batch.Column(4).Append(w.buf.ext); err != nil {
-		return fmt.Errorf("clickhouse: failed to append files column 4: %w", err)
-	}
-	if err := w.batch.Column(5).Append(w.buf.entryType); err != nil {
-		return fmt.Errorf("clickhouse: failed to append files column 5: %w", err)
-	}
-	if err := w.batch.Column(6).Append(w.buf.size); err != nil {
-		return fmt.Errorf("clickhouse: failed to append files column 6: %w", err)
-	}
-	if err := w.batch.Column(7).Append(w.buf.apparentSize); err != nil {
-		return fmt.Errorf("clickhouse: failed to append files column 7: %w", err)
-	}
-	if err := w.batch.Column(8).Append(w.buf.uid); err != nil {
-		return fmt.Errorf("clickhouse: failed to append files column 8: %w", err)
-	}
-	if err := w.batch.Column(9).Append(w.buf.gid); err != nil {
-		return fmt.Errorf("clickhouse: failed to append files column 9: %w", err)
-	}
-	if err := w.batch.Column(10).Append(w.buf.atime); err != nil {
-		return fmt.Errorf("clickhouse: failed to append files column 10: %w", err)
-	}
-	if err := w.batch.Column(11).Append(w.buf.mtime); err != nil {
-		return fmt.Errorf("clickhouse: failed to append files column 11: %w", err)
-	}
-	if err := w.batch.Column(12).Append(w.buf.ctime); err != nil {
-		return fmt.Errorf("clickhouse: failed to append files column 12: %w", err)
-	}
-	if err := w.batch.Column(13).Append(w.buf.inode); err != nil {
-		return fmt.Errorf("clickhouse: failed to append files column 13: %w", err)
-	}
-	if err := w.batch.Column(14).Append(w.buf.nlink); err != nil {
-		return fmt.Errorf("clickhouse: failed to append files column 14: %w", err)
+	if info.Size < 0 || info.ApparentSize < 0 {
+		return errFileIngestNegativeSize
 	}
 
-	if err := w.batch.Send(); err != nil {
-		return fmt.Errorf("clickhouse: failed to send files batch: %w", err)
+	if info.Inode < 0 || info.Nlink < 0 {
+		return errFileIngestNegativeInode
 	}
-
-	w.buf.reset()
-
-	if !reprepare {
-		return nil
-	}
-
-	newBatch, err := w.conn.PrepareBatch(context.WithoutCancel(ctx), insertFilesBatchQuery, driver.WithReleaseConnection())
-	if err != nil {
-		return fmt.Errorf("clickhouse: failed to prepare replacement files batch: %w", err)
-	}
-	w.batch = newBatch
 
 	return nil
 }
 
-func (w *fileIngestWriter) ensureWriteReady(ctx context.Context) error {
-	if w.prepared {
-		return nil
-	}
+func (w *fileIngestWriter) bufferFileInfo(info *summary.FileInfo) {
+	parentDir := string(info.Path.AppendTo(
+		make([]byte, 0, info.Path.Len()),
+	))
+	name := string(info.Name)
 
-	if w.snapshot == uuid.Nil {
-		w.snapshot = snapshotID(w.mountPath, w.updatedAt)
-	}
-
-	if err := dropPartitionIgnoreUnknown(ctx, w.conn, w.mountPath, w.snapshot.String(), dropFilesPartitionQuery); err != nil {
-		return err
-	}
-
-	batchCtx := context.WithoutCancel(ctx)
-	batch, err := w.conn.PrepareBatch(batchCtx, insertFilesBatchQuery, driver.WithReleaseConnection())
-	if err != nil {
-		return fmt.Errorf("clickhouse: failed to prepare files batch: %w", err)
-	}
-
-	w.batch = batch
-	w.prepared = true
-
-	return nil
+	w.buf.appendRow(
+		w.mountPath,
+		w.snapshot,
+		parentDir,
+		name,
+		extFromName(name),
+		info.EntryType,
+		uint64(info.Size),         //nolint:gosec
+		uint64(info.ApparentSize), //nolint:gosec
+		info.UID,
+		info.GID,
+		time.Unix(info.ATime, 0),
+		time.Unix(info.MTime, 0),
+		time.Unix(info.CTime, 0),
+		uint64(info.Inode), //nolint:gosec
+		uint64(info.Nlink), //nolint:gosec
+	)
 }
 
 func extFromName(name string) string {
@@ -357,6 +271,156 @@ func extFromName(name string) string {
 	return strings.ToLower(filepath.Base(name[idx+1:]))
 }
 
+func (w *fileIngestWriter) validateWriteState() error {
+	if w.mountPath == "" {
+		return errMountPathRequired
+	}
+
+	if w.updatedAt.IsZero() {
+		return errUpdatedAtRequired
+	}
+
+	return nil
+}
+
+func (w *fileIngestWriter) flushBuffer(
+	ctx context.Context,
+	reprepare bool,
+) error {
+	if w == nil || w.conn == nil {
+		return errClientClosed
+	}
+
+	if w.buf.rows() == 0 {
+		return nil
+	}
+
+	if err := w.sendBufferedData(ctx); err != nil {
+		return err
+	}
+
+	if !reprepare {
+		return nil
+	}
+
+	return w.reprepareFilesBatch(ctx)
+}
+
+func (w *fileIngestWriter) sendBufferedData(
+	ctx context.Context,
+) error {
+	if err := w.ensureWriteReady(ctx); err != nil {
+		return err
+	}
+
+	if err := w.appendColumnarData(); err != nil {
+		return err
+	}
+
+	if err := w.batch.Send(); err != nil {
+		return fmt.Errorf(
+			"clickhouse: failed to send files batch: %w", err,
+		)
+	}
+
+	w.buf.reset()
+
+	return nil
+}
+
+func (w *fileIngestWriter) reprepareFilesBatch(
+	ctx context.Context,
+) error {
+	newBatch, err := w.conn.PrepareBatch(
+		context.WithoutCancel(ctx),
+		insertFilesBatchQuery,
+		driver.WithReleaseConnection(),
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"clickhouse: failed to prepare replacement files batch: %w",
+			err,
+		)
+	}
+
+	w.batch = newBatch
+
+	return nil
+}
+
+func (w *fileIngestWriter) appendColumnarData() error {
+	columns := []any{
+		w.buf.mountPath,
+		w.buf.snapshot,
+		w.buf.parentDir,
+		w.buf.name,
+		w.buf.ext,
+		w.buf.entryType,
+		w.buf.size,
+		w.buf.apparentSize,
+		w.buf.uid,
+		w.buf.gid,
+		w.buf.atime,
+		w.buf.mtime,
+		w.buf.ctime,
+		w.buf.inode,
+		w.buf.nlink,
+	}
+
+	for i, col := range columns {
+		if err := w.batch.Column(i).Append(col); err != nil {
+			return fmt.Errorf(
+				"clickhouse: failed to append files column %d: %w",
+				i, err,
+			)
+		}
+	}
+
+	return nil
+}
+
+func (w *fileIngestWriter) ensureWriteReady(
+	ctx context.Context,
+) error {
+	if w.prepared {
+		return nil
+	}
+
+	if w.snapshot == uuid.Nil {
+		w.snapshot = snapshotID(w.mountPath, w.updatedAt)
+	}
+
+	if err := dropPartitionIgnoreUnknown(
+		ctx, w.conn, w.mountPath,
+		w.snapshot.String(), dropFilesPartitionQuery,
+	); err != nil {
+		return err
+	}
+
+	return w.prepareFilesBatch(ctx)
+}
+
+func (w *fileIngestWriter) prepareFilesBatch(
+	ctx context.Context,
+) error {
+	batchCtx := context.WithoutCancel(ctx)
+
+	batch, err := w.conn.PrepareBatch(
+		batchCtx, insertFilesBatchQuery,
+		driver.WithReleaseConnection(),
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"clickhouse: failed to prepare files batch: %w", err,
+		)
+	}
+
+	w.batch = batch
+	w.prepared = true
+
+	return nil
+}
+
 // NewFileIngestOperation returns a summary global operation and a closer that
 // streams file-level rows into wrstat_files.
 func NewFileIngestOperation(
@@ -364,19 +428,7 @@ func NewFileIngestOperation(
 	mountPath string,
 	updatedAt time.Time,
 ) (summary.OperationGenerator, io.Closer, error) {
-	if err := validateConfig(cfg); err != nil {
-		return nil, nil, err
-	}
-
-	opts, err := optionsFromConfig(cfg)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), queryTimeout(cfg))
-	defer cancel()
-
-	conn, err := connectAndBootstrap(ctx, opts, cfg.Database)
+	conn, err := connectForFileIngest(cfg)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -395,4 +447,39 @@ func NewFileIngestOperation(
 	}
 
 	return gen, w, nil
+}
+
+func connectForFileIngest(cfg Config) (ch.Conn, error) {
+	if err := validateConfig(cfg); err != nil {
+		return nil, err
+	}
+
+	opts, err := optionsFromConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	ctx, cancel := context.WithTimeout(
+		context.Background(), queryTimeout(cfg),
+	)
+	defer cancel()
+
+	return connectAndBootstrap(ctx, opts, cfg.Database)
+}
+
+type fileIngestOperation struct {
+	w *fileIngestWriter
+}
+
+func (o *fileIngestOperation) Add(info *summary.FileInfo) error {
+	if o == nil || o.w == nil {
+		return errClientClosed
+	}
+
+	return o.w.append(info)
+}
+
+func (o *fileIngestOperation) Output() error {
+	// Global operation output is a no-op; flushing happens in Close() per spec.
+	return nil
 }
