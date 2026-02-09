@@ -12,8 +12,10 @@ import (
 )
 
 const (
-	filesIngestTestCountQuery = "SELECT count() FROM wrstat_files WHERE mount_path = ? AND snapshot_id = toUUID(?)"
-	filesIngestTestSelectExts = "SELECT name, ext FROM wrstat_files WHERE mount_path = ? AND snapshot_id = toUUID(?) ORDER BY name ASC"
+	filesIngestTestCountQuery = "SELECT count() FROM wrstat_files" +
+		" WHERE mount_path = ? AND snapshot_id = toUUID(?)"
+	filesIngestTestSelectExts = "SELECT name, ext FROM wrstat_files" +
+		" WHERE mount_path = ? AND snapshot_id = toUUID(?) ORDER BY name ASC"
 )
 
 func TestClickHouseFileIngestOperation(t *testing.T) {
@@ -69,6 +71,7 @@ func TestClickHouseFileIngestOperation(t *testing.T) {
 		So(closer.Close(), ShouldBeNil)
 
 		conn := th.openConn(cfg.DSN)
+
 		Reset(func() { So(conn.Close(), ShouldBeNil) })
 
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -78,15 +81,18 @@ func TestClickHouseFileIngestOperation(t *testing.T) {
 
 		rows, err := conn.Query(ctx, filesIngestTestSelectExts, testMountPath, sid)
 		So(err, ShouldBeNil)
+
 		defer func() { _ = rows.Close() }()
 
 		So(rows.Next(), ShouldBeTrue)
+
 		var name1, ext1 string
 		So(rows.Scan(&name1, &ext1), ShouldBeNil)
 		So(name1, ShouldEqual, "a.txt")
 		So(ext1, ShouldEqual, "txt")
 
 		So(rows.Next(), ShouldBeTrue)
+
 		var name2, ext2 string
 		So(rows.Scan(&name2, &ext2), ShouldBeNil)
 		So(name2, ShouldEqual, "subdir/")
@@ -97,7 +103,11 @@ func TestClickHouseFileIngestOperation(t *testing.T) {
 		So(err, ShouldBeNil)
 		So(gen2, ShouldNotBeNil)
 		op2 := gen2()
-		So(op2.Add(&summary.FileInfo{Path: root, Name: []byte("b.bin"), Size: 1, ApparentSize: 1, UID: 1, GID: 2, ATime: 1, MTime: 1, CTime: 1, Inode: 102, Nlink: 1, EntryType: stats.FileType}), ShouldBeNil)
+		So(op2.Add(&summary.FileInfo{
+			Path: root, Name: []byte("b.bin"), Size: 1, ApparentSize: 1,
+			UID: 1, GID: 2, ATime: 1, MTime: 1, CTime: 1,
+			Inode: 102, Nlink: 1, EntryType: stats.FileType,
+		}), ShouldBeNil)
 		So(closer2.Close(), ShouldBeNil)
 
 		So(countRows(ctx, conn, filesIngestTestCountQuery, testMountPath, sid), ShouldEqual, 1)

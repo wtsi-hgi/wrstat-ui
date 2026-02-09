@@ -106,3 +106,91 @@ func TestClickHouseDatabaseDirInfo(t *testing.T) {
 		So(sum.Modtime, ShouldResemble, updatedAt)
 	})
 }
+
+func TestClickHouseDatabaseDirInfoAncestor(t *testing.T) {
+	Convey("DirInfo merges results across mounts for ancestor dirs", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 2 * time.Second
+		cfg.PollInterval = 0
+
+		p, err := OpenProvider(cfg)
+		So(err, ShouldBeNil)
+		Reset(func() { So(p.Close(), ShouldBeNil) })
+
+		cp, ok := p.(*chProvider)
+		So(ok, ShouldBeTrue)
+
+		dbch := newClickHouseDatabase(cfg, cp.conn)
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		const (
+			mountA = "/lustre/scratchA/"
+			mountB = "/lustre/scratchB/"
+		)
+
+		updatedA := time.Date(2026, 1, 9, 12, 0, 0, 0, time.UTC)
+		updatedB := time.Date(2026, 1, 10, 14, 0, 0, 0, time.UTC)
+		sidA := snapshotID(mountA, updatedA)
+		sidB := snapshotID(mountB, updatedB)
+
+		ctx, cancel := context.WithTimeout(
+			context.Background(), 5*time.Second,
+		)
+		defer cancel()
+
+		So(conn.Exec(ctx, testInsertMountStmt,
+			mountA, time.Now(), sidA, updatedA,
+		), ShouldBeNil)
+
+		So(conn.Exec(ctx, testInsertMountStmt,
+			mountB, time.Now(), sidB, updatedB,
+		), ShouldBeNil)
+
+		atimeBuckets := []uint64{1, 0, 0, 0, 0, 0, 0, 0, 0}
+		mtimeBuckets := []uint64{0, 1, 0, 0, 0, 0, 0, 0, 0}
+
+		So(conn.Exec(ctx, testInsertDGUTAStmt,
+			mountA, sidA, "/lustre/",
+			uint32(7), uint32(9),
+			uint16(db.DGUTAFileTypeBam),
+			uint8(db.DGUTAgeAll),
+			uint64(10), uint64(100),
+			int64(10), int64(20),
+			atimeBuckets, mtimeBuckets,
+		), ShouldBeNil)
+
+		So(conn.Exec(ctx, testInsertDGUTAStmt,
+			mountB, sidB, "/lustre/",
+			uint32(7), uint32(9),
+			uint16(db.DGUTAFileTypeBam),
+			uint8(db.DGUTAgeAll),
+			uint64(5), uint64(50),
+			int64(5), int64(25),
+			atimeBuckets, mtimeBuckets,
+		), ShouldBeNil)
+
+		sum, err := dbch.DirInfo(
+			"/lustre/", &db.Filter{Age: db.DGUTAgeAll},
+		)
+		So(err, ShouldBeNil)
+		So(sum, ShouldNotBeNil)
+		So(sum.Count, ShouldEqual, 15)
+		So(sum.Size, ShouldEqual, 150)
+		So(sum.Modtime, ShouldResemble, updatedB)
+
+		Convey("returns ErrDirNotFound for non-existent ancestor", func() {
+			_, err := dbch.DirInfo(
+				"/nonexistent/",
+				&db.Filter{Age: db.DGUTAgeAll},
+			)
+			So(err, ShouldEqual, db.ErrDirNotFound)
+		})
+	})
+}

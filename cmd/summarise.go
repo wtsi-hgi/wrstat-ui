@@ -49,8 +49,9 @@ import (
 )
 
 const (
-	summariseDBBatchSize = 10000
-	summariseDirPerm     = 0o755
+	summariseDBBatchSize   = 10000
+	summariseDirPerm       = 0o755
+	maxMountPathCandidates = 4
 )
 
 var (
@@ -67,8 +68,15 @@ var (
 )
 
 var (
-	errSummariseExactlyOneInput = errors.New("exactly 1 input file should be provided")
-	errSummariseNoOutput        = errors.New("no output files specified")
+	errSummariseExactlyOneInput = errors.New(
+		"exactly 1 input file should be provided",
+	)
+	errSummariseNoOutput = errors.New(
+		"no output files specified",
+	)
+	errNoOutputDir = errors.New(
+		"no output directory available for mount-path derivation",
+	)
 )
 
 // summariseCmd represents the stat command.
@@ -180,6 +188,94 @@ func wrapCompressed(wc *os.File) io.WriteCloser {
 	}
 }
 
+func wireClickHouseOperations( //nolint:funlen
+	s *summary.Summariser,
+	cfg clickhouse.Config,
+	mountPath, mountpoints string,
+	modtime time.Time,
+) (func() error, error) {
+	dw, err := clickhouse.NewDGUTAWriter(cfg)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"failed to create dguta writer: %w", err,
+		)
+	}
+
+	fi, fiCloser, err := clickhouse.NewFileIngestOperation(
+		cfg, mountPath, modtime,
+	)
+	if err != nil {
+		_ = dw.Close()
+
+		return nil, fmt.Errorf(
+			"failed to create file ingest operation: %w", err,
+		)
+	}
+
+	dw.SetMountPath(mountPath)
+	dw.SetUpdatedAt(modtime)
+	dw.SetBatchSize(summariseDBBatchSize)
+
+	bs, err := setupBasedirsStore(
+		s, cfg, mountPath, mountpoints, modtime,
+	)
+	if err != nil {
+		_ = fiCloser.Close()
+		_ = dw.Close()
+
+		return nil, err
+	}
+
+	s.AddDirectoryOperation(dirguta.NewDirGroupUserTypeAge(dw))
+	s.AddGlobalOperation(fi)
+
+	return func() error {
+		var cerr error
+
+		cerr = errors.Join(cerr, fiCloser.Close())
+
+		if bs != nil {
+			cerr = errors.Join(cerr, bs.Close())
+		}
+
+		cerr = errors.Join(cerr, dw.Close())
+
+		return cerr
+	}, nil
+}
+
+func setupBasedirsStore(
+	s *summary.Summariser,
+	cfg clickhouse.Config,
+	mountPath, mountpoints string,
+	modtime time.Time,
+) (basedirs.Store, error) {
+	if basedirsDB == "" {
+		return nil, nil //nolint:nilnil
+	}
+
+	bs, err := clickhouse.NewBaseDirsStore(cfg)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"failed to create basedirs store: %w", err,
+		)
+	}
+
+	bs.SetMountPath(mountPath)
+	bs.SetUpdatedAt(modtime)
+
+	if err := addBasedirsSummariser(
+		s, bs, quotaPath, basedirsConfig,
+		mountpoints, modtime,
+	); err != nil {
+		_ = bs.Close()
+
+		return nil, err
+	}
+
+	return bs, nil
+}
+
 func addBasedirsSummariser(
 	s *summary.Summariser,
 	store basedirs.Store,
@@ -206,36 +302,6 @@ func addBasedirsSummariser(
 	s.AddDirectoryOperation(sbasedirs.NewBaseDirs(config.PathShouldOutput, bd))
 
 	return nil
-}
-
-func deriveMountPathForClickHouseSummarise(basedirsDB, dirgutaDB, defaultDir string) (string, error) {
-	candidates := make([]string, 0, 4)
-
-	if defaultDir != "" {
-		candidates = append(candidates, defaultDir)
-	}
-	if dirgutaDB != "" {
-		candidates = append(candidates, dirgutaDB)
-		candidates = append(candidates, filepath.Dir(dirgutaDB))
-	}
-	if basedirsDB != "" {
-		candidates = append(candidates, filepath.Dir(basedirsDB))
-	}
-
-	var lastErr error
-	for _, c := range candidates {
-		mp, err := mountpath.FromOutputDir(c)
-		if err == nil {
-			return mp, nil
-		}
-		lastErr = err
-	}
-
-	if lastErr == nil {
-		lastErr = errors.New("no output directory available for mount-path derivation")
-	}
-
-	return "", lastErr
 }
 
 func configureBaseDirsCreator(
@@ -345,116 +411,43 @@ func setArgsDefaults() {
 	}
 }
 
-func setSummarisers(s *summary.Summariser, mountpoints string, //nolint:gocognit,gocyclo
-	modtime time.Time) (func() error, error) {
-	var closers []func() error
+func setSummarisers(
+	s *summary.Summariser,
+	mountpoints string,
+	modtime time.Time,
+) (func() error, error) {
+	if err := addOutputSummarisers(s); err != nil {
+		return nil, err
+	}
 
+	if basedirsDB == "" && dirgutaDB == "" {
+		return nil, nil //nolint:nilnil
+	}
+
+	closer, err := addClickHouseSummarisers(
+		s, mountpoints, modtime,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return closer, nil
+}
+
+func addOutputSummarisers(s *summary.Summariser) error {
 	if userGroup != "" {
 		if err := addUserGroupSummariser(s, userGroup); err != nil {
-			return nil, err
+			return err
 		}
 	}
 
 	if groupUser != "" {
 		if err := addGroupUserSummariser(s, groupUser); err != nil {
-			return nil, err
+			return err
 		}
 	}
 
-	if basedirsDB != "" || dirgutaDB != "" {
-		loadClickhouseDotEnv()
-
-		mountPath, err := deriveMountPathForClickHouseSummarise(basedirsDB, dirgutaDB, defaultDir)
-		if err != nil {
-			return nil, err
-		}
-
-		mps, err := summariseutil.ParseMountpointsFromFile(mountpoints)
-		if err != nil {
-			return nil, err
-		}
-
-		cfg, err := clickhouseConfigFromEnvAndFlags(
-			clickhouseDSN,
-			clickhouseDatabase,
-			"",
-			mps,
-			"",
-			0,
-			clickhouseQueryTO,
-			defaultQueryTimeout,
-		)
-		if err != nil {
-			return nil, err
-		}
-
-		dw, err := clickhouse.NewDGUTAWriter(cfg)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create dguta writer: %w", err)
-		}
-		dw.SetMountPath(mountPath)
-		dw.SetUpdatedAt(modtime)
-		dw.SetBatchSize(summariseDBBatchSize)
-
-		fi, fiCloser, err := clickhouse.NewFileIngestOperation(cfg, mountPath, modtime)
-		if err != nil {
-			_ = dw.Close()
-			return nil, fmt.Errorf("failed to create file ingest operation: %w", err)
-		}
-
-		var bs basedirs.Store
-		if basedirsDB != "" {
-			bs, err = clickhouse.NewBaseDirsStore(cfg)
-			if err != nil {
-				_ = fiCloser.Close()
-				_ = dw.Close()
-				return nil, fmt.Errorf("failed to create basedirs store: %w", err)
-			}
-
-			bs.SetMountPath(mountPath)
-			bs.SetUpdatedAt(modtime)
-
-			if err := addBasedirsSummariser(s, bs, quotaPath, basedirsConfig, mountpoints, modtime); err != nil {
-				_ = bs.Close()
-				_ = fiCloser.Close()
-				_ = dw.Close()
-				return nil, err
-			}
-		}
-
-		s.AddDirectoryOperation(dirguta.NewDirGroupUserTypeAge(dw))
-		s.AddGlobalOperation(fi)
-
-		closers = append(closers, func() error {
-			// Close order per spec: file ingest -> basedirs store -> DGUTA writer.
-			var cerr error
-			cerr = errors.Join(cerr, fiCloser.Close())
-			if bs != nil {
-				cerr = errors.Join(cerr, bs.Close())
-			}
-			cerr = errors.Join(cerr, dw.Close())
-
-			return cerr
-		})
-	}
-
-	if len(closers) == 0 {
-		return nil, nil //nolint:nilnil
-	}
-
-	return func() error {
-		var err error
-
-		for _, c := range closers {
-			if c == nil {
-				continue
-			}
-
-			err = errors.Join(err, c())
-		}
-
-		return err
-	}, nil
+	return nil
 }
 
 func addUserGroupSummariser(s *summary.Summariser, userGroup string) error {
@@ -477,4 +470,99 @@ func addGroupUserSummariser(s *summary.Summariser, groupUser string) error {
 	s.AddGlobalOperation(groupuser.NewByGroupUser(wrapCompressed(gf)))
 
 	return nil
+}
+
+func addClickHouseSummarisers(
+	s *summary.Summariser,
+	mountpoints string,
+	modtime time.Time,
+) (func() error, error) {
+	loadClickhouseDotEnv()
+
+	mountPath, err := deriveMountPathForClickHouseSummarise(
+		basedirsDB, dirgutaDB, defaultDir,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	cfg, err := clickhouseSummariserConfig(mountpoints)
+	if err != nil {
+		return nil, err
+	}
+
+	return wireClickHouseOperations(
+		s, cfg, mountPath, mountpoints, modtime,
+	)
+}
+
+func deriveMountPathForClickHouseSummarise(
+	basedirsDB, dirgutaDB, defaultDir string,
+) (string, error) {
+	candidates := mountPathCandidates(
+		basedirsDB, dirgutaDB, defaultDir,
+	)
+
+	return resolveFirstMountPath(candidates)
+}
+
+func mountPathCandidates(
+	basedirsDB, dirgutaDB, defaultDir string,
+) []string {
+	candidates := make([]string, 0, maxMountPathCandidates)
+
+	if defaultDir != "" {
+		candidates = append(candidates, defaultDir)
+	}
+
+	if dirgutaDB != "" {
+		candidates = append(candidates, dirgutaDB)
+		candidates = append(candidates, filepath.Dir(dirgutaDB))
+	}
+
+	if basedirsDB != "" {
+		candidates = append(candidates, filepath.Dir(basedirsDB))
+	}
+
+	return candidates
+}
+
+func resolveFirstMountPath(
+	candidates []string,
+) (string, error) {
+	var lastErr error
+
+	for _, c := range candidates {
+		mp, err := mountpath.FromOutputDir(c)
+		if err == nil {
+			return mp, nil
+		}
+
+		lastErr = err
+	}
+
+	if lastErr == nil {
+		lastErr = errNoOutputDir
+	}
+
+	return "", lastErr
+}
+
+func clickhouseSummariserConfig(
+	mountpoints string,
+) (clickhouse.Config, error) {
+	mps, err := summariseutil.ParseMountpointsFromFile(mountpoints)
+	if err != nil {
+		return clickhouse.Config{}, err
+	}
+
+	return clickhouseConfigFromEnvAndFlags(
+		clickhouseDSN,
+		clickhouseDatabase,
+		"",
+		mps,
+		"",
+		0,
+		clickhouseQueryTO,
+	)
 }

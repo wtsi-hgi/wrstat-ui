@@ -77,7 +77,6 @@ func clickhouseConfigFromEnvAndFlags(
 	pollIntervalFlag string,
 	pollIntervalDefault time.Duration,
 	queryTimeoutFlag string,
-	queryTimeoutDefault time.Duration,
 ) (clickhouse.Config, error) {
 	dsn, database, pollInterval, queryTimeout, err := resolveClickhouseConfigInputs(
 		dsnFlag,
@@ -85,7 +84,6 @@ func clickhouseConfigFromEnvAndFlags(
 		pollIntervalFlag,
 		pollIntervalDefault,
 		queryTimeoutFlag,
-		queryTimeoutDefault,
 	)
 	if err != nil {
 		return clickhouse.Config{}, err
@@ -100,7 +98,6 @@ func resolveClickhouseConfigInputs(
 	pollIntervalFlag string,
 	pollIntervalDefault time.Duration,
 	queryTimeoutFlag string,
-	queryTimeoutDefault time.Duration,
 ) (string, string, time.Duration, time.Duration, error) {
 	dsn, err := requiredFlagOrEnv(dsnFlag, envClickhouseDSN, errClickhouseDSNRequired)
 	if err != nil {
@@ -116,50 +113,12 @@ func resolveClickhouseConfigInputs(
 		pollIntervalFlag,
 		pollIntervalDefault,
 		queryTimeoutFlag,
-		queryTimeoutDefault,
 	)
 	if err != nil {
 		return "", "", 0, 0, err
 	}
 
 	return dsn, database, pollInterval, queryTimeout, nil
-}
-
-func clickhouseConfig(
-	dsn string,
-	database string,
-	ownersPath string,
-	mountpoints []string,
-	pollInterval time.Duration,
-	queryTimeout time.Duration,
-) clickhouse.Config {
-	return clickhouse.Config{
-		DSN:           dsn,
-		Database:      database,
-		OwnersCSVPath: ownersPath,
-		MountPoints:   mountpoints,
-		PollInterval:  pollInterval,
-		QueryTimeout:  queryTimeout,
-	}
-}
-
-func clickhouseDurationsFromFlagsAndEnv(
-	pollIntervalFlag string,
-	pollIntervalDefault time.Duration,
-	queryTimeoutFlag string,
-	queryTimeoutDefault time.Duration,
-) (time.Duration, time.Duration, error) {
-	pollInterval, err := parseDurationFlagOrEnv(pollIntervalFlag, envPollInterval, pollIntervalDefault)
-	if err != nil {
-		return 0, 0, err
-	}
-
-	queryTimeout, err := parseDurationFlagOrEnv(queryTimeoutFlag, envQueryTimeout, queryTimeoutDefault)
-	if err != nil {
-		return 0, 0, err
-	}
-
-	return pollInterval, queryTimeout, nil
 }
 
 func requiredFlagOrEnv(flagValue string, envKey string, missing error) (string, error) {
@@ -174,6 +133,24 @@ func requiredFlagOrEnv(flagValue string, envKey string, missing error) (string, 
 	}
 
 	return v, nil
+}
+
+func clickhouseDurationsFromFlagsAndEnv(
+	pollIntervalFlag string,
+	pollIntervalDefault time.Duration,
+	queryTimeoutFlag string,
+) (time.Duration, time.Duration, error) {
+	pollInterval, err := parseDurationFlagOrEnv(pollIntervalFlag, envPollInterval, pollIntervalDefault)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	queryTimeout, err := parseDurationFlagOrEnv(queryTimeoutFlag, envQueryTimeout, defaultQueryTimeout)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	return pollInterval, queryTimeout, nil
 }
 
 func parseDurationFlagOrEnv(flagValue string, envKey string, defaultValue time.Duration) (time.Duration, error) {
@@ -197,4 +174,22 @@ func parseDurationFlagOrEnv(flagValue string, envKey string, defaultValue time.D
 	}
 
 	return d, nil
+}
+
+func clickhouseConfig(
+	dsn string,
+	database string,
+	ownersPath string,
+	mountpoints []string,
+	pollInterval time.Duration,
+	queryTimeout time.Duration,
+) clickhouse.Config {
+	return clickhouse.Config{
+		DSN:           dsn,
+		Database:      database,
+		OwnersCSVPath: ownersPath,
+		MountPoints:   mountpoints,
+		PollInterval:  pollInterval,
+		QueryTimeout:  queryTimeout,
+	}
 }

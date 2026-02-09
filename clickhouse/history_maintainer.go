@@ -34,18 +34,19 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
 )
 
+const (
+	cleanHistoryMutationQuery = "ALTER TABLE wrstat_basedirs_history DELETE WHERE NOT startsWith(mount_path, ?) " +
+		"SETTINGS mutations_sync = 2"
+
+	findInvalidHistoryQuery = "SELECT DISTINCT gid, mount_path FROM wrstat_basedirs_history " +
+		"WHERE NOT startsWith(mount_path, ?) " +
+		"ORDER BY mount_path ASC, gid ASC"
+)
+
 type historyMaintainer struct {
 	cfg  Config
 	opts ch.Options
 }
-
-const (
-	cleanHistoryMutationQuery = "ALTER TABLE wrstat_basedirs_history DELETE WHERE NOT startsWith(mount_path, ?) " +
-		"SETTINGS mutations_sync=1"
-
-	findInvalidHistoryQuery = "SELECT DISTINCT gid, mount_path FROM wrstat_basedirs_history " +
-		"WHERE NOT startsWith(mount_path, ?)"
-)
 
 func (m *historyMaintainer) CleanHistoryForMount(prefix string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), queryTimeout(m.cfg))

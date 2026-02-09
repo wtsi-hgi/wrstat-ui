@@ -39,9 +39,18 @@ func TestClickHouseBaseDirsStore(t *testing.T) {
 		gid := uint32(7)
 		hKey := basedirs.HistoryKey{GID: gid, MountPath: testMountPath}
 
-		h1 := basedirs.History{Date: time.Unix(1709000000, 0).UTC(), UsageSize: 50, QuotaSize: 200, UsageInodes: 5, QuotaInodes: 20}
-		h2 := basedirs.History{Date: time.Unix(1709100000, 0).UTC(), UsageSize: 100, QuotaSize: 200, UsageInodes: 10, QuotaInodes: 20}
-		hOld := basedirs.History{Date: time.Unix(1708000000, 0).UTC(), UsageSize: 1, QuotaSize: 200, UsageInodes: 1, QuotaInodes: 20}
+		h1 := basedirs.History{
+			Date: time.Unix(1709000000, 0).UTC(), UsageSize: 50,
+			QuotaSize: 200, UsageInodes: 5, QuotaInodes: 20,
+		}
+		h2 := basedirs.History{
+			Date: time.Unix(1709100000, 0).UTC(), UsageSize: 100,
+			QuotaSize: 200, UsageInodes: 10, QuotaInodes: 20,
+		}
+		hOld := basedirs.History{
+			Date: time.Unix(1708000000, 0).UTC(), UsageSize: 1,
+			QuotaSize: 200, UsageInodes: 1, QuotaInodes: 20,
+		}
 
 		So(store.AppendGroupHistory(hKey, h1), ShouldBeNil)
 		So(store.AppendGroupHistory(hKey, h2), ShouldBeNil)
@@ -77,6 +86,7 @@ func TestClickHouseBaseDirsStore(t *testing.T) {
 		So(store.Close(), ShouldBeNil)
 
 		conn := th.openConn(cfg.DSN)
+
 		Reset(func() { So(conn.Close(), ShouldBeNil) })
 
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -87,7 +97,9 @@ func TestClickHouseBaseDirsStore(t *testing.T) {
 
 		rows, err := conn.Query(ctx, basedirsStoreTestSelectQuotaDatesQuery, testMountPath, sid, gid, uint8(db.DGUTAgeAll))
 		So(err, ShouldBeNil)
+
 		defer func() { _ = rows.Close() }()
+
 		So(rows.Next(), ShouldBeTrue)
 
 		var gotNoSpace, gotNoFiles time.Time

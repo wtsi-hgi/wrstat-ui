@@ -70,7 +70,6 @@ the flag were not supplied.
 			"",
 			0,
 			clickhouseQueryTO,
-			defaultQueryTimeout,
 		)
 		if err != nil {
 			die("failed to build ClickHouse config: %s", err)
