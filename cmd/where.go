@@ -107,6 +107,8 @@ You can filter what files should be considered and reported on:
 
 If --unused and --unchanged are not specified then files of any age are 
 considered. These options are mutually exclusive.
+--unused and --unchanged bins are inclusive of those below them. i.e. Files in 
+the 1Y bin will also be counted in the 6M,2M and 1M bins.
 
 To avoid producing too much output, the --size option (specify your own units,
 eg. 50M for 50 megabytes) can be used to not display directories that have less
