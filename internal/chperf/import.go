@@ -33,13 +33,14 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/klauspost/pgzip"
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
-	"github.com/wtsi-hgi/wrstat-ui/clickhouse"
 	"github.com/wtsi-hgi/wrstat-ui/datasets"
+	"github.com/wtsi-hgi/wrstat-ui/db"
 	"github.com/wtsi-hgi/wrstat-ui/internal/boltperf"
 	"github.com/wtsi-hgi/wrstat-ui/internal/mountpath"
 	"github.com/wtsi-hgi/wrstat-ui/internal/summariseutil"
@@ -52,6 +53,22 @@ import (
 const (
 	statsGZBasename   = "stats.gz"
 	lineReaderBufSize = 32 * 1024
+
+	phasePartitionDropReset = "partition_drop_reset"
+	phaseFilesInsert        = "wrstat_files_insert"
+	phaseFilesFlush         = "wrstat_files_flush"
+	phaseDGUTAInsert        = "wrstat_dguta_insert"
+	phaseChildrenInsert     = "wrstat_children_insert"
+	phaseMountSwitch        = "mount_switch"
+	phaseOldSnapshotDrop    = "old_snapshot_partition_drop"
+	phaseBasedirsReset      = "wrstat_basedirs_reset"
+	phaseBasedirsGroupUsage = "wrstat_basedirs_group_usage_insert"
+	phaseBasedirsUserUsage  = "wrstat_basedirs_user_usage_insert"
+	phaseBasedirsGroupSubs  = "wrstat_basedirs_group_subdirs_insert"
+	phaseBasedirsUserSubs   = "wrstat_basedirs_user_subdirs_insert"
+	phaseBasedirsHistory    = "wrstat_basedirs_history_insert"
+	phaseBasedirsFinalise   = "wrstat_basedirs_finalise"
+	phaseBasedirsFlush      = "wrstat_basedirs_flush"
 )
 
 // ErrNoDatasets indicates no dataset directories were found.
@@ -63,7 +80,7 @@ type PrintfFunc = boltperf.PrintfFunc
 // Import discovers stats.gz datasets under inputDir, ingests them into
 // ClickHouse, and returns a Report with timing information.
 func Import(
-	cfg clickhouse.Config,
+	api ImportAPI,
 	inputDir string,
 	opts ImportOptions,
 	printf PrintfFunc,
@@ -76,16 +93,12 @@ func Import(
 	report := boltperf.NewReport("clickhouse", inputDir, 1, 0)
 	startAll := time.Now()
 
-	totalRecords, err := importDatasets(cfg, datasetDirs, opts, printf)
+	results, err := importDatasets(api, datasetDirs, opts, printf)
 	if err != nil {
 		return boltperf.Report{}, err
 	}
 
-	report.AddOperation(
-		"import_total",
-		map[string]any{"datasets": len(datasetDirs), "records": totalRecords},
-		[]float64{durationMS(time.Since(startAll))},
-	)
+	addImportReportOperations(&report, results, effectiveParallelism(opts.Parallelism), time.Since(startAll))
 
 	return report, nil
 }
@@ -105,52 +118,340 @@ func findDatasets(baseDir string) ([]string, error) {
 	return dirs, nil
 }
 
+func addImportReportOperations(
+	report *boltperf.Report,
+	results []datasetImportResult,
+	parallelism int,
+	totalDuration time.Duration,
+) {
+	for _, result := range results {
+		report.AddOperation("import_file_total", map[string]any{
+			"dataset":                    result.dataset,
+			"stats_path":                 result.statsPath,
+			"mount_path":                 result.mountPath,
+			"lines":                      result.lines,
+			"rows_per_table":             cloneUint64Map(result.rows),
+			"throughput_records_per_sec": throughputPerSecond(result.records(), result.elapsed),
+		}, []float64{durationMS(result.elapsed)})
+
+		for _, phase := range sortedImportPhases(result.phases) {
+			inputs := map[string]any{
+				"dataset":    result.dataset,
+				"stats_path": result.statsPath,
+				"mount_path": result.mountPath,
+				"phase":      phase,
+			}
+			addImportPhaseInputs(inputs, result, phase)
+
+			report.AddOperation("import_phase", inputs, []float64{durationMS(result.phases[phase])})
+		}
+	}
+
+	report.AddOperation("import_total", map[string]any{
+		"datasets":                   len(results),
+		"records":                    totalImportRecords(results),
+		"parallelism":                parallelism,
+		"mode":                       importMode(parallelism),
+		"throughput_records_per_sec": throughputPerSecond(totalImportRecords(results), totalDuration),
+	}, []float64{durationMS(totalDuration)})
+}
+
+func cloneUint64Map(src map[string]uint64) map[string]uint64 {
+	if len(src) == 0 {
+		return map[string]uint64{}
+	}
+
+	dst := make(map[string]uint64, len(src))
+	for k, v := range src {
+		dst[k] = v
+	}
+
+	return dst
+}
+
+func throughputPerSecond(records uint64, elapsed time.Duration) float64 {
+	if elapsed <= 0 {
+		return 0
+	}
+
+	return float64(records) / elapsed.Seconds()
+}
+
 func durationMS(d time.Duration) float64 {
 	return float64(d) / float64(time.Millisecond)
 }
 
+func sortedImportPhases(phases map[string]time.Duration) []string {
+	names := make([]string, 0, len(phases))
+	for phase := range phases {
+		names = append(names, phase)
+	}
+
+	sort.Strings(names)
+
+	return names
+}
+
+func addImportPhaseInputs(inputs map[string]any, result datasetImportResult, phase string) {
+	if table, rows, ok := importSingleTablePhase(result, phase); ok {
+		inputs["table"] = table
+		inputs["rows"] = rows
+
+		return
+	}
+
+	if tables, ok := importMultiTablePhase(phase); ok {
+		inputs["tables"] = tables
+	}
+}
+
+func importSingleTablePhase(result datasetImportResult, phase string) (string, uint64, bool) {
+	table, ok := importMainTablePhase(phase)
+	if !ok {
+		table, ok = importBasedirsTablePhase(phase)
+		if !ok {
+			return "", 0, false
+		}
+	}
+
+	return table, result.rows[table], true
+}
+
+func importMainTablePhase(phase string) (string, bool) {
+	switch phase {
+	case phaseFilesInsert, phaseFilesFlush:
+		return "wrstat_files", true
+	case phaseDGUTAInsert:
+		return "wrstat_dguta", true
+	case phaseChildrenInsert:
+		return "wrstat_children", true
+	default:
+		return "", false
+	}
+}
+
+func importBasedirsTablePhase(phase string) (string, bool) {
+	switch phase {
+	case phaseBasedirsGroupUsage:
+		return "wrstat_basedirs_group_usage", true
+	case phaseBasedirsUserUsage:
+		return "wrstat_basedirs_user_usage", true
+	case phaseBasedirsGroupSubs:
+		return "wrstat_basedirs_group_subdirs", true
+	case phaseBasedirsUserSubs:
+		return "wrstat_basedirs_user_subdirs", true
+	case phaseBasedirsHistory:
+		return "wrstat_basedirs_history", true
+	default:
+		return "", false
+	}
+}
+
+func importMultiTablePhase(phase string) ([]string, bool) {
+	switch phase {
+	case phasePartitionDropReset:
+		return []string{
+			"wrstat_dguta",
+			"wrstat_children",
+			"wrstat_files",
+			"wrstat_basedirs_group_usage",
+			"wrstat_basedirs_user_usage",
+			"wrstat_basedirs_group_subdirs",
+			"wrstat_basedirs_user_subdirs",
+		}, true
+	case phaseBasedirsReset, phaseBasedirsFlush:
+		return []string{
+			"wrstat_basedirs_group_usage",
+			"wrstat_basedirs_user_usage",
+			"wrstat_basedirs_group_subdirs",
+			"wrstat_basedirs_user_subdirs",
+		}, true
+	case phaseBasedirsFinalise:
+		return []string{"wrstat_basedirs_group_usage", "wrstat_basedirs_history"}, true
+	default:
+		return nil, false
+	}
+}
+
+func totalImportRecords(results []datasetImportResult) uint64 {
+	var total uint64
+
+	for _, result := range results {
+		total += result.records()
+	}
+
+	return total
+}
+
+func importMode(parallelism int) string {
+	if parallelism > 1 {
+		return "parallel"
+	}
+
+	return "serial"
+}
+
+func effectiveParallelism(parallelism int) int {
+	if parallelism < 1 {
+		return 1
+	}
+
+	return parallelism
+}
+
 func importDatasets(
-	cfg clickhouse.Config,
+	api ImportAPI,
 	datasetDirs []string,
 	opts ImportOptions,
 	printf PrintfFunc,
-) (uint64, error) {
+) ([]datasetImportResult, error) {
 	if opts.Parallelism <= 1 {
-		return importSerial(cfg, datasetDirs, opts, printf)
+		return importSerial(api, datasetDirs, opts, printf)
 	}
 
-	return importParallel(cfg, datasetDirs, opts, printf)
+	return importParallel(api, datasetDirs, opts, printf)
 }
 
 func importSerial(
-	cfg clickhouse.Config,
+	api ImportAPI,
 	datasetDirs []string,
 	opts ImportOptions,
 	printf PrintfFunc,
-) (uint64, error) {
-	var total uint64
+) ([]datasetImportResult, error) {
+	results := make([]datasetImportResult, 0, len(datasetDirs))
 
 	for _, dir := range datasetDirs {
-		n, err := importOneDataset(cfg, dir, opts, printf)
+		result, err := importOneDataset(api, dir, opts, printf)
 		if err != nil {
-			return 0, err
+			return nil, err
 		}
 
-		total += n
+		results = append(results, result)
 	}
 
-	return total, nil
+	return results, nil
+}
+
+func newDatasetImportMetrics(dataset, statsPath, mountPath string) *datasetImportMetrics {
+	return &datasetImportMetrics{
+		dataset:   dataset,
+		statsPath: statsPath,
+		mountPath: mountPath,
+		rows:      make(map[string]uint64),
+		phases:    make(map[string]time.Duration),
+	}
+}
+
+func ingestStatsGZWithMetrics(
+	api ImportAPI,
+	statsPath, mp string,
+	updatedAt time.Time,
+	opts ImportOptions,
+	metrics *datasetImportMetrics,
+) (_ uint64, err error) {
+	gz, closeFn, err := openStatsGZReader(statsPath)
+	if err != nil {
+		return 0, err
+	}
+
+	defer func() {
+		if cerr := closeFn(); err == nil {
+			err = cerr
+		}
+	}()
+
+	return summariseReader(gz, api, mp, updatedAt, opts, metrics)
+}
+
+func newTrackedDGUTAWriter(
+	dw db.DGUTAWriter,
+	metrics *datasetImportMetrics,
+) *trackedDGUTAWriter {
+	timed := &trackedDGUTAWriter{DGUTAWriter: dw, metrics: metrics}
+
+	setImportPhaseRecorder(dw, metrics)
+
+	return timed
+}
+
+func setImportPhaseRecorder(target any, metrics *datasetImportMetrics) {
+	if metrics == nil {
+		return
+	}
+
+	recorder, ok := target.(importPhaseRecorderSetter)
+	if !ok {
+		return
+	}
+
+	recorder.SetImportPhaseRecorder(metrics.addPhase)
+}
+
+func trackFileIngestOperation(
+	gen summary.OperationGenerator,
+	metrics *datasetImportMetrics,
+) summary.OperationGenerator {
+	return func() summary.Operation {
+		return &trackedFileOperation{Operation: gen(), metrics: metrics}
+	}
+}
+
+func composeImportCloser(
+	fileCloser io.Closer,
+	basedirsCloser func() error,
+	dgutaCloser abortableCloser,
+) func(bool) error {
+	return func(publish bool) error {
+		cerr := errors.Join(
+			closeImportFile(fileCloser),
+			closeImportBasedirs(basedirsCloser),
+		)
+
+		return errors.Join(cerr, closeImportDGUTA(dgutaCloser, publish && cerr == nil))
+	}
+}
+
+func closeImportFile(fileCloser io.Closer) error {
+	if fileCloser == nil {
+		return nil
+	}
+
+	return fileCloser.Close()
+}
+
+func closeImportBasedirs(basedirsCloser func() error) error {
+	if basedirsCloser == nil {
+		return nil
+	}
+
+	return basedirsCloser()
+}
+
+func closeImportDGUTA(dgutaCloser abortableCloser, publish bool) error {
+	if dgutaCloser == nil {
+		return nil
+	}
+
+	if publish {
+		return dgutaCloser.Close()
+	}
+
+	return dgutaCloser.Abort()
 }
 
 func importParallel(
-	cfg clickhouse.Config,
+	api ImportAPI,
 	datasetDirs []string,
 	opts ImportOptions,
 	printf PrintfFunc,
-) (uint64, error) {
-	results := runParallel(cfg, datasetDirs, opts, printf)
+) ([]datasetImportResult, error) {
+	results := runParallel(api, datasetDirs, opts, printf)
 
-	return sumResults(results)
+	if _, err := sumResults(results); err != nil {
+		return nil, err
+	}
+
+	return collectImportResults(results)
 }
 
 func sumResults(results []importResult) (uint64, error) {
@@ -167,8 +468,22 @@ func sumResults(results []importResult) (uint64, error) {
 	return total, nil
 }
 
+func collectImportResults(results []importResult) ([]datasetImportResult, error) {
+	imports := make([]datasetImportResult, 0, len(results))
+
+	for _, r := range results {
+		if r.err != nil {
+			return nil, r.err
+		}
+
+		imports = append(imports, r.dataset)
+	}
+
+	return imports, nil
+}
+
 func runParallel(
-	cfg clickhouse.Config,
+	api ImportAPI,
 	datasetDirs []string,
 	opts ImportOptions,
 	printf PrintfFunc,
@@ -188,8 +503,8 @@ func runParallel(
 
 			defer func() { <-sem }()
 
-			n, err := importOneDataset(cfg, d, opts, printf)
-			results[i] = importResult{records: n, err: err}
+			result, err := importOneDataset(api, d, opts, printf)
+			results[i] = importResult{dataset: result, records: result.records(), err: err}
 		}(idx, dir)
 	}
 
@@ -199,55 +514,46 @@ func runParallel(
 }
 
 func importOneDataset(
-	cfg clickhouse.Config,
+	api ImportAPI,
 	datasetDir string,
 	opts ImportOptions,
 	printf PrintfFunc,
-) (_ uint64, err error) {
+) (_ datasetImportResult, err error) {
 	mp, err := mountpath.FromOutputDir(datasetDir)
 	if err != nil {
-		return 0, err
+		return datasetImportResult{}, err
 	}
 
 	statsPath := filepath.Join(datasetDir, statsGZBasename)
 
 	st, err := os.Stat(statsPath)
 	if err != nil {
-		return 0, err
+		return datasetImportResult{}, err
 	}
 
 	updatedAt := st.ModTime()
 	start := time.Now()
+	metrics := newDatasetImportMetrics(filepath.Base(datasetDir), statsPath, mp)
 
-	records, err := ingestStatsGZ(cfg, statsPath, mp, updatedAt, opts)
+	records, err := ingestStatsGZ(api, statsPath, mp, updatedAt, opts, metrics)
 	if err != nil {
-		return 0, err
+		return datasetImportResult{}, err
 	}
 
 	printf("import dataset=%s mount=%s records=%d seconds=%.3f\n",
 		filepath.Base(datasetDir), mp, records, time.Since(start).Seconds())
 
-	return records, nil
+	return metrics.result(records, time.Since(start)), nil
 }
 
 func ingestStatsGZ(
-	cfg clickhouse.Config,
+	api ImportAPI,
 	statsPath, mp string,
 	updatedAt time.Time,
 	opts ImportOptions,
+	metrics *datasetImportMetrics,
 ) (_ uint64, err error) {
-	gz, closeFn, err := openStatsGZReader(statsPath)
-	if err != nil {
-		return 0, err
-	}
-
-	defer func() {
-		if cerr := closeFn(); err == nil {
-			err = cerr
-		}
-	}()
-
-	return summariseReader(gz, cfg, mp, updatedAt, opts)
+	return ingestStatsGZWithMetrics(api, statsPath, mp, updatedAt, opts, metrics)
 }
 
 func openStatsGZReader(path string) (*pgzip.Reader, func() error, error) {
@@ -275,22 +581,23 @@ func openStatsGZReader(path string) (*pgzip.Reader, func() error, error) {
 
 func summariseReader(
 	r io.Reader,
-	cfg clickhouse.Config,
+	api ImportAPI,
 	mp string,
 	updatedAt time.Time,
 	opts ImportOptions,
+	metrics *datasetImportMetrics,
 ) (_ uint64, err error) {
 	lr := newLineCountingReader(r, opts.MaxLines)
 	ss := summary.NewSummariser(stats.NewStatsParser(lr))
 
-	allClosers, err := addAllSummarisers(ss, cfg, mp, updatedAt, opts)
+	allClosers, err := addAllSummarisers(ss, api, mp, updatedAt, opts, metrics)
 	if err != nil {
 		return 0, err
 	}
 
 	defer func() {
-		if cerr := allClosers(); err == nil {
-			err = cerr
+		if cerr := allClosers(err == nil); cerr != nil {
+			err = errors.Join(err, cerr)
 		}
 	}()
 
@@ -316,69 +623,70 @@ func newLineCountingReader(r io.Reader, maxLines int) *lineCountingReader {
 
 func addAllSummarisers(
 	ss *summary.Summariser,
-	cfg clickhouse.Config,
+	api ImportAPI,
 	mp string,
 	updatedAt time.Time,
 	opts ImportOptions,
-) (func() error, error) {
-	dw, err := clickhouse.NewDGUTAWriter(cfg)
+	metrics *datasetImportMetrics,
+) (func(bool) error, error) {
+	dw, err := api.NewDGUTAWriter()
 	if err != nil {
 		return nil, err
 	}
 
-	dw.SetMountPath(mp)
-	dw.SetUpdatedAt(updatedAt)
-	dw.SetBatchSize(opts.BatchSize)
+	timedDW := newTrackedDGUTAWriter(dw, metrics)
 
-	fi, fiCloser, err := clickhouse.NewFileIngestOperation(cfg, mp, updatedAt)
+	timedDW.SetMountPath(mp)
+	timedDW.SetUpdatedAt(updatedAt)
+	timedDW.SetBatchSize(opts.BatchSize)
+
+	fi, fiCloser, err := api.NewFileIngestOperation(mp, updatedAt)
 	if err != nil {
-		_ = dw.Close()
-
-		return nil, err
+		return nil, errors.Join(err, timedDW.Abort())
 	}
 
-	closers := func() error {
-		return errors.Join(fiCloser.Close(), dw.Close())
-	}
+	setImportPhaseRecorder(fiCloser, metrics)
 
-	ss.AddDirectoryOperation(dirguta.NewDirGroupUserTypeAge(dw))
-	ss.AddGlobalOperation(fi)
+	timedFI := trackFileIngestOperation(fi, metrics)
+	timedFICloser := timedImportCloser{Closer: fiCloser, metrics: metrics, phase: phaseFilesFlush}
 
-	bsCloser, err := addBasedirsSummariser(ss, cfg, mp, updatedAt, opts)
+	ss.AddDirectoryOperation(dirguta.NewDirGroupUserTypeAge(timedDW))
+	ss.AddGlobalOperation(timedFI)
+
+	bsCloser, err := addBasedirsSummariser(ss, api, mp, updatedAt, opts, metrics)
 	if err != nil {
-		_ = closers() //nolint:errcheck
-
-		return nil, err
+		return nil, errors.Join(err, composeImportCloser(timedFICloser, nil, timedDW)(false))
 	}
 
-	return func() error {
-		return errors.Join(closers(), bsCloser())
-	}, nil
+	return composeImportCloser(timedFICloser, bsCloser, timedDW), nil
 }
 
 func addBasedirsSummariser(
 	ss *summary.Summariser,
-	cfg clickhouse.Config,
+	api ImportAPI,
 	mp string,
 	updatedAt time.Time,
 	opts ImportOptions,
+	metrics *datasetImportMetrics,
 ) (func() error, error) {
 	if opts.QuotaPath == "" || opts.ConfigPath == "" {
 		return func() error { return nil }, nil
 	}
 
-	bs, err := clickhouse.NewBaseDirsStore(cfg)
+	bs, err := api.NewBaseDirsStore()
 	if err != nil {
 		return nil, err
 	}
 
-	bs.SetMountPath(mp)
-	bs.SetUpdatedAt(updatedAt)
+	timedBS := &trackedBasedirsStore{Store: bs, metrics: metrics}
 
-	closer := func() error { return bs.Close() }
+	timedBS.SetMountPath(mp)
+	timedBS.SetUpdatedAt(updatedAt)
 
-	if err := addBasedirsOp(ss, bs, updatedAt, opts); err != nil {
-		_ = bs.Close()
+	closer := func() error { return timedBS.Close() }
+
+	if err := addBasedirsOp(ss, timedBS, updatedAt, opts); err != nil {
+		_ = timedBS.Close()
 
 		return nil, err
 	}
@@ -430,6 +738,11 @@ func parseBasedirsInputs(opts ImportOptions) (*basedirs.Quotas, basedirs.Config,
 	return quotas, config, mountpoints, nil
 }
 
+type abortableCloser interface {
+	io.Closer
+	Abort() error
+}
+
 // ImportOptions configures the import operation.
 type ImportOptions struct {
 	MaxLines    int
@@ -440,9 +753,276 @@ type ImportOptions struct {
 	MountsPath  string
 }
 
+type datasetImportResult struct {
+	dataset   string
+	statsPath string
+	mountPath string
+	lines     uint64
+	elapsed   time.Duration
+	rows      map[string]uint64
+	phases    map[string]time.Duration
+}
+
+func (r datasetImportResult) records() uint64 {
+	return r.lines
+}
+
 type importResult struct {
+	dataset datasetImportResult
 	records uint64
 	err     error
+}
+
+type datasetImportMetrics struct {
+	dataset   string
+	statsPath string
+	mountPath string
+	rows      map[string]uint64
+	phases    map[string]time.Duration
+}
+
+func (m *datasetImportMetrics) addRows(table string, rows uint64) {
+	if m == nil || rows == 0 {
+		return
+	}
+
+	m.rows[table] += rows
+}
+
+func (m *datasetImportMetrics) addPhase(phase string, d time.Duration) {
+	if m == nil || d <= 0 {
+		return
+	}
+
+	m.phases[phase] += d
+}
+
+func (m *datasetImportMetrics) result(lines uint64, elapsed time.Duration) datasetImportResult {
+	return datasetImportResult{
+		dataset:   m.dataset,
+		statsPath: m.statsPath,
+		mountPath: m.mountPath,
+		lines:     lines,
+		elapsed:   elapsed,
+		rows:      cloneUint64Map(m.rows),
+		phases:    cloneDurationMap(m.phases),
+	}
+}
+
+func cloneDurationMap(src map[string]time.Duration) map[string]time.Duration {
+	if len(src) == 0 {
+		return map[string]time.Duration{}
+	}
+
+	dst := make(map[string]time.Duration, len(src))
+	for k, v := range src {
+		dst[k] = v
+	}
+
+	return dst
+}
+
+type timedImportCloser struct {
+	io.Closer
+	metrics *datasetImportMetrics
+	phase   string
+}
+
+func (c timedImportCloser) Close() error {
+	start := time.Now()
+	err := c.Closer.Close()
+	c.metrics.addPhase(c.phase, time.Since(start))
+
+	return err
+}
+
+type trackedDGUTAWriter struct {
+	db.DGUTAWriter
+	metrics *datasetImportMetrics
+}
+
+func (w *trackedDGUTAWriter) Add(record db.RecordDGUTA) error {
+	err := w.DGUTAWriter.Add(record)
+	if err == nil {
+		w.metrics.addRows("wrstat_dguta", countDGUTARows(record))
+		w.metrics.addRows("wrstat_children", countChildrenRows(record.Children))
+	}
+
+	return err
+}
+
+func countDGUTARows(record db.RecordDGUTA) uint64 {
+	var rows uint64
+
+	for _, guta := range record.GUTAs {
+		if guta != nil {
+			rows++
+		}
+	}
+
+	return rows
+}
+
+func countChildrenRows(children []string) uint64 {
+	var rows uint64
+
+	for _, child := range children {
+		if strings.TrimSuffix(child, "/") != "" {
+			rows++
+		}
+	}
+
+	return rows
+}
+
+func (w *trackedDGUTAWriter) Close() error {
+	return w.DGUTAWriter.Close()
+}
+
+func (w *trackedDGUTAWriter) Abort() error {
+	aborter, ok := w.DGUTAWriter.(interface{ Abort() error })
+	if ok {
+		return aborter.Abort()
+	}
+
+	return w.DGUTAWriter.Close()
+}
+
+type importPhaseRecorderSetter interface {
+	SetImportPhaseRecorder(recorder func(phase string, duration time.Duration))
+}
+
+type historyAppendInsertReporter interface {
+	LastHistoryAppendInserted() bool
+}
+
+type trackedFileOperation struct {
+	summary.Operation
+	metrics *datasetImportMetrics
+}
+
+func (o *trackedFileOperation) Add(info *summary.FileInfo) error {
+	start := time.Now()
+	err := o.Operation.Add(info)
+	o.metrics.addPhase(phaseFilesInsert, time.Since(start))
+
+	if err == nil && info != nil {
+		o.metrics.addRows("wrstat_files", 1)
+	}
+
+	return err
+}
+
+type trackedBasedirsStore struct {
+	basedirs.Store
+	metrics *datasetImportMetrics
+}
+
+func (s *trackedBasedirsStore) Reset() error {
+	start := time.Now()
+	err := s.Store.Reset()
+	duration := time.Since(start)
+	s.metrics.addPhase(phaseBasedirsReset, duration)
+	s.metrics.addPhase(phasePartitionDropReset, duration)
+
+	return err
+}
+
+func (s *trackedBasedirsStore) PutGroupUsage(u *basedirs.Usage) error {
+	start := time.Now()
+	err := s.Store.PutGroupUsage(u)
+	s.metrics.addPhase(phaseBasedirsGroupUsage, time.Since(start))
+
+	if err == nil && u != nil {
+		s.metrics.addRows("wrstat_basedirs_group_usage", 1)
+	}
+
+	return err
+}
+
+func (s *trackedBasedirsStore) PutUserUsage(u *basedirs.Usage) error {
+	start := time.Now()
+	err := s.Store.PutUserUsage(u)
+	s.metrics.addPhase(phaseBasedirsUserUsage, time.Since(start))
+
+	if err == nil && u != nil {
+		s.metrics.addRows("wrstat_basedirs_user_usage", 1)
+	}
+
+	return err
+}
+
+func (s *trackedBasedirsStore) PutGroupSubDirs(key basedirs.SubDirKey, subdirs []*basedirs.SubDir) error {
+	start := time.Now()
+	err := s.Store.PutGroupSubDirs(key, subdirs)
+	s.metrics.addPhase(phaseBasedirsGroupSubs, time.Since(start))
+
+	if err == nil {
+		s.metrics.addRows("wrstat_basedirs_group_subdirs", countNonNilSubDirs(subdirs))
+	}
+
+	return err
+}
+
+func countNonNilSubDirs(subdirs []*basedirs.SubDir) uint64 {
+	var rows uint64
+
+	for _, subdir := range subdirs {
+		if subdir != nil {
+			rows++
+		}
+	}
+
+	return rows
+}
+
+func (s *trackedBasedirsStore) PutUserSubDirs(key basedirs.SubDirKey, subdirs []*basedirs.SubDir) error {
+	start := time.Now()
+	err := s.Store.PutUserSubDirs(key, subdirs)
+	s.metrics.addPhase(phaseBasedirsUserSubs, time.Since(start))
+
+	if err == nil {
+		s.metrics.addRows("wrstat_basedirs_user_subdirs", countNonNilSubDirs(subdirs))
+	}
+
+	return err
+}
+
+func (s *trackedBasedirsStore) AppendGroupHistory(key basedirs.HistoryKey, point basedirs.History) error {
+	start := time.Now()
+	err := s.Store.AppendGroupHistory(key, point)
+	s.metrics.addPhase(phaseBasedirsHistory, time.Since(start))
+
+	if err == nil && historyAppendInserted(s.Store) {
+		s.metrics.addRows("wrstat_basedirs_history", 1)
+	}
+
+	return err
+}
+
+func historyAppendInserted(store basedirs.Store) bool {
+	reporter, ok := store.(historyAppendInsertReporter)
+	if !ok {
+		return true
+	}
+
+	return reporter.LastHistoryAppendInserted()
+}
+
+func (s *trackedBasedirsStore) Finalise() error {
+	start := time.Now()
+	err := s.Store.Finalise()
+	s.metrics.addPhase(phaseBasedirsFinalise, time.Since(start))
+
+	return err
+}
+
+func (s *trackedBasedirsStore) Close() error {
+	start := time.Now()
+	err := s.Store.Close()
+	s.metrics.addPhase(phaseBasedirsFlush, time.Since(start))
+
+	return err
 }
 
 type lineCountingReader struct {

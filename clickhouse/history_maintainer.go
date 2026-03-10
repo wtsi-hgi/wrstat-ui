@@ -28,7 +28,10 @@ package clickhouse
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
+	"strings"
 
 	ch "github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
@@ -41,7 +44,11 @@ const (
 	findInvalidHistoryQuery = "SELECT DISTINCT gid, mount_path FROM wrstat_basedirs_history " +
 		"WHERE NOT startsWith(mount_path, ?) " +
 		"ORDER BY mount_path ASC, gid ASC"
+
+	testDatabaseNamePrefix = "wrstat_ui_test_"
 )
+
+var errUnsafeHistoryCleanup = errors.New("clickhouse: refusing to clean basedirs history in test environment")
 
 type historyMaintainer struct {
 	cfg  Config
@@ -49,6 +56,10 @@ type historyMaintainer struct {
 }
 
 func (m *historyMaintainer) CleanHistoryForMount(prefix string) error {
+	if err := m.refuseUnsafeCleanInTestEnv(); err != nil {
+		return err
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), queryTimeout(m.cfg))
 	defer cancel()
 
@@ -64,6 +75,23 @@ func (m *historyMaintainer) CleanHistoryForMount(prefix string) error {
 	}
 
 	return nil
+}
+
+func (m *historyMaintainer) refuseUnsafeCleanInTestEnv() error {
+	if os.Getenv("WRSTAT_ENV") != "test" {
+		return nil
+	}
+
+	if strings.HasPrefix(m.cfg.Database, testDatabaseNamePrefix) {
+		return nil
+	}
+
+	return fmt.Errorf(
+		"%w for database %q; expected prefix %q",
+		errUnsafeHistoryCleanup,
+		m.cfg.Database,
+		testDatabaseNamePrefix,
+	)
 }
 
 func (m *historyMaintainer) FindInvalidHistory(prefix string) ([]basedirs.HistoryIssue, error) {
@@ -120,10 +148,7 @@ func NewHistoryMaintainer(cfg Config) (basedirs.HistoryMaintainer, error) {
 		return nil, err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), queryTimeout(cfg))
-	defer cancel()
-
-	conn, err := connectAndBootstrap(ctx, opts, cfg.Database)
+	conn, err := connectAndBootstrap(context.Background(), opts, cfg.Database, queryTimeout(cfg))
 	if err != nil {
 		return nil, err
 	}

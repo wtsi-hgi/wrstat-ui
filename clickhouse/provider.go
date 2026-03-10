@@ -219,9 +219,11 @@ func (p *chProvider) pollLoop(ctx context.Context) {
 		p.queueError(err)
 	}
 
-	for range ticker.C {
-		if ctx.Err() != nil {
+	for {
+		select {
+		case <-ctx.Done():
 			return
+		case <-ticker.C:
 		}
 
 		fp, err := p.mountsActiveFingerprint(ctx)
@@ -467,10 +469,7 @@ func OpenProvider(cfg Config) (provider.Provider, error) {
 		return nil, err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), queryTimeout(cfg))
-	defer cancel()
-
-	conn, err := connectAndBootstrap(ctx, opts, cfg.Database)
+	conn, err := connectAndBootstrap(context.Background(), opts, cfg.Database, queryTimeout(cfg))
 	if err != nil {
 		return nil, err
 	}

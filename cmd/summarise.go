@@ -193,7 +193,7 @@ func wireClickHouseOperations( //nolint:funlen
 	cfg clickhouse.Config,
 	mountPath, mountpoints string,
 	modtime time.Time,
-) (func() error, error) {
+) (func(bool) error, error) {
 	dw, err := clickhouse.NewDGUTAWriter(cfg)
 	if err != nil {
 		return nil, fmt.Errorf(
@@ -205,10 +205,9 @@ func wireClickHouseOperations( //nolint:funlen
 		cfg, mountPath, modtime,
 	)
 	if err != nil {
-		_ = dw.Close()
-
-		return nil, fmt.Errorf(
-			"failed to create file ingest operation: %w", err,
+		return nil, errors.Join(
+			fmt.Errorf("failed to create file ingest operation: %w", err),
+			closeSummariseDGUTAWriter(dw, false),
 		)
 	}
 
@@ -220,28 +219,71 @@ func wireClickHouseOperations( //nolint:funlen
 		s, cfg, mountPath, mountpoints, modtime,
 	)
 	if err != nil {
-		_ = fiCloser.Close()
-		_ = dw.Close()
-
-		return nil, err
+		return nil, errors.Join(
+			err,
+			fiCloser.Close(),
+			closeSummariseDGUTAWriter(dw, false),
+		)
 	}
 
 	s.AddDirectoryOperation(dirguta.NewDirGroupUserTypeAge(dw))
 	s.AddGlobalOperation(fi)
 
-	return func() error {
-		var cerr error
+	var basedirsCloser func() error
 
-		cerr = errors.Join(cerr, fiCloser.Close())
+	if bs != nil {
+		basedirsCloser = bs.Close
+	}
 
-		if bs != nil {
-			cerr = errors.Join(cerr, bs.Close())
-		}
+	return composeSummariseCloser(fiCloser, basedirsCloser, dw), nil
+}
 
-		cerr = errors.Join(cerr, dw.Close())
+func composeSummariseCloser(
+	fileCloser io.Closer,
+	basedirsCloser func() error,
+	dgutaCloser io.Closer,
+) func(bool) error {
+	return func(publish bool) error {
+		cerr := errors.Join(
+			closeSummariseFile(fileCloser),
+			closeSummariseBasedirs(basedirsCloser),
+		)
 
-		return cerr
-	}, nil
+		return errors.Join(cerr, closeSummariseDGUTAWriter(dgutaCloser, publish && cerr == nil))
+	}
+}
+
+func closeSummariseBasedirs(basedirsCloser func() error) error {
+	if basedirsCloser == nil {
+		return nil
+	}
+
+	return basedirsCloser()
+}
+
+func closeSummariseFile(fileCloser io.Closer) error {
+	if fileCloser == nil {
+		return nil
+	}
+
+	return fileCloser.Close()
+}
+
+func closeSummariseDGUTAWriter(writer io.Closer, publish bool) error {
+	if writer == nil {
+		return nil
+	}
+
+	if publish {
+		return writer.Close()
+	}
+
+	aborter, ok := writer.(interface{ Abort() error })
+	if ok {
+		return aborter.Abort()
+	}
+
+	return writer.Close()
 }
 
 func setupBasedirsStore(
@@ -342,8 +384,8 @@ func run(args []string) (err error) {
 		return err
 	} else if fn != nil {
 		defer func() {
-			if errr := fn(); err == nil {
-				err = errr
+			if errr := fn(err == nil); errr != nil {
+				err = errors.Join(err, errr)
 			}
 		}()
 	}
@@ -415,7 +457,7 @@ func setSummarisers(
 	s *summary.Summariser,
 	mountpoints string,
 	modtime time.Time,
-) (func() error, error) {
+) (func(bool) error, error) {
 	if err := addOutputSummarisers(s); err != nil {
 		return nil, err
 	}
@@ -476,7 +518,7 @@ func addClickHouseSummarisers(
 	s *summary.Summariser,
 	mountpoints string,
 	modtime time.Time,
-) (func() error, error) {
+) (func(bool) error, error) {
 	loadClickhouseDotEnv()
 
 	mountPath, err := deriveMountPathForClickHouseSummarise(

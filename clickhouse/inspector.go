@@ -28,7 +28,10 @@ package clickhouse
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -65,6 +68,10 @@ type QueryMetrics struct {
 	ResultBytes uint64
 }
 
+func fallbackQueryMetrics(runDuration time.Duration) *QueryMetrics {
+	return &QueryMetrics{DurationMs: durationMillis(runDuration)}
+}
+
 // Inspector can run EXPLAIN and query system.query_log without exposing
 // clickhouse-go types.
 type Inspector struct {
@@ -84,10 +91,7 @@ func NewInspector(cfg Config) (*Inspector, error) {
 		return nil, err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), queryTimeout(cfg))
-	defer cancel()
-
-	conn, err := connectAndBootstrap(ctx, opts, cfg.Database)
+	conn, err := connectAndBootstrap(context.Background(), opts, cfg.Database, queryTimeout(cfg))
 	if err != nil {
 		return nil, err
 	}
@@ -144,11 +148,28 @@ func (i *Inspector) Measure(
 		return nil, fmt.Errorf("clickhouse: failed to get server time: %w", err)
 	}
 
-	if err := run(ctx); err != nil {
-		return nil, err
+	start := time.Now()
+
+	if runErr := run(ctx); runErr != nil {
+		return nil, runErr
 	}
 
-	return i.queryMetricsSince(ctx, t0)
+	runDuration := time.Since(start)
+
+	m, err := i.queryMetricsSince(ctx, t0)
+	if err == nil {
+		return m, nil
+	}
+
+	if shouldFallbackQueryMetrics(err) {
+		return fallbackQueryMetrics(runDuration), nil
+	}
+
+	return nil, err
+}
+
+func shouldFallbackQueryMetrics(err error) bool {
+	return isMissingQueryLogError(err) || errors.Is(err, sql.ErrNoRows)
 }
 
 // Close closes the inspector's connection.
@@ -244,4 +265,34 @@ type explainRows interface {
 	Next() bool
 	Scan(dest ...any) error
 	Err() error
+}
+
+func isMissingQueryLogError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	msg := strings.ToLower(err.Error())
+
+	return strings.Contains(msg, "system.query_log") &&
+		(strings.Contains(msg, "unknown table") ||
+			strings.Contains(msg, "doesn't exist"))
+}
+
+func durationMillis(runDuration time.Duration) uint64 {
+	if runDuration <= 0 {
+		return 0
+	}
+
+	ms := runDuration.Milliseconds()
+	if ms <= 0 {
+		return 0
+	}
+
+	value, err := strconv.ParseUint(strconv.FormatInt(ms, 10), 10, 64)
+	if err != nil {
+		return 0
+	}
+
+	return value
 }

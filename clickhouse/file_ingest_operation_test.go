@@ -2,6 +2,7 @@ package clickhouse
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -11,6 +12,8 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/summary"
 )
 
+const fileIngestTestPhasePartitionDropReset = "partition_drop_reset"
+
 const (
 	filesIngestTestCountQuery = "SELECT count() FROM wrstat_files" +
 		" WHERE mount_path = ? AND snapshot_id = toUUID(?)"
@@ -18,7 +21,54 @@ const (
 		" WHERE mount_path = ? AND snapshot_id = toUUID(?) ORDER BY name ASC"
 )
 
+type fileIngestPhaseRecorder interface {
+	SetImportPhaseRecorder(recorder func(phase string, duration time.Duration))
+}
+
 func TestClickHouseFileIngestOperation(t *testing.T) {
+	Convey("File ingest operation records initial partition drop/reset time", t, func() {
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 2 * time.Second
+
+		updatedAt := time.Unix(1710000000, 0).UTC()
+		paths := internaltest.NewDirectoryPathCreator()
+		root := paths.ToDirectoryPath(testMountPath)
+
+		gen, closer, err := NewFileIngestOperation(cfg, testMountPath, updatedAt)
+		So(err, ShouldBeNil)
+		So(gen, ShouldNotBeNil)
+		So(closer, ShouldNotBeNil)
+
+		recorder, ok := closer.(fileIngestPhaseRecorder)
+		So(ok, ShouldBeTrue)
+
+		phases := make(map[string]time.Duration)
+
+		recorder.SetImportPhaseRecorder(func(phase string, d time.Duration) {
+			phases[phase] += d
+		})
+
+		op := gen()
+		So(op.Add(&summary.FileInfo{
+			Path:         root,
+			Name:         []byte("a.txt"),
+			Size:         123,
+			ApparentSize: 456,
+			UID:          1,
+			GID:          2,
+			ATime:        20,
+			MTime:        21,
+			CTime:        22,
+			Inode:        101,
+			Nlink:        1,
+			EntryType:    stats.FileType,
+		}), ShouldBeNil)
+
+		So(closer.Close(), ShouldBeNil)
+		So(phases[fileIngestTestPhasePartitionDropReset], ShouldBeGreaterThan, time.Duration(0))
+	})
+
 	Convey("File ingest operation drops partitions and writes wrstat_files", t, func() {
 		th := newClickHouseTestHarness(t)
 		cfg := th.newConfig()
@@ -111,5 +161,88 @@ func TestClickHouseFileIngestOperation(t *testing.T) {
 		So(closer2.Close(), ShouldBeNil)
 
 		So(countRows(ctx, conn, filesIngestTestCountQuery, testMountPath, sid), ShouldEqual, 1)
+	})
+
+	Convey("File ingest operation refuses to rewrite an active deterministic snapshot", t, func() {
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 2 * time.Second
+
+		updatedAt := time.Unix(1710000000, 0).UTC()
+		sid := snapshotID(testMountPath, updatedAt).String()
+
+		paths := internaltest.NewDirectoryPathCreator()
+		root := paths.ToDirectoryPath(testMountPath)
+
+		gen, closer, err := NewFileIngestOperation(cfg, testMountPath, updatedAt)
+		So(err, ShouldBeNil)
+		So(gen, ShouldNotBeNil)
+		So(closer, ShouldNotBeNil)
+
+		op := gen()
+		So(op.Add(&summary.FileInfo{
+			Path:         root,
+			Name:         []byte("a.txt"),
+			Size:         123,
+			ApparentSize: 456,
+			UID:          1,
+			GID:          2,
+			ATime:        20,
+			MTime:        21,
+			CTime:        22,
+			Inode:        101,
+			Nlink:        1,
+			EntryType:    stats.FileType,
+		}), ShouldBeNil)
+		So(closer.Close(), ShouldBeNil)
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		So(conn.Exec(ctx, testInsertMountStmt, testMountPath, time.Now(), sid, updatedAt), ShouldBeNil)
+
+		gen2, closer2, err := NewFileIngestOperation(cfg, testMountPath, updatedAt)
+		So(err, ShouldBeNil)
+		So(gen2, ShouldNotBeNil)
+		So(closer2, ShouldNotBeNil)
+
+		op2 := gen2()
+		So(op2.Add(&summary.FileInfo{
+			Path:         root,
+			Name:         []byte("b.bin"),
+			Size:         1,
+			ApparentSize: 1,
+			UID:          1,
+			GID:          2,
+			ATime:        1,
+			MTime:        1,
+			CTime:        1,
+			Inode:        102,
+			Nlink:        1,
+			EntryType:    stats.FileType,
+		}), ShouldBeNil)
+
+		err = closer2.Close()
+		So(err, ShouldNotBeNil)
+		So(errors.Is(err, errActiveSnapshotRewrite), ShouldBeTrue)
+
+		So(countRows(ctx, conn, filesIngestTestCountQuery, testMountPath, sid), ShouldEqual, 1)
+
+		rows, err := conn.Query(ctx, filesIngestTestSelectExts, testMountPath, sid)
+		So(err, ShouldBeNil)
+
+		defer func() { _ = rows.Close() }()
+
+		So(rows.Next(), ShouldBeTrue)
+
+		var name, ext string
+		So(rows.Scan(&name, &ext), ShouldBeNil)
+		So(name, ShouldEqual, "a.txt")
+		So(ext, ShouldEqual, "txt")
+		So(rows.Next(), ShouldBeFalse)
 	})
 }

@@ -44,6 +44,8 @@ var errForcedFailure = errors.New("forced failure")
 
 const testMountPath = "/mnt/test/"
 
+const dgutaWriterTestPhasePartitionDropReset = "partition_drop_reset"
+
 const (
 	dgutaWriterTestActiveSnapshotQuery = "SELECT toString(snapshot_id), updated_at FROM wrstat_mounts_active " +
 		"WHERE mount_path = ?"
@@ -81,6 +83,37 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 		w.SetUpdatedAt(time.Date(2026, 1, 9, 12, 0, 0, 0, time.UTC))
 		err = w.Add(db.RecordDGUTA{Dir: paths.ToDirectoryPath("/"), GUTAs: nil})
 		So(err, ShouldBeNil)
+	})
+
+	Convey("DGUTAWriter records initial partition drop/reset time", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 2 * time.Second
+
+		w, err := NewDGUTAWriter(cfg)
+		So(err, ShouldBeNil)
+		So(w, ShouldNotBeNil)
+
+		impl, ok := w.(*dgutaWriter)
+		So(ok, ShouldBeTrue)
+
+		phases := make(map[string]time.Duration)
+
+		impl.SetImportPhaseRecorder(func(phase string, d time.Duration) {
+			phases[phase] += d
+		})
+
+		w.SetMountPath(testMountPath)
+		w.SetUpdatedAt(time.Date(2026, 1, 9, 12, 0, 0, 0, time.UTC))
+
+		paths := internaltest.NewDirectoryPathCreator()
+		err = w.Add(singleDGUTARecord(paths.ToDirectoryPath("/"), 42, "/child/"))
+		So(err, ShouldBeNil)
+		So(phases[dgutaWriterTestPhasePartitionDropReset], ShouldBeGreaterThan, time.Duration(0))
+		So(w.Close(), ShouldBeNil)
 	})
 
 	Convey("DGUTAWriter switches the active snapshot on Close", t, func() {
@@ -130,7 +163,7 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 		So(gotUpdatedAt, ShouldEqual, updatedAt)
 	})
 
-	Convey("DGUTAWriter writes dguta + children rows and supports idempotent retry", t, func() {
+	Convey("DGUTAWriter writes dguta + children rows", t, func() {
 		os.Setenv("WRSTAT_ENV", "test")
 		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
 
@@ -145,7 +178,6 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 		dir := paths.ToDirectoryPath("/")
 
 		writeSingleDGUTARecord(cfg, updatedAt, dir, 42, "/foo/")
-		writeSingleDGUTARecord(cfg, updatedAt, dir, 77, "/bar/")
 
 		conn := th.openConn(cfg.DSN)
 
@@ -168,7 +200,7 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 
 		var gotGID uint32
 		So(rows.Scan(&gotGID), ShouldBeNil)
-		So(gotGID, ShouldEqual, 77)
+		So(gotGID, ShouldEqual, 42)
 		So(rows.Next(), ShouldBeFalse)
 
 		childRows, err := conn.Query(ctx,
@@ -185,7 +217,120 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 
 		var gotChild string
 		So(childRows.Scan(&gotChild), ShouldBeNil)
-		So(gotChild, ShouldEqual, "/bar")
+		So(gotChild, ShouldEqual, "/foo")
+		So(childRows.Next(), ShouldBeFalse)
+	})
+
+	Convey("DGUTAWriter supports retry after aborting an unpublished snapshot", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 5 * time.Second
+
+		updatedAt := time.Date(2026, 1, 9, 12, 0, 0, 0, time.UTC)
+		sid := snapshotID(testMountPath, updatedAt)
+
+		paths := internaltest.NewDirectoryPathCreator()
+		dir := paths.ToDirectoryPath("/")
+
+		w, err := NewDGUTAWriter(cfg)
+		So(err, ShouldBeNil)
+		So(w, ShouldNotBeNil)
+
+		impl, ok := w.(*dgutaWriter)
+		So(ok, ShouldBeTrue)
+
+		impl.SetBatchSize(1)
+		w.SetMountPath(testMountPath)
+		w.SetUpdatedAt(updatedAt)
+		So(w.Add(singleDGUTARecord(dir, 42, "/foo/")), ShouldBeNil)
+
+		aborter, ok := w.(interface{ Abort() error })
+		So(ok, ShouldBeTrue)
+		So(aborter.Abort(), ShouldBeNil)
+
+		writeSingleDGUTARecord(cfg, updatedAt, dir, 77, "/bar/")
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		So(countRows(ctx, conn,
+			dgutaWriterTestCountActiveMountQuery,
+			testMountPath,
+		), ShouldEqual, 1)
+		So(countRows(ctx, conn,
+			dgutaWriterTestCountDGUTAQuery,
+			testMountPath,
+			sid.String(),
+		), ShouldEqual, 1)
+		So(countRows(ctx, conn,
+			dgutaWriterTestCountChildrenQuery,
+			testMountPath,
+			sid.String(),
+		), ShouldEqual, 1)
+
+		rows, err := conn.Query(ctx,
+			dgutaWriterTestSelectGIDQuery,
+			testMountPath,
+			sid.String(),
+			"/",
+		)
+		So(err, ShouldBeNil)
+
+		defer func() { _ = rows.Close() }()
+
+		So(rows.Next(), ShouldBeTrue)
+
+		var gotGID uint32
+		So(rows.Scan(&gotGID), ShouldBeNil)
+		So(gotGID, ShouldEqual, 77)
+		So(rows.Next(), ShouldBeFalse)
+	})
+
+	Convey("DGUTAWriter expands summariser child names to full child paths", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 2 * time.Second
+
+		updatedAt := time.Date(2026, 1, 9, 12, 0, 0, 0, time.UTC)
+		expectedSID := snapshotID(testMountPath, updatedAt)
+
+		paths := internaltest.NewDirectoryPathCreator()
+		dir := paths.ToDirectoryPath(testMountPath)
+
+		writeSingleDGUTARecord(cfg, updatedAt, dir, 88, "child/")
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		childRows, err := conn.Query(ctx,
+			dgutaWriterTestSelectChildQuery,
+			testMountPath,
+			expectedSID.String(),
+			testMountPath,
+		)
+		So(err, ShouldBeNil)
+
+		defer func() { _ = childRows.Close() }()
+
+		So(childRows.Next(), ShouldBeTrue)
+
+		var gotChild string
+		So(childRows.Scan(&gotChild), ShouldBeNil)
+		So(gotChild, ShouldEqual, testMountPath+"child")
 		So(childRows.Next(), ShouldBeFalse)
 	})
 
@@ -302,6 +447,165 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 			testMountPath,
 			sid.String(),
 		), ShouldEqual, 0)
+	})
+
+	Convey("DGUTAWriter Abort cleans up new snapshot without switching", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 5 * time.Second
+
+		updatedAt := time.Date(2026, 1, 9, 12, 0, 0, 0, time.UTC)
+		sid := snapshotID(testMountPath, updatedAt)
+
+		w, err := NewDGUTAWriter(cfg)
+		So(err, ShouldBeNil)
+		So(w, ShouldNotBeNil)
+
+		w.SetMountPath(testMountPath)
+		w.SetUpdatedAt(updatedAt)
+
+		paths := internaltest.NewDirectoryPathCreator()
+		dir := paths.ToDirectoryPath("/")
+		So(w.Add(singleDGUTARecord(dir, 444, "/child/")), ShouldBeNil)
+
+		aborter, ok := w.(interface{ Abort() error })
+		So(ok, ShouldBeTrue)
+		So(aborter.Abort(), ShouldBeNil)
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		So(countRows(ctx, conn,
+			dgutaWriterTestCountActiveMountQuery,
+			testMountPath,
+		), ShouldEqual, 0)
+		So(countRows(ctx, conn,
+			dgutaWriterTestCountDGUTAQuery,
+			testMountPath,
+			sid.String(),
+		), ShouldEqual, 0)
+		So(countRows(ctx, conn,
+			dgutaWriterTestCountChildrenQuery,
+			testMountPath,
+			sid.String(),
+		), ShouldEqual, 0)
+	})
+
+	Convey("DGUTAWriter cleanup uses a fresh timeout when the close context is already done", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 5 * time.Second
+
+		updatedAt := time.Date(2026, 1, 9, 12, 0, 0, 0, time.UTC)
+		sid := snapshotID(testMountPath, updatedAt)
+
+		w, err := NewDGUTAWriter(cfg)
+		So(err, ShouldBeNil)
+		So(w, ShouldNotBeNil)
+
+		impl, ok := w.(*dgutaWriter)
+		So(ok, ShouldBeTrue)
+
+		impl.SetBatchSize(1)
+		impl.SetMountPath(testMountPath)
+		impl.SetUpdatedAt(updatedAt)
+
+		paths := internaltest.NewDirectoryPathCreator()
+		dir := paths.ToDirectoryPath("/")
+		So(impl.Add(singleDGUTARecord(dir, 333, "/child/")), ShouldBeNil)
+
+		cleanupCtx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		err = impl.closeWithNewSnapshotCleanup(cleanupCtx, errForcedFailure)
+		So(err, ShouldNotBeNil)
+		So(errors.Is(err, errForcedFailure), ShouldBeTrue)
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		ctx, ctxCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer ctxCancel()
+
+		So(countRows(ctx, conn,
+			dgutaWriterTestCountDGUTAQuery,
+			testMountPath,
+			sid.String(),
+		), ShouldEqual, 0)
+		So(countRows(ctx, conn,
+			dgutaWriterTestCountChildrenQuery,
+			testMountPath,
+			sid.String(),
+		), ShouldEqual, 0)
+	})
+
+	Convey("DGUTAWriter refuses to rewrite an active snapshot and Abort preserves published data", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 5 * time.Second
+
+		updatedAt := time.Date(2026, 1, 9, 12, 0, 0, 0, time.UTC)
+		sid := snapshotID(testMountPath, updatedAt)
+
+		paths := internaltest.NewDirectoryPathCreator()
+		dir := paths.ToDirectoryPath("/")
+
+		writeSingleDGUTARecord(cfg, updatedAt, dir, 42, "/foo/")
+
+		w, err := NewDGUTAWriter(cfg)
+		So(err, ShouldBeNil)
+		So(w, ShouldNotBeNil)
+
+		impl, ok := w.(*dgutaWriter)
+		So(ok, ShouldBeTrue)
+
+		impl.SetBatchSize(1)
+		w.SetMountPath(testMountPath)
+		w.SetUpdatedAt(updatedAt)
+
+		err = w.Add(singleDGUTARecord(dir, 77, "/bar/"))
+		So(err, ShouldNotBeNil)
+		So(errors.Is(err, errActiveSnapshotRewrite), ShouldBeTrue)
+
+		aborter, ok := w.(interface{ Abort() error })
+		So(ok, ShouldBeTrue)
+		So(aborter.Abort(), ShouldBeNil)
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		So(countRows(ctx, conn,
+			dgutaWriterTestCountActiveMountQuery,
+			testMountPath,
+		), ShouldEqual, 1)
+		So(countRows(ctx, conn,
+			dgutaWriterTestCountDGUTAQuery,
+			testMountPath,
+			sid.String(),
+		), ShouldEqual, 1)
+		So(countRows(ctx, conn,
+			dgutaWriterTestCountChildrenQuery,
+			testMountPath,
+			sid.String(),
+		), ShouldEqual, 1)
 	})
 }
 
