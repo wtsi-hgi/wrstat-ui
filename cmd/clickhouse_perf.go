@@ -157,7 +157,9 @@ func runCHPerfImport(inputDir string) error {
 		return err
 	}
 
-	report, err := chperf.Import(cfg, inputDir, chperf.ImportOptions{
+	api := chperf.NewClickHouseAPI(cfg)
+
+	report, err := chperf.Import(api, inputDir, chperf.ImportOptions{
 		MaxLines:    chPerf.maxLines,
 		BatchSize:   chPerf.batchSize,
 		Parallelism: chPerf.parallelism,
@@ -178,7 +180,9 @@ func runCHPerfQuery() error {
 		return err
 	}
 
-	report, err := chperf.Query(cfg, chperf.QueryOptions{
+	api := chperf.NewClickHouseAPI(cfg)
+
+	report, err := chperf.Query(api, chperf.QueryOptions{
 		Dir:    chPerf.dir,
 		UID:    chPerf.uid,
 		GIDs:   parseGIDs(chPerf.gids),

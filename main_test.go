@@ -33,6 +33,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -46,6 +47,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	_ "unsafe"
 
 	"github.com/VertebrateResequencing/wr/jobqueue"
 	"github.com/VertebrateResequencing/wr/jobqueue/scheduler"
@@ -53,6 +55,7 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
 	"github.com/wtsi-hgi/wrstat-ui/clickhouse"
 	"github.com/wtsi-hgi/wrstat-ui/db"
+	"github.com/wtsi-hgi/wrstat-ui/internal/boltperf"
 	internaldata "github.com/wtsi-hgi/wrstat-ui/internal/data"
 	"github.com/wtsi-hgi/wrstat-ui/internal/statsdata"
 	internaltest "github.com/wtsi-hgi/wrstat-ui/internal/test"
@@ -60,6 +63,20 @@ import (
 )
 
 const app = "wrstat-ui_test"
+
+const (
+	clickHousePerfPhasePartitionDropReset = "partition_drop_reset"
+	clickHousePerfPhaseDGUTAInsert        = "wrstat_dguta_insert"
+	clickHousePerfPhaseChildrenInsert     = "wrstat_children_insert"
+	clickHousePerfPhaseMountSwitch        = "mount_switch"
+	clickHousePerfPhaseOldSnapshotDrop    = "old_snapshot_partition_drop"
+)
+
+var (
+	errSummariseTestFiles    = errors.New("summarise files")
+	errSummariseTestBasedirs = errors.New("summarise basedirs")
+	errSummariseTestDGUTA    = errors.New("summarise dguta")
+)
 
 type clickHouseCLIEnv struct {
 	DSN      string
@@ -422,6 +439,778 @@ func TestDBInfo(t *testing.T) {
 		So(output, ShouldContainSubstring, "Dirs: 1")
 		So(output, ShouldContainSubstring, "DGUTAs: 1")
 	})
+}
+
+func TestClickHousePerfImport(t *testing.T) {
+	Convey("clickhouse-perf import ingests a dataset and writes a useful JSON report", t, func() {
+		chEnv := setupClickHouseCLIEnv(t)
+		fixture := newClickHousePerfFixture(t)
+		importJSON := filepath.Join(t.TempDir(), "clickhouse_import.json")
+
+		stdout, stderr, err := runClickHousePerfImport(t, fixture, importJSON)
+		if err != nil {
+			t.Fatalf("clickhouse-perf import failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+		}
+
+		So(stderr, ShouldBeBlank)
+		So(stdout, ShouldContainSubstring, "import dataset="+fixture.datasetName)
+		So(stdout, ShouldContainSubstring, "mount=/lustre/")
+
+		report := readPerfReport(t, importJSON)
+		So(report.SchemaVersion, ShouldEqual, 1)
+		So(report.Backend, ShouldEqual, "clickhouse")
+		So(report.GoVersion, ShouldNotBeBlank)
+		So(report.OS, ShouldNotBeBlank)
+		So(report.Arch, ShouldNotBeBlank)
+		So(report.StartedAt, ShouldNotBeBlank)
+		So(report.InputDir, ShouldEqual, fixture.statsInputDir)
+		So(report.Repeat, ShouldEqual, 1)
+		So(report.Warmup, ShouldEqual, 0)
+		So(len(report.Operations), ShouldBeGreaterThan, 2)
+
+		fileTotal := findReportOperation(report.Operations, "import_file_total")
+		So(fileTotal, ShouldNotBeNil)
+		So(fileTotal.Inputs["dataset"], ShouldEqual, fixture.datasetName)
+		So(fileTotal.Inputs["mount_path"], ShouldEqual, "/lustre/")
+
+		rowsPerTable, ok := fileTotal.Inputs["rows_per_table"].(map[string]any)
+		So(ok, ShouldBeTrue)
+		So(rowsPerTable["wrstat_files"], ShouldBeGreaterThan, float64(0))
+
+		partitionReset := findReportPhaseOperation(report.Operations, clickHousePerfPhasePartitionDropReset)
+		So(partitionReset, ShouldNotBeNil)
+		So(partitionReset.DurationsMS[0], ShouldBeGreaterThan, 0)
+
+		tables, ok := partitionReset.Inputs["tables"].([]any)
+		So(ok, ShouldBeTrue)
+
+		tableNames := make([]string, 0, len(tables))
+		for _, raw := range tables {
+			name, ok := raw.(string)
+			So(ok, ShouldBeTrue)
+
+			tableNames = append(tableNames, name)
+		}
+
+		So(tableNames, ShouldContain, "wrstat_dguta")
+		So(tableNames, ShouldContain, "wrstat_children")
+		So(tableNames, ShouldContain, "wrstat_files")
+		So(tableNames, ShouldContain, "wrstat_basedirs_group_usage")
+
+		dgutaInsert := findReportPhaseOperation(report.Operations, clickHousePerfPhaseDGUTAInsert)
+		So(dgutaInsert, ShouldNotBeNil)
+		So(dgutaInsert.Inputs["table"], ShouldEqual, "wrstat_dguta")
+		So(dgutaInsert.Inputs["rows"], ShouldBeGreaterThan, float64(0))
+
+		childrenInsert := findReportPhaseOperation(report.Operations, clickHousePerfPhaseChildrenInsert)
+		So(childrenInsert, ShouldNotBeNil)
+		So(childrenInsert.Inputs["table"], ShouldEqual, "wrstat_children")
+		So(childrenInsert.Inputs["rows"], ShouldBeGreaterThan, float64(0))
+
+		mountSwitch := findReportPhaseOperation(report.Operations, clickHousePerfPhaseMountSwitch)
+		So(mountSwitch, ShouldNotBeNil)
+		So(mountSwitch.DurationsMS[0], ShouldBeGreaterThan, 0)
+
+		So(findReportPhaseOperation(report.Operations, clickHousePerfPhaseOldSnapshotDrop), ShouldBeNil)
+
+		total := findReportOperation(report.Operations, "import_total")
+		So(total, ShouldNotBeNil)
+		So(total.Inputs["datasets"], ShouldEqual, float64(1))
+		So(total.Inputs["parallelism"], ShouldEqual, float64(1))
+		So(total.Inputs["mode"], ShouldEqual, "serial")
+		So(total.Inputs["records"], ShouldBeGreaterThan, float64(0))
+
+		client, err := clickhouse.NewClient(clickhouse.Config{
+			DSN:           chEnv.DSN,
+			Database:      chEnv.Database,
+			OwnersCSVPath: fixture.ownersPath,
+			MountPoints:   fixture.queryMounts,
+			QueryTimeout:  5 * time.Second,
+		})
+		So(err, ShouldBeNil)
+
+		defer client.Close()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		rows, err := client.ListDir(ctx, fixture.queryDir, clickhouse.ListOptions{})
+		So(err, ShouldBeNil)
+		So(len(rows), ShouldBeGreaterThan, 0)
+		So(rows[0].ParentDir, ShouldEqual, fixture.queryDir)
+	})
+
+	Convey("clickhouse-perf import failure does not advance the active snapshot", t, func() {
+		chEnv := setupClickHouseCLIEnv(t)
+		fixture := newClickHousePerfFixture(t)
+		goodJSON := filepath.Join(t.TempDir(), "clickhouse_import_good.json")
+		badJSON := filepath.Join(t.TempDir(), "clickhouse_import_bad.json")
+
+		stdout, stderr, err := runClickHousePerfImport(t, fixture, goodJSON)
+		if err != nil {
+			t.Fatalf("clickhouse-perf import failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+		}
+
+		initialTS := activeMountTimestamp(t, chEnv, "/lustre/")
+		So(initialTS, ShouldEqual, fixture.updatedAt)
+
+		failedUpdatedAt := fixture.updatedAt.Add(time.Hour)
+		corruptPerfFixtureStats(t, fixture, failedUpdatedAt)
+
+		_, stderr, err = runClickHousePerfImport(t, fixture, badJSON)
+		So(err, ShouldNotBeNil)
+		So(stderr, ShouldNotBeBlank)
+
+		finalTS := activeMountTimestamp(t, chEnv, "/lustre/")
+		So(finalTS, ShouldEqual, initialTS)
+		So(finalTS, ShouldNotEqual, failedUpdatedAt)
+	})
+}
+
+func newClickHousePerfFixture(t *testing.T) clickHousePerfFixture {
+	t.Helper()
+
+	gid, uid, _, _, err := internaluser.RealGIDAndUID()
+	So(err, ShouldBeNil)
+
+	refTime := time.Now().Truncate(time.Second)
+	paths, root := internaldata.FakeFilesForDGUTADBForBasedirsTesting(
+		gid,
+		uid,
+		"lustre",
+		2,
+		1<<20,
+		1<<19,
+		true,
+		refTime.Unix(),
+	)
+
+	statsInputDir := t.TempDir()
+	datasetDir := filepath.Join(statsInputDir, "1_／lustre")
+	So(os.MkdirAll(datasetDir, 0o755), ShouldBeNil)
+
+	statsGZPath := filepath.Join(datasetDir, "stats.gz")
+	fh, err := os.Create(statsGZPath)
+	So(err, ShouldBeNil)
+
+	gz := gzip.NewWriter(fh)
+	_, err = io.Copy(gz, root.AsReader())
+	So(err, ShouldBeNil)
+	So(gz.Close(), ShouldBeNil)
+	So(fh.Close(), ShouldBeNil)
+	So(os.Chtimes(statsGZPath, refTime, refTime), ShouldBeNil)
+
+	metaDir := t.TempDir()
+	quotaFile := filepath.Join(metaDir, "quota.csv")
+	basedirsConfig := filepath.Join(metaDir, "basedirs.config")
+	mountsFile := filepath.Join(metaDir, "mounts.txt")
+
+	So(os.WriteFile(quotaFile, []byte(""), 0o600), ShouldBeNil)
+	So(os.WriteFile(basedirsConfig, []byte("\t1\t1\n"), 0o600), ShouldBeNil)
+	So(os.WriteFile(mountsFile, []byte("\"/lustre\"\n\"/\"\n"), 0o600), ShouldBeNil)
+
+	ownersPath, err := internaldata.CreateOwnersCSV(t, internaldata.ExampleOwnersCSV)
+	So(err, ShouldBeNil)
+
+	return clickHousePerfFixture{
+		statsInputDir:   statsInputDir,
+		statsGZPath:     statsGZPath,
+		datasetName:     filepath.Base(datasetDir),
+		ownersPath:      ownersPath,
+		quotaFile:       quotaFile,
+		basedirsConfig:  basedirsConfig,
+		mountsFile:      mountsFile,
+		updatedAt:       refTime,
+		queryDir:        paths[0] + "/",
+		queryMounts:     []string{"/lustre/", "/"},
+		queryReportUID:  "101",
+		queryReportGIDs: "1,3",
+	}
+}
+
+func runClickHousePerfImport(
+	t *testing.T,
+	fixture clickHousePerfFixture,
+	jsonPath string,
+) (string, string, error) {
+	t.Helper()
+
+	stdout, stderr, err := runWRStatWithTimeout(
+		t,
+		45*time.Second,
+		"clickhouse-perf",
+		"import",
+		fixture.statsInputDir,
+		"--owners",
+		fixture.ownersPath,
+		"--mounts",
+		fixture.mountsFile,
+		"--quota",
+		fixture.quotaFile,
+		"--config",
+		fixture.basedirsConfig,
+		"--batchSize",
+		"512",
+		"--parallelism",
+		"1",
+		"--query-timeout",
+		"5s",
+		"--json",
+		jsonPath,
+	)
+
+	return stdout, stderr, err
+}
+
+func runWRStatWithTimeout(
+	t *testing.T,
+	timeout time.Duration,
+	args ...string,
+) (string, string, error) {
+	t.Helper()
+
+	var (
+		stdout, stderr strings.Builder
+		jobs           []*jobqueue.Job
+	)
+
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		return "", "", err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "./"+app, args...)
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	cmd.ExtraFiles = append(cmd.ExtraFiles, pw)
+
+	jd := json.NewDecoder(pr)
+	done := make(chan struct{})
+
+	go func() {
+		for {
+			var j []*jobqueue.Job
+
+			if errr := jd.Decode(&j); errr != nil {
+				break
+			}
+
+			jobs = append(jobs, j...)
+		}
+
+		close(done)
+	}()
+
+	err = cmd.Run()
+
+	pw.Close()
+
+	<-done
+
+	return stdout.String(), stderr.String(), err
+}
+
+func readPerfReport(t *testing.T, path string) boltperf.Report {
+	t.Helper()
+
+	data, err := os.ReadFile(path)
+	So(err, ShouldBeNil)
+
+	var report boltperf.Report
+
+	dec := json.NewDecoder(strings.NewReader(string(data)))
+	dec.DisallowUnknownFields()
+	So(dec.Decode(&report), ShouldBeNil)
+
+	return report
+}
+
+func findReportOperation(ops []boltperf.Operation, name string) *boltperf.Operation {
+	for i := range ops {
+		if ops[i].Name == name {
+			return &ops[i]
+		}
+	}
+
+	return nil
+}
+
+func findReportPhaseOperation(ops []boltperf.Operation, phase string) *boltperf.Operation {
+	for i := range ops {
+		if ops[i].Name != "import_phase" {
+			continue
+		}
+
+		if ops[i].Inputs["phase"] == phase {
+			return &ops[i]
+		}
+	}
+
+	return nil
+}
+
+func corruptPerfFixtureStats(t *testing.T, fixture clickHousePerfFixture, updatedAt time.Time) {
+	t.Helper()
+
+	raw := readGzipFile(t, fixture.statsGZPath)
+	raw = append(raw, []byte("\"/broken\"\t1\n")...)
+
+	writeGzipFile(t, fixture.statsGZPath, raw)
+	So(os.Chtimes(fixture.statsGZPath, updatedAt, updatedAt), ShouldBeNil)
+}
+
+func readGzipFile(t *testing.T, path string) []byte {
+	t.Helper()
+
+	fh, err := os.Open(path)
+	So(err, ShouldBeNil)
+
+	defer func() { So(fh.Close(), ShouldBeNil) }()
+
+	gz, err := gzip.NewReader(fh)
+	So(err, ShouldBeNil)
+
+	defer func() { So(gz.Close(), ShouldBeNil) }()
+
+	data, err := io.ReadAll(gz)
+	So(err, ShouldBeNil)
+
+	return data
+}
+
+func writeGzipFile(t *testing.T, path string, data []byte) {
+	t.Helper()
+
+	fh, err := os.Create(path)
+	So(err, ShouldBeNil)
+
+	gz := gzip.NewWriter(fh)
+	_, err = gz.Write(data)
+	So(err, ShouldBeNil)
+	So(gz.Close(), ShouldBeNil)
+	So(fh.Close(), ShouldBeNil)
+}
+
+func activeMountTimestamp(t *testing.T, chEnv clickHouseCLIEnv, mountPath string) time.Time {
+	t.Helper()
+
+	p, err := clickhouse.OpenProvider(clickhouse.Config{
+		DSN:          chEnv.DSN,
+		Database:     chEnv.Database,
+		QueryTimeout: 5 * time.Second,
+	})
+	So(err, ShouldBeNil)
+
+	defer func() { So(p.Close(), ShouldBeNil) }()
+
+	timestamps, err := p.BaseDirs().MountTimestamps()
+	So(err, ShouldBeNil)
+
+	ts, ok := timestamps[strings.ReplaceAll(mountPath, "/", "／")]
+	So(ok, ShouldBeTrue)
+
+	return ts
+}
+
+func TestClickHousePerfQuery(t *testing.T) {
+	Convey("clickhouse-perf query reports timed operations and metrics against imported data", t, func() {
+		chEnv := setupClickHouseCLIEnv(t)
+		fixture := newClickHousePerfFixture(t)
+		importJSON := filepath.Join(t.TempDir(), "clickhouse_import.json")
+		queryJSON := filepath.Join(t.TempDir(), "clickhouse_query.json")
+
+		stdout, stderr, err := runClickHousePerfImport(t, fixture, importJSON)
+		if err != nil {
+			t.Fatalf("clickhouse-perf import failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+		}
+
+		queryDir := findClickHousePerfQueryableDir(t, chEnv, fixture)
+
+		stdout, stderr, err = runClickHousePerfQuery(t, 45*time.Second, fixture, queryDir, queryJSON)
+		if err != nil {
+			t.Fatalf("clickhouse-perf query failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+		}
+
+		So(stderr, ShouldBeBlank)
+		So(stdout, ShouldContainSubstring, "query: using dir="+queryDir)
+		So(stdout, ShouldContainSubstring, "ExplainListDir:")
+		So(stdout, ShouldContainSubstring, "ExplainStatPath:")
+		So(stdout, ShouldContainSubstring, "files_listdir metrics:")
+		So(stdout, ShouldContainSubstring, "glob_case_A repeats=2")
+
+		report := readPerfReport(t, queryJSON)
+		So(report.SchemaVersion, ShouldEqual, 1)
+		So(report.Backend, ShouldEqual, "clickhouse")
+		So(report.GoVersion, ShouldNotBeBlank)
+		So(report.OS, ShouldNotBeBlank)
+		So(report.Arch, ShouldNotBeBlank)
+		So(report.StartedAt, ShouldNotBeBlank)
+		So(report.InputDir, ShouldEqual, "")
+		So(report.Repeat, ShouldEqual, 2)
+		So(report.Warmup, ShouldEqual, 0)
+		So(len(report.Operations), ShouldBeGreaterThanOrEqualTo, 10)
+
+		opNames := make([]string, 0, len(report.Operations))
+		for _, op := range report.Operations {
+			opNames = append(opNames, op.Name)
+			So(len(op.DurationsMS), ShouldEqual, 2)
+		}
+
+		So(opNames, ShouldContain, "mount_timestamps")
+		So(opNames, ShouldContain, "tree_dirinfo")
+		So(opNames, ShouldContain, "basedirs_group_usage")
+		So(opNames, ShouldContain, "files_listdir")
+		So(opNames, ShouldContain, "permission_check")
+		So(opNames, ShouldContain, "glob_case_A")
+
+		treeDirInfo := findReportOperation(report.Operations, "tree_dirinfo")
+		So(treeDirInfo, ShouldNotBeNil)
+		So(treeDirInfo.Inputs["dir"], ShouldNotBeBlank)
+
+		filesListDir := findReportOperation(report.Operations, "files_listdir")
+		So(filesListDir, ShouldNotBeNil)
+		So(filesListDir.Inputs["dir"], ShouldEqual, treeDirInfo.Inputs["dir"])
+	})
+}
+
+func runClickHousePerfQuery(
+	t *testing.T,
+	timeout time.Duration,
+	fixture clickHousePerfFixture,
+	queryDir string,
+	jsonPath string,
+) (string, string, error) {
+	t.Helper()
+
+	stdout, stderr, err := runWRStatWithTimeout(
+		t,
+		timeout,
+		"clickhouse-perf",
+		"query",
+		"--owners",
+		fixture.ownersPath,
+		"--mounts",
+		fixture.mountsFile,
+		"--dir",
+		queryDir,
+		"--uid",
+		fixture.queryReportUID,
+		"--gids",
+		fixture.queryReportGIDs,
+		"--repeat",
+		"2",
+		"--query-timeout",
+		"5s",
+		"--json",
+		jsonPath,
+	)
+
+	return stdout, stderr, err
+}
+
+func findClickHousePerfQueryableDir(
+	t *testing.T,
+	chEnv clickHouseCLIEnv,
+	fixture clickHousePerfFixture,
+) string {
+	t.Helper()
+
+	cfg := clickhouse.Config{
+		DSN:           chEnv.DSN,
+		Database:      chEnv.Database,
+		OwnersCSVPath: fixture.ownersPath,
+		MountPoints:   fixture.queryMounts,
+		QueryTimeout:  5 * time.Second,
+	}
+
+	p, err := clickhouse.OpenProvider(cfg)
+	So(err, ShouldBeNil)
+
+	defer p.Close()
+
+	client, err := clickhouse.NewClient(cfg)
+	So(err, ShouldBeNil)
+
+	defer client.Close()
+
+	filter := &db.Filter{Age: db.DGUTAgeAll}
+	candidates := []string{fixture.queryDir}
+	seen := make(map[string]struct{})
+
+	for len(candidates) > 0 {
+		dir := candidates[0]
+		candidates = candidates[1:]
+
+		if _, ok := seen[dir]; ok {
+			continue
+		}
+
+		seen[dir] = struct{}{}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		rows, err := client.ListDir(ctx, dir, clickhouse.ListOptions{})
+
+		cancel()
+
+		if err != nil || len(rows) == 0 {
+			if parent := clickHousePerfParentDir(dir); parent != "" {
+				candidates = append(candidates, parent)
+			}
+
+			continue
+		}
+
+		if _, err := p.Tree().DirInfo(dir, filter); err == nil {
+			return dir
+		}
+
+		for _, row := range rows {
+			if row.EntryType == 'd' {
+				candidates = append(candidates, row.Path)
+			}
+		}
+
+		if parent := clickHousePerfParentDir(dir); parent != "" {
+			candidates = append(candidates, parent)
+		}
+	}
+
+	t.Fatalf("failed to find a clickhouse-perf query dir that works for both tree and file APIs")
+
+	return ""
+}
+
+func clickHousePerfParentDir(dir string) string {
+	trimmed := strings.TrimSuffix(dir, "/")
+	if trimmed == "" || trimmed == "/" {
+		return ""
+	}
+
+	pos := strings.LastIndexByte(trimmed, '/')
+	if pos <= 0 {
+		return "/"
+	}
+
+	return trimmed[:pos+1]
+}
+
+type summariseOrderedCloser struct {
+	name  string
+	calls *[]string
+	err   error
+}
+
+func (c summariseOrderedCloser) Close() error {
+	if c.calls != nil {
+		*c.calls = append(*c.calls, c.name)
+	}
+
+	return c.err
+}
+
+func TestCloseSummariseDGUTAWriter(t *testing.T) {
+	Convey("closeSummariseDGUTAWriter publishes with Close", t, func() {
+		calls := make([]string, 0, 1)
+
+		err := closeSummariseDGUTAWriter(summariseAbortTrackingCloser{
+			closeName: "close",
+			abortName: "abort",
+			calls:     &calls,
+		}, true)
+
+		So(err, ShouldBeNil)
+		So(calls, ShouldResemble, []string{"close"})
+	})
+
+	Convey("closeSummariseDGUTAWriter aborts when not publishing and Abort is available", t, func() {
+		calls := make([]string, 0, 1)
+
+		err := closeSummariseDGUTAWriter(summariseAbortTrackingCloser{
+			closeName: "close",
+			abortName: "abort",
+			calls:     &calls,
+		}, false)
+
+		So(err, ShouldBeNil)
+		So(calls, ShouldResemble, []string{"abort"})
+	})
+
+	Convey("closeSummariseDGUTAWriter falls back to Close when Abort is unavailable", t, func() {
+		calls := make([]string, 0, 1)
+
+		err := closeSummariseDGUTAWriter(summariseOrderedCloser{
+			name:  "close",
+			calls: &calls,
+		}, false)
+
+		So(err, ShouldBeNil)
+		So(calls, ShouldResemble, []string{"close"})
+	})
+
+	Convey("closeSummariseDGUTAWriter returns the writer error", t, func() {
+		err := closeSummariseDGUTAWriter(summariseAbortTrackingCloser{
+			abortErr: errSummariseTestDGUTA,
+		}, false)
+
+		So(err, ShouldEqual, errSummariseTestDGUTA)
+	})
+}
+
+//go:linkname closeSummariseDGUTAWriter github.com/wtsi-hgi/wrstat-ui/cmd.closeSummariseDGUTAWriter
+func closeSummariseDGUTAWriter(writer io.Closer, publish bool) error
+
+func TestComposeSummariseCloser(t *testing.T) {
+	Convey("composeSummariseCloser closes resources in summarise order on success", t, func() {
+		calls := make([]string, 0, 3)
+
+		closer := composeSummariseCloser(
+			summariseOrderedCloser{name: "files", calls: &calls},
+			func() error {
+				calls = append(calls, "basedirs")
+
+				return nil
+			},
+			summariseAbortTrackingCloser{
+				closeName: "dguta-close",
+				abortName: "dguta-abort",
+				calls:     &calls,
+			},
+		)
+
+		So(closer(true), ShouldBeNil)
+		So(calls, ShouldResemble, []string{"files", "basedirs", "dguta-close"})
+	})
+
+	Convey("composeSummariseCloser aborts dguta publishing when not publishing", t, func() {
+		calls := make([]string, 0, 3)
+
+		closer := composeSummariseCloser(
+			summariseOrderedCloser{name: "files", calls: &calls},
+			func() error {
+				calls = append(calls, "basedirs")
+
+				return nil
+			},
+			summariseAbortTrackingCloser{
+				closeName: "dguta-close",
+				abortName: "dguta-abort",
+				calls:     &calls,
+			},
+		)
+
+		So(closer(false), ShouldBeNil)
+		So(calls, ShouldResemble, []string{"files", "basedirs", "dguta-abort"})
+	})
+
+	Convey("composeSummariseCloser aborts dguta publishing when file close fails", t, func() {
+		calls := make([]string, 0, 3)
+
+		closer := composeSummariseCloser(
+			summariseOrderedCloser{name: "files", calls: &calls, err: errSummariseTestFiles},
+			func() error {
+				calls = append(calls, "basedirs")
+
+				return nil
+			},
+			summariseAbortTrackingCloser{
+				closeName: "dguta-close",
+				abortName: "dguta-abort",
+				calls:     &calls,
+			},
+		)
+
+		err := closer(true)
+
+		So(err, ShouldNotBeNil)
+		So(err.Error(), ShouldContainSubstring, errSummariseTestFiles.Error())
+		So(calls, ShouldResemble, []string{"files", "basedirs", "dguta-abort"})
+	})
+
+	Convey("composeSummariseCloser aborts dguta publishing when basedirs close fails", t, func() {
+		calls := make([]string, 0, 3)
+
+		closer := composeSummariseCloser(
+			summariseOrderedCloser{name: "files", calls: &calls},
+			func() error {
+				calls = append(calls, "basedirs")
+
+				return errSummariseTestBasedirs
+			},
+			summariseAbortTrackingCloser{
+				closeName: "dguta-close",
+				abortName: "dguta-abort",
+				calls:     &calls,
+			},
+		)
+
+		err := closer(true)
+
+		So(err, ShouldNotBeNil)
+		So(err.Error(), ShouldContainSubstring, errSummariseTestBasedirs.Error())
+		So(calls, ShouldResemble, []string{"files", "basedirs", "dguta-abort"})
+	})
+
+	Convey("composeSummariseCloser joins cleanup errors", t, func() {
+		err := composeSummariseCloser(
+			summariseOrderedCloser{err: errSummariseTestFiles},
+			func() error { return errSummariseTestBasedirs },
+			summariseAbortTrackingCloser{abortErr: errSummariseTestDGUTA},
+		)(false)
+
+		So(err, ShouldNotBeNil)
+		So(err.Error(), ShouldContainSubstring, errSummariseTestFiles.Error())
+		So(err.Error(), ShouldContainSubstring, errSummariseTestBasedirs.Error())
+		So(err.Error(), ShouldContainSubstring, errSummariseTestDGUTA.Error())
+	})
+}
+
+//go:linkname composeSummariseCloser github.com/wtsi-hgi/wrstat-ui/cmd.composeSummariseCloser
+func composeSummariseCloser(
+	fileCloser io.Closer,
+	basedirsCloser func() error,
+	dgutaCloser io.Closer,
+) func(bool) error
+
+type summariseAbortTrackingCloser struct {
+	closeName string
+	abortName string
+	calls     *[]string
+	closeErr  error
+	abortErr  error
+}
+
+func (c summariseAbortTrackingCloser) Close() error {
+	if c.calls != nil && c.closeName != "" {
+		*c.calls = append(*c.calls, c.closeName)
+	}
+
+	return c.closeErr
+}
+
+func (c summariseAbortTrackingCloser) Abort() error {
+	if c.calls != nil && c.abortName != "" {
+		*c.calls = append(*c.calls, c.abortName)
+	}
+
+	return c.abortErr
+}
+
+type clickHousePerfFixture struct {
+	statsInputDir   string
+	statsGZPath     string
+	datasetName     string
+	ownersPath      string
+	quotaFile       string
+	basedirsConfig  string
+	mountsFile      string
+	updatedAt       time.Time
+	queryDir        string
+	queryMounts     []string
+	queryReportUID  string
+	queryReportGIDs string
 }
 
 func TestMain(m *testing.M) {

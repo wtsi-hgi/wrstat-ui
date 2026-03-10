@@ -35,6 +35,7 @@ import (
 	"time"
 
 	ch "github.com/ClickHouse/clickhouse-go/v2"
+	chproto "github.com/ClickHouse/clickhouse-go/v2/lib/proto"
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
 )
 
@@ -48,7 +49,118 @@ var (
 
 const defaultQueryTimeout = 10 * time.Second
 
+const defaultMaxOpenConns = 10
+
 const createDatabaseStmtPrefix = "CREATE DATABASE IF NOT EXISTS "
+
+const defaultDatabaseName = "default"
+
+const unknownDatabaseCode int32 = 81
+
+type clickHouseOpener func(*ch.Options) (ch.Conn, error)
+
+func connectAndBootstrapWith(
+	ctx context.Context,
+	opts *ch.Options,
+	database string,
+	queryTO time.Duration,
+	open clickHouseOpener,
+	ensureSchema schemaEnsurer,
+) (ch.Conn, error) {
+	conn, err := openAndPingWithTimeout(ctx, opts, open, queryTO)
+	if err == nil {
+		return ensureSchemaReady(ctx, conn, ensureSchema)
+	}
+
+	if !shouldBootstrapMissingDatabase(err, database) {
+		return nil, err
+	}
+
+	err = ensureDatabaseExists(ctx, opts, database, queryTO, open)
+	if err != nil {
+		return nil, err
+	}
+
+	conn, err = openAndPingWithTimeout(ctx, opts, open, queryTO)
+	if err != nil {
+		return nil, err
+	}
+
+	return ensureSchemaReady(ctx, conn, ensureSchema)
+}
+
+func ensureSchemaReady(
+	ctx context.Context,
+	conn ch.Conn,
+	ensureSchema schemaEnsurer,
+) (ch.Conn, error) {
+	err := ensureSchema(ctx, conn)
+	if err != nil {
+		_ = conn.Close()
+
+		return nil, err
+	}
+
+	return conn, nil
+}
+
+func shouldBootstrapMissingDatabase(err error, database string) bool {
+	return database != defaultDatabaseName && isMissingDatabaseError(err)
+}
+
+func isMissingDatabaseError(err error) bool {
+	var exception *chproto.Exception
+	if errors.As(err, &exception) {
+		return exception.Code == unknownDatabaseCode || exception.Name == "UNKNOWN_DATABASE"
+	}
+
+	msg := strings.ToLower(err.Error())
+
+	return strings.Contains(msg, "unknown database") ||
+		strings.Contains(msg, "database does not exist")
+}
+
+func openAndPing(ctx context.Context, opts *ch.Options, open clickHouseOpener) (ch.Conn, error) {
+	conn, err := open(opts)
+	if err != nil {
+		return nil, err
+	}
+
+	err = conn.Ping(ctx)
+	if err != nil {
+		_ = conn.Close()
+
+		return nil, err
+	}
+
+	return conn, nil
+}
+
+func queryContext(parent context.Context, queryTO time.Duration) (context.Context, context.CancelFunc) {
+	if parent == nil {
+		parent = context.Background()
+	}
+
+	if queryTO <= 0 {
+		queryTO = defaultQueryTimeout
+	}
+
+	return context.WithTimeout(parent, queryTO)
+}
+
+func openAndPingWithTimeout(
+	parent context.Context,
+	opts *ch.Options,
+	open clickHouseOpener,
+	queryTO time.Duration,
+) (ch.Conn, error) {
+	ctx, cancel := queryContext(parent, queryTO)
+	defer cancel()
+
+	return openAndPing(ctx, opts, open)
+}
+
+type schemaEnsurer func(context.Context, ch.Conn) error
 
 // Client is the public ClickHouse-backed client for the extra-goal file APIs.
 //
@@ -77,10 +189,7 @@ func NewClient(cfg Config) (*Client, error) {
 		return nil, err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), queryTimeout(cfg))
-	defer cancel()
-
-	conn, err := connectAndBootstrap(ctx, opts, cfg.Database)
+	conn, err := connectAndBootstrap(context.Background(), opts, cfg.Database, queryTimeout(cfg))
 	if err != nil {
 		return nil, err
 	}
@@ -109,36 +218,32 @@ func (c *Client) Close() error {
 	return c.conn.Close()
 }
 
-func connectAndBootstrap(ctx context.Context, opts *ch.Options, database string) (ch.Conn, error) {
-	bootErr := ensureDatabaseExists(ctx, opts, database)
-	if bootErr != nil {
-		return nil, bootErr
-	}
-
-	conn, err := ch.Open(opts)
-	if err != nil {
-		return nil, err
-	}
-
-	bootErr = ensureSchema(ctx, conn)
-	if bootErr != nil {
-		_ = conn.Close()
-
-		return nil, bootErr
-	}
-
-	return conn, nil
+func connectAndBootstrap(
+	ctx context.Context,
+	opts *ch.Options,
+	database string,
+	queryTO time.Duration,
+) (ch.Conn, error) {
+	return connectAndBootstrapWith(ctx, opts, database, queryTO, ch.Open, func(ctx context.Context, conn ch.Conn) error {
+		return ensureSchemaWithBootstrapLock(ctx, conn, opts, database, queryTO)
+	})
 }
 
-func ensureDatabaseExists(ctx context.Context, opts *ch.Options, database string) error {
-	if database == "default" {
+func ensureDatabaseExists(
+	ctx context.Context,
+	opts *ch.Options,
+	database string,
+	queryTO time.Duration,
+	open clickHouseOpener,
+) error {
+	if database == defaultDatabaseName {
 		return nil
 	}
 
 	adminOpts := *opts
-	adminOpts.Auth.Database = "default"
+	adminOpts.Auth.Database = defaultDatabaseName
 
-	conn, err := ch.Open(&adminOpts)
+	conn, err := openAndPingWithTimeout(ctx, &adminOpts, open, queryTO)
 	if err != nil {
 		return fmt.Errorf("clickhouse: failed to connect for bootstrap: %w", err)
 	}
@@ -146,7 +251,11 @@ func ensureDatabaseExists(ctx context.Context, opts *ch.Options, database string
 	defer func() { _ = conn.Close() }()
 
 	stmt := createDatabaseStmtPrefix + quoteIdent(database)
-	if err := conn.Exec(ctx, stmt); err != nil {
+
+	queryCtx, cancel := queryContext(ctx, queryTO)
+	defer cancel()
+
+	if err := conn.Exec(queryCtx, stmt); err != nil {
 		return fmt.Errorf("clickhouse: failed to create database %q: %w", database, err)
 	}
 
@@ -209,16 +318,19 @@ func optionsFromConfig(cfg Config) (*ch.Options, error) {
 
 	opts.Auth.Database = cfg.Database
 
-	if cfg.MaxOpenConns > 0 {
-		opts.MaxOpenConns = cfg.MaxOpenConns
-		if cfg.MaxIdleConns <= 0 {
-			opts.MaxIdleConns = cfg.MaxOpenConns
-		}
+	effectiveMaxOpenConns := cfg.MaxOpenConns
+	if effectiveMaxOpenConns <= 0 {
+		effectiveMaxOpenConns = defaultMaxOpenConns
 	}
 
-	if cfg.MaxIdleConns > 0 {
-		opts.MaxIdleConns = cfg.MaxIdleConns
+	opts.MaxOpenConns = effectiveMaxOpenConns
+
+	effectiveMaxIdleConns := cfg.MaxIdleConns
+	if effectiveMaxIdleConns <= 0 {
+		effectiveMaxIdleConns = effectiveMaxOpenConns
 	}
+
+	opts.MaxIdleConns = effectiveMaxIdleConns
 
 	return opts, nil
 }

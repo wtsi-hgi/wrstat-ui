@@ -43,6 +43,12 @@ import (
 const (
 	defaultBatchSize = 100_000
 
+	importPhasePartitionDropReset = "partition_drop_reset"
+	importPhaseDGUTAInsert        = "wrstat_dguta_insert"
+	importPhaseChildrenInsert     = "wrstat_children_insert"
+	importPhaseMountSwitch        = "mount_switch"
+	importPhaseOldSnapshotDrop    = "old_snapshot_partition_drop"
+
 	activeSnapshotQuery = "SELECT toString(snapshot_id), updated_at FROM wrstat_mounts_active " +
 		"WHERE mount_path = ?"
 	switchSnapshotQuery = "INSERT INTO wrstat_mounts (mount_path, switched_at, active_snapshot, updated_at) " +
@@ -68,9 +74,12 @@ const (
 )
 
 var (
-	errMountPathRequired = errors.New("clickhouse: mount path is required")
-	errUpdatedAtRequired = errors.New("clickhouse: updated at is required")
-	errDirRequired       = errors.New("clickhouse: record dir is required")
+	errMountPathRequired     = errors.New("clickhouse: mount path is required")
+	errUpdatedAtRequired     = errors.New("clickhouse: updated at is required")
+	errDirRequired           = errors.New("clickhouse: record dir is required")
+	errActiveSnapshotRewrite = errors.New(
+		"clickhouse: refusing to rewrite active snapshot",
+	)
 )
 
 type dgutaWriter struct {
@@ -88,6 +97,8 @@ type dgutaWriter struct {
 
 	dgutaBatch    driver.Batch
 	childrenBatch driver.Batch
+
+	importPhaseRecorder func(string, time.Duration)
 
 	// failBeforeSwitchErr forces Close() to fail before switching snapshots.
 	// Used only by integration tests.
@@ -108,6 +119,10 @@ func (w *dgutaWriter) SetMountPath(mountPath string) {
 
 func (w *dgutaWriter) SetUpdatedAt(updatedAt time.Time) {
 	w.updatedAt = updatedAt
+}
+
+func (w *dgutaWriter) SetImportPhaseRecorder(recorder func(string, time.Duration)) {
+	w.importPhaseRecorder = recorder
 }
 
 func (w *dgutaWriter) Add(dguta db.RecordDGUTA) error {
@@ -164,6 +179,23 @@ func (w *dgutaWriter) Close() error {
 	return w.conn.Close()
 }
 
+func (w *dgutaWriter) Abort() error {
+	if w == nil || w.closed {
+		return nil
+	}
+
+	w.closed = true
+
+	if w.conn == nil {
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), queryTimeout(w.cfg))
+	defer cancel()
+
+	return w.closeWithNewSnapshotCleanup(ctx, nil)
+}
+
 func (w *dgutaWriter) validateAdd(dguta db.RecordDGUTA) error {
 	if w.mountPath == "" {
 		return errMountPathRequired
@@ -195,14 +227,6 @@ func (w *dgutaWriter) ensureSnapshotID() {
 func (w *dgutaWriter) switchActiveSnapshot(ctx context.Context) error {
 	w.ensureSnapshotID()
 
-	// Read previous snapshot (required by spec). We don't use it yet.
-	rows, err := w.conn.Query(ctx, activeSnapshotQuery, w.mountPath)
-	if err != nil {
-		return fmt.Errorf("clickhouse: failed to read active snapshot: %w", err)
-	}
-
-	_ = rows.Close()
-
 	if err := w.conn.Exec(ctx, switchSnapshotQuery, w.mountPath, w.snapshot.String(), w.updatedAt); err != nil {
 		return fmt.Errorf("clickhouse: failed to switch active snapshot: %w", err)
 	}
@@ -216,33 +240,57 @@ func (w *dgutaWriter) switchSnapshotAndDropOld(ctx context.Context) error {
 		return w.closeWithNewSnapshotCleanup(ctx, err)
 	}
 
-	if w.failBeforeSwitchErr != nil {
-		return w.closeWithNewSnapshotCleanup(ctx, w.failBeforeSwitchErr)
-	}
-
-	if err := w.switchActiveSnapshot(ctx); err != nil {
-		return w.closeWithNewSnapshotCleanup(ctx, err)
+	if err := w.switchSnapshotOrCleanup(ctx); err != nil {
+		return err
 	}
 
 	if !hasPrevious {
 		return nil
 	}
 
+	return w.dropPreviousSnapshotPartitions(ctx, previousSID)
+}
+
+func (w *dgutaWriter) switchSnapshotOrCleanup(ctx context.Context) error {
+	if w.failBeforeSwitchErr != nil {
+		return w.closeWithNewSnapshotCleanup(ctx, w.failBeforeSwitchErr)
+	}
+
+	switchStart := time.Now()
+	err := w.switchActiveSnapshot(ctx)
+	w.recordImportPhase(importPhaseMountSwitch, time.Since(switchStart))
+
+	if err != nil {
+		return w.closeWithNewSnapshotCleanup(ctx, err)
+	}
+
+	return nil
+}
+
+func (w *dgutaWriter) dropPreviousSnapshotPartitions(ctx context.Context, previousSID string) error {
 	// Idempotent retry: if previous snapshot id equals the new snapshot id,
 	// do not drop partitions (we would drop the data we just wrote).
 	if previousSID == w.snapshot.String() {
 		return nil
 	}
 
-	if err := w.dropAllSnapshotPartitions(ctx, previousSID); err != nil {
-		return err
-	}
+	dropStart := time.Now()
+	err := w.dropAllSnapshotPartitions(ctx, previousSID)
+	w.recordImportPhase(importPhaseOldSnapshotDrop, time.Since(dropStart))
 
-	return nil
+	return err
 }
 
 func (w *dgutaWriter) readPreviousActiveSnapshotID(ctx context.Context) (string, bool, error) {
-	rows, err := w.conn.Query(ctx, activeSnapshotQuery, w.mountPath)
+	return readActiveSnapshotID(ctx, w.conn, w.mountPath)
+}
+
+func readActiveSnapshotID(
+	ctx context.Context,
+	conn ch.Conn,
+	mountPath string,
+) (string, bool, error) {
+	rows, err := conn.Query(ctx, activeSnapshotQuery, mountPath)
 	if err != nil {
 		return "", false, fmt.Errorf("clickhouse: failed to read active snapshot: %w", err)
 	}
@@ -265,16 +313,66 @@ func (w *dgutaWriter) readPreviousActiveSnapshotID(ctx context.Context) (string,
 }
 
 func (w *dgutaWriter) closeWithNewSnapshotCleanup(ctx context.Context, cause error) error {
-	w.ensureSnapshotID()
+	cause = errors.Join(cause, w.abortAllBatches())
 
-	cleanupErr := w.dropAllSnapshotPartitions(ctx, w.snapshot.String())
-	_ = w.conn.Close()
-
-	if cleanupErr == nil {
-		return cause
+	if !w.shouldSwitchSnapshot() {
+		return errors.Join(cause, w.conn.Close())
 	}
 
-	return errors.Join(cause, cleanupErr)
+	w.ensureSnapshotID()
+
+	cleanupCtx, cancel := w.snapshotCleanupContext(ctx)
+	defer cancel()
+
+	cleanupErr := w.dropCurrentSnapshotPartitionsIfInactive(cleanupCtx)
+	closeErr := w.conn.Close()
+
+	return errors.Join(cause, cleanupErr, closeErr)
+}
+
+func (w *dgutaWriter) dropCurrentSnapshotPartitionsIfInactive(ctx context.Context) error {
+	activeSID, hasActive, err := w.readPreviousActiveSnapshotID(ctx)
+	if err != nil {
+		return err
+	}
+
+	if hasActive && activeSID == w.snapshot.String() {
+		return nil
+	}
+
+	return w.dropAllSnapshotPartitions(ctx, w.snapshot.String())
+}
+
+func (w *dgutaWriter) snapshotCleanupContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx != nil && ctx.Err() == nil {
+		return ctx, func() {}
+	}
+
+	return queryContext(context.Background(), queryTimeout(w.cfg))
+}
+
+func (w *dgutaWriter) abortAllBatches() error {
+	var err error
+
+	err = errors.Join(err, abortBatch(&w.dgutaBatch, "dguta"))
+	err = errors.Join(err, abortBatch(&w.childrenBatch, "children"))
+
+	return err
+}
+
+func abortBatch(batch *driver.Batch, name string) error {
+	if batch == nil || *batch == nil {
+		return nil
+	}
+
+	err := (*batch).Abort()
+	*batch = nil
+
+	if err == nil {
+		return nil
+	}
+
+	return fmt.Errorf("clickhouse: failed to abort %s batch: %w", name, err)
 }
 
 func (w *dgutaWriter) dropAllSnapshotPartitions(ctx context.Context, sid string) error {
@@ -304,7 +402,13 @@ func (w *dgutaWriter) ensureWriteReady(ctx context.Context) error {
 		return nil
 	}
 
-	if err := w.dropNewSnapshotPartitions(ctx); err != nil {
+	if err := refuseActiveSnapshotRewrite(ctx, w.conn, w.mountPath, w.snapshot); err != nil {
+		return err
+	}
+
+	if err := w.timeImportPhase(importPhasePartitionDropReset, func() error {
+		return w.dropNewSnapshotPartitions(ctx)
+	}); err != nil {
 		return err
 	}
 
@@ -320,6 +424,29 @@ func (w *dgutaWriter) ensureWriteReady(ctx context.Context) error {
 	w.prepared = true
 
 	return nil
+}
+
+func refuseActiveSnapshotRewrite(
+	ctx context.Context,
+	conn ch.Conn,
+	mountPath string,
+	snapshot uuid.UUID,
+) error {
+	activeSID, hasActive, err := readActiveSnapshotID(ctx, conn, mountPath)
+	if err != nil {
+		return err
+	}
+
+	if !hasActive || activeSID != snapshot.String() {
+		return nil
+	}
+
+	return fmt.Errorf(
+		"%w: mount_path=%s snapshot_id=%s",
+		errActiveSnapshotRewrite,
+		mountPath,
+		activeSID,
+	)
 }
 
 func (w *dgutaWriter) prepareBatches(ctx context.Context) (driver.Batch, driver.Batch, error) {
@@ -379,47 +506,64 @@ func (w *dgutaWriter) dropPartition(ctx context.Context, query, sid string) erro
 }
 
 func (w *dgutaWriter) appendDGUTARows(dguta db.RecordDGUTA, parentDir string) error {
-	for _, guta := range dguta.GUTAs {
-		if guta == nil {
-			continue
+	return w.timeImportPhase(importPhaseDGUTAInsert, func() error {
+		for _, guta := range dguta.GUTAs {
+			if guta == nil {
+				continue
+			}
+
+			err := w.dgutaBatch.Append(
+				w.mountPath,
+				w.snapshot.String(),
+				parentDir,
+				guta.GID,
+				guta.UID,
+				uint16(guta.FT),
+				uint8(guta.Age),
+				guta.Count,
+				guta.Size,
+				guta.Atime,
+				guta.Mtime,
+				guta.ATimeRanges[:],
+				guta.MTimeRanges[:],
+			)
+			if err != nil {
+				return fmt.Errorf("clickhouse: failed to append dguta row: %w", err)
+			}
 		}
 
-		err := w.dgutaBatch.Append(
-			w.mountPath,
-			w.snapshot.String(),
-			parentDir,
-			guta.GID,
-			guta.UID,
-			uint16(guta.FT),
-			uint8(guta.Age),
-			guta.Count,
-			guta.Size,
-			guta.Atime,
-			guta.Mtime,
-			guta.ATimeRanges[:],
-			guta.MTimeRanges[:],
-		)
-		if err != nil {
-			return fmt.Errorf("clickhouse: failed to append dguta row: %w", err)
-		}
-	}
-
-	return nil
+		return nil
+	})
 }
 
 func (w *dgutaWriter) appendChildrenRows(children []string, parentDir string) error {
-	for _, child := range children {
-		child = strings.TrimSuffix(child, "/")
-		if child == "" {
-			continue
+	return w.timeImportPhase(importPhaseChildrenInsert, func() error {
+		for _, child := range children {
+			child = childPathForParent(parentDir, child)
+			if child == "" {
+				continue
+			}
+
+			if err := w.childrenBatch.Append(w.mountPath, w.snapshot.String(), parentDir, child); err != nil {
+				return fmt.Errorf("clickhouse: failed to append child row: %w", err)
+			}
 		}
 
-		if err := w.childrenBatch.Append(w.mountPath, w.snapshot.String(), parentDir, child); err != nil {
-			return fmt.Errorf("clickhouse: failed to append child row: %w", err)
-		}
+		return nil
+	})
+}
+
+func childPathForParent(parentDir, child string) string {
+	child = strings.TrimSuffix(child, "/")
+	if child == "" {
+		return ""
 	}
 
-	return nil
+	if strings.HasPrefix(child, "/") {
+		return child
+	}
+
+	return parentDir + child
 }
 
 func (w *dgutaWriter) flushFullBatches(ctx context.Context) error {
@@ -455,65 +599,90 @@ func (w *dgutaWriter) flushAllBatches() error {
 }
 
 func (w *dgutaWriter) sendAndReplaceDGUTABatch(ctx context.Context) error {
-	if err := w.dgutaBatch.Send(); err != nil {
-		return fmt.Errorf("clickhouse: failed to send dguta batch: %w", err)
-	}
+	return w.timeImportPhase(importPhaseDGUTAInsert, func() error {
+		if err := w.dgutaBatch.Send(); err != nil {
+			return fmt.Errorf("clickhouse: failed to send dguta batch: %w", err)
+		}
 
-	batchCtx := context.WithoutCancel(ctx)
+		batchCtx := context.WithoutCancel(ctx)
 
-	batch, err := w.conn.PrepareBatch(
-		batchCtx,
-		insertDGUTAQuery,
-		driver.WithReleaseConnection(),
-	)
-	if err != nil {
-		return fmt.Errorf("clickhouse: failed to prepare dguta batch: %w", err)
-	}
+		batch, err := w.conn.PrepareBatch(
+			batchCtx,
+			insertDGUTAQuery,
+			driver.WithReleaseConnection(),
+		)
+		if err != nil {
+			return fmt.Errorf("clickhouse: failed to prepare dguta batch: %w", err)
+		}
 
-	w.dgutaBatch = batch
+		w.dgutaBatch = batch
 
-	return nil
+		return nil
+	})
 }
 
 func (w *dgutaWriter) sendAndReplaceChildrenBatch(ctx context.Context) error {
-	if err := w.childrenBatch.Send(); err != nil {
-		return fmt.Errorf("clickhouse: failed to send children batch: %w", err)
-	}
+	return w.timeImportPhase(importPhaseChildrenInsert, func() error {
+		if err := w.childrenBatch.Send(); err != nil {
+			return fmt.Errorf("clickhouse: failed to send children batch: %w", err)
+		}
 
-	batchCtx := context.WithoutCancel(ctx)
+		batchCtx := context.WithoutCancel(ctx)
 
-	batch, err := w.conn.PrepareBatch(
-		batchCtx,
-		insertChildrenQuery,
-		driver.WithReleaseConnection(),
-	)
-	if err != nil {
-		return fmt.Errorf("clickhouse: failed to prepare children batch: %w", err)
-	}
+		batch, err := w.conn.PrepareBatch(
+			batchCtx,
+			insertChildrenQuery,
+			driver.WithReleaseConnection(),
+		)
+		if err != nil {
+			return fmt.Errorf("clickhouse: failed to prepare children batch: %w", err)
+		}
 
-	w.childrenBatch = batch
+		w.childrenBatch = batch
 
-	return nil
+		return nil
+	})
 }
 
 func (w *dgutaWriter) sendAndCloseDGUTABatch() error {
-	if err := w.dgutaBatch.Send(); err != nil {
-		return fmt.Errorf("clickhouse: failed to send dguta batch: %w", err)
-	}
+	return w.timeImportPhase(importPhaseDGUTAInsert, func() error {
+		if err := w.dgutaBatch.Send(); err != nil {
+			return fmt.Errorf("clickhouse: failed to send dguta batch: %w", err)
+		}
 
-	w.dgutaBatch = nil
+		w.dgutaBatch = nil
 
-	return nil
+		return nil
+	})
 }
 
 func (w *dgutaWriter) sendAndCloseChildrenBatch() error {
-	if err := w.childrenBatch.Send(); err != nil {
-		return fmt.Errorf("clickhouse: failed to send children batch: %w", err)
+	return w.timeImportPhase(importPhaseChildrenInsert, func() error {
+		if err := w.childrenBatch.Send(); err != nil {
+			return fmt.Errorf("clickhouse: failed to send children batch: %w", err)
+		}
+
+		w.childrenBatch = nil
+
+		return nil
+	})
+}
+
+func (w *dgutaWriter) recordImportPhase(phase string, d time.Duration) {
+	if w == nil || w.importPhaseRecorder == nil || d <= 0 {
+		return
 	}
 
-	w.childrenBatch = nil
+	w.importPhaseRecorder(phase, d)
+}
 
-	return nil
+func (w *dgutaWriter) timeImportPhase(phase string, fn func() error) error {
+	start := time.Now()
+	err := fn()
+
+	w.recordImportPhase(phase, time.Since(start))
+
+	return err
 }
 
 // NewDGUTAWriter returns a ClickHouse-backed implementation of db.DGUTAWriter.
@@ -527,10 +696,7 @@ func NewDGUTAWriter(cfg Config) (db.DGUTAWriter, error) {
 		return nil, err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), queryTimeout(cfg))
-	defer cancel()
-
-	conn, err := connectAndBootstrap(ctx, opts, cfg.Database)
+	conn, err := connectAndBootstrap(context.Background(), opts, cfg.Database, queryTimeout(cfg))
 	if err != nil {
 		return nil, err
 	}

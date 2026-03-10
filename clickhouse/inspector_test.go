@@ -28,11 +28,13 @@ package clickhouse
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"os"
 	"testing"
 	"time"
 
+	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	. "github.com/smartystreets/goconvey/convey"
 )
 
@@ -113,6 +115,52 @@ func TestInspectorExplainStatPath(t *testing.T) {
 	})
 }
 
+type inspectorTestRow struct {
+	values []any
+	err    error
+}
+
+func (r inspectorTestRow) Err() error {
+	return r.err
+}
+
+func (r inspectorTestRow) Scan(dest ...any) error {
+	if r.err != nil {
+		return r.err
+	}
+
+	if len(dest) != len(r.values) {
+		return errTestScan
+	}
+
+	for i, value := range r.values {
+		switch d := dest[i].(type) {
+		case *time.Time:
+			v, ok := value.(time.Time)
+			if !ok {
+				return errTestScan
+			}
+
+			*d = v
+		case *uint64:
+			v, ok := value.(uint64)
+			if !ok {
+				return errTestScan
+			}
+
+			*d = v
+		default:
+			return errTestScan
+		}
+	}
+
+	return nil
+}
+
+func (r inspectorTestRow) ScanStruct(any) error {
+	return r.err
+}
+
 func TestInspectorMeasure(t *testing.T) {
 	Convey("Measure returns the error from the run function", t, func() {
 		os.Setenv("WRSTAT_ENV", "test")
@@ -136,6 +184,32 @@ func TestInspectorMeasure(t *testing.T) {
 		})
 		So(err, ShouldEqual, errTestRun)
 		So(m, ShouldBeNil)
+	})
+
+	Convey("Measure falls back when query logging returns no matching row", t, func() {
+		ins := &Inspector{
+			cfg: Config{QueryTimeout: time.Second},
+			conn: &inspectorTestConn{rows: map[string]driver.Row{
+				serverTimeQuery: inspectorTestRow{values: []any{time.Unix(1710000000, 0).UTC()}},
+				queryLogQuery:   inspectorTestRow{err: sql.ErrNoRows},
+			}},
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+
+		m, err := ins.Measure(ctx, func(context.Context) error {
+			time.Sleep(20 * time.Millisecond)
+
+			return nil
+		})
+		So(err, ShouldBeNil)
+		So(m, ShouldNotBeNil)
+		So(m.DurationMs, ShouldBeGreaterThanOrEqualTo, uint64(10))
+		So(m.ReadRows, ShouldEqual, 0)
+		So(m.ReadBytes, ShouldEqual, 0)
+		So(m.ResultRows, ShouldEqual, 0)
+		So(m.ResultBytes, ShouldEqual, 0)
 	})
 }
 
@@ -172,6 +246,27 @@ func TestInspectorServerTime(t *testing.T) {
 		So(t0.After(before), ShouldBeTrue)
 		So(t0.Before(time.Now().Add(2*time.Second)), ShouldBeTrue)
 	})
+}
+
+type inspectorTestConn struct {
+	bootstrapTestConn
+	rows map[string]driver.Row
+}
+
+func (c *inspectorTestConn) QueryRow(_ context.Context, query string, _ ...any) driver.Row {
+	if row, ok := c.rows[query]; ok {
+		return row
+	}
+
+	return bootstrapTestRow{err: errBootstrapTestUnexpectedCall}
+}
+
+func (c *inspectorTestConn) Exec(_ context.Context, query string, _ ...any) error {
+	if query == flushLogsStmt {
+		return nil
+	}
+
+	return errBootstrapTestUnexpectedCall
 }
 
 type mockExplainRows struct {

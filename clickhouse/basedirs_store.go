@@ -101,7 +101,8 @@ type chBaseDirsStore struct {
 	groupSubBatch   driver.Batch
 	userSubBatch    driver.Batch
 
-	bufferedAgeAllGroupUsage map[uint32][]*basedirs.Usage
+	bufferedAgeAllGroupUsage  map[uint32][]*basedirs.Usage
+	lastHistoryAppendInserted bool
 
 	closed bool
 }
@@ -123,14 +124,16 @@ func (s *chBaseDirsStore) Reset() error {
 		return err
 	}
 
-	s.snapshot = snapshotID(s.mountPath, s.updatedAt)
-	s.bufferedAgeAllGroupUsage = map[uint32][]*basedirs.Usage{}
-	s.reset = false
+	s.resetSnapshotState()
 
 	ctx, cancel := context.WithTimeout(
 		context.Background(), queryTimeout(s.cfg),
 	)
 	defer cancel()
+
+	if err := refuseActiveSnapshotRewrite(ctx, s.conn, s.mountPath, s.snapshot); err != nil {
+		return err
+	}
 
 	if err := s.dropSnapshotPartitions(ctx); err != nil {
 		return err
@@ -143,6 +146,13 @@ func (s *chBaseDirsStore) Reset() error {
 	s.reset = true
 
 	return nil
+}
+
+func (s *chBaseDirsStore) resetSnapshotState() {
+	s.snapshot = snapshotID(s.mountPath, s.updatedAt)
+	s.bufferedAgeAllGroupUsage = map[uint32][]*basedirs.Usage{}
+	s.lastHistoryAppendInserted = false
+	s.reset = false
 }
 
 func (s *chBaseDirsStore) validateReadyForReset() error {
@@ -315,6 +325,8 @@ func (s *chBaseDirsStore) AppendGroupHistory(
 		return errStoreNotReset
 	}
 
+	s.lastHistoryAppendInserted = false
+
 	skip, err := s.historyAlreadyRecorded(key, point.Date)
 	if err != nil {
 		return err
@@ -324,7 +336,14 @@ func (s *chBaseDirsStore) AppendGroupHistory(
 		return nil
 	}
 
-	return s.insertHistoryPoint(key, point)
+	err = s.insertHistoryPoint(key, point)
+	s.lastHistoryAppendInserted = err == nil
+
+	return err
+}
+
+func (s *chBaseDirsStore) LastHistoryAppendInserted() bool {
+	return s != nil && s.lastHistoryAppendInserted
 }
 
 func (s *chBaseDirsStore) historyAlreadyRecorded(
@@ -745,10 +764,7 @@ func NewBaseDirsStore(cfg Config) (basedirs.Store, error) {
 		return nil, err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), queryTimeout(cfg))
-	defer cancel()
-
-	conn, err := connectAndBootstrap(ctx, opts, cfg.Database)
+	conn, err := connectAndBootstrap(context.Background(), opts, cfg.Database, queryTimeout(cfg))
 	if err != nil {
 		return nil, err
 	}

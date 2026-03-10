@@ -481,6 +481,28 @@ func TestClientFindByGlob(t *testing.T) {
 			uint64(1),
 		), ShouldBeNil)
 
+		base2 := mountPath + "other/"
+		path3 := base2 + "b.txt"
+		So(conn.Exec(
+			ctx,
+			testInsertFileStmt,
+			mountPath,
+			sid,
+			base2,
+			"b.txt",
+			"txt",
+			uint8(stats.FileType),
+			uint64(3),
+			uint64(3),
+			uint32(444),
+			uint32(111),
+			atime,
+			mtime,
+			ctime,
+			uint64(3),
+			uint64(1),
+		), ShouldBeNil)
+
 		rows, err := c.FindByGlob(ctx, []string{base}, nil, FindOptions{})
 		So(err, ShouldBeNil)
 		So(rows, ShouldBeEmpty)
@@ -491,6 +513,11 @@ func TestClientFindByGlob(t *testing.T) {
 		So(rows[0].Path, ShouldEqual, path1)
 
 		rows, err = c.FindByGlob(ctx, []string{base}, []string{"**"}, FindOptions{})
+		So(err, ShouldBeNil)
+		So(rows, ShouldHaveLength, 2)
+		So([]string{rows[0].Path, rows[1].Path}, ShouldResemble, []string{path1, path2})
+
+		rows, err = c.FindByGlob(ctx, []string{base}, []string{"**/*.txt"}, FindOptions{})
 		So(err, ShouldBeNil)
 		So(rows, ShouldHaveLength, 2)
 		So([]string{rows[0].Path, rows[1].Path}, ShouldResemble, []string{path1, path2})
@@ -520,5 +547,10 @@ func TestClientFindByGlob(t *testing.T) {
 		So(err, ShouldBeNil)
 		So(rows, ShouldHaveLength, 1)
 		So(rows[0].Path, ShouldEqual, path1)
+
+		rows, err = c.FindByGlob(ctx, []string{base, base2}, []string{"*"}, FindOptions{})
+		So(err, ShouldBeNil)
+		So(rows, ShouldHaveLength, 2)
+		So([]string{rows[0].Path, rows[1].Path}, ShouldResemble, []string{path1, path3})
 	})
 }

@@ -149,7 +149,21 @@ type fileIngestWriter struct {
 
 	batchSize int
 
+	importPhaseRecorder func(string, time.Duration)
+
 	closed bool
+}
+
+func (w *fileIngestWriter) SetImportPhaseRecorder(recorder func(string, time.Duration)) {
+	w.importPhaseRecorder = recorder
+}
+
+func (w *fileIngestWriter) recordImportPhase(phase string, d time.Duration) {
+	if w == nil || w.importPhaseRecorder == nil || d <= 0 {
+		return
+	}
+
+	w.importPhaseRecorder(phase, d)
 }
 
 func (w *fileIngestWriter) Close() error {
@@ -390,10 +404,18 @@ func (w *fileIngestWriter) ensureWriteReady(
 		w.snapshot = snapshotID(w.mountPath, w.updatedAt)
 	}
 
-	if err := dropPartitionIgnoreUnknown(
+	if err := refuseActiveSnapshotRewrite(ctx, w.conn, w.mountPath, w.snapshot); err != nil {
+		return err
+	}
+
+	dropStart := time.Now()
+	err := dropPartitionIgnoreUnknown(
 		ctx, w.conn, w.mountPath,
 		w.snapshot.String(), dropFilesPartitionQuery,
-	); err != nil {
+	)
+	w.recordImportPhase(importPhasePartitionDropReset, time.Since(dropStart))
+
+	if err != nil {
 		return err
 	}
 
@@ -459,12 +481,7 @@ func connectForFileIngest(cfg Config) (ch.Conn, error) {
 		return nil, err
 	}
 
-	ctx, cancel := context.WithTimeout(
-		context.Background(), queryTimeout(cfg),
-	)
-	defer cancel()
-
-	return connectAndBootstrap(ctx, opts, cfg.Database)
+	return connectAndBootstrap(context.Background(), opts, cfg.Database, queryTimeout(cfg))
 }
 
 type fileIngestOperation struct {

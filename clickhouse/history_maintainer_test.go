@@ -33,6 +33,7 @@ import (
 	"testing"
 	"time"
 
+	ch "github.com/ClickHouse/clickhouse-go/v2"
 	. "github.com/smartystreets/goconvey/convey"
 )
 
@@ -41,6 +42,23 @@ const (
 		"usage_size, quota_size, usage_inodes, quota_inodes) VALUES (?, ?, ?, ?, ?, ?, ?)"
 	testSelectBasedirsHistoryRowsQuery = "SELECT gid, mount_path FROM wrstat_basedirs_history ORDER BY gid"
 )
+
+func TestClickHouseHistoryMaintainerRefusesUnsafeCleanInTestEnv(t *testing.T) {
+	t.Setenv("WRSTAT_ENV", "test")
+
+	Convey("CleanHistoryForMount refuses non-test databases in the test environment", t, func() {
+		m := &historyMaintainer{
+			cfg:  Config{Database: "wrstat_ui_prod", QueryTimeout: 100 * time.Millisecond},
+			opts: ch.Options{Addr: []string{"127.0.0.1:1"}},
+		}
+
+		err := m.CleanHistoryForMount("/mnt/keep/")
+		So(err, ShouldNotBeNil)
+		So(err.Error(), ShouldContainSubstring, "refusing to clean basedirs history")
+		So(err.Error(), ShouldContainSubstring, "wrstat_ui_prod")
+		So(err.Error(), ShouldContainSubstring, "wrstat_ui_test_")
+	})
+}
 
 func TestClickHouseHistoryMaintainer(t *testing.T) {
 	Convey("NewHistoryMaintainer can find and clean invalid history rows", t, func() {

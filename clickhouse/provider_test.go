@@ -34,10 +34,19 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	. "github.com/smartystreets/goconvey/convey"
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 	internaldata "github.com/wtsi-hgi/wrstat-ui/internal/data"
+)
+
+const providerTestMountPath = "/mnt/test/"
+
+var (
+	errProviderTestErr1 = errors.New("provider test err1")
+	errProviderTestErr2 = errors.New("provider test err2")
+	errProviderTestErr3 = errors.New("provider test err3")
 )
 
 type providerSwapTestDB struct {
@@ -60,6 +69,57 @@ func (d *providerSwapTestDB) Close() error {
 	d.closed.Store(true)
 
 	return nil
+}
+
+func TestProviderCloseStopsPollingPromptly(t *testing.T) {
+	Convey("Close stops polling promptly between ticks", t, func() {
+		conn := &providerCloseTestConn{firstQuery: make(chan struct{}, 1)}
+		p := &chProvider{
+			cfg: Config{
+				PollInterval: time.Second,
+				QueryTimeout: time.Second,
+			},
+			conn: conn,
+		}
+
+		p.startPolling()
+
+		select {
+		case <-conn.firstQuery:
+			// ok
+		case <-time.After(time.Second):
+			t.Fatalf("timed out waiting for initial poll")
+		}
+
+		closeDone := make(chan error, 1)
+
+		go func() {
+			closeDone <- p.Close()
+		}()
+
+		returnedPromptly := false
+
+		select {
+		case err := <-closeDone:
+			So(err, ShouldBeNil)
+
+			returnedPromptly = true
+		case <-time.After(200 * time.Millisecond):
+		}
+
+		So(returnedPromptly, ShouldBeTrue)
+
+		if !returnedPromptly {
+			select {
+			case err := <-closeDone:
+				So(err, ShouldBeNil)
+			case <-time.After(2 * time.Second):
+				t.Fatalf("timed out waiting for Close to return")
+			}
+		}
+
+		So(conn.closed.Load(), ShouldBeTrue)
+	})
 }
 
 type providerSwapTestBD struct {
@@ -86,9 +146,11 @@ func (r *providerSwapTestBD) History(gid uint32, path string) ([]basedirs.Histor
 	return nil, nil
 }
 
-func (r *providerSwapTestBD) SetMountPoints(mountpoints []string)    {}
+func (r *providerSwapTestBD) SetMountPoints(mountpoints []string) {}
+
 func (r *providerSwapTestBD) SetCachedGroup(gid uint32, name string) {}
-func (r *providerSwapTestBD) SetCachedUser(uid uint32, name string)  {}
+
+func (r *providerSwapTestBD) SetCachedUser(uid uint32, name string) {}
 
 func (r *providerSwapTestBD) Info() (*basedirs.DBInfo, error) {
 	return &basedirs.DBInfo{}, nil
@@ -213,14 +275,6 @@ func TestOpenProviderPolling(t *testing.T) {
 		}
 	})
 }
-
-const providerTestMountPath = "/mnt/test/"
-
-var (
-	errProviderTestErr1 = errors.New("provider test err1")
-	errProviderTestErr2 = errors.New("provider test err2")
-	errProviderTestErr3 = errors.New("provider test err3")
-)
 
 func TestOpenProviderBaseDirs(t *testing.T) {
 	Convey("OpenProvider returns a basedirs reader", t, func() {
@@ -483,4 +537,22 @@ func TestProviderOnErrorQueueAndSerialization(t *testing.T) {
 
 		So(concurrent.Load(), ShouldBeFalse)
 	})
+}
+
+type providerCloseTestConn struct {
+	bootstrapTestConn
+
+	queries    atomic.Int32
+	firstQuery chan struct{}
+}
+
+func (c *providerCloseTestConn) Query(context.Context, string, ...any) (driver.Rows, error) {
+	if c.queries.Add(1) == 1 {
+		select {
+		case c.firstQuery <- struct{}{}:
+		default:
+		}
+	}
+
+	return &findByGlobEmptyRows{}, nil
 }

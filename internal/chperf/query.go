@@ -35,7 +35,6 @@ import (
 	"time"
 
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
-	"github.com/wtsi-hgi/wrstat-ui/clickhouse"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 	"github.com/wtsi-hgi/wrstat-ui/internal/boltperf"
 	"github.com/wtsi-hgi/wrstat-ui/provider"
@@ -71,11 +70,11 @@ type QueryOptions struct {
 // Query runs a repeatable timing suite against ClickHouse and returns
 // a Report with per-query latency percentiles.
 func Query(
-	cfg clickhouse.Config,
+	api QueryAPI,
 	opts QueryOptions,
 	printf PrintfFunc,
 ) (_ boltperf.Report, err error) {
-	qctx, err := buildQueryContext(cfg, opts, printf)
+	qctx, err := buildQueryContext(api, opts, printf)
 	if err != nil {
 		return boltperf.Report{}, err
 	}
@@ -100,11 +99,11 @@ func Query(
 }
 
 func buildQueryContext(
-	cfg clickhouse.Config,
+	api QueryAPI,
 	opts QueryOptions,
 	printf PrintfFunc,
 ) (queryContext, error) {
-	p, client, inspector, err := openAll(cfg)
+	p, client, inspector, err := openAll(api)
 	if err != nil {
 		return queryContext{}, err
 	}
@@ -129,21 +128,21 @@ func buildQueryContext(
 }
 
 func openAll(
-	cfg clickhouse.Config,
-) (provider.Provider, *clickhouse.Client, *clickhouse.Inspector, error) {
-	p, err := clickhouse.OpenProvider(cfg)
+	api QueryAPI,
+) (provider.Provider, QueryClient, QueryInspector, error) {
+	p, err := api.OpenProvider()
 	if err != nil {
 		return nil, nil, nil, err
 	}
 
-	client, err := clickhouse.NewClient(cfg)
+	client, err := api.NewQueryClient()
 	if err != nil {
 		_ = p.Close()
 
 		return nil, nil, nil, err
 	}
 
-	inspector, err := clickhouse.NewInspector(cfg)
+	inspector, err := api.NewQueryInspector()
 	if err != nil {
 		_ = client.Close()
 		_ = p.Close()
@@ -215,17 +214,21 @@ func DecodeMountPaths(mt map[string]time.Time) []string {
 	paths := make([]string, 0, len(mt))
 
 	for key := range mt {
-		mp := strings.ReplaceAll(key, "／", "/")
-		if !strings.HasSuffix(mp, "/") {
-			mp += "/"
-		}
-
-		paths = append(paths, mp)
+		paths = append(paths, decodeMountPath(key))
 	}
 
 	sort.Strings(paths)
 
 	return paths
+}
+
+func decodeMountPath(mountKey string) string {
+	mountPath := strings.ReplaceAll(mountKey, "／", "/")
+	if !strings.HasSuffix(mountPath, "/") {
+		mountPath += "/"
+	}
+
+	return mountPath
 }
 
 func pickDir(tree *db.Tree, startDir string) string {
@@ -340,12 +343,10 @@ func ExplainHasPruning(explain string) bool {
 		strings.Contains(explain, "parent_dir")
 }
 
-func pickPath(client *clickhouse.Client, dir string) string {
+func pickPath(client QueryClient, dir string) string {
 	ctx := context.Background()
 
-	rows, err := client.ListDir(ctx, dir, clickhouse.ListOptions{
-		Limit: 1,
-	})
+	rows, err := client.ListDir(ctx, dir, 1)
 	if err != nil || len(rows) == 0 {
 		return ""
 	}
@@ -386,23 +387,40 @@ func buildOps(qctx queryContext, printf PrintfFunc) []op {
 }
 
 func opMountTimestamps(qctx queryContext) op {
+	inputs := map[string]any{}
+
 	return op{
 		name:   "mount_timestamps",
-		inputs: map[string]any{},
+		inputs: inputs,
 		run: func(_ context.Context) error {
 			ts, err := qctx.provider.BaseDirs().MountTimestamps()
 			if err != nil {
 				return err
 			}
 
-			for k, v := range ts {
-				_ = k
-				_ = v
-			}
+			inputs["mount_count"] = len(ts)
+			inputs["active_mounts"] = activeMountsFreshness(ts)
 
 			return nil
 		},
 	}
+}
+
+func activeMountsFreshness(mt map[string]time.Time) []activeMountFreshness {
+	freshness := make([]activeMountFreshness, 0, len(mt))
+
+	for mountKey, updatedAt := range mt {
+		freshness = append(freshness, activeMountFreshness{
+			MountPath: decodeMountPath(mountKey),
+			UpdatedAt: updatedAt.UTC().Format(time.RFC3339Nano),
+		})
+	}
+
+	sort.Slice(freshness, func(i, j int) bool {
+		return freshness[i].MountPath < freshness[j].MountPath
+	})
+
+	return freshness
 }
 
 func opTreeDirInfo(qctx queryContext) op {
@@ -435,7 +453,7 @@ func opListDir(qctx queryContext) op {
 		name:   "files_listdir",
 		inputs: map[string]any{"dir": qctx.dir},
 		run: func(ctx context.Context) error {
-			_, err := qctx.client.ListDir(ctx, qctx.dir, clickhouse.ListOptions{})
+			_, err := qctx.client.ListDir(ctx, qctx.dir, 0)
 
 			return err
 		},
@@ -454,9 +472,7 @@ func opStatPath(qctx queryContext, printf PrintfFunc) []op {
 		name:   "files_statpath",
 		inputs: map[string]any{"path": pickedPath},
 		run: func(ctx context.Context) error {
-			_, err := qctx.client.StatPath(ctx, pickedPath, clickhouse.StatOptions{})
-
-			return err
+			return qctx.client.StatPath(ctx, pickedPath)
 		},
 	}}
 }
@@ -470,11 +486,7 @@ func opPermission(qctx queryContext) op {
 			"gids": qctx.gids,
 		},
 		run: func(ctx context.Context) error {
-			_, err := qctx.client.PermissionAnyInDir(
-				ctx, qctx.dir, qctx.uid, qctx.gids,
-			)
-
-			return err
+			return qctx.client.PermissionAnyInDir(ctx, qctx.dir, qctx.uid, qctx.gids)
 		},
 	}
 }
@@ -502,10 +514,10 @@ func globOps(qctx queryContext) []op {
 	return ops
 }
 
-func pickExt(client *clickhouse.Client, dir string) string {
+func pickExt(client QueryClient, dir string) string {
 	ctx := context.Background()
 
-	rows, err := client.ListDir(ctx, dir, clickhouse.ListOptions{})
+	rows, err := client.ListDir(ctx, dir, 0)
 	if err != nil {
 		return ""
 	}
@@ -533,17 +545,9 @@ func globOp(
 			"require_owner": requireOwner,
 		},
 		run: func(ctx context.Context) error {
-			opts := clickhouse.FindOptions{
-				RequireOwner: requireOwner,
-				UID:          qctx.uid,
-				GIDs:         qctx.gids,
-			}
-
-			_, err := qctx.client.FindByGlob(
-				ctx, baseDirs, patterns, opts,
+			return qctx.client.FindByGlob(
+				ctx, baseDirs, patterns, requireOwner, qctx.uid, qctx.gids,
 			)
-
-			return err
 		},
 	}
 }
@@ -555,7 +559,10 @@ func runOp(
 	opts QueryOptions,
 	printf PrintfFunc,
 ) error {
-	durations := timingLoop(qctx, o, opts.Repeat, printf)
+	durations, err := timingLoop(qctx, o, opts.Repeat, printf)
+	if err != nil {
+		return err
+	}
 
 	report.AddOperation(o.name, o.inputs, durations)
 
@@ -571,37 +578,30 @@ func timingLoop(
 	o op,
 	repeat int,
 	printf PrintfFunc,
-) []float64 {
+) ([]float64, error) {
 	ctx := context.Background()
 	durations := make([]float64, 0, repeat)
 
-	for range repeat {
-		var (
-			metrics *clickhouse.QueryMetrics
-			elapsed time.Duration
-		)
-
+	for i := range repeat {
 		start := time.Now()
 
-		m, err := qctx.inspector.Measure(ctx, o.run)
-		elapsed = time.Since(start)
-
-		if err == nil {
-			metrics = m
+		metrics, err := qctx.inspector.Measure(ctx, o.run)
+		if err != nil {
+			return nil, fmt.Errorf("%s repeat %d/%d: %w", o.name, i+1, repeat, err)
 		}
 
-		durations = append(durations, durationMS(elapsed))
+		durations = append(durations, durationMS(time.Since(start)))
 
 		printMetrics(printf, o.name, metrics)
 	}
 
-	return durations
+	return durations, nil
 }
 
 func printMetrics(
 	printf PrintfFunc,
 	name string,
-	m *clickhouse.QueryMetrics,
+	m *QueryMetrics,
 ) {
 	if m == nil {
 		return
@@ -613,6 +613,11 @@ func printMetrics(
 		m.ResultRows, m.ResultBytes)
 }
 
+type activeMountFreshness struct {
+	MountPath string `json:"mount_path"`
+	UpdatedAt string `json:"updated_at"`
+}
+
 type op struct {
 	name   string
 	inputs map[string]any
@@ -621,8 +626,8 @@ type op struct {
 
 type queryContext struct {
 	provider  provider.Provider
-	client    *clickhouse.Client
-	inspector *clickhouse.Inspector
+	client    QueryClient
+	inspector QueryInspector
 	dir       string
 	uid       uint32
 	gids      []uint32

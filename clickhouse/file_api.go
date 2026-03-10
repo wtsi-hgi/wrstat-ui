@@ -47,6 +47,44 @@ var (
 	errInvalidPath  = errors.New("clickhouse: invalid path")
 )
 
+const (
+	fileRowSelectAll = "f.path, f.parent_dir, f.name, f.ext, f.entry_type, f.size, " +
+		"f.apparent_size, f.uid, f.gid, f.atime, f.mtime, f.ctime, f.inode, f.nlink"
+)
+
+const statPathQueryTemplate = "WITH (SELECT snapshot_id FROM wrstat_mounts_active WHERE mount_path = ?) AS sid " +
+	"SELECT %s FROM wrstat_files f PREWHERE f.mount_path = ? AND f.snapshot_id = sid " +
+	"AND f.parent_dir = ? AND f.name = ? LIMIT 1"
+
+const listDirQueryTemplate = "WITH (SELECT snapshot_id FROM wrstat_mounts_active WHERE mount_path = ?) AS sid " +
+	"SELECT %s FROM wrstat_files f PREWHERE f.mount_path = ? AND f.snapshot_id = sid " +
+	"AND f.parent_dir = ? ORDER BY f.name ASC LIMIT ? OFFSET ?"
+
+const findByGlobQueryTemplate = "WITH (SELECT snapshot_id FROM wrstat_mounts_active WHERE mount_path = ?) AS sid " +
+	"SELECT %s FROM wrstat_files f PREWHERE f.mount_path = ? AND f.snapshot_id = sid " +
+	"WHERE (%s) " +
+	"AND (? = 0 OR f.uid = ? OR has(?, f.gid)) " +
+	"ORDER BY f.parent_dir ASC, f.name ASC LIMIT ? OFFSET ?"
+
+const isDirQuery = "WITH (SELECT snapshot_id FROM wrstat_mounts_active WHERE mount_path = ?) AS sid " +
+	"SELECT f.entry_type FROM wrstat_files f PREWHERE f.mount_path = ? AND f.snapshot_id = sid " +
+	"AND f.parent_dir = ? AND f.name = ? LIMIT 1"
+
+const permissionAnyInDirQuery = "WITH (SELECT snapshot_id FROM wrstat_mounts_active WHERE mount_path = ?) AS sid " +
+	"SELECT 1 FROM wrstat_dguta d PREWHERE d.mount_path = ? AND d.snapshot_id = sid " +
+	"AND d.dir = ? AND d.age = ? AND (d.uid = ? OR has(?, d.gid)) LIMIT 1"
+
+const defaultFileLimit = 1_000_000
+
+const (
+	maxGlobPatternsPerQuery       = 32
+	findByGlobParamsPerBaseDirCap = 2
+	findByGlobParamsSharedCap     = 7
+	minDedupeByPathLen            = 2
+	growExtraForAnchors           = 2
+	maxByte                       = 0xFF
+)
+
 // FileRow represents a file or directory from wrstat_files.
 type FileRow struct {
 	Path         string
@@ -63,6 +101,45 @@ type FileRow struct {
 	CTime        time.Time
 	Inode        int64
 	Nlink        int64
+}
+
+func writeGlobToken(b *strings.Builder, pattern string, i *int) bool {
+	switch pattern[*i] {
+	case '*':
+		if *i+1 < len(pattern) && pattern[*i+1] == '*' {
+			if isZeroOrMoreDirsPattern(pattern, *i) {
+				b.WriteString("(?:[^/]+/)*")
+
+				*i += 2
+
+				return true
+			}
+
+			b.WriteString(".*")
+
+			(*i)++
+
+			return true
+		}
+
+		b.WriteString("[^/]*")
+
+		return true
+	case '?':
+		b.WriteString("[^/]")
+
+		return true
+	default:
+		return false
+	}
+}
+
+func isZeroOrMoreDirsPattern(pattern string, idx int) bool {
+	return (idx == 0 || pattern[idx-1] == '/') && idx+2 < len(pattern) && pattern[idx+2] == '/'
+}
+
+func findByGlobBaseDirClause(matchCount int) string {
+	return "(f.parent_dir >= ? AND f.parent_dir < ? AND (" + matchOrList(matchCount) + "))"
 }
 
 // ListOptions controls ListDir behaviour.
@@ -87,11 +164,6 @@ type FindOptions struct {
 	GIDs         []uint32
 }
 
-const (
-	fileRowSelectAll = "f.path, f.parent_dir, f.name, f.ext, f.entry_type, f.size, " +
-		"f.apparent_size, f.uid, f.gid, f.atime, f.mtime, f.ctime, f.inode, f.nlink"
-)
-
 func defaultFileRowFields() []string {
 	return []string{
 		"path",
@@ -110,38 +182,6 @@ func defaultFileRowFields() []string {
 		"nlink",
 	}
 }
-
-const statPathQueryTemplate = "WITH (SELECT snapshot_id FROM wrstat_mounts_active WHERE mount_path = ?) AS sid " +
-	"SELECT %s FROM wrstat_files f PREWHERE f.mount_path = ? AND f.snapshot_id = sid " +
-	"AND f.parent_dir = ? AND f.name = ? LIMIT 1"
-
-const listDirQueryTemplate = "WITH (SELECT snapshot_id FROM wrstat_mounts_active WHERE mount_path = ?) AS sid " +
-	"SELECT %s FROM wrstat_files f PREWHERE f.mount_path = ? AND f.snapshot_id = sid " +
-	"AND f.parent_dir = ? ORDER BY f.name ASC LIMIT ? OFFSET ?"
-
-const findByGlobQueryTemplate = "WITH (SELECT snapshot_id FROM wrstat_mounts_active WHERE mount_path = ?) AS sid " +
-	"SELECT %s FROM wrstat_files f PREWHERE f.mount_path = ? AND f.snapshot_id = sid " +
-	"WHERE f.parent_dir >= ? AND f.parent_dir < ? AND (%s) " +
-	"AND (? = 0 OR f.uid = ? OR has(?, f.gid)) " +
-	"ORDER BY f.parent_dir ASC, f.name ASC LIMIT ? OFFSET ?"
-
-const isDirQuery = "WITH (SELECT snapshot_id FROM wrstat_mounts_active WHERE mount_path = ?) AS sid " +
-	"SELECT f.entry_type FROM wrstat_files f PREWHERE f.mount_path = ? AND f.snapshot_id = sid " +
-	"AND f.parent_dir = ? AND f.name = ? LIMIT 1"
-
-const permissionAnyInDirQuery = "WITH (SELECT snapshot_id FROM wrstat_mounts_active WHERE mount_path = ?) AS sid " +
-	"SELECT 1 FROM wrstat_dguta d PREWHERE d.mount_path = ? AND d.snapshot_id = sid " +
-	"AND d.dir = ? AND d.age = ? AND (d.uid = ? OR has(?, d.gid)) LIMIT 1"
-
-const defaultFileLimit = 1_000_000
-
-const (
-	maxGlobPatternsPerQuery = 32
-	findByGlobParamsBaseCap = 8
-	minDedupeByPathLen      = 2
-	growExtraForAnchors     = 2
-	maxByte                 = 0xFF
-)
 
 // StatPath returns metadata for an exact file path over the active snapshot of
 // the mount containing the path.
@@ -312,7 +352,7 @@ func (c *Client) runFindByGlobQuerySpec(
 		selectList,
 		fields,
 		spec.mountPath,
-		spec.baseDir,
+		spec.baseDirs,
 		spec.patternChunk,
 		ownerEnabled,
 		uid,
@@ -323,6 +363,10 @@ func (c *Client) runFindByGlobQuerySpec(
 }
 
 func (c *Client) finishFindByGlob(in []FileRow) []FileRow {
+	if len(in) < minDedupeByPathLen {
+		return in
+	}
+
 	sort.Slice(in, func(i, j int) bool { return in[i].Path < in[j].Path })
 
 	return dedupeByPath(in)
@@ -330,7 +374,7 @@ func (c *Client) finishFindByGlob(in []FileRow) []FileRow {
 
 type findByGlobQuerySpec struct {
 	mountPath    string
-	baseDir      string
+	baseDirs     []string
 	patternChunk []string
 }
 
@@ -343,14 +387,12 @@ func (c *Client) findByGlobPlan(baseDirsByMount map[string][]string, patterns []
 	queries := make([]findByGlobQuerySpec, 0)
 
 	for mountPath, dirs := range baseDirsByMount {
-		for _, baseDir := range dirs {
-			for _, chunk := range chunkStrings(patterns, maxGlobPatternsPerQuery) {
-				queries = append(queries, findByGlobQuerySpec{
-					mountPath:    mountPath,
-					baseDir:      baseDir,
-					patternChunk: chunk,
-				})
-			}
+		for _, chunk := range chunkStrings(patterns, maxGlobPatternsPerQuery) {
+			queries = append(queries, findByGlobQuerySpec{
+				mountPath:    mountPath,
+				baseDirs:     dirs,
+				patternChunk: chunk,
+			})
 		}
 	}
 
@@ -394,7 +436,7 @@ func (c *Client) findByGlobQuery(
 	selectList string,
 	fields []string,
 	mountPath string,
-	baseDir string,
+	baseDirs []string,
 	patterns []string,
 	ownerEnabled int64,
 	uid uint32,
@@ -405,7 +447,7 @@ func (c *Client) findByGlobQuery(
 	q, params := buildFindByGlobQueryAndParams(
 		selectList,
 		mountPath,
-		baseDir,
+		baseDirs,
 		patterns,
 		ownerEnabled,
 		uid,
@@ -451,7 +493,7 @@ func (c *Client) queryFileRows(
 func buildFindByGlobQueryAndParams(
 	selectList string,
 	mountPath string,
-	baseDir string,
+	baseDirs []string,
 	patterns []string,
 	ownerEnabled int64,
 	uid uint32,
@@ -459,17 +501,21 @@ func buildFindByGlobQueryAndParams(
 	limit int64,
 	offset int64,
 ) (string, []any) {
-	compiled := compileGlobRegexes(baseDir, patterns)
+	baseDirClauses := make([]string, 0, len(baseDirs))
+	params := make([]any, 0, findByGlobParamsSharedCap+len(baseDirs)*(len(patterns)+findByGlobParamsPerBaseDirCap))
+	params = append(params, mountPath, mountPath)
 
-	orList := matchOrList(len(compiled))
-	q := fmt.Sprintf(findByGlobQueryTemplate, selectList, orList)
+	for _, baseDir := range baseDirs {
+		compiled := compileGlobRegexes(baseDir, patterns)
+		baseDirClauses = append(baseDirClauses, findByGlobBaseDirClause(len(compiled)))
+		params = append(params, baseDir, prefixNext(baseDir))
 
-	params := make([]any, 0, findByGlobParamsBaseCap+len(compiled))
-	params = append(params, mountPath, mountPath, baseDir, prefixNext(baseDir))
-
-	for _, re := range compiled {
-		params = append(params, re)
+		for _, re := range compiled {
+			params = append(params, re)
+		}
 	}
+
+	q := fmt.Sprintf(findByGlobQueryTemplate, selectList, strings.Join(baseDirClauses, " OR "))
 
 	params = append(params, ownerEnabled, uid, gids, limit, offset)
 
@@ -581,22 +627,11 @@ func globToRE2(escapedBase string, pattern string) string {
 	b.WriteString(escapedBase)
 
 	for i := 0; i < len(pattern); i++ {
-		switch pattern[i] {
-		case '*':
-			if i+1 < len(pattern) && pattern[i+1] == '*' {
-				b.WriteString(".*")
-
-				i++
-
-				continue
-			}
-
-			b.WriteString("[^/]*")
-		case '?':
-			b.WriteString("[^/]")
-		default:
-			writeRE2LiteralByte(&b, pattern[i])
+		if writeGlobToken(&b, pattern, &i) {
+			continue
 		}
+
+		writeRE2LiteralByte(&b, pattern[i])
 	}
 
 	b.WriteByte('$')

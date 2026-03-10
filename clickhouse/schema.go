@@ -35,6 +35,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	ch "github.com/ClickHouse/clickhouse-go/v2"
 )
@@ -42,6 +43,9 @@ import (
 var (
 	errNoEmbeddedSchemaFiles   = errors.New("clickhouse: no embedded schema files found")
 	errUnexpectedSchemaVersion = errors.New("clickhouse: unexpected schema versions")
+
+	//nolint:gochecknoglobals // Serialises same-process bootstrap for legacy empty tables.
+	schemaVersionBootstrapMu sync.Mutex
 )
 
 const (
@@ -118,6 +122,9 @@ func applySchemaDDL(ctx context.Context, execer ch.Conn, stmts []string) error {
 }
 
 func ensureSchemaVersion(ctx context.Context, execer ch.Conn) error {
+	schemaVersionBootstrapMu.Lock()
+	defer schemaVersionBootstrapMu.Unlock()
+
 	count, minVersion, maxVersion, err := schemaVersionStatsFromDB(ctx, execer)
 	if err != nil {
 		return err
