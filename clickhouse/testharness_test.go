@@ -165,7 +165,7 @@ func (h *clickHouseTestHarness) baseDSN(database string) string {
 	}
 
 	return fmt.Sprintf(
-		"clickhouse://default@127.0.0.1:%d/default?database=%s&dial_timeout=1s",
+		"clickhouse://default@127.0.0.1:%d/default?database=%s&dial_timeout=1s&compress=lz4",
 		h.tcpPort,
 		url.QueryEscape(database),
 	)
@@ -315,11 +315,6 @@ func findClickHouseBinary(t *testing.T) string {
 	bin, err := exec.LookPath("clickhouse")
 	if err == nil {
 		return bin
-	}
-
-	fallback := "/software/hgi/installs/clickhouse/clickhouse"
-	if _, statErr := os.Stat(fallback); statErr == nil {
-		return fallback
 	}
 
 	t.Skip("clickhouse binary not found")

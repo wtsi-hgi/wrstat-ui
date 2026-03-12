@@ -22,6 +22,7 @@ require (
 	github.com/wtsi-hgi/go-authserver v1.4.0
 	go.etcd.io/bbolt v1.4.0
 	golang.org/x/exp v0.0.0-20250218142911-aa4b98e5adaa
+	golang.org/x/sys v0.40.0
 	vimagination.zapto.org/byteio v1.0.5
 	vimagination.zapto.org/httpfile v1.0.0
 	vimagination.zapto.org/parser v1.2.3
@@ -161,7 +162,6 @@ require (
 	golang.org/x/net v0.49.0 // indirect
 	golang.org/x/oauth2 v0.30.0 // indirect
 	golang.org/x/sync v0.19.0 // indirect
-	golang.org/x/sys v0.40.0 // indirect
 	golang.org/x/term v0.39.0 // indirect
 	golang.org/x/text v0.33.0 // indirect
 	golang.org/x/time v0.11.0 // indirect

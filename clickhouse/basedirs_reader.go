@@ -30,31 +30,13 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	ch "github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 )
-
-type chBaseDirsReader struct {
-	cfg Config
-
-	conn ch.Conn
-
-	owners map[uint32]string
-
-	groupCache *basedirs.GroupCache
-	userCache  *basedirs.UserCache
-
-	mountPoints basedirs.MountPoints
-}
-
-type iterRows interface {
-	Next() bool
-	Scan(dest ...any) error
-	Close() error
-}
 
 const groupUsageQuery = `
 WITH active AS (
@@ -122,6 +104,98 @@ ORDER BY date ASC
 `
 
 const mountTimestampsQuery = "SELECT mount_path, updated_at FROM wrstat_mounts_active"
+
+const groupUsageSnapshotQuery = `
+SELECT
+	gid, basedir, uids, usage_size, quota_size, usage_inodes, quota_inodes,
+	mtime, date_no_space, date_no_files, age
+FROM wrstat_basedirs_group_usage u
+WHERE u.age = ? AND %s
+ORDER BY gid ASC, basedir ASC
+`
+
+const userUsageSnapshotQuery = `
+SELECT
+	uid, basedir, gids, usage_size, quota_size, usage_inodes, quota_inodes,
+	mtime, age
+FROM wrstat_basedirs_user_usage u
+WHERE u.age = ? AND %s
+ORDER BY uid ASC, basedir ASC
+`
+
+const groupSubDirsSnapshotQuery = `
+SELECT
+	subdir, num_files, size_files, last_modified, file_usage
+FROM wrstat_basedirs_group_subdirs s
+WHERE s.gid = ? AND s.basedir = ? AND s.age = ? AND %s
+ORDER BY s.pos ASC
+`
+
+const userSubDirsSnapshotQuery = `
+SELECT
+	subdir, num_files, size_files, last_modified, file_usage
+FROM wrstat_basedirs_user_subdirs s
+WHERE s.uid = ? AND s.basedir = ? AND s.age = ? AND %s
+ORDER BY s.pos ASC
+`
+
+const infoGroupUsageSnapshotQuery = `
+	SELECT count()
+	FROM wrstat_basedirs_group_usage u
+	WHERE u.age = ? AND %s
+`
+
+const infoUserUsageSnapshotQuery = `
+	SELECT count()
+	FROM wrstat_basedirs_user_usage u
+	WHERE u.age = ? AND %s
+`
+
+const infoGroupHistorySnapshotQuery = `
+	SELECT
+		countDistinct((mount_path, gid)) AS group_mount_combos,
+		count() AS group_histories
+	FROM wrstat_basedirs_history
+	WHERE %s
+`
+
+const infoGroupSubDirsSnapshotQuery = `
+	SELECT
+		countDistinct((gid, basedir)) AS group_subdir_combos,
+		count() AS group_subdirs
+	FROM wrstat_basedirs_group_subdirs s
+	WHERE s.age = ? AND %s
+`
+
+const infoUserSubDirsSnapshotQuery = `
+	SELECT
+		countDistinct((uid, basedir)) AS user_subdir_combos,
+		count() AS user_subdirs
+	FROM wrstat_basedirs_user_subdirs s
+	WHERE s.age = ? AND %s
+`
+
+type chBaseDirsReader struct {
+	cfg Config
+
+	conn ch.Conn
+
+	snapshot *activeMountsSnapshot
+	closed   atomic.Bool
+
+	owners map[uint32]string
+
+	groupCache *basedirs.GroupCache
+	userCache  *basedirs.UserCache
+
+	mountPoints basedirs.MountPoints
+}
+
+type iterRows interface {
+	Next() bool
+	Scan(dest ...any) error
+	Close() error
+}
 
 type groupUsageScanned struct {
 	gid         uint32
@@ -234,42 +308,255 @@ func (s *subDirScanned) toSubDir() *basedirs.SubDir {
 	}
 }
 
-func newClickHouseBaseDirsReader(cfg Config, conn ch.Conn) basedirs.Reader {
-	r := &chBaseDirsReader{
-		cfg:        cfg,
-		conn:       conn,
-		owners:     map[uint32]string{},
-		groupCache: basedirs.NewGroupCache(),
-		userCache:  basedirs.NewUserCache(),
-	}
-
-	if cfg.OwnersCSVPath != "" {
-		if owners, err := basedirs.ParseOwners(cfg.OwnersCSVPath); err == nil {
-			r.owners = owners
-		}
-	}
-
-	r.SetMountPoints(cfg.MountPoints)
-
-	if len(r.mountPoints) == 0 {
-		if mps, err := basedirs.GetMountPoints(); err == nil {
-			r.mountPoints = mps
-		}
-	}
-
-	return r
+func (r *chBaseDirsReader) snapshotGroupUsage(age db.DirGUTAge) ([]*basedirs.Usage, error) {
+	return r.snapshotUsage(
+		age,
+		groupUsageSnapshotQuery,
+		"group",
+		"u.mount_path",
+		"u.snapshot_id",
+		r.scanGroupUsageRows,
+	)
 }
 
-func (r *chBaseDirsReader) GroupUsage(age db.DirGUTAge) ([]*basedirs.Usage, error) {
+func (r *chBaseDirsReader) snapshotUserUsage(age db.DirGUTAge) ([]*basedirs.Usage, error) {
+	return r.snapshotUsage(
+		age,
+		userUsageSnapshotQuery,
+		"user",
+		"u.mount_path",
+		"u.snapshot_id",
+		r.scanUserUsageRows,
+	)
+}
+
+func (r *chBaseDirsReader) snapshotUsage(
+	age db.DirGUTAge,
+	queryFmt, what, mountColumn, snapshotColumn string,
+	scan func(iterRows) ([]*basedirs.Usage, error),
+) ([]*basedirs.Usage, error) {
+	mounts := r.snapshot.all()
+	if len(mounts) == 0 {
+		return []*basedirs.Usage{}, nil
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), queryTimeout(r.cfg))
 	defer cancel()
 
-	rows, err := r.conn.Query(ctx, groupUsageQuery, uint8(age))
+	query, args := activeMountsQuery(
+		queryFmt,
+		mountColumn,
+		snapshotColumn,
+		mounts,
+		uint8(age),
+	)
+
+	rows, err := r.conn.Query(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("clickhouse: failed to query group usage: %w", err)
+		return nil, fmt.Errorf("clickhouse: failed to query %s usage: %w", what, err)
+	}
+
+	return scan(rows)
+}
+
+func (r *chBaseDirsReader) snapshotGroupSubDirs(
+	gid uint32,
+	basedir string,
+	age db.DirGUTAge,
+) ([]*basedirs.SubDir, error) {
+	mounts := r.snapshot.all()
+	if len(mounts) == 0 {
+		return nil, basedirs.ErrNoSuchUserOrGroup
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), queryTimeout(r.cfg))
+	defer cancel()
+
+	query, args := activeMountsQuery(
+		groupSubDirsSnapshotQuery,
+		"s.mount_path",
+		"s.snapshot_id",
+		mounts,
+		gid,
+		basedir,
+		uint8(age),
+	)
+
+	return r.subDirs(ctx, "group", query, args...)
+}
+
+func (r *chBaseDirsReader) snapshotUserSubDirs(
+	uid uint32,
+	basedir string,
+	age db.DirGUTAge,
+) ([]*basedirs.SubDir, error) {
+	mounts := r.snapshot.all()
+	if len(mounts) == 0 {
+		return nil, basedirs.ErrNoSuchUserOrGroup
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), queryTimeout(r.cfg))
+	defer cancel()
+
+	query, args := activeMountsQuery(
+		userSubDirsSnapshotQuery,
+		"s.mount_path",
+		"s.snapshot_id",
+		mounts,
+		uid,
+		basedir,
+		uint8(age),
+	)
+
+	return r.subDirs(ctx, "user", query, args...)
+}
+
+func (r *chBaseDirsReader) liveMountTimestamps(ctx context.Context) (map[string]time.Time, error) {
+	rows, err := r.conn.Query(ctx, mountTimestampsQuery)
+	if err != nil {
+		return nil, fmt.Errorf("clickhouse: failed to query mount timestamps: %w", err)
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	return scanMountTimestamps(rows)
+}
+
+func scanMountTimestamps(rows iterRows) (map[string]time.Time, error) {
+	out := make(map[string]time.Time)
+
+	for rows.Next() {
+		var (
+			mountPath string
+			updatedAt time.Time
+		)
+
+		if err := rows.Scan(&mountPath, &updatedAt); err != nil {
+			return nil, fmt.Errorf("clickhouse: failed to scan mount timestamps: %w", err)
+		}
+
+		mountKey := strings.ReplaceAll(mountPath, "/", "／")
+		out[mountKey] = updatedAt
+	}
+
+	return out, nil
+}
+
+func (r *chBaseDirsReader) queryCountForSnapshot(
+	ctx context.Context,
+	queryFmt, mountColumn, snapshotColumn string,
+	dest *int,
+	mounts []activeMount,
+	args ...any,
+) error {
+	if len(mounts) == 0 {
+		*dest = 0
+
+		return nil
+	}
+
+	query, queryArgs := activeMountsQuery(
+		queryFmt,
+		mountColumn,
+		snapshotColumn,
+		mounts,
+		args...,
+	)
+
+	return r.queryCount(ctx, query, dest, queryArgs...)
+}
+
+func (r *chBaseDirsReader) queryCountPairForSnapshot(
+	ctx context.Context,
+	queryFmt, mountColumn, snapshotColumn string,
+	destA, destB *int,
+	mounts []activeMount,
+	args ...any,
+) error {
+	if len(mounts) == 0 {
+		*destA = 0
+		*destB = 0
+
+		return nil
+	}
+
+	query, queryArgs := activeMountsQuery(
+		queryFmt,
+		mountColumn,
+		snapshotColumn,
+		mounts,
+		args...,
+	)
+
+	return r.queryCountPair(ctx, query, destA, destB, queryArgs...)
+}
+
+func (r *chBaseDirsReader) queryCountPairForActiveMounts(
+	ctx context.Context,
+	queryFmt, mountColumn string,
+	destA, destB *int,
+	mounts []activeMount,
+	args ...any,
+) error {
+	if len(mounts) == 0 {
+		*destA = 0
+		*destB = 0
+
+		return nil
+	}
+
+	query, queryArgs := activeMountPathsQuery(
+		queryFmt,
+		mountColumn,
+		mounts,
+		args...,
+	)
+
+	return r.queryCountPair(ctx, query, destA, destB, queryArgs...)
+}
+
+func (r *chBaseDirsReader) ensureOpen() error {
+	if r == nil || r.closed.Load() {
+		return errReaderClosed
+	}
+
+	return nil
+}
+
+func (r *chBaseDirsReader) GroupUsage(age db.DirGUTAge) ([]*basedirs.Usage, error) {
+	if err := r.ensureOpen(); err != nil {
+		return nil, err
+	}
+
+	if r.snapshot != nil {
+		return r.snapshotGroupUsage(age)
+	}
+
+	rows, err := r.queryUsageRows(groupUsageQuery, "group", age)
+	if err != nil {
+		return nil, err
 	}
 
 	return r.scanGroupUsageRows(rows)
+}
+
+func (r *chBaseDirsReader) queryUsageRows(
+	query, what string,
+	age db.DirGUTAge,
+) (iterRows, error) {
+	if err := r.ensureOpen(); err != nil {
+		return nil, err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), queryTimeout(r.cfg))
+	defer cancel()
+
+	rows, err := r.conn.Query(ctx, query, uint8(age))
+	if err != nil {
+		return nil, fmt.Errorf("clickhouse: failed to query %s usage: %w", what, err)
+	}
+
+	return rows, nil
 }
 
 func (r *chBaseDirsReader) scanGroupUsageRows(rows iterRows) ([]*basedirs.Usage, error) {
@@ -290,12 +577,17 @@ func (r *chBaseDirsReader) scanGroupUsageRows(rows iterRows) ([]*basedirs.Usage,
 }
 
 func (r *chBaseDirsReader) UserUsage(age db.DirGUTAge) ([]*basedirs.Usage, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), queryTimeout(r.cfg))
-	defer cancel()
+	if err := r.ensureOpen(); err != nil {
+		return nil, err
+	}
 
-	rows, err := r.conn.Query(ctx, userUsageQuery, uint8(age))
+	if r.snapshot != nil {
+		return r.snapshotUserUsage(age)
+	}
+
+	rows, err := r.queryUsageRows(userUsageQuery, "user", age)
 	if err != nil {
-		return nil, fmt.Errorf("clickhouse: failed to query user usage: %w", err)
+		return nil, err
 	}
 
 	return r.scanUserUsageRows(rows)
@@ -319,6 +611,14 @@ func (r *chBaseDirsReader) scanUserUsageRows(rows iterRows) ([]*basedirs.Usage, 
 }
 
 func (r *chBaseDirsReader) GroupSubDirs(gid uint32, basedir string, age db.DirGUTAge) ([]*basedirs.SubDir, error) {
+	if err := r.ensureOpen(); err != nil {
+		return nil, err
+	}
+
+	if r.snapshot != nil {
+		return r.snapshotGroupSubDirs(gid, basedir, age)
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), queryTimeout(r.cfg))
 	defer cancel()
 
@@ -326,6 +626,14 @@ func (r *chBaseDirsReader) GroupSubDirs(gid uint32, basedir string, age db.DirGU
 }
 
 func (r *chBaseDirsReader) UserSubDirs(uid uint32, basedir string, age db.DirGUTAge) ([]*basedirs.SubDir, error) {
+	if err := r.ensureOpen(); err != nil {
+		return nil, err
+	}
+
+	if r.snapshot != nil {
+		return r.snapshotUserSubDirs(uid, basedir, age)
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), queryTimeout(r.cfg))
 	defer cancel()
 
@@ -368,6 +676,10 @@ func convertUsageMap(m map[uint16]uint64) basedirs.UsageBreakdownByType {
 }
 
 func (r *chBaseDirsReader) History(gid uint32, path string) ([]basedirs.History, error) {
+	if err := r.ensureOpen(); err != nil {
+		return nil, err
+	}
+
 	mp := r.mountPoints.PrefixOf(path)
 	if mp == "" {
 		return nil, basedirs.ErrInvalidBasePath
@@ -418,36 +730,25 @@ func (r *chBaseDirsReader) SetCachedUser(uid uint32, name string) {
 }
 
 func (r *chBaseDirsReader) MountTimestamps() (map[string]time.Time, error) {
+	if err := r.ensureOpen(); err != nil {
+		return nil, err
+	}
+
+	if r.snapshot != nil {
+		return r.snapshot.mountTimestamps(), nil
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), queryTimeout(r.cfg))
 	defer cancel()
 
-	rows, err := r.conn.Query(ctx, mountTimestampsQuery)
-	if err != nil {
-		return nil, fmt.Errorf("clickhouse: failed to query mount timestamps: %w", err)
-	}
-
-	defer func() { _ = rows.Close() }()
-
-	out := make(map[string]time.Time)
-
-	for rows.Next() {
-		var (
-			mountPath string
-			updatedAt time.Time
-		)
-
-		if err := rows.Scan(&mountPath, &updatedAt); err != nil {
-			return nil, fmt.Errorf("clickhouse: failed to scan mount timestamps: %w", err)
-		}
-
-		mountKey := strings.ReplaceAll(mountPath, "/", "／")
-		out[mountKey] = updatedAt
-	}
-
-	return out, nil
+	return r.liveMountTimestamps(ctx)
 }
 
 func (r *chBaseDirsReader) Info() (*basedirs.DBInfo, error) {
+	if err := r.ensureOpen(); err != nil {
+		return nil, err
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), queryTimeout(r.cfg))
 	defer cancel()
 
@@ -483,6 +784,18 @@ func (r *chBaseDirsReader) fillInfo(ctx context.Context, info *basedirs.DBInfo) 
 }
 
 func (r *chBaseDirsReader) fillInfoGroupUsage(ctx context.Context, info *basedirs.DBInfo, ageAll uint8) error {
+	if r.snapshot != nil {
+		return r.queryCountForSnapshot(
+			ctx,
+			infoGroupUsageSnapshotQuery,
+			"u.mount_path",
+			"u.snapshot_id",
+			&info.GroupDirCombos,
+			r.snapshot.all(),
+			ageAll,
+		)
+	}
+
 	query := `
 		WITH active AS (SELECT mount_path, snapshot_id FROM wrstat_mounts_active)
 		SELECT count()
@@ -496,6 +809,18 @@ func (r *chBaseDirsReader) fillInfoGroupUsage(ctx context.Context, info *basedir
 }
 
 func (r *chBaseDirsReader) fillInfoUserUsage(ctx context.Context, info *basedirs.DBInfo, ageAll uint8) error {
+	if r.snapshot != nil {
+		return r.queryCountForSnapshot(
+			ctx,
+			infoUserUsageSnapshotQuery,
+			"u.mount_path",
+			"u.snapshot_id",
+			&info.UserDirCombos,
+			r.snapshot.all(),
+			ageAll,
+		)
+	}
+
 	query := `
 		WITH active AS (SELECT mount_path, snapshot_id FROM wrstat_mounts_active)
 		SELECT count()
@@ -509,17 +834,44 @@ func (r *chBaseDirsReader) fillInfoUserUsage(ctx context.Context, info *basedirs
 }
 
 func (r *chBaseDirsReader) fillInfoGroupHistory(ctx context.Context, info *basedirs.DBInfo) error {
+	if r.snapshot != nil {
+		return r.queryCountPairForActiveMounts(
+			ctx,
+			infoGroupHistorySnapshotQuery,
+			"mount_path",
+			&info.GroupMountCombos,
+			&info.GroupHistories,
+			r.snapshot.all(),
+		)
+	}
+
 	query := `
+		WITH active AS (SELECT DISTINCT mount_path FROM wrstat_mounts_active)
 		SELECT
-			countDistinct((mount_path, gid)) AS group_mount_combos,
+			countDistinct((h.mount_path, h.gid)) AS group_mount_combos,
 			count() AS group_histories
-		FROM wrstat_basedirs_history
+		FROM wrstat_basedirs_history h
+		ANY INNER JOIN active a
+		ON h.mount_path = a.mount_path
 	`
 
 	return r.queryCountPair(ctx, query, &info.GroupMountCombos, &info.GroupHistories)
 }
 
 func (r *chBaseDirsReader) fillInfoGroupSubDirs(ctx context.Context, info *basedirs.DBInfo, ageAll uint8) error {
+	if r.snapshot != nil {
+		return r.queryCountPairForSnapshot(
+			ctx,
+			infoGroupSubDirsSnapshotQuery,
+			"s.mount_path",
+			"s.snapshot_id",
+			&info.GroupSubDirCombos,
+			&info.GroupSubDirs,
+			r.snapshot.all(),
+			ageAll,
+		)
+	}
+
 	query := `
 		WITH active AS (SELECT mount_path, snapshot_id FROM wrstat_mounts_active)
 		SELECT
@@ -535,6 +887,19 @@ func (r *chBaseDirsReader) fillInfoGroupSubDirs(ctx context.Context, info *based
 }
 
 func (r *chBaseDirsReader) fillInfoUserSubDirs(ctx context.Context, info *basedirs.DBInfo, ageAll uint8) error {
+	if r.snapshot != nil {
+		return r.queryCountPairForSnapshot(
+			ctx,
+			infoUserSubDirsSnapshotQuery,
+			"s.mount_path",
+			"s.snapshot_id",
+			&info.UserSubDirCombos,
+			&info.UserSubDirs,
+			r.snapshot.all(),
+			ageAll,
+		)
+	}
+
 	query := `
 		WITH active AS (SELECT mount_path, snapshot_id FROM wrstat_mounts_active)
 		SELECT
@@ -641,6 +1006,43 @@ func scanUint64Pair(rows iterRows) (uint64, uint64, bool, error) {
 }
 
 func (r *chBaseDirsReader) Close() error {
-	// The provider owns the underlying ClickHouse connection.
+	if r == nil {
+		return nil
+	}
+
+	r.closed.Store(true)
+
 	return nil
+}
+
+func newClickHouseBaseDirsReaderWithSnapshot(
+	cfg Config,
+	conn ch.Conn,
+	snapshot *activeMountsSnapshot,
+) (basedirs.Reader, error) {
+	mountPoints, err := mountPointsFromConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	r := &chBaseDirsReader{
+		cfg:         cfg,
+		conn:        conn,
+		snapshot:    snapshot,
+		owners:      map[uint32]string{},
+		groupCache:  basedirs.NewGroupCache(),
+		userCache:   basedirs.NewUserCache(),
+		mountPoints: mountPoints,
+	}
+
+	if cfg.OwnersCSVPath != "" {
+		owners, err := basedirs.ParseOwners(cfg.OwnersCSVPath)
+		if err != nil {
+			return nil, fmt.Errorf("clickhouse: failed to parse owners csv: %w", err)
+		}
+
+		r.owners = owners
+	}
+
+	return r, nil
 }

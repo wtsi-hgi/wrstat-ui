@@ -53,6 +53,7 @@ import (
 const (
 	statsGZBasename   = "stats.gz"
 	lineReaderBufSize = 32 * 1024
+	maxImportParallel = 4
 
 	phasePartitionDropReset = "partition_drop_reset"
 	phaseFilesInsert        = "wrstat_files_insert"
@@ -296,6 +297,10 @@ func effectiveParallelism(parallelism int) int {
 		return 1
 	}
 
+	if parallelism > maxImportParallel {
+		return maxImportParallel
+	}
+
 	return parallelism
 }
 
@@ -387,6 +392,21 @@ func setImportPhaseRecorder(target any, metrics *datasetImportMetrics) {
 	recorder.SetImportPhaseRecorder(metrics.addPhase)
 }
 
+func setImportBatchSize(batchSize int, targets ...any) {
+	if batchSize <= 0 {
+		return
+	}
+
+	for _, target := range targets {
+		setter, ok := target.(batchSizeSetter)
+		if !ok {
+			continue
+		}
+
+		setter.SetBatchSize(batchSize)
+	}
+}
+
 func trackFileIngestOperation(
 	gen summary.OperationGenerator,
 	metrics *datasetImportMetrics,
@@ -396,18 +416,43 @@ func trackFileIngestOperation(
 	}
 }
 
+func closeImportBasedirsStore(store basedirs.Store, publish bool) error {
+	if store == nil {
+		return nil
+	}
+
+	if publish {
+		return store.Close()
+	}
+
+	aborter, ok := store.(interface{ Abort() error })
+	if ok {
+		return aborter.Abort()
+	}
+
+	return store.Close()
+}
+
 func composeImportCloser(
 	fileCloser io.Closer,
-	basedirsCloser func() error,
+	basedirsCloser func(bool) error,
 	dgutaCloser abortableCloser,
 ) func(bool) error {
 	return func(publish bool) error {
-		cerr := errors.Join(
-			closeImportFile(fileCloser),
-			closeImportBasedirs(basedirsCloser),
+		fileErr := closeImportFile(fileCloser)
+		shouldPublishBasedirs := publish && fileErr == nil
+
+		basedirsErr := closeImportBasedirs(basedirsCloser, shouldPublishBasedirs)
+		dgutaErr := closeImportDGUTA(
+			dgutaCloser,
+			shouldPublishBasedirs && basedirsErr == nil,
 		)
 
-		return errors.Join(cerr, closeImportDGUTA(dgutaCloser, publish && cerr == nil))
+		if shouldPublishBasedirs && (basedirsErr != nil || dgutaErr != nil) {
+			basedirsErr = errors.Join(basedirsErr, closeImportBasedirs(basedirsCloser, false))
+		}
+
+		return errors.Join(fileErr, basedirsErr, dgutaErr)
 	}
 }
 
@@ -419,12 +464,12 @@ func closeImportFile(fileCloser io.Closer) error {
 	return fileCloser.Close()
 }
 
-func closeImportBasedirs(basedirsCloser func() error) error {
+func closeImportBasedirs(basedirsCloser func(bool) error, publish bool) error {
 	if basedirsCloser == nil {
 		return nil
 	}
 
-	return basedirsCloser()
+	return basedirsCloser(publish)
 }
 
 func closeImportDGUTA(dgutaCloser abortableCloser, publish bool) error {
@@ -488,7 +533,8 @@ func runParallel(
 	opts ImportOptions,
 	printf PrintfFunc,
 ) []importResult {
-	sem := make(chan struct{}, opts.Parallelism)
+	parallelism := effectiveParallelism(opts.Parallelism)
+	sem := make(chan struct{}, parallelism)
 	results := make([]importResult, len(datasetDirs))
 
 	var wg sync.WaitGroup
@@ -638,12 +684,13 @@ func addAllSummarisers(
 
 	timedDW.SetMountPath(mp)
 	timedDW.SetUpdatedAt(updatedAt)
-	timedDW.SetBatchSize(opts.BatchSize)
 
 	fi, fiCloser, err := api.NewFileIngestOperation(mp, updatedAt)
 	if err != nil {
 		return nil, errors.Join(err, timedDW.Abort())
 	}
+
+	setImportBatchSize(opts.BatchSize, timedDW, fiCloser)
 
 	setImportPhaseRecorder(fiCloser, metrics)
 
@@ -668,9 +715,9 @@ func addBasedirsSummariser(
 	updatedAt time.Time,
 	opts ImportOptions,
 	metrics *datasetImportMetrics,
-) (func() error, error) {
+) (func(bool) error, error) {
 	if opts.QuotaPath == "" || opts.ConfigPath == "" {
-		return func() error { return nil }, nil
+		return func(bool) error { return nil }, nil
 	}
 
 	bs, err := api.NewBaseDirsStore()
@@ -678,12 +725,16 @@ func addBasedirsSummariser(
 		return nil, err
 	}
 
+	setImportBatchSize(opts.BatchSize, bs)
+
 	timedBS := &trackedBasedirsStore{Store: bs, metrics: metrics}
 
 	timedBS.SetMountPath(mp)
 	timedBS.SetUpdatedAt(updatedAt)
 
-	closer := func() error { return timedBS.Close() }
+	closer := func(publish bool) error {
+		return closeImportBasedirsStore(timedBS, publish)
+	}
 
 	if err := addBasedirsOp(ss, timedBS, updatedAt, opts); err != nil {
 		_ = timedBS.Close()
@@ -736,6 +787,10 @@ func parseBasedirsInputs(opts ImportOptions) (*basedirs.Quotas, basedirs.Config,
 	}
 
 	return quotas, config, mountpoints, nil
+}
+
+type batchSizeSetter interface {
+	SetBatchSize(batchSize int)
 }
 
 type abortableCloser interface {
@@ -916,6 +971,15 @@ func (o *trackedFileOperation) Add(info *summary.FileInfo) error {
 type trackedBasedirsStore struct {
 	basedirs.Store
 	metrics *datasetImportMetrics
+}
+
+func (s *trackedBasedirsStore) Abort() error {
+	aborter, ok := s.Store.(interface{ Abort() error })
+	if ok {
+		return aborter.Abort()
+	}
+
+	return s.Store.Close()
 }
 
 func (s *trackedBasedirsStore) Reset() error {

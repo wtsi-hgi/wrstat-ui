@@ -56,10 +56,12 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/clickhouse"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 	"github.com/wtsi-hgi/wrstat-ui/internal/boltperf"
+	"github.com/wtsi-hgi/wrstat-ui/internal/chperf"
 	internaldata "github.com/wtsi-hgi/wrstat-ui/internal/data"
 	"github.com/wtsi-hgi/wrstat-ui/internal/statsdata"
 	internaltest "github.com/wtsi-hgi/wrstat-ui/internal/test"
 	internaluser "github.com/wtsi-hgi/wrstat-ui/internal/user"
+	"github.com/wtsi-hgi/wrstat-ui/provider"
 )
 
 const app = "wrstat-ui_test"
@@ -113,7 +115,7 @@ func setupClickHouseCLIEnv(t *testing.T) clickHouseCLIEnv {
 
 	db := newTestDatabaseName(t)
 	dsn := fmt.Sprintf(
-		"clickhouse://default@127.0.0.1:%d/default?database=%s&dial_timeout=1s",
+		"clickhouse://default@127.0.0.1:%d/default?database=%s&dial_timeout=1s&compress=lz4",
 		tcpPort,
 		url.QueryEscape(db),
 	)
@@ -553,6 +555,8 @@ func TestClickHousePerfImport(t *testing.T) {
 
 		initialTS := activeMountTimestamp(t, chEnv, "/lustre/")
 		So(initialTS, ShouldEqual, fixture.updatedAt)
+		initialHistory := basedirsHistorySeries(t, chEnv, fixture)
+		So(initialHistory, ShouldNotBeEmpty)
 
 		failedUpdatedAt := fixture.updatedAt.Add(time.Hour)
 		corruptPerfFixtureStats(t, fixture, failedUpdatedAt)
@@ -564,6 +568,7 @@ func TestClickHousePerfImport(t *testing.T) {
 		finalTS := activeMountTimestamp(t, chEnv, "/lustre/")
 		So(finalTS, ShouldEqual, initialTS)
 		So(finalTS, ShouldNotEqual, failedUpdatedAt)
+		So(basedirsHistorySeries(t, chEnv, fixture), ShouldResemble, initialHistory)
 	})
 }
 
@@ -625,6 +630,8 @@ func newClickHousePerfFixture(t *testing.T) clickHousePerfFixture {
 		queryMounts:     []string{"/lustre/", "/"},
 		queryReportUID:  "101",
 		queryReportGIDs: "1,3",
+		historyGID:      gid,
+		historyPath:     "/lustre/scratch125/humgen/projects/D",
 	}
 }
 
@@ -815,6 +822,30 @@ func activeMountTimestamp(t *testing.T, chEnv clickHouseCLIEnv, mountPath string
 	return ts
 }
 
+func basedirsHistorySeries(t *testing.T, chEnv clickHouseCLIEnv, fixture clickHousePerfFixture) []basedirs.History {
+	t.Helper()
+
+	p, err := clickhouse.OpenProvider(clickhouse.Config{
+		DSN:           chEnv.DSN,
+		Database:      chEnv.Database,
+		OwnersCSVPath: fixture.ownersPath,
+		MountPoints:   fixture.queryMounts,
+		QueryTimeout:  5 * time.Second,
+	})
+	So(err, ShouldBeNil)
+
+	defer func() { So(p.Close(), ShouldBeNil) }()
+
+	p.BaseDirs().SetMountPoints(fixture.queryMounts)
+
+	history, err := p.BaseDirs().History(fixture.historyGID, fixture.historyPath)
+	So(err, ShouldBeNil)
+
+	fixTZs(history)
+
+	return history
+}
+
 func TestClickHousePerfQuery(t *testing.T) {
 	Convey("clickhouse-perf query reports timed operations and metrics against imported data", t, func() {
 		chEnv := setupClickHouseCLIEnv(t)
@@ -997,6 +1028,64 @@ func clickHousePerfParentDir(dir string) string {
 	return trimmed[:pos+1]
 }
 
+type chPerfOpenProviderTestStub struct{}
+
+func (chPerfOpenProviderTestStub) Tree() *db.Tree { return nil }
+
+func (chPerfOpenProviderTestStub) BaseDirs() basedirs.Reader { return nil }
+
+func (chPerfOpenProviderTestStub) OnUpdate(func()) {}
+
+func (chPerfOpenProviderTestStub) OnError(func(error)) {}
+
+func (chPerfOpenProviderTestStub) Close() error { return nil }
+
+func TestClickHousePerfCommand(t *testing.T) {
+	Convey("clickhouse-perf import help shows the default batch size", t, func() {
+		stdout, stderr, _, err := runWRStat("clickhouse-perf", "import", "--help")
+		So(err, ShouldBeNil)
+		So(stderr, ShouldBeBlank)
+		So(stdout, ShouldContainSubstring, "ClickHouse insert batch size")
+		So(stdout, ShouldContainSubstring, "default 10000")
+	})
+
+	Convey("clickhouse perf query opens its provider with polling disabled", t, func() {
+		cfg := clickhouse.Config{
+			DSN:           "clickhouse://127.0.0.1:9000/?database=wrstat",
+			Database:      "wrstat",
+			OwnersCSVPath: "/tmp/owners.csv",
+			MountPoints:   []string{"/mnt/test/"},
+			PollInterval:  time.Minute,
+			QueryTimeout:  30 * time.Second,
+		}
+
+		var got clickhouse.Config
+
+		api := newCHPerfClickHouseAPIWithOpenProvider(
+			cfg,
+			func(cfg clickhouse.Config) (provider.Provider, error) {
+				got = cfg
+
+				return chPerfOpenProviderTestStub{}, nil
+			},
+		)
+
+		p, err := api.OpenProvider()
+		So(err, ShouldBeNil)
+		So(p, ShouldNotBeNil)
+		So(got.PollInterval, ShouldEqual, 0)
+		So(got.DSN, ShouldEqual, cfg.DSN)
+		So(got.Database, ShouldEqual, cfg.Database)
+		So(got.QueryTimeout, ShouldEqual, cfg.QueryTimeout)
+	})
+}
+
+//go:linkname newCHPerfClickHouseAPIWithOpenProvider github.com/wtsi-hgi/wrstat-ui/internal/chperf.newClickHouseAPIWithOpenProvider
+func newCHPerfClickHouseAPIWithOpenProvider(
+	cfg clickhouse.Config,
+	openProvider func(clickhouse.Config) (provider.Provider, error),
+) chperf.ClickHouseAPI
+
 type summariseOrderedCloser struct {
 	name  string
 	calls *[]string
@@ -1068,11 +1157,11 @@ func TestComposeSummariseCloser(t *testing.T) {
 
 		closer := composeSummariseCloser(
 			summariseOrderedCloser{name: "files", calls: &calls},
-			func() error {
-				calls = append(calls, "basedirs")
-
-				return nil
-			},
+			trackedSummariseBasedirsCloser(summariseAbortTrackingCloser{
+				closeName: "basedirs-close",
+				abortName: "basedirs-abort",
+				calls:     &calls,
+			}),
 			summariseAbortTrackingCloser{
 				closeName: "dguta-close",
 				abortName: "dguta-abort",
@@ -1081,7 +1170,7 @@ func TestComposeSummariseCloser(t *testing.T) {
 		)
 
 		So(closer(true), ShouldBeNil)
-		So(calls, ShouldResemble, []string{"files", "basedirs", "dguta-close"})
+		So(calls, ShouldResemble, []string{"files", "basedirs-close", "dguta-close"})
 	})
 
 	Convey("composeSummariseCloser aborts dguta publishing when not publishing", t, func() {
@@ -1089,11 +1178,11 @@ func TestComposeSummariseCloser(t *testing.T) {
 
 		closer := composeSummariseCloser(
 			summariseOrderedCloser{name: "files", calls: &calls},
-			func() error {
-				calls = append(calls, "basedirs")
-
-				return nil
-			},
+			trackedSummariseBasedirsCloser(summariseAbortTrackingCloser{
+				closeName: "basedirs-close",
+				abortName: "basedirs-abort",
+				calls:     &calls,
+			}),
 			summariseAbortTrackingCloser{
 				closeName: "dguta-close",
 				abortName: "dguta-abort",
@@ -1102,7 +1191,7 @@ func TestComposeSummariseCloser(t *testing.T) {
 		)
 
 		So(closer(false), ShouldBeNil)
-		So(calls, ShouldResemble, []string{"files", "basedirs", "dguta-abort"})
+		So(calls, ShouldResemble, []string{"files", "basedirs-abort", "dguta-abort"})
 	})
 
 	Convey("composeSummariseCloser aborts dguta publishing when file close fails", t, func() {
@@ -1110,11 +1199,11 @@ func TestComposeSummariseCloser(t *testing.T) {
 
 		closer := composeSummariseCloser(
 			summariseOrderedCloser{name: "files", calls: &calls, err: errSummariseTestFiles},
-			func() error {
-				calls = append(calls, "basedirs")
-
-				return nil
-			},
+			trackedSummariseBasedirsCloser(summariseAbortTrackingCloser{
+				closeName: "basedirs-close",
+				abortName: "basedirs-abort",
+				calls:     &calls,
+			}),
 			summariseAbortTrackingCloser{
 				closeName: "dguta-close",
 				abortName: "dguta-abort",
@@ -1126,7 +1215,7 @@ func TestComposeSummariseCloser(t *testing.T) {
 
 		So(err, ShouldNotBeNil)
 		So(err.Error(), ShouldContainSubstring, errSummariseTestFiles.Error())
-		So(calls, ShouldResemble, []string{"files", "basedirs", "dguta-abort"})
+		So(calls, ShouldResemble, []string{"files", "basedirs-abort", "dguta-abort"})
 	})
 
 	Convey("composeSummariseCloser aborts dguta publishing when basedirs close fails", t, func() {
@@ -1134,11 +1223,12 @@ func TestComposeSummariseCloser(t *testing.T) {
 
 		closer := composeSummariseCloser(
 			summariseOrderedCloser{name: "files", calls: &calls},
-			func() error {
-				calls = append(calls, "basedirs")
-
-				return errSummariseTestBasedirs
-			},
+			trackedSummariseBasedirsCloser(summariseAbortTrackingCloser{
+				closeName: "basedirs-close",
+				abortName: "basedirs-abort",
+				calls:     &calls,
+				closeErr:  errSummariseTestBasedirs,
+			}),
 			summariseAbortTrackingCloser{
 				closeName: "dguta-close",
 				abortName: "dguta-abort",
@@ -1150,13 +1240,38 @@ func TestComposeSummariseCloser(t *testing.T) {
 
 		So(err, ShouldNotBeNil)
 		So(err.Error(), ShouldContainSubstring, errSummariseTestBasedirs.Error())
-		So(calls, ShouldResemble, []string{"files", "basedirs", "dguta-abort"})
+		So(calls, ShouldResemble, []string{"files", "basedirs-close", "dguta-abort", "basedirs-abort"})
+	})
+
+	Convey("composeSummariseCloser aborts basedirs when dguta publish fails after basedirs flush", t, func() {
+		calls := make([]string, 0, 4)
+
+		closer := composeSummariseCloser(
+			summariseOrderedCloser{name: "files", calls: &calls},
+			trackedSummariseBasedirsCloser(summariseAbortTrackingCloser{
+				closeName: "basedirs-close",
+				abortName: "basedirs-abort",
+				calls:     &calls,
+			}),
+			summariseAbortTrackingCloser{
+				closeName: "dguta-close",
+				abortName: "dguta-abort",
+				calls:     &calls,
+				closeErr:  errSummariseTestDGUTA,
+			},
+		)
+
+		err := closer(true)
+
+		So(err, ShouldNotBeNil)
+		So(err.Error(), ShouldContainSubstring, errSummariseTestDGUTA.Error())
+		So(calls, ShouldResemble, []string{"files", "basedirs-close", "dguta-close", "basedirs-abort"})
 	})
 
 	Convey("composeSummariseCloser joins cleanup errors", t, func() {
 		err := composeSummariseCloser(
 			summariseOrderedCloser{err: errSummariseTestFiles},
-			func() error { return errSummariseTestBasedirs },
+			func(bool) error { return errSummariseTestBasedirs },
 			summariseAbortTrackingCloser{abortErr: errSummariseTestDGUTA},
 		)(false)
 
@@ -1170,9 +1285,50 @@ func TestComposeSummariseCloser(t *testing.T) {
 //go:linkname composeSummariseCloser github.com/wtsi-hgi/wrstat-ui/cmd.composeSummariseCloser
 func composeSummariseCloser(
 	fileCloser io.Closer,
-	basedirsCloser func() error,
+	basedirsCloser func(bool) error,
 	dgutaCloser io.Closer,
 ) func(bool) error
+
+func trackedSummariseBasedirsCloser(closer summariseAbortTrackingCloser) func(bool) error {
+	return func(publish bool) error {
+		if publish {
+			return closer.Close()
+		}
+
+		return closer.Abort()
+	}
+}
+
+type summariseBatchSizeRecorder struct {
+	batchSize int
+}
+
+func (r *summariseBatchSizeRecorder) SetBatchSize(batchSize int) {
+	r.batchSize = batchSize
+}
+
+func TestSetClickHouseBatchSize(t *testing.T) {
+	Convey("summarise propagates ClickHouse batch size to supported writers", t, func() {
+		fileWriter := &summariseBatchSizeRecorder{}
+		basedirsStore := &summariseBatchSizeRecorder{}
+
+		setClickHouseBatchSize(100_000, fileWriter, struct{}{}, nil, basedirsStore)
+
+		So(fileWriter.batchSize, ShouldEqual, 100_000)
+		So(basedirsStore.batchSize, ShouldEqual, 100_000)
+	})
+
+	Convey("summarise ignores non-positive batch sizes", t, func() {
+		recorder := &summariseBatchSizeRecorder{}
+
+		setClickHouseBatchSize(0, recorder)
+
+		So(recorder.batchSize, ShouldEqual, 0)
+	})
+}
+
+//go:linkname setClickHouseBatchSize github.com/wtsi-hgi/wrstat-ui/cmd.setClickHouseBatchSize
+func setClickHouseBatchSize(batchSize int, targets ...any)
 
 type summariseAbortTrackingCloser struct {
 	closeName string
@@ -1211,6 +1367,30 @@ type clickHousePerfFixture struct {
 	queryMounts     []string
 	queryReportUID  string
 	queryReportGIDs string
+	historyGID      uint32
+	historyPath     string
+}
+
+func TestServerCommand(t *testing.T) {
+	Convey("server help describes ClickHouse-backed behaviour", t, func() {
+		stdout, stderr, _, err := runWRStat("server", "--help")
+		So(err, ShouldBeNil)
+		So(stderr, ShouldBeBlank)
+		So(stdout, ShouldContainSubstring, "ClickHouse")
+		So(stdout, ShouldContainSubstring, "poll ClickHouse for active mount updates")
+		So(stdout, ShouldNotContainSubstring, "wrstat multi -f")
+		So(stdout, ShouldNotContainSubstring, "basedirs.db")
+		So(stdout, ShouldNotContainSubstring, "dguta.dbs")
+	})
+
+	Convey("server no longer requires a legacy output directory argument", t, func() {
+		stdout, stderr, _, err := runWRStat("server")
+		So(err, ShouldNotBeNil)
+		So(stdout, ShouldBeBlank)
+		So(stderr, ShouldContainSubstring, "you must supply --cert")
+		So(stderr, ShouldNotContainSubstring, "wrstat multi -f")
+		So(stderr, ShouldNotContainSubstring, "output directory")
+	})
 }
 
 func TestMain(m *testing.M) {
@@ -1739,11 +1919,6 @@ func findClickHouseBinary(t *testing.T) string {
 	bin, err := exec.LookPath("clickhouse")
 	if err == nil {
 		return bin
-	}
-
-	fallback := "/software/hgi/installs/clickhouse/clickhouse"
-	if _, statErr := os.Stat(fallback); statErr == nil {
-		return fallback
 	}
 
 	t.Skip("clickhouse binary not found")

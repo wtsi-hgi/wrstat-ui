@@ -17,6 +17,84 @@ make
 Generally, use the `-h` option on wrstat and its sub commands for detailed
 help.
 
+## ClickHouse development and tests
+
+The ClickHouse-backed commands (`summarise`, `server`, `dbinfo`, and
+`clickhouse-perf`) read their connection settings from flags or from these
+environment variables:
+
+- `WRSTAT_CLICKHOUSE_DSN`
+- `WRSTAT_CLICKHOUSE_DATABASE`
+- `WRSTAT_QUERY_TIMEOUT`
+- `WRSTAT_POLL_INTERVAL`
+
+At runtime, the DSN and database must match. For example:
+
+```bash
+export WRSTAT_CLICKHOUSE_DSN='clickhouse://default@127.0.0.1:9000/default?database=wrstat_dev&dial_timeout=1s&compress=lz4'
+export WRSTAT_CLICKHOUSE_DATABASE='wrstat_dev'
+```
+
+### How the test runners find ClickHouse
+
+The Go tests start ClickHouse automatically when `WRSTAT_CLICKHOUSE_DSN` is not
+already set.
+
+The test runners look up `clickhouse` using `PATH` only.
+
+For local development, install the standalone `clickhouse` binary somewhere on
+your `PATH`.
+The simplest route on Linux is to download the official ClickHouse static
+package, extract it, and copy the `clickhouse` binary into `~/bin/` (or any
+other directory already on `PATH`).
+
+If the `clickhouse` binary is not on `PATH`, the ClickHouse-backed tests are skipped.
+
+When the tests start ClickHouse themselves they:
+
+- create an isolated temporary data directory
+- bind only to `127.0.0.1`
+- choose free TCP and HTTP ports automatically
+- wait for `SELECT 1` before running
+- create a fresh `wrstat_ui_test_*` database per test run
+
+### Localhost-only safety rules
+
+Any pre-started server supplied through `WRSTAT_CLICKHOUSE_DSN` must resolve to
+localhost. The tests refuse non-loopback hosts, so remote DSNs are rejected.
+
+This safety rule exists because the ClickHouse tests create and mutate
+temporary test databases aggressively.
+
+### Using an already-running ClickHouse server or a custom port
+
+If you already have a local ClickHouse server running, or want to run one on a
+custom port, export `WRSTAT_CLICKHOUSE_DSN` before running tests. The tests will
+reuse that server instead of starting their own process.
+
+Example using a server on port `9001`:
+
+```bash
+export WRSTAT_CLICKHOUSE_DSN='clickhouse://default@127.0.0.1:9001/default?database=wrstat_dev&dial_timeout=1s&compress=lz4'
+export WRSTAT_CLICKHOUSE_DATABASE='wrstat_dev'
+go test ./clickhouse ./cmd ./internal/chperf
+```
+
+The CLI tests rewrite the DSN's `database=` query parameter to a unique
+`wrstat_ui_test_*` database for each run. Supplying
+`WRSTAT_CLICKHOUSE_DATABASE` alongside the DSN is still recommended because the
+ClickHouse-backed commands use it directly.
+
+### Focused ClickHouse test runs
+
+Useful focused commands during development include:
+
+```bash
+go test ./clickhouse -run TestClickHouseDatabase
+go test ./internal/chperf -run TestAddAllSummarisers
+go test . -run 'TestClickHousePerfCommand|TestSetClickHouseBatchSize'
+```
+
 ## Analytics
 
 There is a seperate analytics server (wrstat-ui analytics) that can be used to

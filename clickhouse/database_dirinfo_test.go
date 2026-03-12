@@ -194,3 +194,44 @@ func TestClickHouseDatabaseDirInfoAncestor(t *testing.T) {
 		})
 	})
 }
+
+func TestClickHouseDatabaseDirInfoScopeResolution(t *testing.T) {
+	Convey("DirInfo keeps configured parent mounts in single-mount scope even without an active snapshot", t, func() {
+		const (
+			parentMount = "/mnt/parent/"
+			childMount  = "/mnt/parent/child/"
+		)
+
+		updatedAt := time.Date(2026, 1, 11, 9, 0, 0, 0, time.UTC)
+		dbch := newClickHouseDatabaseWithSnapshot(
+			Config{MountPoints: []string{"/", parentMount, childMount}},
+			nil,
+			newActiveMountsSnapshot([]mountsActiveRow{{
+				mountPath:  childMount,
+				snapshotID: snapshotID(childMount, updatedAt).String(),
+				updatedAt:  updatedAt,
+			}}),
+		)
+
+		mountPath, singleMount, err := dbch.resolveMountScope(parentMount)
+		So(err, ShouldBeNil)
+		So(singleMount, ShouldBeTrue)
+		So(mountPath, ShouldEqual, parentMount)
+
+		_, err = dbch.DirInfo(parentMount, &db.Filter{Age: db.DGUTAgeAll})
+		So(err, ShouldEqual, db.ErrDirNotFound)
+	})
+
+	Convey("DirInfo keeps ancestor scope for directories above nested mountpoints", t, func() {
+		dbch := newClickHouseDatabaseWithSnapshot(
+			Config{MountPoints: []string{"/", "/lustre/scratchA/", "/lustre/scratchB/"}},
+			nil,
+			newActiveMountsSnapshot(nil),
+		)
+
+		mountPath, singleMount, err := dbch.resolveMountScope("/lustre/")
+		So(err, ShouldBeNil)
+		So(singleMount, ShouldBeFalse)
+		So(mountPath, ShouldBeBlank)
+	})
+}

@@ -49,7 +49,7 @@ import (
 )
 
 const (
-	summariseDBBatchSize   = 10000
+	summariseDBBatchSize   = 100_000
 	summariseDirPerm       = 0o755
 	maxMountPathCandidates = 4
 )
@@ -213,7 +213,7 @@ func wireClickHouseOperations( //nolint:funlen
 
 	dw.SetMountPath(mountPath)
 	dw.SetUpdatedAt(modtime)
-	dw.SetBatchSize(summariseDBBatchSize)
+	setClickHouseBatchSize(summariseDBBatchSize, dw, fiCloser)
 
 	bs, err := setupBasedirsStore(
 		s, cfg, mountPath, mountpoints, modtime,
@@ -226,39 +226,66 @@ func wireClickHouseOperations( //nolint:funlen
 		)
 	}
 
+	setClickHouseBatchSize(summariseDBBatchSize, bs)
+
 	s.AddDirectoryOperation(dirguta.NewDirGroupUserTypeAge(dw))
 	s.AddGlobalOperation(fi)
 
-	var basedirsCloser func() error
+	var basedirsCloser func(bool) error
 
 	if bs != nil {
-		basedirsCloser = bs.Close
+		basedirsCloser = func(publish bool) error {
+			return closeSummariseBasedirsStore(bs, publish)
+		}
 	}
 
 	return composeSummariseCloser(fiCloser, basedirsCloser, dw), nil
 }
 
-func composeSummariseCloser(
-	fileCloser io.Closer,
-	basedirsCloser func() error,
-	dgutaCloser io.Closer,
-) func(bool) error {
-	return func(publish bool) error {
-		cerr := errors.Join(
-			closeSummariseFile(fileCloser),
-			closeSummariseBasedirs(basedirsCloser),
-		)
+func setClickHouseBatchSize(batchSize int, targets ...any) {
+	if batchSize <= 0 {
+		return
+	}
 
-		return errors.Join(cerr, closeSummariseDGUTAWriter(dgutaCloser, publish && cerr == nil))
+	for _, target := range targets {
+		setter, ok := target.(batchSizeSetter)
+		if !ok {
+			continue
+		}
+
+		setter.SetBatchSize(batchSize)
 	}
 }
 
-func closeSummariseBasedirs(basedirsCloser func() error) error {
+func composeSummariseCloser(
+	fileCloser io.Closer,
+	basedirsCloser func(bool) error,
+	dgutaCloser io.Closer,
+) func(bool) error {
+	return func(publish bool) error {
+		fileErr := closeSummariseFile(fileCloser)
+		shouldPublishBasedirs := publish && fileErr == nil
+
+		basedirsErr := closeSummariseBasedirs(basedirsCloser, shouldPublishBasedirs)
+		dgutaErr := closeSummariseDGUTAWriter(
+			dgutaCloser,
+			shouldPublishBasedirs && basedirsErr == nil,
+		)
+
+		if shouldPublishBasedirs && (basedirsErr != nil || dgutaErr != nil) {
+			basedirsErr = errors.Join(basedirsErr, closeSummariseBasedirs(basedirsCloser, false))
+		}
+
+		return errors.Join(fileErr, basedirsErr, dgutaErr)
+	}
+}
+
+func closeSummariseBasedirs(basedirsCloser func(bool) error, publish bool) error {
 	if basedirsCloser == nil {
 		return nil
 	}
 
-	return basedirsCloser()
+	return basedirsCloser(publish)
 }
 
 func closeSummariseFile(fileCloser io.Closer) error {
@@ -364,6 +391,27 @@ func configureBaseDirsCreator(
 	bd.SetModTime(modtime)
 
 	return bd, nil
+}
+
+func closeSummariseBasedirsStore(store basedirs.Store, publish bool) error {
+	if store == nil {
+		return nil
+	}
+
+	if publish {
+		return store.Close()
+	}
+
+	aborter, ok := store.(interface{ Abort() error })
+	if ok {
+		return aborter.Abort()
+	}
+
+	return store.Close()
+}
+
+type batchSizeSetter interface {
+	SetBatchSize(batchSize int)
 }
 
 func run(args []string) (err error) {

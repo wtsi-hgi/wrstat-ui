@@ -45,6 +45,8 @@ var (
 	errQueryTestRun     = errors.New("query failed")
 )
 
+const explainPruningOutput = "mount_path partition pruning\nparent_dir key condition"
+
 func TestDecodeMountPaths(t *testing.T) {
 	Convey("DecodeMountPaths converts fullwidth solidus and adds trailing slash", t, func() {
 		mt := map[string]time.Time{
@@ -131,25 +133,35 @@ func TestPickLargestChild(t *testing.T) {
 }
 
 type fakeQueryInspector struct {
-	measure func(ctx context.Context, run func(ctx context.Context) error) (*QueryMetrics, error)
-	closeFn func() error
+	explainListDir  func(ctx context.Context, mountPath, dir string, limit, offset int64) (string, error)
+	explainStatPath func(ctx context.Context, mountPath, path string) (string, error)
+	measure         func(ctx context.Context, run func(ctx context.Context) error) (*QueryMetrics, error)
+	closeFn         func() error
 }
 
 func (f fakeQueryInspector) ExplainListDir(
-	context.Context,
-	string,
-	string,
-	int64,
-	int64,
+	ctx context.Context,
+	mountPath string,
+	dir string,
+	limit int64,
+	offset int64,
 ) (string, error) {
+	if f.explainListDir != nil {
+		return f.explainListDir(ctx, mountPath, dir, limit, offset)
+	}
+
 	return "", nil
 }
 
 func (f fakeQueryInspector) ExplainStatPath(
-	context.Context,
-	string,
-	string,
+	ctx context.Context,
+	mountPath string,
+	path string,
 ) (string, error) {
+	if f.explainStatPath != nil {
+		return f.explainStatPath(ctx, mountPath, path)
+	}
+
 	return "", nil
 }
 
@@ -239,7 +251,7 @@ func TestRunOp(t *testing.T) {
 
 		So(err, ShouldBeNil)
 		So(report.Operations, ShouldHaveLength, 1)
-		So(report.Operations[0].DurationsMS, ShouldHaveLength, 2)
+		So(report.Operations[0].DurationsMS, ShouldResemble, []float64{12, 12})
 		So(out.String(), ShouldContainSubstring, "metrics")
 	})
 
@@ -319,6 +331,52 @@ func TestBuildQueryContext(t *testing.T) {
 		So(providerClosed, ShouldBeTrue)
 		So(clientClosed, ShouldBeTrue)
 		So(inspectorClosed, ShouldBeTrue)
+	})
+}
+
+func TestVerifyPlans(t *testing.T) {
+	Convey("verifyPlans fails when ExplainStatPath lacks pruning", t, func() {
+		qctx := queryContext{
+			provider: fakeMountTimestampsProvider{bd: fakeMountTimestampsReader{mountTimestamps: map[string]time.Time{
+				"／mnt／test": time.Now(),
+			}}},
+			client: &fakeQueryClient{rows: []QueryRow{{Path: "/mnt/test/project/file.txt"}}},
+			inspector: fakeQueryInspector{
+				explainListDir: func(context.Context, string, string, int64, int64) (string, error) {
+					return explainPruningOutput, nil
+				},
+				explainStatPath: func(context.Context, string, string) (string, error) {
+					return "mount_path partition pruning", nil
+				},
+			},
+			dir: "/mnt/test/project/",
+		}
+
+		err := verifyPlans(qctx, func(string, ...any) {})
+
+		So(err, ShouldNotBeNil)
+		So(err.Error(), ShouldContainSubstring, ErrExplainMissingIndex.Error())
+		So(err.Error(), ShouldContainSubstring, "mount_path partition pruning")
+	})
+
+	Convey("verifyPlans accepts ExplainStatPath when pruning is present", t, func() {
+		qctx := queryContext{
+			provider: fakeMountTimestampsProvider{bd: fakeMountTimestampsReader{mountTimestamps: map[string]time.Time{
+				"／mnt／test": time.Now(),
+			}}},
+			client: &fakeQueryClient{rows: []QueryRow{{Path: "/mnt/test/project/file.txt"}}},
+			inspector: fakeQueryInspector{
+				explainListDir: func(context.Context, string, string, int64, int64) (string, error) {
+					return explainPruningOutput, nil
+				},
+				explainStatPath: func(context.Context, string, string) (string, error) {
+					return explainPruningOutput, nil
+				},
+			},
+			dir: "/mnt/test/project/",
+		}
+
+		So(verifyPlans(qctx, func(string, ...any) {}), ShouldBeNil)
 	})
 }
 

@@ -72,13 +72,13 @@ var (
 // serverCmd represents the server command.
 var serverCmd = &cobra.Command{
 	Use:   "server",
-	Short: "Start the web server",
+	Short: "Start the ClickHouse-backed web server",
 	Long: `Start the web server.
 
-Starting the web server brings up a web interface and REST API that will use the
-latest *.dguta.dbs directory and basedirs.db inside the given 'wrstat multi'
-output directory to answer questions about where data is on the disks. (Provide
-your 'wrstat multi -f' argument as an unamed argument to this command.)
+Starting the web server brings up a web interface and REST API backed by the
+active snapshots stored in ClickHouse. Configure ClickHouse with
+--clickhouse-dsn/--clickhouse-database or the WRSTAT_CLICKHOUSE_* env vars, and
+supply --owners so group IDs can be mapped to owners.
 
 Your --bind address should include the port, and for it to work with your
 --cert, you probably need to specify it as fqdn:port.
@@ -93,7 +93,7 @@ The server will log all messages (of any severity) to syslog at the INFO level,
 except for non-graceful stops of the server, which are sent at the CRIT level or
 include 'panic' in the message. The messages are tagged 'wrstat-server', and you
 might want to filter away 'STATUS=200' to find problems.
-If --logfile is supplied, logs to that file instaed of syslog.
+If --logfile is supplied, logs to that file instead of syslog.
 
 If --areas is supplied, the group,area csv file pointed to will be used to add
 "areas" to the server, allowing clients to specify an area to filter on all
@@ -111,16 +111,16 @@ The server must be running for 'wrstat-ui where' calls to succeed.
 This command will block forever in the foreground; you can background it with
 ctrl-z; bg. Or better yet, use the daemonize program to daemonize this.
 
-It will monitor the given directory and attempt to reload the databases when a
-new subdirectory is added by another run of 'wrstat summarise' with the same
-base output directory. After reloading, will delete the previous run's database
-files. It will use the mtime of the file as the data creation time in reports.
+It will poll ClickHouse for active mount updates and reload its readers when
+new snapshots become active. Use --poll-interval or WRSTAT_POLL_INTERVAL to
+control how often refresh checks run. Data freshness in reports comes from the
+snapshot updated_at timestamp stored in ClickHouse.
 `,
 	Run: func(cmd *cobra.Command, args []string) {
 		loadClickhouseDotEnv()
 
-		if len(args) != 1 {
-			die("you must supply the path to your 'wrstat multi -f' output directory")
+		if len(args) > 0 {
+			warn("server: ignoring legacy output directory argument")
 		}
 
 		if serverBind == "" {

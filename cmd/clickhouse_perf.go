@@ -39,7 +39,7 @@ import (
 
 const (
 	chPerfDefaultRepeat    = 20
-	chPerfDefaultBatchSize = 10000
+	chPerfDefaultBatchSize = 10_000
 	chPerfDefaultParallel  = 1
 )
 
@@ -136,7 +136,7 @@ func addCHPerfImportFlags() {
 	f.IntVar(&chPerf.batchSize, "batchSize", chPerfDefaultBatchSize,
 		"ClickHouse insert batch size")
 	f.IntVar(&chPerf.parallelism, "parallelism", chPerfDefaultParallel,
-		"number of concurrent dataset ingests")
+		"number of concurrent dataset ingests (capped at 4)")
 	f.StringVar(&chPerf.quota, "quota", "", "quota csv for basedirs")
 	f.StringVar(&chPerf.config, "config", "", "basedirs config file")
 }

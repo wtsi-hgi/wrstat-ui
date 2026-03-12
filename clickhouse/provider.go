@@ -41,11 +41,13 @@ import (
 
 const mountsActiveRowsInitialCap = 16
 
-const mountsActiveRowsQuery = "SELECT mount_path, updated_at FROM wrstat_mounts_active ORDER BY mount_path"
+const mountsActiveRowsQuery = "SELECT mount_path, toString(snapshot_id), updated_at " +
+	"FROM wrstat_mounts_active ORDER BY mount_path"
 
 type mountsActiveRow struct {
-	mountPath string
-	updatedAt time.Time
+	mountPath  string
+	snapshotID string
+	updatedAt  time.Time
 }
 
 type chProvider struct {
@@ -57,7 +59,8 @@ type chProvider struct {
 	tree *db.Tree
 	bd   basedirs.Reader
 
-	buildReaders func() (db.Database, *db.Tree, basedirs.Reader)
+	buildReaders    func(context.Context, *activeMountsSnapshot) (db.Database, *db.Tree, basedirs.Reader, error)
+	captureSnapshot func(context.Context) (*activeMountsSnapshot, string, error)
 
 	mu       sync.RWMutex
 	onUpdate func()
@@ -66,7 +69,9 @@ type chProvider struct {
 	updateCh chan struct{}
 	errCh    chan struct{}
 
+	currentFingerprint string
 	pendingFingerprint string
+	hasPendingUpdate   bool
 	pendingErrs        []error
 	pendingErrHead     int
 
@@ -83,10 +88,16 @@ func (p *chProvider) Tree() *db.Tree {
 		return tree
 	}
 
+	var err error
+
 	p.mu.Lock()
-	p.ensureReadersLocked()
+	err = p.ensureReadersLocked()
 	tree = p.tree
 	p.mu.Unlock()
+
+	if err != nil {
+		p.queueError(err)
+	}
 
 	return tree
 }
@@ -100,33 +111,77 @@ func (p *chProvider) BaseDirs() basedirs.Reader {
 		return bd
 	}
 
+	var err error
+
 	p.mu.Lock()
-	p.ensureReadersLocked()
+	err = p.ensureReadersLocked()
 	bd = p.bd
 	p.mu.Unlock()
+
+	if err != nil {
+		p.queueError(err)
+	}
 
 	return bd
 }
 
-func (p *chProvider) ensureReadersLocked() {
+func (p *chProvider) ensureReadersLocked() error {
 	if p.tree != nil && p.bd != nil {
-		return
+		return nil
 	}
 
-	if p.buildReaders == nil {
-		p.buildReaders = p.defaultBuildReaders
+	build := p.buildReaders
+	if build == nil {
+		build = p.defaultBuildReaders
 	}
 
-	dbImpl, tree, bd := p.buildReaders()
+	capture := p.captureSnapshot
+	if capture == nil {
+		capture = p.captureActiveMountsState
+	}
+
+	snapshot, fingerprint, err := capture(context.Background())
+	if err != nil {
+		return err
+	}
+
+	dbImpl, tree, bd, err := build(context.Background(), snapshot)
+	if err != nil {
+		return err
+	}
+
 	p.db = dbImpl
 	p.tree = tree
 	p.bd = bd
+	p.currentFingerprint = fingerprint
+
+	return nil
 }
 
-func (p *chProvider) defaultBuildReaders() (db.Database, *db.Tree, basedirs.Reader) {
-	dbImpl := newClickHouseDatabase(p.cfg, p.conn)
+func (p *chProvider) defaultBuildReaders(
+	_ context.Context,
+	snapshot *activeMountsSnapshot,
+) (db.Database, *db.Tree, basedirs.Reader, error) {
+	dbImpl := newClickHouseDatabaseWithSnapshot(p.cfg, p.conn, snapshot)
 
-	return dbImpl, db.NewTree(dbImpl), newClickHouseBaseDirsReader(p.cfg, p.conn)
+	bd, err := newClickHouseBaseDirsReaderWithSnapshot(p.cfg, p.conn, snapshot)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	return dbImpl, db.NewTree(dbImpl), bd, nil
+}
+
+func (p *chProvider) captureActiveMountsState(parent context.Context) (*activeMountsSnapshot, string, error) {
+	ctx, cancel := context.WithTimeout(parent, queryTimeout(p.cfg))
+	defer cancel()
+
+	rows, err := p.mountsActiveRows(ctx)
+	if err != nil {
+		return nil, "", fmt.Errorf("clickhouse: failed to capture mounts_active snapshot: %w", err)
+	}
+
+	return newActiveMountsSnapshot(rows), fingerprintForMountsActive(rows), nil
 }
 
 func (p *chProvider) OnUpdate(cb func()) {
@@ -214,10 +269,7 @@ func (p *chProvider) pollLoop(ctx context.Context) {
 	ticker := time.NewTicker(p.cfg.PollInterval)
 	defer ticker.Stop()
 
-	last, err := p.mountsActiveFingerprint(ctx)
-	if err != nil {
-		p.queueError(err)
-	}
+	p.pollOnce(ctx)
 
 	for {
 		select {
@@ -226,20 +278,27 @@ func (p *chProvider) pollLoop(ctx context.Context) {
 		case <-ticker.C:
 		}
 
-		fp, err := p.mountsActiveFingerprint(ctx)
-		if err != nil {
-			p.queueError(err)
-
-			continue
-		}
-
-		if fp == last {
-			continue
-		}
-
-		last = fp
-		p.queueUpdate(fp)
+		p.pollOnce(ctx)
 	}
+}
+
+func (p *chProvider) pollOnce(ctx context.Context) {
+	if ctx.Err() != nil {
+		return
+	}
+
+	fp, err := p.mountsActiveFingerprint(ctx)
+	if err != nil {
+		p.queueError(err)
+
+		return
+	}
+
+	if fp == p.currentPublishedFingerprint() {
+		return
+	}
+
+	p.queueUpdate(fp)
 }
 
 func (p *chProvider) mountsActiveFingerprint(parent context.Context) (string, error) {
@@ -258,6 +317,8 @@ func fingerprintForMountsActive(rows []mountsActiveRow) string {
 	var b strings.Builder
 	for _, row := range rows {
 		b.WriteString(row.mountPath)
+		b.WriteString("|")
+		b.WriteString(row.snapshotID)
 		b.WriteString("|")
 		b.WriteString(row.updatedAt.UTC().Format(time.RFC3339Nano))
 		b.WriteString("\n")
@@ -278,15 +339,20 @@ func (p *chProvider) mountsActiveRows(ctx context.Context) ([]mountsActiveRow, e
 
 	for rows.Next() {
 		var (
-			mountPath string
-			updatedAt time.Time
+			mountPath  string
+			snapshotID string
+			updatedAt  time.Time
 		)
 
-		if err := rows.Scan(&mountPath, &updatedAt); err != nil {
+		if err := rows.Scan(&mountPath, &snapshotID, &updatedAt); err != nil {
 			return nil, fmt.Errorf("clickhouse: failed to scan mounts_active: %w", err)
 		}
 
-		out = append(out, mountsActiveRow{mountPath: mountPath, updatedAt: updatedAt})
+		out = append(out, mountsActiveRow{
+			mountPath:  mountPath,
+			snapshotID: snapshotID,
+			updatedAt:  updatedAt,
+		})
 	}
 
 	return out, nil
@@ -295,6 +361,7 @@ func (p *chProvider) mountsActiveRows(ctx context.Context) ([]mountsActiveRow, e
 func (p *chProvider) queueUpdate(fp string) {
 	p.mu.Lock()
 	p.pendingFingerprint = fp
+	p.hasPendingUpdate = true
 	p.mu.Unlock()
 
 	select {
@@ -319,31 +386,29 @@ func (p *chProvider) queueError(err error) {
 }
 
 func (p *chProvider) updateLoop(ctx context.Context) {
-	processed := ""
-
 	for {
 		if !p.waitForSignal(ctx, p.updateCh) {
 			return
 		}
 
-		processed = p.drainUpdates(ctx, processed)
+		p.drainUpdates(ctx)
 	}
 }
 
-func (p *chProvider) drainUpdates(ctx context.Context, processed string) string {
+func (p *chProvider) drainUpdates(ctx context.Context) {
 	for {
 		if ctx.Err() != nil {
-			return processed
+			return
 		}
 
-		fp, cb := p.pendingUpdate()
-		if fp == "" || fp == processed {
-			return processed
+		fp, ok, cb := p.pendingUpdate()
+		if !ok || fp == p.currentPublishedFingerprint() {
+			return
 		}
 
-		processed = fp
-
-		p.swapReadersAndInvoke(cb)
+		if !p.swapReadersAndInvoke(ctx, fp, cb) {
+			return
+		}
 	}
 }
 
@@ -356,48 +421,105 @@ func (p *chProvider) waitForSignal(ctx context.Context, ch <-chan struct{}) bool
 	}
 }
 
-func (p *chProvider) pendingUpdate() (string, func()) {
+func (p *chProvider) pendingUpdate() (string, bool, func()) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
-	return p.pendingFingerprint, p.onUpdate
+	return p.pendingFingerprint, p.hasPendingUpdate, p.onUpdate
 }
 
-func (p *chProvider) swapReadersAndInvoke(cb func()) {
-	newDB, newTree, newBD := p.buildReadersNow()
-	oldDB, oldBD := p.publishReaders(newDB, newTree, newBD)
+func (p *chProvider) swapReadersAndInvoke(ctx context.Context, targetFingerprint string, cb func()) bool {
+	newDB, newTree, newBD, publishedFingerprint, err := p.buildReadersNow(ctx)
+	if err != nil {
+		p.queueError(err)
 
-	if cb != nil {
-		cb()
+		return false
 	}
 
+	oldDB, oldBD := p.publishReaders(
+		newDB,
+		newTree,
+		newBD,
+		targetFingerprint,
+		publishedFingerprint,
+	)
+
+	invokeSerializedCallback(cb)
+
 	p.closeOldReaders(oldDB, oldBD)
+
+	return true
 }
 
-func (p *chProvider) buildReadersNow() (db.Database, *db.Tree, basedirs.Reader) {
+func invokeSerializedCallback(cb func()) {
+	if cb == nil {
+		return
+	}
+
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+
+		cb()
+	}()
+
+	<-done
+}
+
+func (p *chProvider) buildReadersNow(ctx context.Context) (db.Database, *db.Tree, basedirs.Reader, string, error) {
 	p.mu.RLock()
 	build := p.buildReaders
+	capture := p.captureSnapshot
 	p.mu.RUnlock()
 
 	if build == nil {
-		return p.defaultBuildReaders()
+		build = p.defaultBuildReaders
 	}
 
-	return build()
+	if capture == nil {
+		capture = p.captureActiveMountsState
+	}
+
+	snapshot, fingerprint, err := capture(ctx)
+	if err != nil {
+		return nil, nil, nil, "", err
+	}
+
+	dbImpl, tree, bd, err := build(ctx, snapshot)
+	if err != nil {
+		return nil, nil, nil, "", err
+	}
+
+	return dbImpl, tree, bd, fingerprint, nil
 }
 
 func (p *chProvider) publishReaders(
 	newDB db.Database,
 	newTree *db.Tree,
 	newBD basedirs.Reader,
+	targetFingerprint string,
+	publishedFingerprint string,
 ) (db.Database, basedirs.Reader) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	oldDB, oldBD := p.db, p.bd
 	p.db, p.tree, p.bd = newDB, newTree, newBD
+	p.currentFingerprint = publishedFingerprint
+
+	if p.hasPendingUpdate && p.pendingFingerprint == targetFingerprint {
+		p.pendingFingerprint = publishedFingerprint
+	}
 
 	return oldDB, oldBD
+}
+
+func (p *chProvider) currentPublishedFingerprint() string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	return p.currentFingerprint
 }
 
 func (p *chProvider) closeOldReaders(oldDB db.Database, oldBD basedirs.Reader) {
@@ -431,10 +553,24 @@ func (p *chProvider) drainErrors(ctx context.Context) {
 			return
 		}
 
-		if cb != nil {
-			cb(err)
-		}
+		invokeSerializedErrorCallback(cb, err)
 	}
+}
+
+func invokeSerializedErrorCallback(cb func(error), err error) {
+	if cb == nil {
+		return
+	}
+
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+
+		cb(err)
+	}()
+
+	<-done
 }
 
 func (p *chProvider) pendingError() (func(error), error) {
@@ -475,7 +611,18 @@ func OpenProvider(cfg Config) (provider.Provider, error) {
 	}
 
 	p := &chProvider{cfg: cfg, conn: conn}
-	p.buildReaders = p.defaultBuildReaders
+
+	dbImpl, tree, bd, fingerprint, err := p.buildReadersNow(context.Background())
+	if err != nil {
+		_ = conn.Close()
+
+		return nil, err
+	}
+
+	p.db = dbImpl
+	p.tree = tree
+	p.bd = bd
+	p.currentFingerprint = fingerprint
 	p.startPolling()
 
 	return p, nil
