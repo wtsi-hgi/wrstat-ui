@@ -29,6 +29,7 @@ package clickhouse
 import (
 	"testing"
 
+	ch "github.com/ClickHouse/clickhouse-go/v2"
 	. "github.com/smartystreets/goconvey/convey"
 )
 
@@ -54,6 +55,13 @@ func TestOptionsFromConfig(t *testing.T) {
 			So(err, ShouldBeNil)
 			So(opts.MaxOpenConns, ShouldEqual, 23)
 			So(opts.MaxIdleConns, ShouldEqual, 23)
+		})
+
+		Convey("it enforces LZ4 transport compression", func() {
+			opts, err := optionsFromConfig(cfg)
+			So(err, ShouldBeNil)
+			So(opts.Compression, ShouldNotBeNil)
+			So(opts.Compression.Method, ShouldEqual, ch.CompressionLZ4)
 		})
 	})
 }

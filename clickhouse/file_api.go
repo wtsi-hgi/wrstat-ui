@@ -842,11 +842,11 @@ func (c *Client) resolveMountParentName(path string) (string, string, string, er
 	return mountPath, parentDir, name, nil
 }
 
-type UnknownFileFieldError struct {
+type unknownFileFieldError struct {
 	Field string
 }
 
-func (e UnknownFileFieldError) Error() string {
+func (e unknownFileFieldError) Error() string {
 	return fmt.Sprintf("clickhouse: unknown file field %q", e.Field)
 }
 
@@ -861,7 +861,7 @@ func fileRowSelectList(fields []string) (string, []string, error) {
 	for _, f := range fields {
 		col, ok := fileRowColumnForField(f)
 		if !ok {
-			return "", nil, UnknownFileFieldError{Field: f}
+			return "", nil, unknownFileFieldError{Field: f}
 		}
 
 		out = append(out, col)
@@ -959,7 +959,7 @@ func (s *fileRowScanState) destsFor(fields []string) ([]any, error) {
 	for _, f := range fields {
 		dest, ok := s.destForField(f)
 		if !ok {
-			return nil, UnknownFileFieldError{Field: f}
+			return nil, unknownFileFieldError{Field: f}
 		}
 
 		dests = append(dests, dest)

@@ -43,9 +43,13 @@ var (
 	errDSNRequired         = errors.New("clickhouse: DSN is required")
 	errDatabaseRequired    = errors.New("clickhouse: Database is required")
 	errDatabaseInvalid     = errors.New("clickhouse: Database contains invalid characters")
+	errDSNNativeProtocol   = errors.New("clickhouse: DSN must use the native clickhouse:// protocol")
 	errDSNMissingDatabase  = errors.New("clickhouse: DSN must include database=")
 	errDSNDatabaseMismatch = errors.New("clickhouse: DSN database does not match Database")
 )
+
+//nolint:gochecknoglobals // overridden in tests to simulate mount autodiscovery failures.
+var discoverMountPoints = basedirs.GetMountPoints
 
 const defaultQueryTimeout = 10 * time.Second
 
@@ -202,7 +206,7 @@ func mountPointsFromConfig(cfg Config) (basedirs.MountPoints, error) {
 		return basedirs.ValidateMountPoints(cfg.MountPoints), nil
 	}
 
-	mountPoints, err := basedirs.GetMountPoints()
+	mountPoints, err := discoverMountPoints()
 	if err != nil {
 		return nil, fmt.Errorf("clickhouse: failed to auto-discover mountpoints: %w", err)
 	}
@@ -279,6 +283,10 @@ func validateConfig(cfg Config) error {
 		return errDatabaseInvalid
 	}
 
+	if err := validateDSNProtocol(cfg.DSN); err != nil {
+		return err
+	}
+
 	dsnDB, err := databaseFromDSN(cfg.DSN)
 	if err != nil {
 		return err
@@ -291,6 +299,19 @@ func validateConfig(cfg Config) error {
 			dsnDB,
 			cfg.Database,
 		)
+	}
+
+	return nil
+}
+
+func validateDSNProtocol(dsn string) error {
+	u, err := url.Parse(dsn)
+	if err != nil {
+		return fmt.Errorf("clickhouse: invalid DSN: %w", err)
+	}
+
+	if u.Scheme != "clickhouse" {
+		return errDSNNativeProtocol
 	}
 
 	return nil
@@ -317,6 +338,7 @@ func optionsFromConfig(cfg Config) (*ch.Options, error) {
 	}
 
 	opts.Auth.Database = cfg.Database
+	opts.Compression = &ch.Compression{Method: ch.CompressionLZ4}
 
 	effectiveMaxOpenConns := cfg.MaxOpenConns
 	if effectiveMaxOpenConns <= 0 {

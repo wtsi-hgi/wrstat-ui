@@ -175,3 +175,27 @@ func TestClickHouseDatabaseChildrenAncestor(t *testing.T) {
 		})
 	})
 }
+
+func TestClickHouseDatabaseChildrenSingleMountScope(t *testing.T) {
+	Convey("Children does not merge child mounts when a configured parent mount has no active snapshot", t, func() {
+		const (
+			parentMount = "/mnt/parent/"
+			childMount  = "/mnt/parent/child/"
+		)
+
+		updatedAt := time.Date(2026, 1, 11, 9, 0, 0, 0, time.UTC)
+		dbch := newClickHouseDatabaseWithSnapshot(
+			Config{MountPoints: []string{"/", parentMount, childMount}},
+			nil,
+			newActiveMountsSnapshot([]mountsActiveRow{{
+				mountPath:  childMount,
+				snapshotID: snapshotID(childMount, updatedAt).String(),
+				updatedAt:  updatedAt,
+			}}),
+		)
+
+		children, err := dbch.Children(parentMount)
+		So(err, ShouldBeNil)
+		So(children, ShouldBeNil)
+	})
+}

@@ -37,15 +37,25 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/summary"
 )
 
-var _ ImportAPI = (*ClickHouseAPI)(nil)
+var _ ClickHouseAPI = (*clickHouseAPI)(nil)
 
-var _ QueryAPI = (*ClickHouseAPI)(nil)
+var _ ImportAPI = (*clickHouseAPI)(nil)
 
-type queryClientAdapter struct {
+var _ QueryAPI = (*clickHouseAPI)(nil)
+
+// ClickHouseAPI adapts the ClickHouse backend to the perf harness.
+type ClickHouseAPI interface {
+	ImportAPI
+	QueryAPI
+}
+
+type clickHouseOpenProvider func(clickhouse.Config) (provider.Provider, error)
+
+type clickHouseQueryClient struct {
 	client *clickhouse.Client
 }
 
-func (c queryClientAdapter) ListDir(
+func (c clickHouseQueryClient) ListDir(
 	ctx context.Context,
 	dir string,
 	limit int64,
@@ -67,13 +77,13 @@ func (c queryClientAdapter) ListDir(
 	return converted, nil
 }
 
-func (c queryClientAdapter) StatPath(ctx context.Context, path string) error {
+func (c clickHouseQueryClient) StatPath(ctx context.Context, path string) error {
 	_, err := c.client.StatPath(ctx, path, clickhouse.StatOptions{})
 
 	return err
 }
 
-func (c queryClientAdapter) PermissionAnyInDir(
+func (c clickHouseQueryClient) PermissionAnyInDir(
 	ctx context.Context,
 	dir string,
 	uid uint32,
@@ -84,7 +94,7 @@ func (c queryClientAdapter) PermissionAnyInDir(
 	return err
 }
 
-func (c queryClientAdapter) FindByGlob(
+func (c clickHouseQueryClient) FindByGlob(
 	ctx context.Context,
 	baseDirs []string,
 	patterns []string,
@@ -101,15 +111,15 @@ func (c queryClientAdapter) FindByGlob(
 	return err
 }
 
-func (c queryClientAdapter) Close() error {
+func (c clickHouseQueryClient) Close() error {
 	return c.client.Close()
 }
 
-type queryInspectorAdapter struct {
+type clickHouseQueryInspector struct {
 	inspector *clickhouse.Inspector
 }
 
-func (i queryInspectorAdapter) ExplainListDir(
+func (i clickHouseQueryInspector) ExplainListDir(
 	ctx context.Context,
 	mountPath, dir string,
 	limit, offset int64,
@@ -117,14 +127,14 @@ func (i queryInspectorAdapter) ExplainListDir(
 	return i.inspector.ExplainListDir(ctx, mountPath, dir, limit, offset)
 }
 
-func (i queryInspectorAdapter) ExplainStatPath(
+func (i clickHouseQueryInspector) ExplainStatPath(
 	ctx context.Context,
 	mountPath, path string,
 ) (string, error) {
 	return i.inspector.ExplainStatPath(ctx, mountPath, path)
 }
 
-func (i queryInspectorAdapter) Measure(
+func (i clickHouseQueryInspector) Measure(
 	ctx context.Context,
 	run func(ctx context.Context) error,
 ) (*QueryMetrics, error) {
@@ -142,53 +152,71 @@ func (i queryInspectorAdapter) Measure(
 	}, nil
 }
 
-func (i queryInspectorAdapter) Close() error {
+func (i clickHouseQueryInspector) Close() error {
 	return i.inspector.Close()
 }
 
-// ClickHouseAPI adapts the ClickHouse backend to the performance harness.
-type ClickHouseAPI struct {
-	cfg clickhouse.Config
+type clickHouseAPI struct {
+	cfg          clickhouse.Config
+	openProvider clickHouseOpenProvider
 }
 
 // NewClickHouseAPI returns a ClickHouse-backed adapter for the perf harness.
-func NewClickHouseAPI(cfg clickhouse.Config) *ClickHouseAPI {
-	return &ClickHouseAPI{cfg: cfg}
+func NewClickHouseAPI(cfg clickhouse.Config) ClickHouseAPI {
+	return newClickHouseAPIWithOpenProvider(cfg, clickhouse.OpenProvider)
 }
 
-func (a *ClickHouseAPI) NewQueryClient() (QueryClient, error) {
+func newClickHouseAPIWithOpenProvider(
+	cfg clickhouse.Config,
+	openProvider clickHouseOpenProvider,
+) ClickHouseAPI {
+	if openProvider == nil {
+		openProvider = clickhouse.OpenProvider
+	}
+
+	return &clickHouseAPI{cfg: cfg, openProvider: openProvider}
+}
+
+func (a *clickHouseAPI) providerConfig() clickhouse.Config {
+	cfg := a.cfg
+	cfg.PollInterval = 0
+
+	return cfg
+}
+
+func (a *clickHouseAPI) NewQueryClient() (QueryClient, error) {
 	client, err := clickhouse.NewClient(a.cfg)
 	if err != nil {
 		return nil, err
 	}
 
-	return queryClientAdapter{client: client}, nil
+	return clickHouseQueryClient{client: client}, nil
 }
 
-func (a *ClickHouseAPI) NewQueryInspector() (QueryInspector, error) {
+func (a *clickHouseAPI) NewQueryInspector() (QueryInspector, error) {
 	inspector, err := clickhouse.NewInspector(a.cfg)
 	if err != nil {
 		return nil, err
 	}
 
-	return queryInspectorAdapter{inspector: inspector}, nil
+	return clickHouseQueryInspector{inspector: inspector}, nil
 }
 
-func (a *ClickHouseAPI) NewDGUTAWriter() (db.DGUTAWriter, error) {
+func (a *clickHouseAPI) NewDGUTAWriter() (db.DGUTAWriter, error) {
 	return clickhouse.NewDGUTAWriter(a.cfg)
 }
 
-func (a *ClickHouseAPI) NewFileIngestOperation(
+func (a *clickHouseAPI) NewFileIngestOperation(
 	mountPath string,
 	updatedAt time.Time,
 ) (summary.OperationGenerator, io.Closer, error) {
 	return clickhouse.NewFileIngestOperation(a.cfg, mountPath, updatedAt)
 }
 
-func (a *ClickHouseAPI) NewBaseDirsStore() (basedirs.Store, error) {
+func (a *clickHouseAPI) NewBaseDirsStore() (basedirs.Store, error) {
 	return clickhouse.NewBaseDirsStore(a.cfg)
 }
 
-func (a *ClickHouseAPI) OpenProvider() (provider.Provider, error) {
-	return clickhouse.OpenProvider(a.cfg)
+func (a *clickHouseAPI) OpenProvider() (provider.Provider, error) {
+	return a.openProvider(a.providerConfig())
 }

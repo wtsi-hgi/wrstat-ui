@@ -28,6 +28,7 @@ package clickhouse
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -143,5 +144,25 @@ func TestClientFindByGlobQueryGrouping(t *testing.T) {
 			So(rows, ShouldBeEmpty)
 			So(conn.queryCountValue(), ShouldEqual, 2)
 		})
+	})
+}
+
+func TestUnknownFileFieldErrors(t *testing.T) {
+	Convey("file row helpers preserve unknown field error behaviour", t, func() {
+		_, _, err := fileRowSelectList([]string{"bogus"})
+		So(err, ShouldNotBeNil)
+		So(err.Error(), ShouldEqual, `clickhouse: unknown file field "bogus"`)
+
+		var selectErr unknownFileFieldError
+		So(errors.As(err, &selectErr), ShouldBeTrue)
+		So(selectErr.Field, ShouldEqual, "bogus")
+
+		_, err = (&fileRowScanState{}).destsFor([]string{"bogus"})
+		So(err, ShouldNotBeNil)
+		So(err.Error(), ShouldEqual, `clickhouse: unknown file field "bogus"`)
+
+		var scanErr unknownFileFieldError
+		So(errors.As(err, &scanErr), ShouldBeTrue)
+		So(scanErr.Field, ShouldEqual, "bogus")
 	})
 }

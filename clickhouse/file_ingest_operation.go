@@ -154,6 +154,12 @@ type fileIngestWriter struct {
 	closed bool
 }
 
+func (w *fileIngestWriter) SetBatchSize(batchSize int) {
+	if batchSize > 0 {
+		w.batchSize = batchSize
+	}
+}
+
 func (w *fileIngestWriter) SetImportPhaseRecorder(recorder func(string, time.Duration)) {
 	w.importPhaseRecorder = recorder
 }

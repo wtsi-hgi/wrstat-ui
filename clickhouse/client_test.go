@@ -63,6 +63,15 @@ func TestNewClient(t *testing.T) {
 			So(c, ShouldBeNil)
 		})
 
+		Convey("it rejects non-native DSNs", func() {
+			c, err := clickhouse.NewClient(clickhouse.Config{
+				DSN:      "http://localhost:8123/?database=wrstat",
+				Database: "wrstat",
+			})
+			So(err, ShouldNotBeNil)
+			So(c, ShouldBeNil)
+		})
+
 		Convey("it accepts a minimal valid config and then attempts to connect", func() {
 			cfg := clickhouse.Config{
 				DSN:           "clickhouse://127.0.0.1:65535/?database=wrstat",

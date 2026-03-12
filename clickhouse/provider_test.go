@@ -30,6 +30,8 @@ import (
 	"context"
 	"errors"
 	"os"
+	"runtime"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -69,6 +71,365 @@ func (d *providerSwapTestDB) Close() error {
 	d.closed.Store(true)
 
 	return nil
+}
+
+func TestOpenProviderUpdatePinsClickHouseSnapshots(t *testing.T) {
+	Convey("OpenProvider keeps old ClickHouse-backed readers on their old snapshot during callback", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 2 * time.Second
+		cfg.PollInterval = 50 * time.Millisecond
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		bootstrapProvider, err := OpenProvider(cfg)
+		So(err, ShouldBeNil)
+		So(bootstrapProvider, ShouldNotBeNil)
+		So(bootstrapProvider.Close(), ShouldBeNil)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		oldUpdatedAt := time.Date(2026, 1, 9, 12, 0, 0, 0, time.UTC)
+		newUpdatedAt := time.Date(2026, 1, 10, 12, 0, 0, 0, time.UTC)
+
+		So(insertProviderSnapshot(ctx, conn, providerTestMountPath, oldUpdatedAt, 2, 100, 1000), ShouldBeNil)
+
+		p, err := OpenProvider(cfg)
+		So(err, ShouldBeNil)
+		So(p, ShouldNotBeNil)
+		Reset(func() { So(p.Close(), ShouldBeNil) })
+
+		oldTree := p.Tree()
+		oldBD := p.BaseDirs()
+
+		So(oldTree, ShouldNotBeNil)
+		So(oldBD, ShouldNotBeNil)
+
+		oldInfo, err := oldTree.DirInfo(providerTestMountPath, &db.Filter{Age: db.DGUTAgeAll})
+		So(err, ShouldBeNil)
+		So(oldInfo, ShouldNotBeNil)
+		So(oldInfo.Current.Count, ShouldEqual, 2)
+
+		oldUsage, err := oldBD.GroupUsage(db.DGUTAgeAll)
+		So(err, ShouldBeNil)
+		So(len(oldUsage), ShouldEqual, 1)
+		So(oldUsage[0].UsageSize, ShouldEqual, 1000)
+
+		type providerSnapshotObservation struct {
+			oldInfo     *db.DirInfo
+			newInfo     *db.DirInfo
+			oldInfoErr  error
+			newInfoErr  error
+			oldUsage    []*basedirs.Usage
+			newUsage    []*basedirs.Usage
+			oldUsageErr error
+			newUsageErr error
+			oldMounts   map[string]time.Time
+			newMounts   map[string]time.Time
+			oldMountErr error
+			newMountErr error
+		}
+
+		observed := make(chan providerSnapshotObservation, 1)
+		callbackStarted := make(chan struct{}, 1)
+		allowCallbackReturn := make(chan struct{})
+		callbackDone := make(chan struct{}, 1)
+
+		p.OnUpdate(func() {
+			obs := providerSnapshotObservation{}
+
+			obs.oldInfo, obs.oldInfoErr = oldTree.DirInfo(
+				providerTestMountPath,
+				&db.Filter{Age: db.DGUTAgeAll},
+			)
+			obs.newInfo, obs.newInfoErr = p.Tree().DirInfo(
+				providerTestMountPath,
+				&db.Filter{Age: db.DGUTAgeAll},
+			)
+			obs.oldUsage, obs.oldUsageErr = oldBD.GroupUsage(db.DGUTAgeAll)
+			obs.newUsage, obs.newUsageErr = p.BaseDirs().GroupUsage(db.DGUTAgeAll)
+			obs.oldMounts, obs.oldMountErr = oldBD.MountTimestamps()
+			obs.newMounts, obs.newMountErr = p.BaseDirs().MountTimestamps()
+
+			observed <- obs
+
+			callbackStarted <- struct{}{}
+
+			<-allowCallbackReturn
+
+			callbackDone <- struct{}{}
+		})
+
+		// Let the poller establish a baseline for the old snapshot first.
+		time.Sleep(2 * cfg.PollInterval)
+
+		So(insertProviderSnapshot(ctx, conn, providerTestMountPath, newUpdatedAt, 5, 500, 2000), ShouldBeNil)
+
+		select {
+		case <-callbackStarted:
+			// ok
+		case <-time.After(5 * time.Second):
+			t.Fatalf("timed out waiting for OnUpdate to start")
+		}
+
+		var got providerSnapshotObservation
+		select {
+		case got = <-observed:
+			// ok
+		case <-time.After(5 * time.Second):
+			t.Fatalf("timed out waiting for snapshot observation")
+		}
+
+		mountKey := strings.ReplaceAll(providerTestMountPath, "/", "／")
+
+		So(got.oldInfoErr, ShouldBeNil)
+		So(got.newInfoErr, ShouldBeNil)
+		So(got.oldInfo, ShouldNotBeNil)
+		So(got.newInfo, ShouldNotBeNil)
+		So(got.oldInfo.Current.Count, ShouldEqual, 2)
+		So(got.oldInfo.Current.Size, ShouldEqual, 100)
+		So(got.oldInfo.Current.Modtime, ShouldResemble, oldUpdatedAt)
+		So(got.newInfo.Current.Count, ShouldEqual, 5)
+		So(got.newInfo.Current.Size, ShouldEqual, 500)
+		So(got.newInfo.Current.Modtime, ShouldResemble, newUpdatedAt)
+
+		So(got.oldUsageErr, ShouldBeNil)
+		So(got.newUsageErr, ShouldBeNil)
+		So(len(got.oldUsage), ShouldEqual, 1)
+		So(len(got.newUsage), ShouldEqual, 1)
+		So(got.oldUsage[0].UsageSize, ShouldEqual, 1000)
+		So(got.newUsage[0].UsageSize, ShouldEqual, 2000)
+
+		So(got.oldMountErr, ShouldBeNil)
+		So(got.newMountErr, ShouldBeNil)
+		So(got.oldMounts[mountKey], ShouldResemble, oldUpdatedAt)
+		So(got.newMounts[mountKey], ShouldResemble, newUpdatedAt)
+
+		close(allowCallbackReturn)
+
+		select {
+		case <-callbackDone:
+			// ok
+		case <-time.After(5 * time.Second):
+			t.Fatalf("timed out waiting for OnUpdate to finish")
+		}
+
+		deadline := time.Now().Add(2 * time.Second)
+
+		var (
+			closedInfoErr  error
+			closedUsageErr error
+			closedMountErr error
+		)
+
+		for time.Now().Before(deadline) {
+			_, closedInfoErr = oldTree.DirInfo(
+				providerTestMountPath,
+				&db.Filter{Age: db.DGUTAgeAll},
+			)
+			_, closedUsageErr = oldBD.GroupUsage(db.DGUTAgeAll)
+			_, closedMountErr = oldBD.MountTimestamps()
+
+			closedReaders := errors.Is(closedInfoErr, errReaderClosed) &&
+				errors.Is(closedUsageErr, errReaderClosed) &&
+				errors.Is(closedMountErr, errReaderClosed)
+
+			if closedReaders {
+				break
+			}
+
+			time.Sleep(10 * time.Millisecond)
+		}
+
+		So(errors.Is(closedInfoErr, errReaderClosed), ShouldBeTrue)
+		So(errors.Is(closedUsageErr, errReaderClosed), ShouldBeTrue)
+		So(errors.Is(closedMountErr, errReaderClosed), ShouldBeTrue)
+	})
+}
+
+func insertProviderSnapshot(
+	ctx context.Context,
+	conn providerExecConn,
+	mountPath string,
+	updatedAt time.Time,
+	count, size, usageSize uint64,
+) error {
+	sid := snapshotID(mountPath, updatedAt)
+	atimeBuckets := []uint64{1, 0, 0, 0, 0, 0, 0, 0, 0}
+	mtimeBuckets := []uint64{0, 1, 0, 0, 0, 0, 0, 0, 0}
+	basedir := mountPath + "project/"
+	quotaSize := usageSize * 2
+	quotaInodes := count * 2
+
+	if err := conn.Exec(
+		ctx,
+		testInsertDGUTAStmt,
+		mountPath,
+		sid,
+		mountPath,
+		uint32(7),
+		uint32(9),
+		uint16(db.DGUTAFileTypeBam),
+		uint8(db.DGUTAgeAll),
+		count,
+		size,
+		int64(10),
+		int64(20),
+		atimeBuckets,
+		mtimeBuckets,
+	); err != nil {
+		return err
+	}
+
+	if err := conn.Exec(
+		ctx,
+		insertBasedirsGroupUsageQuery,
+		mountPath,
+		sid.String(),
+		uint32(7),
+		basedir,
+		uint8(db.DGUTAgeAll),
+		[]uint32{9},
+		usageSize,
+		quotaSize,
+		count,
+		quotaInodes,
+		updatedAt,
+		unixEpochUTC(),
+		unixEpochUTC(),
+	); err != nil {
+		return err
+	}
+
+	return conn.Exec(
+		ctx,
+		testInsertMountStmt,
+		mountPath,
+		time.Now().UTC(),
+		sid,
+		updatedAt,
+	)
+}
+
+func TestProviderRefreshCaptureFailureKeepsPublishedReaders(t *testing.T) {
+	Convey("refresh capture failures keep the published readers pinned in place", t, func() {
+		oldDB := &providerSwapTestDB{}
+		oldBD := &providerSwapTestBD{}
+		oldTree := db.NewTree(oldDB)
+
+		var buildCalled atomic.Bool
+
+		cp := &chProvider{
+			db:                 oldDB,
+			tree:               oldTree,
+			bd:                 oldBD,
+			errCh:              make(chan struct{}, 1),
+			currentFingerprint: "old-fingerprint",
+			buildReaders: func(context.Context, *activeMountsSnapshot) (db.Database, *db.Tree, basedirs.Reader, error) {
+				buildCalled.Store(true)
+
+				dbImpl := &providerSwapTestDB{}
+				bdImpl := &providerSwapTestBD{}
+
+				return dbImpl, db.NewTree(dbImpl), bdImpl, nil
+			},
+			captureSnapshot: func(context.Context) (*activeMountsSnapshot, string, error) {
+				return nil, "", errProviderTestErr1
+			},
+		}
+
+		var updateCalled atomic.Bool
+
+		errorCalled := make(chan error, 1)
+
+		cp.OnUpdate(func() {
+			updateCalled.Store(true)
+		})
+		cp.OnError(func(err error) {
+			errorCalled <- err
+		})
+
+		cp.queueUpdate("new-fingerprint")
+		cp.drainUpdates(context.Background())
+		cp.drainErrors(context.Background())
+
+		So(buildCalled.Load(), ShouldBeFalse)
+		So(updateCalled.Load(), ShouldBeFalse)
+		So(cp.db, ShouldEqual, oldDB)
+		So(cp.tree, ShouldEqual, oldTree)
+		So(cp.bd, ShouldEqual, oldBD)
+		So(cp.currentPublishedFingerprint(), ShouldEqual, "old-fingerprint")
+		So(oldDB.closed.Load(), ShouldBeFalse)
+		So(oldBD.closed.Load(), ShouldBeFalse)
+
+		select {
+		case err := <-errorCalled:
+			So(err, ShouldEqual, errProviderTestErr1)
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for OnError")
+		}
+	})
+}
+
+func TestProviderCallbacksRunOnFreshGoroutine(t *testing.T) {
+	Convey("OnUpdate and OnError callbacks run on a fresh goroutine", t, func() {
+		callerID := currentGoroutineID()
+
+		cp := &chProvider{
+			captureSnapshot: func(context.Context) (*activeMountsSnapshot, string, error) {
+				return &activeMountsSnapshot{}, "", nil
+			},
+			buildReaders: func(context.Context, *activeMountsSnapshot) (db.Database, *db.Tree, basedirs.Reader, error) {
+				dbImpl := &providerSwapTestDB{}
+				bdImpl := &providerSwapTestBD{}
+
+				return dbImpl, db.NewTree(dbImpl), bdImpl, nil
+			},
+		}
+
+		updateGID := make(chan string, 1)
+
+		cp.swapReadersAndInvoke(context.Background(), "", func() {
+			updateGID <- currentGoroutineID()
+		})
+
+		So(<-updateGID, ShouldNotEqual, callerID)
+
+		type callbackInfo struct {
+			gid string
+			err error
+		}
+
+		errorInfo := make(chan callbackInfo, 1)
+
+		cp.OnError(func(err error) {
+			errorInfo <- callbackInfo{gid: currentGoroutineID(), err: err}
+		})
+		cp.queueError(errProviderTestErr1)
+		cp.drainErrors(context.Background())
+
+		got := <-errorInfo
+		So(got.err, ShouldEqual, errProviderTestErr1)
+		So(got.gid, ShouldNotEqual, callerID)
+	})
+}
+
+func currentGoroutineID() string {
+	buf := make([]byte, 64)
+	n := runtime.Stack(buf, false)
+
+	fields := strings.Fields(string(buf[:n]))
+	if len(fields) < 2 {
+		return ""
+	}
+
+	return fields[1]
 }
 
 func TestProviderCloseStopsPollingPromptly(t *testing.T) {
@@ -289,6 +650,7 @@ func TestOpenProviderBaseDirs(t *testing.T) {
 		So(err, ShouldBeNil)
 
 		cfg.OwnersCSVPath = ownersPath
+		cfg.MountPoints = []string{providerTestMountPath}
 
 		p, err := OpenProvider(cfg)
 		So(err, ShouldBeNil)
@@ -312,6 +674,50 @@ func TestOpenProviderBaseDirs(t *testing.T) {
 		So(err, ShouldBeNil)
 		So(uu, ShouldNotBeNil)
 		So(len(uu), ShouldEqual, 0)
+	})
+
+	Convey("OpenProvider fails fast on invalid owners CSV", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 2 * time.Second
+		cfg.MountPoints = []string{providerTestMountPath}
+
+		ownersPath := t.TempDir() + "/owners.csv"
+		So(os.WriteFile(ownersPath, []byte("bad,line,format\n"), 0o600), ShouldBeNil)
+
+		cfg.OwnersCSVPath = ownersPath
+
+		p, err := OpenProvider(cfg)
+		So(err, ShouldNotBeNil)
+		So(err.Error(), ShouldContainSubstring, "failed to parse owners csv")
+		So(err.Error(), ShouldContainSubstring, basedirs.ErrInvalidOwnersFile.Error())
+		So(p, ShouldBeNil)
+	})
+
+	Convey("OpenProvider fails fast on mount autodiscovery errors", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 2 * time.Second
+
+		origDiscoverMountPoints := discoverMountPoints
+
+		Reset(func() { discoverMountPoints = origDiscoverMountPoints })
+
+		discoverMountPoints = func() (basedirs.MountPoints, error) {
+			return nil, errProviderTestErr2
+		}
+
+		p, err := OpenProvider(cfg)
+		So(err, ShouldNotBeNil)
+		So(err.Error(), ShouldContainSubstring, "failed to auto-discover mountpoints")
+		So(err.Error(), ShouldContainSubstring, errProviderTestErr2.Error())
+		So(p, ShouldBeNil)
 	})
 }
 
@@ -342,7 +748,7 @@ func TestOpenProviderUpdateSwapSemantics(t *testing.T) {
 			calls    int
 		)
 
-		cp.buildReaders = func() (db.Database, *db.Tree, basedirs.Reader) {
+		cp.buildReaders = func(context.Context, *activeMountsSnapshot) (db.Database, *db.Tree, basedirs.Reader, error) {
 			calls++
 			dbImpl := &providerSwapTestDB{}
 			bdImpl := &providerSwapTestBD{}
@@ -355,8 +761,11 @@ func TestOpenProviderUpdateSwapSemantics(t *testing.T) {
 				builtDB2, builtBD2 = dbImpl, bdImpl
 			}
 
-			return dbImpl, tree, bdImpl
+			return dbImpl, tree, bdImpl, nil
 		}
+
+		liveBD, liveDB := cp.detachReaders()
+		cp.closeOldReaders(liveDB, liveBD)
 
 		oldTree := p.Tree()
 		oldBD := p.BaseDirs()
@@ -555,4 +964,8 @@ func (c *providerCloseTestConn) Query(context.Context, string, ...any) (driver.R
 	}
 
 	return &findByGlobEmptyRows{}, nil
+}
+
+type providerExecConn interface {
+	Exec(ctx context.Context, query string, args ...any) error
 }

@@ -169,4 +169,161 @@ func TestClickHouseBaseDirsStore(t *testing.T) {
 
 		So(countRows(ctx, conn, basedirsStoreTestCountGroupUsageQuery, testMountPath, sid), ShouldEqual, 1)
 	})
+
+	Convey("BaseDirsStore Abort rolls back newly appended history without touching older history", t, func() {
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 2 * time.Second
+
+		updatedAt := time.Unix(1710000000, 0).UTC()
+		sid := snapshotID(testMountPath, updatedAt).String()
+		gid := uint32(7)
+		oldPoint := basedirs.History{
+			Date: time.Unix(1709000000, 0).UTC(), UsageSize: 50,
+			QuotaSize: 200, UsageInodes: 5, QuotaInodes: 20,
+		}
+		newPoint := basedirs.History{
+			Date: updatedAt, UsageSize: 100,
+			QuotaSize: 200, UsageInodes: 10, QuotaInodes: 20,
+		}
+
+		store, err := NewBaseDirsStore(cfg)
+		So(err, ShouldBeNil)
+		So(store, ShouldNotBeNil)
+
+		store.SetMountPath(testMountPath)
+		store.SetUpdatedAt(updatedAt)
+		So(store.Reset(), ShouldBeNil)
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		So(conn.Exec(
+			ctx,
+			testInsertBasedirsHistoryStmt,
+			testMountPath,
+			gid,
+			oldPoint.Date,
+			oldPoint.UsageSize,
+			oldPoint.QuotaSize,
+			oldPoint.UsageInodes,
+			oldPoint.QuotaInodes,
+		), ShouldBeNil)
+		So(store.AppendGroupHistory(
+			basedirs.HistoryKey{GID: gid, MountPath: testMountPath},
+			newPoint,
+		), ShouldBeNil)
+		So(store.PutGroupUsage(&basedirs.Usage{
+			GID:         gid,
+			BaseDir:     "/base/",
+			UIDs:        []uint32{1},
+			UsageSize:   10,
+			QuotaSize:   20,
+			UsageInodes: 1,
+			QuotaInodes: 2,
+			Mtime:       updatedAt,
+			Age:         db.DGUTAgeA1M,
+		}), ShouldBeNil)
+		So(store.Finalise(), ShouldBeNil)
+		So(store.Close(), ShouldBeNil)
+
+		So(countRows(ctx, conn, basedirsStoreTestCountHistoryQuery, testMountPath, gid), ShouldEqual, 2)
+		So(countRows(ctx, conn, basedirsStoreTestCountGroupUsageQuery, testMountPath, sid), ShouldEqual, 1)
+
+		aborter, ok := store.(interface{ Abort() error })
+		So(ok, ShouldBeTrue)
+		So(aborter.Abort(), ShouldBeNil)
+
+		So(countRows(ctx, conn, basedirsStoreTestCountHistoryQuery, testMountPath, gid), ShouldEqual, 1)
+		So(countRows(ctx, conn, basedirsStoreTestCountGroupUsageQuery, testMountPath, sid), ShouldEqual, 0)
+
+		retryStore, err := NewBaseDirsStore(cfg)
+		So(err, ShouldBeNil)
+		So(retryStore, ShouldNotBeNil)
+
+		retryStore.SetMountPath(testMountPath)
+		retryStore.SetUpdatedAt(updatedAt)
+		So(retryStore.Reset(), ShouldBeNil)
+		So(retryStore.AppendGroupHistory(
+			basedirs.HistoryKey{GID: gid, MountPath: testMountPath},
+			newPoint,
+		), ShouldBeNil)
+		So(retryStore.PutGroupUsage(&basedirs.Usage{
+			GID:         gid,
+			BaseDir:     "/base/",
+			UIDs:        []uint32{1},
+			UsageSize:   11,
+			QuotaSize:   20,
+			UsageInodes: 1,
+			QuotaInodes: 2,
+			Mtime:       updatedAt,
+			Age:         db.DGUTAgeA1M,
+		}), ShouldBeNil)
+		So(retryStore.Finalise(), ShouldBeNil)
+		So(retryStore.Close(), ShouldBeNil)
+
+		So(countRows(ctx, conn, basedirsStoreTestCountHistoryQuery, testMountPath, gid), ShouldEqual, 2)
+		So(countRows(ctx, conn, basedirsStoreTestCountGroupUsageQuery, testMountPath, sid), ShouldEqual, 1)
+	})
+
+	Convey("BaseDirsStore Abort preserves published data after the snapshot is active", t, func() {
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 2 * time.Second
+
+		updatedAt := time.Unix(1710000000, 0).UTC()
+		sid := snapshotID(testMountPath, updatedAt).String()
+		gid := uint32(7)
+		point := basedirs.History{
+			Date: updatedAt, UsageSize: 100,
+			QuotaSize: 200, UsageInodes: 10, QuotaInodes: 20,
+		}
+
+		store, err := NewBaseDirsStore(cfg)
+		So(err, ShouldBeNil)
+		So(store, ShouldNotBeNil)
+
+		store.SetMountPath(testMountPath)
+		store.SetUpdatedAt(updatedAt)
+		So(store.Reset(), ShouldBeNil)
+		So(store.AppendGroupHistory(
+			basedirs.HistoryKey{GID: gid, MountPath: testMountPath},
+			point,
+		), ShouldBeNil)
+		So(store.PutGroupUsage(&basedirs.Usage{
+			GID:         gid,
+			BaseDir:     "/base/",
+			UIDs:        []uint32{1},
+			UsageSize:   10,
+			QuotaSize:   20,
+			UsageInodes: 1,
+			QuotaInodes: 2,
+			Mtime:       updatedAt,
+			Age:         db.DGUTAgeA1M,
+		}), ShouldBeNil)
+		So(store.Finalise(), ShouldBeNil)
+		So(store.Close(), ShouldBeNil)
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		So(conn.Exec(ctx, testInsertMountStmt, testMountPath, time.Now(), sid, updatedAt), ShouldBeNil)
+		So(countRows(ctx, conn, basedirsStoreTestCountHistoryQuery, testMountPath, gid), ShouldEqual, 1)
+		So(countRows(ctx, conn, basedirsStoreTestCountGroupUsageQuery, testMountPath, sid), ShouldEqual, 1)
+
+		aborter, ok := store.(interface{ Abort() error })
+		So(ok, ShouldBeTrue)
+		So(aborter.Abort(), ShouldBeNil)
+
+		So(countRows(ctx, conn, basedirsStoreTestCountHistoryQuery, testMountPath, gid), ShouldEqual, 1)
+		So(countRows(ctx, conn, basedirsStoreTestCountGroupUsageQuery, testMountPath, sid), ShouldEqual, 1)
+	})
 }

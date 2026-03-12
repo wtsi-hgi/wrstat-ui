@@ -29,6 +29,8 @@ package chperf
 import (
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -83,6 +85,15 @@ func TestSumResults(t *testing.T) {
 			So(err, ShouldEqual, ErrNoDatasets)
 			So(total, ShouldEqual, 0)
 		})
+	})
+}
+
+func TestEffectiveParallelism(t *testing.T) {
+	Convey("effectiveParallelism clamps into the supported range", t, func() {
+		So(effectiveParallelism(0), ShouldEqual, 1)
+		So(effectiveParallelism(1), ShouldEqual, 1)
+		So(effectiveParallelism(4), ShouldEqual, 4)
+		So(effectiveParallelism(9), ShouldEqual, 4)
 	})
 }
 
@@ -176,6 +187,7 @@ func TestAddAllSummarisers(t *testing.T) {
 		So(api.fileMountPath, ShouldEqual, "/mnt/scratch/")
 		So(api.fileUpdatedAt, ShouldEqual, updatedAt)
 		So(api.dgutaWriter.batchSize, ShouldEqual, 17)
+		So(api.fileCloser.batchSize, ShouldEqual, 17)
 		So(api.dgutaWriter.mountPath, ShouldEqual, "/mnt/scratch/")
 		So(api.dgutaWriter.updatedAt, ShouldEqual, updatedAt)
 		So(api.baseDirsCalls, ShouldEqual, 0)
@@ -187,7 +199,24 @@ func TestAddAllSummarisers(t *testing.T) {
 	})
 }
 
-type fakeImportCloser struct{ closed bool }
+func trackedImportBasedirsCloser(closer abortTrackingCloser) func(bool) error {
+	return func(publish bool) error {
+		if publish {
+			return closer.Close()
+		}
+
+		return closer.Abort()
+	}
+}
+
+type fakeImportCloser struct {
+	closed    bool
+	batchSize int
+}
+
+func (c *fakeImportCloser) SetBatchSize(batchSize int) {
+	c.batchSize = batchSize
+}
 
 func (c *fakeImportCloser) Close() error {
 	c.closed = true
@@ -204,11 +233,17 @@ func (fakeImportOperation) Output() error { return nil }
 type historyTrackingBasedirsStore struct {
 	appendErr      error
 	appendInserted bool
+	batchSize      int
+	aborted        bool
 }
 
 func (*historyTrackingBasedirsStore) SetMountPath(string) {}
 
 func (*historyTrackingBasedirsStore) SetUpdatedAt(time.Time) {}
+
+func (s *historyTrackingBasedirsStore) SetBatchSize(batchSize int) {
+	s.batchSize = batchSize
+}
 
 func (*historyTrackingBasedirsStore) Reset() error { return nil }
 
@@ -244,6 +279,42 @@ func (s *historyTrackingBasedirsStore) LastHistoryAppendInserted() bool {
 func (*historyTrackingBasedirsStore) Finalise() error { return nil }
 
 func (*historyTrackingBasedirsStore) Close() error { return nil }
+
+func (s *historyTrackingBasedirsStore) Abort() error {
+	s.aborted = true
+
+	return nil
+}
+
+func TestAddBasedirsSummariserPropagatesBatchSize(t *testing.T) {
+	Convey("addBasedirsSummariser propagates the configured batch size to the basedirs store", t, func() {
+		tmpDir := t.TempDir()
+		quotaPath := filepath.Join(tmpDir, "quota.csv")
+		configPath := filepath.Join(tmpDir, "basedirs.config")
+
+		So(os.WriteFile(quotaPath, []byte("7,/mnt/scratch,100,10\n"), 0o600), ShouldBeNil)
+		So(os.WriteFile(configPath, []byte("/\t1\t1\n"), 0o600), ShouldBeNil)
+
+		store := &historyTrackingBasedirsStore{}
+		api := &fakeImportAPI{baseDirsStore: store}
+		metrics := newDatasetImportMetrics("dataset", "/input/stats.gz", "/mnt/scratch/")
+
+		closer, err := addBasedirsSummariser(
+			summary.NewSummariser(nil),
+			api,
+			"/mnt/scratch/",
+			time.Date(2026, 3, 9, 12, 34, 56, 0, time.UTC),
+			ImportOptions{BatchSize: 23, QuotaPath: quotaPath, ConfigPath: configPath},
+			metrics,
+		)
+
+		So(err, ShouldBeNil)
+		So(closer, ShouldNotBeNil)
+		So(store.batchSize, ShouldEqual, 23)
+		So(api.baseDirsCalls, ShouldEqual, 1)
+		So(closer(true), ShouldBeNil)
+	})
+}
 
 func TestTrackedBasedirsStoreHistoryRows(t *testing.T) {
 	Convey("trackedBasedirsStore records reset time in the spec-level partition drop/reset phase", t, func() {
@@ -330,6 +401,7 @@ func findImportOperation(ops []boltperf.Operation, name, phase string) *boltperf
 type fakeImportAPI struct {
 	dgutaWriter   *fakeImportDGUTAWriter
 	fileCloser    *fakeImportCloser
+	baseDirsStore *historyTrackingBasedirsStore
 	fileMountPath string
 	fileUpdatedAt time.Time
 	baseDirsCalls int
@@ -360,7 +432,11 @@ func (a *fakeImportAPI) NewFileIngestOperation(
 func (a *fakeImportAPI) NewBaseDirsStore() (basedirs.Store, error) {
 	a.baseDirsCalls++
 
-	return &historyTrackingBasedirsStore{}, nil
+	if a.baseDirsStore == nil {
+		a.baseDirsStore = &historyTrackingBasedirsStore{}
+	}
+
+	return a.baseDirsStore, nil
 }
 
 type orderedCloser struct {
@@ -383,16 +459,16 @@ func TestComposeImportCloser(t *testing.T) {
 
 		closer := composeImportCloser(
 			orderedCloser{name: "files", calls: &calls},
-			func() error {
-				calls = append(calls, "basedirs")
-
-				return nil
-			},
+			trackedImportBasedirsCloser(abortTrackingCloser{
+				closeName: "basedirs-close",
+				abortName: "basedirs-abort",
+				calls:     &calls,
+			}),
 			abortTrackingCloser{closeName: "dguta-close", abortName: "dguta-abort", calls: &calls},
 		)
 
 		So(closer(true), ShouldBeNil)
-		So(calls, ShouldResemble, []string{"files", "basedirs", "dguta-close"})
+		So(calls, ShouldResemble, []string{"files", "basedirs-close", "dguta-close"})
 	})
 
 	Convey("composeImportCloser aborts dguta publishing on failure", t, func() {
@@ -400,16 +476,16 @@ func TestComposeImportCloser(t *testing.T) {
 
 		closer := composeImportCloser(
 			orderedCloser{name: "files", calls: &calls},
-			func() error {
-				calls = append(calls, "basedirs")
-
-				return nil
-			},
+			trackedImportBasedirsCloser(abortTrackingCloser{
+				closeName: "basedirs-close",
+				abortName: "basedirs-abort",
+				calls:     &calls,
+			}),
 			abortTrackingCloser{closeName: "dguta-close", abortName: "dguta-abort", calls: &calls},
 		)
 
 		So(closer(false), ShouldBeNil)
-		So(calls, ShouldResemble, []string{"files", "basedirs", "dguta-abort"})
+		So(calls, ShouldResemble, []string{"files", "basedirs-abort", "dguta-abort"})
 	})
 
 	Convey("composeImportCloser aborts dguta publishing when file close fails", t, func() {
@@ -417,11 +493,11 @@ func TestComposeImportCloser(t *testing.T) {
 
 		closer := composeImportCloser(
 			orderedCloser{name: "files", calls: &calls, err: errImportTestFiles},
-			func() error {
-				calls = append(calls, "basedirs")
-
-				return nil
-			},
+			trackedImportBasedirsCloser(abortTrackingCloser{
+				closeName: "basedirs-close",
+				abortName: "basedirs-abort",
+				calls:     &calls,
+			}),
 			abortTrackingCloser{closeName: "dguta-close", abortName: "dguta-abort", calls: &calls},
 		)
 
@@ -429,7 +505,7 @@ func TestComposeImportCloser(t *testing.T) {
 
 		So(err, ShouldNotBeNil)
 		So(err.Error(), ShouldContainSubstring, errImportTestFiles.Error())
-		So(calls, ShouldResemble, []string{"files", "basedirs", "dguta-abort"})
+		So(calls, ShouldResemble, []string{"files", "basedirs-abort", "dguta-abort"})
 	})
 
 	Convey("composeImportCloser aborts dguta publishing when basedirs close fails", t, func() {
@@ -437,11 +513,12 @@ func TestComposeImportCloser(t *testing.T) {
 
 		closer := composeImportCloser(
 			orderedCloser{name: "files", calls: &calls},
-			func() error {
-				calls = append(calls, "basedirs")
-
-				return errImportTestBasedirs
-			},
+			trackedImportBasedirsCloser(abortTrackingCloser{
+				closeName: "basedirs-close",
+				abortName: "basedirs-abort",
+				calls:     &calls,
+				closeErr:  errImportTestBasedirs,
+			}),
 			abortTrackingCloser{closeName: "dguta-close", abortName: "dguta-abort", calls: &calls},
 		)
 
@@ -449,13 +526,33 @@ func TestComposeImportCloser(t *testing.T) {
 
 		So(err, ShouldNotBeNil)
 		So(err.Error(), ShouldContainSubstring, errImportTestBasedirs.Error())
-		So(calls, ShouldResemble, []string{"files", "basedirs", "dguta-abort"})
+		So(calls, ShouldResemble, []string{"files", "basedirs-close", "dguta-abort", "basedirs-abort"})
+	})
+
+	Convey("composeImportCloser aborts basedirs when dguta publish fails after basedirs flush", t, func() {
+		calls := make([]string, 0, 4)
+
+		closer := composeImportCloser(
+			orderedCloser{name: "files", calls: &calls},
+			trackedImportBasedirsCloser(abortTrackingCloser{
+				closeName: "basedirs-close",
+				abortName: "basedirs-abort",
+				calls:     &calls,
+			}),
+			abortTrackingCloser{closeName: "dguta-close", abortName: "dguta-abort", calls: &calls, closeErr: errImportTestDGUTA},
+		)
+
+		err := closer(true)
+
+		So(err, ShouldNotBeNil)
+		So(err.Error(), ShouldContainSubstring, errImportTestDGUTA.Error())
+		So(calls, ShouldResemble, []string{"files", "basedirs-close", "dguta-close", "basedirs-abort"})
 	})
 
 	Convey("composeImportCloser joins cleanup errors", t, func() {
 		err := composeImportCloser(
 			orderedCloser{name: "files", err: errImportTestFiles},
-			func() error { return errImportTestBasedirs },
+			func(bool) error { return errImportTestBasedirs },
 			abortTrackingCloser{abortErr: errImportTestDGUTA},
 		)(false)
 

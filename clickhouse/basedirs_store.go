@@ -74,6 +74,245 @@ const historyCap = 64
 
 func batchSend(b driver.Batch) error { return b.Send() }
 
+type historyRollbackEntry struct {
+	date time.Time
+	key  basedirs.HistoryKey
+}
+
+func (s *chBaseDirsStore) SetBatchSize(batchSize int) {
+	if batchSize > 0 {
+		s.batchSize = batchSize
+	}
+}
+
+func (s *chBaseDirsStore) ensureSnapshotID() {
+	if s.snapshot != uuid.Nil {
+		return
+	}
+
+	s.snapshot = snapshotID(s.mountPath, s.updatedAt)
+}
+
+func (s *chBaseDirsStore) recordInsertedHistory(key basedirs.HistoryKey, date time.Time) {
+	s.insertedHistory = append(s.insertedHistory, historyRollbackEntry{
+		date: date.UTC(),
+		key:  key,
+	})
+}
+
+func (s *chBaseDirsStore) Abort() error {
+	if s == nil {
+		return nil
+	}
+
+	err := s.abortPendingBatches()
+	if !s.abortNeedsCleanup() {
+		s.clearRollbackState()
+
+		return errors.Join(err, s.closeStoreConn())
+	}
+
+	err = errors.Join(err, s.abortWithCleanup())
+	s.clearRollbackState()
+
+	return err
+}
+
+func (s *chBaseDirsStore) abortPendingBatches() error {
+	if s.conn == nil || s.closed {
+		return nil
+	}
+
+	return s.abortExistingBatches()
+}
+
+func (s *chBaseDirsStore) abortNeedsCleanup() bool {
+	return s.hasSnapshotCleanup() || len(s.insertedHistory) > 0
+}
+
+func (s *chBaseDirsStore) abortWithCleanup() error {
+	rollbackConn, closeConn, connErr := s.rollbackConn()
+	if connErr != nil {
+		return connErr
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), queryTimeout(s.cfg))
+	defer cancel()
+
+	return errors.Join(s.cleanupAbortedRun(ctx, rollbackConn), closeConn())
+}
+
+func (s *chBaseDirsStore) hasSnapshotCleanup() bool {
+	return s.mountPath != "" && !s.updatedAt.IsZero()
+}
+
+func (s *chBaseDirsStore) rollbackConn() (ch.Conn, func() error, error) {
+	if s.conn != nil && !s.closed {
+		return s.conn, s.closeStoreConn, nil
+	}
+
+	conn, err := s.openStoreConn()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return conn, conn.Close, nil
+}
+
+func (s *chBaseDirsStore) openStoreConn() (ch.Conn, error) {
+	opts, err := optionsFromConfig(s.cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	return connectAndBootstrap(
+		context.Background(),
+		opts,
+		s.cfg.Database,
+		queryTimeout(s.cfg),
+	)
+}
+
+func (s *chBaseDirsStore) cleanupAbortedRun(ctx context.Context, conn ch.Conn) error {
+	published, publishErr := s.snapshotPublished(ctx, conn)
+	if publishErr != nil {
+		return publishErr
+	}
+
+	if published {
+		return nil
+	}
+
+	var err error
+
+	if s.hasSnapshotCleanup() {
+		s.ensureSnapshotID()
+		err = errors.Join(err, s.dropSnapshotPartitionsWithConn(ctx, conn))
+	}
+
+	err = errors.Join(err, s.rollbackInsertedHistory(ctx, conn))
+
+	return err
+}
+
+func (s *chBaseDirsStore) snapshotPublished(
+	ctx context.Context,
+	conn ch.Conn,
+) (bool, error) {
+	if !s.hasSnapshotCleanup() {
+		return false, nil
+	}
+
+	s.ensureSnapshotID()
+
+	activeSID, hasActive, err := readActiveSnapshotID(ctx, conn, s.mountPath)
+	if err != nil {
+		return false, err
+	}
+
+	return hasActive && activeSID == s.snapshot.String(), nil
+}
+
+func (s *chBaseDirsStore) rollbackInsertedHistory(ctx context.Context, conn ch.Conn) error {
+	if len(s.insertedHistory) == 0 {
+		return nil
+	}
+
+	rollbackByDate := make(map[time.Time]map[basedirs.HistoryKey]struct{})
+
+	for _, entry := range s.insertedHistory {
+		keys := rollbackByDate[entry.date]
+		if keys == nil {
+			keys = make(map[basedirs.HistoryKey]struct{})
+			rollbackByDate[entry.date] = keys
+		}
+
+		keys[entry.key] = struct{}{}
+	}
+
+	var err error
+
+	for date, keySet := range rollbackByDate {
+		keys := make([]basedirs.HistoryKey, 0, len(keySet))
+		for key := range keySet {
+			keys = append(keys, key)
+		}
+
+		query, args := deleteBasedirsHistoryRollbackQuery(date, keys)
+		err = errors.Join(err, rollbackHistoryRows(ctx, conn, query, args...))
+	}
+
+	return err
+}
+
+func deleteBasedirsHistoryRollbackQuery(date time.Time, keys []basedirs.HistoryKey) (string, []any) {
+	var b strings.Builder
+	b.WriteString("ALTER TABLE wrstat_basedirs_history DELETE WHERE date = ? AND (mount_path, gid) IN (")
+
+	args := make([]any, 0, 1+len(keys)*2)
+	args = append(args, date)
+
+	for i, key := range keys {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+
+		b.WriteString("(?, ?)")
+
+		args = append(args, key.MountPath, key.GID)
+	}
+
+	b.WriteString(") SETTINGS mutations_sync = 2")
+
+	return b.String(), args
+}
+
+func rollbackHistoryRows(ctx context.Context, conn ch.Conn, query string, args ...any) error {
+	if err := conn.Exec(ctx, query, args...); err != nil {
+		return fmt.Errorf("clickhouse: failed to rollback basedirs history: %w", err)
+	}
+
+	return nil
+}
+
+func (s *chBaseDirsStore) clearRollbackState() {
+	s.insertedHistory = nil
+	s.bufferedAgeAllGroupUsage = nil
+	s.lastHistoryAppendInserted = false
+	s.reset = false
+}
+
+func (s *chBaseDirsStore) closeStoreConn() error {
+	if s == nil || s.conn == nil {
+		return nil
+	}
+
+	conn := s.conn
+	s.conn = nil
+	s.closed = true
+
+	return conn.Close()
+}
+
+func (s *chBaseDirsStore) dropSnapshotPartitionsWithConn(ctx context.Context, conn ch.Conn) error {
+	sid := s.snapshot.String()
+
+	queries := [...]string{
+		dropBasedirsGroupUsagePartitionQuery,
+		dropBasedirsUserUsagePartitionQuery,
+		dropBasedirsGroupSubdirsPartitionQuery,
+		dropBasedirsUserSubdirsPartitionQuery,
+	}
+
+	for _, query := range queries {
+		if err := dropPartitionIgnoreUnknown(ctx, conn, s.mountPath, sid, query); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 func batchAbort(b driver.Batch) error { return b.Abort() }
 
 type batchOp func(driver.Batch) error
@@ -102,6 +341,7 @@ type chBaseDirsStore struct {
 	userSubBatch    driver.Batch
 
 	bufferedAgeAllGroupUsage  map[uint32][]*basedirs.Usage
+	insertedHistory           []historyRollbackEntry
 	lastHistoryAppendInserted bool
 
 	closed bool
@@ -151,6 +391,7 @@ func (s *chBaseDirsStore) Reset() error {
 func (s *chBaseDirsStore) resetSnapshotState() {
 	s.snapshot = snapshotID(s.mountPath, s.updatedAt)
 	s.bufferedAgeAllGroupUsage = map[uint32][]*basedirs.Usage{}
+	s.insertedHistory = nil
 	s.lastHistoryAppendInserted = false
 	s.reset = false
 }
@@ -337,7 +578,11 @@ func (s *chBaseDirsStore) AppendGroupHistory(
 	}
 
 	err = s.insertHistoryPoint(key, point)
+
 	s.lastHistoryAppendInserted = err == nil
+	if err == nil {
+		s.recordInsertedHistory(key, point.Date)
+	}
 
 	return err
 }
@@ -480,7 +725,7 @@ func (s *chBaseDirsStore) Close() error {
 	}
 
 	flushErr := s.flushAllBatches()
-	closeErr := s.conn.Close()
+	closeErr := s.closeStoreConn()
 
 	return errors.Join(flushErr, closeErr)
 }
@@ -555,22 +800,7 @@ func (s *chBaseDirsStore) collectHistoryRows(
 }
 
 func (s *chBaseDirsStore) dropSnapshotPartitions(ctx context.Context) error {
-	sid := s.snapshot.String()
-
-	queries := [...]string{
-		dropBasedirsGroupUsagePartitionQuery,
-		dropBasedirsUserUsagePartitionQuery,
-		dropBasedirsGroupSubdirsPartitionQuery,
-		dropBasedirsUserSubdirsPartitionQuery,
-	}
-
-	for _, query := range queries {
-		if err := dropPartitionIgnoreUnknown(ctx, s.conn, s.mountPath, sid, query); err != nil {
-			return err
-		}
-	}
-
-	return nil
+	return s.dropSnapshotPartitionsWithConn(ctx, s.conn)
 }
 
 func dropPartitionIgnoreUnknown(

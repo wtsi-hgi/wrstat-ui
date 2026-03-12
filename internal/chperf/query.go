@@ -302,14 +302,19 @@ func verifyPlans(qctx queryContext, printf PrintfFunc) error {
 	}
 
 	pickedPath := pickPath(qctx.client, qctx.dir)
+	if pickedPath == "" {
+		return nil
+	}
 
-	if pickedPath != "" {
-		explainSP, spErr := qctx.inspector.ExplainStatPath(ctx, mountPath, pickedPath)
-		if spErr != nil {
-			return fmt.Errorf("ExplainStatPath failed: %w", spErr)
-		}
+	explainSP, spErr := qctx.inspector.ExplainStatPath(ctx, mountPath, pickedPath)
+	if spErr != nil {
+		return fmt.Errorf("ExplainStatPath failed: %w", spErr)
+	}
 
-		printf("ExplainStatPath:\n%s\n\n", explainSP)
+	printf("ExplainStatPath:\n%s\n\n", explainSP)
+
+	if !ExplainHasPruning(explainSP) {
+		return fmt.Errorf("%w:\n%s", ErrExplainMissingIndex, explainSP)
 	}
 
 	return nil
@@ -590,12 +595,20 @@ func timingLoop(
 			return nil, fmt.Errorf("%s repeat %d/%d: %w", o.name, i+1, repeat, err)
 		}
 
-		durations = append(durations, durationMS(time.Since(start)))
+		durations = append(durations, measuredQueryDurationMS(metrics, time.Since(start)))
 
 		printMetrics(printf, o.name, metrics)
 	}
 
 	return durations, nil
+}
+
+func measuredQueryDurationMS(metrics *QueryMetrics, wall time.Duration) float64 {
+	if metrics != nil {
+		return float64(metrics.DurationMs)
+	}
+
+	return durationMS(wall)
 }
 
 func printMetrics(
