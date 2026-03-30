@@ -65,6 +65,10 @@ will be created to contain the new files.
 The --quota, --config, and --mount flags act the same as in the summarise
 subcommand and will be passed along to it.
 
+The --queues flag restricts wr submissions to the given comma-separated queue
+names, while --queues_avoid tells wr which comma-separated queues it should
+avoid when scheduling those summarise jobs.
+
 The --group flag can be specified to override the unix group with which the
 summarise subcommands will be run.
 `,
