@@ -581,6 +581,7 @@ func TestWatch(t *testing.T) {
 		So(err, ShouldBeNil)
 
 		So(len(jobs), ShouldBeGreaterThan, 0)
+		So(jobs[0].Requirements.Other, ShouldBeNil)
 		So(jobs[0].RepGroup, ShouldStartWith, "wrstat-ui-summarise-")
 		So(jobs, ShouldResemble, []*jobqueue.Job{
 			{
@@ -637,6 +638,18 @@ func TestWatch(t *testing.T) {
 				Retries:  30,
 				State:    jobqueue.JobStateDelayed,
 			},
+		})
+
+		So(os.Remove(dotA), ShouldBeNil)
+
+		_, _, jobs, err = runWRStat("watch", "-o", output, "-q", "/some/quota.file", "-c", "basedirs.config",
+			"--queues=q1,q2", "--queues_avoid=q3", tmp)
+		So(err, ShouldBeNil)
+
+		So(len(jobs), ShouldBeGreaterThan, 0)
+		So(jobs[0].Requirements.Other, ShouldResemble, map[string]string{
+			"scheduler_queue":        "q1,q2",
+			"scheduler_queues_avoid": "q3",
 		})
 	})
 }

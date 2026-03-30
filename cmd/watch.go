@@ -32,7 +32,11 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/watch"
 )
 
-var group string
+var (
+	group            string
+	watchQueue       string
+	watchQueuesAvoid string
+)
 
 var watchcmd = &cobra.Command{
 	Use:   "watch",
@@ -69,7 +73,17 @@ summarise subcommands will be run.
 			die("%s", err)
 		}
 
-		if err := watch.Watch(args, group, defaultDir, quotaPath, basedirsConfig, mounts, appLogger); err != nil {
+		if err := watch.Watch(
+			args,
+			group,
+			defaultDir,
+			quotaPath,
+			basedirsConfig,
+			mounts,
+			watchQueue,
+			watchQueuesAvoid,
+			appLogger,
+		); err != nil {
 			die("%s", err)
 		}
 	},
@@ -109,5 +123,7 @@ func init() {
 	watchcmd.Flags().StringVarP(&quotaPath, "quota", "q", "", "csv of gid,disk,size_quota,inode_quota")
 	watchcmd.Flags().StringVarP(&basedirsConfig, "config", "c", "", "path to basedirs config file")
 	watchcmd.Flags().StringVarP(&mounts, "mounts", "m", "", "path to a file containing a list of quoted mountpoints")
+	watchcmd.Flags().StringVar(&watchQueue, "queues", "", "comma-separated queues to submit jobs to")
+	watchcmd.Flags().StringVar(&watchQueuesAvoid, "queues_avoid", "", "comma-separated queues to avoid")
 	watchcmd.Flags().StringVarP(&group, "group", "g", "", "unix group to run the summarisers with")
 }

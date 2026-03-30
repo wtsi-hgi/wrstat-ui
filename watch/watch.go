@@ -54,9 +54,11 @@ var connectTimeout = 10 * time.Second //nolint:gochecknoglobals
 //
 // The scheduled summarise subcommands will be given the output directory, quota
 // path and basedirs config path.
-func Watch(inputDirs []string, group, outputDir, quotaPath, basedirsConfig, mounts string, logger log15.Logger) error {
+func Watch(inputDirs []string, group, outputDir, quotaPath, basedirsConfig,
+	mounts, queue, queuesAvoid string, logger log15.Logger) error {
 	for {
-		if err := watch(inputDirs, group, outputDir, quotaPath, basedirsConfig, mounts, logger); err != nil {
+		if err := watch(inputDirs, group, outputDir, quotaPath, basedirsConfig,
+			mounts, queue, queuesAvoid, logger); err != nil {
 			return err
 		}
 
@@ -68,10 +70,12 @@ func Watch(inputDirs []string, group, outputDir, quotaPath, basedirsConfig, moun
 	}
 }
 
-func watch(inputDirs []string, group, outputDir, quotaPath, basedirsConfig, mounts string, logger log15.Logger) error { //nolint:gocognit,gocyclo,lll,funlen
+func watch(inputDirs []string, group, outputDir, quotaPath, basedirsConfig, mounts, queue, queuesAvoid string, logger log15.Logger) error { //nolint:gocognit,gocyclo,lll,funlen
 	s, err := client.New(client.SchedulerSettings{
-		Logger:  logger,
-		Timeout: connectTimeout,
+		Logger:      logger,
+		Timeout:     connectTimeout,
+		Queue:       queue,
+		QueuesAvoid: queuesAvoid,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create wr client: %w", err)
