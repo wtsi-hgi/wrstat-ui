@@ -48,15 +48,18 @@ const (
 
 var connectTimeout = 10 * time.Second //nolint:gochecknoglobals
 
-// Watch watches an input directory (which should be the output directory of a
-// wrstat multi run) for new stats.gz files, upon which it will run the
-// summarise subcommand on that data, if it has not already been run.
+// Watch watches input directories (which should be output directories of wrstat
+// multi runs) for new stats.gz files, upon which it will run the summarise
+// subcommand on that data, if it has not already been run.
 //
 // The scheduled summarise subcommands will be given the output directory, quota
-// path and basedirs config path.
-func Watch(inputDirs []string, group, outputDir, quotaPath, basedirsConfig, mounts string, logger log15.Logger) error {
+// path and basedirs config path. The queue and queuesAvoid values are passed to
+// wr so scheduler submission can target or avoid specific queues.
+func Watch(inputDirs []string, group, outputDir, quotaPath, basedirsConfig,
+	mounts, queue, queuesAvoid string, logger log15.Logger) error {
 	for {
-		if err := watch(inputDirs, group, outputDir, quotaPath, basedirsConfig, mounts, logger); err != nil {
+		if err := watch(inputDirs, group, outputDir, quotaPath, basedirsConfig,
+			mounts, queue, queuesAvoid, logger); err != nil {
 			return err
 		}
 
@@ -68,10 +71,12 @@ func Watch(inputDirs []string, group, outputDir, quotaPath, basedirsConfig, moun
 	}
 }
 
-func watch(inputDirs []string, group, outputDir, quotaPath, basedirsConfig, mounts string, logger log15.Logger) error { //nolint:gocognit,gocyclo,lll,funlen
+func watch(inputDirs []string, group, outputDir, quotaPath, basedirsConfig, mounts, queue, queuesAvoid string, logger log15.Logger) error { //nolint:gocognit,gocyclo,lll,funlen
 	s, err := client.New(client.SchedulerSettings{
-		Logger:  logger,
-		Timeout: connectTimeout,
+		Logger:      logger,
+		Timeout:     connectTimeout,
+		Queue:       queue,
+		QueuesAvoid: queuesAvoid,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create wr client: %w", err)

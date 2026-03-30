@@ -32,7 +32,11 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/watch"
 )
 
-var group string
+var (
+	group            string
+	watchQueue       string
+	watchQueuesAvoid string
+)
 
 var watchcmd = &cobra.Command{
 	Use:   "watch",
@@ -61,6 +65,10 @@ will be created to contain the new files.
 The --quota, --config, and --mount flags act the same as in the summarise
 subcommand and will be passed along to it.
 
+The --queues flag restricts wr submissions to the given comma-separated queue
+names, while --queues_avoid tells wr which comma-separated queues it should
+avoid when scheduling those summarise jobs.
+
 The --group flag can be specified to override the unix group with which the
 summarise subcommands will be run.
 `,
@@ -69,7 +77,17 @@ summarise subcommands will be run.
 			die("%s", err)
 		}
 
-		if err := watch.Watch(args, group, defaultDir, quotaPath, basedirsConfig, mounts, appLogger); err != nil {
+		if err := watch.Watch(
+			args,
+			group,
+			defaultDir,
+			quotaPath,
+			basedirsConfig,
+			mounts,
+			watchQueue,
+			watchQueuesAvoid,
+			appLogger,
+		); err != nil {
 			die("%s", err)
 		}
 	},
@@ -109,5 +127,7 @@ func init() {
 	watchcmd.Flags().StringVarP(&quotaPath, "quota", "q", "", "csv of gid,disk,size_quota,inode_quota")
 	watchcmd.Flags().StringVarP(&basedirsConfig, "config", "c", "", "path to basedirs config file")
 	watchcmd.Flags().StringVarP(&mounts, "mounts", "m", "", "path to a file containing a list of quoted mountpoints")
+	watchcmd.Flags().StringVar(&watchQueue, "queues", "", "comma-separated queues to submit jobs to")
+	watchcmd.Flags().StringVar(&watchQueuesAvoid, "queues_avoid", "", "comma-separated queues to avoid")
 	watchcmd.Flags().StringVarP(&group, "group", "g", "", "unix group to run the summarisers with")
 }
