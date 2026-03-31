@@ -226,8 +226,8 @@ func sanitiseUsageTimes(results []*basedirs.Usage, now time.Time) []*basedirs.Us
 
 		clone := *usage
 		clone.Mtime = sanitiseJSONTime(clone.Mtime, now)
-		clone.DateNoSpace = sanitiseJSONTime(clone.DateNoSpace, time.Unix(0, 0).UTC())
-		clone.DateNoFiles = sanitiseJSONTime(clone.DateNoFiles, time.Unix(0, 0).UTC())
+		clone.DateNoSpace = sanitiseJSONTime(clone.DateNoSpace, time.Time{})
+		clone.DateNoFiles = sanitiseJSONTime(clone.DateNoFiles, time.Time{})
 		out[i] = &clone
 	}
 

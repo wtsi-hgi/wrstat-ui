@@ -573,8 +573,8 @@ func TestServer(t *testing.T) {
 			So(err, ShouldBeNil)
 			So(usageGroup, ShouldNotBeEmpty)
 			So(usageGroup[0].Mtime.Year(), ShouldBeLessThanOrEqualTo, 9999)
-			So(usageGroup[0].DateNoSpace, ShouldEqual, time.Unix(0, 0).UTC())
-			So(usageGroup[0].DateNoFiles, ShouldEqual, time.Unix(0, 0).UTC())
+			So(usageGroup[0].DateNoSpace, ShouldEqual, time.Time{})
+			So(usageGroup[0].DateNoFiles, ShouldEqual, time.Time{})
 
 			response, err = query(s, EndPointBasedirUsageUser, "")
 			So(err, ShouldBeNil)
@@ -723,12 +723,15 @@ func TestServer(t *testing.T) {
 
 			timeout := time.After(2 * time.Second)
 
+			ticker := time.NewTicker(10 * time.Millisecond)
+			defer ticker.Stop()
+
 		Loop:
 			for {
 				select {
 				case <-timeout:
 					t.Fatal("timeout waiting for provider update with sanitised caches")
-				case <-time.After(10 * time.Millisecond):
+				case <-ticker.C:
 					s.mu.RLock()
 					ts, ok := s.dataTimeStamp["keyA"]
 					s.mu.RUnlock()
@@ -747,8 +750,8 @@ func TestServer(t *testing.T) {
 			So(err, ShouldBeNil)
 			So(usageGroup, ShouldNotBeEmpty)
 			So(usageGroup[0].Mtime.Year(), ShouldBeLessThanOrEqualTo, 9999)
-			So(usageGroup[0].DateNoSpace, ShouldEqual, time.Unix(0, 0).UTC())
-			So(usageGroup[0].DateNoFiles, ShouldEqual, time.Unix(0, 0).UTC())
+			So(usageGroup[0].DateNoSpace, ShouldEqual, time.Time{})
+			So(usageGroup[0].DateNoFiles, ShouldEqual, time.Time{})
 
 			response, err = query(s, EndPointBasedirUsageUser, "")
 			So(err, ShouldBeNil)
