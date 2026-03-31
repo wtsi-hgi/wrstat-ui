@@ -36,6 +36,7 @@ import (
 	"encoding/json"
 	"io"
 	"sync"
+	"time"
 
 	gas "github.com/wtsi-hgi/go-authserver"
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
@@ -177,40 +178,68 @@ func (s *Server) stop() {
 // usage data into JSON and gzip. so serveGzippedCache can serve quickly.
 // Returns an error if any cache build fails.
 func (s *Server) prewarmCaches(bd basedirs.Reader) error {
-	if err := s.buildCache(bd.GroupUsage, &s.groupUsageCache); err != nil {
-		return err
-	}
-
-	return s.buildCache(bd.UserUsage, &s.userUsageCache)
-}
-
-// buildCache computes usage data, serialises it, compresses it, and stores it
-// in the cache.
-func (s *Server) buildCache(
-	usageFunc func(db.DirGUTAge) ([]*basedirs.Usage, error),
-	cache *usageCache,
-) error {
-	results, err := s.collectUsage(usageFunc)
+	groupCache, err := s.buildCache(bd.GroupUsage)
 	if err != nil {
 		return err
 	}
+
+	userCache, err := s.buildCache(bd.UserUsage)
+	if err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	s.groupUsageCache = groupCache
+	s.userUsageCache = userCache
+	s.mu.Unlock()
+
+	return nil
+}
+
+// buildCache computes usage data, serialises it, compresses it, and returns
+// the fully built cache.
+func (s *Server) buildCache(
+	usageFunc func(db.DirGUTAge) ([]*basedirs.Usage, error),
+) (usageCache, error) {
+	results, err := s.collectUsage(usageFunc)
+	if err != nil {
+		return usageCache{}, err
+	}
+
+	results = sanitiseUsageTimes(results, time.Now().UTC())
 
 	jsonData, err := json.Marshal(results)
 	if err != nil {
-		return err
+		return usageCache{}, err
 	}
 
 	gzipData, err := compressGzip(jsonData)
 	if err != nil {
-		return err
+		return usageCache{}, err
 	}
 
-	*cache = usageCache{
+	return usageCache{
 		jsonData: jsonData,
 		gzipData: gzipData,
+	}, nil
+}
+
+func sanitiseUsageTimes(results []*basedirs.Usage, now time.Time) []*basedirs.Usage {
+	out := make([]*basedirs.Usage, len(results))
+
+	for i, usage := range results {
+		if usage == nil {
+			continue
+		}
+
+		clone := *usage
+		clone.Mtime = sanitiseJSONTime(clone.Mtime, now)
+		clone.DateNoSpace = sanitiseJSONTime(clone.DateNoSpace, time.Time{})
+		clone.DateNoFiles = sanitiseJSONTime(clone.DateNoFiles, time.Time{})
+		out[i] = &clone
 	}
 
-	return nil
+	return out
 }
 
 // compressGzip compresses JSON into gzip format.
@@ -247,4 +276,13 @@ func (s *Server) collectUsage(
 	}
 
 	return results, nil
+}
+
+func sanitiseJSONTime(t, fallback time.Time) time.Time {
+	year := t.Year()
+	if year < 0 || year > 9999 {
+		return fallback
+	}
+
+	return t
 }
