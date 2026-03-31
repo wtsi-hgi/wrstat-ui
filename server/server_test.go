@@ -667,6 +667,99 @@ func TestServer(t *testing.T) {
 			So(latestUserCache, ShouldNotResemble, initialUserCache)
 		})
 
+		Convey("Server sanitises invalid usage times during provider updates", func() {
+			ownersPath, err := internaldata.CreateOwnersCSV(t, internaldata.ExampleOwnersCSV)
+			So(err, ShouldBeNil)
+
+			tmp := t.TempDir()
+
+			first := filepath.Join(tmp, "111_keyA")
+			err = CreateExampleDBsCustomIDsWithDir(t, first, uid, gids[0], gids[1], refTime)
+			So(err, ShouldBeNil)
+
+			p, err := BuildTestProviderWithMountTimestamps(t, []string{first}, ownersPath, map[string]time.Time{
+				"keyA": time.Unix(refTime, 0),
+			})
+			So(err, ShouldBeNil)
+
+			tp, ok := p.(*testProvider)
+			So(ok, ShouldBeTrue)
+
+			err = s.SetProvider(tp)
+			So(err, ShouldBeNil)
+
+			response, err := query(s, EndPointBasedirUsageGroup, "")
+			So(err, ShouldBeNil)
+			So(response.Code, ShouldEqual, http.StatusOK)
+
+			s.mu.RLock()
+			lastMod := s.dataTimeStamp["keyA"]
+			s.mu.RUnlock()
+
+			second := filepath.Join(tmp, "112_keyA")
+			err = CreateExampleDBsCustomIDsWithDir(t, second, uid, gids[0], gids[1], refTime+10)
+			So(err, ShouldBeNil)
+
+			p2, err := BuildTestProviderWithMountTimestamps(t, []string{second}, ownersPath, map[string]time.Time{
+				"keyA": time.Unix(refTime+10, 0),
+			})
+			So(err, ShouldBeNil)
+
+			tp2, ok := p2.(*testProvider)
+			So(ok, ShouldBeTrue)
+
+			invalidYear := time.Date(10000, time.January, 1, 0, 0, 0, 0, time.UTC)
+			tp2MBD, ok := tp2.bd.(*memBaseDirs)
+			So(ok, ShouldBeTrue)
+			So(tp2MBD.groupUsage[db.DGUTAgeAll], ShouldNotBeEmpty)
+			So(tp2MBD.userUsage[db.DGUTAgeAll], ShouldNotBeEmpty)
+
+			tp2MBD.groupUsage[db.DGUTAgeAll][0].Mtime = invalidYear
+			tp2MBD.groupUsage[db.DGUTAgeAll][0].DateNoSpace = invalidYear
+			tp2MBD.groupUsage[db.DGUTAgeAll][0].DateNoFiles = invalidYear
+			tp2MBD.userUsage[db.DGUTAgeAll][0].Mtime = invalidYear
+
+			tp.triggerUpdate(tp2.tree, tp2.bd)
+
+			timeout := time.After(2 * time.Second)
+
+		Loop:
+			for {
+				select {
+				case <-timeout:
+					t.Fatal("timeout waiting for provider update with sanitised caches")
+				case <-time.After(10 * time.Millisecond):
+					s.mu.RLock()
+					ts, ok := s.dataTimeStamp["keyA"]
+					s.mu.RUnlock()
+
+					if ok && ts > lastMod {
+						break Loop
+					}
+				}
+			}
+
+			response, err = query(s, EndPointBasedirUsageGroup, "")
+			So(err, ShouldBeNil)
+			So(response.Code, ShouldEqual, http.StatusOK)
+
+			usageGroup, err := decodeUsageResult(response)
+			So(err, ShouldBeNil)
+			So(usageGroup, ShouldNotBeEmpty)
+			So(usageGroup[0].Mtime.Year(), ShouldBeLessThanOrEqualTo, 9999)
+			So(usageGroup[0].DateNoSpace, ShouldEqual, time.Unix(0, 0).UTC())
+			So(usageGroup[0].DateNoFiles, ShouldEqual, time.Unix(0, 0).UTC())
+
+			response, err = query(s, EndPointBasedirUsageUser, "")
+			So(err, ShouldBeNil)
+			So(response.Code, ShouldEqual, http.StatusOK)
+
+			usageUser, err := decodeUsageResult(response)
+			So(err, ShouldBeNil)
+			So(usageUser, ShouldNotBeEmpty)
+			So(usageUser[0].Mtime.Year(), ShouldBeLessThanOrEqualTo, 9999)
+		})
+
 		Convey("prewarmCaches fills caches with JSON and gzip", func() {
 			path, err := CreateExampleDBsCustomIDs(t, uid, gids[0], gids[1], refTime)
 			So(err, ShouldBeNil)
