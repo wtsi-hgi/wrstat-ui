@@ -36,6 +36,7 @@ import (
 	"encoding/json"
 	"io"
 	"sync"
+	"time"
 
 	gas "github.com/wtsi-hgi/go-authserver"
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
@@ -195,6 +196,8 @@ func (s *Server) buildCache(
 		return err
 	}
 
+	results = sanitiseUsageTimes(results, time.Now().UTC())
+
 	jsonData, err := json.Marshal(results)
 	if err != nil {
 		return err
@@ -211,6 +214,24 @@ func (s *Server) buildCache(
 	}
 
 	return nil
+}
+
+func sanitiseUsageTimes(results []*basedirs.Usage, now time.Time) []*basedirs.Usage {
+	out := make([]*basedirs.Usage, len(results))
+
+	for i, usage := range results {
+		if usage == nil {
+			continue
+		}
+
+		clone := *usage
+		clone.Mtime = sanitiseJSONTime(clone.Mtime, now)
+		clone.DateNoSpace = sanitiseJSONTime(clone.DateNoSpace, time.Unix(0, 0).UTC())
+		clone.DateNoFiles = sanitiseJSONTime(clone.DateNoFiles, time.Unix(0, 0).UTC())
+		out[i] = &clone
+	}
+
+	return out
 }
 
 // compressGzip compresses JSON into gzip format.
@@ -247,4 +268,13 @@ func (s *Server) collectUsage(
 	}
 
 	return results, nil
+}
+
+func sanitiseJSONTime(t, fallback time.Time) time.Time {
+	year := t.Year()
+	if year < 0 || year > 9999 {
+		return fallback
+	}
+
+	return t
 }

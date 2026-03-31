@@ -538,6 +538,54 @@ func TestServer(t *testing.T) {
 			So(err.Error(), ShouldContainSubstring, "mount timestamps error")
 		})
 
+		Convey("SetProvider sanitises invalid usage times during cache prewarm", func() {
+			path, err := CreateExampleDBsCustomIDs(t, uid, gids[0], gids[1], refTime)
+			So(err, ShouldBeNil)
+
+			ownersPath, err := internaldata.CreateOwnersCSV(t, internaldata.ExampleOwnersCSV)
+			So(err, ShouldBeNil)
+
+			p, err := BuildTestProvider(t, []string{path}, ownersPath, time.Unix(refTime, 0))
+			So(err, ShouldBeNil)
+
+			tp, ok := p.(*testProvider)
+			So(ok, ShouldBeTrue)
+
+			invalidYear := time.Date(10000, time.January, 1, 0, 0, 0, 0, time.UTC)
+			tpMBD, ok := tp.bd.(*memBaseDirs)
+			So(ok, ShouldBeTrue)
+			So(tpMBD.groupUsage[db.DGUTAgeAll], ShouldNotBeEmpty)
+			So(tpMBD.userUsage[db.DGUTAgeAll], ShouldNotBeEmpty)
+
+			tpMBD.groupUsage[db.DGUTAgeAll][0].Mtime = invalidYear
+			tpMBD.groupUsage[db.DGUTAgeAll][0].DateNoSpace = invalidYear
+			tpMBD.groupUsage[db.DGUTAgeAll][0].DateNoFiles = invalidYear
+			tpMBD.userUsage[db.DGUTAgeAll][0].Mtime = invalidYear
+
+			err = s.SetProvider(tp)
+			So(err, ShouldBeNil)
+
+			response, err := query(s, EndPointBasedirUsageGroup, "")
+			So(err, ShouldBeNil)
+			So(response.Code, ShouldEqual, http.StatusOK)
+
+			usageGroup, err := decodeUsageResult(response)
+			So(err, ShouldBeNil)
+			So(usageGroup, ShouldNotBeEmpty)
+			So(usageGroup[0].Mtime.Year(), ShouldBeLessThanOrEqualTo, 9999)
+			So(usageGroup[0].DateNoSpace, ShouldEqual, time.Unix(0, 0).UTC())
+			So(usageGroup[0].DateNoFiles, ShouldEqual, time.Unix(0, 0).UTC())
+
+			response, err = query(s, EndPointBasedirUsageUser, "")
+			So(err, ShouldBeNil)
+			So(response.Code, ShouldEqual, http.StatusOK)
+
+			usageUser, err := decodeUsageResult(response)
+			So(err, ShouldBeNil)
+			So(usageUser, ShouldNotBeEmpty)
+			So(usageUser[0].Mtime.Year(), ShouldBeLessThanOrEqualTo, 9999)
+		})
+
 		Reset(func() { s.Stop() })
 
 		Convey("Server updates when provider updates", func() {

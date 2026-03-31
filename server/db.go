@@ -49,9 +49,10 @@ func validateProvider(p provider.Provider) (basedirs.Reader, error) {
 
 func mountTimestampsToUnixSeconds(mt map[string]time.Time) map[string]int64 {
 	out := make(map[string]int64, len(mt))
+	now := time.Now().UTC()
 
 	for mountKey, t := range mt {
-		out[mountKey] = t.Unix()
+		out[mountKey] = sanitiseJSONTime(t, now).Unix()
 	}
 
 	return out
