@@ -786,6 +786,35 @@ func TestServer(t *testing.T) {
 			So(len(s.userUsageCache.gzipData), ShouldBeGreaterThan, 0)
 		})
 
+		Convey("prewarmCaches keeps both caches unchanged if user cache build fails", func() {
+			path, err := CreateExampleDBsCustomIDs(t, uid, gids[0], gids[1], refTime)
+			So(err, ShouldBeNil)
+
+			ownersPath, err := internaldata.CreateOwnersCSV(t, internaldata.ExampleOwnersCSV)
+			So(err, ShouldBeNil)
+
+			p, err := BuildTestProvider(t, []string{path}, ownersPath, time.Unix(refTime, 0))
+			So(err, ShouldBeNil)
+			err = s.SetProvider(p)
+			So(err, ShouldBeNil)
+
+			s.mu.RLock()
+			initialGroupCache := s.groupUsageCache
+			initialUserCache := s.userUsageCache
+			s.mu.RUnlock()
+
+			err = s.prewarmCaches(badUserUsageReader{Reader: s.basedirs, err: errMountTimestamps})
+			So(err, ShouldEqual, errMountTimestamps)
+
+			s.mu.RLock()
+			deferredGroupCache := s.groupUsageCache
+			deferredUserCache := s.userUsageCache
+			s.mu.RUnlock()
+
+			So(deferredGroupCache, ShouldResemble, initialGroupCache)
+			So(deferredUserCache, ShouldResemble, initialUserCache)
+		})
+
 		Convey("Provider update refreshes server timestamps", func() {
 			ownersPath, err := internaldata.CreateOwnersCSV(t, internaldata.ExampleOwnersCSV)
 			So(err, ShouldBeNil)
@@ -1928,6 +1957,15 @@ func decodeHistoryResult(response *httptest.ResponseRecorder) ([]basedirs.Histor
 	err := json.NewDecoder(response.Body).Decode(&result)
 
 	return result, err
+}
+
+type badUserUsageReader struct {
+	basedirs.Reader
+	err error
+}
+
+func (b badUserUsageReader) UserUsage(db.DirGUTAge) ([]*basedirs.Usage, error) {
+	return nil, b.err
 }
 
 type nilBaseDirsProvider struct{}

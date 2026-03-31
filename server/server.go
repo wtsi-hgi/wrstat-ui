@@ -178,42 +178,50 @@ func (s *Server) stop() {
 // usage data into JSON and gzip. so serveGzippedCache can serve quickly.
 // Returns an error if any cache build fails.
 func (s *Server) prewarmCaches(bd basedirs.Reader) error {
-	if err := s.buildCache(bd.GroupUsage, &s.groupUsageCache); err != nil {
+	groupCache, err := s.buildCache(bd.GroupUsage)
+	if err != nil {
 		return err
 	}
 
-	return s.buildCache(bd.UserUsage, &s.userUsageCache)
-}
-
-// buildCache computes usage data, serialises it, compresses it, and stores it
-// in the cache.
-func (s *Server) buildCache(
-	usageFunc func(db.DirGUTAge) ([]*basedirs.Usage, error),
-	cache *usageCache,
-) error {
-	results, err := s.collectUsage(usageFunc)
+	userCache, err := s.buildCache(bd.UserUsage)
 	if err != nil {
 		return err
+	}
+
+	s.mu.Lock()
+	s.groupUsageCache = groupCache
+	s.userUsageCache = userCache
+	s.mu.Unlock()
+
+	return nil
+}
+
+// buildCache computes usage data, serialises it, compresses it, and returns
+// the fully built cache.
+func (s *Server) buildCache(
+	usageFunc func(db.DirGUTAge) ([]*basedirs.Usage, error),
+) (usageCache, error) {
+	results, err := s.collectUsage(usageFunc)
+	if err != nil {
+		return usageCache{}, err
 	}
 
 	results = sanitiseUsageTimes(results, time.Now().UTC())
 
 	jsonData, err := json.Marshal(results)
 	if err != nil {
-		return err
+		return usageCache{}, err
 	}
 
 	gzipData, err := compressGzip(jsonData)
 	if err != nil {
-		return err
+		return usageCache{}, err
 	}
 
-	*cache = usageCache{
+	return usageCache{
 		jsonData: jsonData,
 		gzipData: gzipData,
-	}
-
-	return nil
+	}, nil
 }
 
 func sanitiseUsageTimes(results []*basedirs.Usage, now time.Time) []*basedirs.Usage {
