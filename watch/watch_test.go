@@ -92,6 +92,7 @@ func TestWatch(t *testing.T) {
 				"/path/to/quota",
 				"/path/to/basedirs.config",
 				"/path/to/mounts",
+				0,
 				"",
 				"",
 				nil,
@@ -120,15 +121,30 @@ func TestWatch(t *testing.T) {
 						Cores: 2,
 						Disk:  1,
 					},
-					Override: 1,
+					Override: 0,
 					Retries:  30,
 					State:    jobqueue.JobStateDelayed,
 				},
 			})
 		})
 
+		Convey("Watch overrides summarise RAM when min mem is set", func() {
+			err = watch([]string{inputDir}, "", outputDir, "/path/to/quota",
+				"/path/to/basedirs.config", "/path/to/mounts", 16, "", "", nil)
+			So(err, ShouldBeNil)
+
+			pw.Close()
+
+			<-wrWrittenCh
+
+			So(jobs, ShouldHaveLength, 1)
+			So(jobs[0].Requirements, ShouldNotBeNil)
+			So(jobs[0].Requirements.RAM, ShouldEqual, 16384)
+			So(jobs[0].Override, ShouldEqual, 1)
+		})
+
 		Convey("Watch leaves job requirements other nil when no queue settings are provided", func() {
-			err = watch([]string{inputDir}, "", outputDir, "/path/to/quota", "/path/to/basedirs.config", "", "", "", nil)
+			err = watch([]string{inputDir}, "", outputDir, "/path/to/quota", "/path/to/basedirs.config", "", 0, "", "", nil)
 			So(err, ShouldBeNil)
 
 			pw.Close()
@@ -141,7 +157,7 @@ func TestWatch(t *testing.T) {
 		})
 
 		Convey("Watch passes queue through to job requirements other", func() {
-			err = watch([]string{inputDir}, "", outputDir, "/path/to/quota", "/path/to/basedirs.config", "", "myq", "", nil)
+			err = watch([]string{inputDir}, "", outputDir, "/path/to/quota", "/path/to/basedirs.config", "", 0, "myq", "", nil)
 			So(err, ShouldBeNil)
 
 			pw.Close()
@@ -156,7 +172,7 @@ func TestWatch(t *testing.T) {
 		})
 
 		Convey("Watch passes queues to avoid through to job requirements other", func() {
-			err = watch([]string{inputDir}, "", outputDir, "/path/to/quota", "/path/to/basedirs.config", "", "", "badq", nil)
+			err = watch([]string{inputDir}, "", outputDir, "/path/to/quota", "/path/to/basedirs.config", "", 0, "", "badq", nil)
 			So(err, ShouldBeNil)
 
 			pw.Close()
@@ -171,7 +187,8 @@ func TestWatch(t *testing.T) {
 		})
 
 		Convey("Watch passes queue and queues to avoid through to job requirements other", func() {
-			err = watch([]string{inputDir}, "", outputDir, "/path/to/quota", "/path/to/basedirs.config", "", "q1,q2", "q3", nil)
+			err = watch([]string{inputDir}, "", outputDir, "/path/to/quota",
+				"/path/to/basedirs.config", "", 0, "q1,q2", "q3", nil)
 			So(err, ShouldBeNil)
 
 			pw.Close()
@@ -195,7 +212,8 @@ func TestWatch(t *testing.T) {
 			err = os.Chdir(parentDir)
 			So(err, ShouldBeNil)
 
-			err := watch([]string{relInput}, "myGroup", relOutput, "/path/to/quota", "/path/to/basedirs.config", "", "", "", nil)
+			err := watch([]string{relInput}, "myGroup", relOutput, "/path/to/quota",
+				"/path/to/basedirs.config", "", 0, "", "", nil)
 
 			errr := os.Chdir(cwd)
 			So(errr, ShouldBeNil)
@@ -223,7 +241,7 @@ func TestWatch(t *testing.T) {
 						Cores: 2,
 						Disk:  1,
 					},
-					Override: 1,
+					Override: 0,
 					Retries:  30,
 					State:    jobqueue.JobStateDelayed,
 				},
@@ -233,7 +251,7 @@ func TestWatch(t *testing.T) {
 		Convey("Watch will not reschedule a summarise if one has already started", func() {
 			So(os.Mkdir(filepath.Join(outputDir, ".12345_abc"), 0755), ShouldBeNil)
 
-			err := watch([]string{inputDir}, "", outputDir, "/path/to/quota", "/path/to/basedirs.config", "", "", "", nil)
+			err := watch([]string{inputDir}, "", outputDir, "/path/to/quota", "/path/to/basedirs.config", "", 0, "", "", nil)
 			So(err, ShouldBeNil)
 
 			pw.Close()
@@ -246,7 +264,7 @@ func TestWatch(t *testing.T) {
 		Convey("Watch will not reschedule a summarise if one has already completed", func() {
 			So(os.Mkdir(filepath.Join(outputDir, "12345_abc"), 0755), ShouldBeNil)
 
-			err := watch([]string{inputDir}, "", outputDir, "/path/to/quota", "/path/to/basedirs.config", "", "", "", nil)
+			err := watch([]string{inputDir}, "", outputDir, "/path/to/quota", "/path/to/basedirs.config", "", 0, "", "", nil)
 			So(err, ShouldBeNil)
 
 			pw.Close()
@@ -261,7 +279,7 @@ func TestWatch(t *testing.T) {
 			So(os.Mkdir(existingOutput, 0755), ShouldBeNil)
 			So(createFile(filepath.Join(existingOutput, basedirBasename)), ShouldBeNil)
 
-			err := watch([]string{inputDir}, "", outputDir, "/path/to/quota", "/path/to/basedirs.config", "", "", "", nil)
+			err := watch([]string{inputDir}, "", outputDir, "/path/to/quota", "/path/to/basedirs.config", "", 0, "", "", nil)
 			So(err, ShouldBeNil)
 
 			pw.Close()
@@ -286,7 +304,7 @@ func TestWatch(t *testing.T) {
 						Cores: 2,
 						Disk:  1,
 					},
-					Override: 1,
+					Override: 0,
 					Retries:  30,
 					State:    jobqueue.JobStateDelayed,
 				},
@@ -306,6 +324,7 @@ func TestWatch(t *testing.T) {
 				"/path/to/quota",
 				"/path/to/basedirs.config",
 				"",
+				0,
 				"",
 				"",
 				nil,
@@ -333,7 +352,7 @@ func TestWatch(t *testing.T) {
 						Cores: 2,
 						Disk:  1,
 					},
-					Override: 1,
+					Override: 0,
 					Retries:  30,
 					State:    jobqueue.JobStateDelayed,
 				},
@@ -353,7 +372,7 @@ func TestWatch(t *testing.T) {
 						Cores: 2,
 						Disk:  1,
 					},
-					Override: 1,
+					Override: 0,
 					Retries:  30,
 					State:    jobqueue.JobStateDelayed,
 				},
@@ -387,7 +406,8 @@ func TestWatch(t *testing.T) {
 			}()
 
 			go func() {
-				errCh <- watch([]string{inputDir}, "", outputDir, "/path/to/quota", "/path/to/basedirs.config", "", "", "", logger)
+				errCh <- watch([]string{inputDir}, "", outputDir, "/path/to/quota",
+					"/path/to/basedirs.config", "", 0, "", "", logger)
 			}()
 
 			err = <-errCh

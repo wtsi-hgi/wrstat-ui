@@ -599,7 +599,7 @@ func TestWatch(t *testing.T) {
 					Time:  10 * time.Second,
 					Disk:  1,
 				},
-				Override: 1,
+				Override: 0,
 				Retries:  30,
 				State:    jobqueue.JobStateDelayed,
 			},
@@ -634,7 +634,7 @@ func TestWatch(t *testing.T) {
 					Time:  10 * time.Second,
 					Disk:  1,
 				},
-				Override: 1,
+				Override: 0,
 				Retries:  30,
 				State:    jobqueue.JobStateDelayed,
 			},
@@ -651,6 +651,16 @@ func TestWatch(t *testing.T) {
 			"scheduler_queue":        "q1,q2",
 			"scheduler_queues_avoid": "q3",
 		})
+
+		So(os.Remove(dotA), ShouldBeNil)
+
+		_, _, jobs, err = runWRStat("watch", "-o", output, "-q", "/some/quota.file", "-c", "basedirs.config",
+			"--min_mem=16", tmp)
+		So(err, ShouldBeNil)
+
+		So(len(jobs), ShouldBeGreaterThan, 0)
+		So(jobs[0].Requirements.RAM, ShouldEqual, 16384)
+		So(jobs[0].Override, ShouldEqual, 1)
 	})
 }
 

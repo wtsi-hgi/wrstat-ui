@@ -34,6 +34,7 @@ import (
 
 var (
 	group            string
+	watchMinMem      int
 	watchQueue       string
 	watchQueuesAvoid string
 )
@@ -69,6 +70,10 @@ The --queues flag restricts wr submissions to the given comma-separated queue
 names, while --queues_avoid tells wr which comma-separated queues it should
 avoid when scheduling those summarise jobs.
 
+The --min_mem flag sets a minimum RAM request in GB for the summarise jobs.
+When set above 0, wr will prefer that higher RAM requirement over learned
+values.
+
 The --group flag can be specified to override the unix group with which the
 summarise subcommands will be run.
 `,
@@ -84,6 +89,7 @@ summarise subcommands will be run.
 			quotaPath,
 			basedirsConfig,
 			mounts,
+			watchMinMem,
 			watchQueue,
 			watchQueuesAvoid,
 			appLogger,
@@ -98,6 +104,7 @@ var (
 	errWatchNoOutput         = errors.New("no output files specified")
 	errWatchNoQuota          = errors.New("no quota file specified")
 	errWatchNoBasedirsConfig = errors.New("no basedirs config file specified")
+	errWatchBadMinMem        = errors.New("min_mem must be 0 or greater")
 )
 
 func checkWatchArgs(args []string) error {
@@ -117,6 +124,10 @@ func checkWatchArgs(args []string) error {
 		return errWatchNoBasedirsConfig
 	}
 
+	if watchMinMem < 0 {
+		return errWatchBadMinMem
+	}
+
 	return nil
 }
 
@@ -127,6 +138,7 @@ func init() {
 	watchcmd.Flags().StringVarP(&quotaPath, "quota", "q", "", "csv of gid,disk,size_quota,inode_quota")
 	watchcmd.Flags().StringVarP(&basedirsConfig, "config", "c", "", "path to basedirs config file")
 	watchcmd.Flags().StringVarP(&mounts, "mounts", "m", "", "path to a file containing a list of quoted mountpoints")
+	watchcmd.Flags().IntVar(&watchMinMem, "min_mem", 0, "minimum RAM in GB to request for summarise jobs")
 	watchcmd.Flags().StringVar(&watchQueue, "queues", "", "comma-separated queues to submit jobs to")
 	watchcmd.Flags().StringVar(&watchQueuesAvoid, "queues_avoid", "", "comma-separated queues to avoid")
 	watchcmd.Flags().StringVarP(&group, "group", "g", "", "unix group to run the summarisers with")

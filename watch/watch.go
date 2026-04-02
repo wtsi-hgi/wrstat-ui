@@ -44,6 +44,7 @@ const (
 	basedirBasename = "basedirs.db"
 	summariseCPU    = 2
 	summariseMem    = 8192
+	mbPerGB         = 1024
 )
 
 var connectTimeout = 10 * time.Second //nolint:gochecknoglobals
@@ -53,13 +54,15 @@ var connectTimeout = 10 * time.Second //nolint:gochecknoglobals
 // subcommand on that data, if it has not already been run.
 //
 // The scheduled summarise subcommands will be given the output directory, quota
-// path and basedirs config path. The queue and queuesAvoid values are passed to
+// path and basedirs config path. minMemGB is in GB and acts as the minimum
+// requested memory for summarise jobs; higher learned or historical
+// requirements remain unchanged. The queue and queuesAvoid values are passed to
 // wr so scheduler submission can target or avoid specific queues.
 func Watch(inputDirs []string, group, outputDir, quotaPath, basedirsConfig,
-	mounts, queue, queuesAvoid string, logger log15.Logger) error {
+	mounts string, minMemGB int, queue, queuesAvoid string, logger log15.Logger) error {
 	for {
 		if err := watch(inputDirs, group, outputDir, quotaPath, basedirsConfig,
-			mounts, queue, queuesAvoid, logger); err != nil {
+			mounts, minMemGB, queue, queuesAvoid, logger); err != nil {
 			return err
 		}
 
@@ -71,7 +74,7 @@ func Watch(inputDirs []string, group, outputDir, quotaPath, basedirsConfig,
 	}
 }
 
-func watch(inputDirs []string, group, outputDir, quotaPath, basedirsConfig, mounts, queue, queuesAvoid string, logger log15.Logger) error { //nolint:gocognit,gocyclo,lll,funlen
+func watch(inputDirs []string, group, outputDir, quotaPath, basedirsConfig, mounts string, minMemGB int, queue, queuesAvoid string, logger log15.Logger) error { //nolint:gocognit,gocyclo,lll,funlen
 	s, err := client.New(client.SchedulerSettings{
 		Logger:      logger,
 		Timeout:     connectTimeout,
@@ -107,7 +110,7 @@ func watch(inputDirs []string, group, outputDir, quotaPath, basedirsConfig, moun
 		})
 
 		if err := scheduleSummarisers(s, group, inputDir, outputDir, quotaPath,
-			basedirsConfig, mounts, inputPaths, logger); err != nil {
+			basedirsConfig, mounts, minMemGB, inputPaths); err != nil {
 			return err
 		}
 	}
@@ -122,11 +125,12 @@ func entryExists(path string) bool {
 }
 
 func scheduleSummarisers(s *client.Scheduler, group, inputDir, outputDir, quotaPath, basedirsConfig, mounts string,
-	inputPaths []string, logger log15.Logger) error {
+	minMemGB int, inputPaths []string) error {
 	jobs := make([]*jobqueue.Job, 0, len(inputPaths))
 
 	for _, p := range inputPaths {
-		job, errr := createSummariseJob(group, inputDir, outputDir, filepath.Base(p), quotaPath, basedirsConfig, mounts, s)
+		job, errr := createSummariseJob(group, inputDir, outputDir, filepath.Base(p),
+			quotaPath, basedirsConfig, mounts, minMemGB, s)
 		if errr != nil {
 			return fmt.Errorf("error scheduling summarise (%s): %w", filepath.Base(p), errr)
 		}
@@ -144,7 +148,7 @@ func scheduleSummarisers(s *client.Scheduler, group, inputDir, outputDir, quotaP
 }
 
 func createSummariseJob(group, inputDir, outputDir, base, quotaPath, basedirsConfig, mounts string,
-	s *client.Scheduler) (*jobqueue.Job, error) {
+	minMemGB int, s *client.Scheduler) (*jobqueue.Job, error) {
 	dotOutputBase := filepath.Join(outputDir, "."+base)
 
 	if err := os.MkdirAll(dotOutputBase, dirPerms); err != nil {
@@ -156,10 +160,6 @@ func createSummariseJob(group, inputDir, outputDir, base, quotaPath, basedirsCon
 		return nil, err
 	}
 
-	reqs := client.DefaultRequirements()
-	reqs.Cores = summariseCPU
-	reqs.RAM = summariseMem
-
 	job := s.NewJob(
 		getJobCommand(dotOutputBase, previousBasedirsDB, quotaPath, basedirsConfig, mounts,
 			inputDir, base, outputDir),
@@ -167,8 +167,16 @@ func createSummariseJob(group, inputDir, outputDir, base, quotaPath, basedirsCon
 		"wrstat-ui-summarise",
 		"",
 		"",
-		reqs,
+		nil,
 	)
+
+	job.Requirements.Cores = summariseCPU
+	job.Requirements.RAM = summariseMem
+
+	if minMemGB > 0 {
+		job.Requirements.RAM = minMemGB * mbPerGB
+		job.Override = 1
+	}
 
 	job.Group = group
 
