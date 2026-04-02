@@ -54,7 +54,9 @@ var connectTimeout = 10 * time.Second //nolint:gochecknoglobals
 // subcommand on that data, if it has not already been run.
 //
 // The scheduled summarise subcommands will be given the output directory, quota
-// path and basedirs config path. The queue and queuesAvoid values are passed to
+// path and basedirs config path. minMemGB is in GB and acts as the minimum
+// requested memory for summarise jobs; higher learned or historical
+// requirements remain unchanged. The queue and queuesAvoid values are passed to
 // wr so scheduler submission can target or avoid specific queues.
 func Watch(inputDirs []string, group, outputDir, quotaPath, basedirsConfig,
 	mounts string, minMemGB int, queue, queuesAvoid string, logger log15.Logger) error {
