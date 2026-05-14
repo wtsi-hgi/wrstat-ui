@@ -13,7 +13,7 @@ default: install
 export CGO_ENABLED = 1
 
 build:
-	@cd server/static/wrstat; npm install && npm run build:prod
+	@cd server/static/wrstat; npm ci && npm run build:prod
 	go build -tags netgo ${LDFLAGS}
 
 buildembedded:
@@ -25,7 +25,7 @@ buildnonpm:
 
 install:
 	@rm -f ${GOPATH}/bin/wrstat-ui
-	@cd server/static/wrstat; npm install && npm run build:prod
+	@cd server/static/wrstat; npm ci && npm run build:prod
 	@echo Starting go install
 	@go install -tags netgo ${LDFLAGS}
 	@echo Installed to ${GOPATH}/bin/wrstat-ui
@@ -36,7 +36,7 @@ installnonpm:
 	@echo installed to ${GOPATH}/bin/wrstat-ui
 
 test:
-	@cd server/static/wrstat; npm install && CI= npm run build:prod
+	@cd server/static/wrstat; npm ci && CI= npm run build:prod
 	@go test -tags netgo --count 1 ./...
 	@cd server/static/wrstat; CI=1 npm test
 
@@ -51,7 +51,7 @@ bench:
 
 # curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh | sh -s -- -b $(go env GOPATH)/bin v2.4.0
 lint:
-	@cd server/static/wrstat; npm install && CI= npm run lint || true 
+	@cd server/static/wrstat; npm ci && CI= npm run lint || true
 	@golangci-lint run --timeout 2m
 # remove the || true when you get round to removing all anys
 
