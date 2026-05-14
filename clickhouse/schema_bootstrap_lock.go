@@ -48,6 +48,7 @@ const (
 	schemaBootstrapLockRetryDelay = 10 * time.Millisecond
 	schemaBootstrapLockFileMode   = 0o600
 	schemaBootstrapLockDirMode    = 0o700
+	minSchemaBootstrapTimeout     = defaultQueryTimeout
 )
 
 type schemaBootstrapLock struct {
@@ -160,10 +161,18 @@ func ensureSchemaWithBootstrapLock(
 		return err
 	}
 
-	queryCtx, cancel := queryContext(ctx, queryTO)
+	queryCtx, cancel := queryContext(ctx, schemaBootstrapTimeout(queryTO))
 	defer cancel()
 
 	return ensureSchema(queryCtx, execer)
+}
+
+func schemaBootstrapTimeout(queryTO time.Duration) time.Duration {
+	if queryTO > minSchemaBootstrapTimeout {
+		return queryTO
+	}
+
+	return minSchemaBootstrapTimeout
 }
 
 func schemaBootstrapLockPath(opts *ch.Options, database string) (string, error) {
