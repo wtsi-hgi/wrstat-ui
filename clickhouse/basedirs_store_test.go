@@ -14,9 +14,14 @@ import (
 const (
 	basedirsStoreTestCountGroupUsageQuery = "SELECT count() FROM wrstat_basedirs_group_usage " +
 		"WHERE mount_path = ? AND snapshot_id = toUUID(?)"
+	basedirsStoreTestCountGroupSubdirsQuery = "SELECT count() FROM wrstat_basedirs_group_subdirs " +
+		"WHERE mount_path = ? AND snapshot_id = toUUID(?)"
 	basedirsStoreTestCountHistoryQuery     = "SELECT count() FROM wrstat_basedirs_history WHERE mount_path = ? AND gid = ?"
 	basedirsStoreTestSelectQuotaDatesQuery = "SELECT date_no_space, date_no_files FROM wrstat_basedirs_group_usage " +
 		"WHERE mount_path = ? AND snapshot_id = toUUID(?) AND gid = ? AND age = ? LIMIT 1"
+	basedirsStoreTestCountUserSubdirsQuery = "SELECT count() FROM wrstat_basedirs_user_subdirs " +
+		"WHERE mount_path = ? AND snapshot_id = toUUID(?)"
+	basedirsStoreTestBaseDir = "/base/"
 )
 
 func TestClickHouseBaseDirsStore(t *testing.T) {
@@ -66,7 +71,7 @@ func TestClickHouseBaseDirsStore(t *testing.T) {
 		// Usage rows; age=all must be buffered and inserted in Finalise with quota dates.
 		uAll := &basedirs.Usage{
 			GID:         gid,
-			BaseDir:     "/base/",
+			BaseDir:     basedirsStoreTestBaseDir,
 			UIDs:        []uint32{1, 2},
 			UsageSize:   100,
 			QuotaSize:   200,
@@ -77,7 +82,7 @@ func TestClickHouseBaseDirsStore(t *testing.T) {
 		}
 		uA1M := &basedirs.Usage{
 			GID:         gid,
-			BaseDir:     "/base/",
+			BaseDir:     basedirsStoreTestBaseDir,
 			UIDs:        []uint32{1},
 			UsageSize:   10,
 			QuotaSize:   200,
@@ -117,6 +122,63 @@ func TestClickHouseBaseDirsStore(t *testing.T) {
 		So(gotNoFiles.Unix(), ShouldEqual, expNoFiles.Unix())
 	})
 
+	Convey("BaseDirsStore refreshes subdir batches after a mid-call flush", t, func() {
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 2 * time.Second
+
+		updatedAt := time.Unix(1710000000, 0).UTC()
+		sid := snapshotID(testMountPath, updatedAt).String()
+
+		store, err := NewBaseDirsStore(cfg)
+		So(err, ShouldBeNil)
+		So(store, ShouldNotBeNil)
+
+		impl, ok := store.(*chBaseDirsStore)
+		So(ok, ShouldBeTrue)
+
+		impl.SetBatchSize(1)
+		store.SetMountPath(testMountPath)
+		store.SetUpdatedAt(updatedAt)
+		So(store.Reset(), ShouldBeNil)
+
+		subdirs := []*basedirs.SubDir{
+			{
+				SubDir:       "first",
+				NumFiles:     1,
+				SizeFiles:    10,
+				LastModified: updatedAt,
+			},
+			{
+				SubDir:       "second",
+				NumFiles:     2,
+				SizeFiles:    20,
+				LastModified: updatedAt.Add(time.Minute),
+			},
+		}
+
+		So(store.PutGroupSubDirs(
+			basedirs.SubDirKey{ID: 7, BaseDir: basedirsStoreTestBaseDir, Age: db.DGUTAgeAll},
+			subdirs,
+		), ShouldBeNil)
+		So(store.PutUserSubDirs(
+			basedirs.SubDirKey{ID: 17, BaseDir: basedirsStoreTestBaseDir, Age: db.DGUTAgeAll},
+			subdirs,
+		), ShouldBeNil)
+		So(store.Finalise(), ShouldBeNil)
+		So(store.Close(), ShouldBeNil)
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		So(countRows(ctx, conn, basedirsStoreTestCountGroupSubdirsQuery, testMountPath, sid), ShouldEqual, 2)
+		So(countRows(ctx, conn, basedirsStoreTestCountUserSubdirsQuery, testMountPath, sid), ShouldEqual, 2)
+	})
+
 	Convey("BaseDirsStore refuses to rewrite an active deterministic snapshot", t, func() {
 		th := newClickHouseTestHarness(t)
 		cfg := th.newConfig()
@@ -134,7 +196,7 @@ func TestClickHouseBaseDirsStore(t *testing.T) {
 		So(store.Reset(), ShouldBeNil)
 		So(store.PutGroupUsage(&basedirs.Usage{
 			GID:         7,
-			BaseDir:     "/base/",
+			BaseDir:     basedirsStoreTestBaseDir,
 			UIDs:        []uint32{1},
 			UsageSize:   10,
 			QuotaSize:   20,
@@ -219,7 +281,7 @@ func TestClickHouseBaseDirsStore(t *testing.T) {
 		), ShouldBeNil)
 		So(store.PutGroupUsage(&basedirs.Usage{
 			GID:         gid,
-			BaseDir:     "/base/",
+			BaseDir:     basedirsStoreTestBaseDir,
 			UIDs:        []uint32{1},
 			UsageSize:   10,
 			QuotaSize:   20,
@@ -254,7 +316,7 @@ func TestClickHouseBaseDirsStore(t *testing.T) {
 		), ShouldBeNil)
 		So(retryStore.PutGroupUsage(&basedirs.Usage{
 			GID:         gid,
-			BaseDir:     "/base/",
+			BaseDir:     basedirsStoreTestBaseDir,
 			UIDs:        []uint32{1},
 			UsageSize:   11,
 			QuotaSize:   20,
@@ -296,7 +358,7 @@ func TestClickHouseBaseDirsStore(t *testing.T) {
 		), ShouldBeNil)
 		So(store.PutGroupUsage(&basedirs.Usage{
 			GID:         gid,
-			BaseDir:     "/base/",
+			BaseDir:     basedirsStoreTestBaseDir,
 			UIDs:        []uint32{1},
 			UsageSize:   10,
 			QuotaSize:   20,
