@@ -101,8 +101,9 @@ func watch(inputDirs []string, group, outputDir, quotaPath, basedirsConfig, moun
 			return entryExists(filepath.Join(outputDir, base)) || entryExists(filepath.Join(outputDir, "."+base))
 		})
 
-		if err := scheduleSummarisers(s, group, inputDir, outputDir, quotaPath,
-			basedirsConfig, mounts, inputPaths, logger); err != nil {
+		if err := scheduleSummarisers(
+			s, group, inputDir, outputDir, quotaPath, basedirsConfig, mounts, inputPaths,
+		); err != nil {
 			return err
 		}
 	}
@@ -117,7 +118,7 @@ func entryExists(path string) bool {
 }
 
 func scheduleSummarisers(s *client.Scheduler, group, inputDir, outputDir, quotaPath, basedirsConfig, mounts string,
-	inputPaths []string, logger log15.Logger) error {
+	inputPaths []string) error {
 	jobs := make([]*jobqueue.Job, 0, len(inputPaths))
 
 	for _, p := range inputPaths {

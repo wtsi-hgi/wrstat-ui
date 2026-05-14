@@ -90,63 +90,6 @@ func (r bootstrapTestRow) ScanStruct(any) error {
 	return r.err
 }
 
-func waitForSchemaVersionBootstrapHelpers(
-	t *testing.T,
-	ctx context.Context,
-	syncDir string,
-	helperIDs []string,
-) {
-	t.Helper()
-
-	ticker := time.NewTicker(10 * time.Millisecond)
-	defer ticker.Stop()
-
-	for {
-		allReady := true
-
-		for _, helperID := range helperIDs {
-			_, err := os.Stat(schemaVersionBootstrapReadyPath(syncDir, helperID))
-			switch {
-			case err == nil:
-			case os.IsNotExist(err):
-				allReady = false
-			default:
-				t.Fatalf("failed to stat bootstrap helper %s ready file: %v", helperID, err)
-			}
-		}
-
-		if allReady {
-			return
-		}
-
-		select {
-		case <-ctx.Done():
-			t.Fatalf("bootstrap helpers did not reach schema insert barrier: %v", ctx.Err())
-		case <-ticker.C:
-		}
-	}
-}
-
-func schemaVersionBootstrapReadyPath(syncDir, helperID string) string {
-	return filepath.Join(
-		syncDir,
-		schemaVersionBootstrapReadyFilePrefix+helperID,
-	)
-}
-
-func tableEngine(ctx context.Context, t *testing.T, conn ch.Conn, database, table string) string {
-	t.Helper()
-
-	row := conn.QueryRow(ctx, testSystemTableEngineQuery, database, table)
-
-	var engine string
-	if err := row.Scan(&engine); err != nil {
-		t.Fatalf("failed to scan table engine: %v", err)
-	}
-
-	return engine
-}
-
 type bootstrapTestConn struct {
 	pingErr error
 	execErr error
@@ -229,7 +172,7 @@ func TestConnectAndBootstrap(t *testing.T) {
 
 		cfg := Config{
 			DSN:      "clickhouse://127.0.0.1:9000/default?database=wrstat",
-			Database: "wrstat",
+			Database: testDatabaseName,
 		}
 
 		opts, err := optionsFromConfig(cfg)
@@ -257,7 +200,7 @@ func TestConnectAndBootstrap(t *testing.T) {
 
 			So(connectErr, ShouldBeNil)
 			So(conn, ShouldEqual, targetConn)
-			So(openedDatabases, ShouldResemble, []string{"wrstat"})
+			So(openedDatabases, ShouldResemble, []string{testDatabaseName})
 			So(targetConn.closed.Load(), ShouldBeFalse)
 		})
 
@@ -298,212 +241,13 @@ func TestConnectAndBootstrap(t *testing.T) {
 
 			So(connectErr, ShouldBeNil)
 			So(conn, ShouldEqual, readyConn)
-			So(openedDatabases, ShouldResemble, []string{"wrstat", defaultDatabaseName, "wrstat"})
+			So(openedDatabases, ShouldResemble, []string{testDatabaseName, defaultDatabaseName, testDatabaseName})
 			So(adminConn.executedQueries(), ShouldResemble, []string{createDatabaseStmtPrefix + "`wrstat`"})
 			So(missingConn.closed.Load(), ShouldBeTrue)
 			So(adminConn.closed.Load(), ShouldBeTrue)
 			So(readyConn.closed.Load(), ShouldBeFalse)
 		})
 	})
-}
-
-func TestNewClientBootstrapsSchema(t *testing.T) {
-	Convey("NewClient bootstraps database and schema", t, func() {
-		os.Setenv("WRSTAT_ENV", "test")
-
-		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
-
-		th := newClickHouseTestHarness(t)
-		cfg := th.newConfig()
-		cfg.PollInterval = time.Second
-		cfg.QueryTimeout = 5 * time.Second
-
-		c, err := NewClient(cfg)
-		So(err, ShouldBeNil)
-		So(c, ShouldNotBeNil)
-		So(c.Close(), ShouldBeNil)
-
-		versions := th.schemaVersions(cfg)
-		So(versions, ShouldResemble, []uint32{1})
-	})
-
-	Convey("NewClient bootstraps the full schema", t, func() {
-		os.Setenv("WRSTAT_ENV", "test")
-
-		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
-
-		th := newClickHouseTestHarness(t)
-		cfg := th.newConfig()
-		cfg.PollInterval = time.Second
-		cfg.QueryTimeout = 5 * time.Second
-
-		c, err := NewClient(cfg)
-		So(err, ShouldBeNil)
-		So(c, ShouldNotBeNil)
-		Reset(func() { So(c.Close(), ShouldBeNil) })
-
-		conn := th.openConn(cfg.DSN)
-
-		Reset(func() { So(conn.Close(), ShouldBeNil) })
-
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-
-		tables := listTableNames(ctx, t, conn, cfg.Database)
-		So(tables, ShouldContain, "wrstat_schema_version")
-		So(tables, ShouldContain, "wrstat_mounts")
-		So(tables, ShouldContain, "wrstat_mounts_active")
-		So(tables, ShouldContain, "wrstat_dguta")
-		So(tables, ShouldContain, "wrstat_children")
-		So(tables, ShouldContain, "wrstat_basedirs_group_usage")
-		So(tables, ShouldContain, "wrstat_basedirs_user_usage")
-		So(tables, ShouldContain, "wrstat_basedirs_group_subdirs")
-		So(tables, ShouldContain, "wrstat_basedirs_user_subdirs")
-		So(tables, ShouldContain, "wrstat_basedirs_history")
-		So(tables, ShouldContain, "wrstat_files")
-
-		cols := listColumnNames(ctx, t, conn, cfg.Database, "wrstat_mounts_active")
-		So(cols, ShouldContain, "mount_path")
-		So(cols, ShouldContain, "snapshot_id")
-		So(cols, ShouldContain, "updated_at")
-
-		So(tableEngine(ctx, t, conn, cfg.Database, "wrstat_schema_version"), ShouldEqual, "TinyLog")
-	})
-}
-
-func listTableNames(ctx context.Context, t *testing.T, conn ch.Conn, database string) []string {
-	t.Helper()
-
-	rows, err := conn.Query(ctx, testSystemTablesQuery, database)
-	if err != nil {
-		t.Fatalf("failed to query system.tables: %v", err)
-	}
-
-	defer func() { _ = rows.Close() }()
-
-	names := make([]string, 0, 16)
-
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			t.Fatalf("failed to scan table name: %v", err)
-		}
-
-		names = append(names, name)
-	}
-
-	sort.Strings(names)
-
-	return names
-}
-
-func listColumnNames(
-	ctx context.Context,
-	t *testing.T,
-	conn ch.Conn,
-	database string,
-	table string,
-) []string {
-	t.Helper()
-
-	rows, err := conn.Query(
-		ctx,
-		testSystemColumnsQuery,
-		database,
-		table,
-	)
-	if err != nil {
-		t.Fatalf("failed to query system.columns: %v", err)
-	}
-
-	defer func() { _ = rows.Close() }()
-
-	names := make([]string, 0, 16)
-
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			t.Fatalf("failed to scan column name: %v", err)
-		}
-
-		names = append(names, name)
-	}
-
-	sort.Strings(names)
-
-	return names
-}
-
-func runSchemaVersionBootstrapHelperProcess(t *testing.T) {
-	t.Helper()
-
-	helperID := os.Getenv(schemaVersionBootstrapHelperIDEnv)
-	syncDir := os.Getenv(schemaVersionBootstrapSyncDirEnv)
-	queryTimeout := 5 * time.Second
-
-	if rawTimeout := os.Getenv(schemaVersionBootstrapQueryTimeoutEnv); rawTimeout != "" {
-		parsedTimeout, err := time.ParseDuration(rawTimeout)
-		if err != nil {
-			t.Fatalf("bootstrap helper invalid query timeout %q: %v", rawTimeout, err)
-		}
-
-		queryTimeout = parsedTimeout
-	}
-
-	cfg := Config{
-		DSN:          os.Getenv(schemaVersionBootstrapDSNEnv),
-		Database:     os.Getenv(schemaVersionBootstrapDatabaseEnv),
-		PollInterval: time.Second,
-		QueryTimeout: queryTimeout,
-	}
-
-	if helperID == "" || syncDir == "" || cfg.DSN == "" || cfg.Database == "" {
-		t.Fatal("bootstrap helper missing configuration")
-	}
-
-	if err := os.WriteFile(
-		schemaVersionBootstrapReadyPath(syncDir, helperID),
-		[]byte("ready"),
-		0o600,
-	); err != nil {
-		t.Fatalf("failed to write bootstrap ready file: %v", err)
-	}
-
-	waitForSchemaVersionBootstrapRelease(t, syncDir)
-
-	client, err := NewClient(cfg)
-	if err != nil {
-		t.Fatalf("bootstrap helper %s failed to create client: %v", helperID, err)
-	}
-
-	if err := client.Close(); err != nil {
-		t.Fatalf("bootstrap helper %s failed to close client: %v", helperID, err)
-	}
-}
-
-func waitForSchemaVersionBootstrapRelease(t *testing.T, syncDir string) {
-	t.Helper()
-
-	deadline := time.Now().Add(5 * time.Second)
-	releasePath := schemaVersionBootstrapReleasePath(syncDir)
-
-	for time.Now().Before(deadline) {
-		_, err := os.Stat(releasePath)
-		switch {
-		case err == nil:
-			return
-		case os.IsNotExist(err):
-			time.Sleep(10 * time.Millisecond)
-		default:
-			t.Fatalf("failed to stat bootstrap release file: %v", err)
-		}
-	}
-
-	t.Fatalf("timed out waiting for bootstrap release file %q", releasePath)
-}
-
-func schemaVersionBootstrapReleasePath(syncDir string) string {
-	return filepath.Join(syncDir, schemaVersionBootstrapReleaseFile)
 }
 
 type schemaVersionTestStore struct {
@@ -657,6 +401,126 @@ func (r *schemaVersionTestRows) Err() error {
 	return nil
 }
 
+func waitForSchemaVersionBootstrapHelpers(
+	t *testing.T,
+	ctx context.Context,
+	syncDir string,
+	helperIDs []string,
+) {
+	t.Helper()
+
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		allReady := true
+
+		for _, helperID := range helperIDs {
+			_, err := os.Stat(schemaVersionBootstrapReadyPath(syncDir, helperID))
+			switch {
+			case err == nil:
+			case os.IsNotExist(err):
+				allReady = false
+			default:
+				t.Fatalf("failed to stat bootstrap helper %s ready file: %v", helperID, err)
+			}
+		}
+
+		if allReady {
+			return
+		}
+
+		select {
+		case <-ctx.Done():
+			t.Fatalf("bootstrap helpers did not reach schema insert barrier: %v", ctx.Err())
+		case <-ticker.C:
+		}
+	}
+}
+
+func schemaVersionBootstrapReadyPath(syncDir, helperID string) string {
+	return filepath.Join(
+		syncDir,
+		schemaVersionBootstrapReadyFilePrefix+helperID,
+	)
+}
+
+func listTableNames(ctx context.Context, t *testing.T, conn ch.Conn, database string) []string {
+	t.Helper()
+
+	rows, err := conn.Query(ctx, testSystemTablesQuery, database)
+	if err != nil {
+		t.Fatalf("failed to query system.tables: %v", err)
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	names := make([]string, 0, 16)
+
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			t.Fatalf("failed to scan table name: %v", err)
+		}
+
+		names = append(names, name)
+	}
+
+	sort.Strings(names)
+
+	return names
+}
+
+func listColumnNames(
+	ctx context.Context,
+	t *testing.T,
+	conn ch.Conn,
+	database string,
+	table string,
+) []string {
+	t.Helper()
+
+	rows, err := conn.Query(
+		ctx,
+		testSystemColumnsQuery,
+		database,
+		table,
+	)
+	if err != nil {
+		t.Fatalf("failed to query system.columns: %v", err)
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	names := make([]string, 0, 16)
+
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			t.Fatalf("failed to scan column name: %v", err)
+		}
+
+		names = append(names, name)
+	}
+
+	sort.Strings(names)
+
+	return names
+}
+
+func tableEngine(ctx context.Context, t *testing.T, conn ch.Conn, database, table string) string {
+	t.Helper()
+
+	row := conn.QueryRow(ctx, testSystemTableEngineQuery, database, table)
+
+	var engine string
+	if err := row.Scan(&engine); err != nil {
+		t.Fatalf("failed to scan table engine: %v", err)
+	}
+
+	return engine
+}
+
 type schemaVersionTestConn struct {
 	store *schemaVersionTestStore
 }
@@ -719,6 +583,142 @@ func (c *schemaVersionTestConn) Stats() driver.Stats {
 
 func (c *schemaVersionTestConn) Close() error {
 	return nil
+}
+
+func TestNewClientBootstrapsSchema(t *testing.T) {
+	Convey("NewClient bootstraps database and schema", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.PollInterval = time.Second
+		cfg.QueryTimeout = 5 * time.Second
+
+		c, err := NewClient(cfg)
+		So(err, ShouldBeNil)
+		So(c, ShouldNotBeNil)
+		So(c.Close(), ShouldBeNil)
+
+		versions := th.schemaVersions(cfg)
+		So(versions, ShouldResemble, []uint32{1})
+	})
+
+	Convey("NewClient bootstraps the full schema", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.PollInterval = time.Second
+		cfg.QueryTimeout = 5 * time.Second
+
+		c, err := NewClient(cfg)
+		So(err, ShouldBeNil)
+		So(c, ShouldNotBeNil)
+		Reset(func() { So(c.Close(), ShouldBeNil) })
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		tables := listTableNames(ctx, t, conn, cfg.Database)
+		So(tables, ShouldContain, "wrstat_schema_version")
+		So(tables, ShouldContain, "wrstat_mounts")
+		So(tables, ShouldContain, "wrstat_mounts_active")
+		So(tables, ShouldContain, "wrstat_dguta")
+		So(tables, ShouldContain, "wrstat_children")
+		So(tables, ShouldContain, "wrstat_basedirs_group_usage")
+		So(tables, ShouldContain, "wrstat_basedirs_user_usage")
+		So(tables, ShouldContain, "wrstat_basedirs_group_subdirs")
+		So(tables, ShouldContain, "wrstat_basedirs_user_subdirs")
+		So(tables, ShouldContain, "wrstat_basedirs_history")
+		So(tables, ShouldContain, "wrstat_files")
+
+		cols := listColumnNames(ctx, t, conn, cfg.Database, "wrstat_mounts_active")
+		So(cols, ShouldContain, "mount_path")
+		So(cols, ShouldContain, "snapshot_id")
+		So(cols, ShouldContain, "updated_at")
+
+		So(tableEngine(ctx, t, conn, cfg.Database, "wrstat_schema_version"), ShouldEqual, "TinyLog")
+	})
+}
+
+func runSchemaVersionBootstrapHelperProcess(t *testing.T) {
+	t.Helper()
+
+	helperID := os.Getenv(schemaVersionBootstrapHelperIDEnv)
+	syncDir := os.Getenv(schemaVersionBootstrapSyncDirEnv)
+	queryTimeout := 5 * time.Second
+
+	if rawTimeout := os.Getenv(schemaVersionBootstrapQueryTimeoutEnv); rawTimeout != "" {
+		parsedTimeout, err := time.ParseDuration(rawTimeout)
+		if err != nil {
+			t.Fatalf("bootstrap helper invalid query timeout %q: %v", rawTimeout, err)
+		}
+
+		queryTimeout = parsedTimeout
+	}
+
+	cfg := Config{
+		DSN:          os.Getenv(schemaVersionBootstrapDSNEnv),
+		Database:     os.Getenv(schemaVersionBootstrapDatabaseEnv),
+		PollInterval: time.Second,
+		QueryTimeout: queryTimeout,
+	}
+
+	if helperID == "" || syncDir == "" || cfg.DSN == "" || cfg.Database == "" {
+		t.Fatal("bootstrap helper missing configuration")
+	}
+
+	if err := os.WriteFile(
+		schemaVersionBootstrapReadyPath(syncDir, helperID),
+		[]byte("ready"),
+		0o600,
+	); err != nil {
+		t.Fatalf("failed to write bootstrap ready file: %v", err)
+	}
+
+	waitForSchemaVersionBootstrapRelease(t, syncDir)
+
+	client, err := NewClient(cfg)
+	if err != nil {
+		t.Fatalf("bootstrap helper %s failed to create client: %v", helperID, err)
+	}
+
+	if err := client.Close(); err != nil {
+		t.Fatalf("bootstrap helper %s failed to close client: %v", helperID, err)
+	}
+}
+
+func waitForSchemaVersionBootstrapRelease(t *testing.T, syncDir string) {
+	t.Helper()
+
+	deadline := time.Now().Add(5 * time.Second)
+	releasePath := schemaVersionBootstrapReleasePath(syncDir)
+
+	for time.Now().Before(deadline) {
+		_, err := os.Stat(releasePath)
+		switch {
+		case err == nil:
+			return
+		case os.IsNotExist(err):
+			time.Sleep(10 * time.Millisecond)
+		default:
+			t.Fatalf("failed to stat bootstrap release file: %v", err)
+		}
+	}
+
+	t.Fatalf("timed out waiting for bootstrap release file %q", releasePath)
+}
+
+func schemaVersionBootstrapReleasePath(syncDir string) string {
+	return filepath.Join(syncDir, schemaVersionBootstrapReleaseFile)
 }
 
 type schemaVersionBootstrapHelper struct {

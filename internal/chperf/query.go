@@ -45,6 +45,7 @@ const (
 	dirPickMaxCount     = 20000
 	dirPickMaxSteps     = 64
 	defaultExplainLimit = 1_000_000
+	queryInputDirKey    = "dir"
 )
 
 var (
@@ -377,12 +378,13 @@ func runSuite(
 }
 
 func buildOps(qctx queryContext, printf PrintfFunc) []op {
-	ops := []op{
+	ops := make([]op, 0, 8)
+	ops = append(ops,
 		opMountTimestamps(qctx),
 		opTreeDirInfo(qctx),
 		opGroupUsage(qctx),
 		opListDir(qctx),
-	}
+	)
 
 	ops = append(ops, opStatPath(qctx, printf)...)
 	ops = append(ops, opPermission(qctx))
@@ -431,7 +433,7 @@ func activeMountsFreshness(mt map[string]time.Time) []activeMountFreshness {
 func opTreeDirInfo(qctx queryContext) op {
 	return op{
 		name:   "tree_dirinfo",
-		inputs: map[string]any{"dir": qctx.dir},
+		inputs: map[string]any{queryInputDirKey: qctx.dir},
 		run: func(_ context.Context) error {
 			filter := &db.Filter{Age: db.DGUTAgeAll}
 			_, err := qctx.provider.Tree().DirInfo(qctx.dir, filter)
@@ -456,7 +458,7 @@ func opGroupUsage(qctx queryContext) op {
 func opListDir(qctx queryContext) op {
 	return op{
 		name:   "files_listdir",
-		inputs: map[string]any{"dir": qctx.dir},
+		inputs: map[string]any{queryInputDirKey: qctx.dir},
 		run: func(ctx context.Context) error {
 			_, err := qctx.client.ListDir(ctx, qctx.dir, 0)
 
@@ -486,9 +488,9 @@ func opPermission(qctx queryContext) op {
 	return op{
 		name: "permission_check",
 		inputs: map[string]any{
-			"dir":  qctx.dir,
-			"uid":  qctx.uid,
-			"gids": qctx.gids,
+			queryInputDirKey: qctx.dir,
+			"uid":            qctx.uid,
+			"gids":           qctx.gids,
 		},
 		run: func(ctx context.Context) error {
 			return qctx.client.PermissionAnyInDir(ctx, qctx.dir, qctx.uid, qctx.gids)

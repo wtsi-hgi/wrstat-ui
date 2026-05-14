@@ -85,6 +85,23 @@ const (
 	maxByte                       = 0xFF
 )
 
+const (
+	fileFieldPath         = "path"
+	fileFieldParentDir    = "parent_dir"
+	fileFieldName         = "name"
+	fileFieldExt          = "ext"
+	fileFieldEntryType    = "entry_type"
+	fileFieldSize         = "size"
+	fileFieldApparentSize = "apparent_size"
+	fileFieldUID          = "uid"
+	fileFieldGID          = "gid"
+	fileFieldATime        = "atime"
+	fileFieldMTime        = "mtime"
+	fileFieldCTime        = "ctime"
+	fileFieldInode        = "inode"
+	fileFieldNLink        = "nlink"
+)
+
 // FileRow represents a file or directory from wrstat_files.
 type FileRow struct {
 	Path         string
@@ -103,84 +120,17 @@ type FileRow struct {
 	Nlink        int64
 }
 
-func writeGlobToken(b *strings.Builder, pattern string, i *int) bool {
-	switch pattern[*i] {
-	case '*':
-		if *i+1 < len(pattern) && pattern[*i+1] == '*' {
-			if isZeroOrMoreDirsPattern(pattern, *i) {
-				b.WriteString("(?:[^/]+/)*")
-
-				*i += 2
-
-				return true
-			}
-
-			b.WriteString(".*")
-
-			(*i)++
-
-			return true
-		}
-
-		b.WriteString("[^/]*")
-
-		return true
-	case '?':
-		b.WriteString("[^/]")
-
-		return true
-	default:
-		return false
+func firstFileRow(rows fileRowIterator, fields []string) (*FileRow, error) {
+	if !rows.Next() {
+		return nil, errPathNotFound
 	}
-}
 
-func isZeroOrMoreDirsPattern(pattern string, idx int) bool {
-	return (idx == 0 || pattern[idx-1] == '/') && idx+2 < len(pattern) && pattern[idx+2] == '/'
-}
-
-func findByGlobBaseDirClause(matchCount int) string {
-	return "(f.parent_dir >= ? AND f.parent_dir < ? AND (" + matchOrList(matchCount) + "))"
-}
-
-// ListOptions controls ListDir behaviour.
-type ListOptions struct {
-	Fields []string
-	Limit  int64
-	Offset int64
-}
-
-// StatOptions controls StatPath behaviour.
-type StatOptions struct {
-	Fields []string
-}
-
-// FindOptions controls FindByGlob behaviour.
-type FindOptions struct {
-	Fields       []string
-	Limit        int64
-	Offset       int64
-	RequireOwner bool
-	UID          uint32
-	GIDs         []uint32
-}
-
-func defaultFileRowFields() []string {
-	return []string{
-		"path",
-		"parent_dir",
-		"name",
-		"ext",
-		"entry_type",
-		"size",
-		"apparent_size",
-		"uid",
-		"gid",
-		"atime",
-		"mtime",
-		"ctime",
-		"inode",
-		"nlink",
+	row := &FileRow{}
+	if err := scanFileRow(rows, fields, row); err != nil {
+		return nil, err
 	}
+
+	return row, nil
 }
 
 // StatPath returns metadata for an exact file path over the active snapshot of
@@ -213,6 +163,77 @@ func (c *Client) StatPath(ctx context.Context, path string, opts StatOptions) (*
 	return firstFileRow(rows, fields)
 }
 
+func statPathQuery(opts StatOptions) (string, []string, error) {
+	selectList, fields, err := fileRowSelectList(opts.Fields)
+	if err != nil {
+		return "", nil, err
+	}
+
+	return fmt.Sprintf(statPathQueryTemplate, selectList), fields, nil
+}
+
+func fileRowSelectList(fields []string) (string, []string, error) {
+	if len(fields) == 0 {
+		all := defaultFileRowFields()
+
+		return fileRowSelectAll, all, nil
+	}
+
+	out := make([]string, 0, len(fields))
+	for _, f := range fields {
+		col, ok := fileRowColumnForField(f)
+		if !ok {
+			return "", nil, unknownFileFieldError{Field: f}
+		}
+
+		out = append(out, col)
+	}
+
+	return strings.Join(out, ", "), fields, nil
+}
+
+func defaultFileRowFields() []string {
+	return []string{
+		fileFieldPath,
+		fileFieldParentDir,
+		fileFieldName,
+		fileFieldExt,
+		fileFieldEntryType,
+		fileFieldSize,
+		fileFieldApparentSize,
+		fileFieldUID,
+		fileFieldGID,
+		fileFieldATime,
+		fileFieldMTime,
+		fileFieldCTime,
+		fileFieldInode,
+		fileFieldNLink,
+	}
+}
+
+func fileRowColumnForField(field string) (string, bool) {
+	cols := map[string]string{
+		fileFieldPath:         "f.path",
+		fileFieldParentDir:    "f.parent_dir",
+		fileFieldName:         "f.name",
+		fileFieldExt:          "f.ext",
+		fileFieldEntryType:    "f.entry_type",
+		fileFieldSize:         "f.size",
+		fileFieldApparentSize: "f.apparent_size",
+		fileFieldUID:          "f.uid",
+		fileFieldGID:          "f.gid",
+		fileFieldATime:        "f.atime",
+		fileFieldMTime:        "f.mtime",
+		fileFieldCTime:        "f.ctime",
+		fileFieldInode:        "f.inode",
+		fileFieldNLink:        "f.nlink",
+	}
+
+	col, ok := cols[field]
+
+	return col, ok
+}
+
 // ListDir lists direct children (by parent_dir) for the given directory.
 func (c *Client) ListDir(ctx context.Context, dir string, opts ListOptions) ([]FileRow, error) {
 	if c == nil || c.conn == nil {
@@ -235,6 +256,53 @@ func (c *Client) ListDir(ctx context.Context, dir string, opts ListOptions) ([]F
 	defer cancel()
 
 	return c.listDirRows(qctx, q, fields, mountPath, parentDir, limit, opts.Offset)
+}
+
+func listDirQuery(opts ListOptions) (string, []string, error) {
+	selectList, fields, err := fileRowSelectList(opts.Fields)
+	if err != nil {
+		return "", nil, err
+	}
+
+	return fmt.Sprintf(listDirQueryTemplate, selectList), fields, nil
+}
+
+func listLimit(limit int64) int64 {
+	if limit > 0 {
+		return limit
+	}
+
+	return defaultFileLimit
+}
+
+func (c *Client) listDirRows(
+	ctx context.Context,
+	query string,
+	fields []string,
+	mountPath string,
+	parentDir string,
+	limit int64,
+	offset int64,
+) ([]FileRow, error) {
+	rows, err := c.conn.Query(ctx, query, mountPath, mountPath, parentDir, limit, offset)
+	if err != nil {
+		return nil, fmt.Errorf("clickhouse: failed to query ListDir: %w", err)
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	out := make([]FileRow, 0)
+
+	for rows.Next() {
+		var row FileRow
+		if err := scanFileRow(rows, fields, &row); err != nil {
+			return nil, err
+		}
+
+		out = append(out, row)
+	}
+
+	return out, nil
 }
 
 // FindByGlob finds file rows matching gitignore-style patterns under the given
@@ -285,30 +353,9 @@ func (c *Client) findByGlob(
 	return sliceLimitOffset(all, limit, opts.Offset), nil
 }
 
-func (c *Client) prepareFindByGlob(
-	baseDirs []string,
-	patterns []string,
-	opts FindOptions,
-) (string, []string, findByGlobExecPlan, bool, int64, int64, int64, int64, uint32, []uint32, error) {
-	selectList, fields, err := fileRowSelectList(opts.Fields)
-	if err != nil {
-		return "", nil, findByGlobExecPlan{}, false, 0, 0, 0, 0, 0, nil, err
-	}
-
-	baseDirsByMount, err := c.groupBaseDirsByMount(baseDirs)
-	if err != nil {
-		return "", nil, findByGlobExecPlan{}, false, 0, 0, 0, 0, 0, nil, err
-	}
-
-	plan := c.findByGlobPlan(baseDirsByMount, patterns)
-	useDirectOffset := plan.queryCount == 1
-
-	ownerEnabled, uid, gids := ownerFilterArgs(opts)
-
-	limit := listLimit(opts.Limit)
-	qLimit, qOffset := findByGlobQueryLimitOffset(limit, opts.Offset, useDirectOffset)
-
-	return selectList, fields, plan, useDirectOffset, limit, qLimit, qOffset, ownerEnabled, uid, gids, nil
+type findByGlobExecPlan struct {
+	queries    []findByGlobQuerySpec
+	queryCount int
 }
 
 func (c *Client) runFindByGlobPlan(
@@ -334,6 +381,12 @@ func (c *Client) runFindByGlobPlan(
 	}
 
 	return out, nil
+}
+
+type findByGlobQuerySpec struct {
+	mountPath    string
+	baseDirs     []string
+	patternChunk []string
 }
 
 func (c *Client) runFindByGlobQuerySpec(
@@ -362,6 +415,222 @@ func (c *Client) runFindByGlobQuerySpec(
 	)
 }
 
+func (c *Client) findByGlobQuery(
+	ctx context.Context,
+	selectList string,
+	fields []string,
+	mountPath string,
+	baseDirs []string,
+	patterns []string,
+	ownerEnabled int64,
+	uid uint32,
+	gids []uint32,
+	limit int64,
+	offset int64,
+) ([]FileRow, error) {
+	q, params := buildFindByGlobQueryAndParams(
+		selectList,
+		mountPath,
+		baseDirs,
+		patterns,
+		ownerEnabled,
+		uid,
+		gids,
+		limit,
+		offset,
+	)
+
+	qctx, cancel := context.WithTimeout(ctx, queryTimeout(c.cfg))
+	defer cancel()
+
+	return c.queryFileRows(qctx, "FindByGlob", q, fields, params...)
+}
+
+func buildFindByGlobQueryAndParams(
+	selectList string,
+	mountPath string,
+	baseDirs []string,
+	patterns []string,
+	ownerEnabled int64,
+	uid uint32,
+	gids []uint32,
+	limit int64,
+	offset int64,
+) (string, []any) {
+	baseDirClauses := make([]string, 0, len(baseDirs))
+	params := make([]any, 0, findByGlobParamsSharedCap+len(baseDirs)*(len(patterns)+findByGlobParamsPerBaseDirCap))
+	params = append(params, mountPath, mountPath)
+
+	for _, baseDir := range baseDirs {
+		compiled := compileGlobRegexes(baseDir, patterns)
+		baseDirClauses = append(baseDirClauses, findByGlobBaseDirClause(len(compiled)))
+		params = append(params, baseDir, prefixNext(baseDir))
+
+		for _, re := range compiled {
+			params = append(params, re)
+		}
+	}
+
+	q := fmt.Sprintf(findByGlobQueryTemplate, selectList, strings.Join(baseDirClauses, " OR "))
+
+	params = append(params, ownerEnabled, uid, gids, limit, offset)
+
+	return q, params
+}
+
+func compileGlobRegexes(baseDir string, patterns []string) []string {
+	escapedBase := regexp.QuoteMeta(baseDir)
+
+	out := make([]string, 0, len(patterns))
+	for _, p := range patterns {
+		out = append(out, globToRE2(escapedBase, p))
+	}
+
+	return out
+}
+
+func globToRE2(escapedBase string, pattern string) string {
+	var b strings.Builder
+	b.Grow(len(escapedBase) + len(pattern) + growExtraForAnchors)
+
+	b.WriteByte('^')
+	b.WriteString(escapedBase)
+
+	for i := 0; i < len(pattern); i++ {
+		if writeGlobToken(&b, pattern, &i) {
+			continue
+		}
+
+		writeRE2LiteralByte(&b, pattern[i])
+	}
+
+	b.WriteByte('$')
+
+	return b.String()
+}
+
+func writeGlobToken(b *strings.Builder, pattern string, i *int) bool {
+	switch pattern[*i] {
+	case '*':
+		if *i+1 < len(pattern) && pattern[*i+1] == '*' {
+			if isZeroOrMoreDirsPattern(pattern, *i) {
+				b.WriteString("(?:[^/]+/)*")
+
+				*i += 2
+
+				return true
+			}
+
+			b.WriteString(".*")
+
+			(*i)++
+
+			return true
+		}
+
+		b.WriteString("[^/]*")
+
+		return true
+	case '?':
+		b.WriteString("[^/]")
+
+		return true
+	default:
+		return false
+	}
+}
+
+func isZeroOrMoreDirsPattern(pattern string, idx int) bool {
+	return (idx == 0 || pattern[idx-1] == '/') && idx+2 < len(pattern) && pattern[idx+2] == '/'
+}
+
+func writeRE2LiteralByte(b *strings.Builder, c byte) {
+	switch c {
+	case '.', '+', '(', ')', '|', '[', ']', '{', '}', '^', '$', '\\':
+		b.WriteByte('\\')
+		b.WriteByte(c)
+	default:
+		b.WriteByte(c)
+	}
+}
+
+func findByGlobBaseDirClause(matchCount int) string {
+	return "(f.parent_dir >= ? AND f.parent_dir < ? AND (" + matchOrList(matchCount) + "))"
+}
+
+func matchOrList(n int) string {
+	if n <= 0 {
+		return "0"
+	}
+
+	out := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		out = append(out, "match(f.path, ?)")
+	}
+
+	return strings.Join(out, " OR ")
+}
+
+func prefixNext(prefix string) string {
+	if prefix == "" {
+		return "\x00"
+	}
+
+	b := []byte(prefix)
+	for i := len(b) - 1; i >= 0; i-- {
+		if b[i] != maxByte {
+			b[i]++
+
+			return string(b[:i+1])
+		}
+	}
+
+	return prefix + "\x00"
+}
+
+func (c *Client) queryFileRows(
+	ctx context.Context,
+	op string,
+	query string,
+	fields []string,
+	params ...any,
+) ([]FileRow, error) {
+	rows, err := c.conn.Query(ctx, query, params...)
+	if err != nil {
+		return nil, fmt.Errorf("clickhouse: failed to query %s: %w", op, err)
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	out := make([]FileRow, 0)
+
+	for rows.Next() {
+		var row FileRow
+		if err := scanFileRow(rows, fields, &row); err != nil {
+			return nil, err
+		}
+
+		out = append(out, row)
+	}
+
+	return out, nil
+}
+
+func scanFileRow(rows fileRowScanner, fields []string, out *FileRow) error {
+	state := &fileRowScanState{}
+
+	dests, err := state.destsFor(fields)
+	if err != nil {
+		return err
+	}
+
+	if err := rows.Scan(dests...); err != nil {
+		return fmt.Errorf("clickhouse: failed to scan file row: %w", err)
+	}
+
+	return state.applyTo(out)
+}
+
 func (c *Client) finishFindByGlob(in []FileRow) []FileRow {
 	if len(in) < minDedupeByPathLen {
 		return in
@@ -372,22 +641,323 @@ func (c *Client) finishFindByGlob(in []FileRow) []FileRow {
 	return dedupeByPath(in)
 }
 
-type findByGlobQuerySpec struct {
-	mountPath    string
-	baseDirs     []string
-	patternChunk []string
+func dedupeByPath(in []FileRow) []FileRow {
+	if len(in) < minDedupeByPathLen {
+		return in
+	}
+
+	out := in[:0]
+
+	var last string
+
+	for i, row := range in {
+		if i == 0 || row.Path != last {
+			out = append(out, row)
+			last = row.Path
+		}
+	}
+
+	return out
 }
 
-type findByGlobExecPlan struct {
-	queries    []findByGlobQuerySpec
-	queryCount int
+func sliceLimitOffset(in []FileRow, limit int64, offset int64) []FileRow {
+	if offset > 0 {
+		if offset >= int64(len(in)) {
+			return []FileRow{}
+		}
+
+		in = in[offset:]
+	}
+
+	if limit >= int64(len(in)) {
+		return in
+	}
+
+	return in[:limit]
+}
+
+// ListOptions controls ListDir behaviour.
+type ListOptions struct {
+	Fields []string
+	Limit  int64
+	Offset int64
+}
+
+// StatOptions controls StatPath behaviour.
+type StatOptions struct {
+	Fields []string
+}
+
+// FindOptions controls FindByGlob behaviour.
+type FindOptions struct {
+	Fields       []string
+	Limit        int64
+	Offset       int64
+	RequireOwner bool
+	UID          uint32
+	GIDs         []uint32
+}
+
+func (c *Client) prepareFindByGlob(
+	baseDirs []string,
+	patterns []string,
+	opts FindOptions,
+) (string, []string, findByGlobExecPlan, bool, int64, int64, int64, int64, uint32, []uint32, error) {
+	selectList, fields, err := fileRowSelectList(opts.Fields)
+	if err != nil {
+		return "", nil, findByGlobExecPlan{}, false, 0, 0, 0, 0, 0, nil, err
+	}
+
+	baseDirsByMount, err := c.groupBaseDirsByMount(baseDirs)
+	if err != nil {
+		return "", nil, findByGlobExecPlan{}, false, 0, 0, 0, 0, 0, nil, err
+	}
+
+	plan := c.findByGlobPlan(baseDirsByMount, patterns)
+	useDirectOffset := plan.queryCount == 1
+
+	ownerEnabled, uid, gids := ownerFilterArgs(opts)
+
+	limit := listLimit(opts.Limit)
+	qLimit, qOffset := findByGlobQueryLimitOffset(limit, opts.Offset, useDirectOffset)
+
+	return selectList, fields, plan, useDirectOffset, limit, qLimit, qOffset, ownerEnabled, uid, gids, nil
+}
+
+func findByGlobQueryLimitOffset(limit int64, offset int64, useDirectOffset bool) (int64, int64) {
+	if useDirectOffset {
+		return limit, offset
+	}
+
+	if offset <= 0 {
+		return limit, 0
+	}
+
+	if limit > math.MaxInt64-offset {
+		return math.MaxInt64, 0
+	}
+
+	return limit + offset, 0
+}
+
+func ownerFilterArgs(opts FindOptions) (int64, uint32, []uint32) {
+	ownerEnabled := int64(0)
+	if opts.RequireOwner {
+		ownerEnabled = 1
+	}
+
+	return ownerEnabled, opts.UID, ensureNonNilUInt32s(opts.GIDs)
+}
+
+func ensureNonNilUInt32s(in []uint32) []uint32 {
+	if in == nil {
+		return []uint32{}
+	}
+
+	return in
+}
+
+type unknownFileFieldError struct {
+	Field string
+}
+
+func (e unknownFileFieldError) Error() string {
+	return fmt.Sprintf("clickhouse: unknown file field %q", e.Field)
+}
+
+type fileRowScanner interface {
+	Scan(dest ...any) error
+}
+
+type fileRowIterator interface {
+	fileRowScanner
+	Next() bool
+}
+
+type fileRowConverted struct {
+	size         int64
+	apparentSize int64
+	inode        int64
+	nlink        int64
+}
+
+type fileRowScanState struct {
+	path      string
+	parentDir string
+	name      string
+	ext       string
+
+	entryType uint8
+	uid       uint32
+	gid       uint32
+
+	size         uint64
+	apparentSize uint64
+	inode        uint64
+	nlink        uint64
+
+	atime time.Time
+	mtime time.Time
+	ctime time.Time
+}
+
+func (s *fileRowScanState) destsFor(fields []string) ([]any, error) {
+	if len(fields) == 0 {
+		fields = defaultFileRowFields()
+	}
+
+	dests := make([]any, 0, len(fields))
+	for _, f := range fields {
+		dest, ok := s.destForField(f)
+		if !ok {
+			return nil, unknownFileFieldError{Field: f}
+		}
+
+		dests = append(dests, dest)
+	}
+
+	return dests, nil
+}
+
+func (s *fileRowScanState) destForField(field string) (any, bool) {
+	dests := map[string]any{
+		fileFieldPath:         &s.path,
+		fileFieldParentDir:    &s.parentDir,
+		fileFieldName:         &s.name,
+		fileFieldExt:          &s.ext,
+		fileFieldEntryType:    &s.entryType,
+		fileFieldSize:         &s.size,
+		fileFieldApparentSize: &s.apparentSize,
+		fileFieldUID:          &s.uid,
+		fileFieldGID:          &s.gid,
+		fileFieldATime:        &s.atime,
+		fileFieldMTime:        &s.mtime,
+		fileFieldCTime:        &s.ctime,
+		fileFieldInode:        &s.inode,
+		fileFieldNLink:        &s.nlink,
+	}
+
+	dest, ok := dests[field]
+
+	return dest, ok
+}
+
+func (s *fileRowScanState) applyTo(out *FileRow) error {
+	converted, err := s.convertUints()
+	if err != nil {
+		return err
+	}
+
+	s.applyScalars(out, converted)
+
+	return nil
+}
+
+func (s *fileRowScanState) convertUints() (*fileRowConverted, error) {
+	size, err := uint64ToInt64(s.size)
+	if err != nil {
+		return nil, err
+	}
+
+	apparentSize, err := uint64ToInt64(s.apparentSize)
+	if err != nil {
+		return nil, err
+	}
+
+	inode, err := uint64ToInt64(s.inode)
+	if err != nil {
+		return nil, err
+	}
+
+	nlink, err := uint64ToInt64(s.nlink)
+	if err != nil {
+		return nil, err
+	}
+
+	return &fileRowConverted{size: size, apparentSize: apparentSize, inode: inode, nlink: nlink}, nil
+}
+
+func uint64ToInt64(v uint64) (int64, error) {
+	if v > uint64(math.MaxInt64) {
+		return 0, errInvalidPath
+	}
+
+	return int64(v), nil
+}
+
+func (s *fileRowScanState) applyScalars(out *FileRow, converted *fileRowConverted) {
+	out.Path = s.path
+	out.ParentDir = s.parentDir
+	out.Name = s.name
+	out.Ext = s.ext
+	out.EntryType = s.entryType
+	out.Size = converted.size
+	out.ApparentSize = converted.apparentSize
+	out.UID = s.uid
+	out.GID = s.gid
+	out.ATime = s.atime
+	out.MTime = s.mtime
+	out.CTime = s.ctime
+	out.Inode = converted.inode
+	out.Nlink = converted.nlink
+}
+
+func chunkStrings(in []string, maxChunk int) [][]string {
+	if maxChunk <= 0 || len(in) == 0 {
+		return nil
+	}
+
+	if len(in) <= maxChunk {
+		return [][]string{in}
+	}
+
+	out := make([][]string, 0, (len(in)+maxChunk-1)/maxChunk)
+	for start := 0; start < len(in); start += maxChunk {
+		end := start + maxChunk
+		if end > len(in) {
+			end = len(in)
+		}
+
+		out = append(out, in[start:end])
+	}
+
+	return out
+}
+
+func splitPathParentAndName(path string) (string, string, bool) {
+	if path == "" {
+		return "", "", false
+	}
+
+	idx := lastComponentSlashIndex(path)
+	if idx < 0 {
+		return "", "", false
+	}
+
+	parentDir := path[:idx+1]
+	name := path[idx+1:]
+
+	if parentDir == "" || name == "" {
+		return "", "", false
+	}
+
+	return parentDir, name, true
+}
+
+func lastComponentSlashIndex(path string) int {
+	if strings.HasSuffix(path, "/") && path != "/" {
+		return strings.LastIndex(path[:len(path)-1], "/")
+	}
+
+	return strings.LastIndex(path, "/")
 }
 
 func (c *Client) findByGlobPlan(baseDirsByMount map[string][]string, patterns []string) findByGlobExecPlan {
-	queries := make([]findByGlobQuerySpec, 0)
+	patternChunks := chunkStrings(patterns, maxGlobPatternsPerQuery)
+	queries := make([]findByGlobQuerySpec, 0, len(baseDirsByMount)*len(patternChunks))
 
 	for mountPath, dirs := range baseDirsByMount {
-		for _, chunk := range chunkStrings(patterns, maxGlobPatternsPerQuery) {
+		for _, chunk := range patternChunks {
 			queries = append(queries, findByGlobQuerySpec{
 				mountPath:    mountPath,
 				baseDirs:     dirs,
@@ -431,280 +1001,6 @@ func (c *Client) groupBaseDirsByMount(baseDirs []string) (map[string][]string, e
 	return out, nil
 }
 
-func (c *Client) findByGlobQuery(
-	ctx context.Context,
-	selectList string,
-	fields []string,
-	mountPath string,
-	baseDirs []string,
-	patterns []string,
-	ownerEnabled int64,
-	uid uint32,
-	gids []uint32,
-	limit int64,
-	offset int64,
-) ([]FileRow, error) {
-	q, params := buildFindByGlobQueryAndParams(
-		selectList,
-		mountPath,
-		baseDirs,
-		patterns,
-		ownerEnabled,
-		uid,
-		gids,
-		limit,
-		offset,
-	)
-
-	qctx, cancel := context.WithTimeout(ctx, queryTimeout(c.cfg))
-	defer cancel()
-
-	return c.queryFileRows(qctx, "FindByGlob", q, fields, params...)
-}
-
-func (c *Client) queryFileRows(
-	ctx context.Context,
-	op string,
-	query string,
-	fields []string,
-	params ...any,
-) ([]FileRow, error) {
-	rows, err := c.conn.Query(ctx, query, params...)
-	if err != nil {
-		return nil, fmt.Errorf("clickhouse: failed to query %s: %w", op, err)
-	}
-
-	defer func() { _ = rows.Close() }()
-
-	out := make([]FileRow, 0)
-
-	for rows.Next() {
-		var row FileRow
-		if err := scanFileRow(rows, fields, &row); err != nil {
-			return nil, err
-		}
-
-		out = append(out, row)
-	}
-
-	return out, nil
-}
-
-func buildFindByGlobQueryAndParams(
-	selectList string,
-	mountPath string,
-	baseDirs []string,
-	patterns []string,
-	ownerEnabled int64,
-	uid uint32,
-	gids []uint32,
-	limit int64,
-	offset int64,
-) (string, []any) {
-	baseDirClauses := make([]string, 0, len(baseDirs))
-	params := make([]any, 0, findByGlobParamsSharedCap+len(baseDirs)*(len(patterns)+findByGlobParamsPerBaseDirCap))
-	params = append(params, mountPath, mountPath)
-
-	for _, baseDir := range baseDirs {
-		compiled := compileGlobRegexes(baseDir, patterns)
-		baseDirClauses = append(baseDirClauses, findByGlobBaseDirClause(len(compiled)))
-		params = append(params, baseDir, prefixNext(baseDir))
-
-		for _, re := range compiled {
-			params = append(params, re)
-		}
-	}
-
-	q := fmt.Sprintf(findByGlobQueryTemplate, selectList, strings.Join(baseDirClauses, " OR "))
-
-	params = append(params, ownerEnabled, uid, gids, limit, offset)
-
-	return q, params
-}
-
-func findByGlobQueryLimitOffset(limit int64, offset int64, useDirectOffset bool) (int64, int64) {
-	if useDirectOffset {
-		return limit, offset
-	}
-
-	if offset <= 0 {
-		return limit, 0
-	}
-
-	if limit > math.MaxInt64-offset {
-		return math.MaxInt64, 0
-	}
-
-	return limit + offset, 0
-}
-
-func sliceLimitOffset(in []FileRow, limit int64, offset int64) []FileRow {
-	if offset > 0 {
-		if offset >= int64(len(in)) {
-			return []FileRow{}
-		}
-
-		in = in[offset:]
-	}
-
-	if limit >= int64(len(in)) {
-		return in
-	}
-
-	return in[:limit]
-}
-
-func dedupeByPath(in []FileRow) []FileRow {
-	if len(in) < minDedupeByPathLen {
-		return in
-	}
-
-	out := in[:0]
-
-	var last string
-
-	for i, row := range in {
-		if i == 0 || row.Path != last {
-			out = append(out, row)
-			last = row.Path
-		}
-	}
-
-	return out
-}
-
-func chunkStrings(in []string, maxChunk int) [][]string {
-	if maxChunk <= 0 || len(in) == 0 {
-		return nil
-	}
-
-	if len(in) <= maxChunk {
-		return [][]string{in}
-	}
-
-	out := make([][]string, 0, (len(in)+maxChunk-1)/maxChunk)
-	for start := 0; start < len(in); start += maxChunk {
-		end := start + maxChunk
-		if end > len(in) {
-			end = len(in)
-		}
-
-		out = append(out, in[start:end])
-	}
-
-	return out
-}
-
-func matchOrList(n int) string {
-	if n <= 0 {
-		return "0"
-	}
-
-	out := make([]string, 0, n)
-	for i := 0; i < n; i++ {
-		out = append(out, "match(f.path, ?)")
-	}
-
-	return strings.Join(out, " OR ")
-}
-
-func compileGlobRegexes(baseDir string, patterns []string) []string {
-	escapedBase := regexp.QuoteMeta(baseDir)
-
-	out := make([]string, 0, len(patterns))
-	for _, p := range patterns {
-		out = append(out, globToRE2(escapedBase, p))
-	}
-
-	return out
-}
-
-func globToRE2(escapedBase string, pattern string) string {
-	var b strings.Builder
-	b.Grow(len(escapedBase) + len(pattern) + growExtraForAnchors)
-
-	b.WriteByte('^')
-	b.WriteString(escapedBase)
-
-	for i := 0; i < len(pattern); i++ {
-		if writeGlobToken(&b, pattern, &i) {
-			continue
-		}
-
-		writeRE2LiteralByte(&b, pattern[i])
-	}
-
-	b.WriteByte('$')
-
-	return b.String()
-}
-
-func writeRE2LiteralByte(b *strings.Builder, c byte) {
-	switch c {
-	case '.', '+', '(', ')', '|', '[', ']', '{', '}', '^', '$', '\\':
-		b.WriteByte('\\')
-		b.WriteByte(c)
-	default:
-		b.WriteByte(c)
-	}
-}
-
-func prefixNext(prefix string) string {
-	if prefix == "" {
-		return "\x00"
-	}
-
-	b := []byte(prefix)
-	for i := len(b) - 1; i >= 0; i-- {
-		if b[i] != maxByte {
-			b[i]++
-
-			return string(b[:i+1])
-		}
-	}
-
-	return prefix + "\x00"
-}
-
-func ownerFilterArgs(opts FindOptions) (int64, uint32, []uint32) {
-	ownerEnabled := int64(0)
-	if opts.RequireOwner {
-		ownerEnabled = 1
-	}
-
-	return ownerEnabled, opts.UID, ensureNonNilUInt32s(opts.GIDs)
-}
-
-func (c *Client) listDirRows(
-	ctx context.Context,
-	query string,
-	fields []string,
-	mountPath string,
-	parentDir string,
-	limit int64,
-	offset int64,
-) ([]FileRow, error) {
-	rows, err := c.conn.Query(ctx, query, mountPath, mountPath, parentDir, limit, offset)
-	if err != nil {
-		return nil, fmt.Errorf("clickhouse: failed to query ListDir: %w", err)
-	}
-
-	defer func() { _ = rows.Close() }()
-
-	out := make([]FileRow, 0)
-
-	for rows.Next() {
-		var row FileRow
-		if err := scanFileRow(rows, fields, &row); err != nil {
-			return nil, err
-		}
-
-		out = append(out, row)
-	}
-
-	return out, nil
-}
-
 func (c *Client) resolveMountAndDir(dir string) (string, string, error) {
 	mountPath := c.mountPoints.PrefixOf(dir)
 	if mountPath == "" {
@@ -712,32 +1008,6 @@ func (c *Client) resolveMountAndDir(dir string) (string, string, error) {
 	}
 
 	return mountPath, ensureTrailingSlash(dir), nil
-}
-
-func listLimit(limit int64) int64 {
-	if limit > 0 {
-		return limit
-	}
-
-	return defaultFileLimit
-}
-
-func listDirQuery(opts ListOptions) (string, []string, error) {
-	selectList, fields, err := fileRowSelectList(opts.Fields)
-	if err != nil {
-		return "", nil, err
-	}
-
-	return fmt.Sprintf(listDirQueryTemplate, selectList), fields, nil
-}
-
-func statPathQuery(opts StatOptions) (string, []string, error) {
-	selectList, fields, err := fileRowSelectList(opts.Fields)
-	if err != nil {
-		return "", nil, err
-	}
-
-	return fmt.Sprintf(statPathQueryTemplate, selectList), fields, nil
 }
 
 // IsDir reports whether the given path exists and is a directory.
@@ -820,14 +1090,6 @@ func (c *Client) permissionAnyInDir(
 	return rows.Next(), nil
 }
 
-func ensureNonNilUInt32s(in []uint32) []uint32 {
-	if in == nil {
-		return []uint32{}
-	}
-
-	return in
-}
-
 func (c *Client) resolveMountParentName(path string) (string, string, string, error) {
 	mountPath := c.mountPoints.PrefixOf(path)
 	if mountPath == "" {
@@ -840,248 +1102,4 @@ func (c *Client) resolveMountParentName(path string) (string, string, string, er
 	}
 
 	return mountPath, parentDir, name, nil
-}
-
-type unknownFileFieldError struct {
-	Field string
-}
-
-func (e unknownFileFieldError) Error() string {
-	return fmt.Sprintf("clickhouse: unknown file field %q", e.Field)
-}
-
-func fileRowSelectList(fields []string) (string, []string, error) {
-	if len(fields) == 0 {
-		all := defaultFileRowFields()
-
-		return fileRowSelectAll, all, nil
-	}
-
-	out := make([]string, 0, len(fields))
-	for _, f := range fields {
-		col, ok := fileRowColumnForField(f)
-		if !ok {
-			return "", nil, unknownFileFieldError{Field: f}
-		}
-
-		out = append(out, col)
-	}
-
-	return strings.Join(out, ", "), fields, nil
-}
-
-func fileRowColumnForField(field string) (string, bool) {
-	cols := map[string]string{
-		"path":          "f.path",
-		"parent_dir":    "f.parent_dir",
-		"name":          "f.name",
-		"ext":           "f.ext",
-		"entry_type":    "f.entry_type",
-		"size":          "f.size",
-		"apparent_size": "f.apparent_size",
-		"uid":           "f.uid",
-		"gid":           "f.gid",
-		"atime":         "f.atime",
-		"mtime":         "f.mtime",
-		"ctime":         "f.ctime",
-		"inode":         "f.inode",
-		"nlink":         "f.nlink",
-	}
-
-	col, ok := cols[field]
-
-	return col, ok
-}
-
-type fileRowScanner interface {
-	Scan(dest ...any) error
-}
-
-type fileRowIterator interface {
-	fileRowScanner
-	Next() bool
-}
-
-func firstFileRow(rows fileRowIterator, fields []string) (*FileRow, error) {
-	if !rows.Next() {
-		return nil, errPathNotFound
-	}
-
-	row := &FileRow{}
-	if err := scanFileRow(rows, fields, row); err != nil {
-		return nil, err
-	}
-
-	return row, nil
-}
-
-func scanFileRow(rows fileRowScanner, fields []string, out *FileRow) error {
-	state := &fileRowScanState{}
-
-	dests, err := state.destsFor(fields)
-	if err != nil {
-		return err
-	}
-
-	if err := rows.Scan(dests...); err != nil {
-		return fmt.Errorf("clickhouse: failed to scan file row: %w", err)
-	}
-
-	return state.applyTo(out)
-}
-
-type fileRowScanState struct {
-	path      string
-	parentDir string
-	name      string
-	ext       string
-
-	entryType uint8
-	uid       uint32
-	gid       uint32
-
-	size         uint64
-	apparentSize uint64
-	inode        uint64
-	nlink        uint64
-
-	atime time.Time
-	mtime time.Time
-	ctime time.Time
-}
-
-func (s *fileRowScanState) destsFor(fields []string) ([]any, error) {
-	if len(fields) == 0 {
-		fields = defaultFileRowFields()
-	}
-
-	dests := make([]any, 0, len(fields))
-	for _, f := range fields {
-		dest, ok := s.destForField(f)
-		if !ok {
-			return nil, unknownFileFieldError{Field: f}
-		}
-
-		dests = append(dests, dest)
-	}
-
-	return dests, nil
-}
-
-func (s *fileRowScanState) destForField(field string) (any, bool) {
-	dests := map[string]any{
-		"path":          &s.path,
-		"parent_dir":    &s.parentDir,
-		"name":          &s.name,
-		"ext":           &s.ext,
-		"entry_type":    &s.entryType,
-		"size":          &s.size,
-		"apparent_size": &s.apparentSize,
-		"uid":           &s.uid,
-		"gid":           &s.gid,
-		"atime":         &s.atime,
-		"mtime":         &s.mtime,
-		"ctime":         &s.ctime,
-		"inode":         &s.inode,
-		"nlink":         &s.nlink,
-	}
-
-	dest, ok := dests[field]
-
-	return dest, ok
-}
-
-func (s *fileRowScanState) applyTo(out *FileRow) error {
-	converted, err := s.convertUints()
-	if err != nil {
-		return err
-	}
-
-	s.applyScalars(out, converted)
-
-	return nil
-}
-
-type fileRowConverted struct {
-	size         int64
-	apparentSize int64
-	inode        int64
-	nlink        int64
-}
-
-func (s *fileRowScanState) convertUints() (*fileRowConverted, error) {
-	size, err := uint64ToInt64(s.size)
-	if err != nil {
-		return nil, err
-	}
-
-	apparentSize, err := uint64ToInt64(s.apparentSize)
-	if err != nil {
-		return nil, err
-	}
-
-	inode, err := uint64ToInt64(s.inode)
-	if err != nil {
-		return nil, err
-	}
-
-	nlink, err := uint64ToInt64(s.nlink)
-	if err != nil {
-		return nil, err
-	}
-
-	return &fileRowConverted{size: size, apparentSize: apparentSize, inode: inode, nlink: nlink}, nil
-}
-
-func (s *fileRowScanState) applyScalars(out *FileRow, converted *fileRowConverted) {
-	out.Path = s.path
-	out.ParentDir = s.parentDir
-	out.Name = s.name
-	out.Ext = s.ext
-	out.EntryType = s.entryType
-	out.Size = converted.size
-	out.ApparentSize = converted.apparentSize
-	out.UID = s.uid
-	out.GID = s.gid
-	out.ATime = s.atime
-	out.MTime = s.mtime
-	out.CTime = s.ctime
-	out.Inode = converted.inode
-	out.Nlink = converted.nlink
-}
-
-func uint64ToInt64(v uint64) (int64, error) {
-	if v > uint64(math.MaxInt64) {
-		return 0, errInvalidPath
-	}
-
-	return int64(v), nil
-}
-
-func splitPathParentAndName(path string) (string, string, bool) {
-	if path == "" {
-		return "", "", false
-	}
-
-	idx := lastComponentSlashIndex(path)
-	if idx < 0 {
-		return "", "", false
-	}
-
-	parentDir := path[:idx+1]
-	name := path[idx+1:]
-
-	if parentDir == "" || name == "" {
-		return "", "", false
-	}
-
-	return parentDir, name, true
-}
-
-func lastComponentSlashIndex(path string) int {
-	if strings.HasSuffix(path, "/") && path != "/" {
-		return strings.LastIndex(path[:len(path)-1], "/")
-	}
-
-	return strings.LastIndex(path, "/")
 }

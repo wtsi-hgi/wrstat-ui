@@ -174,6 +174,7 @@ snapshot updated_at timestamp stored in ClickHouse.
 		}
 
 		info("opening databases, please wait...")
+
 		cfg, err := clickhouseConfigFromEnvAndFlags(
 			clickhouseDSN,
 			clickhouseDatabase,

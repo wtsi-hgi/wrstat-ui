@@ -37,7 +37,7 @@ func TestOptionsFromConfig(t *testing.T) {
 	Convey("optionsFromConfig enforces the spec connection pool defaults", t, func() {
 		cfg := Config{
 			DSN:      "clickhouse://localhost:9000/?database=wrstat",
-			Database: "wrstat",
+			Database: testDatabaseName,
 		}
 
 		Convey("it defaults MaxOpenConns to 10 and MaxIdleConns to match", func() {

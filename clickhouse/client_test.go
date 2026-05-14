@@ -34,10 +34,12 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/clickhouse"
 )
 
+const clientTestDatabaseName = "wrstat"
+
 func TestNewClient(t *testing.T) {
 	Convey("NewClient validates Config", t, func() {
 		Convey("it errors when DSN is empty", func() {
-			c, err := clickhouse.NewClient(clickhouse.Config{Database: "wrstat"})
+			c, err := clickhouse.NewClient(clickhouse.Config{Database: clientTestDatabaseName})
 			So(err, ShouldNotBeNil)
 			So(c, ShouldBeNil)
 		})
@@ -49,7 +51,10 @@ func TestNewClient(t *testing.T) {
 		})
 
 		Convey("it errors when DSN is missing database=", func() {
-			c, err := clickhouse.NewClient(clickhouse.Config{DSN: "clickhouse://localhost:9000/", Database: "wrstat"})
+			c, err := clickhouse.NewClient(clickhouse.Config{
+				DSN:      "clickhouse://localhost:9000/",
+				Database: clientTestDatabaseName,
+			})
 			So(err, ShouldNotBeNil)
 			So(c, ShouldBeNil)
 		})
@@ -57,7 +62,7 @@ func TestNewClient(t *testing.T) {
 		Convey("it errors when DSN database does not match Config.Database", func() {
 			c, err := clickhouse.NewClient(clickhouse.Config{
 				DSN:      "clickhouse://localhost:9000/?database=other",
-				Database: "wrstat",
+				Database: clientTestDatabaseName,
 			})
 			So(err, ShouldNotBeNil)
 			So(c, ShouldBeNil)
@@ -66,7 +71,7 @@ func TestNewClient(t *testing.T) {
 		Convey("it rejects non-native DSNs", func() {
 			c, err := clickhouse.NewClient(clickhouse.Config{
 				DSN:      "http://localhost:8123/?database=wrstat",
-				Database: "wrstat",
+				Database: clientTestDatabaseName,
 			})
 			So(err, ShouldNotBeNil)
 			So(c, ShouldBeNil)
@@ -75,7 +80,7 @@ func TestNewClient(t *testing.T) {
 		Convey("it accepts a minimal valid config and then attempts to connect", func() {
 			cfg := clickhouse.Config{
 				DSN:           "clickhouse://127.0.0.1:65535/?database=wrstat",
-				Database:      "wrstat",
+				Database:      clientTestDatabaseName,
 				OwnersCSVPath: "",
 				MountPoints:   nil,
 				PollInterval:  time.Second,

@@ -70,6 +70,15 @@ const (
 	phaseBasedirsHistory    = "wrstat_basedirs_history_insert"
 	phaseBasedirsFinalise   = "wrstat_basedirs_finalise"
 	phaseBasedirsFlush      = "wrstat_basedirs_flush"
+
+	tableFiles                = "wrstat_files"
+	tableDGUTA                = "wrstat_dguta"
+	tableChildren             = "wrstat_children"
+	tableBasedirsGroupUsage   = "wrstat_basedirs_group_usage"
+	tableBasedirsUserUsage    = "wrstat_basedirs_user_usage"
+	tableBasedirsGroupSubdirs = "wrstat_basedirs_group_subdirs"
+	tableBasedirsUserSubdirs  = "wrstat_basedirs_user_subdirs"
+	tableBasedirsHistory      = "wrstat_basedirs_history"
 )
 
 // ErrNoDatasets indicates no dataset directories were found.
@@ -221,11 +230,11 @@ func importSingleTablePhase(result datasetImportResult, phase string) (string, u
 func importMainTablePhase(phase string) (string, bool) {
 	switch phase {
 	case phaseFilesInsert, phaseFilesFlush:
-		return "wrstat_files", true
+		return tableFiles, true
 	case phaseDGUTAInsert:
-		return "wrstat_dguta", true
+		return tableDGUTA, true
 	case phaseChildrenInsert:
-		return "wrstat_children", true
+		return tableChildren, true
 	default:
 		return "", false
 	}
@@ -234,15 +243,15 @@ func importMainTablePhase(phase string) (string, bool) {
 func importBasedirsTablePhase(phase string) (string, bool) {
 	switch phase {
 	case phaseBasedirsGroupUsage:
-		return "wrstat_basedirs_group_usage", true
+		return tableBasedirsGroupUsage, true
 	case phaseBasedirsUserUsage:
-		return "wrstat_basedirs_user_usage", true
+		return tableBasedirsUserUsage, true
 	case phaseBasedirsGroupSubs:
-		return "wrstat_basedirs_group_subdirs", true
+		return tableBasedirsGroupSubdirs, true
 	case phaseBasedirsUserSubs:
-		return "wrstat_basedirs_user_subdirs", true
+		return tableBasedirsUserSubdirs, true
 	case phaseBasedirsHistory:
-		return "wrstat_basedirs_history", true
+		return tableBasedirsHistory, true
 	default:
 		return "", false
 	}
@@ -252,23 +261,23 @@ func importMultiTablePhase(phase string) ([]string, bool) {
 	switch phase {
 	case phasePartitionDropReset:
 		return []string{
-			"wrstat_dguta",
-			"wrstat_children",
-			"wrstat_files",
-			"wrstat_basedirs_group_usage",
-			"wrstat_basedirs_user_usage",
-			"wrstat_basedirs_group_subdirs",
-			"wrstat_basedirs_user_subdirs",
+			tableDGUTA,
+			tableChildren,
+			tableFiles,
+			tableBasedirsGroupUsage,
+			tableBasedirsUserUsage,
+			tableBasedirsGroupSubdirs,
+			tableBasedirsUserSubdirs,
 		}, true
 	case phaseBasedirsReset, phaseBasedirsFlush:
 		return []string{
-			"wrstat_basedirs_group_usage",
-			"wrstat_basedirs_user_usage",
-			"wrstat_basedirs_group_subdirs",
-			"wrstat_basedirs_user_subdirs",
+			tableBasedirsGroupUsage,
+			tableBasedirsUserUsage,
+			tableBasedirsGroupSubdirs,
+			tableBasedirsUserSubdirs,
 		}, true
 	case phaseBasedirsFinalise:
-		return []string{"wrstat_basedirs_group_usage", "wrstat_basedirs_history"}, true
+		return []string{tableBasedirsGroupUsage, tableBasedirsHistory}, true
 	default:
 		return nil, false
 	}
@@ -337,6 +346,39 @@ func importSerial(
 	return results, nil
 }
 
+func importOneDataset(
+	api ImportAPI,
+	datasetDir string,
+	opts ImportOptions,
+	printf PrintfFunc,
+) (_ datasetImportResult, err error) {
+	mp, err := mountpath.FromOutputDir(datasetDir)
+	if err != nil {
+		return datasetImportResult{}, err
+	}
+
+	statsPath := filepath.Join(datasetDir, statsGZBasename)
+
+	st, err := os.Stat(statsPath)
+	if err != nil {
+		return datasetImportResult{}, err
+	}
+
+	updatedAt := st.ModTime()
+	start := time.Now()
+	metrics := newDatasetImportMetrics(filepath.Base(datasetDir), statsPath, mp)
+
+	records, err := ingestStatsGZ(api, statsPath, mp, updatedAt, opts, metrics)
+	if err != nil {
+		return datasetImportResult{}, err
+	}
+
+	printf("import dataset=%s mount=%s records=%d seconds=%.3f\n",
+		filepath.Base(datasetDir), mp, records, time.Since(start).Seconds())
+
+	return metrics.result(records, time.Since(start)), nil
+}
+
 func newDatasetImportMetrics(dataset, statsPath, mountPath string) *datasetImportMetrics {
 	return &datasetImportMetrics{
 		dataset:   dataset,
@@ -345,6 +387,16 @@ func newDatasetImportMetrics(dataset, statsPath, mountPath string) *datasetImpor
 		rows:      make(map[string]uint64),
 		phases:    make(map[string]time.Duration),
 	}
+}
+
+func ingestStatsGZ(
+	api ImportAPI,
+	statsPath, mp string,
+	updatedAt time.Time,
+	opts ImportOptions,
+	metrics *datasetImportMetrics,
+) (_ uint64, err error) {
+	return ingestStatsGZWithMetrics(api, statsPath, mp, updatedAt, opts, metrics)
 }
 
 func ingestStatsGZWithMetrics(
@@ -366,6 +418,112 @@ func ingestStatsGZWithMetrics(
 	}()
 
 	return summariseReader(gz, api, mp, updatedAt, opts, metrics)
+}
+
+func openStatsGZReader(path string) (*pgzip.Reader, func() error, error) {
+	fh, err := os.Open(path)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	gz, err := pgzip.NewReader(fh)
+	if err != nil {
+		_ = fh.Close()
+
+		return nil, nil, err
+	}
+
+	closeFn := func() error {
+		gzErr := gz.Close()
+		fhErr := fh.Close()
+
+		return errors.Join(gzErr, fhErr)
+	}
+
+	return gz, closeFn, nil
+}
+
+func summariseReader(
+	r io.Reader,
+	api ImportAPI,
+	mp string,
+	updatedAt time.Time,
+	opts ImportOptions,
+	metrics *datasetImportMetrics,
+) (_ uint64, err error) {
+	lr := newLineCountingReader(r, opts.MaxLines)
+	ss := summary.NewSummariser(stats.NewStatsParser(lr))
+
+	allClosers, err := addAllSummarisers(ss, api, mp, updatedAt, opts, metrics)
+	if err != nil {
+		return 0, err
+	}
+
+	defer func() {
+		if cerr := allClosers(err == nil); cerr != nil {
+			err = errors.Join(err, cerr)
+		}
+	}()
+
+	if err := ss.Summarise(); err != nil {
+		return 0, err
+	}
+
+	return lr.linesRead(), nil
+}
+
+func newLineCountingReader(r io.Reader, maxLines int) *lineCountingReader {
+	var ml uint64
+	if maxLines > 0 {
+		ml = uint64(maxLines)
+	}
+
+	return &lineCountingReader{
+		underlying: r,
+		maxLines:   ml,
+		buf:        make([]byte, lineReaderBufSize),
+	}
+}
+
+func addAllSummarisers(
+	ss *summary.Summariser,
+	api ImportAPI,
+	mp string,
+	updatedAt time.Time,
+	opts ImportOptions,
+	metrics *datasetImportMetrics,
+) (func(bool) error, error) {
+	dw, err := api.NewDGUTAWriter()
+	if err != nil {
+		return nil, err
+	}
+
+	timedDW := newTrackedDGUTAWriter(dw, metrics)
+
+	timedDW.SetMountPath(mp)
+	timedDW.SetUpdatedAt(updatedAt)
+
+	fi, fiCloser, err := api.NewFileIngestOperation(mp, updatedAt)
+	if err != nil {
+		return nil, errors.Join(err, timedDW.Abort())
+	}
+
+	setImportBatchSize(opts.BatchSize, timedDW, fiCloser)
+
+	setImportPhaseRecorder(fiCloser, metrics)
+
+	timedFI := trackFileIngestOperation(fi, metrics)
+	timedFICloser := timedImportCloser{Closer: fiCloser, metrics: metrics, phase: phaseFilesFlush}
+
+	ss.AddDirectoryOperation(dirguta.NewDirGroupUserTypeAge(timedDW))
+	ss.AddGlobalOperation(timedFI)
+
+	bsCloser, err := addBasedirsSummariser(ss, api, mp, updatedAt, opts, metrics)
+	if err != nil {
+		return nil, errors.Join(err, composeImportCloser(timedFICloser, nil, timedDW)(false))
+	}
+
+	return composeImportCloser(timedFICloser, bsCloser, timedDW), nil
 }
 
 func newTrackedDGUTAWriter(
@@ -416,6 +574,43 @@ func trackFileIngestOperation(
 	}
 }
 
+func addBasedirsSummariser(
+	ss *summary.Summariser,
+	api ImportAPI,
+	mp string,
+	updatedAt time.Time,
+	opts ImportOptions,
+	metrics *datasetImportMetrics,
+) (func(bool) error, error) {
+	if opts.QuotaPath == "" || opts.ConfigPath == "" {
+		return func(bool) error { return nil }, nil
+	}
+
+	bs, err := api.NewBaseDirsStore()
+	if err != nil {
+		return nil, err
+	}
+
+	setImportBatchSize(opts.BatchSize, bs)
+
+	timedBS := &trackedBasedirsStore{Store: bs, metrics: metrics}
+
+	timedBS.SetMountPath(mp)
+	timedBS.SetUpdatedAt(updatedAt)
+
+	closer := func(publish bool) error {
+		return closeImportBasedirsStore(timedBS, publish)
+	}
+
+	if err := addBasedirsOp(ss, timedBS, updatedAt, opts); err != nil {
+		_ = timedBS.Close()
+
+		return nil, err
+	}
+
+	return closer, nil
+}
+
 func closeImportBasedirsStore(store basedirs.Store, publish bool) error {
 	if store == nil {
 		return nil
@@ -431,6 +626,50 @@ func closeImportBasedirsStore(store basedirs.Store, publish bool) error {
 	}
 
 	return store.Close()
+}
+
+func addBasedirsOp(
+	ss *summary.Summariser,
+	store basedirs.Store,
+	modtime time.Time,
+	opts ImportOptions,
+) error {
+	quotas, config, mountpoints, err := parseBasedirsInputs(opts)
+	if err != nil {
+		return err
+	}
+
+	bd, err := basedirs.NewCreator(store, quotas)
+	if err != nil {
+		return err
+	}
+
+	if len(mountpoints) > 0 {
+		bd.SetMountPoints(mountpoints)
+	}
+
+	bd.SetModTime(modtime)
+	ss.AddDirectoryOperation(sbasedirs.NewBaseDirs(config.PathShouldOutput, bd))
+
+	return nil
+}
+
+func parseBasedirsInputs(opts ImportOptions) (*basedirs.Quotas, basedirs.Config, []string, error) {
+	quotas, config, err := summariseutil.ParseBasedirConfig(opts.QuotaPath, opts.ConfigPath)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	var mountpoints []string
+
+	if opts.MountsPath != "" {
+		mountpoints, err = summariseutil.ParseMountpointsFromFile(opts.MountsPath)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+	}
+
+	return quotas, config, mountpoints, nil
 }
 
 func composeImportCloser(
@@ -559,236 +798,6 @@ func runParallel(
 	return results
 }
 
-func importOneDataset(
-	api ImportAPI,
-	datasetDir string,
-	opts ImportOptions,
-	printf PrintfFunc,
-) (_ datasetImportResult, err error) {
-	mp, err := mountpath.FromOutputDir(datasetDir)
-	if err != nil {
-		return datasetImportResult{}, err
-	}
-
-	statsPath := filepath.Join(datasetDir, statsGZBasename)
-
-	st, err := os.Stat(statsPath)
-	if err != nil {
-		return datasetImportResult{}, err
-	}
-
-	updatedAt := st.ModTime()
-	start := time.Now()
-	metrics := newDatasetImportMetrics(filepath.Base(datasetDir), statsPath, mp)
-
-	records, err := ingestStatsGZ(api, statsPath, mp, updatedAt, opts, metrics)
-	if err != nil {
-		return datasetImportResult{}, err
-	}
-
-	printf("import dataset=%s mount=%s records=%d seconds=%.3f\n",
-		filepath.Base(datasetDir), mp, records, time.Since(start).Seconds())
-
-	return metrics.result(records, time.Since(start)), nil
-}
-
-func ingestStatsGZ(
-	api ImportAPI,
-	statsPath, mp string,
-	updatedAt time.Time,
-	opts ImportOptions,
-	metrics *datasetImportMetrics,
-) (_ uint64, err error) {
-	return ingestStatsGZWithMetrics(api, statsPath, mp, updatedAt, opts, metrics)
-}
-
-func openStatsGZReader(path string) (*pgzip.Reader, func() error, error) {
-	fh, err := os.Open(path)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	gz, err := pgzip.NewReader(fh)
-	if err != nil {
-		_ = fh.Close()
-
-		return nil, nil, err
-	}
-
-	closeFn := func() error {
-		gzErr := gz.Close()
-		fhErr := fh.Close()
-
-		return errors.Join(gzErr, fhErr)
-	}
-
-	return gz, closeFn, nil
-}
-
-func summariseReader(
-	r io.Reader,
-	api ImportAPI,
-	mp string,
-	updatedAt time.Time,
-	opts ImportOptions,
-	metrics *datasetImportMetrics,
-) (_ uint64, err error) {
-	lr := newLineCountingReader(r, opts.MaxLines)
-	ss := summary.NewSummariser(stats.NewStatsParser(lr))
-
-	allClosers, err := addAllSummarisers(ss, api, mp, updatedAt, opts, metrics)
-	if err != nil {
-		return 0, err
-	}
-
-	defer func() {
-		if cerr := allClosers(err == nil); cerr != nil {
-			err = errors.Join(err, cerr)
-		}
-	}()
-
-	if err := ss.Summarise(); err != nil {
-		return 0, err
-	}
-
-	return lr.linesRead(), nil
-}
-
-func newLineCountingReader(r io.Reader, maxLines int) *lineCountingReader {
-	var ml uint64
-	if maxLines > 0 {
-		ml = uint64(maxLines)
-	}
-
-	return &lineCountingReader{
-		underlying: r,
-		maxLines:   ml,
-		buf:        make([]byte, lineReaderBufSize),
-	}
-}
-
-func addAllSummarisers(
-	ss *summary.Summariser,
-	api ImportAPI,
-	mp string,
-	updatedAt time.Time,
-	opts ImportOptions,
-	metrics *datasetImportMetrics,
-) (func(bool) error, error) {
-	dw, err := api.NewDGUTAWriter()
-	if err != nil {
-		return nil, err
-	}
-
-	timedDW := newTrackedDGUTAWriter(dw, metrics)
-
-	timedDW.SetMountPath(mp)
-	timedDW.SetUpdatedAt(updatedAt)
-
-	fi, fiCloser, err := api.NewFileIngestOperation(mp, updatedAt)
-	if err != nil {
-		return nil, errors.Join(err, timedDW.Abort())
-	}
-
-	setImportBatchSize(opts.BatchSize, timedDW, fiCloser)
-
-	setImportPhaseRecorder(fiCloser, metrics)
-
-	timedFI := trackFileIngestOperation(fi, metrics)
-	timedFICloser := timedImportCloser{Closer: fiCloser, metrics: metrics, phase: phaseFilesFlush}
-
-	ss.AddDirectoryOperation(dirguta.NewDirGroupUserTypeAge(timedDW))
-	ss.AddGlobalOperation(timedFI)
-
-	bsCloser, err := addBasedirsSummariser(ss, api, mp, updatedAt, opts, metrics)
-	if err != nil {
-		return nil, errors.Join(err, composeImportCloser(timedFICloser, nil, timedDW)(false))
-	}
-
-	return composeImportCloser(timedFICloser, bsCloser, timedDW), nil
-}
-
-func addBasedirsSummariser(
-	ss *summary.Summariser,
-	api ImportAPI,
-	mp string,
-	updatedAt time.Time,
-	opts ImportOptions,
-	metrics *datasetImportMetrics,
-) (func(bool) error, error) {
-	if opts.QuotaPath == "" || opts.ConfigPath == "" {
-		return func(bool) error { return nil }, nil
-	}
-
-	bs, err := api.NewBaseDirsStore()
-	if err != nil {
-		return nil, err
-	}
-
-	setImportBatchSize(opts.BatchSize, bs)
-
-	timedBS := &trackedBasedirsStore{Store: bs, metrics: metrics}
-
-	timedBS.SetMountPath(mp)
-	timedBS.SetUpdatedAt(updatedAt)
-
-	closer := func(publish bool) error {
-		return closeImportBasedirsStore(timedBS, publish)
-	}
-
-	if err := addBasedirsOp(ss, timedBS, updatedAt, opts); err != nil {
-		_ = timedBS.Close()
-
-		return nil, err
-	}
-
-	return closer, nil
-}
-
-func addBasedirsOp(
-	ss *summary.Summariser,
-	store basedirs.Store,
-	modtime time.Time,
-	opts ImportOptions,
-) error {
-	quotas, config, mountpoints, err := parseBasedirsInputs(opts)
-	if err != nil {
-		return err
-	}
-
-	bd, err := basedirs.NewCreator(store, quotas)
-	if err != nil {
-		return err
-	}
-
-	if len(mountpoints) > 0 {
-		bd.SetMountPoints(mountpoints)
-	}
-
-	bd.SetModTime(modtime)
-	ss.AddDirectoryOperation(sbasedirs.NewBaseDirs(config.PathShouldOutput, bd))
-
-	return nil
-}
-
-func parseBasedirsInputs(opts ImportOptions) (*basedirs.Quotas, basedirs.Config, []string, error) {
-	quotas, config, err := summariseutil.ParseBasedirConfig(opts.QuotaPath, opts.ConfigPath)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-
-	var mountpoints []string
-
-	if opts.MountsPath != "" {
-		mountpoints, err = summariseutil.ParseMountpointsFromFile(opts.MountsPath)
-		if err != nil {
-			return nil, nil, nil, err
-		}
-	}
-
-	return quotas, config, mountpoints, nil
-}
-
 type batchSizeSetter interface {
 	SetBatchSize(batchSize int)
 }
@@ -899,8 +908,8 @@ type trackedDGUTAWriter struct {
 func (w *trackedDGUTAWriter) Add(record db.RecordDGUTA) error {
 	err := w.DGUTAWriter.Add(record)
 	if err == nil {
-		w.metrics.addRows("wrstat_dguta", countDGUTARows(record))
-		w.metrics.addRows("wrstat_children", countChildrenRows(record.Children))
+		w.metrics.addRows(tableDGUTA, countDGUTARows(record))
+		w.metrics.addRows(tableChildren, countChildrenRows(record.Children))
 	}
 
 	return err
@@ -962,7 +971,7 @@ func (o *trackedFileOperation) Add(info *summary.FileInfo) error {
 	o.metrics.addPhase(phaseFilesInsert, time.Since(start))
 
 	if err == nil && info != nil {
-		o.metrics.addRows("wrstat_files", 1)
+		o.metrics.addRows(tableFiles, 1)
 	}
 
 	return err
@@ -998,7 +1007,7 @@ func (s *trackedBasedirsStore) PutGroupUsage(u *basedirs.Usage) error {
 	s.metrics.addPhase(phaseBasedirsGroupUsage, time.Since(start))
 
 	if err == nil && u != nil {
-		s.metrics.addRows("wrstat_basedirs_group_usage", 1)
+		s.metrics.addRows(tableBasedirsGroupUsage, 1)
 	}
 
 	return err
@@ -1010,7 +1019,7 @@ func (s *trackedBasedirsStore) PutUserUsage(u *basedirs.Usage) error {
 	s.metrics.addPhase(phaseBasedirsUserUsage, time.Since(start))
 
 	if err == nil && u != nil {
-		s.metrics.addRows("wrstat_basedirs_user_usage", 1)
+		s.metrics.addRows(tableBasedirsUserUsage, 1)
 	}
 
 	return err
@@ -1022,7 +1031,7 @@ func (s *trackedBasedirsStore) PutGroupSubDirs(key basedirs.SubDirKey, subdirs [
 	s.metrics.addPhase(phaseBasedirsGroupSubs, time.Since(start))
 
 	if err == nil {
-		s.metrics.addRows("wrstat_basedirs_group_subdirs", countNonNilSubDirs(subdirs))
+		s.metrics.addRows(tableBasedirsGroupSubdirs, countNonNilSubDirs(subdirs))
 	}
 
 	return err
@@ -1046,7 +1055,7 @@ func (s *trackedBasedirsStore) PutUserSubDirs(key basedirs.SubDirKey, subdirs []
 	s.metrics.addPhase(phaseBasedirsUserSubs, time.Since(start))
 
 	if err == nil {
-		s.metrics.addRows("wrstat_basedirs_user_subdirs", countNonNilSubDirs(subdirs))
+		s.metrics.addRows(tableBasedirsUserSubdirs, countNonNilSubDirs(subdirs))
 	}
 
 	return err
@@ -1058,7 +1067,7 @@ func (s *trackedBasedirsStore) AppendGroupHistory(key basedirs.HistoryKey, point
 	s.metrics.addPhase(phaseBasedirsHistory, time.Since(start))
 
 	if err == nil && historyAppendInserted(s.Store) {
-		s.metrics.addRows("wrstat_basedirs_history", 1)
+		s.metrics.addRows(tableBasedirsHistory, 1)
 	}
 
 	return err

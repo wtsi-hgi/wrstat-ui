@@ -140,6 +140,43 @@ func openAndPing(ctx context.Context, opts *ch.Options, open clickHouseOpener) (
 	return conn, nil
 }
 
+func ensureDatabaseExists(
+	ctx context.Context,
+	opts *ch.Options,
+	database string,
+	queryTO time.Duration,
+	open clickHouseOpener,
+) error {
+	if database == defaultDatabaseName {
+		return nil
+	}
+
+	adminOpts := *opts
+	adminOpts.Auth.Database = defaultDatabaseName
+
+	conn, err := openAndPingWithTimeout(ctx, &adminOpts, open, queryTO)
+	if err != nil {
+		return fmt.Errorf("clickhouse: failed to connect for bootstrap: %w", err)
+	}
+
+	defer func() { _ = conn.Close() }()
+
+	stmt := createDatabaseStmtPrefix + quoteIdent(database)
+
+	queryCtx, cancel := queryContext(ctx, queryTO)
+	defer cancel()
+
+	if err := conn.Exec(queryCtx, stmt); err != nil {
+		return fmt.Errorf("clickhouse: failed to create database %q: %w", database, err)
+	}
+
+	return nil
+}
+
+func quoteIdent(s string) string {
+	return "`" + strings.ReplaceAll(s, "`", "``") + "`"
+}
+
 func queryContext(parent context.Context, queryTO time.Duration) (context.Context, context.CancelFunc) {
 	if parent == nil {
 		parent = context.Background()
@@ -201,6 +238,14 @@ func NewClient(cfg Config) (*Client, error) {
 	return &Client{cfg: cfg, conn: conn, mountPoints: mountPoints}, nil
 }
 
+func (c *Client) Close() error {
+	if c == nil || c.conn == nil {
+		return nil
+	}
+
+	return c.conn.Close()
+}
+
 func mountPointsFromConfig(cfg Config) (basedirs.MountPoints, error) {
 	if len(cfg.MountPoints) > 0 {
 		return basedirs.ValidateMountPoints(cfg.MountPoints), nil
@@ -214,14 +259,6 @@ func mountPointsFromConfig(cfg Config) (basedirs.MountPoints, error) {
 	return mountPoints, nil
 }
 
-func (c *Client) Close() error {
-	if c == nil || c.conn == nil {
-		return nil
-	}
-
-	return c.conn.Close()
-}
-
 func connectAndBootstrap(
 	ctx context.Context,
 	opts *ch.Options,
@@ -233,44 +270,19 @@ func connectAndBootstrap(
 	})
 }
 
-func ensureDatabaseExists(
-	ctx context.Context,
-	opts *ch.Options,
-	database string,
-	queryTO time.Duration,
-	open clickHouseOpener,
-) error {
-	if database == defaultDatabaseName {
-		return nil
-	}
-
-	adminOpts := *opts
-	adminOpts.Auth.Database = defaultDatabaseName
-
-	conn, err := openAndPingWithTimeout(ctx, &adminOpts, open, queryTO)
-	if err != nil {
-		return fmt.Errorf("clickhouse: failed to connect for bootstrap: %w", err)
-	}
-
-	defer func() { _ = conn.Close() }()
-
-	stmt := createDatabaseStmtPrefix + quoteIdent(database)
-
-	queryCtx, cancel := queryContext(ctx, queryTO)
-	defer cancel()
-
-	if err := conn.Exec(queryCtx, stmt); err != nil {
-		return fmt.Errorf("clickhouse: failed to create database %q: %w", database, err)
-	}
-
-	return nil
-}
-
-func quoteIdent(s string) string {
-	return "`" + strings.ReplaceAll(s, "`", "``") + "`"
-}
-
 func validateConfig(cfg Config) error {
+	if err := validateRequiredConfig(cfg); err != nil {
+		return err
+	}
+
+	if err := validateDSNProtocol(cfg.DSN); err != nil {
+		return err
+	}
+
+	return validateDSNDatabase(cfg)
+}
+
+func validateRequiredConfig(cfg Config) error {
 	if cfg.DSN == "" {
 		return errDSNRequired
 	}
@@ -281,24 +293,6 @@ func validateConfig(cfg Config) error {
 
 	if strings.ContainsAny(cfg.Database, "`\x00") {
 		return errDatabaseInvalid
-	}
-
-	if err := validateDSNProtocol(cfg.DSN); err != nil {
-		return err
-	}
-
-	dsnDB, err := databaseFromDSN(cfg.DSN)
-	if err != nil {
-		return err
-	}
-
-	if dsnDB != cfg.Database {
-		return fmt.Errorf(
-			"%w: DSN database %q does not match Database %q",
-			errDSNDatabaseMismatch,
-			dsnDB,
-			cfg.Database,
-		)
 	}
 
 	return nil
@@ -312,6 +306,24 @@ func validateDSNProtocol(dsn string) error {
 
 	if u.Scheme != "clickhouse" {
 		return errDSNNativeProtocol
+	}
+
+	return nil
+}
+
+func validateDSNDatabase(cfg Config) error {
+	dsnDB, err := databaseFromDSN(cfg.DSN)
+	if err != nil {
+		return err
+	}
+
+	if dsnDB != cfg.Database {
+		return fmt.Errorf(
+			"%w: DSN database %q does not match Database %q",
+			errDSNDatabaseMismatch,
+			dsnDB,
+			cfg.Database,
+		)
 	}
 
 	return nil

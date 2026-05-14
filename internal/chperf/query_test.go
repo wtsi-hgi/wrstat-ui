@@ -45,19 +45,22 @@ var (
 	errQueryTestRun     = errors.New("query failed")
 )
 
-const explainPruningOutput = "mount_path partition pruning\nparent_dir key condition"
+const (
+	explainPruningOutput = "mount_path partition pruning\nparent_dir key condition"
+	queryTestNFSTeamPath = "/nfs/team/"
+)
 
 func TestDecodeMountPaths(t *testing.T) {
 	Convey("DecodeMountPaths converts fullwidth solidus and adds trailing slash", t, func() {
 		mt := map[string]time.Time{
 			"／lustre／scratch123": time.Now(),
-			"/nfs/team/":         time.Now(),
+			queryTestNFSTeamPath: time.Now(),
 		}
 
 		paths := DecodeMountPaths(mt)
 		So(paths, ShouldHaveLength, 2)
 		So(paths[0], ShouldEqual, "/lustre/scratch123/")
-		So(paths[1], ShouldEqual, "/nfs/team/")
+		So(paths[1], ShouldEqual, queryTestNFSTeamPath)
 	})
 
 	Convey("DecodeMountPaths returns empty for nil map", t, func() {
@@ -191,7 +194,11 @@ func TestRunOp(t *testing.T) {
 					return nil, errQueryTestMeasure
 				},
 			}},
-			op{name: "files_listdir", inputs: map[string]any{"dir": "/tmp/"}, run: func(context.Context) error { return nil }},
+			op{
+				name:   "files_listdir",
+				inputs: map[string]any{queryInputDirKey: "/tmp/"},
+				run:    func(context.Context) error { return nil },
+			},
 			QueryOptions{Repeat: 3},
 			func(string, ...any) {},
 		)
@@ -216,7 +223,7 @@ func TestRunOp(t *testing.T) {
 			}},
 			op{
 				name:   "permission_check",
-				inputs: map[string]any{"dir": "/tmp/"},
+				inputs: map[string]any{queryInputDirKey: "/tmp/"},
 				run:    func(context.Context) error { return errQueryTestRun },
 			},
 			QueryOptions{Repeat: 2},
@@ -262,8 +269,8 @@ func TestRunOp(t *testing.T) {
 		report := boltperf.NewReport("clickhouse", "", 1, 0)
 		qctx := queryContext{
 			provider: fakeMountTimestampsProvider{bd: fakeMountTimestampsReader{mountTimestamps: map[string]time.Time{
-				"／lustre":    updatedAtA,
-				"/nfs/team/": updatedAtB,
+				"／lustre":            updatedAtA,
+				queryTestNFSTeamPath: updatedAtB,
 			}}},
 			inspector: fakeQueryInspector{
 				measure: func(ctx context.Context, run func(context.Context) error) (*QueryMetrics, error) {
@@ -292,7 +299,7 @@ func TestRunOp(t *testing.T) {
 		So(ok, ShouldBeTrue)
 		So(activeMounts, ShouldResemble, []activeMountFreshness{
 			{MountPath: "/lustre/", UpdatedAt: updatedAtA.Format(time.RFC3339Nano)},
-			{MountPath: "/nfs/team/", UpdatedAt: updatedAtB.Format(time.RFC3339Nano)},
+			{MountPath: queryTestNFSTeamPath, UpdatedAt: updatedAtB.Format(time.RFC3339Nano)},
 		})
 	})
 }
