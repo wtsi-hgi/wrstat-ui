@@ -475,18 +475,18 @@ func (s *chBaseDirsStore) PutGroupSubDirs(
 	key basedirs.SubDirKey,
 	subdirs []*basedirs.SubDir,
 ) error {
-	return s.appendSubDirs(s.groupSubBatch, key, subdirs, "group")
+	return s.appendSubDirs(&s.groupSubBatch, key, subdirs, "group")
 }
 
 func (s *chBaseDirsStore) PutUserSubDirs(
 	key basedirs.SubDirKey,
 	subdirs []*basedirs.SubDir,
 ) error {
-	return s.appendSubDirs(s.userSubBatch, key, subdirs, "user")
+	return s.appendSubDirs(&s.userSubBatch, key, subdirs, "user")
 }
 
 func (s *chBaseDirsStore) appendSubDirs(
-	batch driver.Batch,
+	batch *driver.Batch,
 	key basedirs.SubDirKey,
 	subdirs []*basedirs.SubDir,
 	kind string,
@@ -504,7 +504,7 @@ func (s *chBaseDirsStore) appendSubDirs(
 			continue
 		}
 
-		if err := s.appendOneSubDir(batch, key, sd, pos, kind); err != nil {
+		if err := s.appendOneSubDir(*batch, key, sd, pos, kind); err != nil {
 			return err
 		}
 	}
