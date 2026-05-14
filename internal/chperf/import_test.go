@@ -42,18 +42,25 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/summary"
 )
 
-var (
-	errImportTestFiles    = errors.New("files")
-	errImportTestBasedirs = errors.New("basedirs")
-	errImportTestDGUTA    = errors.New("dguta")
-)
-
 const (
 	expectedPhasePartitionDropReset = "partition_drop_reset"
 	expectedPhaseDGUTAInsert        = "wrstat_dguta_insert"
 	expectedPhaseChildrenInsert     = "wrstat_children_insert"
 	expectedPhaseMountSwitch        = "mount_switch"
 	expectedPhaseOldSnapshotDrop    = "old_snapshot_partition_drop"
+
+	importTestFilesClose    = "files"
+	importTestBasedirsClose = "basedirs-close"
+	importTestBasedirsAbort = "basedirs-abort"
+	importTestDGUTAClose    = "dguta-close"
+	importTestDGUTAAbort    = "dguta-abort"
+	importTestMountScratch  = "/mnt/scratch/"
+)
+
+var (
+	errImportTestFiles    = errors.New(importTestFilesClose)
+	errImportTestBasedirs = errors.New("basedirs")
+	errImportTestDGUTA    = errors.New("dguta")
 )
 
 func TestSumResults(t *testing.T) {
@@ -172,23 +179,23 @@ func TestAddAllSummarisers(t *testing.T) {
 			fileCloser:  &fakeImportCloser{},
 		}
 		updatedAt := time.Date(2026, 3, 9, 12, 34, 56, 0, time.UTC)
-		metrics := newDatasetImportMetrics("dataset", "/input/stats.gz", "/mnt/scratch/")
+		metrics := newDatasetImportMetrics("dataset", "/input/stats.gz", importTestMountScratch)
 
 		closer, err := addAllSummarisers(
 			summary.NewSummariser(nil),
 			api,
-			"/mnt/scratch/",
+			importTestMountScratch,
 			updatedAt,
 			ImportOptions{BatchSize: 17},
 			metrics,
 		)
 
 		So(err, ShouldBeNil)
-		So(api.fileMountPath, ShouldEqual, "/mnt/scratch/")
+		So(api.fileMountPath, ShouldEqual, importTestMountScratch)
 		So(api.fileUpdatedAt, ShouldEqual, updatedAt)
 		So(api.dgutaWriter.batchSize, ShouldEqual, 17)
 		So(api.fileCloser.batchSize, ShouldEqual, 17)
-		So(api.dgutaWriter.mountPath, ShouldEqual, "/mnt/scratch/")
+		So(api.dgutaWriter.mountPath, ShouldEqual, importTestMountScratch)
 		So(api.dgutaWriter.updatedAt, ShouldEqual, updatedAt)
 		So(api.baseDirsCalls, ShouldEqual, 0)
 
@@ -197,16 +204,6 @@ func TestAddAllSummarisers(t *testing.T) {
 		So(api.dgutaWriter.closed, ShouldBeTrue)
 		So(api.dgutaWriter.aborted, ShouldBeFalse)
 	})
-}
-
-func trackedImportBasedirsCloser(closer abortTrackingCloser) func(bool) error {
-	return func(publish bool) error {
-		if publish {
-			return closer.Close()
-		}
-
-		return closer.Abort()
-	}
 }
 
 type fakeImportCloser struct {
@@ -297,12 +294,12 @@ func TestAddBasedirsSummariserPropagatesBatchSize(t *testing.T) {
 
 		store := &historyTrackingBasedirsStore{}
 		api := &fakeImportAPI{baseDirsStore: store}
-		metrics := newDatasetImportMetrics("dataset", "/input/stats.gz", "/mnt/scratch/")
+		metrics := newDatasetImportMetrics("dataset", "/input/stats.gz", importTestMountScratch)
 
 		closer, err := addBasedirsSummariser(
 			summary.NewSummariser(nil),
 			api,
-			"/mnt/scratch/",
+			importTestMountScratch,
 			time.Date(2026, 3, 9, 12, 34, 56, 0, time.UTC),
 			ImportOptions{BatchSize: 23, QuotaPath: quotaPath, ConfigPath: configPath},
 			metrics,
@@ -318,7 +315,7 @@ func TestAddBasedirsSummariserPropagatesBatchSize(t *testing.T) {
 
 func TestTrackedBasedirsStoreHistoryRows(t *testing.T) {
 	Convey("trackedBasedirsStore records reset time in the spec-level partition drop/reset phase", t, func() {
-		metrics := newDatasetImportMetrics("dataset", "/input/stats.gz", "/mnt/scratch/")
+		metrics := newDatasetImportMetrics("dataset", "/input/stats.gz", importTestMountScratch)
 		store := &trackedBasedirsStore{
 			Store:   &historyTrackingBasedirsStore{},
 			metrics: metrics,
@@ -330,57 +327,57 @@ func TestTrackedBasedirsStoreHistoryRows(t *testing.T) {
 	})
 
 	Convey("trackedBasedirsStore counts successful history appends in report rows", t, func() {
-		metrics := newDatasetImportMetrics("dataset", "/input/stats.gz", "/mnt/scratch/")
+		metrics := newDatasetImportMetrics("dataset", "/input/stats.gz", importTestMountScratch)
 		store := &trackedBasedirsStore{
 			Store:   &historyTrackingBasedirsStore{appendInserted: true},
 			metrics: metrics,
 		}
 
 		So(store.AppendGroupHistory(
-			basedirs.HistoryKey{GID: 12, MountPath: "/mnt/scratch/"},
+			basedirs.HistoryKey{GID: 12, MountPath: importTestMountScratch},
 			basedirs.History{Date: time.Unix(1700000000, 0).UTC()},
 		), ShouldBeNil)
 
 		metrics.phases[phaseBasedirsHistory] = time.Millisecond
 
 		result := metrics.result(0, time.Second)
-		So(result.rows["wrstat_basedirs_history"], ShouldEqual, 1)
+		So(result.rows[tableBasedirsHistory], ShouldEqual, 1)
 
 		report := boltperf.NewReport("clickhouse", "/input", 1, 0)
 		addImportReportOperations(&report, []datasetImportResult{result}, 1, time.Second)
 
 		historyPhase := findImportOperation(report.Operations, "import_phase", phaseBasedirsHistory)
 		So(historyPhase, ShouldNotBeNil)
-		So(historyPhase.Inputs["table"], ShouldEqual, "wrstat_basedirs_history")
+		So(historyPhase.Inputs["table"], ShouldEqual, tableBasedirsHistory)
 		So(historyPhase.Inputs["rows"], ShouldEqual, uint64(1))
 	})
 
 	Convey("trackedBasedirsStore ignores history appends skipped without insertion", t, func() {
-		metrics := newDatasetImportMetrics("dataset", "/input/stats.gz", "/mnt/scratch/")
+		metrics := newDatasetImportMetrics("dataset", "/input/stats.gz", importTestMountScratch)
 		store := &trackedBasedirsStore{
 			Store:   &historyTrackingBasedirsStore{appendInserted: false},
 			metrics: metrics,
 		}
 
 		So(store.AppendGroupHistory(
-			basedirs.HistoryKey{GID: 12, MountPath: "/mnt/scratch/"},
+			basedirs.HistoryKey{GID: 12, MountPath: importTestMountScratch},
 			basedirs.History{Date: time.Unix(1700000000, 0).UTC()},
 		), ShouldBeNil)
-		So(metrics.rows["wrstat_basedirs_history"], ShouldEqual, uint64(0))
+		So(metrics.rows[tableBasedirsHistory], ShouldEqual, uint64(0))
 	})
 
 	Convey("trackedBasedirsStore ignores failed history appends", t, func() {
-		metrics := newDatasetImportMetrics("dataset", "/input/stats.gz", "/mnt/scratch/")
+		metrics := newDatasetImportMetrics("dataset", "/input/stats.gz", importTestMountScratch)
 		store := &trackedBasedirsStore{
 			Store:   &historyTrackingBasedirsStore{appendErr: errImportTestBasedirs},
 			metrics: metrics,
 		}
 
 		So(store.AppendGroupHistory(
-			basedirs.HistoryKey{GID: 12, MountPath: "/mnt/scratch/"},
+			basedirs.HistoryKey{GID: 12, MountPath: importTestMountScratch},
 			basedirs.History{Date: time.Unix(1700000000, 0).UTC()},
 		), ShouldEqual, errImportTestBasedirs)
-		So(metrics.rows["wrstat_basedirs_history"], ShouldEqual, uint64(0))
+		So(metrics.rows[tableBasedirsHistory], ShouldEqual, uint64(0))
 	})
 }
 
@@ -458,100 +455,115 @@ func TestComposeImportCloser(t *testing.T) {
 		calls := make([]string, 0, 3)
 
 		closer := composeImportCloser(
-			orderedCloser{name: "files", calls: &calls},
+			orderedCloser{name: importTestFilesClose, calls: &calls},
 			trackedImportBasedirsCloser(abortTrackingCloser{
-				closeName: "basedirs-close",
-				abortName: "basedirs-abort",
+				closeName: importTestBasedirsClose,
+				abortName: importTestBasedirsAbort,
 				calls:     &calls,
 			}),
-			abortTrackingCloser{closeName: "dguta-close", abortName: "dguta-abort", calls: &calls},
+			abortTrackingCloser{closeName: importTestDGUTAClose, abortName: importTestDGUTAAbort, calls: &calls},
 		)
 
 		So(closer(true), ShouldBeNil)
-		So(calls, ShouldResemble, []string{"files", "basedirs-close", "dguta-close"})
+		So(calls, ShouldResemble, []string{importTestFilesClose, importTestBasedirsClose, importTestDGUTAClose})
 	})
 
 	Convey("composeImportCloser aborts dguta publishing on failure", t, func() {
 		calls := make([]string, 0, 3)
 
 		closer := composeImportCloser(
-			orderedCloser{name: "files", calls: &calls},
+			orderedCloser{name: importTestFilesClose, calls: &calls},
 			trackedImportBasedirsCloser(abortTrackingCloser{
-				closeName: "basedirs-close",
-				abortName: "basedirs-abort",
+				closeName: importTestBasedirsClose,
+				abortName: importTestBasedirsAbort,
 				calls:     &calls,
 			}),
-			abortTrackingCloser{closeName: "dguta-close", abortName: "dguta-abort", calls: &calls},
+			abortTrackingCloser{closeName: importTestDGUTAClose, abortName: importTestDGUTAAbort, calls: &calls},
 		)
 
 		So(closer(false), ShouldBeNil)
-		So(calls, ShouldResemble, []string{"files", "basedirs-abort", "dguta-abort"})
+		So(calls, ShouldResemble, []string{importTestFilesClose, importTestBasedirsAbort, importTestDGUTAAbort})
 	})
 
 	Convey("composeImportCloser aborts dguta publishing when file close fails", t, func() {
 		calls := make([]string, 0, 3)
 
 		closer := composeImportCloser(
-			orderedCloser{name: "files", calls: &calls, err: errImportTestFiles},
+			orderedCloser{name: importTestFilesClose, calls: &calls, err: errImportTestFiles},
 			trackedImportBasedirsCloser(abortTrackingCloser{
-				closeName: "basedirs-close",
-				abortName: "basedirs-abort",
+				closeName: importTestBasedirsClose,
+				abortName: importTestBasedirsAbort,
 				calls:     &calls,
 			}),
-			abortTrackingCloser{closeName: "dguta-close", abortName: "dguta-abort", calls: &calls},
+			abortTrackingCloser{closeName: importTestDGUTAClose, abortName: importTestDGUTAAbort, calls: &calls},
 		)
 
 		err := closer(true)
 
 		So(err, ShouldNotBeNil)
 		So(err.Error(), ShouldContainSubstring, errImportTestFiles.Error())
-		So(calls, ShouldResemble, []string{"files", "basedirs-abort", "dguta-abort"})
+		So(calls, ShouldResemble, []string{importTestFilesClose, importTestBasedirsAbort, importTestDGUTAAbort})
 	})
 
 	Convey("composeImportCloser aborts dguta publishing when basedirs close fails", t, func() {
 		calls := make([]string, 0, 3)
 
 		closer := composeImportCloser(
-			orderedCloser{name: "files", calls: &calls},
+			orderedCloser{name: importTestFilesClose, calls: &calls},
 			trackedImportBasedirsCloser(abortTrackingCloser{
-				closeName: "basedirs-close",
-				abortName: "basedirs-abort",
+				closeName: importTestBasedirsClose,
+				abortName: importTestBasedirsAbort,
 				calls:     &calls,
 				closeErr:  errImportTestBasedirs,
 			}),
-			abortTrackingCloser{closeName: "dguta-close", abortName: "dguta-abort", calls: &calls},
+			abortTrackingCloser{closeName: importTestDGUTAClose, abortName: importTestDGUTAAbort, calls: &calls},
 		)
 
 		err := closer(true)
 
 		So(err, ShouldNotBeNil)
 		So(err.Error(), ShouldContainSubstring, errImportTestBasedirs.Error())
-		So(calls, ShouldResemble, []string{"files", "basedirs-close", "dguta-abort", "basedirs-abort"})
+		So(calls, ShouldResemble, []string{
+			importTestFilesClose,
+			importTestBasedirsClose,
+			importTestDGUTAAbort,
+			importTestBasedirsAbort,
+		})
 	})
 
 	Convey("composeImportCloser aborts basedirs when dguta publish fails after basedirs flush", t, func() {
 		calls := make([]string, 0, 4)
 
 		closer := composeImportCloser(
-			orderedCloser{name: "files", calls: &calls},
+			orderedCloser{name: importTestFilesClose, calls: &calls},
 			trackedImportBasedirsCloser(abortTrackingCloser{
-				closeName: "basedirs-close",
-				abortName: "basedirs-abort",
+				closeName: importTestBasedirsClose,
+				abortName: importTestBasedirsAbort,
 				calls:     &calls,
 			}),
-			abortTrackingCloser{closeName: "dguta-close", abortName: "dguta-abort", calls: &calls, closeErr: errImportTestDGUTA},
+			abortTrackingCloser{
+				closeName: importTestDGUTAClose,
+				abortName: importTestDGUTAAbort,
+				calls:     &calls,
+				closeErr:  errImportTestDGUTA,
+			},
 		)
 
 		err := closer(true)
 
 		So(err, ShouldNotBeNil)
 		So(err.Error(), ShouldContainSubstring, errImportTestDGUTA.Error())
-		So(calls, ShouldResemble, []string{"files", "basedirs-close", "dguta-close", "basedirs-abort"})
+		So(calls, ShouldResemble, []string{
+			importTestFilesClose,
+			importTestBasedirsClose,
+			importTestDGUTAClose,
+			importTestBasedirsAbort,
+		})
 	})
 
 	Convey("composeImportCloser joins cleanup errors", t, func() {
 		err := composeImportCloser(
-			orderedCloser{name: "files", err: errImportTestFiles},
+			orderedCloser{name: importTestFilesClose, err: errImportTestFiles},
 			func(bool) error { return errImportTestBasedirs },
 			abortTrackingCloser{abortErr: errImportTestDGUTA},
 		)(false)
@@ -561,6 +573,16 @@ func TestComposeImportCloser(t *testing.T) {
 		So(err.Error(), ShouldContainSubstring, errImportTestBasedirs.Error())
 		So(err.Error(), ShouldContainSubstring, errImportTestDGUTA.Error())
 	})
+}
+
+func trackedImportBasedirsCloser(closer abortTrackingCloser) func(bool) error {
+	return func(publish bool) error {
+		if publish {
+			return closer.Close()
+		}
+
+		return closer.Abort()
+	}
 }
 
 type abortTrackingCloser struct {
@@ -593,16 +615,16 @@ func TestImportReportOperations(t *testing.T) {
 		result := datasetImportResult{
 			dataset:   "v1_／mnt／scratch",
 			statsPath: "/input/v1_／mnt／scratch/stats.gz",
-			mountPath: "/mnt/scratch/",
+			mountPath: importTestMountScratch,
 			lines:     42,
 			elapsed:   1500 * time.Millisecond,
 			rows: map[string]uint64{
-				"wrstat_files":                  42,
-				"wrstat_dguta":                  7,
-				"wrstat_children":               5,
-				"wrstat_basedirs_group_usage":   3,
-				"wrstat_basedirs_user_usage":    2,
-				"wrstat_basedirs_group_subdirs": 4,
+				tableFiles:                42,
+				tableDGUTA:                7,
+				tableChildren:             5,
+				tableBasedirsGroupUsage:   3,
+				tableBasedirsUserUsage:    2,
+				tableBasedirsGroupSubdirs: 4,
 			},
 			phases: map[string]time.Duration{
 				expectedPhasePartitionDropReset: 160 * time.Millisecond,
@@ -639,13 +661,13 @@ func TestImportReportOperations(t *testing.T) {
 		tables, ok := partitionReset.Inputs["tables"].([]string)
 		So(ok, ShouldBeTrue)
 		So(tables, ShouldResemble, []string{
-			"wrstat_dguta",
-			"wrstat_children",
-			"wrstat_files",
-			"wrstat_basedirs_group_usage",
-			"wrstat_basedirs_user_usage",
-			"wrstat_basedirs_group_subdirs",
-			"wrstat_basedirs_user_subdirs",
+			tableDGUTA,
+			tableChildren,
+			tableFiles,
+			tableBasedirsGroupUsage,
+			tableBasedirsUserUsage,
+			tableBasedirsGroupSubdirs,
+			tableBasedirsUserSubdirs,
 		})
 		So(partitionReset.DurationsMS, ShouldResemble, []float64{160})
 
@@ -658,13 +680,13 @@ func TestImportReportOperations(t *testing.T) {
 
 		dgutaInsert := findImportOperation(report.Operations, "import_phase", expectedPhaseDGUTAInsert)
 		So(dgutaInsert, ShouldNotBeNil)
-		So(dgutaInsert.Inputs["table"], ShouldEqual, "wrstat_dguta")
+		So(dgutaInsert.Inputs["table"], ShouldEqual, tableDGUTA)
 		So(dgutaInsert.Inputs["rows"], ShouldEqual, uint64(7))
 		So(dgutaInsert.DurationsMS, ShouldResemble, []float64{200})
 
 		childrenInsert := findImportOperation(report.Operations, "import_phase", expectedPhaseChildrenInsert)
 		So(childrenInsert, ShouldNotBeNil)
-		So(childrenInsert.Inputs["table"], ShouldEqual, "wrstat_children")
+		So(childrenInsert.Inputs["table"], ShouldEqual, tableChildren)
 		So(childrenInsert.Inputs["rows"], ShouldEqual, uint64(5))
 		So(childrenInsert.DurationsMS, ShouldResemble, []float64{100})
 

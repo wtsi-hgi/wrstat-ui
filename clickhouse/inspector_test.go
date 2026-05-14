@@ -47,7 +47,7 @@ var (
 func TestNewInspector(t *testing.T) {
 	Convey("NewInspector validates Config", t, func() {
 		Convey("it errors when DSN is empty", func() {
-			ins, err := NewInspector(Config{Database: "wrstat"})
+			ins, err := NewInspector(Config{Database: testDatabaseName})
 			So(err, ShouldNotBeNil)
 			So(ins, ShouldBeNil)
 		})
@@ -112,6 +112,41 @@ func TestInspectorExplainStatPath(t *testing.T) {
 			_, err := ins.ExplainStatPath(ctx, providerTestMountPath, "")
 			So(err, ShouldNotBeNil)
 		})
+	})
+}
+
+func TestInspectorClose(t *testing.T) {
+	Convey("Close is safe to call on nil inspector", t, func() {
+		var ins *Inspector
+
+		So(ins.Close(), ShouldBeNil)
+	})
+}
+
+func TestInspectorServerTime(t *testing.T) {
+	Convey("serverTime returns the current server time", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 5 * time.Second
+
+		ins, err := NewInspector(cfg)
+		So(err, ShouldBeNil)
+		So(ins, ShouldNotBeNil)
+
+		Reset(func() { So(ins.Close(), ShouldBeNil) })
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		before := time.Now().Add(-2 * time.Second)
+
+		t0, err := ins.serverTime(ctx)
+		So(err, ShouldBeNil)
+		So(t0.After(before), ShouldBeTrue)
+		So(t0.Before(time.Now().Add(2*time.Second)), ShouldBeTrue)
 	})
 }
 
@@ -210,41 +245,6 @@ func TestInspectorMeasure(t *testing.T) {
 		So(m.ReadBytes, ShouldEqual, 0)
 		So(m.ResultRows, ShouldEqual, 0)
 		So(m.ResultBytes, ShouldEqual, 0)
-	})
-}
-
-func TestInspectorClose(t *testing.T) {
-	Convey("Close is safe to call on nil inspector", t, func() {
-		var ins *Inspector
-
-		So(ins.Close(), ShouldBeNil)
-	})
-}
-
-func TestInspectorServerTime(t *testing.T) {
-	Convey("serverTime returns the current server time", t, func() {
-		os.Setenv("WRSTAT_ENV", "test")
-		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
-
-		th := newClickHouseTestHarness(t)
-		cfg := th.newConfig()
-		cfg.QueryTimeout = 5 * time.Second
-
-		ins, err := NewInspector(cfg)
-		So(err, ShouldBeNil)
-		So(ins, ShouldNotBeNil)
-
-		Reset(func() { So(ins.Close(), ShouldBeNil) })
-
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-
-		before := time.Now().Add(-2 * time.Second)
-
-		t0, err := ins.serverTime(ctx)
-		So(err, ShouldBeNil)
-		So(t0.After(before), ShouldBeTrue)
-		So(t0.Before(time.Now().Add(2*time.Second)), ShouldBeTrue)
 	})
 }
 

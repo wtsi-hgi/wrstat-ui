@@ -38,6 +38,28 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
 )
 
+const findByGlobAlphaOne = "/alpha/one"
+
+func TestUnknownFileFieldErrors(t *testing.T) {
+	Convey("file row helpers preserve unknown field error behaviour", t, func() {
+		_, _, err := fileRowSelectList([]string{"bogus"})
+		So(err, ShouldNotBeNil)
+		So(err.Error(), ShouldEqual, `clickhouse: unknown file field "bogus"`)
+
+		var selectErr unknownFileFieldError
+		So(errors.As(err, &selectErr), ShouldBeTrue)
+		So(selectErr.Field, ShouldEqual, "bogus")
+
+		_, err = (&fileRowScanState{}).destsFor([]string{"bogus"})
+		So(err, ShouldNotBeNil)
+		So(err.Error(), ShouldEqual, `clickhouse: unknown file field "bogus"`)
+
+		var scanErr unknownFileFieldError
+		So(errors.As(err, &scanErr), ShouldBeTrue)
+		So(scanErr.Field, ShouldEqual, "bogus")
+	})
+}
+
 type findByGlobEmptyRows struct{}
 
 func (r *findByGlobEmptyRows) Next() bool {
@@ -114,7 +136,7 @@ func TestClientFindByGlobQueryGrouping(t *testing.T) {
 			conn := &findByGlobQueryCountConn{}
 			client := newClient(conn)
 
-			rows, err := client.FindByGlob(ctx, []string{"/alpha/one", "/alpha/two"}, []string{"*"}, FindOptions{})
+			rows, err := client.FindByGlob(ctx, []string{findByGlobAlphaOne, "/alpha/two"}, []string{"*"}, FindOptions{})
 			So(err, ShouldBeNil)
 			So(rows, ShouldBeEmpty)
 			So(conn.queryCountValue(), ShouldEqual, 1)
@@ -129,7 +151,7 @@ func TestClientFindByGlobQueryGrouping(t *testing.T) {
 				patterns[i] = "*"
 			}
 
-			rows, err := client.FindByGlob(ctx, []string{"/alpha/one", "/alpha/two"}, patterns, FindOptions{})
+			rows, err := client.FindByGlob(ctx, []string{findByGlobAlphaOne, "/alpha/two"}, patterns, FindOptions{})
 			So(err, ShouldBeNil)
 			So(rows, ShouldBeEmpty)
 			So(conn.queryCountValue(), ShouldEqual, 2)
@@ -139,30 +161,10 @@ func TestClientFindByGlobQueryGrouping(t *testing.T) {
 			conn := &findByGlobQueryCountConn{}
 			client := newClient(conn)
 
-			rows, err := client.FindByGlob(ctx, []string{"/alpha/one", "/beta/two"}, []string{"*"}, FindOptions{})
+			rows, err := client.FindByGlob(ctx, []string{findByGlobAlphaOne, "/beta/two"}, []string{"*"}, FindOptions{})
 			So(err, ShouldBeNil)
 			So(rows, ShouldBeEmpty)
 			So(conn.queryCountValue(), ShouldEqual, 2)
 		})
-	})
-}
-
-func TestUnknownFileFieldErrors(t *testing.T) {
-	Convey("file row helpers preserve unknown field error behaviour", t, func() {
-		_, _, err := fileRowSelectList([]string{"bogus"})
-		So(err, ShouldNotBeNil)
-		So(err.Error(), ShouldEqual, `clickhouse: unknown file field "bogus"`)
-
-		var selectErr unknownFileFieldError
-		So(errors.As(err, &selectErr), ShouldBeTrue)
-		So(selectErr.Field, ShouldEqual, "bogus")
-
-		_, err = (&fileRowScanState{}).destsFor([]string{"bogus"})
-		So(err, ShouldNotBeNil)
-		So(err.Error(), ShouldEqual, `clickhouse: unknown file field "bogus"`)
-
-		var scanErr unknownFileFieldError
-		So(errors.As(err, &scanErr), ShouldBeTrue)
-		So(scanErr.Field, ShouldEqual, "bogus")
 	})
 }

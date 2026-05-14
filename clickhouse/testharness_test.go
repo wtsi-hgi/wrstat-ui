@@ -51,6 +51,7 @@ import (
 )
 
 const (
+	testDatabaseName        = "wrstat"
 	testSchemaVersionsQuery = "SELECT version FROM wrstat_schema_version"
 	testPingQuery           = "SELECT 1"
 	testInsertMountStmt     = "INSERT INTO wrstat_mounts (mount_path, switched_at, " +

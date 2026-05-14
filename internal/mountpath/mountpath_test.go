@@ -5,6 +5,8 @@ import (
 	"testing"
 )
 
+const testMountDataPath = "/mnt/data/"
+
 func TestFromOutputDir(t *testing.T) {
 	t.Parallel()
 
@@ -17,17 +19,17 @@ func TestFromOutputDir(t *testing.T) {
 		{
 			name:      "dataset dir itself",
 			outputDir: "/tmp/20250101_／mnt／data／",
-			want:      "/mnt/data/",
+			want:      testMountDataPath,
 		},
 		{
 			name:      "subpath inside dataset dir",
 			outputDir: "/tmp/20250101_／mnt／data／/dguta.dbs",
-			want:      "/mnt/data/",
+			want:      testMountDataPath,
 		},
 		{
 			name:      "adds trailing slash",
 			outputDir: "/tmp/20250101_／mnt／data",
-			want:      "/mnt/data/",
+			want:      testMountDataPath,
 		},
 		{
 			name:      "empty input",
