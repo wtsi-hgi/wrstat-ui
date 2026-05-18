@@ -80,6 +80,7 @@ const (
 	maxGlobPatternsPerQuery       = 32
 	findByGlobParamsPerBaseDirCap = 2
 	findByGlobParamsSharedCap     = 7
+	findByGlobClauseCap           = 2
 	minDedupeByPathLen            = 2
 	growExtraForAnchors           = 2
 	maxByte                       = 0xFF
@@ -462,13 +463,10 @@ func buildFindByGlobQueryAndParams(
 	params = append(params, mountPath, mountPath)
 
 	for _, baseDir := range baseDirs {
-		compiled := compileGlobRegexes(baseDir, patterns)
-		baseDirClauses = append(baseDirClauses, findByGlobBaseDirClause(len(compiled)))
-		params = append(params, baseDir, prefixNext(baseDir))
-
-		for _, re := range compiled {
-			params = append(params, re)
-		}
+		compiled := compileGlobPatterns(baseDir, patterns)
+		clause, clauseParams := findByGlobBaseDirClause(baseDir, compiled)
+		baseDirClauses = append(baseDirClauses, clause)
+		params = append(params, clauseParams...)
 	}
 
 	q := fmt.Sprintf(findByGlobQueryTemplate, selectList, strings.Join(baseDirClauses, " OR "))
@@ -478,15 +476,45 @@ func buildFindByGlobQueryAndParams(
 	return q, params
 }
 
-func compileGlobRegexes(baseDir string, patterns []string) []string {
+type compiledGlobPatterns struct {
+	direct    []string
+	recursive []string
+	matchAll  bool
+}
+
+func compileGlobPatterns(baseDir string, patterns []string) compiledGlobPatterns {
 	escapedBase := regexp.QuoteMeta(baseDir)
 
-	out := make([]string, 0, len(patterns))
+	out := compiledGlobPatterns{
+		direct:    make([]string, 0, len(patterns)),
+		recursive: make([]string, 0, len(patterns)),
+	}
+
 	for _, p := range patterns {
-		out = append(out, globToRE2(escapedBase, p))
+		if globPatternMatchesWholeSubtree(p) {
+			out.matchAll = true
+
+			continue
+		}
+
+		if isDirectChildGlobPattern(p) {
+			out.direct = append(out.direct, globToRE2("", p))
+
+			continue
+		}
+
+		out.recursive = append(out.recursive, globToRE2(escapedBase, p))
 	}
 
 	return out
+}
+
+func globPatternMatchesWholeSubtree(pattern string) bool {
+	return pattern == "**" || pattern == "**/*"
+}
+
+func isDirectChildGlobPattern(pattern string) bool {
+	return !strings.Contains(pattern, "/") && !strings.Contains(pattern, "**")
 }
 
 func globToRE2(escapedBase string, pattern string) string {
@@ -554,18 +582,53 @@ func writeRE2LiteralByte(b *strings.Builder, c byte) {
 	}
 }
 
-func findByGlobBaseDirClause(matchCount int) string {
-	return "(f.parent_dir >= ? AND f.parent_dir < ? AND (" + matchOrList(matchCount) + "))"
+func findByGlobBaseDirClause(baseDir string, compiled compiledGlobPatterns) (string, []any) {
+	if compiled.matchAll {
+		return findByGlobRangeClause(), []any{baseDir, prefixNext(baseDir)}
+	}
+
+	clauses := make([]string, 0, findByGlobClauseCap)
+	params := make([]any, 0, len(compiled.direct)+len(compiled.recursive)+findByGlobParamsPerBaseDirCap)
+
+	if len(compiled.direct) > 0 {
+		clauses = append(clauses, "(f.parent_dir = ? AND ("+matchOrList("f.name", len(compiled.direct))+"))")
+		params = append(params, baseDir)
+		params = appendStringsAsAny(params, compiled.direct)
+	}
+
+	if len(compiled.recursive) > 0 {
+		clauses = append(clauses, findByGlobRangeClause()+" AND ("+matchOrList("f.path", len(compiled.recursive))+")")
+		params = append(params, baseDir, prefixNext(baseDir))
+		params = appendStringsAsAny(params, compiled.recursive)
+	}
+
+	if len(clauses) == 0 {
+		return "(0)", nil
+	}
+
+	return "(" + strings.Join(clauses, " OR ") + ")", params
 }
 
-func matchOrList(n int) string {
+func findByGlobRangeClause() string {
+	return "(f.parent_dir >= ? AND f.parent_dir < ?)"
+}
+
+func appendStringsAsAny(out []any, in []string) []any {
+	for _, s := range in {
+		out = append(out, s)
+	}
+
+	return out
+}
+
+func matchOrList(column string, n int) string {
 	if n <= 0 {
 		return "0"
 	}
 
 	out := make([]string, 0, n)
 	for i := 0; i < n; i++ {
-		out = append(out, "match(f.path, ?)")
+		out = append(out, "match("+column+", ?)")
 	}
 
 	return strings.Join(out, " OR ")

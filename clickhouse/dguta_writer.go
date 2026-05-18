@@ -104,7 +104,29 @@ type dgutaWriter struct {
 	// Used only by integration tests.
 	failBeforeSwitchErr error
 
+	previousDGUTARows dgutaRecordRows
+
 	closed bool
+}
+
+type dgutaRecordRows struct {
+	rawDir       string
+	canonicalDir string
+	keys         map[dgutaRowKey]struct{}
+}
+
+type dgutaRowKey struct {
+	dir         string
+	gid         uint32
+	uid         uint32
+	ft          uint16
+	age         uint8
+	count       uint64
+	size        uint64
+	atime       int64
+	mtime       int64
+	aTimeRanges [9]uint64
+	mTimeRanges [9]uint64
 }
 
 func (w *dgutaWriter) SetBatchSize(batchSize int) {
@@ -137,9 +159,10 @@ func (w *dgutaWriter) Add(dguta db.RecordDGUTA) error {
 		return err
 	}
 
-	parentDir := string(dguta.Dir.AppendTo(make([]byte, 0, dguta.Dir.Len())))
+	rawParentDir := string(dguta.Dir.AppendTo(make([]byte, 0, dguta.Dir.Len())))
+	parentDir := canonicalPathForMount(w.mountPath, rawParentDir)
 
-	if err := w.appendDGUTARows(dguta, parentDir); err != nil {
+	if err := w.appendDGUTARows(dguta, rawParentDir, parentDir); err != nil {
 		return err
 	}
 
@@ -505,41 +528,105 @@ func (w *dgutaWriter) dropPartition(ctx context.Context, query, sid string) erro
 	return fmt.Errorf("clickhouse: failed to drop partition: %w", err)
 }
 
-func (w *dgutaWriter) appendDGUTARows(dguta db.RecordDGUTA, parentDir string) error {
-	return w.timeImportPhase(importPhaseDGUTAInsert, func() error {
+func (w *dgutaWriter) appendDGUTARows(dguta db.RecordDGUTA, rawParentDir, parentDir string) error {
+	keys := make(map[dgutaRowKey]struct{}, len(dguta.GUTAs))
+
+	err := w.timeImportPhase(importPhaseDGUTAInsert, func() error {
 		for _, guta := range dguta.GUTAs {
-			if guta == nil {
-				continue
+			key, keep, err := w.appendDGUTARow(rawParentDir, parentDir, guta)
+			if err != nil {
+				return err
 			}
 
-			err := w.dgutaBatch.Append(
-				w.mountPath,
-				w.snapshot.String(),
-				parentDir,
-				guta.GID,
-				guta.UID,
-				uint16(guta.FT),
-				uint8(guta.Age),
-				guta.Count,
-				guta.Size,
-				guta.Atime,
-				guta.Mtime,
-				guta.ATimeRanges[:],
-				guta.MTimeRanges[:],
-			)
-			if err != nil {
-				return fmt.Errorf("clickhouse: failed to append dguta row: %w", err)
+			if keep {
+				keys[key] = struct{}{}
 			}
 		}
 
 		return nil
 	})
+	if err != nil {
+		return err
+	}
+
+	w.previousDGUTARows = dgutaRecordRows{
+		rawDir:       rawParentDir,
+		canonicalDir: parentDir,
+		keys:         keys,
+	}
+
+	return nil
+}
+
+func (w *dgutaWriter) appendDGUTARow(rawParentDir, parentDir string, guta *db.GUTA) (dgutaRowKey, bool, error) {
+	if guta == nil {
+		return dgutaRowKey{}, false, nil
+	}
+
+	rowKey := newDGUTARowKey(parentDir, guta)
+	if w.isConsecutiveCanonicalDGUTADuplicate(rawParentDir, parentDir, rowKey) {
+		return rowKey, true, nil
+	}
+
+	err := w.dgutaBatch.Append(
+		w.mountPath,
+		w.snapshot.String(),
+		parentDir,
+		guta.GID,
+		guta.UID,
+		uint16(guta.FT),
+		uint8(guta.Age),
+		guta.Count,
+		guta.Size,
+		guta.Atime,
+		guta.Mtime,
+		guta.ATimeRanges[:],
+		guta.MTimeRanges[:],
+	)
+	if err != nil {
+		return dgutaRowKey{}, false, fmt.Errorf("clickhouse: failed to append dguta row: %w", err)
+	}
+
+	return rowKey, true, nil
+}
+
+func newDGUTARowKey(dir string, guta *db.GUTA) dgutaRowKey {
+	return dgutaRowKey{
+		dir:         dir,
+		gid:         guta.GID,
+		uid:         guta.UID,
+		ft:          uint16(guta.FT),
+		age:         uint8(guta.Age),
+		count:       guta.Count,
+		size:        guta.Size,
+		atime:       guta.Atime,
+		mtime:       guta.Mtime,
+		aTimeRanges: guta.ATimeRanges,
+		mTimeRanges: guta.MTimeRanges,
+	}
+}
+
+func (w *dgutaWriter) isConsecutiveCanonicalDGUTADuplicate(rawDir, canonicalDir string, key dgutaRowKey) bool {
+	prev := w.previousDGUTARows
+	if prev.keys == nil || prev.rawDir == rawDir || prev.canonicalDir != canonicalDir {
+		return false
+	}
+
+	if prev.rawDir == prev.canonicalDir && rawDir == canonicalDir {
+		return false
+	}
+
+	_, ok := prev.keys[key]
+
+	return ok
 }
 
 func (w *dgutaWriter) appendChildrenRows(children []string, parentDir string) error {
 	return w.timeImportPhase(importPhaseChildrenInsert, func() error {
 		for _, child := range children {
 			child = childPathForParent(parentDir, child)
+
+			child = canonicalPathForMount(w.mountPath, child)
 			if child == "" {
 				continue
 			}
