@@ -105,6 +105,109 @@ func TestClickHouseDatabaseDirInfo(t *testing.T) {
 		So(sum.Size, ShouldEqual, 123)
 		So(sum.Modtime, ShouldResemble, updatedAt)
 	})
+
+	Convey("DirInfo uses the active root snapshot below inactive nested mountpoints", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 2 * time.Second
+		cfg.PollInterval = 0
+		cfg.MountPoints = []string{"/", "/dev/", "/proc/"}
+
+		p, err := OpenProvider(cfg)
+		So(err, ShouldBeNil)
+		Reset(func() { So(p.Close(), ShouldBeNil) })
+
+		cp, ok := p.(*chProvider)
+		So(ok, ShouldBeTrue)
+
+		dbch := newClickHouseDatabase(cfg, cp.conn)
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		const (
+			mountPath = "/"
+			dir       = "/dev/"
+		)
+
+		updatedAt := time.Date(2026, 1, 12, 12, 0, 0, 0, time.UTC)
+		sid := snapshotID(mountPath, updatedAt)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		So(conn.Exec(ctx,
+			testInsertMountStmt,
+			mountPath,
+			time.Now(),
+			sid,
+			updatedAt,
+		), ShouldBeNil)
+
+		atimeBuckets := []uint64{1, 0, 0, 0, 0, 0, 0, 0, 0}
+		mtimeBuckets := []uint64{0, 1, 0, 0, 0, 0, 0, 0, 0}
+
+		So(conn.Exec(ctx,
+			testInsertDGUTAStmt,
+			mountPath,
+			sid,
+			mountPath,
+			uint32(7),
+			uint32(9),
+			uint16(db.DGUTAFileTypeBam),
+			uint8(db.DGUTAgeAll),
+			uint64(3),
+			uint64(456),
+			int64(10),
+			int64(20),
+			atimeBuckets,
+			mtimeBuckets,
+		), ShouldBeNil)
+
+		So(conn.Exec(ctx,
+			testInsertDGUTAStmt,
+			mountPath,
+			sid,
+			dir,
+			uint32(7),
+			uint32(9),
+			uint16(db.DGUTAFileTypeBam),
+			uint8(db.DGUTAgeAll),
+			uint64(2),
+			uint64(123),
+			int64(10),
+			int64(20),
+			atimeBuckets,
+			mtimeBuckets,
+		), ShouldBeNil)
+
+		So(conn.Exec(ctx,
+			testInsertChildrenStmt,
+			mountPath,
+			sid,
+			mountPath,
+			"/dev",
+		), ShouldBeNil)
+
+		sum, err := dbch.DirInfo("/dev", &db.Filter{Age: db.DGUTAgeAll})
+		So(err, ShouldBeNil)
+		So(sum, ShouldNotBeNil)
+		So(sum.Count, ShouldEqual, 2)
+		So(sum.Size, ShouldEqual, 123)
+		So(sum.Modtime, ShouldResemble, updatedAt)
+
+		di, err := db.NewTree(dbch).DirInfo("/", &db.Filter{Age: db.DGUTAgeAll})
+		So(err, ShouldBeNil)
+		So(di, ShouldNotBeNil)
+		So(di.Current.Count, ShouldEqual, 3)
+		So(di.Children, ShouldHaveLength, 1)
+		So(di.Children[0].Dir, ShouldEqual, "/dev")
+		So(di.Children[0].Count, ShouldEqual, 2)
+	})
 }
 
 func TestClickHouseDatabaseDirInfoAncestor(t *testing.T) {
