@@ -25,6 +25,7 @@
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  ******************************************************************************/
 
+import type { ReactElement } from "react";
 import { useEffect, useState } from 'react';
 import { formatDate } from './format';
 
@@ -51,9 +52,9 @@ const paddingXL = 80,
 		const [infoBox, setInfoBox] = useState(-1),
 			amountToY = (amount: number) => paddingYT + maxY - amount * yScale,
 			dateToX = (date: number) => paddingXL + (date - minDate) * xScale,
-			quotaPoints: JSX.Element[] = [],
-			usagePoints: JSX.Element[] = [],
-			infoBoxes: JSX.Element[] = [];
+			quotaPoints: ReactElement[] = [],
+			usagePoints: ReactElement[] = [],
+			infoBoxes: ReactElement[] = [];
 
 		let minDate = Infinity,
 			maxDate = -Infinity,

@@ -654,8 +654,8 @@ func TestServer(t *testing.T) {
 				}
 			}
 
-			So(s.tree, ShouldNotEqual, dirguta)
-			So(s.basedirs, ShouldNotEqual, basedirs)
+			So(s.tree == dirguta, ShouldBeFalse)
+			So(s.basedirs == basedirs, ShouldBeFalse)
 			So(len(s.dataTimeStamp), ShouldEqual, 2)
 			So(s.dataTimeStamp["keyB"], ShouldBeGreaterThan, lastMod)
 
@@ -882,8 +882,8 @@ func TestServer(t *testing.T) {
 			So(s.dataTimeStamp["keyA"], ShouldEqual, newTS)
 			So(newTS, ShouldBeGreaterThan, oldTS)
 
-			So(newTree, ShouldNotEqual, oldTree)
-			So(newBD, ShouldNotEqual, oldBD)
+			So(newTree == oldTree, ShouldBeFalse)
+			So(newBD == oldBD, ShouldBeFalse)
 		})
 
 		Convey("serveGzippedCache serves group and user usage via HTTP", func() {

@@ -28,6 +28,7 @@
 import type { GroupUserFilterParams } from './GroupUserFilter';
 import type { Child } from './rpc';
 import type { Entry } from './Treemap';
+import type { ReactElement } from "react";
 import { useEffect, useState } from "react";
 import GroupUserFilter from './GroupUserFilter';
 import MultiSelect from './MultiSelect';
@@ -147,7 +148,7 @@ const colours = [
 	entrySort = (a: Entry, b: Entry) => b.value - a.value,
 	DiskTreeComponent = ({ treePath, userMap, groupMap, age, setTreePath, guf }: DiskTreeParams) => {
 		const [treeMapData, setTreeMapData] = useState<Entry[] | null>(null),
-			[breadcrumbs, setBreadcrumbs] = useState<JSX.Element[]>([]),
+			[breadcrumbs, setBreadcrumbs] = useState<ReactElement[]>([]),
 			[childDetails, setChildDetails] = useState<Child | null>(null),
 			[tableDetails, setTableDetails] = useState<Child | null>(null),
 			[dirDetails, setDirDetails] = useState<Child | null>(childDetails),

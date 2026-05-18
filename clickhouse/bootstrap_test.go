@@ -350,6 +350,10 @@ func (r *schemaVersionTestRows) Next() bool {
 	return true
 }
 
+func (r *schemaVersionTestRows) HasData() bool {
+	return !r.next
+}
+
 func (r *schemaVersionTestRows) Scan(dest ...any) error {
 	if len(dest) != 3 {
 		return errBootstrapTestUnexpectedScanDestinationN

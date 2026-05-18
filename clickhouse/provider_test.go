@@ -834,8 +834,8 @@ func TestOpenProviderUpdateSwapSemantics(t *testing.T) {
 			t.Fatalf("timed out waiting for OnUpdate observation")
 		}
 
-		So(got.tree, ShouldNotEqual, oldTree)
-		So(got.bd, ShouldNotEqual, oldBD)
+		So(got.tree == oldTree, ShouldBeFalse)
+		So(got.bd == oldBD, ShouldBeFalse)
 
 		// Old readers must remain usable (and not closed) until callback returns.
 		So(builtDB1.closed.Load(), ShouldBeFalse)

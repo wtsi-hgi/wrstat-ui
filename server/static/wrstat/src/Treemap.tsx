@@ -25,7 +25,7 @@
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  ******************************************************************************/
 
-import type { MouseEventHandler } from "react";
+import type { MouseEventHandler, ReactElement } from "react";
 
 type TreeMapParams = {
 	table: Table | null;
@@ -130,7 +130,7 @@ const phi = (1 + Math.sqrt(5)) / 2,
 			remainingTotal += e.value;
 		}
 
-		const toRet: JSX.Element[] = [];
+		const toRet: ReactElement[] = [];
 
 		while (box.right - box.left >= 1 && box.bottom - box.top >= 1) {
 			const isRow = (box.right - box.left) / (box.bottom - box.top) < phi || pos === 0,

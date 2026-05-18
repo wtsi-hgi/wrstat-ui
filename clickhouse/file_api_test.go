@@ -74,6 +74,10 @@ func (r *findByGlobEmptyRows) Next() bool {
 	return false
 }
 
+func (r *findByGlobEmptyRows) HasData() bool {
+	return false
+}
+
 func (r *findByGlobEmptyRows) Scan(...any) error {
 	return errBootstrapTestUnexpectedCall
 }

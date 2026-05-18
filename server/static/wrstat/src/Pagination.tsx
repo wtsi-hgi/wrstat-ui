@@ -25,6 +25,8 @@
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  ******************************************************************************/
 
+import type { ReactElement } from "react";
+
 type PaginationParams = {
 	totalPages: number;
 	currentPage: number;
@@ -33,7 +35,7 @@ type PaginationParams = {
 
 const paginationEnd = 3,
 	paginationSurround = 3,
-	processPaginationSection = (ret: JSX.Element[], currPage: number, from: number, to: number, onClick: (page: number) => void) => {
+	processPaginationSection = (ret: ReactElement[], currPage: number, from: number, to: number, onClick: (page: number) => void) => {
 		if (ret.length !== 0) {
 			ret.push(<li key={`pagination_gap_${from}`}>…</li>);
 		}
@@ -64,7 +66,7 @@ const paginationEnd = 3,
 		}
 	},
 	PaginationComponent = ({ totalPages, currentPage, onClick }: PaginationParams) => {
-		const ret: JSX.Element[] = [],
+		const ret: ReactElement[] = [],
 			lastPage = totalPages - 1;
 
 		if (lastPage < 1) {
