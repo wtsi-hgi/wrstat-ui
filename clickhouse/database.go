@@ -330,7 +330,12 @@ func (d *clickHouseDatabase) resolveMountScope(dir string) (string, bool, error)
 
 	normDir := ensureTrailingSlash(dir)
 
-	if mountPath := d.mountPoints.PrefixOf(normDir); mountPath != "" && mountPath != "/" {
+	mountPath, ok, err := d.resolveConfiguredMountScope(normDir)
+	if err != nil {
+		return "", false, err
+	}
+
+	if ok {
 		return mountPath, true, nil
 	}
 
@@ -348,6 +353,24 @@ func (d *clickHouseDatabase) resolveMountScope(dir string) (string, bool, error)
 	}
 
 	return mount.mountPath, true, nil
+}
+
+func (d *clickHouseDatabase) resolveConfiguredMountScope(dir string) (string, bool, error) {
+	mountPath := d.mountPoints.PrefixOf(dir)
+	if mountPath == "" || mountPath == "/" {
+		return "", false, nil
+	}
+
+	mount, ok, err := d.activeMountForDir(dir)
+	if err != nil {
+		return "", false, err
+	}
+
+	if ok {
+		return mount.mountPath, true, nil
+	}
+
+	return mountPath, true, nil
 }
 
 func (d *clickHouseDatabase) hasNestedMountPoint(dir string) bool {
