@@ -29,6 +29,7 @@ package clickhouse
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -38,7 +39,14 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
 )
 
-const findByGlobAlphaOne = "/alpha/one"
+const (
+	findByGlobAlphaMount  = "/alpha/"
+	findByGlobBetaMount   = "/beta/"
+	findByGlobAlphaOne    = "/alpha/one"
+	findByGlobAlphaOneDir = "/alpha/one/"
+	findByGlobAlphaTwo    = "/alpha/two"
+	findByGlobBetaTwo     = "/beta/two"
+)
 
 func TestUnknownFileFieldErrors(t *testing.T) {
 	Convey("file row helpers preserve unknown field error behaviour", t, func() {
@@ -122,7 +130,10 @@ func TestClientFindByGlobQueryGrouping(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
 
-		mountPoints := basedirs.ValidateMountPoints([]string{"/alpha/", "/beta/"})
+		mountPoints := basedirs.ValidateMountPoints([]string{
+			findByGlobAlphaMount,
+			findByGlobBetaMount,
+		})
 
 		newClient := func(conn *findByGlobQueryCountConn) *Client {
 			return &Client{
@@ -136,7 +147,12 @@ func TestClientFindByGlobQueryGrouping(t *testing.T) {
 			conn := &findByGlobQueryCountConn{}
 			client := newClient(conn)
 
-			rows, err := client.FindByGlob(ctx, []string{findByGlobAlphaOne, "/alpha/two"}, []string{"*"}, FindOptions{})
+			rows, err := client.FindByGlob(
+				ctx,
+				[]string{findByGlobAlphaOne, findByGlobAlphaTwo},
+				[]string{"*"},
+				FindOptions{},
+			)
 			So(err, ShouldBeNil)
 			So(rows, ShouldBeEmpty)
 			So(conn.queryCountValue(), ShouldEqual, 1)
@@ -151,7 +167,12 @@ func TestClientFindByGlobQueryGrouping(t *testing.T) {
 				patterns[i] = "*"
 			}
 
-			rows, err := client.FindByGlob(ctx, []string{findByGlobAlphaOne, "/alpha/two"}, patterns, FindOptions{})
+			rows, err := client.FindByGlob(
+				ctx,
+				[]string{findByGlobAlphaOne, findByGlobAlphaTwo},
+				patterns,
+				FindOptions{},
+			)
 			So(err, ShouldBeNil)
 			So(rows, ShouldBeEmpty)
 			So(conn.queryCountValue(), ShouldEqual, 2)
@@ -161,10 +182,74 @@ func TestClientFindByGlobQueryGrouping(t *testing.T) {
 			conn := &findByGlobQueryCountConn{}
 			client := newClient(conn)
 
-			rows, err := client.FindByGlob(ctx, []string{findByGlobAlphaOne, "/beta/two"}, []string{"*"}, FindOptions{})
+			rows, err := client.FindByGlob(
+				ctx,
+				[]string{findByGlobAlphaOne, findByGlobBetaTwo},
+				[]string{"*"},
+				FindOptions{},
+			)
 			So(err, ShouldBeNil)
 			So(rows, ShouldBeEmpty)
 			So(conn.queryCountValue(), ShouldEqual, 2)
+		})
+	})
+}
+
+func TestFindByGlobQueryShape(t *testing.T) {
+	Convey("FindByGlob uses parent_dir equality for direct child patterns", t, func() {
+		q, params := buildFindByGlobQueryAndParams(
+			fileRowSelectAll,
+			findByGlobAlphaMount,
+			[]string{findByGlobAlphaOneDir},
+			[]string{"*.txt"},
+			1,
+			222,
+			[]uint32{111},
+			100,
+			0,
+		)
+
+		So(q, ShouldContainSubstring, "f.parent_dir = ?")
+		So(q, ShouldContainSubstring, "match(f.name, ?)")
+		So(q, ShouldNotContainSubstring, "match(f.path, ?)")
+		So(params, ShouldResemble, []any{
+			findByGlobAlphaMount,
+			findByGlobAlphaMount,
+			findByGlobAlphaOneDir,
+			"^[^/]*\\.txt$",
+			int64(1),
+			uint32(222),
+			[]uint32{111},
+			int64(100),
+			int64(0),
+		})
+	})
+
+	Convey("FindByGlob omits redundant path regexes for recursive match-all patterns", t, func() {
+		q, params := buildFindByGlobQueryAndParams(
+			fileRowSelectAll,
+			findByGlobAlphaMount,
+			[]string{findByGlobAlphaOneDir},
+			[]string{"**"},
+			0,
+			0,
+			nil,
+			100,
+			0,
+		)
+
+		So(q, ShouldContainSubstring, "f.parent_dir >= ? AND f.parent_dir < ?")
+		So(strings.Count(q, "match("), ShouldEqual, 0)
+		So(params, ShouldResemble, []any{
+			findByGlobAlphaMount,
+			findByGlobAlphaMount,
+			findByGlobAlphaOneDir,
+			"/alpha/one0",
+			int64(0),
+			uint32(0),
+			[]uint32(nil),
+			int64(100),
+			int64(0),
 		})
 	})
 }

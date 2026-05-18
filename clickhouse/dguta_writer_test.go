@@ -59,6 +59,10 @@ const (
 		"AND snapshot_id = toUUID(?)"
 	dgutaWriterTestCountChildrenQuery = "SELECT count() FROM wrstat_children WHERE mount_path = ? " +
 		"AND snapshot_id = toUUID(?)"
+	dgutaWriterTestCountDGUTAForDirQuery = "SELECT count() FROM wrstat_dguta WHERE mount_path = ? " +
+		"AND snapshot_id = toUUID(?) AND dir = ?"
+	dgutaWriterTestCountChildrenForParentQuery = "SELECT count() FROM wrstat_children WHERE mount_path = ? " +
+		"AND snapshot_id = toUUID(?) AND parent_dir = ?"
 )
 
 func TestClickHouseDGUTAWriter(t *testing.T) {
@@ -332,6 +336,120 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 		So(childRows.Scan(&gotChild), ShouldBeNil)
 		So(gotChild, ShouldEqual, testMountPath+"child")
 		So(childRows.Next(), ShouldBeFalse)
+	})
+
+	Convey("DGUTAWriter canonicalises root mount paths without double-counting", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 2 * time.Second
+		cfg.MountPoints = []string{"/"}
+
+		const mountPath = "/"
+
+		updatedAt := time.Date(2026, 1, 9, 12, 0, 0, 0, time.UTC)
+		expectedSID := snapshotID(mountPath, updatedAt)
+
+		paths := internaltest.NewDirectoryPathCreator()
+
+		w, err := NewDGUTAWriter(cfg)
+		So(err, ShouldBeNil)
+		So(w, ShouldNotBeNil)
+
+		w.SetMountPath(mountPath)
+		w.SetUpdatedAt(updatedAt)
+
+		So(w.Add(singleDGUTARecord(paths.ToDirectoryPath("/"), 42, "")), ShouldBeNil)
+		So(w.Add(singleDGUTARecord(paths.ToDirectoryPath("//"), 42, "boot/")), ShouldBeNil)
+		So(w.Close(), ShouldBeNil)
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		So(countRows(ctx, conn,
+			dgutaWriterTestCountDGUTAForDirQuery,
+			mountPath,
+			expectedSID.String(),
+			"/",
+		), ShouldEqual, 1)
+		So(countRows(ctx, conn,
+			dgutaWriterTestCountDGUTAForDirQuery,
+			mountPath,
+			expectedSID.String(),
+			"//",
+		), ShouldEqual, 0)
+
+		dbch := newClickHouseDatabase(cfg, conn)
+
+		sum, err := dbch.DirInfo("/", &db.Filter{Age: db.DGUTAgeA1M})
+		So(err, ShouldBeNil)
+		So(sum.Count, ShouldEqual, 7)
+
+		children, err := dbch.Children("/")
+		So(err, ShouldBeNil)
+		So(children, ShouldResemble, []string{"/boot"})
+
+		So(countRows(ctx, conn,
+			dgutaWriterTestCountChildrenForParentQuery,
+			mountPath,
+			expectedSID.String(),
+			"//",
+		), ShouldEqual, 0)
+	})
+
+	Convey("DGUTAWriter preserves repeated rows for the same canonical directory", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 2 * time.Second
+		cfg.MountPoints = []string{"/"}
+
+		const mountPath = "/"
+
+		updatedAt := time.Date(2026, 1, 9, 12, 0, 0, 0, time.UTC)
+		expectedSID := snapshotID(mountPath, updatedAt)
+
+		paths := internaltest.NewDirectoryPathCreator()
+		dir := paths.ToDirectoryPath("/")
+
+		w, err := NewDGUTAWriter(cfg)
+		So(err, ShouldBeNil)
+		So(w, ShouldNotBeNil)
+
+		w.SetMountPath(mountPath)
+		w.SetUpdatedAt(updatedAt)
+
+		So(w.Add(singleDGUTARecord(dir, 42, "")), ShouldBeNil)
+		So(w.Add(singleDGUTARecord(dir, 42, "")), ShouldBeNil)
+		So(w.Close(), ShouldBeNil)
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		So(countRows(ctx, conn,
+			dgutaWriterTestCountDGUTAForDirQuery,
+			mountPath,
+			expectedSID.String(),
+			"/",
+		), ShouldEqual, 2)
+
+		dbch := newClickHouseDatabase(cfg, conn)
+
+		sum, err := dbch.DirInfo("/", &db.Filter{Age: db.DGUTAgeA1M})
+		So(err, ShouldBeNil)
+		So(sum.Count, ShouldEqual, 14)
 	})
 
 	Convey("DGUTAWriter drops previous snapshot partitions on Close", t, func() {

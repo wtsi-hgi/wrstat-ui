@@ -163,6 +163,120 @@ func TestClickHouseFileIngestOperation(t *testing.T) {
 		So(countRows(ctx, conn, filesIngestTestCountQuery, testMountPath, sid), ShouldEqual, 1)
 	})
 
+	Convey("File ingest operation canonicalises root mount paths for ListDir", t, func() {
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 2 * time.Second
+		cfg.MountPoints = []string{"/"}
+
+		const mountPath = "/"
+
+		updatedAt := time.Unix(1710000000, 0).UTC()
+		sid := snapshotID(mountPath, updatedAt)
+
+		paths := internaltest.NewDirectoryPathCreator()
+
+		gen, closer, err := NewFileIngestOperation(cfg, mountPath, updatedAt)
+		So(err, ShouldBeNil)
+		So(gen, ShouldNotBeNil)
+		So(closer, ShouldNotBeNil)
+
+		op := gen()
+		So(op, ShouldNotBeNil)
+
+		So(op.Add(&summary.FileInfo{
+			Path:         paths.ToDirectoryPath("//"),
+			Name:         []byte("/"),
+			Size:         0,
+			ApparentSize: 0,
+			UID:          1,
+			GID:          2,
+			ATime:        10,
+			MTime:        11,
+			CTime:        12,
+			Inode:        100,
+			Nlink:        1,
+			EntryType:    stats.DirType,
+		}), ShouldBeNil)
+
+		So(op.Add(&summary.FileInfo{
+			Path:         paths.ToDirectoryPath("//boot/"),
+			Name:         []byte("boot/"),
+			Size:         0,
+			ApparentSize: 0,
+			UID:          1,
+			GID:          2,
+			ATime:        10,
+			MTime:        11,
+			CTime:        12,
+			Inode:        101,
+			Nlink:        1,
+			EntryType:    stats.DirType,
+		}), ShouldBeNil)
+
+		So(op.Add(&summary.FileInfo{
+			Path:         paths.ToDirectoryPath("//"),
+			Name:         []byte("bin"),
+			Size:         7,
+			ApparentSize: 7,
+			UID:          1,
+			GID:          2,
+			ATime:        20,
+			MTime:        21,
+			CTime:        22,
+			Inode:        102,
+			Nlink:        1,
+			EntryType:    stats.SymlinkType,
+		}), ShouldBeNil)
+
+		So(op.Add(&summary.FileInfo{
+			Path:         paths.ToDirectoryPath("//boot/"),
+			Name:         []byte("vmlinuz"),
+			Size:         123,
+			ApparentSize: 456,
+			UID:          1,
+			GID:          2,
+			ATime:        30,
+			MTime:        31,
+			CTime:        32,
+			Inode:        103,
+			Nlink:        1,
+			EntryType:    stats.FileType,
+		}), ShouldBeNil)
+
+		So(closer.Close(), ShouldBeNil)
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		So(conn.Exec(ctx, testInsertMountStmt, mountPath, time.Now(), sid, updatedAt), ShouldBeNil)
+
+		client, err := NewClient(cfg)
+		So(err, ShouldBeNil)
+		Reset(func() { So(client.Close(), ShouldBeNil) })
+
+		rows, err := client.ListDir(ctx, "/", ListOptions{})
+		So(err, ShouldBeNil)
+		So(rows, ShouldHaveLength, 2)
+		So(rows[0].ParentDir, ShouldEqual, "/")
+		So(rows[0].Name, ShouldEqual, "bin")
+		So(rows[0].Path, ShouldEqual, "/bin")
+		So(rows[1].ParentDir, ShouldEqual, "/")
+		So(rows[1].Name, ShouldEqual, "boot/")
+		So(rows[1].Path, ShouldEqual, "/boot/")
+
+		rows, err = client.ListDir(ctx, "/boot/", ListOptions{})
+		So(err, ShouldBeNil)
+		So(rows, ShouldHaveLength, 1)
+		So(rows[0].ParentDir, ShouldEqual, "/boot/")
+		So(rows[0].Name, ShouldEqual, "vmlinuz")
+		So(rows[0].Path, ShouldEqual, "/boot/vmlinuz")
+	})
+
 	Convey("File ingest operation refuses to rewrite an active deterministic snapshot", t, func() {
 		th := newClickHouseTestHarness(t)
 		cfg := th.newConfig()

@@ -204,20 +204,35 @@ func (w *fileIngestWriter) append(info *summary.FileInfo) error {
 		return errClientClosed
 	}
 
-	if info == nil {
+	keep, err := w.prepareAppend(info)
+	if err != nil {
+		return err
+	}
+
+	if !keep {
 		return nil
 	}
 
+	return w.flushIfBatchFull()
+}
+
+func (w *fileIngestWriter) prepareAppend(info *summary.FileInfo) (bool, error) {
+	if info == nil {
+		return false, nil
+	}
+
 	if err := w.validateWriteState(); err != nil {
-		return err
+		return false, err
 	}
 
 	if err := validateFileInfo(info); err != nil {
-		return err
+		return false, err
 	}
 
-	w.bufferFileInfo(info)
+	return w.bufferFileInfo(info), nil
+}
 
+func (w *fileIngestWriter) flushIfBatchFull() error {
 	if w.buf.rows() < w.batchSize {
 		return nil
 	}
@@ -250,11 +265,16 @@ func validateFileInfo(info *summary.FileInfo) error {
 	return nil
 }
 
-func (w *fileIngestWriter) bufferFileInfo(info *summary.FileInfo) {
+func (w *fileIngestWriter) bufferFileInfo(info *summary.FileInfo) bool {
 	parentDir := string(info.Path.AppendTo(
 		make([]byte, 0, info.Path.Len()),
 	))
 	name := string(info.Name)
+
+	parentDir, name, keep := canonicalFileIngestPath(w.mountPath, parentDir, name)
+	if !keep {
+		return false
+	}
 
 	w.buf.appendRow(
 		w.mountPath,
@@ -273,6 +293,35 @@ func (w *fileIngestWriter) bufferFileInfo(info *summary.FileInfo) {
 		uint64(info.Inode), //nolint:gosec
 		uint64(info.Nlink), //nolint:gosec
 	)
+
+	return true
+}
+
+func canonicalFileIngestPath(mountPath, parentDir, name string) (string, string, bool) {
+	parentDir = canonicalPathForMount(mountPath, parentDir)
+
+	if !strings.HasSuffix(name, "/") || !strings.HasSuffix(parentDir, name) {
+		return parentDir, name, true
+	}
+
+	if parentDir == "/" && name == "/" {
+		return "", "", false
+	}
+
+	return strings.TrimSuffix(parentDir, name), name, true
+}
+
+func canonicalPathForMount(mountPath, path string) string {
+	if mountPath != "/" || path == "" {
+		return path
+	}
+
+	trimmed := strings.TrimLeft(path, "/")
+	if trimmed == "" {
+		return "/"
+	}
+
+	return "/" + trimmed
 }
 
 func extFromName(name string) string {
