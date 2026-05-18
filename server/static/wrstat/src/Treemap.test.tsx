@@ -25,7 +25,6 @@
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  ******************************************************************************/
 
-import 'jest-canvas-mock';
 import { render } from '@testing-library/react';
 import TreeMap, { type Table } from './Treemap';
 

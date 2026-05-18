@@ -25,17 +25,17 @@
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  ******************************************************************************/
 
-import type { CSSProperties } from "react";
+import type { CSSProperties, ReactElement } from "react";
 import Pagination from "./Pagination";
 import { useSavedState } from "./state";
 
 type Column<T> = {
 	[K in Extract<keyof T, string>]-?: {
 		title: string;
-		titleHTML?: JSX.Element
+		titleHTML?: ReactElement
 		key: K;
 		extra?: (data: T[K], row: T) => Record<string, any>;
-		formatter?: (data: T[K], row: T) => JSX.Element | string;
+		formatter?: (data: T[K], row: T) => ReactElement | string;
 		sortFn?: (a: T, b: T) => number;
 		reverseFn?: (a: T, b: T) => number;
 		startReverse?: boolean;
