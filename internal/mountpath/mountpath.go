@@ -65,7 +65,7 @@ func mountPathFromDatasetDirBase(dirBase string) (mountPath string, ok bool, err
 		return "", false, ErrDatasetDirEmptyMountKey
 	}
 
-	_, mountKey, ok := datasets.SplitDatasetDirName(dirBase)
+	_, mountKey, ok := datasets.SplitDatasetDirName(strings.TrimPrefix(dirBase, "."))
 	if !ok {
 		return "", false, nil
 	}

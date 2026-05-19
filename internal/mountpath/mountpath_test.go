@@ -3,9 +3,22 @@ package mountpath
 import (
 	"errors"
 	"testing"
+
+	. "github.com/smartystreets/goconvey/convey"
 )
 
 const testMountDataPath = "/mnt/data/"
+
+func TestFromOutputDirAcceptsDotPrefixedStagingDir(t *testing.T) {
+	t.Parallel()
+
+	Convey("FromOutputDir accepts a watch staging dataset basename", t, func() {
+		got, err := FromOutputDir("/tmp/.20260517-200015_／lustre／scratch123")
+
+		So(err, ShouldBeNil)
+		So(got, ShouldEqual, "/lustre/scratch123/")
+	})
+}
 
 func TestFromOutputDir(t *testing.T) {
 	t.Parallel()
