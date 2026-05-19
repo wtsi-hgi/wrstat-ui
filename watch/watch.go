@@ -39,11 +39,12 @@ import (
 )
 
 const (
-	inputStatsFile  = "stats.gz"
-	dirPerms        = 0750
-	basedirBasename = "basedirs.db"
-	summariseCPU    = 2
-	summariseMem    = 8192
+	inputStatsFile       = "stats.gz"
+	dirPerms             = 0750
+	basedirBasename      = "basedirs.db"
+	summariseCPU         = 2
+	summariseMem         = 8192
+	activeSnapshotOKFlag = "--clickhouse-active-snapshot-ok"
 )
 
 var connectTimeout = 10 * time.Second //nolint:gochecknoglobals
@@ -192,7 +193,7 @@ func getPreviousBasedirsDB(outputDir, base string) (string, error) {
 
 func getJobCommand(dotOutputBase, previousBasedirsDB, quotaPath, basedirsConfig, mounts,
 	inputDir, base, outputDir string) string {
-	cmdFormat := "%[1]q summarise -d %[2]q"
+	cmdFormat := "%[1]q summarise " + activeSnapshotOKFlag + " -d %[2]q"
 
 	if previousBasedirsDB != "" {
 		cmdFormat += " -s %[3]q"

@@ -27,6 +27,7 @@
 package clickhouse
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -36,6 +37,40 @@ const (
 	activeMountTupleArgCount = 2
 	activeMountPathArgCount  = 1
 )
+
+// ActiveSnapshotMatches reports whether mountPath is already active for the
+// deterministic snapshot derived from updatedAt.
+func ActiveSnapshotMatches(cfg Config, mountPath string, updatedAt time.Time) (bool, error) {
+	if err := validateConfig(cfg); err != nil {
+		return false, err
+	}
+
+	opts, err := optionsFromConfig(cfg)
+	if err != nil {
+		return false, err
+	}
+
+	conn, err := connectAndBootstrap(
+		context.Background(),
+		opts,
+		cfg.Database,
+		queryTimeout(cfg),
+	)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = conn.Close() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), queryTimeout(cfg))
+	defer cancel()
+
+	activeSID, hasActive, err := readActiveSnapshotID(ctx, conn, mountPath)
+	if err != nil {
+		return false, err
+	}
+
+	return hasActive && activeSID == snapshotID(mountPath, updatedAt).String(), nil
+}
 
 type activeMount struct {
 	mountPath  string

@@ -52,6 +52,7 @@ const (
 	summariseDBBatchSize   = 100_000
 	summariseDirPerm       = 0o755
 	maxMountPathCandidates = 4
+	activeSnapshotOKFlag   = "clickhouse-active-snapshot-ok"
 )
 
 var (
@@ -65,6 +66,8 @@ var (
 	quotaPath      string
 	basedirsConfig string
 	mounts         string
+
+	clickhouseActiveSnapshotOK bool
 )
 
 var (
@@ -77,7 +80,15 @@ var (
 	errNoOutputDir = errors.New(
 		"no output directory available for mount-path derivation",
 	)
+	errSummariseClickHouseSnapshotAlreadyActive = errors.New(
+		"clickhouse snapshot already active",
+	)
+	errSummariseClickHouseActiveSnapshotRewrite = errors.New(
+		"clickhouse: refusing to rewrite active snapshot",
+	)
 )
+
+var clickHouseSnapshotIsActive = clickhouse.ActiveSnapshotMatches
 
 // summariseCmd represents the stat command.
 var summariseCmd = &cobra.Command{
@@ -159,6 +170,8 @@ func init() {
 		"ClickHouse database name (default $WRSTAT_CLICKHOUSE_DATABASE)")
 	summariseCmd.Flags().StringVar(&clickhouseQueryTO, "query-timeout", "",
 		"Per-query timeout (default $WRSTAT_QUERY_TIMEOUT)")
+	summariseCmd.Flags().BoolVar(&clickhouseActiveSnapshotOK, activeSnapshotOKFlag, false,
+		"treat an already-active exact ClickHouse snapshot as success")
 }
 
 type compressedFile struct {
@@ -414,6 +427,69 @@ type batchSizeSetter interface {
 	SetBatchSize(batchSize int)
 }
 
+type clickHouseSummariseTarget struct {
+	cfg         clickhouse.Config
+	mountPath   string
+	mountpoints string
+	modtime     time.Time
+}
+
+func prepareClickHouseSummariseTarget(
+	mountpoints string,
+	modtime time.Time,
+) (*clickHouseSummariseTarget, error) {
+	if basedirsDB == "" && dirgutaDB == "" {
+		return nil, nil //nolint:nilnil
+	}
+
+	loadClickhouseDotEnv()
+
+	mountPath, err := deriveMountPathForClickHouseSummarise(
+		basedirsDB, dirgutaDB, defaultDir,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	cfg, err := clickhouseSummariserConfig(mountpoints)
+	if err != nil {
+		return nil, err
+	}
+
+	return &clickHouseSummariseTarget{
+		cfg:         cfg,
+		mountPath:   mountPath,
+		mountpoints: mountpoints,
+		modtime:     modtime,
+	}, nil
+}
+
+func preflightClickHouseActiveSnapshot(target clickHouseSummariseTarget) error {
+	active, err := clickHouseSnapshotIsActive(
+		target.cfg,
+		target.mountPath,
+		target.modtime,
+	)
+	if err != nil {
+		return err
+	}
+
+	if !active {
+		return nil
+	}
+
+	if clickhouseActiveSnapshotOK {
+		return errSummariseClickHouseSnapshotAlreadyActive
+	}
+
+	return fmt.Errorf(
+		"%w: mount_path=%s updated_at=%s",
+		errSummariseClickHouseActiveSnapshotRewrite,
+		target.mountPath,
+		target.modtime.UTC().Format(time.RFC3339Nano),
+	)
+}
+
 func run(args []string) (err error) {
 	if err = checkArgs(args); err != nil {
 		return err
@@ -428,9 +504,16 @@ func run(args []string) (err error) {
 
 	setArgsDefaults()
 
-	if fn, err := setSummarisers(s, mounts, modtime); err != nil { //nolint:nestif
+	fn, err := setSummarisers(s, mounts, modtime)
+	if errors.Is(err, errSummariseClickHouseSnapshotAlreadyActive) {
+		return nil
+	}
+
+	if err != nil {
 		return err
-	} else if fn != nil {
+	}
+
+	if fn != nil {
 		defer func() {
 			if errr := fn(err == nil); errr != nil {
 				err = errors.Join(err, errr)
@@ -506,17 +589,28 @@ func setSummarisers(
 	mountpoints string,
 	modtime time.Time,
 ) (func(bool) error, error) {
-	if err := addOutputSummarisers(s); err != nil {
+	chTarget, err := prepareClickHouseSummariseTarget(mountpoints, modtime)
+	if err != nil {
 		return nil, err
 	}
 
-	if basedirsDB == "" && dirgutaDB == "" {
+	if chTarget != nil {
+		err = preflightClickHouseActiveSnapshot(*chTarget)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	err = addOutputSummarisers(s)
+	if err != nil {
+		return nil, err
+	}
+
+	if chTarget == nil {
 		return nil, nil //nolint:nilnil
 	}
 
-	closer, err := addClickHouseSummarisers(
-		s, mountpoints, modtime,
-	)
+	closer, err := addClickHouseSummarisers(s, *chTarget)
 	if err != nil {
 		return nil, err
 	}
@@ -564,25 +658,10 @@ func addGroupUserSummariser(s *summary.Summariser, groupUser string) error {
 
 func addClickHouseSummarisers(
 	s *summary.Summariser,
-	mountpoints string,
-	modtime time.Time,
+	target clickHouseSummariseTarget,
 ) (func(bool) error, error) {
-	loadClickhouseDotEnv()
-
-	mountPath, err := deriveMountPathForClickHouseSummarise(
-		basedirsDB, dirgutaDB, defaultDir,
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	cfg, err := clickhouseSummariserConfig(mountpoints)
-	if err != nil {
-		return nil, err
-	}
-
 	return wireClickHouseOperations(
-		s, cfg, mountPath, mountpoints, modtime,
+		s, target.cfg, target.mountPath, target.mountpoints, target.modtime,
 	)
 }
 
