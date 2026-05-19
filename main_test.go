@@ -1049,12 +1049,12 @@ func (chPerfOpenProviderTestStub) OnError(func(error)) {}
 func (chPerfOpenProviderTestStub) Close() error { return nil }
 
 func TestClickHousePerfCommand(t *testing.T) {
-	Convey("clickhouse-perf import help shows the default batch size", t, func() {
+	Convey("clickhouse-perf import help shows the production batch size default", t, func() {
 		stdout, stderr, _, err := runWRStat("clickhouse-perf", "import", "--help")
 		So(err, ShouldBeNil)
 		So(stderr, ShouldBeBlank)
-		So(stdout, ShouldContainSubstring, "ClickHouse insert batch size")
-		So(stdout, ShouldContainSubstring, "default 10000")
+		So(stdout, ShouldContainSubstring, "ClickHouse insert batch size (default 100000)")
+		So(stdout, ShouldNotContainSubstring, "ClickHouse insert batch size (default 10000)")
 	})
 
 	Convey("clickhouse perf query opens its provider with polling disabled", t, func() {
