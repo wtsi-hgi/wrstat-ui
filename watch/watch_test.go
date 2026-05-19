@@ -105,7 +105,7 @@ func TestWatch(t *testing.T) {
 
 			So(jobs, ShouldResemble, []*jobqueue.Job{
 				{
-					Cmd: fmt.Sprintf(`%[1]q summarise -d "%[2]s/.12345_abc" `+
+					Cmd: fmt.Sprintf(`%[1]q summarise --clickhouse-active-snapshot-ok -d "%[2]s/.12345_abc" `+
 						`-m "/path/to/mounts" `+
 						`-q "/path/to/quota" -c "/path/to/basedirs.config" `+
 						`"%[3]s/stats.gz" && touch -r "%[3]s" "%[2]s/.12345_abc" `+
@@ -225,7 +225,7 @@ func TestWatch(t *testing.T) {
 
 			So(jobs, ShouldResemble, []*jobqueue.Job{
 				{
-					Cmd: fmt.Sprintf(`%[1]q summarise -d "%[2]s/.12345_abc" `+
+					Cmd: fmt.Sprintf(`%[1]q summarise --clickhouse-active-snapshot-ok -d "%[2]s/.12345_abc" `+
 						`-q "/path/to/quota" -c "/path/to/basedirs.config" `+
 						`"%[3]s/stats.gz" && touch -r "%[3]s" "%[2]s/.12345_abc" `+
 						`&& mv "%[2]s/.12345_abc" "%[2]s/12345_abc"`,
@@ -288,7 +288,7 @@ func TestWatch(t *testing.T) {
 
 			So(jobs, ShouldResemble, []*jobqueue.Job{
 				{
-					Cmd: fmt.Sprintf(`%[1]q summarise -d "%[2]s/.12345_abc" `+
+					Cmd: fmt.Sprintf(`%[1]q summarise --clickhouse-active-snapshot-ok -d "%[2]s/.12345_abc" `+
 						`-s "%[2]s/00001_abc/basedirs.db" `+
 						`-q "/path/to/quota" -c "/path/to/basedirs.config" `+
 						`"%[3]s/stats.gz" && touch -r "%[3]s" "%[2]s/.12345_abc" `+
@@ -337,7 +337,7 @@ func TestWatch(t *testing.T) {
 
 			So(jobs, ShouldResemble, []*jobqueue.Job{
 				{
-					Cmd: fmt.Sprintf(`%[1]q summarise -d "%[2]s/.12345_abc" `+
+					Cmd: fmt.Sprintf(`%[1]q summarise --clickhouse-active-snapshot-ok -d "%[2]s/.12345_abc" `+
 						`-q "/path/to/quota" -c "/path/to/basedirs.config" `+
 						`"%[3]s/stats.gz" && touch -r "%[3]s" "%[2]s/.12345_abc" `+
 						`&& mv "%[2]s/.12345_abc" "%[2]s/12345_abc"`,
@@ -357,7 +357,7 @@ func TestWatch(t *testing.T) {
 					State:    jobqueue.JobStateDelayed,
 				},
 				{
-					Cmd: fmt.Sprintf(`%[1]q summarise -d "%[2]s/.98765_c" `+
+					Cmd: fmt.Sprintf(`%[1]q summarise --clickhouse-active-snapshot-ok -d "%[2]s/.98765_c" `+
 						`-q "/path/to/quota" -c "/path/to/basedirs.config" `+
 						`"%[3]s/stats.gz" && touch -r "%[3]s" "%[2]s/.98765_c" `+
 						`&& mv "%[2]s/.98765_c" "%[2]s/98765_c"`,
