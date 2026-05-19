@@ -29,6 +29,7 @@ package clickhouse
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -328,6 +329,28 @@ func TestEnsureSchemaVersion(t *testing.T) {
 		So(maxVersion, ShouldNotBeNil)
 		So(*minVersion, ShouldEqual, 1)
 		So(*maxVersion, ShouldEqual, 1)
+	})
+
+	Convey("ensureSchemaVersion accepts duplicate existing version one rows", t, func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+
+		store := newSchemaVersionTestStore()
+		store.versionRows = 2
+
+		err := ensureSchemaVersion(ctx, &schemaVersionTestConn{store: store})
+		So(err, ShouldBeNil)
+	})
+
+	Convey("validateSchemaVersionStats rejects mixed and unsupported versions", t, func() {
+		versionOne := uint32(1)
+		versionTwo := uint32(2)
+
+		err := validateSchemaVersionStats(2, &versionOne, &versionTwo)
+		So(errors.Is(err, errUnexpectedSchemaVersion), ShouldBeTrue)
+
+		err = validateSchemaVersionStats(1, &versionTwo, &versionTwo)
+		So(errors.Is(err, errUnexpectedSchemaVersion), ShouldBeTrue)
 	})
 }
 
