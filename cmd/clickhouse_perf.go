@@ -39,7 +39,7 @@ import (
 
 const (
 	chPerfDefaultRepeat    = 20
-	chPerfDefaultBatchSize = 10_000
+	chPerfDefaultBatchSize = 100_000
 	chPerfDefaultParallel  = 1
 )
 
