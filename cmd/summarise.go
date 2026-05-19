@@ -26,6 +26,7 @@
 package cmd
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -51,8 +52,10 @@ import (
 const (
 	summariseDBBatchSize   = 100_000
 	summariseDirPerm       = 0o755
+	summariseMarkerPerm    = 0o600
 	maxMountPathCandidates = 4
 	activeSnapshotOKFlag   = "clickhouse-active-snapshot-ok"
+	completionMarkerName   = ".wrstat-ui-summarise-complete"
 )
 
 var (
@@ -88,7 +91,10 @@ var (
 	)
 )
 
-var clickHouseSnapshotIsActive = clickhouse.ActiveSnapshotMatches
+var (
+	clickHouseSnapshotIsActive        = clickhouse.ActiveSnapshotMatches
+	wireSummariseClickHouseOperations = wireClickHouseOperations
+)
 
 // summariseCmd represents the stat command.
 var summariseCmd = &cobra.Command{
@@ -432,6 +438,7 @@ type clickHouseSummariseTarget struct {
 	mountPath   string
 	mountpoints string
 	modtime     time.Time
+	outputDir   string
 }
 
 func prepareClickHouseSummariseTarget(
@@ -461,6 +468,7 @@ func prepareClickHouseSummariseTarget(
 		mountPath:   mountPath,
 		mountpoints: mountpoints,
 		modtime:     modtime,
+		outputDir:   defaultDir,
 	}, nil
 }
 
@@ -479,15 +487,119 @@ func preflightClickHouseActiveSnapshot(target clickHouseSummariseTarget) error {
 	}
 
 	if clickhouseActiveSnapshotOK {
+		return preflightClickHouseActiveSnapshotRetry(target)
+	}
+
+	return summariseActiveSnapshotRewriteError(target)
+}
+
+func preflightClickHouseActiveSnapshotRetry(target clickHouseSummariseTarget) error {
+	markerMatches, err := summariseCompletionMarkerMatches(target)
+	if err != nil {
+		return err
+	}
+
+	if markerMatches {
 		return errSummariseClickHouseSnapshotAlreadyActive
 	}
 
+	return summariseActiveSnapshotRewriteError(target)
+}
+
+func summariseCompletionMarkerMatches(target clickHouseSummariseTarget) (bool, error) {
+	if target.outputDir == "" {
+		return false, nil
+	}
+
+	data, err := os.ReadFile(summariseCompletionMarkerPath(target.outputDir))
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+
+	if err != nil {
+		return false, fmt.Errorf("failed to read summarise completion marker: %w", err)
+	}
+
+	if !json.Valid(data) {
+		return false, nil
+	}
+
+	var marker summariseCompletionMarker
+	if err := json.Unmarshal(data, &marker); err != nil {
+		return false, fmt.Errorf("failed to parse summarise completion marker: %w", err)
+	}
+
+	expected := newSummariseCompletionMarker(target)
+
+	return marker == expected, nil
+}
+
+func summariseCompletionMarkerPath(outputDir string) string {
+	return filepath.Join(outputDir, completionMarkerName)
+}
+
+func newSummariseCompletionMarker(target clickHouseSummariseTarget) summariseCompletionMarker {
+	return summariseCompletionMarker{
+		MountPath: target.mountPath,
+		UpdatedAt: target.modtime.UTC().Format(time.RFC3339Nano),
+	}
+}
+
+func summariseActiveSnapshotRewriteError(target clickHouseSummariseTarget) error {
 	return fmt.Errorf(
 		"%w: mount_path=%s updated_at=%s",
 		errSummariseClickHouseActiveSnapshotRewrite,
 		target.mountPath,
 		target.modtime.UTC().Format(time.RFC3339Nano),
 	)
+}
+
+func writeSummariseCompletionMarker(target *clickHouseSummariseTarget) error {
+	if target == nil || target.outputDir == "" {
+		return nil
+	}
+
+	data, err := json.Marshal(newSummariseCompletionMarker(*target))
+	if err != nil {
+		return err
+	}
+
+	data = append(data, '\n')
+
+	if err := os.WriteFile(
+		summariseCompletionMarkerPath(target.outputDir),
+		data,
+		summariseMarkerPerm,
+	); err != nil {
+		return fmt.Errorf("failed to write summarise completion marker: %w", err)
+	}
+
+	return nil
+}
+
+type summariseCompletionMarker struct {
+	MountPath string `json:"mount_path"`
+	UpdatedAt string `json:"updated_at"`
+}
+
+type summariseRunHooks struct {
+	close            func(bool) error
+	completionTarget *clickHouseSummariseTarget
+}
+
+func addClickHouseSummariseHooks(
+	s *summary.Summariser,
+	chTarget *clickHouseSummariseTarget,
+) (*summariseRunHooks, error) {
+	closer, err := addClickHouseSummarisers(s, *chTarget)
+	if err != nil {
+		return nil, err
+	}
+
+	return &summariseRunHooks{
+		close:            closer,
+		completionTarget: chTarget,
+	}, nil
 }
 
 func run(args []string) (err error) {
@@ -504,7 +616,7 @@ func run(args []string) (err error) {
 
 	setArgsDefaults()
 
-	fn, err := setSummarisers(s, mounts, modtime)
+	hooks, err := setSummarisers(s, mounts, modtime)
 	if errors.Is(err, errSummariseClickHouseSnapshotAlreadyActive) {
 		return nil
 	}
@@ -513,15 +625,20 @@ func run(args []string) (err error) {
 		return err
 	}
 
-	if fn != nil {
-		defer func() {
-			if errr := fn(err == nil); errr != nil {
-				err = errors.Join(err, errr)
-			}
-		}()
+	if hooks == nil {
+		return s.Summarise()
 	}
 
-	return s.Summarise()
+	err = s.Summarise()
+	if hooks.close != nil {
+		err = errors.Join(err, hooks.close(err == nil))
+	}
+
+	if err != nil {
+		return err
+	}
+
+	return writeSummariseCompletionMarker(hooks.completionTarget)
 }
 
 func checkArgs(args []string) error {
@@ -588,7 +705,7 @@ func setSummarisers(
 	s *summary.Summariser,
 	mountpoints string,
 	modtime time.Time,
-) (func(bool) error, error) {
+) (*summariseRunHooks, error) {
 	chTarget, err := prepareClickHouseSummariseTarget(mountpoints, modtime)
 	if err != nil {
 		return nil, err
@@ -610,12 +727,7 @@ func setSummarisers(
 		return nil, nil //nolint:nilnil
 	}
 
-	closer, err := addClickHouseSummarisers(s, *chTarget)
-	if err != nil {
-		return nil, err
-	}
-
-	return closer, nil
+	return addClickHouseSummariseHooks(s, chTarget)
 }
 
 func addOutputSummarisers(s *summary.Summariser) error {
@@ -660,7 +772,7 @@ func addClickHouseSummarisers(
 	s *summary.Summariser,
 	target clickHouseSummariseTarget,
 ) (func(bool) error, error) {
-	return wireClickHouseOperations(
+	return wireSummariseClickHouseOperations(
 		s, target.cfg, target.mountPath, target.mountpoints, target.modtime,
 	)
 }
