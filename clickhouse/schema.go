@@ -186,7 +186,7 @@ func validateSchemaVersionStats(count uint64, minVersion, maxVersion *uint32) er
 }
 
 func schemaVersionStatsOK(count uint64, minVersion, maxVersion *uint32) bool {
-	return count == 1 &&
+	return count >= 1 &&
 		minVersion != nil && maxVersion != nil &&
 		*minVersion == 1 && *maxVersion == 1
 }
