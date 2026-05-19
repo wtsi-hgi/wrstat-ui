@@ -333,7 +333,7 @@ func snapshotSummariseGlobals() func() {
 	origClickHouseDSN := clickhouseDSN
 	origClickHouseDatabase := clickhouseDatabase
 	origClickHouseQueryTO := clickhouseQueryTO
-	origClickHouseActiveSnapshotOK := clickhouseActiveSnapshotOK
+	origClickHouseRecover := clickhouseRecover
 	origClickHouseSnapshotIsActive := clickHouseSnapshotIsActive
 	origClickHouseCleanActiveSnapshotAttempt := clickHouseCleanActiveSnapshotAttempt
 	origWireSummariseClickHouseOperations := wireSummariseClickHouseOperations
@@ -351,7 +351,7 @@ func snapshotSummariseGlobals() func() {
 		clickhouseDSN = origClickHouseDSN
 		clickhouseDatabase = origClickHouseDatabase
 		clickhouseQueryTO = origClickHouseQueryTO
-		clickhouseActiveSnapshotOK = origClickHouseActiveSnapshotOK
+		clickhouseRecover = origClickHouseRecover
 		clickHouseSnapshotIsActive = origClickHouseSnapshotIsActive
 		clickHouseCleanActiveSnapshotAttempt = origClickHouseCleanActiveSnapshotAttempt
 		wireSummariseClickHouseOperations = origWireSummariseClickHouseOperations
@@ -371,7 +371,7 @@ func configureSummariseActiveSnapshotTest(outputDir string, allowActive bool) {
 	clickhouseDSN = summariseTestClickHouseDSN
 	clickhouseDatabase = summariseTestClickHouseDatabase
 	clickhouseQueryTO = ""
-	clickhouseActiveSnapshotOK = allowActive
+	clickhouseRecover = allowActive
 }
 
 func readFileBytes(path string) []byte {
@@ -403,27 +403,20 @@ func summariseCompletionMarkerExists(outputDir string) bool {
 }
 
 func TestSummariseClickHouseRecoverFlag(t *testing.T) {
-	Convey("summarise exposes clickhouse recover and hides the old retry flag", t, func() {
+	Convey("summarise exposes only clickhouse recover", t, func() {
 		restore := snapshotSummariseGlobals()
 		Reset(restore)
 		Reset(func() {
 			So(summariseCmd.Flags().Set("clickhouse-recover", "false"), ShouldBeNil)
-			So(summariseCmd.Flags().Set("clickhouse-active-snapshot-ok", "false"), ShouldBeNil)
 		})
 
 		usages := summariseCmd.Flags().FlagUsages()
 		So(usages, ShouldContainSubstring, "--clickhouse-recover")
-		So(usages, ShouldNotContainSubstring, "--clickhouse-active-snapshot-ok")
-
-		oldFlag := summariseCmd.Flags().Lookup("clickhouse-active-snapshot-ok")
-		So(oldFlag, ShouldNotBeNil)
-		So(oldFlag.Hidden, ShouldBeTrue)
 
 		So(summariseCmd.Flags().Set("clickhouse-recover", "true"), ShouldBeNil)
-		So(clickhouseActiveSnapshotOK, ShouldBeTrue)
+		So(clickhouseRecover, ShouldBeTrue)
 
 		So(summariseCmd.Flags().Set("clickhouse-recover", "false"), ShouldBeNil)
-		So(summariseCmd.Flags().Set("clickhouse-active-snapshot-ok", "true"), ShouldBeNil)
-		So(clickhouseActiveSnapshotOK, ShouldBeTrue)
+		So(clickhouseRecover, ShouldBeFalse)
 	})
 }

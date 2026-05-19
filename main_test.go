@@ -1396,7 +1396,7 @@ func TestWatch(t *testing.T) {
 		So(jobs[0].RepGroup, ShouldStartWith, "wrstat-ui-summarise-")
 		So(jobs, ShouldResemble, []*jobqueue.Job{
 			{
-				Cmd: fmt.Sprintf(`"./wrstat-ui_test" summarise -d %[1]q -q `+
+				Cmd: fmt.Sprintf(`"./wrstat-ui_test" summarise --clickhouse-recover -d %[1]q -q `+
 					`"/some/quota.file" -c "basedirs.config" %[2]q && touch -r %[3]q %[1]q && mv %[1]q %[4]q`,
 					dotA, statsA, runA, finalA,
 				),
@@ -1431,7 +1431,7 @@ func TestWatch(t *testing.T) {
 		So(jobs[0].RepGroup, ShouldStartWith, "wrstat-ui-summarise-")
 		So(jobs, ShouldResemble, []*jobqueue.Job{
 			{
-				Cmd: fmt.Sprintf(`"./wrstat-ui_test" summarise -d %[1]q `+
+				Cmd: fmt.Sprintf(`"./wrstat-ui_test" summarise --clickhouse-recover -d %[1]q `+
 					`-s %[2]q -q "/some/quota.file" -c "basedirs.config" %[3]q && touch -r %[4]q %[1]q && mv %[1]q %[5]q`,
 					dotA, previousBasedirs, statsA, runA, finalA,
 				),
@@ -2073,91 +2073,6 @@ func TestVersion(t *testing.T) {
 		So(err, ShouldBeNil)
 		So(strings.TrimSpace(output), ShouldEqual, "TESTVERSION")
 		So(stderr, ShouldBeBlank)
-	})
-}
-
-func TestWatch(t *testing.T) {
-	Convey("watch starts the correct jobs", t, func() {
-		tmp := t.TempDir()
-		output := t.TempDir()
-
-		runA := filepath.Join(tmp, "12345_A")
-		dotA := filepath.Join(output, ".12345_A")
-		finalA := filepath.Join(output, "12345_A")
-		statsA := filepath.Join(runA, "stats.gz")
-
-		const (
-			cpus = 2
-			ram  = 8192
-		)
-
-		cwd, err := os.Getwd()
-		So(err, ShouldBeNil)
-
-		So(os.Mkdir(runA, 0755), ShouldBeNil)
-		So(os.WriteFile(statsA, nil, 0600), ShouldBeNil)
-
-		_, _, jobs, err := runWRStat("watch", "-o", output, "-q", "/some/quota.file", "-c", "basedirs.config", tmp)
-		So(err, ShouldBeNil)
-
-		So(len(jobs), ShouldBeGreaterThan, 0)
-		So(jobs[0].RepGroup, ShouldStartWith, "wrstat-ui-summarise-")
-		So(jobs, ShouldResemble, []*jobqueue.Job{
-			{
-				Cmd: fmt.Sprintf(`"./wrstat-ui_test" summarise --clickhouse-recover -d %[1]q -q `+
-					`"/some/quota.file" -c "basedirs.config" %[2]q && touch -r %[3]q %[1]q && mv %[1]q %[4]q`,
-					dotA, statsA, runA, finalA,
-				),
-				Cwd:        cwd,
-				CwdMatters: true,
-				ReqGroup:   "wrstat-ui-summarise",
-				RepGroup:   jobs[0].RepGroup,
-				Requirements: &scheduler.Requirements{
-					Cores: cpus,
-					RAM:   ram,
-					Time:  10 * time.Second,
-					Disk:  1,
-				},
-				Override: 1,
-				Retries:  30,
-				State:    jobqueue.JobStateDelayed,
-			},
-		})
-
-		So(os.Remove(dotA), ShouldBeNil)
-
-		previous := filepath.Join(output, "12344_A")
-		previousBasedirs := filepath.Join(previous, "basedirs.db")
-
-		So(os.Mkdir(previous, 0700), ShouldBeNil)
-		So(os.WriteFile(previousBasedirs, nil, 0600), ShouldBeNil)
-
-		_, _, jobs, err = runWRStat("watch", "-o", output, "-q", "/some/quota.file", "-c", "basedirs.config", tmp)
-		So(err, ShouldBeNil)
-
-		So(len(jobs), ShouldBeGreaterThan, 0)
-		So(jobs[0].RepGroup, ShouldStartWith, "wrstat-ui-summarise-")
-		So(jobs, ShouldResemble, []*jobqueue.Job{
-			{
-				Cmd: fmt.Sprintf(`"./wrstat-ui_test" summarise --clickhouse-recover -d %[1]q `+
-					`-s %[2]q -q "/some/quota.file" -c "basedirs.config" %[3]q && touch -r %[4]q %[1]q && mv %[1]q %[5]q`,
-					dotA, previousBasedirs, statsA, runA, finalA,
-				),
-				Cwd:        cwd,
-				CwdMatters: true,
-				ReqGroup:   "wrstat-ui-summarise",
-				RepGroup:   jobs[0].RepGroup,
-				Requirements: &scheduler.Requirements{
-					Cores: cpus,
-					RAM:   ram,
-					Time:  10 * time.Second,
-					Disk:  1,
-				},
-				Override: 1,
-				Retries:  30,
-				State:    jobqueue.JobStateDelayed,
-			},
-		})
 	})
 }
 
