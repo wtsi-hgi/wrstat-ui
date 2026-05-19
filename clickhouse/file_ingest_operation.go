@@ -146,6 +146,7 @@ type fileIngestWriter struct {
 	prepared bool
 	batch    driver.Batch
 	buf      fileIngestBuffer
+	sendErr  error
 
 	batchSize int
 
@@ -183,7 +184,9 @@ func (w *fileIngestWriter) Close() error {
 
 	if w.conn != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), queryTimeout(w.cfg))
-		out = errors.Join(out, w.flushBuffer(ctx, false))
+		if w.sendErr == nil {
+			out = errors.Join(out, w.flushBuffer(ctx))
+		}
 
 		cancel()
 
@@ -242,7 +245,7 @@ func (w *fileIngestWriter) flushIfBatchFull() error {
 	)
 	defer cancel()
 
-	return w.flushBuffer(ctx, true)
+	return w.flushBuffer(ctx)
 }
 
 func validateFileInfo(info *summary.FileInfo) error {
@@ -341,6 +344,10 @@ func extFromName(name string) string {
 }
 
 func (w *fileIngestWriter) validateWriteState() error {
+	if w.sendErr != nil {
+		return w.sendErr
+	}
+
 	if w.mountPath == "" {
 		return errMountPathRequired
 	}
@@ -354,7 +361,6 @@ func (w *fileIngestWriter) validateWriteState() error {
 
 func (w *fileIngestWriter) flushBuffer(
 	ctx context.Context,
-	reprepare bool,
 ) error {
 	if w == nil || w.conn == nil {
 		return errClientClosed
@@ -368,11 +374,7 @@ func (w *fileIngestWriter) flushBuffer(
 		return err
 	}
 
-	if !reprepare {
-		return nil
-	}
-
-	return w.reprepareFilesBatch(ctx)
+	return nil
 }
 
 func (w *fileIngestWriter) sendBufferedData(
@@ -382,37 +384,25 @@ func (w *fileIngestWriter) sendBufferedData(
 		return err
 	}
 
+	if err := w.prepareFilesBatch(ctx); err != nil {
+		return err
+	}
+
 	if err := w.appendColumnarData(); err != nil {
 		return err
 	}
 
 	if err := w.batch.Send(); err != nil {
-		return fmt.Errorf(
+		w.sendErr = fmt.Errorf(
 			"clickhouse: failed to send files batch: %w", err,
 		)
+		w.batch = nil
+
+		return w.sendErr
 	}
 
 	w.buf.reset()
-
-	return nil
-}
-
-func (w *fileIngestWriter) reprepareFilesBatch(
-	ctx context.Context,
-) error {
-	newBatch, err := w.conn.PrepareBatch(
-		context.WithoutCancel(ctx),
-		insertFilesBatchQuery,
-		driver.WithReleaseConnection(),
-	)
-	if err != nil {
-		return fmt.Errorf(
-			"clickhouse: failed to prepare replacement files batch: %w",
-			err,
-		)
-	}
-
-	w.batch = newBatch
+	w.batch = nil
 
 	return nil
 }
@@ -474,12 +464,18 @@ func (w *fileIngestWriter) ensureWriteReady(
 		return err
 	}
 
-	return w.prepareFilesBatch(ctx)
+	return nil
 }
 
 func (w *fileIngestWriter) prepareFilesBatch(
 	ctx context.Context,
 ) error {
+	if w.batch != nil {
+		w.prepared = true
+
+		return nil
+	}
+
 	batchCtx := context.WithoutCancel(ctx)
 
 	batch, err := w.conn.PrepareBatch(

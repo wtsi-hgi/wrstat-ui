@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ClickHouse/clickhouse-go/v2/lib/column"
+	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	. "github.com/smartystreets/goconvey/convey"
 	internaltest "github.com/wtsi-hgi/wrstat-ui/internal/test"
 	"github.com/wtsi-hgi/wrstat-ui/stats"
@@ -19,6 +21,14 @@ const (
 		" WHERE mount_path = ? AND snapshot_id = toUUID(?)"
 	filesIngestTestSelectExts = "SELECT name, ext FROM wrstat_files" +
 		" WHERE mount_path = ? AND snapshot_id = toUUID(?) ORDER BY name ASC"
+)
+
+var (
+	errFileIngestLazyPrepareSend = errors.New(
+		"dial tcp: lookup clickhouse-host: i/o timeout",
+	)
+	errFileIngestLazyPreparePrepare        = errors.New("prepare files batch timeout")
+	errFileIngestLazyPrepareUnexpectedCall = errors.New("unexpected file ingest lazy prepare test call")
 )
 
 type fileIngestPhaseRecorder interface {
@@ -277,6 +287,101 @@ func TestClickHouseFileIngestOperation(t *testing.T) {
 		So(rows[0].Path, ShouldEqual, "/boot/vmlinuz")
 	})
 
+	Convey("File ingest operation prepares each files batch only when sending buffered rows", t, func() {
+		updatedAt := time.Unix(1710000000, 0).UTC()
+		paths := internaltest.NewDirectoryPathCreator()
+		root := paths.ToDirectoryPath(testMountPath)
+		conn := &fileIngestLazyPrepareConn{}
+		w := &fileIngestWriter{
+			cfg:       Config{QueryTimeout: time.Second},
+			conn:      conn,
+			mountPath: testMountPath,
+			updatedAt: updatedAt,
+			snapshot:  snapshotID(testMountPath, updatedAt),
+			batchSize: 1,
+		}
+		op := &fileIngestOperation{w: w}
+
+		So(conn.prepareCalls, ShouldEqual, 0)
+		So(op.Add(fileIngestTestInfo(root, "a.txt", 101)), ShouldBeNil)
+		So(conn.prepareCalls, ShouldEqual, 1)
+		So(conn.batches, ShouldHaveLength, 1)
+		So(conn.batches[0].sent, ShouldBeTrue)
+		So(w.batch, ShouldBeNil)
+
+		So(op.Add(fileIngestTestInfo(root, "b.txt", 102)), ShouldBeNil)
+		So(conn.prepareCalls, ShouldEqual, 2)
+		So(conn.batches, ShouldHaveLength, 2)
+		So(conn.batches[1].sent, ShouldBeTrue)
+		So(w.batch, ShouldBeNil)
+		So(w.buf.rows(), ShouldEqual, 0)
+	})
+
+	Convey("File ingest operation does not retry an ambiguous files batch send on Close", t, func() {
+		updatedAt := time.Unix(1710000000, 0).UTC()
+		paths := internaltest.NewDirectoryPathCreator()
+		root := paths.ToDirectoryPath(testMountPath)
+		conn := &fileIngestLazyPrepareConn{sendErr: errFileIngestLazyPrepareSend}
+		w := &fileIngestWriter{
+			cfg:       Config{QueryTimeout: time.Second},
+			conn:      conn,
+			mountPath: testMountPath,
+			updatedAt: updatedAt,
+			snapshot:  snapshotID(testMountPath, updatedAt),
+			batchSize: 1,
+		}
+		op := &fileIngestOperation{w: w}
+
+		err := op.Add(fileIngestTestInfo(root, "a.txt", 101))
+		So(err, ShouldNotBeNil)
+		So(errors.Is(err, errFileIngestLazyPrepareSend), ShouldBeTrue)
+		So(conn.prepareCalls, ShouldEqual, 1)
+		So(conn.batches, ShouldHaveLength, 1)
+		So(conn.batches[0].sendCalls, ShouldEqual, 1)
+
+		So(w.Close(), ShouldBeNil)
+		So(conn.prepareCalls, ShouldEqual, 1)
+		So(conn.batches[0].sendCalls, ShouldEqual, 1)
+	})
+
+	Convey("File ingest operation rechecks active snapshot if initial batch prepare fails", t, func() {
+		updatedAt := time.Unix(1710000000, 0).UTC()
+		sid := snapshotID(testMountPath, updatedAt)
+		paths := internaltest.NewDirectoryPathCreator()
+		root := paths.ToDirectoryPath(testMountPath)
+		conn := &fileIngestLazyPrepareConn{
+			prepareErr:           errFileIngestLazyPreparePrepare,
+			prepareErrOnce:       true,
+			activeSnapshotID:     sid.String(),
+			activeSnapshotAtCall: 2,
+		}
+		w := &fileIngestWriter{
+			cfg:       Config{QueryTimeout: time.Second},
+			conn:      conn,
+			mountPath: testMountPath,
+			updatedAt: updatedAt,
+			snapshot:  sid,
+			batchSize: 1,
+		}
+		op := &fileIngestOperation{w: w}
+
+		err := op.Add(fileIngestTestInfo(root, "a.txt", 101))
+		So(err, ShouldNotBeNil)
+		So(errors.Is(err, errFileIngestLazyPreparePrepare), ShouldBeTrue)
+		So(w.batch, ShouldBeNil)
+		So(w.prepared, ShouldBeFalse)
+		So(conn.queryCalls, ShouldEqual, 1)
+		So(conn.execCalls, ShouldEqual, 1)
+		So(conn.prepareCalls, ShouldEqual, 1)
+
+		err = w.Close()
+		So(err, ShouldNotBeNil)
+		So(errors.Is(err, errActiveSnapshotRewrite), ShouldBeTrue)
+		So(conn.queryCalls, ShouldEqual, 2)
+		So(conn.execCalls, ShouldEqual, 1)
+		So(conn.prepareCalls, ShouldEqual, 1)
+	})
+
 	Convey("File ingest operation refuses to rewrite an active deterministic snapshot", t, func() {
 		th := newClickHouseTestHarness(t)
 		cfg := th.newConfig()
@@ -359,4 +464,262 @@ func TestClickHouseFileIngestOperation(t *testing.T) {
 		So(ext, ShouldEqual, "txt")
 		So(rows.Next(), ShouldBeFalse)
 	})
+}
+
+func fileIngestTestInfo(path *summary.DirectoryPath, name string, inode int64) *summary.FileInfo {
+	return &summary.FileInfo{
+		Path:         path,
+		Name:         []byte(name),
+		Size:         123,
+		ApparentSize: 456,
+		UID:          1,
+		GID:          2,
+		ATime:        20,
+		MTime:        21,
+		CTime:        22,
+		Inode:        inode,
+		Nlink:        1,
+		EntryType:    stats.FileType,
+	}
+}
+
+type fileIngestLazyPrepareRows struct {
+	activeSID string
+	seen      bool
+}
+
+func (r *fileIngestLazyPrepareRows) Next() bool {
+	if r.activeSID == "" || r.seen {
+		return false
+	}
+
+	r.seen = true
+
+	return true
+}
+
+func (r *fileIngestLazyPrepareRows) Scan(dest ...any) error {
+	if len(dest) < 2 {
+		return errFileIngestLazyPrepareUnexpectedCall
+	}
+
+	sid, ok := dest[0].(*string)
+	if !ok {
+		return errFileIngestLazyPrepareUnexpectedCall
+	}
+
+	updatedAt, ok := dest[1].(*time.Time)
+	if !ok {
+		return errFileIngestLazyPrepareUnexpectedCall
+	}
+
+	*sid = r.activeSID
+	*updatedAt = time.Unix(1710000000, 0).UTC()
+
+	return nil
+}
+
+func (r *fileIngestLazyPrepareRows) ScanStruct(any) error {
+	return errFileIngestLazyPrepareUnexpectedCall
+}
+
+func (r *fileIngestLazyPrepareRows) ColumnTypes() []driver.ColumnType {
+	return nil
+}
+
+func (r *fileIngestLazyPrepareRows) Totals(...any) error {
+	return nil
+}
+
+func (r *fileIngestLazyPrepareRows) Columns() []string {
+	return nil
+}
+
+func (r *fileIngestLazyPrepareRows) Close() error {
+	return nil
+}
+
+func (r *fileIngestLazyPrepareRows) Err() error {
+	return nil
+}
+
+func (r *fileIngestLazyPrepareRows) HasData() bool {
+	return r.activeSID != ""
+}
+
+type fileIngestLazyPrepareRow struct{}
+
+func (r fileIngestLazyPrepareRow) Err() error {
+	return errFileIngestLazyPrepareUnexpectedCall
+}
+
+func (r fileIngestLazyPrepareRow) Scan(...any) error {
+	return errFileIngestLazyPrepareUnexpectedCall
+}
+
+func (r fileIngestLazyPrepareRow) ScanStruct(any) error {
+	return errFileIngestLazyPrepareUnexpectedCall
+}
+
+type fileIngestLazyPrepareColumn struct{}
+
+func (c *fileIngestLazyPrepareColumn) Append(any) error {
+	return nil
+}
+
+func (c *fileIngestLazyPrepareColumn) AppendRow(any) error {
+	return nil
+}
+
+type fileIngestLazyPrepareBatch struct {
+	columns   []fileIngestLazyPrepareColumn
+	sendErr   error
+	sendCalls int
+	sent      bool
+	aborted   bool
+	closed    bool
+}
+
+func newFileIngestLazyPrepareBatch(sendErr error) *fileIngestLazyPrepareBatch {
+	return &fileIngestLazyPrepareBatch{
+		columns: make([]fileIngestLazyPrepareColumn, 15),
+		sendErr: sendErr,
+	}
+}
+
+func (b *fileIngestLazyPrepareBatch) Abort() error {
+	b.aborted = true
+
+	return nil
+}
+
+func (b *fileIngestLazyPrepareBatch) Append(...any) error {
+	return nil
+}
+
+func (b *fileIngestLazyPrepareBatch) AppendStruct(any) error {
+	return nil
+}
+
+func (b *fileIngestLazyPrepareBatch) Column(i int) driver.BatchColumn {
+	return &b.columns[i]
+}
+
+func (b *fileIngestLazyPrepareBatch) Flush() error {
+	return nil
+}
+
+func (b *fileIngestLazyPrepareBatch) Send() error {
+	b.sendCalls++
+	if b.sendErr != nil {
+		return b.sendErr
+	}
+
+	b.sent = true
+
+	return nil
+}
+
+func (b *fileIngestLazyPrepareBatch) IsSent() bool {
+	return b.sent || b.aborted || b.closed
+}
+
+func (b *fileIngestLazyPrepareBatch) Rows() int {
+	return 0
+}
+
+func (b *fileIngestLazyPrepareBatch) Columns() []column.Interface {
+	return nil
+}
+
+func (b *fileIngestLazyPrepareBatch) Close() error {
+	b.closed = true
+
+	return nil
+}
+
+type fileIngestLazyPrepareConn struct {
+	prepareCalls         int
+	queryCalls           int
+	execCalls            int
+	batches              []*fileIngestLazyPrepareBatch
+	sendErr              error
+	prepareErr           error
+	prepareErrOnce       bool
+	activeSnapshotID     string
+	activeSnapshotAtCall int
+}
+
+func (c *fileIngestLazyPrepareConn) Contributors() []string {
+	return nil
+}
+
+func (c *fileIngestLazyPrepareConn) ServerVersion() (*driver.ServerVersion, error) {
+	return &driver.ServerVersion{}, nil
+}
+
+func (c *fileIngestLazyPrepareConn) Select(context.Context, any, string, ...any) error {
+	return errFileIngestLazyPrepareUnexpectedCall
+}
+
+func (c *fileIngestLazyPrepareConn) Query(context.Context, string, ...any) (driver.Rows, error) {
+	c.queryCalls++
+
+	activeCall := c.activeSnapshotAtCall
+	if activeCall == 0 {
+		activeCall = 1
+	}
+
+	if c.activeSnapshotID != "" && c.queryCalls >= activeCall {
+		return &fileIngestLazyPrepareRows{activeSID: c.activeSnapshotID}, nil
+	}
+
+	return &fileIngestLazyPrepareRows{}, nil
+}
+
+func (c *fileIngestLazyPrepareConn) QueryRow(context.Context, string, ...any) driver.Row {
+	return fileIngestLazyPrepareRow{}
+}
+
+func (c *fileIngestLazyPrepareConn) PrepareBatch(
+	context.Context,
+	string,
+	...driver.PrepareBatchOption,
+) (driver.Batch, error) {
+	c.prepareCalls++
+	if c.prepareErr != nil {
+		err := c.prepareErr
+		if c.prepareErrOnce {
+			c.prepareErr = nil
+		}
+
+		return nil, err
+	}
+
+	batch := newFileIngestLazyPrepareBatch(c.sendErr)
+	c.batches = append(c.batches, batch)
+
+	return batch, nil
+}
+
+func (c *fileIngestLazyPrepareConn) Exec(context.Context, string, ...any) error {
+	c.execCalls++
+
+	return nil
+}
+
+func (c *fileIngestLazyPrepareConn) AsyncInsert(context.Context, string, bool, ...any) error {
+	return errFileIngestLazyPrepareUnexpectedCall
+}
+
+func (c *fileIngestLazyPrepareConn) Ping(context.Context) error {
+	return nil
+}
+
+func (c *fileIngestLazyPrepareConn) Stats() driver.Stats {
+	return driver.Stats{}
+}
+
+func (c *fileIngestLazyPrepareConn) Close() error {
+	return nil
 }
