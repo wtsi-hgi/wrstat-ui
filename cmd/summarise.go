@@ -92,8 +92,9 @@ var (
 )
 
 var (
-	clickHouseSnapshotIsActive        = clickhouse.ActiveSnapshotMatches
-	wireSummariseClickHouseOperations = wireClickHouseOperations
+	clickHouseSnapshotIsActive           = clickhouse.ActiveSnapshotMatches
+	clickHouseCleanActiveSnapshotAttempt = clickhouse.CleanActiveSnapshotAttempt
+	wireSummariseClickHouseOperations    = wireClickHouseOperations
 )
 
 // summariseCmd represents the stat command.
@@ -503,7 +504,11 @@ func preflightClickHouseActiveSnapshotRetry(target clickHouseSummariseTarget) er
 		return errSummariseClickHouseSnapshotAlreadyActive
 	}
 
-	return summariseActiveSnapshotRewriteError(target)
+	if err := clickHouseCleanActiveSnapshotAttempt(target.cfg, target.mountPath, target.modtime); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func summariseCompletionMarkerMatches(target clickHouseSummariseTarget) (bool, error) {

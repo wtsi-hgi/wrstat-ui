@@ -103,17 +103,23 @@ func (f summariseActiveSnapshotFixture) writeValidStats(t *testing.T) {
 }
 
 func TestSummariseClickHouseActiveSnapshotPreflight(t *testing.T) {
-	Convey("watch retries refuse an already-active ClickHouse snapshot without a completion marker", t, func() {
+	Convey("watch retries clean an already-active ClickHouse snapshot "+
+		"without a completion marker and reprocess", t, func() {
 		fixture := newSummariseActiveSnapshotFixture(t)
+		fixture.writeValidStats(t)
 
 		restore := snapshotSummariseGlobals()
 		Reset(restore)
 
 		configureSummariseActiveSnapshotTest(fixture.outputDir, true)
 
-		called := false
+		activeCheckCalled := false
+		cleanupCalled := false
+		wireCalled := false
+		closeCalled := false
+
 		clickHouseSnapshotIsActive = func(cfg clickhouse.Config, mountPath string, modtime time.Time) (bool, error) {
-			called = true
+			activeCheckCalled = true
 
 			So(cfg.DSN, ShouldEqual, summariseTestClickHouseDSN)
 			So(cfg.Database, ShouldEqual, summariseTestClickHouseDatabase)
@@ -122,13 +128,49 @@ func TestSummariseClickHouseActiveSnapshotPreflight(t *testing.T) {
 
 			return true, nil
 		}
+		clickHouseCleanActiveSnapshotAttempt = func(
+			cfg clickhouse.Config,
+			mountPath string,
+			modtime time.Time,
+		) error {
+			So(cfg.DSN, ShouldEqual, summariseTestClickHouseDSN)
+			So(cfg.Database, ShouldEqual, summariseTestClickHouseDatabase)
+			So(mountPath, ShouldEqual, "/mnt/test/")
+			So(modtime.Equal(fixture.updatedAt), ShouldBeTrue)
+
+			cleanupCalled = true
+
+			return nil
+		}
+		wireSummariseClickHouseOperations = func(
+			_ *summary.Summariser,
+			_ clickhouse.Config,
+			_, _ string,
+			_ time.Time,
+		) (func(bool) error, error) {
+			So(cleanupCalled, ShouldBeTrue)
+
+			wireCalled = true
+
+			return func(publish bool) error {
+				So(publish, ShouldBeTrue)
+
+				closeCalled = true
+
+				return nil
+			}, nil
+		}
 
 		err := run([]string{fixture.statsPath})
-		So(err, ShouldNotBeNil)
-		So(err.Error(), ShouldContainSubstring, "refusing to rewrite active snapshot")
-		So(called, ShouldBeTrue)
-		So(readFileBytes(fixture.groupUserPath), ShouldResemble, fixture.groupUserContent)
-		So(readFileBytes(fixture.userGroupPath), ShouldResemble, fixture.userGroupContent)
+		So(err, ShouldBeNil)
+		So(activeCheckCalled, ShouldBeTrue)
+		So(cleanupCalled, ShouldBeTrue)
+		So(wireCalled, ShouldBeTrue)
+		So(closeCalled, ShouldBeTrue)
+
+		markerMatches, err := summariseCompletionMarkerMatches(*fixture.clickHouseTarget())
+		So(err, ShouldBeNil)
+		So(markerMatches, ShouldBeTrue)
 	})
 
 	Convey("watch retries accept an already-active ClickHouse snapshot with a matching completion marker", t, func() {
@@ -140,12 +182,32 @@ func TestSummariseClickHouseActiveSnapshotPreflight(t *testing.T) {
 		configureSummariseActiveSnapshotTest(fixture.outputDir, true)
 		So(writeSummariseCompletionMarker(fixture.clickHouseTarget()), ShouldBeNil)
 
+		cleanupCalled := false
+		wireCalled := false
+
 		clickHouseSnapshotIsActive = func(clickhouse.Config, string, time.Time) (bool, error) {
 			return true, nil
+		}
+		clickHouseCleanActiveSnapshotAttempt = func(clickhouse.Config, string, time.Time) error {
+			cleanupCalled = true
+
+			return nil
+		}
+		wireSummariseClickHouseOperations = func(
+			_ *summary.Summariser,
+			_ clickhouse.Config,
+			_, _ string,
+			_ time.Time,
+		) (func(bool) error, error) {
+			wireCalled = true
+
+			return func(bool) error { return nil }, nil
 		}
 
 		err := run([]string{fixture.statsPath})
 		So(err, ShouldBeNil)
+		So(cleanupCalled, ShouldBeFalse)
+		So(wireCalled, ShouldBeFalse)
 		So(readFileBytes(fixture.groupUserPath), ShouldResemble, fixture.groupUserContent)
 		So(readFileBytes(fixture.userGroupPath), ShouldResemble, fixture.userGroupContent)
 	})
@@ -159,13 +221,33 @@ func TestSummariseClickHouseActiveSnapshotPreflight(t *testing.T) {
 		configureSummariseActiveSnapshotTest(fixture.outputDir, false)
 		So(writeSummariseCompletionMarker(fixture.clickHouseTarget()), ShouldBeNil)
 
+		cleanupCalled := false
+		wireCalled := false
+
 		clickHouseSnapshotIsActive = func(clickhouse.Config, string, time.Time) (bool, error) {
 			return true, nil
+		}
+		clickHouseCleanActiveSnapshotAttempt = func(clickhouse.Config, string, time.Time) error {
+			cleanupCalled = true
+
+			return nil
+		}
+		wireSummariseClickHouseOperations = func(
+			_ *summary.Summariser,
+			_ clickhouse.Config,
+			_, _ string,
+			_ time.Time,
+		) (func(bool) error, error) {
+			wireCalled = true
+
+			return func(bool) error { return nil }, nil
 		}
 
 		err := run([]string{fixture.statsPath})
 		So(err, ShouldNotBeNil)
 		So(err.Error(), ShouldContainSubstring, "refusing to rewrite active snapshot")
+		So(cleanupCalled, ShouldBeFalse)
+		So(wireCalled, ShouldBeFalse)
 		So(readFileBytes(fixture.groupUserPath), ShouldResemble, fixture.groupUserContent)
 		So(readFileBytes(fixture.userGroupPath), ShouldResemble, fixture.userGroupContent)
 	})
@@ -253,6 +335,7 @@ func snapshotSummariseGlobals() func() {
 	origClickHouseQueryTO := clickhouseQueryTO
 	origClickHouseActiveSnapshotOK := clickhouseActiveSnapshotOK
 	origClickHouseSnapshotIsActive := clickHouseSnapshotIsActive
+	origClickHouseCleanActiveSnapshotAttempt := clickHouseCleanActiveSnapshotAttempt
 	origWireSummariseClickHouseOperations := wireSummariseClickHouseOperations
 
 	return func() {
@@ -270,6 +353,7 @@ func snapshotSummariseGlobals() func() {
 		clickhouseQueryTO = origClickHouseQueryTO
 		clickhouseActiveSnapshotOK = origClickHouseActiveSnapshotOK
 		clickHouseSnapshotIsActive = origClickHouseSnapshotIsActive
+		clickHouseCleanActiveSnapshotAttempt = origClickHouseCleanActiveSnapshotAttempt
 		wireSummariseClickHouseOperations = origWireSummariseClickHouseOperations
 	}
 }
