@@ -27,6 +27,7 @@ package cmd
 
 import (
 	"compress/gzip"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -34,12 +35,15 @@ import (
 
 	. "github.com/smartystreets/goconvey/convey"
 	"github.com/wtsi-hgi/wrstat-ui/clickhouse"
+	"github.com/wtsi-hgi/wrstat-ui/summary"
 )
 
 const (
 	summariseTestClickHouseDSN      = "clickhouse://default@127.0.0.1:9000/default"
 	summariseTestClickHouseDatabase = "wrstat_ui_test"
 )
+
+var errSummariseTestClose = errors.New("close failed")
 
 type summariseActiveSnapshotFixture struct {
 	outputDir        string
@@ -83,8 +87,23 @@ func newSummariseActiveSnapshotFixture(t *testing.T) summariseActiveSnapshotFixt
 	}
 }
 
+func (f summariseActiveSnapshotFixture) clickHouseTarget() *clickHouseSummariseTarget {
+	return &clickHouseSummariseTarget{
+		mountPath: "/mnt/test/",
+		modtime:   f.updatedAt,
+		outputDir: f.outputDir,
+	}
+}
+
+func (f summariseActiveSnapshotFixture) writeValidStats(t *testing.T) {
+	t.Helper()
+
+	writeGzipStats(t, f.statsPath, []byte("\"/mnt/test/file\"\t1\t0\t0\t0\t0\t0\tf\t1\t1\t0\t1\n"))
+	So(os.Chtimes(f.statsPath, f.updatedAt, f.updatedAt), ShouldBeNil)
+}
+
 func TestSummariseClickHouseActiveSnapshotPreflight(t *testing.T) {
-	Convey("watch retries treat an already-active ClickHouse snapshot as success before truncating outputs", t, func() {
+	Convey("watch retries refuse an already-active ClickHouse snapshot without a completion marker", t, func() {
 		fixture := newSummariseActiveSnapshotFixture(t)
 
 		restore := snapshotSummariseGlobals()
@@ -105,8 +124,28 @@ func TestSummariseClickHouseActiveSnapshotPreflight(t *testing.T) {
 		}
 
 		err := run([]string{fixture.statsPath})
-		So(err, ShouldBeNil)
+		So(err, ShouldNotBeNil)
+		So(err.Error(), ShouldContainSubstring, "refusing to rewrite active snapshot")
 		So(called, ShouldBeTrue)
+		So(readFileBytes(fixture.groupUserPath), ShouldResemble, fixture.groupUserContent)
+		So(readFileBytes(fixture.userGroupPath), ShouldResemble, fixture.userGroupContent)
+	})
+
+	Convey("watch retries accept an already-active ClickHouse snapshot with a matching completion marker", t, func() {
+		fixture := newSummariseActiveSnapshotFixture(t)
+
+		restore := snapshotSummariseGlobals()
+		Reset(restore)
+
+		configureSummariseActiveSnapshotTest(fixture.outputDir, true)
+		So(writeSummariseCompletionMarker(fixture.clickHouseTarget()), ShouldBeNil)
+
+		clickHouseSnapshotIsActive = func(clickhouse.Config, string, time.Time) (bool, error) {
+			return true, nil
+		}
+
+		err := run([]string{fixture.statsPath})
+		So(err, ShouldBeNil)
 		So(readFileBytes(fixture.groupUserPath), ShouldResemble, fixture.groupUserContent)
 		So(readFileBytes(fixture.userGroupPath), ShouldResemble, fixture.userGroupContent)
 	})
@@ -118,6 +157,7 @@ func TestSummariseClickHouseActiveSnapshotPreflight(t *testing.T) {
 		Reset(restore)
 
 		configureSummariseActiveSnapshotTest(fixture.outputDir, false)
+		So(writeSummariseCompletionMarker(fixture.clickHouseTarget()), ShouldBeNil)
 
 		clickHouseSnapshotIsActive = func(clickhouse.Config, string, time.Time) (bool, error) {
 			return true, nil
@@ -128,6 +168,73 @@ func TestSummariseClickHouseActiveSnapshotPreflight(t *testing.T) {
 		So(err.Error(), ShouldContainSubstring, "refusing to rewrite active snapshot")
 		So(readFileBytes(fixture.groupUserPath), ShouldResemble, fixture.groupUserContent)
 		So(readFileBytes(fixture.userGroupPath), ShouldResemble, fixture.userGroupContent)
+	})
+
+	Convey("successful summarise writes a completion marker after ClickHouse closing succeeds", t, func() {
+		fixture := newSummariseActiveSnapshotFixture(t)
+		fixture.writeValidStats(t)
+
+		restore := snapshotSummariseGlobals()
+		Reset(restore)
+
+		configureSummariseActiveSnapshotTest(fixture.outputDir, false)
+
+		closeCalled := false
+
+		clickHouseSnapshotIsActive = func(clickhouse.Config, string, time.Time) (bool, error) {
+			return false, nil
+		}
+		wireSummariseClickHouseOperations = func(
+			_ *summary.Summariser,
+			_ clickhouse.Config,
+			_, _ string,
+			_ time.Time,
+		) (func(bool) error, error) {
+			return func(publish bool) error {
+				So(publish, ShouldBeTrue)
+				So(summariseCompletionMarkerExists(fixture.outputDir), ShouldBeFalse)
+
+				closeCalled = true
+
+				return nil
+			}, nil
+		}
+
+		err := run([]string{fixture.statsPath})
+		So(err, ShouldBeNil)
+		So(closeCalled, ShouldBeTrue)
+
+		markerMatches, err := summariseCompletionMarkerMatches(*fixture.clickHouseTarget())
+		So(err, ShouldBeNil)
+		So(markerMatches, ShouldBeTrue)
+	})
+
+	Convey("summarise does not write a completion marker when ClickHouse closing fails", t, func() {
+		fixture := newSummariseActiveSnapshotFixture(t)
+		fixture.writeValidStats(t)
+
+		restore := snapshotSummariseGlobals()
+		Reset(restore)
+
+		configureSummariseActiveSnapshotTest(fixture.outputDir, false)
+
+		clickHouseSnapshotIsActive = func(clickhouse.Config, string, time.Time) (bool, error) {
+			return false, nil
+		}
+		wireSummariseClickHouseOperations = func(
+			_ *summary.Summariser,
+			_ clickhouse.Config,
+			_, _ string,
+			_ time.Time,
+		) (func(bool) error, error) {
+			return func(bool) error {
+				return errSummariseTestClose
+			}, nil
+		}
+
+		err := run([]string{fixture.statsPath})
+		So(errors.Is(err, errSummariseTestClose), ShouldBeTrue)
+		So(summariseCompletionMarkerExists(fixture.outputDir), ShouldBeFalse)
 	})
 }
 
@@ -146,6 +253,7 @@ func snapshotSummariseGlobals() func() {
 	origClickHouseQueryTO := clickhouseQueryTO
 	origClickHouseActiveSnapshotOK := clickhouseActiveSnapshotOK
 	origClickHouseSnapshotIsActive := clickHouseSnapshotIsActive
+	origWireSummariseClickHouseOperations := wireSummariseClickHouseOperations
 
 	return func() {
 		defaultDir = origDefaultDir
@@ -162,6 +270,7 @@ func snapshotSummariseGlobals() func() {
 		clickhouseQueryTO = origClickHouseQueryTO
 		clickhouseActiveSnapshotOK = origClickHouseActiveSnapshotOK
 		clickHouseSnapshotIsActive = origClickHouseSnapshotIsActive
+		wireSummariseClickHouseOperations = origWireSummariseClickHouseOperations
 	}
 }
 
@@ -201,4 +310,10 @@ func writeGzipStats(t *testing.T, path string, content []byte) {
 	_, err = zw.Write(content)
 	So(err, ShouldBeNil)
 	So(zw.Close(), ShouldBeNil)
+}
+
+func summariseCompletionMarkerExists(outputDir string) bool {
+	_, err := os.Stat(summariseCompletionMarkerPath(outputDir))
+
+	return err == nil
 }
