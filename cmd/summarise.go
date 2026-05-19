@@ -54,6 +54,7 @@ const (
 	summariseDirPerm       = 0o755
 	summariseMarkerPerm    = 0o600
 	maxMountPathCandidates = 4
+	clickhouseRecoverFlag  = "clickhouse-recover"
 	activeSnapshotOKFlag   = "clickhouse-active-snapshot-ok"
 	completionMarkerName   = ".wrstat-ui-summarise-complete"
 )
@@ -177,8 +178,17 @@ func init() {
 		"ClickHouse database name (default $WRSTAT_CLICKHOUSE_DATABASE)")
 	summariseCmd.Flags().StringVar(&clickhouseQueryTO, "query-timeout", "",
 		"Per-query timeout (default $WRSTAT_QUERY_TIMEOUT)")
+	summariseCmd.Flags().BoolVar(&clickhouseActiveSnapshotOK, clickhouseRecoverFlag, false,
+		"recover a failed ClickHouse summarise retry")
 	summariseCmd.Flags().BoolVar(&clickhouseActiveSnapshotOK, activeSnapshotOKFlag, false,
-		"treat an already-active exact ClickHouse snapshot as success")
+		"deprecated alias for --clickhouse-recover")
+
+	if err := summariseCmd.Flags().MarkDeprecated(
+		activeSnapshotOKFlag,
+		"use --"+clickhouseRecoverFlag+" instead",
+	); err != nil {
+		panic(err)
+	}
 }
 
 type compressedFile struct {

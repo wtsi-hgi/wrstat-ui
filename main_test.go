@@ -2104,7 +2104,7 @@ func TestWatch(t *testing.T) {
 		So(jobs[0].RepGroup, ShouldStartWith, "wrstat-ui-summarise-")
 		So(jobs, ShouldResemble, []*jobqueue.Job{
 			{
-				Cmd: fmt.Sprintf(`"./wrstat-ui_test" summarise --clickhouse-active-snapshot-ok -d %[1]q -q `+
+				Cmd: fmt.Sprintf(`"./wrstat-ui_test" summarise --clickhouse-recover -d %[1]q -q `+
 					`"/some/quota.file" -c "basedirs.config" %[2]q && touch -r %[3]q %[1]q && mv %[1]q %[4]q`,
 					dotA, statsA, runA, finalA,
 				),
@@ -2139,7 +2139,7 @@ func TestWatch(t *testing.T) {
 		So(jobs[0].RepGroup, ShouldStartWith, "wrstat-ui-summarise-")
 		So(jobs, ShouldResemble, []*jobqueue.Job{
 			{
-				Cmd: fmt.Sprintf(`"./wrstat-ui_test" summarise --clickhouse-active-snapshot-ok -d %[1]q `+
+				Cmd: fmt.Sprintf(`"./wrstat-ui_test" summarise --clickhouse-recover -d %[1]q `+
 					`-s %[2]q -q "/some/quota.file" -c "basedirs.config" %[3]q && touch -r %[4]q %[1]q && mv %[1]q %[5]q`,
 					dotA, previousBasedirs, statsA, runA, finalA,
 				),

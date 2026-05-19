@@ -401,3 +401,29 @@ func summariseCompletionMarkerExists(outputDir string) bool {
 
 	return err == nil
 }
+
+func TestSummariseClickHouseRecoverFlag(t *testing.T) {
+	Convey("summarise exposes clickhouse recover and hides the old retry flag", t, func() {
+		restore := snapshotSummariseGlobals()
+		Reset(restore)
+		Reset(func() {
+			So(summariseCmd.Flags().Set("clickhouse-recover", "false"), ShouldBeNil)
+			So(summariseCmd.Flags().Set("clickhouse-active-snapshot-ok", "false"), ShouldBeNil)
+		})
+
+		usages := summariseCmd.Flags().FlagUsages()
+		So(usages, ShouldContainSubstring, "--clickhouse-recover")
+		So(usages, ShouldNotContainSubstring, "--clickhouse-active-snapshot-ok")
+
+		oldFlag := summariseCmd.Flags().Lookup("clickhouse-active-snapshot-ok")
+		So(oldFlag, ShouldNotBeNil)
+		So(oldFlag.Hidden, ShouldBeTrue)
+
+		So(summariseCmd.Flags().Set("clickhouse-recover", "true"), ShouldBeNil)
+		So(clickhouseActiveSnapshotOK, ShouldBeTrue)
+
+		So(summariseCmd.Flags().Set("clickhouse-recover", "false"), ShouldBeNil)
+		So(summariseCmd.Flags().Set("clickhouse-active-snapshot-ok", "true"), ShouldBeNil)
+		So(clickhouseActiveSnapshotOK, ShouldBeTrue)
+	})
+}
