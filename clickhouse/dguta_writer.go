@@ -694,6 +694,8 @@ func (w *dgutaWriter) flushFullBatches(ctx context.Context) error {
 func (w *dgutaWriter) flushAllBatches() error {
 	for _, slot := range w.batchSlots() {
 		if slot.rows() == 0 {
+			_ = abortBatch(slot.batch, slot.name) //nolint:errcheck // Best-effort release; preserve close error behaviour.
+
 			continue
 		}
 
