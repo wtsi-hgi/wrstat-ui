@@ -3,14 +3,15 @@ package mountpath
 import (
 	"errors"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/wtsi-hgi/wrstat-ui/datasets"
 )
 
 const (
-	fullwidthSolidus     = "／" // U+FF0F FULLWIDTH SOLIDUS
-	fullwidthReplacement = "/"
+	fullwidthSolidus = "／" // U+FF0F FULLWIDTH SOLIDUS
+	pathSeparator    = "/"
 )
 
 var (
@@ -61,11 +62,12 @@ func FromOutputDir(outputDir string) (string, error) {
 }
 
 func mountPathFromDatasetDirBase(dirBase string) (mountPath string, ok bool, err error) {
+	dirBase = strings.TrimPrefix(dirBase, ".")
 	if strings.HasSuffix(dirBase, "_") {
 		return "", false, ErrDatasetDirEmptyMountKey
 	}
 
-	_, mountKey, ok := datasets.SplitDatasetDirName(strings.TrimPrefix(dirBase, "."))
+	_, mountKey, ok := datasets.SplitDatasetDirName(dirBase)
 	if !ok {
 		return "", false, nil
 	}
@@ -79,12 +81,8 @@ func mountPathFromDatasetDirBase(dirBase string) (mountPath string, ok bool, err
 		return "", false, ErrDatasetDirEmptyMountKey
 	}
 
-	if !strings.HasPrefix(mountPath, "/") {
+	if !strings.HasPrefix(mountPath, pathSeparator) {
 		return "", false, ErrDatasetDirBadMountPath
-	}
-
-	if !strings.HasSuffix(mountPath, "/") {
-		mountPath += "/"
 	}
 
 	return mountPath, true, nil
@@ -96,10 +94,28 @@ func DecodeKey(mountKey string) string {
 		return ""
 	}
 
-	mountPath := strings.ReplaceAll(mountKey, fullwidthSolidus, fullwidthReplacement)
-	if !strings.HasSuffix(mountPath, fullwidthReplacement) {
-		mountPath += fullwidthReplacement
+	mountPath := strings.ReplaceAll(mountKey, fullwidthSolidus, pathSeparator)
+	if !strings.HasSuffix(mountPath, pathSeparator) {
+		mountPath += pathSeparator
 	}
 
 	return mountPath
+}
+
+// EncodeKey converts a slash-delimited mount path into a dataset mount key.
+func EncodeKey(mountPath string) string {
+	return strings.ReplaceAll(mountPath, pathSeparator, fullwidthSolidus)
+}
+
+// DecodeSortedKeys converts mount-key map keys into sorted mount paths.
+func DecodeSortedKeys[M ~map[string]V, V any](mountKeys M) []string {
+	paths := make([]string, 0, len(mountKeys))
+
+	for key := range mountKeys {
+		paths = append(paths, DecodeKey(key))
+	}
+
+	slices.Sort(paths)
+
+	return paths
 }

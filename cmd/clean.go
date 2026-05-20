@@ -29,6 +29,7 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
+	"github.com/wtsi-hgi/wrstat-ui/basedirs"
 	"github.com/wtsi-hgi/wrstat-ui/clickhouse"
 )
 
@@ -52,8 +53,6 @@ The --view/-v flag can be used to view the keys that would have be removed if
 the flag were not supplied.
 `,
 	Run: func(_ *cobra.Command, args []string) {
-		loadClickhouseDotEnv()
-
 		if len(args) > 0 {
 			warn("clean: ignoring legacy basedirs DB path argument")
 		}
@@ -62,39 +61,58 @@ the flag were not supplied.
 			die("need to specify a path prefix to keep")
 		}
 
-		cfg, err := clickhouseConfigFromEnvAndFlags(
-			clickhouseDSN,
-			clickhouseDatabase,
-			"",
-			nil,
-			"",
-			0,
-			clickhouseQueryTO,
-		)
+		m, err := openCleanHistoryMaintainer()
 		if err != nil {
-			die("failed to build ClickHouse config: %s", err)
-		}
-
-		m, err := clickhouse.NewHistoryMaintainer(cfg)
-		if err != nil {
-			die("failed to open clickhouse history maintainer: %s", err)
+			die("%s", err)
 		}
 
 		if viewOnly {
-			toRemove, err := m.FindInvalidHistory(prefix)
-			if err != nil {
-				die("failed to read clickhouse history: %s", err)
-			}
+			err = printInvalidHistory(m, prefix)
+		} else if err = m.CleanHistoryForMount(prefix); err != nil {
+			err = fmt.Errorf("error cleaning clickhouse history: %w", err)
+		}
 
-			for _, k := range toRemove {
-				fmt.Printf("%d:%s\n", k.GID, k.MountPath)
-			}
-		} else {
-			if err := m.CleanHistoryForMount(prefix); err != nil {
-				die("error cleaning clickhouse history: %s", err)
-			}
+		if err != nil {
+			die("%s", err)
 		}
 	},
+}
+
+func openCleanHistoryMaintainer() (basedirs.HistoryMaintainer, error) {
+	loadClickhouseDotEnv()
+
+	cfg, err := clickhouseConfigFromEnvAndFlags(
+		clickhouseDSN,
+		clickhouseDatabase,
+		"",
+		nil,
+		"",
+		0,
+		clickhouseQueryTO,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build ClickHouse config: %w", err)
+	}
+
+	m, err := clickhouse.NewHistoryMaintainer(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open clickhouse history maintainer: %w", err)
+	}
+
+	return m, nil
+}
+
+func printInvalidHistory(m basedirs.HistoryMaintainer, prefix string) error {
+	toRemove, err := m.FindInvalidHistory(prefix)
+	if err != nil {
+		return fmt.Errorf("failed to read clickhouse history: %w", err)
+	}
+
+	for _, k := range toRemove {
+		fmt.Printf("%d:%s\n", k.GID, k.MountPath)
+	}
+
+	return nil
 }
 
 func init() {
@@ -102,10 +120,6 @@ func init() {
 
 	cleancmd.Flags().StringVarP(&prefix, "prefix", "p", "", "path prefix to keep in history")
 	cleancmd.Flags().BoolVarP(&viewOnly, "view", "v", false, "show the keys that will be removed without deleting them")
-	cleancmd.Flags().StringVarP(&clickhouseDSN, "clickhouse-dsn", "C", "",
-		"ClickHouse DSN (default $WRSTAT_CLICKHOUSE_DSN)")
-	cleancmd.Flags().StringVarP(&clickhouseDatabase, "clickhouse-database", "D", "",
-		"ClickHouse database name (default $WRSTAT_CLICKHOUSE_DATABASE)")
-	cleancmd.Flags().StringVar(&clickhouseQueryTO, "query-timeout", "",
-		"per-query timeout (default $WRSTAT_QUERY_TIMEOUT or 30s)")
+	addClickhouseConnectionFlags(cleancmd.Flags(), &clickhouseDSN, &clickhouseDatabase)
+	addClickhouseQueryTimeoutFlag(cleancmd.Flags(), &clickhouseQueryTO)
 }

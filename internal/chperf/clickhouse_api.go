@@ -65,6 +65,10 @@ func (c clickHouseQueryClient) ListDir(
 		return nil, err
 	}
 
+	return convertQueryRows(rows), nil
+}
+
+func convertQueryRows(rows []clickhouse.FileRow) []QueryRow {
 	converted := make([]QueryRow, len(rows))
 	for i, row := range rows {
 		converted[i] = QueryRow{
@@ -74,7 +78,7 @@ func (c clickHouseQueryClient) ListDir(
 		}
 	}
 
-	return converted, nil
+	return converted
 }
 
 func (c clickHouseQueryClient) StatPath(ctx context.Context, path string) error {
@@ -143,13 +147,17 @@ func (i clickHouseQueryInspector) Measure(
 		return nil, err
 	}
 
+	return convertQueryMetrics(metrics), nil
+}
+
+func convertQueryMetrics(metrics *clickhouse.QueryMetrics) *QueryMetrics {
 	return &QueryMetrics{
 		DurationMs:  metrics.DurationMs,
 		ReadRows:    metrics.ReadRows,
 		ReadBytes:   metrics.ReadBytes,
 		ResultRows:  metrics.ResultRows,
 		ResultBytes: metrics.ResultBytes,
-	}, nil
+	}
 }
 
 func (i clickHouseQueryInspector) Close() error {

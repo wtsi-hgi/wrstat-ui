@@ -189,6 +189,10 @@ func queryContext(parent context.Context, queryTO time.Duration) (context.Contex
 	return context.WithTimeout(parent, queryTO)
 }
 
+func configQueryContext(cfg Config) (context.Context, context.CancelFunc) {
+	return queryContext(context.Background(), queryTimeout(cfg))
+}
+
 func openAndPingWithTimeout(
 	parent context.Context,
 	opts *ch.Options,
@@ -238,7 +242,10 @@ func (c *Client) Close() error {
 		return nil
 	}
 
-	return c.conn.Close()
+	conn := c.conn
+	c.conn = nil
+
+	return conn.Close()
 }
 
 func mountPointsFromConfig(cfg Config) (basedirs.MountPoints, error) {
@@ -359,22 +366,23 @@ func optionsFromConfig(cfg Config) (*ch.Options, error) {
 
 	opts.Auth.Database = cfg.Database
 	opts.Compression = &ch.Compression{Method: ch.CompressionLZ4}
-
-	effectiveMaxOpenConns := cfg.MaxOpenConns
-	if effectiveMaxOpenConns <= 0 {
-		effectiveMaxOpenConns = defaultMaxOpenConns
-	}
-
-	opts.MaxOpenConns = effectiveMaxOpenConns
-
-	effectiveMaxIdleConns := cfg.MaxIdleConns
-	if effectiveMaxIdleConns <= 0 {
-		effectiveMaxIdleConns = effectiveMaxOpenConns
-	}
-
-	opts.MaxIdleConns = effectiveMaxIdleConns
+	opts.MaxOpenConns, opts.MaxIdleConns = effectiveConnectionLimits(cfg)
 
 	return opts, nil
+}
+
+func effectiveConnectionLimits(cfg Config) (int, int) {
+	maxOpen := cfg.MaxOpenConns
+	if maxOpen <= 0 {
+		maxOpen = defaultMaxOpenConns
+	}
+
+	maxIdle := cfg.MaxIdleConns
+	if maxIdle <= 0 {
+		maxIdle = maxOpen
+	}
+
+	return maxOpen, maxIdle
 }
 
 func queryTimeout(cfg Config) time.Duration {

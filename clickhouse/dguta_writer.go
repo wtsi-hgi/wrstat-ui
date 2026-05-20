@@ -72,6 +72,47 @@ const (
 		"VALUES (?, toUUID(?), ?, ?)"
 )
 
+func allPartitionDropQueries() []string {
+	return []string{
+		dropDGUTAPartitionQuery,
+		dropChildrenPartitionQuery,
+		dropFilesPartitionQuery,
+		dropBasedirsGroupUsagePartitionQuery,
+		dropBasedirsUserUsagePartitionQuery,
+		dropBasedirsGroupSubdirsPartitionQuery,
+		dropBasedirsUserSubdirsPartitionQuery,
+	}
+}
+
+func basedirsPartitionDropQueries() []string {
+	return []string{
+		dropBasedirsGroupUsagePartitionQuery,
+		dropBasedirsUserUsagePartitionQuery,
+		dropBasedirsGroupSubdirsPartitionQuery,
+		dropBasedirsUserSubdirsPartitionQuery,
+	}
+}
+
+func dropSnapshotPartitionsForMount(
+	ctx context.Context,
+	conn ch.Conn,
+	mountPath string,
+	sid string,
+	queries []string,
+) error {
+	for _, query := range queries {
+		if err := dropPartitionIgnoreUnknown(ctx, conn, mountPath, sid, query); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func prepareBatchWithRelease(ctx context.Context, conn ch.Conn, query string) (driver.Batch, error) {
+	return conn.PrepareBatch(ctx, query, driver.WithReleaseConnection())
+}
+
 var (
 	errMountPathRequired     = errors.New("clickhouse: mount path is required")
 	errUpdatedAtRequired     = errors.New("clickhouse: updated at is required")
@@ -151,7 +192,7 @@ func (w *dgutaWriter) Add(dguta db.RecordDGUTA) error {
 		return err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), queryTimeout(w.cfg))
+	ctx, cancel := configQueryContext(w.cfg)
 	defer cancel()
 
 	if err := w.ensureWriteReady(ctx); err != nil {
@@ -183,7 +224,7 @@ func (w *dgutaWriter) Close() error {
 		return nil
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), queryTimeout(w.cfg))
+	ctx, cancel := configQueryContext(w.cfg)
 	defer cancel()
 
 	if err := w.flushAllBatches(); err != nil {
@@ -212,7 +253,7 @@ func (w *dgutaWriter) Abort() error {
 		return nil
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), queryTimeout(w.cfg))
+	ctx, cancel := configQueryContext(w.cfg)
 	defer cancel()
 
 	return w.closeWithNewSnapshotCleanup(ctx, nil)
@@ -370,7 +411,7 @@ func (w *dgutaWriter) snapshotCleanupContext(ctx context.Context) (context.Conte
 		return ctx, func() {}
 	}
 
-	return queryContext(context.Background(), queryTimeout(w.cfg))
+	return configQueryContext(w.cfg)
 }
 
 func (w *dgutaWriter) abortAllBatches() error {
@@ -398,23 +439,7 @@ func abortBatch(batch *driver.Batch, name string) error {
 }
 
 func (w *dgutaWriter) dropAllSnapshotPartitions(ctx context.Context, sid string) error {
-	queries := [...]string{
-		dropDGUTAPartitionQuery,
-		dropChildrenPartitionQuery,
-		dropFilesPartitionQuery,
-		dropBasedirsGroupUsagePartitionQuery,
-		dropBasedirsUserUsagePartitionQuery,
-		dropBasedirsGroupSubdirsPartitionQuery,
-		dropBasedirsUserSubdirsPartitionQuery,
-	}
-
-	for _, query := range queries {
-		if err := dropPartitionIgnoreUnknown(ctx, w.conn, w.mountPath, sid, query); err != nil {
-			return err
-		}
-	}
-
-	return nil
+	return dropSnapshotPartitionsForMount(ctx, w.conn, w.mountPath, sid, allPartitionDropQueries())
 }
 
 func (w *dgutaWriter) ensureWriteReady(ctx context.Context) error {
@@ -481,8 +506,8 @@ func (w *dgutaWriter) prepareBatches(ctx context.Context) (driver.Batch, driver.
 	if err != nil {
 		if abortErr := dgutaBatch.Abort(); abortErr != nil {
 			return nil, nil, fmt.Errorf(
-				"clickhouse: failed to abort dguta batch after children prepare failed: %w",
-				abortErr,
+				"clickhouse: failed to prepare children batch and abort dguta batch: %w",
+				errors.Join(err, abortErr),
 			)
 		}
 
@@ -493,7 +518,7 @@ func (w *dgutaWriter) prepareBatches(ctx context.Context) (driver.Batch, driver.
 }
 
 func (w *dgutaWriter) prepareBatch(ctx context.Context, query string) (driver.Batch, error) {
-	return w.conn.PrepareBatch(ctx, query, driver.WithReleaseConnection())
+	return prepareBatchWithRelease(ctx, w.conn, query)
 }
 
 func (w *dgutaWriter) dropNewSnapshotPartitions(ctx context.Context) error {
@@ -700,11 +725,7 @@ func (w *dgutaWriter) sendAndReplaceBatch(ctx context.Context, slot dgutaBatchSl
 
 		batchCtx := context.WithoutCancel(ctx)
 
-		batch, err := w.conn.PrepareBatch(
-			batchCtx,
-			slot.query,
-			driver.WithReleaseConnection(),
-		)
+		batch, err := w.prepareBatch(batchCtx, slot.query)
 		if err != nil {
 			return fmt.Errorf("clickhouse: failed to prepare %s batch: %w", slot.name, err)
 		}

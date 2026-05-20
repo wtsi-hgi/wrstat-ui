@@ -29,7 +29,6 @@ package clickhouse
 import (
 	"context"
 	"fmt"
-	"strings"
 	"sync/atomic"
 	"time"
 
@@ -340,7 +339,7 @@ func (r *chBaseDirsReader) snapshotUsage(
 		return []*basedirs.Usage{}, nil
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), queryTimeout(r.cfg))
+	ctx, cancel := configQueryContext(r.cfg)
 	defer cancel()
 
 	query, args := activeMountsQuery(
@@ -369,7 +368,7 @@ func (r *chBaseDirsReader) snapshotGroupSubDirs(
 		return nil, basedirs.ErrNoSuchUserOrGroup
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), queryTimeout(r.cfg))
+	ctx, cancel := configQueryContext(r.cfg)
 	defer cancel()
 
 	query, args := activeMountsQuery(
@@ -395,7 +394,7 @@ func (r *chBaseDirsReader) snapshotUserSubDirs(
 		return nil, basedirs.ErrNoSuchUserOrGroup
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), queryTimeout(r.cfg))
+	ctx, cancel := configQueryContext(r.cfg)
 	defer cancel()
 
 	query, args := activeMountsQuery(
@@ -435,8 +434,11 @@ func scanMountTimestamps(rows iterRows) (map[string]time.Time, error) {
 			return nil, fmt.Errorf("clickhouse: failed to scan mount timestamps: %w", err)
 		}
 
-		mountKey := strings.ReplaceAll(mountPath, "/", "／")
-		out[mountKey] = updatedAt
+		out[mountTimestampKey(mountPath)] = updatedAt
+	}
+
+	if err := rowsErr(rows); err != nil {
+		return nil, fmt.Errorf("clickhouse: mount timestamp iteration error: %w", err)
 	}
 
 	return out, nil
@@ -548,7 +550,7 @@ func (r *chBaseDirsReader) queryUsageRows(
 		return nil, err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), queryTimeout(r.cfg))
+	ctx, cancel := configQueryContext(r.cfg)
 	defer cancel()
 
 	rows, err := r.conn.Query(ctx, query, uint8(age))
@@ -560,20 +562,14 @@ func (r *chBaseDirsReader) queryUsageRows(
 }
 
 func (r *chBaseDirsReader) scanGroupUsageRows(rows iterRows) ([]*basedirs.Usage, error) {
-	defer func() { _ = rows.Close() }()
-
-	out := make([]*basedirs.Usage, 0)
-
-	for rows.Next() {
-		var s groupUsageScanned
-		if err := s.scanFrom(rows); err != nil {
-			return nil, fmt.Errorf("clickhouse: failed to scan group usage: %w", err)
+	return scanUsageRows(rows, "group", func(rows iterRows) (*basedirs.Usage, error) {
+		var row groupUsageScanned
+		if err := row.scanFrom(rows); err != nil {
+			return nil, err
 		}
 
-		out = append(out, s.toUsage(r))
-	}
-
-	return out, nil
+		return row.toUsage(r), nil
+	})
 }
 
 func (r *chBaseDirsReader) UserUsage(age db.DirGUTAge) ([]*basedirs.Usage, error) {
@@ -594,17 +590,36 @@ func (r *chBaseDirsReader) UserUsage(age db.DirGUTAge) ([]*basedirs.Usage, error
 }
 
 func (r *chBaseDirsReader) scanUserUsageRows(rows iterRows) ([]*basedirs.Usage, error) {
+	return scanUsageRows(rows, "user", func(rows iterRows) (*basedirs.Usage, error) {
+		var row userUsageScanned
+		if err := row.scanFrom(rows); err != nil {
+			return nil, err
+		}
+
+		return row.toUsage(r), nil
+	})
+}
+
+func scanUsageRows(
+	rows iterRows,
+	what string,
+	scan func(iterRows) (*basedirs.Usage, error),
+) ([]*basedirs.Usage, error) {
 	defer func() { _ = rows.Close() }()
 
 	out := make([]*basedirs.Usage, 0)
 
 	for rows.Next() {
-		var s userUsageScanned
-		if err := s.scanFrom(rows); err != nil {
-			return nil, fmt.Errorf("clickhouse: failed to scan user usage: %w", err)
+		usage, err := scan(rows)
+		if err != nil {
+			return nil, fmt.Errorf("clickhouse: failed to scan %s usage: %w", what, err)
 		}
 
-		out = append(out, s.toUsage(r))
+		out = append(out, usage)
+	}
+
+	if err := rowsErr(rows); err != nil {
+		return nil, fmt.Errorf("clickhouse: %s usage iteration error: %w", what, err)
 	}
 
 	return out, nil
@@ -619,7 +634,7 @@ func (r *chBaseDirsReader) GroupSubDirs(gid uint32, basedir string, age db.DirGU
 		return r.snapshotGroupSubDirs(gid, basedir, age)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), queryTimeout(r.cfg))
+	ctx, cancel := configQueryContext(r.cfg)
 	defer cancel()
 
 	return r.subDirs(ctx, "group", groupSubDirsQuery, gid, basedir, uint8(age))
@@ -634,7 +649,7 @@ func (r *chBaseDirsReader) UserSubDirs(uid uint32, basedir string, age db.DirGUT
 		return r.snapshotUserSubDirs(uid, basedir, age)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), queryTimeout(r.cfg))
+	ctx, cancel := configQueryContext(r.cfg)
 	defer cancel()
 
 	return r.subDirs(ctx, "user", userSubDirsQuery, uid, basedir, uint8(age))
@@ -657,6 +672,10 @@ func (r *chBaseDirsReader) subDirs(ctx context.Context, what, query string, args
 		}
 
 		out = append(out, s.toSubDir())
+	}
+
+	if err := rowsErr(rows); err != nil {
+		return nil, fmt.Errorf("clickhouse: %s subdirs iteration error: %w", what, err)
 	}
 
 	if len(out) == 0 {
@@ -685,7 +704,7 @@ func (r *chBaseDirsReader) History(gid uint32, path string) ([]basedirs.History,
 		return nil, basedirs.ErrInvalidBasePath
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), queryTimeout(r.cfg))
+	ctx, cancel := configQueryContext(r.cfg)
 	defer cancel()
 
 	rows, err := r.conn.Query(ctx, historyQuery, mp, gid)
@@ -708,6 +727,10 @@ func (r *chBaseDirsReader) scanHistoryRows(rows iterRows) ([]basedirs.History, e
 		}
 
 		out = append(out, h)
+	}
+
+	if err := rowsErr(rows); err != nil {
+		return nil, fmt.Errorf("clickhouse: history iteration error: %w", err)
 	}
 
 	if len(out) == 0 {
@@ -738,7 +761,7 @@ func (r *chBaseDirsReader) MountTimestamps() (map[string]time.Time, error) {
 		return r.snapshot.mountTimestamps(), nil
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), queryTimeout(r.cfg))
+	ctx, cancel := configQueryContext(r.cfg)
 	defer cancel()
 
 	return r.liveMountTimestamps(ctx)
@@ -749,7 +772,7 @@ func (r *chBaseDirsReader) Info() (*basedirs.DBInfo, error) {
 		return nil, err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), queryTimeout(r.cfg))
+	ctx, cancel := configQueryContext(r.cfg)
 	defer cancel()
 
 	info := &basedirs.DBInfo{}

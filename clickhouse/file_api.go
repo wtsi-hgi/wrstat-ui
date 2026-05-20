@@ -599,7 +599,7 @@ func matchOrList(column string, n int) string {
 	}
 
 	out := make([]string, 0, n)
-	for i := 0; i < n; i++ {
+	for range n {
 		out = append(out, "match("+column+", ?)")
 	}
 
@@ -827,13 +827,6 @@ type fileRowIterator interface {
 	Next() bool
 }
 
-type fileRowConverted struct {
-	size         int64
-	apparentSize int64
-	inode        int64
-	nlink        int64
-}
-
 type fileRowScanState struct {
 	path      string
 	parentDir string
@@ -852,6 +845,13 @@ type fileRowScanState struct {
 	atime time.Time
 	mtime time.Time
 	ctime time.Time
+}
+
+type fileRowInts struct {
+	size         int64
+	apparentSize int64
+	inode        int64
+	nlink        int64
 }
 
 func (s *fileRowScanState) destsFor(fields []string) ([]any, error) {
@@ -901,38 +901,50 @@ func (s *fileRowScanState) destForField(field string) (any, bool) {
 }
 
 func (s *fileRowScanState) applyTo(out *FileRow) error {
-	converted, err := s.convertUints()
+	ints, err := s.intValues()
 	if err != nil {
 		return err
 	}
 
-	s.applyScalars(out, converted)
+	out.Path = s.path
+	out.ParentDir = s.parentDir
+	out.Name = s.name
+	out.Ext = s.ext
+	out.EntryType = s.entryType
+	out.Size = ints.size
+	out.ApparentSize = ints.apparentSize
+	out.UID = s.uid
+	out.GID = s.gid
+	out.ATime = s.atime
+	out.MTime = s.mtime
+	out.CTime = s.ctime
+	out.Inode = ints.inode
+	out.Nlink = ints.nlink
 
 	return nil
 }
 
-func (s *fileRowScanState) convertUints() (*fileRowConverted, error) {
-	size, err := uint64ToInt64(s.size)
-	if err != nil {
-		return nil, err
+func (s *fileRowScanState) intValues() (fileRowInts, error) {
+	var out fileRowInts
+
+	var err error
+	if out.size, err = uint64ToInt64(s.size); err != nil {
+		return fileRowInts{}, err
 	}
 
-	apparentSize, err := uint64ToInt64(s.apparentSize)
-	if err != nil {
-		return nil, err
+	if out.apparentSize, err = uint64ToInt64(s.apparentSize); err != nil {
+		return fileRowInts{}, err
 	}
 
-	inode, err := uint64ToInt64(s.inode)
-	if err != nil {
-		return nil, err
+	if out.inode, err = uint64ToInt64(s.inode); err != nil {
+		return fileRowInts{}, err
 	}
 
-	nlink, err := uint64ToInt64(s.nlink)
-	if err != nil {
-		return nil, err
+	if out.nlink, err = uint64ToInt64(s.nlink); err != nil {
+		return fileRowInts{}, err
 	}
 
-	return &fileRowConverted{size: size, apparentSize: apparentSize, inode: inode, nlink: nlink}, nil
+	return out, nil
 }
 
 func uint64ToInt64(v uint64) (int64, error) {
@@ -941,23 +953,6 @@ func uint64ToInt64(v uint64) (int64, error) {
 	}
 
 	return int64(v), nil
-}
-
-func (s *fileRowScanState) applyScalars(out *FileRow, converted *fileRowConverted) {
-	out.Path = s.path
-	out.ParentDir = s.parentDir
-	out.Name = s.name
-	out.Ext = s.ext
-	out.EntryType = s.entryType
-	out.Size = converted.size
-	out.ApparentSize = converted.apparentSize
-	out.UID = s.uid
-	out.GID = s.gid
-	out.ATime = s.atime
-	out.MTime = s.mtime
-	out.CTime = s.ctime
-	out.Inode = converted.inode
-	out.Nlink = converted.nlink
 }
 
 func chunkStrings(in []string, maxChunk int) [][]string {
@@ -971,11 +966,7 @@ func chunkStrings(in []string, maxChunk int) [][]string {
 
 	out := make([][]string, 0, (len(in)+maxChunk-1)/maxChunk)
 	for start := 0; start < len(in); start += maxChunk {
-		end := start + maxChunk
-		if end > len(in) {
-			end = len(in)
-		}
-
+		end := min(start+maxChunk, len(in))
 		out = append(out, in[start:end])
 	}
 
@@ -1032,7 +1023,7 @@ func (c *Client) groupBaseDirsByMount(baseDirs []string) (map[string][]string, e
 		return map[string][]string{}, nil
 	}
 
-	seen := make(map[string]map[string]bool)
+	seen := make(map[string]map[string]struct{})
 	out := make(map[string][]string)
 
 	for _, bd := range baseDirs {
@@ -1042,14 +1033,14 @@ func (c *Client) groupBaseDirsByMount(baseDirs []string) (map[string][]string, e
 		}
 
 		if seen[mountPath] == nil {
-			seen[mountPath] = make(map[string]bool)
+			seen[mountPath] = make(map[string]struct{})
 		}
 
-		if seen[mountPath][normalised] {
+		if _, ok := seen[mountPath][normalised]; ok {
 			continue
 		}
 
-		seen[mountPath][normalised] = true
+		seen[mountPath][normalised] = struct{}{}
 		out[mountPath] = append(out[mountPath], normalised)
 	}
 

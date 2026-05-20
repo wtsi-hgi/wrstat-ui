@@ -33,8 +33,10 @@ import (
 	"time"
 
 	"github.com/joho/godotenv"
+	"github.com/spf13/pflag"
 	"github.com/wtsi-hgi/wrstat-ui/clickhouse"
 	"github.com/wtsi-hgi/wrstat-ui/internal/summariseutil"
+	"github.com/wtsi-hgi/wrstat-ui/provider"
 )
 
 const (
@@ -42,6 +44,11 @@ const (
 	envClickhouseDatabase = "WRSTAT_CLICKHOUSE_DATABASE"
 	envPollInterval       = "WRSTAT_POLL_INTERVAL"
 	envQueryTimeout       = "WRSTAT_QUERY_TIMEOUT"
+
+	clickhouseDSNFlagHelp      = "ClickHouse DSN (default $WRSTAT_CLICKHOUSE_DSN)"
+	clickhouseDatabaseFlagHelp = "ClickHouse database name (default $WRSTAT_CLICKHOUSE_DATABASE)"
+	clickhouseQueryTOFlagHelp  = "per-query timeout (default $WRSTAT_QUERY_TIMEOUT or 30s)"
+	mountpointsFlagHelp        = "path to a file containing a list of quoted mountpoints"
 )
 
 var (
@@ -56,6 +63,28 @@ var clickhouseDotEnvKeys = []string{
 	envQueryTimeout,
 }
 
+func addClickhouseConnectionFlags(flags *pflag.FlagSet, dsn, database *string) {
+	flags.StringVarP(dsn, "clickhouse-dsn", "C", "", clickhouseDSNFlagHelp)
+	flags.StringVarP(database, "clickhouse-database", "D", "", clickhouseDatabaseFlagHelp)
+}
+
+func addClickhouseQueryTimeoutFlag(flags *pflag.FlagSet, queryTimeout *string) {
+	flags.StringVar(queryTimeout, "query-timeout", "", clickhouseQueryTOFlagHelp)
+}
+
+func addMountpointsFlag(flags *pflag.FlagSet, mountpoints *string) {
+	flags.StringVarP(mountpoints, "mounts", "m", "", mountpointsFlagHelp)
+}
+
+func openClickhouseProvider(cfg clickhouse.Config) (provider.Provider, error) {
+	p, err := clickhouse.OpenProvider(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open clickhouse provider: %w", err)
+	}
+
+	return p, nil
+}
+
 func loadClickhouseDotEnv() {
 	orig := originalEnvKeys(clickhouseDotEnvKeys)
 
@@ -64,7 +93,7 @@ func loadClickhouseDotEnv() {
 }
 
 func originalEnvKeys(keys []string) map[string]struct{} {
-	orig := map[string]struct{}{}
+	orig := make(map[string]struct{}, len(keys))
 
 	for _, key := range keys {
 		if _, ok := os.LookupEnv(key); ok {
@@ -180,8 +209,8 @@ func clickhouseDurationsFromFlagsAndEnv(
 }
 
 func parseDurationFlagOrEnv(flagValue string, envKey string, defaultValue time.Duration) (time.Duration, error) {
-	if strings.TrimSpace(flagValue) != "" {
-		d, err := time.ParseDuration(flagValue)
+	if v := strings.TrimSpace(flagValue); v != "" {
+		d, err := time.ParseDuration(v)
 		if err != nil {
 			return 0, fmt.Errorf("invalid duration for %q: %w", envKey, err)
 		}

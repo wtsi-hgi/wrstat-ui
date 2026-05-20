@@ -50,12 +50,12 @@ import (
 )
 
 const (
-	summariseDBBatchSize   = 100_000
-	summariseDirPerm       = 0o755
-	summariseMarkerPerm    = 0o600
-	maxMountPathCandidates = 4
-	clickhouseRecoverFlag  = "clickhouse-recover"
-	completionMarkerName   = ".wrstat-ui-summarise-complete"
+	summariseDBBatchSize  = 100_000
+	summariseDirPerm      = 0o755
+	summariseMarkerPerm   = 0o600
+	clickhouseRecoverFlag = "clickhouse-recover"
+	completionMarkerName  = ".wrstat-ui-summarise-complete"
+	mountPathCandidateCap = 4
 )
 
 var (
@@ -168,15 +168,11 @@ func init() {
 	summariseCmd.Flags().StringVarP(&dirgutaDB, "tree", "t", "", "tree output dir")
 	summariseCmd.Flags().StringVarP(&quotaPath, "quota", "q", "", "csv of gid,disk,size_quota,inode_quota")
 	summariseCmd.Flags().StringVarP(&basedirsConfig, "config", "c", "", "path to basedirs config file")
-	summariseCmd.Flags().StringVarP(&mounts, "mounts", "m", "", "path to a file containing a list of quoted mountpoints")
+	addMountpointsFlag(summariseCmd.Flags(), &mounts)
 
 	// ClickHouse flags (must override env vars if specified).
-	summariseCmd.Flags().StringVarP(&clickhouseDSN, "clickhouse-dsn", "C", "",
-		"ClickHouse DSN (default $WRSTAT_CLICKHOUSE_DSN)")
-	summariseCmd.Flags().StringVarP(&clickhouseDatabase, "clickhouse-database", "D", "",
-		"ClickHouse database name (default $WRSTAT_CLICKHOUSE_DATABASE)")
-	summariseCmd.Flags().StringVar(&clickhouseQueryTO, "query-timeout", "",
-		"Per-query timeout (default $WRSTAT_QUERY_TIMEOUT)")
+	addClickhouseConnectionFlags(summariseCmd.Flags(), &clickhouseDSN, &clickhouseDatabase)
+	addClickhouseQueryTimeoutFlag(summariseCmd.Flags(), &clickhouseQueryTO)
 	summariseCmd.Flags().BoolVar(&clickhouseRecover, clickhouseRecoverFlag, false,
 		"recover a failed ClickHouse summarise retry")
 }
@@ -188,13 +184,13 @@ type compressedFile struct {
 
 func (c *compressedFile) Close() error {
 	err := c.Writer.Close()
-	errr := c.file.Close()
+	fileErr := c.file.Close()
 
 	if err != nil {
 		return err
 	}
 
-	return errr
+	return fileErr
 }
 
 func wrapCompressed(wc *os.File) io.WriteCloser {
@@ -206,6 +202,15 @@ func wrapCompressed(wc *os.File) io.WriteCloser {
 		Writer: pgzip.NewWriter(wc),
 		file:   wc,
 	}
+}
+
+type compressedStatsFile struct {
+	*pgzip.Reader
+	file *os.File
+}
+
+func (c *compressedStatsFile) Close() error {
+	return errors.Join(c.Reader.Close(), c.file.Close())
 }
 
 func wireClickHouseOperations( //nolint:funlen
@@ -539,6 +544,9 @@ func run(args []string) (err error) {
 	if err != nil {
 		return err
 	}
+	defer func() {
+		err = errors.Join(err, r.Close())
+	}()
 
 	s := summary.NewSummariser(stats.NewStatsParser(r))
 
@@ -581,9 +589,9 @@ func checkArgs(args []string) error {
 	return nil
 }
 
-func openStatsFile(statsFile string) (io.Reader, time.Time, error) {
+func openStatsFile(statsFile string) (io.ReadCloser, time.Time, error) {
 	if statsFile == "-" {
-		return os.Stdin, time.Now(), nil
+		return io.NopCloser(os.Stdin), time.Now(), nil
 	}
 
 	f, err := os.Open(statsFile)
@@ -593,18 +601,23 @@ func openStatsFile(statsFile string) (io.Reader, time.Time, error) {
 
 	fi, err := f.Stat()
 	if err != nil {
+		_ = f.Close()
+
 		return nil, time.Time{}, err
 	}
 
-	var r io.Reader = f
-
 	if strings.HasSuffix(statsFile, ".gz") {
-		if r, err = pgzip.NewReader(f); err != nil {
+		r, err := pgzip.NewReader(f)
+		if err != nil {
+			_ = f.Close()
+
 			return nil, time.Time{}, fmt.Errorf("failed to decompress stats file: %w", err)
 		}
+
+		return &compressedStatsFile{Reader: r, file: f}, fi.ModTime(), nil
 	}
 
-	return r, fi.ModTime(), nil
+	return f, fi.ModTime(), nil
 }
 
 func setArgsDefaults() {
@@ -718,7 +731,7 @@ func deriveMountPathForClickHouseSummarise(
 func mountPathCandidates(
 	basedirsDB, dirgutaDB, defaultDir string,
 ) []string {
-	candidates := make([]string, 0, maxMountPathCandidates)
+	candidates := make([]string, 0, mountPathCandidateCap)
 
 	if defaultDir != "" {
 		candidates = append(candidates, defaultDir)

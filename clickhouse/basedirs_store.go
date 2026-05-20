@@ -136,7 +136,7 @@ func (s *chBaseDirsStore) abortWithCleanup() error {
 		return connErr
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), queryTimeout(s.cfg))
+	ctx, cancel := configQueryContext(s.cfg)
 	defer cancel()
 
 	return errors.Join(s.cleanupAbortedRun(ctx, rollbackConn), closeConn())
@@ -151,16 +151,12 @@ func (s *chBaseDirsStore) rollbackConn() (ch.Conn, func() error, error) {
 		return s.conn, s.closeStoreConn, nil
 	}
 
-	conn, err := s.openStoreConn()
+	conn, err := connectFromConfig(s.cfg)
 	if err != nil {
 		return nil, nil, err
 	}
 
 	return conn, conn.Close, nil
-}
-
-func (s *chBaseDirsStore) openStoreConn() (ch.Conn, error) {
-	return connectFromConfig(s.cfg)
 }
 
 func (s *chBaseDirsStore) cleanupAbortedRun(ctx context.Context, conn ch.Conn) error {
@@ -285,22 +281,7 @@ func (s *chBaseDirsStore) closeStoreConn() error {
 }
 
 func (s *chBaseDirsStore) dropSnapshotPartitionsWithConn(ctx context.Context, conn ch.Conn) error {
-	sid := s.snapshot.String()
-
-	queries := [...]string{
-		dropBasedirsGroupUsagePartitionQuery,
-		dropBasedirsUserUsagePartitionQuery,
-		dropBasedirsGroupSubdirsPartitionQuery,
-		dropBasedirsUserSubdirsPartitionQuery,
-	}
-
-	for _, query := range queries {
-		if err := dropPartitionIgnoreUnknown(ctx, conn, s.mountPath, sid, query); err != nil {
-			return err
-		}
-	}
-
-	return nil
+	return dropSnapshotPartitionsForMount(ctx, conn, s.mountPath, s.snapshot.String(), basedirsPartitionDropQueries())
 }
 
 func batchAbort(b driver.Batch) error { return b.Abort() }
@@ -310,6 +291,7 @@ type batchOp func(driver.Batch) error
 type batchSlot struct {
 	batch *driver.Batch
 	query string
+	name  string
 }
 
 type chBaseDirsStore struct {
@@ -356,9 +338,7 @@ func (s *chBaseDirsStore) Reset() error {
 
 	s.resetSnapshotState()
 
-	ctx, cancel := context.WithTimeout(
-		context.Background(), queryTimeout(s.cfg),
-	)
+	ctx, cancel := configQueryContext(s.cfg)
 	defer cancel()
 
 	if err := refuseActiveSnapshotRewrite(ctx, s.conn, s.mountPath, s.snapshot); err != nil {
@@ -585,9 +565,7 @@ func (s *chBaseDirsStore) historyAlreadyRecorded(
 	key basedirs.HistoryKey,
 	date time.Time,
 ) (bool, error) {
-	ctx, cancel := context.WithTimeout(
-		context.Background(), queryTimeout(s.cfg),
-	)
+	ctx, cancel := configQueryContext(s.cfg)
 	defer cancel()
 
 	rows, err := s.conn.Query(
@@ -629,9 +607,7 @@ func (s *chBaseDirsStore) insertHistoryPoint(
 	key basedirs.HistoryKey,
 	point basedirs.History,
 ) error {
-	ctx, cancel := context.WithTimeout(
-		context.Background(), queryTimeout(s.cfg),
-	)
+	ctx, cancel := configQueryContext(s.cfg)
 	defer cancel()
 
 	if err := s.conn.Exec(
@@ -745,9 +721,7 @@ func (s *chBaseDirsStore) appendGroupUsage(u *basedirs.Usage, dateNoSpace, dateN
 func (s *chBaseDirsStore) readHistorySeries(
 	gid uint32,
 ) ([]basedirs.History, error) {
-	ctx, cancel := context.WithTimeout(
-		context.Background(), queryTimeout(s.cfg),
-	)
+	ctx, cancel := configQueryContext(s.cfg)
 	defer cancel()
 
 	rows, err := s.conn.Query(
@@ -814,84 +788,36 @@ func dropPartitionIgnoreUnknown(
 	return fmt.Errorf("clickhouse: failed to drop partition: %w", err)
 }
 
-func (s *chBaseDirsStore) prepareBatches(ctx context.Context) error { //nolint:funlen
-	groupUsage, err := s.conn.PrepareBatch(
-		ctx, insertBasedirsGroupUsageQuery,
-		driver.WithReleaseConnection(),
-	)
-	if err != nil {
-		return fmt.Errorf(
-			"clickhouse: failed to prepare basedirs group usage batch: %w",
-			err,
-		)
+func (s *chBaseDirsStore) prepareBatches(ctx context.Context) error {
+	slots := s.batchSlots()
+	prepared := make([]driver.Batch, 0, len(slots))
+
+	for _, slot := range slots {
+		batch, err := prepareBatchWithRelease(ctx, s.conn, slot.query)
+		if err != nil {
+			return errors.Join(
+				fmt.Errorf("clickhouse: failed to prepare basedirs %s batch: %w", slot.name, err),
+				abortPreparedBatches(prepared),
+			)
+		}
+
+		prepared = append(prepared, batch)
 	}
 
-	userUsage, err := s.conn.PrepareBatch(
-		ctx, insertBasedirsUserUsageQuery,
-		driver.WithReleaseConnection(),
-	)
-	if err != nil {
-		_ = groupUsage.Abort() //nolint:errcheck
-
-		return fmt.Errorf(
-			"clickhouse: failed to prepare basedirs user usage batch: %w",
-			err,
-		)
+	for i, batch := range prepared {
+		*slots[i].batch = batch
 	}
-
-	groupSub, err := s.conn.PrepareBatch(
-		ctx, insertBasedirsGroupSubdirsQuery,
-		driver.WithReleaseConnection(),
-	)
-	if err != nil {
-		_ = userUsage.Abort()  //nolint:errcheck
-		_ = groupUsage.Abort() //nolint:errcheck
-
-		return fmt.Errorf(
-			"clickhouse: failed to prepare basedirs group subdirs batch: %w",
-			err,
-		)
-	}
-
-	userSub, err := s.conn.PrepareBatch(
-		ctx, insertBasedirsUserSubdirsQuery,
-		driver.WithReleaseConnection(),
-	)
-	if err != nil {
-		_ = groupSub.Abort()   //nolint:errcheck
-		_ = userUsage.Abort()  //nolint:errcheck
-		_ = groupUsage.Abort() //nolint:errcheck
-
-		return fmt.Errorf(
-			"clickhouse: failed to prepare basedirs user subdirs batch: %w",
-			err,
-		)
-	}
-
-	s.groupUsageBatch = groupUsage
-	s.userUsageBatch = userUsage
-	s.groupSubBatch = groupSub
-	s.userSubBatch = userSub
 
 	return nil
 }
 
 func (s *chBaseDirsStore) flushFullBatches() error {
-	ctx, cancel := context.WithTimeout(
-		context.Background(), queryTimeout(s.cfg),
-	)
+	ctx, cancel := configQueryContext(s.cfg)
 	defer cancel()
 
 	batchCtx := context.WithoutCancel(ctx)
 
-	slots := []batchSlot{
-		{&s.groupUsageBatch, insertBasedirsGroupUsageQuery},
-		{&s.userUsageBatch, insertBasedirsUserUsageQuery},
-		{&s.groupSubBatch, insertBasedirsGroupSubdirsQuery},
-		{&s.userSubBatch, insertBasedirsUserSubdirsQuery},
-	}
-
-	for _, slot := range slots {
+	for _, slot := range s.batchSlots() {
 		b, err := sendAndReprepareIfFull(
 			batchCtx, s.conn, *slot.batch,
 			s.batchSize, slot.query,
@@ -923,9 +849,7 @@ func sendAndReprepareIfFull(
 		)
 	}
 
-	b, err := conn.PrepareBatch(
-		ctx, query, driver.WithReleaseConnection(),
-	)
+	b, err := prepareBatchWithRelease(ctx, conn, query)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"clickhouse: failed to reprepare batch: %w", err,
@@ -935,22 +859,33 @@ func sendAndReprepareIfFull(
 	return b, nil
 }
 
+func abortPreparedBatches(batches []driver.Batch) error {
+	var err error
+	for i := len(batches) - 1; i >= 0; i-- {
+		err = errors.Join(err, batches[i].Abort())
+	}
+
+	return err
+}
+
+func (s *chBaseDirsStore) batchSlots() []batchSlot {
+	return []batchSlot{
+		{&s.groupUsageBatch, insertBasedirsGroupUsageQuery, "group usage"},
+		{&s.userUsageBatch, insertBasedirsUserUsageQuery, "user usage"},
+		{&s.groupSubBatch, insertBasedirsGroupSubdirsQuery, "group subdirs"},
+		{&s.userSubBatch, insertBasedirsUserSubdirsQuery, "user subdirs"},
+	}
+}
+
 func (s *chBaseDirsStore) applyToBatches(
 	op batchOp, errMsg string,
 ) error {
 	var out error
 
-	batches := []*driver.Batch{
-		&s.groupUsageBatch,
-		&s.userUsageBatch,
-		&s.groupSubBatch,
-		&s.userSubBatch,
-	}
-
-	for _, bp := range batches {
-		if *bp != nil {
-			out = errors.Join(out, op(*bp))
-			*bp = nil
+	for _, slot := range s.batchSlots() {
+		if *slot.batch != nil {
+			out = errors.Join(out, op(*slot.batch))
+			*slot.batch = nil
 		}
 	}
 

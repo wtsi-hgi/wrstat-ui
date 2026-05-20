@@ -27,16 +27,15 @@
 package clickhouse
 
 import (
-	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
+
+	"github.com/wtsi-hgi/wrstat-ui/internal/mountpath"
 )
 
-const (
-	activeMountTupleArgCount = 2
-	activeMountPathArgCount  = 1
-)
+const activeMountTupleArgCount = 2
 
 // ActiveSnapshotMatches reports whether mountPath is already active for the
 // deterministic snapshot derived from updatedAt.
@@ -51,7 +50,7 @@ func ActiveSnapshotMatches(cfg Config, mountPath string, updatedAt time.Time) (b
 	}
 	defer func() { _ = conn.Close() }()
 
-	ctx, cancel := context.WithTimeout(context.Background(), queryTimeout(cfg))
+	ctx, cancel := configQueryContext(cfg)
 	defer cancel()
 
 	activeSID, hasActive, err := readActiveSnapshotID(ctx, conn, mountPath)
@@ -77,7 +76,7 @@ func activeMountsQuery(
 		mountColumn, snapshotColumn, mounts,
 	)
 
-	return fmt.Sprintf(queryFmt, condition), appendQueryArgs(args, activeArgs)
+	return fmt.Sprintf(queryFmt, condition), append(args, activeArgs...)
 }
 
 func activeMountsTupleCondition(
@@ -118,14 +117,7 @@ func activeMountPathsQuery(
 ) (string, []any) {
 	condition, activeArgs := activeMountPathsCondition(mountColumn, mounts)
 
-	return fmt.Sprintf(queryFmt, condition), appendQueryArgs(args, activeArgs)
-}
-
-func appendQueryArgs(prefix, suffix []any) []any {
-	all := make([]any, 0, len(prefix)+len(suffix))
-	all = append(all, prefix...)
-
-	return append(all, suffix...)
+	return fmt.Sprintf(queryFmt, condition), append(args, activeArgs...)
 }
 
 func activeMountPathsCondition(
@@ -140,7 +132,7 @@ func activeMountPathsCondition(
 	b.WriteString(mountColumn)
 	b.WriteString(" IN (")
 
-	args := make([]any, 0, len(mounts)*activeMountPathArgCount)
+	args := make([]any, 0, len(mounts))
 	for i, mount := range mounts {
 		if i > 0 {
 			b.WriteString(", ")
@@ -240,10 +232,7 @@ func (s *activeMountsSnapshot) all() []activeMount {
 		return nil
 	}
 
-	mounts := make([]activeMount, len(s.mounts))
-	copy(mounts, s.mounts)
-
-	return mounts
+	return slices.Clone(s.mounts)
 }
 
 func (s *activeMountsSnapshot) maxUpdatedAt(dir string) (time.Time, bool) {
@@ -282,8 +271,12 @@ func (s *activeMountsSnapshot) mountTimestamps() map[string]time.Time {
 	out := make(map[string]time.Time, len(s.mounts))
 
 	for _, mount := range s.mounts {
-		out[strings.ReplaceAll(mount.mountPath, "/", "／")] = mount.updatedAt.UTC()
+		out[mountTimestampKey(mount.mountPath)] = mount.updatedAt.UTC()
 	}
 
 	return out
+}
+
+func mountTimestampKey(mountPath string) string {
+	return mountpath.EncodeKey(mountPath)
 }

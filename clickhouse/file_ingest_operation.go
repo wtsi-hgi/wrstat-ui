@@ -31,7 +31,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -183,7 +182,7 @@ func (w *fileIngestWriter) Close() error {
 	var out error
 
 	if w.conn != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), queryTimeout(w.cfg))
+		ctx, cancel := configQueryContext(w.cfg)
 		if w.sendErr == nil {
 			out = errors.Join(out, w.flushBuffer(ctx))
 		}
@@ -232,7 +231,7 @@ func (w *fileIngestWriter) prepareAppend(info *summary.FileInfo) (bool, error) {
 		return false, err
 	}
 
-	return w.bufferFileInfo(info), nil
+	return w.bufferFileInfo(info)
 }
 
 func (w *fileIngestWriter) flushIfBatchFull() error {
@@ -240,9 +239,7 @@ func (w *fileIngestWriter) flushIfBatchFull() error {
 		return nil
 	}
 
-	ctx, cancel := context.WithTimeout(
-		context.Background(), queryTimeout(w.cfg),
-	)
+	ctx, cancel := configQueryContext(w.cfg)
 	defer cancel()
 
 	return w.flushBuffer(ctx)
@@ -268,36 +265,67 @@ func validateFileInfo(info *summary.FileInfo) error {
 	return nil
 }
 
-func (w *fileIngestWriter) bufferFileInfo(info *summary.FileInfo) bool {
-	parentDir := string(info.Path.AppendTo(
-		make([]byte, 0, info.Path.Len()),
-	))
-	name := string(info.Name)
+func (w *fileIngestWriter) bufferFileInfo(info *summary.FileInfo) (bool, error) {
+	parentDir, name := fileIngestParentAndName(info)
 
 	parentDir, name, keep := canonicalFileIngestPath(w.mountPath, parentDir, name)
 	if !keep {
-		return false
+		return false, nil
+	}
+
+	size, apparentSize, inode, nlink, err := unsignedFileInfoValues(info)
+	if err != nil {
+		return false, err
 	}
 
 	w.buf.appendRow(
-		w.mountPath,
-		w.snapshot,
-		parentDir,
-		name,
-		extFromName(name),
-		info.EntryType,
-		uint64(info.Size),         //nolint:gosec
-		uint64(info.ApparentSize), //nolint:gosec
-		info.UID,
-		info.GID,
+		w.mountPath, w.snapshot, parentDir, name, extFromName(name),
+		info.EntryType, size, apparentSize, info.UID, info.GID,
 		time.Unix(info.ATime, 0),
 		time.Unix(info.MTime, 0),
 		time.Unix(info.CTime, 0),
-		uint64(info.Inode), //nolint:gosec
-		uint64(info.Nlink), //nolint:gosec
+		inode, nlink,
 	)
 
-	return true
+	return true, nil
+}
+
+func fileIngestParentAndName(info *summary.FileInfo) (string, string) {
+	parentDir := string(info.Path.AppendTo(make([]byte, 0, info.Path.Len())))
+
+	return parentDir, string(info.Name)
+}
+
+func unsignedFileInfoValues(info *summary.FileInfo) (uint64, uint64, uint64, uint64, error) {
+	size, err := nonNegativeInt64ToUint64(info.Size, errFileIngestNegativeSize)
+	if err != nil {
+		return 0, 0, 0, 0, err
+	}
+
+	apparentSize, err := nonNegativeInt64ToUint64(info.ApparentSize, errFileIngestNegativeSize)
+	if err != nil {
+		return 0, 0, 0, 0, err
+	}
+
+	inode, err := nonNegativeInt64ToUint64(info.Inode, errFileIngestNegativeInode)
+	if err != nil {
+		return 0, 0, 0, 0, err
+	}
+
+	nlink, err := nonNegativeInt64ToUint64(info.Nlink, errFileIngestNegativeInode)
+	if err != nil {
+		return 0, 0, 0, 0, err
+	}
+
+	return size, apparentSize, inode, nlink, nil
+}
+
+func nonNegativeInt64ToUint64(v int64, negativeErr error) (uint64, error) {
+	if v < 0 {
+		return 0, negativeErr
+	}
+
+	return uint64(v), nil
 }
 
 func canonicalFileIngestPath(mountPath, parentDir, name string) (string, string, bool) {
@@ -340,7 +368,7 @@ func extFromName(name string) string {
 		return ""
 	}
 
-	return strings.ToLower(filepath.Base(name[idx+1:]))
+	return strings.ToLower(name[idx+1:])
 }
 
 func (w *fileIngestWriter) validateWriteState() error {
@@ -474,10 +502,7 @@ func (w *fileIngestWriter) prepareFilesBatch(
 
 	batchCtx := context.WithoutCancel(ctx)
 
-	batch, err := w.conn.PrepareBatch(
-		batchCtx, insertFilesBatchQuery,
-		driver.WithReleaseConnection(),
-	)
+	batch, err := prepareBatchWithRelease(batchCtx, w.conn, insertFilesBatchQuery)
 	if err != nil {
 		return fmt.Errorf(
 			"clickhouse: failed to prepare files batch: %w", err,

@@ -213,15 +213,7 @@ func firstMountPath(bd basedirs.Reader) (string, error) {
 // paths by replacing fullwidth solidus (U+FF0F) with '/' and ensuring
 // a trailing slash.
 func DecodeMountPaths(mt map[string]time.Time) []string {
-	paths := make([]string, 0, len(mt))
-
-	for key := range mt {
-		paths = append(paths, mountpath.DecodeKey(key))
-	}
-
-	sort.Strings(paths)
-
-	return paths
+	return mountpath.DecodeSortedKeys(mt)
 }
 
 func pickDir(tree *db.Tree, startDir string) string {

@@ -41,6 +41,7 @@ const (
 	inputStatsFile        = "stats.gz"
 	dirPerms              = 0750
 	basedirBasename       = "basedirs.db"
+	hiddenOutputPrefix    = "."
 	summariseCPU          = 2
 	summariseMem          = 8192
 	mbPerGB               = 1024
@@ -98,7 +99,7 @@ func watch(inputDirs []string, group, outputDir, quotaPath, basedirsConfig, moun
 	}
 
 	for _, inputDir := range inputDirs {
-		inputPaths, err := datasets.FindLatestDatasetDirs(inputDir, "stats.gz")
+		inputPaths, err := datasets.FindLatestDatasetDirs(inputDir, inputStatsFile)
 		if err != nil {
 			return fmt.Errorf("error getting input DB paths: %w", err)
 		}
@@ -106,7 +107,7 @@ func watch(inputDirs []string, group, outputDir, quotaPath, basedirsConfig, moun
 		inputPaths = slices.DeleteFunc(inputPaths, func(p string) bool {
 			base := filepath.Base(p)
 
-			return entryExists(filepath.Join(outputDir, base)) || entryExists(filepath.Join(outputDir, "."+base))
+			return entryExists(filepath.Join(outputDir, base)) || entryExists(hiddenOutputDir(outputDir, base))
 		})
 
 		if err := scheduleSummarisers(s, group, inputDir, outputDir, quotaPath,
@@ -129,10 +130,12 @@ func scheduleSummarisers(s *client.Scheduler, group, inputDir, outputDir, quotaP
 	jobs := make([]*jobqueue.Job, 0, len(inputPaths))
 
 	for _, p := range inputPaths {
-		job, errr := createSummariseJob(group, inputDir, outputDir, filepath.Base(p),
+		base := filepath.Base(p)
+
+		job, err := createSummariseJob(group, inputDir, outputDir, base,
 			quotaPath, basedirsConfig, mounts, minMemGB, s)
-		if errr != nil {
-			return fmt.Errorf("error scheduling summarise (%s): %w", filepath.Base(p), errr)
+		if err != nil {
+			return fmt.Errorf("error scheduling summarise (%s): %w", base, err)
 		}
 
 		jobs = append(jobs, job)
@@ -140,7 +143,9 @@ func scheduleSummarisers(s *client.Scheduler, group, inputDir, outputDir, quotaP
 
 	if len(jobs) == 0 {
 		return nil
-	} else if err := s.SubmitJobs(jobs); err != nil {
+	}
+
+	if err := s.SubmitJobs(jobs); err != nil {
 		return fmt.Errorf("error submitting jobs to wr: %w", err)
 	}
 
@@ -149,7 +154,7 @@ func scheduleSummarisers(s *client.Scheduler, group, inputDir, outputDir, quotaP
 
 func createSummariseJob(group, inputDir, outputDir, base, quotaPath, basedirsConfig, mounts string,
 	minMemGB int, s *client.Scheduler) (*jobqueue.Job, error) {
-	dotOutputBase := filepath.Join(outputDir, "."+base)
+	dotOutputBase := hiddenOutputDir(outputDir, base)
 
 	if err := os.MkdirAll(dotOutputBase, dirPerms); err != nil {
 		return nil, err
@@ -189,20 +194,29 @@ func getPreviousBasedirsDB(outputDir, base string) (string, error) {
 		return "", err
 	}
 
-	_, baseKey, ok := datasets.SplitDatasetDirName(base)
+	baseKey, ok := datasetKey(base)
 	if !ok {
 		return "", nil
 	}
 
 	for _, possibleBasedirDB := range possibleBasedirs {
-		_, key, ok := datasets.SplitDatasetDirName(filepath.Base(possibleBasedirDB))
-
+		key, ok := datasetKey(filepath.Base(possibleBasedirDB))
 		if ok && key == baseKey {
 			return filepath.Join(possibleBasedirDB, basedirBasename), nil
 		}
 	}
 
 	return "", nil
+}
+
+func datasetKey(name string) (string, bool) {
+	_, key, ok := datasets.SplitDatasetDirName(name)
+
+	return key, ok
+}
+
+func hiddenOutputDir(outputDir, base string) string {
+	return filepath.Join(outputDir, hiddenOutputPrefix+base)
 }
 
 func getJobCommand(dotOutputBase, previousBasedirsDB, quotaPath, basedirsConfig, mounts,

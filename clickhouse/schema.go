@@ -113,9 +113,8 @@ func readSchemaStatement(name string) (string, error) {
 
 func applySchemaDDL(ctx context.Context, execer ch.Conn, stmts []string) error {
 	for _, stmt := range stmts {
-		execErr := execer.Exec(ctx, stmt)
-		if execErr != nil {
-			return fmt.Errorf("clickhouse: failed to execute schema DDL: %w", execErr)
+		if err := execer.Exec(ctx, stmt); err != nil {
+			return fmt.Errorf("clickhouse: failed to execute schema DDL: %w", err)
 		}
 	}
 
@@ -147,8 +146,8 @@ func ensureSchemaVersion(ctx context.Context, execer ch.Conn) error {
 	return validateSchemaVersionStats(count, minVersion, maxVersion)
 }
 
-func schemaVersionStatsFromDB(ctx context.Context, q ch.Conn) (uint64, *uint32, *uint32, error) {
-	rows, err := q.Query(ctx, schemaVersionStatsQuery)
+func schemaVersionStatsFromDB(ctx context.Context, conn ch.Conn) (uint64, *uint32, *uint32, error) {
+	rows, err := conn.Query(ctx, schemaVersionStatsQuery)
 	if err != nil {
 		return 0, nil, nil, fmt.Errorf("clickhouse: failed to query schema version stats: %w", err)
 	}
@@ -205,9 +204,8 @@ func formatNullableUint32(v *uint32) string {
 }
 
 func insertSchemaVersion(ctx context.Context, execer ch.Conn) error {
-	execErr := execer.Exec(ctx, insertSchemaVersionStmt)
-	if execErr != nil {
-		return fmt.Errorf("clickhouse: failed to set schema version: %w", execErr)
+	if err := execer.Exec(ctx, insertSchemaVersionStmt); err != nil {
+		return fmt.Errorf("clickhouse: failed to set schema version: %w", err)
 	}
 
 	return nil

@@ -28,7 +28,6 @@ package cmd
 
 import (
 	"github.com/spf13/cobra"
-	"github.com/wtsi-hgi/wrstat-ui/clickhouse"
 )
 
 // dbinfoCmd represents the server command.
@@ -62,9 +61,9 @@ NB: for large databases, this can take hours to run.
 			die("failed to build ClickHouse config: %s", err)
 		}
 
-		p, err := clickhouse.OpenProvider(cfg)
+		p, err := openClickhouseProvider(cfg)
 		if err != nil {
-			die("failed to open clickhouse provider: %s", err)
+			die("%s", err)
 		}
 		defer p.Close()
 
@@ -92,11 +91,7 @@ NB: for large databases, this can take hours to run.
 
 func init() {
 	RootCmd.AddCommand(dbinfoCmd)
-	dbinfoCmd.Flags().StringVarP(&clickhouseDSN, "clickhouse-dsn", "C", "",
-		"ClickHouse DSN (default $WRSTAT_CLICKHOUSE_DSN)")
-	dbinfoCmd.Flags().StringVarP(&clickhouseDatabase, "clickhouse-database", "D", "",
-		"ClickHouse database name (default $WRSTAT_CLICKHOUSE_DATABASE)")
-	dbinfoCmd.Flags().StringVar(&clickhouseQueryTO, "query-timeout", "",
-		"per-query timeout (default $WRSTAT_QUERY_TIMEOUT or 30s)")
+	addClickhouseConnectionFlags(dbinfoCmd.Flags(), &clickhouseDSN, &clickhouseDatabase)
+	addClickhouseQueryTimeoutFlag(dbinfoCmd.Flags(), &clickhouseQueryTO)
 	dbinfoCmd.Flags().StringVarP(&ownersPath, "owners", "o", "", "path to owners csv file (optional)")
 }

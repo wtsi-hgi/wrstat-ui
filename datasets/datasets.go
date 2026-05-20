@@ -43,6 +43,8 @@ type nameVersion struct {
 	version string
 }
 
+const datasetDirSeparator = "_"
+
 // FindDatasetDirs returns the latest dataset directory for each dataset key
 // found directly under baseDir, and a list of older dataset directory names
 // that may be removed.
@@ -70,7 +72,7 @@ func FindDatasetDirs(baseDir string, required ...string) ([]string, []string, er
 	toDelete := make([]string, 0)
 
 	for _, entry := range entries {
-		considerDatasetDirEntryWithDeletes(latest, &toDelete, baseDir, entry, required)
+		toDelete = considerDatasetDirEntryWithDeletes(latest, toDelete, baseDir, entry, required)
 	}
 
 	dirs := make([]string, 0, len(latest))
@@ -84,19 +86,19 @@ func FindDatasetDirs(baseDir string, required ...string) ([]string, []string, er
 }
 
 func considerDatasetDirEntryWithDeletes(latest map[string]nameVersion,
-	toDelete *[]string, baseDir string, entry fs.DirEntry, required []string) {
+	toDelete []string, baseDir string, entry fs.DirEntry, required []string) []string {
 	name := entry.Name()
 
 	if !isValidDatasetEntry(entry, name, baseDir, required) {
-		return
+		return toDelete
 	}
 
 	version, key, ok := SplitDatasetDirName(name)
 	if !ok {
-		return
+		return toDelete
 	}
 
-	updateLatestWithDeletes(latest, toDelete, name, version, key)
+	return updateLatestWithDeletes(latest, toDelete, name, version, key)
 }
 
 // SplitDatasetDirName splits a dataset directory name into its <version> and
@@ -112,10 +114,7 @@ func SplitDatasetDirName(name string) (version string, key string, ok bool) {
 		return "", "", false
 	}
 
-	before, after, ok := strings.Cut(name, "_")
-	if !ok {
-		return "", "", false
-	}
+	before, after, _ := strings.Cut(name, datasetDirSeparator)
 
 	return before, after, true
 }
@@ -125,11 +124,7 @@ func isValidDatasetEntry(entry fs.DirEntry, name, baseDir string, required []str
 		return false
 	}
 
-	if !HasRequiredFiles(filepath.Join(baseDir, name), required...) {
-		return false
-	}
-
-	return true
+	return HasRequiredFiles(filepath.Join(baseDir, name), required...)
 }
 
 // IsValidDatasetDirName validates a dataset directory name.
@@ -142,7 +137,7 @@ func IsValidDatasetDirName(name string) bool {
 		return false
 	}
 
-	before, after, ok := strings.Cut(name, "_")
+	before, after, ok := strings.Cut(name, datasetDirSeparator)
 	if !ok {
 		return false
 	}
@@ -162,22 +157,24 @@ func HasRequiredFiles(dir string, required ...string) bool {
 	return true
 }
 
-func updateLatestWithDeletes(latest map[string]nameVersion, toDelete *[]string, name, version, key string) {
+func updateLatestWithDeletes(latest map[string]nameVersion, toDelete []string, name, version, key string) []string {
 	previous, ok := latest[key]
 	if !ok {
 		latest[key] = nameVersion{name: name, version: version}
 
-		return
+		return toDelete
 	}
 
 	if compareDatasetVersions(previous.version, version) > 0 {
-		appendToDelete(toDelete, name)
+		toDelete = append(toDelete, name)
 
-		return
+		return toDelete
 	}
 
-	appendToDelete(toDelete, previous.name)
+	toDelete = append(toDelete, previous.name)
 	latest[key] = nameVersion{name: name, version: version}
+
+	return toDelete
 }
 
 func compareDatasetVersions(a, b string) int {
@@ -187,9 +184,9 @@ func compareDatasetVersions(a, b string) int {
 	switch {
 	case aOK && bOK:
 		return cmp.Compare(ai, bi)
-	case aOK && !bOK:
+	case aOK:
 		return 1
-	case !aOK && bOK:
+	case bOK:
 		return -1
 	default:
 		return strings.Compare(a, b)
@@ -198,19 +195,8 @@ func compareDatasetVersions(a, b string) int {
 
 func parsePositiveInt(s string) (int, bool) {
 	v, err := strconv.Atoi(s)
-	if err != nil {
-		return 0, false
-	}
 
-	return v, true
-}
-
-func appendToDelete(toDelete *[]string, name string) {
-	if toDelete == nil {
-		return
-	}
-
-	*toDelete = append(*toDelete, name)
+	return v, err == nil
 }
 
 // FindLatestDatasetDirs returns the latest dataset directory for each dataset

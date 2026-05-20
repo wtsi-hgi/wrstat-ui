@@ -140,7 +140,7 @@ func addImportReportOperations(
 			"stats_path":                 result.statsPath,
 			"mount_path":                 result.mountPath,
 			"lines":                      result.lines,
-			"rows_per_table":             cloneUint64Map(result.rows),
+			"rows_per_table":             cloneMap(result.rows),
 			"throughput_records_per_sec": throughputPerSecond(result.records(), result.elapsed),
 		}, []float64{durationMS(result.elapsed)})
 
@@ -166,12 +166,12 @@ func addImportReportOperations(
 	}, []float64{durationMS(totalDuration)})
 }
 
-func cloneUint64Map(src map[string]uint64) map[string]uint64 {
+func cloneMap[M ~map[K]V, K comparable, V any](src M) M {
 	if len(src) == 0 {
-		return map[string]uint64{}
+		return make(M)
 	}
 
-	dst := make(map[string]uint64, len(src))
+	dst := make(M, len(src))
 	for k, v := range src {
 		dst[k] = v
 	}
@@ -319,7 +319,7 @@ func importDatasets(
 	opts ImportOptions,
 	printf PrintfFunc,
 ) ([]datasetImportResult, error) {
-	if opts.Parallelism <= 1 {
+	if effectiveParallelism(opts.Parallelism) == 1 {
 		return importSerial(api, datasetDirs, opts, printf)
 	}
 
@@ -573,7 +573,7 @@ func addBasedirsSummariser(
 	metrics *datasetImportMetrics,
 ) (func(bool) error, error) {
 	if opts.QuotaPath == "" || opts.ConfigPath == "" {
-		return func(bool) error { return nil }, nil
+		return noopPublishCloser, nil
 	}
 
 	bs, err := api.NewBaseDirsStore()
@@ -599,6 +599,10 @@ func addBasedirsSummariser(
 	}
 
 	return closer, nil
+}
+
+func noopPublishCloser(bool) error {
+	return nil
 }
 
 func addBasedirsOp(
@@ -651,12 +655,11 @@ func importParallel(
 	printf PrintfFunc,
 ) ([]datasetImportResult, error) {
 	results := runParallel(api, datasetDirs, opts, printf)
-
 	if _, err := sumResults(results); err != nil {
 		return nil, err
 	}
 
-	return collectImportResults(results)
+	return collectImportResults(results), nil
 }
 
 func sumResults(results []importResult) (uint64, error) {
@@ -673,18 +676,14 @@ func sumResults(results []importResult) (uint64, error) {
 	return total, nil
 }
 
-func collectImportResults(results []importResult) ([]datasetImportResult, error) {
+func collectImportResults(results []importResult) []datasetImportResult {
 	imports := make([]datasetImportResult, 0, len(results))
 
 	for _, r := range results {
-		if r.err != nil {
-			return nil, r.err
-		}
-
 		imports = append(imports, r.dataset)
 	}
 
-	return imports, nil
+	return imports
 }
 
 func runParallel(
@@ -789,22 +788,24 @@ func (m *datasetImportMetrics) result(lines uint64, elapsed time.Duration) datas
 		mountPath: m.mountPath,
 		lines:     lines,
 		elapsed:   elapsed,
-		rows:      cloneUint64Map(m.rows),
-		phases:    cloneDurationMap(m.phases),
+		rows:      cloneMap(m.rows),
+		phases:    cloneMap(m.phases),
 	}
 }
 
-func cloneDurationMap(src map[string]time.Duration) map[string]time.Duration {
-	if len(src) == 0 {
-		return map[string]time.Duration{}
+func (m *datasetImportMetrics) timePhases(
+	run func() error,
+	phases ...string,
+) error {
+	start := time.Now()
+	err := run()
+	duration := time.Since(start)
+
+	for _, phase := range phases {
+		m.addPhase(phase, duration)
 	}
 
-	dst := make(map[string]time.Duration, len(src))
-	for k, v := range src {
-		dst[k] = v
-	}
-
-	return dst
+	return err
 }
 
 type timedImportCloser struct {
@@ -814,11 +815,7 @@ type timedImportCloser struct {
 }
 
 func (c timedImportCloser) Close() error {
-	start := time.Now()
-	err := c.Closer.Close()
-	c.metrics.addPhase(c.phase, time.Since(start))
-
-	return err
+	return c.metrics.timePhases(c.Closer.Close, c.phase)
 }
 
 type trackedDGUTAWriter struct {
@@ -865,12 +862,7 @@ func (w *trackedDGUTAWriter) Close() error {
 }
 
 func (w *trackedDGUTAWriter) Abort() error {
-	aborter, ok := w.DGUTAWriter.(interface{ Abort() error })
-	if ok {
-		return aborter.Abort()
-	}
-
-	return w.DGUTAWriter.Close()
+	return summariseutil.CloseOrAbort(w.DGUTAWriter, false)
 }
 
 type importPhaseRecorderSetter interface {
@@ -887,9 +879,9 @@ type trackedFileOperation struct {
 }
 
 func (o *trackedFileOperation) Add(info *summary.FileInfo) error {
-	start := time.Now()
-	err := o.Operation.Add(info)
-	o.metrics.addPhase(phaseFilesInsert, time.Since(start))
+	err := o.metrics.timePhases(func() error {
+		return o.Operation.Add(info)
+	}, phaseFilesInsert)
 
 	if err == nil && info != nil {
 		o.metrics.addRows(tableFiles, 1)
@@ -904,28 +896,21 @@ type trackedBasedirsStore struct {
 }
 
 func (s *trackedBasedirsStore) Abort() error {
-	aborter, ok := s.Store.(interface{ Abort() error })
-	if ok {
-		return aborter.Abort()
-	}
-
-	return s.Store.Close()
+	return summariseutil.CloseOrAbort(s.Store, false)
 }
 
 func (s *trackedBasedirsStore) Reset() error {
-	start := time.Now()
-	err := s.Store.Reset()
-	duration := time.Since(start)
-	s.metrics.addPhase(phaseBasedirsReset, duration)
-	s.metrics.addPhase(phasePartitionDropReset, duration)
-
-	return err
+	return s.metrics.timePhases(
+		s.Store.Reset,
+		phaseBasedirsReset,
+		phasePartitionDropReset,
+	)
 }
 
 func (s *trackedBasedirsStore) PutGroupUsage(u *basedirs.Usage) error {
-	start := time.Now()
-	err := s.Store.PutGroupUsage(u)
-	s.metrics.addPhase(phaseBasedirsGroupUsage, time.Since(start))
+	err := s.metrics.timePhases(func() error {
+		return s.Store.PutGroupUsage(u)
+	}, phaseBasedirsGroupUsage)
 
 	if err == nil && u != nil {
 		s.metrics.addRows(tableBasedirsGroupUsage, 1)
@@ -935,9 +920,9 @@ func (s *trackedBasedirsStore) PutGroupUsage(u *basedirs.Usage) error {
 }
 
 func (s *trackedBasedirsStore) PutUserUsage(u *basedirs.Usage) error {
-	start := time.Now()
-	err := s.Store.PutUserUsage(u)
-	s.metrics.addPhase(phaseBasedirsUserUsage, time.Since(start))
+	err := s.metrics.timePhases(func() error {
+		return s.Store.PutUserUsage(u)
+	}, phaseBasedirsUserUsage)
 
 	if err == nil && u != nil {
 		s.metrics.addRows(tableBasedirsUserUsage, 1)
@@ -947,10 +932,9 @@ func (s *trackedBasedirsStore) PutUserUsage(u *basedirs.Usage) error {
 }
 
 func (s *trackedBasedirsStore) PutGroupSubDirs(key basedirs.SubDirKey, subdirs []*basedirs.SubDir) error {
-	start := time.Now()
-	err := s.Store.PutGroupSubDirs(key, subdirs)
-	s.metrics.addPhase(phaseBasedirsGroupSubs, time.Since(start))
-
+	err := s.metrics.timePhases(func() error {
+		return s.Store.PutGroupSubDirs(key, subdirs)
+	}, phaseBasedirsGroupSubs)
 	if err == nil {
 		s.metrics.addRows(tableBasedirsGroupSubdirs, countNonNilSubDirs(subdirs))
 	}
@@ -971,10 +955,9 @@ func countNonNilSubDirs(subdirs []*basedirs.SubDir) uint64 {
 }
 
 func (s *trackedBasedirsStore) PutUserSubDirs(key basedirs.SubDirKey, subdirs []*basedirs.SubDir) error {
-	start := time.Now()
-	err := s.Store.PutUserSubDirs(key, subdirs)
-	s.metrics.addPhase(phaseBasedirsUserSubs, time.Since(start))
-
+	err := s.metrics.timePhases(func() error {
+		return s.Store.PutUserSubDirs(key, subdirs)
+	}, phaseBasedirsUserSubs)
 	if err == nil {
 		s.metrics.addRows(tableBasedirsUserSubdirs, countNonNilSubDirs(subdirs))
 	}
@@ -983,9 +966,9 @@ func (s *trackedBasedirsStore) PutUserSubDirs(key basedirs.SubDirKey, subdirs []
 }
 
 func (s *trackedBasedirsStore) AppendGroupHistory(key basedirs.HistoryKey, point basedirs.History) error {
-	start := time.Now()
-	err := s.Store.AppendGroupHistory(key, point)
-	s.metrics.addPhase(phaseBasedirsHistory, time.Since(start))
+	err := s.metrics.timePhases(func() error {
+		return s.Store.AppendGroupHistory(key, point)
+	}, phaseBasedirsHistory)
 
 	if err == nil && historyAppendInserted(s.Store) {
 		s.metrics.addRows(tableBasedirsHistory, 1)
@@ -1004,19 +987,11 @@ func historyAppendInserted(store basedirs.Store) bool {
 }
 
 func (s *trackedBasedirsStore) Finalise() error {
-	start := time.Now()
-	err := s.Store.Finalise()
-	s.metrics.addPhase(phaseBasedirsFinalise, time.Since(start))
-
-	return err
+	return s.metrics.timePhases(s.Store.Finalise, phaseBasedirsFinalise)
 }
 
 func (s *trackedBasedirsStore) Close() error {
-	start := time.Now()
-	err := s.Store.Close()
-	s.metrics.addPhase(phaseBasedirsFlush, time.Since(start))
-
-	return err
+	return s.metrics.timePhases(s.Store.Close, phaseBasedirsFlush)
 }
 
 type lineCountingReader struct {

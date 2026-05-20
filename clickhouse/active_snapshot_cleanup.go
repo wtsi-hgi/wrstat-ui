@@ -49,12 +49,13 @@ func CleanActiveSnapshotAttempt(cfg Config, mountPath string, updatedAt time.Tim
 	}
 	defer func() { _ = conn.Close() }()
 
-	ctx, cancel := context.WithTimeout(context.Background(), queryTimeout(cfg))
+	ctx, cancel := configQueryContext(cfg)
 	defer cancel()
 
 	sid := snapshotID(mountPath, updatedAt).String()
 
-	if active, err := snapshotIsCurrentlyActive(ctx, conn, mountPath, sid); err != nil || !active {
+	activeSID, hasActive, err := readActiveSnapshotID(ctx, conn, mountPath)
+	if err != nil || !hasActive || activeSID != sid {
 		return err
 	}
 
@@ -81,20 +82,6 @@ func validateSnapshotCleanupInputs(cfg Config, mountPath string, updatedAt time.
 	return nil
 }
 
-func snapshotIsCurrentlyActive(
-	ctx context.Context,
-	conn ch.Conn,
-	mountPath string,
-	sid string,
-) (bool, error) {
-	activeSID, hasActive, err := readActiveSnapshotID(ctx, conn, mountPath)
-	if err != nil {
-		return false, err
-	}
-
-	return hasActive && activeSID == sid, nil
-}
-
 func deleteActiveSnapshotMountRows(
 	ctx context.Context,
 	conn ch.Conn,
@@ -114,21 +101,5 @@ func dropAllSnapshotPartitions(
 	mountPath string,
 	sid string,
 ) error {
-	queries := [...]string{
-		dropDGUTAPartitionQuery,
-		dropChildrenPartitionQuery,
-		dropFilesPartitionQuery,
-		dropBasedirsGroupUsagePartitionQuery,
-		dropBasedirsUserUsagePartitionQuery,
-		dropBasedirsGroupSubdirsPartitionQuery,
-		dropBasedirsUserSubdirsPartitionQuery,
-	}
-
-	for _, query := range queries {
-		if err := dropPartitionIgnoreUnknown(ctx, conn, mountPath, sid, query); err != nil {
-			return err
-		}
-	}
-
-	return nil
+	return dropSnapshotPartitionsForMount(ctx, conn, mountPath, sid, allPartitionDropQueries())
 }

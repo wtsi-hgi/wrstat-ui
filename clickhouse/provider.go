@@ -448,14 +448,14 @@ func (p *chProvider) swapReadersAndInvoke(ctx context.Context, targetFingerprint
 		publishedFingerprint,
 	)
 
-	invokeSerializedCallback(cb)
+	invokeCallbackOnFreshGoroutine(cb)
 
 	p.closeOldReaders(oldDB, oldBD)
 
 	return true
 }
 
-func invokeSerializedCallback(cb func()) {
+func invokeCallbackOnFreshGoroutine(cb func()) {
 	if cb == nil {
 		return
 	}
@@ -513,7 +513,8 @@ func (p *chProvider) publishReaders(
 	p.currentFingerprint = publishedFingerprint
 
 	if p.hasPendingUpdate && p.pendingFingerprint == targetFingerprint {
-		p.pendingFingerprint = publishedFingerprint
+		p.pendingFingerprint = ""
+		p.hasPendingUpdate = false
 	}
 
 	return oldDB, oldBD
@@ -557,11 +558,11 @@ func (p *chProvider) drainErrors(ctx context.Context) {
 			return
 		}
 
-		invokeSerializedErrorCallback(cb, err)
+		invokeErrorCallbackOnFreshGoroutine(cb, err)
 	}
 }
 
-func invokeSerializedErrorCallback(cb func(error), err error) {
+func invokeErrorCallbackOnFreshGoroutine(cb func(error), err error) {
 	if cb == nil {
 		return
 	}

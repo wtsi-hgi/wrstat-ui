@@ -280,7 +280,7 @@ func (d *clickHouseDatabase) Children(dir string) ([]string, error) {
 }
 
 func (d *clickHouseDatabase) childrenForMount(mountPath, snapshotID, parentDir string) ([]string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), queryTimeout(d.cfg))
+	ctx, cancel := configQueryContext(d.cfg)
 	defer cancel()
 
 	return d.queryChildren(ctx, childrenQuery, "children", mountPath, snapshotID, parentDir)
@@ -296,6 +296,10 @@ func scanChildrenRows(rows rowsScanner) ([]string, error) {
 		}
 
 		children = append(children, child)
+	}
+
+	if err := rowsErr(rows); err != nil {
+		return nil, fmt.Errorf("clickhouse: children iteration error: %w", err)
 	}
 
 	return children, nil
@@ -395,7 +399,7 @@ func (d *clickHouseDatabase) queryActiveMount(
 	query string,
 	args ...any,
 ) (activeMount, bool, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), queryTimeout(d.cfg))
+	ctx, cancel := configQueryContext(d.cfg)
 	defer cancel()
 
 	rows, err := d.conn.Query(ctx, query, args...)
@@ -428,9 +432,7 @@ func (d *clickHouseDatabase) childrenForAncestor(
 		return d.snapshotChildrenForAncestor(parentDir)
 	}
 
-	ctx, cancel := context.WithTimeout(
-		context.Background(), queryTimeout(d.cfg),
-	)
+	ctx, cancel := configQueryContext(d.cfg)
 	defer cancel()
 
 	return d.queryAncestorChildren(ctx, childrenAncestorQuery, parentDir, parentDir)
@@ -444,9 +446,7 @@ func (d *clickHouseDatabase) snapshotChildrenForAncestor(
 		return nil, nil
 	}
 
-	ctx, cancel := context.WithTimeout(
-		context.Background(), queryTimeout(d.cfg),
-	)
+	ctx, cancel := configQueryContext(d.cfg)
 	defer cancel()
 
 	query, args := activeMountsQuery(
@@ -498,7 +498,7 @@ func (d *clickHouseDatabase) Info() (*db.Info, error) {
 		return nil, err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), queryTimeout(d.cfg))
+	ctx, cancel := configQueryContext(d.cfg)
 	defer cancel()
 
 	numDirs, numDGUTAs, err := d.infoDGUTACounts(ctx)
@@ -520,24 +520,24 @@ func (d *clickHouseDatabase) Info() (*db.Info, error) {
 }
 
 func makeDBInfo(numDirs, numDGUTAs, numParents, numChildren uint64) (*db.Info, error) {
-	dirs, err := safeUint64ToInt(numDirs)
+	dirs, err := infoCountToInt("num_dirs", numDirs)
 	if err != nil {
-		return nil, fmt.Errorf("clickhouse: invalid num_dirs: %w", err)
+		return nil, err
 	}
 
-	dgutas, err := safeUint64ToInt(numDGUTAs)
+	dgutas, err := infoCountToInt("num_dgutas", numDGUTAs)
 	if err != nil {
-		return nil, fmt.Errorf("clickhouse: invalid num_dgutas: %w", err)
+		return nil, err
 	}
 
-	parents, err := safeUint64ToInt(numParents)
+	parents, err := infoCountToInt("num_parents", numParents)
 	if err != nil {
-		return nil, fmt.Errorf("clickhouse: invalid num_parents: %w", err)
+		return nil, err
 	}
 
-	children, err := safeUint64ToInt(numChildren)
+	children, err := infoCountToInt("num_children", numChildren)
 	if err != nil {
-		return nil, fmt.Errorf("clickhouse: invalid num_children: %w", err)
+		return nil, err
 	}
 
 	return &db.Info{
@@ -546,6 +546,15 @@ func makeDBInfo(numDirs, numDGUTAs, numParents, numChildren uint64) (*db.Info, e
 		NumParents:  parents,
 		NumChildren: children,
 	}, nil
+}
+
+func infoCountToInt(name string, v uint64) (int, error) {
+	out, err := safeUint64ToInt(v)
+	if err != nil {
+		return 0, fmt.Errorf("clickhouse: invalid %s: %w", name, err)
+	}
+
+	return out, nil
 }
 
 func (d *clickHouseDatabase) infoDGUTACounts(ctx context.Context) (uint64, uint64, error) {
@@ -663,9 +672,7 @@ func (d *clickHouseDatabase) ensureOpen() error {
 func (d *clickHouseDatabase) gutasForDir(
 	mountPath, snapshotID, dir string,
 ) (db.GUTAs, error) {
-	ctx, cancel := context.WithTimeout(
-		context.Background(), queryTimeout(d.cfg),
-	)
+	ctx, cancel := configQueryContext(d.cfg)
 	defer cancel()
 
 	rows, err := d.conn.Query(
@@ -694,6 +701,10 @@ func scanDGUTARows(rows rowsScanner) (db.GUTAs, error) {
 		gutas = append(gutas, g)
 	}
 
+	if err := rowsErr(rows); err != nil {
+		return nil, fmt.Errorf("clickhouse: dguta iteration error: %w", err)
+	}
+
 	return gutas, nil
 }
 
@@ -704,9 +715,7 @@ func (d *clickHouseDatabase) gutasForAncestor(
 		return d.snapshotGUTAsForAncestor(dir)
 	}
 
-	ctx, cancel := context.WithTimeout(
-		context.Background(), queryTimeout(d.cfg),
-	)
+	ctx, cancel := configQueryContext(d.cfg)
 	defer cancel()
 
 	rows, err := d.conn.Query(
@@ -729,9 +738,7 @@ func (d *clickHouseDatabase) snapshotGUTAsForAncestor(dir string) (db.GUTAs, err
 		return nil, nil
 	}
 
-	ctx, cancel := context.WithTimeout(
-		context.Background(), queryTimeout(d.cfg),
-	)
+	ctx, cancel := configQueryContext(d.cfg)
 	defer cancel()
 
 	query, args := activeMountsQuery(
@@ -766,9 +773,7 @@ func (d *clickHouseDatabase) ancestorMaxUpdatedAt(
 		return updatedAt.UTC(), nil
 	}
 
-	ctx, cancel := context.WithTimeout(
-		context.Background(), queryTimeout(d.cfg),
-	)
+	ctx, cancel := configQueryContext(d.cfg)
 	defer cancel()
 
 	rows, err := d.conn.Query(
@@ -808,6 +813,19 @@ type rowsScanner interface {
 	Scan(dest ...any) error
 }
 
+type rowsErrer interface {
+	Err() error
+}
+
+func rowsErr(rows any) error {
+	errer, ok := rows.(rowsErrer)
+	if !ok {
+		return nil
+	}
+
+	return errer.Err()
+}
+
 func scanDGUTARow(rows rowsScanner) (*db.GUTA, error) {
 	var s dgutaScanned
 	if err := s.scanFrom(rows); err != nil {
@@ -834,7 +852,7 @@ func scanDGUTARow(rows rowsScanner) (*db.GUTA, error) {
 func sliceToAgeBuckets(in []uint64) summary.AgeBuckets {
 	var out summary.AgeBuckets
 
-	for i := 0; i < len(out) && i < len(in); i++ {
+	for i := range min(len(out), len(in)) {
 		out[i] = in[i]
 	}
 

@@ -37,13 +37,11 @@ import (
 	"time"
 
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
+	"github.com/wtsi-hgi/wrstat-ui/datasets"
+	"github.com/wtsi-hgi/wrstat-ui/internal/mountpath"
 )
 
-const (
-	numDatasetDirParts   = 2
-	fullwidthSolidus     = "／"
-	fullwidthReplacement = "/"
-)
+const rootMountPath = "/"
 
 // ErrDatasetDirMissingUnderscore is returned when a dataset directory name
 // does not contain the expected '<version>_<mountKey>' underscore separator.
@@ -195,18 +193,10 @@ func closePublishFunc(closer func(bool) error, publish bool) error {
 func DeriveMountPathFromOutputDir(outputPath string) string {
 	parentDir := filepath.Base(filepath.Dir(outputPath))
 
-	parts := strings.SplitN(parentDir, "_", numDatasetDirParts)
-	if len(parts) != numDatasetDirParts {
-		// Fallback to root mount path for backwards compatibility
-		return "/"
+	_, mountKey, ok := datasets.SplitDatasetDirName(parentDir)
+	if !ok {
+		return rootMountPath
 	}
 
-	mountKey := parts[1]
-	mountPath := strings.ReplaceAll(mountKey, fullwidthSolidus, fullwidthReplacement)
-
-	if !strings.HasSuffix(mountPath, "/") {
-		mountPath += "/"
-	}
-
-	return mountPath
+	return mountpath.DecodeKey(mountKey)
 }

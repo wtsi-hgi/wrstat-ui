@@ -60,7 +60,7 @@ func (m *historyMaintainer) CleanHistoryForMount(prefix string) error {
 		return err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), queryTimeout(m.cfg))
+	ctx, cancel := m.queryContext()
 	defer cancel()
 
 	conn, err := m.openConn()
@@ -95,7 +95,7 @@ func (m *historyMaintainer) refuseUnsafeCleanInTestEnv() error {
 }
 
 func (m *historyMaintainer) FindInvalidHistory(prefix string) ([]basedirs.HistoryIssue, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), queryTimeout(m.cfg))
+	ctx, cancel := m.queryContext()
 	defer cancel()
 
 	conn, err := m.openConn()
@@ -111,6 +111,10 @@ func (m *historyMaintainer) FindInvalidHistory(prefix string) ([]basedirs.Histor
 	}
 
 	return scanInvalidHistoryRows(rows)
+}
+
+func (m *historyMaintainer) queryContext() (context.Context, context.CancelFunc) {
+	return configQueryContext(m.cfg)
 }
 
 type invalidHistoryRows interface {

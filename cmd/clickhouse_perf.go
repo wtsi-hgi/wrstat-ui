@@ -115,15 +115,10 @@ func addCHPerfFlags() {
 func addCHPerfPersistentFlags() {
 	pf := chPerfCmd.PersistentFlags()
 
-	pf.StringVarP(&chPerf.dsn, "clickhouse-dsn", "C", "",
-		"ClickHouse DSN (default $WRSTAT_CLICKHOUSE_DSN)")
-	pf.StringVarP(&chPerf.database, "clickhouse-database", "D", "",
-		"ClickHouse database name (default $WRSTAT_CLICKHOUSE_DATABASE)")
-	pf.StringVar(&chPerf.queryTO, "query-timeout", "",
-		"per-query timeout (default $WRSTAT_QUERY_TIMEOUT or 30s)")
+	addClickhouseConnectionFlags(pf, &chPerf.dsn, &chPerf.database)
+	addClickhouseQueryTimeoutFlag(pf, &chPerf.queryTO)
 	pf.StringVar(&chPerf.owners, "owners", "", "gid,owner csv file")
-	pf.StringVarP(&chPerf.mountpoints, "mounts", "m", "",
-		"path to a file containing a list of quoted mountpoints")
+	addMountpointsFlag(pf, &chPerf.mountpoints)
 	pf.StringVar(&chPerf.jsonOut, "json", "", "write JSON report to this file")
 }
 
@@ -197,7 +192,7 @@ func runCHPerfQuery() error {
 func chPerfConfig() (clickhouse.Config, error) {
 	loadClickhouseDotEnv()
 
-	mountpoints, err := chPerfMountpoints()
+	mountpoints, err := parseOptionalMountpoints(chPerf.mountpoints)
 	if err != nil {
 		return clickhouse.Config{}, err
 	}
@@ -213,13 +208,8 @@ func chPerfConfig() (clickhouse.Config, error) {
 	)
 }
 
-func chPerfMountpoints() ([]string, error) {
-	return parseOptionalMountpoints(chPerf.mountpoints)
-}
-
 func parseGIDs(raw string) []uint32 {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
+	if strings.TrimSpace(raw) == "" {
 		return nil
 	}
 
@@ -227,15 +217,21 @@ func parseGIDs(raw string) []uint32 {
 	gids := make([]uint32, 0, len(parts))
 
 	for _, p := range parts {
-		v, err := strconv.ParseUint(strings.TrimSpace(p), 10, 32)
-		if err != nil {
-			continue
+		if gid, ok := parseGID(p); ok {
+			gids = append(gids, gid)
 		}
-
-		gids = append(gids, uint32(v))
 	}
 
 	return gids
+}
+
+func parseGID(raw string) (uint32, bool) {
+	v, err := strconv.ParseUint(strings.TrimSpace(raw), 10, 32)
+	if err != nil {
+		return 0, false
+	}
+
+	return uint32(v), true
 }
 
 func chPerfWriteReport(report boltperf.Report) error {

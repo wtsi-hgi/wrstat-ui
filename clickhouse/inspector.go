@@ -150,9 +150,9 @@ func (i *Inspector) Measure(
 
 	runDuration := time.Since(start)
 
-	m, err := i.queryMetricsSince(ctx, t0)
+	metrics, err := i.queryMetricsSince(ctx, t0)
 	if err == nil {
-		return m, nil
+		return metrics, nil
 	}
 
 	if shouldFallbackQueryMetrics(err) {
@@ -172,11 +172,14 @@ func (i *Inspector) Close() error {
 		return nil
 	}
 
-	return i.conn.Close()
+	conn := i.conn
+	i.conn = nil
+
+	return conn.Close()
 }
 
 func (i *Inspector) runExplain(ctx context.Context, query string, args ...any) (string, error) {
-	qctx, cancel := context.WithTimeout(ctx, queryTimeout(i.cfg))
+	qctx, cancel := i.queryContext(ctx)
 	defer cancel()
 
 	rows, err := i.conn.Query(qctx, query, args...)
@@ -209,7 +212,7 @@ func collectExplainOutput(rows explainRows) (string, error) {
 }
 
 func (i *Inspector) serverTime(ctx context.Context) (time.Time, error) {
-	qctx, cancel := context.WithTimeout(ctx, queryTimeout(i.cfg))
+	qctx, cancel := i.queryContext(ctx)
 	defer cancel()
 
 	row := i.conn.QueryRow(qctx, serverTimeQuery)
@@ -231,7 +234,7 @@ func (i *Inspector) queryMetricsSince(ctx context.Context, t0 time.Time) (*Query
 }
 
 func (i *Inspector) flushLogs(ctx context.Context) error {
-	qctx, cancel := context.WithTimeout(ctx, queryTimeout(i.cfg))
+	qctx, cancel := i.queryContext(ctx)
 	defer cancel()
 
 	if err := i.conn.Exec(qctx, flushLogsStmt); err != nil {
@@ -242,7 +245,7 @@ func (i *Inspector) flushLogs(ctx context.Context) error {
 }
 
 func (i *Inspector) scanQueryMetrics(ctx context.Context, t0 time.Time) (*QueryMetrics, error) {
-	qctx, cancel := context.WithTimeout(ctx, queryTimeout(i.cfg))
+	qctx, cancel := i.queryContext(ctx)
 	defer cancel()
 
 	row := i.conn.QueryRow(qctx, queryLogQuery, t0)
@@ -253,6 +256,10 @@ func (i *Inspector) scanQueryMetrics(ctx context.Context, t0 time.Time) (*QueryM
 	}
 
 	return &m, nil
+}
+
+func (i *Inspector) queryContext(parent context.Context) (context.Context, context.CancelFunc) {
+	return queryContext(parent, queryTimeout(i.cfg))
 }
 
 type explainRows interface {

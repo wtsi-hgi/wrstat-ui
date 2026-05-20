@@ -37,16 +37,15 @@ import (
 
 	"github.com/inconshreveable/log15"
 	"github.com/spf13/cobra"
-	"github.com/wtsi-hgi/wrstat-ui/clickhouse"
 	"github.com/wtsi-hgi/wrstat-ui/server"
 )
 
 const (
-	sentinelPollFrequencty = 1 * time.Minute
-	defaultQueryTimeout    = 30 * time.Second
-	serverTokenBasename    = ".wrstat.servertoken"
-	dgutaDBsSuffix         = "dguta.dbs"
-	basedirBasename        = "basedirs.db"
+	sentinelPollFrequency = 1 * time.Minute
+	defaultQueryTimeout   = 30 * time.Second
+	serverTokenBasename   = ".wrstat.servertoken"
+	dgutaDBsSuffix        = "dguta.dbs"
+	basedirBasename       = "basedirs.db"
 )
 
 // options for this cmd.
@@ -122,21 +121,7 @@ snapshot updated_at timestamp stored in ClickHouse.
 			warn("server: ignoring legacy output directory argument")
 		}
 
-		if serverBind == "" {
-			die("you must supply --bind")
-		}
-
-		if serverCert == "" {
-			die("you must supply --cert")
-		}
-
-		if serverKey == "" {
-			die("you must supply --key")
-		}
-
-		if ownersPath == "" {
-			die("you must supply --owners")
-		}
+		checkServerArgs()
 
 		mountpoints, err := parseOptionalMountpoints(mounts)
 		if err != nil {
@@ -174,16 +159,16 @@ snapshot updated_at timestamp stored in ClickHouse.
 			ownersPath,
 			mountpoints,
 			clickhousePoll,
-			sentinelPollFrequencty,
+			sentinelPollFrequency,
 			clickhouseQueryTO,
 		)
 		if err != nil {
 			die("failed to build ClickHouse config: %s", err)
 		}
 
-		p, err := clickhouse.OpenProvider(cfg)
+		p, err := openClickhouseProvider(cfg)
 		if err != nil {
-			die("failed to open clickhouse provider: %s", err)
+			die("%s", err)
 		}
 		if setErr := s.SetProvider(p); setErr != nil {
 			_ = p.Close()
@@ -212,6 +197,24 @@ snapshot updated_at timestamp stored in ClickHouse.
 	},
 }
 
+func checkServerArgs() {
+	if serverBind == "" {
+		die("you must supply --bind")
+	}
+
+	if serverCert == "" {
+		die("you must supply --cert")
+	}
+
+	if serverKey == "" {
+		die("you must supply --key")
+	}
+
+	if ownersPath == "" {
+		die("you must supply --owners")
+	}
+}
+
 var whiteListGIDs = map[string]struct{}{
 	"0":     {},
 	"1105":  {},
@@ -235,14 +238,10 @@ func init() {
 		"path to certificate file")
 	serverCmd.Flags().StringVarP(&serverKey, "key", "k", "",
 		"path to key file")
-	serverCmd.Flags().StringVarP(&clickhouseDSN, "clickhouse-dsn", "C", "",
-		"ClickHouse DSN (default $WRSTAT_CLICKHOUSE_DSN)")
-	serverCmd.Flags().StringVarP(&clickhouseDatabase, "clickhouse-database", "D", "",
-		"ClickHouse database name (default $WRSTAT_CLICKHOUSE_DATABASE)")
+	addClickhouseConnectionFlags(serverCmd.Flags(), &clickhouseDSN, &clickhouseDatabase)
 	serverCmd.Flags().StringVar(&clickhousePoll, "poll-interval", "",
 		"how often to poll ClickHouse for mount updates (default $WRSTAT_POLL_INTERVAL or 1m)")
-	serverCmd.Flags().StringVar(&clickhouseQueryTO, "query-timeout", "",
-		"per-query timeout (default $WRSTAT_QUERY_TIMEOUT or 30s)")
+	addClickhouseQueryTimeoutFlag(serverCmd.Flags(), &clickhouseQueryTO)
 	serverCmd.Flags().StringVar(&oktaURL, "okta_url", "",
 		"Okta application URL, eg host:port (defaults to --bind)")
 	serverCmd.Flags().StringVar(&oktaOAuthIssuer, "okta_issuer", os.Getenv("OKTA_OAUTH2_ISSUER"),
@@ -256,7 +255,7 @@ func init() {
 	serverCmd.Flags().StringVar(&serverLogPath, "logfile", "",
 		"log to this file instead of syslog")
 	serverCmd.Flags().StringVar(&spywareDB, "spyware", "s", "path to sqlite database to record analytics")
-	serverCmd.Flags().StringVarP(&mounts, "mounts", "m", "", "path to a file containing a list of quoted mountpoints")
+	addMountpointsFlag(serverCmd.Flags(), &mounts)
 }
 
 // checkOAuthArgs ensures we have the necessary args/ env vars for Okta auth.
@@ -284,12 +283,12 @@ func whiteLister(gid string) bool {
 	return ok
 }
 
-// sayStarted logs to console that the server stated. It does this a second
-// after being calling in a goroutine, when we can assume the server has
+// sayStarted logs to console that the server started. It does this a second
+// after being called in a goroutine, when we can assume the server has
 // actually started; if it failed, we expect it to do so in less than a second
 // and exit.
 func sayStarted() {
-	<-time.After(1 * time.Second)
+	time.Sleep(1 * time.Second)
 
 	info("server started")
 }
