@@ -103,6 +103,24 @@ const (
 	fileFieldNLink        = "nlink"
 )
 
+//nolint:gochecknoglobals // Immutable lookup table used on hot file-row scan paths.
+var fileRowSpecs = []fileRowFieldSpec{
+	{fileFieldPath, "f.path", func(s *fileRowScanState) any { return &s.path }},
+	{fileFieldParentDir, "f.parent_dir", func(s *fileRowScanState) any { return &s.parentDir }},
+	{fileFieldName, "f.name", func(s *fileRowScanState) any { return &s.name }},
+	{fileFieldExt, "f.ext", func(s *fileRowScanState) any { return &s.ext }},
+	{fileFieldEntryType, "f.entry_type", func(s *fileRowScanState) any { return &s.entryType }},
+	{fileFieldSize, "f.size", func(s *fileRowScanState) any { return &s.size }},
+	{fileFieldApparentSize, "f.apparent_size", func(s *fileRowScanState) any { return &s.apparentSize }},
+	{fileFieldUID, "f.uid", func(s *fileRowScanState) any { return &s.uid }},
+	{fileFieldGID, "f.gid", func(s *fileRowScanState) any { return &s.gid }},
+	{fileFieldATime, "f.atime", func(s *fileRowScanState) any { return &s.atime }},
+	{fileFieldMTime, "f.mtime", func(s *fileRowScanState) any { return &s.mtime }},
+	{fileFieldCTime, "f.ctime", func(s *fileRowScanState) any { return &s.ctime }},
+	{fileFieldInode, "f.inode", func(s *fileRowScanState) any { return &s.inode }},
+	{fileFieldNLink, "f.nlink", func(s *fileRowScanState) any { return &s.nlink }},
+}
+
 // FileRow represents a file or directory from wrstat_files.
 type FileRow struct {
 	Path         string
@@ -200,7 +218,7 @@ func fileRowSelectList(fields []string) (string, []string, error) {
 }
 
 func defaultFileRowFields() []string {
-	specs := fileRowFieldSpecs()
+	specs := fileRowSpecs
 	out := make([]string, 0, len(specs))
 
 	for _, spec := range specs {
@@ -210,27 +228,8 @@ func defaultFileRowFields() []string {
 	return out
 }
 
-func fileRowFieldSpecs() []fileRowFieldSpec {
-	return []fileRowFieldSpec{
-		{fileFieldPath, "f.path", func(s *fileRowScanState) any { return &s.path }},
-		{fileFieldParentDir, "f.parent_dir", func(s *fileRowScanState) any { return &s.parentDir }},
-		{fileFieldName, "f.name", func(s *fileRowScanState) any { return &s.name }},
-		{fileFieldExt, "f.ext", func(s *fileRowScanState) any { return &s.ext }},
-		{fileFieldEntryType, "f.entry_type", func(s *fileRowScanState) any { return &s.entryType }},
-		{fileFieldSize, "f.size", func(s *fileRowScanState) any { return &s.size }},
-		{fileFieldApparentSize, "f.apparent_size", func(s *fileRowScanState) any { return &s.apparentSize }},
-		{fileFieldUID, "f.uid", func(s *fileRowScanState) any { return &s.uid }},
-		{fileFieldGID, "f.gid", func(s *fileRowScanState) any { return &s.gid }},
-		{fileFieldATime, "f.atime", func(s *fileRowScanState) any { return &s.atime }},
-		{fileFieldMTime, "f.mtime", func(s *fileRowScanState) any { return &s.mtime }},
-		{fileFieldCTime, "f.ctime", func(s *fileRowScanState) any { return &s.ctime }},
-		{fileFieldInode, "f.inode", func(s *fileRowScanState) any { return &s.inode }},
-		{fileFieldNLink, "f.nlink", func(s *fileRowScanState) any { return &s.nlink }},
-	}
-}
-
 func fileRowFieldSpecFor(field string) (fileRowFieldSpec, bool) {
-	for _, spec := range fileRowFieldSpecs() {
+	for _, spec := range fileRowSpecs {
 		if spec.field == field {
 			return spec, true
 		}

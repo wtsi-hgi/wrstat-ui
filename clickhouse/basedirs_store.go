@@ -862,8 +862,8 @@ func sendAndReprepareIfFull(
 	return b, nil
 }
 
-func (s *chBaseDirsStore) batchSlots() []batchSlot {
-	return []batchSlot{
+func (s *chBaseDirsStore) batchSlots() [4]batchSlot {
+	return [...]batchSlot{
 		{&s.groupUsageBatch, insertBasedirsGroupUsageQuery, "group usage"},
 		{&s.userUsageBatch, insertBasedirsUserUsageQuery, "user usage"},
 		{&s.groupSubBatch, insertBasedirsGroupSubdirsQuery, "group subdirs"},

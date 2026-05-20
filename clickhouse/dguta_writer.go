@@ -707,8 +707,8 @@ func (w *dgutaWriter) flushAllBatches() error {
 	return nil
 }
 
-func (w *dgutaWriter) batchSlots() []dgutaBatchSlot {
-	return []dgutaBatchSlot{
+func (w *dgutaWriter) batchSlots() [2]dgutaBatchSlot {
+	return [...]dgutaBatchSlot{
 		{
 			batch: &w.dgutaBatch,
 			query: insertDGUTAQuery,
