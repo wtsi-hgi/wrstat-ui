@@ -331,7 +331,7 @@ func TestEnsureSchemaVersion(t *testing.T) {
 		So(*maxVersion, ShouldEqual, 1)
 	})
 
-	Convey("ensureSchemaVersion accepts duplicate existing version one rows", t, func() {
+	Convey("ensureSchemaVersion rejects duplicate existing version one rows", t, func() {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
 
@@ -339,7 +339,7 @@ func TestEnsureSchemaVersion(t *testing.T) {
 		store.versionRows = 2
 
 		err := ensureSchemaVersion(ctx, &schemaVersionTestConn{store: store})
-		So(err, ShouldBeNil)
+		So(errors.Is(err, errUnexpectedSchemaVersion), ShouldBeTrue)
 	})
 
 	Convey("validateSchemaVersionStats rejects mixed and unsupported versions", t, func() {
