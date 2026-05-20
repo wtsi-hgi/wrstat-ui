@@ -27,7 +27,6 @@
 package clickhouse
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -60,7 +59,7 @@ func (m *historyMaintainer) CleanHistoryForMount(prefix string) error {
 		return err
 	}
 
-	ctx, cancel := m.queryContext()
+	ctx, cancel := configQueryContext(m.cfg)
 	defer cancel()
 
 	conn, err := m.openConn()
@@ -95,7 +94,7 @@ func (m *historyMaintainer) refuseUnsafeCleanInTestEnv() error {
 }
 
 func (m *historyMaintainer) FindInvalidHistory(prefix string) ([]basedirs.HistoryIssue, error) {
-	ctx, cancel := m.queryContext()
+	ctx, cancel := configQueryContext(m.cfg)
 	defer cancel()
 
 	conn, err := m.openConn()
@@ -111,10 +110,6 @@ func (m *historyMaintainer) FindInvalidHistory(prefix string) ([]basedirs.Histor
 	}
 
 	return scanInvalidHistoryRows(rows)
-}
-
-func (m *historyMaintainer) queryContext() (context.Context, context.CancelFunc) {
-	return configQueryContext(m.cfg)
 }
 
 type invalidHistoryRows interface {

@@ -115,8 +115,6 @@ control how often refresh checks run. Data freshness in reports comes from the
 snapshot updated_at timestamp stored in ClickHouse.
 `,
 	Run: func(_ *cobra.Command, args []string) {
-		loadClickhouseDotEnv()
-
 		if len(args) > 0 {
 			warn("server: ignoring legacy output directory argument")
 		}
@@ -154,7 +152,7 @@ var whiteListGIDs = map[string]struct{}{
 func setServerClickHouseProvider(s *server.Server, mountpoints []string) {
 	info("opening databases, please wait...")
 
-	cfg, err := clickhouseConfigFromEnvAndFlags(clickhouseConfigInput{
+	cfg, err := loadClickhouseConfig(clickhouseConfigInput{
 		dsnFlag:             clickhouseDSN,
 		databaseFlag:        clickhouseDatabase,
 		ownersPath:          ownersPath,
@@ -194,20 +192,20 @@ func addServerPages(s *server.Server) {
 }
 
 func checkServerArgs() {
-	if serverBind == "" {
-		die("you must supply --bind")
+	required := [...]struct {
+		name  string
+		value string
+	}{
+		{name: "--bind", value: serverBind},
+		{name: "--cert", value: serverCert},
+		{name: "--key", value: serverKey},
+		{name: "--owners", value: ownersPath},
 	}
 
-	if serverCert == "" {
-		die("you must supply --cert")
-	}
-
-	if serverKey == "" {
-		die("you must supply --key")
-	}
-
-	if ownersPath == "" {
-		die("you must supply --owners")
+	for _, flag := range required {
+		if flag.value == "" {
+			die("you must supply %s", flag.name)
+		}
 	}
 }
 
@@ -295,7 +293,7 @@ func newConfiguredServer(logPath string) *server.Server {
 func startServer(s *server.Server) {
 	defer s.Stop()
 
-	sayStarted()
+	go sayStarted()
 
 	if err := s.Start(serverBind, serverCert, serverKey); err != nil {
 		die("non-graceful stop: %s", err)

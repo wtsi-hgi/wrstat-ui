@@ -107,45 +107,48 @@ func buildQueryContext(
 	opts QueryOptions,
 	printf PrintfFunc,
 ) (queryContext, error) {
-	p, client, inspector, err := openAll(api)
+	qctx, err := openQueryContext(api)
 	if err != nil {
 		return queryContext{}, err
 	}
 
-	dir, err := selectDir(p, opts.Dir, printf)
+	dir, err := selectDir(qctx.provider, opts.Dir, printf)
 	if err != nil {
-		return queryContext{}, errors.Join(err, closeQueryResources(inspector, client, p))
+		return queryContext{}, errors.Join(err, qctx.close())
 	}
 
-	return queryContext{
-		provider:  p,
-		client:    client,
-		inspector: inspector,
-		dir:       dir,
-		uid:       opts.UID,
-		gids:      opts.GIDs,
-	}, nil
+	qctx.dir = dir
+	qctx.uid = opts.UID
+	qctx.gids = opts.GIDs
+
+	return qctx, nil
 }
 
-func openAll(
-	api QueryAPI,
-) (provider.Provider, QueryClient, QueryInspector, error) {
+func openQueryContext(api QueryAPI) (queryContext, error) {
+	var qctx queryContext
+
 	p, err := api.OpenProvider()
 	if err != nil {
-		return nil, nil, nil, err
+		return queryContext{}, err
 	}
+
+	qctx.provider = p
 
 	client, err := api.NewQueryClient()
 	if err != nil {
-		return nil, nil, nil, errors.Join(err, closeQueryResources(p))
+		return queryContext{}, errors.Join(err, qctx.close())
 	}
+
+	qctx.client = client
 
 	inspector, err := api.NewQueryInspector()
 	if err != nil {
-		return nil, nil, nil, errors.Join(err, closeQueryResources(client, p))
+		return queryContext{}, errors.Join(err, qctx.close())
 	}
 
-	return p, client, inspector, nil
+	qctx.inspector = inspector
+
+	return qctx, nil
 }
 
 func closeQueryResources(closers ...io.Closer) error {
@@ -369,19 +372,17 @@ func runSuite(
 }
 
 func buildOps(qctx queryContext, printf PrintfFunc) []op {
-	ops := make([]op, 0, 8)
-	ops = append(ops,
+	ops := []op{
 		opMountTimestamps(qctx),
 		opTreeDirInfo(qctx),
 		opGroupUsage(qctx),
 		opListDir(qctx),
-	)
+	}
 
 	ops = append(ops, opStatPath(qctx, printf)...)
 	ops = append(ops, opPermission(qctx))
-	ops = append(ops, globOps(qctx)...)
 
-	return ops
+	return append(ops, globOps(qctx)...)
 }
 
 func opMountTimestamps(qctx queryContext) op {
@@ -490,22 +491,35 @@ func opPermission(qctx queryContext) op {
 }
 
 func globOps(qctx queryContext) []op {
+	type globCase struct {
+		name         string
+		pattern      string
+		requireOwner bool
+	}
+
 	ext := pickExt(qctx.client, qctx.dir)
 	baseDirs := []string{qctx.dir}
-
-	ops := []op{
-		globOp(qctx, baseDirs, "A", []string{"*"}, false),
-		globOp(qctx, baseDirs, "B", []string{"*"}, true),
-		globOp(qctx, baseDirs, "C", []string{"**"}, false),
-		globOp(qctx, baseDirs, "D", []string{"**"}, true),
+	cases := []globCase{
+		{name: "A", pattern: "*"},
+		{name: "B", pattern: "*", requireOwner: true},
+		{name: "C", pattern: "**"},
+		{name: "D", pattern: "**", requireOwner: true},
 	}
 
 	if ext != "" {
-		ops = append(ops,
-			globOp(qctx, baseDirs, "E", []string{"*." + ext}, false),
-			globOp(qctx, baseDirs, "F", []string{"*." + ext}, true),
-			globOp(qctx, baseDirs, "G", []string{"**/*." + ext}, false),
-			globOp(qctx, baseDirs, "H", []string{"**/*." + ext}, true),
+		cases = append(cases,
+			globCase{name: "E", pattern: "*." + ext},
+			globCase{name: "F", pattern: "*." + ext, requireOwner: true},
+			globCase{name: "G", pattern: "**/*." + ext},
+			globCase{name: "H", pattern: "**/*." + ext, requireOwner: true},
+		)
+	}
+
+	ops := make([]op, 0, len(cases))
+	for _, c := range cases {
+		ops = append(
+			ops,
+			globOp(qctx, baseDirs, c.name, []string{c.pattern}, c.requireOwner),
 		)
 	}
 

@@ -67,10 +67,6 @@ type QueryMetrics struct {
 	ResultBytes uint64
 }
 
-func fallbackQueryMetrics(runDuration time.Duration) *QueryMetrics {
-	return &QueryMetrics{DurationMs: durationMillis(runDuration)}
-}
-
 // Inspector can run EXPLAIN and query system.query_log without exposing
 // clickhouse-go types.
 type Inspector struct {
@@ -156,7 +152,7 @@ func (i *Inspector) Measure(
 	}
 
 	if shouldFallbackQueryMetrics(err) {
-		return fallbackQueryMetrics(runDuration), nil
+		return &QueryMetrics{DurationMs: durationMillis(runDuration)}, nil
 	}
 
 	return nil, err
@@ -193,7 +189,7 @@ func (i *Inspector) runExplain(ctx context.Context, query string, args ...any) (
 }
 
 func collectExplainOutput(rows explainRows) (string, error) {
-	lines := make([]string, 0)
+	var lines []string
 
 	for rows.Next() {
 		var line string
@@ -281,10 +277,6 @@ func isMissingQueryLogError(err error) bool {
 }
 
 func durationMillis(runDuration time.Duration) uint64 {
-	if runDuration <= 0 {
-		return 0
-	}
-
 	ms := runDuration.Milliseconds()
 	if ms <= 0 {
 		return 0

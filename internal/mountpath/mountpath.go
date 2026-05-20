@@ -89,7 +89,7 @@ func FromOutputDir(outputDir string) (string, error) {
 	return "", ErrDatasetDirBadFormat
 }
 
-func mountPathFromDatasetDirBase(dirBase string) (mountPath string, ok bool, err error) {
+func mountPathFromDatasetDirBase(dirBase string) (string, bool, error) {
 	dirBase = strings.TrimPrefix(dirBase, ".")
 	if strings.HasSuffix(dirBase, "_") {
 		return "", false, ErrDatasetDirEmptyMountKey
@@ -104,7 +104,7 @@ func mountPathFromDatasetDirBase(dirBase string) (mountPath string, ok bool, err
 		return "", false, nil
 	}
 
-	mountPath = DecodeKey(mountKey)
+	mountPath := DecodeKey(mountKey)
 	if mountPath == "" {
 		return "", false, ErrDatasetDirEmptyMountKey
 	}

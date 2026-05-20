@@ -29,6 +29,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/VertebrateResequencing/wr/client"
@@ -42,9 +43,10 @@ const (
 	dirPerms              = 0750
 	basedirBasename       = "basedirs.db"
 	hiddenOutputPrefix    = "."
-	summariseCPU          = 2
-	summariseMem          = 8192
+	summariseCores        = 2
+	defaultSummariseRAMMB = 8192
 	mbPerGB               = 1024
+	jobTimestampLayout    = "20060102150405"
 	clickhouseRecoverFlag = "--clickhouse-recover"
 )
 
@@ -191,15 +193,15 @@ func createSummariseJob(group, inputDir, outputDir, base, quotaPath, basedirsCon
 	job := s.NewJob(
 		getJobCommand(dotOutputBase, previousBasedirsDB, quotaPath, basedirsConfig, mounts,
 			inputDir, base, outputDir),
-		"wrstat-ui-summarise-"+time.Now().Format("20060102150405"),
+		summariseJobName(),
 		"wrstat-ui-summarise",
 		"",
 		"",
 		nil,
 	)
 
-	job.Requirements.Cores = summariseCPU
-	job.Requirements.RAM = summariseMem
+	job.Requirements.Cores = summariseCores
+	job.Requirements.RAM = defaultSummariseRAMMB
 
 	if minMemGB > 0 {
 		job.Requirements.RAM = minMemGB * mbPerGB
@@ -209,6 +211,10 @@ func createSummariseJob(group, inputDir, outputDir, base, quotaPath, basedirsCon
 	job.Group = group
 
 	return job, nil
+}
+
+func summariseJobName() string {
+	return "wrstat-ui-summarise-" + time.Now().Format(jobTimestampLayout)
 }
 
 func getPreviousBasedirsDB(outputDir, base string) (string, error) {
@@ -244,23 +250,35 @@ func hiddenOutputDir(outputDir, base string) string {
 
 func getJobCommand(dotOutputBase, previousBasedirsDB, quotaPath, basedirsConfig, mounts,
 	inputDir, base, outputDir string) string {
-	cmdFormat := "%[1]q summarise " + clickhouseRecoverFlag + " -d %[2]q"
+	inputBase := filepath.Join(inputDir, base)
+	finalOutputBase := filepath.Join(outputDir, base)
+	parts := []string{
+		shellQuote(os.Args[0]),
+		"summarise",
+		clickhouseRecoverFlag,
+		"-d",
+		shellQuote(dotOutputBase),
+	}
 
 	if previousBasedirsDB != "" {
-		cmdFormat += " -s %[3]q"
+		parts = append(parts, "-s", shellQuote(previousBasedirsDB))
 	}
 
 	if mounts != "" {
-		cmdFormat += " -m %[9]q"
+		parts = append(parts, "-m", shellQuote(mounts))
 	}
 
-	cmdFormat += " -q %[4]q -c %[5]q %[6]q && touch -r %[7]q %[2]q && mv %[2]q %[8]q"
-
-	return fmt.Sprintf(cmdFormat,
-		os.Args[0], dotOutputBase, previousBasedirsDB, quotaPath, basedirsConfig,
-		filepath.Join(inputDir, base, inputStatsFile),
-		filepath.Join(inputDir, base),
-		filepath.Join(outputDir, base),
-		mounts,
+	parts = append(parts,
+		"-q", shellQuote(quotaPath),
+		"-c", shellQuote(basedirsConfig),
+		shellQuote(filepath.Join(inputBase, inputStatsFile)),
+		"&&", "touch", "-r", shellQuote(inputBase), shellQuote(dotOutputBase),
+		"&&", "mv", shellQuote(dotOutputBase), shellQuote(finalOutputBase),
 	)
+
+	return strings.Join(parts, " ")
+}
+
+func shellQuote(value string) string {
+	return fmt.Sprintf("%q", value)
 }

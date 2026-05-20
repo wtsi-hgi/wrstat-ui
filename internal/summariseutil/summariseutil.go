@@ -120,6 +120,26 @@ func NewBaseDirsCreator(
 	return bd, nil
 }
 
+// SetBatchSize applies batchSize to targets that support SetBatchSize.
+func SetBatchSize(batchSize int, targets ...any) {
+	if batchSize <= 0 {
+		return
+	}
+
+	for _, target := range targets {
+		setter, ok := target.(batchSizeSetter)
+		if !ok {
+			continue
+		}
+
+		setter.SetBatchSize(batchSize)
+	}
+}
+
+type batchSizeSetter interface {
+	SetBatchSize(batchSize int)
+}
+
 // ComposePublishCloser closes file, basedirs and DGUTA resources in the
 // publish/abort order shared by summarise and ClickHouse perf imports.
 func ComposePublishCloser(

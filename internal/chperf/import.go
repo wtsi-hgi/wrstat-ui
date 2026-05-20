@@ -207,15 +207,15 @@ func addImportPhaseInputs(inputs map[string]any, result datasetImportResult, pha
 }
 
 func importSingleTablePhase(result datasetImportResult, phase string) (string, uint64, bool) {
-	table, ok := importMainTablePhase(phase)
-	if !ok {
-		table, ok = importBasedirsTablePhase(phase)
-		if !ok {
-			return "", 0, false
-		}
+	if table, ok := importMainTablePhase(phase); ok {
+		return table, result.rows[table], true
 	}
 
-	return table, result.rows[table], true
+	if table, ok := importBasedirsTablePhase(phase); ok {
+		return table, result.rows[table], true
+	}
+
+	return "", 0, false
 }
 
 func importMainTablePhase(phase string) (string, bool) {
@@ -293,15 +293,7 @@ func importMode(parallelism int) string {
 }
 
 func effectiveParallelism(parallelism int) int {
-	if parallelism < 1 {
-		return 1
-	}
-
-	if parallelism > maxImportParallel {
-		return maxImportParallel
-	}
-
-	return parallelism
+	return min(max(parallelism, 1), maxImportParallel)
 }
 
 func importDatasets(
@@ -357,7 +349,8 @@ func importOneDataset(
 
 	updatedAt := st.ModTime()
 	start := time.Now()
-	metrics := newDatasetImportMetrics(filepath.Base(datasetDir), statsPath, mountPath)
+	dataset := filepath.Base(datasetDir)
+	metrics := newDatasetImportMetrics(dataset, statsPath, mountPath)
 
 	records, err := ingestStatsGZ(api, statsPath, mountPath, updatedAt, opts, metrics)
 	if err != nil {
@@ -365,7 +358,7 @@ func importOneDataset(
 	}
 
 	printf("import dataset=%s mount=%s records=%d seconds=%.3f\n",
-		filepath.Base(datasetDir), mountPath, records, time.Since(start).Seconds())
+		dataset, mountPath, records, time.Since(start).Seconds())
 
 	return metrics.result(records, time.Since(start)), nil
 }
@@ -470,32 +463,32 @@ func addAllSummarisers(
 		return nil, err
 	}
 
-	timedDW := newTrackedDGUTAWriter(dw, metrics)
+	trackedDW := newTrackedDGUTAWriter(dw, metrics)
 
-	timedDW.SetMountPath(mountPath)
-	timedDW.SetUpdatedAt(updatedAt)
+	trackedDW.SetMountPath(mountPath)
+	trackedDW.SetUpdatedAt(updatedAt)
 
 	fi, fiCloser, err := api.NewFileIngestOperation(mountPath, updatedAt)
 	if err != nil {
-		return nil, errors.Join(err, timedDW.Abort())
+		return nil, errors.Join(err, trackedDW.Abort())
 	}
 
-	setImportBatchSize(opts.BatchSize, timedDW, fiCloser)
+	summariseutil.SetBatchSize(opts.BatchSize, trackedDW, fiCloser)
 
 	setImportPhaseRecorder(fiCloser, metrics)
 
-	timedFI := trackFileIngestOperation(fi, metrics)
+	trackedFI := trackFileIngestOperation(fi, metrics)
 	timedFICloser := timedImportCloser{Closer: fiCloser, metrics: metrics, phase: phaseFilesFlush}
 
-	ss.AddDirectoryOperation(dirguta.NewDirGroupUserTypeAge(timedDW))
-	ss.AddGlobalOperation(timedFI)
+	ss.AddDirectoryOperation(dirguta.NewDirGroupUserTypeAge(trackedDW))
+	ss.AddGlobalOperation(trackedFI)
 
 	bsCloser, err := addBasedirsSummariser(ss, api, mountPath, updatedAt, opts, metrics)
 	if err != nil {
-		return nil, errors.Join(err, composeImportCloser(timedFICloser, nil, timedDW)(false))
+		return nil, errors.Join(err, composeImportCloser(timedFICloser, nil, trackedDW)(false))
 	}
 
-	return composeImportCloser(timedFICloser, bsCloser, timedDW), nil
+	return composeImportCloser(timedFICloser, bsCloser, trackedDW), nil
 }
 
 func newTrackedDGUTAWriter(
@@ -520,21 +513,6 @@ func setImportPhaseRecorder(target any, metrics *datasetImportMetrics) {
 	}
 
 	recorder.SetImportPhaseRecorder(metrics.addPhase)
-}
-
-func setImportBatchSize(batchSize int, targets ...any) {
-	if batchSize <= 0 {
-		return
-	}
-
-	for _, target := range targets {
-		setter, ok := target.(batchSizeSetter)
-		if !ok {
-			continue
-		}
-
-		setter.SetBatchSize(batchSize)
-	}
 }
 
 func trackFileIngestOperation(
@@ -563,19 +541,19 @@ func addBasedirsSummariser(
 		return nil, err
 	}
 
-	setImportBatchSize(opts.BatchSize, bs)
+	summariseutil.SetBatchSize(opts.BatchSize, bs)
 
-	timedBS := &trackedBasedirsStore{Store: bs, metrics: metrics}
+	trackedBS := &trackedBasedirsStore{Store: bs, metrics: metrics}
 
-	timedBS.SetMountPath(mountPath)
-	timedBS.SetUpdatedAt(updatedAt)
+	trackedBS.SetMountPath(mountPath)
+	trackedBS.SetUpdatedAt(updatedAt)
 
 	closer := func(publish bool) error {
-		return summariseutil.CloseOrAbort(timedBS, publish)
+		return summariseutil.CloseOrAbort(trackedBS, publish)
 	}
 
-	if err := addBasedirsOp(ss, timedBS, updatedAt, opts); err != nil {
-		return nil, errors.Join(err, timedBS.Abort())
+	if err := addBasedirsOp(ss, trackedBS, updatedAt, opts); err != nil {
+		return nil, errors.Join(err, trackedBS.Abort())
 	}
 
 	return closer, nil
@@ -713,10 +691,6 @@ func runParallel(
 	wg.Wait()
 
 	return results
-}
-
-type batchSizeSetter interface {
-	SetBatchSize(batchSize int)
 }
 
 type abortableCloser interface {

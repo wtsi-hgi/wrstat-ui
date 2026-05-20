@@ -418,6 +418,14 @@ func unixEpochUTC() time.Time {
 	return time.Unix(0, 0).UTC()
 }
 
+func unixEpochIfZero(t time.Time) time.Time {
+	if t.IsZero() {
+		return unixEpochUTC()
+	}
+
+	return t
+}
+
 func (s *chBaseDirsStore) PutUserUsage(u *basedirs.Usage) error {
 	if err := s.ensureReady(); err != nil {
 		return err
@@ -427,6 +435,10 @@ func (s *chBaseDirsStore) PutUserUsage(u *basedirs.Usage) error {
 		return nil
 	}
 
+	return s.appendUserUsage(u)
+}
+
+func (s *chBaseDirsStore) appendUserUsage(u *basedirs.Usage) error {
 	if err := s.userUsageBatch.Append(
 		s.mountPath,
 		s.snapshot.String(),
@@ -655,13 +667,8 @@ func (s *chBaseDirsStore) finaliseGIDUsages(
 	}
 
 	dateNoSpace, dateNoFiles := basedirs.DateQuotaFull(history)
-	if dateNoSpace.IsZero() {
-		dateNoSpace = unixEpochUTC()
-	}
-
-	if dateNoFiles.IsZero() {
-		dateNoFiles = unixEpochUTC()
-	}
+	dateNoSpace = unixEpochIfZero(dateNoSpace)
+	dateNoFiles = unixEpochIfZero(dateNoFiles)
 
 	for _, u := range usages {
 		if u == nil {

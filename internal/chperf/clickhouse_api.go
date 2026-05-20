@@ -37,11 +37,11 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/summary"
 )
 
-var _ ClickHouseAPI = (*clickHouseAPI)(nil)
-
-var _ ImportAPI = (*clickHouseAPI)(nil)
-
-var _ QueryAPI = (*clickHouseAPI)(nil)
+var (
+	_ ClickHouseAPI = (*clickHouseAPI)(nil)
+	_ ImportAPI     = (*clickHouseAPI)(nil)
+	_ QueryAPI      = (*clickHouseAPI)(nil)
+)
 
 // ClickHouseAPI adapts the ClickHouse backend to the perf harness.
 type ClickHouseAPI interface {

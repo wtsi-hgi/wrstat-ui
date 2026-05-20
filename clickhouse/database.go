@@ -213,12 +213,7 @@ func (d *clickHouseDatabase) dirInfoSingleMount(
 		return &db.DirSummary{Modtime: updatedAt}, db.ErrDirNotFound
 	}
 
-	sum := gutas.Summary(filter)
-	if sum != nil {
-		sum.Modtime = updatedAt
-	}
-
-	return sum, nil
+	return dirSummaryWithModtime(gutas, filter, updatedAt), nil
 }
 
 func (d *clickHouseDatabase) dirInfoAncestor(
@@ -241,12 +236,16 @@ func (d *clickHouseDatabase) dirInfoAncestor(
 		return nil, err
 	}
 
+	return dirSummaryWithModtime(gutas, filter, updatedAt), nil
+}
+
+func dirSummaryWithModtime(gutas db.GUTAs, filter *db.Filter, updatedAt time.Time) *db.DirSummary {
 	sum := gutas.Summary(filter)
 	if sum != nil {
 		sum.Modtime = updatedAt
 	}
 
-	return sum, nil
+	return sum
 }
 
 func (d *clickHouseDatabase) Children(dir string) ([]string, error) {
@@ -372,11 +371,8 @@ func (d *clickHouseDatabase) hasNestedMountPoint(dir string) bool {
 func (d *clickHouseDatabase) activeMountForMountPath(mountPath string) (activeMount, bool, error) {
 	if d.snapshot != nil {
 		mount, ok := d.snapshot.mount(mountPath)
-		if !ok {
-			return activeMount{}, false, nil
-		}
 
-		return mount, true, nil
+		return mount, ok, nil
 	}
 
 	return d.queryActiveMount(resolveExactMountQuery, ensureTrailingSlash(mountPath))
@@ -385,11 +381,8 @@ func (d *clickHouseDatabase) activeMountForMountPath(mountPath string) (activeMo
 func (d *clickHouseDatabase) activeMountForDir(dir string) (activeMount, bool, error) {
 	if d.snapshot != nil {
 		mount, ok := d.snapshot.resolve(dir)
-		if !ok {
-			return activeMount{}, false, nil
-		}
 
-		return mount, true, nil
+		return mount, ok, nil
 	}
 
 	return d.queryActiveMount(resolveMountQuery, ensureTrailingSlash(dir))
@@ -574,8 +567,6 @@ func (d *clickHouseDatabase) infoDGUTACounts(ctx context.Context) (uint64, uint6
 		ctx,
 		infoDGUTASnapshotQuery,
 		"dguta",
-		"mount_path",
-		"snapshot_id",
 		d.snapshot.all(),
 	)
 }
@@ -589,8 +580,6 @@ func (d *clickHouseDatabase) infoChildrenCounts(ctx context.Context) (uint64, ui
 		ctx,
 		infoChildrenSnapshotQuery,
 		"children",
-		"mount_path",
-		"snapshot_id",
 		d.snapshot.all(),
 	)
 }
@@ -621,7 +610,7 @@ func (d *clickHouseDatabase) queryInfoCounts(
 
 func (d *clickHouseDatabase) infoCountsForSnapshot(
 	ctx context.Context,
-	queryFmt, desc, mountColumn, snapshotColumn string,
+	queryFmt, desc string,
 	mounts []activeMount,
 ) (uint64, uint64, error) {
 	if len(mounts) == 0 {
@@ -630,8 +619,8 @@ func (d *clickHouseDatabase) infoCountsForSnapshot(
 
 	query, args := activeMountsQuery(
 		queryFmt,
-		mountColumn,
-		snapshotColumn,
+		"mount_path",
+		"snapshot_id",
 		mounts,
 	)
 

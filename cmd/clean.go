@@ -73,9 +73,7 @@ the flag were not supplied.
 }
 
 func openCleanHistoryMaintainer() (basedirs.HistoryMaintainer, error) {
-	loadClickhouseDotEnv()
-
-	cfg, err := clickhouseConfigFromEnvAndFlags(clickhouseConfigInput{
+	cfg, err := loadClickhouseConfig(clickhouseConfigInput{
 		dsnFlag:          clickhouseDSN,
 		databaseFlag:     clickhouseDatabase,
 		queryTimeoutFlag: clickhouseQueryTO,

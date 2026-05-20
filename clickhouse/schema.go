@@ -128,13 +128,11 @@ func ensureSchemaVersion(ctx context.Context, execer ch.Conn) error {
 		return err
 	}
 
-	if count != 0 {
-		return validateSchemaVersionStats(count, minVersion, maxVersion)
-	}
-
-	count, minVersion, maxVersion, err = insertAndReadSchemaVersionStats(ctx, execer)
-	if err != nil {
-		return err
+	if count == 0 {
+		count, minVersion, maxVersion, err = insertAndReadSchemaVersionStats(ctx, execer)
+		if err != nil {
+			return err
+		}
 	}
 
 	return validateSchemaVersionStats(count, minVersion, maxVersion)

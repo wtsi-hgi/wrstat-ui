@@ -97,8 +97,7 @@ func ensureSchemaReady(
 	conn ch.Conn,
 	ensureSchema schemaEnsurer,
 ) (ch.Conn, error) {
-	err := ensureSchema(ctx, conn)
-	if err != nil {
+	if err := ensureSchema(ctx, conn); err != nil {
 		_ = conn.Close()
 
 		return nil, err
@@ -129,8 +128,7 @@ func openAndPing(ctx context.Context, opts *ch.Options, open clickHouseOpener) (
 		return nil, err
 	}
 
-	err = conn.Ping(ctx)
-	if err != nil {
+	if err := conn.Ping(ctx); err != nil {
 		_ = conn.Close()
 
 		return nil, err

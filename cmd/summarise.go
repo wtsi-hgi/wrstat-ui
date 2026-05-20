@@ -215,7 +215,7 @@ func (c *compressedStatsFile) Close() error {
 func wireClickHouseOperations( //nolint:funlen
 	s *summary.Summariser,
 	cfg clickhouse.Config,
-	mountPath, mountpoints string,
+	mountPath, _ string,
 	modtime time.Time,
 ) (func(bool) error, error) {
 	dw, err := clickhouse.NewDGUTAWriter(cfg)
@@ -240,7 +240,7 @@ func wireClickHouseOperations( //nolint:funlen
 	setClickHouseBatchSize(summariseDBBatchSize, dw, fiCloser)
 
 	bs, err := setupBasedirsStore(
-		s, cfg, mountPath, mountpoints, modtime,
+		s, cfg, mountPath, cfg.MountPoints, modtime,
 	)
 	if err != nil {
 		return nil, errors.Join(
@@ -266,22 +266,11 @@ func wireClickHouseOperations( //nolint:funlen
 	return composeSummariseCloser(fiCloser, basedirsCloser, dw), nil
 }
 
-func composeSummariseCloser(
-	fileCloser io.Closer,
-	basedirsCloser func(bool) error,
-	dgutaCloser io.Closer,
-) func(bool) error {
-	return summariseutil.ComposePublishCloser(fileCloser, basedirsCloser, dgutaCloser)
-}
-
-func closeSummariseDGUTAWriter(writer io.Closer, publish bool) error {
-	return summariseutil.CloseOrAbort(writer, publish)
-}
-
 func setupBasedirsStore(
 	s *summary.Summariser,
 	cfg clickhouse.Config,
-	mountPath, mountpoints string,
+	mountPath string,
+	mountpoints []string,
 	modtime time.Time,
 ) (basedirs.Store, error) {
 	if basedirsDB == "" {
@@ -313,7 +302,7 @@ func addBasedirsSummariser(
 	store basedirs.Store,
 	quotaPath string,
 	basedirsConfig string,
-	mountpoints string,
+	mountpoints []string,
 	modtime time.Time,
 ) error {
 	quotas, config, err := summariseutil.ParseBasedirConfig(quotaPath, basedirsConfig)
@@ -321,12 +310,7 @@ func addBasedirsSummariser(
 		return err
 	}
 
-	mps, err := parseMountpointsFlag(mountpoints)
-	if err != nil {
-		return err
-	}
-
-	bd, err := summariseutil.NewBaseDirsCreator(store, quotas, mps, modtime)
+	bd, err := summariseutil.NewBaseDirsCreator(store, quotas, mountpoints, modtime)
 	if err != nil {
 		return err
 	}
@@ -337,18 +321,19 @@ func addBasedirsSummariser(
 }
 
 func setClickHouseBatchSize(batchSize int, targets ...any) {
-	if batchSize <= 0 {
-		return
-	}
+	summariseutil.SetBatchSize(batchSize, targets...)
+}
 
-	for _, target := range targets {
-		setter, ok := target.(batchSizeSetter)
-		if !ok {
-			continue
-		}
+func composeSummariseCloser(
+	fileCloser io.Closer,
+	basedirsCloser func(bool) error,
+	dgutaCloser io.Closer,
+) func(bool) error {
+	return summariseutil.ComposePublishCloser(fileCloser, basedirsCloser, dgutaCloser)
+}
 
-		setter.SetBatchSize(batchSize)
-	}
+func closeSummariseDGUTAWriter(writer io.Closer, publish bool) error {
+	return summariseutil.CloseOrAbort(writer, publish)
 }
 
 func summariseWithHooks(s *summary.Summariser, hooks *summariseRunHooks) error {
@@ -368,27 +353,21 @@ func summariseWithHooks(s *summary.Summariser, hooks *summariseRunHooks) error {
 	return writeSummariseCompletionMarker(hooks.completionTarget)
 }
 
-type batchSizeSetter interface {
-	SetBatchSize(batchSize int)
-}
-
 type clickHouseSummariseTarget struct {
-	cfg         clickhouse.Config
-	mountPath   string
-	mountpoints string
-	modtime     time.Time
-	outputDir   string
+	cfg             clickhouse.Config
+	mountPath       string
+	mountpointsPath string
+	modtime         time.Time
+	outputDir       string
 }
 
 func prepareClickHouseSummariseTarget(
-	mountpoints string,
+	mountpointsPath string,
 	modtime time.Time,
 ) (*clickHouseSummariseTarget, error) {
 	if basedirsDB == "" && dirgutaDB == "" {
 		return nil, nil //nolint:nilnil
 	}
-
-	loadClickhouseDotEnv()
 
 	mountPath, err := deriveMountPathForClickHouseSummarise(
 		basedirsDB, dirgutaDB, defaultDir,
@@ -397,17 +376,17 @@ func prepareClickHouseSummariseTarget(
 		return nil, err
 	}
 
-	cfg, err := clickhouseSummariserConfig(mountpoints)
+	cfg, err := clickhouseSummariserConfig(mountpointsPath)
 	if err != nil {
 		return nil, err
 	}
 
 	return &clickHouseSummariseTarget{
-		cfg:         cfg,
-		mountPath:   mountPath,
-		mountpoints: mountpoints,
-		modtime:     modtime,
-		outputDir:   defaultDir,
+		cfg:             cfg,
+		mountPath:       mountPath,
+		mountpointsPath: mountpointsPath,
+		modtime:         modtime,
+		outputDir:       defaultDir,
 	}, nil
 }
 
@@ -535,7 +514,7 @@ func addClickHouseSummariseHooks(
 	chTarget *clickHouseSummariseTarget,
 ) (*summariseRunHooks, error) {
 	closer, err := wireSummariseClickHouseOperations(
-		s, chTarget.cfg, chTarget.mountPath, chTarget.mountpoints, chTarget.modtime,
+		s, chTarget.cfg, chTarget.mountPath, chTarget.mountpointsPath, chTarget.modtime,
 	)
 	if err != nil {
 		return nil, err
@@ -753,15 +732,9 @@ func mountPathCandidates(
 func clickhouseSummariserConfig(
 	mountpoints string,
 ) (clickhouse.Config, error) {
-	mps, err := parseMountpointsFlag(mountpoints)
-	if err != nil {
-		return clickhouse.Config{}, err
-	}
-
-	return clickhouseConfigFromEnvAndFlags(clickhouseConfigInput{
+	return loadClickhouseConfigWithMountpoints(clickhouseConfigInput{
 		dsnFlag:          clickhouseDSN,
 		databaseFlag:     clickhouseDatabase,
-		mountpoints:      mps,
 		queryTimeoutFlag: clickhouseQueryTO,
-	})
+	}, mountpoints)
 }

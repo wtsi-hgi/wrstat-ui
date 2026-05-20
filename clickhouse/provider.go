@@ -50,6 +50,10 @@ type mountsActiveRow struct {
 	updatedAt  time.Time
 }
 
+type readerBuilder func(context.Context, *activeMountsSnapshot) (db.Database, *db.Tree, basedirs.Reader, error)
+
+type snapshotCapturer func(context.Context) (*activeMountsSnapshot, string, error)
+
 type chProvider struct {
 	cfg Config
 
@@ -59,8 +63,8 @@ type chProvider struct {
 	tree *db.Tree
 	bd   basedirs.Reader
 
-	buildReaders    func(context.Context, *activeMountsSnapshot) (db.Database, *db.Tree, basedirs.Reader, error)
-	captureSnapshot func(context.Context) (*activeMountsSnapshot, string, error)
+	buildReaders    readerBuilder
+	captureSnapshot snapshotCapturer
 
 	mu       sync.RWMutex
 	onUpdate func()
@@ -130,15 +134,7 @@ func (p *chProvider) ensureReadersLocked() error {
 		return nil
 	}
 
-	build := p.buildReaders
-	if build == nil {
-		build = p.defaultBuildReaders
-	}
-
-	capture := p.captureSnapshot
-	if capture == nil {
-		capture = p.captureActiveMountsState
-	}
+	build, capture := p.readerHooksLocked()
 
 	snapshot, fingerprint, err := capture(context.Background())
 	if err != nil {
@@ -156,6 +152,20 @@ func (p *chProvider) ensureReadersLocked() error {
 	p.currentFingerprint = fingerprint
 
 	return nil
+}
+
+func (p *chProvider) readerHooksLocked() (readerBuilder, snapshotCapturer) {
+	build := p.buildReaders
+	if build == nil {
+		build = p.defaultBuildReaders
+	}
+
+	capture := p.captureSnapshot
+	if capture == nil {
+		capture = p.captureActiveMountsState
+	}
+
+	return build, capture
 }
 
 func (p *chProvider) defaultBuildReaders(
@@ -477,17 +487,8 @@ func invokeOnFreshGoroutine(fn func()) {
 
 func (p *chProvider) buildReadersNow(ctx context.Context) (db.Database, *db.Tree, basedirs.Reader, string, error) {
 	p.mu.RLock()
-	build := p.buildReaders
-	capture := p.captureSnapshot
+	build, capture := p.readerHooksLocked()
 	p.mu.RUnlock()
-
-	if build == nil {
-		build = p.defaultBuildReaders
-	}
-
-	if capture == nil {
-		capture = p.captureActiveMountsState
-	}
 
 	snapshot, fingerprint, err := capture(ctx)
 	if err != nil {

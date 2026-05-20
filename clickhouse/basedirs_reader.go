@@ -714,6 +714,10 @@ func (r *chBaseDirsReader) subDirs(ctx context.Context, what, query string, args
 		return nil, fmt.Errorf("clickhouse: failed to query %s subdirs: %w", what, err)
 	}
 
+	return scanSubDirRows(rows, what)
+}
+
+func scanSubDirRows(rows iterRows, what string) ([]*basedirs.SubDir, error) {
 	defer func() { _ = rows.Close() }()
 
 	out := make([]*basedirs.SubDir, 0)

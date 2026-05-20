@@ -42,13 +42,11 @@ the server.
 NB: for large databases, this can take hours to run.
 `,
 	Run: func(_ *cobra.Command, args []string) {
-		loadClickhouseDotEnv()
-
 		if len(args) > 0 {
 			warn("dbinfo: ignoring legacy output directory argument")
 		}
 
-		cfg, err := clickhouseConfigFromEnvAndFlags(clickhouseConfigInput{
+		cfg, err := loadClickhouseConfig(clickhouseConfigInput{
 			dsnFlag:          clickhouseDSN,
 			databaseFlag:     clickhouseDatabase,
 			ownersPath:       ownersPath,

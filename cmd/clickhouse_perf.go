@@ -190,20 +190,12 @@ func runCHPerfQuery() error {
 }
 
 func chPerfConfig() (clickhouse.Config, error) {
-	loadClickhouseDotEnv()
-
-	mountpoints, err := parseMountpointsFlag(chPerf.mountpoints)
-	if err != nil {
-		return clickhouse.Config{}, err
-	}
-
-	return clickhouseConfigFromEnvAndFlags(clickhouseConfigInput{
+	return loadClickhouseConfigWithMountpoints(clickhouseConfigInput{
 		dsnFlag:          chPerf.dsn,
 		databaseFlag:     chPerf.database,
 		ownersPath:       chPerf.owners,
-		mountpoints:      mountpoints,
 		queryTimeoutFlag: chPerf.queryTO,
-	})
+	}, chPerf.mountpoints)
 }
 
 func parseGIDs(raw string) []uint32 {

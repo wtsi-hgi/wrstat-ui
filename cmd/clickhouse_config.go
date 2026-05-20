@@ -94,6 +94,26 @@ func parseMountpointsFlag(path string) ([]string, error) {
 	return mountpoints, nil
 }
 
+func loadClickhouseConfig(input clickhouseConfigInput) (clickhouse.Config, error) {
+	loadClickhouseDotEnv()
+
+	return clickhouseConfigFromEnvAndFlags(input)
+}
+
+func loadClickhouseConfigWithMountpoints(
+	input clickhouseConfigInput,
+	mountpointsPath string,
+) (clickhouse.Config, error) {
+	mountpoints, err := parseMountpointsFlag(mountpointsPath)
+	if err != nil {
+		return clickhouse.Config{}, err
+	}
+
+	input.mountpoints = mountpoints
+
+	return loadClickhouseConfig(input)
+}
+
 type clickhouseConfigInput struct {
 	dsnFlag             string
 	databaseFlag        string
@@ -157,47 +177,40 @@ func loadClickhouseDotEnvFile(path string, orig map[string]struct{}) {
 	}
 
 	for _, key := range clickhouseDotEnvKeys {
-		val, ok := env[key]
-		if !ok {
-			continue
-		}
-
 		if _, ok := orig[key]; ok {
 			continue
 		}
 
-		_ = os.Setenv(key, val)
+		if val, ok := env[key]; ok {
+			_ = os.Setenv(key, val)
+		}
 	}
 }
 
 func clickhouseConfigFromEnvAndFlags(input clickhouseConfigInput) (clickhouse.Config, error) {
-	var cfg clickhouse.Config
-
 	dsn, err := requiredFlagOrEnv(input.dsnFlag, envClickhouseDSN, errClickhouseDSNRequired)
 	if err != nil {
 		return clickhouse.Config{}, err
 	}
-
-	cfg.DSN = dsn
 
 	database, err := requiredFlagOrEnv(input.databaseFlag, envClickhouseDatabase, errClickhouseDatabaseRequired)
 	if err != nil {
 		return clickhouse.Config{}, err
 	}
 
-	cfg.Database = database
-	cfg.OwnersCSVPath = input.ownersPath
-	cfg.MountPoints = input.mountpoints
-
 	pollInterval, queryTimeout, err := clickhouseDurationsFromEnvAndFlags(input)
 	if err != nil {
 		return clickhouse.Config{}, err
 	}
 
-	cfg.PollInterval = pollInterval
-	cfg.QueryTimeout = queryTimeout
-
-	return cfg, nil
+	return clickhouse.Config{
+		DSN:           dsn,
+		Database:      database,
+		OwnersCSVPath: input.ownersPath,
+		MountPoints:   input.mountpoints,
+		PollInterval:  pollInterval,
+		QueryTimeout:  queryTimeout,
+	}, nil
 }
 
 func requiredFlagOrEnv(flagValue string, envKey string, missing error) (string, error) {
@@ -221,12 +234,7 @@ func parseDurationFlagOrEnv(
 	defaultValue time.Duration,
 ) (time.Duration, error) {
 	if v := strings.TrimSpace(flagValue); v != "" {
-		d, err := time.ParseDuration(v)
-		if err != nil {
-			return 0, fmt.Errorf("invalid duration for --%s: %w", flagName, err)
-		}
-
-		return d, nil
+		return parseConfiguredDuration(v, "for --"+flagName)
 	}
 
 	v := strings.TrimSpace(os.Getenv(envKey))
@@ -234,9 +242,13 @@ func parseDurationFlagOrEnv(
 		return defaultValue, nil
 	}
 
-	d, err := time.ParseDuration(v)
+	return parseConfiguredDuration(v, "in "+envKey)
+}
+
+func parseConfiguredDuration(value, source string) (time.Duration, error) {
+	d, err := time.ParseDuration(value)
 	if err != nil {
-		return 0, fmt.Errorf("invalid duration in %s: %w", envKey, err)
+		return 0, fmt.Errorf("invalid duration %s: %w", source, err)
 	}
 
 	return d, nil

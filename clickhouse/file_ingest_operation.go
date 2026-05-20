@@ -45,18 +45,10 @@ const insertFilesBatchQuery = "INSERT INTO wrstat_files " +
 	"uid, gid, atime, mtime, ctime, inode, nlink)"
 
 var (
-	errFileIngestNoDirPath = errors.New(
-		"clickhouse: file ingest requires directory path",
-	)
-	errFileIngestNoName = errors.New(
-		"clickhouse: file ingest requires entry name",
-	)
-	errFileIngestNegativeSize = errors.New(
-		"clickhouse: file ingest requires non-negative sizes",
-	)
-	errFileIngestNegativeInode = errors.New(
-		"clickhouse: file ingest requires non-negative inode and nlink",
-	)
+	errFileIngestNoDirPath     = errors.New("clickhouse: file ingest requires directory path")
+	errFileIngestNoName        = errors.New("clickhouse: file ingest requires entry name")
+	errFileIngestNegativeSize  = errors.New("clickhouse: file ingest requires non-negative sizes")
+	errFileIngestNegativeInode = errors.New("clickhouse: file ingest requires non-negative inode and nlink")
 )
 
 type fileIngestRow struct {
@@ -218,11 +210,15 @@ func (w *fileIngestWriter) SetImportPhaseRecorder(recorder func(string, time.Dur
 }
 
 func (w *fileIngestWriter) recordImportPhase(phase string, d time.Duration) {
-	if w == nil || w.importPhaseRecorder == nil || d <= 0 {
+	if w == nil {
 		return
 	}
 
-	w.importPhaseRecorder(phase, d)
+	recordImportPhase(w.importPhaseRecorder, phase, d)
+}
+
+func (w *fileIngestWriter) timeImportPhase(phase string, fn func() error) error {
+	return timeImportPhase(w.recordImportPhase, phase, fn)
 }
 
 func (w *fileIngestWriter) Close() error {
@@ -385,7 +381,8 @@ func nonNegativeInt64ToUint64(v int64, negativeErr error) (uint64, error) {
 func canonicalFileIngestPath(mountPath, parentDir, name string) (string, string, bool) {
 	parentDir = canonicalPathForMount(mountPath, parentDir)
 
-	if !strings.HasSuffix(name, "/") || !strings.HasSuffix(parentDir, name) {
+	selfNamedDir := strings.HasSuffix(name, "/") && strings.HasSuffix(parentDir, name)
+	if !selfNamedDir {
 		return parentDir, name, true
 	}
 
@@ -505,14 +502,12 @@ func (w *fileIngestWriter) ensureWriteReady(ctx context.Context) error {
 		return err
 	}
 
-	dropStart := time.Now()
-	err := dropPartitionIgnoreUnknown(
-		ctx, w.conn, w.mountPath,
-		w.snapshot.String(), dropFilesPartitionQuery,
-	)
-	w.recordImportPhase(importPhasePartitionDropReset, time.Since(dropStart))
-
-	if err != nil {
+	if err := w.timeImportPhase(importPhasePartitionDropReset, func() error {
+		return dropPartitionIgnoreUnknown(
+			ctx, w.conn, w.mountPath,
+			w.snapshot.String(), dropFilesPartitionQuery,
+		)
+	}); err != nil {
 		return err
 	}
 
@@ -521,8 +516,6 @@ func (w *fileIngestWriter) ensureWriteReady(ctx context.Context) error {
 
 func (w *fileIngestWriter) prepareFilesBatch(ctx context.Context) error {
 	if w.batch != nil {
-		w.prepared = true
-
 		return nil
 	}
 

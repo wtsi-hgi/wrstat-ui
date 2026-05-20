@@ -156,14 +156,14 @@ type activeMountsSnapshot struct {
 }
 
 func newActiveMountsSnapshot(rows []mountsActiveRow) *activeMountsSnapshot {
-	mounts := make([]activeMount, 0, len(rows))
+	mounts := make([]activeMount, len(rows))
 
-	for _, row := range rows {
-		mounts = append(mounts, activeMount{
+	for i, row := range rows {
+		mounts[i] = activeMount{
 			mountPath:  row.mountPath,
 			snapshotID: row.snapshotID,
 			updatedAt:  row.updatedAt.UTC(),
-		})
+		}
 	}
 
 	return &activeMountsSnapshot{mounts: mounts}

@@ -327,11 +327,9 @@ func (w *dgutaWriter) switchSnapshotOrCleanup(ctx context.Context) error {
 		return w.closeWithNewSnapshotCleanup(ctx, w.failBeforeSwitchErr)
 	}
 
-	switchStart := time.Now()
-	err := w.switchActiveSnapshot(ctx)
-	w.recordImportPhase(importPhaseMountSwitch, time.Since(switchStart))
-
-	if err != nil {
+	if err := w.timeImportPhase(importPhaseMountSwitch, func() error {
+		return w.switchActiveSnapshot(ctx)
+	}); err != nil {
 		return w.closeWithNewSnapshotCleanup(ctx, err)
 	}
 
@@ -345,11 +343,9 @@ func (w *dgutaWriter) dropPreviousSnapshotPartitions(ctx context.Context, previo
 		return nil
 	}
 
-	dropStart := time.Now()
-	err := w.dropAllSnapshotPartitions(ctx, previousSID)
-	w.recordImportPhase(importPhaseOldSnapshotDrop, time.Since(dropStart))
-
-	return err
+	return w.timeImportPhase(importPhaseOldSnapshotDrop, func() error {
+		return w.dropAllSnapshotPartitions(ctx, previousSID)
+	})
 }
 
 func (w *dgutaWriter) readPreviousActiveSnapshotID(ctx context.Context) (string, bool, error) {
@@ -409,11 +405,12 @@ func (w *dgutaWriter) dropCurrentSnapshotPartitionsIfInactive(ctx context.Contex
 		return err
 	}
 
-	if hasActive && activeSID == w.snapshot.String() {
+	sid := w.snapshot.String()
+	if hasActive && activeSID == sid {
 		return nil
 	}
 
-	return w.dropAllSnapshotPartitions(ctx, w.snapshot.String())
+	return w.dropAllSnapshotPartitions(ctx, sid)
 }
 
 func (w *dgutaWriter) snapshotCleanupContext(ctx context.Context) (context.Context, context.CancelFunc) {
@@ -425,12 +422,10 @@ func (w *dgutaWriter) snapshotCleanupContext(ctx context.Context) (context.Conte
 }
 
 func (w *dgutaWriter) abortAllBatches() error {
-	var err error
-
-	err = errors.Join(err, abortBatch(&w.dgutaBatch, "dguta"))
-	err = errors.Join(err, abortBatch(&w.childrenBatch, "children"))
-
-	return err
+	return errors.Join(
+		abortBatch(&w.dgutaBatch, "dguta"),
+		abortBatch(&w.childrenBatch, "children"),
+	)
 }
 
 func abortBatch(batch *driver.Batch, name string) error {
@@ -642,6 +637,8 @@ func (w *dgutaWriter) isConsecutiveCanonicalDGUTADuplicate(rawDir, canonicalDir 
 }
 
 func (w *dgutaWriter) appendChildrenRows(children []string, parentDir string) error {
+	snapshotID := w.snapshot.String()
+
 	return w.timeImportPhase(importPhaseChildrenInsert, func() error {
 		for _, child := range children {
 			child = childPathForParent(parentDir, child)
@@ -651,7 +648,7 @@ func (w *dgutaWriter) appendChildrenRows(children []string, parentDir string) er
 				continue
 			}
 
-			if err := w.childrenBatch.Append(w.mountPath, w.snapshot.String(), parentDir, child); err != nil {
+			if err := w.childrenBatch.Append(w.mountPath, snapshotID, parentDir, child); err != nil {
 				return fmt.Errorf("clickhouse: failed to append child row: %w", err)
 			}
 		}
@@ -710,26 +707,18 @@ type dgutaBatchSlot struct {
 
 func (w *dgutaWriter) batchSlots() []dgutaBatchSlot {
 	return []dgutaBatchSlot{
-		w.dgutaBatchSlot(),
-		w.childrenBatchSlot(),
-	}
-}
-
-func (w *dgutaWriter) dgutaBatchSlot() dgutaBatchSlot {
-	return dgutaBatchSlot{
-		batch: &w.dgutaBatch,
-		query: insertDGUTAQuery,
-		phase: importPhaseDGUTAInsert,
-		name:  "dguta",
-	}
-}
-
-func (w *dgutaWriter) childrenBatchSlot() dgutaBatchSlot {
-	return dgutaBatchSlot{
-		batch: &w.childrenBatch,
-		query: insertChildrenQuery,
-		phase: importPhaseChildrenInsert,
-		name:  "children",
+		{
+			batch: &w.dgutaBatch,
+			query: insertDGUTAQuery,
+			phase: importPhaseDGUTAInsert,
+			name:  "dguta",
+		},
+		{
+			batch: &w.childrenBatch,
+			query: insertChildrenQuery,
+			phase: importPhaseChildrenInsert,
+			name:  "children",
+		},
 	}
 }
 
@@ -765,20 +754,15 @@ func (w *dgutaWriter) sendAndCloseBatch(slot dgutaBatchSlot) error {
 }
 
 func (w *dgutaWriter) recordImportPhase(phase string, d time.Duration) {
-	if w == nil || w.importPhaseRecorder == nil || d <= 0 {
+	if w == nil {
 		return
 	}
 
-	w.importPhaseRecorder(phase, d)
+	recordImportPhase(w.importPhaseRecorder, phase, d)
 }
 
 func (w *dgutaWriter) timeImportPhase(phase string, fn func() error) error {
-	start := time.Now()
-	err := fn()
-
-	w.recordImportPhase(phase, time.Since(start))
-
-	return err
+	return timeImportPhase(w.recordImportPhase, phase, fn)
 }
 
 // NewDGUTAWriter returns a ClickHouse-backed implementation of db.DGUTAWriter.

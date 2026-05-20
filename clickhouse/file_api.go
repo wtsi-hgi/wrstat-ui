@@ -169,12 +169,16 @@ func (c *Client) StatPath(ctx context.Context, path string, opts StatOptions) (*
 }
 
 func statPathQuery(opts StatOptions) (string, []string, error) {
-	selectList, fields, err := fileRowSelectList(opts.Fields)
+	return fileRowQuery(statPathQueryTemplate, opts.Fields)
+}
+
+func fileRowQuery(template string, fields []string) (string, []string, error) {
+	selectList, selectedFields, err := fileRowSelectList(fields)
 	if err != nil {
 		return "", nil, err
 	}
 
-	return fmt.Sprintf(statPathQueryTemplate, selectList), fields, nil
+	return fmt.Sprintf(template, selectList), selectedFields, nil
 }
 
 func fileRowSelectList(fields []string) (string, []string, error) {
@@ -184,12 +188,12 @@ func fileRowSelectList(fields []string) (string, []string, error) {
 
 	out := make([]string, 0, len(fields))
 	for _, f := range fields {
-		col, ok := fileRowColumnForField(f)
+		spec, ok := fileRowFieldSpecFor(f)
 		if !ok {
 			return "", nil, unknownFileFieldError{Field: f}
 		}
 
-		out = append(out, col)
+		out = append(out, spec.column)
 	}
 
 	return strings.Join(out, ", "), fields, nil
@@ -223,15 +227,6 @@ func fileRowFieldSpecs() []fileRowFieldSpec {
 		{fileFieldInode, "f.inode", func(s *fileRowScanState) any { return &s.inode }},
 		{fileFieldNLink, "f.nlink", func(s *fileRowScanState) any { return &s.nlink }},
 	}
-}
-
-func fileRowColumnForField(field string) (string, bool) {
-	spec, ok := fileRowFieldSpecFor(field)
-	if !ok {
-		return "", false
-	}
-
-	return spec.column, true
 }
 
 func fileRowFieldSpecFor(field string) (fileRowFieldSpec, bool) {
@@ -279,12 +274,7 @@ func (c *Client) ListDir(ctx context.Context, dir string, opts ListOptions) ([]F
 }
 
 func listDirQuery(opts ListOptions) (string, []string, error) {
-	selectList, fields, err := fileRowSelectList(opts.Fields)
-	if err != nil {
-		return "", nil, err
-	}
-
-	return fmt.Sprintf(listDirQueryTemplate, selectList), fields, nil
+	return fileRowQuery(listDirQueryTemplate, opts.Fields)
 }
 
 func listLimit(limit int64) int64 {
@@ -311,15 +301,6 @@ func (c *Client) FindByGlob(
 		return []FileRow{}, nil
 	}
 
-	return c.findByGlob(ctx, baseDirs, patterns, opts)
-}
-
-func (c *Client) findByGlob(
-	ctx context.Context,
-	baseDirs []string,
-	patterns []string,
-	opts FindOptions,
-) ([]FileRow, error) {
 	prepared, err := c.prepareFindByGlob(baseDirs, patterns, opts)
 	if err != nil {
 		return nil, err
@@ -369,19 +350,7 @@ func (c *Client) runFindByGlobPlan(
 	out := make([]FileRow, 0)
 
 	for _, q := range prepared.plan.queries {
-		rows, err := c.findByGlobQuery(
-			ctx,
-			prepared.selectList,
-			prepared.fields,
-			q.mountPath,
-			q.baseDirs,
-			q.patternChunk,
-			prepared.ownerEnabled,
-			prepared.uid,
-			prepared.gids,
-			prepared.queryLimit,
-			prepared.queryOffset,
-		)
+		rows, err := c.findByGlobQuery(ctx, prepared, q)
 		if err != nil {
 			return nil, err
 		}
@@ -400,33 +369,25 @@ type findByGlobQuerySpec struct {
 
 func (c *Client) findByGlobQuery(
 	ctx context.Context,
-	selectList string,
-	fields []string,
-	mountPath string,
-	baseDirs []string,
-	patterns []string,
-	ownerEnabled int64,
-	uid uint32,
-	gids []uint32,
-	limit int64,
-	offset int64,
+	prepared findByGlobPrepared,
+	spec findByGlobQuerySpec,
 ) ([]FileRow, error) {
 	q, params := buildFindByGlobQueryAndParams(
-		selectList,
-		mountPath,
-		baseDirs,
-		patterns,
-		ownerEnabled,
-		uid,
-		gids,
-		limit,
-		offset,
+		prepared.selectList,
+		spec.mountPath,
+		spec.baseDirs,
+		spec.patternChunk,
+		prepared.ownerEnabled,
+		prepared.uid,
+		prepared.gids,
+		prepared.queryLimit,
+		prepared.queryOffset,
 	)
 
 	qctx, cancel := queryContext(ctx, queryTimeout(c.cfg))
 	defer cancel()
 
-	return c.queryFileRows(qctx, "FindByGlob", q, fields, params...)
+	return c.queryFileRows(qctx, "FindByGlob", q, prepared.fields, params...)
 }
 
 func buildFindByGlobQueryAndParams(
@@ -695,15 +656,16 @@ func dedupeByPath(in []FileRow) []FileRow {
 		return in
 	}
 
-	out := in[:0]
+	out := in[:1]
+	last := in[0].Path
 
-	var last string
-
-	for i, row := range in {
-		if i == 0 || row.Path != last {
-			out = append(out, row)
-			last = row.Path
+	for _, row := range in[1:] {
+		if row.Path == last {
+			continue
 		}
+
+		out = append(out, row)
+		last = row.Path
 	}
 
 	return out
@@ -947,26 +909,32 @@ func (s *fileRowScanState) applyTo(out *FileRow) error {
 }
 
 func (s *fileRowScanState) intValues() (fileRowInts, error) {
-	var out fileRowInts
-
-	var err error
-	if out.size, err = uint64ToInt64(s.size); err != nil {
+	size, err := uint64ToInt64(s.size)
+	if err != nil {
 		return fileRowInts{}, err
 	}
 
-	if out.apparentSize, err = uint64ToInt64(s.apparentSize); err != nil {
+	apparentSize, err := uint64ToInt64(s.apparentSize)
+	if err != nil {
 		return fileRowInts{}, err
 	}
 
-	if out.inode, err = uint64ToInt64(s.inode); err != nil {
+	inode, err := uint64ToInt64(s.inode)
+	if err != nil {
 		return fileRowInts{}, err
 	}
 
-	if out.nlink, err = uint64ToInt64(s.nlink); err != nil {
+	nlink, err := uint64ToInt64(s.nlink)
+	if err != nil {
 		return fileRowInts{}, err
 	}
 
-	return out, nil
+	return fileRowInts{
+		size:         size,
+		apparentSize: apparentSize,
+		inode:        inode,
+		nlink:        nlink,
+	}, nil
 }
 
 func uint64ToInt64(v uint64) (int64, error) {
@@ -1065,15 +1033,17 @@ func (c *Client) groupBaseDirsByMount(baseDirs []string) (map[string][]string, e
 			return nil, err
 		}
 
-		if seen[mountPath] == nil {
-			seen[mountPath] = make(map[string]struct{})
+		seenMount := seen[mountPath]
+		if seenMount == nil {
+			seenMount = make(map[string]struct{})
+			seen[mountPath] = seenMount
 		}
 
-		if _, ok := seen[mountPath][normalised]; ok {
+		if _, ok := seenMount[normalised]; ok {
 			continue
 		}
 
-		seen[mountPath][normalised] = struct{}{}
+		seenMount[normalised] = struct{}{}
 		out[mountPath] = append(out[mountPath], normalised)
 	}
 
