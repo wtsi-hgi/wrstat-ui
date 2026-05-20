@@ -336,6 +336,29 @@ func closeSummariseDGUTAWriter(writer io.Closer, publish bool) error {
 	return summariseutil.CloseOrAbort(writer, publish)
 }
 
+func setupClickHouseSummariseHooks(
+	s *summary.Summariser,
+	chTarget *clickHouseSummariseTarget,
+) (*summariseRunHooks, error) {
+	if chTarget == nil {
+		return nil, nil //nolint:nilnil
+	}
+
+	if err := preflightClickHouseActiveSnapshot(*chTarget); err != nil {
+		return nil, err
+	}
+
+	return addClickHouseSummariseHooks(s, chTarget)
+}
+
+func abortSummariseHooks(hooks *summariseRunHooks) error {
+	if hooks == nil || hooks.close == nil {
+		return nil
+	}
+
+	return hooks.close(false)
+}
+
 func summariseWithHooks(s *summary.Summariser, hooks *summariseRunHooks) error {
 	err := s.Summarise()
 	if hooks != nil && hooks.close != nil {
@@ -630,23 +653,17 @@ func setSummarisers(
 		return nil, err
 	}
 
-	if chTarget != nil {
-		err = preflightClickHouseActiveSnapshot(*chTarget)
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	err = addOutputSummarisers(s)
+	hooks, err := setupClickHouseSummariseHooks(s, chTarget)
 	if err != nil {
 		return nil, err
 	}
 
-	if chTarget == nil {
-		return nil, nil //nolint:nilnil
+	err = addOutputSummarisers(s)
+	if err != nil {
+		return nil, errors.Join(err, abortSummariseHooks(hooks))
 	}
 
-	return addClickHouseSummariseHooks(s, chTarget)
+	return hooks, nil
 }
 
 func addOutputSummarisers(s *summary.Summariser) error {
