@@ -162,6 +162,15 @@ func shouldFallbackQueryMetrics(err error) bool {
 	return isMissingQueryLogError(err) || errors.Is(err, sql.ErrNoRows)
 }
 
+func durationMillis(runDuration time.Duration) uint64 {
+	ms := runDuration.Milliseconds()
+	if ms <= 0 {
+		return 0
+	}
+
+	return uint64(ms)
+}
+
 // Close closes the inspector's connection.
 func (i *Inspector) Close() error {
 	if i == nil || i.conn == nil {
@@ -274,13 +283,4 @@ func isMissingQueryLogError(err error) bool {
 	return strings.Contains(msg, "system.query_log") &&
 		(strings.Contains(msg, "unknown table") ||
 			strings.Contains(msg, "doesn't exist"))
-}
-
-func durationMillis(runDuration time.Duration) uint64 {
-	ms := runDuration.Milliseconds()
-	if ms <= 0 {
-		return 0
-	}
-
-	return uint64(ms)
 }

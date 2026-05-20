@@ -320,29 +320,6 @@ func (c *Client) FindByGlob(
 	return sliceLimitOffset(all, prepared.limit, opts.Offset), nil
 }
 
-type fileRowFieldSpec struct {
-	field    string
-	column   string
-	scanDest func(*fileRowScanState) any
-}
-
-type findByGlobExecPlan struct {
-	queries []findByGlobQuerySpec
-}
-
-type findByGlobPrepared struct {
-	selectList      string
-	fields          []string
-	plan            findByGlobExecPlan
-	useDirectOffset bool
-	limit           int64
-	queryLimit      int64
-	queryOffset     int64
-	ownerEnabled    int64
-	uid             uint32
-	gids            []uint32
-}
-
 func (c *Client) runFindByGlobPlan(
 	ctx context.Context,
 	prepared findByGlobPrepared,
@@ -417,12 +394,6 @@ func buildFindByGlobQueryAndParams(
 	params = append(params, ownerEnabled, uid, gids, limit, offset)
 
 	return q, params
-}
-
-type compiledGlobPatterns struct {
-	direct    []string
-	recursive []string
-	matchAll  bool
 }
 
 func compileGlobPatterns(baseDir string, patterns []string) compiledGlobPatterns {
@@ -556,27 +527,6 @@ func findByGlobRangeClause() string {
 	return "(f.parent_dir >= ? AND f.parent_dir < ?)"
 }
 
-func appendStringsAsAny(out []any, in []string) []any {
-	for _, s := range in {
-		out = append(out, s)
-	}
-
-	return out
-}
-
-func matchOrList(column string, n int) string {
-	if n <= 0 {
-		return "0"
-	}
-
-	out := make([]string, 0, n)
-	for range n {
-		out = append(out, "match("+column+", ?)")
-	}
-
-	return strings.Join(out, " OR ")
-}
-
 func prefixNext(prefix string) string {
 	if prefix == "" {
 		return "\x00"
@@ -592,6 +542,27 @@ func prefixNext(prefix string) string {
 	}
 
 	return prefix + "\x00"
+}
+
+func matchOrList(column string, n int) string {
+	if n <= 0 {
+		return "0"
+	}
+
+	out := make([]string, 0, n)
+	for range n {
+		out = append(out, "match("+column+", ?)")
+	}
+
+	return strings.Join(out, " OR ")
+}
+
+func appendStringsAsAny(out []any, in []string) []any {
+	for _, s := range in {
+		out = append(out, s)
+	}
+
+	return out
 }
 
 func (c *Client) queryFileRows(
@@ -687,131 +658,6 @@ func sliceLimitOffset(in []FileRow, limit int64, offset int64) []FileRow {
 	return in[:limit]
 }
 
-// ListOptions controls ListDir behaviour.
-type ListOptions struct {
-	Fields []string
-	Limit  int64
-	Offset int64
-}
-
-// StatOptions controls StatPath behaviour.
-type StatOptions struct {
-	Fields []string
-}
-
-// FindOptions controls FindByGlob behaviour.
-type FindOptions struct {
-	Fields       []string
-	Limit        int64
-	Offset       int64
-	RequireOwner bool
-	UID          uint32
-	GIDs         []uint32
-}
-
-func (c *Client) prepareFindByGlob(
-	baseDirs []string,
-	patterns []string,
-	opts FindOptions,
-) (findByGlobPrepared, error) {
-	selectList, fields, err := fileRowSelectList(opts.Fields)
-	if err != nil {
-		return findByGlobPrepared{}, err
-	}
-
-	baseDirsByMount, err := c.groupBaseDirsByMount(baseDirs)
-	if err != nil {
-		return findByGlobPrepared{}, err
-	}
-
-	plan := findByGlobPlan(baseDirsByMount, patterns)
-
-	return newFindByGlobPrepared(selectList, fields, plan, opts), nil
-}
-
-func newFindByGlobPrepared(
-	selectList string,
-	fields []string,
-	plan findByGlobExecPlan,
-	opts FindOptions,
-) findByGlobPrepared {
-	out := findByGlobPrepared{
-		selectList:      selectList,
-		fields:          fields,
-		plan:            plan,
-		useDirectOffset: len(plan.queries) == 1,
-	}
-
-	out.ownerEnabled, out.uid, out.gids = ownerFilterArgs(opts)
-	out.limit = listLimit(opts.Limit)
-	out.queryLimit, out.queryOffset = findByGlobQueryLimitOffset(
-		out.limit,
-		opts.Offset,
-		out.useDirectOffset,
-	)
-
-	return out
-}
-
-func isDirFromRows(rows fileRowIterator) (bool, error) {
-	entryType, ok, err := isDirEntryType(rows)
-	if err != nil || !ok {
-		return false, err
-	}
-
-	return entryType == uint8(stats.DirType), nil
-}
-
-func isDirEntryType(rows fileRowIterator) (uint8, bool, error) {
-	if !rows.Next() {
-		if err := rows.Err(); err != nil {
-			return 0, false, fmt.Errorf("clickhouse: IsDir iteration error: %w", err)
-		}
-
-		return 0, false, nil
-	}
-
-	var entryType uint8
-	if err := rows.Scan(&entryType); err != nil {
-		return 0, false, fmt.Errorf("clickhouse: failed to scan IsDir row: %w", err)
-	}
-
-	return entryType, true, nil
-}
-
-func findByGlobQueryLimitOffset(limit int64, offset int64, useDirectOffset bool) (int64, int64) {
-	if useDirectOffset {
-		return limit, offset
-	}
-
-	if offset <= 0 {
-		return limit, 0
-	}
-
-	if limit > math.MaxInt64-offset {
-		return math.MaxInt64, 0
-	}
-
-	return limit + offset, 0
-}
-
-func ownerFilterArgs(opts FindOptions) (int64, uint32, []uint32) {
-	ownerEnabled := int64(0)
-	if opts.RequireOwner {
-		ownerEnabled = 1
-	}
-
-	return ownerEnabled, opts.UID, ensureNonNilUInt32s(opts.GIDs)
-}
-
-func ensureNonNilUInt32s(in []uint32) []uint32 {
-	if in == nil {
-		return []uint32{}
-	}
-
-	return in
-}
-
 type unknownFileFieldError struct {
 	Field string
 }
@@ -820,14 +666,11 @@ func (e unknownFileFieldError) Error() string {
 	return fmt.Sprintf("clickhouse: unknown file field %q", e.Field)
 }
 
-type fileRowScanner interface {
-	Scan(dest ...any) error
-}
-
-type fileRowIterator interface {
-	fileRowScanner
-	Next() bool
-	Err() error
+type fileRowInts struct {
+	size         int64
+	apparentSize int64
+	inode        int64
+	nlink        int64
 }
 
 type fileRowScanState struct {
@@ -848,13 +691,6 @@ type fileRowScanState struct {
 	atime time.Time
 	mtime time.Time
 	ctime time.Time
-}
-
-type fileRowInts struct {
-	size         int64
-	apparentSize int64
-	inode        int64
-	nlink        int64
 }
 
 func (s *fileRowScanState) destsFor(fields []string) ([]any, error) {
@@ -945,6 +781,187 @@ func uint64ToInt64(v uint64) (int64, error) {
 	return int64(v), nil
 }
 
+type fileRowFieldSpec struct {
+	field    string
+	column   string
+	scanDest func(*fileRowScanState) any
+}
+
+type findByGlobExecPlan struct {
+	queries []findByGlobQuerySpec
+}
+
+func findByGlobPlan(baseDirsByMount map[string][]string, patterns []string) findByGlobExecPlan {
+	patternChunks := chunkStrings(patterns, maxGlobPatternsPerQuery)
+	queries := make([]findByGlobQuerySpec, 0, len(baseDirsByMount)*len(patternChunks))
+
+	for mountPath, dirs := range baseDirsByMount {
+		for _, chunk := range patternChunks {
+			queries = append(queries, findByGlobQuerySpec{
+				mountPath:    mountPath,
+				baseDirs:     dirs,
+				patternChunk: chunk,
+			})
+		}
+	}
+
+	return findByGlobExecPlan{queries: queries}
+}
+
+type findByGlobPrepared struct {
+	selectList      string
+	fields          []string
+	plan            findByGlobExecPlan
+	useDirectOffset bool
+	limit           int64
+	queryLimit      int64
+	queryOffset     int64
+	ownerEnabled    int64
+	uid             uint32
+	gids            []uint32
+}
+
+func newFindByGlobPrepared(
+	selectList string,
+	fields []string,
+	plan findByGlobExecPlan,
+	opts FindOptions,
+) findByGlobPrepared {
+	out := findByGlobPrepared{
+		selectList:      selectList,
+		fields:          fields,
+		plan:            plan,
+		useDirectOffset: len(plan.queries) == 1,
+	}
+
+	out.ownerEnabled, out.uid, out.gids = ownerFilterArgs(opts)
+	out.limit = listLimit(opts.Limit)
+	out.queryLimit, out.queryOffset = findByGlobQueryLimitOffset(
+		out.limit,
+		opts.Offset,
+		out.useDirectOffset,
+	)
+
+	return out
+}
+
+func (c *Client) prepareFindByGlob(
+	baseDirs []string,
+	patterns []string,
+	opts FindOptions,
+) (findByGlobPrepared, error) {
+	selectList, fields, err := fileRowSelectList(opts.Fields)
+	if err != nil {
+		return findByGlobPrepared{}, err
+	}
+
+	baseDirsByMount, err := c.groupBaseDirsByMount(baseDirs)
+	if err != nil {
+		return findByGlobPrepared{}, err
+	}
+
+	plan := findByGlobPlan(baseDirsByMount, patterns)
+
+	return newFindByGlobPrepared(selectList, fields, plan, opts), nil
+}
+
+type compiledGlobPatterns struct {
+	direct    []string
+	recursive []string
+	matchAll  bool
+}
+
+// ListOptions controls ListDir behaviour.
+type ListOptions struct {
+	Fields []string
+	Limit  int64
+	Offset int64
+}
+
+// StatOptions controls StatPath behaviour.
+type StatOptions struct {
+	Fields []string
+}
+
+// FindOptions controls FindByGlob behaviour.
+type FindOptions struct {
+	Fields       []string
+	Limit        int64
+	Offset       int64
+	RequireOwner bool
+	UID          uint32
+	GIDs         []uint32
+}
+
+func ownerFilterArgs(opts FindOptions) (int64, uint32, []uint32) {
+	ownerEnabled := int64(0)
+	if opts.RequireOwner {
+		ownerEnabled = 1
+	}
+
+	return ownerEnabled, opts.UID, ensureNonNilUInt32s(opts.GIDs)
+}
+
+func ensureNonNilUInt32s(in []uint32) []uint32 {
+	if in == nil {
+		return []uint32{}
+	}
+
+	return in
+}
+
+type fileRowScanner interface {
+	Scan(dest ...any) error
+}
+
+type fileRowIterator interface {
+	fileRowScanner
+	Next() bool
+	Err() error
+}
+
+func isDirFromRows(rows fileRowIterator) (bool, error) {
+	entryType, ok, err := isDirEntryType(rows)
+	if err != nil || !ok {
+		return false, err
+	}
+
+	return entryType == uint8(stats.DirType), nil
+}
+
+func isDirEntryType(rows fileRowIterator) (uint8, bool, error) {
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return 0, false, fmt.Errorf("clickhouse: IsDir iteration error: %w", err)
+		}
+
+		return 0, false, nil
+	}
+
+	var entryType uint8
+	if err := rows.Scan(&entryType); err != nil {
+		return 0, false, fmt.Errorf("clickhouse: failed to scan IsDir row: %w", err)
+	}
+
+	return entryType, true, nil
+}
+
+func findByGlobQueryLimitOffset(limit int64, offset int64, useDirectOffset bool) (int64, int64) {
+	if useDirectOffset {
+		return limit, offset
+	}
+
+	if offset <= 0 {
+		return limit, 0
+	}
+
+	if limit > math.MaxInt64-offset {
+		return math.MaxInt64, 0
+	}
+
+	return limit + offset, 0
+}
+
 func chunkStrings(in []string, maxChunk int) [][]string {
 	if maxChunk <= 0 || len(in) == 0 {
 		return nil
@@ -989,23 +1006,6 @@ func lastComponentSlashIndex(path string) int {
 	}
 
 	return strings.LastIndex(path, "/")
-}
-
-func findByGlobPlan(baseDirsByMount map[string][]string, patterns []string) findByGlobExecPlan {
-	patternChunks := chunkStrings(patterns, maxGlobPatternsPerQuery)
-	queries := make([]findByGlobQuerySpec, 0, len(baseDirsByMount)*len(patternChunks))
-
-	for mountPath, dirs := range baseDirsByMount {
-		for _, chunk := range patternChunks {
-			queries = append(queries, findByGlobQuerySpec{
-				mountPath:    mountPath,
-				baseDirs:     dirs,
-				patternChunk: chunk,
-			})
-		}
-	}
-
-	return findByGlobExecPlan{queries: queries}
 }
 
 func permissionAnyInDirArgs(mountPath string, dir string, uid uint32, gids []uint32) []any {

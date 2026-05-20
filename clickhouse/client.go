@@ -186,10 +186,6 @@ func queryContext(parent context.Context, queryTO time.Duration) (context.Contex
 	return context.WithTimeout(parent, queryTO)
 }
 
-func configQueryContext(cfg Config) (context.Context, context.CancelFunc) {
-	return queryContext(context.Background(), queryTimeout(cfg))
-}
-
 func openAndPingWithTimeout(
 	parent context.Context,
 	opts *ch.Options,
@@ -245,17 +241,48 @@ func (c *Client) Close() error {
 	return conn.Close()
 }
 
-func mountPointsFromConfig(cfg Config) (basedirs.MountPoints, error) {
-	if len(cfg.MountPoints) > 0 {
-		return basedirs.ValidateMountPoints(cfg.MountPoints), nil
-	}
+func configQueryContext(cfg Config) (context.Context, context.CancelFunc) {
+	return queryContext(context.Background(), queryTimeout(cfg))
+}
 
-	mountPoints, err := discoverMountPoints()
+func connectFromConfig(cfg Config) (ch.Conn, error) {
+	opts, err := optionsFromConfig(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("clickhouse: failed to auto-discover mountpoints: %w", err)
+		return nil, err
 	}
 
-	return mountPoints, nil
+	return connectFromOptions(cfg, opts)
+}
+
+func optionsFromConfig(cfg Config) (*ch.Options, error) {
+	opts, err := ch.ParseDSN(cfg.DSN)
+	if err != nil {
+		return nil, fmt.Errorf("clickhouse: invalid DSN: %w", err)
+	}
+
+	opts.Auth.Database = cfg.Database
+	opts.Compression = &ch.Compression{Method: ch.CompressionLZ4}
+	opts.MaxOpenConns, opts.MaxIdleConns = effectiveConnectionLimits(cfg)
+
+	return opts, nil
+}
+
+func effectiveConnectionLimits(cfg Config) (int, int) {
+	maxOpen := cfg.MaxOpenConns
+	if maxOpen <= 0 {
+		maxOpen = defaultMaxOpenConns
+	}
+
+	maxIdle := cfg.MaxIdleConns
+	if maxIdle <= 0 {
+		maxIdle = maxOpen
+	}
+
+	return maxOpen, maxIdle
+}
+
+func connectFromOptions(cfg Config, opts *ch.Options) (ch.Conn, error) {
+	return connectAndBootstrap(context.Background(), opts, cfg.Database, queryTimeout(cfg))
 }
 
 func connectAndBootstrap(
@@ -269,17 +296,25 @@ func connectAndBootstrap(
 	})
 }
 
-func connectFromConfig(cfg Config) (ch.Conn, error) {
-	opts, err := optionsFromConfig(cfg)
-	if err != nil {
-		return nil, err
+func queryTimeout(cfg Config) time.Duration {
+	if cfg.QueryTimeout > 0 {
+		return cfg.QueryTimeout
 	}
 
-	return connectFromOptions(cfg, opts)
+	return defaultQueryTimeout
 }
 
-func connectFromOptions(cfg Config, opts *ch.Options) (ch.Conn, error) {
-	return connectAndBootstrap(context.Background(), opts, cfg.Database, queryTimeout(cfg))
+func mountPointsFromConfig(cfg Config) (basedirs.MountPoints, error) {
+	if len(cfg.MountPoints) > 0 {
+		return basedirs.ValidateMountPoints(cfg.MountPoints), nil
+	}
+
+	mountPoints, err := discoverMountPoints()
+	if err != nil {
+		return nil, fmt.Errorf("clickhouse: failed to auto-discover mountpoints: %w", err)
+	}
+
+	return mountPoints, nil
 }
 
 func validateConfig(cfg Config) error {
@@ -340,41 +375,6 @@ func validateDSNDatabase(cfg Config, dsnURL *url.URL) error {
 	}
 
 	return nil
-}
-
-func optionsFromConfig(cfg Config) (*ch.Options, error) {
-	opts, err := ch.ParseDSN(cfg.DSN)
-	if err != nil {
-		return nil, fmt.Errorf("clickhouse: invalid DSN: %w", err)
-	}
-
-	opts.Auth.Database = cfg.Database
-	opts.Compression = &ch.Compression{Method: ch.CompressionLZ4}
-	opts.MaxOpenConns, opts.MaxIdleConns = effectiveConnectionLimits(cfg)
-
-	return opts, nil
-}
-
-func effectiveConnectionLimits(cfg Config) (int, int) {
-	maxOpen := cfg.MaxOpenConns
-	if maxOpen <= 0 {
-		maxOpen = defaultMaxOpenConns
-	}
-
-	maxIdle := cfg.MaxIdleConns
-	if maxIdle <= 0 {
-		maxIdle = maxOpen
-	}
-
-	return maxOpen, maxIdle
-}
-
-func queryTimeout(cfg Config) time.Duration {
-	if cfg.QueryTimeout > 0 {
-		return cfg.QueryTimeout
-	}
-
-	return defaultQueryTimeout
 }
 
 func databaseFromDSNURL(u *url.URL) (string, error) {

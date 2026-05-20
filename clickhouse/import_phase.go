@@ -29,14 +29,6 @@ import "time"
 
 type importPhaseRecorder func(string, time.Duration)
 
-func recordImportPhase(recorder importPhaseRecorder, phase string, d time.Duration) {
-	if recorder == nil || d <= 0 {
-		return
-	}
-
-	recorder(phase, d)
-}
-
 func timeImportPhase(
 	recorder importPhaseRecorder,
 	phase string,
@@ -48,4 +40,12 @@ func timeImportPhase(
 	recordImportPhase(recorder, phase, time.Since(start))
 
 	return err
+}
+
+func recordImportPhase(recorder importPhaseRecorder, phase string, d time.Duration) {
+	if recorder == nil || d <= 0 {
+		return
+	}
+
+	recorder(phase, d)
 }

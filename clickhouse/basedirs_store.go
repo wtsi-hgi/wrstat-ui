@@ -82,6 +82,37 @@ type historyRollbackEntry struct {
 	key  basedirs.HistoryKey
 }
 
+type batchSlot struct {
+	batch *driver.Batch
+	query string
+	name  string
+}
+
+type chBaseDirsStore struct {
+	cfg Config
+
+	conn ch.Conn
+
+	batchSize int
+
+	mountPath string
+	updatedAt time.Time
+	snapshot  uuid.UUID
+
+	reset bool
+
+	groupUsageBatch driver.Batch
+	userUsageBatch  driver.Batch
+	groupSubBatch   driver.Batch
+	userSubBatch    driver.Batch
+
+	bufferedAgeAllGroupUsage  map[uint32][]*basedirs.Usage
+	insertedHistory           []historyRollbackEntry
+	lastHistoryAppendInserted bool
+
+	closed bool
+}
+
 func (s *chBaseDirsStore) SetBatchSize(batchSize int) {
 	if batchSize > 0 {
 		s.batchSize = batchSize
@@ -287,37 +318,6 @@ func (s *chBaseDirsStore) dropSnapshotPartitionsWithConn(ctx context.Context, co
 	return dropSnapshotPartitionsForMount(ctx, conn, s.mountPath, s.snapshot.String(), basedirsPartitionDropQueries())
 }
 
-type batchSlot struct {
-	batch *driver.Batch
-	query string
-	name  string
-}
-
-type chBaseDirsStore struct {
-	cfg Config
-
-	conn ch.Conn
-
-	batchSize int
-
-	mountPath string
-	updatedAt time.Time
-	snapshot  uuid.UUID
-
-	reset bool
-
-	groupUsageBatch driver.Batch
-	userUsageBatch  driver.Batch
-	groupSubBatch   driver.Batch
-	userSubBatch    driver.Batch
-
-	bufferedAgeAllGroupUsage  map[uint32][]*basedirs.Usage
-	insertedHistory           []historyRollbackEntry
-	lastHistoryAppendInserted bool
-
-	closed bool
-}
-
 func (s *chBaseDirsStore) SetMountPath(mountPath string) {
 	s.mountPath = mountPath
 }
@@ -416,14 +416,6 @@ func (s *chBaseDirsStore) PutGroupUsage(u *basedirs.Usage) error {
 
 func unixEpochUTC() time.Time {
 	return time.Unix(0, 0).UTC()
-}
-
-func unixEpochIfZero(t time.Time) time.Time {
-	if t.IsZero() {
-		return unixEpochUTC()
-	}
-
-	return t
 }
 
 func (s *chBaseDirsStore) PutUserUsage(u *basedirs.Usage) error {
@@ -683,6 +675,14 @@ func (s *chBaseDirsStore) finaliseGIDUsages(
 	return nil
 }
 
+func unixEpochIfZero(t time.Time) time.Time {
+	if t.IsZero() {
+		return unixEpochUTC()
+	}
+
+	return t
+}
+
 func (s *chBaseDirsStore) Close() error {
 	if s == nil || s.closed {
 		return nil
@@ -778,23 +778,6 @@ func (s *chBaseDirsStore) dropSnapshotPartitions(ctx context.Context) error {
 	return s.dropSnapshotPartitionsWithConn(ctx, s.conn)
 }
 
-func dropPartitionIgnoreUnknown(
-	ctx context.Context,
-	conn ch.Conn,
-	mountPath, snapshotID, query string,
-) error {
-	err := conn.Exec(ctx, query, mountPath, snapshotID)
-	if err == nil {
-		return nil
-	}
-
-	if isUnknownPartition(err) {
-		return nil
-	}
-
-	return fmt.Errorf("clickhouse: failed to drop partition: %w", err)
-}
-
 func (s *chBaseDirsStore) prepareBatches(ctx context.Context) error {
 	slots := s.batchSlots()
 	prepared := make([]driver.Batch, 0, len(slots))
@@ -816,6 +799,15 @@ func (s *chBaseDirsStore) prepareBatches(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+func abortPreparedBatches(batches []driver.Batch) error {
+	var err error
+	for _, batch := range slices.Backward(batches) {
+		err = errors.Join(err, batch.Abort())
+	}
+
+	return err
 }
 
 func (s *chBaseDirsStore) flushFullBatches() error {
@@ -864,15 +856,6 @@ func sendAndReprepareIfFull(
 	}
 
 	return b, nil
-}
-
-func abortPreparedBatches(batches []driver.Batch) error {
-	var err error
-	for _, batch := range slices.Backward(batches) {
-		err = errors.Join(err, batch.Abort())
-	}
-
-	return err
 }
 
 func (s *chBaseDirsStore) batchSlots() []batchSlot {
@@ -930,6 +913,23 @@ func NewBaseDirsStore(cfg Config) (basedirs.Store, error) {
 	}
 
 	return &chBaseDirsStore{cfg: cfg, conn: conn, batchSize: defaultBatchSize}, nil
+}
+
+func dropPartitionIgnoreUnknown(
+	ctx context.Context,
+	conn ch.Conn,
+	mountPath, snapshotID, query string,
+) error {
+	err := conn.Exec(ctx, query, mountPath, snapshotID)
+	if err == nil {
+		return nil
+	}
+
+	if isUnknownPartition(err) {
+		return nil
+	}
+
+	return fmt.Errorf("clickhouse: failed to drop partition: %w", err)
 }
 
 func isUnknownPartition(err error) bool {

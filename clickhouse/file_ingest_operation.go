@@ -283,17 +283,6 @@ func (w *fileIngestWriter) prepareAppend(info *summary.FileInfo) (bool, error) {
 	return w.bufferFileInfo(info)
 }
 
-func (w *fileIngestWriter) flushIfBatchFull() error {
-	if w.buf.rows() < w.batchSize {
-		return nil
-	}
-
-	ctx, cancel := configQueryContext(w.cfg)
-	defer cancel()
-
-	return w.flushBuffer(ctx)
-}
-
 func validateFileInfo(info *summary.FileInfo) error {
 	if info.Path == nil {
 		return errFileIngestNoDirPath
@@ -312,6 +301,17 @@ func validateFileInfo(info *summary.FileInfo) error {
 	}
 
 	return nil
+}
+
+func (w *fileIngestWriter) flushIfBatchFull() error {
+	if w.buf.rows() < w.batchSize {
+		return nil
+	}
+
+	ctx, cancel := configQueryContext(w.cfg)
+	defer cancel()
+
+	return w.flushBuffer(ctx)
 }
 
 func (w *fileIngestWriter) bufferFileInfo(info *summary.FileInfo) (bool, error) {
@@ -338,46 +338,6 @@ func fileIngestParentAndName(info *summary.FileInfo) (string, string) {
 	return parentDir, string(info.Name)
 }
 
-func (w *fileIngestWriter) ensureSnapshotID() {
-	if w.snapshot != uuid.Nil {
-		return
-	}
-
-	w.snapshot = snapshotID(w.mountPath, w.updatedAt)
-}
-
-func unsignedFileInfoValues(info *summary.FileInfo) (uint64, uint64, uint64, uint64, error) {
-	size, err := nonNegativeInt64ToUint64(info.Size, errFileIngestNegativeSize)
-	if err != nil {
-		return 0, 0, 0, 0, err
-	}
-
-	apparentSize, err := nonNegativeInt64ToUint64(info.ApparentSize, errFileIngestNegativeSize)
-	if err != nil {
-		return 0, 0, 0, 0, err
-	}
-
-	inode, err := nonNegativeInt64ToUint64(info.Inode, errFileIngestNegativeInode)
-	if err != nil {
-		return 0, 0, 0, 0, err
-	}
-
-	nlink, err := nonNegativeInt64ToUint64(info.Nlink, errFileIngestNegativeInode)
-	if err != nil {
-		return 0, 0, 0, 0, err
-	}
-
-	return size, apparentSize, inode, nlink, nil
-}
-
-func nonNegativeInt64ToUint64(v int64, negativeErr error) (uint64, error) {
-	if v < 0 {
-		return 0, negativeErr
-	}
-
-	return uint64(v), nil
-}
-
 func canonicalFileIngestPath(mountPath, parentDir, name string) (string, string, bool) {
 	parentDir = canonicalPathForMount(mountPath, parentDir)
 
@@ -393,33 +353,12 @@ func canonicalFileIngestPath(mountPath, parentDir, name string) (string, string,
 	return strings.TrimSuffix(parentDir, name), name, true
 }
 
-func canonicalPathForMount(mountPath, path string) string {
-	if mountPath != "/" || path == "" {
-		return path
+func (w *fileIngestWriter) ensureSnapshotID() {
+	if w.snapshot != uuid.Nil {
+		return
 	}
 
-	trimmed := strings.TrimLeft(path, "/")
-	if trimmed == "" {
-		return "/"
-	}
-
-	return "/" + trimmed
-}
-
-func extFromName(name string) string {
-	// Directories include a trailing '/', and we don't store extensions for them.
-	if strings.HasSuffix(name, "/") {
-		return ""
-	}
-
-	// Spec semantics: ext is the portion after the last '.', lowercased.
-	// If there's no '.', or the name begins with '.' and has no other '.', ext is empty.
-	idx := strings.LastIndexByte(name, '.')
-	if idx <= 0 || idx == len(name)-1 {
-		return ""
-	}
-
-	return strings.ToLower(name[idx+1:])
+	w.snapshot = snapshotID(w.mountPath, w.updatedAt)
 }
 
 func (w *fileIngestWriter) validateWriteState() error {
@@ -585,4 +524,65 @@ func (o *fileIngestOperation) Add(info *summary.FileInfo) error {
 func (o *fileIngestOperation) Output() error {
 	// Global operation output is a no-op; flushing happens in Close() per spec.
 	return nil
+}
+
+func unsignedFileInfoValues(info *summary.FileInfo) (uint64, uint64, uint64, uint64, error) {
+	size, err := nonNegativeInt64ToUint64(info.Size, errFileIngestNegativeSize)
+	if err != nil {
+		return 0, 0, 0, 0, err
+	}
+
+	apparentSize, err := nonNegativeInt64ToUint64(info.ApparentSize, errFileIngestNegativeSize)
+	if err != nil {
+		return 0, 0, 0, 0, err
+	}
+
+	inode, err := nonNegativeInt64ToUint64(info.Inode, errFileIngestNegativeInode)
+	if err != nil {
+		return 0, 0, 0, 0, err
+	}
+
+	nlink, err := nonNegativeInt64ToUint64(info.Nlink, errFileIngestNegativeInode)
+	if err != nil {
+		return 0, 0, 0, 0, err
+	}
+
+	return size, apparentSize, inode, nlink, nil
+}
+
+func nonNegativeInt64ToUint64(v int64, negativeErr error) (uint64, error) {
+	if v < 0 {
+		return 0, negativeErr
+	}
+
+	return uint64(v), nil
+}
+
+func canonicalPathForMount(mountPath, path string) string {
+	if mountPath != "/" || path == "" {
+		return path
+	}
+
+	trimmed := strings.TrimLeft(path, "/")
+	if trimmed == "" {
+		return "/"
+	}
+
+	return "/" + trimmed
+}
+
+func extFromName(name string) string {
+	// Directories include a trailing '/', and we don't store extensions for them.
+	if strings.HasSuffix(name, "/") {
+		return ""
+	}
+
+	// Spec semantics: ext is the portion after the last '.', lowercased.
+	// If there's no '.', or the name begins with '.' and has no other '.', ext is empty.
+	idx := strings.LastIndexByte(name, '.')
+	if idx <= 0 || idx == len(name)-1 {
+		return ""
+	}
+
+	return strings.ToLower(name[idx+1:])
 }

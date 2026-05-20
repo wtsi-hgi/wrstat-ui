@@ -81,26 +81,6 @@ var (
 	)
 )
 
-func (slot dgutaBatchSlot) rows() int {
-	if slot.batch == nil || *slot.batch == nil {
-		return 0
-	}
-
-	return (*slot.batch).Rows()
-}
-
-func allPartitionDropQueries() []string {
-	return []string{
-		dropDGUTAPartitionQuery,
-		dropChildrenPartitionQuery,
-		dropFilesPartitionQuery,
-		dropBasedirsGroupUsagePartitionQuery,
-		dropBasedirsUserUsagePartitionQuery,
-		dropBasedirsGroupSubdirsPartitionQuery,
-		dropBasedirsUserSubdirsPartitionQuery,
-	}
-}
-
 func basedirsPartitionDropQueries() []string {
 	return []string{
 		dropBasedirsGroupUsagePartitionQuery,
@@ -110,24 +90,55 @@ func basedirsPartitionDropQueries() []string {
 	}
 }
 
-func dropSnapshotPartitionsForMount(
-	ctx context.Context,
-	conn ch.Conn,
-	mountPath string,
-	sid string,
-	queries []string,
-) error {
-	for _, query := range queries {
-		if err := dropPartitionIgnoreUnknown(ctx, conn, mountPath, sid, query); err != nil {
-			return err
-		}
-	}
-
-	return nil
+type dgutaRowKey struct {
+	dir         string
+	gid         uint32
+	uid         uint32
+	ft          uint16
+	age         uint8
+	count       uint64
+	size        uint64
+	atime       int64
+	mtime       int64
+	aTimeRanges [9]uint64
+	mTimeRanges [9]uint64
 }
 
-func prepareBatchWithRelease(ctx context.Context, conn ch.Conn, query string) (driver.Batch, error) {
-	return conn.PrepareBatch(ctx, query, driver.WithReleaseConnection())
+func newDGUTARowKey(dir string, guta *db.GUTA) dgutaRowKey {
+	return dgutaRowKey{
+		dir:         dir,
+		gid:         guta.GID,
+		uid:         guta.UID,
+		ft:          uint16(guta.FT),
+		age:         uint8(guta.Age),
+		count:       guta.Count,
+		size:        guta.Size,
+		atime:       guta.Atime,
+		mtime:       guta.Mtime,
+		aTimeRanges: guta.ATimeRanges,
+		mTimeRanges: guta.MTimeRanges,
+	}
+}
+
+type dgutaRecordRows struct {
+	rawDir       string
+	canonicalDir string
+	keys         map[dgutaRowKey]struct{}
+}
+
+type dgutaBatchSlot struct {
+	batch *driver.Batch
+	query string
+	phase string
+	name  string
+}
+
+func (slot dgutaBatchSlot) rows() int {
+	if slot.batch == nil || *slot.batch == nil {
+		return 0
+	}
+
+	return (*slot.batch).Rows()
 }
 
 type dgutaWriter struct {
@@ -155,26 +166,6 @@ type dgutaWriter struct {
 	previousDGUTARows dgutaRecordRows
 
 	closed bool
-}
-
-type dgutaRecordRows struct {
-	rawDir       string
-	canonicalDir string
-	keys         map[dgutaRowKey]struct{}
-}
-
-type dgutaRowKey struct {
-	dir         string
-	gid         uint32
-	uid         uint32
-	ft          uint16
-	age         uint8
-	count       uint64
-	size        uint64
-	atime       int64
-	mtime       int64
-	aTimeRanges [9]uint64
-	mTimeRanges [9]uint64
 }
 
 func (w *dgutaWriter) SetBatchSize(batchSize int) {
@@ -447,6 +438,34 @@ func (w *dgutaWriter) dropAllSnapshotPartitions(ctx context.Context, sid string)
 	return dropSnapshotPartitionsForMount(ctx, w.conn, w.mountPath, sid, allPartitionDropQueries())
 }
 
+func dropSnapshotPartitionsForMount(
+	ctx context.Context,
+	conn ch.Conn,
+	mountPath string,
+	sid string,
+	queries []string,
+) error {
+	for _, query := range queries {
+		if err := dropPartitionIgnoreUnknown(ctx, conn, mountPath, sid, query); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func allPartitionDropQueries() []string {
+	return []string{
+		dropDGUTAPartitionQuery,
+		dropChildrenPartitionQuery,
+		dropFilesPartitionQuery,
+		dropBasedirsGroupUsagePartitionQuery,
+		dropBasedirsUserUsagePartitionQuery,
+		dropBasedirsGroupSubdirsPartitionQuery,
+		dropBasedirsUserSubdirsPartitionQuery,
+	}
+}
+
 func (w *dgutaWriter) ensureWriteReady(ctx context.Context) error {
 	w.ensureSnapshotID()
 
@@ -524,6 +543,10 @@ func (w *dgutaWriter) prepareBatches(ctx context.Context) (driver.Batch, driver.
 
 func (w *dgutaWriter) prepareBatch(ctx context.Context, query string) (driver.Batch, error) {
 	return prepareBatchWithRelease(ctx, w.conn, query)
+}
+
+func prepareBatchWithRelease(ctx context.Context, conn ch.Conn, query string) (driver.Batch, error) {
+	return conn.PrepareBatch(ctx, query, driver.WithReleaseConnection())
 }
 
 func (w *dgutaWriter) dropNewSnapshotPartitions(ctx context.Context) error {
@@ -605,22 +628,6 @@ func (w *dgutaWriter) appendDGUTARow(rawParentDir, parentDir string, guta *db.GU
 	return rowKey, true, nil
 }
 
-func newDGUTARowKey(dir string, guta *db.GUTA) dgutaRowKey {
-	return dgutaRowKey{
-		dir:         dir,
-		gid:         guta.GID,
-		uid:         guta.UID,
-		ft:          uint16(guta.FT),
-		age:         uint8(guta.Age),
-		count:       guta.Count,
-		size:        guta.Size,
-		atime:       guta.Atime,
-		mtime:       guta.Mtime,
-		aTimeRanges: guta.ATimeRanges,
-		mTimeRanges: guta.MTimeRanges,
-	}
-}
-
 func (w *dgutaWriter) isConsecutiveCanonicalDGUTADuplicate(rawDir, canonicalDir string, key dgutaRowKey) bool {
 	prev := w.previousDGUTARows
 	if prev.keys == nil || prev.rawDir == rawDir || prev.canonicalDir != canonicalDir {
@@ -696,13 +703,6 @@ func (w *dgutaWriter) flushAllBatches() error {
 	}
 
 	return nil
-}
-
-type dgutaBatchSlot struct {
-	batch *driver.Batch
-	query string
-	phase string
-	name  string
 }
 
 func (w *dgutaWriter) batchSlots() []dgutaBatchSlot {

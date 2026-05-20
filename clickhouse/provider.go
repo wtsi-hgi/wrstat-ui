@@ -50,6 +50,15 @@ type mountsActiveRow struct {
 	updatedAt  time.Time
 }
 
+func scanMountsActiveRow(rows rowsScanner) (mountsActiveRow, error) {
+	var row mountsActiveRow
+	if err := rows.Scan(&row.mountPath, &row.snapshotID, &row.updatedAt); err != nil {
+		return mountsActiveRow{}, fmt.Errorf("clickhouse: failed to scan mounts_active: %w", err)
+	}
+
+	return row, nil
+}
+
 type readerBuilder func(context.Context, *activeMountsSnapshot) (db.Database, *db.Tree, basedirs.Reader, error)
 
 type snapshotCapturer func(context.Context) (*activeMountsSnapshot, string, error)
@@ -194,6 +203,20 @@ func (p *chProvider) captureActiveMountsState(parent context.Context) (*activeMo
 	return newActiveMountsSnapshot(rows), fingerprintForMountsActive(rows), nil
 }
 
+func fingerprintForMountsActive(rows []mountsActiveRow) string {
+	var b strings.Builder
+	for _, row := range rows {
+		b.WriteString(row.mountPath)
+		b.WriteString("|")
+		b.WriteString(row.snapshotID)
+		b.WriteString("|")
+		b.WriteString(row.updatedAt.UTC().Format(time.RFC3339Nano))
+		b.WriteString("\n")
+	}
+
+	return b.String()
+}
+
 func (p *chProvider) OnUpdate(cb func()) {
 	p.mu.Lock()
 	p.onUpdate = cb
@@ -326,20 +349,6 @@ func (p *chProvider) mountsActiveFingerprint(parent context.Context) (string, er
 	return fingerprintForMountsActive(rows), nil
 }
 
-func fingerprintForMountsActive(rows []mountsActiveRow) string {
-	var b strings.Builder
-	for _, row := range rows {
-		b.WriteString(row.mountPath)
-		b.WriteString("|")
-		b.WriteString(row.snapshotID)
-		b.WriteString("|")
-		b.WriteString(row.updatedAt.UTC().Format(time.RFC3339Nano))
-		b.WriteString("\n")
-	}
-
-	return b.String()
-}
-
 func (p *chProvider) mountsActiveRows(ctx context.Context) ([]mountsActiveRow, error) {
 	rows, err := p.conn.Query(ctx, mountsActiveRowsQuery)
 	if err != nil {
@@ -364,15 +373,6 @@ func (p *chProvider) mountsActiveRows(ctx context.Context) ([]mountsActiveRow, e
 	}
 
 	return out, nil
-}
-
-func scanMountsActiveRow(rows rowsScanner) (mountsActiveRow, error) {
-	var row mountsActiveRow
-	if err := rows.Scan(&row.mountPath, &row.snapshotID, &row.updatedAt); err != nil {
-		return mountsActiveRow{}, fmt.Errorf("clickhouse: failed to scan mounts_active: %w", err)
-	}
-
-	return row, nil
 }
 
 func (p *chProvider) queueUpdate(fp string) {

@@ -224,22 +224,6 @@ const infoUserSubDirsQuery = `
 	WHERE s.age = ?
 `
 
-type chBaseDirsReader struct {
-	cfg Config
-
-	conn ch.Conn
-
-	snapshot *activeMountsSnapshot
-	closed   atomic.Bool
-
-	owners map[uint32]string
-
-	groupCache *basedirs.GroupCache
-	userCache  *basedirs.UserCache
-
-	mountPoints basedirs.MountPoints
-}
-
 type iterRows interface {
 	Next() bool
 	Scan(dest ...any) error
@@ -335,26 +319,20 @@ func (s *userUsageScanned) toUsage(r *chBaseDirsReader) *basedirs.Usage {
 	}
 }
 
-type subDirScanned struct {
-	subdir       string
-	numFiles     uint64
-	sizeFiles    uint64
-	lastModified time.Time
-	usageMap     map[uint16]uint64
-}
+type chBaseDirsReader struct {
+	cfg Config
 
-func (s *subDirScanned) scanFrom(rows iterRows) error {
-	return rows.Scan(&s.subdir, &s.numFiles, &s.sizeFiles, &s.lastModified, &s.usageMap)
-}
+	conn ch.Conn
 
-func (s *subDirScanned) toSubDir() *basedirs.SubDir {
-	return &basedirs.SubDir{
-		SubDir:       s.subdir,
-		NumFiles:     s.numFiles,
-		SizeFiles:    s.sizeFiles,
-		LastModified: s.lastModified,
-		FileUsage:    convertUsageMap(s.usageMap),
-	}
+	snapshot *activeMountsSnapshot
+	closed   atomic.Bool
+
+	owners map[uint32]string
+
+	groupCache *basedirs.GroupCache
+	userCache  *basedirs.UserCache
+
+	mountPoints basedirs.MountPoints
 }
 
 func (r *chBaseDirsReader) snapshotGroupUsage(age db.DirGUTAge) ([]*basedirs.Usage, error) {
@@ -625,6 +603,31 @@ func (r *chBaseDirsReader) scanGroupUsageRows(rows iterRows) ([]*basedirs.Usage,
 	})
 }
 
+func scanUsageRows(
+	rows iterRows,
+	what string,
+	scan func(iterRows) (*basedirs.Usage, error),
+) ([]*basedirs.Usage, error) {
+	defer func() { _ = rows.Close() }()
+
+	out := make([]*basedirs.Usage, 0)
+
+	for rows.Next() {
+		usage, err := scan(rows)
+		if err != nil {
+			return nil, fmt.Errorf("clickhouse: failed to scan %s usage: %w", what, err)
+		}
+
+		out = append(out, usage)
+	}
+
+	if err := rowsErr(rows); err != nil {
+		return nil, fmt.Errorf("clickhouse: %s usage iteration error: %w", what, err)
+	}
+
+	return out, nil
+}
+
 func (r *chBaseDirsReader) UserUsage(age db.DirGUTAge) ([]*basedirs.Usage, error) {
 	if err := r.ensureOpen(); err != nil {
 		return nil, err
@@ -651,31 +654,6 @@ func (r *chBaseDirsReader) scanUserUsageRows(rows iterRows) ([]*basedirs.Usage, 
 
 		return row.toUsage(r), nil
 	})
-}
-
-func scanUsageRows(
-	rows iterRows,
-	what string,
-	scan func(iterRows) (*basedirs.Usage, error),
-) ([]*basedirs.Usage, error) {
-	defer func() { _ = rows.Close() }()
-
-	out := make([]*basedirs.Usage, 0)
-
-	for rows.Next() {
-		usage, err := scan(rows)
-		if err != nil {
-			return nil, fmt.Errorf("clickhouse: failed to scan %s usage: %w", what, err)
-		}
-
-		out = append(out, usage)
-	}
-
-	if err := rowsErr(rows); err != nil {
-		return nil, fmt.Errorf("clickhouse: %s usage iteration error: %w", what, err)
-	}
-
-	return out, nil
 }
 
 func (r *chBaseDirsReader) GroupSubDirs(gid uint32, basedir string, age db.DirGUTAge) ([]*basedirs.SubDir, error) {
@@ -740,15 +718,6 @@ func scanSubDirRows(rows iterRows, what string) ([]*basedirs.SubDir, error) {
 	}
 
 	return out, nil
-}
-
-func convertUsageMap(m map[uint16]uint64) basedirs.UsageBreakdownByType {
-	out := make(basedirs.UsageBreakdownByType, len(m))
-	for k, v := range m {
-		out[db.DirGUTAFileType(k)] = v
-	}
-
-	return out
 }
 
 func (r *chBaseDirsReader) History(gid uint32, path string) ([]basedirs.History, error) {
@@ -1053,4 +1022,35 @@ func newClickHouseBaseDirsReaderWithSnapshot(
 	}
 
 	return r, nil
+}
+
+type subDirScanned struct {
+	subdir       string
+	numFiles     uint64
+	sizeFiles    uint64
+	lastModified time.Time
+	usageMap     map[uint16]uint64
+}
+
+func (s *subDirScanned) scanFrom(rows iterRows) error {
+	return rows.Scan(&s.subdir, &s.numFiles, &s.sizeFiles, &s.lastModified, &s.usageMap)
+}
+
+func (s *subDirScanned) toSubDir() *basedirs.SubDir {
+	return &basedirs.SubDir{
+		SubDir:       s.subdir,
+		NumFiles:     s.numFiles,
+		SizeFiles:    s.sizeFiles,
+		LastModified: s.lastModified,
+		FileUsage:    convertUsageMap(s.usageMap),
+	}
+}
+
+func convertUsageMap(m map[uint16]uint64) basedirs.UsageBreakdownByType {
+	out := make(basedirs.UsageBreakdownByType, len(m))
+	for k, v := range m {
+		out[db.DirGUTAFileType(k)] = v
+	}
+
+	return out
 }

@@ -146,6 +146,14 @@ func insertAndReadSchemaVersionStats(ctx context.Context, execer ch.Conn) (uint6
 	return schemaVersionStatsFromDB(ctx, execer)
 }
 
+func insertSchemaVersion(ctx context.Context, execer ch.Conn) error {
+	if err := execer.Exec(ctx, insertSchemaVersionStmt, currentSchemaVersion); err != nil {
+		return fmt.Errorf("clickhouse: failed to set schema version: %w", err)
+	}
+
+	return nil
+}
+
 func schemaVersionStatsFromDB(ctx context.Context, conn ch.Conn) (uint64, *uint32, *uint32, error) {
 	rows, err := conn.Query(ctx, schemaVersionStatsQuery)
 	if err != nil {
@@ -203,12 +211,4 @@ func formatNullableUint32(v *uint32) string {
 	}
 
 	return strconv.FormatUint(uint64(*v), 10)
-}
-
-func insertSchemaVersion(ctx context.Context, execer ch.Conn) error {
-	if err := execer.Exec(ctx, insertSchemaVersionStmt, currentSchemaVersion); err != nil {
-		return fmt.Errorf("clickhouse: failed to set schema version: %w", err)
-	}
-
-	return nil
 }
