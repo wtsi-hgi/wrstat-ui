@@ -34,8 +34,8 @@ import (
 )
 
 var (
-	prefix   string
-	viewOnly bool
+	cleanPrefix   string
+	cleanViewOnly bool
 )
 
 var cleancmd = &cobra.Command{
@@ -57,7 +57,7 @@ the flag were not supplied.
 			warn("clean: ignoring legacy basedirs DB path argument")
 		}
 
-		if prefix == "" {
+		if cleanPrefix == "" {
 			die("need to specify a path prefix to keep")
 		}
 
@@ -66,13 +66,7 @@ the flag were not supplied.
 			die("%s", err)
 		}
 
-		if viewOnly {
-			err = printInvalidHistory(m, prefix)
-		} else if err = m.CleanHistoryForMount(prefix); err != nil {
-			err = fmt.Errorf("error cleaning clickhouse history: %w", err)
-		}
-
-		if err != nil {
+		if err := cleanHistory(m, cleanPrefix, cleanViewOnly); err != nil {
 			die("%s", err)
 		}
 	},
@@ -81,31 +75,39 @@ the flag were not supplied.
 func openCleanHistoryMaintainer() (basedirs.HistoryMaintainer, error) {
 	loadClickhouseDotEnv()
 
-	cfg, err := clickhouseConfigFromEnvAndFlags(
-		clickhouseDSN,
-		clickhouseDatabase,
-		"",
-		nil,
-		"",
-		0,
-		clickhouseQueryTO,
-	)
+	cfg, err := clickhouseConfigFromEnvAndFlags(clickhouseConfigInput{
+		dsnFlag:          clickhouseDSN,
+		databaseFlag:     clickhouseDatabase,
+		queryTimeoutFlag: clickhouseQueryTO,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to build ClickHouse config: %w", err)
 	}
 
 	m, err := clickhouse.NewHistoryMaintainer(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open clickhouse history maintainer: %w", err)
+		return nil, fmt.Errorf("failed to open ClickHouse history maintainer: %w", err)
 	}
 
 	return m, nil
 }
 
+func cleanHistory(m basedirs.HistoryMaintainer, prefix string, viewOnly bool) error {
+	if viewOnly {
+		return printInvalidHistory(m, prefix)
+	}
+
+	if err := m.CleanHistoryForMount(prefix); err != nil {
+		return fmt.Errorf("error cleaning ClickHouse history: %w", err)
+	}
+
+	return nil
+}
+
 func printInvalidHistory(m basedirs.HistoryMaintainer, prefix string) error {
 	toRemove, err := m.FindInvalidHistory(prefix)
 	if err != nil {
-		return fmt.Errorf("failed to read clickhouse history: %w", err)
+		return fmt.Errorf("failed to read ClickHouse history: %w", err)
 	}
 
 	for _, k := range toRemove {
@@ -118,8 +120,14 @@ func printInvalidHistory(m basedirs.HistoryMaintainer, prefix string) error {
 func init() {
 	RootCmd.AddCommand(cleancmd)
 
-	cleancmd.Flags().StringVarP(&prefix, "prefix", "p", "", "path prefix to keep in history")
-	cleancmd.Flags().BoolVarP(&viewOnly, "view", "v", false, "show the keys that will be removed without deleting them")
+	cleancmd.Flags().StringVarP(&cleanPrefix, "prefix", "p", "", "path prefix to keep in history")
+	cleancmd.Flags().BoolVarP(
+		&cleanViewOnly,
+		"view",
+		"v",
+		false,
+		"show the keys that will be removed without deleting them",
+	)
 	addClickhouseConnectionFlags(cleancmd.Flags(), &clickhouseDSN, &clickhouseDatabase)
 	addClickhouseQueryTimeoutFlag(cleancmd.Flags(), &clickhouseQueryTO)
 }

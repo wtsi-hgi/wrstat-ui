@@ -1,3 +1,29 @@
+/*******************************************************************************
+ * Copyright (c) 2026 Genome Research Ltd.
+ *
+ * Author: Sendu Bala <sb10@sanger.ac.uk>
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining
+ * a copy of this software and associated documentation files (the
+ * "Software"), to deal in the Software without restriction, including
+ * without limitation the rights to use, copy, modify, merge, publish,
+ * distribute, sublicense, and/or sell copies of the Software, and to
+ * permit persons to whom the Software is furnished to do so, subject to
+ * the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included
+ * in all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+ * IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+ * CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+ * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+ * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ ******************************************************************************/
+
+// Package mountpath encodes and decodes dataset directory mount-path keys.
 package mountpath
 
 import (
@@ -15,9 +41,17 @@ const (
 )
 
 var (
-	ErrEmptyOutputDir          = errors.New("empty output dir")
-	ErrDatasetDirBadFormat     = errors.New("dataset dir basename must be <version>_<mountKey>")
-	ErrDatasetDirBadMountPath  = errors.New("dataset dir mount path must be absolute")
+	// ErrEmptyOutputDir is returned when mount path derivation is given an
+	// empty output directory.
+	ErrEmptyOutputDir = errors.New("empty output dir")
+	// ErrDatasetDirBadFormat is returned when neither the output directory nor
+	// its parent has a dataset directory basename.
+	ErrDatasetDirBadFormat = errors.New("dataset dir basename must be <version>_<mountKey>")
+	// ErrDatasetDirBadMountPath is returned when a decoded mount path is not
+	// absolute.
+	ErrDatasetDirBadMountPath = errors.New("dataset dir mount path must be absolute")
+	// ErrDatasetDirEmptyMountKey is returned when the dataset basename has no
+	// usable mount key.
 	ErrDatasetDirEmptyMountKey = errors.New("dataset dir mount key is empty")
 )
 
@@ -36,26 +70,20 @@ func FromOutputDir(outputDir string) (string, error) {
 	}
 
 	clean := filepath.Clean(outputDir)
-	base := filepath.Base(clean)
-
-	mountPath, ok, err := mountPathFromDatasetDirBase(base)
-	if err != nil {
-		return "", err
+	candidates := [...]string{
+		filepath.Base(clean),
+		filepath.Base(filepath.Dir(clean)),
 	}
 
-	if ok {
-		return mountPath, nil
-	}
+	for _, base := range candidates {
+		mountPath, ok, err := mountPathFromDatasetDirBase(base)
+		if err != nil {
+			return "", err
+		}
 
-	parentBase := filepath.Base(filepath.Dir(clean))
-
-	mountPath, ok, err = mountPathFromDatasetDirBase(parentBase)
-	if err != nil {
-		return "", err
-	}
-
-	if ok {
-		return mountPath, nil
+		if ok {
+			return mountPath, nil
+		}
 	}
 
 	return "", ErrDatasetDirBadFormat

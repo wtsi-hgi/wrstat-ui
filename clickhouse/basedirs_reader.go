@@ -144,10 +144,28 @@ const infoGroupUsageSnapshotQuery = `
 	WHERE u.age = ? AND %s
 `
 
+const infoGroupUsageQuery = `
+	WITH active AS (SELECT mount_path, snapshot_id FROM wrstat_mounts_active)
+	SELECT count()
+	FROM wrstat_basedirs_group_usage u
+	ANY INNER JOIN active a
+	ON u.mount_path = a.mount_path AND u.snapshot_id = a.snapshot_id
+	WHERE u.age = ?
+`
+
 const infoUserUsageSnapshotQuery = `
 	SELECT count()
 	FROM wrstat_basedirs_user_usage u
 	WHERE u.age = ? AND %s
+`
+
+const infoUserUsageQuery = `
+	WITH active AS (SELECT mount_path, snapshot_id FROM wrstat_mounts_active)
+	SELECT count()
+	FROM wrstat_basedirs_user_usage u
+	ANY INNER JOIN active a
+	ON u.mount_path = a.mount_path AND u.snapshot_id = a.snapshot_id
+	WHERE u.age = ?
 `
 
 const infoGroupHistorySnapshotQuery = `
@@ -158,6 +176,16 @@ const infoGroupHistorySnapshotQuery = `
 	WHERE %s
 `
 
+const infoGroupHistoryQuery = `
+	WITH active AS (SELECT DISTINCT mount_path FROM wrstat_mounts_active)
+	SELECT
+		countDistinct((h.mount_path, h.gid)) AS group_mount_combos,
+		count() AS group_histories
+	FROM wrstat_basedirs_history h
+	ANY INNER JOIN active a
+	ON h.mount_path = a.mount_path
+`
+
 const infoGroupSubDirsSnapshotQuery = `
 	SELECT
 		countDistinct((gid, basedir)) AS group_subdir_combos,
@@ -166,12 +194,34 @@ const infoGroupSubDirsSnapshotQuery = `
 	WHERE s.age = ? AND %s
 `
 
+const infoGroupSubDirsQuery = `
+	WITH active AS (SELECT mount_path, snapshot_id FROM wrstat_mounts_active)
+	SELECT
+		countDistinct((gid, basedir)) AS group_subdir_combos,
+		count() AS group_subdirs
+	FROM wrstat_basedirs_group_subdirs s
+	ANY INNER JOIN active a
+	ON s.mount_path = a.mount_path AND s.snapshot_id = a.snapshot_id
+	WHERE s.age = ?
+`
+
 const infoUserSubDirsSnapshotQuery = `
 	SELECT
 		countDistinct((uid, basedir)) AS user_subdir_combos,
 		count() AS user_subdirs
 	FROM wrstat_basedirs_user_subdirs s
 	WHERE s.age = ? AND %s
+`
+
+const infoUserSubDirsQuery = `
+	WITH active AS (SELECT mount_path, snapshot_id FROM wrstat_mounts_active)
+	SELECT
+		countDistinct((uid, basedir)) AS user_subdir_combos,
+		count() AS user_subdirs
+	FROM wrstat_basedirs_user_subdirs s
+	ANY INNER JOIN active a
+	ON s.mount_path = a.mount_path AND s.snapshot_id = a.snapshot_id
+	WHERE s.age = ?
 `
 
 type chBaseDirsReader struct {
@@ -363,29 +413,32 @@ func (r *chBaseDirsReader) snapshotGroupSubDirs(
 	basedir string,
 	age db.DirGUTAge,
 ) ([]*basedirs.SubDir, error) {
-	mounts := r.snapshot.all()
-	if len(mounts) == 0 {
-		return nil, basedirs.ErrNoSuchUserOrGroup
-	}
-
-	ctx, cancel := configQueryContext(r.cfg)
-	defer cancel()
-
-	query, args := activeMountsQuery(
+	return r.snapshotSubDirs(
 		groupSubDirsSnapshotQuery,
-		"s.mount_path",
-		"s.snapshot_id",
-		mounts,
+		"group",
 		gid,
 		basedir,
-		uint8(age),
+		age,
 	)
-
-	return r.subDirs(ctx, "group", query, args...)
 }
 
 func (r *chBaseDirsReader) snapshotUserSubDirs(
 	uid uint32,
+	basedir string,
+	age db.DirGUTAge,
+) ([]*basedirs.SubDir, error) {
+	return r.snapshotSubDirs(
+		userSubDirsSnapshotQuery,
+		"user",
+		uid,
+		basedir,
+		age,
+	)
+}
+
+func (r *chBaseDirsReader) snapshotSubDirs(
+	queryFmt, what string,
+	id uint32,
 	basedir string,
 	age db.DirGUTAge,
 ) ([]*basedirs.SubDir, error) {
@@ -398,16 +451,16 @@ func (r *chBaseDirsReader) snapshotUserSubDirs(
 	defer cancel()
 
 	query, args := activeMountsQuery(
-		userSubDirsSnapshotQuery,
+		queryFmt,
 		"s.mount_path",
 		"s.snapshot_id",
 		mounts,
-		uid,
+		id,
 		basedir,
 		uint8(age),
 	)
 
-	return r.subDirs(ctx, "user", query, args...)
+	return r.subDirs(ctx, what, query, args...)
 }
 
 func (r *chBaseDirsReader) liveMountTimestamps(ctx context.Context) (map[string]time.Time, error) {
@@ -699,15 +752,15 @@ func (r *chBaseDirsReader) History(gid uint32, path string) ([]basedirs.History,
 		return nil, err
 	}
 
-	mp := r.mountPoints.PrefixOf(path)
-	if mp == "" {
+	mountPath := r.mountPoints.PrefixOf(path)
+	if mountPath == "" {
 		return nil, basedirs.ErrInvalidBasePath
 	}
 
 	ctx, cancel := configQueryContext(r.cfg)
 	defer cancel()
 
-	rows, err := r.conn.Query(ctx, historyQuery, mp, gid)
+	rows, err := r.conn.Query(ctx, historyQuery, mountPath, gid)
 	if err != nil {
 		return nil, fmt.Errorf("clickhouse: failed to query history: %w", err)
 	}
@@ -819,16 +872,7 @@ func (r *chBaseDirsReader) fillInfoGroupUsage(ctx context.Context, info *basedir
 		)
 	}
 
-	query := `
-		WITH active AS (SELECT mount_path, snapshot_id FROM wrstat_mounts_active)
-		SELECT count()
-		FROM wrstat_basedirs_group_usage u
-		ANY INNER JOIN active a
-		ON u.mount_path = a.mount_path AND u.snapshot_id = a.snapshot_id
-		WHERE u.age = ?
-	`
-
-	return r.queryCount(ctx, query, &info.GroupDirCombos, ageAll)
+	return r.queryCount(ctx, infoGroupUsageQuery, &info.GroupDirCombos, ageAll)
 }
 
 func (r *chBaseDirsReader) fillInfoUserUsage(ctx context.Context, info *basedirs.DBInfo, ageAll uint8) error {
@@ -844,16 +888,7 @@ func (r *chBaseDirsReader) fillInfoUserUsage(ctx context.Context, info *basedirs
 		)
 	}
 
-	query := `
-		WITH active AS (SELECT mount_path, snapshot_id FROM wrstat_mounts_active)
-		SELECT count()
-		FROM wrstat_basedirs_user_usage u
-		ANY INNER JOIN active a
-		ON u.mount_path = a.mount_path AND u.snapshot_id = a.snapshot_id
-		WHERE u.age = ?
-	`
-
-	return r.queryCount(ctx, query, &info.UserDirCombos, ageAll)
+	return r.queryCount(ctx, infoUserUsageQuery, &info.UserDirCombos, ageAll)
 }
 
 func (r *chBaseDirsReader) fillInfoGroupHistory(ctx context.Context, info *basedirs.DBInfo) error {
@@ -868,17 +903,7 @@ func (r *chBaseDirsReader) fillInfoGroupHistory(ctx context.Context, info *based
 		)
 	}
 
-	query := `
-		WITH active AS (SELECT DISTINCT mount_path FROM wrstat_mounts_active)
-		SELECT
-			countDistinct((h.mount_path, h.gid)) AS group_mount_combos,
-			count() AS group_histories
-		FROM wrstat_basedirs_history h
-		ANY INNER JOIN active a
-		ON h.mount_path = a.mount_path
-	`
-
-	return r.queryCountPair(ctx, query, &info.GroupMountCombos, &info.GroupHistories)
+	return r.queryCountPair(ctx, infoGroupHistoryQuery, &info.GroupMountCombos, &info.GroupHistories)
 }
 
 func (r *chBaseDirsReader) fillInfoGroupSubDirs(ctx context.Context, info *basedirs.DBInfo, ageAll uint8) error {
@@ -895,18 +920,7 @@ func (r *chBaseDirsReader) fillInfoGroupSubDirs(ctx context.Context, info *based
 		)
 	}
 
-	query := `
-		WITH active AS (SELECT mount_path, snapshot_id FROM wrstat_mounts_active)
-		SELECT
-			countDistinct((gid, basedir)) AS group_subdir_combos,
-			count() AS group_subdirs
-		FROM wrstat_basedirs_group_subdirs s
-		ANY INNER JOIN active a
-		ON s.mount_path = a.mount_path AND s.snapshot_id = a.snapshot_id
-		WHERE s.age = ?
-	`
-
-	return r.queryCountPair(ctx, query, &info.GroupSubDirCombos, &info.GroupSubDirs, ageAll)
+	return r.queryCountPair(ctx, infoGroupSubDirsQuery, &info.GroupSubDirCombos, &info.GroupSubDirs, ageAll)
 }
 
 func (r *chBaseDirsReader) fillInfoUserSubDirs(ctx context.Context, info *basedirs.DBInfo, ageAll uint8) error {
@@ -923,18 +937,7 @@ func (r *chBaseDirsReader) fillInfoUserSubDirs(ctx context.Context, info *basedi
 		)
 	}
 
-	query := `
-		WITH active AS (SELECT mount_path, snapshot_id FROM wrstat_mounts_active)
-		SELECT
-			countDistinct((uid, basedir)) AS user_subdir_combos,
-			count() AS user_subdirs
-		FROM wrstat_basedirs_user_subdirs s
-		ANY INNER JOIN active a
-		ON s.mount_path = a.mount_path AND s.snapshot_id = a.snapshot_id
-		WHERE s.age = ?
-	`
-
-	return r.queryCountPair(ctx, query, &info.UserSubDirCombos, &info.UserSubDirs, ageAll)
+	return r.queryCountPair(ctx, infoUserSubDirsQuery, &info.UserSubDirCombos, &info.UserSubDirs, ageAll)
 }
 
 func (r *chBaseDirsReader) queryCount(ctx context.Context, query string, dest *int, args ...any) error {
@@ -951,9 +954,9 @@ func (r *chBaseDirsReader) queryCount(ctx context.Context, query string, dest *i
 		return nil
 	}
 
-	n, err := scanUint64(rows)
-	if err != nil {
-		return fmt.Errorf("clickhouse: failed to scan basedirs info: %w", err)
+	var n uint64
+	if scanErr := rows.Scan(&n); scanErr != nil {
+		return fmt.Errorf("clickhouse: failed to scan basedirs info: %w", scanErr)
 	}
 
 	i, err := safeUint64ToInt(n)
@@ -974,16 +977,16 @@ func (r *chBaseDirsReader) queryCountPair(ctx context.Context, query string, des
 
 	defer func() { _ = rows.Close() }()
 
-	a, b, ok, err := scanUint64Pair(rows)
-	if err != nil {
-		return fmt.Errorf("clickhouse: failed to scan basedirs info: %w", err)
-	}
-
-	if !ok {
+	if !rows.Next() {
 		*destA = 0
 		*destB = 0
 
 		return nil
+	}
+
+	var a, b uint64
+	if scanErr := rows.Scan(&a, &b); scanErr != nil {
+		return fmt.Errorf("clickhouse: failed to scan basedirs info: %w", scanErr)
 	}
 
 	return setIntPairFromUint64(destA, destB, a, b)
@@ -1004,28 +1007,6 @@ func setIntPairFromUint64(destA, destB *int, a, b uint64) error {
 	*destB = bi
 
 	return nil
-}
-
-func scanUint64(rows iterRows) (uint64, error) {
-	var n uint64
-	if err := rows.Scan(&n); err != nil {
-		return 0, err
-	}
-
-	return n, nil
-}
-
-func scanUint64Pair(rows iterRows) (uint64, uint64, bool, error) {
-	if !rows.Next() {
-		return 0, 0, false, nil
-	}
-
-	var a, b uint64
-	if err := rows.Scan(&a, &b); err != nil {
-		return 0, 0, false, err
-	}
-
-	return a, b, true, nil
 }
 
 func (r *chBaseDirsReader) Close() error {

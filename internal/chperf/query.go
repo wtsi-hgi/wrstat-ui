@@ -27,10 +27,12 @@
 package chperf
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
-	"sort"
+	"io"
+	"slices"
 	"strings"
 	"time"
 
@@ -112,11 +114,7 @@ func buildQueryContext(
 
 	dir, err := selectDir(p, opts.Dir, printf)
 	if err != nil {
-		_ = inspector.Close()
-		_ = client.Close()
-		_ = p.Close()
-
-		return queryContext{}, err
+		return queryContext{}, errors.Join(err, closeQueryResources(inspector, client, p))
 	}
 
 	return queryContext{
@@ -139,20 +137,29 @@ func openAll(
 
 	client, err := api.NewQueryClient()
 	if err != nil {
-		_ = p.Close()
-
-		return nil, nil, nil, err
+		return nil, nil, nil, errors.Join(err, closeQueryResources(p))
 	}
 
 	inspector, err := api.NewQueryInspector()
 	if err != nil {
-		_ = client.Close()
-		_ = p.Close()
-
-		return nil, nil, nil, err
+		return nil, nil, nil, errors.Join(err, closeQueryResources(client, p))
 	}
 
 	return p, client, inspector, nil
+}
+
+func closeQueryResources(closers ...io.Closer) error {
+	var err error
+
+	for _, closer := range closers {
+		if closer == nil {
+			continue
+		}
+
+		err = errors.Join(err, closer.Close())
+	}
+
+	return err
 }
 
 func selectDir(
@@ -313,9 +320,9 @@ func mountPathForDir(qctx queryContext) string {
 
 	mountPaths := DecodeMountPaths(mt)
 
-	for _, mp := range mountPaths {
-		if strings.HasPrefix(qctx.dir, mp) {
-			return mp
+	for _, mountPath := range mountPaths {
+		if strings.HasPrefix(qctx.dir, mountPath) {
+			return mountPath
 		}
 	}
 
@@ -407,8 +414,8 @@ func activeMountsFreshness(mt map[string]time.Time) []activeMountFreshness {
 		})
 	}
 
-	sort.Slice(freshness, func(i, j int) bool {
-		return freshness[i].MountPath < freshness[j].MountPath
+	slices.SortFunc(freshness, func(a, b activeMountFreshness) int {
+		return cmp.Compare(a.MountPath, b.MountPath)
 	})
 
 	return freshness
@@ -633,9 +640,5 @@ type queryContext struct {
 }
 
 func (q *queryContext) close() error {
-	return errors.Join(
-		q.inspector.Close(),
-		q.client.Close(),
-		q.provider.Close(),
-	)
+	return closeQueryResources(q.inspector, q.client, q.provider)
 }

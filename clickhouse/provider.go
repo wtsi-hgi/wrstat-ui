@@ -173,7 +173,7 @@ func (p *chProvider) defaultBuildReaders(
 }
 
 func (p *chProvider) captureActiveMountsState(parent context.Context) (*activeMountsSnapshot, string, error) {
-	ctx, cancel := context.WithTimeout(parent, queryTimeout(p.cfg))
+	ctx, cancel := queryContext(parent, queryTimeout(p.cfg))
 	defer cancel()
 
 	rows, err := p.mountsActiveRows(ctx)
@@ -210,7 +210,10 @@ func (p *chProvider) Close() error {
 		return nil
 	}
 
-	return p.conn.Close()
+	conn := p.conn
+	p.conn = nil
+
+	return conn.Close()
 }
 
 func (p *chProvider) stopPolling() {
@@ -302,7 +305,7 @@ func (p *chProvider) pollOnce(ctx context.Context) {
 }
 
 func (p *chProvider) mountsActiveFingerprint(parent context.Context) (string, error) {
-	ctx, cancel := context.WithTimeout(parent, queryTimeout(p.cfg))
+	ctx, cancel := queryContext(parent, queryTimeout(p.cfg))
 	defer cancel()
 
 	rows, err := p.mountsActiveRows(ctx)
@@ -368,8 +371,12 @@ func (p *chProvider) queueUpdate(fp string) {
 	p.hasPendingUpdate = true
 	p.mu.Unlock()
 
+	signal(p.updateCh)
+}
+
+func signal(ch chan struct{}) {
 	select {
-	case p.updateCh <- struct{}{}:
+	case ch <- struct{}{}:
 	default:
 	}
 }
@@ -383,10 +390,7 @@ func (p *chProvider) queueError(err error) {
 	p.pendingErrs = append(p.pendingErrs, err)
 	p.mu.Unlock()
 
-	select {
-	case p.errCh <- struct{}{}:
-	default:
-	}
+	signal(p.errCh)
 }
 
 func (p *chProvider) updateLoop(ctx context.Context) {
@@ -448,15 +452,15 @@ func (p *chProvider) swapReadersAndInvoke(ctx context.Context, targetFingerprint
 		publishedFingerprint,
 	)
 
-	invokeCallbackOnFreshGoroutine(cb)
+	invokeOnFreshGoroutine(cb)
 
 	p.closeOldReaders(oldDB, oldBD)
 
 	return true
 }
 
-func invokeCallbackOnFreshGoroutine(cb func()) {
-	if cb == nil {
+func invokeOnFreshGoroutine(fn func()) {
+	if fn == nil {
 		return
 	}
 
@@ -465,7 +469,7 @@ func invokeCallbackOnFreshGoroutine(cb func()) {
 	go func() {
 		defer close(done)
 
-		cb()
+		fn()
 	}()
 
 	<-done
@@ -558,24 +562,12 @@ func (p *chProvider) drainErrors(ctx context.Context) {
 			return
 		}
 
-		invokeErrorCallbackOnFreshGoroutine(cb, err)
+		if cb != nil {
+			invokeOnFreshGoroutine(func() {
+				cb(err)
+			})
+		}
 	}
-}
-
-func invokeErrorCallbackOnFreshGoroutine(cb func(error), err error) {
-	if cb == nil {
-		return
-	}
-
-	done := make(chan struct{})
-
-	go func() {
-		defer close(done)
-
-		cb(err)
-	}()
-
-	<-done
 }
 
 func (p *chProvider) pendingError() (func(error), error) {

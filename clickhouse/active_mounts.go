@@ -35,7 +35,10 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/internal/mountpath"
 )
 
-const activeMountTupleArgCount = 2
+const (
+	noRowsCondition      = "1 = 0"
+	activeMountTupleArgs = 2
+)
 
 // ActiveSnapshotMatches reports whether mountPath is already active for the
 // deterministic snapshot derived from updatedAt.
@@ -84,7 +87,7 @@ func activeMountsTupleCondition(
 	mounts []activeMount,
 ) (string, []any) {
 	if len(mounts) == 0 {
-		return "1 = 0", nil
+		return noRowsCondition, nil
 	}
 
 	var b strings.Builder
@@ -94,7 +97,7 @@ func activeMountsTupleCondition(
 	b.WriteString(snapshotColumn)
 	b.WriteString(") IN (")
 
-	args := make([]any, 0, len(mounts)*activeMountTupleArgCount)
+	args := make([]any, 0, len(mounts)*activeMountTupleArgs)
 	for i, mount := range mounts {
 		if i > 0 {
 			b.WriteString(", ")
@@ -125,7 +128,7 @@ func activeMountPathsCondition(
 	mounts []activeMount,
 ) (string, []any) {
 	if len(mounts) == 0 {
-		return "1 = 0", nil
+		return noRowsCondition, nil
 	}
 
 	var b strings.Builder

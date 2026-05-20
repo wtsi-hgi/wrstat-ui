@@ -114,7 +114,7 @@ new snapshots become active. Use --poll-interval or WRSTAT_POLL_INTERVAL to
 control how often refresh checks run. Data freshness in reports comes from the
 snapshot updated_at timestamp stored in ClickHouse.
 `,
-	Run: func(cmd *cobra.Command, args []string) {
+	Run: func(_ *cobra.Command, args []string) {
 		loadClickhouseDotEnv()
 
 		if len(args) > 0 {
@@ -123,78 +123,74 @@ snapshot updated_at timestamp stored in ClickHouse.
 
 		checkServerArgs()
 
-		mountpoints, err := parseOptionalMountpoints(mounts)
+		mountpoints, err := parseMountpointsFlag(mounts)
 		if err != nil {
-			die("failed to parse mounts file: %s", err)
+			die("%s", err)
 		}
 
 		checkOAuthArgs()
 
-		logWriter := setServerLogger(serverLogPath)
+		s := newConfiguredServer(serverLogPath)
 
-		s := server.New(logWriter)
-
-		err = s.EnableAuthWithServerToken(serverCert, serverKey, serverTokenBasename, authenticateDeny)
-		if err != nil {
-			die("failed to enable authentication: %s", err)
-		}
-
-		if oktaURL == "" {
-			oktaURL = serverBind
-		}
-
-		s.AddOIDCRoutes(oktaURL, oktaOAuthIssuer, oktaOAuthClientID, oktaOAuthClientSecret)
-
-		s.WhiteListGroups(whiteLister)
-
-		if areasPath != "" {
-			s.AddGroupAreas(areasCSVToMap(areasPath))
-		}
-
-		info("opening databases, please wait...")
-
-		cfg, err := clickhouseConfigFromEnvAndFlags(
-			clickhouseDSN,
-			clickhouseDatabase,
-			ownersPath,
-			mountpoints,
-			clickhousePoll,
-			sentinelPollFrequency,
-			clickhouseQueryTO,
-		)
-		if err != nil {
-			die("failed to build ClickHouse config: %s", err)
-		}
-
-		p, err := openClickhouseProvider(cfg)
-		if err != nil {
-			die("%s", err)
-		}
-		if setErr := s.SetProvider(p); setErr != nil {
-			_ = p.Close()
-			die("failed to set provider: %s", setErr)
-		}
-
-		err = s.AddTreePage()
-		if err != nil {
-			die("failed to add tree page: %s", err)
-		}
-
-		if spywareDB != "" {
-			if err = s.InitAnalyticsDB(spywareDB); err != nil {
-				die("failed to init spyware db: %s", err)
-			}
-		}
-
-		defer s.Stop()
-
-		sayStarted()
-
-		err = s.Start(serverBind, serverCert, serverKey)
-		if err != nil {
-			die("non-graceful stop: %s", err)
-		}
+		setServerClickHouseProvider(s, mountpoints)
+		addServerPages(s)
+		startServer(s)
 	},
+}
+
+var whiteListGIDs = map[string]struct{}{
+	"0":     {},
+	"1105":  {},
+	"1313":  {},
+	"1818":  {},
+	"15306": {},
+	"1662":  {},
+	"15394": {},
+	"1527":  {},
+	"15705": {},
+	"15449": {},
+}
+
+func setServerClickHouseProvider(s *server.Server, mountpoints []string) {
+	info("opening databases, please wait...")
+
+	cfg, err := clickhouseConfigFromEnvAndFlags(clickhouseConfigInput{
+		dsnFlag:             clickhouseDSN,
+		databaseFlag:        clickhouseDatabase,
+		ownersPath:          ownersPath,
+		mountpoints:         mountpoints,
+		pollIntervalFlag:    clickhousePoll,
+		pollIntervalDefault: sentinelPollFrequency,
+		queryTimeoutFlag:    clickhouseQueryTO,
+	})
+	if err != nil {
+		die("failed to build ClickHouse config: %s", err)
+	}
+
+	p, err := openClickhouseProvider(cfg)
+	if err != nil {
+		die("%s", err)
+	}
+
+	if err := s.SetProvider(p); err != nil {
+		_ = p.Close()
+
+		die("failed to set provider: %s", err)
+	}
+}
+
+func addServerPages(s *server.Server) {
+	if err := s.AddTreePage(); err != nil {
+		die("failed to add tree page: %s", err)
+	}
+
+	if spywareDB == "" {
+		return
+	}
+
+	if err := s.InitAnalyticsDB(spywareDB); err != nil {
+		die("failed to init spyware db: %s", err)
+	}
 }
 
 func checkServerArgs() {
@@ -213,19 +209,6 @@ func checkServerArgs() {
 	if ownersPath == "" {
 		die("you must supply --owners")
 	}
-}
-
-var whiteListGIDs = map[string]struct{}{
-	"0":     {},
-	"1105":  {},
-	"1313":  {},
-	"1818":  {},
-	"15306": {},
-	"1662":  {},
-	"15394": {},
-	"1527":  {},
-	"15705": {},
-	"15449": {},
 }
 
 func init() {
@@ -281,6 +264,42 @@ func whiteLister(gid string) bool {
 	_, ok := whiteListGIDs[gid]
 
 	return ok
+}
+
+func newConfiguredServer(logPath string) *server.Server {
+	s := server.New(setServerLogger(logPath))
+
+	if err := s.EnableAuthWithServerToken(
+		serverCert,
+		serverKey,
+		serverTokenBasename,
+		authenticateDeny,
+	); err != nil {
+		die("failed to enable authentication: %s", err)
+	}
+
+	if oktaURL == "" {
+		oktaURL = serverBind
+	}
+
+	s.AddOIDCRoutes(oktaURL, oktaOAuthIssuer, oktaOAuthClientID, oktaOAuthClientSecret)
+	s.WhiteListGroups(whiteLister)
+
+	if areasPath != "" {
+		s.AddGroupAreas(areasCSVToMap(areasPath))
+	}
+
+	return s
+}
+
+func startServer(s *server.Server) {
+	defer s.Stop()
+
+	sayStarted()
+
+	if err := s.Start(serverBind, serverCert, serverKey); err != nil {
+		die("non-graceful stop: %s", err)
+	}
 }
 
 // sayStarted logs to console that the server started. It does this a second

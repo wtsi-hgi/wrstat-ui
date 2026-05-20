@@ -55,7 +55,6 @@ const (
 	summariseMarkerPerm   = 0o600
 	clickhouseRecoverFlag = "clickhouse-recover"
 	completionMarkerName  = ".wrstat-ui-summarise-complete"
-	mountPathCandidateCap = 4
 )
 
 var (
@@ -260,26 +259,11 @@ func wireClickHouseOperations( //nolint:funlen
 
 	if bs != nil {
 		basedirsCloser = func(publish bool) error {
-			return closeSummariseBasedirsStore(bs, publish)
+			return summariseutil.CloseOrAbort(bs, publish)
 		}
 	}
 
 	return composeSummariseCloser(fiCloser, basedirsCloser, dw), nil
-}
-
-func setClickHouseBatchSize(batchSize int, targets ...any) {
-	if batchSize <= 0 {
-		return
-	}
-
-	for _, target := range targets {
-		setter, ok := target.(batchSizeSetter)
-		if !ok {
-			continue
-		}
-
-		setter.SetBatchSize(batchSize)
-	}
 }
 
 func composeSummariseCloser(
@@ -318,9 +302,7 @@ func setupBasedirsStore(
 		s, bs, quotaPath, basedirsConfig,
 		mountpoints, modtime,
 	); err != nil {
-		_ = bs.Close()
-
-		return nil, err
+		return nil, errors.Join(err, summariseutil.CloseOrAbort(bs, false))
 	}
 
 	return bs, nil
@@ -339,7 +321,7 @@ func addBasedirsSummariser(
 		return err
 	}
 
-	mps, err := parseOptionalMountpoints(mountpoints)
+	mps, err := parseMountpointsFlag(mountpoints)
 	if err != nil {
 		return err
 	}
@@ -354,8 +336,36 @@ func addBasedirsSummariser(
 	return nil
 }
 
-func closeSummariseBasedirsStore(store basedirs.Store, publish bool) error {
-	return summariseutil.CloseOrAbort(store, publish)
+func setClickHouseBatchSize(batchSize int, targets ...any) {
+	if batchSize <= 0 {
+		return
+	}
+
+	for _, target := range targets {
+		setter, ok := target.(batchSizeSetter)
+		if !ok {
+			continue
+		}
+
+		setter.SetBatchSize(batchSize)
+	}
+}
+
+func summariseWithHooks(s *summary.Summariser, hooks *summariseRunHooks) error {
+	err := s.Summarise()
+	if hooks != nil && hooks.close != nil {
+		err = errors.Join(err, hooks.close(err == nil))
+	}
+
+	if err != nil {
+		return err
+	}
+
+	if hooks == nil {
+		return nil
+	}
+
+	return writeSummariseCompletionMarker(hooks.completionTarget)
 }
 
 type batchSizeSetter interface {
@@ -524,7 +534,9 @@ func addClickHouseSummariseHooks(
 	s *summary.Summariser,
 	chTarget *clickHouseSummariseTarget,
 ) (*summariseRunHooks, error) {
-	closer, err := addClickHouseSummarisers(s, *chTarget)
+	closer, err := wireSummariseClickHouseOperations(
+		s, chTarget.cfg, chTarget.mountPath, chTarget.mountpoints, chTarget.modtime,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -561,20 +573,7 @@ func run(args []string) (err error) {
 		return err
 	}
 
-	if hooks == nil {
-		return s.Summarise()
-	}
-
-	err = s.Summarise()
-	if hooks.close != nil {
-		err = errors.Join(err, hooks.close(err == nil))
-	}
-
-	if err != nil {
-		return err
-	}
-
-	return writeSummariseCompletionMarker(hooks.completionTarget)
+	return summariseWithHooks(s, hooks)
 }
 
 func checkArgs(args []string) error {
@@ -709,29 +708,31 @@ func addGroupUserSummariser(s *summary.Summariser, groupUser string) error {
 	return nil
 }
 
-func addClickHouseSummarisers(
-	s *summary.Summariser,
-	target clickHouseSummariseTarget,
-) (func(bool) error, error) {
-	return wireSummariseClickHouseOperations(
-		s, target.cfg, target.mountPath, target.mountpoints, target.modtime,
-	)
-}
-
 func deriveMountPathForClickHouseSummarise(
 	basedirsDB, dirgutaDB, defaultDir string,
 ) (string, error) {
-	candidates := mountPathCandidates(
-		basedirsDB, dirgutaDB, defaultDir,
-	)
+	var lastErr error
 
-	return resolveFirstMountPath(candidates)
+	for _, c := range mountPathCandidates(basedirsDB, dirgutaDB, defaultDir) {
+		mp, err := mountpath.FromOutputDir(c)
+		if err == nil {
+			return mp, nil
+		}
+
+		lastErr = err
+	}
+
+	if lastErr == nil {
+		lastErr = errNoOutputDir
+	}
+
+	return "", lastErr
 }
 
 func mountPathCandidates(
 	basedirsDB, dirgutaDB, defaultDir string,
 ) []string {
-	candidates := make([]string, 0, mountPathCandidateCap)
+	var candidates []string
 
 	if defaultDir != "" {
 		candidates = append(candidates, defaultDir)
@@ -749,42 +750,18 @@ func mountPathCandidates(
 	return candidates
 }
 
-func resolveFirstMountPath(
-	candidates []string,
-) (string, error) {
-	var lastErr error
-
-	for _, c := range candidates {
-		mp, err := mountpath.FromOutputDir(c)
-		if err == nil {
-			return mp, nil
-		}
-
-		lastErr = err
-	}
-
-	if lastErr == nil {
-		lastErr = errNoOutputDir
-	}
-
-	return "", lastErr
-}
-
 func clickhouseSummariserConfig(
 	mountpoints string,
 ) (clickhouse.Config, error) {
-	mps, err := parseOptionalMountpoints(mountpoints)
+	mps, err := parseMountpointsFlag(mountpoints)
 	if err != nil {
 		return clickhouse.Config{}, err
 	}
 
-	return clickhouseConfigFromEnvAndFlags(
-		clickhouseDSN,
-		clickhouseDatabase,
-		"",
-		mps,
-		"",
-		0,
-		clickhouseQueryTO,
-	)
+	return clickhouseConfigFromEnvAndFlags(clickhouseConfigInput{
+		dsnFlag:          clickhouseDSN,
+		databaseFlag:     clickhouseDatabase,
+		mountpoints:      mps,
+		queryTimeoutFlag: clickhouseQueryTO,
+	})
 }

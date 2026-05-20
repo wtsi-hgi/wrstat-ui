@@ -80,9 +80,8 @@ func connectAndBootstrapWith(
 		return nil, err
 	}
 
-	err = ensureDatabaseExists(ctx, opts, database, queryTO, open)
-	if err != nil {
-		return nil, err
+	if ensureErr := ensureDatabaseExists(ctx, opts, database, queryTO, open); ensureErr != nil {
+		return nil, ensureErr
 	}
 
 	conn, err = openAndPingWithTimeout(ctx, opts, open, queryTO)
@@ -290,11 +289,12 @@ func validateConfig(cfg Config) error {
 		return err
 	}
 
-	if err := validateDSNProtocol(cfg.DSN); err != nil {
+	dsnURL, err := parseNativeDSN(cfg.DSN)
+	if err != nil {
 		return err
 	}
 
-	return validateDSNDatabase(cfg)
+	return validateDSNDatabase(cfg, dsnURL)
 }
 
 func validateRequiredConfig(cfg Config) error {
@@ -313,21 +313,21 @@ func validateRequiredConfig(cfg Config) error {
 	return nil
 }
 
-func validateDSNProtocol(dsn string) error {
+func parseNativeDSN(dsn string) (*url.URL, error) {
 	u, err := url.Parse(dsn)
 	if err != nil {
-		return fmt.Errorf("clickhouse: invalid DSN: %w", err)
+		return nil, fmt.Errorf("clickhouse: invalid DSN: %w", err)
 	}
 
 	if u.Scheme != "clickhouse" {
-		return errDSNNativeProtocol
+		return nil, errDSNNativeProtocol
 	}
 
-	return nil
+	return u, nil
 }
 
-func validateDSNDatabase(cfg Config) error {
-	dsnDB, err := databaseFromDSN(cfg.DSN)
+func validateDSNDatabase(cfg Config, dsnURL *url.URL) error {
+	dsnDB, err := databaseFromDSNURL(dsnURL)
 	if err != nil {
 		return err
 	}
@@ -342,20 +342,6 @@ func validateDSNDatabase(cfg Config) error {
 	}
 
 	return nil
-}
-
-func databaseFromDSN(dsn string) (string, error) {
-	u, err := url.Parse(dsn)
-	if err != nil {
-		return "", fmt.Errorf("clickhouse: invalid DSN: %w", err)
-	}
-
-	db := u.Query().Get("database")
-	if db == "" {
-		return "", errDSNMissingDatabase
-	}
-
-	return db, nil
 }
 
 func optionsFromConfig(cfg Config) (*ch.Options, error) {
@@ -391,4 +377,13 @@ func queryTimeout(cfg Config) time.Duration {
 	}
 
 	return defaultQueryTimeout
+}
+
+func databaseFromDSNURL(u *url.URL) (string, error) {
+	db := u.Query().Get("database")
+	if db == "" {
+		return "", errDSNMissingDatabase
+	}
+
+	return db, nil
 }

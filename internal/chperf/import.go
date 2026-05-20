@@ -30,9 +30,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -123,7 +124,7 @@ func findDatasets(baseDir string) ([]string, error) {
 		return nil, fmt.Errorf("%w: %q", ErrNoDatasets, baseDir)
 	}
 
-	sort.Strings(dirs)
+	slices.Sort(dirs)
 
 	return dirs, nil
 }
@@ -134,6 +135,8 @@ func addImportReportOperations(
 	parallelism int,
 	totalDuration time.Duration,
 ) {
+	totalRecords := totalImportRecords(results)
+
 	for _, result := range results {
 		report.AddOperation("import_file_total", map[string]any{
 			"dataset":                    result.dataset,
@@ -159,24 +162,19 @@ func addImportReportOperations(
 
 	report.AddOperation("import_total", map[string]any{
 		"datasets":                   len(results),
-		"records":                    totalImportRecords(results),
+		"records":                    totalRecords,
 		"parallelism":                parallelism,
 		"mode":                       importMode(parallelism),
-		"throughput_records_per_sec": throughputPerSecond(totalImportRecords(results), totalDuration),
+		"throughput_records_per_sec": throughputPerSecond(totalRecords, totalDuration),
 	}, []float64{durationMS(totalDuration)})
 }
 
 func cloneMap[M ~map[K]V, K comparable, V any](src M) M {
-	if len(src) == 0 {
+	if src == nil {
 		return make(M)
 	}
 
-	dst := make(M, len(src))
-	for k, v := range src {
-		dst[k] = v
-	}
-
-	return dst
+	return maps.Clone(src)
 }
 
 func throughputPerSecond(records uint64, elapsed time.Duration) float64 {
@@ -192,14 +190,7 @@ func durationMS(d time.Duration) float64 {
 }
 
 func sortedImportPhases(phases map[string]time.Duration) []string {
-	names := make([]string, 0, len(phases))
-	for phase := range phases {
-		names = append(names, phase)
-	}
-
-	sort.Strings(names)
-
-	return names
+	return slices.Sorted(maps.Keys(phases))
 }
 
 func addImportPhaseInputs(inputs map[string]any, result datasetImportResult, phase string) {
@@ -352,7 +343,7 @@ func importOneDataset(
 	opts ImportOptions,
 	printf PrintfFunc,
 ) (_ datasetImportResult, err error) {
-	mp, err := mountpath.FromOutputDir(datasetDir)
+	mountPath, err := mountpath.FromOutputDir(datasetDir)
 	if err != nil {
 		return datasetImportResult{}, err
 	}
@@ -366,15 +357,15 @@ func importOneDataset(
 
 	updatedAt := st.ModTime()
 	start := time.Now()
-	metrics := newDatasetImportMetrics(filepath.Base(datasetDir), statsPath, mp)
+	metrics := newDatasetImportMetrics(filepath.Base(datasetDir), statsPath, mountPath)
 
-	records, err := ingestStatsGZ(api, statsPath, mp, updatedAt, opts, metrics)
+	records, err := ingestStatsGZ(api, statsPath, mountPath, updatedAt, opts, metrics)
 	if err != nil {
 		return datasetImportResult{}, err
 	}
 
 	printf("import dataset=%s mount=%s records=%d seconds=%.3f\n",
-		filepath.Base(datasetDir), mp, records, time.Since(start).Seconds())
+		filepath.Base(datasetDir), mountPath, records, time.Since(start).Seconds())
 
 	return metrics.result(records, time.Since(start)), nil
 }
@@ -391,52 +382,43 @@ func newDatasetImportMetrics(dataset, statsPath, mountPath string) *datasetImpor
 
 func ingestStatsGZ(
 	api ImportAPI,
-	statsPath, mp string,
+	statsPath, mountPath string,
 	updatedAt time.Time,
 	opts ImportOptions,
 	metrics *datasetImportMetrics,
 ) (_ uint64, err error) {
-	gz, closeFn, err := openStatsGZReader(statsPath)
+	gz, err := openStatsGZReader(statsPath)
 	if err != nil {
 		return 0, err
 	}
 
 	defer func() {
-		if cerr := closeFn(); err == nil {
+		if cerr := gz.Close(); err == nil {
 			err = cerr
 		}
 	}()
 
-	return summariseReader(gz, api, mp, updatedAt, opts, metrics)
+	return summariseReader(gz, api, mountPath, updatedAt, opts, metrics)
 }
 
-func openStatsGZReader(path string) (*pgzip.Reader, func() error, error) {
+func openStatsGZReader(path string) (*statsGZReader, error) {
 	fh, err := os.Open(path)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	gz, err := pgzip.NewReader(fh)
 	if err != nil {
-		_ = fh.Close()
-
-		return nil, nil, err
+		return nil, errors.Join(err, fh.Close())
 	}
 
-	closeFn := func() error {
-		gzErr := gz.Close()
-		fhErr := fh.Close()
-
-		return errors.Join(gzErr, fhErr)
-	}
-
-	return gz, closeFn, nil
+	return &statsGZReader{Reader: gz, file: fh}, nil
 }
 
 func summariseReader(
 	r io.Reader,
 	api ImportAPI,
-	mp string,
+	mountPath string,
 	updatedAt time.Time,
 	opts ImportOptions,
 	metrics *datasetImportMetrics,
@@ -444,7 +426,7 @@ func summariseReader(
 	lr := newLineCountingReader(r, opts.MaxLines)
 	ss := summary.NewSummariser(stats.NewStatsParser(lr))
 
-	allClosers, err := addAllSummarisers(ss, api, mp, updatedAt, opts, metrics)
+	allClosers, err := addAllSummarisers(ss, api, mountPath, updatedAt, opts, metrics)
 	if err != nil {
 		return 0, err
 	}
@@ -478,7 +460,7 @@ func newLineCountingReader(r io.Reader, maxLines int) *lineCountingReader {
 func addAllSummarisers(
 	ss *summary.Summariser,
 	api ImportAPI,
-	mp string,
+	mountPath string,
 	updatedAt time.Time,
 	opts ImportOptions,
 	metrics *datasetImportMetrics,
@@ -490,10 +472,10 @@ func addAllSummarisers(
 
 	timedDW := newTrackedDGUTAWriter(dw, metrics)
 
-	timedDW.SetMountPath(mp)
+	timedDW.SetMountPath(mountPath)
 	timedDW.SetUpdatedAt(updatedAt)
 
-	fi, fiCloser, err := api.NewFileIngestOperation(mp, updatedAt)
+	fi, fiCloser, err := api.NewFileIngestOperation(mountPath, updatedAt)
 	if err != nil {
 		return nil, errors.Join(err, timedDW.Abort())
 	}
@@ -508,7 +490,7 @@ func addAllSummarisers(
 	ss.AddDirectoryOperation(dirguta.NewDirGroupUserTypeAge(timedDW))
 	ss.AddGlobalOperation(timedFI)
 
-	bsCloser, err := addBasedirsSummariser(ss, api, mp, updatedAt, opts, metrics)
+	bsCloser, err := addBasedirsSummariser(ss, api, mountPath, updatedAt, opts, metrics)
 	if err != nil {
 		return nil, errors.Join(err, composeImportCloser(timedFICloser, nil, timedDW)(false))
 	}
@@ -567,7 +549,7 @@ func trackFileIngestOperation(
 func addBasedirsSummariser(
 	ss *summary.Summariser,
 	api ImportAPI,
-	mp string,
+	mountPath string,
 	updatedAt time.Time,
 	opts ImportOptions,
 	metrics *datasetImportMetrics,
@@ -585,7 +567,7 @@ func addBasedirsSummariser(
 
 	timedBS := &trackedBasedirsStore{Store: bs, metrics: metrics}
 
-	timedBS.SetMountPath(mp)
+	timedBS.SetMountPath(mountPath)
 	timedBS.SetUpdatedAt(updatedAt)
 
 	closer := func(publish bool) error {
@@ -593,12 +575,27 @@ func addBasedirsSummariser(
 	}
 
 	if err := addBasedirsOp(ss, timedBS, updatedAt, opts); err != nil {
-		_ = timedBS.Close()
-
-		return nil, err
+		return nil, errors.Join(err, timedBS.Abort())
 	}
 
 	return closer, nil
+}
+
+func importMountpoints(opts ImportOptions) ([]string, error) {
+	if opts.MountPoints != nil {
+		return opts.MountPoints, nil
+	}
+
+	return summariseutil.ParseMountpointsFromFile(opts.MountsPath)
+}
+
+type statsGZReader struct {
+	*pgzip.Reader
+	file *os.File
+}
+
+func (r *statsGZReader) Close() error {
+	return errors.Join(r.Reader.Close(), r.file.Close())
 }
 
 func noopPublishCloser(bool) error {
@@ -632,7 +629,7 @@ func parseBasedirsInputs(opts ImportOptions) (*basedirs.Quotas, basedirs.Config,
 		return nil, nil, nil, err
 	}
 
-	mountpoints, err := summariseutil.ParseMountpointsFromFile(opts.MountsPath)
+	mountpoints, err := importMountpoints(opts)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -735,6 +732,7 @@ type ImportOptions struct {
 	QuotaPath   string
 	ConfigPath  string
 	MountsPath  string
+	MountPoints []string
 }
 
 type datasetImportResult struct {
@@ -1097,13 +1095,13 @@ func (l *lineCountingReader) limitChunk(chunk []byte) []byte {
 }
 
 func countNewLines(b []byte) uint64 {
-	var n uint64
+	var lines uint64
 
 	for _, c := range b {
 		if c == '\n' {
-			n++
+			lines++
 		}
 	}
 
-	return n
+	return lines
 }

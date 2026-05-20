@@ -159,7 +159,7 @@ func runCHPerfImport(inputDir string) error {
 		Parallelism: chPerf.parallelism,
 		QuotaPath:   chPerf.quota,
 		ConfigPath:  chPerf.config,
-		MountsPath:  chPerf.mountpoints,
+		MountPoints: cfg.MountPoints,
 	}, cliPrint)
 	if err != nil {
 		return err
@@ -192,20 +192,18 @@ func runCHPerfQuery() error {
 func chPerfConfig() (clickhouse.Config, error) {
 	loadClickhouseDotEnv()
 
-	mountpoints, err := parseOptionalMountpoints(chPerf.mountpoints)
+	mountpoints, err := parseMountpointsFlag(chPerf.mountpoints)
 	if err != nil {
 		return clickhouse.Config{}, err
 	}
 
-	return clickhouseConfigFromEnvAndFlags(
-		chPerf.dsn,
-		chPerf.database,
-		chPerf.owners,
-		mountpoints,
-		"",
-		0,
-		chPerf.queryTO,
-	)
+	return clickhouseConfigFromEnvAndFlags(clickhouseConfigInput{
+		dsnFlag:          chPerf.dsn,
+		databaseFlag:     chPerf.database,
+		ownersPath:       chPerf.owners,
+		mountpoints:      mountpoints,
+		queryTimeoutFlag: chPerf.queryTO,
+	})
 }
 
 func parseGIDs(raw string) []uint32 {

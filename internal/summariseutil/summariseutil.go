@@ -31,13 +31,11 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
-	"github.com/wtsi-hgi/wrstat-ui/datasets"
 	"github.com/wtsi-hgi/wrstat-ui/internal/mountpath"
 )
 
@@ -181,22 +179,16 @@ func closePublishFunc(closer func(bool) error, publish bool) error {
 	return closer(publish)
 }
 
-// DeriveMountPathFromOutputDir extracts the mount path from the parent
-// directory of the output path.
-//
-// The parent directory is expected to have the form '<version>_<mountKey>'
-// where <mountKey> is the mount path with '/' replaced by '／' (fullwidth
-// solidus).
+// DeriveMountPathFromOutputDir extracts the mount path from a dataset output
+// directory or from a child path inside it.
 //
 // If the directory name doesn't match the expected format, "/" is returned
 // as a fallback for backwards compatibility.
 func DeriveMountPathFromOutputDir(outputPath string) string {
-	parentDir := filepath.Base(filepath.Dir(outputPath))
-
-	_, mountKey, ok := datasets.SplitDatasetDirName(parentDir)
-	if !ok {
+	mountPath, err := mountpath.FromOutputDir(outputPath)
+	if err != nil {
 		return rootMountPath
 	}
 
-	return mountpath.DecodeKey(mountKey)
+	return mountPath
 }

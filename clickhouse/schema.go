@@ -32,7 +32,6 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -50,8 +49,9 @@ var (
 )
 
 const (
-	schemaVersionStatsQuery = "SELECT count(), min(version), max(version) FROM wrstat_schema_version"
-	insertSchemaVersionStmt = "INSERT INTO wrstat_schema_version (version) VALUES (1)"
+	currentSchemaVersion    uint32 = 1
+	schemaVersionStatsQuery        = "SELECT count(), min(version), max(version) FROM wrstat_schema_version"
+	insertSchemaVersionStmt        = "INSERT INTO wrstat_schema_version (version) VALUES (?)"
 )
 
 //go:embed schema/*.sql
@@ -75,8 +75,6 @@ func schemaSQL() ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("clickhouse: failed to list embedded schema files: %w", err)
 	}
-
-	sort.Strings(entries)
 
 	stmts := make([]string, 0, len(entries))
 	for _, name := range entries {
@@ -134,16 +132,20 @@ func ensureSchemaVersion(ctx context.Context, execer ch.Conn) error {
 		return validateSchemaVersionStats(count, minVersion, maxVersion)
 	}
 
-	if insertErr := insertSchemaVersion(ctx, execer); insertErr != nil {
-		return insertErr
-	}
-
-	count, minVersion, maxVersion, err = schemaVersionStatsFromDB(ctx, execer)
+	count, minVersion, maxVersion, err = insertAndReadSchemaVersionStats(ctx, execer)
 	if err != nil {
 		return err
 	}
 
 	return validateSchemaVersionStats(count, minVersion, maxVersion)
+}
+
+func insertAndReadSchemaVersionStats(ctx context.Context, execer ch.Conn) (uint64, *uint32, *uint32, error) {
+	if err := insertSchemaVersion(ctx, execer); err != nil {
+		return 0, nil, nil, err
+	}
+
+	return schemaVersionStatsFromDB(ctx, execer)
 }
 
 func schemaVersionStatsFromDB(ctx context.Context, conn ch.Conn) (uint64, *uint32, *uint32, error) {
@@ -190,9 +192,11 @@ func validateSchemaVersionStats(count uint64, minVersion, maxVersion *uint32) er
 }
 
 func schemaVersionStatsOK(count uint64, minVersion, maxVersion *uint32) bool {
-	return count >= 1 &&
-		minVersion != nil && maxVersion != nil &&
-		*minVersion == 1 && *maxVersion == 1
+	if count < 1 || minVersion == nil || maxVersion == nil {
+		return false
+	}
+
+	return *minVersion == currentSchemaVersion && *maxVersion == currentSchemaVersion
 }
 
 func formatNullableUint32(v *uint32) string {
@@ -204,7 +208,7 @@ func formatNullableUint32(v *uint32) string {
 }
 
 func insertSchemaVersion(ctx context.Context, execer ch.Conn) error {
-	if err := execer.Exec(ctx, insertSchemaVersionStmt); err != nil {
+	if err := execer.Exec(ctx, insertSchemaVersionStmt, currentSchemaVersion); err != nil {
 		return fmt.Errorf("clickhouse: failed to set schema version: %w", err)
 	}
 

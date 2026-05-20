@@ -34,6 +34,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -168,11 +169,7 @@ func ensureSchemaWithBootstrapLock(
 }
 
 func schemaBootstrapTimeout(queryTO time.Duration) time.Duration {
-	if queryTO > minSchemaBootstrapTimeout {
-		return queryTO
-	}
-
-	return minSchemaBootstrapTimeout
+	return max(queryTO, minSchemaBootstrapTimeout)
 }
 
 func schemaBootstrapLockPath(opts *ch.Options, database string) (string, error) {
@@ -201,7 +198,7 @@ func schemaBootstrapLockDir() (string, error) {
 }
 
 func schemaBootstrapLockKey(opts *ch.Options, database string) string {
-	addrs := append([]string(nil), opts.Addr...)
+	addrs := slices.Clone(opts.Addr)
 	sort.Strings(addrs)
 
 	sum := sha256.Sum256([]byte(strings.Join(addrs, ",") + "|" + database))

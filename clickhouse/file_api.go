@@ -123,6 +123,10 @@ type FileRow struct {
 
 func firstFileRow(rows fileRowIterator, fields []string) (*FileRow, error) {
 	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return nil, fmt.Errorf("clickhouse: StatPath iteration error: %w", err)
+		}
+
 		return nil, errPathNotFound
 	}
 
@@ -151,7 +155,7 @@ func (c *Client) StatPath(ctx context.Context, path string, opts StatOptions) (*
 		return nil, err
 	}
 
-	qctx, cancel := context.WithTimeout(ctx, queryTimeout(c.cfg))
+	qctx, cancel := queryContext(ctx, queryTimeout(c.cfg))
 	defer cancel()
 
 	rows, err := c.conn.Query(qctx, q, mountPath, mountPath, parentDir, name)
@@ -175,9 +179,7 @@ func statPathQuery(opts StatOptions) (string, []string, error) {
 
 func fileRowSelectList(fields []string) (string, []string, error) {
 	if len(fields) == 0 {
-		all := defaultFileRowFields()
-
-		return fileRowSelectAll, all, nil
+		return fileRowSelectAll, defaultFileRowFields(), nil
 	}
 
 	out := make([]string, 0, len(fields))
@@ -194,50 +196,52 @@ func fileRowSelectList(fields []string) (string, []string, error) {
 }
 
 func defaultFileRowFields() []string {
-	return []string{
-		fileFieldPath,
-		fileFieldParentDir,
-		fileFieldName,
-		fileFieldExt,
-		fileFieldEntryType,
-		fileFieldSize,
-		fileFieldApparentSize,
-		fileFieldUID,
-		fileFieldGID,
-		fileFieldATime,
-		fileFieldMTime,
-		fileFieldCTime,
-		fileFieldInode,
-		fileFieldNLink,
+	specs := fileRowFieldSpecs()
+	out := make([]string, 0, len(specs))
+
+	for _, spec := range specs {
+		out = append(out, spec.field)
+	}
+
+	return out
+}
+
+func fileRowFieldSpecs() []fileRowFieldSpec {
+	return []fileRowFieldSpec{
+		{fileFieldPath, "f.path", func(s *fileRowScanState) any { return &s.path }},
+		{fileFieldParentDir, "f.parent_dir", func(s *fileRowScanState) any { return &s.parentDir }},
+		{fileFieldName, "f.name", func(s *fileRowScanState) any { return &s.name }},
+		{fileFieldExt, "f.ext", func(s *fileRowScanState) any { return &s.ext }},
+		{fileFieldEntryType, "f.entry_type", func(s *fileRowScanState) any { return &s.entryType }},
+		{fileFieldSize, "f.size", func(s *fileRowScanState) any { return &s.size }},
+		{fileFieldApparentSize, "f.apparent_size", func(s *fileRowScanState) any { return &s.apparentSize }},
+		{fileFieldUID, "f.uid", func(s *fileRowScanState) any { return &s.uid }},
+		{fileFieldGID, "f.gid", func(s *fileRowScanState) any { return &s.gid }},
+		{fileFieldATime, "f.atime", func(s *fileRowScanState) any { return &s.atime }},
+		{fileFieldMTime, "f.mtime", func(s *fileRowScanState) any { return &s.mtime }},
+		{fileFieldCTime, "f.ctime", func(s *fileRowScanState) any { return &s.ctime }},
+		{fileFieldInode, "f.inode", func(s *fileRowScanState) any { return &s.inode }},
+		{fileFieldNLink, "f.nlink", func(s *fileRowScanState) any { return &s.nlink }},
 	}
 }
 
 func fileRowColumnForField(field string) (string, bool) {
-	for _, col := range [...]struct {
-		field string
-		value string
-	}{
-		{fileFieldPath, "f.path"},
-		{fileFieldParentDir, "f.parent_dir"},
-		{fileFieldName, "f.name"},
-		{fileFieldExt, "f.ext"},
-		{fileFieldEntryType, "f.entry_type"},
-		{fileFieldSize, "f.size"},
-		{fileFieldApparentSize, "f.apparent_size"},
-		{fileFieldUID, "f.uid"},
-		{fileFieldGID, "f.gid"},
-		{fileFieldATime, "f.atime"},
-		{fileFieldMTime, "f.mtime"},
-		{fileFieldCTime, "f.ctime"},
-		{fileFieldInode, "f.inode"},
-		{fileFieldNLink, "f.nlink"},
-	} {
-		if col.field == field {
-			return col.value, true
+	spec, ok := fileRowFieldSpecFor(field)
+	if !ok {
+		return "", false
+	}
+
+	return spec.column, true
+}
+
+func fileRowFieldSpecFor(field string) (fileRowFieldSpec, bool) {
+	for _, spec := range fileRowFieldSpecs() {
+		if spec.field == field {
+			return spec, true
 		}
 	}
 
-	return "", false
+	return fileRowFieldSpec{}, false
 }
 
 // ListDir lists direct children (by parent_dir) for the given directory.
@@ -258,7 +262,7 @@ func (c *Client) ListDir(ctx context.Context, dir string, opts ListOptions) ([]F
 
 	limit := listLimit(opts.Limit)
 
-	qctx, cancel := context.WithTimeout(ctx, queryTimeout(c.cfg))
+	qctx, cancel := queryContext(ctx, queryTimeout(c.cfg))
 	defer cancel()
 
 	return c.queryFileRows(
@@ -333,6 +337,12 @@ func (c *Client) findByGlob(
 	}
 
 	return sliceLimitOffset(all, prepared.limit, opts.Offset), nil
+}
+
+type fileRowFieldSpec struct {
+	field    string
+	column   string
+	scanDest func(*fileRowScanState) any
 }
 
 type findByGlobExecPlan struct {
@@ -413,7 +423,7 @@ func (c *Client) findByGlobQuery(
 		offset,
 	)
 
-	qctx, cancel := context.WithTimeout(ctx, queryTimeout(c.cfg))
+	qctx, cancel := queryContext(ctx, queryTimeout(c.cfg))
 	defer cancel()
 
 	return c.queryFileRows(qctx, "FindByGlob", q, fields, params...)
@@ -648,6 +658,10 @@ func (c *Client) queryFileRows(
 		out = append(out, row)
 	}
 
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("clickhouse: %s iteration error: %w", op, err)
+	}
+
 	return out, nil
 }
 
@@ -777,6 +791,32 @@ func newFindByGlobPrepared(
 	return out
 }
 
+func isDirFromRows(rows fileRowIterator) (bool, error) {
+	entryType, ok, err := isDirEntryType(rows)
+	if err != nil || !ok {
+		return false, err
+	}
+
+	return entryType == uint8(stats.DirType), nil
+}
+
+func isDirEntryType(rows fileRowIterator) (uint8, bool, error) {
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return 0, false, fmt.Errorf("clickhouse: IsDir iteration error: %w", err)
+		}
+
+		return 0, false, nil
+	}
+
+	var entryType uint8
+	if err := rows.Scan(&entryType); err != nil {
+		return 0, false, fmt.Errorf("clickhouse: failed to scan IsDir row: %w", err)
+	}
+
+	return entryType, true, nil
+}
+
 func findByGlobQueryLimitOffset(limit int64, offset int64, useDirectOffset bool) (int64, int64) {
 	if useDirectOffset {
 		return limit, offset
@@ -825,6 +865,7 @@ type fileRowScanner interface {
 type fileRowIterator interface {
 	fileRowScanner
 	Next() bool
+	Err() error
 }
 
 type fileRowScanState struct {
@@ -873,31 +914,12 @@ func (s *fileRowScanState) destsFor(fields []string) ([]any, error) {
 }
 
 func (s *fileRowScanState) destForField(field string) (any, bool) {
-	for _, dest := range [...]struct {
-		field string
-		value any
-	}{
-		{fileFieldPath, &s.path},
-		{fileFieldParentDir, &s.parentDir},
-		{fileFieldName, &s.name},
-		{fileFieldExt, &s.ext},
-		{fileFieldEntryType, &s.entryType},
-		{fileFieldSize, &s.size},
-		{fileFieldApparentSize, &s.apparentSize},
-		{fileFieldUID, &s.uid},
-		{fileFieldGID, &s.gid},
-		{fileFieldATime, &s.atime},
-		{fileFieldMTime, &s.mtime},
-		{fileFieldCTime, &s.ctime},
-		{fileFieldInode, &s.inode},
-		{fileFieldNLink, &s.nlink},
-	} {
-		if dest.field == field {
-			return dest.value, true
-		}
+	spec, ok := fileRowFieldSpecFor(field)
+	if !ok {
+		return nil, false
 	}
 
-	return nil, false
+	return spec.scanDest(s), true
 }
 
 func (s *fileRowScanState) applyTo(out *FileRow) error {
@@ -1018,6 +1040,17 @@ func findByGlobPlan(baseDirsByMount map[string][]string, patterns []string) find
 	return findByGlobExecPlan{queries: queries}
 }
 
+func permissionAnyInDirArgs(mountPath string, dir string, uid uint32, gids []uint32) []any {
+	return []any{
+		mountPath,
+		mountPath,
+		dir,
+		uint8(db.DGUTAgeAll),
+		uid,
+		gids,
+	}
+}
+
 func (c *Client) groupBaseDirsByMount(baseDirs []string) (map[string][]string, error) {
 	if len(baseDirs) == 0 {
 		return map[string][]string{}, nil
@@ -1067,7 +1100,7 @@ func (c *Client) IsDir(ctx context.Context, path string) (bool, error) {
 		return false, err
 	}
 
-	qctx, cancel := context.WithTimeout(ctx, queryTimeout(c.cfg))
+	qctx, cancel := queryContext(ctx, queryTimeout(c.cfg))
 	defer cancel()
 
 	rows, err := c.conn.Query(qctx, isDirQuery, mountPath, mountPath, parentDir, name)
@@ -1077,16 +1110,7 @@ func (c *Client) IsDir(ctx context.Context, path string) (bool, error) {
 
 	defer func() { _ = rows.Close() }()
 
-	if !rows.Next() {
-		return false, nil
-	}
-
-	var entryType uint8
-	if err := rows.Scan(&entryType); err != nil {
-		return false, fmt.Errorf("clickhouse: failed to scan IsDir row: %w", err)
-	}
-
-	return entryType == uint8(stats.DirType), nil
+	return isDirFromRows(rows)
 }
 
 // PermissionAnyInDir reports whether, in the active snapshot for the mount
@@ -1114,18 +1138,13 @@ func (c *Client) permissionAnyInDir(
 	uid uint32,
 	gids []uint32,
 ) (bool, error) {
-	qctx, cancel := context.WithTimeout(ctx, queryTimeout(c.cfg))
+	qctx, cancel := queryContext(ctx, queryTimeout(c.cfg))
 	defer cancel()
 
 	rows, err := c.conn.Query(
 		qctx,
 		permissionAnyInDirQuery,
-		mountPath,
-		mountPath,
-		dir,
-		uint8(db.DGUTAgeAll),
-		uid,
-		gids,
+		permissionAnyInDirArgs(mountPath, dir, uid, gids)...,
 	)
 	if err != nil {
 		return false, fmt.Errorf("clickhouse: failed to query PermissionAnyInDir: %w", err)
@@ -1133,7 +1152,12 @@ func (c *Client) permissionAnyInDir(
 
 	defer func() { _ = rows.Close() }()
 
-	return rows.Next(), nil
+	ok := rows.Next()
+	if err := rows.Err(); err != nil {
+		return false, fmt.Errorf("clickhouse: PermissionAnyInDir iteration error: %w", err)
+	}
+
+	return ok, nil
 }
 
 func (c *Client) resolveMountParentName(path string) (string, string, string, error) {

@@ -55,15 +55,19 @@ func CleanActiveSnapshotAttempt(cfg Config, mountPath string, updatedAt time.Tim
 	sid := snapshotID(mountPath, updatedAt).String()
 
 	activeSID, hasActive, err := readActiveSnapshotID(ctx, conn, mountPath)
-	if err != nil || !hasActive || activeSID != sid {
+	if err != nil {
 		return err
+	}
+
+	if !hasActive || activeSID != sid {
+		return nil
 	}
 
 	if err := deleteActiveSnapshotMountRows(ctx, conn, mountPath, sid); err != nil {
 		return err
 	}
 
-	return dropAllSnapshotPartitions(ctx, conn, mountPath, sid)
+	return dropSnapshotPartitionsForMount(ctx, conn, mountPath, sid, allPartitionDropQueries())
 }
 
 func validateSnapshotCleanupInputs(cfg Config, mountPath string, updatedAt time.Time) error {
@@ -93,13 +97,4 @@ func deleteActiveSnapshotMountRows(
 	}
 
 	return nil
-}
-
-func dropAllSnapshotPartitions(
-	ctx context.Context,
-	conn ch.Conn,
-	mountPath string,
-	sid string,
-) error {
-	return dropSnapshotPartitionsForMount(ctx, conn, mountPath, sid, allPartitionDropQueries())
 }

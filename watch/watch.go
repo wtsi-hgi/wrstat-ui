@@ -75,7 +75,8 @@ func Watch(inputDirs []string, group, outputDir, quotaPath, basedirsConfig,
 	}
 }
 
-func watch(inputDirs []string, group, outputDir, quotaPath, basedirsConfig, mounts string, minMemGB int, queue, queuesAvoid string, logger log15.Logger) error { //nolint:gocognit,gocyclo,lll,funlen
+func watch(inputDirs []string, group, outputDir, quotaPath, basedirsConfig, mounts string,
+	minMemGB int, queue, queuesAvoid string, logger log15.Logger) error {
 	s, err := client.New(client.SchedulerSettings{
 		Logger:      logger,
 		Timeout:     connectTimeout,
@@ -88,27 +89,16 @@ func watch(inputDirs []string, group, outputDir, quotaPath, basedirsConfig, moun
 
 	defer s.Disconnect() //nolint:errcheck
 
-	for n := range inputDirs {
-		if inputDirs[n], err = filepath.Abs(inputDirs[n]); err != nil {
-			return err
-		}
-	}
-
-	if outputDir, err = filepath.Abs(outputDir); err != nil {
+	inputDirs, outputDir, err = absoluteWatchPaths(inputDirs, outputDir)
+	if err != nil {
 		return err
 	}
 
 	for _, inputDir := range inputDirs {
-		inputPaths, err := datasets.FindLatestDatasetDirs(inputDir, inputStatsFile)
+		inputPaths, err := pendingInputPaths(inputDir, outputDir)
 		if err != nil {
-			return fmt.Errorf("error getting input DB paths: %w", err)
+			return err
 		}
-
-		inputPaths = slices.DeleteFunc(inputPaths, func(p string) bool {
-			base := filepath.Base(p)
-
-			return entryExists(filepath.Join(outputDir, base)) || entryExists(hiddenOutputDir(outputDir, base))
-		})
 
 		if err := scheduleSummarisers(s, group, inputDir, outputDir, quotaPath,
 			basedirsConfig, mounts, minMemGB, inputPaths); err != nil {
@@ -117,6 +107,39 @@ func watch(inputDirs []string, group, outputDir, quotaPath, basedirsConfig, moun
 	}
 
 	return nil
+}
+
+func absoluteWatchPaths(inputDirs []string, outputDir string) ([]string, string, error) {
+	absInputDirs := make([]string, len(inputDirs))
+
+	for i, inputDir := range inputDirs {
+		absInputDir, err := filepath.Abs(inputDir)
+		if err != nil {
+			return nil, "", err
+		}
+
+		absInputDirs[i] = absInputDir
+	}
+
+	absOutputDir, err := filepath.Abs(outputDir)
+	if err != nil {
+		return nil, "", err
+	}
+
+	return absInputDirs, absOutputDir, nil
+}
+
+func pendingInputPaths(inputDir, outputDir string) ([]string, error) {
+	inputPaths, err := datasets.FindLatestDatasetDirs(inputDir, inputStatsFile)
+	if err != nil {
+		return nil, fmt.Errorf("error getting input DB paths: %w", err)
+	}
+
+	return slices.DeleteFunc(inputPaths, func(p string) bool {
+		base := filepath.Base(p)
+
+		return entryExists(filepath.Join(outputDir, base)) || entryExists(hiddenOutputDir(outputDir, base))
+	}), nil
 }
 
 func entryExists(path string) bool {

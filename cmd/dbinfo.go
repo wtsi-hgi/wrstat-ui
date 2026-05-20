@@ -48,15 +48,12 @@ NB: for large databases, this can take hours to run.
 			warn("dbinfo: ignoring legacy output directory argument")
 		}
 
-		cfg, err := clickhouseConfigFromEnvAndFlags(
-			clickhouseDSN,
-			clickhouseDatabase,
-			ownersPath,
-			nil,
-			"",
-			0,
-			clickhouseQueryTO,
-		)
+		cfg, err := clickhouseConfigFromEnvAndFlags(clickhouseConfigInput{
+			dsnFlag:          clickhouseDSN,
+			databaseFlag:     clickhouseDatabase,
+			ownersPath:       ownersPath,
+			queryTimeoutFlag: clickhouseQueryTO,
+		})
 		if err != nil {
 			die("failed to build ClickHouse config: %s", err)
 		}

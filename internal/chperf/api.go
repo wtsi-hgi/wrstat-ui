@@ -52,6 +52,8 @@ type QueryRow struct {
 
 // QueryClient wraps the ClickHouse file queries used by the perf harness.
 type QueryClient interface {
+	io.Closer
+
 	ListDir(ctx context.Context, dir string, limit int64) ([]QueryRow, error)
 	StatPath(ctx context.Context, path string) error
 	PermissionAnyInDir(ctx context.Context, dir string, uid uint32, gids []uint32) error
@@ -63,7 +65,6 @@ type QueryClient interface {
 		uid uint32,
 		gids []uint32,
 	) error
-	Close() error
 }
 
 // QueryMetrics captures the query log metrics printed by the perf harness.
@@ -77,10 +78,11 @@ type QueryMetrics struct {
 
 // QueryInspector exposes EXPLAIN and per-query metrics for the perf harness.
 type QueryInspector interface {
+	io.Closer
+
 	ExplainListDir(ctx context.Context, mountPath, dir string, limit, offset int64) (string, error)
 	ExplainStatPath(ctx context.Context, mountPath, path string) (string, error)
 	Measure(ctx context.Context, run func(ctx context.Context) error) (*QueryMetrics, error)
-	Close() error
 }
 
 // QueryAPI creates the storage-backed readers required by Query.

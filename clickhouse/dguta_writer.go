@@ -48,7 +48,7 @@ const (
 	importPhaseMountSwitch        = "mount_switch"
 	importPhaseOldSnapshotDrop    = "old_snapshot_partition_drop"
 
-	activeSnapshotQuery = "SELECT toString(snapshot_id), updated_at FROM wrstat_mounts_active " +
+	activeSnapshotQuery = "SELECT toString(snapshot_id) FROM wrstat_mounts_active " +
 		"WHERE mount_path = ?"
 	switchSnapshotQuery = "INSERT INTO wrstat_mounts (mount_path, switched_at, active_snapshot, updated_at) " +
 		"VALUES (?, now64(3), toUUID(?), ?)"
@@ -71,6 +71,23 @@ const (
 		"(mount_path, snapshot_id, parent_dir, child) " +
 		"VALUES (?, toUUID(?), ?, ?)"
 )
+
+var (
+	errMountPathRequired     = errors.New("clickhouse: mount path is required")
+	errUpdatedAtRequired     = errors.New("clickhouse: updated at is required")
+	errDirRequired           = errors.New("clickhouse: record dir is required")
+	errActiveSnapshotRewrite = errors.New(
+		"clickhouse: refusing to rewrite active snapshot",
+	)
+)
+
+func (slot dgutaBatchSlot) rows() int {
+	if slot.batch == nil || *slot.batch == nil {
+		return 0
+	}
+
+	return (*slot.batch).Rows()
+}
 
 func allPartitionDropQueries() []string {
 	return []string{
@@ -112,15 +129,6 @@ func dropSnapshotPartitionsForMount(
 func prepareBatchWithRelease(ctx context.Context, conn ch.Conn, query string) (driver.Batch, error) {
 	return conn.PrepareBatch(ctx, query, driver.WithReleaseConnection())
 }
-
-var (
-	errMountPathRequired     = errors.New("clickhouse: mount path is required")
-	errUpdatedAtRequired     = errors.New("clickhouse: updated at is required")
-	errDirRequired           = errors.New("clickhouse: record dir is required")
-	errActiveSnapshotRewrite = errors.New(
-		"clickhouse: refusing to rewrite active snapshot",
-	)
-)
 
 type dgutaWriter struct {
 	cfg Config
@@ -361,14 +369,16 @@ func readActiveSnapshotID(
 	defer func() { _ = rows.Close() }()
 
 	if !rows.Next() {
+		rowErr := rows.Err()
+		if rowErr != nil {
+			return "", false, fmt.Errorf("clickhouse: active snapshot iteration error: %w", rowErr)
+		}
+
 		return "", false, nil
 	}
 
-	var (
-		sid       string
-		updatedAt time.Time
-	)
-	if err := rows.Scan(&sid, &updatedAt); err != nil {
+	sid, err := scanActiveSnapshotID(rows)
+	if err != nil {
 		return "", false, fmt.Errorf("clickhouse: failed to scan active snapshot: %w", err)
 	}
 
@@ -522,17 +532,20 @@ func (w *dgutaWriter) prepareBatch(ctx context.Context, query string) (driver.Ba
 }
 
 func (w *dgutaWriter) dropNewSnapshotPartitions(ctx context.Context) error {
-	sid := w.snapshot.String()
+	return dropSnapshotPartitionsForMount(
+		ctx,
+		w.conn,
+		w.mountPath,
+		w.snapshot.String(),
+		dgutaPartitionDropQueries(),
+	)
+}
 
-	if err := dropPartitionIgnoreUnknown(ctx, w.conn, w.mountPath, sid, dropDGUTAPartitionQuery); err != nil {
-		return err
+func dgutaPartitionDropQueries() []string {
+	return []string{
+		dropDGUTAPartitionQuery,
+		dropChildrenPartitionQuery,
 	}
-
-	if err := dropPartitionIgnoreUnknown(ctx, w.conn, w.mountPath, sid, dropChildrenPartitionQuery); err != nil {
-		return err
-	}
-
-	return nil
 }
 
 func (w *dgutaWriter) appendDGUTARows(dguta db.RecordDGUTA, rawParentDir, parentDir string) error {
@@ -661,14 +674,12 @@ func childPathForParent(parentDir, child string) string {
 }
 
 func (w *dgutaWriter) flushFullBatches(ctx context.Context) error {
-	if w.dgutaBatch != nil && w.dgutaBatch.Rows() >= w.batchSize {
-		if err := w.sendAndReplaceBatch(ctx, w.dgutaBatchSlot()); err != nil {
-			return err
+	for _, slot := range w.batchSlots() {
+		if slot.rows() < w.batchSize {
+			continue
 		}
-	}
 
-	if w.childrenBatch != nil && w.childrenBatch.Rows() >= w.batchSize {
-		if err := w.sendAndReplaceBatch(ctx, w.childrenBatchSlot()); err != nil {
+		if err := w.sendAndReplaceBatch(ctx, slot); err != nil {
 			return err
 		}
 	}
@@ -677,14 +688,12 @@ func (w *dgutaWriter) flushFullBatches(ctx context.Context) error {
 }
 
 func (w *dgutaWriter) flushAllBatches() error {
-	if w.dgutaBatch != nil && w.dgutaBatch.Rows() > 0 {
-		if err := w.sendAndCloseBatch(w.dgutaBatchSlot()); err != nil {
-			return err
+	for _, slot := range w.batchSlots() {
+		if slot.rows() == 0 {
+			continue
 		}
-	}
 
-	if w.childrenBatch != nil && w.childrenBatch.Rows() > 0 {
-		if err := w.sendAndCloseBatch(w.childrenBatchSlot()); err != nil {
+		if err := w.sendAndCloseBatch(slot); err != nil {
 			return err
 		}
 	}
@@ -697,6 +706,13 @@ type dgutaBatchSlot struct {
 	query string
 	phase string
 	name  string
+}
+
+func (w *dgutaWriter) batchSlots() []dgutaBatchSlot {
+	return []dgutaBatchSlot{
+		w.dgutaBatchSlot(),
+		w.childrenBatchSlot(),
+	}
 }
 
 func (w *dgutaWriter) dgutaBatchSlot() dgutaBatchSlot {
@@ -777,4 +793,19 @@ func NewDGUTAWriter(cfg Config) (db.DGUTAWriter, error) {
 	}
 
 	return &dgutaWriter{cfg: cfg, conn: conn, batchSize: defaultBatchSize}, nil
+}
+
+func scanActiveSnapshotID(rows driver.Rows) (string, error) {
+	if len(rows.Columns()) == 1 {
+		var sid string
+
+		return sid, rows.Scan(&sid)
+	}
+
+	var (
+		sid       string
+		updatedAt time.Time
+	)
+
+	return sid, rows.Scan(&sid, &updatedAt)
 }

@@ -435,7 +435,7 @@ func (d *clickHouseDatabase) childrenForAncestor(
 	ctx, cancel := configQueryContext(d.cfg)
 	defer cancel()
 
-	return d.queryAncestorChildren(ctx, childrenAncestorQuery, parentDir, parentDir)
+	return d.queryChildren(ctx, childrenAncestorQuery, "ancestor children", parentDir, parentDir)
 }
 
 func (d *clickHouseDatabase) snapshotChildrenForAncestor(
@@ -457,14 +457,6 @@ func (d *clickHouseDatabase) snapshotChildrenForAncestor(
 		parentDir,
 	)
 
-	return d.queryAncestorChildren(ctx, query, args...)
-}
-
-func (d *clickHouseDatabase) queryAncestorChildren(
-	ctx context.Context,
-	query string,
-	args ...any,
-) ([]string, error) {
 	return d.queryChildren(ctx, query, "ancestor children", args...)
 }
 
@@ -546,6 +538,22 @@ func makeDBInfo(numDirs, numDGUTAs, numParents, numChildren uint64) (*db.Info, e
 		NumParents:  parents,
 		NumChildren: children,
 	}, nil
+}
+
+func (d *clickHouseDatabase) queryGUTAs(
+	ctx context.Context,
+	what string,
+	query string,
+	args ...any,
+) (db.GUTAs, error) {
+	rows, err := d.conn.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("clickhouse: failed to query %s: %w", what, err)
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	return scanDGUTARows(rows)
 }
 
 func infoCountToInt(name string, v uint64) (int, error) {
@@ -675,18 +683,7 @@ func (d *clickHouseDatabase) gutasForDir(
 	ctx, cancel := configQueryContext(d.cfg)
 	defer cancel()
 
-	rows, err := d.conn.Query(
-		ctx, dgutaQuery, mountPath, snapshotID, dir,
-	)
-	if err != nil {
-		return nil, fmt.Errorf(
-			"clickhouse: failed to query dguta: %w", err,
-		)
-	}
-
-	defer func() { _ = rows.Close() }()
-
-	return scanDGUTARows(rows)
+	return d.queryGUTAs(ctx, "dguta", dgutaQuery, mountPath, snapshotID, dir)
 }
 
 func scanDGUTARows(rows rowsScanner) (db.GUTAs, error) {
@@ -718,18 +715,7 @@ func (d *clickHouseDatabase) gutasForAncestor(
 	ctx, cancel := configQueryContext(d.cfg)
 	defer cancel()
 
-	rows, err := d.conn.Query(
-		ctx, dgutaAncestorQuery, dir, dir,
-	)
-	if err != nil {
-		return nil, fmt.Errorf(
-			"clickhouse: failed to query ancestor dguta: %w", err,
-		)
-	}
-
-	defer func() { _ = rows.Close() }()
-
-	return scanDGUTARows(rows)
+	return d.queryGUTAs(ctx, "ancestor dguta", dgutaAncestorQuery, dir, dir)
 }
 
 func (d *clickHouseDatabase) snapshotGUTAsForAncestor(dir string) (db.GUTAs, error) {
@@ -749,16 +735,7 @@ func (d *clickHouseDatabase) snapshotGUTAsForAncestor(dir string) (db.GUTAs, err
 		dir,
 	)
 
-	rows, err := d.conn.Query(ctx, query, args...)
-	if err != nil {
-		return nil, fmt.Errorf(
-			"clickhouse: failed to query ancestor dguta: %w", err,
-		)
-	}
-
-	defer func() { _ = rows.Close() }()
-
-	return scanDGUTARows(rows)
+	return d.queryGUTAs(ctx, "ancestor dguta", query, args...)
 }
 
 func (d *clickHouseDatabase) ancestorMaxUpdatedAt(
@@ -832,21 +809,18 @@ func scanDGUTARow(rows rowsScanner) (*db.GUTA, error) {
 		return nil, err
 	}
 
-	g := &db.GUTA{
-		GID:   s.gid,
-		UID:   s.uid,
-		FT:    db.DirGUTAFileType(s.ft),
-		Age:   db.DirGUTAge(s.age),
-		Count: s.count,
-		Size:  s.size,
-		Atime: s.atimeMin,
-		Mtime: s.mtimeMax,
-	}
-
-	g.ATimeRanges = sliceToAgeBuckets(s.atimeBuckets)
-	g.MTimeRanges = sliceToAgeBuckets(s.mtimeBuckets)
-
-	return g, nil
+	return &db.GUTA{
+		GID:         s.gid,
+		UID:         s.uid,
+		FT:          db.DirGUTAFileType(s.ft),
+		Age:         db.DirGUTAge(s.age),
+		Count:       s.count,
+		Size:        s.size,
+		Atime:       s.atimeMin,
+		ATimeRanges: sliceToAgeBuckets(s.atimeBuckets),
+		Mtime:       s.mtimeMax,
+		MTimeRanges: sliceToAgeBuckets(s.mtimeBuckets),
+	}, nil
 }
 
 func sliceToAgeBuckets(in []uint64) summary.AgeBuckets {

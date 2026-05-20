@@ -38,12 +38,12 @@ import (
 	"strings"
 )
 
+const datasetDirSeparator = "_"
+
 type nameVersion struct {
 	name    string
 	version string
 }
-
-const datasetDirSeparator = "_"
 
 // FindDatasetDirs returns the latest dataset directory for each dataset key
 // found directly under baseDir, and a list of older dataset directory names
@@ -72,7 +72,7 @@ func FindDatasetDirs(baseDir string, required ...string) ([]string, []string, er
 	toDelete := make([]string, 0)
 
 	for _, entry := range entries {
-		toDelete = considerDatasetDirEntryWithDeletes(latest, toDelete, baseDir, entry, required)
+		toDelete = considerDatasetDirEntry(latest, toDelete, baseDir, entry, required)
 	}
 
 	dirs := make([]string, 0, len(latest))
@@ -85,16 +85,15 @@ func FindDatasetDirs(baseDir string, required ...string) ([]string, []string, er
 	return dirs, toDelete, nil
 }
 
-func considerDatasetDirEntryWithDeletes(latest map[string]nameVersion,
+func considerDatasetDirEntry(latest map[string]nameVersion,
 	toDelete []string, baseDir string, entry fs.DirEntry, required []string) []string {
 	name := entry.Name()
-
-	if !isValidDatasetEntry(entry, name, baseDir, required) {
+	if !entry.IsDir() {
 		return toDelete
 	}
 
 	version, key, ok := SplitDatasetDirName(name)
-	if !ok {
+	if !ok || !HasRequiredFiles(filepath.Join(baseDir, name), required...) {
 		return toDelete
 	}
 
@@ -117,14 +116,6 @@ func SplitDatasetDirName(name string) (version string, key string, ok bool) {
 	before, after, _ := strings.Cut(name, datasetDirSeparator)
 
 	return before, after, true
-}
-
-func isValidDatasetEntry(entry fs.DirEntry, name, baseDir string, required []string) bool {
-	if !entry.IsDir() || !IsValidDatasetDirName(name) {
-		return false
-	}
-
-	return HasRequiredFiles(filepath.Join(baseDir, name), required...)
 }
 
 // IsValidDatasetDirName validates a dataset directory name.
@@ -158,9 +149,10 @@ func HasRequiredFiles(dir string, required ...string) bool {
 }
 
 func updateLatestWithDeletes(latest map[string]nameVersion, toDelete []string, name, version, key string) []string {
+	candidate := nameVersion{name: name, version: version}
 	previous, ok := latest[key]
 	if !ok {
-		latest[key] = nameVersion{name: name, version: version}
+		latest[key] = candidate
 
 		return toDelete
 	}
@@ -172,14 +164,14 @@ func updateLatestWithDeletes(latest map[string]nameVersion, toDelete []string, n
 	}
 
 	toDelete = append(toDelete, previous.name)
-	latest[key] = nameVersion{name: name, version: version}
+	latest[key] = candidate
 
 	return toDelete
 }
 
 func compareDatasetVersions(a, b string) int {
-	ai, aOK := parsePositiveInt(a)
-	bi, bOK := parsePositiveInt(b)
+	ai, aOK := parseDatasetVersionInt(a)
+	bi, bOK := parseDatasetVersionInt(b)
 
 	switch {
 	case aOK && bOK:
@@ -193,7 +185,7 @@ func compareDatasetVersions(a, b string) int {
 	}
 }
 
-func parsePositiveInt(s string) (int, bool) {
+func parseDatasetVersionInt(s string) (int, bool) {
 	v, err := strconv.Atoi(s)
 
 	return v, err == nil

@@ -30,6 +30,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
+	"slices"
 	"strings"
 	"time"
 
@@ -68,11 +70,12 @@ const (
 		"FROM wrstat_basedirs_history WHERE mount_path = ? AND gid = ? ORDER BY date ASC"
 )
 
-var errStoreNotReset = errors.New("clickhouse: basedirs store not reset")
+var (
+	errStoreNotReset          = errors.New("clickhouse: basedirs store not reset")
+	errSubDirPositionOverflow = errors.New("clickhouse: basedirs subdir position overflows UInt32")
+)
 
 const historyCap = 64
-
-func batchSend(b driver.Batch) error { return b.Send() }
 
 type historyRollbackEntry struct {
 	date time.Time
@@ -284,10 +287,6 @@ func (s *chBaseDirsStore) dropSnapshotPartitionsWithConn(ctx context.Context, co
 	return dropSnapshotPartitionsForMount(ctx, conn, s.mountPath, s.snapshot.String(), basedirsPartitionDropQueries())
 }
 
-func batchAbort(b driver.Batch) error { return b.Abort() }
-
-type batchOp func(driver.Batch) error
-
 type batchSlot struct {
 	batch *driver.Batch
 	query string
@@ -382,13 +381,21 @@ func (s *chBaseDirsStore) validateReadyForReset() error {
 	return nil
 }
 
-func (s *chBaseDirsStore) PutGroupUsage(u *basedirs.Usage) error {
+func (s *chBaseDirsStore) ensureReady() error {
 	if s == nil || s.conn == nil {
 		return errClientClosed
 	}
 
 	if !s.reset {
 		return errStoreNotReset
+	}
+
+	return nil
+}
+
+func (s *chBaseDirsStore) PutGroupUsage(u *basedirs.Usage) error {
+	if err := s.ensureReady(); err != nil {
+		return err
 	}
 
 	if u == nil {
@@ -402,7 +409,9 @@ func (s *chBaseDirsStore) PutGroupUsage(u *basedirs.Usage) error {
 		return nil
 	}
 
-	return s.appendGroupUsage(u, unixEpochUTC(), unixEpochUTC())
+	epoch := unixEpochUTC()
+
+	return s.appendGroupUsage(u, epoch, epoch)
 }
 
 func unixEpochUTC() time.Time {
@@ -410,12 +419,8 @@ func unixEpochUTC() time.Time {
 }
 
 func (s *chBaseDirsStore) PutUserUsage(u *basedirs.Usage) error {
-	if s == nil || s.conn == nil {
-		return errClientClosed
-	}
-
-	if !s.reset {
-		return errStoreNotReset
+	if err := s.ensureReady(); err != nil {
+		return err
 	}
 
 	if u == nil {
@@ -461,12 +466,8 @@ func (s *chBaseDirsStore) appendSubDirs(
 	subdirs []*basedirs.SubDir,
 	kind string,
 ) error {
-	if s == nil || s.conn == nil {
-		return errClientClosed
-	}
-
-	if !s.reset {
-		return errStoreNotReset
+	if err := s.ensureReady(); err != nil {
+		return err
 	}
 
 	for pos, sd := range subdirs {
@@ -474,7 +475,11 @@ func (s *chBaseDirsStore) appendSubDirs(
 			continue
 		}
 
-		if err := s.appendOneSubDir(*batch, key, sd, pos, kind); err != nil {
+		if uint64(pos) > math.MaxUint32 {
+			return fmt.Errorf("%w: %s position %d", errSubDirPositionOverflow, kind, pos)
+		}
+
+		if err := s.appendOneSubDir(*batch, key, sd, uint32(pos), kind); err != nil {
 			return err
 		}
 	}
@@ -486,7 +491,7 @@ func (s *chBaseDirsStore) appendOneSubDir(
 	batch driver.Batch,
 	key basedirs.SubDirKey,
 	sd *basedirs.SubDir,
-	pos int,
+	pos uint32,
 	kind string,
 ) error {
 	if err := batch.Append(
@@ -495,7 +500,7 @@ func (s *chBaseDirsStore) appendOneSubDir(
 		key.ID,
 		key.BaseDir,
 		uint8(key.Age),
-		uint32(pos), //nolint:gosec
+		pos,
 		sd.SubDir,
 		sd.NumFiles,
 		sd.SizeFiles,
@@ -528,12 +533,8 @@ func (s *chBaseDirsStore) AppendGroupHistory(
 	key basedirs.HistoryKey,
 	point basedirs.History,
 ) error {
-	if s == nil || s.conn == nil {
-		return errClientClosed
-	}
-
-	if !s.reset {
-		return errStoreNotReset
+	if err := s.ensureReady(); err != nil {
+		return err
 	}
 
 	s.lastHistoryAppendInserted = false
@@ -580,10 +581,10 @@ func (s *chBaseDirsStore) historyAlreadyRecorded(
 
 	defer func() { _ = rows.Close() }()
 
-	return s.scanHistoryLastDate(rows, date)
+	return scanHistoryLastDate(rows, date)
 }
 
-func (s *chBaseDirsStore) scanHistoryLastDate(
+func scanHistoryLastDate(
 	rows driver.Rows,
 	date time.Time,
 ) (bool, error) {
@@ -631,12 +632,8 @@ func (s *chBaseDirsStore) insertHistoryPoint(
 }
 
 func (s *chBaseDirsStore) Finalise() error {
-	if s == nil || s.conn == nil {
-		return errClientClosed
-	}
-
-	if !s.reset {
-		return errStoreNotReset
+	if err := s.ensureReady(); err != nil {
+		return err
 	}
 
 	for gid, usages := range s.bufferedAgeAllGroupUsage {
@@ -736,10 +733,10 @@ func (s *chBaseDirsStore) readHistorySeries(
 
 	defer func() { _ = rows.Close() }()
 
-	return s.collectHistoryRows(rows)
+	return collectHistoryRows(rows)
 }
 
-func (s *chBaseDirsStore) collectHistoryRows(
+func collectHistoryRows(
 	rows driver.Rows,
 ) ([]basedirs.History, error) {
 	history := make([]basedirs.History, 0, historyCap)
@@ -760,6 +757,13 @@ func (s *chBaseDirsStore) collectHistoryRows(
 		history = append(history, h)
 	}
 
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf(
+			"clickhouse: basedirs history series iteration error: %w",
+			err,
+		)
+	}
+
 	return history, nil
 }
 
@@ -777,12 +781,8 @@ func dropPartitionIgnoreUnknown(
 		return nil
 	}
 
-	var ex *proto.Exception
-	if errors.As(err, &ex) {
-		// ClickHouse returns UNKNOWN_PARTITION for first-time snapshots.
-		if strings.Contains(ex.Message, "UNKNOWN_PARTITION") || strings.Contains(ex.Message, "Unknown partition") {
-			return nil
-		}
+	if isUnknownPartition(err) {
+		return nil
 	}
 
 	return fmt.Errorf("clickhouse: failed to drop partition: %w", err)
@@ -861,8 +861,8 @@ func sendAndReprepareIfFull(
 
 func abortPreparedBatches(batches []driver.Batch) error {
 	var err error
-	for i := len(batches) - 1; i >= 0; i-- {
-		err = errors.Join(err, batches[i].Abort())
+	for _, batch := range slices.Backward(batches) {
+		err = errors.Join(err, batch.Abort())
 	}
 
 	return err
@@ -878,7 +878,8 @@ func (s *chBaseDirsStore) batchSlots() []batchSlot {
 }
 
 func (s *chBaseDirsStore) applyToBatches(
-	op batchOp, errMsg string,
+	op func(driver.Batch) error,
+	errMsg string,
 ) error {
 	var out error
 
@@ -898,13 +899,15 @@ func (s *chBaseDirsStore) applyToBatches(
 
 func (s *chBaseDirsStore) flushAllBatches() error {
 	return s.applyToBatches(
-		batchSend, "failed to flush basedirs batches",
+		driver.Batch.Send,
+		"failed to flush basedirs batches",
 	)
 }
 
 func (s *chBaseDirsStore) abortExistingBatches() error {
 	return s.applyToBatches(
-		batchAbort, "failed to abort existing basedirs batches",
+		driver.Batch.Abort,
+		"failed to abort existing basedirs batches",
 	)
 }
 
@@ -920,4 +923,15 @@ func NewBaseDirsStore(cfg Config) (basedirs.Store, error) {
 	}
 
 	return &chBaseDirsStore{cfg: cfg, conn: conn, batchSize: defaultBatchSize}, nil
+}
+
+func isUnknownPartition(err error) bool {
+	var ex *proto.Exception
+	if !errors.As(err, &ex) {
+		return false
+	}
+
+	// ClickHouse returns UNKNOWN_PARTITION for first-time snapshots.
+	return strings.Contains(ex.Message, "UNKNOWN_PARTITION") ||
+		strings.Contains(ex.Message, "Unknown partition")
 }

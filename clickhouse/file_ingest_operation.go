@@ -59,6 +59,55 @@ var (
 	)
 )
 
+type fileIngestRow struct {
+	mountPath    string
+	snapshot     uuid.UUID
+	parentDir    string
+	name         string
+	ext          string
+	entryType    uint8
+	size         uint64
+	apparentSize uint64
+	uid          uint32
+	gid          uint32
+	atime        time.Time
+	mtime        time.Time
+	ctime        time.Time
+	inode        uint64
+	nlink        uint64
+}
+
+func fileIngestRowFromInfo(
+	mountPath string,
+	snapshot uuid.UUID,
+	parentDir string,
+	name string,
+	info *summary.FileInfo,
+) (fileIngestRow, error) {
+	size, apparentSize, inode, nlink, err := unsignedFileInfoValues(info)
+	if err != nil {
+		return fileIngestRow{}, err
+	}
+
+	return fileIngestRow{
+		mountPath:    mountPath,
+		snapshot:     snapshot,
+		parentDir:    parentDir,
+		name:         name,
+		ext:          extFromName(name),
+		entryType:    info.EntryType,
+		size:         size,
+		apparentSize: apparentSize,
+		uid:          info.UID,
+		gid:          info.GID,
+		atime:        time.Unix(info.ATime, 0),
+		mtime:        time.Unix(info.MTime, 0),
+		ctime:        time.Unix(info.CTime, 0),
+		inode:        inode,
+		nlink:        nlink,
+	}, nil
+}
+
 type fileIngestBuffer struct {
 	mountPath    []string
 	snapshot     []uuid.UUID
@@ -99,38 +148,42 @@ func (b *fileIngestBuffer) reset() {
 	b.nlink = b.nlink[:0]
 }
 
-func (b *fileIngestBuffer) appendRow( //nolint:funlen
-	mountPath string,
-	snapshot uuid.UUID,
-	parentDir string,
-	name string,
-	ext string,
-	entryType uint8,
-	size uint64,
-	apparentSize uint64,
-	uid uint32,
-	gid uint32,
-	atime time.Time,
-	mtime time.Time,
-	ctime time.Time,
-	inode uint64,
-	nlink uint64,
-) {
-	b.mountPath = append(b.mountPath, mountPath)
-	b.snapshot = append(b.snapshot, snapshot)
-	b.parentDir = append(b.parentDir, parentDir)
-	b.name = append(b.name, name)
-	b.ext = append(b.ext, ext)
-	b.entryType = append(b.entryType, entryType)
-	b.size = append(b.size, size)
-	b.apparentSize = append(b.apparentSize, apparentSize)
-	b.uid = append(b.uid, uid)
-	b.gid = append(b.gid, gid)
-	b.atime = append(b.atime, atime)
-	b.mtime = append(b.mtime, mtime)
-	b.ctime = append(b.ctime, ctime)
-	b.inode = append(b.inode, inode)
-	b.nlink = append(b.nlink, nlink)
+func (b *fileIngestBuffer) appendRow(row fileIngestRow) {
+	b.mountPath = append(b.mountPath, row.mountPath)
+	b.snapshot = append(b.snapshot, row.snapshot)
+	b.parentDir = append(b.parentDir, row.parentDir)
+	b.name = append(b.name, row.name)
+	b.ext = append(b.ext, row.ext)
+	b.entryType = append(b.entryType, row.entryType)
+	b.size = append(b.size, row.size)
+	b.apparentSize = append(b.apparentSize, row.apparentSize)
+	b.uid = append(b.uid, row.uid)
+	b.gid = append(b.gid, row.gid)
+	b.atime = append(b.atime, row.atime)
+	b.mtime = append(b.mtime, row.mtime)
+	b.ctime = append(b.ctime, row.ctime)
+	b.inode = append(b.inode, row.inode)
+	b.nlink = append(b.nlink, row.nlink)
+}
+
+func (b *fileIngestBuffer) columns() []any {
+	return []any{
+		b.mountPath,
+		b.snapshot,
+		b.parentDir,
+		b.name,
+		b.ext,
+		b.entryType,
+		b.size,
+		b.apparentSize,
+		b.uid,
+		b.gid,
+		b.atime,
+		b.mtime,
+		b.ctime,
+		b.inode,
+		b.nlink,
+	}
 }
 
 type fileIngestWriter struct {
@@ -273,19 +326,12 @@ func (w *fileIngestWriter) bufferFileInfo(info *summary.FileInfo) (bool, error) 
 		return false, nil
 	}
 
-	size, apparentSize, inode, nlink, err := unsignedFileInfoValues(info)
+	row, err := fileIngestRowFromInfo(w.mountPath, w.snapshot, parentDir, name, info)
 	if err != nil {
 		return false, err
 	}
 
-	w.buf.appendRow(
-		w.mountPath, w.snapshot, parentDir, name, extFromName(name),
-		info.EntryType, size, apparentSize, info.UID, info.GID,
-		time.Unix(info.ATime, 0),
-		time.Unix(info.MTime, 0),
-		time.Unix(info.CTime, 0),
-		inode, nlink,
-	)
+	w.buf.appendRow(row)
 
 	return true, nil
 }
@@ -294,6 +340,14 @@ func fileIngestParentAndName(info *summary.FileInfo) (string, string) {
 	parentDir := string(info.Path.AppendTo(make([]byte, 0, info.Path.Len())))
 
 	return parentDir, string(info.Name)
+}
+
+func (w *fileIngestWriter) ensureSnapshotID() {
+	if w.snapshot != uuid.Nil {
+		return
+	}
+
+	w.snapshot = snapshotID(w.mountPath, w.updatedAt)
 }
 
 func unsignedFileInfoValues(info *summary.FileInfo) (uint64, uint64, uint64, uint64, error) {
@@ -387,9 +441,7 @@ func (w *fileIngestWriter) validateWriteState() error {
 	return nil
 }
 
-func (w *fileIngestWriter) flushBuffer(
-	ctx context.Context,
-) error {
+func (w *fileIngestWriter) flushBuffer(ctx context.Context) error {
 	if w == nil || w.conn == nil {
 		return errClientClosed
 	}
@@ -401,9 +453,7 @@ func (w *fileIngestWriter) flushBuffer(
 	return w.sendBufferedData(ctx)
 }
 
-func (w *fileIngestWriter) sendBufferedData(
-	ctx context.Context,
-) error {
+func (w *fileIngestWriter) sendBufferedData(ctx context.Context) error {
 	if err := w.ensureWriteReady(ctx); err != nil {
 		return err
 	}
@@ -432,25 +482,7 @@ func (w *fileIngestWriter) sendBufferedData(
 }
 
 func (w *fileIngestWriter) appendColumnarData() error {
-	columns := []any{
-		w.buf.mountPath,
-		w.buf.snapshot,
-		w.buf.parentDir,
-		w.buf.name,
-		w.buf.ext,
-		w.buf.entryType,
-		w.buf.size,
-		w.buf.apparentSize,
-		w.buf.uid,
-		w.buf.gid,
-		w.buf.atime,
-		w.buf.mtime,
-		w.buf.ctime,
-		w.buf.inode,
-		w.buf.nlink,
-	}
-
-	for i, col := range columns {
+	for i, col := range w.buf.columns() {
 		if err := w.batch.Column(i).Append(col); err != nil {
 			return fmt.Errorf(
 				"clickhouse: failed to append files column %d: %w",
@@ -462,16 +494,12 @@ func (w *fileIngestWriter) appendColumnarData() error {
 	return nil
 }
 
-func (w *fileIngestWriter) ensureWriteReady(
-	ctx context.Context,
-) error {
+func (w *fileIngestWriter) ensureWriteReady(ctx context.Context) error {
 	if w.prepared {
 		return nil
 	}
 
-	if w.snapshot == uuid.Nil {
-		w.snapshot = snapshotID(w.mountPath, w.updatedAt)
-	}
+	w.ensureSnapshotID()
 
 	if err := refuseActiveSnapshotRewrite(ctx, w.conn, w.mountPath, w.snapshot); err != nil {
 		return err
@@ -491,9 +519,7 @@ func (w *fileIngestWriter) ensureWriteReady(
 	return nil
 }
 
-func (w *fileIngestWriter) prepareFilesBatch(
-	ctx context.Context,
-) error {
+func (w *fileIngestWriter) prepareFilesBatch(ctx context.Context) error {
 	if w.batch != nil {
 		w.prepared = true
 
