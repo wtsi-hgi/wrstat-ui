@@ -593,6 +593,10 @@ func scanHistoryLastDate(
 	date time.Time,
 ) (bool, error) {
 	if !rows.Next() {
+		if iterErr := rowIterationErr(rows, "clickhouse: basedirs history last date iteration error"); iterErr != nil {
+			return false, iterErr
+		}
+
 		return false, nil
 	}
 
@@ -821,11 +825,11 @@ func (s *chBaseDirsStore) flushFullBatches() error {
 			batchCtx, s.conn, *slot.batch,
 			s.batchSize, slot.query,
 		)
+		*slot.batch = b
+
 		if err != nil {
 			return err
 		}
-
-		*slot.batch = b
 	}
 
 	return nil
@@ -843,7 +847,7 @@ func sendAndReprepareIfFull(
 	}
 
 	if err := batch.Send(); err != nil {
-		return nil, fmt.Errorf(
+		return batch, fmt.Errorf(
 			"clickhouse: failed to send batch: %w", err,
 		)
 	}

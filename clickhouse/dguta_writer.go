@@ -728,6 +728,8 @@ func (w *dgutaWriter) sendAndReplaceBatch(ctx context.Context, slot dgutaBatchSl
 			return fmt.Errorf("clickhouse: failed to send %s batch: %w", slot.name, err)
 		}
 
+		*slot.batch = nil
+
 		batchCtx := context.WithoutCancel(ctx)
 
 		batch, err := w.prepareBatch(batchCtx, slot.query)

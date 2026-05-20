@@ -922,6 +922,10 @@ func (r *chBaseDirsReader) queryCount(ctx context.Context, query string, dest *i
 	defer func() { _ = rows.Close() }()
 
 	if !rows.Next() {
+		if iterErr := rowIterationErr(rows, "clickhouse: basedirs info iteration error"); iterErr != nil {
+			return iterErr
+		}
+
 		*dest = 0
 
 		return nil
@@ -951,6 +955,10 @@ func (r *chBaseDirsReader) queryCountPair(ctx context.Context, query string, des
 	defer func() { _ = rows.Close() }()
 
 	if !rows.Next() {
+		if iterErr := rowIterationErr(rows, "clickhouse: basedirs info iteration error"); iterErr != nil {
+			return iterErr
+		}
+
 		*destA = 0
 		*destB = 0
 

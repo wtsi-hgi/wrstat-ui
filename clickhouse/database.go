@@ -392,32 +392,44 @@ func (d *clickHouseDatabase) queryActiveMount(
 	defer func() { _ = rows.Close() }()
 
 	if !rows.Next() {
+		if iterErr := rowIterationErr(rows, "clickhouse: active mount iteration error"); iterErr != nil {
+			return activeMount{}, false, iterErr
+		}
+
 		return activeMount{}, false, nil
 	}
 
-	mountPath, snapshotID, updatedAt, err := scanActiveMountRow(rows)
+	mount, err := scanActiveMountRow(rows)
 	if err != nil {
 		return activeMount{}, false, err
 	}
 
-	return activeMount{
-		mountPath:  mountPath,
-		snapshotID: snapshotID,
-		updatedAt:  updatedAt.UTC(),
-	}, true, nil
+	return mount, true, nil
 }
 
-func scanActiveMountRow(rows rowsScanner) (string, string, time.Time, error) {
+func rowIterationErr(rows any, msg string) error {
+	if err := rowsErr(rows); err != nil {
+		return fmt.Errorf("%s: %w", msg, err)
+	}
+
+	return nil
+}
+
+func scanActiveMountRow(rows rowsScanner) (activeMount, error) {
 	var (
 		mountPath, snapshotID string
 		updatedAt             time.Time
 	)
 
 	if err := rows.Scan(&mountPath, &snapshotID, &updatedAt); err != nil {
-		return "", "", time.Time{}, fmt.Errorf("clickhouse: failed to scan active mount: %w", err)
+		return activeMount{}, fmt.Errorf("clickhouse: failed to scan active mount: %w", err)
 	}
 
-	return mountPath, snapshotID, updatedAt, nil
+	return activeMount{
+		mountPath:  mountPath,
+		snapshotID: snapshotID,
+		updatedAt:  updatedAt.UTC(),
+	}, nil
 }
 
 func (d *clickHouseDatabase) childrenForAncestor(
@@ -628,6 +640,11 @@ func (d *clickHouseDatabase) queryInfoCounts(
 	defer func() { _ = rows.Close() }()
 
 	if !rows.Next() {
+		msg := fmt.Sprintf("clickhouse: %s counts iteration error", desc)
+		if iterErr := rowIterationErr(rows, msg); iterErr != nil {
+			return 0, 0, iterErr
+		}
+
 		return 0, 0, nil
 	}
 
@@ -750,6 +767,10 @@ func (d *clickHouseDatabase) ancestorMaxUpdatedAt(
 
 func scanMaxUpdatedAt(rows rowsScanner) (time.Time, error) {
 	if !rows.Next() {
+		if iterErr := rowIterationErr(rows, "clickhouse: ancestor max updated_at iteration error"); iterErr != nil {
+			return time.Time{}, iterErr
+		}
+
 		return time.Time{}, nil
 	}
 
