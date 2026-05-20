@@ -396,16 +396,6 @@ func ingestStatsGZ(
 	opts ImportOptions,
 	metrics *datasetImportMetrics,
 ) (_ uint64, err error) {
-	return ingestStatsGZWithMetrics(api, statsPath, mp, updatedAt, opts, metrics)
-}
-
-func ingestStatsGZWithMetrics(
-	api ImportAPI,
-	statsPath, mp string,
-	updatedAt time.Time,
-	opts ImportOptions,
-	metrics *datasetImportMetrics,
-) (_ uint64, err error) {
 	gz, closeFn, err := openStatsGZReader(statsPath)
 	if err != nil {
 		return 0, err
@@ -599,7 +589,7 @@ func addBasedirsSummariser(
 	timedBS.SetUpdatedAt(updatedAt)
 
 	closer := func(publish bool) error {
-		return closeImportBasedirsStore(timedBS, publish)
+		return summariseutil.CloseOrAbort(timedBS, publish)
 	}
 
 	if err := addBasedirsOp(ss, timedBS, updatedAt, opts); err != nil {
@@ -609,23 +599,6 @@ func addBasedirsSummariser(
 	}
 
 	return closer, nil
-}
-
-func closeImportBasedirsStore(store basedirs.Store, publish bool) error {
-	if store == nil {
-		return nil
-	}
-
-	if publish {
-		return store.Close()
-	}
-
-	aborter, ok := store.(interface{ Abort() error })
-	if ok {
-		return aborter.Abort()
-	}
-
-	return store.Close()
 }
 
 func addBasedirsOp(
@@ -639,16 +612,11 @@ func addBasedirsOp(
 		return err
 	}
 
-	bd, err := basedirs.NewCreator(store, quotas)
+	bd, err := summariseutil.NewBaseDirsCreator(store, quotas, mountpoints, modtime)
 	if err != nil {
 		return err
 	}
 
-	if len(mountpoints) > 0 {
-		bd.SetMountPoints(mountpoints)
-	}
-
-	bd.SetModTime(modtime)
 	ss.AddDirectoryOperation(sbasedirs.NewBaseDirs(config.PathShouldOutput, bd))
 
 	return nil
@@ -660,13 +628,9 @@ func parseBasedirsInputs(opts ImportOptions) (*basedirs.Quotas, basedirs.Config,
 		return nil, nil, nil, err
 	}
 
-	var mountpoints []string
-
-	if opts.MountsPath != "" {
-		mountpoints, err = summariseutil.ParseMountpointsFromFile(opts.MountsPath)
-		if err != nil {
-			return nil, nil, nil, err
-		}
+	mountpoints, err := summariseutil.ParseMountpointsFromFile(opts.MountsPath)
+	if err != nil {
+		return nil, nil, nil, err
 	}
 
 	return quotas, config, mountpoints, nil
@@ -677,50 +641,7 @@ func composeImportCloser(
 	basedirsCloser func(bool) error,
 	dgutaCloser abortableCloser,
 ) func(bool) error {
-	return func(publish bool) error {
-		fileErr := closeImportFile(fileCloser)
-		shouldPublishBasedirs := publish && fileErr == nil
-
-		basedirsErr := closeImportBasedirs(basedirsCloser, shouldPublishBasedirs)
-		dgutaErr := closeImportDGUTA(
-			dgutaCloser,
-			shouldPublishBasedirs && basedirsErr == nil,
-		)
-
-		if shouldPublishBasedirs && (basedirsErr != nil || dgutaErr != nil) {
-			basedirsErr = errors.Join(basedirsErr, closeImportBasedirs(basedirsCloser, false))
-		}
-
-		return errors.Join(fileErr, basedirsErr, dgutaErr)
-	}
-}
-
-func closeImportFile(fileCloser io.Closer) error {
-	if fileCloser == nil {
-		return nil
-	}
-
-	return fileCloser.Close()
-}
-
-func closeImportBasedirs(basedirsCloser func(bool) error, publish bool) error {
-	if basedirsCloser == nil {
-		return nil
-	}
-
-	return basedirsCloser(publish)
-}
-
-func closeImportDGUTA(dgutaCloser abortableCloser, publish bool) error {
-	if dgutaCloser == nil {
-		return nil
-	}
-
-	if publish {
-		return dgutaCloser.Close()
-	}
-
-	return dgutaCloser.Abort()
+	return summariseutil.ComposePublishCloser(fileCloser, basedirsCloser, dgutaCloser)
 }
 
 func importParallel(

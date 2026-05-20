@@ -31,7 +31,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"strconv"
 	"strings"
 	"time"
 
@@ -86,12 +85,7 @@ func NewInspector(cfg Config) (*Inspector, error) {
 		return nil, err
 	}
 
-	opts, err := optionsFromConfig(cfg)
-	if err != nil {
-		return nil, err
-	}
-
-	conn, err := connectAndBootstrap(context.Background(), opts, cfg.Database, queryTimeout(cfg))
+	conn, err := connectFromConfig(cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -289,10 +283,5 @@ func durationMillis(runDuration time.Duration) uint64 {
 		return 0
 	}
 
-	value, err := strconv.ParseUint(strconv.FormatInt(ms, 10), 10, 64)
-	if err != nil {
-		return 0
-	}
-
-	return value
+	return uint64(ms)
 }

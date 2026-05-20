@@ -29,10 +29,12 @@ package summariseutil
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
 )
@@ -99,6 +101,86 @@ func ParseMountpointsFromFile(mountpoints string) ([]string, error) {
 	}
 
 	return mounts, nil
+}
+
+// NewBaseDirsCreator returns a configured basedirs creator.
+func NewBaseDirsCreator(
+	store basedirs.Store,
+	quotas *basedirs.Quotas,
+	mountpoints []string,
+	modtime time.Time,
+) (*basedirs.BaseDirs, error) {
+	bd, err := basedirs.NewCreator(store, quotas)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create new basedirs creator: %w", err)
+	}
+
+	if len(mountpoints) > 0 {
+		bd.SetMountPoints(mountpoints)
+	}
+
+	bd.SetModTime(modtime)
+
+	return bd, nil
+}
+
+// ComposePublishCloser closes file, basedirs and DGUTA resources in the
+// publish/abort order shared by summarise and ClickHouse perf imports.
+func ComposePublishCloser(
+	fileCloser io.Closer,
+	basedirsCloser func(bool) error,
+	dgutaCloser io.Closer,
+) func(bool) error {
+	return func(publish bool) error {
+		fileErr := closeOptional(fileCloser)
+		shouldPublishBasedirs := publish && fileErr == nil
+
+		basedirsErr := closePublishFunc(basedirsCloser, shouldPublishBasedirs)
+		dgutaErr := CloseOrAbort(
+			dgutaCloser,
+			shouldPublishBasedirs && basedirsErr == nil,
+		)
+
+		if shouldPublishBasedirs && (basedirsErr != nil || dgutaErr != nil) {
+			basedirsErr = errors.Join(basedirsErr, closePublishFunc(basedirsCloser, false))
+		}
+
+		return errors.Join(fileErr, basedirsErr, dgutaErr)
+	}
+}
+
+func closeOptional(closer io.Closer) error {
+	if closer == nil {
+		return nil
+	}
+
+	return closer.Close()
+}
+
+// CloseOrAbort closes closer when publishing, or calls Abort when available.
+func CloseOrAbort(closer io.Closer, publish bool) error {
+	if closer == nil {
+		return nil
+	}
+
+	if publish {
+		return closer.Close()
+	}
+
+	aborter, ok := closer.(interface{ Abort() error })
+	if ok {
+		return aborter.Abort()
+	}
+
+	return closer.Close()
+}
+
+func closePublishFunc(closer func(bool) error, publish bool) error {
+	if closer == nil {
+		return nil
+	}
+
+	return closer(publish)
 }
 
 // DeriveMountPathFromOutputDir extracts the mount path from the parent

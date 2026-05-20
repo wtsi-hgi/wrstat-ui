@@ -34,7 +34,6 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/clickhouse"
 	"github.com/wtsi-hgi/wrstat-ui/internal/boltperf"
 	"github.com/wtsi-hgi/wrstat-ui/internal/chperf"
-	"github.com/wtsi-hgi/wrstat-ui/internal/summariseutil"
 )
 
 const (
@@ -215,11 +214,7 @@ func chPerfConfig() (clickhouse.Config, error) {
 }
 
 func chPerfMountpoints() ([]string, error) {
-	if chPerf.mountpoints == "" {
-		return nil, nil
-	}
-
-	return summariseutil.ParseMountpointsFromFile(chPerf.mountpoints)
+	return parseOptionalMountpoints(chPerf.mountpoints)
 }
 
 func parseGIDs(raw string) []uint32 {

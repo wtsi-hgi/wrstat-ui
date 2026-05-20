@@ -74,7 +74,7 @@ func mountPathFromDatasetDirBase(dirBase string) (mountPath string, ok bool, err
 		return "", false, nil
 	}
 
-	mountPath = strings.ReplaceAll(mountKey, fullwidthSolidus, fullwidthReplacement)
+	mountPath = DecodeKey(mountKey)
 	if mountPath == "" {
 		return "", false, ErrDatasetDirEmptyMountKey
 	}
@@ -88,4 +88,18 @@ func mountPathFromDatasetDirBase(dirBase string) (mountPath string, ok bool, err
 	}
 
 	return mountPath, true, nil
+}
+
+// DecodeKey converts a dataset mount key back to a slash-delimited mount path.
+func DecodeKey(mountKey string) string {
+	if mountKey == "" {
+		return ""
+	}
+
+	mountPath := strings.ReplaceAll(mountKey, fullwidthSolidus, fullwidthReplacement)
+	if !strings.HasSuffix(mountPath, fullwidthReplacement) {
+		mountPath += fullwidthReplacement
+	}
+
+	return mountPath
 }

@@ -282,55 +282,11 @@ func composeSummariseCloser(
 	basedirsCloser func(bool) error,
 	dgutaCloser io.Closer,
 ) func(bool) error {
-	return func(publish bool) error {
-		fileErr := closeSummariseFile(fileCloser)
-		shouldPublishBasedirs := publish && fileErr == nil
-
-		basedirsErr := closeSummariseBasedirs(basedirsCloser, shouldPublishBasedirs)
-		dgutaErr := closeSummariseDGUTAWriter(
-			dgutaCloser,
-			shouldPublishBasedirs && basedirsErr == nil,
-		)
-
-		if shouldPublishBasedirs && (basedirsErr != nil || dgutaErr != nil) {
-			basedirsErr = errors.Join(basedirsErr, closeSummariseBasedirs(basedirsCloser, false))
-		}
-
-		return errors.Join(fileErr, basedirsErr, dgutaErr)
-	}
-}
-
-func closeSummariseBasedirs(basedirsCloser func(bool) error, publish bool) error {
-	if basedirsCloser == nil {
-		return nil
-	}
-
-	return basedirsCloser(publish)
-}
-
-func closeSummariseFile(fileCloser io.Closer) error {
-	if fileCloser == nil {
-		return nil
-	}
-
-	return fileCloser.Close()
+	return summariseutil.ComposePublishCloser(fileCloser, basedirsCloser, dgutaCloser)
 }
 
 func closeSummariseDGUTAWriter(writer io.Closer, publish bool) error {
-	if writer == nil {
-		return nil
-	}
-
-	if publish {
-		return writer.Close()
-	}
-
-	aborter, ok := writer.(interface{ Abort() error })
-	if ok {
-		return aborter.Abort()
-	}
-
-	return writer.Close()
+	return summariseutil.CloseOrAbort(writer, publish)
 }
 
 func setupBasedirsStore(
@@ -378,12 +334,12 @@ func addBasedirsSummariser(
 		return err
 	}
 
-	mps, err := summariseutil.ParseMountpointsFromFile(mountpoints)
+	mps, err := parseOptionalMountpoints(mountpoints)
 	if err != nil {
 		return err
 	}
 
-	bd, err := configureBaseDirsCreator(store, quotas, mps, modtime)
+	bd, err := summariseutil.NewBaseDirsCreator(store, quotas, mps, modtime)
 	if err != nil {
 		return err
 	}
@@ -393,41 +349,8 @@ func addBasedirsSummariser(
 	return nil
 }
 
-func configureBaseDirsCreator(
-	store basedirs.Store,
-	quotas *basedirs.Quotas,
-	mountpoints []string,
-	modtime time.Time,
-) (*basedirs.BaseDirs, error) {
-	bd, err := basedirs.NewCreator(store, quotas)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create new basedirs creator: %w", err)
-	}
-
-	if len(mountpoints) > 0 {
-		bd.SetMountPoints(mountpoints)
-	}
-
-	bd.SetModTime(modtime)
-
-	return bd, nil
-}
-
 func closeSummariseBasedirsStore(store basedirs.Store, publish bool) error {
-	if store == nil {
-		return nil
-	}
-
-	if publish {
-		return store.Close()
-	}
-
-	aborter, ok := store.(interface{ Abort() error })
-	if ok {
-		return aborter.Abort()
-	}
-
-	return store.Close()
+	return summariseutil.CloseOrAbort(store, publish)
 }
 
 type batchSizeSetter interface {
@@ -837,7 +760,7 @@ func resolveFirstMountPath(
 func clickhouseSummariserConfig(
 	mountpoints string,
 ) (clickhouse.Config, error) {
-	mps, err := summariseutil.ParseMountpointsFromFile(mountpoints)
+	mps, err := parseOptionalMountpoints(mountpoints)
 	if err != nil {
 		return clickhouse.Config{}, err
 	}

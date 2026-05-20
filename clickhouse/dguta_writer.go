@@ -35,7 +35,6 @@ import (
 
 	ch "github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
-	"github.com/ClickHouse/clickhouse-go/v2/lib/proto"
 	"github.com/google/uuid"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 )
@@ -410,7 +409,7 @@ func (w *dgutaWriter) dropAllSnapshotPartitions(ctx context.Context, sid string)
 	}
 
 	for _, query := range queries {
-		if err := w.dropPartition(ctx, query, sid); err != nil {
+		if err := dropPartitionIgnoreUnknown(ctx, w.conn, w.mountPath, sid, query); err != nil {
 			return err
 		}
 	}
@@ -500,32 +499,15 @@ func (w *dgutaWriter) prepareBatch(ctx context.Context, query string) (driver.Ba
 func (w *dgutaWriter) dropNewSnapshotPartitions(ctx context.Context) error {
 	sid := w.snapshot.String()
 
-	if err := w.dropPartition(ctx, dropDGUTAPartitionQuery, sid); err != nil {
+	if err := dropPartitionIgnoreUnknown(ctx, w.conn, w.mountPath, sid, dropDGUTAPartitionQuery); err != nil {
 		return err
 	}
 
-	if err := w.dropPartition(ctx, dropChildrenPartitionQuery, sid); err != nil {
+	if err := dropPartitionIgnoreUnknown(ctx, w.conn, w.mountPath, sid, dropChildrenPartitionQuery); err != nil {
 		return err
 	}
 
 	return nil
-}
-
-func (w *dgutaWriter) dropPartition(ctx context.Context, query, sid string) error {
-	err := w.conn.Exec(ctx, query, w.mountPath, sid)
-	if err == nil {
-		return nil
-	}
-
-	var ex *proto.Exception
-	if errors.As(err, &ex) {
-		// ClickHouse returns UNKNOWN_PARTITION for first-time snapshots.
-		if strings.Contains(ex.Message, "UNKNOWN_PARTITION") || strings.Contains(ex.Message, "Unknown partition") {
-			return nil
-		}
-	}
-
-	return fmt.Errorf("clickhouse: failed to drop partition: %w", err)
 }
 
 func (w *dgutaWriter) appendDGUTARows(dguta db.RecordDGUTA, rawParentDir, parentDir string) error {
@@ -655,13 +637,13 @@ func childPathForParent(parentDir, child string) string {
 
 func (w *dgutaWriter) flushFullBatches(ctx context.Context) error {
 	if w.dgutaBatch != nil && w.dgutaBatch.Rows() >= w.batchSize {
-		if err := w.sendAndReplaceDGUTABatch(ctx); err != nil {
+		if err := w.sendAndReplaceBatch(ctx, w.dgutaBatchSlot()); err != nil {
 			return err
 		}
 	}
 
 	if w.childrenBatch != nil && w.childrenBatch.Rows() >= w.batchSize {
-		if err := w.sendAndReplaceChildrenBatch(ctx); err != nil {
+		if err := w.sendAndReplaceBatch(ctx, w.childrenBatchSlot()); err != nil {
 			return err
 		}
 	}
@@ -671,13 +653,13 @@ func (w *dgutaWriter) flushFullBatches(ctx context.Context) error {
 
 func (w *dgutaWriter) flushAllBatches() error {
 	if w.dgutaBatch != nil && w.dgutaBatch.Rows() > 0 {
-		if err := w.sendAndCloseDGUTABatch(); err != nil {
+		if err := w.sendAndCloseBatch(w.dgutaBatchSlot()); err != nil {
 			return err
 		}
 	}
 
 	if w.childrenBatch != nil && w.childrenBatch.Rows() > 0 {
-		if err := w.sendAndCloseChildrenBatch(); err != nil {
+		if err := w.sendAndCloseBatch(w.childrenBatchSlot()); err != nil {
 			return err
 		}
 	}
@@ -685,71 +667,61 @@ func (w *dgutaWriter) flushAllBatches() error {
 	return nil
 }
 
-func (w *dgutaWriter) sendAndReplaceDGUTABatch(ctx context.Context) error {
-	return w.timeImportPhase(importPhaseDGUTAInsert, func() error {
-		if err := w.dgutaBatch.Send(); err != nil {
-			return fmt.Errorf("clickhouse: failed to send dguta batch: %w", err)
+type dgutaBatchSlot struct {
+	batch *driver.Batch
+	query string
+	phase string
+	name  string
+}
+
+func (w *dgutaWriter) dgutaBatchSlot() dgutaBatchSlot {
+	return dgutaBatchSlot{
+		batch: &w.dgutaBatch,
+		query: insertDGUTAQuery,
+		phase: importPhaseDGUTAInsert,
+		name:  "dguta",
+	}
+}
+
+func (w *dgutaWriter) childrenBatchSlot() dgutaBatchSlot {
+	return dgutaBatchSlot{
+		batch: &w.childrenBatch,
+		query: insertChildrenQuery,
+		phase: importPhaseChildrenInsert,
+		name:  "children",
+	}
+}
+
+func (w *dgutaWriter) sendAndReplaceBatch(ctx context.Context, slot dgutaBatchSlot) error {
+	return w.timeImportPhase(slot.phase, func() error {
+		if err := (*slot.batch).Send(); err != nil {
+			return fmt.Errorf("clickhouse: failed to send %s batch: %w", slot.name, err)
 		}
 
 		batchCtx := context.WithoutCancel(ctx)
 
 		batch, err := w.conn.PrepareBatch(
 			batchCtx,
-			insertDGUTAQuery,
+			slot.query,
 			driver.WithReleaseConnection(),
 		)
 		if err != nil {
-			return fmt.Errorf("clickhouse: failed to prepare dguta batch: %w", err)
+			return fmt.Errorf("clickhouse: failed to prepare %s batch: %w", slot.name, err)
 		}
 
-		w.dgutaBatch = batch
+		*slot.batch = batch
 
 		return nil
 	})
 }
 
-func (w *dgutaWriter) sendAndReplaceChildrenBatch(ctx context.Context) error {
-	return w.timeImportPhase(importPhaseChildrenInsert, func() error {
-		if err := w.childrenBatch.Send(); err != nil {
-			return fmt.Errorf("clickhouse: failed to send children batch: %w", err)
+func (w *dgutaWriter) sendAndCloseBatch(slot dgutaBatchSlot) error {
+	return w.timeImportPhase(slot.phase, func() error {
+		if err := (*slot.batch).Send(); err != nil {
+			return fmt.Errorf("clickhouse: failed to send %s batch: %w", slot.name, err)
 		}
 
-		batchCtx := context.WithoutCancel(ctx)
-
-		batch, err := w.conn.PrepareBatch(
-			batchCtx,
-			insertChildrenQuery,
-			driver.WithReleaseConnection(),
-		)
-		if err != nil {
-			return fmt.Errorf("clickhouse: failed to prepare children batch: %w", err)
-		}
-
-		w.childrenBatch = batch
-
-		return nil
-	})
-}
-
-func (w *dgutaWriter) sendAndCloseDGUTABatch() error {
-	return w.timeImportPhase(importPhaseDGUTAInsert, func() error {
-		if err := w.dgutaBatch.Send(); err != nil {
-			return fmt.Errorf("clickhouse: failed to send dguta batch: %w", err)
-		}
-
-		w.dgutaBatch = nil
-
-		return nil
-	})
-}
-
-func (w *dgutaWriter) sendAndCloseChildrenBatch() error {
-	return w.timeImportPhase(importPhaseChildrenInsert, func() error {
-		if err := w.childrenBatch.Send(); err != nil {
-			return fmt.Errorf("clickhouse: failed to send children batch: %w", err)
-		}
-
-		w.childrenBatch = nil
+		*slot.batch = nil
 
 		return nil
 	})
@@ -778,12 +750,7 @@ func NewDGUTAWriter(cfg Config) (db.DGUTAWriter, error) {
 		return nil, err
 	}
 
-	opts, err := optionsFromConfig(cfg)
-	if err != nil {
-		return nil, err
-	}
-
-	conn, err := connectAndBootstrap(context.Background(), opts, cfg.Database, queryTimeout(cfg))
+	conn, err := connectFromConfig(cfg)
 	if err != nil {
 		return nil, err
 	}

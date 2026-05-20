@@ -160,17 +160,7 @@ func (s *chBaseDirsStore) rollbackConn() (ch.Conn, func() error, error) {
 }
 
 func (s *chBaseDirsStore) openStoreConn() (ch.Conn, error) {
-	opts, err := optionsFromConfig(s.cfg)
-	if err != nil {
-		return nil, err
-	}
-
-	return connectAndBootstrap(
-		context.Background(),
-		opts,
-		s.cfg.Database,
-		queryTimeout(s.cfg),
-	)
+	return connectFromConfig(s.cfg)
 }
 
 func (s *chBaseDirsStore) cleanupAbortedRun(ctx context.Context, conn ch.Conn) error {
@@ -989,12 +979,7 @@ func NewBaseDirsStore(cfg Config) (basedirs.Store, error) {
 		return nil, err
 	}
 
-	opts, err := optionsFromConfig(cfg)
-	if err != nil {
-		return nil, err
-	}
-
-	conn, err := connectAndBootstrap(context.Background(), opts, cfg.Database, queryTimeout(cfg))
+	conn, err := connectFromConfig(cfg)
 	if err != nil {
 		return nil, err
 	}

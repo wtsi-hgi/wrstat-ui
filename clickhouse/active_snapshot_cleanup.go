@@ -43,12 +43,7 @@ func CleanActiveSnapshotAttempt(cfg Config, mountPath string, updatedAt time.Tim
 		return err
 	}
 
-	opts, err := optionsFromConfig(cfg)
-	if err != nil {
-		return err
-	}
-
-	conn, err := connectAndBootstrap(context.Background(), opts, cfg.Database, queryTimeout(cfg))
+	conn, err := connectFromConfig(cfg)
 	if err != nil {
 		return err
 	}

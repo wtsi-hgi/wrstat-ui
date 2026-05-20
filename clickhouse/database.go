@@ -283,29 +283,7 @@ func (d *clickHouseDatabase) childrenForMount(mountPath, snapshotID, parentDir s
 	ctx, cancel := context.WithTimeout(context.Background(), queryTimeout(d.cfg))
 	defer cancel()
 
-	rows, err := d.conn.Query(
-		ctx,
-		childrenQuery,
-		mountPath,
-		snapshotID,
-		parentDir,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("clickhouse: failed to query children: %w", err)
-	}
-
-	defer func() { _ = rows.Close() }()
-
-	children, err := scanChildrenRows(rows)
-	if err != nil {
-		return nil, err
-	}
-
-	if len(children) == 0 {
-		return nil, nil
-	}
-
-	return children, nil
+	return d.queryChildren(ctx, childrenQuery, "children", mountPath, snapshotID, parentDir)
 }
 
 func scanChildrenRows(rows rowsScanner) ([]string, error) {
@@ -487,11 +465,18 @@ func (d *clickHouseDatabase) queryAncestorChildren(
 	query string,
 	args ...any,
 ) ([]string, error) {
+	return d.queryChildren(ctx, query, "ancestor children", args...)
+}
+
+func (d *clickHouseDatabase) queryChildren(
+	ctx context.Context,
+	query string,
+	what string,
+	args ...any,
+) ([]string, error) {
 	rows, err := d.conn.Query(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf(
-			"clickhouse: failed to query ancestor children: %w", err,
-		)
+		return nil, fmt.Errorf("clickhouse: failed to query %s: %w", what, err)
 	}
 
 	defer func() { _ = rows.Close() }()
@@ -565,7 +550,7 @@ func makeDBInfo(numDirs, numDGUTAs, numParents, numChildren uint64) (*db.Info, e
 
 func (d *clickHouseDatabase) infoDGUTACounts(ctx context.Context) (uint64, uint64, error) {
 	if d.snapshot == nil {
-		return d.infoCounts(ctx, infoDGUTAQuery, "dguta")
+		return d.queryInfoCounts(ctx, infoDGUTAQuery, "dguta")
 	}
 
 	return d.infoCountsForSnapshot(
@@ -580,7 +565,7 @@ func (d *clickHouseDatabase) infoDGUTACounts(ctx context.Context) (uint64, uint6
 
 func (d *clickHouseDatabase) infoChildrenCounts(ctx context.Context) (uint64, uint64, error) {
 	if d.snapshot == nil {
-		return d.infoCounts(ctx, infoChildrenQuery, "children")
+		return d.queryInfoCounts(ctx, infoChildrenQuery, "children")
 	}
 
 	return d.infoCountsForSnapshot(
@@ -591,10 +576,6 @@ func (d *clickHouseDatabase) infoChildrenCounts(ctx context.Context) (uint64, ui
 		"snapshot_id",
 		d.snapshot.all(),
 	)
-}
-
-func (d *clickHouseDatabase) infoCounts(ctx context.Context, query, desc string) (uint64, uint64, error) {
-	return d.queryInfoCounts(ctx, query, desc)
 }
 
 func (d *clickHouseDatabase) queryInfoCounts(

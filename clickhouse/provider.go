@@ -338,24 +338,28 @@ func (p *chProvider) mountsActiveRows(ctx context.Context) ([]mountsActiveRow, e
 	out := make([]mountsActiveRow, 0, mountsActiveRowsInitialCap)
 
 	for rows.Next() {
-		var (
-			mountPath  string
-			snapshotID string
-			updatedAt  time.Time
-		)
-
-		if err := rows.Scan(&mountPath, &snapshotID, &updatedAt); err != nil {
-			return nil, fmt.Errorf("clickhouse: failed to scan mounts_active: %w", err)
+		row, err := scanMountsActiveRow(rows)
+		if err != nil {
+			return nil, err
 		}
 
-		out = append(out, mountsActiveRow{
-			mountPath:  mountPath,
-			snapshotID: snapshotID,
-			updatedAt:  updatedAt,
-		})
+		out = append(out, row)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("clickhouse: mounts_active iteration error: %w", err)
 	}
 
 	return out, nil
+}
+
+func scanMountsActiveRow(rows rowsScanner) (mountsActiveRow, error) {
+	var row mountsActiveRow
+	if err := rows.Scan(&row.mountPath, &row.snapshotID, &row.updatedAt); err != nil {
+		return mountsActiveRow{}, fmt.Errorf("clickhouse: failed to scan mounts_active: %w", err)
+	}
+
+	return row, nil
 }
 
 func (p *chProvider) queueUpdate(fp string) {
@@ -600,12 +604,7 @@ func OpenProvider(cfg Config) (provider.Provider, error) {
 		return nil, err
 	}
 
-	opts, err := optionsFromConfig(cfg)
-	if err != nil {
-		return nil, err
-	}
-
-	conn, err := connectAndBootstrap(context.Background(), opts, cfg.Database, queryTimeout(cfg))
+	conn, err := connectFromConfig(cfg)
 	if err != nil {
 		return nil, err
 	}

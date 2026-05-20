@@ -34,6 +34,7 @@ import (
 
 	"github.com/joho/godotenv"
 	"github.com/wtsi-hgi/wrstat-ui/clickhouse"
+	"github.com/wtsi-hgi/wrstat-ui/internal/summariseutil"
 )
 
 const (
@@ -217,4 +218,12 @@ func clickhouseConfig(
 		PollInterval:  pollInterval,
 		QueryTimeout:  queryTimeout,
 	}
+}
+
+func parseOptionalMountpoints(path string) ([]string, error) {
+	if path == "" {
+		return nil, nil
+	}
+
+	return summariseutil.ParseMountpointsFromFile(path)
 }

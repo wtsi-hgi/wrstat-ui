@@ -29,6 +29,7 @@
 package datasets
 
 import (
+	"cmp"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -185,7 +186,7 @@ func compareDatasetVersions(a, b string) int {
 
 	switch {
 	case aOK && bOK:
-		return ai - bi
+		return cmp.Compare(ai, bi)
 	case aOK && !bOK:
 		return 1
 	case !aOK && bOK:

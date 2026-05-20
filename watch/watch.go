@@ -29,7 +29,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strings"
 	"time"
 
 	"github.com/VertebrateResequencing/wr/client"
@@ -190,12 +189,15 @@ func getPreviousBasedirsDB(outputDir, base string) (string, error) {
 		return "", err
 	}
 
-	splitBase := strings.Split(base, "_")
+	_, baseKey, ok := datasets.SplitDatasetDirName(base)
+	if !ok {
+		return "", nil
+	}
 
 	for _, possibleBasedirDB := range possibleBasedirs {
-		key := strings.SplitN(filepath.Base(possibleBasedirDB), "_", 2) //nolint:mnd
+		_, key, ok := datasets.SplitDatasetDirName(filepath.Base(possibleBasedirDB))
 
-		if key[1] == splitBase[1] {
+		if ok && key == baseKey {
 			return filepath.Join(possibleBasedirDB, basedirBasename), nil
 		}
 	}

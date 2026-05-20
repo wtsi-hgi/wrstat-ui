@@ -45,17 +45,7 @@ func ActiveSnapshotMatches(cfg Config, mountPath string, updatedAt time.Time) (b
 		return false, err
 	}
 
-	opts, err := optionsFromConfig(cfg)
-	if err != nil {
-		return false, err
-	}
-
-	conn, err := connectAndBootstrap(
-		context.Background(),
-		opts,
-		cfg.Database,
-		queryTimeout(cfg),
-	)
+	conn, err := connectFromConfig(cfg)
 	if err != nil {
 		return false, err
 	}
@@ -87,11 +77,7 @@ func activeMountsQuery(
 		mountColumn, snapshotColumn, mounts,
 	)
 
-	allArgs := make([]any, 0, len(args)+len(activeArgs))
-	allArgs = append(allArgs, args...)
-	allArgs = append(allArgs, activeArgs...)
-
-	return fmt.Sprintf(queryFmt, condition), allArgs
+	return fmt.Sprintf(queryFmt, condition), appendQueryArgs(args, activeArgs)
 }
 
 func activeMountsTupleCondition(
@@ -132,11 +118,14 @@ func activeMountPathsQuery(
 ) (string, []any) {
 	condition, activeArgs := activeMountPathsCondition(mountColumn, mounts)
 
-	allArgs := make([]any, 0, len(args)+len(activeArgs))
-	allArgs = append(allArgs, args...)
-	allArgs = append(allArgs, activeArgs...)
+	return fmt.Sprintf(queryFmt, condition), appendQueryArgs(args, activeArgs)
+}
 
-	return fmt.Sprintf(queryFmt, condition), allArgs
+func appendQueryArgs(prefix, suffix []any) []any {
+	all := make([]any, 0, len(prefix)+len(suffix))
+	all = append(all, prefix...)
+
+	return append(all, suffix...)
 }
 
 func activeMountPathsCondition(
@@ -286,6 +275,10 @@ func (s *activeMountsSnapshot) maxUpdatedAt(dir string) (time.Time, bool) {
 }
 
 func (s *activeMountsSnapshot) mountTimestamps() map[string]time.Time {
+	if s == nil {
+		return nil
+	}
+
 	out := make(map[string]time.Time, len(s.mounts))
 
 	for _, mount := range s.mounts {

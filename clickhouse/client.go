@@ -225,12 +225,7 @@ func NewClient(cfg Config) (*Client, error) {
 		return nil, err
 	}
 
-	opts, err := optionsFromConfig(cfg)
-	if err != nil {
-		return nil, err
-	}
-
-	conn, err := connectAndBootstrap(context.Background(), opts, cfg.Database, queryTimeout(cfg))
+	conn, err := connectFromConfig(cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -268,6 +263,19 @@ func connectAndBootstrap(
 	return connectAndBootstrapWith(ctx, opts, database, queryTO, ch.Open, func(ctx context.Context, conn ch.Conn) error {
 		return ensureSchemaWithBootstrapLock(ctx, conn, opts, database, queryTO)
 	})
+}
+
+func connectFromConfig(cfg Config) (ch.Conn, error) {
+	opts, err := optionsFromConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	return connectFromOptions(cfg, opts)
+}
+
+func connectFromOptions(cfg Config, opts *ch.Options) (ch.Conn, error) {
+	return connectAndBootstrap(context.Background(), opts, cfg.Database, queryTimeout(cfg))
 }
 
 func validateConfig(cfg Config) error {

@@ -38,7 +38,6 @@ import (
 	"github.com/inconshreveable/log15"
 	"github.com/spf13/cobra"
 	"github.com/wtsi-hgi/wrstat-ui/clickhouse"
-	"github.com/wtsi-hgi/wrstat-ui/internal/summariseutil"
 	"github.com/wtsi-hgi/wrstat-ui/server"
 )
 
@@ -139,15 +138,9 @@ snapshot updated_at timestamp stored in ClickHouse.
 			die("you must supply --owners")
 		}
 
-		var mountpoints []string
-
-		if mounts != "" {
-			mps, err := summariseutil.ParseMountpointsFromFile(mounts)
-			if err != nil {
-				die("failed to parse mounts file: %s", err)
-			}
-
-			mountpoints = mps
+		mountpoints, err := parseOptionalMountpoints(mounts)
+		if err != nil {
+			die("failed to parse mounts file: %s", err)
 		}
 
 		checkOAuthArgs()
@@ -156,7 +149,7 @@ snapshot updated_at timestamp stored in ClickHouse.
 
 		s := server.New(logWriter)
 
-		err := s.EnableAuthWithServerToken(serverCert, serverKey, serverTokenBasename, authenticateDeny)
+		err = s.EnableAuthWithServerToken(serverCert, serverKey, serverTokenBasename, authenticateDeny)
 		if err != nil {
 			die("failed to enable authentication: %s", err)
 		}
@@ -354,12 +347,7 @@ func areasCSVToMap(path string) map[string][]string {
 			die("could not read areas csv: %s", err)
 		}
 
-		groups, present := areas[rec[1]]
-		if !present {
-			groups = []string{}
-		}
-
-		areas[rec[1]] = append(groups, rec[0])
+		areas[rec[1]] = append(areas[rec[1]], rec[0])
 	}
 
 	return areas

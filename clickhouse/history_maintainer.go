@@ -110,20 +110,43 @@ func (m *historyMaintainer) FindInvalidHistory(prefix string) ([]basedirs.Histor
 		return nil, fmt.Errorf("clickhouse: failed to query invalid history: %w", err)
 	}
 
+	return scanInvalidHistoryRows(rows)
+}
+
+type invalidHistoryRows interface {
+	rowsScanner
+	Close() error
+	Err() error
+}
+
+func scanInvalidHistoryRows(rows invalidHistoryRows) ([]basedirs.HistoryIssue, error) {
 	defer func() { _ = rows.Close() }()
 
 	out := make([]basedirs.HistoryIssue, 0)
 
 	for rows.Next() {
-		var issue basedirs.HistoryIssue
-		if err := rows.Scan(&issue.GID, &issue.MountPath); err != nil {
-			return nil, fmt.Errorf("clickhouse: failed to scan invalid history: %w", err)
+		issue, err := scanInvalidHistoryIssue(rows)
+		if err != nil {
+			return nil, err
 		}
 
 		out = append(out, issue)
 	}
 
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("clickhouse: invalid history iteration error: %w", err)
+	}
+
 	return out, nil
+}
+
+func scanInvalidHistoryIssue(rows rowsScanner) (basedirs.HistoryIssue, error) {
+	var issue basedirs.HistoryIssue
+	if err := rows.Scan(&issue.GID, &issue.MountPath); err != nil {
+		return basedirs.HistoryIssue{}, fmt.Errorf("clickhouse: failed to scan invalid history: %w", err)
+	}
+
+	return issue, nil
 }
 
 func (m *historyMaintainer) openConn() (ch.Conn, error) {
@@ -148,7 +171,7 @@ func NewHistoryMaintainer(cfg Config) (basedirs.HistoryMaintainer, error) {
 		return nil, err
 	}
 
-	conn, err := connectAndBootstrap(context.Background(), opts, cfg.Database, queryTimeout(cfg))
+	conn, err := connectFromOptions(cfg, opts)
 	if err != nil {
 		return nil, err
 	}

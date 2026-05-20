@@ -37,6 +37,7 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 	"github.com/wtsi-hgi/wrstat-ui/internal/boltperf"
+	"github.com/wtsi-hgi/wrstat-ui/internal/mountpath"
 	"github.com/wtsi-hgi/wrstat-ui/provider"
 )
 
@@ -215,21 +216,12 @@ func DecodeMountPaths(mt map[string]time.Time) []string {
 	paths := make([]string, 0, len(mt))
 
 	for key := range mt {
-		paths = append(paths, decodeMountPath(key))
+		paths = append(paths, mountpath.DecodeKey(key))
 	}
 
 	sort.Strings(paths)
 
 	return paths
-}
-
-func decodeMountPath(mountKey string) string {
-	mountPath := strings.ReplaceAll(mountKey, "／", "/")
-	if !strings.HasSuffix(mountPath, "/") {
-		mountPath += "/"
-	}
-
-	return mountPath
 }
 
 func pickDir(tree *db.Tree, startDir string) string {
@@ -418,7 +410,7 @@ func activeMountsFreshness(mt map[string]time.Time) []activeMountFreshness {
 
 	for mountKey, updatedAt := range mt {
 		freshness = append(freshness, activeMountFreshness{
-			MountPath: decodeMountPath(mountKey),
+			MountPath: mountpath.DecodeKey(mountKey),
 			UpdatedAt: updatedAt.UTC().Format(time.RFC3339Nano),
 		})
 	}

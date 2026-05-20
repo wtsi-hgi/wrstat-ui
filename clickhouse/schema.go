@@ -42,6 +42,7 @@ import (
 
 var (
 	errNoEmbeddedSchemaFiles   = errors.New("clickhouse: no embedded schema files found")
+	errNoSchemaVersionStats    = errors.New("clickhouse: schema version stats returned no rows")
 	errUnexpectedSchemaVersion = errors.New("clickhouse: unexpected schema versions")
 
 	//nolint:gochecknoglobals // Serialises same-process bootstrap for legacy empty tables.
@@ -155,7 +156,11 @@ func schemaVersionStatsFromDB(ctx context.Context, q ch.Conn) (uint64, *uint32, 
 	defer func() { _ = rows.Close() }()
 
 	if !rows.Next() {
-		return 0, nil, nil, fmt.Errorf("clickhouse: failed to query schema version stats: %w", rows.Err())
+		if err := rows.Err(); err != nil {
+			return 0, nil, nil, fmt.Errorf("clickhouse: failed to query schema version stats: %w", err)
+		}
+
+		return 0, nil, nil, errNoSchemaVersionStats
 	}
 
 	var (

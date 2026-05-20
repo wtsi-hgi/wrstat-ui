@@ -370,11 +370,7 @@ func (w *fileIngestWriter) flushBuffer(
 		return nil
 	}
 
-	if err := w.sendBufferedData(ctx); err != nil {
-		return err
-	}
-
-	return nil
+	return w.sendBufferedData(ctx)
 }
 
 func (w *fileIngestWriter) sendBufferedData(
@@ -527,12 +523,7 @@ func connectForFileIngest(cfg Config) (ch.Conn, error) {
 		return nil, err
 	}
 
-	opts, err := optionsFromConfig(cfg)
-	if err != nil {
-		return nil, err
-	}
-
-	return connectAndBootstrap(context.Background(), opts, cfg.Database, queryTimeout(cfg))
+	return connectFromConfig(cfg)
 }
 
 type fileIngestOperation struct {
