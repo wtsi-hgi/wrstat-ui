@@ -771,6 +771,7 @@ func boltPerfQueryOps(ctx perfQueryContext) []perfQueryOp {
 	return []perfQueryOp{
 		boltPerfOpMountTimestamps(ctx),
 		boltPerfOpTreeDirInfo(ctx),
+		boltPerfOpTreeDiskTreeEndpoint(ctx),
 		boltPerfOpTreeWhere(ctx),
 		boltPerfOpBasedirsGroupUsage(ctx),
 		boltPerfOpBasedirsUserUsage(ctx),
@@ -826,6 +827,30 @@ func boltPerfOpTreeDirInfo(ctx perfQueryContext) perfQueryOp {
 			_, err := ctx.tree.DirInfo(ctx.queryDir, filter)
 
 			return err
+		},
+	}
+}
+
+func boltPerfOpTreeDiskTreeEndpoint(ctx perfQueryContext) perfQueryOp {
+	return perfQueryOp{
+		name:   "tree_disktree_endpoint",
+		inputs: map[string]any{"dir": ctx.queryDir, "age": int(db.DGUTAgeAll)},
+		op: func() error {
+			filter := &db.Filter{Age: db.DGUTAgeAll}
+
+			di, err := ctx.tree.DirInfo(ctx.queryDir, filter)
+			if err != nil || di == nil {
+				return err
+			}
+
+			childPaths := make([]string, 0, len(di.Children))
+			for _, child := range di.Children {
+				childPaths = append(childPaths, child.Dir)
+			}
+
+			_ = ctx.tree.DirsHaveChildren(childPaths, filter)
+
+			return nil
 		},
 	}
 }

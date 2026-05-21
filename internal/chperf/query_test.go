@@ -48,6 +48,10 @@ var (
 const (
 	explainPruningOutput = "mount_path partition pruning\nparent_dir key condition"
 	queryTestNFSTeamPath = "/nfs/team/"
+	queryOpTestChildADir = "/root/a/"
+	queryOpTestChildBDir = "/root/b/"
+	queryOpTestGrandDir  = "/root/a/grand/"
+	queryOpTestRootDir   = "/root/"
 )
 
 func TestDecodeMountPaths(t *testing.T) {
@@ -184,6 +188,46 @@ func (f fakeQueryInspector) Close() error {
 }
 
 func TestRunOp(t *testing.T) {
+	Convey("runOp executes warmups without recording measured durations", t, func() {
+		var (
+			runCalls      int
+			measuredCalls uint64
+		)
+
+		report := boltperf.NewReport("clickhouse", "", 2, 1)
+
+		err := runOp(
+			&report,
+			queryContext{inspector: fakeQueryInspector{
+				measure: func(ctx context.Context, run func(context.Context) error) (*QueryMetrics, error) {
+					measuredCalls++
+
+					if err := run(ctx); err != nil {
+						return nil, err
+					}
+
+					return &QueryMetrics{DurationMs: 10 + measuredCalls}, nil
+				},
+			}},
+			op{
+				name: queryOpTreeWhereName,
+				run: func(context.Context) error {
+					runCalls++
+
+					return nil
+				},
+			},
+			QueryOptions{Repeat: 2, Warmup: 1},
+			func(string, ...any) {},
+		)
+
+		So(err, ShouldBeNil)
+		So(runCalls, ShouldEqual, 3)
+		So(measuredCalls, ShouldEqual, uint64(2))
+		So(report.Operations, ShouldHaveLength, 1)
+		So(report.Operations[0].DurationsMS, ShouldResemble, []float64{11, 12})
+	})
+
 	Convey("runOp returns an error when Measure fails", t, func() {
 		report := boltperf.NewReport("clickhouse", "", 2, 0)
 
@@ -430,6 +474,67 @@ func (c *fakeQueryClient) Close() error {
 	return nil
 }
 
+func TestBuildOps(t *testing.T) {
+	Convey("buildOps reports DiskTree endpoint and tree_where operations", t, func() {
+		qctx := queryContext{
+			provider: fakeMountTimestampsProvider{tree: db.NewTree(newQueryOpTestDB())},
+			client:   &fakeQueryClient{},
+			dir:      queryOpTestRootDir,
+		}
+
+		ops := buildOps(qctx, QueryOptions{Splits: 2}, func(string, ...any) {})
+		names := make([]string, 0, len(ops))
+
+		var whereInputs map[string]any
+
+		for _, op := range ops {
+			names = append(names, op.name)
+			if op.name == queryOpTreeWhereName {
+				whereInputs = op.inputs
+			}
+		}
+
+		So(names, ShouldContain, queryOpTreeDiskTreeEndName)
+		So(names, ShouldContain, queryOpTreeWhereName)
+		So(whereInputs, ShouldNotBeNil)
+		So(whereInputs[queryInputDirKey], ShouldEqual, queryOpTestRootDir)
+		So(whereInputs["splits"], ShouldEqual, 2)
+	})
+
+	Convey("tree_disktree_endpoint checks all child has_children values via Tree fallback", t, func() {
+		database := newQueryOpTestDB()
+		qctx := queryContext{
+			provider: fakeMountTimestampsProvider{tree: db.NewTree(database)},
+			dir:      queryOpTestRootDir,
+		}
+
+		err := opTreeDiskTreeEndpoint(qctx).run(context.Background())
+
+		So(err, ShouldBeNil)
+		So(database.childrenCalls, ShouldResemble, []string{
+			queryOpTestRootDir,
+			queryOpTestChildADir,
+			queryOpTestChildBDir,
+		})
+	})
+}
+
+func newQueryOpTestDB() *queryOpTestDB {
+	return &queryOpTestDB{
+		children: map[string][]string{
+			queryOpTestRootDir:   {queryOpTestChildADir, queryOpTestChildBDir},
+			queryOpTestChildADir: {queryOpTestGrandDir},
+			queryOpTestChildBDir: {},
+		},
+		summaries: map[string]*db.DirSummary{
+			queryOpTestRootDir:   {Count: 3},
+			queryOpTestChildADir: {Count: 2},
+			queryOpTestChildBDir: {Count: 1},
+			queryOpTestGrandDir:  {Count: 1},
+		},
+	}
+}
+
 type fakeQueryAPI struct {
 	provider  provider.Provider
 	client    QueryClient
@@ -463,7 +568,12 @@ type fakeMountTimestampsProvider struct {
 	provider.Provider
 
 	bd        basedirs.Reader
+	tree      *db.Tree
 	closeHook func() error
+}
+
+func (p fakeMountTimestampsProvider) Tree() *db.Tree {
+	return p.tree
 }
 
 func (p fakeMountTimestampsProvider) BaseDirs() basedirs.Reader {
@@ -475,5 +585,36 @@ func (p fakeMountTimestampsProvider) Close() error {
 		return p.closeHook()
 	}
 
+	return nil
+}
+
+type queryOpTestDB struct {
+	children      map[string][]string
+	summaries     map[string]*db.DirSummary
+	childrenCalls []string
+}
+
+func (d *queryOpTestDB) DirInfo(dir string, _ *db.Filter) (*db.DirSummary, error) {
+	summary := d.summaries[dir]
+	if summary == nil {
+		return nil, db.ErrDirNotFound
+	}
+
+	cp := *summary
+
+	return &cp, nil
+}
+
+func (d *queryOpTestDB) Children(dir string) ([]string, error) {
+	d.childrenCalls = append(d.childrenCalls, dir)
+
+	return d.children[dir], nil
+}
+
+func (d *queryOpTestDB) Info() (*db.Info, error) {
+	return &db.Info{}, nil
+}
+
+func (d *queryOpTestDB) Close() error {
 	return nil
 }

@@ -40,15 +40,19 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/db"
 	"github.com/wtsi-hgi/wrstat-ui/internal/boltperf"
 	"github.com/wtsi-hgi/wrstat-ui/internal/mountpath"
+	"github.com/wtsi-hgi/wrstat-ui/internal/split"
 	"github.com/wtsi-hgi/wrstat-ui/provider"
 )
 
 const (
-	dirPickMinCount     = 1000
-	dirPickMaxCount     = 20000
-	dirPickMaxSteps     = 64
-	defaultExplainLimit = 1_000_000
-	queryInputDirKey    = "dir"
+	dirPickMinCount            = 1000
+	dirPickMaxCount            = 20000
+	dirPickMaxSteps            = 64
+	defaultExplainLimit        = 1_000_000
+	queryInputDirKey           = "dir"
+	queryOpTreeDiskTreeEndName = "tree_disktree_endpoint"
+	queryOpTreeDirInfoName     = "tree_dirinfo"
+	queryOpTreeWhereName       = "tree_where"
 )
 
 var (
@@ -69,6 +73,8 @@ type QueryOptions struct {
 	UID    uint32
 	GIDs   []uint32
 	Repeat int
+	Warmup int
+	Splits int
 }
 
 // Query runs a repeatable timing suite against ClickHouse and returns
@@ -93,7 +99,7 @@ func Query(
 		return boltperf.Report{}, err
 	}
 
-	report := boltperf.NewReport("clickhouse", "", opts.Repeat, 0)
+	report := boltperf.NewReport("clickhouse", "", opts.Repeat, opts.Warmup)
 
 	if err := runSuite(&report, qctx, opts, printf); err != nil {
 		return boltperf.Report{}, err
@@ -149,6 +155,64 @@ func openQueryContext(api QueryAPI) (queryContext, error) {
 	qctx.inspector = inspector
 
 	return qctx, nil
+}
+
+func opTreeDiskTreeEndpoint(qctx queryContext) op {
+	return op{
+		name: queryOpTreeDiskTreeEndName,
+		inputs: map[string]any{
+			queryInputDirKey: qctx.dir,
+			"age":            int(db.DGUTAgeAll),
+		},
+		run: func(_ context.Context) error {
+			return runTreeDiskTreeEndpoint(qctx.provider.Tree(), qctx.dir)
+		},
+	}
+}
+
+func runTreeDiskTreeEndpoint(tree *db.Tree, dir string) error {
+	filter := &db.Filter{Age: db.DGUTAgeAll}
+
+	di, err := tree.DirInfo(dir, filter)
+	if err != nil || di == nil {
+		return err
+	}
+
+	childPaths := make([]string, 0, len(di.Children))
+	for _, child := range di.Children {
+		childPaths = append(childPaths, child.Dir)
+	}
+
+	_ = tree.DirsHaveChildren(childPaths, filter)
+
+	return nil
+}
+
+func opTreeWhere(qctx queryContext, splits int) op {
+	return op{
+		name: queryOpTreeWhereName,
+		inputs: map[string]any{
+			queryInputDirKey: qctx.dir,
+			"age":            int(db.DGUTAgeAll),
+			"splits":         splits,
+		},
+		run: func(_ context.Context) error {
+			filter := &db.Filter{Age: db.DGUTAgeAll}
+			_, err := qctx.provider.Tree().Where(qctx.dir, filter, split.SplitsToSplitFn(splits))
+
+			return err
+		},
+	}
+}
+
+func warmupOp(ctx context.Context, o op, warmup int) error {
+	for i := range warmup {
+		if err := o.run(ctx); err != nil {
+			return fmt.Errorf("%s warmup %d/%d: %w", o.name, i+1, warmup, err)
+		}
+	}
+
+	return nil
 }
 
 func closeQueryResources(closers ...io.Closer) error {
@@ -360,7 +424,7 @@ func runSuite(
 	opts QueryOptions,
 	printf PrintfFunc,
 ) error {
-	ops := buildOps(qctx, printf)
+	ops := buildOps(qctx, opts, printf)
 
 	for _, o := range ops {
 		if err := runOp(report, qctx, o, opts, printf); err != nil {
@@ -371,10 +435,12 @@ func runSuite(
 	return nil
 }
 
-func buildOps(qctx queryContext, printf PrintfFunc) []op {
+func buildOps(qctx queryContext, opts QueryOptions, printf PrintfFunc) []op {
 	ops := []op{
 		opMountTimestamps(qctx),
 		opTreeDirInfo(qctx),
+		opTreeDiskTreeEndpoint(qctx),
+		opTreeWhere(qctx, opts.Splits),
 		opGroupUsage(qctx),
 		opListDir(qctx),
 	}
@@ -424,7 +490,7 @@ func activeMountsFreshness(mt map[string]time.Time) []activeMountFreshness {
 
 func opTreeDirInfo(qctx queryContext) op {
 	return op{
-		name:   "tree_dirinfo",
+		name:   queryOpTreeDirInfoName,
 		inputs: map[string]any{queryInputDirKey: qctx.dir},
 		run: func(_ context.Context) error {
 			filter := &db.Filter{Age: db.DGUTAgeAll}
@@ -571,7 +637,7 @@ func runOp(
 	opts QueryOptions,
 	printf PrintfFunc,
 ) error {
-	durations, err := timingLoop(qctx, o, opts.Repeat, printf)
+	durations, err := timingLoop(qctx, o, opts.Warmup, opts.Repeat, printf)
 	if err != nil {
 		return err
 	}
@@ -588,10 +654,15 @@ func runOp(
 func timingLoop(
 	qctx queryContext,
 	o op,
+	warmup int,
 	repeat int,
 	printf PrintfFunc,
 ) ([]float64, error) {
 	ctx := context.Background()
+	if err := warmupOp(ctx, o, warmup); err != nil {
+		return nil, err
+	}
+
 	durations := make([]float64, 0, repeat)
 
 	for i := range repeat {

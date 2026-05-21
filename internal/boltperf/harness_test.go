@@ -32,6 +32,14 @@ import (
 	"testing"
 
 	. "github.com/smartystreets/goconvey/convey"
+	"github.com/wtsi-hgi/wrstat-ui/db"
+)
+
+const (
+	querySuiteTestChildADir = "/root/a/"
+	querySuiteTestChildBDir = "/root/b/"
+	querySuiteTestGrandDir  = "/root/a/grand/"
+	querySuiteTestRootDir   = "/root/"
 )
 
 func TestLineCountingReader(t *testing.T) {
@@ -52,6 +60,88 @@ func TestLineCountingReader(t *testing.T) {
 			So(err, ShouldBeNil)
 			So(string(b), ShouldEqual, "a\nb\n")
 			So(lr.linesRead(), ShouldEqual, 2)
+		})
+	})
+}
+
+type querySuiteTestDB struct {
+	children      map[string][]string
+	summaries     map[string]*db.DirSummary
+	childrenCalls []string
+}
+
+func newQuerySuiteTestDB() *querySuiteTestDB {
+	return &querySuiteTestDB{
+		children: map[string][]string{
+			querySuiteTestRootDir:   {querySuiteTestChildADir, querySuiteTestChildBDir},
+			querySuiteTestChildADir: {querySuiteTestGrandDir},
+			querySuiteTestChildBDir: {},
+		},
+		summaries: map[string]*db.DirSummary{
+			querySuiteTestRootDir:   {Count: 3},
+			querySuiteTestChildADir: {Count: 2},
+			querySuiteTestChildBDir: {Count: 1},
+			querySuiteTestGrandDir:  {Count: 1},
+		},
+	}
+}
+
+func (d *querySuiteTestDB) DirInfo(dir string, _ *db.Filter) (*db.DirSummary, error) {
+	summary := d.summaries[dir]
+	if summary == nil {
+		return nil, db.ErrDirNotFound
+	}
+
+	cp := *summary
+
+	return &cp, nil
+}
+
+func (d *querySuiteTestDB) Children(dir string) ([]string, error) {
+	d.childrenCalls = append(d.childrenCalls, dir)
+
+	return d.children[dir], nil
+}
+
+func (d *querySuiteTestDB) Info() (*db.Info, error) {
+	return &db.Info{}, nil
+}
+
+func (d *querySuiteTestDB) Close() error {
+	return nil
+}
+
+func TestQuerySuiteOps(t *testing.T) {
+	Convey("buildQuerySuiteOps reports DiskTree endpoint", t, func() {
+		ctx := queryContext{
+			tree:     db.NewTree(newQuerySuiteTestDB()),
+			queryDir: querySuiteTestRootDir,
+		}
+
+		ops := buildQuerySuiteOps(ctx, QueryOptions{Splits: 4})
+		names := make([]string, 0, len(ops))
+
+		for _, op := range ops {
+			names = append(names, op.name)
+		}
+
+		So(names, ShouldContain, "tree_disktree_endpoint")
+	})
+
+	Convey("tree_disktree_endpoint checks all child has_children values via Tree fallback", t, func() {
+		database := newQuerySuiteTestDB()
+		ctx := queryContext{
+			tree:     db.NewTree(database),
+			queryDir: querySuiteTestRootDir,
+		}
+
+		err := opTreeDiskTreeEndpoint(ctx)
+
+		So(err, ShouldBeNil)
+		So(database.childrenCalls, ShouldResemble, []string{
+			querySuiteTestRootDir,
+			querySuiteTestChildADir,
+			querySuiteTestChildBDir,
 		})
 	})
 }

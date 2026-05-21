@@ -712,6 +712,11 @@ func buildQuerySuiteOps(ctx queryContext, opts QueryOptions) []querySuiteOp {
 			op:     func() error { return opTreeDirInfo(ctx) },
 		},
 		{
+			name:   "tree_disktree_endpoint",
+			inputs: map[string]any{"dir": ctx.queryDir, "age": int(db.DGUTAgeAll)},
+			op:     func() error { return opTreeDiskTreeEndpoint(ctx) },
+		},
+		{
 			name: "tree_where",
 			inputs: map[string]any{
 				"dir":    ctx.queryDir,
@@ -779,6 +784,24 @@ func opTreeDirInfo(ctx queryContext) error {
 	_, err := ctx.tree.DirInfo(ctx.queryDir, filter)
 
 	return err
+}
+
+func opTreeDiskTreeEndpoint(ctx queryContext) error {
+	filter := &db.Filter{Age: db.DGUTAgeAll}
+
+	di, err := ctx.tree.DirInfo(ctx.queryDir, filter)
+	if err != nil || di == nil {
+		return err
+	}
+
+	childPaths := make([]string, 0, len(di.Children))
+	for _, child := range di.Children {
+		childPaths = append(childPaths, child.Dir)
+	}
+
+	_ = ctx.tree.DirsHaveChildren(childPaths, filter)
+
+	return nil
 }
 
 func opTreeWhere(ctx queryContext, splits int) error {

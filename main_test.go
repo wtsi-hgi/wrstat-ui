@@ -73,6 +73,10 @@ const (
 	clickHousePerfPhaseMountSwitch        = "mount_switch"
 	clickHousePerfPhaseOldSnapshotDrop    = "old_snapshot_partition_drop"
 
+	perfOpTreeDirInfo          = "tree_dirinfo"
+	perfOpTreeDiskTreeEndpoint = "tree_disktree_endpoint"
+	perfOpTreeWhere            = "tree_where"
+
 	testLustreMount        = "/lustre/"
 	summariseCloseName     = "close"
 	summariseAbortName     = "abort"
@@ -889,7 +893,7 @@ func TestClickHousePerfQuery(t *testing.T) {
 		So(report.StartedAt, ShouldNotBeBlank)
 		So(report.InputDir, ShouldEqual, "")
 		So(report.Repeat, ShouldEqual, 2)
-		So(report.Warmup, ShouldEqual, 0)
+		So(report.Warmup, ShouldEqual, 1)
 		So(len(report.Operations), ShouldBeGreaterThanOrEqualTo, 10)
 
 		opNames := make([]string, 0, len(report.Operations))
@@ -899,15 +903,21 @@ func TestClickHousePerfQuery(t *testing.T) {
 		}
 
 		So(opNames, ShouldContain, "mount_timestamps")
-		So(opNames, ShouldContain, "tree_dirinfo")
+		So(opNames, ShouldContain, perfOpTreeDirInfo)
+		So(opNames, ShouldContain, perfOpTreeDiskTreeEndpoint)
+		So(opNames, ShouldContain, perfOpTreeWhere)
 		So(opNames, ShouldContain, "basedirs_group_usage")
 		So(opNames, ShouldContain, "files_listdir")
 		So(opNames, ShouldContain, "permission_check")
 		So(opNames, ShouldContain, "glob_case_A")
 
-		treeDirInfo := findReportOperation(report.Operations, "tree_dirinfo")
+		treeDirInfo := findReportOperation(report.Operations, perfOpTreeDirInfo)
 		So(treeDirInfo, ShouldNotBeNil)
 		So(treeDirInfo.Inputs["dir"], ShouldNotBeBlank)
+
+		treeWhere := findReportOperation(report.Operations, perfOpTreeWhere)
+		So(treeWhere, ShouldNotBeNil)
+		So(treeWhere.Inputs["splits"], ShouldEqual, float64(2))
 
 		filesListDir := findReportOperation(report.Operations, "files_listdir")
 		So(filesListDir, ShouldNotBeNil)
@@ -940,6 +950,10 @@ func runClickHousePerfQuery(
 		"--gids",
 		fixture.queryReportGIDs,
 		"--repeat",
+		"2",
+		"--warmup",
+		"1",
+		"--splits",
 		"2",
 		"--query-timeout",
 		"5s",
@@ -1246,8 +1260,9 @@ func TestBoltPerf(t *testing.T) {
 
 		So(opNames, ShouldResemble, []string{
 			"mount_timestamps",
-			"tree_dirinfo",
-			"tree_where",
+			perfOpTreeDirInfo,
+			perfOpTreeDiskTreeEndpoint,
+			perfOpTreeWhere,
 			"basedirs_group_usage",
 			"basedirs_user_usage",
 			"basedirs_group_subdirs",
@@ -1354,8 +1369,9 @@ func TestBoltPerf(t *testing.T) {
 
 			So(opNames2, ShouldResemble, []string{
 				"mount_timestamps",
-				"tree_dirinfo",
-				"tree_where",
+				perfOpTreeDirInfo,
+				perfOpTreeDiskTreeEndpoint,
+				perfOpTreeWhere,
 				"basedirs_group_usage",
 				"basedirs_user_usage",
 				"basedirs_group_subdirs",

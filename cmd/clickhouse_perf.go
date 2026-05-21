@@ -38,6 +38,8 @@ import (
 
 const (
 	chPerfDefaultRepeat    = 20
+	chPerfDefaultWarmup    = 1
+	chPerfDefaultSplits    = 4
 	chPerfDefaultBatchSize = 100_000
 	chPerfDefaultParallel  = 1
 )
@@ -94,6 +96,8 @@ type chPerfFlags struct {
 	uid    uint32
 	gids   string
 	repeat int
+	warmup int
+	splits int
 }
 
 var chPerf chPerfFlags
@@ -143,6 +147,8 @@ func addCHPerfQueryFlags() {
 	f.Uint32Var(&chPerf.uid, "uid", 0, "UID for permission query")
 	f.StringVar(&chPerf.gids, "gids", "", "comma-separated GIDs for permission query")
 	f.IntVar(&chPerf.repeat, "repeat", chPerfDefaultRepeat, "number of timed repeats")
+	f.IntVar(&chPerf.warmup, "warmup", chPerfDefaultWarmup, "warmup iterations")
+	f.IntVar(&chPerf.splits, "splits", chPerfDefaultSplits, "where() splits")
 }
 
 func runCHPerfImport(inputDir string) error {
@@ -181,6 +187,8 @@ func runCHPerfQuery() error {
 		UID:    chPerf.uid,
 		GIDs:   parseGIDs(chPerf.gids),
 		Repeat: chPerf.repeat,
+		Warmup: chPerf.warmup,
+		Splits: chPerf.splits,
 	}, cliPrint)
 	if err != nil {
 		return err
