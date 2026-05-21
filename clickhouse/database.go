@@ -212,6 +212,20 @@ func activeMountGroup(
 	return group
 }
 
+type whereTraversalItem struct {
+	dir  string
+	step int
+}
+
+func childWhereTraversalItems(children []*db.DirSummary, step int) []whereTraversalItem {
+	items := make([]whereTraversalItem, len(children))
+	for i, child := range children {
+		items[i] = whereTraversalItem{dir: child.Dir, step: step}
+	}
+
+	return items
+}
+
 type clickHouseDatabase struct {
 	cfg  Config
 	conn ch.Conn
@@ -307,22 +321,20 @@ func (d *clickHouseDatabase) Where(
 	filter = defaultWhereFilter(filter)
 	queryDir := ensureTrailingSlash(dir)
 
-	summaries, err := d.whereSubtreeSummaries(queryDir, filter)
+	if recurseCount(dir) <= 1 {
+		return d.whereFromSubtree(dir, queryDir, filter, recurseCount)
+	}
+
+	traversal, fallbackToSubtree, err := d.whereTraversalFor(queryDir, filter)
 	if err != nil {
 		return nil, err
 	}
 
-	if summaries[queryDir] == nil {
-		sum, err := d.DirInfo(dir, filter)
-		if err != nil || sum == nil {
-			return nil, err
-		}
+	if fallbackToSubtree {
+		return d.whereFromSubtree(dir, queryDir, filter, recurseCount)
 	}
 
-	dcss := newWhereSubtree(summaries).where(dir, recurseCount)
-	sort.Sort(dcss)
-
-	return dcss, nil
+	return d.whereFromTraversal(dir, filter, recurseCount, traversal)
 }
 
 func defaultWhereFilter(filter *db.Filter) *db.Filter {
@@ -352,6 +364,93 @@ func dirSummaryWithModtime(gutas db.GUTAs, filter *db.Filter, updatedAt time.Tim
 	}
 
 	return sum
+}
+
+func (d *clickHouseDatabase) whereTraversalFor(
+	queryDir string,
+	filter *db.Filter,
+) (*whereTraversal, bool, error) {
+	mountPath, ok, err := d.resolveMountScope(queryDir)
+	if err != nil {
+		return nil, false, err
+	}
+
+	if !ok {
+		return nil, true, nil
+	}
+
+	mount, found, err := d.activeMountForMountPath(mountPath)
+	if err != nil {
+		return nil, false, err
+	}
+
+	traversal := newWhereTraversal(d, filter)
+	if found {
+		traversal.mount = &mount
+	}
+
+	return traversal, false, nil
+}
+
+func newWhereTraversal(
+	d *clickHouseDatabase,
+	filter *db.Filter,
+) *whereTraversal {
+	return &whereTraversal{
+		database:       d,
+		filter:         filter,
+		summaries:      make(map[string]*db.DirSummary),
+		summaryLoaded:  make(map[string]bool),
+		children:       make(map[string][]string),
+		childrenLoaded: make(map[string]bool),
+	}
+}
+
+func (d *clickHouseDatabase) whereFromTraversal(
+	dir string,
+	filter *db.Filter,
+	recurseCount func(string) int,
+	traversal *whereTraversal,
+) (db.DCSs, error) {
+	dcss, err := traversal.where(dir, recurseCount)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(dcss) == 0 {
+		sum, err := d.DirInfo(dir, filter)
+		if err != nil || sum == nil {
+			return nil, err
+		}
+	}
+
+	sort.Sort(dcss)
+
+	return dcss, nil
+}
+
+func (d *clickHouseDatabase) whereFromSubtree(
+	dir string,
+	queryDir string,
+	filter *db.Filter,
+	recurseCount func(string) int,
+) (db.DCSs, error) {
+	summaries, err := d.whereSubtreeSummaries(queryDir, filter)
+	if err != nil {
+		return nil, err
+	}
+
+	if summaries[queryDir] == nil {
+		sum, err := d.DirInfo(dir, filter)
+		if err != nil || sum == nil {
+			return nil, err
+		}
+	}
+
+	dcss := newWhereSubtree(summaries).where(dir, recurseCount)
+	sort.Sort(dcss)
+
+	return dcss, nil
 }
 
 func newWhereSubtree(summaries map[string]*db.DirSummary) *whereSubtree {
@@ -1463,6 +1562,444 @@ func scanChildrenRowsByParent(rows rowsScanner) (map[string][]string, error) {
 	return children, nil
 }
 
+type whereTraversal struct {
+	database *clickHouseDatabase
+	filter   *db.Filter
+	mount    *activeMount
+
+	summaries      map[string]*db.DirSummary
+	summaryLoaded  map[string]bool
+	children       map[string][]string
+	childrenLoaded map[string]bool
+}
+
+func (t *whereTraversal) where(dir string, recurseCount func(string) int) (db.DCSs, error) {
+	var dcss db.DCSs
+
+	frontier := []whereTraversalItem{{dir: dir}}
+	for len(frontier) > 0 {
+		infos, err := t.where0Batch(whereTraversalDirs(frontier))
+		if err != nil {
+			return nil, err
+		}
+
+		dcss = appendWhereSummaries(dcss, infos)
+		frontier = nextWhereFrontier(frontier, infos, recurseCount)
+	}
+
+	return dcss, nil
+}
+
+func whereTraversalDirs(frontier []whereTraversalItem) []string {
+	dirs := make([]string, len(frontier))
+	for i, item := range frontier {
+		dirs[i] = item.dir
+	}
+
+	return dirs
+}
+
+func appendWhereSummaries(dcss db.DCSs, infos []*db.DirInfo) db.DCSs {
+	for _, di := range infos {
+		if di != nil {
+			dcss = append(dcss, di.Current)
+		}
+	}
+
+	return dcss
+}
+
+func nextWhereFrontier(
+	frontier []whereTraversalItem,
+	infos []*db.DirInfo,
+	recurseCount func(string) int,
+) []whereTraversalItem {
+	next := make([]whereTraversalItem, 0)
+
+	for i, item := range frontier {
+		di := infos[i]
+		if di == nil || recurseCount(item.dir) <= item.step {
+			continue
+		}
+
+		next = append(next, childWhereTraversalItems(di.Children, item.step+1)...)
+	}
+
+	return next
+}
+
+func (t *whereTraversal) where0Batch(dirs []string) ([]*db.DirInfo, error) {
+	results := make([]*db.DirInfo, len(dirs))
+	current := append([]string(nil), dirs...)
+
+	pending := make([]bool, len(dirs))
+	for i := range pending {
+		pending[i] = true
+	}
+
+	for pendingCount(pending) > 0 {
+		infos, err := t.dirInfos(currentDirs(current, pending))
+		if err != nil {
+			return nil, err
+		}
+
+		applyWhere0BatchInfos(current, pending, results, infos)
+	}
+
+	return results, nil
+}
+
+func pendingCount(pending []bool) int {
+	count := 0
+
+	for _, isPending := range pending {
+		if isPending {
+			count++
+		}
+	}
+
+	return count
+}
+
+func currentDirs(current []string, pending []bool) []string {
+	dirs := make([]string, 0, len(current))
+	seen := make(map[string]bool, len(current))
+
+	for i, dir := range current {
+		if !pending[i] {
+			continue
+		}
+
+		key := ensureTrailingSlash(dir)
+		if seen[key] {
+			continue
+		}
+
+		dirs = append(dirs, dir)
+		seen[key] = true
+	}
+
+	return dirs
+}
+
+func applyWhere0BatchInfos(
+	current []string,
+	pending []bool,
+	results []*db.DirInfo,
+	infos map[string]*db.DirInfo,
+) {
+	for i, dir := range current {
+		if !pending[i] {
+			continue
+		}
+
+		applyWhere0Info(i, dir, current, pending, results, infos)
+	}
+}
+
+func (t *whereTraversal) dirInfos(dirs []string) (map[string]*db.DirInfo, error) {
+	keys := canonicalDirs(dirs)
+	if err := t.loadSummaries(keys); err != nil {
+		return nil, err
+	}
+
+	if err := t.loadChildren(keys); err != nil {
+		return nil, err
+	}
+
+	childKeys := t.childSummaryDirs(keys)
+	if err := t.loadSummaries(childKeys); err != nil {
+		return nil, err
+	}
+
+	result := make(map[string]*db.DirInfo, len(keys))
+	for i, key := range keys {
+		t.addDirInfo(result, key, dirs[i])
+	}
+
+	return result, nil
+}
+
+func canonicalDirs(dirs []string) []string {
+	keys := make([]string, len(dirs))
+	for i, dir := range dirs {
+		keys[i] = ensureTrailingSlash(dir)
+	}
+
+	return keys
+}
+
+func (t *whereTraversal) addDirInfo(
+	result map[string]*db.DirInfo,
+	key string,
+	displayDir string,
+) {
+	current := t.summaryForDir(key, displayDir)
+	if current == nil {
+		return
+	}
+
+	result[key] = &db.DirInfo{
+		Current:  current,
+		Children: t.childSummaries(key),
+	}
+}
+
+func (t *whereTraversal) childSummaries(parent string) []*db.DirSummary {
+	children := make([]*db.DirSummary, 0, len(t.children[parent]))
+
+	for _, child := range t.children[parent] {
+		summary := t.summaryForDir(child, whereDisplayDir(child))
+		if summary != nil && summary.Count > 0 {
+			children = append(children, summary)
+		}
+	}
+
+	return children
+}
+
+func (t *whereTraversal) childSummaryDirs(parentDirs []string) []string {
+	seen := make(map[string]bool)
+	childDirs := make([]string, 0)
+
+	for _, parent := range parentDirs {
+		for _, child := range t.children[parent] {
+			if seen[child] {
+				continue
+			}
+
+			childDirs = append(childDirs, child)
+			seen[child] = true
+		}
+	}
+
+	return childDirs
+}
+
+func (t *whereTraversal) loadSummaries(dirs []string) error {
+	missing := t.unloadedSummaries(dirs)
+	if len(missing) == 0 {
+		return nil
+	}
+
+	if t.mount != nil {
+		return t.loadMountSummaries(missing)
+	}
+
+	summaries, err := t.database.DirInfos(missing, t.filter)
+	if err != nil {
+		return err
+	}
+
+	for _, dir := range missing {
+		t.summaryLoaded[dir] = true
+		if summary := summaries[dir]; summary != nil {
+			t.summaries[dir] = summary
+		}
+	}
+
+	return nil
+}
+
+func (t *whereTraversal) unloadedSummaries(dirs []string) []string {
+	missing := make([]string, 0, len(dirs))
+	seen := make(map[string]bool, len(dirs))
+
+	for _, dir := range dirs {
+		if seen[dir] || t.summaryLoaded[dir] {
+			continue
+		}
+
+		missing = append(missing, dir)
+		seen[dir] = true
+	}
+
+	return missing
+}
+
+func (t *whereTraversal) loadMountSummaries(dirs []string) error {
+	gutasByDir, err := t.database.gutasForDirs(
+		t.mount.mountPath,
+		t.mount.snapshotID,
+		dirs,
+	)
+	if err != nil {
+		return err
+	}
+
+	for _, dir := range dirs {
+		t.summaryLoaded[dir] = true
+
+		sum := dirSummaryWithModtime(gutasByDir[dir], t.filter, t.mount.updatedAt)
+		if sum != nil {
+			t.summaries[dir] = sum
+		}
+	}
+
+	return nil
+}
+
+func (t *whereTraversal) loadChildren(dirs []string) error {
+	missing := t.unloadedChildren(dirs)
+	if len(missing) == 0 {
+		return nil
+	}
+
+	if t.mount != nil {
+		return t.loadMountChildren(missing)
+	}
+
+	return t.loadFallbackChildren(missing)
+}
+
+func (t *whereTraversal) unloadedChildren(dirs []string) []string {
+	missing := make([]string, 0, len(dirs))
+	seen := make(map[string]bool, len(dirs))
+
+	for _, dir := range dirs {
+		if seen[dir] || t.childrenLoaded[dir] {
+			continue
+		}
+
+		missing = append(missing, dir)
+		seen[dir] = true
+	}
+
+	return missing
+}
+
+func (t *whereTraversal) loadMountChildren(dirs []string) error {
+	childrenByParent, err := t.database.childrenForParentsMount(
+		t.mount.mountPath,
+		t.mount.snapshotID,
+		dirs,
+	)
+	if err != nil {
+		return err
+	}
+
+	for _, dir := range dirs {
+		t.children[dir] = canonicalSortedChildren(childrenByParent[dir])
+		t.childrenLoaded[dir] = true
+	}
+
+	return nil
+}
+
+func canonicalSortedChildren(children []string) []string {
+	if len(children) == 0 {
+		return nil
+	}
+
+	out := make([]string, 0, len(children))
+	seen := make(map[string]bool, len(children))
+
+	for _, child := range children {
+		key := ensureTrailingSlash(child)
+		if seen[key] {
+			continue
+		}
+
+		out = append(out, key)
+		seen[key] = true
+	}
+
+	sort.Strings(out)
+
+	return out
+}
+
+func (t *whereTraversal) loadFallbackChildren(dirs []string) error {
+	groups, fallback, err := t.database.groupDirsByActiveMount(dirs)
+	if err != nil {
+		return err
+	}
+
+	if err := t.loadFallbackChildGroups(groups); err != nil {
+		return err
+	}
+
+	if err := t.loadFallbackChildDirs(fallback); err != nil {
+		return err
+	}
+
+	t.markChildrenLoaded(dirs)
+
+	return nil
+}
+
+func (t *whereTraversal) loadFallbackChildGroups(
+	groups map[string]*activeMountDirGroup,
+) error {
+	for _, group := range groups {
+		if err := t.loadGroupChildren(group); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (t *whereTraversal) loadFallbackChildDirs(dirs []string) error {
+	for _, dir := range dirs {
+		children, err := t.database.Children(dir)
+		if err != nil {
+			return err
+		}
+
+		t.storeChildren(dir, children)
+	}
+
+	return nil
+}
+
+func (t *whereTraversal) markChildrenLoaded(dirs []string) {
+	for _, dir := range dirs {
+		if t.childrenLoaded[dir] {
+			continue
+		}
+
+		t.children[dir] = nil
+		t.childrenLoaded[dir] = true
+	}
+}
+
+func (t *whereTraversal) storeChildren(parent string, children []string) {
+	key := ensureTrailingSlash(parent)
+	t.children[key] = canonicalSortedChildren(children)
+	t.childrenLoaded[key] = true
+}
+
+func (t *whereTraversal) loadGroupChildren(group *activeMountDirGroup) error {
+	childrenByParent, err := t.database.childrenForParentsMount(
+		group.mount.mountPath,
+		group.mount.snapshotID,
+		group.queryDirs,
+	)
+	if err != nil {
+		return err
+	}
+
+	for _, dir := range group.queryDirs {
+		t.children[dir] = canonicalSortedChildren(childrenByParent[dir])
+		t.childrenLoaded[dir] = true
+	}
+
+	return nil
+}
+
+func (t *whereTraversal) summaryForDir(key, displayDir string) *db.DirSummary {
+	summary := t.summaries[key]
+	if summary == nil {
+		return nil
+	}
+
+	cp := *summary
+	cp.Dir = displayDir
+
+	return &cp
+}
+
 type whereSubtree struct {
 	summaries map[string]*db.DirSummary
 	children  map[string][]string
@@ -1729,6 +2266,31 @@ func (s *dgutaScanned) scanFromWithDir(rows rowsScanner, dir *string) error {
 	}
 
 	return nil
+}
+
+func applyWhere0Info(
+	i int,
+	dir string,
+	current []string,
+	pending []bool,
+	results []*db.DirInfo,
+	infos map[string]*db.DirInfo,
+) {
+	di := infos[ensureTrailingSlash(dir)]
+	if di == nil {
+		pending[i] = false
+
+		return
+	}
+
+	if di.IsSameAsChild() {
+		current[i] = di.Children[0].Dir
+
+		return
+	}
+
+	results[i] = di
+	pending[i] = false
 }
 
 func whereUpdatedAtForDir(dir string, mounts []activeMount) time.Time {

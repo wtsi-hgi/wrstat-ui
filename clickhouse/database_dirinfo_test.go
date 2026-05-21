@@ -28,7 +28,9 @@ package clickhouse
 
 import (
 	"context"
+	"fmt"
 	"os"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -40,6 +42,26 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/internal/split"
 	"github.com/wtsi-hgi/wrstat-ui/summary"
 )
+
+type clickHouseGenericTreeDB struct {
+	d *clickHouseDatabase
+}
+
+func (d *clickHouseGenericTreeDB) DirInfo(dir string, filter *db.Filter) (*db.DirSummary, error) {
+	return d.d.DirInfo(dir, filter)
+}
+
+func (d *clickHouseGenericTreeDB) Children(dir string) ([]string, error) {
+	return d.d.Children(dir)
+}
+
+func (d *clickHouseGenericTreeDB) Info() (*db.Info, error) {
+	return d.d.Info()
+}
+
+func (d *clickHouseGenericTreeDB) Close() error {
+	return d.d.Close()
+}
 
 func TestClickHouseDatabaseDirInfo(t *testing.T) {
 	Convey("DirInfo returns a summary from wrstat_dguta for active snapshot", t, func() {
@@ -442,11 +464,22 @@ func TestClickHouseDatabaseDirInfoScopeResolution(t *testing.T) {
 type whereQueryCountingConn struct {
 	ch.Conn
 
-	queries atomic.Int32
+	queries        atomic.Int32
+	subtreeQueries atomic.Int32
+}
+
+func (c *whereQueryCountingConn) subtreeQueryCountValue() int {
+	return int(c.subtreeQueries.Load())
 }
 
 func (c *whereQueryCountingConn) Query(ctx context.Context, query string, args ...any) (driver.Rows, error) {
 	c.queries.Add(1)
+
+	isSubtreeQuery := strings.Contains(query, "startsWith(dir, ?)") ||
+		strings.Contains(query, "startsWith(d.dir, ?)")
+	if isSubtreeQuery {
+		c.subtreeQueries.Add(1)
+	}
 
 	return c.Conn.Query(ctx, query, args...)
 }
@@ -665,5 +698,96 @@ func TestClickHouseDatabaseWhereFastPath(t *testing.T) {
 		So(dcss[2].Count, ShouldEqual, 5)
 		So(dcss[2].Modtime, ShouldResemble, updatedB)
 		So(countingConn.queryCountValue(), ShouldEqual, 1)
+	})
+
+	Convey("Where batches only the traversed split frontier", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 2 * time.Second
+		cfg.PollInterval = 0
+		cfg.MountPoints = []string{"/mnt/frontier/"}
+
+		p, err := OpenProvider(cfg)
+		So(err, ShouldBeNil)
+		Reset(func() { So(p.Close(), ShouldBeNil) })
+
+		cp, ok := p.(*chProvider)
+		So(ok, ShouldBeTrue)
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		mountPath := "/mnt/frontier/"
+		updatedAt := time.Date(2026, 1, 11, 12, 0, 0, 0, time.UTC)
+		sid := snapshotID(mountPath, updatedAt).String()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+
+		So(conn.Exec(ctx, testInsertMountStmt, mountPath, time.Now(), sid, updatedAt), ShouldBeNil)
+
+		insertSummary := func(dir string, count uint64) {
+			So(conn.Exec(ctx,
+				testInsertDGUTAStmt,
+				mountPath,
+				sid,
+				dir,
+				uint32(7),
+				uint32(9),
+				uint16(db.DGUTAFileTypeBam),
+				uint8(db.DGUTAgeAll),
+				count,
+				count*10,
+				int64(10),
+				int64(20),
+				[]uint64{1, 0, 0, 0, 0, 0, 0, 0, 0},
+				[]uint64{0, 1, 0, 0, 0, 0, 0, 0, 0},
+			), ShouldBeNil)
+		}
+		insertChild := func(parent, child string) {
+			So(conn.Exec(ctx, testInsertChildrenStmt, mountPath, sid, parent, child), ShouldBeNil)
+		}
+
+		insertSummary(mountPath, 100)
+		insertSummary(mountPath+"stem/", 100)
+		insertChild(mountPath, mountPath+"stem")
+
+		for branch := range 8 {
+			branchDir := fmt.Sprintf("%sstem/branch%02d/", mountPath, branch)
+			insertSummary(branchDir, 5)
+			insertChild(mountPath+"stem/", strings.TrimSuffix(branchDir, "/"))
+
+			for leaf := range 3 {
+				leafDir := fmt.Sprintf("%sleaf%02d/", branchDir, leaf)
+				insertSummary(leafDir, 1)
+				insertChild(branchDir, strings.TrimSuffix(leafDir, "/"))
+
+				for extra := range 2 {
+					extraDir := fmt.Sprintf("%sunused%02d/", leafDir, extra)
+					insertSummary(extraDir, 1)
+					insertChild(leafDir, strings.TrimSuffix(extraDir, "/"))
+				}
+			}
+		}
+
+		filter := &db.Filter{GIDs: []uint32{7}, UIDs: []uint32{9}, Age: db.DGUTAgeAll}
+		splitFn := split.SplitsToSplitFn(2)
+		genericTree := db.NewTree(&clickHouseGenericTreeDB{
+			d: newClickHouseDatabase(cfg, cp.conn),
+		})
+		expected, err := genericTree.Where(mountPath, filter, splitFn)
+		So(err, ShouldBeNil)
+
+		countingConn := &whereQueryCountingConn{Conn: cp.conn}
+		fastTree := db.NewTree(newClickHouseDatabase(cfg, countingConn))
+		actual, err := fastTree.Where(mountPath, filter, splitFn)
+		So(err, ShouldBeNil)
+		So(actual, ShouldResemble, expected)
+		So(countingConn.subtreeQueryCountValue(), ShouldEqual, 0)
+		So(countingConn.queryCountValue(), ShouldBeLessThan, 20)
 	})
 }
