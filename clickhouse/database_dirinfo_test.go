@@ -332,6 +332,206 @@ func TestClickHouseDatabaseBatchedTreeExpansion(t *testing.T) {
 	})
 }
 
+func TestClickHouseDatabaseDirsHaveChildrenFastPath(t *testing.T) {
+	Convey("DirsHaveChildren uses a filtered parent-existence query instead of fetching child summaries", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 2 * time.Second
+		cfg.PollInterval = 0
+		cfg.MountPoints = []string{"/mnt/test/"}
+
+		p, err := OpenProvider(cfg)
+		So(err, ShouldBeNil)
+		Reset(func() { So(p.Close(), ShouldBeNil) })
+
+		cp, ok := p.(*chProvider)
+		So(ok, ShouldBeTrue)
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		const mountPath = "/mnt/test/"
+
+		updatedAt := time.Date(2026, 1, 9, 12, 0, 0, 0, time.UTC)
+		sid := snapshotID(mountPath, updatedAt)
+		oldSID := snapshotID(mountPath, updatedAt.Add(-time.Hour))
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		So(conn.Exec(ctx, testInsertMountStmt, mountPath, time.Now(), sid, updatedAt), ShouldBeNil)
+
+		atimeBuckets := []uint64{1, 0, 0, 0, 0, 0, 0, 0, 0}
+		mtimeBuckets := []uint64{0, 1, 0, 0, 0, 0, 0, 0, 0}
+
+		insertGUTA := func(snapshotID, dir string, gid, uid uint32, ft db.DirGUTAFileType, age db.DirGUTAge) {
+			So(conn.Exec(ctx,
+				testInsertDGUTAStmt,
+				mountPath,
+				snapshotID,
+				dir,
+				gid,
+				uid,
+				uint16(ft),
+				uint8(age),
+				uint64(1),
+				uint64(10),
+				int64(10),
+				int64(20),
+				atimeBuckets,
+				mtimeBuckets,
+			), ShouldBeNil)
+		}
+		insertChild := func(snapshotID, parent, child string) {
+			So(conn.Exec(ctx, testInsertChildrenStmt, mountPath, snapshotID, parent, child), ShouldBeNil)
+		}
+
+		parentMatch := mountPath + "match/"
+		parentWrongGID := mountPath + "wrong-gid/"
+		parentWrongUID := mountPath + "wrong-uid/"
+		parentWrongFT := mountPath + "wrong-ft/"
+		parentWrongAge := mountPath + "wrong-age/"
+		missingParent := mountPath + "missing/"
+
+		for i := range 25 {
+			child := fmt.Sprintf("%schild%02d", parentMatch, i)
+			insertChild(sid.String(), parentMatch, child)
+			insertGUTA(
+				sid.String(),
+				child+"/",
+				uint32(8),
+				uint32(9),
+				db.DGUTAFileTypeBam,
+				db.DGUTAgeA1M,
+			)
+		}
+
+		matchingChild := parentMatch + "target"
+		insertChild(sid.String(), parentMatch, matchingChild)
+		insertGUTA(
+			sid.String(),
+			matchingChild+"/",
+			uint32(7),
+			uint32(9),
+			db.DGUTAFileTypeBam,
+			db.DGUTAgeA1M,
+		)
+
+		for i := range 25 {
+			child := fmt.Sprintf("%schild%02d", parentWrongGID, i)
+			insertChild(sid.String(), parentWrongGID, child)
+			insertGUTA(
+				sid.String(),
+				child+"/",
+				uint32(8),
+				uint32(9),
+				db.DGUTAFileTypeBam,
+				db.DGUTAgeA1M,
+			)
+		}
+
+		oldMatchingChild := parentWrongGID + "old-target"
+		insertChild(oldSID.String(), parentWrongGID, oldMatchingChild)
+		insertGUTA(
+			oldSID.String(),
+			oldMatchingChild+"/",
+			uint32(7),
+			uint32(9),
+			db.DGUTAFileTypeBam,
+			db.DGUTAgeA1M,
+		)
+
+		wrongUIDChild := parentWrongUID + "target"
+		insertChild(sid.String(), parentWrongUID, wrongUIDChild)
+		insertGUTA(
+			sid.String(),
+			wrongUIDChild+"/",
+			uint32(7),
+			uint32(10),
+			db.DGUTAFileTypeBam,
+			db.DGUTAgeA1M,
+		)
+
+		wrongFTChild := parentWrongFT + "target"
+		insertChild(sid.String(), parentWrongFT, wrongFTChild)
+		insertGUTA(
+			sid.String(),
+			wrongFTChild+"/",
+			uint32(7),
+			uint32(9),
+			db.DGUTAFileTypeCram,
+			db.DGUTAgeA1M,
+		)
+
+		wrongAgeChild := parentWrongAge + "target"
+		insertChild(sid.String(), parentWrongAge, wrongAgeChild)
+		insertGUTA(
+			sid.String(),
+			wrongAgeChild+"/",
+			uint32(7),
+			uint32(9),
+			db.DGUTAFileTypeBam,
+			db.DGUTAgeAll,
+		)
+
+		countingConn := &hasChildrenQueryCountingConn{Conn: cp.conn}
+		dbch := newClickHouseDatabase(cfg, countingConn)
+		filter := &db.Filter{
+			GIDs: []uint32{7},
+			UIDs: []uint32{9},
+			FT:   db.DGUTAFileTypeBam,
+			Age:  db.DGUTAgeA1M,
+		}
+
+		hasChildren, err := dbch.DirsHaveChildren(
+			[]string{
+				parentWrongGID,
+				parentMatch,
+				missingParent,
+				parentMatch,
+				parentWrongUID,
+				parentWrongFT,
+				parentWrongAge,
+			},
+			filter,
+		)
+		So(err, ShouldBeNil)
+		So(hasChildren, ShouldResemble, map[string]bool{
+			parentMatch:    true,
+			parentWrongGID: false,
+			parentWrongUID: false,
+			parentWrongFT:  false,
+			parentWrongAge: false,
+			missingParent:  false,
+		})
+
+		hasAnyChildren, err := dbch.DirsHaveChildren([]string{parentWrongGID}, nil)
+		So(err, ShouldBeNil)
+		So(hasAnyChildren, ShouldResemble, map[string]bool{parentWrongGID: true})
+
+		hasEmptyGIDChildren, err := dbch.DirsHaveChildren(
+			[]string{parentMatch},
+			&db.Filter{GIDs: []uint32{}, Age: db.DGUTAgeA1M},
+		)
+		So(err, ShouldBeNil)
+		So(hasEmptyGIDChildren, ShouldResemble, map[string]bool{parentMatch: false})
+
+		hasEmptyUIDChildren, err := dbch.DirsHaveChildren(
+			[]string{parentMatch},
+			&db.Filter{UIDs: []uint32{}, Age: db.DGUTAgeA1M},
+		)
+		So(err, ShouldBeNil)
+		So(hasEmptyUIDChildren, ShouldResemble, map[string]bool{parentMatch: false})
+
+		So(countingConn.childSummaryBatchQueryCount(), ShouldEqual, 0)
+		So(countingConn.existenceQueryCount(), ShouldEqual, 4)
+	})
+}
+
 func TestClickHouseDatabaseDirInfoAncestor(t *testing.T) {
 	Convey("DirInfo merges results across mounts for ancestor dirs", t, func() {
 		os.Setenv("WRSTAT_ENV", "test")
@@ -459,6 +659,37 @@ func TestClickHouseDatabaseDirInfoScopeResolution(t *testing.T) {
 		So(singleMount, ShouldBeFalse)
 		So(mountPath, ShouldBeBlank)
 	})
+}
+
+type hasChildrenQueryCountingConn struct {
+	ch.Conn
+
+	childSummaryBatchQueries atomic.Int32
+	existenceQueries         atomic.Int32
+}
+
+func (c *hasChildrenQueryCountingConn) Query(ctx context.Context, query string, args ...any) (driver.Rows, error) {
+	isChildSummaryBatchQuery := strings.Contains(query, "SELECT dir, gid, uid, ft, age, count, size") &&
+		strings.Contains(query, "WHERE dir IN (")
+	if isChildSummaryBatchQuery {
+		c.childSummaryBatchQueries.Add(1)
+	}
+
+	isExistenceQuery := strings.Contains(query, "INNER JOIN wrstat_dguta d") &&
+		strings.Contains(query, "GROUP BY c.parent_dir")
+	if isExistenceQuery {
+		c.existenceQueries.Add(1)
+	}
+
+	return c.Conn.Query(ctx, query, args...)
+}
+
+func (c *hasChildrenQueryCountingConn) childSummaryBatchQueryCount() int {
+	return int(c.childSummaryBatchQueries.Load())
+}
+
+func (c *hasChildrenQueryCountingConn) existenceQueryCount() int {
+	return int(c.existenceQueries.Load())
 }
 
 type whereQueryCountingConn struct {

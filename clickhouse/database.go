@@ -133,6 +133,17 @@ const (
 		"WHERE parent_dir IN (%s) " +
 		"ORDER BY parent_dir ASC, child ASC"
 
+	dirsHaveMatchingChildrenQuery = "SELECT c.parent_dir " +
+		"FROM wrstat_children c " +
+		"INNER JOIN wrstat_dguta d " +
+		"ON d.mount_path = c.mount_path " +
+		"AND d.snapshot_id = c.snapshot_id " +
+		"AND d.dir = if(endsWith(c.child, '/'), c.child, concat(c.child, '/')) " +
+		"WHERE c.mount_path = ? AND c.snapshot_id = ? " +
+		"AND c.parent_dir IN (%s) %s " +
+		"GROUP BY c.parent_dir " +
+		"ORDER BY c.parent_dir ASC"
+
 	whereSubtreeSummarySelect = "SELECT dir, " +
 		"arraySort(groupUniqArray(uid)) AS uids, " +
 		"arraySort(groupUniqArray(gid)) AS gids, " +
@@ -608,21 +619,13 @@ func (d *clickHouseDatabase) whereSubtreeSingleMountSummaries(
 }
 
 func whereFilterClause(filter *db.Filter, columnPrefix string) (string, []any) {
-	var (
-		b    strings.Builder
-		args []any
-	)
+	var b strings.Builder
+
+	args := make([]any, 0, 1)
 
 	appendIDFilter(&b, &args, columnPrefix+"gid", filter.GIDs)
 	appendIDFilter(&b, &args, columnPrefix+"uid", filter.UIDs)
-
-	if filter.FT != 0 {
-		b.WriteString(" AND bitAnd(")
-		b.WriteString(columnPrefix)
-		b.WriteString("ft, ?) > 0")
-
-		args = append(args, uint16(filter.FT))
-	}
+	appendFTFilter(&b, &args, columnPrefix+"ft", filter.FT)
 
 	b.WriteString(" AND ")
 	b.WriteString(columnPrefix)
@@ -902,59 +905,23 @@ func (d *clickHouseDatabase) addDirsHaveChildrenForMount(
 	group *activeMountDirGroup,
 	filter *db.Filter,
 ) error {
-	childrenByParent, err := d.childrenForParentsMount(
+	parentsWithChildren, err := d.parentDirsWithMatchingChildrenMount(
 		group.mount.mountPath,
 		group.mount.snapshotID,
 		group.queryDirs,
+		filter,
 	)
 	if err != nil {
 		return err
 	}
 
-	childParents, childDirs := collectChildParents(childrenByParent)
-
-	childSummaries, err := d.DirInfos(childDirs, filter)
-	if err != nil {
-		return err
+	for _, queryDir := range group.queryDirs {
+		if parentsWithChildren[queryDir] {
+			result[group.originalDirs[queryDir]] = true
+		}
 	}
-
-	markParentsWithMatchingChildren(result, group, childParents, childSummaries)
 
 	return nil
-}
-
-func collectChildParents(childrenByParent map[string][]string) (map[string][]string, []string) {
-	childParents := make(map[string][]string)
-	childDirs := make([]string, 0)
-
-	for parent, children := range childrenByParent {
-		for _, child := range children {
-			if _, exists := childParents[child]; !exists {
-				childDirs = append(childDirs, child)
-			}
-
-			childParents[child] = append(childParents[child], parent)
-		}
-	}
-
-	return childParents, childDirs
-}
-
-func markParentsWithMatchingChildren(
-	result map[string]bool,
-	group *activeMountDirGroup,
-	childParents map[string][]string,
-	childSummaries map[string]*db.DirSummary,
-) {
-	for child, summary := range childSummaries {
-		if summary == nil || summary.Count == 0 {
-			continue
-		}
-
-		for _, parent := range childParents[child] {
-			result[group.originalDirs[parent]] = true
-		}
-	}
 }
 
 func (d *clickHouseDatabase) dirHasChildrenSlow(dir string, filter *db.Filter) bool {
@@ -2000,6 +1967,77 @@ func (t *whereTraversal) summaryForDir(key, displayDir string) *db.DirSummary {
 	return &cp
 }
 
+func (d *clickHouseDatabase) parentDirsWithMatchingChildrenMount(
+	mountPath, snapshotID string,
+	parentDirs []string,
+	filter *db.Filter,
+) (map[string]bool, error) {
+	if len(parentDirs) == 0 {
+		return map[string]bool{}, nil
+	}
+
+	ctx, cancel := configQueryContext(d.cfg)
+	defer cancel()
+
+	query, args := dirsHaveMatchingChildrenMountQuery(
+		parentDirs,
+		mountPath,
+		snapshotID,
+		filter,
+	)
+
+	rows, err := d.conn.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("clickhouse: failed to query matching child dirs: %w", err)
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	return scanParentDirSet(rows)
+}
+
+func dirsHaveMatchingChildrenMountQuery(
+	parentDirs []string,
+	mountPath, snapshotID string,
+	filter *db.Filter,
+) (string, []any) {
+	filterClause, filterArgs := gutaExistenceFilterClause(filter, "d.")
+	query := fmt.Sprintf(
+		dirsHaveMatchingChildrenQuery,
+		placeholders(len(parentDirs)),
+		filterClause,
+	)
+	args := make([]any, 0, 2+len(parentDirs)+len(filterArgs))
+	args = append(args, mountPath, snapshotID)
+
+	for _, parentDir := range parentDirs {
+		args = append(args, parentDir)
+	}
+
+	args = append(args, filterArgs...)
+
+	return query, args
+}
+
+func scanParentDirSet(rows rowsScanner) (map[string]bool, error) {
+	parents := make(map[string]bool)
+
+	for rows.Next() {
+		var parent string
+		if err := rows.Scan(&parent); err != nil {
+			return nil, fmt.Errorf("clickhouse: failed to scan matching child parent: %w", err)
+		}
+
+		parents[parent] = true
+	}
+
+	if err := rowsErr(rows); err != nil {
+		return nil, fmt.Errorf("clickhouse: matching child dirs iteration error: %w", err)
+	}
+
+	return parents, nil
+}
+
 type whereSubtree struct {
 	summaries map[string]*db.DirSummary
 	children  map[string][]string
@@ -2266,6 +2304,49 @@ func (s *dgutaScanned) scanFromWithDir(rows rowsScanner, dir *string) error {
 	}
 
 	return nil
+}
+
+func gutaExistenceFilterClause(filter *db.Filter, columnPrefix string) (string, []any) {
+	var b strings.Builder
+
+	args := make([]any, 0, 1)
+
+	b.WriteString(" AND ")
+	b.WriteString(columnPrefix)
+	b.WriteString("count > 0")
+
+	if filter == nil {
+		return b.String(), nil
+	}
+
+	appendIDFilter(&b, &args, columnPrefix+"gid", filter.GIDs)
+	appendIDFilter(&b, &args, columnPrefix+"uid", filter.UIDs)
+	appendFTFilter(&b, &args, columnPrefix+"ft", filter.FT)
+
+	b.WriteString(" AND ")
+	b.WriteString(columnPrefix)
+	b.WriteString("age = ?")
+
+	args = append(args, uint8(filter.Age))
+
+	return b.String(), args
+}
+
+func appendFTFilter(
+	b *strings.Builder,
+	args *[]any,
+	column string,
+	ft db.DirGUTAFileType,
+) {
+	if ft == 0 {
+		return
+	}
+
+	b.WriteString(" AND bitAnd(")
+	b.WriteString(column)
+	b.WriteString(", ?) > 0")
+
+	*args = append(*args, uint16(ft))
 }
 
 func applyWhere0Info(
