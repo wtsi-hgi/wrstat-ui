@@ -141,6 +141,28 @@ func (t *Tree) DirInfo(dir string, filter *Filter) (*DirInfo, error) {
 // with files in them that pass the filter. See GUTAs.Summary for an explanation
 // of the filter.
 func (t *Tree) DirHasChildren(dir string, filter *Filter) bool {
+	return t.DirsHaveChildren([]string{dir}, filter)[dir]
+}
+
+// DirsHaveChildren tells you which of the given directories have any child
+// directories with files in them that pass the filter.
+func (t *Tree) DirsHaveChildren(dirs []string, filter *Filter) map[string]bool {
+	if batcher, ok := t.db.(DirHasChildrenBatcher); ok {
+		hasChildren, err := batcher.DirsHaveChildren(dirs, filter)
+		if err == nil {
+			return hasChildren
+		}
+	}
+
+	result := make(map[string]bool, len(dirs))
+	for _, dir := range dirs {
+		result[dir] = t.dirHasChildren(dir, filter)
+	}
+
+	return result
+}
+
+func (t *Tree) dirHasChildren(dir string, filter *Filter) bool {
 	children, err := t.db.Children(dir)
 	if err != nil {
 		return false
@@ -175,6 +197,10 @@ func (t *Tree) getSummaryInfo(dir string, filter *Filter) (*DirSummary, error) {
 // addChildInfo adds DirSummary info of the given child paths to the di's
 // Children. If a child dir has no files in it, it is ignored.
 func (t *Tree) addChildInfo(di *DirInfo, children []string, filter *Filter) error {
+	if batcher, ok := t.db.(DirInfoBatcher); ok {
+		return t.addBatchedChildInfo(di, children, filter, batcher)
+	}
+
 	for _, child := range children {
 		dcs, errc := t.getSummaryInfo(child, filter)
 		if errc != nil {
@@ -185,6 +211,32 @@ func (t *Tree) addChildInfo(di *DirInfo, children []string, filter *Filter) erro
 			continue
 		}
 
+		if dcs.Count > 0 {
+			di.Children = append(di.Children, dcs)
+		}
+	}
+
+	return nil
+}
+
+func (t *Tree) addBatchedChildInfo(
+	di *DirInfo,
+	children []string,
+	filter *Filter,
+	batcher DirInfoBatcher,
+) error {
+	summaries, err := batcher.DirInfos(children, filter)
+	if err != nil {
+		return err
+	}
+
+	for _, child := range children {
+		dcs := summaries[child]
+		if dcs == nil {
+			continue
+		}
+
+		dcs.Dir = child
 		if dcs.Count > 0 {
 			di.Children = append(di.Children, dcs)
 		}

@@ -53,6 +53,19 @@ type Database interface {
 	Close() error
 }
 
+// DirInfoBatcher is an optional Database extension for fetching summaries for
+// multiple directories in one storage operation.
+type DirInfoBatcher interface {
+	DirInfos(dirs []string, filter *Filter) (map[string]*DirSummary, error)
+}
+
+// DirHasChildrenBatcher is an optional Database extension for checking whether
+// multiple directories have filter-passing child directories in one storage
+// operation.
+type DirHasChildrenBatcher interface {
+	DirsHaveChildren(dirs []string, filter *Filter) (map[string]bool, error)
+}
+
 // DGUTAWriter is the full interface for writing DGUTA data.
 //
 // cmd/summarise uses this to configure the writer before passing it to

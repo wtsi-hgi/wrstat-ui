@@ -40,6 +40,81 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/summary/dirguta"
 )
 
+const (
+	batchRootDir        = "/root"
+	batchRootChildA     = "/root/a"
+	batchRootChildB     = "/root/b"
+	batchRootEmptyChild = "/root/empty"
+)
+
+type batchTreeTestDB struct {
+	children      map[string][]string
+	summaries     map[string]*db.DirSummary
+	dirInfoCalls  []string
+	dirInfosCalls [][]string
+}
+
+func newBatchTreeTestDB() *batchTreeTestDB {
+	return &batchTreeTestDB{
+		children: map[string][]string{
+			batchRootDir: {batchRootChildA, batchRootChildB, batchRootEmptyChild},
+		},
+		summaries: map[string]*db.DirSummary{
+			batchRootDir:        {Count: 3},
+			batchRootChildA:     {Count: 2},
+			batchRootChildB:     {Count: 1},
+			batchRootEmptyChild: {Count: 0},
+		},
+	}
+}
+
+func (d *batchTreeTestDB) DirInfo(dir string, _ *db.Filter) (*db.DirSummary, error) {
+	d.dirInfoCalls = append(d.dirInfoCalls, dir)
+
+	sum := d.summaries[dir]
+	if sum == nil {
+		return nil, db.ErrDirNotFound
+	}
+
+	if sum.Count == 0 {
+		return &db.DirSummary{}, nil
+	}
+
+	cp := *sum
+
+	return &cp, nil
+}
+
+func (d *batchTreeTestDB) DirInfos(dirs []string, _ *db.Filter) (map[string]*db.DirSummary, error) {
+	d.dirInfosCalls = append(d.dirInfosCalls, dirs)
+
+	summaries := make(map[string]*db.DirSummary, len(dirs))
+	for _, dir := range dirs {
+		sum := d.summaries[dir]
+		if sum == nil || sum.Count == 0 {
+			continue
+		}
+
+		cp := *sum
+		cp.Dir = dir
+		summaries[dir] = &cp
+	}
+
+	return summaries, nil
+}
+
+func (d *batchTreeTestDB) Children(dir string) ([]string, error) {
+	return d.children[dir], nil
+}
+
+func (d *batchTreeTestDB) Info() (*db.Info, error) {
+	return &db.Info{}, nil
+}
+
+func (d *batchTreeTestDB) Close() error {
+	return nil
+}
+
 func TestTree(t *testing.T) {
 	refUnixTime := time.Now().Unix()
 
@@ -403,4 +478,22 @@ func fillTestDB(outputDir string, files *statsdata.Directory, updatedAt time.Tim
 	}
 
 	return w.Close()
+}
+
+func TestTreeBatchExtensions(t *testing.T) {
+	Convey("DirInfo uses optional batched child summaries", t, func() {
+		database := newBatchTreeTestDB()
+		tree := db.NewTree(database)
+
+		di, err := tree.DirInfo(batchRootDir, nil)
+		So(err, ShouldBeNil)
+		So(di.Children, ShouldResemble, []*db.DirSummary{
+			{Dir: batchRootChildA, Count: 2},
+			{Dir: batchRootChildB, Count: 1},
+		})
+		So(database.dirInfoCalls, ShouldResemble, []string{batchRootDir})
+		So(database.dirInfosCalls, ShouldResemble, [][]string{{
+			batchRootChildA, batchRootChildB, batchRootEmptyChild,
+		}})
+	})
 }

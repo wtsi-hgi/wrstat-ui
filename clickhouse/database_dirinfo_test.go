@@ -210,6 +210,101 @@ func TestClickHouseDatabaseDirInfo(t *testing.T) {
 	})
 }
 
+func TestClickHouseDatabaseBatchedTreeExpansion(t *testing.T) {
+	Convey("batched summaries and child-existence checks support first-level tree expansion", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 2 * time.Second
+		cfg.PollInterval = 0
+
+		p, err := OpenProvider(cfg)
+		So(err, ShouldBeNil)
+		Reset(func() { So(p.Close(), ShouldBeNil) })
+
+		cp, ok := p.(*chProvider)
+		So(ok, ShouldBeTrue)
+
+		dbch := newClickHouseDatabase(cfg, cp.conn)
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		const mountPath = "/mnt/test/"
+
+		updatedAt := time.Date(2026, 1, 9, 12, 0, 0, 0, time.UTC)
+		sid := snapshotID(mountPath, updatedAt)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		So(conn.Exec(ctx,
+			testInsertMountStmt,
+			mountPath,
+			time.Now(),
+			sid,
+			updatedAt,
+		), ShouldBeNil)
+
+		atimeBuckets := []uint64{1, 0, 0, 0, 0, 0, 0, 0, 0}
+		mtimeBuckets := []uint64{0, 1, 0, 0, 0, 0, 0, 0, 0}
+
+		insertGUTA := func(dir string, gid uint32, count uint64) {
+			So(conn.Exec(ctx,
+				testInsertDGUTAStmt,
+				mountPath,
+				sid,
+				dir,
+				gid,
+				uint32(9),
+				uint16(db.DGUTAFileTypeBam),
+				uint8(db.DGUTAgeAll),
+				count,
+				count*10,
+				int64(10),
+				int64(20),
+				atimeBuckets,
+				mtimeBuckets,
+			), ShouldBeNil)
+		}
+
+		insertGUTA(mountPath+"a/", 7, 3)
+		insertGUTA(mountPath+"b/", 7, 2)
+		insertGUTA(mountPath+"a/grand/", 7, 1)
+		insertGUTA(mountPath+"b/grand/", 8, 1)
+
+		So(conn.Exec(ctx, testInsertChildrenStmt,
+			mountPath, sid, mountPath+"a/", mountPath+"a/grand",
+		), ShouldBeNil)
+		So(conn.Exec(ctx, testInsertChildrenStmt,
+			mountPath, sid, mountPath+"b/", mountPath+"b/grand",
+		), ShouldBeNil)
+
+		filter := &db.Filter{GIDs: []uint32{7}, Age: db.DGUTAgeAll}
+		summaries, err := dbch.DirInfos(
+			[]string{mountPath + "a", mountPath + "b"},
+			filter,
+		)
+		So(err, ShouldBeNil)
+		So(summaries[mountPath+"a"].Count, ShouldEqual, 3)
+		So(summaries[mountPath+"a"].Dir, ShouldEqual, mountPath+"a")
+		So(summaries[mountPath+"b"].Count, ShouldEqual, 2)
+		So(summaries[mountPath+"b"].Modtime, ShouldResemble, updatedAt)
+
+		hasChildren, err := dbch.DirsHaveChildren(
+			[]string{mountPath + "a", mountPath + "b"},
+			filter,
+		)
+		So(err, ShouldBeNil)
+		So(hasChildren, ShouldResemble, map[string]bool{
+			mountPath + "a": true,
+			mountPath + "b": false,
+		})
+	})
+}
+
 func TestClickHouseDatabaseDirInfoAncestor(t *testing.T) {
 	Convey("DirInfo merges results across mounts for ancestor dirs", t, func() {
 		os.Setenv("WRSTAT_ENV", "test")

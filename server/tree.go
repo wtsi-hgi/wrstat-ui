@@ -214,9 +214,16 @@ func (s *Server) diToTreeElement(di *db.DirInfo, filter *db.Filter,
 
 	childElements := make([]*TreeElement, len(di.Children))
 
+	childPaths := make([]string, len(di.Children))
+	for i, dds := range di.Children {
+		childPaths[i] = dds.Dir
+	}
+
+	hasChildren := s.tree.DirsHaveChildren(childPaths, filter)
+
 	for i, dds := range di.Children {
 		childTE := s.ddsToTreeElement(dds, allowedGIDs)
-		childTE.HasChildren = s.tree.DirHasChildren(dds.Dir, filter)
+		childTE.HasChildren = hasChildren[dds.Dir]
 		childElements[i] = childTE
 	}
 

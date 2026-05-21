@@ -44,6 +44,7 @@ const (
 	childrenInitialCap = 16
 
 	dgutaInitialCap = 8
+	queryScopeArgs  = 2
 
 	childrenQuery = "SELECT DISTINCT child FROM wrstat_children " +
 		"PREWHERE mount_path = ? AND snapshot_id = ? AND parent_dir = ? " +
@@ -117,6 +118,18 @@ const (
 		"FROM wrstat_dguta d " +
 		"WHERE d.dir = ? AND %s"
 
+	dgutasForDirsQuery = "SELECT dir, gid, uid, ft, age, count, size, " +
+		"atime_min, mtime_max, atime_buckets, mtime_buckets " +
+		"FROM wrstat_dguta " +
+		"PREWHERE mount_path = ? AND snapshot_id = ? " +
+		"WHERE dir IN (%s)"
+
+	childrenForParentsQuery = "SELECT parent_dir, child " +
+		"FROM wrstat_children " +
+		"PREWHERE mount_path = ? AND snapshot_id = ? " +
+		"WHERE parent_dir IN (%s) " +
+		"ORDER BY parent_dir ASC, child ASC"
+
 	infoDGUTASnapshotQuery = "SELECT " +
 		"uniqExact(dir) AS num_dirs, " +
 		"count() AS num_dgutas " +
@@ -133,6 +146,32 @@ const (
 var errIntOverflow = errors.New("value overflows int")
 
 var errReaderClosed = errors.New("clickhouse: reader is closed")
+
+type activeMountDirGroup struct {
+	mount        activeMount
+	originalDirs map[string]string
+	queryDirs    []string
+}
+
+func activeMountGroup(
+	groups map[string]*activeMountDirGroup,
+	mount activeMount,
+) *activeMountDirGroup {
+	key := mount.mountPath + "\x00" + mount.snapshotID
+
+	group := groups[key]
+	if group != nil {
+		return group
+	}
+
+	group = &activeMountDirGroup{
+		mount:        mount,
+		originalDirs: make(map[string]string),
+	}
+	groups[key] = group
+
+	return group
+}
 
 type clickHouseDatabase struct {
 	cfg  Config
@@ -286,11 +325,291 @@ func (d *clickHouseDatabase) Children(dir string) ([]string, error) {
 	)
 }
 
+// DirInfos returns directory summaries for multiple directories.
+func (d *clickHouseDatabase) DirInfos(
+	dirs []string,
+	filter *db.Filter,
+) (map[string]*db.DirSummary, error) {
+	if err := d.ensureOpen(); err != nil {
+		return nil, err
+	}
+
+	result := make(map[string]*db.DirSummary, len(dirs))
+
+	groups, fallback, err := d.groupDirsByActiveMount(dirs)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := d.addDirInfoGroups(result, groups, filter); err != nil {
+		return nil, err
+	}
+
+	return result, d.addFallbackDirInfos(result, fallback, filter)
+}
+
+// DirsHaveChildren returns whether each directory has filter-passing child
+// directories.
+func (d *clickHouseDatabase) DirsHaveChildren(
+	dirs []string,
+	filter *db.Filter,
+) (map[string]bool, error) {
+	if err := d.ensureOpen(); err != nil {
+		return nil, err
+	}
+
+	result := make(map[string]bool, len(dirs))
+	for _, dir := range dirs {
+		result[dir] = false
+	}
+
+	groups, fallback, err := d.groupDirsByActiveMount(dirs)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, group := range groups {
+		if err := d.addDirsHaveChildrenForMount(result, group, filter); err != nil {
+			return nil, err
+		}
+	}
+
+	for _, dir := range fallback {
+		result[dir] = d.dirHasChildrenSlow(dir, filter)
+	}
+
+	return result, nil
+}
+
 func (d *clickHouseDatabase) childrenForMount(mountPath, snapshotID, parentDir string) ([]string, error) {
 	ctx, cancel := configQueryContext(d.cfg)
 	defer cancel()
 
 	return d.queryChildren(ctx, childrenQuery, "children", mountPath, snapshotID, parentDir)
+}
+
+func (d *clickHouseDatabase) addDirInfoGroups(
+	result map[string]*db.DirSummary,
+	groups map[string]*activeMountDirGroup,
+	filter *db.Filter,
+) error {
+	for _, group := range groups {
+		if err := d.addDirInfosForMount(result, group, filter); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (d *clickHouseDatabase) addFallbackDirInfos(
+	result map[string]*db.DirSummary,
+	dirs []string,
+	filter *db.Filter,
+) error {
+	for _, dir := range dirs {
+		sum, err := d.DirInfo(dir, filter)
+		if err != nil {
+			return err
+		}
+
+		if sum == nil {
+			continue
+		}
+
+		sum.Dir = dir
+		result[dir] = sum
+	}
+
+	return nil
+}
+
+func (d *clickHouseDatabase) groupDirsByActiveMount(
+	dirs []string,
+) (map[string]*activeMountDirGroup, []string, error) {
+	groups := make(map[string]*activeMountDirGroup)
+	fallback := make([]string, 0)
+
+	for _, dir := range dirs {
+		if err := d.addDirToActiveMountGroups(groups, &fallback, dir); err != nil {
+			return nil, nil, err
+		}
+	}
+
+	return groups, fallback, nil
+}
+
+func (d *clickHouseDatabase) addDirToActiveMountGroups(
+	groups map[string]*activeMountDirGroup,
+	fallback *[]string,
+	dir string,
+) error {
+	mountPath, ok, err := d.resolveMountScope(dir)
+	if err != nil {
+		return err
+	}
+
+	if !ok {
+		*fallback = append(*fallback, dir)
+
+		return nil
+	}
+
+	mount, found, err := d.activeMountForMountPath(mountPath)
+	if err != nil || !found {
+		return err
+	}
+
+	group := activeMountGroup(groups, mount)
+
+	queryDir := ensureTrailingSlash(dir)
+	if _, exists := group.originalDirs[queryDir]; !exists {
+		group.queryDirs = append(group.queryDirs, queryDir)
+	}
+
+	group.originalDirs[queryDir] = dir
+
+	return nil
+}
+
+func (d *clickHouseDatabase) addDirInfosForMount(
+	result map[string]*db.DirSummary,
+	group *activeMountDirGroup,
+	filter *db.Filter,
+) error {
+	gutasByDir, err := d.gutasForDirs(
+		group.mount.mountPath,
+		group.mount.snapshotID,
+		group.queryDirs,
+	)
+	if err != nil {
+		return err
+	}
+
+	d.addSummariesForGUTAs(result, group, filter, gutasByDir)
+
+	return d.addMissingDirInfoSummaries(result, group, filter, gutasByDir)
+}
+
+func (d *clickHouseDatabase) addSummariesForGUTAs(
+	result map[string]*db.DirSummary,
+	group *activeMountDirGroup,
+	filter *db.Filter,
+	gutasByDir map[string]db.GUTAs,
+) {
+	for queryDir, gutas := range gutasByDir {
+		sum := dirSummaryWithModtime(gutas, filter, group.mount.updatedAt)
+		if sum == nil {
+			continue
+		}
+
+		originalDir := group.originalDirs[queryDir]
+		sum.Dir = originalDir
+		result[originalDir] = sum
+	}
+}
+
+func (d *clickHouseDatabase) addMissingDirInfoSummaries(
+	result map[string]*db.DirSummary,
+	group *activeMountDirGroup,
+	filter *db.Filter,
+	gutasByDir map[string]db.GUTAs,
+) error {
+	for _, queryDir := range group.queryDirs {
+		if _, found := gutasByDir[queryDir]; found {
+			continue
+		}
+
+		originalDir := group.originalDirs[queryDir]
+
+		sum, err := d.DirInfo(originalDir, filter)
+		if err != nil {
+			return err
+		}
+
+		if sum != nil {
+			sum.Dir = originalDir
+			result[originalDir] = sum
+		}
+	}
+
+	return nil
+}
+
+func (d *clickHouseDatabase) addDirsHaveChildrenForMount(
+	result map[string]bool,
+	group *activeMountDirGroup,
+	filter *db.Filter,
+) error {
+	childrenByParent, err := d.childrenForParentsMount(
+		group.mount.mountPath,
+		group.mount.snapshotID,
+		group.queryDirs,
+	)
+	if err != nil {
+		return err
+	}
+
+	childParents, childDirs := collectChildParents(childrenByParent)
+
+	childSummaries, err := d.DirInfos(childDirs, filter)
+	if err != nil {
+		return err
+	}
+
+	markParentsWithMatchingChildren(result, group, childParents, childSummaries)
+
+	return nil
+}
+
+func collectChildParents(childrenByParent map[string][]string) (map[string][]string, []string) {
+	childParents := make(map[string][]string)
+	childDirs := make([]string, 0)
+
+	for parent, children := range childrenByParent {
+		for _, child := range children {
+			if _, exists := childParents[child]; !exists {
+				childDirs = append(childDirs, child)
+			}
+
+			childParents[child] = append(childParents[child], parent)
+		}
+	}
+
+	return childParents, childDirs
+}
+
+func markParentsWithMatchingChildren(
+	result map[string]bool,
+	group *activeMountDirGroup,
+	childParents map[string][]string,
+	childSummaries map[string]*db.DirSummary,
+) {
+	for child, summary := range childSummaries {
+		if summary == nil || summary.Count == 0 {
+			continue
+		}
+
+		for _, parent := range childParents[child] {
+			result[group.originalDirs[parent]] = true
+		}
+	}
+}
+
+func (d *clickHouseDatabase) dirHasChildrenSlow(dir string, filter *db.Filter) bool {
+	children, err := d.Children(dir)
+	if err != nil {
+		return false
+	}
+
+	for _, child := range children {
+		ds, _ := d.DirInfo(child, filter) //nolint:errcheck
+		if ds != nil && ds.Count > 0 {
+			return true
+		}
+	}
+
+	return false
 }
 
 func (d *clickHouseDatabase) resolveMountScope(dir string) (string, bool, error) {
@@ -702,6 +1021,60 @@ func (d *clickHouseDatabase) gutasForDir(
 	return d.queryGUTAs(ctx, "dguta", dgutaQuery, mountPath, snapshotID, dir)
 }
 
+func (d *clickHouseDatabase) gutasForDirs(
+	mountPath, snapshotID string,
+	dirs []string,
+) (map[string]db.GUTAs, error) {
+	if len(dirs) == 0 {
+		return map[string]db.GUTAs{}, nil
+	}
+
+	ctx, cancel := configQueryContext(d.cfg)
+	defer cancel()
+
+	query, args := scopedBatchQuery(dgutasForDirsQuery, dirs, mountPath, snapshotID)
+
+	rows, err := d.conn.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("clickhouse: failed to query dguta batch: %w", err)
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	return scanDGUTARowsByDir(rows)
+}
+
+func scopedBatchQuery(queryFmt string, values []string, scopeArgs ...any) (string, []any) {
+	query := fmt.Sprintf(queryFmt, placeholders(len(values)))
+	args := make([]any, 0, len(values)+queryScopeArgs)
+	args = append(args, scopeArgs...)
+
+	for _, value := range values {
+		args = append(args, value)
+	}
+
+	return query, args
+}
+
+func scanDGUTARowsByDir(rows rowsScanner) (map[string]db.GUTAs, error) {
+	gutasByDir := make(map[string]db.GUTAs)
+
+	for rows.Next() {
+		dir, g, err := scanDirDGUTARow(rows)
+		if err != nil {
+			return nil, err
+		}
+
+		gutasByDir[dir] = append(gutasByDir[dir], g)
+	}
+
+	if err := rowsErr(rows); err != nil {
+		return nil, fmt.Errorf("clickhouse: dguta batch iteration error: %w", err)
+	}
+
+	return gutasByDir, nil
+}
+
 func (d *clickHouseDatabase) gutasForAncestor(
 	dir string,
 ) (db.GUTAs, error) {
@@ -786,6 +1159,48 @@ func scanMaxUpdatedAt(rows rowsScanner) (time.Time, error) {
 	return updatedAt.UTC(), nil
 }
 
+func (d *clickHouseDatabase) childrenForParentsMount(
+	mountPath, snapshotID string,
+	parentDirs []string,
+) (map[string][]string, error) {
+	if len(parentDirs) == 0 {
+		return map[string][]string{}, nil
+	}
+
+	ctx, cancel := configQueryContext(d.cfg)
+	defer cancel()
+
+	query, args := scopedBatchQuery(childrenForParentsQuery, parentDirs, mountPath, snapshotID)
+
+	rows, err := d.conn.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("clickhouse: failed to query children batch: %w", err)
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	return scanChildrenRowsByParent(rows)
+}
+
+func scanChildrenRowsByParent(rows rowsScanner) (map[string][]string, error) {
+	children := make(map[string][]string)
+
+	for rows.Next() {
+		var parent, child string
+		if err := rows.Scan(&parent, &child); err != nil {
+			return nil, fmt.Errorf("clickhouse: failed to scan child batch: %w", err)
+		}
+
+		children[parent] = append(children[parent], child)
+	}
+
+	if err := rowsErr(rows); err != nil {
+		return nil, fmt.Errorf("clickhouse: children batch iteration error: %w", err)
+	}
+
+	return children, nil
+}
+
 type rowsScanner interface {
 	Next() bool
 	Scan(dest ...any) error
@@ -797,6 +1212,23 @@ func scanDGUTARow(rows rowsScanner) (*db.GUTA, error) {
 		return nil, err
 	}
 
+	return s.guta(), nil
+}
+
+func scanDirDGUTARow(rows rowsScanner) (string, *db.GUTA, error) {
+	var (
+		dir string
+		s   dgutaScanned
+	)
+
+	if err := s.scanFromWithDir(rows, &dir); err != nil {
+		return "", nil, err
+	}
+
+	return dir, s.guta(), nil
+}
+
+func (s *dgutaScanned) guta() *db.GUTA {
 	return &db.GUTA{
 		GID:         s.gid,
 		UID:         s.uid,
@@ -808,7 +1240,7 @@ func scanDGUTARow(rows rowsScanner) (*db.GUTA, error) {
 		ATimeRanges: sliceToAgeBuckets(s.atimeBuckets),
 		Mtime:       s.mtimeMax,
 		MTimeRanges: sliceToAgeBuckets(s.mtimeBuckets),
-	}, nil
+	}
 }
 
 func sliceToAgeBuckets(in []uint64) summary.AgeBuckets {
@@ -864,6 +1296,40 @@ func (s *dgutaScanned) scanFrom(rows rowsScanner) error {
 	}
 
 	return nil
+}
+
+func (s *dgutaScanned) scanFromWithDir(rows rowsScanner, dir *string) error {
+	if err := rows.Scan(
+		dir,
+		&s.gid,
+		&s.uid,
+		&s.ft,
+		&s.age,
+		&s.count,
+		&s.size,
+		&s.atimeMin,
+		&s.mtimeMax,
+		&s.atimeBuckets,
+		&s.mtimeBuckets,
+	); err != nil {
+		return fmt.Errorf("clickhouse: failed to scan dguta batch: %w", err)
+	}
+
+	return nil
+}
+
+func placeholders(n int) string {
+	var b strings.Builder
+
+	for i := range n {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+
+		b.WriteString("?")
+	}
+
+	return b.String()
 }
 
 func infoCountToInt(name string, v uint64) (int, error) {
