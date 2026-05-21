@@ -47,6 +47,8 @@ var errTimedOut = errors.New("timed out")
 
 func TestWatch(t *testing.T) {
 	Convey("Given the expected setup", t, func() {
+		const reqGroupABC = "wrstat-ui-summarise-abc"
+
 		inputDir := t.TempDir()
 		outputDir := t.TempDir()
 		testInputA := filepath.Join(inputDir, "12345_abc")
@@ -114,7 +116,7 @@ func TestWatch(t *testing.T) {
 					Cwd:        cwd,
 					CwdMatters: true,
 					RepGroup:   "wrstat-ui-summarise-" + time.Now().Format("20060102150405"),
-					ReqGroup:   "wrstat-ui-summarise",
+					ReqGroup:   reqGroupABC,
 					Requirements: &scheduler.Requirements{
 						RAM:   8192,
 						Time:  10 * time.Second,
@@ -233,7 +235,7 @@ func TestWatch(t *testing.T) {
 					Cwd:        parentDir,
 					CwdMatters: true,
 					RepGroup:   "wrstat-ui-summarise-" + time.Now().Format("20060102150405"),
-					ReqGroup:   "wrstat-ui-summarise",
+					ReqGroup:   reqGroupABC,
 					Group:      "myGroup",
 					Requirements: &scheduler.Requirements{
 						RAM:   8192,
@@ -297,7 +299,7 @@ func TestWatch(t *testing.T) {
 					Cwd:        cwd,
 					CwdMatters: true,
 					RepGroup:   "wrstat-ui-summarise-" + time.Now().Format("20060102150405"),
-					ReqGroup:   "wrstat-ui-summarise",
+					ReqGroup:   reqGroupABC,
 					Requirements: &scheduler.Requirements{
 						RAM:   8192,
 						Time:  10 * time.Second,
@@ -345,7 +347,7 @@ func TestWatch(t *testing.T) {
 					Cwd:        cwd,
 					CwdMatters: true,
 					RepGroup:   "wrstat-ui-summarise-" + time.Now().Format("20060102150405"),
-					ReqGroup:   "wrstat-ui-summarise",
+					ReqGroup:   reqGroupABC,
 					Requirements: &scheduler.Requirements{
 						RAM:   8192,
 						Time:  10 * time.Second,
@@ -365,7 +367,7 @@ func TestWatch(t *testing.T) {
 					Cwd:        cwd,
 					CwdMatters: true,
 					RepGroup:   "wrstat-ui-summarise-" + time.Now().Format("20060102150405"),
-					ReqGroup:   "wrstat-ui-summarise",
+					ReqGroup:   "wrstat-ui-summarise-c",
 					Requirements: &scheduler.Requirements{
 						RAM:   8192,
 						Time:  10 * time.Second,
@@ -415,6 +417,53 @@ func TestWatch(t *testing.T) {
 			So(err, ShouldNotEqual, errTimedOut)
 			So(err.Error(), ShouldContainSubstring, "could not reach the server")
 		})
+	})
+}
+
+func TestWatchSummariseReqGroupIncludesMountKey(t *testing.T) {
+	Convey("Watch sets summarise requirements group per mount key", t, func() {
+		inputDir := t.TempDir()
+		outputDir := t.TempDir()
+		inputBase := "20260517-200015_／lustre／scratch127"
+		testInput := filepath.Join(inputDir, inputBase)
+		wrWrittenCh := make(chan bool)
+
+		pr, pw, err := os.Pipe()
+		So(err, ShouldBeNil)
+
+		client.PretendSubmissions = strconv.FormatUint(uint64(pw.Fd()), 10)
+
+		var jobs []*jobqueue.Job
+
+		go func() {
+			defer pr.Close()
+			defer close(wrWrittenCh)
+
+			j := json.NewDecoder(pr)
+
+			for {
+				var js []*jobqueue.Job
+
+				if errr := j.Decode(&js); errr != nil {
+					return
+				}
+
+				jobs = append(jobs, js...)
+			}
+		}()
+
+		So(os.Mkdir(testInput, 0755), ShouldBeNil)
+		So(createFile(filepath.Join(testInput, inputStatsFile)), ShouldBeNil)
+
+		err = watch([]string{inputDir}, "", outputDir, "", "", "", 0, "", "", nil)
+		So(err, ShouldBeNil)
+
+		pw.Close()
+
+		<-wrWrittenCh
+
+		So(jobs, ShouldHaveLength, 1)
+		So(jobs[0].ReqGroup, ShouldEqual, "wrstat-ui-summarise-／lustre／scratch127")
 	})
 }
 

@@ -1402,7 +1402,7 @@ func TestWatch(t *testing.T) {
 				),
 				Cwd:        cwd,
 				CwdMatters: true,
-				ReqGroup:   "wrstat-ui-summarise",
+				ReqGroup:   "wrstat-ui-summarise-A",
 				RepGroup:   jobs[0].RepGroup,
 				Requirements: &scheduler.Requirements{
 					Cores: cpus,
@@ -1437,7 +1437,7 @@ func TestWatch(t *testing.T) {
 				),
 				Cwd:        cwd,
 				CwdMatters: true,
-				ReqGroup:   "wrstat-ui-summarise",
+				ReqGroup:   "wrstat-ui-summarise-A",
 				RepGroup:   jobs[0].RepGroup,
 				Requirements: &scheduler.Requirements{
 					Cores: cpus,

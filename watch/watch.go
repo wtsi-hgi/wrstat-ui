@@ -48,6 +48,7 @@ const (
 	mbPerGB               = 1024
 	jobTimestampLayout    = "20060102150405"
 	clickhouseRecoverFlag = "--clickhouse-recover"
+	summariseReqGroupBase = "wrstat-ui-summarise"
 )
 
 var connectTimeout = 10 * time.Second //nolint:gochecknoglobals
@@ -194,7 +195,7 @@ func createSummariseJob(group, inputDir, outputDir, base, quotaPath, basedirsCon
 		getJobCommand(dotOutputBase, previousBasedirsDB, quotaPath, basedirsConfig, mounts,
 			inputDir, base, outputDir),
 		summariseJobName(),
-		"wrstat-ui-summarise",
+		summariseReqGroup(base),
 		"",
 		"",
 		nil,
@@ -236,6 +237,15 @@ func getPreviousBasedirsDB(outputDir, base string) (string, error) {
 	}
 
 	return "", nil
+}
+
+func summariseReqGroup(base string) string {
+	key, ok := datasetKey(base)
+	if !ok {
+		return summariseReqGroupBase
+	}
+
+	return summariseReqGroupBase + "-" + key
 }
 
 func datasetKey(name string) (string, bool) {
