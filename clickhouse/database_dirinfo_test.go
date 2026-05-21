@@ -333,6 +333,78 @@ func TestClickHouseDatabaseBatchedTreeExpansion(t *testing.T) {
 }
 
 func TestClickHouseDatabaseDirsHaveChildrenFastPath(t *testing.T) {
+	Convey("DirsHaveChildren skips the existence join when requested parents have no child rows", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+
+		th := newClickHouseTestHarness(t)
+
+		const mountPath = "/mnt/test/"
+
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 2 * time.Second
+		cfg.PollInterval = 0
+		cfg.MountPoints = []string{mountPath}
+
+		p, err := OpenProvider(cfg)
+		So(err, ShouldBeNil)
+		Reset(func() { So(p.Close(), ShouldBeNil) })
+
+		cp, ok := p.(*chProvider)
+		So(ok, ShouldBeTrue)
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		updatedAt := time.Date(2026, 1, 9, 12, 0, 0, 0, time.UTC)
+		sid := snapshotID(mountPath, updatedAt)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		So(conn.Exec(ctx, testInsertMountStmt, mountPath, time.Now(), sid, updatedAt), ShouldBeNil)
+
+		atimeBuckets := []uint64{1, 0, 0, 0, 0, 0, 0, 0, 0}
+
+		mtimeBuckets := []uint64{0, 1, 0, 0, 0, 0, 0, 0, 0}
+		for _, dir := range []string{mountPath + "leaf-a/", mountPath + "leaf-b/"} {
+			So(conn.Exec(ctx,
+				testInsertDGUTAStmt,
+				mountPath,
+				sid,
+				dir,
+				uint32(7),
+				uint32(9),
+				uint16(db.DGUTAFileTypeBam),
+				uint8(db.DGUTAgeAll),
+				uint64(1),
+				uint64(10),
+				int64(10),
+				int64(20),
+				atimeBuckets,
+				mtimeBuckets,
+			), ShouldBeNil)
+		}
+
+		countingConn := &hasChildrenQueryCountingConn{Conn: cp.conn}
+		dbch := newClickHouseDatabase(cfg, countingConn)
+
+		hasChildren, err := dbch.DirsHaveChildren(
+			[]string{mountPath + "leaf-b", mountPath + "leaf-a", mountPath + "missing"},
+			nil,
+		)
+		So(err, ShouldBeNil)
+		So(hasChildren, ShouldResemble, map[string]bool{
+			mountPath + "leaf-a":  false,
+			mountPath + "leaf-b":  false,
+			mountPath + "missing": false,
+		})
+		So(countingConn.existenceQueryCount(), ShouldEqual, 0)
+		So(countingConn.childSummaryBatchQueryCount(), ShouldEqual, 0)
+		So(countingConn.childBatchQueryCount(), ShouldEqual, 1)
+	})
+
 	Convey("DirsHaveChildren uses a filtered parent-existence query instead of fetching child summaries", t, func() {
 		os.Setenv("WRSTAT_ENV", "test")
 		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
@@ -664,11 +736,19 @@ func TestClickHouseDatabaseDirInfoScopeResolution(t *testing.T) {
 type hasChildrenQueryCountingConn struct {
 	ch.Conn
 
+	childBatchQueries        atomic.Int32
 	childSummaryBatchQueries atomic.Int32
 	existenceQueries         atomic.Int32
 }
 
 func (c *hasChildrenQueryCountingConn) Query(ctx context.Context, query string, args ...any) (driver.Rows, error) {
+	isChildBatchQuery := strings.Contains(query, "SELECT parent_dir, child") &&
+		strings.Contains(query, "FROM wrstat_children") &&
+		strings.Contains(query, "WHERE parent_dir IN (")
+	if isChildBatchQuery {
+		c.childBatchQueries.Add(1)
+	}
+
 	isChildSummaryBatchQuery := strings.Contains(query, "SELECT dir, gid, uid, ft, age, count, size") &&
 		strings.Contains(query, "WHERE dir IN (")
 	if isChildSummaryBatchQuery {
@@ -682,6 +762,10 @@ func (c *hasChildrenQueryCountingConn) Query(ctx context.Context, query string, 
 	}
 
 	return c.Conn.Query(ctx, query, args...)
+}
+
+func (c *hasChildrenQueryCountingConn) childBatchQueryCount() int {
+	return int(c.childBatchQueries.Load())
 }
 
 func (c *hasChildrenQueryCountingConn) childSummaryBatchQueryCount() int {

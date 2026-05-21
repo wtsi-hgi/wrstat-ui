@@ -905,12 +905,7 @@ func (d *clickHouseDatabase) addDirsHaveChildrenForMount(
 	group *activeMountDirGroup,
 	filter *db.Filter,
 ) error {
-	parentsWithChildren, err := d.parentDirsWithMatchingChildrenMount(
-		group.mount.mountPath,
-		group.mount.snapshotID,
-		group.queryDirs,
-		filter,
-	)
+	parentsWithChildren, err := d.parentDirsWithFilteredChildrenForMount(group, filter)
 	if err != nil {
 		return err
 	}
@@ -922,6 +917,49 @@ func (d *clickHouseDatabase) addDirsHaveChildrenForMount(
 	}
 
 	return nil
+}
+
+func (d *clickHouseDatabase) parentDirsWithFilteredChildrenForMount(
+	group *activeMountDirGroup,
+	filter *db.Filter,
+) (map[string]bool, error) {
+	childrenByParent, err := d.childrenForParentsMount(
+		group.mount.mountPath,
+		group.mount.snapshotID,
+		group.queryDirs,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	parentDirs := parentDirsWithAnyChildren(group.queryDirs, childrenByParent)
+	if len(parentDirs) == 0 {
+		return map[string]bool{}, nil
+	}
+
+	return d.parentDirsWithMatchingChildrenMount(
+		group.mount.mountPath,
+		group.mount.snapshotID,
+		parentDirs,
+		filter,
+	)
+}
+
+func parentDirsWithAnyChildren(
+	parentDirs []string,
+	childrenByParent map[string][]string,
+) []string {
+	dirs := make([]string, 0, len(parentDirs))
+
+	for _, parentDir := range parentDirs {
+		if len(childrenByParent[parentDir]) == 0 {
+			continue
+		}
+
+		dirs = append(dirs, parentDir)
+	}
+
+	return dirs
 }
 
 func (d *clickHouseDatabase) dirHasChildrenSlow(dir string, filter *db.Filter) bool {
