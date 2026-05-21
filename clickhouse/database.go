@@ -44,10 +44,11 @@ import (
 const (
 	childrenInitialCap = 16
 
-	dgutaInitialCap          = 8
-	queryScopeArgs           = 2
-	whereSingleMountBaseArgs = 3
-	whereAncestorBaseArgs    = 2
+	dgutaInitialCap                    = 8
+	dirsHaveChildrenSummaryFanoutLimit = 16
+	queryScopeArgs                     = 2
+	whereSingleMountBaseArgs           = 3
+	whereAncestorBaseArgs              = 2
 
 	childrenQuery = "SELECT DISTINCT child FROM wrstat_children " +
 		"PREWHERE mount_path = ? AND snapshot_id = ? AND parent_dir = ? " +
@@ -932,10 +933,16 @@ func (d *clickHouseDatabase) parentDirsWithFilteredChildrenForMount(
 		return nil, err
 	}
 
-	parentDirs := parentDirsWithAnyChildren(group.queryDirs, childrenByParent)
-	if len(parentDirs) == 0 {
+	childParents, childDirs := collectChildParents(childrenByParent)
+	if len(childDirs) == 0 {
 		return map[string]bool{}, nil
 	}
+
+	if len(childDirs) <= dirsHaveChildrenSummaryFanoutLimit {
+		return d.parentDirsWithSummarizedChildren(childParents, childDirs, filter)
+	}
+
+	parentDirs := parentDirsWithAnyChildren(group.queryDirs, childrenByParent)
 
 	return d.parentDirsWithMatchingChildrenMount(
 		group.mount.mountPath,
@@ -943,6 +950,23 @@ func (d *clickHouseDatabase) parentDirsWithFilteredChildrenForMount(
 		parentDirs,
 		filter,
 	)
+}
+
+func collectChildParents(childrenByParent map[string][]string) (map[string][]string, []string) {
+	childParents := make(map[string][]string)
+	childDirs := make([]string, 0)
+
+	for parent, children := range childrenByParent {
+		for _, child := range children {
+			if _, exists := childParents[child]; !exists {
+				childDirs = append(childDirs, child)
+			}
+
+			childParents[child] = append(childParents[child], parent)
+		}
+	}
+
+	return childParents, childDirs
 }
 
 func parentDirsWithAnyChildren(
@@ -960,6 +984,38 @@ func parentDirsWithAnyChildren(
 	}
 
 	return dirs
+}
+
+func (d *clickHouseDatabase) parentDirsWithSummarizedChildren(
+	childParents map[string][]string,
+	childDirs []string,
+	filter *db.Filter,
+) (map[string]bool, error) {
+	childSummaries, err := d.DirInfos(childDirs, filter)
+	if err != nil {
+		return nil, err
+	}
+
+	return parentDirsWithMatchingChildSummaries(childParents, childSummaries), nil
+}
+
+func parentDirsWithMatchingChildSummaries(
+	childParents map[string][]string,
+	childSummaries map[string]*db.DirSummary,
+) map[string]bool {
+	parentDirs := make(map[string]bool)
+
+	for child, summary := range childSummaries {
+		if summary == nil || summary.Count == 0 {
+			continue
+		}
+
+		for _, parent := range childParents[child] {
+			parentDirs[parent] = true
+		}
+	}
+
+	return parentDirs
 }
 
 func (d *clickHouseDatabase) dirHasChildrenSlow(dir string, filter *db.Filter) bool {

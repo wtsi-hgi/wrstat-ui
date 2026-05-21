@@ -405,7 +405,107 @@ func TestClickHouseDatabaseDirsHaveChildrenFastPath(t *testing.T) {
 		So(countingConn.childBatchQueryCount(), ShouldEqual, 1)
 	})
 
-	Convey("DirsHaveChildren uses a filtered parent-existence query instead of fetching child summaries", t, func() {
+	Convey("DirsHaveChildren uses child summaries instead of the existence join for small child fanout", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+
+		th := newClickHouseTestHarness(t)
+
+		const mountPath = "/mnt/test/"
+
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 2 * time.Second
+		cfg.PollInterval = 0
+		cfg.MountPoints = []string{mountPath}
+
+		p, err := OpenProvider(cfg)
+		So(err, ShouldBeNil)
+		Reset(func() { So(p.Close(), ShouldBeNil) })
+
+		cp, ok := p.(*chProvider)
+		So(ok, ShouldBeTrue)
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		updatedAt := time.Date(2026, 1, 9, 12, 0, 0, 0, time.UTC)
+		sid := snapshotID(mountPath, updatedAt)
+		oldSID := snapshotID(mountPath, updatedAt.Add(-time.Hour))
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		So(conn.Exec(ctx, testInsertMountStmt, mountPath, time.Now(), sid, updatedAt), ShouldBeNil)
+
+		atimeBuckets := []uint64{1, 0, 0, 0, 0, 0, 0, 0, 0}
+		mtimeBuckets := []uint64{0, 1, 0, 0, 0, 0, 0, 0, 0}
+
+		insertGUTA := func(snapshotID, dir string, gid, uid uint32, age db.DirGUTAge) {
+			So(conn.Exec(ctx,
+				testInsertDGUTAStmt,
+				mountPath,
+				snapshotID,
+				dir,
+				gid,
+				uid,
+				uint16(db.DGUTAFileTypeBam),
+				uint8(age),
+				uint64(1),
+				uint64(10),
+				int64(10),
+				int64(20),
+				atimeBuckets,
+				mtimeBuckets,
+			), ShouldBeNil)
+		}
+		insertChild := func(snapshotID, parent, child string) {
+			So(conn.Exec(ctx, testInsertChildrenStmt, mountPath, snapshotID, parent, child), ShouldBeNil)
+		}
+
+		parentMatch := mountPath + "match/"
+		parentFiltered := mountPath + "filtered/"
+		missingParent := mountPath + "missing/"
+
+		matchingChild := parentMatch + "target"
+		filteredChild := parentMatch + "wrong-gid"
+		onlyFilteredChild := parentFiltered + "wrong-uid"
+		oldMatchingChild := parentFiltered + "old-target"
+
+		insertChild(sid.String(), parentMatch, matchingChild)
+		insertGUTA(sid.String(), matchingChild+"/", uint32(7), uint32(9), db.DGUTAgeA1M)
+		insertChild(sid.String(), parentMatch, filteredChild)
+		insertGUTA(sid.String(), filteredChild+"/", uint32(8), uint32(9), db.DGUTAgeA1M)
+		insertChild(sid.String(), parentFiltered, onlyFilteredChild)
+		insertGUTA(sid.String(), onlyFilteredChild+"/", uint32(7), uint32(10), db.DGUTAgeA1M)
+		insertChild(oldSID.String(), parentFiltered, oldMatchingChild)
+		insertGUTA(oldSID.String(), oldMatchingChild+"/", uint32(7), uint32(9), db.DGUTAgeA1M)
+
+		countingConn := &hasChildrenQueryCountingConn{Conn: cp.conn}
+		dbch := newClickHouseDatabase(cfg, countingConn)
+		filter := &db.Filter{
+			GIDs: []uint32{7},
+			UIDs: []uint32{9},
+			FT:   db.DGUTAFileTypeBam,
+			Age:  db.DGUTAgeA1M,
+		}
+
+		hasChildren, err := dbch.DirsHaveChildren(
+			[]string{parentFiltered, missingParent, parentMatch, parentMatch},
+			filter,
+		)
+		So(err, ShouldBeNil)
+		So(hasChildren, ShouldResemble, map[string]bool{
+			parentMatch:    true,
+			parentFiltered: false,
+			missingParent:  false,
+		})
+		So(countingConn.childBatchQueryCount(), ShouldEqual, 1)
+		So(countingConn.childSummaryBatchQueryCount(), ShouldEqual, 1)
+		So(countingConn.existenceQueryCount(), ShouldEqual, 0)
+	})
+
+	Convey("DirsHaveChildren keeps the parent-existence query for larger child fanout", t, func() {
 		os.Setenv("WRSTAT_ENV", "test")
 		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
 
@@ -468,8 +568,9 @@ func TestClickHouseDatabaseDirsHaveChildrenFastPath(t *testing.T) {
 		parentWrongFT := mountPath + "wrong-ft/"
 		parentWrongAge := mountPath + "wrong-age/"
 		missingParent := mountPath + "missing/"
+		largeFanout := dirsHaveChildrenSummaryFanoutLimit + 1
 
-		for i := range 25 {
+		for i := range largeFanout {
 			child := fmt.Sprintf("%schild%02d", parentMatch, i)
 			insertChild(sid.String(), parentMatch, child)
 			insertGUTA(
@@ -493,7 +594,7 @@ func TestClickHouseDatabaseDirsHaveChildrenFastPath(t *testing.T) {
 			db.DGUTAgeA1M,
 		)
 
-		for i := range 25 {
+		for i := range largeFanout {
 			child := fmt.Sprintf("%schild%02d", parentWrongGID, i)
 			insertChild(sid.String(), parentWrongGID, child)
 			insertGUTA(
