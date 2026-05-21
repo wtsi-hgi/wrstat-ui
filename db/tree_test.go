@@ -496,4 +496,38 @@ func TestTreeBatchExtensions(t *testing.T) {
 			batchRootChildA, batchRootChildB, batchRootEmptyChild,
 		}})
 	})
+
+	Convey("Where uses optional storage fast path after applying defaults", t, func() {
+		database := &whereFastPathTestDB{batchTreeTestDB: newBatchTreeTestDB()}
+		tree := db.NewTree(database)
+
+		dcss, err := tree.Where(batchRootDir, nil, split.SplitsToSplitFn(2))
+		So(err, ShouldBeNil)
+		So(dcss, ShouldResemble, db.DCSs{{Dir: batchRootDir, Count: 4, Size: 40}})
+		So(database.whereDir, ShouldEqual, batchRootDir)
+		So(database.whereFilter, ShouldNotBeNil)
+		So(database.whereFilter.FT, ShouldEqual, db.AllTypesExceptDirectories)
+		So(database.whereSplits, ShouldEqual, 2)
+		So(database.dirInfoCalls, ShouldBeEmpty)
+	})
+}
+
+type whereFastPathTestDB struct {
+	*batchTreeTestDB
+
+	whereDir    string
+	whereFilter *db.Filter
+	whereSplits int
+}
+
+func (d *whereFastPathTestDB) Where(
+	dir string,
+	filter *db.Filter,
+	recurseCount func(string) int,
+) (db.DCSs, error) {
+	d.whereDir = dir
+	d.whereFilter = filter
+	d.whereSplits = recurseCount(dir)
+
+	return db.DCSs{{Dir: dir, Count: 4, Size: 40}}, nil
 }

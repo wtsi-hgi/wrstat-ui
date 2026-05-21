@@ -66,6 +66,12 @@ type DirHasChildrenBatcher interface {
 	DirsHaveChildren(dirs []string, filter *Filter) (map[string]bool, error)
 }
 
+// Whereer is an optional Database extension for resolving Tree.Where in a
+// storage-specific way while preserving Tree.Where semantics.
+type Whereer interface {
+	Where(dir string, filter *Filter, recurseCount func(string) int) (DCSs, error)
+}
+
 // DGUTAWriter is the full interface for writing DGUTA data.
 //
 // cmd/summarise uses this to configure the writer before passing it to

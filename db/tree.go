@@ -279,6 +279,17 @@ func (t *Tree) Where(dir string, filter *Filter, recurseCount split.SplitFn) (DC
 		filter.FT = AllTypesExceptDirectories
 	}
 
+	if whereer, ok := t.db.(Whereer); ok {
+		dcss, err := whereer.Where(dir, filter, recurseCount)
+		if err != nil {
+			return nil, err
+		}
+
+		sort.Sort(dcss)
+
+		return dcss, nil
+	}
+
 	dcss, err := t.recurseWhere(dir, filter, recurseCount, 0)
 	if err != nil {
 		return nil, err

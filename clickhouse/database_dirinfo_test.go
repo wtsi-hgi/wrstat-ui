@@ -29,11 +29,16 @@ package clickhouse
 import (
 	"context"
 	"os"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	ch "github.com/ClickHouse/clickhouse-go/v2"
+	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	. "github.com/smartystreets/goconvey/convey"
 	"github.com/wtsi-hgi/wrstat-ui/db"
+	"github.com/wtsi-hgi/wrstat-ui/internal/split"
+	"github.com/wtsi-hgi/wrstat-ui/summary"
 )
 
 func TestClickHouseDatabaseDirInfo(t *testing.T) {
@@ -431,5 +436,234 @@ func TestClickHouseDatabaseDirInfoScopeResolution(t *testing.T) {
 		So(err, ShouldBeNil)
 		So(singleMount, ShouldBeFalse)
 		So(mountPath, ShouldBeBlank)
+	})
+}
+
+type whereQueryCountingConn struct {
+	ch.Conn
+
+	queries atomic.Int32
+}
+
+func (c *whereQueryCountingConn) Query(ctx context.Context, query string, args ...any) (driver.Rows, error) {
+	c.queries.Add(1)
+
+	return c.Conn.Query(ctx, query, args...)
+}
+
+func (c *whereQueryCountingConn) queryCountValue() int {
+	return int(c.queries.Load())
+}
+
+func TestClickHouseDatabaseWhereFastPath(t *testing.T) {
+	Convey("Where resolves a filtered subtree without recursive query fanout", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 2 * time.Second
+		cfg.PollInterval = 0
+		cfg.MountPoints = []string{"/mnt/test/"}
+
+		p, err := OpenProvider(cfg)
+		So(err, ShouldBeNil)
+		Reset(func() { So(p.Close(), ShouldBeNil) })
+
+		cp, ok := p.(*chProvider)
+		So(ok, ShouldBeTrue)
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		const mountPath = "/mnt/test/"
+
+		updatedAt := time.Date(2026, 1, 9, 12, 0, 0, 0, time.UTC)
+		sid := snapshotID(mountPath, updatedAt)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		So(conn.Exec(ctx, testInsertMountStmt, mountPath, time.Now(), sid, updatedAt), ShouldBeNil)
+
+		atimeBuckets := []uint64{1, 0, 0, 0, 0, 0, 0, 0, 0}
+		mtimeBuckets := []uint64{0, 1, 0, 0, 0, 0, 0, 0, 0}
+
+		insertGUTA := func(dir string, gid, uid uint32, ft db.DirGUTAFileType, count uint64) {
+			So(conn.Exec(ctx,
+				testInsertDGUTAStmt,
+				mountPath,
+				sid,
+				dir,
+				gid,
+				uid,
+				uint16(ft),
+				uint8(db.DGUTAgeAll),
+				count,
+				count*10,
+				int64(10),
+				int64(20),
+				atimeBuckets,
+				mtimeBuckets,
+			), ShouldBeNil)
+		}
+
+		insertGUTA(mountPath, 7, 9, db.DGUTAFileTypeBam, 6)
+		insertGUTA(mountPath+"a/", 7, 9, db.DGUTAFileTypeBam, 6)
+		insertGUTA(mountPath+"a/b/", 7, 9, db.DGUTAFileTypeBam, 4)
+		insertGUTA(mountPath+"a/b/deep/", 7, 9, db.DGUTAFileTypeBam, 4)
+		insertGUTA(mountPath+"a/c/", 7, 9, db.DGUTAFileTypeBam, 2)
+		insertGUTA(mountPath, 8, 10, db.DGUTAFileTypeCram, 100)
+		insertGUTA(mountPath+"a/", 8, 10, db.DGUTAFileTypeCram, 100)
+		insertGUTA(mountPath+"a/c/", 8, 10, db.DGUTAFileTypeCram, 100)
+
+		So(conn.Exec(ctx, testInsertChildrenStmt, mountPath, sid, mountPath, mountPath+"a"), ShouldBeNil)
+		So(conn.Exec(ctx, testInsertChildrenStmt, mountPath, sid, mountPath+"a/", mountPath+"a/b"), ShouldBeNil)
+		So(conn.Exec(ctx, testInsertChildrenStmt, mountPath, sid, mountPath+"a/", mountPath+"a/c"), ShouldBeNil)
+		So(conn.Exec(ctx, testInsertChildrenStmt, mountPath, sid, mountPath+"a/b/", mountPath+"a/b/deep"), ShouldBeNil)
+
+		countingConn := &whereQueryCountingConn{Conn: cp.conn}
+		tree := db.NewTree(newClickHouseDatabase(cfg, countingConn))
+		filter := &db.Filter{
+			GIDs: []uint32{7},
+			UIDs: []uint32{9},
+			FT:   db.DGUTAFileTypeBam,
+			Age:  db.DGUTAgeAll,
+		}
+
+		dcss, err := tree.Where(mountPath, filter, split.SplitsToSplitFn(1))
+		So(err, ShouldBeNil)
+		So(dcss, ShouldResemble, db.DCSs{
+			{
+				Dir:         mountPath + "a",
+				Count:       6,
+				Size:        60,
+				Atime:       time.Unix(10, 0),
+				CommonATime: summary.Range7Years,
+				Mtime:       time.Unix(20, 0),
+				CommonMTime: summary.Range5Years,
+				UIDs:        []uint32{9},
+				GIDs:        []uint32{7},
+				FT:          db.DGUTAFileTypeBam,
+				Age:         db.DGUTAgeAll,
+				Modtime:     updatedAt,
+			},
+			{
+				Dir:         mountPath + "a/b/deep",
+				Count:       4,
+				Size:        40,
+				Atime:       time.Unix(10, 0),
+				CommonATime: summary.Range7Years,
+				Mtime:       time.Unix(20, 0),
+				CommonMTime: summary.Range5Years,
+				UIDs:        []uint32{9},
+				GIDs:        []uint32{7},
+				FT:          db.DGUTAFileTypeBam,
+				Age:         db.DGUTAgeAll,
+				Modtime:     updatedAt,
+			},
+			{
+				Dir:         mountPath + "a/c",
+				Count:       2,
+				Size:        20,
+				Atime:       time.Unix(10, 0),
+				CommonATime: summary.Range7Years,
+				Mtime:       time.Unix(20, 0),
+				CommonMTime: summary.Range5Years,
+				UIDs:        []uint32{9},
+				GIDs:        []uint32{7},
+				FT:          db.DGUTAFileTypeBam,
+				Age:         db.DGUTAgeAll,
+				Modtime:     updatedAt,
+			},
+		})
+		So(countingConn.queryCountValue(), ShouldBeLessThanOrEqualTo, 3)
+	})
+
+	Convey("Where merges ancestor directories across pinned active mounts", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 2 * time.Second
+		cfg.PollInterval = 0
+		cfg.MountPoints = []string{"/", "/lustre/scratchA/", "/lustre/scratchB/"}
+
+		p, err := OpenProvider(cfg)
+		So(err, ShouldBeNil)
+		Reset(func() { So(p.Close(), ShouldBeNil) })
+
+		cp, ok := p.(*chProvider)
+		So(ok, ShouldBeTrue)
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		const (
+			mountA = "/lustre/scratchA/"
+			mountB = "/lustre/scratchB/"
+		)
+
+		updatedA := time.Date(2026, 1, 9, 12, 0, 0, 0, time.UTC)
+		updatedB := time.Date(2026, 1, 10, 12, 0, 0, 0, time.UTC)
+		sidA := snapshotID(mountA, updatedA)
+		sidB := snapshotID(mountB, updatedB)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		So(conn.Exec(ctx, testInsertMountStmt, mountA, time.Now(), sidA, updatedA), ShouldBeNil)
+		So(conn.Exec(ctx, testInsertMountStmt, mountB, time.Now(), sidB, updatedB), ShouldBeNil)
+
+		atimeBuckets := []uint64{1, 0, 0, 0, 0, 0, 0, 0, 0}
+		mtimeBuckets := []uint64{0, 1, 0, 0, 0, 0, 0, 0, 0}
+
+		insertGUTA := func(mountPath, sid, dir string, count uint64) {
+			So(conn.Exec(ctx,
+				testInsertDGUTAStmt,
+				mountPath,
+				sid,
+				dir,
+				uint32(7),
+				uint32(9),
+				uint16(db.DGUTAFileTypeBam),
+				uint8(db.DGUTAgeAll),
+				count,
+				count*10,
+				int64(10),
+				int64(20),
+				atimeBuckets,
+				mtimeBuckets,
+			), ShouldBeNil)
+		}
+
+		insertGUTA(mountA, sidA.String(), "/lustre/", 10)
+		insertGUTA(mountA, sidA.String(), mountA, 10)
+		insertGUTA(mountB, sidB.String(), "/lustre/", 5)
+		insertGUTA(mountB, sidB.String(), mountB, 5)
+
+		snapshot := newActiveMountsSnapshot([]mountsActiveRow{
+			{mountPath: mountA, snapshotID: sidA.String(), updatedAt: updatedA},
+			{mountPath: mountB, snapshotID: sidB.String(), updatedAt: updatedB},
+		})
+		countingConn := &whereQueryCountingConn{Conn: cp.conn}
+		tree := db.NewTree(newClickHouseDatabaseWithSnapshot(cfg, countingConn, snapshot))
+
+		dcss, err := tree.Where("/lustre/", nil, split.SplitsToSplitFn(1))
+		So(err, ShouldBeNil)
+		So(dcss, ShouldHaveLength, 3)
+		So(dcss[0].Dir, ShouldEqual, "/lustre/")
+		So(dcss[0].Count, ShouldEqual, 15)
+		So(dcss[0].Modtime, ShouldResemble, updatedB)
+		So(dcss[1].Dir, ShouldEqual, "/lustre/scratchA")
+		So(dcss[1].Count, ShouldEqual, 10)
+		So(dcss[1].Modtime, ShouldResemble, updatedA)
+		So(dcss[2].Dir, ShouldEqual, "/lustre/scratchB")
+		So(dcss[2].Count, ShouldEqual, 5)
+		So(dcss[2].Modtime, ShouldResemble, updatedB)
+		So(countingConn.queryCountValue(), ShouldEqual, 1)
 	})
 }
