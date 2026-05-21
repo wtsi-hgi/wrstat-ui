@@ -296,7 +296,7 @@ func (d *DirGroupUserTypeAge) Add(info *summary.FileInfo) error { //nolint:funle
 // file was handled as a hardlink, false otherwise.
 func (d *DirGroupUserTypeAge) handleHardlink(info *summary.FileInfo, //nolint:funlen
 	ft db.DirGUTAFileType, atime int64) bool {
-	if info.Nlink <= 1 || info.Inode == 0 {
+	if info.IsDir() || info.Nlink <= 1 || info.Inode == 0 {
 		return false
 	}
 

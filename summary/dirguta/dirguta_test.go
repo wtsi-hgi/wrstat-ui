@@ -607,6 +607,51 @@ func TestDirGUTA(t *testing.T) {
 		So(m.has("/a/", gid, uid, ft, db.DGUTAgeAll, 1, 102400, atimeOld, mtimeOld), ShouldBeTrue)
 	})
 
+	Convey("DirGUTA only tracks non-directory hardlinks", t, func() {
+		refTime := time.Now().Unix()
+		paths := internaltest.NewDirectoryPathCreator()
+		op, ok := newDirGroupUserTypeAge(
+			&mockDB{make(map[string]db.GUTAs)},
+			refTime,
+		)().(*DirGroupUserTypeAge)
+		So(ok, ShouldBeTrue)
+
+		dirInfo := &summary.FileInfo{
+			Path:      paths.ToDirectoryPath("/a/"),
+			Name:      strToBS("a"),
+			Size:      4096,
+			UID:       uid,
+			GID:       gid,
+			MTime:     refTime - db.SecondsInAMonth,
+			ATime:     refTime - db.SecondsInAYear,
+			Inode:     1001,
+			Nlink:     3,
+			EntryType: stats.DirType,
+		}
+
+		handled := op.handleHardlink(dirInfo, db.DGUTAFileTypeOther, refTime)
+		So(handled, ShouldBeFalse)
+		So(len(op.seenHardlinks), ShouldEqual, 0)
+
+		fileInfo := &summary.FileInfo{
+			Path:      paths.ToDirectoryPath("/a/file.txt"),
+			Name:      strToBS("file.txt"),
+			Size:      100,
+			UID:       uid,
+			GID:       gid,
+			MTime:     refTime - db.SecondsInAMonth,
+			ATime:     refTime - db.SecondsInAYear,
+			Inode:     2002,
+			Nlink:     2,
+			EntryType: stats.FileType,
+		}
+
+		handled = op.handleHardlink(fileInfo, db.DGUTAFileTypeOther, fileInfo.ATime)
+		So(handled, ShouldBeTrue)
+		So(len(op.seenHardlinks), ShouldEqual, 1)
+		_, exists := op.seenHardlinks[fileInfo.Inode]
+		So(exists, ShouldBeTrue)
+	})
 }
 
 func isVCF(name string) bool {
