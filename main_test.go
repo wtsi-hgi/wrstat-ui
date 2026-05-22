@@ -77,6 +77,7 @@ const (
 	perfOpTreeDiskTreeEndpoint = "tree_disktree_endpoint"
 	perfOpTreeDiskTreeNewDirs  = "tree_disktree_endpoint_new_dirs"
 	perfOpTreeWhere            = "tree_where"
+	perfOpTreeWhereColdCached  = "tree_where_cold_then_cached"
 	perfOpTreeWhereFresh       = "tree_where_fresh_provider"
 
 	testLustreMount        = "/lustre/"
@@ -916,6 +917,7 @@ func TestClickHousePerfQuery(t *testing.T) {
 		So(opNames, ShouldContain, perfOpTreeDiskTreeEndpoint)
 		So(opNames, ShouldContain, perfOpTreeDiskTreeNewDirs)
 		So(opNames, ShouldContain, perfOpTreeWhere)
+		So(opNames, ShouldContain, perfOpTreeWhereColdCached)
 		So(opNames, ShouldContain, perfOpTreeWhereFresh)
 		So(opNames, ShouldContain, "basedirs_group_usage")
 		So(opNames, ShouldContain, "files_listdir")
@@ -929,6 +931,11 @@ func TestClickHousePerfQuery(t *testing.T) {
 		treeWhere := findReportOperation(report.Operations, perfOpTreeWhere)
 		So(treeWhere, ShouldNotBeNil)
 		So(treeWhere.Inputs["splits"], ShouldEqual, float64(2))
+
+		coldCachedWhere := findReportOperation(report.Operations, perfOpTreeWhereColdCached)
+		So(coldCachedWhere, ShouldNotBeNil)
+		So(coldCachedWhere.Inputs["cache_scope"], ShouldEqual, "same_provider_cold_then_warm")
+		So(coldCachedWhere.Inputs["duration_source"], ShouldEqual, "wall")
 
 		newDirs := findReportOperation(report.Operations, perfOpTreeDiskTreeNewDirs)
 		So(newDirs, ShouldNotBeNil)
@@ -1288,6 +1295,7 @@ func TestBoltPerf(t *testing.T) {
 
 		So(opNames, ShouldResemble, []string{
 			"mount_timestamps",
+			perfOpTreeWhereColdCached,
 			perfOpTreeDiskTreeNewDirs,
 			perfOpTreeDirInfo,
 			perfOpTreeDiskTreeEndpoint,
@@ -1399,6 +1407,7 @@ func TestBoltPerf(t *testing.T) {
 
 			So(opNames2, ShouldResemble, []string{
 				"mount_timestamps",
+				perfOpTreeWhereColdCached,
 				perfOpTreeDirInfo,
 				perfOpTreeDiskTreeEndpoint,
 				perfOpTreeWhere,

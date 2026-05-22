@@ -561,8 +561,26 @@ func TestBuildOps(t *testing.T) {
 			names = append(names, op.name)
 		}
 
+		coldCachedWhereOp := findQueryTestOp(ops, "tree_where_cold_then_cached")
+		So(coldCachedWhereOp, ShouldNotBeNil)
+		So(coldCachedWhereOp.inputs[queryInputDirKey], ShouldEqual, queryOpTestRootDir)
+		So(coldCachedWhereOp.inputs["cache_scope"], ShouldEqual, "same_provider_cold_then_warm")
+		So(coldCachedWhereOp.inputs["duration_source"], ShouldEqual, "wall")
+		So(coldCachedWhereOp.inputs["splits"], ShouldEqual, 2)
+		So(coldCachedWhereOp.skipWarmup, ShouldBeTrue)
+		So(coldCachedWhereOp.useWallTime, ShouldBeTrue)
+
 		So(names, ShouldContain, "tree_disktree_endpoint_new_dirs")
+		So(names, ShouldContain, "tree_where_cold_then_cached")
 		So(names, ShouldContain, "tree_where_fresh_provider")
+		So(queryTestOpIndex(names, "tree_where_cold_then_cached"), ShouldBeLessThan,
+			queryTestOpIndex(names, "tree_disktree_endpoint_new_dirs"))
+		So(queryTestOpIndex(names, "tree_where_cold_then_cached"), ShouldBeLessThan,
+			queryTestOpIndex(names, queryOpTreeDirInfoName))
+		So(queryTestOpIndex(names, "tree_where_cold_then_cached"), ShouldBeLessThan,
+			queryTestOpIndex(names, queryOpTreeDiskTreeEndName))
+		So(queryTestOpIndex(names, "tree_where_cold_then_cached"), ShouldBeLessThan,
+			queryTestOpIndex(names, queryOpTreeWhereName))
 
 		newDirsOp := findQueryTestOp(ops, "tree_disktree_endpoint_new_dirs")
 		So(newDirsOp, ShouldNotBeNil)
@@ -713,6 +731,16 @@ func findQueryTestOp(ops []op, name string) *op {
 	}
 
 	return nil
+}
+
+func queryTestOpIndex(names []string, name string) int {
+	for i, candidate := range names {
+		if candidate == name {
+			return i
+		}
+	}
+
+	return -1
 }
 
 type fakeQueryAPI struct {

@@ -73,6 +73,13 @@ const (
 	perfDirPickMinCount      = 1000
 	perfDirPickMaxCount      = 20000
 	perfDirPickMaxIterations = 128
+
+	perfQueryInputAge            = "age"
+	perfQueryInputBaseDir        = "basedir"
+	perfQueryInputCacheScope     = "cache_scope"
+	perfQueryInputDir            = "dir"
+	perfQueryInputDurationSource = "duration_source"
+	perfQueryInputSplits         = "splits"
 )
 
 var (
@@ -753,7 +760,12 @@ func boltPerfNewQueryContext(
 
 func runPerfQuerySuite(report *perfReport, ctx perfQueryContext, printf perfPrintfFunc) error {
 	for _, op := range boltPerfQueryOps(ctx) {
-		durations, err := measureOperation(boltPerf.warmup, boltPerf.repeat, op.op)
+		warmup := boltPerf.warmup
+		if op.skipWarmup {
+			warmup = 0
+		}
+
+		durations, err := measureOperation(warmup, boltPerf.repeat, op.op)
 		if err != nil {
 			return err
 		}
@@ -770,6 +782,7 @@ func runPerfQuerySuite(report *perfReport, ctx perfQueryContext, printf perfPrin
 func boltPerfQueryOps(ctx perfQueryContext) []perfQueryOp {
 	return []perfQueryOp{
 		boltPerfOpMountTimestamps(ctx),
+		boltPerfOpTreeWhereColdThenCached(ctx),
 		boltPerfOpTreeDirInfo(ctx),
 		boltPerfOpTreeDiskTreeEndpoint(ctx),
 		boltPerfOpTreeWhere(ctx),
@@ -818,10 +831,31 @@ func deriveMountPathFromDatasetDirName(dirName string) (string, error) {
 	return mountPath, nil
 }
 
+func boltPerfOpTreeWhereColdThenCached(ctx perfQueryContext) perfQueryOp {
+	return perfQueryOp{
+		name: "tree_where_cold_then_cached",
+		inputs: map[string]any{
+			perfQueryInputDir:            ctx.queryDir,
+			perfQueryInputAge:            int(db.DGUTAgeAll),
+			perfQueryInputSplits:         boltPerf.splits,
+			perfQueryInputCacheScope:     "same_provider_cold_then_warm",
+			perfQueryInputDurationSource: "wall",
+		},
+		op: func() error {
+			filter := &db.Filter{Age: db.DGUTAgeAll}
+			splitFn := split.SplitsToSplitFn(boltPerf.splits)
+			_, err := ctx.tree.Where(ctx.queryDir, filter, splitFn)
+
+			return err
+		},
+		skipWarmup: true,
+	}
+}
+
 func boltPerfOpTreeDirInfo(ctx perfQueryContext) perfQueryOp {
 	return perfQueryOp{
 		name:   "tree_dirinfo",
-		inputs: map[string]any{"dir": ctx.queryDir, "age": int(db.DGUTAgeAll)},
+		inputs: map[string]any{perfQueryInputDir: ctx.queryDir, perfQueryInputAge: int(db.DGUTAgeAll)},
 		op: func() error {
 			filter := &db.Filter{Age: db.DGUTAgeAll}
 			_, err := ctx.tree.DirInfo(ctx.queryDir, filter)
@@ -834,7 +868,7 @@ func boltPerfOpTreeDirInfo(ctx perfQueryContext) perfQueryOp {
 func boltPerfOpTreeDiskTreeEndpoint(ctx perfQueryContext) perfQueryOp {
 	return perfQueryOp{
 		name:   "tree_disktree_endpoint",
-		inputs: map[string]any{"dir": ctx.queryDir, "age": int(db.DGUTAgeAll)},
+		inputs: map[string]any{perfQueryInputDir: ctx.queryDir, perfQueryInputAge: int(db.DGUTAgeAll)},
 		op: func() error {
 			filter := &db.Filter{Age: db.DGUTAgeAll}
 
@@ -859,9 +893,9 @@ func boltPerfOpTreeWhere(ctx perfQueryContext) perfQueryOp {
 	return perfQueryOp{
 		name: "tree_where",
 		inputs: map[string]any{
-			"dir":    ctx.queryDir,
-			"age":    int(db.DGUTAgeAll),
-			"splits": boltPerf.splits,
+			perfQueryInputDir:    ctx.queryDir,
+			perfQueryInputAge:    int(db.DGUTAgeAll),
+			perfQueryInputSplits: boltPerf.splits,
 		},
 		op: func() error {
 			filter := &db.Filter{Age: db.DGUTAgeAll}
@@ -876,7 +910,7 @@ func boltPerfOpTreeWhere(ctx perfQueryContext) perfQueryOp {
 func boltPerfOpBasedirsGroupUsage(ctx perfQueryContext) perfQueryOp {
 	return perfQueryOp{
 		name:   "basedirs_group_usage",
-		inputs: map[string]any{"age": int(db.DGUTAgeAll)},
+		inputs: map[string]any{perfQueryInputAge: int(db.DGUTAgeAll)},
 		op: func() error {
 			_, err := ctx.bd.GroupUsage(db.DGUTAgeAll)
 
@@ -888,7 +922,7 @@ func boltPerfOpBasedirsGroupUsage(ctx perfQueryContext) perfQueryOp {
 func boltPerfOpBasedirsUserUsage(ctx perfQueryContext) perfQueryOp {
 	return perfQueryOp{
 		name:   "basedirs_user_usage",
-		inputs: map[string]any{"age": int(db.DGUTAgeAll)},
+		inputs: map[string]any{perfQueryInputAge: int(db.DGUTAgeAll)},
 		op: func() error {
 			_, err := ctx.bd.UserUsage(db.DGUTAgeAll)
 
@@ -901,9 +935,9 @@ func boltPerfOpBasedirsGroupSubdirs(ctx perfQueryContext) perfQueryOp {
 	return perfQueryOp{
 		name: "basedirs_group_subdirs",
 		inputs: map[string]any{
-			"gid":     ctx.ids.gid,
-			"basedir": ctx.ids.groupBD,
-			"age":     int(db.DGUTAgeAll),
+			"gid":                 ctx.ids.gid,
+			perfQueryInputBaseDir: ctx.ids.groupBD,
+			perfQueryInputAge:     int(db.DGUTAgeAll),
 		},
 		op: func() error {
 			_, err := ctx.bd.GroupSubDirs(ctx.ids.gid, ctx.ids.groupBD, db.DGUTAgeAll)
@@ -917,9 +951,9 @@ func boltPerfOpBasedirsUserSubdirs(ctx perfQueryContext) perfQueryOp {
 	return perfQueryOp{
 		name: "basedirs_user_subdirs",
 		inputs: map[string]any{
-			"uid":     ctx.ids.uid,
-			"basedir": ctx.ids.userBD,
-			"age":     int(db.DGUTAgeAll),
+			"uid":                 ctx.ids.uid,
+			perfQueryInputBaseDir: ctx.ids.userBD,
+			perfQueryInputAge:     int(db.DGUTAgeAll),
 		},
 		op: func() error {
 			_, err := ctx.bd.UserSubDirs(ctx.ids.uid, ctx.ids.userBD, db.DGUTAgeAll)
@@ -995,9 +1029,10 @@ func percentileMS(values []float64, p float64) float64 {
 }
 
 type perfQueryOp struct {
-	name   string
-	inputs map[string]any
-	op     func() error
+	name       string
+	inputs     map[string]any
+	op         func() error
+	skipWarmup bool
 }
 
 // perfOperation represents a single measured operation in a perf report.

@@ -53,13 +53,16 @@ const (
 	queryInputDirKey           = "dir"
 	queryInputDurationSource   = "duration_source"
 	queryInputCacheScope       = "cache_scope"
+	queryInputSplitsKey        = "splits"
 	queryOpTreeDiskTreeEndName = "tree_disktree_endpoint"
 	queryOpTreeDiskTreeNewName = "tree_disktree_endpoint_new_dirs"
 	queryOpTreeDirInfoName     = "tree_dirinfo"
+	queryOpTreeWhereColdName   = "tree_where_cold_then_cached"
 	queryOpTreeWhereFreshName  = "tree_where_fresh_provider"
 	queryOpTreeWhereName       = "tree_where"
 	queryScopeFreshProvider    = "fresh_provider_per_repeat"
 	queryScopeNewDirEachRepeat = "new_directory_each_repeat"
+	queryScopeSameProviderCold = "same_provider_cold_then_warm"
 	queryScopeSameProviderDir  = "same_provider_same_dir"
 	querySourceClickHouseLog   = "clickhouse_query_log"
 	querySourceWall            = "wall"
@@ -173,6 +176,27 @@ func openQueryContext(api QueryAPI) (queryContext, error) {
 	return qctx, nil
 }
 
+func opTreeWhereColdThenCached(qctx queryContext, splits int) op {
+	return op{
+		name: queryOpTreeWhereColdName,
+		inputs: map[string]any{
+			queryInputDirKey:         qctx.dir,
+			queryInputCacheScope:     queryScopeSameProviderCold,
+			queryInputDurationSource: querySourceWall,
+			queryInputAgeKey:         int(db.DGUTAgeAll),
+			queryInputSplitsKey:      splits,
+		},
+		run: func(_ context.Context) error {
+			filter := &db.Filter{Age: db.DGUTAgeAll}
+			_, err := qctx.provider.Tree().Where(qctx.dir, filter, split.SplitsToSplitFn(splits))
+
+			return err
+		},
+		useWallTime: true,
+		skipWarmup:  true,
+	}
+}
+
 func opTreeDiskTreeEndpointNewDirs(qctx queryContext, opts QueryOptions) op {
 	dirs, fallback := disktreeClickDirs(qctx, opts)
 	timedDirs := dirsForRepeats(dirs, opts.Repeat)
@@ -259,7 +283,7 @@ func opTreeWhere(qctx queryContext, splits int) op {
 			queryInputCacheScope:     queryScopeSameProviderDir,
 			queryInputDurationSource: querySourceClickHouseLog,
 			queryInputAgeKey:         int(db.DGUTAgeAll),
-			"splits":                 splits,
+			queryInputSplitsKey:      splits,
 		},
 		run: func(_ context.Context) error {
 			filter := &db.Filter{Age: db.DGUTAgeAll}
@@ -278,7 +302,7 @@ func opTreeWhereFreshProvider(qctx queryContext, splits int) op {
 			queryInputCacheScope:     queryScopeFreshProvider,
 			queryInputDurationSource: querySourceWall,
 			queryInputAgeKey:         int(db.DGUTAgeAll),
-			"splits":                 splits,
+			queryInputSplitsKey:      splits,
 		},
 		run: func(_ context.Context) error {
 			return runTreeWhereFreshProvider(qctx, splits)
@@ -661,6 +685,7 @@ func runSuite(
 func buildOps(qctx queryContext, opts QueryOptions, printf PrintfFunc) []op {
 	ops := []op{
 		opMountTimestamps(qctx),
+		opTreeWhereColdThenCached(qctx, opts.Splits),
 	}
 
 	if opts.WalkDepth > 0 && opts.WalkLimit > 0 {

@@ -131,9 +131,26 @@ func TestQuerySuiteOps(t *testing.T) {
 			names = append(names, op.name)
 		}
 
+		coldCachedWhereOp := findQuerySuiteTestOp(ops, "tree_where_cold_then_cached")
+		So(coldCachedWhereOp, ShouldNotBeNil)
+		So(coldCachedWhereOp.inputs["dir"], ShouldEqual, querySuiteTestRootDir)
+		So(coldCachedWhereOp.inputs["cache_scope"], ShouldEqual, "same_provider_cold_then_warm")
+		So(coldCachedWhereOp.inputs["duration_source"], ShouldEqual, "wall")
+		So(coldCachedWhereOp.inputs["splits"], ShouldEqual, 4)
+		So(coldCachedWhereOp.skipWarmup, ShouldBeTrue)
+
 		So(names, ShouldContain, "tree_disktree_endpoint")
 		So(names, ShouldContain, "tree_disktree_endpoint_new_dirs")
+		So(names, ShouldContain, "tree_where_cold_then_cached")
 		So(names, ShouldContain, "tree_where_fresh_provider")
+		So(querySuiteTestOpIndex(names, "tree_where_cold_then_cached"), ShouldBeLessThan,
+			querySuiteTestOpIndex(names, "tree_disktree_endpoint_new_dirs"))
+		So(querySuiteTestOpIndex(names, "tree_where_cold_then_cached"), ShouldBeLessThan,
+			querySuiteTestOpIndex(names, "tree_dirinfo"))
+		So(querySuiteTestOpIndex(names, "tree_where_cold_then_cached"), ShouldBeLessThan,
+			querySuiteTestOpIndex(names, "tree_disktree_endpoint"))
+		So(querySuiteTestOpIndex(names, "tree_where_cold_then_cached"), ShouldBeLessThan,
+			querySuiteTestOpIndex(names, "tree_where"))
 
 		newDirsOp := findQuerySuiteTestOp(ops, "tree_disktree_endpoint_new_dirs")
 		So(newDirsOp, ShouldNotBeNil)
@@ -261,4 +278,14 @@ func findQuerySuiteTestOp(ops []querySuiteOp, name string) *querySuiteOp {
 	}
 
 	return nil
+}
+
+func querySuiteTestOpIndex(names []string, name string) int {
+	for i, candidate := range names {
+		if candidate == name {
+			return i
+		}
+	}
+
+	return -1
 }

@@ -27,6 +27,9 @@
 package clickhouse
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"slices"
 	"sync"
 
 	"github.com/wtsi-hgi/wrstat-ui/db"
@@ -35,7 +38,10 @@ import (
 const (
 	treeChildrenCacheMaxEntries = 4096
 	treeDGUTACacheMaxEntries    = 8192
+	treeQueryCacheMaxNamespaces = 16
 )
+
+var sharedTreeQueryCaches = newTreeQueryCacheRegistry() //nolint:gochecknoglobals // process-wide provider cache
 
 type treeCacheKey struct {
 	mountPath  string
@@ -59,6 +65,10 @@ type treeQueryCache struct {
 
 	dgutas     map[treeCacheKey]db.GUTAs
 	dgutaOrder []treeCacheKey
+}
+
+func treeQueryCacheForConfig(cfg Config) *treeQueryCache {
+	return sharedTreeQueryCaches.cache(treeQueryCacheNamespace(cfg))
 }
 
 func newTreeQueryCache() *treeQueryCache {
@@ -159,4 +169,63 @@ func (c *treeQueryCache) evictOldestGUTAs() {
 		c.dgutaOrder = c.dgutaOrder[1:]
 		delete(c.dgutas, oldest)
 	}
+}
+
+type treeQueryCacheRegistry struct {
+	mu sync.Mutex
+
+	caches map[string]*treeQueryCache
+	order  []string
+}
+
+func newTreeQueryCacheRegistry() *treeQueryCacheRegistry {
+	return &treeQueryCacheRegistry{
+		caches: make(map[string]*treeQueryCache),
+	}
+}
+
+func (r *treeQueryCacheRegistry) cache(namespace string) *treeQueryCache {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if cache, ok := r.caches[namespace]; ok {
+		r.promote(namespace)
+
+		return cache
+	}
+
+	cache := newTreeQueryCache()
+	r.caches[namespace] = cache
+	r.order = append(r.order, namespace)
+	r.evictOldest()
+
+	return cache
+}
+
+func (r *treeQueryCacheRegistry) promote(namespace string) {
+	idx := slices.Index(r.order, namespace)
+	if idx < 0 || idx == len(r.order)-1 {
+		return
+	}
+
+	r.order = slices.Delete(r.order, idx, idx+1)
+	r.order = append(r.order, namespace)
+}
+
+func (r *treeQueryCacheRegistry) evictOldest() {
+	for len(r.order) > treeQueryCacheMaxNamespaces {
+		oldest := r.order[0]
+		r.order = r.order[1:]
+		delete(r.caches, oldest)
+	}
+}
+
+func resetSharedTreeQueryCachesForTesting() {
+	sharedTreeQueryCaches = newTreeQueryCacheRegistry()
+}
+
+func treeQueryCacheNamespace(cfg Config) string {
+	hash := sha256.Sum256([]byte(cfg.DSN + "\x00" + cfg.Database))
+
+	return hex.EncodeToString(hash[:])
 }

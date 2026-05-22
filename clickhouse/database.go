@@ -47,8 +47,6 @@ const (
 	dgutaInitialCap                    = 8
 	dirsHaveChildrenSummaryFanoutLimit = 16
 	queryScopeArgs                     = 2
-	whereSingleMountBaseArgs           = 3
-	whereAncestorBaseArgs              = 2
 
 	childrenQuery = "SELECT DISTINCT child FROM wrstat_children " +
 		"PREWHERE mount_path = ? AND snapshot_id = ? AND parent_dir = ? " +
@@ -145,42 +143,6 @@ const (
 		"GROUP BY c.parent_dir " +
 		"ORDER BY c.parent_dir ASC"
 
-	whereSubtreeSummarySelect = "SELECT dir, " +
-		"arraySort(groupUniqArray(uid)) AS uids, " +
-		"arraySort(groupUniqArray(gid)) AS gids, " +
-		"toUInt16(groupBitOr(ft)) AS file_type, " +
-		"sum(count) AS total_count, " +
-		"sum(size) AS total_size, " +
-		"minIf(atime_min, atime_min != 0) AS atime_min, " +
-		"max(mtime_max) AS mtime_max, " +
-		"arrayReduce('sumForEach', groupArray(atime_buckets)) AS atime_buckets, " +
-		"arrayReduce('sumForEach', groupArray(mtime_buckets)) AS mtime_buckets "
-
-	whereSubtreeSingleMountQuery = whereSubtreeSummarySelect +
-		"FROM wrstat_dguta " +
-		"PREWHERE mount_path = ? AND snapshot_id = ? " +
-		"WHERE startsWith(dir, ?) %s " +
-		"GROUP BY dir HAVING total_count > 0 ORDER BY dir ASC"
-
-	whereSubtreeAncestorQuery = "WITH active AS (" +
-		"SELECT mount_path, snapshot_id, updated_at " +
-		"FROM wrstat_mounts_active " +
-		"WHERE startsWith(mount_path, ?)" +
-		") " +
-		whereSubtreeSummarySelect +
-		", max(a.updated_at) AS updated_at " +
-		"FROM wrstat_dguta d " +
-		"ANY INNER JOIN active a " +
-		"ON d.mount_path = a.mount_path " +
-		"AND d.snapshot_id = a.snapshot_id " +
-		"WHERE startsWith(d.dir, ?) %s " +
-		"GROUP BY d.dir HAVING total_count > 0 ORDER BY dir ASC"
-
-	whereSubtreeAncestorSnapshotQuery = whereSubtreeSummarySelect +
-		"FROM wrstat_dguta d " +
-		"WHERE startsWith(d.dir, ?) AND %s %s " +
-		"GROUP BY d.dir HAVING total_count > 0 ORDER BY dir ASC"
-
 	infoDGUTASnapshotQuery = "SELECT " +
 		"uniqExact(dir) AS num_dirs, " +
 		"count() AS num_dgutas " +
@@ -238,6 +200,13 @@ func childWhereTraversalItems(children []*db.DirSummary, step int) []whereTraver
 	return items
 }
 
+func (t *whereTraversal) summaryDirsForInfos(parentDirs []string) []string {
+	dirs := make([]string, 0, len(parentDirs))
+	dirs = append(dirs, parentDirs...)
+
+	return append(dirs, t.childSummaryDirs(parentDirs)...)
+}
+
 type clickHouseDatabase struct {
 	cfg  Config
 	conn ch.Conn
@@ -268,7 +237,7 @@ func newClickHouseDatabaseWithSnapshot(
 		mountPoints:    mountPoints,
 		mountPointsErr: err,
 		snapshot:       snapshot,
-		treeCache:      newTreeQueryCache(),
+		treeCache:      treeQueryCacheForConfig(cfg),
 	}
 }
 
@@ -336,17 +305,9 @@ func (d *clickHouseDatabase) Where(
 	filter = defaultWhereFilter(filter)
 	queryDir := ensureTrailingSlash(dir)
 
-	if recurseCount(dir) <= 1 {
-		return d.whereFromSubtree(dir, queryDir, filter, recurseCount)
-	}
-
-	traversal, fallbackToSubtree, err := d.whereTraversalFor(queryDir, filter)
+	traversal, err := d.whereTraversalFor(queryDir, filter)
 	if err != nil {
 		return nil, err
-	}
-
-	if fallbackToSubtree {
-		return d.whereFromSubtree(dir, queryDir, filter, recurseCount)
 	}
 
 	return d.whereFromTraversal(dir, filter, recurseCount, traversal)
@@ -384,27 +345,27 @@ func dirSummaryWithModtime(gutas db.GUTAs, filter *db.Filter, updatedAt time.Tim
 func (d *clickHouseDatabase) whereTraversalFor(
 	queryDir string,
 	filter *db.Filter,
-) (*whereTraversal, bool, error) {
+) (*whereTraversal, error) {
 	mountPath, ok, err := d.resolveMountScope(queryDir)
 	if err != nil {
-		return nil, false, err
+		return nil, err
 	}
 
+	traversal := newWhereTraversal(d, filter)
 	if !ok {
-		return nil, true, nil
+		return traversal, nil
 	}
 
 	mount, found, err := d.activeMountForMountPath(mountPath)
 	if err != nil {
-		return nil, false, err
+		return nil, err
 	}
 
-	traversal := newWhereTraversal(d, filter)
 	if found {
 		traversal.mount = &mount
 	}
 
-	return traversal, false, nil
+	return traversal, nil
 }
 
 func newWhereTraversal(
@@ -442,37 +403,6 @@ func (d *clickHouseDatabase) whereFromTraversal(
 	sort.Sort(dcss)
 
 	return dcss, nil
-}
-
-func (d *clickHouseDatabase) whereFromSubtree(
-	dir string,
-	queryDir string,
-	filter *db.Filter,
-	recurseCount func(string) int,
-) (db.DCSs, error) {
-	summaries, err := d.whereSubtreeSummaries(queryDir, filter)
-	if err != nil {
-		return nil, err
-	}
-
-	if summaries[queryDir] == nil {
-		sum, err := d.DirInfo(dir, filter)
-		if err != nil || sum == nil {
-			return nil, err
-		}
-	}
-
-	dcss := newWhereSubtree(summaries).where(dir, recurseCount)
-	sort.Sort(dcss)
-
-	return dcss, nil
-}
-
-func newWhereSubtree(summaries map[string]*db.DirSummary) *whereSubtree {
-	return &whereSubtree{
-		summaries: summaries,
-		children:  whereSubtreeChildren(summaries),
-	}
 }
 
 func (d *clickHouseDatabase) dirInfoAncestor(
@@ -582,171 +512,6 @@ func (d *clickHouseDatabase) DirsHaveChildren(
 	}
 
 	return result, nil
-}
-
-func (d *clickHouseDatabase) whereSubtreeSummaries(
-	queryDir string,
-	filter *db.Filter,
-) (map[string]*db.DirSummary, error) {
-	mountPath, ok, err := d.resolveMountScope(queryDir)
-	if err != nil {
-		return nil, err
-	}
-
-	if !ok {
-		return d.whereSubtreeAncestorSummaries(queryDir, filter)
-	}
-
-	mount, found, err := d.activeMountForMountPath(mountPath)
-	if err != nil || !found {
-		return nil, err
-	}
-
-	return d.whereSubtreeSingleMountSummaries(mount, queryDir, filter)
-}
-
-func (d *clickHouseDatabase) whereSubtreeSingleMountSummaries(
-	mount activeMount,
-	queryDir string,
-	filter *db.Filter,
-) (map[string]*db.DirSummary, error) {
-	filterClause, filterArgs := whereFilterClause(filter, "")
-	query := fmt.Sprintf(whereSubtreeSingleMountQuery, filterClause)
-	args := make([]any, 0, whereSingleMountBaseArgs+len(filterArgs))
-	args = append(args, mount.mountPath, mount.snapshotID, queryDir)
-	args = append(args, filterArgs...)
-
-	ctx, cancel := configQueryContext(d.cfg)
-	defer cancel()
-
-	return d.queryWhereSubtree(ctx, query, false, mount.updatedAt, filter.Age, args...)
-}
-
-func whereFilterClause(filter *db.Filter, columnPrefix string) (string, []any) {
-	var b strings.Builder
-
-	args := make([]any, 0, 1)
-
-	appendIDFilter(&b, &args, columnPrefix+"gid", filter.GIDs)
-	appendIDFilter(&b, &args, columnPrefix+"uid", filter.UIDs)
-	appendFTFilter(&b, &args, columnPrefix+"ft", filter.FT)
-
-	b.WriteString(" AND ")
-	b.WriteString(columnPrefix)
-	b.WriteString("age = ?")
-
-	args = append(args, uint8(filter.Age))
-
-	return b.String(), args
-}
-
-func (d *clickHouseDatabase) whereSubtreeAncestorSummaries(
-	queryDir string,
-	filter *db.Filter,
-) (map[string]*db.DirSummary, error) {
-	if d.snapshot != nil {
-		return d.whereSubtreeSnapshotAncestorSummaries(queryDir, filter)
-	}
-
-	filterClause, filterArgs := whereFilterClause(filter, "d.")
-	query := fmt.Sprintf(whereSubtreeAncestorQuery, filterClause)
-	args := make([]any, 0, whereAncestorBaseArgs+len(filterArgs))
-	args = append(args, queryDir, queryDir)
-	args = append(args, filterArgs...)
-
-	ctx, cancel := configQueryContext(d.cfg)
-	defer cancel()
-
-	return d.queryWhereSubtree(ctx, query, true, time.Time{}, filter.Age, args...)
-}
-
-func (d *clickHouseDatabase) whereSubtreeSnapshotAncestorSummaries(
-	queryDir string,
-	filter *db.Filter,
-) (map[string]*db.DirSummary, error) {
-	mounts := d.snapshot.under(queryDir)
-	updatedAt, _ := d.snapshot.maxUpdatedAt(queryDir)
-
-	condition, conditionArgs := activeMountsTupleCondition(
-		"d.mount_path",
-		"d.snapshot_id",
-		mounts,
-	)
-	filterClause, filterArgs := whereFilterClause(filter, "d.")
-	query := fmt.Sprintf(whereSubtreeAncestorSnapshotQuery, condition, filterClause)
-	args := make([]any, 0, 1+len(conditionArgs)+len(filterArgs))
-	args = append(args, queryDir)
-	args = append(args, conditionArgs...)
-	args = append(args, filterArgs...)
-
-	ctx, cancel := configQueryContext(d.cfg)
-	defer cancel()
-
-	summaries, err := d.queryWhereSubtree(ctx, query, false, time.Time{}, filter.Age, args...)
-	if err != nil {
-		return nil, err
-	}
-
-	applySnapshotWhereModtimes(summaries, mounts, updatedAt)
-
-	return summaries, nil
-}
-
-func applySnapshotWhereModtimes(
-	summaries map[string]*db.DirSummary,
-	mounts []activeMount,
-	defaultUpdatedAt time.Time,
-) {
-	for dir, summary := range summaries {
-		updatedAt := whereUpdatedAtForDir(dir, mounts)
-		if updatedAt.IsZero() {
-			updatedAt = defaultUpdatedAt.UTC()
-		}
-
-		summary.Modtime = updatedAt
-	}
-}
-
-func (d *clickHouseDatabase) queryWhereSubtree(
-	ctx context.Context,
-	query string,
-	scanUpdatedAt bool,
-	updatedAt time.Time,
-	age db.DirGUTAge,
-	args ...any,
-) (map[string]*db.DirSummary, error) {
-	rows, err := d.conn.Query(ctx, query, args...)
-	if err != nil {
-		return nil, fmt.Errorf("clickhouse: failed to query where subtree: %w", err)
-	}
-
-	defer func() { _ = rows.Close() }()
-
-	return scanWhereSubtreeRows(rows, scanUpdatedAt, updatedAt, age)
-}
-
-func scanWhereSubtreeRows(
-	rows rowsScanner,
-	scanUpdatedAt bool,
-	defaultUpdatedAt time.Time,
-	age db.DirGUTAge,
-) (map[string]*db.DirSummary, error) {
-	summaries := make(map[string]*db.DirSummary)
-
-	for rows.Next() {
-		dir, summary, err := scanWhereSubtreeRow(rows, scanUpdatedAt, defaultUpdatedAt, age)
-		if err != nil {
-			return nil, err
-		}
-
-		summaries[dir] = summary
-	}
-
-	if err := rowsErr(rows); err != nil {
-		return nil, fmt.Errorf("clickhouse: where subtree iteration error: %w", err)
-	}
-
-	return summaries, nil
 }
 
 func (d *clickHouseDatabase) childrenForMount(mountPath, snapshotID, parentDir string) ([]string, error) {
@@ -1914,16 +1679,12 @@ func applyWhere0BatchInfos(
 
 func (t *whereTraversal) dirInfos(dirs []string) (map[string]*db.DirInfo, error) {
 	keys := canonicalDirs(dirs)
-	if err := t.loadSummaries(keys); err != nil {
-		return nil, err
-	}
 
 	if err := t.loadChildren(keys); err != nil {
 		return nil, err
 	}
 
-	childKeys := t.childSummaryDirs(keys)
-	if err := t.loadSummaries(childKeys); err != nil {
+	if err := t.loadSummaries(t.summaryDirsForInfos(keys)); err != nil {
 		return nil, err
 	}
 
@@ -2300,66 +2061,6 @@ func scanParentDirSet(rows rowsScanner) (map[string]bool, error) {
 	return parents, nil
 }
 
-type whereSubtree struct {
-	summaries map[string]*db.DirSummary
-	children  map[string][]string
-}
-
-func (s *whereSubtree) where(dir string, recurseCount func(string) int) db.DCSs {
-	return s.recurseWhere(dir, recurseCount, 0)
-}
-
-func (s *whereSubtree) recurseWhere(dir string, recurseCount func(string) int, step int) db.DCSs {
-	di := s.where0(dir)
-	if di == nil {
-		return nil
-	}
-
-	dcss := db.DCSs{di.Current}
-	if recurseCount(dir) <= step {
-		return dcss
-	}
-
-	for _, dcs := range di.Children {
-		dcss = append(dcss, s.recurseWhere(dcs.Dir, recurseCount, step+1)...)
-	}
-
-	return dcss
-}
-
-func (s *whereSubtree) where0(dir string) *db.DirInfo {
-	di := s.dirInfo(dir)
-	if di == nil {
-		return nil
-	}
-
-	for di.IsSameAsChild() {
-		di = s.dirInfo(di.Children[0].Dir)
-	}
-
-	return di
-}
-
-func (s *whereSubtree) dirInfo(dir string) *db.DirInfo {
-	key := ensureTrailingSlash(dir)
-
-	current := s.summaryForDir(key, dir)
-	if current == nil {
-		return nil
-	}
-
-	di := &db.DirInfo{Current: current}
-
-	for _, child := range s.children[key] {
-		childSummary := s.summaryForDir(child, whereDisplayDir(child))
-		if childSummary != nil && childSummary.Count > 0 {
-			di.Children = append(di.Children, childSummary)
-		}
-	}
-
-	return di
-}
-
 func whereDisplayDir(dir string) string {
 	if dir == "/" {
 		return dir
@@ -2368,35 +2069,9 @@ func whereDisplayDir(dir string) string {
 	return strings.TrimSuffix(dir, "/")
 }
 
-func (s *whereSubtree) summaryForDir(key, displayDir string) *db.DirSummary {
-	summary := s.summaries[key]
-	if summary == nil {
-		return nil
-	}
-
-	cp := *summary
-	cp.Dir = displayDir
-
-	return &cp
-}
-
 type rowsScanner interface {
 	Next() bool
 	Scan(dest ...any) error
-}
-
-func scanWhereSubtreeRow(
-	rows rowsScanner,
-	scanUpdatedAt bool,
-	updatedAt time.Time,
-	age db.DirGUTAge,
-) (string, *db.DirSummary, error) {
-	var scanned whereSubtreeScanned
-	if err := scanned.scanFrom(rows, scanUpdatedAt, updatedAt); err != nil {
-		return "", nil, err
-	}
-
-	return scanned.dir, scanned.summary(age), nil
 }
 
 func scanDGUTARow(rows rowsScanner) (*db.GUTA, error) {
@@ -2419,63 +2094,6 @@ func scanDirDGUTARow(rows rowsScanner) (string, *db.GUTA, error) {
 	}
 
 	return dir, s.guta(), nil
-}
-
-type whereSubtreeScanned struct {
-	dir          string
-	uids, gids   []uint32
-	ft           uint16
-	count, size  uint64
-	atime, mtime int64
-	atimeBuckets []uint64
-	mtimeBuckets []uint64
-	updatedAt    time.Time
-}
-
-func (s *whereSubtreeScanned) scanFrom(
-	rows rowsScanner,
-	scanUpdatedAt bool,
-	updatedAt time.Time,
-) error {
-	s.updatedAt = updatedAt
-
-	dest := []any{
-		&s.dir,
-		&s.uids,
-		&s.gids,
-		&s.ft,
-		&s.count,
-		&s.size,
-		&s.atime,
-		&s.mtime,
-		&s.atimeBuckets,
-		&s.mtimeBuckets,
-	}
-	if scanUpdatedAt {
-		dest = append(dest, &s.updatedAt)
-	}
-
-	if err := rows.Scan(dest...); err != nil {
-		return fmt.Errorf("clickhouse: failed to scan where subtree: %w", err)
-	}
-
-	return nil
-}
-
-func (s *whereSubtreeScanned) summary(age db.DirGUTAge) *db.DirSummary {
-	return &db.DirSummary{
-		Count:       s.count,
-		Size:        s.size,
-		Atime:       time.Unix(s.atime, 0),
-		CommonATime: summary.MostCommonBucket(sliceToAgeBuckets(s.atimeBuckets)),
-		Mtime:       time.Unix(s.mtime, 0),
-		CommonMTime: summary.MostCommonBucket(sliceToAgeBuckets(s.mtimeBuckets)),
-		UIDs:        s.uids,
-		GIDs:        s.gids,
-		FT:          db.DirGUTAFileType(s.ft),
-		Age:         age,
-		Modtime:     s.updatedAt.UTC(),
-	}
 }
 
 func (s *dgutaScanned) guta() *db.GUTA {
@@ -2636,22 +2254,6 @@ func applyWhere0Info(
 	pending[i] = false
 }
 
-func whereUpdatedAtForDir(dir string, mounts []activeMount) time.Time {
-	var updatedAt time.Time
-
-	for _, mount := range mounts {
-		if !strings.HasPrefix(dir, mount.mountPath) && !strings.HasPrefix(mount.mountPath, dir) {
-			continue
-		}
-
-		if mount.updatedAt.After(updatedAt) {
-			updatedAt = mount.updatedAt.UTC()
-		}
-	}
-
-	return updatedAt
-}
-
 func appendIDFilter(
 	b *strings.Builder,
 	args *[]any,
@@ -2691,43 +2293,6 @@ func placeholders(n int) string {
 	}
 
 	return b.String()
-}
-
-func whereSubtreeChildren(summaries map[string]*db.DirSummary) map[string][]string {
-	children := make(map[string][]string)
-
-	for dir := range summaries {
-		parent, ok := whereParentDir(dir)
-		if !ok {
-			continue
-		}
-
-		children[parent] = append(children[parent], dir)
-	}
-
-	for parent := range children {
-		sort.Strings(children[parent])
-	}
-
-	return children
-}
-
-func whereParentDir(dir string) (string, bool) {
-	trimmed := strings.TrimSuffix(dir, "/")
-	if trimmed == "" {
-		return "", false
-	}
-
-	idx := strings.LastIndex(trimmed, "/")
-	if idx < 0 {
-		return "", false
-	}
-
-	if idx == 0 {
-		return "/", true
-	}
-
-	return trimmed[:idx+1], true
 }
 
 func infoCountToInt(name string, v uint64) (int, error) {

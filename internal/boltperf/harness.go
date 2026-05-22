@@ -61,15 +61,17 @@ const (
 	dirPickMaxCount      = 20000
 	dirPickMaxIterations = 128
 
-	queryInputAgeKey         = "age"
-	queryInputBaseDirKey     = "basedir"
-	queryInputCacheScope     = "cache_scope"
-	queryInputDirKey         = "dir"
-	queryInputDurationSource = "duration_source"
-	queryScopeFreshProvider  = "fresh_provider_per_repeat"
-	queryScopeNewDir         = "new_directory_each_repeat"
-	queryScopeSameProvider   = "same_provider_same_dir"
-	querySourceWall          = "wall"
+	queryInputAgeKey           = "age"
+	queryInputBaseDirKey       = "basedir"
+	queryInputCacheScope       = "cache_scope"
+	queryInputDirKey           = "dir"
+	queryInputDurationSource   = "duration_source"
+	queryInputSplitsKey        = "splits"
+	queryScopeFreshProvider    = "fresh_provider_per_repeat"
+	queryScopeNewDir           = "new_directory_each_repeat"
+	queryScopeSameProviderCold = "same_provider_cold_then_warm"
+	queryScopeSameProvider     = "same_provider_same_dir"
+	querySourceWall            = "wall"
 )
 
 var (
@@ -741,6 +743,7 @@ func buildQuerySuiteOps(ctx queryContext, opts QueryOptions) []querySuiteOp {
 			inputs: map[string]any{"datasets": len(ctx.datasetDirs)},
 			op:     func() error { return opMountTimestamps(ctx) },
 		},
+		opTreeWhereColdThenCached(ctx, opts.Splits),
 	}
 
 	if opts.WalkDepth > 0 && opts.WalkLimit > 0 {
@@ -773,7 +776,7 @@ func buildQuerySuiteOps(ctx queryContext, opts QueryOptions) []querySuiteOp {
 			inputs: map[string]any{
 				queryInputDirKey:         ctx.queryDir,
 				queryInputAgeKey:         int(db.DGUTAgeAll),
-				"splits":                 opts.Splits,
+				queryInputSplitsKey:      opts.Splits,
 				queryInputCacheScope:     queryScopeSameProvider,
 				queryInputDurationSource: querySourceWall,
 			},
@@ -784,7 +787,7 @@ func buildQuerySuiteOps(ctx queryContext, opts QueryOptions) []querySuiteOp {
 			inputs: map[string]any{
 				queryInputDirKey:         ctx.queryDir,
 				queryInputAgeKey:         int(db.DGUTAgeAll),
-				"splits":                 opts.Splits,
+				queryInputSplitsKey:      opts.Splits,
 				queryInputCacheScope:     queryScopeFreshProvider,
 				queryInputDurationSource: querySourceWall,
 			},
@@ -845,6 +848,21 @@ func opMountTimestamps(ctx queryContext) error {
 	}
 
 	return nil
+}
+
+func opTreeWhereColdThenCached(ctx queryContext, splits int) querySuiteOp {
+	return querySuiteOp{
+		name: "tree_where_cold_then_cached",
+		inputs: map[string]any{
+			queryInputDirKey:         ctx.queryDir,
+			queryInputAgeKey:         int(db.DGUTAgeAll),
+			queryInputSplitsKey:      splits,
+			queryInputCacheScope:     queryScopeSameProviderCold,
+			queryInputDurationSource: querySourceWall,
+		},
+		op:         func() error { return opTreeWhere(ctx, splits) },
+		skipWarmup: true,
+	}
 }
 
 func opTreeDiskTreeEndpointNewDirs(ctx queryContext, opts QueryOptions) querySuiteOp {
