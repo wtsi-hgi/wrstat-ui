@@ -247,6 +247,8 @@ type clickHouseDatabase struct {
 
 	snapshot *activeMountsSnapshot
 	closed   atomic.Bool
+
+	treeCache *treeQueryCache
 }
 
 func newClickHouseDatabase(cfg Config, conn ch.Conn) *clickHouseDatabase {
@@ -266,6 +268,7 @@ func newClickHouseDatabaseWithSnapshot(
 		mountPoints:    mountPoints,
 		mountPointsErr: err,
 		snapshot:       snapshot,
+		treeCache:      newTreeQueryCache(),
 	}
 }
 
@@ -747,10 +750,22 @@ func scanWhereSubtreeRows(
 }
 
 func (d *clickHouseDatabase) childrenForMount(mountPath, snapshotID, parentDir string) ([]string, error) {
+	key := newTreeCacheKey(mountPath, snapshotID, parentDir)
+	if children, ok := d.treeCache.getChildren(key); ok {
+		return children, nil
+	}
+
 	ctx, cancel := configQueryContext(d.cfg)
 	defer cancel()
 
-	return d.queryChildren(ctx, childrenQuery, "children", mountPath, snapshotID, parentDir)
+	children, err := d.queryChildren(ctx, childrenQuery, "children", mountPath, snapshotID, parentDir)
+	if err != nil {
+		return nil, err
+	}
+
+	d.treeCache.putChildren(key, children)
+
+	return cloneStrings(children), nil
 }
 
 func (d *clickHouseDatabase) addDirInfoGroups(
@@ -1437,10 +1452,22 @@ func (d *clickHouseDatabase) ensureOpen() error {
 func (d *clickHouseDatabase) gutasForDir(
 	mountPath, snapshotID, dir string,
 ) (db.GUTAs, error) {
+	key := newTreeCacheKey(mountPath, snapshotID, dir)
+	if gutas, ok := d.treeCache.getGUTAs(key); ok {
+		return gutas, nil
+	}
+
 	ctx, cancel := configQueryContext(d.cfg)
 	defer cancel()
 
-	return d.queryGUTAs(ctx, "dguta", dgutaQuery, mountPath, snapshotID, dir)
+	gutas, err := d.queryGUTAs(ctx, "dguta", dgutaQuery, mountPath, snapshotID, dir)
+	if err != nil {
+		return nil, err
+	}
+
+	d.treeCache.putGUTAs(key, gutas)
+
+	return cloneGUTAs(gutas), nil
 }
 
 func (d *clickHouseDatabase) gutasForDirs(
@@ -1451,6 +1478,62 @@ func (d *clickHouseDatabase) gutasForDirs(
 		return map[string]db.GUTAs{}, nil
 	}
 
+	result, missing := d.cachedGUTAsForDirs(mountPath, snapshotID, dirs)
+	if len(missing) == 0 {
+		return result, nil
+	}
+
+	queried, err := d.queryGUTAsForDirs(mountPath, snapshotID, missing)
+	if err != nil {
+		return nil, err
+	}
+
+	d.addQueriedGUTAsForDirs(result, mountPath, snapshotID, missing, queried)
+
+	return result, nil
+}
+
+func (d *clickHouseDatabase) cachedGUTAsForDirs(
+	mountPath, snapshotID string,
+	dirs []string,
+) (map[string]db.GUTAs, []string) {
+	result := make(map[string]db.GUTAs, len(dirs))
+	missing := make([]string, 0, len(dirs))
+	seen := make(map[string]bool, len(dirs))
+
+	for _, dir := range dirs {
+		key := newTreeCacheKey(mountPath, snapshotID, dir)
+		if d.addCachedGUTAsForDir(result, key) || seen[key.dir] {
+			continue
+		}
+
+		missing = append(missing, key.dir)
+		seen[key.dir] = true
+	}
+
+	return result, missing
+}
+
+func (d *clickHouseDatabase) addCachedGUTAsForDir(
+	result map[string]db.GUTAs,
+	key treeCacheKey,
+) bool {
+	gutas, ok := d.treeCache.getGUTAs(key)
+	if !ok {
+		return false
+	}
+
+	if len(gutas) > 0 {
+		result[key.dir] = gutas
+	}
+
+	return true
+}
+
+func (d *clickHouseDatabase) queryGUTAsForDirs(
+	mountPath, snapshotID string,
+	dirs []string,
+) (map[string]db.GUTAs, error) {
 	ctx, cancel := configQueryContext(d.cfg)
 	defer cancel()
 
@@ -1495,6 +1578,23 @@ func scanDGUTARowsByDir(rows rowsScanner) (map[string]db.GUTAs, error) {
 	}
 
 	return gutasByDir, nil
+}
+
+func (d *clickHouseDatabase) addQueriedGUTAsForDirs(
+	result map[string]db.GUTAs,
+	mountPath string,
+	snapshotID string,
+	missing []string,
+	queried map[string]db.GUTAs,
+) {
+	for _, dir := range missing {
+		gutas := queried[dir]
+		d.treeCache.putGUTAs(newTreeCacheKey(mountPath, snapshotID, dir), gutas)
+
+		if len(gutas) > 0 {
+			result[dir] = cloneGUTAs(gutas)
+		}
+	}
 }
 
 func (d *clickHouseDatabase) gutasForAncestor(
@@ -1589,6 +1689,60 @@ func (d *clickHouseDatabase) childrenForParentsMount(
 		return map[string][]string{}, nil
 	}
 
+	result, missing := d.cachedChildrenForParents(mountPath, snapshotID, parentDirs)
+	if len(missing) == 0 {
+		return result, nil
+	}
+
+	queried, err := d.queryChildrenForParentsMount(mountPath, snapshotID, missing)
+	if err != nil {
+		return nil, err
+	}
+
+	d.addQueriedChildrenForParents(result, mountPath, snapshotID, missing, queried)
+
+	return result, nil
+}
+
+func (d *clickHouseDatabase) cachedChildrenForParents(
+	mountPath, snapshotID string,
+	parentDirs []string,
+) (map[string][]string, []string) {
+	result := make(map[string][]string, len(parentDirs))
+	missing := make([]string, 0, len(parentDirs))
+	seen := make(map[string]bool, len(parentDirs))
+
+	for _, parentDir := range parentDirs {
+		key := newTreeCacheKey(mountPath, snapshotID, parentDir)
+		if d.addCachedChildrenForParent(result, key) || seen[key.dir] {
+			continue
+		}
+
+		missing = append(missing, key.dir)
+		seen[key.dir] = true
+	}
+
+	return result, missing
+}
+
+func (d *clickHouseDatabase) addCachedChildrenForParent(
+	result map[string][]string,
+	key treeCacheKey,
+) bool {
+	children, ok := d.treeCache.getChildren(key)
+	if !ok {
+		return false
+	}
+
+	result[key.dir] = children
+
+	return true
+}
+
+func (d *clickHouseDatabase) queryChildrenForParentsMount(
+	mountPath, snapshotID string,
+	parentDirs []string,
+) (map[string][]string, error) {
 	ctx, cancel := configQueryContext(d.cfg)
 	defer cancel()
 
@@ -2059,6 +2213,20 @@ func (t *whereTraversal) summaryForDir(key, displayDir string) *db.DirSummary {
 	cp.Dir = displayDir
 
 	return &cp
+}
+
+func (d *clickHouseDatabase) addQueriedChildrenForParents(
+	result map[string][]string,
+	mountPath string,
+	snapshotID string,
+	missing []string,
+	queried map[string][]string,
+) {
+	for _, parentDir := range missing {
+		children := queried[parentDir]
+		d.treeCache.putChildren(newTreeCacheKey(mountPath, snapshotID, parentDir), children)
+		result[parentDir] = cloneStrings(children)
+	}
 }
 
 func (d *clickHouseDatabase) parentDirsWithMatchingChildrenMount(
