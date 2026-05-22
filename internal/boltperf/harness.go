@@ -60,6 +60,16 @@ const (
 	dirPickMinCount      = 1000
 	dirPickMaxCount      = 20000
 	dirPickMaxIterations = 128
+
+	queryInputAgeKey         = "age"
+	queryInputBaseDirKey     = "basedir"
+	queryInputCacheScope     = "cache_scope"
+	queryInputDirKey         = "dir"
+	queryInputDurationSource = "duration_source"
+	queryScopeFreshProvider  = "fresh_provider_per_repeat"
+	queryScopeNewDir         = "new_directory_each_repeat"
+	queryScopeSameProvider   = "same_provider_same_dir"
+	querySourceWall          = "wall"
 )
 
 var (
@@ -488,8 +498,11 @@ func buildQueryContext(inputDir string, opts QueryOptions, printf PrintfFunc) (q
 		tree:        tree,
 		mr:          mr,
 		closeFn:     closeFn,
-		queryDir:    queryDir,
-		ids:         ids,
+		openFreshTree: func() (*db.Tree, func() error, error) {
+			return openFreshQueryTree(opts, datasetDir)
+		},
+		queryDir: queryDir,
+		ids:      ids,
 	}, nil
 }
 
@@ -689,9 +702,31 @@ func pickLargestUsage(usages []*basedirs.Usage) *basedirs.Usage {
 	return best
 }
 
+func openFreshQueryTree(opts QueryOptions, datasetDir string) (*db.Tree, func() error, error) {
+	if opts.OpenDatabase == nil {
+		return nil, nil, ErrOpenDatabaseRequired
+	}
+
+	dgutaPath := filepath.Join(datasetDir, dgutaDBsSuffix)
+
+	database, err := opts.OpenDatabase(dgutaPath)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	tree := db.NewTree(database)
+	closeFn := func() error {
+		tree.Close()
+
+		return nil
+	}
+
+	return tree, closeFn, nil
+}
+
 func runQuerySuite(report *Report, ctx queryContext, opts QueryOptions, printf PrintfFunc) error {
 	for _, op := range buildQuerySuiteOps(ctx, opts) {
-		if err := timeAndReportQueryOp(report, opts, printf, op.name, op.inputs, op.op); err != nil {
+		if err := timeAndReportQueryOp(report, opts, printf, op); err != nil {
 			return err
 		}
 	}
@@ -700,65 +735,98 @@ func runQuerySuite(report *Report, ctx queryContext, opts QueryOptions, printf P
 }
 
 func buildQuerySuiteOps(ctx queryContext, opts QueryOptions) []querySuiteOp {
-	return []querySuiteOp{
+	ops := []querySuiteOp{
 		{
 			name:   "mount_timestamps",
 			inputs: map[string]any{"datasets": len(ctx.datasetDirs)},
 			op:     func() error { return opMountTimestamps(ctx) },
 		},
+	}
+
+	if opts.WalkDepth > 0 && opts.WalkLimit > 0 {
+		ops = append(ops, opTreeDiskTreeEndpointNewDirs(ctx, opts))
+	}
+
+	ops = append(ops, []querySuiteOp{
 		{
-			name:   "tree_dirinfo",
-			inputs: map[string]any{"dir": ctx.queryDir, "age": int(db.DGUTAgeAll)},
-			op:     func() error { return opTreeDirInfo(ctx) },
+			name: "tree_dirinfo",
+			inputs: map[string]any{
+				queryInputDirKey:         ctx.queryDir,
+				queryInputAgeKey:         int(db.DGUTAgeAll),
+				queryInputCacheScope:     queryScopeSameProvider,
+				queryInputDurationSource: querySourceWall,
+			},
+			op: func() error { return opTreeDirInfo(ctx) },
 		},
 		{
-			name:   "tree_disktree_endpoint",
-			inputs: map[string]any{"dir": ctx.queryDir, "age": int(db.DGUTAgeAll)},
-			op:     func() error { return opTreeDiskTreeEndpoint(ctx) },
+			name: "tree_disktree_endpoint",
+			inputs: map[string]any{
+				queryInputDirKey:         ctx.queryDir,
+				queryInputAgeKey:         int(db.DGUTAgeAll),
+				queryInputCacheScope:     queryScopeSameProvider,
+				queryInputDurationSource: querySourceWall,
+			},
+			op: func() error { return opTreeDiskTreeEndpoint(ctx) },
 		},
 		{
 			name: "tree_where",
 			inputs: map[string]any{
-				"dir":    ctx.queryDir,
-				"age":    int(db.DGUTAgeAll),
-				"splits": opts.Splits,
+				queryInputDirKey:         ctx.queryDir,
+				queryInputAgeKey:         int(db.DGUTAgeAll),
+				"splits":                 opts.Splits,
+				queryInputCacheScope:     queryScopeSameProvider,
+				queryInputDurationSource: querySourceWall,
 			},
 			op: func() error { return opTreeWhere(ctx, opts.Splits) },
 		},
 		{
+			name: "tree_where_fresh_provider",
+			inputs: map[string]any{
+				queryInputDirKey:         ctx.queryDir,
+				queryInputAgeKey:         int(db.DGUTAgeAll),
+				"splits":                 opts.Splits,
+				queryInputCacheScope:     queryScopeFreshProvider,
+				queryInputDurationSource: querySourceWall,
+			},
+			op:         func() error { return opTreeWhereFreshProvider(ctx, opts.Splits) },
+			skipWarmup: true,
+		},
+		{
 			name:   "basedirs_group_usage",
-			inputs: map[string]any{"age": int(db.DGUTAgeAll)},
+			inputs: map[string]any{queryInputAgeKey: int(db.DGUTAgeAll)},
 			op:     func() error { return opBasedirsGroupUsage(ctx) },
 		},
 		{
 			name:   "basedirs_user_usage",
-			inputs: map[string]any{"age": int(db.DGUTAgeAll)},
+			inputs: map[string]any{queryInputAgeKey: int(db.DGUTAgeAll)},
 			op:     func() error { return opBasedirsUserUsage(ctx) },
 		},
 		{
 			name: "basedirs_group_subdirs",
 			inputs: map[string]any{
-				"gid":     ctx.ids.gid,
-				"basedir": ctx.ids.groupBD,
-				"age":     int(db.DGUTAgeAll),
+				"gid":                ctx.ids.gid,
+				queryInputBaseDirKey: ctx.ids.groupBD,
+				queryInputAgeKey:     int(db.DGUTAgeAll),
 			},
 			op: func() error { return opBasedirsGroupSubDirs(ctx) },
 		},
 		{
 			name: "basedirs_user_subdirs",
 			inputs: map[string]any{
-				"uid":     ctx.ids.uid,
-				"basedir": ctx.ids.userBD,
-				"age":     int(db.DGUTAgeAll),
+				"uid":                ctx.ids.uid,
+				queryInputBaseDirKey: ctx.ids.userBD,
+				queryInputAgeKey:     int(db.DGUTAgeAll),
 			},
 			op: func() error { return opBasedirsUserSubDirs(ctx) },
 		},
 		{
 			name:   "basedirs_history",
-			inputs: map[string]any{"gid": ctx.ids.gid, "basedir": ctx.ids.groupBD},
+			inputs: map[string]any{"gid": ctx.ids.gid, queryInputBaseDirKey: ctx.ids.groupBD},
 			op:     func() error { return opBasedirsHistory(ctx) },
 		},
-	}
+	}...)
+
+	return ops
 }
 
 func opMountTimestamps(ctx queryContext) error {
@@ -779,17 +847,173 @@ func opMountTimestamps(ctx queryContext) error {
 	return nil
 }
 
-func opTreeDirInfo(ctx queryContext) error {
-	filter := &db.Filter{Age: db.DGUTAgeAll}
-	_, err := ctx.tree.DirInfo(ctx.queryDir, filter)
+func opTreeDiskTreeEndpointNewDirs(ctx queryContext, opts QueryOptions) querySuiteOp {
+	dirs, fallback := disktreeClickDirs(ctx, opts)
+	timedDirs := dirsForRepeats(dirs, opts.Repeat)
+	i := 0
 
-	return err
+	return querySuiteOp{
+		name: "tree_disktree_endpoint_new_dirs",
+		inputs: map[string]any{
+			"start_dir":              ctx.queryDir,
+			"dirs":                   timedDirs,
+			"dir_count":              len(timedDirs),
+			"walk_depth":             opts.WalkDepth,
+			"walk_limit":             opts.WalkLimit,
+			"fallback_to_start_dir":  fallback,
+			queryInputCacheScope:     queryScopeNewDir,
+			queryInputDurationSource: querySourceWall,
+			queryInputAgeKey:         int(db.DGUTAgeAll),
+		},
+		op: func() error {
+			if i >= len(timedDirs) {
+				return nil
+			}
+
+			dir := timedDirs[i]
+			i++
+
+			return runTreeDiskTreeEndpoint(ctx.tree, dir)
+		},
+		skipWarmup:        true,
+		hasRepeatOverride: true,
+		repeatOverride:    len(timedDirs),
+	}
 }
 
-func opTreeDiskTreeEndpoint(ctx queryContext) error {
+func disktreeClickDirs(ctx queryContext, opts QueryOptions) ([]string, bool) {
+	dirs := leafDisktreeDirs(collectDisktreeDirsFromFreshTree(ctx, opts.WalkDepth, opts.WalkLimit))
+	if len(dirs) > 0 || opts.WalkLimit <= 0 {
+		return dirs, false
+	}
+
+	return []string{ctx.queryDir}, true
+}
+
+func leafDisktreeDirs(dirs []string) []string {
+	leaves := make([]string, 0, len(dirs))
+
+	for _, dir := range dirs {
+		if hasDisktreeDescendant(dir, dirs) {
+			continue
+		}
+
+		leaves = append(leaves, dir)
+	}
+
+	return leaves
+}
+
+func hasDisktreeDescendant(dir string, dirs []string) bool {
+	for _, candidate := range dirs {
+		if candidate != dir && strings.HasPrefix(candidate, dir) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func collectDisktreeDirsFromFreshTree(ctx queryContext, depth int, limit int) (dirs []string) {
+	if ctx.openFreshTree == nil {
+		return nil
+	}
+
+	tree, closeFn, err := ctx.openFreshTree()
+	if err != nil {
+		return nil
+	}
+
+	if closeFn != nil {
+		defer func() {
+			if err := closeFn(); err != nil {
+				dirs = nil
+			}
+		}()
+	}
+
+	return collectDisktreeDirsFromTree(tree, ctx.queryDir, depth, limit)
+}
+
+func collectDisktreeDirsFromTree(tree *db.Tree, startDir string, depth int, limit int) []string {
+	if tree == nil || depth <= 0 || limit <= 0 {
+		return nil
+	}
+
+	queue := []disktreeWalkDir{{dir: startDir}}
+	seen := map[string]struct{}{startDir: {}}
+	dirs := make([]string, 0, limit)
+
+	for len(queue) > 0 && len(dirs) < limit {
+		item := queue[0]
+		queue = queue[1:]
+
+		if item.depth >= depth {
+			continue
+		}
+
+		children := childDirsFromTree(tree, item.dir)
+		queue = appendDisktreeWalkChildren(queue, &dirs, seen, limit, item.depth+1, children)
+	}
+
+	return dirs
+}
+
+func childDirsFromTree(tree *db.Tree, dir string) []string {
 	filter := &db.Filter{Age: db.DGUTAgeAll}
 
-	di, err := ctx.tree.DirInfo(ctx.queryDir, filter)
+	di, err := tree.DirInfo(dir, filter)
+	if err != nil || di == nil {
+		return nil
+	}
+
+	children := make([]string, 0, len(di.Children))
+	for _, child := range di.Children {
+		children = append(children, child.Dir)
+	}
+
+	return children
+}
+
+func appendDisktreeWalkChildren(
+	queue []disktreeWalkDir,
+	dirs *[]string,
+	seen map[string]struct{},
+	limit int,
+	childDepth int,
+	children []string,
+) []disktreeWalkDir {
+	for _, child := range children {
+		if len(*dirs) >= limit {
+			return queue
+		}
+
+		if _, ok := seen[child]; ok {
+			continue
+		}
+
+		seen[child] = struct{}{}
+		*dirs = append(*dirs, child)
+		queue = append(queue, disktreeWalkDir{dir: child, depth: childDepth})
+	}
+
+	return queue
+}
+
+func dirsForRepeats(dirs []string, repeat int) []string {
+	if repeat <= 0 || len(dirs) == 0 {
+		return nil
+	}
+
+	n := min(repeat, len(dirs))
+
+	return append([]string(nil), dirs[:n]...)
+}
+
+func runTreeDiskTreeEndpoint(tree *db.Tree, dir string) error {
+	filter := &db.Filter{Age: db.DGUTAgeAll}
+
+	di, err := tree.DirInfo(dir, filter)
 	if err != nil || di == nil {
 		return err
 	}
@@ -799,9 +1023,20 @@ func opTreeDiskTreeEndpoint(ctx queryContext) error {
 		childPaths = append(childPaths, child.Dir)
 	}
 
-	_ = ctx.tree.DirsHaveChildren(childPaths, filter)
+	_ = tree.DirsHaveChildren(childPaths, filter)
 
 	return nil
+}
+
+func opTreeDirInfo(ctx queryContext) error {
+	filter := &db.Filter{Age: db.DGUTAgeAll}
+	_, err := ctx.tree.DirInfo(ctx.queryDir, filter)
+
+	return err
+}
+
+func opTreeDiskTreeEndpoint(ctx queryContext) error {
+	return runTreeDiskTreeEndpoint(ctx.tree, ctx.queryDir)
 }
 
 func opTreeWhere(ctx queryContext, splits int) error {
@@ -810,6 +1045,23 @@ func opTreeWhere(ctx queryContext, splits int) error {
 	_, err := ctx.tree.Where(ctx.queryDir, filter, splitFn)
 
 	return err
+}
+
+func opTreeWhereFreshProvider(ctx queryContext, splits int) error {
+	if ctx.openFreshTree == nil {
+		return ErrOpenDatabaseRequired
+	}
+
+	tree, closeFn, err := ctx.openFreshTree()
+	if err != nil {
+		return err
+	}
+
+	filter := &db.Filter{Age: db.DGUTAgeAll}
+	splitFn := split.SplitsToSplitFn(splits)
+	_, whereErr := tree.Where(ctx.queryDir, filter, splitFn)
+
+	return closeAndJoinErr(closeFn, whereErr)
 }
 
 func opBasedirsGroupUsage(ctx queryContext) error {
@@ -846,19 +1098,27 @@ func timeAndReportQueryOp(
 	report *Report,
 	opts QueryOptions,
 	printf PrintfFunc,
-	name string,
-	inputs map[string]any,
-	op func() error,
+	op querySuiteOp,
 ) error {
-	durations, err := measureOperation(opts.Warmup, opts.Repeat, op)
+	warmup := opts.Warmup
+	if op.skipWarmup {
+		warmup = 0
+	}
+
+	repeat := opts.Repeat
+	if op.hasRepeatOverride {
+		repeat = op.repeatOverride
+	}
+
+	durations, err := measureOperation(warmup, repeat, op.op)
 	if err != nil {
 		return err
 	}
 
-	report.AddOperation(name, inputs, durations)
+	report.AddOperation(op.name, op.inputs, durations)
 
 	p50, p95, p99 := PercentilesMS(durations)
-	printf("%s repeats=%d p50_ms=%.3f p95_ms=%.3f p99_ms=%.3f\n", name, len(durations), p50, p95, p99)
+	printf("%s repeats=%d p50_ms=%.3f p95_ms=%.3f p99_ms=%.3f\n", op.name, len(durations), p50, p95, p99)
 
 	return nil
 }
@@ -898,6 +1158,11 @@ func discoverQueryDatasets(inputDir string, printf PrintfFunc) ([]string, string
 	return datasetDirs, datasetDir, nil
 }
 
+type disktreeWalkDir struct {
+	dir   string
+	depth int
+}
+
 // ImportOptions configures the bolt-perf import harness.
 type ImportOptions struct {
 	Backend  string
@@ -922,10 +1187,12 @@ type QueryOptions struct {
 	Mounts  string
 	JSONOut string
 
-	Dir    string
-	Repeat int
-	Warmup int
-	Splits int
+	Dir       string
+	Repeat    int
+	Warmup    int
+	Splits    int
+	WalkDepth int
+	WalkLimit int
 
 	OpenDatabase            func(paths ...string) (db.Database, error)
 	OpenMultiBaseDirsReader func(ownersPath string, dbPaths ...string) (basedirs.Reader, error)
@@ -952,18 +1219,22 @@ type queryIDs struct {
 }
 
 type queryContext struct {
-	datasetDirs []string
-	tree        *db.Tree
-	mr          basedirs.Reader
-	closeFn     func() error
-	queryDir    string
-	ids         queryIDs
+	datasetDirs   []string
+	tree          *db.Tree
+	mr            basedirs.Reader
+	closeFn       func() error
+	openFreshTree func() (*db.Tree, func() error, error)
+	queryDir      string
+	ids           queryIDs
 }
 
 type querySuiteOp struct {
-	name   string
-	inputs map[string]any
-	op     func() error
+	name              string
+	inputs            map[string]any
+	op                func() error
+	skipWarmup        bool
+	hasRepeatOverride bool
+	repeatOverride    int
 }
 
 // lineCountingReader is used to optionally cap stats parsing at a number of lines.

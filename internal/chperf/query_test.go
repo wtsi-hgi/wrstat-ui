@@ -346,6 +346,39 @@ func TestRunOp(t *testing.T) {
 			{MountPath: queryTestNFSTeamPath, UpdatedAt: updatedAtB.Format(time.RFC3339Nano)},
 		})
 	})
+
+	Convey("runOp records wall durations for operations that should include full provider work", t, func() {
+		var runCalls int
+
+		report := boltperf.NewReport("clickhouse", "", 2, 0)
+		qctx := queryContext{inspector: fakeQueryInspector{
+			measure: func(_ context.Context, _ func(context.Context) error) (*QueryMetrics, error) {
+				return nil, errQueryTestMeasure
+			},
+		}}
+
+		err := runOp(
+			&report,
+			qctx,
+			op{
+				name:        "tree_where_fresh_provider",
+				inputs:      map[string]any{},
+				useWallTime: true,
+				run: func(context.Context) error {
+					runCalls++
+
+					return nil
+				},
+			},
+			QueryOptions{Repeat: 2},
+			func(string, ...any) {},
+		)
+
+		So(err, ShouldBeNil)
+		So(runCalls, ShouldEqual, 2)
+		So(report.Operations, ShouldHaveLength, 1)
+		So(report.Operations[0].DurationsMS, ShouldHaveLength, 2)
+	})
 }
 
 func TestBuildQueryContext(t *testing.T) {
@@ -433,14 +466,19 @@ func TestVerifyPlans(t *testing.T) {
 
 type fakeQueryClient struct {
 	rows      []QueryRow
+	rowsByDir map[string][]QueryRow
 	closeHook func() error
 }
 
 func (c *fakeQueryClient) ListDir(
-	context.Context,
-	string,
-	int64,
+	_ context.Context,
+	dir string,
+	_ int64,
 ) ([]QueryRow, error) {
+	if c.rowsByDir != nil {
+		return c.rowsByDir[dir], nil
+	}
+
 	return c.rows, nil
 }
 
@@ -501,6 +539,138 @@ func TestBuildOps(t *testing.T) {
 		So(whereInputs["splits"], ShouldEqual, 2)
 	})
 
+	Convey("buildOps reports cold/new directory and fresh-provider tree coverage", t, func() {
+		qctx := queryContext{
+			provider: fakeMountTimestampsProvider{tree: db.NewTree(newQueryOpTestDB())},
+			client: &fakeQueryClient{rowsByDir: map[string][]QueryRow{
+				queryOpTestRootDir: {
+					{Path: queryOpTestChildADir, EntryType: 'd'},
+					{Path: queryOpTestChildBDir, EntryType: 'd'},
+				},
+			}},
+			dir: queryOpTestRootDir,
+			openProvider: func() (provider.Provider, error) {
+				return fakeMountTimestampsProvider{tree: db.NewTree(newQueryOpTestDB())}, nil
+			},
+		}
+
+		ops := buildOps(qctx, QueryOptions{Repeat: 2, Splits: 2, WalkDepth: 1, WalkLimit: 2}, func(string, ...any) {})
+		names := make([]string, 0, len(ops))
+
+		for _, op := range ops {
+			names = append(names, op.name)
+		}
+
+		So(names, ShouldContain, "tree_disktree_endpoint_new_dirs")
+		So(names, ShouldContain, "tree_where_fresh_provider")
+
+		newDirsOp := findQueryTestOp(ops, "tree_disktree_endpoint_new_dirs")
+		So(newDirsOp, ShouldNotBeNil)
+		So(newDirsOp.inputs["start_dir"], ShouldEqual, queryOpTestRootDir)
+		So(newDirsOp.inputs["dirs"], ShouldResemble, []string{queryOpTestChildADir, queryOpTestChildBDir})
+		So(newDirsOp.inputs["cache_scope"], ShouldEqual, "new_directory_each_repeat")
+		So(newDirsOp.inputs["duration_source"], ShouldEqual, "wall")
+		So(newDirsOp.skipWarmup, ShouldBeTrue)
+		So(newDirsOp.repeatOverride, ShouldEqual, 2)
+
+		freshWhereOp := findQueryTestOp(ops, "tree_where_fresh_provider")
+		So(freshWhereOp, ShouldNotBeNil)
+		So(freshWhereOp.inputs[queryInputDirKey], ShouldEqual, queryOpTestRootDir)
+		So(freshWhereOp.inputs["cache_scope"], ShouldEqual, "fresh_provider_per_repeat")
+		So(freshWhereOp.inputs["duration_source"], ShouldEqual, "wall")
+		So(freshWhereOp.skipWarmup, ShouldBeTrue)
+		So(freshWhereOp.useWallTime, ShouldBeTrue)
+	})
+
+	Convey("tree_disktree_endpoint_new_dirs times walked dirs instead of the selected warm dir", t, func() {
+		database := newQueryOpTestDB()
+		qctx := queryContext{
+			provider: fakeMountTimestampsProvider{tree: db.NewTree(database)},
+			client: &fakeQueryClient{rowsByDir: map[string][]QueryRow{
+				queryOpTestRootDir: {
+					{Path: queryOpTestChildADir, EntryType: 'd'},
+					{Path: queryOpTestChildBDir, EntryType: 'd'},
+				},
+			}},
+			dir: queryOpTestRootDir,
+		}
+
+		ops := buildOps(qctx, QueryOptions{Repeat: 2, WalkDepth: 1, WalkLimit: 2}, func(string, ...any) {})
+		newDirsOp := findQueryTestOp(ops, "tree_disktree_endpoint_new_dirs")
+
+		So(newDirsOp, ShouldNotBeNil)
+		So(newDirsOp.run(context.Background()), ShouldBeNil)
+		So(newDirsOp.run(context.Background()), ShouldBeNil)
+		So(database.childrenCalls, ShouldNotContain, queryOpTestRootDir)
+		So(database.childrenCalls, ShouldContain, queryOpTestChildADir)
+		So(database.childrenCalls, ShouldContain, queryOpTestChildBDir)
+	})
+
+	Convey("tree_disktree_endpoint_new_dirs skips ancestors that would warm descendants", t, func() {
+		database := newQueryOpTestDB()
+		qctx := queryContext{
+			provider: fakeMountTimestampsProvider{tree: db.NewTree(database)},
+			client: &fakeQueryClient{rowsByDir: map[string][]QueryRow{
+				queryOpTestRootDir: {
+					{Path: queryOpTestChildADir, EntryType: 'd'},
+					{Path: queryOpTestChildBDir, EntryType: 'd'},
+				},
+				queryOpTestChildADir: {
+					{Path: queryOpTestGrandDir, EntryType: 'd'},
+				},
+			}},
+			dir: queryOpTestRootDir,
+		}
+
+		ops := buildOps(qctx, QueryOptions{Repeat: 3, WalkDepth: 2, WalkLimit: 3}, func(string, ...any) {})
+		newDirsOp := findQueryTestOp(ops, "tree_disktree_endpoint_new_dirs")
+		So(newDirsOp, ShouldNotBeNil)
+		So(newDirsOp.inputs["dirs"], ShouldResemble, []string{
+			queryOpTestChildBDir,
+			queryOpTestGrandDir,
+		})
+		So(newDirsOp.repeatOverride, ShouldEqual, 2)
+
+		So(newDirsOp.run(context.Background()), ShouldBeNil)
+		So(newDirsOp.run(context.Background()), ShouldBeNil)
+		So(database.childrenCalls, ShouldNotContain, queryOpTestRootDir)
+		So(database.childrenCalls, ShouldNotContain, queryOpTestChildADir)
+		So(database.childrenCalls, ShouldContain, queryOpTestChildBDir)
+		So(database.childrenCalls, ShouldContain, queryOpTestGrandDir)
+		So(database.dirInfoCalls, ShouldNotContain, queryOpTestRootDir)
+		So(database.dirInfoCalls, ShouldNotContain, queryOpTestChildADir)
+	})
+
+	Convey("tree_where_fresh_provider opens and closes a provider for each run", t, func() {
+		var (
+			openCalls  int
+			closeCalls int
+		)
+
+		qctx := queryContext{
+			dir: queryOpTestRootDir,
+			openProvider: func() (provider.Provider, error) {
+				openCalls++
+
+				return fakeMountTimestampsProvider{
+					tree: db.NewTree(newQueryOpTestDB()),
+					closeHook: func() error {
+						closeCalls++
+
+						return nil
+					},
+				}, nil
+			},
+		}
+
+		o := opTreeWhereFreshProvider(qctx, 1)
+
+		So(o.run(context.Background()), ShouldBeNil)
+		So(o.run(context.Background()), ShouldBeNil)
+		So(openCalls, ShouldEqual, 2)
+		So(closeCalls, ShouldEqual, 2)
+	})
+
 	Convey("tree_disktree_endpoint checks all child has_children values via Tree fallback", t, func() {
 		database := newQueryOpTestDB()
 		qctx := queryContext{
@@ -533,6 +703,16 @@ func newQueryOpTestDB() *queryOpTestDB {
 			queryOpTestGrandDir:  {Count: 1},
 		},
 	}
+}
+
+func findQueryTestOp(ops []op, name string) *op {
+	for i := range ops {
+		if ops[i].name == name {
+			return &ops[i]
+		}
+	}
+
+	return nil
 }
 
 type fakeQueryAPI struct {
@@ -591,10 +771,13 @@ func (p fakeMountTimestampsProvider) Close() error {
 type queryOpTestDB struct {
 	children      map[string][]string
 	summaries     map[string]*db.DirSummary
+	dirInfoCalls  []string
 	childrenCalls []string
 }
 
 func (d *queryOpTestDB) DirInfo(dir string, _ *db.Filter) (*db.DirSummary, error) {
+	d.dirInfoCalls = append(d.dirInfoCalls, dir)
+
 	summary := d.summaries[dir]
 	if summary == nil {
 		return nil, db.ErrDirNotFound

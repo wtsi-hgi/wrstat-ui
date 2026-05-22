@@ -37,5 +37,16 @@ func TestClickHousePerfQueryFlags(t *testing.T) {
 
 		So(flags.Lookup("warmup"), ShouldNotBeNil)
 		So(flags.Lookup("splits"), ShouldNotBeNil)
+		So(flags.Lookup("walk-depth"), ShouldNotBeNil)
+		So(flags.Lookup("walk-limit"), ShouldNotBeNil)
+	})
+
+	Convey("bolt-perf query exposes tree benchmark controls", t, func() {
+		flags := boltPerfQueryCmd.Flags()
+
+		So(flags.Lookup("warmup"), ShouldNotBeNil)
+		So(flags.Lookup("splits"), ShouldNotBeNil)
+		So(flags.Lookup("walk-depth"), ShouldNotBeNil)
+		So(flags.Lookup("walk-limit"), ShouldNotBeNil)
 	})
 }

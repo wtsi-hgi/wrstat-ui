@@ -40,6 +40,8 @@ const (
 	chPerfDefaultRepeat    = 20
 	chPerfDefaultWarmup    = 1
 	chPerfDefaultSplits    = 4
+	chPerfDefaultWalkDepth = 2
+	chPerfDefaultWalkLimit = 20
 	chPerfDefaultBatchSize = 100_000
 	chPerfDefaultParallel  = 1
 )
@@ -92,12 +94,14 @@ type chPerfFlags struct {
 	quota       string
 	config      string
 
-	dir    string
-	uid    uint32
-	gids   string
-	repeat int
-	warmup int
-	splits int
+	dir       string
+	uid       uint32
+	gids      string
+	repeat    int
+	warmup    int
+	splits    int
+	walkDepth int
+	walkLimit int
 }
 
 var chPerf chPerfFlags
@@ -149,6 +153,10 @@ func addCHPerfQueryFlags() {
 	f.IntVar(&chPerf.repeat, "repeat", chPerfDefaultRepeat, "number of timed repeats")
 	f.IntVar(&chPerf.warmup, "warmup", chPerfDefaultWarmup, "warmup iterations")
 	f.IntVar(&chPerf.splits, "splits", chPerfDefaultSplits, "where() splits")
+	f.IntVar(&chPerf.walkDepth, "walk-depth", chPerfDefaultWalkDepth,
+		"max depth for unique directory tree walk timings")
+	f.IntVar(&chPerf.walkLimit, "walk-limit", chPerfDefaultWalkLimit,
+		"max unique directories to time in tree walk operations")
 }
 
 func runCHPerfImport(inputDir string) error {
@@ -183,12 +191,14 @@ func runCHPerfQuery() error {
 	api := chperf.NewClickHouseAPI(cfg)
 
 	report, err := chperf.Query(api, chperf.QueryOptions{
-		Dir:    chPerf.dir,
-		UID:    chPerf.uid,
-		GIDs:   parseGIDs(chPerf.gids),
-		Repeat: chPerf.repeat,
-		Warmup: chPerf.warmup,
-		Splits: chPerf.splits,
+		Dir:       chPerf.dir,
+		UID:       chPerf.uid,
+		GIDs:      parseGIDs(chPerf.gids),
+		Repeat:    chPerf.repeat,
+		Warmup:    chPerf.warmup,
+		Splits:    chPerf.splits,
+		WalkDepth: chPerf.walkDepth,
+		WalkLimit: chPerf.walkLimit,
 	}, cliPrint)
 	if err != nil {
 		return err

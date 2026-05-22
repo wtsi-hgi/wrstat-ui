@@ -67,6 +67,7 @@ func TestLineCountingReader(t *testing.T) {
 type querySuiteTestDB struct {
 	children      map[string][]string
 	summaries     map[string]*db.DirSummary
+	dirInfoCalls  []string
 	childrenCalls []string
 }
 
@@ -87,6 +88,8 @@ func newQuerySuiteTestDB() *querySuiteTestDB {
 }
 
 func (d *querySuiteTestDB) DirInfo(dir string, _ *db.Filter) (*db.DirSummary, error) {
+	d.dirInfoCalls = append(d.dirInfoCalls, dir)
+
 	summary := d.summaries[dir]
 	if summary == nil {
 		return nil, db.ErrDirNotFound
@@ -116,9 +119,12 @@ func TestQuerySuiteOps(t *testing.T) {
 		ctx := queryContext{
 			tree:     db.NewTree(newQuerySuiteTestDB()),
 			queryDir: querySuiteTestRootDir,
+			openFreshTree: func() (*db.Tree, func() error, error) {
+				return db.NewTree(newQuerySuiteTestDB()), func() error { return nil }, nil
+			},
 		}
 
-		ops := buildQuerySuiteOps(ctx, QueryOptions{Splits: 4})
+		ops := buildQuerySuiteOps(ctx, QueryOptions{Repeat: 2, Splits: 4, WalkDepth: 1, WalkLimit: 2})
 		names := make([]string, 0, len(ops))
 
 		for _, op := range ops {
@@ -126,6 +132,107 @@ func TestQuerySuiteOps(t *testing.T) {
 		}
 
 		So(names, ShouldContain, "tree_disktree_endpoint")
+		So(names, ShouldContain, "tree_disktree_endpoint_new_dirs")
+		So(names, ShouldContain, "tree_where_fresh_provider")
+
+		newDirsOp := findQuerySuiteTestOp(ops, "tree_disktree_endpoint_new_dirs")
+		So(newDirsOp, ShouldNotBeNil)
+		So(newDirsOp.inputs["start_dir"], ShouldEqual, querySuiteTestRootDir)
+		So(newDirsOp.inputs["dirs"], ShouldResemble, []string{querySuiteTestChildADir, querySuiteTestChildBDir})
+		So(newDirsOp.inputs["cache_scope"], ShouldEqual, "new_directory_each_repeat")
+		So(newDirsOp.skipWarmup, ShouldBeTrue)
+		So(newDirsOp.repeatOverride, ShouldEqual, 2)
+
+		freshWhereOp := findQuerySuiteTestOp(ops, "tree_where_fresh_provider")
+		So(freshWhereOp, ShouldNotBeNil)
+		So(freshWhereOp.inputs["dir"], ShouldEqual, querySuiteTestRootDir)
+		So(freshWhereOp.inputs["cache_scope"], ShouldEqual, "fresh_provider_per_repeat")
+		So(freshWhereOp.skipWarmup, ShouldBeTrue)
+	})
+
+	Convey("tree_disktree_endpoint_new_dirs times walked dirs instead of the selected warm dir", t, func() {
+		database := newQuerySuiteTestDB()
+		ctx := queryContext{
+			tree:     db.NewTree(database),
+			queryDir: querySuiteTestRootDir,
+			openFreshTree: func() (*db.Tree, func() error, error) {
+				return db.NewTree(newQuerySuiteTestDB()), func() error { return nil }, nil
+			},
+		}
+
+		ops := buildQuerySuiteOps(ctx, QueryOptions{Repeat: 2, WalkDepth: 1, WalkLimit: 2})
+		newDirsOp := findQuerySuiteTestOp(ops, "tree_disktree_endpoint_new_dirs")
+		So(newDirsOp, ShouldNotBeNil)
+
+		database.childrenCalls = nil
+
+		So(newDirsOp.op(), ShouldBeNil)
+		So(newDirsOp.op(), ShouldBeNil)
+		So(database.childrenCalls, ShouldNotContain, querySuiteTestRootDir)
+		So(database.childrenCalls, ShouldContain, querySuiteTestChildADir)
+		So(database.childrenCalls, ShouldContain, querySuiteTestChildBDir)
+	})
+
+	Convey("tree_disktree_endpoint_new_dirs discovers candidates with a fresh tree", t, func() {
+		timingDB := newQuerySuiteTestDB()
+		discoveryDB := newQuerySuiteTestDB()
+		closeCalls := 0
+		ctx := queryContext{
+			tree:     db.NewTree(timingDB),
+			queryDir: querySuiteTestRootDir,
+			openFreshTree: func() (*db.Tree, func() error, error) {
+				return db.NewTree(discoveryDB), func() error {
+					closeCalls++
+
+					return nil
+				}, nil
+			},
+		}
+
+		ops := buildQuerySuiteOps(ctx, QueryOptions{Repeat: 3, WalkDepth: 2, WalkLimit: 3})
+		newDirsOp := findQuerySuiteTestOp(ops, "tree_disktree_endpoint_new_dirs")
+		So(newDirsOp, ShouldNotBeNil)
+		So(newDirsOp.inputs["dirs"], ShouldResemble, []string{
+			querySuiteTestChildBDir,
+			querySuiteTestGrandDir,
+		})
+		So(closeCalls, ShouldEqual, 1)
+		So(discoveryDB.dirInfoCalls, ShouldContain, querySuiteTestRootDir)
+		So(discoveryDB.dirInfoCalls, ShouldContain, querySuiteTestChildADir)
+		So(timingDB.dirInfoCalls, ShouldBeEmpty)
+		So(timingDB.childrenCalls, ShouldBeEmpty)
+
+		So(newDirsOp.op(), ShouldBeNil)
+		So(newDirsOp.op(), ShouldBeNil)
+		So(timingDB.dirInfoCalls, ShouldNotContain, querySuiteTestRootDir)
+		So(timingDB.dirInfoCalls, ShouldNotContain, querySuiteTestChildADir)
+		So(timingDB.dirInfoCalls, ShouldContain, querySuiteTestChildBDir)
+		So(timingDB.dirInfoCalls, ShouldContain, querySuiteTestGrandDir)
+	})
+
+	Convey("tree_where_fresh_provider opens and closes a fresh tree for each run", t, func() {
+		var (
+			openCalls  int
+			closeCalls int
+		)
+
+		ctx := queryContext{
+			queryDir: querySuiteTestRootDir,
+			openFreshTree: func() (*db.Tree, func() error, error) {
+				openCalls++
+
+				return db.NewTree(newQuerySuiteTestDB()), func() error {
+					closeCalls++
+
+					return nil
+				}, nil
+			},
+		}
+
+		So(opTreeWhereFreshProvider(ctx, 1), ShouldBeNil)
+		So(opTreeWhereFreshProvider(ctx, 1), ShouldBeNil)
+		So(openCalls, ShouldEqual, 2)
+		So(closeCalls, ShouldEqual, 2)
 	})
 
 	Convey("tree_disktree_endpoint checks all child has_children values via Tree fallback", t, func() {
@@ -144,4 +251,14 @@ func TestQuerySuiteOps(t *testing.T) {
 			querySuiteTestChildBDir,
 		})
 	})
+}
+
+func findQuerySuiteTestOp(ops []querySuiteOp, name string) *querySuiteOp {
+	for i := range ops {
+		if ops[i].name == name {
+			return &ops[i]
+		}
+	}
+
+	return nil
 }

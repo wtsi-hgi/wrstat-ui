@@ -75,7 +75,9 @@ const (
 
 	perfOpTreeDirInfo          = "tree_dirinfo"
 	perfOpTreeDiskTreeEndpoint = "tree_disktree_endpoint"
+	perfOpTreeDiskTreeNewDirs  = "tree_disktree_endpoint_new_dirs"
 	perfOpTreeWhere            = "tree_where"
+	perfOpTreeWhereFresh       = "tree_where_fresh_provider"
 
 	testLustreMount        = "/lustre/"
 	summariseCloseName     = "close"
@@ -899,13 +901,22 @@ func TestClickHousePerfQuery(t *testing.T) {
 		opNames := make([]string, 0, len(report.Operations))
 		for _, op := range report.Operations {
 			opNames = append(opNames, op.Name)
+			if op.Name == perfOpTreeDiskTreeNewDirs {
+				So(len(op.DurationsMS), ShouldBeGreaterThan, 0)
+				So(len(op.DurationsMS), ShouldBeLessThanOrEqualTo, 2)
+
+				continue
+			}
+
 			So(len(op.DurationsMS), ShouldEqual, 2)
 		}
 
 		So(opNames, ShouldContain, "mount_timestamps")
 		So(opNames, ShouldContain, perfOpTreeDirInfo)
 		So(opNames, ShouldContain, perfOpTreeDiskTreeEndpoint)
+		So(opNames, ShouldContain, perfOpTreeDiskTreeNewDirs)
 		So(opNames, ShouldContain, perfOpTreeWhere)
+		So(opNames, ShouldContain, perfOpTreeWhereFresh)
 		So(opNames, ShouldContain, "basedirs_group_usage")
 		So(opNames, ShouldContain, "files_listdir")
 		So(opNames, ShouldContain, "permission_check")
@@ -918,6 +929,15 @@ func TestClickHousePerfQuery(t *testing.T) {
 		treeWhere := findReportOperation(report.Operations, perfOpTreeWhere)
 		So(treeWhere, ShouldNotBeNil)
 		So(treeWhere.Inputs["splits"], ShouldEqual, float64(2))
+
+		newDirs := findReportOperation(report.Operations, perfOpTreeDiskTreeNewDirs)
+		So(newDirs, ShouldNotBeNil)
+		So(newDirs.Inputs["start_dir"], ShouldEqual, treeDirInfo.Inputs["dir"])
+		So(newDirs.Inputs["cache_scope"], ShouldEqual, "new_directory_each_repeat")
+
+		freshWhere := findReportOperation(report.Operations, perfOpTreeWhereFresh)
+		So(freshWhere, ShouldNotBeNil)
+		So(freshWhere.Inputs["cache_scope"], ShouldEqual, "fresh_provider_per_repeat")
 
 		filesListDir := findReportOperation(report.Operations, "files_listdir")
 		So(filesListDir, ShouldNotBeNil)
@@ -954,6 +974,10 @@ func runClickHousePerfQuery(
 		"--warmup",
 		"1",
 		"--splits",
+		"2",
+		"--walk-depth",
+		"2",
+		"--walk-limit",
 		"2",
 		"--query-timeout",
 		"5s",
@@ -1208,6 +1232,10 @@ func TestBoltPerf(t *testing.T) {
 			"0",
 			"--splits",
 			"2",
+			"--walk-depth",
+			"2",
+			"--walk-limit",
+			"2",
 			"--json",
 			queryJSON,
 		)
@@ -1260,9 +1288,11 @@ func TestBoltPerf(t *testing.T) {
 
 		So(opNames, ShouldResemble, []string{
 			"mount_timestamps",
+			perfOpTreeDiskTreeNewDirs,
 			perfOpTreeDirInfo,
 			perfOpTreeDiskTreeEndpoint,
 			perfOpTreeWhere,
+			perfOpTreeWhereFresh,
 			"basedirs_group_usage",
 			"basedirs_user_usage",
 			"basedirs_group_subdirs",

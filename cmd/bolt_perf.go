@@ -33,9 +33,11 @@ import (
 )
 
 const (
-	boltPerfDefaultRepeat = 20
-	boltPerfDefaultWarmup = 1
-	boltPerfDefaultSplits = 4
+	boltPerfDefaultRepeat    = 20
+	boltPerfDefaultWarmup    = 1
+	boltPerfDefaultSplits    = 4
+	boltPerfDefaultWalkDepth = 2
+	boltPerfDefaultWalkLimit = 20
 
 	boltPerfBackendInterfaces = "bolt_interfaces"
 )
@@ -143,10 +145,12 @@ type boltPerfFlags struct {
 	config   string
 	maxLines int
 
-	dir    string
-	repeat int
-	warmup int
-	splits int
+	dir       string
+	repeat    int
+	warmup    int
+	splits    int
+	walkDepth int
+	walkLimit int
 }
 
 var boltPerf boltPerfFlags
@@ -188,6 +192,8 @@ func runBoltPerfQuery(inputDir string) error {
 		Repeat:                  boltPerf.repeat,
 		Warmup:                  boltPerf.warmup,
 		Splits:                  boltPerf.splits,
+		WalkDepth:               boltPerf.walkDepth,
+		WalkLimit:               boltPerf.walkLimit,
 		OpenDatabase:            bolt.OpenDatabase,
 		OpenMultiBaseDirsReader: bolt.OpenMultiBaseDirsReader,
 	}
@@ -226,6 +232,10 @@ func addBoltPerfFlags() {
 	boltPerfQueryCmd.Flags().IntVar(&boltPerf.repeat, "repeat", boltPerfDefaultRepeat, "repeat count")
 	boltPerfQueryCmd.Flags().IntVar(&boltPerf.warmup, "warmup", boltPerfDefaultWarmup, "warmup iterations")
 	boltPerfQueryCmd.Flags().IntVar(&boltPerf.splits, "splits", boltPerfDefaultSplits, "where() splits")
+	boltPerfQueryCmd.Flags().IntVar(&boltPerf.walkDepth, "walk-depth", boltPerfDefaultWalkDepth,
+		"max depth for unique directory tree walk timings")
+	boltPerfQueryCmd.Flags().IntVar(&boltPerf.walkLimit, "walk-limit", boltPerfDefaultWalkLimit,
+		"max unique directories to time in tree walk operations")
 }
 
 func markBoltPerfRequiredFlags() {

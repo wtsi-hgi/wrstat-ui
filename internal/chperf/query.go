@@ -49,10 +49,20 @@ const (
 	dirPickMaxCount            = 20000
 	dirPickMaxSteps            = 64
 	defaultExplainLimit        = 1_000_000
+	queryInputAgeKey           = "age"
 	queryInputDirKey           = "dir"
+	queryInputDurationSource   = "duration_source"
+	queryInputCacheScope       = "cache_scope"
 	queryOpTreeDiskTreeEndName = "tree_disktree_endpoint"
+	queryOpTreeDiskTreeNewName = "tree_disktree_endpoint_new_dirs"
 	queryOpTreeDirInfoName     = "tree_dirinfo"
+	queryOpTreeWhereFreshName  = "tree_where_fresh_provider"
 	queryOpTreeWhereName       = "tree_where"
+	queryScopeFreshProvider    = "fresh_provider_per_repeat"
+	queryScopeNewDirEachRepeat = "new_directory_each_repeat"
+	queryScopeSameProviderDir  = "same_provider_same_dir"
+	querySourceClickHouseLog   = "clickhouse_query_log"
+	querySourceWall            = "wall"
 )
 
 var (
@@ -65,16 +75,20 @@ var (
 	// ErrEmptyDir is returned when the selected directory has no files
 	// for StatPath testing.
 	ErrEmptyDir = errors.New("directory is empty, skipping StatPath")
+
+	errOpenProviderRequired = errors.New("OpenProvider is required")
 )
 
 // QueryOptions configures the query timing suite.
 type QueryOptions struct {
-	Dir    string
-	UID    uint32
-	GIDs   []uint32
-	Repeat int
-	Warmup int
-	Splits int
+	Dir       string
+	UID       uint32
+	GIDs      []uint32
+	Repeat    int
+	Warmup    int
+	Splits    int
+	WalkDepth int
+	WalkLimit int
 }
 
 // Query runs a repeatable timing suite against ClickHouse and returns
@@ -133,7 +147,9 @@ func buildQueryContext(
 func openQueryContext(api QueryAPI) (queryContext, error) {
 	var qctx queryContext
 
-	p, err := api.OpenProvider()
+	qctx.openProvider = api.OpenProvider
+
+	p, err := qctx.openProvider()
 	if err != nil {
 		return queryContext{}, err
 	}
@@ -157,12 +173,59 @@ func openQueryContext(api QueryAPI) (queryContext, error) {
 	return qctx, nil
 }
 
+func opTreeDiskTreeEndpointNewDirs(qctx queryContext, opts QueryOptions) op {
+	dirs, fallback := disktreeClickDirs(qctx, opts)
+	timedDirs := dirsForRepeats(dirs, opts.Repeat)
+	i := 0
+
+	return op{
+		name: queryOpTreeDiskTreeNewName,
+		inputs: map[string]any{
+			"start_dir":              qctx.dir,
+			"dirs":                   timedDirs,
+			"dir_count":              len(timedDirs),
+			"walk_depth":             opts.WalkDepth,
+			"walk_limit":             opts.WalkLimit,
+			"fallback_to_start_dir":  fallback,
+			queryInputCacheScope:     queryScopeNewDirEachRepeat,
+			queryInputDurationSource: querySourceWall,
+			queryInputAgeKey:         int(db.DGUTAgeAll),
+		},
+		run: func(_ context.Context) error {
+			if i >= len(timedDirs) {
+				return nil
+			}
+
+			dir := timedDirs[i]
+			i++
+
+			return runTreeDiskTreeEndpoint(qctx.provider.Tree(), dir)
+		},
+		useWallTime:       true,
+		skipWarmup:        true,
+		hasRepeatOverride: true,
+		repeatOverride:    len(timedDirs),
+	}
+}
+
+func dirsForRepeats(dirs []string, repeat int) []string {
+	if repeat <= 0 || len(dirs) == 0 {
+		return nil
+	}
+
+	n := min(repeat, len(dirs))
+
+	return slices.Clone(dirs[:n])
+}
+
 func opTreeDiskTreeEndpoint(qctx queryContext) op {
 	return op{
 		name: queryOpTreeDiskTreeEndName,
 		inputs: map[string]any{
-			queryInputDirKey: qctx.dir,
-			"age":            int(db.DGUTAgeAll),
+			queryInputDirKey:         qctx.dir,
+			queryInputCacheScope:     queryScopeSameProviderDir,
+			queryInputDurationSource: querySourceClickHouseLog,
+			queryInputAgeKey:         int(db.DGUTAgeAll),
 		},
 		run: func(_ context.Context) error {
 			return runTreeDiskTreeEndpoint(qctx.provider.Tree(), qctx.dir)
@@ -192,9 +255,11 @@ func opTreeWhere(qctx queryContext, splits int) op {
 	return op{
 		name: queryOpTreeWhereName,
 		inputs: map[string]any{
-			queryInputDirKey: qctx.dir,
-			"age":            int(db.DGUTAgeAll),
-			"splits":         splits,
+			queryInputDirKey:         qctx.dir,
+			queryInputCacheScope:     queryScopeSameProviderDir,
+			queryInputDurationSource: querySourceClickHouseLog,
+			queryInputAgeKey:         int(db.DGUTAgeAll),
+			"splits":                 splits,
 		},
 		run: func(_ context.Context) error {
 			filter := &db.Filter{Age: db.DGUTAgeAll}
@@ -205,6 +270,41 @@ func opTreeWhere(qctx queryContext, splits int) op {
 	}
 }
 
+func opTreeWhereFreshProvider(qctx queryContext, splits int) op {
+	return op{
+		name: queryOpTreeWhereFreshName,
+		inputs: map[string]any{
+			queryInputDirKey:         qctx.dir,
+			queryInputCacheScope:     queryScopeFreshProvider,
+			queryInputDurationSource: querySourceWall,
+			queryInputAgeKey:         int(db.DGUTAgeAll),
+			"splits":                 splits,
+		},
+		run: func(_ context.Context) error {
+			return runTreeWhereFreshProvider(qctx, splits)
+		},
+		useWallTime: true,
+		skipWarmup:  true,
+	}
+}
+
+func runTreeWhereFreshProvider(qctx queryContext, splits int) error {
+	if qctx.openProvider == nil {
+		return errOpenProviderRequired
+	}
+
+	p, err := qctx.openProvider()
+	if err != nil {
+		return err
+	}
+
+	filter := &db.Filter{Age: db.DGUTAgeAll}
+	_, whereErr := p.Tree().Where(qctx.dir, filter, split.SplitsToSplitFn(splits))
+	closeErr := p.Close()
+
+	return errors.Join(whereErr, closeErr)
+}
+
 func warmupOp(ctx context.Context, o op, warmup int) error {
 	for i := range warmup {
 		if err := o.run(ctx); err != nil {
@@ -213,6 +313,129 @@ func warmupOp(ctx context.Context, o op, warmup int) error {
 	}
 
 	return nil
+}
+
+func timeWallOp(ctx context.Context, run func(context.Context) error) (float64, error) {
+	start := time.Now()
+
+	if err := run(ctx); err != nil {
+		return 0, err
+	}
+
+	return durationMS(time.Since(start)), nil
+}
+
+func disktreeClickDirs(qctx queryContext, opts QueryOptions) ([]string, bool) {
+	dirs := leafDisktreeDirs(collectDisktreeDirsFromFileAPI(qctx.client, qctx.dir, opts.WalkDepth, opts.WalkLimit))
+	if len(dirs) > 0 || opts.WalkLimit <= 0 {
+		return dirs, false
+	}
+
+	return []string{qctx.dir}, true
+}
+
+func leafDisktreeDirs(dirs []string) []string {
+	leaves := make([]string, 0, len(dirs))
+
+	for _, dir := range dirs {
+		if hasDisktreeDescendant(dir, dirs) {
+			continue
+		}
+
+		leaves = append(leaves, dir)
+	}
+
+	return leaves
+}
+
+func hasDisktreeDescendant(dir string, dirs []string) bool {
+	for _, candidate := range dirs {
+		if candidate != dir && strings.HasPrefix(candidate, dir) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func collectDisktreeDirsFromFileAPI(
+	client QueryClient,
+	startDir string,
+	depth int,
+	limit int,
+) []string {
+	if client == nil || depth <= 0 || limit <= 0 {
+		return nil
+	}
+
+	ctx := context.Background()
+	queue := []disktreeWalkDir{{dir: startDir}}
+	seen := map[string]struct{}{startDir: {}}
+	dirs := make([]string, 0, limit)
+
+	for len(queue) > 0 && len(dirs) < limit {
+		item := queue[0]
+		queue = queue[1:]
+
+		if item.depth >= depth {
+			continue
+		}
+
+		children := listChildDirs(ctx, client, item.dir)
+		queue = appendDisktreeWalkChildren(queue, &dirs, seen, limit, item.depth+1, children)
+	}
+
+	return dirs
+}
+
+func listChildDirs(ctx context.Context, client QueryClient, dir string) []string {
+	rows, err := client.ListDir(ctx, dir, 0)
+	if err != nil {
+		return nil
+	}
+
+	dirs := make([]string, 0, len(rows))
+	for _, row := range rows {
+		if row.EntryType != 'd' {
+			continue
+		}
+
+		if child := normaliseDirPath(row.Path); child != "" {
+			dirs = append(dirs, child)
+		}
+	}
+
+	return dirs
+}
+
+func appendDisktreeWalkChildren(
+	queue []disktreeWalkDir,
+	dirs *[]string,
+	seen map[string]struct{},
+	limit int,
+	childDepth int,
+	children []string,
+) []disktreeWalkDir {
+	for _, child := range children {
+		if len(*dirs) >= limit {
+			return queue
+		}
+
+		if _, ok := seen[child]; ok {
+			continue
+		}
+
+		seen[child] = struct{}{}
+		*dirs = append(*dirs, child)
+		queue = append(queue, disktreeWalkDir{dir: child, depth: childDepth})
+	}
+
+	return queue
+}
+
+type disktreeWalkDir struct {
+	dir   string
+	depth int
 }
 
 func closeQueryResources(closers ...io.Closer) error {
@@ -438,12 +661,20 @@ func runSuite(
 func buildOps(qctx queryContext, opts QueryOptions, printf PrintfFunc) []op {
 	ops := []op{
 		opMountTimestamps(qctx),
+	}
+
+	if opts.WalkDepth > 0 && opts.WalkLimit > 0 {
+		ops = append(ops, opTreeDiskTreeEndpointNewDirs(qctx, opts))
+	}
+
+	ops = append(ops,
 		opTreeDirInfo(qctx),
 		opTreeDiskTreeEndpoint(qctx),
 		opTreeWhere(qctx, opts.Splits),
+		opTreeWhereFreshProvider(qctx, opts.Splits),
 		opGroupUsage(qctx),
 		opListDir(qctx),
-	}
+	)
 
 	ops = append(ops, opStatPath(qctx, printf)...)
 	ops = append(ops, opPermission(qctx))
@@ -490,8 +721,12 @@ func activeMountsFreshness(mt map[string]time.Time) []activeMountFreshness {
 
 func opTreeDirInfo(qctx queryContext) op {
 	return op{
-		name:   queryOpTreeDirInfoName,
-		inputs: map[string]any{queryInputDirKey: qctx.dir},
+		name: queryOpTreeDirInfoName,
+		inputs: map[string]any{
+			queryInputDirKey:         qctx.dir,
+			queryInputCacheScope:     queryScopeSameProviderDir,
+			queryInputDurationSource: querySourceClickHouseLog,
+		},
 		run: func(_ context.Context) error {
 			filter := &db.Filter{Age: db.DGUTAgeAll}
 			_, err := qctx.provider.Tree().DirInfo(qctx.dir, filter)
@@ -637,7 +872,17 @@ func runOp(
 	opts QueryOptions,
 	printf PrintfFunc,
 ) error {
-	durations, err := timingLoop(qctx, o, opts.Warmup, opts.Repeat, printf)
+	warmup := opts.Warmup
+	if o.skipWarmup {
+		warmup = 0
+	}
+
+	repeat := opts.Repeat
+	if o.hasRepeatOverride {
+		repeat = o.repeatOverride
+	}
+
+	durations, err := timingLoop(qctx, o, warmup, repeat, printf)
 	if err != nil {
 		return err
 	}
@@ -666,6 +911,17 @@ func timingLoop(
 	durations := make([]float64, 0, repeat)
 
 	for i := range repeat {
+		if o.useWallTime {
+			duration, err := timeWallOp(ctx, o.run)
+			if err != nil {
+				return nil, fmt.Errorf("%s repeat %d/%d: %w", o.name, i+1, repeat, err)
+			}
+
+			durations = append(durations, duration)
+
+			continue
+		}
+
 		start := time.Now()
 
 		metrics, err := qctx.inspector.Measure(ctx, o.run)
@@ -710,18 +966,23 @@ type activeMountFreshness struct {
 }
 
 type op struct {
-	name   string
-	inputs map[string]any
-	run    func(ctx context.Context) error
+	name              string
+	inputs            map[string]any
+	run               func(ctx context.Context) error
+	useWallTime       bool
+	skipWarmup        bool
+	hasRepeatOverride bool
+	repeatOverride    int
 }
 
 type queryContext struct {
-	provider  provider.Provider
-	client    QueryClient
-	inspector QueryInspector
-	dir       string
-	uid       uint32
-	gids      []uint32
+	provider     provider.Provider
+	client       QueryClient
+	inspector    QueryInspector
+	openProvider func() (provider.Provider, error)
+	dir          string
+	uid          uint32
+	gids         []uint32
 }
 
 func (q *queryContext) close() error {
