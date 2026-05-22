@@ -26,6 +26,8 @@
 package dirguta
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 	"unsafe"
@@ -38,6 +40,100 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/stats"
 	"github.com/wtsi-hgi/wrstat-ui/summary"
 )
+
+func directoryHeavyStats(directories int, refTime int64) string {
+	var b strings.Builder
+
+	writeDirectoryStatsRow(&b, "/nfs/t283_imaging/", 0, 0, refTime, refTime, 1, int64(directories+2))
+
+	for n := range directories {
+		writeDirectoryStatsRow(
+			&b,
+			fmt.Sprintf("/nfs/t283_imaging/dir%04d/", n),
+			1000,
+			1000,
+			refTime,
+			refTime-db.SecondsInAYear*8,
+			int64(n+2),
+			2,
+		)
+	}
+
+	return b.String()
+}
+
+func writeDirectoryStatsRow(
+	b *strings.Builder,
+	path string,
+	uid uint32,
+	gid uint32,
+	atime int64,
+	mtime int64,
+	inode int64,
+	nlink int64,
+) {
+	fmt.Fprintf(
+		b,
+		"%q\t4096\t%d\t%d\t%d\t%d\t%d\td\t%d\t%d\t1\t4096\n",
+		path,
+		uid,
+		gid,
+		atime,
+		mtime,
+		mtime,
+		inode,
+		nlink,
+	)
+}
+
+func summariseDirectoryHeavyStats(data string, refTime int64) (*countingDB, error) {
+	s := summary.NewSummariser(stats.NewStatsParser(strings.NewReader(data)))
+	sink := new(countingDB)
+
+	s.AddDirectoryOperation(newDirGroupUserTypeAge(sink, refTime))
+
+	return sink, s.Summarise()
+}
+
+func mustSummariseDirectoryHeavyStats(data string, refTime int64) {
+	if _, err := summariseDirectoryHeavyStats(data, refTime); err != nil {
+		panic(err)
+	}
+}
+
+type countingDB struct {
+	records uint64
+	rows    uint64
+}
+
+func (m *countingDB) Add(dguta db.RecordDGUTA) error {
+	m.records++
+	m.rows += uint64(len(dguta.GUTAs))
+
+	return nil
+}
+
+func BenchmarkDirGUTADirectoryHeavy(b *testing.B) {
+	const directories = 100000
+
+	refTime := int64(1779120209)
+	data := directoryHeavyStats(directories, refTime)
+
+	b.SetBytes(int64(len(data)))
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for b.Loop() {
+		sink, err := summariseDirectoryHeavyStats(data, refTime)
+		if err != nil {
+			b.Fatal(err)
+		}
+
+		if sink.records != directories+3 {
+			b.Fatalf("expected %d records, got %d", directories+3, sink.records)
+		}
+	}
+}
 
 func TestDirGUTAFileType(t *testing.T) {
 	Convey("isTemp lets you know if a path is a temporary file", t, func() {
@@ -651,6 +747,24 @@ func TestDirGUTA(t *testing.T) {
 		So(len(op.seenHardlinks), ShouldEqual, 1)
 		_, exists := op.seenHardlinks[fileInfo.Inode]
 		So(exists, ShouldBeTrue)
+	})
+
+	Convey("DirGUTA keeps transient summary allocations bounded for directory-heavy stats", t, func() {
+		const directories = 1000
+
+		refTime := time.Now().Unix()
+		data := directoryHeavyStats(directories, refTime)
+
+		sink, err := summariseDirectoryHeavyStats(data, refTime)
+		So(err, ShouldBeNil)
+		So(sink.records, ShouldEqual, directories+3)
+		So(sink.rows, ShouldBeGreaterThan, directories)
+
+		allocs := testing.AllocsPerRun(3, func() {
+			mustSummariseDirectoryHeavyStats(data, refTime)
+		})
+
+		So(allocs, ShouldBeLessThan, 30000.0)
 	})
 }
 

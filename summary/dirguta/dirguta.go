@@ -50,6 +50,12 @@ var gutaKeyPool = sync.Pool{ //nolint:gochecknoglobals
 	},
 }
 
+var summaryWithTimesPool = sync.Pool{ //nolint:gochecknoglobals
+	New: func() any {
+		return new(summary.SummaryWithTimes)
+	},
+}
+
 // Error is a custom error type.
 type Error string
 
@@ -163,11 +169,15 @@ func (store *gutaStore) add(gkey gutaKey, size int64, atime int64, mtime int64) 
 
 	s, ok := store.sumMap[gkey]
 	if !ok {
-		s = new(summary.SummaryWithTimes)
+		s = newSummaryWithTimes()
 		store.sumMap[gkey] = s
 	}
 
 	s.Add(size, atime, mtime, store.refTime)
+}
+
+func newSummaryWithTimes() *summary.SummaryWithTimes {
+	return summaryWithTimesPool.Get().(*summary.SummaryWithTimes) //nolint:errcheck,forcetypeassert
 }
 
 // sort returns a slice of our summaryWithAtime values, sorted by our dguta keys
@@ -200,6 +210,36 @@ func (store *gutaStore) subtractFromStore(keys gutaKeys, size int64, atime int64
 		summary.Count--
 		summary.Size -= size
 	}
+}
+
+func (store *gutaStore) drainInto(parent *gutaStore) {
+	for key, childSummary := range store.sumMap {
+		if existing, ok := parent.sumMap[key]; ok {
+			existing.AddSummary(childSummary)
+			recycleSummaryWithTimes(childSummary)
+		} else {
+			parent.sumMap[key] = childSummary
+		}
+
+		delete(store.sumMap, key)
+	}
+}
+
+func recycleSummaryWithTimes(s *summary.SummaryWithTimes) {
+	if s == nil {
+		return
+	}
+
+	*s = summary.SummaryWithTimes{}
+	summaryWithTimesPool.Put(s)
+}
+
+func (store *gutaStore) clear() {
+	for _, sum := range store.sumMap {
+		recycleSummaryWithTimes(sum)
+	}
+
+	clear(store.sumMap)
 }
 
 // DB contains the method that will be called for each directories DGUTA
@@ -403,7 +443,7 @@ func (d *DirGroupUserTypeAge) Output() error {
 			return err
 		}
 	} else {
-		d.parent.addChild(d.store, d.seenHardlinks)
+		d.parent.addChild(&d.store, d.seenHardlinks)
 	}
 
 	d.clear()
@@ -412,14 +452,14 @@ func (d *DirGroupUserTypeAge) Output() error {
 }
 
 // addChild merges a child directory's store and seen inodes into this DirGroupUserTypeAge.
-func (d *DirGroupUserTypeAge) addChild(child gutaStore, childSeen map[int64]*inodeEntry) {
+func (d *DirGroupUserTypeAge) addChild(child *gutaStore, childSeen map[int64]*inodeEntry) {
 	d.mergeSeenHardlinks(child, childSeen)
 	d.mergeSumMaps(child)
 }
 
 // mergeSeenHardlinks merges the child's inode map into the parent's
 // updating existing entries if needed.
-func (d *DirGroupUserTypeAge) mergeSeenHardlinks(child gutaStore, childSeen map[int64]*inodeEntry) {
+func (d *DirGroupUserTypeAge) mergeSeenHardlinks(child *gutaStore, childSeen map[int64]*inodeEntry) {
 	for inode, cEntry := range childSeen {
 		if pEntry, exists := d.seenHardlinks[inode]; exists {
 			d.updateExistingHardlink(child, pEntry, cEntry)
@@ -430,7 +470,7 @@ func (d *DirGroupUserTypeAge) mergeSeenHardlinks(child gutaStore, childSeen map[
 }
 
 // updateExistingHardlink merges two inode entries (parent & child) and updates store accordingly.
-func (d *DirGroupUserTypeAge) updateExistingHardlink(child gutaStore, pEntry, cEntry *inodeEntry) {
+func (d *DirGroupUserTypeAge) updateExistingHardlink(child *gutaStore, pEntry, cEntry *inodeEntry) {
 	existingPKeys := gutaKeysFromEntry(pEntry.gid, pEntry.uid, pEntry.fileType)
 
 	d.store.subtractFromStore(existingPKeys, pEntry.size, pEntry.atime, pEntry.mtime)
@@ -450,14 +490,8 @@ func (d *DirGroupUserTypeAge) updateExistingHardlink(child gutaStore, pEntry, cE
 }
 
 // mergeSumMaps combines a child gutaStore's summaries into the parent.
-func (d *DirGroupUserTypeAge) mergeSumMaps(child gutaStore) {
-	for key, summary := range child.sumMap {
-		if existing, ok := d.store.sumMap[key]; ok {
-			existing.AddSummary(summary)
-		} else {
-			d.store.sumMap[key] = summary
-		}
-	}
+func (d *DirGroupUserTypeAge) mergeSumMaps(child *gutaStore) {
+	child.drainInto(&d.store)
 }
 
 func (d *DirGroupUserTypeAge) getGUTA(guta gutaKey) *db.GUTA {
@@ -491,7 +525,7 @@ func (d *DirGroupUserTypeAge) outputRoot(dguta db.RecordDGUTA) error {
 }
 
 func (d *DirGroupUserTypeAge) clear() {
-	clear(d.store.sumMap)
+	d.store.clear()
 	clear(d.seenHardlinks)
 
 	d.thisDir = nil
