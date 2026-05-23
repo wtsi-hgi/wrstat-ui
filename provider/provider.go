@@ -51,3 +51,8 @@ type Provider interface {
 	OnError(cb func(error))
 	Close() error
 }
+
+// Messenger is an optional provider interface for operational status messages.
+type Messenger interface {
+	OnMessage(cb func(message string))
+}

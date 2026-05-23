@@ -262,12 +262,14 @@ type testProvider struct {
 	bd    basedirs.Reader
 	cb    func()
 	errCb func(error)
+	msgCb func(string)
 }
 
-func (p *testProvider) Tree() *db.Tree            { return p.tree }
-func (p *testProvider) BaseDirs() basedirs.Reader { return p.bd }
-func (p *testProvider) OnUpdate(cb func())        { p.cb = cb }
-func (p *testProvider) OnError(cb func(error))    { p.errCb = cb }
+func (p *testProvider) Tree() *db.Tree                    { return p.tree }
+func (p *testProvider) BaseDirs() basedirs.Reader         { return p.bd }
+func (p *testProvider) OnUpdate(cb func())                { p.cb = cb }
+func (p *testProvider) OnError(cb func(error))            { p.errCb = cb }
+func (p *testProvider) OnMessage(cb func(message string)) { p.msgCb = cb }
 func (p *testProvider) Close() error {
 	if p.bd != nil {
 		_ = p.bd.Close()
@@ -286,6 +288,12 @@ func (p *testProvider) triggerUpdate(newTree *db.Tree, newBD basedirs.Reader) {
 	p.bd = newBD
 	if p.cb != nil {
 		go p.cb()
+	}
+}
+
+func (p *testProvider) triggerMessage(msg string) {
+	if p.msgCb != nil {
+		p.msgCb(msg)
 	}
 }
 

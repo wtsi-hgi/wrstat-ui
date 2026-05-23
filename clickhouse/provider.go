@@ -75,21 +75,28 @@ type chProvider struct {
 	buildReaders    readerBuilder
 	captureSnapshot snapshotCapturer
 
-	mu       sync.RWMutex
-	onUpdate func()
-	onError  func(error)
+	mu        sync.RWMutex
+	onUpdate  func()
+	onError   func(error)
+	onMessage func(string)
 
 	updateCh chan struct{}
 	errCh    chan struct{}
+	msgCh    chan struct{}
 
 	currentFingerprint string
 	pendingFingerprint string
 	hasPendingUpdate   bool
 	pendingErrs        []error
 	pendingErrHead     int
+	pendingMessages    []string
+	pendingMsgHead     int
+	treeSummaryJobs    map[string]*treeSummaryRefreshState
 
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
+	closing        bool
+	workersStarted bool
+	workerCancels  []context.CancelFunc
+	wg             sync.WaitGroup
 }
 
 func (p *chProvider) Tree() *db.Tree {
@@ -203,6 +210,7 @@ func (p *chProvider) captureActiveMountsState(parent context.Context) (*activeMo
 	snapshot := newActiveMountsSnapshot(rows)
 	if err := ensureActiveTreeSummaries(ctx, p.conn, rows); err != nil {
 		p.queueError(fmt.Errorf("clickhouse: failed to refresh active tree summaries: %w", err))
+		p.scheduleTreeSummaryRefresh(context.WithoutCancel(ctx), snapshot, rows)
 
 		return snapshot, snapshot.fingerprint, nil
 	}
@@ -210,6 +218,97 @@ func (p *chProvider) captureActiveMountsState(parent context.Context) (*activeMo
 	snapshot.markTreeSummaryReady()
 
 	return snapshot, snapshot.fingerprint, nil
+}
+
+func (p *chProvider) OnMessage(cb func(message string)) {
+	p.mu.Lock()
+	p.onMessage = cb
+	hasPendingMessages := p.hasPendingMessagesLocked()
+	msgCh := p.msgCh
+	p.mu.Unlock()
+
+	if cb != nil && hasPendingMessages {
+		signal(msgCh)
+	}
+}
+
+func (p *chProvider) startBackgroundWorkers() {
+	ctx, ok := p.newBackgroundContext()
+	if !ok {
+		return
+	}
+
+	p.errCh = make(chan struct{}, 1)
+	p.msgCh = make(chan struct{}, 1)
+
+	p.startWorker(ctx, p.errorLoop)
+	p.startWorker(ctx, p.messageLoop)
+}
+
+func (p *chProvider) cancelWorkers() {
+	p.mu.Lock()
+	p.closing = true
+	cancels := append([]context.CancelFunc(nil), p.workerCancels...)
+
+	for _, job := range p.treeSummaryJobs {
+		cancels = append(cancels, job.cancel)
+	}
+
+	p.mu.Unlock()
+
+	for _, cancel := range cancels {
+		cancel()
+	}
+}
+
+func (p *chProvider) newBackgroundContext() (context.Context, bool) {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.workersStarted || p.closing {
+		cancel()
+
+		return nil, false
+	}
+
+	p.workersStarted = true
+	p.workerCancels = append(p.workerCancels, cancel)
+
+	return ctx, true
+}
+
+func (p *chProvider) newWorkerContext() (context.Context, bool) {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.closing {
+		cancel()
+
+		return nil, false
+	}
+
+	p.workerCancels = append(p.workerCancels, cancel)
+
+	return ctx, true
+}
+
+func (p *chProvider) signalPendingCallbacks() {
+	p.mu.RLock()
+	hasPendingErrs := p.hasPendingErrorsLocked()
+	hasPendingMessages := p.hasPendingMessagesLocked()
+	p.mu.RUnlock()
+
+	if hasPendingErrs {
+		signal(p.errCh)
+	}
+
+	if hasPendingMessages {
+		signal(p.msgCh)
+	}
 }
 
 func fingerprintForMountsActive(rows []mountsActiveRow) string {
@@ -265,10 +364,7 @@ func (p *chProvider) Close() error {
 }
 
 func (p *chProvider) stopPolling() {
-	if p.cancel != nil {
-		p.cancel()
-	}
-
+	p.cancelWorkers()
 	p.wg.Wait()
 }
 
@@ -291,27 +387,22 @@ func (p *chProvider) startPolling() {
 		return
 	}
 
+	p.startBackgroundWorkers()
+
 	if p.cfg.PollInterval <= 0 {
 		return
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	p.cancel = cancel
-
 	p.updateCh = make(chan struct{}, 1)
-	p.errCh = make(chan struct{}, 1)
+
+	ctx, ok := p.newWorkerContext()
+	if !ok {
+		return
+	}
 
 	p.startWorker(ctx, p.pollLoop)
 	p.startWorker(ctx, p.updateLoop)
-	p.startWorker(ctx, p.errorLoop)
-
-	p.mu.RLock()
-	hasPendingErrs := p.hasPendingErrorsLocked()
-	p.mu.RUnlock()
-
-	if hasPendingErrs {
-		signal(p.errCh)
-	}
+	p.signalPendingCallbacks()
 }
 
 func (p *chProvider) startWorker(ctx context.Context, fn func(context.Context)) {
@@ -428,6 +519,18 @@ func (p *chProvider) queueError(err error) {
 	p.mu.Unlock()
 
 	signal(p.errCh)
+}
+
+func (p *chProvider) queueMessage(msg string) {
+	if msg == "" {
+		return
+	}
+
+	p.mu.Lock()
+	p.pendingMessages = append(p.pendingMessages, msg)
+	p.mu.Unlock()
+
+	signal(p.msgCh)
 }
 
 func (p *chProvider) updateLoop(ctx context.Context) {
@@ -634,6 +737,85 @@ func (p *chProvider) hasPendingErrorsLocked() bool {
 	return p.pendingErrHead < len(p.pendingErrs)
 }
 
+func (p *chProvider) messageLoop(ctx context.Context) {
+	for {
+		if !p.waitForSignal(ctx, p.msgCh) {
+			return
+		}
+
+		p.drainMessages(ctx)
+	}
+}
+
+func (p *chProvider) drainMessages(ctx context.Context) {
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+
+		cb := p.messageCallback()
+		if cb == nil {
+			return
+		}
+
+		msg := p.popPendingMessage()
+		if msg == "" {
+			return
+		}
+
+		invokeOnFreshGoroutine(func() {
+			cb(msg)
+		})
+	}
+}
+
+func (p *chProvider) messageCallback() func(string) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	return p.onMessage
+}
+
+func (p *chProvider) popPendingMessage() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.pendingMsgHead >= len(p.pendingMessages) {
+		p.pendingMessages = nil
+		p.pendingMsgHead = 0
+
+		return ""
+	}
+
+	msg := p.pendingMessages[p.pendingMsgHead]
+	p.pendingMsgHead++
+
+	if p.pendingMsgHead >= len(p.pendingMessages) {
+		p.pendingMessages = nil
+		p.pendingMsgHead = 0
+	}
+
+	return msg
+}
+
+func (p *chProvider) hasPendingMessagesLocked() bool {
+	return p.pendingMsgHead < len(p.pendingMessages)
+}
+
+func (p *chProvider) buildInitialReaders() error {
+	dbImpl, tree, bd, fingerprint, err := p.buildReadersNow(context.Background())
+	if err != nil {
+		return err
+	}
+
+	p.db = dbImpl
+	p.tree = tree
+	p.bd = bd
+	p.currentFingerprint = fingerprint
+
+	return nil
+}
+
 func openProviderWithConnector(
 	cfg Config,
 	connect func(Config) (ch.Conn, error),
@@ -648,18 +830,16 @@ func openProviderWithConnector(
 	}
 
 	p := &chProvider{cfg: cfg, conn: conn}
+	p.startBackgroundWorkers()
 
-	dbImpl, tree, bd, fingerprint, err := p.buildReadersNow(context.Background())
-	if err != nil {
+	if err := p.buildInitialReaders(); err != nil {
+		p.stopPolling()
+
 		_ = conn.Close()
 
 		return nil, err
 	}
 
-	p.db = dbImpl
-	p.tree = tree
-	p.bd = bd
-	p.currentFingerprint = fingerprint
 	p.startPolling()
 
 	return p, nil

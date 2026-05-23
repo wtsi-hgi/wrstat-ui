@@ -112,6 +112,16 @@ func (s *Server) SetProvider(p provider.Provider) error {
 		s.Logger.Printf("provider error: %s", err)
 	})
 
+	if messenger, ok := p.(provider.Messenger); ok {
+		messenger.OnMessage(func(msg string) {
+			if msg == "" {
+				return
+			}
+
+			s.Logger.Printf("provider message: %s", msg)
+		})
+	}
+
 	return nil
 }
 

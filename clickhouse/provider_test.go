@@ -435,6 +435,97 @@ func currentGoroutineID() string {
 }
 
 func TestOpenProviderTreeSummaryRefreshFailure(t *testing.T) {
+	Convey("startup refresh timeout schedules maintenance refresh and reports completion", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 100 * time.Millisecond
+		cfg.PollInterval = 0
+
+		const (
+			lustreAncestor = "/lustre/"
+			mountPath      = lustreAncestor + "agentA/"
+		)
+
+		cfg.MountPoints = []string{"/", mountPath}
+
+		bootstrapProvider, err := OpenProvider(cfg)
+		So(err, ShouldBeNil)
+		So(bootstrapProvider.Close(), ShouldBeNil)
+
+		conn := th.openConn(cfg.DSN)
+		providerOwnsConn := false
+
+		Reset(func() {
+			if !providerOwnsConn {
+				So(conn.Close(), ShouldBeNil)
+			}
+		})
+
+		updatedAt := time.Date(2026, 1, 9, 12, 0, 0, 0, time.UTC)
+		sid := snapshotID(mountPath, updatedAt)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		So(insertProviderAncestorSnapshot(ctx, conn, mountPath, updatedAt), ShouldBeNil)
+
+		refreshConn := &treeSummaryRefreshTimeoutThenMaintenanceConn{Conn: conn}
+		started := time.Now()
+
+		p, err := openProviderWithConnector(cfg, func(Config) (ch.Conn, error) {
+			return refreshConn, nil
+		})
+		So(err, ShouldBeNil)
+		So(p, ShouldNotBeNil)
+		So(time.Since(started), ShouldBeLessThan, time.Second)
+
+		providerOwnsConn = true
+
+		Reset(func() { So(p.Close(), ShouldBeNil) })
+
+		messenger, ok := p.(interface{ OnMessage(cb func(msg string)) })
+		So(ok, ShouldBeTrue)
+
+		gotMessage := make(chan string, 1)
+
+		messenger.OnMessage(func(msg string) {
+			gotMessage <- msg
+		})
+
+		select {
+		case msg := <-gotMessage:
+			So(msg, ShouldContainSubstring, "active tree summary refresh completed")
+			So(msg, ShouldContainSubstring, "active_mounts=1")
+		case <-time.After(5 * time.Second):
+			t.Fatalf("timed out waiting for tree summary refresh completion")
+		}
+
+		fingerprint := fingerprintForMountsActive([]mountsActiveRow{{
+			mountPath:  mountPath,
+			snapshotID: sid.String(),
+			updatedAt:  updatedAt,
+		}})
+		So(countRows(ctx, refreshConn,
+			"SELECT count() FROM wrstat_tree_summary_sets FINAL WHERE fingerprint = ?",
+			fingerprint,
+		), ShouldEqual, 1)
+		So(refreshConn.inlineRefreshFailures(), ShouldBeGreaterThan, 0)
+		So(refreshConn.maintenanceRefreshInserts(), ShouldBeGreaterThan, 0)
+
+		treeBefore := refreshConn.treeSummaryQueryCount()
+		ancestorBefore := refreshConn.ancestorDGUTAQueryCount()
+
+		di, err := p.Tree().DirInfo("/", &db.Filter{Age: db.DGUTAgeAll})
+		So(err, ShouldBeNil)
+		So(di, ShouldNotBeNil)
+		So(di.Current.Count, ShouldEqual, 4)
+		So(refreshConn.treeSummaryQueryCount(), ShouldBeGreaterThan, treeBefore)
+		So(refreshConn.ancestorDGUTAQueryCount(), ShouldEqual, ancestorBefore)
+	})
+
 	Convey("provider reader build publishes readers when tree summary refresh times out", t, func() {
 		os.Setenv("WRSTAT_ENV", "test")
 		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
@@ -533,6 +624,45 @@ func TestOpenProviderTreeSummaryRefreshFailure(t *testing.T) {
 
 		So(failingConn.treeSummaryRefreshFailures(), ShouldBeGreaterThan, 0)
 	})
+}
+
+func insertProviderAncestorSnapshot(
+	ctx context.Context,
+	conn providerExecConn,
+	mountPath string,
+	updatedAt time.Time,
+) error {
+	sid := snapshotID(mountPath, updatedAt)
+	atimeBuckets := []uint64{1, 0, 0, 0, 0, 0, 0, 0, 0}
+	mtimeBuckets := []uint64{0, 1, 0, 0, 0, 0, 0, 0, 0}
+
+	if err := conn.Exec(ctx, testInsertMountStmt, mountPath, time.Now().UTC(), sid, updatedAt); err != nil {
+		return err
+	}
+
+	for _, dir := range []string{"/", "/lustre/"} {
+		if err := conn.Exec(
+			ctx,
+			testInsertDGUTAStmt,
+			mountPath,
+			sid.String(),
+			dir,
+			uint32(7),
+			uint32(9),
+			uint16(db.DGUTAFileTypeBam),
+			uint8(db.DGUTAgeAll),
+			uint64(4),
+			uint64(40),
+			int64(10),
+			int64(20),
+			atimeBuckets,
+			mtimeBuckets,
+		); err != nil {
+			return err
+		}
+	}
+
+	return conn.Exec(ctx, testInsertChildrenStmt, mountPath, sid.String(), "/", "/lustre")
 }
 
 func TestProviderCloseStopsPollingPromptly(t *testing.T) {
@@ -1071,4 +1201,65 @@ func (c *providerCloseTestConn) Query(context.Context, string, ...any) (driver.R
 
 type providerExecConn interface {
 	Exec(ctx context.Context, query string, args ...any) error
+}
+
+type treeSummaryRefreshTimeoutThenMaintenanceConn struct {
+	ch.Conn
+
+	ancestorDGUTAQueries atomic.Int32
+	inlineFailures       atomic.Int32
+	maintenanceInserts   atomic.Int32
+	treeSummaryQueries   atomic.Int32
+}
+
+func (c *treeSummaryRefreshTimeoutThenMaintenanceConn) Query(
+	ctx context.Context,
+	query string,
+	args ...any,
+) (driver.Rows, error) {
+	if isAncestorDGUTAQuery(query) {
+		c.ancestorDGUTAQueries.Add(1)
+	}
+
+	if isTreeSummaryQuery(query) {
+		c.treeSummaryQueries.Add(1)
+	}
+
+	return c.Conn.Query(ctx, query, args...)
+}
+
+func (c *treeSummaryRefreshTimeoutThenMaintenanceConn) Exec(
+	ctx context.Context,
+	query string,
+	args ...any,
+) error {
+	if strings.Contains(query, "INSERT INTO wrstat_tree_") {
+		if _, ok := ctx.Deadline(); ok {
+			c.inlineFailures.Add(1)
+
+			<-ctx.Done()
+
+			return ctx.Err()
+		}
+
+		c.maintenanceInserts.Add(1)
+	}
+
+	return c.Conn.Exec(ctx, query, args...)
+}
+
+func (c *treeSummaryRefreshTimeoutThenMaintenanceConn) ancestorDGUTAQueryCount() int {
+	return int(c.ancestorDGUTAQueries.Load())
+}
+
+func (c *treeSummaryRefreshTimeoutThenMaintenanceConn) inlineRefreshFailures() int {
+	return int(c.inlineFailures.Load())
+}
+
+func (c *treeSummaryRefreshTimeoutThenMaintenanceConn) maintenanceRefreshInserts() int {
+	return int(c.maintenanceInserts.Load())
+}
+
+func (c *treeSummaryRefreshTimeoutThenMaintenanceConn) treeSummaryQueryCount() int {
+	return int(c.treeSummaryQueries.Load())
 }

@@ -538,6 +538,28 @@ func TestServer(t *testing.T) {
 			So(err.Error(), ShouldContainSubstring, "mount timestamps error")
 		})
 
+		Convey("SetProvider logs provider messages", func() {
+			path, err := CreateExampleDBsCustomIDs(t, uid, gids[0], gids[1], refTime)
+			So(err, ShouldBeNil)
+
+			ownersPath, err := internaldata.CreateOwnersCSV(t, internaldata.ExampleOwnersCSV)
+			So(err, ShouldBeNil)
+
+			p, err := BuildTestProvider(t, []string{path}, ownersPath, time.Unix(refTime, 0))
+			So(err, ShouldBeNil)
+
+			tp, ok := p.(*testProvider)
+			So(ok, ShouldBeTrue)
+
+			err = s.SetProvider(tp)
+			So(err, ShouldBeNil)
+
+			tp.triggerMessage(
+				"clickhouse: active tree summary refresh completed active_mounts=1",
+			)
+			So(logWriter.String(), ShouldContainSubstring, "provider message: clickhouse: active tree summary refresh completed")
+		})
+
 		Convey("SetProvider sanitises invalid usage times during cache prewarm", func() {
 			path, err := CreateExampleDBsCustomIDs(t, uid, gids[0], gids[1], refTime)
 			So(err, ShouldBeNil)
