@@ -46,6 +46,7 @@ const (
 	importPhaseDGUTAInsert        = "wrstat_dguta_insert"
 	importPhaseChildrenInsert     = "wrstat_children_insert"
 	importPhaseMountSwitch        = "mount_switch"
+	importPhaseTreeSummaryRefresh = "wrstat_tree_summary_refresh"
 	importPhaseOldSnapshotDrop    = "old_snapshot_partition_drop"
 
 	activeSnapshotQuery = "SELECT toString(snapshot_id) FROM wrstat_mounts_active " +
@@ -306,11 +307,26 @@ func (w *dgutaWriter) switchSnapshotAndDropOld(ctx context.Context) error {
 		return err
 	}
 
+	if err := w.refreshActiveTreeSummaries(ctx); err != nil {
+		return err
+	}
+
 	if !hasPrevious {
 		return nil
 	}
 
 	return w.dropPreviousSnapshotPartitions(ctx, previousSID)
+}
+
+func (w *dgutaWriter) refreshActiveTreeSummaries(ctx context.Context) error {
+	return w.timeImportPhase(importPhaseTreeSummaryRefresh, func() error {
+		rows, err := queryMountsActiveRows(ctx, w.conn)
+		if err != nil {
+			return err
+		}
+
+		return ensureActiveTreeSummaries(ctx, w.conn, rows)
+	})
 }
 
 func (w *dgutaWriter) switchSnapshotOrCleanup(ctx context.Context) error {

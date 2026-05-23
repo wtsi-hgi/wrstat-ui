@@ -411,6 +411,10 @@ func (d *clickHouseDatabase) dirInfoAncestor(
 ) (*db.DirSummary, error) {
 	normDir := ensureTrailingSlash(dir)
 
+	if sum, ok, err := d.dirInfoTreeSummaryAncestor(normDir, filter); err != nil || ok {
+		return sum, err
+	}
+
 	gutas, err := d.gutasForAncestor(normDir)
 	if err != nil {
 		return nil, err
@@ -426,6 +430,25 @@ func (d *clickHouseDatabase) dirInfoAncestor(
 	}
 
 	return dirSummaryWithModtime(gutas, filter, updatedAt), nil
+}
+
+func (d *clickHouseDatabase) dirInfoTreeSummaryAncestor(
+	dir string,
+	filter *db.Filter,
+) (*db.DirSummary, bool, error) {
+	ctx, cancel := configQueryContext(d.cfg)
+	defer cancel()
+
+	if sum, ok, err := d.treeDirSummary(ctx, dir, filter); err != nil || ok {
+		return sum, ok, err
+	}
+
+	gutas, updatedAt, ok, err := d.treeSummaryGUTAs(ctx, dir)
+	if err != nil || !ok {
+		return nil, ok, err
+	}
+
+	return dirSummaryWithModtime(gutas, filter, updatedAt), true, nil
 }
 
 func (d *clickHouseDatabase) Children(dir string) ([]string, error) {
@@ -491,27 +514,74 @@ func (d *clickHouseDatabase) DirsHaveChildren(
 		return nil, err
 	}
 
-	result := make(map[string]bool, len(dirs))
-	for _, dir := range dirs {
-		result[dir] = false
-	}
+	result := newDirsHaveChildrenResult(dirs)
 
 	groups, fallback, err := d.groupDirsByActiveMount(dirs)
 	if err != nil {
 		return nil, err
 	}
 
-	for _, group := range groups {
-		if err := d.addDirsHaveChildrenForMount(result, group, filter); err != nil {
-			return nil, err
-		}
+	if groupErr := d.addDirsHaveChildrenGroups(result, groups, filter); groupErr != nil {
+		return nil, groupErr
 	}
 
-	for _, dir := range fallback {
+	unhandledFallback, err := d.addTreeSummaryDirsHaveChildren(result, fallback, filter)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, dir := range unhandledFallback {
 		result[dir] = d.dirHasChildrenSlow(dir, filter)
 	}
 
 	return result, nil
+}
+
+func newDirsHaveChildrenResult(dirs []string) map[string]bool {
+	result := make(map[string]bool, len(dirs))
+	for _, dir := range dirs {
+		result[dir] = false
+	}
+
+	return result
+}
+
+func (d *clickHouseDatabase) addDirsHaveChildrenGroups(
+	result map[string]bool,
+	groups map[string]*activeMountDirGroup,
+	filter *db.Filter,
+) error {
+	for _, group := range groups {
+		if err := d.addDirsHaveChildrenForMount(result, group, filter); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (d *clickHouseDatabase) addTreeSummaryDirsHaveChildren(
+	result map[string]bool,
+	dirs []string,
+	filter *db.Filter,
+) ([]string, error) {
+	if len(dirs) == 0 {
+		return nil, nil
+	}
+
+	ctx, cancel := configQueryContext(d.cfg)
+	defer cancel()
+
+	hasChildren, ok, err := d.treeSummaryDirsHaveChildren(ctx, dirs, filter)
+	if err != nil || !ok {
+		return dirs, err
+	}
+
+	for dir, has := range hasChildren {
+		result[dir] = has
+	}
+
+	return nil, nil
 }
 
 func (d *clickHouseDatabase) childrenForMount(mountPath, snapshotID, parentDir string) ([]string, error) {
@@ -956,6 +1026,10 @@ func scanActiveMountRow(rows rowsScanner) (activeMount, error) {
 func (d *clickHouseDatabase) childrenForAncestor(
 	parentDir string,
 ) ([]string, error) {
+	if children, ok, err := d.childrenForTreeSummaryAncestor(parentDir); err != nil || ok {
+		return children, err
+	}
+
 	if d.snapshot != nil {
 		return d.snapshotChildrenForAncestor(parentDir)
 	}
@@ -964,6 +1038,13 @@ func (d *clickHouseDatabase) childrenForAncestor(
 	defer cancel()
 
 	return d.queryChildren(ctx, childrenAncestorQuery, "ancestor children", parentDir, parentDir)
+}
+
+func (d *clickHouseDatabase) childrenForTreeSummaryAncestor(parentDir string) ([]string, bool, error) {
+	ctx, cancel := configQueryContext(d.cfg)
+	defer cancel()
+
+	return d.treeSummaryChildren(ctx, parentDir)
 }
 
 func (d *clickHouseDatabase) snapshotChildrenForAncestor(

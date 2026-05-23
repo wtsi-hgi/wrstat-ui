@@ -152,7 +152,9 @@ func activeMountPathsCondition(
 }
 
 type activeMountsSnapshot struct {
-	mounts []activeMount
+	mounts           []activeMount
+	fingerprint      string
+	treeSummaryReady bool
 }
 
 func newActiveMountsSnapshot(rows []mountsActiveRow) *activeMountsSnapshot {
@@ -166,7 +168,10 @@ func newActiveMountsSnapshot(rows []mountsActiveRow) *activeMountsSnapshot {
 		}
 	}
 
-	return &activeMountsSnapshot{mounts: mounts}
+	return &activeMountsSnapshot{
+		mounts:      mounts,
+		fingerprint: fingerprintForMountsActive(rows),
+	}
 }
 
 func (s *activeMountsSnapshot) resolve(dir string) (activeMount, bool) {
@@ -264,6 +269,20 @@ func (s *activeMountsSnapshot) maxUpdatedAt(dir string) (time.Time, bool) {
 	}
 
 	return latestUpdatedAt, ok
+}
+
+func (s *activeMountsSnapshot) markTreeSummaryReady() {
+	if s != nil {
+		s.treeSummaryReady = true
+	}
+}
+
+func (s *activeMountsSnapshot) treeSummaryFingerprint() (string, bool, error) {
+	if s == nil || !s.treeSummaryReady || s.fingerprint == "" {
+		return "", false, nil
+	}
+
+	return s.fingerprint, true, nil
 }
 
 func (s *activeMountsSnapshot) mountTimestamps() map[string]time.Time {

@@ -780,9 +780,16 @@ func runPerfQuerySuite(report *perfReport, ctx perfQueryContext, printf perfPrin
 }
 
 func boltPerfQueryOps(ctx perfQueryContext) []perfQueryOp {
-	return []perfQueryOp{
+	ops := []perfQueryOp{
 		boltPerfOpMountTimestamps(ctx),
 		boltPerfOpTreeWhereColdThenCached(ctx),
+	}
+
+	if boltPerf.ancLimit > 0 {
+		ops = append(ops, boltPerfOpTreeDiskTreeAncestorDirs(ctx))
+	}
+
+	return append(ops,
 		boltPerfOpTreeDirInfo(ctx),
 		boltPerfOpTreeDiskTreeEndpoint(ctx),
 		boltPerfOpTreeWhere(ctx),
@@ -791,7 +798,7 @@ func boltPerfQueryOps(ctx perfQueryContext) []perfQueryOp {
 		boltPerfOpBasedirsGroupSubdirs(ctx),
 		boltPerfOpBasedirsUserSubdirs(ctx),
 		boltPerfOpBasedirsHistory(ctx),
-	}
+	)
 }
 
 func boltPerfOpMountTimestamps(ctx perfQueryContext) perfQueryOp {
@@ -865,28 +872,141 @@ func boltPerfOpTreeDirInfo(ctx perfQueryContext) perfQueryOp {
 	}
 }
 
+func boltPerfOpTreeDiskTreeAncestorDirs(ctx perfQueryContext) perfQueryOp {
+	dirs := perfAncestorDisktreeDirs(ctx)
+
+	return perfQueryOp{
+		name: "tree_disktree_endpoint_ancestor_dirs",
+		inputs: map[string]any{
+			"start_dir":                  perfAncestorStartDir(),
+			"dirs":                       dirs,
+			"dir_count":                  len(dirs),
+			"ancestor_limit":             boltPerf.ancLimit,
+			perfQueryInputAge:            int(db.DGUTAgeAll),
+			perfQueryInputCacheScope:     "ancestor_directory_sequence",
+			perfQueryInputDurationSource: "wall",
+		},
+		op: func() error {
+			for _, dir := range dirs {
+				if err := runPerfTreeDiskTreeEndpoint(ctx.tree, dir); err != nil {
+					return err
+				}
+			}
+
+			return nil
+		},
+		skipWarmup: true,
+	}
+}
+
+func perfAncestorDisktreeDirs(ctx perfQueryContext) []string {
+	startDir := perfAncestorStartDir()
+
+	if boltPerf.ancLimit <= 0 {
+		return nil
+	}
+
+	mountPaths := make([]string, 0, len(ctx.datasetDirs))
+	for _, datasetDir := range ctx.datasetDirs {
+		mountPath, err := deriveMountPathFromDatasetDirName(filepath.Base(datasetDir))
+		if err != nil {
+			continue
+		}
+
+		mountPaths = append(mountPaths, mountPath)
+	}
+
+	sort.Strings(mountPaths)
+
+	if len(mountPaths) == 0 {
+		return []string{startDir}
+	}
+
+	return perfAncestorDirsForMountPaths(startDir, mountPaths, boltPerf.ancLimit)
+}
+
+func perfAncestorStartDir() string {
+	if dir := normaliseDirPath(boltPerf.ancDir); dir != "" {
+		return dir
+	}
+
+	return "/"
+}
+
+func perfAncestorDirsForMountPaths(startDir string, mountPaths []string, limit int) []string {
+	dirs := make([]string, 0, min(limit, len(mountPaths)+1))
+	seen := make(map[string]bool, len(mountPaths)+1)
+
+	addPerfAncestorDir(&dirs, seen, startDir, limit)
+
+	for _, mountPath := range mountPaths {
+		for _, dir := range perfPrefixDirsForMount(startDir, mountPath) {
+			addPerfAncestorDir(&dirs, seen, dir, limit)
+		}
+	}
+
+	return dirs
+}
+
+func perfPrefixDirsForMount(startDir, mountPath string) []string {
+	mountPath = normaliseDirPath(mountPath)
+	if mountPath == "" || !strings.HasPrefix(mountPath, startDir) {
+		return nil
+	}
+
+	parts := strings.Split(strings.Trim(mountPath, "/"), "/")
+	dirs := make([]string, 0, len(parts)+1)
+	current := "/"
+
+	for _, part := range parts {
+		if part == "" {
+			continue
+		}
+
+		current += part + "/"
+		if strings.HasPrefix(current, startDir) {
+			dirs = append(dirs, current)
+		}
+	}
+
+	return dirs
+}
+
+func addPerfAncestorDir(dirs *[]string, seen map[string]bool, dir string, limit int) {
+	if len(*dirs) >= limit || seen[dir] {
+		return
+	}
+
+	seen[dir] = true
+	*dirs = append(*dirs, dir)
+}
+
 func boltPerfOpTreeDiskTreeEndpoint(ctx perfQueryContext) perfQueryOp {
 	return perfQueryOp{
 		name:   "tree_disktree_endpoint",
 		inputs: map[string]any{perfQueryInputDir: ctx.queryDir, perfQueryInputAge: int(db.DGUTAgeAll)},
 		op: func() error {
-			filter := &db.Filter{Age: db.DGUTAgeAll}
-
-			di, err := ctx.tree.DirInfo(ctx.queryDir, filter)
-			if err != nil || di == nil {
-				return err
-			}
-
-			childPaths := make([]string, 0, len(di.Children))
-			for _, child := range di.Children {
-				childPaths = append(childPaths, child.Dir)
-			}
-
-			_ = ctx.tree.DirsHaveChildren(childPaths, filter)
-
-			return nil
+			return runPerfTreeDiskTreeEndpoint(ctx.tree, ctx.queryDir)
 		},
 	}
+}
+
+func runPerfTreeDiskTreeEndpoint(tree *db.Tree, dir string) error {
+	filter := &db.Filter{Age: db.DGUTAgeAll}
+
+	di, err := tree.DirInfo(dir, filter)
+	if err != nil || di == nil {
+		return err
+	}
+
+	childPaths := make([]string, 0, len(di.Children))
+	for _, child := range di.Children {
+		childPaths = append(childPaths, child.Dir)
+	}
+
+	_ = tree.DirsHaveChildren(childPaths, filter)
+
+	return nil
 }
 
 func boltPerfOpTreeWhere(ctx perfQueryContext) perfQueryOp {

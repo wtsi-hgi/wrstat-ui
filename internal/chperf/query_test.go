@@ -37,6 +37,7 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 	"github.com/wtsi-hgi/wrstat-ui/internal/boltperf"
+	"github.com/wtsi-hgi/wrstat-ui/internal/mountpath"
 	"github.com/wtsi-hgi/wrstat-ui/provider"
 )
 
@@ -112,6 +113,30 @@ func TestNormaliseDirPath(t *testing.T) {
 		Convey("returns already-normalised path unchanged", func() {
 			So(normaliseDirPath("/dir/sub/"), ShouldEqual, "/dir/sub/")
 		})
+	})
+}
+
+func TestDirsForRepeats(t *testing.T) {
+	Convey("uniqueDirsForRepeats caps timings at the discovered dirs", t, func() {
+		dirs := []string{queryOpTestChildADir, queryOpTestChildBDir}
+
+		So(uniqueDirsForRepeats(dirs, 3), ShouldResemble, dirs)
+		So(uniqueDirsForRepeats(dirs, 0), ShouldBeNil)
+		So(uniqueDirsForRepeats(nil, 3), ShouldBeNil)
+	})
+
+	Convey("cycledDirsForRepeats repeats ancestor clicks up to the requested count", t, func() {
+		dirs := []string{"/", queryOpTestRootDir}
+
+		So(cycledDirsForRepeats(dirs, 5), ShouldResemble, []string{
+			"/",
+			queryOpTestRootDir,
+			"/",
+			queryOpTestRootDir,
+			"/",
+		})
+		So(cycledDirsForRepeats(dirs, 0), ShouldBeNil)
+		So(cycledDirsForRepeats(nil, 5), ShouldBeNil)
 	})
 }
 
@@ -541,7 +566,13 @@ func TestBuildOps(t *testing.T) {
 
 	Convey("buildOps reports cold/new directory and fresh-provider tree coverage", t, func() {
 		qctx := queryContext{
-			provider: fakeMountTimestampsProvider{tree: db.NewTree(newQueryOpTestDB())},
+			provider: fakeMountTimestampsProvider{
+				tree: db.NewTree(newQueryOpTestDB()),
+				bd: fakeMountTimestampsReader{mountTimestamps: map[string]time.Time{
+					mountpath.EncodeKey(queryOpTestChildADir): time.Unix(1, 0),
+					mountpath.EncodeKey(queryTestNFSTeamPath): time.Unix(2, 0),
+				}},
+			},
 			client: &fakeQueryClient{rowsByDir: map[string][]QueryRow{
 				queryOpTestRootDir: {
 					{Path: queryOpTestChildADir, EntryType: 'd'},
@@ -554,7 +585,13 @@ func TestBuildOps(t *testing.T) {
 			},
 		}
 
-		ops := buildOps(qctx, QueryOptions{Repeat: 2, Splits: 2, WalkDepth: 1, WalkLimit: 2}, func(string, ...any) {})
+		ops := buildOps(qctx, QueryOptions{
+			Repeat:        5,
+			Splits:        2,
+			WalkDepth:     1,
+			WalkLimit:     2,
+			AncestorLimit: 5,
+		}, func(string, ...any) {})
 		names := make([]string, 0, len(ops))
 
 		for _, op := range ops {
@@ -571,6 +608,7 @@ func TestBuildOps(t *testing.T) {
 		So(coldCachedWhereOp.useWallTime, ShouldBeTrue)
 
 		So(names, ShouldContain, "tree_disktree_endpoint_new_dirs")
+		So(names, ShouldContain, queryOpTreeDiskTreeAncName)
 		So(names, ShouldContain, "tree_where_cold_then_cached")
 		So(names, ShouldContain, "tree_where_fresh_provider")
 		So(queryTestOpIndex(names, "tree_where_cold_then_cached"), ShouldBeLessThan,
@@ -590,6 +628,21 @@ func TestBuildOps(t *testing.T) {
 		So(newDirsOp.inputs["duration_source"], ShouldEqual, "wall")
 		So(newDirsOp.skipWarmup, ShouldBeTrue)
 		So(newDirsOp.repeatOverride, ShouldEqual, 2)
+
+		ancestorOp := findQueryTestOp(ops, queryOpTreeDiskTreeAncName)
+		So(ancestorOp, ShouldNotBeNil)
+		So(ancestorOp.inputs["start_dir"], ShouldEqual, "/")
+		So(ancestorOp.inputs["dirs"], ShouldResemble, []string{
+			"/",
+			"/nfs/",
+			queryTestNFSTeamPath,
+			queryOpTestRootDir,
+			queryOpTestChildADir,
+		})
+		So(ancestorOp.inputs["cache_scope"], ShouldEqual, queryScopeAncestorDirs)
+		So(ancestorOp.inputs["duration_source"], ShouldEqual, "wall")
+		So(ancestorOp.skipWarmup, ShouldBeTrue)
+		So(ancestorOp.repeatOverride, ShouldEqual, 5)
 
 		freshWhereOp := findQueryTestOp(ops, "tree_where_fresh_provider")
 		So(freshWhereOp, ShouldNotBeNil)

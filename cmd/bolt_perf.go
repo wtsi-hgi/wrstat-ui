@@ -38,6 +38,7 @@ const (
 	boltPerfDefaultSplits    = 4
 	boltPerfDefaultWalkDepth = 2
 	boltPerfDefaultWalkLimit = 20
+	boltPerfDefaultAncLimit  = 16
 
 	boltPerfBackendInterfaces = "bolt_interfaces"
 )
@@ -146,11 +147,13 @@ type boltPerfFlags struct {
 	maxLines int
 
 	dir       string
+	ancDir    string
 	repeat    int
 	warmup    int
 	splits    int
 	walkDepth int
 	walkLimit int
+	ancLimit  int
 }
 
 var boltPerf boltPerfFlags
@@ -189,11 +192,13 @@ func runBoltPerfQuery(inputDir string) error {
 		Mounts:                  boltPerf.mounts,
 		JSONOut:                 boltPerf.jsonOut,
 		Dir:                     boltPerf.dir,
+		AncestorDir:             boltPerf.ancDir,
 		Repeat:                  boltPerf.repeat,
 		Warmup:                  boltPerf.warmup,
 		Splits:                  boltPerf.splits,
 		WalkDepth:               boltPerf.walkDepth,
 		WalkLimit:               boltPerf.walkLimit,
+		AncestorLimit:           boltPerf.ancLimit,
 		OpenDatabase:            bolt.OpenDatabase,
 		OpenMultiBaseDirsReader: bolt.OpenMultiBaseDirsReader,
 	}
@@ -229,6 +234,8 @@ func addBoltPerfFlags() {
 	boltPerfImportCmd.Flags().IntVar(&boltPerf.warmup, "warmup", boltPerfDefaultWarmup, "warmup iterations")
 
 	boltPerfQueryCmd.Flags().StringVar(&boltPerf.dir, "dir", "", "directory to query (default: auto)")
+	boltPerfQueryCmd.Flags().StringVar(&boltPerf.ancDir, "ancestor-dir", "/",
+		"ancestor directory for root/click-through Disktree timings")
 	boltPerfQueryCmd.Flags().IntVar(&boltPerf.repeat, "repeat", boltPerfDefaultRepeat, "repeat count")
 	boltPerfQueryCmd.Flags().IntVar(&boltPerf.warmup, "warmup", boltPerfDefaultWarmup, "warmup iterations")
 	boltPerfQueryCmd.Flags().IntVar(&boltPerf.splits, "splits", boltPerfDefaultSplits, "where() splits")
@@ -236,6 +243,8 @@ func addBoltPerfFlags() {
 		"max depth for unique directory tree walk timings")
 	boltPerfQueryCmd.Flags().IntVar(&boltPerf.walkLimit, "walk-limit", boltPerfDefaultWalkLimit,
 		"max unique directories to time in tree walk operations")
+	boltPerfQueryCmd.Flags().IntVar(&boltPerf.ancLimit, "ancestor-limit", boltPerfDefaultAncLimit,
+		"max root/ancestor directories to time in Disktree click-through operations")
 }
 
 func markBoltPerfRequiredFlags() {

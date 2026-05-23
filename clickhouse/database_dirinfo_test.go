@@ -1326,6 +1326,153 @@ func TestClickHouseDatabaseDirInfoScopeResolution(t *testing.T) {
 	})
 }
 
+func TestClickHouseDatabaseActiveAncestorSummaries(t *testing.T) {
+	Convey("Disktree root and ancestor has_children use maintained tree summary rows", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 2 * time.Second
+		cfg.PollInterval = 0
+
+		const (
+			lustreAncestor = "/lustre/"
+			nfsAncestor    = "/nfs/"
+			mountA         = lustreAncestor + "agentA/"
+			mountB         = nfsAncestor + "projectB/"
+		)
+
+		cfg.MountPoints = []string{"/", mountA, mountB}
+
+		bootstrapProvider, err := OpenProvider(cfg)
+		So(err, ShouldBeNil)
+		So(bootstrapProvider.Close(), ShouldBeNil)
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		updatedA := time.Date(2026, 1, 9, 12, 0, 0, 0, time.UTC)
+		updatedB := time.Date(2026, 1, 10, 14, 0, 0, 0, time.UTC)
+		sidA := snapshotID(mountA, updatedA)
+		sidB := snapshotID(mountB, updatedB)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		So(conn.Exec(ctx, testInsertMountStmt, mountA, time.Now(), sidA, updatedA), ShouldBeNil)
+		So(conn.Exec(ctx, testInsertMountStmt, mountB, time.Now(), sidB, updatedB), ShouldBeNil)
+
+		atimeBuckets := []uint64{1, 0, 0, 0, 0, 0, 0, 0, 0}
+		mtimeBuckets := []uint64{0, 1, 0, 0, 0, 0, 0, 0, 0}
+
+		insertGUTA := func(mountPath string, sid fmt.Stringer, dir string, gid uint32, count uint64) {
+			So(conn.Exec(ctx,
+				testInsertDGUTAStmt,
+				mountPath,
+				sid.String(),
+				dir,
+				gid,
+				uint32(9),
+				uint16(db.DGUTAFileTypeBam),
+				uint8(db.DGUTAgeAll),
+				count,
+				count*10,
+				int64(10),
+				int64(20),
+				atimeBuckets,
+				mtimeBuckets,
+			), ShouldBeNil)
+		}
+		insertChild := func(mountPath string, sid fmt.Stringer, parent, child string) {
+			So(conn.Exec(ctx, testInsertChildrenStmt, mountPath, sid.String(), parent, child), ShouldBeNil)
+		}
+
+		for _, dir := range []string{"/", lustreAncestor, mountA} {
+			insertGUTA(mountA, sidA, dir, 7, 10)
+		}
+
+		insertGUTA(mountA, sidA, mountA+"deep/", 7, 3)
+
+		for _, dir := range []string{"/", nfsAncestor, mountB} {
+			insertGUTA(mountB, sidB, dir, 8, 5)
+		}
+
+		insertGUTA(mountB, sidB, mountB+"deep/", 8, 2)
+
+		insertChild(mountA, sidA, "/", "/lustre")
+		insertChild(mountB, sidB, "/", "/nfs")
+		insertChild(mountA, sidA, lustreAncestor, "/lustre/agentA")
+		insertChild(mountB, sidB, nfsAncestor, "/nfs/projectB")
+		insertChild(mountA, sidA, mountA, mountA+"deep")
+		insertChild(mountB, sidB, mountB, mountB+"deep")
+
+		p, err := OpenProvider(cfg)
+		So(err, ShouldBeNil)
+		Reset(func() { So(p.Close(), ShouldBeNil) })
+
+		cp, ok := p.(*chProvider)
+		So(ok, ShouldBeTrue)
+
+		snapshot, _, err := cp.captureActiveMountsState(context.Background())
+		So(err, ShouldBeNil)
+
+		countingConn := &ancestorSummaryQueryCountingConn{Conn: cp.conn}
+		dbch := newClickHouseDatabaseWithSnapshot(cfg, countingConn, snapshot)
+		tree := db.NewTree(dbch)
+
+		filter := &db.Filter{Age: db.DGUTAgeAll}
+		di, err := tree.DirInfo("/", filter)
+		So(err, ShouldBeNil)
+		So(di, ShouldNotBeNil)
+		So(di.Current.Count, ShouldEqual, 15)
+		So(di.Current.Size, ShouldEqual, 150)
+		So(di.Current.Modtime, ShouldResemble, updatedB)
+		So(di.Children, ShouldHaveLength, 2)
+		So(di.Children[0].Dir, ShouldEqual, "/lustre")
+		So(di.Children[0].Count, ShouldEqual, 10)
+		So(di.Children[1].Dir, ShouldEqual, "/nfs")
+		So(di.Children[1].Count, ShouldEqual, 5)
+
+		hasChildren := tree.DirsHaveChildren(
+			[]string{"/lustre", "/nfs"},
+			&db.Filter{GIDs: []uint32{7}, Age: db.DGUTAgeAll},
+		)
+		So(hasChildren, ShouldResemble, map[string]bool{
+			"/lustre": true,
+			"/nfs":    false,
+		})
+
+		for _, emptyFilter := range []*db.Filter{
+			{GIDs: []uint32{}, Age: db.DGUTAgeAll},
+			{UIDs: []uint32{}, Age: db.DGUTAgeAll},
+		} {
+			for _, dir := range []string{"/", lustreAncestor, nfsAncestor} {
+				sum, err := dbch.DirInfo(dir, emptyFilter)
+				So(err, ShouldBeNil)
+				So(sum, ShouldBeNil)
+
+				di, err := tree.DirInfo(dir, emptyFilter)
+				So(err, ShouldBeNil)
+				So(di, ShouldBeNil)
+			}
+
+			So(tree.DirsHaveChildren(
+				[]string{"/", lustreAncestor, nfsAncestor},
+				emptyFilter,
+			), ShouldResemble, map[string]bool{
+				"/":            false,
+				lustreAncestor: false,
+				nfsAncestor:    false,
+			})
+		}
+
+		So(countingConn.treeSummaryQueryCount(), ShouldBeGreaterThan, 0)
+		So(countingConn.ancestorDGUTAQueryCount(), ShouldEqual, 0)
+	})
+}
+
 type hasChildrenQueryCountingConn struct {
 	ch.Conn
 
@@ -1812,4 +1959,43 @@ func TestClickHouseDatabaseWhereFastPath(t *testing.T) {
 
 func (c *whereQueryCountingConn) summaryBatchQueryCountValue() int {
 	return int(c.summaryBatchQueries.Load())
+}
+
+type ancestorSummaryQueryCountingConn struct {
+	ch.Conn
+
+	ancestorDGUTAQueries atomic.Int32
+	treeSummaryQueries   atomic.Int32
+}
+
+func (c *ancestorSummaryQueryCountingConn) Query(ctx context.Context, query string, args ...any) (driver.Rows, error) {
+	if isAncestorDGUTAQuery(query) {
+		c.ancestorDGUTAQueries.Add(1)
+	}
+
+	if isTreeSummaryQuery(query) {
+		c.treeSummaryQueries.Add(1)
+	}
+
+	return c.Conn.Query(ctx, query, args...)
+}
+
+func isAncestorDGUTAQuery(query string) bool {
+	return strings.Contains(query, "FROM wrstat_dguta d") &&
+		strings.Contains(query, "WHERE d.dir = ?")
+}
+
+func isTreeSummaryQuery(query string) bool {
+	return strings.Contains(query, "FROM wrstat_tree_dguta") ||
+		strings.Contains(query, "JOIN wrstat_tree_dguta") ||
+		strings.Contains(query, "FROM wrstat_tree_dir_summary") ||
+		strings.Contains(query, "JOIN wrstat_tree_dir_summary")
+}
+
+func (c *ancestorSummaryQueryCountingConn) ancestorDGUTAQueryCount() int {
+	return int(c.ancestorDGUTAQueries.Load())
+}
+
+func (c *ancestorSummaryQueryCountingConn) treeSummaryQueryCount() int {
+	return int(c.treeSummaryQueries.Load())
 }

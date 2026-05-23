@@ -725,6 +725,67 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 			sid.String(),
 		), ShouldEqual, 1)
 	})
+
+	Convey("DGUTAWriter populates active tree summary rows on snapshot switch", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 5 * time.Second
+		cfg.MountPoints = []string{"/", "/lustre/agentA/"}
+
+		const mountPath = "/lustre/agentA/"
+
+		updatedAt := time.Date(2026, 1, 9, 12, 0, 0, 0, time.UTC)
+		sid := snapshotID(mountPath, updatedAt)
+
+		w, err := NewDGUTAWriter(cfg)
+		So(err, ShouldBeNil)
+		So(w, ShouldNotBeNil)
+
+		w.SetMountPath(mountPath)
+		w.SetUpdatedAt(updatedAt)
+
+		paths := internaltest.NewDirectoryPathCreator()
+		So(w.Add(singleDGUTARecord(paths.ToDirectoryPath("/"), 42, "/lustre/")), ShouldBeNil)
+		So(w.Add(singleDGUTARecord(paths.ToDirectoryPath("/lustre/"), 42, mountPath)), ShouldBeNil)
+		So(w.Add(singleDGUTARecord(paths.ToDirectoryPath(mountPath), 42, mountPath+"deep/")), ShouldBeNil)
+		So(w.Close(), ShouldBeNil)
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		fingerprint := fingerprintForMountsActive([]mountsActiveRow{{
+			mountPath:  mountPath,
+			snapshotID: sid.String(),
+			updatedAt:  updatedAt,
+		}})
+
+		So(countRows(ctx, conn,
+			"SELECT count() FROM wrstat_tree_summary_sets FINAL WHERE fingerprint = ?",
+			fingerprint,
+		), ShouldEqual, 1)
+		So(countRows(ctx, conn,
+			"SELECT count() FROM wrstat_tree_dguta FINAL WHERE fingerprint = ? AND dir = ?",
+			fingerprint,
+			"/",
+		), ShouldBeGreaterThan, 0)
+		So(countRows(ctx, conn,
+			"SELECT count() FROM wrstat_tree_dir_summary FINAL WHERE fingerprint = ? AND dir = ?",
+			fingerprint,
+			"/",
+		), ShouldBeGreaterThan, 0)
+		So(countRows(ctx, conn,
+			"SELECT count() FROM wrstat_tree_children FINAL WHERE fingerprint = ? AND parent_dir = ?",
+			fingerprint,
+			"/",
+		), ShouldEqual, 1)
+	})
 }
 
 func countRows(ctx context.Context, conn interface {

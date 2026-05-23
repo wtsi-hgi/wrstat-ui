@@ -200,7 +200,14 @@ func (p *chProvider) captureActiveMountsState(parent context.Context) (*activeMo
 		return nil, "", fmt.Errorf("clickhouse: failed to capture mounts_active snapshot: %w", err)
 	}
 
-	return newActiveMountsSnapshot(rows), fingerprintForMountsActive(rows), nil
+	snapshot := newActiveMountsSnapshot(rows)
+	if err := ensureActiveTreeSummaries(ctx, p.conn, rows); err != nil {
+		return nil, "", fmt.Errorf("clickhouse: failed to refresh active tree summaries: %w", err)
+	}
+
+	snapshot.markTreeSummaryReady()
+
+	return snapshot, snapshot.fingerprint, nil
 }
 
 func fingerprintForMountsActive(rows []mountsActiveRow) string {
@@ -350,7 +357,11 @@ func (p *chProvider) mountsActiveFingerprint(parent context.Context) (string, er
 }
 
 func (p *chProvider) mountsActiveRows(ctx context.Context) ([]mountsActiveRow, error) {
-	rows, err := p.conn.Query(ctx, mountsActiveRowsQuery)
+	return queryMountsActiveRows(ctx, p.conn)
+}
+
+func queryMountsActiveRows(ctx context.Context, conn ch.Conn) ([]mountsActiveRow, error) {
+	rows, err := conn.Query(ctx, mountsActiveRowsQuery)
 	if err != nil {
 		return nil, fmt.Errorf("clickhouse: failed to query mounts_active: %w", err)
 	}

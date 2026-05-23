@@ -54,6 +54,7 @@ const (
 	queryInputDurationSource   = "duration_source"
 	queryInputCacheScope       = "cache_scope"
 	queryInputSplitsKey        = "splits"
+	queryOpTreeDiskTreeAncName = "tree_disktree_endpoint_ancestor_dirs"
 	queryOpTreeDiskTreeEndName = "tree_disktree_endpoint"
 	queryOpTreeDiskTreeNewName = "tree_disktree_endpoint_new_dirs"
 	queryOpTreeDirInfoName     = "tree_dirinfo"
@@ -61,6 +62,7 @@ const (
 	queryOpTreeWhereFreshName  = "tree_where_fresh_provider"
 	queryOpTreeWhereName       = "tree_where"
 	queryScopeFreshProvider    = "fresh_provider_per_repeat"
+	queryScopeAncestorDirs     = "ancestor_directory_each_repeat"
 	queryScopeNewDirEachRepeat = "new_directory_each_repeat"
 	queryScopeSameProviderCold = "same_provider_cold_then_warm"
 	queryScopeSameProviderDir  = "same_provider_same_dir"
@@ -84,14 +86,16 @@ var (
 
 // QueryOptions configures the query timing suite.
 type QueryOptions struct {
-	Dir       string
-	UID       uint32
-	GIDs      []uint32
-	Repeat    int
-	Warmup    int
-	Splits    int
-	WalkDepth int
-	WalkLimit int
+	Dir           string
+	AncestorDir   string
+	UID           uint32
+	GIDs          []uint32
+	Repeat        int
+	Warmup        int
+	Splits        int
+	WalkDepth     int
+	WalkLimit     int
+	AncestorLimit int
 }
 
 // Query runs a repeatable timing suite against ClickHouse and returns
@@ -199,7 +203,7 @@ func opTreeWhereColdThenCached(qctx queryContext, splits int) op {
 
 func opTreeDiskTreeEndpointNewDirs(qctx queryContext, opts QueryOptions) op {
 	dirs, fallback := disktreeClickDirs(qctx, opts)
-	timedDirs := dirsForRepeats(dirs, opts.Repeat)
+	timedDirs := uniqueDirsForRepeats(dirs, opts.Repeat)
 	i := 0
 
 	return op{
@@ -232,7 +236,40 @@ func opTreeDiskTreeEndpointNewDirs(qctx queryContext, opts QueryOptions) op {
 	}
 }
 
-func dirsForRepeats(dirs []string, repeat int) []string {
+func opTreeDiskTreeEndpointAncestorDirs(qctx queryContext, opts QueryOptions) op {
+	dirs := ancestorDisktreeDirs(qctx, opts)
+	timedDirs := cycledDirsForRepeats(dirs, opts.Repeat)
+	i := 0
+
+	return op{
+		name: queryOpTreeDiskTreeAncName,
+		inputs: map[string]any{
+			"start_dir":              ancestorStartDir(opts),
+			"dirs":                   timedDirs,
+			"dir_count":              len(timedDirs),
+			"ancestor_limit":         opts.AncestorLimit,
+			queryInputCacheScope:     queryScopeAncestorDirs,
+			queryInputDurationSource: querySourceWall,
+			queryInputAgeKey:         int(db.DGUTAgeAll),
+		},
+		run: func(_ context.Context) error {
+			if i >= len(timedDirs) {
+				return nil
+			}
+
+			dir := timedDirs[i]
+			i++
+
+			return runTreeDiskTreeEndpoint(qctx.provider.Tree(), dir)
+		},
+		useWallTime:       true,
+		skipWarmup:        true,
+		hasRepeatOverride: true,
+		repeatOverride:    len(timedDirs),
+	}
+}
+
+func uniqueDirsForRepeats(dirs []string, repeat int) []string {
 	if repeat <= 0 || len(dirs) == 0 {
 		return nil
 	}
@@ -240,6 +277,19 @@ func dirsForRepeats(dirs []string, repeat int) []string {
 	n := min(repeat, len(dirs))
 
 	return slices.Clone(dirs[:n])
+}
+
+func cycledDirsForRepeats(dirs []string, repeat int) []string {
+	if repeat <= 0 || len(dirs) == 0 {
+		return nil
+	}
+
+	timedDirs := make([]string, 0, repeat)
+	for i := range repeat {
+		timedDirs = append(timedDirs, dirs[i%len(dirs)])
+	}
+
+	return timedDirs
 }
 
 func opTreeDiskTreeEndpoint(qctx queryContext) op {
@@ -356,6 +406,89 @@ func disktreeClickDirs(qctx queryContext, opts QueryOptions) ([]string, bool) {
 	}
 
 	return []string{qctx.dir}, true
+}
+
+func ancestorDisktreeDirs(qctx queryContext, opts QueryOptions) []string {
+	startDir := ancestorStartDir(opts)
+	if opts.AncestorLimit <= 0 {
+		return nil
+	}
+
+	mountPaths := activeMountPaths(qctx.provider)
+	if len(mountPaths) == 0 {
+		return []string{startDir}
+	}
+
+	return ancestorDirsForMountPaths(startDir, mountPaths, opts.AncestorLimit)
+}
+
+func ancestorStartDir(opts QueryOptions) string {
+	if dir := normaliseDirPath(opts.AncestorDir); dir != "" {
+		return dir
+	}
+
+	return "/"
+}
+
+func activeMountPaths(p provider.Provider) []string {
+	if p == nil || p.BaseDirs() == nil {
+		return nil
+	}
+
+	mt, err := p.BaseDirs().MountTimestamps()
+	if err != nil {
+		return nil
+	}
+
+	return DecodeMountPaths(mt)
+}
+
+func ancestorDirsForMountPaths(startDir string, mountPaths []string, limit int) []string {
+	dirs := make([]string, 0, min(limit, len(mountPaths)+1))
+	seen := make(map[string]bool, len(mountPaths)+1)
+
+	addAncestorDir(&dirs, seen, startDir, limit)
+
+	for _, mountPath := range mountPaths {
+		for _, dir := range prefixDirsForMount(startDir, mountPath) {
+			addAncestorDir(&dirs, seen, dir, limit)
+		}
+	}
+
+	return dirs
+}
+
+func prefixDirsForMount(startDir, mountPath string) []string {
+	mountPath = normaliseDirPath(mountPath)
+	if mountPath == "" || !strings.HasPrefix(mountPath, startDir) {
+		return nil
+	}
+
+	parts := strings.Split(strings.Trim(mountPath, "/"), "/")
+	dirs := make([]string, 0, len(parts)+1)
+	current := "/"
+
+	for _, part := range parts {
+		if part == "" {
+			continue
+		}
+
+		current += part + "/"
+		if strings.HasPrefix(current, startDir) {
+			dirs = append(dirs, current)
+		}
+	}
+
+	return dirs
+}
+
+func addAncestorDir(dirs *[]string, seen map[string]bool, dir string, limit int) {
+	if len(*dirs) >= limit || seen[dir] {
+		return
+	}
+
+	seen[dir] = true
+	*dirs = append(*dirs, dir)
 }
 
 func leafDisktreeDirs(dirs []string) []string {
@@ -690,6 +823,10 @@ func buildOps(qctx queryContext, opts QueryOptions, printf PrintfFunc) []op {
 
 	if opts.WalkDepth > 0 && opts.WalkLimit > 0 {
 		ops = append(ops, opTreeDiskTreeEndpointNewDirs(qctx, opts))
+	}
+
+	if opts.AncestorLimit > 0 {
+		ops = append(ops, opTreeDiskTreeEndpointAncestorDirs(qctx, opts))
 	}
 
 	ops = append(ops,

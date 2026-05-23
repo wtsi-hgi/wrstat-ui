@@ -42,6 +42,7 @@ const (
 	chPerfDefaultSplits    = 4
 	chPerfDefaultWalkDepth = 2
 	chPerfDefaultWalkLimit = 20
+	chPerfDefaultAncLimit  = 16
 	chPerfDefaultBatchSize = 100_000
 	chPerfDefaultParallel  = 1
 )
@@ -95,6 +96,7 @@ type chPerfFlags struct {
 	config      string
 
 	dir       string
+	ancDir    string
 	uid       uint32
 	gids      string
 	repeat    int
@@ -102,6 +104,7 @@ type chPerfFlags struct {
 	splits    int
 	walkDepth int
 	walkLimit int
+	ancLimit  int
 }
 
 var chPerf chPerfFlags
@@ -148,6 +151,8 @@ func addCHPerfQueryFlags() {
 
 	f.StringVar(&chPerf.dir, "dir", "",
 		"directory to query (default: auto-select)")
+	f.StringVar(&chPerf.ancDir, "ancestor-dir", "/",
+		"ancestor directory for root/click-through Disktree timings")
 	f.Uint32Var(&chPerf.uid, "uid", 0, "UID for permission query")
 	f.StringVar(&chPerf.gids, "gids", "", "comma-separated GIDs for permission query")
 	f.IntVar(&chPerf.repeat, "repeat", chPerfDefaultRepeat, "number of timed repeats")
@@ -157,6 +162,8 @@ func addCHPerfQueryFlags() {
 		"max depth for unique directory tree walk timings")
 	f.IntVar(&chPerf.walkLimit, "walk-limit", chPerfDefaultWalkLimit,
 		"max unique directories to time in tree walk operations")
+	f.IntVar(&chPerf.ancLimit, "ancestor-limit", chPerfDefaultAncLimit,
+		"max root/ancestor directories to time in Disktree click-through operations")
 }
 
 func runCHPerfImport(inputDir string) error {
@@ -191,14 +198,16 @@ func runCHPerfQuery() error {
 	api := chperf.NewClickHouseAPI(cfg)
 
 	report, err := chperf.Query(api, chperf.QueryOptions{
-		Dir:       chPerf.dir,
-		UID:       chPerf.uid,
-		GIDs:      parseGIDs(chPerf.gids),
-		Repeat:    chPerf.repeat,
-		Warmup:    chPerf.warmup,
-		Splits:    chPerf.splits,
-		WalkDepth: chPerf.walkDepth,
-		WalkLimit: chPerf.walkLimit,
+		Dir:           chPerf.dir,
+		AncestorDir:   chPerf.ancDir,
+		UID:           chPerf.uid,
+		GIDs:          parseGIDs(chPerf.gids),
+		Repeat:        chPerf.repeat,
+		Warmup:        chPerf.warmup,
+		Splits:        chPerf.splits,
+		WalkDepth:     chPerf.walkDepth,
+		WalkLimit:     chPerf.walkLimit,
+		AncestorLimit: chPerf.ancLimit,
 	}, cliPrint)
 	if err != nil {
 		return err

@@ -74,6 +74,7 @@ const (
 	clickHousePerfPhaseOldSnapshotDrop    = "old_snapshot_partition_drop"
 
 	perfOpTreeDirInfo          = "tree_dirinfo"
+	perfOpTreeDiskTreeAncDirs  = "tree_disktree_endpoint_ancestor_dirs"
 	perfOpTreeDiskTreeEndpoint = "tree_disktree_endpoint"
 	perfOpTreeDiskTreeNewDirs  = "tree_disktree_endpoint_new_dirs"
 	perfOpTreeWhere            = "tree_where"
@@ -915,6 +916,7 @@ func TestClickHousePerfQuery(t *testing.T) {
 		So(opNames, ShouldContain, "mount_timestamps")
 		So(opNames, ShouldContain, perfOpTreeDirInfo)
 		So(opNames, ShouldContain, perfOpTreeDiskTreeEndpoint)
+		So(opNames, ShouldContain, perfOpTreeDiskTreeAncDirs)
 		So(opNames, ShouldContain, perfOpTreeDiskTreeNewDirs)
 		So(opNames, ShouldContain, perfOpTreeWhere)
 		So(opNames, ShouldContain, perfOpTreeWhereColdCached)
@@ -941,6 +943,11 @@ func TestClickHousePerfQuery(t *testing.T) {
 		So(newDirs, ShouldNotBeNil)
 		So(newDirs.Inputs["start_dir"], ShouldEqual, treeDirInfo.Inputs["dir"])
 		So(newDirs.Inputs["cache_scope"], ShouldEqual, "new_directory_each_repeat")
+
+		ancestorDirs := findReportOperation(report.Operations, perfOpTreeDiskTreeAncDirs)
+		So(ancestorDirs, ShouldNotBeNil)
+		So(ancestorDirs.Inputs["start_dir"], ShouldEqual, "/")
+		So(ancestorDirs.Inputs["cache_scope"], ShouldEqual, "ancestor_directory_each_repeat")
 
 		freshWhere := findReportOperation(report.Operations, perfOpTreeWhereFresh)
 		So(freshWhere, ShouldNotBeNil)
@@ -1297,6 +1304,7 @@ func TestBoltPerf(t *testing.T) {
 			"mount_timestamps",
 			perfOpTreeWhereColdCached,
 			perfOpTreeDiskTreeNewDirs,
+			perfOpTreeDiskTreeAncDirs,
 			perfOpTreeDirInfo,
 			perfOpTreeDiskTreeEndpoint,
 			perfOpTreeWhere,
@@ -1408,6 +1416,7 @@ func TestBoltPerf(t *testing.T) {
 			So(opNames2, ShouldResemble, []string{
 				"mount_timestamps",
 				perfOpTreeWhereColdCached,
+				perfOpTreeDiskTreeAncDirs,
 				perfOpTreeDirInfo,
 				perfOpTreeDiskTreeEndpoint,
 				perfOpTreeWhere,

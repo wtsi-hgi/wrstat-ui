@@ -62,6 +62,7 @@ const (
 	phaseDGUTAInsert        = "wrstat_dguta_insert"
 	phaseChildrenInsert     = "wrstat_children_insert"
 	phaseMountSwitch        = "mount_switch"
+	phaseTreeSummaryRefresh = "wrstat_tree_summary_refresh"
 	phaseOldSnapshotDrop    = "old_snapshot_partition_drop"
 	phaseBasedirsReset      = "wrstat_basedirs_reset"
 	phaseBasedirsGroupUsage = "wrstat_basedirs_group_usage_insert"
@@ -75,6 +76,10 @@ const (
 	tableFiles                = "wrstat_files"
 	tableDGUTA                = "wrstat_dguta"
 	tableChildren             = "wrstat_children"
+	tableTreeSummarySets      = "wrstat_tree_summary_sets"
+	tableTreeDGUTA            = "wrstat_tree_dguta"
+	tableTreeDirSummary       = "wrstat_tree_dir_summary"
+	tableTreeChildren         = "wrstat_tree_children"
 	tableBasedirsGroupUsage   = "wrstat_basedirs_group_usage"
 	tableBasedirsUserUsage    = "wrstat_basedirs_user_usage"
 	tableBasedirsGroupSubdirs = "wrstat_basedirs_group_subdirs"
@@ -269,6 +274,8 @@ func importMultiTablePhase(phase string) ([]string, bool) {
 		}, true
 	case phaseBasedirsFinalise:
 		return []string{tableBasedirsGroupUsage, tableBasedirsHistory}, true
+	case phaseTreeSummaryRefresh:
+		return []string{tableTreeSummarySets, tableTreeDGUTA, tableTreeDirSummary, tableTreeChildren}, true
 	default:
 		return nil, false
 	}

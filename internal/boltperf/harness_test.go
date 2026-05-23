@@ -28,11 +28,13 @@ package boltperf
 
 import (
 	"io"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	. "github.com/smartystreets/goconvey/convey"
 	"github.com/wtsi-hgi/wrstat-ui/db"
+	"github.com/wtsi-hgi/wrstat-ui/internal/mountpath"
 )
 
 const (
@@ -61,6 +63,30 @@ func TestLineCountingReader(t *testing.T) {
 			So(string(b), ShouldEqual, "a\nb\n")
 			So(lr.linesRead(), ShouldEqual, 2)
 		})
+	})
+}
+
+func TestDirsForRepeats(t *testing.T) {
+	Convey("uniqueDirsForRepeats caps timings at the discovered dirs", t, func() {
+		dirs := []string{"/a/", "/b/"}
+
+		So(uniqueDirsForRepeats(dirs, 3), ShouldResemble, dirs)
+		So(uniqueDirsForRepeats(dirs, 0), ShouldBeNil)
+		So(uniqueDirsForRepeats(nil, 3), ShouldBeNil)
+	})
+
+	Convey("cycledDirsForRepeats repeats ancestor clicks up to the requested count", t, func() {
+		dirs := []string{"/", querySuiteTestRootDir}
+
+		So(cycledDirsForRepeats(dirs, 5), ShouldResemble, []string{
+			"/",
+			querySuiteTestRootDir,
+			"/",
+			querySuiteTestRootDir,
+			"/",
+		})
+		So(cycledDirsForRepeats(dirs, 0), ShouldBeNil)
+		So(cycledDirsForRepeats(nil, 5), ShouldBeNil)
 	})
 }
 
@@ -117,6 +143,10 @@ func (d *querySuiteTestDB) Close() error {
 func TestQuerySuiteOps(t *testing.T) {
 	Convey("buildQuerySuiteOps reports DiskTree endpoint", t, func() {
 		ctx := queryContext{
+			datasetDirs: []string{
+				filepath.Join("/tmp", "20260101_"+mountpath.EncodeKey(querySuiteTestChildADir)),
+				filepath.Join("/tmp", "20260101_"+mountpath.EncodeKey("/nfs/team/")),
+			},
 			tree:     db.NewTree(newQuerySuiteTestDB()),
 			queryDir: querySuiteTestRootDir,
 			openFreshTree: func() (*db.Tree, func() error, error) {
@@ -124,7 +154,13 @@ func TestQuerySuiteOps(t *testing.T) {
 			},
 		}
 
-		ops := buildQuerySuiteOps(ctx, QueryOptions{Repeat: 2, Splits: 4, WalkDepth: 1, WalkLimit: 2})
+		ops := buildQuerySuiteOps(ctx, QueryOptions{
+			Repeat:        5,
+			Splits:        4,
+			WalkDepth:     1,
+			WalkLimit:     2,
+			AncestorLimit: 5,
+		})
 		names := make([]string, 0, len(ops))
 
 		for _, op := range ops {
@@ -141,6 +177,7 @@ func TestQuerySuiteOps(t *testing.T) {
 
 		So(names, ShouldContain, "tree_disktree_endpoint")
 		So(names, ShouldContain, "tree_disktree_endpoint_new_dirs")
+		So(names, ShouldContain, "tree_disktree_endpoint_ancestor_dirs")
 		So(names, ShouldContain, "tree_where_cold_then_cached")
 		So(names, ShouldContain, "tree_where_fresh_provider")
 		So(querySuiteTestOpIndex(names, "tree_where_cold_then_cached"), ShouldBeLessThan,
@@ -159,6 +196,20 @@ func TestQuerySuiteOps(t *testing.T) {
 		So(newDirsOp.inputs["cache_scope"], ShouldEqual, "new_directory_each_repeat")
 		So(newDirsOp.skipWarmup, ShouldBeTrue)
 		So(newDirsOp.repeatOverride, ShouldEqual, 2)
+
+		ancestorOp := findQuerySuiteTestOp(ops, "tree_disktree_endpoint_ancestor_dirs")
+		So(ancestorOp, ShouldNotBeNil)
+		So(ancestorOp.inputs["start_dir"], ShouldEqual, "/")
+		So(ancestorOp.inputs["dirs"], ShouldResemble, []string{
+			"/",
+			"/nfs/",
+			"/nfs/team/",
+			querySuiteTestRootDir,
+			querySuiteTestChildADir,
+		})
+		So(ancestorOp.inputs["cache_scope"], ShouldEqual, queryScopeAncestorDirs)
+		So(ancestorOp.skipWarmup, ShouldBeTrue)
+		So(ancestorOp.repeatOverride, ShouldEqual, 5)
 
 		freshWhereOp := findQuerySuiteTestOp(ops, "tree_where_fresh_provider")
 		So(freshWhereOp, ShouldNotBeNil)

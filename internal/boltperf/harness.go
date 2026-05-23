@@ -67,6 +67,7 @@ const (
 	queryInputDirKey           = "dir"
 	queryInputDurationSource   = "duration_source"
 	queryInputSplitsKey        = "splits"
+	queryScopeAncestorDirs     = "ancestor_directory_each_repeat"
 	queryScopeFreshProvider    = "fresh_provider_per_repeat"
 	queryScopeNewDir           = "new_directory_each_repeat"
 	queryScopeSameProviderCold = "same_provider_cold_then_warm"
@@ -750,6 +751,10 @@ func buildQuerySuiteOps(ctx queryContext, opts QueryOptions) []querySuiteOp {
 		ops = append(ops, opTreeDiskTreeEndpointNewDirs(ctx, opts))
 	}
 
+	if opts.AncestorLimit > 0 {
+		ops = append(ops, opTreeDiskTreeEndpointAncestorDirs(ctx, opts))
+	}
+
 	ops = append(ops, []querySuiteOp{
 		{
 			name: "tree_dirinfo",
@@ -867,7 +872,7 @@ func opTreeWhereColdThenCached(ctx queryContext, splits int) querySuiteOp {
 
 func opTreeDiskTreeEndpointNewDirs(ctx queryContext, opts QueryOptions) querySuiteOp {
 	dirs, fallback := disktreeClickDirs(ctx, opts)
-	timedDirs := dirsForRepeats(dirs, opts.Repeat)
+	timedDirs := uniqueDirsForRepeats(dirs, opts.Repeat)
 	i := 0
 
 	return querySuiteOp{
@@ -899,6 +904,38 @@ func opTreeDiskTreeEndpointNewDirs(ctx queryContext, opts QueryOptions) querySui
 	}
 }
 
+func opTreeDiskTreeEndpointAncestorDirs(ctx queryContext, opts QueryOptions) querySuiteOp {
+	dirs := ancestorDisktreeDirs(ctx, opts)
+	timedDirs := cycledDirsForRepeats(dirs, opts.Repeat)
+	i := 0
+
+	return querySuiteOp{
+		name: "tree_disktree_endpoint_ancestor_dirs",
+		inputs: map[string]any{
+			"start_dir":              ancestorStartDir(opts),
+			"dirs":                   timedDirs,
+			"dir_count":              len(timedDirs),
+			"ancestor_limit":         opts.AncestorLimit,
+			queryInputCacheScope:     queryScopeAncestorDirs,
+			queryInputDurationSource: querySourceWall,
+			queryInputAgeKey:         int(db.DGUTAgeAll),
+		},
+		op: func() error {
+			if i >= len(timedDirs) {
+				return nil
+			}
+
+			dir := timedDirs[i]
+			i++
+
+			return runTreeDiskTreeEndpoint(ctx.tree, dir)
+		},
+		skipWarmup:        true,
+		hasRepeatOverride: true,
+		repeatOverride:    len(timedDirs),
+	}
+}
+
 func disktreeClickDirs(ctx queryContext, opts QueryOptions) ([]string, bool) {
 	dirs := leafDisktreeDirs(collectDisktreeDirsFromFreshTree(ctx, opts.WalkDepth, opts.WalkLimit))
 	if len(dirs) > 0 || opts.WalkLimit <= 0 {
@@ -906,6 +943,92 @@ func disktreeClickDirs(ctx queryContext, opts QueryOptions) ([]string, bool) {
 	}
 
 	return []string{ctx.queryDir}, true
+}
+
+func ancestorDisktreeDirs(ctx queryContext, opts QueryOptions) []string {
+	startDir := ancestorStartDir(opts)
+	if opts.AncestorLimit <= 0 {
+		return nil
+	}
+
+	mountPaths := mountPathsFromDatasetDirs(ctx.datasetDirs)
+	if len(mountPaths) == 0 {
+		return []string{startDir}
+	}
+
+	return ancestorDirsForMountPaths(startDir, mountPaths, opts.AncestorLimit)
+}
+
+func ancestorStartDir(opts QueryOptions) string {
+	if dir := normaliseDirPath(opts.AncestorDir); dir != "" {
+		return dir
+	}
+
+	return "/"
+}
+
+func mountPathsFromDatasetDirs(datasetDirs []string) []string {
+	mountPaths := make([]string, 0, len(datasetDirs))
+	for _, datasetDir := range datasetDirs {
+		mountPath, err := DeriveMountPathFromDatasetDirName(filepath.Base(datasetDir))
+		if err != nil {
+			continue
+		}
+
+		mountPaths = append(mountPaths, mountPath)
+	}
+
+	sort.Strings(mountPaths)
+
+	return mountPaths
+}
+
+func ancestorDirsForMountPaths(startDir string, mountPaths []string, limit int) []string {
+	dirs := make([]string, 0, min(limit, len(mountPaths)+1))
+	seen := make(map[string]bool, len(mountPaths)+1)
+
+	addAncestorDir(&dirs, seen, startDir, limit)
+
+	for _, mountPath := range mountPaths {
+		for _, dir := range prefixDirsForMount(startDir, mountPath) {
+			addAncestorDir(&dirs, seen, dir, limit)
+		}
+	}
+
+	return dirs
+}
+
+func prefixDirsForMount(startDir, mountPath string) []string {
+	mountPath = normaliseDirPath(mountPath)
+	if mountPath == "" || !strings.HasPrefix(mountPath, startDir) {
+		return nil
+	}
+
+	parts := strings.Split(strings.Trim(mountPath, "/"), "/")
+	dirs := make([]string, 0, len(parts)+1)
+	current := "/"
+
+	for _, part := range parts {
+		if part == "" {
+			continue
+		}
+
+		current += part + "/"
+		if strings.HasPrefix(current, startDir) {
+			dirs = append(dirs, current)
+		}
+	}
+
+	return dirs
+}
+
+func addAncestorDir(dirs *[]string, seen map[string]bool, dir string, limit int) {
+	if len(*dirs) >= limit || seen[dir] {
+		return
+	}
+
+	seen[dir] = true
+	*dirs = append(*dirs, dir)
 }
 
 func leafDisktreeDirs(dirs []string) []string {
@@ -1018,7 +1141,7 @@ func appendDisktreeWalkChildren(
 	return queue
 }
 
-func dirsForRepeats(dirs []string, repeat int) []string {
+func uniqueDirsForRepeats(dirs []string, repeat int) []string {
 	if repeat <= 0 || len(dirs) == 0 {
 		return nil
 	}
@@ -1026,6 +1149,19 @@ func dirsForRepeats(dirs []string, repeat int) []string {
 	n := min(repeat, len(dirs))
 
 	return append([]string(nil), dirs[:n]...)
+}
+
+func cycledDirsForRepeats(dirs []string, repeat int) []string {
+	if repeat <= 0 || len(dirs) == 0 {
+		return nil
+	}
+
+	timedDirs := make([]string, 0, repeat)
+	for i := range repeat {
+		timedDirs = append(timedDirs, dirs[i%len(dirs)])
+	}
+
+	return timedDirs
 }
 
 func runTreeDiskTreeEndpoint(tree *db.Tree, dir string) error {
@@ -1205,12 +1341,14 @@ type QueryOptions struct {
 	Mounts  string
 	JSONOut string
 
-	Dir       string
-	Repeat    int
-	Warmup    int
-	Splits    int
-	WalkDepth int
-	WalkLimit int
+	Dir           string
+	AncestorDir   string
+	Repeat        int
+	Warmup        int
+	Splits        int
+	WalkDepth     int
+	WalkLimit     int
+	AncestorLimit int
 
 	OpenDatabase            func(paths ...string) (db.Database, error)
 	OpenMultiBaseDirsReader func(ownersPath string, dbPaths ...string) (basedirs.Reader, error)
