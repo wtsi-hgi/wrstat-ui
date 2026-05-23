@@ -41,6 +41,7 @@ func TestClickHousePerfQueryFlags(t *testing.T) {
 		So(flags.Lookup("walk-limit"), ShouldNotBeNil)
 		So(flags.Lookup("ancestor-dir"), ShouldNotBeNil)
 		So(flags.Lookup("ancestor-limit"), ShouldNotBeNil)
+		So(flags.Lookup("ops"), ShouldNotBeNil)
 	})
 
 	Convey("bolt-perf query exposes tree benchmark controls", t, func() {
@@ -52,5 +53,6 @@ func TestClickHousePerfQueryFlags(t *testing.T) {
 		So(flags.Lookup("walk-limit"), ShouldNotBeNil)
 		So(flags.Lookup("ancestor-dir"), ShouldNotBeNil)
 		So(flags.Lookup("ancestor-limit"), ShouldNotBeNil)
+		So(flags.Lookup("ops"), ShouldNotBeNil)
 	})
 }

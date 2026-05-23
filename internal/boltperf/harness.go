@@ -67,6 +67,13 @@ const (
 	queryInputDirKey           = "dir"
 	queryInputDurationSource   = "duration_source"
 	queryInputSplitsKey        = "splits"
+	queryOpTreeDiskTreeAncName = "tree_disktree_endpoint_ancestor_dirs"
+	queryOpTreeDiskTreeEndName = "tree_disktree_endpoint"
+	queryOpTreeDiskTreeNewName = "tree_disktree_endpoint_new_dirs"
+	queryOpTreeDirInfoName     = "tree_dirinfo"
+	queryOpTreeWhereColdName   = "tree_where_cold_then_cached"
+	queryOpTreeWhereFreshName  = "tree_where_fresh_provider"
+	queryOpTreeWhereName       = "tree_where"
 	queryScopeAncestorDirs     = "ancestor_directory_each_repeat"
 	queryScopeFreshProvider    = "fresh_provider_per_repeat"
 	queryScopeNewDir           = "new_directory_each_repeat"
@@ -88,6 +95,8 @@ var (
 	ErrOpenDatabaseRequired = errors.New("OpenDatabase is required")
 	// ErrOpenMultiBaseDirsReaderRequired indicates the query options must supply OpenMultiBaseDirsReader.
 	ErrOpenMultiBaseDirsReaderRequired = errors.New("OpenMultiBaseDirsReader is required")
+
+	errUnknownQueryOps = errors.New("unknown query ops")
 )
 
 // PrintfFunc matches fmt.Printf-style output and is used by the harness
@@ -728,13 +737,85 @@ func openFreshQueryTree(opts QueryOptions, datasetDir string) (*db.Tree, func() 
 }
 
 func runQuerySuite(report *Report, ctx queryContext, opts QueryOptions, printf PrintfFunc) error {
-	for _, op := range buildQuerySuiteOps(ctx, opts) {
+	ops, err := selectQuerySuiteOps(buildQuerySuiteOps(ctx, opts), opts.Ops)
+	if err != nil {
+		return err
+	}
+
+	for _, op := range ops {
 		if err := timeAndReportQueryOp(report, opts, printf, op); err != nil {
 			return err
 		}
 	}
 
 	return nil
+}
+
+func selectQuerySuiteOps(ops []querySuiteOp, names []string) ([]querySuiteOp, error) {
+	wanted, wantedOrder := queryOpNameSet(names)
+	if len(wanted) == 0 {
+		return ops, nil
+	}
+
+	available := make([]string, 0, len(ops))
+	availableSet := make(map[string]struct{}, len(ops))
+	selected := make([]querySuiteOp, 0, len(wanted))
+
+	for _, candidate := range ops {
+		available = append(available, candidate.name)
+		availableSet[candidate.name] = struct{}{}
+
+		if _, ok := wanted[candidate.name]; ok {
+			selected = append(selected, candidate)
+		}
+	}
+
+	unknown := unknownQueryOpNames(wantedOrder, availableSet)
+	if len(unknown) > 0 {
+		return nil, fmt.Errorf(
+			"%w: %s; available ops: %s",
+			errUnknownQueryOps,
+			strings.Join(unknown, ", "),
+			strings.Join(available, ", "),
+		)
+	}
+
+	return selected, nil
+}
+
+func queryOpNameSet(names []string) (map[string]struct{}, []string) {
+	wanted := make(map[string]struct{}, len(names))
+	wantedOrder := make([]string, 0, len(names))
+
+	for _, name := range names {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+
+		if _, ok := wanted[name]; ok {
+			continue
+		}
+
+		wanted[name] = struct{}{}
+		wantedOrder = append(wantedOrder, name)
+	}
+
+	return wanted, wantedOrder
+}
+
+func unknownQueryOpNames(wanted []string, available map[string]struct{}) []string {
+	unknown := make([]string, 0)
+
+	for _, name := range wanted {
+		if _, ok := available[name]; ok {
+			continue
+		}
+
+		unknown = append(unknown, name)
+	}
+
+	return unknown
 }
 
 func buildQuerySuiteOps(ctx queryContext, opts QueryOptions) []querySuiteOp {
@@ -757,7 +838,7 @@ func buildQuerySuiteOps(ctx queryContext, opts QueryOptions) []querySuiteOp {
 
 	ops = append(ops, []querySuiteOp{
 		{
-			name: "tree_dirinfo",
+			name: queryOpTreeDirInfoName,
 			inputs: map[string]any{
 				queryInputDirKey:         ctx.queryDir,
 				queryInputAgeKey:         int(db.DGUTAgeAll),
@@ -767,7 +848,7 @@ func buildQuerySuiteOps(ctx queryContext, opts QueryOptions) []querySuiteOp {
 			op: func() error { return opTreeDirInfo(ctx) },
 		},
 		{
-			name: "tree_disktree_endpoint",
+			name: queryOpTreeDiskTreeEndName,
 			inputs: map[string]any{
 				queryInputDirKey:         ctx.queryDir,
 				queryInputAgeKey:         int(db.DGUTAgeAll),
@@ -777,7 +858,7 @@ func buildQuerySuiteOps(ctx queryContext, opts QueryOptions) []querySuiteOp {
 			op: func() error { return opTreeDiskTreeEndpoint(ctx) },
 		},
 		{
-			name: "tree_where",
+			name: queryOpTreeWhereName,
 			inputs: map[string]any{
 				queryInputDirKey:         ctx.queryDir,
 				queryInputAgeKey:         int(db.DGUTAgeAll),
@@ -788,7 +869,7 @@ func buildQuerySuiteOps(ctx queryContext, opts QueryOptions) []querySuiteOp {
 			op: func() error { return opTreeWhere(ctx, opts.Splits) },
 		},
 		{
-			name: "tree_where_fresh_provider",
+			name: queryOpTreeWhereFreshName,
 			inputs: map[string]any{
 				queryInputDirKey:         ctx.queryDir,
 				queryInputAgeKey:         int(db.DGUTAgeAll),
@@ -857,7 +938,7 @@ func opMountTimestamps(ctx queryContext) error {
 
 func opTreeWhereColdThenCached(ctx queryContext, splits int) querySuiteOp {
 	return querySuiteOp{
-		name: "tree_where_cold_then_cached",
+		name: queryOpTreeWhereColdName,
 		inputs: map[string]any{
 			queryInputDirKey:         ctx.queryDir,
 			queryInputAgeKey:         int(db.DGUTAgeAll),
@@ -876,7 +957,7 @@ func opTreeDiskTreeEndpointNewDirs(ctx queryContext, opts QueryOptions) querySui
 	i := 0
 
 	return querySuiteOp{
-		name: "tree_disktree_endpoint_new_dirs",
+		name: queryOpTreeDiskTreeNewName,
 		inputs: map[string]any{
 			"start_dir":              ctx.queryDir,
 			"dirs":                   timedDirs,
@@ -910,7 +991,7 @@ func opTreeDiskTreeEndpointAncestorDirs(ctx queryContext, opts QueryOptions) que
 	i := 0
 
 	return querySuiteOp{
-		name: "tree_disktree_endpoint_ancestor_dirs",
+		name: queryOpTreeDiskTreeAncName,
 		inputs: map[string]any{
 			"start_dir":              ancestorStartDir(opts),
 			"dirs":                   timedDirs,
@@ -1343,6 +1424,7 @@ type QueryOptions struct {
 
 	Dir           string
 	AncestorDir   string
+	Ops           []string
 	Repeat        int
 	Warmup        int
 	Splits        int

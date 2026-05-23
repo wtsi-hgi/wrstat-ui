@@ -167,7 +167,7 @@ func TestQuerySuiteOps(t *testing.T) {
 			names = append(names, op.name)
 		}
 
-		coldCachedWhereOp := findQuerySuiteTestOp(ops, "tree_where_cold_then_cached")
+		coldCachedWhereOp := findQuerySuiteTestOp(ops, queryOpTreeWhereColdName)
 		So(coldCachedWhereOp, ShouldNotBeNil)
 		So(coldCachedWhereOp.inputs["dir"], ShouldEqual, querySuiteTestRootDir)
 		So(coldCachedWhereOp.inputs["cache_scope"], ShouldEqual, "same_provider_cold_then_warm")
@@ -175,21 +175,21 @@ func TestQuerySuiteOps(t *testing.T) {
 		So(coldCachedWhereOp.inputs["splits"], ShouldEqual, 4)
 		So(coldCachedWhereOp.skipWarmup, ShouldBeTrue)
 
-		So(names, ShouldContain, "tree_disktree_endpoint")
-		So(names, ShouldContain, "tree_disktree_endpoint_new_dirs")
-		So(names, ShouldContain, "tree_disktree_endpoint_ancestor_dirs")
-		So(names, ShouldContain, "tree_where_cold_then_cached")
-		So(names, ShouldContain, "tree_where_fresh_provider")
-		So(querySuiteTestOpIndex(names, "tree_where_cold_then_cached"), ShouldBeLessThan,
-			querySuiteTestOpIndex(names, "tree_disktree_endpoint_new_dirs"))
-		So(querySuiteTestOpIndex(names, "tree_where_cold_then_cached"), ShouldBeLessThan,
-			querySuiteTestOpIndex(names, "tree_dirinfo"))
-		So(querySuiteTestOpIndex(names, "tree_where_cold_then_cached"), ShouldBeLessThan,
-			querySuiteTestOpIndex(names, "tree_disktree_endpoint"))
-		So(querySuiteTestOpIndex(names, "tree_where_cold_then_cached"), ShouldBeLessThan,
-			querySuiteTestOpIndex(names, "tree_where"))
+		So(names, ShouldContain, queryOpTreeDiskTreeEndName)
+		So(names, ShouldContain, queryOpTreeDiskTreeNewName)
+		So(names, ShouldContain, queryOpTreeDiskTreeAncName)
+		So(names, ShouldContain, queryOpTreeWhereColdName)
+		So(names, ShouldContain, queryOpTreeWhereFreshName)
+		So(querySuiteTestOpIndex(names, queryOpTreeWhereColdName), ShouldBeLessThan,
+			querySuiteTestOpIndex(names, queryOpTreeDiskTreeNewName))
+		So(querySuiteTestOpIndex(names, queryOpTreeWhereColdName), ShouldBeLessThan,
+			querySuiteTestOpIndex(names, queryOpTreeDirInfoName))
+		So(querySuiteTestOpIndex(names, queryOpTreeWhereColdName), ShouldBeLessThan,
+			querySuiteTestOpIndex(names, queryOpTreeDiskTreeEndName))
+		So(querySuiteTestOpIndex(names, queryOpTreeWhereColdName), ShouldBeLessThan,
+			querySuiteTestOpIndex(names, queryOpTreeWhereName))
 
-		newDirsOp := findQuerySuiteTestOp(ops, "tree_disktree_endpoint_new_dirs")
+		newDirsOp := findQuerySuiteTestOp(ops, queryOpTreeDiskTreeNewName)
 		So(newDirsOp, ShouldNotBeNil)
 		So(newDirsOp.inputs["start_dir"], ShouldEqual, querySuiteTestRootDir)
 		So(newDirsOp.inputs["dirs"], ShouldResemble, []string{querySuiteTestChildADir, querySuiteTestChildBDir})
@@ -197,7 +197,7 @@ func TestQuerySuiteOps(t *testing.T) {
 		So(newDirsOp.skipWarmup, ShouldBeTrue)
 		So(newDirsOp.repeatOverride, ShouldEqual, 2)
 
-		ancestorOp := findQuerySuiteTestOp(ops, "tree_disktree_endpoint_ancestor_dirs")
+		ancestorOp := findQuerySuiteTestOp(ops, queryOpTreeDiskTreeAncName)
 		So(ancestorOp, ShouldNotBeNil)
 		So(ancestorOp.inputs["start_dir"], ShouldEqual, "/")
 		So(ancestorOp.inputs["dirs"], ShouldResemble, []string{
@@ -211,7 +211,7 @@ func TestQuerySuiteOps(t *testing.T) {
 		So(ancestorOp.skipWarmup, ShouldBeTrue)
 		So(ancestorOp.repeatOverride, ShouldEqual, 5)
 
-		freshWhereOp := findQuerySuiteTestOp(ops, "tree_where_fresh_provider")
+		freshWhereOp := findQuerySuiteTestOp(ops, queryOpTreeWhereFreshName)
 		So(freshWhereOp, ShouldNotBeNil)
 		So(freshWhereOp.inputs["dir"], ShouldEqual, querySuiteTestRootDir)
 		So(freshWhereOp.inputs["cache_scope"], ShouldEqual, "fresh_provider_per_repeat")
@@ -229,7 +229,7 @@ func TestQuerySuiteOps(t *testing.T) {
 		}
 
 		ops := buildQuerySuiteOps(ctx, QueryOptions{Repeat: 2, WalkDepth: 1, WalkLimit: 2})
-		newDirsOp := findQuerySuiteTestOp(ops, "tree_disktree_endpoint_new_dirs")
+		newDirsOp := findQuerySuiteTestOp(ops, queryOpTreeDiskTreeNewName)
 		So(newDirsOp, ShouldNotBeNil)
 
 		database.childrenCalls = nil
@@ -258,7 +258,7 @@ func TestQuerySuiteOps(t *testing.T) {
 		}
 
 		ops := buildQuerySuiteOps(ctx, QueryOptions{Repeat: 3, WalkDepth: 2, WalkLimit: 3})
-		newDirsOp := findQuerySuiteTestOp(ops, "tree_disktree_endpoint_new_dirs")
+		newDirsOp := findQuerySuiteTestOp(ops, queryOpTreeDiskTreeNewName)
 		So(newDirsOp, ShouldNotBeNil)
 		So(newDirsOp.inputs["dirs"], ShouldResemble, []string{
 			querySuiteTestChildBDir,
@@ -339,4 +339,43 @@ func querySuiteTestOpIndex(names []string, name string) int {
 	}
 
 	return -1
+}
+
+func TestRunQuerySuiteOperationSelection(t *testing.T) {
+	Convey("runQuerySuite only runs selected operations in default operation order", t, func() {
+		ctx := queryContext{
+			tree:     db.NewTree(newQuerySuiteTestDB()),
+			queryDir: querySuiteTestRootDir,
+		}
+		report := NewReport("bolt", "", 1, 0)
+
+		err := runQuerySuite(&report, ctx, QueryOptions{
+			Repeat: 1,
+			Ops:    []string{queryOpTreeDiskTreeEndName, queryOpTreeDirInfoName},
+		}, func(string, ...any) {})
+
+		So(err, ShouldBeNil)
+		So(report.Operations, ShouldHaveLength, 2)
+		So(report.Operations[0].Name, ShouldEqual, queryOpTreeDirInfoName)
+		So(report.Operations[1].Name, ShouldEqual, queryOpTreeDiskTreeEndName)
+	})
+
+	Convey("runQuerySuite reports unknown selected operations with available names", t, func() {
+		ctx := queryContext{
+			tree:     db.NewTree(newQuerySuiteTestDB()),
+			queryDir: querySuiteTestRootDir,
+		}
+		report := NewReport("bolt", "", 1, 0)
+
+		err := runQuerySuite(&report, ctx, QueryOptions{
+			Repeat: 1,
+			Ops:    []string{"missing_op", queryOpTreeDirInfoName},
+		}, func(string, ...any) {})
+
+		So(err, ShouldNotBeNil)
+		So(err.Error(), ShouldContainSubstring, "unknown query ops: missing_op")
+		So(err.Error(), ShouldContainSubstring, "available ops:")
+		So(err.Error(), ShouldContainSubstring, queryOpTreeDiskTreeEndName)
+		So(report.Operations, ShouldHaveLength, 0)
+	})
 }

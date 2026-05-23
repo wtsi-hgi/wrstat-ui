@@ -81,6 +81,7 @@ var (
 	// for StatPath testing.
 	ErrEmptyDir = errors.New("directory is empty, skipping StatPath")
 
+	errUnknownQueryOps      = errors.New("unknown query ops")
 	errOpenProviderRequired = errors.New("OpenProvider is required")
 )
 
@@ -88,6 +89,7 @@ var (
 type QueryOptions struct {
 	Dir           string
 	AncestorDir   string
+	Ops           []string
 	UID           uint32
 	GIDs          []uint32
 	Repeat        int
@@ -178,6 +180,73 @@ func openQueryContext(api QueryAPI) (queryContext, error) {
 	qctx.inspector = inspector
 
 	return qctx, nil
+}
+
+func selectOps(ops []op, names []string) ([]op, error) {
+	wanted, wantedOrder := opNameSet(names)
+	if len(wanted) == 0 {
+		return ops, nil
+	}
+
+	available := make([]string, 0, len(ops))
+	availableSet := make(map[string]struct{}, len(ops))
+	selected := make([]op, 0, len(wanted))
+
+	for _, candidate := range ops {
+		available = append(available, candidate.name)
+		availableSet[candidate.name] = struct{}{}
+
+		if _, ok := wanted[candidate.name]; ok {
+			selected = append(selected, candidate)
+		}
+	}
+
+	unknown := unknownOpNames(wantedOrder, availableSet)
+	if len(unknown) > 0 {
+		return nil, fmt.Errorf(
+			"%w: %s; available ops: %s",
+			errUnknownQueryOps,
+			strings.Join(unknown, ", "),
+			strings.Join(available, ", "),
+		)
+	}
+
+	return selected, nil
+}
+
+func opNameSet(names []string) (map[string]struct{}, []string) {
+	wanted := make(map[string]struct{}, len(names))
+	wantedOrder := make([]string, 0, len(names))
+
+	for _, name := range names {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+
+		if _, ok := wanted[name]; ok {
+			continue
+		}
+
+		wanted[name] = struct{}{}
+		wantedOrder = append(wantedOrder, name)
+	}
+
+	return wanted, wantedOrder
+}
+
+func unknownOpNames(wanted []string, available map[string]struct{}) []string {
+	unknown := make([]string, 0)
+
+	for _, name := range wanted {
+		if _, ok := available[name]; ok {
+			continue
+		}
+
+		unknown = append(unknown, name)
+	}
+
+	return unknown
 }
 
 func opTreeWhereColdThenCached(qctx queryContext, splits int) op {
@@ -805,6 +874,11 @@ func runSuite(
 	printf PrintfFunc,
 ) error {
 	ops := buildOps(qctx, opts, printf)
+
+	ops, err := selectOps(ops, opts.Ops)
+	if err != nil {
+		return err
+	}
 
 	for _, o := range ops {
 		if err := runOp(report, qctx, o, opts, printf); err != nil {

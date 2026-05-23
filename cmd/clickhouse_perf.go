@@ -97,6 +97,7 @@ type chPerfFlags struct {
 
 	dir       string
 	ancDir    string
+	ops       []string
 	uid       uint32
 	gids      string
 	repeat    int
@@ -153,6 +154,8 @@ func addCHPerfQueryFlags() {
 		"directory to query (default: auto-select)")
 	f.StringVar(&chPerf.ancDir, "ancestor-dir", "/",
 		"ancestor directory for root/click-through Disktree timings")
+	f.StringSliceVar(&chPerf.ops, "ops", nil,
+		"comma-separated query operation names to run (default: all)")
 	f.Uint32Var(&chPerf.uid, "uid", 0, "UID for permission query")
 	f.StringVar(&chPerf.gids, "gids", "", "comma-separated GIDs for permission query")
 	f.IntVar(&chPerf.repeat, "repeat", chPerfDefaultRepeat, "number of timed repeats")
@@ -200,6 +203,7 @@ func runCHPerfQuery() error {
 	report, err := chperf.Query(api, chperf.QueryOptions{
 		Dir:           chPerf.dir,
 		AncestorDir:   chPerf.ancDir,
+		Ops:           chPerf.ops,
 		UID:           chPerf.uid,
 		GIDs:          parseGIDs(chPerf.gids),
 		Repeat:        chPerf.repeat,

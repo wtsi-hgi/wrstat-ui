@@ -84,6 +84,7 @@ const (
 
 var (
 	errUnknownBackend              = errors.New("unknown backend")
+	errUnknownPerfQueryOps         = errors.New("unknown query ops")
 	errNoDatasets                  = errors.New("no datasets found")
 	errDatasetDirMissingUnderscore = errors.New("dataset dir name missing '_' separator")
 )
@@ -759,7 +760,12 @@ func boltPerfNewQueryContext(
 }
 
 func runPerfQuerySuite(report *perfReport, ctx perfQueryContext, printf perfPrintfFunc) error {
-	for _, op := range boltPerfQueryOps(ctx) {
+	ops, err := selectPerfQueryOps(boltPerfQueryOps(ctx), boltPerf.ops)
+	if err != nil {
+		return err
+	}
+
+	for _, op := range ops {
 		warmup := boltPerf.warmup
 		if op.skipWarmup {
 			warmup = 0
@@ -777,6 +783,73 @@ func runPerfQuerySuite(report *perfReport, ctx perfQueryContext, printf perfPrin
 	}
 
 	return nil
+}
+
+func selectPerfQueryOps(ops []perfQueryOp, names []string) ([]perfQueryOp, error) {
+	wanted, wantedOrder := perfQueryOpNameSet(names)
+	if len(wanted) == 0 {
+		return ops, nil
+	}
+
+	available := make([]string, 0, len(ops))
+	availableSet := make(map[string]struct{}, len(ops))
+	selected := make([]perfQueryOp, 0, len(wanted))
+
+	for _, candidate := range ops {
+		available = append(available, candidate.name)
+		availableSet[candidate.name] = struct{}{}
+
+		if _, ok := wanted[candidate.name]; ok {
+			selected = append(selected, candidate)
+		}
+	}
+
+	unknown := unknownPerfQueryOpNames(wantedOrder, availableSet)
+	if len(unknown) > 0 {
+		return nil, fmt.Errorf(
+			"%w: %s; available ops: %s",
+			errUnknownPerfQueryOps,
+			strings.Join(unknown, ", "),
+			strings.Join(available, ", "),
+		)
+	}
+
+	return selected, nil
+}
+
+func perfQueryOpNameSet(names []string) (map[string]struct{}, []string) {
+	wanted := make(map[string]struct{}, len(names))
+	wantedOrder := make([]string, 0, len(names))
+
+	for _, name := range names {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+
+		if _, ok := wanted[name]; ok {
+			continue
+		}
+
+		wanted[name] = struct{}{}
+		wantedOrder = append(wantedOrder, name)
+	}
+
+	return wanted, wantedOrder
+}
+
+func unknownPerfQueryOpNames(wanted []string, available map[string]struct{}) []string {
+	unknown := make([]string, 0)
+
+	for _, name := range wanted {
+		if _, ok := available[name]; ok {
+			continue
+		}
+
+		unknown = append(unknown, name)
+	}
+
+	return unknown
 }
 
 func boltPerfQueryOps(ctx perfQueryContext) []perfQueryOp {

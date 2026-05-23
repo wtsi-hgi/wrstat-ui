@@ -406,6 +406,57 @@ func TestRunOp(t *testing.T) {
 	})
 }
 
+func TestRunSuiteOperationSelection(t *testing.T) {
+	Convey("runSuite only runs selected operations in default operation order", t, func() {
+		qctx := queryContext{
+			provider: fakeMountTimestampsProvider{tree: db.NewTree(newQueryOpTestDB())},
+			client:   &fakeQueryClient{},
+			inspector: fakeQueryInspector{
+				measure: func(ctx context.Context, run func(context.Context) error) (*QueryMetrics, error) {
+					if err := run(ctx); err != nil {
+						return nil, err
+					}
+
+					return &QueryMetrics{DurationMs: 1}, nil
+				},
+			},
+			dir: queryOpTestRootDir,
+		}
+		report := boltperf.NewReport("clickhouse", "", 1, 0)
+
+		err := runSuite(&report, qctx, QueryOptions{
+			Repeat: 1,
+			Ops:    []string{queryOpTreeDiskTreeEndName, queryOpTreeDirInfoName},
+		}, func(string, ...any) {})
+
+		So(err, ShouldBeNil)
+		So(report.Operations, ShouldHaveLength, 2)
+		So(report.Operations[0].Name, ShouldEqual, queryOpTreeDirInfoName)
+		So(report.Operations[1].Name, ShouldEqual, queryOpTreeDiskTreeEndName)
+	})
+
+	Convey("runSuite reports unknown selected operations with available names", t, func() {
+		qctx := queryContext{
+			provider:  fakeMountTimestampsProvider{tree: db.NewTree(newQueryOpTestDB())},
+			client:    &fakeQueryClient{},
+			inspector: fakeQueryInspector{},
+			dir:       queryOpTestRootDir,
+		}
+		report := boltperf.NewReport("clickhouse", "", 1, 0)
+
+		err := runSuite(&report, qctx, QueryOptions{
+			Repeat: 1,
+			Ops:    []string{"not_real", queryOpTreeDirInfoName},
+		}, func(string, ...any) {})
+
+		So(err, ShouldNotBeNil)
+		So(err.Error(), ShouldContainSubstring, "unknown query ops: not_real")
+		So(err.Error(), ShouldContainSubstring, "available ops:")
+		So(err.Error(), ShouldContainSubstring, queryOpTreeDiskTreeEndName)
+		So(report.Operations, ShouldHaveLength, 0)
+	})
+}
+
 func TestBuildQueryContext(t *testing.T) {
 	Convey("buildQueryContext closes injected dependencies when selecting a dir fails", t, func() {
 		providerClosed := false

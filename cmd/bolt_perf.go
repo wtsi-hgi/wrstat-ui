@@ -148,6 +148,7 @@ type boltPerfFlags struct {
 
 	dir       string
 	ancDir    string
+	ops       []string
 	repeat    int
 	warmup    int
 	splits    int
@@ -193,6 +194,7 @@ func runBoltPerfQuery(inputDir string) error {
 		JSONOut:                 boltPerf.jsonOut,
 		Dir:                     boltPerf.dir,
 		AncestorDir:             boltPerf.ancDir,
+		Ops:                     boltPerf.ops,
 		Repeat:                  boltPerf.repeat,
 		Warmup:                  boltPerf.warmup,
 		Splits:                  boltPerf.splits,
@@ -236,6 +238,8 @@ func addBoltPerfFlags() {
 	boltPerfQueryCmd.Flags().StringVar(&boltPerf.dir, "dir", "", "directory to query (default: auto)")
 	boltPerfQueryCmd.Flags().StringVar(&boltPerf.ancDir, "ancestor-dir", "/",
 		"ancestor directory for root/click-through Disktree timings")
+	boltPerfQueryCmd.Flags().StringSliceVar(&boltPerf.ops, "ops", nil,
+		"comma-separated query operation names to run (default: all)")
 	boltPerfQueryCmd.Flags().IntVar(&boltPerf.repeat, "repeat", boltPerfDefaultRepeat, "repeat count")
 	boltPerfQueryCmd.Flags().IntVar(&boltPerf.warmup, "warmup", boltPerfDefaultWarmup, "warmup iterations")
 	boltPerfQueryCmd.Flags().IntVar(&boltPerf.splits, "splits", boltPerfDefaultSplits, "where() splits")
