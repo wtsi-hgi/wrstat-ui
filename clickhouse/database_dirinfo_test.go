@@ -1408,6 +1408,12 @@ func TestClickHouseDatabaseActiveAncestorSummaries(t *testing.T) {
 		insertChild(mountA, sidA, mountA, mountA+"deep")
 		insertChild(mountB, sidB, mountB, mountB+"deep")
 
+		rows := []mountsActiveRow{
+			{mountPath: mountA, snapshotID: sidA.String(), updatedAt: updatedA},
+			{mountPath: mountB, snapshotID: sidB.String(), updatedAt: updatedB},
+		}
+		So(ensureActiveTreeSummaries(ctx, conn, rows), ShouldBeNil)
+
 		p, err := OpenProvider(cfg)
 		So(err, ShouldBeNil)
 		Reset(func() { So(p.Close(), ShouldBeNil) })

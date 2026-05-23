@@ -57,6 +57,7 @@ func TestWatchSummariseResourceMinimums(t *testing.T) {
 		So(err, ShouldBeNil)
 
 		defer pr.Close()
+		defer pw.Close()
 
 		pretendSubmissions := client.PretendSubmissions
 

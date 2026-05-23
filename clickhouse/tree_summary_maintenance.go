@@ -55,8 +55,23 @@ func newTreeSummaryRefreshJob(rows []mountsActiveRow) treeSummaryRefreshJob {
 	}
 }
 
+func treeSummaryRefreshScheduledMessage(job treeSummaryRefreshJob) string {
+	return fmt.Sprintf(
+		"clickhouse: active tree summary refresh scheduled asynchronously active_mounts=%d ancestor_dirs=%d fingerprint=%s",
+		job.activeMountCount,
+		job.ancestorDirCount,
+		treeSummaryFingerprintHash(job.fingerprint),
+	)
+}
+
 func (p *chProvider) runTreeSummaryRefresh(ctx context.Context, job treeSummaryRefreshJob) {
 	defer p.forgetTreeSummaryRefresh(job.fingerprint)
+
+	if ctx.Err() != nil {
+		return
+	}
+
+	p.queueMessage(treeSummaryRefreshStartedMessage(job))
 
 	for ctx.Err() == nil {
 		if p.tryTreeSummaryRefresh(ctx, job) {
@@ -79,6 +94,15 @@ func sleepContext(ctx context.Context, d time.Duration) bool {
 	case <-timer.C:
 		return true
 	}
+}
+
+func treeSummaryRefreshStartedMessage(job treeSummaryRefreshJob) string {
+	return fmt.Sprintf(
+		"clickhouse: active tree summary refresh started active_mounts=%d ancestor_dirs=%d fingerprint=%s",
+		job.activeMountCount,
+		job.ancestorDirCount,
+		treeSummaryFingerprintHash(job.fingerprint),
+	)
 }
 
 func (p *chProvider) tryTreeSummaryRefresh(ctx context.Context, job treeSummaryRefreshJob) bool {
@@ -143,6 +167,7 @@ func (p *chProvider) scheduleTreeSummaryRefresh(
 		return
 	}
 
+	p.queueMessage(treeSummaryRefreshScheduledMessage(job))
 	p.startWorker(maintenanceCtx, func(ctx context.Context) {
 		defer cancel()
 

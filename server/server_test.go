@@ -551,8 +551,23 @@ func TestServer(t *testing.T) {
 			tp, ok := p.(*testProvider)
 			So(ok, ShouldBeTrue)
 
+			tp.pendingMessages = []string{
+				"clickhouse: active tree summary refresh scheduled asynchronously active_mounts=1",
+				"clickhouse: active tree summary refresh started active_mounts=1",
+			}
+
 			err = s.SetProvider(tp)
 			So(err, ShouldBeNil)
+			So(
+				logWriter.String(),
+				ShouldContainSubstring,
+				"provider message: clickhouse: active tree summary refresh scheduled asynchronously",
+			)
+			So(
+				logWriter.String(),
+				ShouldContainSubstring,
+				"provider message: clickhouse: active tree summary refresh started",
+			)
 
 			tp.triggerMessage(
 				"clickhouse: active tree summary refresh completed active_mounts=1",

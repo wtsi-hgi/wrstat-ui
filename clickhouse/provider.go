@@ -108,16 +108,13 @@ func (p *chProvider) Tree() *db.Tree {
 		return tree
 	}
 
-	var err error
-
-	p.mu.Lock()
-	err = p.ensureReadersLocked()
-	tree = p.tree
-	p.mu.Unlock()
-
-	if err != nil {
+	if err := p.ensureReaders(); err != nil {
 		p.queueError(err)
 	}
+
+	p.mu.RLock()
+	tree = p.tree
+	p.mu.RUnlock()
 
 	return tree
 }
@@ -131,35 +128,54 @@ func (p *chProvider) BaseDirs() basedirs.Reader {
 		return bd
 	}
 
-	var err error
-
-	p.mu.Lock()
-	err = p.ensureReadersLocked()
-	bd = p.bd
-	p.mu.Unlock()
-
-	if err != nil {
+	if err := p.ensureReaders(); err != nil {
 		p.queueError(err)
 	}
+
+	p.mu.RLock()
+	bd = p.bd
+	p.mu.RUnlock()
 
 	return bd
 }
 
-func (p *chProvider) ensureReadersLocked() error {
-	if p.tree != nil && p.bd != nil {
+func (p *chProvider) ensureReaders() error {
+	if p.readersReady() {
 		return nil
 	}
 
-	build, capture := p.readerHooksLocked()
-
-	snapshot, fingerprint, err := capture(context.Background())
+	dbImpl, tree, bd, fingerprint, err := p.buildReadersNow(context.Background())
 	if err != nil {
 		return err
 	}
 
-	dbImpl, tree, bd, err := build(context.Background(), snapshot)
-	if err != nil {
-		return err
+	if p.publishLazyReaders(dbImpl, tree, bd, fingerprint) {
+		return nil
+	}
+
+	p.closeOldReaders(dbImpl, bd)
+
+	return nil
+}
+
+func (p *chProvider) readersReady() bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	return p.tree != nil && p.bd != nil
+}
+
+func (p *chProvider) publishLazyReaders(
+	dbImpl db.Database,
+	tree *db.Tree,
+	bd basedirs.Reader,
+	fingerprint string,
+) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.tree != nil && p.bd != nil {
+		return false
 	}
 
 	p.db = dbImpl
@@ -167,7 +183,7 @@ func (p *chProvider) ensureReadersLocked() error {
 	p.bd = bd
 	p.currentFingerprint = fingerprint
 
-	return nil
+	return true
 }
 
 func (p *chProvider) readerHooksLocked() (readerBuilder, snapshotCapturer) {
@@ -208,16 +224,31 @@ func (p *chProvider) captureActiveMountsState(parent context.Context) (*activeMo
 	}
 
 	snapshot := newActiveMountsSnapshot(rows)
-	if err := ensureActiveTreeSummaries(ctx, p.conn, rows); err != nil {
-		p.queueError(fmt.Errorf("clickhouse: failed to refresh active tree summaries: %w", err))
+	if activeTreeSummariesReadyForSnapshot(ctx, p.conn, snapshot) {
+		snapshot.markTreeSummaryReady()
+	} else {
 		p.scheduleTreeSummaryRefresh(context.WithoutCancel(ctx), snapshot, rows)
-
-		return snapshot, snapshot.fingerprint, nil
 	}
 
-	snapshot.markTreeSummaryReady()
-
 	return snapshot, snapshot.fingerprint, nil
+}
+
+func activeTreeSummariesReadyForSnapshot(
+	ctx context.Context,
+	conn ch.Conn,
+	snapshot *activeMountsSnapshot,
+) bool {
+	if snapshot == nil {
+		return false
+	}
+
+	if snapshot.fingerprint == "" {
+		return true
+	}
+
+	ready, err := treeSummaryReady(ctx, conn, snapshot.fingerprint)
+
+	return err == nil && ready
 }
 
 func (p *chProvider) OnMessage(cb func(message string)) {

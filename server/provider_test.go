@@ -263,13 +263,23 @@ type testProvider struct {
 	cb    func()
 	errCb func(error)
 	msgCb func(string)
+
+	pendingMessages []string
 }
 
-func (p *testProvider) Tree() *db.Tree                    { return p.tree }
-func (p *testProvider) BaseDirs() basedirs.Reader         { return p.bd }
-func (p *testProvider) OnUpdate(cb func())                { p.cb = cb }
-func (p *testProvider) OnError(cb func(error))            { p.errCb = cb }
-func (p *testProvider) OnMessage(cb func(message string)) { p.msgCb = cb }
+func (p *testProvider) Tree() *db.Tree            { return p.tree }
+func (p *testProvider) BaseDirs() basedirs.Reader { return p.bd }
+func (p *testProvider) OnUpdate(cb func())        { p.cb = cb }
+func (p *testProvider) OnError(cb func(error))    { p.errCb = cb }
+func (p *testProvider) OnMessage(cb func(message string)) {
+	p.msgCb = cb
+
+	for _, msg := range p.pendingMessages {
+		p.triggerMessage(msg)
+	}
+
+	p.pendingMessages = nil
+}
 func (p *testProvider) Close() error {
 	if p.bd != nil {
 		_ = p.bd.Close()

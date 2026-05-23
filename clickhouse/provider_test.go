@@ -435,7 +435,7 @@ func currentGoroutineID() string {
 }
 
 func TestOpenProviderTreeSummaryRefreshFailure(t *testing.T) {
-	Convey("startup refresh timeout schedules maintenance refresh and reports completion", t, func() {
+	Convey("startup schedules maintenance refresh without synchronous backfill", t, func() {
 		os.Setenv("WRSTAT_ENV", "test")
 		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
 
@@ -486,14 +486,36 @@ func TestOpenProviderTreeSummaryRefreshFailure(t *testing.T) {
 
 		Reset(func() { So(p.Close(), ShouldBeNil) })
 
+		cp, ok := p.(*chProvider)
+		So(ok, ShouldBeTrue)
+		So(cp.pendingErrs, ShouldHaveLength, 0)
+
 		messenger, ok := p.(interface{ OnMessage(cb func(msg string)) })
 		So(ok, ShouldBeTrue)
 
-		gotMessage := make(chan string, 1)
+		gotMessage := make(chan string, 4)
 
 		messenger.OnMessage(func(msg string) {
 			gotMessage <- msg
 		})
+
+		select {
+		case msg := <-gotMessage:
+			So(msg, ShouldContainSubstring, "active tree summary refresh scheduled asynchronously")
+			So(msg, ShouldContainSubstring, "active_mounts=1")
+			So(msg, ShouldContainSubstring, "ancestor_dirs=")
+		case <-time.After(5 * time.Second):
+			t.Fatalf("timed out waiting for tree summary refresh scheduled message")
+		}
+
+		select {
+		case msg := <-gotMessage:
+			So(msg, ShouldContainSubstring, "active tree summary refresh started")
+			So(msg, ShouldContainSubstring, "active_mounts=1")
+			So(msg, ShouldContainSubstring, "ancestor_dirs=")
+		case <-time.After(5 * time.Second):
+			t.Fatalf("timed out waiting for tree summary refresh started message")
+		}
 
 		select {
 		case msg := <-gotMessage:
@@ -512,7 +534,7 @@ func TestOpenProviderTreeSummaryRefreshFailure(t *testing.T) {
 			"SELECT count() FROM wrstat_tree_summary_sets FINAL WHERE fingerprint = ?",
 			fingerprint,
 		), ShouldEqual, 1)
-		So(refreshConn.inlineRefreshFailures(), ShouldBeGreaterThan, 0)
+		So(refreshConn.inlineRefreshFailures(), ShouldEqual, 0)
 		So(refreshConn.maintenanceRefreshInserts(), ShouldBeGreaterThan, 0)
 
 		treeBefore := refreshConn.treeSummaryQueryCount()
@@ -526,7 +548,7 @@ func TestOpenProviderTreeSummaryRefreshFailure(t *testing.T) {
 		So(refreshConn.ancestorDGUTAQueryCount(), ShouldEqual, ancestorBefore)
 	})
 
-	Convey("provider reader build publishes readers when tree summary refresh times out", t, func() {
+	Convey("provider reader build publishes readers without synchronous tree summary refresh", t, func() {
 		os.Setenv("WRSTAT_ENV", "test")
 		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
 
@@ -562,13 +584,16 @@ func TestOpenProviderTreeSummaryRefreshFailure(t *testing.T) {
 		So(tree, ShouldNotBeNil)
 		So(bd, ShouldNotBeNil)
 		So(fingerprint, ShouldNotBeBlank)
-		So(cp.pendingErrs, ShouldHaveLength, 1)
-		So(cp.pendingErrs[0].Error(), ShouldContainSubstring, context.DeadlineExceeded.Error())
+		So(cp.pendingErrs, ShouldHaveLength, 0)
+
+		deadlineConn, ok := cp.conn.(*treeSummaryRefreshDeadlineConn)
+		So(ok, ShouldBeTrue)
+		So(deadlineConn.treeSummaryRefreshFailures(), ShouldEqual, 0)
 		So(dbImpl.Close(), ShouldBeNil)
 		So(bd.Close(), ShouldBeNil)
 	})
 
-	Convey("queued startup tree summary refresh errors reach OnError after polling starts", t, func() {
+	Convey("async tree summary refresh errors reach OnError after polling starts", t, func() {
 		os.Setenv("WRSTAT_ENV", "test")
 		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
 
@@ -617,12 +642,86 @@ func TestOpenProviderTreeSummaryRefreshFailure(t *testing.T) {
 
 		select {
 		case err := <-got:
+			So(err.Error(), ShouldContainSubstring, "failed to refresh active tree summaries asynchronously")
 			So(err.Error(), ShouldContainSubstring, context.DeadlineExceeded.Error())
 		case <-time.After(5 * time.Second):
-			t.Fatalf("timed out waiting for startup OnError")
+			t.Fatalf("timed out waiting for async refresh OnError")
 		}
 
 		So(failingConn.treeSummaryRefreshFailures(), ShouldBeGreaterThan, 0)
+	})
+
+	Convey("ready tree summaries avoid scheduling maintenance refresh", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 2 * time.Second
+		cfg.PollInterval = 0
+
+		const (
+			lustreAncestor = "/lustre/"
+			mountPath      = lustreAncestor + "agentA/"
+		)
+
+		cfg.MountPoints = []string{"/", mountPath}
+
+		bootstrapProvider, err := OpenProvider(cfg)
+		So(err, ShouldBeNil)
+		So(bootstrapProvider.Close(), ShouldBeNil)
+
+		conn := th.openConn(cfg.DSN)
+		providerOwnsConn := false
+
+		Reset(func() {
+			if !providerOwnsConn {
+				So(conn.Close(), ShouldBeNil)
+			}
+		})
+
+		updatedAt := time.Date(2026, 1, 9, 12, 0, 0, 0, time.UTC)
+		sid := snapshotID(mountPath, updatedAt)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		So(insertProviderAncestorSnapshot(ctx, conn, mountPath, updatedAt), ShouldBeNil)
+
+		rows := []mountsActiveRow{{
+			mountPath:  mountPath,
+			snapshotID: sid.String(),
+			updatedAt:  updatedAt,
+		}}
+		So(ensureActiveTreeSummaries(ctx, conn, rows), ShouldBeNil)
+
+		refreshConn := &treeSummaryRefreshTimeoutThenMaintenanceConn{Conn: conn}
+
+		p, err := openProviderWithConnector(cfg, func(Config) (ch.Conn, error) {
+			return refreshConn, nil
+		})
+		So(err, ShouldBeNil)
+		So(p, ShouldNotBeNil)
+
+		providerOwnsConn = true
+
+		Reset(func() { So(p.Close(), ShouldBeNil) })
+
+		cp, ok := p.(*chProvider)
+		So(ok, ShouldBeTrue)
+		So(cp.pendingMessages, ShouldHaveLength, 0)
+		So(refreshConn.inlineRefreshFailures(), ShouldEqual, 0)
+		So(refreshConn.maintenanceRefreshInserts(), ShouldEqual, 0)
+
+		treeBefore := refreshConn.treeSummaryQueryCount()
+		ancestorBefore := refreshConn.ancestorDGUTAQueryCount()
+
+		di, err := p.Tree().DirInfo("/", &db.Filter{Age: db.DGUTAgeAll})
+		So(err, ShouldBeNil)
+		So(di, ShouldNotBeNil)
+		So(di.Current.Count, ShouldEqual, 4)
+		So(refreshConn.treeSummaryQueryCount(), ShouldBeGreaterThan, treeBefore)
+		So(refreshConn.ancestorDGUTAQueryCount(), ShouldEqual, ancestorBefore)
 	})
 }
 
@@ -663,6 +762,50 @@ func insertProviderAncestorSnapshot(
 	}
 
 	return conn.Exec(ctx, testInsertChildrenStmt, mountPath, sid.String(), "/", "/lustre")
+}
+
+func TestProviderLazyReaderBuildSchedulesRefreshWithoutDeadlock(t *testing.T) {
+	Convey("lazy reader build releases the provider lock before scheduling tree summary refresh", t, func() {
+		var cp *chProvider
+
+		updatedAt := time.Date(2026, 1, 9, 12, 0, 0, 0, time.UTC)
+		rows := []mountsActiveRow{{
+			mountPath:  providerTestMountPath,
+			snapshotID: "snapshot-1",
+			updatedAt:  updatedAt,
+		}}
+		snapshot := newActiveMountsSnapshot(rows)
+
+		cp = &chProvider{
+			msgCh: make(chan struct{}, 1),
+			buildReaders: func(context.Context, *activeMountsSnapshot) (db.Database, *db.Tree, basedirs.Reader, error) {
+				dbImpl := &providerSwapTestDB{}
+				bdImpl := &providerSwapTestBD{}
+
+				return dbImpl, db.NewTree(dbImpl), bdImpl, nil
+			},
+			captureSnapshot: func(context.Context) (*activeMountsSnapshot, string, error) {
+				cp.scheduleTreeSummaryRefresh(context.Background(), snapshot, rows)
+
+				return snapshot, snapshot.fingerprint, nil
+			},
+		}
+
+		gotTree := make(chan *db.Tree, 1)
+
+		go func() {
+			gotTree <- cp.Tree()
+		}()
+
+		select {
+		case tree := <-gotTree:
+			So(tree, ShouldNotBeNil)
+		case <-time.After(500 * time.Millisecond):
+			t.Fatalf("timed out waiting for lazy reader build")
+		}
+
+		So(cp.currentPublishedFingerprint(), ShouldEqual, snapshot.fingerprint)
+	})
 }
 
 func TestProviderCloseStopsPollingPromptly(t *testing.T) {
