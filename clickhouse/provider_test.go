@@ -36,6 +36,7 @@ import (
 	"testing"
 	"time"
 
+	ch "github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	. "github.com/smartystreets/goconvey/convey"
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
@@ -98,7 +99,7 @@ func TestOpenProviderUpdatePinsClickHouseSnapshots(t *testing.T) {
 		oldUpdatedAt := time.Date(2026, 1, 9, 12, 0, 0, 0, time.UTC)
 		newUpdatedAt := time.Date(2026, 1, 10, 12, 0, 0, 0, time.UTC)
 
-		So(insertProviderSnapshot(ctx, conn, providerTestMountPath, oldUpdatedAt, 2, 100, 1000), ShouldBeNil)
+		So(insertProviderSnapshot(ctx, conn, oldUpdatedAt, 2, 100, 1000), ShouldBeNil)
 
 		p, err := OpenProvider(cfg)
 		So(err, ShouldBeNil)
@@ -169,7 +170,7 @@ func TestOpenProviderUpdatePinsClickHouseSnapshots(t *testing.T) {
 		// Let the poller establish a baseline for the old snapshot first.
 		time.Sleep(2 * cfg.PollInterval)
 
-		So(insertProviderSnapshot(ctx, conn, providerTestMountPath, newUpdatedAt, 5, 500, 2000), ShouldBeNil)
+		So(insertProviderSnapshot(ctx, conn, newUpdatedAt, 5, 500, 2000), ShouldBeNil)
 
 		select {
 		case <-callbackStarted:
@@ -256,10 +257,11 @@ func TestOpenProviderUpdatePinsClickHouseSnapshots(t *testing.T) {
 func insertProviderSnapshot(
 	ctx context.Context,
 	conn providerExecConn,
-	mountPath string,
 	updatedAt time.Time,
 	count, size, usageSize uint64,
 ) error {
+	const mountPath = providerTestMountPath
+
 	sid := snapshotID(mountPath, updatedAt)
 	atimeBuckets := []uint64{1, 0, 0, 0, 0, 0, 0, 0, 0}
 	mtimeBuckets := []uint64{0, 1, 0, 0, 0, 0, 0, 0, 0}
@@ -430,6 +432,107 @@ func currentGoroutineID() string {
 	}
 
 	return fields[1]
+}
+
+func TestOpenProviderTreeSummaryRefreshFailure(t *testing.T) {
+	Convey("provider reader build publishes readers when tree summary refresh times out", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 2 * time.Second
+		cfg.PollInterval = 0
+
+		bootstrapProvider, err := OpenProvider(cfg)
+		So(err, ShouldBeNil)
+		So(bootstrapProvider.Close(), ShouldBeNil)
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		updatedAt := time.Date(2026, 1, 9, 12, 0, 0, 0, time.UTC)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		So(insertProviderSnapshot(ctx, conn, updatedAt, 2, 100, 1000), ShouldBeNil)
+
+		cp := &chProvider{
+			cfg:   cfg,
+			conn:  &treeSummaryRefreshDeadlineConn{Conn: conn},
+			errCh: make(chan struct{}, 1),
+		}
+
+		dbImpl, tree, bd, fingerprint, err := cp.buildReadersNow(context.Background())
+		So(err, ShouldBeNil)
+		So(dbImpl, ShouldNotBeNil)
+		So(tree, ShouldNotBeNil)
+		So(bd, ShouldNotBeNil)
+		So(fingerprint, ShouldNotBeBlank)
+		So(cp.pendingErrs, ShouldHaveLength, 1)
+		So(cp.pendingErrs[0].Error(), ShouldContainSubstring, context.DeadlineExceeded.Error())
+		So(dbImpl.Close(), ShouldBeNil)
+		So(bd.Close(), ShouldBeNil)
+	})
+
+	Convey("queued startup tree summary refresh errors reach OnError after polling starts", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 2 * time.Second
+		cfg.PollInterval = 50 * time.Millisecond
+
+		bootstrapProvider, err := OpenProvider(cfg)
+		So(err, ShouldBeNil)
+		So(bootstrapProvider.Close(), ShouldBeNil)
+
+		conn := th.openConn(cfg.DSN)
+		providerOwnsConn := false
+
+		Reset(func() {
+			if !providerOwnsConn {
+				So(conn.Close(), ShouldBeNil)
+			}
+		})
+
+		updatedAt := time.Date(2026, 1, 9, 12, 0, 0, 0, time.UTC)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		So(insertProviderSnapshot(ctx, conn, updatedAt, 2, 100, 1000), ShouldBeNil)
+
+		failingConn := &treeSummaryRefreshDeadlineConn{Conn: conn}
+
+		p, err := openProviderWithConnector(cfg, func(Config) (ch.Conn, error) {
+			return failingConn, nil
+		})
+		So(err, ShouldBeNil)
+		So(p, ShouldNotBeNil)
+
+		providerOwnsConn = true
+
+		Reset(func() { So(p.Close(), ShouldBeNil) })
+
+		got := make(chan error, 1)
+
+		p.OnError(func(err error) {
+			got <- err
+		})
+
+		select {
+		case err := <-got:
+			So(err.Error(), ShouldContainSubstring, context.DeadlineExceeded.Error())
+		case <-time.After(5 * time.Second):
+			t.Fatalf("timed out waiting for startup OnError")
+		}
+
+		So(failingConn.treeSummaryRefreshFailures(), ShouldBeGreaterThan, 0)
+	})
 }
 
 func TestProviderCloseStopsPollingPromptly(t *testing.T) {

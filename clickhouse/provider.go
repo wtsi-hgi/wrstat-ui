@@ -202,7 +202,9 @@ func (p *chProvider) captureActiveMountsState(parent context.Context) (*activeMo
 
 	snapshot := newActiveMountsSnapshot(rows)
 	if err := ensureActiveTreeSummaries(ctx, p.conn, rows); err != nil {
-		return nil, "", fmt.Errorf("clickhouse: failed to refresh active tree summaries: %w", err)
+		p.queueError(fmt.Errorf("clickhouse: failed to refresh active tree summaries: %w", err))
+
+		return snapshot, snapshot.fingerprint, nil
 	}
 
 	snapshot.markTreeSummaryReady()
@@ -233,7 +235,13 @@ func (p *chProvider) OnUpdate(cb func()) {
 func (p *chProvider) OnError(cb func(error)) {
 	p.mu.Lock()
 	p.onError = cb
+	hasPendingErrs := p.hasPendingErrorsLocked()
+	errCh := p.errCh
 	p.mu.Unlock()
+
+	if cb != nil && hasPendingErrs {
+		signal(errCh)
+	}
 }
 
 func (p *chProvider) Close() error {
@@ -296,6 +304,14 @@ func (p *chProvider) startPolling() {
 	p.startWorker(ctx, p.pollLoop)
 	p.startWorker(ctx, p.updateLoop)
 	p.startWorker(ctx, p.errorLoop)
+
+	p.mu.RLock()
+	hasPendingErrs := p.hasPendingErrorsLocked()
+	p.mu.RUnlock()
+
+	if hasPendingErrs {
+		signal(p.errCh)
+	}
 }
 
 func (p *chProvider) startWorker(ctx context.Context, fn func(context.Context)) {
@@ -569,20 +585,30 @@ func (p *chProvider) drainErrors(ctx context.Context) {
 			return
 		}
 
-		cb, err := p.pendingError()
+		cb := p.errorCallback()
+		if cb == nil {
+			return
+		}
+
+		err := p.popPendingError()
 		if err == nil {
 			return
 		}
 
-		if cb != nil {
-			invokeOnFreshGoroutine(func() {
-				cb(err)
-			})
-		}
+		invokeOnFreshGoroutine(func() {
+			cb(err)
+		})
 	}
 }
 
-func (p *chProvider) pendingError() (func(error), error) {
+func (p *chProvider) errorCallback() func(error) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	return p.onError
+}
+
+func (p *chProvider) popPendingError() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -590,7 +616,7 @@ func (p *chProvider) pendingError() (func(error), error) {
 		p.pendingErrs = nil
 		p.pendingErrHead = 0
 
-		return p.onError, nil
+		return nil
 	}
 
 	err := p.pendingErrs[p.pendingErrHead]
@@ -601,15 +627,22 @@ func (p *chProvider) pendingError() (func(error), error) {
 		p.pendingErrHead = 0
 	}
 
-	return p.onError, err
+	return err
 }
 
-func OpenProvider(cfg Config) (provider.Provider, error) {
+func (p *chProvider) hasPendingErrorsLocked() bool {
+	return p.pendingErrHead < len(p.pendingErrs)
+}
+
+func openProviderWithConnector(
+	cfg Config,
+	connect func(Config) (ch.Conn, error),
+) (provider.Provider, error) {
 	if err := validateConfig(cfg); err != nil {
 		return nil, err
 	}
 
-	conn, err := connectFromConfig(cfg)
+	conn, err := connect(cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -630,4 +663,8 @@ func OpenProvider(cfg Config) (provider.Provider, error) {
 	p.startPolling()
 
 	return p, nil
+}
+
+func OpenProvider(cfg Config) (provider.Provider, error) {
+	return openProviderWithConnector(cfg, connectFromConfig)
 }

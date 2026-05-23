@@ -786,6 +786,65 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 			"/",
 		), ShouldEqual, 1)
 	})
+
+	Convey("DGUTAWriter keeps the active snapshot when tree summary refresh times out", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 2 * time.Second
+		cfg.MountPoints = []string{"/", testMountPath}
+
+		updatedAt := time.Date(2026, 1, 9, 12, 0, 0, 0, time.UTC)
+		sid := snapshotID(testMountPath, updatedAt)
+
+		w, err := NewDGUTAWriter(cfg)
+		So(err, ShouldBeNil)
+		So(w, ShouldNotBeNil)
+
+		impl, ok := w.(*dgutaWriter)
+		So(ok, ShouldBeTrue)
+
+		w.SetMountPath(testMountPath)
+		w.SetUpdatedAt(updatedAt)
+
+		paths := internaltest.NewDirectoryPathCreator()
+		So(w.Add(singleDGUTARecord(paths.ToDirectoryPath("/"), 42, testMountPath)), ShouldBeNil)
+
+		failingConn := &treeSummaryRefreshDeadlineConn{Conn: impl.conn}
+		impl.conn = failingConn
+
+		So(w.Close(), ShouldBeNil)
+		So(failingConn.treeSummaryRefreshFailures(), ShouldBeGreaterThan, 0)
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		So(countRows(ctx, conn,
+			dgutaWriterTestCountActiveMountQuery,
+			testMountPath,
+		), ShouldEqual, 1)
+		So(countRows(ctx, conn,
+			dgutaWriterTestCountDGUTAQuery,
+			testMountPath,
+			sid.String(),
+		), ShouldEqual, 1)
+
+		fingerprint := fingerprintForMountsActive([]mountsActiveRow{{
+			mountPath:  testMountPath,
+			snapshotID: sid.String(),
+			updatedAt:  updatedAt,
+		}})
+		So(countRows(ctx, conn,
+			"SELECT count() FROM wrstat_tree_summary_sets FINAL WHERE fingerprint = ?",
+			fingerprint,
+		), ShouldEqual, 0)
+	})
 }
 
 func countRows(ctx context.Context, conn interface {

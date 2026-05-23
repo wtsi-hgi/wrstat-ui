@@ -307,15 +307,19 @@ func (w *dgutaWriter) switchSnapshotAndDropOld(ctx context.Context) error {
 		return err
 	}
 
-	if err := w.refreshActiveTreeSummaries(ctx); err != nil {
-		return err
-	}
+	w.refreshActiveTreeSummariesBestEffort(ctx)
 
 	if !hasPrevious {
 		return nil
 	}
 
 	return w.dropPreviousSnapshotPartitions(ctx, previousSID)
+}
+
+func (w *dgutaWriter) refreshActiveTreeSummariesBestEffort(ctx context.Context) {
+	if err := w.refreshActiveTreeSummaries(ctx); err != nil {
+		return
+	}
 }
 
 func (w *dgutaWriter) refreshActiveTreeSummaries(ctx context.Context) error {

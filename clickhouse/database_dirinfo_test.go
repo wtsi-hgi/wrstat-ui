@@ -1471,6 +1471,133 @@ func TestClickHouseDatabaseActiveAncestorSummaries(t *testing.T) {
 		So(countingConn.treeSummaryQueryCount(), ShouldBeGreaterThan, 0)
 		So(countingConn.ancestorDGUTAQueryCount(), ShouldEqual, 0)
 	})
+
+	Convey("Ancestor queries fall back while tree summary refresh is unavailable and use summaries once ready", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 2 * time.Second
+
+		const (
+			lustreAncestor = "/lustre/"
+			mountPath      = lustreAncestor + "agentA/"
+		)
+
+		cfg.MountPoints = []string{"/", mountPath}
+
+		bootstrapProvider, err := OpenProvider(cfg)
+		So(err, ShouldBeNil)
+		So(bootstrapProvider.Close(), ShouldBeNil)
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		updatedAt := time.Date(2026, 1, 9, 12, 0, 0, 0, time.UTC)
+		sid := snapshotID(mountPath, updatedAt)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		So(conn.Exec(ctx, testInsertMountStmt, mountPath, time.Now(), sid, updatedAt), ShouldBeNil)
+
+		atimeBuckets := []uint64{1, 0, 0, 0, 0, 0, 0, 0, 0}
+		mtimeBuckets := []uint64{0, 1, 0, 0, 0, 0, 0, 0, 0}
+
+		for _, dir := range []string{"/", lustreAncestor} {
+			So(conn.Exec(ctx,
+				testInsertDGUTAStmt,
+				mountPath,
+				sid.String(),
+				dir,
+				uint32(7),
+				uint32(9),
+				uint16(db.DGUTAFileTypeBam),
+				uint8(db.DGUTAgeAll),
+				uint64(4),
+				uint64(40),
+				int64(10),
+				int64(20),
+				atimeBuckets,
+				mtimeBuckets,
+			), ShouldBeNil)
+		}
+
+		So(conn.Exec(ctx, testInsertChildrenStmt, mountPath, sid.String(), "/", "/lustre"), ShouldBeNil)
+
+		failingConn := &treeSummaryRefreshDeadlineConn{Conn: conn}
+		fallbackCountingConn := &ancestorSummaryQueryCountingConn{Conn: failingConn}
+		dbch := newClickHouseDatabase(cfg, fallbackCountingConn)
+		filter := &db.Filter{Age: db.DGUTAgeAll}
+
+		sum, err := dbch.DirInfo("/", filter)
+		So(err, ShouldBeNil)
+		So(sum, ShouldNotBeNil)
+		So(sum.Count, ShouldEqual, 4)
+		So(sum.Size, ShouldEqual, 40)
+
+		hasChildren, err := dbch.DirsHaveChildren([]string{"/"}, filter)
+		So(err, ShouldBeNil)
+		So(hasChildren, ShouldResemble, map[string]bool{"/": true})
+		So(failingConn.treeSummaryAvailabilityQueries(), ShouldBeGreaterThan, 0)
+		So(fallbackCountingConn.ancestorDGUTAQueryCount(), ShouldBeGreaterThan, 0)
+
+		rows := []mountsActiveRow{{
+			mountPath:  mountPath,
+			snapshotID: sid.String(),
+			updatedAt:  updatedAt,
+		}}
+		So(ensureActiveTreeSummaries(ctx, conn, rows), ShouldBeNil)
+
+		readyCountingConn := &ancestorSummaryQueryCountingConn{Conn: conn}
+		readyDB := newClickHouseDatabase(cfg, readyCountingConn)
+
+		sum, err = readyDB.DirInfo("/", filter)
+		So(err, ShouldBeNil)
+		So(sum, ShouldNotBeNil)
+		So(sum.Count, ShouldEqual, 4)
+		So(sum.Size, ShouldEqual, 40)
+		So(readyCountingConn.treeSummaryQueryCount(), ShouldBeGreaterThan, 0)
+		So(readyCountingConn.ancestorDGUTAQueryCount(), ShouldEqual, 0)
+	})
+}
+
+type treeSummaryRefreshDeadlineConn struct {
+	ch.Conn
+
+	failures            atomic.Int32
+	availabilityQueries atomic.Int32
+}
+
+func (c *treeSummaryRefreshDeadlineConn) Query(ctx context.Context, query string, args ...any) (driver.Rows, error) {
+	isAvailabilityQuery := strings.Contains(query, "FROM wrstat_tree_summary_sets") ||
+		strings.Contains(query, "FROM wrstat_tree_dir_summary")
+
+	if isAvailabilityQuery {
+		c.availabilityQueries.Add(1)
+	}
+
+	return c.Conn.Query(ctx, query, args...)
+}
+
+func (c *treeSummaryRefreshDeadlineConn) Exec(ctx context.Context, query string, args ...any) error {
+	if strings.Contains(query, "INSERT INTO wrstat_tree_") {
+		c.failures.Add(1)
+
+		return context.DeadlineExceeded
+	}
+
+	return c.Conn.Exec(ctx, query, args...)
+}
+
+func (c *treeSummaryRefreshDeadlineConn) treeSummaryRefreshFailures() int {
+	return int(c.failures.Load())
+}
+
+func (c *treeSummaryRefreshDeadlineConn) treeSummaryAvailabilityQueries() int {
+	return int(c.availabilityQueries.Load())
 }
 
 type hasChildrenQueryCountingConn struct {

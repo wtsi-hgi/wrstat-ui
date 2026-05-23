@@ -702,9 +702,16 @@ func (d *clickHouseDatabase) activeTreeSummaryFingerprint(
 		return "", false, err
 	}
 
-	if err := ensureActiveTreeSummaries(ctx, d.conn, rows); err != nil {
-		return "", false, err
+	fingerprint := fingerprintForMountsActive(rows)
+
+	ready, readyErr := treeSummaryReady(ctx, d.conn, fingerprint)
+	if readyErr != nil {
+		ready = false
 	}
 
-	return fingerprintForMountsActive(rows), true, nil
+	if !ready {
+		return "", false, nil
+	}
+
+	return fingerprint, true, nil
 }

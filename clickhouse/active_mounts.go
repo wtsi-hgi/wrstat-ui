@@ -30,6 +30,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/wtsi-hgi/wrstat-ui/internal/mountpath"
@@ -154,7 +155,7 @@ func activeMountPathsCondition(
 type activeMountsSnapshot struct {
 	mounts           []activeMount
 	fingerprint      string
-	treeSummaryReady bool
+	treeSummaryReady atomic.Bool
 }
 
 func newActiveMountsSnapshot(rows []mountsActiveRow) *activeMountsSnapshot {
@@ -273,12 +274,12 @@ func (s *activeMountsSnapshot) maxUpdatedAt(dir string) (time.Time, bool) {
 
 func (s *activeMountsSnapshot) markTreeSummaryReady() {
 	if s != nil {
-		s.treeSummaryReady = true
+		s.treeSummaryReady.Store(true)
 	}
 }
 
 func (s *activeMountsSnapshot) treeSummaryFingerprint() (string, bool, error) {
-	if s == nil || !s.treeSummaryReady || s.fingerprint == "" {
+	if s == nil || !s.treeSummaryReady.Load() || s.fingerprint == "" {
 		return "", false, nil
 	}
 
