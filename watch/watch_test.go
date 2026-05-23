@@ -45,6 +45,53 @@ import (
 
 var errTimedOut = errors.New("timed out")
 
+func TestWatchSummariseResourceMinimums(t *testing.T) {
+	Convey("Watch creates summarise jobs with resource minimums that wr can only raise", t, func() {
+		inputDir := t.TempDir()
+		outputDir := t.TempDir()
+		inputBase := "20260517-200015_／lustre／scratch127"
+		lowMemBase := "20260517-200015_／lustre／scratch128"
+		highMemBase := "20260517-200015_／lustre／scratch129"
+
+		pr, pw, err := os.Pipe()
+		So(err, ShouldBeNil)
+
+		defer pr.Close()
+
+		pretendSubmissions := client.PretendSubmissions
+
+		client.PretendSubmissions = strconv.FormatUint(uint64(pw.Fd()), 10)
+		defer func() {
+			client.PretendSubmissions = pretendSubmissions
+		}()
+
+		s, err := client.New(client.SchedulerSettings{})
+		So(err, ShouldBeNil)
+
+		defer s.Disconnect() //nolint:errcheck
+
+		job, err := createSummariseJob("", inputDir, outputDir, inputBase, "", "", "", 0, s)
+		So(err, ShouldBeNil)
+		So(job.Requirements.RAM, ShouldEqual, 8192)
+		So(job.Requirements.Time, ShouldEqual, 30*time.Minute)
+		So(job.Requirements.Cores, ShouldEqual, 2)
+		So(job.Override, ShouldEqual, 1)
+		So(job.ReqGroup, ShouldEqual, "wrstat-ui-summarise-／lustre／scratch127")
+
+		lowMemJob, err := createSummariseJob("", inputDir, outputDir, lowMemBase, "", "", "", 4, s)
+		So(err, ShouldBeNil)
+		So(lowMemJob.Requirements.RAM, ShouldEqual, 8192)
+		So(lowMemJob.Requirements.Time, ShouldEqual, 30*time.Minute)
+		So(lowMemJob.Override, ShouldEqual, 1)
+
+		highMemJob, err := createSummariseJob("", inputDir, outputDir, highMemBase, "", "", "", 16, s)
+		So(err, ShouldBeNil)
+		So(highMemJob.Requirements.RAM, ShouldEqual, 16384)
+		So(highMemJob.Requirements.Time, ShouldEqual, 30*time.Minute)
+		So(highMemJob.Override, ShouldEqual, 1)
+	})
+}
+
 func TestWatch(t *testing.T) {
 	Convey("Given the expected setup", t, func() {
 		const reqGroupABC = "wrstat-ui-summarise-abc"
@@ -119,11 +166,11 @@ func TestWatch(t *testing.T) {
 					ReqGroup:   reqGroupABC,
 					Requirements: &scheduler.Requirements{
 						RAM:   8192,
-						Time:  10 * time.Second,
+						Time:  summariseMinRuntime,
 						Cores: 2,
 						Disk:  1,
 					},
-					Override: 0,
+					Override: 1,
 					Retries:  30,
 					State:    jobqueue.JobStateDelayed,
 				},
@@ -239,11 +286,11 @@ func TestWatch(t *testing.T) {
 					Group:      "myGroup",
 					Requirements: &scheduler.Requirements{
 						RAM:   8192,
-						Time:  10 * time.Second,
+						Time:  summariseMinRuntime,
 						Cores: 2,
 						Disk:  1,
 					},
-					Override: 0,
+					Override: 1,
 					Retries:  30,
 					State:    jobqueue.JobStateDelayed,
 				},
@@ -302,11 +349,11 @@ func TestWatch(t *testing.T) {
 					ReqGroup:   reqGroupABC,
 					Requirements: &scheduler.Requirements{
 						RAM:   8192,
-						Time:  10 * time.Second,
+						Time:  summariseMinRuntime,
 						Cores: 2,
 						Disk:  1,
 					},
-					Override: 0,
+					Override: 1,
 					Retries:  30,
 					State:    jobqueue.JobStateDelayed,
 				},
@@ -350,11 +397,11 @@ func TestWatch(t *testing.T) {
 					ReqGroup:   reqGroupABC,
 					Requirements: &scheduler.Requirements{
 						RAM:   8192,
-						Time:  10 * time.Second,
+						Time:  summariseMinRuntime,
 						Cores: 2,
 						Disk:  1,
 					},
-					Override: 0,
+					Override: 1,
 					Retries:  30,
 					State:    jobqueue.JobStateDelayed,
 				},
@@ -370,11 +417,11 @@ func TestWatch(t *testing.T) {
 					ReqGroup:   "wrstat-ui-summarise-c",
 					Requirements: &scheduler.Requirements{
 						RAM:   8192,
-						Time:  10 * time.Second,
+						Time:  summariseMinRuntime,
 						Cores: 2,
 						Disk:  1,
 					},
-					Override: 0,
+					Override: 1,
 					Retries:  30,
 					State:    jobqueue.JobStateDelayed,
 				},

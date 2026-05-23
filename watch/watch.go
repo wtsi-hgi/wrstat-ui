@@ -44,6 +44,7 @@ const (
 	basedirBasename       = "basedirs.db"
 	hiddenOutputPrefix    = "."
 	summariseCores        = 2
+	summariseMinRuntime   = 30 * time.Minute
 	defaultSummariseRAMMB = 8192
 	mbPerGB               = 1024
 	jobTimestampLayout    = "20060102150405"
@@ -59,9 +60,10 @@ var connectTimeout = 10 * time.Second //nolint:gochecknoglobals
 //
 // The scheduled summarise subcommands will be given the output directory, quota
 // path and basedirs config path. minMemGB is in GB and acts as the minimum
-// requested memory for summarise jobs; higher learned or historical
-// requirements remain unchanged. The queue and queuesAvoid values are passed to
-// wr so scheduler submission can target or avoid specific queues.
+// requested memory for summarise jobs, with values below the default 8GB floor
+// clamped upward. Higher learned or historical requirements remain unchanged.
+// The queue and queuesAvoid values are passed to wr so scheduler submission can
+// target or avoid specific queues.
 func Watch(inputDirs []string, group, outputDir, quotaPath, basedirsConfig,
 	mounts string, minMemGB int, queue, queuesAvoid string, logger log15.Logger) error {
 	for {
@@ -191,6 +193,11 @@ func createSummariseJob(group, inputDir, outputDir, base, quotaPath, basedirsCon
 		return nil, err
 	}
 
+	req := client.DefaultRequirements()
+	req.Cores = summariseCores
+	req.RAM = summariseMinRAMMB(minMemGB)
+	req.Time = summariseMinRuntime
+
 	job := s.NewJob(
 		getJobCommand(dotOutputBase, previousBasedirsDB, quotaPath, basedirsConfig, mounts,
 			inputDir, base, outputDir),
@@ -198,20 +205,24 @@ func createSummariseJob(group, inputDir, outputDir, base, quotaPath, basedirsCon
 		summariseReqGroup(base),
 		"",
 		"",
-		nil,
+		req,
 	)
-
-	job.Requirements.Cores = summariseCores
-	job.Requirements.RAM = defaultSummariseRAMMB
-
-	if minMemGB > 0 {
-		job.Requirements.RAM = minMemGB * mbPerGB
-		job.Override = 1
-	}
-
 	job.Group = group
 
 	return job, nil
+}
+
+func summariseMinRAMMB(minMemGB int) int {
+	if minMemGB <= 0 {
+		return defaultSummariseRAMMB
+	}
+
+	requestedRAM := minMemGB * mbPerGB
+	if requestedRAM < defaultSummariseRAMMB {
+		return defaultSummariseRAMMB
+	}
+
+	return requestedRAM
 }
 
 func summariseJobName() string {

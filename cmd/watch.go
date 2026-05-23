@@ -70,9 +70,10 @@ The --queues flag restricts wr submissions to the given comma-separated queue
 names, while --queues_avoid tells wr which comma-separated queues it should
 avoid when scheduling those summarise jobs.
 
-The --min_mem flag sets a minimum RAM request in GB for the summarise jobs.
-When set above 0, wr will prefer that higher RAM requirement over learned
-values.
+The --min_mem flag sets a minimum RAM request in GB for the summarise jobs,
+defaulting to 8. Lower values are clamped to 8, and wr may still raise RAM or
+runtime above the submitted 8GB/30m floors when it has learned higher
+requirements for the mount.
 
 The --group flag can be specified to override the unix group with which the
 summarise subcommands will be run.
@@ -138,7 +139,8 @@ func init() {
 	watchcmd.Flags().StringVarP(&quotaPath, "quota", "q", "", "csv of gid,disk,size_quota,inode_quota")
 	watchcmd.Flags().StringVarP(&basedirsConfig, "config", "c", "", "path to basedirs config file")
 	watchcmd.Flags().StringVarP(&mounts, "mounts", "m", "", "path to a file containing a list of quoted mountpoints")
-	watchcmd.Flags().IntVar(&watchMinMem, "min_mem", 0, "minimum RAM in GB to request for summarise jobs")
+	watchcmd.Flags().IntVar(&watchMinMem, "min_mem", 0,
+		"minimum RAM in GB to request for summarise jobs; values below 8 are clamped to 8")
 	watchcmd.Flags().StringVar(&watchQueue, "queues", "", "comma-separated queues to submit jobs to")
 	watchcmd.Flags().StringVar(&watchQueuesAvoid, "queues_avoid", "", "comma-separated queues to avoid")
 	watchcmd.Flags().StringVarP(&group, "group", "g", "", "unix group to run the summarisers with")
