@@ -223,6 +223,8 @@ func (p *chProvider) captureActiveMountsState(parent context.Context) (*activeMo
 		return nil, "", fmt.Errorf("clickhouse: failed to capture mounts_active snapshot: %w", err)
 	}
 
+	p.ensureActiveMountDirSummariesBestEffort(context.WithoutCancel(parent), rows)
+
 	snapshot := newActiveMountsSnapshot(rows)
 	if activeTreeSummariesReadyForSnapshot(ctx, p.conn, snapshot) {
 		snapshot.markTreeSummaryReady()
@@ -249,6 +251,29 @@ func activeTreeSummariesReadyForSnapshot(
 	ready, err := treeSummaryReady(ctx, conn, snapshot.fingerprint)
 
 	return err == nil && ready
+}
+
+func (p *chProvider) ensureActiveMountDirSummariesBestEffort(
+	parent context.Context,
+	rows []mountsActiveRow,
+) {
+	if p == nil || len(rows) == 0 {
+		return
+	}
+
+	ctx, cancel := queryContext(parent, queryTimeout(p.cfg))
+	defer cancel()
+
+	if err := ensureActiveMountDirSummaries(ctx, p.conn, rows); err != nil {
+		p.queueError(err)
+
+		return
+	}
+
+	cache := treeQueryCacheForConfig(p.cfg)
+	for _, row := range rows {
+		cache.putMountDirSummaryReady(newTreeMountCacheKey(row.mountPath, row.snapshotID))
+	}
 }
 
 func (p *chProvider) OnMessage(cb func(message string)) {

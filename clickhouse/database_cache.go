@@ -36,9 +36,11 @@ import (
 )
 
 const (
-	treeChildrenCacheMaxEntries = 4096
-	treeDGUTACacheMaxEntries    = 8192
-	treeQueryCacheMaxNamespaces = 16
+	treeChildrenCacheMaxEntries     = 65536
+	treeDGUTACacheMaxEntries        = 8192
+	treeDirSummaryCacheMaxEntries   = 32768
+	treeMountSummaryCacheMaxEntries = 1024
+	treeQueryCacheMaxNamespaces     = 16
 )
 
 var sharedTreeQueryCaches = newTreeQueryCacheRegistry() //nolint:gochecknoglobals // process-wide provider cache
@@ -57,6 +59,33 @@ func newTreeCacheKey(mountPath, snapshotID, dir string) treeCacheKey {
 	}
 }
 
+type treeDirSummaryCacheKey struct {
+	treeCacheKey
+	age db.DirGUTAge
+}
+
+func newTreeDirSummaryCacheKey(
+	mountPath, snapshotID, dir string,
+	age db.DirGUTAge,
+) treeDirSummaryCacheKey {
+	return treeDirSummaryCacheKey{
+		treeCacheKey: newTreeCacheKey(mountPath, snapshotID, dir),
+		age:          age,
+	}
+}
+
+type treeMountCacheKey struct {
+	mountPath  string
+	snapshotID string
+}
+
+func newTreeMountCacheKey(mountPath, snapshotID string) treeMountCacheKey {
+	return treeMountCacheKey{
+		mountPath:  ensureTrailingSlash(mountPath),
+		snapshotID: snapshotID,
+	}
+}
+
 type treeQueryCache struct {
 	mu sync.RWMutex
 
@@ -65,6 +94,11 @@ type treeQueryCache struct {
 
 	dgutas     map[treeCacheKey]db.GUTAs
 	dgutaOrder []treeCacheKey
+
+	dirSummaries      map[treeDirSummaryCacheKey]*db.DirSummary
+	dirSummaryOrder   []treeDirSummaryCacheKey
+	mountSummaries    map[treeMountCacheKey]bool
+	mountSummaryOrder []treeMountCacheKey
 }
 
 func treeQueryCacheForConfig(cfg Config) *treeQueryCache {
@@ -73,8 +107,10 @@ func treeQueryCacheForConfig(cfg Config) *treeQueryCache {
 
 func newTreeQueryCache() *treeQueryCache {
 	return &treeQueryCache{
-		children: make(map[treeCacheKey][]string),
-		dgutas:   make(map[treeCacheKey]db.GUTAs),
+		children:       make(map[treeCacheKey][]string),
+		dgutas:         make(map[treeCacheKey]db.GUTAs),
+		dirSummaries:   make(map[treeDirSummaryCacheKey]*db.DirSummary),
+		mountSummaries: make(map[treeMountCacheKey]bool),
 	}
 }
 
@@ -171,6 +207,86 @@ func (c *treeQueryCache) evictOldestGUTAs() {
 	}
 }
 
+func (c *treeQueryCache) getDirSummary(key treeDirSummaryCacheKey) (*db.DirSummary, bool) {
+	c.mu.RLock()
+	summary, ok := c.dirSummaries[key]
+	c.mu.RUnlock()
+
+	if !ok {
+		return nil, false
+	}
+
+	return cloneDirSummary(summary), true
+}
+
+func cloneDirSummary(in *db.DirSummary) *db.DirSummary {
+	if in == nil {
+		return nil
+	}
+
+	out := *in
+	out.UIDs = cloneUint32s(in.UIDs)
+	out.GIDs = cloneUint32s(in.GIDs)
+
+	return &out
+}
+
+func (c *treeQueryCache) putDirSummary(key treeDirSummaryCacheKey, summary *db.DirSummary) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if _, exists := c.dirSummaries[key]; !exists {
+		c.dirSummaryOrder = append(c.dirSummaryOrder, key)
+		c.evictOldestDirSummaries()
+	}
+
+	c.dirSummaries[key] = cloneDirSummary(summary)
+}
+
+func (c *treeQueryCache) evictOldestDirSummaries() {
+	for len(c.dirSummaryOrder) > treeDirSummaryCacheMaxEntries {
+		oldest := c.dirSummaryOrder[0]
+		c.dirSummaryOrder = c.dirSummaryOrder[1:]
+		delete(c.dirSummaries, oldest)
+	}
+}
+
+func (c *treeQueryCache) dirSummaryEntryCount() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	return len(c.dirSummaries)
+}
+
+func (c *treeQueryCache) getMountDirSummaryReady(key treeMountCacheKey) bool {
+	c.mu.RLock()
+	ready := c.mountSummaries[key]
+	c.mu.RUnlock()
+
+	return ready
+}
+
+func (c *treeQueryCache) putMountDirSummaryReady(key treeMountCacheKey) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.mountSummaries[key] {
+		return
+	}
+
+	c.mountSummaries[key] = true
+	c.mountSummaryOrder = append(c.mountSummaryOrder, key)
+	c.evictOldestMountSummaries()
+}
+
+func (c *treeQueryCache) evictOldestMountSummaries() {
+	for len(c.mountSummaryOrder) > treeMountSummaryCacheMaxEntries {
+		oldest := c.mountSummaryOrder[0]
+		c.mountSummaryOrder = c.mountSummaryOrder[1:]
+		delete(c.mountSummaries, oldest)
+	}
+}
+
 type treeQueryCacheRegistry struct {
 	mu sync.Mutex
 
@@ -222,6 +338,17 @@ func (r *treeQueryCacheRegistry) evictOldest() {
 
 func resetSharedTreeQueryCachesForTesting() {
 	sharedTreeQueryCaches = newTreeQueryCacheRegistry()
+}
+
+func cloneUint32s(in []uint32) []uint32 {
+	if len(in) == 0 {
+		return nil
+	}
+
+	out := make([]uint32, len(in))
+	copy(out, in)
+
+	return out
 }
 
 func treeQueryCacheNamespace(cfg Config) string {

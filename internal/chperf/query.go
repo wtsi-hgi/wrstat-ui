@@ -45,29 +45,31 @@ import (
 )
 
 const (
-	dirPickMinCount            = 1000
-	dirPickMaxCount            = 20000
-	dirPickMaxSteps            = 64
-	defaultExplainLimit        = 1_000_000
-	queryInputAgeKey           = "age"
-	queryInputDirKey           = "dir"
-	queryInputDurationSource   = "duration_source"
-	queryInputCacheScope       = "cache_scope"
-	queryInputSplitsKey        = "splits"
-	queryOpTreeDiskTreeAncName = "tree_disktree_endpoint_ancestor_dirs"
-	queryOpTreeDiskTreeEndName = "tree_disktree_endpoint"
-	queryOpTreeDiskTreeNewName = "tree_disktree_endpoint_new_dirs"
-	queryOpTreeDirInfoName     = "tree_dirinfo"
-	queryOpTreeWhereColdName   = "tree_where_cold_then_cached"
-	queryOpTreeWhereFreshName  = "tree_where_fresh_provider"
-	queryOpTreeWhereName       = "tree_where"
-	queryScopeFreshProvider    = "fresh_provider_per_repeat"
-	queryScopeAncestorDirs     = "ancestor_directory_each_repeat"
-	queryScopeNewDirEachRepeat = "new_directory_each_repeat"
-	queryScopeSameProviderCold = "same_provider_cold_then_warm"
-	queryScopeSameProviderDir  = "same_provider_same_dir"
-	querySourceClickHouseLog   = "clickhouse_query_log"
-	querySourceWall            = "wall"
+	dirPickMinCount                     = 1000
+	dirPickMaxCount                     = 20000
+	dirPickMaxSteps                     = 64
+	defaultExplainLimit                 = 1_000_000
+	queryInputAgeKey                    = "age"
+	queryInputDirKey                    = "dir"
+	queryInputDurationSource            = "duration_source"
+	queryInputCacheScope                = "cache_scope"
+	queryInputSplitsKey                 = "splits"
+	queryOpTreeDiskTreeAncName          = "tree_disktree_endpoint_ancestor_dirs"
+	queryOpTreeDiskTreeEndName          = "tree_disktree_endpoint"
+	queryOpTreeDiskTreeNewName          = "tree_disktree_endpoint_new_dirs"
+	queryOpTreeDiskTreeVisibleChildName = "tree_disktree_endpoint_visible_child_dirs"
+	queryOpTreeDirInfoName              = "tree_dirinfo"
+	queryOpTreeWhereColdName            = "tree_where_cold_then_cached"
+	queryOpTreeWhereFreshName           = "tree_where_fresh_provider"
+	queryOpTreeWhereName                = "tree_where"
+	queryScopeFreshProvider             = "fresh_provider_per_repeat"
+	queryScopeAncestorDirs              = "ancestor_directory_each_repeat"
+	queryScopeNewDirEachRepeat          = "new_directory_each_repeat"
+	queryScopeSameProviderCold          = "same_provider_cold_then_warm"
+	queryScopeSameProviderDir           = "same_provider_same_dir"
+	queryScopeVisibleChildDirs          = "visible_child_directory_each_repeat"
+	querySourceClickHouseLog            = "clickhouse_query_log"
+	querySourceWall                     = "wall"
 )
 
 var (
@@ -305,6 +307,24 @@ func opTreeDiskTreeEndpointNewDirs(qctx queryContext, opts QueryOptions) op {
 	}
 }
 
+func loadTreeDiskTreeEndpoint(tree *db.Tree, dir string) ([]string, error) {
+	filter := &db.Filter{Age: db.DGUTAgeAll}
+
+	di, err := tree.DirInfo(dir, filter)
+	if err != nil || di == nil {
+		return nil, err
+	}
+
+	childPaths := make([]string, 0, len(di.Children))
+	for _, child := range di.Children {
+		childPaths = append(childPaths, child.Dir)
+	}
+
+	_ = tree.DirsHaveChildren(childPaths, filter)
+
+	return childPaths, nil
+}
+
 func opTreeDiskTreeEndpointAncestorDirs(qctx queryContext, opts QueryOptions) op {
 	dirs := ancestorDisktreeDirs(qctx, opts)
 	timedDirs := cycledDirsForRepeats(dirs, opts.Repeat)
@@ -377,21 +397,67 @@ func opTreeDiskTreeEndpoint(qctx queryContext) op {
 }
 
 func runTreeDiskTreeEndpoint(tree *db.Tree, dir string) error {
-	filter := &db.Filter{Age: db.DGUTAgeAll}
+	_, err := loadTreeDiskTreeEndpoint(tree, dir)
 
-	di, err := tree.DirInfo(dir, filter)
-	if err != nil || di == nil {
-		return err
+	return err
+}
+
+func opTreeDiskTreeEndpointVisibleChildDirs(qctx queryContext) op {
+	inputs := map[string]any{
+		"parent_dir":             qctx.dir,
+		"child_dirs":             []string{},
+		"child_count":            0,
+		"fallback_to_parent_dir": false,
+		queryInputCacheScope:     queryScopeVisibleChildDirs,
+		queryInputDurationSource: querySourceWall,
+		queryInputAgeKey:         int(db.DGUTAgeAll),
 	}
 
-	childPaths := make([]string, 0, len(di.Children))
-	for _, child := range di.Children {
-		childPaths = append(childPaths, child.Dir)
+	var timedDirs []string
+
+	i := 0
+
+	return op{
+		name:   queryOpTreeDiskTreeVisibleChildName,
+		inputs: inputs,
+		prepare: func(repeat int) (int, error) {
+			childDirs, err := loadTreeDiskTreeEndpoint(qctx.provider.Tree(), qctx.dir)
+			if err != nil {
+				return 0, err
+			}
+
+			var fallback bool
+
+			timedDirs, fallback = visibleChildDirsForRepeats(childDirs, qctx.dir, repeat)
+			inputs["child_dirs"] = timedDirs
+			inputs["child_count"] = len(timedDirs)
+			inputs["fallback_to_parent_dir"] = fallback
+			i = 0
+
+			return len(timedDirs), nil
+		},
+		run: func(_ context.Context) error {
+			if i >= len(timedDirs) {
+				return nil
+			}
+
+			dir := timedDirs[i]
+			i++
+
+			return runTreeDiskTreeEndpoint(qctx.provider.Tree(), dir)
+		},
+		useWallTime: true,
+		skipWarmup:  true,
+	}
+}
+
+func visibleChildDirsForRepeats(childDirs []string, parentDir string, repeat int) ([]string, bool) {
+	timedDirs := uniqueDirsForRepeats(childDirs, repeat)
+	if len(timedDirs) > 0 || repeat <= 0 {
+		return timedDirs, false
 	}
 
-	_ = tree.DirsHaveChildren(childPaths, filter)
-
-	return nil
+	return []string{parentDir}, true
 }
 
 func opTreeWhere(qctx queryContext, splits int) op {
@@ -906,6 +972,7 @@ func buildOps(qctx queryContext, opts QueryOptions, printf PrintfFunc) []op {
 	ops = append(ops,
 		opTreeDirInfo(qctx),
 		opTreeDiskTreeEndpoint(qctx),
+		opTreeDiskTreeEndpointVisibleChildDirs(qctx),
 		opTreeWhere(qctx, opts.Splits),
 		opTreeWhereFreshProvider(qctx, opts.Splits),
 		opGroupUsage(qctx),
@@ -1114,6 +1181,15 @@ func runOp(
 	}
 
 	repeat := opts.Repeat
+	if o.prepare != nil {
+		preparedRepeat, err := o.prepare(repeat)
+		if err != nil {
+			return fmt.Errorf("%s prepare: %w", o.name, err)
+		}
+
+		repeat = preparedRepeat
+	}
+
 	if o.hasRepeatOverride {
 		repeat = o.repeatOverride
 	}
@@ -1204,6 +1280,7 @@ type activeMountFreshness struct {
 type op struct {
 	name              string
 	inputs            map[string]any
+	prepare           func(repeat int) (int, error)
 	run               func(ctx context.Context) error
 	useWallTime       bool
 	skipWarmup        bool

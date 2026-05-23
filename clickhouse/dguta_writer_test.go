@@ -785,6 +785,17 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 			fingerprint,
 			"/",
 		), ShouldEqual, 1)
+		So(countRows(ctx, conn,
+			"SELECT count() FROM wrstat_dir_summary WHERE mount_path = ? AND snapshot_id = ? AND dir = ?",
+			mountPath,
+			sid.String(),
+			mountPath,
+		), ShouldBeGreaterThan, 0)
+		So(countRows(ctx, conn,
+			"SELECT count() FROM wrstat_dir_summary_sets FINAL WHERE mount_path = ? AND snapshot_id = ?",
+			mountPath,
+			sid.String(),
+		), ShouldEqual, 1)
 	})
 
 	Convey("DGUTAWriter keeps the active snapshot when tree summary refresh times out", t, func() {

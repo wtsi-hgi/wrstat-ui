@@ -44,9 +44,13 @@ import (
 const (
 	childrenInitialCap = 16
 
-	dgutaInitialCap                    = 8
-	dirsHaveChildrenSummaryFanoutLimit = 16
-	queryScopeArgs                     = 2
+	dgutaInitialCap                      = 8
+	dirsHaveChildrenSummaryPrefetchLimit = 64
+	dirsHaveChildrenSummaryFanoutLimit   = 16
+	dirSummaryFilterClauseInitialCap     = 3
+	groupedDirSummaryMinDirs             = 4096
+	queryStringINMaxValues               = 1000
+	queryScopeArgs                       = 2
 
 	childrenQuery = "SELECT DISTINCT child FROM wrstat_children " +
 		"PREWHERE mount_path = ? AND snapshot_id = ? AND parent_dir = ? " +
@@ -126,11 +130,37 @@ const (
 		"PREWHERE mount_path = ? AND snapshot_id = ? " +
 		"WHERE dir IN (%s)"
 
+	dirSummariesForDirsQuery = "SELECT dir, count() AS raw_rows, " +
+		"sumIf(file_count, passes_filter) AS total_count, " +
+		"sumIf(file_size, passes_filter) AS total_size, " +
+		"minIf(atime_min, passes_filter AND atime_min != 0) AS atime_min, " +
+		"maxIf(mtime_max, passes_filter) AS mtime_max, " +
+		"sumForEachIf(atime_buckets, passes_filter) AS atime_buckets, " +
+		"sumForEachIf(mtime_buckets, passes_filter) AS mtime_buckets, " +
+		"arraySort(groupUniqArrayIf(uid, passes_filter)) AS uids, " +
+		"arraySort(groupUniqArrayIf(gid, passes_filter)) AS gids, " +
+		"groupBitOrIf(ft, passes_filter) AS ft " +
+		"FROM (" +
+		"SELECT dir, gid, uid, ft, count AS file_count, size AS file_size, " +
+		"atime_min, mtime_max, atime_buckets, mtime_buckets, " +
+		"%s AS passes_filter " +
+		"FROM wrstat_dguta " +
+		"PREWHERE mount_path = ? AND snapshot_id = ? " +
+		"WHERE dir IN (%s)" +
+		") " +
+		"GROUP BY dir"
+
 	childrenForParentsQuery = "SELECT parent_dir, child " +
 		"FROM wrstat_children " +
 		"PREWHERE mount_path = ? AND snapshot_id = ? " +
 		"WHERE parent_dir IN (%s) " +
 		"ORDER BY parent_dir ASC, child ASC"
+
+	childrenForExternalParentsQuery = "SELECT c.parent_dir, c.child " +
+		"FROM wrstat_children AS c " +
+		"ANY INNER JOIN " + externalDirsTableName + " AS q ON q.dir = c.parent_dir " +
+		"WHERE c.mount_path = ? AND c.snapshot_id = ? " +
+		"ORDER BY c.parent_dir ASC, c.child ASC"
 
 	dirsHaveMatchingChildrenQuery = "SELECT c.parent_dir " +
 		"FROM wrstat_children c " +
@@ -278,6 +308,17 @@ func (d *clickHouseDatabase) dirInfoSingleMount(
 	dir string,
 	filter *db.Filter,
 ) (*db.DirSummary, error) {
+	sum, found, ok, err := d.dirSummaryForDirMount(
+		mountPath, snapshotID, updatedAt, dir, filter,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	if ok {
+		return dirInfoSummaryResult(sum, found, updatedAt)
+	}
+
 	gutas, err := d.gutasForDir(
 		mountPath, snapshotID, ensureTrailingSlash(dir),
 	)
@@ -290,6 +331,18 @@ func (d *clickHouseDatabase) dirInfoSingleMount(
 	}
 
 	return dirSummaryWithModtime(gutas, filter, updatedAt), nil
+}
+
+func dirInfoSummaryResult(
+	sum *db.DirSummary,
+	found bool,
+	updatedAt time.Time,
+) (*db.DirSummary, error) {
+	if !found {
+		return &db.DirSummary{Modtime: updatedAt}, db.ErrDirNotFound
+	}
+
+	return sum, nil
 }
 
 // Where resolves Tree.Where with set-oriented ClickHouse subtree summaries.
@@ -692,6 +745,44 @@ func (d *clickHouseDatabase) addDirInfosForMount(
 	group *activeMountDirGroup,
 	filter *db.Filter,
 ) error {
+	ok, err := d.addGroupedDirInfosForMount(result, group, filter)
+	if err != nil || ok {
+		return err
+	}
+
+	return d.addRawDirInfosForMount(result, group, filter)
+}
+
+func (d *clickHouseDatabase) addGroupedDirInfosForMount(
+	result map[string]*db.DirSummary,
+	group *activeMountDirGroup,
+	filter *db.Filter,
+) (bool, error) {
+	summaries, handled, ok, err := d.dirSummariesForDirsMount(
+		group.mount.mountPath,
+		group.mount.snapshotID,
+		group.mount.updatedAt,
+		group.queryDirs,
+		filter,
+	)
+	if err != nil {
+		return false, err
+	}
+
+	if !ok {
+		return false, nil
+	}
+
+	d.addGroupedDirSummaries(result, group, summaries)
+
+	return true, d.addMissingDirInfoSummaries(result, group, filter, handled)
+}
+
+func (d *clickHouseDatabase) addRawDirInfosForMount(
+	result map[string]*db.DirSummary,
+	group *activeMountDirGroup,
+	filter *db.Filter,
+) error {
 	gutasByDir, err := d.gutasForDirs(
 		group.mount.mountPath,
 		group.mount.snapshotID,
@@ -703,7 +794,32 @@ func (d *clickHouseDatabase) addDirInfosForMount(
 
 	d.addSummariesForGUTAs(result, group, filter, gutasByDir)
 
-	return d.addMissingDirInfoSummaries(result, group, filter, gutasByDir)
+	return d.addMissingDirInfoSummaries(result, group, filter, handledGUTADirs(gutasByDir))
+}
+
+func handledGUTADirs(gutasByDir map[string]db.GUTAs) map[string]bool {
+	handled := make(map[string]bool, len(gutasByDir))
+	for dir := range gutasByDir {
+		handled[dir] = true
+	}
+
+	return handled
+}
+
+func (d *clickHouseDatabase) addGroupedDirSummaries(
+	result map[string]*db.DirSummary,
+	group *activeMountDirGroup,
+	summaries map[string]*db.DirSummary,
+) {
+	for queryDir, sum := range summaries {
+		if sum == nil {
+			continue
+		}
+
+		originalDir := group.originalDirs[queryDir]
+		sum.Dir = originalDir
+		result[originalDir] = sum
+	}
 }
 
 func (d *clickHouseDatabase) addSummariesForGUTAs(
@@ -728,10 +844,10 @@ func (d *clickHouseDatabase) addMissingDirInfoSummaries(
 	result map[string]*db.DirSummary,
 	group *activeMountDirGroup,
 	filter *db.Filter,
-	gutasByDir map[string]db.GUTAs,
+	handled map[string]bool,
 ) error {
 	for _, queryDir := range group.queryDirs {
-		if _, found := gutasByDir[queryDir]; found {
+		if handled[queryDir] {
 			continue
 		}
 
@@ -783,6 +899,114 @@ func (d *clickHouseDatabase) parentDirsWithFilteredChildrenForMount(
 		return nil, err
 	}
 
+	parentDirs := parentDirsWithAnyChildren(group.queryDirs, childrenByParent)
+	if len(parentDirs) == 0 {
+		return map[string]bool{}, nil
+	}
+
+	if broadFilterCanUseChildRows(filter) {
+		parents := parentDirSet(parentDirs)
+
+		ignoreDirsHaveChildrenPrefetchError(
+			d.prefetchDirsHaveChildrenSummaries(group, filter, childrenByParent),
+		)
+
+		return parents, nil
+	}
+
+	return d.parentDirsWithFilteredChildRows(group, filter, childrenByParent, parentDirs)
+}
+
+func broadFilterCanUseChildRows(filter *db.Filter) bool {
+	return filter == nil ||
+		(filter.GIDs == nil &&
+			filter.UIDs == nil &&
+			filter.FT == 0 &&
+			filter.Age == db.DGUTAgeAll)
+}
+
+func parentDirSet(parentDirs []string) map[string]bool {
+	set := make(map[string]bool, len(parentDirs))
+	for _, parentDir := range parentDirs {
+		set[parentDir] = true
+	}
+
+	return set
+}
+
+func ignoreDirsHaveChildrenPrefetchError(error) {}
+
+func (d *clickHouseDatabase) prefetchDirsHaveChildrenSummaries(
+	group *activeMountDirGroup,
+	filter *db.Filter,
+	childrenByParent map[string][]string,
+) error {
+	if !canUseMountDirSummary(filter) {
+		return nil
+	}
+
+	childDirs, ok := boundedUniqueChildDirs(
+		childrenByParent,
+		dirsHaveChildrenSummaryPrefetchLimit,
+	)
+	if !ok || len(childDirs) == 0 {
+		return nil
+	}
+
+	return d.cacheMountDirSummariesForDirsMount(
+		group.mount.mountPath,
+		group.mount.snapshotID,
+		childDirs,
+		filter,
+	)
+}
+
+func boundedUniqueChildDirs(
+	childrenByParent map[string][]string,
+	limit int,
+) ([]string, bool) {
+	if limit <= 0 {
+		return nil, false
+	}
+
+	childDirs := make([]string, 0, limit)
+	seen := make(map[string]bool, limit)
+
+	for _, children := range childrenByParent {
+		for _, child := range children {
+			if !addBoundedUniqueChildDir(&childDirs, seen, ensureTrailingSlash(child), limit) {
+				return nil, false
+			}
+		}
+	}
+
+	return childDirs, true
+}
+
+func (d *clickHouseDatabase) cacheMountDirSummariesForDirsMount(
+	mountPath, snapshotID string,
+	dirs []string,
+	filter *db.Filter,
+) error {
+	summaries, handled, ok, err := d.mountDirSummariesForDirsMount(
+		mountPath,
+		snapshotID,
+		dirs,
+		filter,
+	)
+	_ = summaries
+	_ = handled
+	_ = ok
+
+	return err
+}
+
+func (d *clickHouseDatabase) parentDirsWithFilteredChildRows(
+	group *activeMountDirGroup,
+	filter *db.Filter,
+	childrenByParent map[string][]string,
+	parentDirs []string,
+) (map[string]bool, error) {
 	childParents, childDirs := collectChildParents(childrenByParent)
 	if len(childDirs) == 0 {
 		return map[string]bool{}, nil
@@ -791,8 +1015,6 @@ func (d *clickHouseDatabase) parentDirsWithFilteredChildrenForMount(
 	if len(childDirs) <= dirsHaveChildrenSummaryFanoutLimit {
 		return d.parentDirsWithSummarizedChildren(childParents, childDirs, filter)
 	}
-
-	parentDirs := parentDirsWithAnyChildren(group.queryDirs, childrenByParent)
 
 	return d.parentDirsWithMatchingChildrenMount(
 		group.mount.mountPath,
@@ -1383,6 +1605,45 @@ func (d *clickHouseDatabase) queryGUTAsForDirs(
 	ctx, cancel := configQueryContext(d.cfg)
 	defer cancel()
 
+	result := make(map[string]db.GUTAs)
+
+	for _, batchDirs := range stringValueBatches(dirs) {
+		queried, err := d.queryGUTAsForDirsBatch(ctx, mountPath, snapshotID, batchDirs)
+		if err != nil {
+			return nil, err
+		}
+
+		for dir, gutas := range queried {
+			result[dir] = gutas
+		}
+	}
+
+	return result, nil
+}
+
+func stringValueBatches(values []string) [][]string {
+	if len(values) == 0 {
+		return nil
+	}
+
+	if len(values) <= queryStringINMaxValues {
+		return [][]string{values}
+	}
+
+	batches := make([][]string, 0, (len(values)+queryStringINMaxValues-1)/queryStringINMaxValues)
+	for start := 0; start < len(values); start += queryStringINMaxValues {
+		end := min(start+queryStringINMaxValues, len(values))
+		batches = append(batches, values[start:end])
+	}
+
+	return batches
+}
+
+func (d *clickHouseDatabase) queryGUTAsForDirsBatch(
+	ctx context.Context,
+	mountPath, snapshotID string,
+	dirs []string,
+) (map[string]db.GUTAs, error) {
 	query, args := scopedBatchQuery(dgutasForDirsQuery, dirs, mountPath, snapshotID)
 
 	rows, err := d.conn.Query(ctx, query, args...)
@@ -1397,7 +1658,7 @@ func (d *clickHouseDatabase) queryGUTAsForDirs(
 
 func scopedBatchQuery(queryFmt string, values []string, scopeArgs ...any) (string, []any) {
 	query := fmt.Sprintf(queryFmt, placeholders(len(values)))
-	args := make([]any, 0, len(values)+queryScopeArgs)
+	args := make([]any, 0, len(values)+len(scopeArgs))
 	args = append(args, scopeArgs...)
 
 	for _, value := range values {
@@ -1424,6 +1685,144 @@ func scanDGUTARowsByDir(rows rowsScanner) (map[string]db.GUTAs, error) {
 	}
 
 	return gutasByDir, nil
+}
+
+func (d *clickHouseDatabase) dirSummaryForDirMount(
+	mountPath, snapshotID string,
+	updatedAt time.Time,
+	dir string,
+	filter *db.Filter,
+) (*db.DirSummary, bool, bool, error) {
+	summaries, handled, ok, err := d.dirSummariesForDirsMount(
+		mountPath,
+		snapshotID,
+		updatedAt,
+		[]string{ensureTrailingSlash(dir)},
+		filter,
+	)
+	if err != nil || !ok {
+		return nil, false, ok, err
+	}
+
+	queryDir := ensureTrailingSlash(dir)
+	if !handled[queryDir] && !mountDirSummaryMissingMeansNotFound(filter) {
+		return nil, false, false, nil
+	}
+
+	return summaries[queryDir], handled[queryDir], true, nil
+}
+
+func (d *clickHouseDatabase) dirSummariesForDirsMount(
+	mountPath, snapshotID string,
+	updatedAt time.Time,
+	dirs []string,
+	filter *db.Filter,
+) (map[string]*db.DirSummary, map[string]bool, bool, error) {
+	if len(dirs) == 0 {
+		return map[string]*db.DirSummary{}, map[string]bool{}, true, nil
+	}
+
+	summaries, handled, ok, err := d.mountDirSummariesForDirsMount(mountPath, snapshotID, dirs, filter)
+	if err != nil || ok {
+		return summaries, handled, ok, err
+	}
+
+	if !shouldUseGroupedDirSummaries(dirs, filter) {
+		return nil, nil, false, nil
+	}
+
+	return d.queryGroupedDirSummariesForDirsMount(mountPath, snapshotID, updatedAt, dirs, filter)
+}
+
+func shouldUseGroupedDirSummaries(dirs []string, filter *db.Filter) bool {
+	if len(dirs) < groupedDirSummaryMinDirs {
+		return false
+	}
+
+	_, _, ok := dirSummaryFilterExpression(filter)
+
+	return ok
+}
+
+func (d *clickHouseDatabase) queryGroupedDirSummariesForDirsMount(
+	mountPath, snapshotID string,
+	updatedAt time.Time,
+	dirs []string,
+	filter *db.Filter,
+) (map[string]*db.DirSummary, map[string]bool, bool, error) {
+	query, args, ok := dirSummariesForDirsMountQuery(mountPath, snapshotID, dirs, filter)
+	if !ok {
+		return nil, nil, false, nil
+	}
+
+	ctx, cancel := configQueryContext(d.cfg)
+	defer cancel()
+
+	rows, err := d.conn.Query(ctx, query, args...)
+	if err != nil {
+		return nil, nil, true, fmt.Errorf("clickhouse: failed to query dir summaries: %w", err)
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	summaries, handled, err := scanDirSummaryRows(rows, filter, updatedAt)
+
+	return summaries, handled, true, err
+}
+
+func dirSummariesForDirsMountQuery(
+	mountPath, snapshotID string,
+	dirs []string,
+	filter *db.Filter,
+) (string, []any, bool) {
+	filterExpr, filterArgs, ok := dirSummaryFilterExpression(filter)
+	if !ok {
+		return "", nil, false
+	}
+
+	query := fmt.Sprintf(
+		dirSummariesForDirsQuery,
+		filterExpr,
+		placeholders(len(dirs)),
+	)
+
+	args := make([]any, 0, len(filterArgs)+queryScopeArgs+len(dirs))
+	args = append(args, filterArgs...)
+	args = append(args, mountPath, snapshotID)
+
+	for _, dir := range dirs {
+		args = append(args, dir)
+	}
+
+	return query, args, true
+}
+
+func scanDirSummaryRows(
+	rows rowsScanner,
+	filter *db.Filter,
+	updatedAt time.Time,
+) (map[string]*db.DirSummary, map[string]bool, error) {
+	summaries := make(map[string]*db.DirSummary)
+	handled := make(map[string]bool)
+
+	for rows.Next() {
+		var s dirSummaryScanned
+		if err := s.scanFrom(rows); err != nil {
+			return nil, nil, err
+		}
+
+		handled[s.dir] = true
+
+		if sum := s.summary(filter, updatedAt); sum != nil {
+			summaries[s.dir] = sum
+		}
+	}
+
+	if err := rowsErr(rows); err != nil {
+		return nil, nil, fmt.Errorf("clickhouse: dir summary iteration error: %w", err)
+	}
+
+	return summaries, handled, nil
 }
 
 func (d *clickHouseDatabase) addQueriedGUTAsForDirs(
@@ -1592,11 +1991,39 @@ func (d *clickHouseDatabase) queryChildrenForParentsMount(
 	ctx, cancel := configQueryContext(d.cfg)
 	defer cancel()
 
-	query, args := scopedBatchQuery(childrenForParentsQuery, parentDirs, mountPath, snapshotID)
+	if len(parentDirs) > queryStringINMaxValues {
+		return d.queryChildrenForExternalParentsMount(ctx, mountPath, snapshotID, parentDirs)
+	}
 
-	rows, err := d.conn.Query(ctx, query, args...)
+	result := make(map[string][]string)
+
+	for _, batchDirs := range stringValueBatches(parentDirs) {
+		queried, err := d.queryChildrenForParentsMountBatch(ctx, mountPath, snapshotID, batchDirs)
+		if err != nil {
+			return nil, err
+		}
+
+		for parent, children := range queried {
+			result[parent] = children
+		}
+	}
+
+	return result, nil
+}
+
+func (d *clickHouseDatabase) queryChildrenForExternalParentsMount(
+	ctx context.Context,
+	mountPath, snapshotID string,
+	parentDirs []string,
+) (map[string][]string, error) {
+	externalCtx, err := contextWithExternalDirs(ctx, parentDirs)
 	if err != nil {
-		return nil, fmt.Errorf("clickhouse: failed to query children batch: %w", err)
+		return nil, err
+	}
+
+	rows, err := d.conn.Query(externalCtx, childrenForExternalParentsQuery, mountPath, snapshotID)
+	if err != nil {
+		return nil, fmt.Errorf("clickhouse: failed to query external children batch: %w", err)
 	}
 
 	defer func() { _ = rows.Close() }()
@@ -2057,6 +2484,23 @@ func (t *whereTraversal) summaryForDir(key, displayDir string) *db.DirSummary {
 	return &cp
 }
 
+func (d *clickHouseDatabase) queryChildrenForParentsMountBatch(
+	ctx context.Context,
+	mountPath, snapshotID string,
+	parentDirs []string,
+) (map[string][]string, error) {
+	query, args := scopedBatchQuery(childrenForParentsQuery, parentDirs, mountPath, snapshotID)
+
+	rows, err := d.conn.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("clickhouse: failed to query children batch: %w", err)
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	return scanChildrenRowsByParent(rows)
+}
+
 func (d *clickHouseDatabase) addQueriedChildrenForParents(
 	result map[string][]string,
 	mountPath string,
@@ -2177,6 +2621,65 @@ func scanDirDGUTARow(rows rowsScanner) (string, *db.GUTA, error) {
 	return dir, s.guta(), nil
 }
 
+type dirSummaryScanned struct {
+	dir          string
+	rawRows      uint64
+	count        uint64
+	size         uint64
+	atimeMin     int64
+	mtimeMax     int64
+	atimeBuckets []uint64
+	mtimeBuckets []uint64
+	uids         []uint32
+	gids         []uint32
+	ft           uint16
+}
+
+func (s *dirSummaryScanned) scanFrom(rows rowsScanner) error {
+	if err := rows.Scan(
+		&s.dir,
+		&s.rawRows,
+		&s.count,
+		&s.size,
+		&s.atimeMin,
+		&s.mtimeMax,
+		&s.atimeBuckets,
+		&s.mtimeBuckets,
+		&s.uids,
+		&s.gids,
+		&s.ft,
+	); err != nil {
+		return fmt.Errorf("clickhouse: failed to scan dir summary: %w", err)
+	}
+
+	return nil
+}
+
+func (s *dirSummaryScanned) summary(filter *db.Filter, updatedAt time.Time) *db.DirSummary {
+	if s.count == 0 {
+		return nil
+	}
+
+	var age db.DirGUTAge
+	if filter != nil {
+		age = filter.Age
+	}
+
+	return &db.DirSummary{
+		Count:       s.count,
+		Size:        s.size,
+		Atime:       time.Unix(s.atimeMin, 0),
+		CommonATime: summary.MostCommonBucket(sliceToAgeBuckets(s.atimeBuckets)),
+		Mtime:       time.Unix(s.mtimeMax, 0),
+		CommonMTime: summary.MostCommonBucket(sliceToAgeBuckets(s.mtimeBuckets)),
+		UIDs:        s.uids,
+		GIDs:        s.gids,
+		FT:          db.DirGUTAFileType(s.ft),
+		Age:         age,
+		Modtime:     updatedAt,
+	}
+}
+
 func (s *dgutaScanned) guta() *db.GUTA {
 	return &db.GUTA{
 		GID:         s.gid,
@@ -2265,6 +2768,72 @@ func (s *dgutaScanned) scanFromWithDir(rows rowsScanner, dir *string) error {
 	}
 
 	return nil
+}
+
+func addBoundedUniqueChildDir(
+	childDirs *[]string,
+	seen map[string]bool,
+	dir string,
+	limit int,
+) bool {
+	if seen[dir] {
+		return true
+	}
+
+	if len(*childDirs) == limit {
+		return false
+	}
+
+	seen[dir] = true
+	*childDirs = append(*childDirs, dir)
+
+	return true
+}
+
+func dirSummaryFilterExpression(filter *db.Filter) (string, []any, bool) {
+	if filter == nil {
+		return "1", nil, true
+	}
+
+	if filter.FT != 0 {
+		return "", nil, false
+	}
+
+	if isEmptyIDFilter(filter.GIDs) || isEmptyIDFilter(filter.UIDs) {
+		return "0", nil, true
+	}
+
+	clauses := make([]string, 0, dirSummaryFilterClauseInitialCap)
+	args := make([]any, 0, len(filter.GIDs)+len(filter.UIDs)+1)
+
+	appendIDMembershipClause(&clauses, &args, "gid", filter.GIDs)
+	appendIDMembershipClause(&clauses, &args, "uid", filter.UIDs)
+
+	clauses = append(clauses, "age = ?")
+	args = append(args, uint8(filter.Age))
+
+	return strings.Join(clauses, " AND "), args, true
+}
+
+func isEmptyIDFilter(values []uint32) bool {
+	return values != nil && len(values) == 0
+}
+
+func appendIDMembershipClause(
+	clauses *[]string,
+	args *[]any,
+	column string,
+	values []uint32,
+) {
+	if values == nil {
+		return
+	}
+
+	*clauses = append(*clauses, column+" IN ("+placeholders(len(values))+")")
+
+	for _, value := range values {
+		*args = append(*args, value)
+	}
 }
 
 func gutaExistenceFilterClause(filter *db.Filter, columnPrefix string) (string, []any) {

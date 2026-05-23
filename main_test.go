@@ -73,13 +73,14 @@ const (
 	clickHousePerfPhaseMountSwitch        = "mount_switch"
 	clickHousePerfPhaseOldSnapshotDrop    = "old_snapshot_partition_drop"
 
-	perfOpTreeDirInfo          = "tree_dirinfo"
-	perfOpTreeDiskTreeAncDirs  = "tree_disktree_endpoint_ancestor_dirs"
-	perfOpTreeDiskTreeEndpoint = "tree_disktree_endpoint"
-	perfOpTreeDiskTreeNewDirs  = "tree_disktree_endpoint_new_dirs"
-	perfOpTreeWhere            = "tree_where"
-	perfOpTreeWhereColdCached  = "tree_where_cold_then_cached"
-	perfOpTreeWhereFresh       = "tree_where_fresh_provider"
+	perfOpTreeDirInfo                  = "tree_dirinfo"
+	perfOpTreeDiskTreeAncDirs          = "tree_disktree_endpoint_ancestor_dirs"
+	perfOpTreeDiskTreeEndpoint         = "tree_disktree_endpoint"
+	perfOpTreeDiskTreeNewDirs          = "tree_disktree_endpoint_new_dirs"
+	perfOpTreeDiskTreeVisibleChildDirs = "tree_disktree_endpoint_visible_child_dirs"
+	perfOpTreeWhere                    = "tree_where"
+	perfOpTreeWhereColdCached          = "tree_where_cold_then_cached"
+	perfOpTreeWhereFresh               = "tree_where_fresh_provider"
 
 	testLustreMount        = "/lustre/"
 	summariseCloseName     = "close"
@@ -903,7 +904,10 @@ func TestClickHousePerfQuery(t *testing.T) {
 		opNames := make([]string, 0, len(report.Operations))
 		for _, op := range report.Operations {
 			opNames = append(opNames, op.Name)
-			if op.Name == perfOpTreeDiskTreeNewDirs {
+
+			hasChildDirRepeatOverride := op.Name == perfOpTreeDiskTreeNewDirs ||
+				op.Name == perfOpTreeDiskTreeVisibleChildDirs
+			if hasChildDirRepeatOverride {
 				So(len(op.DurationsMS), ShouldBeGreaterThan, 0)
 				So(len(op.DurationsMS), ShouldBeLessThanOrEqualTo, 2)
 
@@ -918,6 +922,7 @@ func TestClickHousePerfQuery(t *testing.T) {
 		So(opNames, ShouldContain, perfOpTreeDiskTreeEndpoint)
 		So(opNames, ShouldContain, perfOpTreeDiskTreeAncDirs)
 		So(opNames, ShouldContain, perfOpTreeDiskTreeNewDirs)
+		So(opNames, ShouldContain, perfOpTreeDiskTreeVisibleChildDirs)
 		So(opNames, ShouldContain, perfOpTreeWhere)
 		So(opNames, ShouldContain, perfOpTreeWhereColdCached)
 		So(opNames, ShouldContain, perfOpTreeWhereFresh)
@@ -943,6 +948,13 @@ func TestClickHousePerfQuery(t *testing.T) {
 		So(newDirs, ShouldNotBeNil)
 		So(newDirs.Inputs["start_dir"], ShouldEqual, treeDirInfo.Inputs["dir"])
 		So(newDirs.Inputs["cache_scope"], ShouldEqual, "new_directory_each_repeat")
+
+		visibleChildDirs := findReportOperation(report.Operations, perfOpTreeDiskTreeVisibleChildDirs)
+		So(visibleChildDirs, ShouldNotBeNil)
+		So(visibleChildDirs.Inputs["parent_dir"], ShouldEqual, treeDirInfo.Inputs["dir"])
+		So(visibleChildDirs.Inputs["child_count"], ShouldBeGreaterThan, float64(0))
+		So(visibleChildDirs.Inputs["cache_scope"], ShouldEqual, "visible_child_directory_each_repeat")
+		So(visibleChildDirs.Inputs["duration_source"], ShouldEqual, "wall")
 
 		ancestorDirs := findReportOperation(report.Operations, perfOpTreeDiskTreeAncDirs)
 		So(ancestorDirs, ShouldNotBeNil)
@@ -1297,6 +1309,13 @@ func TestBoltPerf(t *testing.T) {
 		opNames := make([]string, 0, len(report.Operations))
 		for _, op := range report.Operations {
 			opNames = append(opNames, op.Name)
+			if op.Name == perfOpTreeDiskTreeVisibleChildDirs {
+				So(len(op.DurationsMS), ShouldBeGreaterThan, 0)
+				So(len(op.DurationsMS), ShouldBeLessThanOrEqualTo, 2)
+
+				continue
+			}
+
 			So(len(op.DurationsMS), ShouldEqual, 2)
 		}
 
@@ -1307,6 +1326,7 @@ func TestBoltPerf(t *testing.T) {
 			perfOpTreeDiskTreeAncDirs,
 			perfOpTreeDirInfo,
 			perfOpTreeDiskTreeEndpoint,
+			perfOpTreeDiskTreeVisibleChildDirs,
 			perfOpTreeWhere,
 			perfOpTreeWhereFresh,
 			"basedirs_group_usage",

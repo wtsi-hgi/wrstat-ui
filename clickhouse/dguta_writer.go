@@ -54,9 +54,11 @@ const (
 	switchSnapshotQuery = "INSERT INTO wrstat_mounts (mount_path, switched_at, active_snapshot, updated_at) " +
 		"VALUES (?, now64(3), toUUID(?), ?)"
 
-	dropDGUTAPartitionQuery    = "ALTER TABLE wrstat_dguta DROP PARTITION tuple(?, toUUID(?))"
-	dropChildrenPartitionQuery = "ALTER TABLE wrstat_children DROP PARTITION tuple(?, toUUID(?))"
-	dropFilesPartitionQuery    = "ALTER TABLE wrstat_files DROP PARTITION tuple(?, toUUID(?))"
+	dropDGUTAPartitionQuery         = "ALTER TABLE wrstat_dguta DROP PARTITION tuple(?, toUUID(?))"
+	dropChildrenPartitionQuery      = "ALTER TABLE wrstat_children DROP PARTITION tuple(?, toUUID(?))"
+	dropFilesPartitionQuery         = "ALTER TABLE wrstat_files DROP PARTITION tuple(?, toUUID(?))"
+	dropDirSummaryPartitionQuery    = "ALTER TABLE wrstat_dir_summary DROP PARTITION tuple(?, toUUID(?))"
+	dropDirSummarySetPartitionQuery = "ALTER TABLE wrstat_dir_summary_sets DROP PARTITION tuple(?, toUUID(?))"
 
 	dropBasedirsGroupUsagePartitionQuery   = "ALTER TABLE wrstat_basedirs_group_usage DROP PARTITION tuple(?, toUUID(?))"
 	dropBasedirsUserUsagePartitionQuery    = "ALTER TABLE wrstat_basedirs_user_usage DROP PARTITION tuple(?, toUUID(?))"
@@ -71,6 +73,8 @@ const (
 	insertChildrenQuery = "INSERT INTO wrstat_children " +
 		"(mount_path, snapshot_id, parent_dir, child) " +
 		"VALUES (?, toUUID(?), ?, ?)"
+
+	importPhaseDirSummaryRefresh = "wrstat_dir_summary_refresh"
 )
 
 var (
@@ -307,6 +311,7 @@ func (w *dgutaWriter) switchSnapshotAndDropOld(ctx context.Context) error {
 		return err
 	}
 
+	w.refreshMountDirSummariesBestEffort(ctx)
 	w.refreshActiveTreeSummariesBestEffort(ctx)
 
 	if !hasPrevious {
@@ -320,6 +325,24 @@ func (w *dgutaWriter) refreshActiveTreeSummariesBestEffort(ctx context.Context) 
 	if err := w.refreshActiveTreeSummaries(ctx); err != nil {
 		return
 	}
+}
+
+func (w *dgutaWriter) refreshMountDirSummariesBestEffort(ctx context.Context) {
+	if err := w.refreshMountDirSummaries(ctx); err != nil {
+		return
+	}
+}
+
+func (w *dgutaWriter) refreshMountDirSummaries(ctx context.Context) error {
+	w.ensureSnapshotID()
+
+	return w.timeImportPhase(importPhaseDirSummaryRefresh, func() error {
+		return refreshMountDirSummaries(ctx, w.conn, activeMount{
+			mountPath:  w.mountPath,
+			snapshotID: w.snapshot.String(),
+			updatedAt:  w.updatedAt,
+		})
+	})
 }
 
 func (w *dgutaWriter) refreshActiveTreeSummaries(ctx context.Context) error {
@@ -479,6 +502,8 @@ func allPartitionDropQueries() []string {
 		dropDGUTAPartitionQuery,
 		dropChildrenPartitionQuery,
 		dropFilesPartitionQuery,
+		dropDirSummaryPartitionQuery,
+		dropDirSummarySetPartitionQuery,
 		dropBasedirsGroupUsagePartitionQuery,
 		dropBasedirsUserUsagePartitionQuery,
 		dropBasedirsGroupSubdirsPartitionQuery,
@@ -583,6 +608,8 @@ func dgutaPartitionDropQueries() []string {
 	return []string{
 		dropDGUTAPartitionQuery,
 		dropChildrenPartitionQuery,
+		dropDirSummaryPartitionQuery,
+		dropDirSummarySetPartitionQuery,
 	}
 }
 

@@ -177,6 +177,7 @@ func TestQuerySuiteOps(t *testing.T) {
 
 		So(names, ShouldContain, queryOpTreeDiskTreeEndName)
 		So(names, ShouldContain, queryOpTreeDiskTreeNewName)
+		So(names, ShouldContain, queryOpTreeDiskTreeVisibleChildName)
 		So(names, ShouldContain, queryOpTreeDiskTreeAncName)
 		So(names, ShouldContain, queryOpTreeWhereColdName)
 		So(names, ShouldContain, queryOpTreeWhereFreshName)
@@ -196,6 +197,14 @@ func TestQuerySuiteOps(t *testing.T) {
 		So(newDirsOp.inputs["cache_scope"], ShouldEqual, "new_directory_each_repeat")
 		So(newDirsOp.skipWarmup, ShouldBeTrue)
 		So(newDirsOp.repeatOverride, ShouldEqual, 2)
+
+		visibleChildDirsOp := findQuerySuiteTestOp(ops, queryOpTreeDiskTreeVisibleChildName)
+		So(visibleChildDirsOp, ShouldNotBeNil)
+		So(visibleChildDirsOp.inputs["parent_dir"], ShouldEqual, querySuiteTestRootDir)
+		So(visibleChildDirsOp.inputs["cache_scope"], ShouldEqual, queryScopeVisibleChildDirs)
+		So(visibleChildDirsOp.inputs["duration_source"], ShouldEqual, "wall")
+		So(visibleChildDirsOp.inputs[queryInputAgeKey], ShouldEqual, int(db.DGUTAgeAll))
+		So(visibleChildDirsOp.skipWarmup, ShouldBeTrue)
 
 		ancestorOp := findQuerySuiteTestOp(ops, queryOpTreeDiskTreeAncName)
 		So(ancestorOp, ShouldNotBeNil)
@@ -278,6 +287,72 @@ func TestQuerySuiteOps(t *testing.T) {
 		So(timingDB.dirInfoCalls, ShouldContain, querySuiteTestGrandDir)
 	})
 
+	Convey("tree_disktree_endpoint_visible_child_dirs loads parent before timing visible children", t, func() {
+		database := newQuerySuiteTestDB()
+		ctx := queryContext{
+			tree:     db.NewTree(database),
+			queryDir: querySuiteTestRootDir,
+		}
+
+		ops := buildQuerySuiteOps(ctx, QueryOptions{Repeat: 5})
+		visibleChildDirsOp := findQuerySuiteTestOp(ops, queryOpTreeDiskTreeVisibleChildName)
+		report := NewReport("bolt", "", 5, 3)
+
+		So(visibleChildDirsOp, ShouldNotBeNil)
+		So(timeAndReportQueryOp(
+			&report,
+			QueryOptions{Repeat: 5, Warmup: 3},
+			func(string, ...any) {},
+			*visibleChildDirsOp,
+		), ShouldBeNil)
+
+		So(report.Operations, ShouldHaveLength, 1)
+		So(report.Operations[0].Name, ShouldEqual, queryOpTreeDiskTreeVisibleChildName)
+		So(report.Operations[0].DurationsMS, ShouldHaveLength, 2)
+		So(report.Operations[0].Inputs["parent_dir"], ShouldEqual, querySuiteTestRootDir)
+		So(report.Operations[0].Inputs["child_dirs"], ShouldResemble, []string{
+			querySuiteTestChildADir,
+			querySuiteTestChildBDir,
+		})
+		So(report.Operations[0].Inputs["child_count"], ShouldEqual, 2)
+		So(report.Operations[0].Inputs["cache_scope"], ShouldEqual, queryScopeVisibleChildDirs)
+		So(report.Operations[0].Inputs["duration_source"], ShouldEqual, "wall")
+		So(report.Operations[0].Inputs[queryInputAgeKey], ShouldEqual, int(db.DGUTAgeAll))
+		So(countQuerySuiteTestDir(database.dirInfoCalls, querySuiteTestRootDir), ShouldEqual, 1)
+		So(database.dirInfoCalls, ShouldContain, querySuiteTestChildADir)
+		So(database.dirInfoCalls, ShouldContain, querySuiteTestChildBDir)
+	})
+
+	Convey("tree_disktree_endpoint_visible_child_dirs falls back to the parent when it has no children", t, func() {
+		database := newQuerySuiteTestDB()
+		database.children[querySuiteTestRootDir] = nil
+		database.summaries = map[string]*db.DirSummary{
+			querySuiteTestRootDir: {Count: 1},
+		}
+		ctx := queryContext{
+			tree:     db.NewTree(database),
+			queryDir: querySuiteTestRootDir,
+		}
+
+		ops := buildQuerySuiteOps(ctx, QueryOptions{Repeat: 5})
+		visibleChildDirsOp := findQuerySuiteTestOp(ops, queryOpTreeDiskTreeVisibleChildName)
+		report := NewReport("bolt", "", 5, 0)
+
+		So(visibleChildDirsOp, ShouldNotBeNil)
+		So(timeAndReportQueryOp(
+			&report,
+			QueryOptions{Repeat: 5},
+			func(string, ...any) {},
+			*visibleChildDirsOp,
+		), ShouldBeNil)
+
+		So(report.Operations, ShouldHaveLength, 1)
+		So(report.Operations[0].DurationsMS, ShouldHaveLength, 1)
+		So(report.Operations[0].Inputs["child_dirs"], ShouldResemble, []string{querySuiteTestRootDir})
+		So(report.Operations[0].Inputs["child_count"], ShouldEqual, 1)
+		So(report.Operations[0].Inputs["fallback_to_parent_dir"], ShouldBeTrue)
+	})
+
 	Convey("tree_where_fresh_provider opens and closes a fresh tree for each run", t, func() {
 		var (
 			openCalls  int
@@ -341,6 +416,18 @@ func querySuiteTestOpIndex(names []string, name string) int {
 	return -1
 }
 
+func countQuerySuiteTestDir(dirs []string, target string) int {
+	count := 0
+
+	for _, dir := range dirs {
+		if dir == target {
+			count++
+		}
+	}
+
+	return count
+}
+
 func TestRunQuerySuiteOperationSelection(t *testing.T) {
 	Convey("runQuerySuite only runs selected operations in default operation order", t, func() {
 		ctx := queryContext{
@@ -358,6 +445,24 @@ func TestRunQuerySuiteOperationSelection(t *testing.T) {
 		So(report.Operations, ShouldHaveLength, 2)
 		So(report.Operations[0].Name, ShouldEqual, queryOpTreeDirInfoName)
 		So(report.Operations[1].Name, ShouldEqual, queryOpTreeDiskTreeEndName)
+	})
+
+	Convey("runQuerySuite can select visible child directory timings", t, func() {
+		ctx := queryContext{
+			tree:     db.NewTree(newQuerySuiteTestDB()),
+			queryDir: querySuiteTestRootDir,
+		}
+		report := NewReport("bolt", "", 1, 0)
+
+		err := runQuerySuite(&report, ctx, QueryOptions{
+			Repeat: 1,
+			Ops:    []string{queryOpTreeDiskTreeVisibleChildName},
+		}, func(string, ...any) {})
+
+		So(err, ShouldBeNil)
+		So(report.Operations, ShouldHaveLength, 1)
+		So(report.Operations[0].Name, ShouldEqual, queryOpTreeDiskTreeVisibleChildName)
+		So(report.Operations[0].Inputs["child_dirs"], ShouldResemble, []string{querySuiteTestChildADir})
 	})
 
 	Convey("runQuerySuite reports unknown selected operations with available names", t, func() {
