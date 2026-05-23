@@ -237,6 +237,50 @@ func (t *whereTraversal) summaryDirsForInfos(parentDirs []string) []string {
 	return append(dirs, t.childSummaryDirs(parentDirs)...)
 }
 
+func (t *whereTraversal) loadGroupedMountSummaries(dirs []string) (bool, error) {
+	summaries, _, ok, err := t.database.dirSummariesForDirsMount(
+		t.mount.mountPath,
+		t.mount.snapshotID,
+		t.mount.updatedAt,
+		dirs,
+		t.filter,
+	)
+	if err != nil || !ok {
+		return ok, err
+	}
+
+	for _, dir := range dirs {
+		t.summaryLoaded[dir] = true
+		if sum := summaries[dir]; sum != nil {
+			t.summaries[dir] = sum
+		}
+	}
+
+	return true, nil
+}
+
+func (t *whereTraversal) loadRawMountSummaries(dirs []string) error {
+	gutasByDir, err := t.database.gutasForDirs(
+		t.mount.mountPath,
+		t.mount.snapshotID,
+		dirs,
+	)
+	if err != nil {
+		return err
+	}
+
+	for _, dir := range dirs {
+		t.summaryLoaded[dir] = true
+
+		sum := dirSummaryWithModtime(gutasByDir[dir], t.filter, t.mount.updatedAt)
+		if sum != nil {
+			t.summaries[dir] = sum
+		}
+	}
+
+	return nil
+}
+
 type clickHouseDatabase struct {
 	cfg  Config
 	conn ch.Conn
@@ -941,7 +985,7 @@ func (d *clickHouseDatabase) prefetchDirsHaveChildrenSummaries(
 	filter *db.Filter,
 	childrenByParent map[string][]string,
 ) error {
-	if !canUseMountDirSummary(filter) {
+	if _, ok := mountDirSummaryModeForFilter(filter); !ok {
 		return nil
 	}
 
@@ -1727,21 +1771,15 @@ func (d *clickHouseDatabase) dirSummariesForDirsMount(
 		return summaries, handled, ok, err
 	}
 
-	if !shouldUseGroupedDirSummaries(dirs, filter) {
+	if !shouldUseGroupedDirSummaries(dirs) {
 		return nil, nil, false, nil
 	}
 
 	return d.queryGroupedDirSummariesForDirsMount(mountPath, snapshotID, updatedAt, dirs, filter)
 }
 
-func shouldUseGroupedDirSummaries(dirs []string, filter *db.Filter) bool {
-	if len(dirs) < groupedDirSummaryMinDirs {
-		return false
-	}
-
-	_, _, ok := dirSummaryFilterExpression(filter)
-
-	return ok
+func shouldUseGroupedDirSummaries(dirs []string) bool {
+	return len(dirs) >= groupedDirSummaryMinDirs
 }
 
 func (d *clickHouseDatabase) queryGroupedDirSummariesForDirsMount(
@@ -1750,10 +1788,7 @@ func (d *clickHouseDatabase) queryGroupedDirSummariesForDirsMount(
 	dirs []string,
 	filter *db.Filter,
 ) (map[string]*db.DirSummary, map[string]bool, bool, error) {
-	query, args, ok := dirSummariesForDirsMountQuery(mountPath, snapshotID, dirs, filter)
-	if !ok {
-		return nil, nil, false, nil
-	}
+	query, args := dirSummariesForDirsMountQuery(mountPath, snapshotID, dirs, filter)
 
 	ctx, cancel := configQueryContext(d.cfg)
 	defer cancel()
@@ -1774,11 +1809,8 @@ func dirSummariesForDirsMountQuery(
 	mountPath, snapshotID string,
 	dirs []string,
 	filter *db.Filter,
-) (string, []any, bool) {
-	filterExpr, filterArgs, ok := dirSummaryFilterExpression(filter)
-	if !ok {
-		return "", nil, false
-	}
+) (string, []any) {
+	filterExpr, filterArgs := dirSummaryFilterExpression(filter)
 
 	query := fmt.Sprintf(
 		dirSummariesForDirsQuery,
@@ -1794,7 +1826,7 @@ func dirSummariesForDirsMountQuery(
 		args = append(args, dir)
 	}
 
-	return query, args, true
+	return query, args
 }
 
 func scanDirSummaryRows(
@@ -2302,25 +2334,12 @@ func (t *whereTraversal) unloadedSummaries(dirs []string) []string {
 }
 
 func (t *whereTraversal) loadMountSummaries(dirs []string) error {
-	gutasByDir, err := t.database.gutasForDirs(
-		t.mount.mountPath,
-		t.mount.snapshotID,
-		dirs,
-	)
-	if err != nil {
+	ok, err := t.loadGroupedMountSummaries(dirs)
+	if err != nil || ok {
 		return err
 	}
 
-	for _, dir := range dirs {
-		t.summaryLoaded[dir] = true
-
-		sum := dirSummaryWithModtime(gutasByDir[dir], t.filter, t.mount.updatedAt)
-		if sum != nil {
-			t.summaries[dir] = sum
-		}
-	}
-
-	return nil
+	return t.loadRawMountSummaries(dirs)
 }
 
 func (t *whereTraversal) loadChildren(dirs []string) error {
@@ -2790,33 +2809,39 @@ func addBoundedUniqueChildDir(
 	return true
 }
 
-func dirSummaryFilterExpression(filter *db.Filter) (string, []any, bool) {
+func dirSummaryFilterExpression(filter *db.Filter) (string, []any) {
 	if filter == nil {
-		return "1", nil, true
-	}
-
-	if filter.FT != 0 {
-		return "", nil, false
+		return "1", nil
 	}
 
 	if isEmptyIDFilter(filter.GIDs) || isEmptyIDFilter(filter.UIDs) {
-		return "0", nil, true
+		return "0", nil
 	}
 
 	clauses := make([]string, 0, dirSummaryFilterClauseInitialCap)
-	args := make([]any, 0, len(filter.GIDs)+len(filter.UIDs)+1)
+	args := make([]any, 0, dirSummaryFilterArgCap(filter))
 
 	appendIDMembershipClause(&clauses, &args, "gid", filter.GIDs)
 	appendIDMembershipClause(&clauses, &args, "uid", filter.UIDs)
+	appendFTMembershipClause(&clauses, &args, "ft", filter.FT)
 
 	clauses = append(clauses, "age = ?")
 	args = append(args, uint8(filter.Age))
 
-	return strings.Join(clauses, " AND "), args, true
+	return strings.Join(clauses, " AND "), args
 }
 
 func isEmptyIDFilter(values []uint32) bool {
 	return values != nil && len(values) == 0
+}
+
+func dirSummaryFilterArgCap(filter *db.Filter) int {
+	capacity := len(filter.GIDs) + len(filter.UIDs) + 1
+	if filter.FT != 0 {
+		capacity++
+	}
+
+	return capacity
 }
 
 func appendIDMembershipClause(
@@ -2834,6 +2859,20 @@ func appendIDMembershipClause(
 	for _, value := range values {
 		*args = append(*args, value)
 	}
+}
+
+func appendFTMembershipClause(
+	clauses *[]string,
+	args *[]any,
+	column string,
+	ft db.DirGUTAFileType,
+) {
+	if ft == 0 {
+		return
+	}
+
+	*clauses = append(*clauses, "bitAnd("+column+", ?) > 0")
+	*args = append(*args, uint16(ft))
 }
 
 func gutaExistenceFilterClause(filter *db.Filter, columnPrefix string) (string, []any) {

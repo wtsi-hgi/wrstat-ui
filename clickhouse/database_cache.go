@@ -61,16 +61,19 @@ func newTreeCacheKey(mountPath, snapshotID, dir string) treeCacheKey {
 
 type treeDirSummaryCacheKey struct {
 	treeCacheKey
-	age db.DirGUTAge
+	age  db.DirGUTAge
+	mode mountDirSummaryMode
 }
 
 func newTreeDirSummaryCacheKey(
 	mountPath, snapshotID, dir string,
 	age db.DirGUTAge,
+	mode mountDirSummaryMode,
 ) treeDirSummaryCacheKey {
 	return treeDirSummaryCacheKey{
 		treeCacheKey: newTreeCacheKey(mountPath, snapshotID, dir),
 		age:          age,
+		mode:         mode,
 	}
 }
 

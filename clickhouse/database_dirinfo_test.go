@@ -459,6 +459,144 @@ func TestClickHouseDatabaseMountDirSummary(t *testing.T) {
 		So(countingConn.rawSummaryQueryCount(), ShouldEqual, 1)
 	})
 
+	Convey("DirInfos uses maintained non-directory summaries for the default where filter", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+		resetSharedTreeQueryCachesForTesting()
+		Reset(resetSharedTreeQueryCachesForTesting)
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 5 * time.Second
+		cfg.PollInterval = 0
+
+		p, err := OpenProvider(cfg)
+		So(err, ShouldBeNil)
+		Reset(func() { So(p.Close(), ShouldBeNil) })
+
+		cp, ok := p.(*chProvider)
+		So(ok, ShouldBeTrue)
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		const mountPath = "/mnt/nondirsummary/"
+
+		updatedAt := time.Date(2026, 1, 10, 9, 30, 0, 0, time.UTC)
+		sid := snapshotID(mountPath, updatedAt)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		So(conn.Exec(ctx, testInsertMountStmt, mountPath, time.Now(), sid, updatedAt), ShouldBeNil)
+		insertDirSummaryTestTypedGUTA(ctx, conn, mountPath, sid, mountPath+"a/", db.DGUTAFileTypeBam, 7, 3)
+		insertDirSummaryTestTypedGUTA(ctx, conn, mountPath, sid, mountPath+"a/", db.DGUTAFileTypeDir, 7, 11)
+		So(refreshMountDirSummaries(ctx, conn, activeMount{
+			mountPath:  mountPath,
+			snapshotID: sid.String(),
+			updatedAt:  updatedAt,
+		}), ShouldBeNil)
+
+		countingConn := &dirInfoSummaryQueryCountingConn{Conn: cp.conn}
+		dbch := newClickHouseDatabase(cfg, countingConn)
+
+		allSummaries, err := dbch.DirInfos(
+			[]string{mountPath + "a"},
+			&db.Filter{Age: db.DGUTAgeAll},
+		)
+		So(err, ShouldBeNil)
+		So(allSummaries[mountPath+"a"].Count, ShouldEqual, 14)
+		So(allSummaries[mountPath+"a"].FT, ShouldEqual, db.DGUTAFileTypeBam|db.DGUTAFileTypeDir)
+		So(countingConn.mountDirSummaryQueryCount(), ShouldEqual, 1)
+
+		countingConn.reset()
+
+		fileSummaries, err := dbch.DirInfos(
+			[]string{mountPath + "a"},
+			&db.Filter{Age: db.DGUTAgeAll, FT: db.AllTypesExceptDirectories},
+		)
+		So(err, ShouldBeNil)
+		So(fileSummaries[mountPath+"a"].Count, ShouldEqual, 3)
+		So(fileSummaries[mountPath+"a"].FT, ShouldEqual, db.DGUTAFileTypeBam)
+		So(countingConn.mountDirSummaryQueryCount(), ShouldEqual, 1)
+		So(countingConn.groupedSummaryQueryCount(), ShouldEqual, 0)
+		So(countingConn.rawSummaryBatchQueryCount(), ShouldEqual, 0)
+
+		countingConn.reset()
+
+		allSummariesAgain, err := dbch.DirInfos(
+			[]string{mountPath + "a"},
+			&db.Filter{Age: db.DGUTAgeAll},
+		)
+		So(err, ShouldBeNil)
+		So(allSummariesAgain[mountPath+"a"].Count, ShouldEqual, 14)
+		So(countingConn.mountDirSummaryQueryCount(), ShouldEqual, 0)
+		So(countingConn.rawSummaryBatchQueryCount(), ShouldEqual, 0)
+	})
+
+	Convey("DirInfos and Where omit maintained non-directory summaries with no files", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+		resetSharedTreeQueryCachesForTesting()
+		Reset(resetSharedTreeQueryCachesForTesting)
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 5 * time.Second
+		cfg.PollInterval = 0
+		cfg.MountPoints = []string{"/mnt/dironlysummary/"}
+
+		p, err := OpenProvider(cfg)
+		So(err, ShouldBeNil)
+		Reset(func() { So(p.Close(), ShouldBeNil) })
+
+		cp, ok := p.(*chProvider)
+		So(ok, ShouldBeTrue)
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		const mountPath = "/mnt/dironlysummary/"
+
+		updatedAt := time.Date(2026, 1, 10, 10, 30, 0, 0, time.UTC)
+		sid := snapshotID(mountPath, updatedAt)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		So(conn.Exec(ctx, testInsertMountStmt, mountPath, time.Now(), sid, updatedAt), ShouldBeNil)
+		insertDirSummaryTestTypedGUTA(ctx, conn, mountPath, sid, mountPath, db.DGUTAFileTypeBam, 7, 2)
+		insertDirSummaryTestTypedGUTA(ctx, conn, mountPath, sid, mountPath+"dironly/", db.DGUTAFileTypeDir, 7, 11)
+		So(conn.Exec(ctx, testInsertChildrenStmt, mountPath, sid.String(), mountPath, mountPath+"dironly"), ShouldBeNil)
+		So(refreshMountDirSummaries(ctx, conn, activeMount{
+			mountPath:  mountPath,
+			snapshotID: sid.String(),
+			updatedAt:  updatedAt,
+		}), ShouldBeNil)
+
+		countingConn := &dirInfoSummaryQueryCountingConn{Conn: cp.conn}
+		dbch := newClickHouseDatabase(cfg, countingConn)
+		filter := &db.Filter{Age: db.DGUTAgeAll, FT: db.AllTypesExceptDirectories}
+
+		summaries, err := dbch.DirInfos([]string{mountPath + "dironly"}, filter)
+		So(err, ShouldBeNil)
+		So(summaries, ShouldNotContainKey, mountPath+"dironly")
+		So(countingConn.mountDirSummaryQueryCount(), ShouldEqual, 1)
+		So(countingConn.groupedSummaryQueryCount(), ShouldEqual, 0)
+		So(countingConn.rawSummaryBatchQueryCount(), ShouldEqual, 0)
+
+		countingConn.reset()
+
+		dcss, err := db.NewTree(dbch).Where(mountPath, filter, split.SplitsToSplitFn(1))
+		So(err, ShouldBeNil)
+		So(dcss, ShouldHaveLength, 1)
+		So(dcss[0].Dir, ShouldEqual, mountPath)
+		So(dcss[0].Count, ShouldEqual, 2)
+		So(countingConn.rawSummaryBatchQueryCount(), ShouldEqual, 0)
+	})
+
 	Convey("DirInfos falls back for UID and GID filters even when mount summaries exist", t, func() {
 		os.Setenv("WRSTAT_ENV", "test")
 		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
@@ -492,6 +630,7 @@ func TestClickHouseDatabaseMountDirSummary(t *testing.T) {
 		So(conn.Exec(ctx, testInsertMountStmt, mountPath, time.Now(), sid, updatedAt), ShouldBeNil)
 		insertDirSummaryTestGUTA(ctx, conn, mountPath, sid, mountPath+"a/", 7, 3)
 		insertDirSummaryTestGUTA(ctx, conn, mountPath, sid, mountPath+"a/", 8, 4)
+		insertDirSummaryTestGUTA(ctx, conn, mountPath, sid, mountPath+"b/", 7, 5)
 		So(refreshMountDirSummaries(ctx, conn, activeMount{
 			mountPath:  mountPath,
 			snapshotID: sid.String(),
@@ -507,6 +646,18 @@ func TestClickHouseDatabaseMountDirSummary(t *testing.T) {
 		)
 		So(err, ShouldBeNil)
 		So(summaries[mountPath+"a"].Count, ShouldEqual, 3)
+		So(countingConn.mountDirSummaryQueryCount(), ShouldEqual, 0)
+		So(countingConn.groupedSummaryQueryCount(), ShouldEqual, 0)
+		So(countingConn.rawSummaryBatchQueryCount(), ShouldEqual, 1)
+
+		countingConn.reset()
+
+		ftSummaries, err := dbch.DirInfos(
+			[]string{mountPath + "b"},
+			&db.Filter{FT: db.DGUTAFileTypeBam, Age: db.DGUTAgeAll},
+		)
+		So(err, ShouldBeNil)
+		So(ftSummaries[mountPath+"b"].Count, ShouldEqual, 5)
 		So(countingConn.mountDirSummaryQueryCount(), ShouldEqual, 0)
 		So(countingConn.groupedSummaryQueryCount(), ShouldEqual, 0)
 		So(countingConn.rawSummaryBatchQueryCount(), ShouldEqual, 1)
@@ -685,6 +836,7 @@ func TestClickHouseDatabaseMountDirSummary(t *testing.T) {
 				fmt.Sprintf("snapshot-%d", i),
 				fmt.Sprintf("/mnt/cache/%d/", i),
 				db.DGUTAgeAll,
+				mountDirSummaryAll,
 			)
 			cache.putDirSummary(key, &db.DirSummary{Count: uint64(i + 1)})
 		}
@@ -712,6 +864,19 @@ func insertDirSummaryTestGUTA(
 	gid uint32,
 	count uint64,
 ) {
+	insertDirSummaryTestTypedGUTA(ctx, conn, mountPath, sid, dir, db.DGUTAFileTypeBam, gid, count)
+}
+
+func insertDirSummaryTestTypedGUTA(
+	ctx context.Context,
+	conn ch.Conn,
+	mountPath string,
+	sid fmt.Stringer,
+	dir string,
+	ft db.DirGUTAFileType,
+	gid uint32,
+	count uint64,
+) {
 	So(conn.Exec(ctx,
 		testInsertDGUTAStmt,
 		mountPath,
@@ -719,7 +884,7 @@ func insertDirSummaryTestGUTA(
 		dir,
 		gid,
 		uint32(9),
-		uint16(db.DGUTAFileTypeBam),
+		uint16(ft),
 		uint8(db.DGUTAgeAll),
 		count,
 		count*10,
@@ -2186,6 +2351,33 @@ func TestClickHouseDatabaseActiveAncestorSummaries(t *testing.T) {
 	})
 }
 
+func insertWhereSummaryTestGUTA(
+	ctx context.Context,
+	conn ch.Conn,
+	mountPath string,
+	sid string,
+	dir string,
+	ft db.DirGUTAFileType,
+	count uint64,
+) {
+	So(conn.Exec(ctx,
+		testInsertDGUTAStmt,
+		mountPath,
+		sid,
+		dir,
+		uint32(7),
+		uint32(9),
+		uint16(ft),
+		uint8(db.DGUTAgeAll),
+		count,
+		count*10,
+		int64(10),
+		int64(20),
+		[]uint64{1, 0, 0, 0, 0, 0, 0, 0, 0},
+		[]uint64{0, 1, 0, 0, 0, 0, 0, 0, 0},
+	), ShouldBeNil)
+}
+
 type treeSummaryRefreshDeadlineConn struct {
 	ch.Conn
 
@@ -2813,6 +3005,135 @@ func TestClickHouseDatabaseWhereFastPath(t *testing.T) {
 		So(actual, ShouldResemble, expected)
 		So(countingConn.subtreeQueryCountValue(), ShouldEqual, 0)
 		So(countingConn.queryCountValue(), ShouldBeLessThan, 20)
+	})
+
+	Convey("Where uses maintained non-directory summaries for large default-filter child batches", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+		resetSharedTreeQueryCachesForTesting()
+		Reset(resetSharedTreeQueryCachesForTesting)
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 5 * time.Second
+		cfg.PollInterval = 0
+		cfg.MountPoints = []string{"/mnt/wheregrouped/"}
+
+		p, err := OpenProvider(cfg)
+		So(err, ShouldBeNil)
+		Reset(func() { So(p.Close(), ShouldBeNil) })
+
+		cp, ok := p.(*chProvider)
+		So(ok, ShouldBeTrue)
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		const mountPath = "/mnt/wheregrouped/"
+
+		updatedAt := time.Date(2026, 1, 12, 9, 0, 0, 0, time.UTC)
+		sid := snapshotID(mountPath, updatedAt).String()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		So(conn.Exec(ctx, testInsertMountStmt, mountPath, time.Now(), sid, updatedAt), ShouldBeNil)
+		insertWhereSummaryTestGUTA(ctx, conn, mountPath, sid, mountPath, db.DGUTAFileTypeBam, 3)
+		insertWhereSummaryTestGUTA(ctx, conn, mountPath, sid, mountPath, db.DGUTAFileTypeDir, 7)
+		insertWhereSummaryTestGUTA(ctx, conn, mountPath, sid, mountPath+"child0000/", db.DGUTAFileTypeBam, 2)
+		insertWhereSummaryTestGUTA(ctx, conn, mountPath, sid, mountPath+"child0001/", db.DGUTAFileTypeDir, 7)
+
+		batch, err := conn.PrepareBatch(ctx, insertChildrenQuery)
+		So(err, ShouldBeNil)
+
+		var (
+			appendErr error
+			appended  int
+		)
+
+		for i := range groupedDirSummaryMinDirs {
+			child := fmt.Sprintf("%schild%04d", mountPath, i)
+
+			if appendErr != nil {
+				continue
+			}
+
+			appendErr = batch.Append(mountPath, sid, mountPath, child)
+			if appendErr == nil {
+				appended++
+			}
+		}
+
+		So(appendErr, ShouldBeNil)
+		So(appended, ShouldEqual, groupedDirSummaryMinDirs)
+		So(batch.Send(), ShouldBeNil)
+		So(refreshMountDirSummaries(ctx, conn, activeMount{
+			mountPath:  mountPath,
+			snapshotID: sid,
+			updatedAt:  updatedAt,
+		}), ShouldBeNil)
+
+		countingConn := &dirInfoSummaryQueryCountingConn{Conn: cp.conn}
+		tree := db.NewTree(newClickHouseDatabase(cfg, countingConn))
+
+		dcss, err := tree.Where(mountPath, nil, split.SplitsToSplitFn(0))
+		So(err, ShouldBeNil)
+		So(dcss, ShouldHaveLength, 1)
+		So(dcss[0].Dir, ShouldEqual, mountPath)
+		So(dcss[0].Count, ShouldEqual, 3)
+		So(dcss[0].FT, ShouldEqual, db.DGUTAFileTypeBam)
+		So(dcss[0].Modtime, ShouldResemble, updatedAt)
+		So(countingConn.mountDirSummaryQueryCount(), ShouldEqual, 1)
+		So(countingConn.groupedSummaryQueryCount(), ShouldEqual, 0)
+		So(countingConn.rawSummaryBatchQueryCount(), ShouldEqual, 0)
+	})
+
+	Convey("Where keeps raw summary batches for small active-mount child batches", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+		resetSharedTreeQueryCachesForTesting()
+		Reset(resetSharedTreeQueryCachesForTesting)
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 5 * time.Second
+		cfg.PollInterval = 0
+		cfg.MountPoints = []string{"/mnt/whereraw/"}
+
+		p, err := OpenProvider(cfg)
+		So(err, ShouldBeNil)
+		Reset(func() { So(p.Close(), ShouldBeNil) })
+
+		cp, ok := p.(*chProvider)
+		So(ok, ShouldBeTrue)
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		const mountPath = "/mnt/whereraw/"
+
+		updatedAt := time.Date(2026, 1, 12, 10, 0, 0, 0, time.UTC)
+		sid := snapshotID(mountPath, updatedAt).String()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		So(conn.Exec(ctx, testInsertMountStmt, mountPath, time.Now(), sid, updatedAt), ShouldBeNil)
+		insertWhereSummaryTestGUTA(ctx, conn, mountPath, sid, mountPath, db.DGUTAFileTypeBam, 3)
+		insertWhereSummaryTestGUTA(ctx, conn, mountPath, sid, mountPath+"a/", db.DGUTAFileTypeBam, 3)
+		So(conn.Exec(ctx, testInsertChildrenStmt, mountPath, sid, mountPath, mountPath+"a"), ShouldBeNil)
+
+		countingConn := &dirInfoSummaryQueryCountingConn{Conn: cp.conn}
+		tree := db.NewTree(newClickHouseDatabase(cfg, countingConn))
+
+		dcss, err := tree.Where(mountPath, nil, split.SplitsToSplitFn(0))
+		So(err, ShouldBeNil)
+		So(dcss, ShouldHaveLength, 1)
+		So(dcss[0].Count, ShouldEqual, 3)
+		So(countingConn.groupedSummaryQueryCount(), ShouldEqual, 0)
+		So(countingConn.rawSummaryBatchQueryCount(), ShouldEqual, 1)
 	})
 }
 

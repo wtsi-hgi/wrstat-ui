@@ -36,23 +36,33 @@ import (
 )
 
 const (
-	mountDirSummaryVersion = 2
+	mountDirSummaryVersion = 3
 
 	insertMountDirSummaryQuery = "INSERT INTO wrstat_dir_summary " +
 		"(mount_path, snapshot_id, dir, updated_at, age, count, size, " +
-		"atime_min, mtime_max, atime_buckets, mtime_buckets, uids, gids, ft, child_count, refreshed_at) " +
+		"atime_min, mtime_max, atime_buckets, mtime_buckets, uids, gids, ft, " +
+		"file_count, file_size, file_atime_min, file_mtime_max, " +
+		"file_atime_buckets, file_mtime_buckets, file_uids, file_gids, file_ft, " +
+		"child_count, refreshed_at) " +
 		"SELECT ?, toUUID(?), d.dir, ?, d.age, sum(d.count), sum(d.size), " +
 		"minIf(d.atime_min, d.atime_min != 0), max(d.mtime_max), " +
 		"arrayReduce('sumForEach', groupArray(d.atime_buckets)), " +
 		"arrayReduce('sumForEach', groupArray(d.mtime_buckets)), " +
-		"arraySort(groupUniqArray(d.uid)), arraySort(groupUniqArray(d.gid)), " +
-		"groupBitOr(d.ft), any(ifNull(c.child_count, 0)), ? " +
-		"FROM wrstat_dguta AS d " +
+		"arraySort(groupUniqArray(d.uid)), arraySort(groupUniqArray(d.gid)), groupBitOr(d.ft), " +
+		"sumIf(d.count, d.file_summary), sumIf(d.size, d.file_summary), " +
+		"minIf(d.atime_min, d.file_summary AND d.atime_min != 0), maxIf(d.mtime_max, d.file_summary), " +
+		"arrayReduce('sumForEach', groupArrayIf(d.atime_buckets, d.file_summary)), " +
+		"arrayReduce('sumForEach', groupArrayIf(d.mtime_buckets, d.file_summary)), " +
+		"arraySort(groupUniqArrayIf(d.uid, d.file_summary)), arraySort(groupUniqArrayIf(d.gid, d.file_summary)), " +
+		"groupBitOrIf(d.ft, d.file_summary), any(ifNull(c.child_count, 0)), ? " +
+		"FROM (" +
+		"SELECT *, bitAnd(ft, ?) > 0 AS file_summary FROM wrstat_dguta " +
+		"WHERE mount_path = ? AND snapshot_id = toUUID(?)" +
+		") AS d " +
 		"LEFT JOIN (" +
 		"SELECT parent_dir, count() AS child_count FROM wrstat_children " +
 		"WHERE mount_path = ? AND snapshot_id = toUUID(?) GROUP BY parent_dir" +
 		") AS c ON c.parent_dir = d.dir " +
-		"WHERE d.mount_path = ? AND d.snapshot_id = toUUID(?) " +
 		"GROUP BY d.dir, d.age"
 
 	insertMountDirSummarySetQuery = "INSERT INTO wrstat_dir_summary_sets " +
@@ -68,15 +78,67 @@ const (
 		"PREWHERE mount_path = ? AND snapshot_id = ? AND age = ? " +
 		"WHERE dir IN (%s)"
 
+	mountDirFileSummariesForDirsQuery = "SELECT dir, updated_at, age, file_count, file_size, " +
+		"file_atime_min, file_mtime_max, file_atime_buckets, file_mtime_buckets, " +
+		"file_uids, file_gids, file_ft, child_count " +
+		"FROM wrstat_dir_summary " +
+		"PREWHERE mount_path = ? AND snapshot_id = ? AND age = ? " +
+		"WHERE dir IN (%s)"
+
 	mountDirSummariesForExternalDirsQuery = "SELECT s.dir, s.updated_at, s.age, s.count, s.size, " +
 		"s.atime_min, s.mtime_max, s.atime_buckets, s.mtime_buckets, s.uids, s.gids, s.ft, s.child_count " +
 		"FROM wrstat_dir_summary AS s " +
 		"ANY INNER JOIN " + externalDirsTableName + " AS q ON q.dir = s.dir " +
 		"WHERE s.mount_path = ? AND s.snapshot_id = ? AND s.age = ?"
+
+	mountDirFileSummariesForExternalDirsQuery = "SELECT s.dir, s.updated_at, s.age, " +
+		"s.file_count, s.file_size, s.file_atime_min, s.file_mtime_max, " +
+		"s.file_atime_buckets, s.file_mtime_buckets, s.file_uids, s.file_gids, s.file_ft, s.child_count " +
+		"FROM wrstat_dir_summary AS s " +
+		"ANY INNER JOIN " + externalDirsTableName + " AS q ON q.dir = s.dir " +
+		"WHERE s.mount_path = ? AND s.snapshot_id = ? AND s.age = ?"
+)
+
+type mountDirSummaryMode uint8
+
+const (
+	mountDirSummaryAll mountDirSummaryMode = iota
+	mountDirSummaryFiles
 )
 
 func mountDirSummaryMissingMeansNotFound(filter *db.Filter) bool {
 	return filter != nil && filter.Age == db.DGUTAgeAll
+}
+
+func mountDirSummaryModeForFilter(filter *db.Filter) (mountDirSummaryMode, bool) {
+	if filter == nil || filter.GIDs != nil || filter.UIDs != nil {
+		return mountDirSummaryAll, false
+	}
+
+	switch filter.FT {
+	case 0:
+		return mountDirSummaryAll, true
+	case db.AllTypesExceptDirectories:
+		return mountDirSummaryFiles, true
+	default:
+		return mountDirSummaryAll, false
+	}
+}
+
+func mountDirSummariesForExternalDirsQueryForMode(mode mountDirSummaryMode) string {
+	if mode == mountDirSummaryFiles {
+		return mountDirFileSummariesForExternalDirsQuery
+	}
+
+	return mountDirSummariesForExternalDirsQuery
+}
+
+func mountDirSummariesForDirsQueryForMode(mode mountDirSummaryMode) string {
+	if mode == mountDirSummaryFiles {
+		return mountDirFileSummariesForDirsQuery
+	}
+
+	return mountDirSummariesForDirsQuery
 }
 
 func ensureActiveMountDirSummaries(
@@ -177,6 +239,7 @@ func insertMountDirSummaries(
 		mount.snapshotID,
 		mount.updatedAt,
 		refreshedAt,
+		uint16(db.AllTypesExceptDirectories),
 		mount.mountPath,
 		mount.snapshotID,
 		mount.mountPath,
@@ -205,10 +268,6 @@ func insertMountDirSummarySet(
 	}
 
 	return nil
-}
-
-func canUseMountDirSummary(filter *db.Filter) bool {
-	return filter != nil && filter.GIDs == nil && filter.UIDs == nil && filter.FT == 0
 }
 
 func scanMountDirSummaryRows(
@@ -261,6 +320,10 @@ func scanMountDirSummaryRow(rows rowsScanner) (string, *db.DirSummary, uint64, e
 		return "", nil, 0, fmt.Errorf("clickhouse: failed to scan maintained dir summary: %w", err)
 	}
 
+	if s.count == 0 {
+		return dir, nil, childCount, nil
+	}
+
 	return dir, s.summary(), childCount, nil
 }
 
@@ -290,16 +353,19 @@ func (d *clickHouseDatabase) mountDirSummariesForDirsMount(
 	dirs []string,
 	filter *db.Filter,
 ) (map[string]*db.DirSummary, map[string]bool, bool, error) {
-	if !canUseMountDirSummary(filter) {
+	mode, ok := mountDirSummaryModeForFilter(filter)
+	if !ok {
 		return nil, nil, false, nil
 	}
 
-	summaries, handled, missing := d.cachedMountDirSummaries(mountPath, snapshotID, dirs, filter.Age)
+	summaries, handled, missing := d.cachedMountDirSummaries(mountPath, snapshotID, dirs, filter.Age, mode)
 	if len(missing) == 0 {
 		return summaries, handled, true, nil
 	}
 
-	ok, err := d.addMissingMountDirSummaries(summaries, handled, mountPath, snapshotID, missing, filter.Age)
+	ok, err := d.addMissingMountDirSummaries(
+		summaries, handled, mountPath, snapshotID, missing, filter.Age, mode,
+	)
 	if err != nil || !ok {
 		return nil, nil, ok, err
 	}
@@ -313,6 +379,7 @@ func (d *clickHouseDatabase) addMissingMountDirSummaries(
 	mountPath, snapshotID string,
 	missing []string,
 	age db.DirGUTAge,
+	mode mountDirSummaryMode,
 ) (bool, error) {
 	ctx, cancel := configQueryContext(d.cfg)
 	defer cancel()
@@ -323,13 +390,15 @@ func (d *clickHouseDatabase) addMissingMountDirSummaries(
 	}
 
 	queried, queryHandled, childCounts, err := d.queryMountDirSummariesForDirs(
-		ctx, mountPath, snapshotID, missing, age,
+		ctx, mountPath, snapshotID, missing, age, mode,
 	)
 	if err != nil {
 		return true, err
 	}
 
-	d.addQueriedMountDirSummaries(summaries, handled, mountPath, snapshotID, queried, queryHandled, childCounts)
+	d.addQueriedMountDirSummaries(
+		summaries, handled, mountPath, snapshotID, age, mode, queried, queryHandled, childCounts,
+	)
 
 	return true, nil
 }
@@ -357,6 +426,7 @@ func (d *clickHouseDatabase) cachedMountDirSummaries(
 	mountPath, snapshotID string,
 	dirs []string,
 	age db.DirGUTAge,
+	mode mountDirSummaryMode,
 ) (map[string]*db.DirSummary, map[string]bool, []string) {
 	summaries := make(map[string]*db.DirSummary, len(dirs))
 	handled := make(map[string]bool, len(dirs))
@@ -364,7 +434,7 @@ func (d *clickHouseDatabase) cachedMountDirSummaries(
 	seen := make(map[string]bool, len(dirs))
 
 	for _, dir := range dirs {
-		key := newTreeDirSummaryCacheKey(mountPath, snapshotID, dir, age)
+		key := newTreeDirSummaryCacheKey(mountPath, snapshotID, dir, age, mode)
 		if seen[key.dir] {
 			continue
 		}
@@ -388,12 +458,13 @@ func (d *clickHouseDatabase) queryMountDirSummariesForDirs(
 	mountPath, snapshotID string,
 	dirs []string,
 	age db.DirGUTAge,
+	mode mountDirSummaryMode,
 ) (map[string]*db.DirSummary, map[string]bool, map[string]uint64, error) {
 	if len(dirs) > queryStringINMaxValues {
-		return d.queryMountDirSummariesForExternalDirs(ctx, mountPath, snapshotID, dirs, age)
+		return d.queryMountDirSummariesForExternalDirs(ctx, mountPath, snapshotID, dirs, age, mode)
 	}
 
-	return d.queryMountDirSummariesForDirsBatches(ctx, mountPath, snapshotID, dirs, age)
+	return d.queryMountDirSummariesForDirsBatches(ctx, mountPath, snapshotID, dirs, age, mode)
 }
 
 func (d *clickHouseDatabase) queryMountDirSummariesForDirsBatches(
@@ -401,6 +472,7 @@ func (d *clickHouseDatabase) queryMountDirSummariesForDirsBatches(
 	mountPath, snapshotID string,
 	dirs []string,
 	age db.DirGUTAge,
+	mode mountDirSummaryMode,
 ) (map[string]*db.DirSummary, map[string]bool, map[string]uint64, error) {
 	summaries := make(map[string]*db.DirSummary)
 	handled := make(map[string]bool)
@@ -408,7 +480,7 @@ func (d *clickHouseDatabase) queryMountDirSummariesForDirsBatches(
 
 	for _, batchDirs := range stringValueBatches(dirs) {
 		err := d.addMountDirSummaryBatch(
-			ctx, mountPath, snapshotID, batchDirs, age, summaries, handled, childCounts,
+			ctx, mountPath, snapshotID, batchDirs, age, mode, summaries, handled, childCounts,
 		)
 		if err != nil {
 			return nil, nil, nil, err
@@ -423,12 +495,13 @@ func (d *clickHouseDatabase) addMountDirSummaryBatch(
 	mountPath, snapshotID string,
 	dirs []string,
 	age db.DirGUTAge,
+	mode mountDirSummaryMode,
 	summaries map[string]*db.DirSummary,
 	handled map[string]bool,
 	childCounts map[string]uint64,
 ) error {
 	batchSummaries, batchHandled, batchChildCounts, err := d.queryMountDirSummariesForDirsBatch(
-		ctx, mountPath, snapshotID, dirs, age,
+		ctx, mountPath, snapshotID, dirs, age, mode,
 	)
 	if err != nil {
 		return err
@@ -444,13 +517,20 @@ func (d *clickHouseDatabase) queryMountDirSummariesForExternalDirs(
 	mountPath, snapshotID string,
 	dirs []string,
 	age db.DirGUTAge,
+	mode mountDirSummaryMode,
 ) (map[string]*db.DirSummary, map[string]bool, map[string]uint64, error) {
 	externalCtx, err := contextWithExternalDirs(ctx, dirs)
 	if err != nil {
 		return nil, nil, nil, err
 	}
 
-	rows, err := d.conn.Query(externalCtx, mountDirSummariesForExternalDirsQuery, mountPath, snapshotID, uint8(age))
+	rows, err := d.conn.Query(
+		externalCtx,
+		mountDirSummariesForExternalDirsQueryForMode(mode),
+		mountPath,
+		snapshotID,
+		uint8(age),
+	)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("clickhouse: failed to query maintained external dir summaries: %w", err)
 	}
@@ -465,8 +545,15 @@ func (d *clickHouseDatabase) queryMountDirSummariesForDirsBatch(
 	mountPath, snapshotID string,
 	dirs []string,
 	age db.DirGUTAge,
+	mode mountDirSummaryMode,
 ) (map[string]*db.DirSummary, map[string]bool, map[string]uint64, error) {
-	query, args := scopedBatchQuery(mountDirSummariesForDirsQuery, dirs, mountPath, snapshotID, uint8(age))
+	query, args := scopedBatchQuery(
+		mountDirSummariesForDirsQueryForMode(mode),
+		dirs,
+		mountPath,
+		snapshotID,
+		uint8(age),
+	)
 
 	rows, err := d.conn.Query(ctx, query, args...)
 	if err != nil {
@@ -482,23 +569,26 @@ func (d *clickHouseDatabase) addQueriedMountDirSummaries(
 	summaries map[string]*db.DirSummary,
 	handled map[string]bool,
 	mountPath, snapshotID string,
+	age db.DirGUTAge,
+	mode mountDirSummaryMode,
 	queried map[string]*db.DirSummary,
 	queryHandled map[string]bool,
 	childCounts map[string]uint64,
 ) {
-	for dir, sum := range queried {
+	for dir := range queryHandled {
+		sum := queried[dir]
 		d.treeCache.putDirSummary(
-			newTreeDirSummaryCacheKey(mountPath, snapshotID, dir, sum.Age),
+			newTreeDirSummaryCacheKey(mountPath, snapshotID, dir, age, mode),
 			sum,
 		)
-		summaries[dir] = cloneDirSummary(sum)
+		handled[dir] = true
+
+		if sum != nil {
+			summaries[dir] = cloneDirSummary(sum)
+		}
 
 		if childCounts[dir] == 0 {
 			d.treeCache.putChildren(newTreeCacheKey(mountPath, snapshotID, dir), nil)
 		}
-	}
-
-	for dir := range queryHandled {
-		handled[dir] = true
 	}
 }
