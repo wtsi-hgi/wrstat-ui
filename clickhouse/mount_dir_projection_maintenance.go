@@ -37,6 +37,20 @@ import (
 
 const mountDirProjectionMaintenanceRetryDelay = time.Second
 
+const (
+	mountDirProjectionMountStartedMessage = "clickhouse: active mount dir projection refresh mount started " +
+		"active_mounts=%d mount_index=%d total_mounts=%d mount_path=%q snapshot_id=%s fingerprint=%s"
+	mountDirProjectionMountSkippedMessage = "clickhouse: active mount dir projection refresh mount skipped ready " +
+		"active_mounts=%d mount_index=%d total_mounts=%d mount_path=%q snapshot_id=%s duration=%s fingerprint=%s"
+	mountDirProjectionMountCompletedMessage = "clickhouse: active mount dir projection refresh mount completed " +
+		"active_mounts=%d mount_index=%d total_mounts=%d mount_path=%q snapshot_id=%s duration=%s fingerprint=%s"
+	mountDirProjectionPhaseStartedMessage = "clickhouse: active mount dir projection refresh phase started " +
+		"active_mounts=%d mount_index=%d total_mounts=%d mount_path=%q snapshot_id=%s phase=%s fingerprint=%s"
+	mountDirProjectionPhaseCompletedMessage = "clickhouse: active mount dir projection refresh phase completed " +
+		"active_mounts=%d mount_index=%d total_mounts=%d mount_path=%q snapshot_id=%s phase=%s duration=%s " +
+		"fingerprint=%s"
+)
+
 func activeMountDirProjectionRowsNeedingRefresh(
 	ctx context.Context,
 	conn ch.Conn,
@@ -123,7 +137,15 @@ func (p *chProvider) tryMountDirProjectionRefresh(
 
 	conn, err := p.maintenanceConnection(ctx)
 	if err == nil {
-		err = ensureActiveMountDirSummaries(ctx, conn, job.rows)
+		err = ensureActiveMountDirSummariesWithProgress(
+			ctx,
+			conn,
+			job.rows,
+			mountDirProjectionMessageProgress{
+				job:   job,
+				queue: p.queueMessage,
+			},
+		)
 	}
 
 	if err == nil {
@@ -157,6 +179,109 @@ func mountDirProjectionRefreshCompletedMessage(
 		duration.Round(time.Millisecond),
 		mountDirProjectionFingerprintHash(job.fingerprint),
 	)
+}
+
+type mountDirProjectionProgress interface {
+	mountStarted(row mountsActiveRow, index, total int)
+	mountSkipped(row mountsActiveRow, index, total int, duration time.Duration)
+	mountCompleted(row mountsActiveRow, index, total int, duration time.Duration)
+	phaseStarted(row mountsActiveRow, index, total int, phase string)
+	phaseCompleted(row mountsActiveRow, index, total int, phase string, duration time.Duration)
+}
+
+type mountDirProjectionMessageProgress struct {
+	job   mountDirProjectionRefreshJob
+	queue func(string)
+}
+
+func (p mountDirProjectionMessageProgress) mountStarted(row mountsActiveRow, index, total int) {
+	p.queueProgress(
+		mountDirProjectionMountStartedMessage,
+		p.job.activeMountCount,
+		index,
+		total,
+		row.mountPath,
+		row.snapshotID,
+		mountDirProjectionFingerprintHash(p.job.fingerprint),
+	)
+}
+
+func (p mountDirProjectionMessageProgress) mountSkipped(
+	row mountsActiveRow,
+	index, total int,
+	duration time.Duration,
+) {
+	p.queueProgress(
+		mountDirProjectionMountSkippedMessage,
+		p.job.activeMountCount,
+		index,
+		total,
+		row.mountPath,
+		row.snapshotID,
+		duration.Round(time.Millisecond),
+		mountDirProjectionFingerprintHash(p.job.fingerprint),
+	)
+}
+
+func (p mountDirProjectionMessageProgress) mountCompleted(
+	row mountsActiveRow,
+	index, total int,
+	duration time.Duration,
+) {
+	p.queueProgress(
+		mountDirProjectionMountCompletedMessage,
+		p.job.activeMountCount,
+		index,
+		total,
+		row.mountPath,
+		row.snapshotID,
+		duration.Round(time.Millisecond),
+		mountDirProjectionFingerprintHash(p.job.fingerprint),
+	)
+}
+
+func (p mountDirProjectionMessageProgress) phaseStarted(
+	row mountsActiveRow,
+	index, total int,
+	phase string,
+) {
+	p.queueProgress(
+		mountDirProjectionPhaseStartedMessage,
+		p.job.activeMountCount,
+		index,
+		total,
+		row.mountPath,
+		row.snapshotID,
+		phase,
+		mountDirProjectionFingerprintHash(p.job.fingerprint),
+	)
+}
+
+func (p mountDirProjectionMessageProgress) phaseCompleted(
+	row mountsActiveRow,
+	index, total int,
+	phase string,
+	duration time.Duration,
+) {
+	p.queueProgress(
+		mountDirProjectionPhaseCompletedMessage,
+		p.job.activeMountCount,
+		index,
+		total,
+		row.mountPath,
+		row.snapshotID,
+		phase,
+		duration.Round(time.Millisecond),
+		mountDirProjectionFingerprintHash(p.job.fingerprint),
+	)
+}
+
+func (p mountDirProjectionMessageProgress) queueProgress(format string, args ...any) {
+	if p.queue == nil {
+		return
+	}
+
+	p.queue(fmt.Sprintf(format, args...))
 }
 
 func (p *chProvider) markMountDirProjectionsReady(rows []mountsActiveRow) {

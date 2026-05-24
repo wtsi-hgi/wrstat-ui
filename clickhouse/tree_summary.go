@@ -225,31 +225,184 @@ func refreshActiveTreeSummaries(
 	rows []mountsActiveRow,
 	fingerprint string,
 ) error {
+	return refreshActiveTreeSummariesWithProgress(ctx, conn, rows, fingerprint, nil)
+}
+
+func refreshActiveTreeSummariesWithProgress(
+	ctx context.Context,
+	conn ch.Conn,
+	rows []mountsActiveRow,
+	fingerprint string,
+	progress treeSummaryProgress,
+) error {
 	snapshot := newActiveMountsSnapshot(rows)
 	refreshedAt := time.Now().UTC()
+	dirs := activeTreeDirs(snapshot.all())
 
-	for _, dir := range activeTreeDirs(snapshot.all()) {
-		mounts := snapshot.under(dir)
-		if len(mounts) == 0 {
-			continue
-		}
-
-		updatedAt := maxUpdatedAtForMounts(mounts)
-
-		if err := insertTreeSummaryDGUTA(ctx, conn, fingerprint, dir, updatedAt, refreshedAt, mounts); err != nil {
-			return err
-		}
-
-		if err := insertTreeDirSummary(ctx, conn, fingerprint, dir, updatedAt, refreshedAt, mounts); err != nil {
-			return err
-		}
-
-		if err := insertTreeSummaryChildren(ctx, conn, fingerprint, dir, refreshedAt, mounts); err != nil {
+	for i, dir := range dirs {
+		if err := refreshActiveTreeSummaryDirWithProgress(
+			ctx,
+			conn,
+			snapshot,
+			dir,
+			i+1,
+			len(dirs),
+			fingerprint,
+			refreshedAt,
+			progress,
+		); err != nil {
 			return err
 		}
 	}
 
 	return insertTreeSummarySet(ctx, conn, fingerprint, countActiveMountRows(rows), refreshedAt)
+}
+
+func refreshActiveTreeSummaryDirWithProgress(
+	ctx context.Context,
+	conn ch.Conn,
+	snapshot *activeMountsSnapshot,
+	dir string,
+	index, total int,
+	fingerprint string,
+	refreshedAt time.Time,
+	progress treeSummaryProgress,
+) error {
+	refresh, ok := newTreeSummaryDirRefresh(snapshot, dir, index, total, fingerprint, refreshedAt)
+	if !ok {
+		return nil
+	}
+
+	started := time.Now()
+
+	reportTreeSummaryAncestorStarted(progress, refresh)
+
+	if err := insertTreeSummaryDirRowsWithProgress(ctx, conn, refresh, progress); err != nil {
+		return err
+	}
+
+	reportTreeSummaryAncestorCompleted(progress, refresh, time.Since(started))
+
+	return nil
+}
+
+type treeSummaryDirRefresh struct {
+	dir         string
+	index       int
+	total       int
+	mountCount  int
+	fingerprint string
+	updatedAt   time.Time
+	refreshedAt time.Time
+	mounts      []activeMount
+}
+
+func newTreeSummaryDirRefresh(
+	snapshot *activeMountsSnapshot,
+	dir string,
+	index, total int,
+	fingerprint string,
+	refreshedAt time.Time,
+) (treeSummaryDirRefresh, bool) {
+	mounts := snapshot.under(dir)
+	if len(mounts) == 0 {
+		return treeSummaryDirRefresh{}, false
+	}
+
+	return treeSummaryDirRefresh{
+		dir:         dir,
+		index:       index,
+		total:       total,
+		mountCount:  len(mounts),
+		fingerprint: fingerprint,
+		updatedAt:   maxUpdatedAtForMounts(mounts),
+		refreshedAt: refreshedAt,
+		mounts:      mounts,
+	}, true
+}
+
+func reportTreeSummaryAncestorStarted(progress treeSummaryProgress, refresh treeSummaryDirRefresh) {
+	if progress != nil {
+		progress.ancestorStarted(refresh.dir, refresh.index, refresh.total, refresh.mountCount)
+	}
+}
+
+func reportTreeSummaryAncestorCompleted(
+	progress treeSummaryProgress,
+	refresh treeSummaryDirRefresh,
+	duration time.Duration,
+) {
+	if progress != nil {
+		progress.ancestorCompleted(refresh.dir, refresh.index, refresh.total, refresh.mountCount, duration)
+	}
+}
+
+func insertTreeSummaryDirRowsWithProgress(
+	ctx context.Context,
+	conn ch.Conn,
+	refresh treeSummaryDirRefresh,
+	progress treeSummaryProgress,
+) error {
+	if err := runTreeSummaryDirPhase(progress, refresh, "dguta_summary", func() error {
+		return insertTreeSummaryDGUTA(
+			ctx, conn, refresh.fingerprint, refresh.dir, refresh.updatedAt, refresh.refreshedAt, refresh.mounts,
+		)
+	}); err != nil {
+		return err
+	}
+
+	if err := runTreeSummaryDirPhase(progress, refresh, "dir_summary", func() error {
+		return insertTreeDirSummary(
+			ctx, conn, refresh.fingerprint, refresh.dir, refresh.updatedAt, refresh.refreshedAt, refresh.mounts,
+		)
+	}); err != nil {
+		return err
+	}
+
+	return runTreeSummaryDirPhase(progress, refresh, "children", func() error {
+		return insertTreeSummaryChildren(ctx, conn, refresh.fingerprint, refresh.dir, refresh.refreshedAt, refresh.mounts)
+	})
+}
+
+func runTreeSummaryDirPhase(
+	progress treeSummaryProgress,
+	refresh treeSummaryDirRefresh,
+	phase string,
+	fn func() error,
+) error {
+	return runTreeSummaryPhase(
+		progress,
+		refresh.dir,
+		refresh.index,
+		refresh.total,
+		refresh.mountCount,
+		phase,
+		fn,
+	)
+}
+
+func runTreeSummaryPhase(
+	progress treeSummaryProgress,
+	dir string,
+	index, total, mountCount int,
+	phase string,
+	fn func() error,
+) error {
+	if progress != nil {
+		progress.phaseStarted(dir, index, total, mountCount, phase)
+	}
+
+	started := time.Now()
+
+	if err := fn(); err != nil {
+		return err
+	}
+
+	if progress != nil {
+		progress.phaseCompleted(dir, index, total, mountCount, phase, time.Since(started))
+	}
+
+	return nil
 }
 
 func activeTreeDirs(mounts []activeMount) []string {

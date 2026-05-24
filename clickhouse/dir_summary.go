@@ -146,24 +146,88 @@ func ensureActiveMountDirSummaries(
 	conn ch.Conn,
 	rows []mountsActiveRow,
 ) error {
-	for _, row := range rows {
-		mount := activeMount(row)
+	return ensureActiveMountDirSummariesWithProgress(ctx, conn, rows, nil)
+}
 
-		ready, err := mountDirProjectionsReady(ctx, conn, mount.mountPath, mount.snapshotID)
-		if err != nil {
-			return err
-		}
+func ensureActiveMountDirSummariesWithProgress(
+	ctx context.Context,
+	conn ch.Conn,
+	rows []mountsActiveRow,
+	progress mountDirProjectionProgress,
+) error {
+	total := len(rows)
 
-		if ready {
-			continue
-		}
-
-		if err := refreshMountDirSummaries(ctx, conn, mount); err != nil {
+	for i, row := range rows {
+		if err := ensureActiveMountDirSummaryWithProgress(ctx, conn, row, i+1, total, progress); err != nil {
 			return err
 		}
 	}
 
 	return nil
+}
+
+func ensureActiveMountDirSummaryWithProgress(
+	ctx context.Context,
+	conn ch.Conn,
+	row mountsActiveRow,
+	index, total int,
+	progress mountDirProjectionProgress,
+) error {
+	started := time.Now()
+	mount := activeMount(row)
+
+	reportMountDirProjectionMountStarted(progress, row, index, total)
+
+	ready, err := mountDirProjectionsReady(ctx, conn, mount.mountPath, mount.snapshotID)
+	if err != nil {
+		return err
+	}
+
+	if ready {
+		reportMountDirProjectionMountSkipped(progress, row, index, total, time.Since(started))
+
+		return nil
+	}
+
+	if err := refreshMountDirSummariesWithProgress(ctx, conn, mount, row, index, total, progress); err != nil {
+		return err
+	}
+
+	reportMountDirProjectionMountCompleted(progress, row, index, total, time.Since(started))
+
+	return nil
+}
+
+func reportMountDirProjectionMountStarted(
+	progress mountDirProjectionProgress,
+	row mountsActiveRow,
+	index, total int,
+) {
+	if progress != nil {
+		progress.mountStarted(row, index, total)
+	}
+}
+
+func reportMountDirProjectionMountSkipped(
+	progress mountDirProjectionProgress,
+	row mountsActiveRow,
+	index, total int,
+	duration time.Duration,
+) {
+	if progress != nil {
+		progress.mountSkipped(row, index, total, duration)
+	}
+}
+
+func reportMountDirProjectionMountCompleted(
+	progress mountDirProjectionProgress,
+	row mountsActiveRow,
+	index, total int,
+	duration time.Duration,
+) {
+	if progress != nil {
+		progress.mountCompleted(row, index, total, duration)
+	}
 }
 
 func mountDirProjectionsReady(
@@ -198,17 +262,32 @@ func mountDirSummaryReady(
 }
 
 func refreshMountDirSummaries(ctx context.Context, conn ch.Conn, mount activeMount) error {
+	row := mountsActiveRow(mount)
+
+	return refreshMountDirSummariesWithProgress(ctx, conn, mount, row, 1, 1, nil)
+}
+
+func refreshMountDirSummariesWithProgress(
+	ctx context.Context,
+	conn ch.Conn,
+	mount activeMount,
+	row mountsActiveRow,
+	index, total int,
+	progress mountDirProjectionProgress,
+) error {
 	if mount.mountPath == "" || mount.snapshotID == "" {
 		return nil
 	}
 
 	refreshedAt := time.Now().UTC()
 
-	if err := dropMountDirSummaryPartitions(ctx, conn, mount); err != nil {
+	if err := runMountDirProjectionPhase(progress, row, index, total, "drop_partitions", func() error {
+		return dropMountDirSummaryPartitions(ctx, conn, mount)
+	}); err != nil {
 		return err
 	}
 
-	return insertMountDirSummaryRows(ctx, conn, mount, refreshedAt)
+	return insertMountDirSummaryRowsWithProgress(ctx, conn, mount, row, index, total, refreshedAt, progress)
 }
 
 func dropMountDirSummaryPartitions(ctx context.Context, conn ch.Conn, mount activeMount) error {
@@ -229,21 +308,54 @@ func dropMountDirSummaryPartitions(ctx context.Context, conn ch.Conn, mount acti
 	)
 }
 
-func insertMountDirSummaryRows(
+func insertMountDirSummaryRowsWithProgress(
 	ctx context.Context,
 	conn ch.Conn,
 	mount activeMount,
+	row mountsActiveRow,
+	index, total int,
 	refreshedAt time.Time,
+	progress mountDirProjectionProgress,
 ) error {
-	if err := insertMountDirSummaries(ctx, conn, mount, refreshedAt); err != nil {
+	if err := runMountDirProjectionPhase(progress, row, index, total, "dir_summary", func() error {
+		return insertMountDirSummaries(ctx, conn, mount, refreshedAt)
+	}); err != nil {
 		return err
 	}
 
-	if err := insertMountDirDGUTAVectors(ctx, conn, mount, refreshedAt); err != nil {
+	if err := runMountDirProjectionPhase(progress, row, index, total, "dguta_vector", func() error {
+		return insertMountDirDGUTAVectors(ctx, conn, mount, refreshedAt)
+	}); err != nil {
 		return err
 	}
 
-	return insertMountDirSummarySet(ctx, conn, mount, refreshedAt)
+	return runMountDirProjectionPhase(progress, row, index, total, "mark_ready", func() error {
+		return insertMountDirSummarySet(ctx, conn, mount, refreshedAt)
+	})
+}
+
+func runMountDirProjectionPhase(
+	progress mountDirProjectionProgress,
+	row mountsActiveRow,
+	index, total int,
+	phase string,
+	fn func() error,
+) error {
+	if progress != nil {
+		progress.phaseStarted(row, index, total, phase)
+	}
+
+	started := time.Now()
+
+	if err := fn(); err != nil {
+		return err
+	}
+
+	if progress != nil {
+		progress.phaseCompleted(row, index, total, phase, time.Since(started))
+	}
+
+	return nil
 }
 
 func insertMountDirSummaries(

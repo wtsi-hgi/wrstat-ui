@@ -29,6 +29,7 @@ package clickhouse
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"runtime"
 	"strings"
@@ -486,7 +487,7 @@ func TestOpenProviderTreeSummaryRefreshFailure(t *testing.T) {
 		messenger, ok := p.(interface{ OnMessage(cb func(msg string)) })
 		So(ok, ShouldBeTrue)
 
-		gotMessage := make(chan string, 4)
+		gotMessage := make(chan string, 32)
 
 		messenger.OnMessage(func(msg string) {
 			gotMessage <- msg
@@ -497,6 +498,38 @@ func TestOpenProviderTreeSummaryRefreshFailure(t *testing.T) {
 
 		msg = waitForProviderMessage(t, gotMessage, "active mount dir projection refresh started")
 		So(msg, ShouldContainSubstring, "active_mounts=1")
+
+		msg = waitForProviderMessage(t, gotMessage, "active mount dir projection refresh mount started")
+		So(msg, ShouldContainSubstring, "mount_index=1")
+		So(msg, ShouldContainSubstring, "total_mounts=1")
+		So(msg, ShouldContainSubstring, fmt.Sprintf("mount_path=%q", providerTestMountPath))
+
+		msg = waitForProviderMessage(
+			t,
+			gotMessage,
+			"active mount dir projection refresh phase started",
+			"phase=dir_summary",
+		)
+		So(msg, ShouldContainSubstring, "mount_index=1")
+
+		msg = waitForProviderMessage(
+			t,
+			gotMessage,
+			"active mount dir projection refresh phase completed",
+			"phase=dir_summary",
+		)
+		So(msg, ShouldContainSubstring, "duration=")
+
+		msg = waitForProviderMessage(
+			t,
+			gotMessage,
+			"active mount dir projection refresh phase started",
+			"phase=dguta_vector",
+		)
+		So(msg, ShouldContainSubstring, "mount_index=1")
+
+		msg = waitForProviderMessage(t, gotMessage, "active mount dir projection refresh mount completed")
+		So(msg, ShouldContainSubstring, "duration=")
 
 		msg = waitForProviderMessage(t, gotMessage, "active mount dir projection refresh completed")
 		So(msg, ShouldContainSubstring, "active_mounts=1")
@@ -578,7 +611,7 @@ func TestOpenProviderTreeSummaryRefreshFailure(t *testing.T) {
 		messenger, ok := p.(interface{ OnMessage(cb func(msg string)) })
 		So(ok, ShouldBeTrue)
 
-		gotMessage := make(chan string, 4)
+		gotMessage := make(chan string, 32)
 
 		messenger.OnMessage(func(msg string) {
 			gotMessage <- msg
@@ -591,6 +624,29 @@ func TestOpenProviderTreeSummaryRefreshFailure(t *testing.T) {
 		msg = waitForProviderMessage(t, gotMessage, "active tree summary refresh started")
 		So(msg, ShouldContainSubstring, "active_mounts=1")
 		So(msg, ShouldContainSubstring, "ancestor_dirs=")
+
+		msg = waitForProviderMessage(t, gotMessage, "active tree summary refresh ancestor started")
+		So(msg, ShouldContainSubstring, "ancestor_index=")
+		So(msg, ShouldContainSubstring, "total_ancestor_dirs=")
+
+		msg = waitForProviderMessage(
+			t,
+			gotMessage,
+			"active tree summary refresh phase started",
+			"phase=dguta_summary",
+		)
+		So(msg, ShouldContainSubstring, "mounts_under_dir=")
+
+		msg = waitForProviderMessage(
+			t,
+			gotMessage,
+			"active tree summary refresh phase completed",
+			"phase=dguta_summary",
+		)
+		So(msg, ShouldContainSubstring, "duration=")
+
+		msg = waitForProviderMessage(t, gotMessage, "active tree summary refresh ancestor completed")
+		So(msg, ShouldContainSubstring, "duration=")
 
 		msg = waitForProviderMessage(t, gotMessage, "active tree summary refresh completed")
 		So(msg, ShouldContainSubstring, "active_mounts=1")
@@ -796,7 +852,7 @@ func TestOpenProviderTreeSummaryRefreshFailure(t *testing.T) {
 	})
 }
 
-func waitForProviderMessage(t *testing.T, messages <-chan string, want string) string {
+func waitForProviderMessage(t *testing.T, messages <-chan string, want string, more ...string) string {
 	t.Helper()
 
 	deadline := time.After(5 * time.Second)
@@ -804,13 +860,23 @@ func waitForProviderMessage(t *testing.T, messages <-chan string, want string) s
 	for {
 		select {
 		case msg := <-messages:
-			if strings.Contains(msg, want) {
+			if messageContainsAll(msg, append([]string{want}, more...)...) {
 				return msg
 			}
 		case <-deadline:
 			t.Fatalf("timed out waiting for provider message containing %q", want)
 		}
 	}
+}
+
+func messageContainsAll(msg string, wants ...string) bool {
+	for _, want := range wants {
+		if !strings.Contains(msg, want) {
+			return false
+		}
+	}
+
+	return true
 }
 
 func insertProviderAncestorSnapshot(

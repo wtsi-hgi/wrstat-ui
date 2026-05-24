@@ -36,6 +36,21 @@ import (
 
 const treeSummaryMaintenanceRetryDelay = time.Second
 
+const (
+	treeSummaryAncestorStartedMessage = "clickhouse: active tree summary refresh ancestor started " +
+		"active_mounts=%d ancestor_dirs=%d ancestor_index=%d total_ancestor_dirs=%d dir=%q " +
+		"mounts_under_dir=%d fingerprint=%s"
+	treeSummaryAncestorCompletedMessage = "clickhouse: active tree summary refresh ancestor completed " +
+		"active_mounts=%d ancestor_dirs=%d ancestor_index=%d total_ancestor_dirs=%d dir=%q " +
+		"mounts_under_dir=%d duration=%s fingerprint=%s"
+	treeSummaryPhaseStartedMessage = "clickhouse: active tree summary refresh phase started " +
+		"active_mounts=%d ancestor_dirs=%d ancestor_index=%d total_ancestor_dirs=%d dir=%q " +
+		"mounts_under_dir=%d phase=%s fingerprint=%s"
+	treeSummaryPhaseCompletedMessage = "clickhouse: active tree summary refresh phase completed " +
+		"active_mounts=%d ancestor_dirs=%d ancestor_index=%d total_ancestor_dirs=%d dir=%q " +
+		"mounts_under_dir=%d phase=%s duration=%s fingerprint=%s"
+)
+
 type treeSummaryRefreshJob struct {
 	rows             []mountsActiveRow
 	fingerprint      string
@@ -110,7 +125,16 @@ func (p *chProvider) tryTreeSummaryRefresh(ctx context.Context, job treeSummaryR
 
 	conn, err := p.maintenanceConnection(ctx)
 	if err == nil {
-		err = refreshActiveTreeSummaries(ctx, conn, job.rows, job.fingerprint)
+		err = refreshActiveTreeSummariesWithProgress(
+			ctx,
+			conn,
+			job.rows,
+			job.fingerprint,
+			treeSummaryMessageProgress{
+				job:   job,
+				queue: p.queueMessage,
+			},
+		)
 	}
 
 	if err == nil {
@@ -148,6 +172,95 @@ func treeSummaryFingerprintHash(fingerprint string) string {
 	sum := sha256.Sum256([]byte(fingerprint))
 
 	return hex.EncodeToString(sum[:])[:12]
+}
+
+type treeSummaryProgress interface {
+	ancestorStarted(dir string, index, total, mountCount int)
+	ancestorCompleted(dir string, index, total, mountCount int, duration time.Duration)
+	phaseStarted(dir string, index, total, mountCount int, phase string)
+	phaseCompleted(dir string, index, total, mountCount int, phase string, duration time.Duration)
+}
+
+type treeSummaryMessageProgress struct {
+	job   treeSummaryRefreshJob
+	queue func(string)
+}
+
+func (p treeSummaryMessageProgress) ancestorStarted(dir string, index, total, mountCount int) {
+	p.queueProgress(
+		treeSummaryAncestorStartedMessage,
+		p.job.activeMountCount,
+		p.job.ancestorDirCount,
+		index,
+		total,
+		dir,
+		mountCount,
+		treeSummaryFingerprintHash(p.job.fingerprint),
+	)
+}
+
+func (p treeSummaryMessageProgress) ancestorCompleted(
+	dir string,
+	index, total, mountCount int,
+	duration time.Duration,
+) {
+	p.queueProgress(
+		treeSummaryAncestorCompletedMessage,
+		p.job.activeMountCount,
+		p.job.ancestorDirCount,
+		index,
+		total,
+		dir,
+		mountCount,
+		duration.Round(time.Millisecond),
+		treeSummaryFingerprintHash(p.job.fingerprint),
+	)
+}
+
+func (p treeSummaryMessageProgress) phaseStarted(
+	dir string,
+	index, total, mountCount int,
+	phase string,
+) {
+	p.queueProgress(
+		treeSummaryPhaseStartedMessage,
+		p.job.activeMountCount,
+		p.job.ancestorDirCount,
+		index,
+		total,
+		dir,
+		mountCount,
+		phase,
+		treeSummaryFingerprintHash(p.job.fingerprint),
+	)
+}
+
+func (p treeSummaryMessageProgress) phaseCompleted(
+	dir string,
+	index, total, mountCount int,
+	phase string,
+	duration time.Duration,
+) {
+	p.queueProgress(
+		treeSummaryPhaseCompletedMessage,
+		p.job.activeMountCount,
+		p.job.ancestorDirCount,
+		index,
+		total,
+		dir,
+		mountCount,
+		phase,
+		duration.Round(time.Millisecond),
+		treeSummaryFingerprintHash(p.job.fingerprint),
+	)
+}
+
+func (p treeSummaryMessageProgress) queueProgress(format string, args ...any) {
+	if p.queue == nil {
+		return
+	}
+
+	p.queue(fmt.Sprintf(format, args...))
 }
 
 func (p *chProvider) scheduleTreeSummaryRefresh(
