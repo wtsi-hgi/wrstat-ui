@@ -53,6 +53,7 @@ const (
 	queryOpTestChildBDir = "/root/b/"
 	queryOpTestGrandDir  = "/root/a/grand/"
 	queryOpTestRootDir   = "/root/"
+	queryTestNoMatchGID  = 404
 )
 
 func TestDecodeMountPaths(t *testing.T) {
@@ -161,6 +162,58 @@ func TestPickLargestChild(t *testing.T) {
 			best := pickLargestChild(children)
 			So(best.Dir, ShouldEqual, "/b/")
 		})
+	})
+}
+
+type noMatchFilteredTreeDB struct {
+	dirInfoCalls []string
+}
+
+func (d *noMatchFilteredTreeDB) DirInfo(dir string, filter *db.Filter) (*db.DirSummary, error) {
+	d.dirInfoCalls = append(d.dirInfoCalls, dir)
+
+	if hasNoMatchGID(filter) {
+		return nil, nil //nolint:nilnil
+	}
+
+	return &db.DirSummary{Count: dirPickMinCount}, nil
+}
+
+func hasNoMatchGID(filter *db.Filter) bool {
+	if filter == nil {
+		return false
+	}
+
+	for _, gid := range filter.GIDs {
+		if gid == queryTestNoMatchGID {
+			return true
+		}
+	}
+
+	return false
+}
+
+func (*noMatchFilteredTreeDB) Children(string) ([]string, error) {
+	return []string{queryOpTestChildADir}, nil
+}
+
+func (*noMatchFilteredTreeDB) Info() (*db.Info, error) {
+	return &db.Info{}, nil
+}
+
+func (*noMatchFilteredTreeDB) Close() error {
+	return nil
+}
+
+func TestPickDir(t *testing.T) {
+	Convey("pickDir stops at the current directory when a filter has no matching rows", t, func() {
+		database := &noMatchFilteredTreeDB{}
+		filter := &db.Filter{GIDs: []uint32{queryTestNoMatchGID}, Age: db.DGUTAgeAll}
+
+		dir := pickDir(db.NewTree(database), queryOpTestRootDir, filter)
+
+		So(dir, ShouldEqual, queryOpTestRootDir)
+		So(database.dirInfoCalls, ShouldResemble, []string{queryOpTestRootDir})
 	})
 }
 
@@ -634,6 +687,44 @@ func TestBuildOps(t *testing.T) {
 		So(whereInputs["splits"], ShouldEqual, 2)
 	})
 
+	Convey("tree_where uses the configured tree filter and records it", t, func() {
+		database := newQueryOpTestDB()
+		filter := queryTestTreeFilter()
+		qctx := queryContext{
+			provider: fakeMountTimestampsProvider{tree: db.NewTree(database)},
+			client:   &fakeQueryClient{},
+			dir:      queryOpTestRootDir,
+		}
+
+		ops := buildOps(qctx, QueryOptions{Splits: 2, TreeFilter: filter}, func(string, ...any) {})
+		whereOp := findQueryTestOp(ops, queryOpTreeWhereName)
+		So(whereOp, ShouldNotBeNil)
+		assertQueryTestTreeFilterInputs(whereOp.inputs, filter)
+
+		So(whereOp.run(context.Background()), ShouldBeNil)
+		So(database.dirInfoFilters, ShouldNotBeEmpty)
+		So(database.dirInfoFilters[0], ShouldResemble, filter)
+	})
+
+	Convey("tree_disktree_endpoint uses the configured tree filter and records it", t, func() {
+		database := newQueryOpTestDB()
+		filter := queryTestTreeFilter()
+		qctx := queryContext{
+			provider: fakeMountTimestampsProvider{tree: db.NewTree(database)},
+			client:   &fakeQueryClient{},
+			dir:      queryOpTestRootDir,
+		}
+
+		ops := buildOps(qctx, QueryOptions{TreeFilter: filter}, func(string, ...any) {})
+		disktreeOp := findQueryTestOp(ops, queryOpTreeDiskTreeEndName)
+		So(disktreeOp, ShouldNotBeNil)
+		assertQueryTestTreeFilterInputs(disktreeOp.inputs, filter)
+
+		So(disktreeOp.run(context.Background()), ShouldBeNil)
+		So(database.dirInfoFilters, ShouldNotBeEmpty)
+		So(database.dirInfoFilters[0], ShouldResemble, filter)
+	})
+
 	Convey("buildOps reports cold/new directory and fresh-provider tree coverage", t, func() {
 		qctx := queryContext{
 			provider: fakeMountTimestampsProvider{
@@ -926,6 +1017,15 @@ func newQueryOpTestDB() *queryOpTestDB {
 	}
 }
 
+func queryTestTreeFilter() *db.Filter {
+	return &db.Filter{
+		GIDs: []uint32{7, 8},
+		UIDs: []uint32{9, 10},
+		FT:   db.DGUTAFileTypeBam | db.DGUTAFileTypeCram,
+		Age:  db.DGUTAgeAll,
+	}
+}
+
 func findQueryTestOp(ops []op, name string) *op {
 	for i := range ops {
 		if ops[i].name == name {
@@ -934,6 +1034,14 @@ func findQueryTestOp(ops []op, name string) *op {
 	}
 
 	return nil
+}
+
+func assertQueryTestTreeFilterInputs(inputs map[string]any, filter *db.Filter) {
+	So(inputs[queryInputAgeKey], ShouldEqual, int(filter.Age))
+	So(inputs[queryInputFilterGIDsKey], ShouldResemble, filter.GIDs)
+	So(inputs[queryInputFilterUIDsKey], ShouldResemble, filter.UIDs)
+	So(inputs[queryInputFilterFileTypeMaskKey], ShouldEqual, int(filter.FT))
+	So(inputs[queryInputFilterFileTypesKey], ShouldEqual, filter.FT.String())
 }
 
 func queryTestOpIndex(names []string, name string) int {
@@ -1012,14 +1120,16 @@ func (p fakeMountTimestampsProvider) Close() error {
 }
 
 type queryOpTestDB struct {
-	children      map[string][]string
-	summaries     map[string]*db.DirSummary
-	dirInfoCalls  []string
-	childrenCalls []string
+	children       map[string][]string
+	summaries      map[string]*db.DirSummary
+	dirInfoCalls   []string
+	dirInfoFilters []*db.Filter
+	childrenCalls  []string
 }
 
-func (d *queryOpTestDB) DirInfo(dir string, _ *db.Filter) (*db.DirSummary, error) {
+func (d *queryOpTestDB) DirInfo(dir string, filter *db.Filter) (*db.DirSummary, error) {
 	d.dirInfoCalls = append(d.dirInfoCalls, dir)
+	d.dirInfoFilters = append(d.dirInfoFilters, cloneQueryTestFilter(filter))
 
 	summary := d.summaries[dir]
 	if summary == nil {
@@ -1029,6 +1139,19 @@ func (d *queryOpTestDB) DirInfo(dir string, _ *db.Filter) (*db.DirSummary, error
 	cp := *summary
 
 	return &cp, nil
+}
+
+func cloneQueryTestFilter(filter *db.Filter) *db.Filter {
+	if filter == nil {
+		return nil
+	}
+
+	return &db.Filter{
+		GIDs: append([]uint32(nil), filter.GIDs...),
+		UIDs: append([]uint32(nil), filter.UIDs...),
+		FT:   filter.FT,
+		Age:  filter.Age,
+	}
 }
 
 func (d *queryOpTestDB) Children(dir string) ([]string, error) {

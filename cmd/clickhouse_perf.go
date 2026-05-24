@@ -27,11 +27,13 @@
 package cmd
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/wtsi-hgi/wrstat-ui/clickhouse"
+	"github.com/wtsi-hgi/wrstat-ui/db"
 	"github.com/wtsi-hgi/wrstat-ui/internal/boltperf"
 	"github.com/wtsi-hgi/wrstat-ui/internal/chperf"
 )
@@ -100,6 +102,10 @@ type chPerfFlags struct {
 	ops       []string
 	uid       uint32
 	gids      string
+	treeGIDs  string
+	treeUIDs  string
+	treeFT    string
+	treeTypes string
 	repeat    int
 	warmup    int
 	splits    int
@@ -158,6 +164,12 @@ func addCHPerfQueryFlags() {
 		"comma-separated query operation names to run (default: all)")
 	f.Uint32Var(&chPerf.uid, "uid", 0, "UID for permission query")
 	f.StringVar(&chPerf.gids, "gids", "", "comma-separated GIDs for permission query")
+	f.StringVar(&chPerf.treeGIDs, "tree-gids", "", "comma-separated GIDs for tree query filter")
+	f.StringVar(&chPerf.treeUIDs, "tree-uids", "", "comma-separated UIDs for tree query filter")
+	f.StringVar(&chPerf.treeTypes, "tree-types", "",
+		"comma-separated file type names for tree query filter (for example bam,cram,temp)")
+	f.StringVar(&chPerf.treeFT, "tree-ft", "",
+		"file type bitmask for tree query filter (decimal or 0x; ORed with --tree-types)")
 	f.IntVar(&chPerf.repeat, "repeat", chPerfDefaultRepeat, "number of timed repeats")
 	f.IntVar(&chPerf.warmup, "warmup", chPerfDefaultWarmup, "warmup iterations")
 	f.IntVar(&chPerf.splits, "splits", chPerfDefaultSplits, "where() splits")
@@ -198,21 +210,14 @@ func runCHPerfQuery() error {
 		return err
 	}
 
+	opts, err := chPerfQueryOptions()
+	if err != nil {
+		return err
+	}
+
 	api := chperf.NewClickHouseAPI(cfg)
 
-	report, err := chperf.Query(api, chperf.QueryOptions{
-		Dir:           chPerf.dir,
-		AncestorDir:   chPerf.ancDir,
-		Ops:           chPerf.ops,
-		UID:           chPerf.uid,
-		GIDs:          parseGIDs(chPerf.gids),
-		Repeat:        chPerf.repeat,
-		Warmup:        chPerf.warmup,
-		Splits:        chPerf.splits,
-		WalkDepth:     chPerf.walkDepth,
-		WalkLimit:     chPerf.walkLimit,
-		AncestorLimit: chPerf.ancLimit,
-	}, cliPrint)
+	report, err := chperf.Query(api, opts, cliPrint)
 	if err != nil {
 		return err
 	}
@@ -227,6 +232,110 @@ func chPerfConfig() (clickhouse.Config, error) {
 		ownersPath:       chPerf.owners,
 		queryTimeoutFlag: chPerf.queryTO,
 	}, chPerf.mountpoints)
+}
+
+func chPerfQueryOptions() (chperf.QueryOptions, error) {
+	treeFilter, err := parsePerfTreeFilter(chPerf.treeGIDs, chPerf.treeUIDs, chPerf.treeFT, chPerf.treeTypes)
+	if err != nil {
+		return chperf.QueryOptions{}, err
+	}
+
+	return chperf.QueryOptions{
+		Dir:           chPerf.dir,
+		AncestorDir:   chPerf.ancDir,
+		Ops:           chPerf.ops,
+		UID:           chPerf.uid,
+		GIDs:          parseGIDs(chPerf.gids),
+		TreeFilter:    treeFilter,
+		Repeat:        chPerf.repeat,
+		Warmup:        chPerf.warmup,
+		Splits:        chPerf.splits,
+		WalkDepth:     chPerf.walkDepth,
+		WalkLimit:     chPerf.walkLimit,
+		AncestorLimit: chPerf.ancLimit,
+	}, nil
+}
+
+func parsePerfTreeFilter(gidsRaw, uidsRaw, ftRaw, typesRaw string) (*db.Filter, error) {
+	gids, err := parsePerfTreeFilterIDs(gidsRaw, "tree-gids")
+	if err != nil {
+		return nil, err
+	}
+
+	uids, err := parsePerfTreeFilterIDs(uidsRaw, "tree-uids")
+	if err != nil {
+		return nil, err
+	}
+
+	ft, err := parsePerfTreeFilterFileTypes(ftRaw, typesRaw)
+	if err != nil {
+		return nil, err
+	}
+
+	return &db.Filter{
+		GIDs: gids,
+		UIDs: uids,
+		FT:   ft,
+		Age:  db.DGUTAgeAll,
+	}, nil
+}
+
+func parsePerfTreeFilterIDs(raw, flagName string) ([]uint32, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+
+	parts := strings.Split(raw, ",")
+	ids := make([]uint32, 0, len(parts))
+
+	for _, part := range parts {
+		trimmed := strings.TrimSpace(part)
+		if trimmed == "" {
+			continue
+		}
+
+		id, err := strconv.ParseUint(trimmed, 10, 32)
+		if err != nil {
+			return nil, fmt.Errorf("invalid --%s value %q: %w", flagName, trimmed, err)
+		}
+
+		ids = append(ids, uint32(id))
+	}
+
+	return ids, nil
+}
+
+func parsePerfTreeFilterFileTypes(ftRaw, typesRaw string) (db.DirGUTAFileType, error) {
+	var ft db.DirGUTAFileType
+
+	if trimmed := strings.TrimSpace(ftRaw); trimmed != "" {
+		mask, err := strconv.ParseUint(trimmed, 0, 16)
+		if err != nil {
+			return 0, fmt.Errorf("invalid --tree-ft value %q: %w", trimmed, err)
+		}
+
+		ft |= db.DirGUTAFileType(mask)
+	}
+
+	if strings.TrimSpace(typesRaw) == "" {
+		return ft, nil
+	}
+
+	for _, part := range strings.Split(typesRaw, ",") {
+		name := strings.TrimSpace(part)
+		if name == "" {
+			continue
+		}
+
+		fileType, err := db.FileTypeStringToDirGUTAFileType(name)
+		if err != nil {
+			return 0, fmt.Errorf("invalid --tree-types value %q: %w", name, err)
+		}
+
+		ft |= fileType
+	}
+
+	return ft, nil
 }
 
 func parseGIDs(raw string) []uint32 {

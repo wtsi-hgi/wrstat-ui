@@ -146,3 +146,44 @@ func (legacyPerfTreeDB) Info() (*db.Info, error) {
 func (legacyPerfTreeDB) Close() error {
 	return nil
 }
+
+func TestRunBoltPerfQueryInterfacesTreeFilters(t *testing.T) {
+	Convey("runBoltPerfQuery rejects tree filters for the legacy interfaces backend", t, func() {
+		cases := []struct {
+			flag string
+			set  func()
+		}{
+			{
+				flag: "--tree-gids",
+				set:  func() { boltPerf.treeGIDs = "7" },
+			},
+			{
+				flag: "--tree-uids",
+				set:  func() { boltPerf.treeUIDs = "8" },
+			},
+			{
+				flag: "--tree-types",
+				set:  func() { boltPerf.treeTypes = "bam" },
+			},
+			{
+				flag: "--tree-ft",
+				set:  func() { boltPerf.treeFT = "0x20" },
+			},
+		}
+
+		for _, tc := range cases {
+			Convey("rejects "+tc.flag, func() {
+				restoreBoltPerf := setLegacyPerfBoltFlags(nil)
+				defer restoreBoltPerf()
+
+				tc.set()
+
+				err := runBoltPerfQuery("/unused")
+
+				So(err, ShouldNotBeNil)
+				So(err.Error(), ShouldContainSubstring, "bolt_interfaces backend does not support tree filter flags")
+				So(err.Error(), ShouldContainSubstring, tc.flag)
+			})
+		}
+	})
+}

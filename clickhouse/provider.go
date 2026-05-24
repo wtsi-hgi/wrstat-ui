@@ -84,14 +84,15 @@ type chProvider struct {
 	errCh    chan struct{}
 	msgCh    chan struct{}
 
-	currentFingerprint string
-	pendingFingerprint string
-	hasPendingUpdate   bool
-	pendingErrs        []error
-	pendingErrHead     int
-	pendingMessages    []string
-	pendingMsgHead     int
-	treeSummaryJobs    map[string]*treeSummaryRefreshState
+	currentFingerprint     string
+	pendingFingerprint     string
+	hasPendingUpdate       bool
+	pendingErrs            []error
+	pendingErrHead         int
+	pendingMessages        []string
+	pendingMsgHead         int
+	treeSummaryJobs        map[string]*treeSummaryRefreshState
+	mountDirProjectionJobs map[treeMountCacheKey]*mountDirProjectionRefreshState
 
 	closing        bool
 	workersStarted bool
@@ -223,7 +224,7 @@ func (p *chProvider) captureActiveMountsState(parent context.Context) (*activeMo
 		return nil, "", fmt.Errorf("clickhouse: failed to capture mounts_active snapshot: %w", err)
 	}
 
-	p.ensureActiveMountDirSummariesBestEffort(context.WithoutCancel(parent), rows)
+	p.scheduleActiveMountDirProjectionRefreshBestEffort(ctx, rows)
 
 	snapshot := newActiveMountsSnapshot(rows)
 	if activeTreeSummariesReadyForSnapshot(ctx, p.conn, snapshot) {
@@ -253,27 +254,28 @@ func activeTreeSummariesReadyForSnapshot(
 	return err == nil && ready
 }
 
-func (p *chProvider) ensureActiveMountDirSummariesBestEffort(
-	parent context.Context,
+func (p *chProvider) scheduleActiveMountDirProjectionRefreshBestEffort(
+	ctx context.Context,
 	rows []mountsActiveRow,
 ) {
 	if p == nil || len(rows) == 0 {
 		return
 	}
 
-	ctx, cancel := queryContext(parent, queryTimeout(p.cfg))
-	defer cancel()
-
-	if err := ensureActiveMountDirSummaries(ctx, p.conn, rows); err != nil {
+	missingRows, err := activeMountDirProjectionRowsNeedingRefresh(ctx, p.conn, rows)
+	if err != nil {
 		p.queueError(err)
+
+		missingRows = append([]mountsActiveRow(nil), rows...)
+	}
+
+	if len(missingRows) == 0 {
+		p.markMountDirProjectionsReady(rows)
 
 		return
 	}
 
-	cache := treeQueryCacheForConfig(p.cfg)
-	for _, row := range rows {
-		cache.putMountDirSummaryReady(newTreeMountCacheKey(row.mountPath, row.snapshotID))
-	}
+	p.scheduleMountDirProjectionRefresh(context.WithoutCancel(ctx), missingRows)
 }
 
 func (p *chProvider) OnMessage(cb func(message string)) {
@@ -307,6 +309,10 @@ func (p *chProvider) cancelWorkers() {
 	cancels := append([]context.CancelFunc(nil), p.workerCancels...)
 
 	for _, job := range p.treeSummaryJobs {
+		cancels = append(cancels, job.cancel)
+	}
+
+	for _, job := range p.mountDirProjectionJobs {
 		cancels = append(cancels, job.cancel)
 	}
 

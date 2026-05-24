@@ -27,6 +27,10 @@
 package cmd
 
 import (
+	"errors"
+	"fmt"
+	"strings"
+
 	"github.com/spf13/cobra"
 	"github.com/wtsi-hgi/wrstat-ui/bolt"
 	"github.com/wtsi-hgi/wrstat-ui/internal/boltperf"
@@ -41,6 +45,10 @@ const (
 	boltPerfDefaultAncLimit  = 16
 
 	boltPerfBackendInterfaces = "bolt_interfaces"
+)
+
+var errBoltPerfInterfacesTreeFilters = errors.New(
+	"bolt_interfaces backend does not support tree filter flags",
 )
 
 var boltPerfCmd = &cobra.Command{
@@ -149,6 +157,10 @@ type boltPerfFlags struct {
 	dir       string
 	ancDir    string
 	ops       []string
+	treeGIDs  string
+	treeUIDs  string
+	treeFT    string
+	treeTypes string
 	repeat    int
 	warmup    int
 	splits    int
@@ -184,7 +196,16 @@ func runBoltPerfImport(inputDir string) error {
 
 func runBoltPerfQuery(inputDir string) error {
 	if boltPerf.backend == boltPerfBackendInterfaces {
+		if err := rejectBoltPerfInterfacesTreeFilters(); err != nil {
+			return err
+		}
+
 		return runBoltPerfQueryInterfaces(inputDir, cliPrint)
+	}
+
+	treeFilter, err := parsePerfTreeFilter(boltPerf.treeGIDs, boltPerf.treeUIDs, boltPerf.treeFT, boltPerf.treeTypes)
+	if err != nil {
+		return err
 	}
 
 	opts := boltperf.QueryOptions{
@@ -195,6 +216,7 @@ func runBoltPerfQuery(inputDir string) error {
 		Dir:                     boltPerf.dir,
 		AncestorDir:             boltPerf.ancDir,
 		Ops:                     boltPerf.ops,
+		TreeFilter:              treeFilter,
 		Repeat:                  boltPerf.repeat,
 		Warmup:                  boltPerf.warmup,
 		Splits:                  boltPerf.splits,
@@ -206,6 +228,41 @@ func runBoltPerfQuery(inputDir string) error {
 	}
 
 	return boltperf.Query(inputDir, opts, cliPrint)
+}
+
+func rejectBoltPerfInterfacesTreeFilters() error {
+	flags := boltPerfInterfacesTreeFilterFlags()
+	if len(flags) == 0 {
+		return nil
+	}
+
+	return fmt.Errorf(
+		"%w: %s",
+		errBoltPerfInterfacesTreeFilters,
+		strings.Join(flags, ", "),
+	)
+}
+
+func boltPerfInterfacesTreeFilterFlags() []string {
+	var flags []string
+
+	if strings.TrimSpace(boltPerf.treeGIDs) != "" {
+		flags = append(flags, "--tree-gids")
+	}
+
+	if strings.TrimSpace(boltPerf.treeUIDs) != "" {
+		flags = append(flags, "--tree-uids")
+	}
+
+	if strings.TrimSpace(boltPerf.treeTypes) != "" {
+		flags = append(flags, "--tree-types")
+	}
+
+	if strings.TrimSpace(boltPerf.treeFT) != "" {
+		flags = append(flags, "--tree-ft")
+	}
+
+	return flags
 }
 
 func init() {
@@ -240,6 +297,14 @@ func addBoltPerfFlags() {
 		"ancestor directory for root/click-through Disktree timings")
 	boltPerfQueryCmd.Flags().StringSliceVar(&boltPerf.ops, "ops", nil,
 		"comma-separated query operation names to run (default: all)")
+	boltPerfQueryCmd.Flags().StringVar(&boltPerf.treeGIDs, "tree-gids", "",
+		"comma-separated GIDs for tree query filter")
+	boltPerfQueryCmd.Flags().StringVar(&boltPerf.treeUIDs, "tree-uids", "",
+		"comma-separated UIDs for tree query filter")
+	boltPerfQueryCmd.Flags().StringVar(&boltPerf.treeTypes, "tree-types", "",
+		"comma-separated file type names for tree query filter (for example bam,cram,temp)")
+	boltPerfQueryCmd.Flags().StringVar(&boltPerf.treeFT, "tree-ft", "",
+		"file type bitmask for tree query filter (decimal or 0x; ORed with --tree-types)")
 	boltPerfQueryCmd.Flags().IntVar(&boltPerf.repeat, "repeat", boltPerfDefaultRepeat, "repeat count")
 	boltPerfQueryCmd.Flags().IntVar(&boltPerf.warmup, "warmup", boltPerfDefaultWarmup, "warmup iterations")
 	boltPerfQueryCmd.Flags().IntVar(&boltPerf.splits, "splits", boltPerfDefaultSplits, "where() splits")

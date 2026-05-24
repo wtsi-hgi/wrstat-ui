@@ -38,10 +38,11 @@ import (
 )
 
 const (
-	querySuiteTestChildADir = "/root/a/"
-	querySuiteTestChildBDir = "/root/b/"
-	querySuiteTestGrandDir  = "/root/a/grand/"
-	querySuiteTestRootDir   = "/root/"
+	querySuiteTestChildADir  = "/root/a/"
+	querySuiteTestChildBDir  = "/root/b/"
+	querySuiteTestGrandDir   = "/root/a/grand/"
+	querySuiteTestRootDir    = "/root/"
+	querySuiteTestNoMatchGID = 404
 )
 
 func TestLineCountingReader(t *testing.T) {
@@ -90,11 +91,64 @@ func TestDirsForRepeats(t *testing.T) {
 	})
 }
 
+type noMatchFilteredTreeDB struct {
+	dirInfoCalls []string
+}
+
+func (d *noMatchFilteredTreeDB) DirInfo(dir string, filter *db.Filter) (*db.DirSummary, error) {
+	d.dirInfoCalls = append(d.dirInfoCalls, dir)
+
+	if hasNoMatchGID(filter) {
+		return nil, nil //nolint:nilnil
+	}
+
+	return &db.DirSummary{Count: dirPickMinCount}, nil
+}
+
+func hasNoMatchGID(filter *db.Filter) bool {
+	if filter == nil {
+		return false
+	}
+
+	for _, gid := range filter.GIDs {
+		if gid == querySuiteTestNoMatchGID {
+			return true
+		}
+	}
+
+	return false
+}
+
+func (*noMatchFilteredTreeDB) Children(string) ([]string, error) {
+	return []string{querySuiteTestChildADir}, nil
+}
+
+func (*noMatchFilteredTreeDB) Info() (*db.Info, error) {
+	return &db.Info{}, nil
+}
+
+func (*noMatchFilteredTreeDB) Close() error {
+	return nil
+}
+
+func TestPickRepresentativeDirFromTree(t *testing.T) {
+	Convey("pickRepresentativeDirFromTree stops at the current directory when a filter has no matching rows", t, func() {
+		database := &noMatchFilteredTreeDB{}
+		filter := &db.Filter{GIDs: []uint32{querySuiteTestNoMatchGID}, Age: db.DGUTAgeAll}
+
+		dir := pickRepresentativeDirFromTree(db.NewTree(database), querySuiteTestRootDir, filter)
+
+		So(dir, ShouldEqual, querySuiteTestRootDir)
+		So(database.dirInfoCalls, ShouldResemble, []string{querySuiteTestRootDir})
+	})
+}
+
 type querySuiteTestDB struct {
-	children      map[string][]string
-	summaries     map[string]*db.DirSummary
-	dirInfoCalls  []string
-	childrenCalls []string
+	children       map[string][]string
+	summaries      map[string]*db.DirSummary
+	dirInfoCalls   []string
+	dirInfoFilters []*db.Filter
+	childrenCalls  []string
 }
 
 func newQuerySuiteTestDB() *querySuiteTestDB {
@@ -113,8 +167,9 @@ func newQuerySuiteTestDB() *querySuiteTestDB {
 	}
 }
 
-func (d *querySuiteTestDB) DirInfo(dir string, _ *db.Filter) (*db.DirSummary, error) {
+func (d *querySuiteTestDB) DirInfo(dir string, filter *db.Filter) (*db.DirSummary, error) {
 	d.dirInfoCalls = append(d.dirInfoCalls, dir)
+	d.dirInfoFilters = append(d.dirInfoFilters, cloneQuerySuiteTestFilter(filter))
 
 	summary := d.summaries[dir]
 	if summary == nil {
@@ -124,6 +179,19 @@ func (d *querySuiteTestDB) DirInfo(dir string, _ *db.Filter) (*db.DirSummary, er
 	cp := *summary
 
 	return &cp, nil
+}
+
+func cloneQuerySuiteTestFilter(filter *db.Filter) *db.Filter {
+	if filter == nil {
+		return nil
+	}
+
+	return &db.Filter{
+		GIDs: append([]uint32(nil), filter.GIDs...),
+		UIDs: append([]uint32(nil), filter.UIDs...),
+		FT:   filter.FT,
+		Age:  filter.Age,
+	}
 }
 
 func (d *querySuiteTestDB) Children(dir string) ([]string, error) {
@@ -225,6 +293,42 @@ func TestQuerySuiteOps(t *testing.T) {
 		So(freshWhereOp.inputs["dir"], ShouldEqual, querySuiteTestRootDir)
 		So(freshWhereOp.inputs["cache_scope"], ShouldEqual, "fresh_provider_per_repeat")
 		So(freshWhereOp.skipWarmup, ShouldBeTrue)
+	})
+
+	Convey("tree_where uses the configured tree filter and records it", t, func() {
+		database := newQuerySuiteTestDB()
+		filter := querySuiteTestTreeFilter()
+		ctx := queryContext{
+			tree:     db.NewTree(database),
+			queryDir: querySuiteTestRootDir,
+		}
+
+		ops := buildQuerySuiteOps(ctx, QueryOptions{Splits: 2, TreeFilter: filter})
+		whereOp := findQuerySuiteTestOp(ops, queryOpTreeWhereName)
+		So(whereOp, ShouldNotBeNil)
+		assertQuerySuiteTestTreeFilterInputs(whereOp.inputs, filter)
+
+		So(whereOp.op(), ShouldBeNil)
+		So(database.dirInfoFilters, ShouldNotBeEmpty)
+		So(database.dirInfoFilters[0], ShouldResemble, filter)
+	})
+
+	Convey("tree_disktree_endpoint uses the configured tree filter and records it", t, func() {
+		database := newQuerySuiteTestDB()
+		filter := querySuiteTestTreeFilter()
+		ctx := queryContext{
+			tree:     db.NewTree(database),
+			queryDir: querySuiteTestRootDir,
+		}
+
+		ops := buildQuerySuiteOps(ctx, QueryOptions{TreeFilter: filter})
+		disktreeOp := findQuerySuiteTestOp(ops, queryOpTreeDiskTreeEndName)
+		So(disktreeOp, ShouldNotBeNil)
+		assertQuerySuiteTestTreeFilterInputs(disktreeOp.inputs, filter)
+
+		So(disktreeOp.op(), ShouldBeNil)
+		So(database.dirInfoFilters, ShouldNotBeEmpty)
+		So(database.dirInfoFilters[0], ShouldResemble, filter)
 	})
 
 	Convey("tree_disktree_endpoint_new_dirs times walked dirs instead of the selected warm dir", t, func() {
@@ -414,6 +518,23 @@ func querySuiteTestOpIndex(names []string, name string) int {
 	}
 
 	return -1
+}
+
+func querySuiteTestTreeFilter() *db.Filter {
+	return &db.Filter{
+		GIDs: []uint32{7, 8},
+		UIDs: []uint32{9, 10},
+		FT:   db.DGUTAFileTypeBam | db.DGUTAFileTypeCram,
+		Age:  db.DGUTAgeAll,
+	}
+}
+
+func assertQuerySuiteTestTreeFilterInputs(inputs map[string]any, filter *db.Filter) {
+	So(inputs[queryInputAgeKey], ShouldEqual, int(filter.Age))
+	So(inputs[queryInputFilterGIDsKey], ShouldResemble, filter.GIDs)
+	So(inputs[queryInputFilterUIDsKey], ShouldResemble, filter.UIDs)
+	So(inputs[queryInputFilterFileTypeMaskKey], ShouldEqual, int(filter.FT))
+	So(inputs[queryInputFilterFileTypesKey], ShouldEqual, filter.FT.String())
 }
 
 func countQuerySuiteTestDir(dirs []string, target string) int {

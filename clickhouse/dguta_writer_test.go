@@ -796,6 +796,12 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 			mountPath,
 			sid.String(),
 		), ShouldEqual, 1)
+		So(countRows(ctx, conn,
+			"SELECT count() FROM wrstat_dir_dguta_vector WHERE mount_path = ? AND snapshot_id = ? AND dir = ?",
+			mountPath,
+			sid.String(),
+			mountPath,
+		), ShouldEqual, 1)
 	})
 
 	Convey("DGUTAWriter keeps the active snapshot when tree summary refresh times out", t, func() {

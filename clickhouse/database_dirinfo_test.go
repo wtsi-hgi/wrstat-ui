@@ -597,7 +597,7 @@ func TestClickHouseDatabaseMountDirSummary(t *testing.T) {
 		So(countingConn.rawSummaryBatchQueryCount(), ShouldEqual, 0)
 	})
 
-	Convey("DirInfos falls back for UID and GID filters even when mount summaries exist", t, func() {
+	Convey("DirInfos uses DGUTA vectors for UID, GID, and specific file-type filters", t, func() {
 		os.Setenv("WRSTAT_ENV", "test")
 		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
 		resetSharedTreeQueryCachesForTesting()
@@ -648,7 +648,8 @@ func TestClickHouseDatabaseMountDirSummary(t *testing.T) {
 		So(summaries[mountPath+"a"].Count, ShouldEqual, 3)
 		So(countingConn.mountDirSummaryQueryCount(), ShouldEqual, 0)
 		So(countingConn.groupedSummaryQueryCount(), ShouldEqual, 0)
-		So(countingConn.rawSummaryBatchQueryCount(), ShouldEqual, 1)
+		So(countingConn.mountDirVectorQueryCount(), ShouldEqual, 1)
+		So(countingConn.rawSummaryBatchQueryCount(), ShouldEqual, 0)
 
 		countingConn.reset()
 
@@ -660,7 +661,103 @@ func TestClickHouseDatabaseMountDirSummary(t *testing.T) {
 		So(ftSummaries[mountPath+"b"].Count, ShouldEqual, 5)
 		So(countingConn.mountDirSummaryQueryCount(), ShouldEqual, 0)
 		So(countingConn.groupedSummaryQueryCount(), ShouldEqual, 0)
-		So(countingConn.rawSummaryBatchQueryCount(), ShouldEqual, 1)
+		So(countingConn.mountDirVectorQueryCount(), ShouldEqual, 1)
+		So(countingConn.rawSummaryBatchQueryCount(), ShouldEqual, 0)
+	})
+
+	Convey("DirInfos uses maintained DGUTA vectors for arbitrary active-mount filters", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+		resetSharedTreeQueryCachesForTesting()
+		Reset(resetSharedTreeQueryCachesForTesting)
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 5 * time.Second
+		cfg.PollInterval = 0
+
+		p, err := OpenProvider(cfg)
+		So(err, ShouldBeNil)
+		Reset(func() { So(p.Close(), ShouldBeNil) })
+
+		cp, ok := p.(*chProvider)
+		So(ok, ShouldBeTrue)
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		const mountPath = "/mnt/vectorfiltered/"
+
+		updatedAt := time.Date(2026, 1, 10, 10, 15, 0, 0, time.UTC)
+		sid := snapshotID(mountPath, updatedAt)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		So(conn.Exec(ctx, testInsertMountStmt, mountPath, time.Now(), sid, updatedAt), ShouldBeNil)
+
+		insertVectorGUTA := func(dir string, gid, uid uint32, ft db.DirGUTAFileType, age db.DirGUTAge, count uint64) {
+			So(conn.Exec(ctx,
+				testInsertDGUTAStmt,
+				mountPath,
+				sid.String(),
+				dir,
+				gid,
+				uid,
+				uint16(ft),
+				uint8(age),
+				count,
+				count*10,
+				int64(10),
+				int64(20),
+				[]uint64{count, 0, 0, 0, 0, 0, 0, 0, 0},
+				[]uint64{0, count, 0, 0, 0, 0, 0, 0, 0},
+			), ShouldBeNil)
+		}
+
+		insertVectorGUTA(mountPath+"a/", 7, 9, db.DGUTAFileTypeBam, db.DGUTAgeAll, 3)
+		insertVectorGUTA(mountPath+"a/", 8, 9, db.DGUTAFileTypeCram, db.DGUTAgeAll, 4)
+		insertVectorGUTA(mountPath+"a/", 7, 10, db.DGUTAFileTypeBam, db.DGUTAgeA1M, 5)
+		insertVectorGUTA(mountPath+"b/", 7, 9, db.DGUTAFileTypeBam, db.DGUTAgeAll, 2)
+		So(refreshMountDirSummaries(ctx, conn, activeMount{
+			mountPath:  mountPath,
+			snapshotID: sid.String(),
+			updatedAt:  updatedAt,
+		}), ShouldBeNil)
+
+		rawDB := newClickHouseDatabase(cfg, cp.conn)
+		expectedSummary := func(dir string, filter *db.Filter) *db.DirSummary {
+			gutas, errg := rawDB.gutasForDir(mountPath, sid.String(), ensureTrailingSlash(dir))
+			So(errg, ShouldBeNil)
+
+			sum := dirSummaryWithModtime(gutas, filter, updatedAt)
+			So(sum, ShouldNotBeNil)
+
+			sum.Dir = dir
+
+			return sum
+		}
+
+		countingConn := &dirInfoSummaryQueryCountingConn{Conn: cp.conn}
+		dbch := newClickHouseDatabase(cfg, countingConn)
+		filter := &db.Filter{
+			GIDs: []uint32{7},
+			UIDs: []uint32{9},
+			FT:   db.DGUTAFileTypeBam,
+			Age:  db.DGUTAgeAll,
+		}
+
+		summaries, err := dbch.DirInfos([]string{mountPath + "a", mountPath + "b/"}, filter)
+		So(err, ShouldBeNil)
+		So(summaries, ShouldResemble, map[string]*db.DirSummary{
+			mountPath + "a":  expectedSummary(mountPath+"a", filter),
+			mountPath + "b/": expectedSummary(mountPath+"b/", filter),
+		})
+		So(countingConn.mountDirVectorQueryCount(), ShouldEqual, 1)
+		So(countingConn.groupedSummaryQueryCount(), ShouldEqual, 0)
+		So(countingConn.rawSummaryBatchQueryCount(), ShouldEqual, 0)
+		So(countingConn.rawSummaryQueryCount(), ShouldEqual, 0)
 	})
 
 	Convey("DirInfos avoids grouped raw summaries for small batches without maintained rows", t, func() {
@@ -1026,7 +1123,7 @@ func TestClickHouseDatabaseTreeCache(t *testing.T) {
 		So(countingConn.queryCountValue(), ShouldEqual, warmQueries)
 	})
 
-	Convey("Tree.Where reuses cached rows on repeated traversals", t, func() {
+	Convey("Tree.Where reuses cached child rows on repeated traversals", t, func() {
 		os.Setenv("WRSTAT_ENV", "test")
 		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
 
@@ -1113,13 +1210,18 @@ func TestClickHouseDatabaseTreeCache(t *testing.T) {
 		So(expected, ShouldHaveLength, 4)
 
 		warmQueries := countingConn.queryCountValue()
+		warmChildBatches := countingConn.childBatchQueryCountValue()
+		warmFilteredSummaries := countingConn.filteredMountSummaryQueryCountValue()
+
 		So(warmQueries, ShouldBeGreaterThan, 0)
 		So(countingConn.subtreeQueryCountValue(), ShouldEqual, 0)
 
 		actual, err := tree.Where(mountPath, filter, splitFn)
 		So(err, ShouldBeNil)
 		So(actual, ShouldResemble, expected)
-		So(countingConn.queryCountValue(), ShouldEqual, warmQueries)
+		So(countingConn.queryCountValue(), ShouldEqual, warmQueries+1)
+		So(countingConn.filteredMountSummaryQueryCountValue(), ShouldEqual, warmFilteredSummaries+1)
+		So(countingConn.childBatchQueryCountValue(), ShouldEqual, warmChildBatches)
 	})
 
 	Convey("Tree.Where shares cached rows across same-namespace database instances", t, func() {
@@ -1200,7 +1302,8 @@ func TestClickHouseDatabaseTreeCache(t *testing.T) {
 		So(err, ShouldBeNil)
 		So(expected, ShouldHaveLength, 4)
 		So(countingConn.childBatchQueryCountValue(), ShouldBeGreaterThan, 0)
-		So(countingConn.summaryBatchQueryCountValue(), ShouldBeGreaterThan, 0)
+		So(countingConn.filteredMountSummaryQueryCountValue(), ShouldEqual, 1)
+		So(countingConn.summaryBatchQueryCountValue(), ShouldEqual, 0)
 		So(firstDB.Close(), ShouldBeNil)
 
 		countingConn.resetCounts()
@@ -1210,7 +1313,8 @@ func TestClickHouseDatabaseTreeCache(t *testing.T) {
 		So(actual, ShouldResemble, expected)
 		So(countingConn.childBatchQueryCountValue(), ShouldEqual, 0)
 		So(countingConn.summaryBatchQueryCountValue(), ShouldEqual, 0)
-		So(countingConn.queryCountValue(), ShouldEqual, 0)
+		So(countingConn.filteredMountSummaryQueryCountValue(), ShouldEqual, 1)
+		So(countingConn.queryCountValue(), ShouldEqual, 1)
 		So(secondDB.Close(), ShouldBeNil)
 	})
 
@@ -1300,7 +1404,8 @@ func TestClickHouseDatabaseTreeCache(t *testing.T) {
 		So(err, ShouldBeNil)
 		So(actual, ShouldResemble, expected)
 		So(countingConn.childBatchQueryCountValue(), ShouldBeGreaterThan, 0)
-		So(countingConn.summaryBatchQueryCountValue(), ShouldBeGreaterThan, 0)
+		So(countingConn.filteredMountSummaryQueryCountValue(), ShouldEqual, 1)
+		So(countingConn.summaryBatchQueryCountValue(), ShouldEqual, 0)
 	})
 
 	Convey("cache keys are scoped by active snapshot id", t, func() {
@@ -1583,6 +1688,67 @@ func TestClickHouseDatabaseDirsHaveChildrenFastPath(t *testing.T) {
 		})
 		So(countingConn.childBatchQueryCount(), ShouldEqual, 1)
 		So(countingConn.childSummaryBatchQueryCount(), ShouldEqual, 1)
+		So(countingConn.existenceQueryCount(), ShouldEqual, 0)
+	})
+
+	Convey("DirsHaveChildren uses DGUTA vectors for wide arbitrary-filter child checks", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+		resetSharedTreeQueryCachesForTesting()
+		Reset(resetSharedTreeQueryCachesForTesting)
+
+		th := newClickHouseTestHarness(t)
+
+		const mountPath = "/mnt/vectorchildren/"
+
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 5 * time.Second
+		cfg.PollInterval = 0
+		cfg.MountPoints = []string{mountPath}
+
+		p, err := OpenProvider(cfg)
+		So(err, ShouldBeNil)
+		Reset(func() { So(p.Close(), ShouldBeNil) })
+
+		cp, ok := p.(*chProvider)
+		So(ok, ShouldBeTrue)
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		updatedAt := time.Date(2026, 1, 12, 8, 0, 0, 0, time.UTC)
+		sid := snapshotID(mountPath, updatedAt)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		So(conn.Exec(ctx, testInsertMountStmt, mountPath, time.Now(), sid, updatedAt), ShouldBeNil)
+
+		parent := mountPath + "wide/"
+		for i := range dirsHaveChildrenSummaryFanoutLimit + 1 {
+			child := fmt.Sprintf("%schild%02d", parent, i)
+			So(conn.Exec(ctx, testInsertChildrenStmt, mountPath, sid.String(), parent, child), ShouldBeNil)
+		}
+
+		insertDirSummaryTestGUTA(ctx, conn, mountPath, sid, parent+"child05/", 7, 3)
+		insertDirSummaryTestGUTA(ctx, conn, mountPath, sid, parent+"child06/", 8, 2)
+		So(refreshMountDirSummaries(ctx, conn, activeMount{
+			mountPath:  mountPath,
+			snapshotID: sid.String(),
+			updatedAt:  updatedAt,
+		}), ShouldBeNil)
+
+		countingConn := &hasChildrenQueryCountingConn{Conn: cp.conn}
+		dbch := newClickHouseDatabase(cfg, countingConn)
+		filter := &db.Filter{GIDs: []uint32{7}, FT: db.DGUTAFileTypeBam, Age: db.DGUTAgeAll}
+
+		hasChildren, err := dbch.DirsHaveChildren([]string{parent}, filter)
+		So(err, ShouldBeNil)
+		So(hasChildren, ShouldResemble, map[string]bool{parent: true})
+		So(countingConn.childBatchQueryCount(), ShouldEqual, 1)
+		So(countingConn.mountVectorQueryCount(), ShouldEqual, 1)
+		So(countingConn.childSummaryBatchQueryCount(), ShouldEqual, 0)
 		So(countingConn.existenceQueryCount(), ShouldEqual, 0)
 	})
 
@@ -2421,6 +2587,7 @@ type hasChildrenQueryCountingConn struct {
 	childSummaryBatchQueries atomic.Int32
 	existenceQueries         atomic.Int32
 	mountSummaryQueries      atomic.Int32
+	mountVectorQueries       atomic.Int32
 }
 
 func (c *hasChildrenQueryCountingConn) Query(ctx context.Context, query string, args ...any) (driver.Rows, error) {
@@ -2446,6 +2613,10 @@ func (c *hasChildrenQueryCountingConn) Query(ctx context.Context, query string, 
 		c.mountSummaryQueries.Add(1)
 	}
 
+	if isMountDirInfoVectorQuery(query) {
+		c.mountVectorQueries.Add(1)
+	}
+
 	return c.Conn.Query(ctx, query, args...)
 }
 
@@ -2467,6 +2638,10 @@ func isMountDirInfoSummaryQuery(query string) bool {
 		!strings.Contains(query, "wrstat_dir_summary_sets")
 }
 
+func isMountDirInfoVectorQuery(query string) bool {
+	return strings.Contains(query, "FROM wrstat_dir_dguta_vector")
+}
+
 func (c *hasChildrenQueryCountingConn) childBatchQueryCount() int {
 	return int(c.childBatchQueries.Load())
 }
@@ -2481,6 +2656,10 @@ func (c *hasChildrenQueryCountingConn) existenceQueryCount() int {
 
 func (c *hasChildrenQueryCountingConn) mountSummaryQueryCount() int {
 	return int(c.mountSummaryQueries.Load())
+}
+
+func (c *hasChildrenQueryCountingConn) mountVectorQueryCount() int {
+	return int(c.mountVectorQueries.Load())
 }
 
 type dirsHaveChildrenPrefetchFailureConn struct {
@@ -2516,6 +2695,7 @@ type dirInfoSummaryQueryCountingConn struct {
 	rawSummaryBatchQueries atomic.Int32
 	rawSummaryQueries      atomic.Int32
 	mountSummaryQueries    atomic.Int32
+	mountVectorQueries     atomic.Int32
 }
 
 func (c *dirInfoSummaryQueryCountingConn) Query(ctx context.Context, query string, args ...any) (driver.Rows, error) {
@@ -2535,6 +2715,10 @@ func (c *dirInfoSummaryQueryCountingConn) Query(ctx context.Context, query strin
 		c.mountSummaryQueries.Add(1)
 	}
 
+	if isMountDirInfoVectorQuery(query) {
+		c.mountVectorQueries.Add(1)
+	}
+
 	return c.Conn.Query(ctx, query, args...)
 }
 
@@ -2549,6 +2733,7 @@ func (c *dirInfoSummaryQueryCountingConn) reset() {
 	c.rawSummaryBatchQueries.Store(0)
 	c.rawSummaryQueries.Store(0)
 	c.mountSummaryQueries.Store(0)
+	c.mountVectorQueries.Store(0)
 }
 
 func (c *dirInfoSummaryQueryCountingConn) groupedSummaryQueryCount() int {
@@ -2567,17 +2752,36 @@ func (c *dirInfoSummaryQueryCountingConn) mountDirSummaryQueryCount() int {
 	return int(c.mountSummaryQueries.Load())
 }
 
+func (c *dirInfoSummaryQueryCountingConn) mountDirVectorQueryCount() int {
+	return int(c.mountVectorQueries.Load())
+}
+
 type whereQueryCountingConn struct {
 	ch.Conn
 
-	childBatchQueries   atomic.Int32
-	queries             atomic.Int32
-	summaryBatchQueries atomic.Int32
-	subtreeQueries      atomic.Int32
+	allMountChildQueries        atomic.Int32
+	childBatchQueries           atomic.Int32
+	filteredMountSummaryQueries atomic.Int32
+	mountVectorQueries          atomic.Int32
+	queries                     atomic.Int32
+	summaryBatchQueries         atomic.Int32
+	subtreeQueries              atomic.Int32
+}
+
+func (c *whereQueryCountingConn) allMountChildQueryCountValue() int {
+	return int(c.allMountChildQueries.Load())
 }
 
 func (c *whereQueryCountingConn) childBatchQueryCountValue() int {
 	return int(c.childBatchQueries.Load())
+}
+
+func (c *whereQueryCountingConn) filteredMountSummaryQueryCountValue() int {
+	return int(c.filteredMountSummaryQueries.Load())
+}
+
+func (c *whereQueryCountingConn) mountDirVectorQueryCount() int {
+	return int(c.mountVectorQueries.Load())
 }
 
 func (c *whereQueryCountingConn) subtreeQueryCountValue() int {
@@ -2585,7 +2789,10 @@ func (c *whereQueryCountingConn) subtreeQueryCountValue() int {
 }
 
 func (c *whereQueryCountingConn) resetCounts() {
+	c.allMountChildQueries.Store(0)
 	c.childBatchQueries.Store(0)
+	c.filteredMountSummaryQueries.Store(0)
+	c.mountVectorQueries.Store(0)
 	c.queries.Store(0)
 	c.summaryBatchQueries.Store(0)
 	c.subtreeQueries.Store(0)
@@ -2606,6 +2813,14 @@ func (c *whereQueryCountingConn) Query(ctx context.Context, query string, args .
 		c.summaryBatchQueries.Add(1)
 	}
 
+	if isFilteredMountWhereSummaryQuery(query) {
+		c.filteredMountSummaryQueries.Add(1)
+	}
+
+	if isMountDirInfoVectorQuery(query) {
+		c.mountVectorQueries.Add(1)
+	}
+
 	isChildBatchQuery := strings.Contains(query, "parent_dir, child") &&
 		strings.Contains(query, "FROM wrstat_children") &&
 		strings.Contains(query, "WHERE parent_dir IN (")
@@ -2613,7 +2828,22 @@ func (c *whereQueryCountingConn) Query(ctx context.Context, query string, args .
 		c.childBatchQueries.Add(1)
 	}
 
+	isAllMountChildQuery := strings.Contains(query, "parent_dir, child") &&
+		strings.Contains(query, "FROM wrstat_children") &&
+		!strings.Contains(query, "WHERE parent_dir IN (") &&
+		!strings.Contains(query, "JOIN")
+	if isAllMountChildQuery {
+		c.allMountChildQueries.Add(1)
+	}
+
 	return c.Conn.Query(ctx, query, args...)
+}
+
+func isFilteredMountWhereSummaryQuery(query string) bool {
+	return strings.Contains(query, "FROM wrstat_dguta") &&
+		strings.Contains(query, "GROUP BY dir") &&
+		!strings.Contains(query, "WHERE dir IN (") &&
+		!strings.Contains(query, "startsWith")
 }
 
 func (c *whereQueryCountingConn) queryCountValue() int {
@@ -3087,6 +3317,99 @@ func TestClickHouseDatabaseWhereFastPath(t *testing.T) {
 		So(countingConn.mountDirSummaryQueryCount(), ShouldEqual, 1)
 		So(countingConn.groupedSummaryQueryCount(), ShouldEqual, 0)
 		So(countingConn.rawSummaryBatchQueryCount(), ShouldEqual, 0)
+	})
+
+	Convey("Where preloads selective mount summaries for arbitrary-filter traversal", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+		resetSharedTreeQueryCachesForTesting()
+		Reset(resetSharedTreeQueryCachesForTesting)
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 5 * time.Second
+		cfg.PollInterval = 0
+		cfg.MountPoints = []string{"/mnt/wherevector/"}
+
+		p, err := OpenProvider(cfg)
+		So(err, ShouldBeNil)
+		Reset(func() { So(p.Close(), ShouldBeNil) })
+
+		cp, ok := p.(*chProvider)
+		So(ok, ShouldBeTrue)
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		const mountPath = "/mnt/wherevector/"
+
+		updatedAt := time.Date(2026, 1, 12, 9, 30, 0, 0, time.UTC)
+		sid := snapshotID(mountPath, updatedAt).String()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		So(conn.Exec(ctx, testInsertMountStmt, mountPath, time.Now(), sid, updatedAt), ShouldBeNil)
+
+		insertGUTA := func(dir string, gid uint32, count uint64) {
+			So(conn.Exec(ctx,
+				testInsertDGUTAStmt,
+				mountPath,
+				sid,
+				dir,
+				gid,
+				uint32(9),
+				uint16(db.DGUTAFileTypeBam),
+				uint8(db.DGUTAgeAll),
+				count,
+				count*10,
+				int64(10),
+				int64(20),
+				[]uint64{count, 0, 0, 0, 0, 0, 0, 0, 0},
+				[]uint64{0, count, 0, 0, 0, 0, 0, 0, 0},
+			), ShouldBeNil)
+		}
+		insertChild := func(parent, child string) {
+			So(conn.Exec(ctx, testInsertChildrenStmt, mountPath, sid, parent, child), ShouldBeNil)
+		}
+
+		insertGUTA(mountPath, 7, 10)
+		insertGUTA(mountPath+"a/", 7, 10)
+		insertGUTA(mountPath+"a/leaf1/", 7, 6)
+		insertGUTA(mountPath+"a/leaf2/", 7, 4)
+		insertGUTA(mountPath+"b/", 8, 2)
+		insertChild(mountPath, mountPath+"a")
+		insertChild(mountPath, mountPath+"b")
+		insertChild(mountPath+"a/", mountPath+"a/leaf1")
+		insertChild(mountPath+"a/", mountPath+"a/leaf2")
+		So(refreshMountDirSummaries(ctx, conn, activeMount{
+			mountPath:  mountPath,
+			snapshotID: sid,
+			updatedAt:  updatedAt,
+		}), ShouldBeNil)
+
+		countingConn := &whereQueryCountingConn{Conn: cp.conn}
+		snapshot := newActiveMountsSnapshot([]mountsActiveRow{{
+			mountPath:  mountPath,
+			snapshotID: sid,
+			updatedAt:  updatedAt,
+		}})
+		tree := db.NewTree(newClickHouseDatabaseWithSnapshot(cfg, countingConn, snapshot))
+		filter := &db.Filter{GIDs: []uint32{7}, UIDs: []uint32{9}, Age: db.DGUTAgeAll}
+
+		dcss, err := tree.Where(mountPath, filter, split.SplitsToSplitFn(0))
+		So(err, ShouldBeNil)
+		So(dcss, ShouldHaveLength, 1)
+		So(dcss[0].Dir, ShouldEqual, mountPath+"a")
+		So(dcss[0].Count, ShouldEqual, 10)
+		So(dcss[0].Size, ShouldEqual, 100)
+		So(dcss[0].Modtime, ShouldResemble, updatedAt)
+		So(countingConn.filteredMountSummaryQueryCountValue(), ShouldEqual, 1)
+		So(countingConn.allMountChildQueryCountValue(), ShouldEqual, 0)
+		So(countingConn.mountDirVectorQueryCount(), ShouldEqual, 0)
+		So(countingConn.summaryBatchQueryCountValue(), ShouldEqual, 0)
+		So(countingConn.childBatchQueryCountValue(), ShouldEqual, 1)
 	})
 
 	Convey("Where keeps raw summary batches for small active-mount child batches", t, func() {

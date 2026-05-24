@@ -54,11 +54,13 @@ const (
 	switchSnapshotQuery = "INSERT INTO wrstat_mounts (mount_path, switched_at, active_snapshot, updated_at) " +
 		"VALUES (?, now64(3), toUUID(?), ?)"
 
-	dropDGUTAPartitionQuery         = "ALTER TABLE wrstat_dguta DROP PARTITION tuple(?, toUUID(?))"
-	dropChildrenPartitionQuery      = "ALTER TABLE wrstat_children DROP PARTITION tuple(?, toUUID(?))"
-	dropFilesPartitionQuery         = "ALTER TABLE wrstat_files DROP PARTITION tuple(?, toUUID(?))"
-	dropDirSummaryPartitionQuery    = "ALTER TABLE wrstat_dir_summary DROP PARTITION tuple(?, toUUID(?))"
-	dropDirSummarySetPartitionQuery = "ALTER TABLE wrstat_dir_summary_sets DROP PARTITION tuple(?, toUUID(?))"
+	dropDGUTAPartitionQuery          = "ALTER TABLE wrstat_dguta DROP PARTITION tuple(?, toUUID(?))"
+	dropChildrenPartitionQuery       = "ALTER TABLE wrstat_children DROP PARTITION tuple(?, toUUID(?))"
+	dropFilesPartitionQuery          = "ALTER TABLE wrstat_files DROP PARTITION tuple(?, toUUID(?))"
+	dropDirSummaryPartitionQuery     = "ALTER TABLE wrstat_dir_summary DROP PARTITION tuple(?, toUUID(?))"
+	dropDirSummarySetPartitionQuery  = "ALTER TABLE wrstat_dir_summary_sets DROP PARTITION tuple(?, toUUID(?))"
+	dropDirDGUTAVectorPartitionQuery = "ALTER TABLE wrstat_dir_dguta_vector " +
+		"DROP PARTITION tuple(?, toUUID(?))"
 
 	dropBasedirsGroupUsagePartitionQuery   = "ALTER TABLE wrstat_basedirs_group_usage DROP PARTITION tuple(?, toUUID(?))"
 	dropBasedirsUserUsagePartitionQuery    = "ALTER TABLE wrstat_basedirs_user_usage DROP PARTITION tuple(?, toUUID(?))"
@@ -504,6 +506,7 @@ func allPartitionDropQueries() []string {
 		dropFilesPartitionQuery,
 		dropDirSummaryPartitionQuery,
 		dropDirSummarySetPartitionQuery,
+		dropDirDGUTAVectorPartitionQuery,
 		dropBasedirsGroupUsagePartitionQuery,
 		dropBasedirsUserUsagePartitionQuery,
 		dropBasedirsGroupSubdirsPartitionQuery,
@@ -610,6 +613,7 @@ func dgutaPartitionDropQueries() []string {
 		dropChildrenPartitionQuery,
 		dropDirSummaryPartitionQuery,
 		dropDirSummarySetPartitionQuery,
+		dropDirDGUTAVectorPartitionQuery,
 	}
 }
 

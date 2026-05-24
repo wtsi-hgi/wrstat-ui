@@ -102,6 +102,8 @@ type treeQueryCache struct {
 	dirSummaryOrder   []treeDirSummaryCacheKey
 	mountSummaries    map[treeMountCacheKey]bool
 	mountSummaryOrder []treeMountCacheKey
+	mountVectors      map[treeMountCacheKey]bool
+	mountVectorOrder  []treeMountCacheKey
 }
 
 func treeQueryCacheForConfig(cfg Config) *treeQueryCache {
@@ -114,6 +116,7 @@ func newTreeQueryCache() *treeQueryCache {
 		dgutas:         make(map[treeCacheKey]db.GUTAs),
 		dirSummaries:   make(map[treeDirSummaryCacheKey]*db.DirSummary),
 		mountSummaries: make(map[treeMountCacheKey]bool),
+		mountVectors:   make(map[treeMountCacheKey]bool),
 	}
 }
 
@@ -287,6 +290,35 @@ func (c *treeQueryCache) evictOldestMountSummaries() {
 		oldest := c.mountSummaryOrder[0]
 		c.mountSummaryOrder = c.mountSummaryOrder[1:]
 		delete(c.mountSummaries, oldest)
+	}
+}
+
+func (c *treeQueryCache) getMountDirDGUTAVectorReady(key treeMountCacheKey) bool {
+	c.mu.RLock()
+	ready := c.mountVectors[key]
+	c.mu.RUnlock()
+
+	return ready
+}
+
+func (c *treeQueryCache) putMountDirDGUTAVectorReady(key treeMountCacheKey) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.mountVectors[key] {
+		return
+	}
+
+	c.mountVectors[key] = true
+	c.mountVectorOrder = append(c.mountVectorOrder, key)
+	c.evictOldestMountDirDGUTAVectors()
+}
+
+func (c *treeQueryCache) evictOldestMountDirDGUTAVectors() {
+	for len(c.mountVectorOrder) > treeMountSummaryCacheMaxEntries {
+		oldest := c.mountVectorOrder[0]
+		c.mountVectorOrder = c.mountVectorOrder[1:]
+		delete(c.mountVectors, oldest)
 	}
 }
 

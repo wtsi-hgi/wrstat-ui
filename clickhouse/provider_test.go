@@ -435,6 +435,89 @@ func currentGoroutineID() string {
 }
 
 func TestOpenProviderTreeSummaryRefreshFailure(t *testing.T) {
+	Convey("startup schedules mount dir projection refresh without synchronous backfill", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+		resetSharedTreeQueryCachesForTesting()
+		Reset(resetSharedTreeQueryCachesForTesting)
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 100 * time.Millisecond
+		cfg.PollInterval = 0
+		cfg.MountPoints = []string{providerTestMountPath}
+
+		bootstrapProvider, err := OpenProvider(cfg)
+		So(err, ShouldBeNil)
+		So(bootstrapProvider.Close(), ShouldBeNil)
+
+		conn := th.openConn(cfg.DSN)
+		providerOwnsConn := false
+
+		Reset(func() {
+			if !providerOwnsConn {
+				So(conn.Close(), ShouldBeNil)
+			}
+		})
+
+		updatedAt := time.Date(2026, 1, 9, 12, 0, 0, 0, time.UTC)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		So(insertProviderSnapshot(ctx, conn, updatedAt, 2, 100, 1000), ShouldBeNil)
+
+		refreshConn := &mountDirProjectionTimeoutThenMaintenanceConn{Conn: conn}
+		started := time.Now()
+
+		p, err := openProviderWithConnector(cfg, func(Config) (ch.Conn, error) {
+			return refreshConn, nil
+		})
+		So(err, ShouldBeNil)
+		So(p, ShouldNotBeNil)
+		So(time.Since(started), ShouldBeLessThan, time.Second)
+
+		providerOwnsConn = true
+
+		Reset(func() { So(p.Close(), ShouldBeNil) })
+
+		messenger, ok := p.(interface{ OnMessage(cb func(msg string)) })
+		So(ok, ShouldBeTrue)
+
+		gotMessage := make(chan string, 4)
+
+		messenger.OnMessage(func(msg string) {
+			gotMessage <- msg
+		})
+
+		msg := waitForProviderMessage(t, gotMessage, "active mount dir projection refresh scheduled asynchronously")
+		So(msg, ShouldContainSubstring, "active_mounts=1")
+
+		msg = waitForProviderMessage(t, gotMessage, "active mount dir projection refresh started")
+		So(msg, ShouldContainSubstring, "active_mounts=1")
+
+		msg = waitForProviderMessage(t, gotMessage, "active mount dir projection refresh completed")
+		So(msg, ShouldContainSubstring, "active_mounts=1")
+
+		So(refreshConn.inlineProjectionFailures(), ShouldEqual, 0)
+		So(refreshConn.maintenanceProjectionInserts(), ShouldBeGreaterThan, 0)
+
+		readinessBefore := refreshConn.mountDirReadinessQueryCount()
+		vectorBefore := refreshConn.mountDirVectorQueryCount()
+
+		di, err := p.Tree().DirInfo(providerTestMountPath, &db.Filter{
+			GIDs: []uint32{7},
+			UIDs: []uint32{9},
+			FT:   db.DGUTAFileTypeBam,
+			Age:  db.DGUTAgeAll,
+		})
+		So(err, ShouldBeNil)
+		So(di, ShouldNotBeNil)
+		So(di.Current.Count, ShouldEqual, 2)
+		So(refreshConn.mountDirReadinessQueryCount(), ShouldEqual, readinessBefore)
+		So(refreshConn.mountDirVectorQueryCount(), ShouldBeGreaterThan, vectorBefore)
+	})
+
 	Convey("startup schedules maintenance refresh without synchronous backfill", t, func() {
 		os.Setenv("WRSTAT_ENV", "test")
 		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
@@ -499,31 +582,16 @@ func TestOpenProviderTreeSummaryRefreshFailure(t *testing.T) {
 			gotMessage <- msg
 		})
 
-		select {
-		case msg := <-gotMessage:
-			So(msg, ShouldContainSubstring, "active tree summary refresh scheduled asynchronously")
-			So(msg, ShouldContainSubstring, "active_mounts=1")
-			So(msg, ShouldContainSubstring, "ancestor_dirs=")
-		case <-time.After(5 * time.Second):
-			t.Fatalf("timed out waiting for tree summary refresh scheduled message")
-		}
+		msg := waitForProviderMessage(t, gotMessage, "active tree summary refresh scheduled asynchronously")
+		So(msg, ShouldContainSubstring, "active_mounts=1")
+		So(msg, ShouldContainSubstring, "ancestor_dirs=")
 
-		select {
-		case msg := <-gotMessage:
-			So(msg, ShouldContainSubstring, "active tree summary refresh started")
-			So(msg, ShouldContainSubstring, "active_mounts=1")
-			So(msg, ShouldContainSubstring, "ancestor_dirs=")
-		case <-time.After(5 * time.Second):
-			t.Fatalf("timed out waiting for tree summary refresh started message")
-		}
+		msg = waitForProviderMessage(t, gotMessage, "active tree summary refresh started")
+		So(msg, ShouldContainSubstring, "active_mounts=1")
+		So(msg, ShouldContainSubstring, "ancestor_dirs=")
 
-		select {
-		case msg := <-gotMessage:
-			So(msg, ShouldContainSubstring, "active tree summary refresh completed")
-			So(msg, ShouldContainSubstring, "active_mounts=1")
-		case <-time.After(5 * time.Second):
-			t.Fatalf("timed out waiting for tree summary refresh completion")
-		}
+		msg = waitForProviderMessage(t, gotMessage, "active tree summary refresh completed")
+		So(msg, ShouldContainSubstring, "active_mounts=1")
 
 		fingerprint := fingerprintForMountsActive([]mountsActiveRow{{
 			mountPath:  mountPath,
@@ -694,6 +762,7 @@ func TestOpenProviderTreeSummaryRefreshFailure(t *testing.T) {
 			updatedAt:  updatedAt,
 		}}
 		So(ensureActiveTreeSummaries(ctx, conn, rows), ShouldBeNil)
+		So(ensureActiveMountDirSummaries(ctx, conn, rows), ShouldBeNil)
 
 		refreshConn := &treeSummaryRefreshTimeoutThenMaintenanceConn{Conn: conn}
 
@@ -723,6 +792,23 @@ func TestOpenProviderTreeSummaryRefreshFailure(t *testing.T) {
 		So(refreshConn.treeSummaryQueryCount(), ShouldBeGreaterThan, treeBefore)
 		So(refreshConn.ancestorDGUTAQueryCount(), ShouldEqual, ancestorBefore)
 	})
+}
+
+func waitForProviderMessage(t *testing.T, messages <-chan string, want string) string {
+	t.Helper()
+
+	deadline := time.After(5 * time.Second)
+
+	for {
+		select {
+		case msg := <-messages:
+			if strings.Contains(msg, want) {
+				return msg
+			}
+		case <-deadline:
+			t.Fatalf("timed out waiting for provider message containing %q", want)
+		}
+	}
 }
 
 func insertProviderAncestorSnapshot(
@@ -1344,6 +1430,72 @@ func (c *providerCloseTestConn) Query(context.Context, string, ...any) (driver.R
 
 type providerExecConn interface {
 	Exec(ctx context.Context, query string, args ...any) error
+}
+
+type mountDirProjectionTimeoutThenMaintenanceConn struct {
+	ch.Conn
+
+	inlineFailures     atomic.Int32
+	maintenanceInserts atomic.Int32
+	readinessQueries   atomic.Int32
+	vectorQueries      atomic.Int32
+}
+
+func (c *mountDirProjectionTimeoutThenMaintenanceConn) Query(
+	ctx context.Context,
+	query string,
+	args ...any,
+) (driver.Rows, error) {
+	if strings.Contains(query, "FROM wrstat_dir_summary_sets") {
+		c.readinessQueries.Add(1)
+	}
+
+	if strings.Contains(query, "FROM wrstat_dir_dguta_vector") {
+		c.vectorQueries.Add(1)
+	}
+
+	return c.Conn.Query(ctx, query, args...)
+}
+
+func (c *mountDirProjectionTimeoutThenMaintenanceConn) Exec(
+	ctx context.Context,
+	query string,
+	args ...any,
+) error {
+	if isMountDirProjectionInsert(query) {
+		if _, ok := ctx.Deadline(); ok {
+			c.inlineFailures.Add(1)
+
+			<-ctx.Done()
+
+			return ctx.Err()
+		}
+
+		c.maintenanceInserts.Add(1)
+	}
+
+	return c.Conn.Exec(ctx, query, args...)
+}
+
+func isMountDirProjectionInsert(query string) bool {
+	return strings.Contains(query, "INSERT INTO wrstat_dir_summary ") ||
+		strings.Contains(query, "INSERT INTO wrstat_dir_dguta_vector ")
+}
+
+func (c *mountDirProjectionTimeoutThenMaintenanceConn) inlineProjectionFailures() int {
+	return int(c.inlineFailures.Load())
+}
+
+func (c *mountDirProjectionTimeoutThenMaintenanceConn) maintenanceProjectionInserts() int {
+	return int(c.maintenanceInserts.Load())
+}
+
+func (c *mountDirProjectionTimeoutThenMaintenanceConn) mountDirReadinessQueryCount() int {
+	return int(c.readinessQueries.Load())
+}
+
+func (c *mountDirProjectionTimeoutThenMaintenanceConn) mountDirVectorQueryCount() int {
+	return int(c.vectorQueries.Load())
 }
 
 type treeSummaryRefreshTimeoutThenMaintenanceConn struct {

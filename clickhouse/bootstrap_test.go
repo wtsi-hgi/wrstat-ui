@@ -662,6 +662,7 @@ func TestNewClientBootstrapsSchema(t *testing.T) {
 		So(tables, ShouldContain, "wrstat_children")
 		So(tables, ShouldContain, "wrstat_dir_summary")
 		So(tables, ShouldContain, "wrstat_dir_summary_sets")
+		So(tables, ShouldContain, "wrstat_dir_dguta_vector")
 		So(tables, ShouldContain, "wrstat_basedirs_group_usage")
 		So(tables, ShouldContain, "wrstat_basedirs_user_usage")
 		So(tables, ShouldContain, "wrstat_basedirs_group_subdirs")

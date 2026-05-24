@@ -36,7 +36,7 @@ import (
 )
 
 const (
-	mountDirSummaryVersion = 3
+	mountDirSummaryVersion = 4
 
 	insertMountDirSummaryQuery = "INSERT INTO wrstat_dir_summary " +
 		"(mount_path, snapshot_id, dir, updated_at, age, count, size, " +
@@ -149,7 +149,7 @@ func ensureActiveMountDirSummaries(
 	for _, row := range rows {
 		mount := activeMount(row)
 
-		ready, err := mountDirSummaryReady(ctx, conn, mount.mountPath, mount.snapshotID)
+		ready, err := mountDirProjectionsReady(ctx, conn, mount.mountPath, mount.snapshotID)
 		if err != nil {
 			return err
 		}
@@ -164,6 +164,14 @@ func ensureActiveMountDirSummaries(
 	}
 
 	return nil
+}
+
+func mountDirProjectionsReady(
+	ctx context.Context,
+	conn ch.Conn,
+	mountPath, snapshotID string,
+) (bool, error) {
+	return mountDirSummaryReady(ctx, conn, mountPath, snapshotID)
 }
 
 func mountDirSummaryReady(
@@ -210,8 +218,14 @@ func dropMountDirSummaryPartitions(ctx context.Context, conn ch.Conn, mount acti
 		return err
 	}
 
-	return dropPartitionIgnoreUnknown(
+	if err := dropPartitionIgnoreUnknown(
 		ctx, conn, mount.mountPath, mount.snapshotID, dropDirSummaryPartitionQuery,
+	); err != nil {
+		return err
+	}
+
+	return dropPartitionIgnoreUnknown(
+		ctx, conn, mount.mountPath, mount.snapshotID, dropDirDGUTAVectorPartitionQuery,
 	)
 }
 
@@ -222,6 +236,10 @@ func insertMountDirSummaryRows(
 	refreshedAt time.Time,
 ) error {
 	if err := insertMountDirSummaries(ctx, conn, mount, refreshedAt); err != nil {
+		return err
+	}
+
+	if err := insertMountDirDGUTAVectors(ctx, conn, mount, refreshedAt); err != nil {
 		return err
 	}
 
