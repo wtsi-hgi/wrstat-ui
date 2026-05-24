@@ -1493,6 +1493,133 @@ func TestClickHouseDatabaseTreeCache(t *testing.T) {
 }
 
 func TestClickHouseDatabaseDirsHaveChildrenFastPath(t *testing.T) {
+	Convey("Disktree virtual ancestor clicks batch active mount roots", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+		resetSharedTreeQueryCachesForTesting()
+		Reset(resetSharedTreeQueryCachesForTesting)
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 5 * time.Second
+		cfg.PollInterval = 0
+
+		const (
+			nfsMountCount   = 100
+			firstNFSProject = "/nfs/project000"
+			lastNFSProject  = "/nfs/project099"
+		)
+
+		cfg.MountPoints = make([]string, 0, nfsMountCount+1)
+		cfg.MountPoints = append(cfg.MountPoints, "/")
+
+		for i := range nfsMountCount {
+			cfg.MountPoints = append(cfg.MountPoints, fmt.Sprintf("/nfs/project%03d/", i))
+		}
+
+		bootstrapProvider, err := OpenProvider(cfg)
+		So(err, ShouldBeNil)
+		So(bootstrapProvider.Close(), ShouldBeNil)
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+
+		mountBatch, err := conn.PrepareBatch(ctx, testInsertMountStmt)
+		So(err, ShouldBeNil)
+
+		dgutaBatch, err := conn.PrepareBatch(ctx, insertDGUTAQuery)
+		So(err, ShouldBeNil)
+
+		childrenBatch, err := conn.PrepareBatch(ctx, insertChildrenQuery)
+		So(err, ShouldBeNil)
+
+		baseUpdatedAt := time.Date(2026, 1, 12, 11, 0, 0, 0, time.UTC)
+		rows := make([]mountsActiveRow, 0, nfsMountCount)
+
+		var nfsCount uint64
+
+		for i := range nfsMountCount {
+			count := uint64(i + 10)
+			nfsCount += count
+
+			mountPath := fmt.Sprintf("/nfs/project%03d/", i)
+			updatedAt := baseUpdatedAt.Add(time.Duration(i) * time.Minute)
+			sid := snapshotID(mountPath, updatedAt)
+
+			So(mountBatch.Append(mountPath, time.Now(), sid, updatedAt), ShouldBeNil)
+			So(appendDisktreeNFSClickGUTA(dgutaBatch, mountPath, sid.String(), mountPath, count), ShouldBeNil)
+			So(appendDisktreeNFSClickGUTA(dgutaBatch, mountPath, sid.String(), mountPath+"leaf/", 1), ShouldBeNil)
+			So(childrenBatch.Append(mountPath, sid.String(), mountPath, mountPath+"leaf"), ShouldBeNil)
+
+			rows = append(rows, mountsActiveRow{
+				mountPath:  mountPath,
+				snapshotID: sid.String(),
+				updatedAt:  updatedAt,
+			})
+		}
+
+		So(mountBatch.Send(), ShouldBeNil)
+		So(dgutaBatch.Send(), ShouldBeNil)
+		So(childrenBatch.Send(), ShouldBeNil)
+
+		countingConn := &whereQueryCountingConn{Conn: conn}
+		tree := db.NewTree(newClickHouseDatabaseWithSnapshot(
+			cfg,
+			countingConn,
+			newActiveMountsSnapshot(rows),
+		))
+		filter := &db.Filter{Age: db.DGUTAgeAll}
+
+		di, err := tree.DirInfo("/nfs", filter)
+		So(err, ShouldBeNil)
+		So(di, ShouldNotBeNil)
+		So(di.Current.Count, ShouldEqual, nfsCount)
+		So(di.Children, ShouldHaveLength, nfsMountCount)
+		So(di.Children[0].Dir, ShouldEqual, firstNFSProject)
+		So(di.Children[nfsMountCount-1].Dir, ShouldEqual, lastNFSProject)
+
+		childPaths := make([]string, len(di.Children))
+		for i, child := range di.Children {
+			childPaths[i] = child.Dir
+		}
+
+		hasChildren := tree.DirsHaveChildren(childPaths, filter)
+		So(hasChildren, ShouldHaveLength, nfsMountCount)
+		So(hasChildren[firstNFSProject], ShouldBeTrue)
+		So(hasChildren[lastNFSProject], ShouldBeTrue)
+
+		clicked, err := tree.DirInfo(firstNFSProject, filter)
+		So(err, ShouldBeNil)
+		So(clicked, ShouldNotBeNil)
+		So(clicked.Current.Count, ShouldEqual, 10)
+		So(clicked.Children, ShouldHaveLength, 1)
+		So(clicked.Children[0].Dir, ShouldEqual, firstNFSProject+"/leaf")
+
+		So(countingConn.queryCountValue(), ShouldBeLessThanOrEqualTo, 12)
+
+		matchingFilteredChildren := tree.DirsHaveChildren(
+			[]string{firstNFSProject, lastNFSProject},
+			&db.Filter{GIDs: []uint32{7}, Age: db.DGUTAgeAll},
+		)
+		So(matchingFilteredChildren, ShouldResemble, map[string]bool{
+			firstNFSProject: true,
+			lastNFSProject:  true,
+		})
+
+		emptyFilteredChildren := tree.DirsHaveChildren(
+			[]string{firstNFSProject, lastNFSProject},
+			&db.Filter{GIDs: []uint32{42}, Age: db.DGUTAgeAll},
+		)
+		So(emptyFilteredChildren, ShouldResemble, map[string]bool{
+			firstNFSProject: false,
+			lastNFSProject:  false,
+		})
+	})
+
 	Convey("DirsHaveChildren skips unnecessary DGUTA work for broad child checks", t, func() {
 		os.Setenv("WRSTAT_ENV", "test")
 		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
@@ -2142,6 +2269,30 @@ func TestClickHouseDatabaseDirsHaveChildrenFastPath(t *testing.T) {
 		So(countingConn.childSummaryBatchQueryCount(), ShouldEqual, 0)
 		So(countingConn.existenceQueryCount(), ShouldEqual, 3)
 	})
+}
+
+func appendDisktreeNFSClickGUTA(
+	batch driver.Batch,
+	mountPath string,
+	sid string,
+	dir string,
+	count uint64,
+) error {
+	return batch.Append(
+		mountPath,
+		sid,
+		dir,
+		uint32(7),
+		uint32(9),
+		uint16(db.DGUTAFileTypeBam),
+		uint8(db.DGUTAgeAll),
+		count,
+		count*10,
+		int64(10),
+		int64(20),
+		[]uint64{1, 0, 0, 0, 0, 0, 0, 0, 0},
+		[]uint64{0, 1, 0, 0, 0, 0, 0, 0, 0},
+	)
 }
 
 func TestClickHouseDatabaseDirInfoAncestor(t *testing.T) {

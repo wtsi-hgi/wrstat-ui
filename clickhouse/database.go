@@ -51,6 +51,7 @@ const (
 	groupedDirSummaryMinDirs             = 4096
 	queryStringINMaxValues               = 1000
 	queryScopeArgs                       = 2
+	activeMountDirTupleArgs              = 3
 
 	childrenQuery = "SELECT DISTINCT child FROM wrstat_children " +
 		"PREWHERE mount_path = ? AND snapshot_id = ? AND parent_dir = ? " +
@@ -124,10 +125,15 @@ const (
 		"FROM wrstat_dguta d " +
 		"WHERE d.dir = ? AND %s"
 
-	dgutaActiveMountRootsQuery = "SELECT d.gid, d.uid, d.ft, d.age, d.count, d.size, " +
+	dgutasForActiveMountRootDirsQuery = "SELECT d.mount_path, d.gid, d.uid, d.ft, d.age, d.count, d.size, " +
 		"d.atime_min, d.mtime_max, d.atime_buckets, d.mtime_buckets " +
 		"FROM wrstat_dguta d " +
 		"WHERE d.dir = d.mount_path AND %s"
+
+	dgutasForActiveMountDirsQuery = "SELECT d.dir, d.gid, d.uid, d.ft, d.age, d.count, d.size, " +
+		"d.atime_min, d.mtime_max, d.atime_buckets, d.mtime_buckets " +
+		"FROM wrstat_dguta d " +
+		"WHERE (d.mount_path, d.snapshot_id, d.dir) IN (%s)"
 
 	dgutasForDirsQuery = "SELECT dir, gid, uid, ft, age, count, size, " +
 		"atime_min, mtime_max, atime_buckets, mtime_buckets " +
@@ -165,6 +171,11 @@ const (
 		"FROM wrstat_children AS c " +
 		"ANY INNER JOIN " + externalDirsTableName + " AS q ON q.dir = c.parent_dir " +
 		"WHERE c.mount_path = ? AND c.snapshot_id = ? " +
+		"ORDER BY c.parent_dir ASC, c.child ASC"
+
+	activeMountRootChildrenQuery = "SELECT c.parent_dir, c.child " +
+		"FROM wrstat_children c " +
+		"WHERE c.parent_dir = c.mount_path AND %s " +
 		"ORDER BY c.parent_dir ASC, c.child ASC"
 
 	dirsHaveMatchingChildrenQuery = "SELECT c.parent_dir " +
@@ -234,6 +245,11 @@ func activeMountGroup(
 	groups[key] = group
 
 	return group
+}
+
+type activeMountRootDirs struct {
+	mounts       []activeMount
+	originalDirs map[string][]string
 }
 
 type whereTraversalItem struct {
@@ -733,14 +749,28 @@ func (d *clickHouseDatabase) dirInfoVirtualAncestor(
 		return nil, false, err
 	}
 
-	gutas, err := d.gutasForActiveMountRoots(mounts)
-	if err != nil || len(gutas) == 0 {
+	gutasByRoot, err := d.gutasForActiveMountRootDirs(mounts)
+	if err != nil {
 		return nil, false, err
+	}
+
+	gutas := activeMountRootGUTAs(mounts, gutasByRoot)
+	if len(gutas) == 0 {
+		return nil, false, nil
 	}
 
 	updatedAt := maxUpdatedAtForMounts(mounts)
 
 	return dirSummaryWithModtime(gutas, filter, updatedAt), true, nil
+}
+
+func activeMountRootGUTAs(mounts []activeMount, gutasByRoot map[string]db.GUTAs) db.GUTAs {
+	gutas := make(db.GUTAs, 0, len(gutasByRoot))
+	for _, mount := range mounts {
+		gutas = append(gutas, gutasByRoot[mount.mountPath]...)
+	}
+
+	return gutas
 }
 
 func (d *clickHouseDatabase) dirInfoTreeSummaryAncestor(
@@ -803,7 +833,16 @@ func (d *clickHouseDatabase) DirInfos(
 
 	result := make(map[string]*db.DirSummary, len(dirs))
 
-	groups, fallback, err := d.groupDirsByActiveMount(dirs)
+	roots, remaining, err := d.splitActiveMountRootDirs(dirs)
+	if err != nil {
+		return nil, err
+	}
+
+	if addErr := d.addActiveMountRootDirInfos(result, roots, filter); addErr != nil {
+		return nil, addErr
+	}
+
+	groups, fallback, err := d.groupDirsByActiveMount(remaining)
 	if err != nil {
 		return nil, err
 	}
@@ -827,21 +866,12 @@ func (d *clickHouseDatabase) DirsHaveChildren(
 
 	result := newDirsHaveChildrenResult(dirs)
 
-	groups, fallback, err := d.groupDirsByActiveMount(dirs)
+	fallback, err := d.addBatchedDirsHaveChildren(result, dirs, filter)
 	if err != nil {
 		return nil, err
 	}
 
-	if groupErr := d.addDirsHaveChildrenGroups(result, groups, filter); groupErr != nil {
-		return nil, groupErr
-	}
-
-	unhandledFallback, err := d.addTreeSummaryDirsHaveChildren(result, fallback, filter)
-	if err != nil {
-		return nil, err
-	}
-
-	for _, dir := range unhandledFallback {
+	for _, dir := range fallback {
 		result[dir] = d.dirHasChildrenSlow(dir, filter)
 	}
 
@@ -857,6 +887,37 @@ func newDirsHaveChildrenResult(dirs []string) map[string]bool {
 	return result
 }
 
+func (d *clickHouseDatabase) addBatchedDirsHaveChildren(
+	result map[string]bool,
+	dirs []string,
+	filter *db.Filter,
+) ([]string, error) {
+	roots, remaining, err := d.splitActiveMountRootDirs(dirs)
+	if err != nil {
+		return nil, err
+	}
+
+	if addErr := d.addActiveMountRootDirsHaveChildren(result, roots, filter); addErr != nil {
+		return nil, addErr
+	}
+
+	groups, fallback, err := d.groupDirsByActiveMount(remaining)
+	if err != nil {
+		return nil, err
+	}
+
+	if groupErr := d.addDirsHaveChildrenGroups(result, groups, filter); groupErr != nil {
+		return nil, groupErr
+	}
+
+	unhandledFallback, err := d.addTreeSummaryDirsHaveChildren(result, fallback, filter)
+	if err != nil {
+		return nil, err
+	}
+
+	return unhandledFallback, nil
+}
+
 func (d *clickHouseDatabase) addDirsHaveChildrenGroups(
 	result map[string]bool,
 	groups map[string]*activeMountDirGroup,
@@ -869,6 +930,144 @@ func (d *clickHouseDatabase) addDirsHaveChildrenGroups(
 	}
 
 	return nil
+}
+
+func (d *clickHouseDatabase) addActiveMountRootDirsHaveChildren(
+	result map[string]bool,
+	roots activeMountRootDirs,
+	filter *db.Filter,
+) error {
+	if len(roots.mounts) == 0 {
+		return nil
+	}
+
+	childrenByParent, err := d.childrenForActiveMountRoots(roots.mounts)
+	if err != nil {
+		return err
+	}
+
+	parents, err := d.parentActiveMountRootsWithChildren(roots.mounts, filter, childrenByParent)
+	if err != nil {
+		return err
+	}
+
+	for parent := range parents {
+		for _, original := range roots.originalDirs[parent] {
+			result[original] = true
+		}
+	}
+
+	return nil
+}
+
+func (d *clickHouseDatabase) parentActiveMountRootsWithChildren(
+	mounts []activeMount,
+	filter *db.Filter,
+	childrenByParent map[string][]string,
+) (map[string]bool, error) {
+	if broadFilterCanUseChildRows(filter) {
+		dirs := activeMountRootDirsList(mounts)
+
+		return parentDirSet(parentDirsWithAnyChildren(dirs, childrenByParent)), nil
+	}
+
+	return d.parentActiveMountRootsWithFilteredChildren(mounts, filter, childrenByParent)
+}
+
+func activeMountRootDirsList(mounts []activeMount) []string {
+	dirs := make([]string, len(mounts))
+	for i, mount := range mounts {
+		dirs[i] = mount.mountPath
+	}
+
+	return dirs
+}
+
+func (d *clickHouseDatabase) parentActiveMountRootsWithFilteredChildren(
+	mounts []activeMount,
+	filter *db.Filter,
+	childrenByParent map[string][]string,
+) (map[string]bool, error) {
+	childParents, childMounts, childDirs := collectActiveMountRootChildParents(mounts, childrenByParent)
+	if len(childDirs) == 0 {
+		return map[string]bool{}, nil
+	}
+
+	childSummaries, err := d.activeMountChildSummaries(childDirs, childMounts, filter)
+	if err != nil {
+		return nil, err
+	}
+
+	return parentDirsWithMatchingChildSummaries(childParents, childSummaries), nil
+}
+
+func collectActiveMountRootChildParents(
+	mounts []activeMount,
+	childrenByParent map[string][]string,
+) (map[string][]string, map[string]activeMount, []string) {
+	childParents := make(map[string][]string)
+	childMounts := make(map[string]activeMount)
+	childDirs := make([]string, 0)
+
+	for _, mount := range mounts {
+		for _, child := range childrenByParent[mount.mountPath] {
+			childDir := ensureTrailingSlash(child)
+			if _, exists := childParents[childDir]; !exists {
+				childDirs = append(childDirs, childDir)
+				childMounts[childDir] = mount
+			}
+
+			childParents[childDir] = append(childParents[childDir], mount.mountPath)
+		}
+	}
+
+	return childParents, childMounts, childDirs
+}
+
+func (d *clickHouseDatabase) activeMountChildSummaries(
+	childDirs []string,
+	childMounts map[string]activeMount,
+	filter *db.Filter,
+) (map[string]*db.DirSummary, error) {
+	gutasByDir, err := d.gutasForActiveMountDirs(childDirs, childMounts)
+	if err != nil {
+		return nil, err
+	}
+
+	summaries := make(map[string]*db.DirSummary, len(gutasByDir))
+	for _, childDir := range childDirs {
+		gutas := gutasByDir[childDir]
+		if len(gutas) == 0 {
+			continue
+		}
+
+		mount := childMounts[childDir]
+		sum := dirSummaryWithModtime(gutas, filter, mount.updatedAt)
+		d.cacheActiveMountChildSummary(mount, childDir, filter, sum)
+
+		if sum != nil {
+			summaries[childDir] = sum
+		}
+	}
+
+	return summaries, nil
+}
+
+func (d *clickHouseDatabase) cacheActiveMountChildSummary(
+	mount activeMount,
+	childDir string,
+	filter *db.Filter,
+	sum *db.DirSummary,
+) {
+	mode, ok := mountDirSummaryModeForFilter(filter)
+	if !ok {
+		return
+	}
+
+	d.treeCache.putDirSummary(
+		newTreeDirSummaryCacheKey(mount.mountPath, mount.snapshotID, childDir, filter.Age, mode),
+		sum,
+	)
 }
 
 func (d *clickHouseDatabase) addTreeSummaryDirsHaveChildren(
@@ -976,6 +1175,198 @@ func (d *clickHouseDatabase) childrenForMount(mountPath, snapshotID, parentDir s
 	d.treeCache.putChildren(key, children)
 
 	return cloneStrings(children), nil
+}
+
+func (d *clickHouseDatabase) childrenForActiveMountRoots(
+	mounts []activeMount,
+) (map[string][]string, error) {
+	if len(mounts) == 0 {
+		return map[string][]string{}, nil
+	}
+
+	result, missing := d.cachedChildrenForActiveMountRoots(mounts)
+	if len(missing) == 0 {
+		return result, nil
+	}
+
+	queried, err := d.queryChildrenForActiveMountRoots(missing)
+	if err != nil {
+		return nil, err
+	}
+
+	d.addQueriedChildrenForActiveMountRoots(result, missing, queried)
+
+	return result, nil
+}
+
+func (d *clickHouseDatabase) cachedChildrenForActiveMountRoots(
+	mounts []activeMount,
+) (map[string][]string, []activeMount) {
+	result := make(map[string][]string, len(mounts))
+	missing := make([]activeMount, 0, len(mounts))
+
+	for _, mount := range mounts {
+		key := newTreeCacheKey(mount.mountPath, mount.snapshotID, mount.mountPath)
+		if d.addCachedChildrenForParent(result, key) {
+			continue
+		}
+
+		missing = append(missing, mount)
+	}
+
+	return result, missing
+}
+
+func (d *clickHouseDatabase) queryChildrenForActiveMountRoots(
+	mounts []activeMount,
+) (map[string][]string, error) {
+	ctx, cancel := configQueryContext(d.cfg)
+	defer cancel()
+
+	query, args := activeMountsQuery(
+		activeMountRootChildrenQuery,
+		"c.mount_path",
+		"c.snapshot_id",
+		mounts,
+	)
+
+	rows, err := d.conn.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("clickhouse: failed to query active mount root children: %w", err)
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	return scanChildrenRowsByParent(rows)
+}
+
+func (d *clickHouseDatabase) addQueriedChildrenForActiveMountRoots(
+	result map[string][]string,
+	missing []activeMount,
+	queried map[string][]string,
+) {
+	for _, mount := range missing {
+		children := queried[mount.mountPath]
+		d.treeCache.putChildren(newTreeCacheKey(mount.mountPath, mount.snapshotID, mount.mountPath), children)
+		result[mount.mountPath] = cloneStrings(children)
+	}
+}
+
+func (d *clickHouseDatabase) splitActiveMountRootDirs(
+	dirs []string,
+) (activeMountRootDirs, []string, error) {
+	roots := activeMountRootDirs{
+		originalDirs: make(map[string][]string),
+	}
+	remaining := make([]string, 0, len(dirs))
+	seen := make(map[string]bool, len(dirs))
+
+	for _, dir := range dirs {
+		mount, ok, err := d.activeMountRootForDir(dir)
+		if err != nil {
+			return activeMountRootDirs{}, nil, err
+		}
+
+		if !ok {
+			remaining = append(remaining, dir)
+
+			continue
+		}
+
+		roots.originalDirs[mount.mountPath] = append(roots.originalDirs[mount.mountPath], dir)
+		if seen[mount.mountPath] {
+			continue
+		}
+
+		roots.mounts = append(roots.mounts, mount)
+		seen[mount.mountPath] = true
+	}
+
+	return roots, remaining, nil
+}
+
+func (d *clickHouseDatabase) activeMountRootForDir(dir string) (activeMount, bool, error) {
+	queryDir := ensureTrailingSlash(dir)
+	if d.snapshot != nil {
+		mount, ok := d.snapshot.mount(queryDir)
+
+		return mount, ok, nil
+	}
+
+	return d.activeMountForMountPath(queryDir)
+}
+
+func (d *clickHouseDatabase) addActiveMountRootDirInfos(
+	result map[string]*db.DirSummary,
+	roots activeMountRootDirs,
+	filter *db.Filter,
+) error {
+	if len(roots.mounts) == 0 {
+		return nil
+	}
+
+	summaries, err := d.activeMountRootSummaries(roots.mounts, filter)
+	if err != nil {
+		return err
+	}
+
+	for _, mount := range roots.mounts {
+		sum := summaries[mount.mountPath]
+		if sum == nil {
+			continue
+		}
+
+		for _, original := range roots.originalDirs[mount.mountPath] {
+			cp := cloneDirSummary(sum)
+			cp.Dir = original
+			result[original] = cp
+		}
+	}
+
+	return nil
+}
+
+func (d *clickHouseDatabase) activeMountRootSummaries(
+	mounts []activeMount,
+	filter *db.Filter,
+) (map[string]*db.DirSummary, error) {
+	gutasByRoot, err := d.gutasForActiveMountRootDirs(mounts)
+	if err != nil {
+		return nil, err
+	}
+
+	summaries := make(map[string]*db.DirSummary, len(gutasByRoot))
+	for _, mount := range mounts {
+		gutas := gutasByRoot[mount.mountPath]
+		if len(gutas) == 0 {
+			continue
+		}
+
+		sum := dirSummaryWithModtime(gutas, filter, mount.updatedAt)
+		d.cacheActiveMountRootSummary(mount, filter, sum)
+
+		if sum != nil {
+			summaries[mount.mountPath] = sum
+		}
+	}
+
+	return summaries, nil
+}
+
+func (d *clickHouseDatabase) cacheActiveMountRootSummary(
+	mount activeMount,
+	filter *db.Filter,
+	sum *db.DirSummary,
+) {
+	mode, ok := mountDirSummaryModeForFilter(filter)
+	if !ok {
+		return
+	}
+
+	d.treeCache.putDirSummary(
+		newTreeDirSummaryCacheKey(mount.mountPath, mount.snapshotID, mount.mountPath, filter.Age, mode),
+		sum,
+	)
 }
 
 func (d *clickHouseDatabase) addDirInfoGroups(
@@ -1963,6 +2354,83 @@ func (d *clickHouseDatabase) gutasForDir(
 	return cloneGUTAs(gutas), nil
 }
 
+func (d *clickHouseDatabase) gutasForActiveMountRootDirs(
+	mounts []activeMount,
+) (map[string]db.GUTAs, error) {
+	if len(mounts) == 0 {
+		return map[string]db.GUTAs{}, nil
+	}
+
+	result, missing := d.cachedGUTAsForActiveMountRoots(mounts)
+	if len(missing) == 0 {
+		return result, nil
+	}
+
+	queried, err := d.queryGUTAsForActiveMountRootDirs(missing)
+	if err != nil {
+		return nil, err
+	}
+
+	d.addQueriedGUTAsForActiveMountRoots(result, missing, queried)
+
+	return result, nil
+}
+
+func (d *clickHouseDatabase) cachedGUTAsForActiveMountRoots(
+	mounts []activeMount,
+) (map[string]db.GUTAs, []activeMount) {
+	result := make(map[string]db.GUTAs, len(mounts))
+	missing := make([]activeMount, 0, len(mounts))
+
+	for _, mount := range mounts {
+		key := newTreeCacheKey(mount.mountPath, mount.snapshotID, mount.mountPath)
+
+		gutas, ok := d.treeCache.getGUTAs(key)
+		if !ok {
+			missing = append(missing, mount)
+
+			continue
+		}
+
+		if len(gutas) > 0 {
+			result[mount.mountPath] = gutas
+		}
+	}
+
+	return result, missing
+}
+
+func (d *clickHouseDatabase) queryGUTAsForActiveMountRootDirs(
+	mounts []activeMount,
+) (map[string]db.GUTAs, error) {
+	ctx, cancel := configQueryContext(d.cfg)
+	defer cancel()
+
+	query, args := activeMountsQuery(
+		dgutasForActiveMountRootDirsQuery,
+		"d.mount_path",
+		"d.snapshot_id",
+		mounts,
+	)
+
+	return d.queryGUTAsByDir(ctx, "active mount root dguta batch", query, args...)
+}
+
+func (d *clickHouseDatabase) addQueriedGUTAsForActiveMountRoots(
+	result map[string]db.GUTAs,
+	missing []activeMount,
+	queried map[string]db.GUTAs,
+) {
+	for _, mount := range missing {
+		gutas := queried[mount.mountPath]
+		d.treeCache.putGUTAs(newTreeCacheKey(mount.mountPath, mount.snapshotID, mount.mountPath), gutas)
+
+		if len(gutas) > 0 {
+			result[mount.mountPath] = cloneGUTAs(gutas)
+		}
+	}
+}
+
 func (d *clickHouseDatabase) gutasForDirs(
 	mountPath, snapshotID string,
 	dirs []string,
@@ -1984,6 +2452,120 @@ func (d *clickHouseDatabase) gutasForDirs(
 	d.addQueriedGUTAsForDirs(result, mountPath, snapshotID, missing, queried)
 
 	return result, nil
+}
+
+func (d *clickHouseDatabase) gutasForActiveMountDirs(
+	dirs []string,
+	mountsByDir map[string]activeMount,
+) (map[string]db.GUTAs, error) {
+	if len(dirs) == 0 {
+		return map[string]db.GUTAs{}, nil
+	}
+
+	result, missing := d.cachedGUTAsForActiveMountDirs(dirs, mountsByDir)
+	if len(missing) == 0 {
+		return result, nil
+	}
+
+	queried, err := d.queryGUTAsForActiveMountDirs(missing, mountsByDir)
+	if err != nil {
+		return nil, err
+	}
+
+	d.addQueriedGUTAsForActiveMountDirs(result, missing, mountsByDir, queried)
+
+	return result, nil
+}
+
+func (d *clickHouseDatabase) cachedGUTAsForActiveMountDirs(
+	dirs []string,
+	mountsByDir map[string]activeMount,
+) (map[string]db.GUTAs, []string) {
+	result := make(map[string]db.GUTAs, len(dirs))
+	missing := make([]string, 0, len(dirs))
+
+	for _, dir := range dirs {
+		mount := mountsByDir[dir]
+		key := newTreeCacheKey(mount.mountPath, mount.snapshotID, dir)
+
+		gutas, ok := d.treeCache.getGUTAs(key)
+		if !ok {
+			missing = append(missing, key.dir)
+
+			continue
+		}
+
+		if len(gutas) > 0 {
+			result[key.dir] = gutas
+		}
+	}
+
+	return result, missing
+}
+
+func (d *clickHouseDatabase) queryGUTAsForActiveMountDirs(
+	dirs []string,
+	mountsByDir map[string]activeMount,
+) (map[string]db.GUTAs, error) {
+	ctx, cancel := configQueryContext(d.cfg)
+	defer cancel()
+
+	result := make(map[string]db.GUTAs)
+
+	for _, batchDirs := range stringValueBatches(dirs) {
+		queried, err := d.queryGUTAsForActiveMountDirsBatch(ctx, batchDirs, mountsByDir)
+		if err != nil {
+			return nil, err
+		}
+
+		for dir, gutas := range queried {
+			result[dir] = gutas
+		}
+	}
+
+	return result, nil
+}
+
+func (d *clickHouseDatabase) queryGUTAsForActiveMountDirsBatch(
+	ctx context.Context,
+	dirs []string,
+	mountsByDir map[string]activeMount,
+) (map[string]db.GUTAs, error) {
+	query, args := activeMountDirTuplesQuery(dirs, mountsByDir)
+
+	return d.queryGUTAsByDir(ctx, "active mount child dguta batch", query, args...)
+}
+
+func activeMountDirTuplesQuery(
+	dirs []string,
+	mountsByDir map[string]activeMount,
+) (string, []any) {
+	query := fmt.Sprintf(dgutasForActiveMountDirsQuery, activeMountDirTuplePlaceholders(len(dirs)))
+	args := make([]any, 0, len(dirs)*activeMountDirTupleArgs)
+
+	for _, dir := range dirs {
+		mount := mountsByDir[dir]
+		args = append(args, mount.mountPath, mount.snapshotID, dir)
+	}
+
+	return query, args
+}
+
+func (d *clickHouseDatabase) addQueriedGUTAsForActiveMountDirs(
+	result map[string]db.GUTAs,
+	missing []string,
+	mountsByDir map[string]activeMount,
+	queried map[string]db.GUTAs,
+) {
+	for _, dir := range missing {
+		mount := mountsByDir[dir]
+		gutas := queried[dir]
+		d.treeCache.putGUTAs(newTreeCacheKey(mount.mountPath, mount.snapshotID, dir), gutas)
+
+		if len(gutas) > 0 {
+			result[dir] = cloneGUTAs(gutas)
+		}
+	}
 }
 
 func (d *clickHouseDatabase) cachedGUTAsForDirs(
@@ -2071,14 +2653,7 @@ func (d *clickHouseDatabase) queryGUTAsForDirsBatch(
 ) (map[string]db.GUTAs, error) {
 	query, args := scopedBatchQuery(dgutasForDirsQuery, dirs, mountPath, snapshotID)
 
-	rows, err := d.conn.Query(ctx, query, args...)
-	if err != nil {
-		return nil, fmt.Errorf("clickhouse: failed to query dguta batch: %w", err)
-	}
-
-	defer func() { _ = rows.Close() }()
-
-	return scanDGUTARowsByDir(rows)
+	return d.queryGUTAsByDir(ctx, "dguta batch", query, args...)
 }
 
 func scopedBatchQuery(queryFmt string, values []string, scopeArgs ...any) (string, []any) {
@@ -2091,6 +2666,22 @@ func scopedBatchQuery(queryFmt string, values []string, scopeArgs ...any) (strin
 	}
 
 	return query, args
+}
+
+func (d *clickHouseDatabase) queryGUTAsByDir(
+	ctx context.Context,
+	what string,
+	query string,
+	args ...any,
+) (map[string]db.GUTAs, error) {
+	rows, err := d.conn.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("clickhouse: failed to query %s: %w", what, err)
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	return scanDGUTARowsByDir(rows)
 }
 
 func scanDGUTARowsByDir(rows rowsScanner) (map[string]db.GUTAs, error) {
@@ -2312,24 +2903,6 @@ func (d *clickHouseDatabase) gutasForAncestor(
 	defer cancel()
 
 	return d.queryGUTAs(ctx, "ancestor dguta", dgutaAncestorQuery, dir, dir)
-}
-
-func (d *clickHouseDatabase) gutasForActiveMountRoots(mounts []activeMount) (db.GUTAs, error) {
-	if len(mounts) == 0 {
-		return nil, nil
-	}
-
-	ctx, cancel := configQueryContext(d.cfg)
-	defer cancel()
-
-	query, args := activeMountsQuery(
-		dgutaActiveMountRootsQuery,
-		"d.mount_path",
-		"d.snapshot_id",
-		mounts,
-	)
-
-	return d.queryGUTAs(ctx, "active mount root dguta", query, args...)
 }
 
 func (d *clickHouseDatabase) snapshotGUTAsForAncestor(dir string) (db.GUTAs, error) {
@@ -3246,6 +3819,20 @@ func (s *dgutaScanned) scanFromWithDir(rows rowsScanner, dir *string) error {
 	}
 
 	return nil
+}
+
+func activeMountDirTuplePlaceholders(n int) string {
+	var b strings.Builder
+
+	for i := range n {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+
+		b.WriteString("(?, toUUID(?), ?)")
+	}
+
+	return b.String()
 }
 
 func immediateChildForMount(parentDir, mountPath string) (string, bool) {
