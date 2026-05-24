@@ -2544,6 +2544,15 @@ func insertWhereSummaryTestGUTA(
 	), ShouldBeNil)
 }
 
+func dirSummariesByDir(dcss db.DCSs) map[string]*db.DirSummary {
+	byDir := make(map[string]*db.DirSummary, len(dcss))
+	for _, dcs := range dcss {
+		byDir[dcs.Dir] = dcs
+	}
+
+	return byDir
+}
+
 type treeSummaryRefreshDeadlineConn struct {
 	ch.Conn
 
@@ -2851,6 +2860,91 @@ func (c *whereQueryCountingConn) queryCountValue() int {
 }
 
 func TestClickHouseDatabaseWhereFastPath(t *testing.T) {
+	Convey("Where synthesises virtual ancestors over many active mount roots", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+		resetSharedTreeQueryCachesForTesting()
+		Reset(resetSharedTreeQueryCachesForTesting)
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 5 * time.Second
+		cfg.PollInterval = 0
+		cfg.MountPoints = []string{"/", "/lustre/", "/nfs/"}
+
+		p, err := OpenProvider(cfg)
+		So(err, ShouldBeNil)
+		Reset(func() { So(p.Close(), ShouldBeNil) })
+
+		cp, ok := p.(*chProvider)
+		So(ok, ShouldBeTrue)
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+
+		insertMount := func(mountPath string, updatedAt time.Time, count uint64) mountsActiveRow {
+			sid := snapshotID(mountPath, updatedAt)
+			So(conn.Exec(ctx, testInsertMountStmt, mountPath, time.Now(), sid, updatedAt), ShouldBeNil)
+			insertWhereSummaryTestGUTA(ctx, conn, mountPath, sid.String(), mountPath, db.DGUTAFileTypeBam, count)
+
+			return mountsActiveRow{
+				mountPath:  mountPath,
+				snapshotID: sid.String(),
+				updatedAt:  updatedAt,
+			}
+		}
+
+		const nfsMountCount = 100
+
+		rows := make([]mountsActiveRow, 0, nfsMountCount+1)
+
+		var nfsCount uint64
+
+		baseUpdatedAt := time.Date(2026, 1, 12, 11, 0, 0, 0, time.UTC)
+
+		for i := range nfsMountCount {
+			count := uint64(i + 1)
+			nfsCount += count
+			mountPath := fmt.Sprintf("/nfs/project%03d/", i)
+			rows = append(rows, insertMount(mountPath, baseUpdatedAt.Add(time.Duration(i)*time.Minute), count))
+		}
+
+		const lustreCount = uint64(200)
+
+		lustreMount := "/lustre/scratchZ/"
+		rows = append(rows, insertMount(lustreMount, baseUpdatedAt.Add(3*time.Hour), lustreCount))
+
+		So(ensureActiveTreeSummaries(ctx, conn, rows), ShouldBeNil)
+
+		snapshot := newActiveMountsSnapshot(rows)
+		snapshot.markTreeSummaryReady()
+		tree := db.NewTree(newClickHouseDatabaseWithSnapshot(cfg, cp.conn, snapshot))
+		filter := &db.Filter{GIDs: []uint32{7}, UIDs: []uint32{9}, Age: db.DGUTAgeAll}
+		splitFn := split.SplitsToSplitFn(2)
+
+		nfsDCSs, err := tree.Where("/nfs", filter, splitFn)
+		So(err, ShouldBeNil)
+		So(nfsDCSs, ShouldNotBeEmpty)
+
+		nfsByDir := dirSummariesByDir(nfsDCSs)
+		So(nfsByDir["/nfs"].Count, ShouldEqual, nfsCount)
+		So(nfsByDir["/nfs/project000"].Count, ShouldEqual, 1)
+		So(nfsByDir["/nfs/project099"].Count, ShouldEqual, 100)
+
+		rootDCSs, err := tree.Where("/", filter, splitFn)
+		So(err, ShouldBeNil)
+		So(rootDCSs, ShouldNotBeEmpty)
+
+		rootByDir := dirSummariesByDir(rootDCSs)
+		So(rootByDir["/"].Count, ShouldEqual, nfsCount+lustreCount)
+		So(rootByDir["/nfs"].Count, ShouldEqual, nfsCount)
+		So(rootByDir["/lustre/scratchZ"].Count, ShouldEqual, lustreCount)
+	})
+
 	Convey("Where resolves a filtered subtree without recursive query fanout", t, func() {
 		os.Setenv("WRSTAT_ENV", "test")
 		Reset(func() { os.Unsetenv("WRSTAT_ENV") })

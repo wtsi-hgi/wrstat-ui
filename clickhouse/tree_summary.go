@@ -234,7 +234,7 @@ func refreshActiveTreeSummaries(
 			continue
 		}
 
-		updatedAt, _ := maxUpdatedAtForMounts(mounts)
+		updatedAt := maxUpdatedAtForMounts(mounts)
 
 		if err := insertTreeSummaryDGUTA(ctx, conn, fingerprint, dir, updatedAt, refreshedAt, mounts); err != nil {
 			return err
@@ -293,7 +293,7 @@ func treeDirsForMount(mountPath string) []string {
 	return dirs
 }
 
-func maxUpdatedAtForMounts(mounts []activeMount) (time.Time, bool) {
+func maxUpdatedAtForMounts(mounts []activeMount) time.Time {
 	var (
 		latest time.Time
 		ok     bool
@@ -308,7 +308,7 @@ func maxUpdatedAtForMounts(mounts []activeMount) (time.Time, bool) {
 		ok = true
 	}
 
-	return latest, ok
+	return latest
 }
 
 func insertTreeSummaryDGUTA(
