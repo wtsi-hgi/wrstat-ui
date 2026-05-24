@@ -28,6 +28,7 @@ package clickhouse
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -68,6 +69,9 @@ type chProvider struct {
 
 	conn ch.Conn
 
+	maintenanceConn    ch.Conn
+	connectMaintenance clickHouseConfigConnector
+
 	db   db.Database
 	tree *db.Tree
 	bd   basedirs.Reader
@@ -98,6 +102,18 @@ type chProvider struct {
 	workersStarted bool
 	workerCancels  []context.CancelFunc
 	wg             sync.WaitGroup
+}
+
+func newChProvider(
+	cfg Config,
+	conn ch.Conn,
+	connectMaintenance clickHouseConfigConnector,
+) *chProvider {
+	return &chProvider{
+		cfg:                cfg,
+		conn:               conn,
+		connectMaintenance: connectMaintenance,
+	}
 }
 
 func (p *chProvider) Tree() *db.Tree {
@@ -373,6 +389,16 @@ func (p *chProvider) signalPendingCallbacks() {
 	}
 }
 
+func (p *chProvider) detachMaintenanceConnection() ch.Conn {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	conn := p.maintenanceConn
+	p.maintenanceConn = nil
+
+	return conn
+}
+
 func fingerprintForMountsActive(rows []mountsActiveRow) string {
 	var b strings.Builder
 	for _, row := range rows {
@@ -415,14 +441,19 @@ func (p *chProvider) Close() error {
 	bd, dbImpl := p.detachReaders()
 	p.closeOldReaders(dbImpl, bd)
 
-	if p.conn == nil {
-		return nil
+	var err error
+
+	if maintenanceConn := p.detachMaintenanceConnection(); maintenanceConn != nil {
+		err = errors.Join(err, maintenanceConn.Close())
 	}
 
-	conn := p.conn
-	p.conn = nil
+	if p.conn != nil {
+		conn := p.conn
+		p.conn = nil
+		err = errors.Join(err, conn.Close())
+	}
 
-	return conn.Close()
+	return err
 }
 
 func (p *chProvider) stopPolling() {
@@ -878,27 +909,91 @@ func (p *chProvider) buildInitialReaders() error {
 	return nil
 }
 
-func openProviderWithConnector(
+func (p *chProvider) maintenanceConnection(ctx context.Context) (ch.Conn, error) {
+	p.mu.RLock()
+	conn := p.maintenanceConn
+	primaryConn := p.conn
+	connectMaintenance := p.connectMaintenance
+	closing := p.closing
+	p.mu.RUnlock()
+
+	if conn != nil {
+		return conn, nil
+	}
+
+	if connectMaintenance == nil {
+		return primaryConn, nil
+	}
+
+	if closing {
+		return nil, context.Canceled
+	}
+
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	newConn, err := connectMaintenance(ctx, p.cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	return p.storeMaintenanceConnection(newConn)
+}
+
+func (p *chProvider) storeMaintenanceConnection(newConn ch.Conn) (ch.Conn, error) {
+	p.mu.Lock()
+	if p.closing {
+		p.mu.Unlock()
+
+		_ = newConn.Close()
+
+		return nil, context.Canceled
+	}
+
+	if p.maintenanceConn != nil {
+		conn := p.maintenanceConn
+		p.mu.Unlock()
+
+		_ = newConn.Close()
+
+		return conn, nil
+	}
+
+	p.maintenanceConn = newConn
+	p.mu.Unlock()
+
+	return newConn, nil
+}
+
+func (p *chProvider) startInitialReaders() error {
+	p.startBackgroundWorkers()
+
+	if err := p.buildInitialReaders(); err != nil {
+		_ = p.Close()
+
+		return err
+	}
+
+	return nil
+}
+
+func openProviderWithConnectors(
 	cfg Config,
-	connect func(Config) (ch.Conn, error),
+	connect clickHouseConfigConnector,
+	connectMaintenance clickHouseConfigConnector,
 ) (provider.Provider, error) {
 	if err := validateConfig(cfg); err != nil {
 		return nil, err
 	}
 
-	conn, err := connect(cfg)
+	conn, err := openProviderConnection(cfg, connect)
 	if err != nil {
 		return nil, err
 	}
 
-	p := &chProvider{cfg: cfg, conn: conn}
-	p.startBackgroundWorkers()
-
-	if err := p.buildInitialReaders(); err != nil {
-		p.stopPolling()
-
-		_ = conn.Close()
-
+	p := newChProvider(cfg, conn, connectMaintenance)
+	if err := p.startInitialReaders(); err != nil {
 		return nil, err
 	}
 
@@ -907,6 +1002,30 @@ func openProviderWithConnector(
 	return p, nil
 }
 
+func openProviderConnection(
+	cfg Config,
+	connect clickHouseConfigConnector,
+) (ch.Conn, error) {
+	if connect == nil {
+		connect = connectFromConfigContext
+	}
+
+	return connect(context.Background(), cfg)
+}
+
+func openProviderWithConnector(
+	cfg Config,
+	connect func(Config) (ch.Conn, error),
+) (provider.Provider, error) {
+	return openProviderWithConnectors(cfg, legacyProviderConnector(connect), nil)
+}
+
 func OpenProvider(cfg Config) (provider.Provider, error) {
-	return openProviderWithConnector(cfg, connectFromConfig)
+	return openProviderWithConnectors(cfg, connectFromConfigContext, connectMaintenanceFromConfig)
+}
+
+func legacyProviderConnector(connect func(Config) (ch.Conn, error)) clickHouseConfigConnector {
+	return func(_ context.Context, cfg Config) (ch.Conn, error) {
+		return connect(cfg)
+	}
 }

@@ -246,12 +246,16 @@ func configQueryContext(cfg Config) (context.Context, context.CancelFunc) {
 }
 
 func connectFromConfig(cfg Config) (ch.Conn, error) {
+	return connectFromConfigContext(context.Background(), cfg)
+}
+
+func connectFromConfigContext(ctx context.Context, cfg Config) (ch.Conn, error) {
 	opts, err := optionsFromConfig(cfg)
 	if err != nil {
 		return nil, err
 	}
 
-	return connectFromOptions(cfg, opts)
+	return connectFromOptionsContext(ctx, cfg, opts)
 }
 
 func optionsFromConfig(cfg Config) (*ch.Options, error) {
@@ -282,7 +286,11 @@ func effectiveConnectionLimits(cfg Config) (int, int) {
 }
 
 func connectFromOptions(cfg Config, opts *ch.Options) (ch.Conn, error) {
-	return connectAndBootstrap(context.Background(), opts, cfg.Database, queryTimeout(cfg))
+	return connectFromOptionsContext(context.Background(), cfg, opts)
+}
+
+func connectFromOptionsContext(ctx context.Context, cfg Config, opts *ch.Options) (ch.Conn, error) {
+	return connectAndBootstrap(ctx, opts, cfg.Database, queryTimeout(cfg))
 }
 
 func connectAndBootstrap(

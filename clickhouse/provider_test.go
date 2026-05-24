@@ -52,6 +52,8 @@ var (
 	errProviderTestErr3 = errors.New("provider test err3")
 )
 
+var errProviderMaintenanceRefreshPrimary = errors.New("primary connection used for maintenance refresh")
+
 type providerSwapTestDB struct {
 	closed atomic.Bool
 }
@@ -894,6 +896,194 @@ func TestProviderLazyReaderBuildSchedulesRefreshWithoutDeadlock(t *testing.T) {
 	})
 }
 
+func TestProviderMaintenanceConnection(t *testing.T) {
+	Convey("provider-owned async maintenance uses a separate lazy connection", t, func() {
+		cfg := Config{
+			DSN:      "clickhouse://127.0.0.1:9000/default?database=wrstat&read_timeout=100ms",
+			Database: testDatabaseName,
+		}
+		primaryConn := &bootstrapTestConn{}
+		maintenanceConn := &bootstrapTestConn{}
+
+		var calls atomic.Int32
+
+		cp := &chProvider{
+			cfg:  cfg,
+			conn: primaryConn,
+			connectMaintenance: func(ctx context.Context, got Config) (ch.Conn, error) {
+				So(ctx.Err(), ShouldBeNil)
+				So(got, ShouldResemble, cfg)
+				calls.Add(1)
+
+				return maintenanceConn, nil
+			},
+		}
+
+		conn, err := cp.maintenanceConnection(context.Background())
+		So(err, ShouldBeNil)
+		So(conn, ShouldEqual, maintenanceConn)
+		So(calls.Load(), ShouldEqual, 1)
+
+		conn, err = cp.maintenanceConnection(context.Background())
+		So(err, ShouldBeNil)
+		So(conn, ShouldEqual, maintenanceConn)
+		So(calls.Load(), ShouldEqual, 1)
+		So(primaryConn.closed.Load(), ShouldBeFalse)
+
+		So(cp.Close(), ShouldBeNil)
+		So(maintenanceConn.closed.Load(), ShouldBeTrue)
+		So(primaryConn.closed.Load(), ShouldBeTrue)
+	})
+
+	Convey("test connector path can share the foreground connection", t, func() {
+		primaryConn := &bootstrapTestConn{}
+		cp := &chProvider{conn: primaryConn}
+
+		conn, err := cp.maintenanceConnection(context.Background())
+		So(err, ShouldBeNil)
+		So(conn, ShouldEqual, primaryConn)
+	})
+}
+
+func TestProviderMaintenanceRefreshUsesMaintenanceConnection(t *testing.T) {
+	Convey("mount dir projection refresh uses the provider maintenance connection", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+		resetSharedTreeQueryCachesForTesting()
+		Reset(resetSharedTreeQueryCachesForTesting)
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 2 * time.Second
+
+		bootstrapProvider, err := OpenProvider(cfg)
+		So(err, ShouldBeNil)
+		So(bootstrapProvider.Close(), ShouldBeNil)
+
+		primaryConn := &providerMaintenanceRefreshConn{
+			Conn:              th.openConn(cfg.DSN),
+			failOnMaintenance: true,
+		}
+		maintenanceConn := &providerMaintenanceRefreshConn{Conn: th.openConn(cfg.DSN)}
+
+		var maintenanceCalls atomic.Int32
+
+		cp := &chProvider{
+			cfg:  cfg,
+			conn: primaryConn,
+			connectMaintenance: func(ctx context.Context, got Config) (ch.Conn, error) {
+				So(ctx.Err(), ShouldBeNil)
+				So(got, ShouldResemble, cfg)
+				maintenanceCalls.Add(1)
+
+				return maintenanceConn, nil
+			},
+		}
+
+		Reset(func() {
+			So(cp.Close(), ShouldBeNil)
+
+			if maintenanceCalls.Load() == 0 {
+				So(maintenanceConn.Close(), ShouldBeNil)
+			}
+		})
+
+		updatedAt := time.Date(2026, 1, 9, 12, 0, 0, 0, time.UTC)
+		sid := snapshotID(providerTestMountPath, updatedAt)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		So(insertProviderSnapshot(ctx, primaryConn, updatedAt, 2, 100, 1000), ShouldBeNil)
+
+		rows := []mountsActiveRow{{
+			mountPath:  providerTestMountPath,
+			snapshotID: sid.String(),
+			updatedAt:  updatedAt,
+		}}
+
+		ok := cp.tryMountDirProjectionRefresh(context.Background(), newMountDirProjectionRefreshJob(rows))
+		So(ok, ShouldBeTrue)
+		So(maintenanceCalls.Load(), ShouldEqual, 1)
+		So(primaryConn.mountDirProjectionInsertFailures(), ShouldEqual, 0)
+		So(maintenanceConn.mountDirProjectionInserts(), ShouldBeGreaterThan, 0)
+		So(countRows(ctx, maintenanceConn,
+			"SELECT count() FROM wrstat_dir_summary_sets FINAL WHERE mount_path = ? AND snapshot_id = ?",
+			providerTestMountPath,
+			sid.String(),
+		), ShouldEqual, 1)
+	})
+
+	Convey("tree summary refresh uses the provider maintenance connection", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 2 * time.Second
+		cfg.MountPoints = []string{"/", "/lustre/agentA/"}
+
+		bootstrapProvider, err := OpenProvider(cfg)
+		So(err, ShouldBeNil)
+		So(bootstrapProvider.Close(), ShouldBeNil)
+
+		primaryConn := &providerMaintenanceRefreshConn{
+			Conn:              th.openConn(cfg.DSN),
+			failOnMaintenance: true,
+		}
+		maintenanceConn := &providerMaintenanceRefreshConn{Conn: th.openConn(cfg.DSN)}
+
+		var maintenanceCalls atomic.Int32
+
+		cp := &chProvider{
+			cfg:  cfg,
+			conn: primaryConn,
+			connectMaintenance: func(ctx context.Context, got Config) (ch.Conn, error) {
+				So(ctx.Err(), ShouldBeNil)
+				So(got, ShouldResemble, cfg)
+				maintenanceCalls.Add(1)
+
+				return maintenanceConn, nil
+			},
+		}
+
+		Reset(func() {
+			So(cp.Close(), ShouldBeNil)
+
+			if maintenanceCalls.Load() == 0 {
+				So(maintenanceConn.Close(), ShouldBeNil)
+			}
+		})
+
+		const mountPath = "/lustre/agentA/"
+
+		updatedAt := time.Date(2026, 1, 9, 12, 0, 0, 0, time.UTC)
+		sid := snapshotID(mountPath, updatedAt)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		So(insertProviderAncestorSnapshot(ctx, primaryConn, mountPath, updatedAt), ShouldBeNil)
+
+		rows := []mountsActiveRow{{
+			mountPath:  mountPath,
+			snapshotID: sid.String(),
+			updatedAt:  updatedAt,
+		}}
+		job := newTreeSummaryRefreshJob(rows)
+
+		ok := cp.tryTreeSummaryRefresh(context.Background(), job)
+		So(ok, ShouldBeTrue)
+		So(maintenanceCalls.Load(), ShouldEqual, 1)
+		So(primaryConn.treeSummaryInsertFailures(), ShouldEqual, 0)
+		So(maintenanceConn.treeSummaryInserts(), ShouldBeGreaterThan, 0)
+		So(countRows(ctx, maintenanceConn,
+			"SELECT count() FROM wrstat_tree_summary_sets FINAL WHERE fingerprint = ?",
+			job.fingerprint,
+		), ShouldEqual, 1)
+	})
+}
+
 func TestProviderCloseStopsPollingPromptly(t *testing.T) {
 	Convey("Close stops polling promptly between ticks", t, func() {
 		conn := &providerCloseTestConn{firstQuery: make(chan struct{}, 1)}
@@ -1496,6 +1686,60 @@ func (c *mountDirProjectionTimeoutThenMaintenanceConn) mountDirReadinessQueryCou
 
 func (c *mountDirProjectionTimeoutThenMaintenanceConn) mountDirVectorQueryCount() int {
 	return int(c.vectorQueries.Load())
+}
+
+type providerMaintenanceRefreshConn struct {
+	ch.Conn
+
+	failOnMaintenance bool
+	mountDirInserts   atomic.Int32
+	mountDirFailures  atomic.Int32
+	treeInserts       atomic.Int32
+	treeFailures      atomic.Int32
+}
+
+func (c *providerMaintenanceRefreshConn) Exec(ctx context.Context, query string, args ...any) error {
+	if isMountDirProjectionInsert(query) {
+		if c.failOnMaintenance {
+			c.mountDirFailures.Add(1)
+
+			return errProviderMaintenanceRefreshPrimary
+		}
+
+		c.mountDirInserts.Add(1)
+	}
+
+	if isTreeSummaryInsert(query) {
+		if c.failOnMaintenance {
+			c.treeFailures.Add(1)
+
+			return errProviderMaintenanceRefreshPrimary
+		}
+
+		c.treeInserts.Add(1)
+	}
+
+	return c.Conn.Exec(ctx, query, args...)
+}
+
+func isTreeSummaryInsert(query string) bool {
+	return strings.Contains(query, "INSERT INTO wrstat_tree_")
+}
+
+func (c *providerMaintenanceRefreshConn) mountDirProjectionInsertFailures() int {
+	return int(c.mountDirFailures.Load())
+}
+
+func (c *providerMaintenanceRefreshConn) mountDirProjectionInserts() int {
+	return int(c.mountDirInserts.Load())
+}
+
+func (c *providerMaintenanceRefreshConn) treeSummaryInsertFailures() int {
+	return int(c.treeFailures.Load())
+}
+
+func (c *providerMaintenanceRefreshConn) treeSummaryInserts() int {
+	return int(c.treeInserts.Load())
 }
 
 type treeSummaryRefreshTimeoutThenMaintenanceConn struct {

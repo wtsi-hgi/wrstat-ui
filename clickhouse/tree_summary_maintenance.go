@@ -108,7 +108,11 @@ func treeSummaryRefreshStartedMessage(job treeSummaryRefreshJob) string {
 func (p *chProvider) tryTreeSummaryRefresh(ctx context.Context, job treeSummaryRefreshJob) bool {
 	started := time.Now()
 
-	err := refreshActiveTreeSummaries(ctx, p.conn, job.rows, job.fingerprint)
+	conn, err := p.maintenanceConnection(ctx)
+	if err == nil {
+		err = refreshActiveTreeSummaries(ctx, conn, job.rows, job.fingerprint)
+	}
+
 	if err == nil {
 		p.completeTreeSummaryRefresh(job, time.Since(started))
 

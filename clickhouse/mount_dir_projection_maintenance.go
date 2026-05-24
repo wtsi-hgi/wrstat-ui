@@ -121,7 +121,11 @@ func (p *chProvider) tryMountDirProjectionRefresh(
 ) bool {
 	started := time.Now()
 
-	err := ensureActiveMountDirSummaries(ctx, p.conn, job.rows)
+	conn, err := p.maintenanceConnection(ctx)
+	if err == nil {
+		err = ensureActiveMountDirSummaries(ctx, conn, job.rows)
+	}
+
 	if err == nil {
 		p.completeMountDirProjectionRefresh(job, time.Since(started))
 
