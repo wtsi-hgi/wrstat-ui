@@ -30,9 +30,12 @@ import (
 	"context"
 	"errors"
 	"os"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	ch "github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	. "github.com/smartystreets/goconvey/convey"
 	"github.com/wtsi-hgi/wrstat-ui/db"
@@ -64,6 +67,35 @@ const (
 	dgutaWriterTestCountChildrenForParentQuery = "SELECT count() FROM wrstat_children WHERE mount_path = ? " +
 		"AND snapshot_id = toUUID(?) AND parent_dir = ?"
 )
+
+type forbiddenProjectionRefreshConn struct {
+	ch.Conn
+
+	forbidden atomic.Int32
+}
+
+func (c *forbiddenProjectionRefreshConn) Exec(ctx context.Context, query string, args ...any) error {
+	if isForbiddenProjectionRefreshSQL(query) {
+		c.forbidden.Add(1)
+	}
+
+	return c.Conn.Exec(ctx, query, args...)
+}
+
+func isForbiddenProjectionRefreshSQL(query string) bool {
+	normalised := strings.Join(strings.Fields(query), " ")
+
+	return strings.Contains(normalised, "INSERT INTO wrstat_dir_summary ") &&
+		strings.Contains(normalised, " SELECT ") &&
+		strings.Contains(normalised, " FROM wrstat_dguta") ||
+		strings.Contains(normalised, "INSERT INTO wrstat_dir_dguta_vector ") &&
+			strings.Contains(normalised, " SELECT ") &&
+			strings.Contains(normalised, " FROM wrstat_dguta")
+}
+
+func (c *forbiddenProjectionRefreshConn) forbiddenProjectionRefreshes() int {
+	return int(c.forbidden.Load())
+}
 
 func TestClickHouseDGUTAWriter(t *testing.T) {
 	Convey("DGUTAWriter enforces required metadata", t, func() {
@@ -804,6 +836,125 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 		), ShouldEqual, 1)
 	})
 
+	Convey("DGUTAWriter writes mount dir projection rows without ClickHouse rebuild SQL", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+		resetSharedTreeQueryCachesForTesting()
+		Reset(resetSharedTreeQueryCachesForTesting)
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 5 * time.Second
+		cfg.MountPoints = []string{"/mnt/projections/"}
+
+		const mountPath = "/mnt/projections/"
+
+		updatedAt := time.Date(2026, 1, 11, 9, 0, 0, 0, time.UTC)
+		sid := snapshotID(mountPath, updatedAt)
+
+		w, err := NewDGUTAWriter(cfg)
+		So(err, ShouldBeNil)
+		So(w, ShouldNotBeNil)
+
+		impl, ok := w.(*dgutaWriter)
+		So(ok, ShouldBeTrue)
+
+		trackedConn := &forbiddenProjectionRefreshConn{Conn: impl.conn}
+		impl.conn = trackedConn
+		impl.SetBatchSize(2)
+		impl.SetMountPath(mountPath)
+		impl.SetUpdatedAt(updatedAt)
+
+		paths := internaltest.NewDirectoryPathCreator()
+		So(impl.Add(db.RecordDGUTA{
+			Dir: paths.ToDirectoryPath(mountPath),
+			GUTAs: db.GUTAs{
+				testProjectionGUTA(7, 9, db.DGUTAFileTypeBam, db.DGUTAgeAll, 10),
+				testProjectionGUTA(8, 9, db.DGUTAFileTypeDir, db.DGUTAgeAll, 2),
+			},
+			Children: []string{"alpha/", "beta/"},
+		}), ShouldBeNil)
+		So(impl.Add(db.RecordDGUTA{
+			Dir: paths.ToDirectoryPath(mountPath + "alpha/"),
+			GUTAs: db.GUTAs{
+				testProjectionGUTA(7, 9, db.DGUTAFileTypeBam, db.DGUTAgeAll, 3),
+				testProjectionGUTA(7, 10, db.DGUTAFileTypeCram, db.DGUTAgeAll, 4),
+				testProjectionGUTA(7, 9, db.DGUTAFileTypeBam, db.DGUTAgeA1M, 2),
+			},
+			Children: []string{"leaf/"},
+		}), ShouldBeNil)
+		So(impl.Add(db.RecordDGUTA{
+			Dir: paths.ToDirectoryPath(mountPath + "beta/"),
+			GUTAs: db.GUTAs{
+				testProjectionGUTA(8, 9, db.DGUTAFileTypeDir, db.DGUTAgeAll, 6),
+			},
+		}), ShouldBeNil)
+		So(impl.Add(db.RecordDGUTA{
+			Dir: paths.ToDirectoryPath(mountPath + "alpha/leaf/"),
+			GUTAs: db.GUTAs{
+				testProjectionGUTA(7, 9, db.DGUTAFileTypeBam, db.DGUTAgeAll, 1),
+			},
+		}), ShouldBeNil)
+		So(impl.Close(), ShouldBeNil)
+		So(trackedConn.forbiddenProjectionRefreshes(), ShouldEqual, 0)
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		So(countRows(ctx, conn,
+			"SELECT count() FROM wrstat_dir_summary_sets FINAL WHERE mount_path = ? AND snapshot_id = ?",
+			mountPath,
+			sid.String(),
+		), ShouldEqual, 1)
+		So(countRows(ctx, conn,
+			"SELECT child_count FROM wrstat_dir_summary WHERE mount_path = ? AND snapshot_id = ? AND dir = ? AND age = ?",
+			mountPath,
+			sid.String(),
+			mountPath,
+			uint8(db.DGUTAgeAll),
+		), ShouldEqual, 2)
+
+		dbch := newClickHouseDatabase(cfg, conn)
+
+		allSummaries, err := dbch.DirInfos(
+			[]string{mountPath, mountPath + "alpha/", mountPath + "beta/"},
+			&db.Filter{Age: db.DGUTAgeAll},
+		)
+		So(err, ShouldBeNil)
+		So(allSummaries[mountPath].Count, ShouldEqual, 12)
+		So(allSummaries[mountPath].GIDs, ShouldResemble, []uint32{7, 8})
+		So(allSummaries[mountPath].FT, ShouldEqual, db.DGUTAFileTypeBam|db.DGUTAFileTypeDir)
+		So(allSummaries[mountPath].Modtime, ShouldResemble, updatedAt)
+		So(allSummaries[mountPath+"alpha/"].Count, ShouldEqual, 7)
+		So(allSummaries[mountPath+"beta/"].Count, ShouldEqual, 6)
+
+		fileSummaries, err := dbch.DirInfos(
+			[]string{mountPath, mountPath + "beta/"},
+			&db.Filter{Age: db.DGUTAgeAll, FT: db.AllTypesExceptDirectories},
+		)
+		So(err, ShouldBeNil)
+		So(fileSummaries[mountPath].Count, ShouldEqual, 10)
+		So(fileSummaries[mountPath].FT, ShouldEqual, db.DGUTAFileTypeBam)
+		So(fileSummaries, ShouldNotContainKey, mountPath+"beta/")
+
+		vectorSummaries, err := dbch.DirInfos(
+			[]string{mountPath + "alpha/", mountPath + "alpha/leaf/"},
+			&db.Filter{
+				GIDs: []uint32{7},
+				UIDs: []uint32{9},
+				FT:   db.DGUTAFileTypeBam,
+				Age:  db.DGUTAgeA1M,
+			},
+		)
+		So(err, ShouldBeNil)
+		So(vectorSummaries[mountPath+"alpha/"].Count, ShouldEqual, 2)
+		So(vectorSummaries, ShouldNotContainKey, mountPath+"alpha/leaf/")
+	})
+
 	Convey("DGUTAWriter keeps the active snapshot when tree summary refresh times out", t, func() {
 		os.Setenv("WRSTAT_ENV", "test")
 		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
@@ -916,5 +1067,25 @@ func singleDGUTARecord(dir *summary.DirectoryPath, gid uint32, child string) db.
 			MTimeRanges: [9]uint64{0, 1, 0, 0, 0, 0, 0, 0, 0},
 		}},
 		Children: []string{child},
+	}
+}
+
+func testProjectionGUTA(
+	gid, uid uint32,
+	ft db.DirGUTAFileType,
+	age db.DirGUTAge,
+	count uint32,
+) *db.GUTA {
+	return &db.GUTA{
+		GID:         gid,
+		UID:         uid,
+		FT:          ft,
+		Age:         age,
+		Count:       uint64(count),
+		Size:        uint64(count) * 10,
+		Atime:       int64(10 + count),
+		Mtime:       int64(20 + count),
+		ATimeRanges: [9]uint64{uint64(count), 0, 0, 0, 0, 0, 0, 0, 0},
+		MTimeRanges: [9]uint64{0, uint64(count), 0, 0, 0, 0, 0, 0, 0},
 	}
 }

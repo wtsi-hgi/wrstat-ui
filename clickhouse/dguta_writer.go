@@ -46,6 +46,7 @@ const (
 	importPhaseDGUTAInsert        = "wrstat_dguta_insert"
 	importPhaseChildrenInsert     = "wrstat_children_insert"
 	importPhaseMountSwitch        = "mount_switch"
+	importPhaseDirProjectionWrite = "wrstat_dir_projection_insert"
 	importPhaseTreeSummaryRefresh = "wrstat_tree_summary_refresh"
 	importPhaseOldSnapshotDrop    = "old_snapshot_partition_drop"
 
@@ -75,8 +76,6 @@ const (
 	insertChildrenQuery = "INSERT INTO wrstat_children " +
 		"(mount_path, snapshot_id, parent_dir, child) " +
 		"VALUES (?, toUUID(?), ?, ?)"
-
-	importPhaseDirSummaryRefresh = "wrstat_dir_summary_refresh"
 )
 
 var (
@@ -171,6 +170,7 @@ type dgutaWriter struct {
 	failBeforeSwitchErr error
 
 	previousDGUTARows dgutaRecordRows
+	dirProjection     mountDirProjectionState
 
 	closed bool
 }
@@ -208,13 +208,18 @@ func (w *dgutaWriter) Add(dguta db.RecordDGUTA) error {
 	rawParentDir := string(dguta.Dir.AppendTo(make([]byte, 0, dguta.Dir.Len())))
 	parentDir := canonicalPathForMount(w.mountPath, rawParentDir)
 
-	if err := w.appendDGUTARows(dguta, rawParentDir, parentDir); err != nil {
+	appendedGUTAs, err := w.appendDGUTARows(dguta, rawParentDir, parentDir)
+	if err != nil {
 		return err
 	}
 
-	if err := w.appendChildrenRows(dguta.Children, parentDir); err != nil {
+	appendedChildren, err := w.appendChildrenRows(dguta.Children, parentDir)
+	if err != nil {
 		return err
 	}
+
+	w.dirProjection.addGUTAs(parentDir, appendedGUTAs)
+	w.dirProjection.addChildren(parentDir, appendedChildren)
 
 	return w.flushFullBatches(ctx)
 }
@@ -237,15 +242,29 @@ func (w *dgutaWriter) Close() error {
 		return w.closeWithNewSnapshotCleanup(ctx, err)
 	}
 
-	if w.shouldSwitchSnapshot() {
-		if err := w.switchSnapshotAndDropOld(ctx); err != nil {
-			_ = w.conn.Close()
-
-			return err
-		}
+	if err := w.publishSnapshotOnClose(ctx); err != nil {
+		return err
 	}
 
 	return w.conn.Close()
+}
+
+func (w *dgutaWriter) publishSnapshotOnClose(ctx context.Context) error {
+	if !w.shouldSwitchSnapshot() {
+		return nil
+	}
+
+	if err := w.writeMountDirProjections(ctx); err != nil {
+		return w.closeWithNewSnapshotCleanup(ctx, err)
+	}
+
+	if err := w.switchSnapshotAndDropOld(ctx); err != nil {
+		_ = w.conn.Close()
+
+		return err
+	}
+
+	return nil
 }
 
 func (w *dgutaWriter) Abort() error {
@@ -313,7 +332,6 @@ func (w *dgutaWriter) switchSnapshotAndDropOld(ctx context.Context) error {
 		return err
 	}
 
-	w.refreshMountDirSummariesBestEffort(ctx)
 	w.refreshActiveTreeSummariesBestEffort(ctx)
 
 	if !hasPrevious {
@@ -329,21 +347,15 @@ func (w *dgutaWriter) refreshActiveTreeSummariesBestEffort(ctx context.Context) 
 	}
 }
 
-func (w *dgutaWriter) refreshMountDirSummariesBestEffort(ctx context.Context) {
-	if err := w.refreshMountDirSummaries(ctx); err != nil {
-		return
-	}
-}
-
-func (w *dgutaWriter) refreshMountDirSummaries(ctx context.Context) error {
+func (w *dgutaWriter) writeMountDirProjections(ctx context.Context) error {
 	w.ensureSnapshotID()
 
-	return w.timeImportPhase(importPhaseDirSummaryRefresh, func() error {
-		return refreshMountDirSummaries(ctx, w.conn, activeMount{
+	return w.timeImportPhase(importPhaseDirProjectionWrite, func() error {
+		return writeMountDirProjectionRows(ctx, w.conn, activeMount{
 			mountPath:  w.mountPath,
 			snapshotID: w.snapshot.String(),
 			updatedAt:  w.updatedAt,
-		})
+		}, w.dirProjection, w.batchSize)
 	})
 }
 
@@ -617,25 +629,24 @@ func dgutaPartitionDropQueries() []string {
 	}
 }
 
-func (w *dgutaWriter) appendDGUTARows(dguta db.RecordDGUTA, rawParentDir, parentDir string) error {
+func (w *dgutaWriter) appendDGUTARows(
+	dguta db.RecordDGUTA,
+	rawParentDir, parentDir string,
+) (db.GUTAs, error) {
 	keys := make(map[dgutaRowKey]struct{}, len(dguta.GUTAs))
+	appendedGUTAs := make(db.GUTAs, 0, len(dguta.GUTAs))
 
 	err := w.timeImportPhase(importPhaseDGUTAInsert, func() error {
 		for _, guta := range dguta.GUTAs {
-			key, keep, err := w.appendDGUTARow(rawParentDir, parentDir, guta)
-			if err != nil {
+			if err := w.appendDGUTARowForRecord(rawParentDir, parentDir, guta, keys, &appendedGUTAs); err != nil {
 				return err
-			}
-
-			if keep {
-				keys[key] = struct{}{}
 			}
 		}
 
 		return nil
 	})
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	w.previousDGUTARows = dgutaRecordRows{
@@ -644,20 +655,53 @@ func (w *dgutaWriter) appendDGUTARows(dguta db.RecordDGUTA, rawParentDir, parent
 		keys:         keys,
 	}
 
+	return appendedGUTAs, nil
+}
+
+func (w *dgutaWriter) appendDGUTARowForRecord(
+	rawParentDir, parentDir string,
+	guta *db.GUTA,
+	keys map[dgutaRowKey]struct{},
+	appendedGUTAs *db.GUTAs,
+) error {
+	key, keep, appended, err := w.appendDGUTARow(rawParentDir, parentDir, guta)
+	if err != nil {
+		return err
+	}
+
+	if keep {
+		keys[key] = struct{}{}
+	}
+
+	if appended {
+		*appendedGUTAs = append(*appendedGUTAs, guta)
+	}
+
 	return nil
 }
 
-func (w *dgutaWriter) appendDGUTARow(rawParentDir, parentDir string, guta *db.GUTA) (dgutaRowKey, bool, error) {
+func (w *dgutaWriter) appendDGUTARow(
+	rawParentDir, parentDir string,
+	guta *db.GUTA,
+) (dgutaRowKey, bool, bool, error) {
 	if guta == nil {
-		return dgutaRowKey{}, false, nil
+		return dgutaRowKey{}, false, false, nil
 	}
 
 	rowKey := newDGUTARowKey(parentDir, guta)
 	if w.isConsecutiveCanonicalDGUTADuplicate(rawParentDir, parentDir, rowKey) {
-		return rowKey, true, nil
+		return rowKey, true, false, nil
 	}
 
-	err := w.dgutaBatch.Append(
+	if err := w.appendDGUTABatchRow(parentDir, guta); err != nil {
+		return dgutaRowKey{}, false, false, fmt.Errorf("clickhouse: failed to append dguta row: %w", err)
+	}
+
+	return rowKey, true, true, nil
+}
+
+func (w *dgutaWriter) appendDGUTABatchRow(parentDir string, guta *db.GUTA) error {
+	return w.dgutaBatch.Append(
 		w.mountPath,
 		w.snapshot.String(),
 		parentDir,
@@ -672,11 +716,6 @@ func (w *dgutaWriter) appendDGUTARow(rawParentDir, parentDir string, guta *db.GU
 		guta.ATimeRanges[:],
 		guta.MTimeRanges[:],
 	)
-	if err != nil {
-		return dgutaRowKey{}, false, fmt.Errorf("clickhouse: failed to append dguta row: %w", err)
-	}
-
-	return rowKey, true, nil
 }
 
 func (w *dgutaWriter) isConsecutiveCanonicalDGUTADuplicate(rawDir, canonicalDir string, key dgutaRowKey) bool {
@@ -694,10 +733,12 @@ func (w *dgutaWriter) isConsecutiveCanonicalDGUTADuplicate(rawDir, canonicalDir 
 	return ok
 }
 
-func (w *dgutaWriter) appendChildrenRows(children []string, parentDir string) error {
+func (w *dgutaWriter) appendChildrenRows(children []string, parentDir string) (uint64, error) {
 	snapshotID := w.snapshot.String()
 
-	return w.timeImportPhase(importPhaseChildrenInsert, func() error {
+	var appended uint64
+
+	err := w.timeImportPhase(importPhaseChildrenInsert, func() error {
 		for _, child := range children {
 			child = childPathForParent(parentDir, child)
 
@@ -709,10 +750,14 @@ func (w *dgutaWriter) appendChildrenRows(children []string, parentDir string) er
 			if err := w.childrenBatch.Append(w.mountPath, snapshotID, parentDir, child); err != nil {
 				return fmt.Errorf("clickhouse: failed to append child row: %w", err)
 			}
+
+			appended++
 		}
 
 		return nil
 	})
+
+	return appended, err
 }
 
 func childPathForParent(parentDir, child string) string {

@@ -31,7 +31,6 @@ import (
 	"fmt"
 	"time"
 
-	ch "github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 )
 
@@ -40,26 +39,7 @@ const (
 		"(mount_path, snapshot_id, dir, updated_at, gids, uids, fts, ages, " +
 		"counts, sizes, atime_mins, mtime_maxs, atime_buckets, mtime_buckets, " +
 		"child_count, refreshed_at) " +
-		"SELECT ?, toUUID(?), dir, ?, " +
-		"arrayMap(x -> x.1, vector), arrayMap(x -> x.2, vector), " +
-		"arrayMap(x -> x.3, vector), arrayMap(x -> x.4, vector), " +
-		"arrayMap(x -> x.5, vector), arrayMap(x -> x.6, vector), " +
-		"arrayMap(x -> x.7, vector), arrayMap(x -> x.8, vector), " +
-		"arrayMap(x -> x.9, vector), arrayMap(x -> x.10, vector), " +
-		"child_count, ? " +
-		"FROM (" +
-		"SELECT d.dir, " +
-		"arraySort(x -> (x.4, x.1, x.2, x.3), groupArray(tuple(" +
-		"d.gid, d.uid, d.ft, d.age, d.count, d.size, d.atime_min, d.mtime_max, " +
-		"d.atime_buckets, d.mtime_buckets))) AS vector, " +
-		"any(ifNull(c.child_count, 0)) AS child_count " +
-		"FROM wrstat_dguta AS d " +
-		"LEFT JOIN (" +
-		"SELECT parent_dir, count() AS child_count FROM wrstat_children " +
-		"WHERE mount_path = ? AND snapshot_id = toUUID(?) GROUP BY parent_dir" +
-		") AS c ON c.parent_dir = d.dir " +
-		"WHERE d.mount_path = ? AND d.snapshot_id = toUUID(?) GROUP BY d.dir" +
-		")"
+		"VALUES (?, toUUID(?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
 
 	mountDirDGUTAVectorsForDirsQuery = "SELECT dir, updated_at, gids, uids, fts, ages, " +
 		"counts, sizes, atime_mins, mtime_maxs, atime_buckets, mtime_buckets, child_count " +
@@ -76,28 +56,6 @@ const (
 )
 
 var errMountDirDGUTAVectorLengthMismatch = errors.New("clickhouse: dir dguta vector column lengths differ")
-
-func insertMountDirDGUTAVectors(
-	ctx context.Context,
-	conn ch.Conn,
-	mount activeMount,
-	refreshedAt time.Time,
-) error {
-	if err := conn.Exec(ctx, insertMountDirDGUTAVectorQuery,
-		mount.mountPath,
-		mount.snapshotID,
-		mount.updatedAt,
-		refreshedAt,
-		mount.mountPath,
-		mount.snapshotID,
-		mount.mountPath,
-		mount.snapshotID,
-	); err != nil {
-		return fmt.Errorf("clickhouse: failed to refresh dir dguta vectors: %w", err)
-	}
-
-	return nil
-}
 
 type mountDirDGUTAVectorScanned struct {
 	dir          string

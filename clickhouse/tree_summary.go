@@ -168,6 +168,13 @@ func scanTreeDirSummary(rows rowsScanner) (*db.DirSummary, error) {
 	return s.summary(), nil
 }
 
+type treeSummaryProgress interface {
+	ancestorStarted(dir string, index, total, mountCount int)
+	ancestorCompleted(dir string, index, total, mountCount int, duration time.Duration)
+	phaseStarted(dir string, index, total, mountCount int, phase string)
+	phaseCompleted(dir string, index, total, mountCount int, phase string, duration time.Duration)
+}
+
 func ensureActiveTreeSummaries(
 	ctx context.Context,
 	conn ch.Conn,

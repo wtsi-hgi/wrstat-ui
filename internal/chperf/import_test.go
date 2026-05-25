@@ -632,7 +632,7 @@ func TestImportReportOperations(t *testing.T) {
 				phaseFilesFlush:                 50 * time.Millisecond,
 				expectedPhaseDGUTAInsert:        200 * time.Millisecond,
 				expectedPhaseChildrenInsert:     100 * time.Millisecond,
-				phaseDirSummaryRefresh:          90 * time.Millisecond,
+				phaseDirProjectionWrite:         90 * time.Millisecond,
 				expectedPhaseMountSwitch:        120 * time.Millisecond,
 				expectedPhaseOldSnapshotDrop:    80 * time.Millisecond,
 				phaseBasedirsReset:              100 * time.Millisecond,
@@ -667,6 +667,7 @@ func TestImportReportOperations(t *testing.T) {
 			tableFiles,
 			tableDirSummary,
 			tableDirSummarySets,
+			tableDirDGUTAVector,
 			tableBasedirsGroupUsage,
 			tableBasedirsUserUsage,
 			tableBasedirsGroupSubdirs,
@@ -674,10 +675,11 @@ func TestImportReportOperations(t *testing.T) {
 		})
 		So(partitionReset.DurationsMS, ShouldResemble, []float64{160})
 
-		dirSummaryRefresh := findImportOperation(report.Operations, "import_phase", phaseDirSummaryRefresh)
-		So(dirSummaryRefresh, ShouldNotBeNil)
-		So(dirSummaryRefresh.Inputs["tables"], ShouldResemble, []string{tableDirSummary, tableDirSummarySets})
-		So(dirSummaryRefresh.DurationsMS, ShouldResemble, []float64{90})
+		dirProjectionWrite := findImportOperation(report.Operations, "import_phase", phaseDirProjectionWrite)
+		So(dirProjectionWrite, ShouldNotBeNil)
+		So(dirProjectionWrite.Inputs["tables"], ShouldResemble,
+			[]string{tableDirSummary, tableDirSummarySets, tableDirDGUTAVector})
+		So(dirProjectionWrite.DurationsMS, ShouldResemble, []float64{90})
 
 		filesInsert := findImportOperation(report.Operations, "import_phase", phaseFilesInsert)
 		So(filesInsert, ShouldNotBeNil)

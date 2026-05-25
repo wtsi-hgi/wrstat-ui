@@ -27,11 +27,7 @@
 package clickhouse
 
 import (
-	"context"
-	"io"
-	"net"
 	"testing"
-	"time"
 
 	ch "github.com/ClickHouse/clickhouse-go/v2"
 	. "github.com/smartystreets/goconvey/convey"
@@ -67,99 +63,5 @@ func TestOptionsFromConfig(t *testing.T) {
 			So(opts.Compression, ShouldNotBeNil)
 			So(opts.Compression.Method, ShouldEqual, ch.CompressionLZ4)
 		})
-
-		Convey("maintenance options do not inherit short driver read timeouts", func() {
-			cfgWithShortReadTimeout := cfg
-			cfgWithShortReadTimeout.DSN += "&read_timeout=100ms"
-
-			foregroundOpts, err := optionsFromConfig(cfgWithShortReadTimeout)
-			So(err, ShouldBeNil)
-			So(foregroundOpts.ReadTimeout, ShouldEqual, 100*time.Millisecond)
-
-			maintenanceOpts, err := maintenanceOptionsFromConfig(cfgWithShortReadTimeout)
-			So(err, ShouldBeNil)
-			So(maintenanceOpts.ReadTimeout, ShouldEqual, maintenanceReadTimeout)
-			So(maintenanceOpts.DialContext, ShouldNotBeNil)
-			So(maintenanceOpts.Auth.Database, ShouldEqual, foregroundOpts.Auth.Database)
-			So(maintenanceOpts.DialTimeout, ShouldEqual, foregroundOpts.DialTimeout)
-			So(maintenanceOpts.Compression.Method, ShouldEqual, foregroundOpts.Compression.Method)
-		})
-	})
-}
-
-type testAddr string
-
-func (a testAddr) Network() string {
-	return string(a)
-}
-
-func (a testAddr) String() string {
-	return string(a)
-}
-
-type recordingDeadlineConn struct {
-	readDeadline      time.Time
-	deadline          time.Time
-	readDeadlineCalls int
-	deadlineCalls     int
-}
-
-func (*recordingDeadlineConn) Read([]byte) (int, error) {
-	return 0, io.EOF
-}
-
-func (*recordingDeadlineConn) Write(b []byte) (int, error) {
-	return len(b), nil
-}
-
-func (*recordingDeadlineConn) Close() error {
-	return nil
-}
-
-func (*recordingDeadlineConn) LocalAddr() net.Addr {
-	return testAddr("local")
-}
-
-func (*recordingDeadlineConn) RemoteAddr() net.Addr {
-	return testAddr("remote")
-}
-
-func (c *recordingDeadlineConn) SetDeadline(t time.Time) error {
-	c.deadline = t
-	c.deadlineCalls++
-
-	return nil
-}
-
-func (c *recordingDeadlineConn) SetReadDeadline(t time.Time) error {
-	c.readDeadline = t
-	c.readDeadlineCalls++
-
-	return nil
-}
-
-func (*recordingDeadlineConn) SetWriteDeadline(time.Time) error {
-	return nil
-}
-
-func TestNoReadDeadlineDialContext(t *testing.T) {
-	Convey("maintenance dial context ignores driver read deadlines but preserves context deadlines", t, func() {
-		baseConn := &recordingDeadlineConn{}
-		dial := noReadDeadlineDialContext(func(context.Context, string) (net.Conn, error) {
-			return baseConn, nil
-		})
-
-		conn, err := dial(context.Background(), "127.0.0.1:9000")
-		So(err, ShouldBeNil)
-
-		readDeadline := time.Now().Add(time.Second)
-		So(conn.SetReadDeadline(readDeadline), ShouldBeNil)
-		So(baseConn.readDeadlineCalls, ShouldEqual, 0)
-		So(baseConn.readDeadline.IsZero(), ShouldBeTrue)
-
-		deadline := time.Now().Add(2 * time.Second)
-		So(conn.SetDeadline(deadline), ShouldBeNil)
-		So(baseConn.deadlineCalls, ShouldEqual, 1)
-		So(baseConn.deadline, ShouldResemble, deadline)
 	})
 }

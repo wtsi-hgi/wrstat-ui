@@ -64,13 +64,12 @@ type readerBuilder func(context.Context, *activeMountsSnapshot) (db.Database, *d
 
 type snapshotCapturer func(context.Context) (*activeMountsSnapshot, string, error)
 
+type clickHouseConfigConnector func(context.Context, Config) (ch.Conn, error)
+
 type chProvider struct {
 	cfg Config
 
 	conn ch.Conn
-
-	maintenanceConn    ch.Conn
-	connectMaintenance clickHouseConfigConnector
 
 	db   db.Database
 	tree *db.Tree
@@ -88,15 +87,13 @@ type chProvider struct {
 	errCh    chan struct{}
 	msgCh    chan struct{}
 
-	currentFingerprint     string
-	pendingFingerprint     string
-	hasPendingUpdate       bool
-	pendingErrs            []error
-	pendingErrHead         int
-	pendingMessages        []string
-	pendingMsgHead         int
-	treeSummaryJobs        map[string]*treeSummaryRefreshState
-	mountDirProjectionJobs map[treeMountCacheKey]*mountDirProjectionRefreshState
+	currentFingerprint string
+	pendingFingerprint string
+	hasPendingUpdate   bool
+	pendingErrs        []error
+	pendingErrHead     int
+	pendingMessages    []string
+	pendingMsgHead     int
 
 	closing        bool
 	workersStarted bool
@@ -107,12 +104,10 @@ type chProvider struct {
 func newChProvider(
 	cfg Config,
 	conn ch.Conn,
-	connectMaintenance clickHouseConfigConnector,
 ) *chProvider {
 	return &chProvider{
-		cfg:                cfg,
-		conn:               conn,
-		connectMaintenance: connectMaintenance,
+		cfg:  cfg,
+		conn: conn,
 	}
 }
 
@@ -240,13 +235,9 @@ func (p *chProvider) captureActiveMountsState(parent context.Context) (*activeMo
 		return nil, "", fmt.Errorf("clickhouse: failed to capture mounts_active snapshot: %w", err)
 	}
 
-	p.scheduleActiveMountDirProjectionRefreshBestEffort(ctx, rows)
-
 	snapshot := newActiveMountsSnapshot(rows)
 	if activeTreeSummariesReadyForSnapshot(ctx, p.conn, snapshot) {
 		snapshot.markTreeSummaryReady()
-	} else {
-		p.scheduleTreeSummaryRefresh(context.WithoutCancel(ctx), snapshot, rows)
 	}
 
 	return snapshot, snapshot.fingerprint, nil
@@ -268,30 +259,6 @@ func activeTreeSummariesReadyForSnapshot(
 	ready, err := treeSummaryReady(ctx, conn, snapshot.fingerprint)
 
 	return err == nil && ready
-}
-
-func (p *chProvider) scheduleActiveMountDirProjectionRefreshBestEffort(
-	ctx context.Context,
-	rows []mountsActiveRow,
-) {
-	if p == nil || len(rows) == 0 {
-		return
-	}
-
-	missingRows, err := activeMountDirProjectionRowsNeedingRefresh(ctx, p.conn, rows)
-	if err != nil {
-		p.queueError(err)
-
-		missingRows = append([]mountsActiveRow(nil), rows...)
-	}
-
-	if len(missingRows) == 0 {
-		p.markMountDirProjectionsReady(rows)
-
-		return
-	}
-
-	p.scheduleMountDirProjectionRefresh(context.WithoutCancel(ctx), missingRows)
 }
 
 func (p *chProvider) OnMessage(cb func(message string)) {
@@ -323,14 +290,6 @@ func (p *chProvider) cancelWorkers() {
 	p.mu.Lock()
 	p.closing = true
 	cancels := append([]context.CancelFunc(nil), p.workerCancels...)
-
-	for _, job := range p.treeSummaryJobs {
-		cancels = append(cancels, job.cancel)
-	}
-
-	for _, job := range p.mountDirProjectionJobs {
-		cancels = append(cancels, job.cancel)
-	}
 
 	p.mu.Unlock()
 
@@ -389,16 +348,6 @@ func (p *chProvider) signalPendingCallbacks() {
 	}
 }
 
-func (p *chProvider) detachMaintenanceConnection() ch.Conn {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	conn := p.maintenanceConn
-	p.maintenanceConn = nil
-
-	return conn
-}
-
 func fingerprintForMountsActive(rows []mountsActiveRow) string {
 	var b strings.Builder
 	for _, row := range rows {
@@ -442,10 +391,6 @@ func (p *chProvider) Close() error {
 	p.closeOldReaders(dbImpl, bd)
 
 	var err error
-
-	if maintenanceConn := p.detachMaintenanceConnection(); maintenanceConn != nil {
-		err = errors.Join(err, maintenanceConn.Close())
-	}
 
 	if p.conn != nil {
 		conn := p.conn
@@ -612,18 +557,6 @@ func (p *chProvider) queueError(err error) {
 	p.mu.Unlock()
 
 	signal(p.errCh)
-}
-
-func (p *chProvider) queueMessage(msg string) {
-	if msg == "" {
-		return
-	}
-
-	p.mu.Lock()
-	p.pendingMessages = append(p.pendingMessages, msg)
-	p.mu.Unlock()
-
-	signal(p.msgCh)
 }
 
 func (p *chProvider) updateLoop(ctx context.Context) {
@@ -909,63 +842,6 @@ func (p *chProvider) buildInitialReaders() error {
 	return nil
 }
 
-func (p *chProvider) maintenanceConnection(ctx context.Context) (ch.Conn, error) {
-	p.mu.RLock()
-	conn := p.maintenanceConn
-	primaryConn := p.conn
-	connectMaintenance := p.connectMaintenance
-	closing := p.closing
-	p.mu.RUnlock()
-
-	if conn != nil {
-		return conn, nil
-	}
-
-	if connectMaintenance == nil {
-		return primaryConn, nil
-	}
-
-	if closing {
-		return nil, context.Canceled
-	}
-
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-
-	newConn, err := connectMaintenance(ctx, p.cfg)
-	if err != nil {
-		return nil, err
-	}
-
-	return p.storeMaintenanceConnection(newConn)
-}
-
-func (p *chProvider) storeMaintenanceConnection(newConn ch.Conn) (ch.Conn, error) {
-	p.mu.Lock()
-	if p.closing {
-		p.mu.Unlock()
-
-		_ = newConn.Close()
-
-		return nil, context.Canceled
-	}
-
-	if p.maintenanceConn != nil {
-		conn := p.maintenanceConn
-		p.mu.Unlock()
-
-		_ = newConn.Close()
-
-		return conn, nil
-	}
-
-	p.maintenanceConn = newConn
-	p.mu.Unlock()
-
-	return newConn, nil
-}
-
 func (p *chProvider) startInitialReaders() error {
 	p.startBackgroundWorkers()
 
@@ -981,7 +857,6 @@ func (p *chProvider) startInitialReaders() error {
 func openProviderWithConnectors(
 	cfg Config,
 	connect clickHouseConfigConnector,
-	connectMaintenance clickHouseConfigConnector,
 ) (provider.Provider, error) {
 	if err := validateConfig(cfg); err != nil {
 		return nil, err
@@ -992,7 +867,7 @@ func openProviderWithConnectors(
 		return nil, err
 	}
 
-	p := newChProvider(cfg, conn, connectMaintenance)
+	p := newChProvider(cfg, conn)
 	if err := p.startInitialReaders(); err != nil {
 		return nil, err
 	}
@@ -1013,19 +888,6 @@ func openProviderConnection(
 	return connect(context.Background(), cfg)
 }
 
-func openProviderWithConnector(
-	cfg Config,
-	connect func(Config) (ch.Conn, error),
-) (provider.Provider, error) {
-	return openProviderWithConnectors(cfg, legacyProviderConnector(connect), nil)
-}
-
 func OpenProvider(cfg Config) (provider.Provider, error) {
-	return openProviderWithConnectors(cfg, connectFromConfigContext, connectMaintenanceFromConfig)
-}
-
-func legacyProviderConnector(connect func(Config) (ch.Conn, error)) clickHouseConfigConnector {
-	return func(_ context.Context, cfg Config) (ch.Conn, error) {
-		return connect(cfg)
-	}
+	return openProviderWithConnectors(cfg, connectFromConfigContext)
 }

@@ -29,7 +29,6 @@ package clickhouse
 import (
 	"context"
 	"fmt"
-	"time"
 
 	ch "github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/wtsi-hgi/wrstat-ui/db"
@@ -44,26 +43,7 @@ const (
 		"file_count, file_size, file_atime_min, file_mtime_max, " +
 		"file_atime_buckets, file_mtime_buckets, file_uids, file_gids, file_ft, " +
 		"child_count, refreshed_at) " +
-		"SELECT ?, toUUID(?), d.dir, ?, d.age, sum(d.count), sum(d.size), " +
-		"minIf(d.atime_min, d.atime_min != 0), max(d.mtime_max), " +
-		"arrayReduce('sumForEach', groupArray(d.atime_buckets)), " +
-		"arrayReduce('sumForEach', groupArray(d.mtime_buckets)), " +
-		"arraySort(groupUniqArray(d.uid)), arraySort(groupUniqArray(d.gid)), groupBitOr(d.ft), " +
-		"sumIf(d.count, d.file_summary), sumIf(d.size, d.file_summary), " +
-		"minIf(d.atime_min, d.file_summary AND d.atime_min != 0), maxIf(d.mtime_max, d.file_summary), " +
-		"arrayReduce('sumForEach', groupArrayIf(d.atime_buckets, d.file_summary)), " +
-		"arrayReduce('sumForEach', groupArrayIf(d.mtime_buckets, d.file_summary)), " +
-		"arraySort(groupUniqArrayIf(d.uid, d.file_summary)), arraySort(groupUniqArrayIf(d.gid, d.file_summary)), " +
-		"groupBitOrIf(d.ft, d.file_summary), any(ifNull(c.child_count, 0)), ? " +
-		"FROM (" +
-		"SELECT *, bitAnd(ft, ?) > 0 AS file_summary FROM wrstat_dguta " +
-		"WHERE mount_path = ? AND snapshot_id = toUUID(?)" +
-		") AS d " +
-		"LEFT JOIN (" +
-		"SELECT parent_dir, count() AS child_count FROM wrstat_children " +
-		"WHERE mount_path = ? AND snapshot_id = toUUID(?) GROUP BY parent_dir" +
-		") AS c ON c.parent_dir = d.dir " +
-		"GROUP BY d.dir, d.age"
+		"VALUES (?, toUUID(?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
 
 	insertMountDirSummarySetQuery = "INSERT INTO wrstat_dir_summary_sets " +
 		"(mount_path, snapshot_id, updated_at, summary_version, refreshed_at) " +
@@ -141,103 +121,6 @@ func mountDirSummariesForDirsQueryForMode(mode mountDirSummaryMode) string {
 	return mountDirSummariesForDirsQuery
 }
 
-func ensureActiveMountDirSummaries(
-	ctx context.Context,
-	conn ch.Conn,
-	rows []mountsActiveRow,
-) error {
-	return ensureActiveMountDirSummariesWithProgress(ctx, conn, rows, nil)
-}
-
-func ensureActiveMountDirSummariesWithProgress(
-	ctx context.Context,
-	conn ch.Conn,
-	rows []mountsActiveRow,
-	progress mountDirProjectionProgress,
-) error {
-	total := len(rows)
-
-	for i, row := range rows {
-		if err := ensureActiveMountDirSummaryWithProgress(ctx, conn, row, i+1, total, progress); err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-func ensureActiveMountDirSummaryWithProgress(
-	ctx context.Context,
-	conn ch.Conn,
-	row mountsActiveRow,
-	index, total int,
-	progress mountDirProjectionProgress,
-) error {
-	started := time.Now()
-	mount := activeMount(row)
-
-	reportMountDirProjectionMountStarted(progress, row, index, total)
-
-	ready, err := mountDirProjectionsReady(ctx, conn, mount.mountPath, mount.snapshotID)
-	if err != nil {
-		return err
-	}
-
-	if ready {
-		reportMountDirProjectionMountSkipped(progress, row, index, total, time.Since(started))
-
-		return nil
-	}
-
-	if err := refreshMountDirSummariesWithProgress(ctx, conn, mount, row, index, total, progress); err != nil {
-		return err
-	}
-
-	reportMountDirProjectionMountCompleted(progress, row, index, total, time.Since(started))
-
-	return nil
-}
-
-func reportMountDirProjectionMountStarted(
-	progress mountDirProjectionProgress,
-	row mountsActiveRow,
-	index, total int,
-) {
-	if progress != nil {
-		progress.mountStarted(row, index, total)
-	}
-}
-
-func reportMountDirProjectionMountSkipped(
-	progress mountDirProjectionProgress,
-	row mountsActiveRow,
-	index, total int,
-	duration time.Duration,
-) {
-	if progress != nil {
-		progress.mountSkipped(row, index, total, duration)
-	}
-}
-
-func reportMountDirProjectionMountCompleted(
-	progress mountDirProjectionProgress,
-	row mountsActiveRow,
-	index, total int,
-	duration time.Duration,
-) {
-	if progress != nil {
-		progress.mountCompleted(row, index, total, duration)
-	}
-}
-
-func mountDirProjectionsReady(
-	ctx context.Context,
-	conn ch.Conn,
-	mountPath, snapshotID string,
-) (bool, error) {
-	return mountDirSummaryReady(ctx, conn, mountPath, snapshotID)
-}
-
 func mountDirSummaryReady(
 	ctx context.Context,
 	conn ch.Conn,
@@ -259,145 +142,6 @@ func mountDirSummaryReady(
 	}
 
 	return false, nil
-}
-
-func refreshMountDirSummaries(ctx context.Context, conn ch.Conn, mount activeMount) error {
-	row := mountsActiveRow(mount)
-
-	return refreshMountDirSummariesWithProgress(ctx, conn, mount, row, 1, 1, nil)
-}
-
-func refreshMountDirSummariesWithProgress(
-	ctx context.Context,
-	conn ch.Conn,
-	mount activeMount,
-	row mountsActiveRow,
-	index, total int,
-	progress mountDirProjectionProgress,
-) error {
-	if mount.mountPath == "" || mount.snapshotID == "" {
-		return nil
-	}
-
-	refreshedAt := time.Now().UTC()
-
-	if err := runMountDirProjectionPhase(progress, row, index, total, "drop_partitions", func() error {
-		return dropMountDirSummaryPartitions(ctx, conn, mount)
-	}); err != nil {
-		return err
-	}
-
-	return insertMountDirSummaryRowsWithProgress(ctx, conn, mount, row, index, total, refreshedAt, progress)
-}
-
-func dropMountDirSummaryPartitions(ctx context.Context, conn ch.Conn, mount activeMount) error {
-	if err := dropPartitionIgnoreUnknown(
-		ctx, conn, mount.mountPath, mount.snapshotID, dropDirSummarySetPartitionQuery,
-	); err != nil {
-		return err
-	}
-
-	if err := dropPartitionIgnoreUnknown(
-		ctx, conn, mount.mountPath, mount.snapshotID, dropDirSummaryPartitionQuery,
-	); err != nil {
-		return err
-	}
-
-	return dropPartitionIgnoreUnknown(
-		ctx, conn, mount.mountPath, mount.snapshotID, dropDirDGUTAVectorPartitionQuery,
-	)
-}
-
-func insertMountDirSummaryRowsWithProgress(
-	ctx context.Context,
-	conn ch.Conn,
-	mount activeMount,
-	row mountsActiveRow,
-	index, total int,
-	refreshedAt time.Time,
-	progress mountDirProjectionProgress,
-) error {
-	if err := runMountDirProjectionPhase(progress, row, index, total, "dir_summary", func() error {
-		return insertMountDirSummaries(ctx, conn, mount, refreshedAt)
-	}); err != nil {
-		return err
-	}
-
-	if err := runMountDirProjectionPhase(progress, row, index, total, "dguta_vector", func() error {
-		return insertMountDirDGUTAVectors(ctx, conn, mount, refreshedAt)
-	}); err != nil {
-		return err
-	}
-
-	return runMountDirProjectionPhase(progress, row, index, total, "mark_ready", func() error {
-		return insertMountDirSummarySet(ctx, conn, mount, refreshedAt)
-	})
-}
-
-func runMountDirProjectionPhase(
-	progress mountDirProjectionProgress,
-	row mountsActiveRow,
-	index, total int,
-	phase string,
-	fn func() error,
-) error {
-	if progress != nil {
-		progress.phaseStarted(row, index, total, phase)
-	}
-
-	started := time.Now()
-
-	if err := fn(); err != nil {
-		return err
-	}
-
-	if progress != nil {
-		progress.phaseCompleted(row, index, total, phase, time.Since(started))
-	}
-
-	return nil
-}
-
-func insertMountDirSummaries(
-	ctx context.Context,
-	conn ch.Conn,
-	mount activeMount,
-	refreshedAt time.Time,
-) error {
-	if err := conn.Exec(ctx, insertMountDirSummaryQuery,
-		mount.mountPath,
-		mount.snapshotID,
-		mount.updatedAt,
-		refreshedAt,
-		uint16(db.AllTypesExceptDirectories),
-		mount.mountPath,
-		mount.snapshotID,
-		mount.mountPath,
-		mount.snapshotID,
-	); err != nil {
-		return fmt.Errorf("clickhouse: failed to refresh dir summaries: %w", err)
-	}
-
-	return nil
-}
-
-func insertMountDirSummarySet(
-	ctx context.Context,
-	conn ch.Conn,
-	mount activeMount,
-	refreshedAt time.Time,
-) error {
-	if err := conn.Exec(ctx, insertMountDirSummarySetQuery,
-		mount.mountPath,
-		mount.snapshotID,
-		mount.updatedAt,
-		mountDirSummaryVersion,
-		refreshedAt,
-	); err != nil {
-		return fmt.Errorf("clickhouse: failed to mark dir summaries refreshed: %w", err)
-	}
-
-	return nil
 }
 
 func scanMountDirSummaryRows(

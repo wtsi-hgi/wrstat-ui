@@ -421,7 +421,7 @@ func TestClickHouseDatabaseMountDirSummary(t *testing.T) {
 		insertDirSummaryTestGUTA(ctx, conn, mountPath, sid, mountPath+"a/", 7, 3)
 		insertDirSummaryTestGUTA(ctx, conn, mountPath, sid, mountPath+"a/", 8, 4)
 		insertDirSummaryTestGUTA(ctx, conn, mountPath, sid, mountPath+"b/", 7, 2)
-		So(refreshMountDirSummaries(ctx, conn, activeMount{
+		So(writeMaintainedMountDirProjectionForTest(ctx, conn, activeMount{
 			mountPath:  mountPath,
 			snapshotID: sid.String(),
 			updatedAt:  updatedAt,
@@ -492,7 +492,7 @@ func TestClickHouseDatabaseMountDirSummary(t *testing.T) {
 		So(conn.Exec(ctx, testInsertMountStmt, mountPath, time.Now(), sid, updatedAt), ShouldBeNil)
 		insertDirSummaryTestTypedGUTA(ctx, conn, mountPath, sid, mountPath+"a/", db.DGUTAFileTypeBam, 7, 3)
 		insertDirSummaryTestTypedGUTA(ctx, conn, mountPath, sid, mountPath+"a/", db.DGUTAFileTypeDir, 7, 11)
-		So(refreshMountDirSummaries(ctx, conn, activeMount{
+		So(writeMaintainedMountDirProjectionForTest(ctx, conn, activeMount{
 			mountPath:  mountPath,
 			snapshotID: sid.String(),
 			updatedAt:  updatedAt,
@@ -570,7 +570,7 @@ func TestClickHouseDatabaseMountDirSummary(t *testing.T) {
 		insertDirSummaryTestTypedGUTA(ctx, conn, mountPath, sid, mountPath, db.DGUTAFileTypeBam, 7, 2)
 		insertDirSummaryTestTypedGUTA(ctx, conn, mountPath, sid, mountPath+"dironly/", db.DGUTAFileTypeDir, 7, 11)
 		So(conn.Exec(ctx, testInsertChildrenStmt, mountPath, sid.String(), mountPath, mountPath+"dironly"), ShouldBeNil)
-		So(refreshMountDirSummaries(ctx, conn, activeMount{
+		So(writeMaintainedMountDirProjectionForTest(ctx, conn, activeMount{
 			mountPath:  mountPath,
 			snapshotID: sid.String(),
 			updatedAt:  updatedAt,
@@ -631,7 +631,7 @@ func TestClickHouseDatabaseMountDirSummary(t *testing.T) {
 		insertDirSummaryTestGUTA(ctx, conn, mountPath, sid, mountPath+"a/", 7, 3)
 		insertDirSummaryTestGUTA(ctx, conn, mountPath, sid, mountPath+"a/", 8, 4)
 		insertDirSummaryTestGUTA(ctx, conn, mountPath, sid, mountPath+"b/", 7, 5)
-		So(refreshMountDirSummaries(ctx, conn, activeMount{
+		So(writeMaintainedMountDirProjectionForTest(ctx, conn, activeMount{
 			mountPath:  mountPath,
 			snapshotID: sid.String(),
 			updatedAt:  updatedAt,
@@ -720,7 +720,7 @@ func TestClickHouseDatabaseMountDirSummary(t *testing.T) {
 		insertVectorGUTA(mountPath+"a/", 8, 9, db.DGUTAFileTypeCram, db.DGUTAgeAll, 4)
 		insertVectorGUTA(mountPath+"a/", 7, 10, db.DGUTAFileTypeBam, db.DGUTAgeA1M, 5)
 		insertVectorGUTA(mountPath+"b/", 7, 9, db.DGUTAFileTypeBam, db.DGUTAgeAll, 2)
-		So(refreshMountDirSummaries(ctx, conn, activeMount{
+		So(writeMaintainedMountDirProjectionForTest(ctx, conn, activeMount{
 			mountPath:  mountPath,
 			snapshotID: sid.String(),
 			updatedAt:  updatedAt,
@@ -843,7 +843,7 @@ func TestClickHouseDatabaseMountDirSummary(t *testing.T) {
 
 		So(conn.Exec(ctx, testInsertMountStmt, mountPath, firstUpdatedAt, firstSID, firstUpdatedAt), ShouldBeNil)
 		insertDirSummaryTestGUTA(ctx, conn, mountPath, firstSID, mountPath+"a/", 7, 1)
-		So(refreshMountDirSummaries(ctx, conn, activeMount{
+		So(writeMaintainedMountDirProjectionForTest(ctx, conn, activeMount{
 			mountPath:  mountPath,
 			snapshotID: firstSID.String(),
 			updatedAt:  firstUpdatedAt,
@@ -851,7 +851,7 @@ func TestClickHouseDatabaseMountDirSummary(t *testing.T) {
 
 		So(conn.Exec(ctx, testInsertMountStmt, mountPath, secondUpdatedAt, secondSID, secondUpdatedAt), ShouldBeNil)
 		insertDirSummaryTestGUTA(ctx, conn, mountPath, secondSID, mountPath+"a/", 7, 9)
-		So(refreshMountDirSummaries(ctx, conn, activeMount{
+		So(writeMaintainedMountDirProjectionForTest(ctx, conn, activeMount{
 			mountPath:  mountPath,
 			snapshotID: secondSID.String(),
 			updatedAt:  secondUpdatedAt,
@@ -902,7 +902,7 @@ func TestClickHouseDatabaseMountDirSummary(t *testing.T) {
 		insertDirSummaryTestGUTA(ctx, conn, mountPath, sid, mountPath, 7, 10)
 		insertDirSummaryTestGUTA(ctx, conn, mountPath, sid, mountPath+"a/", 7, 6)
 		So(conn.Exec(ctx, testInsertChildrenStmt, mountPath, sid, mountPath, mountPath+"a"), ShouldBeNil)
-		So(refreshMountDirSummaries(ctx, conn, activeMount{
+		So(writeMaintainedMountDirProjectionForTest(ctx, conn, activeMount{
 			mountPath:  mountPath,
 			snapshotID: sid.String(),
 			updatedAt:  updatedAt,
@@ -990,6 +990,37 @@ func insertDirSummaryTestTypedGUTA(
 		[]uint64{1, 0, 0, 0, 0, 0, 0, 0, 0},
 		[]uint64{0, 1, 0, 0, 0, 0, 0, 0, 0},
 	), ShouldBeNil)
+}
+
+func writeMaintainedMountDirProjectionForTest(
+	ctx context.Context,
+	conn ch.Conn,
+	mount activeMount,
+) error {
+	state, err := mountDirProjectionStateFromSeededRows(ctx, conn, mount)
+	if err != nil {
+		return err
+	}
+
+	return writeMountDirProjectionRows(ctx, conn, mount, state, defaultBatchSize)
+}
+
+func mountDirProjectionStateFromSeededRows(
+	ctx context.Context,
+	conn ch.Conn,
+	mount activeMount,
+) (mountDirProjectionState, error) {
+	state := newMountDirProjectionState()
+
+	if err := addSeededDGUTAToMountDirProjectionState(ctx, conn, mount, &state); err != nil {
+		return mountDirProjectionState{}, err
+	}
+
+	if err := addSeededChildrenToMountDirProjectionState(ctx, conn, mount, &state); err != nil {
+		return mountDirProjectionState{}, err
+	}
+
+	return state, nil
 }
 
 func TestClickHouseDatabaseTreeCache(t *testing.T) {
@@ -1860,7 +1891,7 @@ func TestClickHouseDatabaseDirsHaveChildrenFastPath(t *testing.T) {
 
 		insertDirSummaryTestGUTA(ctx, conn, mountPath, sid, parent+"child05/", 7, 3)
 		insertDirSummaryTestGUTA(ctx, conn, mountPath, sid, parent+"child06/", 8, 2)
-		So(refreshMountDirSummaries(ctx, conn, activeMount{
+		So(writeMaintainedMountDirProjectionForTest(ctx, conn, activeMount{
 			mountPath:  mountPath,
 			snapshotID: sid.String(),
 			updatedAt:  updatedAt,
@@ -1924,7 +1955,7 @@ func TestClickHouseDatabaseDirsHaveChildrenFastPath(t *testing.T) {
 		So(conn.Exec(ctx, testInsertChildrenStmt, mountPath, sid, mountPath+"a/", mountPath+"a/g1"), ShouldBeNil)
 		So(conn.Exec(ctx, testInsertChildrenStmt, mountPath, sid, mountPath+"a/", mountPath+"a/g2"), ShouldBeNil)
 
-		So(refreshMountDirSummaries(ctx, conn, activeMount{
+		So(writeMaintainedMountDirProjectionForTest(ctx, conn, activeMount{
 			mountPath:  mountPath,
 			snapshotID: sid.String(),
 			updatedAt:  updatedAt,
@@ -2000,7 +2031,7 @@ func TestClickHouseDatabaseDirsHaveChildrenFastPath(t *testing.T) {
 			So(conn.Exec(ctx, testInsertChildrenStmt, mountPath, sid, parent, child), ShouldBeNil)
 		}
 
-		So(refreshMountDirSummaries(ctx, conn, activeMount{
+		So(writeMaintainedMountDirProjectionForTest(ctx, conn, activeMount{
 			mountPath:  mountPath,
 			snapshotID: sid.String(),
 			updatedAt:  updatedAt,
@@ -2702,6 +2733,95 @@ func dirSummariesByDir(dcss db.DCSs) map[string]*db.DirSummary {
 	}
 
 	return byDir
+}
+
+func addSeededDGUTAToMountDirProjectionState(
+	ctx context.Context,
+	conn ch.Conn,
+	mount activeMount,
+	state *mountDirProjectionState,
+) error {
+	rows, err := conn.Query(ctx,
+		"SELECT dir, gid, uid, ft, age, count, size, atime_min, mtime_max, atime_buckets, mtime_buckets "+
+			"FROM wrstat_dguta WHERE mount_path = ? AND snapshot_id = toUUID(?)",
+		mount.mountPath,
+		mount.snapshotID,
+	)
+	if err != nil {
+		return err
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	for rows.Next() {
+		dir, guta, err := scanSeededProjectionGUTA(rows)
+		if err != nil {
+			return err
+		}
+
+		state.addGUTA(dir, guta)
+	}
+
+	return rows.Err()
+}
+
+func scanSeededProjectionGUTA(rows rowsScanner) (string, *db.GUTA, error) {
+	var (
+		dir string
+		s   dgutaScanned
+	)
+
+	if err := rows.Scan(
+		&dir,
+		&s.gid,
+		&s.uid,
+		&s.ft,
+		&s.age,
+		&s.count,
+		&s.size,
+		&s.atimeMin,
+		&s.mtimeMax,
+		&s.atimeBuckets,
+		&s.mtimeBuckets,
+	); err != nil {
+		return "", nil, err
+	}
+
+	return dir, s.guta(), nil
+}
+
+func addSeededChildrenToMountDirProjectionState(
+	ctx context.Context,
+	conn ch.Conn,
+	mount activeMount,
+	state *mountDirProjectionState,
+) error {
+	rows, err := conn.Query(ctx,
+		"SELECT parent_dir, count() FROM wrstat_children "+
+			"WHERE mount_path = ? AND snapshot_id = toUUID(?) GROUP BY parent_dir",
+		mount.mountPath,
+		mount.snapshotID,
+	)
+	if err != nil {
+		return err
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	for rows.Next() {
+		var (
+			parentDir string
+			count     uint64
+		)
+
+		if err := rows.Scan(&parentDir, &count); err != nil {
+			return err
+		}
+
+		state.addChildren(parentDir, count)
+	}
+
+	return rows.Err()
 }
 
 type treeSummaryRefreshDeadlineConn struct {
@@ -3543,7 +3663,7 @@ func TestClickHouseDatabaseWhereFastPath(t *testing.T) {
 		So(appendErr, ShouldBeNil)
 		So(appended, ShouldEqual, groupedDirSummaryMinDirs)
 		So(batch.Send(), ShouldBeNil)
-		So(refreshMountDirSummaries(ctx, conn, activeMount{
+		So(writeMaintainedMountDirProjectionForTest(ctx, conn, activeMount{
 			mountPath:  mountPath,
 			snapshotID: sid,
 			updatedAt:  updatedAt,
@@ -3628,7 +3748,7 @@ func TestClickHouseDatabaseWhereFastPath(t *testing.T) {
 		insertChild(mountPath, mountPath+"b")
 		insertChild(mountPath+"a/", mountPath+"a/leaf1")
 		insertChild(mountPath+"a/", mountPath+"a/leaf2")
-		So(refreshMountDirSummaries(ctx, conn, activeMount{
+		So(writeMaintainedMountDirProjectionForTest(ctx, conn, activeMount{
 			mountPath:  mountPath,
 			snapshotID: sid,
 			updatedAt:  updatedAt,
