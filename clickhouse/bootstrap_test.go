@@ -47,9 +47,11 @@ import (
 )
 
 const (
-	testSystemTablesQuery      = "SELECT name FROM system.tables WHERE database = ? ORDER BY name"
-	testSystemColumnsQuery     = "SELECT name FROM system.columns WHERE database = ? AND table = ? ORDER BY name"
-	testSystemTableEngineQuery = "SELECT engine FROM system.tables WHERE database = ? AND name = ? LIMIT 1"
+	testSystemTablesQuery       = "SELECT name FROM system.tables WHERE database = ? ORDER BY name"
+	testSystemColumnsQuery      = "SELECT name FROM system.columns WHERE database = ? AND table = ? ORDER BY name"
+	testSystemTableEngineQuery  = "SELECT engine FROM system.tables WHERE database = ? AND name = ? LIMIT 1"
+	testInsertInactiveMountStmt = "INSERT INTO wrstat_mounts (mount_path, switched_at, " +
+		"active_snapshot, updated_at, active) VALUES (?, ?, ?, ?, 0)"
 
 	schemaVersionBootstrapHelperEnv       = "WRSTAT_SCHEMA_BOOTSTRAP_HELPER"
 	schemaVersionBootstrapDSNEnv          = "WRSTAT_SCHEMA_BOOTSTRAP_DSN"
@@ -675,7 +677,73 @@ func TestNewClientBootstrapsSchema(t *testing.T) {
 		So(cols, ShouldContain, "snapshot_id")
 		So(cols, ShouldContain, "updated_at")
 
+		mountCols := listColumnNames(ctx, t, conn, cfg.Database, "wrstat_mounts")
+		So(mountCols, ShouldContain, "active")
+
 		So(tableEngine(ctx, t, conn, cfg.Database, "wrstat_schema_version"), ShouldEqual, "TinyLog")
+	})
+
+	Convey("NewClient bootstraps wrstat_mounts_active to hide inactive latest rows", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.PollInterval = time.Second
+		cfg.QueryTimeout = 5 * time.Second
+
+		c, err := NewClient(cfg)
+		So(err, ShouldBeNil)
+		So(c, ShouldNotBeNil)
+		Reset(func() { So(c.Close(), ShouldBeNil) })
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		firstUpdatedAt := time.Date(2026, 1, 9, 12, 0, 0, 0, time.UTC)
+		secondUpdatedAt := firstUpdatedAt.Add(time.Hour)
+		firstSID := snapshotID(testMountPath, firstUpdatedAt).String()
+		secondSID := snapshotID(testMountPath, secondUpdatedAt).String()
+
+		So(conn.Exec(ctx, testInsertMountStmt, testMountPath, firstUpdatedAt, firstSID, firstUpdatedAt), ShouldBeNil)
+
+		activeSID, hasActive, err := readActiveSnapshotID(ctx, conn, testMountPath)
+		So(err, ShouldBeNil)
+		So(hasActive, ShouldBeTrue)
+		So(activeSID, ShouldEqual, firstSID)
+
+		So(conn.Exec(
+			ctx,
+			testInsertInactiveMountStmt,
+			testMountPath,
+			firstUpdatedAt.Add(time.Second),
+			firstSID,
+			firstUpdatedAt,
+		), ShouldBeNil)
+
+		activeSID, hasActive, err = readActiveSnapshotID(ctx, conn, testMountPath)
+		So(err, ShouldBeNil)
+		So(hasActive, ShouldBeFalse)
+		So(activeSID, ShouldBeBlank)
+
+		So(conn.Exec(
+			ctx,
+			testInsertMountStmt,
+			testMountPath,
+			firstUpdatedAt.Add(2*time.Second),
+			secondSID,
+			secondUpdatedAt,
+		), ShouldBeNil)
+
+		activeSID, hasActive, err = readActiveSnapshotID(ctx, conn, testMountPath)
+		So(err, ShouldBeNil)
+		So(hasActive, ShouldBeTrue)
+		So(activeSID, ShouldEqual, secondSID)
 	})
 }
 

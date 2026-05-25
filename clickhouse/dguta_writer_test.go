@@ -329,6 +329,48 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 		So(rows.Next(), ShouldBeFalse)
 	})
 
+	Convey("DGUTAWriter republishes a deterministic snapshot after cleanup tombstones it", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 5 * time.Second
+
+		updatedAt := time.Date(2026, 1, 9, 12, 0, 0, 0, time.UTC)
+		sid := snapshotID(testMountPath, updatedAt)
+
+		opts, err := optionsFromConfig(cfg)
+		So(err, ShouldBeNil)
+
+		conn, err := connectAndBootstrap(context.Background(), opts, cfg.Database, queryTimeout(cfg))
+		So(err, ShouldBeNil)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		futureSwitchAt := time.Now().UTC().Add(time.Hour)
+		So(conn.Exec(ctx, testInsertMountStmt, testMountPath, futureSwitchAt, sid.String(), updatedAt), ShouldBeNil)
+		insertSnapshotCleanupRows(ctx, conn, sid.String(), updatedAt)
+
+		So(cleanActiveSnapshotAttemptWithConn(cfg, conn, testMountPath, updatedAt), ShouldBeNil)
+
+		activeSID, hasActive, err := readActiveSnapshotID(ctx, conn, testMountPath)
+		So(err, ShouldBeNil)
+		So(hasActive, ShouldBeFalse)
+		So(activeSID, ShouldBeBlank)
+
+		paths := internaltest.NewDirectoryPathCreator()
+		writeSingleDGUTARecord(cfg, updatedAt, paths.ToDirectoryPath("/"), 77, "/retry/")
+
+		activeSID, hasActive, err = readActiveSnapshotID(ctx, conn, testMountPath)
+		So(err, ShouldBeNil)
+		So(hasActive, ShouldBeTrue)
+		So(activeSID, ShouldEqual, sid.String())
+	})
+
 	Convey("DGUTAWriter expands summariser child names to full child paths", t, func() {
 		os.Setenv("WRSTAT_ENV", "test")
 		Reset(func() { os.Unsetenv("WRSTAT_ENV") })

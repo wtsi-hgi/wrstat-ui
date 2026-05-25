@@ -37,22 +37,26 @@ import (
 const (
 	activeSnapshotCleanupTimeout = 30 * time.Minute
 
-	deleteActiveSnapshotMountRowsQuery = "ALTER TABLE wrstat_mounts DELETE WHERE mount_path = ? " +
-		"AND active_snapshot = toUUID(?) SETTINGS mutations_sync = 2"
-	latestSnapshotMountSwitchedAtQuery = "SELECT switched_at FROM wrstat_mounts " +
-		"WHERE mount_path = ? ORDER BY switched_at DESC LIMIT 1"
 	previousSnapshotMountRowQuery = "SELECT toString(active_snapshot), updated_at " +
 		"FROM wrstat_mounts WHERE mount_path = ? AND active_snapshot != toUUID(?) " +
-		"ORDER BY switched_at DESC LIMIT 1"
+		"AND active = 1 ORDER BY switched_at DESC LIMIT 1"
 	rollbackActiveSnapshotMountRowQuery = "INSERT INTO wrstat_mounts " +
-		"(mount_path, switched_at, active_snapshot, updated_at) " +
-		"SELECT ?, ?, toUUID(?), ? WHERE EXISTS (" +
+		"(mount_path, switched_at, active_snapshot, updated_at, active) " +
+		"SELECT ?, next_switched_at, toUUID(?), ?, 1 FROM (" +
+		"SELECT greatest(max(switched_at) + toIntervalMillisecond(1), now64(3)) AS next_switched_at " +
+		"FROM wrstat_mounts WHERE mount_path = ?) WHERE EXISTS (" +
+		"SELECT 1 FROM wrstat_mounts_active WHERE mount_path = ? AND snapshot_id = toUUID(?))"
+	insertInactiveSnapshotMountRowQuery = "INSERT INTO wrstat_mounts " +
+		"(mount_path, switched_at, active_snapshot, updated_at, active) " +
+		"SELECT ?, next_switched_at, toUUID(?), latest_updated_at, 0 FROM (" +
+		"SELECT greatest(max(switched_at) + toIntervalMillisecond(1), now64(3)) AS next_switched_at, " +
+		"argMax(updated_at, switched_at) AS latest_updated_at FROM wrstat_mounts WHERE mount_path = ?) " +
+		"WHERE EXISTS (" +
 		"SELECT 1 FROM wrstat_mounts_active WHERE mount_path = ? AND snapshot_id = toUUID(?))"
 )
 
 var (
-	errActiveSnapshotStillActive        = errors.New("clickhouse: failed to clean active snapshot mount row")
-	errLatestSnapshotMountSwitchMissing = errors.New("clickhouse: latest snapshot mount switch time was not found")
+	errActiveSnapshotStillActive = errors.New("clickhouse: failed to clean active snapshot mount row")
 )
 
 type activeSnapshotMountRow struct {
@@ -110,21 +114,61 @@ func cleanActiveSnapshotAttempt(ctx context.Context, conn ch.Conn, mountPath str
 		return err
 	}
 
-	if hasPrevious {
-		err = rollbackActiveSnapshotMountRow(ctx, conn, mountPath, sid, previous)
-	} else {
-		err = deleteActiveSnapshotMountRows(ctx, conn, mountPath, sid)
-	}
-
-	if err != nil {
-		return err
-	}
-
-	if err := ensureSnapshotInactive(ctx, conn, mountPath, sid); err != nil {
+	if err := cleanActiveSnapshotMountRow(ctx, conn, mountPath, sid, previous, hasPrevious); err != nil {
 		return err
 	}
 
 	return dropSnapshotPartitionsForMount(ctx, conn, mountPath, sid, allPartitionDropQueries())
+}
+
+func cleanActiveSnapshotMountRow(
+	ctx context.Context,
+	conn ch.Conn,
+	mountPath string,
+	sid string,
+	previous activeSnapshotMountRow,
+	hasPrevious bool,
+) error {
+	if !hasPrevious {
+		return insertInactiveSnapshotMountRowAndEnsure(ctx, conn, mountPath, sid)
+	}
+
+	if err := rollbackActiveSnapshotMountRow(ctx, conn, mountPath, sid, previous); err != nil {
+		return err
+	}
+
+	inactive, err := snapshotInactive(ctx, conn, mountPath, sid)
+	if err != nil || inactive {
+		return err
+	}
+
+	return insertInactiveSnapshotMountRowAndEnsure(ctx, conn, mountPath, sid)
+}
+
+func insertInactiveSnapshotMountRowAndEnsure(
+	ctx context.Context,
+	conn ch.Conn,
+	mountPath string,
+	sid string,
+) error {
+	if err := insertInactiveSnapshotMountRow(ctx, conn, mountPath, sid); err != nil {
+		return err
+	}
+
+	return ensureSnapshotInactive(ctx, conn, mountPath, sid)
+}
+
+func insertInactiveSnapshotMountRow(
+	ctx context.Context,
+	conn ch.Conn,
+	mountPath string,
+	sid string,
+) error {
+	if err := conn.Exec(ctx, insertInactiveSnapshotMountRowQuery, mountPath, sid, mountPath, mountPath, sid); err != nil {
+		return fmt.Errorf("clickhouse: failed to mark active snapshot mount row inactive: %w", err)
+	}
+
+	return nil
 }
 
 func ensureSnapshotInactive(ctx context.Context, conn ch.Conn, mountPath string, sid string) error {
@@ -145,6 +189,19 @@ func ensureSnapshotInactive(ctx context.Context, conn ch.Conn, mountPath string,
 	return nil
 }
 
+func snapshotInactive(ctx context.Context, conn ch.Conn, mountPath string, sid string) (bool, error) {
+	err := ensureSnapshotInactive(ctx, conn, mountPath, sid)
+	if err == nil {
+		return true, nil
+	}
+
+	if errors.Is(err, errActiveSnapshotStillActive) {
+		return false, nil
+	}
+
+	return false, err
+}
+
 func rollbackActiveSnapshotMountRow(
 	ctx context.Context,
 	conn ch.Conn,
@@ -152,18 +209,13 @@ func rollbackActiveSnapshotMountRow(
 	failedSID string,
 	previous activeSnapshotMountRow,
 ) error {
-	switchedAt, err := nextSnapshotMountSwitchedAt(ctx, conn, mountPath)
-	if err != nil {
-		return err
-	}
-
 	if err := conn.Exec(
 		ctx,
 		rollbackActiveSnapshotMountRowQuery,
 		mountPath,
-		switchedAt,
 		previous.snapshotID,
 		previous.updatedAt,
+		mountPath,
 		mountPath,
 		failedSID,
 	); err != nil {
@@ -171,40 +223,6 @@ func rollbackActiveSnapshotMountRow(
 	}
 
 	return nil
-}
-
-func nextSnapshotMountSwitchedAt(ctx context.Context, conn ch.Conn, mountPath string) (time.Time, error) {
-	rows, err := conn.Query(ctx, latestSnapshotMountSwitchedAtQuery, mountPath)
-	if err != nil {
-		return time.Time{}, fmt.Errorf("clickhouse: failed to read latest snapshot mount switch time: %w", err)
-	}
-
-	defer func() { _ = rows.Close() }()
-
-	if !rows.Next() {
-		rowErr := rows.Err()
-		if rowErr != nil {
-			return time.Time{}, fmt.Errorf("clickhouse: latest snapshot mount switch time iteration error: %w", rowErr)
-		}
-
-		return time.Time{}, errLatestSnapshotMountSwitchMissing
-	}
-
-	var latest time.Time
-	if err := rows.Scan(&latest); err != nil {
-		return time.Time{}, fmt.Errorf("clickhouse: failed to scan latest snapshot mount switch time: %w", err)
-	}
-
-	return nextMillisecondAfter(latest, time.Now().UTC()), nil
-}
-
-func nextMillisecondAfter(latest time.Time, now time.Time) time.Time {
-	next := latest.Add(time.Millisecond)
-	if now.Before(next) {
-		return next
-	}
-
-	return now
 }
 
 // CleanActiveSnapshotAttempt removes an abandoned active deterministic snapshot
@@ -234,19 +252,6 @@ func validateSnapshotCleanupInputs(cfg Config, mountPath string, updatedAt time.
 
 	if updatedAt.IsZero() {
 		return errUpdatedAtRequired
-	}
-
-	return nil
-}
-
-func deleteActiveSnapshotMountRows(
-	ctx context.Context,
-	conn ch.Conn,
-	mountPath string,
-	sid string,
-) error {
-	if err := conn.Exec(ctx, deleteActiveSnapshotMountRowsQuery, mountPath, sid); err != nil {
-		return fmt.Errorf("clickhouse: failed to delete active snapshot mount row: %w", err)
 	}
 
 	return nil

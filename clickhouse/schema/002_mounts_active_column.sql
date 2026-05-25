@@ -24,11 +24,5 @@
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  ***************************************************************************** */
 
-CREATE TABLE IF NOT EXISTS wrstat_mounts (
-  mount_path LowCardinality(String) CODEC(ZSTD(3)),
-  switched_at DateTime64(3) CODEC(Delta, ZSTD(3)),
-  active_snapshot UUID,
-  updated_at DateTime CODEC(Delta, ZSTD(3)),
-  active UInt8 DEFAULT 1
-) ENGINE = ReplacingMergeTree(switched_at)
-ORDER BY mount_path;
+ALTER TABLE wrstat_mounts
+ADD COLUMN IF NOT EXISTS active UInt8 DEFAULT 1;

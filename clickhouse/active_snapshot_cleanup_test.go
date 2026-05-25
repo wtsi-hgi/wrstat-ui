@@ -28,6 +28,7 @@ package clickhouse
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -53,13 +54,17 @@ type activeSnapshotCleanupDeleteRejectingConn struct {
 }
 
 func (c *activeSnapshotCleanupDeleteRejectingConn) Exec(ctx context.Context, query string, args ...any) error {
-	if query == deleteActiveSnapshotMountRowsQuery {
+	if isActiveSnapshotCleanupMountDeleteQuery(query) {
 		c.sawDelete = true
 
 		return errActiveSnapshotCleanupDeleteForbidden
 	}
 
 	return c.Conn.Exec(ctx, query, args...)
+}
+
+func isActiveSnapshotCleanupMountDeleteQuery(query string) bool {
+	return strings.HasPrefix(query, "ALTER TABLE wrstat_mounts DELETE")
 }
 
 func TestCleanActiveSnapshotAttempt(t *testing.T) {
@@ -117,6 +122,44 @@ func TestCleanActiveSnapshotAttempt(t *testing.T) {
 		assertSnapshotCleanupRows(ctx, conn, failedSID, 0)
 	})
 
+	Convey("CleanActiveSnapshotAttempt tombstones a failed snapshot with no previous mount row "+
+		"without deleting", t, func() {
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 5 * time.Second
+
+		failedUpdatedAt := time.Date(2026, 1, 9, 12, 0, 0, 0, time.UTC)
+		failedSID := snapshotID(testMountPath, failedUpdatedAt).String()
+
+		opts, err := optionsFromConfig(cfg)
+		So(err, ShouldBeNil)
+
+		conn, err := connectAndBootstrap(context.Background(), opts, cfg.Database, queryTimeout(cfg))
+		So(err, ShouldBeNil)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		So(conn.Exec(ctx, testInsertMountStmt, testMountPath, failedUpdatedAt, failedSID, failedUpdatedAt), ShouldBeNil)
+		insertSnapshotCleanupRows(ctx, conn, failedSID, failedUpdatedAt)
+
+		wrapped := &activeSnapshotCleanupDeleteRejectingConn{Conn: conn}
+		So(cleanActiveSnapshotAttemptWithConn(cfg, wrapped, testMountPath, failedUpdatedAt), ShouldBeNil)
+		So(wrapped.sawDelete, ShouldBeFalse)
+
+		activeSID, hasActive, err := readActiveSnapshotID(ctx, conn, testMountPath)
+		So(err, ShouldBeNil)
+		So(hasActive, ShouldBeFalse)
+		So(activeSID, ShouldBeBlank)
+
+		matches, err := ActiveSnapshotMatches(cfg, testMountPath, failedUpdatedAt)
+		So(err, ShouldBeNil)
+		So(matches, ShouldBeFalse)
+		assertSnapshotCleanupRows(ctx, conn, failedSID, 0)
+	})
+
 	Convey("CleanActiveSnapshotAttempt rolls back to an older snapshot without deleting mount rows", t, func() {
 		th := newClickHouseTestHarness(t)
 		cfg := th.newConfig()
@@ -155,7 +198,45 @@ func TestCleanActiveSnapshotAttempt(t *testing.T) {
 		assertSnapshotCleanupRows(ctx, conn, failedSID, 0)
 	})
 
-	Convey("CleanActiveSnapshotAttempt does not use the normal query timeout for unavoidable deletes", t, func() {
+	Convey("CleanActiveSnapshotAttempt tombstones the failed snapshot when rollback does not displace it", t, func() {
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 5 * time.Second
+
+		olderUpdatedAt := time.Date(2026, 1, 9, 12, 0, 0, 0, time.UTC)
+		failedUpdatedAt := olderUpdatedAt.Add(time.Hour)
+		olderSID := snapshotID(testMountPath, olderUpdatedAt).String()
+		failedSID := snapshotID(testMountPath, failedUpdatedAt).String()
+
+		opts, err := optionsFromConfig(cfg)
+		So(err, ShouldBeNil)
+
+		conn, err := connectAndBootstrap(context.Background(), opts, cfg.Database, queryTimeout(cfg))
+		So(err, ShouldBeNil)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		So(conn.Exec(ctx, testInsertMountStmt, testMountPath, olderUpdatedAt, olderSID, olderUpdatedAt), ShouldBeNil)
+		So(conn.Exec(ctx, testInsertMountStmt, testMountPath, failedUpdatedAt, failedSID, failedUpdatedAt), ShouldBeNil)
+		insertSnapshotCleanupRows(ctx, conn, olderSID, olderUpdatedAt)
+		insertSnapshotCleanupRows(ctx, conn, failedSID, failedUpdatedAt)
+
+		wrapped := &activeSnapshotCleanupRollbackNoopConn{Conn: conn}
+		So(cleanActiveSnapshotAttemptWithConn(cfg, wrapped, testMountPath, failedUpdatedAt), ShouldBeNil)
+		So(wrapped.sawRollback, ShouldBeTrue)
+
+		activeSID, hasActive, err := readActiveSnapshotID(ctx, conn, testMountPath)
+		So(err, ShouldBeNil)
+		So(hasActive, ShouldBeFalse)
+		So(activeSID, ShouldBeBlank)
+		assertSnapshotCleanupRows(ctx, conn, olderSID, 1)
+		assertSnapshotCleanupRows(ctx, conn, failedSID, 0)
+	})
+
+	Convey("CleanActiveSnapshotAttempt does not use the normal query timeout for cleanup metadata changes", t, func() {
 		th := newClickHouseTestHarness(t)
 		cfg := th.newConfig()
 		cfg.QueryTimeout = 5 * time.Second
@@ -182,7 +263,7 @@ func TestCleanActiveSnapshotAttempt(t *testing.T) {
 			queryTimeout: cfg.QueryTimeout,
 		}
 		So(cleanActiveSnapshotAttemptWithConn(cfg, wrapped, testMountPath, failedUpdatedAt), ShouldBeNil)
-		So(wrapped.sawDelete, ShouldBeTrue)
+		So(wrapped.sawMetadataChange, ShouldBeTrue)
 
 		activeSID, hasActive, err := readActiveSnapshotID(ctx, conn, testMountPath)
 		So(err, ShouldBeNil)
@@ -342,18 +423,39 @@ func assertSnapshotCleanupRows(
 
 type activeSnapshotCleanupDeadlineCheckingConn struct {
 	ch.Conn
-	queryTimeout time.Duration
-	sawDelete    bool
+	queryTimeout      time.Duration
+	sawMetadataChange bool
 }
 
 func (c *activeSnapshotCleanupDeadlineCheckingConn) Exec(ctx context.Context, query string, args ...any) error {
-	if query == deleteActiveSnapshotMountRowsQuery {
-		c.sawDelete = true
+	if isActiveSnapshotCleanupMetadataQuery(query) {
+		c.sawMetadataChange = true
 
 		deadline, ok := ctx.Deadline()
 		if ok && time.Until(deadline) <= c.queryTimeout {
 			return errActiveSnapshotCleanupNormalDeadline
 		}
+	}
+
+	return c.Conn.Exec(ctx, query, args...)
+}
+
+func isActiveSnapshotCleanupMetadataQuery(query string) bool {
+	return query == insertInactiveSnapshotMountRowQuery ||
+		query == rollbackActiveSnapshotMountRowQuery ||
+		isActiveSnapshotCleanupMountDeleteQuery(query)
+}
+
+type activeSnapshotCleanupRollbackNoopConn struct {
+	ch.Conn
+	sawRollback bool
+}
+
+func (c *activeSnapshotCleanupRollbackNoopConn) Exec(ctx context.Context, query string, args ...any) error {
+	if query == rollbackActiveSnapshotMountRowQuery {
+		c.sawRollback = true
+
+		return nil
 	}
 
 	return c.Conn.Exec(ctx, query, args...)

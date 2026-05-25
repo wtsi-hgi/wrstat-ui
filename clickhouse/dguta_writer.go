@@ -53,7 +53,8 @@ const (
 	activeSnapshotQuery = "SELECT toString(snapshot_id) FROM wrstat_mounts_active " +
 		"WHERE mount_path = ?"
 	switchSnapshotQuery = "INSERT INTO wrstat_mounts (mount_path, switched_at, active_snapshot, updated_at) " +
-		"VALUES (?, now64(3), toUUID(?), ?)"
+		"SELECT ?, greatest(coalesce(max(switched_at) + toIntervalMillisecond(1), now64(3)), now64(3)), " +
+		"toUUID(?), ? FROM wrstat_mounts WHERE mount_path = ?"
 
 	dropDGUTAPartitionQuery          = "ALTER TABLE wrstat_dguta DROP PARTITION tuple(?, toUUID(?))"
 	dropChildrenPartitionQuery       = "ALTER TABLE wrstat_children DROP PARTITION tuple(?, toUUID(?))"
@@ -354,7 +355,14 @@ func (w *dgutaWriter) ensureSnapshotID() {
 func (w *dgutaWriter) switchActiveSnapshot(ctx context.Context) error {
 	w.ensureSnapshotID()
 
-	if err := w.conn.Exec(ctx, switchSnapshotQuery, w.mountPath, w.snapshot.String(), w.updatedAt); err != nil {
+	if err := w.conn.Exec(
+		ctx,
+		switchSnapshotQuery,
+		w.mountPath,
+		w.snapshot.String(),
+		w.updatedAt,
+		w.mountPath,
+	); err != nil {
 		return fmt.Errorf("clickhouse: failed to switch active snapshot: %w", err)
 	}
 
