@@ -45,14 +45,14 @@ const (
 		"SELECT ?, next_switched_at, toUUID(?), ?, 1 FROM (" +
 		"SELECT greatest(max(switched_at) + toIntervalMillisecond(1), now64(3)) AS next_switched_at " +
 		"FROM wrstat_mounts WHERE mount_path = ?) WHERE EXISTS (" +
-		"SELECT 1 FROM wrstat_mounts_active WHERE mount_path = ? AND snapshot_id = toUUID(?))"
+		"SELECT 1 FROM wrstat_mounts_active_v2 WHERE mount_path = ? AND snapshot_id = toUUID(?))"
 	insertInactiveSnapshotMountRowQuery = "INSERT INTO wrstat_mounts " +
 		"(mount_path, switched_at, active_snapshot, updated_at, active) " +
 		"SELECT ?, next_switched_at, toUUID(?), latest_updated_at, 0 FROM (" +
 		"SELECT greatest(max(switched_at) + toIntervalMillisecond(1), now64(3)) AS next_switched_at, " +
 		"argMax(updated_at, switched_at) AS latest_updated_at FROM wrstat_mounts WHERE mount_path = ?) " +
 		"WHERE EXISTS (" +
-		"SELECT 1 FROM wrstat_mounts_active WHERE mount_path = ? AND snapshot_id = toUUID(?))"
+		"SELECT 1 FROM wrstat_mounts_active_v2 WHERE mount_path = ? AND snapshot_id = toUUID(?))"
 )
 
 var (

@@ -50,7 +50,7 @@ const (
 	importPhaseTreeSummaryRefresh = "wrstat_tree_summary_refresh"
 	importPhaseOldSnapshotDrop    = "old_snapshot_partition_drop"
 
-	activeSnapshotQuery = "SELECT toString(snapshot_id) FROM wrstat_mounts_active " +
+	activeSnapshotQuery = "SELECT toString(snapshot_id) FROM wrstat_mounts_active_v2 " +
 		"WHERE mount_path = ?"
 	switchSnapshotQuery = "INSERT INTO wrstat_mounts (mount_path, switched_at, active_snapshot, updated_at) " +
 		"SELECT ?, greatest(coalesce(max(switched_at) + toIntervalMillisecond(1), now64(3)), now64(3)), " +

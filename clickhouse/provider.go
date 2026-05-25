@@ -43,7 +43,7 @@ import (
 const mountsActiveRowsInitialCap = 16
 
 const mountsActiveRowsQuery = "SELECT mount_path, toString(snapshot_id), updated_at " +
-	"FROM wrstat_mounts_active ORDER BY mount_path"
+	"FROM wrstat_mounts_active_v2 ORDER BY mount_path"
 
 type mountsActiveRow struct {
 	mountPath  string

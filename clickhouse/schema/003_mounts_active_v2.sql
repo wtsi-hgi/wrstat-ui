@@ -24,4 +24,16 @@
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  ***************************************************************************** */
 
-DROP VIEW IF EXISTS wrstat_mounts_active;
+CREATE VIEW IF NOT EXISTS wrstat_mounts_active_v2 AS
+SELECT
+  mount_path,
+  tupleElement(latest, 1) AS snapshot_id,
+  tupleElement(latest, 2) AS updated_at
+FROM (
+  SELECT
+    mount_path,
+    argMax(tuple(active_snapshot, updated_at, active), switched_at) AS latest
+  FROM wrstat_mounts
+  GROUP BY mount_path
+)
+WHERE tupleElement(latest, 3) = 1;

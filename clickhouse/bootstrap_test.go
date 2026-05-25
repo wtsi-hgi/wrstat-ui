@@ -31,9 +31,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -73,6 +76,8 @@ const (
 	schemaVersionBootstrapReadyFilePrefix = "ready-"
 )
 
+var errBootstrapTestSourceLocation = errors.New("clickhouse: failed to locate bootstrap test source")
+
 type bootstrapTestError string
 
 const (
@@ -101,6 +106,25 @@ func (r bootstrapTestRow) Scan(...any) error {
 
 func (r bootstrapTestRow) ScanStruct(any) error {
 	return r.err
+}
+
+func readLegacyActiveSnapshotID(ctx context.Context, conn ch.Conn, mountPath string) string {
+	rows, err := conn.Query(
+		ctx,
+		"SELECT toString(snapshot_id) FROM wrstat_mounts_active WHERE mount_path = ?",
+		mountPath,
+	)
+	So(err, ShouldBeNil)
+
+	defer func() { _ = rows.Close() }()
+
+	So(rows.Next(), ShouldBeTrue)
+
+	var sid string
+	So(rows.Scan(&sid), ShouldBeNil)
+	So(rows.Next(), ShouldBeFalse)
+
+	return sid
 }
 
 type bootstrapTestConn struct {
@@ -670,6 +694,7 @@ func TestNewClientBootstrapsSchema(t *testing.T) {
 		So(tables, ShouldContain, "wrstat_schema_version")
 		So(tables, ShouldContain, "wrstat_mounts")
 		So(tables, ShouldContain, "wrstat_mounts_active")
+		So(tables, ShouldContain, "wrstat_mounts_active_v2")
 		So(tables, ShouldContain, "wrstat_dguta")
 		So(tables, ShouldContain, "wrstat_children")
 		So(tables, ShouldContain, "wrstat_dir_summary")
@@ -687,13 +712,18 @@ func TestNewClientBootstrapsSchema(t *testing.T) {
 		So(cols, ShouldContain, "snapshot_id")
 		So(cols, ShouldContain, "updated_at")
 
+		cols = listColumnNames(ctx, t, conn, cfg.Database, "wrstat_mounts_active_v2")
+		So(cols, ShouldContain, "mount_path")
+		So(cols, ShouldContain, "snapshot_id")
+		So(cols, ShouldContain, "updated_at")
+
 		mountCols := listColumnNames(ctx, t, conn, cfg.Database, "wrstat_mounts")
 		So(mountCols, ShouldContain, "active")
 
 		So(tableEngine(ctx, t, conn, cfg.Database, "wrstat_schema_version"), ShouldEqual, "TinyLog")
 	})
 
-	Convey("NewClient bootstraps wrstat_mounts_active to hide inactive latest rows", t, func() {
+	Convey("NewClient bootstraps wrstat_mounts_active_v2 to hide inactive latest rows", t, func() {
 		os.Setenv("WRSTAT_ENV", "test")
 
 		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
@@ -756,7 +786,7 @@ func TestNewClientBootstrapsSchema(t *testing.T) {
 		So(activeSID, ShouldEqual, secondSID)
 	})
 
-	Convey("NewClient migrates a legacy wrstat_mounts_active view to hide inactive latest rows", t, func() {
+	Convey("NewClient leaves a legacy wrstat_mounts_active view and uses v2 for active reads", t, func() {
 		os.Setenv("WRSTAT_ENV", "test")
 
 		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
@@ -790,6 +820,10 @@ func TestNewClientBootstrapsSchema(t *testing.T) {
 		mountCols := listColumnNames(ctx, t, conn, cfg.Database, "wrstat_mounts")
 		So(mountCols, ShouldContain, "active")
 
+		tables := listTableNames(ctx, t, conn, cfg.Database)
+		So(tables, ShouldContain, "wrstat_mounts_active")
+		So(tables, ShouldContain, "wrstat_mounts_active_v2")
+
 		firstUpdatedAt := time.Date(2026, 1, 9, 12, 0, 0, 0, time.UTC)
 		secondUpdatedAt := firstUpdatedAt.Add(time.Hour)
 		firstSID := snapshotID(testMountPath, firstUpdatedAt).String()
@@ -801,6 +835,7 @@ func TestNewClientBootstrapsSchema(t *testing.T) {
 		So(err, ShouldBeNil)
 		So(hasActive, ShouldBeTrue)
 		So(activeSID, ShouldEqual, firstSID)
+		So(readLegacyActiveSnapshotID(ctx, conn, testMountPath), ShouldEqual, firstSID)
 
 		So(conn.Exec(
 			ctx,
@@ -815,6 +850,8 @@ func TestNewClientBootstrapsSchema(t *testing.T) {
 		So(err, ShouldBeNil)
 		So(hasActive, ShouldBeFalse)
 		So(activeSID, ShouldBeBlank)
+		So(readLegacyActiveSnapshotID(ctx, conn, testMountPath), ShouldEqual, firstSID)
+		So(cleanActiveSnapshotAttemptWithConn(cfg, conn, testMountPath, firstUpdatedAt), ShouldBeNil)
 
 		So(conn.Exec(
 			ctx,
@@ -1123,18 +1160,19 @@ func TestNewClientBootstrapLockWaitDoesNotUseQueryTimeout(t *testing.T) {
 }
 
 func TestSchemaSQLMountsActiveViewMigrationOrdering(t *testing.T) {
-	Convey("schemaSQL rebuilds wrstat_mounts_active without atomic replace DDL", t, func() {
+	Convey("schemaSQL creates v2 active view without dropping the legacy view", t, func() {
 		stmts, err := schemaSQL()
 		So(err, ShouldBeNil)
 
 		activeColumnIdx := -1
 		dropIdx := -1
-		createIdx := -1
+		createV2Idx := -1
 		usesCreateOrReplace := false
+		v2IsTombstoneAware := false
 
 		for i, stmt := range stmts {
 			normalised := normalizeSchemaStatementForTest(stmt)
-			if strings.Contains(normalised, "CREATE OR REPLACE VIEW WRSTAT_MOUNTS_ACTIVE") {
+			if schemaStatementReplacesActiveView(normalised) {
 				usesCreateOrReplace = true
 			}
 
@@ -1146,18 +1184,79 @@ func TestSchemaSQLMountsActiveViewMigrationOrdering(t *testing.T) {
 				dropIdx = i
 			}
 
-			if strings.Contains(normalised, "CREATE VIEW IF NOT EXISTS WRSTAT_MOUNTS_ACTIVE AS") {
-				createIdx = i
+			if strings.Contains(normalised, "CREATE VIEW IF NOT EXISTS WRSTAT_MOUNTS_ACTIVE_V2 AS") {
+				createV2Idx = i
+				v2IsTombstoneAware = strings.Contains(
+					normalised,
+					"ARGMAX(TUPLE(ACTIVE_SNAPSHOT, UPDATED_AT, ACTIVE), SWITCHED_AT)",
+				) && strings.Contains(normalised, "WHERE TUPLEELEMENT(LATEST, 3) = 1")
 			}
 		}
 
 		So(usesCreateOrReplace, ShouldBeFalse)
 		So(activeColumnIdx, ShouldBeGreaterThanOrEqualTo, 0)
-		So(dropIdx, ShouldBeGreaterThan, activeColumnIdx)
-		So(createIdx, ShouldBeGreaterThan, dropIdx)
+		So(dropIdx, ShouldEqual, -1)
+		So(createV2Idx, ShouldBeGreaterThan, activeColumnIdx)
+		So(v2IsTombstoneAware, ShouldBeTrue)
 	})
 }
 
 func normalizeSchemaStatementForTest(stmt string) string {
 	return strings.Join(strings.Fields(strings.ToUpper(stmt)), " ")
+}
+
+func schemaStatementReplacesActiveView(normalised string) bool {
+	return strings.Contains(normalised, "CREATE OR REPLACE VIEW WRSTAT_MOUNTS_ACTIVE") ||
+		strings.Contains(normalised, "CREATE OR REPLACE VIEW WRSTAT_MOUNTS_ACTIVE_V2")
+}
+
+func TestProductionGoSQLAvoidsLegacyMountsActiveView(t *testing.T) {
+	Convey("production Go source does not query the legacy active mounts view", t, func() {
+		legacyViewPattern := regexp.MustCompile(`\bwrstat_mounts_active\b`)
+		offenders, err := productionGoFilesContaining(legacyViewPattern)
+
+		So(err, ShouldBeNil)
+		So(offenders, ShouldBeEmpty)
+	})
+}
+
+func productionGoFilesContaining(pattern *regexp.Regexp) ([]string, error) {
+	_, currentFile, _, ok := runtime.Caller(0)
+	if !ok {
+		return nil, errBootstrapTestSourceLocation
+	}
+
+	repoRoot := filepath.Dir(filepath.Dir(currentFile))
+	repoFS := os.DirFS(repoRoot)
+	roots := []string{"clickhouse", "cmd", "internal"}
+	offenders := make([]string, 0)
+
+	for _, root := range roots {
+		if err := fs.WalkDir(repoFS, root, func(path string, entry fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+
+			if entry.IsDir() || filepath.Ext(path) != ".go" || strings.HasSuffix(path, "_test.go") {
+				return nil
+			}
+
+			b, err := fs.ReadFile(repoFS, path)
+			if err != nil {
+				return err
+			}
+
+			if pattern.Match(b) {
+				offenders = append(offenders, path)
+			}
+
+			return nil
+		}); err != nil {
+			return nil, err
+		}
+	}
+
+	sort.Strings(offenders)
+
+	return offenders, nil
 }

@@ -576,7 +576,7 @@ func (r *providerSwapTestBD) Close() error {
 }
 
 func TestOpenProviderPolling(t *testing.T) {
-	Convey("OpenProvider polls wrstat_mounts_active and calls OnUpdate on change", t, func() {
+	Convey("OpenProvider polls wrstat_mounts_active_v2 and calls OnUpdate on change", t, func() {
 		os.Setenv("WRSTAT_ENV", "test")
 		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
 

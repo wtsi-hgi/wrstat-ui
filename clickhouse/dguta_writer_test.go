@@ -50,14 +50,14 @@ const testMountPath = "/mnt/test/"
 const dgutaWriterTestPhasePartitionDropReset = "partition_drop_reset"
 
 const (
-	dgutaWriterTestActiveSnapshotQuery = "SELECT toString(snapshot_id), updated_at FROM wrstat_mounts_active " +
+	dgutaWriterTestActiveSnapshotQuery = "SELECT toString(snapshot_id), updated_at FROM wrstat_mounts_active_v2 " +
 		"WHERE mount_path = ?"
 	dgutaWriterTestSelectGIDQuery = "SELECT gid FROM wrstat_dguta WHERE mount_path = ? " +
 		"AND snapshot_id = toUUID(?) AND dir = ?"
 	dgutaWriterTestSelectChildQuery = "SELECT child FROM wrstat_children WHERE mount_path = ? " +
 		"AND snapshot_id = toUUID(?) AND parent_dir = ?"
 
-	dgutaWriterTestCountActiveMountQuery = "SELECT count() FROM wrstat_mounts_active WHERE mount_path = ?"
+	dgutaWriterTestCountActiveMountQuery = "SELECT count() FROM wrstat_mounts_active_v2 WHERE mount_path = ?"
 	dgutaWriterTestCountDGUTAQuery       = "SELECT count() FROM wrstat_dguta WHERE mount_path = ? " +
 		"AND snapshot_id = toUUID(?)"
 	dgutaWriterTestCountChildrenQuery = "SELECT count() FROM wrstat_children WHERE mount_path = ? " +

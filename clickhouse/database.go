@@ -59,7 +59,7 @@ const (
 
 	childrenAncestorQuery = "WITH active AS (" +
 		"SELECT mount_path, snapshot_id " +
-		"FROM wrstat_mounts_active " +
+		"FROM wrstat_mounts_active_v2 " +
 		"WHERE startsWith(mount_path, ?)" +
 		") " +
 		"SELECT DISTINCT c.child " +
@@ -77,7 +77,7 @@ const (
 
 	dgutaAncestorQuery = "WITH active AS (" +
 		"SELECT mount_path, snapshot_id " +
-		"FROM wrstat_mounts_active " +
+		"FROM wrstat_mounts_active_v2 " +
 		"WHERE startsWith(mount_path, ?)" +
 		") " +
 		"SELECT d.gid, d.uid, d.ft, d.age, d.count, d.size, " +
@@ -89,7 +89,7 @@ const (
 		"WHERE d.dir = ?"
 
 	ancestorMaxUpdatedAtQuery = "SELECT max(updated_at) " +
-		"FROM wrstat_mounts_active " +
+		"FROM wrstat_mounts_active_v2 " +
 		"WHERE startsWith(mount_path, ?)"
 
 	infoDGUTAQuery = "SELECT " +
@@ -97,7 +97,7 @@ const (
 		"count() AS num_dgutas " +
 		"FROM wrstat_dguta " +
 		"WHERE (mount_path, snapshot_id) IN (" +
-		"SELECT mount_path, snapshot_id FROM wrstat_mounts_active" +
+		"SELECT mount_path, snapshot_id FROM wrstat_mounts_active_v2" +
 		")"
 
 	infoChildrenQuery = "SELECT " +
@@ -105,14 +105,14 @@ const (
 		"count() AS num_children " +
 		"FROM wrstat_children " +
 		"WHERE (mount_path, snapshot_id) IN (" +
-		"SELECT mount_path, snapshot_id FROM wrstat_mounts_active" +
+		"SELECT mount_path, snapshot_id FROM wrstat_mounts_active_v2" +
 		")"
 
-	resolveMountQuery = "SELECT mount_path, snapshot_id, updated_at FROM wrstat_mounts_active " +
+	resolveMountQuery = "SELECT mount_path, snapshot_id, updated_at FROM wrstat_mounts_active_v2 " +
 		"WHERE startsWith(?, mount_path) " +
 		"ORDER BY length(mount_path) DESC LIMIT 1"
 
-	resolveExactMountQuery = "SELECT mount_path, snapshot_id, updated_at FROM wrstat_mounts_active " +
+	resolveExactMountQuery = "SELECT mount_path, snapshot_id, updated_at FROM wrstat_mounts_active_v2 " +
 		"WHERE mount_path = ? LIMIT 1"
 
 	childrenAncestorSnapshotQuery = "SELECT DISTINCT c.child " +
