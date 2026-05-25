@@ -27,9 +27,11 @@ package clickhouse
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
+	ch "github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	. "github.com/smartystreets/goconvey/convey"
 	"github.com/wtsi-hgi/wrstat-ui/db"
@@ -37,11 +39,28 @@ import (
 )
 
 const (
-	activeSnapshotCleanupCountMountRowsQuery = "SELECT count() FROM wrstat_mounts " +
-		"WHERE mount_path = ? AND active_snapshot = toUUID(?)"
 	activeSnapshotCleanupCountHistoryQuery = "SELECT count() FROM wrstat_basedirs_history " +
 		"WHERE mount_path = ? AND gid = ?"
 )
+
+var errActiveSnapshotCleanupDeleteForbidden = errors.New("active snapshot cleanup delete should not run")
+
+var errActiveSnapshotCleanupNormalDeadline = errors.New("active snapshot cleanup used normal query timeout")
+
+type activeSnapshotCleanupDeleteRejectingConn struct {
+	ch.Conn
+	sawDelete bool
+}
+
+func (c *activeSnapshotCleanupDeleteRejectingConn) Exec(ctx context.Context, query string, args ...any) error {
+	if query == deleteActiveSnapshotMountRowsQuery {
+		c.sawDelete = true
+
+		return errActiveSnapshotCleanupDeleteForbidden
+	}
+
+	return c.Conn.Exec(ctx, query, args...)
+}
 
 func TestCleanActiveSnapshotAttempt(t *testing.T) {
 	Convey("CleanActiveSnapshotAttempt removes only the failed active snapshot and preserves older data", t, func() {
@@ -67,8 +86,8 @@ func TestCleanActiveSnapshotAttempt(t *testing.T) {
 
 		So(conn.Exec(ctx, testInsertMountStmt, testMountPath, olderUpdatedAt, olderSID, olderUpdatedAt), ShouldBeNil)
 		So(conn.Exec(ctx, testInsertMountStmt, testMountPath, failedUpdatedAt, failedSID, failedUpdatedAt), ShouldBeNil)
-		insertSnapshotCleanupRows(ctx, conn, testMountPath, olderSID, olderUpdatedAt)
-		insertSnapshotCleanupRows(ctx, conn, testMountPath, failedSID, failedUpdatedAt)
+		insertSnapshotCleanupRows(ctx, conn, olderSID, olderUpdatedAt)
+		insertSnapshotCleanupRows(ctx, conn, failedSID, failedUpdatedAt)
 		So(conn.Exec(
 			ctx,
 			testInsertBasedirsHistoryStmt,
@@ -93,11 +112,83 @@ func TestCleanActiveSnapshotAttempt(t *testing.T) {
 		So(hasActive, ShouldBeTrue)
 		So(activeSID, ShouldEqual, olderSID)
 
-		So(countRows(ctx, conn, activeSnapshotCleanupCountMountRowsQuery, testMountPath, failedSID), ShouldEqual, 0)
-		So(countRows(ctx, conn, activeSnapshotCleanupCountMountRowsQuery, testMountPath, olderSID), ShouldEqual, 1)
 		So(countRows(ctx, conn, activeSnapshotCleanupCountHistoryQuery, testMountPath, uint32(7)), ShouldEqual, 1)
-		assertSnapshotCleanupRows(ctx, conn, testMountPath, olderSID, 1)
-		assertSnapshotCleanupRows(ctx, conn, testMountPath, failedSID, 0)
+		assertSnapshotCleanupRows(ctx, conn, olderSID, 1)
+		assertSnapshotCleanupRows(ctx, conn, failedSID, 0)
+	})
+
+	Convey("CleanActiveSnapshotAttempt rolls back to an older snapshot without deleting mount rows", t, func() {
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 5 * time.Second
+
+		olderUpdatedAt := time.Date(2026, 1, 9, 12, 0, 0, 0, time.UTC)
+		failedUpdatedAt := olderUpdatedAt.Add(time.Hour)
+		olderSID := snapshotID(testMountPath, olderUpdatedAt).String()
+		failedSID := snapshotID(testMountPath, failedUpdatedAt).String()
+
+		opts, err := optionsFromConfig(cfg)
+		So(err, ShouldBeNil)
+
+		conn, err := connectAndBootstrap(context.Background(), opts, cfg.Database, queryTimeout(cfg))
+		So(err, ShouldBeNil)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		So(conn.Exec(ctx, testInsertMountStmt, testMountPath, olderUpdatedAt, olderSID, olderUpdatedAt), ShouldBeNil)
+		So(conn.Exec(ctx, testInsertMountStmt, testMountPath, failedUpdatedAt, failedSID, failedUpdatedAt), ShouldBeNil)
+		insertSnapshotCleanupRows(ctx, conn, olderSID, olderUpdatedAt)
+		insertSnapshotCleanupRows(ctx, conn, failedSID, failedUpdatedAt)
+
+		wrapped := &activeSnapshotCleanupDeleteRejectingConn{Conn: conn}
+		So(cleanActiveSnapshotAttemptWithConn(cfg, wrapped, testMountPath, failedUpdatedAt), ShouldBeNil)
+		So(wrapped.sawDelete, ShouldBeFalse)
+
+		activeSID, hasActive, err := readActiveSnapshotID(ctx, conn, testMountPath)
+		So(err, ShouldBeNil)
+		So(hasActive, ShouldBeTrue)
+		So(activeSID, ShouldEqual, olderSID)
+		assertSnapshotCleanupRows(ctx, conn, olderSID, 1)
+		assertSnapshotCleanupRows(ctx, conn, failedSID, 0)
+	})
+
+	Convey("CleanActiveSnapshotAttempt does not use the normal query timeout for unavoidable deletes", t, func() {
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 5 * time.Second
+
+		failedUpdatedAt := time.Date(2026, 1, 9, 12, 0, 0, 0, time.UTC)
+		failedSID := snapshotID(testMountPath, failedUpdatedAt).String()
+
+		opts, err := optionsFromConfig(cfg)
+		So(err, ShouldBeNil)
+
+		conn, err := connectAndBootstrap(context.Background(), opts, cfg.Database, queryTimeout(cfg))
+		So(err, ShouldBeNil)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		So(conn.Exec(ctx, testInsertMountStmt, testMountPath, failedUpdatedAt, failedSID, failedUpdatedAt), ShouldBeNil)
+		insertSnapshotCleanupRows(ctx, conn, failedSID, failedUpdatedAt)
+
+		wrapped := &activeSnapshotCleanupDeadlineCheckingConn{
+			Conn:         conn,
+			queryTimeout: cfg.QueryTimeout,
+		}
+		So(cleanActiveSnapshotAttemptWithConn(cfg, wrapped, testMountPath, failedUpdatedAt), ShouldBeNil)
+		So(wrapped.sawDelete, ShouldBeTrue)
+
+		activeSID, hasActive, err := readActiveSnapshotID(ctx, conn, testMountPath)
+		So(err, ShouldBeNil)
+		So(hasActive, ShouldBeFalse)
+		So(activeSID, ShouldBeBlank)
+		assertSnapshotCleanupRows(ctx, conn, failedSID, 0)
 	})
 }
 
@@ -106,7 +197,6 @@ func insertSnapshotCleanupRows(
 	conn interface {
 		Exec(ctx context.Context, query string, args ...any) error
 	},
-	mountPath string,
 	sid string,
 	updatedAt time.Time,
 ) {
@@ -116,9 +206,9 @@ func insertSnapshotCleanupRows(
 	So(conn.Exec(
 		ctx,
 		testInsertDGUTAStmt,
-		mountPath,
+		testMountPath,
 		sid,
-		mountPath,
+		testMountPath,
 		uint32(7),
 		uint32(9),
 		uint16(db.DGUTAFileTypeBam),
@@ -130,13 +220,13 @@ func insertSnapshotCleanupRows(
 		atimeBuckets,
 		mtimeBuckets,
 	), ShouldBeNil)
-	So(conn.Exec(ctx, testInsertChildrenStmt, mountPath, sid, mountPath, mountPath+"child"), ShouldBeNil)
+	So(conn.Exec(ctx, testInsertChildrenStmt, testMountPath, sid, testMountPath, testMountPath+"child"), ShouldBeNil)
 	So(conn.Exec(
 		ctx,
 		testInsertFileStmt,
-		mountPath,
+		testMountPath,
 		sid,
-		mountPath,
+		testMountPath,
 		"file.bam",
 		"bam",
 		uint8(stats.FileType),
@@ -153,7 +243,7 @@ func insertSnapshotCleanupRows(
 	So(conn.Exec(
 		ctx,
 		insertBasedirsGroupUsageQuery,
-		mountPath,
+		testMountPath,
 		sid,
 		uint32(7),
 		basedirsStoreTestBaseDir,
@@ -170,7 +260,7 @@ func insertSnapshotCleanupRows(
 	So(conn.Exec(
 		ctx,
 		insertBasedirsUserUsageQuery,
-		mountPath,
+		testMountPath,
 		sid,
 		uint32(9),
 		basedirsStoreTestBaseDir,
@@ -182,7 +272,7 @@ func insertSnapshotCleanupRows(
 		uint64(2),
 		updatedAt,
 	), ShouldBeNil)
-	insertSnapshotCleanupSubdirs(ctx, conn, mountPath, sid, updatedAt)
+	insertSnapshotCleanupSubdirs(ctx, conn, sid, updatedAt)
 }
 
 func insertSnapshotCleanupSubdirs(
@@ -190,7 +280,6 @@ func insertSnapshotCleanupSubdirs(
 	conn interface {
 		Exec(ctx context.Context, query string, args ...any) error
 	},
-	mountPath string,
 	sid string,
 	updatedAt time.Time,
 ) {
@@ -199,7 +288,7 @@ func insertSnapshotCleanupSubdirs(
 	So(conn.Exec(
 		ctx,
 		insertBasedirsGroupSubdirsQuery,
-		mountPath,
+		testMountPath,
 		sid,
 		uint32(7),
 		basedirsStoreTestBaseDir,
@@ -214,7 +303,7 @@ func insertSnapshotCleanupSubdirs(
 	So(conn.Exec(
 		ctx,
 		insertBasedirsUserSubdirsQuery,
-		mountPath,
+		testMountPath,
 		sid,
 		uint32(9),
 		basedirsStoreTestBaseDir,
@@ -233,7 +322,6 @@ func assertSnapshotCleanupRows(
 	conn interface {
 		Query(ctx context.Context, query string, args ...any) (driver.Rows, error)
 	},
-	mountPath string,
 	sid string,
 	expected uint64,
 ) {
@@ -248,6 +336,25 @@ func assertSnapshotCleanupRows(
 	}
 
 	for _, query := range queries {
-		So(countRows(ctx, conn, query, mountPath, sid), ShouldEqual, expected)
+		So(countRows(ctx, conn, query, testMountPath, sid), ShouldEqual, expected)
 	}
+}
+
+type activeSnapshotCleanupDeadlineCheckingConn struct {
+	ch.Conn
+	queryTimeout time.Duration
+	sawDelete    bool
+}
+
+func (c *activeSnapshotCleanupDeadlineCheckingConn) Exec(ctx context.Context, query string, args ...any) error {
+	if query == deleteActiveSnapshotMountRowsQuery {
+		c.sawDelete = true
+
+		deadline, ok := ctx.Deadline()
+		if ok && time.Until(deadline) <= c.queryTimeout {
+			return errActiveSnapshotCleanupNormalDeadline
+		}
+	}
+
+	return c.Conn.Exec(ctx, query, args...)
 }
