@@ -35,6 +35,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -52,6 +53,15 @@ const (
 	testSystemTableEngineQuery  = "SELECT engine FROM system.tables WHERE database = ? AND name = ? LIMIT 1"
 	testInsertInactiveMountStmt = "INSERT INTO wrstat_mounts (mount_path, switched_at, " +
 		"active_snapshot, updated_at, active) VALUES (?, ?, ?, ?, 0)"
+	testCreateLegacyMountsTableStmt = "CREATE TABLE wrstat_mounts (" +
+		"mount_path LowCardinality(String) CODEC(ZSTD(3)), " +
+		"switched_at DateTime64(3) CODEC(Delta, ZSTD(3)), " +
+		"active_snapshot UUID, " +
+		"updated_at DateTime CODEC(Delta, ZSTD(3))" +
+		") ENGINE = ReplacingMergeTree(switched_at) ORDER BY mount_path"
+	testCreateLegacyMountsActiveViewStmt = "CREATE VIEW wrstat_mounts_active AS " +
+		"SELECT mount_path, argMax(active_snapshot, switched_at) AS snapshot_id, " +
+		"max(updated_at) AS updated_at FROM wrstat_mounts GROUP BY mount_path"
 
 	schemaVersionBootstrapHelperEnv       = "WRSTAT_SCHEMA_BOOTSTRAP_HELPER"
 	schemaVersionBootstrapDSNEnv          = "WRSTAT_SCHEMA_BOOTSTRAP_DSN"
@@ -745,6 +755,81 @@ func TestNewClientBootstrapsSchema(t *testing.T) {
 		So(hasActive, ShouldBeTrue)
 		So(activeSID, ShouldEqual, secondSID)
 	})
+
+	Convey("NewClient migrates a legacy wrstat_mounts_active view to hide inactive latest rows", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.PollInterval = time.Second
+		cfg.QueryTimeout = 5 * time.Second
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		adminConn := th.openConn(th.baseDSN(defaultDatabaseName))
+
+		Reset(func() { So(adminConn.Close(), ShouldBeNil) })
+
+		So(adminConn.Exec(ctx, createDatabaseStmtPrefix+quoteIdent(cfg.Database)), ShouldBeNil)
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		So(conn.Exec(ctx, testCreateLegacyMountsTableStmt), ShouldBeNil)
+		So(conn.Exec(ctx, testCreateLegacyMountsActiveViewStmt), ShouldBeNil)
+
+		c, err := NewClient(cfg)
+		So(err, ShouldBeNil)
+		So(c, ShouldNotBeNil)
+		Reset(func() { So(c.Close(), ShouldBeNil) })
+
+		mountCols := listColumnNames(ctx, t, conn, cfg.Database, "wrstat_mounts")
+		So(mountCols, ShouldContain, "active")
+
+		firstUpdatedAt := time.Date(2026, 1, 9, 12, 0, 0, 0, time.UTC)
+		secondUpdatedAt := firstUpdatedAt.Add(time.Hour)
+		firstSID := snapshotID(testMountPath, firstUpdatedAt).String()
+		secondSID := snapshotID(testMountPath, secondUpdatedAt).String()
+
+		So(conn.Exec(ctx, testInsertMountStmt, testMountPath, firstUpdatedAt, firstSID, firstUpdatedAt), ShouldBeNil)
+
+		activeSID, hasActive, err := readActiveSnapshotID(ctx, conn, testMountPath)
+		So(err, ShouldBeNil)
+		So(hasActive, ShouldBeTrue)
+		So(activeSID, ShouldEqual, firstSID)
+
+		So(conn.Exec(
+			ctx,
+			testInsertInactiveMountStmt,
+			testMountPath,
+			firstUpdatedAt.Add(time.Second),
+			firstSID,
+			firstUpdatedAt,
+		), ShouldBeNil)
+
+		activeSID, hasActive, err = readActiveSnapshotID(ctx, conn, testMountPath)
+		So(err, ShouldBeNil)
+		So(hasActive, ShouldBeFalse)
+		So(activeSID, ShouldBeBlank)
+
+		So(conn.Exec(
+			ctx,
+			testInsertMountStmt,
+			testMountPath,
+			firstUpdatedAt.Add(2*time.Second),
+			secondSID,
+			secondUpdatedAt,
+		), ShouldBeNil)
+
+		activeSID, hasActive, err = readActiveSnapshotID(ctx, conn, testMountPath)
+		So(err, ShouldBeNil)
+		So(hasActive, ShouldBeTrue)
+		So(activeSID, ShouldEqual, secondSID)
+	})
 }
 
 func runSchemaVersionBootstrapHelperProcess(t *testing.T) {
@@ -1035,4 +1120,44 @@ func TestNewClientBootstrapLockWaitDoesNotUseQueryTimeout(t *testing.T) {
 		So(helper.wait(), ShouldBeNil)
 		So(th.schemaVersions(cfg), ShouldResemble, []uint32{1})
 	})
+}
+
+func TestSchemaSQLMountsActiveViewMigrationOrdering(t *testing.T) {
+	Convey("schemaSQL rebuilds wrstat_mounts_active without atomic replace DDL", t, func() {
+		stmts, err := schemaSQL()
+		So(err, ShouldBeNil)
+
+		activeColumnIdx := -1
+		dropIdx := -1
+		createIdx := -1
+		usesCreateOrReplace := false
+
+		for i, stmt := range stmts {
+			normalised := normalizeSchemaStatementForTest(stmt)
+			if strings.Contains(normalised, "CREATE OR REPLACE VIEW WRSTAT_MOUNTS_ACTIVE") {
+				usesCreateOrReplace = true
+			}
+
+			if strings.Contains(normalised, "ALTER TABLE WRSTAT_MOUNTS ADD COLUMN IF NOT EXISTS ACTIVE ") {
+				activeColumnIdx = i
+			}
+
+			if strings.Contains(normalised, "DROP VIEW IF EXISTS WRSTAT_MOUNTS_ACTIVE") {
+				dropIdx = i
+			}
+
+			if strings.Contains(normalised, "CREATE VIEW IF NOT EXISTS WRSTAT_MOUNTS_ACTIVE AS") {
+				createIdx = i
+			}
+		}
+
+		So(usesCreateOrReplace, ShouldBeFalse)
+		So(activeColumnIdx, ShouldBeGreaterThanOrEqualTo, 0)
+		So(dropIdx, ShouldBeGreaterThan, activeColumnIdx)
+		So(createIdx, ShouldBeGreaterThan, dropIdx)
+	})
+}
+
+func normalizeSchemaStatementForTest(stmt string) string {
+	return strings.Join(strings.Fields(strings.ToUpper(stmt)), " ")
 }
