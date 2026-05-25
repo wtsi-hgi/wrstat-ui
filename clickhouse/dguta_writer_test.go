@@ -955,6 +955,48 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 		So(vectorSummaries, ShouldNotContainKey, mountPath+"alpha/leaf/")
 	})
 
+	Convey("DGUTAWriter streams mount dir projection batches before Close", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 5 * time.Second
+		cfg.MountPoints = []string{"/mnt/streaming/"}
+
+		const mountPath = "/mnt/streaming/"
+
+		updatedAt := time.Date(2026, 1, 12, 9, 0, 0, 0, time.UTC)
+
+		w, err := NewDGUTAWriter(cfg)
+		So(err, ShouldBeNil)
+		So(w, ShouldNotBeNil)
+
+		impl, ok := w.(*dgutaWriter)
+		So(ok, ShouldBeTrue)
+		Reset(func() { So(impl.Abort(), ShouldBeNil) })
+
+		trackedConn := &projectionStreamingConn{Conn: impl.conn}
+		impl.conn = trackedConn
+		impl.SetBatchSize(1)
+		impl.SetMountPath(mountPath)
+		impl.SetUpdatedAt(updatedAt)
+
+		paths := internaltest.NewDirectoryPathCreator()
+		So(impl.Add(db.RecordDGUTA{
+			Dir: paths.ToDirectoryPath(mountPath),
+			GUTAs: db.GUTAs{
+				testProjectionGUTA(7, 9, db.DGUTAFileTypeBam, db.DGUTAgeAll, 10),
+			},
+			Children: []string{"alpha/"},
+		}), ShouldBeNil)
+
+		So(trackedConn.sentProjectionBatches(), ShouldBeGreaterThan, 0)
+		So(trackedConn.sentSummarySetBatches(), ShouldEqual, 0)
+		So(impl.Close(), ShouldBeNil)
+		So(trackedConn.sentSummarySetBatches(), ShouldEqual, 1)
+	})
+
 	Convey("DGUTAWriter keeps the active snapshot when tree summary refresh times out", t, func() {
 		os.Setenv("WRSTAT_ENV", "test")
 		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
@@ -1088,4 +1130,67 @@ func testProjectionGUTA(
 		ATimeRanges: [9]uint64{uint64(count), 0, 0, 0, 0, 0, 0, 0, 0},
 		MTimeRanges: [9]uint64{0, uint64(count), 0, 0, 0, 0, 0, 0, 0},
 	}
+}
+
+type projectionStreamingConn struct {
+	ch.Conn
+
+	projectionSends atomic.Int32
+	summarySetSends atomic.Int32
+}
+
+func (c *projectionStreamingConn) PrepareBatch(
+	ctx context.Context,
+	query string,
+	opts ...driver.PrepareBatchOption,
+) (driver.Batch, error) {
+	batch, err := c.Conn.PrepareBatch(ctx, query, opts...)
+	if err != nil {
+		return nil, err
+	}
+
+	if !isMountDirProjectionInsert(query) {
+		return batch, nil
+	}
+
+	return &projectionStreamingBatch{
+		Batch: batch,
+		query: query,
+		conn:  c,
+	}, nil
+}
+
+func isMountDirProjectionInsert(query string) bool {
+	return query == insertMountDirSummaryQuery ||
+		query == insertMountDirDGUTAVectorQuery ||
+		query == insertMountDirSummarySetQuery
+}
+
+func (c *projectionStreamingConn) sentProjectionBatches() int {
+	return int(c.projectionSends.Load())
+}
+
+func (c *projectionStreamingConn) sentSummarySetBatches() int {
+	return int(c.summarySetSends.Load())
+}
+
+type projectionStreamingBatch struct {
+	driver.Batch
+
+	query string
+	conn  *projectionStreamingConn
+}
+
+func (b *projectionStreamingBatch) Send() error {
+	if err := b.Batch.Send(); err != nil {
+		return err
+	}
+
+	if b.query == insertMountDirSummarySetQuery {
+		b.conn.summarySetSends.Add(1)
+	} else {
+		b.conn.projectionSends.Add(1)
+	}
+
+	return nil
 }

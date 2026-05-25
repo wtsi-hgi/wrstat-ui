@@ -175,7 +175,7 @@ func scanMountDirDGUTAVectorRows(rows rowsScanner) (map[string]db.GUTAs, error) 
 			return nil, err
 		}
 
-		gutasByDir[dir] = gutas
+		gutasByDir[dir] = append(gutasByDir[dir], gutas...)
 	}
 
 	if err := rowsErr(rows); err != nil {

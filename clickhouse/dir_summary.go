@@ -29,6 +29,7 @@ package clickhouse
 import (
 	"context"
 	"fmt"
+	"time"
 
 	ch "github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/wtsi-hgi/wrstat-ui/db"
@@ -105,6 +106,16 @@ func mountDirSummaryModeForFilter(filter *db.Filter) (mountDirSummaryMode, bool)
 	}
 }
 
+func newMountDirSummaryScan() *mountDirSummaryScan {
+	return &mountDirSummaryScan{
+		summaries:    make(map[string]*db.DirSummary),
+		handled:      make(map[string]bool),
+		childCounts:  make(map[string]uint64),
+		accumulators: make(map[string]*mountDirSummaryAccumulator),
+		updatedAts:   make(map[string]time.Time),
+	}
+}
+
 func mountDirSummariesForExternalDirsQueryForMode(mode mountDirSummaryMode) string {
 	if mode == mountDirSummaryFiles {
 		return mountDirFileSummariesForExternalDirsQuery
@@ -119,6 +130,47 @@ func mountDirSummariesForDirsQueryForMode(mode mountDirSummaryMode) string {
 	}
 
 	return mountDirSummariesForDirsQuery
+}
+
+type mountDirSummaryScan struct {
+	summaries    map[string]*db.DirSummary
+	handled      map[string]bool
+	childCounts  map[string]uint64
+	accumulators map[string]*mountDirSummaryAccumulator
+	updatedAts   map[string]time.Time
+}
+
+func (s *mountDirSummaryScan) add(dir string, row treeDirSummaryScanned, childCount uint64) {
+	s.handled[dir] = true
+	s.childCounts[dir] += childCount
+
+	if row.count == 0 {
+		return
+	}
+
+	acc := s.accumulator(dir, db.DirGUTAge(row.age))
+	acc.addScanned(row)
+	s.updatedAts[dir] = row.updatedAt
+}
+
+func (s *mountDirSummaryScan) accumulator(dir string, age db.DirGUTAge) *mountDirSummaryAccumulator {
+	acc := s.accumulators[dir]
+	if acc != nil {
+		return acc
+	}
+
+	acc = newMountDirSummaryAccumulator(age)
+	s.accumulators[dir] = acc
+
+	return acc
+}
+
+func (s *mountDirSummaryScan) result() (map[string]*db.DirSummary, map[string]bool, map[string]uint64) {
+	for dir, acc := range s.accumulators {
+		s.summaries[dir] = acc.summary(s.updatedAts[dir])
+	}
+
+	return s.summaries, s.handled, s.childCounts
 }
 
 func mountDirSummaryReady(
@@ -147,29 +199,27 @@ func mountDirSummaryReady(
 func scanMountDirSummaryRows(
 	rows rowsScanner,
 ) (map[string]*db.DirSummary, map[string]bool, map[string]uint64, error) {
-	summaries := make(map[string]*db.DirSummary)
-	handled := make(map[string]bool)
-	childCounts := make(map[string]uint64)
+	scanned := newMountDirSummaryScan()
 
 	for rows.Next() {
-		dir, sum, childCount, err := scanMountDirSummaryRow(rows)
+		dir, s, childCount, err := scanMountDirSummaryRow(rows)
 		if err != nil {
 			return nil, nil, nil, err
 		}
 
-		summaries[dir] = sum
-		handled[dir] = true
-		childCounts[dir] = childCount
+		scanned.add(dir, s, childCount)
 	}
 
 	if err := rowsErr(rows); err != nil {
 		return nil, nil, nil, fmt.Errorf("clickhouse: maintained dir summary iteration error: %w", err)
 	}
 
+	summaries, handled, childCounts := scanned.result()
+
 	return summaries, handled, childCounts, nil
 }
 
-func scanMountDirSummaryRow(rows rowsScanner) (string, *db.DirSummary, uint64, error) {
+func scanMountDirSummaryRow(rows rowsScanner) (string, treeDirSummaryScanned, uint64, error) {
 	var (
 		dir        string
 		childCount uint64
@@ -191,14 +241,10 @@ func scanMountDirSummaryRow(rows rowsScanner) (string, *db.DirSummary, uint64, e
 		&s.ft,
 		&childCount,
 	); err != nil {
-		return "", nil, 0, fmt.Errorf("clickhouse: failed to scan maintained dir summary: %w", err)
+		return "", treeDirSummaryScanned{}, 0, fmt.Errorf("clickhouse: failed to scan maintained dir summary: %w", err)
 	}
 
-	if s.count == 0 {
-		return dir, nil, childCount, nil
-	}
-
-	return dir, s.summary(), childCount, nil
+	return dir, s, childCount, nil
 }
 
 func mergeMountDirSummaryRows(

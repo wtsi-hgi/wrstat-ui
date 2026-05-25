@@ -132,6 +132,23 @@ type dgutaRecordRows struct {
 	keys         map[dgutaRowKey]struct{}
 }
 
+func (r dgutaRecordRows) ages() []db.DirGUTAge {
+	ages := make([]db.DirGUTAge, 0, len(r.keys))
+	seen := make(map[db.DirGUTAge]struct{}, len(r.keys))
+
+	for key := range r.keys {
+		age := db.DirGUTAge(key.age)
+		if _, ok := seen[age]; ok {
+			continue
+		}
+
+		seen[age] = struct{}{}
+		ages = append(ages, age)
+	}
+
+	return ages
+}
+
 type dgutaBatchSlot struct {
 	batch *driver.Batch
 	query string
@@ -170,7 +187,7 @@ type dgutaWriter struct {
 	failBeforeSwitchErr error
 
 	previousDGUTARows dgutaRecordRows
-	dirProjection     mountDirProjectionState
+	dirProjection     mountDirProjectionWriter
 
 	closed bool
 }
@@ -205,6 +222,10 @@ func (w *dgutaWriter) Add(dguta db.RecordDGUTA) error {
 		return err
 	}
 
+	return w.addReadyRecord(ctx, dguta)
+}
+
+func (w *dgutaWriter) addReadyRecord(ctx context.Context, dguta db.RecordDGUTA) error {
 	rawParentDir := string(dguta.Dir.AppendTo(make([]byte, 0, dguta.Dir.Len())))
 	parentDir := canonicalPathForMount(w.mountPath, rawParentDir)
 
@@ -218,8 +239,14 @@ func (w *dgutaWriter) Add(dguta db.RecordDGUTA) error {
 		return err
 	}
 
-	w.dirProjection.addGUTAs(parentDir, appendedGUTAs)
-	w.dirProjection.addChildren(parentDir, appendedChildren)
+	if err := w.appendMountDirProjectionRows(
+		parentDir,
+		appendedGUTAs,
+		appendedChildren,
+		w.previousDGUTARows.ages(),
+	); err != nil {
+		return err
+	}
 
 	return w.flushFullBatches(ctx)
 }
@@ -238,6 +265,10 @@ func (w *dgutaWriter) Close() error {
 	ctx, cancel := configQueryContext(w.cfg)
 	defer cancel()
 
+	if err := w.ensureCloseReady(ctx); err != nil {
+		return w.closeWithNewSnapshotCleanup(ctx, err)
+	}
+
 	if err := w.flushAllBatches(); err != nil {
 		return w.closeWithNewSnapshotCleanup(ctx, err)
 	}
@@ -254,7 +285,7 @@ func (w *dgutaWriter) publishSnapshotOnClose(ctx context.Context) error {
 		return nil
 	}
 
-	if err := w.writeMountDirProjections(ctx); err != nil {
+	if err := w.writeMountDirProjectionSummarySet(ctx); err != nil {
 		return w.closeWithNewSnapshotCleanup(ctx, err)
 	}
 
@@ -304,6 +335,14 @@ func (w *dgutaWriter) shouldSwitchSnapshot() bool {
 	return w.mountPath != "" && !w.updatedAt.IsZero()
 }
 
+func (w *dgutaWriter) ensureCloseReady(ctx context.Context) error {
+	if !w.shouldSwitchSnapshot() || w.prepared {
+		return nil
+	}
+
+	return w.ensureWriteReady(ctx)
+}
+
 func (w *dgutaWriter) ensureSnapshotID() {
 	if w.snapshot != uuid.Nil {
 		return
@@ -347,16 +386,20 @@ func (w *dgutaWriter) refreshActiveTreeSummariesBestEffort(ctx context.Context) 
 	}
 }
 
-func (w *dgutaWriter) writeMountDirProjections(ctx context.Context) error {
+func (w *dgutaWriter) writeMountDirProjectionSummarySet(ctx context.Context) error {
 	w.ensureSnapshotID()
 
 	return w.timeImportPhase(importPhaseDirProjectionWrite, func() error {
-		return writeMountDirProjectionRows(ctx, w.conn, activeMount{
-			mountPath:  w.mountPath,
-			snapshotID: w.snapshot.String(),
-			updatedAt:  w.updatedAt,
-		}, w.dirProjection, w.batchSize)
+		return writeMountDirSummarySetRow(ctx, w.conn, w.activeMount(), w.dirProjection.refreshedAt)
 	})
+}
+
+func (w *dgutaWriter) activeMount() activeMount {
+	return activeMount{
+		mountPath:  w.mountPath,
+		snapshotID: w.snapshot.String(),
+		updatedAt:  w.updatedAt,
+	}
 }
 
 func (w *dgutaWriter) refreshActiveTreeSummaries(ctx context.Context) error {
@@ -473,6 +516,7 @@ func (w *dgutaWriter) abortAllBatches() error {
 	return errors.Join(
 		abortBatch(&w.dgutaBatch, "dguta"),
 		abortBatch(&w.childrenBatch, "children"),
+		w.dirProjection.abortAll(),
 	)
 }
 
@@ -545,13 +589,14 @@ func (w *dgutaWriter) ensureWriteReady(ctx context.Context) error {
 
 	batchCtx := context.WithoutCancel(ctx)
 
-	dgutaBatch, childrenBatch, err := w.prepareBatches(batchCtx)
+	dgutaBatch, childrenBatch, dirProjection, err := w.prepareBatches(batchCtx)
 	if err != nil {
 		return err
 	}
 
 	w.dgutaBatch = dgutaBatch
 	w.childrenBatch = childrenBatch
+	w.dirProjection = dirProjection
 	w.prepared = true
 
 	return nil
@@ -580,25 +625,64 @@ func refuseActiveSnapshotRewrite(
 	)
 }
 
-func (w *dgutaWriter) prepareBatches(ctx context.Context) (driver.Batch, driver.Batch, error) {
+func (w *dgutaWriter) prepareBatches(
+	ctx context.Context,
+) (driver.Batch, driver.Batch, mountDirProjectionWriter, error) {
 	dgutaBatch, err := w.prepareBatch(ctx, insertDGUTAQuery)
 	if err != nil {
-		return nil, nil, fmt.Errorf("clickhouse: failed to prepare dguta batch: %w", err)
+		return nil, nil, mountDirProjectionWriter{}, fmt.Errorf("clickhouse: failed to prepare dguta batch: %w", err)
 	}
 
-	childrenBatch, err := w.prepareBatch(ctx, insertChildrenQuery)
+	childrenBatch, err := w.prepareChildrenBatch(ctx, dgutaBatch)
 	if err != nil {
-		if abortErr := dgutaBatch.Abort(); abortErr != nil {
-			return nil, nil, fmt.Errorf(
-				"clickhouse: failed to prepare children batch and abort dguta batch: %w",
-				errors.Join(err, abortErr),
-			)
-		}
-
-		return nil, nil, fmt.Errorf("clickhouse: failed to prepare children batch: %w", err)
+		return nil, nil, mountDirProjectionWriter{}, err
 	}
 
-	return dgutaBatch, childrenBatch, nil
+	dirProjection, err := w.prepareDirProjectionBatches(ctx, dgutaBatch, childrenBatch)
+	if err != nil {
+		return nil, nil, mountDirProjectionWriter{}, err
+	}
+
+	return dgutaBatch, childrenBatch, dirProjection, nil
+}
+
+func (w *dgutaWriter) prepareChildrenBatch(ctx context.Context, dgutaBatch driver.Batch) (driver.Batch, error) {
+	childrenBatch, err := w.prepareBatch(ctx, insertChildrenQuery)
+	if err == nil {
+		return childrenBatch, nil
+	}
+
+	if abortErr := dgutaBatch.Abort(); abortErr != nil {
+		return nil, fmt.Errorf(
+			"clickhouse: failed to prepare children batch and abort dguta batch: %w",
+			errors.Join(err, abortErr),
+		)
+	}
+
+	return nil, fmt.Errorf("clickhouse: failed to prepare children batch: %w", err)
+}
+
+func (w *dgutaWriter) prepareDirProjectionBatches(
+	ctx context.Context,
+	dgutaBatch, childrenBatch driver.Batch,
+) (mountDirProjectionWriter, error) {
+	dirProjection, err := prepareMountDirProjectionWriter(ctx, w.conn)
+	if err == nil {
+		return dirProjection, nil
+	}
+
+	abortErr := errors.Join(
+		abortBatch(&childrenBatch, "children"),
+		abortBatch(&dgutaBatch, "dguta"),
+	)
+	if abortErr != nil {
+		return mountDirProjectionWriter{}, fmt.Errorf(
+			"clickhouse: failed to prepare dir projection batches and abort import batches: %w",
+			errors.Join(err, abortErr),
+		)
+	}
+
+	return mountDirProjectionWriter{}, err
 }
 
 func (w *dgutaWriter) prepareBatch(ctx context.Context, query string) (driver.Batch, error) {
@@ -773,6 +857,17 @@ func childPathForParent(parentDir, child string) string {
 	return parentDir + child
 }
 
+func (w *dgutaWriter) appendMountDirProjectionRows(
+	parentDir string,
+	gutas db.GUTAs,
+	childCount uint64,
+	recordAges []db.DirGUTAge,
+) error {
+	return w.timeImportPhase(importPhaseDirProjectionWrite, func() error {
+		return w.dirProjection.appendRecord(w.activeMount(), parentDir, gutas, childCount, recordAges)
+	})
+}
+
 func (w *dgutaWriter) flushFullBatches(ctx context.Context) error {
 	for _, slot := range w.batchSlots() {
 		if slot.rows() < w.batchSize {
@@ -803,7 +898,7 @@ func (w *dgutaWriter) flushAllBatches() error {
 	return nil
 }
 
-func (w *dgutaWriter) batchSlots() [2]dgutaBatchSlot {
+func (w *dgutaWriter) batchSlots() [4]dgutaBatchSlot {
 	return [...]dgutaBatchSlot{
 		{
 			batch: &w.dgutaBatch,
@@ -816,6 +911,18 @@ func (w *dgutaWriter) batchSlots() [2]dgutaBatchSlot {
 			query: insertChildrenQuery,
 			phase: importPhaseChildrenInsert,
 			name:  "children",
+		},
+		{
+			batch: &w.dirProjection.summaryBatch,
+			query: insertMountDirSummaryQuery,
+			phase: importPhaseDirProjectionWrite,
+			name:  "dir summary",
+		},
+		{
+			batch: &w.dirProjection.vectorBatch,
+			query: insertMountDirDGUTAVectorQuery,
+			phase: importPhaseDirProjectionWrite,
+			name:  "dir dguta vector",
 		},
 	}
 }

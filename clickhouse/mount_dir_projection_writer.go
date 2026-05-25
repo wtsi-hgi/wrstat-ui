@@ -301,6 +301,82 @@ func mountDirSummaryBaseValues(
 	}
 }
 
+type mountDirProjectionWriter struct {
+	summaryBatch driver.Batch
+	vectorBatch  driver.Batch
+	refreshedAt  time.Time
+}
+
+func prepareMountDirProjectionWriter(
+	ctx context.Context,
+	conn ch.Conn,
+) (mountDirProjectionWriter, error) {
+	writer := mountDirProjectionWriter{refreshedAt: time.Now().UTC()}
+	if err := writer.prepare(ctx, conn); err != nil {
+		return mountDirProjectionWriter{}, err
+	}
+
+	return writer, nil
+}
+
+func (w *mountDirProjectionWriter) prepare(ctx context.Context, conn ch.Conn) error {
+	summaryBatch, err := prepareBatchWithRelease(ctx, conn, insertMountDirSummaryQuery)
+	if err != nil {
+		return fmt.Errorf("clickhouse: failed to prepare dir summary batch: %w", err)
+	}
+
+	vectorBatch, err := prepareBatchWithRelease(ctx, conn, insertMountDirDGUTAVectorQuery)
+	if err != nil {
+		if abortErr := summaryBatch.Abort(); abortErr != nil {
+			return fmt.Errorf(
+				"clickhouse: failed to prepare dir dguta vector batch and abort dir summary batch: %w",
+				errors.Join(err, abortErr),
+			)
+		}
+
+		return fmt.Errorf("clickhouse: failed to prepare dir dguta vector batch: %w", err)
+	}
+
+	w.summaryBatch = summaryBatch
+	w.vectorBatch = vectorBatch
+
+	return nil
+}
+
+func (w *mountDirProjectionWriter) appendRecord(
+	mount activeMount,
+	dir string,
+	gutas db.GUTAs,
+	childCount uint64,
+	recordAges []db.DirGUTAge,
+) error {
+	state := newMountDirProjectionState()
+	state.addGUTAs(dir, gutas)
+	state.addChildren(dir, childCount)
+	state.addChildOnlySummaryAges(dir, recordAges)
+
+	for _, key := range state.summaryKeys() {
+		if err := appendMountDirSummaryRow(w.summaryBatch, mount, key, state, w.refreshedAt); err != nil {
+			return err
+		}
+	}
+
+	for _, vectorDir := range state.vectorDirs() {
+		if err := appendMountDirDGUTAVectorRow(w.vectorBatch, mount, vectorDir, state, w.refreshedAt); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (w *mountDirProjectionWriter) abortAll() error {
+	return errors.Join(
+		abortBatch(&w.summaryBatch, "dir summary"),
+		abortBatch(&w.vectorBatch, "dir dguta vector"),
+	)
+}
+
 type mountDirSummaryAccumulator struct {
 	age          db.DirGUTAge
 	count        uint64
@@ -312,6 +388,14 @@ type mountDirSummaryAccumulator struct {
 	uids         map[uint32]struct{}
 	gids         map[uint32]struct{}
 	ft           db.DirGUTAFileType
+}
+
+func newMountDirSummaryAccumulator(age db.DirGUTAge) *mountDirSummaryAccumulator {
+	return &mountDirSummaryAccumulator{
+		age:  age,
+		uids: make(map[uint32]struct{}),
+		gids: make(map[uint32]struct{}),
+	}
 }
 
 func (a *mountDirSummaryAccumulator) add(guta *db.GUTA) {
@@ -337,6 +421,63 @@ func (a *mountDirSummaryAccumulator) add(guta *db.GUTA) {
 	a.uids[guta.UID] = struct{}{}
 	a.gids[guta.GID] = struct{}{}
 	a.ft |= guta.FT
+}
+
+func (a *mountDirSummaryAccumulator) addScanned(s treeDirSummaryScanned) {
+	a.count += s.count
+	a.size += s.size
+	a.addScannedTimes(s)
+	addAgeBucketSlice(&a.atimeBuckets, s.atimeBuckets)
+	addAgeBucketSlice(&a.mtimeBuckets, s.mtimeBuckets)
+	addUint32Slice(a.uids, s.uids)
+	addUint32Slice(a.gids, s.gids)
+	a.ft |= db.DirGUTAFileType(s.ft)
+}
+
+func addAgeBucketSlice(dst *summary.AgeBuckets, src []uint64) {
+	for i, count := range src {
+		if i >= len(dst) {
+			return
+		}
+
+		dst[i] += count
+	}
+}
+
+func addUint32Slice(dst map[uint32]struct{}, src []uint32) {
+	for _, value := range src {
+		dst[value] = struct{}{}
+	}
+}
+
+func (a *mountDirSummaryAccumulator) addScannedTimes(s treeDirSummaryScanned) {
+	if s.atimeMin != 0 && (a.atimeMin == 0 || s.atimeMin < a.atimeMin) {
+		a.atimeMin = s.atimeMin
+	}
+
+	if s.mtimeMax > a.mtimeMax {
+		a.mtimeMax = s.mtimeMax
+	}
+}
+
+func (a *mountDirSummaryAccumulator) summary(updatedAt time.Time) *db.DirSummary {
+	if a == nil || a.count == 0 {
+		return nil
+	}
+
+	return &db.DirSummary{
+		Count:       a.count,
+		Size:        a.size,
+		Atime:       time.Unix(a.atimeMin, 0),
+		CommonATime: summary.MostCommonBucket(a.atimeBuckets),
+		Mtime:       time.Unix(a.mtimeMax, 0),
+		CommonMTime: summary.MostCommonBucket(a.mtimeBuckets),
+		UIDs:        sortedUint32Set(a.uids),
+		GIDs:        sortedUint32Set(a.gids),
+		FT:          a.ft,
+		Age:         a.age,
+		Modtime:     updatedAt.UTC(),
+	}
 }
 
 type mountDirProjectionState struct {
@@ -401,6 +542,23 @@ func (s *mountDirProjectionState) addChildren(dir string, count uint64) {
 	s.childCounts[dir] += count
 }
 
+func (s *mountDirProjectionState) addChildOnlySummaryAges(dir string, ages []db.DirGUTAge) {
+	if len(ages) == 0 || s.childCounts[dir] == 0 {
+		return
+	}
+
+	s.ensure()
+
+	for _, age := range ages {
+		key := mountDirSummaryKey{dir: dir, age: age}
+		if s.summaries[key] != nil {
+			continue
+		}
+
+		s.summaries[key] = newMountDirSummaryAccumulator(age)
+	}
+}
+
 func (s *mountDirProjectionState) ensure() {
 	if s.summaries == nil {
 		*s = newMountDirProjectionState()
@@ -416,11 +574,7 @@ func (s *mountDirProjectionState) summaryAccumulator(
 		return acc
 	}
 
-	acc = &mountDirSummaryAccumulator{
-		age:  key.age,
-		uids: make(map[uint32]struct{}),
-		gids: make(map[uint32]struct{}),
-	}
+	acc = newMountDirSummaryAccumulator(key.age)
 	accumulators[key] = acc
 
 	return acc
