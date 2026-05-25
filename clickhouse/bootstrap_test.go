@@ -786,6 +786,82 @@ func TestNewClientBootstrapsSchema(t *testing.T) {
 		So(activeSID, ShouldEqual, secondSID)
 	})
 
+	Convey("NewClient bootstraps wrstat_mounts_active_v2 to prefer inactive rows on switched_at ties", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.PollInterval = time.Second
+		cfg.QueryTimeout = 5 * time.Second
+
+		c, err := NewClient(cfg)
+		So(err, ShouldBeNil)
+		So(c, ShouldNotBeNil)
+		Reset(func() { So(c.Close(), ShouldBeNil) })
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		tiedSwitchAt := time.Now().UTC().Add(time.Hour).Truncate(time.Millisecond)
+		updatedAt := time.Date(2026, 1, 9, 12, 0, 0, 0, time.UTC)
+
+		activeFirstMount := testMountPath
+		activeFirstSID := snapshotID(activeFirstMount, updatedAt).String()
+		So(conn.Exec(ctx, testInsertMountStmt, activeFirstMount, tiedSwitchAt, activeFirstSID, updatedAt), ShouldBeNil)
+		So(conn.Exec(
+			ctx,
+			testInsertInactiveMountStmt,
+			activeFirstMount,
+			tiedSwitchAt,
+			activeFirstSID,
+			updatedAt,
+		), ShouldBeNil)
+
+		inactiveFirstMount := "/mnt/test-inactive-first/"
+		inactiveFirstSID := snapshotID(inactiveFirstMount, updatedAt).String()
+		So(conn.Exec(
+			ctx,
+			testInsertInactiveMountStmt,
+			inactiveFirstMount,
+			tiedSwitchAt,
+			inactiveFirstSID,
+			updatedAt,
+		), ShouldBeNil)
+		So(conn.Exec(ctx, testInsertMountStmt, inactiveFirstMount, tiedSwitchAt, inactiveFirstSID, updatedAt), ShouldBeNil)
+
+		activeSID, hasActive, err := readActiveSnapshotID(ctx, conn, activeFirstMount)
+		So(err, ShouldBeNil)
+		So(hasActive, ShouldBeFalse)
+		So(activeSID, ShouldBeBlank)
+
+		activeSID, hasActive, err = readActiveSnapshotID(ctx, conn, inactiveFirstMount)
+		So(err, ShouldBeNil)
+		So(hasActive, ShouldBeFalse)
+		So(activeSID, ShouldBeBlank)
+
+		retryUpdatedAt := updatedAt.Add(time.Hour)
+		retrySID := snapshotID(activeFirstMount, retryUpdatedAt).String()
+		So(conn.Exec(
+			ctx,
+			testInsertMountStmt,
+			activeFirstMount,
+			tiedSwitchAt.Add(time.Second),
+			retrySID,
+			retryUpdatedAt,
+		), ShouldBeNil)
+
+		activeSID, hasActive, err = readActiveSnapshotID(ctx, conn, activeFirstMount)
+		So(err, ShouldBeNil)
+		So(hasActive, ShouldBeTrue)
+		So(activeSID, ShouldEqual, retrySID)
+	})
+
 	Convey("NewClient leaves a legacy wrstat_mounts_active view and uses v2 for active reads", t, func() {
 		os.Setenv("WRSTAT_ENV", "test")
 
@@ -1186,10 +1262,13 @@ func TestSchemaSQLMountsActiveViewMigrationOrdering(t *testing.T) {
 
 			if strings.Contains(normalised, "CREATE VIEW IF NOT EXISTS WRSTAT_MOUNTS_ACTIVE_V2 AS") {
 				createV2Idx = i
-				v2IsTombstoneAware = strings.Contains(
-					normalised,
-					"ARGMAX(TUPLE(ACTIVE_SNAPSHOT, UPDATED_AT, ACTIVE), SWITCHED_AT)",
-				) && strings.Contains(normalised, "WHERE TUPLEELEMENT(LATEST, 3) = 1")
+				v2IsTombstoneAware = strings.Contains(normalised, "ARGMAX(") &&
+					strings.Contains(normalised, "TUPLE(ACTIVE_SNAPSHOT, UPDATED_AT, ACTIVE)") &&
+					strings.Contains(
+						normalised,
+						"TUPLE(SWITCHED_AT, IF(ACTIVE = 0, 1, 0), UPDATED_AT, TOSTRING(ACTIVE_SNAPSHOT))",
+					) &&
+					strings.Contains(normalised, "WHERE TUPLEELEMENT(LATEST, 3) = 1")
 			}
 		}
 

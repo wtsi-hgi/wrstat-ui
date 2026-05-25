@@ -32,7 +32,10 @@ SELECT
 FROM (
   SELECT
     mount_path,
-    argMax(tuple(active_snapshot, updated_at, active), switched_at) AS latest
+    argMax(
+      tuple(active_snapshot, updated_at, active),
+      tuple(switched_at, if(active = 0, 1, 0), updated_at, toString(active_snapshot))
+    ) AS latest
   FROM wrstat_mounts
   GROUP BY mount_path
 )
