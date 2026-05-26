@@ -46,7 +46,7 @@ const (
 	mountMaxSwitchedAtQuery             = "SELECT maxOrNull(switched_at) FROM wrstat_mounts WHERE mount_path = ?"
 	latestActiveSnapshotSwitchedAtQuery = "SELECT maxOrNull(switched_at) FROM wrstat_mounts " +
 		"WHERE mount_path = ? AND active_snapshot = toUUID(?) AND active = 1 " +
-		"AND switched_at > ?"
+		"AND switched_at > fromUnixTimestamp64Milli(?)"
 	latestMountMetadataRowsQuery = "SELECT toString(active_snapshot), updated_at, switched_at, active " +
 		"FROM wrstat_mounts WHERE mount_path = ? ORDER BY switched_at DESC, " +
 		"if(active = 0, 1, 0) DESC, updated_at DESC, toString(active_snapshot) DESC LIMIT 5"
@@ -70,7 +70,7 @@ const (
 		"SELECT max(switched_at) AS latest_switched_at, " +
 		"argMax(updated_at, tuple(switched_at, if(active = 0, 1, 0), updated_at, toString(active_snapshot))) " +
 		"AS latest_updated_at FROM wrstat_mounts WHERE mount_path = ?) " +
-		"WHERE latest_switched_at <= ?"
+		"WHERE latest_switched_at <= fromUnixTimestamp64Milli(?)"
 )
 
 var (
@@ -226,7 +226,13 @@ func readLatestActiveSnapshotSwitchedAt(
 	sid string,
 	baselineMaxSwitchedAt time.Time,
 ) (time.Time, bool, error) {
-	rows, err := conn.Query(ctx, latestActiveSnapshotSwitchedAtQuery, mountPath, sid, baselineMaxSwitchedAt)
+	rows, err := conn.Query(
+		ctx,
+		latestActiveSnapshotSwitchedAtQuery,
+		mountPath,
+		sid,
+		snapshotCleanupUnixMillis(baselineMaxSwitchedAt),
+	)
 	if err != nil {
 		return time.Time{}, false, fmt.Errorf("clickhouse: failed to read latest active snapshot switch time: %w", err)
 	}
@@ -242,6 +248,10 @@ func readLatestActiveSnapshotSwitchedAt(
 	}
 
 	return scanLatestActiveSnapshotSwitchedAt(rows)
+}
+
+func snapshotCleanupUnixMillis(t time.Time) int64 {
+	return t.UTC().UnixMilli()
 }
 
 func latestActiveSnapshotSwitchedAtRowsErr(err error) error {
@@ -513,7 +523,7 @@ func execRepairInactiveSnapshotMountRow(
 		mountPath,
 		sid,
 		mountPath,
-		baselineMaxSwitchedAt,
+		snapshotCleanupUnixMillis(baselineMaxSwitchedAt),
 	); err != nil {
 		return fmt.Errorf("clickhouse: failed to repair active snapshot mount row: %w", err)
 	}

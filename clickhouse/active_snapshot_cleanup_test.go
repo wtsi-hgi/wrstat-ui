@@ -160,6 +160,42 @@ func TestCleanActiveSnapshotAttempt(t *testing.T) {
 		assertSnapshotCleanupRows(ctx, conn, failedSID, 0)
 	})
 
+	Convey("CleanActiveSnapshotAttempt treats same-millisecond active rows as the cleanup baseline",
+		t, func() {
+			th := newClickHouseTestHarness(t)
+			cfg := th.newConfig()
+			cfg.QueryTimeout = 5 * time.Second
+
+			failedUpdatedAt := time.Date(2026, 1, 9, 12, 0, 0, 0, time.UTC)
+			failedSwitchAt := time.Date(2026, 1, 9, 12, 0, 1, 221*int(time.Millisecond), time.UTC)
+			failedSID := snapshotID(testMountPath, failedUpdatedAt).String()
+
+			opts, err := optionsFromConfig(cfg)
+			So(err, ShouldBeNil)
+
+			conn, err := connectAndBootstrap(context.Background(), opts, cfg.Database, queryTimeout(cfg))
+			So(err, ShouldBeNil)
+
+			Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+
+			insertSnapshotCleanupMountAt(ctx, conn, testMountPath, failedSwitchAt, failedSID, failedUpdatedAt)
+			insertSnapshotCleanupRows(ctx, conn, failedSID, failedUpdatedAt)
+
+			wrapped := &activeSnapshotCleanupCoarseLatestActiveParamConn{Conn: conn}
+			So(cleanActiveSnapshotAttemptWithConn(cfg, wrapped, testMountPath, failedUpdatedAt), ShouldBeNil)
+			So(wrapped.sawMillisecondBaseline, ShouldBeTrue)
+			So(wrapped.sawCoarseTimeBaseline, ShouldBeFalse)
+
+			activeSID, hasActive, err := readActiveSnapshotID(ctx, conn, testMountPath)
+			So(err, ShouldBeNil)
+			So(hasActive, ShouldBeFalse)
+			So(activeSID, ShouldBeBlank)
+			assertSnapshotCleanupRows(ctx, conn, failedSID, 0)
+		})
+
 	Convey("CleanActiveSnapshotAttempt repairs a no-effect inactive mount insert before dropping failed partitions",
 		t, func() {
 			th := newClickHouseTestHarness(t)
@@ -186,6 +222,43 @@ func TestCleanActiveSnapshotAttempt(t *testing.T) {
 			wrapped := &activeSnapshotCleanupInactiveNoopConn{Conn: conn}
 			So(cleanActiveSnapshotAttemptWithConn(cfg, wrapped, testMountPath, failedUpdatedAt), ShouldBeNil)
 			So(wrapped.noopedInactiveInserts, ShouldEqual, 1)
+
+			activeSID, hasActive, err := readActiveSnapshotID(ctx, conn, testMountPath)
+			So(err, ShouldBeNil)
+			So(hasActive, ShouldBeFalse)
+			So(activeSID, ShouldBeBlank)
+			assertSnapshotCleanupRows(ctx, conn, failedSID, 0)
+		})
+
+	Convey("CleanActiveSnapshotAttempt repairs no-effect tombstones using millisecond cleanup baselines",
+		t, func() {
+			th := newClickHouseTestHarness(t)
+			cfg := th.newConfig()
+			cfg.QueryTimeout = 5 * time.Second
+
+			failedUpdatedAt := time.Date(2026, 1, 9, 12, 0, 0, 0, time.UTC)
+			failedSwitchAt := time.Date(2026, 1, 9, 12, 0, 1, 221*int(time.Millisecond), time.UTC)
+			failedSID := snapshotID(testMountPath, failedUpdatedAt).String()
+
+			opts, err := optionsFromConfig(cfg)
+			So(err, ShouldBeNil)
+
+			conn, err := connectAndBootstrap(context.Background(), opts, cfg.Database, queryTimeout(cfg))
+			So(err, ShouldBeNil)
+
+			Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+
+			insertSnapshotCleanupMountAt(ctx, conn, testMountPath, failedSwitchAt, failedSID, failedUpdatedAt)
+			insertSnapshotCleanupRows(ctx, conn, failedSID, failedUpdatedAt)
+
+			wrapped := &activeSnapshotCleanupCoarseRepairParamConn{Conn: conn}
+			So(cleanActiveSnapshotAttemptWithConn(cfg, wrapped, testMountPath, failedUpdatedAt), ShouldBeNil)
+			So(wrapped.noopedInactiveInserts, ShouldEqual, 1)
+			So(wrapped.sawMillisecondRepairBaseline, ShouldBeTrue)
+			So(wrapped.noopedRepairs, ShouldEqual, 0)
 
 			activeSID, hasActive, err := readActiveSnapshotID(ctx, conn, testMountPath)
 			So(err, ShouldBeNil)
@@ -582,6 +655,22 @@ func assertSnapshotCleanupRows(
 	}
 }
 
+func insertSnapshotCleanupMountAt(
+	ctx context.Context,
+	conn interface {
+		Exec(ctx context.Context, query string, args ...any) error
+	},
+	mountPath string,
+	switchedAt time.Time,
+	sid string,
+	updatedAt time.Time,
+) {
+	const query = "INSERT INTO wrstat_mounts (mount_path, switched_at, active_snapshot, updated_at) " +
+		"SELECT ?, fromUnixTimestamp64Milli(?), toUUID(?), ?"
+
+	So(conn.Exec(ctx, query, mountPath, switchedAt.UTC().UnixMilli(), sid, updatedAt), ShouldBeNil)
+}
+
 type activeSnapshotCleanupDeadlineCheckingConn struct {
 	ch.Conn
 	queryTimeout      time.Duration
@@ -744,4 +833,65 @@ func isActiveSnapshotCleanupMetadataChangeQuery(query string) bool {
 	return query == insertInactiveSnapshotMountRowQuery ||
 		query == repairInactiveSnapshotMountRowQuery ||
 		query == rollbackActiveSnapshotMountRowQuery
+}
+
+type activeSnapshotCleanupCoarseLatestActiveParamConn struct {
+	ch.Conn
+	sawCoarseTimeBaseline  bool
+	sawMillisecondBaseline bool
+}
+
+func (c *activeSnapshotCleanupCoarseLatestActiveParamConn) Query(
+	ctx context.Context,
+	query string,
+	args ...any,
+) (driver.Rows, error) {
+	if query != latestActiveSnapshotSwitchedAtQuery {
+		return c.Conn.Query(ctx, query, args...)
+	}
+
+	switch baseline := args[2].(type) {
+	case time.Time:
+		c.sawCoarseTimeBaseline = true
+
+		return c.Conn.Query(ctx, "SELECT toNullable(fromUnixTimestamp64Milli(?))", baseline.UTC().UnixMilli())
+	case int64:
+		c.sawMillisecondBaseline = true
+	}
+
+	return c.Conn.Query(ctx, query, args...)
+}
+
+type activeSnapshotCleanupCoarseRepairParamConn struct {
+	ch.Conn
+	noopedInactiveInserts        int
+	noopedRepairs                int
+	sawMillisecondRepairBaseline bool
+}
+
+func (c *activeSnapshotCleanupCoarseRepairParamConn) Exec(
+	ctx context.Context,
+	query string,
+	args ...any,
+) error {
+	if query == insertInactiveSnapshotMountRowQuery && c.noopedInactiveInserts == 0 {
+		c.noopedInactiveInserts++
+
+		return nil
+	}
+
+	if query != repairInactiveSnapshotMountRowQuery {
+		return c.Conn.Exec(ctx, query, args...)
+	}
+
+	switch args[3].(type) {
+	case time.Time:
+		c.noopedRepairs++
+
+		return nil
+	case int64:
+		c.sawMillisecondRepairBaseline = true
+	}
+
+	return c.Conn.Exec(ctx, query, args...)
 }
