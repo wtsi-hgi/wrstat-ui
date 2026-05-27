@@ -85,6 +85,7 @@ var (
 	errMountPathRequired     = errors.New("clickhouse: mount path is required")
 	errUpdatedAtRequired     = errors.New("clickhouse: updated at is required")
 	errDirRequired           = errors.New("clickhouse: record dir is required")
+	errDGUTABatchNotPrepared = errors.New("clickhouse: dguta batch is not prepared")
 	errActiveSnapshotRewrite = errors.New(
 		"clickhouse: refusing to rewrite active snapshot",
 	)
@@ -213,7 +214,8 @@ type dgutaWriter struct {
 	previousDGUTARows dgutaRecordRows
 	dirProjection     mountDirProjectionWriter
 
-	closed bool
+	closed   bool
+	writeErr error
 }
 
 func (w *dgutaWriter) SetBatchSize(batchSize int) {
@@ -384,6 +386,10 @@ func (w *dgutaWriter) shouldSwitchSnapshot() bool {
 }
 
 func (w *dgutaWriter) ensureCloseReady(ctx context.Context) error {
+	if w.writeErr != nil {
+		return w.writeErr
+	}
+
 	if !w.shouldSwitchSnapshot() || w.prepared {
 		return nil
 	}
@@ -628,6 +634,10 @@ func allPartitionDropQueries() []string {
 }
 
 func (w *dgutaWriter) ensureWriteReady(ctx context.Context) error {
+	if w.writeErr != nil {
+		return w.writeErr
+	}
+
 	w.ensureSnapshotID()
 
 	if w.prepared {
@@ -644,19 +654,7 @@ func (w *dgutaWriter) ensureWriteReady(ctx context.Context) error {
 		return err
 	}
 
-	batchCtx := context.WithoutCancel(ctx)
-
-	dgutaBatch, childrenBatch, dirProjection, err := w.prepareBatches(batchCtx)
-	if err != nil {
-		return err
-	}
-
-	w.dgutaBatch = dgutaBatch
-	w.childrenBatch = childrenBatch
-	w.dirProjection = dirProjection
-	w.prepared = true
-
-	return nil
+	return w.prepareWriteBatches(context.WithoutCancel(ctx))
 }
 
 func refuseActiveSnapshotRewrite(
@@ -680,6 +678,20 @@ func refuseActiveSnapshotRewrite(
 		mountPath,
 		activeSID,
 	)
+}
+
+func (w *dgutaWriter) prepareWriteBatches(ctx context.Context) error {
+	dgutaBatch, childrenBatch, dirProjection, err := w.prepareBatches(ctx)
+	if err != nil {
+		return err
+	}
+
+	w.dgutaBatch = dgutaBatch
+	w.childrenBatch = childrenBatch
+	w.dirProjection = dirProjection
+	w.prepared = true
+
+	return nil
 }
 
 func (w *dgutaWriter) prepareBatches(
@@ -842,6 +854,14 @@ func (w *dgutaWriter) appendDGUTARow(
 }
 
 func (w *dgutaWriter) appendDGUTABatchRow(parentDir string, guta *db.GUTA) error {
+	if w.writeErr != nil {
+		return w.writeErr
+	}
+
+	if w.dgutaBatch == nil {
+		return errDGUTABatchNotPrepared
+	}
+
 	if err := w.dgutaBatch.Append(
 		w.mountPath,
 		w.snapshot.String(),
@@ -860,7 +880,36 @@ func (w *dgutaWriter) appendDGUTABatchRow(parentDir string, guta *db.GUTA) error
 		return err
 	}
 
-	return flushBatchIfFull(&w.dgutaBatch, w.effectiveDGUTABatchSize(), "dguta", &w.dgutaFlushed)
+	return w.sendFullDGUTABatchIfFull()
+}
+
+func (w *dgutaWriter) sendFullDGUTABatchIfFull() error {
+	batchSize := w.effectiveDGUTABatchSize()
+	if w.dgutaBatch == nil || batchSize <= 0 || w.dgutaBatch.Rows() < batchSize {
+		return nil
+	}
+
+	return w.sendFullDGUTABatch()
+}
+
+func (w *dgutaWriter) sendFullDGUTABatch() error {
+	if err := w.dgutaBatch.Send(); err != nil {
+		return fmt.Errorf("clickhouse: failed to send dguta batch: %w", err)
+	}
+
+	w.dgutaBatch = nil
+	w.dgutaFlushed = false
+
+	batch, err := w.prepareBatch(context.Background(), insertDGUTAQuery)
+	if err != nil {
+		w.writeErr = fmt.Errorf("clickhouse: failed to prepare dguta batch: %w", err)
+
+		return w.writeErr
+	}
+
+	w.dgutaBatch = batch
+
+	return nil
 }
 
 func flushBatchIfFull(batch *driver.Batch, batchSize int, name string, flushed *bool) error {

@@ -1085,9 +1085,10 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 		So(trackedConn.maxRowsFor(insertMountDirSummaryQuery), ShouldBeLessThanOrEqualTo, 2)
 	})
 
-	Convey("DGUTAWriter caps raw DGUTA flushes below large import batches by default", t, func() {
+	Convey("DGUTAWriter sends capped raw DGUTA blocks as separate prepared batches", t, func() {
+		conn := &rawDGUTASendPrepareConn{}
 		batch := &countingDGUTABatch{}
-		impl := &dgutaWriter{dgutaBatch: batch}
+		impl := &dgutaWriter{conn: conn, dgutaBatch: batch}
 		impl.SetBatchSize(100_000)
 
 		guta := testProjectionGUTA(7, 9, db.DGUTAFileTypeBam, db.DGUTAgeAll, 1)
@@ -1099,9 +1100,57 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 
 		So(err, ShouldBeNil)
 		So(batch.maxRows, ShouldEqual, defaultRawDGUTABatchSize)
-		So(impl.dgutaBatch.Rows(), ShouldEqual, 1)
+		So(batch.flushes, ShouldEqual, 0)
+		So(batch.sends, ShouldEqual, 1)
+		So(conn.preparedBatches(), ShouldEqual, 1)
+		So(conn.batches[0].Rows(), ShouldEqual, 1)
 		So(impl.batchSize, ShouldEqual, 100_000)
 		So(impl.effectiveProjectionBatchSize(), ShouldEqual, defaultProjectionBatchSize)
+	})
+
+	Convey("DGUTAWriter fails safely when raw DGUTA reprepare fails after send", t, func() {
+		conn := &rawDGUTASendPrepareConn{prepareErr: errForcedFailure}
+		batch := &countingDGUTABatch{}
+		impl := &dgutaWriter{conn: conn, dgutaBatch: batch}
+		impl.SetBatchSize(1)
+
+		guta := testProjectionGUTA(7, 9, db.DGUTAFileTypeBam, db.DGUTAgeAll, 1)
+
+		err := impl.appendDGUTABatchRow("/mnt/raw-reprepare/", guta)
+		So(errors.Is(err, errForcedFailure), ShouldBeTrue)
+		So(batch.sends, ShouldEqual, 1)
+		So(conn.preparedBatches(), ShouldEqual, 0)
+
+		var nextErr error
+
+		So(func() {
+			nextErr = impl.appendDGUTABatchRow("/mnt/raw-reprepare/", guta)
+		}, ShouldNotPanic)
+		So(errors.Is(nextErr, errForcedFailure), ShouldBeTrue)
+	})
+
+	Convey("DGUTAWriter sends the final partial raw DGUTA batch once", t, func() {
+		conn := &rawDGUTASendPrepareConn{}
+		firstBatch := &countingDGUTABatch{}
+		impl := &dgutaWriter{conn: conn, dgutaBatch: firstBatch}
+		impl.SetBatchSize(2)
+
+		guta := testProjectionGUTA(7, 9, db.DGUTAFileTypeBam, db.DGUTAgeAll, 1)
+
+		for range 3 {
+			So(impl.appendDGUTABatchRow("/mnt/raw-final/", guta), ShouldBeNil)
+		}
+
+		So(firstBatch.flushes, ShouldEqual, 0)
+		So(firstBatch.sends, ShouldEqual, 1)
+		So(conn.preparedBatches(), ShouldEqual, 1)
+
+		finalBatch := conn.batches[0]
+		So(finalBatch.Rows(), ShouldEqual, 1)
+		So(impl.flushAllBatches(), ShouldBeNil)
+		So(finalBatch.flushes, ShouldEqual, 0)
+		So(finalBatch.sends, ShouldEqual, 1)
+		So(impl.dgutaBatch, ShouldBeNil)
 	})
 
 	Convey("DGUTAWriter caps projection batches below large raw import batches by default", t, func() {
@@ -1612,6 +1661,8 @@ type countingDGUTABatch struct {
 	rows    int
 	maxRows int
 	sent    bool
+	flushes int
+	sends   int
 }
 
 func (b *countingDGUTABatch) Abort() error {
@@ -1639,6 +1690,7 @@ func (b *countingDGUTABatch) Column(int) driver.BatchColumn {
 
 func (b *countingDGUTABatch) Flush() error {
 	b.recordRows()
+	b.flushes++
 	b.rows = 0
 
 	return nil
@@ -1647,6 +1699,7 @@ func (b *countingDGUTABatch) Flush() error {
 func (b *countingDGUTABatch) Send() error {
 	b.recordRows()
 	b.sent = true
+	b.sends++
 	b.rows = 0
 
 	return nil
@@ -1672,4 +1725,38 @@ func (b *countingDGUTABatch) recordRows() {
 	if b.rows > b.maxRows {
 		b.maxRows = b.rows
 	}
+}
+
+type rawDGUTASendPrepareConn struct {
+	bootstrapTestConn
+
+	batches    []*countingDGUTABatch
+	prepareErr error
+}
+
+func (c *rawDGUTASendPrepareConn) PrepareBatch(
+	_ context.Context,
+	query string,
+	_ ...driver.PrepareBatchOption,
+) (driver.Batch, error) {
+	if query != insertDGUTAQuery {
+		return nil, errBootstrapTestUnexpectedCall
+	}
+
+	if c.prepareErr != nil {
+		return nil, c.prepareErr
+	}
+
+	return c.newBatch(), nil
+}
+
+func (c *rawDGUTASendPrepareConn) newBatch() *countingDGUTABatch {
+	batch := &countingDGUTABatch{}
+	c.batches = append(c.batches, batch)
+
+	return batch
+}
+
+func (c *rawDGUTASendPrepareConn) preparedBatches() int {
+	return len(c.batches)
 }
