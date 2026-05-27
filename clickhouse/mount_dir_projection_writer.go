@@ -302,9 +302,11 @@ func mountDirSummaryBaseValues(
 }
 
 type mountDirProjectionWriter struct {
-	summaryBatch driver.Batch
-	vectorBatch  driver.Batch
-	refreshedAt  time.Time
+	summaryBatch   driver.Batch
+	vectorBatch    driver.Batch
+	summaryFlushed bool
+	vectorFlushed  bool
+	refreshedAt    time.Time
 }
 
 func prepareMountDirProjectionWriter(
@@ -349,20 +351,49 @@ func (w *mountDirProjectionWriter) appendRecord(
 	gutas db.GUTAs,
 	childCount uint64,
 	recordAges []db.DirGUTAge,
+	batchSize int,
 ) error {
 	state := newMountDirProjectionState()
 	state.addGUTAs(dir, gutas)
 	state.addChildren(dir, childCount)
 	state.addChildOnlySummaryAges(dir, recordAges)
 
+	if err := w.appendSummaryRows(mount, state, batchSize); err != nil {
+		return err
+	}
+
+	return w.appendVectorRows(mount, state, batchSize)
+}
+
+func (w *mountDirProjectionWriter) appendSummaryRows(
+	mount activeMount,
+	state mountDirProjectionState,
+	batchSize int,
+) error {
 	for _, key := range state.summaryKeys() {
 		if err := appendMountDirSummaryRow(w.summaryBatch, mount, key, state, w.refreshedAt); err != nil {
 			return err
 		}
+
+		if err := flushBatchIfFull(&w.summaryBatch, batchSize, "dir summary", &w.summaryFlushed); err != nil {
+			return err
+		}
 	}
 
+	return nil
+}
+
+func (w *mountDirProjectionWriter) appendVectorRows(
+	mount activeMount,
+	state mountDirProjectionState,
+	batchSize int,
+) error {
 	for _, vectorDir := range state.vectorDirs() {
 		if err := appendMountDirDGUTAVectorRow(w.vectorBatch, mount, vectorDir, state, w.refreshedAt); err != nil {
+			return err
+		}
+
+		if err := flushBatchIfFull(&w.vectorBatch, batchSize, "dir dguta vector", &w.vectorFlushed); err != nil {
 			return err
 		}
 	}

@@ -30,6 +30,7 @@ import (
 	"bytes"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/wtsi-hgi/wrstat-ui/internal/split"
 	"github.com/wtsi-hgi/wrstat-ui/stats"
@@ -195,6 +196,9 @@ func (d directory) Output() error {
 // Directory Operator.
 type OperationGenerator func() Operation
 
+// ProgressFunc receives periodic parser progress from a Summariser.
+type ProgressFunc func(records uint64, elapsed time.Duration)
+
 type operationGenerators []OperationGenerator
 
 func (o operationGenerators) Generate() directory {
@@ -235,6 +239,8 @@ type Summariser struct {
 	statsParser         *stats.StatsParser
 	directoryOperations operationGenerators
 	globalOperations    operationGenerators
+	progressEvery       uint64
+	progress            ProgressFunc
 }
 
 // NewSummariser returns a new Summariser that will read from the given
@@ -257,20 +263,31 @@ func (s *Summariser) AddGlobalOperation(op OperationGenerator) {
 	s.globalOperations = append(s.globalOperations, op)
 }
 
+// SetProgress reports progress after every recordsEvery parsed records.
+func (s *Summariser) SetProgress(recordsEvery uint64, progress ProgressFunc) {
+	s.progressEvery = recordsEvery
+	s.progress = progress
+}
+
 // Summarise will read from the stats.StatsParser and pass that information to
 // the Operations it has been given.
 func (s *Summariser) Summarise() error { //nolint:funlen
 	statsInfo := new(stats.FileInfo)
 	dirs := make(directories, 0, probableMaxDirectoryDepth)
 	global := s.globalOperations.Generate()
+	started := time.Now()
 
 	var (
 		currentDir *DirectoryPath
 		err        error
 		info       FileInfo
+		records    uint64
 	)
 
 	for s.statsParser.Scan(statsInfo) == nil {
+		records++
+		s.reportProgress(records, started)
+
 		dirs, currentDir, err = s.changeToWorkingDirectoryOfEntry(dirs, currentDir, statsInfo)
 		if err != nil {
 			return err
@@ -296,6 +313,14 @@ func (s *Summariser) Summarise() error { //nolint:funlen
 	}
 
 	return global.Output()
+}
+
+func (s *Summariser) reportProgress(records uint64, started time.Time) {
+	if s.progress == nil || s.progressEvery == 0 || records%s.progressEvery != 0 {
+		return
+	}
+
+	s.progress(records, time.Since(started))
 }
 
 func (s *Summariser) changeToWorkingDirectoryOfEntry(directories directories,

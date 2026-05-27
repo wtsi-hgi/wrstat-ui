@@ -125,5 +125,17 @@ func TestParse(t *testing.T) {
 			So(outputMap2["/opt/dir0/dir0/dir0/dir0/dir0/"], ShouldEqual, 4096)
 			So(outputMap2["/opt/dir0/dir0/dir0/dir1/"], ShouldEqual, 8193)
 		})
+
+		Convey("You can report parser progress before output completes", func() {
+			var progress []uint64
+
+			s.SetProgress(200, func(records uint64, _ time.Duration) {
+				progress = append(progress, records)
+			})
+
+			err := s.Summarise()
+			So(err, ShouldBeNil)
+			So(progress, ShouldResemble, []uint64{200, 400, 600})
+		})
 	})
 }

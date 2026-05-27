@@ -1039,6 +1039,51 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 		So(trackedConn.sentSummarySetBatches(), ShouldEqual, 1)
 	})
 
+	Convey("DGUTAWriter flushes large records without oversize import batches", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 5 * time.Second
+		cfg.MountPoints = []string{"/mnt/large-record/"}
+
+		const mountPath = "/mnt/large-record/"
+
+		updatedAt := time.Date(2026, 1, 13, 9, 0, 0, 0, time.UTC)
+
+		w, err := NewDGUTAWriter(cfg)
+		So(err, ShouldBeNil)
+		So(w, ShouldNotBeNil)
+
+		impl, ok := w.(*dgutaWriter)
+		So(ok, ShouldBeTrue)
+
+		trackedConn := newBatchFlushLimitConn(impl.conn)
+		impl.conn = trackedConn
+		impl.SetBatchSize(2)
+		impl.SetMountPath(mountPath)
+		impl.SetUpdatedAt(updatedAt)
+
+		paths := internaltest.NewDirectoryPathCreator()
+		So(impl.Add(db.RecordDGUTA{
+			Dir: paths.ToDirectoryPath(mountPath),
+			GUTAs: db.GUTAs{
+				testProjectionGUTA(7, 9, db.DGUTAFileTypeBam, db.DGUTAgeAll, 10),
+				testProjectionGUTA(7, 9, db.DGUTAFileTypeBam, db.DGUTAgeA1M, 9),
+				testProjectionGUTA(7, 10, db.DGUTAFileTypeCram, db.DGUTAgeA2M, 8),
+				testProjectionGUTA(8, 11, db.DGUTAFileTypeText, db.DGUTAgeA6M, 7),
+				testProjectionGUTA(9, 12, db.DGUTAFileTypeDir, db.DGUTAgeM1Y, 6),
+			},
+			Children: []string{"a/", "b/", "c/", "d/", "e/"},
+		}), ShouldBeNil)
+		So(impl.Close(), ShouldBeNil)
+
+		So(trackedConn.maxRowsFor(insertDGUTAQuery), ShouldBeLessThanOrEqualTo, 2)
+		So(trackedConn.maxRowsFor(insertChildrenQuery), ShouldBeLessThanOrEqualTo, 2)
+		So(trackedConn.maxRowsFor(insertMountDirSummaryQuery), ShouldBeLessThanOrEqualTo, 2)
+	})
+
 	Convey("DGUTAWriter keeps the active snapshot when tree summary refresh times out", t, func() {
 		os.Setenv("WRSTAT_ENV", "test")
 		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
@@ -1174,6 +1219,31 @@ func testProjectionGUTA(
 	}
 }
 
+func newBatchFlushLimitConn(conn ch.Conn) *batchFlushLimitConn {
+	return &batchFlushLimitConn{
+		Conn:    conn,
+		maxRows: make(map[string]int),
+	}
+}
+
+func (b *projectionStreamingBatch) Flush() error {
+	if err := b.Batch.Flush(); err != nil {
+		return err
+	}
+
+	b.recordSend()
+
+	return nil
+}
+
+func (b *projectionStreamingBatch) recordSend() {
+	if b.query == insertMountDirSummarySetQuery {
+		b.conn.summarySetSends.Add(1)
+	} else {
+		b.conn.projectionSends.Add(1)
+	}
+}
+
 type projectionStreamingConn struct {
 	ch.Conn
 
@@ -1228,11 +1298,59 @@ func (b *projectionStreamingBatch) Send() error {
 		return err
 	}
 
-	if b.query == insertMountDirSummarySetQuery {
-		b.conn.summarySetSends.Add(1)
-	} else {
-		b.conn.projectionSends.Add(1)
-	}
+	b.recordSend()
 
 	return nil
+}
+
+type batchFlushLimitBatch struct {
+	driver.Batch
+
+	query string
+	conn  *batchFlushLimitConn
+}
+
+func (b *batchFlushLimitBatch) Flush() error {
+	b.conn.recordRows(b.query, b.Rows())
+
+	return b.Batch.Flush()
+}
+
+func (b *batchFlushLimitBatch) Send() error {
+	b.conn.recordRows(b.query, b.Rows())
+
+	return b.Batch.Send()
+}
+
+type batchFlushLimitConn struct {
+	ch.Conn
+
+	maxRows map[string]int
+}
+
+func (c *batchFlushLimitConn) PrepareBatch(
+	ctx context.Context,
+	query string,
+	opts ...driver.PrepareBatchOption,
+) (driver.Batch, error) {
+	batch, err := c.Conn.PrepareBatch(ctx, query, opts...)
+	if err != nil {
+		return nil, err
+	}
+
+	return &batchFlushLimitBatch{
+		Batch: batch,
+		query: query,
+		conn:  c,
+	}, nil
+}
+
+func (c *batchFlushLimitConn) maxRowsFor(query string) int {
+	return c.maxRows[query]
+}
+
+func (c *batchFlushLimitConn) recordRows(query string, rows int) {
+	if rows > c.maxRows[query] {
+		c.maxRows[query] = rows
+	}
 }

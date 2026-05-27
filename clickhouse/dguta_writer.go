@@ -97,6 +97,18 @@ func basedirsPartitionDropQueries() []string {
 	}
 }
 
+func flushBatch(batch *driver.Batch, name string, flushed *bool) error {
+	if err := (*batch).Flush(); err != nil {
+		return fmt.Errorf("clickhouse: failed to flush %s batch: %w", name, err)
+	}
+
+	if flushed != nil {
+		*flushed = true
+	}
+
+	return nil
+}
+
 type dgutaRowKey struct {
 	dir         string
 	gid         uint32
@@ -151,10 +163,10 @@ func (r dgutaRecordRows) ages() []db.DirGUTAge {
 }
 
 type dgutaBatchSlot struct {
-	batch *driver.Batch
-	query string
-	phase string
-	name  string
+	batch   *driver.Batch
+	flushed *bool
+	phase   string
+	name    string
 }
 
 func (slot dgutaBatchSlot) rows() int {
@@ -163,6 +175,10 @@ func (slot dgutaBatchSlot) rows() int {
 	}
 
 	return (*slot.batch).Rows()
+}
+
+func (slot dgutaBatchSlot) wasFlushed() bool {
+	return slot.flushed != nil && *slot.flushed
 }
 
 type dgutaWriter struct {
@@ -180,6 +196,8 @@ type dgutaWriter struct {
 
 	dgutaBatch    driver.Batch
 	childrenBatch driver.Batch
+	dgutaFlushed  bool
+	childFlushed  bool
 
 	importPhaseRecorder func(string, time.Duration)
 
@@ -223,10 +241,10 @@ func (w *dgutaWriter) Add(dguta db.RecordDGUTA) error {
 		return err
 	}
 
-	return w.addReadyRecord(ctx, dguta)
+	return w.addReadyRecord(dguta)
 }
 
-func (w *dgutaWriter) addReadyRecord(ctx context.Context, dguta db.RecordDGUTA) error {
+func (w *dgutaWriter) addReadyRecord(dguta db.RecordDGUTA) error {
 	rawParentDir := string(dguta.Dir.AppendTo(make([]byte, 0, dguta.Dir.Len())))
 	parentDir := canonicalPathForMount(w.mountPath, rawParentDir)
 
@@ -249,7 +267,7 @@ func (w *dgutaWriter) addReadyRecord(ctx context.Context, dguta db.RecordDGUTA) 
 		return err
 	}
 
-	return w.flushFullBatches(ctx)
+	return w.flushFullBatches()
 }
 
 func (w *dgutaWriter) Close() error {
@@ -793,7 +811,7 @@ func (w *dgutaWriter) appendDGUTARow(
 }
 
 func (w *dgutaWriter) appendDGUTABatchRow(parentDir string, guta *db.GUTA) error {
-	return w.dgutaBatch.Append(
+	if err := w.dgutaBatch.Append(
 		w.mountPath,
 		w.snapshot.String(),
 		parentDir,
@@ -807,7 +825,19 @@ func (w *dgutaWriter) appendDGUTABatchRow(parentDir string, guta *db.GUTA) error
 		guta.Mtime,
 		guta.ATimeRanges[:],
 		guta.MTimeRanges[:],
-	)
+	); err != nil {
+		return err
+	}
+
+	return flushBatchIfFull(&w.dgutaBatch, w.batchSize, "dguta", &w.dgutaFlushed)
+}
+
+func flushBatchIfFull(batch *driver.Batch, batchSize int, name string, flushed *bool) error {
+	if batch == nil || *batch == nil || batchSize <= 0 || (*batch).Rows() < batchSize {
+		return nil
+	}
+
+	return flushBatch(batch, name, flushed)
 }
 
 func (w *dgutaWriter) isConsecutiveCanonicalDGUTADuplicate(rawDir, canonicalDir string, key dgutaRowKey) bool {
@@ -832,24 +862,39 @@ func (w *dgutaWriter) appendChildrenRows(children []string, parentDir string) (u
 
 	err := w.timeImportPhase(importPhaseChildrenInsert, func() error {
 		for _, child := range children {
-			child = childPathForParent(parentDir, child)
-
-			child = canonicalPathForMount(w.mountPath, child)
-			if child == "" {
-				continue
+			ok, err := w.appendChildRow(snapshotID, parentDir, child)
+			if err != nil {
+				return err
 			}
 
-			if err := w.childrenBatch.Append(w.mountPath, snapshotID, parentDir, child); err != nil {
-				return fmt.Errorf("clickhouse: failed to append child row: %w", err)
+			if ok {
+				appended++
 			}
-
-			appended++
 		}
 
 		return nil
 	})
 
 	return appended, err
+}
+
+func (w *dgutaWriter) appendChildRow(snapshotID, parentDir, child string) (bool, error) {
+	child = childPathForParent(parentDir, child)
+
+	child = canonicalPathForMount(w.mountPath, child)
+	if child == "" {
+		return false, nil
+	}
+
+	if err := w.childrenBatch.Append(w.mountPath, snapshotID, parentDir, child); err != nil {
+		return false, fmt.Errorf("clickhouse: failed to append child row: %w", err)
+	}
+
+	if err := flushBatchIfFull(&w.childrenBatch, w.batchSize, "children", &w.childFlushed); err != nil {
+		return false, err
+	}
+
+	return true, nil
 }
 
 func childPathForParent(parentDir, child string) string {
@@ -872,17 +917,17 @@ func (w *dgutaWriter) appendMountDirProjectionRows(
 	recordAges []db.DirGUTAge,
 ) error {
 	return w.timeImportPhase(importPhaseDirProjectionWrite, func() error {
-		return w.dirProjection.appendRecord(w.activeMount(), parentDir, gutas, childCount, recordAges)
+		return w.dirProjection.appendRecord(w.activeMount(), parentDir, gutas, childCount, recordAges, w.batchSize)
 	})
 }
 
-func (w *dgutaWriter) flushFullBatches(ctx context.Context) error {
+func (w *dgutaWriter) flushFullBatches() error {
 	for _, slot := range w.batchSlots() {
 		if slot.rows() < w.batchSize {
 			continue
 		}
 
-		if err := w.sendAndReplaceBatch(ctx, slot); err != nil {
+		if err := w.flushBatch(slot); err != nil {
 			return err
 		}
 	}
@@ -892,7 +937,7 @@ func (w *dgutaWriter) flushFullBatches(ctx context.Context) error {
 
 func (w *dgutaWriter) flushAllBatches() error {
 	for _, slot := range w.batchSlots() {
-		if slot.rows() == 0 {
+		if slot.rows() == 0 && !slot.wasFlushed() {
 			_ = abortBatch(slot.batch, slot.name) //nolint:errcheck // Best-effort release; preserve close error behaviour.
 
 			continue
@@ -909,50 +954,35 @@ func (w *dgutaWriter) flushAllBatches() error {
 func (w *dgutaWriter) batchSlots() [4]dgutaBatchSlot {
 	return [...]dgutaBatchSlot{
 		{
-			batch: &w.dgutaBatch,
-			query: insertDGUTAQuery,
-			phase: importPhaseDGUTAInsert,
-			name:  "dguta",
+			batch:   &w.dgutaBatch,
+			flushed: &w.dgutaFlushed,
+			phase:   importPhaseDGUTAInsert,
+			name:    "dguta",
 		},
 		{
-			batch: &w.childrenBatch,
-			query: insertChildrenQuery,
-			phase: importPhaseChildrenInsert,
-			name:  "children",
+			batch:   &w.childrenBatch,
+			flushed: &w.childFlushed,
+			phase:   importPhaseChildrenInsert,
+			name:    "children",
 		},
 		{
-			batch: &w.dirProjection.summaryBatch,
-			query: insertMountDirSummaryQuery,
-			phase: importPhaseDirProjectionWrite,
-			name:  "dir summary",
+			batch:   &w.dirProjection.summaryBatch,
+			flushed: &w.dirProjection.summaryFlushed,
+			phase:   importPhaseDirProjectionWrite,
+			name:    "dir summary",
 		},
 		{
-			batch: &w.dirProjection.vectorBatch,
-			query: insertMountDirDGUTAVectorQuery,
-			phase: importPhaseDirProjectionWrite,
-			name:  "dir dguta vector",
+			batch:   &w.dirProjection.vectorBatch,
+			flushed: &w.dirProjection.vectorFlushed,
+			phase:   importPhaseDirProjectionWrite,
+			name:    "dir dguta vector",
 		},
 	}
 }
 
-func (w *dgutaWriter) sendAndReplaceBatch(ctx context.Context, slot dgutaBatchSlot) error {
+func (w *dgutaWriter) flushBatch(slot dgutaBatchSlot) error {
 	return w.timeImportPhase(slot.phase, func() error {
-		if err := (*slot.batch).Send(); err != nil {
-			return fmt.Errorf("clickhouse: failed to send %s batch: %w", slot.name, err)
-		}
-
-		*slot.batch = nil
-
-		batchCtx := context.WithoutCancel(ctx)
-
-		batch, err := w.prepareBatch(batchCtx, slot.query)
-		if err != nil {
-			return fmt.Errorf("clickhouse: failed to prepare %s batch: %w", slot.name, err)
-		}
-
-		*slot.batch = batch
-
-		return nil
+		return flushBatch(slot.batch, slot.name, slot.flushed)
 	})
 }
 

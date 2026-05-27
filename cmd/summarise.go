@@ -32,6 +32,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -50,11 +51,13 @@ import (
 )
 
 const (
-	summariseDBBatchSize  = 100_000
-	summariseDirPerm      = 0o755
-	summariseMarkerPerm   = 0o600
-	clickhouseRecoverFlag = "clickhouse-recover"
-	completionMarkerName  = ".wrstat-ui-summarise-complete"
+	summariseDBBatchSize       = 100_000
+	summariseProgressEveryRows = 1_000_000
+	bytesPerMiB                = 1024 * 1024
+	summariseDirPerm           = 0o755
+	summariseMarkerPerm        = 0o600
+	clickhouseRecoverFlag      = "clickhouse-recover"
+	completionMarkerName       = ".wrstat-ui-summarise-complete"
 )
 
 var (
@@ -336,6 +339,26 @@ func closeSummariseDGUTAWriter(writer io.Closer, publish bool) error {
 	return summariseutil.CloseOrAbort(writer, publish)
 }
 
+func setSummariseProgress(s *summary.Summariser, statsFile string) {
+	s.SetProgress(summariseProgressEveryRows, func(records uint64, elapsed time.Duration) {
+		var mem runtime.MemStats
+		runtime.ReadMemStats(&mem)
+
+		info(
+			"summarise progress input=%s records=%d elapsed=%s heap_alloc_mb=%d heap_sys_mb=%d",
+			statsFile,
+			records,
+			elapsed.Round(time.Second),
+			bytesToMiB(mem.HeapAlloc),
+			bytesToMiB(mem.HeapSys),
+		)
+	})
+}
+
+func bytesToMiB(bytes uint64) uint64 {
+	return bytes / bytesPerMiB
+}
+
 func setupClickHouseSummariseHooks(
 	s *summary.Summariser,
 	chTarget *clickHouseSummariseTarget,
@@ -563,6 +586,7 @@ func run(args []string) (err error) {
 	}()
 
 	s := summary.NewSummariser(stats.NewStatsParser(r))
+	setSummariseProgress(s, args[0])
 
 	setArgsDefaults()
 
