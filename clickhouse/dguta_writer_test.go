@@ -36,6 +36,7 @@ import (
 	"time"
 
 	ch "github.com/ClickHouse/clickhouse-go/v2"
+	"github.com/ClickHouse/clickhouse-go/v2/lib/column"
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	. "github.com/smartystreets/goconvey/convey"
 	"github.com/wtsi-hgi/wrstat-ui/db"
@@ -1084,15 +1085,36 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 		So(trackedConn.maxRowsFor(insertMountDirSummaryQuery), ShouldBeLessThanOrEqualTo, 2)
 	})
 
+	Convey("DGUTAWriter caps raw DGUTA flushes below large import batches by default", t, func() {
+		batch := &countingDGUTABatch{}
+		impl := &dgutaWriter{dgutaBatch: batch}
+		impl.SetBatchSize(100_000)
+
+		guta := testProjectionGUTA(7, 9, db.DGUTAFileTypeBam, db.DGUTAgeAll, 1)
+
+		var err error
+		for range defaultRawDGUTABatchSize + 1 {
+			err = errors.Join(err, impl.appendDGUTABatchRow("/mnt/raw-cap/", guta))
+		}
+
+		So(err, ShouldBeNil)
+		So(batch.maxRows, ShouldEqual, defaultRawDGUTABatchSize)
+		So(impl.dgutaBatch.Rows(), ShouldEqual, 1)
+		So(impl.batchSize, ShouldEqual, 100_000)
+		So(impl.effectiveProjectionBatchSize(), ShouldEqual, defaultProjectionBatchSize)
+	})
+
 	Convey("DGUTAWriter caps projection batches below large raw import batches by default", t, func() {
 		impl := &dgutaWriter{}
 
 		impl.SetBatchSize(100_000)
 		So(impl.batchSize, ShouldEqual, 100_000)
+		So(impl.effectiveDGUTABatchSize(), ShouldEqual, defaultRawDGUTABatchSize)
 		So(impl.projectionBatchSize, ShouldEqual, defaultProjectionBatchSize)
 
 		impl.SetBatchSize(7)
 		So(impl.batchSize, ShouldEqual, 7)
+		So(impl.effectiveDGUTABatchSize(), ShouldEqual, 7)
 		So(impl.projectionBatchSize, ShouldEqual, 7)
 	})
 
@@ -1417,5 +1439,71 @@ func (c *batchFlushLimitConn) maxRowsFor(query string) int {
 func (c *batchFlushLimitConn) recordRows(query string, rows int) {
 	if rows > c.maxRows[query] {
 		c.maxRows[query] = rows
+	}
+}
+
+type countingDGUTABatch struct {
+	rows    int
+	maxRows int
+	sent    bool
+}
+
+func (b *countingDGUTABatch) Abort() error {
+	b.sent = true
+	b.rows = 0
+
+	return nil
+}
+
+func (b *countingDGUTABatch) Append(...any) error {
+	b.rows++
+
+	return nil
+}
+
+func (b *countingDGUTABatch) AppendStruct(any) error {
+	b.rows++
+
+	return nil
+}
+
+func (b *countingDGUTABatch) Column(int) driver.BatchColumn {
+	return nil
+}
+
+func (b *countingDGUTABatch) Flush() error {
+	b.recordRows()
+	b.rows = 0
+
+	return nil
+}
+
+func (b *countingDGUTABatch) Send() error {
+	b.recordRows()
+	b.sent = true
+	b.rows = 0
+
+	return nil
+}
+
+func (b *countingDGUTABatch) IsSent() bool {
+	return b.sent
+}
+
+func (b *countingDGUTABatch) Rows() int {
+	return b.rows
+}
+
+func (b *countingDGUTABatch) Columns() []column.Interface {
+	return nil
+}
+
+func (b *countingDGUTABatch) Close() error {
+	return nil
+}
+
+func (b *countingDGUTABatch) recordRows() {
+	if b.rows > b.maxRows {
+		b.maxRows = b.rows
 	}
 }

@@ -41,6 +41,7 @@ import (
 
 const (
 	defaultBatchSize           = 100_000
+	defaultRawDGUTABatchSize   = 10_000
 	defaultProjectionBatchSize = 10_000
 
 	importPhasePartitionDropReset = "partition_drop_reset"
@@ -189,6 +190,7 @@ type dgutaWriter struct {
 	conn ch.Conn
 
 	batchSize           int
+	dgutaBatchSize      int
 	projectionBatchSize int
 
 	mountPath string
@@ -217,8 +219,17 @@ type dgutaWriter struct {
 func (w *dgutaWriter) SetBatchSize(batchSize int) {
 	if batchSize > 0 {
 		w.batchSize = batchSize
+		w.dgutaBatchSize = rawDGUTABatchSizeFor(batchSize)
 		w.projectionBatchSize = projectionBatchSizeFor(batchSize)
 	}
+}
+
+func rawDGUTABatchSizeFor(batchSize int) int {
+	if batchSize <= 0 {
+		return defaultRawDGUTABatchSize
+	}
+
+	return min(batchSize, defaultRawDGUTABatchSize)
 }
 
 func projectionBatchSizeFor(batchSize int) int {
@@ -847,7 +858,7 @@ func (w *dgutaWriter) appendDGUTABatchRow(parentDir string, guta *db.GUTA) error
 		return err
 	}
 
-	return flushBatchIfFull(&w.dgutaBatch, w.batchSize, "dguta", &w.dgutaFlushed)
+	return flushBatchIfFull(&w.dgutaBatch, w.effectiveDGUTABatchSize(), "dguta", &w.dgutaFlushed)
 }
 
 func flushBatchIfFull(batch *driver.Batch, batchSize int, name string, flushed *bool) error {
@@ -978,13 +989,7 @@ func (w *dgutaWriter) flushAllBatches() error {
 
 func (w *dgutaWriter) batchSlots() [4]dgutaBatchSlot {
 	return [...]dgutaBatchSlot{
-		{
-			batch:     &w.dgutaBatch,
-			flushed:   &w.dgutaFlushed,
-			batchSize: w.batchSize,
-			phase:     importPhaseDGUTAInsert,
-			name:      "dguta",
-		},
+		w.rawDGUTABatchSlot(),
 		{
 			batch:     &w.childrenBatch,
 			flushed:   &w.childFlushed,
@@ -1007,6 +1012,24 @@ func (w *dgutaWriter) batchSlots() [4]dgutaBatchSlot {
 			name:      "dir dguta vector",
 		},
 	}
+}
+
+func (w *dgutaWriter) rawDGUTABatchSlot() dgutaBatchSlot {
+	return dgutaBatchSlot{
+		batch:     &w.dgutaBatch,
+		flushed:   &w.dgutaFlushed,
+		batchSize: w.effectiveDGUTABatchSize(),
+		phase:     importPhaseDGUTAInsert,
+		name:      "dguta",
+	}
+}
+
+func (w *dgutaWriter) effectiveDGUTABatchSize() int {
+	if w.dgutaBatchSize > 0 {
+		return w.dgutaBatchSize
+	}
+
+	return rawDGUTABatchSizeFor(w.batchSize)
 }
 
 func (w *dgutaWriter) effectiveProjectionBatchSize() int {
@@ -1062,6 +1085,7 @@ func NewDGUTAWriter(cfg Config) (db.DGUTAWriter, error) {
 		cfg:                 cfg,
 		conn:                conn,
 		batchSize:           defaultBatchSize,
+		dgutaBatchSize:      rawDGUTABatchSizeFor(defaultBatchSize),
 		projectionBatchSize: projectionBatchSizeFor(defaultBatchSize),
 	}, nil
 }
