@@ -1477,17 +1477,20 @@ func TestWatch(t *testing.T) {
 
 		So(len(jobs), ShouldBeGreaterThan, 0)
 		So(jobs[0].Requirements.Other, ShouldBeNil)
-		So(jobs[0].RepGroup, ShouldStartWith, "wrstat-ui-summarise-")
-		So(jobs, ShouldResemble, []*jobqueue.Job{
+		assertWatchSummariseRepGroup(jobs[0].RepGroup)
+		So(jobsWithoutWatchRepGroups(jobs), ShouldResemble, []*jobqueue.Job{
 			{
-				Cmd: fmt.Sprintf(`"./wrstat-ui_test" summarise --clickhouse-recover -d %[1]q -q `+
-					`"/some/quota.file" -c "basedirs.config" %[2]q && touch -r %[3]q %[1]q && mv %[1]q %[4]q`,
+				Cmd: fmt.Sprintf(
+					`summarise_log=$(printf '%%s/summarise-%%s-%%s.log' '%[1]s' `+
+						`"$(date -u +%%Y%%m%%dT%%H%%M%%SZ)" "$$") && `+
+						`'./wrstat-ui_test' summarise --clickhouse-recover -d '%[1]s' -q `+
+						`'/some/quota.file' -c 'basedirs.config' '%[2]s' > "$summarise_log" 2>&1 `+
+						`&& touch -r '%[3]s' '%[1]s' && mv '%[1]s' '%[4]s'`,
 					dotA, statsA, runA, finalA,
 				),
 				Cwd:        cwd,
 				CwdMatters: true,
 				ReqGroup:   "wrstat-ui-summarise-A",
-				RepGroup:   jobs[0].RepGroup,
 				Requirements: &scheduler.Requirements{
 					Cores: cpus,
 					RAM:   ram,
@@ -1512,17 +1515,20 @@ func TestWatch(t *testing.T) {
 		So(err, ShouldBeNil)
 
 		So(len(jobs), ShouldBeGreaterThan, 0)
-		So(jobs[0].RepGroup, ShouldStartWith, "wrstat-ui-summarise-")
-		So(jobs, ShouldResemble, []*jobqueue.Job{
+		assertWatchSummariseRepGroup(jobs[0].RepGroup)
+		So(jobsWithoutWatchRepGroups(jobs), ShouldResemble, []*jobqueue.Job{
 			{
-				Cmd: fmt.Sprintf(`"./wrstat-ui_test" summarise --clickhouse-recover -d %[1]q `+
-					`-s %[2]q -q "/some/quota.file" -c "basedirs.config" %[3]q && touch -r %[4]q %[1]q && mv %[1]q %[5]q`,
+				Cmd: fmt.Sprintf(
+					`summarise_log=$(printf '%%s/summarise-%%s-%%s.log' '%[1]s' `+
+						`"$(date -u +%%Y%%m%%dT%%H%%M%%SZ)" "$$") && `+
+						`'./wrstat-ui_test' summarise --clickhouse-recover -d '%[1]s' `+
+						`-s '%[2]s' -q '/some/quota.file' -c 'basedirs.config' '%[3]s' `+
+						`> "$summarise_log" 2>&1 && touch -r '%[4]s' '%[1]s' && mv '%[1]s' '%[5]s'`,
 					dotA, previousBasedirs, statsA, runA, finalA,
 				),
 				Cwd:        cwd,
 				CwdMatters: true,
 				ReqGroup:   "wrstat-ui-summarise-A",
-				RepGroup:   jobs[0].RepGroup,
 				Requirements: &scheduler.Requirements{
 					Cores: cpus,
 					RAM:   ram,
@@ -2089,6 +2095,26 @@ type clickHousePerfFixture struct {
 	queryReportGIDs string
 	historyGID      uint32
 	historyPath     string
+}
+
+func assertWatchSummariseRepGroup(repGroup string) {
+	const (
+		prefix    = "wrstat-ui-summarise-"
+		timeStamp = "20060102150405"
+	)
+
+	So(repGroup, ShouldStartWith, prefix)
+
+	_, err := time.Parse(timeStamp, strings.TrimPrefix(repGroup, prefix))
+	So(err, ShouldBeNil)
+}
+
+func jobsWithoutWatchRepGroups(jobs []*jobqueue.Job) []*jobqueue.Job {
+	for _, job := range jobs {
+		job.RepGroup = ""
+	}
+
+	return jobs
 }
 
 func TestServerCommand(t *testing.T) {

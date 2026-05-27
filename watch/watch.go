@@ -225,6 +225,13 @@ func summariseMinRAMMB(minMemGB int) int {
 	return requestedRAM
 }
 
+func summariseLogAssignment(dotOutputBase string) string {
+	return fmt.Sprintf(
+		`summarise_log=$(printf '%%s/summarise-%%s-%%s.log' %s "$(date -u +%%Y%%m%%dT%%H%%M%%SZ)" "$$")`,
+		shellQuote(dotOutputBase),
+	)
+}
+
 func summariseJobName() string {
 	return "wrstat-ui-summarise-" + time.Now().Format(jobTimestampLayout)
 }
@@ -274,6 +281,8 @@ func getJobCommand(dotOutputBase, previousBasedirsDB, quotaPath, basedirsConfig,
 	inputBase := filepath.Join(inputDir, base)
 	finalOutputBase := filepath.Join(outputDir, base)
 	parts := []string{
+		summariseLogAssignment(dotOutputBase),
+		"&&",
 		shellQuote(os.Args[0]),
 		"summarise",
 		clickhouseRecoverFlag,
@@ -293,6 +302,7 @@ func getJobCommand(dotOutputBase, previousBasedirsDB, quotaPath, basedirsConfig,
 		"-q", shellQuote(quotaPath),
 		"-c", shellQuote(basedirsConfig),
 		shellQuote(filepath.Join(inputBase, inputStatsFile)),
+		">", `"$summarise_log"`, "2>&1",
 		"&&", "touch", "-r", shellQuote(inputBase), shellQuote(dotOutputBase),
 		"&&", "mv", shellQuote(dotOutputBase), shellQuote(finalOutputBase),
 	)
@@ -301,5 +311,5 @@ func getJobCommand(dotOutputBase, previousBasedirsDB, quotaPath, basedirsConfig,
 }
 
 func shellQuote(value string) string {
-	return fmt.Sprintf("%q", value)
+	return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'"
 }

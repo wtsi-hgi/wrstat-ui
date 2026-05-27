@@ -26,12 +26,15 @@
 package watch
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -90,6 +93,90 @@ func TestWatchSummariseResourceMinimums(t *testing.T) {
 		So(highMemJob.Requirements.RAM, ShouldEqual, 16384)
 		So(highMemJob.Requirements.Time, ShouldEqual, 30*time.Minute)
 		So(highMemJob.Override, ShouldEqual, 1)
+	})
+}
+
+func TestWatchSummariseCommandPreservesAttemptLogs(t *testing.T) {
+	Convey("Generated summarise commands preserve per-attempt stdout and stderr logs", t, func() {
+		tempDir := t.TempDir()
+		outputDir := filepath.Join(tempDir, "output-$WRSTAT_UI_UNSAFE_TOKEN-`touch BACKTICK_MARKER`-$(touch DOLLAR_MARKER)")
+		inputDir := filepath.Join(tempDir, "input")
+		base := "20260517-200015_／nfs／t283_imaging"
+		inputBase := filepath.Join(inputDir, base)
+		dotOutputBase := hiddenOutputDir(outputDir, base)
+		finalOutputBase := filepath.Join(outputDir, base)
+		fakeWrstatUI := filepath.Join(
+			tempDir,
+			"bin-$WRSTAT_UI_UNSAFE_TOKEN-`touch EXE_BACKTICK_MARKER`-$(touch EXE_DOLLAR_MARKER)",
+			"wrstat-ui",
+		)
+
+		So(os.MkdirAll(inputBase, 0755), ShouldBeNil)
+		So(os.MkdirAll(dotOutputBase, 0755), ShouldBeNil)
+		So(createFile(filepath.Join(inputBase, inputStatsFile)), ShouldBeNil)
+		So(os.MkdirAll(filepath.Dir(fakeWrstatUI), 0755), ShouldBeNil)
+		So(os.WriteFile(fakeWrstatUI, []byte(`#!/bin/sh
+printf 'fake stdout for %s\n' "$1"
+printf 'fake stderr for %s\n' "$1" >&2
+exit "$FAKE_SUMMARISE_EXIT"
+`), 0600), ShouldBeNil)
+		So(os.Chmod(fakeWrstatUI, 0700), ShouldBeNil)
+
+		oldArgs := os.Args
+
+		os.Args = []string{fakeWrstatUI}
+		defer func() {
+			os.Args = oldArgs
+		}()
+
+		command := getJobCommand(dotOutputBase, "", "", "", "", inputDir, base, outputDir)
+		So(command, ShouldContainSubstring, `$(date -u +%Y%m%dT%H%M%SZ)`)
+		So(command, ShouldContainSubstring, `"$$"`)
+		So(command, ShouldContainSubstring, `> "$summarise_log" 2>&1`)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		failedAttempt := exec.CommandContext(ctx, "sh", "-c", command)
+
+		failedAttempt.Dir = tempDir
+
+		failedAttempt.Env = append(os.Environ(), "FAKE_SUMMARISE_EXIT=7", "WRSTAT_UI_UNSAFE_TOKEN=expanded")
+		err := failedAttempt.Run()
+		So(err, ShouldNotBeNil)
+
+		stagingLogs, err := filepath.Glob(filepath.Join(dotOutputBase, "summarise-*.log"))
+		So(err, ShouldBeNil)
+		So(stagingLogs, ShouldHaveLength, 1)
+		So(entryExists(finalOutputBase), ShouldBeFalse)
+
+		logBytes, err := os.ReadFile(stagingLogs[0])
+		So(err, ShouldBeNil)
+		So(string(logBytes), ShouldContainSubstring, "fake stdout for summarise")
+		So(string(logBytes), ShouldContainSubstring, "fake stderr for summarise")
+
+		successfulRetry := exec.CommandContext(ctx, "sh", "-c", command)
+
+		successfulRetry.Dir = tempDir
+
+		successfulRetry.Env = append(os.Environ(), "FAKE_SUMMARISE_EXIT=0", "WRSTAT_UI_UNSAFE_TOKEN=expanded")
+		So(successfulRetry.Run(), ShouldBeNil)
+
+		finalLogs, err := filepath.Glob(filepath.Join(finalOutputBase, "summarise-*.log"))
+		So(err, ShouldBeNil)
+		So(finalLogs, ShouldHaveLength, 2)
+		So(entryExists(dotOutputBase), ShouldBeFalse)
+		So(filepath.Base(finalLogs[0]), ShouldNotEqual, filepath.Base(finalLogs[1]))
+
+		for _, logPath := range finalLogs {
+			So(strings.HasPrefix(filepath.Base(logPath), "summarise-"), ShouldBeTrue)
+			So(strings.HasSuffix(filepath.Base(logPath), ".log"), ShouldBeTrue)
+		}
+
+		So(entryExists(filepath.Join(tempDir, "BACKTICK_MARKER")), ShouldBeFalse)
+		So(entryExists(filepath.Join(tempDir, "DOLLAR_MARKER")), ShouldBeFalse)
+		So(entryExists(filepath.Join(tempDir, "EXE_BACKTICK_MARKER")), ShouldBeFalse)
+		So(entryExists(filepath.Join(tempDir, "EXE_DOLLAR_MARKER")), ShouldBeFalse)
 	})
 }
 
@@ -153,17 +240,20 @@ func TestWatch(t *testing.T) {
 
 			<-wrWrittenCh
 
-			So(jobs, ShouldResemble, []*jobqueue.Job{
+			So(jobs, ShouldHaveLength, 1)
+			assertSummariseRepGroup(jobs[0].RepGroup)
+			So(jobsWithoutRepGroups(jobs), ShouldResemble, []*jobqueue.Job{
 				{
-					Cmd: fmt.Sprintf(`%[1]q summarise --clickhouse-recover -d "%[2]s/.12345_abc" `+
-						`-m "/path/to/mounts" `+
-						`-q "/path/to/quota" -c "/path/to/basedirs.config" `+
-						`"%[3]s/stats.gz" && touch -r "%[3]s" "%[2]s/.12345_abc" `+
-						`&& mv "%[2]s/.12345_abc" "%[2]s/12345_abc"`,
+					Cmd: fmt.Sprintf(expectedSummariseLogAssignment(`'%[2]s/.12345_abc'`)+
+						`'%[1]s' summarise --clickhouse-recover -d '%[2]s/.12345_abc' `+
+						`-m '/path/to/mounts' `+
+						`-q '/path/to/quota' -c '/path/to/basedirs.config' `+
+						`'%[3]s/stats.gz' > "$summarise_log" 2>&1 `+
+						`&& touch -r '%[3]s' '%[2]s/.12345_abc' `+
+						`&& mv '%[2]s/.12345_abc' '%[2]s/12345_abc'`,
 						os.Args[0], outputDir, testInputA),
 					Cwd:        cwd,
 					CwdMatters: true,
-					RepGroup:   "wrstat-ui-summarise-" + time.Now().Format("20060102150405"),
 					ReqGroup:   reqGroupABC,
 					Requirements: &scheduler.Requirements{
 						RAM:   8192,
@@ -273,16 +363,19 @@ func TestWatch(t *testing.T) {
 
 			<-wrWrittenCh
 
-			So(jobs, ShouldResemble, []*jobqueue.Job{
+			So(jobs, ShouldHaveLength, 1)
+			assertSummariseRepGroup(jobs[0].RepGroup)
+			So(jobsWithoutRepGroups(jobs), ShouldResemble, []*jobqueue.Job{
 				{
-					Cmd: fmt.Sprintf(`%[1]q summarise --clickhouse-recover -d "%[2]s/.12345_abc" `+
-						`-q "/path/to/quota" -c "/path/to/basedirs.config" `+
-						`"%[3]s/stats.gz" && touch -r "%[3]s" "%[2]s/.12345_abc" `+
-						`&& mv "%[2]s/.12345_abc" "%[2]s/12345_abc"`,
+					Cmd: fmt.Sprintf(expectedSummariseLogAssignment(`'%[2]s/.12345_abc'`)+
+						`'%[1]s' summarise --clickhouse-recover -d '%[2]s/.12345_abc' `+
+						`-q '/path/to/quota' -c '/path/to/basedirs.config' `+
+						`'%[3]s/stats.gz' > "$summarise_log" 2>&1 `+
+						`&& touch -r '%[3]s' '%[2]s/.12345_abc' `+
+						`&& mv '%[2]s/.12345_abc' '%[2]s/12345_abc'`,
 						os.Args[0], outputDir, testInputA),
 					Cwd:        parentDir,
 					CwdMatters: true,
-					RepGroup:   "wrstat-ui-summarise-" + time.Now().Format("20060102150405"),
 					ReqGroup:   reqGroupABC,
 					Group:      "myGroup",
 					Requirements: &scheduler.Requirements{
@@ -336,17 +429,20 @@ func TestWatch(t *testing.T) {
 
 			<-wrWrittenCh
 
-			So(jobs, ShouldResemble, []*jobqueue.Job{
+			So(jobs, ShouldHaveLength, 1)
+			assertSummariseRepGroup(jobs[0].RepGroup)
+			So(jobsWithoutRepGroups(jobs), ShouldResemble, []*jobqueue.Job{
 				{
-					Cmd: fmt.Sprintf(`%[1]q summarise --clickhouse-recover -d "%[2]s/.12345_abc" `+
-						`-s "%[2]s/00001_abc/basedirs.db" `+
-						`-q "/path/to/quota" -c "/path/to/basedirs.config" `+
-						`"%[3]s/stats.gz" && touch -r "%[3]s" "%[2]s/.12345_abc" `+
-						`&& mv "%[2]s/.12345_abc" "%[2]s/12345_abc"`,
+					Cmd: fmt.Sprintf(expectedSummariseLogAssignment(`'%[2]s/.12345_abc'`)+
+						`'%[1]s' summarise --clickhouse-recover -d '%[2]s/.12345_abc' `+
+						`-s '%[2]s/00001_abc/basedirs.db' `+
+						`-q '/path/to/quota' -c '/path/to/basedirs.config' `+
+						`'%[3]s/stats.gz' > "$summarise_log" 2>&1 `+
+						`&& touch -r '%[3]s' '%[2]s/.12345_abc' `+
+						`&& mv '%[2]s/.12345_abc' '%[2]s/12345_abc'`,
 						os.Args[0], outputDir, testInputA),
 					Cwd:        cwd,
 					CwdMatters: true,
-					RepGroup:   "wrstat-ui-summarise-" + time.Now().Format("20060102150405"),
 					ReqGroup:   reqGroupABC,
 					Requirements: &scheduler.Requirements{
 						RAM:   8192,
@@ -385,16 +481,20 @@ func TestWatch(t *testing.T) {
 
 			<-wrWrittenCh
 
-			So(jobs, ShouldResemble, []*jobqueue.Job{
+			So(jobs, ShouldHaveLength, 2)
+			assertSummariseRepGroup(jobs[0].RepGroup)
+			assertSummariseRepGroup(jobs[1].RepGroup)
+			So(jobsWithoutRepGroups(jobs), ShouldResemble, []*jobqueue.Job{
 				{
-					Cmd: fmt.Sprintf(`%[1]q summarise --clickhouse-recover -d "%[2]s/.12345_abc" `+
-						`-q "/path/to/quota" -c "/path/to/basedirs.config" `+
-						`"%[3]s/stats.gz" && touch -r "%[3]s" "%[2]s/.12345_abc" `+
-						`&& mv "%[2]s/.12345_abc" "%[2]s/12345_abc"`,
+					Cmd: fmt.Sprintf(expectedSummariseLogAssignment(`'%[2]s/.12345_abc'`)+
+						`'%[1]s' summarise --clickhouse-recover -d '%[2]s/.12345_abc' `+
+						`-q '/path/to/quota' -c '/path/to/basedirs.config' `+
+						`'%[3]s/stats.gz' > "$summarise_log" 2>&1 `+
+						`&& touch -r '%[3]s' '%[2]s/.12345_abc' `+
+						`&& mv '%[2]s/.12345_abc' '%[2]s/12345_abc'`,
 						os.Args[0], outputDir, testInputA),
 					Cwd:        cwd,
 					CwdMatters: true,
-					RepGroup:   "wrstat-ui-summarise-" + time.Now().Format("20060102150405"),
 					ReqGroup:   reqGroupABC,
 					Requirements: &scheduler.Requirements{
 						RAM:   8192,
@@ -407,14 +507,15 @@ func TestWatch(t *testing.T) {
 					State:    jobqueue.JobStateDelayed,
 				},
 				{
-					Cmd: fmt.Sprintf(`%[1]q summarise --clickhouse-recover -d "%[2]s/.98765_c" `+
-						`-q "/path/to/quota" -c "/path/to/basedirs.config" `+
-						`"%[3]s/stats.gz" && touch -r "%[3]s" "%[2]s/.98765_c" `+
-						`&& mv "%[2]s/.98765_c" "%[2]s/98765_c"`,
+					Cmd: fmt.Sprintf(expectedSummariseLogAssignment(`'%[2]s/.98765_c'`)+
+						`'%[1]s' summarise --clickhouse-recover -d '%[2]s/.98765_c' `+
+						`-q '/path/to/quota' -c '/path/to/basedirs.config' `+
+						`'%[3]s/stats.gz' > "$summarise_log" 2>&1 `+
+						`&& touch -r '%[3]s' '%[2]s/.98765_c' `+
+						`&& mv '%[2]s/.98765_c' '%[2]s/98765_c'`,
 						os.Args[0], outputDir, testInputC),
 					Cwd:        cwd,
 					CwdMatters: true,
-					RepGroup:   "wrstat-ui-summarise-" + time.Now().Format("20060102150405"),
 					ReqGroup:   "wrstat-ui-summarise-c",
 					Requirements: &scheduler.Requirements{
 						RAM:   8192,
@@ -522,4 +623,25 @@ func createFile(path string) error {
 	}
 
 	return f.Close()
+}
+
+func assertSummariseRepGroup(repGroup string) {
+	So(repGroup, ShouldStartWith, summariseReqGroupBase+"-")
+
+	_, err := time.Parse(jobTimestampLayout, strings.TrimPrefix(repGroup, summariseReqGroupBase+"-"))
+	So(err, ShouldBeNil)
+}
+
+func jobsWithoutRepGroups(jobs []*jobqueue.Job) []*jobqueue.Job {
+	for _, job := range jobs {
+		job.RepGroup = ""
+	}
+
+	return jobs
+}
+
+func expectedSummariseLogAssignment(quotedDotOutput string) string {
+	return `summarise_log=$(printf '%%s/summarise-%%s-%%s.log' ` +
+		quotedDotOutput +
+		` "$(date -u +%%Y%%m%%dT%%H%%M%%SZ)" "$$") && `
 }
