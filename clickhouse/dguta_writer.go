@@ -40,7 +40,8 @@ import (
 )
 
 const (
-	defaultBatchSize = 100_000
+	defaultBatchSize           = 100_000
+	defaultProjectionBatchSize = 10_000
 
 	importPhasePartitionDropReset = "partition_drop_reset"
 	importPhaseDGUTAInsert        = "wrstat_dguta_insert"
@@ -163,10 +164,11 @@ func (r dgutaRecordRows) ages() []db.DirGUTAge {
 }
 
 type dgutaBatchSlot struct {
-	batch   *driver.Batch
-	flushed *bool
-	phase   string
-	name    string
+	batch     *driver.Batch
+	flushed   *bool
+	batchSize int
+	phase     string
+	name      string
 }
 
 func (slot dgutaBatchSlot) rows() int {
@@ -186,7 +188,8 @@ type dgutaWriter struct {
 
 	conn ch.Conn
 
-	batchSize int
+	batchSize           int
+	projectionBatchSize int
 
 	mountPath string
 	updatedAt time.Time
@@ -214,6 +217,21 @@ type dgutaWriter struct {
 func (w *dgutaWriter) SetBatchSize(batchSize int) {
 	if batchSize > 0 {
 		w.batchSize = batchSize
+		w.projectionBatchSize = projectionBatchSizeFor(batchSize)
+	}
+}
+
+func projectionBatchSizeFor(batchSize int) int {
+	if batchSize <= 0 {
+		return defaultProjectionBatchSize
+	}
+
+	return min(batchSize, defaultProjectionBatchSize)
+}
+
+func (w *dgutaWriter) SetProjectionBatchSize(batchSize int) {
+	if batchSize > 0 {
+		w.projectionBatchSize = batchSize
 	}
 }
 
@@ -917,13 +935,20 @@ func (w *dgutaWriter) appendMountDirProjectionRows(
 	recordAges []db.DirGUTAge,
 ) error {
 	return w.timeImportPhase(importPhaseDirProjectionWrite, func() error {
-		return w.dirProjection.appendRecord(w.activeMount(), parentDir, gutas, childCount, recordAges, w.batchSize)
+		return w.dirProjection.appendRecord(
+			w.activeMount(),
+			parentDir,
+			gutas,
+			childCount,
+			recordAges,
+			w.effectiveProjectionBatchSize(),
+		)
 	})
 }
 
 func (w *dgutaWriter) flushFullBatches() error {
 	for _, slot := range w.batchSlots() {
-		if slot.rows() < w.batchSize {
+		if slot.rows() < slot.batchSize {
 			continue
 		}
 
@@ -954,30 +979,42 @@ func (w *dgutaWriter) flushAllBatches() error {
 func (w *dgutaWriter) batchSlots() [4]dgutaBatchSlot {
 	return [...]dgutaBatchSlot{
 		{
-			batch:   &w.dgutaBatch,
-			flushed: &w.dgutaFlushed,
-			phase:   importPhaseDGUTAInsert,
-			name:    "dguta",
+			batch:     &w.dgutaBatch,
+			flushed:   &w.dgutaFlushed,
+			batchSize: w.batchSize,
+			phase:     importPhaseDGUTAInsert,
+			name:      "dguta",
 		},
 		{
-			batch:   &w.childrenBatch,
-			flushed: &w.childFlushed,
-			phase:   importPhaseChildrenInsert,
-			name:    "children",
+			batch:     &w.childrenBatch,
+			flushed:   &w.childFlushed,
+			batchSize: w.batchSize,
+			phase:     importPhaseChildrenInsert,
+			name:      "children",
 		},
 		{
-			batch:   &w.dirProjection.summaryBatch,
-			flushed: &w.dirProjection.summaryFlushed,
-			phase:   importPhaseDirProjectionWrite,
-			name:    "dir summary",
+			batch:     &w.dirProjection.summaryBatch,
+			flushed:   &w.dirProjection.summaryFlushed,
+			batchSize: w.effectiveProjectionBatchSize(),
+			phase:     importPhaseDirProjectionWrite,
+			name:      "dir summary",
 		},
 		{
-			batch:   &w.dirProjection.vectorBatch,
-			flushed: &w.dirProjection.vectorFlushed,
-			phase:   importPhaseDirProjectionWrite,
-			name:    "dir dguta vector",
+			batch:     &w.dirProjection.vectorBatch,
+			flushed:   &w.dirProjection.vectorFlushed,
+			batchSize: w.effectiveProjectionBatchSize(),
+			phase:     importPhaseDirProjectionWrite,
+			name:      "dir dguta vector",
 		},
 	}
+}
+
+func (w *dgutaWriter) effectiveProjectionBatchSize() int {
+	if w.projectionBatchSize > 0 {
+		return w.projectionBatchSize
+	}
+
+	return projectionBatchSizeFor(w.batchSize)
 }
 
 func (w *dgutaWriter) flushBatch(slot dgutaBatchSlot) error {
@@ -1021,7 +1058,12 @@ func NewDGUTAWriter(cfg Config) (db.DGUTAWriter, error) {
 		return nil, err
 	}
 
-	return &dgutaWriter{cfg: cfg, conn: conn, batchSize: defaultBatchSize}, nil
+	return &dgutaWriter{
+		cfg:                 cfg,
+		conn:                conn,
+		batchSize:           defaultBatchSize,
+		projectionBatchSize: projectionBatchSizeFor(defaultBatchSize),
+	}, nil
 }
 
 func scanActiveSnapshotID(rows driver.Rows) (string, error) {

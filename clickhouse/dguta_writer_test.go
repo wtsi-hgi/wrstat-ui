@@ -1084,6 +1084,71 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 		So(trackedConn.maxRowsFor(insertMountDirSummaryQuery), ShouldBeLessThanOrEqualTo, 2)
 	})
 
+	Convey("DGUTAWriter caps projection batches below large raw import batches by default", t, func() {
+		impl := &dgutaWriter{}
+
+		impl.SetBatchSize(100_000)
+		So(impl.batchSize, ShouldEqual, 100_000)
+		So(impl.projectionBatchSize, ShouldEqual, defaultProjectionBatchSize)
+
+		impl.SetBatchSize(7)
+		So(impl.batchSize, ShouldEqual, 7)
+		So(impl.projectionBatchSize, ShouldEqual, 7)
+	})
+
+	Convey("DGUTAWriter flushes projection batches separately from raw import batches", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 5 * time.Second
+		cfg.MountPoints = []string{"/mnt/separate-batches/"}
+
+		const mountPath = "/mnt/separate-batches/"
+
+		updatedAt := time.Date(2026, 1, 14, 9, 0, 0, 0, time.UTC)
+
+		w, err := NewDGUTAWriter(cfg)
+		So(err, ShouldBeNil)
+		So(w, ShouldNotBeNil)
+
+		impl, ok := w.(*dgutaWriter)
+		So(ok, ShouldBeTrue)
+
+		trackedConn := newBatchFlushLimitConn(impl.conn)
+		impl.conn = trackedConn
+		impl.SetBatchSize(4)
+		impl.SetProjectionBatchSize(2)
+		impl.SetMountPath(mountPath)
+		impl.SetUpdatedAt(updatedAt)
+
+		paths := internaltest.NewDirectoryPathCreator()
+		So(impl.Add(db.RecordDGUTA{
+			Dir: paths.ToDirectoryPath(mountPath),
+			GUTAs: db.GUTAs{
+				testProjectionGUTA(7, 9, db.DGUTAFileTypeBam, db.DGUTAgeAll, 10),
+				testProjectionGUTA(7, 9, db.DGUTAFileTypeBam, db.DGUTAgeA1M, 9),
+				testProjectionGUTA(7, 10, db.DGUTAFileTypeCram, db.DGUTAgeA2M, 8),
+				testProjectionGUTA(8, 11, db.DGUTAFileTypeText, db.DGUTAgeA6M, 7),
+				testProjectionGUTA(9, 12, db.DGUTAFileTypeDir, db.DGUTAgeM1Y, 6),
+			},
+			Children: []string{"a/", "b/", "c/", "d/"},
+		}), ShouldBeNil)
+		So(impl.Add(db.RecordDGUTA{
+			Dir: paths.ToDirectoryPath(mountPath + "a/"),
+			GUTAs: db.GUTAs{
+				testProjectionGUTA(7, 9, db.DGUTAFileTypeBam, db.DGUTAgeAll, 3),
+			},
+		}), ShouldBeNil)
+		So(impl.Close(), ShouldBeNil)
+
+		So(trackedConn.maxRowsFor(insertDGUTAQuery), ShouldEqual, 4)
+		So(trackedConn.maxRowsFor(insertChildrenQuery), ShouldEqual, 4)
+		So(trackedConn.maxRowsFor(insertMountDirSummaryQuery), ShouldBeLessThanOrEqualTo, 2)
+		So(trackedConn.maxRowsFor(insertMountDirDGUTAVectorQuery), ShouldBeLessThanOrEqualTo, 2)
+	})
+
 	Convey("DGUTAWriter keeps the active snapshot when tree summary refresh times out", t, func() {
 		os.Setenv("WRSTAT_ENV", "test")
 		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
