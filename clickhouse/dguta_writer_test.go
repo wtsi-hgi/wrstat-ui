@@ -1229,6 +1229,31 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 			fingerprint,
 		), ShouldEqual, 0)
 	})
+
+	Convey("DGUTAWriter drops the previous snapshot when tree summary refresh exhausts close context", t, func() {
+		updatedAt := time.Date(2026, 1, 9, 14, 0, 0, 0, time.UTC)
+		previousSID := snapshotID(testMountPath, updatedAt.Add(-1*time.Hour))
+		nextSID := snapshotID(testMountPath, updatedAt)
+		conn := &dgutaWriterCloseContextConn{
+			previousSID: previousSID.String(),
+			nextSID:     nextSID.String(),
+			updatedAt:   updatedAt,
+		}
+		w := &dgutaWriter{
+			cfg:       Config{QueryTimeout: time.Second},
+			conn:      conn,
+			mountPath: testMountPath,
+			updatedAt: updatedAt,
+			snapshot:  nextSID,
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+		defer cancel()
+
+		So(w.switchSnapshotAndDropOld(ctx), ShouldBeNil)
+		So(conn.oldSnapshotPartitionDrops(), ShouldBeGreaterThan, 0)
+		So(conn.treeSummaryRefreshes(), ShouldBeGreaterThan, 0)
+	})
 }
 
 func countRows(ctx context.Context, conn interface {
@@ -1440,6 +1465,147 @@ func (c *batchFlushLimitConn) recordRows(query string, rows int) {
 	if rows > c.maxRows[query] {
 		c.maxRows[query] = rows
 	}
+}
+
+type dgutaWriterCloseContextRows struct {
+	columns []string
+	values  [][]any
+	index   int
+}
+
+func (r *dgutaWriterCloseContextRows) Next() bool {
+	if r.index >= len(r.values) {
+		return false
+	}
+
+	r.index++
+
+	return true
+}
+
+func (r *dgutaWriterCloseContextRows) HasData() bool {
+	return len(r.values) > 0
+}
+
+func (r *dgutaWriterCloseContextRows) Scan(dest ...any) error {
+	if r.index == 0 || r.index > len(r.values) {
+		return errBootstrapTestUnexpectedCall
+	}
+
+	row := r.values[r.index-1]
+	for i, value := range row {
+		switch ptr := dest[i].(type) {
+		case *string:
+			str, ok := value.(string)
+			if !ok {
+				return errBootstrapTestUnexpectedCall
+			}
+
+			*ptr = str
+		case *time.Time:
+			t, ok := value.(time.Time)
+			if !ok {
+				return errBootstrapTestUnexpectedCall
+			}
+
+			*ptr = t
+		default:
+			return errBootstrapTestUnexpectedCall
+		}
+	}
+
+	return nil
+}
+
+func (r *dgutaWriterCloseContextRows) ScanStruct(any) error {
+	return errBootstrapTestUnexpectedCall
+}
+
+func (r *dgutaWriterCloseContextRows) ColumnTypes() []driver.ColumnType {
+	return nil
+}
+
+func (r *dgutaWriterCloseContextRows) Totals(...any) error {
+	return errBootstrapTestUnexpectedCall
+}
+
+func (r *dgutaWriterCloseContextRows) Columns() []string {
+	return r.columns
+}
+
+func (r *dgutaWriterCloseContextRows) Close() error {
+	return nil
+}
+
+func (r *dgutaWriterCloseContextRows) Err() error {
+	return nil
+}
+
+type dgutaWriterCloseContextConn struct {
+	bootstrapTestConn
+
+	previousSID string
+	nextSID     string
+	updatedAt   time.Time
+
+	oldSnapshotDrops atomic.Int32
+	treeRefreshes    atomic.Int32
+}
+
+func (c *dgutaWriterCloseContextConn) Query(
+	ctx context.Context,
+	query string,
+	_ ...any,
+) (driver.Rows, error) {
+	switch query {
+	case activeSnapshotQuery:
+		return &dgutaWriterCloseContextRows{
+			columns: []string{"snapshot_id"},
+			values:  [][]any{{c.previousSID}},
+		}, nil
+	case mountsActiveRowsQuery:
+		return &dgutaWriterCloseContextRows{
+			columns: []string{"mount_path", "snapshot_id", "updated_at"},
+			values:  [][]any{{testMountPath, c.nextSID, c.updatedAt}},
+		}, nil
+	default:
+		isTreeSummaryAvailabilityQuery := strings.Contains(query, "FROM wrstat_tree_summary_sets") ||
+			strings.Contains(query, "FROM wrstat_tree_dir_summary")
+		if isTreeSummaryAvailabilityQuery {
+			c.treeRefreshes.Add(1)
+			<-ctx.Done()
+
+			return nil, ctx.Err()
+		}
+
+		return nil, errBootstrapTestUnexpectedCall
+	}
+}
+
+func (c *dgutaWriterCloseContextConn) Exec(ctx context.Context, query string, _ ...any) error {
+	switch {
+	case query == switchSnapshotQuery:
+		return nil
+	case strings.HasPrefix(query, "ALTER TABLE"):
+		c.oldSnapshotDrops.Add(1)
+
+		return ctx.Err()
+	case strings.Contains(query, "INSERT INTO wrstat_tree_"):
+		c.treeRefreshes.Add(1)
+		<-ctx.Done()
+
+		return ctx.Err()
+	default:
+		return errBootstrapTestUnexpectedCall
+	}
+}
+
+func (c *dgutaWriterCloseContextConn) oldSnapshotPartitionDrops() int {
+	return int(c.oldSnapshotDrops.Load())
+}
+
+func (c *dgutaWriterCloseContextConn) treeSummaryRefreshes() int {
+	return int(c.treeRefreshes.Load())
 }
 
 type countingDGUTABatch struct {
