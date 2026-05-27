@@ -32,6 +32,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -239,6 +240,147 @@ func TestConnectAndBootstrap(t *testing.T) {
 			So(conn, ShouldEqual, targetConn)
 			So(openedDatabases, ShouldResemble, []string{testDatabaseName})
 			So(targetConn.closed.Load(), ShouldBeFalse)
+		})
+
+		Convey("it retries transient open failures before bootstrapping", func() {
+			timeoutErr := &net.DNSError{
+				UnwrapErr: context.DeadlineExceeded,
+				Err:       "i/o timeout",
+				Name:      "farm22-wrstat01",
+				IsTimeout: true,
+			}
+			targetConn := &bootstrapTestConn{}
+			openedDatabases := make([]string, 0, 3)
+			schemaCalls := 0
+
+			conn, connectErr := connectAndBootstrapWith(
+				ctx,
+				opts,
+				cfg.Database,
+				time.Second,
+				func(callOpts *ch.Options) (ch.Conn, error) {
+					openedDatabases = append(openedDatabases, callOpts.Auth.Database)
+					if len(openedDatabases) < 3 {
+						return nil, fmt.Errorf("dial tcp: lookup %s: %w", timeoutErr.Name, timeoutErr)
+					}
+
+					return targetConn, nil
+				},
+				func(context.Context, ch.Conn) error {
+					schemaCalls++
+
+					return nil
+				},
+			)
+
+			So(connectErr, ShouldBeNil)
+			So(conn, ShouldEqual, targetConn)
+			So(openedDatabases, ShouldResemble, []string{testDatabaseName, testDatabaseName, testDatabaseName})
+			So(schemaCalls, ShouldEqual, 1)
+			So(targetConn.closed.Load(), ShouldBeFalse)
+		})
+
+		Convey("it retries transient ping failures and closes failed connections", func() {
+			timeoutErr := &net.OpError{
+				Op:  "dial",
+				Net: "tcp",
+				Addr: &net.TCPAddr{
+					IP:   net.ParseIP("192.0.2.1"),
+					Port: 9000,
+				},
+				Err: context.DeadlineExceeded,
+			}
+			transientConn := &bootstrapTestConn{pingErr: timeoutErr}
+			targetConn := &bootstrapTestConn{}
+			conns := []*bootstrapTestConn{transientConn, targetConn}
+			attempts := 0
+
+			conn, connectErr := connectAndBootstrapWith(
+				ctx,
+				opts,
+				cfg.Database,
+				time.Second,
+				func(*ch.Options) (ch.Conn, error) {
+					if attempts >= len(conns) {
+						return nil, errBootstrapTestUnexpectedConnection
+					}
+
+					conn := conns[attempts]
+					attempts++
+
+					return conn, nil
+				},
+				func(context.Context, ch.Conn) error { return nil },
+			)
+
+			So(connectErr, ShouldBeNil)
+			So(conn, ShouldEqual, targetConn)
+			So(attempts, ShouldEqual, 2)
+			So(transientConn.closed.Load(), ShouldBeTrue)
+			So(targetConn.closed.Load(), ShouldBeFalse)
+		})
+
+		Convey("it does not retry non-transient open failures", func() {
+			attempts := 0
+
+			conn, connectErr := connectAndBootstrapWith(
+				ctx,
+				opts,
+				cfg.Database,
+				time.Second,
+				func(*ch.Options) (ch.Conn, error) {
+					attempts++
+
+					return nil, errBootstrapTestAccessDenied
+				},
+				func(context.Context, ch.Conn) error { return nil },
+			)
+
+			So(conn, ShouldBeNil)
+			So(connectErr, ShouldEqual, errBootstrapTestAccessDenied)
+			So(attempts, ShouldEqual, 1)
+		})
+
+		Convey("it does not retry a bare context deadline", func() {
+			attempts := 0
+
+			conn, connectErr := connectAndBootstrapWith(
+				ctx,
+				opts,
+				cfg.Database,
+				time.Second,
+				func(*ch.Options) (ch.Conn, error) {
+					attempts++
+
+					return nil, context.DeadlineExceeded
+				},
+				func(context.Context, ch.Conn) error { return nil },
+			)
+
+			So(conn, ShouldBeNil)
+			So(errors.Is(connectErr, context.DeadlineExceeded), ShouldBeTrue)
+			So(attempts, ShouldEqual, 1)
+		})
+
+		Convey("it does not retry a bare context cancellation", func() {
+			attempts := 0
+
+			conn, connectErr := connectAndBootstrapWith(
+				ctx,
+				opts,
+				cfg.Database,
+				time.Second,
+				func(*ch.Options) (ch.Conn, error) {
+					attempts++
+
+					return nil, context.Canceled
+				},
+				func(context.Context, ch.Conn) error { return nil },
+			)
+
+			So(conn, ShouldBeNil)
+			So(connectErr, ShouldEqual, context.Canceled)
+			So(attempts, ShouldEqual, 1)
 		})
 
 		Convey("it reconnects via default only after an unknown database failure", func() {

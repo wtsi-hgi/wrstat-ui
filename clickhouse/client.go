@@ -30,6 +30,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"strings"
 	"time"
@@ -54,6 +55,14 @@ var discoverMountPoints = basedirs.GetMountPoints
 const defaultQueryTimeout = 10 * time.Second
 
 const defaultMaxOpenConns = 10
+
+const maxConnectionSetupAttempts = 4
+
+const (
+	firstConnectionSetupRetryDelay  = 100 * time.Millisecond
+	secondConnectionSetupRetryDelay = 250 * time.Millisecond
+	laterConnectionSetupRetryDelay  = 500 * time.Millisecond
+)
 
 const createDatabaseStmtPrefix = "CREATE DATABASE IF NOT EXISTS "
 
@@ -120,6 +129,104 @@ func isMissingDatabaseError(err error) bool {
 
 	return strings.Contains(msg, "unknown database") ||
 		strings.Contains(msg, "database does not exist")
+}
+
+func openAndPingWithRetry(ctx context.Context, opts *ch.Options, open clickHouseOpener) (ch.Conn, error) {
+	var err error
+
+	for attempt := range maxConnectionSetupAttempts {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+
+		conn, attemptErr := openAndPing(ctx, opts, open)
+		if attemptErr == nil {
+			return conn, nil
+		}
+
+		err = attemptErr
+
+		if shouldStopConnectionSetupRetry(err, attempt) {
+			return nil, err
+		}
+
+		if waitErr := waitForConnectionSetupRetry(ctx, connectionSetupRetryDelay(attempt)); waitErr != nil {
+			return nil, waitErr
+		}
+	}
+
+	return nil, err
+}
+
+func shouldStopConnectionSetupRetry(err error, attempt int) bool {
+	return !isTransientConnectionSetupError(err) || attempt == maxConnectionSetupAttempts-1
+}
+
+func isTransientConnectionSetupError(err error) bool {
+	switch {
+	case err == nil:
+		return false
+	case errors.Is(err, context.Canceled):
+		return false
+	}
+
+	var exception *chproto.Exception
+	if errors.As(err, &exception) {
+		return false
+	}
+
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return isTransientDNSError(dnsErr)
+	}
+
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		return opErr.Timeout()
+	}
+
+	if errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+
+	return isTimeoutError(err)
+}
+
+func isTransientDNSError(err *net.DNSError) bool {
+	return err.IsTimeout || err.IsTemporary
+}
+
+func isTimeoutError(err error) bool {
+	var netErr net.Error
+
+	return errors.As(err, &netErr) && netErr.Timeout()
+}
+
+func waitForConnectionSetupRetry(ctx context.Context, delay time.Duration) error {
+	if delay <= 0 {
+		return nil
+	}
+
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func connectionSetupRetryDelay(attempt int) time.Duration {
+	switch attempt {
+	case 0:
+		return firstConnectionSetupRetryDelay
+	case 1:
+		return secondConnectionSetupRetryDelay
+	default:
+		return laterConnectionSetupRetryDelay
+	}
 }
 
 func openAndPing(ctx context.Context, opts *ch.Options, open clickHouseOpener) (ch.Conn, error) {
@@ -195,7 +302,7 @@ func openAndPingWithTimeout(
 	ctx, cancel := queryContext(parent, queryTO)
 	defer cancel()
 
-	return openAndPing(ctx, opts, open)
+	return openAndPingWithRetry(ctx, opts, open)
 }
 
 type schemaEnsurer func(context.Context, ch.Conn) error
