@@ -70,6 +70,17 @@ const (
 		"FROM wrstat_basedirs_history WHERE mount_path = ? AND gid = ? ORDER BY date ASC"
 )
 
+const (
+	importPhaseBasedirsReset      = "wrstat_basedirs_reset"
+	importPhaseBasedirsGroupUsage = "wrstat_basedirs_group_usage_insert"
+	importPhaseBasedirsUserUsage  = "wrstat_basedirs_user_usage_insert"
+	importPhaseBasedirsGroupSubs  = "wrstat_basedirs_group_subdirs_insert"
+	importPhaseBasedirsUserSubs   = "wrstat_basedirs_user_subdirs_insert"
+	importPhaseBasedirsHistory    = "wrstat_basedirs_history_insert"
+	importPhaseBasedirsFinalise   = "wrstat_basedirs_finalise"
+	importPhaseBasedirsFlush      = "wrstat_basedirs_flush"
+)
+
 var (
 	errStoreNotReset          = errors.New("clickhouse: basedirs store not reset")
 	errSubDirPositionOverflow = errors.New("clickhouse: basedirs subdir position overflows UInt32")
@@ -95,6 +106,8 @@ type chBaseDirsStore struct {
 
 	batchSize int
 
+	importPhaseRecorder func(string, time.Duration)
+
 	mountPath string
 	updatedAt time.Time
 	snapshot  uuid.UUID
@@ -117,6 +130,26 @@ func (s *chBaseDirsStore) SetBatchSize(batchSize int) {
 	if batchSize > 0 {
 		s.batchSize = batchSize
 	}
+}
+
+func (s *chBaseDirsStore) SetImportPhaseRecorder(recorder func(string, time.Duration)) {
+	if s == nil {
+		return
+	}
+
+	s.importPhaseRecorder = recorder
+}
+
+func (s *chBaseDirsStore) recordImportPhase(phase string, d time.Duration) {
+	if s == nil {
+		return
+	}
+
+	recordImportPhase(s.importPhaseRecorder, phase, d)
+}
+
+func (s *chBaseDirsStore) timeImportPhase(phase string, fn func() error) error {
+	return timeImportPhase(s.recordImportPhase, phase, fn)
 }
 
 func (s *chBaseDirsStore) ensureSnapshotID() {
@@ -327,6 +360,10 @@ func (s *chBaseDirsStore) SetUpdatedAt(updatedAt time.Time) {
 }
 
 func (s *chBaseDirsStore) Reset() error {
+	return s.timeImportPhase(importPhaseBasedirsReset, s.resetStore)
+}
+
+func (s *chBaseDirsStore) resetStore() error {
 	if err := s.validateReadyForReset(); err != nil {
 		return err
 	}
@@ -431,20 +468,27 @@ func (s *chBaseDirsStore) PutUserUsage(u *basedirs.Usage) error {
 }
 
 func (s *chBaseDirsStore) appendUserUsage(u *basedirs.Usage) error {
-	if err := s.userUsageBatch.Append(
-		s.mountPath,
-		s.snapshot.String(),
-		u.UID,
-		u.BaseDir,
-		uint8(u.Age),
-		ensureNonNilUInt32s(u.GIDs),
-		u.UsageSize,
-		u.QuotaSize,
-		u.UsageInodes,
-		u.QuotaInodes,
-		u.Mtime,
-	); err != nil {
-		return fmt.Errorf("clickhouse: failed to append basedirs user usage: %w", err)
+	err := s.timeImportPhase(importPhaseBasedirsUserUsage, func() error {
+		if err := s.userUsageBatch.Append(
+			s.mountPath,
+			s.snapshot.String(),
+			u.UID,
+			u.BaseDir,
+			uint8(u.Age),
+			ensureNonNilUInt32s(u.GIDs),
+			u.UsageSize,
+			u.QuotaSize,
+			u.UsageInodes,
+			u.QuotaInodes,
+			u.Mtime,
+		); err != nil {
+			return fmt.Errorf("clickhouse: failed to append basedirs user usage: %w", err)
+		}
+
+		return nil
+	})
+	if err != nil {
+		return err
 	}
 
 	return s.flushFullBatches()
@@ -454,14 +498,14 @@ func (s *chBaseDirsStore) PutGroupSubDirs(
 	key basedirs.SubDirKey,
 	subdirs []*basedirs.SubDir,
 ) error {
-	return s.appendSubDirs(&s.groupSubBatch, key, subdirs, "group")
+	return s.appendSubDirs(&s.groupSubBatch, key, subdirs, "group", importPhaseBasedirsGroupSubs)
 }
 
 func (s *chBaseDirsStore) PutUserSubDirs(
 	key basedirs.SubDirKey,
 	subdirs []*basedirs.SubDir,
 ) error {
-	return s.appendSubDirs(&s.userSubBatch, key, subdirs, "user")
+	return s.appendSubDirs(&s.userSubBatch, key, subdirs, "user", importPhaseBasedirsUserSubs)
 }
 
 func (s *chBaseDirsStore) appendSubDirs(
@@ -469,6 +513,7 @@ func (s *chBaseDirsStore) appendSubDirs(
 	key basedirs.SubDirKey,
 	subdirs []*basedirs.SubDir,
 	kind string,
+	phase string,
 ) error {
 	if err := s.ensureReady(); err != nil {
 		return err
@@ -483,7 +528,7 @@ func (s *chBaseDirsStore) appendSubDirs(
 			return fmt.Errorf("%w: %s position %d", errSubDirPositionOverflow, kind, pos)
 		}
 
-		if err := s.appendOneSubDir(*batch, key, sd, uint32(pos), kind); err != nil {
+		if err := s.appendOneSubDir(*batch, key, sd, uint32(pos), kind, phase); err != nil {
 			return err
 		}
 	}
@@ -497,18 +542,32 @@ func (s *chBaseDirsStore) appendOneSubDir(
 	sd *basedirs.SubDir,
 	pos uint32,
 	kind string,
+	phase string,
+) error {
+	err := s.timeImportPhase(phase, func() error {
+		return appendBasedirsSubDirBatch(
+			batch, s.mountPath, s.snapshot.String(),
+			key, sd, pos, kind,
+		)
+	})
+	if err != nil {
+		return err
+	}
+
+	return s.flushFullBatches()
+}
+
+func appendBasedirsSubDirBatch(
+	batch driver.Batch,
+	mountPath, snapshot string,
+	key basedirs.SubDirKey,
+	sd *basedirs.SubDir,
+	pos uint32,
+	kind string,
 ) error {
 	if err := batch.Append(
-		s.mountPath,
-		s.snapshot.String(),
-		key.ID,
-		key.BaseDir,
-		uint8(key.Age),
-		pos,
-		sd.SubDir,
-		sd.NumFiles,
-		sd.SizeFiles,
-		sd.LastModified,
+		mountPath, snapshot, key.ID, key.BaseDir, uint8(key.Age), pos,
+		sd.SubDir, sd.NumFiles, sd.SizeFiles, sd.LastModified,
 		usageBreakdownToCHMap(sd.FileUsage),
 	); err != nil {
 		return fmt.Errorf(
@@ -517,23 +576,19 @@ func (s *chBaseDirsStore) appendOneSubDir(
 		)
 	}
 
-	return s.flushFullBatches()
-}
-
-func usageBreakdownToCHMap(in basedirs.UsageBreakdownByType) map[uint16]uint64 {
-	if in == nil {
-		return map[uint16]uint64{}
-	}
-
-	out := make(map[uint16]uint64, len(in))
-	for ft, v := range in {
-		out[uint16(ft)] = v
-	}
-
-	return out
+	return nil
 }
 
 func (s *chBaseDirsStore) AppendGroupHistory(
+	key basedirs.HistoryKey,
+	point basedirs.History,
+) error {
+	return s.timeImportPhase(importPhaseBasedirsHistory, func() error {
+		return s.appendGroupHistory(key, point)
+	})
+}
+
+func (s *chBaseDirsStore) appendGroupHistory(
 	key basedirs.HistoryKey,
 	point basedirs.History,
 ) error {
@@ -560,6 +615,92 @@ func (s *chBaseDirsStore) AppendGroupHistory(
 	}
 
 	return err
+}
+
+func (s *chBaseDirsStore) finalise() error {
+	if err := s.ensureReady(); err != nil {
+		return err
+	}
+
+	for gid, usages := range s.bufferedAgeAllGroupUsage {
+		if err := s.finaliseGIDUsages(gid, usages); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (s *chBaseDirsStore) close() error {
+	s.closed = true
+
+	if s.conn == nil {
+		return nil
+	}
+
+	flushErr := s.flushAllBatches()
+	closeErr := s.closeStoreConn()
+
+	return errors.Join(flushErr, closeErr)
+}
+
+func (s *chBaseDirsStore) sendAndReprepareIfFull(
+	ctx context.Context,
+	batch driver.Batch,
+	query string,
+) (driver.Batch, error) {
+	if batch == nil || batch.Rows() < s.batchSize {
+		return batch, nil
+	}
+
+	var next driver.Batch
+
+	err := s.timeImportPhase(importPhaseBasedirsFlush, func() error {
+		b, err := sendAndReprepareBatch(ctx, s.conn, batch, query)
+		if err != nil {
+			return err
+		}
+
+		next = b
+
+		return nil
+	})
+	if err != nil {
+		return batch, err
+	}
+
+	return next, nil
+}
+
+func sendAndReprepareBatch(
+	ctx context.Context,
+	conn ch.Conn,
+	batch driver.Batch,
+	query string,
+) (driver.Batch, error) {
+	if err := batch.Send(); err != nil {
+		return batch, fmt.Errorf("clickhouse: failed to send batch: %w", err)
+	}
+
+	b, err := prepareBatchWithRelease(ctx, conn, query)
+	if err != nil {
+		return nil, fmt.Errorf("clickhouse: failed to reprepare batch: %w", err)
+	}
+
+	return b, nil
+}
+
+func usageBreakdownToCHMap(in basedirs.UsageBreakdownByType) map[uint16]uint64 {
+	if in == nil {
+		return map[uint16]uint64{}
+	}
+
+	out := make(map[uint16]uint64, len(in))
+	for ft, v := range in {
+		out[uint16(ft)] = v
+	}
+
+	return out
 }
 
 func (s *chBaseDirsStore) LastHistoryAppendInserted() bool {
@@ -640,17 +781,7 @@ func (s *chBaseDirsStore) insertHistoryPoint(
 }
 
 func (s *chBaseDirsStore) Finalise() error {
-	if err := s.ensureReady(); err != nil {
-		return err
-	}
-
-	for gid, usages := range s.bufferedAgeAllGroupUsage {
-		if err := s.finaliseGIDUsages(gid, usages); err != nil {
-			return err
-		}
-	}
-
-	return nil
+	return s.timeImportPhase(importPhaseBasedirsFinalise, s.finalise)
 }
 
 func (s *chBaseDirsStore) finaliseGIDUsages(
@@ -692,35 +823,33 @@ func (s *chBaseDirsStore) Close() error {
 		return nil
 	}
 
-	s.closed = true
-
-	if s.conn == nil {
-		return nil
-	}
-
-	flushErr := s.flushAllBatches()
-	closeErr := s.closeStoreConn()
-
-	return errors.Join(flushErr, closeErr)
+	return s.timeImportPhase(importPhaseBasedirsFlush, s.close)
 }
 
 func (s *chBaseDirsStore) appendGroupUsage(u *basedirs.Usage, dateNoSpace, dateNoFiles time.Time) error {
-	if err := s.groupUsageBatch.Append(
-		s.mountPath,
-		s.snapshot.String(),
-		u.GID,
-		u.BaseDir,
-		uint8(u.Age),
-		ensureNonNilUInt32s(u.UIDs),
-		u.UsageSize,
-		u.QuotaSize,
-		u.UsageInodes,
-		u.QuotaInodes,
-		u.Mtime,
-		dateNoSpace,
-		dateNoFiles,
-	); err != nil {
-		return fmt.Errorf("clickhouse: failed to append basedirs group usage: %w", err)
+	err := s.timeImportPhase(importPhaseBasedirsGroupUsage, func() error {
+		if err := s.groupUsageBatch.Append(
+			s.mountPath,
+			s.snapshot.String(),
+			u.GID,
+			u.BaseDir,
+			uint8(u.Age),
+			ensureNonNilUInt32s(u.UIDs),
+			u.UsageSize,
+			u.QuotaSize,
+			u.UsageInodes,
+			u.QuotaInodes,
+			u.Mtime,
+			dateNoSpace,
+			dateNoFiles,
+		); err != nil {
+			return fmt.Errorf("clickhouse: failed to append basedirs group usage: %w", err)
+		}
+
+		return nil
+	})
+	if err != nil {
+		return err
 	}
 
 	return s.flushFullBatches()
@@ -821,10 +950,7 @@ func (s *chBaseDirsStore) flushFullBatches() error {
 	batchCtx := context.WithoutCancel(ctx)
 
 	for _, slot := range s.batchSlots() {
-		b, err := sendAndReprepareIfFull(
-			batchCtx, s.conn, *slot.batch,
-			s.batchSize, slot.query,
-		)
+		b, err := s.sendAndReprepareIfFull(batchCtx, *slot.batch, slot.query)
 		*slot.batch = b
 
 		if err != nil {
@@ -833,33 +959,6 @@ func (s *chBaseDirsStore) flushFullBatches() error {
 	}
 
 	return nil
-}
-
-func sendAndReprepareIfFull(
-	ctx context.Context,
-	conn ch.Conn,
-	batch driver.Batch,
-	batchSize int,
-	query string,
-) (driver.Batch, error) {
-	if batch == nil || batch.Rows() < batchSize {
-		return batch, nil
-	}
-
-	if err := batch.Send(); err != nil {
-		return batch, fmt.Errorf(
-			"clickhouse: failed to send batch: %w", err,
-		)
-	}
-
-	b, err := prepareBatchWithRelease(ctx, conn, query)
-	if err != nil {
-		return nil, fmt.Errorf(
-			"clickhouse: failed to reprepare batch: %w", err,
-		)
-	}
-
-	return b, nil
 }
 
 func (s *chBaseDirsStore) batchSlots() [4]batchSlot {

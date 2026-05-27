@@ -32,7 +32,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"time"
 
@@ -220,6 +219,7 @@ func wireClickHouseOperations( //nolint:funlen
 	cfg clickhouse.Config,
 	mountPath, _ string,
 	modtime time.Time,
+	diag *summariseDiagnostics,
 ) (func(bool) error, error) {
 	dw, err := clickhouse.NewDGUTAWriter(cfg)
 	if err != nil {
@@ -241,6 +241,7 @@ func wireClickHouseOperations( //nolint:funlen
 	dw.SetMountPath(mountPath)
 	dw.SetUpdatedAt(modtime)
 	setClickHouseBatchSize(summariseDBBatchSize, dw, fiCloser)
+	setSummariseImportPhaseRecorder(diag.recordImportPhase, dw, fiCloser)
 
 	bs, err := setupBasedirsStore(
 		s, cfg, mountPath, cfg.MountPoints, modtime,
@@ -254,6 +255,7 @@ func wireClickHouseOperations( //nolint:funlen
 	}
 
 	setClickHouseBatchSize(summariseDBBatchSize, bs)
+	setSummariseImportPhaseRecorder(diag.recordImportPhase, bs)
 
 	s.AddDirectoryOperation(dirguta.NewDirGroupUserTypeAge(dw))
 	s.AddGlobalOperation(fi)
@@ -339,20 +341,8 @@ func closeSummariseDGUTAWriter(writer io.Closer, publish bool) error {
 	return summariseutil.CloseOrAbort(writer, publish)
 }
 
-func setSummariseProgress(s *summary.Summariser, statsFile string) {
-	s.SetProgress(summariseProgressEveryRows, func(records uint64, elapsed time.Duration) {
-		var mem runtime.MemStats
-		runtime.ReadMemStats(&mem)
-
-		info(
-			"summarise progress input=%s records=%d elapsed=%s heap_alloc_mb=%d heap_sys_mb=%d",
-			statsFile,
-			records,
-			elapsed.Round(time.Second),
-			bytesToMiB(mem.HeapAlloc),
-			bytesToMiB(mem.HeapSys),
-		)
-	})
+func setSummariseProgress(s *summary.Summariser, diag *summariseDiagnostics) {
+	diag.setProgress(s)
 }
 
 func bytesToMiB(bytes uint64) uint64 {
@@ -362,6 +352,7 @@ func bytesToMiB(bytes uint64) uint64 {
 func setupClickHouseSummariseHooks(
 	s *summary.Summariser,
 	chTarget *clickHouseSummariseTarget,
+	diag *summariseDiagnostics,
 ) (*summariseRunHooks, error) {
 	if chTarget == nil {
 		return nil, nil //nolint:nilnil
@@ -371,7 +362,7 @@ func setupClickHouseSummariseHooks(
 		return nil, err
 	}
 
-	return addClickHouseSummariseHooks(s, chTarget)
+	return addClickHouseSummariseHooks(s, chTarget, diag)
 }
 
 func abortSummariseHooks(hooks *summariseRunHooks) error {
@@ -382,21 +373,56 @@ func abortSummariseHooks(hooks *summariseRunHooks) error {
 	return hooks.close(false)
 }
 
-func summariseWithHooks(s *summary.Summariser, hooks *summariseRunHooks) error {
-	err := s.Summarise()
-	if hooks != nil && hooks.close != nil {
-		err = errors.Join(err, hooks.close(err == nil))
-	}
+func summariseWithHooks(
+	s *summary.Summariser,
+	hooks *summariseRunHooks,
+	diag *summariseDiagnostics,
+) error {
+	diag.setCurrentPhase("parse")
 
+	err := s.Summarise()
+	diag.logParseResult(err)
+
+	err = errors.Join(err, closeSummariseHooksWithDiagnostics(hooks, diag, err == nil))
 	if err != nil {
+		diag.logFailure(err)
+
 		return err
 	}
 
-	if hooks == nil {
+	return writeSummariseCompletionMarkerWithDiagnostics(hooks, diag)
+}
+
+func closeSummariseHooksWithDiagnostics(
+	hooks *summariseRunHooks,
+	diag *summariseDiagnostics,
+	publish bool,
+) error {
+	if hooks == nil || hooks.close == nil {
 		return nil
 	}
 
-	return writeSummariseCompletionMarker(hooks.completionTarget)
+	diag.logCloseStart(publish)
+	err := hooks.close(publish)
+	diag.logCloseResult(publish, err)
+
+	return err
+}
+
+func writeSummariseCompletionMarkerWithDiagnostics(
+	hooks *summariseRunHooks,
+	diag *summariseDiagnostics,
+) error {
+	if hooks == nil {
+		diag.logCompletionMarkerResult(nil)
+
+		return nil
+	}
+
+	err := writeSummariseCompletionMarker(hooks.completionTarget)
+	diag.logCompletionMarkerResult(err)
+
+	return err
 }
 
 type clickHouseSummariseTarget struct {
@@ -558,9 +584,10 @@ type summariseRunHooks struct {
 func addClickHouseSummariseHooks(
 	s *summary.Summariser,
 	chTarget *clickHouseSummariseTarget,
+	diag *summariseDiagnostics,
 ) (*summariseRunHooks, error) {
 	closer, err := wireSummariseClickHouseOperations(
-		s, chTarget.cfg, chTarget.mountPath, chTarget.mountpointsPath, chTarget.modtime,
+		s, chTarget.cfg, chTarget.mountPath, chTarget.mountpointsPath, chTarget.modtime, diag,
 	)
 	if err != nil {
 		return nil, err
@@ -586,20 +613,28 @@ func run(args []string) (err error) {
 	}()
 
 	s := summary.NewSummariser(stats.NewStatsParser(r))
-	setSummariseProgress(s, args[0])
 
 	setArgsDefaults()
 
-	hooks, err := setSummarisers(s, mounts, modtime)
+	diag := newSummariseDiagnostics(args[0])
+
+	diag.setOutputDir(defaultDir)
+	defer diag.stopSignalHandler()
+
+	setSummariseProgress(s, diag)
+
+	hooks, err := setSummarisers(s, mounts, modtime, diag)
 	if errors.Is(err, errSummariseClickHouseSnapshotAlreadyActive) {
 		return nil
 	}
 
 	if err != nil {
+		diag.logFailure(err)
+
 		return err
 	}
 
-	return summariseWithHooks(s, hooks)
+	return summariseWithHooks(s, hooks, diag)
 }
 
 func checkArgs(args []string) error {
@@ -671,13 +706,18 @@ func setSummarisers(
 	s *summary.Summariser,
 	mountpoints string,
 	modtime time.Time,
+	diag *summariseDiagnostics,
 ) (*summariseRunHooks, error) {
 	chTarget, err := prepareClickHouseSummariseTarget(mountpoints, modtime)
 	if err != nil {
 		return nil, err
 	}
 
-	hooks, err := setupClickHouseSummariseHooks(s, chTarget)
+	diag.setTarget(chTarget)
+	diag.logStart()
+	diag.startSignalHandler()
+
+	hooks, err := setupClickHouseSummariseHooks(s, chTarget, diag)
 	if err != nil {
 		return nil, err
 	}

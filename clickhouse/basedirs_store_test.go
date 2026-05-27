@@ -179,6 +179,92 @@ func TestClickHouseBaseDirsStore(t *testing.T) {
 		So(countRows(ctx, conn, basedirsStoreTestCountUserSubdirsQuery, testMountPath, sid), ShouldEqual, 2)
 	})
 
+	Convey("BaseDirsStore records basedirs phases through its recorder wiring", t, func() {
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 2 * time.Second
+
+		updatedAt := time.Unix(1710000000, 0).UTC()
+		gid := uint32(7)
+		uid := uint32(17)
+		phases := make(map[string]time.Duration)
+
+		store, err := NewBaseDirsStore(cfg)
+		So(err, ShouldBeNil)
+		So(store, ShouldNotBeNil)
+
+		impl, ok := store.(*chBaseDirsStore)
+		So(ok, ShouldBeTrue)
+
+		impl.SetBatchSize(1)
+		impl.SetImportPhaseRecorder(func(phase string, d time.Duration) {
+			phases[phase] += d
+		})
+
+		store.SetMountPath(testMountPath)
+		store.SetUpdatedAt(updatedAt)
+		So(store.Reset(), ShouldBeNil)
+		So(store.AppendGroupHistory(
+			basedirs.HistoryKey{GID: gid, MountPath: testMountPath},
+			basedirs.History{
+				Date: updatedAt, UsageSize: 100,
+				QuotaSize: 200, UsageInodes: 10, QuotaInodes: 20,
+			},
+		), ShouldBeNil)
+		So(store.PutGroupUsage(&basedirs.Usage{
+			GID:         gid,
+			BaseDir:     basedirsStoreTestBaseDir,
+			UIDs:        []uint32{uid},
+			UsageSize:   10,
+			QuotaSize:   20,
+			UsageInodes: 1,
+			QuotaInodes: 2,
+			Mtime:       updatedAt,
+			Age:         db.DGUTAgeA1M,
+		}), ShouldBeNil)
+		So(store.PutUserUsage(&basedirs.Usage{
+			UID:         uid,
+			BaseDir:     basedirsStoreTestBaseDir,
+			GIDs:        []uint32{gid},
+			UsageSize:   11,
+			QuotaSize:   21,
+			UsageInodes: 2,
+			QuotaInodes: 3,
+			Mtime:       updatedAt,
+			Age:         db.DGUTAgeA1M,
+		}), ShouldBeNil)
+
+		subdirs := []*basedirs.SubDir{{
+			SubDir:       "child",
+			NumFiles:     1,
+			SizeFiles:    10,
+			LastModified: updatedAt,
+		}}
+		So(store.PutGroupSubDirs(
+			basedirs.SubDirKey{ID: gid, BaseDir: basedirsStoreTestBaseDir, Age: db.DGUTAgeA1M},
+			subdirs,
+		), ShouldBeNil)
+		So(store.PutUserSubDirs(
+			basedirs.SubDirKey{ID: uid, BaseDir: basedirsStoreTestBaseDir, Age: db.DGUTAgeA1M},
+			subdirs,
+		), ShouldBeNil)
+		So(store.Finalise(), ShouldBeNil)
+		So(store.Close(), ShouldBeNil)
+
+		for _, phase := range []string{
+			"wrstat_basedirs_reset",
+			"wrstat_basedirs_group_usage_insert",
+			"wrstat_basedirs_user_usage_insert",
+			"wrstat_basedirs_group_subdirs_insert",
+			"wrstat_basedirs_user_subdirs_insert",
+			"wrstat_basedirs_history_insert",
+			"wrstat_basedirs_finalise",
+			"wrstat_basedirs_flush",
+		} {
+			So(phases[phase], ShouldBeGreaterThan, time.Duration(0))
+		}
+	})
+
 	Convey("BaseDirsStore refuses to rewrite an active deterministic snapshot", t, func() {
 		th := newClickHouseTestHarness(t)
 		cfg := th.newConfig()

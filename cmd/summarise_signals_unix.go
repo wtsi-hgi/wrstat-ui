@@ -1,8 +1,9 @@
+//go:build !windows
+
 /*******************************************************************************
  * Copyright (c) 2026 Genome Research Ltd.
  *
- * Authors:
- *   Sendu Bala <sb10@sanger.ac.uk>
+ * Author: Sendu Bala <sb10@sanger.ac.uk>
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -24,21 +25,74 @@
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  ******************************************************************************/
 
-package clickhouse
+package cmd
 
 import (
-	"time"
-
-	"github.com/google/uuid"
+	"os"
+	"os/signal"
+	"sync"
+	"syscall"
 )
 
-// SnapshotID returns the deterministic snapshot UUID for a mount and update time.
-func SnapshotID(mountPath string, updatedAt time.Time) string {
-	return snapshotID(mountPath, updatedAt).String()
+func summariseSignalName(sig os.Signal) string {
+	switch sig {
+	case syscall.SIGTERM:
+		return "SIGTERM"
+	case os.Interrupt:
+		return "SIGINT"
+	case syscall.SIGQUIT:
+		return "SIGQUIT"
+	default:
+		return sig.String()
+	}
 }
 
-func snapshotID(mountPath string, updatedAt time.Time) uuid.UUID {
-	name := mountPath + "|" + updatedAt.UTC().Format(time.RFC3339Nano)
+func resignalCurrentProcess(sig os.Signal) {
+	p, err := os.FindProcess(os.Getpid())
+	if err != nil {
+		os.Exit(1)
+	}
 
-	return uuid.NewSHA1(uuid.Nil, []byte(name))
+	if err := p.Signal(sig); err != nil {
+		os.Exit(1)
+	}
+}
+
+func (d *summariseDiagnostics) startSignalHandler() {
+	if d == nil {
+		return
+	}
+
+	signals := []os.Signal{syscall.SIGTERM, os.Interrupt, syscall.SIGQUIT}
+	ch := make(chan os.Signal, 1)
+	done := make(chan struct{})
+
+	var once sync.Once
+
+	signal.Notify(ch, signals...)
+
+	d.signalStop = func() {
+		once.Do(func() {
+			signal.Stop(ch)
+			close(done)
+		})
+	}
+
+	go func() {
+		select {
+		case sig := <-ch:
+			d.logSignal(sig)
+			signal.Reset(sig)
+			resignalCurrentProcess(sig)
+		case <-done:
+		}
+	}()
+}
+
+func (d *summariseDiagnostics) stopSignalHandler() {
+	if d == nil || d.signalStop == nil {
+		return
+	}
+
+	d.signalStop()
 }

@@ -147,6 +147,7 @@ func TestSummariseClickHouseActiveSnapshotPreflight(t *testing.T) {
 			_ clickhouse.Config,
 			_, _ string,
 			_ time.Time,
+			_ *summariseDiagnostics,
 		) (func(bool) error, error) {
 			So(cleanupCalled, ShouldBeTrue)
 
@@ -198,6 +199,7 @@ func TestSummariseClickHouseActiveSnapshotPreflight(t *testing.T) {
 			_ clickhouse.Config,
 			_, _ string,
 			_ time.Time,
+			_ *summariseDiagnostics,
 		) (func(bool) error, error) {
 			wireCalled = true
 
@@ -237,6 +239,7 @@ func TestSummariseClickHouseActiveSnapshotPreflight(t *testing.T) {
 			_ clickhouse.Config,
 			_, _ string,
 			_ time.Time,
+			_ *summariseDiagnostics,
 		) (func(bool) error, error) {
 			wireCalled = true
 
@@ -271,6 +274,7 @@ func TestSummariseClickHouseActiveSnapshotPreflight(t *testing.T) {
 			_ clickhouse.Config,
 			_, _ string,
 			_ time.Time,
+			_ *summariseDiagnostics,
 		) (func(bool) error, error) {
 			return func(publish bool) error {
 				So(publish, ShouldBeTrue)
@@ -308,6 +312,7 @@ func TestSummariseClickHouseActiveSnapshotPreflight(t *testing.T) {
 			_ clickhouse.Config,
 			_, _ string,
 			_ time.Time,
+			_ *summariseDiagnostics,
 		) (func(bool) error, error) {
 			return func(bool) error {
 				return errSummariseTestClose

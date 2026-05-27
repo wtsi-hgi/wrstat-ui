@@ -1,8 +1,9 @@
+//go:build windows
+
 /*******************************************************************************
  * Copyright (c) 2026 Genome Research Ltd.
  *
- * Authors:
- *   Sendu Bala <sb10@sanger.ac.uk>
+ * Author: Sendu Bala <sb10@sanger.ac.uk>
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -24,21 +25,18 @@
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  ******************************************************************************/
 
-package clickhouse
+package cmd
 
-import (
-	"time"
+import "os"
 
-	"github.com/google/uuid"
-)
+func summariseSignalName(sig os.Signal) string {
+	if sig == os.Interrupt {
+		return "SIGINT"
+	}
 
-// SnapshotID returns the deterministic snapshot UUID for a mount and update time.
-func SnapshotID(mountPath string, updatedAt time.Time) string {
-	return snapshotID(mountPath, updatedAt).String()
+	return sig.String()
 }
 
-func snapshotID(mountPath string, updatedAt time.Time) uuid.UUID {
-	name := mountPath + "|" + updatedAt.UTC().Format(time.RFC3339Nano)
+func (d *summariseDiagnostics) startSignalHandler() {}
 
-	return uuid.NewSHA1(uuid.Nil, []byte(name))
-}
+func (d *summariseDiagnostics) stopSignalHandler() {}
