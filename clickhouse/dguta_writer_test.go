@@ -50,6 +50,8 @@ const testMountPath = "/mnt/test/"
 
 const dgutaWriterTestPhasePartitionDropReset = "partition_drop_reset"
 
+const dgutaWriterTestSnapshotIDColumn = "snapshot_id"
+
 const (
 	dgutaWriterTestActiveSnapshotQuery = "SELECT toString(snapshot_id), updated_at FROM wrstat_mounts_active_v2 " +
 		"WHERE mount_path = ?"
@@ -1726,12 +1728,12 @@ func (c *dgutaWriterCloseContextConn) Query(
 	switch query {
 	case activeSnapshotQuery:
 		return &dgutaWriterCloseContextRows{
-			columns: []string{"snapshot_id"},
+			columns: []string{dgutaWriterTestSnapshotIDColumn},
 			values:  [][]any{{c.previousSID}},
 		}, nil
 	case mountsActiveRowsQuery:
 		return &dgutaWriterCloseContextRows{
-			columns: []string{"mount_path", "snapshot_id", "updated_at"},
+			columns: []string{"mount_path", dgutaWriterTestSnapshotIDColumn, "updated_at"},
 			values:  [][]any{{testMountPath, c.nextSID, c.updatedAt}},
 		}, nil
 	default:
@@ -1772,6 +1774,86 @@ func (c *dgutaWriterCloseContextConn) oldSnapshotPartitionDrops() int {
 
 func (c *dgutaWriterCloseContextConn) treeSummaryRefreshes() int {
 	return int(c.treeRefreshes.Load())
+}
+
+func TestDGUTAWriterOldSnapshotDropUsesCleanupTimeout(t *testing.T) {
+	Convey("DGUTAWriter uses the cleanup timeout when dropping the previous snapshot after switch", t, func() {
+		updatedAt := time.Date(2026, 1, 9, 15, 0, 0, 0, time.UTC)
+		queryTimeout := 100 * time.Millisecond
+		previousSID := snapshotID(testMountPath, updatedAt.Add(-1*time.Hour))
+		nextSID := snapshotID(testMountPath, updatedAt)
+		conn := &oldSnapshotDropDeadlineConn{
+			previousSID:  previousSID.String(),
+			normalWindow: queryTimeout,
+		}
+		w := &dgutaWriter{
+			cfg:       Config{QueryTimeout: queryTimeout},
+			conn:      conn,
+			mountPath: testMountPath,
+			updatedAt: updatedAt,
+			snapshot:  nextSID,
+		}
+
+		ctx, cancel := queryContext(context.Background(), queryTimeout)
+		defer cancel()
+
+		So(w.switchSnapshotAndDropOld(ctx), ShouldBeNil)
+		So(conn.oldSnapshotPartitionDrops(), ShouldEqual, len(allPartitionDropQueries()))
+		So(conn.longDeadlineDrops(), ShouldEqual, len(allPartitionDropQueries()))
+	})
+}
+
+type oldSnapshotDropDeadlineConn struct {
+	bootstrapTestConn
+
+	previousSID  string
+	normalWindow time.Duration
+
+	oldSnapshotDrops atomic.Int32
+	longDeadline     atomic.Int32
+}
+
+func (c *oldSnapshotDropDeadlineConn) Query(
+	_ context.Context,
+	query string,
+	_ ...any,
+) (driver.Rows, error) {
+	if query != activeSnapshotQuery {
+		return nil, errForcedFailure
+	}
+
+	return &dgutaWriterCloseContextRows{
+		columns: []string{dgutaWriterTestSnapshotIDColumn},
+		values:  [][]any{{c.previousSID}},
+	}, nil
+}
+
+func (c *oldSnapshotDropDeadlineConn) Exec(ctx context.Context, query string, _ ...any) error {
+	switch {
+	case query == switchSnapshotQuery:
+		return nil
+	case strings.HasPrefix(query, "ALTER TABLE"):
+		c.oldSnapshotDrops.Add(1)
+
+		deadline, ok := ctx.Deadline()
+		if !ok || time.Until(deadline) <= c.normalWindow {
+			return context.DeadlineExceeded
+		}
+
+		c.longDeadline.Add(1)
+
+		return nil
+	default:
+		return errBootstrapTestUnexpectedCall
+	}
+}
+
+func (c *oldSnapshotDropDeadlineConn) oldSnapshotPartitionDrops() int {
+	return int(c.oldSnapshotDrops.Load())
+}
+
+func (c *oldSnapshotDropDeadlineConn) longDeadlineDrops() int {
+	return int(c.longDeadline.Load())
 }
 
 type countingDGUTABatch struct {

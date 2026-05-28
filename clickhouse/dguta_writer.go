@@ -497,8 +497,11 @@ func (w *dgutaWriter) dropPreviousSnapshotPartitions(ctx context.Context, previo
 		return nil
 	}
 
+	cleanupCtx, cleanupCancel := queryContext(context.WithoutCancel(ctx), activeSnapshotCleanupTimeout)
+	defer cleanupCancel()
+
 	return w.timeImportPhase(importPhaseOldSnapshotDrop, func() error {
-		return w.dropAllSnapshotPartitions(ctx, previousSID)
+		return w.dropAllSnapshotPartitions(cleanupCtx, previousSID)
 	})
 }
 
