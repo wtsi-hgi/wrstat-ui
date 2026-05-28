@@ -1153,6 +1153,123 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 		So(impl.dgutaBatch, ShouldBeNil)
 	})
 
+	Convey("DGUTAWriter sends capped projection blocks as separate prepared batches", t, func() {
+		conn := &projectionSendPrepareConn{}
+		writer := mountDirProjectionWriter{}
+
+		So(writer.prepare(context.Background(), conn), ShouldBeNil)
+
+		mount := activeMount{
+			mountPath:  "/mnt/projection-send/",
+			snapshotID: "00000000-0000-0000-0000-000000000001",
+			updatedAt:  time.Date(2026, 1, 14, 9, 0, 0, 0, time.UTC),
+		}
+		So(writer.appendRecord(
+			mount,
+			"/mnt/projection-send/",
+			db.GUTAs{testProjectionGUTA(7, 9, db.DGUTAFileTypeBam, db.DGUTAgeAll, 1)},
+			0,
+			nil,
+			1,
+		), ShouldBeNil)
+
+		summaryBatches := conn.batchesFor(insertMountDirSummaryQuery)
+		vectorBatches := conn.batchesFor(insertMountDirDGUTAVectorQuery)
+
+		So(summaryBatches, ShouldHaveLength, 2)
+		So(vectorBatches, ShouldHaveLength, 2)
+		So(summaryBatches[0].flushes, ShouldEqual, 0)
+		So(summaryBatches[0].sends, ShouldEqual, 1)
+		So(summaryBatches[0].maxRows, ShouldEqual, 1)
+		So(summaryBatches[1].Rows(), ShouldEqual, 0)
+		So(vectorBatches[0].flushes, ShouldEqual, 0)
+		So(vectorBatches[0].sends, ShouldEqual, 1)
+		So(vectorBatches[0].maxRows, ShouldEqual, 1)
+		So(vectorBatches[1].Rows(), ShouldEqual, 0)
+		So(writer.summaryFlushed, ShouldBeFalse)
+		So(writer.vectorFlushed, ShouldBeFalse)
+		So(writer.abortAll(), ShouldBeNil)
+	})
+
+	Convey("DGUTAWriter fails safely when projection reprepare fails after send", t, func() {
+		conn := &projectionSendPrepareConn{}
+		writer := mountDirProjectionWriter{}
+
+		So(writer.prepare(context.Background(), conn), ShouldBeNil)
+		conn.prepareErrs = map[string]error{
+			insertMountDirSummaryQuery: errForcedFailure,
+		}
+
+		mount := activeMount{
+			mountPath:  "/mnt/projection-reprepare/",
+			snapshotID: "00000000-0000-0000-0000-000000000002",
+			updatedAt:  time.Date(2026, 1, 14, 9, 0, 0, 0, time.UTC),
+		}
+		err := writer.appendRecord(
+			mount,
+			"/mnt/projection-reprepare/",
+			db.GUTAs{testProjectionGUTA(7, 9, db.DGUTAFileTypeBam, db.DGUTAgeAll, 1)},
+			0,
+			nil,
+			1,
+		)
+		So(errors.Is(err, errForcedFailure), ShouldBeTrue)
+		So(conn.batchesFor(insertMountDirSummaryQuery)[0].flushes, ShouldEqual, 0)
+		So(conn.batchesFor(insertMountDirSummaryQuery)[0].sends, ShouldEqual, 1)
+
+		var nextErr error
+
+		So(func() {
+			nextErr = writer.appendRecord(
+				mount,
+				"/mnt/projection-reprepare/",
+				db.GUTAs{testProjectionGUTA(7, 9, db.DGUTAFileTypeBam, db.DGUTAgeAll, 1)},
+				0,
+				nil,
+				1,
+			)
+		}, ShouldNotPanic)
+		So(errors.Is(nextErr, errForcedFailure), ShouldBeTrue)
+		So(writer.abortAll(), ShouldBeNil)
+	})
+
+	Convey("DGUTAWriter sends the final partial projection batches once", t, func() {
+		conn := &projectionSendPrepareConn{}
+		writer := mountDirProjectionWriter{}
+		So(writer.prepare(context.Background(), conn), ShouldBeNil)
+
+		impl := &dgutaWriter{dirProjection: writer}
+		impl.SetBatchSize(2)
+
+		mount := activeMount{
+			mountPath:  "/mnt/projection-final/",
+			snapshotID: "00000000-0000-0000-0000-000000000003",
+			updatedAt:  time.Date(2026, 1, 14, 9, 0, 0, 0, time.UTC),
+		}
+		So(impl.dirProjection.appendRecord(
+			mount,
+			"/mnt/projection-final/",
+			db.GUTAs{testProjectionGUTA(7, 9, db.DGUTAFileTypeBam, db.DGUTAgeAll, 1)},
+			0,
+			nil,
+			2,
+		), ShouldBeNil)
+
+		summaryBatch := conn.batchesFor(insertMountDirSummaryQuery)[0]
+		vectorBatch := conn.batchesFor(insertMountDirDGUTAVectorQuery)[0]
+
+		So(summaryBatch.sends, ShouldEqual, 0)
+		So(vectorBatch.sends, ShouldEqual, 0)
+
+		So(impl.flushAllBatches(), ShouldBeNil)
+		So(summaryBatch.flushes, ShouldEqual, 0)
+		So(summaryBatch.sends, ShouldEqual, 1)
+		So(vectorBatch.flushes, ShouldEqual, 0)
+		So(vectorBatch.sends, ShouldEqual, 1)
+		So(impl.dirProjection.summaryBatch, ShouldBeNil)
+		So(impl.dirProjection.vectorBatch, ShouldBeNil)
+	})
+
 	Convey("DGUTAWriter caps projection batches below large raw import batches by default", t, func() {
 		impl := &dgutaWriter{}
 
@@ -1759,4 +1876,39 @@ func (c *rawDGUTASendPrepareConn) newBatch() *countingDGUTABatch {
 
 func (c *rawDGUTASendPrepareConn) preparedBatches() int {
 	return len(c.batches)
+}
+
+type projectionSendPrepareConn struct {
+	bootstrapTestConn
+
+	batches     map[string][]*countingDGUTABatch
+	prepareErrs map[string]error
+}
+
+func (c *projectionSendPrepareConn) PrepareBatch(
+	_ context.Context,
+	query string,
+	_ ...driver.PrepareBatchOption,
+) (driver.Batch, error) {
+	if !isMountDirProjectionInsert(query) {
+		return nil, errBootstrapTestUnexpectedCall
+	}
+
+	if err := c.prepareErrs[query]; err != nil {
+		return nil, err
+	}
+
+	batch := &countingDGUTABatch{}
+
+	if c.batches == nil {
+		c.batches = make(map[string][]*countingDGUTABatch)
+	}
+
+	c.batches[query] = append(c.batches[query], batch)
+
+	return batch, nil
+}
+
+func (c *projectionSendPrepareConn) batchesFor(query string) []*countingDGUTABatch {
+	return c.batches[query]
 }

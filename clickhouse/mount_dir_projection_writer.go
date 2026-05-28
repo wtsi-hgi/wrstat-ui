@@ -39,6 +39,8 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/summary"
 )
 
+var errDirProjectionBatchNotPrepared = errors.New("clickhouse: dir projection batch is not prepared")
+
 func compareProjectionGUTAs(a, b *db.GUTA) int {
 	if a == nil && b == nil {
 		return 0
@@ -302,11 +304,13 @@ func mountDirSummaryBaseValues(
 }
 
 type mountDirProjectionWriter struct {
+	conn           ch.Conn
 	summaryBatch   driver.Batch
 	vectorBatch    driver.Batch
 	summaryFlushed bool
 	vectorFlushed  bool
 	refreshedAt    time.Time
+	writeErr       error
 }
 
 func prepareMountDirProjectionWriter(
@@ -322,6 +326,8 @@ func prepareMountDirProjectionWriter(
 }
 
 func (w *mountDirProjectionWriter) prepare(ctx context.Context, conn ch.Conn) error {
+	w.conn = conn
+
 	summaryBatch, err := prepareBatchWithRelease(ctx, conn, insertMountDirSummaryQuery)
 	if err != nil {
 		return fmt.Errorf("clickhouse: failed to prepare dir summary batch: %w", err)
@@ -341,6 +347,8 @@ func (w *mountDirProjectionWriter) prepare(ctx context.Context, conn ch.Conn) er
 
 	w.summaryBatch = summaryBatch
 	w.vectorBatch = vectorBatch
+	w.summaryFlushed = false
+	w.vectorFlushed = false
 
 	return nil
 }
@@ -370,12 +378,21 @@ func (w *mountDirProjectionWriter) appendSummaryRows(
 	state mountDirProjectionState,
 	batchSize int,
 ) error {
+	if err := w.batchReady(w.summaryBatch, "dir summary"); err != nil {
+		return err
+	}
+
 	for _, key := range state.summaryKeys() {
 		if err := appendMountDirSummaryRow(w.summaryBatch, mount, key, state, w.refreshedAt); err != nil {
 			return err
 		}
 
-		if err := flushBatchIfFull(&w.summaryBatch, batchSize, "dir summary", &w.summaryFlushed); err != nil {
+		if err := w.sendFullBatchIfFull(
+			&w.summaryBatch,
+			insertMountDirSummaryQuery,
+			batchSize,
+			"dir summary",
+		); err != nil {
 			return err
 		}
 	}
@@ -388,15 +405,76 @@ func (w *mountDirProjectionWriter) appendVectorRows(
 	state mountDirProjectionState,
 	batchSize int,
 ) error {
+	if err := w.batchReady(w.vectorBatch, "dir dguta vector"); err != nil {
+		return err
+	}
+
 	for _, vectorDir := range state.vectorDirs() {
 		if err := appendMountDirDGUTAVectorRow(w.vectorBatch, mount, vectorDir, state, w.refreshedAt); err != nil {
 			return err
 		}
 
-		if err := flushBatchIfFull(&w.vectorBatch, batchSize, "dir dguta vector", &w.vectorFlushed); err != nil {
+		if err := w.sendFullBatchIfFull(
+			&w.vectorBatch,
+			insertMountDirDGUTAVectorQuery,
+			batchSize,
+			"dir dguta vector",
+		); err != nil {
 			return err
 		}
 	}
+
+	return nil
+}
+
+func (w *mountDirProjectionWriter) batchReady(batch driver.Batch, name string) error {
+	if w.writeErr != nil {
+		return w.writeErr
+	}
+
+	if batch != nil {
+		return nil
+	}
+
+	w.writeErr = fmt.Errorf("%w: %s", errDirProjectionBatchNotPrepared, name)
+
+	return w.writeErr
+}
+
+func (w *mountDirProjectionWriter) sendFullBatchIfFull(
+	batch *driver.Batch,
+	query string,
+	batchSize int,
+	name string,
+) error {
+	if batch == nil || *batch == nil || batchSize <= 0 || (*batch).Rows() < batchSize {
+		return nil
+	}
+
+	return w.sendFullBatch(batch, query, name)
+}
+
+func (w *mountDirProjectionWriter) sendFullBatch(
+	batch *driver.Batch,
+	query, name string,
+) error {
+	if err := (*batch).Send(); err != nil {
+		*batch = nil
+		w.writeErr = fmt.Errorf("clickhouse: failed to send %s batch: %w", name, err)
+
+		return w.writeErr
+	}
+
+	*batch = nil
+
+	next, err := prepareBatchWithRelease(context.Background(), w.conn, query)
+	if err != nil {
+		w.writeErr = fmt.Errorf("clickhouse: failed to prepare %s batch: %w", name, err)
+
+		return w.writeErr
+	}
+
+	*batch = next
 
 	return nil
 }

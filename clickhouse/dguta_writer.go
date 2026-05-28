@@ -996,7 +996,7 @@ func (w *dgutaWriter) appendMountDirProjectionRows(
 	childCount uint64,
 	recordAges []db.DirGUTAge,
 ) error {
-	return w.timeImportPhase(importPhaseDirProjectionWrite, func() error {
+	err := w.timeImportPhase(importPhaseDirProjectionWrite, func() error {
 		return w.dirProjection.appendRecord(
 			w.activeMount(),
 			parentDir,
@@ -1006,6 +1006,11 @@ func (w *dgutaWriter) appendMountDirProjectionRows(
 			w.effectiveProjectionBatchSize(),
 		)
 	})
+	if err != nil {
+		w.writeErr = err
+	}
+
+	return err
 }
 
 func (w *dgutaWriter) flushFullBatches() error {
