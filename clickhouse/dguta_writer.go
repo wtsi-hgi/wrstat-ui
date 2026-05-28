@@ -758,11 +758,11 @@ func (w *dgutaWriter) prepareDirProjectionBatches(
 }
 
 func (w *dgutaWriter) prepareBatch(ctx context.Context, query string) (driver.Batch, error) {
-	return prepareBatchWithRelease(ctx, w.conn, query)
+	return prepareImportBatch(ctx, w.conn, query)
 }
 
-func prepareBatchWithRelease(ctx context.Context, conn ch.Conn, query string) (driver.Batch, error) {
-	return conn.PrepareBatch(importBatchContext(ctx), query, driver.WithReleaseConnection())
+func prepareImportBatch(ctx context.Context, conn ch.Conn, query string) (driver.Batch, error) {
+	return conn.PrepareBatch(importBatchContext(ctx), query)
 }
 
 func (w *dgutaWriter) dropNewSnapshotPartitions(ctx context.Context) error {
@@ -1186,7 +1186,7 @@ func NewDGUTAWriter(cfg Config) (db.DGUTAWriter, error) {
 		return nil, err
 	}
 
-	conn, err := connectFromConfig(cfg)
+	conn, err := connectForImportFromConfig(cfg)
 	if err != nil {
 		return nil, err
 	}

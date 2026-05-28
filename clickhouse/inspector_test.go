@@ -53,7 +53,7 @@ func TestNewInspector(t *testing.T) {
 		})
 
 		Convey("it errors when Database is empty", func() {
-			ins, err := NewInspector(Config{DSN: "clickhouse://localhost:9000/?database=wrstat"})
+			ins, err := NewInspector(Config{DSN: testNativeDSN})
 			So(err, ShouldNotBeNil)
 			So(ins, ShouldBeNil)
 		})

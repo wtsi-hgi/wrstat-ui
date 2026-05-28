@@ -52,7 +52,7 @@ func TestClickHouseImportBatchContexts(t *testing.T) {
 		ctx, cancel := queryContext(context.Background(), time.Millisecond)
 		defer cancel()
 
-		batch, err := prepareBatchWithRelease(ctx, conn, insertDGUTAQuery)
+		batch, err := prepareImportBatch(ctx, conn, insertDGUTAQuery)
 		So(err, ShouldBeNil)
 		So(batch, ShouldNotBeNil)
 
@@ -62,6 +62,18 @@ func TestClickHouseImportBatchContexts(t *testing.T) {
 		So(batch.Send(), ShouldBeNil)
 		So(conn.prepares, ShouldEqual, 1)
 		So(conn.deadlinePrepares, ShouldEqual, 0)
+	})
+
+	Convey("Import batch sends do not depend on released-connection reacquire semantics", t, func() {
+		conn := &importContextConn{releasedSendErr: context.DeadlineExceeded}
+
+		batch, err := prepareImportBatch(context.Background(), conn, insertDGUTAQuery)
+		So(err, ShouldBeNil)
+		So(batch, ShouldNotBeNil)
+
+		So(batch.Send(), ShouldBeNil)
+		So(conn.prepares, ShouldEqual, 1)
+		So(conn.releasePrepares, ShouldEqual, 0)
 	})
 
 	Convey("Import batch reprepare replaces an already-expired normal query context", t, func() {
@@ -80,6 +92,7 @@ func TestClickHouseImportBatchContexts(t *testing.T) {
 		So(batch.sends, ShouldEqual, 1)
 		So(conn.prepares, ShouldEqual, 1)
 		So(conn.deadlinePrepares, ShouldEqual, 0)
+		So(conn.releasePrepares, ShouldEqual, 0)
 	})
 
 	Convey("Every long-running import prepared-batch table uses the shared import context semantics", t, func() {
@@ -93,6 +106,7 @@ func TestClickHouseImportBatchContexts(t *testing.T) {
 			insertChildrenQuery,
 			insertMountDirSummaryQuery,
 			insertMountDirDGUTAVectorQuery,
+			insertMountDirSummarySetQuery,
 			insertFilesBatchQuery,
 			insertBasedirsGroupUsageQuery,
 			insertBasedirsUserUsageQuery,
@@ -104,10 +118,11 @@ func TestClickHouseImportBatchContexts(t *testing.T) {
 
 		for _, query := range queries {
 			conn := &importContextConn{}
-			batch, err := prepareBatchWithRelease(ctx, conn, query)
+			batch, err := prepareImportBatch(ctx, conn, query)
 			So(err, ShouldBeNil)
 			So(batch, ShouldNotBeNil)
 			So(conn.deadlinePrepares, ShouldEqual, 0)
+			So(conn.releasePrepares, ShouldEqual, 0)
 
 			totalPrepares += conn.prepares
 		}
@@ -182,6 +197,9 @@ type importContextBatch struct {
 	*countingDGUTABatch
 
 	ctxErr func() error
+
+	releasedSendErr   error
+	releaseConnection bool
 }
 
 func (b *importContextBatch) Column(int) driver.BatchColumn {
@@ -189,6 +207,10 @@ func (b *importContextBatch) Column(int) driver.BatchColumn {
 }
 
 func (b *importContextBatch) Send() error {
+	if b.releaseConnection && b.releasedSendErr != nil {
+		return b.releasedSendErr
+	}
+
 	if err := b.ctxErr(); err != nil {
 		return err
 	}
@@ -201,12 +223,14 @@ type importContextConn struct {
 
 	prepares         int
 	deadlinePrepares int
+	releasePrepares  int
+	releasedSendErr  error
 }
 
 func (c *importContextConn) PrepareBatch(
 	ctx context.Context,
 	_ string,
-	_ ...driver.PrepareBatchOption,
+	opts ...driver.PrepareBatchOption,
 ) (driver.Batch, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -216,10 +240,21 @@ func (c *importContextConn) PrepareBatch(
 		c.deadlinePrepares++
 	}
 
+	var batchOpts driver.PrepareBatchOptions
+	for _, opt := range opts {
+		opt(&batchOpts)
+	}
+
+	if batchOpts.ReleaseConnection {
+		c.releasePrepares++
+	}
+
 	c.prepares++
 
 	return &importContextBatch{
 		countingDGUTABatch: &countingDGUTABatch{},
 		ctxErr:             ctx.Err,
+		releasedSendErr:    c.releasedSendErr,
+		releaseConnection:  batchOpts.ReleaseConnection,
 	}, nil
 }

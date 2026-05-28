@@ -102,7 +102,7 @@ func writeProjectionRows[T any](
 	batchSize int,
 	appendRow func(driver.Batch, T) error,
 ) error {
-	batch, err := prepareBatchWithRelease(ctx, conn, query)
+	batch, err := prepareImportBatch(ctx, conn, query)
 	if err != nil {
 		return fmt.Errorf("clickhouse: failed to prepare %s batch: %w", name, err)
 	}
@@ -144,7 +144,7 @@ func sendAndReplaceProjectionBatch(
 		return nil, fmt.Errorf("clickhouse: failed to send %s batch: %w", name, err)
 	}
 
-	next, err := prepareBatchWithRelease(ctx, conn, query)
+	next, err := prepareImportBatch(ctx, conn, query)
 	if err != nil {
 		return nil, fmt.Errorf("clickhouse: failed to prepare %s batch: %w", name, err)
 	}
@@ -328,12 +328,12 @@ func prepareMountDirProjectionWriter(
 func (w *mountDirProjectionWriter) prepare(ctx context.Context, conn ch.Conn) error {
 	w.conn = conn
 
-	summaryBatch, err := prepareBatchWithRelease(ctx, conn, insertMountDirSummaryQuery)
+	summaryBatch, err := prepareImportBatch(ctx, conn, insertMountDirSummaryQuery)
 	if err != nil {
 		return fmt.Errorf("clickhouse: failed to prepare dir summary batch: %w", err)
 	}
 
-	vectorBatch, err := prepareBatchWithRelease(ctx, conn, insertMountDirDGUTAVectorQuery)
+	vectorBatch, err := prepareImportBatch(ctx, conn, insertMountDirDGUTAVectorQuery)
 	if err != nil {
 		if abortErr := summaryBatch.Abort(); abortErr != nil {
 			return fmt.Errorf(
@@ -467,7 +467,7 @@ func (w *mountDirProjectionWriter) sendFullBatch(
 
 	*batch = nil
 
-	next, err := prepareBatchWithRelease(context.Background(), w.conn, query)
+	next, err := prepareImportBatch(context.Background(), w.conn, query)
 	if err != nil {
 		w.writeErr = fmt.Errorf("clickhouse: failed to prepare %s batch: %w", name, err)
 
@@ -769,7 +769,7 @@ func writeMountDirSummarySetRow(
 	mount activeMount,
 	refreshedAt time.Time,
 ) error {
-	batch, err := prepareBatchWithRelease(ctx, conn, insertMountDirSummarySetQuery)
+	batch, err := prepareImportBatch(ctx, conn, insertMountDirSummarySetQuery)
 	if err != nil {
 		return fmt.Errorf("clickhouse: failed to prepare dir summary set batch: %w", err)
 	}

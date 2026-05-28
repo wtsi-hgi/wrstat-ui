@@ -56,6 +56,15 @@ const defaultQueryTimeout = 10 * time.Second
 
 const defaultMaxOpenConns = 10
 
+const (
+	minImportDialTimeout      = 30 * time.Second
+	minImportReadTimeout      = time.Hour
+	minImportConnMaxLifetime  = 24 * time.Hour
+	minLongLivedImportBatches = 4
+	minImportControlConns     = 1
+	minImportOpenConns        = minLongLivedImportBatches + minImportControlConns
+)
+
 const maxConnectionSetupAttempts = 4
 
 const (
@@ -365,6 +374,26 @@ func connectFromConfigContext(ctx context.Context, cfg Config) (ch.Conn, error) 
 	return connectFromOptionsContext(ctx, cfg, opts)
 }
 
+func connectForImportFromConfig(cfg Config) (ch.Conn, error) {
+	opts, err := importOptionsFromConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	return connectFromOptions(cfg, opts)
+}
+
+func importOptionsFromConfig(cfg Config) (*ch.Options, error) {
+	opts, err := optionsFromConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	normalizeImportConnectionOptions(opts)
+
+	return opts, nil
+}
+
 func optionsFromConfig(cfg Config) (*ch.Options, error) {
 	opts, err := ch.ParseDSN(cfg.DSN)
 	if err != nil {
@@ -390,6 +419,28 @@ func effectiveConnectionLimits(cfg Config) (int, int) {
 	}
 
 	return maxOpen, maxIdle
+}
+
+func normalizeImportConnectionOptions(opts *ch.Options) {
+	opts.DialTimeout = maxDuration(opts.DialTimeout, minImportDialTimeout)
+	opts.ReadTimeout = maxDuration(opts.ReadTimeout, minImportReadTimeout)
+	opts.ConnMaxLifetime = maxDuration(opts.ConnMaxLifetime, minImportConnMaxLifetime)
+
+	if opts.MaxOpenConns < minImportOpenConns {
+		opts.MaxOpenConns = minImportOpenConns
+	}
+
+	if opts.MaxIdleConns < minImportOpenConns {
+		opts.MaxIdleConns = minImportOpenConns
+	}
+}
+
+func maxDuration(current, floor time.Duration) time.Duration {
+	if current >= floor {
+		return current
+	}
+
+	return floor
 }
 
 func connectFromOptions(cfg Config, opts *ch.Options) (ch.Conn, error) {

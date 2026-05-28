@@ -682,7 +682,7 @@ func sendAndReprepareBatch(
 		return batch, fmt.Errorf("clickhouse: failed to send batch: %w", err)
 	}
 
-	b, err := prepareBatchWithRelease(ctx, conn, query)
+	b, err := prepareImportBatch(ctx, conn, query)
 	if err != nil {
 		return nil, fmt.Errorf("clickhouse: failed to reprepare batch: %w", err)
 	}
@@ -916,7 +916,7 @@ func (s *chBaseDirsStore) prepareBatches(ctx context.Context) error {
 	prepared := make([]driver.Batch, 0, len(slots))
 
 	for _, slot := range slots {
-		batch, err := prepareBatchWithRelease(ctx, s.conn, slot.query)
+		batch, err := prepareImportBatch(ctx, s.conn, slot.query)
 		if err != nil {
 			return errors.Join(
 				fmt.Errorf("clickhouse: failed to prepare basedirs %s batch: %w", slot.name, err),
@@ -1008,7 +1008,7 @@ func NewBaseDirsStore(cfg Config) (basedirs.Store, error) {
 		return nil, err
 	}
 
-	conn, err := connectFromConfig(cfg)
+	conn, err := connectForImportFromConfig(cfg)
 	if err != nil {
 		return nil, err
 	}

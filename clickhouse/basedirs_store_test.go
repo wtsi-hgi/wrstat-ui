@@ -25,10 +25,12 @@ const (
 )
 
 func TestClickHouseBaseDirsStore(t *testing.T) {
-	Convey("BaseDirsStore writes basedirs snapshots and maintains history", t, func() {
+	Convey("BaseDirsStore writes basedirs snapshots and maintains history under a low configured import pool", t, func() {
 		th := newClickHouseTestHarness(t)
 		cfg := th.newConfig()
 		cfg.QueryTimeout = 2 * time.Second
+		cfg.MaxOpenConns = 1
+		cfg.MaxIdleConns = 1
 
 		updatedAt := time.Unix(1710000000, 0).UTC()
 		sid := snapshotID(testMountPath, updatedAt).String()

@@ -458,7 +458,7 @@ func (w *fileIngestWriter) prepareFilesBatch(ctx context.Context) error {
 		return nil
 	}
 
-	batch, err := prepareBatchWithRelease(ctx, w.conn, insertFilesBatchQuery)
+	batch, err := prepareImportBatch(ctx, w.conn, insertFilesBatchQuery)
 	if err != nil {
 		return fmt.Errorf(
 			"clickhouse: failed to prepare files batch: %w", err,
@@ -504,7 +504,7 @@ func connectForFileIngest(cfg Config) (ch.Conn, error) {
 		return nil, err
 	}
 
-	return connectFromConfig(cfg)
+	return connectForImportFromConfig(cfg)
 }
 
 type fileIngestOperation struct {
