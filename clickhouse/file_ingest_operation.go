@@ -458,9 +458,7 @@ func (w *fileIngestWriter) prepareFilesBatch(ctx context.Context) error {
 		return nil
 	}
 
-	batchCtx := context.WithoutCancel(ctx)
-
-	batch, err := prepareBatchWithRelease(batchCtx, w.conn, insertFilesBatchQuery)
+	batch, err := prepareBatchWithRelease(ctx, w.conn, insertFilesBatchQuery)
 	if err != nil {
 		return fmt.Errorf(
 			"clickhouse: failed to prepare files batch: %w", err,

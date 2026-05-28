@@ -385,7 +385,7 @@ func (s *chBaseDirsStore) resetStore() error {
 		return err
 	}
 
-	if err := s.prepareBatches(context.WithoutCancel(ctx)); err != nil {
+	if err := s.prepareBatches(ctx); err != nil {
 		return err
 	}
 
@@ -947,10 +947,8 @@ func (s *chBaseDirsStore) flushFullBatches() error {
 	ctx, cancel := configQueryContext(s.cfg)
 	defer cancel()
 
-	batchCtx := context.WithoutCancel(ctx)
-
 	for _, slot := range s.batchSlots() {
-		b, err := s.sendAndReprepareIfFull(batchCtx, *slot.batch, slot.query)
+		b, err := s.sendAndReprepareIfFull(ctx, *slot.batch, slot.query)
 		*slot.batch = b
 
 		if err != nil {

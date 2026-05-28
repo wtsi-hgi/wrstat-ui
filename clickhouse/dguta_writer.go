@@ -657,7 +657,7 @@ func (w *dgutaWriter) ensureWriteReady(ctx context.Context) error {
 		return err
 	}
 
-	return w.prepareWriteBatches(context.WithoutCancel(ctx))
+	return w.prepareWriteBatches(ctx)
 }
 
 func refuseActiveSnapshotRewrite(
@@ -762,7 +762,7 @@ func (w *dgutaWriter) prepareBatch(ctx context.Context, query string) (driver.Ba
 }
 
 func prepareBatchWithRelease(ctx context.Context, conn ch.Conn, query string) (driver.Batch, error) {
-	return conn.PrepareBatch(ctx, query, driver.WithReleaseConnection())
+	return conn.PrepareBatch(importBatchContext(ctx), query, driver.WithReleaseConnection())
 }
 
 func (w *dgutaWriter) dropNewSnapshotPartitions(ctx context.Context) error {
@@ -1199,6 +1199,16 @@ func NewDGUTAWriter(cfg Config) (db.DGUTAWriter, error) {
 		projectionBatchSize: projectionBatchSizeFor(defaultBatchSize),
 		childrenBatchSize:   childrenBatchSizeFor(defaultBatchSize),
 	}, nil
+}
+
+func importBatchContext(parent context.Context) context.Context {
+	if parent == nil {
+		parent = context.Background()
+	}
+
+	// clickhouse-go stores the PrepareBatch context and reuses it during Send,
+	// so import batches must not retain normal query deadlines across long runs.
+	return context.WithoutCancel(parent)
 }
 
 func scanActiveSnapshotID(rows driver.Rows) (string, error) {
