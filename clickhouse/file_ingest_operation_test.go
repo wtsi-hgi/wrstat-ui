@@ -382,6 +382,29 @@ func TestClickHouseFileIngestOperation(t *testing.T) {
 		So(conn.prepareCalls, ShouldEqual, 1)
 	})
 
+	Convey("File ingest reset uses cleanup timeout semantics for partition drops", t, func() {
+		updatedAt := time.Unix(1710000000, 0).UTC()
+		queryTimeout := 100 * time.Millisecond
+		conn := &fileIngestPartitionDropDeadlineConn{
+			partitionDropDeadlineConn: partitionDropDeadlineConn{normalWindow: queryTimeout},
+		}
+		w := &fileIngestWriter{
+			cfg:       Config{QueryTimeout: queryTimeout},
+			conn:      conn,
+			mountPath: testMountPath,
+			updatedAt: updatedAt,
+			snapshot:  snapshotID(testMountPath, updatedAt),
+			batchSize: defaultBatchSize,
+		}
+
+		ctx, cancel := queryContext(context.Background(), queryTimeout)
+		defer cancel()
+
+		So(w.ensureWriteReady(ctx), ShouldBeNil)
+		So(conn.partitionDrops(), ShouldEqual, 1)
+		So(conn.cleanupDeadlineDrops(), ShouldEqual, 1)
+	})
+
 	Convey("File ingest operation refuses to rewrite an active deterministic snapshot", t, func() {
 		th := newClickHouseTestHarness(t)
 		cfg := th.newConfig()
@@ -722,4 +745,22 @@ func (c *fileIngestLazyPrepareConn) Stats() driver.Stats {
 
 func (c *fileIngestLazyPrepareConn) Close() error {
 	return nil
+}
+
+type fileIngestPartitionDropDeadlineConn struct {
+	partitionDropDeadlineConn
+}
+
+func (c *fileIngestPartitionDropDeadlineConn) Query(
+	_ context.Context,
+	query string,
+	_ ...any,
+) (driver.Rows, error) {
+	if query != activeSnapshotQuery {
+		return nil, errBootstrapTestUnexpectedCall
+	}
+
+	return &dgutaWriterCloseContextRows{
+		columns: []string{dgutaWriterTestSnapshotIDColumn},
+	}, nil
 }

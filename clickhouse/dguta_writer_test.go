@@ -1155,6 +1155,118 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 		So(impl.dgutaBatch, ShouldBeNil)
 	})
 
+	Convey("DGUTAWriter sends capped children blocks as separate prepared batches", t, func() {
+		conn := &childrenSendPrepareConn{}
+		firstBatch := &countingDGUTABatch{}
+		impl := &dgutaWriter{
+			conn:          conn,
+			childrenBatch: firstBatch,
+			mountPath:     "/mnt/children-cap/",
+		}
+		impl.SetBatchSize(100_000)
+
+		var (
+			appendErr error
+			appended  int
+		)
+
+		for range defaultChildrenBatchSize + 1 {
+			ok, err := impl.appendChildRow(
+				"00000000-0000-0000-0000-000000000004",
+				"/mnt/children-cap/",
+				"child/",
+			)
+			appendErr = errors.Join(appendErr, err)
+
+			if ok {
+				appended++
+			}
+		}
+
+		So(appendErr, ShouldBeNil)
+		So(appended, ShouldEqual, defaultChildrenBatchSize+1)
+		So(firstBatch.maxRows, ShouldEqual, defaultChildrenBatchSize)
+		So(firstBatch.flushes, ShouldEqual, 0)
+		So(firstBatch.sends, ShouldEqual, 1)
+		So(conn.preparedBatches(), ShouldEqual, 1)
+		So(conn.batches[0].Rows(), ShouldEqual, 1)
+		So(impl.batchSize, ShouldEqual, 100_000)
+		So(impl.effectiveChildrenBatchSize(), ShouldEqual, defaultChildrenBatchSize)
+	})
+
+	Convey("DGUTAWriter fails safely when children reprepare fails after send", t, func() {
+		conn := &childrenSendPrepareConn{prepareErr: errForcedFailure}
+		firstBatch := &countingDGUTABatch{}
+		impl := &dgutaWriter{
+			conn:          conn,
+			childrenBatch: firstBatch,
+			mountPath:     "/mnt/children-reprepare/",
+		}
+		impl.SetBatchSize(1)
+
+		ok, err := impl.appendChildRow(
+			"00000000-0000-0000-0000-000000000005",
+			"/mnt/children-reprepare/",
+			"child/",
+		)
+		So(ok, ShouldBeFalse)
+		So(errors.Is(err, errForcedFailure), ShouldBeTrue)
+		So(firstBatch.flushes, ShouldEqual, 0)
+		So(firstBatch.sends, ShouldEqual, 1)
+		So(conn.preparedBatches(), ShouldEqual, 0)
+
+		var nextErr error
+
+		So(func() {
+			ok, nextErr = impl.appendChildRow(
+				"00000000-0000-0000-0000-000000000005",
+				"/mnt/children-reprepare/",
+				"child/",
+			)
+		}, ShouldNotPanic)
+		So(ok, ShouldBeFalse)
+		So(errors.Is(nextErr, errForcedFailure), ShouldBeTrue)
+
+		impl.mountPath = ""
+
+		So(func() {
+			nextErr = impl.Close()
+		}, ShouldNotPanic)
+		So(errors.Is(nextErr, errForcedFailure), ShouldBeTrue)
+	})
+
+	Convey("DGUTAWriter sends the final partial children batch once", t, func() {
+		conn := &childrenSendPrepareConn{}
+		firstBatch := &countingDGUTABatch{}
+		impl := &dgutaWriter{
+			conn:          conn,
+			childrenBatch: firstBatch,
+			mountPath:     "/mnt/children-final/",
+		}
+		impl.SetBatchSize(2)
+
+		for range 3 {
+			ok, err := impl.appendChildRow(
+				"00000000-0000-0000-0000-000000000006",
+				"/mnt/children-final/",
+				"child/",
+			)
+			So(err, ShouldBeNil)
+			So(ok, ShouldBeTrue)
+		}
+
+		So(firstBatch.flushes, ShouldEqual, 0)
+		So(firstBatch.sends, ShouldEqual, 1)
+		So(conn.preparedBatches(), ShouldEqual, 1)
+
+		finalBatch := conn.batches[0]
+		So(finalBatch.Rows(), ShouldEqual, 1)
+		So(impl.flushAllBatches(), ShouldBeNil)
+		So(finalBatch.flushes, ShouldEqual, 0)
+		So(finalBatch.sends, ShouldEqual, 1)
+		So(impl.childrenBatch, ShouldBeNil)
+	})
+
 	Convey("DGUTAWriter sends capped projection blocks as separate prepared batches", t, func() {
 		conn := &projectionSendPrepareConn{}
 		writer := mountDirProjectionWriter{}
@@ -1278,11 +1390,13 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 		impl.SetBatchSize(100_000)
 		So(impl.batchSize, ShouldEqual, 100_000)
 		So(impl.effectiveDGUTABatchSize(), ShouldEqual, defaultRawDGUTABatchSize)
+		So(impl.effectiveChildrenBatchSize(), ShouldEqual, defaultChildrenBatchSize)
 		So(impl.projectionBatchSize, ShouldEqual, defaultProjectionBatchSize)
 
 		impl.SetBatchSize(7)
 		So(impl.batchSize, ShouldEqual, 7)
 		So(impl.effectiveDGUTABatchSize(), ShouldEqual, 7)
+		So(impl.effectiveChildrenBatchSize(), ShouldEqual, 7)
 		So(impl.projectionBatchSize, ShouldEqual, 7)
 	})
 
@@ -1856,6 +1970,84 @@ func (c *oldSnapshotDropDeadlineConn) longDeadlineDrops() int {
 	return int(c.longDeadline.Load())
 }
 
+type partitionDropDeadlineConn struct {
+	bootstrapTestConn
+
+	normalWindow time.Duration
+	err          error
+
+	drops           atomic.Int32
+	cleanupDeadline atomic.Int32
+}
+
+func (c *partitionDropDeadlineConn) Exec(ctx context.Context, query string, _ ...any) error {
+	if !strings.HasPrefix(query, "ALTER TABLE") {
+		return errBootstrapTestUnexpectedCall
+	}
+
+	c.drops.Add(1)
+
+	deadline, ok := ctx.Deadline()
+	if !ok || time.Until(deadline) <= c.normalWindow {
+		return context.DeadlineExceeded
+	}
+
+	c.cleanupDeadline.Add(1)
+
+	return c.err
+}
+
+func (c *partitionDropDeadlineConn) partitionDrops() int {
+	return int(c.drops.Load())
+}
+
+func (c *partitionDropDeadlineConn) cleanupDeadlineDrops() int {
+	return int(c.cleanupDeadline.Load())
+}
+
+func TestPartitionDropUsesCleanupTimeout(t *testing.T) {
+	Convey("Partition drops replace normal query deadlines with the cleanup timeout", t, func() {
+		queryTimeout := 100 * time.Millisecond
+		conn := &partitionDropDeadlineConn{normalWindow: queryTimeout}
+
+		ctx, cancel := queryContext(context.Background(), queryTimeout)
+		defer cancel()
+
+		err := dropPartitionIgnoreUnknown(
+			ctx,
+			conn,
+			testMountPath,
+			"00000000-0000-0000-0000-000000000007",
+			dropFilesPartitionQuery,
+		)
+		So(err, ShouldBeNil)
+		So(conn.partitionDrops(), ShouldEqual, 1)
+		So(conn.cleanupDeadlineDrops(), ShouldEqual, 1)
+	})
+
+	Convey("Partition drops still propagate real cleanup-timeout errors", t, func() {
+		queryTimeout := 100 * time.Millisecond
+		conn := &partitionDropDeadlineConn{
+			normalWindow: queryTimeout,
+			err:          errForcedFailure,
+		}
+
+		ctx, cancel := queryContext(context.Background(), queryTimeout)
+		defer cancel()
+
+		err := dropPartitionIgnoreUnknown(
+			ctx,
+			conn,
+			testMountPath,
+			"00000000-0000-0000-0000-000000000008",
+			dropFilesPartitionQuery,
+		)
+		So(errors.Is(err, errForcedFailure), ShouldBeTrue)
+		So(conn.partitionDrops(), ShouldEqual, 1)
+		So(conn.cleanupDeadlineDrops(), ShouldEqual, 1)
+	})
+}
+
 type countingDGUTABatch struct {
 	rows    int
 	maxRows int
@@ -1957,6 +2149,36 @@ func (c *rawDGUTASendPrepareConn) newBatch() *countingDGUTABatch {
 }
 
 func (c *rawDGUTASendPrepareConn) preparedBatches() int {
+	return len(c.batches)
+}
+
+type childrenSendPrepareConn struct {
+	bootstrapTestConn
+
+	batches    []*countingDGUTABatch
+	prepareErr error
+}
+
+func (c *childrenSendPrepareConn) PrepareBatch(
+	_ context.Context,
+	query string,
+	_ ...driver.PrepareBatchOption,
+) (driver.Batch, error) {
+	if query != insertChildrenQuery {
+		return nil, errBootstrapTestUnexpectedCall
+	}
+
+	if c.prepareErr != nil {
+		return nil, c.prepareErr
+	}
+
+	batch := &countingDGUTABatch{}
+	c.batches = append(c.batches, batch)
+
+	return batch, nil
+}
+
+func (c *childrenSendPrepareConn) preparedBatches() int {
 	return len(c.batches)
 }
 

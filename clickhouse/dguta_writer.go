@@ -43,6 +43,7 @@ const (
 	defaultBatchSize           = 100_000
 	defaultRawDGUTABatchSize   = 10_000
 	defaultProjectionBatchSize = 10_000
+	defaultChildrenBatchSize   = 10_000
 
 	importPhasePartitionDropReset = "partition_drop_reset"
 	importPhaseDGUTAInsert        = "wrstat_dguta_insert"
@@ -82,11 +83,12 @@ const (
 )
 
 var (
-	errMountPathRequired     = errors.New("clickhouse: mount path is required")
-	errUpdatedAtRequired     = errors.New("clickhouse: updated at is required")
-	errDirRequired           = errors.New("clickhouse: record dir is required")
-	errDGUTABatchNotPrepared = errors.New("clickhouse: dguta batch is not prepared")
-	errActiveSnapshotRewrite = errors.New(
+	errMountPathRequired        = errors.New("clickhouse: mount path is required")
+	errUpdatedAtRequired        = errors.New("clickhouse: updated at is required")
+	errDirRequired              = errors.New("clickhouse: record dir is required")
+	errDGUTABatchNotPrepared    = errors.New("clickhouse: dguta batch is not prepared")
+	errChildrenBatchNotPrepared = errors.New("clickhouse: children batch is not prepared")
+	errActiveSnapshotRewrite    = errors.New(
 		"clickhouse: refusing to rewrite active snapshot",
 	)
 )
@@ -98,18 +100,6 @@ func basedirsPartitionDropQueries() []string {
 		dropBasedirsGroupSubdirsPartitionQuery,
 		dropBasedirsUserSubdirsPartitionQuery,
 	}
-}
-
-func flushBatch(batch *driver.Batch, name string, flushed *bool) error {
-	if err := (*batch).Flush(); err != nil {
-		return fmt.Errorf("clickhouse: failed to flush %s batch: %w", name, err)
-	}
-
-	if flushed != nil {
-		*flushed = true
-	}
-
-	return nil
 }
 
 type dgutaRowKey struct {
@@ -193,6 +183,7 @@ type dgutaWriter struct {
 	batchSize           int
 	dgutaBatchSize      int
 	projectionBatchSize int
+	childrenBatchSize   int
 
 	mountPath string
 	updatedAt time.Time
@@ -223,6 +214,7 @@ func (w *dgutaWriter) SetBatchSize(batchSize int) {
 		w.batchSize = batchSize
 		w.dgutaBatchSize = rawDGUTABatchSizeFor(batchSize)
 		w.projectionBatchSize = projectionBatchSizeFor(batchSize)
+		w.childrenBatchSize = childrenBatchSizeFor(batchSize)
 	}
 }
 
@@ -240,6 +232,14 @@ func projectionBatchSizeFor(batchSize int) int {
 	}
 
 	return min(batchSize, defaultProjectionBatchSize)
+}
+
+func childrenBatchSizeFor(batchSize int) int {
+	if batchSize <= 0 {
+		return defaultChildrenBatchSize
+	}
+
+	return min(batchSize, defaultChildrenBatchSize)
 }
 
 func (w *dgutaWriter) SetProjectionBatchSize(batchSize int) {
@@ -897,7 +897,10 @@ func (w *dgutaWriter) sendFullDGUTABatchIfFull() error {
 
 func (w *dgutaWriter) sendFullDGUTABatch() error {
 	if err := w.dgutaBatch.Send(); err != nil {
-		return fmt.Errorf("clickhouse: failed to send dguta batch: %w", err)
+		w.dgutaBatch = nil
+		w.writeErr = fmt.Errorf("clickhouse: failed to send dguta batch: %w", err)
+
+		return w.writeErr
 	}
 
 	w.dgutaBatch = nil
@@ -913,14 +916,6 @@ func (w *dgutaWriter) sendFullDGUTABatch() error {
 	w.dgutaBatch = batch
 
 	return nil
-}
-
-func flushBatchIfFull(batch *driver.Batch, batchSize int, name string, flushed *bool) error {
-	if batch == nil || *batch == nil || batchSize <= 0 || (*batch).Rows() < batchSize {
-		return nil
-	}
-
-	return flushBatch(batch, name, flushed)
 }
 
 func (w *dgutaWriter) isConsecutiveCanonicalDGUTADuplicate(rawDir, canonicalDir string, key dgutaRowKey) bool {
@@ -962,6 +957,16 @@ func (w *dgutaWriter) appendChildrenRows(children []string, parentDir string) (u
 }
 
 func (w *dgutaWriter) appendChildRow(snapshotID, parentDir, child string) (bool, error) {
+	if w.writeErr != nil {
+		return false, w.writeErr
+	}
+
+	if w.childrenBatch == nil {
+		w.writeErr = errChildrenBatchNotPrepared
+
+		return false, w.writeErr
+	}
+
 	child = childPathForParent(parentDir, child)
 
 	child = canonicalPathForMount(w.mountPath, child)
@@ -973,7 +978,7 @@ func (w *dgutaWriter) appendChildRow(snapshotID, parentDir, child string) (bool,
 		return false, fmt.Errorf("clickhouse: failed to append child row: %w", err)
 	}
 
-	if err := flushBatchIfFull(&w.childrenBatch, w.batchSize, "children", &w.childFlushed); err != nil {
+	if err := w.sendFullChildrenBatchIfFull(); err != nil {
 		return false, err
 	}
 
@@ -991,6 +996,38 @@ func childPathForParent(parentDir, child string) string {
 	}
 
 	return parentDir + child
+}
+
+func (w *dgutaWriter) sendFullChildrenBatchIfFull() error {
+	batchSize := w.effectiveChildrenBatchSize()
+	if w.childrenBatch == nil || batchSize <= 0 || w.childrenBatch.Rows() < batchSize {
+		return nil
+	}
+
+	return w.sendFullChildrenBatch()
+}
+
+func (w *dgutaWriter) sendFullChildrenBatch() error {
+	if err := w.childrenBatch.Send(); err != nil {
+		w.childrenBatch = nil
+		w.writeErr = fmt.Errorf("clickhouse: failed to send children batch: %w", err)
+
+		return w.writeErr
+	}
+
+	w.childrenBatch = nil
+	w.childFlushed = false
+
+	batch, err := w.prepareBatch(context.Background(), insertChildrenQuery)
+	if err != nil {
+		w.writeErr = fmt.Errorf("clickhouse: failed to prepare children batch: %w", err)
+
+		return w.writeErr
+	}
+
+	w.childrenBatch = batch
+
+	return nil
 }
 
 func (w *dgutaWriter) appendMountDirProjectionRows(
@@ -1017,17 +1054,29 @@ func (w *dgutaWriter) appendMountDirProjectionRows(
 }
 
 func (w *dgutaWriter) flushFullBatches() error {
-	for _, slot := range w.batchSlots() {
-		if slot.rows() < slot.batchSize {
-			continue
-		}
-
-		if err := w.flushBatch(slot); err != nil {
-			return err
-		}
+	if err := w.sendFullDGUTABatchIfFull(); err != nil {
+		return err
 	}
 
-	return nil
+	if err := w.sendFullChildrenBatchIfFull(); err != nil {
+		return err
+	}
+
+	if err := w.dirProjection.sendFullBatchIfFull(
+		&w.dirProjection.summaryBatch,
+		insertMountDirSummaryQuery,
+		w.effectiveProjectionBatchSize(),
+		"dir summary",
+	); err != nil {
+		return err
+	}
+
+	return w.dirProjection.sendFullBatchIfFull(
+		&w.dirProjection.vectorBatch,
+		insertMountDirDGUTAVectorQuery,
+		w.effectiveProjectionBatchSize(),
+		"dir dguta vector",
+	)
 }
 
 func (w *dgutaWriter) flushAllBatches() error {
@@ -1052,7 +1101,7 @@ func (w *dgutaWriter) batchSlots() [4]dgutaBatchSlot {
 		{
 			batch:     &w.childrenBatch,
 			flushed:   &w.childFlushed,
-			batchSize: w.batchSize,
+			batchSize: w.effectiveChildrenBatchSize(),
 			phase:     importPhaseChildrenInsert,
 			name:      "children",
 		},
@@ -1099,10 +1148,12 @@ func (w *dgutaWriter) effectiveProjectionBatchSize() int {
 	return projectionBatchSizeFor(w.batchSize)
 }
 
-func (w *dgutaWriter) flushBatch(slot dgutaBatchSlot) error {
-	return w.timeImportPhase(slot.phase, func() error {
-		return flushBatch(slot.batch, slot.name, slot.flushed)
-	})
+func (w *dgutaWriter) effectiveChildrenBatchSize() int {
+	if w.childrenBatchSize > 0 {
+		return w.childrenBatchSize
+	}
+
+	return childrenBatchSizeFor(w.batchSize)
 }
 
 func (w *dgutaWriter) sendAndCloseBatch(slot dgutaBatchSlot) error {
@@ -1146,6 +1197,7 @@ func NewDGUTAWriter(cfg Config) (db.DGUTAWriter, error) {
 		batchSize:           defaultBatchSize,
 		dgutaBatchSize:      rawDGUTABatchSizeFor(defaultBatchSize),
 		projectionBatchSize: projectionBatchSizeFor(defaultBatchSize),
+		childrenBatchSize:   childrenBatchSizeFor(defaultBatchSize),
 	}, nil
 }
 

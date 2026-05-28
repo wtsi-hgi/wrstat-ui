@@ -1023,7 +1023,10 @@ func dropPartitionIgnoreUnknown(
 	conn ch.Conn,
 	mountPath, snapshotID, query string,
 ) error {
-	err := conn.Exec(ctx, query, mountPath, snapshotID)
+	dropCtx, cancel := partitionDropContext(ctx)
+	defer cancel()
+
+	err := conn.Exec(dropCtx, query, mountPath, snapshotID)
 	if err == nil {
 		return nil
 	}
@@ -1033,6 +1036,14 @@ func dropPartitionIgnoreUnknown(
 	}
 
 	return fmt.Errorf("clickhouse: failed to drop partition: %w", err)
+}
+
+func partitionDropContext(parent context.Context) (context.Context, context.CancelFunc) {
+	if parent == nil {
+		parent = context.Background()
+	}
+
+	return queryContext(context.WithoutCancel(parent), activeSnapshotCleanupTimeout)
 }
 
 func isUnknownPartition(err error) bool {
