@@ -85,6 +85,12 @@ type QueryInspector interface {
 	Measure(ctx context.Context, run func(ctx context.Context) error) (*QueryMetrics, error)
 }
 
+// QueryCacheResetter clears storage-local query caches for cold-cache
+// benchmark operations.
+type QueryCacheResetter interface {
+	ResetQueryCaches()
+}
+
 // QueryAPI creates the storage-backed readers required by Query.
 type QueryAPI interface {
 	OpenProvider() (provider.Provider, error)

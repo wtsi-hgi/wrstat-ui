@@ -44,7 +44,10 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/summary"
 )
 
-var errForcedMaintainedSummaryPrefetchFailure = errors.New("forced maintained summary prefetch failure")
+var (
+	errForcedMaintainedSummaryPrefetchFailure = errors.New("forced maintained summary prefetch failure")
+	errUnexpectedMountDirSummaryReadyQuery    = errors.New("unexpected query in mount dir summary readiness test")
+)
 
 type clickHouseGenericTreeDB struct {
 	d *clickHouseDatabase
@@ -238,6 +241,82 @@ func TestClickHouseDatabaseDirInfo(t *testing.T) {
 		So(di.Children[0].Dir, ShouldEqual, "/dev")
 		So(di.Children[0].Count, ShouldEqual, 2)
 	})
+}
+
+func assertMaintainedReadinessRetriesMissesAndCachesHits(
+	checkReady func(*clickHouseDatabase, context.Context, string, string) (bool, error),
+	mountPath string,
+) {
+	resetSharedTreeQueryCachesForTesting()
+	Reset(resetSharedTreeQueryCachesForTesting)
+
+	conn := &mountDirSummaryReadinessConn{}
+	dbch := newClickHouseDatabase(Config{QueryTimeout: time.Second}, conn)
+	ctx := context.Background()
+
+	ready, err := checkReady(dbch, ctx, mountPath, "snapshot")
+	So(err, ShouldBeNil)
+	So(ready, ShouldBeFalse)
+	So(conn.queryCount(), ShouldEqual, 1)
+
+	conn.setReady(true)
+
+	ready, err = checkReady(dbch, ctx, mountPath, "snapshot")
+	So(err, ShouldBeNil)
+	So(ready, ShouldBeTrue)
+	So(conn.queryCount(), ShouldEqual, 2)
+
+	ready, err = checkReady(dbch, ctx, mountPath, "snapshot")
+	So(err, ShouldBeNil)
+	So(ready, ShouldBeTrue)
+	So(conn.queryCount(), ShouldEqual, 2)
+}
+
+type mountDirSummaryReadinessRows struct {
+	ready bool
+	seen  bool
+}
+
+func (r *mountDirSummaryReadinessRows) Next() bool {
+	if !r.ready || r.seen {
+		return false
+	}
+
+	r.seen = true
+
+	return true
+}
+
+func (r *mountDirSummaryReadinessRows) Scan(...any) error {
+	return nil
+}
+
+func (r *mountDirSummaryReadinessRows) ScanStruct(any) error {
+	return nil
+}
+
+func (r *mountDirSummaryReadinessRows) ColumnTypes() []driver.ColumnType {
+	return nil
+}
+
+func (r *mountDirSummaryReadinessRows) Totals(...any) error {
+	return nil
+}
+
+func (r *mountDirSummaryReadinessRows) Columns() []string {
+	return nil
+}
+
+func (r *mountDirSummaryReadinessRows) Close() error {
+	return nil
+}
+
+func (r *mountDirSummaryReadinessRows) Err() error {
+	return nil
+}
+
+func (r *mountDirSummaryReadinessRows) HasData() bool {
+	return r.ready
 }
 
 func TestClickHouseDatabaseBatchedTreeExpansion(t *testing.T) {
@@ -1024,6 +1103,24 @@ func mountDirProjectionStateFromSeededRows(
 }
 
 func TestClickHouseDatabaseTreeCache(t *testing.T) {
+	Convey("maintained projection readiness caches retry misses and keep hits", t, func() {
+		assertMaintainedReadinessRetriesMissesAndCachesHits(
+			func(dbch *clickHouseDatabase, ctx context.Context, mountPath, snapshotID string) (bool, error) {
+				return dbch.mountDirSummaryReadyCached(ctx, mountPath, snapshotID)
+			},
+			"/mnt/later/",
+		)
+	})
+
+	Convey("maintained vector readiness also retries after summary readiness misses", t, func() {
+		assertMaintainedReadinessRetriesMissesAndCachesHits(
+			func(dbch *clickHouseDatabase, ctx context.Context, mountPath, snapshotID string) (bool, error) {
+				return dbch.mountDirDGUTAVectorReadyCached(ctx, mountPath, snapshotID)
+			},
+			"/mnt/vector-later/",
+		)
+	})
+
 	Convey("Tree.DirInfo and DiskTree-shaped calls reuse cached rows for the active snapshot", t, func() {
 		os.Setenv("WRSTAT_ENV", "test")
 		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
@@ -2822,6 +2919,35 @@ func addSeededChildrenToMountDirProjectionState(
 	}
 
 	return rows.Err()
+}
+
+type mountDirSummaryReadinessConn struct {
+	ch.Conn
+
+	queries atomic.Int32
+	ready   atomic.Bool
+}
+
+func (c *mountDirSummaryReadinessConn) Query(
+	_ context.Context,
+	query string,
+	_ ...any,
+) (driver.Rows, error) {
+	if strings.Contains(query, "FROM wrstat_dir_summary_sets") {
+		c.queries.Add(1)
+
+		return &mountDirSummaryReadinessRows{ready: c.ready.Load()}, nil
+	}
+
+	return nil, errUnexpectedMountDirSummaryReadyQuery
+}
+
+func (c *mountDirSummaryReadinessConn) setReady(ready bool) {
+	c.ready.Store(ready)
+}
+
+func (c *mountDirSummaryReadinessConn) queryCount() int {
+	return int(c.queries.Load())
 }
 
 type treeSummaryRefreshDeadlineConn struct {

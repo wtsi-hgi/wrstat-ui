@@ -317,7 +317,7 @@ func TestRunOp(t *testing.T) {
 				},
 			}},
 			op{
-				name:   "files_listdir",
+				name:   queryOpFilesListDirName,
 				inputs: map[string]any{queryInputDirKey: "/tmp/"},
 				run:    func(context.Context) error { return nil },
 			},
@@ -327,7 +327,7 @@ func TestRunOp(t *testing.T) {
 
 		So(err, ShouldNotBeNil)
 		So(err.Error(), ShouldContainSubstring, errQueryTestMeasure.Error())
-		So(err.Error(), ShouldContainSubstring, "files_listdir")
+		So(err.Error(), ShouldContainSubstring, queryOpFilesListDirName)
 		So(report.Operations, ShouldHaveLength, 0)
 	})
 
@@ -454,6 +454,52 @@ func TestRunOp(t *testing.T) {
 
 		So(err, ShouldBeNil)
 		So(runCalls, ShouldEqual, 2)
+		So(report.Operations, ShouldHaveLength, 1)
+		So(report.Operations[0].DurationsMS, ShouldHaveLength, 2)
+	})
+
+	Convey("runOp runs setup and teardown around each timed repeat", t, func() {
+		var calls []string
+
+		report := boltperf.NewReport("clickhouse", "", 2, 0)
+		qctx := queryContext{inspector: fakeQueryInspector{
+			measure: func(_ context.Context, _ func(context.Context) error) (*QueryMetrics, error) {
+				return nil, errQueryTestMeasure
+			},
+		}}
+
+		err := runOp(
+			&report,
+			qctx,
+			op{
+				name:        "tree_where_provider_update_cold_cache",
+				inputs:      map[string]any{},
+				useWallTime: true,
+				setup: func(context.Context) error {
+					calls = append(calls, "setup")
+
+					return nil
+				},
+				run: func(context.Context) error {
+					calls = append(calls, "run")
+
+					return nil
+				},
+				teardown: func(context.Context) error {
+					calls = append(calls, "teardown")
+
+					return nil
+				},
+			},
+			QueryOptions{Repeat: 2},
+			func(string, ...any) {},
+		)
+
+		So(err, ShouldBeNil)
+		So(calls, ShouldResemble, []string{
+			"setup", "run", "teardown",
+			"setup", "run", "teardown",
+		})
 		So(report.Operations, ShouldHaveLength, 1)
 		So(report.Operations[0].DurationsMS, ShouldHaveLength, 2)
 	})
@@ -744,6 +790,7 @@ func TestBuildOps(t *testing.T) {
 			openProvider: func() (provider.Provider, error) {
 				return fakeMountTimestampsProvider{tree: db.NewTree(newQueryOpTestDB())}, nil
 			},
+			resetQueryCaches: func() {},
 		}
 
 		ops := buildOps(qctx, QueryOptions{
@@ -772,6 +819,10 @@ func TestBuildOps(t *testing.T) {
 		So(names, ShouldContain, queryOpTreeDiskTreeVisibleChildName)
 		So(names, ShouldContain, queryOpTreeDiskTreeAncName)
 		So(names, ShouldContain, "tree_where_cold_then_cached")
+		So(names, ShouldContain, queryOpTreeWhereColdProviderName)
+		So(names, ShouldContain, queryOpTreeDiskTreeColdProviderName)
+		So(names, ShouldContain, queryOpTreeWhereProviderUpdateName)
+		So(names, ShouldContain, queryOpTreeDiskTreeProviderUpdateName)
 		So(names, ShouldContain, "tree_where_fresh_provider")
 		So(queryTestOpIndex(names, "tree_where_cold_then_cached"), ShouldBeLessThan,
 			queryTestOpIndex(names, "tree_disktree_endpoint_new_dirs"))
@@ -822,6 +873,100 @@ func TestBuildOps(t *testing.T) {
 		So(freshWhereOp.inputs["duration_source"], ShouldEqual, "wall")
 		So(freshWhereOp.skipWarmup, ShouldBeTrue)
 		So(freshWhereOp.useWallTime, ShouldBeTrue)
+
+		coldProviderWhereOp := findQueryTestOp(ops, queryOpTreeWhereColdProviderName)
+		So(coldProviderWhereOp, ShouldNotBeNil)
+		So(coldProviderWhereOp.inputs["cache_scope"], ShouldEqual, queryScopeColdProvider)
+		So(coldProviderWhereOp.inputs["duration_source"], ShouldEqual, "wall")
+		So(coldProviderWhereOp.skipWarmup, ShouldBeTrue)
+		So(coldProviderWhereOp.useWallTime, ShouldBeTrue)
+
+		updateWhereOp := findQueryTestOp(ops, queryOpTreeWhereProviderUpdateName)
+		So(updateWhereOp, ShouldNotBeNil)
+		So(updateWhereOp.inputs["cache_scope"], ShouldEqual, queryScopeProviderUpdateCold)
+		So(updateWhereOp.inputs["duration_source"], ShouldEqual, "wall")
+		So(updateWhereOp.skipWarmup, ShouldBeTrue)
+		So(updateWhereOp.useWallTime, ShouldBeTrue)
+
+		coldProviderDiskTreeOp := findQueryTestOp(ops, queryOpTreeDiskTreeColdProviderName)
+		So(coldProviderDiskTreeOp, ShouldNotBeNil)
+		So(coldProviderDiskTreeOp.inputs["cache_scope"], ShouldEqual, queryScopeColdProvider)
+		So(coldProviderDiskTreeOp.inputs["duration_source"], ShouldEqual, "wall")
+		So(coldProviderDiskTreeOp.skipWarmup, ShouldBeTrue)
+		So(coldProviderDiskTreeOp.useWallTime, ShouldBeTrue)
+
+		updateDiskTreeOp := findQueryTestOp(ops, queryOpTreeDiskTreeProviderUpdateName)
+		So(updateDiskTreeOp, ShouldNotBeNil)
+		So(updateDiskTreeOp.inputs["cache_scope"], ShouldEqual, queryScopeProviderUpdateCold)
+		So(updateDiskTreeOp.inputs["duration_source"], ShouldEqual, "wall")
+		So(updateDiskTreeOp.skipWarmup, ShouldBeTrue)
+		So(updateDiskTreeOp.useWallTime, ShouldBeTrue)
+	})
+
+	Convey("provider-update cold-cache tree ops open providers outside timed runs", t, func() {
+		var (
+			closeCalls int
+			openCalls  int
+			resetCalls int
+		)
+
+		qctx := queryContext{
+			dir: queryOpTestRootDir,
+			openProvider: func() (provider.Provider, error) {
+				openCalls++
+
+				return fakeMountTimestampsProvider{
+					tree: db.NewTree(newQueryOpTestDB()),
+					closeHook: func() error {
+						closeCalls++
+
+						return nil
+					},
+				}, nil
+			},
+			resetQueryCaches: func() {
+				resetCalls++
+			},
+		}
+
+		whereOp := opTreeWhereProviderUpdateColdCache(qctx, 1)
+		So(whereOp.setup(context.Background()), ShouldBeNil)
+		So(openCalls, ShouldEqual, 1)
+		So(resetCalls, ShouldEqual, 1)
+		So(whereOp.run(context.Background()), ShouldBeNil)
+		So(openCalls, ShouldEqual, 1)
+		So(whereOp.teardown(context.Background()), ShouldBeNil)
+		So(closeCalls, ShouldEqual, 1)
+
+		diskTreeOp := opTreeDiskTreeProviderUpdateColdCache(qctx)
+		So(diskTreeOp.setup(context.Background()), ShouldBeNil)
+		So(openCalls, ShouldEqual, 2)
+		So(resetCalls, ShouldEqual, 2)
+		So(diskTreeOp.run(context.Background()), ShouldBeNil)
+		So(openCalls, ShouldEqual, 2)
+		So(diskTreeOp.teardown(context.Background()), ShouldBeNil)
+		So(closeCalls, ShouldEqual, 2)
+	})
+
+	Convey("buildOps records cache metadata for file-level APIs", t, func() {
+		qctx := queryContext{
+			provider: fakeMountTimestampsProvider{tree: db.NewTree(newQueryOpTestDB())},
+			client: &fakeQueryClient{rows: []QueryRow{{
+				Path:      queryOpTestRootDir + "file.bam",
+				Ext:       "bam",
+				EntryType: 'f',
+			}}},
+			dir: queryOpTestRootDir,
+		}
+
+		ops := buildOps(qctx, QueryOptions{}, func(string, ...any) {})
+
+		for _, name := range []string{queryOpFilesListDirName, "files_statpath", "glob_case_A"} {
+			fileOp := findQueryTestOp(ops, name)
+			So(fileOp, ShouldNotBeNil)
+			So(fileOp.inputs[queryInputCacheScope], ShouldEqual, queryScopeSameQueryClient)
+			So(fileOp.inputs[queryInputDurationSource], ShouldEqual, querySourceClickHouseLog)
+		}
 	})
 
 	Convey("tree_disktree_endpoint_new_dirs times walked dirs instead of the selected warm dir", t, func() {

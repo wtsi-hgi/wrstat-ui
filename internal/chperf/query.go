@@ -45,35 +45,43 @@ import (
 )
 
 const (
-	dirPickMinCount                     = 1000
-	dirPickMaxCount                     = 20000
-	dirPickMaxSteps                     = 64
-	defaultExplainLimit                 = 1_000_000
-	queryInputAgeKey                    = "age"
-	queryInputDirKey                    = "dir"
-	queryInputDurationSource            = "duration_source"
-	queryInputCacheScope                = "cache_scope"
-	queryInputFilterFileTypeMaskKey     = "filter_file_type_mask"
-	queryInputFilterFileTypesKey        = "filter_file_types"
-	queryInputFilterGIDsKey             = "filter_gids"
-	queryInputFilterUIDsKey             = "filter_uids"
-	queryInputSplitsKey                 = "splits"
-	queryOpTreeDiskTreeAncName          = "tree_disktree_endpoint_ancestor_dirs"
-	queryOpTreeDiskTreeEndName          = "tree_disktree_endpoint"
-	queryOpTreeDiskTreeNewName          = "tree_disktree_endpoint_new_dirs"
-	queryOpTreeDiskTreeVisibleChildName = "tree_disktree_endpoint_visible_child_dirs"
-	queryOpTreeDirInfoName              = "tree_dirinfo"
-	queryOpTreeWhereColdName            = "tree_where_cold_then_cached"
-	queryOpTreeWhereFreshName           = "tree_where_fresh_provider"
-	queryOpTreeWhereName                = "tree_where"
-	queryScopeFreshProvider             = "fresh_provider_per_repeat"
-	queryScopeAncestorDirs              = "ancestor_directory_each_repeat"
-	queryScopeNewDirEachRepeat          = "new_directory_each_repeat"
-	queryScopeSameProviderCold          = "same_provider_cold_then_warm"
-	queryScopeSameProviderDir           = "same_provider_same_dir"
-	queryScopeVisibleChildDirs          = "visible_child_directory_each_repeat"
-	querySourceClickHouseLog            = "clickhouse_query_log"
-	querySourceWall                     = "wall"
+	dirPickMinCount                       = 1000
+	dirPickMaxCount                       = 20000
+	dirPickMaxSteps                       = 64
+	defaultExplainLimit                   = 1_000_000
+	queryInputAgeKey                      = "age"
+	queryInputDirKey                      = "dir"
+	queryInputDurationSource              = "duration_source"
+	queryInputCacheScope                  = "cache_scope"
+	queryInputFilterFileTypeMaskKey       = "filter_file_type_mask"
+	queryInputFilterFileTypesKey          = "filter_file_types"
+	queryInputFilterGIDsKey               = "filter_gids"
+	queryInputFilterUIDsKey               = "filter_uids"
+	queryInputSplitsKey                   = "splits"
+	queryOpFilesListDirName               = "files_listdir"
+	queryOpTreeDiskTreeAncName            = "tree_disktree_endpoint_ancestor_dirs"
+	queryOpTreeDiskTreeColdProviderName   = "tree_disktree_endpoint_cold_provider"
+	queryOpTreeDiskTreeEndName            = "tree_disktree_endpoint"
+	queryOpTreeDiskTreeNewName            = "tree_disktree_endpoint_new_dirs"
+	queryOpTreeDiskTreeProviderUpdateName = "tree_disktree_endpoint_provider_update_cold_cache"
+	queryOpTreeDiskTreeVisibleChildName   = "tree_disktree_endpoint_visible_child_dirs"
+	queryOpTreeDirInfoName                = "tree_dirinfo"
+	queryOpTreeWhereColdName              = "tree_where_cold_then_cached"
+	queryOpTreeWhereColdProviderName      = "tree_where_cold_provider"
+	queryOpTreeWhereFreshName             = "tree_where_fresh_provider"
+	queryOpTreeWhereName                  = "tree_where"
+	queryOpTreeWhereProviderUpdateName    = "tree_where_provider_update_cold_cache"
+	queryScopeFreshProvider               = "fresh_provider_per_repeat"
+	queryScopeAncestorDirs                = "ancestor_directory_each_repeat"
+	queryScopeColdProvider                = "cold_provider_with_cold_query_cache"
+	queryScopeNewDirEachRepeat            = "new_directory_each_repeat"
+	queryScopeProviderUpdateCold          = "provider_update_cold_cache"
+	queryScopeSameProviderCold            = "same_provider_cold_then_warm"
+	queryScopeSameProviderDir             = "same_provider_same_dir"
+	queryScopeSameQueryClient             = "same_query_client"
+	queryScopeVisibleChildDirs            = "visible_child_directory_each_repeat"
+	querySourceClickHouseLog              = "clickhouse_query_log"
+	querySourceWall                       = "wall"
 )
 
 var (
@@ -166,6 +174,7 @@ func openQueryContext(api QueryAPI) (queryContext, error) {
 	var qctx queryContext
 
 	qctx.openProvider = api.OpenProvider
+	qctx.resetQueryCaches = queryCacheResetter(api)
 
 	p, err := qctx.openProvider()
 	if err != nil {
@@ -189,6 +198,15 @@ func openQueryContext(api QueryAPI) (queryContext, error) {
 	qctx.inspector = inspector
 
 	return qctx, nil
+}
+
+func queryCacheResetter(api QueryAPI) func() {
+	resetter, ok := api.(QueryCacheResetter)
+	if !ok {
+		return nil
+	}
+
+	return resetter.ResetQueryCaches
 }
 
 func treeFilterFromOptions(filter *db.Filter) *db.Filter {
@@ -324,6 +342,150 @@ func treeOpInputs(filter *db.Filter, inputs map[string]any) map[string]any {
 	inputs[queryInputFilterFileTypesKey] = filter.FT.String()
 
 	return inputs
+}
+
+func opTreeWhereColdProvider(qctx queryContext, splits int) op {
+	filter := treeFilterFromOptions(qctx.treeFilter)
+
+	return op{
+		name: queryOpTreeWhereColdProviderName,
+		inputs: treeOpInputs(filter, map[string]any{
+			queryInputDirKey:         qctx.dir,
+			queryInputCacheScope:     queryScopeColdProvider,
+			queryInputDurationSource: querySourceWall,
+			queryInputSplitsKey:      splits,
+		}),
+		setup: func(_ context.Context) error {
+			qctx.resetCaches()
+
+			return nil
+		},
+		run: func(_ context.Context) error {
+			return runTreeWhereFreshProvider(qctx, splits, filter)
+		},
+		useWallTime: true,
+		skipWarmup:  true,
+	}
+}
+
+func opTreeDiskTreeEndpointColdProvider(qctx queryContext) op {
+	filter := treeFilterFromOptions(qctx.treeFilter)
+
+	return op{
+		name: queryOpTreeDiskTreeColdProviderName,
+		inputs: treeOpInputs(filter, map[string]any{
+			queryInputDirKey:         qctx.dir,
+			queryInputCacheScope:     queryScopeColdProvider,
+			queryInputDurationSource: querySourceWall,
+		}),
+		setup: func(_ context.Context) error {
+			qctx.resetCaches()
+
+			return nil
+		},
+		run: func(_ context.Context) error {
+			return runTreeDiskTreeFreshProvider(qctx, filter)
+		},
+		useWallTime: true,
+		skipWarmup:  true,
+	}
+}
+
+func runTreeDiskTreeFreshProvider(qctx queryContext, filter *db.Filter) error {
+	if qctx.openProvider == nil {
+		return errOpenProviderRequired
+	}
+
+	p, err := qctx.openProvider()
+	if err != nil {
+		return err
+	}
+
+	runErr := runTreeDiskTreeEndpoint(p.Tree(), qctx.dir, filter)
+	closeErr := p.Close()
+
+	return errors.Join(runErr, closeErr)
+}
+
+func opTreeWhereProviderUpdateColdCache(qctx queryContext, splits int) op {
+	filter := treeFilterFromOptions(qctx.treeFilter)
+
+	var p provider.Provider
+
+	return op{
+		name: queryOpTreeWhereProviderUpdateName,
+		inputs: treeOpInputs(filter, map[string]any{
+			queryInputDirKey:         qctx.dir,
+			queryInputCacheScope:     queryScopeProviderUpdateCold,
+			queryInputDurationSource: querySourceWall,
+			queryInputSplitsKey:      splits,
+		}),
+		setup: func(_ context.Context) error {
+			qctx.resetCaches()
+
+			var err error
+
+			p, err = openProviderForRepeat(qctx)
+
+			return err
+		},
+		run: func(_ context.Context) error {
+			_, err := p.Tree().Where(qctx.dir, filter, split.SplitsToSplitFn(splits))
+
+			return err
+		},
+		teardown: func(_ context.Context) error {
+			err := p.Close()
+			p = nil
+
+			return err
+		},
+		useWallTime: true,
+		skipWarmup:  true,
+	}
+}
+
+func openProviderForRepeat(qctx queryContext) (provider.Provider, error) {
+	if qctx.openProvider == nil {
+		return nil, errOpenProviderRequired
+	}
+
+	return qctx.openProvider()
+}
+
+func opTreeDiskTreeProviderUpdateColdCache(qctx queryContext) op {
+	filter := treeFilterFromOptions(qctx.treeFilter)
+
+	var p provider.Provider
+
+	return op{
+		name: queryOpTreeDiskTreeProviderUpdateName,
+		inputs: treeOpInputs(filter, map[string]any{
+			queryInputDirKey:         qctx.dir,
+			queryInputCacheScope:     queryScopeProviderUpdateCold,
+			queryInputDurationSource: querySourceWall,
+		}),
+		setup: func(_ context.Context) error {
+			qctx.resetCaches()
+
+			var err error
+
+			p, err = openProviderForRepeat(qctx)
+
+			return err
+		},
+		run: func(_ context.Context) error {
+			return runTreeDiskTreeEndpoint(p.Tree(), qctx.dir, filter)
+		},
+		teardown: func(_ context.Context) error {
+			err := p.Close()
+			p = nil
+
+			return err
+		},
+		useWallTime: true,
+		skipWarmup:  true,
+	}
 }
 
 func opTreeDiskTreeEndpointNewDirs(qctx queryContext, opts QueryOptions) op {
@@ -579,12 +741,62 @@ func buildTreeFilter(qctx queryContext, opts QueryOptions) *db.Filter {
 
 func warmupOp(ctx context.Context, o op, warmup int) error {
 	for i := range warmup {
-		if err := o.run(ctx); err != nil {
+		if err := runOpCycle(ctx, o, func(context.Context) error {
+			return o.run(ctx)
+		}); err != nil {
 			return fmt.Errorf("%s warmup %d/%d: %w", o.name, i+1, warmup, err)
 		}
 	}
 
 	return nil
+}
+
+func runOpCycle(ctx context.Context, o op, run func(context.Context) error) error {
+	if o.setup != nil {
+		if err := o.setup(ctx); err != nil {
+			return err
+		}
+	}
+
+	runErr := run(ctx)
+	teardownErr := teardownOp(ctx, o)
+
+	return errors.Join(runErr, teardownErr)
+}
+
+func teardownOp(ctx context.Context, o op) error {
+	if o.teardown == nil {
+		return nil
+	}
+
+	return o.teardown(ctx)
+}
+
+func timeOpRepeat(
+	ctx context.Context,
+	qctx queryContext,
+	o op,
+	printf PrintfFunc,
+) (float64, error) {
+	if o.useWallTime {
+		return timeWallRepeat(ctx, o)
+	}
+
+	return timeMeasuredRepeat(ctx, qctx, o, printf)
+}
+
+func timeWallRepeat(ctx context.Context, o op) (float64, error) {
+	var duration float64
+
+	err := runOpCycle(ctx, o, func(context.Context) error {
+		var runErr error
+
+		duration, runErr = timeWallOp(ctx, o.run)
+
+		return runErr
+	})
+
+	return duration, err
 }
 
 func timeWallOp(ctx context.Context, run func(context.Context) error) (float64, error) {
@@ -595,6 +807,36 @@ func timeWallOp(ctx context.Context, run func(context.Context) error) (float64, 
 	}
 
 	return durationMS(time.Since(start)), nil
+}
+
+func timeMeasuredRepeat(
+	ctx context.Context,
+	qctx queryContext,
+	o op,
+	printf PrintfFunc,
+) (float64, error) {
+	var (
+		duration float64
+		metrics  *QueryMetrics
+	)
+
+	err := runOpCycle(ctx, o, func(context.Context) error {
+		start := time.Now()
+
+		var runErr error
+
+		metrics, runErr = qctx.inspector.Measure(ctx, o.run)
+		duration = measuredQueryDurationMS(metrics, time.Since(start))
+
+		return runErr
+	})
+	if err != nil {
+		return 0, err
+	}
+
+	printMetrics(printf, o.name, metrics)
+
+	return duration, nil
 }
 
 func disktreeClickDirs(qctx queryContext, opts QueryOptions) ([]string, bool) {
@@ -1019,6 +1261,10 @@ func buildOps(qctx queryContext, opts QueryOptions, printf PrintfFunc) []op {
 	ops := []op{
 		opMountTimestamps(qctx),
 		opTreeWhereColdThenCached(qctx, opts.Splits),
+		opTreeWhereColdProvider(qctx, opts.Splits),
+		opTreeDiskTreeEndpointColdProvider(qctx),
+		opTreeWhereProviderUpdateColdCache(qctx, opts.Splits),
+		opTreeDiskTreeProviderUpdateColdCache(qctx),
 	}
 
 	if opts.WalkDepth > 0 && opts.WalkLimit > 0 {
@@ -1114,8 +1360,12 @@ func opGroupUsage(qctx queryContext) op {
 
 func opListDir(qctx queryContext) op {
 	return op{
-		name:   "files_listdir",
-		inputs: map[string]any{queryInputDirKey: qctx.dir},
+		name: queryOpFilesListDirName,
+		inputs: map[string]any{
+			queryInputDirKey:         qctx.dir,
+			queryInputCacheScope:     queryScopeSameQueryClient,
+			queryInputDurationSource: querySourceClickHouseLog,
+		},
 		run: func(ctx context.Context) error {
 			_, err := qctx.client.ListDir(ctx, qctx.dir, 0)
 
@@ -1133,8 +1383,12 @@ func opStatPath(qctx queryContext, printf PrintfFunc) []op {
 	}
 
 	return []op{{
-		name:   "files_statpath",
-		inputs: map[string]any{"path": pickedPath},
+		name: "files_statpath",
+		inputs: map[string]any{
+			"path":                   pickedPath,
+			queryInputCacheScope:     queryScopeSameQueryClient,
+			queryInputDurationSource: querySourceClickHouseLog,
+		},
 		run: func(ctx context.Context) error {
 			return qctx.client.StatPath(ctx, pickedPath)
 		},
@@ -1218,8 +1472,10 @@ func globOp(
 	return op{
 		name: "glob_case_" + caseName,
 		inputs: map[string]any{
-			"patterns":      patterns,
-			"require_owner": requireOwner,
+			"patterns":               patterns,
+			"require_owner":          requireOwner,
+			queryInputCacheScope:     queryScopeSameQueryClient,
+			queryInputDurationSource: querySourceClickHouseLog,
 		},
 		run: func(ctx context.Context) error {
 			return qctx.client.FindByGlob(
@@ -1284,27 +1540,12 @@ func timingLoop(
 	durations := make([]float64, 0, repeat)
 
 	for i := range repeat {
-		if o.useWallTime {
-			duration, err := timeWallOp(ctx, o.run)
-			if err != nil {
-				return nil, fmt.Errorf("%s repeat %d/%d: %w", o.name, i+1, repeat, err)
-			}
-
-			durations = append(durations, duration)
-
-			continue
-		}
-
-		start := time.Now()
-
-		metrics, err := qctx.inspector.Measure(ctx, o.run)
+		duration, err := timeOpRepeat(ctx, qctx, o, printf)
 		if err != nil {
 			return nil, fmt.Errorf("%s repeat %d/%d: %w", o.name, i+1, repeat, err)
 		}
 
-		durations = append(durations, measuredQueryDurationMS(metrics, time.Since(start)))
-
-		printMetrics(printf, o.name, metrics)
+		durations = append(durations, duration)
 	}
 
 	return durations, nil
@@ -1341,8 +1582,10 @@ type activeMountFreshness struct {
 type op struct {
 	name              string
 	inputs            map[string]any
+	setup             func(ctx context.Context) error
 	prepare           func(repeat int) (int, error)
 	run               func(ctx context.Context) error
+	teardown          func(ctx context.Context) error
 	useWallTime       bool
 	skipWarmup        bool
 	hasRepeatOverride bool
@@ -1350,16 +1593,23 @@ type op struct {
 }
 
 type queryContext struct {
-	provider     provider.Provider
-	client       QueryClient
-	inspector    QueryInspector
-	openProvider func() (provider.Provider, error)
-	dir          string
-	uid          uint32
-	gids         []uint32
-	treeFilter   *db.Filter
+	provider         provider.Provider
+	client           QueryClient
+	inspector        QueryInspector
+	openProvider     func() (provider.Provider, error)
+	dir              string
+	uid              uint32
+	gids             []uint32
+	treeFilter       *db.Filter
+	resetQueryCaches func()
 }
 
 func (q *queryContext) close() error {
 	return closeQueryResources(q.inspector, q.client, q.provider)
+}
+
+func (q queryContext) resetCaches() {
+	if q.resetQueryCaches != nil {
+		q.resetQueryCaches()
+	}
 }

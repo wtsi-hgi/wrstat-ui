@@ -37,17 +37,18 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/summary"
 )
 
-var (
-	_ ClickHouseAPI = (*clickHouseAPI)(nil)
-	_ ImportAPI     = (*clickHouseAPI)(nil)
-	_ QueryAPI      = (*clickHouseAPI)(nil)
-)
-
 // ClickHouseAPI adapts the ClickHouse backend to the perf harness.
 type ClickHouseAPI interface {
 	ImportAPI
 	QueryAPI
 }
+
+var (
+	_ ClickHouseAPI      = (*clickHouseAPI)(nil)
+	_ ImportAPI          = (*clickHouseAPI)(nil)
+	_ QueryAPI           = (*clickHouseAPI)(nil)
+	_ QueryCacheResetter = (*clickHouseAPI)(nil)
+)
 
 type clickHouseOpenProvider func(clickhouse.Config) (provider.Provider, error)
 
@@ -227,4 +228,8 @@ func (a *clickHouseAPI) NewBaseDirsStore() (basedirs.Store, error) {
 
 func (a *clickHouseAPI) OpenProvider() (provider.Provider, error) {
 	return a.openProvider(a.providerConfig())
+}
+
+func (a *clickHouseAPI) ResetQueryCaches() {
+	clickhouse.ResetTreeQueryCaches()
 }

@@ -322,6 +322,22 @@ func (c *treeQueryCache) evictOldestMountDirDGUTAVectors() {
 	}
 }
 
+func (c *treeQueryCache) reset() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.children = make(map[treeCacheKey][]string)
+	c.childrenOrder = nil
+	c.dgutas = make(map[treeCacheKey]db.GUTAs)
+	c.dgutaOrder = nil
+	c.dirSummaries = make(map[treeDirSummaryCacheKey]*db.DirSummary)
+	c.dirSummaryOrder = nil
+	c.mountSummaries = make(map[treeMountCacheKey]bool)
+	c.mountSummaryOrder = nil
+	c.mountVectors = make(map[treeMountCacheKey]bool)
+	c.mountVectorOrder = nil
+}
+
 type treeQueryCacheRegistry struct {
 	mu sync.Mutex
 
@@ -371,8 +387,26 @@ func (r *treeQueryCacheRegistry) evictOldest() {
 	}
 }
 
+func (r *treeQueryCacheRegistry) reset() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	for _, cache := range r.caches {
+		cache.reset()
+	}
+
+	r.caches = make(map[string]*treeQueryCache)
+	r.order = nil
+}
+
+// ResetTreeQueryCaches clears process-local tree query caches used by
+// ClickHouse providers.
+func ResetTreeQueryCaches() {
+	sharedTreeQueryCaches.reset()
+}
+
 func resetSharedTreeQueryCachesForTesting() {
-	sharedTreeQueryCaches = newTreeQueryCacheRegistry()
+	ResetTreeQueryCaches()
 }
 
 func cloneUint32s(in []uint32) []uint32 {
