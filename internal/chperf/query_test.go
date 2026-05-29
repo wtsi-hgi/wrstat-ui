@@ -706,6 +706,65 @@ func (c *fakeQueryClient) Close() error {
 	return nil
 }
 
+func TestStartupCacheWarmingAudit(t *testing.T) {
+	Convey("runSuite reports startup and cache-warming timing metadata", t, func() {
+		qctx := queryContext{
+			client: &fakeQueryClient{},
+			dir:    queryOpTestRootDir,
+		}
+		report := boltperf.NewReport("clickhouse", "", 5, 3)
+
+		err := runSuite(&report, qctx, QueryOptions{
+			Repeat: 5,
+			Warmup: 3,
+			Ops:    []string{queryOpStartupCacheWarmingAuditName},
+		}, func(string, ...any) {})
+
+		So(err, ShouldBeNil)
+		So(report.Operations, ShouldHaveLength, 1)
+		So(report.Operations[0].Name, ShouldEqual, queryOpStartupCacheWarmingAuditName)
+		So(report.Operations[0].DurationsMS, ShouldHaveLength, 1)
+
+		inputs := report.Operations[0].Inputs
+		So(inputs["initial_provider_readers_timing"], ShouldEqual, queryStartupStageSynchronousInitial)
+		So(inputs["server_basedirs_cache_timing"], ShouldEqual, queryStartupStageSynchronousInitial)
+		So(inputs["query_cache_warmup_timing"], ShouldEqual, queryStartupStageLazyInteraction)
+		So(inputs["provider_polling_timing"], ShouldEqual, queryStartupStageBackgroundProvider)
+		So(inputs["provider_update_refresh_timing"], ShouldEqual, queryStartupStageBackgroundProvider)
+
+		providerWork, ok := inputs["initial_provider_work"].([]string)
+		So(ok, ShouldBeTrue)
+		So(providerWork, ShouldContain, "build_initial_readers")
+
+		serverWork, ok := inputs["server_cache_work"].([]string)
+		So(ok, ShouldBeTrue)
+		So(serverWork, ShouldContain, "prewarm_basedirs_caches")
+
+		queryWork, ok := inputs["query_cache_work"].([]string)
+		So(ok, ShouldBeTrue)
+		So(queryWork, ShouldContain, "lazy_query_cache_warmup_from_interactions")
+
+		updateWork, ok := inputs["provider_update_work"].([]string)
+		So(ok, ShouldBeTrue)
+		So(updateWork, ShouldContain, "server_refresh_provider_from_update_callback")
+
+		timingOps, ok := inputs["timing_ops"].(map[string][]string)
+		So(ok, ShouldBeTrue)
+		So(timingOps["lazy_query_cache_warmup"], ShouldResemble, []string{
+			queryOpTreeWhereColdName,
+			queryOpTreeDiskTreeVisibleChildName,
+		})
+		So(timingOps["cold_provider_startup_replay"], ShouldResemble, []string{
+			queryOpTreeWhereColdProviderName,
+			queryOpTreeDiskTreeColdProviderName,
+		})
+		So(timingOps["provider_update_cold_cache"], ShouldResemble, []string{
+			queryOpTreeWhereProviderUpdateName,
+			queryOpTreeDiskTreeProviderUpdateName,
+		})
+	})
+}
+
 func TestBuildOps(t *testing.T) {
 	Convey("buildOps reports DiskTree endpoint and tree_where operations", t, func() {
 		qctx := queryContext{

@@ -59,6 +59,7 @@ const (
 	queryInputFilterUIDsKey               = "filter_uids"
 	queryInputSplitsKey                   = "splits"
 	queryOpFilesListDirName               = "files_listdir"
+	queryOpStartupCacheWarmingAuditName   = "startup_cache_warming_audit"
 	queryOpTreeDiskTreeAncName            = "tree_disktree_endpoint_ancestor_dirs"
 	queryOpTreeDiskTreeColdProviderName   = "tree_disktree_endpoint_cold_provider"
 	queryOpTreeDiskTreeEndName            = "tree_disktree_endpoint"
@@ -79,9 +80,13 @@ const (
 	queryScopeSameProviderCold            = "same_provider_cold_then_warm"
 	queryScopeSameProviderDir             = "same_provider_same_dir"
 	queryScopeSameQueryClient             = "same_query_client"
+	queryScopeStartupAudit                = "startup_cache_warming_contract"
 	queryScopeVisibleChildDirs            = "visible_child_directory_each_repeat"
 	querySourceClickHouseLog              = "clickhouse_query_log"
 	querySourceWall                       = "wall"
+	queryStartupStageBackgroundProvider   = "background_provider_polling_or_update_after_initial_readers"
+	queryStartupStageLazyInteraction      = "lazy_during_user_or_perf_interactions"
+	queryStartupStageSynchronousInitial   = "synchronous_before_server_started"
 )
 
 var (
@@ -306,6 +311,67 @@ func unknownOpNames(wanted []string, available map[string]struct{}) []string {
 	}
 
 	return unknown
+}
+
+func opStartupCacheWarmingAudit() op {
+	return op{
+		name: queryOpStartupCacheWarmingAuditName,
+		inputs: map[string]any{
+			queryInputCacheScope:     queryScopeStartupAudit,
+			queryInputDurationSource: querySourceWall,
+			"server_started_contract": "server_started_is_logged_after_clickhouse_provider_open_" +
+				"and_server_set_provider_complete",
+			"initial_provider_readers_timing": queryStartupStageSynchronousInitial,
+			"server_basedirs_cache_timing":    queryStartupStageSynchronousInitial,
+			"query_cache_warmup_timing":       queryStartupStageLazyInteraction,
+			"provider_polling_timing":         queryStartupStageBackgroundProvider,
+			"provider_update_refresh_timing":  queryStartupStageBackgroundProvider,
+			"initial_provider_work": []string{
+				"validate_clickhouse_config",
+				"open_clickhouse_connection",
+				"build_initial_readers",
+				"publish_initial_tree_and_basedirs_readers",
+			},
+			"server_cache_work": []string{
+				"validate_provider",
+				"read_basedirs",
+				"read_mount_timestamps",
+				"prewarm_basedirs_caches",
+				"assign_provider_fields",
+			},
+			"query_cache_work": []string{
+				"lazy_query_cache_warmup_from_interactions",
+				"measured_by_cold_then_warm_and_visible_child_ops",
+			},
+			"provider_update_work": []string{
+				"poll_active_mounts",
+				"rebuild_readers_when_active_mounts_change",
+				"server_refresh_provider_from_update_callback",
+				"prewarm_basedirs_caches_before_field_swap",
+			},
+			"timing_ops": map[string][]string{
+				"lazy_query_cache_warmup": {
+					queryOpTreeWhereColdName,
+					queryOpTreeDiskTreeVisibleChildName,
+				},
+				"cold_provider_startup_replay": {
+					queryOpTreeWhereColdProviderName,
+					queryOpTreeDiskTreeColdProviderName,
+				},
+				"provider_update_cold_cache": {
+					queryOpTreeWhereProviderUpdateName,
+					queryOpTreeDiskTreeProviderUpdateName,
+				},
+			},
+		},
+		run: func(context.Context) error {
+			return nil
+		},
+		useWallTime:       true,
+		skipWarmup:        true,
+		hasRepeatOverride: true,
+		repeatOverride:    1,
+	}
 }
 
 func opTreeWhereColdThenCached(qctx queryContext, splits int) op {
@@ -1259,6 +1325,7 @@ func buildOps(qctx queryContext, opts QueryOptions, printf PrintfFunc) []op {
 	qctx.treeFilter = buildTreeFilter(qctx, opts)
 
 	ops := []op{
+		opStartupCacheWarmingAudit(),
 		opMountTimestamps(qctx),
 		opTreeWhereColdThenCached(qctx, opts.Splits),
 		opTreeWhereColdProvider(qctx, opts.Splits),

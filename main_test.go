@@ -81,6 +81,7 @@ const (
 	perfOpTreeWhere                    = "tree_where"
 	perfOpTreeWhereColdCached          = "tree_where_cold_then_cached"
 	perfOpTreeWhereFresh               = "tree_where_fresh_provider"
+	perfOpStartupCacheWarmingAudit     = "startup_cache_warming_audit"
 
 	testLustreMount        = "/lustre/"
 	summariseCloseName     = "close"
@@ -914,9 +915,16 @@ func TestClickHousePerfQuery(t *testing.T) {
 				continue
 			}
 
+			if op.Name == perfOpStartupCacheWarmingAudit {
+				So(len(op.DurationsMS), ShouldEqual, 1)
+
+				continue
+			}
+
 			So(len(op.DurationsMS), ShouldEqual, 2)
 		}
 
+		So(opNames, ShouldContain, perfOpStartupCacheWarmingAudit)
 		So(opNames, ShouldContain, "mount_timestamps")
 		So(opNames, ShouldContain, perfOpTreeDirInfo)
 		So(opNames, ShouldContain, perfOpTreeDiskTreeEndpoint)
@@ -934,6 +942,17 @@ func TestClickHousePerfQuery(t *testing.T) {
 		treeDirInfo := findReportOperation(report.Operations, perfOpTreeDirInfo)
 		So(treeDirInfo, ShouldNotBeNil)
 		So(treeDirInfo.Inputs["dir"], ShouldNotBeBlank)
+
+		startupAudit := findReportOperation(report.Operations, perfOpStartupCacheWarmingAudit)
+		So(startupAudit, ShouldNotBeNil)
+		So(startupAudit.Inputs["initial_provider_readers_timing"], ShouldEqual,
+			"synchronous_before_server_started")
+		So(startupAudit.Inputs["server_basedirs_cache_timing"], ShouldEqual,
+			"synchronous_before_server_started")
+		So(startupAudit.Inputs["query_cache_warmup_timing"], ShouldEqual,
+			"lazy_during_user_or_perf_interactions")
+		So(startupAudit.Inputs["provider_update_refresh_timing"], ShouldEqual,
+			"background_provider_polling_or_update_after_initial_readers")
 
 		treeWhere := findReportOperation(report.Operations, perfOpTreeWhere)
 		So(treeWhere, ShouldNotBeNil)
