@@ -1110,7 +1110,24 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 		So(impl.effectiveProjectionBatchSize(), ShouldEqual, defaultProjectionBatchSize)
 	})
 
-	Convey("DGUTAWriter fails safely when raw DGUTA reprepare fails after send", t, func() {
+	Convey("DGUTAWriter does not prepare empty import batches when writes become ready", t, func() {
+		conn := &lazyDGUTAImportConn{}
+		impl := &dgutaWriter{
+			conn:      conn,
+			mountPath: "/mnt/lazy-ready/",
+			updatedAt: time.Date(2026, 5, 29, 9, 0, 0, 0, time.UTC),
+		}
+
+		So(impl.ensureWriteReady(context.Background()), ShouldBeNil)
+		So(impl.prepared, ShouldBeTrue)
+		So(conn.preparedBatches(), ShouldEqual, 0)
+		So(impl.dgutaBatch, ShouldBeNil)
+		So(impl.childrenBatch, ShouldBeNil)
+		So(impl.dirProjection.summaryBatch, ShouldBeNil)
+		So(impl.dirProjection.vectorBatch, ShouldBeNil)
+	})
+
+	Convey("DGUTAWriter prepares raw DGUTA batches lazily and does not reprepare after send", t, func() {
 		conn := &rawDGUTASendPrepareConn{prepareErr: errForcedFailure}
 		batch := &countingDGUTABatch{}
 		impl := &dgutaWriter{conn: conn, dgutaBatch: batch}
@@ -1119,9 +1136,10 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 		guta := testProjectionGUTA(7, 9, db.DGUTAFileTypeBam, db.DGUTAgeAll, 1)
 
 		err := impl.appendDGUTABatchRow("/mnt/raw-reprepare/", guta)
-		So(errors.Is(err, errForcedFailure), ShouldBeTrue)
+		So(err, ShouldBeNil)
 		So(batch.sends, ShouldEqual, 1)
 		So(conn.preparedBatches(), ShouldEqual, 0)
+		So(impl.dgutaBatch, ShouldBeNil)
 
 		var nextErr error
 
@@ -1129,6 +1147,30 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 			nextErr = impl.appendDGUTABatchRow("/mnt/raw-reprepare/", guta)
 		}, ShouldNotPanic)
 		So(errors.Is(nextErr, errForcedFailure), ShouldBeTrue)
+	})
+
+	Convey("DGUTAWriter sends slow partial raw DGUTA batches before the receive timeout window", t, func() {
+		now := time.Date(2026, 5, 29, 9, 0, 0, 0, time.UTC)
+
+		conn := &rawDGUTASendPrepareConn{}
+		impl := &dgutaWriter{conn: conn, batchNow: func() time.Time { return now }}
+		impl.SetBatchSize(100)
+
+		guta := testProjectionGUTA(7, 9, db.DGUTAFileTypeBam, db.DGUTAgeAll, 1)
+
+		So(impl.appendDGUTABatchRow("/mnt/raw-slow/", guta), ShouldBeNil)
+		So(conn.preparedBatches(), ShouldEqual, 1)
+
+		firstBatch := conn.batches[0]
+		So(firstBatch.Rows(), ShouldEqual, 1)
+		So(firstBatch.sends, ShouldEqual, 0)
+
+		now = now.Add(4*time.Minute + time.Second)
+
+		So(impl.appendDGUTABatchRow("/mnt/raw-slow/", guta), ShouldBeNil)
+		So(firstBatch.sends, ShouldEqual, 1)
+		So(conn.preparedBatches(), ShouldEqual, 2)
+		So(conn.batches[1].Rows(), ShouldEqual, 1)
 	})
 
 	Convey("DGUTAWriter sends the final partial raw DGUTA batch once", t, func() {
@@ -1194,7 +1236,7 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 		So(impl.effectiveChildrenBatchSize(), ShouldEqual, defaultChildrenBatchSize)
 	})
 
-	Convey("DGUTAWriter fails safely when children reprepare fails after send", t, func() {
+	Convey("DGUTAWriter prepares children batches lazily and does not reprepare after send", t, func() {
 		conn := &childrenSendPrepareConn{prepareErr: errForcedFailure}
 		firstBatch := &countingDGUTABatch{}
 		impl := &dgutaWriter{
@@ -1209,11 +1251,12 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 			"/mnt/children-reprepare/",
 			"child/",
 		)
-		So(ok, ShouldBeFalse)
-		So(errors.Is(err, errForcedFailure), ShouldBeTrue)
+		So(ok, ShouldBeTrue)
+		So(err, ShouldBeNil)
 		So(firstBatch.flushes, ShouldEqual, 0)
 		So(firstBatch.sends, ShouldEqual, 1)
 		So(conn.preparedBatches(), ShouldEqual, 0)
+		So(impl.childrenBatch, ShouldBeNil)
 
 		var nextErr error
 
@@ -1233,6 +1276,44 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 			nextErr = impl.Close()
 		}, ShouldNotPanic)
 		So(errors.Is(nextErr, errForcedFailure), ShouldBeTrue)
+	})
+
+	Convey("DGUTAWriter sends slow partial children batches before the receive timeout window", t, func() {
+		now := time.Date(2026, 5, 29, 9, 0, 0, 0, time.UTC)
+
+		conn := &childrenSendPrepareConn{}
+		impl := &dgutaWriter{
+			conn:      conn,
+			mountPath: "/mnt/children-slow/",
+			batchNow:  func() time.Time { return now },
+		}
+		impl.SetBatchSize(100)
+
+		ok, err := impl.appendChildRow(
+			"00000000-0000-0000-0000-000000000007",
+			"/mnt/children-slow/",
+			"child/",
+		)
+		So(ok, ShouldBeTrue)
+		So(err, ShouldBeNil)
+		So(conn.preparedBatches(), ShouldEqual, 1)
+
+		firstBatch := conn.batches[0]
+		So(firstBatch.Rows(), ShouldEqual, 1)
+		So(firstBatch.sends, ShouldEqual, 0)
+
+		now = now.Add(4*time.Minute + time.Second)
+
+		ok, err = impl.appendChildRow(
+			"00000000-0000-0000-0000-000000000007",
+			"/mnt/children-slow/",
+			"next/",
+		)
+		So(ok, ShouldBeTrue)
+		So(err, ShouldBeNil)
+		So(firstBatch.sends, ShouldEqual, 1)
+		So(conn.preparedBatches(), ShouldEqual, 2)
+		So(conn.batches[1].Rows(), ShouldEqual, 1)
 	})
 
 	Convey("DGUTAWriter sends the final partial children batch once", t, func() {
@@ -1269,9 +1350,7 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 
 	Convey("DGUTAWriter sends capped projection blocks as separate prepared batches", t, func() {
 		conn := &projectionSendPrepareConn{}
-		writer := mountDirProjectionWriter{}
-
-		So(writer.prepare(context.Background(), conn), ShouldBeNil)
+		writer := mountDirProjectionWriter{conn: conn, refreshedAt: time.Date(2026, 1, 14, 9, 0, 0, 0, time.UTC)}
 
 		mount := activeMount{
 			mountPath:  "/mnt/projection-send/",
@@ -1290,28 +1369,26 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 		summaryBatches := conn.batchesFor(insertMountDirSummaryQuery)
 		vectorBatches := conn.batchesFor(insertMountDirDGUTAVectorQuery)
 
-		So(summaryBatches, ShouldHaveLength, 2)
-		So(vectorBatches, ShouldHaveLength, 2)
+		So(summaryBatches, ShouldHaveLength, 1)
+		So(vectorBatches, ShouldHaveLength, 1)
 		So(summaryBatches[0].flushes, ShouldEqual, 0)
 		So(summaryBatches[0].sends, ShouldEqual, 1)
 		So(summaryBatches[0].maxRows, ShouldEqual, 1)
-		So(summaryBatches[1].Rows(), ShouldEqual, 0)
 		So(vectorBatches[0].flushes, ShouldEqual, 0)
 		So(vectorBatches[0].sends, ShouldEqual, 1)
 		So(vectorBatches[0].maxRows, ShouldEqual, 1)
-		So(vectorBatches[1].Rows(), ShouldEqual, 0)
+		So(writer.summaryBatch, ShouldBeNil)
+		So(writer.vectorBatch, ShouldBeNil)
 		So(writer.summaryFlushed, ShouldBeFalse)
 		So(writer.vectorFlushed, ShouldBeFalse)
 		So(writer.abortAll(), ShouldBeNil)
 	})
 
-	Convey("DGUTAWriter fails safely when projection reprepare fails after send", t, func() {
+	Convey("DGUTAWriter prepares projection batches lazily and does not reprepare after send", t, func() {
 		conn := &projectionSendPrepareConn{}
-		writer := mountDirProjectionWriter{}
-
-		So(writer.prepare(context.Background(), conn), ShouldBeNil)
-		conn.prepareErrs = map[string]error{
-			insertMountDirSummaryQuery: errForcedFailure,
+		writer := mountDirProjectionWriter{
+			conn:        conn,
+			refreshedAt: time.Date(2026, 1, 14, 9, 0, 0, 0, time.UTC),
 		}
 
 		mount := activeMount{
@@ -1327,9 +1404,15 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 			nil,
 			1,
 		)
-		So(errors.Is(err, errForcedFailure), ShouldBeTrue)
+		So(err, ShouldBeNil)
 		So(conn.batchesFor(insertMountDirSummaryQuery)[0].flushes, ShouldEqual, 0)
 		So(conn.batchesFor(insertMountDirSummaryQuery)[0].sends, ShouldEqual, 1)
+		So(conn.batchesFor(insertMountDirSummaryQuery), ShouldHaveLength, 1)
+		So(writer.summaryBatch, ShouldBeNil)
+
+		conn.prepareErrs = map[string]error{
+			insertMountDirSummaryQuery: errForcedFailure,
+		}
 
 		var nextErr error
 
@@ -1347,10 +1430,111 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 		So(writer.abortAll(), ShouldBeNil)
 	})
 
+	Convey("DGUTAWriter sends slow partial projection batches before the receive timeout window", t, func() {
+		now := time.Date(2026, 5, 29, 9, 0, 0, 0, time.UTC)
+
+		conn := &projectionSendPrepareConn{}
+		writer := mountDirProjectionWriter{
+			conn:        conn,
+			refreshedAt: now,
+			batchNow:    func() time.Time { return now },
+		}
+		mount := activeMount{
+			mountPath:  "/mnt/projection-slow/",
+			snapshotID: "00000000-0000-0000-0000-000000000008",
+			updatedAt:  now,
+		}
+
+		So(writer.appendRecord(
+			mount,
+			"/mnt/projection-slow/",
+			db.GUTAs{testProjectionGUTA(7, 9, db.DGUTAFileTypeBam, db.DGUTAgeAll, 1)},
+			0,
+			nil,
+			100,
+		), ShouldBeNil)
+
+		summaryBatch := conn.batchesFor(insertMountDirSummaryQuery)[0]
+		vectorBatch := conn.batchesFor(insertMountDirDGUTAVectorQuery)[0]
+
+		So(summaryBatch.Rows(), ShouldEqual, 1)
+		So(vectorBatch.Rows(), ShouldEqual, 1)
+		So(summaryBatch.sends, ShouldEqual, 0)
+		So(vectorBatch.sends, ShouldEqual, 0)
+
+		now = now.Add(4*time.Minute + time.Second)
+
+		So(writer.appendRecord(
+			mount,
+			"/mnt/projection-slow/next/",
+			db.GUTAs{testProjectionGUTA(7, 10, db.DGUTAFileTypeCram, db.DGUTAgeA2M, 1)},
+			0,
+			nil,
+			100,
+		), ShouldBeNil)
+
+		So(summaryBatch.sends, ShouldEqual, 1)
+		So(vectorBatch.sends, ShouldEqual, 1)
+		So(conn.batchesFor(insertMountDirSummaryQuery), ShouldHaveLength, 2)
+		So(conn.batchesFor(insertMountDirDGUTAVectorQuery), ShouldHaveLength, 2)
+		So(conn.batchesFor(insertMountDirSummaryQuery)[1].Rows(), ShouldEqual, 1)
+		So(conn.batchesFor(insertMountDirDGUTAVectorQuery)[1].Rows(), ShouldEqual, 1)
+	})
+
+	Convey("Projection row helper prepares lazily and closes slow partial batches", t, func() {
+		now := time.Date(2026, 5, 29, 9, 0, 0, 0, time.UTC)
+
+		conn := &projectionSendPrepareConn{}
+		appendCalls := 0
+
+		err := writeProjectionRowsWithClock(
+			context.Background(),
+			conn,
+			insertMountDirSummaryQuery,
+			"dir summary",
+			[]string{"first", "second"},
+			100,
+			func(batch driver.Batch, _ string) error {
+				appendCalls++
+
+				if err := batch.Append("row"); err != nil {
+					return err
+				}
+
+				if appendCalls == 1 {
+					now = now.Add(4*time.Minute + time.Second)
+				}
+
+				return nil
+			},
+			func() time.Time { return now },
+		)
+		So(err, ShouldBeNil)
+		So(appendCalls, ShouldEqual, 2)
+
+		batches := conn.batchesFor(insertMountDirSummaryQuery)
+		So(batches, ShouldHaveLength, 2)
+		So(batches[0].sends, ShouldEqual, 1)
+		So(batches[0].maxRows, ShouldEqual, 1)
+		So(batches[1].sends, ShouldEqual, 1)
+		So(batches[1].maxRows, ShouldEqual, 1)
+
+		emptyConn := &projectionSendPrepareConn{}
+		So(writeProjectionRows(
+			context.Background(),
+			emptyConn,
+			insertMountDirSummaryQuery,
+			"dir summary",
+			[]string{},
+			100,
+			func(driver.Batch, string) error { return nil },
+		), ShouldBeNil)
+		So(emptyConn.batchesFor(insertMountDirSummaryQuery), ShouldHaveLength, 0)
+	})
+
 	Convey("DGUTAWriter sends the final partial projection batches once", t, func() {
 		conn := &projectionSendPrepareConn{}
-		writer := mountDirProjectionWriter{}
-		So(writer.prepare(context.Background(), conn), ShouldBeNil)
+		writer := mountDirProjectionWriter{conn: conn, refreshedAt: time.Date(2026, 1, 14, 9, 0, 0, 0, time.UTC)}
 
 		impl := &dgutaWriter{dirProjection: writer}
 		impl.SetBatchSize(2)
@@ -2215,4 +2399,65 @@ func (c *projectionSendPrepareConn) PrepareBatch(
 
 func (c *projectionSendPrepareConn) batchesFor(query string) []*countingDGUTABatch {
 	return c.batches[query]
+}
+
+type lazyDGUTAImportConn struct {
+	bootstrapTestConn
+
+	batches map[string][]*countingDGUTABatch
+}
+
+func (c *lazyDGUTAImportConn) Query(
+	_ context.Context,
+	query string,
+	_ ...any,
+) (driver.Rows, error) {
+	if query != activeSnapshotQuery {
+		return nil, errBootstrapTestUnexpectedCall
+	}
+
+	return &dgutaWriterCloseContextRows{
+		columns: []string{dgutaWriterTestSnapshotIDColumn},
+	}, nil
+}
+
+func (c *lazyDGUTAImportConn) PrepareBatch(
+	_ context.Context,
+	query string,
+	_ ...driver.PrepareBatchOption,
+) (driver.Batch, error) {
+	if !isLazyDGUTAImportQuery(query) {
+		return nil, errBootstrapTestUnexpectedCall
+	}
+
+	batch := &countingDGUTABatch{}
+
+	if c.batches == nil {
+		c.batches = make(map[string][]*countingDGUTABatch)
+	}
+
+	c.batches[query] = append(c.batches[query], batch)
+
+	return batch, nil
+}
+
+func isLazyDGUTAImportQuery(query string) bool {
+	switch query {
+	case insertDGUTAQuery,
+		insertChildrenQuery,
+		insertMountDirSummaryQuery,
+		insertMountDirDGUTAVectorQuery:
+		return true
+	default:
+		return false
+	}
+}
+
+func (c *lazyDGUTAImportConn) preparedBatches() int {
+	var count int
+	for _, batches := range c.batches {
+		count += len(batches)
+	}
+
+	return count
 }

@@ -102,28 +102,52 @@ func writeProjectionRows[T any](
 	batchSize int,
 	appendRow func(driver.Batch, T) error,
 ) error {
-	batch, err := prepareImportBatch(ctx, conn, query)
-	if err != nil {
-		return fmt.Errorf("clickhouse: failed to prepare %s batch: %w", name, err)
-	}
+	return writeProjectionRowsWithClock(ctx, conn, query, name, values, batchSize, appendRow, time.Now)
+}
 
+func writeProjectionRowsWithClock[T any](
+	ctx context.Context,
+	conn ch.Conn,
+	query, name string,
+	values []T,
+	batchSize int,
+	appendRow func(driver.Batch, T) error,
+	now func() time.Time,
+) error {
+	writer := projectionRowsWriter{conn: conn, query: query, name: name, now: now}
 	for _, value := range values {
-		appendErr := appendRow(batch, value)
-		if appendErr != nil {
-			return errors.Join(appendErr, abortProjectionBatch(batch, name))
-		}
-
-		if batch.Rows() < batchSize {
-			continue
-		}
-
-		batch, err = sendAndReplaceProjectionBatch(ctx, conn, batch, query, name)
-		if err != nil {
+		if err := appendProjectionRowValue(ctx, &writer, value, batchSize, appendRow); err != nil {
 			return err
 		}
 	}
 
-	return sendOrAbortProjectionBatch(batch, name)
+	return writer.close()
+}
+
+func appendProjectionRowValue[T any](
+	ctx context.Context,
+	writer *projectionRowsWriter,
+	value T,
+	batchSize int,
+	appendRow func(driver.Batch, T) error,
+) error {
+	if err := writer.sendIfTooOld(); err != nil {
+		return err
+	}
+
+	if err := writer.ensureReady(ctx); err != nil {
+		return err
+	}
+
+	if err := appendRow(writer.batch, value); err != nil {
+		return errors.Join(err, abortProjectionBatch(writer.batch, writer.name))
+	}
+
+	if shouldSendProjectionBatch(writer.batch, writer.openedAt, batchSize, writer.now) {
+		return writer.send()
+	}
+
+	return nil
 }
 
 func abortProjectionBatch(batch driver.Batch, name string) error {
@@ -134,22 +158,73 @@ func abortProjectionBatch(batch driver.Batch, name string) error {
 	return nil
 }
 
-func sendAndReplaceProjectionBatch(
-	ctx context.Context,
-	conn ch.Conn,
+func shouldSendProjectionBatch(
 	batch driver.Batch,
-	query, name string,
-) (driver.Batch, error) {
-	if err := batch.Send(); err != nil {
-		return nil, fmt.Errorf("clickhouse: failed to send %s batch: %w", name, err)
+	openedAt time.Time,
+	batchSize int,
+	now func() time.Time,
+) bool {
+	if batch == nil || batch.Rows() == 0 {
+		return false
 	}
 
-	next, err := prepareImportBatch(ctx, conn, query)
+	return batchSize > 0 && batch.Rows() >= batchSize || importBatchOpenTooLong(openedAt, now)
+}
+
+type projectionRowsWriter struct {
+	conn     ch.Conn
+	query    string
+	name     string
+	batch    driver.Batch
+	openedAt time.Time
+	now      func() time.Time
+}
+
+func (w *projectionRowsWriter) sendIfTooOld() error {
+	if w.batch == nil || w.batch.Rows() == 0 || !importBatchOpenTooLong(w.openedAt, w.now) {
+		return nil
+	}
+
+	return w.send()
+}
+
+func (w *projectionRowsWriter) ensureReady(ctx context.Context) error {
+	if w.batch != nil {
+		return nil
+	}
+
+	batch, err := prepareImportBatch(ctx, w.conn, w.query)
 	if err != nil {
-		return nil, fmt.Errorf("clickhouse: failed to prepare %s batch: %w", name, err)
+		return fmt.Errorf("clickhouse: failed to prepare %s batch: %w", w.name, err)
 	}
 
-	return next, nil
+	w.batch = batch
+
+	markImportBatchOpened(&w.openedAt, w.now)
+
+	return nil
+}
+
+func (w *projectionRowsWriter) send() error {
+	if err := w.batch.Send(); err != nil {
+		w.batch = nil
+		clearImportBatchOpened(&w.openedAt)
+
+		return fmt.Errorf("clickhouse: failed to send %s batch: %w", w.name, err)
+	}
+
+	w.batch = nil
+	clearImportBatchOpened(&w.openedAt)
+
+	return nil
+}
+
+func (w *projectionRowsWriter) close() error {
+	if w.batch == nil {
+		return nil
+	}
+
+	return sendOrAbortProjectionBatch(w.batch, w.name)
 }
 
 func sendOrAbortProjectionBatch(batch driver.Batch, name string) error {
@@ -304,53 +379,41 @@ func mountDirSummaryBaseValues(
 }
 
 type mountDirProjectionWriter struct {
-	conn           ch.Conn
-	summaryBatch   driver.Batch
-	vectorBatch    driver.Batch
-	summaryFlushed bool
-	vectorFlushed  bool
-	refreshedAt    time.Time
-	writeErr       error
+	conn            ch.Conn
+	summaryBatch    driver.Batch
+	vectorBatch     driver.Batch
+	summaryOpenedAt time.Time
+	vectorOpenedAt  time.Time
+	batchNow        func() time.Time
+	summaryFlushed  bool
+	vectorFlushed   bool
+	refreshedAt     time.Time
+	writeErr        error
 }
 
 func prepareMountDirProjectionWriter(
-	ctx context.Context,
+	_ context.Context,
 	conn ch.Conn,
-) (mountDirProjectionWriter, error) {
+) mountDirProjectionWriter {
 	writer := mountDirProjectionWriter{refreshedAt: time.Now().UTC()}
-	if err := writer.prepare(ctx, conn); err != nil {
-		return mountDirProjectionWriter{}, err
-	}
+	writer.prepare(conn)
 
-	return writer, nil
+	return writer
 }
 
-func (w *mountDirProjectionWriter) prepare(ctx context.Context, conn ch.Conn) error {
+func (w *mountDirProjectionWriter) prepare(conn ch.Conn) {
 	w.conn = conn
+	if w.refreshedAt.IsZero() {
+		w.refreshedAt = w.importBatchNow().UTC()
+	}
+}
 
-	summaryBatch, err := prepareImportBatch(ctx, conn, insertMountDirSummaryQuery)
-	if err != nil {
-		return fmt.Errorf("clickhouse: failed to prepare dir summary batch: %w", err)
+func (w *mountDirProjectionWriter) importBatchNow() time.Time {
+	if w != nil && w.batchNow != nil {
+		return w.batchNow()
 	}
 
-	vectorBatch, err := prepareImportBatch(ctx, conn, insertMountDirDGUTAVectorQuery)
-	if err != nil {
-		if abortErr := summaryBatch.Abort(); abortErr != nil {
-			return fmt.Errorf(
-				"clickhouse: failed to prepare dir dguta vector batch and abort dir summary batch: %w",
-				errors.Join(err, abortErr),
-			)
-		}
-
-		return fmt.Errorf("clickhouse: failed to prepare dir dguta vector batch: %w", err)
-	}
-
-	w.summaryBatch = summaryBatch
-	w.vectorBatch = vectorBatch
-	w.summaryFlushed = false
-	w.vectorFlushed = false
-
-	return nil
+	return time.Now()
 }
 
 func (w *mountDirProjectionWriter) appendRecord(
@@ -378,21 +441,43 @@ func (w *mountDirProjectionWriter) appendSummaryRows(
 	state mountDirProjectionState,
 	batchSize int,
 ) error {
-	if err := w.batchReady(w.summaryBatch, "dir summary"); err != nil {
-		return err
-	}
+	return appendTrackedProjectionRows(
+		w,
+		state.summaryKeys(),
+		&w.summaryBatch,
+		&w.summaryOpenedAt,
+		insertMountDirSummaryQuery,
+		"dir summary",
+		batchSize,
+		func(batch driver.Batch, key mountDirSummaryKey) error {
+			return appendMountDirSummaryRow(batch, mount, key, state, w.refreshedAt)
+		},
+	)
+}
 
-	for _, key := range state.summaryKeys() {
-		if err := appendMountDirSummaryRow(w.summaryBatch, mount, key, state, w.refreshedAt); err != nil {
+func appendTrackedProjectionRows[T any](
+	writer *mountDirProjectionWriter,
+	values []T,
+	batch *driver.Batch,
+	openedAt *time.Time,
+	query, name string,
+	batchSize int,
+	appendRow func(driver.Batch, T) error,
+) error {
+	for _, value := range values {
+		if err := writer.sendOpenBatchIfTooOld(batch, openedAt, name); err != nil {
 			return err
 		}
 
-		if err := w.sendFullBatchIfFull(
-			&w.summaryBatch,
-			insertMountDirSummaryQuery,
-			batchSize,
-			"dir summary",
-		); err != nil {
+		if err := writer.ensureBatchReady(batch, openedAt, query, name); err != nil {
+			return err
+		}
+
+		if err := appendRow(*batch, value); err != nil {
+			return err
+		}
+
+		if err := writer.sendFullBatchIfFull(batch, openedAt, batchSize, name); err != nil {
 			return err
 		}
 	}
@@ -405,61 +490,121 @@ func (w *mountDirProjectionWriter) appendVectorRows(
 	state mountDirProjectionState,
 	batchSize int,
 ) error {
-	if err := w.batchReady(w.vectorBatch, "dir dguta vector"); err != nil {
-		return err
-	}
-
-	for _, vectorDir := range state.vectorDirs() {
-		if err := appendMountDirDGUTAVectorRow(w.vectorBatch, mount, vectorDir, state, w.refreshedAt); err != nil {
-			return err
-		}
-
-		if err := w.sendFullBatchIfFull(
-			&w.vectorBatch,
-			insertMountDirDGUTAVectorQuery,
-			batchSize,
-			"dir dguta vector",
-		); err != nil {
-			return err
-		}
-	}
-
-	return nil
+	return appendTrackedProjectionRows(
+		w,
+		state.vectorDirs(),
+		&w.vectorBatch,
+		&w.vectorOpenedAt,
+		insertMountDirDGUTAVectorQuery,
+		"dir dguta vector",
+		batchSize,
+		func(batch driver.Batch, dir string) error {
+			return appendMountDirDGUTAVectorRow(batch, mount, dir, state, w.refreshedAt)
+		},
+	)
 }
 
-func (w *mountDirProjectionWriter) batchReady(batch driver.Batch, name string) error {
+func (w *mountDirProjectionWriter) ensureBatchReady(
+	batch *driver.Batch,
+	openedAt *time.Time,
+	query, name string,
+) error {
 	if w.writeErr != nil {
 		return w.writeErr
 	}
 
-	if batch != nil {
+	if batch == nil {
+		w.writeErr = fmt.Errorf("%w: %s", errDirProjectionBatchNotPrepared, name)
+
+		return w.writeErr
+	}
+
+	if *batch != nil {
 		return nil
 	}
 
-	w.writeErr = fmt.Errorf("%w: %s", errDirProjectionBatchNotPrepared, name)
+	if w.conn == nil {
+		w.writeErr = fmt.Errorf("%w: %s", errDirProjectionBatchNotPrepared, name)
 
-	return w.writeErr
+		return w.writeErr
+	}
+
+	return w.prepareBatch(
+		batch,
+		openedAt,
+		query,
+		name,
+	)
+}
+
+func (w *mountDirProjectionWriter) prepareBatch(
+	batch *driver.Batch,
+	openedAt *time.Time,
+	query, name string,
+) error {
+	prepared, err := prepareImportBatch(context.Background(), w.conn, query)
+	if err != nil {
+		w.writeErr = fmt.Errorf("clickhouse: failed to prepare %s batch: %w", name, err)
+
+		return w.writeErr
+	}
+
+	*batch = prepared
+
+	markImportBatchOpened(openedAt, w.importBatchNow)
+
+	return nil
 }
 
 func (w *mountDirProjectionWriter) sendFullBatchIfFull(
 	batch *driver.Batch,
-	query string,
+	openedAt *time.Time,
 	batchSize int,
 	name string,
 ) error {
-	if batch == nil || *batch == nil || batchSize <= 0 || (*batch).Rows() < batchSize {
+	if batch == nil || *batch == nil {
 		return nil
 	}
 
-	return w.sendFullBatch(batch, query, name)
+	if batchSize > 0 && (*batch).Rows() >= batchSize {
+		return w.sendFullBatch(batch, openedAt, name)
+	}
+
+	return w.sendOpenBatchIfTooOld(batch, openedAt, name)
+}
+
+func (w *mountDirProjectionWriter) sendOpenBatchIfTooOld(
+	batch *driver.Batch,
+	openedAt *time.Time,
+	name string,
+) error {
+	if !w.projectionBatchOpenTooLong(batch, openedAt) {
+		return nil
+	}
+
+	return w.sendFullBatch(batch, openedAt, name)
+}
+
+func (w *mountDirProjectionWriter) projectionBatchOpenTooLong(
+	batch *driver.Batch,
+	openedAt *time.Time,
+) bool {
+	return batch != nil &&
+		*batch != nil &&
+		(*batch).Rows() > 0 &&
+		importBatchOpenTooLong(*openedAt, w.importBatchNow)
 }
 
 func (w *mountDirProjectionWriter) sendFullBatch(
 	batch *driver.Batch,
-	query, name string,
+	openedAt *time.Time,
+	name string,
 ) error {
 	if err := (*batch).Send(); err != nil {
 		*batch = nil
+
+		clearImportBatchOpened(openedAt)
+
 		w.writeErr = fmt.Errorf("clickhouse: failed to send %s batch: %w", name, err)
 
 		return w.writeErr
@@ -467,14 +612,7 @@ func (w *mountDirProjectionWriter) sendFullBatch(
 
 	*batch = nil
 
-	next, err := prepareImportBatch(context.Background(), w.conn, query)
-	if err != nil {
-		w.writeErr = fmt.Errorf("clickhouse: failed to prepare %s batch: %w", name, err)
-
-		return w.writeErr
-	}
-
-	*batch = next
+	clearImportBatchOpened(openedAt)
 
 	return nil
 }
