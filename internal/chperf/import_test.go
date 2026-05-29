@@ -55,6 +55,8 @@ const (
 	importTestDGUTAClose    = "dguta-close"
 	importTestDGUTAAbort    = "dguta-abort"
 	importTestMountScratch  = "/mnt/scratch/"
+	importTestDataset       = "v1_／mnt／scratch"
+	importTestStatsPath     = "/input/v1_／mnt／scratch/stats.gz"
 )
 
 var (
@@ -613,8 +615,8 @@ func TestImportReportOperations(t *testing.T) {
 	Convey("addImportReportOperations emits per-file and per-phase detail", t, func() {
 		report := boltperf.NewReport("clickhouse", "/input", 1, 0)
 		result := datasetImportResult{
-			dataset:   "v1_／mnt／scratch",
-			statsPath: "/input/v1_／mnt／scratch/stats.gz",
+			dataset:   importTestDataset,
+			statsPath: importTestStatsPath,
 			mountPath: importTestMountScratch,
 			lines:     42,
 			elapsed:   1500 * time.Millisecond,
@@ -644,7 +646,7 @@ func TestImportReportOperations(t *testing.T) {
 
 		addImportReportOperations(&report, []datasetImportResult{result}, 2, 2*time.Second)
 
-		So(report.Operations, ShouldHaveLength, 14)
+		So(report.Operations, ShouldHaveLength, 18)
 
 		fileTotal := findImportOperation(report.Operations, "import_file_total", "")
 		So(fileTotal, ShouldNotBeNil)
@@ -716,4 +718,150 @@ func TestImportReportOperations(t *testing.T) {
 		So(total.Inputs["mode"], ShouldEqual, "parallel")
 		So(total.Inputs["throughput_records_per_sec"], ShouldEqual, 21.0)
 	})
+}
+
+func TestImportGuardrailOperations(t *testing.T) {
+	Convey("addImportReportOperations emits observed import guardrails with required metadata", t, func() {
+		report := boltperf.NewReport("clickhouse", "/input", 1, 0)
+		result := datasetImportResult{
+			dataset:   importTestDataset,
+			statsPath: importTestStatsPath,
+			mountPath: importTestMountScratch,
+			lines:     42,
+			elapsed:   1500 * time.Millisecond,
+			rows: map[string]uint64{
+				tableFiles: 42,
+			},
+			phases: map[string]time.Duration{
+				phaseFilesInsert:        500 * time.Millisecond,
+				phaseFilesFlush:         50 * time.Millisecond,
+				phaseDirProjectionWrite: 90 * time.Millisecond,
+				phaseMountSwitch:        120 * time.Millisecond,
+				phaseTreeSummaryRefresh: 70 * time.Millisecond,
+			},
+		}
+
+		addImportReportOperations(&report, []datasetImportResult{result}, 1, 2*time.Second)
+
+		rawIngest := findImportGuardrailOperation(report.Operations, "raw_file_ingest")
+		So(rawIngest, ShouldNotBeNil)
+		So(rawIngest.Inputs["dataset"], ShouldEqual, result.dataset)
+		So(rawIngest.Inputs["stats_path"], ShouldEqual, result.statsPath)
+		So(rawIngest.Inputs["mount_path"], ShouldEqual, result.mountPath)
+		So(rawIngest.Inputs["status"], ShouldEqual, "observed")
+		So(rawIngest.Inputs["table"], ShouldEqual, tableFiles)
+		So(rawIngest.Inputs["rows"], ShouldEqual, uint64(42))
+		So(rawIngest.Inputs["lines"], ShouldEqual, uint64(42))
+		So(rawIngest.Inputs["throughput_records_per_sec"], ShouldEqual, 28.0)
+		So(rawIngest.DurationsMS, ShouldResemble, []float64{1500})
+
+		mountSwitch := findImportGuardrailOperation(report.Operations, "active_snapshot_publish")
+		So(mountSwitch, ShouldNotBeNil)
+		So(mountSwitch.Inputs["dataset"], ShouldEqual, result.dataset)
+		So(mountSwitch.Inputs["stats_path"], ShouldEqual, result.statsPath)
+		So(mountSwitch.Inputs["mount_path"], ShouldEqual, result.mountPath)
+		So(mountSwitch.Inputs["status"], ShouldEqual, "observed")
+		So(mountSwitch.Inputs["phase"], ShouldEqual, phaseMountSwitch)
+		So(mountSwitch.DurationsMS, ShouldResemble, []float64{120})
+
+		dirProjection := findImportGuardrailOperation(report.Operations, "maintained_dir_projection")
+		So(dirProjection, ShouldNotBeNil)
+		So(dirProjection.Inputs["dataset"], ShouldEqual, result.dataset)
+		So(dirProjection.Inputs["stats_path"], ShouldEqual, result.statsPath)
+		So(dirProjection.Inputs["mount_path"], ShouldEqual, result.mountPath)
+		So(dirProjection.Inputs["status"], ShouldEqual, "observed")
+		So(dirProjection.Inputs["phase"], ShouldEqual, phaseDirProjectionWrite)
+		So(dirProjection.Inputs["tables"], ShouldResemble,
+			[]string{tableDirSummary, tableDirSummarySets, tableDirDGUTAVector})
+		So(dirProjection.DurationsMS, ShouldResemble, []float64{90})
+
+		treeSummary := findImportGuardrailOperation(report.Operations, "active_tree_summary_refresh")
+		So(treeSummary, ShouldNotBeNil)
+		So(treeSummary.Inputs["dataset"], ShouldEqual, result.dataset)
+		So(treeSummary.Inputs["stats_path"], ShouldEqual, result.statsPath)
+		So(treeSummary.Inputs["mount_path"], ShouldEqual, result.mountPath)
+		So(treeSummary.Inputs["status"], ShouldEqual, "observed")
+		So(treeSummary.Inputs["phase"], ShouldEqual, phaseTreeSummaryRefresh)
+		So(treeSummary.Inputs["tables"], ShouldResemble,
+			[]string{tableTreeSummarySets, tableTreeDGUTA, tableTreeDirSummary, tableTreeChildren})
+		So(treeSummary.DurationsMS, ShouldResemble, []float64{70})
+	})
+
+	Convey("addImportReportOperations emits missing import guardrails instead of hiding absent phases", t, func() {
+		report := boltperf.NewReport("clickhouse", "/input", 1, 0)
+		result := datasetImportResult{
+			dataset:   importTestDataset,
+			statsPath: importTestStatsPath,
+			mountPath: importTestMountScratch,
+			rows:      map[string]uint64{},
+			phases:    map[string]time.Duration{},
+		}
+
+		addImportReportOperations(&report, []datasetImportResult{result}, 1, time.Second)
+
+		rawIngest := findImportGuardrailOperation(report.Operations, "raw_file_ingest")
+		So(rawIngest, ShouldNotBeNil)
+		So(rawIngest.Inputs["status"], ShouldEqual, "missing")
+		So(rawIngest.Inputs["rows"], ShouldEqual, uint64(0))
+		So(rawIngest.Inputs["lines"], ShouldEqual, uint64(0))
+		So(rawIngest.DurationsMS, ShouldResemble, []float64{0})
+
+		mountSwitch := findImportGuardrailOperation(report.Operations, "active_snapshot_publish")
+		So(mountSwitch, ShouldNotBeNil)
+		So(mountSwitch.Inputs["status"], ShouldEqual, "missing")
+		So(mountSwitch.Inputs["phase"], ShouldEqual, phaseMountSwitch)
+		So(mountSwitch.DurationsMS, ShouldResemble, []float64{0})
+
+		dirProjection := findImportGuardrailOperation(report.Operations, "maintained_dir_projection")
+		So(dirProjection, ShouldNotBeNil)
+		So(dirProjection.Inputs["status"], ShouldEqual, "missing")
+		So(dirProjection.Inputs["phase"], ShouldEqual, phaseDirProjectionWrite)
+		So(dirProjection.Inputs["tables"], ShouldResemble,
+			[]string{tableDirSummary, tableDirSummarySets, tableDirDGUTAVector})
+		So(dirProjection.DurationsMS, ShouldResemble, []float64{0})
+
+		treeSummary := findImportGuardrailOperation(report.Operations, "active_tree_summary_refresh")
+		So(treeSummary, ShouldNotBeNil)
+		So(treeSummary.Inputs["status"], ShouldEqual, "missing")
+		So(treeSummary.Inputs["phase"], ShouldEqual, phaseTreeSummaryRefresh)
+		So(treeSummary.Inputs["tables"], ShouldResemble,
+			[]string{tableTreeSummarySets, tableTreeDGUTA, tableTreeDirSummary, tableTreeChildren})
+		So(treeSummary.DurationsMS, ShouldResemble, []float64{0})
+	})
+
+	Convey("raw file ingest remains missing when only parser lines were counted", t, func() {
+		report := boltperf.NewReport("clickhouse", "/input", 1, 0)
+		result := datasetImportResult{
+			dataset:   importTestDataset,
+			statsPath: importTestStatsPath,
+			mountPath: importTestMountScratch,
+			lines:     42,
+			elapsed:   1500 * time.Millisecond,
+			rows:      map[string]uint64{},
+			phases:    map[string]time.Duration{},
+		}
+
+		addImportReportOperations(&report, []datasetImportResult{result}, 1, time.Second)
+
+		rawIngest := findImportGuardrailOperation(report.Operations, "raw_file_ingest")
+		So(rawIngest, ShouldNotBeNil)
+		So(rawIngest.Inputs["status"], ShouldEqual, "missing")
+		So(rawIngest.Inputs["rows"], ShouldEqual, uint64(0))
+		So(rawIngest.Inputs["lines"], ShouldEqual, uint64(42))
+		So(rawIngest.DurationsMS, ShouldResemble, []float64{0})
+	})
+}
+
+func findImportGuardrailOperation(ops []boltperf.Operation, guardrail string) *boltperf.Operation {
+	for i := range ops {
+		if ops[i].Name != "import_guardrail" {
+			continue
+		}
+
+		if ops[i].Inputs["guardrail"] == guardrail {
+			return &ops[i]
+		}
+	}
+
+	return nil
 }

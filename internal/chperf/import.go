@@ -91,6 +91,22 @@ const (
 	tableBasedirsHistory      = "wrstat_basedirs_history"
 )
 
+const (
+	importGuardrailOperation                = "import_guardrail"
+	importGuardrailStatusObserved           = "observed"
+	importGuardrailStatusMissing            = "missing"
+	importGuardrailRawFileIngest            = "raw_file_ingest"
+	importGuardrailActiveSnapshotPublish    = "active_snapshot_publish"
+	importGuardrailMaintainedDirProjection  = "maintained_dir_projection"
+	importGuardrailActiveTreeSummaryRefresh = "active_tree_summary_refresh"
+)
+
+const (
+	importInputDataset   = "dataset"
+	importInputStatsPath = "stats_path"
+	importInputMountPath = "mount_path"
+)
+
 // ErrNoDatasets indicates no dataset directories were found.
 var ErrNoDatasets = errors.New("no dataset directories found")
 
@@ -148,9 +164,9 @@ func addImportReportOperations(
 
 	for _, result := range results {
 		report.AddOperation("import_file_total", map[string]any{
-			"dataset":                    result.dataset,
-			"stats_path":                 result.statsPath,
-			"mount_path":                 result.mountPath,
+			importInputDataset:           result.dataset,
+			importInputStatsPath:         result.statsPath,
+			importInputMountPath:         result.mountPath,
 			"lines":                      result.lines,
 			"rows_per_table":             cloneMap(result.rows),
 			"throughput_records_per_sec": throughputPerSecond(result.records(), result.elapsed),
@@ -158,15 +174,17 @@ func addImportReportOperations(
 
 		for _, phase := range sortedImportPhases(result.phases) {
 			inputs := map[string]any{
-				"dataset":    result.dataset,
-				"stats_path": result.statsPath,
-				"mount_path": result.mountPath,
-				"phase":      phase,
+				importInputDataset:   result.dataset,
+				importInputStatsPath: result.statsPath,
+				importInputMountPath: result.mountPath,
+				"phase":              phase,
 			}
 			addImportPhaseInputs(inputs, result, phase)
 
 			report.AddOperation("import_phase", inputs, []float64{durationMS(result.phases[phase])})
 		}
+
+		addImportGuardrailOperations(report, result)
 	}
 
 	report.AddOperation("import_total", map[string]any{
@@ -298,6 +316,95 @@ func totalImportRecords(results []datasetImportResult) uint64 {
 	}
 
 	return total
+}
+
+func addImportGuardrailOperations(report *boltperf.Report, result datasetImportResult) {
+	addRawFileIngestGuardrail(report, result)
+	addPhaseImportGuardrail(report, result, importGuardrailActiveSnapshotPublish, phaseMountSwitch, nil)
+	addPhaseImportGuardrail(
+		report,
+		result,
+		importGuardrailMaintainedDirProjection,
+		phaseDirProjectionWrite,
+		importGuardrailTables(phaseDirProjectionWrite),
+	)
+	addPhaseImportGuardrail(
+		report,
+		result,
+		importGuardrailActiveTreeSummaryRefresh,
+		phaseTreeSummaryRefresh,
+		importGuardrailTables(phaseTreeSummaryRefresh),
+	)
+}
+
+func addRawFileIngestGuardrail(report *boltperf.Report, result datasetImportResult) {
+	status, duration := importGuardrailStatusAndDuration(rawFileIngestObserved(result), result.elapsed)
+	inputs := importGuardrailInputs(result, importGuardrailRawFileIngest, status)
+	inputs["table"] = tableFiles
+	inputs["rows"] = result.rows[tableFiles]
+	inputs["lines"] = result.lines
+	inputs["phases"] = []string{phaseFilesInsert, phaseFilesFlush}
+	inputs["throughput_records_per_sec"] = throughputPerSecond(result.records(), result.elapsed)
+
+	report.AddOperation(importGuardrailOperation, inputs, []float64{durationMS(duration)})
+}
+
+func importGuardrailStatusAndDuration(observed bool, duration time.Duration) (string, time.Duration) {
+	if !observed {
+		return importGuardrailStatusMissing, 0
+	}
+
+	return importGuardrailStatusObserved, duration
+}
+
+func rawFileIngestObserved(result datasetImportResult) bool {
+	return result.rows[tableFiles] > 0 ||
+		hasImportPhase(result, phaseFilesInsert) ||
+		hasImportPhase(result, phaseFilesFlush)
+}
+
+func hasImportPhase(result datasetImportResult, phase string) bool {
+	_, ok := result.phases[phase]
+
+	return ok
+}
+
+func importGuardrailInputs(result datasetImportResult, guardrail string, status string) map[string]any {
+	return map[string]any{
+		importInputDataset:   result.dataset,
+		importInputStatsPath: result.statsPath,
+		importInputMountPath: result.mountPath,
+		"guardrail":          guardrail,
+		"status":             status,
+	}
+}
+
+func addPhaseImportGuardrail(
+	report *boltperf.Report,
+	result datasetImportResult,
+	guardrail string,
+	phase string,
+	tables []string,
+) {
+	phaseDuration, observed := result.phases[phase]
+	status, duration := importGuardrailStatusAndDuration(observed, phaseDuration)
+	inputs := importGuardrailInputs(result, guardrail, status)
+	inputs["phase"] = phase
+
+	if len(tables) > 0 {
+		inputs["tables"] = slices.Clone(tables)
+	}
+
+	report.AddOperation(importGuardrailOperation, inputs, []float64{durationMS(duration)})
+}
+
+func importGuardrailTables(phase string) []string {
+	tables, ok := importMultiTablePhase(phase)
+	if !ok {
+		return nil
+	}
+
+	return tables
 }
 
 func importMode(parallelism int) string {
