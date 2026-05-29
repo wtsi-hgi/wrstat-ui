@@ -1617,28 +1617,24 @@ func (d *clickHouseDatabase) parentDirsWithFilteredChildrenForMount(
 	group *activeMountDirGroup,
 	filter *db.Filter,
 ) (map[string]bool, error) {
-	childrenByParent, err := d.childrenForParentsMount(
-		group.mount.mountPath,
-		group.mount.snapshotID,
-		group.queryDirs,
-	)
+	parents, ok, skipSummaryPrefetch := d.parentDirsWithMaintainedChildCountsForMount(group, filter)
+	if ok {
+		return parents, nil
+	}
+
+	childrenByParent, parentDirs, err := d.childRowsForDirsHaveChildren(group)
 	if err != nil {
 		return nil, err
 	}
 
-	parentDirs := parentDirsWithAnyChildren(group.queryDirs, childrenByParent)
 	if len(parentDirs) == 0 {
 		return map[string]bool{}, nil
 	}
 
 	if broadFilterCanUseChildRows(filter) {
-		parents := parentDirSet(parentDirs)
+		d.prefetchBroadDirsHaveChildrenSummaries(group, filter, childrenByParent, skipSummaryPrefetch)
 
-		ignoreDirsHaveChildrenPrefetchError(
-			d.prefetchDirsHaveChildrenSummaries(group, filter, childrenByParent),
-		)
-
-		return parents, nil
+		return parentDirSet(parentDirs), nil
 	}
 
 	return d.parentDirsWithFilteredChildRows(group, filter, childrenByParent, parentDirs)
@@ -1661,7 +1657,86 @@ func parentDirSet(parentDirs []string) map[string]bool {
 	return set
 }
 
+func (d *clickHouseDatabase) childRowsForDirsHaveChildren(
+	group *activeMountDirGroup,
+) (map[string][]string, []string, error) {
+	childrenByParent, err := d.childrenForParentsMount(
+		group.mount.mountPath,
+		group.mount.snapshotID,
+		group.queryDirs,
+	)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return childrenByParent, parentDirsWithAnyChildren(group.queryDirs, childrenByParent), nil
+}
+
+func (d *clickHouseDatabase) prefetchBroadDirsHaveChildrenSummaries(
+	group *activeMountDirGroup,
+	filter *db.Filter,
+	childrenByParent map[string][]string,
+	skip bool,
+) {
+	if skip {
+		return
+	}
+
+	ignoreDirsHaveChildrenPrefetchError(
+		d.prefetchDirsHaveChildrenSummaries(group, filter, childrenByParent),
+	)
+}
+
 func ignoreDirsHaveChildrenPrefetchError(error) {}
+
+func (d *clickHouseDatabase) parentDirsWithMaintainedChildCountsForMount(
+	group *activeMountDirGroup,
+	filter *db.Filter,
+) (map[string]bool, bool, bool) {
+	if !broadFilterCanUseChildRows(filter) {
+		return nil, false, false
+	}
+
+	if _, ok := mountDirSummaryModeForFilter(filter); !ok {
+		return nil, false, false
+	}
+
+	_, handled, childCounts, ok, err := d.mountDirSummariesForDirsMount(
+		group.mount.mountPath,
+		group.mount.snapshotID,
+		group.queryDirs,
+		filter,
+	)
+	if err != nil || !ok {
+		return nil, false, true
+	}
+
+	parents, ok := maintainedChildCountParents(group.queryDirs, handled, childCounts, filter)
+
+	return parents, ok, ok
+}
+
+func maintainedChildCountParents(
+	dirs []string,
+	handled map[string]bool,
+	childCounts map[string]uint64,
+	filter *db.Filter,
+) (map[string]bool, bool) {
+	parents := make(map[string]bool, len(dirs))
+
+	for _, dir := range dirs {
+		childCount, ok := maintainedChildCountForDir(dir, handled, childCounts, filter)
+		if !ok {
+			return nil, false
+		}
+
+		if childCount > 0 {
+			parents[dir] = true
+		}
+	}
+
+	return parents, true
+}
 
 func (d *clickHouseDatabase) prefetchDirsHaveChildrenSummaries(
 	group *activeMountDirGroup,
@@ -1715,7 +1790,7 @@ func (d *clickHouseDatabase) cacheMountDirSummariesForDirsMount(
 	dirs []string,
 	filter *db.Filter,
 ) error {
-	summaries, handled, ok, err := d.mountDirSummariesForDirsMount(
+	summaries, handled, childCounts, ok, err := d.mountDirSummariesForDirsMount(
 		mountPath,
 		snapshotID,
 		dirs,
@@ -1723,6 +1798,7 @@ func (d *clickHouseDatabase) cacheMountDirSummariesForDirsMount(
 	)
 	_ = summaries
 	_ = handled
+	_ = childCounts
 	_ = ok
 
 	return err
@@ -2738,7 +2814,7 @@ func (d *clickHouseDatabase) dirSummariesForDirsMount(
 		return map[string]*db.DirSummary{}, map[string]bool{}, true, nil
 	}
 
-	summaries, handled, ok, err := d.mountDirSummariesForDirsMount(mountPath, snapshotID, dirs, filter)
+	summaries, handled, ok, err := d.maintainedDirSummariesForDirsMount(mountPath, snapshotID, dirs, filter)
 	if err != nil || ok {
 		return summaries, handled, ok, err
 	}
@@ -2754,6 +2830,30 @@ func (d *clickHouseDatabase) dirSummariesForDirsMount(
 		return summaries, handled, ok, err
 	}
 
+	return d.groupedDirSummariesForDirsMount(mountPath, snapshotID, updatedAt, dirs, filter)
+}
+
+func (d *clickHouseDatabase) maintainedDirSummariesForDirsMount(
+	mountPath, snapshotID string,
+	dirs []string,
+	filter *db.Filter,
+) (map[string]*db.DirSummary, map[string]bool, bool, error) {
+	summaries, handled, _, ok, err := d.mountDirSummariesForDirsMount(
+		mountPath,
+		snapshotID,
+		dirs,
+		filter,
+	)
+
+	return summaries, handled, ok, err
+}
+
+func (d *clickHouseDatabase) groupedDirSummariesForDirsMount(
+	mountPath, snapshotID string,
+	updatedAt time.Time,
+	dirs []string,
+	filter *db.Filter,
+) (map[string]*db.DirSummary, map[string]bool, bool, error) {
 	if !shouldUseGroupedDirSummaries(dirs) {
 		return nil, nil, false, nil
 	}
@@ -3819,6 +3919,21 @@ func (s *dgutaScanned) scanFromWithDir(rows rowsScanner, dir *string) error {
 	}
 
 	return nil
+}
+
+func maintainedChildCountForDir(
+	dir string,
+	handled map[string]bool,
+	childCounts map[string]uint64,
+	filter *db.Filter,
+) (uint64, bool) {
+	if !handled[dir] {
+		return 0, mountDirSummaryMissingMeansNotFound(filter)
+	}
+
+	childCount, ok := childCounts[dir]
+
+	return childCount, ok
 }
 
 func activeMountDirTuplePlaceholders(n int) string {

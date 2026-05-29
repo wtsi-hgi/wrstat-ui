@@ -268,29 +268,43 @@ func mergeMountDirSummaryRows(
 	}
 }
 
+func mergeMountDirChildCounts(childCounts, queryChildCounts map[string]uint64) {
+	for dir, childCount := range queryChildCounts {
+		childCounts[dir] = childCount
+	}
+}
+
 func (d *clickHouseDatabase) mountDirSummariesForDirsMount(
 	mountPath, snapshotID string,
 	dirs []string,
 	filter *db.Filter,
-) (map[string]*db.DirSummary, map[string]bool, bool, error) {
+) (map[string]*db.DirSummary, map[string]bool, map[string]uint64, bool, error) {
 	mode, ok := mountDirSummaryModeForFilter(filter)
 	if !ok {
-		return nil, nil, false, nil
+		return nil, nil, nil, false, nil
 	}
 
-	summaries, handled, missing := d.cachedMountDirSummaries(mountPath, snapshotID, dirs, filter.Age, mode)
+	summaries, handled, childCounts, missing := d.cachedMountDirSummaries(
+		mountPath,
+		snapshotID,
+		dirs,
+		filter.Age,
+		mode,
+	)
 	if len(missing) == 0 {
-		return summaries, handled, true, nil
+		return summaries, handled, childCounts, true, nil
 	}
 
-	ok, err := d.addMissingMountDirSummaries(
+	queryChildCounts, ok, err := d.addMissingMountDirSummaries(
 		summaries, handled, mountPath, snapshotID, missing, filter.Age, mode,
 	)
 	if err != nil || !ok {
-		return nil, nil, ok, err
+		return nil, nil, nil, ok, err
 	}
 
-	return summaries, handled, true, nil
+	mergeMountDirChildCounts(childCounts, queryChildCounts)
+
+	return summaries, handled, childCounts, true, nil
 }
 
 func (d *clickHouseDatabase) addMissingMountDirSummaries(
@@ -300,27 +314,27 @@ func (d *clickHouseDatabase) addMissingMountDirSummaries(
 	missing []string,
 	age db.DirGUTAge,
 	mode mountDirSummaryMode,
-) (bool, error) {
+) (map[string]uint64, bool, error) {
 	ctx, cancel := configQueryContext(d.cfg)
 	defer cancel()
 
 	ready, err := d.mountDirSummaryReadyCached(ctx, mountPath, snapshotID)
 	if err != nil || !ready {
-		return false, err
+		return nil, false, err
 	}
 
 	queried, queryHandled, childCounts, err := d.queryMountDirSummariesForDirs(
 		ctx, mountPath, snapshotID, missing, age, mode,
 	)
 	if err != nil {
-		return true, err
+		return nil, true, err
 	}
 
 	d.addQueriedMountDirSummaries(
 		summaries, handled, mountPath, snapshotID, age, mode, queried, queryHandled, childCounts,
 	)
 
-	return true, nil
+	return childCounts, true, nil
 }
 
 func (d *clickHouseDatabase) mountDirSummaryReadyCached(
@@ -347,9 +361,10 @@ func (d *clickHouseDatabase) cachedMountDirSummaries(
 	dirs []string,
 	age db.DirGUTAge,
 	mode mountDirSummaryMode,
-) (map[string]*db.DirSummary, map[string]bool, []string) {
+) (map[string]*db.DirSummary, map[string]bool, map[string]uint64, []string) {
 	summaries := make(map[string]*db.DirSummary, len(dirs))
 	handled := make(map[string]bool, len(dirs))
+	childCounts := make(map[string]uint64, len(dirs))
 	missing := make([]string, 0, len(dirs))
 	seen := make(map[string]bool, len(dirs))
 
@@ -361,8 +376,7 @@ func (d *clickHouseDatabase) cachedMountDirSummaries(
 
 		seen[key.dir] = true
 		if summary, ok := d.treeCache.getDirSummary(key); ok {
-			summaries[key.dir] = summary
-			handled[key.dir] = true
+			d.addCachedMountDirSummary(summaries, handled, childCounts, key, summary)
 
 			continue
 		}
@@ -370,7 +384,7 @@ func (d *clickHouseDatabase) cachedMountDirSummaries(
 		missing = append(missing, key.dir)
 	}
 
-	return summaries, handled, missing
+	return summaries, handled, childCounts, missing
 }
 
 func (d *clickHouseDatabase) queryMountDirSummariesForDirs(
@@ -497,9 +511,10 @@ func (d *clickHouseDatabase) addQueriedMountDirSummaries(
 ) {
 	for dir := range queryHandled {
 		sum := queried[dir]
-		d.treeCache.putDirSummary(
+		d.treeCache.putDirSummaryWithChildCount(
 			newTreeDirSummaryCacheKey(mountPath, snapshotID, dir, age, mode),
 			sum,
+			childCounts[dir],
 		)
 		handled[dir] = true
 
@@ -510,5 +525,20 @@ func (d *clickHouseDatabase) addQueriedMountDirSummaries(
 		if childCounts[dir] == 0 {
 			d.treeCache.putChildren(newTreeCacheKey(mountPath, snapshotID, dir), nil)
 		}
+	}
+}
+
+func (d *clickHouseDatabase) addCachedMountDirSummary(
+	summaries map[string]*db.DirSummary,
+	handled map[string]bool,
+	childCounts map[string]uint64,
+	key treeDirSummaryCacheKey,
+	summary *db.DirSummary,
+) {
+	summaries[key.dir] = summary
+	handled[key.dir] = true
+
+	if childCount, ok := d.treeCache.getDirSummaryChildCount(key); ok {
+		childCounts[key.dir] = childCount
 	}
 }

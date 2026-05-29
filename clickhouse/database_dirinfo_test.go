@@ -1103,6 +1103,26 @@ func mountDirProjectionStateFromSeededRows(
 }
 
 func TestClickHouseDatabaseTreeCache(t *testing.T) {
+	Convey("summary-only cache writes clear stale maintained child counts", t, func() {
+		cache := newTreeQueryCache()
+		key := newTreeDirSummaryCacheKey(
+			"/mnt/test/",
+			"00000000-0000-0000-0000-000000000001",
+			"/mnt/test/a/",
+			db.DGUTAgeAll,
+			mountDirSummaryAll,
+		)
+
+		cache.putDirSummaryWithChildCount(key, &db.DirSummary{Dir: "/mnt/test/a/", Count: 1}, 3)
+		childCount, ok := cache.getDirSummaryChildCount(key)
+		So(ok, ShouldBeTrue)
+		So(childCount, ShouldEqual, 3)
+
+		cache.putDirSummary(key, &db.DirSummary{Dir: "/mnt/test/a/", Count: 2})
+		_, ok = cache.getDirSummaryChildCount(key)
+		So(ok, ShouldBeFalse)
+	})
+
 	Convey("maintained projection readiness caches retry misses and keep hits", t, func() {
 		assertMaintainedReadinessRetriesMissesAndCachesHits(
 			func(dbch *clickHouseDatabase, ctx context.Context, mountPath, snapshotID string) (bool, error) {
@@ -2007,7 +2027,74 @@ func TestClickHouseDatabaseDirsHaveChildrenFastPath(t *testing.T) {
 		So(countingConn.existenceQueryCount(), ShouldEqual, 0)
 	})
 
-	Convey("DirsHaveChildren prefetches bounded visible-child summaries for broad Disktree clicks", t, func() {
+	Convey("DirsHaveChildren answers broad checks from maintained child counts", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+		resetSharedTreeQueryCachesForTesting()
+		Reset(resetSharedTreeQueryCachesForTesting)
+
+		th := newClickHouseTestHarness(t)
+
+		const mountPath = "/mnt/countchildren/"
+
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 2 * time.Second
+		cfg.PollInterval = 0
+		cfg.MountPoints = []string{mountPath}
+
+		p, err := OpenProvider(cfg)
+		So(err, ShouldBeNil)
+		Reset(func() { So(p.Close(), ShouldBeNil) })
+
+		cp, ok := p.(*chProvider)
+		So(ok, ShouldBeTrue)
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		updatedAt := time.Date(2026, 1, 13, 9, 0, 0, 0, time.UTC)
+		sid := snapshotID(mountPath, updatedAt)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		So(conn.Exec(ctx, testInsertMountStmt, mountPath, time.Now(), sid, updatedAt), ShouldBeNil)
+
+		parentWithChild := mountPath + "parent/"
+		parentWithoutChild := mountPath + "empty/"
+		missingParent := mountPath + "missing/"
+
+		insertDirSummaryTestGUTA(ctx, conn, mountPath, sid, parentWithChild, 7, 3)
+		insertDirSummaryTestGUTA(ctx, conn, mountPath, sid, parentWithoutChild, 7, 1)
+		So(conn.Exec(ctx, testInsertChildrenStmt, mountPath, sid, parentWithChild, parentWithChild+"leaf"), ShouldBeNil)
+
+		So(writeMaintainedMountDirProjectionForTest(ctx, conn, activeMount{
+			mountPath:  mountPath,
+			snapshotID: sid.String(),
+			updatedAt:  updatedAt,
+		}), ShouldBeNil)
+
+		countingConn := &hasChildrenQueryCountingConn{Conn: cp.conn}
+		dbch := newClickHouseDatabase(cfg, countingConn)
+
+		hasChildren, err := dbch.DirsHaveChildren(
+			[]string{parentWithChild, parentWithoutChild, missingParent},
+			&db.Filter{Age: db.DGUTAgeAll},
+		)
+		So(err, ShouldBeNil)
+		So(hasChildren, ShouldResemble, map[string]bool{
+			parentWithChild:    true,
+			parentWithoutChild: false,
+			missingParent:      false,
+		})
+		So(countingConn.childBatchQueryCount(), ShouldEqual, 0)
+		So(countingConn.mountSummaryQueryCount(), ShouldEqual, 1)
+		So(countingConn.childSummaryBatchQueryCount(), ShouldEqual, 0)
+		So(countingConn.existenceQueryCount(), ShouldEqual, 0)
+	})
+
+	Convey("DirsHaveChildren reuses maintained child counts and leaves clicks on maintained summaries", t, func() {
 		os.Setenv("WRSTAT_ENV", "test")
 		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
 		resetSharedTreeQueryCachesForTesting()
@@ -2073,7 +2160,7 @@ func TestClickHouseDatabaseDirsHaveChildrenFastPath(t *testing.T) {
 			mountPath + "a": true,
 			mountPath + "b": false,
 		})
-		So(countingConn.mountDirSummaryQueryCount(), ShouldEqual, 1)
+		So(countingConn.mountDirSummaryQueryCount(), ShouldEqual, 0)
 
 		countingConn.reset()
 
@@ -2082,12 +2169,12 @@ func TestClickHouseDatabaseDirsHaveChildrenFastPath(t *testing.T) {
 		So(clicked.Children, ShouldHaveLength, 2)
 		So(clicked.Children[0].Count, ShouldEqual, 3)
 		So(clicked.Children[1].Count, ShouldEqual, 2)
-		So(countingConn.mountDirSummaryQueryCount(), ShouldEqual, 0)
+		So(countingConn.mountDirSummaryQueryCount(), ShouldEqual, 1)
 		So(countingConn.rawSummaryBatchQueryCount(), ShouldEqual, 0)
 		So(countingConn.rawSummaryQueryCount(), ShouldEqual, 0)
 	})
 
-	Convey("DirsHaveChildren skips broad summary prefetch when discovered children exceed the bound", t, func() {
+	Convey("DirsHaveChildren uses maintained child counts for broad checks with large child fanout", t, func() {
 		os.Setenv("WRSTAT_ENV", "test")
 		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
 		resetSharedTreeQueryCachesForTesting()
@@ -2140,8 +2227,8 @@ func TestClickHouseDatabaseDirsHaveChildrenFastPath(t *testing.T) {
 		hasChildren, err := dbch.DirsHaveChildren([]string{parent}, &db.Filter{Age: db.DGUTAgeAll})
 		So(err, ShouldBeNil)
 		So(hasChildren, ShouldResemble, map[string]bool{parent: true})
-		So(countingConn.childBatchQueryCount(), ShouldEqual, 1)
-		So(countingConn.mountSummaryQueryCount(), ShouldEqual, 0)
+		So(countingConn.childBatchQueryCount(), ShouldEqual, 0)
+		So(countingConn.mountSummaryQueryCount(), ShouldEqual, 1)
 		So(countingConn.childSummaryBatchQueryCount(), ShouldEqual, 0)
 		So(countingConn.existenceQueryCount(), ShouldEqual, 0)
 	})

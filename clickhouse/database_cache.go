@@ -99,6 +99,7 @@ type treeQueryCache struct {
 	dgutaOrder []treeCacheKey
 
 	dirSummaries      map[treeDirSummaryCacheKey]*db.DirSummary
+	dirSummaryCounts  map[treeDirSummaryCacheKey]uint64
 	dirSummaryOrder   []treeDirSummaryCacheKey
 	mountSummaries    map[treeMountCacheKey]bool
 	mountSummaryOrder []treeMountCacheKey
@@ -112,11 +113,12 @@ func treeQueryCacheForConfig(cfg Config) *treeQueryCache {
 
 func newTreeQueryCache() *treeQueryCache {
 	return &treeQueryCache{
-		children:       make(map[treeCacheKey][]string),
-		dgutas:         make(map[treeCacheKey]db.GUTAs),
-		dirSummaries:   make(map[treeDirSummaryCacheKey]*db.DirSummary),
-		mountSummaries: make(map[treeMountCacheKey]bool),
-		mountVectors:   make(map[treeMountCacheKey]bool),
+		children:         make(map[treeCacheKey][]string),
+		dgutas:           make(map[treeCacheKey]db.GUTAs),
+		dirSummaries:     make(map[treeDirSummaryCacheKey]*db.DirSummary),
+		dirSummaryCounts: make(map[treeDirSummaryCacheKey]uint64),
+		mountSummaries:   make(map[treeMountCacheKey]bool),
+		mountVectors:     make(map[treeMountCacheKey]bool),
 	}
 }
 
@@ -238,6 +240,31 @@ func cloneDirSummary(in *db.DirSummary) *db.DirSummary {
 }
 
 func (c *treeQueryCache) putDirSummary(key treeDirSummaryCacheKey, summary *db.DirSummary) {
+	c.putDirSummaryEntry(key, summary, 0, false)
+}
+
+func (c *treeQueryCache) getDirSummaryChildCount(key treeDirSummaryCacheKey) (uint64, bool) {
+	c.mu.RLock()
+	childCount, ok := c.dirSummaryCounts[key]
+	c.mu.RUnlock()
+
+	return childCount, ok
+}
+
+func (c *treeQueryCache) putDirSummaryWithChildCount(
+	key treeDirSummaryCacheKey,
+	summary *db.DirSummary,
+	childCount uint64,
+) {
+	c.putDirSummaryEntry(key, summary, childCount, true)
+}
+
+func (c *treeQueryCache) putDirSummaryEntry(
+	key treeDirSummaryCacheKey,
+	summary *db.DirSummary,
+	childCount uint64,
+	hasChildCount bool,
+) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -247,6 +274,11 @@ func (c *treeQueryCache) putDirSummary(key treeDirSummaryCacheKey, summary *db.D
 	}
 
 	c.dirSummaries[key] = cloneDirSummary(summary)
+	if hasChildCount {
+		c.dirSummaryCounts[key] = childCount
+	} else {
+		delete(c.dirSummaryCounts, key)
+	}
 }
 
 func (c *treeQueryCache) evictOldestDirSummaries() {
@@ -254,6 +286,7 @@ func (c *treeQueryCache) evictOldestDirSummaries() {
 		oldest := c.dirSummaryOrder[0]
 		c.dirSummaryOrder = c.dirSummaryOrder[1:]
 		delete(c.dirSummaries, oldest)
+		delete(c.dirSummaryCounts, oldest)
 	}
 }
 
@@ -331,6 +364,7 @@ func (c *treeQueryCache) reset() {
 	c.dgutas = make(map[treeCacheKey]db.GUTAs)
 	c.dgutaOrder = nil
 	c.dirSummaries = make(map[treeDirSummaryCacheKey]*db.DirSummary)
+	c.dirSummaryCounts = make(map[treeDirSummaryCacheKey]uint64)
 	c.dirSummaryOrder = nil
 	c.mountSummaries = make(map[treeMountCacheKey]bool)
 	c.mountSummaryOrder = nil
