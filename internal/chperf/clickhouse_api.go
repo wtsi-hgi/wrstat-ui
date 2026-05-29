@@ -43,8 +43,28 @@ type ClickHouseAPI interface {
 	QueryAPI
 }
 
+type clickHouseFileAPI interface {
+	ListDir(ctx context.Context, dir string, opts clickhouse.ListOptions) ([]clickhouse.FileRow, error)
+	StatPath(ctx context.Context, path string, opts clickhouse.StatOptions) (*clickhouse.FileRow, error)
+	PermissionAnyInDir(ctx context.Context, dir string, uid uint32, gids []uint32) (bool, error)
+	FindByGlob(
+		ctx context.Context,
+		baseDirs []string,
+		patterns []string,
+		opts clickhouse.FindOptions,
+	) ([]clickhouse.FileRow, error)
+	Close() error
+}
+
+const (
+	clickHouseFileFieldPath      = "path"
+	clickHouseFileFieldExt       = "ext"
+	clickHouseFileFieldEntryType = "entry_type"
+)
+
 var (
 	_ ClickHouseAPI      = (*clickHouseAPI)(nil)
+	_ clickHouseFileAPI  = (*clickhouse.Client)(nil)
 	_ ImportAPI          = (*clickHouseAPI)(nil)
 	_ QueryAPI           = (*clickHouseAPI)(nil)
 	_ QueryCacheResetter = (*clickHouseAPI)(nil)
@@ -53,7 +73,7 @@ var (
 type clickHouseOpenProvider func(clickhouse.Config) (provider.Provider, error)
 
 type clickHouseQueryClient struct {
-	client *clickhouse.Client
+	client clickHouseFileAPI
 }
 
 func (c clickHouseQueryClient) ListDir(
@@ -61,7 +81,14 @@ func (c clickHouseQueryClient) ListDir(
 	dir string,
 	limit int64,
 ) ([]QueryRow, error) {
-	rows, err := c.client.ListDir(ctx, dir, clickhouse.ListOptions{Limit: limit})
+	rows, err := c.client.ListDir(ctx, dir, clickhouse.ListOptions{
+		Fields: []string{
+			clickHouseFileFieldPath,
+			clickHouseFileFieldExt,
+			clickHouseFileFieldEntryType,
+		},
+		Limit: limit,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -83,7 +110,9 @@ func convertQueryRows(rows []clickhouse.FileRow) []QueryRow {
 }
 
 func (c clickHouseQueryClient) StatPath(ctx context.Context, path string) error {
-	_, err := c.client.StatPath(ctx, path, clickhouse.StatOptions{})
+	_, err := c.client.StatPath(ctx, path, clickhouse.StatOptions{
+		Fields: []string{clickHouseFileFieldPath},
+	})
 
 	return err
 }
@@ -108,6 +137,7 @@ func (c clickHouseQueryClient) FindByGlob(
 	gids []uint32,
 ) error {
 	_, err := c.client.FindByGlob(ctx, baseDirs, patterns, clickhouse.FindOptions{
+		Fields:       []string{clickHouseFileFieldPath},
 		RequireOwner: requireOwner,
 		UID:          uid,
 		GIDs:         gids,

@@ -68,6 +68,76 @@ func TestUnknownFileFieldErrors(t *testing.T) {
 	})
 }
 
+func TestFileAPISelectFields(t *testing.T) {
+	Convey("file API query builders keep full-row default selects", t, func() {
+		listQuery, listFields, err := listDirQuery(ListOptions{})
+		So(err, ShouldBeNil)
+		So(listQuery, ShouldContainSubstring, "SELECT "+fileRowSelectAll+" FROM")
+		So(listFields, ShouldResemble, defaultFileRowFields())
+
+		statQuery, statFields, err := statPathQuery(StatOptions{})
+		So(err, ShouldBeNil)
+		So(statQuery, ShouldContainSubstring, "SELECT "+fileRowSelectAll+" FROM")
+		So(statFields, ShouldResemble, defaultFileRowFields())
+
+		client := &Client{mountPoints: basedirs.ValidateMountPoints([]string{findByGlobAlphaMount})}
+		prepared, err := client.prepareFindByGlob(
+			[]string{findByGlobAlphaOneDir},
+			[]string{"*"},
+			FindOptions{},
+		)
+		So(err, ShouldBeNil)
+		So(prepared.selectList, ShouldEqual, fileRowSelectAll)
+		So(prepared.fields, ShouldResemble, defaultFileRowFields())
+	})
+
+	Convey("file API query builders select only requested columns", t, func() {
+		listQuery, listFields, err := listDirQuery(ListOptions{
+			Fields: []string{fileFieldPath, fileFieldExt, fileFieldEntryType},
+		})
+		So(err, ShouldBeNil)
+		So(listQuery, ShouldContainSubstring, "SELECT f.path, f.ext, f.entry_type FROM")
+		So(listQuery, ShouldNotContainSubstring, "SELECT f.path, f.ext, f.entry_type, f.parent_dir")
+		So(listQuery, ShouldNotContainSubstring, "f.size")
+		So(listFields, ShouldResemble, []string{fileFieldPath, fileFieldExt, fileFieldEntryType})
+
+		statQuery, statFields, err := statPathQuery(StatOptions{
+			Fields: []string{fileFieldPath},
+		})
+		So(err, ShouldBeNil)
+		So(statQuery, ShouldContainSubstring, "SELECT f.path FROM")
+		So(statQuery, ShouldNotContainSubstring, "SELECT f.path, f.parent_dir")
+		So(statQuery, ShouldNotContainSubstring, "f.size")
+		So(statFields, ShouldResemble, []string{fileFieldPath})
+
+		client := &Client{mountPoints: basedirs.ValidateMountPoints([]string{findByGlobAlphaMount})}
+		prepared, err := client.prepareFindByGlob(
+			[]string{findByGlobAlphaOneDir},
+			[]string{"*"},
+			FindOptions{Fields: []string{fileFieldPath}},
+		)
+		So(err, ShouldBeNil)
+		So(prepared.selectList, ShouldEqual, "f.path")
+		So(prepared.fields, ShouldResemble, []string{fileFieldPath})
+
+		spec := prepared.plan.queries[0]
+		globQuery, _ := buildFindByGlobQueryAndParams(
+			prepared.selectList,
+			spec.mountPath,
+			spec.baseDirs,
+			spec.patternChunk,
+			prepared.ownerEnabled,
+			prepared.uid,
+			prepared.gids,
+			prepared.queryLimit,
+			prepared.queryOffset,
+		)
+		So(globQuery, ShouldContainSubstring, "SELECT f.path FROM")
+		So(globQuery, ShouldNotContainSubstring, "SELECT f.path, f.parent_dir")
+		So(globQuery, ShouldNotContainSubstring, "f.size")
+	})
+}
+
 type findByGlobEmptyRows struct{}
 
 func (r *findByGlobEmptyRows) Next() bool {
