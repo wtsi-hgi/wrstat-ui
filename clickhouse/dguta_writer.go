@@ -44,6 +44,7 @@ const (
 	defaultRawDGUTABatchSize   = 10_000
 	defaultProjectionBatchSize = 10_000
 	defaultChildrenBatchSize   = 10_000
+	dgutaAgeMaskBits           = 32
 	defaultCHReceiveTimeout    = 300 * time.Second
 	importBatchReceiveGuard    = time.Minute
 	importBatchMaxOpenDuration = defaultCHReceiveTimeout - importBatchReceiveGuard
@@ -139,23 +140,34 @@ type dgutaRecordRows struct {
 	rawDir       string
 	canonicalDir string
 	keys         map[dgutaRowKey]struct{}
+	ageMask      uint32
 }
 
 func (r dgutaRecordRows) ages() []db.DirGUTAge {
-	ages := make([]db.DirGUTAge, 0, len(r.keys))
-	seen := make(map[db.DirGUTAge]struct{}, len(r.keys))
+	if r.ageMask == 0 {
+		return nil
+	}
 
-	for key := range r.keys {
-		age := db.DirGUTAge(key.age)
-		if _, ok := seen[age]; ok {
-			continue
+	ages := make([]db.DirGUTAge, 0, len(db.DirGUTAges))
+	for _, age := range db.DirGUTAges {
+		if dgutaAgeMaskHas(r.ageMask, age) {
+			ages = append(ages, age)
 		}
-
-		seen[age] = struct{}{}
-		ages = append(ages, age)
 	}
 
 	return ages
+}
+
+func dgutaAgeMaskHas(mask uint32, age db.DirGUTAge) bool {
+	bit := dgutaAgeBit(age)
+
+	return bit != 0 && mask&bit != 0
+}
+
+type dgutaRecordTracker struct {
+	trackDuplicateKeys bool
+	keys               map[dgutaRowKey]struct{}
+	ageMask            uint32
 }
 
 type dgutaBatchSlot struct {
@@ -729,17 +741,11 @@ func (w *dgutaWriter) appendDGUTARows(
 	dguta db.RecordDGUTA,
 	rawParentDir, parentDir string,
 ) (db.GUTAs, error) {
-	keys := make(map[dgutaRowKey]struct{}, len(dguta.GUTAs))
+	tracker := w.newDGUTARecordTracker(len(dguta.GUTAs))
 	appendedGUTAs := make(db.GUTAs, 0, len(dguta.GUTAs))
 
 	err := w.timeImportPhase(importPhaseDGUTAInsert, func() error {
-		for _, guta := range dguta.GUTAs {
-			if err := w.appendDGUTARowForRecord(rawParentDir, parentDir, guta, keys, &appendedGUTAs); err != nil {
-				return err
-			}
-		}
-
-		return nil
+		return w.appendDGUTARecordRows(dguta, rawParentDir, parentDir, &tracker, &appendedGUTAs)
 	})
 	if err != nil {
 		return nil, err
@@ -748,25 +754,63 @@ func (w *dgutaWriter) appendDGUTARows(
 	w.previousDGUTARows = dgutaRecordRows{
 		rawDir:       rawParentDir,
 		canonicalDir: parentDir,
-		keys:         keys,
+		keys:         tracker.keys,
+		ageMask:      tracker.ageMask,
 	}
 
 	return appendedGUTAs, nil
 }
 
+func (w *dgutaWriter) appendDGUTARecordRows(
+	dguta db.RecordDGUTA,
+	rawParentDir, parentDir string,
+	tracker *dgutaRecordTracker,
+	appendedGUTAs *db.GUTAs,
+) error {
+	for _, guta := range dguta.GUTAs {
+		if err := w.appendDGUTARowForRecord(rawParentDir, parentDir, guta, tracker, appendedGUTAs); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (w *dgutaWriter) newDGUTARecordTracker(numGUTAs int) dgutaRecordTracker {
+	tracker := dgutaRecordTracker{trackDuplicateKeys: w.shouldTrackCanonicalDGUTADuplicateKeys()}
+	if tracker.trackDuplicateKeys {
+		tracker.keys = make(map[dgutaRowKey]struct{}, numGUTAs)
+	}
+
+	return tracker
+}
+
+func (w *dgutaWriter) shouldTrackCanonicalDGUTADuplicateKeys() bool {
+	return w.mountPath == "/"
+}
+
 func (w *dgutaWriter) appendDGUTARowForRecord(
 	rawParentDir, parentDir string,
 	guta *db.GUTA,
-	keys map[dgutaRowKey]struct{},
+	tracker *dgutaRecordTracker,
 	appendedGUTAs *db.GUTAs,
 ) error {
-	key, keep, appended, err := w.appendDGUTARow(rawParentDir, parentDir, guta)
+	key, keep, appended, err := w.appendDGUTARow(
+		rawParentDir,
+		parentDir,
+		guta,
+		tracker.trackDuplicateKeys,
+	)
 	if err != nil {
 		return err
 	}
 
 	if keep {
-		keys[key] = struct{}{}
+		if tracker.trackDuplicateKeys {
+			tracker.keys[key] = struct{}{}
+		}
+
+		tracker.ageMask = dgutaAgeMaskWith(tracker.ageMask, guta.Age)
 	}
 
 	if appended {
@@ -776,12 +820,30 @@ func (w *dgutaWriter) appendDGUTARowForRecord(
 	return nil
 }
 
+func dgutaAgeMaskWith(mask uint32, age db.DirGUTAge) uint32 {
+	bit := dgutaAgeBit(age)
+	if bit == 0 {
+		return mask
+	}
+
+	return mask | bit
+}
+
 func (w *dgutaWriter) appendDGUTARow(
 	rawParentDir, parentDir string,
 	guta *db.GUTA,
+	trackDuplicateKeys bool,
 ) (dgutaRowKey, bool, bool, error) {
 	if guta == nil {
 		return dgutaRowKey{}, false, false, nil
+	}
+
+	if !trackDuplicateKeys {
+		if err := w.appendDGUTABatchRow(parentDir, guta); err != nil {
+			return dgutaRowKey{}, false, false, fmt.Errorf("clickhouse: failed to append dguta row: %w", err)
+		}
+
+		return dgutaRowKey{}, true, true, nil
 	}
 
 	rowKey := newDGUTARowKey(parentDir, guta)
@@ -1276,6 +1338,14 @@ func NewDGUTAWriter(cfg Config) (db.DGUTAWriter, error) {
 		projectionBatchSize: projectionBatchSizeFor(defaultBatchSize),
 		childrenBatchSize:   childrenBatchSizeFor(defaultBatchSize),
 	}, nil
+}
+
+func dgutaAgeBit(age db.DirGUTAge) uint32 {
+	if age >= dgutaAgeMaskBits {
+		return 0
+	}
+
+	return 1 << age
 }
 
 func importBatchContext(parent context.Context) context.Context {

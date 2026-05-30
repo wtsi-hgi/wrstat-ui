@@ -41,31 +41,14 @@ import (
 
 var errDirProjectionBatchNotPrepared = errors.New("clickhouse: dir projection batch is not prepared")
 
+var zeroSummaryAgeBuckets summary.AgeBuckets //nolint:gochecknoglobals
+
 func compareProjectionGUTAs(a, b *db.GUTA) int {
-	if a == nil && b == nil {
-		return 0
+	if diff, ok := compareNilProjectionGUTAs(a, b); ok {
+		return diff
 	}
 
-	if a == nil {
-		return -1
-	}
-
-	if b == nil {
-		return 1
-	}
-
-	for _, diff := range []int{
-		cmp.Compare(a.Age, b.Age),
-		cmp.Compare(a.GID, b.GID),
-		cmp.Compare(a.UID, b.UID),
-		cmp.Compare(a.FT, b.FT),
-	} {
-		if diff != 0 {
-			return diff
-		}
-	}
-
-	return 0
+	return compareProjectionGUTAValues(a, b)
 }
 
 type mountDirSummaryKey struct {
@@ -312,22 +295,26 @@ func summaryMtimeMax(acc *mountDirSummaryAccumulator) int64 {
 
 func summaryATimeBuckets(acc *mountDirSummaryAccumulator) []uint64 {
 	if acc == nil {
-		return make([]uint64, len(summary.AgeBuckets{}))
+		return ageBucketsSlice(nil)
 	}
 
-	return ageBucketsSlice(acc.atimeBuckets)
+	return ageBucketsSlice(&acc.atimeBuckets)
 }
 
-func ageBucketsSlice(buckets summary.AgeBuckets) []uint64 {
+func ageBucketsSlice(buckets *summary.AgeBuckets) []uint64 {
+	if buckets == nil {
+		return zeroSummaryAgeBuckets[:]
+	}
+
 	return buckets[:]
 }
 
 func summaryMTimeBuckets(acc *mountDirSummaryAccumulator) []uint64 {
 	if acc == nil {
-		return make([]uint64, len(summary.AgeBuckets{}))
+		return ageBucketsSlice(nil)
 	}
 
-	return ageBucketsSlice(acc.mtimeBuckets)
+	return ageBucketsSlice(&acc.mtimeBuckets)
 }
 
 func summaryUIDs(acc *mountDirSummaryAccumulator) []uint32 {
@@ -373,7 +360,7 @@ func mountDirSummaryBaseValues(
 	return []any{
 		mount.mountPath, mount.snapshotID, key.dir, mount.updatedAt,
 		uint8(key.age), acc.count, acc.size, acc.atimeMin, acc.mtimeMax,
-		ageBucketsSlice(acc.atimeBuckets), ageBucketsSlice(acc.mtimeBuckets),
+		ageBucketsSlice(&acc.atimeBuckets), ageBucketsSlice(&acc.mtimeBuckets),
 		sortedUint32Set(acc.uids), sortedUint32Set(acc.gids), uint16(acc.ft),
 	}
 }
@@ -767,17 +754,7 @@ func (s *mountDirProjectionState) addGUTA(dir string, guta *db.GUTA) {
 		s.summaryAccumulator(s.fileSummaries, key).add(guta)
 	}
 
-	s.vectors[dir] = append(s.vectors[dir], cloneGUTA(guta))
-}
-
-func cloneGUTA(guta *db.GUTA) *db.GUTA {
-	if guta == nil {
-		return nil
-	}
-
-	cloned := *guta
-
-	return &cloned
+	s.vectors[dir] = append(s.vectors[dir], guta)
 }
 
 func (s *mountDirProjectionState) addChildren(dir string, count uint64) {
@@ -983,7 +960,6 @@ func appendMountDirDGUTAVectorRow(
 }
 
 func mountDirProjectionVectorColumnsFor(gutas db.GUTAs) mountDirProjectionVectorColumns {
-	gutas = cloneGUTAs(gutas)
 	slices.SortFunc(gutas, compareProjectionGUTAs)
 
 	columns := mountDirProjectionVectorColumns{
@@ -1044,6 +1020,39 @@ func (c *mountDirProjectionVectorColumns) appendStats(guta *db.GUTA) {
 }
 
 func (c *mountDirProjectionVectorColumns) appendBuckets(guta *db.GUTA) {
-	c.atimeBuckets = append(c.atimeBuckets, ageBucketsSlice(guta.ATimeRanges))
-	c.mtimeBuckets = append(c.mtimeBuckets, ageBucketsSlice(guta.MTimeRanges))
+	c.atimeBuckets = append(c.atimeBuckets, ageBucketsSlice(&guta.ATimeRanges))
+	c.mtimeBuckets = append(c.mtimeBuckets, ageBucketsSlice(&guta.MTimeRanges))
+}
+
+func compareNilProjectionGUTAs(a, b *db.GUTA) (int, bool) {
+	switch {
+	case a == nil && b == nil:
+		return 0, true
+	case a == nil:
+		return -1, true
+	case b == nil:
+		return 1, true
+	default:
+		return 0, false
+	}
+}
+
+func compareProjectionGUTAValues(a, b *db.GUTA) int {
+	if diff := cmp.Compare(a.Age, b.Age); diff != 0 {
+		return diff
+	}
+
+	if diff := cmp.Compare(a.GID, b.GID); diff != 0 {
+		return diff
+	}
+
+	if diff := cmp.Compare(a.UID, b.UID); diff != 0 {
+		return diff
+	}
+
+	if diff := cmp.Compare(a.FT, b.FT); diff != 0 {
+		return diff
+	}
+
+	return 0
 }

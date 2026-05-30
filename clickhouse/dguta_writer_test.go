@@ -1348,6 +1348,30 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 		So(impl.childrenBatch, ShouldBeNil)
 	})
 
+	Convey("DGUTAWriter tracks only ages for non-root duplicate checks", t, func() {
+		conn := &rawDGUTASendPrepareConn{}
+		impl := &dgutaWriter{
+			conn:      conn,
+			mountPath: "/nfs/t283_imaging/",
+			snapshot:  snapshotID("/nfs/t283_imaging/", time.Date(2026, 5, 30, 9, 0, 0, 0, time.UTC)),
+		}
+		impl.SetBatchSize(100)
+
+		record := db.RecordDGUTA{
+			GUTAs: db.GUTAs{
+				testProjectionGUTA(7, 9, db.DGUTAFileTypeBam, db.DGUTAgeAll, 1),
+				testProjectionGUTA(7, 9, db.DGUTAFileTypeBam, db.DGUTAgeAll, 2),
+				testProjectionGUTA(7, 9, db.DGUTAFileTypeBam, db.DGUTAgeA2M, 3),
+			},
+		}
+
+		appended, err := impl.appendDGUTARows(record, "/nfs/t283_imaging/a/", "/nfs/t283_imaging/a/")
+		So(err, ShouldBeNil)
+		So(appended, ShouldHaveLength, 3)
+		So(impl.previousDGUTARows.keys, ShouldBeNil)
+		So(impl.previousDGUTARows.ages(), ShouldResemble, []db.DirGUTAge{db.DGUTAgeAll, db.DGUTAgeA2M})
+	})
+
 	Convey("DGUTAWriter sends capped projection blocks as separate prepared batches", t, func() {
 		conn := &projectionSendPrepareConn{}
 		writer := mountDirProjectionWriter{conn: conn, refreshedAt: time.Date(2026, 1, 14, 9, 0, 0, 0, time.UTC)}
@@ -1582,6 +1606,28 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 		So(impl.effectiveDGUTABatchSize(), ShouldEqual, 7)
 		So(impl.effectiveChildrenBatchSize(), ShouldEqual, 7)
 		So(impl.projectionBatchSize, ShouldEqual, 7)
+	})
+
+	Convey("DGUTAWriter builds projection vector columns without cloning GUTA rows", t, func() {
+		gutas := make(db.GUTAs, 128)
+		for i := range gutas {
+			gutas[i] = testProjectionGUTA(
+				uint32(i%7),
+				uint32(i%11),
+				db.DGUTAFileTypeBam,
+				db.DirGUTAges[i%len(db.DirGUTAges)],
+				uint32(i+1),
+			)
+		}
+
+		var columns mountDirProjectionVectorColumns
+
+		allocs := testing.AllocsPerRun(20, func() {
+			columns = mountDirProjectionVectorColumnsFor(gutas)
+		})
+
+		So(columns.gids, ShouldHaveLength, len(gutas))
+		So(allocs, ShouldBeLessThan, 50.0)
 	})
 
 	Convey("DGUTAWriter flushes projection batches separately from raw import batches", t, func() {
