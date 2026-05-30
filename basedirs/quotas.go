@@ -29,6 +29,7 @@ import (
 	"encoding/csv"
 	"errors"
 	"io"
+	"math"
 	"os"
 	"strconv"
 	"strings"
@@ -125,17 +126,21 @@ func parseRowAndStore(row []string, q *Quotas) error {
 		return errBadQuotaCSVFile
 	}
 
-	gid, err := strconv.ParseUint(row[0], 10, 32)
+	gid, skip, err := parseQuotaGID(row[0])
 	if err != nil {
 		return err
 	}
 
-	quotaSize, err := strconv.ParseUint(row[2], 10, 64)
+	if skip {
+		return nil
+	}
+
+	quotaSize, err := parseQuotaValue(row[2])
 	if err != nil {
 		return err
 	}
 
-	quotaInode, err := strconv.ParseUint(row[3], 10, 64)
+	quotaInode, err := parseQuotaValue(row[3])
 	if err != nil {
 		return err
 	}
@@ -147,4 +152,40 @@ func parseRowAndStore(row []string, q *Quotas) error {
 	q.store(uint32(gid), row[1], quotaSize, quotaInode)
 
 	return nil
+}
+
+func parseQuotaGID(raw string) (uint32, bool, error) {
+	gid, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return 0, false, err
+	}
+
+	if gid < 0 {
+		return 0, true, nil
+	}
+
+	if gid > math.MaxUint32 {
+		_, err = strconv.ParseUint(raw, 10, 32)
+
+		return 0, false, err
+	}
+
+	return uint32(gid), false, nil
+}
+
+func parseQuotaValue(raw string) (uint64, error) {
+	if !strings.HasPrefix(raw, "-") {
+		return strconv.ParseUint(raw, 10, 64)
+	}
+
+	value, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return 0, err
+	}
+
+	if value < 0 {
+		return 0, nil
+	}
+
+	return uint64(value), nil
 }

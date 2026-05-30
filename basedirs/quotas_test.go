@@ -26,6 +26,7 @@
 package basedirs
 
 import (
+	"math"
 	"testing"
 
 	. "github.com/smartystreets/goconvey/convey"
@@ -63,6 +64,35 @@ func TestQuotas(t *testing.T) {
 			So(s, ShouldEqual, 0)
 			So(i, ShouldEqual, 0)
 		})
+	})
+
+	Convey("Generated sentinel quota rows do not prevent parsing", t, func() {
+		csvPath = internaldata.CreateQuotasCSV(t, `-1,/lustre/scratch124,109951161369600,10001025
+1,/lustre/scratch125,10,20
+-1,/nfs/ddd0,14293651161088,4294967295
+4,/disk/negative-size,-5,30
+5,/disk/negative-inode,40,-6
+`)
+
+		quota, err := ParseQuotas(csvPath)
+		So(err, ShouldBeNil)
+		So(quota, ShouldNotBeNil)
+
+		s, i := quota.Get(1, "/lustre/scratch125/sub")
+		So(s, ShouldEqual, 10)
+		So(i, ShouldEqual, 20)
+
+		s, i = quota.Get(math.MaxUint32, "/lustre/scratch124/sub")
+		So(s, ShouldEqual, 0)
+		So(i, ShouldEqual, 0)
+
+		s, i = quota.Get(4, "/disk/negative-size/sub")
+		So(s, ShouldEqual, 0)
+		So(i, ShouldEqual, 30)
+
+		s, i = quota.Get(5, "/disk/negative-inode/sub")
+		So(s, ShouldEqual, 40)
+		So(i, ShouldEqual, 0)
 	})
 
 	Convey("Invalid quotas csv files can't be parsed", t, func() {
