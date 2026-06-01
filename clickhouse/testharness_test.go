@@ -55,13 +55,13 @@ const (
 	testNativeDSN           = "clickhouse://localhost:9000/?database=wrstat"
 	testSchemaVersionsQuery = "SELECT version FROM wrstat_schema_version"
 	testPingQuery           = "SELECT 1"
-	testInsertMountStmt     = "INSERT INTO wrstat_mounts (mount_path, switched_at, " +
-		"active_snapshot, updated_at) VALUES (?, ?, ?, ?)"
+	testInsertMountStmt     = "INSERT INTO wrstat_mount_events (mount_path, event_at, event_type, " +
+		"snapshot_id, updated_at, reason) VALUES (?, ?, 1, ?, ?, 'publish')"
 	testInsertChildrenStmt = "INSERT INTO wrstat_children (mount_path, snapshot_id, " +
 		"parent_dir, child) VALUES (?, ?, ?, ?)"
-	testInsertDGUTAStmt = "INSERT INTO wrstat_dguta (mount_path, snapshot_id, dir, gid, uid, ft, age, count, size, " +
-		"atime_min, mtime_max, atime_buckets, mtime_buckets) " +
-		"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+	testInsertDGUTAStmt = "INSERT INTO wrstat_dir_facts (mount_path, snapshot_id, dir, updated_at, gids, uids, " +
+		"fts, ages, counts, sizes, atime_mins, mtime_maxs, atime_buckets, mtime_buckets, refreshed_at) " +
+		"VALUES (?, ?, ?, now(), [?], [?], [?], [?], [?], [?], [?], [?], [?], [?], now())"
 )
 
 type clickHouseTestHarness struct {

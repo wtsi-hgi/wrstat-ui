@@ -40,37 +40,38 @@ const (
 	activeSnapshotCleanupRepairs = 3
 	latestMountMetadataRowsLimit = 5
 
-	previousSnapshotMountRowQuery = "SELECT toString(active_snapshot), updated_at " +
-		"FROM wrstat_mounts WHERE mount_path = ? AND active_snapshot != toUUID(?) " +
-		"AND active = 1 ORDER BY switched_at DESC LIMIT 1"
-	mountMaxSwitchedAtQuery             = "SELECT maxOrNull(switched_at) FROM wrstat_mounts WHERE mount_path = ?"
-	latestActiveSnapshotSwitchedAtQuery = "SELECT maxOrNull(switched_at) FROM wrstat_mounts " +
-		"WHERE mount_path = ? AND active_snapshot = toUUID(?) AND active = 1 " +
-		"AND switched_at > fromUnixTimestamp64Milli(?)"
-	latestMountMetadataRowsQuery = "SELECT toString(active_snapshot), updated_at, switched_at, active " +
-		"FROM wrstat_mounts WHERE mount_path = ? ORDER BY switched_at DESC, " +
-		"if(active = 0, 1, 0) DESC, updated_at DESC, toString(active_snapshot) DESC LIMIT 5"
-	rollbackActiveSnapshotMountRowQuery = "INSERT INTO wrstat_mounts " +
-		"(mount_path, switched_at, active_snapshot, updated_at, active) " +
-		"SELECT ?, next_switched_at, toUUID(?), ?, 1 FROM (" +
-		"SELECT greatest(max(switched_at) + toIntervalMillisecond(1), now64(3)) AS next_switched_at " +
-		"FROM wrstat_mounts WHERE mount_path = ?) WHERE EXISTS (" +
-		"SELECT 1 FROM wrstat_mounts_active_v2 WHERE mount_path = ? AND snapshot_id = toUUID(?))"
-	insertInactiveSnapshotMountRowQuery = "INSERT INTO wrstat_mounts " +
-		"(mount_path, switched_at, active_snapshot, updated_at, active) " +
-		"SELECT ?, next_switched_at, toUUID(?), latest_updated_at, 0 FROM (" +
-		"SELECT greatest(max(switched_at) + toIntervalMillisecond(1), now64(3)) AS next_switched_at, " +
-		"argMax(updated_at, switched_at) AS latest_updated_at FROM wrstat_mounts WHERE mount_path = ?) " +
+	previousSnapshotMountRowQuery = "SELECT toString(snapshot_id), updated_at " +
+		"FROM wrstat_mount_events WHERE mount_path = ? AND snapshot_id != toUUID(?) " +
+		"AND event_type = 1 ORDER BY event_at DESC, updated_at DESC, toString(snapshot_id) DESC LIMIT 1"
+	mountMaxSwitchedAtQuery             = "SELECT maxOrNull(event_at) FROM wrstat_mount_events WHERE mount_path = ?"
+	latestActiveSnapshotSwitchedAtQuery = "SELECT maxOrNull(event_at) FROM wrstat_mount_events " +
+		"WHERE mount_path = ? AND snapshot_id = toUUID(?) AND event_type = 1 " +
+		"AND event_at > fromUnixTimestamp64Milli(?)"
+	latestMountMetadataRowsQuery = "SELECT toString(snapshot_id), updated_at, event_at, event_type " +
+		"FROM wrstat_mount_events WHERE mount_path = ? ORDER BY event_at DESC, " +
+		"if(event_type = 0, 1, 0) DESC, updated_at DESC, toString(snapshot_id) DESC LIMIT 5"
+	rollbackActiveSnapshotMountRowQuery = "INSERT INTO wrstat_mount_events " +
+		"(mount_path, event_at, event_type, snapshot_id, updated_at, reason) " +
+		"SELECT ?, next_event_at, 1, toUUID(?), ?, 'rollback' FROM (" +
+		"SELECT greatest(coalesce(max(event_at) + toIntervalMillisecond(1), now64(3)), now64(3)) AS next_event_at " +
+		"FROM wrstat_mount_events WHERE mount_path = ?) WHERE EXISTS (" +
+		"SELECT 1 FROM wrstat_mounts_active WHERE mount_path = ? AND snapshot_id = toUUID(?))"
+	insertInactiveSnapshotMountRowQuery = "INSERT INTO wrstat_mount_events " +
+		"(mount_path, event_at, event_type, snapshot_id, updated_at, reason) " +
+		"SELECT ?, next_event_at, 0, toUUID(?), latest_updated_at, 'cleanup' FROM (" +
+		"SELECT greatest(coalesce(max(event_at) + toIntervalMillisecond(1), now64(3)), now64(3)) AS next_event_at, " +
+		"argMax(updated_at, tuple(event_at, if(event_type = 0, 1, 0), updated_at, toString(snapshot_id))) " +
+		"AS latest_updated_at FROM wrstat_mount_events WHERE mount_path = ?) " +
 		"WHERE EXISTS (" +
-		"SELECT 1 FROM wrstat_mounts_active_v2 WHERE mount_path = ? AND snapshot_id = toUUID(?))"
-	repairInactiveSnapshotMountRowQuery = "INSERT INTO wrstat_mounts " +
-		"(mount_path, switched_at, active_snapshot, updated_at, active) " +
-		"SELECT ?, greatest(latest_switched_at + toIntervalMillisecond(1), now64(3)), " +
-		"toUUID(?), latest_updated_at, 0 FROM (" +
-		"SELECT max(switched_at) AS latest_switched_at, " +
-		"argMax(updated_at, tuple(switched_at, if(active = 0, 1, 0), updated_at, toString(active_snapshot))) " +
-		"AS latest_updated_at FROM wrstat_mounts WHERE mount_path = ?) " +
-		"WHERE latest_switched_at <= fromUnixTimestamp64Milli(?)"
+		"SELECT 1 FROM wrstat_mounts_active WHERE mount_path = ? AND snapshot_id = toUUID(?))"
+	repairInactiveSnapshotMountRowQuery = "INSERT INTO wrstat_mount_events " +
+		"(mount_path, event_at, event_type, snapshot_id, updated_at, reason) " +
+		"SELECT ?, greatest(latest_event_at + toIntervalMillisecond(1), now64(3)), " +
+		"0, toUUID(?), latest_updated_at, 'cleanup_repair' FROM (" +
+		"SELECT max(event_at) AS latest_event_at, " +
+		"argMax(updated_at, tuple(event_at, if(event_type = 0, 1, 0), updated_at, toString(snapshot_id))) " +
+		"AS latest_updated_at FROM wrstat_mount_events WHERE mount_path = ?) " +
+		"WHERE latest_event_at <= fromUnixTimestamp64Milli(?)"
 )
 
 var (

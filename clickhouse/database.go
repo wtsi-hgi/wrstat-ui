@@ -59,7 +59,7 @@ const (
 
 	childrenAncestorQuery = "WITH active AS (" +
 		"SELECT mount_path, snapshot_id " +
-		"FROM wrstat_mounts_active_v2 " +
+		"FROM wrstat_mounts_active " +
 		"WHERE startsWith(mount_path, ?)" +
 		") " +
 		"SELECT DISTINCT c.child " +
@@ -70,34 +70,45 @@ const (
 		"WHERE c.parent_dir = ? " +
 		"ORDER BY c.child ASC"
 
-	dgutaQuery = "SELECT gid, uid, ft, age, count, size, " +
-		"atime_min, mtime_max, atime_buckets, mtime_buckets " +
-		"FROM wrstat_dguta " +
-		"PREWHERE mount_path = ? AND snapshot_id = ? AND dir = ?"
+	dgutaArrayZipExpr = "arrayZip(gids, uids, fts, ages, counts, sizes, " +
+		"atime_mins, mtime_maxs, atime_buckets, mtime_buckets)"
+
+	dgutaPrefixedArrayZipExpr = "arrayZip(d.gids, d.uids, d.fts, d.ages, d.counts, d.sizes, " +
+		"d.atime_mins, d.mtime_maxs, d.atime_buckets, d.mtime_buckets)"
+
+	dgutaTupleColumns = "tupleElement(g, 1) AS gid, tupleElement(g, 2) AS uid, " +
+		"tupleElement(g, 3) AS ft, tupleElement(g, 4) AS age, " +
+		"tupleElement(g, 5) AS count, tupleElement(g, 6) AS size, " +
+		"tupleElement(g, 7) AS atime_min, tupleElement(g, 8) AS mtime_max, " +
+		"tupleElement(g, 9) AS atime_buckets, tupleElement(g, 10) AS mtime_buckets"
+
+	dgutaQuery = "SELECT " + dgutaTupleColumns + " FROM (" +
+		"SELECT arrayJoin(" + dgutaArrayZipExpr + ") AS g " +
+		"FROM wrstat_dir_facts PREWHERE mount_path = ? AND snapshot_id = ? AND dir = ?)"
 
 	dgutaAncestorQuery = "WITH active AS (" +
 		"SELECT mount_path, snapshot_id " +
-		"FROM wrstat_mounts_active_v2 " +
+		"FROM wrstat_mounts_active " +
 		"WHERE startsWith(mount_path, ?)" +
 		") " +
-		"SELECT d.gid, d.uid, d.ft, d.age, d.count, d.size, " +
-		"d.atime_min, d.mtime_max, d.atime_buckets, d.mtime_buckets " +
-		"FROM wrstat_dguta d " +
+		"SELECT " + dgutaTupleColumns + " FROM (" +
+		"SELECT arrayJoin(" + dgutaPrefixedArrayZipExpr + ") AS g " +
+		"FROM wrstat_dir_facts d " +
 		"ANY INNER JOIN active a " +
 		"ON d.mount_path = a.mount_path " +
 		"AND d.snapshot_id = a.snapshot_id " +
-		"WHERE d.dir = ?"
+		"WHERE d.dir = ?)"
 
 	ancestorMaxUpdatedAtQuery = "SELECT max(updated_at) " +
-		"FROM wrstat_mounts_active_v2 " +
+		"FROM wrstat_mounts_active " +
 		"WHERE startsWith(mount_path, ?)"
 
 	infoDGUTAQuery = "SELECT " +
 		"uniqExact(dir) AS num_dirs, " +
 		"count() AS num_dgutas " +
-		"FROM wrstat_dguta " +
+		"FROM wrstat_dir_facts " +
 		"WHERE (mount_path, snapshot_id) IN (" +
-		"SELECT mount_path, snapshot_id FROM wrstat_mounts_active_v2" +
+		"SELECT mount_path, snapshot_id FROM wrstat_mounts_active" +
 		")"
 
 	infoChildrenQuery = "SELECT " +
@@ -105,14 +116,14 @@ const (
 		"count() AS num_children " +
 		"FROM wrstat_children " +
 		"WHERE (mount_path, snapshot_id) IN (" +
-		"SELECT mount_path, snapshot_id FROM wrstat_mounts_active_v2" +
+		"SELECT mount_path, snapshot_id FROM wrstat_mounts_active" +
 		")"
 
-	resolveMountQuery = "SELECT mount_path, snapshot_id, updated_at FROM wrstat_mounts_active_v2 " +
+	resolveMountQuery = "SELECT mount_path, snapshot_id, updated_at FROM wrstat_mounts_active " +
 		"WHERE startsWith(?, mount_path) " +
 		"ORDER BY length(mount_path) DESC LIMIT 1"
 
-	resolveExactMountQuery = "SELECT mount_path, snapshot_id, updated_at FROM wrstat_mounts_active_v2 " +
+	resolveExactMountQuery = "SELECT mount_path, snapshot_id, updated_at FROM wrstat_mounts_active " +
 		"WHERE mount_path = ? LIMIT 1"
 
 	childrenAncestorSnapshotQuery = "SELECT DISTINCT c.child " +
@@ -120,26 +131,22 @@ const (
 		"WHERE c.parent_dir = ? AND %s " +
 		"ORDER BY c.child ASC"
 
-	dgutaAncestorSnapshotQuery = "SELECT d.gid, d.uid, d.ft, d.age, d.count, d.size, " +
-		"d.atime_min, d.mtime_max, d.atime_buckets, d.mtime_buckets " +
-		"FROM wrstat_dguta d " +
-		"WHERE d.dir = ? AND %s"
+	dgutaAncestorSnapshotQuery = "SELECT " + dgutaTupleColumns + " FROM (" +
+		"SELECT arrayJoin(" + dgutaPrefixedArrayZipExpr + ") AS g " +
+		"FROM wrstat_dir_facts d WHERE d.dir = ? AND %s)"
 
-	dgutasForActiveMountRootDirsQuery = "SELECT d.mount_path, d.gid, d.uid, d.ft, d.age, d.count, d.size, " +
-		"d.atime_min, d.mtime_max, d.atime_buckets, d.mtime_buckets " +
-		"FROM wrstat_dguta d " +
-		"WHERE d.dir = d.mount_path AND %s"
+	dgutasForActiveMountRootDirsQuery = "SELECT mount_path, " + dgutaTupleColumns + " FROM (" +
+		"SELECT d.mount_path, arrayJoin(" + dgutaPrefixedArrayZipExpr + ") AS g " +
+		"FROM wrstat_dir_facts d WHERE d.dir = d.mount_path AND %s)"
 
-	dgutasForActiveMountDirsQuery = "SELECT d.dir, d.gid, d.uid, d.ft, d.age, d.count, d.size, " +
-		"d.atime_min, d.mtime_max, d.atime_buckets, d.mtime_buckets " +
-		"FROM wrstat_dguta d " +
-		"WHERE (d.mount_path, d.snapshot_id, d.dir) IN (%s)"
+	dgutasForActiveMountDirsQuery = "SELECT dir, " + dgutaTupleColumns + " FROM (" +
+		"SELECT d.dir, arrayJoin(" + dgutaPrefixedArrayZipExpr + ") AS g " +
+		"FROM wrstat_dir_facts d WHERE (d.mount_path, d.snapshot_id, d.dir) IN (%s))"
 
-	dgutasForDirsQuery = "SELECT dir, gid, uid, ft, age, count, size, " +
-		"atime_min, mtime_max, atime_buckets, mtime_buckets " +
-		"FROM wrstat_dguta " +
-		"PREWHERE mount_path = ? AND snapshot_id = ? " +
-		"WHERE dir IN (%s)"
+	dgutasForDirsQuery = "SELECT dir, " + dgutaTupleColumns + " FROM (" +
+		"SELECT dir, arrayJoin(" + dgutaArrayZipExpr + ") AS g " +
+		"FROM wrstat_dir_facts PREWHERE mount_path = ? AND snapshot_id = ? " +
+		"WHERE dir IN (%s))"
 
 	dirSummariesForDirsQuery = "SELECT dir, count() AS raw_rows, " +
 		"sumIf(file_count, passes_filter) AS total_count, " +
@@ -152,12 +159,16 @@ const (
 		"arraySort(groupUniqArrayIf(gid, passes_filter)) AS gids, " +
 		"groupBitOrIf(ft, passes_filter) AS ft " +
 		"FROM (" +
-		"SELECT dir, gid, uid, ft, count AS file_count, size AS file_size, " +
-		"atime_min, mtime_max, atime_buckets, mtime_buckets, " +
+		"SELECT dir, tupleElement(g, 1) AS gid, tupleElement(g, 2) AS uid, tupleElement(g, 3) AS ft, " +
+		"tupleElement(g, 4) AS age, tupleElement(g, 5) AS file_count, tupleElement(g, 6) AS file_size, " +
+		"tupleElement(g, 7) AS atime_min, tupleElement(g, 8) AS mtime_max, " +
+		"tupleElement(g, 9) AS atime_buckets, tupleElement(g, 10) AS mtime_buckets, " +
 		"%s AS passes_filter " +
-		"FROM wrstat_dguta " +
+		"FROM (" +
+		"SELECT dir, arrayJoin(" + dgutaArrayZipExpr + ") AS g FROM wrstat_dir_facts " +
 		"PREWHERE mount_path = ? AND snapshot_id = ? " +
 		"WHERE dir IN (%s)" +
+		")" +
 		") " +
 		"GROUP BY dir"
 
@@ -180,7 +191,7 @@ const (
 
 	dirsHaveMatchingChildrenQuery = "SELECT c.parent_dir " +
 		"FROM wrstat_children c " +
-		"INNER JOIN wrstat_dguta d " +
+		"INNER JOIN wrstat_dir_facts d " +
 		"ON d.mount_path = c.mount_path " +
 		"AND d.snapshot_id = c.snapshot_id " +
 		"AND d.dir = if(endsWith(c.child, '/'), c.child, concat(c.child, '/')) " +
@@ -192,7 +203,7 @@ const (
 	infoDGUTASnapshotQuery = "SELECT " +
 		"uniqExact(dir) AS num_dirs, " +
 		"count() AS num_dgutas " +
-		"FROM wrstat_dguta " +
+		"FROM wrstat_dir_facts " +
 		"WHERE %s"
 
 	infoChildrenSnapshotQuery = "SELECT " +
@@ -202,8 +213,8 @@ const (
 		"WHERE %s"
 
 	filteredMountWhereSummariesQuery = "SELECT dir, count() AS raw_rows, " +
-		"sum(count) AS total_count, " +
-		"sum(size) AS total_size, " +
+		"sum(file_count) AS total_count, " +
+		"sum(file_size) AS total_size, " +
 		"minIf(atime_min, atime_min != 0) AS atime_min, " +
 		"max(mtime_max) AS mtime_max, " +
 		"arrayReduce('sumForEach', groupArray(atime_buckets)) AS atime_buckets, " +
@@ -211,8 +222,16 @@ const (
 		"arraySort(groupUniqArray(uid)) AS uids, " +
 		"arraySort(groupUniqArray(gid)) AS gids, " +
 		"groupBitOr(ft) AS file_types " +
-		"FROM wrstat_dguta " +
+		"FROM (" +
+		"SELECT dir, tupleElement(g, 1) AS gid, tupleElement(g, 2) AS uid, tupleElement(g, 3) AS ft, " +
+		"tupleElement(g, 4) AS age, tupleElement(g, 5) AS file_count, tupleElement(g, 6) AS file_size, " +
+		"tupleElement(g, 7) AS atime_min, tupleElement(g, 8) AS mtime_max, " +
+		"tupleElement(g, 9) AS atime_buckets, tupleElement(g, 10) AS mtime_buckets " +
+		"FROM (" +
+		"SELECT dir, arrayJoin(" + dgutaArrayZipExpr + ") AS g FROM wrstat_dir_facts " +
 		"PREWHERE mount_path = ? AND snapshot_id = ? " +
+		")" +
+		") " +
 		"WHERE %s " +
 		"GROUP BY dir"
 )
@@ -4087,46 +4106,29 @@ func appendFTMembershipClause(
 }
 
 func gutaExistenceFilterClause(filter *db.Filter, columnPrefix string) (string, []any) {
-	var b strings.Builder
-
 	args := make([]any, 0, 1)
+	conditions := make([]string, 0, dirSummaryFilterClauseInitialCap+1)
 
-	b.WriteString(" AND ")
-	b.WriteString(columnPrefix)
-	b.WriteString("count > 0")
+	conditions = append(conditions, "count > 0")
 
-	if filter == nil {
-		return b.String(), nil
+	if filter != nil {
+		if isEmptyIDFilter(filter.GIDs) || isEmptyIDFilter(filter.UIDs) {
+			return " AND 0", nil
+		}
+
+		appendIDMembershipClause(&conditions, &args, "gid", filter.GIDs)
+		appendIDMembershipClause(&conditions, &args, "uid", filter.UIDs)
+		appendFTMembershipClause(&conditions, &args, "ft", filter.FT)
+		conditions = append(conditions, "age = ?")
+		args = append(args, uint8(filter.Age))
 	}
 
-	appendIDFilter(&b, &args, columnPrefix+"gid", filter.GIDs)
-	appendIDFilter(&b, &args, columnPrefix+"uid", filter.UIDs)
-	appendFTFilter(&b, &args, columnPrefix+"ft", filter.FT)
+	clause := " AND arrayExists((gid, uid, ft, age, count) -> " +
+		strings.Join(conditions, " AND ") + ", " +
+		columnPrefix + "gids, " + columnPrefix + "uids, " + columnPrefix + "fts, " +
+		columnPrefix + "ages, " + columnPrefix + "counts)"
 
-	b.WriteString(" AND ")
-	b.WriteString(columnPrefix)
-	b.WriteString("age = ?")
-
-	args = append(args, uint8(filter.Age))
-
-	return b.String(), args
-}
-
-func appendFTFilter(
-	b *strings.Builder,
-	args *[]any,
-	column string,
-	ft db.DirGUTAFileType,
-) {
-	if ft == 0 {
-		return
-	}
-
-	b.WriteString(" AND bitAnd(")
-	b.WriteString(column)
-	b.WriteString(", ?) > 0")
-
-	*args = append(*args, uint16(ft))
+	return clause, args
 }
 
 func applyWhere0Info(
@@ -4152,33 +4154,6 @@ func applyWhere0Info(
 
 	results[i] = di
 	pending[i] = false
-}
-
-func appendIDFilter(
-	b *strings.Builder,
-	args *[]any,
-	column string,
-	values []uint32,
-) {
-	if values == nil {
-		return
-	}
-
-	if len(values) == 0 {
-		b.WriteString(" AND 1 = 0")
-
-		return
-	}
-
-	b.WriteString(" AND ")
-	b.WriteString(column)
-	b.WriteString(" IN (")
-	b.WriteString(placeholders(len(values)))
-	b.WriteString(")")
-
-	for _, value := range values {
-		*args = append(*args, value)
-	}
 }
 
 func placeholders(n int) string {

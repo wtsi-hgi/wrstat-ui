@@ -35,7 +35,7 @@ import (
 )
 
 const (
-	insertMountDirDGUTAVectorQuery = "INSERT INTO wrstat_dir_dguta_vector " +
+	insertMountDirDGUTAVectorQuery = "INSERT INTO wrstat_dir_facts " +
 		"(mount_path, snapshot_id, dir, updated_at, gids, uids, fts, ages, " +
 		"counts, sizes, atime_mins, mtime_maxs, atime_buckets, mtime_buckets, " +
 		"child_count, refreshed_at) " +
@@ -43,14 +43,14 @@ const (
 
 	mountDirDGUTAVectorsForDirsQuery = "SELECT dir, updated_at, gids, uids, fts, ages, " +
 		"counts, sizes, atime_mins, mtime_maxs, atime_buckets, mtime_buckets, child_count " +
-		"FROM wrstat_dir_dguta_vector " +
+		"FROM wrstat_dir_facts " +
 		"PREWHERE mount_path = ? AND snapshot_id = ? " +
 		"WHERE dir IN (%s)"
 
 	mountDirDGUTAVectorsForExternalDirsQuery = "SELECT v.dir, v.updated_at, v.gids, v.uids, " +
 		"v.fts, v.ages, v.counts, v.sizes, v.atime_mins, v.mtime_maxs, " +
 		"v.atime_buckets, v.mtime_buckets, v.child_count " +
-		"FROM wrstat_dir_dguta_vector AS v " +
+		"FROM wrstat_dir_facts AS v " +
 		"ANY INNER JOIN " + externalDirsTableName + " AS q ON q.dir = v.dir " +
 		"WHERE v.mount_path = ? AND v.snapshot_id = ?"
 )

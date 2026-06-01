@@ -1677,12 +1677,6 @@ func TestClickHouseDatabaseDirsHaveChildrenFastPath(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
 
-		mountBatch, err := conn.PrepareBatch(ctx, testInsertMountStmt)
-		So(err, ShouldBeNil)
-
-		dgutaBatch, err := conn.PrepareBatch(ctx, insertDGUTAQuery)
-		So(err, ShouldBeNil)
-
 		childrenBatch, err := conn.PrepareBatch(ctx, insertChildrenQuery)
 		So(err, ShouldBeNil)
 
@@ -1699,9 +1693,9 @@ func TestClickHouseDatabaseDirsHaveChildrenFastPath(t *testing.T) {
 			updatedAt := baseUpdatedAt.Add(time.Duration(i) * time.Minute)
 			sid := snapshotID(mountPath, updatedAt)
 
-			So(mountBatch.Append(mountPath, time.Now(), sid, updatedAt), ShouldBeNil)
-			So(appendDisktreeNFSClickGUTA(dgutaBatch, mountPath, sid.String(), mountPath, count), ShouldBeNil)
-			So(appendDisktreeNFSClickGUTA(dgutaBatch, mountPath, sid.String(), mountPath+"leaf/", 1), ShouldBeNil)
+			So(conn.Exec(ctx, testInsertMountStmt, mountPath, time.Now(), sid, updatedAt), ShouldBeNil)
+			appendDisktreeNFSClickGUTA(ctx, conn, mountPath, sid.String(), mountPath, count)
+			appendDisktreeNFSClickGUTA(ctx, conn, mountPath, sid.String(), mountPath+"leaf/", 1)
 			So(childrenBatch.Append(mountPath, sid.String(), mountPath, mountPath+"leaf"), ShouldBeNil)
 
 			rows = append(rows, mountsActiveRow{
@@ -1711,8 +1705,6 @@ func TestClickHouseDatabaseDirsHaveChildrenFastPath(t *testing.T) {
 			})
 		}
 
-		So(mountBatch.Send(), ShouldBeNil)
-		So(dgutaBatch.Send(), ShouldBeNil)
 		So(childrenBatch.Send(), ShouldBeNil)
 
 		countingConn := &whereQueryCountingConn{Conn: conn}
@@ -2585,13 +2577,15 @@ func TestClickHouseDatabaseDirsHaveChildrenFastPath(t *testing.T) {
 }
 
 func appendDisktreeNFSClickGUTA(
-	batch driver.Batch,
+	ctx context.Context,
+	conn ch.Conn,
 	mountPath string,
 	sid string,
 	dir string,
 	count uint64,
-) error {
-	return batch.Append(
+) {
+	So(conn.Exec(ctx,
+		testInsertDGUTAStmt,
 		mountPath,
 		sid,
 		dir,
@@ -2605,7 +2599,7 @@ func appendDisktreeNFSClickGUTA(
 		int64(20),
 		[]uint64{1, 0, 0, 0, 0, 0, 0, 0, 0},
 		[]uint64{0, 1, 0, 0, 0, 0, 0, 0, 0},
-	)
+	), ShouldBeNil)
 }
 
 func TestClickHouseDatabaseDirInfoAncestor(t *testing.T) {
@@ -3024,8 +3018,9 @@ func addSeededDGUTAToMountDirProjectionState(
 	state *mountDirProjectionState,
 ) error {
 	rows, err := conn.Query(ctx,
-		"SELECT dir, gid, uid, ft, age, count, size, atime_min, mtime_max, atime_buckets, mtime_buckets "+
-			"FROM wrstat_dguta WHERE mount_path = ? AND snapshot_id = toUUID(?)",
+		"SELECT dir, "+dgutaTupleColumns+" FROM ("+
+			"SELECT dir, arrayJoin("+dgutaArrayZipExpr+") AS g FROM wrstat_dir_facts "+
+			"WHERE mount_path = ? AND snapshot_id = toUUID(?))",
 		mount.mountPath,
 		mount.snapshotID,
 	)
@@ -3118,7 +3113,7 @@ func (c *mountDirSummaryReadinessConn) Query(
 	query string,
 	_ ...any,
 ) (driver.Rows, error) {
-	if strings.Contains(query, "FROM wrstat_dir_summary_sets") {
+	if strings.Contains(query, "FROM wrstat_dir_projection_sets") {
 		c.queries.Add(1)
 
 		return &mountDirSummaryReadinessRows{ready: c.ready.Load()}, nil
@@ -3143,8 +3138,8 @@ type treeSummaryRefreshDeadlineConn struct {
 }
 
 func (c *treeSummaryRefreshDeadlineConn) Query(ctx context.Context, query string, args ...any) (driver.Rows, error) {
-	isAvailabilityQuery := strings.Contains(query, "FROM wrstat_tree_summary_sets") ||
-		strings.Contains(query, "FROM wrstat_tree_dir_summary")
+	isAvailabilityQuery := strings.Contains(query, "FROM wrstat_virtual_summary_sets") ||
+		strings.Contains(query, "FROM wrstat_virtual_summary_cache")
 
 	if isAvailabilityQuery {
 		c.availabilityQueries.Add(1)
@@ -3154,7 +3149,7 @@ func (c *treeSummaryRefreshDeadlineConn) Query(ctx context.Context, query string
 }
 
 func (c *treeSummaryRefreshDeadlineConn) Exec(ctx context.Context, query string, args ...any) error {
-	if strings.Contains(query, "INSERT INTO wrstat_tree_") {
+	if strings.Contains(query, "INSERT INTO wrstat_virtual_summary_") {
 		c.failures.Add(1)
 
 		return context.DeadlineExceeded
@@ -3194,7 +3189,7 @@ func (c *hasChildrenQueryCountingConn) Query(ctx context.Context, query string, 
 		c.childSummaryBatchQueries.Add(1)
 	}
 
-	isExistenceQuery := strings.Contains(query, "INNER JOIN wrstat_dguta d") &&
+	isExistenceQuery := strings.Contains(query, "INNER JOIN wrstat_dir_facts d") &&
 		strings.Contains(query, "GROUP BY c.parent_dir")
 	if isExistenceQuery {
 		c.existenceQueries.Add(1)
@@ -3212,25 +3207,27 @@ func (c *hasChildrenQueryCountingConn) Query(ctx context.Context, query string, 
 }
 
 func isRawDirInfoBatchQuery(query string) bool {
-	return strings.Contains(query, "SELECT dir, gid, uid, ft, age, count, size") &&
-		strings.Contains(query, "FROM wrstat_dguta") &&
+	return strings.Contains(query, "arrayJoin(arrayZip(gids, uids, fts, ages, counts") &&
+		!strings.Contains(query, "sumForEachIf") &&
 		strings.Contains(query, "WHERE dir IN (")
 }
 
 func isGroupedDirInfoSummaryQuery(query string) bool {
 	return strings.Contains(query, "sumForEachIf") &&
-		strings.Contains(query, "FROM wrstat_dguta") &&
+		strings.Contains(query, "arrayJoin(arrayZip(gids, uids, fts, ages, counts") &&
 		strings.Contains(query, "WHERE dir IN (") &&
 		strings.Contains(query, "GROUP BY dir")
 }
 
 func isMountDirInfoSummaryQuery(query string) bool {
-	return strings.Contains(query, "FROM wrstat_dir_summary") &&
-		!strings.Contains(query, "wrstat_dir_summary_sets")
+	return strings.Contains(query, "FROM wrstat_dir_facts") &&
+		(strings.Contains(query, "all_count") || strings.Contains(query, "file_count")) &&
+		!strings.Contains(query, "wrstat_dir_projection_sets")
 }
 
 func isMountDirInfoVectorQuery(query string) bool {
-	return strings.Contains(query, "FROM wrstat_dir_dguta_vector")
+	return strings.Contains(query, "FROM wrstat_dir_facts") &&
+		strings.Contains(query, "updated_at, gids, uids")
 }
 
 func (c *hasChildrenQueryCountingConn) childBatchQueryCount() int {
@@ -3264,7 +3261,7 @@ func (c *dirsHaveChildrenPrefetchFailureConn) Query(
 	query string,
 	args ...any,
 ) (driver.Rows, error) {
-	isPrefetchQuery := strings.Contains(query, "FROM wrstat_dir_summary_sets") ||
+	isPrefetchQuery := strings.Contains(query, "FROM wrstat_dir_projection_sets") ||
 		isMountDirInfoSummaryQuery(query)
 	if isPrefetchQuery {
 		c.failures.Add(1)
@@ -3431,7 +3428,7 @@ func (c *whereQueryCountingConn) Query(ctx context.Context, query string, args .
 }
 
 func isFilteredMountWhereSummaryQuery(query string) bool {
-	return strings.Contains(query, "FROM wrstat_dguta") &&
+	return strings.Contains(query, "arrayJoin(arrayZip(gids, uids, fts, ages, counts") &&
 		strings.Contains(query, "GROUP BY dir") &&
 		!strings.Contains(query, "WHERE dir IN (") &&
 		!strings.Contains(query, "startsWith")
@@ -4160,15 +4157,15 @@ func (c *ancestorSummaryQueryCountingConn) Query(ctx context.Context, query stri
 }
 
 func isAncestorDGUTAQuery(query string) bool {
-	return strings.Contains(query, "FROM wrstat_dguta d") &&
+	return strings.Contains(query, "FROM wrstat_dir_facts d") &&
+		strings.Contains(query, "arrayJoin") &&
 		strings.Contains(query, "WHERE d.dir = ?")
 }
 
 func isTreeSummaryQuery(query string) bool {
-	return strings.Contains(query, "FROM wrstat_tree_dguta") ||
-		strings.Contains(query, "JOIN wrstat_tree_dguta") ||
-		strings.Contains(query, "FROM wrstat_tree_dir_summary") ||
-		strings.Contains(query, "JOIN wrstat_tree_dir_summary")
+	return strings.Contains(query, "FROM wrstat_virtual_summary_cache") ||
+		strings.Contains(query, "JOIN wrstat_virtual_summary_cache") ||
+		strings.Contains(query, "FROM wrstat_virtual_summary_sets")
 }
 
 func (c *ancestorSummaryQueryCountingConn) ancestorDGUTAQueryCount() int {

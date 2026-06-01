@@ -24,13 +24,10 @@
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  ***************************************************************************** */
 
-ALTER TABLE wrstat_dir_summary
-ADD COLUMN IF NOT EXISTS file_count UInt64 DEFAULT 0 CODEC(Delta, LZ4),
-ADD COLUMN IF NOT EXISTS file_size UInt64 DEFAULT 0 CODEC(Delta, LZ4),
-ADD COLUMN IF NOT EXISTS file_atime_min Int64 DEFAULT 0 CODEC(Delta, LZ4),
-ADD COLUMN IF NOT EXISTS file_mtime_max Int64 DEFAULT 0 CODEC(Delta, LZ4),
-ADD COLUMN IF NOT EXISTS file_atime_buckets Array(UInt64) DEFAULT [] CODEC(LZ4),
-ADD COLUMN IF NOT EXISTS file_mtime_buckets Array(UInt64) DEFAULT [] CODEC(LZ4),
-ADD COLUMN IF NOT EXISTS file_uids Array(UInt32) DEFAULT [] CODEC(LZ4),
-ADD COLUMN IF NOT EXISTS file_gids Array(UInt32) DEFAULT [] CODEC(LZ4),
-ADD COLUMN IF NOT EXISTS file_ft UInt16 DEFAULT 0;
+CREATE TABLE IF NOT EXISTS wrstat_virtual_children_sets (
+  active_set_id String CODEC(ZSTD(3)),
+  active_mount_count UInt64 CODEC(Delta, ZSTD(3)),
+  refreshed_at DateTime64(3) CODEC(Delta, ZSTD(3))
+) ENGINE = MergeTree
+PARTITION BY active_set_id
+ORDER BY active_set_id;

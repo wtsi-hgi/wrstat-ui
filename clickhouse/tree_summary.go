@@ -41,67 +41,41 @@ import (
 )
 
 const (
-	treeSummaryDirsHaveChildrenSummaryFixedArgs = 2
+	treeSummaryDirsHaveChildrenSummaryFixedArgs = 3
+	treeSummaryCacheColumnCount                 = 24
 
-	treeSummaryExistsQuery = "SELECT 1 FROM wrstat_tree_summary_sets FINAL " +
-		"WHERE fingerprint = ? LIMIT 1"
+	treeSummaryExistsQuery = "SELECT 1 FROM wrstat_virtual_summary_sets " +
+		"WHERE active_set_id = ? LIMIT 1"
 
-	insertTreeSummarySetQuery = "INSERT INTO wrstat_tree_summary_sets " +
-		"(fingerprint, active_mount_count, refreshed_at) VALUES (?, ?, ?)"
+	insertTreeSummarySetQuery = "INSERT INTO wrstat_virtual_summary_sets " +
+		"(active_set_id, active_mount_count, refreshed_at) VALUES (?, ?, ?)"
 
-	insertTreeSummaryDGUTAQuery = "INSERT INTO wrstat_tree_dguta " +
-		"(fingerprint, dir, updated_at, gid, uid, ft, age, count, size, " +
-		"atime_min, mtime_max, atime_buckets, mtime_buckets, refreshed_at) " +
-		"SELECT ?, ?, ?, d.gid, d.uid, d.ft, d.age, sum(d.count), sum(d.size), " +
-		"minIf(d.atime_min, d.atime_min != 0), max(d.mtime_max), " +
-		"arrayReduce('sumForEach', groupArray(d.atime_buckets)), " +
-		"arrayReduce('sumForEach', groupArray(d.mtime_buckets)), ? " +
-		"FROM wrstat_dguta d WHERE d.dir = ? AND %s " +
-		"GROUP BY d.gid, d.uid, d.ft, d.age"
+	insertTreeSummaryCacheQuery = "INSERT INTO wrstat_virtual_summary_cache " +
+		"(active_set_id, dir, updated_at, all_count, all_size, all_atime_min, all_mtime_max, " +
+		"all_atime_buckets, all_mtime_buckets, all_uids, all_gids, all_ft, gids, uids, fts, ages, " +
+		"counts, sizes, atime_mins, mtime_maxs, atime_buckets, mtime_buckets, child_count, refreshed_at) " +
+		"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
 
-	insertTreeDirSummaryQuery = "INSERT INTO wrstat_tree_dir_summary " +
-		"(fingerprint, dir, updated_at, age, count, size, atime_min, mtime_max, " +
-		"atime_buckets, mtime_buckets, uids, gids, ft, refreshed_at) " +
-		"SELECT ?, ?, ?, d.age, sum(d.count), sum(d.size), " +
-		"minIf(d.atime_min, d.atime_min != 0), max(d.mtime_max), " +
-		"arrayReduce('sumForEach', groupArray(d.atime_buckets)), " +
-		"arrayReduce('sumForEach', groupArray(d.mtime_buckets)), " +
-		"arraySort(groupUniqArray(d.uid)), arraySort(groupUniqArray(d.gid)), " +
-		"groupBitOr(d.ft), ? " +
-		"FROM wrstat_dguta d WHERE d.dir = ? AND %s GROUP BY d.age"
-
-	insertTreeSummaryChildrenQuery = "INSERT INTO wrstat_tree_children " +
-		"(fingerprint, parent_dir, child, refreshed_at) " +
-		"SELECT DISTINCT ?, c.parent_dir, c.child, ? " +
-		"FROM wrstat_children c WHERE c.parent_dir = ? AND %s"
-
-	treeSummaryDGUTAQuery = "SELECT updated_at, gid, uid, ft, age, count, size, " +
-		"atime_min, mtime_max, atime_buckets, mtime_buckets " +
-		"FROM wrstat_tree_dguta FINAL WHERE fingerprint = ? AND dir = ?"
+	treeSummaryDGUTAQuery = "SELECT updated_at, " + dgutaTupleColumns + " " +
+		"FROM (" +
+		"SELECT updated_at, arrayJoin(" + dgutaArrayZipExpr + ") AS g " +
+		"FROM wrstat_virtual_summary_cache WHERE active_set_id = ? AND dir = ?)"
 
 	treeDirSummaryQuery = "SELECT updated_at, age, count, size, atime_min, mtime_max, " +
 		"atime_buckets, mtime_buckets, uids, gids, ft " +
-		"FROM wrstat_tree_dir_summary FINAL WHERE fingerprint = ? AND dir = ? AND age = ?"
+		"FROM (" +
+		"SELECT updated_at, ? AS age, all_count AS count, all_size AS size, all_atime_min AS atime_min, " +
+		"all_mtime_max AS mtime_max, all_atime_buckets AS atime_buckets, all_mtime_buckets AS mtime_buckets, " +
+		"all_uids AS uids, all_gids AS gids, all_ft AS ft " +
+		"FROM wrstat_virtual_summary_cache WHERE active_set_id = ? AND dir = ?)"
 
-	treeSummaryChildrenQuery = "SELECT child FROM wrstat_tree_children FINAL " +
-		"WHERE fingerprint = ? AND parent_dir = ? ORDER BY child"
+	treeSummaryDirsHaveChildrenSummaryQuery = "SELECT dir AS parent_dir " +
+		"FROM wrstat_virtual_summary_cache WHERE active_set_id = ? AND dir IN (%s) " +
+		"AND child_count > 0 AND ? = ? ORDER BY parent_dir ASC"
 
-	treeSummaryDirsHaveChildrenSummaryQuery = "SELECT c.parent_dir " +
-		"FROM wrstat_tree_children FINAL AS c " +
-		"INNER JOIN wrstat_tree_dir_summary FINAL AS s " +
-		"ON s.fingerprint = c.fingerprint " +
-		"AND s.dir = if(endsWith(c.child, '/'), c.child, concat(c.child, '/')) " +
-		"WHERE c.fingerprint = ? AND c.parent_dir IN (%s) " +
-		"AND s.age = ? AND s.count > 0 " +
-		"GROUP BY c.parent_dir ORDER BY c.parent_dir ASC"
-
-	treeSummaryDirsHaveChildrenQuery = "SELECT c.parent_dir " +
-		"FROM wrstat_tree_children FINAL AS c " +
-		"INNER JOIN wrstat_tree_dguta FINAL AS s " +
-		"ON s.fingerprint = c.fingerprint " +
-		"AND s.dir = if(endsWith(c.child, '/'), c.child, concat(c.child, '/')) " +
-		"WHERE c.fingerprint = ? AND c.parent_dir IN (%s) %s " +
-		"GROUP BY c.parent_dir ORDER BY c.parent_dir ASC"
+	treeSummaryDirsHaveChildrenQuery = "SELECT dir AS parent_dir " +
+		"FROM wrstat_virtual_summary_cache WHERE active_set_id = ? AND dir IN (%s) " +
+		"AND child_count > 0 %s ORDER BY parent_dir ASC"
 )
 
 var errTreeDirSummaryMultipleRows = errors.New("clickhouse: tree dir summary returned multiple rows")
@@ -175,6 +149,142 @@ type treeSummaryProgress interface {
 	phaseCompleted(dir string, index, total, mountCount int, phase string, duration time.Duration)
 }
 
+func insertTreeSummaryCache(
+	ctx context.Context,
+	conn ch.Conn,
+	fingerprint, dir string,
+	updatedAt, refreshedAt time.Time,
+	mounts []activeMount,
+) error {
+	state, err := treeSummaryProjectionState(ctx, conn, dir, mounts)
+	if err != nil {
+		return err
+	}
+
+	if err := conn.Exec(
+		ctx,
+		insertTreeSummaryCacheQuery,
+		treeSummaryCacheRowValues(fingerprint, dir, updatedAt, refreshedAt, state)...,
+	); err != nil {
+		return fmt.Errorf("clickhouse: failed to insert tree summary cache: %w", err)
+	}
+
+	return nil
+}
+
+func treeSummaryProjectionState(
+	ctx context.Context,
+	conn ch.Conn,
+	dir string,
+	mounts []activeMount,
+) (mountDirProjectionState, error) {
+	state := newMountDirProjectionState()
+
+	if err := addTreeSummaryGUTAs(ctx, conn, dir, mounts, &state); err != nil {
+		return mountDirProjectionState{}, err
+	}
+
+	if err := addTreeSummaryChildren(ctx, conn, dir, mounts, &state); err != nil {
+		return mountDirProjectionState{}, err
+	}
+
+	return state, nil
+}
+
+func addTreeSummaryGUTAs(
+	ctx context.Context,
+	conn ch.Conn,
+	dir string,
+	mounts []activeMount,
+	state *mountDirProjectionState,
+) error {
+	query, args := activeMountsQuery(
+		dgutaAncestorSnapshotQuery,
+		"d.mount_path",
+		"d.snapshot_id",
+		mounts,
+		dir,
+	)
+
+	rows, err := conn.Query(ctx, query, args...)
+	if err != nil {
+		return fmt.Errorf("clickhouse: failed to query tree summary dgutas: %w", err)
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	gutas, err := scanDGUTARows(rows)
+	if err != nil {
+		return err
+	}
+
+	state.addGUTAs(dir, gutas)
+
+	return nil
+}
+
+func addTreeSummaryChildren(
+	ctx context.Context,
+	conn ch.Conn,
+	dir string,
+	mounts []activeMount,
+	state *mountDirProjectionState,
+) error {
+	query, args := activeMountsQuery(
+		"SELECT c.parent_dir, count() FROM wrstat_children c WHERE c.parent_dir = ? AND %s GROUP BY c.parent_dir",
+		"c.mount_path",
+		"c.snapshot_id",
+		mounts,
+		dir,
+	)
+
+	rows, err := conn.Query(ctx, query, args...)
+	if err != nil {
+		return fmt.Errorf("clickhouse: failed to query tree summary children: %w", err)
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	return scanTreeSummaryChildren(rows, state)
+}
+
+func scanTreeSummaryChildren(rows driver.Rows, state *mountDirProjectionState) error {
+	for rows.Next() {
+		var (
+			parentDir string
+			count     uint64
+		)
+
+		if err := rows.Scan(&parentDir, &count); err != nil {
+			return fmt.Errorf("clickhouse: failed to scan tree summary children: %w", err)
+		}
+
+		state.addChildren(parentDir, count)
+	}
+
+	return rows.Err()
+}
+
+func treeSummaryCacheRowValues(
+	fingerprint, dir string,
+	updatedAt, refreshedAt time.Time,
+	state mountDirProjectionState,
+) []any {
+	allKey := mountDirSummaryKey{dir: dir, age: db.DGUTAgeAll}
+	acc := summaryAccumulatorOrZero(state.summaries[allKey])
+	values := make([]any, 0, treeSummaryCacheColumnCount)
+	values = append(values,
+		fingerprint, dir, updatedAt,
+		acc.count, acc.size, acc.atimeMin, acc.mtimeMax,
+		ageBucketsSlice(&acc.atimeBuckets), ageBucketsSlice(&acc.mtimeBuckets),
+		sortedUint32Set(acc.uids), sortedUint32Set(acc.gids), uint16(acc.ft),
+	)
+	values = append(values, mountDirProjectionVectorValues(state.vectors[dir])...)
+	values = append(values, state.childCounts[dir], refreshedAt)
+
+	return values
+}
+
 func ensureActiveTreeSummaries(
 	ctx context.Context,
 	conn ch.Conn,
@@ -195,12 +305,7 @@ func ensureActiveTreeSummaries(
 }
 
 func treeSummaryReady(ctx context.Context, conn ch.Conn, fingerprint string) (bool, error) {
-	setExists, err := treeSummaryExists(ctx, conn, treeSummaryExistsQuery, fingerprint, "set")
-	if err != nil || !setExists {
-		return setExists, err
-	}
-
-	return treeSummaryExists(ctx, conn, treeDirSummaryExistsQuery(), fingerprint, "dir summary")
+	return treeSummaryExists(ctx, conn, treeSummaryExistsQuery, fingerprint, "set")
 }
 
 func treeSummaryExists(ctx context.Context, conn ch.Conn, query, fingerprint, what string) (bool, error) {
@@ -220,10 +325,6 @@ func treeSummaryExists(ctx context.Context, conn ch.Conn, query, fingerprint, wh
 	}
 
 	return false, nil
-}
-
-func treeDirSummaryExistsQuery() string {
-	return "SELECT 1 FROM wrstat_tree_dir_summary FINAL WHERE fingerprint = ? LIMIT 1"
 }
 
 func refreshActiveTreeSummaries(
@@ -350,24 +451,10 @@ func insertTreeSummaryDirRowsWithProgress(
 	refresh treeSummaryDirRefresh,
 	progress treeSummaryProgress,
 ) error {
-	if err := runTreeSummaryDirPhase(progress, refresh, "dguta_summary", func() error {
-		return insertTreeSummaryDGUTA(
+	return runTreeSummaryDirPhase(progress, refresh, "summary", func() error {
+		return insertTreeSummaryCache(
 			ctx, conn, refresh.fingerprint, refresh.dir, refresh.updatedAt, refresh.refreshedAt, refresh.mounts,
 		)
-	}); err != nil {
-		return err
-	}
-
-	if err := runTreeSummaryDirPhase(progress, refresh, "dir_summary", func() error {
-		return insertTreeDirSummary(
-			ctx, conn, refresh.fingerprint, refresh.dir, refresh.updatedAt, refresh.refreshedAt, refresh.mounts,
-		)
-	}); err != nil {
-		return err
-	}
-
-	return runTreeSummaryDirPhase(progress, refresh, "children", func() error {
-		return insertTreeSummaryChildren(ctx, conn, refresh.fingerprint, refresh.dir, refresh.refreshedAt, refresh.mounts)
 	})
 }
 
@@ -441,13 +528,15 @@ func treeDirsForMount(mountPath string) []string {
 	dirs := []string{"/"}
 	current := "/"
 
-	for _, part := range parts {
+	for i, part := range parts {
 		if part == "" {
 			continue
 		}
 
 		current += part + "/"
-		dirs = append(dirs, current)
+		if i < len(parts)-1 {
+			dirs = append(dirs, current)
+		}
 	}
 
 	return dirs
@@ -469,82 +558,6 @@ func maxUpdatedAtForMounts(mounts []activeMount) time.Time {
 	}
 
 	return latest
-}
-
-func insertTreeSummaryDGUTA(
-	ctx context.Context,
-	conn ch.Conn,
-	fingerprint, dir string,
-	updatedAt, refreshedAt time.Time,
-	mounts []activeMount,
-) error {
-	query, args := activeMountsQuery(
-		insertTreeSummaryDGUTAQuery,
-		"d.mount_path",
-		"d.snapshot_id",
-		mounts,
-		fingerprint,
-		dir,
-		updatedAt,
-		refreshedAt,
-		dir,
-	)
-
-	if err := conn.Exec(ctx, query, args...); err != nil {
-		return fmt.Errorf("clickhouse: failed to insert tree dguta summary: %w", err)
-	}
-
-	return nil
-}
-
-func insertTreeDirSummary(
-	ctx context.Context,
-	conn ch.Conn,
-	fingerprint, dir string,
-	updatedAt, refreshedAt time.Time,
-	mounts []activeMount,
-) error {
-	query, args := activeMountsQuery(
-		insertTreeDirSummaryQuery,
-		"d.mount_path",
-		"d.snapshot_id",
-		mounts,
-		fingerprint,
-		dir,
-		updatedAt,
-		refreshedAt,
-		dir,
-	)
-
-	if err := conn.Exec(ctx, query, args...); err != nil {
-		return fmt.Errorf("clickhouse: failed to insert tree dir summary: %w", err)
-	}
-
-	return nil
-}
-
-func insertTreeSummaryChildren(
-	ctx context.Context,
-	conn ch.Conn,
-	fingerprint, parentDir string,
-	refreshedAt time.Time,
-	mounts []activeMount,
-) error {
-	query, args := activeMountsQuery(
-		insertTreeSummaryChildrenQuery,
-		"c.mount_path",
-		"c.snapshot_id",
-		mounts,
-		fingerprint,
-		refreshedAt,
-		parentDir,
-	)
-
-	if err := conn.Exec(ctx, query, args...); err != nil {
-		return fmt.Errorf("clickhouse: failed to insert tree children summary: %w", err)
-	}
-
-	return nil
 }
 
 func insertTreeSummarySet(
@@ -579,7 +592,7 @@ func treeSummaryDirsHaveChildrenSQL(
 		return treeSummaryDirsHaveChildrenSummarySQL(parentDirs, fingerprint, filter)
 	}
 
-	filterClause, filterArgs := gutaExistenceFilterClause(filter, "s.")
+	filterClause, filterArgs := gutaExistenceFilterClause(filter, "")
 	query := fmt.Sprintf(
 		treeSummaryDirsHaveChildrenQuery,
 		placeholders(len(parentDirs)),
@@ -619,7 +632,7 @@ func treeSummaryDirsHaveChildrenSummarySQL(
 		args = append(args, parentDir)
 	}
 
-	args = append(args, uint8(filter.Age))
+	args = append(args, uint8(filter.Age), uint8(db.DGUTAgeAll))
 
 	return query, args
 }
@@ -776,7 +789,7 @@ func (d *clickHouseDatabase) treeDirSummary(
 		return nil, false, err
 	}
 
-	rows, err := d.conn.Query(ctx, treeDirSummaryQuery, fingerprint, dir, uint8(filter.Age))
+	rows, err := d.conn.Query(ctx, treeDirSummaryQuery, uint8(filter.Age), fingerprint, dir)
 	if err != nil {
 		return nil, false, fmt.Errorf("clickhouse: failed to query tree dir summary: %w", err)
 	}
@@ -792,26 +805,10 @@ func (d *clickHouseDatabase) treeDirSummary(
 }
 
 func (d *clickHouseDatabase) treeSummaryChildren(
-	ctx context.Context,
-	parentDir string,
+	_ context.Context,
+	_ string,
 ) ([]string, bool, error) {
-	fingerprint, ok, err := d.activeTreeSummaryFingerprint(ctx)
-	if err != nil || !ok {
-		return nil, false, err
-	}
-
-	children, err := d.queryChildren(
-		ctx,
-		treeSummaryChildrenQuery,
-		"tree summary children",
-		fingerprint,
-		parentDir,
-	)
-	if err != nil {
-		return nil, false, err
-	}
-
-	return children, true, nil
+	return nil, false, nil
 }
 
 func (d *clickHouseDatabase) treeSummaryDirsHaveChildren(

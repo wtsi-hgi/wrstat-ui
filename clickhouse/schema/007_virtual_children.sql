@@ -24,22 +24,14 @@
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  ***************************************************************************** */
 
-CREATE TABLE IF NOT EXISTS wrstat_tree_dguta (
-  fingerprint String CODEC(ZSTD(3)),
-  dir String CODEC(LZ4),
-  updated_at DateTime CODEC(Delta, ZSTD(3)),
-  gid UInt32,
-  uid UInt32,
-  ft UInt16,
-  age UInt8,
-  count UInt64 CODEC(Delta, LZ4),
-  size UInt64 CODEC(Delta, LZ4),
-  atime_min Int64 CODEC(Delta, LZ4),
-  mtime_max Int64 CODEC(Delta, LZ4),
-  atime_buckets Array(UInt64) CODEC(LZ4),
-  mtime_buckets Array(UInt64) CODEC(LZ4),
+CREATE TABLE IF NOT EXISTS wrstat_virtual_children (
+  active_set_id String CODEC(ZSTD(3)),
+  parent_dir String CODEC(LZ4),
+  child String CODEC(LZ4),
+  child_is_mount_root UInt8,
+  mount_path LowCardinality(String) CODEC(LZ4),
   refreshed_at DateTime64(3) CODEC(Delta, ZSTD(3))
-) ENGINE = ReplacingMergeTree(refreshed_at)
-PARTITION BY cityHash64(fingerprint) % 64
-ORDER BY (fingerprint, dir, age, gid, uid, ft)
+) ENGINE = MergeTree
+PARTITION BY active_set_id
+ORDER BY (active_set_id, parent_dir, child)
 SETTINGS index_granularity = 8192;

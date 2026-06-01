@@ -37,6 +37,7 @@ import (
 	"sync"
 
 	ch "github.com/ClickHouse/clickhouse-go/v2"
+	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 )
 
 var (
@@ -50,12 +51,67 @@ var (
 
 const (
 	currentSchemaVersion    uint32 = 1
-	schemaVersionStatsQuery        = "SELECT count(), min(version), max(version) FROM wrstat_schema_version"
-	insertSchemaVersionStmt        = "INSERT INTO wrstat_schema_version (version) VALUES (?)"
+	schemaVersionStatsQuery        = "SELECT count(), min(singleton), max(singleton), " +
+		"min(version), max(version) FROM wrstat_schema_version FINAL"
+	insertSchemaVersionStmt = "INSERT INTO wrstat_schema_version (singleton, version) VALUES (1, ?)"
 )
 
 //go:embed schema/*.sql
 var schemaFS embed.FS
+
+type schemaVersionStats struct {
+	count        uint64
+	minSingleton *uint8
+	maxSingleton *uint8
+	minVersion   *uint32
+	maxVersion   *uint32
+}
+
+func (s schemaVersionStats) ok() bool {
+	if !s.hasValues() {
+		return false
+	}
+
+	return *s.minSingleton == 1 &&
+		*s.maxSingleton == 1 &&
+		*s.minVersion == currentSchemaVersion &&
+		*s.maxVersion == currentSchemaVersion
+}
+
+func (s schemaVersionStats) hasValues() bool {
+	return s.count == 1 &&
+		s.minSingleton != nil &&
+		s.maxSingleton != nil &&
+		s.minVersion != nil &&
+		s.maxVersion != nil
+}
+
+func scanSchemaVersionStats(rows driver.Rows) (uint64, *uint8, *uint8, *uint32, *uint32, error) {
+	if !rows.Next() {
+		return noSchemaVersionStats(rows.Err())
+	}
+
+	var stats schemaVersionStats
+	if err := rows.Scan(
+		&stats.count,
+		&stats.minSingleton,
+		&stats.maxSingleton,
+		&stats.minVersion,
+		&stats.maxVersion,
+	); err != nil {
+		return 0, nil, nil, nil, nil, fmt.Errorf("clickhouse: failed to scan schema version stats: %w", err)
+	}
+
+	return stats.count, stats.minSingleton, stats.maxSingleton, stats.minVersion, stats.maxVersion, nil
+}
+
+func noSchemaVersionStats(err error) (uint64, *uint8, *uint8, *uint32, *uint32, error) {
+	if err != nil {
+		return 0, nil, nil, nil, nil, fmt.Errorf("clickhouse: failed to query schema version stats: %w", err)
+	}
+
+	return 0, nil, nil, nil, nil, errNoSchemaVersionStats
+}
 
 func ensureSchema(ctx context.Context, execer ch.Conn) error {
 	stmts, err := schemaSQL()
@@ -123,24 +179,27 @@ func ensureSchemaVersion(ctx context.Context, execer ch.Conn) error {
 	schemaVersionBootstrapMu.Lock()
 	defer schemaVersionBootstrapMu.Unlock()
 
-	count, minVersion, maxVersion, err := schemaVersionStatsFromDB(ctx, execer)
+	count, minSingleton, maxSingleton, minVersion, maxVersion, err := schemaVersionStatsFromDB(ctx, execer)
 	if err != nil {
 		return err
 	}
 
 	if count == 0 {
-		count, minVersion, maxVersion, err = insertAndReadSchemaVersionStats(ctx, execer)
+		count, minSingleton, maxSingleton, minVersion, maxVersion, err = insertAndReadSchemaVersionStats(ctx, execer)
 		if err != nil {
 			return err
 		}
 	}
 
-	return validateSchemaVersionStats(count, minVersion, maxVersion)
+	return validateSchemaVersionStats(count, minSingleton, maxSingleton, minVersion, maxVersion)
 }
 
-func insertAndReadSchemaVersionStats(ctx context.Context, execer ch.Conn) (uint64, *uint32, *uint32, error) {
+func insertAndReadSchemaVersionStats(
+	ctx context.Context,
+	execer ch.Conn,
+) (uint64, *uint8, *uint8, *uint32, *uint32, error) {
 	if err := insertSchemaVersion(ctx, execer); err != nil {
-		return 0, nil, nil, err
+		return 0, nil, nil, nil, nil, err
 	}
 
 	return schemaVersionStatsFromDB(ctx, execer)
@@ -154,55 +213,62 @@ func insertSchemaVersion(ctx context.Context, execer ch.Conn) error {
 	return nil
 }
 
-func schemaVersionStatsFromDB(ctx context.Context, conn ch.Conn) (uint64, *uint32, *uint32, error) {
+func schemaVersionStatsFromDB(
+	ctx context.Context,
+	conn ch.Conn,
+) (uint64, *uint8, *uint8, *uint32, *uint32, error) {
 	rows, err := conn.Query(ctx, schemaVersionStatsQuery)
 	if err != nil {
-		return 0, nil, nil, fmt.Errorf("clickhouse: failed to query schema version stats: %w", err)
+		return 0, nil, nil, nil, nil, fmt.Errorf("clickhouse: failed to query schema version stats: %w", err)
 	}
 
 	defer func() { _ = rows.Close() }()
 
-	if !rows.Next() {
-		if err := rows.Err(); err != nil {
-			return 0, nil, nil, fmt.Errorf("clickhouse: failed to query schema version stats: %w", err)
-		}
-
-		return 0, nil, nil, errNoSchemaVersionStats
-	}
-
-	var (
-		count      uint64
-		minVersion *uint32
-		maxVersion *uint32
-	)
-
-	if err := rows.Scan(&count, &minVersion, &maxVersion); err != nil {
-		return 0, nil, nil, fmt.Errorf("clickhouse: failed to scan schema version stats: %w", err)
-	}
-
-	return count, minVersion, maxVersion, nil
+	return scanSchemaVersionStats(rows)
 }
 
-func validateSchemaVersionStats(count uint64, minVersion, maxVersion *uint32) error {
-	if schemaVersionStatsOK(count, minVersion, maxVersion) {
+func validateSchemaVersionStats(
+	count uint64,
+	minSingleton, maxSingleton *uint8,
+	minVersion, maxVersion *uint32,
+) error {
+	if schemaVersionStatsOK(count, minSingleton, maxSingleton, minVersion, maxVersion) {
 		return nil
 	}
 
 	return fmt.Errorf(
-		"%w: count=%d min=%s max=%s; please migrate or drop the database",
+		"%w: count=%d singleton_min=%s singleton_max=%s min=%s max=%s; please migrate or drop the database",
 		errUnexpectedSchemaVersion,
 		count,
+		formatNullableUint8(minSingleton),
+		formatNullableUint8(maxSingleton),
 		formatNullableUint32(minVersion),
 		formatNullableUint32(maxVersion),
 	)
 }
 
-func schemaVersionStatsOK(count uint64, minVersion, maxVersion *uint32) bool {
-	if count != 1 || minVersion == nil || maxVersion == nil {
-		return false
+func schemaVersionStatsOK(
+	count uint64,
+	minSingleton, maxSingleton *uint8,
+	minVersion, maxVersion *uint32,
+) bool {
+	stats := schemaVersionStats{
+		count:        count,
+		minSingleton: minSingleton,
+		maxSingleton: maxSingleton,
+		minVersion:   minVersion,
+		maxVersion:   maxVersion,
 	}
 
-	return *minVersion == currentSchemaVersion && *maxVersion == currentSchemaVersion
+	return stats.ok()
+}
+
+func formatNullableUint8(v *uint8) string {
+	if v == nil {
+		return "NULL"
+	}
+
+	return strconv.FormatUint(uint64(*v), 10)
 }
 
 func formatNullableUint32(v *uint32) string {

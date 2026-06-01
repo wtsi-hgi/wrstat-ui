@@ -203,7 +203,7 @@ func closePublishFunc(closer func(bool) error, publish bool) error {
 // directory or from a child path inside it.
 //
 // If the directory name doesn't match the expected format, "/" is returned
-// as a fallback for backwards compatibility.
+// as a fallback for legacy behaviour.
 func DeriveMountPathFromOutputDir(outputPath string) string {
 	mountPath, err := mountpath.FromOutputDir(outputPath)
 	if err != nil {

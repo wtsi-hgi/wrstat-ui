@@ -24,5 +24,12 @@
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  ***************************************************************************** */
 
-ALTER TABLE wrstat_mounts
-ADD COLUMN IF NOT EXISTS active UInt8 DEFAULT 1;
+CREATE TABLE IF NOT EXISTS wrstat_dir_projection_sets (
+  mount_path LowCardinality(String) CODEC(LZ4),
+  snapshot_id UUID,
+  updated_at DateTime CODEC(Delta, ZSTD(3)),
+  refreshed_at DateTime64(3) CODEC(Delta, ZSTD(3))
+) ENGINE = MergeTree
+PARTITION BY (mount_path, snapshot_id)
+ORDER BY (mount_path, snapshot_id)
+SETTINGS index_granularity = 8192;

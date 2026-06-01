@@ -55,8 +55,8 @@ const (
 	testSystemTablesQuery       = "SELECT name FROM system.tables WHERE database = ? ORDER BY name"
 	testSystemColumnsQuery      = "SELECT name FROM system.columns WHERE database = ? AND table = ? ORDER BY name"
 	testSystemTableEngineQuery  = "SELECT engine FROM system.tables WHERE database = ? AND name = ? LIMIT 1"
-	testInsertInactiveMountStmt = "INSERT INTO wrstat_mounts (mount_path, switched_at, " +
-		"active_snapshot, updated_at, active) VALUES (?, ?, ?, ?, 0)"
+	testInsertInactiveMountStmt = "INSERT INTO wrstat_mount_events (mount_path, event_at, event_type, " +
+		"snapshot_id, updated_at, reason) VALUES (?, ?, 0, ?, ?, 'inactive')"
 	testCreateLegacyMountsTableStmt = "CREATE TABLE wrstat_mounts (" +
 		"mount_path LowCardinality(String) CODEC(ZSTD(3)), " +
 		"switched_at DateTime64(3) CODEC(Delta, ZSTD(3)), " +
@@ -75,6 +75,7 @@ const (
 	schemaVersionBootstrapSyncDirEnv      = "WRSTAT_SCHEMA_BOOTSTRAP_SYNC_DIR"
 	schemaVersionBootstrapReleaseFile     = "release"
 	schemaVersionBootstrapReadyFilePrefix = "ready-"
+	bootstrapTestClickHouseDir            = "clickhouse"
 )
 
 var errBootstrapTestSourceLocation = errors.New("clickhouse: failed to locate bootstrap test source")
@@ -107,25 +108,6 @@ func (r bootstrapTestRow) Scan(...any) error {
 
 func (r bootstrapTestRow) ScanStruct(any) error {
 	return r.err
-}
-
-func readLegacyActiveSnapshotID(ctx context.Context, conn ch.Conn, mountPath string) string {
-	rows, err := conn.Query(
-		ctx,
-		"SELECT toString(snapshot_id) FROM wrstat_mounts_active WHERE mount_path = ?",
-		mountPath,
-	)
-	So(err, ShouldBeNil)
-
-	defer func() { _ = rows.Close() }()
-
-	So(rows.Next(), ShouldBeTrue)
-
-	var sid string
-	So(rows.Scan(&sid), ShouldBeNil)
-	So(rows.Next(), ShouldBeFalse)
-
-	return sid
 }
 
 type bootstrapTestConn struct {
@@ -442,7 +424,7 @@ func newSchemaVersionTestStore() *schemaVersionTestStore {
 	return &schemaVersionTestStore{initialReadReady: make(chan struct{})}
 }
 
-func (s *schemaVersionTestStore) captureStats() (uint64, *uint32, *uint32) {
+func (s *schemaVersionTestStore) captureStats() (uint64, *uint8, *uint8, *uint32, *uint32) {
 	s.mu.Lock()
 	count := s.versionRows
 	waitForConcurrentRead := false
@@ -468,12 +450,13 @@ func (s *schemaVersionTestStore) captureStats() (uint64, *uint32, *uint32) {
 	}
 
 	if count == 0 {
-		return 0, nil, nil
+		return 0, nil, nil, nil, nil
 	}
 
+	singleton := uint8(1)
 	version := uint32(1)
 
-	return count, &version, &version
+	return count, &singleton, &singleton, &version, &version
 }
 
 func (s *schemaVersionTestStore) insertVersion() {
@@ -500,11 +483,15 @@ func TestEnsureSchemaVersion(t *testing.T) {
 		So(<-errs, ShouldBeNil)
 		So(<-errs, ShouldBeNil)
 
-		count, minVersion, maxVersion, err := schemaVersionStatsFromDB(ctx, conn)
+		count, minSingleton, maxSingleton, minVersion, maxVersion, err := schemaVersionStatsFromDB(ctx, conn)
 		So(err, ShouldBeNil)
 		So(count, ShouldEqual, 1)
+		So(minSingleton, ShouldNotBeNil)
+		So(maxSingleton, ShouldNotBeNil)
 		So(minVersion, ShouldNotBeNil)
 		So(maxVersion, ShouldNotBeNil)
+		So(*minSingleton, ShouldEqual, 1)
+		So(*maxSingleton, ShouldEqual, 1)
 		So(*minVersion, ShouldEqual, 1)
 		So(*maxVersion, ShouldEqual, 1)
 	})
@@ -521,13 +508,18 @@ func TestEnsureSchemaVersion(t *testing.T) {
 	})
 
 	Convey("validateSchemaVersionStats rejects mixed and unsupported versions", t, func() {
+		singleton := uint8(1)
+		singletonTwo := uint8(2)
 		versionOne := uint32(1)
 		versionTwo := uint32(2)
 
-		err := validateSchemaVersionStats(2, &versionOne, &versionTwo)
+		err := validateSchemaVersionStats(2, &singleton, &singleton, &versionOne, &versionTwo)
 		So(errors.Is(err, errUnexpectedSchemaVersion), ShouldBeTrue)
 
-		err = validateSchemaVersionStats(1, &versionTwo, &versionTwo)
+		err = validateSchemaVersionStats(1, &singleton, &singleton, &versionTwo, &versionTwo)
+		So(errors.Is(err, errUnexpectedSchemaVersion), ShouldBeTrue)
+
+		err = validateSchemaVersionStats(1, &singletonTwo, &singletonTwo, &versionOne, &versionOne)
 		So(errors.Is(err, errUnexpectedSchemaVersion), ShouldBeTrue)
 	})
 }
@@ -535,8 +527,10 @@ func TestEnsureSchemaVersion(t *testing.T) {
 type schemaVersionTestRows struct {
 	count uint64
 
-	minVersion *uint32
-	maxVersion *uint32
+	minSingleton *uint8
+	maxSingleton *uint8
+	minVersion   *uint32
+	maxVersion   *uint32
 
 	next bool
 }
@@ -556,7 +550,7 @@ func (r *schemaVersionTestRows) HasData() bool {
 }
 
 func (r *schemaVersionTestRows) Scan(dest ...any) error {
-	if len(dest) != 3 {
+	if len(dest) != 5 {
 		return errBootstrapTestUnexpectedScanDestinationN
 	}
 
@@ -565,17 +559,29 @@ func (r *schemaVersionTestRows) Scan(dest ...any) error {
 		return errBootstrapTestUnexpectedScanDestination
 	}
 
-	minVersion, ok := dest[1].(**uint32)
+	minSingleton, ok := dest[1].(**uint8)
 	if !ok {
 		return errBootstrapTestUnexpectedScanDestination
 	}
 
-	maxVersion, ok := dest[2].(**uint32)
+	maxSingleton, ok := dest[2].(**uint8)
+	if !ok {
+		return errBootstrapTestUnexpectedScanDestination
+	}
+
+	minVersion, ok := dest[3].(**uint32)
+	if !ok {
+		return errBootstrapTestUnexpectedScanDestination
+	}
+
+	maxVersion, ok := dest[4].(**uint32)
 	if !ok {
 		return errBootstrapTestUnexpectedScanDestination
 	}
 
 	*count = r.count
+	*minSingleton = r.minSingleton
+	*maxSingleton = r.maxSingleton
 	*minVersion = r.minVersion
 	*maxVersion = r.maxVersion
 
@@ -595,7 +601,7 @@ func (r *schemaVersionTestRows) Totals(...any) error {
 }
 
 func (r *schemaVersionTestRows) Columns() []string {
-	return []string{"count", "min", "max"}
+	return []string{"count", "singleton_min", "singleton_max", "min", "max"}
 }
 
 func (r *schemaVersionTestRows) Close() error {
@@ -604,6 +610,17 @@ func (r *schemaVersionTestRows) Close() error {
 
 func (r *schemaVersionTestRows) Err() error {
 	return nil
+}
+
+func mustReadSchemaStatementForTest(t *testing.T, name string) string {
+	t.Helper()
+
+	stmt, err := readSchemaStatement(name)
+	if err != nil {
+		t.Fatalf("failed to read schema statement %s: %v", name, err)
+	}
+
+	return stmt
 }
 
 func waitForSchemaVersionBootstrapHelpers(
@@ -747,9 +764,15 @@ func (c *schemaVersionTestConn) Query(_ context.Context, query string, _ ...any)
 		return nil, errBootstrapTestUnexpectedCall
 	}
 
-	count, minVersion, maxVersion := c.store.captureStats()
+	count, minSingleton, maxSingleton, minVersion, maxVersion := c.store.captureStats()
 
-	return &schemaVersionTestRows{count: count, minVersion: minVersion, maxVersion: maxVersion}, nil
+	return &schemaVersionTestRows{
+		count:        count,
+		minSingleton: minSingleton,
+		maxSingleton: maxSingleton,
+		minVersion:   minVersion,
+		maxVersion:   maxVersion,
+	}, nil
 }
 
 func (c *schemaVersionTestConn) QueryRow(context.Context, string, ...any) driver.Row {
@@ -810,6 +833,76 @@ func TestNewClientBootstrapsSchema(t *testing.T) {
 		So(versions, ShouldResemble, []uint32{1})
 	})
 
+	Convey("NewClient concurrent bootstraps leave exactly one final schema version row", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.PollInterval = time.Second
+		cfg.QueryTimeout = 5 * time.Second
+
+		const constructorCount = 8
+
+		var wg sync.WaitGroup
+
+		errs := make(chan error, constructorCount)
+
+		for range constructorCount {
+			wg.Add(1)
+
+			go func() {
+				defer wg.Done()
+
+				c, err := NewClient(cfg)
+				if err != nil {
+					errs <- err
+
+					return
+				}
+
+				errs <- c.Close()
+			}()
+		}
+
+		wg.Wait()
+		close(errs)
+
+		for err := range errs {
+			So(err, ShouldBeNil)
+		}
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		rows, err := conn.Query(
+			ctx,
+			"SELECT count(), min(version), max(version) FROM wrstat_schema_version FINAL",
+		)
+
+		So(err, ShouldBeNil)
+		defer func() { So(rows.Close(), ShouldBeNil) }()
+
+		So(rows.Next(), ShouldBeTrue)
+
+		var (
+			count      uint64
+			minVersion uint32
+			maxVersion uint32
+		)
+
+		So(rows.Scan(&count, &minVersion, &maxVersion), ShouldBeNil)
+		So(count, ShouldEqual, 1)
+		So(minVersion, ShouldEqual, 1)
+		So(maxVersion, ShouldEqual, 1)
+		So(rows.Next(), ShouldBeFalse)
+	})
+
 	Convey("NewClient bootstraps the full schema", t, func() {
 		os.Setenv("WRSTAT_ENV", "test")
 
@@ -834,14 +927,15 @@ func TestNewClientBootstrapsSchema(t *testing.T) {
 
 		tables := listTableNames(ctx, t, conn, cfg.Database)
 		So(tables, ShouldContain, "wrstat_schema_version")
-		So(tables, ShouldContain, "wrstat_mounts")
+		So(tables, ShouldContain, "wrstat_mount_events")
 		So(tables, ShouldContain, "wrstat_mounts_active")
-		So(tables, ShouldContain, "wrstat_mounts_active_v2")
-		So(tables, ShouldContain, "wrstat_dguta")
+		So(tables, ShouldContain, "wrstat_dir_facts")
 		So(tables, ShouldContain, "wrstat_children")
-		So(tables, ShouldContain, "wrstat_dir_summary")
-		So(tables, ShouldContain, "wrstat_dir_summary_sets")
-		So(tables, ShouldContain, "wrstat_dir_dguta_vector")
+		So(tables, ShouldContain, "wrstat_dir_projection_sets")
+		So(tables, ShouldContain, "wrstat_virtual_children")
+		So(tables, ShouldContain, "wrstat_virtual_children_sets")
+		So(tables, ShouldContain, "wrstat_virtual_summary_cache")
+		So(tables, ShouldContain, "wrstat_virtual_summary_sets")
 		So(tables, ShouldContain, "wrstat_basedirs_group_usage")
 		So(tables, ShouldContain, "wrstat_basedirs_user_usage")
 		So(tables, ShouldContain, "wrstat_basedirs_group_subdirs")
@@ -854,18 +948,15 @@ func TestNewClientBootstrapsSchema(t *testing.T) {
 		So(cols, ShouldContain, "snapshot_id")
 		So(cols, ShouldContain, "updated_at")
 
-		cols = listColumnNames(ctx, t, conn, cfg.Database, "wrstat_mounts_active_v2")
-		So(cols, ShouldContain, "mount_path")
-		So(cols, ShouldContain, "snapshot_id")
-		So(cols, ShouldContain, "updated_at")
+		versionCols := listColumnNames(ctx, t, conn, cfg.Database, "wrstat_schema_version")
+		So(versionCols, ShouldContain, "singleton")
+		So(versionCols, ShouldContain, "version")
+		So(versionCols, ShouldContain, "inserted_at")
 
-		mountCols := listColumnNames(ctx, t, conn, cfg.Database, "wrstat_mounts")
-		So(mountCols, ShouldContain, "active")
-
-		So(tableEngine(ctx, t, conn, cfg.Database, "wrstat_schema_version"), ShouldEqual, "TinyLog")
+		So(tableEngine(ctx, t, conn, cfg.Database, "wrstat_schema_version"), ShouldEqual, "ReplacingMergeTree")
 	})
 
-	Convey("NewClient bootstraps wrstat_mounts_active_v2 to hide inactive latest rows", t, func() {
+	Convey("NewClient bootstraps wrstat_mounts_active to hide inactive latest rows", t, func() {
 		os.Setenv("WRSTAT_ENV", "test")
 
 		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
@@ -928,7 +1019,7 @@ func TestNewClientBootstrapsSchema(t *testing.T) {
 		So(activeSID, ShouldEqual, secondSID)
 	})
 
-	Convey("NewClient bootstraps wrstat_mounts_active_v2 to prefer inactive rows on switched_at ties", t, func() {
+	Convey("NewClient bootstraps wrstat_mounts_active to prefer inactive rows on switched_at ties", t, func() {
 		os.Setenv("WRSTAT_ENV", "test")
 
 		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
@@ -1004,7 +1095,7 @@ func TestNewClientBootstrapsSchema(t *testing.T) {
 		So(activeSID, ShouldEqual, retrySID)
 	})
 
-	Convey("NewClient leaves a legacy wrstat_mounts_active view and uses v2 for active reads", t, func() {
+	Convey("NewClient rejects unsupported schema versions before creating a reader", t, func() {
 		os.Setenv("WRSTAT_ENV", "test")
 
 		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
@@ -1027,63 +1118,16 @@ func TestNewClientBootstrapsSchema(t *testing.T) {
 
 		Reset(func() { So(conn.Close(), ShouldBeNil) })
 
-		So(conn.Exec(ctx, testCreateLegacyMountsTableStmt), ShouldBeNil)
-		So(conn.Exec(ctx, testCreateLegacyMountsActiveViewStmt), ShouldBeNil)
+		versionDDL := strings.TrimSuffix(
+			mustReadSchemaStatementForTest(t, "schema/001_schema_version.sql"),
+			";",
+		)
+		So(conn.Exec(ctx, versionDDL), ShouldBeNil)
+		So(conn.Exec(ctx, "INSERT INTO wrstat_schema_version (singleton, version) VALUES (1, 2)"), ShouldBeNil)
 
 		c, err := NewClient(cfg)
-		So(err, ShouldBeNil)
-		So(c, ShouldNotBeNil)
-		Reset(func() { So(c.Close(), ShouldBeNil) })
-
-		mountCols := listColumnNames(ctx, t, conn, cfg.Database, "wrstat_mounts")
-		So(mountCols, ShouldContain, "active")
-
-		tables := listTableNames(ctx, t, conn, cfg.Database)
-		So(tables, ShouldContain, "wrstat_mounts_active")
-		So(tables, ShouldContain, "wrstat_mounts_active_v2")
-
-		firstUpdatedAt := time.Date(2026, 1, 9, 12, 0, 0, 0, time.UTC)
-		secondUpdatedAt := firstUpdatedAt.Add(time.Hour)
-		firstSID := snapshotID(testMountPath, firstUpdatedAt).String()
-		secondSID := snapshotID(testMountPath, secondUpdatedAt).String()
-
-		So(conn.Exec(ctx, testInsertMountStmt, testMountPath, firstUpdatedAt, firstSID, firstUpdatedAt), ShouldBeNil)
-
-		activeSID, hasActive, err := readActiveSnapshotID(ctx, conn, testMountPath)
-		So(err, ShouldBeNil)
-		So(hasActive, ShouldBeTrue)
-		So(activeSID, ShouldEqual, firstSID)
-		So(readLegacyActiveSnapshotID(ctx, conn, testMountPath), ShouldEqual, firstSID)
-
-		So(conn.Exec(
-			ctx,
-			testInsertInactiveMountStmt,
-			testMountPath,
-			firstUpdatedAt.Add(time.Second),
-			firstSID,
-			firstUpdatedAt,
-		), ShouldBeNil)
-
-		activeSID, hasActive, err = readActiveSnapshotID(ctx, conn, testMountPath)
-		So(err, ShouldBeNil)
-		So(hasActive, ShouldBeFalse)
-		So(activeSID, ShouldBeBlank)
-		So(readLegacyActiveSnapshotID(ctx, conn, testMountPath), ShouldEqual, firstSID)
-		So(cleanActiveSnapshotAttemptWithConn(cfg, conn, testMountPath, firstUpdatedAt), ShouldBeNil)
-
-		So(conn.Exec(
-			ctx,
-			testInsertMountStmt,
-			testMountPath,
-			firstUpdatedAt.Add(2*time.Second),
-			secondSID,
-			secondUpdatedAt,
-		), ShouldBeNil)
-
-		activeSID, hasActive, err = readActiveSnapshotID(ctx, conn, testMountPath)
-		So(err, ShouldBeNil)
-		So(hasActive, ShouldBeTrue)
-		So(activeSID, ShouldEqual, secondSID)
+		So(c, ShouldBeNil)
+		So(errors.Is(err, errUnexpectedSchemaVersion), ShouldBeTrue)
 	})
 }
 
@@ -1377,48 +1421,29 @@ func TestNewClientBootstrapLockWaitDoesNotUseQueryTimeout(t *testing.T) {
 	})
 }
 
-func TestSchemaSQLMountsActiveViewMigrationOrdering(t *testing.T) {
-	Convey("schemaSQL creates v2 active view without dropping the legacy view", t, func() {
+func TestSchemaSQLMountsActiveViewDefinition(t *testing.T) {
+	Convey("schemaSQL creates the final active view from mount events", t, func() {
 		stmts, err := schemaSQL()
 		So(err, ShouldBeNil)
 
-		activeColumnIdx := -1
-		dropIdx := -1
-		createV2Idx := -1
-		usesCreateOrReplace := false
-		v2IsTombstoneAware := false
+		createActiveIdx := -1
+		activeIsEventBased := false
 
 		for i, stmt := range stmts {
 			normalised := normalizeSchemaStatementForTest(stmt)
-			if schemaStatementReplacesActiveView(normalised) {
-				usesCreateOrReplace = true
-			}
-
-			if strings.Contains(normalised, "ALTER TABLE WRSTAT_MOUNTS ADD COLUMN IF NOT EXISTS ACTIVE ") {
-				activeColumnIdx = i
-			}
-
-			if strings.Contains(normalised, "DROP VIEW IF EXISTS WRSTAT_MOUNTS_ACTIVE") {
-				dropIdx = i
-			}
-
-			if strings.Contains(normalised, "CREATE VIEW IF NOT EXISTS WRSTAT_MOUNTS_ACTIVE_V2 AS") {
-				createV2Idx = i
-				v2IsTombstoneAware = strings.Contains(normalised, "ARGMAX(") &&
-					strings.Contains(normalised, "TUPLE(ACTIVE_SNAPSHOT, UPDATED_AT, ACTIVE)") &&
-					strings.Contains(
-						normalised,
-						"TUPLE(SWITCHED_AT, IF(ACTIVE = 0, 1, 0), UPDATED_AT, TOSTRING(ACTIVE_SNAPSHOT))",
-					) &&
+			if strings.Contains(normalised, "CREATE VIEW IF NOT EXISTS WRSTAT_MOUNTS_ACTIVE AS") {
+				createActiveIdx = i
+				activeIsEventBased = strings.Contains(normalised, "ARGMAX(") &&
+					strings.Contains(normalised, "TUPLE(SNAPSHOT_ID, UPDATED_AT, EVENT_TYPE)") &&
+					strings.Contains(normalised, "FROM WRSTAT_MOUNT_EVENTS") &&
+					strings.Contains(normalised, "IF(EVENT_TYPE = 0, 1, 0)") &&
+					strings.Contains(normalised, "TOSTRING(SNAPSHOT_ID)") &&
 					strings.Contains(normalised, "WHERE TUPLEELEMENT(LATEST, 3) = 1")
 			}
 		}
 
-		So(usesCreateOrReplace, ShouldBeFalse)
-		So(activeColumnIdx, ShouldBeGreaterThanOrEqualTo, 0)
-		So(dropIdx, ShouldEqual, -1)
-		So(createV2Idx, ShouldBeGreaterThan, activeColumnIdx)
-		So(v2IsTombstoneAware, ShouldBeTrue)
+		So(createActiveIdx, ShouldBeGreaterThanOrEqualTo, 0)
+		So(activeIsEventBased, ShouldBeTrue)
 	})
 }
 
@@ -1426,14 +1451,9 @@ func normalizeSchemaStatementForTest(stmt string) string {
 	return strings.Join(strings.Fields(strings.ToUpper(stmt)), " ")
 }
 
-func schemaStatementReplacesActiveView(normalised string) bool {
-	return strings.Contains(normalised, "CREATE OR REPLACE VIEW WRSTAT_MOUNTS_ACTIVE") ||
-		strings.Contains(normalised, "CREATE OR REPLACE VIEW WRSTAT_MOUNTS_ACTIVE_V2")
-}
-
 func TestProductionGoSQLAvoidsLegacyMountsActiveView(t *testing.T) {
-	Convey("production Go source does not query the legacy active mounts view", t, func() {
-		legacyViewPattern := regexp.MustCompile(`\bwrstat_mounts_active\b`)
+	Convey("production Go source does not query the removed v2 active mounts view", t, func() {
+		legacyViewPattern := regexp.MustCompile(`\bwrstat_mounts_active_v2\b`)
 		offenders, err := productionGoFilesContaining(legacyViewPattern)
 
 		So(err, ShouldBeNil)
@@ -1449,7 +1469,7 @@ func productionGoFilesContaining(pattern *regexp.Regexp) ([]string, error) {
 
 	repoRoot := filepath.Dir(filepath.Dir(currentFile))
 	repoFS := os.DirFS(repoRoot)
-	roots := []string{"clickhouse", "cmd", "internal"}
+	roots := []string{bootstrapTestClickHouseDir, "cmd", "internal"}
 	offenders := make([]string, 0)
 
 	for _, root := range roots {

@@ -24,13 +24,12 @@
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  ***************************************************************************** */
 
-CREATE TABLE IF NOT EXISTS wrstat_dir_summary_sets (
-  mount_path LowCardinality(String) CODEC(LZ4),
+CREATE TABLE IF NOT EXISTS wrstat_mount_events (
+  mount_path LowCardinality(String) CODEC(ZSTD(3)),
+  event_at DateTime64(3) CODEC(Delta, ZSTD(3)),
+  event_type UInt8,
   snapshot_id UUID,
   updated_at DateTime CODEC(Delta, ZSTD(3)),
-  summary_version UInt8,
-  refreshed_at DateTime64(3) CODEC(Delta, ZSTD(3))
-) ENGINE = ReplacingMergeTree(refreshed_at)
-PARTITION BY (mount_path, snapshot_id)
-ORDER BY (mount_path, snapshot_id)
-SETTINGS index_granularity = 8192;
+  reason LowCardinality(String) CODEC(ZSTD(3))
+) ENGINE = MergeTree
+ORDER BY (mount_path, event_at, event_type, updated_at, snapshot_id);

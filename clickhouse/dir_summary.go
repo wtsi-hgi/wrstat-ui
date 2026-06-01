@@ -36,48 +36,49 @@ import (
 )
 
 const (
-	mountDirSummaryVersion = 4
-
-	insertMountDirSummaryQuery = "INSERT INTO wrstat_dir_summary " +
-		"(mount_path, snapshot_id, dir, updated_at, age, count, size, " +
-		"atime_min, mtime_max, atime_buckets, mtime_buckets, uids, gids, ft, " +
+	insertMountDirSummaryQuery = "INSERT INTO wrstat_dir_facts " +
+		"(mount_path, snapshot_id, dir, updated_at, all_count, all_size, " +
+		"all_atime_min, all_mtime_max, all_atime_buckets, all_mtime_buckets, " +
+		"all_uids, all_gids, all_ft, " +
 		"file_count, file_size, file_atime_min, file_mtime_max, " +
 		"file_atime_buckets, file_mtime_buckets, file_uids, file_gids, file_ft, " +
-		"child_count, refreshed_at) " +
-		"VALUES (?, toUUID(?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+		"gids, uids, fts, ages, counts, sizes, atime_mins, mtime_maxs, " +
+		"atime_buckets, mtime_buckets, child_count, refreshed_at) VALUES " +
+		"(?, toUUID(?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
 
-	insertMountDirSummarySetQuery = "INSERT INTO wrstat_dir_summary_sets " +
-		"(mount_path, snapshot_id, updated_at, summary_version, refreshed_at) " +
-		"VALUES (?, toUUID(?), ?, ?, ?)"
+	insertMountDirSummarySetQuery = "INSERT INTO wrstat_dir_projection_sets " +
+		"(mount_path, snapshot_id, updated_at, refreshed_at) " +
+		"VALUES (?, toUUID(?), ?, ?)"
 
-	mountDirSummaryReadyQuery = "SELECT 1 FROM wrstat_dir_summary_sets FINAL " +
-		"WHERE mount_path = ? AND snapshot_id = ? AND summary_version = ? LIMIT 1"
+	mountDirSummaryReadyQuery = "SELECT 1 FROM wrstat_dir_projection_sets " +
+		"WHERE mount_path = ? AND snapshot_id = ? LIMIT 1"
 
-	mountDirSummariesForDirsQuery = "SELECT dir, updated_at, age, count, size, " +
-		"atime_min, mtime_max, atime_buckets, mtime_buckets, uids, gids, ft, child_count " +
-		"FROM wrstat_dir_summary " +
-		"PREWHERE mount_path = ? AND snapshot_id = ? AND age = ? " +
+	mountDirSummariesForDirsQuery = "SELECT dir, updated_at, all_count, all_size, " +
+		"all_atime_min, all_mtime_max, all_atime_buckets, all_mtime_buckets, all_uids, all_gids, all_ft, child_count " +
+		"FROM wrstat_dir_facts " +
+		"PREWHERE mount_path = ? AND snapshot_id = ? " +
 		"WHERE dir IN (%s)"
 
-	mountDirFileSummariesForDirsQuery = "SELECT dir, updated_at, age, file_count, file_size, " +
+	mountDirFileSummariesForDirsQuery = "SELECT dir, updated_at, file_count, file_size, " +
 		"file_atime_min, file_mtime_max, file_atime_buckets, file_mtime_buckets, " +
 		"file_uids, file_gids, file_ft, child_count " +
-		"FROM wrstat_dir_summary " +
-		"PREWHERE mount_path = ? AND snapshot_id = ? AND age = ? " +
+		"FROM wrstat_dir_facts " +
+		"PREWHERE mount_path = ? AND snapshot_id = ? " +
 		"WHERE dir IN (%s)"
 
-	mountDirSummariesForExternalDirsQuery = "SELECT s.dir, s.updated_at, s.age, s.count, s.size, " +
-		"s.atime_min, s.mtime_max, s.atime_buckets, s.mtime_buckets, s.uids, s.gids, s.ft, s.child_count " +
-		"FROM wrstat_dir_summary AS s " +
+	mountDirSummariesForExternalDirsQuery = "SELECT s.dir, s.updated_at, s.all_count, s.all_size, " +
+		"s.all_atime_min, s.all_mtime_max, s.all_atime_buckets, s.all_mtime_buckets, " +
+		"s.all_uids, s.all_gids, s.all_ft, s.child_count " +
+		"FROM wrstat_dir_facts AS s " +
 		"ANY INNER JOIN " + externalDirsTableName + " AS q ON q.dir = s.dir " +
-		"WHERE s.mount_path = ? AND s.snapshot_id = ? AND s.age = ?"
+		"WHERE s.mount_path = ? AND s.snapshot_id = ?"
 
-	mountDirFileSummariesForExternalDirsQuery = "SELECT s.dir, s.updated_at, s.age, " +
+	mountDirFileSummariesForExternalDirsQuery = "SELECT s.dir, s.updated_at, " +
 		"s.file_count, s.file_size, s.file_atime_min, s.file_mtime_max, " +
 		"s.file_atime_buckets, s.file_mtime_buckets, s.file_uids, s.file_gids, s.file_ft, s.child_count " +
-		"FROM wrstat_dir_summary AS s " +
+		"FROM wrstat_dir_facts AS s " +
 		"ANY INNER JOIN " + externalDirsTableName + " AS q ON q.dir = s.dir " +
-		"WHERE s.mount_path = ? AND s.snapshot_id = ? AND s.age = ?"
+		"WHERE s.mount_path = ? AND s.snapshot_id = ?"
 )
 
 type mountDirSummaryMode uint8
@@ -178,7 +179,7 @@ func mountDirSummaryReady(
 	conn ch.Conn,
 	mountPath, snapshotID string,
 ) (bool, error) {
-	rows, err := conn.Query(ctx, mountDirSummaryReadyQuery, mountPath, snapshotID, mountDirSummaryVersion)
+	rows, err := conn.Query(ctx, mountDirSummaryReadyQuery, mountPath, snapshotID)
 	if err != nil {
 		return false, fmt.Errorf("clickhouse: failed to query dir summary readiness: %w", err)
 	}
@@ -226,10 +227,11 @@ func scanMountDirSummaryRow(rows rowsScanner) (string, treeDirSummaryScanned, ui
 		s          treeDirSummaryScanned
 	)
 
+	s.age = uint8(db.DGUTAgeAll)
+
 	if err := rows.Scan(
 		&dir,
 		&s.updatedAt,
-		&s.age,
 		&s.count,
 		&s.size,
 		&s.atimeMin,
@@ -450,7 +452,7 @@ func (d *clickHouseDatabase) queryMountDirSummariesForExternalDirs(
 	ctx context.Context,
 	mountPath, snapshotID string,
 	dirs []string,
-	age db.DirGUTAge,
+	_ db.DirGUTAge,
 	mode mountDirSummaryMode,
 ) (map[string]*db.DirSummary, map[string]bool, map[string]uint64, error) {
 	externalCtx, err := contextWithExternalDirs(ctx, dirs)
@@ -463,7 +465,6 @@ func (d *clickHouseDatabase) queryMountDirSummariesForExternalDirs(
 		mountDirSummariesForExternalDirsQueryForMode(mode),
 		mountPath,
 		snapshotID,
-		uint8(age),
 	)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("clickhouse: failed to query maintained external dir summaries: %w", err)
@@ -478,7 +479,7 @@ func (d *clickHouseDatabase) queryMountDirSummariesForDirsBatch(
 	ctx context.Context,
 	mountPath, snapshotID string,
 	dirs []string,
-	age db.DirGUTAge,
+	_ db.DirGUTAge,
 	mode mountDirSummaryMode,
 ) (map[string]*db.DirSummary, map[string]bool, map[string]uint64, error) {
 	query, args := scopedBatchQuery(
@@ -486,7 +487,6 @@ func (d *clickHouseDatabase) queryMountDirSummariesForDirsBatch(
 		dirs,
 		mountPath,
 		snapshotID,
-		uint8(age),
 	)
 
 	rows, err := d.conn.Query(ctx, query, args...)

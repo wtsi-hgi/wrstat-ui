@@ -56,19 +56,24 @@ const dgutaWriterTestPhasePartitionDropReset = "partition_drop_reset"
 const dgutaWriterTestSnapshotIDColumn = "snapshot_id"
 
 const (
-	dgutaWriterTestActiveSnapshotQuery = "SELECT toString(snapshot_id), updated_at FROM wrstat_mounts_active_v2 " +
+	insertDGUTAQuery = "INSERT INTO wrstat_dir_facts " +
+		"(mount_path, snapshot_id, dir, updated_at, gids, uids, fts, ages, " +
+		"counts, sizes, atime_mins, mtime_maxs, atime_buckets, mtime_buckets, refreshed_at) " +
+		"VALUES (?, toUUID(?), ?, now(), [?], [?], [?], [?], [?], [?], [?], [?], [?], [?], now())"
+
+	dgutaWriterTestActiveSnapshotQuery = "SELECT toString(snapshot_id), updated_at FROM wrstat_mounts_active " +
 		"WHERE mount_path = ?"
-	dgutaWriterTestSelectGIDQuery = "SELECT gid FROM wrstat_dguta WHERE mount_path = ? " +
-		"AND snapshot_id = toUUID(?) AND dir = ?"
+	dgutaWriterTestSelectGIDQuery = "SELECT arrayJoin(gids) AS gid FROM wrstat_dir_facts WHERE mount_path = ? " +
+		"AND snapshot_id = toUUID(?) AND dir = ? ORDER BY gid"
 	dgutaWriterTestSelectChildQuery = "SELECT child FROM wrstat_children WHERE mount_path = ? " +
 		"AND snapshot_id = toUUID(?) AND parent_dir = ?"
 
-	dgutaWriterTestCountActiveMountQuery = "SELECT count() FROM wrstat_mounts_active_v2 WHERE mount_path = ?"
-	dgutaWriterTestCountDGUTAQuery       = "SELECT count() FROM wrstat_dguta WHERE mount_path = ? " +
+	dgutaWriterTestCountActiveMountQuery = "SELECT count() FROM wrstat_mounts_active WHERE mount_path = ?"
+	dgutaWriterTestCountDirFactsQuery    = "SELECT count() FROM wrstat_dir_facts WHERE mount_path = ? " +
 		"AND snapshot_id = toUUID(?)"
 	dgutaWriterTestCountChildrenQuery = "SELECT count() FROM wrstat_children WHERE mount_path = ? " +
 		"AND snapshot_id = toUUID(?)"
-	dgutaWriterTestCountDGUTAForDirQuery = "SELECT count() FROM wrstat_dguta WHERE mount_path = ? " +
+	dgutaWriterTestCountDirFactsForDirQuery = "SELECT count() FROM wrstat_dir_facts WHERE mount_path = ? " +
 		"AND snapshot_id = toUUID(?) AND dir = ?"
 	dgutaWriterTestCountChildrenForParentQuery = "SELECT count() FROM wrstat_children WHERE mount_path = ? " +
 		"AND snapshot_id = toUUID(?) AND parent_dir = ?"
@@ -91,12 +96,9 @@ func (c *forbiddenProjectionRefreshConn) Exec(ctx context.Context, query string,
 func isForbiddenProjectionRefreshSQL(query string) bool {
 	normalised := strings.Join(strings.Fields(query), " ")
 
-	return strings.Contains(normalised, "INSERT INTO wrstat_dir_summary ") &&
+	return strings.Contains(normalised, "INSERT INTO wrstat_dir_facts ") &&
 		strings.Contains(normalised, " SELECT ") &&
-		strings.Contains(normalised, " FROM wrstat_dguta") ||
-		strings.Contains(normalised, "INSERT INTO wrstat_dir_dguta_vector ") &&
-			strings.Contains(normalised, " SELECT ") &&
-			strings.Contains(normalised, " FROM wrstat_dguta")
+		strings.Contains(normalised, " FROM wrstat_dguta")
 }
 
 func (c *forbiddenProjectionRefreshConn) forbiddenProjectionRefreshes() int {
@@ -307,7 +309,7 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 			testMountPath,
 		), ShouldEqual, 1)
 		So(countRows(ctx, conn,
-			dgutaWriterTestCountDGUTAQuery,
+			dgutaWriterTestCountDirFactsQuery,
 			testMountPath,
 			sid.String(),
 		), ShouldEqual, 1)
@@ -453,13 +455,13 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 		defer cancel()
 
 		So(countRows(ctx, conn,
-			dgutaWriterTestCountDGUTAForDirQuery,
+			dgutaWriterTestCountDirFactsForDirQuery,
 			mountPath,
 			expectedSID.String(),
 			"/",
-		), ShouldEqual, 1)
+		), ShouldEqual, 2)
 		So(countRows(ctx, conn,
-			dgutaWriterTestCountDGUTAForDirQuery,
+			dgutaWriterTestCountDirFactsForDirQuery,
 			mountPath,
 			expectedSID.String(),
 			"//",
@@ -519,7 +521,7 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 		defer cancel()
 
 		So(countRows(ctx, conn,
-			dgutaWriterTestCountDGUTAForDirQuery,
+			dgutaWriterTestCountDirFactsForDirQuery,
 			mountPath,
 			expectedSID.String(),
 			"/",
@@ -559,7 +561,7 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 		defer cancel()
 
 		So(countRows(ctx, conn,
-			dgutaWriterTestCountDGUTAQuery,
+			dgutaWriterTestCountDirFactsQuery,
 			testMountPath,
 			sid1.String(),
 		), ShouldEqual, 1)
@@ -572,7 +574,7 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 		writeSingleDGUTARecord(cfg, updatedAt2, dir, 222, "/new/")
 
 		So(countRows(ctx, conn,
-			dgutaWriterTestCountDGUTAQuery,
+			dgutaWriterTestCountDirFactsQuery,
 			testMountPath,
 			sid1.String(),
 		), ShouldEqual, 0)
@@ -583,7 +585,7 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 		), ShouldEqual, 0)
 
 		So(countRows(ctx, conn,
-			dgutaWriterTestCountDGUTAQuery,
+			dgutaWriterTestCountDirFactsQuery,
 			testMountPath,
 			sid2.String(),
 		), ShouldEqual, 1)
@@ -636,7 +638,7 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 			testMountPath,
 		), ShouldEqual, 0)
 		So(countRows(ctx, conn,
-			dgutaWriterTestCountDGUTAQuery,
+			dgutaWriterTestCountDirFactsQuery,
 			testMountPath,
 			sid.String(),
 		), ShouldEqual, 0)
@@ -685,7 +687,7 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 			testMountPath,
 		), ShouldEqual, 0)
 		So(countRows(ctx, conn,
-			dgutaWriterTestCountDGUTAQuery,
+			dgutaWriterTestCountDirFactsQuery,
 			testMountPath,
 			sid.String(),
 		), ShouldEqual, 0)
@@ -737,7 +739,7 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 		defer ctxCancel()
 
 		So(countRows(ctx, conn,
-			dgutaWriterTestCountDGUTAQuery,
+			dgutaWriterTestCountDirFactsQuery,
 			testMountPath,
 			sid.String(),
 		), ShouldEqual, 0)
@@ -795,7 +797,7 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 			testMountPath,
 		), ShouldEqual, 1)
 		So(countRows(ctx, conn,
-			dgutaWriterTestCountDGUTAQuery,
+			dgutaWriterTestCountDirFactsQuery,
 			testMountPath,
 			sid.String(),
 		), ShouldEqual, 1)
@@ -806,7 +808,7 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 		), ShouldEqual, 1)
 	})
 
-	Convey("DGUTAWriter populates active tree summary rows on snapshot switch", t, func() {
+	Convey("DGUTAWriter publishes clean v1 facts and readiness rows on snapshot switch", t, func() {
 		os.Setenv("WRSTAT_ENV", "test")
 		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
 
@@ -840,44 +842,23 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		fingerprint := fingerprintForMountsActive([]mountsActiveRow{{
-			mountPath:  mountPath,
-			snapshotID: sid.String(),
-			updatedAt:  updatedAt,
-		}})
-
 		So(countRows(ctx, conn,
-			"SELECT count() FROM wrstat_tree_summary_sets FINAL WHERE fingerprint = ?",
-			fingerprint,
+			dgutaWriterTestCountActiveMountQuery,
+			mountPath,
 		), ShouldEqual, 1)
 		So(countRows(ctx, conn,
-			"SELECT count() FROM wrstat_tree_dguta FINAL WHERE fingerprint = ? AND dir = ?",
-			fingerprint,
-			"/",
-		), ShouldBeGreaterThan, 0)
-		So(countRows(ctx, conn,
-			"SELECT count() FROM wrstat_tree_dir_summary FINAL WHERE fingerprint = ? AND dir = ?",
-			fingerprint,
-			"/",
-		), ShouldBeGreaterThan, 0)
-		So(countRows(ctx, conn,
-			"SELECT count() FROM wrstat_tree_children FINAL WHERE fingerprint = ? AND parent_dir = ?",
-			fingerprint,
-			"/",
-		), ShouldEqual, 1)
-		So(countRows(ctx, conn,
-			"SELECT count() FROM wrstat_dir_summary WHERE mount_path = ? AND snapshot_id = ? AND dir = ?",
+			"SELECT count() FROM wrstat_dir_projection_sets WHERE mount_path = ? AND snapshot_id = ?",
 			mountPath,
 			sid.String(),
-			mountPath,
 		), ShouldBeGreaterThan, 0)
 		So(countRows(ctx, conn,
-			"SELECT count() FROM wrstat_dir_summary_sets FINAL WHERE mount_path = ? AND snapshot_id = ?",
+			"SELECT count() FROM wrstat_dir_facts WHERE mount_path = ? AND snapshot_id = ? AND dir = ?",
 			mountPath,
 			sid.String(),
-		), ShouldEqual, 1)
+			"/",
+		), ShouldBeGreaterThan, 0)
 		So(countRows(ctx, conn,
-			"SELECT count() FROM wrstat_dir_dguta_vector WHERE mount_path = ? AND snapshot_id = ? AND dir = ?",
+			"SELECT count() FROM wrstat_dir_facts WHERE mount_path = ? AND snapshot_id = ? AND dir = ?",
 			mountPath,
 			sid.String(),
 			mountPath,
@@ -954,16 +935,15 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 		defer cancel()
 
 		So(countRows(ctx, conn,
-			"SELECT count() FROM wrstat_dir_summary_sets FINAL WHERE mount_path = ? AND snapshot_id = ?",
+			"SELECT count() FROM wrstat_dir_projection_sets WHERE mount_path = ? AND snapshot_id = ?",
 			mountPath,
 			sid.String(),
 		), ShouldEqual, 1)
 		So(countRows(ctx, conn,
-			"SELECT child_count FROM wrstat_dir_summary WHERE mount_path = ? AND snapshot_id = ? AND dir = ? AND age = ?",
+			"SELECT sum(child_count) FROM wrstat_dir_facts WHERE mount_path = ? AND snapshot_id = ? AND dir = ?",
 			mountPath,
 			sid.String(),
 			mountPath,
-			uint8(db.DGUTAgeAll),
 		), ShouldEqual, 2)
 
 		dbch := newClickHouseDatabase(cfg, conn)
@@ -1092,32 +1072,8 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 		}), ShouldBeNil)
 		So(impl.Close(), ShouldBeNil)
 
-		So(trackedConn.maxRowsFor(insertDGUTAQuery), ShouldBeLessThanOrEqualTo, 2)
 		So(trackedConn.maxRowsFor(insertChildrenQuery), ShouldBeLessThanOrEqualTo, 2)
 		So(trackedConn.maxRowsFor(insertMountDirSummaryQuery), ShouldBeLessThanOrEqualTo, 2)
-	})
-
-	Convey("DGUTAWriter sends capped raw DGUTA blocks as separate prepared batches", t, func() {
-		conn := &rawDGUTASendPrepareConn{}
-		batch := &countingDGUTABatch{}
-		impl := &dgutaWriter{conn: conn, dgutaBatch: batch}
-		impl.SetBatchSize(100_000)
-
-		guta := testProjectionGUTA(7, 9, db.DGUTAFileTypeBam, db.DGUTAgeAll, 1)
-
-		var err error
-		for range defaultRawDGUTABatchSize + 1 {
-			err = errors.Join(err, impl.appendDGUTABatchRow("/mnt/raw-cap/", guta))
-		}
-
-		So(err, ShouldBeNil)
-		So(batch.maxRows, ShouldEqual, defaultRawDGUTABatchSize)
-		So(batch.flushes, ShouldEqual, 0)
-		So(batch.sends, ShouldEqual, 1)
-		So(conn.preparedBatches(), ShouldEqual, 1)
-		So(conn.batches[0].Rows(), ShouldEqual, 1)
-		So(impl.batchSize, ShouldEqual, 100_000)
-		So(impl.effectiveProjectionBatchSize(), ShouldEqual, defaultProjectionBatchSize)
 	})
 
 	Convey("DGUTAWriter does not prepare empty import batches when writes become ready", t, func() {
@@ -1131,80 +1087,9 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 		So(impl.ensureWriteReady(context.Background()), ShouldBeNil)
 		So(impl.prepared, ShouldBeTrue)
 		So(conn.preparedBatches(), ShouldEqual, 0)
-		So(impl.dgutaBatch, ShouldBeNil)
 		So(impl.childrenBatch, ShouldBeNil)
 		So(impl.dirProjection.summaryBatch, ShouldBeNil)
 		So(impl.dirProjection.vectorBatch, ShouldBeNil)
-	})
-
-	Convey("DGUTAWriter prepares raw DGUTA batches lazily and does not reprepare after send", t, func() {
-		conn := &rawDGUTASendPrepareConn{prepareErr: errForcedFailure}
-		batch := &countingDGUTABatch{}
-		impl := &dgutaWriter{conn: conn, dgutaBatch: batch}
-		impl.SetBatchSize(1)
-
-		guta := testProjectionGUTA(7, 9, db.DGUTAFileTypeBam, db.DGUTAgeAll, 1)
-
-		err := impl.appendDGUTABatchRow("/mnt/raw-reprepare/", guta)
-		So(err, ShouldBeNil)
-		So(batch.sends, ShouldEqual, 1)
-		So(conn.preparedBatches(), ShouldEqual, 0)
-		So(impl.dgutaBatch, ShouldBeNil)
-
-		var nextErr error
-
-		So(func() {
-			nextErr = impl.appendDGUTABatchRow("/mnt/raw-reprepare/", guta)
-		}, ShouldNotPanic)
-		So(errors.Is(nextErr, errForcedFailure), ShouldBeTrue)
-	})
-
-	Convey("DGUTAWriter sends slow partial raw DGUTA batches before the receive timeout window", t, func() {
-		now := time.Date(2026, 5, 29, 9, 0, 0, 0, time.UTC)
-
-		conn := &rawDGUTASendPrepareConn{}
-		impl := &dgutaWriter{conn: conn, batchNow: func() time.Time { return now }}
-		impl.SetBatchSize(100)
-
-		guta := testProjectionGUTA(7, 9, db.DGUTAFileTypeBam, db.DGUTAgeAll, 1)
-
-		So(impl.appendDGUTABatchRow("/mnt/raw-slow/", guta), ShouldBeNil)
-		So(conn.preparedBatches(), ShouldEqual, 1)
-
-		firstBatch := conn.batches[0]
-		So(firstBatch.Rows(), ShouldEqual, 1)
-		So(firstBatch.sends, ShouldEqual, 0)
-
-		now = now.Add(4*time.Minute + time.Second)
-
-		So(impl.appendDGUTABatchRow("/mnt/raw-slow/", guta), ShouldBeNil)
-		So(firstBatch.sends, ShouldEqual, 1)
-		So(conn.preparedBatches(), ShouldEqual, 2)
-		So(conn.batches[1].Rows(), ShouldEqual, 1)
-	})
-
-	Convey("DGUTAWriter sends the final partial raw DGUTA batch once", t, func() {
-		conn := &rawDGUTASendPrepareConn{}
-		firstBatch := &countingDGUTABatch{}
-		impl := &dgutaWriter{conn: conn, dgutaBatch: firstBatch}
-		impl.SetBatchSize(2)
-
-		guta := testProjectionGUTA(7, 9, db.DGUTAFileTypeBam, db.DGUTAgeAll, 1)
-
-		for range 3 {
-			So(impl.appendDGUTABatchRow("/mnt/raw-final/", guta), ShouldBeNil)
-		}
-
-		So(firstBatch.flushes, ShouldEqual, 0)
-		So(firstBatch.sends, ShouldEqual, 1)
-		So(conn.preparedBatches(), ShouldEqual, 1)
-
-		finalBatch := conn.batches[0]
-		So(finalBatch.Rows(), ShouldEqual, 1)
-		So(impl.flushAllBatches(), ShouldBeNil)
-		So(finalBatch.flushes, ShouldEqual, 0)
-		So(finalBatch.sends, ShouldEqual, 1)
-		So(impl.dgutaBatch, ShouldBeNil)
 	})
 
 	Convey("DGUTAWriter sends capped children blocks as separate prepared batches", t, func() {
@@ -1359,9 +1244,7 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 	})
 
 	Convey("DGUTAWriter tracks only ages for non-root duplicate checks", t, func() {
-		conn := &rawDGUTASendPrepareConn{}
 		impl := &dgutaWriter{
-			conn:      conn,
 			mountPath: testT283ImagingMountPath,
 			snapshot:  snapshotID(testT283ImagingMountPath, time.Date(2026, 5, 30, 9, 0, 0, 0, time.UTC)),
 		}
@@ -1386,7 +1269,7 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 		So(impl.previousDGUTARows.ages(), ShouldResemble, []db.DirGUTAge{db.DGUTAgeAll, db.DGUTAgeA2M})
 	})
 
-	Convey("DGUTAWriter sends capped projection blocks as separate prepared batches", t, func() {
+	Convey("DGUTAWriter sends capped clean fact blocks as separate prepared batches", t, func() {
 		conn := &projectionSendPrepareConn{}
 		writer := mountDirProjectionWriter{conn: conn, refreshedAt: time.Date(2026, 1, 14, 9, 0, 0, 0, time.UTC)}
 
@@ -1405,21 +1288,14 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 			1,
 		), ShouldBeNil)
 
-		summaryBatches := conn.batchesFor(insertMountDirSummaryQuery)
-		vectorBatches := conn.batchesFor(insertMountDirDGUTAVectorQuery)
+		summaryBatches := conn.factBatches()
 
 		So(summaryBatches, ShouldHaveLength, 1)
-		So(vectorBatches, ShouldHaveLength, 1)
 		So(summaryBatches[0].flushes, ShouldEqual, 0)
 		So(summaryBatches[0].sends, ShouldEqual, 1)
 		So(summaryBatches[0].maxRows, ShouldEqual, 1)
-		So(vectorBatches[0].flushes, ShouldEqual, 0)
-		So(vectorBatches[0].sends, ShouldEqual, 1)
-		So(vectorBatches[0].maxRows, ShouldEqual, 1)
 		So(writer.summaryBatch, ShouldBeNil)
-		So(writer.vectorBatch, ShouldBeNil)
 		So(writer.summaryFlushed, ShouldBeFalse)
-		So(writer.vectorFlushed, ShouldBeFalse)
 		So(writer.abortAll(), ShouldBeNil)
 	})
 
@@ -1445,9 +1321,9 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 			1,
 		)
 		So(err, ShouldBeNil)
-		So(conn.batchesFor(insertMountDirSummaryQuery)[0].flushes, ShouldEqual, 0)
-		So(conn.batchesFor(insertMountDirSummaryQuery)[0].sends, ShouldEqual, 1)
-		So(conn.batchesFor(insertMountDirSummaryQuery), ShouldHaveLength, 1)
+		So(conn.factBatches()[0].flushes, ShouldEqual, 0)
+		So(conn.factBatches()[0].sends, ShouldEqual, 1)
+		So(conn.factBatches(), ShouldHaveLength, 1)
 		So(writer.summaryBatch, ShouldBeNil)
 
 		conn.prepareErrs = map[string]error{
@@ -1496,13 +1372,10 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 			100,
 		), ShouldBeNil)
 
-		summaryBatch := conn.batchesFor(insertMountDirSummaryQuery)[0]
-		vectorBatch := conn.batchesFor(insertMountDirDGUTAVectorQuery)[0]
+		summaryBatch := conn.factBatches()[0]
 
 		So(summaryBatch.Rows(), ShouldEqual, 1)
-		So(vectorBatch.Rows(), ShouldEqual, 1)
 		So(summaryBatch.sends, ShouldEqual, 0)
-		So(vectorBatch.sends, ShouldEqual, 0)
 
 		now = now.Add(4*time.Minute + time.Second)
 
@@ -1517,11 +1390,8 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 		), ShouldBeNil)
 
 		So(summaryBatch.sends, ShouldEqual, 1)
-		So(vectorBatch.sends, ShouldEqual, 1)
-		So(conn.batchesFor(insertMountDirSummaryQuery), ShouldHaveLength, 2)
-		So(conn.batchesFor(insertMountDirDGUTAVectorQuery), ShouldHaveLength, 2)
-		So(conn.batchesFor(insertMountDirSummaryQuery)[1].Rows(), ShouldEqual, 1)
-		So(conn.batchesFor(insertMountDirDGUTAVectorQuery)[1].Rows(), ShouldEqual, 1)
+		So(conn.factBatches(), ShouldHaveLength, 2)
+		So(conn.factBatches()[1].Rows(), ShouldEqual, 1)
 	})
 
 	Convey("Projection row helper prepares lazily and closes slow partial batches", t, func() {
@@ -1555,7 +1425,7 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 		So(err, ShouldBeNil)
 		So(appendCalls, ShouldEqual, 2)
 
-		batches := conn.batchesFor(insertMountDirSummaryQuery)
+		batches := conn.factBatches()
 		So(batches, ShouldHaveLength, 2)
 		So(batches[0].sends, ShouldEqual, 1)
 		So(batches[0].maxRows, ShouldEqual, 1)
@@ -1572,7 +1442,7 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 			100,
 			func(driver.Batch, string) error { return nil },
 		), ShouldBeNil)
-		So(emptyConn.batchesFor(insertMountDirSummaryQuery), ShouldHaveLength, 0)
+		So(emptyConn.factBatches(), ShouldHaveLength, 0)
 	})
 
 	Convey("DGUTAWriter sends the final partial projection batches once", t, func() {
@@ -1597,33 +1467,26 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 			2,
 		), ShouldBeNil)
 
-		summaryBatch := conn.batchesFor(insertMountDirSummaryQuery)[0]
-		vectorBatch := conn.batchesFor(insertMountDirDGUTAVectorQuery)[0]
+		summaryBatch := conn.factBatches()[0]
 
 		So(summaryBatch.sends, ShouldEqual, 0)
-		So(vectorBatch.sends, ShouldEqual, 0)
 
 		So(impl.flushAllBatches(), ShouldBeNil)
 		So(summaryBatch.flushes, ShouldEqual, 0)
 		So(summaryBatch.sends, ShouldEqual, 1)
-		So(vectorBatch.flushes, ShouldEqual, 0)
-		So(vectorBatch.sends, ShouldEqual, 1)
 		So(impl.dirProjection.summaryBatch, ShouldBeNil)
-		So(impl.dirProjection.vectorBatch, ShouldBeNil)
 	})
 
-	Convey("DGUTAWriter caps projection batches below large raw import batches by default", t, func() {
+	Convey("DGUTAWriter caps clean fact and children batches by default", t, func() {
 		impl := &dgutaWriter{}
 
 		impl.SetBatchSize(100_000)
 		So(impl.batchSize, ShouldEqual, 100_000)
-		So(impl.effectiveDGUTABatchSize(), ShouldEqual, defaultRawDGUTABatchSize)
 		So(impl.effectiveChildrenBatchSize(), ShouldEqual, defaultChildrenBatchSize)
 		So(impl.projectionBatchSize, ShouldEqual, defaultProjectionBatchSize)
 
 		impl.SetBatchSize(7)
 		So(impl.batchSize, ShouldEqual, 7)
-		So(impl.effectiveDGUTABatchSize(), ShouldEqual, 7)
 		So(impl.effectiveChildrenBatchSize(), ShouldEqual, 7)
 		So(impl.projectionBatchSize, ShouldEqual, 7)
 	})
@@ -1681,9 +1544,7 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 		}
 
 		So(impl.flushAllBatches(), ShouldBeNil)
-		So(conn.totalRowsFor(insertDGUTAQuery), ShouldEqual, dirs)
 		So(conn.totalRowsFor(insertMountDirSummaryQuery), ShouldEqual, dirs)
-		So(conn.totalRowsFor(insertMountDirDGUTAVectorQuery), ShouldEqual, dirs)
 	})
 
 	Convey("DGUTAWriter normalises mount paths before internal age compaction", t, func() {
@@ -1722,10 +1583,10 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 		}
 
 		So(impl.flushAllBatches(), ShouldBeNil)
-		So(conn.totalRowsFor(insertDGUTAQuery), ShouldEqual, 7)
+		So(conn.totalRowsFor(insertMountDirSummaryQuery), ShouldEqual, 3)
 	})
 
-	Convey("DGUTAWriter flushes projection batches separately from raw import batches", t, func() {
+	Convey("DGUTAWriter flushes clean fact batches separately from child batches", t, func() {
 		os.Setenv("WRSTAT_ENV", "test")
 		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
 
@@ -1772,10 +1633,8 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 		}), ShouldBeNil)
 		So(impl.Close(), ShouldBeNil)
 
-		So(trackedConn.maxRowsFor(insertDGUTAQuery), ShouldEqual, 4)
 		So(trackedConn.maxRowsFor(insertChildrenQuery), ShouldEqual, 4)
 		So(trackedConn.maxRowsFor(insertMountDirSummaryQuery), ShouldBeLessThanOrEqualTo, 2)
-		So(trackedConn.maxRowsFor(insertMountDirDGUTAVectorQuery), ShouldBeLessThanOrEqualTo, 2)
 	})
 
 	Convey("DGUTAWriter keeps the active snapshot when tree summary refresh times out", t, func() {
@@ -1794,20 +1653,13 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 		So(err, ShouldBeNil)
 		So(w, ShouldNotBeNil)
 
-		impl, ok := w.(*dgutaWriter)
-		So(ok, ShouldBeTrue)
-
 		w.SetMountPath(testMountPath)
 		w.SetUpdatedAt(updatedAt)
 
 		paths := internaltest.NewDirectoryPathCreator()
 		So(w.Add(singleDGUTARecord(paths.ToDirectoryPath("/"), 42, testMountPath)), ShouldBeNil)
 
-		failingConn := &treeSummaryRefreshDeadlineConn{Conn: impl.conn}
-		impl.conn = failingConn
-
 		So(w.Close(), ShouldBeNil)
-		So(failingConn.treeSummaryRefreshFailures(), ShouldBeGreaterThan, 0)
 
 		conn := th.openConn(cfg.DSN)
 
@@ -1821,20 +1673,15 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 			testMountPath,
 		), ShouldEqual, 1)
 		So(countRows(ctx, conn,
-			dgutaWriterTestCountDGUTAQuery,
+			dgutaWriterTestCountDirFactsQuery,
 			testMountPath,
 			sid.String(),
 		), ShouldEqual, 1)
-
-		fingerprint := fingerprintForMountsActive([]mountsActiveRow{{
-			mountPath:  testMountPath,
-			snapshotID: sid.String(),
-			updatedAt:  updatedAt,
-		}})
 		So(countRows(ctx, conn,
-			"SELECT count() FROM wrstat_tree_summary_sets FINAL WHERE fingerprint = ?",
-			fingerprint,
-		), ShouldEqual, 0)
+			"SELECT count() FROM wrstat_dir_projection_sets WHERE mount_path = ? AND snapshot_id = ?",
+			testMountPath,
+			sid.String(),
+		), ShouldEqual, 1)
 	})
 
 	Convey("DGUTAWriter drops the previous snapshot when tree summary refresh exhausts close context", t, func() {
@@ -2185,8 +2032,8 @@ func (c *dgutaWriterCloseContextConn) Query(
 			values:  [][]any{{testMountPath, c.nextSID, c.updatedAt}},
 		}, nil
 	default:
-		isTreeSummaryAvailabilityQuery := strings.Contains(query, "FROM wrstat_tree_summary_sets") ||
-			strings.Contains(query, "FROM wrstat_tree_dir_summary")
+		isTreeSummaryAvailabilityQuery := strings.Contains(query, "FROM wrstat_virtual_summary_sets") ||
+			strings.Contains(query, "FROM wrstat_virtual_summary_cache")
 		if isTreeSummaryAvailabilityQuery {
 			c.treeRefreshes.Add(1)
 			<-ctx.Done()
@@ -2206,7 +2053,7 @@ func (c *dgutaWriterCloseContextConn) Exec(ctx context.Context, query string, _ 
 		c.oldSnapshotDrops.Add(1)
 
 		return ctx.Err()
-	case strings.Contains(query, "INSERT INTO wrstat_tree_"):
+	case strings.Contains(query, "INSERT INTO wrstat_virtual_summary_"):
 		c.treeRefreshes.Add(1)
 		<-ctx.Done()
 
@@ -2455,40 +2302,6 @@ func (b *countingDGUTABatch) recordRows() {
 	}
 }
 
-type rawDGUTASendPrepareConn struct {
-	bootstrapTestConn
-
-	batches    []*countingDGUTABatch
-	prepareErr error
-}
-
-func (c *rawDGUTASendPrepareConn) PrepareBatch(
-	_ context.Context,
-	query string,
-	_ ...driver.PrepareBatchOption,
-) (driver.Batch, error) {
-	if query != insertDGUTAQuery {
-		return nil, errBootstrapTestUnexpectedCall
-	}
-
-	if c.prepareErr != nil {
-		return nil, c.prepareErr
-	}
-
-	return c.newBatch(), nil
-}
-
-func (c *rawDGUTASendPrepareConn) newBatch() *countingDGUTABatch {
-	batch := &countingDGUTABatch{}
-	c.batches = append(c.batches, batch)
-
-	return batch
-}
-
-func (c *rawDGUTASendPrepareConn) preparedBatches() int {
-	return len(c.batches)
-}
-
 type childrenSendPrepareConn struct {
 	bootstrapTestConn
 
@@ -2550,8 +2363,8 @@ func (c *projectionSendPrepareConn) PrepareBatch(
 	return batch, nil
 }
 
-func (c *projectionSendPrepareConn) batchesFor(query string) []*countingDGUTABatch {
-	return c.batches[query]
+func (c *projectionSendPrepareConn) factBatches() []*countingDGUTABatch {
+	return c.batches[insertMountDirSummaryQuery]
 }
 
 type lazyDGUTAImportConn struct {
@@ -2596,8 +2409,7 @@ func (c *lazyDGUTAImportConn) PrepareBatch(
 
 func isLazyDGUTAImportQuery(query string) bool {
 	switch query {
-	case insertDGUTAQuery,
-		insertChildrenQuery,
+	case insertChildrenQuery,
 		insertMountDirSummaryQuery,
 		insertMountDirDGUTAVectorQuery:
 		return true

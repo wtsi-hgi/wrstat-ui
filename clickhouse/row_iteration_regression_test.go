@@ -180,11 +180,11 @@ func TestSchemaVersionStatsNoRows(t *testing.T) {
 	Convey("schemaVersionStatsFromDB reports an empty stats result distinctly", t, func() {
 		conn := &iterationRegressionConn{
 			rows: &iterationRegressionRows{
-				columns: []string{"count", "min", "max"},
+				columns: []string{"count", "singleton_min", "singleton_max", "min", "max"},
 			},
 		}
 
-		_, _, _, err := schemaVersionStatsFromDB(context.Background(), conn)
+		_, _, _, _, _, err := schemaVersionStatsFromDB(context.Background(), conn)
 		So(errors.Is(err, errNoSchemaVersionStats), ShouldBeTrue)
 	})
 }

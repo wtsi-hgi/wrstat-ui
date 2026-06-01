@@ -42,6 +42,11 @@ import (
 const (
 	activeSnapshotCleanupCountHistoryQuery = "SELECT count() FROM wrstat_basedirs_history " +
 		"WHERE mount_path = ? AND gid = ?"
+	activeSnapshotCleanupCountDirFactsQuery = "SELECT count() FROM wrstat_dir_facts " +
+		"WHERE mount_path = ? AND snapshot_id = toUUID(?)"
+	activeSnapshotCleanupInsertDirFactsQuery = "INSERT INTO wrstat_dir_facts " +
+		"(mount_path, snapshot_id, dir, updated_at, all_count, all_size, refreshed_at) " +
+		"VALUES (?, toUUID(?), ?, ?, ?, ?, ?)"
 )
 
 var errActiveSnapshotCleanupDeleteForbidden = errors.New("active snapshot cleanup delete should not run")
@@ -515,25 +520,16 @@ func insertSnapshotCleanupRows(
 	sid string,
 	updatedAt time.Time,
 ) {
-	atimeBuckets := []uint64{1, 0, 0, 0, 0, 0, 0, 0, 0}
-	mtimeBuckets := []uint64{0, 1, 0, 0, 0, 0, 0, 0, 0}
-
 	So(conn.Exec(
 		ctx,
-		testInsertDGUTAStmt,
+		activeSnapshotCleanupInsertDirFactsQuery,
 		testMountPath,
 		sid,
 		testMountPath,
-		uint32(7),
-		uint32(9),
-		uint16(db.DGUTAFileTypeBam),
-		uint8(db.DGUTAgeAll),
+		updatedAt,
 		uint64(2),
 		uint64(123),
-		int64(10),
-		int64(20),
-		atimeBuckets,
-		mtimeBuckets,
+		updatedAt,
 	), ShouldBeNil)
 	So(conn.Exec(ctx, testInsertChildrenStmt, testMountPath, sid, testMountPath, testMountPath+"child"), ShouldBeNil)
 	So(conn.Exec(
@@ -641,7 +637,7 @@ func assertSnapshotCleanupRows(
 	expected uint64,
 ) {
 	queries := []string{
-		dgutaWriterTestCountDGUTAQuery,
+		activeSnapshotCleanupCountDirFactsQuery,
 		dgutaWriterTestCountChildrenQuery,
 		filesIngestTestCountQuery,
 		basedirsStoreTestCountGroupUsageQuery,
@@ -665,8 +661,8 @@ func insertSnapshotCleanupMountAt(
 	sid string,
 	updatedAt time.Time,
 ) {
-	const query = "INSERT INTO wrstat_mounts (mount_path, switched_at, active_snapshot, updated_at) " +
-		"SELECT ?, fromUnixTimestamp64Milli(?), toUUID(?), ?"
+	const query = "INSERT INTO wrstat_mount_events (mount_path, event_at, event_type, snapshot_id, updated_at, reason) " +
+		"SELECT ?, fromUnixTimestamp64Milli(?), 1, toUUID(?), ?, 'test'"
 
 	So(conn.Exec(ctx, query, mountPath, switchedAt.UTC().UnixMilli(), sid, updatedAt), ShouldBeNil)
 }

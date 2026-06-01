@@ -52,27 +52,28 @@ const (
 		"f.apparent_size, f.uid, f.gid, f.atime, f.mtime, f.ctime, f.inode, f.nlink"
 )
 
-const statPathQueryTemplate = "WITH (SELECT snapshot_id FROM wrstat_mounts_active_v2 WHERE mount_path = ?) AS sid " +
+const statPathQueryTemplate = "WITH (SELECT snapshot_id FROM wrstat_mounts_active WHERE mount_path = ?) AS sid " +
 	"SELECT %s FROM wrstat_files f PREWHERE f.mount_path = ? AND f.snapshot_id = sid " +
 	"AND f.parent_dir = ? AND f.name = ? LIMIT 1"
 
-const listDirQueryTemplate = "WITH (SELECT snapshot_id FROM wrstat_mounts_active_v2 WHERE mount_path = ?) AS sid " +
+const listDirQueryTemplate = "WITH (SELECT snapshot_id FROM wrstat_mounts_active WHERE mount_path = ?) AS sid " +
 	"SELECT %s FROM wrstat_files f PREWHERE f.mount_path = ? AND f.snapshot_id = sid " +
 	"AND f.parent_dir = ? ORDER BY f.name ASC LIMIT ? OFFSET ?"
 
-const findByGlobQueryTemplate = "WITH (SELECT snapshot_id FROM wrstat_mounts_active_v2 WHERE mount_path = ?) AS sid " +
+const findByGlobQueryTemplate = "WITH (SELECT snapshot_id FROM wrstat_mounts_active WHERE mount_path = ?) AS sid " +
 	"SELECT %s FROM wrstat_files f PREWHERE f.mount_path = ? AND f.snapshot_id = sid " +
 	"WHERE (%s) " +
 	"AND (? = 0 OR f.uid = ? OR has(?, f.gid)) " +
 	"ORDER BY f.parent_dir ASC, f.name ASC LIMIT ? OFFSET ?"
 
-const isDirQuery = "WITH (SELECT snapshot_id FROM wrstat_mounts_active_v2 WHERE mount_path = ?) AS sid " +
+const isDirQuery = "WITH (SELECT snapshot_id FROM wrstat_mounts_active WHERE mount_path = ?) AS sid " +
 	"SELECT f.entry_type FROM wrstat_files f PREWHERE f.mount_path = ? AND f.snapshot_id = sid " +
 	"AND f.parent_dir = ? AND f.name = ? LIMIT 1"
 
-const permissionAnyInDirQuery = "WITH (SELECT snapshot_id FROM wrstat_mounts_active_v2 WHERE mount_path = ?) AS sid " +
-	"SELECT 1 FROM wrstat_dguta d PREWHERE d.mount_path = ? AND d.snapshot_id = sid " +
-	"AND d.dir = ? AND d.age = ? AND (d.uid = ? OR has(?, d.gid)) LIMIT 1"
+const permissionAnyInDirQuery = "WITH (SELECT snapshot_id FROM wrstat_mounts_active WHERE mount_path = ?) AS sid " +
+	"SELECT 1 FROM wrstat_dir_facts d PREWHERE d.mount_path = ? AND d.snapshot_id = sid " +
+	"AND d.dir = ? AND arrayExists((age, uid, gid) -> age = ? AND (uid = ? OR has(?, gid)), " +
+	"d.ages, d.uids, d.gids) LIMIT 1"
 
 const defaultFileLimit = 1_000_000
 

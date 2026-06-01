@@ -40,7 +40,7 @@ import (
 const groupUsageQuery = `
 WITH active AS (
 	SELECT mount_path, snapshot_id
-	FROM wrstat_mounts_active_v2
+	FROM wrstat_mounts_active
 )
 SELECT
 	gid, basedir, uids, usage_size, quota_size, usage_inodes, quota_inodes,
@@ -55,7 +55,7 @@ ORDER BY gid ASC, basedir ASC
 const userUsageQuery = `
 WITH active AS (
 	SELECT mount_path, snapshot_id
-	FROM wrstat_mounts_active_v2
+	FROM wrstat_mounts_active
 )
 SELECT
 	uid, basedir, gids, usage_size, quota_size, usage_inodes, quota_inodes,
@@ -70,7 +70,7 @@ ORDER BY uid ASC, basedir ASC
 const groupSubDirsQuery = `
 WITH active AS (
 	SELECT mount_path, snapshot_id
-	FROM wrstat_mounts_active_v2
+	FROM wrstat_mounts_active
 )
 SELECT
 	subdir, num_files, size_files, last_modified, file_usage
@@ -84,7 +84,7 @@ ORDER BY s.pos ASC
 const userSubDirsQuery = `
 WITH active AS (
 	SELECT mount_path, snapshot_id
-	FROM wrstat_mounts_active_v2
+	FROM wrstat_mounts_active
 )
 SELECT
 	subdir, num_files, size_files, last_modified, file_usage
@@ -102,7 +102,7 @@ WHERE mount_path = ? AND gid = ?
 ORDER BY date ASC
 `
 
-const mountTimestampsQuery = "SELECT mount_path, updated_at FROM wrstat_mounts_active_v2"
+const mountTimestampsQuery = "SELECT mount_path, updated_at FROM wrstat_mounts_active"
 
 const groupUsageSnapshotQuery = `
 SELECT
@@ -145,7 +145,7 @@ const infoGroupUsageSnapshotQuery = `
 `
 
 const infoGroupUsageQuery = `
-	WITH active AS (SELECT mount_path, snapshot_id FROM wrstat_mounts_active_v2)
+	WITH active AS (SELECT mount_path, snapshot_id FROM wrstat_mounts_active)
 	SELECT count()
 	FROM wrstat_basedirs_group_usage u
 	ANY INNER JOIN active a
@@ -160,7 +160,7 @@ const infoUserUsageSnapshotQuery = `
 `
 
 const infoUserUsageQuery = `
-	WITH active AS (SELECT mount_path, snapshot_id FROM wrstat_mounts_active_v2)
+	WITH active AS (SELECT mount_path, snapshot_id FROM wrstat_mounts_active)
 	SELECT count()
 	FROM wrstat_basedirs_user_usage u
 	ANY INNER JOIN active a
@@ -177,7 +177,7 @@ const infoGroupHistorySnapshotQuery = `
 `
 
 const infoGroupHistoryQuery = `
-	WITH active AS (SELECT DISTINCT mount_path FROM wrstat_mounts_active_v2)
+	WITH active AS (SELECT DISTINCT mount_path FROM wrstat_mounts_active)
 	SELECT
 		countDistinct((h.mount_path, h.gid)) AS group_mount_combos,
 		count() AS group_histories
@@ -195,7 +195,7 @@ const infoGroupSubDirsSnapshotQuery = `
 `
 
 const infoGroupSubDirsQuery = `
-	WITH active AS (SELECT mount_path, snapshot_id FROM wrstat_mounts_active_v2)
+	WITH active AS (SELECT mount_path, snapshot_id FROM wrstat_mounts_active)
 	SELECT
 		countDistinct((gid, basedir)) AS group_subdir_combos,
 		count() AS group_subdirs
@@ -214,7 +214,7 @@ const infoUserSubDirsSnapshotQuery = `
 `
 
 const infoUserSubDirsQuery = `
-	WITH active AS (SELECT mount_path, snapshot_id FROM wrstat_mounts_active_v2)
+	WITH active AS (SELECT mount_path, snapshot_id FROM wrstat_mounts_active)
 	SELECT
 		countDistinct((uid, basedir)) AS user_subdir_combos,
 		count() AS user_subdirs

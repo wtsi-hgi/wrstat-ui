@@ -32,8 +32,16 @@ SELECT
 FROM (
   SELECT
     mount_path,
-    argMax(tuple(active_snapshot, updated_at, active), switched_at) AS latest
-  FROM wrstat_mounts
+    argMax(
+      tuple(snapshot_id, updated_at, event_type),
+      tuple(
+        event_at,
+        if(event_type = 0, 1, 0),
+        updated_at,
+        toString(snapshot_id)
+      )
+    ) AS latest
+  FROM wrstat_mount_events
   GROUP BY mount_path
 )
 WHERE tupleElement(latest, 3) = 1;

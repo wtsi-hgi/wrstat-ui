@@ -25,5 +25,8 @@
  ***************************************************************************** */
 
 CREATE TABLE IF NOT EXISTS wrstat_schema_version (
-  version UInt32
-) ENGINE = TinyLog;
+  singleton UInt8 DEFAULT 1,
+  version UInt32,
+  inserted_at DateTime64(3) DEFAULT now64(3)
+) ENGINE = ReplacingMergeTree(inserted_at)
+ORDER BY singleton;

@@ -34,8 +34,8 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/wtsi-hgi/wrstat-ui/clickhouse"
 	"github.com/wtsi-hgi/wrstat-ui/db"
-	"github.com/wtsi-hgi/wrstat-ui/internal/boltperf"
 	"github.com/wtsi-hgi/wrstat-ui/internal/chperf"
+	"github.com/wtsi-hgi/wrstat-ui/internal/perfreport"
 )
 
 const (
@@ -364,10 +364,10 @@ func parseGID(raw string) (uint32, bool) {
 	return uint32(v), true
 }
 
-func chPerfWriteReport(report boltperf.Report) error {
+func chPerfWriteReport(report perfreport.Report) error {
 	if chPerf.jsonOut == "" {
 		return nil
 	}
 
-	return boltperf.WriteReport(chPerf.jsonOut, report)
+	return perfreport.WriteReport(chPerf.jsonOut, report)
 }

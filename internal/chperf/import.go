@@ -42,8 +42,8 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
 	"github.com/wtsi-hgi/wrstat-ui/datasets"
 	"github.com/wtsi-hgi/wrstat-ui/db"
-	"github.com/wtsi-hgi/wrstat-ui/internal/boltperf"
 	"github.com/wtsi-hgi/wrstat-ui/internal/mountpath"
+	"github.com/wtsi-hgi/wrstat-ui/internal/perfreport"
 	"github.com/wtsi-hgi/wrstat-ui/internal/summariseutil"
 	"github.com/wtsi-hgi/wrstat-ui/stats"
 	"github.com/wtsi-hgi/wrstat-ui/summary"
@@ -77,11 +77,11 @@ const (
 	tableFiles                = "wrstat_files"
 	tableDGUTA                = "wrstat_dguta"
 	tableChildren             = "wrstat_children"
-	tableDirSummary           = "wrstat_dir_summary"
-	tableDirSummarySets       = "wrstat_dir_summary_sets"
-	tableDirDGUTAVector       = "wrstat_dir_dguta_vector"
+	tableDirSummary           = "wrstat_dir_facts"
+	tableDirSummarySets       = "wrstat_dir_projection_sets"
+	tableDirDGUTAVector       = "wrstat_dir_facts"
 	tableTreeSummarySets      = "wrstat_tree_summary_sets"
-	tableTreeDGUTA            = "wrstat_tree_dguta"
+	tableTreeDGUTA            = "wrstat_virtual_summary_cache"
 	tableTreeDirSummary       = "wrstat_tree_dir_summary"
 	tableTreeChildren         = "wrstat_tree_children"
 	tableBasedirsGroupUsage   = "wrstat_basedirs_group_usage"
@@ -111,7 +111,7 @@ const (
 var ErrNoDatasets = errors.New("no dataset directories found")
 
 // PrintfFunc matches fmt.Printf-style output.
-type PrintfFunc = boltperf.PrintfFunc
+type PrintfFunc = perfreport.PrintfFunc
 
 // Import discovers stats.gz datasets under inputDir, ingests them into
 // ClickHouse, and returns a Report with timing information.
@@ -120,18 +120,18 @@ func Import(
 	inputDir string,
 	opts ImportOptions,
 	printf PrintfFunc,
-) (boltperf.Report, error) {
+) (perfreport.Report, error) {
 	datasetDirs, err := findDatasets(inputDir)
 	if err != nil {
-		return boltperf.Report{}, err
+		return perfreport.Report{}, err
 	}
 
-	report := boltperf.NewReport("clickhouse", inputDir, 1, 0)
+	report := perfreport.NewReport("clickhouse", inputDir, 1, 0)
 	startAll := time.Now()
 
 	results, err := importDatasets(api, datasetDirs, opts, printf)
 	if err != nil {
-		return boltperf.Report{}, err
+		return perfreport.Report{}, err
 	}
 
 	addImportReportOperations(&report, results, effectiveParallelism(opts.Parallelism), time.Since(startAll))
@@ -155,7 +155,7 @@ func findDatasets(baseDir string) ([]string, error) {
 }
 
 func addImportReportOperations(
-	report *boltperf.Report,
+	report *perfreport.Report,
 	results []datasetImportResult,
 	parallelism int,
 	totalDuration time.Duration,
@@ -318,7 +318,7 @@ func totalImportRecords(results []datasetImportResult) uint64 {
 	return total
 }
 
-func addImportGuardrailOperations(report *boltperf.Report, result datasetImportResult) {
+func addImportGuardrailOperations(report *perfreport.Report, result datasetImportResult) {
 	addRawFileIngestGuardrail(report, result)
 	addPhaseImportGuardrail(report, result, importGuardrailActiveSnapshotPublish, phaseMountSwitch, nil)
 	addPhaseImportGuardrail(
@@ -337,7 +337,7 @@ func addImportGuardrailOperations(report *boltperf.Report, result datasetImportR
 	)
 }
 
-func addRawFileIngestGuardrail(report *boltperf.Report, result datasetImportResult) {
+func addRawFileIngestGuardrail(report *perfreport.Report, result datasetImportResult) {
 	status, duration := importGuardrailStatusAndDuration(rawFileIngestObserved(result), result.elapsed)
 	inputs := importGuardrailInputs(result, importGuardrailRawFileIngest, status)
 	inputs["table"] = tableFiles
@@ -380,7 +380,7 @@ func importGuardrailInputs(result datasetImportResult, guardrail string, status 
 }
 
 func addPhaseImportGuardrail(
-	report *boltperf.Report,
+	report *perfreport.Report,
 	result datasetImportResult,
 	guardrail string,
 	phase string,

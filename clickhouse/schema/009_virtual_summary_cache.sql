@@ -24,11 +24,32 @@
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  ***************************************************************************** */
 
-CREATE TABLE IF NOT EXISTS wrstat_mounts (
-  mount_path LowCardinality(String) CODEC(ZSTD(3)),
-  switched_at DateTime64(3) CODEC(Delta, ZSTD(3)),
-  active_snapshot UUID,
+CREATE TABLE IF NOT EXISTS wrstat_virtual_summary_cache (
+  active_set_id String CODEC(ZSTD(3)),
+  dir String CODEC(LZ4),
   updated_at DateTime CODEC(Delta, ZSTD(3)),
-  active UInt8 DEFAULT 1
-) ENGINE = ReplacingMergeTree(switched_at)
-ORDER BY mount_path;
+  all_count UInt64 CODEC(Delta, LZ4),
+  all_size UInt64 CODEC(Delta, LZ4),
+  all_atime_min Int64 CODEC(Delta, LZ4),
+  all_mtime_max Int64 CODEC(Delta, LZ4),
+  all_atime_buckets Array(UInt64) CODEC(LZ4),
+  all_mtime_buckets Array(UInt64) CODEC(LZ4),
+  all_uids Array(UInt32) CODEC(LZ4),
+  all_gids Array(UInt32) CODEC(LZ4),
+  all_ft UInt16,
+  gids Array(UInt32) CODEC(LZ4),
+  uids Array(UInt32) CODEC(LZ4),
+  fts Array(UInt16) CODEC(LZ4),
+  ages Array(UInt8) CODEC(LZ4),
+  counts Array(UInt64) CODEC(Delta, LZ4),
+  sizes Array(UInt64) CODEC(Delta, LZ4),
+  atime_mins Array(Int64) CODEC(Delta, LZ4),
+  mtime_maxs Array(Int64) CODEC(Delta, LZ4),
+  atime_buckets Array(Array(UInt64)) CODEC(LZ4),
+  mtime_buckets Array(Array(UInt64)) CODEC(LZ4),
+  child_count UInt64 CODEC(Delta, LZ4),
+  refreshed_at DateTime64(3) CODEC(Delta, ZSTD(3))
+) ENGINE = MergeTree
+PARTITION BY active_set_id
+ORDER BY (active_set_id, dir)
+SETTINGS index_granularity = 8192;

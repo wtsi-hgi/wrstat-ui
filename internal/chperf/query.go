@@ -38,8 +38,8 @@ import (
 
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
 	"github.com/wtsi-hgi/wrstat-ui/db"
-	"github.com/wtsi-hgi/wrstat-ui/internal/boltperf"
 	"github.com/wtsi-hgi/wrstat-ui/internal/mountpath"
+	"github.com/wtsi-hgi/wrstat-ui/internal/perfreport"
 	"github.com/wtsi-hgi/wrstat-ui/internal/split"
 	"github.com/wtsi-hgi/wrstat-ui/provider"
 )
@@ -126,10 +126,10 @@ func Query(
 	api QueryAPI,
 	opts QueryOptions,
 	printf PrintfFunc,
-) (_ boltperf.Report, err error) {
+) (_ perfreport.Report, err error) {
 	qctx, err := buildQueryContext(api, opts, printf)
 	if err != nil {
-		return boltperf.Report{}, err
+		return perfreport.Report{}, err
 	}
 
 	defer func() {
@@ -139,13 +139,13 @@ func Query(
 	}()
 
 	if err := verifyPlans(qctx, printf); err != nil {
-		return boltperf.Report{}, err
+		return perfreport.Report{}, err
 	}
 
-	report := boltperf.NewReport("clickhouse", "", opts.Repeat, opts.Warmup)
+	report := perfreport.NewReport("clickhouse", "", opts.Repeat, opts.Warmup)
 
 	if err := runSuite(&report, qctx, opts, printf); err != nil {
-		return boltperf.Report{}, err
+		return perfreport.Report{}, err
 	}
 
 	return report, nil
@@ -1300,7 +1300,7 @@ func pickPath(client QueryClient, dir string) string {
 }
 
 func runSuite(
-	report *boltperf.Report,
+	report *perfreport.Report,
 	qctx queryContext,
 	opts QueryOptions,
 	printf PrintfFunc,
@@ -1553,7 +1553,7 @@ func globOp(
 }
 
 func runOp(
-	report *boltperf.Report,
+	report *perfreport.Report,
 	qctx queryContext,
 	o op,
 	opts QueryOptions,
@@ -1585,7 +1585,7 @@ func runOp(
 
 	report.AddOperation(o.name, o.inputs, durations)
 
-	p50, p95, p99 := boltperf.PercentilesMS(durations)
+	p50, p95, p99 := perfreport.PercentilesMS(durations)
 	printf("%s repeats=%d p50=%.3f p95=%.3f p99=%.3f ms\n",
 		o.name, len(durations), p50, p95, p99)
 
