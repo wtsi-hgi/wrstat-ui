@@ -370,7 +370,13 @@ func TestRunOp(t *testing.T) {
 						return nil, err
 					}
 
-					return &QueryMetrics{DurationMs: 12, ReadRows: 34, ResultRows: 1}, nil
+					return &QueryMetrics{
+						DurationMs: 12,
+						ReadRows:   34,
+						ReadBytes:  56,
+						ReadMarks:  7,
+						ResultRows: 1,
+					}, nil
 				},
 			}},
 			op{name: "mount_timestamps", inputs: map[string]any{}, run: func(context.Context) error { return nil }},
@@ -381,7 +387,11 @@ func TestRunOp(t *testing.T) {
 		So(err, ShouldBeNil)
 		So(report.Operations, ShouldHaveLength, 1)
 		So(report.Operations[0].DurationsMS, ShouldResemble, []float64{12, 12})
+		So(report.Operations[0].ReadRows, ShouldResemble, []uint64{34, 34})
+		So(report.Operations[0].ReadBytes, ShouldResemble, []uint64{56, 56})
+		So(report.Operations[0].ReadMarks, ShouldResemble, []uint64{7, 7})
 		So(out.String(), ShouldContainSubstring, "metrics")
+		So(out.String(), ShouldContainSubstring, "read_marks=%d")
 	})
 
 	Convey("runOp records active mount updated_at values for mount_timestamps", t, func() {
@@ -573,6 +583,82 @@ func TestRunSuiteOperationSelection(t *testing.T) {
 		So(err.Error(), ShouldContainSubstring, queryOpTreeDiskTreeEndName)
 		So(report.Operations, ShouldHaveLength, 0)
 	})
+
+	Convey("runSuite can select focused final-gate operations with counts and query counters", t, func() {
+		database := newQueryOpTestDB()
+		database.children["/"] = []string{queryOpTestRootDir}
+		database.summaries["/"] = &db.DirSummary{Count: 3}
+		qctx := queryContext{
+			provider: fakeMountTimestampsProvider{
+				tree: db.NewTree(database),
+				bd: fakeMountTimestampsReader{mountTimestamps: map[string]time.Time{
+					mountpath.EncodeKey(queryOpTestRootDir): time.Unix(1, 0),
+				}},
+			},
+			client: &fakeQueryClient{rows: []QueryRow{{
+				Path:      queryOpTestRootDir + ".hidden.bam",
+				Ext:       "bam",
+				EntryType: 'f',
+			}}},
+			inspector: fakeQueryInspector{
+				measure: func(ctx context.Context, run func(context.Context) error) (*QueryMetrics, error) {
+					if err := run(ctx); err != nil {
+						return nil, err
+					}
+
+					return &QueryMetrics{
+						DurationMs: 3,
+						ReadRows:   4,
+						ReadBytes:  5,
+						ReadMarks:  6,
+					}, nil
+				},
+			},
+			dir:        queryOpTestRootDir,
+			treeFilter: queryTestTreeFilter(),
+		}
+		report := boltperf.NewReport("clickhouse", "", 1, 0)
+		focusedOps := []string{
+			queryOpDirInfoBroadName,
+			queryOpDirInfoFilteredName,
+			queryOpDirInfosBroadName,
+			queryOpDirInfosFilteredName,
+			queryOpDirsHaveChildrenBroadName,
+			queryOpDirsHaveChildrenFilteredName,
+			queryOpWhereWholeMountName,
+			queryOpWhereFilteredWholeMountName,
+			queryOpVirtualChildrenName,
+			queryOpVirtualDirInfoName,
+			queryOpFindGlobExtensionDotfileName,
+		}
+
+		err := runSuite(&report, qctx, QueryOptions{
+			Repeat: 1,
+			Ops:    focusedOps,
+			Splits: 1,
+		}, func(string, ...any) {})
+
+		So(err, ShouldBeNil)
+		So(report.Operations, ShouldHaveLength, len(focusedOps))
+
+		names := make([]string, 0, len(report.Operations))
+		for _, op := range report.Operations {
+			names = append(names, op.Name)
+			So(op.DurationsMS, ShouldResemble, []float64{3})
+			So(op.P50MS, ShouldEqual, float64(3))
+			So(op.P95MS, ShouldEqual, float64(3))
+			So(op.P99MS, ShouldEqual, float64(3))
+			So(op.ReadRows, ShouldResemble, []uint64{4})
+			So(op.ReadBytes, ShouldResemble, []uint64{5})
+			So(op.ReadMarks, ShouldResemble, []uint64{6})
+			So(op.ResultCount, ShouldHaveLength, 1)
+			So(op.ResultCount[0], ShouldBeGreaterThanOrEqualTo, uint64(0))
+		}
+
+		for _, name := range focusedOps {
+			So(names, ShouldContain, name)
+		}
+	})
 }
 
 func TestBuildQueryContext(t *testing.T) {
@@ -694,8 +780,8 @@ func (*fakeQueryClient) FindByGlob(
 	bool,
 	uint32,
 	[]uint32,
-) error {
-	return nil
+) (int, error) {
+	return 2, nil
 }
 
 func (c *fakeQueryClient) Close() error {

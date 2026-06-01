@@ -60,6 +60,76 @@ func TestNewInspector(t *testing.T) {
 	})
 }
 
+type profileEventsTestRows struct {
+	events map[string]uint64
+	keys   []string
+	pos    int
+}
+
+func (r *profileEventsTestRows) Next() bool {
+	if r.keys == nil {
+		r.keys = []string{
+			profileEventSelectedRows,
+			profileEventSelectedBytes,
+			profileEventSelectedMarks,
+		}
+	}
+
+	return r.pos < len(r.keys)
+}
+
+func (r *profileEventsTestRows) Scan(dest ...any) error {
+	if len(dest) != 2 {
+		return errBootstrapTestUnexpectedScanDestinationN
+	}
+
+	event := r.keys[r.pos]
+
+	eventDest, ok := dest[0].(*string)
+	if !ok {
+		return errBootstrapTestUnexpectedScanDestination
+	}
+
+	valueDest, ok := dest[1].(*uint64)
+	if !ok {
+		return errBootstrapTestUnexpectedScanDestination
+	}
+
+	*eventDest = event
+	*valueDest = r.events[event]
+	r.pos++
+
+	return nil
+}
+
+func (*profileEventsTestRows) ScanStruct(any) error {
+	return errBootstrapTestUnexpectedCall
+}
+
+func (*profileEventsTestRows) ColumnTypes() []driver.ColumnType {
+	return nil
+}
+
+func (*profileEventsTestRows) Totals(dest ...any) error {
+	return errBootstrapTestUnexpectedCall
+}
+
+func (*profileEventsTestRows) Columns() []string {
+	return []string{"event", "value"}
+}
+
+func (*profileEventsTestRows) Close() error {
+	return nil
+}
+
+func (*profileEventsTestRows) Err() error {
+	return nil
+}
+
+func (*profileEventsTestRows) HasData() bool {
+	return true
+}
+
 func TestInspectorExplainListDir(t *testing.T) {
 	Convey("ExplainListDir returns EXPLAIN output", t, func() {
 		os.Setenv("WRSTAT_ENV", "test")
@@ -227,6 +297,17 @@ func TestInspectorMeasure(t *testing.T) {
 			conn: &inspectorTestConn{rows: map[string]driver.Row{
 				serverTimeQuery: inspectorTestRow{values: []any{time.Unix(1710000000, 0).UTC()}},
 				queryLogQuery:   inspectorTestRow{err: sql.ErrNoRows},
+			}, profileEvents: []map[string]uint64{
+				{
+					profileEventSelectedRows:  10,
+					profileEventSelectedBytes: 20,
+					profileEventSelectedMarks: 3,
+				},
+				{
+					profileEventSelectedRows:  15,
+					profileEventSelectedBytes: 32,
+					profileEventSelectedMarks: 5,
+				},
 			}},
 		}
 
@@ -241,8 +322,9 @@ func TestInspectorMeasure(t *testing.T) {
 		So(err, ShouldBeNil)
 		So(m, ShouldNotBeNil)
 		So(m.DurationMs, ShouldBeGreaterThanOrEqualTo, uint64(10))
-		So(m.ReadRows, ShouldEqual, 0)
-		So(m.ReadBytes, ShouldEqual, 0)
+		So(m.ReadRows, ShouldEqual, 5)
+		So(m.ReadBytes, ShouldEqual, 12)
+		So(m.ReadMarks, ShouldEqual, 2)
 		So(m.ResultRows, ShouldEqual, 0)
 		So(m.ResultBytes, ShouldEqual, 0)
 	})
@@ -250,7 +332,9 @@ func TestInspectorMeasure(t *testing.T) {
 
 type inspectorTestConn struct {
 	bootstrapTestConn
-	rows map[string]driver.Row
+	rows          map[string]driver.Row
+	profileEvents []map[string]uint64
+	profilePos    int
 }
 
 func (c *inspectorTestConn) QueryRow(_ context.Context, query string, _ ...any) driver.Row {
@@ -267,6 +351,17 @@ func (c *inspectorTestConn) Exec(_ context.Context, query string, _ ...any) erro
 	}
 
 	return errBootstrapTestUnexpectedCall
+}
+
+func (c *inspectorTestConn) Query(_ context.Context, query string, _ ...any) (driver.Rows, error) {
+	if query != profileEventsQuery || c.profilePos >= len(c.profileEvents) {
+		return nil, errBootstrapTestUnexpectedCall
+	}
+
+	rows := profileEventsTestRows{events: c.profileEvents[c.profilePos]}
+	c.profilePos++
+
+	return &rows, nil
 }
 
 type mockExplainRows struct {

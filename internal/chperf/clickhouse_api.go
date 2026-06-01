@@ -27,15 +27,42 @@ package chperf
 
 import (
 	"context"
+	"fmt"
 	"io"
+	"strings"
 	"time"
 
+	ch "github.com/ClickHouse/clickhouse-go/v2"
+	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
 	"github.com/wtsi-hgi/wrstat-ui/clickhouse"
 	"github.com/wtsi-hgi/wrstat-ui/db"
+	"github.com/wtsi-hgi/wrstat-ui/internal/perfreport"
 	"github.com/wtsi-hgi/wrstat-ui/provider"
 	"github.com/wtsi-hgi/wrstat-ui/summary"
 )
+
+const (
+	clickHouseFileFieldPath      = "path"
+	clickHouseFileFieldExt       = "ext"
+	clickHouseFileFieldEntryType = "entry_type"
+)
+
+const importFactsStatsQuery = "SELECT " +
+	"toUInt64(count()), " +
+	"toUInt64(sum(length(gids))), " +
+	"if(count() = 0, 0, avg(length(gids))), " +
+	"toUInt64(max(length(gids))), " +
+	"toUInt64(count()), " +
+	"toUInt64(countIf(arrayExists(b -> length(b) > 0, atime_buckets) " +
+	"OR arrayExists(b -> length(b) > 0, mtime_buckets))), " +
+	"toUInt64(greatest(" +
+	"max(arrayMax(arrayConcat([0], arrayMap(b -> length(b), atime_buckets)))), " +
+	"max(arrayMax(arrayConcat([0], arrayMap(b -> length(b), mtime_buckets))))" +
+	")), " +
+	"toUInt64(countIf(arrayExists(b -> length(b) NOT IN (0, 10), atime_buckets) " +
+	"OR arrayExists(b -> length(b) NOT IN (0, 10), mtime_buckets))) " +
+	"FROM wrstat_dir_facts"
 
 // ClickHouseAPI adapts the ClickHouse backend to the perf harness.
 type ClickHouseAPI interface {
@@ -56,18 +83,13 @@ type clickHouseFileAPI interface {
 	Close() error
 }
 
-const (
-	clickHouseFileFieldPath      = "path"
-	clickHouseFileFieldExt       = "ext"
-	clickHouseFileFieldEntryType = "entry_type"
-)
-
 var (
-	_ ClickHouseAPI      = (*clickHouseAPI)(nil)
-	_ clickHouseFileAPI  = (*clickhouse.Client)(nil)
-	_ ImportAPI          = (*clickHouseAPI)(nil)
-	_ QueryAPI           = (*clickHouseAPI)(nil)
-	_ QueryCacheResetter = (*clickHouseAPI)(nil)
+	_ ClickHouseAPI        = (*clickHouseAPI)(nil)
+	_ clickHouseFileAPI    = (*clickhouse.Client)(nil)
+	_ ImportAPI            = (*clickHouseAPI)(nil)
+	_ ImportReportStatsAPI = (*clickHouseAPI)(nil)
+	_ QueryAPI             = (*clickHouseAPI)(nil)
+	_ QueryCacheResetter   = (*clickHouseAPI)(nil)
 )
 
 type clickHouseOpenProvider func(clickhouse.Config) (provider.Provider, error)
@@ -135,15 +157,15 @@ func (c clickHouseQueryClient) FindByGlob(
 	requireOwner bool,
 	uid uint32,
 	gids []uint32,
-) error {
-	_, err := c.client.FindByGlob(ctx, baseDirs, patterns, clickhouse.FindOptions{
+) (int, error) {
+	rows, err := c.client.FindByGlob(ctx, baseDirs, patterns, clickhouse.FindOptions{
 		Fields:       []string{clickHouseFileFieldPath},
 		RequireOwner: requireOwner,
 		UID:          uid,
 		GIDs:         gids,
 	})
 
-	return err
+	return len(rows), err
 }
 
 func (c clickHouseQueryClient) Close() error {
@@ -186,6 +208,7 @@ func convertQueryMetrics(metrics *clickhouse.QueryMetrics) *QueryMetrics {
 		DurationMs:  metrics.DurationMs,
 		ReadRows:    metrics.ReadRows,
 		ReadBytes:   metrics.ReadBytes,
+		ReadMarks:   metrics.ReadMarks,
 		ResultRows:  metrics.ResultRows,
 		ResultBytes: metrics.ResultBytes,
 	}
@@ -256,10 +279,155 @@ func (a *clickHouseAPI) NewBaseDirsStore() (basedirs.Store, error) {
 	return clickhouse.NewBaseDirsStore(a.cfg)
 }
 
+func (a *clickHouseAPI) ImportTableStats(
+	ctx context.Context,
+	tables []string,
+) (map[string]perfreport.TableStats, error) {
+	conn, err := a.openStatsConn(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	defer func() { _ = conn.Close() }()
+
+	return queryImportTableStats(ctx, conn, a.cfg.Database, tables)
+}
+
+func queryImportTableStats(
+	ctx context.Context,
+	conn driver.Conn,
+	database string,
+	tables []string,
+) (map[string]perfreport.TableStats, error) {
+	if len(tables) == 0 {
+		return map[string]perfreport.TableStats{}, nil
+	}
+
+	query, args := importTableStatsQuery(database, tables)
+
+	rows, err := conn.Query(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	return scanImportTableStats(rows)
+}
+
+func (a *clickHouseAPI) ImportFactsStats(
+	ctx context.Context,
+) (perfreport.FactsVectorStats, perfreport.FactsBucketStats, error) {
+	conn, err := a.openStatsConn(ctx)
+	if err != nil {
+		return perfreport.FactsVectorStats{}, perfreport.FactsBucketStats{}, err
+	}
+
+	defer func() { _ = conn.Close() }()
+
+	return queryImportFactsStats(ctx, conn)
+}
+
+func queryImportFactsStats(
+	ctx context.Context,
+	conn driver.Conn,
+) (perfreport.FactsVectorStats, perfreport.FactsBucketStats, error) {
+	row := conn.QueryRow(ctx, importFactsStatsQuery)
+
+	var (
+		vector perfreport.FactsVectorStats
+		bucket perfreport.FactsBucketStats
+	)
+
+	err := row.Scan(
+		&vector.Rows,
+		&vector.TotalEntries,
+		&vector.AverageEntriesPerDir,
+		&vector.MaxEntriesPerDir,
+		&bucket.Rows,
+		&bucket.NonEmptyRows,
+		&bucket.MaxBuckets,
+		&bucket.MismatchedBucketRows,
+	)
+	if err != nil {
+		return vector, bucket, fmt.Errorf("clickhouse perf facts stats: %w", err)
+	}
+
+	return vector, bucket, nil
+}
+
 func (a *clickHouseAPI) OpenProvider() (provider.Provider, error) {
 	return a.openProvider(a.providerConfig())
 }
 
 func (a *clickHouseAPI) ResetQueryCaches() {
 	clickhouse.ResetTreeQueryCaches()
+}
+
+func (a *clickHouseAPI) openStatsConn(ctx context.Context) (driver.Conn, error) {
+	opts, err := ch.ParseDSN(a.cfg.DSN)
+	if err != nil {
+		return nil, err
+	}
+
+	opts.Auth.Database = a.cfg.Database
+
+	conn, err := ch.Open(opts)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := conn.Ping(ctx); err != nil {
+		_ = conn.Close()
+
+		return nil, err
+	}
+
+	return conn, nil
+}
+
+func importTableStatsQuery(database string, tables []string) (string, []any) {
+	placeholders := strings.TrimRight(strings.Repeat("?,", len(tables)), ",")
+	query := "SELECT table, toUInt64(sum(rows)), toUInt64(count()), " +
+		"toUInt64(sum(data_compressed_bytes)), toUInt64(sum(data_uncompressed_bytes)) " +
+		"FROM system.parts WHERE database = ? AND active AND table IN (" +
+		placeholders + ") GROUP BY table"
+
+	args := make([]any, 0, len(tables)+1)
+
+	args = append(args, database)
+	for _, table := range tables {
+		args = append(args, table)
+	}
+
+	return query, args
+}
+
+func scanImportTableStats(rows driver.Rows) (map[string]perfreport.TableStats, error) {
+	stats := make(map[string]perfreport.TableStats)
+
+	for rows.Next() {
+		var (
+			table string
+			s     perfreport.TableStats
+		)
+
+		if err := rows.Scan(
+			&table,
+			&s.Rows,
+			&s.ActiveParts,
+			&s.CompressedBytes,
+			&s.UncompressedBytes,
+		); err != nil {
+			return nil, err
+		}
+
+		stats[table] = s
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return stats, nil
 }

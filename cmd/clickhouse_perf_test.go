@@ -26,6 +26,7 @@
 package cmd
 
 import (
+	"os"
 	"testing"
 
 	. "github.com/smartystreets/goconvey/convey"
@@ -63,4 +64,61 @@ func TestClickHousePerfQueryFlags(t *testing.T) {
 		So(flags.Lookup("tree-types"), ShouldNotBeNil)
 		So(flags.Lookup("tree-ft"), ShouldNotBeNil)
 	})
+}
+
+func TestClickHousePerfRequiresConnectionSettings(t *testing.T) {
+	Convey("clickhouse-perf import reports missing DSN and database before input work", t, func() {
+		resetClickHousePerfConnectionForTest()
+
+		err := runCHPerfImport("/definitely/not/read")
+
+		So(err, ShouldNotBeNil)
+		So(err.Error(), ShouldContainSubstring, errClickhouseDSNRequired.Error())
+		So(err.Error(), ShouldContainSubstring, errClickhouseDatabaseRequired.Error())
+		So(err.Error(), ShouldNotContainSubstring, "definitely/not/read")
+	})
+
+	Convey("clickhouse-perf query reports missing DSN and database before running operations", t, func() {
+		resetClickHousePerfConnectionForTest()
+
+		err := runCHPerfQuery()
+
+		So(err, ShouldNotBeNil)
+		So(err.Error(), ShouldContainSubstring, errClickhouseDSNRequired.Error())
+		So(err.Error(), ShouldContainSubstring, errClickhouseDatabaseRequired.Error())
+		So(err.Error(), ShouldNotContainSubstring, "active mounts")
+	})
+}
+
+func resetClickHousePerfConnectionForTest() {
+	origDSN := chPerf.dsn
+	origDB := chPerf.database
+	origMountpoints := chPerf.mountpoints
+	origEnvDSN, hadEnvDSN := os.LookupEnv(envClickhouseDSN)
+	origEnvDB, hadEnvDB := os.LookupEnv(envClickhouseDatabase)
+
+	chPerf.dsn = ""
+	chPerf.database = ""
+	chPerf.mountpoints = ""
+	_ = os.Unsetenv(envClickhouseDSN)
+	_ = os.Unsetenv(envClickhouseDatabase)
+
+	Reset(func() {
+		chPerf.dsn = origDSN
+		chPerf.database = origDB
+		chPerf.mountpoints = origMountpoints
+
+		restoreEnv(envClickhouseDSN, origEnvDSN, hadEnvDSN)
+		restoreEnv(envClickhouseDatabase, origEnvDB, hadEnvDB)
+	})
+}
+
+func restoreEnv(key, value string, ok bool) {
+	if ok {
+		_ = os.Setenv(key, value)
+
+		return
+	}
+
+	_ = os.Unsetenv(key)
 }

@@ -27,6 +27,7 @@
 package chperf
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -36,6 +37,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/klauspost/pgzip"
@@ -89,6 +91,7 @@ const (
 	tableBasedirsGroupSubdirs = "wrstat_basedirs_group_subdirs"
 	tableBasedirsUserSubdirs  = "wrstat_basedirs_user_subdirs"
 	tableBasedirsHistory      = "wrstat_basedirs_history"
+	tableDirFilterAgeAll      = "wrstat_dir_filter_ageall"
 )
 
 const (
@@ -135,6 +138,10 @@ func Import(
 	}
 
 	addImportReportOperations(&report, results, effectiveParallelism(opts.Parallelism), time.Since(startAll))
+
+	if err := enrichImportReport(context.Background(), &report, api, results); err != nil {
+		return perfreport.Report{}, err
+	}
 
 	return report, nil
 }
@@ -417,6 +424,223 @@ func importMode(parallelism int) string {
 
 func effectiveParallelism(parallelism int) int {
 	return min(max(parallelism, 1), maxImportParallel)
+}
+
+func enrichImportReport(
+	ctx context.Context,
+	report *perfreport.Report,
+	api ImportAPI,
+	results []datasetImportResult,
+) error {
+	selectedTables := selectedImportTables(nil)
+	tableStats := fallbackImportTableStats(results, selectedTables)
+
+	if statsAPI, ok := api.(ImportReportStatsAPI); ok {
+		if err := collectImportReportStats(ctx, report, statsAPI, &selectedTables, tableStats); err != nil {
+			return err
+		}
+	}
+
+	addImportPhaseDurations(tableStats, results)
+
+	report.SelectedTables = selectedTables
+	report.TableStats = tableStatsForSelectedTables(tableStats, selectedTables)
+	report.MaxRSSBytes = maxRSSBytes()
+
+	return nil
+}
+
+func selectedImportTables(collected map[string]perfreport.TableStats) []string {
+	selected := baseImportSelectedTables()
+
+	for _, optional := range []string{tableDirFilterAgeAll, tableTreeDGUTA} {
+		if importTableSelected(collected[optional]) {
+			selected = append(selected, optional)
+		}
+	}
+
+	return selected
+}
+
+func baseImportSelectedTables() []string {
+	return []string{
+		tableFiles,
+		tableDirSummary,
+		tableChildren,
+		tableDirSummarySets,
+		tableBasedirsGroupUsage,
+		tableBasedirsUserUsage,
+		tableBasedirsGroupSubdirs,
+		tableBasedirsUserSubdirs,
+		tableBasedirsHistory,
+	}
+}
+
+func importTableSelected(stats perfreport.TableStats) bool {
+	return stats.Rows > 0 ||
+		stats.ActiveParts > 0 ||
+		stats.CompressedBytes > 0 ||
+		stats.UncompressedBytes > 0
+}
+
+func fallbackImportTableStats(
+	results []datasetImportResult,
+	tables []string,
+) map[string]perfreport.TableStats {
+	stats := make(map[string]perfreport.TableStats, len(tables))
+	for _, table := range tables {
+		stats[table] = perfreport.TableStats{Rows: importRowsForPhysicalTable(results, table)}
+	}
+
+	return stats
+}
+
+func importRowsForPhysicalTable(results []datasetImportResult, table string) uint64 {
+	var rows uint64
+
+	for _, result := range results {
+		switch table {
+		case tableDirSummary:
+			rows += result.rows[tableDGUTA]
+		default:
+			rows += result.rows[table]
+		}
+	}
+
+	return rows
+}
+
+func collectImportReportStats(
+	ctx context.Context,
+	report *perfreport.Report,
+	statsAPI ImportReportStatsAPI,
+	selectedTables *[]string,
+	tableStats map[string]perfreport.TableStats,
+) error {
+	collected, err := statsAPI.ImportTableStats(ctx, importStatsCandidateTables())
+	if err != nil {
+		return err
+	}
+
+	*selectedTables = selectedImportTables(collected)
+	maps.Copy(tableStats, collected)
+
+	vector, buckets, err := statsAPI.ImportFactsStats(ctx)
+	if err != nil {
+		return err
+	}
+
+	report.FactsVectorStats = &vector
+	report.FactsBucketStats = &buckets
+
+	return nil
+}
+
+func importStatsCandidateTables() []string {
+	tables := baseImportSelectedTables()
+	tables = append(tables, tableDirFilterAgeAll, tableTreeDGUTA)
+
+	return tables
+}
+
+func addImportPhaseDurations(
+	stats map[string]perfreport.TableStats,
+	results []datasetImportResult,
+) {
+	for table, phases := range importPhaseDurationsByTable(results) {
+		tableStats := stats[table]
+		tableStats.ImportPhaseDurationsMS = phases
+		stats[table] = tableStats
+	}
+}
+
+func importPhaseDurationsByTable(results []datasetImportResult) map[string]map[string]float64 {
+	byTable := make(map[string]map[string]float64)
+
+	for _, result := range results {
+		for phase, duration := range result.phases {
+			addImportPhaseDuration(byTable, phase, duration)
+		}
+	}
+
+	return byTable
+}
+
+func addImportPhaseDuration(
+	byTable map[string]map[string]float64,
+	phase string,
+	duration time.Duration,
+) {
+	for _, table := range importPhasePhysicalTables(phase) {
+		if byTable[table] == nil {
+			byTable[table] = make(map[string]float64)
+		}
+
+		byTable[table][phase] += durationMS(duration)
+	}
+}
+
+func importPhasePhysicalTables(phase string) []string {
+	if table, ok := importMainTablePhase(phase); ok {
+		return []string{importPhysicalTable(table)}
+	}
+
+	if table, ok := importBasedirsTablePhase(phase); ok {
+		return []string{table}
+	}
+
+	tables, ok := importMultiTablePhase(phase)
+	if !ok {
+		return nil
+	}
+
+	physical := make([]string, 0, len(tables))
+
+	seen := make(map[string]struct{}, len(tables))
+	for _, table := range tables {
+		table = importPhysicalTable(table)
+		if _, ok := seen[table]; ok {
+			continue
+		}
+
+		seen[table] = struct{}{}
+		physical = append(physical, table)
+	}
+
+	return physical
+}
+
+func importPhysicalTable(table string) string {
+	if table == tableDGUTA {
+		return tableDirSummary
+	}
+
+	return table
+}
+
+func tableStatsForSelectedTables(
+	stats map[string]perfreport.TableStats,
+	selectedTables []string,
+) map[string]perfreport.TableStats {
+	selected := make(map[string]perfreport.TableStats, len(selectedTables))
+	for _, table := range selectedTables {
+		selected[table] = stats[table]
+	}
+
+	return selected
+}
+
+func maxRSSBytes() uint64 {
+	var usage syscall.Rusage
+	if err := syscall.Getrusage(syscall.RUSAGE_SELF, &usage); err != nil {
+		return 0
+	}
+
+	if usage.Maxrss <= 0 {
+		return 0
+	}
+
+	return uint64(usage.Maxrss) * 1024
 }
 
 func importDatasets(

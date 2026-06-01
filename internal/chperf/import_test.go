@@ -27,6 +27,7 @@
 package chperf
 
 import (
+	"context"
 	"errors"
 	"io"
 	"os"
@@ -39,6 +40,7 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 	"github.com/wtsi-hgi/wrstat-ui/internal/boltperf"
+	"github.com/wtsi-hgi/wrstat-ui/internal/perfreport"
 	internaltest "github.com/wtsi-hgi/wrstat-ui/internal/test"
 	"github.com/wtsi-hgi/wrstat-ui/summary"
 )
@@ -427,6 +429,9 @@ type fakeImportAPI struct {
 	dgutaWriter   *fakeImportDGUTAWriter
 	fileCloser    *fakeImportCloser
 	baseDirsStore *historyTrackingBasedirsStore
+	tableStats    map[string]perfreport.TableStats
+	vectorStats   perfreport.FactsVectorStats
+	bucketStats   perfreport.FactsBucketStats
 	fileMountPath string
 	fileUpdatedAt time.Time
 	baseDirsCalls int
@@ -462,6 +467,129 @@ func (a *fakeImportAPI) NewBaseDirsStore() (basedirs.Store, error) {
 	}
 
 	return a.baseDirsStore, nil
+}
+
+func (a *fakeImportAPI) ImportTableStats(
+	context.Context,
+	[]string,
+) (map[string]perfreport.TableStats, error) {
+	return a.tableStats, nil
+}
+
+func (a *fakeImportAPI) ImportFactsStats(
+	context.Context,
+) (perfreport.FactsVectorStats, perfreport.FactsBucketStats, error) {
+	return a.vectorStats, a.bucketStats, nil
+}
+
+func TestImportReportEnrichment(t *testing.T) {
+	Convey("enrichImportReport records selected table stats, facts stats, and optional tables", t, func() {
+		report := boltperf.NewReport("clickhouse", "/input", 1, 0)
+		result := datasetImportResult{
+			dataset:   importTestDataset,
+			statsPath: importTestStatsPath,
+			mountPath: importTestMountScratch,
+			rows: map[string]uint64{
+				tableFiles:                42,
+				tableDGUTA:                3,
+				tableChildren:             2,
+				tableBasedirsGroupUsage:   1,
+				tableBasedirsUserUsage:    1,
+				tableBasedirsGroupSubdirs: 1,
+				tableBasedirsUserSubdirs:  1,
+				tableBasedirsHistory:      1,
+			},
+			phases: map[string]time.Duration{
+				phaseFilesInsert:        10 * time.Millisecond,
+				phaseDirProjectionWrite: 20 * time.Millisecond,
+				phaseChildrenInsert:     30 * time.Millisecond,
+				phaseBasedirsGroupUsage: 40 * time.Millisecond,
+			},
+		}
+		api := &fakeImportAPI{
+			tableStats: map[string]perfreport.TableStats{
+				tableFiles: {
+					Rows:              42,
+					ActiveParts:       2,
+					CompressedBytes:   100,
+					UncompressedBytes: 200,
+				},
+				tableDirSummary: {
+					Rows:              3,
+					ActiveParts:       1,
+					CompressedBytes:   80,
+					UncompressedBytes: 160,
+				},
+				tableChildren: {
+					Rows:              2,
+					ActiveParts:       1,
+					CompressedBytes:   50,
+					UncompressedBytes: 100,
+				},
+				tableDirFilterAgeAll: {
+					Rows:              5,
+					ActiveParts:       1,
+					CompressedBytes:   70,
+					UncompressedBytes: 140,
+				},
+				tableTreeDGUTA: {
+					Rows:              6,
+					ActiveParts:       1,
+					CompressedBytes:   90,
+					UncompressedBytes: 180,
+				},
+			},
+			vectorStats: perfreport.FactsVectorStats{
+				Rows:                 3,
+				TotalEntries:         12,
+				AverageEntriesPerDir: 4,
+				MaxEntriesPerDir:     9,
+			},
+			bucketStats: perfreport.FactsBucketStats{
+				Rows:                 3,
+				NonEmptyRows:         2,
+				MaxBuckets:           10,
+				MismatchedBucketRows: 0,
+			},
+		}
+
+		So(enrichImportReport(context.Background(), &report, api, []datasetImportResult{result}), ShouldBeNil)
+
+		So(report.SelectedTables, ShouldContain, tableFiles)
+		So(report.SelectedTables, ShouldContain, tableDirSummary)
+		So(report.SelectedTables, ShouldContain, tableChildren)
+		So(report.SelectedTables, ShouldContain, tableDirSummarySets)
+		So(report.SelectedTables, ShouldContain, tableBasedirsGroupUsage)
+		So(report.SelectedTables, ShouldContain, tableBasedirsUserUsage)
+		So(report.SelectedTables, ShouldContain, tableBasedirsGroupSubdirs)
+		So(report.SelectedTables, ShouldContain, tableBasedirsUserSubdirs)
+		So(report.SelectedTables, ShouldContain, tableBasedirsHistory)
+		So(report.SelectedTables, ShouldContain, tableDirFilterAgeAll)
+		So(report.SelectedTables, ShouldContain, tableTreeDGUTA)
+
+		files := report.TableStats[tableFiles]
+		So(files.Rows, ShouldEqual, uint64(42))
+		So(files.ActiveParts, ShouldEqual, uint64(2))
+		So(files.CompressedBytes, ShouldEqual, uint64(100))
+		So(files.UncompressedBytes, ShouldEqual, uint64(200))
+		So(files.ImportPhaseDurationsMS[phaseFilesInsert], ShouldEqual, float64(10))
+
+		dirFacts := report.TableStats[tableDirSummary]
+		So(dirFacts.Rows, ShouldEqual, uint64(3))
+		So(dirFacts.ImportPhaseDurationsMS[phaseDirProjectionWrite], ShouldEqual, float64(20))
+
+		children := report.TableStats[tableChildren]
+		So(children.Rows, ShouldEqual, uint64(2))
+		So(children.ImportPhaseDurationsMS[phaseChildrenInsert], ShouldEqual, float64(30))
+
+		basedirs := report.TableStats[tableBasedirsGroupUsage]
+		So(basedirs.Rows, ShouldEqual, uint64(1))
+		So(basedirs.ImportPhaseDurationsMS[phaseBasedirsGroupUsage], ShouldEqual, float64(40))
+
+		So(report.FactsVectorStats, ShouldResemble, &api.vectorStats)
+		So(report.FactsBucketStats, ShouldResemble, &api.bucketStats)
+		So(report.MaxRSSBytes, ShouldBeGreaterThan, uint64(0))
+	})
 }
 
 type orderedCloser struct {

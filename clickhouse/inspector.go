@@ -35,6 +35,7 @@ import (
 	"time"
 
 	ch "github.com/ClickHouse/clickhouse-go/v2"
+	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 )
 
 const (
@@ -44,10 +45,18 @@ const (
 
 	flushLogsStmt = "SYSTEM FLUSH LOGS"
 
+	profileEventSelectedRows  = "SelectedRows"
+	profileEventSelectedBytes = "SelectedBytes"
+	profileEventSelectedMarks = "SelectedMarks"
+
+	profileEventsQuery = "SELECT event, value FROM system.events " +
+		"WHERE event IN ('SelectedRows', 'SelectedBytes', 'SelectedMarks')"
+
 	queryLogQuery = "SELECT " +
 		"toUInt64(query_duration_ms) AS duration_ms, " +
 		"toUInt64(read_rows) AS read_rows, " +
 		"toUInt64(read_bytes) AS read_bytes, " +
+		"toUInt64(ProfileEvents['SelectedMarks']) AS read_marks, " +
 		"toUInt64(result_rows) AS result_rows, " +
 		"toUInt64(result_bytes) AS result_bytes " +
 		"FROM system.query_log " +
@@ -63,6 +72,7 @@ type QueryMetrics struct {
 	DurationMs  uint64
 	ReadRows    uint64
 	ReadBytes   uint64
+	ReadMarks   uint64
 	ResultRows  uint64
 	ResultBytes uint64
 }
@@ -138,6 +148,7 @@ func (i *Inspector) Measure(
 		return nil, fmt.Errorf("clickhouse: failed to get server time: %w", err)
 	}
 
+	beforeEvents, eventsErr := i.profileEvents(ctx)
 	start := time.Now()
 
 	if runErr := run(ctx); runErr != nil {
@@ -152,7 +163,7 @@ func (i *Inspector) Measure(
 	}
 
 	if shouldFallbackQueryMetrics(err) {
-		return &QueryMetrics{DurationMs: durationMillis(runDuration)}, nil
+		return i.fallbackProfileEventMetrics(ctx, runDuration, beforeEvents, eventsErr)
 	}
 
 	return nil, err
@@ -162,6 +173,26 @@ func shouldFallbackQueryMetrics(err error) bool {
 	return isMissingQueryLogError(err) || errors.Is(err, sql.ErrNoRows)
 }
 
+func (i *Inspector) fallbackProfileEventMetrics(
+	ctx context.Context,
+	runDuration time.Duration,
+	before map[string]uint64,
+	beforeErr error,
+) (*QueryMetrics, error) {
+	metrics := &QueryMetrics{DurationMs: durationMillis(runDuration)}
+
+	if beforeErr == nil {
+		after, err := i.profileEvents(ctx)
+		if err == nil {
+			metrics.ReadRows = profileEventDelta(before, after, profileEventSelectedRows)
+			metrics.ReadBytes = profileEventDelta(before, after, profileEventSelectedBytes)
+			metrics.ReadMarks = profileEventDelta(before, after, profileEventSelectedMarks)
+		}
+	}
+
+	return metrics, nil
+}
+
 func durationMillis(runDuration time.Duration) uint64 {
 	ms := runDuration.Milliseconds()
 	if ms <= 0 {
@@ -169,6 +200,14 @@ func durationMillis(runDuration time.Duration) uint64 {
 	}
 
 	return uint64(ms)
+}
+
+func profileEventDelta(before, after map[string]uint64, event string) uint64 {
+	if after[event] <= before[event] {
+		return 0
+	}
+
+	return after[event] - before[event]
 }
 
 // Close closes the inspector's connection.
@@ -249,6 +288,43 @@ func (i *Inspector) flushLogs(ctx context.Context) error {
 	return nil
 }
 
+func (i *Inspector) profileEvents(ctx context.Context) (map[string]uint64, error) {
+	qctx, cancel := i.queryContext(ctx)
+	defer cancel()
+
+	rows, err := i.conn.Query(qctx, profileEventsQuery)
+	if err != nil {
+		return nil, err
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	return scanProfileEvents(rows)
+}
+
+func scanProfileEvents(rows driver.Rows) (map[string]uint64, error) {
+	events := make(map[string]uint64)
+
+	for rows.Next() {
+		var (
+			event string
+			value uint64
+		)
+
+		if err := rows.Scan(&event, &value); err != nil {
+			return nil, err
+		}
+
+		events[event] = value
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return events, nil
+}
+
 func (i *Inspector) scanQueryMetrics(ctx context.Context, t0 time.Time) (*QueryMetrics, error) {
 	qctx, cancel := i.queryContext(ctx)
 	defer cancel()
@@ -256,7 +332,14 @@ func (i *Inspector) scanQueryMetrics(ctx context.Context, t0 time.Time) (*QueryM
 	row := i.conn.QueryRow(qctx, queryLogQuery, t0)
 
 	var m QueryMetrics
-	if err := row.Scan(&m.DurationMs, &m.ReadRows, &m.ReadBytes, &m.ResultRows, &m.ResultBytes); err != nil {
+	if err := row.Scan(
+		&m.DurationMs,
+		&m.ReadRows,
+		&m.ReadBytes,
+		&m.ReadMarks,
+		&m.ResultRows,
+		&m.ResultBytes,
+	); err != nil {
 		return nil, fmt.Errorf("clickhouse: failed to query metrics: %w", err)
 	}
 

@@ -32,6 +32,7 @@ import (
 
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
 	"github.com/wtsi-hgi/wrstat-ui/db"
+	"github.com/wtsi-hgi/wrstat-ui/internal/perfreport"
 	"github.com/wtsi-hgi/wrstat-ui/provider"
 	"github.com/wtsi-hgi/wrstat-ui/summary"
 )
@@ -41,6 +42,12 @@ type ImportAPI interface {
 	NewDGUTAWriter() (db.DGUTAWriter, error)
 	NewFileIngestOperation(mountPath string, updatedAt time.Time) (summary.OperationGenerator, io.Closer, error)
 	NewBaseDirsStore() (basedirs.Store, error)
+}
+
+// ImportReportStatsAPI exposes post-import ClickHouse evidence.
+type ImportReportStatsAPI interface {
+	ImportTableStats(ctx context.Context, tables []string) (map[string]perfreport.TableStats, error)
+	ImportFactsStats(ctx context.Context) (perfreport.FactsVectorStats, perfreport.FactsBucketStats, error)
 }
 
 // QueryRow captures the file metadata fields used by the perf harness.
@@ -64,7 +71,7 @@ type QueryClient interface {
 		requireOwner bool,
 		uid uint32,
 		gids []uint32,
-	) error
+	) (int, error)
 }
 
 // QueryMetrics captures the query log metrics printed by the perf harness.
@@ -72,6 +79,7 @@ type QueryMetrics struct {
 	DurationMs  uint64
 	ReadRows    uint64
 	ReadBytes   uint64
+	ReadMarks   uint64
 	ResultRows  uint64
 	ResultBytes uint64
 }

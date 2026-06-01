@@ -58,6 +58,7 @@ const (
 	queryInputFilterGIDsKey               = "filter_gids"
 	queryInputFilterIndexGateKey          = "filter_index_gate"
 	queryInputFilterUIDsKey               = "filter_uids"
+	queryInputParentDirKey                = "parent_dir"
 	queryInputSplitsKey                   = "splits"
 	queryInputTreeFilterRouteKey          = "tree_filter_route"
 	queryOpFilesListDirName               = "files_listdir"
@@ -69,11 +70,22 @@ const (
 	queryOpTreeDiskTreeProviderUpdateName = "tree_disktree_endpoint_provider_update_cold_cache"
 	queryOpTreeDiskTreeVisibleChildName   = "tree_disktree_endpoint_visible_child_dirs"
 	queryOpTreeDirInfoName                = "tree_dirinfo"
+	queryOpDirInfoBroadName               = "dirinfo_broad"
+	queryOpDirInfoFilteredName            = "dirinfo_filtered"
+	queryOpDirInfosBroadName              = "dirinfos_broad"
+	queryOpDirInfosFilteredName           = "dirinfos_filtered"
+	queryOpDirsHaveChildrenBroadName      = "dirshavechildren_broad"
+	queryOpDirsHaveChildrenFilteredName   = "dirshavechildren_filtered"
+	queryOpFindGlobExtensionDotfileName   = "find_glob_extension_dotfile"
 	queryOpTreeWhereColdName              = "tree_where_cold_then_cached"
 	queryOpTreeWhereColdProviderName      = "tree_where_cold_provider"
 	queryOpTreeWhereFreshName             = "tree_where_fresh_provider"
 	queryOpTreeWhereName                  = "tree_where"
 	queryOpTreeWhereProviderUpdateName    = "tree_where_provider_update_cold_cache"
+	queryOpVirtualChildrenName            = "virtual_children"
+	queryOpVirtualDirInfoName             = "virtual_dirinfo"
+	queryOpWhereFilteredWholeMountName    = "where_filtered_whole_mount"
+	queryOpWhereWholeMountName            = "where_whole_mount" //nolint:gosec // Operation name, not a credential.
 	queryScopeFreshProvider               = "fresh_provider_per_repeat"
 	queryScopeAncestorDirs                = "ancestor_directory_each_repeat"
 	queryScopeColdProvider                = "cold_provider_with_cold_query_cache"
@@ -733,7 +745,7 @@ func runTreeDiskTreeEndpoint(tree *db.Tree, dir string, filter *db.Filter) error
 func opTreeDiskTreeEndpointVisibleChildDirs(qctx queryContext) op {
 	filter := treeFilterFromOptions(qctx.treeFilter)
 	inputs := treeOpInputs(filter, map[string]any{
-		"parent_dir":             qctx.dir,
+		queryInputParentDirKey:   qctx.dir,
 		"child_dirs":             []string{},
 		"child_count":            0,
 		"fallback_to_parent_dir": false,
@@ -842,6 +854,317 @@ func runTreeWhereFreshProvider(qctx queryContext, splits int, filter *db.Filter)
 	return errors.Join(whereErr, closeErr)
 }
 
+func opResultCount(o op) uint64 {
+	if o.resultCount == nil {
+		return 0
+	}
+
+	return o.resultCount()
+}
+
+func querySampleDurations(samples []queryRepeatSample) []float64 {
+	durations := make([]float64, len(samples))
+	for i, sample := range samples {
+		durations[i] = sample.durationMS
+	}
+
+	return durations
+}
+
+func querySampleReadRows(samples []queryRepeatSample) []uint64 {
+	values, ok := querySampleMetricValues(samples, func(m *QueryMetrics) uint64 { return m.ReadRows })
+	if !ok {
+		return nil
+	}
+
+	return values
+}
+
+func querySampleMetricValues(
+	samples []queryRepeatSample,
+	value func(*QueryMetrics) uint64,
+) ([]uint64, bool) {
+	values := make([]uint64, 0, len(samples))
+	for _, sample := range samples {
+		if sample.metrics == nil {
+			continue
+		}
+
+		values = append(values, value(sample.metrics))
+	}
+
+	return values, len(values) > 0
+}
+
+func querySampleReadBytes(samples []queryRepeatSample) []uint64 {
+	values, ok := querySampleMetricValues(samples, func(m *QueryMetrics) uint64 { return m.ReadBytes })
+	if !ok {
+		return nil
+	}
+
+	return values
+}
+
+func querySampleReadMarks(samples []queryRepeatSample) []uint64 {
+	values, ok := querySampleMetricValues(samples, func(m *QueryMetrics) uint64 { return m.ReadMarks })
+	if !ok {
+		return nil
+	}
+
+	return values
+}
+
+func querySampleResultCounts(samples []queryRepeatSample, o op) []uint64 {
+	if o.resultCount == nil {
+		return nil
+	}
+
+	counts := make([]uint64, len(samples))
+	for i, sample := range samples {
+		counts[i] = sample.resultCount
+	}
+
+	return counts
+}
+
+func focusedQueryOps(qctx queryContext, opts QueryOptions) []op {
+	broadFilter := treeFilterFromOptions(nil)
+	filtered := buildTreeFilter(qctx, opts)
+
+	return []op{
+		opFocusedDirInfo(qctx, queryOpDirInfoBroadName, broadFilter),
+		opFocusedDirInfo(qctx, queryOpDirInfoFilteredName, filtered),
+		opFocusedDirInfos(qctx, queryOpDirInfosBroadName, broadFilter),
+		opFocusedDirInfos(qctx, queryOpDirInfosFilteredName, filtered),
+		opFocusedDirsHaveChildren(qctx, queryOpDirsHaveChildrenBroadName, broadFilter),
+		opFocusedDirsHaveChildren(qctx, queryOpDirsHaveChildrenFilteredName, filtered),
+		opFocusedWhere(qctx, queryOpWhereWholeMountName, broadFilter, opts.Splits),
+		opFocusedWhere(qctx, queryOpWhereFilteredWholeMountName, filtered, opts.Splits),
+		opFocusedVirtualChildren(qctx, filtered),
+		opFocusedVirtualDirInfo(qctx, filtered),
+		opFocusedGlobExtensionDotfile(qctx),
+	}
+}
+
+func opFocusedDirInfo(qctx queryContext, name string, filter *db.Filter) op {
+	var resultCount uint64
+
+	return op{
+		name: name,
+		inputs: treeOpInputs(filter, map[string]any{
+			queryInputDirKey:         qctx.dir,
+			queryInputCacheScope:     queryScopeSameProviderDir,
+			queryInputDurationSource: querySourceClickHouseLog,
+		}),
+		run: func(_ context.Context) error {
+			info, err := qctx.provider.Tree().DirInfo(qctx.dir, filter)
+			resultCount = dirInfoResultCount(info)
+
+			return err
+		},
+		resultCount: func() uint64 { return resultCount },
+	}
+}
+
+func dirInfoResultCount(info *db.DirInfo) uint64 {
+	if info == nil || info.Current == nil {
+		return 0
+	}
+
+	return uint64(1 + len(info.Children))
+}
+
+func opFocusedDirInfos(qctx queryContext, name string, filter *db.Filter) op {
+	var resultCount uint64
+
+	return op{
+		name: name,
+		inputs: treeOpInputs(filter, map[string]any{
+			queryInputParentDirKey:   qctx.dir,
+			queryInputCacheScope:     queryScopeSameProviderDir,
+			queryInputDurationSource: querySourceClickHouseLog,
+		}),
+		run: func(_ context.Context) error {
+			dirs, err := focusedDirInfoDirs(qctx.provider.Tree(), qctx.dir, filter)
+			if err != nil {
+				return err
+			}
+
+			resultCount = uint64(len(dirs))
+
+			return nil
+		},
+		resultCount: func() uint64 { return resultCount },
+	}
+}
+
+func focusedDirInfoDirs(tree *db.Tree, dir string, filter *db.Filter) ([]string, error) {
+	info, err := tree.DirInfo(dir, filter)
+	if err != nil || info == nil {
+		return nil, err
+	}
+
+	dirs := make([]string, 0, 1+len(info.Children))
+
+	dirs = append(dirs, dir)
+	for _, child := range info.Children {
+		dirs = append(dirs, child.Dir)
+	}
+
+	for _, candidate := range dirs {
+		if _, err := tree.DirInfo(candidate, filter); err != nil {
+			return nil, err
+		}
+	}
+
+	return dirs, nil
+}
+
+func opFocusedDirsHaveChildren(qctx queryContext, name string, filter *db.Filter) op {
+	var resultCount uint64
+
+	return op{
+		name: name,
+		inputs: treeOpInputs(filter, map[string]any{
+			queryInputParentDirKey:   qctx.dir,
+			queryInputCacheScope:     queryScopeSameProviderDir,
+			queryInputDurationSource: querySourceClickHouseLog,
+		}),
+		run: func(_ context.Context) error {
+			dirs, err := focusedDirInfoDirs(qctx.provider.Tree(), qctx.dir, filter)
+			if err != nil {
+				return err
+			}
+
+			hasChildren := qctx.provider.Tree().DirsHaveChildren(dirs, filter)
+			resultCount = countTrue(hasChildren)
+
+			return nil
+		},
+		resultCount: func() uint64 { return resultCount },
+	}
+}
+
+func countTrue(values map[string]bool) uint64 {
+	var count uint64
+
+	for _, value := range values {
+		if value {
+			count++
+		}
+	}
+
+	return count
+}
+
+func opFocusedWhere(qctx queryContext, name string, filter *db.Filter, splits int) op {
+	var resultCount uint64
+
+	return op{
+		name: name,
+		inputs: treeOpInputs(filter, map[string]any{
+			"mount_path":             mountPathForDir(qctx),
+			queryInputCacheScope:     queryScopeSameProviderDir,
+			queryInputDurationSource: querySourceClickHouseLog,
+			queryInputSplitsKey:      splits,
+		}),
+		run: func(_ context.Context) error {
+			results, err := qctx.provider.Tree().Where(
+				mountPathForDir(qctx),
+				filter,
+				split.SplitsToSplitFn(splits),
+			)
+			resultCount = uint64(len(results))
+
+			return err
+		},
+		resultCount: func() uint64 { return resultCount },
+	}
+}
+
+func opFocusedVirtualChildren(qctx queryContext, filter *db.Filter) op {
+	var resultCount uint64
+
+	return op{
+		name: queryOpVirtualChildrenName,
+		inputs: treeOpInputs(filter, map[string]any{
+			queryInputDirKey:         "/",
+			queryInputCacheScope:     queryScopeSameProviderDir,
+			queryInputDurationSource: querySourceClickHouseLog,
+		}),
+		run: func(_ context.Context) error {
+			hasChildren := qctx.provider.Tree().DirsHaveChildren([]string{"/", qctx.dir}, filter)
+			resultCount = countTrue(hasChildren)
+
+			return nil
+		},
+		resultCount: func() uint64 { return resultCount },
+	}
+}
+
+func opFocusedVirtualDirInfo(qctx queryContext, filter *db.Filter) op {
+	var resultCount uint64
+
+	return op{
+		name: queryOpVirtualDirInfoName,
+		inputs: treeOpInputs(filter, map[string]any{
+			queryInputDirKey:         "/",
+			queryInputCacheScope:     queryScopeSameProviderDir,
+			queryInputDurationSource: querySourceClickHouseLog,
+		}),
+		run: func(_ context.Context) error {
+			info, err := qctx.provider.Tree().DirInfo("/", filter)
+			resultCount = dirInfoResultCount(info)
+
+			return err
+		},
+		resultCount: func() uint64 { return resultCount },
+	}
+}
+
+func opFocusedGlobExtensionDotfile(qctx queryContext) op {
+	ext := pickExt(qctx.client, qctx.dir)
+	if ext == "" {
+		ext = "*"
+	}
+
+	pattern := ".*." + ext
+
+	var resultCount uint64
+
+	return op{
+		name: queryOpFindGlobExtensionDotfileName,
+		inputs: map[string]any{
+			"patterns":               []string{pattern},
+			"require_owner":          false,
+			queryInputCacheScope:     queryScopeSameQueryClient,
+			queryInputDurationSource: querySourceClickHouseLog,
+		},
+		run: func(ctx context.Context) error {
+			count, err := qctx.client.FindByGlob(
+				ctx,
+				[]string{qctx.dir},
+				[]string{pattern},
+				false,
+				qctx.uid,
+				qctx.gids,
+			)
+			resultCount = intToUint64(count)
+
+			return err
+		},
+		resultCount: func() uint64 { return resultCount },
+	}
+}
+
+func intToUint64(value int) uint64 {
+	if value <= 0 {
+		return 0
+	}
+
+	return uint64(value)
+}
+
 func buildTreeFilter(qctx queryContext, opts QueryOptions) *db.Filter {
 	if opts.TreeFilter != nil {
 		return treeFilterFromOptions(opts.TreeFilter)
@@ -888,7 +1211,7 @@ func timeOpRepeat(
 	qctx queryContext,
 	o op,
 	printf PrintfFunc,
-) (float64, error) {
+) (queryRepeatSample, error) {
 	if o.useWallTime {
 		return timeWallRepeat(ctx, o)
 	}
@@ -896,7 +1219,7 @@ func timeOpRepeat(
 	return timeMeasuredRepeat(ctx, qctx, o, printf)
 }
 
-func timeWallRepeat(ctx context.Context, o op) (float64, error) {
+func timeWallRepeat(ctx context.Context, o op) (queryRepeatSample, error) {
 	var duration float64
 
 	err := runOpCycle(ctx, o, func(context.Context) error {
@@ -907,7 +1230,10 @@ func timeWallRepeat(ctx context.Context, o op) (float64, error) {
 		return runErr
 	})
 
-	return duration, err
+	return queryRepeatSample{
+		durationMS:  duration,
+		resultCount: opResultCount(o),
+	}, err
 }
 
 func timeWallOp(ctx context.Context, run func(context.Context) error) (float64, error) {
@@ -925,7 +1251,7 @@ func timeMeasuredRepeat(
 	qctx queryContext,
 	o op,
 	printf PrintfFunc,
-) (float64, error) {
+) (queryRepeatSample, error) {
 	var (
 		duration float64
 		metrics  *QueryMetrics
@@ -942,12 +1268,16 @@ func timeMeasuredRepeat(
 		return runErr
 	})
 	if err != nil {
-		return 0, err
+		return queryRepeatSample{}, err
 	}
 
 	printMetrics(printf, o.name, metrics)
 
-	return duration, nil
+	return queryRepeatSample{
+		durationMS:  duration,
+		metrics:     metrics,
+		resultCount: opResultCount(o),
+	}, nil
 }
 
 func disktreeClickDirs(qctx queryContext, opts QueryOptions) ([]string, bool) {
@@ -1146,6 +1476,12 @@ type disktreeWalkDir struct {
 	depth int
 }
 
+type queryRepeatSample struct {
+	durationMS  float64
+	metrics     *QueryMetrics
+	resultCount uint64
+}
+
 func closeQueryResources(closers ...io.Closer) error {
 	var err error
 
@@ -1306,6 +1642,10 @@ func verifyPlans(qctx queryContext, printf PrintfFunc) error {
 }
 
 func mountPathForDir(qctx queryContext) string {
+	if qctx.provider == nil || qctx.provider.BaseDirs() == nil {
+		return qctx.dir
+	}
+
 	mt, err := qctx.provider.BaseDirs().MountTimestamps()
 	if err != nil {
 		return qctx.dir
@@ -1386,6 +1726,10 @@ func buildOps(qctx queryContext, opts QueryOptions, printf PrintfFunc) []op {
 	if opts.AncestorLimit > 0 {
 		ops = append(ops, opTreeDiskTreeEndpointAncestorDirs(qctx, opts))
 	}
+
+	ops = append(ops,
+		focusedQueryOps(qctx, opts)...,
+	)
 
 	ops = append(ops,
 		opTreeDirInfo(qctx),
@@ -1590,9 +1934,11 @@ func globOp(
 			queryInputDurationSource: querySourceClickHouseLog,
 		},
 		run: func(ctx context.Context) error {
-			return qctx.client.FindByGlob(
+			_, err := qctx.client.FindByGlob(
 				ctx, baseDirs, patterns, requireOwner, qctx.uid, qctx.gids,
 			)
+
+			return err
 		},
 	}
 }
@@ -1623,12 +1969,21 @@ func runOp(
 		repeat = o.repeatOverride
 	}
 
-	durations, err := timingLoop(qctx, o, warmup, repeat, printf)
+	samples, err := timingLoop(qctx, o, warmup, repeat, printf)
 	if err != nil {
 		return err
 	}
 
-	report.AddOperation(o.name, o.inputs, durations)
+	durations := querySampleDurations(samples)
+	report.AddOperationWithCounters(
+		o.name,
+		o.inputs,
+		durations,
+		querySampleReadRows(samples),
+		querySampleReadBytes(samples),
+		querySampleReadMarks(samples),
+		querySampleResultCounts(samples, o),
+	)
 
 	p50, p95, p99 := perfreport.PercentilesMS(durations)
 	printf("%s repeats=%d p50=%.3f p95=%.3f p99=%.3f ms\n",
@@ -1643,24 +1998,24 @@ func timingLoop(
 	warmup int,
 	repeat int,
 	printf PrintfFunc,
-) ([]float64, error) {
+) ([]queryRepeatSample, error) {
 	ctx := context.Background()
 	if err := warmupOp(ctx, o, warmup); err != nil {
 		return nil, err
 	}
 
-	durations := make([]float64, 0, repeat)
+	samples := make([]queryRepeatSample, 0, repeat)
 
 	for i := range repeat {
-		duration, err := timeOpRepeat(ctx, qctx, o, printf)
+		sample, err := timeOpRepeat(ctx, qctx, o, printf)
 		if err != nil {
 			return nil, fmt.Errorf("%s repeat %d/%d: %w", o.name, i+1, repeat, err)
 		}
 
-		durations = append(durations, duration)
+		samples = append(samples, sample)
 	}
 
-	return durations, nil
+	return samples, nil
 }
 
 func measuredQueryDurationMS(metrics *QueryMetrics, wall time.Duration) float64 {
@@ -1681,9 +2036,9 @@ func printMetrics(
 	}
 
 	printf("  %s metrics: duration_ms=%d read_rows=%d "+
-		"read_bytes=%d result_rows=%d result_bytes=%d\n",
+		"read_bytes=%d read_marks=%d result_rows=%d result_bytes=%d\n",
 		name, m.DurationMs, m.ReadRows, m.ReadBytes,
-		m.ResultRows, m.ResultBytes)
+		m.ReadMarks, m.ResultRows, m.ResultBytes)
 }
 
 type activeMountFreshness struct {
@@ -1698,6 +2053,7 @@ type op struct {
 	prepare           func(repeat int) (int, error)
 	run               func(ctx context.Context) error
 	teardown          func(ctx context.Context) error
+	resultCount       func() uint64
 	useWallTime       bool
 	skipWarmup        bool
 	hasRepeatOverride bool

@@ -20,5 +20,5 @@ Extend `clickhouse-perf` reports in `internal/chperf/import.go`,
 facts vector stats, phase metrics, profile-event query metrics, and focused
 operations needed by final gates. Cover all 9 acceptance tests from E1.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed

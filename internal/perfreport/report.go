@@ -46,24 +46,58 @@ type Operation struct {
 	Name        string         `json:"name"`
 	Inputs      map[string]any `json:"inputs"`
 	DurationsMS []float64      `json:"durations_ms"`
+	ReadRows    []uint64       `json:"read_rows,omitempty"`
+	ReadBytes   []uint64       `json:"read_bytes,omitempty"`
+	ReadMarks   []uint64       `json:"read_marks,omitempty"`
+	ResultCount []uint64       `json:"result_counts,omitempty"`
 	P50MS       float64        `json:"p50_ms"`
 	P95MS       float64        `json:"p95_ms"`
 	P99MS       float64        `json:"p99_ms"`
 }
 
+// TableStats captures physical ClickHouse table size evidence.
+type TableStats struct {
+	Rows                   uint64             `json:"rows"`
+	ActiveParts            uint64             `json:"active_parts"`
+	CompressedBytes        uint64             `json:"compressed_bytes"`
+	UncompressedBytes      uint64             `json:"uncompressed_bytes"`
+	ImportPhaseDurationsMS map[string]float64 `json:"import_phase_durations_ms,omitempty"`
+}
+
+// FactsVectorStats captures wrstat_dir_facts vector-density evidence.
+type FactsVectorStats struct {
+	Rows                 uint64  `json:"rows"`
+	TotalEntries         uint64  `json:"total_entries"`
+	AverageEntriesPerDir float64 `json:"average_entries_per_dir"`
+	MaxEntriesPerDir     uint64  `json:"max_entries_per_dir"`
+}
+
+// FactsBucketStats captures wrstat_dir_facts bucket-shape evidence.
+type FactsBucketStats struct {
+	Rows                 uint64 `json:"rows"`
+	NonEmptyRows         uint64 `json:"non_empty_rows"`
+	MaxBuckets           uint64 `json:"max_buckets"`
+	MismatchedBucketRows uint64 `json:"mismatched_bucket_rows"`
+}
+
 // Report is the top-level JSON report written by perf harnesses.
 type Report struct {
-	SchemaVersion int         `json:"schema_version"`
-	Backend       string      `json:"backend"`
-	GitCommit     string      `json:"git_commit"`
-	GoVersion     string      `json:"go_version"`
-	OS            string      `json:"os"`
-	Arch          string      `json:"arch"`
-	StartedAt     string      `json:"started_at"`
-	InputDir      string      `json:"input_dir"`
-	Repeat        int         `json:"repeat"`
-	Warmup        int         `json:"warmup"`
-	Operations    []Operation `json:"operations"`
+	SchemaVersion    int                   `json:"schema_version"`
+	Backend          string                `json:"backend"`
+	GitCommit        string                `json:"git_commit"`
+	GoVersion        string                `json:"go_version"`
+	OS               string                `json:"os"`
+	Arch             string                `json:"arch"`
+	StartedAt        string                `json:"started_at"`
+	InputDir         string                `json:"input_dir"`
+	Repeat           int                   `json:"repeat"`
+	Warmup           int                   `json:"warmup"`
+	SelectedTables   []string              `json:"selected_tables,omitempty"`
+	TableStats       map[string]TableStats `json:"table_stats,omitempty"`
+	FactsVectorStats *FactsVectorStats     `json:"facts_vector_stats,omitempty"`
+	FactsBucketStats *FactsBucketStats     `json:"facts_bucket_stats,omitempty"`
+	MaxRSSBytes      uint64                `json:"max_rss_bytes,omitempty"`
+	Operations       []Operation           `json:"operations"`
 }
 
 // NewReport constructs a new report with build and environment metadata.
@@ -86,12 +120,30 @@ func NewReport(backend, inputDir string, repeat, warmup int) Report {
 // AddOperation appends a measured operation and computes p50/p95/p99 from
 // the provided durations.
 func (r *Report) AddOperation(name string, inputs map[string]any, durationsMS []float64) {
+	r.AddOperationWithCounters(name, inputs, durationsMS, nil, nil, nil, nil)
+}
+
+// AddOperationWithCounters appends a measured operation with per-repeat
+// storage counters and computes p50/p95/p99 from the provided durations.
+func (r *Report) AddOperationWithCounters(
+	name string,
+	inputs map[string]any,
+	durationsMS []float64,
+	readRows []uint64,
+	readBytes []uint64,
+	readMarks []uint64,
+	resultCounts []uint64,
+) {
 	p50, p95, p99 := PercentilesMS(durationsMS)
 
 	r.Operations = append(r.Operations, Operation{
 		Name:        name,
 		Inputs:      inputs,
 		DurationsMS: durationsMS,
+		ReadRows:    readRows,
+		ReadBytes:   readBytes,
+		ReadMarks:   readMarks,
+		ResultCount: resultCounts,
 		P50MS:       p50,
 		P95MS:       p95,
 		P99MS:       p99,

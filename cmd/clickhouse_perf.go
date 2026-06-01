@@ -27,7 +27,9 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 
@@ -182,6 +184,10 @@ func addCHPerfQueryFlags() {
 }
 
 func runCHPerfImport(inputDir string) error {
+	if err := chPerfValidateClickHouseSettings(); err != nil {
+		return err
+	}
+
 	cfg, err := chPerfConfig()
 	if err != nil {
 		return err
@@ -205,6 +211,10 @@ func runCHPerfImport(inputDir string) error {
 }
 
 func runCHPerfQuery() error {
+	if err := chPerfValidateClickHouseSettings(); err != nil {
+		return err
+	}
+
 	cfg, err := chPerfConfig()
 	if err != nil {
 		return err
@@ -223,6 +233,21 @@ func runCHPerfQuery() error {
 	}
 
 	return chPerfWriteReport(report)
+}
+
+func chPerfValidateClickHouseSettings() error {
+	loadClickhouseDotEnv()
+
+	var err error
+	if strings.TrimSpace(chPerf.dsn) == "" && strings.TrimSpace(os.Getenv(envClickhouseDSN)) == "" {
+		err = errors.Join(err, errClickhouseDSNRequired)
+	}
+
+	if strings.TrimSpace(chPerf.database) == "" && strings.TrimSpace(os.Getenv(envClickhouseDatabase)) == "" {
+		err = errors.Join(err, errClickhouseDatabaseRequired)
+	}
+
+	return err
 }
 
 func chPerfConfig() (clickhouse.Config, error) {

@@ -118,14 +118,16 @@ func TestClickHouseQueryClientUsesNarrowFileFields(t *testing.T) {
 		So(recorder.statOpts, ShouldHaveLength, 1)
 		So(recorder.statOpts[0].Fields, ShouldResemble, []string{clickHouseFileFieldPath})
 
-		So(client.FindByGlob(
+		count, err := client.FindByGlob(
 			ctx,
 			[]string{clickHouseAPIFieldTestDir},
 			[]string{"**/*." + clickHouseAPIFieldTestExt},
 			true,
 			123,
 			[]uint32{456},
-		), ShouldBeNil)
+		)
+		So(err, ShouldBeNil)
+		So(count, ShouldEqual, 1)
 		So(recorder.findOpts, ShouldHaveLength, 1)
 		So(recorder.findOpts[0].Fields, ShouldResemble, []string{clickHouseFileFieldPath})
 		So(recorder.findOpts[0].RequireOwner, ShouldBeTrue)
