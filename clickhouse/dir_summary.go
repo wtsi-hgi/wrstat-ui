@@ -92,7 +92,7 @@ func mountDirSummaryMissingMeansNotFound(filter *db.Filter) bool {
 }
 
 func mountDirSummaryModeForFilter(filter *db.Filter) (mountDirSummaryMode, bool) {
-	if filter == nil || filter.GIDs != nil || filter.UIDs != nil {
+	if filter == nil || filter.GIDs != nil || filter.UIDs != nil || filter.Age != db.DGUTAgeAll {
 		return mountDirSummaryAll, false
 	}
 

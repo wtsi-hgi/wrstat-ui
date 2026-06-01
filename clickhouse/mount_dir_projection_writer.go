@@ -43,6 +43,27 @@ var errDirProjectionBatchNotPrepared = errors.New("clickhouse: dir projection ba
 
 var zeroSummaryAgeBuckets summary.AgeBuckets //nolint:gochecknoglobals
 
+func (s mountDirProjectionState) summaryKeysFor(compactAges bool) []mountDirSummaryKey {
+	keys := make([]mountDirSummaryKey, 0, len(s.summaries))
+	for key := range s.summaries {
+		if compactAges && key.age != db.DGUTAgeAll {
+			continue
+		}
+
+		keys = append(keys, key)
+	}
+
+	slices.SortFunc(keys, func(a, b mountDirSummaryKey) int {
+		if dirCmp := cmp.Compare(a.dir, b.dir); dirCmp != 0 {
+			return dirCmp
+		}
+
+		return cmp.Compare(a.age, b.age)
+	})
+
+	return keys
+}
+
 func compareProjectionGUTAs(a, b *db.GUTA) int {
 	if diff, ok := compareNilProjectionGUTAs(a, b); ok {
 		return diff
@@ -409,6 +430,7 @@ func (w *mountDirProjectionWriter) appendRecord(
 	gutas db.GUTAs,
 	childCount uint64,
 	recordAges []db.DirGUTAge,
+	compactAges bool,
 	batchSize int,
 ) error {
 	state := newMountDirProjectionState()
@@ -416,7 +438,7 @@ func (w *mountDirProjectionWriter) appendRecord(
 	state.addChildren(dir, childCount)
 	state.addChildOnlySummaryAges(dir, recordAges)
 
-	if err := w.appendSummaryRows(mount, state, batchSize); err != nil {
+	if err := w.appendSummaryRows(mount, state, compactAges, batchSize); err != nil {
 		return err
 	}
 
@@ -426,11 +448,12 @@ func (w *mountDirProjectionWriter) appendRecord(
 func (w *mountDirProjectionWriter) appendSummaryRows(
 	mount activeMount,
 	state mountDirProjectionState,
+	compactAges bool,
 	batchSize int,
 ) error {
 	return appendTrackedProjectionRows(
 		w,
-		state.summaryKeys(),
+		state.summaryKeysFor(compactAges),
 		&w.summaryBatch,
 		&w.summaryOpenedAt,
 		insertMountDirSummaryQuery,
@@ -805,20 +828,7 @@ func (s *mountDirProjectionState) summaryAccumulator(
 }
 
 func (s mountDirProjectionState) summaryKeys() []mountDirSummaryKey {
-	keys := make([]mountDirSummaryKey, 0, len(s.summaries))
-	for key := range s.summaries {
-		keys = append(keys, key)
-	}
-
-	slices.SortFunc(keys, func(a, b mountDirSummaryKey) int {
-		if dirCmp := cmp.Compare(a.dir, b.dir); dirCmp != 0 {
-			return dirCmp
-		}
-
-		return cmp.Compare(a.age, b.age)
-	})
-
-	return keys
+	return s.summaryKeysFor(false)
 }
 
 func (s mountDirProjectionState) vectorDirs() []string {

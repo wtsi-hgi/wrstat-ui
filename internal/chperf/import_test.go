@@ -39,6 +39,7 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 	"github.com/wtsi-hgi/wrstat-ui/internal/boltperf"
+	internaltest "github.com/wtsi-hgi/wrstat-ui/internal/test"
 	"github.com/wtsi-hgi/wrstat-ui/summary"
 )
 
@@ -131,7 +132,32 @@ func TestLineCountingReader(t *testing.T) {
 func TestDGUTARowCounting(t *testing.T) {
 	Convey("countDGUTARows ignores nil gutas", t, func() {
 		record := db.RecordDGUTA{GUTAs: db.GUTAs{nil, &db.GUTA{}, nil, &db.GUTA{}}}
-		So(countDGUTARows(record), ShouldEqual, 2)
+		So(countDGUTARows(record, ""), ShouldEqual, 2)
+	})
+
+	Convey("countDGUTARows reports compacted internal mount rows", t, func() {
+		paths := internaltest.NewDirectoryPathCreator()
+		record := db.RecordDGUTA{
+			Dir: paths.ToDirectoryPath(importTestMountScratch + "dir/"),
+			GUTAs: db.GUTAs{
+				{Age: db.DGUTAgeAll},
+				{Age: db.DGUTAgeA1M},
+				nil,
+				{Age: db.DGUTAgeM1Y},
+			},
+		}
+
+		So(countDGUTARows(record, importTestMountScratch), ShouldEqual, 1)
+		So(countDGUTARows(record, strings.TrimSuffix(importTestMountScratch, "/")), ShouldEqual, 1)
+		So(countDGUTARows(record, "/"), ShouldEqual, 3)
+
+		mountRoot := record
+		mountRoot.Dir = paths.ToDirectoryPath(importTestMountScratch)
+		So(countDGUTARows(mountRoot, strings.TrimSuffix(importTestMountScratch, "/")), ShouldEqual, 3)
+
+		sibling := record
+		sibling.Dir = paths.ToDirectoryPath(strings.TrimSuffix(importTestMountScratch, "/") + "2/dir/")
+		So(countDGUTARows(sibling, strings.TrimSuffix(importTestMountScratch, "/")), ShouldEqual, 3)
 	})
 
 	Convey("countChildrenRows ignores blank child names", t, func() {

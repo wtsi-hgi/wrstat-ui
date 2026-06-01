@@ -268,7 +268,15 @@ func (w *dgutaWriter) SetProjectionBatchSize(batchSize int) {
 }
 
 func (w *dgutaWriter) SetMountPath(mountPath string) {
-	w.mountPath = mountPath
+	w.mountPath = normalizeImportMountPath(mountPath)
+}
+
+func normalizeImportMountPath(mountPath string) string {
+	if mountPath == "" || mountPath == "/" {
+		return mountPath
+	}
+
+	return ensureTrailingSlash(mountPath)
 }
 
 func (w *dgutaWriter) SetUpdatedAt(updatedAt time.Time) {
@@ -795,7 +803,7 @@ func (w *dgutaWriter) appendDGUTARowForRecord(
 	tracker *dgutaRecordTracker,
 	appendedGUTAs *db.GUTAs,
 ) error {
-	key, keep, appended, err := w.appendDGUTARow(
+	key, keep, project, err := w.appendDGUTARow(
 		rawParentDir,
 		parentDir,
 		guta,
@@ -813,7 +821,7 @@ func (w *dgutaWriter) appendDGUTARowForRecord(
 		tracker.ageMask = dgutaAgeMaskWith(tracker.ageMask, guta.Age)
 	}
 
-	if appended {
+	if project {
 		*appendedGUTAs = append(*appendedGUTAs, guta)
 	}
 
@@ -839,8 +847,8 @@ func (w *dgutaWriter) appendDGUTARow(
 	}
 
 	if !trackDuplicateKeys {
-		if err := w.appendDGUTABatchRow(parentDir, guta); err != nil {
-			return dgutaRowKey{}, false, false, fmt.Errorf("clickhouse: failed to append dguta row: %w", err)
+		if err := w.appendRawDGUTARowIfNeeded(parentDir, guta); err != nil {
+			return dgutaRowKey{}, false, false, err
 		}
 
 		return dgutaRowKey{}, true, true, nil
@@ -851,11 +859,42 @@ func (w *dgutaWriter) appendDGUTARow(
 		return rowKey, true, false, nil
 	}
 
-	if err := w.appendDGUTABatchRow(parentDir, guta); err != nil {
-		return dgutaRowKey{}, false, false, fmt.Errorf("clickhouse: failed to append dguta row: %w", err)
+	if err := w.appendRawDGUTARowIfNeeded(parentDir, guta); err != nil {
+		return dgutaRowKey{}, false, false, err
 	}
 
 	return rowKey, true, true, nil
+}
+
+func (w *dgutaWriter) appendRawDGUTARowIfNeeded(parentDir string, guta *db.GUTA) error {
+	if !w.shouldWriteRawDGUTARow(parentDir, guta) {
+		return nil
+	}
+
+	if err := w.appendDGUTABatchRow(parentDir, guta); err != nil {
+		return fmt.Errorf("clickhouse: failed to append dguta row: %w", err)
+	}
+
+	return nil
+}
+
+func (w *dgutaWriter) shouldWriteRawDGUTARow(parentDir string, guta *db.GUTA) bool {
+	return guta.Age == db.DGUTAgeAll || !w.compactInternalDGUTAAges(parentDir)
+}
+
+func (w *dgutaWriter) compactInternalDGUTAAges(parentDir string) bool {
+	// Full age detail is preserved in wrstat_dir_dguta_vector; internal raw
+	// rows keep AgeAll to avoid one ClickHouse row per age bucket per dir.
+	return isInternalMountDir(w.mountPath, parentDir)
+}
+
+func isInternalMountDir(mountPath, dir string) bool {
+	mountPath = normalizeImportMountPath(mountPath)
+
+	return mountPath != "" &&
+		mountPath != "/" &&
+		dir != mountPath &&
+		strings.HasPrefix(dir, mountPath)
 }
 
 func (w *dgutaWriter) appendDGUTABatchRow(parentDir string, guta *db.GUTA) error {
@@ -1177,6 +1216,7 @@ func (w *dgutaWriter) appendMountDirProjectionRows(
 			gutas,
 			childCount,
 			recordAges,
+			w.compactInternalDGUTAAges(parentDir),
 			w.effectiveProjectionBatchSize(),
 		)
 	})

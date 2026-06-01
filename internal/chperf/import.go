@@ -699,6 +699,11 @@ func (r *statsGZReader) Close() error {
 	return errors.Join(r.Reader.Close(), r.file.Close())
 }
 
+func (w *trackedDGUTAWriter) SetMountPath(mountPath string) {
+	w.mountPath = mountPath
+	w.DGUTAWriter.SetMountPath(mountPath)
+}
+
 func noopPublishCloser(bool) error {
 	return nil
 }
@@ -916,23 +921,28 @@ func (c timedImportCloser) Close() error {
 type trackedDGUTAWriter struct {
 	db.DGUTAWriter
 	metrics *datasetImportMetrics
+
+	mountPath string
 }
 
 func (w *trackedDGUTAWriter) Add(record db.RecordDGUTA) error {
 	err := w.DGUTAWriter.Add(record)
 	if err == nil {
-		w.metrics.addRows(tableDGUTA, countDGUTARows(record))
+		w.metrics.addRows(tableDGUTA, countDGUTARows(record, w.mountPath))
 		w.metrics.addRows(tableChildren, countChildrenRows(record.Children))
 	}
 
 	return err
 }
 
-func countDGUTARows(record db.RecordDGUTA) uint64 {
+func countDGUTARows(record db.RecordDGUTA, mountPath string) uint64 {
 	var rows uint64
 
+	dir := string(record.Dir.AppendTo(nil))
+	compactAges := compactInternalDGUTAAgesForImportMetrics(mountPath, dir)
+
 	for _, guta := range record.GUTAs {
-		if guta != nil {
+		if guta != nil && (!compactAges || guta.Age == db.DGUTAgeAll) {
 			rows++
 		}
 	}
@@ -1201,4 +1211,21 @@ func countNewLines(b []byte) uint64 {
 	}
 
 	return lines
+}
+
+func compactInternalDGUTAAgesForImportMetrics(mountPath, dir string) bool {
+	mountPath = normalizeImportMountPathForMetrics(mountPath)
+
+	return mountPath != "" &&
+		mountPath != "/" &&
+		dir != mountPath &&
+		strings.HasPrefix(dir, mountPath)
+}
+
+func normalizeImportMountPathForMetrics(mountPath string) string {
+	if mountPath == "" || mountPath == "/" || strings.HasSuffix(mountPath, "/") {
+		return mountPath
+	}
+
+	return mountPath + "/"
 }

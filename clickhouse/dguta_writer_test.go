@@ -29,6 +29,7 @@ package clickhouse
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"sync/atomic"
@@ -47,6 +48,8 @@ import (
 var errForcedFailure = errors.New("forced failure")
 
 const testMountPath = "/mnt/test/"
+
+const testT283ImagingMountPath = "/nfs/t283_imaging/"
 
 const dgutaWriterTestPhasePartitionDropReset = "partition_drop_reset"
 
@@ -998,6 +1001,13 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 		So(err, ShouldBeNil)
 		So(vectorSummaries[mountPath+"alpha/"].Count, ShouldEqual, 2)
 		So(vectorSummaries, ShouldNotContainKey, mountPath+"alpha/leaf/")
+
+		ageOnlySummaries, err := dbch.DirInfos(
+			[]string{mountPath + "alpha/"},
+			&db.Filter{Age: db.DGUTAgeA1M},
+		)
+		So(err, ShouldBeNil)
+		So(ageOnlySummaries[mountPath+"alpha/"].Count, ShouldEqual, 2)
 	})
 
 	Convey("DGUTAWriter streams mount dir projection batches before Close", t, func() {
@@ -1352,8 +1362,8 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 		conn := &rawDGUTASendPrepareConn{}
 		impl := &dgutaWriter{
 			conn:      conn,
-			mountPath: "/nfs/t283_imaging/",
-			snapshot:  snapshotID("/nfs/t283_imaging/", time.Date(2026, 5, 30, 9, 0, 0, 0, time.UTC)),
+			mountPath: testT283ImagingMountPath,
+			snapshot:  snapshotID(testT283ImagingMountPath, time.Date(2026, 5, 30, 9, 0, 0, 0, time.UTC)),
 		}
 		impl.SetBatchSize(100)
 
@@ -1365,7 +1375,11 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 			},
 		}
 
-		appended, err := impl.appendDGUTARows(record, "/nfs/t283_imaging/a/", "/nfs/t283_imaging/a/")
+		appended, err := impl.appendDGUTARows(
+			record,
+			testT283ImagingMountPath+"a/",
+			testT283ImagingMountPath+"a/",
+		)
 		So(err, ShouldBeNil)
 		So(appended, ShouldHaveLength, 3)
 		So(impl.previousDGUTARows.keys, ShouldBeNil)
@@ -1387,6 +1401,7 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 			db.GUTAs{testProjectionGUTA(7, 9, db.DGUTAFileTypeBam, db.DGUTAgeAll, 1)},
 			0,
 			nil,
+			false,
 			1,
 		), ShouldBeNil)
 
@@ -1426,6 +1441,7 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 			db.GUTAs{testProjectionGUTA(7, 9, db.DGUTAFileTypeBam, db.DGUTAgeAll, 1)},
 			0,
 			nil,
+			false,
 			1,
 		)
 		So(err, ShouldBeNil)
@@ -1447,6 +1463,7 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 				db.GUTAs{testProjectionGUTA(7, 9, db.DGUTAFileTypeBam, db.DGUTAgeAll, 1)},
 				0,
 				nil,
+				false,
 				1,
 			)
 		}, ShouldNotPanic)
@@ -1475,6 +1492,7 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 			db.GUTAs{testProjectionGUTA(7, 9, db.DGUTAFileTypeBam, db.DGUTAgeAll, 1)},
 			0,
 			nil,
+			false,
 			100,
 		), ShouldBeNil)
 
@@ -1494,6 +1512,7 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 			db.GUTAs{testProjectionGUTA(7, 10, db.DGUTAFileTypeCram, db.DGUTAgeA2M, 1)},
 			0,
 			nil,
+			false,
 			100,
 		), ShouldBeNil)
 
@@ -1574,6 +1593,7 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 			db.GUTAs{testProjectionGUTA(7, 9, db.DGUTAFileTypeBam, db.DGUTAgeAll, 1)},
 			0,
 			nil,
+			false,
 			2,
 		), ShouldBeNil)
 
@@ -1628,6 +1648,81 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 
 		So(columns.gids, ShouldHaveLength, len(gutas))
 		So(allocs, ShouldBeLessThan, 50.0)
+	})
+
+	Convey("DGUTAWriter compacts t283-shaped internal age rows while preserving vectors", t, func() {
+		conn := &lazyDGUTAImportConn{}
+		updatedAt := time.Date(2026, 6, 1, 9, 0, 0, 0, time.UTC)
+		mountPath := "/nfs/t283_imaging/"
+
+		impl := &dgutaWriter{
+			conn:      conn,
+			mountPath: mountPath,
+			updatedAt: updatedAt,
+			snapshot:  snapshotID(mountPath, updatedAt),
+			prepared:  true,
+			dirProjection: mountDirProjectionWriter{
+				conn:        conn,
+				refreshedAt: updatedAt,
+			},
+		}
+		impl.SetBatchSize(100_000)
+
+		const dirs = 100
+
+		paths := internaltest.NewDirectoryPathCreator()
+
+		for n := range dirs {
+			record := db.RecordDGUTA{
+				Dir:   paths.ToDirectoryPath(fmt.Sprintf("%sdir%04d/", mountPath, n)),
+				GUTAs: t283DirectoryGUTAs(),
+			}
+			So(impl.addReadyRecord(record), ShouldBeNil)
+		}
+
+		So(impl.flushAllBatches(), ShouldBeNil)
+		So(conn.totalRowsFor(insertDGUTAQuery), ShouldEqual, dirs)
+		So(conn.totalRowsFor(insertMountDirSummaryQuery), ShouldEqual, dirs)
+		So(conn.totalRowsFor(insertMountDirDGUTAVectorQuery), ShouldEqual, dirs)
+	})
+
+	Convey("DGUTAWriter normalises mount paths before internal age compaction", t, func() {
+		conn := &lazyDGUTAImportConn{}
+		updatedAt := time.Date(2026, 6, 1, 9, 15, 0, 0, time.UTC)
+		mountPath := testT283ImagingMountPath
+
+		impl := &dgutaWriter{
+			conn:      conn,
+			updatedAt: updatedAt,
+			prepared:  true,
+			dirProjection: mountDirProjectionWriter{
+				conn:        conn,
+				refreshedAt: updatedAt,
+			},
+		}
+		impl.SetBatchSize(100_000)
+		impl.SetMountPath(strings.TrimSuffix(mountPath, "/"))
+		impl.snapshot = snapshotID(impl.mountPath, updatedAt)
+		So(impl.mountPath, ShouldEqual, mountPath)
+
+		paths := internaltest.NewDirectoryPathCreator()
+		for _, dir := range []string{
+			mountPath,
+			mountPath + "internal/",
+			"/nfs/t283_imaging2/sibling/",
+		} {
+			So(impl.addReadyRecord(db.RecordDGUTA{
+				Dir: paths.ToDirectoryPath(dir),
+				GUTAs: db.GUTAs{
+					testProjectionGUTA(7, 9, db.DGUTAFileTypeBam, db.DGUTAgeAll, 1),
+					testProjectionGUTA(7, 9, db.DGUTAFileTypeBam, db.DGUTAgeA1M, 2),
+					testProjectionGUTA(7, 9, db.DGUTAFileTypeBam, db.DGUTAgeA2M, 3),
+				},
+			}), ShouldBeNil)
+		}
+
+		So(impl.flushAllBatches(), ShouldBeNil)
+		So(conn.totalRowsFor(insertDGUTAQuery), ShouldEqual, 7)
 	})
 
 	Convey("DGUTAWriter flushes projection batches separately from raw import batches", t, func() {
@@ -1848,6 +1943,15 @@ func newBatchFlushLimitConn(conn ch.Conn) *batchFlushLimitConn {
 		Conn:    conn,
 		maxRows: make(map[string]int),
 	}
+}
+
+func t283DirectoryGUTAs() db.GUTAs {
+	gutas := make(db.GUTAs, 0, len(db.DirGUTAges))
+	for _, age := range db.DirGUTAges {
+		gutas = append(gutas, testProjectionGUTA(66, 15008, db.DGUTAFileTypeDir, age, 1))
+	}
+
+	return gutas
 }
 
 func (b *projectionStreamingBatch) Flush() error {
@@ -2279,11 +2383,12 @@ func TestPartitionDropUsesCleanupTimeout(t *testing.T) {
 }
 
 type countingDGUTABatch struct {
-	rows    int
-	maxRows int
-	sent    bool
-	flushes int
-	sends   int
+	rows     int
+	maxRows  int
+	appended int
+	sent     bool
+	flushes  int
+	sends    int
 }
 
 func (b *countingDGUTABatch) Abort() error {
@@ -2295,12 +2400,14 @@ func (b *countingDGUTABatch) Abort() error {
 
 func (b *countingDGUTABatch) Append(...any) error {
 	b.rows++
+	b.appended++
 
 	return nil
 }
 
 func (b *countingDGUTABatch) AppendStruct(any) error {
 	b.rows++
+	b.appended++
 
 	return nil
 }
@@ -2503,6 +2610,15 @@ func (c *lazyDGUTAImportConn) preparedBatches() int {
 	var count int
 	for _, batches := range c.batches {
 		count += len(batches)
+	}
+
+	return count
+}
+
+func (c *lazyDGUTAImportConn) totalRowsFor(query string) int {
+	var count int
+	for _, batch := range c.batches[query] {
+		count += batch.appended
 	}
 
 	return count

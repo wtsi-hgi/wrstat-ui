@@ -535,7 +535,8 @@ func TestClickHouseDatabaseMountDirSummary(t *testing.T) {
 		emptyAgeSummary, err := dbch.DirInfo(mountPath+"a/", &db.Filter{Age: db.DGUTAgeA1M})
 		So(err, ShouldBeNil)
 		So(emptyAgeSummary, ShouldBeNil)
-		So(countingConn.rawSummaryQueryCount(), ShouldEqual, 1)
+		So(countingConn.rawSummaryQueryCount(), ShouldEqual, 0)
+		So(countingConn.mountDirVectorQueryCount(), ShouldEqual, 1)
 	})
 
 	Convey("DirInfos uses maintained non-directory summaries for the default where filter", t, func() {
@@ -1864,6 +1865,103 @@ func TestClickHouseDatabaseDirsHaveChildrenFastPath(t *testing.T) {
 		So(err, ShouldBeNil)
 		So(hasFilteredChildren, ShouldResemble, map[string]bool{broadParent: false})
 		So(countingConn.existenceQueryCount(), ShouldEqual, 1)
+	})
+
+	Convey("DirsHaveChildren checks active mount root children through DGUTA vectors", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+		resetSharedTreeQueryCachesForTesting()
+		Reset(resetSharedTreeQueryCachesForTesting)
+
+		th := newClickHouseTestHarness(t)
+
+		const mountPath = "/mnt/rootvector/"
+
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 5 * time.Second
+		cfg.PollInterval = 0
+		cfg.MountPoints = []string{mountPath}
+
+		p, err := OpenProvider(cfg)
+		So(err, ShouldBeNil)
+		Reset(func() { So(p.Close(), ShouldBeNil) })
+
+		cp, ok := p.(*chProvider)
+		So(ok, ShouldBeTrue)
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		updatedAt := time.Date(2026, 6, 1, 9, 30, 0, 0, time.UTC)
+		sid := snapshotID(mountPath, updatedAt)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		So(conn.Exec(ctx, testInsertMountStmt, mountPath, time.Now(), sid, updatedAt), ShouldBeNil)
+
+		childDir := mountPath + "compact/"
+		missingDir := mountPath + "empty/"
+		So(conn.Exec(
+			ctx, testInsertChildrenStmt, mountPath, sid.String(), mountPath, childDir[:len(childDir)-1],
+		), ShouldBeNil)
+
+		So(conn.Exec(ctx,
+			testInsertDGUTAStmt,
+			mountPath,
+			sid.String(),
+			childDir,
+			uint32(7),
+			uint32(9),
+			uint16(db.DGUTAFileTypeBam),
+			uint8(db.DGUTAgeAll),
+			uint64(3),
+			uint64(30),
+			int64(10),
+			int64(20),
+			[]uint64{3, 0, 0, 0, 0, 0, 0, 0, 0},
+			[]uint64{0, 3, 0, 0, 0, 0, 0, 0, 0},
+		), ShouldBeNil)
+
+		state := newMountDirProjectionState()
+		state.addGUTAs(childDir, db.GUTAs{
+			testProjectionGUTA(7, 9, db.DGUTAFileTypeBam, db.DGUTAgeAll, 3),
+			testProjectionGUTA(7, 9, db.DGUTAFileTypeBam, db.DGUTAgeA1M, 2),
+		})
+		So(writeMountDirProjectionRows(ctx, conn, activeMount{
+			mountPath:  mountPath,
+			snapshotID: sid.String(),
+			updatedAt:  updatedAt,
+		}, state, defaultBatchSize), ShouldBeNil)
+
+		countingConn := &hasChildrenQueryCountingConn{Conn: cp.conn}
+		dbch := newClickHouseDatabase(cfg, countingConn)
+
+		filter := &db.Filter{
+			GIDs: []uint32{7},
+			UIDs: []uint32{9},
+			FT:   db.DGUTAFileTypeBam,
+			Age:  db.DGUTAgeA1M,
+		}
+		hasChildren, err := dbch.DirsHaveChildren([]string{mountPath, missingDir}, filter)
+		So(err, ShouldBeNil)
+		So(hasChildren, ShouldResemble, map[string]bool{
+			mountPath:  true,
+			missingDir: false,
+		})
+		So(countingConn.mountVectorQueryCount(), ShouldEqual, 1)
+
+		wrongGIDChildren, err := dbch.DirsHaveChildren(
+			[]string{mountPath},
+			&db.Filter{GIDs: []uint32{42}, Age: db.DGUTAgeA1M},
+		)
+		So(err, ShouldBeNil)
+		So(wrongGIDChildren, ShouldResemble, map[string]bool{mountPath: false})
+
+		allChildren, err := dbch.DirsHaveChildren([]string{mountPath}, &db.Filter{Age: db.DGUTAgeAll})
+		So(err, ShouldBeNil)
+		So(allChildren, ShouldResemble, map[string]bool{mountPath: true})
 	})
 
 	Convey("DirsHaveChildren batches child summaries for small child fanout", t, func() {

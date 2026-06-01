@@ -335,6 +335,10 @@ func (t *whereTraversal) shouldPreloadFilteredMountWhere(queryDir string) bool {
 		return false
 	}
 
+	if t.filter.Age != db.DGUTAgeAll {
+		return false
+	}
+
 	return ensureTrailingSlash(queryDir) == ensureTrailingSlash(t.mount.mountPath)
 }
 
@@ -1029,6 +1033,10 @@ func (d *clickHouseDatabase) activeMountChildSummaries(
 	childMounts map[string]activeMount,
 	filter *db.Filter,
 ) (map[string]*db.DirSummary, error) {
+	if mountDirDGUTAVectorCanHandleFilter(filter) {
+		return d.activeMountChildSummariesFromDirInfos(childDirs, filter)
+	}
+
 	gutasByDir, err := d.gutasForActiveMountDirs(childDirs, childMounts)
 	if err != nil {
 		return nil, err
@@ -1045,6 +1053,26 @@ func (d *clickHouseDatabase) activeMountChildSummaries(
 		sum := dirSummaryWithModtime(gutas, filter, mount.updatedAt)
 		d.cacheActiveMountChildSummary(mount, childDir, filter, sum)
 
+		if sum != nil {
+			summaries[childDir] = sum
+		}
+	}
+
+	return summaries, nil
+}
+
+func (d *clickHouseDatabase) activeMountChildSummariesFromDirInfos(
+	childDirs []string,
+	filter *db.Filter,
+) (map[string]*db.DirSummary, error) {
+	childSummaries, err := d.DirInfos(childDirs, filter)
+	if err != nil {
+		return nil, err
+	}
+
+	summaries := make(map[string]*db.DirSummary, len(childSummaries))
+	for _, childDir := range childDirs {
+		sum := childSummaries[childDir]
 		if sum != nil {
 			summaries[childDir] = sum
 		}
