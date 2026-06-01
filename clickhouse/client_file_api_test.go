@@ -402,6 +402,66 @@ func TestClientPermissionAnyInDir(t *testing.T) {
 		So(err, ShouldBeNil)
 		So(ok, ShouldBeFalse)
 	})
+
+	Convey("Client.PermissionAnyInDir checks active AgeAll fact vectors", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 2 * time.Second
+		cfg.MountPoints = []string{"/mnt/c4-perm/"}
+
+		c, err := NewClient(cfg)
+		So(err, ShouldBeNil)
+		So(c, ShouldNotBeNil)
+		Reset(func() { So(c.Close(), ShouldBeNil) })
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		const mountPath = "/mnt/c4-perm/"
+
+		dir := mountPath + "a/"
+
+		updatedAt := time.Date(2026, 6, 1, 15, 30, 0, 0, time.UTC)
+		sid := snapshotID(mountPath, updatedAt)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		So(conn.Exec(ctx, testInsertMountStmt, mountPath, time.Now(), sid, updatedAt), ShouldBeNil)
+		So(conn.Exec(
+			ctx,
+			testInsertInfoFactVectorStmt,
+			mountPath,
+			sid.String(),
+			dir,
+			[]uint32{20, 7},
+			[]uint32{11, 12},
+			[]uint16{uint16(db.DGUTAFileTypeBam), uint16(db.DGUTAFileTypeCram)},
+			[]uint8{uint8(db.DGUTAgeAll), uint8(db.DGUTAgeAll)},
+			[]uint64{1, 1},
+			[]uint64{10, 20},
+			[]int64{10, 11},
+			[]int64{20, 21},
+			[][]uint64{{1, 0, 0, 0, 0, 0, 0, 0, 0}, {0, 1, 0, 0, 0, 0, 0, 0, 0}},
+			[][]uint64{{0, 1, 0, 0, 0, 0, 0, 0, 0}, {1, 0, 0, 0, 0, 0, 0, 0, 0}},
+		), ShouldBeNil)
+
+		ok, err := c.PermissionAnyInDir(ctx, dir, 11, []uint32{9})
+		So(err, ShouldBeNil)
+		So(ok, ShouldBeTrue)
+
+		ok, err = c.PermissionAnyInDir(ctx, dir, 99, []uint32{7})
+		So(err, ShouldBeNil)
+		So(ok, ShouldBeTrue)
+
+		ok, err = c.PermissionAnyInDir(ctx, dir, 99, []uint32{98})
+		So(err, ShouldBeNil)
+		So(ok, ShouldBeFalse)
+	})
 }
 
 func TestClientFindByGlob(t *testing.T) {

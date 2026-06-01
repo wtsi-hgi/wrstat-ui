@@ -74,8 +74,8 @@ const (
 		"FROM wrstat_dir_facts PREWHERE mount_path = ? AND snapshot_id = ? AND dir = ?)"
 
 	infoDGUTAQuery = "SELECT " +
-		"uniqExact(dir) AS num_dirs, " +
-		"count() AS num_dgutas " +
+		"count() AS num_dirs, " +
+		"sum(length(gids)) AS num_dgutas " +
 		"FROM wrstat_dir_facts " +
 		"WHERE (mount_path, snapshot_id) IN (" +
 		"SELECT mount_path, snapshot_id FROM wrstat_mounts_active" +
@@ -171,8 +171,8 @@ const (
 		"ORDER BY c.parent_dir ASC"
 
 	infoDGUTASnapshotQuery = "SELECT " +
-		"uniqExact(dir) AS num_dirs, " +
-		"count() AS num_dgutas " +
+		"count() AS num_dirs, " +
+		"sum(length(gids)) AS num_dgutas " +
 		"FROM wrstat_dir_facts " +
 		"WHERE %s"
 
@@ -1946,20 +1946,7 @@ func (d *clickHouseDatabase) parentDirsWithFilteredChildRows(
 		return d.parentDirsWithSummarizedChildren(childParents, childDirs, filter)
 	}
 
-	if ready, err := d.mountDirDGUTAVectorsReadyForFilter(group, filter); err != nil || ready {
-		if err != nil {
-			return nil, err
-		}
-
-		return d.parentDirsWithSummarizedChildren(childParents, childDirs, filter)
-	}
-
-	return d.parentDirsWithMatchingChildrenMount(
-		group.mount.mountPath,
-		group.mount.snapshotID,
-		parentDirs,
-		filter,
-	)
+	return d.parentDirsWithWideFilteredChildRows(group, filter, childParents, childDirs, parentDirs)
 }
 
 func collectChildParents(childrenByParent map[string][]string) (map[string][]string, []string) {
@@ -1994,6 +1981,36 @@ func parentDirsWithAnyChildren(
 	}
 
 	return dirs
+}
+
+func (d *clickHouseDatabase) parentDirsWithWideFilteredChildRows(
+	group *activeMountDirGroup,
+	filter *db.Filter,
+	childParents map[string][]string,
+	childDirs []string,
+	parentDirs []string,
+) (map[string]bool, error) {
+	ctx, cancel := configQueryContext(d.cfg)
+	defer cancel()
+
+	if parents, ok, err := d.parentDirsWithAgeAllFilteredChildRows(ctx, group, parentDirs, filter); err != nil || ok {
+		return parents, err
+	}
+
+	if ready, err := d.mountDirDGUTAVectorsReadyForFilter(group, filter); err != nil || ready {
+		if err != nil {
+			return nil, err
+		}
+
+		return d.parentDirsWithSummarizedChildren(childParents, childDirs, filter)
+	}
+
+	return d.parentDirsWithMatchingChildrenMount(
+		group.mount.mountPath,
+		group.mount.snapshotID,
+		parentDirs,
+		filter,
+	)
 }
 
 func (d *clickHouseDatabase) mountDirDGUTAVectorsReadyForFilter(
@@ -3068,10 +3085,15 @@ func (d *clickHouseDatabase) filteredMountWhereSummaries(
 	mount activeMount,
 	filter *db.Filter,
 ) (map[string]*db.DirSummary, error) {
-	query, args := filteredMountWhereSummariesQueryForFilter(mount.mountPath, mount.snapshotID, filter)
-
 	ctx, cancel := configQueryContext(d.cfg)
 	defer cancel()
+
+	summaries, ok, err := d.dirFilterAgeAllWhereSummaries(ctx, mount, filter)
+	if err != nil || ok {
+		return summaries, err
+	}
+
+	query, args := filteredMountWhereSummariesQueryForFilter(mount.mountPath, mount.snapshotID, filter)
 
 	rows, err := d.conn.Query(ctx, query, args...)
 	if err != nil {
@@ -3080,7 +3102,7 @@ func (d *clickHouseDatabase) filteredMountWhereSummaries(
 
 	defer func() { _ = rows.Close() }()
 
-	summaries, _, err := scanDirSummaryRows(rows, filter, mount.updatedAt)
+	summaries, _, err = scanDirSummaryRows(rows, filter, mount.updatedAt)
 
 	return summaries, err
 }

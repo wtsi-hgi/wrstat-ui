@@ -830,6 +830,23 @@ func TestBuildOps(t *testing.T) {
 		So(database.dirInfoFilters[0], ShouldResemble, filter)
 	})
 
+	Convey("tree ops mark AgeAll owner/type filters as optional-index gated", t, func() {
+		filter := queryTestTreeFilter()
+		inputs := treeOpInputs(filter, nil)
+
+		So(inputs[queryInputTreeFilterRouteKey], ShouldEqual, queryTreeFilterRouteOptionalAgeAll)
+		So(inputs[queryInputFilterIndexGateKey], ShouldEqual, queryFilterIndexGatePerfRequired)
+	})
+
+	Convey("tree ops mark age-specific filters as facts-vector reads", t, func() {
+		filter := queryTestTreeFilter()
+		filter.Age = db.DGUTAgeM1Y
+		inputs := treeOpInputs(filter, nil)
+
+		So(inputs[queryInputTreeFilterRouteKey], ShouldEqual, queryTreeFilterRouteFactsVectors)
+		So(inputs[queryInputFilterIndexGateKey], ShouldEqual, queryFilterIndexGateInapplicable)
+	})
+
 	Convey("buildOps reports cold/new directory and fresh-provider tree coverage", t, func() {
 		qctx := queryContext{
 			provider: fakeMountTimestampsProvider{

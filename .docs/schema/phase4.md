@@ -21,8 +21,8 @@ virtual hierarchy tables in `clickhouse/database.go` and
 `clickhouse/dir_facts.go`. Remove raw-DGUTA fallback tests and cover all 6
 acceptance tests from C1.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
 
 ### Item 4.2: C2 - Optional AgeAll Filter Index
 
@@ -34,8 +34,8 @@ apply, and ensure age-specific reads always use facts vectors. Implement in
 `clickhouse/dir_filter_ageall.go` and `internal/chperf/query.go`, covering
 all 8 acceptance tests from C2.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
 
 ### Item 4.3: C4 - Info And Permission Counts
 
@@ -46,5 +46,5 @@ permission semantics using facts vector entries or the optional AgeAll route
 when applicable in `clickhouse/database.go` and `clickhouse/file_api.go`.
 Cover all 4 acceptance tests from C4.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed

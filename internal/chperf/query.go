@@ -56,8 +56,10 @@ const (
 	queryInputFilterFileTypeMaskKey       = "filter_file_type_mask"
 	queryInputFilterFileTypesKey          = "filter_file_types"
 	queryInputFilterGIDsKey               = "filter_gids"
+	queryInputFilterIndexGateKey          = "filter_index_gate"
 	queryInputFilterUIDsKey               = "filter_uids"
 	queryInputSplitsKey                   = "splits"
+	queryInputTreeFilterRouteKey          = "tree_filter_route"
 	queryOpFilesListDirName               = "files_listdir"
 	queryOpStartupCacheWarmingAuditName   = "startup_cache_warming_audit"
 	queryOpTreeDiskTreeAncName            = "tree_disktree_endpoint_ancestor_dirs"
@@ -84,6 +86,10 @@ const (
 	queryScopeVisibleChildDirs            = "visible_child_directory_each_repeat"
 	querySourceClickHouseLog              = "clickhouse_query_log"
 	querySourceWall                       = "wall"
+	queryTreeFilterRouteFactsVectors      = "wrstat_dir_facts_vectors"
+	queryTreeFilterRouteOptionalAgeAll    = "wrstat_dir_facts_default_optional_wrstat_dir_filter_ageall"
+	queryFilterIndexGateInapplicable      = "not_applicable"
+	queryFilterIndexGatePerfRequired      = "requires_failed_final_perf_gate_and_ready_index"
 	queryStartupStageBackgroundProvider   = "background_provider_polling_or_update_after_initial_readers"
 	queryStartupStageLazyInteraction      = "lazy_during_user_or_perf_interactions"
 	queryStartupStageSynchronousInitial   = "synchronous_before_server_started"
@@ -406,8 +412,47 @@ func treeOpInputs(filter *db.Filter, inputs map[string]any) map[string]any {
 	inputs[queryInputFilterUIDsKey] = slices.Clone(filter.UIDs)
 	inputs[queryInputFilterFileTypeMaskKey] = int(filter.FT)
 	inputs[queryInputFilterFileTypesKey] = filter.FT.String()
+	inputs[queryInputTreeFilterRouteKey] = treeFilterRoute(filter)
+	inputs[queryInputFilterIndexGateKey] = treeFilterIndexGate(filter)
 
 	return inputs
+}
+
+func treeFilterRoute(filter *db.Filter) string {
+	if treeFilterAgeAllIndexEligible(filter) {
+		return queryTreeFilterRouteOptionalAgeAll
+	}
+
+	return queryTreeFilterRouteFactsVectors
+}
+
+func treeFilterAgeAllIndexEligible(filter *db.Filter) bool {
+	if filter == nil || filter.Age != db.DGUTAgeAll {
+		return false
+	}
+
+	if treeFilterHasEmptyIDPredicate(filter) {
+		return false
+	}
+
+	return treeFilterHasOwnerOrTypePredicate(filter)
+}
+
+func treeFilterHasEmptyIDPredicate(filter *db.Filter) bool {
+	return (filter.GIDs != nil && len(filter.GIDs) == 0) ||
+		(filter.UIDs != nil && len(filter.UIDs) == 0)
+}
+
+func treeFilterHasOwnerOrTypePredicate(filter *db.Filter) bool {
+	return filter.GIDs != nil || filter.UIDs != nil || filter.FT != 0
+}
+
+func treeFilterIndexGate(filter *db.Filter) string {
+	if treeFilterAgeAllIndexEligible(filter) {
+		return queryFilterIndexGatePerfRequired
+	}
+
+	return queryFilterIndexGateInapplicable
 }
 
 func opTreeWhereColdProvider(qctx queryContext, splits int) op {
