@@ -57,19 +57,6 @@ const (
 		"PREWHERE mount_path = ? AND snapshot_id = ? AND parent_dir = ? " +
 		"ORDER BY child"
 
-	childrenAncestorQuery = "WITH active AS (" +
-		"SELECT mount_path, snapshot_id " +
-		"FROM wrstat_mounts_active " +
-		"WHERE startsWith(mount_path, ?)" +
-		") " +
-		"SELECT DISTINCT c.child " +
-		"FROM wrstat_children c " +
-		"ANY INNER JOIN active a " +
-		"ON c.mount_path = a.mount_path " +
-		"AND c.snapshot_id = a.snapshot_id " +
-		"WHERE c.parent_dir = ? " +
-		"ORDER BY c.child ASC"
-
 	dgutaArrayZipExpr = "arrayZip(gids, uids, fts, ages, counts, sizes, " +
 		"atime_mins, mtime_maxs, atime_buckets, mtime_buckets)"
 
@@ -85,23 +72,6 @@ const (
 	dgutaQuery = "SELECT " + dgutaTupleColumns + " FROM (" +
 		"SELECT arrayJoin(" + dgutaArrayZipExpr + ") AS g " +
 		"FROM wrstat_dir_facts PREWHERE mount_path = ? AND snapshot_id = ? AND dir = ?)"
-
-	dgutaAncestorQuery = "WITH active AS (" +
-		"SELECT mount_path, snapshot_id " +
-		"FROM wrstat_mounts_active " +
-		"WHERE startsWith(mount_path, ?)" +
-		") " +
-		"SELECT " + dgutaTupleColumns + " FROM (" +
-		"SELECT arrayJoin(" + dgutaPrefixedArrayZipExpr + ") AS g " +
-		"FROM wrstat_dir_facts d " +
-		"ANY INNER JOIN active a " +
-		"ON d.mount_path = a.mount_path " +
-		"AND d.snapshot_id = a.snapshot_id " +
-		"WHERE d.dir = ?)"
-
-	ancestorMaxUpdatedAtQuery = "SELECT max(updated_at) " +
-		"FROM wrstat_mounts_active " +
-		"WHERE startsWith(mount_path, ?)"
 
 	infoDGUTAQuery = "SELECT " +
 		"uniqExact(dir) AS num_dirs, " +
@@ -510,6 +480,15 @@ func (d *clickHouseDatabase) dirInfoSingleMount(
 	dir string,
 	filter *db.Filter,
 ) (*db.DirSummary, error) {
+	ready, err := d.activeMountFactsReady(mountPath, snapshotID)
+	if err != nil {
+		return nil, err
+	}
+
+	if !ready {
+		return &db.DirSummary{Modtime: updatedAt}, db.ErrDirNotFound
+	}
+
 	sum, found, ok, err := d.dirInfoDGUTAVectorMount(mountPath, snapshotID, updatedAt, dir, filter)
 	if err != nil {
 		return nil, err
@@ -536,6 +515,47 @@ func dirInfoSummaryResult(
 	return sum, nil
 }
 
+func (d *clickHouseDatabase) activeMountFactsReady(mountPath, snapshotID string) (bool, error) {
+	if d.conn == nil {
+		return false, nil
+	}
+
+	ctx, cancel := configQueryContext(d.cfg)
+	defer cancel()
+
+	return d.mountDirSummaryReadyCached(ctx, mountPath, snapshotID)
+}
+
+func (d *clickHouseDatabase) activeMountReady(mount activeMount) (bool, error) {
+	return d.activeMountFactsReady(mount.mountPath, mount.snapshotID)
+}
+
+func (d *clickHouseDatabase) readyActiveMounts(mounts []activeMount) ([]activeMount, error) {
+	readyMounts := make([]activeMount, 0, len(mounts))
+
+	for _, mount := range mounts {
+		ready, err := d.activeMountReady(mount)
+		if err != nil {
+			return nil, err
+		}
+
+		if ready {
+			readyMounts = append(readyMounts, mount)
+		}
+	}
+
+	return readyMounts, nil
+}
+
+func (d *clickHouseDatabase) readyActiveMountsUnder(dir string) ([]activeMount, error) {
+	mounts, err := d.activeMountsUnder(dir)
+	if err != nil || len(mounts) == 0 {
+		return mounts, err
+	}
+
+	return d.readyActiveMounts(mounts)
+}
+
 func (d *clickHouseDatabase) dirInfoSingleMountFallback(
 	mountPath, snapshotID string,
 	updatedAt time.Time,
@@ -547,7 +567,7 @@ func (d *clickHouseDatabase) dirInfoSingleMountFallback(
 		return nil, err
 	}
 
-	if ok {
+	if ok && found {
 		return dirInfoSummaryResult(sum, found, updatedAt)
 	}
 
@@ -577,7 +597,7 @@ func (d *clickHouseDatabase) dirInfoDGUTAVectorMount(
 
 	queryDir := ensureTrailingSlash(dir)
 
-	gutasByDir, _, ok, err := d.mountDirDGUTAVectorsForDirsMount(mountPath, snapshotID, []string{queryDir})
+	gutasByDir, ok, err := d.mountDirDGUTAVectorsForDirsMount(mountPath, snapshotID, []string{queryDir})
 	if err != nil || !ok {
 		return nil, false, ok, err
 	}
@@ -663,11 +683,11 @@ func (d *clickHouseDatabase) whereTraversalFor(
 		return nil, err
 	}
 
-	if found {
-		traversal.mount = &mount
+	if !found {
+		return traversal, nil
 	}
 
-	return traversal, nil
+	return d.readyWhereTraversal(traversal, mount)
 }
 
 func newWhereTraversal(
@@ -682,6 +702,20 @@ func newWhereTraversal(
 		children:       make(map[string][]string),
 		childrenLoaded: make(map[string]bool),
 	}
+}
+
+func (d *clickHouseDatabase) readyWhereTraversal(
+	traversal *whereTraversal,
+	mount activeMount,
+) (*whereTraversal, error) {
+	ready, err := d.activeMountReady(mount)
+	if err != nil || !ready {
+		return traversal, err
+	}
+
+	traversal.mount = &mount
+
+	return traversal, nil
 }
 
 func (d *clickHouseDatabase) whereFromTraversal(
@@ -724,7 +758,12 @@ func (d *clickHouseDatabase) dirInfoAncestorFallback(
 	normDir string,
 	filter *db.Filter,
 ) (*db.DirSummary, error) {
-	gutas, err := d.gutasForAncestor(normDir)
+	mounts, err := d.readyActiveMountsUnder(normDir)
+	if err != nil {
+		return nil, err
+	}
+
+	gutas, err := d.gutasForAncestorMounts(normDir, mounts)
 	if err != nil {
 		return nil, err
 	}
@@ -738,10 +777,7 @@ func (d *clickHouseDatabase) dirInfoAncestorFallback(
 		return &db.DirSummary{}, db.ErrDirNotFound
 	}
 
-	updatedAt, err := d.ancestorMaxUpdatedAt(normDir)
-	if err != nil {
-		return nil, err
-	}
+	updatedAt := maxUpdatedAtForMounts(mounts)
 
 	return dirSummaryWithModtime(gutas, filter, updatedAt), nil
 }
@@ -768,6 +804,11 @@ func (d *clickHouseDatabase) dirInfoVirtualAncestor(
 	filter *db.Filter,
 ) (*db.DirSummary, bool, error) {
 	mounts, err := d.activeMountsUnder(dir)
+	if err != nil || len(mounts) == 0 {
+		return nil, false, err
+	}
+
+	mounts, err = d.readyActiveMounts(mounts)
 	if err != nil || len(mounts) == 0 {
 		return nil, false, err
 	}
@@ -840,9 +881,19 @@ func (d *clickHouseDatabase) Children(dir string) ([]string, error) {
 		return nil, nil
 	}
 
-	return d.childrenForMount(
-		mount.mountPath, mount.snapshotID, parentDir,
-	)
+	return d.childrenForReadyActiveMount(mount, parentDir)
+}
+
+func (d *clickHouseDatabase) childrenForReadyActiveMount(
+	mount activeMount,
+	parentDir string,
+) ([]string, error) {
+	ready, err := d.activeMountReady(mount)
+	if err != nil || !ready {
+		return nil, err
+	}
+
+	return d.childrenForMount(mount.mountPath, mount.snapshotID, parentDir)
 }
 
 // DirInfos returns directory summaries for multiple directories.
@@ -960,16 +1011,17 @@ func (d *clickHouseDatabase) addActiveMountRootDirsHaveChildren(
 	roots activeMountRootDirs,
 	filter *db.Filter,
 ) error {
-	if len(roots.mounts) == 0 {
-		return nil
+	mounts, err := d.readyActiveRootMounts(roots)
+	if err != nil || len(mounts) == 0 {
+		return err
 	}
 
-	childrenByParent, err := d.childrenForActiveMountRoots(roots.mounts)
+	childrenByParent, err := d.childrenForActiveMountRoots(mounts)
 	if err != nil {
 		return err
 	}
 
-	parents, err := d.parentActiveMountRootsWithChildren(roots.mounts, filter, childrenByParent)
+	parents, err := d.parentActiveMountRootsWithChildren(mounts, filter, childrenByParent)
 	if err != nil {
 		return err
 	}
@@ -981,6 +1033,16 @@ func (d *clickHouseDatabase) addActiveMountRootDirsHaveChildren(
 	}
 
 	return nil
+}
+
+func (d *clickHouseDatabase) readyActiveRootMounts(
+	roots activeMountRootDirs,
+) ([]activeMount, error) {
+	if len(roots.mounts) == 0 {
+		return nil, nil
+	}
+
+	return d.readyActiveMounts(roots.mounts)
 }
 
 func (d *clickHouseDatabase) parentActiveMountRootsWithChildren(
@@ -1348,16 +1410,17 @@ func (d *clickHouseDatabase) addActiveMountRootDirInfos(
 	roots activeMountRootDirs,
 	filter *db.Filter,
 ) error {
-	if len(roots.mounts) == 0 {
-		return nil
+	mounts, err := d.readyActiveRootMounts(roots)
+	if err != nil || len(mounts) == 0 {
+		return err
 	}
 
-	summaries, err := d.activeMountRootSummaries(roots.mounts, filter)
+	summaries, err := d.activeMountRootSummaries(mounts, filter)
 	if err != nil {
 		return err
 	}
 
-	for _, mount := range roots.mounts {
+	for _, mount := range mounts {
 		sum := summaries[mount.mountPath]
 		if sum == nil {
 			continue
@@ -1494,6 +1557,19 @@ func (d *clickHouseDatabase) addDirToActiveMountGroups(
 		return nil
 	}
 
+	return d.addReadyDirToActiveMountGroup(groups, mount, dir)
+}
+
+func (d *clickHouseDatabase) addReadyDirToActiveMountGroup(
+	groups map[string]*activeMountDirGroup,
+	mount activeMount,
+	dir string,
+) error {
+	ready, err := d.activeMountReady(mount)
+	if err != nil || !ready {
+		return err
+	}
+
 	addDirToActiveMountGroup(groups, mount, dir)
 
 	return nil
@@ -1628,6 +1704,10 @@ func (d *clickHouseDatabase) addMissingDirInfoSummaries(
 		originalDir := group.originalDirs[queryDir]
 
 		sum, err := d.DirInfo(originalDir, filter)
+		if errors.Is(err, db.ErrDirNotFound) {
+			continue
+		}
+
 		if err != nil {
 			return err
 		}
@@ -2133,28 +2213,29 @@ func (d *clickHouseDatabase) childrenForAncestor(
 }
 
 func (d *clickHouseDatabase) queryOrVirtualChildrenForAncestor(parentDir string) ([]string, error) {
-	ctx, cancel := configQueryContext(d.cfg)
-	defer cancel()
-
-	children, err := d.queryChildren(ctx, childrenAncestorQuery, "ancestor children", parentDir, parentDir)
-	if err != nil || len(children) > 0 {
-		return children, err
-	}
-
-	return d.childrenForVirtualAncestor(parentDir)
+	return d.readyChildrenForAncestor(parentDir)
 }
 
 func (d *clickHouseDatabase) snapshotOrVirtualChildrenForAncestor(parentDir string) ([]string, error) {
-	children, err := d.snapshotChildrenForAncestor(parentDir)
+	return d.readyChildrenForAncestor(parentDir)
+}
+
+func (d *clickHouseDatabase) readyChildrenForAncestor(parentDir string) ([]string, error) {
+	mounts, err := d.readyActiveMountsUnder(parentDir)
+	if err != nil || len(mounts) == 0 {
+		return nil, err
+	}
+
+	children, err := d.childrenForAncestorMounts(parentDir, mounts)
 	if err != nil || len(children) > 0 {
 		return children, err
 	}
 
-	return d.childrenForVirtualAncestor(parentDir)
+	return immediateChildrenForMounts(parentDir, mounts), nil
 }
 
 func (d *clickHouseDatabase) childrenForVirtualAncestor(parentDir string) ([]string, error) {
-	mounts, err := d.activeMountsUnder(parentDir)
+	mounts, err := d.readyActiveMountsUnder(parentDir)
 	if err != nil || len(mounts) == 0 {
 		return nil, err
 	}
@@ -2208,14 +2289,10 @@ func (d *clickHouseDatabase) childrenForTreeSummaryAncestor(parentDir string) ([
 	return d.treeSummaryChildren(ctx, parentDir)
 }
 
-func (d *clickHouseDatabase) snapshotChildrenForAncestor(
+func (d *clickHouseDatabase) childrenForAncestorMounts(
 	parentDir string,
+	mounts []activeMount,
 ) ([]string, error) {
-	mounts := d.snapshot.under(parentDir)
-	if len(mounts) == 0 {
-		return nil, nil
-	}
-
 	ctx, cancel := configQueryContext(d.cfg)
 	defer cancel()
 
@@ -3039,21 +3116,10 @@ func (d *clickHouseDatabase) addQueriedGUTAsForDirs(
 	}
 }
 
-func (d *clickHouseDatabase) gutasForAncestor(
+func (d *clickHouseDatabase) gutasForAncestorMounts(
 	dir string,
+	mounts []activeMount,
 ) (db.GUTAs, error) {
-	if d.snapshot != nil {
-		return d.snapshotGUTAsForAncestor(dir)
-	}
-
-	ctx, cancel := configQueryContext(d.cfg)
-	defer cancel()
-
-	return d.queryGUTAs(ctx, "ancestor dguta", dgutaAncestorQuery, dir, dir)
-}
-
-func (d *clickHouseDatabase) snapshotGUTAsForAncestor(dir string) (db.GUTAs, error) {
-	mounts := d.snapshot.under(dir)
 	if len(mounts) == 0 {
 		return nil, nil
 	}
@@ -3070,36 +3136,6 @@ func (d *clickHouseDatabase) snapshotGUTAsForAncestor(dir string) (db.GUTAs, err
 	)
 
 	return d.queryGUTAs(ctx, "ancestor dguta", query, args...)
-}
-
-func (d *clickHouseDatabase) ancestorMaxUpdatedAt(
-	dir string,
-) (time.Time, error) {
-	if d.snapshot != nil {
-		updatedAt, ok := d.snapshot.maxUpdatedAt(dir)
-		if !ok {
-			return time.Time{}, nil
-		}
-
-		return updatedAt.UTC(), nil
-	}
-
-	ctx, cancel := configQueryContext(d.cfg)
-	defer cancel()
-
-	rows, err := d.conn.Query(
-		ctx, ancestorMaxUpdatedAtQuery, dir,
-	)
-	if err != nil {
-		return time.Time{}, fmt.Errorf(
-			"clickhouse: failed to query ancestor max updated_at: %w",
-			err,
-		)
-	}
-
-	defer func() { _ = rows.Close() }()
-
-	return scanMaxUpdatedAt(rows)
 }
 
 func scanMaxUpdatedAt(rows rowsScanner) (time.Time, error) {

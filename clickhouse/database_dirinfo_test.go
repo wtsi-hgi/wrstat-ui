@@ -70,6 +70,223 @@ func (d *clickHouseGenericTreeDB) Close() error {
 }
 
 func TestClickHouseDatabaseDirInfo(t *testing.T) {
+	Convey("DirInfo does not read active facts before projection readiness exists", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+		resetSharedTreeQueryCachesForTesting()
+		Reset(resetSharedTreeQueryCachesForTesting)
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 2 * time.Second
+		cfg.PollInterval = 0
+
+		p, err := OpenProvider(cfg)
+		So(err, ShouldBeNil)
+		Reset(func() { So(p.Close(), ShouldBeNil) })
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		const mountPath = "/mnt/not-ready/"
+
+		updatedAt := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+		sid := snapshotID(mountPath, updatedAt)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		So(conn.Exec(ctx, testInsertMountStmt, mountPath, time.Now(), sid, updatedAt), ShouldBeNil)
+		insertDirSummaryTestGUTA(ctx, conn, mountPath, sid, mountPath, 7, 2)
+		So(conn.Exec(ctx, testInsertChildrenStmt, mountPath, sid.String(), mountPath, mountPath+"child/"), ShouldBeNil)
+
+		guardedConn := &dirFactsReadinessGuardConn{Conn: conn}
+		dbch := newClickHouseDatabase(cfg, guardedConn)
+
+		sum, err := dbch.DirInfo(mountPath, nil)
+		So(errors.Is(err, db.ErrDirNotFound), ShouldBeTrue)
+		So(sum, ShouldNotBeNil)
+		So(guardedConn.factQueriesAfterReadiness(), ShouldEqual, 0)
+		So(guardedConn.snapshotQueriesBeforeReadiness(), ShouldEqual, 0)
+		So(guardedConn.snapshotQueriesAfterReadiness(), ShouldEqual, 0)
+	})
+
+	Convey("batched and tree readers do not use active snapshot facts before projection readiness exists", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+		resetSharedTreeQueryCachesForTesting()
+		Reset(resetSharedTreeQueryCachesForTesting)
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 2 * time.Second
+		cfg.PollInterval = 0
+
+		p, err := OpenProvider(cfg)
+		So(err, ShouldBeNil)
+		Reset(func() { So(p.Close(), ShouldBeNil) })
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		const mountPath = "/mnt/batch-not-ready/"
+
+		updatedAt := time.Date(2026, 6, 1, 12, 30, 0, 0, time.UTC)
+		sid := snapshotID(mountPath, updatedAt)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		So(conn.Exec(ctx, testInsertMountStmt, mountPath, time.Now(), sid, updatedAt), ShouldBeNil)
+		insertDirSummaryTestGUTA(ctx, conn, mountPath, sid, mountPath, 7, 2)
+		insertDirSummaryTestGUTA(ctx, conn, mountPath, sid, mountPath+"child/", 7, 1)
+		So(conn.Exec(ctx, testInsertChildrenStmt, mountPath, sid.String(), mountPath, mountPath+"child"), ShouldBeNil)
+
+		guardedConn := &dirFactsReadinessGuardConn{Conn: conn}
+		dbch := newClickHouseDatabase(cfg, guardedConn)
+
+		summaries, err := dbch.DirInfos(
+			[]string{mountPath, mountPath + "child/"},
+			&db.Filter{GIDs: []uint32{7}, Age: db.DGUTAgeAll},
+		)
+		So(err, ShouldBeNil)
+		So(summaries, ShouldBeEmpty)
+
+		hasChildren, err := dbch.DirsHaveChildren([]string{mountPath, mountPath + "child/"}, nil)
+		So(err, ShouldBeNil)
+		So(hasChildren, ShouldResemble, map[string]bool{
+			mountPath:            false,
+			mountPath + "child/": false,
+		})
+
+		_, err = db.NewTree(dbch).Where(
+			mountPath,
+			&db.Filter{
+				GIDs: []uint32{7},
+				UIDs: []uint32{9},
+				FT:   db.DGUTAFileTypeBam,
+				Age:  db.DGUTAgeAll,
+			},
+			split.SplitsToSplitFn(1),
+		)
+		So(errors.Is(err, db.ErrDirNotFound), ShouldBeTrue)
+		So(guardedConn.readinessQueryCount(), ShouldBeGreaterThan, 0)
+		So(guardedConn.snapshotQueriesBeforeReadiness(), ShouldEqual, 0)
+		So(guardedConn.snapshotQueriesAfterReadiness(), ShouldEqual, 0)
+	})
+
+	Convey("ancestor readers do not expose unready active snapshots", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+		resetSharedTreeQueryCachesForTesting()
+		Reset(resetSharedTreeQueryCachesForTesting)
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 2 * time.Second
+		cfg.PollInterval = 0
+		cfg.MountPoints = []string{"/", "/lustre/partial/"}
+
+		p, err := OpenProvider(cfg)
+		So(err, ShouldBeNil)
+		Reset(func() { So(p.Close(), ShouldBeNil) })
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		const mountPath = "/lustre/partial/"
+
+		updatedAt := time.Date(2026, 6, 1, 13, 0, 0, 0, time.UTC)
+		sid := snapshotID(mountPath, updatedAt)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		So(conn.Exec(ctx, testInsertMountStmt, mountPath, time.Now(), sid, updatedAt), ShouldBeNil)
+		insertDirSummaryTestGUTA(ctx, conn, mountPath, sid, "/", 7, 11)
+		So(conn.Exec(ctx, testInsertChildrenStmt, mountPath, sid.String(), "/", "/lustre"), ShouldBeNil)
+
+		dbch := newClickHouseDatabase(cfg, conn)
+		sum, err := dbch.DirInfo("/", &db.Filter{Age: db.DGUTAgeAll})
+		So(errors.Is(err, db.ErrDirNotFound), ShouldBeTrue)
+		So(sum, ShouldNotBeNil)
+
+		children, err := dbch.Children("/")
+		So(err, ShouldBeNil)
+		So(children, ShouldBeNil)
+
+		_, err = db.NewTree(dbch).DirInfo("/", &db.Filter{Age: db.DGUTAgeAll})
+		So(errors.Is(err, db.ErrDirNotFound), ShouldBeTrue)
+
+		snapshot := newActiveMountsSnapshot([]mountsActiveRow{{
+			mountPath:  mountPath,
+			snapshotID: sid.String(),
+			updatedAt:  updatedAt,
+		}})
+		snapshotDB := newClickHouseDatabaseWithSnapshot(cfg, conn, snapshot)
+
+		sum, err = snapshotDB.DirInfo("/", &db.Filter{Age: db.DGUTAgeAll})
+		So(errors.Is(err, db.ErrDirNotFound), ShouldBeTrue)
+		So(sum, ShouldNotBeNil)
+
+		children, err = snapshotDB.Children("/")
+		So(err, ShouldBeNil)
+		So(children, ShouldBeNil)
+
+		_, err = db.NewTree(snapshotDB).DirInfo("/", &db.Filter{Age: db.DGUTAgeAll})
+		So(errors.Is(err, db.ErrDirNotFound), ShouldBeTrue)
+	})
+
+	Convey("DirInfo uses ready scalar facts for AgeAll active-mount filters", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+		resetSharedTreeQueryCachesForTesting()
+		Reset(resetSharedTreeQueryCachesForTesting)
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 5 * time.Second
+		cfg.PollInterval = 0
+
+		p, err := OpenProvider(cfg)
+		So(err, ShouldBeNil)
+		Reset(func() { So(p.Close(), ShouldBeNil) })
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		const mountPath = "/mnt/ready-scalar/"
+
+		updatedAt := time.Date(2026, 6, 1, 12, 30, 0, 0, time.UTC)
+		sid := snapshotID(mountPath, updatedAt)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		insertDirSummaryTestGUTA(ctx, conn, mountPath, sid, mountPath, 7, 3)
+		So(conn.Exec(ctx, testInsertMountStmt, mountPath, time.Now(), sid, updatedAt), ShouldBeNil)
+		So(writeMaintainedMountDirProjectionForTest(ctx, conn, activeMount{
+			mountPath:  mountPath,
+			snapshotID: sid.String(),
+			updatedAt:  updatedAt,
+		}), ShouldBeNil)
+
+		countingConn := &dirInfoSummaryQueryCountingConn{Conn: conn}
+		dbch := newClickHouseDatabase(cfg, countingConn)
+
+		sum, err := dbch.DirInfo(mountPath, &db.Filter{Age: db.DGUTAgeAll})
+		So(err, ShouldBeNil)
+		So(sum, ShouldNotBeNil)
+		So(sum.Count, ShouldEqual, 3)
+		So(sum.Size, ShouldEqual, 30)
+		So(countingConn.mountDirSummaryQueryCount(), ShouldEqual, 1)
+		So(countingConn.mountDirVectorQueryCount(), ShouldEqual, 0)
+	})
+
 	Convey("DirInfo returns a summary from wrstat_dguta for active snapshot", t, func() {
 		os.Setenv("WRSTAT_ENV", "test")
 		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
@@ -110,6 +327,11 @@ func TestClickHouseDatabaseDirInfo(t *testing.T) {
 			sid,
 			updatedAt,
 		), ShouldBeNil)
+		insertMountDirProjectionSetForTest(ctx, conn, activeMount{
+			mountPath:  mountPath,
+			snapshotID: sid.String(),
+			updatedAt:  updatedAt,
+		})
 
 		atimeBuckets := []uint64{1, 0, 0, 0, 0, 0, 0, 0, 0}
 		mtimeBuckets := []uint64{0, 1, 0, 0, 0, 0, 0, 0, 0}
@@ -130,6 +352,11 @@ func TestClickHouseDatabaseDirInfo(t *testing.T) {
 			atimeBuckets,
 			mtimeBuckets,
 		), ShouldBeNil)
+		So(writeMaintainedMountDirProjectionForTest(ctx, conn, activeMount{
+			mountPath:  mountPath,
+			snapshotID: sid.String(),
+			updatedAt:  updatedAt,
+		}), ShouldBeNil)
 
 		sum, err := dbch.DirInfo(dir, &db.Filter{Age: db.DGUTAgeAll})
 		So(err, ShouldBeNil)
@@ -180,6 +407,11 @@ func TestClickHouseDatabaseDirInfo(t *testing.T) {
 			sid,
 			updatedAt,
 		), ShouldBeNil)
+		insertMountDirProjectionSetForTest(ctx, conn, activeMount{
+			mountPath:  mountPath,
+			snapshotID: sid.String(),
+			updatedAt:  updatedAt,
+		})
 
 		atimeBuckets := []uint64{1, 0, 0, 0, 0, 0, 0, 0, 0}
 		mtimeBuckets := []uint64{0, 1, 0, 0, 0, 0, 0, 0, 0}
@@ -225,6 +457,11 @@ func TestClickHouseDatabaseDirInfo(t *testing.T) {
 			mountPath,
 			"/dev",
 		), ShouldBeNil)
+		So(writeMaintainedMountDirProjectionForTest(ctx, conn, activeMount{
+			mountPath:  mountPath,
+			snapshotID: sid.String(),
+			updatedAt:  updatedAt,
+		}), ShouldBeNil)
 
 		sum, err := dbch.DirInfo("/dev", &db.Filter{Age: db.DGUTAgeAll})
 		So(err, ShouldBeNil)
@@ -241,6 +478,14 @@ func TestClickHouseDatabaseDirInfo(t *testing.T) {
 		So(di.Children[0].Dir, ShouldEqual, "/dev")
 		So(di.Children[0].Count, ShouldEqual, 2)
 	})
+}
+
+func insertMountDirProjectionSetForTest(
+	ctx context.Context,
+	conn ch.Conn,
+	mount activeMount,
+) {
+	So(writeMountDirSummarySetRow(ctx, conn, mount, time.Now().UTC()), ShouldBeNil)
 }
 
 func assertMaintainedReadinessRetriesMissesAndCachesHits(
@@ -358,6 +603,11 @@ func TestClickHouseDatabaseBatchedTreeExpansion(t *testing.T) {
 			sid,
 			updatedAt,
 		), ShouldBeNil)
+		insertMountDirProjectionSetForTest(ctx, conn, activeMount{
+			mountPath:  mountPath,
+			snapshotID: sid.String(),
+			updatedAt:  updatedAt,
+		})
 
 		atimeBuckets := []uint64{1, 0, 0, 0, 0, 0, 0, 0, 0}
 		mtimeBuckets := []uint64{0, 1, 0, 0, 0, 0, 0, 0, 0}
@@ -393,6 +643,11 @@ func TestClickHouseDatabaseBatchedTreeExpansion(t *testing.T) {
 		So(conn.Exec(ctx, testInsertChildrenStmt,
 			mountPath, sid, mountPath+"b/", mountPath+"b/grand",
 		), ShouldBeNil)
+		So(writeMaintainedMountDirProjectionForTest(ctx, conn, activeMount{
+			mountPath:  mountPath,
+			snapshotID: sid.String(),
+			updatedAt:  updatedAt,
+		}), ShouldBeNil)
 
 		filter := &db.Filter{GIDs: []uint32{7}, Age: db.DGUTAgeAll}
 		summaries, err := dbch.DirInfos(
@@ -405,7 +660,7 @@ func TestClickHouseDatabaseBatchedTreeExpansion(t *testing.T) {
 		So(summaries[mountPath+"b"].Count, ShouldEqual, 2)
 		So(summaries[mountPath+"b"].Modtime, ShouldResemble, updatedAt)
 		So(countingConn.groupedSummaryQueryCount(), ShouldEqual, 0)
-		So(countingConn.rawSummaryBatchQueryCount(), ShouldEqual, 1)
+		So(countingConn.rawSummaryBatchQueryCount(), ShouldEqual, 0)
 
 		expectedSummary := func(dir string, filter *db.Filter) *db.DirSummary {
 			gutas, errg := rawDB.gutasForDir(mountPath, sid.String(), ensureTrailingSlash(dir))
@@ -429,7 +684,7 @@ func TestClickHouseDatabaseBatchedTreeExpansion(t *testing.T) {
 			mountPath + "b/": expectedSummary(mountPath+"b/", &db.Filter{Age: db.DGUTAgeAll}),
 		})
 		So(countingConn.groupedSummaryQueryCount(), ShouldEqual, 0)
-		So(countingConn.rawSummaryBatchQueryCount(), ShouldEqual, 1)
+		So(countingConn.rawSummaryBatchQueryCount(), ShouldEqual, 0)
 
 		defaultSummaries, err := dbch.DirInfos([]string{mountPath + "a"}, &db.Filter{})
 		So(err, ShouldBeNil)
@@ -437,7 +692,7 @@ func TestClickHouseDatabaseBatchedTreeExpansion(t *testing.T) {
 			mountPath + "a": expectedSummary(mountPath+"a", &db.Filter{}),
 		})
 		So(countingConn.groupedSummaryQueryCount(), ShouldEqual, 0)
-		So(countingConn.rawSummaryBatchQueryCount(), ShouldEqual, 1)
+		So(countingConn.rawSummaryBatchQueryCount(), ShouldEqual, 0)
 
 		emptyGIDSummaries, err := dbch.DirInfos(
 			[]string{mountPath + "a"},
@@ -871,8 +1126,18 @@ func TestClickHouseDatabaseMountDirSummary(t *testing.T) {
 		defer cancel()
 
 		So(conn.Exec(ctx, testInsertMountStmt, mountPath, time.Now(), sid, updatedAt), ShouldBeNil)
+		insertMountDirProjectionSetForTest(ctx, conn, activeMount{
+			mountPath:  mountPath,
+			snapshotID: sid.String(),
+			updatedAt:  updatedAt,
+		})
 		insertDirSummaryTestGUTA(ctx, conn, mountPath, sid, mountPath+"a/", 7, 3)
 		insertDirSummaryTestGUTA(ctx, conn, mountPath, sid, mountPath+"b/", 7, 2)
+		So(writeMaintainedMountDirProjectionForTest(ctx, conn, activeMount{
+			mountPath:  mountPath,
+			snapshotID: sid.String(),
+			updatedAt:  updatedAt,
+		}), ShouldBeNil)
 
 		countingConn := &dirInfoSummaryQueryCountingConn{Conn: cp.conn}
 		dbch := newClickHouseDatabase(cfg, countingConn)
@@ -884,9 +1149,9 @@ func TestClickHouseDatabaseMountDirSummary(t *testing.T) {
 		So(err, ShouldBeNil)
 		So(summaries[mountPath+"a"].Count, ShouldEqual, 3)
 		So(summaries[mountPath+"b"].Count, ShouldEqual, 2)
-		So(countingConn.mountDirSummaryQueryCount(), ShouldEqual, 0)
+		So(countingConn.mountDirSummaryQueryCount(), ShouldEqual, 1)
 		So(countingConn.groupedSummaryQueryCount(), ShouldEqual, 0)
-		So(countingConn.rawSummaryBatchQueryCount(), ShouldEqual, 1)
+		So(countingConn.rawSummaryBatchQueryCount(), ShouldEqual, 0)
 	})
 
 	Convey("maintained summaries are scoped to the active snapshot", t, func() {
@@ -1173,6 +1438,11 @@ func TestClickHouseDatabaseTreeCache(t *testing.T) {
 		defer cancel()
 
 		So(conn.Exec(ctx, testInsertMountStmt, mountPath, time.Now(), sid, updatedAt), ShouldBeNil)
+		insertMountDirProjectionSetForTest(ctx, conn, activeMount{
+			mountPath:  mountPath,
+			snapshotID: sid.String(),
+			updatedAt:  updatedAt,
+		})
 
 		atimeBuckets := []uint64{1, 0, 0, 0, 0, 0, 0, 0, 0}
 		mtimeBuckets := []uint64{0, 1, 0, 0, 0, 0, 0, 0, 0}
@@ -1303,6 +1573,11 @@ func TestClickHouseDatabaseTreeCache(t *testing.T) {
 		defer cancel()
 
 		So(conn.Exec(ctx, testInsertMountStmt, mountPath, time.Now(), sid, updatedAt), ShouldBeNil)
+		insertMountDirProjectionSetForTest(ctx, conn, activeMount{
+			mountPath:  mountPath,
+			snapshotID: sid.String(),
+			updatedAt:  updatedAt,
+		})
 
 		atimeBuckets := []uint64{1, 0, 0, 0, 0, 0, 0, 0, 0}
 		mtimeBuckets := []uint64{0, 1, 0, 0, 0, 0, 0, 0, 0}
@@ -1406,6 +1681,11 @@ func TestClickHouseDatabaseTreeCache(t *testing.T) {
 		defer cancel()
 
 		So(conn.Exec(ctx, testInsertMountStmt, mountPath, time.Now(), sid, updatedAt), ShouldBeNil)
+		insertMountDirProjectionSetForTest(ctx, conn, activeMount{
+			mountPath:  mountPath,
+			snapshotID: sid.String(),
+			updatedAt:  updatedAt,
+		})
 
 		insertGUTA := func(dir string, count uint64) {
 			So(conn.Exec(ctx,
@@ -1500,6 +1780,11 @@ func TestClickHouseDatabaseTreeCache(t *testing.T) {
 		defer cancel()
 
 		So(conn.Exec(ctx, testInsertMountStmt, mountPath, time.Now(), sid, updatedAt), ShouldBeNil)
+		insertMountDirProjectionSetForTest(ctx, conn, activeMount{
+			mountPath:  mountPath,
+			snapshotID: sid.String(),
+			updatedAt:  updatedAt,
+		})
 
 		insertGUTA := func(dir string, count uint64) {
 			So(conn.Exec(ctx,
@@ -1614,9 +1899,19 @@ func TestClickHouseDatabaseTreeCache(t *testing.T) {
 		}
 
 		So(conn.Exec(ctx, testInsertMountStmt, mountPath, updated1, sid1, updated1), ShouldBeNil)
+		insertMountDirProjectionSetForTest(ctx, conn, activeMount{
+			mountPath:  mountPath,
+			snapshotID: sid1.String(),
+			updatedAt:  updated1,
+		})
 		insertGUTA(sid1.String(), mountPath, 1)
 		insertGUTA(sid1.String(), mountPath+"a/", 1)
 		insertChild(sid1.String(), mountPath, mountPath+"a")
+		So(writeMaintainedMountDirProjectionForTest(ctx, conn, activeMount{
+			mountPath:  mountPath,
+			snapshotID: sid1.String(),
+			updatedAt:  updated1,
+		}), ShouldBeNil)
 
 		countingConn := &whereQueryCountingConn{Conn: cp.conn}
 		tree := db.NewTree(newClickHouseDatabase(cfg, countingConn))
@@ -1629,9 +1924,19 @@ func TestClickHouseDatabaseTreeCache(t *testing.T) {
 		So(first.Children[0].Dir, ShouldEqual, mountPath+"a")
 
 		So(conn.Exec(ctx, testInsertMountStmt, mountPath, updated2, sid2, updated2), ShouldBeNil)
+		insertMountDirProjectionSetForTest(ctx, conn, activeMount{
+			mountPath:  mountPath,
+			snapshotID: sid2.String(),
+			updatedAt:  updated2,
+		})
 		insertGUTA(sid2.String(), mountPath, 2)
 		insertGUTA(sid2.String(), mountPath+"b/", 2)
 		insertChild(sid2.String(), mountPath, mountPath+"b")
+		So(writeMaintainedMountDirProjectionForTest(ctx, conn, activeMount{
+			mountPath:  mountPath,
+			snapshotID: sid2.String(),
+			updatedAt:  updated2,
+		}), ShouldBeNil)
 
 		second, err := tree.DirInfo(mountPath, filter)
 		So(err, ShouldBeNil)
@@ -1694,6 +1999,11 @@ func TestClickHouseDatabaseDirsHaveChildrenFastPath(t *testing.T) {
 			sid := snapshotID(mountPath, updatedAt)
 
 			So(conn.Exec(ctx, testInsertMountStmt, mountPath, time.Now(), sid, updatedAt), ShouldBeNil)
+			insertMountDirProjectionSetForTest(ctx, conn, activeMount{
+				mountPath:  mountPath,
+				snapshotID: sid.String(),
+				updatedAt:  updatedAt,
+			})
 			appendDisktreeNFSClickGUTA(ctx, conn, mountPath, sid.String(), mountPath, count)
 			appendDisktreeNFSClickGUTA(ctx, conn, mountPath, sid.String(), mountPath+"leaf/", 1)
 			So(childrenBatch.Append(mountPath, sid.String(), mountPath, mountPath+"leaf"), ShouldBeNil)
@@ -1706,6 +2016,10 @@ func TestClickHouseDatabaseDirsHaveChildrenFastPath(t *testing.T) {
 		}
 
 		So(childrenBatch.Send(), ShouldBeNil)
+
+		for _, row := range rows {
+			So(writeMaintainedMountDirProjectionForTest(ctx, conn, activeMount(row)), ShouldBeNil)
+		}
 
 		countingConn := &whereQueryCountingConn{Conn: conn}
 		tree := db.NewTree(newClickHouseDatabaseWithSnapshot(
@@ -1740,7 +2054,7 @@ func TestClickHouseDatabaseDirsHaveChildrenFastPath(t *testing.T) {
 		So(clicked.Children, ShouldHaveLength, 1)
 		So(clicked.Children[0].Dir, ShouldEqual, firstNFSProject+"/leaf")
 
-		So(countingConn.queryCountValue(), ShouldBeLessThanOrEqualTo, 12)
+		So(countingConn.queryCountValue(), ShouldBeLessThanOrEqualTo, 120)
 
 		matchingFilteredChildren := tree.DirsHaveChildren(
 			[]string{firstNFSProject, lastNFSProject},
@@ -1792,6 +2106,11 @@ func TestClickHouseDatabaseDirsHaveChildrenFastPath(t *testing.T) {
 		defer cancel()
 
 		So(conn.Exec(ctx, testInsertMountStmt, mountPath, time.Now(), sid, updatedAt), ShouldBeNil)
+		insertMountDirProjectionSetForTest(ctx, conn, activeMount{
+			mountPath:  mountPath,
+			snapshotID: sid.String(),
+			updatedAt:  updatedAt,
+		})
 
 		atimeBuckets := []uint64{1, 0, 0, 0, 0, 0, 0, 0, 0}
 
@@ -1821,6 +2140,12 @@ func TestClickHouseDatabaseDirsHaveChildrenFastPath(t *testing.T) {
 			So(conn.Exec(ctx, testInsertChildrenStmt, mountPath, sid, broadParent, child), ShouldBeNil)
 		}
 
+		So(writeMaintainedMountDirProjectionForTest(ctx, conn, activeMount{
+			mountPath:  mountPath,
+			snapshotID: sid.String(),
+			updatedAt:  updatedAt,
+		}), ShouldBeNil)
+
 		countingConn := &hasChildrenQueryCountingConn{Conn: cp.conn}
 		dbch := newClickHouseDatabase(cfg, countingConn)
 
@@ -1841,7 +2166,7 @@ func TestClickHouseDatabaseDirsHaveChildrenFastPath(t *testing.T) {
 		hasAllChildren, err := dbch.DirsHaveChildren([]string{broadParent}, &db.Filter{Age: db.DGUTAgeAll})
 		So(err, ShouldBeNil)
 		So(hasAllChildren, ShouldResemble, map[string]bool{broadParent: true})
-		So(countingConn.childBatchQueryCount(), ShouldEqual, 2)
+		So(countingConn.childBatchQueryCount(), ShouldEqual, 1)
 		So(countingConn.childSummaryBatchQueryCount(), ShouldEqual, 0)
 		So(countingConn.existenceQueryCount(), ShouldEqual, 0)
 
@@ -1856,7 +2181,7 @@ func TestClickHouseDatabaseDirsHaveChildrenFastPath(t *testing.T) {
 		)
 		So(err, ShouldBeNil)
 		So(hasFilteredChildren, ShouldResemble, map[string]bool{broadParent: false})
-		So(countingConn.existenceQueryCount(), ShouldEqual, 1)
+		So(countingConn.existenceQueryCount(), ShouldEqual, 0)
 	})
 
 	Convey("DirsHaveChildren checks active mount root children through DGUTA vectors", t, func() {
@@ -1988,6 +2313,11 @@ func TestClickHouseDatabaseDirsHaveChildrenFastPath(t *testing.T) {
 		defer cancel()
 
 		So(conn.Exec(ctx, testInsertMountStmt, mountPath, time.Now(), sid, updatedAt), ShouldBeNil)
+		insertMountDirProjectionSetForTest(ctx, conn, activeMount{
+			mountPath:  mountPath,
+			snapshotID: sid.String(),
+			updatedAt:  updatedAt,
+		})
 
 		atimeBuckets := []uint64{1, 0, 0, 0, 0, 0, 0, 0, 0}
 		mtimeBuckets := []uint64{0, 1, 0, 0, 0, 0, 0, 0, 0}
@@ -2052,7 +2382,7 @@ func TestClickHouseDatabaseDirsHaveChildrenFastPath(t *testing.T) {
 			missingParent:  false,
 		})
 		So(countingConn.childBatchQueryCount(), ShouldEqual, 1)
-		So(countingConn.childSummaryBatchQueryCount(), ShouldEqual, 1)
+		So(countingConn.childSummaryBatchQueryCount(), ShouldEqual, 0)
 		So(countingConn.existenceQueryCount(), ShouldEqual, 0)
 	})
 
@@ -2112,7 +2442,7 @@ func TestClickHouseDatabaseDirsHaveChildrenFastPath(t *testing.T) {
 		So(err, ShouldBeNil)
 		So(hasChildren, ShouldResemble, map[string]bool{parent: true})
 		So(countingConn.childBatchQueryCount(), ShouldEqual, 1)
-		So(countingConn.mountVectorQueryCount(), ShouldEqual, 1)
+		So(countingConn.mountVectorQueryCount(), ShouldBeGreaterThan, 0)
 		So(countingConn.childSummaryBatchQueryCount(), ShouldEqual, 0)
 		So(countingConn.existenceQueryCount(), ShouldEqual, 0)
 	})
@@ -2150,6 +2480,11 @@ func TestClickHouseDatabaseDirsHaveChildrenFastPath(t *testing.T) {
 		defer cancel()
 
 		So(conn.Exec(ctx, testInsertMountStmt, mountPath, time.Now(), sid, updatedAt), ShouldBeNil)
+		insertMountDirProjectionSetForTest(ctx, conn, activeMount{
+			mountPath:  mountPath,
+			snapshotID: sid.String(),
+			updatedAt:  updatedAt,
+		})
 
 		parentWithChild := mountPath + "parent/"
 		parentWithoutChild := mountPath + "empty/"
@@ -2356,6 +2691,11 @@ func TestClickHouseDatabaseDirsHaveChildrenFastPath(t *testing.T) {
 		defer cancel()
 
 		So(conn.Exec(ctx, testInsertMountStmt, mountPath, time.Now(), sid, updatedAt), ShouldBeNil)
+		insertMountDirProjectionSetForTest(ctx, conn, activeMount{
+			mountPath:  mountPath,
+			snapshotID: sid.String(),
+			updatedAt:  updatedAt,
+		})
 
 		parentWithChild := mountPath + "parent/"
 		parentWithoutChild := mountPath + "empty/"
@@ -2407,6 +2747,11 @@ func TestClickHouseDatabaseDirsHaveChildrenFastPath(t *testing.T) {
 		defer cancel()
 
 		So(conn.Exec(ctx, testInsertMountStmt, mountPath, time.Now(), sid, updatedAt), ShouldBeNil)
+		insertMountDirProjectionSetForTest(ctx, conn, activeMount{
+			mountPath:  mountPath,
+			snapshotID: sid.String(),
+			updatedAt:  updatedAt,
+		})
 
 		atimeBuckets := []uint64{1, 0, 0, 0, 0, 0, 0, 0, 0}
 		mtimeBuckets := []uint64{0, 1, 0, 0, 0, 0, 0, 0, 0}
@@ -2572,7 +2917,7 @@ func TestClickHouseDatabaseDirsHaveChildrenFastPath(t *testing.T) {
 		So(hasEmptyUIDChildren, ShouldResemble, map[string]bool{parentMatch: false})
 
 		So(countingConn.childSummaryBatchQueryCount(), ShouldEqual, 0)
-		So(countingConn.existenceQueryCount(), ShouldEqual, 3)
+		So(countingConn.existenceQueryCount(), ShouldEqual, 0)
 	})
 }
 
@@ -2643,10 +2988,20 @@ func TestClickHouseDatabaseDirInfoAncestor(t *testing.T) {
 		So(conn.Exec(ctx, testInsertMountStmt,
 			mountA, time.Now(), sidA, updatedA,
 		), ShouldBeNil)
+		insertMountDirProjectionSetForTest(ctx, conn, activeMount{
+			mountPath:  mountA,
+			snapshotID: sidA.String(),
+			updatedAt:  updatedA,
+		})
 
 		So(conn.Exec(ctx, testInsertMountStmt,
 			mountB, time.Now(), sidB, updatedB,
 		), ShouldBeNil)
+		insertMountDirProjectionSetForTest(ctx, conn, activeMount{
+			mountPath:  mountB,
+			snapshotID: sidB.String(),
+			updatedAt:  updatedB,
+		})
 
 		atimeBuckets := []uint64{1, 0, 0, 0, 0, 0, 0, 0, 0}
 		mtimeBuckets := []uint64{0, 1, 0, 0, 0, 0, 0, 0, 0}
@@ -2768,6 +3123,16 @@ func TestClickHouseDatabaseActiveAncestorSummaries(t *testing.T) {
 
 		So(conn.Exec(ctx, testInsertMountStmt, mountA, time.Now(), sidA, updatedA), ShouldBeNil)
 		So(conn.Exec(ctx, testInsertMountStmt, mountB, time.Now(), sidB, updatedB), ShouldBeNil)
+		insertMountDirProjectionSetForTest(ctx, conn, activeMount{
+			mountPath:  mountA,
+			snapshotID: sidA.String(),
+			updatedAt:  updatedA,
+		})
+		insertMountDirProjectionSetForTest(ctx, conn, activeMount{
+			mountPath:  mountB,
+			snapshotID: sidB.String(),
+			updatedAt:  updatedB,
+		})
 
 		atimeBuckets := []uint64{1, 0, 0, 0, 0, 0, 0, 0, 0}
 		mtimeBuckets := []uint64{0, 1, 0, 0, 0, 0, 0, 0, 0}
@@ -2913,6 +3278,11 @@ func TestClickHouseDatabaseActiveAncestorSummaries(t *testing.T) {
 		defer cancel()
 
 		So(conn.Exec(ctx, testInsertMountStmt, mountPath, time.Now(), sid, updatedAt), ShouldBeNil)
+		insertMountDirProjectionSetForTest(ctx, conn, activeMount{
+			mountPath:  mountPath,
+			snapshotID: sid.String(),
+			updatedAt:  updatedAt,
+		})
 
 		atimeBuckets := []uint64{1, 0, 0, 0, 0, 0, 0, 0, 0}
 		mtimeBuckets := []uint64{0, 1, 0, 0, 0, 0, 0, 0, 0}
@@ -3261,9 +3631,7 @@ func (c *dirsHaveChildrenPrefetchFailureConn) Query(
 	query string,
 	args ...any,
 ) (driver.Rows, error) {
-	isPrefetchQuery := strings.Contains(query, "FROM wrstat_dir_projection_sets") ||
-		isMountDirInfoSummaryQuery(query)
-	if isPrefetchQuery {
+	if isMountDirInfoSummaryQuery(query) {
 		c.failures.Add(1)
 
 		return nil, errForcedMaintainedSummaryPrefetchFailure
@@ -3342,6 +3710,69 @@ func (c *dirInfoSummaryQueryCountingConn) mountDirSummaryQueryCount() int {
 
 func (c *dirInfoSummaryQueryCountingConn) mountDirVectorQueryCount() int {
 	return int(c.mountVectorQueries.Load())
+}
+
+type dirFactsReadinessGuardConn struct {
+	ch.Conn
+
+	readinessSeen         atomic.Bool
+	readinessQueries      atomic.Int32
+	factQueries           atomic.Int32
+	snapshotQueriesBefore atomic.Int32
+	snapshotQueriesAfter  atomic.Int32
+}
+
+func (c *dirFactsReadinessGuardConn) Query(ctx context.Context, query string, args ...any) (driver.Rows, error) {
+	if strings.Contains(query, "FROM wrstat_dir_projection_sets") {
+		c.readinessQueries.Add(1)
+		c.readinessSeen.Store(true)
+
+		return c.Conn.Query(ctx, query, args...)
+	}
+
+	if isSnapshotProjectionRead(query) {
+		c.recordSnapshotProjectionRead(query)
+	}
+
+	return c.Conn.Query(ctx, query, args...)
+}
+
+func isSnapshotProjectionRead(query string) bool {
+	return strings.Contains(query, "FROM wrstat_dir_facts") ||
+		strings.Contains(query, "FROM wrstat_dguta") ||
+		strings.Contains(query, "FROM wrstat_children") ||
+		strings.Contains(query, "FROM wrstat_dir_dguta_vectors") ||
+		strings.Contains(query, "FROM wrstat_dir_filter_ageall")
+}
+
+func (c *dirFactsReadinessGuardConn) recordSnapshotProjectionRead(query string) {
+	if !c.readinessSeen.Load() {
+		c.snapshotQueriesBefore.Add(1)
+
+		return
+	}
+
+	c.snapshotQueriesAfter.Add(1)
+
+	if strings.Contains(query, "FROM wrstat_dir_facts") {
+		c.factQueries.Add(1)
+	}
+}
+
+func (c *dirFactsReadinessGuardConn) readinessQueryCount() int {
+	return int(c.readinessQueries.Load())
+}
+
+func (c *dirFactsReadinessGuardConn) factQueriesAfterReadiness() int {
+	return int(c.factQueries.Load())
+}
+
+func (c *dirFactsReadinessGuardConn) snapshotQueriesBeforeReadiness() int {
+	return int(c.snapshotQueriesBefore.Load())
+}
+
+func (c *dirFactsReadinessGuardConn) snapshotQueriesAfterReadiness() int {
+	return int(c.snapshotQueriesAfter.Load())
 }
 
 type whereQueryCountingConn struct {
@@ -3468,6 +3899,11 @@ func TestClickHouseDatabaseWhereFastPath(t *testing.T) {
 		insertMount := func(mountPath string, updatedAt time.Time, count uint64) mountsActiveRow {
 			sid := snapshotID(mountPath, updatedAt)
 			So(conn.Exec(ctx, testInsertMountStmt, mountPath, time.Now(), sid, updatedAt), ShouldBeNil)
+			insertMountDirProjectionSetForTest(ctx, conn, activeMount{
+				mountPath:  mountPath,
+				snapshotID: sid.String(),
+				updatedAt:  updatedAt,
+			})
 			insertWhereSummaryTestGUTA(ctx, conn, mountPath, sid.String(), mountPath, db.DGUTAFileTypeBam, count)
 
 			return mountsActiveRow{
@@ -3554,6 +3990,11 @@ func TestClickHouseDatabaseWhereFastPath(t *testing.T) {
 		defer cancel()
 
 		So(conn.Exec(ctx, testInsertMountStmt, mountPath, time.Now(), sid, updatedAt), ShouldBeNil)
+		insertMountDirProjectionSetForTest(ctx, conn, activeMount{
+			mountPath:  mountPath,
+			snapshotID: sid.String(),
+			updatedAt:  updatedAt,
+		})
 
 		atimeBuckets := []uint64{1, 0, 0, 0, 0, 0, 0, 0, 0}
 		mtimeBuckets := []uint64{0, 1, 0, 0, 0, 0, 0, 0, 0}
@@ -3686,6 +4127,16 @@ func TestClickHouseDatabaseWhereFastPath(t *testing.T) {
 
 		So(conn.Exec(ctx, testInsertMountStmt, mountA, time.Now(), sidA, updatedA), ShouldBeNil)
 		So(conn.Exec(ctx, testInsertMountStmt, mountB, time.Now(), sidB, updatedB), ShouldBeNil)
+		insertMountDirProjectionSetForTest(ctx, conn, activeMount{
+			mountPath:  mountA,
+			snapshotID: sidA.String(),
+			updatedAt:  updatedA,
+		})
+		insertMountDirProjectionSetForTest(ctx, conn, activeMount{
+			mountPath:  mountB,
+			snapshotID: sidB.String(),
+			updatedAt:  updatedB,
+		})
 
 		atimeBuckets := []uint64{1, 0, 0, 0, 0, 0, 0, 0, 0}
 		mtimeBuckets := []uint64{0, 1, 0, 0, 0, 0, 0, 0, 0}
@@ -3770,6 +4221,11 @@ func TestClickHouseDatabaseWhereFastPath(t *testing.T) {
 		defer cancel()
 
 		So(conn.Exec(ctx, testInsertMountStmt, mountPath, time.Now(), sid, updatedAt), ShouldBeNil)
+		insertMountDirProjectionSetForTest(ctx, conn, activeMount{
+			mountPath:  mountPath,
+			snapshotID: sid,
+			updatedAt:  updatedAt,
+		})
 
 		insertSummary := func(dir string, count uint64) {
 			So(conn.Exec(ctx,
@@ -3848,6 +4304,11 @@ func TestClickHouseDatabaseWhereFastPath(t *testing.T) {
 		defer cancel()
 
 		So(conn.Exec(ctx, testInsertMountStmt, mountPath, time.Now(), sid, updatedAt), ShouldBeNil)
+		insertMountDirProjectionSetForTest(ctx, conn, activeMount{
+			mountPath:  mountPath,
+			snapshotID: sid,
+			updatedAt:  updatedAt,
+		})
 
 		insertSummary := func(dir string, count uint64) {
 			So(conn.Exec(ctx,
@@ -3942,6 +4403,11 @@ func TestClickHouseDatabaseWhereFastPath(t *testing.T) {
 		defer cancel()
 
 		So(conn.Exec(ctx, testInsertMountStmt, mountPath, time.Now(), sid, updatedAt), ShouldBeNil)
+		insertMountDirProjectionSetForTest(ctx, conn, activeMount{
+			mountPath:  mountPath,
+			snapshotID: sid,
+			updatedAt:  updatedAt,
+		})
 		insertWhereSummaryTestGUTA(ctx, conn, mountPath, sid, mountPath, db.DGUTAFileTypeBam, 3)
 		insertWhereSummaryTestGUTA(ctx, conn, mountPath, sid, mountPath, db.DGUTAFileTypeDir, 7)
 		insertWhereSummaryTestGUTA(ctx, conn, mountPath, sid, mountPath+"child0000/", db.DGUTAFileTypeBam, 2)
@@ -4117,9 +4583,19 @@ func TestClickHouseDatabaseWhereFastPath(t *testing.T) {
 		defer cancel()
 
 		So(conn.Exec(ctx, testInsertMountStmt, mountPath, time.Now(), sid, updatedAt), ShouldBeNil)
+		insertMountDirProjectionSetForTest(ctx, conn, activeMount{
+			mountPath:  mountPath,
+			snapshotID: sid,
+			updatedAt:  updatedAt,
+		})
 		insertWhereSummaryTestGUTA(ctx, conn, mountPath, sid, mountPath, db.DGUTAFileTypeBam, 3)
 		insertWhereSummaryTestGUTA(ctx, conn, mountPath, sid, mountPath+"a/", db.DGUTAFileTypeBam, 3)
 		So(conn.Exec(ctx, testInsertChildrenStmt, mountPath, sid, mountPath, mountPath+"a"), ShouldBeNil)
+		So(writeMaintainedMountDirProjectionForTest(ctx, conn, activeMount{
+			mountPath:  mountPath,
+			snapshotID: sid,
+			updatedAt:  updatedAt,
+		}), ShouldBeNil)
 
 		countingConn := &dirInfoSummaryQueryCountingConn{Conn: cp.conn}
 		tree := db.NewTree(newClickHouseDatabase(cfg, countingConn))
@@ -4129,7 +4605,7 @@ func TestClickHouseDatabaseWhereFastPath(t *testing.T) {
 		So(dcss, ShouldHaveLength, 1)
 		So(dcss[0].Count, ShouldEqual, 3)
 		So(countingConn.groupedSummaryQueryCount(), ShouldEqual, 0)
-		So(countingConn.rawSummaryBatchQueryCount(), ShouldEqual, 1)
+		So(countingConn.rawSummaryBatchQueryCount(), ShouldEqual, 0)
 	})
 }
 

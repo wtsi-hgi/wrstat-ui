@@ -66,6 +66,8 @@ type snapshotCapturer func(context.Context) (*activeMountsSnapshot, string, erro
 
 type clickHouseConfigConnector func(context.Context, Config) (ch.Conn, error)
 
+type virtualChildrenRefresher func(context.Context, string) error
+
 type chProvider struct {
 	cfg Config
 
@@ -75,8 +77,9 @@ type chProvider struct {
 	tree *db.Tree
 	bd   basedirs.Reader
 
-	buildReaders    readerBuilder
-	captureSnapshot snapshotCapturer
+	buildReaders           readerBuilder
+	captureSnapshot        snapshotCapturer
+	refreshVirtualChildren virtualChildrenRefresher
 
 	mu        sync.RWMutex
 	onUpdate  func()
@@ -620,6 +623,7 @@ func (p *chProvider) swapReadersAndInvoke(ctx context.Context, targetFingerprint
 
 	invokeOnFreshGoroutine(cb)
 
+	p.refreshVirtualChildrenAsync(ctx, publishedFingerprint)
 	p.closeOldReaders(oldDB, oldBD)
 
 	return true
@@ -657,6 +661,43 @@ func (p *chProvider) buildReadersNow(ctx context.Context) (db.Database, *db.Tree
 	}
 
 	return dbImpl, tree, bd, fingerprint, nil
+}
+
+func (p *chProvider) refreshVirtualChildrenAsync(ctx context.Context, activeSetID string) {
+	if activeSetID == "" {
+		return
+	}
+
+	refresh := p.virtualChildrenRefresher()
+	if refresh == nil {
+		return
+	}
+
+	go p.refreshVirtualChildrenAndReport(ctx, activeSetID, refresh)
+}
+
+func (p *chProvider) virtualChildrenRefresher() virtualChildrenRefresher {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	return p.refreshVirtualChildren
+}
+
+func (p *chProvider) refreshVirtualChildrenAndReport(
+	parent context.Context,
+	activeSetID string,
+	refresh virtualChildrenRefresher,
+) {
+	ctx, cancel := queryContext(context.WithoutCancel(parent), queryTimeout(p.cfg))
+	defer cancel()
+
+	if err := refresh(ctx, activeSetID); err != nil {
+		p.queueError(fmt.Errorf(
+			"clickhouse: virtual_children_refresh active_set_id=%q: %w",
+			activeSetID,
+			err,
+		))
+	}
 }
 
 func (p *chProvider) publishReaders(

@@ -248,34 +248,6 @@ func (s *activeMountsSnapshot) all() []activeMount {
 	return slices.Clone(s.mounts)
 }
 
-func (s *activeMountsSnapshot) maxUpdatedAt(dir string) (time.Time, bool) {
-	if s == nil {
-		return time.Time{}, false
-	}
-
-	dir = ensureTrailingSlash(dir)
-
-	var (
-		latestUpdatedAt time.Time
-		ok              bool
-	)
-
-	for _, mount := range s.mounts {
-		if !strings.HasPrefix(mount.mountPath, dir) {
-			continue
-		}
-
-		if ok && !mount.updatedAt.After(latestUpdatedAt) {
-			continue
-		}
-
-		latestUpdatedAt = mount.updatedAt.UTC()
-		ok = true
-	}
-
-	return latestUpdatedAt, ok
-}
-
 func (s *activeMountsSnapshot) markTreeSummaryReady() {
 	if s != nil {
 		s.treeSummaryReady.Store(true)

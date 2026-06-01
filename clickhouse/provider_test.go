@@ -36,6 +36,7 @@ import (
 	"testing"
 	"time"
 
+	ch "github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	. "github.com/smartystreets/goconvey/convey"
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
@@ -255,7 +256,7 @@ func TestOpenProviderUpdatePinsClickHouseSnapshots(t *testing.T) {
 
 func insertProviderSnapshot(
 	ctx context.Context,
-	conn providerExecConn,
+	conn ch.Conn,
 	updatedAt time.Time,
 	count, size, usageSize uint64,
 ) error {
@@ -305,6 +306,14 @@ func insertProviderSnapshot(
 		unixEpochUTC(),
 		unixEpochUTC(),
 	); err != nil {
+		return err
+	}
+
+	if err := writeMaintainedMountDirProjectionForTest(ctx, conn, activeMount{
+		mountPath:  mountPath,
+		snapshotID: sid.String(),
+		updatedAt:  updatedAt,
+	}); err != nil {
 		return err
 	}
 
@@ -374,6 +383,68 @@ func TestProviderRefreshCaptureFailureKeepsPublishedReaders(t *testing.T) {
 			So(err, ShouldEqual, errProviderTestErr1)
 		case <-time.After(2 * time.Second):
 			t.Fatalf("timed out waiting for OnError")
+		}
+	})
+}
+
+func TestProviderVirtualChildrenRefreshErrors(t *testing.T) {
+	Convey("provider reports asynchronous virtual children refresh failures through OnError", t, func() {
+		const activeSetID = "mount|snapshot|2026-01-09T12:00:00Z\n"
+
+		refreshDone := make(chan struct{})
+		refreshedActiveSetID := make(chan string, 1)
+		cp := &chProvider{
+			errCh: make(chan struct{}, 1),
+			captureSnapshot: func(context.Context) (*activeMountsSnapshot, string, error) {
+				return &activeMountsSnapshot{}, activeSetID, nil
+			},
+			buildReaders: func(context.Context, *activeMountsSnapshot) (db.Database, *db.Tree, basedirs.Reader, error) {
+				dbImpl := &providerSwapTestDB{}
+				bdImpl := &providerSwapTestBD{}
+
+				return dbImpl, db.NewTree(dbImpl), bdImpl, nil
+			},
+			refreshVirtualChildren: func(_ context.Context, gotActiveSetID string) error {
+				defer close(refreshDone)
+
+				refreshedActiveSetID <- gotActiveSetID
+
+				return errProviderTestErr1
+			},
+		}
+
+		got := make(chan error, 1)
+
+		cp.OnError(func(err error) {
+			got <- err
+		})
+
+		So(cp.swapReadersAndInvoke(context.Background(), activeSetID, nil), ShouldBeTrue)
+
+		select {
+		case <-refreshDone:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for virtual children refresh")
+		}
+
+		So(<-refreshedActiveSetID, ShouldEqual, activeSetID)
+
+		cp.drainErrors(context.Background())
+
+		select {
+		case err := <-got:
+			So(err.Error(), ShouldContainSubstring, "virtual_children_refresh")
+			So(err.Error(), ShouldContainSubstring, "active_set_id")
+			So(err.Error(), ShouldContainSubstring, "mount|snapshot|2026-01-09T12:00:00Z")
+			So(errors.Is(err, errProviderTestErr1), ShouldBeTrue)
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for OnError")
+		}
+
+		select {
+		case err := <-got:
+			t.Fatalf("unexpected second OnError: %v", err)
+		default:
 		}
 	})
 }
@@ -1012,8 +1083,4 @@ func (c *providerCloseTestConn) Query(context.Context, string, ...any) (driver.R
 	}
 
 	return &findByGlobEmptyRows{}, nil
-}
-
-type providerExecConn interface {
-	Exec(ctx context.Context, query string, args ...any) error
 }

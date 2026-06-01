@@ -35,12 +35,6 @@ import (
 )
 
 const (
-	insertMountDirDGUTAVectorQuery = "INSERT INTO wrstat_dir_facts " +
-		"(mount_path, snapshot_id, dir, updated_at, gids, uids, fts, ages, " +
-		"counts, sizes, atime_mins, mtime_maxs, atime_buckets, mtime_buckets, " +
-		"child_count, refreshed_at) " +
-		"VALUES (?, toUUID(?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-
 	mountDirDGUTAVectorsForDirsQuery = "SELECT dir, updated_at, gids, uids, fts, ages, " +
 		"counts, sizes, atime_mins, mtime_maxs, atime_buckets, mtime_buckets, child_count " +
 		"FROM wrstat_dir_facts " +
@@ -195,36 +189,39 @@ func (d *clickHouseDatabase) mountDirDGUTAVectorSummariesForDirsMount(
 		return nil, nil, false, nil
 	}
 
-	gutasByDir, handled, ok, err := d.mountDirDGUTAVectorsForDirsMount(mountPath, snapshotID, dirs)
+	gutasByDir, ok, err := d.mountDirDGUTAVectorsForDirsMount(mountPath, snapshotID, dirs)
 	if err != nil || !ok {
 		return nil, nil, ok, err
 	}
 
 	summaries := make(map[string]*db.DirSummary, len(gutasByDir))
+
+	summaryHandled := make(map[string]bool, len(gutasByDir))
 	for dir, gutas := range gutasByDir {
+		summaryHandled[dir] = true
 		if sum := dirSummaryWithModtime(gutas, filter, updatedAt); sum != nil {
 			summaries[dir] = sum
 		}
 	}
 
-	return summaries, handled, true, nil
+	return summaries, summaryHandled, true, nil
 }
 
 func (d *clickHouseDatabase) mountDirDGUTAVectorsForDirsMount(
 	mountPath, snapshotID string,
 	dirs []string,
-) (map[string]db.GUTAs, map[string]bool, bool, error) {
+) (map[string]db.GUTAs, bool, error) {
 	gutasByDir, handled, missing := d.cachedMountDirDGUTAVectors(mountPath, snapshotID, dirs)
 	if len(missing) == 0 {
-		return gutasByDir, handled, true, nil
+		return gutasByDir, true, nil
 	}
 
 	ok, err := d.addMissingMountDirDGUTAVectors(gutasByDir, handled, mountPath, snapshotID, missing)
 	if err != nil || !ok {
-		return nil, nil, ok, err
+		return nil, ok, err
 	}
 
-	return gutasByDir, handled, true, nil
+	return gutasByDir, true, nil
 }
 
 func (d *clickHouseDatabase) cachedMountDirDGUTAVectors(
@@ -380,10 +377,9 @@ func (d *clickHouseDatabase) addQueriedMountDirDGUTAVectors(
 ) {
 	for _, dir := range missing {
 		gutas := queried[dir]
-		d.treeCache.putGUTAs(newTreeCacheKey(mountPath, snapshotID, dir), gutas)
-		handled[dir] = true
-
 		if len(gutas) > 0 {
+			d.treeCache.putGUTAs(newTreeCacheKey(mountPath, snapshotID, dir), gutas)
+			handled[dir] = true
 			gutasByDir[dir] = cloneGUTAs(gutas)
 		}
 	}

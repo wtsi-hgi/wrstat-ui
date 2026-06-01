@@ -31,8 +31,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"runtime"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -54,6 +56,8 @@ const testT283ImagingMountPath = "/nfs/t283_imaging/"
 const dgutaWriterTestPhasePartitionDropReset = "partition_drop_reset"
 
 const dgutaWriterTestSnapshotIDColumn = "snapshot_id"
+
+const dgutaWriterTestChildName = "child/"
 
 const (
 	insertDGUTAQuery = "INSERT INTO wrstat_dir_facts " +
@@ -78,6 +82,13 @@ const (
 	dgutaWriterTestCountChildrenForParentQuery = "SELECT count() FROM wrstat_children WHERE mount_path = ? " +
 		"AND snapshot_id = toUUID(?) AND parent_dir = ?"
 )
+
+const b1ReadDirFactQuery = "SELECT gids, uids, fts, ages, counts, sizes, " +
+	"atime_mins, mtime_maxs, atime_buckets, mtime_buckets, " +
+	"all_count, all_size, all_uids, all_gids, all_ft, " +
+	"file_count, file_size, file_atime_min, file_mtime_max, " +
+	"file_atime_buckets, file_mtime_buckets, file_uids, file_gids, file_ft, " +
+	"child_count FROM wrstat_dir_facts WHERE mount_path = ? AND snapshot_id = toUUID(?) AND dir = ?"
 
 type forbiddenProjectionRefreshConn struct {
 	ch.Conn
@@ -158,6 +169,53 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 		So(err, ShouldBeNil)
 		So(phases[dgutaWriterTestPhasePartitionDropReset], ShouldBeGreaterThan, time.Duration(0))
 		So(w.Close(), ShouldBeNil)
+	})
+
+	Convey("DGUTAWriter retry reset drops every snapshot table before writing rows", t, func() {
+		queryTimeout := 100 * time.Millisecond
+		updatedAt := time.Date(2026, 1, 9, 12, 0, 0, 0, time.UTC)
+		sid := snapshotID(testMountPath, updatedAt).String()
+		conn := &dgutaRetryResetConn{normalWindow: queryTimeout}
+		w := &dgutaWriter{
+			cfg:       Config{QueryTimeout: queryTimeout},
+			conn:      conn,
+			mountPath: testMountPath,
+			updatedAt: updatedAt,
+			snapshot:  snapshotID(testMountPath, updatedAt),
+		}
+
+		paths := internaltest.NewDirectoryPathCreator()
+		So(w.Add(singleDGUTARecord(paths.ToDirectoryPath("/"), 42, "/child/")), ShouldBeNil)
+		So(conn.prepared.Load(), ShouldBeTrue)
+		So(conn.partitionDrops(), ShouldEqual, len(allPartitionDropQueries()))
+		So(conn.longDeadlineDrops(), ShouldEqual, len(allPartitionDropQueries()))
+		So(conn.firstPreparedAfterDrops(), ShouldBeTrue)
+		So(conn.seenSnapshotIDs(), ShouldResemble, []string{sid})
+	})
+
+	Convey("DGUTAWriter retry reset wraps partition drop failures before preparing batches", t, func() {
+		queryTimeout := 100 * time.Millisecond
+		updatedAt := time.Date(2026, 1, 9, 12, 0, 0, 0, time.UTC)
+		conn := &dgutaRetryResetConn{
+			normalWindow: queryTimeout,
+			dropErr:      errForcedFailure,
+		}
+		w := &dgutaWriter{
+			cfg:       Config{QueryTimeout: queryTimeout},
+			conn:      conn,
+			mountPath: testMountPath,
+			updatedAt: updatedAt,
+			snapshot:  snapshotID(testMountPath, updatedAt),
+		}
+
+		ctx, cancel := queryContext(context.Background(), queryTimeout)
+		defer cancel()
+
+		err := w.ensureWriteReady(ctx)
+		So(errors.Is(err, errForcedFailure), ShouldBeTrue)
+		So(err.Error(), ShouldContainSubstring, "failed_snapshot_partition_drop")
+		So(conn.prepared.Load(), ShouldBeFalse)
+		So(conn.partitionDrops(), ShouldEqual, 1)
 	})
 
 	Convey("DGUTAWriter switches the active snapshot on Close", t, func() {
@@ -1031,7 +1089,7 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 		So(allSummaries[mountPath].GIDs, ShouldResemble, []uint32{7, 8})
 		So(allSummaries[mountPath].FT, ShouldEqual, db.DGUTAFileTypeBam|db.DGUTAFileTypeDir)
 		So(allSummaries[mountPath].Modtime, ShouldResemble, updatedAt)
-		So(allSummaries[mountPath+"alpha/"].Count, ShouldEqual, 7)
+		So(allSummaries[mountPath+"alpha/"].Count, ShouldEqual, 9)
 		So(allSummaries[mountPath+"beta/"].Count, ShouldEqual, 6)
 
 		fileSummaries, err := dbch.DirInfos(
@@ -1062,6 +1120,292 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 		)
 		So(err, ShouldBeNil)
 		So(ageOnlySummaries[mountPath+"alpha/"].Count, ShouldEqual, 2)
+	})
+
+	Convey("DGUTAWriter streams one canonical facts row per mount directory with aligned vectors and children", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 5 * time.Second
+		cfg.MountPoints = []string{"/mnt/"}
+
+		const mountPath = "/mnt/"
+
+		updatedAt := time.Date(2026, 1, 15, 9, 0, 0, 0, time.UTC)
+		sid := snapshotID(mountPath, updatedAt)
+		paths := internaltest.NewDirectoryPathCreator()
+
+		w, err := NewDGUTAWriter(cfg)
+		So(err, ShouldBeNil)
+		So(w, ShouldNotBeNil)
+
+		w.SetMountPath(mountPath)
+		w.SetUpdatedAt(updatedAt)
+
+		So(w.Add(db.RecordDGUTA{
+			Dir:      paths.ToDirectoryPath("/mnt/"),
+			Children: []string{"a/", "c/"},
+		}), ShouldBeNil)
+		So(w.Add(db.RecordDGUTA{
+			Dir: paths.ToDirectoryPath("/mnt/a/"),
+			GUTAs: db.GUTAs{
+				b1GUTA(7, 11, db.DGUTAFileTypeBam, db.DGUTAgeAll, 2, 20, 100, 200),
+				b1GUTA(7, 12, db.DGUTAFileTypeOther, db.DGUTAgeAll, 1, 5, 90, 150),
+				b1GUTA(8, 11, db.DGUTAFileTypeBam, db.DGUTAgeA6M, 4, 40, 80, 250),
+			},
+			Children: []string{"b/"},
+		}), ShouldBeNil)
+		So(w.Add(db.RecordDGUTA{Dir: paths.ToDirectoryPath("/mnt/a/b/")}), ShouldBeNil)
+		So(w.Add(db.RecordDGUTA{Dir: paths.ToDirectoryPath("/mnt/c/")}), ShouldBeNil)
+		So(w.Close(), ShouldBeNil)
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		So(countRows(ctx, conn, dgutaWriterTestCountDirFactsQuery, mountPath, sid.String()), ShouldEqual, 4)
+
+		fact := readDirFactForTest(ctx, conn, mountPath, sid.String(), "/mnt/a/")
+		So(fact.gids, ShouldResemble, []uint32{7, 7, 8})
+		So(fact.uids, ShouldResemble, []uint32{11, 12, 11})
+		So(fact.fts, ShouldResemble, []uint16{
+			uint16(db.DGUTAFileTypeBam),
+			uint16(db.DGUTAFileTypeOther),
+			uint16(db.DGUTAFileTypeBam),
+		})
+		So(fact.ages, ShouldResemble, []uint8{0, 0, 3})
+		So(fact.counts, ShouldResemble, []uint64{2, 1, 4})
+		So(fact.sizes, ShouldResemble, []uint64{20, 5, 40})
+		So(fact.atimeMins, ShouldResemble, []int64{100, 90, 80})
+		So(fact.mtimeMaxs, ShouldResemble, []int64{200, 150, 250})
+		So(fact.atimeBuckets, ShouldHaveLength, 3)
+		So(fact.mtimeBuckets, ShouldHaveLength, 3)
+		So(fact.atimeBuckets[0], ShouldResemble, []uint64{2, 0, 0, 0, 0, 0, 0, 0, 0})
+		So(fact.mtimeBuckets[2], ShouldResemble, []uint64{0, 4, 0, 0, 0, 0, 0, 0, 0})
+
+		So(fact.allCount, ShouldEqual, 7)
+		So(fact.allSize, ShouldEqual, 65)
+		So(fact.allUIDs, ShouldResemble, []uint32{11, 12})
+		So(fact.allGIDs, ShouldResemble, []uint32{7, 8})
+		So(fact.allFT&uint16(db.DGUTAFileTypeBam), ShouldBeGreaterThan, 0)
+		So(fact.childCount, ShouldEqual, 1)
+
+		childRows, err := conn.Query(ctx, dgutaWriterTestSelectChildQuery, mountPath, sid.String(), "/mnt/a/")
+		So(err, ShouldBeNil)
+
+		defer func() { _ = childRows.Close() }()
+
+		So(childRows.Next(), ShouldBeTrue)
+
+		var child string
+		So(childRows.Scan(&child), ShouldBeNil)
+		So(child, ShouldEqual, "/mnt/a/b")
+		So(childRows.Next(), ShouldBeFalse)
+	})
+
+	Convey("DGUTAWriter derives file-only scalar hot summaries from AgeAll canonical facts", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 5 * time.Second
+		cfg.MountPoints = []string{"/mnt/file-scalars/"}
+
+		const mountPath = "/mnt/file-scalars/"
+
+		updatedAt := time.Date(2026, 1, 15, 10, 0, 0, 0, time.UTC)
+		sid := snapshotID(mountPath, updatedAt)
+		paths := internaltest.NewDirectoryPathCreator()
+
+		w, err := NewDGUTAWriter(cfg)
+		So(err, ShouldBeNil)
+		So(w, ShouldNotBeNil)
+
+		w.SetMountPath(mountPath)
+		w.SetUpdatedAt(updatedAt)
+		So(w.Add(db.RecordDGUTA{
+			Dir: paths.ToDirectoryPath(mountPath),
+			GUTAs: db.GUTAs{
+				b1GUTAWithBuckets(
+					7, 11, db.DGUTAFileTypeBam, 2, 20, 100, 200,
+					[9]uint64{2, 0, 0, 0, 0, 0, 0, 0, 0},
+					[9]uint64{0, 2, 0, 0, 0, 0, 0, 0, 0},
+				),
+				b1GUTAWithBuckets(
+					8, 12, db.DGUTAFileTypeDir, 1, 5, 80, 250,
+					[9]uint64{0, 1, 0, 0, 0, 0, 0, 0, 0},
+					[9]uint64{1, 0, 0, 0, 0, 0, 0, 0, 0},
+				),
+				b1GUTAWithBuckets(
+					8, 13, db.DGUTAFileTypeCram, 3, 30, 120, 180,
+					[9]uint64{0, 0, 3, 0, 0, 0, 0, 0, 0},
+					[9]uint64{0, 0, 3, 0, 0, 0, 0, 0, 0},
+				),
+			},
+		}), ShouldBeNil)
+		So(w.Close(), ShouldBeNil)
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		fact := readDirFactForTest(ctx, conn, mountPath, sid.String(), mountPath)
+		So(fact.fileCount, ShouldEqual, 5)
+		So(fact.fileSize, ShouldEqual, 50)
+		So(fact.fileAtimeMin, ShouldEqual, 100)
+		So(fact.fileMtimeMax, ShouldEqual, 200)
+		So(fact.fileAtimeBuckets, ShouldResemble, []uint64{2, 0, 3, 0, 0, 0, 0, 0, 0})
+		So(fact.fileMtimeBuckets, ShouldResemble, []uint64{0, 2, 3, 0, 0, 0, 0, 0, 0})
+		So(fact.fileUIDs, ShouldResemble, []uint32{11, 13})
+		So(fact.fileGIDs, ShouldResemble, []uint32{7, 8})
+		So(fact.fileFT, ShouldEqual, uint16(db.DGUTAFileTypeBam|db.DGUTAFileTypeCram))
+	})
+
+	Convey("DGUTAWriter keeps t283-shaped fact streaming memory and block sizes bounded", t, func() {
+		conn := &lazyDGUTAImportConn{}
+		updatedAt := time.Date(2026, 6, 1, 10, 0, 0, 0, time.UTC)
+		mountPath := testT283ImagingMountPath
+		impl := &dgutaWriter{
+			conn:      conn,
+			mountPath: mountPath,
+			updatedAt: updatedAt,
+			snapshot:  snapshotID(mountPath, updatedAt),
+			prepared:  true,
+			dirProjection: mountDirProjectionWriter{
+				conn:        conn,
+				refreshedAt: updatedAt,
+			},
+		}
+		impl.SetBatchSize(10_000)
+
+		runtime.GC()
+
+		var usageBefore syscall.Rusage
+		So(syscall.Getrusage(syscall.RUSAGE_SELF, &usageBefore), ShouldBeNil)
+
+		root := &summary.DirectoryPath{Name: mountPath}
+
+		const dirs = 230_000
+
+		var addErr error
+
+		for n := range dirs {
+			dir := &summary.DirectoryPath{
+				Name:   fmt.Sprintf("dir%06d/", n),
+				Depth:  1,
+				Parent: root,
+			}
+			addErr = errors.Join(addErr, impl.addReadyRecord(context.Background(), db.RecordDGUTA{
+				Dir:   dir,
+				GUTAs: b1T283GUTAs(n),
+			}))
+		}
+
+		So(addErr, ShouldBeNil)
+		So(impl.flushAllBatches(), ShouldBeNil)
+
+		var usageAfter syscall.Rusage
+		So(syscall.Getrusage(syscall.RUSAGE_SELF, &usageAfter), ShouldBeNil)
+
+		So(maxRSSKilobytes(usageBefore, usageAfter), ShouldBeLessThan, int64(1_572_864))
+		So(conn.totalRowsFor(insertMountDirSummaryQuery), ShouldEqual, dirs)
+		So(conn.maxRowsFor(insertMountDirSummaryQuery), ShouldBeLessThanOrEqualTo, 10_000)
+	})
+
+	Convey("DGUTAWriter streams selected import writers and does not rebuild facts with INSERT SELECT SQL", t, func() {
+		updatedAt := time.Date(2026, 6, 1, 11, 0, 0, 0, time.UTC)
+		mountPath := "/mnt/sql-spy/"
+		conn := &b1ImportSQLSpyConn{}
+		impl := &dgutaWriter{
+			cfg:       Config{QueryTimeout: time.Second},
+			conn:      conn,
+			mountPath: mountPath,
+			updatedAt: updatedAt,
+			snapshot:  snapshotID(mountPath, updatedAt),
+		}
+		impl.SetBatchSize(1)
+
+		paths := internaltest.NewDirectoryPathCreator()
+		So(impl.Add(db.RecordDGUTA{
+			Dir:      paths.ToDirectoryPath(mountPath),
+			GUTAs:    db.GUTAs{b1GUTA(7, 11, db.DGUTAFileTypeBam, db.DGUTAgeAll, 1, 10, 100, 200)},
+			Children: []string{dgutaWriterTestChildName},
+		}), ShouldBeNil)
+		So(impl.Close(), ShouldBeNil)
+
+		So(conn.batchStats(insertMountDirSummaryQuery).appends, ShouldBeGreaterThan, 0)
+		So(conn.batchStats(insertMountDirSummaryQuery).sends, ShouldBeGreaterThan, 0)
+		So(conn.batchStats(insertChildrenQuery).appends, ShouldBeGreaterThan, 0)
+		So(conn.batchStats(insertChildrenQuery).sends, ShouldBeGreaterThan, 0)
+		So(conn.hasForbiddenInsertSelect(), ShouldBeFalse)
+	})
+
+	Convey("DGUTAWriter does not write child edges or publish readiness when facts writing fails", t, func() {
+		updatedAt := time.Date(2026, 6, 1, 11, 30, 0, 0, time.UTC)
+		mountPath := "/mnt/facts-fail/"
+		conn := &b2PublishReadinessConn{factPrepareErr: errForcedFailure}
+		impl := &dgutaWriter{
+			cfg:       Config{QueryTimeout: time.Second},
+			conn:      conn,
+			mountPath: mountPath,
+			updatedAt: updatedAt,
+			snapshot:  snapshotID(mountPath, updatedAt),
+		}
+		impl.SetBatchSize(1)
+
+		paths := internaltest.NewDirectoryPathCreator()
+		err := impl.Add(db.RecordDGUTA{
+			Dir:      paths.ToDirectoryPath(mountPath),
+			GUTAs:    db.GUTAs{b1GUTA(7, 11, db.DGUTAFileTypeBam, db.DGUTAgeAll, 1, 10, 100, 200)},
+			Children: []string{dgutaWriterTestChildName},
+		})
+		So(errors.Is(err, errForcedFailure), ShouldBeTrue)
+
+		closeErr := impl.Close()
+		So(errors.Is(closeErr, errForcedFailure), ShouldBeTrue)
+		So(conn.batchAppends(insertChildrenQuery), ShouldEqual, 0)
+		So(conn.batchAppends(insertMountDirSummarySetQuery), ShouldEqual, 0)
+		So(conn.activePublishes(), ShouldEqual, 0)
+	})
+
+	Convey("DGUTAWriter drops facts and withholds readiness when a selected derived index fails", t, func() {
+		updatedAt := time.Date(2026, 6, 1, 11, 45, 0, 0, time.UTC)
+		mountPath := "/mnt/derived-index-fail/"
+		conn := &b2PublishReadinessConn{}
+		derived := &b2FailingDerivedIndexWriter{flushErr: errForcedFailure}
+		impl := &dgutaWriter{
+			cfg:                    Config{QueryTimeout: time.Second},
+			conn:                   conn,
+			mountPath:              mountPath,
+			updatedAt:              updatedAt,
+			snapshot:               snapshotID(mountPath, updatedAt),
+			selectedDerivedIndexes: []dgutaDerivedIndexWriter{derived},
+		}
+		impl.SetBatchSize(1)
+
+		paths := internaltest.NewDirectoryPathCreator()
+		So(impl.Add(db.RecordDGUTA{
+			Dir:      paths.ToDirectoryPath(mountPath),
+			GUTAs:    db.GUTAs{b1GUTA(7, 11, db.DGUTAFileTypeBam, db.DGUTAgeAll, 1, 10, 100, 200)},
+			Children: []string{dgutaWriterTestChildName},
+		}), ShouldBeNil)
+
+		err := impl.Close()
+		So(errors.Is(err, errForcedFailure), ShouldBeTrue)
+		So(derived.appendedRecords(), ShouldEqual, 1)
+		So(conn.batchAppends(insertMountDirSummaryQuery), ShouldBeGreaterThan, 0)
+		So(conn.batchAppends(insertMountDirSummarySetQuery), ShouldEqual, 0)
+		So(conn.activePublishes(), ShouldEqual, 0)
+		So(conn.dirFactPartitionDrops(), ShouldBeGreaterThan, 0)
 	})
 
 	Convey("DGUTAWriter streams mount dir projection batches before Close", t, func() {
@@ -1163,7 +1507,6 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 		So(conn.preparedBatches(), ShouldEqual, 0)
 		So(impl.childrenBatch, ShouldBeNil)
 		So(impl.dirProjection.summaryBatch, ShouldBeNil)
-		So(impl.dirProjection.vectorBatch, ShouldBeNil)
 	})
 
 	Convey("DGUTAWriter sends capped children blocks as separate prepared batches", t, func() {
@@ -1245,6 +1588,31 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 			nextErr = impl.Close()
 		}, ShouldNotPanic)
 		So(errors.Is(nextErr, errForcedFailure), ShouldBeTrue)
+	})
+
+	Convey("DGUTAWriter does not retry an ambiguous child batch send before cleanup", t, func() {
+		updatedAt := time.Date(2026, 5, 29, 10, 0, 0, 0, time.UTC)
+		mountPath := "/mnt/ambiguous-send/"
+		conn := &ambiguousDGUTASendConn{sendErr: errForcedFailure}
+		impl := &dgutaWriter{
+			cfg:       Config{QueryTimeout: time.Second},
+			conn:      conn,
+			mountPath: mountPath,
+			updatedAt: updatedAt,
+			snapshot:  snapshotID(mountPath, updatedAt),
+		}
+		impl.SetBatchSize(1)
+
+		paths := internaltest.NewDirectoryPathCreator()
+		err := impl.Add(singleDGUTARecord(paths.ToDirectoryPath(mountPath), 42, "child/"))
+		So(errors.Is(err, errForcedFailure), ShouldBeTrue)
+		So(conn.childBatch.sendCalls, ShouldEqual, 1)
+
+		err = impl.Close()
+		So(errors.Is(err, errForcedFailure), ShouldBeTrue)
+		So(conn.childBatch.sendCalls, ShouldEqual, 1)
+		So(conn.currentSnapshotPartitionDrops(), ShouldEqual,
+			len(allPartitionDropQueries())+len(allPartitionDropQueries()))
 	})
 
 	Convey("DGUTAWriter sends slow partial children batches before the receive timeout window", t, func() {
@@ -1352,7 +1720,8 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 			snapshotID: "00000000-0000-0000-0000-000000000001",
 			updatedAt:  time.Date(2026, 1, 14, 9, 0, 0, 0, time.UTC),
 		}
-		So(writer.appendRecord(
+		So(writer.appendRecordWithContext(
+			context.Background(),
 			mount,
 			"/mnt/projection-send/",
 			db.GUTAs{testProjectionGUTA(7, 9, db.DGUTAFileTypeBam, db.DGUTAgeAll, 1)},
@@ -1385,7 +1754,8 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 			snapshotID: "00000000-0000-0000-0000-000000000002",
 			updatedAt:  time.Date(2026, 1, 14, 9, 0, 0, 0, time.UTC),
 		}
-		err := writer.appendRecord(
+		err := writer.appendRecordWithContext(
+			context.Background(),
 			mount,
 			"/mnt/projection-reprepare/",
 			db.GUTAs{testProjectionGUTA(7, 9, db.DGUTAFileTypeBam, db.DGUTAgeAll, 1)},
@@ -1407,7 +1777,8 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 		var nextErr error
 
 		So(func() {
-			nextErr = writer.appendRecord(
+			nextErr = writer.appendRecordWithContext(
+				context.Background(),
 				mount,
 				"/mnt/projection-reprepare/",
 				db.GUTAs{testProjectionGUTA(7, 9, db.DGUTAFileTypeBam, db.DGUTAgeAll, 1)},
@@ -1436,7 +1807,8 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 			updatedAt:  now,
 		}
 
-		So(writer.appendRecord(
+		So(writer.appendRecordWithContext(
+			context.Background(),
 			mount,
 			"/mnt/projection-slow/",
 			db.GUTAs{testProjectionGUTA(7, 9, db.DGUTAFileTypeBam, db.DGUTAgeAll, 1)},
@@ -1453,7 +1825,8 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 
 		now = now.Add(4*time.Minute + time.Second)
 
-		So(writer.appendRecord(
+		So(writer.appendRecordWithContext(
+			context.Background(),
 			mount,
 			"/mnt/projection-slow/next/",
 			db.GUTAs{testProjectionGUTA(7, 10, db.DGUTAFileTypeCram, db.DGUTAgeA2M, 1)},
@@ -1531,7 +1904,8 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 			snapshotID: "00000000-0000-0000-0000-000000000003",
 			updatedAt:  time.Date(2026, 1, 14, 9, 0, 0, 0, time.UTC),
 		}
-		So(impl.dirProjection.appendRecord(
+		So(impl.dirProjection.appendRecordWithContext(
+			context.Background(),
 			mount,
 			"/mnt/projection-final/",
 			db.GUTAs{testProjectionGUTA(7, 9, db.DGUTAFileTypeBam, db.DGUTAgeAll, 1)},
@@ -1614,7 +1988,7 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 				Dir:   paths.ToDirectoryPath(fmt.Sprintf("%sdir%04d/", mountPath, n)),
 				GUTAs: t283DirectoryGUTAs(),
 			}
-			So(impl.addReadyRecord(record), ShouldBeNil)
+			So(impl.addReadyRecord(context.Background(), record), ShouldBeNil)
 		}
 
 		So(impl.flushAllBatches(), ShouldBeNil)
@@ -1646,7 +2020,7 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 			mountPath + "internal/",
 			"/nfs/t283_imaging2/sibling/",
 		} {
-			So(impl.addReadyRecord(db.RecordDGUTA{
+			So(impl.addReadyRecord(context.Background(), db.RecordDGUTA{
 				Dir: paths.ToDirectoryPath(dir),
 				GUTAs: db.GUTAs{
 					testProjectionGUTA(7, 9, db.DGUTAFileTypeBam, db.DGUTAgeAll, 1),
@@ -1859,6 +2233,101 @@ func testProjectionGUTA(
 	}
 }
 
+func b1GUTA(
+	gid, uid uint32,
+	ft db.DirGUTAFileType,
+	age db.DirGUTAge,
+	count, size uint64,
+	atime, mtime int64,
+) *db.GUTA {
+	return &db.GUTA{
+		GID:         gid,
+		UID:         uid,
+		FT:          ft,
+		Age:         age,
+		Count:       count,
+		Size:        size,
+		Atime:       atime,
+		Mtime:       mtime,
+		ATimeRanges: [9]uint64{count, 0, 0, 0, 0, 0, 0, 0, 0},
+		MTimeRanges: [9]uint64{0, count, 0, 0, 0, 0, 0, 0, 0},
+	}
+}
+
+func readDirFactForTest(ctx context.Context, conn ch.Conn, mountPath, sid, dir string) b1DirFact {
+	rows, err := conn.Query(ctx, b1ReadDirFactQuery, mountPath, sid, dir)
+	So(err, ShouldBeNil)
+
+	defer func() { _ = rows.Close() }()
+
+	So(rows.Next(), ShouldBeTrue)
+
+	var fact b1DirFact
+	So(rows.Scan(
+		&fact.gids,
+		&fact.uids,
+		&fact.fts,
+		&fact.ages,
+		&fact.counts,
+		&fact.sizes,
+		&fact.atimeMins,
+		&fact.mtimeMaxs,
+		&fact.atimeBuckets,
+		&fact.mtimeBuckets,
+		&fact.allCount,
+		&fact.allSize,
+		&fact.allUIDs,
+		&fact.allGIDs,
+		&fact.allFT,
+		&fact.fileCount,
+		&fact.fileSize,
+		&fact.fileAtimeMin,
+		&fact.fileMtimeMax,
+		&fact.fileAtimeBuckets,
+		&fact.fileMtimeBuckets,
+		&fact.fileUIDs,
+		&fact.fileGIDs,
+		&fact.fileFT,
+		&fact.childCount,
+	), ShouldBeNil)
+	So(rows.Next(), ShouldBeFalse)
+
+	return fact
+}
+
+func b1GUTAWithBuckets(
+	gid, uid uint32,
+	ft db.DirGUTAFileType,
+	count, size uint64,
+	atime, mtime int64,
+	atimeBuckets, mtimeBuckets [9]uint64,
+) *db.GUTA {
+	guta := b1GUTA(gid, uid, ft, db.DGUTAgeAll, count, size, atime, mtime)
+	guta.ATimeRanges = atimeBuckets
+	guta.MTimeRanges = mtimeBuckets
+
+	return guta
+}
+
+func b1T283GUTAs(n int) db.GUTAs {
+	age := db.DirGUTAges[n%len(db.DirGUTAges)]
+
+	return db.GUTAs{
+		b1GUTA(66, 15008, db.DGUTAFileTypeDir, db.DGUTAgeAll, 1, 1, 100, 200),
+		b1GUTA(66, 15008, db.DGUTAFileTypeDir, age, 1, 1, 100, 200),
+		b1GUTA(66, 15009, db.DGUTAFileTypeBam, db.DGUTAgeAll, 1, 10, 101, 201),
+		b1GUTA(67, 15009, db.DGUTAFileTypeCram, age, 1, 20, 102, 202),
+	}
+}
+
+func maxRSSKilobytes(before, after syscall.Rusage) int64 {
+	if after.Maxrss > before.Maxrss {
+		return after.Maxrss
+	}
+
+	return before.Maxrss
+}
+
 func newBatchFlushLimitConn(conn ch.Conn) *batchFlushLimitConn {
 	return &batchFlushLimitConn{
 		Conn:    conn,
@@ -1873,6 +2342,37 @@ func t283DirectoryGUTAs() db.GUTAs {
 	}
 
 	return gutas
+}
+
+type b1DirFact struct {
+	gids         []uint32
+	uids         []uint32
+	fts          []uint16
+	ages         []uint8
+	counts       []uint64
+	sizes        []uint64
+	atimeMins    []int64
+	mtimeMaxs    []int64
+	atimeBuckets [][]uint64
+	mtimeBuckets [][]uint64
+
+	allCount uint64
+	allSize  uint64
+	allUIDs  []uint32
+	allGIDs  []uint32
+	allFT    uint16
+
+	fileCount        uint64
+	fileSize         uint64
+	fileAtimeMin     int64
+	fileMtimeMax     int64
+	fileAtimeBuckets []uint64
+	fileMtimeBuckets []uint64
+	fileUIDs         []uint32
+	fileGIDs         []uint32
+	fileFT           uint16
+
+	childCount uint64
 }
 
 type activeMetadataInvalidationConn struct {
@@ -1927,7 +2427,6 @@ func (c *projectionStreamingConn) PrepareBatch(
 
 func isMountDirProjectionInsert(query string) bool {
 	return query == insertMountDirSummaryQuery ||
-		query == insertMountDirDGUTAVectorQuery ||
 		query == insertMountDirSummarySetQuery
 }
 
@@ -2174,6 +2673,29 @@ func TestDGUTAWriterOldSnapshotDropUsesCleanupTimeout(t *testing.T) {
 		So(conn.oldSnapshotPartitionDrops(), ShouldEqual, len(allPartitionDropQueries()))
 		So(conn.longDeadlineDrops(), ShouldEqual, len(allPartitionDropQueries()))
 	})
+
+	Convey("DGUTAWriter reports old snapshot drop failures after publishing the new snapshot", t, func() {
+		updatedAt := time.Date(2026, 1, 9, 15, 0, 0, 0, time.UTC)
+		previousSID := snapshotID(testMountPath, updatedAt.Add(-1*time.Hour))
+		nextSID := snapshotID(testMountPath, updatedAt)
+		conn := &oldSnapshotDropFailingConn{previousSID: previousSID.String()}
+		w := &dgutaWriter{
+			cfg:       Config{QueryTimeout: 100 * time.Millisecond},
+			conn:      conn,
+			mountPath: testMountPath,
+			updatedAt: updatedAt,
+			snapshot:  nextSID,
+		}
+
+		ctx, cancel := queryContext(context.Background(), 100*time.Millisecond)
+		defer cancel()
+
+		err := w.switchSnapshotAndDropOld(ctx)
+		So(errors.Is(err, errForcedFailure), ShouldBeTrue)
+		So(err.Error(), ShouldContainSubstring, "old_snapshot_partition_drop")
+		So(conn.switchCount(), ShouldEqual, 1)
+		So(conn.dropCount(), ShouldEqual, 1)
+	})
 }
 
 type oldSnapshotDropDeadlineConn struct {
@@ -2227,6 +2749,142 @@ func (c *oldSnapshotDropDeadlineConn) oldSnapshotPartitionDrops() int {
 
 func (c *oldSnapshotDropDeadlineConn) longDeadlineDrops() int {
 	return int(c.longDeadline.Load())
+}
+
+type oldSnapshotDropFailingConn struct {
+	bootstrapTestConn
+
+	previousSID string
+
+	switches atomic.Int32
+	drops    atomic.Int32
+}
+
+func (c *oldSnapshotDropFailingConn) Query(
+	_ context.Context,
+	query string,
+	_ ...any,
+) (driver.Rows, error) {
+	if query != activeSnapshotQuery {
+		return nil, errForcedFailure
+	}
+
+	return &dgutaWriterCloseContextRows{
+		columns: []string{dgutaWriterTestSnapshotIDColumn},
+		values:  [][]any{{c.previousSID}},
+	}, nil
+}
+
+func (c *oldSnapshotDropFailingConn) Exec(_ context.Context, query string, _ ...any) error {
+	switch {
+	case query == switchSnapshotQuery:
+		c.switches.Add(1)
+
+		return nil
+	case strings.HasPrefix(query, "ALTER TABLE"):
+		c.drops.Add(1)
+
+		return errForcedFailure
+	default:
+		return errBootstrapTestUnexpectedCall
+	}
+}
+
+func (c *oldSnapshotDropFailingConn) switchCount() int {
+	return int(c.switches.Load())
+}
+
+func (c *oldSnapshotDropFailingConn) dropCount() int {
+	return int(c.drops.Load())
+}
+
+type dgutaRetryResetConn struct {
+	bootstrapTestConn
+
+	normalWindow time.Duration
+	dropErr      error
+
+	drops                  atomic.Int32
+	longDeadline           atomic.Int32
+	prepared               atomic.Bool
+	preparedAfterDropCount atomic.Int32
+	snapshotIDObservations []string
+}
+
+func (c *dgutaRetryResetConn) Query(
+	_ context.Context,
+	query string,
+	_ ...any,
+) (driver.Rows, error) {
+	if query != activeSnapshotQuery {
+		return nil, errBootstrapTestUnexpectedCall
+	}
+
+	return &dgutaWriterCloseContextRows{
+		columns: []string{dgutaWriterTestSnapshotIDColumn},
+	}, nil
+}
+
+func (c *dgutaRetryResetConn) Exec(ctx context.Context, query string, args ...any) error {
+	if !strings.HasPrefix(query, "ALTER TABLE") {
+		return errBootstrapTestUnexpectedCall
+	}
+
+	c.drops.Add(1)
+
+	if len(args) >= 2 {
+		if sid, ok := args[1].(string); ok {
+			c.snapshotIDObservations = append(c.snapshotIDObservations, sid)
+		}
+	}
+
+	deadline, ok := ctx.Deadline()
+	if !ok || time.Until(deadline) <= c.normalWindow {
+		return context.DeadlineExceeded
+	}
+
+	c.longDeadline.Add(1)
+
+	return c.dropErr
+}
+
+func (c *dgutaRetryResetConn) PrepareBatch(
+	_ context.Context,
+	_ string,
+	_ ...driver.PrepareBatchOption,
+) (driver.Batch, error) {
+	c.prepared.Store(true)
+	c.preparedAfterDropCount.Store(c.drops.Load())
+
+	return &countingDGUTABatch{}, nil
+}
+
+func (c *dgutaRetryResetConn) partitionDrops() int {
+	return int(c.drops.Load())
+}
+
+func (c *dgutaRetryResetConn) longDeadlineDrops() int {
+	return int(c.longDeadline.Load())
+}
+
+func (c *dgutaRetryResetConn) firstPreparedAfterDrops() bool {
+	return int(c.preparedAfterDropCount.Load()) == len(allPartitionDropQueries())
+}
+
+func (c *dgutaRetryResetConn) seenSnapshotIDs() []string {
+	seen := make(map[string]struct{}, len(c.snapshotIDObservations))
+
+	ids := make([]string, 0, len(c.snapshotIDObservations))
+	for _, sid := range c.snapshotIDObservations {
+		if _, ok := seen[sid]; ok {
+			continue
+		}
+
+		seen[sid] = struct{}{}
+		ids = append(ids, sid)
+	}
+
+	return ids
 }
 
 type partitionDropDeadlineConn struct {
@@ -2380,6 +3038,77 @@ func (b *countingDGUTABatch) recordRows() {
 	}
 }
 
+type ambiguousDGUTASendBatch struct {
+	countingDGUTABatch
+
+	sendErr   error
+	sendCalls int
+}
+
+func (b *ambiguousDGUTASendBatch) Send() error {
+	b.sendCalls++
+	if b.sendErr != nil {
+		return b.sendErr
+	}
+
+	return b.countingDGUTABatch.Send()
+}
+
+type ambiguousDGUTASendConn struct {
+	bootstrapTestConn
+
+	sendErr error
+
+	childBatch ambiguousDGUTASendBatch
+	factBatch  countingDGUTABatch
+	drops      atomic.Int32
+}
+
+func (c *ambiguousDGUTASendConn) Query(
+	_ context.Context,
+	query string,
+	_ ...any,
+) (driver.Rows, error) {
+	if query != activeSnapshotQuery {
+		return nil, errBootstrapTestUnexpectedCall
+	}
+
+	return &dgutaWriterCloseContextRows{
+		columns: []string{dgutaWriterTestSnapshotIDColumn},
+	}, nil
+}
+
+func (c *ambiguousDGUTASendConn) PrepareBatch(
+	_ context.Context,
+	query string,
+	_ ...driver.PrepareBatchOption,
+) (driver.Batch, error) {
+	switch query {
+	case insertMountDirSummaryQuery:
+		return &c.factBatch, nil
+	case insertChildrenQuery:
+		c.childBatch.sendErr = c.sendErr
+
+		return &c.childBatch, nil
+	default:
+		return nil, errBootstrapTestUnexpectedCall
+	}
+}
+
+func (c *ambiguousDGUTASendConn) Exec(_ context.Context, query string, _ ...any) error {
+	if !strings.HasPrefix(query, "ALTER TABLE") {
+		return errBootstrapTestUnexpectedCall
+	}
+
+	c.drops.Add(1)
+
+	return nil
+}
+
+func (c *ambiguousDGUTASendConn) currentSnapshotPartitionDrops() int {
+	return int(c.drops.Load())
+}
+
 type childrenSendPrepareConn struct {
 	bootstrapTestConn
 
@@ -2488,8 +3217,7 @@ func (c *lazyDGUTAImportConn) PrepareBatch(
 func isLazyDGUTAImportQuery(query string) bool {
 	switch query {
 	case insertChildrenQuery,
-		insertMountDirSummaryQuery,
-		insertMountDirDGUTAVectorQuery:
+		insertMountDirSummaryQuery:
 		return true
 	default:
 		return false
@@ -2512,4 +3240,231 @@ func (c *lazyDGUTAImportConn) totalRowsFor(query string) int {
 	}
 
 	return count
+}
+
+func (c *lazyDGUTAImportConn) maxRowsFor(query string) int {
+	var maxRows int
+	for _, batch := range c.batches[query] {
+		if batch.maxRows > maxRows {
+			maxRows = batch.maxRows
+		}
+	}
+
+	return maxRows
+}
+
+type b1ImportSQLSpyBatch struct {
+	countingDGUTABatch
+
+	appends int
+	sends   int
+}
+
+func (b *b1ImportSQLSpyBatch) Append(values ...any) error {
+	b.appends++
+
+	return b.countingDGUTABatch.Append(values...)
+}
+
+func (b *b1ImportSQLSpyBatch) Send() error {
+	b.sends++
+
+	return b.countingDGUTABatch.Send()
+}
+
+type b1ImportSQLSpyConn struct {
+	bootstrapTestConn
+
+	prepared []string
+	batches  map[string]*b1ImportSQLSpyBatch
+}
+
+func (c *b1ImportSQLSpyConn) Query(
+	_ context.Context,
+	query string,
+	_ ...any,
+) (driver.Rows, error) {
+	c.prepared = append(c.prepared, query)
+
+	switch query {
+	case activeSnapshotQuery:
+		return &dgutaWriterCloseContextRows{
+			columns: []string{dgutaWriterTestSnapshotIDColumn},
+		}, nil
+	case mountsActiveRowsQuery:
+		return &dgutaWriterCloseContextRows{
+			columns: []string{"mount_path", dgutaWriterTestSnapshotIDColumn, "updated_at"},
+		}, nil
+	default:
+		return nil, errBootstrapTestUnexpectedCall
+	}
+}
+
+func (c *b1ImportSQLSpyConn) PrepareBatch(
+	_ context.Context,
+	query string,
+	_ ...driver.PrepareBatchOption,
+) (driver.Batch, error) {
+	c.prepared = append(c.prepared, query)
+
+	switch query {
+	case insertChildrenQuery, insertMountDirSummaryQuery, insertMountDirSummarySetQuery:
+	default:
+		return nil, errBootstrapTestUnexpectedCall
+	}
+
+	if c.batches == nil {
+		c.batches = make(map[string]*b1ImportSQLSpyBatch)
+	}
+
+	batch := &b1ImportSQLSpyBatch{}
+	c.batches[query] = batch
+
+	return batch, nil
+}
+
+func (c *b1ImportSQLSpyConn) batchStats(query string) b1ImportSQLSpyBatch {
+	if c.batches == nil || c.batches[query] == nil {
+		return b1ImportSQLSpyBatch{}
+	}
+
+	return *c.batches[query]
+}
+
+func (c *b1ImportSQLSpyConn) hasForbiddenInsertSelect() bool {
+	queries := append(c.executedQueries(), c.prepared...)
+	for _, query := range queries {
+		if b1ForbiddenInsertSelect(query) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func b1ForbiddenInsertSelect(query string) bool {
+	normalised := strings.ToLower(strings.Join(strings.Fields(query), " "))
+	if !strings.Contains(normalised, "insert into") || !strings.Contains(normalised, " select ") {
+		return false
+	}
+
+	return strings.Contains(normalised, "wrstat_dir_facts") ||
+		strings.Contains(normalised, "wrstat_children") ||
+		strings.Contains(normalised, "wrstat_dir_filter_ageall")
+}
+
+type b2PublishReadinessConn struct {
+	bootstrapTestConn
+
+	factPrepareErr error
+	batches        map[string]*countingDGUTABatch
+
+	activeEvents atomic.Int32
+	dirFactDrops atomic.Int32
+}
+
+func (c *b2PublishReadinessConn) Query(
+	_ context.Context,
+	query string,
+	_ ...any,
+) (driver.Rows, error) {
+	if query != activeSnapshotQuery {
+		return nil, errBootstrapTestUnexpectedCall
+	}
+
+	return &dgutaWriterCloseContextRows{
+		columns: []string{dgutaWriterTestSnapshotIDColumn},
+	}, nil
+}
+
+func (c *b2PublishReadinessConn) PrepareBatch(
+	_ context.Context,
+	query string,
+	_ ...driver.PrepareBatchOption,
+) (driver.Batch, error) {
+	switch query {
+	case insertMountDirSummaryQuery:
+		if c.factPrepareErr != nil {
+			return nil, c.factPrepareErr
+		}
+	case insertChildrenQuery, insertMountDirSummarySetQuery:
+	default:
+		return nil, errBootstrapTestUnexpectedCall
+	}
+
+	if c.batches == nil {
+		c.batches = make(map[string]*countingDGUTABatch)
+	}
+
+	batch := &countingDGUTABatch{}
+	c.batches[query] = batch
+
+	return batch, nil
+}
+
+func (c *b2PublishReadinessConn) Exec(_ context.Context, query string, _ ...any) error {
+	switch {
+	case query == switchSnapshotQuery:
+		c.activeEvents.Add(1)
+
+		return nil
+	case strings.HasPrefix(query, "ALTER TABLE"):
+		if strings.Contains(query, "wrstat_dir_facts") {
+			c.dirFactDrops.Add(1)
+		}
+
+		return nil
+	default:
+		return errBootstrapTestUnexpectedCall
+	}
+}
+
+func (c *b2PublishReadinessConn) batchAppends(query string) int {
+	if c.batches == nil || c.batches[query] == nil {
+		return 0
+	}
+
+	return c.batches[query].appended
+}
+
+func (c *b2PublishReadinessConn) activePublishes() int {
+	return int(c.activeEvents.Load())
+}
+
+func (c *b2PublishReadinessConn) dirFactPartitionDrops() int {
+	return int(c.dirFactDrops.Load())
+}
+
+type b2FailingDerivedIndexWriter struct {
+	records atomic.Int32
+	aborts  atomic.Int32
+
+	flushErr error
+}
+
+func (w *b2FailingDerivedIndexWriter) appendRecord(
+	context.Context,
+	activeMount,
+	string,
+	db.GUTAs,
+	[]string,
+	[]db.DirGUTAge,
+) error {
+	w.records.Add(1)
+
+	return nil
+}
+
+func (w *b2FailingDerivedIndexWriter) flush(context.Context) error {
+	return w.flushErr
+}
+
+func (w *b2FailingDerivedIndexWriter) abort() error {
+	w.aborts.Add(1)
+
+	return nil
+}
+
+func (w *b2FailingDerivedIndexWriter) appendedRecords() int {
+	return int(w.records.Load())
 }

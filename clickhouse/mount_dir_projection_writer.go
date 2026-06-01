@@ -49,13 +49,12 @@ func mountDirFactRowValues(
 	state mountDirProjectionState,
 	refreshedAt time.Time,
 ) []any {
-	allKey := mountDirSummaryKey{dir: dir, age: db.DGUTAgeAll}
 	values := mountDirSummaryBaseValues(
 		mount,
-		allKey,
-		summaryAccumulatorOrZero(state.summaries[allKey]),
+		mountDirSummaryKey{dir: dir, age: db.DGUTAgeAll},
+		summaryAccumulatorOrZero(state.allSummaries[dir]),
 	)
-	values = append(values, mountDirFileSummaryValues(state.fileSummaries[allKey])...)
+	values = append(values, mountDirFileSummaryValues(state.allFileSummaries[dir])...)
 	values = append(values, mountDirProjectionVectorValues(state.vectors[dir])...)
 	values = append(values, state.childCounts[dir], refreshedAt)
 
@@ -109,7 +108,11 @@ func (s mountDirProjectionState) summaryKeysFor(compactAges bool) []mountDirSumm
 }
 
 func (s mountDirProjectionState) factDirs(compactAges bool) []string {
-	set := make(map[string]struct{}, len(s.summaries)+len(s.vectors)+len(s.childCounts))
+	set := make(map[string]struct{}, len(s.dirs)+len(s.summaries)+len(s.vectors)+len(s.childCounts))
+
+	for dir := range s.dirs {
+		set[dir] = struct{}{}
+	}
 
 	for _, key := range s.summaryKeysFor(compactAges) {
 		set[key.dir] = struct{}{}
@@ -135,6 +138,30 @@ func (s mountDirProjectionState) factDirs(compactAges bool) []string {
 	return dirs
 }
 
+func (s *mountDirProjectionState) addDir(dir string) {
+	if dir == "" {
+		return
+	}
+
+	s.ensure()
+	s.dirs[dir] = struct{}{}
+}
+
+func (s *mountDirProjectionState) summaryAccumulatorForDir(
+	accumulators map[string]*mountDirSummaryAccumulator,
+	dir string,
+) *mountDirSummaryAccumulator {
+	acc := accumulators[dir]
+	if acc != nil {
+		return acc
+	}
+
+	acc = newMountDirSummaryAccumulator(db.DGUTAgeAll)
+	accumulators[dir] = acc
+
+	return acc
+}
+
 func writeMountDirFactRows(
 	ctx context.Context,
 	conn ch.Conn,
@@ -156,6 +183,45 @@ func writeMountDirFactRows(
 	)
 }
 
+func newProjectionRowsBlockWriter(
+	conn ch.Conn,
+	query, name string,
+	batch *driver.Batch,
+	openedAt *time.Time,
+	writeErr *error,
+	batchSize int,
+	now func() time.Time,
+) *importBlockWriter {
+	return &importBlockWriter{
+		conn:      conn,
+		query:     query,
+		name:      name,
+		batch:     batch,
+		openedAt:  openedAt,
+		writeErr:  writeErr,
+		batchSize: batchSize,
+		now:       now,
+	}
+}
+
+func appendProjectionRowValues[T any](
+	ctx context.Context,
+	writer *importBlockWriter,
+	values []T,
+	appendRow func(driver.Batch, T) error,
+) error {
+	for _, value := range values {
+		err := writer.append(ctx, func(batch driver.Batch) error {
+			return appendRow(batch, value)
+		})
+		if err != nil {
+			return err
+		}
+	}
+
+	return writer.close()
+}
+
 func appendMountDirFactRow(
 	batch driver.Batch,
 	mount activeMount,
@@ -170,13 +236,15 @@ func appendMountDirFactRow(
 	return nil
 }
 
-func (w *mountDirProjectionWriter) appendFactRows(
+func (w *mountDirProjectionWriter) appendFactRowsWithContext(
+	ctx context.Context,
 	mount activeMount,
 	state mountDirProjectionState,
 	compactAges bool,
 	batchSize int,
 ) error {
 	return appendTrackedProjectionRows(
+		ctx,
 		w,
 		state.factDirs(compactAges),
 		&w.summaryBatch,
@@ -188,6 +256,44 @@ func (w *mountDirProjectionWriter) appendFactRows(
 			return appendMountDirFactRow(batch, mount, dir, state, w.refreshedAt)
 		},
 	)
+}
+
+func (w *mountDirProjectionWriter) appendRecordWithContext(
+	ctx context.Context,
+	mount activeMount,
+	dir string,
+	gutas db.GUTAs,
+	childCount uint64,
+	recordAges []db.DirGUTAge,
+	compactAges bool,
+	batchSize int,
+) error {
+	state := newMountDirProjectionState()
+	state.addDir(dir)
+	state.addGUTAs(dir, gutas)
+	state.addChildren(dir, childCount)
+	state.addChildOnlySummaryAges(dir, recordAges)
+
+	return w.appendFactRowsWithContext(ctx, mount, state, compactAges, batchSize)
+}
+
+func (w *mountDirProjectionWriter) blockWriter(
+	batch *driver.Batch,
+	openedAt *time.Time,
+	query, name string,
+	batchSize int,
+) *importBlockWriter {
+	return &importBlockWriter{
+		conn:        w.conn,
+		query:       query,
+		name:        name,
+		batch:       batch,
+		openedAt:    openedAt,
+		writeErr:    &w.writeErr,
+		batchSize:   batchSize,
+		notPrepared: fmt.Errorf("%w: %s", errDirProjectionBatchNotPrepared, name),
+		now:         w.importBatchNow,
+	}
 }
 
 func compareProjectionGUTAs(a, b *db.GUTA) int {
@@ -223,40 +329,24 @@ func writeProjectionRowsWithClock[T any](
 	appendRow func(driver.Batch, T) error,
 	now func() time.Time,
 ) error {
-	writer := projectionRowsWriter{conn: conn, query: query, name: name, now: now}
-	for _, value := range values {
-		if err := appendProjectionRowValue(ctx, &writer, value, batchSize, appendRow); err != nil {
-			return err
-		}
-	}
+	var (
+		batch    driver.Batch
+		openedAt time.Time
+		writeErr error
+	)
 
-	return writer.close()
-}
+	writer := newProjectionRowsBlockWriter(
+		conn,
+		query,
+		name,
+		&batch,
+		&openedAt,
+		&writeErr,
+		batchSize,
+		now,
+	)
 
-func appendProjectionRowValue[T any](
-	ctx context.Context,
-	writer *projectionRowsWriter,
-	value T,
-	batchSize int,
-	appendRow func(driver.Batch, T) error,
-) error {
-	if err := writer.sendIfTooOld(); err != nil {
-		return err
-	}
-
-	if err := writer.ensureReady(ctx); err != nil {
-		return err
-	}
-
-	if err := appendRow(writer.batch, value); err != nil {
-		return errors.Join(err, abortProjectionBatch(writer.batch, writer.name))
-	}
-
-	if shouldSendProjectionBatch(writer.batch, writer.openedAt, batchSize, writer.now) {
-		return writer.send()
-	}
-
-	return nil
+	return appendProjectionRowValues(ctx, writer, values, appendRow)
 }
 
 func abortProjectionBatch(batch driver.Batch, name string) error {
@@ -265,75 +355,6 @@ func abortProjectionBatch(batch driver.Batch, name string) error {
 	}
 
 	return nil
-}
-
-func shouldSendProjectionBatch(
-	batch driver.Batch,
-	openedAt time.Time,
-	batchSize int,
-	now func() time.Time,
-) bool {
-	if batch == nil || batch.Rows() == 0 {
-		return false
-	}
-
-	return batchSize > 0 && batch.Rows() >= batchSize || importBatchOpenTooLong(openedAt, now)
-}
-
-type projectionRowsWriter struct {
-	conn     ch.Conn
-	query    string
-	name     string
-	batch    driver.Batch
-	openedAt time.Time
-	now      func() time.Time
-}
-
-func (w *projectionRowsWriter) sendIfTooOld() error {
-	if w.batch == nil || w.batch.Rows() == 0 || !importBatchOpenTooLong(w.openedAt, w.now) {
-		return nil
-	}
-
-	return w.send()
-}
-
-func (w *projectionRowsWriter) ensureReady(ctx context.Context) error {
-	if w.batch != nil {
-		return nil
-	}
-
-	batch, err := prepareImportBatch(ctx, w.conn, w.query)
-	if err != nil {
-		return fmt.Errorf("clickhouse: failed to prepare %s batch: %w", w.name, err)
-	}
-
-	w.batch = batch
-
-	markImportBatchOpened(&w.openedAt, w.now)
-
-	return nil
-}
-
-func (w *projectionRowsWriter) send() error {
-	if err := w.batch.Send(); err != nil {
-		w.batch = nil
-		clearImportBatchOpened(&w.openedAt)
-
-		return fmt.Errorf("clickhouse: failed to send %s batch: %w", w.name, err)
-	}
-
-	w.batch = nil
-	clearImportBatchOpened(&w.openedAt)
-
-	return nil
-}
-
-func (w *projectionRowsWriter) close() error {
-	if w.batch == nil {
-		return nil
-	}
-
-	return sendOrAbortProjectionBatch(w.batch, w.name)
 }
 
 func sendOrAbortProjectionBatch(batch driver.Batch, name string) error {
@@ -467,12 +488,9 @@ func mountDirSummaryBaseValues(
 type mountDirProjectionWriter struct {
 	conn            ch.Conn
 	summaryBatch    driver.Batch
-	vectorBatch     driver.Batch
 	summaryOpenedAt time.Time
-	vectorOpenedAt  time.Time
 	batchNow        func() time.Time
 	summaryFlushed  bool
-	vectorFlushed   bool
 	refreshedAt     time.Time
 	writeErr        error
 }
@@ -502,24 +520,8 @@ func (w *mountDirProjectionWriter) importBatchNow() time.Time {
 	return time.Now()
 }
 
-func (w *mountDirProjectionWriter) appendRecord(
-	mount activeMount,
-	dir string,
-	gutas db.GUTAs,
-	childCount uint64,
-	recordAges []db.DirGUTAge,
-	compactAges bool,
-	batchSize int,
-) error {
-	state := newMountDirProjectionState()
-	state.addGUTAs(dir, gutas)
-	state.addChildren(dir, childCount)
-	state.addChildOnlySummaryAges(dir, recordAges)
-
-	return w.appendFactRows(mount, state, compactAges, batchSize)
-}
-
 func appendTrackedProjectionRows[T any](
+	ctx context.Context,
 	writer *mountDirProjectionWriter,
 	values []T,
 	batch *driver.Batch,
@@ -529,74 +531,13 @@ func appendTrackedProjectionRows[T any](
 	appendRow func(driver.Batch, T) error,
 ) error {
 	for _, value := range values {
-		if err := writer.sendOpenBatchIfTooOld(batch, openedAt, name); err != nil {
-			return err
-		}
-
-		if err := writer.ensureBatchReady(batch, openedAt, query, name); err != nil {
-			return err
-		}
-
-		if err := appendRow(*batch, value); err != nil {
-			return err
-		}
-
-		if err := writer.sendFullBatchIfFull(batch, openedAt, batchSize, name); err != nil {
+		blockWriter := writer.blockWriter(batch, openedAt, query, name, batchSize)
+		if err := blockWriter.append(ctx, func(batch driver.Batch) error {
+			return appendRow(batch, value)
+		}); err != nil {
 			return err
 		}
 	}
-
-	return nil
-}
-
-func (w *mountDirProjectionWriter) ensureBatchReady(
-	batch *driver.Batch,
-	openedAt *time.Time,
-	query, name string,
-) error {
-	if w.writeErr != nil {
-		return w.writeErr
-	}
-
-	if batch == nil {
-		w.writeErr = fmt.Errorf("%w: %s", errDirProjectionBatchNotPrepared, name)
-
-		return w.writeErr
-	}
-
-	if *batch != nil {
-		return nil
-	}
-
-	if w.conn == nil {
-		w.writeErr = fmt.Errorf("%w: %s", errDirProjectionBatchNotPrepared, name)
-
-		return w.writeErr
-	}
-
-	return w.prepareBatch(
-		batch,
-		openedAt,
-		query,
-		name,
-	)
-}
-
-func (w *mountDirProjectionWriter) prepareBatch(
-	batch *driver.Batch,
-	openedAt *time.Time,
-	query, name string,
-) error {
-	prepared, err := prepareImportBatch(context.Background(), w.conn, query)
-	if err != nil {
-		w.writeErr = fmt.Errorf("clickhouse: failed to prepare %s batch: %w", name, err)
-
-		return w.writeErr
-	}
-
-	*batch = prepared
-
-	markImportBatchOpened(openedAt, w.importBatchNow)
 
 	return nil
 }
@@ -607,66 +548,11 @@ func (w *mountDirProjectionWriter) sendFullBatchIfFull(
 	batchSize int,
 	name string,
 ) error {
-	if batch == nil || *batch == nil {
-		return nil
-	}
-
-	if batchSize > 0 && (*batch).Rows() >= batchSize {
-		return w.sendFullBatch(batch, openedAt, name)
-	}
-
-	return w.sendOpenBatchIfTooOld(batch, openedAt, name)
-}
-
-func (w *mountDirProjectionWriter) sendOpenBatchIfTooOld(
-	batch *driver.Batch,
-	openedAt *time.Time,
-	name string,
-) error {
-	if !w.projectionBatchOpenTooLong(batch, openedAt) {
-		return nil
-	}
-
-	return w.sendFullBatch(batch, openedAt, name)
-}
-
-func (w *mountDirProjectionWriter) projectionBatchOpenTooLong(
-	batch *driver.Batch,
-	openedAt *time.Time,
-) bool {
-	return batch != nil &&
-		*batch != nil &&
-		(*batch).Rows() > 0 &&
-		importBatchOpenTooLong(*openedAt, w.importBatchNow)
-}
-
-func (w *mountDirProjectionWriter) sendFullBatch(
-	batch *driver.Batch,
-	openedAt *time.Time,
-	name string,
-) error {
-	if err := (*batch).Send(); err != nil {
-		*batch = nil
-
-		clearImportBatchOpened(openedAt)
-
-		w.writeErr = fmt.Errorf("clickhouse: failed to send %s batch: %w", name, err)
-
-		return w.writeErr
-	}
-
-	*batch = nil
-
-	clearImportBatchOpened(openedAt)
-
-	return nil
+	return w.blockWriter(batch, openedAt, "", name, batchSize).sendIfFull()
 }
 
 func (w *mountDirProjectionWriter) abortAll() error {
-	return errors.Join(
-		abortBatch(&w.summaryBatch, "dir summary"),
-		abortBatch(&w.vectorBatch, "dir dguta vector"),
-	)
+	return abortBatch(&w.summaryBatch, "dir facts")
 }
 
 type mountDirSummaryAccumulator struct {
@@ -773,18 +659,24 @@ func (a *mountDirSummaryAccumulator) summary(updatedAt time.Time) *db.DirSummary
 }
 
 type mountDirProjectionState struct {
-	summaries     map[mountDirSummaryKey]*mountDirSummaryAccumulator
-	fileSummaries map[mountDirSummaryKey]*mountDirSummaryAccumulator
-	vectors       map[string]db.GUTAs
-	childCounts   map[string]uint64
+	dirs             map[string]struct{}
+	allSummaries     map[string]*mountDirSummaryAccumulator
+	allFileSummaries map[string]*mountDirSummaryAccumulator
+	summaries        map[mountDirSummaryKey]*mountDirSummaryAccumulator
+	fileSummaries    map[mountDirSummaryKey]*mountDirSummaryAccumulator
+	vectors          map[string]db.GUTAs
+	childCounts      map[string]uint64
 }
 
 func newMountDirProjectionState() mountDirProjectionState {
 	return mountDirProjectionState{
-		summaries:     make(map[mountDirSummaryKey]*mountDirSummaryAccumulator),
-		fileSummaries: make(map[mountDirSummaryKey]*mountDirSummaryAccumulator),
-		vectors:       make(map[string]db.GUTAs),
-		childCounts:   make(map[string]uint64),
+		dirs:             make(map[string]struct{}),
+		allSummaries:     make(map[string]*mountDirSummaryAccumulator),
+		allFileSummaries: make(map[string]*mountDirSummaryAccumulator),
+		summaries:        make(map[mountDirSummaryKey]*mountDirSummaryAccumulator),
+		fileSummaries:    make(map[mountDirSummaryKey]*mountDirSummaryAccumulator),
+		vectors:          make(map[string]db.GUTAs),
+		childCounts:      make(map[string]uint64),
 	}
 }
 
@@ -805,10 +697,13 @@ func (s *mountDirProjectionState) addGUTA(dir string, guta *db.GUTA) {
 		return
 	}
 
+	s.summaryAccumulatorForDir(s.allSummaries, dir).add(guta)
+
 	key := mountDirSummaryKey{dir: dir, age: guta.Age}
 	s.summaryAccumulator(s.summaries, key).add(guta)
 
 	if guta.FT&db.AllTypesExceptDirectories > 0 {
+		s.summaryAccumulatorForDir(s.allFileSummaries, dir).add(guta)
 		s.summaryAccumulator(s.fileSummaries, key).add(guta)
 	}
 

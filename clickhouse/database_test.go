@@ -76,6 +76,11 @@ func TestClickHouseDatabaseChildren(t *testing.T) {
 			sid,
 			updatedAt,
 		), ShouldBeNil)
+		insertMountDirProjectionSetForTest(ctx, conn, activeMount{
+			mountPath:  mountPath,
+			snapshotID: sid.String(),
+			updatedAt:  updatedAt,
+		})
 
 		So(conn.Exec(ctx,
 			testInsertChildrenStmt,
@@ -149,10 +154,20 @@ func TestClickHouseDatabaseChildrenAncestor(t *testing.T) {
 		So(conn.Exec(ctx, testInsertMountStmt,
 			mountA, time.Now(), sidA, updatedA,
 		), ShouldBeNil)
+		insertMountDirProjectionSetForTest(ctx, conn, activeMount{
+			mountPath:  mountA,
+			snapshotID: sidA.String(),
+			updatedAt:  updatedA,
+		})
 
 		So(conn.Exec(ctx, testInsertMountStmt,
 			mountB, time.Now(), sidB, updatedB,
 		), ShouldBeNil)
+		insertMountDirProjectionSetForTest(ctx, conn, activeMount{
+			mountPath:  mountB,
+			snapshotID: sidB.String(),
+			updatedAt:  updatedB,
+		})
 
 		So(conn.Exec(ctx, testInsertChildrenStmt,
 			mountA, sidA, "/lustre/", "/lustre/scratchA",

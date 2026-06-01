@@ -28,6 +28,7 @@ package cmd
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"syscall"
 	"testing"
@@ -41,6 +42,8 @@ import (
 
 const summariseTestSecretDSN = "clickhouse://diag:secret@127.0.0.1:9000/default?" +
 	"database=wrstat_ui_test&password=querysecret"
+
+var errSummariseDiagnosticsOldCleanup = errors.New("forced old cleanup failure")
 
 func TestSummariseProcessRSS(t *testing.T) {
 	Convey("Linux proc statm RSS parsing returns MiB", t, func() {
@@ -188,6 +191,37 @@ func TestSummariseDiagnosticsLogging(t *testing.T) {
 		So(output, ShouldContainSubstring, "recent_import_phases="+quoteForDiagnostics("mount_switch:1s"))
 		So(output, ShouldNotContainSubstring, "secret")
 		So(output, ShouldNotContainSubstring, "querysecret")
+	})
+
+	Convey("old snapshot cleanup failures include phase and target context", t, func() {
+		var logs bytes.Buffer
+
+		restoreLogs := captureSummariseDiagnosticsLogs(&logs)
+		Reset(restoreLogs)
+
+		diag := newSummariseDiagnostics("stats.gz")
+		diag.setTarget(&clickHouseSummariseTarget{
+			cfg: clickhouse.Config{
+				DSN:      summariseTestSecretDSN,
+				Database: summariseTestClickHouseDatabase,
+			},
+			mountPath: "/mnt/test/",
+			modtime:   time.Date(2026, 1, 9, 12, 0, 0, 0, time.UTC),
+			outputDir: filepath.Join("out", "test"),
+		})
+		diag.recordImportPhase("old_snapshot_partition_drop", 42*time.Millisecond)
+
+		diag.logCloseResult(true, fmt.Errorf(
+			"clickhouse: old_snapshot_partition_drop: %w",
+			errSummariseDiagnosticsOldCleanup,
+		))
+
+		output := logs.String()
+		So(output, ShouldContainSubstring, "summarise close failure")
+		So(output, ShouldContainSubstring, "old_snapshot_partition_drop")
+		So(output, ShouldContainSubstring, "mount_path="+quoteForDiagnostics("/mnt/test/"))
+		So(output, ShouldContainSubstring, "snapshot_id=")
+		So(output, ShouldContainSubstring, errSummariseDiagnosticsOldCleanup.Error())
 	})
 }
 

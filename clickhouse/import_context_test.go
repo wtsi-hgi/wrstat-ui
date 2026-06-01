@@ -30,6 +30,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ClickHouse/clickhouse-go/v2/lib/column"
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/google/uuid"
 	. "github.com/smartystreets/goconvey/convey"
@@ -42,6 +43,79 @@ func (importContextColumn) Append(any) error {
 }
 
 func (importContextColumn) AppendRow(any) error {
+	return nil
+}
+
+type importBlockWriterSpyBatch struct {
+	rows        int
+	appends     int
+	sends       int
+	aborts      int
+	emptySends  int
+	sentRows    []int
+	sendCtxErrs []error
+	ctxErr      func() error
+	deadline    time.Time
+	hasDeadline bool
+}
+
+func (b *importBlockWriterSpyBatch) Abort() error {
+	b.aborts++
+	b.rows = 0
+
+	return nil
+}
+
+func (b *importBlockWriterSpyBatch) Append(...any) error {
+	b.appends++
+	b.rows++
+
+	return nil
+}
+
+func (b *importBlockWriterSpyBatch) AppendStruct(any) error {
+	b.appends++
+	b.rows++
+
+	return nil
+}
+
+func (b *importBlockWriterSpyBatch) Column(int) driver.BatchColumn {
+	return nil
+}
+
+func (b *importBlockWriterSpyBatch) Flush() error {
+	return nil
+}
+
+func (b *importBlockWriterSpyBatch) Send() error {
+	b.sends++
+
+	b.sendCtxErrs = append(b.sendCtxErrs, b.ctxErr())
+	if b.rows == 0 {
+		b.emptySends++
+	} else {
+		b.sentRows = append(b.sentRows, b.rows)
+	}
+
+	b.rows = 0
+
+	return nil
+}
+
+func (b *importBlockWriterSpyBatch) IsSent() bool {
+	return b.sends > 0 || b.aborts > 0
+}
+
+func (b *importBlockWriterSpyBatch) Rows() int {
+	return b.rows
+}
+
+func (b *importBlockWriterSpyBatch) Columns() []column.Interface {
+	return nil
+}
+
+func (b *importBlockWriterSpyBatch) Close() error {
 	return nil
 }
 
@@ -61,7 +135,7 @@ func TestClickHouseImportBatchContexts(t *testing.T) {
 		So(ctx.Err(), ShouldNotBeNil)
 		So(batch.Send(), ShouldBeNil)
 		So(conn.prepares, ShouldEqual, 1)
-		So(conn.deadlinePrepares, ShouldEqual, 0)
+		So(conn.deadlinePrepares, ShouldEqual, 1)
 	})
 
 	Convey("Import batch sends do not depend on released-connection reacquire semantics", t, func() {
@@ -91,7 +165,7 @@ func TestClickHouseImportBatchContexts(t *testing.T) {
 		So(next, ShouldNotBeNil)
 		So(batch.sends, ShouldEqual, 1)
 		So(conn.prepares, ShouldEqual, 1)
-		So(conn.deadlinePrepares, ShouldEqual, 0)
+		So(conn.deadlinePrepares, ShouldEqual, 1)
 		So(conn.releasePrepares, ShouldEqual, 0)
 	})
 
@@ -105,7 +179,6 @@ func TestClickHouseImportBatchContexts(t *testing.T) {
 			insertDGUTAQuery,
 			insertChildrenQuery,
 			insertMountDirSummaryQuery,
-			insertMountDirDGUTAVectorQuery,
 			insertMountDirSummarySetQuery,
 			insertFilesBatchQuery,
 			insertBasedirsGroupUsageQuery,
@@ -121,7 +194,7 @@ func TestClickHouseImportBatchContexts(t *testing.T) {
 			batch, err := prepareImportBatch(ctx, conn, query)
 			So(err, ShouldBeNil)
 			So(batch, ShouldNotBeNil)
-			So(conn.deadlinePrepares, ShouldEqual, 0)
+			So(conn.deadlinePrepares, ShouldEqual, 1)
 			So(conn.releasePrepares, ShouldEqual, 0)
 
 			totalPrepares += conn.prepares
@@ -165,7 +238,7 @@ func TestClickHouseImportBatchContexts(t *testing.T) {
 		So(writer.batch, ShouldBeNil)
 		So(writer.buf.rows(), ShouldEqual, 0)
 		So(conn.prepares, ShouldEqual, 1)
-		So(conn.deadlinePrepares, ShouldEqual, 0)
+		So(conn.deadlinePrepares, ShouldEqual, 1)
 	})
 
 	Convey("Partition cleanup replaces an already-expired normal query context", t, func() {
@@ -191,6 +264,207 @@ func TestClickHouseImportBatchContexts(t *testing.T) {
 
 func waitForContextDone(ctx context.Context) {
 	<-ctx.Done()
+}
+
+func TestClickHouseImportBlockWriter(t *testing.T) {
+	Convey("Import block writer closes an unused writer without preparing a batch", t, func() {
+		conn := &importBlockWriterSpyConn{}
+		writer := newTestImportBlockWriter(conn, 2, time.Now)
+
+		So(writer.close(), ShouldBeNil)
+		So(conn.prepareCalls, ShouldEqual, 0)
+		So(conn.totalAppends(), ShouldEqual, 0)
+		So(conn.totalSends(), ShouldEqual, 0)
+		So(conn.totalAborts(), ShouldEqual, 0)
+	})
+
+	Convey("Import block writer prepares lazily on the first appended row", t, func() {
+		conn := &importBlockWriterSpyConn{}
+		writer := newTestImportBlockWriter(conn, 2, time.Now)
+
+		So(conn.prepareCalls, ShouldEqual, 0)
+		So(writer.append(context.Background(), appendSpyImportBlockRow), ShouldBeNil)
+		So(conn.prepareCalls, ShouldEqual, 1)
+	})
+
+	Convey("Import block writer sends bounded blocks and skips empty sends", t, func() {
+		conn := &importBlockWriterSpyConn{}
+		writer := newTestImportBlockWriter(conn, 2, time.Now)
+
+		for range 5 {
+			So(writer.append(context.Background(), appendSpyImportBlockRow), ShouldBeNil)
+		}
+
+		So(writer.close(), ShouldBeNil)
+		So(conn.sentRows(), ShouldResemble, []int{2, 2, 1})
+		So(conn.emptySends(), ShouldEqual, 0)
+	})
+
+	Convey("Import block writer sends an old non-empty block before appending the next row", t, func() {
+		now := time.Date(2026, 5, 29, 9, 0, 0, 0, time.UTC)
+		conn := &importBlockWriterSpyConn{}
+		writer := newTestImportBlockWriter(conn, 100, func() time.Time { return now })
+
+		So(writer.append(context.Background(), appendSpyImportBlockRow), ShouldBeNil)
+
+		firstBatch := conn.batches[0]
+		now = now.Add(importBatchMaxOpenDuration)
+
+		So(writer.append(context.Background(), appendSpyImportBlockRow), ShouldBeNil)
+		So(firstBatch.sends, ShouldEqual, 1)
+		So(conn.sentRows(), ShouldResemble, []int{1})
+		So(conn.batches, ShouldHaveLength, 2)
+		So(conn.batches[1].Rows(), ShouldEqual, 1)
+	})
+
+	Convey("Import block writer does not prepare again after an automatic full-block send", t, func() {
+		conn := &importBlockWriterSpyConn{}
+		writer := newTestImportBlockWriter(conn, 2, time.Now)
+
+		So(writer.append(context.Background(), appendSpyImportBlockRow), ShouldBeNil)
+		So(writer.append(context.Background(), appendSpyImportBlockRow), ShouldBeNil)
+		So(writer.close(), ShouldBeNil)
+		So(conn.prepareCalls, ShouldEqual, 1)
+		So(conn.totalSends(), ShouldEqual, 1)
+	})
+
+	Convey("Import block writer aborts a prepared empty batch without sending", t, func() {
+		conn := &importBlockWriterSpyConn{}
+		writer := newTestImportBlockWriter(conn, 2, time.Now)
+
+		So(writer.ensureReady(context.Background()), ShouldBeNil)
+		So(writer.close(), ShouldBeNil)
+		So(conn.prepareCalls, ShouldEqual, 1)
+		So(conn.totalAborts(), ShouldEqual, 1)
+		So(conn.totalSends(), ShouldEqual, 0)
+	})
+
+	Convey("Import batch send uses a detached timeout context after the parent is canceled", t, func() {
+		conn := &importBlockWriterSpyConn{}
+		writer := newTestImportBlockWriter(conn, 2, time.Now)
+		parent, cancel := context.WithCancel(context.Background())
+
+		So(writer.append(parent, appendSpyImportBlockRow), ShouldBeNil)
+		cancel()
+
+		So(writer.close(), ShouldBeNil)
+		So(conn.parentCanceledSendErrs(), ShouldResemble, []error{nil})
+		So(conn.prepareDeadlines(), ShouldHaveLength, 1)
+	})
+}
+
+func newTestImportBlockWriter(
+	conn *importBlockWriterSpyConn,
+	batchSize int,
+	now func() time.Time,
+) *importBlockWriter {
+	var (
+		batch    driver.Batch
+		openedAt time.Time
+		writeErr error
+	)
+
+	return &importBlockWriter{
+		conn:      conn,
+		query:     "INSERT INTO spy",
+		name:      "spy",
+		batch:     &batch,
+		openedAt:  &openedAt,
+		batchSize: batchSize,
+		now:       now,
+		writeErr:  &writeErr,
+	}
+}
+
+func appendSpyImportBlockRow(batch driver.Batch) error {
+	return batch.Append("row")
+}
+
+type importBlockWriterSpyConn struct {
+	bootstrapTestConn
+
+	prepareCalls int
+	batches      []*importBlockWriterSpyBatch
+}
+
+func (c *importBlockWriterSpyConn) PrepareBatch(
+	ctx context.Context,
+	_ string,
+	_ ...driver.PrepareBatchOption,
+) (driver.Batch, error) {
+	c.prepareCalls++
+
+	batch := &importBlockWriterSpyBatch{ctxErr: ctx.Err}
+	batch.deadline, batch.hasDeadline = ctx.Deadline()
+	c.batches = append(c.batches, batch)
+
+	return batch, nil
+}
+
+func (c *importBlockWriterSpyConn) sentRows() []int {
+	var rows []int
+	for _, batch := range c.batches {
+		rows = append(rows, batch.sentRows...)
+	}
+
+	return rows
+}
+
+func (c *importBlockWriterSpyConn) emptySends() int {
+	var sends int
+	for _, batch := range c.batches {
+		sends += batch.emptySends
+	}
+
+	return sends
+}
+
+func (c *importBlockWriterSpyConn) totalAppends() int {
+	var appends int
+	for _, batch := range c.batches {
+		appends += batch.appends
+	}
+
+	return appends
+}
+
+func (c *importBlockWriterSpyConn) totalSends() int {
+	var sends int
+	for _, batch := range c.batches {
+		sends += batch.sends
+	}
+
+	return sends
+}
+
+func (c *importBlockWriterSpyConn) totalAborts() int {
+	var aborts int
+	for _, batch := range c.batches {
+		aborts += batch.aborts
+	}
+
+	return aborts
+}
+
+func (c *importBlockWriterSpyConn) parentCanceledSendErrs() []error {
+	var errs []error
+	for _, batch := range c.batches {
+		errs = append(errs, batch.sendCtxErrs...)
+	}
+
+	return errs
+}
+
+func (c *importBlockWriterSpyConn) prepareDeadlines() []time.Time {
+	var deadlines []time.Time
+
+	for _, batch := range c.batches {
+		if batch.hasDeadline {
+			deadlines = append(deadlines, batch.deadline)
+		}
+	}
+
+	return deadlines
 }
 
 type importContextBatch struct {
