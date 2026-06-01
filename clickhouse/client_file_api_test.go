@@ -28,11 +28,13 @@ package clickhouse
 
 import (
 	"context"
+	"errors"
 	"os"
 	"testing"
 	"time"
 
 	. "github.com/smartystreets/goconvey/convey"
+	"github.com/wtsi-hgi/wrstat-ui/basedirs"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 	"github.com/wtsi-hgi/wrstat-ui/stats"
 )
@@ -121,6 +123,55 @@ func TestClientStatPath(t *testing.T) {
 	})
 }
 
+func TestClientStatPathErrors(t *testing.T) {
+	Convey("Client.StatPath preserves missing and invalid path errors", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 2 * time.Second
+		cfg.MountPoints = []string{providerTestMountPath}
+
+		c, err := NewClient(cfg)
+		So(err, ShouldBeNil)
+		So(c, ShouldNotBeNil)
+		Reset(func() { So(c.Close(), ShouldBeNil) })
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		const mountPath = providerTestMountPath
+
+		updatedAt := time.Now().UTC().Truncate(time.Second)
+		sid := snapshotID(mountPath, updatedAt)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		So(conn.Exec(ctx, testInsertMountStmt, mountPath, time.Now(), sid, updatedAt), ShouldBeNil)
+
+		row, err := c.StatPath(ctx, mountPath+"missing.txt", StatOptions{})
+		So(row, ShouldBeNil)
+		So(errors.Is(err, errPathNotFound), ShouldBeTrue)
+
+		rootMountClient := &Client{
+			cfg:         Config{QueryTimeout: time.Second},
+			conn:        &bootstrapTestConn{},
+			mountPoints: basedirs.ValidateMountPoints([]string{"/"}),
+		}
+
+		row, err = rootMountClient.StatPath(ctx, "/", StatOptions{})
+		So(row, ShouldBeNil)
+		So(errors.Is(err, errInvalidPath), ShouldBeTrue)
+
+		row, err = c.StatPath(ctx, "/outside/missing.txt", StatOptions{})
+		So(row, ShouldBeNil)
+		So(errors.Is(err, basedirs.ErrInvalidBasePath), ShouldBeTrue)
+	})
+}
+
 func TestClientIsDir(t *testing.T) {
 	Convey("Client.IsDir reports directory entry_type", t, func() {
 		os.Setenv("WRSTAT_ENV", "test")
@@ -185,6 +236,55 @@ func TestClientIsDir(t *testing.T) {
 		isDir, err := c.IsDir(ctx, path)
 		So(err, ShouldBeNil)
 		So(isDir, ShouldBeTrue)
+	})
+}
+
+func TestClientIsDirErrors(t *testing.T) {
+	Convey("Client.IsDir preserves missing and invalid path errors", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 2 * time.Second
+		cfg.MountPoints = []string{providerTestMountPath}
+
+		c, err := NewClient(cfg)
+		So(err, ShouldBeNil)
+		So(c, ShouldNotBeNil)
+		Reset(func() { So(c.Close(), ShouldBeNil) })
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		const mountPath = providerTestMountPath
+
+		updatedAt := time.Now().UTC().Truncate(time.Second)
+		sid := snapshotID(mountPath, updatedAt)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		So(conn.Exec(ctx, testInsertMountStmt, mountPath, time.Now(), sid, updatedAt), ShouldBeNil)
+
+		isDir, err := c.IsDir(ctx, mountPath+"missing/")
+		So(err, ShouldBeNil)
+		So(isDir, ShouldBeFalse)
+
+		rootMountClient := &Client{
+			cfg:         Config{QueryTimeout: time.Second},
+			conn:        &bootstrapTestConn{},
+			mountPoints: basedirs.ValidateMountPoints([]string{"/"}),
+		}
+
+		isDir, err = rootMountClient.IsDir(ctx, "/")
+		So(errors.Is(err, errInvalidPath), ShouldBeTrue)
+		So(isDir, ShouldBeFalse)
+
+		isDir, err = c.IsDir(ctx, "/outside/missing/")
+		So(errors.Is(err, basedirs.ErrInvalidBasePath), ShouldBeTrue)
+		So(isDir, ShouldBeFalse)
 	})
 }
 
@@ -341,6 +441,45 @@ func TestClientListDir(t *testing.T) {
 	})
 }
 
+func TestClientListDirErrors(t *testing.T) {
+	Convey("Client.ListDir preserves empty missing directories and invalid base path errors", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 2 * time.Second
+		cfg.MountPoints = []string{providerTestMountPath}
+
+		c, err := NewClient(cfg)
+		So(err, ShouldBeNil)
+		So(c, ShouldNotBeNil)
+		Reset(func() { So(c.Close(), ShouldBeNil) })
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		const mountPath = providerTestMountPath
+
+		updatedAt := time.Now().UTC().Truncate(time.Second)
+		sid := snapshotID(mountPath, updatedAt)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		So(conn.Exec(ctx, testInsertMountStmt, mountPath, time.Now(), sid, updatedAt), ShouldBeNil)
+
+		rows, err := c.ListDir(ctx, mountPath+"missing", ListOptions{})
+		So(err, ShouldBeNil)
+		So(rows, ShouldBeEmpty)
+
+		rows, err = c.ListDir(ctx, "/outside/missing", ListOptions{})
+		So(errors.Is(err, basedirs.ErrInvalidBasePath), ShouldBeTrue)
+		So(rows, ShouldBeNil)
+	})
+}
+
 func TestClientPermissionAnyInDir(t *testing.T) {
 	Convey("Client.PermissionAnyInDir checks ownership against dguta rows", t, func() {
 		os.Setenv("WRSTAT_ENV", "test")
@@ -459,6 +598,77 @@ func TestClientPermissionAnyInDir(t *testing.T) {
 		So(ok, ShouldBeTrue)
 
 		ok, err = c.PermissionAnyInDir(ctx, dir, 99, []uint32{98})
+		So(err, ShouldBeNil)
+		So(ok, ShouldBeFalse)
+	})
+}
+
+func TestClientPermissionPath(t *testing.T) {
+	Convey("Client.PermissionPath checks exact active file rows", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 2 * time.Second
+		cfg.MountPoints = []string{"/mnt/c5-perm/"}
+
+		c, err := NewClient(cfg)
+		So(err, ShouldBeNil)
+		So(c, ShouldNotBeNil)
+		Reset(func() { So(c.Close(), ShouldBeNil) })
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		const mountPath = "/mnt/c5-perm/"
+
+		base := mountPath + "a/"
+		updatedAt := time.Date(2026, 6, 1, 16, 0, 0, 0, time.UTC)
+		sid := snapshotID(mountPath, updatedAt)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		So(conn.Exec(ctx, testInsertMountStmt, mountPath, time.Now(), sid, updatedAt), ShouldBeNil)
+
+		now := time.Now().UTC().Truncate(time.Second)
+		insert := func(name string, uid uint32, gid uint32) {
+			So(conn.Exec(
+				ctx,
+				testInsertFileStmt,
+				mountPath,
+				sid,
+				base,
+				name,
+				"txt",
+				uint8(stats.FileType),
+				uint64(1),
+				uint64(1),
+				uid,
+				gid,
+				now,
+				now,
+				now,
+				uint64(1),
+				uint64(1),
+			), ShouldBeNil)
+		}
+
+		insert("owned.txt", 10, 30)
+		insert("group.txt", 11, 20)
+		insert("denied.txt", 11, 30)
+
+		ok, err := c.PermissionPath(ctx, base+"owned.txt", 10, []uint32{20})
+		So(err, ShouldBeNil)
+		So(ok, ShouldBeTrue)
+
+		ok, err = c.PermissionPath(ctx, base+"group.txt", 10, []uint32{20})
+		So(err, ShouldBeNil)
+		So(ok, ShouldBeTrue)
+
+		ok, err = c.PermissionPath(ctx, base+"denied.txt", 10, []uint32{20})
 		So(err, ShouldBeNil)
 		So(ok, ShouldBeFalse)
 	})
@@ -613,4 +823,161 @@ func TestClientFindByGlob(t *testing.T) {
 		So(rows, ShouldHaveLength, 2)
 		So([]string{rows[0].Path, rows[1].Path}, ShouldResemble, []string{path1, path3})
 	})
+}
+
+func TestClientFindByGlobC5ExtensionPredicates(t *testing.T) {
+	Convey("Client.FindByGlob preserves regex authority with exact-safe extension pruning", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 2 * time.Second
+		cfg.MountPoints = []string{"/mnt/c5-glob/"}
+
+		c, err := NewClient(cfg)
+		So(err, ShouldBeNil)
+		So(c, ShouldNotBeNil)
+		Reset(func() { So(c.Close(), ShouldBeNil) })
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		const mountPath = "/mnt/c5-glob/"
+
+		base := mountPath
+		nested := mountPath + "a/"
+		updatedAt := time.Date(2026, 6, 1, 16, 30, 0, 0, time.UTC)
+		sid := snapshotID(mountPath, updatedAt)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		So(conn.Exec(ctx, testInsertMountStmt, mountPath, time.Now(), sid, updatedAt), ShouldBeNil)
+
+		now := time.Now().UTC().Truncate(time.Second)
+		insert := func(parentDir string, name string, ext string, uid uint32, gid uint32, inode uint64) {
+			So(conn.Exec(
+				ctx,
+				testInsertFileStmt,
+				mountPath,
+				sid,
+				parentDir,
+				name,
+				ext,
+				uint8(stats.FileType),
+				uint64(1),
+				uint64(1),
+				uid,
+				gid,
+				now,
+				now,
+				now,
+				inode,
+				uint64(1),
+			), ShouldBeNil)
+		}
+
+		insert(base, "a.bam", "bam", 10, 30, 1)
+		insert(base, ".bam", "", 10, 30, 2)
+		insert(base, "b.BAM", "bam", 10, 30, 3)
+		insert(base, "c.cram", "cram", 10, 30, 4)
+		insert(base, "a.tar.gz", "gz", 10, 30, 9)
+		insert(base, "b.tar.bz2", "bz2", 10, 30, 10)
+		insert(nested, "owned.bam", "bam", 10, 30, 5)
+		insert(nested, "group.bam", "bam", 11, 20, 6)
+		insert(nested, "denied.bam", "bam", 11, 30, 7)
+		insert(nested, "fake.cram", "bam", 10, 20, 8)
+
+		rows, err := c.FindByGlob(ctx, []string{base}, []string{"*.bam"}, FindOptions{})
+		So(err, ShouldBeNil)
+		So(fileRowPaths(rows), ShouldResemble, []string{base + ".bam", base + "a.bam"})
+
+		rows, err = c.FindByGlob(ctx, []string{base}, []string{"*.tar.gz"}, FindOptions{})
+		So(err, ShouldBeNil)
+		So(fileRowPaths(rows), ShouldResemble, []string{base + "a.tar.gz"})
+	})
+}
+
+func TestClientFindByGlobC5OwnerAndRegexAuthority(t *testing.T) {
+	Convey("Client.FindByGlob combines exact-safe extension pruning with owner filtering", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 2 * time.Second
+		cfg.MountPoints = []string{"/mnt/c5-owner/"}
+
+		c, err := NewClient(cfg)
+		So(err, ShouldBeNil)
+		So(c, ShouldNotBeNil)
+		Reset(func() { So(c.Close(), ShouldBeNil) })
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		const mountPath = "/mnt/c5-owner/"
+
+		base := mountPath
+		nested := mountPath + "a/"
+		updatedAt := time.Date(2026, 6, 1, 17, 0, 0, 0, time.UTC)
+		sid := snapshotID(mountPath, updatedAt)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		So(conn.Exec(ctx, testInsertMountStmt, mountPath, time.Now(), sid, updatedAt), ShouldBeNil)
+
+		now := time.Now().UTC().Truncate(time.Second)
+		insert := func(name string, ext string, uid uint32, gid uint32, inode uint64) {
+			So(conn.Exec(
+				ctx,
+				testInsertFileStmt,
+				mountPath,
+				sid,
+				nested,
+				name,
+				ext,
+				uint8(stats.FileType),
+				uint64(1),
+				uint64(1),
+				uid,
+				gid,
+				now,
+				now,
+				now,
+				inode,
+				uint64(1),
+			), ShouldBeNil)
+		}
+
+		insert("owned.bam", "bam", 10, 30, 1)
+		insert("group.bam", "bam", 11, 20, 2)
+		insert("denied.bam", "bam", 11, 30, 3)
+		insert("fake.cram", "bam", 10, 20, 4)
+
+		rows, err := c.FindByGlob(
+			ctx,
+			[]string{base},
+			[]string{"**/*.bam"},
+			FindOptions{RequireOwner: true, UID: 10, GIDs: []uint32{20}},
+		)
+		So(err, ShouldBeNil)
+		So(fileRowPaths(rows), ShouldResemble, []string{
+			nested + "group.bam",
+			nested + "owned.bam",
+		})
+	})
+}
+
+func fileRowPaths(rows []FileRow) []string {
+	out := make([]string, len(rows))
+	for i, row := range rows {
+		out[i] = row.Path
+	}
+
+	return out
 }

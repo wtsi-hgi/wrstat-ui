@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	. "github.com/smartystreets/goconvey/convey"
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
 	"github.com/wtsi-hgi/wrstat-ui/db"
@@ -13,6 +14,8 @@ import (
 
 const (
 	basedirsStoreTestCountGroupUsageQuery = "SELECT count() FROM wrstat_basedirs_group_usage " +
+		"WHERE mount_path = ? AND snapshot_id = toUUID(?)"
+	basedirsStoreTestCountUserUsageQuery = "SELECT count() FROM wrstat_basedirs_user_usage " +
 		"WHERE mount_path = ? AND snapshot_id = toUUID(?)"
 	basedirsStoreTestCountGroupSubdirsQuery = "SELECT count() FROM wrstat_basedirs_group_subdirs " +
 		"WHERE mount_path = ? AND snapshot_id = toUUID(?)"
@@ -25,6 +28,99 @@ const (
 )
 
 func TestClickHouseBaseDirsStore(t *testing.T) {
+	Convey("BaseDirsStore retry reset drops all basedirs snapshot partitions before rewriting rows", t, func() {
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 2 * time.Second
+
+		updatedAt := time.Date(2026, 5, 2, 12, 0, 0, 0, time.UTC)
+		sid := snapshotID(testMountPath, updatedAt).String()
+		gid := uint32(7)
+		uid := uint32(17)
+
+		store, err := NewBaseDirsStore(cfg)
+		So(err, ShouldBeNil)
+		So(store, ShouldNotBeNil)
+
+		store.SetMountPath(testMountPath)
+		store.SetUpdatedAt(updatedAt)
+		So(store.Reset(), ShouldBeNil)
+		So(writeBasedirsSnapshotRows(store, gid, uid, updatedAt, 10), ShouldBeNil)
+		So(store.Finalise(), ShouldBeNil)
+		So(store.Close(), ShouldBeNil)
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		assertBasedirsSnapshotRowCounts(ctx, conn, sid, 1)
+
+		retryStore, err := NewBaseDirsStore(cfg)
+		So(err, ShouldBeNil)
+		So(retryStore, ShouldNotBeNil)
+
+		retryStore.SetMountPath(testMountPath)
+		retryStore.SetUpdatedAt(updatedAt)
+		So(retryStore.Reset(), ShouldBeNil)
+		assertBasedirsSnapshotRowCounts(ctx, conn, sid, 0)
+
+		So(writeBasedirsSnapshotRows(retryStore, gid, uid, updatedAt, 20), ShouldBeNil)
+		So(retryStore.Finalise(), ShouldBeNil)
+		So(retryStore.Close(), ShouldBeNil)
+
+		assertBasedirsSnapshotRowCounts(ctx, conn, sid, 1)
+	})
+
+	Convey("BaseDirsStore Abort drops partial usage rows without advancing active mount metadata", t, func() {
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 2 * time.Second
+
+		updatedAt := time.Date(2026, 5, 2, 12, 0, 0, 0, time.UTC)
+		sid := snapshotID(testMountPath, updatedAt).String()
+
+		store, err := NewBaseDirsStore(cfg)
+		So(err, ShouldBeNil)
+		So(store, ShouldNotBeNil)
+
+		impl, ok := store.(*chBaseDirsStore)
+		So(ok, ShouldBeTrue)
+		impl.SetBatchSize(1)
+
+		store.SetMountPath(testMountPath)
+		store.SetUpdatedAt(updatedAt)
+		So(store.Reset(), ShouldBeNil)
+		So(store.PutGroupUsage(&basedirs.Usage{
+			GID:         7,
+			BaseDir:     basedirsStoreTestBaseDir,
+			UIDs:        []uint32{17},
+			UsageSize:   10,
+			QuotaSize:   20,
+			UsageInodes: 1,
+			QuotaInodes: 2,
+			Mtime:       updatedAt,
+			Age:         db.DGUTAgeA1M,
+		}), ShouldBeNil)
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		So(countRows(ctx, conn, basedirsStoreTestCountGroupUsageQuery, testMountPath, sid), ShouldEqual, 1)
+		So(impl.Abort(), ShouldBeNil)
+		So(countRows(ctx, conn, basedirsStoreTestCountGroupUsageQuery, testMountPath, sid), ShouldEqual, 0)
+
+		_, hasActive, err := readActiveSnapshotID(ctx, conn, testMountPath)
+		So(err, ShouldBeNil)
+		So(hasActive, ShouldBeFalse)
+	})
+
 	Convey("BaseDirsStore writes basedirs snapshots and maintains history under a low configured import pool", t, func() {
 		th := newClickHouseTestHarness(t)
 		cfg := th.newConfig()
@@ -476,4 +572,79 @@ func TestClickHouseBaseDirsStore(t *testing.T) {
 		So(countRows(ctx, conn, basedirsStoreTestCountHistoryQuery, testMountPath, gid), ShouldEqual, 1)
 		So(countRows(ctx, conn, basedirsStoreTestCountGroupUsageQuery, testMountPath, sid), ShouldEqual, 1)
 	})
+}
+
+func writeBasedirsSnapshotRows(
+	store basedirs.Store,
+	gid uint32,
+	uid uint32,
+	updatedAt time.Time,
+	usageSize uint64,
+) error {
+	if err := store.PutGroupUsage(&basedirs.Usage{
+		GID:         gid,
+		BaseDir:     basedirsStoreTestBaseDir,
+		UIDs:        []uint32{uid},
+		UsageSize:   usageSize,
+		QuotaSize:   100,
+		UsageInodes: 1,
+		QuotaInodes: 10,
+		Mtime:       updatedAt,
+		Age:         db.DGUTAgeA1M,
+	}); err != nil {
+		return err
+	}
+
+	if err := store.PutUserUsage(&basedirs.Usage{
+		UID:         uid,
+		BaseDir:     basedirsStoreTestBaseDir,
+		GIDs:        []uint32{gid},
+		UsageSize:   usageSize + 1,
+		QuotaSize:   101,
+		UsageInodes: 2,
+		QuotaInodes: 11,
+		Mtime:       updatedAt,
+		Age:         db.DGUTAgeA1M,
+	}); err != nil {
+		return err
+	}
+
+	subdirs := []*basedirs.SubDir{{
+		SubDir:       "child",
+		NumFiles:     1,
+		SizeFiles:    usageSize,
+		LastModified: updatedAt,
+	}}
+
+	if err := store.PutGroupSubDirs(
+		basedirs.SubDirKey{ID: gid, BaseDir: basedirsStoreTestBaseDir, Age: db.DGUTAgeA1M},
+		subdirs,
+	); err != nil {
+		return err
+	}
+
+	return store.PutUserSubDirs(
+		basedirs.SubDirKey{ID: uid, BaseDir: basedirsStoreTestBaseDir, Age: db.DGUTAgeA1M},
+		subdirs,
+	)
+}
+
+func assertBasedirsSnapshotRowCounts(
+	ctx context.Context,
+	conn interface {
+		Query(ctx context.Context, query string, args ...any) (driver.Rows, error)
+	},
+	sid string,
+	expected uint64,
+) {
+	queries := []string{
+		basedirsStoreTestCountGroupUsageQuery,
+		basedirsStoreTestCountUserUsageQuery,
+		basedirsStoreTestCountGroupSubdirsQuery,
+		basedirsStoreTestCountUserSubdirsQuery,
+	}
+
+	for _, query := range queries {
+		So(countRows(ctx, conn, query, testMountPath, sid), ShouldEqual, expected)
+	}
 }

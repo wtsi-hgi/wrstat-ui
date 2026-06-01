@@ -284,16 +284,110 @@ func TestFindByGlobQueryShape(t *testing.T) {
 		)
 
 		So(q, ShouldContainSubstring, "f.parent_dir = ?")
+		So(q, ShouldContainSubstring, "f.ext = ?")
 		So(q, ShouldContainSubstring, "match(f.name, ?)")
 		So(q, ShouldNotContainSubstring, "match(f.path, ?)")
 		So(params, ShouldResemble, []any{
 			findByGlobAlphaMount,
 			findByGlobAlphaMount,
 			findByGlobAlphaOneDir,
+			"txt",
+			".txt",
 			"^[^/]*\\.txt$",
 			int64(1),
 			uint32(222),
 			[]uint32{111},
+			int64(100),
+			int64(0),
+		})
+	})
+
+	Convey("FindByGlob adds exact-safe extension pruning and keeps recursive regex authority", t, func() {
+		q, params := buildFindByGlobQueryAndParams(
+			fileRowSelectAll,
+			findByGlobAlphaMount,
+			[]string{findByGlobAlphaOneDir},
+			[]string{"**/*.bam"},
+			1,
+			10,
+			[]uint32{20},
+			100,
+			0,
+		)
+
+		So(q, ShouldContainSubstring, "f.ext = ?")
+		So(q, ShouldContainSubstring, "f.name = ?")
+		So(q, ShouldContainSubstring, "match(f.path, ?)")
+		So(q, ShouldContainSubstring, "f.uid = ? OR has(?, f.gid)")
+		So(params, ShouldResemble, []any{
+			findByGlobAlphaMount,
+			findByGlobAlphaMount,
+			findByGlobAlphaOneDir,
+			"/alpha/one0",
+			"bam",
+			".bam",
+			"^/alpha/one/(?:[^/]+/)*[^/]*\\.bam$",
+			int64(1),
+			uint32(10),
+			[]uint32{20},
+			int64(100),
+			int64(0),
+		})
+	})
+
+	Convey("FindByGlob does not add extension pruning for non-exact extension globs", t, func() {
+		q, params := buildFindByGlobQueryAndParams(
+			fileRowSelectAll,
+			findByGlobAlphaMount,
+			[]string{findByGlobAlphaOneDir},
+			[]string{"*.[bc]am"},
+			0,
+			0,
+			nil,
+			100,
+			0,
+		)
+
+		So(q, ShouldNotContainSubstring, "f.ext = ?")
+		So(q, ShouldContainSubstring, "match(f.name, ?)")
+		So(params, ShouldResemble, []any{
+			findByGlobAlphaMount,
+			findByGlobAlphaMount,
+			findByGlobAlphaOneDir,
+			"^[^/]*\\.\\[bc\\]am$",
+			int64(0),
+			uint32(0),
+			[]uint32(nil),
+			int64(100),
+			int64(0),
+		})
+	})
+
+	Convey("FindByGlob prunes multi-dot exact globs by final extension segment", t, func() {
+		q, params := buildFindByGlobQueryAndParams(
+			fileRowSelectAll,
+			findByGlobAlphaMount,
+			[]string{findByGlobAlphaOneDir},
+			[]string{"*.tar.gz"},
+			0,
+			0,
+			nil,
+			100,
+			0,
+		)
+
+		So(q, ShouldContainSubstring, "f.ext = ?")
+		So(q, ShouldContainSubstring, "match(f.name, ?)")
+		So(params, ShouldResemble, []any{
+			findByGlobAlphaMount,
+			findByGlobAlphaMount,
+			findByGlobAlphaOneDir,
+			"gz",
+			".gz",
+			"^[^/]*\\.tar\\.gz$",
+			int64(0),
+			uint32(0),
+			[]uint32(nil),
 			int64(100),
 			int64(0),
 		})
@@ -324,6 +418,98 @@ func TestFindByGlobQueryShape(t *testing.T) {
 			[]uint32(nil),
 			int64(100),
 			int64(0),
+		})
+	})
+}
+
+type permissionPathRows struct {
+	ok   bool
+	seen bool
+}
+
+func (r *permissionPathRows) Next() bool {
+	if r.seen || !r.ok {
+		return false
+	}
+
+	r.seen = true
+
+	return true
+}
+
+func (r *permissionPathRows) HasData() bool {
+	return r.ok
+}
+
+func (r *permissionPathRows) Scan(...any) error {
+	return errBootstrapTestUnexpectedCall
+}
+
+func (r *permissionPathRows) ScanStruct(any) error {
+	return errBootstrapTestUnexpectedCall
+}
+
+func (r *permissionPathRows) ColumnTypes() []driver.ColumnType {
+	return nil
+}
+
+func (r *permissionPathRows) Totals(...any) error {
+	return errBootstrapTestUnexpectedCall
+}
+
+func (r *permissionPathRows) Columns() []string {
+	return nil
+}
+
+func (r *permissionPathRows) Close() error {
+	return nil
+}
+
+func (r *permissionPathRows) Err() error {
+	return nil
+}
+
+type permissionPathSpyConn struct {
+	bootstrapTestConn
+
+	query string
+	args  []any
+	ok    bool
+}
+
+func (c *permissionPathSpyConn) Query(_ context.Context, query string, args ...any) (driver.Rows, error) {
+	c.query = query
+
+	c.args = append([]any(nil), args...)
+
+	return &permissionPathRows{ok: c.ok}, nil
+}
+
+func TestClientPermissionPathQueryShape(t *testing.T) {
+	Convey("Client.PermissionPath reads exact wrstat_files rows with owner predicates", t, func() {
+		conn := &permissionPathSpyConn{ok: true}
+		client := &Client{
+			cfg:         Config{QueryTimeout: time.Second},
+			conn:        conn,
+			mountPoints: basedirs.ValidateMountPoints([]string{findByGlobAlphaMount}),
+		}
+
+		ok, err := client.PermissionPath(context.Background(), findByGlobAlphaOneDir+"owned.txt", 10, []uint32{20})
+		So(err, ShouldBeNil)
+		So(ok, ShouldBeTrue)
+		So(conn.query, ShouldContainSubstring, "FROM wrstat_files")
+		So(conn.query, ShouldNotContainSubstring, "wrstat_dguta")
+		So(conn.query, ShouldNotContainSubstring, "wrstat_dir_facts")
+		So(conn.query, ShouldNotContainSubstring, "wrstat_children")
+		So(conn.query, ShouldContainSubstring, "f.parent_dir = ? AND f.name = ?")
+		So(conn.query, ShouldContainSubstring, "f.uid = ? OR has(?, f.gid)")
+		So(conn.args, ShouldResemble, []any{
+			findByGlobAlphaMount,
+			findByGlobAlphaMount,
+			findByGlobAlphaOneDir,
+			"owned.txt",
+			uint32(10),
+			[]uint32{20},
 		})
 	})
 }

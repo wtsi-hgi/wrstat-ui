@@ -75,6 +75,10 @@ const permissionAnyInDirQuery = "WITH (SELECT snapshot_id FROM wrstat_mounts_act
 	"AND d.dir = ? AND arrayExists((age, uid, gid) -> age = ? AND (uid = ? OR has(?, gid)), " +
 	"d.ages, d.uids, d.gids) LIMIT 1"
 
+const permissionPathQuery = "WITH (SELECT snapshot_id FROM wrstat_mounts_active WHERE mount_path = ?) AS sid " +
+	"SELECT 1 FROM wrstat_files f PREWHERE f.mount_path = ? AND f.snapshot_id = sid " +
+	"AND f.parent_dir = ? AND f.name = ? AND (f.uid = ? OR has(?, f.gid)) LIMIT 1"
+
 const defaultFileLimit = 1_000_000
 
 const (
@@ -400,8 +404,8 @@ func compileGlobPatterns(baseDir string, patterns []string) compiledGlobPatterns
 	escapedBase := regexp.QuoteMeta(baseDir)
 
 	out := compiledGlobPatterns{
-		direct:    make([]string, 0, len(patterns)),
-		recursive: make([]string, 0, len(patterns)),
+		direct:    make([]compiledGlobPattern, 0, len(patterns)),
+		recursive: make([]compiledGlobPattern, 0, len(patterns)),
 	}
 
 	for _, p := range patterns {
@@ -412,12 +416,12 @@ func compileGlobPatterns(baseDir string, patterns []string) compiledGlobPatterns
 		}
 
 		if isDirectChildGlobPattern(p) {
-			out.direct = append(out.direct, globToRE2("", p))
+			out.direct = append(out.direct, compileGlobPattern("", p))
 
 			continue
 		}
 
-		out.recursive = append(out.recursive, globToRE2(escapedBase, p))
+		out.recursive = append(out.recursive, compileGlobPattern(escapedBase, p))
 	}
 
 	return out
@@ -429,6 +433,13 @@ func globPatternMatchesWholeSubtree(pattern string) bool {
 
 func isDirectChildGlobPattern(pattern string) bool {
 	return !strings.Contains(pattern, "/") && !strings.Contains(pattern, "**")
+}
+
+func compileGlobPattern(escapedBase string, pattern string) compiledGlobPattern {
+	return compiledGlobPattern{
+		regex: globToRE2(escapedBase, pattern),
+		ext:   exactSafeGlobExt(pattern),
+	}
 }
 
 func globToRE2(escapedBase string, pattern string) string {
@@ -496,6 +507,23 @@ func writeRE2LiteralByte(b *strings.Builder, c byte) {
 	}
 }
 
+func exactSafeGlobExt(pattern string) string {
+	ext, ok := strings.CutPrefix(pattern, "*.")
+	if !ok {
+		ext, ok = strings.CutPrefix(pattern, "**/*.")
+	}
+
+	if !ok || ext == "" || strings.ContainsAny(ext, "*/?[]{}\\") {
+		return ""
+	}
+
+	if idx := strings.LastIndexByte(ext, '.'); idx >= 0 {
+		ext = ext[idx+1:]
+	}
+
+	return strings.ToLower(ext)
+}
+
 func findByGlobBaseDirClause(baseDir string, compiled compiledGlobPatterns) (string, []any) {
 	if compiled.matchAll {
 		return findByGlobRangeClause(), []any{baseDir, prefixNext(baseDir)}
@@ -505,15 +533,17 @@ func findByGlobBaseDirClause(baseDir string, compiled compiledGlobPatterns) (str
 	params := make([]any, 0, len(compiled.direct)+len(compiled.recursive)+findByGlobParamsPerBaseDirCap)
 
 	if len(compiled.direct) > 0 {
-		clauses = append(clauses, "(f.parent_dir = ? AND ("+matchOrList("f.name", len(compiled.direct))+"))")
+		matchClause, matchParams := matchOrExtList("f.name", compiled.direct)
+		clauses = append(clauses, "(f.parent_dir = ? AND ("+matchClause+"))")
 		params = append(params, baseDir)
-		params = appendStringsAsAny(params, compiled.direct)
+		params = append(params, matchParams...)
 	}
 
 	if len(compiled.recursive) > 0 {
-		clauses = append(clauses, findByGlobRangeClause()+" AND ("+matchOrList("f.path", len(compiled.recursive))+")")
+		matchClause, matchParams := matchOrExtList("f.path", compiled.recursive)
+		clauses = append(clauses, findByGlobRangeClause()+" AND ("+matchClause+")")
 		params = append(params, baseDir, prefixNext(baseDir))
-		params = appendStringsAsAny(params, compiled.recursive)
+		params = append(params, matchParams...)
 	}
 
 	if len(clauses) == 0 {
@@ -544,25 +574,27 @@ func prefixNext(prefix string) string {
 	return prefix + "\x00"
 }
 
-func matchOrList(column string, n int) string {
-	if n <= 0 {
-		return "0"
+func matchOrExtList(column string, patterns []compiledGlobPattern) (string, []any) {
+	if len(patterns) == 0 {
+		return "0", nil
 	}
 
-	out := make([]string, 0, n)
-	for range n {
-		out = append(out, "match("+column+", ?)")
+	clauses := make([]string, 0, len(patterns))
+	params := make([]any, 0, len(patterns))
+
+	for _, p := range patterns {
+		if p.ext == "" {
+			clauses = append(clauses, "match("+column+", ?)")
+			params = append(params, p.regex)
+
+			continue
+		}
+
+		clauses = append(clauses, "((f.ext = ? OR f.name = ?) AND match("+column+", ?))")
+		params = append(params, p.ext, "."+p.ext, p.regex)
 	}
 
-	return strings.Join(out, " OR ")
-}
-
-func appendStringsAsAny(out []any, in []string) []any {
-	for _, s := range in {
-		out = append(out, s)
-	}
-
-	return out
+	return strings.Join(clauses, " OR "), params
 }
 
 func (c *Client) queryFileRows(
@@ -656,6 +688,11 @@ func sliceLimitOffset(in []FileRow, limit int64, offset int64) []FileRow {
 	}
 
 	return in[:limit]
+}
+
+type compiledGlobPattern struct {
+	regex string
+	ext   string
 }
 
 type unknownFileFieldError struct {
@@ -866,8 +903,8 @@ func (c *Client) prepareFindByGlob(
 }
 
 type compiledGlobPatterns struct {
-	direct    []string
-	recursive []string
+	direct    []compiledGlobPattern
+	recursive []compiledGlobPattern
 	matchAll  bool
 }
 
@@ -944,6 +981,15 @@ func isDirEntryType(rows fileRowIterator) (uint8, bool, error) {
 	}
 
 	return entryType, true, nil
+}
+
+func permissionRowsOK(rows fileRowIterator, op string) (bool, error) {
+	ok := rows.Next()
+	if err := rows.Err(); err != nil {
+		return false, fmt.Errorf("clickhouse: %s iteration error: %w", op, err)
+	}
+
+	return ok, nil
 }
 
 func findByGlobQueryLimitOffset(limit int64, offset int64, useDirectOffset bool) (int64, int64) {
@@ -1128,6 +1174,51 @@ func (c *Client) permissionAnyInDir(
 	}
 
 	return ok, nil
+}
+
+// PermissionPath reports whether the active snapshot row for path is owned by
+// uid or by any gid in gids.
+func (c *Client) PermissionPath(ctx context.Context, path string, uid uint32, gids []uint32) (bool, error) {
+	if c == nil || c.conn == nil {
+		return false, errClientClosed
+	}
+
+	mountPath, parentDir, name, err := c.resolveMountParentName(path)
+	if err != nil {
+		return false, err
+	}
+
+	return c.permissionPath(ctx, mountPath, parentDir, name, uid, ensureNonNilUInt32s(gids))
+}
+
+func (c *Client) permissionPath(
+	ctx context.Context,
+	mountPath string,
+	parentDir string,
+	name string,
+	uid uint32,
+	gids []uint32,
+) (bool, error) {
+	qctx, cancel := queryContext(ctx, queryTimeout(c.cfg))
+	defer cancel()
+
+	rows, err := c.conn.Query(
+		qctx,
+		permissionPathQuery,
+		mountPath,
+		mountPath,
+		parentDir,
+		name,
+		uid,
+		gids,
+	)
+	if err != nil {
+		return false, fmt.Errorf("clickhouse: failed to query PermissionPath: %w", err)
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	return permissionRowsOK(rows, "PermissionPath")
 }
 
 func (c *Client) resolveMountParentName(path string) (string, string, string, error) {

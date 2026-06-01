@@ -35,6 +35,7 @@ import (
 
 	ch "github.com/ClickHouse/clickhouse-go/v2"
 	. "github.com/smartystreets/goconvey/convey"
+	"github.com/wtsi-hgi/wrstat-ui/basedirs"
 )
 
 const (
@@ -61,6 +62,63 @@ func TestClickHouseHistoryMaintainerRefusesUnsafeCleanInTestEnv(t *testing.T) {
 }
 
 func TestClickHouseHistoryMaintainer(t *testing.T) {
+	Convey("Snapshot partition cleanup leaves basedirs history queryable", t, func() {
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 2 * time.Second
+		cfg.PollInterval = 0
+		cfg.MountPoints = []string{testMountPath}
+
+		bootstrapProvider, err := OpenProvider(cfg)
+		So(err, ShouldBeNil)
+		So(bootstrapProvider.Close(), ShouldBeNil)
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		gid := uint32(7)
+		firstDate := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+		secondDate := time.Date(2026, 5, 2, 0, 0, 0, 0, time.UTC)
+		updatedAt := time.Date(2026, 5, 3, 12, 0, 0, 0, time.UTC)
+		sid := snapshotID(testMountPath, updatedAt).String()
+
+		for _, point := range []basedirs.History{
+			{Date: firstDate, UsageSize: 10, QuotaSize: 100, UsageInodes: 1, QuotaInodes: 10},
+			{Date: secondDate, UsageSize: 20, QuotaSize: 100, UsageInodes: 2, QuotaInodes: 10},
+		} {
+			So(conn.Exec(
+				ctx,
+				testInsertBasedirsHistoryStmt,
+				testMountPath,
+				gid,
+				point.Date,
+				point.UsageSize,
+				point.QuotaSize,
+				point.UsageInodes,
+				point.QuotaInodes,
+			), ShouldBeNil)
+		}
+
+		insertSnapshotCleanupRows(ctx, conn, sid, updatedAt)
+		So(dropSnapshotPartitionsForMount(ctx, conn, testMountPath, sid, allPartitionDropQueries()), ShouldBeNil)
+
+		p, err := OpenProvider(cfg)
+		So(err, ShouldBeNil)
+		Reset(func() { So(p.Close(), ShouldBeNil) })
+
+		history, err := p.BaseDirs().History(gid, testMountPath+"project")
+		So(err, ShouldBeNil)
+		So(history, ShouldHaveLength, 2)
+		So(history[0].Date.Unix(), ShouldEqual, firstDate.Unix())
+		So(history[0].UsageSize, ShouldEqual, 10)
+		So(history[1].Date.Unix(), ShouldEqual, secondDate.Unix())
+		So(history[1].UsageSize, ShouldEqual, 20)
+	})
+
 	Convey("NewHistoryMaintainer can find and clean invalid history rows", t, func() {
 		os.Setenv("WRSTAT_ENV", "test")
 		Reset(func() { os.Unsetenv("WRSTAT_ENV") })

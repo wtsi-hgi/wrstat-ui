@@ -21,8 +21,8 @@ checks on `wrstat_files`, add exact-safe extension predicates while preserving
 regex authority and owner checks, and cover all 8 acceptance tests from C5 in
 `clickhouse/file_api.go`.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
 
 #### Item 6.2: D1 - Preserve Basedirs Behavior [parallel with C5]
 
@@ -33,8 +33,8 @@ Preserve usage, subdirectory, and history behavior in
 basedirs snapshot tables participate in retry and old-snapshot cleanup while
 history remains append-only. Cover all 4 acceptance tests from D1.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
 
 For parallel batch items, use separate subagents per item.
 Launch review subagents using the `go-reviewer` skill
