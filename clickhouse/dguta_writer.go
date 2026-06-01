@@ -426,6 +426,8 @@ func (w *dgutaWriter) switchActiveSnapshot(ctx context.Context) error {
 		return fmt.Errorf("clickhouse: failed to switch active snapshot: %w", err)
 	}
 
+	invalidateActiveMetadataCache(w.cfg)
+
 	return nil
 }
 

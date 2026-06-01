@@ -65,6 +65,10 @@ func ActiveSnapshotMatches(cfg Config, mountPath string, updatedAt time.Time) (b
 	return hasActive && activeSID == snapshotID(mountPath, updatedAt).String(), nil
 }
 
+func invalidateActiveMetadataCache(cfg Config) {
+	treeQueryCacheForConfig(cfg).reset()
+}
+
 type activeMount struct {
 	mountPath  string
 	snapshotID string

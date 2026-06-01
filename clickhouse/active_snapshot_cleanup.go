@@ -36,17 +36,23 @@ import (
 )
 
 const (
-	activeSnapshotCleanupTimeout = 30 * time.Minute
-	activeSnapshotCleanupRepairs = 3
-	latestMountMetadataRowsLimit = 5
+	activeSnapshotCleanupTimeout  = 30 * time.Minute
+	activeSnapshotCleanupRepairs  = 3
+	latestMountMetadataRowsLimit  = 5
+	latestActiveSnapshotQueryArgs = 3
 
-	previousSnapshotMountRowQuery = "SELECT toString(snapshot_id), updated_at " +
-		"FROM wrstat_mount_events WHERE mount_path = ? AND snapshot_id != toUUID(?) " +
-		"AND event_type = 1 ORDER BY event_at DESC, updated_at DESC, toString(snapshot_id) DESC LIMIT 1"
+	previousSnapshotMountRowQuery = "SELECT toString(snapshot_id), updated_at, event_type " +
+		"FROM wrstat_mount_events WHERE mount_path = ? " +
+		"AND NOT (snapshot_id = toUUID(?) AND event_type = 1) " +
+		"AND event_at <= fromUnixTimestamp64Milli(?) " +
+		"ORDER BY event_at DESC, if(event_type = 0, 1, 0) DESC, " +
+		"updated_at DESC, toString(snapshot_id) DESC LIMIT 1"
 	mountMaxSwitchedAtQuery             = "SELECT maxOrNull(event_at) FROM wrstat_mount_events WHERE mount_path = ?"
 	latestActiveSnapshotSwitchedAtQuery = "SELECT maxOrNull(event_at) FROM wrstat_mount_events " +
-		"WHERE mount_path = ? AND snapshot_id = toUUID(?) AND event_type = 1 " +
-		"AND event_at > fromUnixTimestamp64Milli(?)"
+		"WHERE mount_path = ? AND event_type = 1 AND event_at > fromUnixTimestamp64Milli(?)"
+	latestUnexpectedActiveSnapshotSwitchedAtQuery = "SELECT maxOrNull(event_at) FROM wrstat_mount_events " +
+		"WHERE mount_path = ? AND event_type = 1 AND event_at > fromUnixTimestamp64Milli(?) " +
+		"AND NOT (snapshot_id = toUUID(?) AND reason = 'rollback')"
 	latestMountMetadataRowsQuery = "SELECT toString(snapshot_id), updated_at, event_at, event_type " +
 		"FROM wrstat_mount_events WHERE mount_path = ? ORDER BY event_at DESC, " +
 		"if(event_type = 0, 1, 0) DESC, updated_at DESC, toString(snapshot_id) DESC LIMIT 5"
@@ -81,6 +87,7 @@ var (
 type activeSnapshotMountRow struct {
 	snapshotID string
 	updatedAt  time.Time
+	eventType  uint8
 }
 
 func readPreviousSnapshotMountRow(
@@ -88,14 +95,44 @@ func readPreviousSnapshotMountRow(
 	conn ch.Conn,
 	mountPath string,
 	sid string,
+	baseline activeSnapshotCleanupBaseline,
 ) (activeSnapshotMountRow, bool, error) {
-	rows, err := conn.Query(ctx, previousSnapshotMountRowQuery, mountPath, sid)
+	if !baseline.hasRows {
+		return activeSnapshotMountRow{}, false, nil
+	}
+
+	row, found, err := queryPreviousSnapshotMountRow(ctx, conn, mountPath, sid, baseline.maxSwitchedAt)
+	if err != nil || !found || row.eventType != 1 {
+		return activeSnapshotMountRow{}, false, err
+	}
+
+	return row, true, nil
+}
+
+func queryPreviousSnapshotMountRow(
+	ctx context.Context,
+	conn ch.Conn,
+	mountPath string,
+	sid string,
+	baselineMaxSwitchedAt time.Time,
+) (activeSnapshotMountRow, bool, error) {
+	rows, err := conn.Query(
+		ctx,
+		previousSnapshotMountRowQuery,
+		mountPath,
+		sid,
+		snapshotCleanupUnixMillis(baselineMaxSwitchedAt),
+	)
 	if err != nil {
 		return activeSnapshotMountRow{}, false, fmt.Errorf("clickhouse: failed to read previous snapshot mount row: %w", err)
 	}
 
 	defer func() { _ = rows.Close() }()
 
+	return scanOptionalPreviousSnapshotMountRow(rows)
+}
+
+func scanOptionalPreviousSnapshotMountRow(rows driverRows) (activeSnapshotMountRow, bool, error) {
 	if !rows.Next() {
 		rowErr := rows.Err()
 		if rowErr != nil {
@@ -120,7 +157,7 @@ func scanActiveSnapshotMountRow(rows interface {
 	Scan(dest ...any) error
 }) (activeSnapshotMountRow, error) {
 	var row activeSnapshotMountRow
-	if err := rows.Scan(&row.snapshotID, &row.updatedAt); err != nil {
+	if err := rows.Scan(&row.snapshotID, &row.updatedAt, &row.eventType); err != nil {
 		return activeSnapshotMountRow{}, fmt.Errorf("clickhouse: failed to scan snapshot mount row: %w", err)
 	}
 
@@ -133,8 +170,12 @@ func cleanActiveSnapshotAttempt(ctx context.Context, conn ch.Conn, mountPath str
 		return err
 	}
 
-	previous, hasPrevious, err := readPreviousSnapshotMountRow(ctx, conn, mountPath, sid)
+	previous, hasPrevious, err := readPreviousSnapshotMountRow(ctx, conn, mountPath, sid, baseline)
 	if err != nil {
+		return err
+	}
+
+	if err := dropCurrentActiveSnapshotPartitions(ctx, conn, mountPath, sid); err != nil {
 		return err
 	}
 
@@ -142,11 +183,7 @@ func cleanActiveSnapshotAttempt(ctx context.Context, conn ch.Conn, mountPath str
 		return err
 	}
 
-	if err := ensureNoNewerActiveSnapshot(ctx, conn, mountPath, sid, baseline); err != nil {
-		return err
-	}
-
-	return dropSnapshotPartitionsForMount(ctx, conn, mountPath, sid, allPartitionDropQueries())
+	return ensureNoNewerActiveSnapshot(ctx, conn, mountPath, sid, baseline, previous, hasPrevious)
 }
 
 func readMountMaxSwitchedAt(
@@ -189,51 +226,71 @@ func mountMaxSwitchedAtRowsErr(err error) error {
 	return fmt.Errorf("clickhouse: mount max switch time iteration error: %w", err)
 }
 
+func dropCurrentActiveSnapshotPartitions(ctx context.Context, conn ch.Conn, mountPath string, sid string) error {
+	if err := dropSnapshotPartitionsForMount(ctx, conn, mountPath, sid, allPartitionDropQueries()); err != nil {
+		return fmt.Errorf("clickhouse: current_snapshot_partition_drop: %w", err)
+	}
+
+	return nil
+}
+
 func ensureNoNewerActiveSnapshot(
 	ctx context.Context,
 	conn ch.Conn,
 	mountPath string,
 	sid string,
 	baseline activeSnapshotCleanupBaseline,
+	allowedRollback activeSnapshotMountRow,
+	hasAllowedRollback bool,
 ) error {
 	latestActiveSwitchedAt, hasLatestActive, err := readLatestActiveSnapshotSwitchedAt(
 		ctx,
 		conn,
 		mountPath,
-		sid,
 		baseline.maxSwitchedAt,
+		allowedRollback,
+		hasAllowedRollback,
 	)
 	if err != nil {
 		return err
 	}
 
-	if hasLatestActive {
-		reason := fmt.Sprintf(
-			"latest_active_switched_at=%s newer than cleanup_baseline=%s",
-			formatSnapshotCleanupTime(latestActiveSwitchedAt),
-			formatSnapshotCleanupTime(baseline.maxSwitchedAt),
-		)
-
-		return activeSnapshotStillActiveError(ctx, conn, mountPath, sid, reason)
+	if !hasLatestActive {
+		return nil
 	}
 
-	return nil
+	reason := newerActiveSnapshotReason(latestActiveSwitchedAt, baseline)
+
+	return activeSnapshotStillActiveError(ctx, conn, mountPath, sid, reason)
+}
+
+func newerActiveSnapshotReason(
+	latestActiveSwitchedAt time.Time,
+	baseline activeSnapshotCleanupBaseline,
+) string {
+	return fmt.Sprintf(
+		"latest_active_switched_at=%s newer than cleanup_baseline=%s",
+		formatSnapshotCleanupTime(latestActiveSwitchedAt),
+		formatSnapshotCleanupTime(baseline.maxSwitchedAt),
+	)
 }
 
 func readLatestActiveSnapshotSwitchedAt(
 	ctx context.Context,
 	conn ch.Conn,
 	mountPath string,
-	sid string,
 	baselineMaxSwitchedAt time.Time,
+	allowedRollback activeSnapshotMountRow,
+	hasAllowedRollback bool,
 ) (time.Time, bool, error) {
-	rows, err := conn.Query(
-		ctx,
-		latestActiveSnapshotSwitchedAtQuery,
+	query, args := latestActiveSnapshotSwitchedAtArgs(
 		mountPath,
-		sid,
-		snapshotCleanupUnixMillis(baselineMaxSwitchedAt),
+		baselineMaxSwitchedAt,
+		allowedRollback,
+		hasAllowedRollback,
 	)
+
+	rows, err := conn.Query(ctx, query, args...)
 	if err != nil {
 		return time.Time{}, false, fmt.Errorf("clickhouse: failed to read latest active snapshot switch time: %w", err)
 	}
@@ -504,7 +561,15 @@ func repairInactiveSnapshotMountRow(
 		return activeSnapshotStillActiveError(ctx, conn, mountPath, sid, "cleanup_baseline=<none>")
 	}
 
-	if err := ensureNoNewerActiveSnapshot(ctx, conn, mountPath, sid, baseline); err != nil {
+	if err := ensureNoNewerActiveSnapshot(
+		ctx,
+		conn,
+		mountPath,
+		sid,
+		baseline,
+		activeSnapshotMountRow{},
+		false,
+	); err != nil {
 		return err
 	}
 
@@ -553,6 +618,29 @@ func rollbackActiveSnapshotMountRow(
 	}
 
 	return nil
+}
+
+func latestActiveSnapshotSwitchedAtArgs(
+	mountPath string,
+	baselineMaxSwitchedAt time.Time,
+	allowedRollback activeSnapshotMountRow,
+	hasAllowedRollback bool,
+) (string, []any) {
+	args := make([]any, 0, latestActiveSnapshotQueryArgs)
+
+	args = append(args, mountPath, snapshotCleanupUnixMillis(baselineMaxSwitchedAt))
+	if !hasAllowedRollback {
+		return latestActiveSnapshotSwitchedAtQuery, args
+	}
+
+	return latestUnexpectedActiveSnapshotSwitchedAtQuery, append(args, allowedRollback.snapshotID)
+}
+
+type driverRows interface {
+	Next() bool
+	Err() error
+	Close() error
+	Scan(dest ...any) error
 }
 
 type activeSnapshotCleanupBaseline struct {
@@ -618,6 +706,8 @@ func cleanActiveSnapshotAttemptWithConn(
 	if !hasActive || activeSID != sid {
 		return nil
 	}
+
+	defer invalidateActiveMetadataCache(cfg)
 
 	cleanupCtx, cleanupCancel := activeSnapshotCleanupContext()
 	defer cleanupCancel()

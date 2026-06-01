@@ -20,5 +20,5 @@ invalidation in `clickhouse/active_mounts.go`,
 `clickhouse/active_snapshot_cleanup.go`, and `clickhouse/dguta_writer.go`,
 covering all 6 acceptance tests from A2.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed

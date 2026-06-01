@@ -207,6 +207,80 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 		So(gotUpdatedAt, ShouldEqual, updatedAt)
 	})
 
+	Convey("DGUTAWriter appends publish events and exposes only the latest active snapshot", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 5 * time.Second
+
+		olderUpdatedAt := time.Date(2026, 1, 9, 12, 0, 0, 0, time.UTC)
+		newerUpdatedAt := olderUpdatedAt.Add(time.Hour)
+		olderSID := snapshotID(testMountPath, olderUpdatedAt)
+		newerSID := snapshotID(testMountPath, newerUpdatedAt)
+
+		paths := internaltest.NewDirectoryPathCreator()
+		writeSingleDGUTARecord(cfg, olderUpdatedAt, paths.ToDirectoryPath("/"), 42, "/first/")
+		writeSingleDGUTARecord(cfg, newerUpdatedAt, paths.ToDirectoryPath("/"), 77, "/second/")
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		So(countRows(ctx, conn,
+			"SELECT count() FROM wrstat_mount_events WHERE mount_path = ? AND event_type = 1",
+			testMountPath,
+		), ShouldEqual, 2)
+		So(countRows(ctx, conn,
+			"SELECT count() FROM wrstat_mount_events WHERE mount_path = ? AND snapshot_id = toUUID(?)",
+			testMountPath,
+			olderSID.String(),
+		), ShouldEqual, 1)
+		So(countRows(ctx, conn,
+			"SELECT count() FROM wrstat_mount_events WHERE mount_path = ? AND snapshot_id = toUUID(?)",
+			testMountPath,
+			newerSID.String(),
+		), ShouldEqual, 1)
+
+		activeSID, hasActive, err := readActiveSnapshotID(ctx, conn, testMountPath)
+		So(err, ShouldBeNil)
+		So(hasActive, ShouldBeTrue)
+		So(activeSID, ShouldEqual, newerSID.String())
+	})
+
+	Convey("DGUTAWriter invalidates scoped active metadata caches after publishing a snapshot", t, func() {
+		resetSharedTreeQueryCachesForTesting()
+		Reset(resetSharedTreeQueryCachesForTesting)
+
+		updatedAt := time.Date(2026, 1, 9, 15, 0, 0, 0, time.UTC)
+		sid := snapshotID(testMountPath, updatedAt)
+		cfg := Config{DSN: "clickhouse://localhost:9000/?database=cache_publish", Database: "cache_publish"}
+		cache := treeQueryCacheForConfig(cfg)
+		key := newTreeCacheKey(testMountPath, sid.String(), testMountPath)
+		cache.putChildren(key, []string{testMountPath + "stale"})
+
+		children, ok := cache.getChildren(key)
+		So(ok, ShouldBeTrue)
+		So(children, ShouldResemble, []string{testMountPath + "stale"})
+
+		w := &dgutaWriter{
+			cfg:       cfg,
+			conn:      &activeMetadataInvalidationConn{},
+			mountPath: testMountPath,
+			updatedAt: updatedAt,
+			snapshot:  sid,
+		}
+
+		So(w.switchActiveSnapshot(context.Background()), ShouldBeNil)
+
+		_, ok = cache.getChildren(key)
+		So(ok, ShouldBeFalse)
+	})
+
 	Convey("DGUTAWriter writes dguta + children rows", t, func() {
 		os.Setenv("WRSTAT_ENV", "test")
 		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
@@ -1799,6 +1873,10 @@ func t283DirectoryGUTAs() db.GUTAs {
 	}
 
 	return gutas
+}
+
+type activeMetadataInvalidationConn struct {
+	bootstrapTestConn
 }
 
 func (b *projectionStreamingBatch) Flush() error {

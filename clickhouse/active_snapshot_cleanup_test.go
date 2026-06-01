@@ -165,6 +165,88 @@ func TestCleanActiveSnapshotAttempt(t *testing.T) {
 		assertSnapshotCleanupRows(ctx, conn, failedSID, 0)
 	})
 
+	Convey("CleanActiveSnapshotAttempt leaves active metadata untouched when current partition drop times out",
+		t, func() {
+			th := newClickHouseTestHarness(t)
+			cfg := th.newConfig()
+			cfg.QueryTimeout = 5 * time.Second
+
+			failedUpdatedAt := time.Date(2026, 1, 9, 12, 0, 0, 0, time.UTC)
+			failedSID := snapshotID(testMountPath, failedUpdatedAt).String()
+
+			opts, err := optionsFromConfig(cfg)
+			So(err, ShouldBeNil)
+
+			conn, err := connectAndBootstrap(context.Background(), opts, cfg.Database, queryTimeout(cfg))
+			So(err, ShouldBeNil)
+
+			Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+
+			So(conn.Exec(ctx, testInsertMountStmt, testMountPath, failedUpdatedAt, failedSID, failedUpdatedAt), ShouldBeNil)
+			insertSnapshotCleanupRows(ctx, conn, failedSID, failedUpdatedAt)
+
+			wrapped := &activeSnapshotCleanupDropBlockingConn{
+				Conn:          conn,
+				normalTimeout: cfg.QueryTimeout,
+			}
+
+			err = cleanActiveSnapshotAttemptWithConn(cfg, wrapped, testMountPath, failedUpdatedAt)
+			So(err, ShouldNotBeNil)
+			So(err.Error(), ShouldContainSubstring, "current_snapshot_partition_drop")
+			So(wrapped.sawLongDropDeadline, ShouldBeTrue)
+			So(wrapped.metadataChanges, ShouldEqual, 0)
+
+			activeSID, hasActive, err := readActiveSnapshotID(ctx, conn, testMountPath)
+			So(err, ShouldBeNil)
+			So(hasActive, ShouldBeTrue)
+			So(activeSID, ShouldEqual, failedSID)
+			So(countRows(ctx, conn,
+				"SELECT count() FROM wrstat_mount_events WHERE mount_path = ?",
+				testMountPath,
+			), ShouldEqual, 1)
+			assertSnapshotCleanupRows(ctx, conn, failedSID, 1)
+		})
+
+	Convey("CleanActiveSnapshotAttempt invalidates scoped active metadata caches after tombstoning", t, func() {
+		resetSharedTreeQueryCachesForTesting()
+		Reset(resetSharedTreeQueryCachesForTesting)
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 5 * time.Second
+
+		failedUpdatedAt := time.Date(2026, 1, 9, 12, 0, 0, 0, time.UTC)
+		failedSID := snapshotID(testMountPath, failedUpdatedAt).String()
+
+		opts, err := optionsFromConfig(cfg)
+		So(err, ShouldBeNil)
+
+		conn, err := connectAndBootstrap(context.Background(), opts, cfg.Database, queryTimeout(cfg))
+		So(err, ShouldBeNil)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		So(conn.Exec(ctx, testInsertMountStmt, testMountPath, failedUpdatedAt, failedSID, failedUpdatedAt), ShouldBeNil)
+		insertSnapshotCleanupRows(ctx, conn, failedSID, failedUpdatedAt)
+
+		cache := treeQueryCacheForConfig(cfg)
+		key := newTreeCacheKey(testMountPath, failedSID, testMountPath)
+		cache.putChildren(key, []string{testMountPath + "stale"})
+		_, ok := cache.getChildren(key)
+		So(ok, ShouldBeTrue)
+
+		So(cleanActiveSnapshotAttemptWithConn(cfg, conn, testMountPath, failedUpdatedAt), ShouldBeNil)
+
+		_, ok = cache.getChildren(key)
+		So(ok, ShouldBeFalse)
+	})
+
 	Convey("CleanActiveSnapshotAttempt treats same-millisecond active rows as the cleanup baseline",
 		t, func() {
 			th := newClickHouseTestHarness(t)
@@ -186,7 +268,7 @@ func TestCleanActiveSnapshotAttempt(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 
-			insertSnapshotCleanupMountAt(ctx, conn, testMountPath, failedSwitchAt, failedSID, failedUpdatedAt)
+			insertSnapshotCleanupMountAt(ctx, conn, failedSwitchAt, failedSID, failedUpdatedAt)
 			insertSnapshotCleanupRows(ctx, conn, failedSID, failedUpdatedAt)
 
 			wrapped := &activeSnapshotCleanupCoarseLatestActiveParamConn{Conn: conn}
@@ -256,7 +338,7 @@ func TestCleanActiveSnapshotAttempt(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 
-			insertSnapshotCleanupMountAt(ctx, conn, testMountPath, failedSwitchAt, failedSID, failedUpdatedAt)
+			insertSnapshotCleanupMountAt(ctx, conn, failedSwitchAt, failedSID, failedUpdatedAt)
 			insertSnapshotCleanupRows(ctx, conn, failedSID, failedUpdatedAt)
 
 			wrapped := &activeSnapshotCleanupCoarseRepairParamConn{Conn: conn}
@@ -348,7 +430,7 @@ func TestCleanActiveSnapshotAttempt(t *testing.T) {
 		assertSnapshotCleanupRows(ctx, conn, failedSID, 0)
 	})
 
-	Convey("CleanActiveSnapshotAttempt reports a concurrent deterministic publish instead of dropping active data",
+	Convey("CleanActiveSnapshotAttempt reports a concurrent deterministic publish after the cleanup baseline",
 		t, func() {
 			th := newClickHouseTestHarness(t)
 			cfg := th.newConfig()
@@ -392,7 +474,7 @@ func TestCleanActiveSnapshotAttempt(t *testing.T) {
 			So(err, ShouldBeNil)
 			So(hasActive, ShouldBeTrue)
 			So(activeSID, ShouldEqual, failedSID)
-			assertSnapshotCleanupRows(ctx, conn, failedSID, 1)
+			assertSnapshotCleanupRows(ctx, conn, failedSID, 0)
 		})
 
 	Convey("CleanActiveSnapshotAttempt refuses a newer active row hidden by an inactive tombstone", t, func() {
@@ -439,8 +521,145 @@ func TestCleanActiveSnapshotAttempt(t *testing.T) {
 		So(err, ShouldBeNil)
 		So(hasActive, ShouldBeFalse)
 		So(activeSID, ShouldBeBlank)
-		assertSnapshotCleanupRows(ctx, conn, failedSID, 1)
+		assertSnapshotCleanupRows(ctx, conn, failedSID, 0)
 	})
+
+	Convey("CleanActiveSnapshotAttempt reports a concurrent publish for a different snapshot after the cleanup baseline",
+		t, func() {
+			th := newClickHouseTestHarness(t)
+			cfg := th.newConfig()
+			cfg.QueryTimeout = 5 * time.Second
+
+			failedUpdatedAt := time.Date(2026, 1, 9, 12, 0, 0, 0, time.UTC)
+			newerUpdatedAt := failedUpdatedAt.Add(time.Hour)
+			failedSID := snapshotID(testMountPath, failedUpdatedAt).String()
+			newerSID := snapshotID(testMountPath, newerUpdatedAt).String()
+			failedSwitchAt := time.Now().UTC().Add(time.Hour).Truncate(time.Millisecond)
+
+			opts, err := optionsFromConfig(cfg)
+			So(err, ShouldBeNil)
+
+			conn, err := connectAndBootstrap(context.Background(), opts, cfg.Database, queryTimeout(cfg))
+			So(err, ShouldBeNil)
+
+			Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+
+			So(conn.Exec(ctx, testInsertMountStmt, testMountPath, failedSwitchAt, failedSID, failedUpdatedAt), ShouldBeNil)
+			insertSnapshotCleanupRows(ctx, conn, failedSID, failedUpdatedAt)
+
+			wrapped := &activeSnapshotCleanupConcurrentPublishConn{
+				Conn:       conn,
+				mountPath:  testMountPath,
+				sid:        newerSID,
+				updatedAt:  newerUpdatedAt,
+				switchedAt: failedSwitchAt.Add(time.Second),
+			}
+
+			err = cleanActiveSnapshotAttemptWithConn(cfg, wrapped, testMountPath, failedUpdatedAt)
+			So(wrapped.published, ShouldBeTrue)
+			So(err, ShouldNotBeNil)
+			So(errors.Is(err, errActiveSnapshotStillActive), ShouldBeTrue)
+			So(err.Error(), ShouldContainSubstring, "newer than cleanup_baseline")
+			So(err.Error(), ShouldContainSubstring, "latest_mount_rows=")
+			So(err.Error(), ShouldContainSubstring, newerSID)
+
+			assertSnapshotCleanupRows(ctx, conn, failedSID, 0)
+		})
+
+	Convey("CleanActiveSnapshotAttempt does not roll back to a snapshot tombstoned before the failed publish",
+		t, func() {
+			th := newClickHouseTestHarness(t)
+			cfg := th.newConfig()
+			cfg.QueryTimeout = 5 * time.Second
+
+			olderUpdatedAt := time.Date(2026, 1, 9, 12, 0, 0, 0, time.UTC)
+			failedUpdatedAt := olderUpdatedAt.Add(time.Hour)
+			olderSID := snapshotID(testMountPath, olderUpdatedAt).String()
+			failedSID := snapshotID(testMountPath, failedUpdatedAt).String()
+
+			opts, err := optionsFromConfig(cfg)
+			So(err, ShouldBeNil)
+
+			conn, err := connectAndBootstrap(context.Background(), opts, cfg.Database, queryTimeout(cfg))
+			So(err, ShouldBeNil)
+
+			Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+
+			So(conn.Exec(ctx, testInsertMountStmt, testMountPath, olderUpdatedAt, olderSID, olderUpdatedAt), ShouldBeNil)
+			So(conn.Exec(
+				ctx,
+				testInsertInactiveMountStmt,
+				testMountPath,
+				olderUpdatedAt.Add(time.Millisecond),
+				olderSID,
+				olderUpdatedAt,
+			), ShouldBeNil)
+			So(conn.Exec(ctx, testInsertMountStmt, testMountPath, failedUpdatedAt, failedSID, failedUpdatedAt), ShouldBeNil)
+			insertSnapshotCleanupRows(ctx, conn, failedSID, failedUpdatedAt)
+
+			So(cleanActiveSnapshotAttemptWithConn(cfg, conn, testMountPath, failedUpdatedAt), ShouldBeNil)
+
+			activeSID, hasActive, err := readActiveSnapshotID(ctx, conn, testMountPath)
+			So(err, ShouldBeNil)
+			So(hasActive, ShouldBeFalse)
+			So(activeSID, ShouldBeBlank)
+			assertSnapshotCleanupRows(ctx, conn, olderSID, 0)
+			assertSnapshotCleanupRows(ctx, conn, failedSID, 0)
+		})
+
+	Convey("CleanActiveSnapshotAttempt keeps a mount inactive when the failed snapshot was tombstoned before publish",
+		t, func() {
+			th := newClickHouseTestHarness(t)
+			cfg := th.newConfig()
+			cfg.QueryTimeout = 5 * time.Second
+
+			olderUpdatedAt := time.Date(2026, 1, 9, 12, 0, 0, 0, time.UTC)
+			failedUpdatedAt := olderUpdatedAt.Add(time.Hour)
+			olderSID := snapshotID(testMountPath, olderUpdatedAt).String()
+			failedSID := snapshotID(testMountPath, failedUpdatedAt).String()
+			olderSwitchAt := time.Date(2026, 1, 9, 13, 0, 0, 0, time.UTC)
+			failedInactiveAt := olderSwitchAt.Add(time.Second)
+			failedSwitchAt := failedInactiveAt.Add(time.Second)
+
+			opts, err := optionsFromConfig(cfg)
+			So(err, ShouldBeNil)
+
+			conn, err := connectAndBootstrap(context.Background(), opts, cfg.Database, queryTimeout(cfg))
+			So(err, ShouldBeNil)
+
+			Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+
+			insertSnapshotCleanupMountAt(ctx, conn, olderSwitchAt, olderSID, olderUpdatedAt)
+			So(conn.Exec(
+				ctx,
+				testInsertInactiveMountStmt,
+				testMountPath,
+				failedInactiveAt,
+				failedSID,
+				failedUpdatedAt,
+			), ShouldBeNil)
+			insertSnapshotCleanupMountAt(ctx, conn, failedSwitchAt, failedSID, failedUpdatedAt)
+			insertSnapshotCleanupRows(ctx, conn, olderSID, olderUpdatedAt)
+			insertSnapshotCleanupRows(ctx, conn, failedSID, failedUpdatedAt)
+
+			So(cleanActiveSnapshotAttemptWithConn(cfg, conn, testMountPath, failedUpdatedAt), ShouldBeNil)
+
+			activeSID, hasActive, err := readActiveSnapshotID(ctx, conn, testMountPath)
+			So(err, ShouldBeNil)
+			So(hasActive, ShouldBeFalse)
+			So(activeSID, ShouldBeBlank)
+			assertSnapshotCleanupRows(ctx, conn, olderSID, 1)
+			assertSnapshotCleanupRows(ctx, conn, failedSID, 0)
+		})
 
 	Convey("CleanActiveSnapshotAttempt reports latest mount metadata when repair cannot deactivate a snapshot", t, func() {
 		th := newClickHouseTestHarness(t)
@@ -472,7 +691,7 @@ func TestCleanActiveSnapshotAttempt(t *testing.T) {
 		So(err.Error(), ShouldContainSubstring, "latest_mount_rows=")
 		So(err.Error(), ShouldContainSubstring, failedSID)
 		So(wrapped.sawDelete, ShouldBeFalse)
-		assertSnapshotCleanupRows(ctx, conn, failedSID, 1)
+		assertSnapshotCleanupRows(ctx, conn, failedSID, 0)
 	})
 
 	Convey("CleanActiveSnapshotAttempt does not use the normal query timeout for cleanup metadata changes", t, func() {
@@ -656,7 +875,6 @@ func insertSnapshotCleanupMountAt(
 	conn interface {
 		Exec(ctx context.Context, query string, args ...any) error
 	},
-	mountPath string,
 	switchedAt time.Time,
 	sid string,
 	updatedAt time.Time,
@@ -664,7 +882,32 @@ func insertSnapshotCleanupMountAt(
 	const query = "INSERT INTO wrstat_mount_events (mount_path, event_at, event_type, snapshot_id, updated_at, reason) " +
 		"SELECT ?, fromUnixTimestamp64Milli(?), 1, toUUID(?), ?, 'test'"
 
-	So(conn.Exec(ctx, query, mountPath, switchedAt.UTC().UnixMilli(), sid, updatedAt), ShouldBeNil)
+	So(conn.Exec(ctx, query, testMountPath, switchedAt.UTC().UnixMilli(), sid, updatedAt), ShouldBeNil)
+}
+
+type activeSnapshotCleanupDropBlockingConn struct {
+	ch.Conn
+
+	normalTimeout       time.Duration
+	sawLongDropDeadline bool
+	metadataChanges     int
+}
+
+func (c *activeSnapshotCleanupDropBlockingConn) Exec(ctx context.Context, query string, args ...any) error {
+	if strings.HasPrefix(query, "ALTER TABLE") {
+		deadline, ok := ctx.Deadline()
+		if ok && time.Until(deadline) > c.normalTimeout {
+			c.sawLongDropDeadline = true
+		}
+
+		return context.DeadlineExceeded
+	}
+
+	if isActiveSnapshotCleanupMetadataChangeQuery(query) {
+		c.metadataChanges++
+	}
+
+	return c.Conn.Exec(ctx, query, args...)
 }
 
 type activeSnapshotCleanupDeadlineCheckingConn struct {
@@ -846,7 +1089,7 @@ func (c *activeSnapshotCleanupCoarseLatestActiveParamConn) Query(
 		return c.Conn.Query(ctx, query, args...)
 	}
 
-	switch baseline := args[2].(type) {
+	switch baseline := args[1].(type) {
 	case time.Time:
 		c.sawCoarseTimeBaseline = true
 
