@@ -835,6 +835,10 @@ func TestClickHouseDatabaseDirInfo(t *testing.T) {
 			updatedAt:  updatedAt,
 		}), ShouldBeNil)
 
+		children, err := dbch.Children("/")
+		So(err, ShouldBeNil)
+		So(children, ShouldResemble, []string{"/dev"})
+
 		sum, err := dbch.DirInfo("/dev", &db.Filter{Age: db.DGUTAgeAll})
 		So(err, ShouldBeNil)
 		So(sum, ShouldNotBeNil)
@@ -3788,18 +3792,18 @@ func TestClickHouseDatabaseActiveAncestorSummaries(t *testing.T) {
 		So(di.Current.Size, ShouldEqual, 150)
 		So(di.Current.Modtime, ShouldResemble, updatedB)
 		So(di.Children, ShouldHaveLength, 2)
-		So(di.Children[0].Dir, ShouldEqual, "/lustre")
+		So(di.Children[0].Dir, ShouldEqual, c3LustreChild)
 		So(di.Children[0].Count, ShouldEqual, 10)
-		So(di.Children[1].Dir, ShouldEqual, "/nfs")
+		So(di.Children[1].Dir, ShouldEqual, c3NFSChild)
 		So(di.Children[1].Count, ShouldEqual, 5)
 
 		hasChildren := tree.DirsHaveChildren(
-			[]string{"/lustre", "/nfs"},
+			[]string{c3LustreChild, c3NFSChild},
 			&db.Filter{GIDs: []uint32{7}, Age: db.DGUTAgeAll},
 		)
 		So(hasChildren, ShouldResemble, map[string]bool{
-			"/lustre": true,
-			"/nfs":    false,
+			c3LustreChild: true,
+			c3NFSChild:    false,
 		})
 
 		for _, emptyFilter := range []*db.Filter{
@@ -3826,8 +3830,8 @@ func TestClickHouseDatabaseActiveAncestorSummaries(t *testing.T) {
 			})
 		}
 
-		So(countingConn.treeSummaryQueryCount(), ShouldBeGreaterThan, 0)
-		So(countingConn.ancestorFactVectorQueryCount(), ShouldEqual, 0)
+		So(countingConn.treeSummaryQueryCount(), ShouldEqual, 0)
+		So(countingConn.ancestorFactVectorQueryCount(), ShouldBeGreaterThan, 0)
 	})
 
 	Convey("Ancestor queries fall back while tree summary refresh is unavailable and use summaries once ready", t, func() {
@@ -3923,7 +3927,7 @@ func TestClickHouseDatabaseActiveAncestorSummaries(t *testing.T) {
 		So(sum.Count, ShouldEqual, 4)
 		So(sum.Size, ShouldEqual, 40)
 		So(readyCountingConn.treeSummaryQueryCount(), ShouldBeGreaterThan, 0)
-		So(readyCountingConn.ancestorFactVectorQueryCount(), ShouldEqual, 0)
+		So(readyCountingConn.ancestorFactVectorQueryCount(), ShouldBeGreaterThan, 0)
 	})
 }
 

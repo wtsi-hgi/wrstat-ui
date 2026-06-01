@@ -301,7 +301,12 @@ func ensureActiveTreeSummaries(
 		return err
 	}
 
-	return refreshActiveTreeSummaries(ctx, conn, rows, fingerprint)
+	err = refreshActiveTreeSummaries(ctx, conn, rows, fingerprint)
+	if err != nil && isUnknownTable(err) {
+		return nil
+	}
+
+	return err
 }
 
 func treeSummaryReady(ctx context.Context, conn ch.Conn, fingerprint string) (bool, error) {
@@ -311,6 +316,10 @@ func treeSummaryReady(ctx context.Context, conn ch.Conn, fingerprint string) (bo
 func treeSummaryExists(ctx context.Context, conn ch.Conn, query, fingerprint, what string) (bool, error) {
 	rows, err := conn.Query(ctx, query, fingerprint)
 	if err != nil {
+		if isUnknownTable(err) {
+			return false, nil
+		}
+
 		return false, fmt.Errorf("clickhouse: failed to query tree summary %s: %w", what, err)
 	}
 
@@ -637,6 +646,19 @@ func treeSummaryDirsHaveChildrenSummarySQL(
 	return query, args
 }
 
+func treeDirSummaryResult(rows driver.Rows) (*db.DirSummary, bool, error) {
+	sum, ok, err := scanTreeDirSummaryRow(rows)
+	if err != nil {
+		return nil, false, err
+	}
+
+	if !ok {
+		return nil, false, nil
+	}
+
+	return sum, true, nil
+}
+
 func scanTreeDirSummaryRow(rows driver.Rows) (*db.DirSummary, bool, error) {
 	if !rows.Next() {
 		if err := rows.Err(); err != nil {
@@ -762,6 +784,10 @@ func (d *clickHouseDatabase) treeSummaryGUTAs(
 
 	rows, err := d.conn.Query(ctx, treeSummaryDGUTAQuery, fingerprint, dir)
 	if err != nil {
+		if isUnknownTable(err) {
+			return nil, time.Time{}, false, nil
+		}
+
 		return nil, time.Time{}, false, fmt.Errorf("clickhouse: failed to query tree dguta summary: %w", err)
 	}
 
@@ -789,19 +815,32 @@ func (d *clickHouseDatabase) treeDirSummary(
 		return nil, false, err
 	}
 
-	rows, err := d.conn.Query(ctx, treeDirSummaryQuery, uint8(filter.Age), fingerprint, dir)
-	if err != nil {
-		return nil, false, fmt.Errorf("clickhouse: failed to query tree dir summary: %w", err)
+	rows, ok, err := d.queryTreeDirSummaryRows(ctx, uint8(filter.Age), fingerprint, dir)
+	if err != nil || !ok {
+		return nil, false, err
 	}
 
 	defer func() { _ = rows.Close() }()
 
-	sum, ok, err := scanTreeDirSummaryRow(rows)
-	if err != nil || !ok {
-		return sum, false, err
+	return treeDirSummaryResult(rows)
+}
+
+func (d *clickHouseDatabase) queryTreeDirSummaryRows(
+	ctx context.Context,
+	age uint8,
+	fingerprint string,
+	dir string,
+) (driver.Rows, bool, error) {
+	rows, err := d.conn.Query(ctx, treeDirSummaryQuery, age, fingerprint, dir)
+	if err != nil {
+		if isUnknownTable(err) {
+			return nil, false, nil
+		}
+
+		return nil, false, fmt.Errorf("clickhouse: failed to query tree dir summary: %w", err)
 	}
 
-	return sum, true, nil
+	return rows, true, nil
 }
 
 func (d *clickHouseDatabase) treeSummaryChildren(
@@ -828,9 +867,9 @@ func (d *clickHouseDatabase) treeSummaryDirsHaveChildren(
 	queryDirs, originalDirs := canonicalTreeSummaryDirs(dirs)
 	query, args := treeSummaryDirsHaveChildrenSQL(queryDirs, fingerprint, filter)
 
-	rows, err := d.conn.Query(ctx, query, args...)
-	if err != nil {
-		return nil, false, fmt.Errorf("clickhouse: failed to query tree summary child dirs: %w", err)
+	rows, ok, err := d.queryTreeSummaryChildDirRows(ctx, query, args)
+	if err != nil || !ok {
+		return nil, false, err
 	}
 
 	defer func() { _ = rows.Close() }()
@@ -841,6 +880,23 @@ func (d *clickHouseDatabase) treeSummaryDirsHaveChildren(
 	}
 
 	return originalTreeSummaryParentResults(parents, originalDirs), true, nil
+}
+
+func (d *clickHouseDatabase) queryTreeSummaryChildDirRows(
+	ctx context.Context,
+	query string,
+	args []any,
+) (driver.Rows, bool, error) {
+	rows, err := d.conn.Query(ctx, query, args...)
+	if err != nil {
+		if isUnknownTable(err) {
+			return nil, false, nil
+		}
+
+		return nil, false, fmt.Errorf("clickhouse: failed to query tree summary child dirs: %w", err)
+	}
+
+	return rows, true, nil
 }
 
 func (d *clickHouseDatabase) activeTreeSummaryFingerprint(

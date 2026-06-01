@@ -449,6 +449,94 @@ func TestProviderVirtualChildrenRefreshErrors(t *testing.T) {
 	})
 }
 
+func TestProviderVirtualChildrenActiveSetRefreshC3(t *testing.T) {
+	Convey("C3.3 provider update publishes virtual children for the replacement active set", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 2 * time.Second
+		cfg.PollInterval = 50 * time.Millisecond
+		cfg.MountPoints = []string{"/"}
+
+		bootstrapProvider, err := OpenProvider(cfg)
+		So(err, ShouldBeNil)
+		So(bootstrapProvider.Close(), ShouldBeNil)
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		oldUpdatedAt := time.Date(2026, 6, 1, 8, 0, 0, 0, time.UTC)
+		newUpdatedAt := time.Date(2026, 6, 1, 9, 0, 0, 0, time.UTC)
+
+		So(insertProviderSnapshot(ctx, conn, oldUpdatedAt, 2, 20, 200), ShouldBeNil)
+		oldRows, err := queryMountsActiveRows(ctx, conn)
+		So(err, ShouldBeNil)
+
+		oldSetID := fingerprintForMountsActive(oldRows)
+
+		p, err := OpenProvider(cfg)
+		So(err, ShouldBeNil)
+		Reset(func() { So(p.Close(), ShouldBeNil) })
+
+		cp, ok := p.(*chProvider)
+		So(ok, ShouldBeTrue)
+
+		children, err := cp.db.Children("/")
+		So(err, ShouldBeNil)
+		So(children, ShouldResemble, []string{"/mnt"})
+
+		updated := make(chan struct{}, 1)
+
+		p.OnUpdate(func() {
+			updated <- struct{}{}
+		})
+
+		So(insertProviderSnapshot(ctx, conn, newUpdatedAt, 5, 50, 500), ShouldBeNil)
+
+		select {
+		case <-updated:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("timed out waiting for provider update")
+		}
+
+		newRows, err := queryMountsActiveRows(ctx, conn)
+		So(err, ShouldBeNil)
+
+		newSetID := fingerprintForMountsActive(newRows)
+		So(newSetID, ShouldNotEqual, oldSetID)
+
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			rows := countRows(
+				ctx, conn, "SELECT count() FROM wrstat_virtual_children_sets WHERE active_set_id = ?", newSetID,
+			)
+			if rows == 1 {
+				break
+			}
+
+			time.Sleep(25 * time.Millisecond)
+		}
+
+		So(countRows(
+			ctx, conn, "SELECT count() FROM wrstat_virtual_children_sets WHERE active_set_id = ?", newSetID,
+		), ShouldEqual, 1)
+		So(countRows(
+			ctx, conn, "SELECT count() FROM wrstat_virtual_children WHERE active_set_id = ?", newSetID,
+		), ShouldBeGreaterThan, 0)
+
+		info, err := p.Tree().DirInfo("/", &db.Filter{Age: db.DGUTAgeAll})
+		So(err, ShouldBeNil)
+		So(info.Current.Count, ShouldEqual, 5)
+		So(info.Current.Size, ShouldEqual, 50)
+	})
+}
+
 func TestProviderCallbacksRunOnFreshGoroutine(t *testing.T) {
 	Convey("OnUpdate and OnError callbacks run on a fresh goroutine", t, func() {
 		callerID := currentGoroutineID()

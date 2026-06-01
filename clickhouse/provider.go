@@ -678,9 +678,25 @@ func (p *chProvider) refreshVirtualChildrenAsync(ctx context.Context, activeSetI
 
 func (p *chProvider) virtualChildrenRefresher() virtualChildrenRefresher {
 	p.mu.RLock()
-	defer p.mu.RUnlock()
+	refresh := p.refreshVirtualChildren
+	conn := p.conn
+	p.mu.RUnlock()
 
-	return p.refreshVirtualChildren
+	if refresh != nil {
+		return refresh
+	}
+
+	if conn == nil {
+		return nil
+	}
+
+	return func(ctx context.Context, activeSetID string) error {
+		if err := refreshActiveVirtualChildrenForActiveSet(ctx, conn, activeSetID); err != nil {
+			return err
+		}
+
+		return cleanupOldVirtualChildrenSets(ctx, conn, activeSetID)
+	}
 }
 
 func (p *chProvider) refreshVirtualChildrenAndReport(

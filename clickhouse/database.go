@@ -96,11 +96,6 @@ const (
 	resolveExactMountQuery = "SELECT mount_path, snapshot_id, updated_at FROM wrstat_mounts_active " +
 		"WHERE mount_path = ? LIMIT 1"
 
-	childrenAncestorSnapshotQuery = "SELECT DISTINCT c.child " +
-		"FROM wrstat_children c " +
-		"WHERE c.parent_dir = ? AND %s " +
-		"ORDER BY c.child ASC"
-
 	dgutaAncestorSnapshotQuery = "SELECT " + dgutaTupleColumns + " FROM (" +
 		"SELECT arrayJoin(" + dgutaPrefixedArrayZipExpr + ") AS g " +
 		"FROM wrstat_dir_facts d WHERE d.dir = ? AND %s)"
@@ -2239,16 +2234,78 @@ func (d *clickHouseDatabase) snapshotOrVirtualChildrenForAncestor(parentDir stri
 
 func (d *clickHouseDatabase) readyChildrenForAncestor(parentDir string) ([]string, error) {
 	mounts, err := d.readyActiveMountsUnder(parentDir)
-	if err != nil || len(mounts) == 0 {
+	if err != nil {
 		return nil, err
 	}
 
-	children, err := d.childrenForAncestorMounts(parentDir, mounts)
-	if err != nil || len(children) > 0 {
+	ctx, cancel := configQueryContext(d.cfg)
+	defer cancel()
+
+	virtualChildren, err := d.virtualChildrenForReadyAncestorMounts(ctx, parentDir, mounts)
+	if err != nil {
+		return nil, err
+	}
+
+	coveringChildren, err := d.childrenForCoveringActiveMount(parentDir)
+	if err != nil {
+		return nil, err
+	}
+
+	return mergeChildren(coveringChildren, virtualChildren), nil
+}
+
+func mergeChildren(childLists ...[]string) []string {
+	seen := make(map[string]bool)
+	children := make([]string, 0)
+
+	for _, childList := range childLists {
+		for _, child := range childList {
+			if seen[child] {
+				continue
+			}
+
+			seen[child] = true
+			children = append(children, child)
+		}
+	}
+
+	sort.Strings(children)
+
+	if len(children) == 0 {
+		return nil
+	}
+
+	return children
+}
+
+func (d *clickHouseDatabase) virtualChildrenForReadyAncestorMounts(
+	ctx context.Context,
+	parentDir string,
+	mounts []activeMount,
+) ([]string, error) {
+	if len(mounts) == 0 {
+		return nil, nil
+	}
+
+	children, ok, err := d.virtualChildrenForAncestor(ctx, parentDir, mounts)
+	if err != nil || ok {
 		return children, err
 	}
 
 	return immediateChildrenForMounts(parentDir, mounts), nil
+}
+
+func (d *clickHouseDatabase) childrenForCoveringActiveMount(parentDir string) ([]string, error) {
+	if d.conn == nil && d.snapshot == nil {
+		return nil, nil
+	}
+
+	mount, found, err := d.activeMountForDir(parentDir)
+	if err != nil || !found {
+		return nil, err
+	}
+
+	return d.childrenForReadyActiveMount(mount, parentDir)
 }
 
 func (d *clickHouseDatabase) childrenForVirtualAncestor(parentDir string) ([]string, error) {
@@ -2304,24 +2361,6 @@ func (d *clickHouseDatabase) childrenForTreeSummaryAncestor(parentDir string) ([
 	defer cancel()
 
 	return d.treeSummaryChildren(ctx, parentDir)
-}
-
-func (d *clickHouseDatabase) childrenForAncestorMounts(
-	parentDir string,
-	mounts []activeMount,
-) ([]string, error) {
-	ctx, cancel := configQueryContext(d.cfg)
-	defer cancel()
-
-	query, args := activeMountsQuery(
-		childrenAncestorSnapshotQuery,
-		"c.mount_path",
-		"c.snapshot_id",
-		mounts,
-		parentDir,
-	)
-
-	return d.queryChildren(ctx, query, "ancestor children", args...)
 }
 
 func (d *clickHouseDatabase) queryChildren(

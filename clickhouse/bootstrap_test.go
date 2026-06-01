@@ -934,8 +934,8 @@ func TestNewClientBootstrapsSchema(t *testing.T) {
 		So(tables, ShouldContain, "wrstat_dir_projection_sets")
 		So(tables, ShouldContain, "wrstat_virtual_children")
 		So(tables, ShouldContain, "wrstat_virtual_children_sets")
-		So(tables, ShouldContain, "wrstat_virtual_summary_cache")
-		So(tables, ShouldContain, "wrstat_virtual_summary_sets")
+		So(tables, ShouldNotContain, "wrstat_virtual_summary_cache")
+		So(tables, ShouldNotContain, "wrstat_virtual_summary_sets")
 		So(tables, ShouldContain, "wrstat_basedirs_group_usage")
 		So(tables, ShouldContain, "wrstat_basedirs_user_usage")
 		So(tables, ShouldContain, "wrstat_basedirs_group_subdirs")
@@ -1418,6 +1418,19 @@ func TestNewClientBootstrapLockWaitDoesNotUseQueryTimeout(t *testing.T) {
 
 		So(helper.wait(), ShouldBeNil)
 		So(th.schemaVersions(cfg), ShouldResemble, []uint32{1})
+	})
+}
+
+func TestSchemaSQLVirtualSummaryCacheAbsentC3(t *testing.T) {
+	Convey("C3.7 base schema does not define optional virtual summary cache tables", t, func() {
+		stmts, err := schemaSQL()
+		So(err, ShouldBeNil)
+
+		for _, stmt := range stmts {
+			normalised := normalizeSchemaStatementForTest(stmt)
+			So(normalised, ShouldNotContainSubstring, "CREATE TABLE IF NOT EXISTS WRSTAT_VIRTUAL_SUMMARY_CACHE")
+			So(normalised, ShouldNotContainSubstring, "CREATE TABLE IF NOT EXISTS WRSTAT_VIRTUAL_SUMMARY_SETS")
+		}
 	})
 }
 

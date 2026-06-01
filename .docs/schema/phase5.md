@@ -20,5 +20,5 @@ cleanup, and no-`FINAL` hot reads in `clickhouse/virtual_children.go` and
 `clickhouse/database.go`. Add optional virtual summary cache only if gates
 require it, covering all 7 acceptance tests from C3.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
