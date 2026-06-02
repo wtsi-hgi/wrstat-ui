@@ -810,7 +810,14 @@ func TestImportReportOperations(t *testing.T) {
 
 		rows, ok := fileTotal.Inputs["rows_per_table"].(map[string]uint64)
 		So(ok, ShouldBeTrue)
-		So(rows, ShouldResemble, result.rows)
+		So(rows, ShouldResemble, map[string]uint64{
+			tableFiles:                42,
+			tableDirSummary:           7,
+			tableChildren:             5,
+			tableBasedirsGroupUsage:   3,
+			tableBasedirsUserUsage:    2,
+			tableBasedirsGroupSubdirs: 4,
+		})
 
 		partitionReset := findImportOperation(report.Operations, "import_phase", expectedPhasePartitionDropReset)
 		So(partitionReset, ShouldNotBeNil)
@@ -818,12 +825,10 @@ func TestImportReportOperations(t *testing.T) {
 		tables, ok := partitionReset.Inputs["tables"].([]string)
 		So(ok, ShouldBeTrue)
 		So(tables, ShouldResemble, []string{
-			tableDGUTA,
+			tableDirSummary,
 			tableChildren,
 			tableFiles,
-			tableDirSummary,
 			tableDirSummarySets,
-			tableDirDGUTAVector,
 			tableBasedirsGroupUsage,
 			tableBasedirsUserUsage,
 			tableBasedirsGroupSubdirs,
@@ -834,7 +839,7 @@ func TestImportReportOperations(t *testing.T) {
 		dirProjectionWrite := findImportOperation(report.Operations, "import_phase", phaseDirProjectionWrite)
 		So(dirProjectionWrite, ShouldNotBeNil)
 		So(dirProjectionWrite.Inputs["tables"], ShouldResemble,
-			[]string{tableDirSummary, tableDirSummarySets, tableDirDGUTAVector})
+			[]string{tableDirSummary, tableDirSummarySets})
 		So(dirProjectionWrite.DurationsMS, ShouldResemble, []float64{90})
 
 		filesInsert := findImportOperation(report.Operations, "import_phase", phaseFilesInsert)
@@ -846,7 +851,7 @@ func TestImportReportOperations(t *testing.T) {
 
 		dgutaInsert := findImportOperation(report.Operations, "import_phase", expectedPhaseDGUTAInsert)
 		So(dgutaInsert, ShouldNotBeNil)
-		So(dgutaInsert.Inputs["table"], ShouldEqual, tableDGUTA)
+		So(dgutaInsert.Inputs["table"], ShouldEqual, tableDirSummary)
 		So(dgutaInsert.Inputs["rows"], ShouldEqual, uint64(7))
 		So(dgutaInsert.DurationsMS, ShouldResemble, []float64{200})
 
@@ -926,7 +931,7 @@ func TestImportGuardrailOperations(t *testing.T) {
 		So(dirProjection.Inputs["status"], ShouldEqual, "observed")
 		So(dirProjection.Inputs["phase"], ShouldEqual, phaseDirProjectionWrite)
 		So(dirProjection.Inputs["tables"], ShouldResemble,
-			[]string{tableDirSummary, tableDirSummarySets, tableDirDGUTAVector})
+			[]string{tableDirSummary, tableDirSummarySets})
 		So(dirProjection.DurationsMS, ShouldResemble, []float64{90})
 
 		treeSummary := findImportGuardrailOperation(report.Operations, "active_tree_summary_refresh")
@@ -971,7 +976,7 @@ func TestImportGuardrailOperations(t *testing.T) {
 		So(dirProjection.Inputs["status"], ShouldEqual, "missing")
 		So(dirProjection.Inputs["phase"], ShouldEqual, phaseDirProjectionWrite)
 		So(dirProjection.Inputs["tables"], ShouldResemble,
-			[]string{tableDirSummary, tableDirSummarySets, tableDirDGUTAVector})
+			[]string{tableDirSummary, tableDirSummarySets})
 		So(dirProjection.DurationsMS, ShouldResemble, []float64{0})
 
 		treeSummary := findImportGuardrailOperation(report.Operations, "active_tree_summary_refresh")

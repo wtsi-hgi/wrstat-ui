@@ -175,7 +175,7 @@ func addImportReportOperations(
 			importInputStatsPath:         result.statsPath,
 			importInputMountPath:         result.mountPath,
 			"lines":                      result.lines,
-			"rows_per_table":             cloneMap(result.rows),
+			"rows_per_table":             importRowsByPhysicalTable(result.rows),
 			"throughput_records_per_sec": throughputPerSecond(result.records(), result.elapsed),
 		}, []float64{durationMS(result.elapsed)})
 
@@ -229,14 +229,14 @@ func sortedImportPhases(phases map[string]time.Duration) []string {
 
 func addImportPhaseInputs(inputs map[string]any, result datasetImportResult, phase string) {
 	if table, rows, ok := importSingleTablePhase(result, phase); ok {
-		inputs["table"] = table
+		inputs["table"] = importPhysicalTable(table)
 		inputs["rows"] = rows
 
 		return
 	}
 
 	if tables, ok := importMultiTablePhase(phase); ok {
-		inputs["tables"] = tables
+		inputs["tables"] = importPhysicalTables(tables)
 	}
 }
 
@@ -411,7 +411,7 @@ func importGuardrailTables(phase string) []string {
 		return nil
 	}
 
-	return tables
+	return importPhysicalTables(tables)
 }
 
 func importMode(parallelism int) string {
@@ -594,9 +594,13 @@ func importPhasePhysicalTables(phase string) []string {
 		return nil
 	}
 
+	return importPhysicalTables(tables)
+}
+
+func importPhysicalTables(tables []string) []string {
+	seen := make(map[string]struct{}, len(tables))
 	physical := make([]string, 0, len(tables))
 
-	seen := make(map[string]struct{}, len(tables))
 	for _, table := range tables {
 		table = importPhysicalTable(table)
 		if _, ok := seen[table]; ok {
@@ -616,6 +620,15 @@ func importPhysicalTable(table string) string {
 	}
 
 	return table
+}
+
+func importRowsByPhysicalTable(rows map[string]uint64) map[string]uint64 {
+	physical := make(map[string]uint64, len(rows))
+	for table, count := range rows {
+		physical[importPhysicalTable(table)] += count
+	}
+
+	return physical
 }
 
 func tableStatsForSelectedTables(

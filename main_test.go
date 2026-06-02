@@ -496,6 +496,8 @@ func TestClickHousePerfImport(t *testing.T) {
 		rowsPerTable, ok := fileTotal.Inputs["rows_per_table"].(map[string]any)
 		So(ok, ShouldBeTrue)
 		So(rowsPerTable["wrstat_files"], ShouldBeGreaterThan, float64(0))
+		So(rowsPerTable["wrstat_dir_facts"], ShouldBeGreaterThan, float64(0))
+		So(rowsPerTable, ShouldNotContainKey, "wrstat_dguta")
 
 		partitionReset := findReportPhaseOperation(report.Operations, clickHousePerfPhasePartitionDropReset)
 		So(partitionReset, ShouldNotBeNil)
@@ -512,14 +514,14 @@ func TestClickHousePerfImport(t *testing.T) {
 			tableNames = append(tableNames, name)
 		}
 
-		So(tableNames, ShouldContain, "wrstat_dguta")
+		So(tableNames, ShouldContain, "wrstat_dir_facts")
 		So(tableNames, ShouldContain, "wrstat_children")
 		So(tableNames, ShouldContain, "wrstat_files")
 		So(tableNames, ShouldContain, "wrstat_basedirs_group_usage")
 
 		dgutaInsert := findReportPhaseOperation(report.Operations, clickHousePerfPhaseDGUTAInsert)
 		So(dgutaInsert, ShouldNotBeNil)
-		So(dgutaInsert.Inputs["table"], ShouldEqual, "wrstat_dguta")
+		So(dgutaInsert.Inputs["table"], ShouldEqual, "wrstat_dir_facts")
 		So(dgutaInsert.Inputs["rows"], ShouldBeGreaterThan, float64(0))
 
 		childrenInsert := findReportPhaseOperation(report.Operations, clickHousePerfPhaseChildrenInsert)
