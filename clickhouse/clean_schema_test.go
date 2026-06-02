@@ -55,6 +55,14 @@ func TestCleanSchemaDDLContainsOnlyFinalV1Objects(t *testing.T) {
 		offenders := filesContainingAny(files, cleanSchemaSQLDenylist())
 		So(offenders, ShouldBeEmpty)
 	})
+
+	Convey("wrstat_files extension index matches schema-v1 DDL", t, func() {
+		src, err := os.ReadFile(filepath.Join(
+			repoRootForCleanSchemaTest(t), cleanSchemaClickHouseDir, "schema", "011_files.sql",
+		))
+		So(err, ShouldBeNil)
+		So(string(src), ShouldContainSubstring, "INDEX ext_idx ext TYPE set(256) GRANULARITY 1")
+	})
 }
 
 func TestCleanSchemaProductionCodeHasNoLegacyReferences(t *testing.T) {

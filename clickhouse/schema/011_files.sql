@@ -44,7 +44,7 @@ CREATE TABLE IF NOT EXISTS wrstat_files (
   ctime DateTime CODEC(Delta, LZ4),
   inode UInt64 CODEC(Delta, LZ4),
   nlink UInt64 CODEC(Delta, LZ4),
-  INDEX ext_idx ext TYPE set(256) GRANULARITY 4
+  INDEX ext_idx ext TYPE set(256) GRANULARITY 1
 ) ENGINE = MergeTree
 PARTITION BY (mount_path, snapshot_id)
 ORDER BY (mount_path, snapshot_id, parent_dir, name)
