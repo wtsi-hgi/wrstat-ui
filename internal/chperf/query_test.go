@@ -53,6 +53,7 @@ const (
 	queryOpTestChildBDir = "/root/b/"
 	queryOpTestGrandDir  = "/root/a/grand/"
 	queryOpTestRootDir   = "/root/"
+	queryTestBamExt      = "bam"
 	queryTestNoMatchGID  = 404
 )
 
@@ -563,6 +564,50 @@ func TestRunSuiteOperationSelection(t *testing.T) {
 		So(report.Operations[0].Inputs["child_dirs"], ShouldResemble, []string{queryOpTestChildADir})
 	})
 
+	Convey("runSuite records result counts for general final-gate operations", t, func() {
+		qctx := queryContext{
+			provider: fakeMountTimestampsProvider{tree: db.NewTree(newQueryOpTestDB())},
+			client: &fakeQueryClient{rows: []QueryRow{{
+				Path:      queryOpTestRootDir + "sample.bam",
+				Ext:       queryTestBamExt,
+				EntryType: 'f',
+			}}},
+			inspector: fakeQueryInspector{
+				measure: func(ctx context.Context, run func(context.Context) error) (*QueryMetrics, error) {
+					if err := run(ctx); err != nil {
+						return nil, err
+					}
+
+					return &QueryMetrics{DurationMs: 1}, nil
+				},
+			},
+			dir: queryOpTestRootDir,
+		}
+		report := boltperf.NewReport("clickhouse", "", 1, 0)
+
+		err := runSuite(&report, qctx, QueryOptions{
+			Repeat: 1,
+			Ops: []string{
+				queryOpTreeWhereName,
+				queryOpTreeDiskTreeEndName,
+				queryOpTreeDirInfoName,
+				queryOpFilesListDirName,
+				queryOpFilesStatPathName,
+				"glob_case_E",
+			},
+			Splits: 1,
+		}, func(string, ...any) {})
+
+		So(err, ShouldBeNil)
+		So(report.Operations, ShouldHaveLength, 6)
+		So(resultCountsByName(report)[queryOpTreeWhereName], ShouldResemble, []uint64{3})
+		So(resultCountsByName(report)[queryOpTreeDiskTreeEndName], ShouldResemble, []uint64{2})
+		So(resultCountsByName(report)[queryOpTreeDirInfoName], ShouldResemble, []uint64{3})
+		So(resultCountsByName(report)[queryOpFilesListDirName], ShouldResemble, []uint64{1})
+		So(resultCountsByName(report)[queryOpFilesStatPathName], ShouldResemble, []uint64{1})
+		So(resultCountsByName(report)["glob_case_E"], ShouldResemble, []uint64{2})
+	})
+
 	Convey("runSuite reports unknown selected operations with available names", t, func() {
 		qctx := queryContext{
 			provider:  fakeMountTimestampsProvider{tree: db.NewTree(newQueryOpTestDB())},
@@ -597,7 +642,7 @@ func TestRunSuiteOperationSelection(t *testing.T) {
 			},
 			client: &fakeQueryClient{rows: []QueryRow{{
 				Path:      queryOpTestRootDir + ".hidden.bam",
-				Ext:       "bam",
+				Ext:       queryTestBamExt,
 				EntryType: 'f',
 			}}},
 			inspector: fakeQueryInspector{
@@ -659,6 +704,15 @@ func TestRunSuiteOperationSelection(t *testing.T) {
 			So(names, ShouldContain, name)
 		}
 	})
+}
+
+func resultCountsByName(report boltperf.Report) map[string][]uint64 {
+	counts := make(map[string][]uint64, len(report.Operations))
+	for _, op := range report.Operations {
+		counts[op.Name] = op.ResultCount
+	}
+
+	return counts
 }
 
 func TestBuildQueryContext(t *testing.T) {
@@ -997,7 +1051,7 @@ func TestBuildOps(t *testing.T) {
 
 		newDirsOp := findQueryTestOp(ops, "tree_disktree_endpoint_new_dirs")
 		So(newDirsOp, ShouldNotBeNil)
-		So(newDirsOp.inputs["start_dir"], ShouldEqual, queryOpTestRootDir)
+		So(newDirsOp.inputs[queryInputStartDirKey], ShouldEqual, queryOpTestRootDir)
 		So(newDirsOp.inputs["dirs"], ShouldResemble, []string{queryOpTestChildADir, queryOpTestChildBDir})
 		So(newDirsOp.inputs["cache_scope"], ShouldEqual, "new_directory_each_repeat")
 		So(newDirsOp.inputs["duration_source"], ShouldEqual, "wall")
@@ -1015,7 +1069,7 @@ func TestBuildOps(t *testing.T) {
 
 		ancestorOp := findQueryTestOp(ops, queryOpTreeDiskTreeAncName)
 		So(ancestorOp, ShouldNotBeNil)
-		So(ancestorOp.inputs["start_dir"], ShouldEqual, "/")
+		So(ancestorOp.inputs[queryInputStartDirKey], ShouldEqual, "/")
 		So(ancestorOp.inputs["dirs"], ShouldResemble, []string{
 			"/",
 			"/nfs/",
@@ -1115,7 +1169,7 @@ func TestBuildOps(t *testing.T) {
 			provider: fakeMountTimestampsProvider{tree: db.NewTree(newQueryOpTestDB())},
 			client: &fakeQueryClient{rows: []QueryRow{{
 				Path:      queryOpTestRootDir + "file.bam",
-				Ext:       "bam",
+				Ext:       queryTestBamExt,
 				EntryType: 'f',
 			}}},
 			dir: queryOpTestRootDir,
@@ -1123,7 +1177,7 @@ func TestBuildOps(t *testing.T) {
 
 		ops := buildOps(qctx, QueryOptions{}, func(string, ...any) {})
 
-		for _, name := range []string{queryOpFilesListDirName, "files_statpath", "glob_case_A"} {
+		for _, name := range []string{queryOpFilesListDirName, queryOpFilesStatPathName, queryOpGlobCaseAName} {
 			fileOp := findQueryTestOp(ops, name)
 			So(fileOp, ShouldNotBeNil)
 			So(fileOp.inputs[queryInputCacheScope], ShouldEqual, queryScopeSameQueryClient)

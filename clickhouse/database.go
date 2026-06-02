@@ -484,18 +484,39 @@ func (d *clickHouseDatabase) dirInfoSingleMount(
 		return &db.DirSummary{Modtime: updatedAt}, db.ErrDirNotFound
 	}
 
-	sum, found, ok, err := d.dirInfoDGUTAVectorMount(mountPath, snapshotID, updatedAt, dir, filter)
-	if err != nil {
-		return nil, err
+	sum, ok, err := d.maintainedDirInfoSingleMount(mountPath, snapshotID, updatedAt, dir, filter)
+	if err != nil || ok {
+		return sum, err
 	}
 
-	if ok {
-		return dirInfoSummaryResult(sum, found, updatedAt)
+	sum, ok, err = d.vectorDirInfoSingleMount(mountPath, snapshotID, updatedAt, dir, filter)
+	if err != nil || ok {
+		return sum, err
 	}
 
 	return d.dirInfoSingleMountFallback(
 		mountPath, snapshotID, updatedAt, dir, filter,
 	)
+}
+
+func (d *clickHouseDatabase) maintainedDirInfoSingleMount(
+	mountPath, snapshotID string,
+	updatedAt time.Time,
+	dir string,
+	filter *db.Filter,
+) (*db.DirSummary, bool, error) {
+	sum, found, ok, err := d.dirSummaryForDirMount(mountPath, snapshotID, updatedAt, dir, filter)
+	if err != nil || !ok {
+		return nil, ok, err
+	}
+
+	if !found && !mountDirSummaryMissingMeansNotFound(filter) {
+		return nil, false, nil
+	}
+
+	result, err := dirInfoSummaryResult(sum, found, updatedAt)
+
+	return result, true, err
 }
 
 func dirInfoSummaryResult(
@@ -508,6 +529,22 @@ func dirInfoSummaryResult(
 	}
 
 	return sum, nil
+}
+
+func (d *clickHouseDatabase) vectorDirInfoSingleMount(
+	mountPath, snapshotID string,
+	updatedAt time.Time,
+	dir string,
+	filter *db.Filter,
+) (*db.DirSummary, bool, error) {
+	sum, found, ok, err := d.dirInfoDGUTAVectorMount(mountPath, snapshotID, updatedAt, dir, filter)
+	if err != nil || !ok {
+		return nil, ok, err
+	}
+
+	result, err := dirInfoSummaryResult(sum, found, updatedAt)
+
+	return result, true, err
 }
 
 func (d *clickHouseDatabase) activeMountFactsReady(mountPath, snapshotID string) (bool, error) {

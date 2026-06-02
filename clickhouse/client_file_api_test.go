@@ -822,6 +822,23 @@ func TestClientFindByGlob(t *testing.T) {
 		So(err, ShouldBeNil)
 		So(rows, ShouldHaveLength, 2)
 		So([]string{rows[0].Path, rows[1].Path}, ShouldResemble, []string{path1, path3})
+
+		count, err := c.CountByGlob(ctx, []string{base}, []string{"**"}, FindOptions{})
+		So(err, ShouldBeNil)
+		So(count, ShouldEqual, 2)
+
+		count, err = c.CountByGlob(
+			ctx,
+			[]string{base},
+			[]string{"**"},
+			FindOptions{RequireOwner: true, UID: 999, GIDs: []uint32{111}},
+		)
+		So(err, ShouldBeNil)
+		So(count, ShouldEqual, 1)
+
+		count, err = c.CountByGlob(ctx, []string{base}, []string{"**"}, FindOptions{Limit: 1, Offset: 1})
+		So(err, ShouldBeNil)
+		So(count, ShouldEqual, 1)
 	})
 }
 
@@ -962,7 +979,7 @@ func TestClientFindByGlobC5OwnerAndRegexAuthority(t *testing.T) {
 		rows, err := c.FindByGlob(
 			ctx,
 			[]string{base},
-			[]string{"**/*.bam"},
+			[]string{findByGlobRecursiveBamPattern},
 			FindOptions{RequireOwner: true, UID: 10, GIDs: []uint32{20}},
 		)
 		So(err, ShouldBeNil)

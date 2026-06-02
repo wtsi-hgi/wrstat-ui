@@ -21,5 +21,5 @@ only `wrstat_dir_filter_ageall` or `wrstat_virtual_summary_cache` if its gate
 fails, then rerun gates and keep selected clean schema-v1 DDL. Cover all 15
 acceptance tests from E2.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed

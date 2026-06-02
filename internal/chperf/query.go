@@ -60,6 +60,7 @@ const (
 	queryInputFilterUIDsKey               = "filter_uids"
 	queryInputParentDirKey                = "parent_dir"
 	queryInputSplitsKey                   = "splits"
+	queryInputStartDirKey                 = "start_dir"
 	queryInputTreeFilterRouteKey          = "tree_filter_route"
 	queryOpFilesListDirName               = "files_listdir"
 	queryOpStartupCacheWarmingAuditName   = "startup_cache_warming_audit"
@@ -77,6 +78,9 @@ const (
 	queryOpDirsHaveChildrenBroadName      = "dirshavechildren_broad"
 	queryOpDirsHaveChildrenFilteredName   = "dirshavechildren_filtered"
 	queryOpFindGlobExtensionDotfileName   = "find_glob_extension_dotfile"
+	queryOpFilesStatPathName              = "files_statpath"
+	queryOpGlobCaseAName                  = "glob_case_A"
+	queryOpGlobCaseBName                  = "glob_case_B"
 	queryOpTreeWhereColdName              = "tree_where_cold_then_cached"
 	queryOpTreeWhereColdProviderName      = "tree_where_cold_provider"
 	queryOpTreeWhereFreshName             = "tree_where_fresh_provider"
@@ -395,6 +399,8 @@ func opStartupCacheWarmingAudit() op {
 func opTreeWhereColdThenCached(qctx queryContext, splits int) op {
 	filter := treeFilterFromOptions(qctx.treeFilter)
 
+	var resultCount uint64
+
 	return op{
 		name: queryOpTreeWhereColdName,
 		inputs: treeOpInputs(filter, map[string]any{
@@ -404,10 +410,12 @@ func opTreeWhereColdThenCached(qctx queryContext, splits int) op {
 			queryInputSplitsKey:      splits,
 		}),
 		run: func(_ context.Context) error {
-			_, err := qctx.provider.Tree().Where(qctx.dir, filter, split.SplitsToSplitFn(splits))
+			results, err := qctx.provider.Tree().Where(qctx.dir, filter, split.SplitsToSplitFn(splits))
+			resultCount = uint64(len(results))
 
 			return err
 		},
+		resultCount: func() uint64 { return resultCount },
 		useWallTime: true,
 		skipWarmup:  true,
 	}
@@ -470,6 +478,8 @@ func treeFilterIndexGate(filter *db.Filter) string {
 func opTreeWhereColdProvider(qctx queryContext, splits int) op {
 	filter := treeFilterFromOptions(qctx.treeFilter)
 
+	var resultCount uint64
+
 	return op{
 		name: queryOpTreeWhereColdProviderName,
 		inputs: treeOpInputs(filter, map[string]any{
@@ -484,8 +494,12 @@ func opTreeWhereColdProvider(qctx queryContext, splits int) op {
 			return nil
 		},
 		run: func(_ context.Context) error {
-			return runTreeWhereFreshProvider(qctx, splits, filter)
+			count, err := runTreeWhereFreshProvider(qctx, splits, filter)
+			resultCount = count
+
+			return err
 		},
+		resultCount: func() uint64 { return resultCount },
 		useWallTime: true,
 		skipWarmup:  true,
 	}
@@ -493,6 +507,8 @@ func opTreeWhereColdProvider(qctx queryContext, splits int) op {
 
 func opTreeDiskTreeEndpointColdProvider(qctx queryContext) op {
 	filter := treeFilterFromOptions(qctx.treeFilter)
+
+	var resultCount uint64
 
 	return op{
 		name: queryOpTreeDiskTreeColdProviderName,
@@ -507,33 +523,40 @@ func opTreeDiskTreeEndpointColdProvider(qctx queryContext) op {
 			return nil
 		},
 		run: func(_ context.Context) error {
-			return runTreeDiskTreeFreshProvider(qctx, filter)
+			count, err := runTreeDiskTreeFreshProvider(qctx, filter)
+			resultCount = count
+
+			return err
 		},
+		resultCount: func() uint64 { return resultCount },
 		useWallTime: true,
 		skipWarmup:  true,
 	}
 }
 
-func runTreeDiskTreeFreshProvider(qctx queryContext, filter *db.Filter) error {
+func runTreeDiskTreeFreshProvider(qctx queryContext, filter *db.Filter) (uint64, error) {
 	if qctx.openProvider == nil {
-		return errOpenProviderRequired
+		return 0, errOpenProviderRequired
 	}
 
 	p, err := qctx.openProvider()
 	if err != nil {
-		return err
+		return 0, err
 	}
 
-	runErr := runTreeDiskTreeEndpoint(p.Tree(), qctx.dir, filter)
+	count, runErr := runTreeDiskTreeEndpoint(p.Tree(), qctx.dir, filter)
 	closeErr := p.Close()
 
-	return errors.Join(runErr, closeErr)
+	return count, errors.Join(runErr, closeErr)
 }
 
 func opTreeWhereProviderUpdateColdCache(qctx queryContext, splits int) op {
 	filter := treeFilterFromOptions(qctx.treeFilter)
 
-	var p provider.Provider
+	var (
+		p           provider.Provider
+		resultCount uint64
+	)
 
 	return op{
 		name: queryOpTreeWhereProviderUpdateName,
@@ -553,7 +576,8 @@ func opTreeWhereProviderUpdateColdCache(qctx queryContext, splits int) op {
 			return err
 		},
 		run: func(_ context.Context) error {
-			_, err := p.Tree().Where(qctx.dir, filter, split.SplitsToSplitFn(splits))
+			results, err := p.Tree().Where(qctx.dir, filter, split.SplitsToSplitFn(splits))
+			resultCount = uint64(len(results))
 
 			return err
 		},
@@ -563,6 +587,7 @@ func opTreeWhereProviderUpdateColdCache(qctx queryContext, splits int) op {
 
 			return err
 		},
+		resultCount: func() uint64 { return resultCount },
 		useWallTime: true,
 		skipWarmup:  true,
 	}
@@ -579,7 +604,10 @@ func openProviderForRepeat(qctx queryContext) (provider.Provider, error) {
 func opTreeDiskTreeProviderUpdateColdCache(qctx queryContext) op {
 	filter := treeFilterFromOptions(qctx.treeFilter)
 
-	var p provider.Provider
+	var (
+		p           provider.Provider
+		resultCount uint64
+	)
 
 	return op{
 		name: queryOpTreeDiskTreeProviderUpdateName,
@@ -598,7 +626,10 @@ func opTreeDiskTreeProviderUpdateColdCache(qctx queryContext) op {
 			return err
 		},
 		run: func(_ context.Context) error {
-			return runTreeDiskTreeEndpoint(p.Tree(), qctx.dir, filter)
+			count, err := runTreeDiskTreeEndpoint(p.Tree(), qctx.dir, filter)
+			resultCount = count
+
+			return err
 		},
 		teardown: func(_ context.Context) error {
 			err := p.Close()
@@ -606,6 +637,7 @@ func opTreeDiskTreeProviderUpdateColdCache(qctx queryContext) op {
 
 			return err
 		},
+		resultCount: func() uint64 { return resultCount },
 		useWallTime: true,
 		skipWarmup:  true,
 	}
@@ -617,10 +649,12 @@ func opTreeDiskTreeEndpointNewDirs(qctx queryContext, opts QueryOptions) op {
 	timedDirs := uniqueDirsForRepeats(dirs, opts.Repeat)
 	i := 0
 
+	var resultCount uint64
+
 	return op{
 		name: queryOpTreeDiskTreeNewName,
 		inputs: treeOpInputs(filter, map[string]any{
-			"start_dir":              qctx.dir,
+			queryInputStartDirKey:    qctx.dir,
 			"dirs":                   timedDirs,
 			"dir_count":              len(timedDirs),
 			"walk_depth":             opts.WalkDepth,
@@ -637,8 +671,12 @@ func opTreeDiskTreeEndpointNewDirs(qctx queryContext, opts QueryOptions) op {
 			dir := timedDirs[i]
 			i++
 
-			return runTreeDiskTreeEndpoint(qctx.provider.Tree(), dir, filter)
+			count, err := runTreeDiskTreeEndpoint(qctx.provider.Tree(), dir, filter)
+			resultCount = count
+
+			return err
 		},
+		resultCount:       func() uint64 { return resultCount },
 		useWallTime:       true,
 		skipWarmup:        true,
 		hasRepeatOverride: true,
@@ -670,10 +708,12 @@ func opTreeDiskTreeEndpointAncestorDirs(qctx queryContext, opts QueryOptions) op
 	timedDirs := cycledDirsForRepeats(dirs, opts.Repeat)
 	i := 0
 
+	var resultCount uint64
+
 	return op{
 		name: queryOpTreeDiskTreeAncName,
 		inputs: treeOpInputs(filter, map[string]any{
-			"start_dir":              ancestorStartDir(opts),
+			queryInputStartDirKey:    ancestorStartDir(opts),
 			"dirs":                   timedDirs,
 			"dir_count":              len(timedDirs),
 			"ancestor_limit":         opts.AncestorLimit,
@@ -688,8 +728,12 @@ func opTreeDiskTreeEndpointAncestorDirs(qctx queryContext, opts QueryOptions) op
 			dir := timedDirs[i]
 			i++
 
-			return runTreeDiskTreeEndpoint(qctx.provider.Tree(), dir, filter)
+			count, err := runTreeDiskTreeEndpoint(qctx.provider.Tree(), dir, filter)
+			resultCount = count
+
+			return err
 		},
+		resultCount:       func() uint64 { return resultCount },
 		useWallTime:       true,
 		skipWarmup:        true,
 		hasRepeatOverride: true,
@@ -723,6 +767,8 @@ func cycledDirsForRepeats(dirs []string, repeat int) []string {
 func opTreeDiskTreeEndpoint(qctx queryContext) op {
 	filter := treeFilterFromOptions(qctx.treeFilter)
 
+	var resultCount uint64
+
 	return op{
 		name: queryOpTreeDiskTreeEndName,
 		inputs: treeOpInputs(filter, map[string]any{
@@ -731,15 +777,19 @@ func opTreeDiskTreeEndpoint(qctx queryContext) op {
 			queryInputDurationSource: querySourceClickHouseLog,
 		}),
 		run: func(_ context.Context) error {
-			return runTreeDiskTreeEndpoint(qctx.provider.Tree(), qctx.dir, filter)
+			count, err := runTreeDiskTreeEndpoint(qctx.provider.Tree(), qctx.dir, filter)
+			resultCount = count
+
+			return err
 		},
+		resultCount: func() uint64 { return resultCount },
 	}
 }
 
-func runTreeDiskTreeEndpoint(tree *db.Tree, dir string, filter *db.Filter) error {
-	_, err := loadTreeDiskTreeEndpoint(tree, dir, filter)
+func runTreeDiskTreeEndpoint(tree *db.Tree, dir string, filter *db.Filter) (uint64, error) {
+	childPaths, err := loadTreeDiskTreeEndpoint(tree, dir, filter)
 
-	return err
+	return uint64(len(childPaths)), err
 }
 
 func opTreeDiskTreeEndpointVisibleChildDirs(qctx queryContext) op {
@@ -756,6 +806,8 @@ func opTreeDiskTreeEndpointVisibleChildDirs(qctx queryContext) op {
 	var timedDirs []string
 
 	i := 0
+
+	var resultCount uint64
 
 	return op{
 		name:   queryOpTreeDiskTreeVisibleChildName,
@@ -784,8 +836,12 @@ func opTreeDiskTreeEndpointVisibleChildDirs(qctx queryContext) op {
 			dir := timedDirs[i]
 			i++
 
-			return runTreeDiskTreeEndpoint(qctx.provider.Tree(), dir, filter)
+			count, err := runTreeDiskTreeEndpoint(qctx.provider.Tree(), dir, filter)
+			resultCount = count
+
+			return err
 		},
+		resultCount: func() uint64 { return resultCount },
 		useWallTime: true,
 		skipWarmup:  true,
 	}
@@ -803,6 +859,8 @@ func visibleChildDirsForRepeats(childDirs []string, parentDir string, repeat int
 func opTreeWhere(qctx queryContext, splits int) op {
 	filter := treeFilterFromOptions(qctx.treeFilter)
 
+	var resultCount uint64
+
 	return op{
 		name: queryOpTreeWhereName,
 		inputs: treeOpInputs(filter, map[string]any{
@@ -812,15 +870,19 @@ func opTreeWhere(qctx queryContext, splits int) op {
 			queryInputSplitsKey:      splits,
 		}),
 		run: func(_ context.Context) error {
-			_, err := qctx.provider.Tree().Where(qctx.dir, filter, split.SplitsToSplitFn(splits))
+			results, err := qctx.provider.Tree().Where(qctx.dir, filter, split.SplitsToSplitFn(splits))
+			resultCount = uint64(len(results))
 
 			return err
 		},
+		resultCount: func() uint64 { return resultCount },
 	}
 }
 
 func opTreeWhereFreshProvider(qctx queryContext, splits int) op {
 	filter := treeFilterFromOptions(qctx.treeFilter)
+
+	var resultCount uint64
 
 	return op{
 		name: queryOpTreeWhereFreshName,
@@ -831,27 +893,31 @@ func opTreeWhereFreshProvider(qctx queryContext, splits int) op {
 			queryInputSplitsKey:      splits,
 		}),
 		run: func(_ context.Context) error {
-			return runTreeWhereFreshProvider(qctx, splits, filter)
+			count, err := runTreeWhereFreshProvider(qctx, splits, filter)
+			resultCount = count
+
+			return err
 		},
+		resultCount: func() uint64 { return resultCount },
 		useWallTime: true,
 		skipWarmup:  true,
 	}
 }
 
-func runTreeWhereFreshProvider(qctx queryContext, splits int, filter *db.Filter) error {
+func runTreeWhereFreshProvider(qctx queryContext, splits int, filter *db.Filter) (uint64, error) {
 	if qctx.openProvider == nil {
-		return errOpenProviderRequired
+		return 0, errOpenProviderRequired
 	}
 
 	p, err := qctx.openProvider()
 	if err != nil {
-		return err
+		return 0, err
 	}
 
-	_, whereErr := p.Tree().Where(qctx.dir, filter, split.SplitsToSplitFn(splits))
+	results, whereErr := p.Tree().Where(qctx.dir, filter, split.SplitsToSplitFn(splits))
 	closeErr := p.Close()
 
-	return errors.Join(whereErr, closeErr)
+	return uint64(len(results)), errors.Join(whereErr, closeErr)
 }
 
 func opResultCount(o op) uint64 {
@@ -1787,6 +1853,8 @@ func activeMountsFreshness(mt map[string]time.Time) []activeMountFreshness {
 func opTreeDirInfo(qctx queryContext) op {
 	filter := treeFilterFromOptions(qctx.treeFilter)
 
+	var resultCount uint64
+
 	return op{
 		name: queryOpTreeDirInfoName,
 		inputs: treeOpInputs(filter, map[string]any{
@@ -1795,10 +1863,12 @@ func opTreeDirInfo(qctx queryContext) op {
 			queryInputDurationSource: querySourceClickHouseLog,
 		}),
 		run: func(_ context.Context) error {
-			_, err := qctx.provider.Tree().DirInfo(qctx.dir, filter)
+			info, err := qctx.provider.Tree().DirInfo(qctx.dir, filter)
+			resultCount = dirInfoResultCount(info)
 
 			return err
 		},
+		resultCount: func() uint64 { return resultCount },
 	}
 }
 
@@ -1815,6 +1885,8 @@ func opGroupUsage(qctx queryContext) op {
 }
 
 func opListDir(qctx queryContext) op {
+	var resultCount uint64
+
 	return op{
 		name: queryOpFilesListDirName,
 		inputs: map[string]any{
@@ -1823,10 +1895,12 @@ func opListDir(qctx queryContext) op {
 			queryInputDurationSource: querySourceClickHouseLog,
 		},
 		run: func(ctx context.Context) error {
-			_, err := qctx.client.ListDir(ctx, qctx.dir, 0)
+			rows, err := qctx.client.ListDir(ctx, qctx.dir, 0)
+			resultCount = uint64(len(rows))
 
 			return err
 		},
+		resultCount: func() uint64 { return resultCount },
 	}
 }
 
@@ -1839,15 +1913,20 @@ func opStatPath(qctx queryContext, printf PrintfFunc) []op {
 	}
 
 	return []op{{
-		name: "files_statpath",
+		name: queryOpFilesStatPathName,
 		inputs: map[string]any{
 			"path":                   pickedPath,
 			queryInputCacheScope:     queryScopeSameQueryClient,
 			queryInputDurationSource: querySourceClickHouseLog,
 		},
 		run: func(ctx context.Context) error {
-			return qctx.client.StatPath(ctx, pickedPath)
+			if err := qctx.client.StatPath(ctx, pickedPath); err != nil {
+				return err
+			}
+
+			return nil
 		},
+		resultCount: func() uint64 { return 1 },
 	}}
 }
 
@@ -1925,6 +2004,8 @@ func globOp(
 	patterns []string,
 	requireOwner bool,
 ) op {
+	var resultCount uint64
+
 	return op{
 		name: "glob_case_" + caseName,
 		inputs: map[string]any{
@@ -1934,12 +2015,14 @@ func globOp(
 			queryInputDurationSource: querySourceClickHouseLog,
 		},
 		run: func(ctx context.Context) error {
-			_, err := qctx.client.FindByGlob(
+			count, err := qctx.client.FindByGlob(
 				ctx, baseDirs, patterns, requireOwner, qctx.uid, qctx.gids,
 			)
+			resultCount = intToUint64(count)
 
 			return err
 		},
+		resultCount: func() uint64 { return resultCount },
 	}
 }
 

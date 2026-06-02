@@ -40,9 +40,10 @@ const (
 )
 
 type recordingClickHouseFileClient struct {
-	listOpts []clickhouse.ListOptions
-	statOpts []clickhouse.StatOptions
-	findOpts []clickhouse.FindOptions
+	listOpts      []clickhouse.ListOptions
+	statOpts      []clickhouse.StatOptions
+	countGlobOpts []clickhouse.FindOptions
+	findOpts      []clickhouse.FindOptions
 }
 
 func (c *recordingClickHouseFileClient) ListDir(
@@ -76,6 +77,17 @@ func (*recordingClickHouseFileClient) PermissionAnyInDir(
 	[]uint32,
 ) (bool, error) {
 	return true, nil
+}
+
+func (c *recordingClickHouseFileClient) CountByGlob(
+	_ context.Context,
+	_ []string,
+	_ []string,
+	opts clickhouse.FindOptions,
+) (int, error) {
+	c.countGlobOpts = append(c.countGlobOpts, opts)
+
+	return 1, nil
 }
 
 func (c *recordingClickHouseFileClient) FindByGlob(
@@ -128,10 +140,11 @@ func TestClickHouseQueryClientUsesNarrowFileFields(t *testing.T) {
 		)
 		So(err, ShouldBeNil)
 		So(count, ShouldEqual, 1)
-		So(recorder.findOpts, ShouldHaveLength, 1)
-		So(recorder.findOpts[0].Fields, ShouldResemble, []string{clickHouseFileFieldPath})
-		So(recorder.findOpts[0].RequireOwner, ShouldBeTrue)
-		So(recorder.findOpts[0].UID, ShouldEqual, uint32(123))
-		So(recorder.findOpts[0].GIDs, ShouldResemble, []uint32{456})
+		So(recorder.findOpts, ShouldBeEmpty)
+		So(recorder.countGlobOpts, ShouldHaveLength, 1)
+		So(recorder.countGlobOpts[0].Fields, ShouldBeEmpty)
+		So(recorder.countGlobOpts[0].RequireOwner, ShouldBeTrue)
+		So(recorder.countGlobOpts[0].UID, ShouldEqual, uint32(123))
+		So(recorder.countGlobOpts[0].GIDs, ShouldResemble, []uint32{456})
 	})
 }

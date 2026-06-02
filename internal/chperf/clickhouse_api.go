@@ -74,6 +74,12 @@ type clickHouseFileAPI interface {
 	ListDir(ctx context.Context, dir string, opts clickhouse.ListOptions) ([]clickhouse.FileRow, error)
 	StatPath(ctx context.Context, path string, opts clickhouse.StatOptions) (*clickhouse.FileRow, error)
 	PermissionAnyInDir(ctx context.Context, dir string, uid uint32, gids []uint32) (bool, error)
+	CountByGlob(
+		ctx context.Context,
+		baseDirs []string,
+		patterns []string,
+		opts clickhouse.FindOptions,
+	) (int, error)
 	FindByGlob(
 		ctx context.Context,
 		baseDirs []string,
@@ -158,14 +164,11 @@ func (c clickHouseQueryClient) FindByGlob(
 	uid uint32,
 	gids []uint32,
 ) (int, error) {
-	rows, err := c.client.FindByGlob(ctx, baseDirs, patterns, clickhouse.FindOptions{
-		Fields:       []string{clickHouseFileFieldPath},
+	return c.client.CountByGlob(ctx, baseDirs, patterns, clickhouse.FindOptions{
 		RequireOwner: requireOwner,
 		UID:          uid,
 		GIDs:         gids,
 	})
-
-	return len(rows), err
 }
 
 func (c clickHouseQueryClient) Close() error {

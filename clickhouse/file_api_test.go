@@ -40,12 +40,14 @@ import (
 )
 
 const (
-	findByGlobAlphaMount  = "/alpha/"
-	findByGlobBetaMount   = "/beta/"
-	findByGlobAlphaOne    = "/alpha/one"
-	findByGlobAlphaOneDir = "/alpha/one/"
-	findByGlobAlphaTwo    = "/alpha/two"
-	findByGlobBetaTwo     = "/beta/two"
+	findByGlobAlphaMount          = "/alpha/"
+	findByGlobBetaMount           = "/beta/"
+	findByGlobAlphaOne            = "/alpha/one"
+	findByGlobAlphaOneDir         = "/alpha/one/"
+	findByGlobAlphaOneDirNext     = "/alpha/one0"
+	findByGlobAlphaTwo            = "/alpha/two"
+	findByGlobBetaTwo             = "/beta/two"
+	findByGlobRecursiveBamPattern = "**/*.bam"
 )
 
 func TestUnknownFileFieldErrors(t *testing.T) {
@@ -307,7 +309,7 @@ func TestFindByGlobQueryShape(t *testing.T) {
 			fileRowSelectAll,
 			findByGlobAlphaMount,
 			[]string{findByGlobAlphaOneDir},
-			[]string{"**/*.bam"},
+			[]string{findByGlobRecursiveBamPattern},
 			1,
 			10,
 			[]uint32{20},
@@ -323,7 +325,7 @@ func TestFindByGlobQueryShape(t *testing.T) {
 			findByGlobAlphaMount,
 			findByGlobAlphaMount,
 			findByGlobAlphaOneDir,
-			"/alpha/one0",
+			findByGlobAlphaOneDirNext,
 			"bam",
 			".bam",
 			"^/alpha/one/(?:[^/]+/)*[^/]*\\.bam$",
@@ -412,12 +414,43 @@ func TestFindByGlobQueryShape(t *testing.T) {
 			findByGlobAlphaMount,
 			findByGlobAlphaMount,
 			findByGlobAlphaOneDir,
-			"/alpha/one0",
+			findByGlobAlphaOneDirNext,
 			int64(0),
 			uint32(0),
 			[]uint32(nil),
 			int64(100),
 			int64(0),
+		})
+	})
+
+	Convey("CountByGlob reuses glob predicates without row materialisation", t, func() {
+		q, params := buildCountByGlobQueryAndParams(
+			findByGlobAlphaMount,
+			[]string{findByGlobAlphaOneDir},
+			[]string{findByGlobRecursiveBamPattern},
+			1,
+			10,
+			[]uint32{20},
+		)
+
+		So(q, ShouldContainSubstring, "SELECT count() FROM")
+		So(q, ShouldContainSubstring, "f.ext = ?")
+		So(q, ShouldContainSubstring, "f.name = ?")
+		So(q, ShouldContainSubstring, "match(f.path, ?)")
+		So(q, ShouldContainSubstring, "f.uid = ? OR has(?, f.gid)")
+		So(q, ShouldNotContainSubstring, "ORDER BY")
+		So(q, ShouldNotContainSubstring, "LIMIT ? OFFSET ?")
+		So(params, ShouldResemble, []any{
+			findByGlobAlphaMount,
+			findByGlobAlphaMount,
+			findByGlobAlphaOneDir,
+			findByGlobAlphaOneDirNext,
+			"bam",
+			".bam",
+			"^/alpha/one/(?:[^/]+/)*[^/]*\\.bam$",
+			int64(1),
+			uint32(10),
+			[]uint32{20},
 		})
 	})
 }

@@ -3183,6 +3183,15 @@ func TestClickHouseDatabaseDirsHaveChildrenFastPath(t *testing.T) {
 		So(clicked.Children[1].Count, ShouldEqual, 2)
 		So(countingConn.mountDirSummaryQueryCount(), ShouldEqual, 1)
 		So(countingConn.factVectorBatchQueryCount(), ShouldEqual, 0)
+
+		countingConn.reset()
+
+		leafClicked, err := tree.DirInfo(mountPath+"b", filter)
+		So(err, ShouldBeNil)
+		So(leafClicked.Children, ShouldBeEmpty)
+		So(leafClicked.Current.Count, ShouldEqual, 4)
+		So(countingConn.mountDirSummaryQueryCount(), ShouldEqual, 0)
+		So(countingConn.factVectorBatchQueryCount(), ShouldEqual, 0)
 	})
 
 	Convey("DirsHaveChildren uses maintained child counts for broad checks with large child fanout", t, func() {

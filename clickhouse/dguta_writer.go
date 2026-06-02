@@ -41,7 +41,7 @@ import (
 
 const (
 	defaultBatchSize           = 100_000
-	defaultProjectionBatchSize = 10_000
+	defaultProjectionBatchSize = 15_300
 	defaultChildrenBatchSize   = 10_000
 	dgutaAgeMaskBits           = 32
 	defaultCHReceiveTimeout    = 300 * time.Second

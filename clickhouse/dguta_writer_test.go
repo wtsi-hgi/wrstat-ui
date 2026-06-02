@@ -1089,7 +1089,7 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 		So(allSummaries[mountPath].GIDs, ShouldResemble, []uint32{7, 8})
 		So(allSummaries[mountPath].FT, ShouldEqual, db.DGUTAFileTypeBam|db.DGUTAFileTypeDir)
 		So(allSummaries[mountPath].Modtime, ShouldResemble, updatedAt)
-		So(allSummaries[mountPath+"alpha/"].Count, ShouldEqual, 9)
+		So(allSummaries[mountPath+"alpha/"].Count, ShouldEqual, 7)
 		So(allSummaries[mountPath+"beta/"].Count, ShouldEqual, 6)
 
 		fileSummaries, err := dbch.DirInfos(
@@ -1188,10 +1188,10 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 		So(fact.atimeBuckets[0], ShouldResemble, []uint64{2, 0, 0, 0, 0, 0, 0, 0, 0})
 		So(fact.mtimeBuckets[2], ShouldResemble, []uint64{0, 4, 0, 0, 0, 0, 0, 0, 0})
 
-		So(fact.allCount, ShouldEqual, 7)
-		So(fact.allSize, ShouldEqual, 65)
+		So(fact.allCount, ShouldEqual, 3)
+		So(fact.allSize, ShouldEqual, 25)
 		So(fact.allUIDs, ShouldResemble, []uint32{11, 12})
-		So(fact.allGIDs, ShouldResemble, []uint32{7, 8})
+		So(fact.allGIDs, ShouldResemble, []uint32{7})
 		So(fact.allFT&uint16(db.DGUTAFileTypeBam), ShouldBeGreaterThan, 0)
 		So(fact.childCount, ShouldEqual, 1)
 
@@ -1961,6 +1961,21 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 		So(allocs, ShouldBeLessThan, 50.0)
 	})
 
+	Convey("DGUTAWriter keeps direct projection summaries scoped to age all", t, func() {
+		gutas := db.GUTAs{
+			testProjectionGUTA(1, 2, db.DGUTAFileTypeBam, db.DGUTAgeAll, 3),
+			testProjectionGUTA(1, 2, db.DGUTAFileTypeBam, db.DGUTAgeA1M, 3),
+			testProjectionGUTA(1, 2, db.DGUTAFileTypeDir, db.DGUTAgeAll, 1),
+		}
+
+		allSummary, fileSummary := mountDirRecordSummaries(gutas)
+		columns := mountDirProjectionVectorColumnsFor(gutas)
+
+		So(allSummary.count, ShouldEqual, 4)
+		So(fileSummary.count, ShouldEqual, 3)
+		So(columns.counts, ShouldResemble, []uint64{3, 1, 3})
+	})
+
 	Convey("DGUTAWriter compacts t283-shaped internal age rows while preserving vectors", t, func() {
 		conn := &lazyDGUTAImportConn{}
 		updatedAt := time.Date(2026, 6, 1, 9, 0, 0, 0, time.UTC)
@@ -1993,6 +2008,35 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 
 		So(impl.flushAllBatches(), ShouldBeNil)
 		So(conn.totalRowsFor(insertMountDirSummaryQuery), ShouldEqual, dirs)
+	})
+
+	Convey("DGUTAWriter keeps single-record projection appends allocation bounded", t, func() {
+		conn := &lazyDGUTAImportConn{}
+		updatedAt := time.Date(2026, 6, 1, 9, 30, 0, 0, time.UTC)
+		mount := activeMount{
+			mountPath:  testT283ImagingMountPath,
+			snapshotID: snapshotID(testT283ImagingMountPath, updatedAt).String(),
+			updatedAt:  updatedAt,
+		}
+		writer := mountDirProjectionWriter{
+			conn:        conn,
+			refreshedAt: updatedAt,
+		}
+
+		allocs := testing.AllocsPerRun(20, func() {
+			So(writer.appendRecordWithContext(
+				context.Background(),
+				mount,
+				testT283ImagingMountPath+"dir/",
+				t283DirectoryGUTAs(),
+				1,
+				db.DirGUTAges[:],
+				true,
+				100_000,
+			), ShouldBeNil)
+		})
+
+		So(allocs, ShouldBeLessThan, 65.0)
 	})
 
 	Convey("DGUTAWriter normalises mount paths before internal age compaction", t, func() {

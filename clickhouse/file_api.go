@@ -66,6 +66,11 @@ const findByGlobQueryTemplate = "WITH (SELECT snapshot_id FROM wrstat_mounts_act
 	"AND (? = 0 OR f.uid = ? OR has(?, f.gid)) " +
 	"ORDER BY f.parent_dir ASC, f.name ASC LIMIT ? OFFSET ?"
 
+const countByGlobQueryTemplate = "WITH (SELECT snapshot_id FROM wrstat_mounts_active WHERE mount_path = ?) AS sid " +
+	"SELECT count() FROM wrstat_files f PREWHERE f.mount_path = ? AND f.snapshot_id = sid " +
+	"WHERE (%s) " +
+	"AND (? = 0 OR f.uid = ? OR has(?, f.gid))"
+
 const isDirQuery = "WITH (SELECT snapshot_id FROM wrstat_mounts_active WHERE mount_path = ?) AS sid " +
 	"SELECT f.entry_type FROM wrstat_files f PREWHERE f.mount_path = ? AND f.snapshot_id = sid " +
 	"AND f.parent_dir = ? AND f.name = ? LIMIT 1"
@@ -902,6 +907,92 @@ func (c *Client) prepareFindByGlob(
 	return newFindByGlobPrepared(selectList, fields, plan, opts), nil
 }
 
+func (c *Client) prepareCountByGlob(
+	baseDirs []string,
+	patterns []string,
+	opts FindOptions,
+) (findByGlobPrepared, error) {
+	baseDirsByMount, err := c.groupBaseDirsByMount(baseDirs)
+	if err != nil {
+		return findByGlobPrepared{}, err
+	}
+
+	return newFindByGlobPrepared("", nil, findByGlobPlan(baseDirsByMount, patterns), opts), nil
+}
+
+func (c *Client) runCountByGlobPlan(
+	ctx context.Context,
+	prepared findByGlobPrepared,
+) (int64, error) {
+	var total int64
+
+	for _, q := range prepared.plan.queries {
+		count, err := c.countByGlobQuery(ctx, prepared, q)
+		if err != nil {
+			return 0, err
+		}
+
+		total += count
+	}
+
+	return total, nil
+}
+
+func (c *Client) countByGlobQuery(
+	ctx context.Context,
+	prepared findByGlobPrepared,
+	spec findByGlobQuerySpec,
+) (int64, error) {
+	q, params := buildCountByGlobQueryAndParams(
+		spec.mountPath,
+		spec.baseDirs,
+		spec.patternChunk,
+		prepared.ownerEnabled,
+		prepared.uid,
+		prepared.gids,
+	)
+
+	qctx, cancel := queryContext(ctx, queryTimeout(c.cfg))
+	defer cancel()
+
+	var count uint64
+	if err := c.conn.QueryRow(qctx, q, params...).Scan(&count); err != nil {
+		return 0, fmt.Errorf("clickhouse: failed to query CountByGlob: %w", err)
+	}
+
+	if count > uint64(math.MaxInt64) {
+		return 0, errInvalidPath
+	}
+
+	return int64(count), nil
+}
+
+func buildCountByGlobQueryAndParams(
+	mountPath string,
+	baseDirs []string,
+	patterns []string,
+	ownerEnabled int64,
+	uid uint32,
+	gids []uint32,
+) (string, []any) {
+	baseDirClauses := make([]string, 0, len(baseDirs))
+	params := make([]any, 0, findByGlobParamsSharedCap+len(baseDirs)*(len(patterns)+findByGlobParamsPerBaseDirCap))
+	params = append(params, mountPath, mountPath)
+
+	for _, baseDir := range baseDirs {
+		compiled := compileGlobPatterns(baseDir, patterns)
+		clause, clauseParams := findByGlobBaseDirClause(baseDir, compiled)
+		baseDirClauses = append(baseDirClauses, clause)
+		params = append(params, clauseParams...)
+	}
+
+	q := fmt.Sprintf(countByGlobQueryTemplate, strings.Join(baseDirClauses, " OR "))
+
+	params = append(params, ownerEnabled, uid, gids)
+
+	return q, params
+}
+
 type compiledGlobPatterns struct {
 	direct    []compiledGlobPattern
 	recursive []compiledGlobPattern
@@ -928,6 +1019,55 @@ type FindOptions struct {
 	RequireOwner bool
 	UID          uint32
 	GIDs         []uint32
+}
+
+// CountByGlob counts rows matching gitignore-style patterns under base
+// directories without materialising file rows when the prepared plan can be
+// counted without cross-query de-duplication.
+func (c *Client) CountByGlob(
+	ctx context.Context,
+	baseDirs []string,
+	patterns []string,
+	opts FindOptions,
+) (int, error) {
+	if c == nil || c.conn == nil {
+		return 0, errClientClosed
+	}
+
+	if len(patterns) == 0 {
+		return 0, nil
+	}
+
+	if len(patterns) > maxGlobPatternsPerQuery {
+		rows, err := c.FindByGlob(ctx, baseDirs, patterns, opts)
+
+		return len(rows), err
+	}
+
+	prepared, err := c.prepareCountByGlob(baseDirs, patterns, opts)
+	if err != nil {
+		return 0, err
+	}
+
+	count, err := c.runCountByGlobPlan(ctx, prepared)
+	if err != nil {
+		return 0, err
+	}
+
+	return limitOffsetCount(count, prepared.limit, opts.Offset), nil
+}
+
+func limitOffsetCount(count int64, limit int64, offset int64) int {
+	if offset >= count {
+		return 0
+	}
+
+	count -= max(offset, 0)
+	if count > limit {
+		count = limit
+	}
+
+	return int(count)
 }
 
 func ownerFilterArgs(opts FindOptions) (int64, uint32, []uint32) {
