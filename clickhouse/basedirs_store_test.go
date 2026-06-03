@@ -3,6 +3,7 @@ package clickhouse
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -26,6 +27,83 @@ const (
 		"WHERE mount_path = ? AND snapshot_id = toUUID(?)"
 	basedirsStoreTestBaseDir = "/base/"
 )
+
+type basedirsIdleBatch struct {
+	countingDGUTABatch
+
+	conn              *basedirsIdleBatchConn
+	sideQueriesAtOpen int
+}
+
+func (b *basedirsIdleBatch) Send() error {
+	if b.Rows() > 0 && b.conn.sideQueries() > b.sideQueriesAtOpen {
+		b.conn.lateSendCount++
+
+		return context.DeadlineExceeded
+	}
+
+	return b.countingDGUTABatch.Send()
+}
+
+type basedirsIdleBatchConn struct {
+	bootstrapTestConn
+
+	historyQueries  int
+	finaliseQueries int
+	lateSendCount   int
+}
+
+func (c *basedirsIdleBatchConn) Query(
+	_ context.Context,
+	query string,
+	_ ...any,
+) (driver.Rows, error) {
+	switch query {
+	case activeSnapshotQuery:
+		return &dgutaWriterCloseContextRows{
+			columns: []string{dgutaWriterTestSnapshotIDColumn},
+		}, nil
+	case queryBasedirsHistoryLastDate:
+		c.historyQueries++
+
+		return &dgutaWriterCloseContextRows{columns: []string{"max(date)"}}, nil
+	case queryBasedirsHistorySeries:
+		c.finaliseQueries++
+
+		return &dgutaWriterCloseContextRows{
+			columns: []string{"date", "usage_size", "quota_size", "usage_inodes", "quota_inodes"},
+		}, nil
+	default:
+		return nil, errBootstrapTestUnexpectedCall
+	}
+}
+
+func (c *basedirsIdleBatchConn) Exec(_ context.Context, query string, _ ...any) error {
+	switch {
+	case strings.HasPrefix(query, "ALTER TABLE"):
+		return nil
+	case query == insertBasedirsHistoryPoint:
+		return nil
+	default:
+		return errBootstrapTestUnexpectedCall
+	}
+}
+
+func (c *basedirsIdleBatchConn) PrepareBatch(
+	_ context.Context,
+	_ string,
+	_ ...driver.PrepareBatchOption,
+) (driver.Batch, error) {
+	return &basedirsIdleBatch{conn: c, sideQueriesAtOpen: c.sideQueries()}, nil
+}
+
+func (c *basedirsIdleBatchConn) lateSends() int {
+	return c.lateSendCount
+}
+
+func (c *basedirsIdleBatchConn) sideQueries() int {
+	return c.historyQueries + c.finaliseQueries
+}
 
 func TestClickHouseBaseDirsStore(t *testing.T) {
 	Convey("BaseDirsStore retry reset drops all basedirs snapshot partitions before rewriting rows", t, func() {
@@ -361,6 +439,74 @@ func TestClickHouseBaseDirsStore(t *testing.T) {
 		} {
 			So(phases[phase], ShouldBeGreaterThan, time.Duration(0))
 		}
+	})
+
+	Convey("BaseDirsStore flushes pending usage batches before history side queries", t, func() {
+		updatedAt := time.Unix(1710000000, 0).UTC()
+		conn := &basedirsIdleBatchConn{}
+		store := &chBaseDirsStore{
+			cfg:       Config{QueryTimeout: 100 * time.Millisecond},
+			conn:      conn,
+			batchSize: 100_000,
+			mountPath: testMountPath,
+			updatedAt: updatedAt,
+		}
+
+		So(store.Reset(), ShouldBeNil)
+		So(store.PutGroupUsage(&basedirs.Usage{
+			GID:         7,
+			BaseDir:     basedirsStoreTestBaseDir,
+			UIDs:        []uint32{1},
+			UsageSize:   10,
+			QuotaSize:   20,
+			UsageInodes: 1,
+			QuotaInodes: 2,
+			Mtime:       updatedAt,
+			Age:         db.DGUTAgeA1M,
+		}), ShouldBeNil)
+
+		So(store.AppendGroupHistory(
+			basedirs.HistoryKey{GID: 7, MountPath: testMountPath},
+			basedirs.History{
+				Date: updatedAt, UsageSize: 10,
+				QuotaSize: 20, UsageInodes: 1, QuotaInodes: 2,
+			},
+		), ShouldBeNil)
+		So(store.Close(), ShouldBeNil)
+		So(conn.lateSends(), ShouldEqual, 0)
+	})
+
+	Convey("BaseDirsStore reads finalise histories before opening age-all usage batches", t, func() {
+		updatedAt := time.Unix(1710000000, 0).UTC()
+		conn := &basedirsIdleBatchConn{}
+		store := &chBaseDirsStore{
+			cfg:       Config{QueryTimeout: 100 * time.Millisecond},
+			conn:      conn,
+			batchSize: 100_000,
+			mountPath: testMountPath,
+			updatedAt: updatedAt,
+		}
+
+		So(store.Reset(), ShouldBeNil)
+
+		for _, gid := range []uint32{7, 8} {
+			So(store.PutGroupUsage(&basedirs.Usage{
+				GID:         gid,
+				BaseDir:     basedirsStoreTestBaseDir,
+				UIDs:        []uint32{1},
+				UsageSize:   10,
+				QuotaSize:   20,
+				UsageInodes: 1,
+				QuotaInodes: 2,
+				Mtime:       updatedAt,
+				Age:         db.DGUTAgeAll,
+			}), ShouldBeNil)
+		}
+
+		So(store.Finalise(), ShouldBeNil)
+		So(store.Close(), ShouldBeNil)
+		So(conn.lateSends(), ShouldEqual, 0)
+		So(conn.finaliseQueries, ShouldEqual, 2)
 	})
 
 	Convey("BaseDirsStore refuses to rewrite an active deterministic snapshot", t, func() {
