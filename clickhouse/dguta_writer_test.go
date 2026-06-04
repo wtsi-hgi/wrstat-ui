@@ -1208,6 +1208,67 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 		So(childRows.Next(), ShouldBeFalse)
 	})
 
+	Convey("DGUTAWriter accepts streamed child rows with final explicit child count", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 5 * time.Second
+
+		const mountPath = "/nfs/t283_imaging/"
+
+		updatedAt := time.Date(2026, 6, 4, 9, 0, 0, 0, time.UTC)
+		sid := snapshotID(mountPath, updatedAt)
+		paths := internaltest.NewDirectoryPathCreator()
+
+		w, err := NewDGUTAWriter(cfg)
+		So(err, ShouldBeNil)
+		So(w, ShouldNotBeNil)
+
+		w.SetMountPath(mountPath)
+		w.SetUpdatedAt(updatedAt)
+
+		childWriter, ok := w.(db.DGUTAChildrenWriter)
+		So(ok, ShouldBeTrue)
+
+		parent := paths.ToDirectoryPath(mountPath + "wide/")
+		So(childWriter.AddChildren(parent, []string{"child-a/", "child-b/"}), ShouldBeNil)
+		So(w.Add(db.RecordDGUTA{
+			Dir:        parent,
+			ChildCount: 2,
+			GUTAs: db.GUTAs{
+				b1GUTA(7, 11, db.DGUTAFileTypeBam, db.DGUTAgeAll, 2, 20, 100, 200),
+			},
+		}), ShouldBeNil)
+		So(w.Close(), ShouldBeNil)
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		fact := readDirFactForTest(ctx, conn, mountPath, sid.String(), mountPath+"wide/")
+		So(fact.childCount, ShouldEqual, 2)
+
+		childRows, err := conn.Query(ctx, dgutaWriterTestSelectChildQuery, mountPath, sid.String(), mountPath+"wide/")
+		So(err, ShouldBeNil)
+
+		defer func() { _ = childRows.Close() }()
+
+		children := make([]string, 0, 2)
+
+		for childRows.Next() {
+			var child string
+			So(childRows.Scan(&child), ShouldBeNil)
+			children = append(children, child)
+		}
+
+		So(children, ShouldResemble, []string{mountPath + "wide/child-a", mountPath + "wide/child-b"})
+	})
+
 	Convey("DGUTAWriter derives file-only scalar hot summaries from AgeAll canonical facts", t, func() {
 		os.Setenv("WRSTAT_ENV", "test")
 		Reset(func() { os.Unsetenv("WRSTAT_ENV") })

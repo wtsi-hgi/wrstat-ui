@@ -73,9 +73,10 @@ func (d *DGUTA) Append(other *DGUTA) {
 }
 
 type RecordDGUTA struct {
-	Dir      *summary.DirectoryPath
-	GUTAs    GUTAs
-	Children []string
+	Dir        *summary.DirectoryPath
+	GUTAs      GUTAs
+	Children   []string
+	ChildCount uint64
 }
 
 // EncodeToBytes returns our Dir as a []byte and our GUTAs encoded in another
@@ -92,4 +93,10 @@ func (d *RecordDGUTA) EncodeToBytes() ([]byte, []byte) {
 
 func (d *RecordDGUTA) pathBytes() []byte {
 	return d.Dir.AppendTo(pathBuf[:0])
+}
+
+// DGUTAChildrenWriter is an optional DGUTA writer extension for streaming
+// child directory edges before the final directory facts record is available.
+type DGUTAChildrenWriter interface {
+	AddChildren(parent *summary.DirectoryPath, children []string) error
 }

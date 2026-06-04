@@ -26,6 +26,7 @@
 package dirguta
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -133,6 +134,32 @@ func BenchmarkDirGUTADirectoryHeavy(b *testing.B) {
 			b.Fatalf("expected %d records, got %d", directories+3, sink.records)
 		}
 	}
+}
+
+type streamingChildrenDB struct {
+	records                uint64
+	childRows              uint64
+	maxLargeRecordChildren int
+	maxRecordChildCount    uint64
+	maxStreamChildren      int
+}
+
+func (m *streamingChildrenDB) Add(dguta db.RecordDGUTA) error {
+	m.records++
+	if dguta.ChildCount > streamingChildrenBatchSize {
+		m.maxLargeRecordChildren = max(m.maxLargeRecordChildren, len(dguta.Children))
+	}
+
+	m.maxRecordChildCount = max(m.maxRecordChildCount, dguta.ChildCount)
+
+	return nil
+}
+
+func (m *streamingChildrenDB) AddChildren(_ *summary.DirectoryPath, children []string) error {
+	m.childRows += uint64(len(children))
+	m.maxStreamChildren = max(m.maxStreamChildren, len(children))
+
+	return nil
 }
 
 func TestDirGUTAFileType(t *testing.T) {
@@ -765,6 +792,47 @@ func TestDirGUTA(t *testing.T) {
 		})
 
 		So(allocs, ShouldBeLessThan, 30000.0)
+	})
+
+	Convey("DirGUTA streams huge child fanout without retaining every child name", t, func() {
+		const childDirs = 50_000
+
+		refTime := time.Now().Unix()
+		paths := internaltest.NewDirectoryPathCreator()
+		sink := new(streamingChildrenDB)
+		op := &DirGroupUserTypeAge{
+			db:             sink,
+			childDB:        sink,
+			streamChildren: true,
+			store:          gutaStore{make(map[gutaKey]*summary.SummaryWithTimes), refTime},
+			now:            refTime,
+			seenHardlinks:  make(map[int64]*inodeEntry),
+		}
+
+		parent := paths.ToDirectoryPath("/nfs/t283_imaging/wide/")
+		err := op.Add(&summary.FileInfo{
+			Path:      parent,
+			Name:      strToBS("wide/"),
+			EntryType: stats.DirType,
+		})
+
+		for n := range childDirs {
+			childName := fmt.Sprintf("child%05d/", n)
+			childPath := paths.ToDirectoryPath("/nfs/t283_imaging/wide/" + childName)
+			err = errors.Join(err, op.Add(&summary.FileInfo{
+				Path:      childPath,
+				Name:      strToBS(childName),
+				EntryType: stats.DirType,
+			}))
+		}
+
+		err = errors.Join(err, op.Output())
+
+		So(err, ShouldBeNil)
+		So(sink.childRows, ShouldEqual, uint64(childDirs))
+		So(sink.maxRecordChildCount, ShouldEqual, uint64(childDirs))
+		So(sink.maxLargeRecordChildren, ShouldEqual, 0)
+		So(sink.maxStreamChildren, ShouldBeLessThanOrEqualTo, streamingChildrenBatchSize)
 	})
 }
 

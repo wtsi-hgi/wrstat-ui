@@ -40,8 +40,9 @@ import (
 )
 
 const (
-	maxNumOfGUTAKeys = 34
-	lengthOfGUTAKey  = 12
+	maxNumOfGUTAKeys           = 34
+	lengthOfGUTAKey            = 12
+	streamingChildrenBatchSize = 16_384
 )
 
 var gutaKeyPool = sync.Pool{ //nolint:gochecknoglobals
@@ -84,13 +85,17 @@ func newDirGroupUserTypeAge(d DB, refTime int64) summary.OperationGenerator {
 
 	var last *DirGroupUserTypeAge
 
+	childDB, streamChildren := d.(db.DGUTAChildrenWriter)
+
 	return func() summary.Operation {
 		last = &DirGroupUserTypeAge{
-			parent:        last,
-			db:            d,
-			store:         gutaStore{make(map[gutaKey]*summary.SummaryWithTimes), refTime},
-			now:           now,
-			seenHardlinks: make(map[int64]*inodeEntry),
+			parent:         last,
+			db:             d,
+			childDB:        childDB,
+			streamChildren: streamChildren,
+			store:          gutaStore{make(map[gutaKey]*summary.SummaryWithTimes), refTime},
+			now:            now,
+			seenHardlinks:  make(map[int64]*inodeEntry),
 		}
 
 		return last
@@ -269,14 +274,17 @@ type inodeEntry struct {
 // DirGroupUserTypeAge is used to summarise file stats by directory, group,
 // user, file type and age.
 type DirGroupUserTypeAge struct {
-	parent        *DirGroupUserTypeAge
-	db            DB
-	store         gutaStore
-	thisDir       *summary.DirectoryPath
-	children      []string
-	now           int64
-	isTempDir     bool
-	seenHardlinks map[int64]*inodeEntry
+	parent         *DirGroupUserTypeAge
+	db             DB
+	childDB        db.DGUTAChildrenWriter
+	store          gutaStore
+	thisDir        *summary.DirectoryPath
+	children       []string
+	childCount     uint64
+	streamChildren bool
+	now            int64
+	isTempDir      bool
+	seenHardlinks  map[int64]*inodeEntry
 }
 
 // Add is a summary.Operation method. It will break path in to its directories
@@ -300,7 +308,9 @@ func (d *DirGroupUserTypeAge) Add(info *summary.FileInfo) error { //nolint:funle
 	}
 
 	if info.IsDir() && info.Path != nil && info.Path.Parent == d.thisDir {
-		d.children = append(d.children, string(info.Name))
+		if err := d.addChildName(string(info.Name)); err != nil {
+			return err
+		}
 	}
 
 	if info.Path != d.thisDir {
@@ -325,6 +335,31 @@ func (d *DirGroupUserTypeAge) Add(info *summary.FileInfo) error { //nolint:funle
 
 	d.store.addForEach(gKeys, info.Size, atime, max(0, info.MTime))
 	gutaKeyPool.Put(gutaKeysA)
+
+	return nil
+}
+
+func (d *DirGroupUserTypeAge) addChildName(child string) error {
+	d.childCount++
+	d.children = append(d.children, child)
+
+	if !d.streamChildren || len(d.children) < streamingChildrenBatchSize {
+		return nil
+	}
+
+	return d.flushChildren()
+}
+
+func (d *DirGroupUserTypeAge) flushChildren() error {
+	if !d.streamChildren || len(d.children) == 0 {
+		return nil
+	}
+
+	if err := d.childDB.AddChildren(d.thisDir, d.children); err != nil {
+		return err
+	}
+
+	d.children = d.children[:0]
 
 	return nil
 }
@@ -428,7 +463,15 @@ func (d *DirGroupUserTypeAge) handleHardlink(info *summary.FileInfo, //nolint:fu
 // Returns an error on failure to write.
 func (d *DirGroupUserTypeAge) Output() error {
 	dgutas := d.store.sort()
-	dguta := db.RecordDGUTA{Dir: d.thisDir, Children: d.children}
+	if err := d.flushChildren(); err != nil {
+		return err
+	}
+
+	dguta := db.RecordDGUTA{
+		Dir:        d.thisDir,
+		Children:   d.children,
+		ChildCount: d.childCount,
+	}
 
 	for _, guta := range dgutas {
 		dguta.GUTAs = append(dguta.GUTAs, d.getGUTA(guta))
@@ -515,6 +558,7 @@ func (d *DirGroupUserTypeAge) outputRoot(dguta db.RecordDGUTA) error {
 	for thisDir := d.thisDir; thisDir.Parent != nil; thisDir = thisDir.Parent {
 		dguta.Dir = thisDir.Parent
 		dguta.Children = []string{thisDir.Name}
+		dguta.ChildCount = 1
 
 		if err := d.db.Add(dguta); err != nil {
 			return err
@@ -530,4 +574,5 @@ func (d *DirGroupUserTypeAge) clear() {
 
 	d.thisDir = nil
 	d.children = nil
+	d.childCount = 0
 }

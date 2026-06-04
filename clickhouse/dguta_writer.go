@@ -37,6 +37,7 @@ import (
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/google/uuid"
 	"github.com/wtsi-hgi/wrstat-ui/db"
+	"github.com/wtsi-hgi/wrstat-ui/summary"
 )
 
 const (
@@ -301,6 +302,7 @@ func (w *dgutaWriter) addReadyRecord(ctx context.Context, dguta db.RecordDGUTA) 
 	rawParentDir := string(dguta.Dir.AppendTo(make([]byte, 0, dguta.Dir.Len())))
 	parentDir := canonicalPathForMount(w.mountPath, rawParentDir)
 	children := w.canonicalChildrenForParent(parentDir, dguta.Children)
+	childCount := max(dguta.ChildCount, uint64(len(children)))
 
 	appendedGUTAs, err := w.appendDGUTARows(dguta, rawParentDir, parentDir)
 	if err != nil {
@@ -311,13 +313,13 @@ func (w *dgutaWriter) addReadyRecord(ctx context.Context, dguta db.RecordDGUTA) 
 		ctx,
 		parentDir,
 		appendedGUTAs,
-		uint64(len(children)),
+		childCount,
 		w.previousDGUTARows.ages(),
 	); err != nil {
 		return err
 	}
 
-	if _, err := w.appendChildrenRows(ctx, children, parentDir); err != nil {
+	if err := w.appendChildrenRows(ctx, children, parentDir); err != nil {
 		return err
 	}
 
@@ -326,6 +328,28 @@ func (w *dgutaWriter) addReadyRecord(ctx context.Context, dguta db.RecordDGUTA) 
 	}
 
 	return w.flushFullBatches()
+}
+
+func (w *dgutaWriter) AddChildren(parent *summary.DirectoryPath, children []string) error {
+	if err := w.validateAddChildren(parent); err != nil {
+		return err
+	}
+
+	ctx, cancel := configQueryContext(w.cfg)
+	defer cancel()
+
+	if err := w.ensureWriteReady(ctx); err != nil {
+		return err
+	}
+
+	rawParentDir := string(parent.AppendTo(make([]byte, 0, parent.Len())))
+	parentDir := canonicalPathForMount(w.mountPath, rawParentDir)
+
+	if err := w.appendChildrenRows(ctx, children, parentDir); err != nil {
+		return err
+	}
+
+	return w.sendFullChildrenBatchIfFull()
 }
 
 func (w *dgutaWriter) Close() error {
@@ -402,6 +426,22 @@ func (w *dgutaWriter) validateAdd(dguta db.RecordDGUTA) error {
 	}
 
 	if dguta.Dir == nil {
+		return errDirRequired
+	}
+
+	return nil
+}
+
+func (w *dgutaWriter) validateAddChildren(parent *summary.DirectoryPath) error {
+	if w.mountPath == "" {
+		return errMountPathRequired
+	}
+
+	if w.updatedAt.IsZero() {
+		return errUpdatedAtRequired
+	}
+
+	if parent == nil {
 		return errDirRequired
 	}
 
@@ -884,27 +924,19 @@ func (w *dgutaWriter) appendChildrenRows(
 	ctx context.Context,
 	children []string,
 	parentDir string,
-) (uint64, error) {
+) error {
 	snapshotID := w.snapshot.String()
 
-	var appended uint64
-
-	err := w.timeImportPhase(importPhaseChildrenInsert, func() error {
+	return w.timeImportPhase(importPhaseChildrenInsert, func() error {
 		for _, child := range children {
-			ok, err := w.appendChildRowWithContext(ctx, snapshotID, parentDir, child)
+			_, err := w.appendChildRowWithContext(ctx, snapshotID, parentDir, child)
 			if err != nil {
 				return err
-			}
-
-			if ok {
-				appended++
 			}
 		}
 
 		return nil
 	})
-
-	return appended, err
 }
 
 func (w *dgutaWriter) canonicalChildrenForParent(parentDir string, children []string) []string {

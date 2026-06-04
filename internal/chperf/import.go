@@ -113,6 +113,8 @@ const (
 // ErrNoDatasets indicates no dataset directories were found.
 var ErrNoDatasets = errors.New("no dataset directories found")
 
+var errDGUTAChildrenWriterRequired = errors.New("tracked streaming DGUTA writer requires child writer")
+
 // PrintfFunc matches fmt.Printf-style output.
 type PrintfFunc = perfreport.PrintfFunc
 
@@ -840,7 +842,7 @@ func addAllSummarisers(
 	trackedFI := trackFileIngestOperation(fi, metrics)
 	timedFICloser := timedImportCloser{Closer: fiCloser, metrics: metrics, phase: phaseFilesFlush}
 
-	ss.AddDirectoryOperation(dirguta.NewDirGroupUserTypeAge(trackedDW))
+	ss.AddDirectoryOperation(dirguta.NewDirGroupUserTypeAge(trackedDW.directorySink()))
 	ss.AddGlobalOperation(trackedFI)
 
 	bsCloser, err := addBasedirsSummariser(ss, api, mountPath, updatedAt, opts, metrics)
@@ -939,6 +941,35 @@ func (r *statsGZReader) Close() error {
 func (w *trackedDGUTAWriter) SetMountPath(mountPath string) {
 	w.mountPath = mountPath
 	w.DGUTAWriter.SetMountPath(mountPath)
+}
+
+func (w *trackedDGUTAWriter) directorySink() dirguta.DB {
+	if _, ok := w.DGUTAWriter.(db.DGUTAChildrenWriter); ok {
+		return &trackedStreamingDGUTAWriter{trackedDGUTAWriter: w}
+	}
+
+	return w
+}
+
+type trackedStreamingDGUTAWriter struct {
+	*trackedDGUTAWriter
+}
+
+func (w *trackedStreamingDGUTAWriter) AddChildren(
+	parent *summary.DirectoryPath,
+	children []string,
+) error {
+	childWriter, ok := w.DGUTAWriter.(db.DGUTAChildrenWriter)
+	if !ok {
+		return errDGUTAChildrenWriterRequired
+	}
+
+	err := childWriter.AddChildren(parent, children)
+	if err == nil {
+		w.metrics.addRows(tableChildren, countChildrenRows(children))
+	}
+
+	return err
 }
 
 func noopPublishCloser(bool) error {

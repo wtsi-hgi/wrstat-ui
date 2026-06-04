@@ -131,6 +131,20 @@ func TestLineCountingReader(t *testing.T) {
 	})
 }
 
+type fakeStreamingImportDGUTAWriter struct {
+	fakeImportDGUTAWriter
+	streamedChildren uint64
+}
+
+func (w *fakeStreamingImportDGUTAWriter) AddChildren(
+	_ *summary.DirectoryPath,
+	children []string,
+) error {
+	w.streamedChildren += uint64(len(children))
+
+	return nil
+}
+
 func TestDGUTARowCounting(t *testing.T) {
 	Convey("countDGUTARows ignores nil gutas", t, func() {
 		record := db.RecordDGUTA{GUTAs: db.GUTAs{nil, &db.GUTA{}, nil, &db.GUTA{}}}
@@ -165,6 +179,23 @@ func TestDGUTARowCounting(t *testing.T) {
 	Convey("countChildrenRows ignores blank child names", t, func() {
 		children := []string{"/a", "", "/b/", "/"}
 		So(countChildrenRows(children), ShouldEqual, 2)
+	})
+
+	Convey("tracked DGUTA writer counts streamed child rows", t, func() {
+		paths := internaltest.NewDirectoryPathCreator()
+		metrics := newDatasetImportMetrics("dataset", "/input/stats.gz", importTestMountScratch)
+		writer := &fakeStreamingImportDGUTAWriter{}
+		tracked := newTrackedDGUTAWriter(writer, metrics)
+		sink := tracked.directorySink()
+		childWriter, ok := sink.(db.DGUTAChildrenWriter)
+
+		So(ok, ShouldBeTrue)
+		So(childWriter.AddChildren(
+			paths.ToDirectoryPath(importTestMountScratch+"wide/"),
+			[]string{"child-a/", "", "child-b/"},
+		), ShouldBeNil)
+		So(writer.streamedChildren, ShouldEqual, uint64(3))
+		So(metrics.rows[tableChildren], ShouldEqual, uint64(2))
 	})
 }
 
