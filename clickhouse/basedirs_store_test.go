@@ -509,6 +509,52 @@ func TestClickHouseBaseDirsStore(t *testing.T) {
 		So(conn.finaliseQueries, ShouldEqual, 2)
 	})
 
+	Convey("BaseDirsStore flushes stale usage batches before moving to another basedirs table", t, func() {
+		now := time.Date(2026, 6, 5, 9, 0, 0, 0, time.UTC)
+		updatedAt := time.Unix(1710000000, 0).UTC()
+		conn := &basedirsPhaseBatchConn{}
+		store := &chBaseDirsStore{
+			cfg:       Config{QueryTimeout: 100 * time.Millisecond},
+			conn:      conn,
+			batchSize: 100_000,
+			mountPath: testMountPath,
+			updatedAt: updatedAt,
+			batchNow:  func() time.Time { return now },
+		}
+
+		So(store.Reset(), ShouldBeNil)
+		So(store.PutGroupUsage(&basedirs.Usage{
+			GID:         7,
+			BaseDir:     basedirsStoreTestBaseDir,
+			UIDs:        []uint32{1},
+			UsageSize:   10,
+			QuotaSize:   20,
+			UsageInodes: 1,
+			QuotaInodes: 2,
+			Mtime:       updatedAt,
+			Age:         db.DGUTAgeA1M,
+		}), ShouldBeNil)
+
+		groupBatches := conn.batchesFor(insertBasedirsGroupUsageQuery)
+		So(groupBatches, ShouldHaveLength, 1)
+		So(groupBatches[0].sends, ShouldEqual, 0)
+
+		now = now.Add(importBatchMaxOpenDuration)
+
+		So(store.PutUserUsage(&basedirs.Usage{
+			UID:         9,
+			BaseDir:     basedirsStoreTestBaseDir,
+			GIDs:        []uint32{7},
+			UsageSize:   11,
+			UsageInodes: 3,
+			Mtime:       updatedAt,
+			Age:         db.DGUTAgeA1M,
+		}), ShouldBeNil)
+
+		So(groupBatches[0].sends, ShouldEqual, 1)
+		So(conn.batchesFor(insertBasedirsUserUsageQuery), ShouldHaveLength, 1)
+	})
+
 	Convey("BaseDirsStore refuses to rewrite an active deterministic snapshot", t, func() {
 		th := newClickHouseTestHarness(t)
 		cfg := th.newConfig()
@@ -793,4 +839,38 @@ func assertBasedirsSnapshotRowCounts(
 	for _, query := range queries {
 		So(countRows(ctx, conn, query, testMountPath, sid), ShouldEqual, expected)
 	}
+}
+
+type basedirsPhaseBatch struct {
+	countingDGUTABatch
+
+	query string
+}
+
+type basedirsPhaseBatchConn struct {
+	basedirsIdleBatchConn
+
+	batches []*basedirsPhaseBatch
+}
+
+func (c *basedirsPhaseBatchConn) PrepareBatch(
+	_ context.Context,
+	query string,
+	_ ...driver.PrepareBatchOption,
+) (driver.Batch, error) {
+	batch := &basedirsPhaseBatch{query: query}
+	c.batches = append(c.batches, batch)
+
+	return batch, nil
+}
+
+func (c *basedirsPhaseBatchConn) batchesFor(query string) []*basedirsPhaseBatch {
+	var batches []*basedirsPhaseBatch
+	for _, batch := range c.batches {
+		if batch.query == query {
+			batches = append(batches, batch)
+		}
+	}
+
+	return batches
 }

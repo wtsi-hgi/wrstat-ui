@@ -129,6 +129,8 @@ type chBaseDirsStore struct {
 	groupSubOpenedAt   time.Time
 	userSubOpenedAt    time.Time
 	writeErr           error
+	writePhase         string
+	batchNow           func() time.Time
 
 	bufferedAgeAllGroupUsage  map[uint32][]*basedirs.Usage
 	insertedHistory           []historyRollbackEntry
@@ -344,6 +346,7 @@ func (s *chBaseDirsStore) clearRollbackState() {
 	s.bufferedAgeAllGroupUsage = nil
 	s.lastHistoryAppendInserted = false
 	s.reset = false
+	s.writePhase = ""
 }
 
 func (s *chBaseDirsStore) closeStoreConn() error {
@@ -407,6 +410,7 @@ func (s *chBaseDirsStore) resetSnapshotState() {
 	s.insertedHistory = nil
 	s.lastHistoryAppendInserted = false
 	s.reset = false
+	s.writePhase = ""
 }
 
 func (s *chBaseDirsStore) validateReadyForReset() error {
@@ -480,6 +484,10 @@ func (s *chBaseDirsStore) PutUserUsage(u *basedirs.Usage) error {
 
 func (s *chBaseDirsStore) appendUserUsage(u *basedirs.Usage) error {
 	err := s.timeImportPhase(importPhaseBasedirsUserUsage, func() error {
+		if err := s.transitionWritePhase(importPhaseBasedirsUserUsage); err != nil {
+			return err
+		}
+
 		return s.appendToBatch(s.userUsageSlot(), func(batch driver.Batch) error {
 			if err := batch.Append(
 				s.mountPath,
@@ -558,6 +566,10 @@ func (s *chBaseDirsStore) appendOneSubDir(
 	phase string,
 ) error {
 	err := s.timeImportPhase(phase, func() error {
+		if err := s.transitionWritePhase(phase); err != nil {
+			return err
+		}
+
 		return s.appendToBatch(s.subdirSlot(batch, kind), func(prepared driver.Batch) error {
 			return appendBasedirsSubDirBatch(
 				prepared, s.mountPath, s.snapshot.String(),
@@ -610,7 +622,7 @@ func (s *chBaseDirsStore) appendGroupHistory(
 
 	s.lastHistoryAppendInserted = false
 
-	if err := s.flushPendingBatchesBeforeSideQuery(); err != nil {
+	if err := s.transitionWritePhase(importPhaseBasedirsHistory); err != nil {
 		return err
 	}
 
@@ -638,7 +650,7 @@ func (s *chBaseDirsStore) finalise() error {
 		return err
 	}
 
-	if err := s.flushPendingBatchesBeforeSideQuery(); err != nil {
+	if err := s.transitionWritePhase(importPhaseBasedirsFinalise); err != nil {
 		return err
 	}
 
@@ -713,7 +725,32 @@ func (s *chBaseDirsStore) batchWriter(slot batchSlot) *importBlockWriter {
 		openedAt:  slot.openedAt,
 		writeErr:  &s.writeErr,
 		batchSize: s.batchSize,
+		now:       s.importBatchNow,
 	}
+}
+
+func (s *chBaseDirsStore) transitionWritePhase(phase string) error {
+	if s.writePhase == "" || s.writePhase == phase {
+		s.writePhase = phase
+
+		return nil
+	}
+
+	if err := s.flushAllBatches(); err != nil {
+		return err
+	}
+
+	s.writePhase = phase
+
+	return nil
+}
+
+func (s *chBaseDirsStore) importBatchNow() time.Time {
+	if s != nil && s.batchNow != nil {
+		return s.batchNow()
+	}
+
+	return time.Now()
 }
 
 func (s *chBaseDirsStore) appendToBatch(slot batchSlot, appendRow func(driver.Batch) error) error {
@@ -721,10 +758,6 @@ func (s *chBaseDirsStore) appendToBatch(slot batchSlot, appendRow func(driver.Ba
 	defer cancel()
 
 	return s.batchWriter(slot).append(ctx, appendRow)
-}
-
-func (s *chBaseDirsStore) flushPendingBatchesBeforeSideQuery() error {
-	return s.flushAllBatches()
 }
 
 func (s *chBaseDirsStore) closeBatches() error {
@@ -890,6 +923,10 @@ func (s *chBaseDirsStore) Close() error {
 
 func (s *chBaseDirsStore) appendGroupUsage(u *basedirs.Usage, dateNoSpace, dateNoFiles time.Time) error {
 	err := s.timeImportPhase(importPhaseBasedirsGroupUsage, func() error {
+		if err := s.transitionWritePhase(importPhaseBasedirsGroupUsage); err != nil {
+			return err
+		}
+
 		return s.appendToBatch(s.groupUsageSlot(), func(batch driver.Batch) error {
 			if err := batch.Append(
 				s.mountPath,
