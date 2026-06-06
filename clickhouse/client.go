@@ -375,12 +375,16 @@ func connectFromConfigContext(ctx context.Context, cfg Config) (ch.Conn, error) 
 }
 
 func connectForImportFromConfig(cfg Config) (ch.Conn, error) {
+	return connectForImportFromConfigContext(context.Background(), cfg)
+}
+
+func connectForImportFromConfigContext(ctx context.Context, cfg Config) (ch.Conn, error) {
 	opts, err := importOptionsFromConfig(cfg)
 	if err != nil {
 		return nil, err
 	}
 
-	return connectFromOptions(cfg, opts)
+	return connectFromOptionsContext(ctx, cfg, opts)
 }
 
 func importOptionsFromConfig(cfg Config) (*ch.Options, error) {

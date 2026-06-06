@@ -27,6 +27,7 @@ package cmd
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -37,7 +38,7 @@ import (
 	"github.com/inconshreveable/log15"
 	. "github.com/smartystreets/goconvey/convey"
 	"github.com/wtsi-hgi/wrstat-ui/clickhouse"
-	"github.com/wtsi-hgi/wrstat-ui/summary"
+	"github.com/wtsi-hgi/wrstat-ui/internal/chspool"
 )
 
 const summariseTestSecretDSN = "clickhouse://diag:secret@127.0.0.1:9000/default?" +
@@ -81,25 +82,21 @@ func TestSummariseDiagnosticsLogging(t *testing.T) {
 		clickHouseSnapshotIsActive = func(clickhouse.Config, string, time.Time) (bool, error) {
 			return false, nil
 		}
-		wireSummariseClickHouseOperations = func(
-			_ *summary.Summariser,
+		loadSummariseClickHouseSpool = func(
+			_ context.Context,
 			cfg clickhouse.Config,
-			mountPath, _ string,
-			modtime time.Time,
-			diag *summariseDiagnostics,
-		) (func(bool) error, error) {
+			_ string,
+			manifest *chspool.Manifest,
+			recordImportPhase func(string, time.Duration),
+		) error {
 			So(cfg.DSN, ShouldEqual, summariseTestSecretDSN)
-			So(mountPath, ShouldEqual, "/mnt/test/")
-			So(modtime.Equal(fixture.updatedAt), ShouldBeTrue)
-			So(diag, ShouldNotBeNil)
+			So(manifest.MountPath, ShouldEqual, summariseTestMountPath)
+			So(manifest.UpdatedAt, ShouldEqual, fixture.updatedAt.UTC().Format(time.RFC3339Nano))
+			So(recordImportPhase, ShouldNotBeNil)
 
-			diag.recordImportPhase("wrstat_files_insert", 37*time.Millisecond)
+			recordImportPhase("wrstat_files_insert", 37*time.Millisecond)
 
-			return func(publish bool) error {
-				So(publish, ShouldBeTrue)
-
-				return errSummariseTestClose
-			}, nil
+			return errSummariseTestClose
 		}
 
 		err := run([]string{fixture.statsPath})
@@ -111,7 +108,7 @@ func TestSummariseDiagnosticsLogging(t *testing.T) {
 		So(output, ShouldContainSubstring, "pid=")
 		So(output, ShouldContainSubstring, "input="+quoteForDiagnostics(fixture.statsPath))
 		So(output, ShouldContainSubstring, "output="+quoteForDiagnostics(fixture.outputDir))
-		So(output, ShouldContainSubstring, "mount_path="+quoteForDiagnostics("/mnt/test/"))
+		So(output, ShouldContainSubstring, "mount_path="+quoteForDiagnostics(summariseTestMountPath))
 		So(output, ShouldContainSubstring, "snapshot_id=")
 		So(output, ShouldContainSubstring, "clickhouse_database="+quoteForDiagnostics(summariseTestClickHouseDatabase))
 		So(output, ShouldContainSubstring, "clickhouse_dsn="+
@@ -205,7 +202,7 @@ func TestSummariseDiagnosticsLogging(t *testing.T) {
 				DSN:      summariseTestSecretDSN,
 				Database: summariseTestClickHouseDatabase,
 			},
-			mountPath: "/mnt/test/",
+			mountPath: summariseTestMountPath,
 			modtime:   time.Date(2026, 1, 9, 12, 0, 0, 0, time.UTC),
 			outputDir: filepath.Join("out", "test"),
 		})
@@ -219,7 +216,7 @@ func TestSummariseDiagnosticsLogging(t *testing.T) {
 		output := logs.String()
 		So(output, ShouldContainSubstring, "summarise close failure")
 		So(output, ShouldContainSubstring, "old_snapshot_partition_drop")
-		So(output, ShouldContainSubstring, "mount_path="+quoteForDiagnostics("/mnt/test/"))
+		So(output, ShouldContainSubstring, "mount_path="+quoteForDiagnostics(summariseTestMountPath))
 		So(output, ShouldContainSubstring, "snapshot_id=")
 		So(output, ShouldContainSubstring, errSummariseDiagnosticsOldCleanup.Error())
 	})

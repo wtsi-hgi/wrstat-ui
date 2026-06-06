@@ -26,7 +26,9 @@
 package cmd
 
 import (
+	"bytes"
 	"compress/gzip"
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -35,12 +37,15 @@ import (
 
 	. "github.com/smartystreets/goconvey/convey"
 	"github.com/wtsi-hgi/wrstat-ui/clickhouse"
+	"github.com/wtsi-hgi/wrstat-ui/internal/chspool"
+	"github.com/wtsi-hgi/wrstat-ui/internal/statsdata"
 	"github.com/wtsi-hgi/wrstat-ui/summary"
 )
 
 const (
 	summariseTestClickHouseDSN      = "clickhouse://default@127.0.0.1:9000/default"
 	summariseTestClickHouseDatabase = "wrstat_ui_test"
+	summariseTestMountPath          = "/mnt/test/"
 )
 
 var errSummariseTestClose = errors.New("close failed")
@@ -89,7 +94,7 @@ func newSummariseActiveSnapshotFixture(t *testing.T) summariseActiveSnapshotFixt
 
 func (f summariseActiveSnapshotFixture) clickHouseTarget() *clickHouseSummariseTarget {
 	return &clickHouseSummariseTarget{
-		mountPath: "/mnt/test/",
+		mountPath: summariseTestMountPath,
 		modtime:   f.updatedAt,
 		outputDir: f.outputDir,
 	}
@@ -98,7 +103,18 @@ func (f summariseActiveSnapshotFixture) clickHouseTarget() *clickHouseSummariseT
 func (f summariseActiveSnapshotFixture) writeValidStats(t *testing.T) {
 	t.Helper()
 
-	writeGzipStats(t, f.statsPath, []byte("\"/mnt/test/file\"\t1\t0\t0\t0\t0\t0\tf\t1\t1\t0\t1\n"))
+	root := statsdata.NewRoot(summariseTestMountPath, f.updatedAt.Unix())
+	file := root.AddFile("file")
+	file.Size = 1
+	file.Inode = 1
+	file.Nlink = 1
+
+	var buf bytes.Buffer
+
+	_, err := root.WriteTo(&buf)
+	So(err, ShouldBeNil)
+
+	writeGzipStats(t, f.statsPath, buf.Bytes())
 	So(os.Chtimes(f.statsPath, f.updatedAt, f.updatedAt), ShouldBeNil)
 }
 
@@ -123,7 +139,7 @@ func TestSummariseClickHouseActiveSnapshotPreflight(t *testing.T) {
 
 			So(cfg.DSN, ShouldEqual, summariseTestClickHouseDSN)
 			So(cfg.Database, ShouldEqual, summariseTestClickHouseDatabase)
-			So(mountPath, ShouldEqual, "/mnt/test/")
+			So(mountPath, ShouldEqual, summariseTestMountPath)
 			So(modtime.Equal(fixture.updatedAt), ShouldBeTrue)
 
 			return true, nil
@@ -135,7 +151,7 @@ func TestSummariseClickHouseActiveSnapshotPreflight(t *testing.T) {
 		) error {
 			So(cfg.DSN, ShouldEqual, summariseTestClickHouseDSN)
 			So(cfg.Database, ShouldEqual, summariseTestClickHouseDatabase)
-			So(mountPath, ShouldEqual, "/mnt/test/")
+			So(mountPath, ShouldEqual, summariseTestMountPath)
 			So(modtime.Equal(fixture.updatedAt), ShouldBeTrue)
 
 			cleanupCalled = true
@@ -160,6 +176,20 @@ func TestSummariseClickHouseActiveSnapshotPreflight(t *testing.T) {
 
 				return nil
 			}, nil
+		}
+		loadSummariseClickHouseSpool = func(
+			context.Context,
+			clickhouse.Config,
+			string,
+			*chspool.Manifest,
+			func(string, time.Duration),
+		) error {
+			So(cleanupCalled, ShouldBeTrue)
+
+			wireCalled = true
+			closeCalled = true
+
+			return nil
 		}
 
 		err := run([]string{fixture.statsPath})
@@ -205,6 +235,17 @@ func TestSummariseClickHouseActiveSnapshotPreflight(t *testing.T) {
 
 			return func(bool) error { return nil }, nil
 		}
+		loadSummariseClickHouseSpool = func(
+			context.Context,
+			clickhouse.Config,
+			string,
+			*chspool.Manifest,
+			func(string, time.Duration),
+		) error {
+			wireCalled = true
+
+			return nil
+		}
 
 		err := run([]string{fixture.statsPath})
 		So(err, ShouldBeNil)
@@ -244,6 +285,17 @@ func TestSummariseClickHouseActiveSnapshotPreflight(t *testing.T) {
 			wireCalled = true
 
 			return func(bool) error { return nil }, nil
+		}
+		loadSummariseClickHouseSpool = func(
+			context.Context,
+			clickhouse.Config,
+			string,
+			*chspool.Manifest,
+			func(string, time.Duration),
+		) error {
+			wireCalled = true
+
+			return nil
 		}
 
 		err := run([]string{fixture.statsPath})
@@ -285,6 +337,19 @@ func TestSummariseClickHouseActiveSnapshotPreflight(t *testing.T) {
 				return nil
 			}, nil
 		}
+		loadSummariseClickHouseSpool = func(
+			context.Context,
+			clickhouse.Config,
+			string,
+			*chspool.Manifest,
+			func(string, time.Duration),
+		) error {
+			So(summariseCompletionMarkerExists(fixture.outputDir), ShouldBeFalse)
+
+			closeCalled = true
+
+			return nil
+		}
 
 		err := run([]string{fixture.statsPath})
 		So(err, ShouldBeNil)
@@ -318,6 +383,15 @@ func TestSummariseClickHouseActiveSnapshotPreflight(t *testing.T) {
 				return errSummariseTestClose
 			}, nil
 		}
+		loadSummariseClickHouseSpool = func(
+			context.Context,
+			clickhouse.Config,
+			string,
+			*chspool.Manifest,
+			func(string, time.Duration),
+		) error {
+			return errSummariseTestClose
+		}
 
 		err := run([]string{fixture.statsPath})
 		So(errors.Is(err, errSummariseTestClose), ShouldBeTrue)
@@ -342,6 +416,7 @@ func snapshotSummariseGlobals() func() {
 	origClickHouseSnapshotIsActive := clickHouseSnapshotIsActive
 	origClickHouseCleanActiveSnapshotAttempt := clickHouseCleanActiveSnapshotAttempt
 	origWireSummariseClickHouseOperations := wireSummariseClickHouseOperations
+	origLoadSummariseClickHouseSpool := loadSummariseClickHouseSpool
 
 	return func() {
 		defaultDir = origDefaultDir
@@ -360,16 +435,17 @@ func snapshotSummariseGlobals() func() {
 		clickHouseSnapshotIsActive = origClickHouseSnapshotIsActive
 		clickHouseCleanActiveSnapshotAttempt = origClickHouseCleanActiveSnapshotAttempt
 		wireSummariseClickHouseOperations = origWireSummariseClickHouseOperations
+		loadSummariseClickHouseSpool = origLoadSummariseClickHouseSpool
 	}
 }
 
 func configureSummariseActiveSnapshotTest(outputDir string, allowActive bool) {
-	defaultDir = outputDir
-	userGroup = ""
-	groupUser = ""
+	defaultDir = ""
+	userGroup = filepath.Join(outputDir, "byusergroup.gz")
+	groupUser = filepath.Join(outputDir, "bygroup")
 	basedirsDB = ""
 	basedirsHistoryDB = ""
-	dirgutaDB = ""
+	dirgutaDB = filepath.Join(outputDir, dgutaDBsSuffix)
 	quotaPath = ""
 	basedirsConfig = ""
 	mounts = ""

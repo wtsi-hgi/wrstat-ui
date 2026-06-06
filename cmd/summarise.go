@@ -448,6 +448,11 @@ func prepareClickHouseSummariseTarget(
 		return nil, err
 	}
 
+	outputDir, err := summariseSpoolOutputDir()
+	if err != nil {
+		return nil, err
+	}
+
 	cfg, err := clickhouseSummariserConfig(mountpointsPath)
 	if err != nil {
 		return nil, err
@@ -458,7 +463,7 @@ func prepareClickHouseSummariseTarget(
 		mountPath:       mountPath,
 		mountpointsPath: mountpointsPath,
 		modtime:         modtime,
-		outputDir:       defaultDir,
+		outputDir:       outputDir,
 	}, nil
 }
 
@@ -604,6 +609,28 @@ func run(args []string) (err error) {
 		return err
 	}
 
+	setArgsDefaults()
+
+	modtime, err := statsFileModtime(args[0])
+	if err != nil {
+		return err
+	}
+
+	diag := newSummariseDiagnostics(args[0])
+	diag.setOutputDir(defaultDir)
+
+	defer diag.stopSignalHandler()
+
+	chTarget, err := prepareClickHouseSummariseTarget(mounts, modtime)
+	if err != nil {
+		return err
+	}
+
+	handled, err := maybeRunClickHouseSpoolSummarise(args[0], chTarget, diag)
+	if handled {
+		return err
+	}
+
 	r, modtime, err := openStatsFile(args[0])
 	if err != nil {
 		return err
@@ -613,13 +640,6 @@ func run(args []string) (err error) {
 	}()
 
 	s := summary.NewSummariser(stats.NewStatsParser(r))
-
-	setArgsDefaults()
-
-	diag := newSummariseDiagnostics(args[0])
-
-	diag.setOutputDir(defaultDir)
-	defer diag.stopSignalHandler()
 
 	setSummariseProgress(s, diag)
 
