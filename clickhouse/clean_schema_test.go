@@ -75,6 +75,19 @@ func TestCleanSchemaDDLContainsOnlyFinalV1Objects(t *testing.T) {
 		So(ddl, ShouldContainSubstring, "PARTITION BY (mount_path, snapshot_id)")
 		So(ddl, ShouldContainSubstring, "ORDER BY (mount_path, snapshot_id, gid, uid, ft, dir)")
 	})
+
+	Convey("wrstat_parent_facts is the mandatory parent-ordered navigation object", t, func() {
+		src, err := os.ReadFile(filepath.Join(
+			repoRootForCleanSchemaTest(t), cleanSchemaClickHouseDir, "schema", "014_parent_facts.sql",
+		))
+		So(err, ShouldBeNil)
+
+		ddl := strings.Join(strings.Fields(string(src)), " ")
+		So(ddl, ShouldContainSubstring, "CREATE TABLE IF NOT EXISTS wrstat_parent_facts")
+		So(ddl, ShouldContainSubstring, "PARTITION BY (mount_path, snapshot_id)")
+		So(ddl, ShouldContainSubstring, "ORDER BY (mount_path, snapshot_id, parent_dir, dir)")
+		So(ddl, ShouldContainSubstring, "has_children UInt8")
+	})
 }
 
 func TestCleanSchemaProductionCodeHasNoLegacyReferences(t *testing.T) {

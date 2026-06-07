@@ -948,6 +948,7 @@ func TestNewClientBootstrapsSchema(t *testing.T) {
 		So(tables, ShouldContain, "wrstat_children")
 		So(tables, ShouldContain, "wrstat_dir_projection_sets")
 		So(tables, ShouldContain, "wrstat_dir_filter_ageall")
+		So(tables, ShouldContain, "wrstat_parent_facts")
 		So(tables, ShouldContain, "wrstat_virtual_children")
 		So(tables, ShouldContain, "wrstat_virtual_children_sets")
 		So(tables, ShouldContain, "wrstat_active_prefix_rollups")
@@ -977,6 +978,10 @@ func TestNewClientBootstrapsSchema(t *testing.T) {
 		partitionKey, sortingKey := tableKeys(ctx, t, conn, cfg.Database, "wrstat_dir_filter_ageall")
 		So(partitionKey, ShouldEqual, "(mount_path, snapshot_id)")
 		So(sortingKey, ShouldEqual, "mount_path, snapshot_id, gid, uid, ft, dir")
+
+		partitionKey, sortingKey = tableKeys(ctx, t, conn, cfg.Database, "wrstat_parent_facts")
+		So(partitionKey, ShouldEqual, "(mount_path, snapshot_id)")
+		So(sortingKey, ShouldEqual, "mount_path, snapshot_id, parent_dir, dir")
 
 		partitionKey, sortingKey = tableKeys(ctx, t, conn, cfg.Database, "wrstat_active_prefix_rollups")
 		So(partitionKey, ShouldEqual, "active_set_id")

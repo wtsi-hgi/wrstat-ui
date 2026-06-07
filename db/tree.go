@@ -104,6 +104,12 @@ func NewTree(db Database) *Tree {
 	return &Tree{db: db}
 }
 
+// DirSummary returns only the summary for dir, without falling back to child
+// composition when dir itself has no matching rows.
+func (t *Tree) DirSummary(dir string, filter *Filter) (*DirSummary, error) {
+	return t.getSummaryInfo(dir, filter)
+}
+
 // DirInfo tells you the total number of files and their total size nested under
 // the given directory, along with the UIDs and GIDs that own those files.
 // See GUTAs.Summary for an explanation of the filter.
@@ -120,7 +126,7 @@ func (t *Tree) DirInfo(dir string, filter *Filter) (*DirInfo, error) {
 	}
 
 	if dcs == nil {
-		return nil, nil //nolint:nilnil
+		return t.dirInfoFromChildren(dir, filter)
 	}
 
 	di := &DirInfo{
@@ -135,6 +141,27 @@ func (t *Tree) DirInfo(dir string, filter *Filter) (*DirInfo, error) {
 	err = t.addChildInfo(di, children, filter)
 
 	return di, err
+}
+
+func (t *Tree) dirInfoFromChildren(dir string, filter *Filter) (*DirInfo, error) {
+	di := &DirInfo{
+		Current: &DirSummary{Dir: dir},
+	}
+
+	children, err := t.db.Children(dir)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := t.addChildInfo(di, children, filter); err != nil {
+		return nil, err
+	}
+
+	if len(di.Children) == 0 {
+		return nil, nil //nolint:nilnil
+	}
+
+	return di, nil
 }
 
 // DirHasChildren tells you if the given directory has any child directories

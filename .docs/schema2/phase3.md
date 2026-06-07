@@ -19,8 +19,8 @@ defaulting to `wrstat_parent_facts` unless projection or child facts meet the
 evidence requirements, covering all 4 acceptance tests from C1. This gate
 blocks final navigation implementation.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
 
 ### Item 3.2: C2 - Import Parent-Ordered Facts
 
@@ -31,8 +31,8 @@ facts in `clickhouse/schema/014_parent_facts.sql`,
 `clickhouse/parent_facts.go`, and `clickhouse/dguta_writer.go`, covering all
 6 acceptance tests from C2. Depends on the C1 decision.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
 
 ### Item 3.3: C3 - Route Disktree Through Navigation Facts
 
@@ -44,5 +44,5 @@ and `server/tree.go`, while preserving virtual parent and AgeAll filter
 routes, covering all 5 acceptance tests from C3. Depends on C2 import and
 readiness.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed

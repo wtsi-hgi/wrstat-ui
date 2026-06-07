@@ -232,6 +232,56 @@ func activeMountGroup(
 	return group
 }
 
+func remainingDirInfoGroup(
+	group *activeMountDirGroup,
+	handled map[string]bool,
+) *activeMountDirGroup {
+	if len(handled) == 0 {
+		return group
+	}
+
+	remaining := &activeMountDirGroup{
+		mount:        group.mount,
+		originalDirs: make(map[string]string),
+	}
+
+	for _, queryDir := range group.queryDirs {
+		if handled[queryDir] {
+			continue
+		}
+
+		remaining.queryDirs = append(remaining.queryDirs, queryDir)
+		remaining.originalDirs[queryDir] = group.originalDirs[queryDir]
+	}
+
+	return remaining
+}
+
+func parentFactDirInfoFallbackOrError(
+	group *activeMountDirGroup,
+	err error,
+) (*activeMountDirGroup, error) {
+	if isUnknownTable(err) {
+		recordParentFactsFallbackRoute()
+
+		return group, nil
+	}
+
+	return nil, err
+}
+
+func parentFactDirInfoRemainingGroup(
+	group *activeMountDirGroup,
+	handled map[string]bool,
+) *activeMountDirGroup {
+	remaining := remainingDirInfoGroup(group, handled)
+	if len(remaining.queryDirs) > 0 {
+		recordParentFactsFallbackRoute()
+	}
+
+	return remaining
+}
+
 type activeMountRootDirs struct {
 	mounts       []activeMount
 	originalDirs map[string][]string
@@ -1720,12 +1770,207 @@ func (d *clickHouseDatabase) addDirInfosForMount(
 	group *activeMountDirGroup,
 	filter *db.Filter,
 ) error {
+	group, err := d.addParentFactDirInfosForMount(result, group, filter)
+	if err != nil || len(group.queryDirs) == 0 {
+		return err
+	}
+
 	ok, err := d.addGroupedDirInfosForMount(result, group, filter)
 	if err != nil || ok {
 		return err
 	}
 
 	return d.addRawDirInfosForMount(result, group, filter)
+}
+
+func (d *clickHouseDatabase) addParentFactDirInfosForMount(
+	result map[string]*db.DirSummary,
+	group *activeMountDirGroup,
+	filter *db.Filter,
+) (*activeMountDirGroup, error) {
+	if !parentFactsCanHandleDirInfoFilter(filter) {
+		return group, nil
+	}
+
+	requests := parentFactDirInfoRequests(group)
+	if len(requests) == 0 {
+		return group, nil
+	}
+
+	ctx, cancel := configQueryContext(d.cfg)
+	defer cancel()
+
+	handled, err := d.addParentFactDirInfoRequestResults(ctx, result, group, requests, filter)
+	if err != nil {
+		return parentFactDirInfoFallbackOrError(group, err)
+	}
+
+	return parentFactDirInfoRemainingGroup(group, handled), nil
+}
+
+func parentFactsCanHandleDirInfoFilter(filter *db.Filter) bool {
+	if DefaultNavigationObject() != NavigationObjectParentFacts {
+		return false
+	}
+
+	return parentFactDirInfoFilterUsesParentFacts(filter)
+}
+
+func parentFactDirInfoRequests(group *activeMountDirGroup) map[string]map[string]bool {
+	requests := make(map[string]map[string]bool)
+
+	for _, queryDir := range group.queryDirs {
+		parentDir := parentFactsParentDir(queryDir)
+
+		requested := requests[parentDir]
+		if requested == nil {
+			requested = make(map[string]bool)
+			requests[parentDir] = requested
+		}
+
+		requested[queryDir] = true
+	}
+
+	return requests
+}
+
+func (d *clickHouseDatabase) addParentFactDirInfoRequestResults(
+	ctx context.Context,
+	result map[string]*db.DirSummary,
+	group *activeMountDirGroup,
+	requests map[string]map[string]bool,
+	filter *db.Filter,
+) (map[string]bool, error) {
+	handled := make(map[string]bool)
+
+	for _, parentDir := range sortedParentFactRequestDirs(requests) {
+		facts, err := parentFactDirInfoChildSummaries(ctx, d.conn, group.mount, parentDir, filter)
+		if err != nil {
+			return nil, err
+		}
+
+		d.addParentFactDirInfoResults(result, group, requests[parentDir], facts, handled, filter)
+	}
+
+	return handled, nil
+}
+
+func sortedParentFactRequestDirs(requests map[string]map[string]bool) []string {
+	parentDirs := make([]string, 0, len(requests))
+	for parentDir := range requests {
+		parentDirs = append(parentDirs, parentDir)
+	}
+
+	sort.Strings(parentDirs)
+
+	return parentDirs
+}
+
+func (d *clickHouseDatabase) addParentFactDirInfoResults(
+	result map[string]*db.DirSummary,
+	group *activeMountDirGroup,
+	requested map[string]bool,
+	facts []parentFactChildSummary,
+	handled map[string]bool,
+	filter *db.Filter,
+) {
+	for _, fact := range facts {
+		queryDir := ensureTrailingSlash(fact.Dir)
+		if !requested[queryDir] {
+			continue
+		}
+
+		handled[queryDir] = true
+		d.cacheParentFactDirInfoResult(group.mount, queryDir, filter, fact)
+
+		if fact.Summary == nil {
+			if fact.HasChildren {
+				originalDir := group.originalDirs[queryDir]
+				result[originalDir] = emptyParentFactDirSummary(originalDir, filter, group.mount.updatedAt)
+			}
+
+			continue
+		}
+
+		originalDir := group.originalDirs[queryDir]
+		fact.Summary.Dir = originalDir
+		result[originalDir] = fact.Summary
+	}
+}
+
+func emptyParentFactDirSummary(
+	dir string,
+	filter *db.Filter,
+	updatedAt time.Time,
+) *db.DirSummary {
+	var age db.DirGUTAge
+	if filter != nil {
+		age = filter.Age
+	}
+
+	return &db.DirSummary{
+		Dir:     dir,
+		Age:     age,
+		Modtime: updatedAt.UTC(),
+	}
+}
+
+func (d *clickHouseDatabase) cacheParentFactDirInfoResult(
+	mount activeMount,
+	queryDir string,
+	filter *db.Filter,
+	fact parentFactChildSummary,
+) {
+	mode, age, ok := parentFactChildCountCacheModeForFilter(filter)
+	if !ok {
+		return
+	}
+
+	summary := parentFactDirInfoSummaryForCache(fact, queryDir, filter, mount.updatedAt)
+	d.treeCache.putDirSummaryWithChildCount(
+		newTreeDirSummaryCacheKey(mount.mountPath, mount.snapshotID, queryDir, age, mode),
+		summary,
+		fact.ChildCount,
+	)
+
+	if fact.ChildCount == 0 {
+		d.treeCache.putChildren(newTreeCacheKey(mount.mountPath, mount.snapshotID, queryDir), nil)
+	}
+}
+
+func parentFactChildCountCacheModeForFilter(
+	filter *db.Filter,
+) (mountDirSummaryMode, db.DirGUTAge, bool) {
+	if filter == nil {
+		return mountDirSummaryAll, db.DGUTAgeAll, true
+	}
+
+	mode, ok := mountDirSummaryModeForFilter(filter)
+	if !ok {
+		return mountDirSummaryAll, db.DGUTAgeAll, false
+	}
+
+	return mode, filter.Age, true
+}
+
+func parentFactDirInfoSummaryForCache(
+	fact parentFactChildSummary,
+	queryDir string,
+	filter *db.Filter,
+	updatedAt time.Time,
+) *db.DirSummary {
+	if fact.Summary == nil {
+		if fact.HasChildren {
+			return emptyParentFactDirSummary(queryDir, filter, updatedAt)
+		}
+
+		return nil
+	}
+
+	summary := cloneDirSummary(fact.Summary)
+	summary.Dir = queryDir
+
+	return summary
 }
 
 func (d *clickHouseDatabase) addGroupedDirInfosForMount(
@@ -1851,6 +2096,11 @@ func (d *clickHouseDatabase) addDirsHaveChildrenForMount(
 	group *activeMountDirGroup,
 	filter *db.Filter,
 ) error {
+	group, err := d.addParentFactDirsHaveChildrenForMount(result, group, filter)
+	if err != nil || len(group.queryDirs) == 0 {
+		return err
+	}
+
 	parentsWithChildren, err := d.parentDirsWithFilteredChildrenForMount(group, filter)
 	if err != nil {
 		return err
@@ -1863,6 +2113,172 @@ func (d *clickHouseDatabase) addDirsHaveChildrenForMount(
 	}
 
 	return nil
+}
+
+func (d *clickHouseDatabase) addParentFactDirsHaveChildrenForMount(
+	result map[string]bool,
+	group *activeMountDirGroup,
+	filter *db.Filter,
+) (*activeMountDirGroup, error) {
+	if !parentFactsCanHandleDirsHaveChildrenFilter(filter) {
+		return group, nil
+	}
+
+	if parents, ok := d.parentDirsWithCachedChildCountsForMount(group, filter); ok {
+		for queryDir, hasChildren := range parents {
+			result[group.originalDirs[queryDir]] = hasChildren
+		}
+
+		return remainingDirInfoGroup(group, mapAllDirsHandled(group.queryDirs)), nil
+	}
+
+	ctx, cancel := configQueryContext(d.cfg)
+	defer cancel()
+
+	factsByDir, err := d.parentFactRowsByDir(ctx, group)
+	if err != nil {
+		if isUnknownTable(err) {
+			return group, nil
+		}
+
+		return nil, err
+	}
+
+	return d.addParentFactDirsHaveChildrenResults(ctx, result, group, filter, factsByDir)
+}
+
+func parentFactsCanHandleDirsHaveChildrenFilter(filter *db.Filter) bool {
+	if DefaultNavigationObject() != NavigationObjectParentFacts {
+		return false
+	}
+
+	if broadFilterCanUseChildRows(filter) {
+		return true
+	}
+
+	_, ok := mountDirSummaryModeForFilter(filter)
+
+	return ok
+}
+
+func mapAllDirsHandled(dirs []string) map[string]bool {
+	handled := make(map[string]bool, len(dirs))
+	for _, dir := range dirs {
+		handled[ensureTrailingSlash(dir)] = true
+	}
+
+	return handled
+}
+
+func (d *clickHouseDatabase) parentDirsWithCachedChildCountsForMount(
+	group *activeMountDirGroup,
+	filter *db.Filter,
+) (map[string]bool, bool) {
+	if !broadFilterCanUseChildRows(filter) {
+		return nil, false
+	}
+
+	mode, age, ok := parentFactChildCountCacheModeForFilter(filter)
+	if !ok {
+		return nil, false
+	}
+
+	_, handled, childCounts, missing := d.cachedMountDirSummaries(
+		group.mount.mountPath,
+		group.mount.snapshotID,
+		group.queryDirs,
+		age,
+		mode,
+	)
+	if len(missing) > 0 {
+		return nil, false
+	}
+
+	return maintainedChildCountParents(group.queryDirs, handled, childCounts, filter)
+}
+
+func (d *clickHouseDatabase) parentFactRowsByDir(
+	ctx context.Context,
+	group *activeMountDirGroup,
+) (map[string]parentFactChildSummary, error) {
+	requests := parentFactDirInfoRequests(group)
+	factsByDir := make(map[string]parentFactChildSummary)
+
+	for _, parentDir := range sortedParentFactRequestDirs(requests) {
+		facts, err := parentFactChildSummaries(ctx, d.conn, group.mount, parentDir, nil)
+		if err != nil {
+			return nil, err
+		}
+
+		addParentFactRowsByDir(factsByDir, facts)
+	}
+
+	return factsByDir, nil
+}
+
+func addParentFactRowsByDir(
+	factsByDir map[string]parentFactChildSummary,
+	facts []parentFactChildSummary,
+) {
+	for _, fact := range facts {
+		factsByDir[ensureTrailingSlash(fact.Dir)] = fact
+	}
+}
+
+func (d *clickHouseDatabase) addParentFactDirsHaveChildrenResults(
+	ctx context.Context,
+	result map[string]bool,
+	group *activeMountDirGroup,
+	filter *db.Filter,
+	factsByDir map[string]parentFactChildSummary,
+) (*activeMountDirGroup, error) {
+	handled := make(map[string]bool)
+
+	for _, queryDir := range group.queryDirs {
+		fact, ok := factsByDir[queryDir]
+		if !ok {
+			continue
+		}
+
+		hasChildren, err := d.parentFactDirHasChildren(ctx, group.mount, queryDir, fact, filter)
+		if err != nil {
+			return nil, err
+		}
+
+		handled[queryDir] = true
+		result[group.originalDirs[queryDir]] = hasChildren
+	}
+
+	return remainingDirInfoGroup(group, handled), nil
+}
+
+func (d *clickHouseDatabase) parentFactDirHasChildren(
+	ctx context.Context,
+	mount activeMount,
+	queryDir string,
+	fact parentFactChildSummary,
+	filter *db.Filter,
+) (bool, error) {
+	if broadFilterCanUseChildRows(filter) {
+		return fact.HasChildren, nil
+	}
+
+	facts, err := parentFactChildSummaries(ctx, d.conn, mount, queryDir, filter)
+	if err != nil {
+		return false, err
+	}
+
+	return parentFactSummariesHaveChildren(facts), nil
+}
+
+func parentFactSummariesHaveChildren(facts []parentFactChildSummary) bool {
+	for _, fact := range facts {
+		if fact.Summary != nil && fact.Summary.Count > 0 {
+			return true
+		}
+	}
+
+	return false
 }
 
 func (d *clickHouseDatabase) parentDirsWithFilteredChildrenForMount(
@@ -4277,6 +4693,14 @@ func (s *dgutaScanned) scanFromWithDir(rows rowsScanner, dir *string) error {
 	}
 
 	return nil
+}
+
+func parentFactDirInfoFilterUsesParentFacts(filter *db.Filter) bool {
+	if _, ok := mountDirSummaryModeForFilter(filter); ok {
+		return true
+	}
+
+	return !dirFilterAgeAllCanHandleFilter(filter)
 }
 
 func maintainedChildCountForDir(

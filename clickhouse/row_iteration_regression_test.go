@@ -105,7 +105,7 @@ func TestClickHouseRowIterationErrors(t *testing.T) {
 		client := &Client{
 			cfg:         Config{QueryTimeout: time.Second},
 			conn:        &iterationRegressionConn{rows: newIterationRegressionRows()},
-			mountPoints: basedirs.ValidateMountPoints([]string{"/mnt/"}),
+			mountPoints: basedirs.ValidateMountPoints([]string{testRootMountPath}),
 		}
 
 		_, err := client.PermissionAnyInDir(context.Background(), "/mnt/project", 1, nil)
@@ -157,7 +157,7 @@ func TestClickHouseRowIterationErrors(t *testing.T) {
 
 	Convey("active snapshot and provider helpers propagate ClickHouse iterator errors", t, func() {
 		conn := &iterationRegressionConn{rows: newIterationRegressionRows()}
-		_, _, err := readActiveSnapshotID(context.Background(), conn, "/mnt/")
+		_, _, err := readActiveSnapshotID(context.Background(), conn, testRootMountPath)
 		assertIterationError(err, "active snapshot iteration error")
 
 		provider := &chProvider{

@@ -41,9 +41,11 @@ import (
 
 	ch "github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
+	"github.com/google/uuid"
 	. "github.com/smartystreets/goconvey/convey"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 	"github.com/wtsi-hgi/wrstat-ui/internal/split"
+	internaltest "github.com/wtsi-hgi/wrstat-ui/internal/test"
 	"github.com/wtsi-hgi/wrstat-ui/summary"
 )
 
@@ -215,9 +217,9 @@ func TestClickHouseDatabaseFactsRoutingC1(t *testing.T) {
 		defer cancel()
 
 		So(conn.Exec(ctx, testInsertMountStmt, mountPath, time.Now(), sid, updatedAt), ShouldBeNil)
-		insertC1FactVector(ctx, conn, mountPath, sid.String(), dir, 7, 10, db.DGUTAFileTypeBam, db.DGUTAgeAll, 3)
-		insertC1FactVector(ctx, conn, mountPath, sid.String(), dir, 8, 11, db.DGUTAFileTypeCram, db.DGUTAgeAll, 5)
-		insertC1FactVector(ctx, conn, mountPath, sid.String(), dir, 7, 9, db.DGUTAFileTypeCram, db.DGUTAgeAll, 4)
+		insertC1FactVector(ctx, conn, mountPath, sid.String(), dir, 7, 10, db.DGUTAFileTypeBam, db.DGUTAgeA1M, 3)
+		insertC1FactVector(ctx, conn, mountPath, sid.String(), dir, 8, 11, db.DGUTAFileTypeCram, db.DGUTAgeA1M, 5)
+		insertC1FactVector(ctx, conn, mountPath, sid.String(), dir, 7, 9, db.DGUTAFileTypeCram, db.DGUTAgeA1M, 4)
 		So(writeMaintainedMountDirProjectionForTest(ctx, conn, activeMount{
 			mountPath:  mountPath,
 			snapshotID: sid.String(),
@@ -225,7 +227,7 @@ func TestClickHouseDatabaseFactsRoutingC1(t *testing.T) {
 		}), ShouldBeNil)
 
 		dbch := newClickHouseDatabase(cfg, cp.conn)
-		sum, err := dbch.DirInfo(dir, &db.Filter{GIDs: []uint32{7}, Age: db.DGUTAgeAll})
+		sum, err := dbch.DirInfo(dir, &db.Filter{GIDs: []uint32{7}, Age: db.DGUTAgeA1M})
 		So(err, ShouldBeNil)
 		So(sum, ShouldNotBeNil)
 		So(sum.Count, ShouldEqual, 7)
@@ -458,6 +460,284 @@ func factsQueriesMentionScalarSummaryColumns(queries []string) bool {
 	}
 
 	return false
+}
+
+func TestClickHouseDatabaseParentFactsDisktreeRoutingC3(t *testing.T) {
+	Convey("C3.1 ready parent facts route DiskTree child summaries through one parent range", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+		resetSharedTreeQueryCachesForTesting()
+		Reset(resetSharedTreeQueryCachesForTesting)
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 5 * time.Second
+		cfg.PollInterval = 0
+		cfg.MountPoints = []string{testT283ImagingMountPath}
+
+		parentDir := testT283ImagingMountPath + "wide/"
+		updatedAt := time.Date(2026, 6, 7, 16, 30, 0, 0, time.UTC)
+		seedC3ParentFactsDisktree(t, cfg, testT283ImagingMountPath, updatedAt, parentDir, 2)
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		countingConn := &parentFactsDisktreeRouteConn{Conn: conn}
+		actualTree := db.NewTree(newClickHouseDatabase(cfg, countingConn))
+		actual, err := actualTree.DirInfo(parentDir, nil)
+		So(err, ShouldBeNil)
+		So(actual.Current.Count, ShouldEqual, uint64(1))
+		So(actual.Children, ShouldHaveLength, 2)
+		So(actual.Children[0].Dir, ShouldEqual, parentDir+"child000")
+		So(actual.Children[0].Count, ShouldEqual, uint64(2))
+		So(actual.Children[0].Size, ShouldEqual, uint64(20))
+		So(actual.Children[1].Dir, ShouldEqual, parentDir+"child001")
+		So(actual.Children[1].Count, ShouldEqual, uint64(2))
+		So(actual.Children[1].Size, ShouldEqual, uint64(21))
+		So(countingConn.parentFactRangeQueries(), ShouldEqual, 1)
+		So(countingConn.parentFactScalarQueries(), ShouldEqual, 1)
+		So(countingConn.parentFactVectorQueries(), ShouldEqual, 0)
+		So(countingConn.dirFactsINQueries(), ShouldEqual, 0)
+
+		hasChildren := actualTree.DirsHaveChildren([]string{parentDir + "child000", parentDir + "child001"}, nil)
+		So(hasChildren, ShouldResemble, map[string]bool{
+			parentDir + "child000": true,
+			parentDir + "child001": false,
+		})
+		So(countingConn.parentFactRangeQueries(), ShouldEqual, 1)
+		So(countingConn.childrenBatchQueries(), ShouldEqual, 0)
+	})
+
+	Convey("C3.2 missing parent facts fall back to the legacy children plus facts route", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+		resetSharedTreeQueryCachesForTesting()
+		Reset(resetSharedTreeQueryCachesForTesting)
+		resetParentFactsFallbackRoutesForTest()
+		Reset(resetParentFactsFallbackRoutesForTest)
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 5 * time.Second
+		cfg.PollInterval = 0
+		cfg.MountPoints = []string{"/mnt/c3-fallback/"}
+
+		const mountPath = "/mnt/c3-fallback/"
+
+		parentDir := mountPath + "wide/"
+		updatedAt := time.Date(2026, 6, 7, 17, 0, 0, 0, time.UTC)
+		sid := seedC3ParentFactsDisktree(t, cfg, mountPath, updatedAt, parentDir, 2)
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		So(conn.Exec(ctx, dropParentFactsPartitionQuery, mountPath, sid.String()), ShouldBeNil)
+
+		expectedTree := db.NewTree(&clickHouseGenericTreeDB{
+			d: newClickHouseDatabase(cfg, conn),
+		})
+		expected, err := expectedTree.DirInfo(parentDir, nil)
+		So(err, ShouldBeNil)
+		So(expected.Children, ShouldHaveLength, 2)
+
+		resetSharedTreeQueryCachesForTesting()
+
+		countingConn := &parentFactsDisktreeRouteConn{Conn: conn}
+		actualTree := db.NewTree(newClickHouseDatabase(cfg, countingConn))
+		actual, err := actualTree.DirInfo(parentDir, nil)
+		So(err, ShouldBeNil)
+		So(actual, ShouldResemble, expected)
+		So(countingConn.parentFactRangeQueries(), ShouldEqual, 1)
+		So(countingConn.dirFactsINQueries(), ShouldBeGreaterThan, 0)
+		So(parentFactsFallbackRouteName(), ShouldEqual, "parent_facts_fallback")
+		So(parentFactsFallbackRoutes(), ShouldEqual, uint64(1))
+	})
+
+	Convey("C3.4 DiskTree child summary filters keep the intended table routes", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 5 * time.Second
+		cfg.PollInterval = 0
+		cfg.MountPoints = []string{"/mnt/c3-filters/"}
+
+		const mountPath = "/mnt/c3-filters/"
+
+		parentDir := mountPath + "wide/"
+		updatedAt := time.Date(2026, 6, 7, 17, 30, 0, 0, time.UTC)
+		seedC3ParentFactsDisktree(t, cfg, mountPath, updatedAt, parentDir, 2)
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		assertRoute := func(filter *db.Filter, parentFacts, ageAll, vector bool) {
+			resetSharedTreeQueryCachesForTesting()
+
+			countingConn := &parentFactsDisktreeRouteConn{Conn: conn}
+			tree := db.NewTree(newClickHouseDatabase(cfg, countingConn))
+			di, err := tree.DirInfo(parentDir, filter)
+			So(err, ShouldBeNil)
+			So(di.Children, ShouldNotBeEmpty)
+
+			if parentFacts {
+				So(countingConn.parentFactRangeQueries(), ShouldEqual, 1)
+			} else {
+				So(countingConn.parentFactRangeQueries(), ShouldEqual, 0)
+			}
+
+			assertParentFactsReadShape(countingConn, parentFacts, vector)
+
+			if ageAll {
+				So(countingConn.ageAllQueries(), ShouldBeGreaterThan, 0)
+			} else {
+				So(countingConn.ageAllQueries(), ShouldEqual, 0)
+			}
+		}
+
+		assertRoute(nil, true, false, false)
+		assertRoute(&db.Filter{Age: db.DGUTAgeAll}, true, false, false)
+		assertRoute(&db.Filter{FT: db.AllTypesExceptDirectories, Age: db.DGUTAgeAll}, true, false, false)
+		assertRoute(
+			&db.Filter{GIDs: []uint32{7}, UIDs: []uint32{11}, FT: db.DGUTAFileTypeBam, Age: db.DGUTAgeAll},
+			false,
+			true,
+			false,
+		)
+		assertRoute(
+			&db.Filter{GIDs: []uint32{7}, UIDs: []uint32{11}, FT: db.DGUTAFileTypeBam, Age: db.DGUTAgeA6M},
+			true,
+			false,
+			true,
+		)
+	})
+
+	Convey("C3.5 high-fanout DiskTree route reports one parent range and all children", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+		resetSharedTreeQueryCachesForTesting()
+		Reset(resetSharedTreeQueryCachesForTesting)
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 5 * time.Second
+		cfg.PollInterval = 0
+		cfg.MountPoints = []string{testT283ImagingMountPath}
+
+		parentDir := testT283ImagingMountPath + "fanout/"
+		updatedAt := time.Date(2026, 6, 7, 18, 0, 0, 0, time.UTC)
+		seedC3ParentFactsDisktree(t, cfg, testT283ImagingMountPath, updatedAt, parentDir, 305)
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		countingConn := &parentFactsDisktreeRouteConn{Conn: conn}
+		tree := db.NewTree(newClickHouseDatabase(cfg, countingConn))
+		di, err := tree.DirInfo(parentDir, nil)
+		So(err, ShouldBeNil)
+		So(di.Children, ShouldHaveLength, 305)
+		So(countingConn.parentFactRangeQueries(), ShouldEqual, 1)
+		So(countingConn.dirFactsINQueries(), ShouldEqual, 0)
+	})
+}
+
+func seedC3ParentFactsDisktree(
+	t *testing.T,
+	cfg Config,
+	mountPath string,
+	updatedAt time.Time,
+	parentDir string,
+	childCount int,
+) uuid.UUID {
+	t.Helper()
+
+	sid := snapshotID(mountPath, updatedAt)
+	paths := internaltest.NewDirectoryPathCreator()
+
+	w, err := NewDGUTAWriter(cfg)
+	So(err, ShouldBeNil)
+	w.SetMountPath(mountPath)
+	w.SetUpdatedAt(updatedAt)
+
+	So(w.Add(db.RecordDGUTA{
+		Dir:      paths.ToDirectoryPath(mountPath),
+		Children: []string{strings.TrimPrefix(parentDir, mountPath)},
+		GUTAs: db.GUTAs{
+			b1GUTA(7, 11, db.DGUTAFileTypeDir, db.DGUTAgeAll, 1, 1, 100, 200),
+		},
+	}), ShouldBeNil)
+
+	children := make([]string, childCount)
+	for i := range childCount {
+		children[i] = fmt.Sprintf("child%03d/", i)
+	}
+
+	childCountUint, err := strconv.ParseUint(strconv.Itoa(childCount), 10, 64)
+	So(err, ShouldBeNil)
+
+	So(w.Add(db.RecordDGUTA{
+		Dir:        paths.ToDirectoryPath(parentDir),
+		ChildCount: childCountUint,
+		Children:   children,
+		GUTAs: db.GUTAs{
+			b1GUTA(7, 11, db.DGUTAFileTypeDir, db.DGUTAgeAll, 1, 1, 100, 200),
+		},
+	}), ShouldBeNil)
+
+	for i, child := range children {
+		dir := parentDir + child
+
+		record := db.RecordDGUTA{
+			Dir: paths.ToDirectoryPath(dir),
+			GUTAs: db.GUTAs{
+				b1GUTA(uint32(7+i%3), uint32(11+i%5), db.DGUTAFileTypeBam, db.DGUTAgeAll, 2, uint64(20+i), 100, 200),
+				b1GUTA(uint32(7+i%3), uint32(11+i%5), db.DGUTAFileTypeBam, db.DGUTAgeA6M, 1, uint64(10+i), 90, 250),
+			},
+		}
+		if i == 0 {
+			record.ChildCount = 1
+			record.Children = []string{"leaf/"}
+		}
+
+		So(w.Add(record), ShouldBeNil)
+	}
+
+	So(w.Add(db.RecordDGUTA{
+		Dir: paths.ToDirectoryPath(parentDir + "child000/leaf/"),
+		GUTAs: db.GUTAs{
+			b1GUTA(7, 11, db.DGUTAFileTypeBam, db.DGUTAgeAll, 1, 10, 100, 200),
+		},
+	}), ShouldBeNil)
+	So(w.Close(), ShouldBeNil)
+
+	return sid
+}
+
+func assertParentFactsReadShape(
+	countingConn *parentFactsDisktreeRouteConn,
+	parentFacts bool,
+	vector bool,
+) {
+	if vector {
+		So(countingConn.parentFactVectorQueries(), ShouldEqual, 1)
+		So(countingConn.parentFactScalarQueries(), ShouldEqual, 0)
+
+		return
+	}
+
+	So(countingConn.parentFactVectorQueries(), ShouldEqual, 0)
+
+	if parentFacts {
+		So(countingConn.parentFactScalarQueries(), ShouldEqual, 1)
+	}
 }
 
 func TestClickHouseDatabaseDirInfo(t *testing.T) {
@@ -5239,6 +5519,90 @@ func (c *dirInfoSummaryQueryCountingConn) mountDirSummaryQueryCount() int {
 
 func (c *dirInfoSummaryQueryCountingConn) mountDirVectorQueryCount() int {
 	return int(c.mountVectorQueries.Load())
+}
+
+type parentFactsDisktreeRouteConn struct {
+	ch.Conn
+
+	ageAllReads           atomic.Int32
+	childrenBatchReads    atomic.Int32
+	dirFactsINReads       atomic.Int32
+	parentFactRangeReads  atomic.Int32
+	parentFactScalarReads atomic.Int32
+	parentFactVectorReads atomic.Int32
+}
+
+func (c *parentFactsDisktreeRouteConn) Query(ctx context.Context, query string, args ...any) (driver.Rows, error) {
+	if isParentFactsRangeQuery(query) {
+		c.parentFactRangeReads.Add(1)
+	}
+
+	if isParentFactsScalarReadQuery(query) {
+		c.parentFactScalarReads.Add(1)
+	}
+
+	if isParentFactsVectorReadQuery(query) {
+		c.parentFactVectorReads.Add(1)
+	}
+
+	if isDirFactsINReadQuery(query) {
+		c.dirFactsINReads.Add(1)
+	}
+
+	if isDirFilterAgeAllReadQuery(query) {
+		c.ageAllReads.Add(1)
+	}
+
+	if isChildrenBatchReadQuery(query) {
+		c.childrenBatchReads.Add(1)
+	}
+
+	return c.Conn.Query(ctx, query, args...)
+}
+
+func isParentFactsScalarReadQuery(query string) bool {
+	return isParentFactsRangeQuery(query) && !isParentFactsVectorReadQuery(query)
+}
+
+func isParentFactsVectorReadQuery(query string) bool {
+	normalised := strings.Join(strings.Fields(query), " ")
+
+	return isParentFactsRangeQuery(query) &&
+		strings.Contains(normalised, "gids, uids, fts, ages, counts")
+}
+
+func isDirFactsINReadQuery(query string) bool {
+	return strings.Contains(query, "FROM wrstat_dir_facts") &&
+		strings.Contains(query, "WHERE dir IN (")
+}
+
+func isChildrenBatchReadQuery(query string) bool {
+	return strings.Contains(query, "FROM wrstat_children") &&
+		strings.Contains(query, "WHERE parent_dir IN (")
+}
+
+func (c *parentFactsDisktreeRouteConn) ageAllQueries() int {
+	return int(c.ageAllReads.Load())
+}
+
+func (c *parentFactsDisktreeRouteConn) childrenBatchQueries() int {
+	return int(c.childrenBatchReads.Load())
+}
+
+func (c *parentFactsDisktreeRouteConn) dirFactsINQueries() int {
+	return int(c.dirFactsINReads.Load())
+}
+
+func (c *parentFactsDisktreeRouteConn) parentFactRangeQueries() int {
+	return int(c.parentFactRangeReads.Load())
+}
+
+func (c *parentFactsDisktreeRouteConn) parentFactScalarQueries() int {
+	return int(c.parentFactScalarReads.Load())
+}
+
+func (c *parentFactsDisktreeRouteConn) parentFactVectorQueries() int {
+	return int(c.parentFactVectorReads.Load())
 }
 
 type dirFactsReadinessGuardConn struct {

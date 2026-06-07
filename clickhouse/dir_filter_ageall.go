@@ -122,6 +122,7 @@ func (w *dirFilterAgeAllWriter) appendRecord(
 	parentDir string,
 	gutas db.GUTAs,
 	_ []string,
+	_ uint64,
 	_ []db.DirGUTAge,
 ) error {
 	for _, guta := range gutas {
@@ -172,6 +173,10 @@ func (w *dirFilterAgeAllWriter) flush(context.Context) error {
 
 func (w *dirFilterAgeAllWriter) abort() error {
 	return w.blockWriter().abort()
+}
+
+func (w *dirFilterAgeAllWriter) importPhase() string {
+	return ""
 }
 
 func (w *dirFilterAgeAllWriter) blockWriter() *importBlockWriter {

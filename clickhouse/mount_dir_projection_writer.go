@@ -43,6 +43,11 @@ var errDirProjectionBatchNotPrepared = errors.New("clickhouse: dir projection ba
 
 var zeroSummaryAgeBuckets summary.AgeBuckets //nolint:gochecknoglobals
 
+// NavigationObjectProjection identifies the ClickHouse projection navigation
+// candidate. It is selected only when C1 endpoint EXPLAIN evidence proves
+// projection use and parent-range pruning.
+const NavigationObjectProjection NavigationObject = "clickhouse_projection"
+
 type mountDirRecordSummary struct {
 	count        uint64
 	size         uint64

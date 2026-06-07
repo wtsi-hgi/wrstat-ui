@@ -38,6 +38,7 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/db"
 	"github.com/wtsi-hgi/wrstat-ui/internal/boltperf"
 	"github.com/wtsi-hgi/wrstat-ui/internal/mountpath"
+	"github.com/wtsi-hgi/wrstat-ui/internal/perfreport"
 	"github.com/wtsi-hgi/wrstat-ui/provider"
 )
 
@@ -47,14 +48,15 @@ var (
 )
 
 const (
-	explainPruningOutput = "mount_path partition pruning\nparent_dir key condition"
-	queryTestNFSTeamPath = "/nfs/team/"
-	queryOpTestChildADir = "/root/a/"
-	queryOpTestChildBDir = "/root/b/"
-	queryOpTestGrandDir  = "/root/a/grand/"
-	queryOpTestRootDir   = "/root/"
-	queryTestBamExt      = "bam"
-	queryTestNoMatchGID  = 404
+	explainPruningOutput     = "mount_path partition pruning\nparent_dir key condition"
+	navigationGateWinningP95 = 4
+	queryTestNFSTeamPath     = "/nfs/team/"
+	queryOpTestChildADir     = "/root/a/"
+	queryOpTestChildBDir     = "/root/b/"
+	queryOpTestGrandDir      = "/root/a/grand/"
+	queryOpTestRootDir       = "/root/"
+	queryTestBamExt          = "bam"
+	queryTestNoMatchGID      = 404
 )
 
 func TestDecodeMountPaths(t *testing.T) {
@@ -1527,4 +1529,341 @@ func (d *queryOpTestDB) Info() (*db.Info, error) {
 
 func (d *queryOpTestDB) Close() error {
 	return nil
+}
+
+func TestNavigationDecisionGateC1(t *testing.T) {
+	Convey("navigation reports carry timing, counters, result counts, and EXPLAIN for all shapes", t, func() {
+		evidence := navigationGateTestEvidence()
+
+		result := ValidateNavigationDecisionGate(evidence)
+
+		So(result.Checks[0].Passed, ShouldBeTrue)
+
+		for _, shape := range []string{
+			navigationShapeParentFacts,
+			navigationShapeChildFacts,
+			navigationShapeProjection,
+		} {
+			for _, scenario := range []string{navigationScenarioHighFanout, navigationScenarioFiltered} {
+				op, ok := navigationCandidateOperation(evidence.QueryReports, shape, scenario)
+				So(ok, ShouldBeTrue)
+				So(op.P50MS, ShouldBeGreaterThan, 0)
+				So(op.P95MS, ShouldBeGreaterThan, 0)
+				So(op.P99MS, ShouldBeGreaterThan, 0)
+				So(op.ReadRows, ShouldNotBeEmpty)
+				So(op.ReadBytes, ShouldNotBeEmpty)
+				So(op.ReadMarks, ShouldNotBeEmpty)
+				So(op.ResultCount, ShouldNotBeEmpty)
+				So(stringInput(op.Inputs, navigationInputExplainOutput), ShouldContainSubstring, "EXPLAIN indexes = 1")
+			}
+		}
+	})
+
+	Convey("parent facts subset prototype records high-fanout p50 within the C2 gate", t, func() {
+		evidence := navigationGateTestEvidence()
+		op, ok := navigationCandidateOperation(
+			evidence.QueryReports,
+			navigationShapeParentFacts,
+			navigationScenarioHighFanout,
+		)
+
+		So(ok, ShouldBeTrue)
+		So(op.P50MS, ShouldBeLessThanOrEqualTo, float64(5))
+		So(op.ResultCount, ShouldResemble, []uint64{305, 305, 305, 305, 305})
+	})
+
+	Convey("navigation report evidence rejects arbitrary non-EXPLAIN text for every shape", t, func() {
+		for _, shape := range []string{
+			navigationShapeParentFacts,
+			navigationShapeChildFacts,
+			navigationShapeProjection,
+		} {
+			evidence := navigationGateTestEvidence()
+			setNavigationCandidateInput(
+				&evidence,
+				shape,
+				navigationScenarioHighFanout,
+				navigationInputExplainOutput,
+				"not an EXPLAIN indexes query",
+			)
+
+			result := ValidateNavigationDecisionGate(evidence)
+
+			So(result.Checks[0].Passed, ShouldBeFalse)
+			So(result.Checks[0].Detail, ShouldContainSubstring, shape)
+		}
+	})
+
+	Convey("projection is selected only with broad and filtered projection pruning evidence", t, func() {
+		evidence := navigationGateTestEvidence()
+		setNavigationCandidateWinningP95(&evidence, navigationShapeProjection)
+
+		result := ValidateNavigationDecisionGate(evidence)
+
+		So(result.SelectedObject, ShouldEqual, navigationShapeProjection)
+		So(result.Checks[1].Passed, ShouldBeTrue)
+
+		for reportIndex := range evidence.QueryReports {
+			for opIndex := range evidence.QueryReports[reportIndex].Operations {
+				op := &evidence.QueryReports[reportIndex].Operations[opIndex]
+				if navigationCandidateMatches(*op, navigationShapeProjection, navigationScenarioFiltered) {
+					op.Inputs[navigationInputExplainOutput] = explainPruningOutput
+				}
+			}
+		}
+
+		result = ValidateNavigationDecisionGate(evidence)
+
+		So(result.SelectedObject, ShouldEqual, navigationShapeParentFacts)
+		So(result.Checks[1].Passed, ShouldBeFalse)
+		So(result.Checks[1].Detail, ShouldContainSubstring, "projection")
+	})
+
+	Convey("projection evidence must name the selected projection", t, func() {
+		evidence := navigationGateTestEvidence()
+		setNavigationCandidateWinningP95(&evidence, navigationShapeProjection)
+		setNavigationCandidateInput(
+			&evidence,
+			navigationShapeProjection,
+			navigationScenarioFiltered,
+			navigationInputProjectionName,
+			"",
+		)
+
+		result := ValidateNavigationDecisionGate(evidence)
+
+		So(result.SelectedObject, ShouldEqual, navigationShapeParentFacts)
+		So(result.Checks[1].Passed, ShouldBeFalse)
+		So(result.Checks[1].Detail, ShouldContainSubstring, "projection")
+	})
+
+	Convey("child facts require faster filtered AgeAll evidence, one parent range, import gates, and exact results",
+		t, func() {
+			evidence := navigationGateTestEvidence()
+			setNavigationCandidateWinningP95(&evidence, navigationShapeChildFacts)
+
+			result := ValidateNavigationDecisionGate(evidence)
+
+			So(result.SelectedObject, ShouldEqual, navigationShapeChildFacts)
+			So(result.Checks[2].Passed, ShouldBeTrue)
+
+			for reportIndex := range evidence.QueryReports {
+				for opIndex := range evidence.QueryReports[reportIndex].Operations {
+					op := &evidence.QueryReports[reportIndex].Operations[opIndex]
+					if navigationCandidateMatches(*op, navigationShapeChildFacts, navigationScenarioFiltered) {
+						op.Inputs[navigationInputResultDigest] = "different"
+					}
+				}
+			}
+
+			result = ValidateNavigationDecisionGate(evidence)
+
+			So(result.SelectedObject, ShouldEqual, navigationShapeParentFacts)
+			So(result.Checks[2].Passed, ShouldBeFalse)
+			So(result.Checks[2].Detail, ShouldContainSubstring, "exact")
+		})
+
+	Convey("child facts allow a filtered AgeAll owner/type companion read", t, func() {
+		evidence := navigationGateTestEvidence()
+		setNavigationCandidateWinningP95(&evidence, navigationShapeChildFacts)
+		setNavigationCandidateInput(
+			&evidence,
+			navigationShapeChildFacts,
+			navigationScenarioFiltered,
+			navigationInputParentRangeReads,
+			uint64(0),
+		)
+		setNavigationCandidateInput(
+			&evidence,
+			navigationShapeChildFacts,
+			navigationScenarioFiltered,
+			navigationInputAgeAllCompanionRead,
+			"wrstat_dir_filter_ageall owner/type lookup",
+		)
+
+		result := ValidateNavigationDecisionGate(evidence)
+
+		So(result.SelectedObject, ShouldEqual, navigationShapeChildFacts)
+		So(result.Checks[2].Passed, ShouldBeTrue)
+	})
+
+	Convey("child facts reject companion reads outside filtered AgeAll owner/type evidence", t, func() {
+		evidence := navigationGateTestEvidence()
+		setNavigationCandidateWinningP95(&evidence, navigationShapeChildFacts)
+		setNavigationCandidateInput(
+			&evidence,
+			navigationShapeChildFacts,
+			navigationScenarioHighFanout,
+			navigationInputParentRangeReads,
+			uint64(0),
+		)
+		setNavigationCandidateInput(
+			&evidence,
+			navigationShapeChildFacts,
+			navigationScenarioHighFanout,
+			navigationInputAgeAllCompanionRead,
+			"wrstat_dir_filter_ageall owner/type lookup",
+		)
+
+		result := ValidateNavigationDecisionGate(evidence)
+
+		So(result.SelectedObject, ShouldEqual, navigationShapeParentFacts)
+		So(result.Checks[2].Passed, ShouldBeFalse)
+		So(result.Checks[2].Detail, ShouldContainSubstring, "read-shape")
+	})
+
+	Convey("child facts reject empty UID and GID slices as AgeAll owner/type evidence", t, func() {
+		evidence := navigationGateTestEvidence()
+		setNavigationCandidateWinningP95(&evidence, navigationShapeChildFacts)
+		setNavigationCandidateInput(
+			&evidence,
+			navigationShapeChildFacts,
+			navigationScenarioFiltered,
+			queryInputFilterGIDsKey,
+			[]uint32{},
+		)
+		setNavigationCandidateInput(
+			&evidence,
+			navigationShapeChildFacts,
+			navigationScenarioFiltered,
+			queryInputFilterUIDsKey,
+			[]uint32{},
+		)
+		setNavigationCandidateInput(
+			&evidence,
+			navigationShapeChildFacts,
+			navigationScenarioFiltered,
+			queryInputFilterFileTypeMaskKey,
+			0,
+		)
+
+		result := ValidateNavigationDecisionGate(evidence)
+
+		So(result.SelectedObject, ShouldEqual, navigationShapeParentFacts)
+		So(result.Checks[2].Passed, ShouldBeFalse)
+		So(result.Checks[2].Detail, ShouldContainSubstring, "AgeAll")
+		So(treeFilterHasOwnerOrTypePredicate(&db.Filter{
+			GIDs: []uint32{},
+			UIDs: []uint32{},
+			Age:  db.DGUTAgeAll,
+		}), ShouldBeFalse)
+	})
+
+	Convey("parent facts remain selected when no alternative beats the evidence gate", t, func() {
+		evidence := navigationGateTestEvidence()
+
+		result := ValidateNavigationDecisionGate(evidence)
+
+		So(result.SelectedObject, ShouldEqual, navigationShapeParentFacts)
+		So(result.Checks[3].Passed, ShouldBeTrue)
+		So(result.Checks[3].Detail, ShouldContainSubstring, "wrstat_parent_facts")
+	})
+}
+
+func navigationGateTestEvidence() NavigationDecisionEvidence {
+	queryReport := perfreport.NewReport("clickhouse", "", 5, 0)
+	for _, scenario := range []string{navigationScenarioHighFanout, navigationScenarioFiltered} {
+		navigationGateAddCandidate(&queryReport, navigationShapeParentFacts, scenario, 5)
+		navigationGateAddCandidate(&queryReport, navigationShapeChildFacts, scenario, 6)
+		navigationGateAddCandidate(&queryReport, navigationShapeProjection, scenario, 6)
+	}
+
+	importReport := perfreport.NewReport("clickhouse", "", 1, 0)
+	importReport.MaxRSSBytes = 128 * 1024 * 1024
+	importReport.TableStats = map[string]perfreport.TableStats{
+		navigationShapeChildFacts: {Rows: 35_005},
+		tableChildren:             {Rows: 35_005},
+		tableDirSummary:           {Rows: 35_006},
+		tableDirSummarySets:       {Rows: 1},
+		tableFiles:                {Rows: 100_000},
+	}
+	importReport.AddOperation("import_total", map[string]any{importInputRecords: uint64(100_000)}, []float64{1})
+
+	return NavigationDecisionEvidence{
+		ImportReports: []perfreport.Report{importReport},
+		QueryReports:  []perfreport.Report{queryReport},
+	}
+}
+
+func navigationGateAddCandidate(
+	report *perfreport.Report,
+	shape string,
+	scenario string,
+	durationMS float64,
+) {
+	inputs := navigationGateCandidateInputs(shape, scenario)
+	report.AddOperationWithCounters(
+		"navigation_shape_candidate",
+		inputs,
+		[]float64{durationMS, durationMS, durationMS, durationMS, durationMS},
+		[]uint64{100, 100, 100, 100, 100},
+		[]uint64{200, 200, 200, 200, 200},
+		[]uint64{1, 1, 1, 1, 1},
+		[]uint64{305, 305, 305, 305, 305},
+	)
+}
+
+func navigationGateCandidateInputs(shape string, scenario string) map[string]any {
+	inputs := treeOpInputs(&db.Filter{
+		GIDs: []uint32{7},
+		FT:   db.DGUTAFileTypeBam,
+		Age:  db.DGUTAgeAll,
+	}, map[string]any{
+		navigationInputShape:            shape,
+		navigationInputScenario:         scenario,
+		navigationInputChildCount:       uint64(navigationMinHighFanoutChildren),
+		navigationInputParentRangeReads: uint64(1),
+		navigationInputResultDigest:     scenario + "-digest",
+		navigationInputProjectionName:   "wrstat_parent_facts_projection",
+		navigationInputExplainOutput: "EXPLAIN indexes = 1\n" +
+			"Projection wrstat_parent_facts_projection\n" +
+			explainPruningOutput,
+	})
+
+	if scenario == navigationScenarioHighFanout {
+		inputs[queryInputFilterGIDsKey] = []uint32(nil)
+		inputs[queryInputFilterFileTypeMaskKey] = 0
+	}
+
+	return inputs
+}
+
+func setNavigationCandidateInput(
+	evidence *NavigationDecisionEvidence,
+	shape string,
+	scenario string,
+	key string,
+	value any,
+) {
+	for reportIndex := range evidence.QueryReports {
+		for opIndex := range evidence.QueryReports[reportIndex].Operations {
+			op := &evidence.QueryReports[reportIndex].Operations[opIndex]
+			if navigationCandidateMatches(*op, shape, scenario) {
+				op.Inputs[key] = value
+			}
+		}
+	}
+}
+
+func setNavigationCandidateWinningP95(
+	evidence *NavigationDecisionEvidence,
+	shape string,
+) {
+	for reportIndex := range evidence.QueryReports {
+		for opIndex := range evidence.QueryReports[reportIndex].Operations {
+			op := &evidence.QueryReports[reportIndex].Operations[opIndex]
+			if navigationShape(*op) != shape {
+				continue
+			}
+
+			op.DurationsMS = []float64{
+				navigationGateWinningP95,
+				navigationGateWinningP95,
+				navigationGateWinningP95,
+				navigationGateWinningP95,
+				navigationGateWinningP95,
+			}
+			op.P50MS, op.P95MS, op.P99MS = perfreport.PercentilesMS(op.DurationsMS)
+		}
+	}
 }

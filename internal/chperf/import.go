@@ -63,6 +63,7 @@ const (
 	phaseFilesFlush         = "wrstat_files_flush"
 	phaseDGUTAInsert        = "wrstat_dguta_insert"
 	phaseChildrenInsert     = "wrstat_children_insert"
+	phaseParentFactsInsert  = "wrstat_parent_facts_insert"
 	phaseDirProjectionWrite = "wrstat_dir_projection_insert"
 	phaseMountSwitch        = "mount_switch"
 	phaseTreeSummaryRefresh = "wrstat_tree_summary_refresh"
@@ -79,6 +80,7 @@ const (
 	tableFiles                = "wrstat_files"
 	tableDGUTA                = "wrstat_dguta"
 	tableChildren             = "wrstat_children"
+	tableParentFacts          = "wrstat_parent_facts"
 	tableDirSummary           = "wrstat_dir_facts"
 	tableDirSummarySets       = "wrstat_dir_projection_sets"
 	tableDirDGUTAVector       = "wrstat_dir_facts"
@@ -108,6 +110,7 @@ const (
 	importInputDataset   = "dataset"
 	importInputStatsPath = "stats_path"
 	importInputMountPath = "mount_path"
+	importInputRecords   = "records"
 )
 
 // ErrNoDatasets indicates no dataset directories were found.
@@ -198,7 +201,7 @@ func addImportReportOperations(
 
 	report.AddOperation("import_total", map[string]any{
 		"datasets":                   len(results),
-		"records":                    totalRecords,
+		importInputRecords:           totalRecords,
 		"parallelism":                parallelism,
 		"mode":                       importMode(parallelism),
 		"throughput_records_per_sec": throughputPerSecond(totalRecords, totalDuration),
@@ -262,6 +265,8 @@ func importMainTablePhase(phase string) (string, bool) {
 		return tableDGUTA, true
 	case phaseChildrenInsert:
 		return tableChildren, true
+	case phaseParentFactsInsert:
+		return tableParentFacts, true
 	default:
 		return "", false
 	}
@@ -290,6 +295,7 @@ func importMultiTablePhase(phase string) ([]string, bool) {
 		return []string{
 			tableDGUTA,
 			tableChildren,
+			tableParentFacts,
 			tableFiles,
 			tableDirSummary,
 			tableDirSummarySets,
@@ -469,6 +475,7 @@ func baseImportSelectedTables() []string {
 		tableFiles,
 		tableDirSummary,
 		tableChildren,
+		tableParentFacts,
 		tableDirSummarySets,
 		tableBasedirsGroupUsage,
 		tableBasedirsUserUsage,
@@ -1198,6 +1205,7 @@ func (w *trackedDGUTAWriter) Add(record db.RecordDGUTA) error {
 	if err == nil {
 		w.metrics.addRows(tableDGUTA, countDGUTARows(record, w.mountPath))
 		w.metrics.addRows(tableChildren, countChildrenRows(record.Children))
+		w.metrics.addRows(tableParentFacts, countParentFactsRows(record))
 	}
 
 	return err
@@ -1216,6 +1224,14 @@ func countDGUTARows(record db.RecordDGUTA, mountPath string) uint64 {
 	}
 
 	return rows
+}
+
+func countParentFactsRows(record db.RecordDGUTA) uint64 {
+	if record.Dir == nil {
+		return 0
+	}
+
+	return 1
 }
 
 func countChildrenRows(children []string) uint64 {

@@ -727,7 +727,7 @@ func importRowsPass(report perfreport.Report) bool {
 }
 
 func importRowAmplificationPass(report perfreport.Report, total perfreport.Operation) bool {
-	records := uint64Input(total.Inputs, "records")
+	records := uint64Input(total.Inputs, importInputRecords)
 	if records == 0 {
 		return false
 	}

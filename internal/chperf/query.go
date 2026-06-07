@@ -37,6 +37,7 @@ import (
 	"time"
 
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
+	"github.com/wtsi-hgi/wrstat-ui/clickhouse"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 	"github.com/wtsi-hgi/wrstat-ui/internal/mountpath"
 	"github.com/wtsi-hgi/wrstat-ui/internal/perfreport"
@@ -109,6 +110,21 @@ const (
 	queryStartupStageBackgroundProvider   = "background_provider_polling_or_update_after_initial_readers"
 	queryStartupStageLazyInteraction      = "lazy_during_user_or_perf_interactions"
 	queryStartupStageSynchronousInitial   = "synchronous_before_server_started"
+	navigationShapeParentFacts            = string(clickhouse.NavigationObjectParentFacts)
+	navigationShapeChildFacts             = string(clickhouse.NavigationObjectChildFacts)
+	navigationShapeProjection             = string(clickhouse.NavigationObjectProjection)
+	navigationScenarioHighFanout          = "high_fanout_305_children"
+	navigationScenarioFiltered            = "filtered_ageall_owner_type"
+	navigationInputShape                  = "navigation_shape"
+	navigationInputScenario               = "navigation_scenario"
+	navigationInputExplainOutput          = "explain_indexes_1_output"
+	navigationInputProjectionName         = "projection_name"
+	navigationInputChildCount             = "high_fanout_child_count"
+	navigationInputParentRangeReads       = "parent_range_reads"
+	navigationInputAgeAllCompanionRead    = "ageall_companion_read"
+	navigationInputResultDigest           = "result_digest"
+	navigationMinHighFanoutChildren       = 305
+	navigationChildFactsImprovement       = 0.15
 )
 
 var (
@@ -247,6 +263,31 @@ func treeFilterFromOptions(filter *db.Filter) *db.Filter {
 		FT:   filter.FT,
 		Age:  filter.Age,
 	}
+}
+
+func finalDirSummary(tree *db.Tree, current string, filter *db.Filter) bool {
+	summary, err := tree.DirSummary(current, filter)
+
+	return err != nil || summary == nil || representativeDirSummary(summary)
+}
+
+func representativeDirSummary(summary *db.DirSummary) bool {
+	if summary == nil {
+		return false
+	}
+
+	count := summary.Count
+
+	return count >= dirPickMinCount && count <= dirPickMaxCount
+}
+
+func nextDirInfo(tree *db.Tree, current string, filter *db.Filter) (*db.DirInfo, bool) {
+	info, err := tree.DirInfo(current, filter)
+	if err != nil || missingDirInfo(info) {
+		return nil, false
+	}
+
+	return info, true
 }
 
 func missingDirInfo(info *db.DirInfo) bool {
@@ -464,7 +505,11 @@ func treeFilterHasEmptyIDPredicate(filter *db.Filter) bool {
 }
 
 func treeFilterHasOwnerOrTypePredicate(filter *db.Filter) bool {
-	return filter.GIDs != nil || filter.UIDs != nil || filter.FT != 0
+	if filter == nil {
+		return false
+	}
+
+	return len(filter.GIDs) > 0 || len(filter.UIDs) > 0 || filter.FT != 0
 }
 
 func treeFilterIndexGate(filter *db.Filter) string {
@@ -1548,6 +1593,498 @@ type queryRepeatSample struct {
 	resultCount uint64
 }
 
+// NavigationDecisionEvidence contains the query/import report evidence used by
+// the C1 bounded navigation decision gate.
+type NavigationDecisionEvidence struct {
+	ImportReports []perfreport.Report
+	QueryReports  []perfreport.Report
+}
+
+func navigationProjectionPasses(e NavigationDecisionEvidence) bool {
+	if !navigationProjectionExplainPasses(e) {
+		return false
+	}
+
+	return navigationCandidateAtLeastAsFast(e, navigationShapeProjection, navigationScenarioHighFanout) &&
+		navigationCandidateAtLeastAsFast(e, navigationShapeProjection, navigationScenarioFiltered)
+}
+
+func navigationProjectionExplainPasses(e NavigationDecisionEvidence) bool {
+	return navigationProjectionExplainPassesScenario(e, navigationScenarioHighFanout) &&
+		navigationProjectionExplainPassesScenario(e, navigationScenarioFiltered)
+}
+
+func navigationProjectionExplainPassesScenario(e NavigationDecisionEvidence, scenario string) bool {
+	op, ok := navigationCandidateOperation(e.QueryReports, navigationShapeProjection, scenario)
+	if !ok {
+		return false
+	}
+
+	return ExplainUsesProjectionPruning(
+		stringInput(op.Inputs, navigationInputExplainOutput),
+		stringInput(op.Inputs, navigationInputProjectionName),
+	)
+}
+
+func navigationCandidateOperation(
+	reports []perfreport.Report,
+	shape string,
+	scenario string,
+) (perfreport.Operation, bool) {
+	for _, report := range reports {
+		for _, op := range report.Operations {
+			if navigationCandidateMatches(op, shape, scenario) {
+				return op, true
+			}
+		}
+	}
+
+	return perfreport.Operation{}, false
+}
+
+func navigationCandidateMatches(op perfreport.Operation, shape string, scenario string) bool {
+	return navigationShape(op) == shape && navigationScenario(op) == scenario
+}
+
+func navigationShape(op perfreport.Operation) string {
+	return stringInput(op.Inputs, navigationInputShape)
+}
+
+func navigationScenario(op perfreport.Operation) string {
+	return stringInput(op.Inputs, navigationInputScenario)
+}
+
+// ExplainUsesProjectionPruning reports whether EXPLAIN indexes = 1 output
+// names the projection and shows mount/parent pruning.
+func ExplainUsesProjectionPruning(explain string, projectionName string) bool {
+	if !explainIndexes1Output(explain) || !ExplainHasPruning(explain) {
+		return false
+	}
+
+	normalised := strings.ToLower(explain)
+	if !explainNamesProjection(normalised) {
+		return false
+	}
+
+	projectionName = strings.ToLower(strings.TrimSpace(projectionName))
+	if projectionName == "" {
+		return false
+	}
+
+	return strings.Contains(normalised, projectionName)
+}
+
+func explainIndexes1Output(explain string) bool {
+	normalised := strings.ToLower(strings.Join(strings.Fields(explain), " "))
+
+	return strings.Contains(normalised, "explain indexes = 1") ||
+		strings.Contains(normalised, "explain indexes=1")
+}
+
+func explainNamesProjection(explain string) bool {
+	return strings.Contains(explain, "projection")
+}
+
+func navigationCandidateAtLeastAsFast(
+	e NavigationDecisionEvidence,
+	shape string,
+	scenario string,
+) bool {
+	candidate := navigationCandidateP95(e, shape, scenario)
+	parent := navigationCandidateP95(e, navigationShapeParentFacts, scenario)
+
+	return candidate > 0 && parent > 0 && candidate <= parent
+}
+
+func navigationChildFactsPasses(e NavigationDecisionEvidence) bool {
+	return navigationChildFactsSpeedPasses(e) &&
+		navigationChildFactsResultsMatch(e) &&
+		navigationChildFactsReadShapePasses(e) &&
+		navigationChildFactsFilteredAgeAllPasses(e) &&
+		navigationImportGatesPass(e.ImportReports)
+}
+
+func navigationImportGatesPass(reports []perfreport.Report) bool {
+	if len(reports) == 0 {
+		return false
+	}
+
+	for _, report := range reports {
+		if !navigationImportReportPasses(report) {
+			return false
+		}
+	}
+
+	return true
+}
+
+func navigationImportReportPasses(report perfreport.Report) bool {
+	return report.MaxRSSBytes > 0 &&
+		report.MaxRSSBytes <= finalGateT283ImportRSSBytes &&
+		navigationRowAmplificationPasses(report)
+}
+
+func navigationRowAmplificationPasses(report perfreport.Report) bool {
+	total, ok := firstOperation(report, "import_total", nil)
+	if !ok {
+		return false
+	}
+
+	records := uint64Input(total.Inputs, importInputRecords)
+	if records == 0 {
+		return false
+	}
+
+	stats, ok := report.TableStats[navigationShapeChildFacts]
+	if !ok || stats.Rows == 0 {
+		return false
+	}
+
+	return float64(stats.Rows)/float64(records) <= 1.70059
+}
+
+func navigationChildFactsSpeedPasses(e NavigationDecisionEvidence) bool {
+	return navigationCandidateBeatsParentBy(
+		e,
+		navigationShapeChildFacts,
+		navigationScenarioHighFanout,
+		navigationChildFactsImprovement,
+	) &&
+		navigationCandidateBeatsParentBy(
+			e,
+			navigationShapeChildFacts,
+			navigationScenarioFiltered,
+			navigationChildFactsImprovement,
+		)
+}
+
+func navigationCandidateBeatsParentBy(
+	e NavigationDecisionEvidence,
+	shape string,
+	scenario string,
+	improvement float64,
+) bool {
+	candidate := navigationCandidateP95(e, shape, scenario)
+	parent := navigationCandidateP95(e, navigationShapeParentFacts, scenario)
+
+	return candidate > 0 && parent > 0 && candidate <= parent*(1-improvement)
+}
+
+func navigationChildFactsResultsMatch(e NavigationDecisionEvidence) bool {
+	for _, scenario := range []string{navigationScenarioHighFanout, navigationScenarioFiltered} {
+		parent, parentOK := navigationCandidateOperation(e.QueryReports, navigationShapeParentFacts, scenario)
+
+		child, childOK := navigationCandidateOperation(e.QueryReports, navigationShapeChildFacts, scenario)
+		if !parentOK || !childOK || !navigationResultDigestMatches(parent, child) {
+			return false
+		}
+	}
+
+	return true
+}
+
+func navigationResultDigestMatches(a, b perfreport.Operation) bool {
+	aDigest := stringInput(a.Inputs, navigationInputResultDigest)
+	bDigest := stringInput(b.Inputs, navigationInputResultDigest)
+
+	return aDigest != "" && aDigest == bDigest && resultCountsStable(a) && resultCountsStable(b)
+}
+
+func navigationChildFactsReadShapePasses(e NavigationDecisionEvidence) bool {
+	for _, scenario := range []string{navigationScenarioHighFanout, navigationScenarioFiltered} {
+		op, ok := navigationCandidateOperation(e.QueryReports, navigationShapeChildFacts, scenario)
+		if !ok || !navigationReadShapePasses(op, scenario) {
+			return false
+		}
+	}
+
+	return true
+}
+
+func navigationReadShapePasses(op perfreport.Operation, scenario string) bool {
+	reads := uint64Input(op.Inputs, navigationInputParentRangeReads)
+	if reads == 1 {
+		return true
+	}
+
+	if scenario != navigationScenarioFiltered {
+		return false
+	}
+
+	if stringInput(op.Inputs, navigationInputAgeAllCompanionRead) == "" {
+		return false
+	}
+
+	return navigationOperationHasFilteredAgeAllOwnerOrTypePredicate(op)
+}
+
+func navigationOperationHasFilteredAgeAllOwnerOrTypePredicate(op perfreport.Operation) bool {
+	if uint64Input(op.Inputs, queryInputAgeKey) != uint64(db.DGUTAgeAll) {
+		return false
+	}
+
+	ft, ok := uint16Input(op.Inputs, queryInputFilterFileTypeMaskKey)
+	if !ok {
+		return false
+	}
+
+	return treeFilterHasOwnerOrTypePredicate(&db.Filter{
+		GIDs: uint32SliceInput(op.Inputs, queryInputFilterGIDsKey),
+		UIDs: uint32SliceInput(op.Inputs, queryInputFilterUIDsKey),
+		FT:   db.DirGUTAFileType(ft),
+		Age:  db.DGUTAgeAll,
+	})
+}
+
+func uint16Input(inputs map[string]any, key string) (uint16, bool) {
+	value := uint64Input(inputs, key)
+	if value > uint64(^uint16(0)) {
+		return 0, false
+	}
+
+	return uint16(value), true
+}
+
+func uint32SliceInput(inputs map[string]any, key string) []uint32 {
+	v, ok := inputs[key]
+	if !ok {
+		return nil
+	}
+
+	switch typed := v.(type) {
+	case []uint32:
+		return typed
+	case []uint64:
+		return uint64SliceToUint32(typed)
+	case []any:
+		return anySliceToUint32(typed)
+	default:
+		return nil
+	}
+}
+
+func uint64SliceToUint32(values []uint64) []uint32 {
+	converted := make([]uint32, 0, len(values))
+	for _, value := range values {
+		if value <= uint64(^uint32(0)) {
+			converted = append(converted, uint32(value))
+		}
+	}
+
+	return converted
+}
+
+func anySliceToUint32(values []any) []uint32 {
+	converted := make([]uint32, 0, len(values))
+	for _, value := range values {
+		if parsed := uint64InputValue(value); parsed <= uint64(^uint32(0)) {
+			converted = append(converted, uint32(parsed))
+		}
+	}
+
+	return converted
+}
+
+func navigationChildFactsFilteredAgeAllPasses(e NavigationDecisionEvidence) bool {
+	op, ok := navigationCandidateOperation(e.QueryReports, navigationShapeChildFacts, navigationScenarioFiltered)
+	if !ok {
+		return false
+	}
+
+	return navigationOperationHasFilteredAgeAllOwnerOrTypePredicate(op)
+}
+
+func navigationSelectedObject(
+	e NavigationDecisionEvidence,
+	projectionPass bool,
+	childFactsPass bool,
+) string {
+	if projectionPass && childFactsPass {
+		if navigationChildFactsPreferred(e) {
+			return navigationShapeChildFacts
+		}
+	}
+
+	return string(clickhouse.ChooseNavigationObject(projectionPass, childFactsPass))
+}
+
+func navigationChildFactsPreferred(e NavigationDecisionEvidence) bool {
+	childP95 := navigationCandidateP95(e, navigationShapeChildFacts, navigationScenarioFiltered)
+
+	projectionP95 := navigationCandidateP95(e, navigationShapeProjection, navigationScenarioFiltered)
+
+	return childP95 < projectionP95
+}
+
+func navigationCandidateP95(
+	e NavigationDecisionEvidence,
+	shape string,
+	scenario string,
+) float64 {
+	op, ok := navigationCandidateOperation(e.QueryReports, shape, scenario)
+	if !ok {
+		return 0
+	}
+
+	return op.P95MS
+}
+
+func navigationCandidateScenarioComplete(
+	e NavigationDecisionEvidence,
+	shape string,
+	scenario string,
+) bool {
+	op, ok := navigationCandidateOperation(e.QueryReports, shape, scenario)
+
+	return ok && navigationCandidateOperationComplete(op, scenario)
+}
+
+func navigationCandidateOperationComplete(op perfreport.Operation, scenario string) bool {
+	return op.P50MS > 0 &&
+		op.P95MS > 0 &&
+		op.P99MS > 0 &&
+		navigationCandidateCountersComplete(op) &&
+		explainIndexes1Output(stringInput(op.Inputs, navigationInputExplainOutput)) &&
+		navigationHighFanoutInputPasses(op, scenario)
+}
+
+func navigationCandidateCountersComplete(op perfreport.Operation) bool {
+	return len(op.ReadRows) > 0 &&
+		len(op.ReadBytes) > 0 &&
+		len(op.ReadMarks) > 0 &&
+		len(op.ResultCount) > 0
+}
+
+func navigationHighFanoutInputPasses(op perfreport.Operation, scenario string) bool {
+	if scenario != navigationScenarioHighFanout {
+		return true
+	}
+
+	return uint64Input(op.Inputs, navigationInputChildCount) >= navigationMinHighFanoutChildren
+}
+
+// NavigationDecisionCheck captures one C1 acceptance result.
+type NavigationDecisionCheck struct {
+	ID     int    `json:"id"`
+	Name   string `json:"name"`
+	Passed bool   `json:"passed"`
+	Detail string `json:"detail"`
+}
+
+func validateNavigationCandidateReport(e NavigationDecisionEvidence) NavigationDecisionCheck {
+	check := navigationDecisionCheck(1, "candidate report evidence")
+
+	for _, shape := range []string{
+		navigationShapeParentFacts,
+		navigationShapeChildFacts,
+		navigationShapeProjection,
+	} {
+		for _, scenario := range []string{navigationScenarioHighFanout, navigationScenarioFiltered} {
+			if !navigationCandidateScenarioComplete(e, shape, scenario) {
+				return check.fail(shape + " is missing complete " + scenario + " query evidence")
+			}
+		}
+	}
+
+	return check.pass("all navigation candidates include percentiles, counters, results, and EXPLAIN output")
+}
+
+func validateNavigationProjection(
+	e NavigationDecisionEvidence,
+	projectionPass bool,
+) NavigationDecisionCheck {
+	check := navigationDecisionCheck(2, "projection evidence")
+	if projectionPass {
+		return check.pass("projection broad and filtered endpoint evidence passed")
+	}
+
+	if !navigationProjectionExplainPasses(e) {
+		return check.fail("projection was rejected because EXPLAIN did not prove projection pruning")
+	}
+
+	return check.fail("projection was rejected because it did not beat parent facts")
+}
+
+func validateNavigationChildFacts(
+	e NavigationDecisionEvidence,
+	childFactsPass bool,
+) NavigationDecisionCheck {
+	check := navigationDecisionCheck(3, "child facts evidence")
+	if childFactsPass {
+		return check.pass("child facts passed speed, exact result, parent-range, and import gates")
+	}
+
+	if !navigationChildFactsResultsMatch(e) {
+		return check.fail("child facts were rejected because filtered results were not exact")
+	}
+
+	if !navigationChildFactsReadShapePasses(e) {
+		return check.fail("child facts were rejected because read-shape evidence was missing")
+	}
+
+	if !navigationChildFactsFilteredAgeAllPasses(e) {
+		return check.fail("child facts were rejected because filtered AgeAll owner/type evidence was missing")
+	}
+
+	if !navigationImportGatesPass(e.ImportReports) {
+		return check.fail("child facts were rejected because import memory or row amplification evidence failed")
+	}
+
+	return check.fail("child facts were rejected because p95 did not improve on parent facts by 15%")
+}
+
+func validateNavigationParentDefault(selected string) NavigationDecisionCheck {
+	check := navigationDecisionCheck(4, "parent facts default")
+	if selected == navigationShapeParentFacts {
+		return check.pass("wrstat_parent_facts is the implemented object")
+	}
+
+	return check.fail("wrstat_parent_facts was not selected")
+}
+
+func navigationDecisionCheck(id int, name string) NavigationDecisionCheck {
+	return NavigationDecisionCheck{ID: id, Name: name}
+}
+
+func (c NavigationDecisionCheck) pass(detail string) NavigationDecisionCheck {
+	c.Passed = true
+	c.Detail = detail
+
+	return c
+}
+
+func (c NavigationDecisionCheck) fail(detail string) NavigationDecisionCheck {
+	c.Passed = false
+	c.Detail = detail
+
+	return c
+}
+
+// NavigationDecisionResult describes the selected Disktree navigation object.
+type NavigationDecisionResult struct {
+	SelectedObject string                    `json:"selected_object"`
+	Checks         []NavigationDecisionCheck `json:"checks"`
+}
+
+// ValidateNavigationDecisionGate applies the C1 evidence rules. The default is
+// wrstat_parent_facts unless projection or child facts satisfy every required
+// proof item.
+func ValidateNavigationDecisionGate(e NavigationDecisionEvidence) NavigationDecisionResult {
+	projectionPass := navigationProjectionPasses(e)
+	childFactsPass := navigationChildFactsPasses(e)
+	selected := navigationSelectedObject(e, projectionPass, childFactsPass)
+
+	return NavigationDecisionResult{
+		SelectedObject: selected,
+		Checks: []NavigationDecisionCheck{
+			validateNavigationCandidateReport(e),
+			validateNavigationProjection(e, projectionPass),
+			validateNavigationChildFacts(e, childFactsPass),
+			validateNavigationParentDefault(selected),
+		},
+	}
+}
+
 func closeQueryResources(closers ...io.Closer) error {
 	var err error
 
@@ -1641,12 +2178,12 @@ func pickDir(tree *db.Tree, startDir string, filter *db.Filter) string {
 }
 
 func nextDir(tree *db.Tree, current string, filter *db.Filter) (string, bool) {
-	info, err := tree.DirInfo(current, filter)
-	if err != nil || missingDirInfo(info) {
+	if finalDirSummary(tree, current, filter) {
 		return current, true
 	}
 
-	if representativeDirInfo(info) {
+	info, ok := nextDirInfo(tree, current, filter)
+	if !ok || representativeDirInfo(info) {
 		return current, true
 	}
 

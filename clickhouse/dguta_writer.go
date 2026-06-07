@@ -52,6 +52,7 @@ const (
 	importPhasePartitionDropReset  = "partition_drop_reset"
 	importPhaseDGUTAInsert         = "wrstat_dguta_insert"
 	importPhaseChildrenInsert      = "wrstat_children_insert"
+	importPhaseParentFactsInsert   = "wrstat_parent_facts_insert"
 	importPhaseMountSwitch         = "mount_switch"
 	importPhaseDirProjectionWrite  = "wrstat_dir_projection_insert"
 	importPhaseTreeSummaryRefresh  = "wrstat_tree_summary_refresh"
@@ -175,10 +176,12 @@ type dgutaDerivedIndexWriter interface {
 		parentDir string,
 		gutas db.GUTAs,
 		children []string,
+		childCount uint64,
 		ages []db.DirGUTAge,
 	) error
 	flush(ctx context.Context) error
 	abort() error
+	importPhase() string
 }
 
 type dgutaBatchSlot struct {
@@ -327,7 +330,7 @@ func (w *dgutaWriter) addReadyRecord(ctx context.Context, dguta db.RecordDGUTA) 
 		return err
 	}
 
-	if err := w.appendSelectedDerivedIndexRows(ctx, parentDir, appendedGUTAs, children); err != nil {
+	if err := w.appendSelectedDerivedIndexRows(ctx, parentDir, appendedGUTAs, children, childCount); err != nil {
 		return err
 	}
 
@@ -783,9 +786,24 @@ func (w *dgutaWriter) prepareWriteBatches(ctx context.Context) error {
 		w.effectiveProjectionBatchSize(),
 		w.dirProjection.refreshedAt,
 	))
+	w.selectedDerivedIndexes = append(w.selectedDerivedIndexes, w.selectedNavigationFactWriters()...)
 	w.prepared = true
 
 	return nil
+}
+
+func (w *dgutaWriter) selectedNavigationFactWriters() []dgutaDerivedIndexWriter {
+	if DefaultNavigationObject() != NavigationObjectParentFacts {
+		return nil
+	}
+
+	return []dgutaDerivedIndexWriter{
+		newParentFactsWriter(
+			w.conn,
+			w.effectiveProjectionBatchSize(),
+			w.dirProjection.refreshedAt,
+		),
+	}
 }
 
 func (w *dgutaWriter) dropNewSnapshotPartitions(ctx context.Context) error {
@@ -1068,9 +1086,10 @@ func (w *dgutaWriter) appendSelectedDerivedIndexRows(
 	parentDir string,
 	gutas db.GUTAs,
 	children []string,
+	childCount uint64,
 ) error {
 	for _, writer := range w.selectedDerivedIndexes {
-		err := writer.appendRecord(ctx, w.activeMount(), parentDir, gutas, children, w.previousDGUTARows.ages())
+		err := w.appendSelectedDerivedIndexRow(ctx, writer, parentDir, gutas, children, childCount)
 		if err != nil {
 			w.writeErr = err
 
@@ -1079,6 +1098,33 @@ func (w *dgutaWriter) appendSelectedDerivedIndexRows(
 	}
 
 	return nil
+}
+
+func (w *dgutaWriter) appendSelectedDerivedIndexRow(
+	ctx context.Context,
+	writer dgutaDerivedIndexWriter,
+	parentDir string,
+	gutas db.GUTAs,
+	children []string,
+	childCount uint64,
+) error {
+	appendRecord := func() error {
+		return writer.appendRecord(
+			ctx,
+			w.activeMount(),
+			parentDir,
+			gutas,
+			children,
+			childCount,
+			w.previousDGUTARows.ages(),
+		)
+	}
+
+	if phase := writer.importPhase(); phase != "" {
+		return w.timeImportPhase(phase, appendRecord)
+	}
+
+	return appendRecord()
 }
 
 func (w *dgutaWriter) flushFullBatches() error {
@@ -1141,7 +1187,7 @@ func (w *dgutaWriter) batchSlots() [2]dgutaBatchSlot {
 
 func (w *dgutaWriter) flushSelectedDerivedIndexes(ctx context.Context) error {
 	for _, writer := range w.selectedDerivedIndexes {
-		if err := writer.flush(ctx); err != nil {
+		if err := w.flushSelectedDerivedIndex(ctx, writer); err != nil {
 			w.writeErr = err
 
 			return err
@@ -1149,6 +1195,21 @@ func (w *dgutaWriter) flushSelectedDerivedIndexes(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+func (w *dgutaWriter) flushSelectedDerivedIndex(
+	ctx context.Context,
+	writer dgutaDerivedIndexWriter,
+) error {
+	flush := func() error {
+		return writer.flush(ctx)
+	}
+
+	if phase := writer.importPhase(); phase != "" {
+		return w.timeImportPhase(phase, flush)
+	}
+
+	return flush()
 }
 
 func (w *dgutaWriter) abortSelectedDerivedIndexes() error {

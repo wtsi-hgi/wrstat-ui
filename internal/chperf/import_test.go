@@ -49,6 +49,7 @@ const (
 	expectedPhasePartitionDropReset = "partition_drop_reset"
 	expectedPhaseDGUTAInsert        = "wrstat_dguta_insert"
 	expectedPhaseChildrenInsert     = "wrstat_children_insert"
+	expectedPhaseParentFactsInsert  = "wrstat_parent_facts_insert"
 	expectedPhaseMountSwitch        = "mount_switch"
 	expectedPhaseOldSnapshotDrop    = "old_snapshot_partition_drop"
 
@@ -196,6 +197,23 @@ func TestDGUTARowCounting(t *testing.T) {
 		), ShouldBeNil)
 		So(writer.streamedChildren, ShouldEqual, uint64(3))
 		So(metrics.rows[tableChildren], ShouldEqual, uint64(2))
+	})
+
+	Convey("tracked DGUTA writer counts one parent-facts row per imported directory fact", t, func() {
+		paths := internaltest.NewDirectoryPathCreator()
+		metrics := newDatasetImportMetrics("dataset", "/input/stats.gz", importTestMountScratch)
+		tracked := newTrackedDGUTAWriter(&fakeImportDGUTAWriter{}, metrics)
+		tracked.SetMountPath(importTestMountScratch)
+
+		So(tracked.Add(db.RecordDGUTA{
+			Dir: paths.ToDirectoryPath(importTestMountScratch + "a/"),
+			GUTAs: db.GUTAs{
+				&db.GUTA{Age: db.DGUTAgeAll},
+				&db.GUTA{Age: db.DGUTAgeA1M},
+			},
+		}), ShouldBeNil)
+
+		So(metrics.rows[tableParentFacts], ShouldEqual, uint64(1))
 	})
 }
 
@@ -524,6 +542,7 @@ func TestImportReportEnrichment(t *testing.T) {
 				tableFiles:                42,
 				tableDGUTA:                3,
 				tableChildren:             2,
+				tableParentFacts:          3,
 				tableBasedirsGroupUsage:   1,
 				tableBasedirsUserUsage:    1,
 				tableBasedirsGroupSubdirs: 1,
@@ -534,6 +553,7 @@ func TestImportReportEnrichment(t *testing.T) {
 				phaseFilesInsert:        10 * time.Millisecond,
 				phaseDirProjectionWrite: 20 * time.Millisecond,
 				phaseChildrenInsert:     30 * time.Millisecond,
+				phaseParentFactsInsert:  50 * time.Millisecond,
 				phaseBasedirsGroupUsage: 40 * time.Millisecond,
 			},
 		}
@@ -562,6 +582,12 @@ func TestImportReportEnrichment(t *testing.T) {
 					ActiveParts:       1,
 					CompressedBytes:   70,
 					UncompressedBytes: 140,
+				},
+				tableParentFacts: {
+					Rows:              46_307,
+					ActiveParts:       1,
+					CompressedBytes:   1_840_000,
+					UncompressedBytes: 39_700_000,
 				},
 				tableTreeDGUTA: {
 					Rows:              6,
@@ -596,6 +622,7 @@ func TestImportReportEnrichment(t *testing.T) {
 		So(report.SelectedTables, ShouldContain, tableBasedirsUserSubdirs)
 		So(report.SelectedTables, ShouldContain, tableBasedirsHistory)
 		So(report.SelectedTables, ShouldContain, tableDirFilterAgeAll)
+		So(report.SelectedTables, ShouldContain, tableParentFacts)
 		So(report.SelectedTables, ShouldContain, tableTreeDGUTA)
 
 		files := report.TableStats[tableFiles]
@@ -612,6 +639,12 @@ func TestImportReportEnrichment(t *testing.T) {
 		children := report.TableStats[tableChildren]
 		So(children.Rows, ShouldEqual, uint64(2))
 		So(children.ImportPhaseDurationsMS[phaseChildrenInsert], ShouldEqual, float64(30))
+
+		parentFacts := report.TableStats[tableParentFacts]
+		So(parentFacts.Rows, ShouldEqual, uint64(46_307))
+		So(parentFacts.CompressedBytes, ShouldEqual, uint64(1_840_000))
+		So(parentFacts.UncompressedBytes, ShouldEqual, uint64(39_700_000))
+		So(parentFacts.ImportPhaseDurationsMS[phaseParentFactsInsert], ShouldEqual, float64(50))
 
 		basedirs := report.TableStats[tableBasedirsGroupUsage]
 		So(basedirs.Rows, ShouldEqual, uint64(1))
@@ -809,6 +842,7 @@ func TestImportReportOperations(t *testing.T) {
 				tableFiles:                42,
 				tableDGUTA:                7,
 				tableChildren:             5,
+				tableParentFacts:          7,
 				tableBasedirsGroupUsage:   3,
 				tableBasedirsUserUsage:    2,
 				tableBasedirsGroupSubdirs: 4,
@@ -819,6 +853,7 @@ func TestImportReportOperations(t *testing.T) {
 				phaseFilesFlush:                 50 * time.Millisecond,
 				expectedPhaseDGUTAInsert:        200 * time.Millisecond,
 				expectedPhaseChildrenInsert:     100 * time.Millisecond,
+				expectedPhaseParentFactsInsert:  110 * time.Millisecond,
 				phaseDirProjectionWrite:         90 * time.Millisecond,
 				expectedPhaseMountSwitch:        120 * time.Millisecond,
 				expectedPhaseOldSnapshotDrop:    80 * time.Millisecond,
@@ -831,7 +866,7 @@ func TestImportReportOperations(t *testing.T) {
 
 		addImportReportOperations(&report, []datasetImportResult{result}, 2, 2*time.Second)
 
-		So(report.Operations, ShouldHaveLength, 18)
+		So(report.Operations, ShouldHaveLength, 19)
 
 		fileTotal := findImportOperation(report.Operations, "import_file_total", "")
 		So(fileTotal, ShouldNotBeNil)
@@ -845,6 +880,7 @@ func TestImportReportOperations(t *testing.T) {
 			tableFiles:                42,
 			tableDirSummary:           7,
 			tableChildren:             5,
+			tableParentFacts:          7,
 			tableBasedirsGroupUsage:   3,
 			tableBasedirsUserUsage:    2,
 			tableBasedirsGroupSubdirs: 4,
@@ -858,6 +894,7 @@ func TestImportReportOperations(t *testing.T) {
 		So(tables, ShouldResemble, []string{
 			tableDirSummary,
 			tableChildren,
+			tableParentFacts,
 			tableFiles,
 			tableDirSummarySets,
 			tableBasedirsGroupUsage,
@@ -892,6 +929,12 @@ func TestImportReportOperations(t *testing.T) {
 		So(childrenInsert.Inputs["rows"], ShouldEqual, uint64(5))
 		So(childrenInsert.DurationsMS, ShouldResemble, []float64{100})
 
+		parentFactsInsert := findImportOperation(report.Operations, "import_phase", expectedPhaseParentFactsInsert)
+		So(parentFactsInsert, ShouldNotBeNil)
+		So(parentFactsInsert.Inputs["table"], ShouldEqual, tableParentFacts)
+		So(parentFactsInsert.Inputs["rows"], ShouldEqual, uint64(7))
+		So(parentFactsInsert.DurationsMS, ShouldResemble, []float64{110})
+
 		mountSwitch := findImportOperation(report.Operations, "import_phase", expectedPhaseMountSwitch)
 		So(mountSwitch, ShouldNotBeNil)
 		So(mountSwitch.DurationsMS, ShouldResemble, []float64{120})
@@ -903,7 +946,7 @@ func TestImportReportOperations(t *testing.T) {
 		total := findImportOperation(report.Operations, "import_total", "")
 		So(total, ShouldNotBeNil)
 		So(total.Inputs["datasets"], ShouldEqual, 1)
-		So(total.Inputs["records"], ShouldEqual, uint64(42))
+		So(total.Inputs[importInputRecords], ShouldEqual, uint64(42))
 		So(total.Inputs["parallelism"], ShouldEqual, 2)
 		So(total.Inputs["mode"], ShouldEqual, "parallel")
 		So(total.Inputs["throughput_records_per_sec"], ShouldEqual, 21.0)

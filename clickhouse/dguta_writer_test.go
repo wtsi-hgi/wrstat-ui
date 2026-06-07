@@ -54,6 +54,8 @@ var errUnknownParentFactsTable = errors.New("UNKNOWN_TABLE: wrstat_parent_facts 
 
 const testMountPath = "/mnt/test/"
 
+const testRootMountPath = "/mnt/"
+
 const testT283ImagingMountPath = "/nfs/t283_imaging/"
 
 const dgutaWriterTestPhasePartitionDropReset = "partition_drop_reset"
@@ -81,6 +83,8 @@ const (
 	dgutaWriterTestCountChildrenQuery = "SELECT count() FROM wrstat_children WHERE mount_path = ? " +
 		"AND snapshot_id = toUUID(?)"
 	dgutaWriterTestCountAgeAllQuery = "SELECT count() FROM wrstat_dir_filter_ageall WHERE mount_path = ? " +
+		"AND snapshot_id = toUUID(?)"
+	dgutaWriterTestCountParentFactsQuery = "SELECT count() FROM wrstat_parent_facts WHERE mount_path = ? " +
 		"AND snapshot_id = toUUID(?)"
 	dgutaWriterTestCountDirFactsForDirQuery = "SELECT count() FROM wrstat_dir_facts WHERE mount_path = ? " +
 		"AND snapshot_id = toUUID(?) AND dir = ?"
@@ -1190,12 +1194,17 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 		os.Setenv("WRSTAT_ENV", "test")
 		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
 
+		const (
+			mountPath     = testRootMountPath
+			childDir      = mountPath + "a/"
+			grandchildDir = childDir + "b/"
+			siblingDir    = mountPath + "c/"
+		)
+
 		th := newClickHouseTestHarness(t)
 		cfg := th.newConfig()
 		cfg.QueryTimeout = 5 * time.Second
-		cfg.MountPoints = []string{"/mnt/"}
-
-		const mountPath = "/mnt/"
+		cfg.MountPoints = []string{mountPath}
 
 		updatedAt := time.Date(2026, 1, 15, 9, 0, 0, 0, time.UTC)
 		sid := snapshotID(mountPath, updatedAt)
@@ -1209,11 +1218,11 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 		w.SetUpdatedAt(updatedAt)
 
 		So(w.Add(db.RecordDGUTA{
-			Dir:      paths.ToDirectoryPath("/mnt/"),
+			Dir:      paths.ToDirectoryPath(mountPath),
 			Children: []string{"a/", "c/"},
 		}), ShouldBeNil)
 		So(w.Add(db.RecordDGUTA{
-			Dir: paths.ToDirectoryPath("/mnt/a/"),
+			Dir: paths.ToDirectoryPath(childDir),
 			GUTAs: db.GUTAs{
 				b1GUTA(7, 11, db.DGUTAFileTypeBam, db.DGUTAgeAll, 2, 20, 100, 200),
 				b1GUTA(7, 12, db.DGUTAFileTypeOther, db.DGUTAgeAll, 1, 5, 90, 150),
@@ -1221,8 +1230,8 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 			},
 			Children: []string{"b/"},
 		}), ShouldBeNil)
-		So(w.Add(db.RecordDGUTA{Dir: paths.ToDirectoryPath("/mnt/a/b/")}), ShouldBeNil)
-		So(w.Add(db.RecordDGUTA{Dir: paths.ToDirectoryPath("/mnt/c/")}), ShouldBeNil)
+		So(w.Add(db.RecordDGUTA{Dir: paths.ToDirectoryPath(grandchildDir)}), ShouldBeNil)
+		So(w.Add(db.RecordDGUTA{Dir: paths.ToDirectoryPath(siblingDir)}), ShouldBeNil)
 		So(w.Close(), ShouldBeNil)
 
 		conn := th.openConn(cfg.DSN)
@@ -1233,8 +1242,15 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 		defer cancel()
 
 		So(countRows(ctx, conn, dgutaWriterTestCountDirFactsQuery, mountPath, sid.String()), ShouldEqual, 4)
+		So(countRows(ctx, conn, dgutaWriterTestCountParentFactsQuery, mountPath, sid.String()), ShouldEqual, 4)
+		So(readParentFactParentDirsForTest(ctx, conn, mountPath, sid.String()), ShouldResemble, map[string]string{
+			mountPath:     "/",
+			childDir:      mountPath,
+			grandchildDir: childDir,
+			siblingDir:    mountPath,
+		})
 
-		fact := readDirFactForTest(ctx, conn, mountPath, sid.String(), "/mnt/a/")
+		fact := readDirFactForTest(ctx, conn, mountPath, sid.String(), childDir)
 		So(fact.gids, ShouldResemble, []uint32{7, 7, 8})
 		So(fact.uids, ShouldResemble, []uint32{11, 12, 11})
 		So(fact.fts, ShouldResemble, []uint16{
@@ -1259,7 +1275,7 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 		So(fact.allFT&uint16(db.DGUTAFileTypeBam), ShouldBeGreaterThan, 0)
 		So(fact.childCount, ShouldEqual, 1)
 
-		childRows, err := conn.Query(ctx, dgutaWriterTestSelectChildQuery, mountPath, sid.String(), "/mnt/a/")
+		childRows, err := conn.Query(ctx, dgutaWriterTestSelectChildQuery, mountPath, sid.String(), childDir)
 		So(err, ShouldBeNil)
 
 		defer func() { _ = childRows.Close() }()
@@ -1270,18 +1286,223 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 		So(childRows.Scan(&child), ShouldBeNil)
 		So(child, ShouldEqual, "/mnt/a/b")
 		So(childRows.Next(), ShouldBeFalse)
+
+		parentFacts, err := parentFactChildSummaries(ctx, conn, activeMount{
+			mountPath:  mountPath,
+			snapshotID: sid.String(),
+			updatedAt:  updatedAt,
+		}, mountPath, nil)
+		So(err, ShouldBeNil)
+		So(parentFactSummaryDirs(parentFacts), ShouldResemble, []string{childDir, siblingDir})
+		So(parentFacts[0].Summary.Count, ShouldEqual, uint64(3))
+		So(parentFacts[0].HasChildren, ShouldBeTrue)
 	})
 
-	Convey("DGUTAWriter writes only narrow AgeAll owner/type rows during import", t, func() {
+	Convey("C2.2 Parent facts return a high-fanout parent in one parent-prefix range ordered by dir", t, func() {
 		os.Setenv("WRSTAT_ENV", "test")
 		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
 
 		th := newClickHouseTestHarness(t)
 		cfg := th.newConfig()
 		cfg.QueryTimeout = 5 * time.Second
-		cfg.MountPoints = []string{"/mnt/a/"}
+		cfg.MountPoints = []string{testT283ImagingMountPath}
 
-		const mountPath = "/mnt/a/"
+		const parentDir = testT283ImagingMountPath + "wide/"
+
+		updatedAt := time.Date(2026, 6, 7, 15, 0, 0, 0, time.UTC)
+		sid := snapshotID(testT283ImagingMountPath, updatedAt)
+		paths := internaltest.NewDirectoryPathCreator()
+
+		w, err := NewDGUTAWriter(cfg)
+		So(err, ShouldBeNil)
+		w.SetMountPath(testT283ImagingMountPath)
+		w.SetUpdatedAt(updatedAt)
+
+		children := make([]string, 305)
+		for i := range children {
+			children[i] = fmt.Sprintf("child%03d/", i)
+		}
+
+		So(w.Add(db.RecordDGUTA{
+			Dir:        paths.ToDirectoryPath(parentDir),
+			ChildCount: uint64(len(children)),
+			Children:   children,
+			GUTAs: db.GUTAs{
+				b1GUTA(7, 11, db.DGUTAFileTypeDir, db.DGUTAgeAll, 1, 1, 100, 200),
+			},
+		}), ShouldBeNil)
+
+		for i, child := range children {
+			So(w.Add(db.RecordDGUTA{
+				Dir: paths.ToDirectoryPath(parentDir + child),
+				GUTAs: db.GUTAs{
+					b1GUTA(uint32(i%9), uint32(i%13), db.DGUTAFileTypeBam, db.DGUTAgeAll, 1, uint64(i+1), 100, 200),
+				},
+			}), ShouldBeNil)
+		}
+
+		So(w.Close(), ShouldBeNil)
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		countingConn := &parentFactsQueryCountingConn{Conn: conn}
+		parentFacts, err := parentFactChildSummaries(ctx, countingConn, activeMount{
+			mountPath:  testT283ImagingMountPath,
+			snapshotID: sid.String(),
+			updatedAt:  updatedAt,
+		}, parentDir, nil)
+		So(err, ShouldBeNil)
+		So(countingConn.parentFactRangeQueries(), ShouldEqual, 1)
+		So(parentFacts, ShouldHaveLength, 305)
+		So(parentFacts[0].Dir, ShouldEqual, parentDir+"child000/")
+		So(parentFacts[304].Dir, ShouldEqual, parentDir+"child304/")
+	})
+
+	Convey("C2.3 Parent facts return direct low-fanout chain children with correct has_children", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+
+		const mountPath = testRootMountPath
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 5 * time.Second
+		cfg.MountPoints = []string{mountPath}
+
+		updatedAt := time.Date(2026, 6, 7, 15, 30, 0, 0, time.UTC)
+		sid := snapshotID(mountPath, updatedAt)
+		paths := internaltest.NewDirectoryPathCreator()
+
+		w, err := NewDGUTAWriter(cfg)
+		So(err, ShouldBeNil)
+		w.SetMountPath(mountPath)
+		w.SetUpdatedAt(updatedAt)
+
+		for _, record := range []db.RecordDGUTA{
+			{Dir: paths.ToDirectoryPath(mountPath), Children: []string{"a/"}},
+			{Dir: paths.ToDirectoryPath(mountPath + "a/"), Children: []string{"b/"}},
+			{Dir: paths.ToDirectoryPath(mountPath + "a/b/"), Children: []string{"c/"}},
+			{Dir: paths.ToDirectoryPath(mountPath + "a/b/c/")},
+		} {
+			So(w.Add(record), ShouldBeNil)
+		}
+
+		So(w.Close(), ShouldBeNil)
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		for parent, expected := range map[string]struct {
+			dir         string
+			hasChildren bool
+		}{
+			mountPath:          {dir: mountPath + "a/", hasChildren: true},
+			mountPath + "a/":   {dir: mountPath + "a/b/", hasChildren: true},
+			mountPath + "a/b/": {dir: mountPath + "a/b/c/", hasChildren: false},
+		} {
+			parentFacts, err := parentFactChildSummaries(ctx, conn, activeMount{
+				mountPath:  mountPath,
+				snapshotID: sid.String(),
+				updatedAt:  updatedAt,
+			}, parent, nil)
+			So(err, ShouldBeNil)
+			So(parentFacts, ShouldHaveLength, 1)
+			So(parentFacts[0].Dir, ShouldEqual, expected.dir)
+			So(parentFacts[0].HasChildren, ShouldEqual, expected.hasChildren)
+		}
+	})
+
+	Convey("C2.4 Parent facts vector filtering matches dir facts vectors for child dirs", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+		resetSharedTreeQueryCachesForTesting()
+		Reset(resetSharedTreeQueryCachesForTesting)
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 5 * time.Second
+		cfg.MountPoints = []string{"/mnt/filter-parent/"}
+
+		const mountPath = "/mnt/filter-parent/"
+
+		updatedAt := time.Date(2026, 6, 7, 16, 0, 0, 0, time.UTC)
+		sid := snapshotID(mountPath, updatedAt)
+		paths := internaltest.NewDirectoryPathCreator()
+
+		w, err := NewDGUTAWriter(cfg)
+		So(err, ShouldBeNil)
+		w.SetMountPath(mountPath)
+		w.SetUpdatedAt(updatedAt)
+
+		So(w.Add(db.RecordDGUTA{Dir: paths.ToDirectoryPath(mountPath), Children: []string{"a/", "c/"}}), ShouldBeNil)
+		So(w.Add(db.RecordDGUTA{
+			Dir: paths.ToDirectoryPath(mountPath + "a/"),
+			GUTAs: db.GUTAs{
+				b1GUTA(7, 11, db.DGUTAFileTypeBam, db.DGUTAgeAll, 2, 20, 100, 200),
+				b1GUTA(7, 12, db.DGUTAFileTypeOther, db.DGUTAgeAll, 1, 5, 90, 150),
+				b1GUTA(7, 11, db.DGUTAFileTypeBam, db.DGUTAgeA6M, 4, 40, 80, 250),
+			},
+		}), ShouldBeNil)
+		So(w.Add(db.RecordDGUTA{
+			Dir: paths.ToDirectoryPath(mountPath + "c/"),
+			GUTAs: db.GUTAs{
+				b1GUTA(8, 11, db.DGUTAFileTypeBam, db.DGUTAgeAll, 3, 30, 100, 200),
+			},
+		}), ShouldBeNil)
+		So(w.Close(), ShouldBeNil)
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		filter := &db.Filter{
+			GIDs: []uint32{7},
+			UIDs: []uint32{11},
+			FT:   db.DGUTAFileTypeBam,
+			Age:  db.DGUTAgeAll,
+		}
+		parentFacts, err := parentFactChildSummaries(ctx, conn, activeMount{
+			mountPath:  mountPath,
+			snapshotID: sid.String(),
+			updatedAt:  updatedAt,
+		}, mountPath, filter)
+		So(err, ShouldBeNil)
+
+		dbch := &clickHouseDatabase{cfg: cfg, conn: conn, treeCache: newTreeQueryCache()}
+		dirFactSummaries, _, ok, err := dbch.mountDirDGUTAVectorSummariesForDirsMount(
+			mountPath,
+			sid.String(),
+			updatedAt,
+			[]string{mountPath + "a/", mountPath + "c/"},
+			filter,
+		)
+		So(err, ShouldBeNil)
+		So(ok, ShouldBeTrue)
+		So(parentFactSummariesByDir(parentFacts), ShouldResemble, dirFactSummaries)
+	})
+
+	Convey("DGUTAWriter writes only narrow AgeAll owner/type rows during import", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+
+		const mountPath = testRootMountPath + "a/"
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 5 * time.Second
+		cfg.MountPoints = []string{mountPath}
 
 		updatedAt := time.Date(2026, 6, 7, 9, 0, 0, 0, time.UTC)
 		sid := snapshotID(mountPath, updatedAt)
@@ -1627,6 +1848,7 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 				dir,
 				db.GUTAs{guta},
 				nil,
+				0,
 				nil,
 			))
 		}
@@ -1850,6 +2072,8 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 		So(conn.batchStats(insertChildrenQuery).sends, ShouldBeGreaterThan, 0)
 		So(conn.batchStats(insertDirFilterAgeAllQuery).appends, ShouldBeGreaterThan, 0)
 		So(conn.batchStats(insertDirFilterAgeAllQuery).sends, ShouldBeGreaterThan, 0)
+		So(conn.batchStats(insertParentFactsQuery).appends, ShouldBeGreaterThan, 0)
+		So(conn.batchStats(insertParentFactsQuery).sends, ShouldBeGreaterThan, 0)
 		So(conn.hasForbiddenInsertSelect(), ShouldBeFalse)
 	})
 
@@ -2782,6 +3006,53 @@ func singleDGUTARecord(dir *summary.DirectoryPath, gid uint32, child string) db.
 		}},
 		Children: []string{child},
 	}
+}
+
+func readParentFactParentDirsForTest(ctx context.Context, conn interface {
+	Query(ctx context.Context, query string, args ...any) (driver.Rows, error)
+}, mountPath, snapshotID string) map[string]string {
+	rows, err := conn.Query(
+		ctx,
+		"SELECT dir, parent_dir FROM wrstat_parent_facts "+
+			"WHERE mount_path = ? AND snapshot_id = toUUID(?) ORDER BY dir",
+		mountPath,
+		snapshotID,
+	)
+	So(err, ShouldBeNil)
+
+	defer func() { _ = rows.Close() }()
+
+	parentDirs := make(map[string]string)
+
+	for rows.Next() {
+		var dir, parentDir string
+		So(rows.Scan(&dir, &parentDir), ShouldBeNil)
+		parentDirs[dir] = parentDir
+	}
+
+	So(rows.Err(), ShouldBeNil)
+
+	return parentDirs
+}
+
+func parentFactSummaryDirs(facts []parentFactChildSummary) []string {
+	dirs := make([]string, 0, len(facts))
+	for _, fact := range facts {
+		dirs = append(dirs, fact.Dir)
+	}
+
+	return dirs
+}
+
+func parentFactSummariesByDir(facts []parentFactChildSummary) map[string]*db.DirSummary {
+	summaries := make(map[string]*db.DirSummary, len(facts))
+	for _, fact := range facts {
+		if fact.Summary != nil {
+			summaries[fact.Dir] = fact.Summary
+		}
+	}
+
+	return summaries
 }
 
 func insertA3AgeAllFactAndRow(
@@ -4106,9 +4377,10 @@ type ambiguousDGUTASendConn struct {
 
 	sendErr error
 
-	childBatch ambiguousDGUTASendBatch
-	factBatch  countingDGUTABatch
-	drops      atomic.Int32
+	childBatch  ambiguousDGUTASendBatch
+	factBatch   countingDGUTABatch
+	parentBatch countingDGUTABatch
+	drops       atomic.Int32
 }
 
 func (c *ambiguousDGUTASendConn) Query(
@@ -4137,6 +4409,10 @@ func (c *ambiguousDGUTASendConn) PrepareBatch(
 		c.childBatch.sendErr = c.sendErr
 
 		return &c.childBatch, nil
+	case insertDirFilterAgeAllQuery:
+		return &countingDGUTABatch{}, nil
+	case insertParentFactsQuery:
+		return &c.parentBatch, nil
 	default:
 		return nil, errBootstrapTestUnexpectedCall
 	}
@@ -4165,6 +4441,7 @@ type ambiguousAgeAllSendConn struct {
 	ageAllBatch ambiguousDGUTASendBatch
 	childBatch  countingDGUTABatch
 	factBatch   countingDGUTABatch
+	parentBatch countingDGUTABatch
 
 	activeEvents  atomic.Int32
 	activeQueries atomic.Int32
@@ -4202,6 +4479,8 @@ func (c *ambiguousAgeAllSendConn) PrepareBatch(
 		c.ageAllBatch.sendErr = c.sendErr
 
 		return &c.ageAllBatch, nil
+	case insertParentFactsQuery:
+		return &c.parentBatch, nil
 	default:
 		return nil, errBootstrapTestUnexpectedCall
 	}
@@ -4254,6 +4533,36 @@ func (c *ambiguousAgeAllSendConn) partitionDrops() []string {
 
 func (c *ambiguousAgeAllSendConn) latestActiveSnapshot() string {
 	return c.previousSID
+}
+
+type parentFactsQueryCountingConn struct {
+	ch.Conn
+
+	rangeQueries atomic.Int32
+}
+
+func (c *parentFactsQueryCountingConn) Query(
+	ctx context.Context,
+	query string,
+	args ...any,
+) (driver.Rows, error) {
+	if isParentFactsRangeQuery(query) {
+		c.rangeQueries.Add(1)
+	}
+
+	return c.Conn.Query(ctx, query, args...)
+}
+
+func isParentFactsRangeQuery(query string) bool {
+	normalised := strings.Join(strings.Fields(query), " ")
+
+	return strings.Contains(normalised, "FROM wrstat_parent_facts") &&
+		strings.Contains(normalised, "parent_dir = ?") &&
+		strings.Contains(normalised, "ORDER BY dir")
+}
+
+func (c *parentFactsQueryCountingConn) parentFactRangeQueries() int {
+	return int(c.rangeQueries.Load())
 }
 
 type childrenSendPrepareConn struct {
@@ -4365,7 +4674,8 @@ func isLazyDGUTAImportQuery(query string) bool {
 	switch query {
 	case insertChildrenQuery,
 		insertMountDirSummaryQuery,
-		insertDirFilterAgeAllQuery:
+		insertDirFilterAgeAllQuery,
+		insertParentFactsQuery:
 		return true
 	default:
 		return false
@@ -4499,7 +4809,11 @@ func (c *b1ImportSQLSpyConn) PrepareBatch(
 	c.prepared = append(c.prepared, query)
 
 	switch query {
-	case insertChildrenQuery, insertMountDirSummaryQuery, insertDirFilterAgeAllQuery, insertMountDirSummarySetQuery:
+	case insertChildrenQuery,
+		insertMountDirSummaryQuery,
+		insertDirFilterAgeAllQuery,
+		insertParentFactsQuery,
+		insertMountDirSummarySetQuery:
 	default:
 		return nil, errBootstrapTestUnexpectedCall
 	}
@@ -4541,7 +4855,8 @@ func b1ForbiddenInsertSelect(query string) bool {
 
 	return strings.Contains(normalised, "wrstat_dir_facts") ||
 		strings.Contains(normalised, "wrstat_children") ||
-		strings.Contains(normalised, "wrstat_dir_filter_ageall")
+		strings.Contains(normalised, "wrstat_dir_filter_ageall") ||
+		strings.Contains(normalised, "wrstat_parent_facts")
 }
 
 type b2PublishReadinessConn struct {
@@ -4578,7 +4893,10 @@ func (c *b2PublishReadinessConn) PrepareBatch(
 		if c.factPrepareErr != nil {
 			return nil, c.factPrepareErr
 		}
-	case insertChildrenQuery, insertDirFilterAgeAllQuery, insertMountDirSummarySetQuery:
+	case insertChildrenQuery,
+		insertDirFilterAgeAllQuery,
+		insertParentFactsQuery,
+		insertMountDirSummarySetQuery:
 	default:
 		return nil, errBootstrapTestUnexpectedCall
 	}
@@ -4639,6 +4957,7 @@ func (w *b2FailingDerivedIndexWriter) appendRecord(
 	string,
 	db.GUTAs,
 	[]string,
+	uint64,
 	[]db.DirGUTAge,
 ) error {
 	w.records.Add(1)
@@ -4654,6 +4973,10 @@ func (w *b2FailingDerivedIndexWriter) abort() error {
 	w.aborts.Add(1)
 
 	return nil
+}
+
+func (w *b2FailingDerivedIndexWriter) importPhase() string {
+	return ""
 }
 
 func (w *b2FailingDerivedIndexWriter) appendedRecords() int {

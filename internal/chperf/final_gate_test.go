@@ -215,7 +215,7 @@ func finalGateImportReport(ageAllSelected, virtualCacheSelected bool) perfreport
 		tableDirSummary:     finalGateTableStats(35006),
 		tableDirSummarySets: finalGateTableStats(1),
 	}
-	report.AddOperation("import_total", map[string]any{"records": uint64(100000)}, []float64{4350})
+	report.AddOperation("import_total", map[string]any{importInputRecords: uint64(100000)}, []float64{4350})
 
 	if ageAllSelected {
 		report.SelectedTables = append(report.SelectedTables, tableDirFilterAgeAll)
