@@ -687,23 +687,18 @@ func validateSnapshotCleanupInputs(cfg Config, mountPath string, updatedAt time.
 	return nil
 }
 
-func cleanActiveSnapshotAttemptWithConn(
-	cfg Config,
-	conn ch.Conn,
-	mountPath string,
-	updatedAt time.Time,
-) error {
+func cleanActiveSnapshotAttemptWithConn(cfg Config, conn ch.Conn, mountPath string, updatedAt time.Time) error {
 	ctx, cancel := configQueryContext(cfg)
 	defer cancel()
 
 	sid := snapshotID(mountPath, updatedAt).String()
 
-	activeSID, hasActive, err := readActiveSnapshotID(ctx, conn, mountPath)
+	isActive, err := snapshotCleanupTargetIsActive(ctx, conn, mountPath, sid)
 	if err != nil {
 		return err
 	}
 
-	if !hasActive || activeSID != sid {
+	if !isActive {
 		return nil
 	}
 
@@ -712,7 +707,27 @@ func cleanActiveSnapshotAttemptWithConn(
 	cleanupCtx, cleanupCancel := activeSnapshotCleanupContext()
 	defer cleanupCancel()
 
-	return cleanActiveSnapshotAttempt(cleanupCtx, conn, mountPath, sid)
+	if err := cleanActiveSnapshotAttempt(cleanupCtx, conn, mountPath, sid); err != nil {
+		return err
+	}
+
+	refreshCurrentActivePrefixRollupsBestEffort(cleanupCtx, conn)
+
+	return nil
+}
+
+func snapshotCleanupTargetIsActive(
+	ctx context.Context,
+	conn ch.Conn,
+	mountPath string,
+	sid string,
+) (bool, error) {
+	activeSID, hasActive, err := readActiveSnapshotID(ctx, conn, mountPath)
+	if err != nil {
+		return false, err
+	}
+
+	return hasActive && activeSID == sid, nil
 }
 
 func activeSnapshotCleanupContext() (context.Context, context.CancelFunc) {

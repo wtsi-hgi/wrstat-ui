@@ -49,13 +49,14 @@ const (
 	importBatchReceiveGuard    = time.Minute
 	importBatchMaxOpenDuration = defaultCHReceiveTimeout - importBatchReceiveGuard
 
-	importPhasePartitionDropReset = "partition_drop_reset"
-	importPhaseDGUTAInsert        = "wrstat_dguta_insert"
-	importPhaseChildrenInsert     = "wrstat_children_insert"
-	importPhaseMountSwitch        = "mount_switch"
-	importPhaseDirProjectionWrite = "wrstat_dir_projection_insert"
-	importPhaseTreeSummaryRefresh = "wrstat_tree_summary_refresh"
-	importPhaseOldSnapshotDrop    = "old_snapshot_partition_drop"
+	importPhasePartitionDropReset  = "partition_drop_reset"
+	importPhaseDGUTAInsert         = "wrstat_dguta_insert"
+	importPhaseChildrenInsert      = "wrstat_children_insert"
+	importPhaseMountSwitch         = "mount_switch"
+	importPhaseDirProjectionWrite  = "wrstat_dir_projection_insert"
+	importPhaseTreeSummaryRefresh  = "wrstat_tree_summary_refresh"
+	importPhaseActivePrefixRefresh = "wrstat_active_prefix_rollup_refresh"
+	importPhaseOldSnapshotDrop     = "old_snapshot_partition_drop"
 
 	activeSnapshotQuery = "SELECT toString(snapshot_id) FROM wrstat_mounts_active " +
 		"WHERE mount_path = ?"
@@ -511,12 +512,19 @@ func (w *dgutaWriter) switchSnapshotAndDropOld(ctx context.Context) error {
 	}
 
 	w.refreshActiveTreeSummariesBestEffort(ctx)
+	w.refreshActivePrefixRollupsBestEffort(ctx)
 
 	return nil
 }
 
 func (w *dgutaWriter) refreshActiveTreeSummariesBestEffort(ctx context.Context) {
 	if err := w.refreshActiveTreeSummaries(ctx); err != nil {
+		return
+	}
+}
+
+func (w *dgutaWriter) refreshActivePrefixRollupsBestEffort(ctx context.Context) {
+	if err := w.refreshActivePrefixRollups(ctx); err != nil {
 		return
 	}
 }
@@ -545,6 +553,12 @@ func (w *dgutaWriter) refreshActiveTreeSummaries(ctx context.Context) error {
 		}
 
 		return ensureActiveTreeSummaries(ctx, w.conn, rows)
+	})
+}
+
+func (w *dgutaWriter) refreshActivePrefixRollups(ctx context.Context) error {
+	return w.timeImportPhase(importPhaseActivePrefixRefresh, func() error {
+		return refreshCurrentActivePrefixRollups(ctx, w.conn)
 	})
 }
 

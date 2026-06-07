@@ -30,17 +30,25 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"slices"
+	"strconv"
+	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/wtsi-hgi/wrstat-ui/db"
 )
 
 const (
-	treeChildrenCacheMaxEntries     = 65536
-	treeDGUTACacheMaxEntries        = 8192
-	treeDirSummaryCacheMaxEntries   = 32768
-	treeMountSummaryCacheMaxEntries = 1024
-	treeQueryCacheMaxNamespaces     = 16
+	activeMetadataQueryVersion         uint32 = 1
+	activePrefixDirSummaryQueryVersion uint32 = 1
+
+	treeActiveMetadataCacheMaxEntries      = 256
+	treeActivePrefixSummaryCacheMaxEntries = 32768
+	treeChildrenCacheMaxEntries            = 65536
+	treeDGUTACacheMaxEntries               = 8192
+	treeDirSummaryCacheMaxEntries          = 32768
+	treeMountSummaryCacheMaxEntries        = 1024
+	treeQueryCacheMaxNamespaces            = 16
 )
 
 var sharedTreeQueryCaches = newTreeQueryCacheRegistry() //nolint:gochecknoglobals // process-wide provider cache
@@ -89,6 +97,133 @@ func newTreeMountCacheKey(mountPath, snapshotID string) treeMountCacheKey {
 	}
 }
 
+type treeQueryVersionKey struct {
+	schemaVersion uint32
+	queryVersion  uint32
+}
+
+func newTreeQueryVersionKey(schemaVersion, queryVersion uint32) treeQueryVersionKey {
+	return treeQueryVersionKey{
+		schemaVersion: schemaVersion,
+		queryVersion:  queryVersion,
+	}
+}
+
+type treePermissionCacheInputs struct {
+	uid  uint32
+	gids []uint32
+}
+
+type treePermissionCacheKey struct {
+	uid  uint32
+	gids string
+}
+
+func newTreePermissionCacheKey(inputs treePermissionCacheInputs) treePermissionCacheKey {
+	return treePermissionCacheKey{
+		uid:  inputs.uid,
+		gids: uint32SetCacheKey(inputs.gids),
+	}
+}
+
+type treeFilterCacheKey struct {
+	nilFilter bool
+	gids      string
+	uids      string
+	ft        uint16
+	age       uint8
+}
+
+func newTreeFilterCacheKey(filter *db.Filter) treeFilterCacheKey {
+	if filter == nil {
+		return treeFilterCacheKey{nilFilter: true}
+	}
+
+	return treeFilterCacheKey{
+		gids: uint32SetCacheKey(filter.GIDs),
+		uids: uint32SetCacheKey(filter.UIDs),
+		ft:   uint16(filter.FT),
+		age:  uint8(filter.Age),
+	}
+}
+
+func uint32SetCacheKey(values []uint32) string {
+	if values == nil {
+		return "nil"
+	}
+
+	sorted := slices.Clone(values)
+	slices.Sort(sorted)
+
+	var b strings.Builder
+	b.WriteString(strconv.Itoa(len(sorted)))
+	b.WriteByte(':')
+
+	for _, value := range sorted {
+		b.WriteString(strconv.FormatUint(uint64(value), 10))
+		b.WriteByte(',')
+	}
+
+	return b.String()
+}
+
+type treeActivePrefixSummaryCacheKey struct {
+	activeSetID string
+	dir         string
+	filter      treeFilterCacheKey
+	permission  treePermissionCacheKey
+	version     treeQueryVersionKey
+}
+
+func newTreeActivePrefixSummaryCacheKey(
+	activeSetID string,
+	dir string,
+	filter *db.Filter,
+	permission treePermissionCacheInputs,
+	schemaVersion uint32,
+	queryVersion uint32,
+) treeActivePrefixSummaryCacheKey {
+	return treeActivePrefixSummaryCacheKey{
+		activeSetID: activeSetID,
+		dir:         ensureTrailingSlash(dir),
+		filter:      newTreeFilterCacheKey(filter),
+		permission:  newTreePermissionCacheKey(permission),
+		version:     newTreeQueryVersionKey(schemaVersion, queryVersion),
+	}
+}
+
+type treeActiveMetadataCacheKey struct {
+	activeSetID string
+	version     treeQueryVersionKey
+}
+
+func newTreeActiveMetadataCacheKey(
+	activeSetID string,
+	schemaVersion uint32,
+	queryVersion uint32,
+) treeActiveMetadataCacheKey {
+	return treeActiveMetadataCacheKey{
+		activeSetID: activeSetID,
+		version:     newTreeQueryVersionKey(schemaVersion, queryVersion),
+	}
+}
+
+type treeActiveMetadata struct {
+	activeSetID string
+	mounts      []activeMount
+}
+
+func newTreeActiveMetadata(activeSetID string, mounts []activeMount) treeActiveMetadata {
+	return treeActiveMetadata{
+		activeSetID: activeSetID,
+		mounts:      slices.Clone(mounts),
+	}
+}
+
+func (m treeActiveMetadata) clone() treeActiveMetadata {
+	return newTreeActiveMetadata(m.activeSetID, m.mounts)
+}
+
 type treeQueryCache struct {
 	mu sync.RWMutex
 
@@ -105,6 +240,15 @@ type treeQueryCache struct {
 	mountSummaryOrder []treeMountCacheKey
 	mountVectors      map[treeMountCacheKey]bool
 	mountVectorOrder  []treeMountCacheKey
+
+	activePrefixSummaries     map[treeActivePrefixSummaryCacheKey]*db.DirSummary
+	activePrefixSummaryOrder  []treeActivePrefixSummaryCacheKey
+	activeMetadata            map[treeActiveMetadataCacheKey]treeActiveMetadata
+	activeMetadataOrder       []treeActiveMetadataCacheKey
+	activePrefixSummaryHits   atomic.Uint64
+	activePrefixSummaryMisses atomic.Uint64
+	activeMetadataHits        atomic.Uint64
+	activeMetadataMisses      atomic.Uint64
 }
 
 func treeQueryCacheForConfig(cfg Config) *treeQueryCache {
@@ -119,6 +263,10 @@ func newTreeQueryCache() *treeQueryCache {
 		dirSummaryCounts: make(map[treeDirSummaryCacheKey]uint64),
 		mountSummaries:   make(map[treeMountCacheKey]bool),
 		mountVectors:     make(map[treeMountCacheKey]bool),
+		activePrefixSummaries: make(
+			map[treeActivePrefixSummaryCacheKey]*db.DirSummary,
+		),
+		activeMetadata: make(map[treeActiveMetadataCacheKey]treeActiveMetadata),
 	}
 }
 
@@ -297,6 +445,94 @@ func (c *treeQueryCache) dirSummaryEntryCount() int {
 	return len(c.dirSummaries)
 }
 
+func (c *treeQueryCache) getActivePrefixDirSummary(
+	key treeActivePrefixSummaryCacheKey,
+) (*db.DirSummary, bool) {
+	c.mu.RLock()
+	summary, ok := c.activePrefixSummaries[key]
+	c.mu.RUnlock()
+
+	if !ok {
+		c.activePrefixSummaryMisses.Add(1)
+
+		return nil, false
+	}
+
+	c.activePrefixSummaryHits.Add(1)
+
+	return cloneDirSummary(summary), true
+}
+
+func (c *treeQueryCache) putActivePrefixDirSummary(
+	key treeActivePrefixSummaryCacheKey,
+	summary *db.DirSummary,
+) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if _, exists := c.activePrefixSummaries[key]; !exists {
+		c.activePrefixSummaryOrder = append(c.activePrefixSummaryOrder, key)
+		c.evictOldestActivePrefixSummaries()
+	}
+
+	c.activePrefixSummaries[key] = cloneDirSummary(summary)
+}
+
+func (c *treeQueryCache) evictOldestActivePrefixSummaries() {
+	for len(c.activePrefixSummaryOrder) > treeActivePrefixSummaryCacheMaxEntries {
+		oldest := c.activePrefixSummaryOrder[0]
+		c.activePrefixSummaryOrder = c.activePrefixSummaryOrder[1:]
+		delete(c.activePrefixSummaries, oldest)
+	}
+}
+
+func (c *treeQueryCache) activePrefixSummaryEntryCount() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	return len(c.activePrefixSummaries)
+}
+
+func (c *treeQueryCache) getActiveMetadata(key treeActiveMetadataCacheKey) (treeActiveMetadata, bool) {
+	c.mu.RLock()
+	metadata, ok := c.activeMetadata[key]
+	c.mu.RUnlock()
+
+	if !ok {
+		c.activeMetadataMisses.Add(1)
+
+		return treeActiveMetadata{}, false
+	}
+
+	c.activeMetadataHits.Add(1)
+
+	return metadata.clone(), true
+}
+
+func (c *treeQueryCache) putActiveMetadata(key treeActiveMetadataCacheKey, metadata treeActiveMetadata) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if _, exists := c.activeMetadata[key]; !exists {
+		c.activeMetadataOrder = append(c.activeMetadataOrder, key)
+		c.evictOldestActiveMetadata()
+	}
+
+	c.activeMetadata[key] = metadata.clone()
+}
+
+func (c *treeQueryCache) evictOldestActiveMetadata() {
+	for len(c.activeMetadataOrder) > treeActiveMetadataCacheMaxEntries {
+		oldest := c.activeMetadataOrder[0]
+		c.activeMetadataOrder = c.activeMetadataOrder[1:]
+		delete(c.activeMetadata, oldest)
+	}
+}
+
+func (c *treeQueryCache) recordActiveMetadataMiss() {
+	c.activeMetadataMisses.Add(1)
+}
+
 func (c *treeQueryCache) getMountDirSummaryReady(key treeMountCacheKey) bool {
 	c.mu.RLock()
 	ready := c.mountSummaries[key]
@@ -370,6 +606,34 @@ func (c *treeQueryCache) reset() {
 	c.mountSummaryOrder = nil
 	c.mountVectors = make(map[treeMountCacheKey]bool)
 	c.mountVectorOrder = nil
+	c.activePrefixSummaries = make(map[treeActivePrefixSummaryCacheKey]*db.DirSummary)
+	c.activePrefixSummaryOrder = nil
+	c.activeMetadata = make(map[treeActiveMetadataCacheKey]treeActiveMetadata)
+	c.activeMetadataOrder = nil
+	c.resetStats()
+}
+
+type treeQueryCacheStats struct {
+	activePrefixSummaryHits   uint64
+	activePrefixSummaryMisses uint64
+	activeMetadataHits        uint64
+	activeMetadataMisses      uint64
+}
+
+func (c *treeQueryCache) stats() treeQueryCacheStats {
+	return treeQueryCacheStats{
+		activePrefixSummaryHits:   c.activePrefixSummaryHits.Load(),
+		activePrefixSummaryMisses: c.activePrefixSummaryMisses.Load(),
+		activeMetadataHits:        c.activeMetadataHits.Load(),
+		activeMetadataMisses:      c.activeMetadataMisses.Load(),
+	}
+}
+
+func (c *treeQueryCache) resetStats() {
+	c.activePrefixSummaryHits.Store(0)
+	c.activePrefixSummaryMisses.Store(0)
+	c.activeMetadataHits.Store(0)
+	c.activeMetadataMisses.Store(0)
 }
 
 type treeQueryCacheRegistry struct {

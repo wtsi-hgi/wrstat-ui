@@ -309,7 +309,7 @@ func dropVirtualActiveSetPartitions(ctx context.Context, conn ch.Conn, activeSet
 		dropVirtualSummaryCachePartitionQuery,
 		dropVirtualSummarySetPartitionQuery,
 	} {
-		if err := dropVirtualActiveSetPartition(ctx, conn, query, activeSetID); err != nil {
+		if err := dropActiveSetPartition(ctx, conn, query, activeSetID, "virtual"); err != nil {
 			return err
 		}
 	}
@@ -317,7 +317,13 @@ func dropVirtualActiveSetPartitions(ctx context.Context, conn ch.Conn, activeSet
 	return nil
 }
 
-func dropVirtualActiveSetPartition(ctx context.Context, conn ch.Conn, query, activeSetID string) error {
+func dropActiveSetPartition(
+	ctx context.Context,
+	conn ch.Conn,
+	query string,
+	activeSetID string,
+	label string,
+) error {
 	dropCtx, cancel := partitionDropContext(ctx)
 	defer cancel()
 
@@ -326,7 +332,7 @@ func dropVirtualActiveSetPartition(ctx context.Context, conn ch.Conn, query, act
 		return nil
 	}
 
-	return fmt.Errorf("clickhouse: failed to drop virtual active-set partition: %w", err)
+	return fmt.Errorf("clickhouse: failed to drop %s active-set partition: %w", label, err)
 }
 
 func isUnknownTable(err error) bool {
@@ -397,16 +403,7 @@ func (d *clickHouseDatabase) virtualChildrenForAncestor(
 func (d *clickHouseDatabase) currentVirtualChildrenActiveSet(
 	ctx context.Context,
 ) (string, []activeMount, error) {
-	if d.snapshot != nil {
-		return d.snapshot.fingerprint, d.snapshot.all(), nil
-	}
-
-	rows, err := queryMountsActiveRows(ctx, d.conn)
-	if err != nil {
-		return "", nil, err
-	}
-
-	return fingerprintForMountsActive(rows), newActiveMountsSnapshot(rows).all(), nil
+	return d.currentActiveMountsSet(ctx)
 }
 
 func (d *clickHouseDatabase) ensureVirtualChildrenReady(

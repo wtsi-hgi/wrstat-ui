@@ -32,6 +32,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -68,6 +69,15 @@ const (
 	a2T283TotalRows    = 100000
 	a2T283TotalFiles   = 764218
 	a2T283TotalBytes   = 1197943849957
+)
+
+const (
+	b2ActiveRootTupleRowsPerMount          = 40960
+	b2ActiveRootTuplePreseededRowsPerMount = 3
+	b2ActiveRootTupleRepeat                = 20
+	b2ActiveRootTupleP50MaxMS              = 5
+	b2ActiveRootTupleP95MaxMS              = 6
+	nfsAncestor                            = "/nfs/"
 )
 
 type clickHouseGenericTreeDB struct {
@@ -1241,6 +1251,477 @@ func explainGranules(explain string) (uint64, uint64, bool) {
 	total, totalErr := strconv.ParseUint(last[2], 10, 64)
 
 	return read, total, readErr == nil && totalErr == nil
+}
+
+func TestClickHouseDatabaseActivePrefixRoutingB2(t *testing.T) {
+	Convey("B2.1-B2.2 DirInfo routes root and namespace summaries through active-prefix rollups", t, func() {
+		env, ctx, cleanup := newB2ActivePrefixEnv(t)
+		defer cleanup()
+
+		So(ensureActivePrefixRollups(ctx, env.conn, env.rows), ShouldBeNil)
+
+		countingConn := &activePrefixRouteCountingConn{Conn: env.conn}
+		dbch := newClickHouseDatabase(env.cfg, countingConn)
+		tree := db.NewTree(dbch)
+
+		rootExpected := readActivePrefixSummaryForB2(ctx, env.conn, env.activeSetID, "/")
+		lustreExpected := readActivePrefixSummaryForB2(ctx, env.conn, env.activeSetID, "/lustre/")
+		nfsExpected := readActivePrefixSummaryForB2(ctx, env.conn, env.activeSetID, nfsAncestor)
+
+		di, err := tree.DirInfo("/", nil)
+		So(err, ShouldBeNil)
+		So(di, ShouldNotBeNil)
+		assertB2SummaryMatches(di.Current, rootExpected)
+		So(di.Children, ShouldHaveLength, 2)
+		So(di.Children[0].Dir, ShouldEqual, c3LustreChild)
+		assertB2SummaryMatches(di.Children[0], lustreExpected)
+		So(di.Children[1].Dir, ShouldEqual, c3NFSChild)
+		assertB2SummaryMatches(di.Children[1], nfsExpected)
+
+		lustre, err := dbch.DirInfo("/lustre/", nil)
+		So(err, ShouldBeNil)
+		assertB2SummaryMatches(lustre, lustreExpected)
+		So(lustre.Count, ShouldEqual, env.lustreCount)
+		So(lustre.Count, ShouldNotEqual, env.nfsCount)
+
+		nfs, err := dbch.DirInfo(nfsAncestor, nil)
+		So(err, ShouldBeNil)
+		assertB2SummaryMatches(nfs, nfsExpected)
+		So(nfs.Count, ShouldEqual, env.nfsCount)
+		So(nfs.Count, ShouldNotEqual, env.lustreCount)
+
+		So(countingConn.activePrefixScalarQueryCount(), ShouldEqual, 3)
+		So(countingConn.activeMountRootFactQueryCount(), ShouldEqual, 0)
+	})
+
+	Convey("B2.3 filtered namespace DirInfo uses active-prefix AgeAll rows", t, func() {
+		env, ctx, cleanup := newB2ActivePrefixEnv(t)
+		defer cleanup()
+
+		So(ensureActivePrefixRollups(ctx, env.conn, env.rows), ShouldBeNil)
+
+		filter := &db.Filter{
+			Age:  db.DGUTAgeAll,
+			GIDs: []uint32{14976},
+			UIDs: []uint32{20155},
+			FT:   db.DGUTAFileTypeOther,
+		}
+		countingConn := &activePrefixRouteCountingConn{Conn: env.conn}
+		dbch := newClickHouseDatabase(env.cfg, countingConn)
+
+		sum, err := dbch.DirInfo("/nfs/", filter)
+		So(err, ShouldBeNil)
+		So(sum, ShouldNotBeNil)
+		So(sum.Count, ShouldEqual, env.nfsOtherCount)
+		So(sum.Size, ShouldEqual, env.nfsOtherCount*10)
+		So(sum.GIDs, ShouldResemble, []uint32{14976})
+		So(sum.UIDs, ShouldResemble, []uint32{20155})
+		So(sum.FT, ShouldEqual, db.DGUTAFileTypeOther)
+
+		So(countingConn.activePrefixAgeAllQueryCount(), ShouldBeGreaterThan, 0)
+		So(countingConn.dirFilterAgeAllQueryCount(), ShouldEqual, 0)
+		So(countingConn.activeMountRootFactQueryCount(), ShouldEqual, 0)
+	})
+
+	Convey("B2.4 missing active-prefix tables fall back to facts and record the fallback route", t, func() {
+		env, ctx, cleanup := newB2ActivePrefixEnv(t)
+		defer cleanup()
+
+		resetActivePrefixRollupMissesForTest()
+		dropB2ActivePrefixTables(ctx, env.conn)
+
+		countingConn := &activePrefixRouteCountingConn{Conn: env.conn}
+		dbch := newClickHouseDatabase(env.cfg, countingConn)
+
+		sum, err := dbch.DirInfo("/", nil)
+		So(err, ShouldBeNil)
+		So(sum, ShouldNotBeNil)
+		So(sum.Count, ShouldEqual, env.rootCount)
+		So(sum.Size, ShouldEqual, env.rootCount*10)
+		So(activePrefixRollupMisses(), ShouldEqual, uint64(1))
+		So(countingConn.activeMountRootFactQueryCount(), ShouldEqual, 0)
+		So(countingConn.ancestorFactQueryCount(), ShouldBeGreaterThan, 0)
+	})
+
+	Convey("B2.5 active mount-root fact SQL binds full root tuples", t, func() {
+		mounts := []activeMount{
+			{mountPath: c3Scratch120Mount, snapshotID: "00000000-0000-0000-0000-000000000120"},
+			{mountPath: testT283ImagingMountPath, snapshotID: "00000000-0000-0000-0000-000000000283"},
+		}
+
+		query, args := activeMountRootDirTuplesQuery(mounts)
+		normalised := strings.Join(strings.Fields(query), " ")
+		So(normalised, ShouldContainSubstring, "(d.mount_path, d.snapshot_id, d.dir) IN")
+		So(normalised, ShouldNotContainSubstring, "d.dir = d.mount_path")
+		So(normalised, ShouldNotContainSubstring, "(d.mount_path, d.snapshot_id) IN")
+		So(args, ShouldResemble, []any{
+			c3Scratch120Mount,
+			"00000000-0000-0000-0000-000000000120",
+			c3Scratch120Mount,
+			testT283ImagingMountPath,
+			"00000000-0000-0000-0000-000000000283",
+			testT283ImagingMountPath,
+		})
+	})
+
+	Convey("B2.6 tuned active-root tuple SQL prunes to four granules and stays below latency gates", t, func() {
+		env, ctx, cleanup := newB2ActivePrefixEnv(t)
+		defer cleanup()
+
+		seedB2ActiveRootTupleRows(ctx, env.conn, env.mounts)
+		So(env.conn.Exec(ctx, "OPTIM"+"IZE TABLE wrstat_dir_facts FINAL"), ShouldBeNil)
+
+		explain, err := explainB2ActiveRootTupleQuery(ctx, env.conn, env.mounts)
+		So(err, ShouldBeNil)
+
+		readGranules, totalGranules, ok := explainGranules(explain)
+		So(ok, ShouldBeTrue)
+		So(readGranules, ShouldBeLessThanOrEqualTo, uint64(4))
+		So(totalGranules, ShouldEqual, uint64(20))
+
+		durations := measureB2ActiveRootTupleDurations(ctx, env.cfg, env.conn, env.mounts)
+		So(b2Percentile(durations, 0.50), ShouldBeLessThanOrEqualTo, float64(b2ActiveRootTupleP50MaxMS))
+		So(b2Percentile(durations, 0.95), ShouldBeLessThanOrEqualTo, float64(b2ActiveRootTupleP95MaxMS))
+	})
+}
+
+func newB2ActivePrefixEnv(t *testing.T) (*b2ActivePrefixEnv, context.Context, func()) {
+	t.Helper()
+
+	os.Setenv("WRSTAT_ENV", "test")
+	resetSharedTreeQueryCachesForTesting()
+
+	th := newClickHouseTestHarness(t)
+	cfg := th.newConfig()
+	cfg.QueryTimeout = 10 * time.Second
+	cfg.PollInterval = 0
+	cfg.MountPoints = []string{"/"}
+
+	p, err := OpenProvider(cfg)
+	So(err, ShouldBeNil)
+
+	conn := th.openConn(cfg.DSN)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+
+	env := &b2ActivePrefixEnv{
+		cfg:      cfg,
+		conn:     conn,
+		provider: p,
+	}
+	env.seed(ctx)
+
+	return env, ctx, func() {
+		cancel()
+		So(conn.Close(), ShouldBeNil)
+		So(p.Close(), ShouldBeNil)
+		resetSharedTreeQueryCachesForTesting()
+		os.Unsetenv("WRSTAT_ENV")
+	}
+}
+
+func readActivePrefixSummaryForB2(
+	ctx context.Context,
+	conn ch.Conn,
+	activeSetID string,
+	dir string,
+) *db.DirSummary {
+	sum, found, err := readActivePrefixScalarRollup(ctx, conn, activeSetID, dir)
+	So(err, ShouldBeNil)
+	So(found, ShouldBeTrue)
+
+	return sum
+}
+
+func assertB2SummaryMatches(actual, expected *db.DirSummary) {
+	So(actual, ShouldNotBeNil)
+	So(actual.Count, ShouldEqual, expected.Count)
+	So(actual.Size, ShouldEqual, expected.Size)
+	So(actual.CommonATime, ShouldEqual, expected.CommonATime)
+	So(actual.CommonMTime, ShouldEqual, expected.CommonMTime)
+	So(actual.UIDs, ShouldResemble, expected.UIDs)
+	So(actual.GIDs, ShouldResemble, expected.GIDs)
+	So(actual.FT, ShouldEqual, expected.FT)
+	So(actual.Modtime, ShouldResemble, expected.Modtime)
+}
+
+func dropB2ActivePrefixTables(ctx context.Context, conn ch.Conn) {
+	for _, table := range []string{
+		"wrstat_active_prefix_rollup_sets",
+		"wrstat_active_prefix_filter_ageall",
+		"wrstat_active_prefix_rollups",
+	} {
+		So(conn.Exec(ctx, "DROP TABLE "+table), ShouldBeNil)
+	}
+}
+
+func seedB2ActiveRootTupleRows(ctx context.Context, conn ch.Conn, mounts []activeMount) {
+	for _, mount := range mounts {
+		So(conn.Exec(ctx,
+			"INSERT INTO wrstat_dir_facts "+
+				"(mount_path, snapshot_id, dir, updated_at, gids, uids, fts, ages, counts, sizes, "+
+				"atime_mins, mtime_maxs, atime_buckets, mtime_buckets, refreshed_at) "+
+				"SELECT ?, toUUID(?), if(number = 0, ?, concat(?, 'tuple-dir-', leftPad(toString(number), 5, '0'), '/')), ?, "+
+				"[toUInt32(14976)], [toUInt32(20155)], [toUInt16(?)], [toUInt8(?)], [toUInt64(1)], [toUInt64(10)], "+
+				"[toInt64(10)], [toInt64(20)], [[toUInt64(1),0,0,0,0,0,0,0,0]], [[0,toUInt64(1),0,0,0,0,0,0,0]], now() "+
+				"FROM numbers(?)",
+			mount.mountPath,
+			mount.snapshotID,
+			mount.mountPath,
+			mount.mountPath,
+			mount.updatedAt,
+			uint16(db.DGUTAFileTypeOther),
+			uint8(db.DGUTAgeAll),
+			b2ActiveRootTupleRowsPerMount-b2ActiveRootTuplePreseededRowsPerMount,
+		), ShouldBeNil)
+	}
+}
+
+func measureB2ActiveRootTupleDurations(
+	ctx context.Context,
+	cfg Config,
+	conn ch.Conn,
+	mounts []activeMount,
+) []float64 {
+	inspector := &Inspector{cfg: cfg, conn: conn}
+	durations := make([]float64, 0, b2ActiveRootTupleRepeat)
+
+	for range b2ActiveRootTupleRepeat {
+		metrics, err := inspector.Measure(ctx, func(context.Context) error {
+			gutas, queryErr := newClickHouseDatabase(cfg, conn).queryGUTAsForActiveMountRootDirs(mounts)
+			So(gutas, ShouldHaveLength, len(mounts))
+
+			return queryErr
+		})
+		So(err, ShouldBeNil)
+
+		durations = append(durations, float64(metrics.DurationMs))
+	}
+
+	return durations
+}
+
+func b2Percentile(values []float64, p float64) float64 {
+	sorted := append([]float64(nil), values...)
+	sort.Float64s(sorted)
+
+	index := int(float64(len(sorted))*p + 0.999999)
+	if index < 1 {
+		index = 1
+	}
+
+	if index > len(sorted) {
+		index = len(sorted)
+	}
+
+	return sorted[index-1]
+}
+
+func explainB2ActiveRootTupleQuery(
+	ctx context.Context,
+	conn ch.Conn,
+	mounts []activeMount,
+) (string, error) {
+	query, args := activeMountRootDirTuplesQuery(mounts)
+
+	rows, err := conn.Query(ctx, explainPrefix+query, args...)
+	if err != nil {
+		return "", err
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	var lines []string
+
+	for rows.Next() {
+		var line string
+		So(rows.Scan(&line), ShouldBeNil)
+		lines = append(lines, line)
+	}
+
+	So(rows.Err(), ShouldBeNil)
+
+	return strings.Join(lines, "\n"), nil
+}
+
+type b2MountSeed struct {
+	mountPath  string
+	updatedAt  time.Time
+	bamCount   uint64
+	otherCount uint64
+	dirCount   uint64
+	childCount uint64
+}
+
+type b2ActivePrefixEnv struct {
+	cfg           Config
+	conn          ch.Conn
+	provider      interface{ Close() error }
+	rows          []mountsActiveRow
+	mounts        []activeMount
+	activeSetID   string
+	rootCount     uint64
+	lustreCount   uint64
+	nfsCount      uint64
+	nfsOtherCount uint64
+}
+
+func (e *b2ActivePrefixEnv) seed(ctx context.Context) {
+	seeds := []b2MountSeed{
+		{
+			mountPath:  c3Scratch120Mount,
+			updatedAt:  time.Date(2026, 6, 7, 9, 0, 0, 0, time.UTC),
+			bamCount:   90,
+			otherCount: 7,
+			dirCount:   3,
+			childCount: 2,
+		},
+		{
+			mountPath:  "/lustre/scratch122/",
+			updatedAt:  time.Date(2026, 6, 7, 9, 1, 0, 0, time.UTC),
+			bamCount:   80,
+			otherCount: 5,
+			dirCount:   4,
+			childCount: 2,
+		},
+		{
+			mountPath:  "/lustre/scratch127/",
+			updatedAt:  time.Date(2026, 6, 7, 9, 2, 0, 0, time.UTC),
+			bamCount:   70,
+			otherCount: 9,
+			dirCount:   5,
+			childCount: 2,
+		},
+		{
+			mountPath:  testT283ImagingMountPath,
+			updatedAt:  time.Date(2026, 6, 7, 9, 3, 0, 0, time.UTC),
+			bamCount:   60,
+			otherCount: 11,
+			dirCount:   6,
+			childCount: 3,
+		},
+	}
+
+	e.rows = make([]mountsActiveRow, 0, len(seeds))
+	e.mounts = make([]activeMount, 0, len(seeds))
+
+	for _, seed := range seeds {
+		mount := seedB2Mount(ctx, e.conn, seed)
+		e.mounts = append(e.mounts, mount)
+		e.rows = append(e.rows, mountsActiveRow(mount))
+		e.addSeedCounts(seed)
+	}
+
+	e.activeSetID = fingerprintForMountsActive(e.rows)
+}
+
+func seedB2Mount(ctx context.Context, conn ch.Conn, seed b2MountSeed) activeMount {
+	sid := snapshotID(seed.mountPath, seed.updatedAt)
+	mount := activeMount{
+		mountPath:  seed.mountPath,
+		snapshotID: sid.String(),
+		updatedAt:  seed.updatedAt,
+	}
+
+	So(conn.Exec(ctx, testInsertMountStmt, seed.mountPath, time.Now().UTC(), sid, seed.updatedAt), ShouldBeNil)
+
+	for _, dir := range []string{"/", activePrefixB1Namespace(seed.mountPath), seed.mountPath} {
+		insertB2Fact(ctx, conn, mount, dir, db.DGUTAFileTypeBam, seed.bamCount)
+		insertB2Fact(ctx, conn, mount, dir, db.DGUTAFileTypeOther, seed.otherCount)
+		insertB2Fact(ctx, conn, mount, dir, db.DGUTAFileTypeDir, seed.dirCount)
+	}
+
+	insertActivePrefixB1Children(ctx, conn, mount, seed.childCount)
+	So(writeMaintainedMountDirProjectionForTest(ctx, conn, mount), ShouldBeNil)
+	insertDirFilterAgeAllRowsFromFactsForTest(ctx, conn, mount)
+
+	return mount
+}
+
+func (e *b2ActivePrefixEnv) addSeedCounts(seed b2MountSeed) {
+	count := seed.bamCount + seed.otherCount + seed.dirCount
+	e.rootCount += count
+
+	if strings.HasPrefix(seed.mountPath, "/nfs/") {
+		e.nfsCount += count
+		e.nfsOtherCount += seed.otherCount
+
+		return
+	}
+
+	e.lustreCount += count
+}
+
+type activePrefixRouteCountingConn struct {
+	ch.Conn
+
+	activeMountRootFactQueries atomic.Int32
+	activePrefixAgeAllQueries  atomic.Int32
+	activePrefixScalarQueries  atomic.Int32
+	ancestorFactQueries        atomic.Int32
+	dirFilterAgeAllQueries     atomic.Int32
+}
+
+func (c *activePrefixRouteCountingConn) Query(ctx context.Context, query string, args ...any) (driver.Rows, error) {
+	if isActivePrefixScalarReadQuery(query) {
+		c.activePrefixScalarQueries.Add(1)
+	}
+
+	if isActivePrefixAgeAllReadQuery(query) {
+		c.activePrefixAgeAllQueries.Add(1)
+	}
+
+	if isActiveMountRootFactReadQuery(query) {
+		c.activeMountRootFactQueries.Add(1)
+	}
+
+	if isAncestorFactVectorQuery(query) {
+		c.ancestorFactQueries.Add(1)
+	}
+
+	if isDirFilterAgeAllReadQuery(query) {
+		c.dirFilterAgeAllQueries.Add(1)
+	}
+
+	return c.Conn.Query(ctx, query, args...)
+}
+
+func isActivePrefixScalarReadQuery(query string) bool {
+	normalised := strings.Join(strings.Fields(query), " ")
+
+	return strings.Contains(normalised, "FROM wrstat_active_prefix_rollups")
+}
+
+func isActivePrefixAgeAllReadQuery(query string) bool {
+	normalised := strings.Join(strings.Fields(query), " ")
+
+	return strings.Contains(normalised, "FROM wrstat_active_prefix_filter_ageall")
+}
+
+func isActiveMountRootFactReadQuery(query string) bool {
+	normalised := strings.Join(strings.Fields(query), " ")
+
+	return strings.Contains(normalised, "FROM wrstat_dir_facts d") &&
+		strings.Contains(normalised, "(d.mount_path, d.snapshot_id, d.dir) IN")
+}
+
+func (c *activePrefixRouteCountingConn) activeMountRootFactQueryCount() int {
+	return int(c.activeMountRootFactQueries.Load())
+}
+
+func (c *activePrefixRouteCountingConn) activePrefixAgeAllQueryCount() int {
+	return int(c.activePrefixAgeAllQueries.Load())
+}
+
+func (c *activePrefixRouteCountingConn) activePrefixScalarQueryCount() int {
+	return int(c.activePrefixScalarQueries.Load())
+}
+
+func (c *activePrefixRouteCountingConn) ancestorFactQueryCount() int {
+	return int(c.ancestorFactQueries.Load())
+}
+
+func (c *activePrefixRouteCountingConn) dirFilterAgeAllQueryCount() int {
+	return int(c.dirFilterAgeAllQueries.Load())
 }
 
 type queryAndDisplayDirForTest struct {
@@ -4061,7 +4542,6 @@ func TestClickHouseDatabaseActiveAncestorSummaries(t *testing.T) {
 
 		const (
 			lustreAncestor = "/lustre/"
-			nfsAncestor    = "/nfs/"
 			mountA         = lustreAncestor + "agentA/"
 			mountB         = nfsAncestor + "projectB/"
 		)
@@ -4935,7 +5415,7 @@ func TestClickHouseDatabaseWhereFastPath(t *testing.T) {
 		cfg := th.newConfig()
 		cfg.QueryTimeout = 5 * time.Second
 		cfg.PollInterval = 0
-		cfg.MountPoints = []string{"/", "/lustre/", "/nfs/"}
+		cfg.MountPoints = []string{"/", "/lustre/", nfsAncestor}
 
 		p, err := OpenProvider(cfg)
 		So(err, ShouldBeNil)
@@ -5705,4 +6185,15 @@ func (c *ancestorSummaryQueryCountingConn) ancestorFactVectorQueryCount() int {
 
 func (c *ancestorSummaryQueryCountingConn) treeSummaryQueryCount() int {
 	return int(c.treeSummaryQueries.Load())
+}
+
+func insertB2Fact(
+	ctx context.Context,
+	conn ch.Conn,
+	mount activeMount,
+	dir string,
+	ft db.DirGUTAFileType,
+	count uint64,
+) {
+	insertActivePrefixB1Fact(ctx, conn, mount, dir, ft, count)
 }

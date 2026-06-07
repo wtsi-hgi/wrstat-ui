@@ -20,8 +20,8 @@ Add active-prefix rollup DDL and refresh logic in
 `fingerprintForMountsActive`, covering all 6 acceptance tests from B1.
 This item depends on Phase 1 AgeAll rows for AgeAll prefix rows.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
 
 ### Item 2.2: B2 - Route Virtual Ancestors And Tune Root Tuples
 
@@ -33,8 +33,8 @@ active-prefix rollups in `clickhouse/database.go`,
 `clickhouse/virtual_children.go`, and tune active mount-root tuple SQL,
 covering all 6 acceptance tests from B2. Depends on B1 readiness.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
 
 ### Item 2.3: B3 - Active-Set Cleanup And Cache Invalidation
 
@@ -46,5 +46,5 @@ filter, permission inputs, and schema/query version in
 `clickhouse/database_cache.go`, covering all 4 acceptance tests from B3.
 Depends on B1 rollup data and B2 reader routing.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed

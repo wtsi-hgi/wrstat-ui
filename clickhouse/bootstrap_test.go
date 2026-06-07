@@ -950,6 +950,9 @@ func TestNewClientBootstrapsSchema(t *testing.T) {
 		So(tables, ShouldContain, "wrstat_dir_filter_ageall")
 		So(tables, ShouldContain, "wrstat_virtual_children")
 		So(tables, ShouldContain, "wrstat_virtual_children_sets")
+		So(tables, ShouldContain, "wrstat_active_prefix_rollups")
+		So(tables, ShouldContain, "wrstat_active_prefix_filter_ageall")
+		So(tables, ShouldContain, "wrstat_active_prefix_rollup_sets")
 		So(tables, ShouldNotContain, "wrstat_virtual_summary_cache")
 		So(tables, ShouldNotContain, "wrstat_virtual_summary_sets")
 		So(tables, ShouldContain, "wrstat_basedirs_group_usage")
@@ -974,6 +977,18 @@ func TestNewClientBootstrapsSchema(t *testing.T) {
 		partitionKey, sortingKey := tableKeys(ctx, t, conn, cfg.Database, "wrstat_dir_filter_ageall")
 		So(partitionKey, ShouldEqual, "(mount_path, snapshot_id)")
 		So(sortingKey, ShouldEqual, "mount_path, snapshot_id, gid, uid, ft, dir")
+
+		partitionKey, sortingKey = tableKeys(ctx, t, conn, cfg.Database, "wrstat_active_prefix_rollups")
+		So(partitionKey, ShouldEqual, "active_set_id")
+		So(sortingKey, ShouldEqual, "active_set_id, dir")
+
+		partitionKey, sortingKey = tableKeys(ctx, t, conn, cfg.Database, "wrstat_active_prefix_filter_ageall")
+		So(partitionKey, ShouldEqual, "active_set_id")
+		So(sortingKey, ShouldEqual, "active_set_id, dir, gid, uid, ft")
+
+		partitionKey, sortingKey = tableKeys(ctx, t, conn, cfg.Database, "wrstat_active_prefix_rollup_sets")
+		So(partitionKey, ShouldEqual, "active_set_id")
+		So(sortingKey, ShouldEqual, "active_set_id")
 	})
 
 	Convey("NewClient bootstraps wrstat_mounts_active to hide inactive latest rows", t, func() {

@@ -43,6 +43,7 @@ import (
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	. "github.com/smartystreets/goconvey/convey"
 	"github.com/wtsi-hgi/wrstat-ui/db"
+	"github.com/wtsi-hgi/wrstat-ui/internal/perfreport"
 	internaltest "github.com/wtsi-hgi/wrstat-ui/internal/test"
 	"github.com/wtsi-hgi/wrstat-ui/summary"
 )
@@ -93,6 +94,16 @@ const b1ReadDirFactQuery = "SELECT gids, uids, fts, ages, counts, sizes, " +
 	"file_count, file_size, file_atime_min, file_mtime_max, " +
 	"file_atime_buckets, file_mtime_buckets, file_uids, file_gids, file_ft, " +
 	"child_count FROM wrstat_dir_facts WHERE mount_path = ? AND snapshot_id = toUUID(?) AND dir = ?"
+
+const activePrefixB1AllCount = 100000
+
+const (
+	activePrefixScalarRollupPerfName = "active_prefix_scalar_rollup_prototype"
+	activePrefixScalarRollupRepeat   = 20
+	activePrefixScalarRollupWarmup   = 1
+	activePrefixScalarRollupP50MaxMS = 2
+	activePrefixScalarRollupP95MaxMS = 4
+)
 
 type forbiddenProjectionRefreshConn struct {
 	ch.Conn
@@ -1646,7 +1657,7 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 		cfg := th.newConfig()
 		cfg.QueryTimeout = 5 * time.Second
 
-		const mountPath = "/nfs/t283_imaging/"
+		const mountPath = testT283ImagingMountPath
 
 		updatedAt := time.Date(2026, 6, 4, 9, 0, 0, 0, time.UTC)
 		sid := snapshotID(mountPath, updatedAt)
@@ -2472,7 +2483,7 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 	Convey("DGUTAWriter compacts t283-shaped internal age rows while preserving vectors", t, func() {
 		conn := &lazyDGUTAImportConn{}
 		updatedAt := time.Date(2026, 6, 1, 9, 0, 0, 0, time.UTC)
-		mountPath := "/nfs/t283_imaging/"
+		mountPath := testT283ImagingMountPath
 
 		impl := &dgutaWriter{
 			conn:      conn,
@@ -2957,6 +2968,405 @@ func t283DirectoryGUTAs() db.GUTAs {
 	}
 
 	return gutas
+}
+
+type activePrefixScalarRollupForTest struct {
+	allCount   uint64
+	fileCount  uint64
+	childCount uint64
+}
+
+func readActivePrefixScalarRollupForTest(
+	ctx context.Context,
+	conn ch.Conn,
+	activeSetID, dir string,
+) activePrefixScalarRollupForTest {
+	rows, err := conn.Query(ctx,
+		"SELECT all_count, file_count, child_count FROM wrstat_active_prefix_rollups "+
+			"WHERE active_set_id = ? AND dir = ?",
+		activeSetID,
+		dir,
+	)
+	So(err, ShouldBeNil)
+
+	defer func() { _ = rows.Close() }()
+
+	So(rows.Next(), ShouldBeTrue)
+
+	var row activePrefixScalarRollupForTest
+	So(rows.Scan(&row.allCount, &row.fileCount, &row.childCount), ShouldBeNil)
+	So(rows.Next(), ShouldBeFalse)
+
+	return row
+}
+
+func TestActivePrefixRollupsB1(t *testing.T) {
+	Convey("B1.3-B1.5 active-prefix refresh writes ready scalar and AgeAll rows for the four-mount subset", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 5 * time.Second
+		cfg.MountPoints = []string{"/"}
+
+		bootstrapProvider, err := OpenProvider(cfg)
+		So(err, ShouldBeNil)
+		So(bootstrapProvider.Close(), ShouldBeNil)
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		updatedAt := time.Date(2026, 6, 7, 9, 0, 0, 0, time.UTC)
+		rows := []mountsActiveRow{
+			seedActivePrefixB1Mount(ctx, conn, c3Scratch120Mount, updatedAt, 90000, 2),
+			seedActivePrefixB1Mount(ctx, conn, "/lustre/scratch122/", updatedAt.Add(time.Minute), 90000, 2),
+			seedActivePrefixB1Mount(ctx, conn, "/lustre/scratch127/", updatedAt.Add(2*time.Minute), 90000, 2),
+			seedActivePrefixB1Mount(ctx, conn, testT283ImagingMountPath, updatedAt.Add(3*time.Minute), 83197, 3),
+		}
+		activeSetID := fingerprintForMountsActive(rows)
+
+		So(ensureActivePrefixRollups(ctx, conn, rows), ShouldBeNil)
+
+		So(countRows(ctx, conn,
+			"SELECT count() FROM wrstat_active_prefix_rollups WHERE active_set_id = ? "+
+				"AND dir IN ('/', '/lustre/', '/nfs/')",
+			activeSetID,
+		), ShouldEqual, 3)
+		So(countRows(ctx, conn,
+			"SELECT prefix_count FROM wrstat_active_prefix_rollup_sets WHERE active_set_id = ?",
+			activeSetID,
+		), ShouldEqual, 3)
+		So(countRows(ctx, conn,
+			"SELECT count() FROM wrstat_active_prefix_filter_ageall WHERE active_set_id = ? AND dir = '/'",
+			activeSetID,
+		), ShouldBeGreaterThan, 0)
+
+		root := readActivePrefixScalarRollupForTest(ctx, conn, activeSetID, "/")
+		So(root.allCount, ShouldEqual, 400000)
+		So(root.fileCount, ShouldEqual, 353197)
+		So(root.childCount, ShouldEqual, 9)
+
+		So(conn.Exec(ctx, "OPTIM"+"IZE TABLE wrstat_active_prefix_rollups FINAL"), ShouldBeNil)
+
+		explain, err := explainActivePrefixScalarRollupForTest(ctx, conn, activeSetID, "/")
+		So(err, ShouldBeNil)
+
+		readGranules, totalGranules, ok := explainGranules(explain)
+		So(ok, ShouldBeTrue)
+		So(readGranules, ShouldEqual, uint64(1))
+		So(totalGranules, ShouldEqual, uint64(1))
+
+		report := activePrefixScalarRollupPerfReportForTest(
+			ctx,
+			cfg,
+			conn,
+			activeSetID,
+			"/",
+			readGranules,
+			totalGranules,
+		)
+		So(report.Operations, ShouldHaveLength, 1)
+
+		op := report.Operations[0]
+		So(op.Name, ShouldEqual, activePrefixScalarRollupPerfName)
+		So(op.Inputs["read_granules"], ShouldEqual, readGranules)
+		So(op.Inputs["total_granules"], ShouldEqual, totalGranules)
+		So(op.DurationsMS, ShouldHaveLength, activePrefixScalarRollupRepeat)
+		So(op.ReadRows, ShouldHaveLength, activePrefixScalarRollupRepeat)
+		So(op.ResultCount, ShouldHaveLength, activePrefixScalarRollupRepeat)
+		So(op.P50MS, ShouldBeLessThanOrEqualTo, float64(activePrefixScalarRollupP50MaxMS))
+		So(op.P95MS, ShouldBeLessThanOrEqualTo, float64(activePrefixScalarRollupP95MaxMS))
+
+		for _, readRows := range op.ReadRows {
+			So(readRows, ShouldBeGreaterThan, uint64(0))
+		}
+
+		for _, resultCount := range op.ResultCount {
+			So(resultCount, ShouldEqual, uint64(1))
+		}
+	})
+
+	Convey("B1.6 active-prefix reader falls back after refresh writes rows but fails readiness publish", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 5 * time.Second
+
+		bootstrapProvider, err := OpenProvider(cfg)
+		So(err, ShouldBeNil)
+		So(bootstrapProvider.Close(), ShouldBeNil)
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		resetActivePrefixRollupMissesForTest()
+
+		updatedAt := time.Date(2026, 6, 7, 9, 0, 0, 0, time.UTC)
+		rows := []mountsActiveRow{
+			seedActivePrefixB1Mount(ctx, conn, c3Scratch120Mount, updatedAt, 90000, 2),
+		}
+		activeSetID := fingerprintForMountsActive(rows)
+		failingConn := &activePrefixRollupSetFailureConn{Conn: conn}
+
+		err = refreshActivePrefixRollups(ctx, failingConn, rows, activeSetID)
+		So(errors.Is(err, errForcedFailure), ShouldBeTrue)
+		So(failingConn.failedSetInserts(), ShouldEqual, 1)
+		So(countRows(ctx, conn,
+			"SELECT count() FROM wrstat_active_prefix_rollups WHERE active_set_id = ? AND dir = '/'",
+			activeSetID,
+		), ShouldEqual, uint64(1))
+		So(countRows(ctx, conn,
+			"SELECT count() FROM wrstat_active_prefix_filter_ageall WHERE active_set_id = ? AND dir = '/'",
+			activeSetID,
+		), ShouldBeGreaterThan, uint64(0))
+		So(countRows(ctx, conn,
+			"SELECT count() FROM wrstat_active_prefix_rollup_sets WHERE active_set_id = ?",
+			activeSetID,
+		), ShouldEqual, uint64(0))
+
+		fallback := &db.DirSummary{Count: 42}
+		fallbackCalls := 0
+
+		got, err := activePrefixScalarRollupOrFallback(ctx, conn, activeSetID, "/", func() (*db.DirSummary, error) {
+			fallbackCalls++
+
+			return fallback, nil
+		})
+
+		So(err, ShouldBeNil)
+		So(got, ShouldEqual, fallback)
+		So(fallbackCalls, ShouldEqual, 1)
+		So(activePrefixRollupMisses(), ShouldEqual, uint64(1))
+	})
+}
+
+func seedActivePrefixB1Mount(
+	ctx context.Context,
+	conn ch.Conn,
+	mountPath string,
+	updatedAt time.Time,
+	fileCount, childCount uint64,
+) mountsActiveRow {
+	sid := snapshotID(mountPath, updatedAt)
+	mount := activeMount{
+		mountPath:  mountPath,
+		snapshotID: sid.String(),
+		updatedAt:  updatedAt,
+	}
+
+	So(conn.Exec(ctx, testInsertMountStmt, mountPath, time.Now().UTC(), sid, updatedAt), ShouldBeNil)
+	insertActivePrefixB1Facts(ctx, conn, mount, "/", activePrefixB1AllCount, fileCount)
+	insertActivePrefixB1Facts(ctx, conn, mount, activePrefixB1Namespace(mountPath), activePrefixB1AllCount, fileCount)
+	insertActivePrefixB1Children(ctx, conn, mount, childCount)
+	So(writeMaintainedMountDirProjectionForTest(ctx, conn, mount), ShouldBeNil)
+	insertDirFilterAgeAllRowsFromFactsForTest(ctx, conn, mount)
+
+	return mountsActiveRow{
+		mountPath:  mountPath,
+		snapshotID: sid.String(),
+		updatedAt:  updatedAt,
+	}
+}
+
+func insertActivePrefixB1Facts(
+	ctx context.Context,
+	conn ch.Conn,
+	mount activeMount,
+	dir string,
+	allCount, fileCount uint64,
+) {
+	insertActivePrefixB1Fact(ctx, conn, mount, dir, db.DGUTAFileTypeBam, fileCount)
+
+	if allCount > fileCount {
+		insertActivePrefixB1Fact(ctx, conn, mount, dir, db.DGUTAFileTypeDir, allCount-fileCount)
+	}
+}
+
+func insertActivePrefixB1Fact(
+	ctx context.Context,
+	conn ch.Conn,
+	mount activeMount,
+	dir string,
+	ft db.DirGUTAFileType,
+	count uint64,
+) {
+	if count == 0 {
+		return
+	}
+
+	So(conn.Exec(ctx,
+		testInsertDGUTAStmt,
+		mount.mountPath,
+		mount.snapshotID,
+		dir,
+		uint32(14976),
+		uint32(20155),
+		uint16(ft),
+		uint8(db.DGUTAgeAll),
+		count,
+		count*10,
+		int64(100),
+		int64(200),
+		[]uint64{count, 0, 0, 0, 0, 0, 0, 0, 0},
+		[]uint64{0, count, 0, 0, 0, 0, 0, 0, 0},
+	), ShouldBeNil)
+}
+
+func activePrefixB1Namespace(mountPath string) string {
+	if strings.HasPrefix(mountPath, nfsAncestor) {
+		return nfsAncestor
+	}
+
+	return "/lustre/"
+}
+
+func insertActivePrefixB1Children(
+	ctx context.Context,
+	conn ch.Conn,
+	mount activeMount,
+	childCount uint64,
+) {
+	mountName := strings.ReplaceAll(strings.Trim(mount.mountPath, "/"), "/", "-")
+	for i := range childCount {
+		child := fmt.Sprintf("/%s-child-%d", mountName, i)
+		So(conn.Exec(ctx, testInsertChildrenStmt, mount.mountPath, mount.snapshotID, "/", child), ShouldBeNil)
+	}
+}
+
+func explainActivePrefixScalarRollupForTest(
+	ctx context.Context,
+	conn ch.Conn,
+	activeSetID, dir string,
+) (string, error) {
+	rows, err := conn.Query(ctx, explainPrefix+activePrefixScalarRollupReadQuery, activeSetID, dir)
+	if err != nil {
+		return "", err
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	lines := make([]string, 0)
+
+	for rows.Next() {
+		var line string
+		So(rows.Scan(&line), ShouldBeNil)
+		lines = append(lines, line)
+	}
+
+	So(rows.Err(), ShouldBeNil)
+
+	return strings.Join(lines, "\n"), nil
+}
+
+func activePrefixScalarRollupPerfReportForTest(
+	ctx context.Context,
+	cfg Config,
+	conn ch.Conn,
+	activeSetID string,
+	dir string,
+	readGranules uint64,
+	totalGranules uint64,
+) perfreport.Report {
+	inspector := &Inspector{cfg: cfg, conn: conn}
+
+	_, _ = measureActivePrefixScalarRollupForTest(ctx, inspector, conn, activeSetID, dir)
+
+	durations := make([]float64, 0, activePrefixScalarRollupRepeat)
+	readRows := make([]uint64, 0, activePrefixScalarRollupRepeat)
+	readBytes := make([]uint64, 0, activePrefixScalarRollupRepeat)
+	readMarks := make([]uint64, 0, activePrefixScalarRollupRepeat)
+	resultCounts := make([]uint64, 0, activePrefixScalarRollupRepeat)
+
+	for range activePrefixScalarRollupRepeat {
+		metrics, resultCount := measureActivePrefixScalarRollupForTest(ctx, inspector, conn, activeSetID, dir)
+
+		durations = append(durations, float64(metrics.DurationMs))
+		readRows = append(readRows, metrics.ReadRows)
+		readBytes = append(readBytes, metrics.ReadBytes)
+		readMarks = append(readMarks, metrics.ReadMarks)
+		resultCounts = append(resultCounts, resultCount)
+	}
+
+	report := perfreport.NewReport(
+		"clickhouse",
+		"",
+		activePrefixScalarRollupRepeat,
+		activePrefixScalarRollupWarmup,
+	)
+	report.AddOperationWithCounters(
+		activePrefixScalarRollupPerfName,
+		map[string]any{
+			"dir":             dir,
+			"read_granules":   readGranules,
+			"total_granules":  totalGranules,
+			"duration_source": "clickhouse_query_log",
+		},
+		durations,
+		readRows,
+		readBytes,
+		readMarks,
+		resultCounts,
+	)
+
+	return report
+}
+
+func measureActivePrefixScalarRollupForTest(
+	ctx context.Context,
+	inspector *Inspector,
+	conn ch.Conn,
+	activeSetID string,
+	dir string,
+) (*QueryMetrics, uint64) {
+	var found bool
+
+	metrics, err := inspector.Measure(ctx, func(ctx context.Context) error {
+		var measureErr error
+
+		_, found, measureErr = readActivePrefixScalarRollup(ctx, conn, activeSetID, dir)
+
+		return measureErr
+	})
+	So(err, ShouldBeNil)
+	So(found, ShouldBeTrue)
+	So(metrics, ShouldNotBeNil)
+
+	if found {
+		return metrics, 1
+	}
+
+	return metrics, 0
+}
+
+type activePrefixRollupSetFailureConn struct {
+	ch.Conn
+
+	setInsertFailures atomic.Int32
+}
+
+func (c *activePrefixRollupSetFailureConn) Exec(ctx context.Context, query string, args ...any) error {
+	if query == insertActivePrefixRollupSetQuery {
+		c.setInsertFailures.Add(1)
+
+		return errForcedFailure
+	}
+
+	return c.Conn.Exec(ctx, query, args...)
+}
+
+func (c *activePrefixRollupSetFailureConn) failedSetInserts() int {
+	return int(c.setInsertFailures.Load())
 }
 
 type b1DirFact struct {

@@ -44,13 +44,57 @@ import (
 	internaldata "github.com/wtsi-hgi/wrstat-ui/internal/data"
 )
 
-const providerTestMountPath = "/mnt/test/"
+const (
+	providerTestMountPath         = "/mnt/test/"
+	b1ActiveFingerprintSnapshotID = "11111111-1111-1111-1111-111111111111"
+)
 
 var (
 	errProviderTestErr1 = errors.New("provider test err1")
 	errProviderTestErr2 = errors.New("provider test err2")
 	errProviderTestErr3 = errors.New("provider test err3")
 )
+
+func TestFingerprintForMountsActiveB1(t *testing.T) {
+	Convey("B1.1 active-set fingerprints are stable for differently sorted active rows", t, func() {
+		updatedA := time.Date(2026, 6, 7, 9, 0, 0, 123, time.UTC)
+		updatedB := time.Date(2026, 6, 7, 10, 0, 0, 456, time.UTC)
+		rows := []mountsActiveRow{
+			{
+				mountPath:  c3Scratch120Mount,
+				snapshotID: b1ActiveFingerprintSnapshotID,
+				updatedAt:  updatedA,
+			},
+			{
+				mountPath:  testT283ImagingMountPath,
+				snapshotID: "22222222-2222-2222-2222-222222222222",
+				updatedAt:  updatedB,
+			},
+		}
+		reversed := []mountsActiveRow{rows[1], rows[0]}
+
+		first := fingerprintForMountsActive(rows)
+		second := fingerprintForMountsActive(reversed)
+
+		So(first, ShouldNotBeBlank)
+		So(second, ShouldEqual, first)
+	})
+
+	Convey("B1.2 active-set fingerprints change when only updated_at changes", t, func() {
+		rows := []mountsActiveRow{{
+			mountPath:  c3Scratch120Mount,
+			snapshotID: b1ActiveFingerprintSnapshotID,
+			updatedAt:  time.Date(2026, 6, 7, 9, 0, 0, 0, time.UTC),
+		}}
+		changed := []mountsActiveRow{{
+			mountPath:  rows[0].mountPath,
+			snapshotID: rows[0].snapshotID,
+			updatedAt:  rows[0].updatedAt.Add(time.Nanosecond),
+		}}
+
+		So(fingerprintForMountsActive(changed), ShouldNotEqual, fingerprintForMountsActive(rows))
+	})
+}
 
 type providerSwapTestDB struct {
 	closed atomic.Bool
@@ -72,6 +116,147 @@ func (d *providerSwapTestDB) Close() error {
 	d.closed.Store(true)
 
 	return nil
+}
+
+func TestActiveSetCacheInvalidationB3(t *testing.T) {
+	Convey("B3.2 rollback to an earlier active set reads root totals through an active-set-scoped cache key",
+		t, func() {
+			env, ctx, cleanup := newB2ActivePrefixEnv(t)
+			defer cleanup()
+
+			So(ensureActivePrefixRollups(ctx, env.conn, env.rows), ShouldBeNil)
+
+			cache := treeQueryCacheForConfig(env.cfg)
+			cache.resetStats()
+
+			tree := db.NewTree(newClickHouseDatabase(env.cfg, env.conn))
+
+			oldRoot, err := tree.DirInfo("/", nil)
+			So(err, ShouldBeNil)
+			So(oldRoot.Current.Count, ShouldEqual, env.rootCount)
+
+			replacement := seedB2Mount(ctx, env.conn, b2MountSeed{
+				mountPath:  c3Scratch120Mount,
+				updatedAt:  time.Date(2026, 6, 7, 10, 30, 0, 0, time.UTC),
+				bamCount:   600,
+				otherCount: 60,
+				dirCount:   6,
+				childCount: 2,
+			})
+			rowsB, err := queryMountsActiveRows(ctx, env.conn)
+			So(err, ShouldBeNil)
+
+			setB := fingerprintForMountsActive(rowsB)
+			So(setB, ShouldNotEqual, env.activeSetID)
+			So(ensureActivePrefixRollups(ctx, env.conn, rowsB), ShouldBeNil)
+			invalidateActiveMetadataCache(env.cfg)
+
+			rootB, err := tree.DirInfo("/", nil)
+			So(err, ShouldBeNil)
+			So(rootB.Current.Count, ShouldEqual, readActivePrefixSummaryForB2(ctx, env.conn, setB, "/").Count)
+			So(rootB.Current.Count, ShouldNotEqual, env.rootCount)
+
+			original := env.mounts[0]
+			So(env.conn.Exec(
+				ctx,
+				testInsertMountStmt,
+				original.mountPath,
+				time.Now().UTC().Add(time.Second),
+				original.snapshotID,
+				original.updatedAt,
+			), ShouldBeNil)
+			rowsA, err := queryMountsActiveRows(ctx, env.conn)
+			So(err, ShouldBeNil)
+
+			setA := fingerprintForMountsActive(rowsA)
+			So(setA, ShouldEqual, env.activeSetID)
+			So(setA, ShouldNotEqual, setB)
+			So(replacement.snapshotID, ShouldNotEqual, original.snapshotID)
+			invalidateActiveMetadataCache(env.cfg)
+
+			rootA, err := tree.DirInfo("/", nil)
+			So(err, ShouldBeNil)
+			So(rootA.Current.Count, ShouldEqual, env.rootCount)
+			So(rootA.Current.Count, ShouldNotEqual, rootB.Current.Count)
+
+			keyA := newTreeActivePrefixSummaryCacheKey(
+				setA,
+				"/",
+				nil,
+				treePermissionCacheInputs{},
+				currentSchemaVersion,
+				activePrefixDirSummaryQueryVersion,
+			)
+			So(keyA.activeSetID, ShouldEqual, setA)
+
+			cachedA, ok := cache.getActivePrefixDirSummary(keyA)
+			So(ok, ShouldBeTrue)
+			So(cachedA.Count, ShouldEqual, env.rootCount)
+		})
+
+	Convey("B3.3 active-prefix cache keys distinguish schema/query versions for the same path and filter",
+		t, func() {
+			cache := newTreeQueryCache()
+			filter := &db.Filter{
+				GIDs: []uint32{14976, 7},
+				UIDs: []uint32{20155},
+				FT:   db.DGUTAFileTypeOther,
+				Age:  db.DGUTAgeAll,
+			}
+			permissions := treePermissionCacheInputs{uid: 42, gids: []uint32{9, 7}}
+			keyV1 := newTreeActivePrefixSummaryCacheKey(
+				"active-A",
+				nfsAncestor,
+				filter,
+				permissions,
+				currentSchemaVersion,
+				1,
+			)
+			keyV2 := newTreeActivePrefixSummaryCacheKey(
+				"active-A",
+				nfsAncestor,
+				filter,
+				permissions,
+				currentSchemaVersion+1,
+				2,
+			)
+
+			So(keyV1, ShouldNotResemble, keyV2)
+
+			_, ok := cache.getActivePrefixDirSummary(keyV1)
+			So(ok, ShouldBeFalse)
+			cache.putActivePrefixDirSummary(keyV1, &db.DirSummary{Dir: nfsAncestor, Count: 1})
+
+			_, ok = cache.getActivePrefixDirSummary(keyV2)
+			So(ok, ShouldBeFalse)
+			cache.putActivePrefixDirSummary(keyV2, &db.DirSummary{Dir: nfsAncestor, Count: 2})
+
+			stats := cache.stats()
+			So(stats.activePrefixSummaryMisses, ShouldEqual, uint64(2))
+			So(cache.activePrefixSummaryEntryCount(), ShouldEqual, 2)
+		})
+
+	Convey("B3.4 provider-backed namespace requests reuse captured active metadata and report hit/miss counters",
+		t, func() {
+			env, ctx, cleanup := newB2ActivePrefixEnv(t)
+			defer cleanup()
+
+			So(ensureActivePrefixRollups(ctx, env.conn, env.rows), ShouldBeNil)
+			So(refreshActiveVirtualChildren(ctx, env.conn, env.rows), ShouldBeNil)
+
+			cache := treeQueryCacheForConfig(env.cfg)
+			cache.resetStats()
+
+			tree := db.NewTree(newClickHouseDatabaseWithSnapshot(env.cfg, env.conn, newActiveMountsSnapshot(env.rows)))
+			info, err := tree.DirInfo(nfsAncestor, nil)
+			So(err, ShouldBeNil)
+			So(info, ShouldNotBeNil)
+			So(info.Current.Count, ShouldEqual, env.nfsCount)
+
+			stats := cache.stats()
+			So(stats.activeMetadataMisses, ShouldEqual, uint64(1))
+			So(stats.activeMetadataHits, ShouldBeGreaterThanOrEqualTo, uint64(1))
+		})
 }
 
 func TestOpenProviderUpdatePinsClickHouseSnapshots(t *testing.T) {
@@ -387,30 +572,27 @@ func TestProviderRefreshCaptureFailureKeepsPublishedReaders(t *testing.T) {
 	})
 }
 
+func buildProviderSwapTestReaders(
+	context.Context,
+	*activeMountsSnapshot,
+) (db.Database, *db.Tree, basedirs.Reader, error) {
+	dbImpl := &providerSwapTestDB{}
+	bdImpl := &providerSwapTestBD{}
+
+	return dbImpl, db.NewTree(dbImpl), bdImpl, nil
+}
+
 func TestProviderVirtualChildrenRefreshErrors(t *testing.T) {
 	Convey("provider reports asynchronous virtual children refresh failures through OnError", t, func() {
 		const activeSetID = "mount|snapshot|2026-01-09T12:00:00Z\n"
 
-		refreshDone := make(chan struct{})
-		refreshedActiveSetID := make(chan string, 1)
-		cp := &chProvider{
-			errCh: make(chan struct{}, 1),
-			captureSnapshot: func(context.Context) (*activeMountsSnapshot, string, error) {
-				return &activeMountsSnapshot{}, activeSetID, nil
-			},
-			buildReaders: func(context.Context, *activeMountsSnapshot) (db.Database, *db.Tree, basedirs.Reader, error) {
-				dbImpl := &providerSwapTestDB{}
-				bdImpl := &providerSwapTestBD{}
+		cp, refreshDone, refreshedActiveSetID := newProviderAsyncRefreshTestProvider(activeSetID)
+		cp.refreshVirtualChildren = func(_ context.Context, gotActiveSetID string) error {
+			defer close(refreshDone)
 
-				return dbImpl, db.NewTree(dbImpl), bdImpl, nil
-			},
-			refreshVirtualChildren: func(_ context.Context, gotActiveSetID string) error {
-				defer close(refreshDone)
+			refreshedActiveSetID <- gotActiveSetID
 
-				refreshedActiveSetID <- gotActiveSetID
-
-				return errProviderTestErr1
-			},
+			return errProviderTestErr1
 		}
 
 		got := make(chan error, 1)
@@ -1171,4 +1353,67 @@ func (c *providerCloseTestConn) Query(context.Context, string, ...any) (driver.R
 	}
 
 	return &findByGlobEmptyRows{}, nil
+}
+
+func TestProviderActivePrefixRollupRefreshErrorsB1(t *testing.T) {
+	Convey("provider reports asynchronous active-prefix rollup refresh failures through OnError", t, func() {
+		activeSetID := fingerprintForMountsActive([]mountsActiveRow{{
+			mountPath:  c3Scratch120Mount,
+			snapshotID: b1ActiveFingerprintSnapshotID,
+			updatedAt:  time.Date(2026, 6, 7, 9, 0, 0, 0, time.UTC),
+		}})
+
+		cp, refreshDone, refreshedActiveSetID := newProviderAsyncRefreshTestProvider(activeSetID)
+		cp.refreshActivePrefixRollups = func(_ context.Context, gotActiveSetID string) error {
+			defer close(refreshDone)
+
+			refreshedActiveSetID <- gotActiveSetID
+
+			return errProviderTestErr1
+		}
+
+		got := make(chan error, 1)
+
+		cp.OnError(func(err error) {
+			got <- err
+		})
+
+		So(cp.swapReadersAndInvoke(context.Background(), activeSetID, nil), ShouldBeTrue)
+
+		select {
+		case <-refreshDone:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for active-prefix rollup refresh")
+		}
+
+		So(<-refreshedActiveSetID, ShouldEqual, activeSetID)
+
+		cp.drainErrors(context.Background())
+
+		select {
+		case err := <-got:
+			So(err.Error(), ShouldContainSubstring, "active_prefix_rollup_refresh")
+			So(err.Error(), ShouldContainSubstring, "active_set_id")
+			So(err.Error(), ShouldContainSubstring, activeSetID)
+			So(errors.Is(err, errProviderTestErr1), ShouldBeTrue)
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for OnError")
+		}
+	})
+}
+
+func newProviderAsyncRefreshTestProvider(
+	activeSetID string,
+) (*chProvider, chan struct{}, chan string) {
+	refreshDone := make(chan struct{})
+	refreshedActiveSetID := make(chan string, 1)
+	cp := &chProvider{
+		errCh: make(chan struct{}, 1),
+		captureSnapshot: func(context.Context) (*activeMountsSnapshot, string, error) {
+			return &activeMountsSnapshot{}, activeSetID, nil
+		},
+		buildReaders: buildProviderSwapTestReaders,
+	}
+
+	return cp, refreshDone, refreshedActiveSetID
 }

@@ -100,9 +100,10 @@ const (
 		"SELECT arrayJoin(" + dgutaPrefixedArrayZipExpr + ") AS g " +
 		"FROM wrstat_dir_facts d WHERE d.dir = ? AND %s)"
 
-	dgutasForActiveMountRootDirsQuery = "SELECT mount_path, " + dgutaTupleColumns + " FROM (" +
-		"SELECT d.mount_path, arrayJoin(" + dgutaPrefixedArrayZipExpr + ") AS g " +
-		"FROM wrstat_dir_facts d WHERE d.dir = d.mount_path AND %s)"
+	dgutasForActiveMountRootDirsQuery = "SELECT d.mount_path AS dir, " +
+		"d.gids, d.uids, d.fts, d.ages, d.counts, d.sizes, " +
+		"d.atime_mins, d.mtime_maxs, d.atime_buckets, d.mtime_buckets " +
+		"FROM wrstat_dir_facts d PREWHERE %s SETTINGS use_query_cache = 1"
 
 	dgutasForActiveMountDirsQuery = "SELECT dir, " + dgutaTupleColumns + " FROM (" +
 		"SELECT d.dir, arrayJoin(" + dgutaPrefixedArrayZipExpr + ") AS g " +
@@ -779,11 +780,77 @@ func (d *clickHouseDatabase) dirInfoAncestor(
 ) (*db.DirSummary, error) {
 	normDir := ensureTrailingSlash(dir)
 
+	if sum, ok, err := d.dirInfoActivePrefixAncestor(normDir, filter); err != nil || ok {
+		return sum, err
+	}
+
 	if sum, ok, err := d.dirInfoTreeSummaryAncestor(normDir, filter); err != nil || ok {
 		return sum, err
 	}
 
 	return d.dirInfoAncestorFallback(normDir, filter)
+}
+
+func (d *clickHouseDatabase) dirInfoActivePrefixAncestor(
+	normDir string,
+	filter *db.Filter,
+) (*db.DirSummary, bool, error) {
+	sum, handled, miss, err := d.activePrefixAncestorDirSummary(normDir, filter)
+	if err != nil || handled {
+		return sum, handled, err
+	}
+
+	if !miss {
+		return nil, false, nil
+	}
+
+	sum, err = activePrefixRollupFallback(func() (*db.DirSummary, error) {
+		return d.dirInfoAncestorFallback(normDir, filter)
+	})
+
+	return sum, true, err
+}
+
+func (d *clickHouseDatabase) activePrefixAncestorDirSummary(
+	dir string,
+	filter *db.Filter,
+) (*db.DirSummary, bool, bool, error) {
+	ctx, cancel := configQueryContext(d.cfg)
+	defer cancel()
+
+	activeSetID, _, err := d.currentActiveMountsSet(ctx)
+	if err != nil || activeSetID == "" {
+		return nil, false, false, err
+	}
+
+	key := activePrefixSummaryCacheKey(activeSetID, dir, filter)
+	if sum, ok := d.treeCache.getActivePrefixDirSummary(key); ok {
+		return sum, true, false, nil
+	}
+
+	sum, handled, miss, err := activePrefixDirSummary(ctx, d.conn, activeSetID, dir, filter)
+	if err != nil || !handled {
+		return sum, handled, miss, err
+	}
+
+	d.treeCache.putActivePrefixDirSummary(key, sum)
+
+	return sum, handled, miss, nil
+}
+
+func activePrefixSummaryCacheKey(
+	activeSetID string,
+	dir string,
+	filter *db.Filter,
+) treeActivePrefixSummaryCacheKey {
+	return newTreeActivePrefixSummaryCacheKey(
+		activeSetID,
+		dir,
+		filter,
+		treePermissionCacheInputs{},
+		currentSchemaVersion,
+		activePrefixDirSummaryQueryVersion,
+	)
 }
 
 func (d *clickHouseDatabase) dirInfoAncestorFallback(
@@ -801,7 +868,7 @@ func (d *clickHouseDatabase) dirInfoAncestorFallback(
 	}
 
 	if len(gutas) == 0 {
-		sum, ok, virtualErr := d.dirInfoVirtualAncestor(normDir, filter)
+		sum, ok, virtualErr := d.dirInfoVirtualAncestorFromFacts(normDir, filter)
 		if virtualErr != nil || ok {
 			return sum, virtualErr
 		}
@@ -832,6 +899,32 @@ func (d *clickHouseDatabase) dirInfoAllowVirtualAncestor(
 }
 
 func (d *clickHouseDatabase) dirInfoVirtualAncestor(
+	dir string,
+	filter *db.Filter,
+) (*db.DirSummary, bool, error) {
+	sum, handled, miss, err := d.activePrefixAncestorDirSummary(dir, filter)
+	if err != nil || handled {
+		return sum, handled, err
+	}
+
+	if miss {
+		var ok bool
+
+		sum, err = activePrefixRollupFallback(func() (*db.DirSummary, error) {
+			var fallbackErr error
+
+			sum, ok, fallbackErr = d.dirInfoVirtualAncestorFromFacts(dir, filter)
+
+			return sum, fallbackErr
+		})
+
+		return sum, ok || err != nil, err
+	}
+
+	return d.dirInfoVirtualAncestorFromFacts(dir, filter)
+}
+
+func (d *clickHouseDatabase) dirInfoVirtualAncestorFromFacts(
 	dir string,
 	filter *db.Filter,
 ) (*db.DirSummary, bool, error) {
@@ -2699,14 +2792,43 @@ func (d *clickHouseDatabase) queryGUTAsForActiveMountRootDirs(
 	ctx, cancel := configQueryContext(d.cfg)
 	defer cancel()
 
-	query, args := activeMountsQuery(
-		dgutasForActiveMountRootDirsQuery,
-		"d.mount_path",
-		"d.snapshot_id",
-		mounts,
-	)
+	query, args := activeMountRootDirTuplesQuery(mounts)
 
-	return d.queryGUTAsByDir(ctx, "active mount root dguta batch", query, args...)
+	return d.queryMountRootDGUTAVectors(ctx, query, args...)
+}
+
+func (d *clickHouseDatabase) queryMountRootDGUTAVectors(
+	ctx context.Context,
+	query string,
+	args ...any,
+) (map[string]db.GUTAs, error) {
+	rows, err := d.conn.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("clickhouse: failed to query active mount root dguta vector batch: %w", err)
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	return scanMountRootDGUTAVectorRows(rows)
+}
+
+func scanMountRootDGUTAVectorRows(rows rowsScanner) (map[string]db.GUTAs, error) {
+	gutasByDir := make(map[string]db.GUTAs)
+
+	for rows.Next() {
+		dir, gutas, err := scanMountRootDGUTAVectorRow(rows)
+		if err != nil {
+			return nil, err
+		}
+
+		gutasByDir[dir] = append(gutasByDir[dir], gutas...)
+	}
+
+	if err := rowsErr(rows); err != nil {
+		return nil, fmt.Errorf("clickhouse: active mount root dguta vector iteration error: %w", err)
+	}
+
+	return gutasByDir, nil
 }
 
 func (d *clickHouseDatabase) addQueriedGUTAsForActiveMountRoots(
@@ -3244,6 +3366,49 @@ func (d *clickHouseDatabase) gutasForAncestorMounts(
 	)
 
 	return d.queryGUTAs(ctx, "ancestor dguta", query, args...)
+}
+
+func scanMountRootDGUTAVectorRow(rows rowsScanner) (string, db.GUTAs, error) {
+	var s mountRootDGUTAVectorScanned
+	if err := s.scanFrom(rows); err != nil {
+		return "", nil, err
+	}
+
+	gutas, err := s.gutas()
+	if err != nil {
+		return "", nil, err
+	}
+
+	return s.dir, gutas, nil
+}
+
+type mountRootDGUTAVectorScanned struct {
+	dir    string
+	vector dgutaVectorColumns
+}
+
+func (s *mountRootDGUTAVectorScanned) scanFrom(rows rowsScanner) error {
+	if err := rows.Scan(
+		&s.dir,
+		&s.vector.gids,
+		&s.vector.uids,
+		&s.vector.fts,
+		&s.vector.ages,
+		&s.vector.counts,
+		&s.vector.sizes,
+		&s.vector.atimeMins,
+		&s.vector.mtimeMaxs,
+		&s.vector.atimeBuckets,
+		&s.vector.mtimeBuckets,
+	); err != nil {
+		return fmt.Errorf("clickhouse: failed to scan active mount root dguta vector: %w", err)
+	}
+
+	return nil
+}
+
+func (s *mountRootDGUTAVectorScanned) gutas() (db.GUTAs, error) {
+	return s.vector.gutas("mount", s.dir)
 }
 
 type dirSummariesForDirsMountLoader func() (map[string]*db.DirSummary, map[string]bool, bool, error)

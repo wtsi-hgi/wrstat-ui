@@ -27,6 +27,7 @@
 package clickhouse
 
 import (
+	"context"
 	"fmt"
 	"slices"
 	"strings"
@@ -39,6 +40,7 @@ import (
 const (
 	noRowsCondition      = "1 = 0"
 	activeMountTupleArgs = 2
+	activeMountDirArgs   = 3
 )
 
 // ActiveSnapshotMatches reports whether mountPath is already active for the
@@ -118,6 +120,50 @@ func activeMountsTupleCondition(
 	return b.String(), args
 }
 
+func activeMountRootDirTuplesQuery(mounts []activeMount) (string, []any) {
+	condition, args := activeMountRootDirTuplesCondition(
+		"d.mount_path",
+		"d.snapshot_id",
+		"d.dir",
+		mounts,
+	)
+
+	return fmt.Sprintf(dgutasForActiveMountRootDirsQuery, condition), args
+}
+
+func activeMountRootDirTuplesCondition(
+	mountColumn, snapshotColumn, dirColumn string,
+	mounts []activeMount,
+) (string, []any) {
+	if len(mounts) == 0 {
+		return noRowsCondition, nil
+	}
+
+	var b strings.Builder
+	b.WriteString("(")
+	b.WriteString(mountColumn)
+	b.WriteString(", ")
+	b.WriteString(snapshotColumn)
+	b.WriteString(", ")
+	b.WriteString(dirColumn)
+	b.WriteString(") IN (")
+
+	args := make([]any, 0, len(mounts)*activeMountDirArgs)
+	for i, mount := range mounts {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+
+		b.WriteString("(?, ?, ?)")
+
+		args = append(args, mount.mountPath, mount.snapshotID, mount.mountPath)
+	}
+
+	b.WriteString(")")
+
+	return b.String(), args
+}
+
 func activeMountPathsQuery(
 	queryFmt, mountColumn string,
 	mounts []activeMount,
@@ -154,6 +200,53 @@ func activeMountPathsCondition(
 	b.WriteString(")")
 
 	return b.String(), args
+}
+
+func (d *clickHouseDatabase) currentActiveMountsSet(
+	ctx context.Context,
+) (string, []activeMount, error) {
+	if d.snapshot != nil {
+		return d.cachedSnapshotActiveMounts(d.snapshot)
+	}
+
+	if d.conn == nil {
+		return "", nil, nil
+	}
+
+	d.treeCache.recordActiveMetadataMiss()
+
+	rows, err := queryMountsActiveRows(ctx, d.conn)
+	if err != nil {
+		return "", nil, err
+	}
+
+	snapshot := newActiveMountsSnapshot(rows)
+
+	return snapshot.fingerprint, snapshot.all(), nil
+}
+
+func (d *clickHouseDatabase) cachedSnapshotActiveMounts(
+	snapshot *activeMountsSnapshot,
+) (string, []activeMount, error) {
+	if snapshot == nil {
+		return "", nil, nil
+	}
+
+	key := newTreeActiveMetadataCacheKey(
+		snapshot.fingerprint,
+		currentSchemaVersion,
+		activeMetadataQueryVersion,
+	)
+
+	metadata, ok := d.treeCache.getActiveMetadata(key)
+	if ok {
+		return metadata.activeSetID, metadata.mounts, nil
+	}
+
+	metadata = newTreeActiveMetadata(snapshot.fingerprint, snapshot.all())
+	d.treeCache.putActiveMetadata(key, metadata)
+
+	return metadata.activeSetID, metadata.mounts, nil
 }
 
 type activeMountsSnapshot struct {
@@ -228,16 +321,20 @@ func (s *activeMountsSnapshot) under(dir string) []activeMount {
 		return nil
 	}
 
+	return activeMountsUnderDir(dir, s.mounts)
+}
+
+func activeMountsUnderDir(dir string, mounts []activeMount) []activeMount {
 	dir = ensureTrailingSlash(dir)
 
-	mounts := make([]activeMount, 0, len(s.mounts))
-	for _, mount := range s.mounts {
+	out := make([]activeMount, 0, len(mounts))
+	for _, mount := range mounts {
 		if strings.HasPrefix(mount.mountPath, dir) {
-			mounts = append(mounts, mount)
+			out = append(out, mount)
 		}
 	}
 
-	return mounts
+	return out
 }
 
 func (s *activeMountsSnapshot) all() []activeMount {

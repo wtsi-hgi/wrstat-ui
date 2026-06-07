@@ -51,9 +51,7 @@ const (
 
 var errMountDirDGUTAVectorLengthMismatch = errors.New("clickhouse: dir dguta vector column lengths differ")
 
-type mountDirDGUTAVectorScanned struct {
-	dir          string
-	updatedAt    time.Time
+type dgutaVectorColumns struct {
 	gids         []uint32
 	uids         []uint32
 	fts          []uint16
@@ -64,23 +62,81 @@ type mountDirDGUTAVectorScanned struct {
 	mtimeMaxs    []int64
 	atimeBuckets [][]uint64
 	mtimeBuckets [][]uint64
-	childCount   uint64
+}
+
+func (v *dgutaVectorColumns) gutas(mismatchLabel, mismatchValue string) (db.GUTAs, error) {
+	if err := v.validateLengths(mismatchLabel, mismatchValue); err != nil {
+		return nil, err
+	}
+
+	gutas := make(db.GUTAs, len(v.gids))
+	for i := range v.gids {
+		gutas[i] = &db.GUTA{
+			GID:         v.gids[i],
+			UID:         v.uids[i],
+			FT:          db.DirGUTAFileType(v.fts[i]),
+			Age:         db.DirGUTAge(v.ages[i]),
+			Count:       v.counts[i],
+			Size:        v.sizes[i],
+			Atime:       v.atimeMins[i],
+			Mtime:       v.mtimeMaxs[i],
+			ATimeRanges: sliceToAgeBuckets(v.atimeBuckets[i]),
+			MTimeRanges: sliceToAgeBuckets(v.mtimeBuckets[i]),
+		}
+	}
+
+	return gutas, nil
+}
+
+func (v *dgutaVectorColumns) validateLengths(mismatchLabel, mismatchValue string) error {
+	expected := len(v.gids)
+	lengths := []int{
+		len(v.uids),
+		len(v.fts),
+		len(v.ages),
+		len(v.counts),
+		len(v.sizes),
+		len(v.atimeMins),
+		len(v.mtimeMaxs),
+		len(v.atimeBuckets),
+		len(v.mtimeBuckets),
+	}
+
+	for _, length := range lengths {
+		if length != expected {
+			return fmt.Errorf(
+				"%w: %s=%s",
+				errMountDirDGUTAVectorLengthMismatch,
+				mismatchLabel,
+				mismatchValue,
+			)
+		}
+	}
+
+	return nil
+}
+
+type mountDirDGUTAVectorScanned struct {
+	dir        string
+	updatedAt  time.Time
+	vector     dgutaVectorColumns
+	childCount uint64
 }
 
 func (s *mountDirDGUTAVectorScanned) scanFrom(rows rowsScanner) error {
 	if err := rows.Scan(
 		&s.dir,
 		&s.updatedAt,
-		&s.gids,
-		&s.uids,
-		&s.fts,
-		&s.ages,
-		&s.counts,
-		&s.sizes,
-		&s.atimeMins,
-		&s.mtimeMaxs,
-		&s.atimeBuckets,
-		&s.mtimeBuckets,
+		&s.vector.gids,
+		&s.vector.uids,
+		&s.vector.fts,
+		&s.vector.ages,
+		&s.vector.counts,
+		&s.vector.sizes,
+		&s.vector.atimeMins,
+		&s.vector.mtimeMaxs,
+		&s.vector.atimeBuckets,
+		&s.vector.mtimeBuckets,
 		&s.childCount,
 	); err != nil {
 		return fmt.Errorf("clickhouse: failed to scan dir dguta vector: %w", err)
@@ -90,50 +146,7 @@ func (s *mountDirDGUTAVectorScanned) scanFrom(rows rowsScanner) error {
 }
 
 func (s *mountDirDGUTAVectorScanned) gutas() (db.GUTAs, error) {
-	if err := s.validateLengths(); err != nil {
-		return nil, err
-	}
-
-	gutas := make(db.GUTAs, len(s.gids))
-	for i := range s.gids {
-		gutas[i] = &db.GUTA{
-			GID:         s.gids[i],
-			UID:         s.uids[i],
-			FT:          db.DirGUTAFileType(s.fts[i]),
-			Age:         db.DirGUTAge(s.ages[i]),
-			Count:       s.counts[i],
-			Size:        s.sizes[i],
-			Atime:       s.atimeMins[i],
-			Mtime:       s.mtimeMaxs[i],
-			ATimeRanges: sliceToAgeBuckets(s.atimeBuckets[i]),
-			MTimeRanges: sliceToAgeBuckets(s.mtimeBuckets[i]),
-		}
-	}
-
-	return gutas, nil
-}
-
-func (s *mountDirDGUTAVectorScanned) validateLengths() error {
-	expected := len(s.gids)
-	lengths := []int{
-		len(s.uids),
-		len(s.fts),
-		len(s.ages),
-		len(s.counts),
-		len(s.sizes),
-		len(s.atimeMins),
-		len(s.mtimeMaxs),
-		len(s.atimeBuckets),
-		len(s.mtimeBuckets),
-	}
-
-	for _, length := range lengths {
-		if length != expected {
-			return fmt.Errorf("%w: dir=%s", errMountDirDGUTAVectorLengthMismatch, s.dir)
-		}
-	}
-
-	return nil
+	return s.vector.gutas("dir", s.dir)
 }
 
 func scanMountDirDGUTAVectorRow(rows rowsScanner) (string, db.GUTAs, error) {

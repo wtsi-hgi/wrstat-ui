@@ -28,9 +28,11 @@ package clickhouse
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
-	"strings"
+	"sort"
 	"sync"
 	"time"
 
@@ -68,6 +70,8 @@ type clickHouseConfigConnector func(context.Context, Config) (ch.Conn, error)
 
 type virtualChildrenRefresher func(context.Context, string) error
 
+type activePrefixRollupsRefresher func(context.Context, string) error
+
 type chProvider struct {
 	cfg Config
 
@@ -77,9 +81,10 @@ type chProvider struct {
 	tree *db.Tree
 	bd   basedirs.Reader
 
-	buildReaders           readerBuilder
-	captureSnapshot        snapshotCapturer
-	refreshVirtualChildren virtualChildrenRefresher
+	buildReaders               readerBuilder
+	captureSnapshot            snapshotCapturer
+	refreshVirtualChildren     virtualChildrenRefresher
+	refreshActivePrefixRollups activePrefixRollupsRefresher
 
 	mu        sync.RWMutex
 	onUpdate  func()
@@ -352,17 +357,24 @@ func (p *chProvider) signalPendingCallbacks() {
 }
 
 func fingerprintForMountsActive(rows []mountsActiveRow) string {
-	var b strings.Builder
-	for _, row := range rows {
-		b.WriteString(row.mountPath)
-		b.WriteString("|")
-		b.WriteString(row.snapshotID)
-		b.WriteString("|")
-		b.WriteString(row.updatedAt.UTC().Format(time.RFC3339Nano))
-		b.WriteString("\n")
+	if len(rows) == 0 {
+		return ""
 	}
 
-	return b.String()
+	parts := make([]string, 0, len(rows))
+	for _, row := range rows {
+		parts = append(parts, row.mountPath+"|"+row.snapshotID+"|"+row.updatedAt.UTC().Format(time.RFC3339Nano))
+	}
+
+	sort.Strings(parts)
+
+	hash := sha256.New()
+	for _, part := range parts {
+		hash.Write([]byte(part))
+		hash.Write([]byte{0})
+	}
+
+	return hex.EncodeToString(hash.Sum(nil))
 }
 
 func (p *chProvider) OnUpdate(cb func()) {
@@ -624,6 +636,7 @@ func (p *chProvider) swapReadersAndInvoke(ctx context.Context, targetFingerprint
 	invokeOnFreshGoroutine(cb)
 
 	p.refreshVirtualChildrenAsync(ctx, publishedFingerprint)
+	p.refreshActivePrefixRollupsAsync(ctx, publishedFingerprint)
 	p.closeOldReaders(oldDB, oldBD)
 
 	return true
@@ -710,6 +723,55 @@ func (p *chProvider) refreshVirtualChildrenAndReport(
 	if err := refresh(ctx, activeSetID); err != nil {
 		p.queueError(fmt.Errorf(
 			"clickhouse: virtual_children_refresh active_set_id=%q: %w",
+			activeSetID,
+			err,
+		))
+	}
+}
+
+func (p *chProvider) refreshActivePrefixRollupsAsync(ctx context.Context, activeSetID string) {
+	if activeSetID == "" {
+		return
+	}
+
+	refresh := p.activePrefixRollupsRefresher()
+	if refresh == nil {
+		return
+	}
+
+	go p.refreshActivePrefixRollupsAndReport(ctx, activeSetID, refresh)
+}
+
+func (p *chProvider) activePrefixRollupsRefresher() activePrefixRollupsRefresher {
+	p.mu.RLock()
+	refresh := p.refreshActivePrefixRollups
+	conn := p.conn
+	p.mu.RUnlock()
+
+	if refresh != nil {
+		return refresh
+	}
+
+	if conn == nil {
+		return nil
+	}
+
+	return func(ctx context.Context, activeSetID string) error {
+		return refreshActivePrefixRollupsForActiveSet(ctx, conn, activeSetID)
+	}
+}
+
+func (p *chProvider) refreshActivePrefixRollupsAndReport(
+	parent context.Context,
+	activeSetID string,
+	refresh activePrefixRollupsRefresher,
+) {
+	ctx, cancel := queryContext(context.WithoutCancel(parent), queryTimeout(p.cfg))
+	defer cancel()
+
+	if err := refresh(ctx, activeSetID); err != nil {
+		p.queueError(fmt.Errorf(
+			"clickhouse: active_prefix_rollup_refresh active_set_id=%q: %w",
 			activeSetID,
 			err,
 		))

@@ -134,14 +134,12 @@ func schemaSQL() ([]string, error) {
 
 	stmts := make([]string, 0, len(entries))
 	for _, name := range entries {
-		stmt, err := readSchemaStatement(name)
+		fileStmts, err := readSchemaStatements(name)
 		if err != nil {
 			return nil, err
 		}
 
-		if stmt != "" {
-			stmts = append(stmts, stmt)
-		}
+		stmts = append(stmts, fileStmts...)
 	}
 
 	if len(stmts) == 0 {
@@ -152,17 +150,12 @@ func schemaSQL() ([]string, error) {
 }
 
 func readSchemaStatement(name string) (string, error) {
-	b, err := schemaFS.ReadFile(name)
+	stmts, err := readSchemaStatements(name)
 	if err != nil {
-		return "", fmt.Errorf("clickhouse: failed to read embedded schema file %q: %w", name, err)
+		return "", err
 	}
 
-	s := strings.TrimSpace(string(b))
-	for strings.HasSuffix(s, ";") {
-		s = strings.TrimSpace(strings.TrimSuffix(s, ";"))
-	}
-
-	return s, nil
+	return strings.Join(stmts, ";\n"), nil
 }
 
 func applySchemaDDL(ctx context.Context, execer ch.Conn, stmts []string) error {
@@ -192,6 +185,25 @@ func ensureSchemaVersion(ctx context.Context, execer ch.Conn) error {
 	}
 
 	return validateSchemaVersionStats(count, minSingleton, maxSingleton, minVersion, maxVersion)
+}
+
+func readSchemaStatements(name string) ([]string, error) {
+	b, err := schemaFS.ReadFile(name)
+	if err != nil {
+		return nil, fmt.Errorf("clickhouse: failed to read embedded schema file %q: %w", name, err)
+	}
+
+	parts := strings.Split(string(b), ";")
+	stmts := make([]string, 0, len(parts))
+
+	for _, part := range parts {
+		stmt := strings.TrimSpace(part)
+		if stmt != "" {
+			stmts = append(stmts, stmt)
+		}
+	}
+
+	return stmts, nil
 }
 
 func insertAndReadSchemaVersionStats(

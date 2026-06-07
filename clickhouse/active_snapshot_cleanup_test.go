@@ -28,6 +28,7 @@ package clickhouse
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -54,6 +55,66 @@ const (
 var errActiveSnapshotCleanupDeleteForbidden = errors.New("active snapshot cleanup delete should not run")
 
 var errActiveSnapshotCleanupNormalDeadline = errors.New("active snapshot cleanup used normal query timeout")
+
+func TestActiveSetCleanupB3(t *testing.T) {
+	Convey("B3.1 cleanup drops replaced active-prefix and virtual-child partitions and keeps replacement data",
+		t, func() {
+			env, ctx, cleanup := newB2ActivePrefixEnv(t)
+			defer cleanup()
+
+			oldSetID := env.activeSetID
+			So(refreshActiveVirtualChildren(ctx, env.conn, env.rows), ShouldBeNil)
+			So(ensureActivePrefixRollups(ctx, env.conn, env.rows), ShouldBeNil)
+			assertActiveSetRowsPresent(ctx, env.conn, oldSetID)
+
+			seedB2Mount(ctx, env.conn, b2MountSeed{
+				mountPath:  c3Scratch120Mount,
+				updatedAt:  time.Date(2026, 6, 7, 10, 0, 0, 0, time.UTC),
+				bamCount:   300,
+				otherCount: 30,
+				dirCount:   3,
+				childCount: 2,
+			})
+
+			rows, err := queryMountsActiveRows(ctx, env.conn)
+			So(err, ShouldBeNil)
+
+			newSetID := fingerprintForMountsActive(rows)
+			So(newSetID, ShouldNotEqual, oldSetID)
+			So(refreshActiveVirtualChildren(ctx, env.conn, rows), ShouldBeNil)
+			So(ensureActivePrefixRollups(ctx, env.conn, rows), ShouldBeNil)
+			assertActiveSetRowsPresent(ctx, env.conn, newSetID)
+
+			So(cleanupOldVirtualChildrenSets(ctx, env.conn, newSetID), ShouldBeNil)
+			So(cleanupOldActivePrefixRollupSets(ctx, env.conn, newSetID), ShouldBeNil)
+
+			for _, table := range activeSetPartitionTablesForB3() {
+				So(countActiveSetRowsForB3(ctx, env.conn, table, oldSetID), ShouldEqual, 0)
+			}
+
+			assertActiveSetRowsPresent(ctx, env.conn, newSetID)
+		})
+}
+
+func activeSetPartitionTablesForB3() []string {
+	return []string{
+		"wrstat_virtual_children",
+		"wrstat_virtual_children_sets",
+		"wrstat_active_prefix_rollups",
+		"wrstat_active_prefix_filter_ageall",
+		"wrstat_active_prefix_rollup_sets",
+	}
+}
+
+func assertActiveSetRowsPresent(ctx context.Context, conn ch.Conn, activeSetID string) {
+	for _, table := range activeSetPartitionTablesForB3() {
+		So(countActiveSetRowsForB3(ctx, conn, table, activeSetID), ShouldBeGreaterThan, 0)
+	}
+}
+
+func countActiveSetRowsForB3(ctx context.Context, conn ch.Conn, table, activeSetID string) uint64 {
+	return countRows(ctx, conn, fmt.Sprintf("SELECT count() FROM %s WHERE active_set_id = ?", table), activeSetID)
+}
 
 type activeSnapshotCleanupDeleteRejectingConn struct {
 	ch.Conn
