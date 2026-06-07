@@ -184,19 +184,33 @@ when a candidate looks promising and needs stronger proof.
   92.2/95.9 ms, but filtered `tree_where_cold_provider` was 854.1/866.0 ms and
   `/nfs/t283_imaging` filtered `tree_where_cold_provider` reached p50/p95
   1160.6/1554.4 ms in candidate probes.
-- [ ] Measure the actual web/API path if possible, not only in-process perf:
+- [x] Measure the actual web/API path if possible, not only in-process perf:
   page refresh to `/`, first click `/lustre`, first click `/nfs`, first click
   into a selected mount, repeat click, and switch to a different filter.
-  Open: Real browser/HTTP path was not measured in this bounded pass. Current
-  `clickhouse-perf` Disktree ops are in-process and do not include browser cache
-  clear, HTTP, gzip, auth, JSON decode, or React render time.
+  Result: Correction pass in `.tmp/agent/schema2/http-api-correction.md`
+  measured real server endpoints with repeat 5. No-auth `/rest/v1/where` used
+  `server.Server` + `clickhouse.OpenProvider` + `httptest`; auth
+  `/rest/v1/auth/tree` used generated cert/key, `EnableAuth`, `AddTreePage`,
+  `go-authserver` test server, and login. All measured requests returned 200.
+  Auth tree request p50/p95: `/` 88.2/89.8 ms, `/lustre/` 61.1/71.4 ms,
+  `/nfs/` 43.9/46.3 ms, `/nfs/t283_imaging/` 27.2/31.1 ms. Browser-like auth
+  tree sequence p50s: root 86.3 ms, `/lustre/` 47.4 ms, `/nfs/` 35.6 ms,
+  mount root 10.7 ms, repeat mount 3.0 ms, type-filter switch root 105.1 ms.
+  No-auth `where` request p50/p95: `/` 306.1/334.9 ms, `/lustre/` 278.8/282.2
+  ms, `/nfs/` 121.4/125.7 ms, `/nfs/t283_imaging/` 94.5/98.0 ms,
+  type-filter switch root 527.3/553.1 ms. Gzip was not emitted by the handlers
+  in this harness; recorded gzip bytes are offline-compressed response sizes.
+  Browser cache clearing, React render, and layout/canvas work remain unmeasured.
 - [x] Measure `./wrstat-ui where` first run and cached run against the same
   server/database/filter, and separately measure in-process `tree_where` so CLI,
   HTTP, JSON, and database costs are not conflated.
   Result: Deliberately skipped real CLI timing because the standalone `server`
   command requires `--cert`, `--key`, `--owners`, and Okta issuer/client/secret
-  configuration, which this environment did not provide. In-process
-  `tree_where` was measured instead: `/` broad cold-provider p50/p95
+  configuration, which this environment did not provide. Correction pass did
+  measure the server REST `where` handler directly, so HTTP/JSON handler cost is
+  no longer conflated with database cost; the literal `./wrstat-ui where` CLI
+  wrapper remains unmeasured. In-process `tree_where` was measured:
+  `/` broad cold-provider p50/p95
   296.960/361.848 ms; `/` cold-then-cached first sample 376.764 ms then about
   64-70 ms; filtered `/` first sample 881.146 ms then about 79-84 ms.
 - [x] Add temporary query tracing if needed: per request query count, query
@@ -209,11 +223,26 @@ when a candidate looks promising and needs stronger proof.
   t283 filtered whole-mount `where` 35,222-140,219 rows/149-164 MB. Direct
   `system.query_log` capture failed because this local ClickHouse exposed no
   `system.query_log`; query counts and cache hit/miss counts remain open.
-- [ ] If Bolt comparison data is available or can be produced on the same
+  Correction REST pass added response sizes: auth tree root 1,036 JSON bytes
+  and 349 offline gzip bytes; no-auth root `where` 200,102 JSON bytes and
+  16,480 offline gzip bytes; type-filtered root `where` 167,214 JSON bytes and
+  13,713 offline gzip bytes.
+- [x] If Bolt comparison data is available or can be produced on the same
   subset, record Bolt root Disktree and `where` timings as the user-facing
   target.
-  Open: No same-subset Bolt baseline was located or produced during this
-  bounded pass.
+  Result: Correction pass in `.tmp/agent/schema2/bolt-correction.md` produced
+  same-subset Bolt data with `bolt-perf`. Import of 400,000 records succeeded
+  in 3,677.091 ms harness time, 0:03.71 wall, max RSS 193,656 KB. Bolt storage:
+  106,700,800 bytes DGUTA plus 81,920 bytes basedirs. Unfiltered
+  provider-aggregation Disktree p50/p95: `/` 1.933/2.459 ms, `/lustre/`
+  1.681/2.269 ms, `/nfs/` 0.242/0.261 ms, `/nfs/t283_imaging/` 0.463/1.052 ms.
+  Bolt `where_cold_then_cached` p50/p95: `/` 36.570/40.651 ms, `/lustre/`
+  47.793/49.954 ms, `/nfs/` 11.280/13.137 ms, `/nfs/t283_imaging/`
+  13.203/23.621 ms. Filtered direct t283, gid 14976 uid 20155 type `other`,
+  used the default Bolt backend: Disktree 0.334/0.454 ms and
+  `where_cold_then_cached` 67.355/78.534 ms. Limit: `bolt_interfaces` gives
+  multi-dataset virtual-root behavior but rejects tree filter flags, while the
+  default filtered Bolt backend uses only the first dataset.
 
 ## Investigation Checklist
 
@@ -225,7 +254,11 @@ change?
 - [ ] Add or use instrumentation that separates browser/render time, HTTP
   handler time, provider/database time, ClickHouse query time, JSON size, gzip
   size, and React Disktree render time.
-  Open: Not measured for real HTTP/browser. Existing chperf is in-process.
+  Result: Correction pass measured HTTP handler request time, provider setup,
+  login time for auth tree, response JSON bytes, and offline gzip bytes. Chperf
+  still supplies the closest ClickHouse/database timing. Open: browser cache
+  clearing, frontend fetch/decode, React render, and layout/canvas time remain
+  unmeasured.
 - [x] For `/`, `/lustre`, `/nfs`, and one mount root, record the exact backend
   calls made by the Disktree endpoint: `DirInfo`, `DirInfos`, `Children`,
   `DirsHaveChildren`, virtual summary/cache checks, active mount resolution, and
@@ -249,10 +282,11 @@ change?
   child summary/has-children fanout, active mount/readiness lookups, vector
   filtering, response size, or frontend rendering.
   Result: On this subset, in-process root Disktree was under 102 ms p95 and did
-  not reproduce the multi-second browser symptom. The largest measured cold
-  signal was filtered `where`/filter vector scanning on t283, with
-  `tree_where_cold_provider` p50 1160.6 ms and whole-mount filtered scan p50
-  726 ms reading 149-164 MB.
+  not reproduce the multi-second browser symptom. Auth REST tree root request
+  p95 was 89.8 ms, so HTTP/auth/JSON handler overhead is not the hidden
+  multi-second cost on this subset. The largest measured cold signal was
+  filtered `where`/filter vector scanning on t283, with `tree_where_cold_provider`
+  p50 1160.6 ms and whole-mount filtered scan p50 726 ms reading 149-164 MB.
 - [x] Add a `Result:` subsection here with a table of cold root, cold
   `/lustre`, cold `/nfs`, cold mount-root, filter-change, and repeated timings.
 
@@ -261,11 +295,21 @@ Result:
 | Case | Timing | Read rows/bytes | Conclusion |
 |---|---:|---:|---|
 | `/` cold-provider Disktree | p50/p95 97.8/101.1 ms | typical root endpoint 17,239 rows/9.82 MB | Not the reproduced bottleneck in-process. |
+| `/` auth REST tree | request p50/p95 88.2/89.8 ms; JSON/offline gzip 1,036/349 bytes | chperf comparison 89.9/93.2 ms | Server/auth/JSON path tracks in-process Disktree. |
 | `/lustre` cold-provider Disktree | p50/p95 70.7/74.2 ms | 4,319 rows/4.46 MB | Virtual namespace click is measurable but not seconds on subset. |
 | `/nfs` cold-provider Disktree | p50/p95 53.9/54.4 ms | 4,631 rows/608 KB | Warm p50 fell to 14 ms. |
 | `/nfs/t283_imaging` cold-provider Disktree | p50/p95 94.2/115.9 ms filtered | not captured per request | Endpoint itself is less costly than filtered `where`. |
-| `/nfs/t283_imaging` filtered `where` | p50/p95 1160.6/1554.4 ms | whole-mount op 149-164 MB | Strongest cold filter/where signal. |
+| `/` no-auth REST `where` | request p50/p95 306.1/334.9 ms; JSON/offline gzip 200,102/16,480 bytes | chperf comparison 297.0/361.8 ms | HTTP handler tracks in-process `where`. |
+| `/` type-filter REST `where` | request p50/p95 527.3/553.1 ms; JSON/offline gzip 167,214/13,713 bytes | chperf comparison 514.9/550.7 ms | Filter switch remains storage/tree dominated. |
+| `/nfs/t283_imaging` filtered `where` | p50/p95 1160.6/1554.4 ms for gid+uid+type chperf; type-only REST p50/p95 476.8/550.5 ms isolated | whole-mount op 149-164 MB for gid+uid+type | Strongest cold filter/where signal. |
+| Same-subset Bolt `/` Disktree and `where` | Disktree p50/p95 1.93/2.46 ms; `where_cold_then_cached` 36.57/40.65 ms | result counts unavailable in Bolt JSON | Bolt remains the user-facing target. |
 | Repeated/cached `where` | first 376.8-881.1 ms, repeats about 64-84 ms | not counted | Process caches hide cold cost. |
+
+Correction note: isolated type-only REST `/nfs/t283_imaging/` `where` returned 2
+rows, but the same filtered request after a filtered root `/` request returned
+87 rows consistently in the same provider. Carry this forward as a correctness
+or cache-state anomaly to investigate before relying on filtered click-through
+measurements.
 
 ### 2. First-Class Virtual Ancestor Summary Cache
 
@@ -607,8 +651,9 @@ paths while keeping ClickHouse for import, history, and file APIs?
   Open: No sidecar was prototyped or sized in this bounded pass.
 - [ ] Compare an embedded Bolt/SQLite/RocksDB sidecar, a memory-mapped file,
   and a ClickHouse table designed to behave like a key/value navigation index.
-  Open: Not compared because ClickHouse-native candidates still have promising
-  lower-bound signals.
+  Open: Stores were not compared. Same-subset Bolt was measured and is
+  dramatically faster for UI tree paths, but no publishable sidecar design was
+  prototyped.
 - [ ] Preserve active snapshot atomicity: the sidecar must publish only after
   the corresponding ClickHouse snapshot or active set is ready.
   Open: Atomic publish design not modeled.
@@ -619,7 +664,9 @@ paths while keeping ClickHouse for import, history, and file APIs?
   is a radical fallback, not the preferred path unless ClickHouse-native
   candidates cannot hit the cold UX target.
   Result: Defer sidecar. AgeAll filter rows, active-prefix rollups, tuple query
-  tuning, and parent/nav facts should be implemented/proven first.
+  tuning, and parent/nav facts should be implemented/proven first. If those
+  cannot approach the measured Bolt p95 targets, a Bolt-like navigation sidecar
+  should become the fallback rather than more process-local warming.
 
 ### 12. Perf Harness And Acceptance Gates
 
@@ -633,12 +680,14 @@ Question: what measurements must exist so this problem does not regress again?
   No harness code was edited in this recorder pass.
 - [ ] Add an operation for first `./wrstat-ui where` through the real server
   path, not only in-process `Tree.Where`.
-  Open: Real CLI/server path remains missing; current CLI measurement was
-  blocked by auth/cert/Okta requirements.
+  Open: Real CLI wrapper timing remains missing. Correction pass measured the
+  REST `/where` handler directly, but not the `cmd/where.go` client path through
+  a production-style authenticated server.
 - [ ] Add query-count, cache-hit/miss, ClickHouse read rows/bytes/marks, JSON
   response bytes, and operation result counts to perf reports.
-  Open: Read rows/bytes are partly available, but query count, cache hit/miss,
-  JSON bytes, gzip bytes, and robust query-log/profile events remain gaps.
+  Result: Correction pass captured REST JSON bytes and offline gzip bytes.
+  Open: query count, cache hit/miss, ClickHouse marks, result counts in Bolt
+  JSON, and robust query-log/profile events remain gaps.
 - [ ] Add a paired broad/filtered correctness equivalence check so optional
   indexes and caches cannot return stale or partial summaries.
   Open: Prototype AgeAll index result was manually matched; this still needs a
@@ -655,9 +704,12 @@ Question: what measurements must exist so this problem does not regress again?
   refresh under 1s server-side, first `/lustre` and `/nfs` clicks under 500ms
   server-side, first filter switch under 1s server-side, and first `where` no
   more than 10% slower than Bolt on the same subset. Adjust only with evidence.
-  Result: Keep these gates for the next implementation proof, but require real
-  HTTP/browser timing and a same-subset Bolt or accepted replacement baseline
-  before declaring production-scale success.
+  Result: Keep the server-side gates and use the correction Bolt data as the
+  same-subset target. Bolt p95 targets on the 2026-06-07 subset: root Disktree
+  2.459 ms, `/lustre/` 2.269 ms, `/nfs/` 0.261 ms, `/nfs/t283_imaging/`
+  1.052 ms, root `where_cold_then_cached` 40.651 ms, filtered direct t283
+  `where_cold_then_cached` 78.534 ms. Full browser/React timing is still
+  required before declaring production UX success.
 
 ## Comparison Matrix
 
@@ -665,7 +717,7 @@ Maintain this table as experiments complete.
 
 | Design | Tables or caches added/removed | Root `/` cold | `/lustre` and `/nfs` cold | Filter switch cold | `where` first/cached | Import cost | Storage cost | Correctness risks | Complexity | Recommendation |
 |---|---|---:|---:|---:|---:|---:|---:|---|---|---|
-| Current branch baseline | Existing `wrstat_dir_facts`, `wrstat_children`, virtual children, process caches | `/` in-process cold-provider p50 97.8 ms on subset; real browser open | `/lustre` 70.7 ms, `/nfs` 53.9 ms cold-provider | Filtered `/nfs/t283_imaging` endpoint 94.2 ms but filtered `where` remains slow | Root `where` p50 316 ms; filtered t283 `where` p50 1161 ms; cached repeats about 64-84 ms | Existing import 400k lines in 5.56s | facts 7.28 MB, children 0.44 MB compressed | Query-log unavailable locally; in-process only | Medium | Baseline; insufficient for first filtered `where` |
+| Current branch baseline | Existing `wrstat_dir_facts`, `wrstat_children`, virtual children, process caches | `/` auth REST tree p50 88.2 ms; in-process cold-provider p50 97.8 ms; browser render open | `/lustre` auth REST 61.1 ms, `/nfs` 43.9 ms; in-process 70.7/53.9 ms | Type-filter REST root `where` p50 527 ms; filtered `/nfs/t283_imaging` endpoint 94.2 ms but filtered `where` remains slow | Root REST `where` p50 306 ms; filtered t283 gid+uid+type chperf p50 1161 ms; cached repeats about 64-84 ms | Existing CH import 400k lines in 5.56s; Bolt same subset 3.68s | CH facts 7.28 MB, children 0.44 MB compressed; Bolt output 106.78 MB | Query-log unavailable locally; filtered REST click-through anomaly; browser render open | Medium | Baseline; far slower than Bolt target for Disktree and first filtered `where` |
 | First-class virtual ancestor summary cache | Would add `wrstat_virtual_summary_cache` and sets; hooks exist but base DDL omits | Not measured; likely broad root help | May help namespace summaries, not ordinary child facts | Only helps filters if vectors/filter rows stored | Does not directly solve t283 whole-mount filtered `where` | Unknown refresh cost | Unknown | Staleness/readiness/active-set cleanup | Medium-high | Defer; prefer active-prefix rollups first |
 | One-query Disktree navigation facts | Prototype `wrstat_child_facts` | Root virtual parents still need active rows/rollups | High-fanout parent p50 4 ms, one parent range | Needs vectors or filter companion rows | Could help frontiers only if reused | Import cost not measured | +1.74 MB compressed | Duplicate summary rows; virtual parent semantics | Medium | Promising for UI nav after rollups/filter index |
 | Parent-ordered directory facts/projection | Prototype `wrstat_parent_facts` or projection | Not a root virtual fix | High-fanout parent p50 5 ms, one parent range | Needs vector reads or filter index | Indirect only | Import/projection cost not measured | +1.84 MB compressed | Projection optimizer must be proven | Medium | High-value query-shape candidate |
@@ -691,8 +743,11 @@ End the investigation by editing this section in place.
   Result: Defer virtual summary cache because active-prefix rollups are smaller
   and measured. Treat metadata batching and warming as tactical only. Defer
   path-compressed `where` because t283 has only 2.57% single-child dirs and the
-  dominant filter matches nearly all dirs. Defer sidecar because native
-  candidates still have promising lower-bound measurements.
+  dominant filter matches nearly all dirs. Defer sidecar for the first
+  implementation phase because native candidates still have promising
+  lower-bound measurements, but keep it as a concrete fallback now that Bolt is
+  measured to be orders of magnitude faster for Disktree and filtered `where`
+  on the same subset.
 - [x] State what should be implemented first if the final answer has phases.
   Result: Phase 1 should prove `wrstat_dir_filter_ageall` through real importer
   DDL/writes/readiness/cleanup and cold filtered `where` gates. Phase 2 should
@@ -714,15 +769,22 @@ End the investigation by editing this section in place.
   Lustre+NFS subset, first root page refresh under 1s server-side, first
   `/lustre` and `/nfs` clicks under 500 ms server-side, first filter switch
   under 1s server-side, first filtered `where` no more than 10% slower than
-  same-subset Bolt or an agreed replacement baseline, and correctness matching
-  current facts for broad and filtered summaries. Require row counts, active
-  parts, compressed/uncompressed bytes, import time, memory, read rows/bytes,
-  and p95/p99 for each new table.
+  same-subset Bolt, and correctness matching current facts for broad and
+  filtered summaries. Same-subset Bolt p95 targets from the correction pass:
+  root Disktree 2.459 ms, `/lustre/` 2.269 ms, `/nfs/` 0.261 ms,
+  `/nfs/t283_imaging/` 1.052 ms, root `where_cold_then_cached` 40.651 ms, and
+  filtered direct t283 `where_cold_then_cached` 78.534 ms. Require row counts,
+  active parts, compressed/uncompressed bytes, import time, memory, read
+  rows/bytes, response bytes, and p95/p99 for each new table.
 - [x] State any `clickhouse-perf`, server tracing, or browser/API measurement
   improvements needed before implementation.
-  Result: Add real HTTP/browser timing, first `./wrstat-ui where` through the
-  server path, per-request query count, cache hit/miss counts, JSON/gzip bytes,
-  and either enabled `system.query_log` or formal inspector fallback metrics.
+  Result: REST handler timing and response bytes now exist. Add browser/React
+  timing, first `./wrstat-ui where` through the real CLI/server path,
+  per-request query count, cache hit/miss counts, result counts in Bolt perf
+  JSON, and either enabled `system.query_log` or formal inspector fallback
+  metrics. Investigate the filtered REST `/nfs/t283_imaging/` anomaly where the
+  same type-only request returned 2 rows isolated but 87 rows after filtered
+  root warming.
 - [x] Copy concrete spec decisions into a future `.docs/schema2/prompt.md` or
   implementation-phase prompt when requested.
   Result: Not copied now because this task only requested updating
