@@ -64,10 +64,13 @@ const (
 		"SELECT ?, greatest(coalesce(max(event_at) + toIntervalMillisecond(1), now64(3)), now64(3)), " +
 		"1, toUUID(?), ?, 'publish' FROM wrstat_mount_events WHERE mount_path = ?"
 
-	dropChildrenPartitionQuery       = "ALTER TABLE wrstat_children DROP PARTITION tuple(?, toUUID(?))"
-	dropFilesPartitionQuery          = "ALTER TABLE wrstat_files DROP PARTITION tuple(?, toUUID(?))"
-	dropDirSummaryPartitionQuery     = "ALTER TABLE wrstat_dir_facts DROP PARTITION tuple(?, toUUID(?))"
-	dropDirSummarySetPartitionQuery  = "ALTER TABLE wrstat_dir_projection_sets DROP PARTITION tuple(?, toUUID(?))"
+	dropChildrenPartitionQuery        = "ALTER TABLE wrstat_children DROP PARTITION tuple(?, toUUID(?))"
+	dropFilesPartitionQuery           = "ALTER TABLE wrstat_files DROP PARTITION tuple(?, toUUID(?))"
+	dropDirSummaryPartitionQuery      = "ALTER TABLE wrstat_dir_facts DROP PARTITION tuple(?, toUUID(?))"
+	dropDirSummarySetPartitionQuery   = "ALTER TABLE wrstat_dir_projection_sets DROP PARTITION tuple(?, toUUID(?))"
+	dropDirFilterAgeAllPartitionQuery = "ALTER TABLE wrstat_dir_filter_ageall " +
+		"DROP PARTITION tuple(?, toUUID(?))"
+	dropParentFactsPartitionQuery    = "ALTER TABLE wrstat_parent_facts DROP PARTITION tuple(?, toUUID(?))"
 	dropDirDGUTAVectorPartitionQuery = "ALTER TABLE wrstat_dir_facts " +
 		"DROP PARTITION tuple(?, toUUID(?))"
 
@@ -700,6 +703,8 @@ func allPartitionDropQueries() []string {
 		dropChildrenPartitionQuery,
 		dropFilesPartitionQuery,
 		dropDirSummaryPartitionQuery,
+		dropDirFilterAgeAllPartitionQuery,
+		dropParentFactsPartitionQuery,
 		dropDirSummarySetPartitionQuery,
 		dropDirDGUTAVectorPartitionQuery,
 		dropBasedirsGroupUsagePartitionQuery,
@@ -759,6 +764,11 @@ func refuseActiveSnapshotRewrite(
 
 func (w *dgutaWriter) prepareWriteBatches(ctx context.Context) error {
 	w.dirProjection = prepareMountDirProjectionWriter(ctx, w.conn)
+	w.selectedDerivedIndexes = append(w.selectedDerivedIndexes, newDirFilterAgeAllWriter(
+		w.conn,
+		w.effectiveProjectionBatchSize(),
+		w.dirProjection.refreshedAt,
+	))
 	w.prepared = true
 
 	return nil

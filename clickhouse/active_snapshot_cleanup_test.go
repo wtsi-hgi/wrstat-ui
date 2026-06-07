@@ -44,6 +44,8 @@ const (
 		"WHERE mount_path = ? AND gid = ?"
 	activeSnapshotCleanupCountDirFactsQuery = "SELECT count() FROM wrstat_dir_facts " +
 		"WHERE mount_path = ? AND snapshot_id = toUUID(?)"
+	activeSnapshotCleanupCountAgeAllActivePartsQuery = "SELECT count() FROM system.parts " +
+		"WHERE database = ? AND table = 'wrstat_dir_filter_ageall' AND active = 1 AND rows > 0"
 	activeSnapshotCleanupInsertDirFactsQuery = "INSERT INTO wrstat_dir_facts " +
 		"(mount_path, snapshot_id, dir, updated_at, all_count, all_size, refreshed_at) " +
 		"VALUES (?, toUUID(?), ?, ?, ?, ?, ?)"
@@ -661,6 +663,39 @@ func TestCleanActiveSnapshotAttempt(t *testing.T) {
 			assertSnapshotCleanupRows(ctx, conn, failedSID, 0)
 		})
 
+	Convey("A3.4 CleanActiveSnapshotAttempt drops AgeAll active parts on tombstone cleanup", t, func() {
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 5 * time.Second
+
+		failedUpdatedAt := time.Date(2026, 6, 7, 13, 0, 0, 0, time.UTC)
+		failedSID := snapshotID(testMountPath, failedUpdatedAt).String()
+
+		opts, err := optionsFromConfig(cfg)
+		So(err, ShouldBeNil)
+
+		conn, err := connectAndBootstrap(context.Background(), opts, cfg.Database, queryTimeout(cfg))
+		So(err, ShouldBeNil)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		So(conn.Exec(ctx, testInsertMountStmt, testMountPath, failedUpdatedAt, failedSID, failedUpdatedAt), ShouldBeNil)
+		insertSnapshotCleanupRows(ctx, conn, failedSID, failedUpdatedAt)
+		So(countRows(ctx, conn, activeSnapshotCleanupCountAgeAllActivePartsQuery, cfg.Database), ShouldBeGreaterThan, 0)
+
+		So(cleanActiveSnapshotAttemptWithConn(cfg, conn, testMountPath, failedUpdatedAt), ShouldBeNil)
+
+		activeSID, hasActive, err := readActiveSnapshotID(ctx, conn, testMountPath)
+		So(err, ShouldBeNil)
+		So(hasActive, ShouldBeFalse)
+		So(activeSID, ShouldBeBlank)
+		So(countRows(ctx, conn, activeSnapshotCleanupCountAgeAllActivePartsQuery, cfg.Database), ShouldEqual, 0)
+		assertSnapshotCleanupRows(ctx, conn, failedSID, 0)
+	})
+
 	Convey("CleanActiveSnapshotAttempt reports latest mount metadata when repair cannot deactivate a snapshot", t, func() {
 		th := newClickHouseTestHarness(t)
 		cfg := th.newConfig()
@@ -751,6 +786,23 @@ func insertSnapshotCleanupRows(
 		updatedAt,
 	), ShouldBeNil)
 	So(conn.Exec(ctx, testInsertChildrenStmt, testMountPath, sid, testMountPath, testMountPath+"child"), ShouldBeNil)
+	So(conn.Exec(
+		ctx,
+		insertDirFilterAgeAllQuery,
+		testMountPath,
+		sid,
+		uint32(7),
+		uint32(9),
+		uint16(db.DGUTAFileTypeBam),
+		testMountPath,
+		uint64(2),
+		uint64(123),
+		int64(100),
+		int64(200),
+		[]uint64{2, 0, 0, 0, 0, 0, 0, 0, 0},
+		[]uint64{0, 2, 0, 0, 0, 0, 0, 0, 0},
+		updatedAt,
+	), ShouldBeNil)
 	So(conn.Exec(
 		ctx,
 		testInsertFileStmt,
@@ -858,6 +910,7 @@ func assertSnapshotCleanupRows(
 	queries := []string{
 		activeSnapshotCleanupCountDirFactsQuery,
 		dgutaWriterTestCountChildrenQuery,
+		dgutaWriterTestCountAgeAllQuery,
 		filesIngestTestCountQuery,
 		basedirsStoreTestCountGroupUsageQuery,
 		"SELECT count() FROM wrstat_basedirs_user_usage WHERE mount_path = ? AND snapshot_id = toUUID(?)",

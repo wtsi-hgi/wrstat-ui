@@ -19,8 +19,8 @@ Add `wrstat_dir_filter_ageall` DDL and deterministic snapshot import writes in
 `clickhouse/import_block_writer.go`, covering all 5 acceptance tests from A1.
 This item blocks AgeAll routing and readiness work.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
 
 ### Item 1.2: A2 - Route Eligible Filters To AgeAll Rows
 
@@ -32,8 +32,8 @@ Implement eligible AgeAll owner/type filter routing in
 `dirFilterAgeAllCanHandleFilter` and `dirFilterAgeAllFilterExpression`,
 covering all 6 acceptance tests from A2. Depends on A1 table/import support.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
 
 ### Item 1.3: A3 - AgeAll Readiness And Cleanup
 
@@ -45,5 +45,5 @@ Wire AgeAll readiness and cleanup through
 This finalizes snapshot atomicity before later performance gates rely on
 AgeAll rows.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed

@@ -52,9 +52,11 @@ import (
 )
 
 const (
-	testSystemTablesQuery       = "SELECT name FROM system.tables WHERE database = ? ORDER BY name"
-	testSystemColumnsQuery      = "SELECT name FROM system.columns WHERE database = ? AND table = ? ORDER BY name"
-	testSystemTableEngineQuery  = "SELECT engine FROM system.tables WHERE database = ? AND name = ? LIMIT 1"
+	testSystemTablesQuery      = "SELECT name FROM system.tables WHERE database = ? ORDER BY name"
+	testSystemColumnsQuery     = "SELECT name FROM system.columns WHERE database = ? AND table = ? ORDER BY name"
+	testSystemTableEngineQuery = "SELECT engine FROM system.tables WHERE database = ? AND name = ? LIMIT 1"
+	testSystemTableKeysQuery   = "SELECT partition_key, sorting_key FROM system.tables " +
+		"WHERE database = ? AND name = ? LIMIT 1"
 	testInsertInactiveMountStmt = "INSERT INTO wrstat_mount_events (mount_path, event_at, event_type, " +
 		"snapshot_id, updated_at, reason) VALUES (?, ?, 0, ?, ?, 'inactive')"
 	testCreateLegacyMountsTableStmt = "CREATE TABLE wrstat_mounts (" +
@@ -108,6 +110,19 @@ func (r bootstrapTestRow) Scan(...any) error {
 
 func (r bootstrapTestRow) ScanStruct(any) error {
 	return r.err
+}
+
+func tableKeys(ctx context.Context, t *testing.T, conn ch.Conn, database, table string) (string, string) {
+	t.Helper()
+
+	row := conn.QueryRow(ctx, testSystemTableKeysQuery, database, table)
+
+	var partitionKey, sortingKey string
+	if err := row.Scan(&partitionKey, &sortingKey); err != nil {
+		t.Fatalf("failed to scan table keys: %v", err)
+	}
+
+	return partitionKey, sortingKey
 }
 
 type bootstrapTestConn struct {
@@ -932,6 +947,7 @@ func TestNewClientBootstrapsSchema(t *testing.T) {
 		So(tables, ShouldContain, "wrstat_dir_facts")
 		So(tables, ShouldContain, "wrstat_children")
 		So(tables, ShouldContain, "wrstat_dir_projection_sets")
+		So(tables, ShouldContain, "wrstat_dir_filter_ageall")
 		So(tables, ShouldContain, "wrstat_virtual_children")
 		So(tables, ShouldContain, "wrstat_virtual_children_sets")
 		So(tables, ShouldNotContain, "wrstat_virtual_summary_cache")
@@ -954,6 +970,10 @@ func TestNewClientBootstrapsSchema(t *testing.T) {
 		So(versionCols, ShouldContain, "inserted_at")
 
 		So(tableEngine(ctx, t, conn, cfg.Database, "wrstat_schema_version"), ShouldEqual, "ReplacingMergeTree")
+
+		partitionKey, sortingKey := tableKeys(ctx, t, conn, cfg.Database, "wrstat_dir_filter_ageall")
+		So(partitionKey, ShouldEqual, "(mount_path, snapshot_id)")
+		So(sortingKey, ShouldEqual, "mount_path, snapshot_id, gid, uid, ft, dir")
 	})
 
 	Convey("NewClient bootstraps wrstat_mounts_active to hide inactive latest rows", t, func() {

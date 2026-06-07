@@ -179,6 +179,7 @@ func TestClickHouseImportBatchContexts(t *testing.T) {
 			insertDGUTAQuery,
 			insertChildrenQuery,
 			insertMountDirSummaryQuery,
+			insertDirFilterAgeAllQuery,
 			insertMountDirSummarySetQuery,
 			insertFilesBatchQuery,
 			insertBasedirsGroupUsageQuery,

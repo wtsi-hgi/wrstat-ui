@@ -27,17 +27,23 @@ package clickhouse
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
+	"time"
 
+	ch "github.com/ClickHouse/clickhouse-go/v2"
+	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 )
 
 const (
 	dirFilterAgeAllTableName = "wrstat_dir_filter_ageall"
 
-	dirFilterAgeAllActiveRowsQuery = "SELECT sum(rows) FROM system.parts " +
-		"WHERE database = currentDatabase() AND table = ? AND active"
+	insertDirFilterAgeAllQuery = "INSERT INTO wrstat_dir_filter_ageall " +
+		"(mount_path, snapshot_id, gid, uid, ft, dir, count, size, atime_min, mtime_max, " +
+		"atime_buckets, mtime_buckets, refreshed_at) " +
+		"VALUES (?, toUUID(?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
 
 	dirFilterAgeAllWhereSummariesQuery = "SELECT dir, count() AS raw_rows, " +
 		"sum(count) AS total_count, " +
@@ -54,6 +60,21 @@ const (
 		"WHERE %s " +
 		"GROUP BY dir"
 
+	dirFilterAgeAllSummariesForDirsQuery = "SELECT dir, count() AS raw_rows, " +
+		"sum(count) AS total_count, " +
+		"sum(size) AS total_size, " +
+		"minIf(atime_min, atime_min != 0) AS atime_min, " +
+		"max(mtime_max) AS mtime_max, " +
+		"arrayReduce('sumForEach', groupArray(atime_buckets)) AS atime_buckets, " +
+		"arrayReduce('sumForEach', groupArray(mtime_buckets)) AS mtime_buckets, " +
+		"arraySort(groupUniqArray(uid)) AS uids, " +
+		"arraySort(groupUniqArray(gid)) AS gids, " +
+		"groupBitOr(ft) AS file_types " +
+		"FROM wrstat_dir_filter_ageall " +
+		"PREWHERE mount_path = ? AND snapshot_id = ? " +
+		"WHERE dir IN (%s) AND %s " +
+		"GROUP BY dir"
+
 	dirsHaveMatchingChildrenAgeAllQuery = "SELECT c.parent_dir " +
 		"FROM wrstat_children c " +
 		"INNER JOIN wrstat_dir_filter_ageall f " +
@@ -66,6 +87,115 @@ const (
 		"ORDER BY c.parent_dir ASC"
 )
 
+var errDirFilterAgeAllBatchNotPrepared = errors.New("clickhouse: AgeAll filter batch is not prepared")
+
+var errDirFilterAgeAllTableUnavailable = errors.New("clickhouse: AgeAll filter table is unavailable")
+
+type dirFilterAgeAllWriter struct {
+	conn ch.Conn
+
+	batch    driver.Batch
+	openedAt time.Time
+	batchNow func() time.Time
+
+	batchSize   int
+	refreshedAt time.Time
+	writeErr    error
+}
+
+func newDirFilterAgeAllWriter(conn ch.Conn, batchSize int, refreshedAt time.Time) *dirFilterAgeAllWriter {
+	writer := &dirFilterAgeAllWriter{
+		conn:        conn,
+		batchSize:   batchSize,
+		refreshedAt: refreshedAt,
+	}
+	if writer.refreshedAt.IsZero() {
+		writer.refreshedAt = writer.importBatchNow().UTC()
+	}
+
+	return writer
+}
+
+func (w *dirFilterAgeAllWriter) appendRecord(
+	ctx context.Context,
+	mount activeMount,
+	parentDir string,
+	gutas db.GUTAs,
+	_ []string,
+	_ []db.DirGUTAge,
+) error {
+	for _, guta := range gutas {
+		if !dirFilterAgeAllWritableGUTA(guta) {
+			continue
+		}
+
+		if err := w.appendRow(ctx, mount, parentDir, guta); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func dirFilterAgeAllWritableGUTA(guta *db.GUTA) bool {
+	return guta != nil && guta.Age == db.DGUTAgeAll
+}
+
+func (w *dirFilterAgeAllWriter) appendRow(
+	ctx context.Context,
+	mount activeMount,
+	parentDir string,
+	guta *db.GUTA,
+) error {
+	return w.blockWriter().append(ctx, func(batch driver.Batch) error {
+		return batch.Append(
+			mount.mountPath,
+			mount.snapshotID,
+			guta.GID,
+			guta.UID,
+			uint16(guta.FT),
+			parentDir,
+			guta.Count,
+			guta.Size,
+			guta.Atime,
+			guta.Mtime,
+			ageBucketsSlice(&guta.ATimeRanges),
+			ageBucketsSlice(&guta.MTimeRanges),
+			w.refreshedAt,
+		)
+	})
+}
+
+func (w *dirFilterAgeAllWriter) flush(context.Context) error {
+	return w.blockWriter().close()
+}
+
+func (w *dirFilterAgeAllWriter) abort() error {
+	return w.blockWriter().abort()
+}
+
+func (w *dirFilterAgeAllWriter) blockWriter() *importBlockWriter {
+	return &importBlockWriter{
+		conn:        w.conn,
+		query:       insertDirFilterAgeAllQuery,
+		name:        "AgeAll filter",
+		batch:       &w.batch,
+		openedAt:    &w.openedAt,
+		writeErr:    &w.writeErr,
+		batchSize:   w.batchSize,
+		notPrepared: errDirFilterAgeAllBatchNotPrepared,
+		now:         w.importBatchNow,
+	}
+}
+
+func (w *dirFilterAgeAllWriter) importBatchNow() time.Time {
+	if w != nil && w.batchNow != nil {
+		return w.batchNow()
+	}
+
+	return time.Now()
+}
+
 func dirFilterAgeAllCanHandleFilter(filter *db.Filter) bool {
 	if filter == nil || filter.Age != db.DGUTAgeAll {
 		return false
@@ -76,6 +206,26 @@ func dirFilterAgeAllCanHandleFilter(filter *db.Filter) bool {
 	}
 
 	return filter.GIDs != nil || filter.UIDs != nil || filter.FT != 0
+}
+
+func dirFilterAgeAllSummariesForDirsQueryForFilter(
+	mountPath, snapshotID string,
+	dirs []string,
+	filter *db.Filter,
+) (string, []any) {
+	filterExpr, filterArgs := dirFilterAgeAllFilterExpression(filter)
+	query := fmt.Sprintf(dirFilterAgeAllSummariesForDirsQuery, placeholders(len(dirs)), filterExpr)
+
+	args := make([]any, 0, queryScopeArgs+len(dirs)+len(filterArgs))
+	args = append(args, mountPath, snapshotID)
+
+	for _, dir := range dirs {
+		args = append(args, dir)
+	}
+
+	args = append(args, filterArgs...)
+
+	return query, args
 }
 
 func dirFilterAgeAllFilterExpression(filter *db.Filter) (string, []any) {
@@ -97,20 +247,38 @@ func dirFilterAgeAllFilterExpression(filter *db.Filter) (string, []any) {
 	return strings.Join(clauses, " AND "), args
 }
 
+func handledDirFilterAgeAllDirs(dirs []string) map[string]bool {
+	handled := make(map[string]bool, len(dirs))
+	for _, dir := range dirs {
+		handled[dir] = true
+	}
+
+	return handled
+}
+
+func mergeDirFilterAgeAllSummaries(
+	summaries, batch map[string]*db.DirSummary,
+) {
+	for dir, sum := range batch {
+		summaries[dir] = sum
+	}
+}
+
 func (d *clickHouseDatabase) dirFilterAgeAllReadyForFilter(
 	ctx context.Context,
+	mountPath, snapshotID string,
 	filter *db.Filter,
 ) (bool, error) {
 	if !dirFilterAgeAllCanHandleFilter(filter) {
 		return false, nil
 	}
 
-	var rows uint64
-	if err := d.conn.QueryRow(ctx, dirFilterAgeAllActiveRowsQuery, dirFilterAgeAllTableName).Scan(&rows); err != nil {
+	ready, err := d.mountDirSummaryReadyCached(ctx, mountPath, snapshotID)
+	if err != nil {
 		return false, fmt.Errorf("clickhouse: failed to query AgeAll filter index readiness: %w", err)
 	}
 
-	return rows > 0, nil
+	return ready, nil
 }
 
 func (d *clickHouseDatabase) dirFilterAgeAllWhereSummaries(
@@ -118,7 +286,7 @@ func (d *clickHouseDatabase) dirFilterAgeAllWhereSummaries(
 	mount activeMount,
 	filter *db.Filter,
 ) (map[string]*db.DirSummary, bool, error) {
-	ready, err := d.dirFilterAgeAllReadyForFilter(ctx, filter)
+	ready, err := d.dirFilterAgeAllReadyForFilter(ctx, mount.mountPath, mount.snapshotID, filter)
 	if err != nil || !ready {
 		return nil, false, err
 	}
@@ -131,17 +299,101 @@ func (d *clickHouseDatabase) dirFilterAgeAllWhereSummaries(
 
 	rows, err := d.conn.Query(ctx, query, args...)
 	if err != nil {
+		if isUnknownTable(err) {
+			return nil, false, nil
+		}
+
 		return nil, true, fmt.Errorf("clickhouse: failed to query AgeAll filter index summaries: %w", err)
 	}
 
 	defer func() { _ = rows.Close() }()
 
 	summaries, _, err := scanDirSummaryRows(rows, filter, mount.updatedAt)
-	if err != nil || len(summaries) > 0 {
-		return summaries, true, err
+
+	return summaries, true, err
+}
+
+func (d *clickHouseDatabase) dirFilterAgeAllSummariesForDirsMount(
+	mountPath, snapshotID string,
+	updatedAt time.Time,
+	dirs []string,
+	filter *db.Filter,
+) (map[string]*db.DirSummary, map[string]bool, bool, error) {
+	if len(dirs) == 0 {
+		return map[string]*db.DirSummary{}, map[string]bool{}, true, nil
 	}
 
-	return nil, false, nil
+	ctx, cancel := configQueryContext(d.cfg)
+	defer cancel()
+
+	ready, err := d.dirFilterAgeAllReadyForFilter(ctx, mountPath, snapshotID, filter)
+	if err != nil || !ready {
+		return nil, nil, false, err
+	}
+
+	summaries, err := d.dirFilterAgeAllSummaryBatches(ctx, mountPath, snapshotID, updatedAt, dirs, filter)
+	if err != nil {
+		if errors.Is(err, errDirFilterAgeAllTableUnavailable) {
+			return nil, nil, false, nil
+		}
+
+		return nil, nil, true, err
+	}
+
+	return summaries, handledDirFilterAgeAllDirs(dirs), true, nil
+}
+
+func (d *clickHouseDatabase) dirFilterAgeAllSummaryBatches(
+	ctx context.Context,
+	mountPath, snapshotID string,
+	updatedAt time.Time,
+	dirs []string,
+	filter *db.Filter,
+) (map[string]*db.DirSummary, error) {
+	summaries := make(map[string]*db.DirSummary)
+
+	for _, batchDirs := range stringValueBatches(dirs) {
+		batch, err := d.queryDirFilterAgeAllSummariesForDirsBatch(
+			ctx,
+			mountPath,
+			snapshotID,
+			updatedAt,
+			batchDirs,
+			filter,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		mergeDirFilterAgeAllSummaries(summaries, batch)
+	}
+
+	return summaries, nil
+}
+
+func (d *clickHouseDatabase) queryDirFilterAgeAllSummariesForDirsBatch(
+	ctx context.Context,
+	mountPath, snapshotID string,
+	updatedAt time.Time,
+	dirs []string,
+	filter *db.Filter,
+) (map[string]*db.DirSummary, error) {
+	query, args := dirFilterAgeAllSummariesForDirsQueryForFilter(mountPath, snapshotID, dirs, filter)
+
+	rows, err := d.conn.Query(ctx, query, args...)
+	if err != nil {
+		if isUnknownTable(err) {
+			return nil, errDirFilterAgeAllTableUnavailable
+		}
+
+		return nil, fmt.Errorf("clickhouse: failed to query AgeAll filter index dir summaries: %w", err)
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	summaries, _, err := scanDirSummaryRows(rows, filter, updatedAt)
+
+	return summaries, err
 }
 
 func (d *clickHouseDatabase) parentDirsWithAgeAllFilteredChildRows(
@@ -154,21 +406,21 @@ func (d *clickHouseDatabase) parentDirsWithAgeAllFilteredChildRows(
 		return map[string]bool{}, true, nil
 	}
 
-	ready, err := d.dirFilterAgeAllReadyForFilter(ctx, filter)
+	ready, err := d.dirFilterAgeAllReadyForFilter(ctx, group.mount.mountPath, group.mount.snapshotID, filter)
 	if err != nil || !ready {
 		return nil, false, err
 	}
 
 	parents, err := d.queryAgeAllFilteredChildParentBatches(ctx, group, parentDirs, filter)
 	if err != nil {
+		if errors.Is(err, errDirFilterAgeAllTableUnavailable) {
+			return nil, false, nil
+		}
+
 		return nil, true, err
 	}
 
-	if len(parents) > 0 {
-		return parents, true, nil
-	}
-
-	return nil, false, nil
+	return parents, true, nil
 }
 
 func (d *clickHouseDatabase) queryAgeAllFilteredChildParentBatches(
@@ -212,6 +464,10 @@ func (d *clickHouseDatabase) queryAgeAllFilteredChildParents(
 
 	rows, err := d.conn.Query(ctx, query, args...)
 	if err != nil {
+		if isUnknownTable(err) {
+			return nil, errDirFilterAgeAllTableUnavailable
+		}
+
 		return nil, fmt.Errorf("clickhouse: failed to query AgeAll filtered child dirs: %w", err)
 	}
 

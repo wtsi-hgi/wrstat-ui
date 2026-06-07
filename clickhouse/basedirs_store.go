@@ -1063,7 +1063,7 @@ func dropPartitionIgnoreUnknown(
 		return nil
 	}
 
-	if isUnknownPartition(err) {
+	if isUnknownPartition(err) || isUnknownTable(err) {
 		return nil
 	}
 

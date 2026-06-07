@@ -63,6 +63,18 @@ func TestCleanSchemaDDLContainsOnlyFinalV1Objects(t *testing.T) {
 		So(err, ShouldBeNil)
 		So(string(src), ShouldContainSubstring, "INDEX ext_idx ext TYPE set(256) GRANULARITY 1")
 	})
+
+	Convey("wrstat_dir_filter_ageall is a mandatory snapshot-scoped DDL object", t, func() {
+		src, err := os.ReadFile(filepath.Join(
+			repoRootForCleanSchemaTest(t), cleanSchemaClickHouseDir, "schema", "012_dir_filter_ageall.sql",
+		))
+		So(err, ShouldBeNil)
+
+		ddl := strings.Join(strings.Fields(string(src)), " ")
+		So(ddl, ShouldContainSubstring, "CREATE TABLE IF NOT EXISTS wrstat_dir_filter_ageall")
+		So(ddl, ShouldContainSubstring, "PARTITION BY (mount_path, snapshot_id)")
+		So(ddl, ShouldContainSubstring, "ORDER BY (mount_path, snapshot_id, gid, uid, ft, dir)")
+	})
 }
 
 func TestCleanSchemaProductionCodeHasNoLegacyReferences(t *testing.T) {

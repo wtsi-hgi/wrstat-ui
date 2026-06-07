@@ -3031,23 +3031,33 @@ func (d *clickHouseDatabase) dirSummariesForDirsMount(
 		return map[string]*db.DirSummary{}, map[string]bool{}, true, nil
 	}
 
-	summaries, handled, ok, err := d.maintainedDirSummariesForDirsMount(mountPath, snapshotID, dirs, filter)
-	if err != nil || ok {
-		return summaries, handled, ok, err
-	}
-
-	summaries, handled, ok, err = d.mountDirDGUTAVectorSummariesForDirsMount(
-		mountPath,
-		snapshotID,
-		updatedAt,
-		dirs,
-		filter,
+	return firstDirSummariesForDirsMount(
+		func() (map[string]*db.DirSummary, map[string]bool, bool, error) {
+			return d.maintainedDirSummariesForDirsMount(mountPath, snapshotID, dirs, filter)
+		},
+		func() (map[string]*db.DirSummary, map[string]bool, bool, error) {
+			return d.dirFilterAgeAllSummariesForDirsMount(mountPath, snapshotID, updatedAt, dirs, filter)
+		},
+		func() (map[string]*db.DirSummary, map[string]bool, bool, error) {
+			return d.mountDirDGUTAVectorSummariesForDirsMount(mountPath, snapshotID, updatedAt, dirs, filter)
+		},
+		func() (map[string]*db.DirSummary, map[string]bool, bool, error) {
+			return d.groupedDirSummariesForDirsMount(mountPath, snapshotID, updatedAt, dirs, filter)
+		},
 	)
-	if err != nil || ok {
-		return summaries, handled, ok, err
+}
+
+func firstDirSummariesForDirsMount(
+	loaders ...dirSummariesForDirsMountLoader,
+) (map[string]*db.DirSummary, map[string]bool, bool, error) {
+	for _, load := range loaders {
+		summaries, handled, ok, err := load()
+		if err != nil || ok {
+			return summaries, handled, ok, err
+		}
 	}
 
-	return d.groupedDirSummariesForDirsMount(mountPath, snapshotID, updatedAt, dirs, filter)
+	return nil, nil, false, nil
 }
 
 func (d *clickHouseDatabase) maintainedDirSummariesForDirsMount(
@@ -3235,6 +3245,8 @@ func (d *clickHouseDatabase) gutasForAncestorMounts(
 
 	return d.queryGUTAs(ctx, "ancestor dguta", query, args...)
 }
+
+type dirSummariesForDirsMountLoader func() (map[string]*db.DirSummary, map[string]bool, bool, error)
 
 func scanMaxUpdatedAt(rows rowsScanner) (time.Time, error) {
 	if !rows.Next() {
