@@ -126,6 +126,9 @@ func (s *Server) dgutaDStoSummary(dds *db.DirSummary) *DirSummary {
 // uidsToUsernames converts the given user IDs to usernames, sorted on the
 // names.
 func (s *Server) uidsToUsernames(uids []uint32) []string {
+	s.nameCacheMu.Lock()
+	defer s.nameCacheMu.Unlock()
+
 	return idsToSortedNames(uids, s.uidToNameCache, func(uid string) (string, error) {
 		u, err := user.LookupId(uid)
 		if err != nil {
@@ -139,6 +142,9 @@ func (s *Server) uidsToUsernames(uids []uint32) []string {
 // gidsToNames converts the given unix group IDs to group names, sorted
 // on the names.
 func (s *Server) gidsToNames(gids []uint32) []string {
+	s.nameCacheMu.Lock()
+	defer s.nameCacheMu.Unlock()
+
 	return idsToSortedNames(gids, s.gidToNameCache, func(gid string) (string, error) {
 		g, err := user.LookupGroupId(gid)
 		if err != nil {

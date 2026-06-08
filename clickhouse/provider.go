@@ -807,6 +807,11 @@ func (p *chProvider) currentPublishedFingerprint() string {
 	return p.currentFingerprint
 }
 
+// ActiveSetID returns the fingerprint of the currently published active mount set.
+func (p *chProvider) ActiveSetID() string {
+	return p.currentPublishedFingerprint()
+}
+
 func (p *chProvider) closeOldReaders(oldDB db.Database, oldBD basedirs.Reader) {
 	if oldBD != nil {
 		_ = oldBD.Close()

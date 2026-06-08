@@ -582,6 +582,48 @@ func buildProviderSwapTestReaders(
 	return dbImpl, db.NewTree(dbImpl), bdImpl, nil
 }
 
+type e4ReadinessBatchConn struct {
+	ch.Conn
+
+	queries atomic.Int32
+}
+
+func (c *e4ReadinessBatchConn) Query(ctx context.Context, query string, args ...any) (driver.Rows, error) {
+	if strings.Contains(query, "FROM wrstat_dir_projection_sets") {
+		c.queries.Add(1)
+	}
+
+	return c.Conn.Query(ctx, query, args...)
+}
+
+func (c *e4ReadinessBatchConn) readinessQueries() int {
+	return int(c.queries.Load())
+}
+
+func TestE4ProviderReadinessBatching(t *testing.T) {
+	Convey("E4.3 active-mount readiness is checked once per active set batch, not once per mount", t, func() {
+		env, _, cleanup := newB2ActivePrefixEnv(t)
+		defer cleanup()
+
+		countingConn := &e4ReadinessBatchConn{Conn: env.conn}
+		dbch := newClickHouseDatabaseWithSnapshot(
+			env.cfg,
+			countingConn,
+			newActiveMountsSnapshot(env.rows),
+		)
+
+		ready, err := dbch.readyActiveMounts(env.mounts)
+		So(err, ShouldBeNil)
+		So(ready, ShouldHaveLength, len(env.mounts))
+		So(countingConn.readinessQueries(), ShouldEqual, 1)
+
+		ready, err = dbch.readyActiveMounts(env.mounts)
+		So(err, ShouldBeNil)
+		So(ready, ShouldHaveLength, len(env.mounts))
+		So(countingConn.readinessQueries(), ShouldEqual, 1)
+	})
+}
+
 func TestProviderVirtualChildrenRefreshErrors(t *testing.T) {
 	Convey("provider reports asynchronous virtual children refresh failures through OnError", t, func() {
 		const activeSetID = "mount|snapshot|2026-01-09T12:00:00Z\n"

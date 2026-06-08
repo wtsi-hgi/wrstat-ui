@@ -30,6 +30,7 @@ import (
 	"testing"
 
 	. "github.com/smartystreets/goconvey/convey"
+	"github.com/wtsi-hgi/wrstat-ui/db"
 )
 
 func TestPercentilesMS(t *testing.T) {
@@ -45,5 +46,29 @@ func TestPercentilesMS(t *testing.T) {
 		So(p50, ShouldEqual, 0)
 		So(p95, ShouldEqual, 0)
 		So(p99, ShouldEqual, 0)
+	})
+}
+
+func TestBoltQueryReportEvidence(t *testing.T) {
+	Convey("E1 bolt query reports include stable result counts and summary digests", t, func() {
+		report := NewReport("bolt", "", 2, 0)
+		ctx := queryContext{
+			tree:     db.NewTree(newQuerySuiteTestDB()),
+			queryDir: querySuiteTestRootDir,
+		}
+
+		ops := buildQuerySuiteOps(ctx, QueryOptions{Repeat: 2, Splits: 1})
+		whereOp := findQuerySuiteTestOp(ops, queryOpTreeWhereName)
+		So(whereOp, ShouldNotBeNil)
+
+		err := timeAndReportQueryOp(&report, QueryOptions{Repeat: 2}, func(string, ...any) {}, *whereOp)
+
+		So(err, ShouldBeNil)
+		So(report.Operations, ShouldHaveLength, 1)
+		So(report.Operations[0].ResultCount, ShouldResemble, []uint64{3, 3})
+		So(report.Operations[0].Inputs[queryInputResultDigest], ShouldNotBeBlank)
+		So(report.Operations[0].P50MS, ShouldBeGreaterThanOrEqualTo, 0.0)
+		So(report.Operations[0].P95MS, ShouldBeGreaterThanOrEqualTo, 0.0)
+		So(report.Operations[0].P99MS, ShouldBeGreaterThanOrEqualTo, 0.0)
 	})
 }

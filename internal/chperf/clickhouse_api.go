@@ -74,6 +74,7 @@ type clickHouseFileAPI interface {
 	ListDir(ctx context.Context, dir string, opts clickhouse.ListOptions) ([]clickhouse.FileRow, error)
 	StatPath(ctx context.Context, path string, opts clickhouse.StatOptions) (*clickhouse.FileRow, error)
 	PermissionAnyInDir(ctx context.Context, dir string, uid uint32, gids []uint32) (bool, error)
+	PermissionPath(ctx context.Context, path string, uid uint32, gids []uint32) (bool, error)
 	CountByGlob(
 		ctx context.Context,
 		baseDirs []string,
@@ -156,6 +157,17 @@ func (c clickHouseQueryClient) PermissionAnyInDir(
 	return err
 }
 
+func (c clickHouseQueryClient) PermissionPath(
+	ctx context.Context,
+	path string,
+	uid uint32,
+	gids []uint32,
+) error {
+	_, err := c.client.PermissionPath(ctx, path, uid, gids)
+
+	return err
+}
+
 func (c clickHouseQueryClient) FindByGlob(
 	ctx context.Context,
 	baseDirs []string,
@@ -212,6 +224,7 @@ func convertQueryMetrics(metrics *clickhouse.QueryMetrics) *QueryMetrics {
 		ReadRows:    metrics.ReadRows,
 		ReadBytes:   metrics.ReadBytes,
 		ReadMarks:   metrics.ReadMarks,
+		MemoryBytes: metrics.MemoryBytes,
 		ResultRows:  metrics.ResultRows,
 		ResultBytes: metrics.ResultBytes,
 	}

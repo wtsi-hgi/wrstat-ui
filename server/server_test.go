@@ -28,17 +28,21 @@ package server
 import (
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os/user"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -49,17 +53,457 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/db"
 	internaldata "github.com/wtsi-hgi/wrstat-ui/internal/data"
 	"github.com/wtsi-hgi/wrstat-ui/internal/fixtimes"
+	"github.com/wtsi-hgi/wrstat-ui/internal/perfreport"
 	"github.com/wtsi-hgi/wrstat-ui/internal/split"
 	"github.com/wtsi-hgi/wrstat-ui/summary"
 )
 
-var errMountTimestamps = errors.New("mount timestamps error")
+var (
+	errE4GIDLookup     = errors.New("e4 gid lookup failed")
+	errE4UIDLookup     = errors.New("e4 uid lookup failed")
+	errMountTimestamps = errors.New("mount timestamps error")
+)
+
+const (
+	d2AllowedGroupName    = "group7"
+	d2DisallowedGroupName = "group8"
+	d2MountDir            = "/mnt/"
+	d2OpenDir             = "/mnt/open/"
+	d2ClosedDir           = "/mnt/closed/"
+	d2OpenChildDir        = "/mnt/open/child/"
+	d2ClosedChildDir      = "/mnt/closed/child/"
+	d2GroupsQueryKey      = "groups"
+	d2DirQueryKey         = "dir"
+	d2TypesQueryKey       = "types"
+	d2UsersQueryKey       = "users"
+	d2PerfGroupName       = "wrstat_perf_g14976"
+	d2PerfUserName        = "wrstat_perf_u20155"
+	e2T283Dir             = "/nfs/t283_imaging/"
+	e2ScopedCacheHitKey   = "active_prefix_summary:path=/nfs/t283_imaging/;filter=ft:32768;" +
+		"active_set_id=e2;query_version=1"
+	e4ActiveSetA = "set-a"
+	e4ActiveSetB = "set-b"
+)
 
 func TestIDsToWanted(t *testing.T) {
 	Convey("restrictGIDs returns bad query if you don't want any of the given ids", t, func() {
 		_, err := restrictGIDs(map[uint32]bool{1: true}, []uint32{2})
 		So(err, ShouldNotBeNil)
 	})
+}
+
+type d2AuthTestDB struct {
+	children     map[string][]string
+	hasChildren  map[string]bool
+	summaries    map[string]*db.DirSummary
+	dirInfoCalls int
+	whereCalls   int
+	whereFilters []*db.Filter
+}
+
+func newD2AuthServer(t *testing.T) (*d2AuthTestDB, string, string, string, func()) {
+	t.Helper()
+
+	logWriter := gas.NewStringLogger()
+	s := New(logWriter)
+	database := newD2AuthTestDB()
+	s.tree = db.NewTree(database)
+	s.gidToNameCache[7] = d2AllowedGroupName
+	s.gidToNameCache[8] = d2DisallowedGroupName
+	s.Router().Use(gas.IncludeAbortErrorsInBody)
+
+	cert, key, err := gas.CreateTestCert(t)
+	So(err, ShouldBeNil)
+	So(s.EnableAuth(cert, key, func(username, password string) (bool, string) {
+		return true, "1000"
+	}), ShouldBeNil)
+
+	s.userToGIDs["user"] = []string{"7"}
+	So(s.AddTreePage(), ShouldBeNil)
+	s.addBaseDGUTARoutes()
+
+	addr, stop, err := gas.StartTestServer(s, cert, key)
+	So(err, ShouldBeNil)
+
+	token, err := gas.Login(gas.NewClientRequest(addr, cert), "user", "pass")
+	So(err, ShouldBeNil)
+
+	return database, addr, cert, token, func() {
+		So(stop(), ShouldBeNil)
+	}
+}
+
+func newD2AuthTestDB() *d2AuthTestDB {
+	return &d2AuthTestDB{
+		children: map[string][]string{
+			d2MountDir:  {d2OpenDir, d2ClosedDir},
+			d2OpenDir:   {d2OpenChildDir},
+			d2ClosedDir: {d2ClosedChildDir},
+		},
+		hasChildren: map[string]bool{
+			d2OpenDir:   true,
+			d2ClosedDir: true,
+		},
+		summaries: map[string]*db.DirSummary{
+			d2MountDir: {
+				Dir:   d2MountDir,
+				Count: 2,
+				GIDs:  []uint32{7, 8},
+				UIDs:  []uint32{20155},
+				FT:    db.DGUTAFileTypeOther,
+				Age:   db.DGUTAgeAll,
+			},
+			d2OpenDir: {
+				Dir:   d2OpenDir,
+				Count: 1,
+				GIDs:  []uint32{7},
+				UIDs:  []uint32{20155},
+				FT:    db.DGUTAFileTypeOther,
+				Age:   db.DGUTAgeAll,
+			},
+			d2ClosedDir: {
+				Dir:   d2ClosedDir,
+				Count: 1,
+				GIDs:  []uint32{8},
+				UIDs:  []uint32{20155},
+				FT:    db.DGUTAFileTypeOther,
+				Age:   db.DGUTAgeAll,
+			},
+		},
+	}
+}
+
+func (d *d2AuthTestDB) DirInfo(dir string, _ *db.Filter) (*db.DirSummary, error) {
+	d.dirInfoCalls++
+
+	summary := d.summaries[dir]
+	if summary == nil {
+		return nil, db.ErrDirNotFound
+	}
+
+	cp := *summary
+
+	return &cp, nil
+}
+
+func (d *d2AuthTestDB) Children(dir string) ([]string, error) {
+	return append([]string(nil), d.children[dir]...), nil
+}
+
+func (d *d2AuthTestDB) DirsHaveChildren(dirs []string, _ *db.Filter) (map[string]bool, error) {
+	result := make(map[string]bool, len(dirs))
+	for _, dir := range dirs {
+		result[dir] = d.hasChildren[dir]
+	}
+
+	return result, nil
+}
+
+func (d *d2AuthTestDB) Where(dir string, filter *db.Filter, _ func(string) int) (db.DCSs, error) {
+	d.whereCalls++
+	d.whereFilters = append(d.whereFilters, cloneD2Filter(filter))
+
+	return db.DCSs{{
+		Dir:   dir,
+		Count: 1,
+		UIDs:  append([]uint32(nil), filter.UIDs...),
+		GIDs:  append([]uint32(nil), filter.GIDs...),
+		FT:    filter.FT,
+		Age:   filter.Age,
+	}}, nil
+}
+
+func cloneD2Filter(filter *db.Filter) *db.Filter {
+	if filter == nil {
+		return nil
+	}
+
+	return &db.Filter{
+		GIDs: append([]uint32(nil), filter.GIDs...),
+		UIDs: append([]uint32(nil), filter.UIDs...),
+		FT:   filter.FT,
+		Age:  filter.Age,
+	}
+}
+
+func (d *d2AuthTestDB) Info() (*db.Info, error) {
+	return &db.Info{}, nil
+}
+
+func (d *d2AuthTestDB) Close() error {
+	return nil
+}
+
+func (d *d2AuthTestDB) summaryRouteReads() int {
+	return d.dirInfoCalls + d.whereCalls
+}
+
+func TestD2ServerPermissionAuthChecks(t *testing.T) {
+	Convey("D2.3 auth tree marks disallowed child summaries as NoAuth without exposing children", t, func() {
+		database, addr, cert, token, stop := newD2AuthServer(t)
+		defer stop()
+
+		resp, err := gas.NewAuthenticatedClientRequest(addr, cert, token).
+			SetResult(&TreeElement{}).
+			ForceContentType("application/json").
+			SetQueryParam(c3RESTInputPath, d2MountDir).
+			Get(EndPointAuthTree)
+		So(err, ShouldBeNil)
+		So(resp.StatusCode(), ShouldEqual, http.StatusOK)
+
+		root, ok := resp.Result().(*TreeElement)
+		So(ok, ShouldBeTrue)
+
+		children := d2ChildrenByPath(root.Children)
+
+		open := children[d2OpenDir]
+		So(open, ShouldNotBeNil)
+		So(open.NoAuth, ShouldBeFalse)
+		So(open.HasChildren, ShouldBeTrue)
+
+		closed := children[d2ClosedDir]
+		So(closed, ShouldNotBeNil)
+		So(closed.NoAuth, ShouldBeTrue)
+		So(closed.Children, ShouldBeNil)
+		So(database.dirInfoCalls, ShouldBeGreaterThan, 0)
+	})
+
+	Convey("D2.4 auth tree and where reject disallowed Unix group before summary reads", t, func() {
+		database, addr, cert, token, stop := newD2AuthServer(t)
+		defer stop()
+
+		resp, err := gas.NewAuthenticatedClientRequest(addr, cert, token).
+			ForceContentType("application/json").
+			SetQueryParams(map[string]string{
+				c3RESTInputPath:  d2MountDir,
+				d2GroupsQueryKey: d2DisallowedGroupName,
+			}).
+			Get(EndPointAuthTree)
+		So(err, ShouldBeNil)
+		So(resp.StatusCode(), ShouldEqual, http.StatusBadRequest)
+		So(resp.String(), ShouldContainSubstring, ErrBadQuery.Error())
+		So(database.summaryRouteReads(), ShouldEqual, 0)
+
+		resp, err = gas.NewAuthenticatedClientRequest(addr, cert, token).
+			ForceContentType("application/json").
+			SetQueryParams(map[string]string{
+				d2DirQueryKey:    d2MountDir,
+				d2GroupsQueryKey: d2DisallowedGroupName,
+			}).
+			Get(EndPointAuthWhere)
+		So(err, ShouldBeNil)
+		So(resp.StatusCode(), ShouldEqual, http.StatusBadRequest)
+		So(resp.String(), ShouldContainSubstring, ErrBadQuery.Error())
+		So(database.summaryRouteReads(), ShouldEqual, 0)
+	})
+
+	Convey("D2.5 no-auth where maps cached Unix group and user names before querying", t, func() {
+		logWriter := gas.NewStringLogger()
+		s := New(logWriter)
+		database := newD2AuthTestDB()
+		s.tree = db.NewTree(database)
+		s.gidToNameCache[14976] = d2PerfGroupName
+		s.uidToNameCache[20155] = d2PerfUserName
+		s.addBaseDGUTARoutes()
+
+		query := "?" + url.Values{
+			d2DirQueryKey:    {d2MountDir},
+			d2GroupsQueryKey: {d2PerfGroupName},
+			d2UsersQueryKey:  {d2PerfUserName},
+			d2TypesQueryKey:  {db.DGUTAFileTypeOther.String()},
+		}.Encode()
+		response, err := queryWhere(s, query)
+		So(err, ShouldBeNil)
+		So(response.Code, ShouldEqual, http.StatusOK)
+
+		So(database.whereFilters, ShouldHaveLength, 1)
+		filter := database.whereFilters[0]
+		So(filter.GIDs, ShouldResemble, []uint32{14976})
+		So(filter.UIDs, ShouldResemble, []uint32{20155})
+		So(filter.FT, ShouldEqual, db.DGUTAFileTypeOther)
+
+		var got []*DirSummary
+		So(json.Unmarshal(response.Body.Bytes(), &got), ShouldBeNil)
+
+		expectedRaw, err := s.tree.Where(d2MountDir, &db.Filter{
+			GIDs: []uint32{14976},
+			UIDs: []uint32{20155},
+			FT:   db.DGUTAFileTypeOther,
+			Age:  db.DGUTAgeAll,
+		}, split.SplitsToSplitFn(2))
+		So(err, ShouldBeNil)
+
+		So(got, ShouldResemble, s.dcssToSummaries(expectedRaw))
+	})
+}
+
+func d2ChildrenByPath(children []*TreeElement) map[string]*TreeElement {
+	byPath := make(map[string]*TreeElement, len(children))
+	for _, child := range children {
+		byPath[child.Path] = child
+	}
+
+	return byPath
+}
+
+func TestE1ServerPerfHarnessRecordsRESTAndCLI(t *testing.T) {
+	Convey("E1.3/E1.4 REST and CLI/server harness operations record required evidence", t, func() {
+		logWriter := gas.NewStringLogger()
+		s := New(logWriter)
+		database := newD2AuthTestDB()
+		s.tree = db.NewTree(database)
+		s.gidToNameCache[14976] = d2PerfGroupName
+		s.uidToNameCache[20155] = d2PerfUserName
+
+		report, err := s.MeasurePerfHarness(PerfHarnessOptions{
+			Repeat:      2,
+			TreePath:    d2MountDir,
+			WhereDir:    "/nfs/t283_imaging/",
+			WhereGroups: d2PerfGroupName,
+			WhereUsers:  d2PerfUserName,
+			WhereTypes:  db.DGUTAFileTypeOther.String(),
+			WhereSplits: defaultSplitsStr,
+			QueryCount: func() uint64 {
+				return nonNegativeIntToUint64(database.summaryRouteReads())
+			},
+			QueryCountSource: "test.summaryRouteReads_delta",
+			CacheStats: func() (uint64, uint64) {
+				reads := nonNegativeIntToUint64(database.summaryRouteReads())
+
+				return reads, reads
+			},
+			CacheStatsSource: "test.summaryRouteReads_delta",
+		})
+
+		So(err, ShouldBeNil)
+		So(report.Operations, ShouldHaveLength, 3)
+
+		treeOp := serverPerfOperation(report, "rest_tree")
+		assertServerRESTPerfOperation(treeOp)
+		So(serverPerfQueryParams(treeOp)["path"], ShouldEqual, d2MountDir)
+		So(treeOp.ResultCount, ShouldResemble, []uint64{2, 2})
+
+		whereOp := serverPerfOperation(report, "rest_where")
+		assertServerRESTPerfOperation(whereOp)
+		So(serverPerfQueryParams(whereOp)["dir"], ShouldEqual, "/nfs/t283_imaging/")
+		So(serverPerfQueryParams(whereOp)["groups"], ShouldEqual, d2PerfGroupName)
+		So(serverPerfQueryParams(whereOp)["users"], ShouldEqual, d2PerfUserName)
+		So(serverPerfQueryParams(whereOp)["types"], ShouldEqual, db.DGUTAFileTypeOther.String())
+		So(whereOp.ResultCount, ShouldResemble, []uint64{1, 1})
+
+		cliOp := serverPerfOperation(report, "cli_where")
+		assertServerRESTPerfOperation(cliOp)
+		So(cliOp.Inputs["command"], ShouldResemble, []string{
+			"./wrstat-ui",
+			"where",
+			"--dir",
+			"/nfs/t283_imaging/",
+			"--groups",
+			d2PerfGroupName,
+			"--users",
+			d2PerfUserName,
+			"--types",
+			db.DGUTAFileTypeOther.String(),
+			"--json",
+		})
+		So(cliOp.Inputs["first_run_wall_ms"], ShouldBeGreaterThanOrEqualTo, 0.0)
+		So(cliOp.ResultCount, ShouldResemble, []uint64{1, 1})
+	})
+}
+
+func serverPerfOperation(report perfreport.Report, name string) perfreport.Operation {
+	for _, op := range report.Operations {
+		if op.Name == name {
+			return op
+		}
+	}
+
+	return perfreport.Operation{}
+}
+
+func assertServerRESTPerfOperation(op perfreport.Operation) {
+	So(op.Inputs["status_codes"], ShouldResemble, []uint64{200, 200})
+	So(serverPerfPositiveUintInputs(op, "json_bytes"), ShouldBeTrue)
+	So(serverPerfPositiveUintInputs(op, "gzip_bytes"), ShouldBeTrue)
+	So(serverPerfPositiveUintInputs(op, "query_count"), ShouldBeTrue)
+	So(serverPerfPositiveUintInputs(op, "cache_hits"), ShouldBeTrue)
+	So(serverPerfPositiveUintInputs(op, "cache_misses"), ShouldBeTrue)
+	So(op.Inputs["query_count_source"], ShouldEqual, "test.summaryRouteReads_delta")
+	So(op.Inputs["cache_counter_source"], ShouldEqual, "test.summaryRouteReads_delta")
+	So(op.ResultCount, ShouldHaveLength, 2)
+	So(op.P50MS, ShouldBeGreaterThanOrEqualTo, 0.0)
+	So(op.P95MS, ShouldBeGreaterThanOrEqualTo, 0.0)
+	So(op.P99MS, ShouldBeGreaterThanOrEqualTo, 0.0)
+}
+
+func serverPerfPositiveUintInputs(op perfreport.Operation, key string) bool {
+	values, ok := op.Inputs[key].([]uint64)
+	if !ok || len(values) != 2 {
+		return false
+	}
+
+	for _, value := range values {
+		if value == 0 {
+			return false
+		}
+	}
+
+	return true
+}
+
+func serverPerfQueryParams(op perfreport.Operation) map[string]string {
+	params, ok := op.Inputs["query_params"].(map[string]string)
+	if !ok {
+		return nil
+	}
+
+	return params
+}
+
+type e2FilteredRESTDB struct {
+	whereCalls []string
+}
+
+func (d *e2FilteredRESTDB) DirInfo(_ string, _ *db.Filter) (*db.DirSummary, error) {
+	return nil, db.ErrDirNotFound
+}
+
+func (d *e2FilteredRESTDB) Children(_ string) ([]string, error) {
+	return nil, nil
+}
+
+func (d *e2FilteredRESTDB) Where(dir string, filter *db.Filter, _ func(string) int) (db.DCSs, error) {
+	d.whereCalls = append(d.whereCalls, dir)
+
+	if filter == nil || filter.FT != db.DGUTAFileTypeOther {
+		return nil, ErrBadQuery
+	}
+
+	return e2FilteredRESTSummaries(), nil
+}
+
+func e2FilteredRESTSummaries() db.DCSs {
+	return db.DCSs{
+		{Dir: e2T283Dir + "plateA", Count: 50, Size: 500, FT: db.DGUTAFileTypeOther, Age: db.DGUTAgeAll},
+		{Dir: e2T283Dir + "plateB", Count: 37, Size: 370, FT: db.DGUTAFileTypeOther, Age: db.DGUTAgeAll},
+	}
+}
+
+func (d *e2FilteredRESTDB) Info() (*db.Info, error) {
+	return &db.Info{}, nil
+}
+
+func (d *e2FilteredRESTDB) Close() error {
+	return nil
+}
+
+func newE2FilteredRESTServer() *Server {
+	s := New(gas.NewStringLogger())
+	database := &e2FilteredRESTDB{}
+	s.tree = db.NewTree(database)
+	s.addBaseDGUTARoutes()
+
+	return s
 }
 
 type badMountTSReader struct {
@@ -2025,4 +2469,423 @@ type analyticsData struct {
 type matrixElement struct {
 	filter string
 	dss    []*DirSummary
+}
+
+type e4ActiveSetProvider struct {
+	activeSetID string
+}
+
+func (p *e4ActiveSetProvider) Tree() *db.Tree { return nil }
+
+func (p *e4ActiveSetProvider) BaseDirs() basedirs.Reader { return nil }
+
+func (p *e4ActiveSetProvider) OnUpdate(func()) {}
+
+func (p *e4ActiveSetProvider) OnError(func(error)) {}
+
+func (p *e4ActiveSetProvider) Close() error { return nil }
+
+func (p *e4ActiveSetProvider) ActiveSetID() string { return p.activeSetID }
+
+func TestE4ServerTacticalSupport(t *testing.T) {
+	Convey("E4.2 REST where response cache misses when active set id or filter changes", t, func() {
+		activeSet := &e4ActiveSetProvider{activeSetID: e4ActiveSetA}
+		database := &e4ResponseCacheDB{activeSet: activeSet}
+		s := New(gas.NewStringLogger())
+		s.provider = activeSet
+		s.tree = db.NewTree(database)
+		s.activeSetID = e4ActiveSetA
+		s.addBaseDGUTARoutes()
+
+		first, err := e4WhereCounts(s, "?dir=/nfs/t283_imaging/&types=other")
+		So(err, ShouldBeNil)
+		So(first, ShouldResemble, []uint64{101})
+		So(database.whereCalls, ShouldEqual, 1)
+
+		repeated, err := e4WhereCounts(s, "?dir=/nfs/t283_imaging/&types=other")
+		So(err, ShouldBeNil)
+		So(repeated, ShouldResemble, first)
+		So(database.whereCalls, ShouldEqual, 1)
+
+		activeSet.activeSetID = e4ActiveSetB
+		s.activeSetID = e4ActiveSetB
+		changedActiveSet, err := e4WhereCounts(s, "?dir=/nfs/t283_imaging/&types=other")
+		So(err, ShouldBeNil)
+		So(changedActiveSet, ShouldResemble, []uint64{202})
+		So(database.whereCalls, ShouldEqual, 2)
+
+		changedFilter, err := e4WhereCounts(s, "?dir=/nfs/t283_imaging/&types=bam")
+		So(err, ShouldBeNil)
+		So(changedFilter, ShouldResemble, []uint64{303})
+		So(database.whereCalls, ShouldEqual, 3)
+	})
+
+	Convey("E4.2 REST where response cache misses when splits changes response shape", t, func() {
+		activeSet := &e4ActiveSetProvider{activeSetID: e4ActiveSetA}
+		database := &e4SplitsResponseCacheDB{}
+		s := New(gas.NewStringLogger())
+		s.provider = activeSet
+		s.tree = db.NewTree(database)
+		s.activeSetID = e4ActiveSetA
+		s.addBaseDGUTARoutes()
+
+		flat, err := e4WhereCounts(s, "?dir=/nfs/t283_imaging/&types=other&splits=0")
+		So(err, ShouldBeNil)
+		So(flat, ShouldResemble, []uint64{111})
+		So(database.whereCalls, ShouldEqual, 1)
+
+		repeatedFlat, err := e4WhereCounts(s, "?dir=/nfs/t283_imaging/&types=other&splits=0")
+		So(err, ShouldBeNil)
+		So(repeatedFlat, ShouldResemble, flat)
+		So(database.whereCalls, ShouldEqual, 1)
+
+		split, err := e4WhereCounts(s, "?dir=/nfs/t283_imaging/&types=other&splits=1")
+		So(err, ShouldBeNil)
+		So(split, ShouldResemble, []uint64{111, 22})
+		So(database.whereCalls, ShouldEqual, 2)
+	})
+
+	Convey("E4.2 provider active-set updates cannot poison response cache before tree swap", t, func() {
+		activeSet := &e4ActiveSetProvider{activeSetID: e4ActiveSetA}
+		oldDatabase := &e4StaticResponseCacheDB{count: 101}
+		newDatabase := &e4StaticResponseCacheDB{count: 202}
+		s := New(gas.NewStringLogger())
+		s.provider = activeSet
+		s.tree = db.NewTree(oldDatabase)
+		s.activeSetID = e4ActiveSetA
+		s.addBaseDGUTARoutes()
+
+		first, err := e4WhereCounts(s, "?dir=/nfs/t283_imaging/&types=other")
+		So(err, ShouldBeNil)
+		So(first, ShouldResemble, []uint64{101})
+		So(oldDatabase.whereCalls, ShouldEqual, 1)
+
+		activeSet.activeSetID = e4ActiveSetB
+		duringUpdate, err := e4WhereCounts(s, "?dir=/nfs/t283_imaging/&types=other")
+		So(err, ShouldBeNil)
+		So(duringUpdate, ShouldResemble, first)
+		So(oldDatabase.whereCalls, ShouldEqual, 1)
+
+		s.mu.Lock()
+		s.tree = db.NewTree(newDatabase)
+		s.activeSetID = e4ActiveSetB
+		s.mu.Unlock()
+
+		afterSwap, err := e4WhereCounts(s, "?dir=/nfs/t283_imaging/&types=other")
+		So(err, ShouldBeNil)
+		So(afterSwap, ShouldResemble, []uint64{202})
+		So(newDatabase.whereCalls, ShouldEqual, 1)
+	})
+
+	Convey("E4.2 cached reverse UID and GID lookups are guarded during response conversion", t, func() {
+		s := New(io.Discard)
+
+		for i := range 512 {
+			id := uint32(i)
+			s.uidToNameCache[id] = fmt.Sprintf("user%d", i)
+			s.gidToNameCache[id] = fmt.Sprintf("group%d", i)
+		}
+
+		var wg sync.WaitGroup
+
+		errs := make(chan error, 8)
+		generatedIDBases := []uint32{100_000, 101_000, 102_000, 103_000}
+
+		for _, base := range generatedIDBases {
+			wg.Add(1)
+			go func(base uint32) {
+				defer wg.Done()
+
+				for offset := range uint32(256) {
+					id := base + offset
+
+					s.nameCacheMu.Lock()
+					s.uidToNameCache[id] = fmt.Sprintf("generated-user%d", id)
+					s.gidToNameCache[id] = fmt.Sprintf("generated-group%d", id)
+					s.nameCacheMu.Unlock()
+
+					_ = s.uidsToUsernames([]uint32{id})
+					_ = s.gidsToNames([]uint32{id})
+				}
+			}(base)
+		}
+
+		for range 4 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+
+				for range 512 {
+					if id, err := s.userNameToUID("user511"); err != nil || id != "511" {
+						errs <- errE4UIDLookup
+
+						return
+					}
+
+					if id, err := s.groupNameToGID("group511"); err != nil || id != "511" {
+						errs <- errE4GIDLookup
+
+						return
+					}
+				}
+			}()
+		}
+
+		wg.Wait()
+		close(errs)
+
+		var err error
+		for got := range errs {
+			err = got
+
+			break
+		}
+
+		So(err, ShouldBeNil)
+	})
+
+	Convey("E4.3 one REST tree request batches child metadata once for the active set", t, func() {
+		activeSet := &e4ActiveSetProvider{activeSetID: "tree-set"}
+		database := newC3RESTTreeTestDB()
+		seedC3RESTHighFanoutParent(database, c3RESTWideParent, 12)
+
+		s := New(io.Discard)
+		s.provider = activeSet
+		s.tree = db.NewTree(database)
+		s.activeSetID = "tree-set"
+
+		got := requestC3RESTTree(t, s, c3RESTWideParent)
+
+		So(got.Children, ShouldHaveLength, 12)
+		So(database.dirsHaveChildrenCalls, ShouldHaveLength, 1)
+		So(database.dirsHaveChildrenCalls[0], ShouldHaveLength, 12)
+	})
+}
+
+func e4WhereCounts(s *Server, query string) ([]uint64, error) {
+	response, err := queryWhere(s, query)
+	if err != nil {
+		return nil, err
+	}
+
+	result, err := decodeWhereResult(response)
+	if err != nil {
+		return nil, err
+	}
+
+	counts := make([]uint64, len(result))
+	for i, summary := range result {
+		counts[i] = summary.Count
+	}
+
+	return counts, nil
+}
+
+type e4ResponseCacheDB struct {
+	activeSet  *e4ActiveSetProvider
+	whereCalls int
+}
+
+func (d *e4ResponseCacheDB) DirInfo(_ string, _ *db.Filter) (*db.DirSummary, error) {
+	return nil, db.ErrDirNotFound
+}
+
+func (d *e4ResponseCacheDB) Children(_ string) ([]string, error) {
+	return nil, nil
+}
+
+func (d *e4ResponseCacheDB) Where(dir string, filter *db.Filter, _ func(string) int) (db.DCSs, error) {
+	d.whereCalls++
+
+	ft := db.DGUTAFileTypeOther
+	if filter != nil && filter.FT != 0 {
+		ft = filter.FT
+	}
+
+	count := e4ResponseCacheCount(d.activeSet.activeSetID, ft)
+
+	return db.DCSs{{
+		Dir:   dir + "facts/",
+		Count: count,
+		Size:  count * 10,
+		FT:    ft,
+		Age:   db.DGUTAgeAll,
+	}}, nil
+}
+
+func e4ResponseCacheCount(activeSetID string, ft db.DirGUTAFileType) uint64 {
+	switch {
+	case activeSetID == e4ActiveSetA && ft == db.DGUTAFileTypeOther:
+		return 101
+	case activeSetID == e4ActiveSetB && ft == db.DGUTAFileTypeOther:
+		return 202
+	case activeSetID == e4ActiveSetB && ft == db.DGUTAFileTypeBam:
+		return 303
+	default:
+		return 404
+	}
+}
+
+func (d *e4ResponseCacheDB) Info() (*db.Info, error) {
+	return &db.Info{}, nil
+}
+
+func (d *e4ResponseCacheDB) Close() error {
+	return nil
+}
+
+type e4SplitsResponseCacheDB struct {
+	whereCalls int
+}
+
+func (d *e4SplitsResponseCacheDB) DirInfo(_ string, _ *db.Filter) (*db.DirSummary, error) {
+	return nil, db.ErrDirNotFound
+}
+
+func (d *e4SplitsResponseCacheDB) Children(_ string) ([]string, error) {
+	return nil, nil
+}
+
+func (d *e4SplitsResponseCacheDB) Where(
+	dir string,
+	filter *db.Filter,
+	recurseCount func(string) int,
+) (db.DCSs, error) {
+	d.whereCalls++
+
+	ft := db.DGUTAFileTypeOther
+	if filter != nil && filter.FT != 0 {
+		ft = filter.FT
+	}
+
+	dcss := db.DCSs{{
+		Dir:   dir + "facts/",
+		Count: 111,
+		Size:  1110,
+		FT:    ft,
+		Age:   db.DGUTAgeAll,
+	}}
+	if recurseCount(dir) > 0 {
+		dcss = append(dcss, &db.DirSummary{
+			Dir:   dir + "facts/child/",
+			Count: 22,
+			Size:  220,
+			FT:    ft,
+			Age:   db.DGUTAgeAll,
+		})
+	}
+
+	return dcss, nil
+}
+
+func (d *e4SplitsResponseCacheDB) Info() (*db.Info, error) {
+	return &db.Info{}, nil
+}
+
+func (d *e4SplitsResponseCacheDB) Close() error {
+	return nil
+}
+
+type e4StaticResponseCacheDB struct {
+	count      uint64
+	whereCalls int
+}
+
+func (d *e4StaticResponseCacheDB) DirInfo(_ string, _ *db.Filter) (*db.DirSummary, error) {
+	return nil, db.ErrDirNotFound
+}
+
+func (d *e4StaticResponseCacheDB) Children(_ string) ([]string, error) {
+	return nil, nil
+}
+
+func (d *e4StaticResponseCacheDB) Where(dir string, filter *db.Filter, _ func(string) int) (db.DCSs, error) {
+	d.whereCalls++
+
+	ft := db.DGUTAFileTypeOther
+	if filter != nil && filter.FT != 0 {
+		ft = filter.FT
+	}
+
+	return db.DCSs{{
+		Dir:   dir + "facts/",
+		Count: d.count,
+		Size:  d.count * 10,
+		FT:    ft,
+		Age:   db.DGUTAgeAll,
+	}}, nil
+}
+
+func (d *e4StaticResponseCacheDB) Info() (*db.Info, error) {
+	return &db.Info{}, nil
+}
+
+func (d *e4StaticResponseCacheDB) Close() error {
+	return nil
+}
+
+func TestE2ServerFilteredRESTAnomaly(t *testing.T) {
+	Convey("E2.1 filtered REST where digest and count are independent of root warming order", t, func() {
+		directServer := newE2FilteredRESTServer()
+		direct, err := queryWhere(directServer, "?dir="+url.QueryEscape(e2T283Dir)+"&types=other")
+		So(err, ShouldBeNil)
+		So(direct.Code, ShouldEqual, http.StatusOK)
+
+		directResult, err := decodeWhereResult(direct)
+		So(err, ShouldBeNil)
+
+		warmedServer := newE2FilteredRESTServer()
+		root, err := queryWhere(warmedServer, "?dir=/&types=other")
+		So(err, ShouldBeNil)
+		So(root.Code, ShouldEqual, http.StatusOK)
+
+		warmed, err := queryWhere(warmedServer, "?dir="+url.QueryEscape(e2T283Dir)+"&types=other")
+		So(err, ShouldBeNil)
+		So(warmed.Code, ShouldEqual, http.StatusOK)
+
+		warmedResult, err := decodeWhereResult(warmed)
+		So(err, ShouldBeNil)
+
+		So(e2ServerSummaryDigest(directResult), ShouldEqual, e2ServerSummaryDigest(warmedResult))
+		So(len(directResult), ShouldEqual, len(warmedResult))
+		So(len(directResult), ShouldEqual, 2)
+	})
+
+	Convey("E2.3 REST perf evidence records result digest and scoped cache hit keys", t, func() {
+		s := newE2FilteredRESTServer()
+		priorKey := "active_prefix_summary:path=/prior/;filter=ft:1;active_set_id=old;query_version=1"
+		keySnapshots := 0
+		report, err := s.MeasurePerfHarness(PerfHarnessOptions{
+			Repeat:     1,
+			WhereDir:   e2T283Dir,
+			WhereTypes: db.DGUTAFileTypeOther.String(),
+			CacheStats: func() (uint64, uint64) {
+				return 1, 0
+			},
+			CacheHitKeys: func() []string {
+				keySnapshots++
+				if keySnapshots%2 == 1 {
+					return []string{priorKey}
+				}
+
+				return []string{priorKey, e2ScopedCacheHitKey}
+			},
+		})
+		So(err, ShouldBeNil)
+
+		whereOp := serverPerfOperation(report, "rest_where")
+		So(whereOp.Inputs["result_digest"], ShouldNotBeBlank)
+		So(whereOp.Inputs["cache_hit_keys"], ShouldResemble, []string{
+			e2ScopedCacheHitKey,
+		})
+	})
+}
+
+func e2ServerSummaryDigest(summaries []*DirSummary) string {
+	data, err := json.Marshal(summaries)
+	So(err, ShouldBeNil)
+
+	sum := sha256.Sum256(data)
+
+	return "sha256:" + hex.EncodeToString(sum[:])
 }

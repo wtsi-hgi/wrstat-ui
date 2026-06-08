@@ -200,6 +200,9 @@ const (
 		") " +
 		"WHERE %s " +
 		"GROUP BY dir"
+
+	mountDirSummariesReadyQuery = "SELECT mount_path, toString(snapshot_id) " +
+		"FROM wrstat_dir_projection_sets WHERE %s"
 )
 
 var errIntOverflow = errors.New("value overflows int")
@@ -614,20 +617,108 @@ func (d *clickHouseDatabase) activeMountReady(mount activeMount) (bool, error) {
 }
 
 func (d *clickHouseDatabase) readyActiveMounts(mounts []activeMount) ([]activeMount, error) {
-	readyMounts := make([]activeMount, 0, len(mounts))
+	if len(mounts) == 0 || d.conn == nil {
+		return nil, nil
+	}
 
-	for _, mount := range mounts {
-		ready, err := d.activeMountReady(mount)
-		if err != nil {
-			return nil, err
+	ctx, cancel := configQueryContext(d.cfg)
+	defer cancel()
+
+	return d.readyActiveMountsCached(ctx, mounts)
+}
+
+func (d *clickHouseDatabase) readyActiveMountsCached(
+	ctx context.Context,
+	mounts []activeMount,
+) ([]activeMount, error) {
+	readyMounts, missing := d.cachedReadyActiveMounts(mounts)
+	if len(missing) == 0 {
+		return readyMounts, nil
+	}
+
+	queried, err := d.queryReadyActiveMounts(ctx, missing)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, mount := range missing {
+		key := newTreeMountCacheKey(mount.mountPath, mount.snapshotID)
+		if !queried[key] {
+			continue
 		}
 
-		if ready {
-			readyMounts = append(readyMounts, mount)
-		}
+		d.treeCache.putMountDirSummaryReady(key)
+
+		readyMounts = append(readyMounts, mount)
 	}
 
 	return readyMounts, nil
+}
+
+func (d *clickHouseDatabase) cachedReadyActiveMounts(
+	mounts []activeMount,
+) ([]activeMount, []activeMount) {
+	readyMounts := make([]activeMount, 0, len(mounts))
+	missing := make([]activeMount, 0, len(mounts))
+	seen := make(map[treeMountCacheKey]bool, len(mounts))
+
+	for _, mount := range mounts {
+		key := newTreeMountCacheKey(mount.mountPath, mount.snapshotID)
+		if seen[key] {
+			continue
+		}
+
+		seen[key] = true
+		if d.treeCache.getMountDirSummaryReady(key) {
+			readyMounts = append(readyMounts, mount)
+
+			continue
+		}
+
+		missing = append(missing, mount)
+	}
+
+	return readyMounts, missing
+}
+
+func (d *clickHouseDatabase) queryReadyActiveMounts(
+	ctx context.Context,
+	mounts []activeMount,
+) (map[treeMountCacheKey]bool, error) {
+	query, args := activeMountsQuery(
+		mountDirSummariesReadyQuery,
+		"mount_path",
+		"snapshot_id",
+		mounts,
+	)
+
+	rows, err := d.conn.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("clickhouse: failed to query batched dir summary readiness: %w", err)
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	return scanReadyActiveMountRows(rows)
+}
+
+func scanReadyActiveMountRows(rows rowsScanner) (map[treeMountCacheKey]bool, error) {
+	ready := make(map[treeMountCacheKey]bool)
+
+	for rows.Next() {
+		var mountPath, snapshotID string
+		if err := rows.Scan(&mountPath, &snapshotID); err != nil {
+			return nil, fmt.Errorf("clickhouse: failed to scan batched dir summary readiness: %w", err)
+		}
+
+		ready[newTreeMountCacheKey(mountPath, snapshotID)] = true
+	}
+
+	if err := rowsErr(rows); err != nil {
+		return nil, fmt.Errorf("clickhouse: batched dir summary readiness iteration error: %w", err)
+	}
+
+	return ready, nil
 }
 
 func (d *clickHouseDatabase) readyActiveMountsUnder(dir string) ([]activeMount, error) {

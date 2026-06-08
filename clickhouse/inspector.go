@@ -57,6 +57,7 @@ const (
 		"toUInt64(read_rows) AS read_rows, " +
 		"toUInt64(read_bytes) AS read_bytes, " +
 		"toUInt64(ProfileEvents['SelectedMarks']) AS read_marks, " +
+		"toUInt64(memory_usage) AS memory_usage, " +
 		"toUInt64(result_rows) AS result_rows, " +
 		"toUInt64(result_bytes) AS result_bytes " +
 		"FROM system.query_log " +
@@ -73,6 +74,7 @@ type QueryMetrics struct {
 	ReadRows    uint64
 	ReadBytes   uint64
 	ReadMarks   uint64
+	MemoryBytes uint64
 	ResultRows  uint64
 	ResultBytes uint64
 }
@@ -337,6 +339,7 @@ func (i *Inspector) scanQueryMetrics(ctx context.Context, t0 time.Time) (*QueryM
 		&m.ReadRows,
 		&m.ReadBytes,
 		&m.ReadMarks,
+		&m.MemoryBytes,
 		&m.ResultRows,
 		&m.ResultBytes,
 	); err != nil {

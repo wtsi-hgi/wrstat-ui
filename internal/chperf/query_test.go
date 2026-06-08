@@ -56,7 +56,9 @@ const (
 	queryOpTestGrandDir      = "/root/a/grand/"
 	queryOpTestRootDir       = "/root/"
 	queryTestBamExt          = "bam"
-	queryTestNoMatchGID      = 404
+	queryTestE2CacheHitKey   = "active_prefix_summary:path=/nfs/t283_imaging/;filter=ft:32768;" +
+		"active_set_id=e2;query_version=1"
+	queryTestNoMatchGID = 404
 )
 
 func TestDecodeMountPaths(t *testing.T) {
@@ -165,6 +167,22 @@ func TestPickLargestChild(t *testing.T) {
 			best := pickLargestChild(children)
 			So(best.Dir, ShouldEqual, "/b/")
 		})
+	})
+}
+
+func TestE2CacheHitKeyScope(t *testing.T) {
+	Convey("E2.3 scoped cache hit keys include path, filter, active set id, and query version", t, func() {
+		keys := []string{
+			queryTestE2CacheHitKey,
+		}
+
+		So(cacheHitKeysHaveE2Scope(keys), ShouldBeTrue)
+		So(cacheHitKeysHaveE2Scope([]string{
+			"active_prefix_summary:path=/nfs/t283_imaging/;filter=ft:32768;query_version=1",
+		}), ShouldBeFalse)
+		So(cacheHitKeysHaveE2Scope([]string{
+			"active_prefix_summary:path=/nfs/t283_imaging/;active_set_id=e2;query_version=1",
+		}), ShouldBeFalse)
 	})
 }
 
@@ -374,11 +392,12 @@ func TestRunOp(t *testing.T) {
 					}
 
 					return &QueryMetrics{
-						DurationMs: 12,
-						ReadRows:   34,
-						ReadBytes:  56,
-						ReadMarks:  7,
-						ResultRows: 1,
+						DurationMs:  12,
+						ReadRows:    34,
+						ReadBytes:   56,
+						ReadMarks:   7,
+						MemoryBytes: 89,
+						ResultRows:  1,
 					}, nil
 				},
 			}},
@@ -393,8 +412,10 @@ func TestRunOp(t *testing.T) {
 		So(report.Operations[0].ReadRows, ShouldResemble, []uint64{34, 34})
 		So(report.Operations[0].ReadBytes, ShouldResemble, []uint64{56, 56})
 		So(report.Operations[0].ReadMarks, ShouldResemble, []uint64{7, 7})
+		So(report.Operations[0].MemoryBytes, ShouldResemble, []uint64{89, 89})
+		So(report.Operations[0].ResultCount, ShouldResemble, []uint64{1, 1})
 		So(out.String(), ShouldContainSubstring, "metrics")
-		So(out.String(), ShouldContainSubstring, "read_marks=%d")
+		So(out.String(), ShouldContainSubstring, "memory_bytes=%d")
 	})
 
 	Convey("runOp records active mount updated_at values for mount_timestamps", t, func() {
@@ -608,6 +629,62 @@ func TestRunSuiteOperationSelection(t *testing.T) {
 		So(resultCountsByName(report)[queryOpFilesListDirName], ShouldResemble, []uint64{1})
 		So(resultCountsByName(report)[queryOpFilesStatPathName], ShouldResemble, []uint64{1})
 		So(resultCountsByName(report)["glob_case_E"], ShouldResemble, []uint64{2})
+		So(operationByName(report, queryOpTreeWhereName).Inputs[navigationInputResultDigest], ShouldNotBeBlank)
+		So(operationByName(report, queryOpTreeDirInfoName).Inputs[navigationInputResultDigest], ShouldNotBeBlank)
+	})
+
+	Convey("D2.6 permission_check records directory and path permission checks", t, func() {
+		client := &fakeQueryClient{rows: []QueryRow{{
+			Path:      queryOpTestRootDir + "sample.bam",
+			Ext:       queryTestBamExt,
+			EntryType: 'f',
+		}}}
+		qctx := queryContext{
+			provider: fakeMountTimestampsProvider{tree: db.NewTree(newQueryOpTestDB())},
+			client:   client,
+			inspector: fakeQueryInspector{
+				measure: func(ctx context.Context, run func(context.Context) error) (*QueryMetrics, error) {
+					if err := run(ctx); err != nil {
+						return nil, err
+					}
+
+					return &QueryMetrics{DurationMs: 2, ReadRows: 3, ReadBytes: 4, ReadMarks: 5}, nil
+				},
+			},
+			dir:  queryOpTestRootDir,
+			uid:  20155,
+			gids: []uint32{14976},
+		}
+		report := boltperf.NewReport("clickhouse", "", 1, 0)
+
+		err := runSuite(&report, qctx, QueryOptions{
+			Repeat: 1,
+			Ops:    []string{queryOpPermissionCheckName},
+		}, func(string, ...any) {})
+
+		So(err, ShouldBeNil)
+		So(report.Operations, ShouldHaveLength, 1)
+		op := report.Operations[0]
+		So(op.Name, ShouldEqual, queryOpPermissionCheckName)
+		So(op.ResultCount, ShouldResemble, []uint64{2})
+		So(op.ReadRows, ShouldResemble, []uint64{3})
+		So(op.ReadBytes, ShouldResemble, []uint64{4})
+		So(op.ReadMarks, ShouldResemble, []uint64{5})
+		So(op.Inputs[queryInputPermissionChecksKey], ShouldResemble, []string{
+			queryPermissionCheckAnyInDir,
+			queryPermissionCheckPath,
+		})
+		So(op.Inputs[queryInputPermissionPathKey], ShouldEqual, queryOpTestRootDir+"sample.bam")
+		So(client.permissionAnyCalls, ShouldResemble, []permissionAnyCall{{
+			dir:  queryOpTestRootDir,
+			uid:  20155,
+			gids: []uint32{14976},
+		}})
+		So(client.permissionPathCalls, ShouldResemble, []permissionPathCall{{
+			path: queryOpTestRootDir + "sample.bam",
+			uid:  20155,
+			gids: []uint32{14976},
+		}})
 	})
 
 	Convey("runSuite reports unknown selected operations with available names", t, func() {
@@ -706,6 +783,117 @@ func TestRunSuiteOperationSelection(t *testing.T) {
 			So(names, ShouldContain, name)
 		}
 	})
+
+	Convey("D1.6 runSuite records info counts and query counters for final perf reports", t, func() {
+		database := newQueryOpTestDB()
+		database.info = &db.Info{
+			NumDirs:     3,
+			NumDGUTAs:   6,
+			NumParents:  1,
+			NumChildren: 2,
+		}
+		qctx := queryContext{
+			provider: fakeMountTimestampsProvider{tree: db.NewTree(database)},
+			client:   &fakeQueryClient{},
+			inspector: fakeQueryInspector{
+				measure: func(ctx context.Context, run func(context.Context) error) (*QueryMetrics, error) {
+					if err := run(ctx); err != nil {
+						return nil, err
+					}
+
+					return &QueryMetrics{
+						DurationMs: 3,
+						ReadRows:   4,
+						ReadBytes:  5,
+						ReadMarks:  6,
+					}, nil
+				},
+			},
+		}
+		report := boltperf.NewReport("clickhouse", "", 1, 0)
+
+		err := runSuite(&report, qctx, QueryOptions{
+			Repeat: 1,
+			Ops:    []string{"info"},
+		}, func(string, ...any) {})
+
+		So(err, ShouldBeNil)
+		So(database.infoCalls, ShouldEqual, 1)
+		So(report.Operations, ShouldHaveLength, 1)
+		op := report.Operations[0]
+		So(op.Name, ShouldEqual, "info")
+		So(op.DurationsMS, ShouldResemble, []float64{3})
+		So(op.ReadRows, ShouldResemble, []uint64{4})
+		So(op.ReadBytes, ShouldResemble, []uint64{5})
+		So(op.ReadMarks, ShouldResemble, []uint64{6})
+		So(op.ResultCount, ShouldResemble, []uint64{3, 6, 1, 2})
+		So(op.Inputs["count_fields"], ShouldResemble, []string{
+			"num_dirs",
+			"num_dgutas",
+			"num_parents",
+			"num_children",
+		})
+	})
+
+	Convey("D2.6 runSuite records auth tree and auth/no-auth where correctness metadata", t, func() {
+		database := newQueryOpTestDB()
+		database.summaries[queryOpTestRootDir].GIDs = []uint32{7, 8}
+		database.summaries[queryOpTestChildADir].GIDs = []uint32{7}
+		database.summaries[queryOpTestChildBDir].GIDs = []uint32{8}
+		qctx := queryContext{
+			provider: fakeMountTimestampsProvider{tree: db.NewTree(database)},
+			client:   &fakeQueryClient{},
+			inspector: fakeQueryInspector{
+				measure: func(ctx context.Context, run func(context.Context) error) (*QueryMetrics, error) {
+					if err := run(ctx); err != nil {
+						return nil, err
+					}
+
+					return &QueryMetrics{DurationMs: 3, ReadRows: 4, ReadBytes: 5, ReadMarks: 6}, nil
+				},
+			},
+			dir:        queryOpTestRootDir,
+			gids:       []uint32{7},
+			treeFilter: &db.Filter{FT: db.DGUTAFileTypeOther, Age: db.DGUTAgeAll},
+		}
+		report := boltperf.NewReport("clickhouse", "", 1, 0)
+
+		err := runSuite(&report, qctx, QueryOptions{
+			Repeat: 1,
+			Ops: []string{
+				queryOpAuthTreeName,
+				queryOpAuthWhereRestrictedName,
+				queryOpNoAuthWhereName,
+			},
+			Splits: 1,
+		}, func(string, ...any) {})
+
+		So(err, ShouldBeNil)
+		So(report.Operations, ShouldHaveLength, 3)
+
+		authTree := report.Operations[0]
+		So(authTree.Name, ShouldEqual, queryOpAuthTreeName)
+		So(authTree.Inputs[queryInputAllowedGIDsKey], ShouldResemble, []uint32{7})
+		So(authTree.Inputs[queryInputStatusCodeKey], ShouldEqual, 200)
+		So(authTree.Inputs[navigationInputResultDigest], ShouldNotBeBlank)
+		So(authTree.Inputs[queryInputNoAuthFlagsKey], ShouldResemble, map[string]bool{
+			queryOpTestRootDir:   false,
+			queryOpTestChildADir: false,
+			queryOpTestChildBDir: true,
+		})
+
+		restrictedWhere := report.Operations[1]
+		So(restrictedWhere.Name, ShouldEqual, queryOpAuthWhereRestrictedName)
+		So(restrictedWhere.Inputs[queryInputFilterGIDsKey], ShouldResemble, []uint32{7})
+		So(restrictedWhere.Inputs[navigationInputResultDigest], ShouldNotBeBlank)
+		So(restrictedWhere.ResultCount, ShouldResemble, []uint64{3})
+
+		noAuthWhere := report.Operations[2]
+		So(noAuthWhere.Name, ShouldEqual, queryOpNoAuthWhereName)
+		So(noAuthWhere.Inputs[queryInputFilterGIDsKey], ShouldBeEmpty)
+		So(noAuthWhere.Inputs[navigationInputResultDigest], ShouldNotBeBlank)
+		So(noAuthWhere.ResultCount, ShouldResemble, []uint64{3})
+	})
 }
 
 func resultCountsByName(report boltperf.Report) map[string][]uint64 {
@@ -715,6 +903,16 @@ func resultCountsByName(report boltperf.Report) map[string][]uint64 {
 	}
 
 	return counts
+}
+
+func operationByName(report boltperf.Report, name string) perfreport.Operation {
+	for _, op := range report.Operations {
+		if op.Name == name {
+			return op
+		}
+	}
+
+	return perfreport.Operation{}
 }
 
 func TestBuildQueryContext(t *testing.T) {
@@ -800,10 +998,24 @@ func TestVerifyPlans(t *testing.T) {
 	})
 }
 
+type permissionAnyCall struct {
+	dir  string
+	uid  uint32
+	gids []uint32
+}
+
+type permissionPathCall struct {
+	path string
+	uid  uint32
+	gids []uint32
+}
+
 type fakeQueryClient struct {
-	rows      []QueryRow
-	rowsByDir map[string][]QueryRow
-	closeHook func() error
+	rows                []QueryRow
+	rowsByDir           map[string][]QueryRow
+	permissionAnyCalls  []permissionAnyCall
+	permissionPathCalls []permissionPathCall
+	closeHook           func() error
 }
 
 func (c *fakeQueryClient) ListDir(
@@ -820,12 +1032,33 @@ func (c *fakeQueryClient) ListDir(
 
 func (*fakeQueryClient) StatPath(context.Context, string) error { return nil }
 
-func (*fakeQueryClient) PermissionAnyInDir(
-	context.Context,
-	string,
-	uint32,
-	[]uint32,
+func (c *fakeQueryClient) PermissionAnyInDir(
+	_ context.Context,
+	dir string,
+	uid uint32,
+	gids []uint32,
 ) error {
+	c.permissionAnyCalls = append(c.permissionAnyCalls, permissionAnyCall{
+		dir:  dir,
+		uid:  uid,
+		gids: append([]uint32(nil), gids...),
+	})
+
+	return nil
+}
+
+func (c *fakeQueryClient) PermissionPath(
+	_ context.Context,
+	path string,
+	uid uint32,
+	gids []uint32,
+) error {
+	c.permissionPathCalls = append(c.permissionPathCalls, permissionPathCall{
+		path: path,
+		uid:  uid,
+		gids: append([]uint32(nil), gids...),
+	})
+
 	return nil
 }
 
@@ -873,6 +1106,11 @@ func TestStartupCacheWarmingAudit(t *testing.T) {
 		So(inputs["query_cache_warmup_timing"], ShouldEqual, queryStartupStageLazyInteraction)
 		So(inputs["provider_polling_timing"], ShouldEqual, queryStartupStageBackgroundProvider)
 		So(inputs["provider_update_refresh_timing"], ShouldEqual, queryStartupStageBackgroundProvider)
+		So(inputs["filtered_where_gate_source"], ShouldEqual, queryOpTreeWhereColdProviderName)
+		So(inputs["filtered_where_gate_cache_scope"], ShouldEqual, queryScopeColdProvider)
+		So(inputs["filtered_where_gate_requires_cache_reset"], ShouldBeTrue)
+		So(inputs["startup_warming_supports_gate_only"], ShouldBeTrue)
+		So(inputs["warmed_request_output_reuse"], ShouldEqual, "forbidden_for_cold_filtered_where_gate")
 
 		providerWork, ok := inputs["initial_provider_work"].([]string)
 		So(ok, ShouldBeTrue)
@@ -1485,9 +1723,11 @@ func (p fakeMountTimestampsProvider) Close() error {
 type queryOpTestDB struct {
 	children       map[string][]string
 	summaries      map[string]*db.DirSummary
+	info           *db.Info
 	dirInfoCalls   []string
 	dirInfoFilters []*db.Filter
 	childrenCalls  []string
+	infoCalls      int
 }
 
 func (d *queryOpTestDB) DirInfo(dir string, filter *db.Filter) (*db.DirSummary, error) {
@@ -1524,6 +1764,13 @@ func (d *queryOpTestDB) Children(dir string) ([]string, error) {
 }
 
 func (d *queryOpTestDB) Info() (*db.Info, error) {
+	d.infoCalls++
+	if d.info != nil {
+		cp := *d.info
+
+		return &cp, nil
+	}
+
 	return &db.Info{}, nil
 }
 

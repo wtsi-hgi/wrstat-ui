@@ -80,12 +80,12 @@ func GetWhereDataIs(c *gas.ClientCLI, dir, groups, users, types string, age db.D
 	resp, err := r.SetResult([]*DirSummary{}).
 		ForceContentType("application/json").
 		SetQueryParams(map[string]string{
-			"dir":    dir,
-			"groups": groups,
-			"users":  users,
-			"types":  types,
-			"age":    strconv.Itoa(int(age)),
-			"splits": splits,
+			queryParamDir:    dir,
+			queryParamGroups: groups,
+			queryParamUsers:  users,
+			queryParamTypes:  types,
+			queryParamAge:    strconv.Itoa(int(age)),
+			queryParamSplits: splits,
 		}).
 		Get(EndPointAuthWhere)
 	if err != nil {

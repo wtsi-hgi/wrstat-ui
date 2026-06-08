@@ -328,6 +328,38 @@ func TestInspectorMeasure(t *testing.T) {
 		So(m.ResultRows, ShouldEqual, 0)
 		So(m.ResultBytes, ShouldEqual, 0)
 	})
+
+	Convey("Measure returns query-log memory usage when available", t, func() {
+		ins := &Inspector{
+			cfg: Config{QueryTimeout: time.Second},
+			conn: &inspectorTestConn{rows: map[string]driver.Row{
+				serverTimeQuery: inspectorTestRow{values: []any{time.Unix(1710000000, 0).UTC()}},
+				queryLogQuery: inspectorTestRow{values: []any{
+					uint64(12),
+					uint64(34),
+					uint64(56),
+					uint64(7),
+					uint64(89),
+					uint64(1),
+					uint64(2),
+				}},
+			}},
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+
+		m, err := ins.Measure(ctx, func(context.Context) error { return nil })
+		So(err, ShouldBeNil)
+		So(m, ShouldNotBeNil)
+		So(m.DurationMs, ShouldEqual, 12)
+		So(m.ReadRows, ShouldEqual, 34)
+		So(m.ReadBytes, ShouldEqual, 56)
+		So(m.ReadMarks, ShouldEqual, 7)
+		So(m.MemoryBytes, ShouldEqual, 89)
+		So(m.ResultRows, ShouldEqual, 1)
+		So(m.ResultBytes, ShouldEqual, 2)
+	})
 }
 
 type inspectorTestConn struct {

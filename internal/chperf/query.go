@@ -29,6 +29,9 @@ package chperf
 import (
 	"cmp"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -59,11 +62,27 @@ const (
 	queryInputFilterGIDsKey               = "filter_gids"
 	queryInputFilterIndexGateKey          = "filter_index_gate"
 	queryInputFilterUIDsKey               = "filter_uids"
+	queryInputInfoCountFieldsKey          = "count_fields"
+	queryInputPermissionChecksKey         = "permission_checks"
+	queryInputPermissionPathKey           = "permission_path"
 	queryInputParentDirKey                = "parent_dir"
 	queryInputSplitsKey                   = "splits"
 	queryInputStartDirKey                 = "start_dir"
 	queryInputTreeFilterRouteKey          = "tree_filter_route"
+	queryInputAllowedGIDsKey              = "allowed_gids"
+	queryInputCacheHitKeysKey             = "cache_hit_keys"
+	queryInputNoAuthFlagsKey              = "noauth_flags"
+	queryInputStatusCodeKey               = "status_code"
+	queryInputSurfaceKey                  = "surface"
+	queryInputSurfaceInProcessEquivalent  = "in_process_equivalent"
+	queryPermissionCheckAnyInDir          = "any_in_dir"
+	queryPermissionCheckPath              = clickHouseFileFieldPath
+	queryOpAuthTreeName                   = "auth_tree"
+	queryOpAuthWhereRestrictedName        = "auth_where_restricted"
 	queryOpFilesListDirName               = "files_listdir"
+	queryOpInfoName                       = "info"
+	queryOpNoAuthWhereName                = "noauth_where"
+	queryOpPermissionCheckName            = "permission_check"
 	queryOpStartupCacheWarmingAuditName   = "startup_cache_warming_audit"
 	queryOpTreeDiskTreeAncName            = "tree_disktree_endpoint_ancestor_dirs"
 	queryOpTreeDiskTreeColdProviderName   = "tree_disktree_endpoint_cold_provider"
@@ -384,11 +403,16 @@ func opStartupCacheWarmingAudit() op {
 			queryInputDurationSource: querySourceWall,
 			"server_started_contract": "server_started_is_logged_after_clickhouse_provider_open_" +
 				"and_server_set_provider_complete",
-			"initial_provider_readers_timing": queryStartupStageSynchronousInitial,
-			"server_basedirs_cache_timing":    queryStartupStageSynchronousInitial,
-			"query_cache_warmup_timing":       queryStartupStageLazyInteraction,
-			"provider_polling_timing":         queryStartupStageBackgroundProvider,
-			"provider_update_refresh_timing":  queryStartupStageBackgroundProvider,
+			"initial_provider_readers_timing":          queryStartupStageSynchronousInitial,
+			"server_basedirs_cache_timing":             queryStartupStageSynchronousInitial,
+			"query_cache_warmup_timing":                queryStartupStageLazyInteraction,
+			"provider_polling_timing":                  queryStartupStageBackgroundProvider,
+			"provider_update_refresh_timing":           queryStartupStageBackgroundProvider,
+			"filtered_where_gate_source":               queryOpTreeWhereColdProviderName,
+			"filtered_where_gate_cache_scope":          queryScopeColdProvider,
+			"filtered_where_gate_requires_cache_reset": true,
+			"startup_warming_supports_gate_only":       true,
+			"warmed_request_output_reuse":              "forbidden_for_cold_filtered_where_gate",
 			"initial_provider_work": []string{
 				"validate_clickhouse_config",
 				"open_clickhouse_connection",
@@ -437,22 +461,65 @@ func opStartupCacheWarmingAudit() op {
 	}
 }
 
+func opInfo(qctx queryContext) op {
+	var resultCounts []uint64
+
+	inputs := map[string]any{
+		queryInputDirKey:             qctx.dir,
+		queryInputInfoCountFieldsKey: db.InfoCountFieldNames(),
+		queryInputCacheScope:         queryScopeSameProviderDir,
+		queryInputDurationSource:     querySourceClickHouseLog,
+		queryInputStatusCodeKey:      200,
+		queryInputSurfaceKey:         queryInputSurfaceInProcessEquivalent,
+	}
+
+	return op{
+		name:   queryOpInfoName,
+		inputs: inputs,
+		run: func(_ context.Context) error {
+			info, err := qctx.provider.Tree().Info()
+			if err != nil {
+				return err
+			}
+
+			resultCounts = info.CountValues()
+			inputs[navigationInputResultDigest] = digestValue(resultCounts)
+
+			return nil
+		},
+		resultCounts: func() []uint64 { return slices.Clone(resultCounts) },
+	}
+}
+
+func digestValue(value any) string {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return ""
+	}
+
+	sum := sha256.Sum256(data)
+
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
 func opTreeWhereColdThenCached(qctx queryContext, splits int) op {
 	filter := treeFilterFromOptions(qctx.treeFilter)
+	inputs := treeOpInputs(filter, map[string]any{
+		queryInputDirKey:         qctx.dir,
+		queryInputCacheScope:     queryScopeSameProviderCold,
+		queryInputDurationSource: querySourceWall,
+		queryInputSplitsKey:      splits,
+	})
 
 	var resultCount uint64
 
 	return op{
-		name: queryOpTreeWhereColdName,
-		inputs: treeOpInputs(filter, map[string]any{
-			queryInputDirKey:         qctx.dir,
-			queryInputCacheScope:     queryScopeSameProviderCold,
-			queryInputDurationSource: querySourceWall,
-			queryInputSplitsKey:      splits,
-		}),
+		name:   queryOpTreeWhereColdName,
+		inputs: inputs,
 		run: func(_ context.Context) error {
 			results, err := qctx.provider.Tree().Where(qctx.dir, filter, split.SplitsToSplitFn(splits))
 			resultCount = uint64(len(results))
+			inputs[navigationInputResultDigest] = dcssDigest(results)
 
 			return err
 		},
@@ -520,26 +587,61 @@ func treeFilterIndexGate(filter *db.Filter) string {
 	return queryFilterIndexGateInapplicable
 }
 
+func dcssDigest(dcss db.DCSs) string {
+	summaries := make([]*db.DirSummary, len(dcss))
+	copy(summaries, dcss)
+
+	return digestValue(digestSummaries(summaries))
+}
+
+func digestSummaries(summaries []*db.DirSummary) []digestDirSummary {
+	out := make([]digestDirSummary, 0, len(summaries))
+	for _, summary := range summaries {
+		if summary != nil {
+			out = append(out, digestSummary(summary))
+		}
+	}
+
+	return out
+}
+
+func digestSummary(summary *db.DirSummary) digestDirSummary {
+	if summary == nil {
+		return digestDirSummary{}
+	}
+
+	return digestDirSummary{
+		Dir:   summary.Dir,
+		Count: summary.Count,
+		Size:  summary.Size,
+		UIDs:  slices.Clone(summary.UIDs),
+		GIDs:  slices.Clone(summary.GIDs),
+		FT:    uint16(summary.FT),
+		Age:   uint8(summary.Age),
+	}
+}
+
 func opTreeWhereColdProvider(qctx queryContext, splits int) op {
 	filter := treeFilterFromOptions(qctx.treeFilter)
+	inputs := treeOpInputs(filter, map[string]any{
+		queryInputDirKey:         qctx.dir,
+		queryInputCacheScope:     queryScopeColdProvider,
+		queryInputDurationSource: querySourceWall,
+		queryInputSplitsKey:      splits,
+	})
 
 	var resultCount uint64
 
 	return op{
-		name: queryOpTreeWhereColdProviderName,
-		inputs: treeOpInputs(filter, map[string]any{
-			queryInputDirKey:         qctx.dir,
-			queryInputCacheScope:     queryScopeColdProvider,
-			queryInputDurationSource: querySourceWall,
-			queryInputSplitsKey:      splits,
-		}),
+		name:   queryOpTreeWhereColdProviderName,
+		inputs: inputs,
 		setup: func(_ context.Context) error {
 			qctx.resetCaches()
 
 			return nil
 		},
 		run: func(_ context.Context) error {
-			count, err := runTreeWhereFreshProvider(qctx, splits, filter)
+			count, err := runTreeWhereFreshProvider(qctx, splits, filter, inputs)
 			resultCount = count
 
 			return err
@@ -597,6 +699,12 @@ func runTreeDiskTreeFreshProvider(qctx queryContext, filter *db.Filter) (uint64,
 
 func opTreeWhereProviderUpdateColdCache(qctx queryContext, splits int) op {
 	filter := treeFilterFromOptions(qctx.treeFilter)
+	inputs := treeOpInputs(filter, map[string]any{
+		queryInputDirKey:         qctx.dir,
+		queryInputCacheScope:     queryScopeProviderUpdateCold,
+		queryInputDurationSource: querySourceWall,
+		queryInputSplitsKey:      splits,
+	})
 
 	var (
 		p           provider.Provider
@@ -604,13 +712,8 @@ func opTreeWhereProviderUpdateColdCache(qctx queryContext, splits int) op {
 	)
 
 	return op{
-		name: queryOpTreeWhereProviderUpdateName,
-		inputs: treeOpInputs(filter, map[string]any{
-			queryInputDirKey:         qctx.dir,
-			queryInputCacheScope:     queryScopeProviderUpdateCold,
-			queryInputDurationSource: querySourceWall,
-			queryInputSplitsKey:      splits,
-		}),
+		name:   queryOpTreeWhereProviderUpdateName,
+		inputs: inputs,
 		setup: func(_ context.Context) error {
 			qctx.resetCaches()
 
@@ -623,6 +726,7 @@ func opTreeWhereProviderUpdateColdCache(qctx queryContext, splits int) op {
 		run: func(_ context.Context) error {
 			results, err := p.Tree().Where(qctx.dir, filter, split.SplitsToSplitFn(splits))
 			resultCount = uint64(len(results))
+			inputs[navigationInputResultDigest] = dcssDigest(results)
 
 			return err
 		},
@@ -809,6 +913,20 @@ func cycledDirsForRepeats(dirs []string, repeat int) []string {
 	return timedDirs
 }
 
+func dirInfoDigest(info *db.DirInfo) string {
+	if info == nil {
+		return digestValue(nil)
+	}
+
+	return digestValue(struct {
+		Current  digestDirSummary   `json:"current"`
+		Children []digestDirSummary `json:"children"`
+	}{
+		Current:  digestSummary(info.Current),
+		Children: digestSummaries(info.Children),
+	})
+}
+
 func opTreeDiskTreeEndpoint(qctx queryContext) op {
 	filter := treeFilterFromOptions(qctx.treeFilter)
 
@@ -903,20 +1021,22 @@ func visibleChildDirsForRepeats(childDirs []string, parentDir string, repeat int
 
 func opTreeWhere(qctx queryContext, splits int) op {
 	filter := treeFilterFromOptions(qctx.treeFilter)
+	inputs := treeOpInputs(filter, map[string]any{
+		queryInputDirKey:         qctx.dir,
+		queryInputCacheScope:     queryScopeSameProviderDir,
+		queryInputDurationSource: querySourceClickHouseLog,
+		queryInputSplitsKey:      splits,
+	})
 
 	var resultCount uint64
 
 	return op{
-		name: queryOpTreeWhereName,
-		inputs: treeOpInputs(filter, map[string]any{
-			queryInputDirKey:         qctx.dir,
-			queryInputCacheScope:     queryScopeSameProviderDir,
-			queryInputDurationSource: querySourceClickHouseLog,
-			queryInputSplitsKey:      splits,
-		}),
+		name:   queryOpTreeWhereName,
+		inputs: inputs,
 		run: func(_ context.Context) error {
 			results, err := qctx.provider.Tree().Where(qctx.dir, filter, split.SplitsToSplitFn(splits))
 			resultCount = uint64(len(results))
+			inputs[navigationInputResultDigest] = dcssDigest(results)
 
 			return err
 		},
@@ -924,21 +1044,191 @@ func opTreeWhere(qctx queryContext, splits int) op {
 	}
 }
 
-func opTreeWhereFreshProvider(qctx queryContext, splits int) op {
+func opAuthTree(qctx queryContext) op {
 	filter := treeFilterFromOptions(qctx.treeFilter)
+	inputs := treeOpInputs(filter, map[string]any{
+		queryInputDirKey:         qctx.dir,
+		queryInputAllowedGIDsKey: slices.Clone(qctx.gids),
+		queryInputCacheScope:     queryScopeSameProviderDir,
+		queryInputDurationSource: querySourceClickHouseLog,
+		queryInputStatusCodeKey:  200,
+		queryInputSurfaceKey:     queryInputSurfaceInProcessEquivalent,
+	})
 
 	var resultCount uint64
 
 	return op{
-		name: queryOpTreeWhereFreshName,
-		inputs: treeOpInputs(filter, map[string]any{
-			queryInputDirKey:         qctx.dir,
-			queryInputCacheScope:     queryScopeFreshProvider,
-			queryInputDurationSource: querySourceWall,
-			queryInputSplitsKey:      splits,
-		}),
+		name:   queryOpAuthTreeName,
+		inputs: inputs,
 		run: func(_ context.Context) error {
-			count, err := runTreeWhereFreshProvider(qctx, splits, filter)
+			info, err := qctx.provider.Tree().DirInfo(qctx.dir, filter)
+			if err != nil {
+				return err
+			}
+
+			resultCount = dirInfoResultCount(info)
+			inputs[navigationInputResultDigest] = dirInfoDigest(info)
+			inputs[queryInputNoAuthFlagsKey] = dirInfoNoAuthFlags(info, qctx.gids)
+
+			return nil
+		},
+		resultCount: func() uint64 { return resultCount },
+	}
+}
+
+func dirInfoNoAuthFlags(info *db.DirInfo, allowedGIDs []uint32) map[string]bool {
+	if info == nil {
+		return nil
+	}
+
+	flags := make(map[string]bool, 1+len(info.Children))
+	addNoAuthFlag(flags, info.Current, allowedGIDs)
+
+	for _, child := range info.Children {
+		addNoAuthFlag(flags, child, allowedGIDs)
+	}
+
+	return flags
+}
+
+func addNoAuthFlag(flags map[string]bool, summary *db.DirSummary, allowedGIDs []uint32) {
+	if summary == nil {
+		return
+	}
+
+	flags[summary.Dir] = noAuthForGIDs(allowedGIDs, summary.GIDs)
+}
+
+func noAuthForGIDs(allowedGIDs []uint32, summaryGIDs []uint32) bool {
+	if len(allowedGIDs) == 0 {
+		return false
+	}
+
+	allowed := make(map[uint32]bool, len(allowedGIDs))
+	for _, gid := range allowedGIDs {
+		allowed[gid] = true
+	}
+
+	return !slices.ContainsFunc(summaryGIDs, func(gid uint32) bool {
+		return allowed[gid]
+	})
+}
+
+func opAuthWhereRestricted(qctx queryContext, splits int) op {
+	filter := restrictedAuthWhereFilter(qctx.treeFilter, qctx.gids)
+
+	return opWhereWithDigest(
+		queryOpAuthWhereRestrictedName,
+		qctx,
+		filter,
+		treeOpInputs(filter, map[string]any{
+			queryInputDirKey:         qctx.dir,
+			queryInputAllowedGIDsKey: slices.Clone(qctx.gids),
+			queryInputCacheScope:     queryScopeSameProviderDir,
+			queryInputDurationSource: querySourceClickHouseLog,
+			queryInputSplitsKey:      splits,
+			queryInputStatusCodeKey:  200,
+			queryInputSurfaceKey:     queryInputSurfaceInProcessEquivalent,
+		}),
+		splits,
+	)
+}
+
+func restrictedAuthWhereFilter(filter *db.Filter, allowedGIDs []uint32) *db.Filter {
+	restricted := treeFilterFromOptions(filter)
+	if len(allowedGIDs) == 0 {
+		return restricted
+	}
+
+	if len(restricted.GIDs) == 0 {
+		restricted.GIDs = slices.Clone(allowedGIDs)
+
+		return restricted
+	}
+
+	restricted.GIDs = intersectUint32s(restricted.GIDs, allowedGIDs)
+
+	return restricted
+}
+
+func intersectUint32s(values []uint32, allowed []uint32) []uint32 {
+	allowedSet := make(map[uint32]bool, len(allowed))
+	for _, value := range allowed {
+		allowedSet[value] = true
+	}
+
+	out := make([]uint32, 0, len(values))
+	for _, value := range values {
+		if allowedSet[value] {
+			out = append(out, value)
+		}
+	}
+
+	return out
+}
+
+func opWhereWithDigest(
+	name string,
+	qctx queryContext,
+	filter *db.Filter,
+	inputs map[string]any,
+	splits int,
+) op {
+	var resultCount uint64
+
+	return op{
+		name:   name,
+		inputs: inputs,
+		run: func(_ context.Context) error {
+			results, err := qctx.provider.Tree().Where(qctx.dir, filter, split.SplitsToSplitFn(splits))
+			if err != nil {
+				return err
+			}
+
+			resultCount = uint64(len(results))
+			inputs[navigationInputResultDigest] = dcssDigest(results)
+
+			return nil
+		},
+		resultCount: func() uint64 { return resultCount },
+	}
+}
+
+func opNoAuthWhere(qctx queryContext, splits int) op {
+	filter := treeFilterFromOptions(qctx.treeFilter)
+
+	return opWhereWithDigest(
+		queryOpNoAuthWhereName,
+		qctx,
+		filter,
+		treeOpInputs(filter, map[string]any{
+			queryInputDirKey:         qctx.dir,
+			queryInputCacheScope:     queryScopeSameProviderDir,
+			queryInputDurationSource: querySourceClickHouseLog,
+			queryInputSplitsKey:      splits,
+			queryInputStatusCodeKey:  200,
+			queryInputSurfaceKey:     queryInputSurfaceInProcessEquivalent,
+		}),
+		splits,
+	)
+}
+
+func opTreeWhereFreshProvider(qctx queryContext, splits int) op {
+	filter := treeFilterFromOptions(qctx.treeFilter)
+	inputs := treeOpInputs(filter, map[string]any{
+		queryInputDirKey:         qctx.dir,
+		queryInputCacheScope:     queryScopeFreshProvider,
+		queryInputDurationSource: querySourceWall,
+		queryInputSplitsKey:      splits,
+	})
+
+	var resultCount uint64
+
+	return op{
+		name:   queryOpTreeWhereFreshName,
+		inputs: inputs,
+		run: func(_ context.Context) error {
+			count, err := runTreeWhereFreshProvider(qctx, splits, filter, inputs)
 			resultCount = count
 
 			return err
@@ -949,7 +1239,12 @@ func opTreeWhereFreshProvider(qctx queryContext, splits int) op {
 	}
 }
 
-func runTreeWhereFreshProvider(qctx queryContext, splits int, filter *db.Filter) (uint64, error) {
+func runTreeWhereFreshProvider(
+	qctx queryContext,
+	splits int,
+	filter *db.Filter,
+	inputs map[string]any,
+) (uint64, error) {
 	if qctx.openProvider == nil {
 		return 0, errOpenProviderRequired
 	}
@@ -960,9 +1255,42 @@ func runTreeWhereFreshProvider(qctx queryContext, splits int, filter *db.Filter)
 	}
 
 	results, whereErr := p.Tree().Where(qctx.dir, filter, split.SplitsToSplitFn(splits))
+	if whereErr == nil && inputs != nil {
+		inputs[navigationInputResultDigest] = dcssDigest(results)
+	}
+
 	closeErr := p.Close()
 
 	return uint64(len(results)), errors.Join(whereErr, closeErr)
+}
+
+func permissionPathCandidate(client QueryClient, dir string) (string, permissionPathQueryClient, bool) {
+	path := pickPath(client, dir)
+	pathClient, ok := client.(permissionPathQueryClient)
+
+	return path, pathClient, ok && path != ""
+}
+
+func runPermissionChecks(
+	ctx context.Context,
+	qctx queryContext,
+	pathClient permissionPathQueryClient,
+	path string,
+	checkPath bool,
+) (uint64, error) {
+	if err := qctx.client.PermissionAnyInDir(ctx, qctx.dir, qctx.uid, qctx.gids); err != nil {
+		return 0, err
+	}
+
+	if !checkPath {
+		return 1, nil
+	}
+
+	if err := pathClient.PermissionPath(ctx, path, qctx.uid, qctx.gids); err != nil {
+		return 0, err
+	}
+
+	return 2, nil
 }
 
 func opResultCount(o op) uint64 {
@@ -1025,9 +1353,22 @@ func querySampleReadMarks(samples []queryRepeatSample) []uint64 {
 	return values
 }
 
-func querySampleResultCounts(samples []queryRepeatSample, o op) []uint64 {
-	if o.resultCount == nil {
+func querySampleMemoryBytes(samples []queryRepeatSample) []uint64 {
+	values, ok := querySampleMetricValues(samples, func(m *QueryMetrics) uint64 { return m.MemoryBytes })
+	if !ok {
 		return nil
+	}
+
+	return values
+}
+
+func querySampleResultCounts(samples []queryRepeatSample, o op) []uint64 {
+	if o.resultCounts != nil {
+		return o.resultCounts()
+	}
+
+	if o.resultCount == nil {
+		return querySampleResultRows(samples)
 	}
 
 	counts := make([]uint64, len(samples))
@@ -1036,6 +1377,15 @@ func querySampleResultCounts(samples []queryRepeatSample, o op) []uint64 {
 	}
 
 	return counts
+}
+
+func querySampleResultRows(samples []queryRepeatSample) []uint64 {
+	values, ok := querySampleMetricValues(samples, func(m *QueryMetrics) uint64 { return m.ResultRows })
+	if !ok {
+		return nil
+	}
+
+	return values
 }
 
 func focusedQueryOps(qctx queryContext, opts QueryOptions) []op {
@@ -1582,6 +1932,16 @@ func appendDisktreeWalkChildren(
 	return queue
 }
 
+type digestDirSummary struct {
+	Dir   string   `json:"dir"`
+	Count uint64   `json:"count"`
+	Size  uint64   `json:"size"`
+	UIDs  []uint32 `json:"uids"`
+	GIDs  []uint32 `json:"gids"`
+	FT    uint16   `json:"ft"`
+	Age   uint8    `json:"age"`
+}
+
 type disktreeWalkDir struct {
 	dir   string
 	depth int
@@ -2085,6 +2445,10 @@ func ValidateNavigationDecisionGate(e NavigationDecisionEvidence) NavigationDeci
 	}
 }
 
+type permissionPathQueryClient interface {
+	PermissionPath(ctx context.Context, path string, uid uint32, gids []uint32) error
+}
+
 func closeQueryResources(closers ...io.Closer) error {
 	var err error
 
@@ -2315,6 +2679,7 @@ func buildOps(qctx queryContext, opts QueryOptions, printf PrintfFunc) []op {
 	ops := []op{
 		opStartupCacheWarmingAudit(),
 		opMountTimestamps(qctx),
+		opInfo(qctx),
 		opTreeWhereColdThenCached(qctx, opts.Splits),
 		opTreeWhereColdProvider(qctx, opts.Splits),
 		opTreeDiskTreeEndpointColdProvider(qctx),
@@ -2339,6 +2704,9 @@ func buildOps(qctx queryContext, opts QueryOptions, printf PrintfFunc) []op {
 		opTreeDiskTreeEndpoint(qctx),
 		opTreeDiskTreeEndpointVisibleChildDirs(qctx),
 		opTreeWhere(qctx, opts.Splits),
+		opAuthTree(qctx),
+		opAuthWhereRestricted(qctx, opts.Splits),
+		opNoAuthWhere(qctx, opts.Splits),
 		opTreeWhereFreshProvider(qctx, opts.Splits),
 		opGroupUsage(qctx),
 		opListDir(qctx),
@@ -2389,19 +2757,21 @@ func activeMountsFreshness(mt map[string]time.Time) []activeMountFreshness {
 
 func opTreeDirInfo(qctx queryContext) op {
 	filter := treeFilterFromOptions(qctx.treeFilter)
+	inputs := treeOpInputs(filter, map[string]any{
+		queryInputDirKey:         qctx.dir,
+		queryInputCacheScope:     queryScopeSameProviderDir,
+		queryInputDurationSource: querySourceClickHouseLog,
+	})
 
 	var resultCount uint64
 
 	return op{
-		name: queryOpTreeDirInfoName,
-		inputs: treeOpInputs(filter, map[string]any{
-			queryInputDirKey:         qctx.dir,
-			queryInputCacheScope:     queryScopeSameProviderDir,
-			queryInputDurationSource: querySourceClickHouseLog,
-		}),
+		name:   queryOpTreeDirInfoName,
+		inputs: inputs,
 		run: func(_ context.Context) error {
 			info, err := qctx.provider.Tree().DirInfo(qctx.dir, filter)
 			resultCount = dirInfoResultCount(info)
+			inputs[navigationInputResultDigest] = dirInfoDigest(info)
 
 			return err
 		},
@@ -2452,7 +2822,7 @@ func opStatPath(qctx queryContext, printf PrintfFunc) []op {
 	return []op{{
 		name: queryOpFilesStatPathName,
 		inputs: map[string]any{
-			"path":                   pickedPath,
+			clickHouseFileFieldPath:  pickedPath,
 			queryInputCacheScope:     queryScopeSameQueryClient,
 			queryInputDurationSource: querySourceClickHouseLog,
 		},
@@ -2468,16 +2838,36 @@ func opStatPath(qctx queryContext, printf PrintfFunc) []op {
 }
 
 func opPermission(qctx queryContext) op {
+	inputs := map[string]any{
+		queryInputDirKey:         qctx.dir,
+		"uid":                    qctx.uid,
+		"gids":                   qctx.gids,
+		queryInputCacheScope:     queryScopeSameQueryClient,
+		queryInputDurationSource: querySourceClickHouseLog,
+	}
+	path, pathClient, hasPermissionPath := permissionPathCandidate(qctx.client, qctx.dir)
+	checks := []string{queryPermissionCheckAnyInDir}
+
+	if hasPermissionPath {
+		inputs[queryInputPermissionPathKey] = path
+
+		checks = append(checks, queryPermissionCheckPath)
+	}
+
+	inputs[queryInputPermissionChecksKey] = checks
+
+	var resultCount uint64
+
 	return op{
-		name: "permission_check",
-		inputs: map[string]any{
-			queryInputDirKey: qctx.dir,
-			"uid":            qctx.uid,
-			"gids":           qctx.gids,
-		},
+		name:   queryOpPermissionCheckName,
+		inputs: inputs,
 		run: func(ctx context.Context) error {
-			return qctx.client.PermissionAnyInDir(ctx, qctx.dir, qctx.uid, qctx.gids)
+			count, err := runPermissionChecks(ctx, qctx, pathClient, path, hasPermissionPath)
+			resultCount = count
+
+			return err
 		},
+		resultCount: func() uint64 { return resultCount },
 	}
 }
 
@@ -2595,13 +2985,14 @@ func runOp(
 	}
 
 	durations := querySampleDurations(samples)
-	report.AddOperationWithCounters(
+	report.AddOperationWithFullCounters(
 		o.name,
 		o.inputs,
 		durations,
 		querySampleReadRows(samples),
 		querySampleReadBytes(samples),
 		querySampleReadMarks(samples),
+		querySampleMemoryBytes(samples),
 		querySampleResultCounts(samples, o),
 	)
 
@@ -2656,9 +3047,9 @@ func printMetrics(
 	}
 
 	printf("  %s metrics: duration_ms=%d read_rows=%d "+
-		"read_bytes=%d read_marks=%d result_rows=%d result_bytes=%d\n",
+		"read_bytes=%d read_marks=%d memory_bytes=%d result_rows=%d result_bytes=%d\n",
 		name, m.DurationMs, m.ReadRows, m.ReadBytes,
-		m.ReadMarks, m.ResultRows, m.ResultBytes)
+		m.ReadMarks, m.MemoryBytes, m.ResultRows, m.ResultBytes)
 }
 
 type activeMountFreshness struct {
@@ -2674,6 +3065,7 @@ type op struct {
 	run               func(ctx context.Context) error
 	teardown          func(ctx context.Context) error
 	resultCount       func() uint64
+	resultCounts      func() []uint64
 	useWallTime       bool
 	skipWarmup        bool
 	hasRepeatOverride bool
@@ -2700,4 +3092,25 @@ func (q queryContext) resetCaches() {
 	if q.resetQueryCaches != nil {
 		q.resetQueryCaches()
 	}
+}
+
+func cacheHitKeysHaveE2Scope(keys []string) bool {
+	if len(keys) == 0 {
+		return false
+	}
+
+	for _, key := range keys {
+		if !cacheHitKeyHasE2Scope(key) {
+			return false
+		}
+	}
+
+	return true
+}
+
+func cacheHitKeyHasE2Scope(key string) bool {
+	return strings.Contains(key, "path=") &&
+		strings.Contains(key, "filter=") &&
+		strings.Contains(key, "active_set_id=") &&
+		strings.Contains(key, "query_version=")
 }

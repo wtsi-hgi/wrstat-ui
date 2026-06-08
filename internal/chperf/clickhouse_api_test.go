@@ -42,6 +42,7 @@ const (
 type recordingClickHouseFileClient struct {
 	listOpts      []clickhouse.ListOptions
 	statOpts      []clickhouse.StatOptions
+	permPathCalls []string
 	countGlobOpts []clickhouse.FindOptions
 	findOpts      []clickhouse.FindOptions
 }
@@ -76,6 +77,17 @@ func (*recordingClickHouseFileClient) PermissionAnyInDir(
 	uint32,
 	[]uint32,
 ) (bool, error) {
+	return true, nil
+}
+
+func (c *recordingClickHouseFileClient) PermissionPath(
+	_ context.Context,
+	path string,
+	_ uint32,
+	_ []uint32,
+) (bool, error) {
+	c.permPathCalls = append(c.permPathCalls, path)
+
 	return true, nil
 }
 
@@ -129,6 +141,9 @@ func TestClickHouseQueryClientUsesNarrowFileFields(t *testing.T) {
 		So(client.StatPath(ctx, clickHouseAPIFieldTestFilePath), ShouldBeNil)
 		So(recorder.statOpts, ShouldHaveLength, 1)
 		So(recorder.statOpts[0].Fields, ShouldResemble, []string{clickHouseFileFieldPath})
+
+		So(client.PermissionPath(ctx, clickHouseAPIFieldTestFilePath, 123, []uint32{456}), ShouldBeNil)
+		So(recorder.permPathCalls, ShouldResemble, []string{clickHouseAPIFieldTestFilePath})
 
 		count, err := client.FindByGlob(
 			ctx,

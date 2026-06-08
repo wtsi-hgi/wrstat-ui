@@ -49,6 +49,7 @@ type Operation struct {
 	ReadRows    []uint64       `json:"read_rows,omitempty"`
 	ReadBytes   []uint64       `json:"read_bytes,omitempty"`
 	ReadMarks   []uint64       `json:"read_marks,omitempty"`
+	MemoryBytes []uint64       `json:"memory_bytes,omitempty"`
 	ResultCount []uint64       `json:"result_counts,omitempty"`
 	P50MS       float64        `json:"p50_ms"`
 	P95MS       float64        `json:"p95_ms"`
@@ -57,11 +58,14 @@ type Operation struct {
 
 // TableStats captures physical ClickHouse table size evidence.
 type TableStats struct {
-	Rows                   uint64             `json:"rows"`
-	ActiveParts            uint64             `json:"active_parts"`
-	CompressedBytes        uint64             `json:"compressed_bytes"`
-	UncompressedBytes      uint64             `json:"uncompressed_bytes"`
-	ImportPhaseDurationsMS map[string]float64 `json:"import_phase_durations_ms,omitempty"`
+	Rows                       uint64             `json:"rows"`
+	ActiveParts                uint64             `json:"active_parts"`
+	CompressedBytes            uint64             `json:"compressed_bytes"`
+	UncompressedBytes          uint64             `json:"uncompressed_bytes"`
+	ImportMemoryBytes          uint64             `json:"import_memory_bytes,omitempty"`
+	RowAmplificationVsDirFacts float64            `json:"row_amplification_vs_wrstat_dir_facts,omitempty"`
+	RowAmplificationVsChildren float64            `json:"row_amplification_vs_wrstat_children,omitempty"`
+	ImportPhaseDurationsMS     map[string]float64 `json:"import_phase_durations_ms,omitempty"`
 }
 
 // FactsVectorStats captures wrstat_dir_facts vector-density evidence.
@@ -134,6 +138,30 @@ func (r *Report) AddOperationWithCounters(
 	readMarks []uint64,
 	resultCounts []uint64,
 ) {
+	r.AddOperationWithFullCounters(
+		name,
+		inputs,
+		durationsMS,
+		readRows,
+		readBytes,
+		readMarks,
+		nil,
+		resultCounts,
+	)
+}
+
+// AddOperationWithFullCounters appends a measured operation with per-repeat
+// storage counters, optional memory counters, and computed percentiles.
+func (r *Report) AddOperationWithFullCounters(
+	name string,
+	inputs map[string]any,
+	durationsMS []float64,
+	readRows []uint64,
+	readBytes []uint64,
+	readMarks []uint64,
+	memoryBytes []uint64,
+	resultCounts []uint64,
+) {
 	p50, p95, p99 := PercentilesMS(durationsMS)
 
 	r.Operations = append(r.Operations, Operation{
@@ -143,6 +171,7 @@ func (r *Report) AddOperationWithCounters(
 		ReadRows:    readRows,
 		ReadBytes:   readBytes,
 		ReadMarks:   readMarks,
+		MemoryBytes: memoryBytes,
 		ResultCount: resultCounts,
 		P50MS:       p50,
 		P95MS:       p95,

@@ -28,6 +28,9 @@ package clickhouse
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -1821,6 +1824,162 @@ func explainB2ActiveRootTupleQuery(
 	So(rows.Err(), ShouldBeNil)
 
 	return strings.Join(lines, "\n"), nil
+}
+
+func TestE2ClickHouseT283FilteredRESTAnomaly(t *testing.T) {
+	Convey("E2.1/E2.2 t283 type-only Where count and digest are independent of root warming order", t, func() {
+		env, cleanup := newE2T283OrderEnv(t)
+		defer cleanup()
+
+		filter := &db.Filter{FT: db.DGUTAFileTypeOther}
+		splitFn := split.SplitsToSplitFn(2)
+
+		directProvider, err := OpenProvider(env.cfg)
+		So(err, ShouldBeNil)
+		direct, err := directProvider.Tree().Where(testT283ImagingMountPath, filter, splitFn)
+		So(err, ShouldBeNil)
+		So(directProvider.Close(), ShouldBeNil)
+
+		resetSharedTreeQueryCachesForTesting()
+
+		warmedProvider, err := OpenProvider(env.cfg)
+		So(err, ShouldBeNil)
+		_, err = warmedProvider.Tree().Where("/", filter, splitFn)
+		So(err, ShouldBeNil)
+		warmed, err := warmedProvider.Tree().Where(testT283ImagingMountPath, filter, splitFn)
+		So(err, ShouldBeNil)
+		So(warmedProvider.Close(), ShouldBeNil)
+
+		So(e2DCSsDigest(direct), ShouldEqual, e2DCSsDigest(warmed))
+		So(len(direct), ShouldEqual, len(warmed))
+		So(len(direct), ShouldEqual, 3)
+		So(len(direct), ShouldNotEqual, 2)
+	})
+
+	Convey("E2.3 active-prefix cache hit keys include path, filter, active set id, and query version", t, func() {
+		cache := newTreeQueryCache()
+		filter := &db.Filter{
+			FT:  db.DGUTAFileTypeOther,
+			Age: db.DGUTAgeAll,
+		}
+		key := newTreeActivePrefixSummaryCacheKey(
+			"e2-active-set",
+			testT283ImagingMountPath,
+			filter,
+			treePermissionCacheInputs{},
+			currentSchemaVersion,
+			activePrefixDirSummaryQueryVersion,
+		)
+
+		cache.putActivePrefixDirSummary(key, &db.DirSummary{Dir: testT283ImagingMountPath, Count: 87})
+		_, ok := cache.getActivePrefixDirSummary(key)
+		So(ok, ShouldBeTrue)
+
+		stats := cache.stats()
+		So(stats.activePrefixSummaryHitKeys, ShouldHaveLength, 1)
+
+		hitKey := stats.activePrefixSummaryHitKeys[0]
+		So(hitKey, ShouldContainSubstring, "path=/nfs/t283_imaging/")
+		So(hitKey, ShouldContainSubstring, "filter=")
+		So(hitKey, ShouldContainSubstring, "active_set_id=e2-active-set")
+		So(hitKey, ShouldContainSubstring, "query_version=1")
+	})
+}
+
+func newE2T283OrderEnv(t *testing.T) (*e2T283OrderEnv, func()) {
+	t.Helper()
+
+	os.Setenv("WRSTAT_ENV", "test")
+	resetSharedTreeQueryCachesForTesting()
+
+	th := newClickHouseTestHarness(t)
+	cfg := th.newConfig()
+	cfg.QueryTimeout = 10 * time.Second
+	cfg.PollInterval = 0
+	cfg.MountPoints = []string{"/"}
+
+	p, err := OpenProvider(cfg)
+	So(err, ShouldBeNil)
+	So(p.Close(), ShouldBeNil)
+
+	conn := th.openConn(cfg.DSN)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+
+	updatedAt := time.Date(2026, 6, 7, 12, 0, 0, 0, time.UTC)
+	sid := snapshotID(testT283ImagingMountPath, updatedAt)
+	mount := activeMount{
+		mountPath:  testT283ImagingMountPath,
+		snapshotID: sid.String(),
+		updatedAt:  updatedAt,
+	}
+	So(conn.Exec(ctx, testInsertMountStmt, mount.mountPath, time.Now(), sid, updatedAt), ShouldBeNil)
+
+	insertE2T283Summary(ctx, conn, mount, "/", 87)
+	insertE2T283Summary(ctx, conn, mount, nfsAncestor, 87)
+	insertE2T283Summary(ctx, conn, mount, testT283ImagingMountPath, 87)
+	insertE2T283Summary(ctx, conn, mount, testT283ImagingMountPath+"plateA/", 50)
+	insertE2T283Summary(ctx, conn, mount, testT283ImagingMountPath+"plateB/", 37)
+	So(conn.Exec(ctx, testInsertChildrenStmt, mount.mountPath, mount.snapshotID, "/", "/nfs"), ShouldBeNil)
+	So(conn.Exec(
+		ctx, testInsertChildrenStmt, mount.mountPath, mount.snapshotID, nfsAncestor, "/nfs/t283_imaging",
+	), ShouldBeNil)
+	So(conn.Exec(ctx, testInsertChildrenStmt, mount.mountPath, mount.snapshotID,
+		testT283ImagingMountPath, testT283ImagingMountPath+"plateA"), ShouldBeNil)
+	So(conn.Exec(ctx, testInsertChildrenStmt, mount.mountPath, mount.snapshotID,
+		testT283ImagingMountPath, testT283ImagingMountPath+"plateB"), ShouldBeNil)
+	So(writeMaintainedMountDirProjectionForTest(ctx, conn, mount), ShouldBeNil)
+	insertDirFilterAgeAllRowsFromFactsForTest(ctx, conn, mount)
+	So(ensureActivePrefixRollups(ctx, conn, []mountsActiveRow{mountsActiveRow(mount)}), ShouldBeNil)
+
+	return &e2T283OrderEnv{cfg: cfg, conn: conn}, func() {
+		cancel()
+		So(conn.Close(), ShouldBeNil)
+		resetSharedTreeQueryCachesForTesting()
+		os.Unsetenv("WRSTAT_ENV")
+	}
+}
+
+func insertE2T283Summary(ctx context.Context, conn ch.Conn, mount activeMount, dir string, count uint64) {
+	So(conn.Exec(ctx,
+		testInsertDGUTAStmt,
+		mount.mountPath,
+		mount.snapshotID,
+		dir,
+		uint32(14976),
+		uint32(20155),
+		uint16(db.DGUTAFileTypeOther),
+		uint8(db.DGUTAgeAll),
+		count,
+		count*10,
+		int64(10),
+		int64(20),
+		[]uint64{count, 0, 0, 0, 0, 0, 0, 0, 0},
+		[]uint64{0, count, 0, 0, 0, 0, 0, 0, 0},
+	), ShouldBeNil)
+}
+
+func e2DCSsDigest(dcss db.DCSs) string {
+	data, err := json.Marshal(e2DigestSummaries(dcss))
+	So(err, ShouldBeNil)
+
+	sum := sha256.Sum256(data)
+
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+func e2DigestSummaries(dcss db.DCSs) []e2DigestSummary {
+	summaries := make([]e2DigestSummary, 0, len(dcss))
+	for _, summary := range dcss {
+		summaries = append(summaries, e2DigestSummary{
+			Dir:   summary.Dir,
+			Count: summary.Count,
+			Size:  summary.Size,
+			FT:    uint16(summary.FT),
+			Age:   uint8(summary.Age),
+		})
+	}
+
+	return summaries
 }
 
 type b2MountSeed struct {
@@ -6510,6 +6669,19 @@ func TestClickHouseDatabaseWhereFastPath(t *testing.T) {
 
 func (c *whereQueryCountingConn) summaryBatchQueryCountValue() int {
 	return int(c.summaryBatchQueries.Load())
+}
+
+type e2T283OrderEnv struct {
+	cfg  Config
+	conn ch.Conn
+}
+
+type e2DigestSummary struct {
+	Dir   string `json:"dir"`
+	Count uint64 `json:"count"`
+	Size  uint64 `json:"size"`
+	FT    uint16 `json:"ft"`
+	Age   uint8  `json:"age"`
 }
 
 type ancestorSummaryQueryCountingConn struct {

@@ -37,6 +37,10 @@ import (
 
 // groupNameToGID converts group name to GID.
 func groupNameToGID(name string) (string, error) {
+	if numericIDString(name) {
+		return name, nil
+	}
+
 	g, err := user.LookupGroup(name)
 	if err != nil {
 		return "", err
@@ -59,10 +63,10 @@ func makeFilterFromContext(c *gin.Context) (*db.Filter, error) {
 }
 
 func getFilterArgsFromContext(c *gin.Context) (groups string, users string, types string, age string) {
-	groups = c.Query("groups")
-	users = c.Query("users")
-	types = c.Query("types")
-	age = c.Query("age")
+	groups = c.Query(queryParamGroups)
+	users = c.Query(queryParamUsers)
+	types = c.Query(queryParamTypes)
+	age = c.Query(queryParamAge)
 
 	return
 }
@@ -102,7 +106,13 @@ func makeFilterGivenGIDs(filterGIDs []uint32, users, types, age string) (*db.Fil
 // the groups they belong to; security restrictions are purely based on the
 // enforced restrictedGroups().
 func userIDsFromNames(users string) ([]uint32, error) {
-	ids, err := getWantedIDs(users, gas.UserNameToUID)
+	ids, err := getWantedIDs(users, func(name string) (string, error) {
+		if numericIDString(name) {
+			return name, nil
+		}
+
+		return gas.UserNameToUID(name)
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -205,6 +215,27 @@ func idStringsToInts(idString string) uint32 {
 	return uint32(id)
 }
 
+func numericIDString(value string) bool {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return false
+	}
+
+	_, err := strconv.ParseUint(trimmed, 10, 32)
+
+	return err == nil
+}
+
+func cachedNameToID(cache map[uint32]string, name string) (string, bool) {
+	for id, cachedName := range cache {
+		if cachedName == name {
+			return strconv.FormatUint(uint64(id), 10), true
+		}
+	}
+
+	return "", false
+}
+
 // restrictGIDs returns the keys of allowedIDs that are in wantedIDs. Will
 // return allowedIDs if wanted is empty; will return wantedIDs if allowedIDs is
 // nil. Returns an error if you don't want any of the allowedIDs.
@@ -238,6 +269,56 @@ func restrictGIDs(allowedIDs map[uint32]bool, wantedIDs []uint32) ([]uint32, err
 	}
 
 	return final, nil
+}
+
+func (s *Server) makeFilterGivenGIDs(filterGIDs []uint32, users, types, age string) (*db.Filter, error) {
+	filterUIDs, err := s.userIDsFromNames(users)
+	if err != nil {
+		return nil, err
+	}
+
+	return makeTreeFilter(filterGIDs, filterUIDs, types, age)
+}
+
+func (s *Server) userIDsFromNames(users string) ([]uint32, error) {
+	ids, err := getWantedIDs(users, s.userNameToUID)
+	if err != nil {
+		return nil, err
+	}
+
+	return ids, nil
+}
+
+func (s *Server) userNameToUID(name string) (string, error) {
+	if numericIDString(name) {
+		return name, nil
+	}
+
+	s.nameCacheMu.RLock()
+
+	if id, ok := cachedNameToID(s.uidToNameCache, name); ok {
+		s.nameCacheMu.RUnlock()
+
+		return id, nil
+	}
+
+	s.nameCacheMu.RUnlock()
+
+	return gas.UserNameToUID(name)
+}
+
+func (s *Server) groupNameToGID(name string) (string, error) {
+	s.nameCacheMu.RLock()
+
+	if id, ok := cachedNameToID(s.gidToNameCache, name); ok {
+		s.nameCacheMu.RUnlock()
+
+		return id, nil
+	}
+
+	s.nameCacheMu.RUnlock()
+
+	return groupNameToGID(name)
 }
 
 // allowedGIDs checks our JWT if present, and will return the GIDs that
@@ -292,15 +373,41 @@ func (s *Server) makeRestrictedFilterFromContext(c *gin.Context) (*db.Filter, er
 		return nil, err
 	}
 
-	return makeFilterGivenGIDs(restrictedGIDs, users, types, age)
+	return s.makeFilterGivenGIDs(restrictedGIDs, users, types, age)
 }
 
-func (s *Server) getRestrictedGIDs(c *gin.Context, groups string) ([]uint32, error) {
-	filterGIDs, err := getWantedIDs(groups, groupNameToGID)
+func (s *Server) makeAuthTreeFilterFromContext(c *gin.Context) (*db.Filter, error) {
+	groups, users, types, age := getFilterArgsFromContext(c)
+
+	filterGIDs, err := s.groupIDsFromNames(groups)
 	if err != nil {
 		return nil, err
 	}
 
+	if len(filterGIDs) > 0 {
+		filterGIDs, err = s.restrictRequestedGIDs(c, filterGIDs)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return s.makeFilterGivenGIDs(filterGIDs, users, types, age)
+}
+
+func (s *Server) getRestrictedGIDs(c *gin.Context, groups string) ([]uint32, error) {
+	filterGIDs, err := s.groupIDsFromNames(groups)
+	if err != nil {
+		return nil, err
+	}
+
+	return s.restrictRequestedGIDs(c, filterGIDs)
+}
+
+func (s *Server) groupIDsFromNames(groups string) ([]uint32, error) {
+	return getWantedIDs(groups, s.groupNameToGID)
+}
+
+func (s *Server) restrictRequestedGIDs(c *gin.Context, filterGIDs []uint32) ([]uint32, error) {
 	allowedGIDs, err := s.allowedGIDs(c)
 	if err != nil {
 		return nil, err

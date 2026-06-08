@@ -58,42 +58,46 @@ const (
 	lineReaderBufSize = 32 * 1024
 	maxImportParallel = 4
 
-	phasePartitionDropReset = "partition_drop_reset"
-	phaseFilesInsert        = "wrstat_files_insert"
-	phaseFilesFlush         = "wrstat_files_flush"
-	phaseDGUTAInsert        = "wrstat_dguta_insert"
-	phaseChildrenInsert     = "wrstat_children_insert"
-	phaseParentFactsInsert  = "wrstat_parent_facts_insert"
-	phaseDirProjectionWrite = "wrstat_dir_projection_insert"
-	phaseMountSwitch        = "mount_switch"
-	phaseTreeSummaryRefresh = "wrstat_tree_summary_refresh"
-	phaseOldSnapshotDrop    = "old_snapshot_partition_drop"
-	phaseBasedirsReset      = "wrstat_basedirs_reset"
-	phaseBasedirsGroupUsage = "wrstat_basedirs_group_usage_insert"
-	phaseBasedirsUserUsage  = "wrstat_basedirs_user_usage_insert"
-	phaseBasedirsGroupSubs  = "wrstat_basedirs_group_subdirs_insert"
-	phaseBasedirsUserSubs   = "wrstat_basedirs_user_subdirs_insert"
-	phaseBasedirsHistory    = "wrstat_basedirs_history_insert"
-	phaseBasedirsFinalise   = "wrstat_basedirs_finalise"
-	phaseBasedirsFlush      = "wrstat_basedirs_flush"
+	phasePartitionDropReset  = "partition_drop_reset"
+	phaseFilesInsert         = "wrstat_files_insert"
+	phaseFilesFlush          = "wrstat_files_flush"
+	phaseDGUTAInsert         = "wrstat_dguta_insert"
+	phaseChildrenInsert      = "wrstat_children_insert"
+	phaseParentFactsInsert   = "wrstat_parent_facts_insert"
+	phaseDirProjectionWrite  = "wrstat_dir_projection_insert"
+	phaseMountSwitch         = "mount_switch"
+	phaseTreeSummaryRefresh  = "wrstat_tree_summary_refresh"
+	phaseActivePrefixRefresh = "wrstat_active_prefix_rollup_refresh"
+	phaseOldSnapshotDrop     = "old_snapshot_partition_drop"
+	phaseBasedirsReset       = "wrstat_basedirs_reset"
+	phaseBasedirsGroupUsage  = "wrstat_basedirs_group_usage_insert"
+	phaseBasedirsUserUsage   = "wrstat_basedirs_user_usage_insert"
+	phaseBasedirsGroupSubs   = "wrstat_basedirs_group_subdirs_insert"
+	phaseBasedirsUserSubs    = "wrstat_basedirs_user_subdirs_insert"
+	phaseBasedirsHistory     = "wrstat_basedirs_history_insert"
+	phaseBasedirsFinalise    = "wrstat_basedirs_finalise"
+	phaseBasedirsFlush       = "wrstat_basedirs_flush"
 
-	tableFiles                = "wrstat_files"
-	tableDGUTA                = "wrstat_dguta"
-	tableChildren             = "wrstat_children"
-	tableParentFacts          = "wrstat_parent_facts"
-	tableDirSummary           = "wrstat_dir_facts"
-	tableDirSummarySets       = "wrstat_dir_projection_sets"
-	tableDirDGUTAVector       = "wrstat_dir_facts"
-	tableTreeSummarySets      = "wrstat_tree_summary_sets"
-	tableTreeDGUTA            = "wrstat_virtual_summary_cache"
-	tableTreeDirSummary       = "wrstat_tree_dir_summary"
-	tableTreeChildren         = "wrstat_tree_children"
-	tableBasedirsGroupUsage   = "wrstat_basedirs_group_usage"
-	tableBasedirsUserUsage    = "wrstat_basedirs_user_usage"
-	tableBasedirsGroupSubdirs = "wrstat_basedirs_group_subdirs"
-	tableBasedirsUserSubdirs  = "wrstat_basedirs_user_subdirs"
-	tableBasedirsHistory      = "wrstat_basedirs_history"
-	tableDirFilterAgeAll      = "wrstat_dir_filter_ageall"
+	tableFiles                    = "wrstat_files"
+	tableDGUTA                    = "wrstat_dguta"
+	tableChildren                 = "wrstat_children"
+	tableParentFacts              = "wrstat_parent_facts"
+	tableDirSummary               = "wrstat_dir_facts"
+	tableDirSummarySets           = "wrstat_dir_projection_sets"
+	tableDirDGUTAVector           = "wrstat_dir_facts"
+	tableTreeSummarySets          = "wrstat_tree_summary_sets"
+	tableTreeDGUTA                = "wrstat_virtual_summary_cache"
+	tableTreeDirSummary           = "wrstat_tree_dir_summary"
+	tableTreeChildren             = "wrstat_tree_children"
+	tableBasedirsGroupUsage       = "wrstat_basedirs_group_usage"
+	tableBasedirsUserUsage        = "wrstat_basedirs_user_usage"
+	tableBasedirsGroupSubdirs     = "wrstat_basedirs_group_subdirs"
+	tableBasedirsUserSubdirs      = "wrstat_basedirs_user_subdirs"
+	tableBasedirsHistory          = "wrstat_basedirs_history"
+	tableDirFilterAgeAll          = "wrstat_dir_filter_ageall"
+	tableActivePrefixRollups      = "wrstat_active_prefix_rollups"
+	tableActivePrefixFilterAgeAll = "wrstat_active_prefix_filter_ageall"
+	tableActivePrefixRollupSets   = "wrstat_active_prefix_rollup_sets"
 )
 
 const (
@@ -111,6 +115,7 @@ const (
 	importInputStatsPath = "stats_path"
 	importInputMountPath = "mount_path"
 	importInputRecords   = "records"
+	importInputRowCap    = "row_cap"
 )
 
 // ErrNoDatasets indicates no dataset directories were found.
@@ -142,7 +147,13 @@ func Import(
 		return perfreport.Report{}, err
 	}
 
-	addImportReportOperations(&report, results, effectiveParallelism(opts.Parallelism), time.Since(startAll))
+	addImportReportOperations(
+		&report,
+		results,
+		effectiveParallelism(opts.Parallelism),
+		time.Since(startAll),
+		opts.MaxLines,
+	)
 
 	if err := enrichImportReport(context.Background(), &report, api, results); err != nil {
 		return perfreport.Report{}, err
@@ -171,18 +182,23 @@ func addImportReportOperations(
 	results []datasetImportResult,
 	parallelism int,
 	totalDuration time.Duration,
+	rowCap int,
 ) {
 	totalRecords := totalImportRecords(results)
+	rowCapInput := importRowCapInput(rowCap)
 
 	for _, result := range results {
-		report.AddOperation("import_file_total", map[string]any{
+		inputs := map[string]any{
 			importInputDataset:           result.dataset,
 			importInputStatsPath:         result.statsPath,
 			importInputMountPath:         result.mountPath,
 			"lines":                      result.lines,
 			"rows_per_table":             importRowsByPhysicalTable(result.rows),
 			"throughput_records_per_sec": throughputPerSecond(result.records(), result.elapsed),
-		}, []float64{durationMS(result.elapsed)})
+		}
+		addImportRowCapInput(inputs, rowCapInput)
+
+		report.AddOperation("import_file_total", inputs, []float64{durationMS(result.elapsed)})
 
 		for _, phase := range sortedImportPhases(result.phases) {
 			inputs := map[string]any{
@@ -191,21 +207,59 @@ func addImportReportOperations(
 				importInputMountPath: result.mountPath,
 				"phase":              phase,
 			}
+			addImportRowCapInput(inputs, rowCapInput)
 			addImportPhaseInputs(inputs, result, phase)
 
 			report.AddOperation("import_phase", inputs, []float64{durationMS(result.phases[phase])})
 		}
 
-		addImportGuardrailOperations(report, result)
+		addImportGuardrailOperations(report, result, rowCapInput)
 	}
 
-	report.AddOperation("import_total", map[string]any{
+	inputs := map[string]any{
 		"datasets":                   len(results),
 		importInputRecords:           totalRecords,
 		"parallelism":                parallelism,
 		"mode":                       importMode(parallelism),
 		"throughput_records_per_sec": throughputPerSecond(totalRecords, totalDuration),
-	}, []float64{durationMS(totalDuration)})
+	}
+	addImportRowCapInput(inputs, rowCapInput)
+
+	report.AddOperation("import_total", inputs, []float64{durationMS(totalDuration)})
+}
+
+func importRowCapInput(rowCap int) uint64 {
+	if rowCap <= 0 {
+		return 0
+	}
+
+	return uint64(rowCap)
+}
+
+func addImportRowCapInput(inputs map[string]any, rowCap uint64) {
+	if rowCap > 0 {
+		inputs[importInputRowCap] = rowCap
+	}
+}
+
+func addImportDerivedTableEvidence(stats map[string]perfreport.TableStats, memoryBytes uint64) {
+	dirFactsRows := stats[tableDirSummary].Rows
+	childrenRows := stats[tableChildren].Rows
+
+	for table, tableStats := range stats {
+		tableStats.ImportMemoryBytes = memoryBytes
+		tableStats.RowAmplificationVsDirFacts = rowAmplification(tableStats.Rows, dirFactsRows)
+		tableStats.RowAmplificationVsChildren = rowAmplification(tableStats.Rows, childrenRows)
+		stats[table] = tableStats
+	}
+}
+
+func rowAmplification(rows uint64, baselineRows uint64) float64 {
+	if rows == 0 || baselineRows == 0 {
+		return 0
+	}
+
+	return float64(rows) / float64(baselineRows)
 }
 
 func cloneMap[M ~map[K]V, K comparable, V any](src M) M {
@@ -304,9 +358,10 @@ func importMultiTablePhase(phase string) ([]string, bool) {
 			tableBasedirsUserUsage,
 			tableBasedirsGroupSubdirs,
 			tableBasedirsUserSubdirs,
+			tableDirFilterAgeAll,
 		}, true
 	case phaseDirProjectionWrite:
-		return []string{tableDirSummary, tableDirSummarySets, tableDirDGUTAVector}, true
+		return []string{tableDirSummary, tableDirSummarySets, tableDirDGUTAVector, tableDirFilterAgeAll}, true
 	case phaseBasedirsReset, phaseBasedirsFlush:
 		return []string{
 			tableBasedirsGroupUsage,
@@ -318,6 +373,8 @@ func importMultiTablePhase(phase string) ([]string, bool) {
 		return []string{tableBasedirsGroupUsage, tableBasedirsHistory}, true
 	case phaseTreeSummaryRefresh:
 		return []string{tableTreeSummarySets, tableTreeDGUTA, tableTreeDirSummary, tableTreeChildren}, true
+	case phaseActivePrefixRefresh:
+		return []string{tableActivePrefixRollups, tableActivePrefixFilterAgeAll, tableActivePrefixRollupSets}, true
 	default:
 		return nil, false
 	}
@@ -333,15 +390,16 @@ func totalImportRecords(results []datasetImportResult) uint64 {
 	return total
 }
 
-func addImportGuardrailOperations(report *perfreport.Report, result datasetImportResult) {
-	addRawFileIngestGuardrail(report, result)
-	addPhaseImportGuardrail(report, result, importGuardrailActiveSnapshotPublish, phaseMountSwitch, nil)
+func addImportGuardrailOperations(report *perfreport.Report, result datasetImportResult, rowCap uint64) {
+	addRawFileIngestGuardrail(report, result, rowCap)
+	addPhaseImportGuardrail(report, result, importGuardrailActiveSnapshotPublish, phaseMountSwitch, nil, rowCap)
 	addPhaseImportGuardrail(
 		report,
 		result,
 		importGuardrailMaintainedDirProjection,
 		phaseDirProjectionWrite,
 		importGuardrailTables(phaseDirProjectionWrite),
+		rowCap,
 	)
 	addPhaseImportGuardrail(
 		report,
@@ -349,12 +407,14 @@ func addImportGuardrailOperations(report *perfreport.Report, result datasetImpor
 		importGuardrailActiveTreeSummaryRefresh,
 		phaseTreeSummaryRefresh,
 		importGuardrailTables(phaseTreeSummaryRefresh),
+		rowCap,
 	)
 }
 
-func addRawFileIngestGuardrail(report *perfreport.Report, result datasetImportResult) {
+func addRawFileIngestGuardrail(report *perfreport.Report, result datasetImportResult, rowCap uint64) {
 	status, duration := importGuardrailStatusAndDuration(rawFileIngestObserved(result), result.elapsed)
 	inputs := importGuardrailInputs(result, importGuardrailRawFileIngest, status)
+	addImportRowCapInput(inputs, rowCap)
 	inputs["table"] = tableFiles
 	inputs["rows"] = result.rows[tableFiles]
 	inputs["lines"] = result.lines
@@ -400,10 +460,12 @@ func addPhaseImportGuardrail(
 	guardrail string,
 	phase string,
 	tables []string,
+	rowCap uint64,
 ) {
 	phaseDuration, observed := result.phases[phase]
 	status, duration := importGuardrailStatusAndDuration(observed, phaseDuration)
 	inputs := importGuardrailInputs(result, guardrail, status)
+	addImportRowCapInput(inputs, rowCap)
 	inputs["phase"] = phase
 
 	if len(tables) > 0 {
@@ -451,9 +513,11 @@ func enrichImportReport(
 
 	addImportPhaseDurations(tableStats, results)
 
+	report.MaxRSSBytes = maxRSSBytes()
+	addImportDerivedTableEvidence(tableStats, report.MaxRSSBytes)
+
 	report.SelectedTables = selectedTables
 	report.TableStats = tableStatsForSelectedTables(tableStats, selectedTables)
-	report.MaxRSSBytes = maxRSSBytes()
 
 	return nil
 }
@@ -461,7 +525,7 @@ func enrichImportReport(
 func selectedImportTables(collected map[string]perfreport.TableStats) []string {
 	selected := baseImportSelectedTables()
 
-	for _, optional := range []string{tableDirFilterAgeAll, tableTreeDGUTA} {
+	for _, optional := range []string{tableTreeDGUTA} {
 		if importTableSelected(collected[optional]) {
 			selected = append(selected, optional)
 		}
@@ -482,6 +546,10 @@ func baseImportSelectedTables() []string {
 		tableBasedirsGroupSubdirs,
 		tableBasedirsUserSubdirs,
 		tableBasedirsHistory,
+		tableDirFilterAgeAll,
+		tableActivePrefixRollups,
+		tableActivePrefixFilterAgeAll,
+		tableActivePrefixRollupSets,
 	}
 }
 
@@ -547,7 +615,7 @@ func collectImportReportStats(
 
 func importStatsCandidateTables() []string {
 	tables := baseImportSelectedTables()
-	tables = append(tables, tableDirFilterAgeAll, tableTreeDGUTA)
+	tables = append(tables, tableTreeDGUTA)
 
 	return tables
 }

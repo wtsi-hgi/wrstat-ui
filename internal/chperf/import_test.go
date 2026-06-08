@@ -423,7 +423,7 @@ func TestTrackedBasedirsStoreHistoryRows(t *testing.T) {
 		So(result.rows[tableBasedirsHistory], ShouldEqual, 1)
 
 		report := boltperf.NewReport("clickhouse", "/input", 1, 0)
-		addImportReportOperations(&report, []datasetImportResult{result}, 1, time.Second)
+		addImportReportOperations(&report, []datasetImportResult{result}, 1, time.Second, 0)
 
 		historyPhase := findImportOperation(report.Operations, "import_phase", phaseBasedirsHistory)
 		So(historyPhase, ShouldNotBeNil)
@@ -475,15 +475,16 @@ func findImportOperation(ops []boltperf.Operation, name, phase string) *boltperf
 }
 
 type fakeImportAPI struct {
-	dgutaWriter   *fakeImportDGUTAWriter
-	fileCloser    *fakeImportCloser
-	baseDirsStore *historyTrackingBasedirsStore
-	tableStats    map[string]perfreport.TableStats
-	vectorStats   perfreport.FactsVectorStats
-	bucketStats   perfreport.FactsBucketStats
-	fileMountPath string
-	fileUpdatedAt time.Time
-	baseDirsCalls int
+	dgutaWriter      *fakeImportDGUTAWriter
+	fileCloser       *fakeImportCloser
+	baseDirsStore    *historyTrackingBasedirsStore
+	tableStats       map[string]perfreport.TableStats
+	tableStatsTables []string
+	vectorStats      perfreport.FactsVectorStats
+	bucketStats      perfreport.FactsBucketStats
+	fileMountPath    string
+	fileUpdatedAt    time.Time
+	baseDirsCalls    int
 }
 
 func (a *fakeImportAPI) NewDGUTAWriter() (db.DGUTAWriter, error) {
@@ -519,9 +520,11 @@ func (a *fakeImportAPI) NewBaseDirsStore() (basedirs.Store, error) {
 }
 
 func (a *fakeImportAPI) ImportTableStats(
-	context.Context,
-	[]string,
+	_ context.Context,
+	tables []string,
 ) (map[string]perfreport.TableStats, error) {
+	a.tableStatsTables = append([]string(nil), tables...)
+
 	return a.tableStats, nil
 }
 
@@ -550,11 +553,12 @@ func TestImportReportEnrichment(t *testing.T) {
 				tableBasedirsHistory:      1,
 			},
 			phases: map[string]time.Duration{
-				phaseFilesInsert:        10 * time.Millisecond,
-				phaseDirProjectionWrite: 20 * time.Millisecond,
-				phaseChildrenInsert:     30 * time.Millisecond,
-				phaseParentFactsInsert:  50 * time.Millisecond,
-				phaseBasedirsGroupUsage: 40 * time.Millisecond,
+				phaseFilesInsert:         10 * time.Millisecond,
+				phaseDirProjectionWrite:  20 * time.Millisecond,
+				phaseChildrenInsert:      30 * time.Millisecond,
+				phaseParentFactsInsert:   50 * time.Millisecond,
+				phaseBasedirsGroupUsage:  40 * time.Millisecond,
+				phaseActivePrefixRefresh: 60 * time.Millisecond,
 			},
 		}
 		api := &fakeImportAPI{
@@ -595,6 +599,24 @@ func TestImportReportEnrichment(t *testing.T) {
 					CompressedBytes:   90,
 					UncompressedBytes: 180,
 				},
+				tableActivePrefixRollups: {
+					Rows:              3,
+					ActiveParts:       1,
+					CompressedBytes:   30,
+					UncompressedBytes: 60,
+				},
+				tableActivePrefixFilterAgeAll: {
+					Rows:              9,
+					ActiveParts:       1,
+					CompressedBytes:   90,
+					UncompressedBytes: 180,
+				},
+				tableActivePrefixRollupSets: {
+					Rows:              1,
+					ActiveParts:       1,
+					CompressedBytes:   10,
+					UncompressedBytes: 20,
+				},
 			},
 			vectorStats: perfreport.FactsVectorStats{
 				Rows:                 3,
@@ -624,6 +646,14 @@ func TestImportReportEnrichment(t *testing.T) {
 		So(report.SelectedTables, ShouldContain, tableDirFilterAgeAll)
 		So(report.SelectedTables, ShouldContain, tableParentFacts)
 		So(report.SelectedTables, ShouldContain, tableTreeDGUTA)
+		So(report.SelectedTables, ShouldContain, tableActivePrefixRollups)
+		So(report.SelectedTables, ShouldContain, tableActivePrefixFilterAgeAll)
+		So(report.SelectedTables, ShouldContain, tableActivePrefixRollupSets)
+
+		So(api.tableStatsTables, ShouldContain, tableDirFilterAgeAll)
+		So(api.tableStatsTables, ShouldContain, tableActivePrefixRollups)
+		So(api.tableStatsTables, ShouldContain, tableActivePrefixFilterAgeAll)
+		So(api.tableStatsTables, ShouldContain, tableActivePrefixRollupSets)
 
 		files := report.TableStats[tableFiles]
 		So(files.Rows, ShouldEqual, uint64(42))
@@ -649,6 +679,10 @@ func TestImportReportEnrichment(t *testing.T) {
 		basedirs := report.TableStats[tableBasedirsGroupUsage]
 		So(basedirs.Rows, ShouldEqual, uint64(1))
 		So(basedirs.ImportPhaseDurationsMS[phaseBasedirsGroupUsage], ShouldEqual, float64(40))
+
+		activePrefix := report.TableStats[tableActivePrefixRollups]
+		So(activePrefix.Rows, ShouldEqual, uint64(3))
+		So(activePrefix.ImportPhaseDurationsMS[phaseActivePrefixRefresh], ShouldEqual, float64(60))
 
 		So(report.FactsVectorStats, ShouldResemble, &api.vectorStats)
 		So(report.FactsBucketStats, ShouldResemble, &api.bucketStats)
@@ -861,18 +895,20 @@ func TestImportReportOperations(t *testing.T) {
 				phaseBasedirsGroupUsage:         75 * time.Millisecond,
 				phaseBasedirsFinalise:           25 * time.Millisecond,
 				phaseBasedirsFlush:              10 * time.Millisecond,
+				phaseActivePrefixRefresh:        60 * time.Millisecond,
 			},
 		}
 
-		addImportReportOperations(&report, []datasetImportResult{result}, 2, 2*time.Second)
+		addImportReportOperations(&report, []datasetImportResult{result}, 2, 2*time.Second, 100_000)
 
-		So(report.Operations, ShouldHaveLength, 19)
+		So(report.Operations, ShouldHaveLength, 20)
 
 		fileTotal := findImportOperation(report.Operations, "import_file_total", "")
 		So(fileTotal, ShouldNotBeNil)
 		So(fileTotal.Inputs["dataset"], ShouldEqual, result.dataset)
 		So(fileTotal.Inputs["mount_path"], ShouldEqual, result.mountPath)
 		So(fileTotal.Inputs["lines"], ShouldEqual, result.lines)
+		So(fileTotal.Inputs[importInputRowCap], ShouldEqual, uint64(100_000))
 
 		rows, ok := fileTotal.Inputs["rows_per_table"].(map[string]uint64)
 		So(ok, ShouldBeTrue)
@@ -901,14 +937,21 @@ func TestImportReportOperations(t *testing.T) {
 			tableBasedirsUserUsage,
 			tableBasedirsGroupSubdirs,
 			tableBasedirsUserSubdirs,
+			tableDirFilterAgeAll,
 		})
 		So(partitionReset.DurationsMS, ShouldResemble, []float64{160})
 
 		dirProjectionWrite := findImportOperation(report.Operations, "import_phase", phaseDirProjectionWrite)
 		So(dirProjectionWrite, ShouldNotBeNil)
 		So(dirProjectionWrite.Inputs["tables"], ShouldResemble,
-			[]string{tableDirSummary, tableDirSummarySets})
+			[]string{tableDirSummary, tableDirSummarySets, tableDirFilterAgeAll})
 		So(dirProjectionWrite.DurationsMS, ShouldResemble, []float64{90})
+
+		activePrefixRefresh := findImportOperation(report.Operations, "import_phase", phaseActivePrefixRefresh)
+		So(activePrefixRefresh, ShouldNotBeNil)
+		So(activePrefixRefresh.Inputs["tables"], ShouldResemble,
+			[]string{tableActivePrefixRollups, tableActivePrefixFilterAgeAll, tableActivePrefixRollupSets})
+		So(activePrefixRefresh.DurationsMS, ShouldResemble, []float64{60})
 
 		filesInsert := findImportOperation(report.Operations, "import_phase", phaseFilesInsert)
 		So(filesInsert, ShouldNotBeNil)
@@ -947,6 +990,7 @@ func TestImportReportOperations(t *testing.T) {
 		So(total, ShouldNotBeNil)
 		So(total.Inputs["datasets"], ShouldEqual, 1)
 		So(total.Inputs[importInputRecords], ShouldEqual, uint64(42))
+		So(total.Inputs[importInputRowCap], ShouldEqual, uint64(100_000))
 		So(total.Inputs["parallelism"], ShouldEqual, 2)
 		So(total.Inputs["mode"], ShouldEqual, "parallel")
 		So(total.Inputs["throughput_records_per_sec"], ShouldEqual, 21.0)
@@ -974,7 +1018,7 @@ func TestImportGuardrailOperations(t *testing.T) {
 			},
 		}
 
-		addImportReportOperations(&report, []datasetImportResult{result}, 1, 2*time.Second)
+		addImportReportOperations(&report, []datasetImportResult{result}, 1, 2*time.Second, 0)
 
 		rawIngest := findImportGuardrailOperation(report.Operations, "raw_file_ingest")
 		So(rawIngest, ShouldNotBeNil)
@@ -1005,7 +1049,7 @@ func TestImportGuardrailOperations(t *testing.T) {
 		So(dirProjection.Inputs["status"], ShouldEqual, "observed")
 		So(dirProjection.Inputs["phase"], ShouldEqual, phaseDirProjectionWrite)
 		So(dirProjection.Inputs["tables"], ShouldResemble,
-			[]string{tableDirSummary, tableDirSummarySets})
+			[]string{tableDirSummary, tableDirSummarySets, tableDirFilterAgeAll})
 		So(dirProjection.DurationsMS, ShouldResemble, []float64{90})
 
 		treeSummary := findImportGuardrailOperation(report.Operations, "active_tree_summary_refresh")
@@ -1030,7 +1074,7 @@ func TestImportGuardrailOperations(t *testing.T) {
 			phases:    map[string]time.Duration{},
 		}
 
-		addImportReportOperations(&report, []datasetImportResult{result}, 1, time.Second)
+		addImportReportOperations(&report, []datasetImportResult{result}, 1, time.Second, 0)
 
 		rawIngest := findImportGuardrailOperation(report.Operations, "raw_file_ingest")
 		So(rawIngest, ShouldNotBeNil)
@@ -1050,7 +1094,7 @@ func TestImportGuardrailOperations(t *testing.T) {
 		So(dirProjection.Inputs["status"], ShouldEqual, "missing")
 		So(dirProjection.Inputs["phase"], ShouldEqual, phaseDirProjectionWrite)
 		So(dirProjection.Inputs["tables"], ShouldResemble,
-			[]string{tableDirSummary, tableDirSummarySets})
+			[]string{tableDirSummary, tableDirSummarySets, tableDirFilterAgeAll})
 		So(dirProjection.DurationsMS, ShouldResemble, []float64{0})
 
 		treeSummary := findImportGuardrailOperation(report.Operations, "active_tree_summary_refresh")
@@ -1074,7 +1118,7 @@ func TestImportGuardrailOperations(t *testing.T) {
 			phases:    map[string]time.Duration{},
 		}
 
-		addImportReportOperations(&report, []datasetImportResult{result}, 1, time.Second)
+		addImportReportOperations(&report, []datasetImportResult{result}, 1, time.Second, 0)
 
 		rawIngest := findImportGuardrailOperation(report.Operations, "raw_file_ingest")
 		So(rawIngest, ShouldNotBeNil)

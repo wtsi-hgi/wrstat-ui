@@ -121,7 +121,9 @@ type Server struct {
 	provider       provider.Provider
 	basedirs       basedirs.Reader
 	tree           *db.Tree
+	activeSetID    string
 	whiteCB        WhiteListCallback
+	nameCacheMu    sync.RWMutex
 	uidToNameCache map[uint32]string
 	gidToNameCache map[uint32]string
 	userToGIDs     map[string][]string
@@ -134,6 +136,7 @@ type Server struct {
 	analyticsStmt   *sql.Stmt
 	groupUsageCache usageCache
 	userUsageCache  usageCache
+	responseCache   responseCache
 }
 
 // New creates a Server which can serve a REST API and website.
@@ -166,6 +169,7 @@ func (s *Server) stop() {
 		_ = s.provider.Close()
 		s.provider = nil
 		s.tree = nil
+		s.activeSetID = ""
 		s.basedirs = nil
 	}
 

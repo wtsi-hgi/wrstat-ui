@@ -33,6 +33,7 @@ import (
 	"testing"
 	"time"
 
+	ch "github.com/ClickHouse/clickhouse-go/v2"
 	. "github.com/smartystreets/goconvey/convey"
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
 	"github.com/wtsi-hgi/wrstat-ui/db"
@@ -549,7 +550,7 @@ func TestClientPermissionAnyInDir(t *testing.T) {
 		th := newClickHouseTestHarness(t)
 		cfg := th.newConfig()
 		cfg.QueryTimeout = 2 * time.Second
-		cfg.MountPoints = []string{"/mnt/c4-perm/"}
+		cfg.MountPoints = []string{"/mnt/a/"}
 
 		c, err := NewClient(cfg)
 		So(err, ShouldBeNil)
@@ -560,36 +561,25 @@ func TestClientPermissionAnyInDir(t *testing.T) {
 
 		Reset(func() { So(conn.Close(), ShouldBeNil) })
 
-		const mountPath = "/mnt/c4-perm/"
+		const mountPath = "/mnt/a/"
 
-		dir := mountPath + "a/"
+		dir := mountPath
 
+		staleUpdatedAt := time.Date(2026, 6, 1, 15, 0, 0, 0, time.UTC)
+		staleSID := snapshotID(mountPath, staleUpdatedAt)
 		updatedAt := time.Date(2026, 6, 1, 15, 30, 0, 0, time.UTC)
 		sid := snapshotID(mountPath, updatedAt)
 
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		So(conn.Exec(ctx, testInsertMountStmt, mountPath, time.Now(), sid, updatedAt), ShouldBeNil)
-		So(conn.Exec(
-			ctx,
-			testInsertInfoFactVectorStmt,
-			mountPath,
-			sid.String(),
-			dir,
-			[]uint32{20, 7},
-			[]uint32{11, 12},
-			[]uint16{uint16(db.DGUTAFileTypeBam), uint16(db.DGUTAFileTypeCram)},
-			[]uint8{uint8(db.DGUTAgeAll), uint8(db.DGUTAgeAll)},
-			[]uint64{1, 1},
-			[]uint64{10, 20},
-			[]int64{10, 11},
-			[]int64{20, 21},
-			[][]uint64{{1, 0, 0, 0, 0, 0, 0, 0, 0}, {0, 1, 0, 0, 0, 0, 0, 0, 0}},
-			[][]uint64{{0, 1, 0, 0, 0, 0, 0, 0, 0}, {1, 0, 0, 0, 0, 0, 0, 0, 0}},
-		), ShouldBeNil)
+		So(conn.Exec(ctx, testInsertMountStmt, mountPath, staleUpdatedAt, staleSID, staleUpdatedAt), ShouldBeNil)
+		insertPermissionAgeAllFact(ctx, conn, mountPath, staleSID.String(), dir, 99, 99)
 
-		ok, err := c.PermissionAnyInDir(ctx, dir, 11, []uint32{9})
+		So(conn.Exec(ctx, testInsertMountStmt, mountPath, time.Now(), sid, updatedAt), ShouldBeNil)
+		insertPermissionAgeAllFact(ctx, conn, mountPath, sid.String(), dir, 11, 7)
+
+		ok, err := c.PermissionAnyInDir(ctx, dir, 11, []uint32{8})
 		So(err, ShouldBeNil)
 		So(ok, ShouldBeTrue)
 
@@ -597,10 +587,38 @@ func TestClientPermissionAnyInDir(t *testing.T) {
 		So(err, ShouldBeNil)
 		So(ok, ShouldBeTrue)
 
-		ok, err = c.PermissionAnyInDir(ctx, dir, 99, []uint32{98})
+		ok, err = c.PermissionAnyInDir(ctx, dir, 99, []uint32{8})
 		So(err, ShouldBeNil)
 		So(ok, ShouldBeFalse)
 	})
+}
+
+func insertPermissionAgeAllFact(
+	ctx context.Context,
+	conn ch.Conn,
+	mountPath string,
+	sid string,
+	dir string,
+	uid uint32,
+	gid uint32,
+) {
+	So(conn.Exec(
+		ctx,
+		testInsertInfoFactVectorStmt,
+		mountPath,
+		sid,
+		dir,
+		[]uint32{gid},
+		[]uint32{uid},
+		[]uint16{uint16(db.DGUTAFileTypeBam)},
+		[]uint8{uint8(db.DGUTAgeAll)},
+		[]uint64{1},
+		[]uint64{10},
+		[]int64{10},
+		[]int64{20},
+		[][]uint64{{1, 0, 0, 0, 0, 0, 0, 0, 0}},
+		[][]uint64{{0, 1, 0, 0, 0, 0, 0, 0, 0}},
+	), ShouldBeNil)
 }
 
 func TestClientPermissionPath(t *testing.T) {
@@ -669,6 +687,55 @@ func TestClientPermissionPath(t *testing.T) {
 		So(ok, ShouldBeTrue)
 
 		ok, err = c.PermissionPath(ctx, base+"denied.txt", 10, []uint32{20})
+		So(err, ShouldBeNil)
+		So(ok, ShouldBeFalse)
+	})
+
+	Convey("Client.PermissionPath checks only the active exact file row", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 2 * time.Second
+		cfg.MountPoints = []string{"/mnt/a/"}
+
+		c, err := NewClient(cfg)
+		So(err, ShouldBeNil)
+		So(c, ShouldNotBeNil)
+		Reset(func() { So(c.Close(), ShouldBeNil) })
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		const mountPath = "/mnt/a/"
+
+		name := "file.bam"
+		path := mountPath + name
+		staleUpdatedAt := time.Date(2026, 6, 1, 15, 0, 0, 0, time.UTC)
+		staleSID := snapshotID(mountPath, staleUpdatedAt)
+		updatedAt := time.Date(2026, 6, 1, 16, 0, 0, 0, time.UTC)
+		sid := snapshotID(mountPath, updatedAt)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		So(conn.Exec(ctx, testInsertMountStmt, mountPath, staleUpdatedAt, staleSID, staleUpdatedAt), ShouldBeNil)
+		insertPermissionFile(ctx, conn, mountPath, staleSID.String(), mountPath, name, 99, 99)
+
+		So(conn.Exec(ctx, testInsertMountStmt, mountPath, updatedAt, sid, updatedAt), ShouldBeNil)
+		insertPermissionFile(ctx, conn, mountPath, sid.String(), mountPath, name, 11, 7)
+
+		ok, err := c.PermissionPath(ctx, path, 11, []uint32{8})
+		So(err, ShouldBeNil)
+		So(ok, ShouldBeTrue)
+
+		ok, err = c.PermissionPath(ctx, path, 99, []uint32{7})
+		So(err, ShouldBeNil)
+		So(ok, ShouldBeTrue)
+
+		ok, err = c.PermissionPath(ctx, path, 99, []uint32{8})
 		So(err, ShouldBeNil)
 		So(ok, ShouldBeFalse)
 	})
@@ -840,6 +907,39 @@ func TestClientFindByGlob(t *testing.T) {
 		So(err, ShouldBeNil)
 		So(count, ShouldEqual, 1)
 	})
+}
+
+func insertPermissionFile(
+	ctx context.Context,
+	conn ch.Conn,
+	mountPath string,
+	sid string,
+	parentDir string,
+	name string,
+	uid uint32,
+	gid uint32,
+) {
+	now := time.Now().UTC().Truncate(time.Second)
+
+	So(conn.Exec(
+		ctx,
+		testInsertFileStmt,
+		mountPath,
+		sid,
+		parentDir,
+		name,
+		"bam",
+		uint8(stats.FileType),
+		uint64(1),
+		uint64(1),
+		uid,
+		gid,
+		now,
+		now,
+		now,
+		uint64(1),
+		uint64(1),
+	), ShouldBeNil)
 }
 
 func TestClientFindByGlobC5ExtensionPredicates(t *testing.T) {

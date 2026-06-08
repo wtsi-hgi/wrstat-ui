@@ -80,6 +80,7 @@ type QueryMetrics struct {
 	ReadRows    uint64
 	ReadBytes   uint64
 	ReadMarks   uint64
+	MemoryBytes uint64
 	ResultRows  uint64
 	ResultBytes uint64
 }

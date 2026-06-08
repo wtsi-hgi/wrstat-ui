@@ -33,3 +33,35 @@ type Info struct {
 	NumParents  int
 	NumChildren int
 }
+
+// CountValues returns Info counts as non-negative unsigned report values.
+func (i *Info) CountValues() []uint64 {
+	if i == nil {
+		return nil
+	}
+
+	return []uint64{
+		infoCountValue(i.NumDirs),
+		infoCountValue(i.NumDGUTAs),
+		infoCountValue(i.NumParents),
+		infoCountValue(i.NumChildren),
+	}
+}
+
+func infoCountValue(value int) uint64 {
+	if value <= 0 {
+		return 0
+	}
+
+	return uint64(value)
+}
+
+// InfoCountFieldNames returns Info count names in CountValues order.
+func InfoCountFieldNames() []string {
+	return []string{
+		"num_dirs",
+		"num_dgutas",
+		"num_parents",
+		"num_children",
+	}
+}

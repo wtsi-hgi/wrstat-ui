@@ -29,6 +29,7 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -38,6 +39,7 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/db"
 	"github.com/wtsi-hgi/wrstat-ui/internal/chperf"
 	"github.com/wtsi-hgi/wrstat-ui/internal/perfreport"
+	"github.com/wtsi-hgi/wrstat-ui/server"
 )
 
 const (
@@ -49,6 +51,15 @@ const (
 	chPerfDefaultAncLimit  = 16
 	chPerfDefaultBatchSize = 100_000
 	chPerfDefaultParallel  = 1
+
+	chPerfRestQueryCountSource  = "system.events.Query_delta"
+	chPerfRestCacheStatsSource  = "clickhouse.process_tree_query_cache_delta"
+	chPerfRestQueryCounterEvent = "Query"
+)
+
+var (
+	chPerfOpenProvider           = clickhouse.OpenProvider
+	chPerfOpenRestCounterSources = openCHPerfRestCounterSources
 )
 
 var chPerfCmd = &cobra.Command{
@@ -85,6 +96,18 @@ per-query latency with p50/p95/p99 percentiles.
 	},
 }
 
+var chPerfRestCmd = &cobra.Command{
+	Use:   "rest",
+	Short: "Run REST and CLI-shaped timing suite against ClickHouse",
+	Long: `REST runs a repeatable server-handler timing suite against the
+ClickHouse-backed REST tree and where routes, including the CLI/server where
+command shape used by the final performance gates.
+`,
+	RunE: func(_ *cobra.Command, _ []string) error {
+		return runCHPerfRest()
+	},
+}
+
 type chPerfFlags struct {
 	dsn         string
 	database    string
@@ -114,14 +137,64 @@ type chPerfFlags struct {
 	walkDepth int
 	walkLimit int
 	ancLimit  int
+
+	restBaseURL   string
+	restTreePath  string
+	restTreePaths []string
+	restWhereDir  string
+	restGroups    string
+	restUsers     string
+	restTypes     string
 }
 
 var chPerf chPerfFlags
+
+type chPerfRestCounterSources struct {
+	QueryCount       func() uint64
+	QueryCountSource string
+	CacheStats       func() (uint64, uint64)
+	CacheStatsSource string
+	CacheHitKeys     func() []string
+	Close            func() error
+}
+
+func openCHPerfRestCounterSources(cfg clickhouse.Config) (chPerfRestCounterSources, error) {
+	counter, err := clickhouse.NewSystemEventCounter(cfg, chPerfRestQueryCounterEvent)
+	if err != nil {
+		return chPerfRestCounterSources{}, err
+	}
+
+	return chPerfRestCounterSources{
+		QueryCount:       counter.Value,
+		QueryCountSource: chPerfRestQueryCountSource,
+		CacheStats: func() (uint64, uint64) {
+			stats := clickhouse.ReadTreeQueryCacheStats(cfg)
+
+			return stats.Hits(), stats.Misses()
+		},
+		CacheHitKeys: func() []string {
+			stats := clickhouse.ReadTreeQueryCacheStats(cfg)
+
+			return stats.ActivePrefixSummaryHitKeys
+		},
+		CacheStatsSource: chPerfRestCacheStatsSource,
+		Close:            counter.Close,
+	}, nil
+}
+
+func chPerfRestCounterClose(sources chPerfRestCounterSources) func() error {
+	if sources.Close == nil {
+		return func() error { return nil }
+	}
+
+	return sources.Close
+}
 
 func init() {
 	RootCmd.AddCommand(chPerfCmd)
 	chPerfCmd.AddCommand(chPerfImportCmd)
 	chPerfCmd.AddCommand(chPerfQueryCmd)
+	chPerfCmd.AddCommand(chPerfRestCmd)
 
 	addCHPerfFlags()
 }
@@ -130,6 +203,7 @@ func addCHPerfFlags() {
 	addCHPerfPersistentFlags()
 	addCHPerfImportFlags()
 	addCHPerfQueryFlags()
+	addCHPerfRestFlags()
 }
 
 func addCHPerfPersistentFlags() {
@@ -181,6 +255,34 @@ func addCHPerfQueryFlags() {
 		"max unique directories to time in tree walk operations")
 	f.IntVar(&chPerf.ancLimit, "ancestor-limit", chPerfDefaultAncLimit,
 		"max root/ancestor directories to time in Disktree click-through operations")
+}
+
+func addCHPerfRestFlags() {
+	f := chPerfRestCmd.Flags()
+
+	f.StringVar(&chPerf.restBaseURL, "base-url", "",
+		"server base URL label for final-gate REST reports")
+	f.StringSliceVar(&chPerf.restTreePaths, "paths", nil,
+		"comma-separated tree route paths to query")
+	f.StringVar(&chPerf.restTreePath, "tree-path", "/",
+		"tree route path to query")
+	f.StringVar(&chPerf.restWhereDir, "where-dir", "/",
+		"where route directory to query")
+	f.StringVar(&chPerf.restGroups, "groups", "",
+		"comma-separated Unix group names for where route and CLI-shaped query")
+	f.StringVar(&chPerf.restUsers, "users", "",
+		"comma-separated Unix user names for where route and CLI-shaped query")
+	f.StringVar(&chPerf.restTypes, "types", "",
+		"comma-separated file type names for where route and CLI-shaped query")
+	f.StringVar(&chPerf.treeGIDs, "tree-gids", "",
+		"comma-separated GIDs for where route and CLI-shaped query")
+	f.StringVar(&chPerf.treeUIDs, "tree-uids", "",
+		"comma-separated UIDs for where route and CLI-shaped query")
+	f.StringVar(&chPerf.treeTypes, "tree-types", "",
+		"comma-separated file type names for where route and CLI-shaped query")
+	f.IntVar(&chPerf.repeat, "repeat", chPerfDefaultRepeat, "number of timed repeats")
+	f.IntVar(&chPerf.warmup, "warmup", chPerfDefaultWarmup, "warmup iterations")
+	f.IntVar(&chPerf.splits, "splits", chPerfDefaultSplits, "where() splits")
 }
 
 func runCHPerfImport(inputDir string) error {
@@ -235,6 +337,24 @@ func runCHPerfQuery() error {
 	return chPerfWriteReport(report)
 }
 
+func runCHPerfRest() error {
+	if err := chPerfValidateClickHouseSettings(); err != nil {
+		return err
+	}
+
+	cfg, err := chPerfConfig()
+	if err != nil {
+		return err
+	}
+
+	report, err := chPerfRestReport(cfg)
+	if err != nil {
+		return err
+	}
+
+	return chPerfWriteReport(report)
+}
+
 func chPerfValidateClickHouseSettings() error {
 	loadClickhouseDotEnv()
 
@@ -257,6 +377,72 @@ func chPerfConfig() (clickhouse.Config, error) {
 		ownersPath:       chPerf.owners,
 		queryTimeoutFlag: chPerf.queryTO,
 	}, chPerf.mountpoints)
+}
+
+func chPerfRestReport(cfg clickhouse.Config) (_ perfreport.Report, err error) {
+	provider, err := chPerfOpenProvider(cfg)
+	if err != nil {
+		return perfreport.Report{}, err
+	}
+
+	defer func() { _ = provider.Close() }()
+
+	opts, closeCounters, err := chPerfRestOptionsWithCounterSources(cfg)
+	if err != nil {
+		return perfreport.Report{}, err
+	}
+	defer func() { err = errors.Join(err, closeCounters()) }()
+
+	s := server.New(io.Discard)
+
+	err = s.SetProvider(provider)
+	if err != nil {
+		return perfreport.Report{}, err
+	}
+
+	return s.MeasurePerfHarness(opts)
+}
+
+func chPerfRestOptionsWithCounterSources(
+	cfg clickhouse.Config,
+) (server.PerfHarnessOptions, func() error, error) {
+	opts := chPerfRestOptions()
+
+	sources, err := chPerfOpenRestCounterSources(cfg)
+	if err != nil {
+		return server.PerfHarnessOptions{}, nil, err
+	}
+
+	opts.QueryCount = sources.QueryCount
+	opts.QueryCountSource = sources.QueryCountSource
+	opts.CacheStats = sources.CacheStats
+	opts.CacheStatsSource = sources.CacheStatsSource
+	opts.CacheHitKeys = sources.CacheHitKeys
+
+	return opts, chPerfRestCounterClose(sources), nil
+}
+
+func chPerfRestOptions() server.PerfHarnessOptions {
+	return server.PerfHarnessOptions{
+		Repeat:      chPerf.repeat,
+		Warmup:      chPerf.warmup,
+		BaseURL:     chPerf.restBaseURL,
+		TreePath:    chPerf.restTreePath,
+		TreePaths:   append([]string(nil), chPerf.restTreePaths...),
+		WhereDir:    chPerf.restWhereDir,
+		WhereGroups: chPerfRestFilterValue(chPerf.restGroups, chPerf.treeGIDs),
+		WhereUsers:  chPerfRestFilterValue(chPerf.restUsers, chPerf.treeUIDs),
+		WhereTypes:  chPerfRestFilterValue(chPerf.restTypes, chPerf.treeTypes),
+		WhereSplits: strconv.Itoa(chPerf.splits),
+	}
+}
+
+func chPerfRestFilterValue(namedValue string, idValue string) string {
+	if strings.TrimSpace(namedValue) != "" {
+		return namedValue
+	}
+
+	return idValue
 }
 
 func chPerfQueryOptions() (chperf.QueryOptions, error) {

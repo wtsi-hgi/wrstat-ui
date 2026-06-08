@@ -143,19 +143,9 @@ func (s *Server) getGroupAreas(c *gin.Context) {
 // LoadDGUTADB() must already have been called. This is called when there is a
 // GET on /rest/v1/auth/tree.
 func (s *Server) getTree(c *gin.Context) {
-	path := c.DefaultQuery("path", "/")
+	path := c.DefaultQuery(queryParamPath, "/")
 
-	filter, err := makeFilterFromContext(c)
-	if err != nil {
-		c.AbortWithError(http.StatusBadRequest, err) //nolint:errcheck
-
-		return
-	}
-
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	di, err := s.tree.DirInfo(path, filter)
+	filter, err := s.makeAuthTreeFilterFromContext(c)
 	if err != nil {
 		c.AbortWithError(http.StatusBadRequest, err) //nolint:errcheck
 
@@ -169,7 +159,31 @@ func (s *Server) getTree(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, s.diToTreeElement(di, filter, allowedGIDs, path))
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	cacheKey, cacheable := s.responseCacheKeyLocked(authTreeResponseEndpointVersion, path, "", filter, allowedGIDs)
+	if cacheable && s.serveCachedJSON(c, cacheKey) {
+		return
+	}
+
+	di, err := s.tree.DirInfo(path, filter)
+	if err != nil {
+		c.AbortWithError(http.StatusBadRequest, err) //nolint:errcheck
+
+		return
+	}
+
+	treeElement := s.diToTreeElement(di, filter, allowedGIDs, path)
+	if cacheable {
+		if err := s.cacheAndServeJSON(c, cacheKey, treeElement); err != nil {
+			c.AbortWithError(http.StatusBadRequest, err) //nolint:errcheck
+		}
+
+		return
+	}
+
+	c.JSON(http.StatusOK, treeElement)
 }
 
 // TreeElement holds tree.DirInfo type information in a form suited to passing

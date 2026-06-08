@@ -27,6 +27,9 @@
 package boltperf
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -70,6 +73,7 @@ const (
 	queryInputFilterFileTypesKey        = "filter_file_types"
 	queryInputFilterGIDsKey             = "filter_gids"
 	queryInputFilterUIDsKey             = "filter_uids"
+	queryInputResultDigest              = "result_digest"
 	queryInputSplitsKey                 = "splits"
 	queryOpTreeDiskTreeAncName          = "tree_disktree_endpoint_ancestor_dirs"
 	queryOpTreeDiskTreeEndName          = "tree_disktree_endpoint"
@@ -623,8 +627,12 @@ func pickRepresentativeDirFromTree(tree *db.Tree, mountPath string, filter *db.F
 }
 
 func nextRepresentativeDir(tree *db.Tree, current string, filter *db.Filter) (string, bool) {
-	info, err := tree.DirInfo(current, filter)
-	if err != nil || missingDirInfo(info) {
+	if finalDirSummary(tree, current, filter) {
+		return current, true
+	}
+
+	info, ok := nextDirInfo(tree, current, filter)
+	if !ok {
 		return current, true
 	}
 
@@ -638,6 +646,31 @@ func nextRepresentativeDir(tree *db.Tree, current string, filter *db.Filter) (st
 	}
 
 	return next, false
+}
+
+func finalDirSummary(tree *db.Tree, current string, filter *db.Filter) bool {
+	summary, err := tree.DirSummary(current, filter)
+
+	return err != nil || summary == nil || representativeDirSummary(summary)
+}
+
+func representativeDirSummary(summary *db.DirSummary) bool {
+	if summary == nil {
+		return false
+	}
+
+	count := summary.Count
+
+	return count >= dirPickMinCount && count <= dirPickMaxCount
+}
+
+func nextDirInfo(tree *db.Tree, current string, filter *db.Filter) (*db.DirInfo, bool) {
+	info, err := tree.DirInfo(current, filter)
+	if err != nil || missingDirInfo(info) {
+		return nil, false
+	}
+
+	return info, true
 }
 
 func missingDirInfo(info *db.DirInfo) bool {
@@ -875,46 +908,11 @@ func buildQuerySuiteOps(ctx queryContext, opts QueryOptions) []querySuiteOp {
 	}
 
 	ops = append(ops, []querySuiteOp{
-		{
-			name: queryOpTreeDirInfoName,
-			inputs: treeOpInputs(ctx.treeFilter, map[string]any{
-				queryInputDirKey:         ctx.queryDir,
-				queryInputCacheScope:     queryScopeSameProvider,
-				queryInputDurationSource: querySourceWall,
-			}),
-			op: func() error { return opTreeDirInfo(ctx) },
-		},
-		{
-			name: queryOpTreeDiskTreeEndName,
-			inputs: treeOpInputs(ctx.treeFilter, map[string]any{
-				queryInputDirKey:         ctx.queryDir,
-				queryInputCacheScope:     queryScopeSameProvider,
-				queryInputDurationSource: querySourceWall,
-			}),
-			op: func() error { return opTreeDiskTreeEndpoint(ctx) },
-		},
+		opTreeDirInfoSuite(ctx),
+		opTreeDiskTreeEndpointSuite(ctx),
 		opTreeDiskTreeEndpointVisibleChildDirs(ctx),
-		{
-			name: queryOpTreeWhereName,
-			inputs: treeOpInputs(ctx.treeFilter, map[string]any{
-				queryInputDirKey:         ctx.queryDir,
-				queryInputSplitsKey:      opts.Splits,
-				queryInputCacheScope:     queryScopeSameProvider,
-				queryInputDurationSource: querySourceWall,
-			}),
-			op: func() error { return opTreeWhere(ctx, opts.Splits) },
-		},
-		{
-			name: queryOpTreeWhereFreshName,
-			inputs: treeOpInputs(ctx.treeFilter, map[string]any{
-				queryInputDirKey:         ctx.queryDir,
-				queryInputSplitsKey:      opts.Splits,
-				queryInputCacheScope:     queryScopeFreshProvider,
-				queryInputDurationSource: querySourceWall,
-			}),
-			op:         func() error { return opTreeWhereFreshProvider(ctx, opts.Splits) },
-			skipWarmup: true,
-		},
+		opTreeWhereSuite(ctx, opts.Splits),
+		opTreeWhereFreshProviderSuite(ctx, opts.Splits),
 		{
 			name:   "basedirs_group_usage",
 			inputs: map[string]any{queryInputAgeKey: int(db.DGUTAgeAll)},
@@ -980,16 +978,26 @@ func opMountTimestamps(ctx queryContext) error {
 }
 
 func opTreeWhereColdThenCached(ctx queryContext, splits int) querySuiteOp {
+	var resultCount uint64
+
+	inputs := treeOpInputs(ctx.treeFilter, map[string]any{
+		queryInputDirKey:         ctx.queryDir,
+		queryInputSplitsKey:      splits,
+		queryInputCacheScope:     queryScopeSameProviderCold,
+		queryInputDurationSource: querySourceWall,
+	})
+
 	return querySuiteOp{
-		name: queryOpTreeWhereColdName,
-		inputs: treeOpInputs(ctx.treeFilter, map[string]any{
-			queryInputDirKey:         ctx.queryDir,
-			queryInputSplitsKey:      splits,
-			queryInputCacheScope:     queryScopeSameProviderCold,
-			queryInputDurationSource: querySourceWall,
-		}),
-		op:         func() error { return opTreeWhere(ctx, splits) },
-		skipWarmup: true,
+		name:   queryOpTreeWhereColdName,
+		inputs: inputs,
+		op: func() error {
+			count, err := runTreeWhere(ctx.tree, ctx.queryDir, ctx.treeFilter, splits, inputs)
+			resultCount = count
+
+			return err
+		},
+		resultCount: func() uint64 { return resultCount },
+		skipWarmup:  true,
 	}
 }
 
@@ -1008,11 +1016,80 @@ func treeOpInputs(filter *db.Filter, inputs map[string]any) map[string]any {
 	return inputs
 }
 
+func runTreeWhere(
+	tree *db.Tree,
+	dir string,
+	filter *db.Filter,
+	splits int,
+	inputs map[string]any,
+) (uint64, error) {
+	filter = treeFilterFromOptions(filter)
+	splitFn := split.SplitsToSplitFn(splits)
+
+	results, err := tree.Where(dir, filter, splitFn)
+	if err != nil {
+		return 0, err
+	}
+
+	if inputs != nil {
+		inputs[queryInputResultDigest] = dcssDigest(results)
+	}
+
+	return uint64(len(results)), nil
+}
+
+func dcssDigest(dcss db.DCSs) string {
+	summaries := make([]*db.DirSummary, len(dcss))
+	copy(summaries, dcss)
+
+	return digestValue(digestSummaries(summaries))
+}
+
+func digestValue(value any) string {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return ""
+	}
+
+	sum := sha256.Sum256(data)
+
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+func digestSummaries(summaries []*db.DirSummary) []digestDirSummary {
+	out := make([]digestDirSummary, 0, len(summaries))
+	for _, summary := range summaries {
+		if summary != nil {
+			out = append(out, digestSummary(summary))
+		}
+	}
+
+	return out
+}
+
+func digestSummary(summary *db.DirSummary) digestDirSummary {
+	if summary == nil {
+		return digestDirSummary{}
+	}
+
+	return digestDirSummary{
+		Dir:   summary.Dir,
+		Count: summary.Count,
+		Size:  summary.Size,
+		UIDs:  append([]uint32(nil), summary.UIDs...),
+		GIDs:  append([]uint32(nil), summary.GIDs...),
+		FT:    uint16(summary.FT),
+		Age:   uint8(summary.Age),
+	}
+}
+
 func opTreeDiskTreeEndpointNewDirs(ctx queryContext, opts QueryOptions) querySuiteOp {
 	filter := treeFilterFromOptions(ctx.treeFilter)
 	dirs, fallback := disktreeClickDirs(ctx, opts)
 	timedDirs := uniqueDirsForRepeats(dirs, opts.Repeat)
 	i := 0
+
+	var resultCount uint64
 
 	return querySuiteOp{
 		name: queryOpTreeDiskTreeNewName,
@@ -1034,8 +1111,12 @@ func opTreeDiskTreeEndpointNewDirs(ctx queryContext, opts QueryOptions) querySui
 			dir := timedDirs[i]
 			i++
 
-			return runTreeDiskTreeEndpoint(ctx.tree, dir, filter)
+			count, err := runTreeDiskTreeEndpoint(ctx.tree, dir, filter)
+			resultCount = count
+
+			return err
 		},
+		resultCount:       func() uint64 { return resultCount },
 		skipWarmup:        true,
 		hasRepeatOverride: true,
 		repeatOverride:    len(timedDirs),
@@ -1066,6 +1147,8 @@ func opTreeDiskTreeEndpointAncestorDirs(ctx queryContext, opts QueryOptions) que
 	timedDirs := cycledDirsForRepeats(dirs, opts.Repeat)
 	i := 0
 
+	var resultCount uint64
+
 	return querySuiteOp{
 		name: queryOpTreeDiskTreeAncName,
 		inputs: treeOpInputs(filter, map[string]any{
@@ -1084,8 +1167,12 @@ func opTreeDiskTreeEndpointAncestorDirs(ctx queryContext, opts QueryOptions) que
 			dir := timedDirs[i]
 			i++
 
-			return runTreeDiskTreeEndpoint(ctx.tree, dir, filter)
+			count, err := runTreeDiskTreeEndpoint(ctx.tree, dir, filter)
+			resultCount = count
+
+			return err
 		},
+		resultCount:       func() uint64 { return resultCount },
 		skipWarmup:        true,
 		hasRepeatOverride: true,
 		repeatOverride:    len(timedDirs),
@@ -1325,10 +1412,187 @@ func cycledDirsForRepeats(dirs []string, repeat int) []string {
 	return timedDirs
 }
 
-func runTreeDiskTreeEndpoint(tree *db.Tree, dir string, filter *db.Filter) error {
-	_, err := loadTreeDiskTreeEndpoint(tree, dir, filter)
+func runTreeDiskTreeEndpoint(tree *db.Tree, dir string, filter *db.Filter) (uint64, error) {
+	childPaths, err := loadTreeDiskTreeEndpoint(tree, dir, filter)
 
-	return err
+	return uint64(len(childPaths)), err
+}
+
+func opTreeDirInfoSuite(ctx queryContext) querySuiteOp {
+	var resultCount uint64
+
+	inputs := treeOpInputs(ctx.treeFilter, map[string]any{
+		queryInputDirKey:         ctx.queryDir,
+		queryInputCacheScope:     queryScopeSameProvider,
+		queryInputDurationSource: querySourceWall,
+	})
+
+	return querySuiteOp{
+		name:   queryOpTreeDirInfoName,
+		inputs: inputs,
+		op: func() error {
+			filter := treeFilterFromOptions(ctx.treeFilter)
+
+			info, err := ctx.tree.DirInfo(ctx.queryDir, filter)
+			if err != nil {
+				return err
+			}
+
+			resultCount = dirInfoResultCount(info)
+			inputs[queryInputResultDigest] = dirInfoDigest(info)
+
+			return nil
+		},
+		resultCount: func() uint64 { return resultCount },
+	}
+}
+
+func dirInfoResultCount(info *db.DirInfo) uint64 {
+	if info == nil || info.Current == nil {
+		return 0
+	}
+
+	return uint64(1 + len(info.Children))
+}
+
+func dirInfoDigest(info *db.DirInfo) string {
+	if info == nil {
+		return digestValue(nil)
+	}
+
+	return digestValue(struct {
+		Current  digestDirSummary   `json:"current"`
+		Children []digestDirSummary `json:"children"`
+	}{
+		Current:  digestSummary(info.Current),
+		Children: digestSummaries(info.Children),
+	})
+}
+
+func opTreeDiskTreeEndpointSuite(ctx queryContext) querySuiteOp {
+	var resultCount uint64
+
+	return querySuiteOp{
+		name: queryOpTreeDiskTreeEndName,
+		inputs: treeOpInputs(ctx.treeFilter, map[string]any{
+			queryInputDirKey:         ctx.queryDir,
+			queryInputCacheScope:     queryScopeSameProvider,
+			queryInputDurationSource: querySourceWall,
+		}),
+		op: func() error {
+			count, err := runTreeDiskTreeEndpoint(ctx.tree, ctx.queryDir, ctx.treeFilter)
+			resultCount = count
+
+			return err
+		},
+		resultCount: func() uint64 { return resultCount },
+	}
+}
+
+func opTreeWhereSuite(ctx queryContext, splits int) querySuiteOp {
+	var resultCount uint64
+
+	inputs := treeOpInputs(ctx.treeFilter, map[string]any{
+		queryInputDirKey:         ctx.queryDir,
+		queryInputSplitsKey:      splits,
+		queryInputCacheScope:     queryScopeSameProvider,
+		queryInputDurationSource: querySourceWall,
+	})
+
+	return querySuiteOp{
+		name:   queryOpTreeWhereName,
+		inputs: inputs,
+		op: func() error {
+			count, err := runTreeWhere(ctx.tree, ctx.queryDir, ctx.treeFilter, splits, inputs)
+			resultCount = count
+
+			return err
+		},
+		resultCount: func() uint64 { return resultCount },
+	}
+}
+
+func opTreeWhereFreshProviderSuite(ctx queryContext, splits int) querySuiteOp {
+	var resultCount uint64
+
+	inputs := treeOpInputs(ctx.treeFilter, map[string]any{
+		queryInputDirKey:         ctx.queryDir,
+		queryInputSplitsKey:      splits,
+		queryInputCacheScope:     queryScopeFreshProvider,
+		queryInputDurationSource: querySourceWall,
+	})
+
+	return querySuiteOp{
+		name:   queryOpTreeWhereFreshName,
+		inputs: inputs,
+		op: func() error {
+			count, err := runTreeWhereFreshProvider(ctx, splits, inputs)
+			resultCount = count
+
+			return err
+		},
+		resultCount: func() uint64 { return resultCount },
+		skipWarmup:  true,
+	}
+}
+
+func runTreeWhereFreshProvider(
+	ctx queryContext,
+	splits int,
+	inputs map[string]any,
+) (uint64, error) {
+	if ctx.openFreshTree == nil {
+		return 0, ErrOpenDatabaseRequired
+	}
+
+	tree, closeFn, err := ctx.openFreshTree()
+	if err != nil {
+		return 0, err
+	}
+
+	count, whereErr := runTreeWhere(tree, ctx.queryDir, ctx.treeFilter, splits, inputs)
+
+	return count, closeAndJoinErr(closeFn, whereErr)
+}
+
+func measureQueryOperation(warmup, repeat int, op querySuiteOp) ([]float64, []uint64, error) {
+	for range warmup {
+		if err := op.op(); err != nil {
+			return nil, nil, err
+		}
+	}
+
+	durations := make([]float64, 0, repeat)
+	resultCounts := make([]uint64, 0, repeat)
+
+	for range repeat {
+		start := time.Now()
+
+		if err := op.op(); err != nil {
+			return nil, nil, err
+		}
+
+		durations = append(durations, durationMS(time.Since(start)))
+		if op.resultCount != nil {
+			resultCounts = append(resultCounts, op.resultCount())
+		}
+	}
+
+	if op.resultCount == nil {
+		return durations, nil, nil
+	}
+
+	return durations, resultCounts, nil
+}
+
+type digestDirSummary struct {
+	Dir   string   `json:"dir"`
+	Count uint64   `json:"count"`
+	Size  uint64   `json:"size"`
+	UIDs  []uint32 `json:"uids"`
+	GIDs  []uint32 `json:"gids"`
+	FT    uint16   `json:"ft"`
+	Age   uint8    `json:"age"`
 }
 
 func opTreeDirInfo(ctx queryContext) error {
@@ -1339,13 +1603,13 @@ func opTreeDirInfo(ctx queryContext) error {
 }
 
 func opTreeDiskTreeEndpoint(ctx queryContext) error {
-	return runTreeDiskTreeEndpoint(ctx.tree, ctx.queryDir, ctx.treeFilter)
+	_, err := runTreeDiskTreeEndpoint(ctx.tree, ctx.queryDir, ctx.treeFilter)
+
+	return err
 }
 
 func opTreeWhere(ctx queryContext, splits int) error {
-	filter := treeFilterFromOptions(ctx.treeFilter)
-	splitFn := split.SplitsToSplitFn(splits)
-	_, err := ctx.tree.Where(ctx.queryDir, filter, splitFn)
+	_, err := runTreeWhere(ctx.tree, ctx.queryDir, ctx.treeFilter, splits, nil)
 
 	return err
 }
@@ -1364,6 +1628,8 @@ func opTreeDiskTreeEndpointVisibleChildDirs(ctx queryContext) querySuiteOp {
 	var timedDirs []string
 
 	i := 0
+
+	var resultCount uint64
 
 	return querySuiteOp{
 		name:   queryOpTreeDiskTreeVisibleChildName,
@@ -1392,9 +1658,13 @@ func opTreeDiskTreeEndpointVisibleChildDirs(ctx queryContext) querySuiteOp {
 			dir := timedDirs[i]
 			i++
 
-			return runTreeDiskTreeEndpoint(ctx.tree, dir, filter)
+			count, err := runTreeDiskTreeEndpoint(ctx.tree, dir, filter)
+			resultCount = count
+
+			return err
 		},
-		skipWarmup: true,
+		resultCount: func() uint64 { return resultCount },
+		skipWarmup:  true,
 	}
 }
 
@@ -1479,12 +1749,12 @@ func timeAndReportQueryOp(
 		repeat = op.repeatOverride
 	}
 
-	durations, err := measureOperation(warmup, repeat, op.op)
+	durations, resultCounts, err := measureQueryOperation(warmup, repeat, op)
 	if err != nil {
 		return err
 	}
 
-	report.AddOperation(op.name, op.inputs, durations)
+	report.AddOperationWithCounters(op.name, op.inputs, durations, nil, nil, nil, resultCounts)
 
 	p50, p95, p99 := PercentilesMS(durations)
 	printf("%s repeats=%d p50_ms=%.3f p95_ms=%.3f p99_ms=%.3f\n", op.name, len(durations), p50, p95, p99)
@@ -1607,6 +1877,7 @@ type querySuiteOp struct {
 	inputs            map[string]any
 	prepare           func(repeat int) (int, error)
 	op                func() error
+	resultCount       func() uint64
 	skipWarmup        bool
 	hasRepeatOverride bool
 	repeatOverride    int

@@ -18,8 +18,8 @@ Keep `Info()` on canonical active facts and children counts in
 from D1. This confirms derived tables from Phases 1-3 do not alter dbinfo
 semantics.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
 
 ### Item 4.2: D2 - Preserve Permission/Auth Checks
 
@@ -32,8 +32,8 @@ name-based server/CLI filter semantics in `clickhouse/file_api.go`,
 tests from D2. Sequence after D1 to avoid concurrent
 `clickhouse/database.go` edits.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
 
 ### Item 4.3: E1 - Expand Perf And Tracing Harnesses
 
@@ -46,8 +46,8 @@ Extend existing ClickHouse, Bolt, REST, CLI, cache, and report structures in
 covering all 6 acceptance tests from E1. Depends on D1 and D2 preservation
 reviews.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
 
 ### Item 4.4: E2 - Resolve The t283 Filtered REST Anomaly
 
@@ -59,8 +59,8 @@ Fix request-order-independent filtered REST behavior and cache key proof in
 4 acceptance tests from E2. Depends on cache and auth semantics from prior
 items.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
 
 ### Item 4.5: E4 - Tactical Work Is Supporting Only
 
@@ -72,8 +72,8 @@ response caching in `clickhouse/database.go`, `clickhouse/provider.go`,
 covering all 3 acceptance tests from E4. Ensure this work does not substitute
 for cold-path wins required by Phases 1-3 and E3.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
 
 ### Item 4.6: E3 - Final Performance Gates
 
@@ -85,5 +85,5 @@ Implement final gate evaluation and command coverage in
 prior phase items, especially E1 reports, E2 anomaly resolution, D1/D2
 behavior preservation, and any E4 tactical support.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed

@@ -58,6 +58,15 @@ func mountTimestampsToUnixSeconds(mt map[string]time.Time) map[string]int64 {
 	return out
 }
 
+func providerActiveSetID(p provider.Provider) string {
+	activeSetProvider, ok := p.(activeSetIDProvider)
+	if !ok {
+		return ""
+	}
+
+	return activeSetProvider.ActiveSetID()
+}
+
 func (s *Server) prepareProvider(p provider.Provider) (basedirs.Reader, map[string]int64, error) {
 	bd, err := validateProvider(p)
 	if err != nil {
@@ -130,6 +139,7 @@ func (s *Server) assignProviderFields(p provider.Provider, bd basedirs.Reader,
 	s.mu.Lock()
 	s.provider = p
 	s.tree = p.Tree()
+	s.activeSetID = providerActiveSetID(p)
 	s.basedirs = bd
 	s.dataTimeStamp = dataTimeStamp
 
@@ -176,6 +186,7 @@ func (s *Server) refreshProviderFrom(p provider.Provider) error {
 
 	s.mu.Lock()
 	s.tree = p.Tree()
+	s.activeSetID = providerActiveSetID(p)
 	s.basedirs = bd
 	s.dataTimeStamp = dataTimeStamp
 	s.mu.Unlock()
