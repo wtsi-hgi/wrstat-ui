@@ -27,7 +27,9 @@ package clickhouse
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -223,6 +225,65 @@ func TestClickHouseSummariseSpoolLoader(t *testing.T) {
 		So(conn.counts, ShouldEqual, 1)
 		So(conn.prepares, ShouldEqual, 1)
 	})
+
+	Convey("summarise spool basedirs history retry cleanup uses the cleanup timeout", t, func() {
+		cfg := Config{QueryTimeout: 100 * time.Millisecond}
+		conn := &summariseSpoolHistoryDeleteDeadlineConn{normalWindow: cfg.QueryTimeout}
+		loader := &summariseSpoolLoader{cfg: cfg, conn: conn}
+		rows := []chspool.BasedirsHistoryRow{{
+			MountPath: testMountPath,
+			GID:       7,
+			Date:      time.Date(2026, 6, 8, 9, 0, 0, 0, time.UTC),
+		}}
+
+		ctx, cancel := queryContext(context.Background(), cfg.QueryTimeout)
+		defer cancel()
+
+		So(loader.deleteManifestHistoryRows(ctx, rows), ShouldBeNil)
+		So(conn.deleteCalls, ShouldEqual, 1)
+		So(conn.cleanupDeadlineCalls, ShouldEqual, 1)
+	})
+
+	Convey("summarise spool basedirs history cleanup propagates real cleanup errors", t, func() {
+		cfg := Config{QueryTimeout: 100 * time.Millisecond}
+		conn := &summariseSpoolHistoryDeleteDeadlineConn{
+			normalWindow: cfg.QueryTimeout,
+			err:          errForcedFailure,
+		}
+		loader := &summariseSpoolLoader{cfg: cfg, conn: conn}
+		rows := []chspool.BasedirsHistoryRow{{
+			MountPath: testMountPath,
+			GID:       8,
+			Date:      time.Date(2026, 6, 8, 10, 0, 0, 0, time.UTC),
+		}}
+
+		err := loader.deleteManifestHistoryRows(context.Background(), rows)
+
+		So(errors.Is(err, errForcedFailure), ShouldBeTrue)
+		So(conn.deleteCalls, ShouldEqual, 1)
+		So(conn.cleanupDeadlineCalls, ShouldEqual, 1)
+	})
+
+	Convey("summarise spool replay caps schema2 fact and child batches", t, func() {
+		const (
+			factRows  = defaultProjectionBatchSize + 100
+			childRows = defaultChildrenBatchSize + 100
+		)
+
+		spoolDir := filepath.Join(t.TempDir(), "spool")
+		updatedAt := time.Date(2026, 6, 8, 11, 0, 0, 0, time.UTC)
+		manifest := writeSummariseSpoolLoaderSchema2BatchSpool(spoolDir, updatedAt, factRows, childRows)
+		conn := &lazyDGUTAImportConn{}
+
+		loader, err := newSummariseSpoolLoader(Config{}, conn, spoolDir, manifest, nil)
+		So(err, ShouldBeNil)
+
+		So(loader.loadTables(context.Background()), ShouldBeNil)
+		So(conn.totalRowsFor(insertMountDirSummaryQuery), ShouldEqual, factRows)
+		So(conn.maxRowsFor(insertMountDirSummaryQuery), ShouldBeLessThanOrEqualTo, defaultProjectionBatchSize)
+		So(conn.totalRowsFor(insertChildrenQuery), ShouldEqual, childRows)
+		So(conn.maxRowsFor(insertChildrenQuery), ShouldBeLessThanOrEqualTo, defaultChildrenBatchSize)
+	})
 }
 
 func writeSummariseSpoolLoaderTestSpool(
@@ -310,4 +371,85 @@ func writeSummariseSpoolLoaderFileOnlySpool(
 	So(chspool.WriteManifestAtomic(spoolDir, manifest), ShouldBeNil)
 
 	return manifest
+}
+
+func writeSummariseSpoolLoaderSchema2BatchSpool(
+	spoolDir string,
+	updatedAt time.Time,
+	factRows int,
+	childRows int,
+) *chspool.Manifest {
+	set, err := chspool.CreateSet(spoolDir)
+	So(err, ShouldBeNil)
+
+	sid := SnapshotID(testMountPath, updatedAt)
+
+	var writeErr error
+	for range factRows {
+		writeErr = errors.Join(writeErr, set.WriteDirFact(chspool.DirFactRow{
+			MountPath:  testMountPath,
+			SnapshotID: sid,
+			Dir:        testMountPath,
+			UpdatedAt:  updatedAt,
+		}))
+	}
+
+	for range childRows {
+		writeErr = errors.Join(writeErr, set.WriteChild(chspool.ChildRow{
+			MountPath:  testMountPath,
+			SnapshotID: sid,
+			ParentDir:  testMountPath,
+			Child:      "spool-child",
+		}))
+	}
+
+	So(writeErr, ShouldBeNil)
+	So(set.Close(), ShouldBeNil)
+
+	manifest := &chspool.Manifest{
+		Version:      chspool.Version,
+		Format:       chspool.Format,
+		State:        chspool.Complete,
+		MountPath:    testMountPath,
+		SnapshotID:   sid,
+		UpdatedAt:    updatedAt.UTC().Format(time.RFC3339Nano),
+		SchemaMarker: summariseSpoolLoaderSchemaMarker,
+		Tables:       set.TableManifests(),
+		CompletedAt:  time.Now().UTC().Format(time.RFC3339Nano),
+	}
+
+	So(chspool.WriteManifestAtomic(spoolDir, manifest), ShouldBeNil)
+
+	return manifest
+}
+
+type summariseSpoolHistoryDeleteDeadlineConn struct {
+	bootstrapTestConn
+
+	normalWindow time.Duration
+	err          error
+
+	deleteCalls          int
+	cleanupDeadlineCalls int
+}
+
+func (c *summariseSpoolHistoryDeleteDeadlineConn) Exec(
+	ctx context.Context,
+	query string,
+	_ ...any,
+) error {
+	if !strings.HasPrefix(query, "ALTER TABLE wrstat_basedirs_history DELETE") {
+		return errBootstrapTestUnexpectedCall
+	}
+
+	c.deleteCalls++
+
+	deadline, ok := ctx.Deadline()
+	if !ok || time.Until(deadline) <= c.normalWindow {
+		return context.DeadlineExceeded
+	}
+
+	c.cleanupDeadlineCalls++
+
+	return c.err
 }

@@ -364,7 +364,7 @@ func (l *summariseSpoolLoader) deleteManifestHistoryRows(
 	for chunk := range slices.Chunk(uniqueRows, spoolHistoryDeleteChunk) {
 		query, args := summariseSpoolHistoryDeleteQuery(chunk)
 
-		ctx, cancel := l.queryContext(parent)
+		ctx, cancel := l.cleanupContext(parent)
 		if err := l.conn.Exec(ctx, query, args...); err != nil {
 			cancel()
 
@@ -416,6 +416,10 @@ func summariseSpoolHistoryDeleteQuery(rows []chspool.BasedirsHistoryRow) (string
 	b.WriteString(") SETTINGS mutations_sync = 2")
 
 	return b.String(), args
+}
+
+func (l *summariseSpoolLoader) cleanupContext(parent context.Context) (context.Context, context.CancelFunc) {
+	return queryContext(context.WithoutCancel(loadParentContext(parent)), activeSnapshotCleanupTimeout)
 }
 
 func (l *summariseSpoolLoader) insertEligibleHistoryRows( //nolint:funlen,gocognit
@@ -694,7 +698,7 @@ func (l *summariseSpoolLoader) loadTableWithQuery( //nolint:funlen
 			batch:     &batch,
 			openedAt:  &openedAt,
 			writeErr:  &writeErr,
-			batchSize: defaultBatchSize,
+			batchSize: summariseSpoolBatchSizeFor(table),
 		}
 
 		rows, err := load(parent, writer)
@@ -714,6 +718,17 @@ func (l *summariseSpoolLoader) loadTableWithQuery( //nolint:funlen
 
 		return nil
 	})
+}
+
+func summariseSpoolBatchSizeFor(table string) int {
+	switch table {
+	case chspool.TableDirFacts:
+		return projectionBatchSizeFor(defaultBatchSize)
+	case chspool.TableChildren:
+		return childrenBatchSizeFor(defaultBatchSize)
+	default:
+		return defaultBatchSize
+	}
 }
 
 func (l *summariseSpoolLoader) verifyLoadedCounts(parent context.Context) error {
