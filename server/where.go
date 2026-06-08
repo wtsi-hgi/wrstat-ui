@@ -200,6 +200,14 @@ func (c *responseCache) put(key responseCacheKey, body []byte) {
 	c.entries[key] = append([]byte(nil), body...)
 }
 
+func (c *responseCache) clear() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.entries = nil
+	c.order = nil
+}
+
 func (c *responseCache) evictOldest() {
 	for len(c.order) > responseCacheMaxEntries {
 		oldest := c.order[0]

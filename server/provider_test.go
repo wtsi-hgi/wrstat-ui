@@ -258,17 +258,19 @@ func fillUsageNamesAndOwners(
 }
 
 type testProvider struct {
-	tree  *db.Tree
-	bd    basedirs.Reader
-	cb    func()
-	errCb func(error)
-	msgCb func(string)
+	tree        *db.Tree
+	bd          basedirs.Reader
+	activeSetID string
+	cb          func()
+	errCb       func(error)
+	msgCb       func(string)
 
 	pendingMessages []string
 }
 
 func (p *testProvider) Tree() *db.Tree            { return p.tree }
 func (p *testProvider) BaseDirs() basedirs.Reader { return p.bd }
+func (p *testProvider) ActiveSetID() string       { return p.activeSetID }
 func (p *testProvider) OnUpdate(cb func())        { p.cb = cb }
 func (p *testProvider) OnError(cb func(error))    { p.errCb = cb }
 func (p *testProvider) OnMessage(cb func(message string)) {

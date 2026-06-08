@@ -142,6 +142,7 @@ func (s *Server) assignProviderFields(p provider.Provider, bd basedirs.Reader,
 	s.activeSetID = providerActiveSetID(p)
 	s.basedirs = bd
 	s.dataTimeStamp = dataTimeStamp
+	s.responseCache.clear()
 
 	if !loaded {
 		s.addBaseDGUTARoutes()
@@ -189,6 +190,7 @@ func (s *Server) refreshProviderFrom(p provider.Provider) error {
 	s.activeSetID = providerActiveSetID(p)
 	s.basedirs = bd
 	s.dataTimeStamp = dataTimeStamp
+	s.responseCache.clear()
 	s.mu.Unlock()
 
 	return nil

@@ -2577,6 +2577,39 @@ func TestE4ServerTacticalSupport(t *testing.T) {
 		So(newDatabase.whereCalls, ShouldEqual, 1)
 	})
 
+	Convey("E4.2 SetProvider clears response cache when replacing provider with same active set", t, func() {
+		oldDatabase := &e4StaticResponseCacheDB{count: 101}
+		newDatabase := &e4StaticResponseCacheDB{count: 202}
+		bd := &memBaseDirs{
+			mountTimestamps: map[string]time.Time{e2T283Dir: time.Unix(123, 0)},
+		}
+		s := New(gas.NewStringLogger())
+
+		oldProvider := &testProvider{
+			tree:        db.NewTree(oldDatabase),
+			bd:          bd,
+			activeSetID: e4ActiveSetA,
+		}
+		So(s.SetProvider(oldProvider), ShouldBeNil)
+
+		first, err := e4WhereCounts(s, "?dir=/nfs/t283_imaging/&types=other")
+		So(err, ShouldBeNil)
+		So(first, ShouldResemble, []uint64{101})
+		So(oldDatabase.whereCalls, ShouldEqual, 1)
+
+		newProvider := &testProvider{
+			tree:        db.NewTree(newDatabase),
+			bd:          bd,
+			activeSetID: e4ActiveSetA,
+		}
+		So(s.SetProvider(newProvider), ShouldBeNil)
+
+		afterSwap, err := e4WhereCounts(s, "?dir=/nfs/t283_imaging/&types=other")
+		So(err, ShouldBeNil)
+		So(afterSwap, ShouldResemble, []uint64{202})
+		So(newDatabase.whereCalls, ShouldEqual, 1)
+	})
+
 	Convey("E4.2 cached reverse UID and GID lookups are guarded during response conversion", t, func() {
 		s := New(io.Discard)
 
