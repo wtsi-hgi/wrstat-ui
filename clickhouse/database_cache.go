@@ -705,6 +705,8 @@ func (c *treeQueryCache) reset() {
 	c.mountSummaryOrder = nil
 	c.mountVectors = make(map[treeMountCacheKey]bool)
 	c.mountVectorOrder = nil
+	c.mountAgeAll = make(map[treeMountCacheKey]bool)
+	c.mountAgeAllOrder = nil
 	c.activePrefixSummaries = make(map[treeActivePrefixSummaryCacheKey]*db.DirSummary)
 	c.activePrefixSummaryOrder = nil
 	c.activeMetadata = make(map[treeActiveMetadataCacheKey]treeActiveMetadata)
