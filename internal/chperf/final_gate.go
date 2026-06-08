@@ -379,9 +379,34 @@ func finalGateResultCountsMatch(
 	baseline perfreport.Operation,
 	candidate perfreport.Operation,
 ) bool {
+	if finalGateInfoCountVectorsMatch(baseline, candidate) {
+		return true
+	}
+
 	return resultCountsStable(baseline) &&
 		resultCountsStable(candidate) &&
 		slices.Equal(baseline.ResultCount, candidate.ResultCount)
+}
+
+func finalGateInfoCountVectorsMatch(
+	baseline perfreport.Operation,
+	candidate perfreport.Operation,
+) bool {
+	if !finalGateInfoCountFieldsPresent(baseline, candidate) {
+		return false
+	}
+
+	return len(baseline.ResultCount) > 0 &&
+		slices.Equal(baseline.ResultCount, candidate.ResultCount) &&
+		finalGateInputEvidenceMatches(baseline, candidate, queryInputInfoCountFieldsKey)
+}
+
+func finalGateInfoCountFieldsPresent(
+	baseline perfreport.Operation,
+	candidate perfreport.Operation,
+) bool {
+	return finalGateInputPresent(baseline, queryInputInfoCountFieldsKey) &&
+		finalGateInputPresent(candidate, queryInputInfoCountFieldsKey)
 }
 
 func finalGateOperationRequiresDigest(

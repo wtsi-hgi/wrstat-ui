@@ -221,6 +221,29 @@ func TestValidateFinalGates(t *testing.T) {
 		So(finalGateInputPresent(authTree, finalGateRESTInputCacheHits), ShouldBeFalse)
 	})
 
+	Convey("D1.6 final gate accepts matching Info count vectors", t, func() {
+		evidence := finalGateTestEvidence(false, false)
+		finalGateSetReportInfoCountVector(&evidence.BaselineQueryReports[0], []uint64{3, 6, 1, 2})
+		finalGateSetReportInfoCountVector(&evidence.QueryReports[0], []uint64{3, 6, 1, 2})
+
+		result := ValidateFinalGates(evidence)
+
+		So(result.Passed, ShouldBeTrue)
+		So(result.Checks[15].Passed, ShouldBeTrue)
+	})
+
+	Convey("D1.6 final gate fails mismatched Info count vectors", t, func() {
+		evidence := finalGateTestEvidence(false, false)
+		finalGateSetReportInfoCountVector(&evidence.BaselineQueryReports[0], []uint64{3, 6, 1, 2})
+		finalGateSetReportInfoCountVector(&evidence.QueryReports[0], []uint64{3, 7, 1, 2})
+
+		result := ValidateFinalGates(evidence)
+
+		So(result.Passed, ShouldBeFalse)
+		So(result.Checks[15].Passed, ShouldBeFalse)
+		So(result.Checks[15].Detail, ShouldContainSubstring, finalGateResultCountMismatch)
+	})
+
 	Convey("D2.6 final gate fails when candidate p95 is more than 10% slower", t, func() {
 		evidence := finalGateTestEvidence(false, false)
 		finalGateSetCandidateP95(&evidence, queryOpPermissionCheckName, 11.01)
@@ -1016,6 +1039,16 @@ func finalGateFindQueryOpIndex(report perfreport.Report, name string) int {
 	}
 
 	return -1
+}
+
+func finalGateSetReportInfoCountVector(report *perfreport.Report, counts []uint64) {
+	opIndex := finalGateFindQueryOpIndex(*report, queryOpInfoName)
+	So(opIndex, ShouldBeGreaterThanOrEqualTo, 0)
+
+	op := &report.Operations[opIndex]
+	op.ResultCount = slices.Clone(counts)
+	op.Inputs[queryInputInfoCountFieldsKey] = db.InfoCountFieldNames()
+	op.Inputs[navigationInputResultDigest] = "sha256:info-counts"
 }
 
 func finalGateQueryReport() perfreport.Report {
