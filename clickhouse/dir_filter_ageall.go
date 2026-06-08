@@ -85,6 +85,9 @@ const (
 		"AND c.parent_dir IN (%s) AND %s " +
 		"GROUP BY c.parent_dir " +
 		"ORDER BY c.parent_dir ASC"
+
+	dirFilterAgeAllReadyQuery = "SELECT count() FROM wrstat_dir_filter_ageall " +
+		"WHERE mount_path = ? AND snapshot_id = ?"
 )
 
 var errDirFilterAgeAllBatchNotPrepared = errors.New("clickhouse: AgeAll filter batch is not prepared")
@@ -283,7 +286,67 @@ func (d *clickHouseDatabase) dirFilterAgeAllReadyForFilter(
 		return false, fmt.Errorf("clickhouse: failed to query AgeAll filter index readiness: %w", err)
 	}
 
+	if !ready {
+		return false, nil
+	}
+
+	ready, err = d.dirFilterAgeAllRowsReadyCached(ctx, mountPath, snapshotID)
+	if err != nil {
+		return false, fmt.Errorf("clickhouse: failed to query AgeAll filter row readiness: %w", err)
+	}
+
 	return ready, nil
+}
+
+func (d *clickHouseDatabase) dirFilterAgeAllRowsReadyCached(
+	ctx context.Context,
+	mountPath, snapshotID string,
+) (bool, error) {
+	key := newTreeMountCacheKey(mountPath, snapshotID)
+	if ready, cached := d.treeCache.getDirFilterAgeAllReady(key); cached {
+		return ready, nil
+	}
+
+	ready, err := dirFilterAgeAllRowsReady(ctx, d.conn, mountPath, snapshotID)
+	if err != nil {
+		return ready, err
+	}
+
+	d.treeCache.putDirFilterAgeAllReady(key, ready)
+
+	return ready, nil
+}
+
+func dirFilterAgeAllRowsReady(
+	ctx context.Context,
+	conn ch.Conn,
+	mountPath, snapshotID string,
+) (bool, error) {
+	rows, err := conn.Query(ctx, dirFilterAgeAllReadyQuery, mountPath, snapshotID)
+	if err != nil {
+		if isUnknownTable(err) {
+			return false, nil
+		}
+
+		return false, err
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	if !rows.Next() {
+		return false, rowsErr(rows)
+	}
+
+	var count uint64
+	if err := rows.Scan(&count); err != nil {
+		return false, err
+	}
+
+	if err := rowsErr(rows); err != nil {
+		return false, err
+	}
+
+	return count > 0, nil
 }
 
 func (d *clickHouseDatabase) dirFilterAgeAllWhereSummaries(

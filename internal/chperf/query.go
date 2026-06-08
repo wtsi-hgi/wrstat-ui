@@ -458,6 +458,7 @@ func opStartupCacheWarmingAudit() op {
 		skipWarmup:        true,
 		hasRepeatOverride: true,
 		repeatOverride:    1,
+		resultCount:       func() uint64 { return 1 },
 	}
 }
 
@@ -2721,6 +2722,8 @@ func buildOps(qctx queryContext, opts QueryOptions, printf PrintfFunc) []op {
 func opMountTimestamps(qctx queryContext) op {
 	inputs := map[string]any{}
 
+	var resultCount uint64
+
 	return op{
 		name:   "mount_timestamps",
 		inputs: inputs,
@@ -2732,9 +2735,11 @@ func opMountTimestamps(qctx queryContext) op {
 
 			inputs["mount_count"] = len(ts)
 			inputs["active_mounts"] = activeMountsFreshness(ts)
+			resultCount = uint64(len(ts))
 
 			return nil
 		},
+		resultCount: func() uint64 { return resultCount },
 	}
 }
 
@@ -2780,14 +2785,18 @@ func opTreeDirInfo(qctx queryContext) op {
 }
 
 func opGroupUsage(qctx queryContext) op {
+	var resultCount uint64
+
 	return op{
 		name:   "basedirs_group_usage",
 		inputs: map[string]any{},
 		run: func(_ context.Context) error {
-			_, err := qctx.provider.BaseDirs().GroupUsage(db.DGUTAgeAll)
+			rows, err := qctx.provider.BaseDirs().GroupUsage(db.DGUTAgeAll)
+			resultCount = uint64(len(rows))
 
 			return err
 		},
+		resultCount: func() uint64 { return resultCount },
 	}
 }
 

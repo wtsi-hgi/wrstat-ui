@@ -925,6 +925,13 @@ func (d *clickHouseDatabase) dirInfoAncestor(
 		return sum, err
 	}
 
+	return d.dirInfoAncestorAfterActivePrefix(normDir, filter)
+}
+
+func (d *clickHouseDatabase) dirInfoAncestorAfterActivePrefix(
+	normDir string,
+	filter *db.Filter,
+) (*db.DirSummary, error) {
 	if sum, ok, err := d.dirInfoTreeSummaryAncestor(normDir, filter); err != nil || ok {
 		return sum, err
 	}
@@ -946,7 +953,7 @@ func (d *clickHouseDatabase) dirInfoActivePrefixAncestor(
 	}
 
 	sum, err = activePrefixRollupFallback(func() (*db.DirSummary, error) {
-		return d.dirInfoAncestorFallback(normDir, filter)
+		return d.dirInfoAncestorAfterActivePrefix(normDir, filter)
 	})
 
 	return sum, true, err

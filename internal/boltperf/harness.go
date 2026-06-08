@@ -137,10 +137,14 @@ func Import(inputDir string, opts ImportOptions, printf PrintfFunc) error {
 		return err
 	}
 
-	report.AddOperation(
+	report.AddOperationWithCounters(
 		"import_total",
 		map[string]any{"datasets": len(datasetDirs), "records": totalRecords},
 		[]float64{durationMS(time.Since(startAll))},
+		nil,
+		nil,
+		nil,
+		[]uint64{totalRecords},
 	)
 
 	return WriteReport(opts.JSONOut, report)
@@ -891,11 +895,11 @@ func buildQuerySuiteOps(ctx queryContext, opts QueryOptions) []querySuiteOp {
 	ctx.treeFilter = buildTreeFilter(ctx, opts)
 
 	ops := []querySuiteOp{
-		{
-			name:   "mount_timestamps",
-			inputs: map[string]any{"datasets": len(ctx.datasetDirs)},
-			op:     func() error { return opMountTimestamps(ctx) },
-		},
+		countedQuerySuiteOp(
+			"mount_timestamps",
+			map[string]any{"datasets": len(ctx.datasetDirs)},
+			func() (uint64, error) { return opMountTimestamps(ctx) },
+		),
 		opTreeWhereColdThenCached(ctx, opts.Splits),
 	}
 
@@ -913,39 +917,39 @@ func buildQuerySuiteOps(ctx queryContext, opts QueryOptions) []querySuiteOp {
 		opTreeDiskTreeEndpointVisibleChildDirs(ctx),
 		opTreeWhereSuite(ctx, opts.Splits),
 		opTreeWhereFreshProviderSuite(ctx, opts.Splits),
-		{
-			name:   "basedirs_group_usage",
-			inputs: map[string]any{queryInputAgeKey: int(db.DGUTAgeAll)},
-			op:     func() error { return opBasedirsGroupUsage(ctx) },
-		},
-		{
-			name:   "basedirs_user_usage",
-			inputs: map[string]any{queryInputAgeKey: int(db.DGUTAgeAll)},
-			op:     func() error { return opBasedirsUserUsage(ctx) },
-		},
-		{
-			name: "basedirs_group_subdirs",
-			inputs: map[string]any{
+		countedQuerySuiteOp(
+			"basedirs_group_usage",
+			map[string]any{queryInputAgeKey: int(db.DGUTAgeAll)},
+			func() (uint64, error) { return opBasedirsGroupUsage(ctx) },
+		),
+		countedQuerySuiteOp(
+			"basedirs_user_usage",
+			map[string]any{queryInputAgeKey: int(db.DGUTAgeAll)},
+			func() (uint64, error) { return opBasedirsUserUsage(ctx) },
+		),
+		countedQuerySuiteOp(
+			"basedirs_group_subdirs",
+			map[string]any{
 				"gid":                ctx.ids.gid,
 				queryInputBaseDirKey: ctx.ids.groupBD,
 				queryInputAgeKey:     int(db.DGUTAgeAll),
 			},
-			op: func() error { return opBasedirsGroupSubDirs(ctx) },
-		},
-		{
-			name: "basedirs_user_subdirs",
-			inputs: map[string]any{
+			func() (uint64, error) { return opBasedirsGroupSubDirs(ctx) },
+		),
+		countedQuerySuiteOp(
+			"basedirs_user_subdirs",
+			map[string]any{
 				"uid":                ctx.ids.uid,
 				queryInputBaseDirKey: ctx.ids.userBD,
 				queryInputAgeKey:     int(db.DGUTAgeAll),
 			},
-			op: func() error { return opBasedirsUserSubDirs(ctx) },
-		},
-		{
-			name:   "basedirs_history",
-			inputs: map[string]any{"gid": ctx.ids.gid, queryInputBaseDirKey: ctx.ids.groupBD},
-			op:     func() error { return opBasedirsHistory(ctx) },
-		},
+			func() (uint64, error) { return opBasedirsUserSubDirs(ctx) },
+		),
+		countedQuerySuiteOp(
+			"basedirs_history",
+			map[string]any{"gid": ctx.ids.gid, queryInputBaseDirKey: ctx.ids.groupBD},
+			func() (uint64, error) { return opBasedirsHistory(ctx) },
+		),
 	}...)
 
 	return ops
@@ -959,22 +963,42 @@ func buildTreeFilter(ctx queryContext, opts QueryOptions) *db.Filter {
 	return treeFilterFromOptions(ctx.treeFilter)
 }
 
-func opMountTimestamps(ctx queryContext) error {
+func countedQuerySuiteOp(
+	name string,
+	inputs map[string]any,
+	run func() (uint64, error),
+) querySuiteOp {
+	var resultCount uint64
+
+	return querySuiteOp{
+		name:   name,
+		inputs: inputs,
+		op: func() error {
+			count, err := run()
+			resultCount = count
+
+			return err
+		},
+		resultCount: func() uint64 { return resultCount },
+	}
+}
+
+func opMountTimestamps(ctx queryContext) (uint64, error) {
 	for _, datasetDir := range ctx.datasetDirs {
 		base := filepath.Base(datasetDir)
 
 		_, err := DeriveMountPathFromDatasetDirName(base)
 		if err != nil {
-			return err
+			return 0, err
 		}
 
 		_, err = os.Stat(filepath.Join(datasetDir, dgutaDBsSuffix))
 		if err != nil {
-			return err
+			return 0, err
 		}
 	}
 
-	return nil
+	return uint64(len(ctx.datasetDirs)), nil
 }
 
 func opTreeWhereColdThenCached(ctx queryContext, splits int) querySuiteOp {
@@ -1608,12 +1632,6 @@ func opTreeDiskTreeEndpoint(ctx queryContext) error {
 	return err
 }
 
-func opTreeWhere(ctx queryContext, splits int) error {
-	_, err := runTreeWhere(ctx.tree, ctx.queryDir, ctx.treeFilter, splits, nil)
-
-	return err
-}
-
 func opTreeDiskTreeEndpointVisibleChildDirs(ctx queryContext) querySuiteOp {
 	filter := treeFilterFromOptions(ctx.treeFilter)
 	inputs := treeOpInputs(filter, map[string]any{
@@ -1694,34 +1712,34 @@ func opTreeWhereFreshProvider(ctx queryContext, splits int) error {
 	return closeAndJoinErr(closeFn, whereErr)
 }
 
-func opBasedirsGroupUsage(ctx queryContext) error {
-	_, err := ctx.mr.GroupUsage(db.DGUTAgeAll)
+func opBasedirsGroupUsage(ctx queryContext) (uint64, error) {
+	rows, err := ctx.mr.GroupUsage(db.DGUTAgeAll)
 
-	return err
+	return uint64(len(rows)), err
 }
 
-func opBasedirsUserUsage(ctx queryContext) error {
-	_, err := ctx.mr.UserUsage(db.DGUTAgeAll)
+func opBasedirsUserUsage(ctx queryContext) (uint64, error) {
+	rows, err := ctx.mr.UserUsage(db.DGUTAgeAll)
 
-	return err
+	return uint64(len(rows)), err
 }
 
-func opBasedirsGroupSubDirs(ctx queryContext) error {
-	_, err := ctx.mr.GroupSubDirs(ctx.ids.gid, ctx.ids.groupBD, db.DGUTAgeAll)
+func opBasedirsGroupSubDirs(ctx queryContext) (uint64, error) {
+	rows, err := ctx.mr.GroupSubDirs(ctx.ids.gid, ctx.ids.groupBD, db.DGUTAgeAll)
 
-	return err
+	return uint64(len(rows)), err
 }
 
-func opBasedirsUserSubDirs(ctx queryContext) error {
-	_, err := ctx.mr.UserSubDirs(ctx.ids.uid, ctx.ids.userBD, db.DGUTAgeAll)
+func opBasedirsUserSubDirs(ctx queryContext) (uint64, error) {
+	rows, err := ctx.mr.UserSubDirs(ctx.ids.uid, ctx.ids.userBD, db.DGUTAgeAll)
 
-	return err
+	return uint64(len(rows)), err
 }
 
-func opBasedirsHistory(ctx queryContext) error {
-	_, err := ctx.mr.History(ctx.ids.gid, ctx.ids.groupBD)
+func opBasedirsHistory(ctx queryContext) (uint64, error) {
+	rows, err := ctx.mr.History(ctx.ids.gid, ctx.ids.groupBD)
 
-	return err
+	return uint64(len(rows)), err
 }
 
 func timeAndReportQueryOp(

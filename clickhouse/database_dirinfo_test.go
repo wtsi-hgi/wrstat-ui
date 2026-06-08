@@ -361,14 +361,15 @@ func assertNoLegacyTreeRouteTables(queries []string) {
 
 func treeRouteTablesOutsideAllowlist(queries []string) []string {
 	allowed := map[string]bool{
-		"wrstat_children":              true,
-		"wrstat_dir_facts":             true,
-		"wrstat_dir_projection_sets":   true,
-		"wrstat_mounts_active":         true,
-		"wrstat_virtual_children":      true,
-		"wrstat_virtual_children_sets": true,
-		"wrstat_virtual_summary_cache": true,
-		"wrstat_virtual_summary_sets":  true,
+		"wrstat_children":                   true,
+		"wrstat_dir_facts":                  true,
+		"wrstat_dir_projection_sets":        true,
+		"wrstat_mounts_active":              true,
+		string(NavigationObjectParentFacts): true,
+		"wrstat_virtual_children":           true,
+		"wrstat_virtual_children_sets":      true,
+		"wrstat_virtual_summary_cache":      true,
+		"wrstat_virtual_summary_sets":       true,
 	}
 
 	offenders := make([]string, 0)

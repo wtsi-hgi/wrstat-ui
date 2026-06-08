@@ -1303,13 +1303,14 @@ func TestBoltPerf(t *testing.T) {
 			Repeat        int    `json:"repeat"`
 			Warmup        int    `json:"warmup"`
 			Operations    []struct {
-				Name        string                 `json:"name"`
-				Inputs      map[string]any         `json:"inputs"`
-				DurationsMS []float64              `json:"durations_ms"`
-				P50MS       float64                `json:"p50_ms"`
-				P95MS       float64                `json:"p95_ms"`
-				P99MS       float64                `json:"p99_ms"`
-				Extra       map[string]interface{} `json:"-"`
+				Name         string                 `json:"name"`
+				Inputs       map[string]any         `json:"inputs"`
+				DurationsMS  []float64              `json:"durations_ms"`
+				ResultCounts []uint64               `json:"result_counts"`
+				P50MS        float64                `json:"p50_ms"`
+				P95MS        float64                `json:"p95_ms"`
+				P99MS        float64                `json:"p99_ms"`
+				Extra        map[string]interface{} `json:"-"`
 			} `json:"operations"`
 		}
 
@@ -1333,11 +1334,14 @@ func TestBoltPerf(t *testing.T) {
 			if op.Name == perfOpTreeDiskTreeVisibleChildDirs {
 				So(len(op.DurationsMS), ShouldBeGreaterThan, 0)
 				So(len(op.DurationsMS), ShouldBeLessThanOrEqualTo, 2)
+				So(len(op.ResultCounts), ShouldBeGreaterThan, 0)
+				So(len(op.ResultCounts), ShouldBeLessThanOrEqualTo, 2)
 
 				continue
 			}
 
 			So(len(op.DurationsMS), ShouldEqual, 2)
+			So(op.ResultCounts, ShouldHaveLength, 2)
 		}
 
 		So(opNames, ShouldResemble, []string{
@@ -1424,13 +1428,14 @@ func TestBoltPerf(t *testing.T) {
 				Repeat        int    `json:"repeat"`
 				Warmup        int    `json:"warmup"`
 				Operations    []struct {
-					Name        string                 `json:"name"`
-					Inputs      map[string]any         `json:"inputs"`
-					DurationsMS []float64              `json:"durations_ms"`
-					P50MS       float64                `json:"p50_ms"`
-					P95MS       float64                `json:"p95_ms"`
-					P99MS       float64                `json:"p99_ms"`
-					Extra       map[string]interface{} `json:"-"`
+					Name         string                 `json:"name"`
+					Inputs       map[string]any         `json:"inputs"`
+					DurationsMS  []float64              `json:"durations_ms"`
+					ResultCounts []uint64               `json:"result_counts"`
+					P50MS        float64                `json:"p50_ms"`
+					P95MS        float64                `json:"p95_ms"`
+					P99MS        float64                `json:"p99_ms"`
+					Extra        map[string]interface{} `json:"-"`
 				} `json:"operations"`
 			}
 
@@ -1452,6 +1457,7 @@ func TestBoltPerf(t *testing.T) {
 			for _, op := range report2.Operations {
 				opNames2 = append(opNames2, op.Name)
 				So(len(op.DurationsMS), ShouldEqual, 2)
+				So(op.ResultCounts, ShouldHaveLength, 2)
 			}
 
 			So(opNames2, ShouldResemble, []string{

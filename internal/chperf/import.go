@@ -198,7 +198,15 @@ func addImportReportOperations(
 		}
 		addImportRowCapInput(inputs, rowCapInput)
 
-		report.AddOperation("import_file_total", inputs, []float64{durationMS(result.elapsed)})
+		report.AddOperationWithCounters(
+			"import_file_total",
+			inputs,
+			[]float64{durationMS(result.elapsed)},
+			nil,
+			nil,
+			nil,
+			[]uint64{result.records()},
+		)
 
 		for _, phase := range sortedImportPhases(result.phases) {
 			inputs := map[string]any{
@@ -210,7 +218,15 @@ func addImportReportOperations(
 			addImportRowCapInput(inputs, rowCapInput)
 			addImportPhaseInputs(inputs, result, phase)
 
-			report.AddOperation("import_phase", inputs, []float64{durationMS(result.phases[phase])})
+			report.AddOperationWithCounters(
+				"import_phase",
+				inputs,
+				[]float64{durationMS(result.phases[phase])},
+				nil,
+				nil,
+				nil,
+				[]uint64{importPhaseResultCount(result, phase)},
+			)
 		}
 
 		addImportGuardrailOperations(report, result, rowCapInput)
@@ -225,7 +241,15 @@ func addImportReportOperations(
 	}
 	addImportRowCapInput(inputs, rowCapInput)
 
-	report.AddOperation("import_total", inputs, []float64{durationMS(totalDuration)})
+	report.AddOperationWithCounters(
+		"import_total",
+		inputs,
+		[]float64{durationMS(totalDuration)},
+		nil,
+		nil,
+		nil,
+		[]uint64{totalRecords},
+	)
 }
 
 func importRowCapInput(rowCap int) uint64 {
@@ -390,6 +414,27 @@ func totalImportRecords(results []datasetImportResult) uint64 {
 	return total
 }
 
+func importPhaseResultCount(result datasetImportResult, phase string) uint64 {
+	if table, _, ok := importSingleTablePhase(result, phase); ok {
+		return result.rows[table]
+	}
+
+	if tables, ok := importMultiTablePhase(phase); ok {
+		return importTablesResultCount(result, tables)
+	}
+
+	return 1
+}
+
+func importTablesResultCount(result datasetImportResult, tables []string) uint64 {
+	var total uint64
+	for _, table := range tables {
+		total += result.rows[table]
+	}
+
+	return total
+}
+
 func addImportGuardrailOperations(report *perfreport.Report, result datasetImportResult, rowCap uint64) {
 	addRawFileIngestGuardrail(report, result, rowCap)
 	addPhaseImportGuardrail(report, result, importGuardrailActiveSnapshotPublish, phaseMountSwitch, nil, rowCap)
@@ -421,7 +466,15 @@ func addRawFileIngestGuardrail(report *perfreport.Report, result datasetImportRe
 	inputs["phases"] = []string{phaseFilesInsert, phaseFilesFlush}
 	inputs["throughput_records_per_sec"] = throughputPerSecond(result.records(), result.elapsed)
 
-	report.AddOperation(importGuardrailOperation, inputs, []float64{durationMS(duration)})
+	report.AddOperationWithCounters(
+		importGuardrailOperation,
+		inputs,
+		[]float64{durationMS(duration)},
+		nil,
+		nil,
+		nil,
+		[]uint64{result.rows[tableFiles]},
+	)
 }
 
 func importGuardrailStatusAndDuration(observed bool, duration time.Duration) (string, time.Duration) {
@@ -472,7 +525,23 @@ func addPhaseImportGuardrail(
 		inputs["tables"] = slices.Clone(tables)
 	}
 
-	report.AddOperation(importGuardrailOperation, inputs, []float64{durationMS(duration)})
+	report.AddOperationWithCounters(
+		importGuardrailOperation,
+		inputs,
+		[]float64{durationMS(duration)},
+		nil,
+		nil,
+		nil,
+		[]uint64{importGuardrailResultCount(result, phase, observed)},
+	)
+}
+
+func importGuardrailResultCount(result datasetImportResult, phase string, observed bool) uint64 {
+	if !observed {
+		return 0
+	}
+
+	return importPhaseResultCount(result, phase)
 }
 
 func importGuardrailTables(phase string) []string {

@@ -301,6 +301,8 @@ type treeQueryCache struct {
 	mountSummaryOrder []treeMountCacheKey
 	mountVectors      map[treeMountCacheKey]bool
 	mountVectorOrder  []treeMountCacheKey
+	mountAgeAll       map[treeMountCacheKey]bool
+	mountAgeAllOrder  []treeMountCacheKey
 
 	activePrefixSummaries      map[treeActivePrefixSummaryCacheKey]*db.DirSummary
 	activePrefixSummaryOrder   []treeActivePrefixSummaryCacheKey
@@ -326,6 +328,7 @@ func newTreeQueryCache() *treeQueryCache {
 		dirSummaryCounts: make(map[treeDirSummaryCacheKey]uint64),
 		mountSummaries:   make(map[treeMountCacheKey]bool),
 		mountVectors:     make(map[treeMountCacheKey]bool),
+		mountAgeAll:      make(map[treeMountCacheKey]bool),
 		activePrefixSummaries: make(
 			map[treeActivePrefixSummaryCacheKey]*db.DirSummary,
 		),
@@ -653,6 +656,37 @@ func (c *treeQueryCache) evictOldestMountDirDGUTAVectors() {
 		oldest := c.mountVectorOrder[0]
 		c.mountVectorOrder = c.mountVectorOrder[1:]
 		delete(c.mountVectors, oldest)
+	}
+}
+
+func (c *treeQueryCache) getDirFilterAgeAllReady(key treeMountCacheKey) (bool, bool) {
+	c.mu.RLock()
+	ready, cached := c.mountAgeAll[key]
+	c.mu.RUnlock()
+
+	return ready, cached
+}
+
+func (c *treeQueryCache) putDirFilterAgeAllReady(key treeMountCacheKey, ready bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if _, cached := c.mountAgeAll[key]; cached {
+		c.mountAgeAll[key] = ready
+
+		return
+	}
+
+	c.mountAgeAll[key] = ready
+	c.mountAgeAllOrder = append(c.mountAgeAllOrder, key)
+	c.evictOldestDirFilterAgeAllReady()
+}
+
+func (c *treeQueryCache) evictOldestDirFilterAgeAllReady() {
+	for len(c.mountAgeAllOrder) > treeMountSummaryCacheMaxEntries {
+		oldest := c.mountAgeAllOrder[0]
+		c.mountAgeAllOrder = c.mountAgeAllOrder[1:]
+		delete(c.mountAgeAll, oldest)
 	}
 }
 

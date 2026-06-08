@@ -131,10 +131,11 @@ func boltPerfImportInterfacesReport(inputDir string, printf perfPrintfFunc) (per
 		return perfReport{}, err
 	}
 
-	report.addOperation(
+	report.addOperationWithCounts(
 		"import_total",
 		map[string]any{"datasets": len(datasetDirs), "records": totalRecords},
 		[]float64{durationMS(time.Since(startAll))},
+		[]uint64{totalRecords},
 	)
 
 	return report, nil
@@ -771,12 +772,12 @@ func runPerfQuerySuite(report *perfReport, ctx perfQueryContext, printf perfPrin
 			warmup = 0
 		}
 
-		durations, err := measureOperation(warmup, boltPerf.repeat, op.op)
+		durations, resultCounts, err := measureOperation(warmup, boltPerf.repeat, op)
 		if err != nil {
 			return err
 		}
 
-		report.addOperation(op.name, op.inputs, durations)
+		report.addOperationWithCounts(op.name, op.inputs, durations, resultCounts)
 
 		p50, p95, p99 := percentilesMS(durations)
 		printf("%s repeats=%d p50_ms=%.3f p95_ms=%.3f p99_ms=%.3f\n", op.name, len(durations), p50, p95, p99)
@@ -875,13 +876,18 @@ func boltPerfQueryOps(ctx perfQueryContext) []perfQueryOp {
 }
 
 func boltPerfOpMountTimestamps(ctx perfQueryContext) perfQueryOp {
+	var resultCount uint64
+
 	return perfQueryOp{
 		name:   "mount_timestamps",
 		inputs: map[string]any{"datasets": len(ctx.datasetDirs)},
 		op: func() error {
-			if _, err := ctx.bd.MountTimestamps(); err != nil {
+			ts, err := ctx.bd.MountTimestamps()
+			if err != nil {
 				return err
 			}
+
+			resultCount = uint64(len(ts))
 
 			for _, datasetDir := range ctx.datasetDirs {
 				base := filepath.Base(datasetDir)
@@ -892,6 +898,7 @@ func boltPerfOpMountTimestamps(ctx perfQueryContext) perfQueryOp {
 
 			return nil
 		},
+		resultCount: func() uint64 { return resultCount },
 	}
 }
 
@@ -912,6 +919,8 @@ func deriveMountPathFromDatasetDirName(dirName string) (string, error) {
 }
 
 func boltPerfOpTreeWhereColdThenCached(ctx perfQueryContext) perfQueryOp {
+	var resultCount uint64
+
 	return perfQueryOp{
 		name: "tree_where_cold_then_cached",
 		inputs: map[string]any{
@@ -924,29 +933,45 @@ func boltPerfOpTreeWhereColdThenCached(ctx perfQueryContext) perfQueryOp {
 		op: func() error {
 			filter := &db.Filter{Age: db.DGUTAgeAll}
 			splitFn := split.SplitsToSplitFn(boltPerf.splits)
-			_, err := ctx.tree.Where(ctx.queryDir, filter, splitFn)
+			results, err := ctx.tree.Where(ctx.queryDir, filter, splitFn)
+			resultCount = uint64(len(results))
 
 			return err
 		},
-		skipWarmup: true,
+		resultCount: func() uint64 { return resultCount },
+		skipWarmup:  true,
 	}
 }
 
 func boltPerfOpTreeDirInfo(ctx perfQueryContext) perfQueryOp {
+	var resultCount uint64
+
 	return perfQueryOp{
 		name:   "tree_dirinfo",
 		inputs: map[string]any{perfQueryInputDir: ctx.queryDir, perfQueryInputAge: int(db.DGUTAgeAll)},
 		op: func() error {
 			filter := &db.Filter{Age: db.DGUTAgeAll}
-			_, err := ctx.tree.DirInfo(ctx.queryDir, filter)
+			info, err := ctx.tree.DirInfo(ctx.queryDir, filter)
+			resultCount = perfDirInfoResultCount(info)
 
 			return err
 		},
+		resultCount: func() uint64 { return resultCount },
 	}
+}
+
+func perfDirInfoResultCount(info *db.DirInfo) uint64 {
+	if info == nil || info.Current == nil {
+		return 0
+	}
+
+	return uint64(1 + len(info.Children))
 }
 
 func boltPerfOpTreeDiskTreeAncestorDirs(ctx perfQueryContext) perfQueryOp {
 	dirs := perfAncestorDisktreeDirs(ctx)
+
+	var resultCount uint64
 
 	return perfQueryOp{
 		name: "tree_disktree_endpoint_ancestor_dirs",
@@ -960,16 +985,29 @@ func boltPerfOpTreeDiskTreeAncestorDirs(ctx perfQueryContext) perfQueryOp {
 			perfQueryInputDurationSource: "wall",
 		},
 		op: func() error {
-			for _, dir := range dirs {
-				if err := runPerfTreeDiskTreeEndpoint(ctx.tree, dir); err != nil {
-					return err
-				}
-			}
+			count, err := runPerfAncestorDisktreeDirs(ctx.tree, dirs)
+			resultCount = count
 
-			return nil
+			return err
 		},
-		skipWarmup: true,
+		resultCount: func() uint64 { return resultCount },
+		skipWarmup:  true,
 	}
+}
+
+func runPerfAncestorDisktreeDirs(tree *db.Tree, dirs []string) (uint64, error) {
+	var count uint64
+
+	for _, dir := range dirs {
+		childCount, err := runPerfTreeDiskTreeEndpoint(tree, dir)
+		if err != nil {
+			return 0, err
+		}
+
+		count += childCount
+	}
+
+	return count, nil
 }
 
 func perfAncestorDisktreeDirs(ctx perfQueryContext) []string {
@@ -1055,21 +1093,27 @@ func addPerfAncestorDir(dirs *[]string, seen map[string]bool, dir string, limit 
 }
 
 func boltPerfOpTreeDiskTreeEndpoint(ctx perfQueryContext) perfQueryOp {
+	var resultCount uint64
+
 	return perfQueryOp{
 		name:   "tree_disktree_endpoint",
 		inputs: map[string]any{perfQueryInputDir: ctx.queryDir, perfQueryInputAge: int(db.DGUTAgeAll)},
 		op: func() error {
-			return runPerfTreeDiskTreeEndpoint(ctx.tree, ctx.queryDir)
+			count, err := runPerfTreeDiskTreeEndpoint(ctx.tree, ctx.queryDir)
+			resultCount = count
+
+			return err
 		},
+		resultCount: func() uint64 { return resultCount },
 	}
 }
 
-func runPerfTreeDiskTreeEndpoint(tree *db.Tree, dir string) error {
+func runPerfTreeDiskTreeEndpoint(tree *db.Tree, dir string) (uint64, error) {
 	filter := &db.Filter{Age: db.DGUTAgeAll}
 
 	di, err := tree.DirInfo(dir, filter)
 	if err != nil || di == nil {
-		return err
+		return 0, err
 	}
 
 	childPaths := make([]string, 0, len(di.Children))
@@ -1079,10 +1123,12 @@ func runPerfTreeDiskTreeEndpoint(tree *db.Tree, dir string) error {
 
 	_ = tree.DirsHaveChildren(childPaths, filter)
 
-	return nil
+	return uint64(len(childPaths)), nil
 }
 
 func boltPerfOpTreeWhere(ctx perfQueryContext) perfQueryOp {
+	var resultCount uint64
+
 	return perfQueryOp{
 		name: "tree_where",
 		inputs: map[string]any{
@@ -1093,38 +1139,50 @@ func boltPerfOpTreeWhere(ctx perfQueryContext) perfQueryOp {
 		op: func() error {
 			filter := &db.Filter{Age: db.DGUTAgeAll}
 			splitFn := split.SplitsToSplitFn(boltPerf.splits)
-			_, err := ctx.tree.Where(ctx.queryDir, filter, splitFn)
+			results, err := ctx.tree.Where(ctx.queryDir, filter, splitFn)
+			resultCount = uint64(len(results))
 
 			return err
 		},
+		resultCount: func() uint64 { return resultCount },
 	}
 }
 
 func boltPerfOpBasedirsGroupUsage(ctx perfQueryContext) perfQueryOp {
+	var resultCount uint64
+
 	return perfQueryOp{
 		name:   "basedirs_group_usage",
 		inputs: map[string]any{perfQueryInputAge: int(db.DGUTAgeAll)},
 		op: func() error {
-			_, err := ctx.bd.GroupUsage(db.DGUTAgeAll)
+			rows, err := ctx.bd.GroupUsage(db.DGUTAgeAll)
+			resultCount = uint64(len(rows))
 
 			return err
 		},
+		resultCount: func() uint64 { return resultCount },
 	}
 }
 
 func boltPerfOpBasedirsUserUsage(ctx perfQueryContext) perfQueryOp {
+	var resultCount uint64
+
 	return perfQueryOp{
 		name:   "basedirs_user_usage",
 		inputs: map[string]any{perfQueryInputAge: int(db.DGUTAgeAll)},
 		op: func() error {
-			_, err := ctx.bd.UserUsage(db.DGUTAgeAll)
+			rows, err := ctx.bd.UserUsage(db.DGUTAgeAll)
+			resultCount = uint64(len(rows))
 
 			return err
 		},
+		resultCount: func() uint64 { return resultCount },
 	}
 }
 
 func boltPerfOpBasedirsGroupSubdirs(ctx perfQueryContext) perfQueryOp {
+	var resultCount uint64
+
 	return perfQueryOp{
 		name: "basedirs_group_subdirs",
 		inputs: map[string]any{
@@ -1133,14 +1191,18 @@ func boltPerfOpBasedirsGroupSubdirs(ctx perfQueryContext) perfQueryOp {
 			perfQueryInputAge:     int(db.DGUTAgeAll),
 		},
 		op: func() error {
-			_, err := ctx.bd.GroupSubDirs(ctx.ids.gid, ctx.ids.groupBD, db.DGUTAgeAll)
+			rows, err := ctx.bd.GroupSubDirs(ctx.ids.gid, ctx.ids.groupBD, db.DGUTAgeAll)
+			resultCount = uint64(len(rows))
 
 			return err
 		},
+		resultCount: func() uint64 { return resultCount },
 	}
 }
 
 func boltPerfOpBasedirsUserSubdirs(ctx perfQueryContext) perfQueryOp {
+	var resultCount uint64
+
 	return perfQueryOp{
 		name: "basedirs_user_subdirs",
 		inputs: map[string]any{
@@ -1149,44 +1211,60 @@ func boltPerfOpBasedirsUserSubdirs(ctx perfQueryContext) perfQueryOp {
 			perfQueryInputAge:     int(db.DGUTAgeAll),
 		},
 		op: func() error {
-			_, err := ctx.bd.UserSubDirs(ctx.ids.uid, ctx.ids.userBD, db.DGUTAgeAll)
+			rows, err := ctx.bd.UserSubDirs(ctx.ids.uid, ctx.ids.userBD, db.DGUTAgeAll)
+			resultCount = uint64(len(rows))
 
 			return err
 		},
+		resultCount: func() uint64 { return resultCount },
 	}
 }
 
 func boltPerfOpBasedirsHistory(ctx perfQueryContext) perfQueryOp {
+	var resultCount uint64
+
 	return perfQueryOp{
 		name:   "basedirs_history",
 		inputs: map[string]any{"gid": ctx.ids.gid, "basedir": ctx.ids.groupBD},
 		op: func() error {
-			_, err := ctx.bd.History(ctx.ids.gid, ctx.ids.groupBD)
+			rows, err := ctx.bd.History(ctx.ids.gid, ctx.ids.groupBD)
+			resultCount = uint64(len(rows))
 
 			return err
 		},
+		resultCount: func() uint64 { return resultCount },
 	}
 }
 
-func measureOperation(warmup, repeat int, op func() error) ([]float64, error) {
+func measureOperation(warmup, repeat int, op perfQueryOp) ([]float64, []uint64, error) {
 	for i := 0; i < warmup; i++ {
-		if err := op(); err != nil {
-			return nil, err
+		if err := op.op(); err != nil {
+			return nil, nil, err
 		}
 	}
 
 	durations := make([]float64, 0, repeat)
+
+	resultCounts := make([]uint64, 0, repeat)
+
 	for i := 0; i < repeat; i++ {
 		start := time.Now()
 
-		if err := op(); err != nil {
-			return nil, err
+		if err := op.op(); err != nil {
+			return nil, nil, err
 		}
 
 		durations = append(durations, durationMS(time.Since(start)))
+		if op.resultCount != nil {
+			resultCounts = append(resultCounts, op.resultCount())
+		}
 	}
 
-	return durations, nil
+	if op.resultCount == nil {
+		return durations, nil, nil
+	}
+
+	return durations, resultCounts, nil
 }
 
 func percentilesMS(values []float64) (float64, float64, float64) {
@@ -1222,20 +1300,22 @@ func percentileMS(values []float64, p float64) float64 {
 }
 
 type perfQueryOp struct {
-	name       string
-	inputs     map[string]any
-	op         func() error
-	skipWarmup bool
+	name        string
+	inputs      map[string]any
+	op          func() error
+	resultCount func() uint64
+	skipWarmup  bool
 }
 
 // perfOperation represents a single measured operation in a perf report.
 type perfOperation struct {
-	Name        string         `json:"name"`
-	Inputs      map[string]any `json:"inputs"`
-	DurationsMS []float64      `json:"durations_ms"`
-	P50MS       float64        `json:"p50_ms"`
-	P95MS       float64        `json:"p95_ms"`
-	P99MS       float64        `json:"p99_ms"`
+	Name         string         `json:"name"`
+	Inputs       map[string]any `json:"inputs"`
+	DurationsMS  []float64      `json:"durations_ms"`
+	ResultCounts []uint64       `json:"result_counts,omitempty"`
+	P50MS        float64        `json:"p50_ms"`
+	P95MS        float64        `json:"p95_ms"`
+	P99MS        float64        `json:"p99_ms"`
 }
 
 // perfReport is the top-level JSON report written by the perf harness.
@@ -1254,14 +1334,24 @@ type perfReport struct {
 }
 
 func (r *perfReport) addOperation(name string, inputs map[string]any, durationsMS []float64) {
+	r.addOperationWithCounts(name, inputs, durationsMS, nil)
+}
+
+func (r *perfReport) addOperationWithCounts(
+	name string,
+	inputs map[string]any,
+	durationsMS []float64,
+	resultCounts []uint64,
+) {
 	p50, p95, p99 := percentilesMS(durationsMS)
 	r.Operations = append(r.Operations, perfOperation{
-		Name:        name,
-		Inputs:      inputs,
-		DurationsMS: durationsMS,
-		P50MS:       p50,
-		P95MS:       p95,
-		P99MS:       p99,
+		Name:         name,
+		Inputs:       inputs,
+		DurationsMS:  durationsMS,
+		ResultCounts: resultCounts,
+		P50MS:        p50,
+		P95MS:        p95,
+		P99MS:        p99,
 	})
 }
 
