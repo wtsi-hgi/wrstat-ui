@@ -49,7 +49,7 @@ import (
 
 const (
 	clickHouseSpoolDirName    = ".wrstat-ui-clickhouse-spool"
-	clickHouseSpoolSchemaMark = "wrstat-ui-clickhouse-summarise-spool-v1"
+	clickHouseSpoolSchemaMark = "wrstat-ui-clickhouse-summarise-spool-v2"
 )
 
 var loadSummariseClickHouseSpool = clickhouse.LoadSummariseSpool
@@ -85,6 +85,122 @@ type summariseDGUTASpoolWriter struct {
 	previousDGUTARows    summariseDGUTARecordRows
 	closed               bool
 	projectionSetWritten bool
+}
+
+func (w *summariseDGUTASpoolWriter) writeSchema2Rows(
+	dir string,
+	gutas db.GUTAs,
+	childCount uint64,
+) error {
+	if err := w.writeDirFilterAgeAllRows(dir, gutas); err != nil {
+		return err
+	}
+
+	return w.writeParentFactRow(dir, gutas, childCount)
+}
+
+func (w *summariseDGUTASpoolWriter) writeDirFilterAgeAllRows(dir string, gutas db.GUTAs) error {
+	for _, guta := range gutas {
+		if guta == nil || guta.Age != db.DGUTAgeAll {
+			continue
+		}
+
+		if err := w.ds.set.WriteDirFilterAgeAll(chspool.DirFilterAgeAllRow{
+			MountPath:    w.mountPath,
+			SnapshotID:   w.snapshotID,
+			GID:          guta.GID,
+			UID:          guta.UID,
+			FT:           uint16(guta.FT),
+			Dir:          dir,
+			Count:        guta.Count,
+			Size:         guta.Size,
+			AtimeMin:     guta.Atime,
+			MtimeMax:     guta.Mtime,
+			AtimeBuckets: summariseAgeBucketsSlice(&guta.ATimeRanges),
+			MtimeBuckets: summariseAgeBucketsSlice(&guta.MTimeRanges),
+			RefreshedAt:  w.refreshedAt,
+		}); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (w *summariseDGUTASpoolWriter) writeParentFactRow( //nolint:funlen
+	dir string,
+	gutas db.GUTAs,
+	childCount uint64,
+) error {
+	allSummary, fileSummary := summariseMountDirRecordSummaries(gutas)
+	if allSummary == nil {
+		allSummary = newSummariseMountDirRecordSummary()
+	}
+
+	columns := summariseMountDirProjectionVectorColumnsFor(gutas)
+
+	return w.ds.set.WriteParentFact(chspool.ParentFactRow{
+		MountPath:        w.mountPath,
+		SnapshotID:       w.snapshotID,
+		ParentDir:        summariseParentFactsParentDir(dir),
+		Dir:              dir,
+		UpdatedAt:        w.updatedAt,
+		AllCount:         allSummary.count,
+		AllSize:          allSummary.size,
+		AllAtimeMin:      allSummary.atimeMin,
+		AllMtimeMax:      allSummary.mtimeMax,
+		AllAtimeBuckets:  summariseAgeBucketsSlice(&allSummary.atimeBuckets),
+		AllMtimeBuckets:  summariseAgeBucketsSlice(&allSummary.mtimeBuckets),
+		AllUIDs:          allSummary.sortedUIDs(),
+		AllGIDs:          allSummary.sortedGIDs(),
+		AllFT:            uint16(allSummary.ft),
+		FileCount:        summariseRecordSummaryCount(fileSummary),
+		FileSize:         summariseRecordSummarySize(fileSummary),
+		FileAtimeMin:     summariseRecordSummaryAtimeMin(fileSummary),
+		FileMtimeMax:     summariseRecordSummaryMtimeMax(fileSummary),
+		FileAtimeBuckets: summariseRecordSummaryATimeBuckets(fileSummary),
+		FileMtimeBuckets: summariseRecordSummaryMTimeBuckets(fileSummary),
+		FileUIDs:         summariseRecordSummaryUIDs(fileSummary),
+		FileGIDs:         summariseRecordSummaryGIDs(fileSummary),
+		FileFT:           summariseRecordSummaryFT(fileSummary),
+		GIDs:             columns.gids,
+		UIDs:             columns.uids,
+		FTs:              columns.fts,
+		Ages:             columns.ages,
+		Counts:           columns.counts,
+		Sizes:            columns.sizes,
+		AtimeMins:        columns.atimeMins,
+		MtimeMaxs:        columns.mtimeMaxs,
+		AtimeBuckets:     columns.atimeBuckets,
+		MtimeBuckets:     columns.mtimeBuckets,
+		ChildCount:       childCount,
+		HasChildren:      summariseParentFactsHasChildrenValue(childCount),
+		RefreshedAt:      w.refreshedAt,
+	})
+}
+
+func summariseParentFactsParentDir(dir string) string {
+	dir = summariseNormalizeImportMountPath(dir)
+	if dir == "/" {
+		return "/"
+	}
+
+	trimmed := strings.TrimSuffix(dir, "/")
+	idx := strings.LastIndex(trimmed, "/")
+
+	if idx <= 0 {
+		return "/"
+	}
+
+	return trimmed[:idx+1]
+}
+
+func summariseParentFactsHasChildrenValue(childCount uint64) uint8 {
+	if childCount > 0 {
+		return 1
+	}
+
+	return 0
 }
 
 type summariseBasedirsSpoolStore struct {
@@ -545,7 +661,7 @@ func (w *summariseDGUTASpoolWriter) AddChildren(parent *summary.DirectoryPath, c
 	return w.appendChildrenRows(children, parentDir)
 }
 
-func (w *summariseDGUTASpoolWriter) Add(dguta db.RecordDGUTA) error { //nolint:funlen,gocyclo
+func (w *summariseDGUTASpoolWriter) Add(dguta db.RecordDGUTA) error { //nolint:funlen,gocyclo,gocognit
 	if dguta.Dir == nil {
 		return errSummariseSpoolDirFactsDir
 	}
@@ -571,6 +687,10 @@ func (w *summariseDGUTASpoolWriter) Add(dguta db.RecordDGUTA) error { //nolint:f
 	}
 
 	if err := w.writeDirFactRow(parentDir, appendedGUTAs, childCount); err != nil {
+		return err
+	}
+
+	if err := w.writeSchema2Rows(parentDir, appendedGUTAs, childCount); err != nil {
 		return err
 	}
 

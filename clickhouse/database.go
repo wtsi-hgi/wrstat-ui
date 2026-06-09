@@ -685,21 +685,7 @@ func (d *clickHouseDatabase) queryReadyActiveMounts(
 	ctx context.Context,
 	mounts []activeMount,
 ) (map[treeMountCacheKey]bool, error) {
-	query, args := activeMountsQuery(
-		mountDirSummariesReadyQuery,
-		"mount_path",
-		"snapshot_id",
-		mounts,
-	)
-
-	rows, err := d.conn.Query(ctx, query, args...)
-	if err != nil {
-		return nil, fmt.Errorf("clickhouse: failed to query batched dir summary readiness: %w", err)
-	}
-
-	defer func() { _ = rows.Close() }()
-
-	return scanReadyActiveMountRows(rows)
+	return queryReadyActiveMountRows(ctx, d.conn, mounts)
 }
 
 func scanReadyActiveMountRows(rows rowsScanner) (map[treeMountCacheKey]bool, error) {

@@ -172,6 +172,8 @@ func TestSummariseClickHouseSpoolRows(t *testing.T) {
 		So(manifest.Tables[chspool.TableFiles].Rows, ShouldBeGreaterThanOrEqualTo, uint64(3))
 		So(manifest.Tables[chspool.TableChildren].Rows, ShouldBeGreaterThan, uint64(0))
 		So(manifest.Tables[chspool.TableDirFacts].Rows, ShouldBeGreaterThan, uint64(0))
+		So(manifest.Tables[chspool.TableDirFilterAgeAll].Rows, ShouldBeGreaterThan, uint64(0))
+		So(manifest.Tables[chspool.TableParentFacts].Rows, ShouldEqual, manifest.Tables[chspool.TableDirFacts].Rows)
 		So(manifest.Tables[chspool.TableDirProjectionSets].Rows, ShouldEqual, uint64(1))
 		So(manifest.Tables[chspool.TableBasedirsHistory].Rows, ShouldBeGreaterThan, uint64(0))
 		So(manifest.Tables[chspool.TableBasedirsGroupUsage].Rows, ShouldBeGreaterThan, uint64(0))

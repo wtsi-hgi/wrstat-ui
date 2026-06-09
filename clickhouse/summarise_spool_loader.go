@@ -145,12 +145,20 @@ func (l *summariseSpoolLoader) prepareSnapshot(parent context.Context) error {
 	})
 }
 
-func (l *summariseSpoolLoader) loadTables(ctx context.Context) error { //nolint:funlen,gocyclo
+func (l *summariseSpoolLoader) loadTables(ctx context.Context) error { //nolint:funlen,gocyclo,gocognit,cyclop
 	if err := l.loadFiles(ctx); err != nil {
 		return err
 	}
 
 	if err := l.loadDirFacts(ctx); err != nil {
+		return err
+	}
+
+	if err := l.loadDirFilterAgeAll(ctx); err != nil {
+		return err
+	}
+
+	if err := l.loadParentFacts(ctx); err != nil {
 		return err
 	}
 
@@ -293,6 +301,77 @@ func loadSimpleSpoolTable[T any](
 		})
 
 		return rows, errors.Join(err, writer.close())
+	})
+}
+
+func (l *summariseSpoolLoader) loadDirFilterAgeAll(parent context.Context) error {
+	return loadSimpleSpoolTable(
+		parent,
+		l,
+		chspool.TableDirFilterAgeAll,
+		func(batch driver.Batch, row chspool.DirFilterAgeAllRow) error {
+			return batch.Append(
+				row.MountPath,
+				row.SnapshotID,
+				row.GID,
+				row.UID,
+				row.FT,
+				row.Dir,
+				row.Count,
+				row.Size,
+				row.AtimeMin,
+				row.MtimeMax,
+				row.AtimeBuckets,
+				row.MtimeBuckets,
+				row.RefreshedAt,
+			)
+		},
+	)
+}
+
+func (l *summariseSpoolLoader) loadParentFacts(parent context.Context) error { //nolint:funlen
+	return loadSimpleSpoolTable(parent, l, chspool.TableParentFacts, func(
+		batch driver.Batch,
+		row chspool.ParentFactRow,
+	) error {
+		return batch.Append(
+			row.MountPath,
+			row.SnapshotID,
+			row.ParentDir,
+			row.Dir,
+			row.UpdatedAt,
+			row.AllCount,
+			row.AllSize,
+			row.AllAtimeMin,
+			row.AllMtimeMax,
+			row.AllAtimeBuckets,
+			row.AllMtimeBuckets,
+			row.AllUIDs,
+			row.AllGIDs,
+			row.AllFT,
+			row.FileCount,
+			row.FileSize,
+			row.FileAtimeMin,
+			row.FileMtimeMax,
+			row.FileAtimeBuckets,
+			row.FileMtimeBuckets,
+			row.FileUIDs,
+			row.FileGIDs,
+			row.FileFT,
+			row.GIDs,
+			row.UIDs,
+			row.FTs,
+			row.Ages,
+			row.Counts,
+			row.Sizes,
+			row.AtimeMins,
+			row.MtimeMaxs,
+			row.AtimeBuckets,
+			row.MtimeBuckets,
+			row.ChildCount,
+			row.HasChildren,
+			row.RefreshedAt,
+		)
 	})
 }
 
@@ -653,12 +732,16 @@ func (l *summariseSpoolLoader) loadTable(
 	return l.loadTableWithQuery(parent, table, query, phase, load)
 }
 
-func summariseSpoolTableQuery(table string) (string, string, error) {
+func summariseSpoolTableQuery(table string) (string, string, error) { //nolint:gocyclo
 	switch table {
 	case chspool.TableFiles:
 		return insertFilesBatchQuery, summariseSpoolLoadPhasePrefix + table, nil
 	case chspool.TableDirFacts:
 		return insertMountDirSummaryQuery, summariseSpoolLoadPhasePrefix + table, nil
+	case chspool.TableDirFilterAgeAll:
+		return insertDirFilterAgeAllQuery, summariseSpoolLoadPhasePrefix + table, nil
+	case chspool.TableParentFacts:
+		return insertParentFactsQuery, importPhaseParentFactsInsert, nil
 	case chspool.TableChildren:
 		return insertChildrenQuery, summariseSpoolLoadPhasePrefix + table, nil
 	case chspool.TableDirProjectionSets:
@@ -722,7 +805,7 @@ func (l *summariseSpoolLoader) loadTableWithQuery( //nolint:funlen
 
 func summariseSpoolBatchSizeFor(table string) int {
 	switch table {
-	case chspool.TableDirFacts:
+	case chspool.TableDirFacts, chspool.TableDirFilterAgeAll, chspool.TableParentFacts:
 		return projectionBatchSizeFor(defaultBatchSize)
 	case chspool.TableChildren:
 		return childrenBatchSizeFor(defaultBatchSize)
@@ -768,6 +851,12 @@ func summariseSpoolCountQueries() map[string]string {
 		chspool.TableFiles: countLoadedSpoolRowsQuery("wrstat_files"),
 		chspool.TableDirFacts: countLoadedSpoolRowsQuery(
 			"wrstat_dir_facts",
+		),
+		chspool.TableDirFilterAgeAll: countLoadedSpoolRowsQuery(
+			"wrstat_dir_filter_ageall",
+		),
+		chspool.TableParentFacts: countLoadedSpoolRowsQuery(
+			"wrstat_parent_facts",
 		),
 		chspool.TableChildren: countLoadedSpoolRowsQuery(
 			"wrstat_children",
@@ -862,6 +951,18 @@ func validateSummariseSpoolLoad(cfg Config, manifest *chspool.Manifest) error { 
 
 	if manifest.SnapshotID == "" || manifest.UpdatedAt == "" {
 		return errUpdatedAtRequired
+	}
+
+	return validateSummariseSpoolManifestTables(manifest)
+}
+
+func validateSummariseSpoolManifestTables(manifest *chspool.Manifest) error {
+	for _, table := range chspool.TableOrder() {
+		if _, ok := manifest.Tables[table]; ok {
+			continue
+		}
+
+		return fmt.Errorf("%w: missing table %s", errInvalidSummariseSpoolManifest, table)
 	}
 
 	return nil

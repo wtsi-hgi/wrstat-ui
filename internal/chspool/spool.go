@@ -54,6 +54,8 @@ const (
 	TableFiles                = "wrstat_files"
 	TableChildren             = "wrstat_children"
 	TableDirFacts             = "wrstat_dir_facts"
+	TableDirFilterAgeAll      = "wrstat_dir_filter_ageall"
+	TableParentFacts          = "wrstat_parent_facts"
 	TableDirProjectionSets    = "wrstat_dir_projection_sets"
 	TableBasedirsHistory      = "wrstat_basedirs_history"
 	TableBasedirsGroupUsage   = "wrstat_basedirs_group_usage"
@@ -69,6 +71,8 @@ var errUnknownTable = errors.New("unknown clickhouse spool table")
 var tableOrder = []string{ //nolint:gochecknoglobals
 	TableFiles,
 	TableDirFacts,
+	TableDirFilterAgeAll,
+	TableParentFacts,
 	TableChildren,
 	TableDirProjectionSets,
 	TableBasedirsHistory,
@@ -195,7 +199,7 @@ func HashFile(path string) (int64, string, error) {
 	return n, hex.EncodeToString(h.Sum(nil)), nil
 }
 
-func countRows(path string, table string) (uint64, error) { //nolint:gocyclo
+func countRows(path string, table string) (uint64, error) { //nolint:gocyclo,cyclop
 	switch table {
 	case TableFiles:
 		return countDecodedRows[FileRow](path, table)
@@ -203,6 +207,10 @@ func countRows(path string, table string) (uint64, error) { //nolint:gocyclo
 		return countDecodedRows[ChildRow](path, table)
 	case TableDirFacts:
 		return countDecodedRows[DirFactRow](path, table)
+	case TableDirFilterAgeAll:
+		return countDecodedRows[DirFilterAgeAllRow](path, table)
+	case TableParentFacts:
+		return countDecodedRows[ParentFactRow](path, table)
 	case TableDirProjectionSets:
 		return countDecodedRows[DirProjectionSetRow](path, table)
 	case TableBasedirsHistory:
@@ -386,6 +394,61 @@ type DirFactRow struct {
 	RefreshedAt      time.Time
 }
 
+type DirFilterAgeAllRow struct {
+	MountPath    string
+	SnapshotID   string
+	GID          uint32
+	UID          uint32
+	FT           uint16
+	Dir          string
+	Count        uint64
+	Size         uint64
+	AtimeMin     int64
+	MtimeMax     int64
+	AtimeBuckets []uint64
+	MtimeBuckets []uint64
+	RefreshedAt  time.Time
+}
+
+type ParentFactRow struct {
+	MountPath        string
+	SnapshotID       string
+	ParentDir        string
+	Dir              string
+	UpdatedAt        time.Time
+	AllCount         uint64
+	AllSize          uint64
+	AllAtimeMin      int64
+	AllMtimeMax      int64
+	AllAtimeBuckets  []uint64
+	AllMtimeBuckets  []uint64
+	AllUIDs          []uint32
+	AllGIDs          []uint32
+	AllFT            uint16
+	FileCount        uint64
+	FileSize         uint64
+	FileAtimeMin     int64
+	FileMtimeMax     int64
+	FileAtimeBuckets []uint64
+	FileMtimeBuckets []uint64
+	FileUIDs         []uint32
+	FileGIDs         []uint32
+	FileFT           uint16
+	GIDs             []uint32
+	UIDs             []uint32
+	FTs              []uint16
+	Ages             []uint8
+	Counts           []uint64
+	Sizes            []uint64
+	AtimeMins        []int64
+	MtimeMaxs        []int64
+	AtimeBuckets     [][]uint64
+	MtimeBuckets     [][]uint64
+	ChildCount       uint64
+	HasChildren      uint8
+	RefreshedAt      time.Time
+}
+
 type DirProjectionSetRow struct {
 	MountPath   string
 	SnapshotID  string
@@ -542,6 +605,14 @@ func (s *Set) WriteChild(row ChildRow) error {
 
 func (s *Set) WriteDirFact(row DirFactRow) error {
 	return s.encode(TableDirFacts, row)
+}
+
+func (s *Set) WriteDirFilterAgeAll(row DirFilterAgeAllRow) error {
+	return s.encode(TableDirFilterAgeAll, row)
+}
+
+func (s *Set) WriteParentFact(row ParentFactRow) error {
+	return s.encode(TableParentFacts, row)
 }
 
 func (s *Set) WriteDirProjectionSet(row DirProjectionSetRow) error {

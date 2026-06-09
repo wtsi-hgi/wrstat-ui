@@ -38,8 +38,18 @@ import (
 )
 
 const (
-	activePrefixRollupReadyQuery = "SELECT 1 FROM wrstat_active_prefix_rollup_sets " +
+	activePrefixMountReadinessMaxWait      = 500 * time.Millisecond
+	activePrefixMountReadinessPollInterval = 25 * time.Millisecond
+	activePrefixRollupReadyQuery           = "SELECT 1 FROM wrstat_active_prefix_rollup_sets " +
 		"WHERE active_set_id = ? LIMIT 1"
+	activePrefixDirFactsReadyQuery = "SELECT mount_path, toString(snapshot_id) FROM wrstat_dir_facts " +
+		"WHERE dir = ? AND %s GROUP BY mount_path, snapshot_id"
+	activePrefixRootFactsReadyQuery = "SELECT mount_path, toString(snapshot_id) FROM wrstat_dir_facts " +
+		"WHERE %s GROUP BY mount_path, snapshot_id"
+	activePrefixDirAgeAllReadyQuery = "SELECT mount_path, toString(snapshot_id) FROM wrstat_dir_filter_ageall " +
+		"WHERE dir = ? AND %s GROUP BY mount_path, snapshot_id"
+	activePrefixRootAgeAllReadyQuery = "SELECT mount_path, toString(snapshot_id) FROM wrstat_dir_filter_ageall " +
+		"WHERE %s GROUP BY mount_path, snapshot_id"
 	activePrefixScalarRollupReadQuery = "SELECT updated_at, toUInt8(0) AS age, all_count AS count, " +
 		"all_size AS size, all_atime_min AS atime_min, all_mtime_max AS mtime_max, " +
 		"all_atime_buckets AS atime_buckets, all_mtime_buckets AS mtime_buckets, " +
@@ -55,6 +65,11 @@ const (
 		"arrayReduce('sumForEach', groupArray(atime_buckets)), " +
 		"arrayReduce('sumForEach', groupArray(mtime_buckets)) " +
 		"FROM wrstat_dir_filter_ageall WHERE dir = ? AND %s GROUP BY gid, uid, ft ORDER BY gid, uid, ft"
+	activePrefixRootAgeAllRowsQuery = "SELECT gid, uid, ft, sum(count), sum(size), " +
+		"minIf(atime_min, atime_min != 0), max(mtime_max), " +
+		"arrayReduce('sumForEach', groupArray(atime_buckets)), " +
+		"arrayReduce('sumForEach', groupArray(mtime_buckets)) " +
+		"FROM wrstat_dir_filter_ageall WHERE %s GROUP BY gid, uid, ft ORDER BY gid, uid, ft"
 	activePrefixAgeAllSummaryReadQuery = "SELECT dir, count() AS raw_rows, " +
 		"sum(count) AS total_count, sum(size) AS total_size, " +
 		"minIf(atime_min, atime_min != 0) AS atime_min, max(mtime_max) AS mtime_max, " +
@@ -107,6 +122,73 @@ func activePrefixAgeAllRows(
 		return nil, nil
 	}
 
+	ready, err := queryReadyActivePrefixAgeAllRows(ctx, conn, dir, mounts)
+	if err != nil {
+		return nil, err
+	}
+
+	dirRows, err := activePrefixAgeAllRowsForDir(ctx, conn, dir, mounts)
+	if err != nil {
+		return nil, err
+	}
+
+	missing := missingActiveMounts(mounts, ready)
+	if len(missing) == 0 {
+		return dirRows, nil
+	}
+
+	rootRows, err := activePrefixRootAgeAllRows(ctx, conn, missing)
+	if err != nil {
+		return nil, err
+	}
+
+	return append(dirRows, rootRows...), nil
+}
+
+func queryReadyActivePrefixAgeAllRows(
+	ctx context.Context,
+	conn ch.Conn,
+	dir string,
+	mounts []activeMount,
+) (map[treeMountCacheKey]bool, error) {
+	query, args := activeMountsQuery(
+		activePrefixDirAgeAllReadyQuery,
+		"mount_path",
+		"snapshot_id",
+		mounts,
+		dir,
+	)
+
+	rows, err := conn.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("clickhouse: failed to query active-prefix AgeAll readiness: %w", err)
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	return scanReadyActiveMountRows(rows)
+}
+
+func missingActiveMounts(mounts []activeMount, ready map[treeMountCacheKey]bool) []activeMount {
+	missing := make([]activeMount, 0)
+
+	for _, mount := range mounts {
+		if ready[newTreeMountCacheKey(mount.mountPath, mount.snapshotID)] {
+			continue
+		}
+
+		missing = append(missing, mount)
+	}
+
+	return missing
+}
+
+func activePrefixAgeAllRowsForDir(
+	ctx context.Context,
+	conn ch.Conn,
+	dir string,
+	mounts []activeMount,
+) ([]activePrefixAgeAllRow, error) {
 	query, args := activeMountsQuery(
 		activePrefixAgeAllRowsQuery,
 		"mount_path",
@@ -118,6 +200,29 @@ func activePrefixAgeAllRows(
 	rows, err := conn.Query(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("clickhouse: failed to query active-prefix AgeAll rows: %w", err)
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	return scanActivePrefixAgeAllRows(rows)
+}
+
+func activePrefixRootAgeAllRows(
+	ctx context.Context,
+	conn ch.Conn,
+	mounts []activeMount,
+) ([]activePrefixAgeAllRow, error) {
+	condition, args := activeMountRootDirTuplesCondition(
+		"mount_path",
+		"snapshot_id",
+		"dir",
+		mounts,
+	)
+	query := fmt.Sprintf(activePrefixRootAgeAllRowsQuery, condition)
+
+	rows, err := conn.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("clickhouse: failed to query active-prefix root AgeAll rows: %w", err)
 	}
 
 	defer func() { _ = rows.Close() }()
@@ -246,12 +351,9 @@ func refreshCurrentActivePrefixRollups(ctx context.Context, conn ch.Conn) error 
 
 func ensureActivePrefixRollups(ctx context.Context, conn ch.Conn, rows []mountsActiveRow) error {
 	activeSetID := fingerprintForMountsActive(rows)
-	if activeSetID == "" {
-		return nil
-	}
 
-	ready, err := activePrefixRollupsReady(ctx, conn, activeSetID)
-	if err != nil || ready {
+	refresh, err := shouldRefreshActivePrefixRollups(ctx, conn, rows, activeSetID)
+	if err != nil || !refresh {
 		return err
 	}
 
@@ -261,6 +363,74 @@ func ensureActivePrefixRollups(ctx context.Context, conn ch.Conn, rows []mountsA
 	}
 
 	return err
+}
+
+func shouldRefreshActivePrefixRollups(
+	ctx context.Context,
+	conn ch.Conn,
+	rows []mountsActiveRow,
+	activeSetID string,
+) (bool, error) {
+	if activeSetID == "" {
+		return false, nil
+	}
+
+	ready, err := activePrefixRollupsReady(ctx, conn, activeSetID)
+	if err != nil || ready {
+		return false, err
+	}
+
+	return activePrefixRollupMountsReady(ctx, conn, rows)
+}
+
+func activePrefixRollupProjectionState(
+	ctx context.Context,
+	conn ch.Conn,
+	dir string,
+	mounts []activeMount,
+) (mountDirProjectionState, error) {
+	state, err := treeSummaryProjectionState(ctx, conn, dir, mounts)
+	if err != nil {
+		return mountDirProjectionState{}, err
+	}
+
+	if activePrefixNeedsRootFacts(state, dir) {
+		if err := addActivePrefixRootGUTAs(ctx, conn, dir, mounts, &state); err != nil {
+			return mountDirProjectionState{}, err
+		}
+	}
+
+	return state, nil
+}
+
+func activePrefixNeedsRootFacts(state mountDirProjectionState, dir string) bool {
+	return len(state.vectors[dir]) == 0
+}
+
+func addActivePrefixRootGUTAs(
+	ctx context.Context,
+	conn ch.Conn,
+	dir string,
+	mounts []activeMount,
+	state *mountDirProjectionState,
+) error {
+	query, args := activeMountRootDirTuplesQuery(mounts)
+
+	rows, err := conn.Query(ctx, query, args...)
+	if err != nil {
+		return fmt.Errorf("clickhouse: failed to query active-prefix root facts: %w", err)
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	gutasByRoot, err := scanDGUTARowsByDir(rows)
+	if err != nil {
+		return err
+	}
+
+	state.addGUTAs(dir, activeMountRootGUTAs(mounts, gutasByRoot))
+
+	return nil
 }
 
 func cleanupOldActivePrefixRollupSets(ctx context.Context, conn ch.Conn, keepActiveSetID string) error {
@@ -491,7 +661,7 @@ func insertActivePrefixRollup(
 		return nil
 	}
 
-	state, err := treeSummaryProjectionState(ctx, conn, dir, mounts)
+	state, err := activePrefixRollupProjectionState(ctx, conn, dir, mounts)
 	if err != nil {
 		return err
 	}
@@ -593,6 +763,224 @@ func insertActivePrefixRollupSet(
 	}
 
 	return nil
+}
+
+func activePrefixRollupMountsReady(ctx context.Context, conn ch.Conn, rows []mountsActiveRow) (bool, error) {
+	deadline := time.Now().Add(activePrefixMountReadinessMaxWait)
+
+	for {
+		ready, err := activePrefixRollupMountsReadyNow(ctx, conn, rows)
+		if err != nil || ready || time.Now().After(deadline) {
+			return ready, err
+		}
+
+		if !sleepForActivePrefixMountReadiness(ctx) {
+			return false, ctx.Err()
+		}
+	}
+}
+
+func activePrefixRollupMountsReadyNow(ctx context.Context, conn ch.Conn, rows []mountsActiveRow) (bool, error) {
+	snapshot := newActiveMountsSnapshot(rows)
+	mounts := snapshot.all()
+
+	ready, err := queryReadyActiveMountRows(ctx, conn, mounts)
+	if err != nil || !allActiveMountsReady(mounts, ready) {
+		return false, err
+	}
+
+	return activePrefixRollupSourcesReady(ctx, conn, snapshot)
+}
+
+func queryReadyActiveMountRows(
+	ctx context.Context,
+	conn ch.Conn,
+	mounts []activeMount,
+) (map[treeMountCacheKey]bool, error) {
+	query, args := activeMountsQuery(
+		mountDirSummariesReadyQuery,
+		"mount_path",
+		"snapshot_id",
+		mounts,
+	)
+
+	rows, err := conn.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("clickhouse: failed to query batched dir summary readiness: %w", err)
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	return scanReadyActiveMountRows(rows)
+}
+
+func sleepForActivePrefixMountReadiness(ctx context.Context) bool {
+	timer := time.NewTimer(activePrefixMountReadinessPollInterval)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+func queryReadyActivePrefixDirFactRows(
+	ctx context.Context,
+	conn ch.Conn,
+	dir string,
+	mounts []activeMount,
+) (map[treeMountCacheKey]bool, error) {
+	query, args := activeMountsQuery(
+		activePrefixDirFactsReadyQuery,
+		"mount_path",
+		"snapshot_id",
+		mounts,
+		dir,
+	)
+
+	rows, err := conn.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("clickhouse: failed to query active-prefix dir fact readiness: %w", err)
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	return scanReadyActiveMountRows(rows)
+}
+
+func queryReadyActiveMountRootFactRows(
+	ctx context.Context,
+	conn ch.Conn,
+	mounts []activeMount,
+) (map[treeMountCacheKey]bool, error) {
+	condition, args := activeMountRootDirTuplesCondition(
+		"mount_path",
+		"snapshot_id",
+		"dir",
+		mounts,
+	)
+	query := fmt.Sprintf(activePrefixRootFactsReadyQuery, condition)
+
+	rows, err := conn.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("clickhouse: failed to query active-prefix root fact readiness: %w", err)
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	return scanReadyActiveMountRows(rows)
+}
+
+func activePrefixRollupFactSourcesReady(
+	ctx context.Context,
+	conn ch.Conn,
+	dir string,
+	mounts []activeMount,
+) (bool, error) {
+	ready, err := queryReadyActivePrefixDirFactRows(ctx, conn, dir, mounts)
+	if err != nil {
+		return false, err
+	}
+
+	missing := missingActiveMounts(mounts, ready)
+	if len(missing) == 0 {
+		return true, nil
+	}
+
+	ready, err = queryReadyActiveMountRootFactRows(ctx, conn, missing)
+	if err != nil || !allActiveMountsReady(missing, ready) {
+		return false, err
+	}
+
+	return true, nil
+}
+
+func activePrefixRollupAgeAllSourcesReady(
+	ctx context.Context,
+	conn ch.Conn,
+	dir string,
+	mounts []activeMount,
+) (bool, error) {
+	ready, err := queryReadyActivePrefixAgeAllRows(ctx, conn, dir, mounts)
+	if err != nil {
+		return false, err
+	}
+
+	missing := missingActiveMounts(mounts, ready)
+	if len(missing) == 0 {
+		return true, nil
+	}
+
+	ready, err = queryReadyActiveMountRootAgeAllRows(ctx, conn, missing)
+	if err != nil || !allActiveMountsReady(missing, ready) {
+		return false, err
+	}
+
+	return true, nil
+}
+
+func queryReadyActiveMountRootAgeAllRows(
+	ctx context.Context,
+	conn ch.Conn,
+	mounts []activeMount,
+) (map[treeMountCacheKey]bool, error) {
+	condition, args := activeMountRootDirTuplesCondition(
+		"mount_path",
+		"snapshot_id",
+		"dir",
+		mounts,
+	)
+	query := fmt.Sprintf(activePrefixRootAgeAllReadyQuery, condition)
+
+	rows, err := conn.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("clickhouse: failed to query active-prefix root AgeAll readiness: %w", err)
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	return scanReadyActiveMountRows(rows)
+}
+
+func allActiveMountsReady(mounts []activeMount, ready map[treeMountCacheKey]bool) bool {
+	for _, mount := range mounts {
+		if !ready[newTreeMountCacheKey(mount.mountPath, mount.snapshotID)] {
+			return false
+		}
+	}
+
+	return true
+}
+
+func activePrefixRollupSourcesReady(
+	ctx context.Context,
+	conn ch.Conn,
+	snapshot *activeMountsSnapshot,
+) (bool, error) {
+	for _, dir := range activeTreeDirs(snapshot.all()) {
+		ready, err := activePrefixRollupDirSourcesReady(ctx, conn, dir, snapshot.under(dir))
+		if err != nil || !ready {
+			return ready, err
+		}
+	}
+
+	return true, nil
+}
+
+func activePrefixRollupDirSourcesReady(
+	ctx context.Context,
+	conn ch.Conn,
+	dir string,
+	mounts []activeMount,
+) (bool, error) {
+	ready, err := activePrefixRollupFactSourcesReady(ctx, conn, dir, mounts)
+	if err != nil || !ready {
+		return ready, err
+	}
+
+	return activePrefixRollupAgeAllSourcesReady(ctx, conn, dir, mounts)
 }
 
 func readActivePrefixFilteredAgeAllRollup(

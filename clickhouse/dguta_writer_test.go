@@ -3362,6 +3362,167 @@ func TestActivePrefixRollupsB1(t *testing.T) {
 		}
 	})
 
+	Convey("active-prefix refresh withholds readiness while active mounts are not ready", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 5 * time.Second
+
+		bootstrapProvider, err := OpenProvider(cfg)
+		So(err, ShouldBeNil)
+		So(bootstrapProvider.Close(), ShouldBeNil)
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		const mountPath = "/mnt/unready-active-prefix/"
+
+		updatedAt := time.Date(2026, 6, 7, 10, 0, 0, 0, time.UTC)
+		sid := snapshotID(mountPath, updatedAt)
+		So(conn.Exec(
+			ctx,
+			testInsertDGUTAStmt,
+			mountPath,
+			sid.String(),
+			mountPath,
+			uint32(7),
+			uint32(9),
+			uint16(db.DGUTAFileTypeBam),
+			uint8(db.DGUTAgeAll),
+			uint64(5),
+			uint64(50),
+			int64(10),
+			int64(20),
+			[]uint64{1, 0, 0, 0, 0, 0, 0, 0, 0},
+			[]uint64{0, 1, 0, 0, 0, 0, 0, 0, 0},
+		), ShouldBeNil)
+		So(conn.Exec(ctx, testInsertMountStmt, mountPath, time.Now().UTC(), sid, updatedAt), ShouldBeNil)
+
+		rows := []mountsActiveRow{{
+			mountPath:  mountPath,
+			snapshotID: sid.String(),
+			updatedAt:  updatedAt,
+		}}
+		activeSetID := fingerprintForMountsActive(rows)
+
+		So(ensureActivePrefixRollups(ctx, conn, rows), ShouldBeNil)
+		So(countRows(
+			ctx, conn,
+			"SELECT count() FROM wrstat_active_prefix_rollup_sets WHERE active_set_id = ?",
+			activeSetID,
+		), ShouldEqual, uint64(0))
+		So(countRows(
+			ctx, conn,
+			"SELECT count() FROM wrstat_active_prefix_rollups WHERE active_set_id = ?",
+			activeSetID,
+		), ShouldEqual, uint64(0))
+	})
+
+	Convey("active-prefix refresh withholds readiness while active root facts are not visible", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 5 * time.Second
+
+		bootstrapProvider, err := OpenProvider(cfg)
+		So(err, ShouldBeNil)
+		So(bootstrapProvider.Close(), ShouldBeNil)
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		const mountPath = "/mnt/invisible-active-prefix-facts/"
+
+		updatedAt := time.Date(2026, 6, 7, 11, 0, 0, 0, time.UTC)
+		sid := snapshotID(mountPath, updatedAt)
+		mount := activeMount{mountPath: mountPath, snapshotID: sid.String(), updatedAt: updatedAt}
+		So(writeMaintainedMountDirProjectionForTest(ctx, conn, mount), ShouldBeNil)
+		So(conn.Exec(ctx, testInsertMountStmt, mountPath, time.Now().UTC(), sid, updatedAt), ShouldBeNil)
+
+		rows := []mountsActiveRow{{
+			mountPath:  mountPath,
+			snapshotID: sid.String(),
+			updatedAt:  updatedAt,
+		}}
+		activeSetID := fingerprintForMountsActive(rows)
+
+		So(ensureActivePrefixRollups(ctx, conn, rows), ShouldBeNil)
+		So(countRows(
+			ctx, conn,
+			"SELECT count() FROM wrstat_active_prefix_rollup_sets WHERE active_set_id = ?",
+			activeSetID,
+		), ShouldEqual, uint64(0))
+		So(countRows(
+			ctx, conn,
+			"SELECT count() FROM wrstat_active_prefix_rollups WHERE active_set_id = ?",
+			activeSetID,
+		), ShouldEqual, uint64(0))
+	})
+
+	Convey("active-prefix refresh withholds readiness while active AgeAll rows are not visible", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 5 * time.Second
+
+		bootstrapProvider, err := OpenProvider(cfg)
+		So(err, ShouldBeNil)
+		So(bootstrapProvider.Close(), ShouldBeNil)
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		const mountPath = "/mnt/no-ageall-active-prefix/"
+
+		updatedAt := time.Date(2026, 6, 7, 12, 0, 0, 0, time.UTC)
+		sid := snapshotID(mountPath, updatedAt)
+		mount := activeMount{mountPath: mountPath, snapshotID: sid.String(), updatedAt: updatedAt}
+
+		for _, dir := range treeDirsForMount(mountPath) {
+			insertActivePrefixB1Facts(ctx, conn, mount, dir, 5, 5)
+		}
+
+		So(writeMaintainedMountDirProjectionForTest(ctx, conn, mount), ShouldBeNil)
+		So(conn.Exec(ctx, testInsertMountStmt, mountPath, time.Now().UTC(), sid, updatedAt), ShouldBeNil)
+
+		rows := []mountsActiveRow{{
+			mountPath:  mountPath,
+			snapshotID: sid.String(),
+			updatedAt:  updatedAt,
+		}}
+		activeSetID := fingerprintForMountsActive(rows)
+
+		So(ensureActivePrefixRollups(ctx, conn, rows), ShouldBeNil)
+		So(countRows(
+			ctx, conn,
+			"SELECT count() FROM wrstat_active_prefix_rollup_sets WHERE active_set_id = ?",
+			activeSetID,
+		), ShouldEqual, uint64(0))
+		So(countRows(
+			ctx, conn,
+			"SELECT count() FROM wrstat_active_prefix_filter_ageall WHERE active_set_id = ?",
+			activeSetID,
+		), ShouldEqual, uint64(0))
+	})
+
 	Convey("B1.6 active-prefix reader falls back after refresh writes rows but fails readiness publish", t, func() {
 		os.Setenv("WRSTAT_ENV", "test")
 		Reset(func() { os.Unsetenv("WRSTAT_ENV") })

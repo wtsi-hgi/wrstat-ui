@@ -42,6 +42,10 @@ import (
 const (
 	summariseSpoolHistoryCountQuery = "SELECT count() FROM wrstat_basedirs_history " +
 		"WHERE mount_path = ? AND gid = ?"
+	summariseSpoolLoaderCountActivePrefixAgeAllQuery = "SELECT count() FROM wrstat_active_prefix_filter_ageall " +
+		"WHERE active_set_id = ?"
+	summariseSpoolLoaderCountActivePrefixSetQuery = "SELECT count() FROM wrstat_active_prefix_rollup_sets " +
+		"WHERE active_set_id = ?"
 	summariseSpoolLoaderMountPathColumn = "mount_path"
 	summariseSpoolLoaderSchemaMarker    = "test"
 	summariseSpoolLoaderUpdatedAtColumn = "updated_at"
@@ -166,6 +170,26 @@ func (c *summariseSpoolFreshContextConn) PrepareBatch(
 }
 
 func TestClickHouseSummariseSpoolLoader(t *testing.T) {
+	Convey("summarise spool load rejects manifests missing schema2 table manifests", t, func() {
+		manifest := &chspool.Manifest{
+			Version:    chspool.Version,
+			Format:     chspool.Format,
+			State:      chspool.Complete,
+			MountPath:  testMountPath,
+			SnapshotID: "00000000-0000-0000-0000-000000000001",
+			UpdatedAt:  time.Date(2026, 6, 8, 8, 0, 0, 0, time.UTC).Format(time.RFC3339Nano),
+			Tables: map[string]chspool.TableManifest{
+				chspool.TableFiles:    {Table: chspool.TableFiles},
+				chspool.TableDirFacts: {Table: chspool.TableDirFacts},
+			},
+		}
+
+		err := validateSummariseSpoolLoad(Config{DSN: testNativeDSN, Database: testDatabaseName}, manifest)
+
+		So(errors.Is(err, errInvalidSummariseSpoolManifest), ShouldBeTrue)
+		So(err.Error(), ShouldContainSubstring, chspool.TableDirFilterAgeAll)
+	})
+
 	Convey("summarise spool reload is idempotent and does not duplicate basedirs history", t, func() {
 		th := newClickHouseTestHarness(t)
 		cfg := th.newConfig()
@@ -208,6 +232,38 @@ func TestClickHouseSummariseSpoolLoader(t *testing.T) {
 		So(err, ShouldBeNil)
 		So(hasActive, ShouldBeTrue)
 		So(activeSID, ShouldEqual, sid)
+	})
+
+	Convey("summarise spool replay loads schema2 rows before active-prefix publish refresh", t, func() {
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 5 * time.Second
+
+		spoolDir := filepath.Join(t.TempDir(), "spool")
+		updatedAt := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
+		manifest := writeSummariseSpoolLoaderSchema2PublishSpool(spoolDir, updatedAt)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		So(LoadSummariseSpool(ctx, cfg, spoolDir, manifest, nil), ShouldBeNil)
+
+		verifyConn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(verifyConn.Close(), ShouldBeNil) })
+
+		sid := manifest.SnapshotID
+		So(countRows(ctx, verifyConn, dgutaWriterTestCountAgeAllQuery, testMountPath, sid), ShouldEqual, 2)
+		So(countRows(ctx, verifyConn, dgutaWriterTestCountParentFactsQuery, testMountPath, sid), ShouldEqual, 1)
+
+		activeRows, err := queryMountsActiveRows(ctx, verifyConn)
+		So(err, ShouldBeNil)
+
+		activeSetID := fingerprintForMountsActive(activeRows)
+		So(activeSetID, ShouldNotBeBlank)
+		So(countRows(ctx, verifyConn, summariseSpoolLoaderCountActivePrefixSetQuery, activeSetID), ShouldEqual, 1)
+		So(countRows(ctx, verifyConn, summariseSpoolLoaderCountActivePrefixAgeAllQuery, activeSetID),
+			ShouldBeGreaterThan, uint64(0))
 	})
 
 	Convey("summarise spool load uses fresh query contexts after a slow table replay", t, func() {
@@ -266,13 +322,22 @@ func TestClickHouseSummariseSpoolLoader(t *testing.T) {
 
 	Convey("summarise spool replay caps schema2 fact and child batches", t, func() {
 		const (
-			factRows  = defaultProjectionBatchSize + 100
-			childRows = defaultChildrenBatchSize + 100
+			factRows       = defaultProjectionBatchSize + 100
+			ageAllRows     = defaultProjectionBatchSize + 90
+			parentFactRows = defaultProjectionBatchSize + 80
+			childRows      = defaultChildrenBatchSize + 100
 		)
 
 		spoolDir := filepath.Join(t.TempDir(), "spool")
 		updatedAt := time.Date(2026, 6, 8, 11, 0, 0, 0, time.UTC)
-		manifest := writeSummariseSpoolLoaderSchema2BatchSpool(spoolDir, updatedAt, factRows, childRows)
+		manifest := writeSummariseSpoolLoaderSchema2BatchSpool(
+			spoolDir,
+			updatedAt,
+			factRows,
+			ageAllRows,
+			parentFactRows,
+			childRows,
+		)
 		conn := &lazyDGUTAImportConn{}
 
 		loader, err := newSummariseSpoolLoader(Config{}, conn, spoolDir, manifest, nil)
@@ -281,6 +346,10 @@ func TestClickHouseSummariseSpoolLoader(t *testing.T) {
 		So(loader.loadTables(context.Background()), ShouldBeNil)
 		So(conn.totalRowsFor(insertMountDirSummaryQuery), ShouldEqual, factRows)
 		So(conn.maxRowsFor(insertMountDirSummaryQuery), ShouldBeLessThanOrEqualTo, defaultProjectionBatchSize)
+		So(conn.totalRowsFor(insertDirFilterAgeAllQuery), ShouldEqual, ageAllRows)
+		So(conn.maxRowsFor(insertDirFilterAgeAllQuery), ShouldBeLessThanOrEqualTo, defaultProjectionBatchSize)
+		So(conn.totalRowsFor(insertParentFactsQuery), ShouldEqual, parentFactRows)
+		So(conn.maxRowsFor(insertParentFactsQuery), ShouldBeLessThanOrEqualTo, defaultProjectionBatchSize)
 		So(conn.totalRowsFor(insertChildrenQuery), ShouldEqual, childRows)
 		So(conn.maxRowsFor(insertChildrenQuery), ShouldBeLessThanOrEqualTo, defaultChildrenBatchSize)
 	})
@@ -337,6 +406,169 @@ func writeSummariseSpoolLoaderTestSpool(
 	return manifest
 }
 
+func writeSummariseSpoolLoaderSchema2PublishSpool(
+	spoolDir string,
+	updatedAt time.Time,
+) *chspool.Manifest {
+	set, err := chspool.CreateSet(spoolDir)
+	So(err, ShouldBeNil)
+
+	sid := SnapshotID(testMountPath, updatedAt)
+
+	rootFact := summariseSpoolLoaderSchema2FactRow(sid, updatedAt, "/", 3, 0)
+	namespaceFact := summariseSpoolLoaderSchema2FactRow(sid, updatedAt, "/mnt/", 3, 0)
+	mountFact := summariseSpoolLoaderSchema2FactRow(sid, updatedAt, testMountPath, 3, 1)
+	writeErr := errors.Join(
+		set.WriteDirFact(rootFact),
+		set.WriteDirFact(namespaceFact),
+		set.WriteDirFact(mountFact),
+		set.WriteDirFilterAgeAll(summariseSpoolLoaderSchema2AgeAllRow(rootFact)),
+		set.WriteDirFilterAgeAll(summariseSpoolLoaderSchema2AgeAllRow(namespaceFact)),
+		set.WriteParentFact(summariseSpoolLoaderSchema2ParentFactRow(mountFact, "/")),
+		set.WriteDirProjectionSet(chspool.DirProjectionSetRow{
+			MountPath:   testMountPath,
+			SnapshotID:  sid,
+			UpdatedAt:   updatedAt,
+			RefreshedAt: updatedAt,
+		}),
+	)
+
+	So(writeErr, ShouldBeNil)
+	So(set.Close(), ShouldBeNil)
+
+	manifest := &chspool.Manifest{
+		Version:      chspool.Version,
+		Format:       chspool.Format,
+		State:        chspool.Complete,
+		MountPath:    testMountPath,
+		SnapshotID:   sid,
+		UpdatedAt:    updatedAt.UTC().Format(time.RFC3339Nano),
+		SchemaMarker: summariseSpoolLoaderSchemaMarker,
+		Tables:       set.TableManifests(),
+		CompletedAt:  time.Now().UTC().Format(time.RFC3339Nano),
+	}
+
+	So(chspool.WriteManifestAtomic(spoolDir, manifest), ShouldBeNil)
+
+	return manifest
+}
+
+func summariseSpoolLoaderSchema2FactRow(
+	sid string,
+	updatedAt time.Time,
+	dir string,
+	count uint64,
+	childCount uint64,
+) chspool.DirFactRow {
+	size := count * 10
+	buckets := summariseSpoolLoaderSchema2Buckets(count)
+
+	return chspool.DirFactRow{
+		MountPath:        testMountPath,
+		SnapshotID:       sid,
+		Dir:              dir,
+		UpdatedAt:        updatedAt,
+		AllCount:         count,
+		AllSize:          size,
+		AllAtimeMin:      100,
+		AllMtimeMax:      200,
+		AllAtimeBuckets:  buckets,
+		AllMtimeBuckets:  buckets,
+		AllUIDs:          []uint32{17},
+		AllGIDs:          []uint32{7},
+		AllFT:            uint16(db.DGUTAFileTypeBam),
+		FileCount:        count,
+		FileSize:         size,
+		FileAtimeMin:     100,
+		FileMtimeMax:     200,
+		FileAtimeBuckets: buckets,
+		FileMtimeBuckets: buckets,
+		FileUIDs:         []uint32{17},
+		FileGIDs:         []uint32{7},
+		FileFT:           uint16(db.DGUTAFileTypeBam),
+		GIDs:             []uint32{7},
+		UIDs:             []uint32{17},
+		FTs:              []uint16{uint16(db.DGUTAFileTypeBam)},
+		Ages:             []uint8{uint8(db.DGUTAgeAll)},
+		Counts:           []uint64{count},
+		Sizes:            []uint64{size},
+		AtimeMins:        []int64{100},
+		MtimeMaxs:        []int64{200},
+		AtimeBuckets:     [][]uint64{buckets},
+		MtimeBuckets:     [][]uint64{buckets},
+		ChildCount:       childCount,
+		RefreshedAt:      updatedAt,
+	}
+}
+
+func summariseSpoolLoaderSchema2Buckets(count uint64) []uint64 {
+	return []uint64{count, 0, 0, 0, 0, 0, 0, 0, 0}
+}
+
+func summariseSpoolLoaderSchema2AgeAllRow(row chspool.DirFactRow) chspool.DirFilterAgeAllRow {
+	return chspool.DirFilterAgeAllRow{
+		MountPath:    row.MountPath,
+		SnapshotID:   row.SnapshotID,
+		GID:          row.GIDs[0],
+		UID:          row.UIDs[0],
+		FT:           row.FTs[0],
+		Dir:          row.Dir,
+		Count:        row.Counts[0],
+		Size:         row.Sizes[0],
+		AtimeMin:     row.AtimeMins[0],
+		MtimeMax:     row.MtimeMaxs[0],
+		AtimeBuckets: row.AtimeBuckets[0],
+		MtimeBuckets: row.MtimeBuckets[0],
+		RefreshedAt:  row.RefreshedAt,
+	}
+}
+
+func summariseSpoolLoaderSchema2ParentFactRow(row chspool.DirFactRow, parentDir string) chspool.ParentFactRow {
+	hasChildren := uint8(0)
+	if row.ChildCount > 0 {
+		hasChildren = 1
+	}
+
+	return chspool.ParentFactRow{
+		MountPath:        row.MountPath,
+		SnapshotID:       row.SnapshotID,
+		ParentDir:        parentDir,
+		Dir:              row.Dir,
+		UpdatedAt:        row.UpdatedAt,
+		AllCount:         row.AllCount,
+		AllSize:          row.AllSize,
+		AllAtimeMin:      row.AllAtimeMin,
+		AllMtimeMax:      row.AllMtimeMax,
+		AllAtimeBuckets:  row.AllAtimeBuckets,
+		AllMtimeBuckets:  row.AllMtimeBuckets,
+		AllUIDs:          row.AllUIDs,
+		AllGIDs:          row.AllGIDs,
+		AllFT:            row.AllFT,
+		FileCount:        row.FileCount,
+		FileSize:         row.FileSize,
+		FileAtimeMin:     row.FileAtimeMin,
+		FileMtimeMax:     row.FileMtimeMax,
+		FileAtimeBuckets: row.FileAtimeBuckets,
+		FileMtimeBuckets: row.FileMtimeBuckets,
+		FileUIDs:         row.FileUIDs,
+		FileGIDs:         row.FileGIDs,
+		FileFT:           row.FileFT,
+		GIDs:             row.GIDs,
+		UIDs:             row.UIDs,
+		FTs:              row.FTs,
+		Ages:             row.Ages,
+		Counts:           row.Counts,
+		Sizes:            row.Sizes,
+		AtimeMins:        row.AtimeMins,
+		MtimeMaxs:        row.MtimeMaxs,
+		AtimeBuckets:     row.AtimeBuckets,
+		MtimeBuckets:     row.MtimeBuckets,
+		ChildCount:       row.ChildCount,
+		HasChildren:      hasChildren,
+		RefreshedAt:      row.RefreshedAt,
+	}
+}
+
 func writeSummariseSpoolLoaderFileOnlySpool(
 	spoolDir string,
 	updatedAt time.Time,
@@ -377,6 +609,8 @@ func writeSummariseSpoolLoaderSchema2BatchSpool(
 	spoolDir string,
 	updatedAt time.Time,
 	factRows int,
+	ageAllRows int,
+	parentFactRows int,
 	childRows int,
 ) *chspool.Manifest {
 	set, err := chspool.CreateSet(spoolDir)
@@ -391,6 +625,26 @@ func writeSummariseSpoolLoaderSchema2BatchSpool(
 			SnapshotID: sid,
 			Dir:        testMountPath,
 			UpdatedAt:  updatedAt,
+		}))
+	}
+
+	for range ageAllRows {
+		writeErr = errors.Join(writeErr, set.WriteDirFilterAgeAll(chspool.DirFilterAgeAllRow{
+			MountPath:   testMountPath,
+			SnapshotID:  sid,
+			Dir:         testMountPath,
+			RefreshedAt: updatedAt,
+		}))
+	}
+
+	for range parentFactRows {
+		writeErr = errors.Join(writeErr, set.WriteParentFact(chspool.ParentFactRow{
+			MountPath:   testMountPath,
+			SnapshotID:  sid,
+			ParentDir:   "/",
+			Dir:         testMountPath,
+			UpdatedAt:   updatedAt,
+			RefreshedAt: updatedAt,
 		}))
 	}
 
