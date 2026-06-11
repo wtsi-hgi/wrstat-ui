@@ -21,8 +21,8 @@ implement exact full-filter row construction and bounded insert writers in
 Preserve all schema2 tables and routes. Cover all 3 acceptance tests from B1
 in `clickhouse/dguta_writer_test.go`.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
 
 ### Item 2.2: D1 - Direct import stages every schema3 object before publish
 
@@ -35,5 +35,5 @@ needed by D1, using row structs that match D2. Cover all 4 acceptance tests
 from D1 in `clickhouse/dguta_writer_test.go`. Depends on item 2.1 schema3
 tables and full-filter writer counts.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed

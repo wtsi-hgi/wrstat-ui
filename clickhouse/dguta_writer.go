@@ -28,8 +28,11 @@ package clickhouse
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -48,11 +51,18 @@ const (
 	defaultCHReceiveTimeout    = 300 * time.Second
 	importBatchReceiveGuard    = time.Minute
 	importBatchMaxOpenDuration = defaultCHReceiveTimeout - importBatchReceiveGuard
+	activeVirtualSummaryName   = "summary"
+	activeVirtualFilterName    = "filter"
+	activeVirtualChildName     = "child"
 
 	importPhasePartitionDropReset  = "partition_drop_reset"
 	importPhaseDGUTAInsert         = "wrstat_dguta_insert"
 	importPhaseChildrenInsert      = "wrstat_children_insert"
 	importPhaseParentFactsInsert   = "wrstat_parent_facts_insert"
+	importPhaseFullFilterAllInsert = "wrstat_filter_all_insert"
+	importPhaseSchema3Ready        = "wrstat_schema3_snapshot_ready"
+	importPhaseActiveVirtualInsert = "wrstat_active_virtual_insert"
+	importPhaseActiveVirtualReady  = "wrstat_active_virtual_ready"
 	importPhaseMountSwitch         = "mount_switch"
 	importPhaseDirProjectionWrite  = "wrstat_dir_projection_insert"
 	importPhaseTreeSummaryRefresh  = "wrstat_tree_summary_refresh"
@@ -73,8 +83,19 @@ const (
 	dropDirFilterAgeAllPartitionQuery = "ALTER TABLE wrstat_dir_filter_ageall " +
 		"DROP PARTITION tuple(?, toUUID(?))"
 	dropParentFactsPartitionQuery    = "ALTER TABLE wrstat_parent_facts DROP PARTITION tuple(?, toUUID(?))"
+	dropChildFilterAllPartitionQuery = "ALTER TABLE wrstat_child_filter_all " +
+		"DROP PARTITION tuple(?, toUUID(?))"
+	dropDirFilterAllPartitionQuery = "ALTER TABLE wrstat_dir_filter_all " +
+		"DROP PARTITION tuple(?, toUUID(?))"
+	dropSchema3SnapshotSetPartitionQuery = "ALTER TABLE wrstat_schema3_snapshot_sets " +
+		"DROP PARTITION tuple(?, toUUID(?))"
 	dropDirDGUTAVectorPartitionQuery = "ALTER TABLE wrstat_dir_facts " +
 		"DROP PARTITION tuple(?, toUUID(?))"
+
+	dropActiveVirtualSummariesPartitionQuery = "ALTER TABLE wrstat_active_virtual_summaries DROP PARTITION ?"
+	dropActiveVirtualFilterAllPartitionQuery = "ALTER TABLE wrstat_active_virtual_filter_all DROP PARTITION ?"
+	dropActiveVirtualChildrenPartitionQuery  = "ALTER TABLE wrstat_active_virtual_children DROP PARTITION ?"
+	dropActiveVirtualSetsPartitionQuery      = "ALTER TABLE wrstat_active_virtual_sets DROP PARTITION ?"
 
 	dropBasedirsGroupUsagePartitionQuery   = "ALTER TABLE wrstat_basedirs_group_usage DROP PARTITION tuple(?, toUUID(?))"
 	dropBasedirsUserUsagePartitionQuery    = "ALTER TABLE wrstat_basedirs_user_usage DROP PARTITION tuple(?, toUUID(?))"
@@ -84,14 +105,48 @@ const (
 	insertChildrenQuery = "INSERT INTO wrstat_children " +
 		"(mount_path, snapshot_id, parent_dir, child) " +
 		"VALUES (?, toUUID(?), ?, ?)"
+	countSnapshotTableRowsQuery   = "SELECT count() FROM %s WHERE mount_path = ? AND snapshot_id = toUUID(?)"
+	insertSchema3SnapshotSetQuery = "INSERT INTO wrstat_schema3_snapshot_sets " +
+		"(mount_path, snapshot_id, schema3_version, dir_facts_rows, parent_facts_rows, children_rows, " +
+		"child_filter_all_rows, dir_filter_all_rows, manifest_sha256, refreshed_at) " +
+		"VALUES (?, toUUID(?), ?, ?, ?, ?, ?, ?, ?, ?)"
+	insertActiveVirtualSummaryQuery = "INSERT INTO wrstat_active_virtual_summaries " +
+		"(active_set_id, dir, mount_path, is_mount_root_box, updated_at, all_count, all_size, " +
+		"all_atime_min, all_mtime_max, all_atime_buckets, all_mtime_buckets, all_uids, all_gids, " +
+		"all_ft, file_count, file_size, child_count, refreshed_at) " +
+		"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+	insertActiveVirtualFilterAllQuery = "INSERT INTO wrstat_active_virtual_filter_all " +
+		"(active_set_id, dir, age, gid, uid, ft, count, size, atime_min, mtime_max, " +
+		"atime_buckets, mtime_buckets, filter_child_count, child_count, refreshed_at) " +
+		"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+	insertActiveVirtualChildQuery = "INSERT INTO wrstat_active_virtual_children " +
+		"(active_set_id, parent_dir, child_dir, mount_path, is_mount_root_box, child_count, refreshed_at) " +
+		"VALUES (?, ?, ?, ?, ?, ?, ?)"
+	insertActiveVirtualSetQuery = "INSERT INTO wrstat_active_virtual_sets " +
+		"(active_set_id, schema3_version, mounts_sha256, active_mount_count, summary_rows, filter_rows, " +
+		"child_rows, manifest_sha256, ready, refreshed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+	selectActiveVirtualSummariesValidationQuery = "SELECT dir, mount_path, is_mount_root_box, updated_at, " +
+		"all_count, all_size, all_atime_min, all_mtime_max, all_atime_buckets, all_mtime_buckets, " +
+		"all_uids, all_gids, all_ft, file_count, file_size, child_count " +
+		"FROM wrstat_active_virtual_summaries WHERE active_set_id = ? ORDER BY dir"
+	selectActiveVirtualFilterAllValidationQuery = "SELECT dir, age, gid, uid, ft, count, size, " +
+		"atime_min, mtime_max, atime_buckets, mtime_buckets, filter_child_count, child_count " +
+		"FROM wrstat_active_virtual_filter_all WHERE active_set_id = ? ORDER BY dir, age, gid, uid, ft"
+	selectActiveVirtualChildrenValidationQuery = "SELECT parent_dir, child_dir, mount_path, " +
+		"is_mount_root_box, child_count FROM wrstat_active_virtual_children WHERE active_set_id = ? " +
+		"ORDER BY parent_dir, child_dir"
 )
 
 var (
-	errMountPathRequired        = errors.New("clickhouse: mount path is required")
-	errUpdatedAtRequired        = errors.New("clickhouse: updated at is required")
-	errDirRequired              = errors.New("clickhouse: record dir is required")
-	errChildrenBatchNotPrepared = errors.New("clickhouse: children batch is not prepared")
-	errActiveSnapshotRewrite    = errors.New(
+	errMountPathRequired         = errors.New("clickhouse: mount path is required")
+	errUpdatedAtRequired         = errors.New("clickhouse: updated at is required")
+	errDirRequired               = errors.New("clickhouse: record dir is required")
+	errChildrenBatchNotPrepared  = errors.New("clickhouse: children batch is not prepared")
+	errSnapshotCountNoRows       = errors.New("clickhouse: snapshot table count returned no rows")
+	errActiveVirtualRowsMismatch = errors.New(
+		"clickhouse: active virtual row validation mismatch",
+	)
+	errActiveSnapshotRewrite = errors.New(
 		"clickhouse: refusing to rewrite active snapshot",
 	)
 )
@@ -103,6 +158,28 @@ func basedirsPartitionDropQueries() []string {
 		dropBasedirsGroupSubdirsPartitionQuery,
 		dropBasedirsUserSubdirsPartitionQuery,
 	}
+}
+
+func stagedMountsActiveRows(rows []mountsActiveRow, candidate mountsActiveRow) []mountsActiveRow {
+	out := make([]mountsActiveRow, 0, len(rows)+1)
+	replaced := false
+
+	for _, row := range rows {
+		if row.mountPath == candidate.mountPath {
+			out = append(out, candidate)
+			replaced = true
+
+			continue
+		}
+
+		out = append(out, row)
+	}
+
+	if !replaced {
+		out = append(out, candidate)
+	}
+
+	return out
 }
 
 type dgutaRowKey struct {
@@ -205,6 +282,448 @@ func (slot dgutaBatchSlot) wasFlushed() bool {
 	return slot.flushed != nil && *slot.flushed
 }
 
+type schema3SnapshotRowCounts struct {
+	dirFactsRows       uint64
+	parentFactsRows    uint64
+	childrenRows       uint64
+	childFilterAllRows uint64
+	dirFilterAllRows   uint64
+}
+
+type activeVirtualSummaryRow struct {
+	ActiveSetID     string
+	Dir             string
+	MountPath       string
+	IsMountRootBox  uint8
+	UpdatedAt       time.Time
+	AllCount        uint64
+	AllSize         uint64
+	AllAtimeMin     int64
+	AllMtimeMax     int64
+	AllAtimeBuckets []uint64
+	AllMtimeBuckets []uint64
+	AllUIDs         []uint32
+	AllGIDs         []uint32
+	AllFT           uint16
+	FileCount       uint64
+	FileSize        uint64
+	ChildCount      uint64
+	RefreshedAt     time.Time
+}
+
+func activeVirtualSummaryRowWithCounts(
+	row activeVirtualSummaryRow,
+	childCount uint64,
+	updatedAt time.Time,
+	refreshedAt time.Time,
+) activeVirtualSummaryRow {
+	row.UpdatedAt = updatedAt
+	row.ChildCount = childCount
+	row.AllAtimeBuckets = emptyAgeBuckets()
+	row.AllMtimeBuckets = emptyAgeBuckets()
+	row.RefreshedAt = refreshedAt
+
+	return row
+}
+
+func activeVirtualSummaryRowsForChildren(
+	activeSetID string,
+	mounts []activeMount,
+	childRows []activeVirtualChildRow,
+	refreshedAt time.Time,
+) []activeVirtualSummaryRow {
+	dirs, childCounts := activeVirtualSummarySeedRows(activeSetID, mounts, childRows)
+	updatedAt := maxUpdatedAtForMounts(mounts)
+	out := make([]activeVirtualSummaryRow, 0, len(dirs))
+
+	for _, row := range dirs {
+		out = append(out, activeVirtualSummaryRowWithCounts(row, childCounts[row.Dir], updatedAt, refreshedAt))
+	}
+
+	sortActiveVirtualSummaryRows(out)
+
+	return out
+}
+
+func activeVirtualSummarySeedRows(
+	activeSetID string,
+	mounts []activeMount,
+	childRows []activeVirtualChildRow,
+) (map[string]activeVirtualSummaryRow, map[string]uint64) {
+	dirs := make(map[string]activeVirtualSummaryRow, len(childRows)+1)
+	childCounts := make(map[string]uint64)
+
+	for _, row := range childRows {
+		childCounts[row.ParentDir]++
+		dirs[row.ParentDir] = activeVirtualSummaryRow{ActiveSetID: activeSetID, Dir: row.ParentDir}
+		dirs[row.ChildDir] = activeVirtualSummaryRow{
+			ActiveSetID:    activeSetID,
+			Dir:            row.ChildDir,
+			MountPath:      row.MountPath,
+			IsMountRootBox: row.IsMountRootBox,
+		}
+	}
+
+	if len(dirs) == 0 && len(mounts) > 0 {
+		dirs["/"] = activeVirtualSummaryRow{ActiveSetID: activeSetID, Dir: "/"}
+	}
+
+	return dirs, childCounts
+}
+
+func sortActiveVirtualSummaryRows(rows []activeVirtualSummaryRow) {
+	slices.SortFunc(rows, func(a, b activeVirtualSummaryRow) int {
+		return strings.Compare(a.Dir, b.Dir)
+	})
+}
+
+func activeVirtualFilterRowsForSummaries(summaryRows []activeVirtualSummaryRow) []activeVirtualFilterAllRow {
+	rows := make([]activeVirtualFilterAllRow, 0, len(summaryRows))
+	for _, summary := range summaryRows {
+		rows = append(rows, activeVirtualFilterAllRow{
+			ActiveSetID:      summary.ActiveSetID,
+			Dir:              summary.Dir,
+			Age:              uint8(db.DGUTAgeAll),
+			AtimeBuckets:     emptyAgeBuckets(),
+			MtimeBuckets:     emptyAgeBuckets(),
+			FilterChildCount: summary.ChildCount,
+			ChildCount:       summary.ChildCount,
+			RefreshedAt:      summary.RefreshedAt,
+		})
+	}
+
+	return rows
+}
+
+func emptyAgeBuckets() []uint64 {
+	return append([]uint64(nil), ageBucketsSlice(nil)...)
+}
+
+type activeVirtualFilterAllRow struct {
+	ActiveSetID      string
+	Dir              string
+	Age              uint8
+	GID              uint32
+	UID              uint32
+	FT               uint16
+	Count            uint64
+	Size             uint64
+	AtimeMin         int64
+	MtimeMax         int64
+	AtimeBuckets     []uint64
+	MtimeBuckets     []uint64
+	FilterChildCount uint64
+	ChildCount       uint64
+	RefreshedAt      time.Time
+}
+
+func activeVirtualFilterSortKey(row activeVirtualFilterAllRow) string {
+	return fmt.Sprintf("%s\x00%03d\x00%010d\x00%010d\x00%05d", row.Dir, row.Age, row.GID, row.UID, row.FT)
+}
+
+type activeVirtualChildRow struct {
+	ActiveSetID    string
+	ParentDir      string
+	ChildDir       string
+	MountPath      string
+	IsMountRootBox uint8
+	ChildCount     uint64
+	RefreshedAt    time.Time
+}
+
+func activeVirtualChildRowsForMounts(
+	activeSetID string,
+	mounts []activeMount,
+	refreshedAt time.Time,
+) []activeVirtualChildRow {
+	virtualRows := virtualChildRowsForMounts(mounts)
+	rows := make([]activeVirtualChildRow, 0, len(virtualRows))
+
+	for _, row := range virtualRows {
+		rows = append(rows, activeVirtualChildRow{
+			ActiveSetID:    activeSetID,
+			ParentDir:      row.parentDir,
+			ChildDir:       row.child,
+			MountPath:      row.mountPath,
+			IsMountRootBox: boolAsUInt8(row.childIsMountRoot),
+			RefreshedAt:    refreshedAt,
+		})
+	}
+
+	return rows
+}
+
+func boolAsUInt8(v bool) uint8 {
+	if v {
+		return 1
+	}
+
+	return 0
+}
+
+type activeVirtualSetRow struct {
+	ActiveSetID      string
+	Schema3Version   uint32
+	MountsSHA256     string
+	ActiveMountCount uint64
+	SummaryRows      uint64
+	FilterRows       uint64
+	ChildRows        uint64
+	ManifestSHA256   string
+	Ready            uint8
+	RefreshedAt      time.Time
+}
+
+func activeVirtualSetRowForRows(
+	activeSetID string,
+	rows []mountsActiveRow,
+	summaryRows []activeVirtualSummaryRow,
+	filterRows []activeVirtualFilterAllRow,
+	childRows []activeVirtualChildRow,
+	refreshedAt time.Time,
+) activeVirtualSetRow {
+	return activeVirtualSetRow{
+		ActiveSetID:      activeSetID,
+		Schema3Version:   currentSchemaVersion,
+		MountsSHA256:     activeSetID,
+		ActiveMountCount: countActiveMountRows(rows),
+		SummaryRows:      uint64(len(summaryRows)),
+		FilterRows:       uint64(len(filterRows)),
+		ChildRows:        uint64(len(childRows)),
+		ManifestSHA256:   activeVirtualManifestSHA256(activeSetID, len(summaryRows), len(filterRows), len(childRows)),
+		Ready:            1,
+		RefreshedAt:      refreshedAt,
+	}
+}
+
+type activeVirtualValidation struct {
+	rows     uint64
+	checksum string
+}
+
+func activeVirtualSummaryValidation(rows []activeVirtualSummaryRow) activeVirtualValidation {
+	sorted := slices.Clone(rows)
+	sortActiveVirtualSummaryRows(sorted)
+
+	hash := sha256.New()
+	for _, row := range sorted {
+		writeActiveVirtualSummaryChecksum(hash, row)
+	}
+
+	return activeVirtualValidation{rows: uint64(len(rows)), checksum: hex.EncodeToString(hash.Sum(nil))}
+}
+
+func activeVirtualFilterValidation(rows []activeVirtualFilterAllRow) activeVirtualValidation {
+	sorted := slices.Clone(rows)
+	slices.SortFunc(sorted, func(a, b activeVirtualFilterAllRow) int {
+		return strings.Compare(activeVirtualFilterSortKey(a), activeVirtualFilterSortKey(b))
+	})
+
+	hash := sha256.New()
+	for _, row := range sorted {
+		writeActiveVirtualFilterChecksum(hash, row)
+	}
+
+	return activeVirtualValidation{rows: uint64(len(rows)), checksum: hex.EncodeToString(hash.Sum(nil))}
+}
+
+func activeVirtualChildValidation(rows []activeVirtualChildRow) activeVirtualValidation {
+	sorted := slices.Clone(rows)
+	slices.SortFunc(sorted, func(a, b activeVirtualChildRow) int {
+		return strings.Compare(a.ParentDir+"\x00"+a.ChildDir, b.ParentDir+"\x00"+b.ChildDir)
+	})
+
+	hash := sha256.New()
+	for _, row := range sorted {
+		writeActiveVirtualChildChecksum(hash, row)
+	}
+
+	return activeVirtualValidation{rows: uint64(len(rows)), checksum: hex.EncodeToString(hash.Sum(nil))}
+}
+
+type activeVirtualOverlayWriter struct {
+	conn ch.Conn
+
+	summaryBatch driver.Batch
+	filterBatch  driver.Batch
+	childBatch   driver.Batch
+	setBatch     driver.Batch
+
+	summaryOpenedAt time.Time
+	filterOpenedAt  time.Time
+	childOpenedAt   time.Time
+	setOpenedAt     time.Time
+
+	batchSize int
+	writeErr  error
+	now       func() time.Time
+}
+
+func newActiveVirtualOverlayWriter(conn ch.Conn, batchSize int) *activeVirtualOverlayWriter {
+	return &activeVirtualOverlayWriter{
+		conn:      conn,
+		batchSize: batchSize,
+	}
+}
+
+func (w *activeVirtualOverlayWriter) appendSummary(
+	ctx context.Context,
+	row activeVirtualSummaryRow,
+) error {
+	return w.blockWriter(insertActiveVirtualSummaryQuery, &w.summaryBatch, &w.summaryOpenedAt, "active virtual summary").
+		append(ctx, func(batch driver.Batch) error {
+			return batch.Append(
+				row.ActiveSetID,
+				row.Dir,
+				row.MountPath,
+				row.IsMountRootBox,
+				row.UpdatedAt,
+				row.AllCount,
+				row.AllSize,
+				row.AllAtimeMin,
+				row.AllMtimeMax,
+				row.AllAtimeBuckets,
+				row.AllMtimeBuckets,
+				row.AllUIDs,
+				row.AllGIDs,
+				row.AllFT,
+				row.FileCount,
+				row.FileSize,
+				row.ChildCount,
+				row.RefreshedAt,
+			)
+		})
+}
+
+func (w *activeVirtualOverlayWriter) appendFilterAll(
+	ctx context.Context,
+	row activeVirtualFilterAllRow,
+) error {
+	return w.blockWriter(
+		insertActiveVirtualFilterAllQuery,
+		&w.filterBatch,
+		&w.filterOpenedAt,
+		"active virtual filter-all",
+	).append(ctx, func(batch driver.Batch) error {
+		return batch.Append(
+			row.ActiveSetID,
+			row.Dir,
+			row.Age,
+			row.GID,
+			row.UID,
+			row.FT,
+			row.Count,
+			row.Size,
+			row.AtimeMin,
+			row.MtimeMax,
+			row.AtimeBuckets,
+			row.MtimeBuckets,
+			row.FilterChildCount,
+			row.ChildCount,
+			row.RefreshedAt,
+		)
+	})
+}
+
+func (w *activeVirtualOverlayWriter) appendChild(
+	ctx context.Context,
+	row activeVirtualChildRow,
+) error {
+	return w.blockWriter(insertActiveVirtualChildQuery, &w.childBatch, &w.childOpenedAt, "active virtual child").
+		append(ctx, func(batch driver.Batch) error {
+			return batch.Append(
+				row.ActiveSetID,
+				row.ParentDir,
+				row.ChildDir,
+				row.MountPath,
+				row.IsMountRootBox,
+				row.ChildCount,
+				row.RefreshedAt,
+			)
+		})
+}
+
+func (w *activeVirtualOverlayWriter) appendSet(
+	ctx context.Context,
+	row activeVirtualSetRow,
+) error {
+	err := w.blockWriter(insertActiveVirtualSetQuery, &w.setBatch, &w.setOpenedAt, "active virtual set").
+		append(ctx, func(batch driver.Batch) error {
+			return batch.Append(
+				row.ActiveSetID,
+				row.Schema3Version,
+				row.MountsSHA256,
+				row.ActiveMountCount,
+				row.SummaryRows,
+				row.FilterRows,
+				row.ChildRows,
+				row.ManifestSHA256,
+				row.Ready,
+				row.RefreshedAt,
+			)
+		})
+	if err != nil {
+		return err
+	}
+
+	return w.closeBatch(&w.setBatch, &w.setOpenedAt, "active virtual set")
+}
+
+func (w *activeVirtualOverlayWriter) flush(ctx context.Context) error {
+	_ = ctx
+
+	return errors.Join(
+		w.closeBatch(&w.summaryBatch, &w.summaryOpenedAt, "active virtual summary"),
+		w.closeBatch(&w.filterBatch, &w.filterOpenedAt, "active virtual filter-all"),
+		w.closeBatch(&w.childBatch, &w.childOpenedAt, "active virtual child"),
+	)
+}
+
+func (w *activeVirtualOverlayWriter) blockWriter(
+	query string,
+	batch *driver.Batch,
+	openedAt *time.Time,
+	name string,
+) *importBlockWriter {
+	return &importBlockWriter{
+		conn:      w.conn,
+		query:     query,
+		name:      name,
+		batch:     batch,
+		openedAt:  openedAt,
+		writeErr:  &w.writeErr,
+		batchSize: w.batchSize,
+		now:       w.importBatchNow,
+	}
+}
+
+func (w *activeVirtualOverlayWriter) closeBatch(
+	batch *driver.Batch,
+	openedAt *time.Time,
+	name string,
+) error {
+	if batch == nil || *batch == nil {
+		return nil
+	}
+
+	return (&importBlockWriter{
+		name:      name,
+		batch:     batch,
+		openedAt:  openedAt,
+		writeErr:  &w.writeErr,
+		batchSize: w.batchSize,
+		now:       w.importBatchNow,
+	}).close()
+}
+
+func (w *activeVirtualOverlayWriter) importBatchNow() time.Time {
+	if w != nil && w.now != nil {
+		return w.now()
+	}
+
+	return time.Now()
+}
+
 type dgutaWriter struct {
 	cfg Config
 
@@ -230,6 +749,8 @@ type dgutaWriter struct {
 	// failBeforeSwitchErr forces Close() to fail before switching snapshots.
 	// Used only by integration tests.
 	failBeforeSwitchErr error
+
+	stagedActiveSetID string
 
 	previousDGUTARows dgutaRecordRows
 	dirProjection     mountDirProjectionWriter
@@ -397,6 +918,14 @@ func (w *dgutaWriter) publishSnapshotOnClose(ctx context.Context) error {
 		return w.closeWithNewSnapshotCleanup(ctx, err)
 	}
 
+	if err := w.writeSchema3SnapshotReadiness(ctx); err != nil {
+		return w.closeWithNewSnapshotCleanup(ctx, err)
+	}
+
+	if err := w.writeActiveVirtualReadiness(ctx); err != nil {
+		return w.closeWithNewSnapshotCleanup(ctx, err)
+	}
+
 	if err := w.switchSnapshotAndDropOld(ctx); err != nil {
 		_ = w.conn.Close()
 
@@ -504,6 +1033,11 @@ func (w *dgutaWriter) switchSnapshotAndDropOld(ctx context.Context) error {
 		return w.closeWithNewSnapshotCleanup(ctx, err)
 	}
 
+	previousActiveSetID, nextActiveSetID, err := w.activeSetIDsForSwitch(ctx)
+	if err != nil {
+		return w.closeWithNewSnapshotCleanup(ctx, err)
+	}
+
 	if err := w.switchSnapshotOrCleanup(ctx); err != nil {
 		return err
 	}
@@ -514,10 +1048,31 @@ func (w *dgutaWriter) switchSnapshotAndDropOld(ctx context.Context) error {
 		}
 	}
 
+	if err := w.dropPreviousActiveVirtualPartitions(ctx, previousActiveSetID, nextActiveSetID); err != nil {
+		return err
+	}
+
 	w.refreshActiveTreeSummariesBestEffort(ctx)
 	w.refreshActivePrefixRollupsBestEffort(ctx)
 
 	return nil
+}
+
+func (w *dgutaWriter) activeSetIDsForSwitch(ctx context.Context) (string, string, error) {
+	rows, err := queryMountsActiveRows(ctx, w.conn)
+	if err != nil {
+		return "", "", err
+	}
+
+	previousID := fingerprintForMountsActive(rows)
+
+	nextID := w.stagedActiveSetID
+	if nextID == "" {
+		nextRows := stagedMountsActiveRows(rows, mountsActiveRow(w.activeMount()))
+		nextID = fingerprintForMountsActive(nextRows)
+	}
+
+	return previousID, nextID, nil
 }
 
 func (w *dgutaWriter) refreshActiveTreeSummariesBestEffort(ctx context.Context) {
@@ -538,6 +1093,475 @@ func (w *dgutaWriter) writeMountDirProjectionSummarySet(ctx context.Context) err
 	return w.timeImportPhase(importPhaseDirProjectionWrite, func() error {
 		return writeMountDirSummarySetRow(ctx, w.conn, w.activeMount(), w.dirProjection.refreshedAt)
 	})
+}
+
+func (w *dgutaWriter) writeSchema3SnapshotReadiness(ctx context.Context) error {
+	w.ensureSnapshotID()
+
+	return w.timeImportPhase(importPhaseSchema3Ready, func() error {
+		counts, err := w.schema3SnapshotRowCounts(ctx)
+		if err != nil {
+			return err
+		}
+
+		return w.insertSchema3SnapshotSet(ctx, counts)
+	})
+}
+
+func (w *dgutaWriter) schema3SnapshotRowCounts(ctx context.Context) (schema3SnapshotRowCounts, error) {
+	var counts schema3SnapshotRowCounts
+
+	for _, table := range []struct {
+		name string
+		dest *uint64
+	}{
+		{name: "wrstat_dir_facts", dest: &counts.dirFactsRows},
+		{name: "wrstat_parent_facts", dest: &counts.parentFactsRows},
+		{name: "wrstat_children", dest: &counts.childrenRows},
+		{name: "wrstat_child_filter_all", dest: &counts.childFilterAllRows},
+		{name: "wrstat_dir_filter_all", dest: &counts.dirFilterAllRows},
+	} {
+		n, err := w.countSnapshotRows(ctx, table.name)
+		if err != nil {
+			return schema3SnapshotRowCounts{}, err
+		}
+
+		*table.dest = n
+	}
+
+	return counts, nil
+}
+
+func (w *dgutaWriter) countSnapshotRows(ctx context.Context, table string) (uint64, error) {
+	rows, err := w.conn.Query(
+		ctx,
+		fmt.Sprintf(countSnapshotTableRowsQuery, table),
+		w.mountPath,
+		w.snapshot.String(),
+	)
+	if err != nil {
+		return 0, fmt.Errorf("clickhouse: failed to count %s rows: %w", table, err)
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return 0, fmt.Errorf("clickhouse: %s count iteration error: %w", table, err)
+		}
+
+		return 0, fmt.Errorf("%w: %s", errSnapshotCountNoRows, table)
+	}
+
+	var count uint64
+	if err := rows.Scan(&count); err != nil {
+		return 0, fmt.Errorf("clickhouse: failed to scan %s row count: %w", table, err)
+	}
+
+	return count, nil
+}
+
+func (w *dgutaWriter) insertSchema3SnapshotSet(ctx context.Context, counts schema3SnapshotRowCounts) error {
+	manifest := schema3SnapshotManifestSHA256(w.activeMount(), counts)
+	if err := w.conn.Exec(
+		ctx,
+		insertSchema3SnapshotSetQuery,
+		w.mountPath,
+		w.snapshot.String(),
+		currentSchemaVersion,
+		counts.dirFactsRows,
+		counts.parentFactsRows,
+		counts.childrenRows,
+		counts.childFilterAllRows,
+		counts.dirFilterAllRows,
+		manifest,
+		w.dirProjection.refreshedAt,
+	); err != nil {
+		return fmt.Errorf("clickhouse: failed to write schema3 snapshot readiness: %w", err)
+	}
+
+	return nil
+}
+
+func schema3SnapshotManifestSHA256(mount activeMount, counts schema3SnapshotRowCounts) string {
+	input := fmt.Sprintf(
+		"%s|%s|%d|%d|%d|%d|%d|%d",
+		mount.mountPath,
+		mount.snapshotID,
+		currentSchemaVersion,
+		counts.dirFactsRows,
+		counts.parentFactsRows,
+		counts.childrenRows,
+		counts.childFilterAllRows,
+		counts.dirFilterAllRows,
+	)
+
+	return sha256Hex(input)
+}
+
+func (w *dgutaWriter) writeActiveVirtualReadiness(ctx context.Context) error {
+	return w.timeImportPhase(importPhaseActiveVirtualInsert, func() error {
+		rows, err := w.stagedMountsActiveRows(ctx)
+		if err != nil {
+			return err
+		}
+
+		activeSetID := fingerprintForMountsActive(rows)
+
+		w.stagedActiveSetID = activeSetID
+		if activeSetID == "" {
+			return nil
+		}
+
+		dropErr := w.dropActiveVirtualPartitions(ctx, activeSetID)
+		if dropErr != nil {
+			return dropErr
+		}
+
+		setRow, err := w.writeActiveVirtualOverlay(ctx, rows, activeSetID)
+		if err != nil {
+			return err
+		}
+
+		return w.timeImportPhase(importPhaseActiveVirtualReady, func() error {
+			return newActiveVirtualOverlayWriter(w.conn, w.effectiveProjectionBatchSize()).appendSet(ctx, setRow)
+		})
+	})
+}
+
+func (w *dgutaWriter) stagedMountsActiveRows(ctx context.Context) ([]mountsActiveRow, error) {
+	rows, err := queryMountsActiveRows(ctx, w.conn)
+	if err != nil {
+		return nil, err
+	}
+
+	return stagedMountsActiveRows(rows, mountsActiveRow(w.activeMount())), nil
+}
+
+func (w *dgutaWriter) writeActiveVirtualOverlay(
+	ctx context.Context,
+	rows []mountsActiveRow,
+	activeSetID string,
+) (activeVirtualSetRow, error) {
+	refreshedAt := w.dirProjection.refreshedAt
+	if refreshedAt.IsZero() {
+		refreshedAt = time.Now().UTC()
+	}
+
+	mounts := newActiveMountsSnapshot(rows).all()
+	writer := newActiveVirtualOverlayWriter(w.conn, w.effectiveProjectionBatchSize())
+	summaryRows, filterRows, childRows := activeVirtualRowsForMounts(activeSetID, mounts, refreshedAt)
+
+	if err := appendActiveVirtualOverlayRows(ctx, writer, summaryRows, filterRows, childRows); err != nil {
+		return activeVirtualSetRow{}, err
+	}
+
+	if err := writer.flush(ctx); err != nil {
+		return activeVirtualSetRow{}, err
+	}
+
+	if err := w.validateActiveVirtualOverlay(ctx, activeSetID, summaryRows, filterRows, childRows); err != nil {
+		return activeVirtualSetRow{}, err
+	}
+
+	return activeVirtualSetRowForRows(activeSetID, rows, summaryRows, filterRows, childRows, refreshedAt), nil
+}
+
+func activeVirtualRowsForMounts(
+	activeSetID string,
+	mounts []activeMount,
+	refreshedAt time.Time,
+) ([]activeVirtualSummaryRow, []activeVirtualFilterAllRow, []activeVirtualChildRow) {
+	childRows := activeVirtualChildRowsForMounts(activeSetID, mounts, refreshedAt)
+	summaryRows := activeVirtualSummaryRowsForChildren(activeSetID, mounts, childRows, refreshedAt)
+	filterRows := activeVirtualFilterRowsForSummaries(summaryRows)
+
+	return summaryRows, filterRows, childRows
+}
+
+func appendActiveVirtualOverlayRows(
+	ctx context.Context,
+	writer *activeVirtualOverlayWriter,
+	summaryRows []activeVirtualSummaryRow,
+	filterRows []activeVirtualFilterAllRow,
+	childRows []activeVirtualChildRow,
+) error {
+	for _, row := range summaryRows {
+		if err := writer.appendSummary(ctx, row); err != nil {
+			return err
+		}
+	}
+
+	for _, row := range filterRows {
+		if err := writer.appendFilterAll(ctx, row); err != nil {
+			return err
+		}
+	}
+
+	for _, row := range childRows {
+		if err := writer.appendChild(ctx, row); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (w *dgutaWriter) validateActiveVirtualOverlay( //nolint:funlen
+	ctx context.Context,
+	activeSetID string,
+	summaryRows []activeVirtualSummaryRow,
+	filterRows []activeVirtualFilterAllRow,
+	childRows []activeVirtualChildRow,
+) error {
+	if err := w.validateActiveVirtualCheck(
+		ctx,
+		activeSetID,
+		activeVirtualSummaryName,
+		activeVirtualSummaryValidation(summaryRows),
+		w.readActiveVirtualSummaryValidation,
+	); err != nil {
+		return err
+	}
+
+	if err := w.validateActiveVirtualCheck(
+		ctx,
+		activeSetID,
+		activeVirtualFilterName,
+		activeVirtualFilterValidation(filterRows),
+		w.readActiveVirtualFilterValidation,
+	); err != nil {
+		return err
+	}
+
+	return w.validateActiveVirtualCheck(
+		ctx,
+		activeSetID,
+		activeVirtualChildName,
+		activeVirtualChildValidation(childRows),
+		w.readActiveVirtualChildValidation,
+	)
+}
+
+func (w *dgutaWriter) validateActiveVirtualCheck(
+	ctx context.Context,
+	activeSetID string,
+	name string,
+	expected activeVirtualValidation,
+	read func(context.Context, string) (activeVirtualValidation, error),
+) error {
+	actual, err := read(ctx, activeSetID)
+	if err != nil {
+		return err
+	}
+
+	if actual == expected {
+		return nil
+	}
+
+	return fmt.Errorf(
+		"%w: %s rows expected=%d/%s actual=%d/%s",
+		errActiveVirtualRowsMismatch,
+		name,
+		expected.rows,
+		expected.checksum,
+		actual.rows,
+		actual.checksum,
+	)
+}
+
+//nolint:funlen
+func (w *dgutaWriter) readActiveVirtualSummaryValidation(
+	ctx context.Context,
+	activeSetID string,
+) (activeVirtualValidation, error) {
+	rows, err := w.conn.Query(ctx, selectActiveVirtualSummariesValidationQuery, activeSetID)
+	if err != nil {
+		return activeVirtualValidation{}, fmt.Errorf("clickhouse: failed to validate active virtual summaries: %w", err)
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	hash := sha256.New()
+
+	var count uint64
+
+	for rows.Next() {
+		row := activeVirtualSummaryRow{ActiveSetID: activeSetID}
+		if err := rows.Scan(
+			&row.Dir,
+			&row.MountPath,
+			&row.IsMountRootBox,
+			&row.UpdatedAt,
+			&row.AllCount,
+			&row.AllSize,
+			&row.AllAtimeMin,
+			&row.AllMtimeMax,
+			&row.AllAtimeBuckets,
+			&row.AllMtimeBuckets,
+			&row.AllUIDs,
+			&row.AllGIDs,
+			&row.AllFT,
+			&row.FileCount,
+			&row.FileSize,
+			&row.ChildCount,
+		); err != nil {
+			return activeVirtualValidation{}, fmt.Errorf("clickhouse: failed to scan active virtual summary: %w", err)
+		}
+
+		writeActiveVirtualSummaryChecksum(hash, row)
+
+		count++
+	}
+
+	if err := rows.Err(); err != nil {
+		return activeVirtualValidation{}, fmt.Errorf("clickhouse: active virtual summary validation iteration: %w", err)
+	}
+
+	return activeVirtualValidation{rows: count, checksum: hex.EncodeToString(hash.Sum(nil))}, nil
+}
+
+func writeActiveVirtualSummaryChecksum(hash hashWriter, row activeVirtualSummaryRow) {
+	writeChecksumFields(
+		hash,
+		row.ActiveSetID,
+		row.Dir,
+		row.MountPath,
+		row.IsMountRootBox,
+		checksumTime(row.UpdatedAt),
+		row.AllCount,
+		row.AllSize,
+		row.AllAtimeMin,
+		row.AllMtimeMax,
+		row.AllAtimeBuckets,
+		row.AllMtimeBuckets,
+		row.AllUIDs,
+		row.AllGIDs,
+		row.AllFT,
+		row.FileCount,
+		row.FileSize,
+		row.ChildCount,
+	)
+}
+
+//nolint:funlen
+func (w *dgutaWriter) readActiveVirtualFilterValidation(
+	ctx context.Context,
+	activeSetID string,
+) (activeVirtualValidation, error) {
+	rows, err := w.conn.Query(ctx, selectActiveVirtualFilterAllValidationQuery, activeSetID)
+	if err != nil {
+		return activeVirtualValidation{}, fmt.Errorf("clickhouse: failed to validate active virtual filter rows: %w", err)
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	hash := sha256.New()
+
+	var count uint64
+
+	for rows.Next() {
+		row := activeVirtualFilterAllRow{ActiveSetID: activeSetID}
+		if err := rows.Scan(
+			&row.Dir,
+			&row.Age,
+			&row.GID,
+			&row.UID,
+			&row.FT,
+			&row.Count,
+			&row.Size,
+			&row.AtimeMin,
+			&row.MtimeMax,
+			&row.AtimeBuckets,
+			&row.MtimeBuckets,
+			&row.FilterChildCount,
+			&row.ChildCount,
+		); err != nil {
+			return activeVirtualValidation{}, fmt.Errorf("clickhouse: failed to scan active virtual filter row: %w", err)
+		}
+
+		writeActiveVirtualFilterChecksum(hash, row)
+
+		count++
+	}
+
+	if err := rows.Err(); err != nil {
+		return activeVirtualValidation{}, fmt.Errorf("clickhouse: active virtual filter validation iteration: %w", err)
+	}
+
+	return activeVirtualValidation{rows: count, checksum: hex.EncodeToString(hash.Sum(nil))}, nil
+}
+
+func writeActiveVirtualFilterChecksum(hash hashWriter, row activeVirtualFilterAllRow) {
+	writeChecksumFields(
+		hash,
+		row.ActiveSetID,
+		row.Dir,
+		row.Age,
+		row.GID,
+		row.UID,
+		row.FT,
+		row.Count,
+		row.Size,
+		row.AtimeMin,
+		row.MtimeMax,
+		row.AtimeBuckets,
+		row.MtimeBuckets,
+		row.FilterChildCount,
+		row.ChildCount,
+	)
+}
+
+//nolint:funlen
+func (w *dgutaWriter) readActiveVirtualChildValidation(
+	ctx context.Context,
+	activeSetID string,
+) (activeVirtualValidation, error) {
+	rows, err := w.conn.Query(ctx, selectActiveVirtualChildrenValidationQuery, activeSetID)
+	if err != nil {
+		return activeVirtualValidation{}, fmt.Errorf("clickhouse: failed to validate active virtual children: %w", err)
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	hash := sha256.New()
+
+	var count uint64
+
+	for rows.Next() {
+		row := activeVirtualChildRow{ActiveSetID: activeSetID}
+		if err := rows.Scan(
+			&row.ParentDir,
+			&row.ChildDir,
+			&row.MountPath,
+			&row.IsMountRootBox,
+			&row.ChildCount,
+		); err != nil {
+			return activeVirtualValidation{}, fmt.Errorf("clickhouse: failed to scan active virtual child: %w", err)
+		}
+
+		writeActiveVirtualChildChecksum(hash, row)
+
+		count++
+	}
+
+	if err := rows.Err(); err != nil {
+		return activeVirtualValidation{}, fmt.Errorf("clickhouse: active virtual child validation iteration: %w", err)
+	}
+
+	return activeVirtualValidation{rows: count, checksum: hex.EncodeToString(hash.Sum(nil))}, nil
+}
+
+func writeActiveVirtualChildChecksum(hash hashWriter, row activeVirtualChildRow) {
+	writeChecksumFields(
+		hash,
+		row.ActiveSetID,
+		row.ParentDir,
+		row.ChildDir,
+		row.MountPath,
+		row.IsMountRootBox,
+		row.ChildCount,
+	)
 }
 
 func (w *dgutaWriter) activeMount() activeMount {
@@ -599,6 +1623,28 @@ func (w *dgutaWriter) dropPreviousSnapshotPartitions(ctx context.Context, previo
 	})
 }
 
+func (w *dgutaWriter) dropPreviousActiveVirtualPartitions(
+	ctx context.Context,
+	activeSetID string,
+	nextActiveSetID string,
+) error {
+	if activeSetID == "" || activeSetID == nextActiveSetID {
+		return nil
+	}
+
+	cleanupCtx, cleanupCancel := queryContext(context.WithoutCancel(ctx), activeSnapshotCleanupTimeout)
+	defer cleanupCancel()
+
+	return w.timeImportPhase(importPhaseOldSnapshotDrop, func() error {
+		if err := w.dropActiveVirtualPartitions(cleanupCtx, activeSetID); err != nil {
+			return fmt.Errorf("clickhouse: %s: active_set_id=%s: %w",
+				importPhaseOldSnapshotDrop, activeSetID, err)
+		}
+
+		return nil
+	})
+}
+
 func (w *dgutaWriter) readPreviousActiveSnapshotID(ctx context.Context) (string, bool, error) {
 	return readActiveSnapshotID(ctx, w.conn, w.mountPath)
 }
@@ -644,7 +1690,10 @@ func (w *dgutaWriter) closeWithNewSnapshotCleanup(ctx context.Context, cause err
 	cleanupCtx, cancel := w.snapshotCleanupContext(ctx)
 	defer cancel()
 
-	cleanupErr := w.dropCurrentSnapshotPartitionsIfInactive(cleanupCtx)
+	cleanupErr := errors.Join(
+		w.dropCurrentSnapshotPartitionsIfInactive(cleanupCtx),
+		w.dropStagedActiveVirtualPartitions(cleanupCtx),
+	)
 	closeErr := w.conn.Close()
 
 	return errors.Join(cause, cleanupErr, closeErr)
@@ -662,6 +1711,33 @@ func (w *dgutaWriter) dropCurrentSnapshotPartitionsIfInactive(ctx context.Contex
 	}
 
 	return w.dropAllSnapshotPartitions(ctx, sid)
+}
+
+func (w *dgutaWriter) dropStagedActiveVirtualPartitions(ctx context.Context) error {
+	if w.stagedActiveSetID == "" {
+		return nil
+	}
+
+	return w.dropActiveVirtualPartitions(ctx, w.stagedActiveSetID)
+}
+
+func (w *dgutaWriter) dropActiveVirtualPartitions(ctx context.Context, activeSetID string) error {
+	for _, query := range activeVirtualPartitionDropQueries() {
+		if err := dropActiveSetPartition(ctx, w.conn, query, activeSetID, "active-virtual"); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func activeVirtualPartitionDropQueries() []string {
+	return []string{
+		dropActiveVirtualSummariesPartitionQuery,
+		dropActiveVirtualFilterAllPartitionQuery,
+		dropActiveVirtualChildrenPartitionQuery,
+		dropActiveVirtualSetsPartitionQuery,
+	}
 }
 
 func (w *dgutaWriter) snapshotCleanupContext(ctx context.Context) (context.Context, context.CancelFunc) {
@@ -722,6 +1798,9 @@ func allPartitionDropQueries() []string {
 		dropDirSummaryPartitionQuery,
 		dropDirFilterAgeAllPartitionQuery,
 		dropParentFactsPartitionQuery,
+		dropChildFilterAllPartitionQuery,
+		dropDirFilterAllPartitionQuery,
+		dropSchema3SnapshotSetPartitionQuery,
 		dropDirSummarySetPartitionQuery,
 		dropDirDGUTAVectorPartitionQuery,
 		dropBasedirsGroupUsagePartitionQuery,
@@ -786,6 +1865,11 @@ func (w *dgutaWriter) prepareWriteBatches(ctx context.Context) error {
 		w.effectiveProjectionBatchSize(),
 		w.dirProjection.refreshedAt,
 	))
+	w.selectedDerivedIndexes = append(w.selectedDerivedIndexes, newFullFilterAllWriter(
+		w.conn,
+		w.effectiveProjectionBatchSize(),
+		w.dirProjection.refreshedAt,
+	))
 	w.selectedDerivedIndexes = append(w.selectedDerivedIndexes, w.selectedNavigationFactWriters()...)
 	w.prepared = true
 
@@ -807,13 +1891,27 @@ func (w *dgutaWriter) selectedNavigationFactWriters() []dgutaDerivedIndexWriter 
 }
 
 func (w *dgutaWriter) dropNewSnapshotPartitions(ctx context.Context) error {
-	return dropSnapshotPartitionsForMount(
+	if err := dropSnapshotPartitionsForMount(
 		ctx,
 		w.conn,
 		w.mountPath,
 		w.snapshot.String(),
 		allPartitionDropQueries(),
-	)
+	); err != nil {
+		return err
+	}
+
+	rows, err := w.stagedMountsActiveRows(ctx)
+	if err != nil {
+		return err
+	}
+
+	activeSetID := fingerprintForMountsActive(rows)
+	if activeSetID == "" {
+		return nil
+	}
+
+	return w.dropActiveVirtualPartitions(ctx, activeSetID)
 }
 
 func (w *dgutaWriter) appendDGUTARows(
@@ -1281,6 +2379,53 @@ func NewDGUTAWriter(cfg Config) (db.DGUTAWriter, error) {
 		projectionBatchSize: projectionBatchSizeFor(defaultBatchSize),
 		childrenBatchSize:   childrenBatchSizeFor(defaultBatchSize),
 	}, nil
+}
+
+type hashWriter interface {
+	Write(p []byte) (n int, err error)
+}
+
+func writeChecksumFields(hash hashWriter, fields ...any) {
+	for _, field := range fields {
+		if _, err := fmt.Fprint(hash, field); err != nil {
+			panic(err)
+		}
+
+		writeChecksumBytes(hash, []byte{0})
+	}
+
+	writeChecksumBytes(hash, []byte{'\n'})
+}
+
+func writeChecksumBytes(hash hashWriter, value []byte) {
+	if _, err := hash.Write(value); err != nil {
+		panic(err)
+	}
+}
+
+func checksumTime(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+
+	return t.UTC().Truncate(time.Millisecond).Format(time.RFC3339Nano)
+}
+
+func activeVirtualManifestSHA256(activeSetID string, summaryRows, filterRows, childRows int) string {
+	return sha256Hex(fmt.Sprintf(
+		"%s|%d|%d|%d|%d",
+		activeSetID,
+		currentSchemaVersion,
+		summaryRows,
+		filterRows,
+		childRows,
+	))
+}
+
+func sha256Hex(input string) string {
+	sum := sha256.Sum256([]byte(input))
+
+	return hex.EncodeToString(sum[:])
 }
 
 func dgutaAgeBit(age db.DirGUTAge) uint32 {
