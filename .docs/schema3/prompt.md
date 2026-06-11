@@ -454,20 +454,19 @@ Perf reports must record:
 - import wall time, peak RSS, spool bytes, part counts, retry cleanup, and
   publish latency.
 
-## Open Questions For Spec Writer
+## Notes
 
-The future spec-writer clarification loop should resolve these before the
-implementation spec is finalized:
-
-- What import/summarise wall-time and RSS regression budget is acceptable for
-  the all-filter layer?
-- Should `wrstat_child_filter_all` and `wrstat_dir_filter_all` be mandatory
-  base tables immediately, or should one of them be selected by an early phase
-  gate?
-- What exact age bucket semantics must the all-filter rows encode for current
-  `--unused` and `--unchanged` filters?
-- Should `wrstat_dir_filter_ageall` remain indefinitely as a specialized
-  AgeAll table, or should a future projection/table replace it once measured?
-- What sidecar comparison target is acceptable if same-subset Bolt cannot be
-  produced for the high-fanout mixed8 proof case?
-
+- The import/summarise wall-time and peak RSS regression budget is unknown.
+  The spec must determine the acceptable budget through measurement and
+  acceptance gates rather than guessing it.
+- `wrstat_child_filter_all` and `wrstat_dir_filter_all` are mandatory base
+  schema3 tables, not optional candidates or phase-gated alternatives.
+- All-filter rows must encode every age-bucket semantic needed to answer all
+  current and expected web UI queries and `where` queries exactly, including
+  `--unused` and `--unchanged`.
+- `wrstat_dir_filter_ageall` must be replaced once the comprehensive filter
+  layer proves exact equivalence and better-or-equal acceptance-gate results.
+  Do not leave it as an indefinite specialized table.
+- Same-subset Bolt or sidecar comparison must be reproduced. If necessary,
+  check out the pre-ClickHouse code in scratch under `.tmp/agent/schema3` and
+  write temporary bounded code to obtain the comparison.
