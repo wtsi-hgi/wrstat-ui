@@ -210,9 +210,10 @@ type TreeElement struct {
 }
 
 // diToTreeElement converts the given dguta.DirInfo to our own TreeElement. It
-// has to do additional database queries to find out if di's children have
-// children. If results don't belong to at least one of the allowedGIDs, they
-// will be marked as NoAuth and won't include child info.
+// batches child HasChildren assembly so providers can reuse the same parent
+// packet that served child summaries. If results don't belong to at least one
+// of the allowedGIDs, they will be marked as NoAuth and won't include child
+// info.
 func (s *Server) diToTreeElement(di *db.DirInfo, filter *db.Filter,
 	allowedGIDs map[uint32]bool, path string) *TreeElement {
 	if di == nil {

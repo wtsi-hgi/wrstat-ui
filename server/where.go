@@ -236,6 +236,8 @@ type PerfHarnessOptions struct {
 	CacheStats       func() (hits uint64, misses uint64)
 	CacheStatsSource string
 	CacheHitKeys     func() []string
+	FallbackRoutes   func() map[string]uint64
+	FallbackSource   string
 }
 
 func normalisePerfHarnessOptions(opts PerfHarnessOptions) PerfHarnessOptions {
@@ -368,33 +370,27 @@ func (s *Server) measurePerfHarnessRequest(
 	spec perfHarnessSpec,
 	opts PerfHarnessOptions,
 ) (perfHarnessSample, error) {
-	beforeQueries := perfHarnessCounter(opts.QueryCount)
-	beforeHits, beforeMisses := perfHarnessCacheStats(opts.CacheStats)
-	beforeKeys := perfHarnessCacheHitKeySnapshot(opts.CacheHitKeys)
-	start := time.Now()
+	before := newPerfHarnessBeforeSample(opts)
 
 	result, err := s.runPerfHarnessRequest(spec)
 	if err != nil {
 		return perfHarnessSample{}, err
 	}
 
-	afterHits, afterMisses := perfHarnessCacheStats(opts.CacheStats)
-	afterKeys := perfHarnessCacheHitKeySnapshot(opts.CacheHitKeys)
+	return perfHarnessSampleAfter(spec, opts, before, result), nil
+}
 
-	return perfHarnessSample{
-		durationMS:   durationMS(time.Since(start)),
-		statusCode:   nonNegativeIntToUint64(result.statusCode),
-		jsonBytes:    uint64(len(result.body)),
-		gzipBytes:    uint64(len(result.gzipBody)),
-		queryCount:   perfHarnessDelta(beforeQueries, perfHarnessCounter(opts.QueryCount)),
-		cacheHits:    perfHarnessDelta(beforeHits, afterHits),
-		cacheMisses:  perfHarnessDelta(beforeMisses, afterMisses),
-		cacheHitKeys: perfHarnessCacheHitKeyDelta(beforeKeys, afterKeys),
-		resultCount:  spec.resultCount(result.body),
-		resultDigest: perfHarnessDigest(
-			result.body,
-		),
-	}, nil
+func newPerfHarnessBeforeSample(opts PerfHarnessOptions) perfHarnessBeforeSample {
+	hits, misses := perfHarnessCacheStats(opts.CacheStats)
+
+	return perfHarnessBeforeSample{
+		queries:        perfHarnessCounter(opts.QueryCount),
+		cacheHits:      hits,
+		cacheMisses:    misses,
+		cacheHitKeys:   perfHarnessCacheHitKeySnapshot(opts.CacheHitKeys),
+		fallbackRoutes: perfHarnessFallbackRouteSnapshot(opts.FallbackRoutes),
+		start:          time.Now(),
+	}
 }
 
 func perfHarnessCounter(counter func() uint64) uint64 {
@@ -419,6 +415,73 @@ func perfHarnessCacheHitKeySnapshot(keys func() []string) []string {
 	}
 
 	return append([]string(nil), keys()...)
+}
+
+func perfHarnessFallbackRouteSnapshot(routes func() map[string]uint64) map[string]uint64 {
+	if routes == nil {
+		return nil
+	}
+
+	snapshot := routes()
+
+	out := make(map[string]uint64, len(snapshot))
+	for route, count := range snapshot {
+		out[route] = count
+	}
+
+	return out
+}
+
+func perfHarnessSampleAfter(
+	spec perfHarnessSpec,
+	opts PerfHarnessOptions,
+	before perfHarnessBeforeSample,
+	result perfHarnessResponse,
+) perfHarnessSample {
+	afterHits, afterMisses := perfHarnessCacheStats(opts.CacheStats)
+	afterKeys := perfHarnessCacheHitKeySnapshot(opts.CacheHitKeys)
+	afterFallbackRoutes := perfHarnessFallbackRouteSnapshot(opts.FallbackRoutes)
+	fallbackCount, fallbackRoutes := perfHarnessFallbackRouteDelta(before.fallbackRoutes, afterFallbackRoutes)
+
+	return perfHarnessSample{
+		durationMS:     durationMS(time.Since(before.start)),
+		statusCode:     nonNegativeIntToUint64(result.statusCode),
+		jsonBytes:      uint64(len(result.body)),
+		gzipBytes:      uint64(len(result.gzipBody)),
+		queryCount:     perfHarnessDelta(before.queries, perfHarnessCounter(opts.QueryCount)),
+		cacheHits:      perfHarnessDelta(before.cacheHits, afterHits),
+		cacheMisses:    perfHarnessDelta(before.cacheMisses, afterMisses),
+		cacheHitKeys:   perfHarnessCacheHitKeyDelta(before.cacheHitKeys, afterKeys),
+		fallbackCount:  fallbackCount,
+		fallbackRoutes: fallbackRoutes,
+		resultCount:    spec.resultCount(result.body),
+		resultDigest: perfHarnessDigest(
+			result.body,
+		),
+	}
+}
+
+func perfHarnessFallbackRouteDelta(
+	before map[string]uint64,
+	after map[string]uint64,
+) (uint64, []string) {
+	var count uint64
+
+	routes := make([]string, 0, len(after))
+	for route, afterCount := range after {
+		delta := perfHarnessDelta(before[route], afterCount)
+		if delta == 0 {
+			continue
+		}
+
+		count += delta
+
+		routes = append(routes, route)
+	}
+
+	slices.Sort(routes)
+
+	return count, routes
 }
 
 func durationMS(d time.Duration) float64 {
@@ -536,18 +599,21 @@ func perfHarnessBaseInputs(
 	opts PerfHarnessOptions,
 ) map[string]any {
 	return map[string]any{
-		"endpoint":             spec.endpoint,
-		"query_params":         perfHarnessQueryParams(spec.values),
-		"status_codes":         perfHarnessStatusCodes(samples),
-		"json_bytes":           perfHarnessJSONBytes(samples),
-		"gzip_bytes":           perfHarnessGzipBytes(samples),
-		"query_count":          perfHarnessQueryCounts(samples),
-		"query_count_source":   perfHarnessSource(opts.QueryCountSource, opts.QueryCount != nil),
-		"cache_hits":           perfHarnessCacheHits(samples),
-		"cache_misses":         perfHarnessCacheMisses(samples),
-		"cache_hit_keys":       perfHarnessCacheHitKeys(samples),
-		"cache_counter_source": perfHarnessSource(opts.CacheStatsSource, opts.CacheStats != nil),
-		"result_digest":        perfHarnessFirstResultDigest(samples),
+		"endpoint":                spec.endpoint,
+		"query_params":            perfHarnessQueryParams(spec.values),
+		"status_codes":            perfHarnessStatusCodes(samples),
+		"json_bytes":              perfHarnessJSONBytes(samples),
+		"gzip_bytes":              perfHarnessGzipBytes(samples),
+		"query_count":             perfHarnessQueryCounts(samples),
+		"query_count_source":      perfHarnessSource(opts.QueryCountSource, opts.QueryCount != nil),
+		"cache_hits":              perfHarnessCacheHits(samples),
+		"cache_misses":            perfHarnessCacheMisses(samples),
+		"cache_hit_keys":          perfHarnessCacheHitKeys(samples),
+		"cache_counter_source":    perfHarnessSource(opts.CacheStatsSource, opts.CacheStats != nil),
+		"schema3_fallback_count":  perfHarnessFallbackCounts(samples),
+		"schema3_fallback_routes": perfHarnessFallbackRoutes(samples),
+		"schema3_fallback_source": perfHarnessSource(opts.FallbackSource, opts.FallbackRoutes != nil),
+		"result_digest":           perfHarnessFirstResultDigest(samples),
 	}
 }
 
@@ -605,6 +671,21 @@ func perfHarnessCacheHitKeys(samples []perfHarnessSample) []string {
 	}
 
 	return keys
+}
+
+func perfHarnessFallbackCounts(samples []perfHarnessSample) []uint64 {
+	return perfHarnessSampleUints(samples, func(sample perfHarnessSample) uint64 {
+		return sample.fallbackCount
+	})
+}
+
+func perfHarnessFallbackRoutes(samples []perfHarnessSample) []string {
+	routes := make([]string, 0)
+	for _, sample := range samples {
+		routes = append(routes, sample.fallbackRoutes...)
+	}
+
+	return routes
 }
 
 func perfHarnessFirstResultDigest(samples []perfHarnessSample) string {
@@ -686,17 +767,28 @@ func (s *Server) runPerfHarnessRequest(spec perfHarnessSpec) (perfHarnessRespons
 	}, nil
 }
 
+type perfHarnessBeforeSample struct {
+	queries        uint64
+	cacheHits      uint64
+	cacheMisses    uint64
+	cacheHitKeys   []string
+	fallbackRoutes map[string]uint64
+	start          time.Time
+}
+
 type perfHarnessSample struct {
-	durationMS   float64
-	statusCode   uint64
-	jsonBytes    uint64
-	gzipBytes    uint64
-	queryCount   uint64
-	cacheHits    uint64
-	cacheMisses  uint64
-	cacheHitKeys []string
-	resultCount  uint64
-	resultDigest string
+	durationMS     float64
+	statusCode     uint64
+	jsonBytes      uint64
+	gzipBytes      uint64
+	queryCount     uint64
+	cacheHits      uint64
+	cacheMisses    uint64
+	cacheHitKeys   []string
+	fallbackCount  uint64
+	fallbackRoutes []string
+	resultCount    uint64
+	resultDigest   string
 }
 
 type activeSetIDProvider interface {

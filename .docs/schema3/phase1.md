@@ -24,8 +24,8 @@ summary for the clicked directory. Cover all 2 acceptance tests from A1 in
 `clickhouse/database_dirinfo_test.go`, `cmd/where_test.go`, and
 `server/server_test.go`.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
 
 #### Item 1.2: A2 - Parent packets are coherent request units [parallel with A1]
 
@@ -36,8 +36,8 @@ reuse in `clickhouse/parent_facts.go` and `clickhouse/database_cache.go` so a
 high-fanout parent packet serves child summaries and child counts together.
 Cover all 3 acceptance tests from A2 in `clickhouse/database_dirinfo_test.go`.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
 
 ### Batch 2 (parallel, after batch 1 is reviewed)
 
@@ -52,8 +52,8 @@ are unavailable. Cover all 3 acceptance tests from A3 in
 `clickhouse/database_dirinfo_test.go`, `cmd/where_test.go`, and
 `server/server_test.go`. Depends on item 1.2 packet cache and counters.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
 
 #### Item 1.4: A4 - `Tree.Where` traverses frontiers once [parallel with A3]
 
@@ -65,8 +65,8 @@ reuse current and child summaries without per-child fanout. Cover all 2
 acceptance tests from A4 in `clickhouse/database_dirinfo_test.go`. Depends on
 item 1.2 packet cache and counters.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
 
 ### Item 1.5: A5 - REST tree endpoint reuses one packet
 
@@ -77,8 +77,8 @@ packet for child summaries and child `HasChildren` values, including broad,
 full-filter, unused, and unchanged queries. Cover all 3 acceptance tests from
 A5 in `server/server_test.go`. Depends on items 1.2 and 1.3.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
 
 For parallel batch items, use separate subagents per item.
 Launch review subagents using the `go-reviewer` skill

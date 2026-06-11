@@ -180,10 +180,13 @@ func TestClickHousePerfRestCounterSources(t *testing.T) {
 
 		sourceClosed := false
 		cacheHitKeyCalls := 0
+		fallbackSnapshots := 0
 		priorCacheHitKey := "active_prefix_summary:path=/prior/;filter=ft:1;" +
 			"active_set_id=old;query_version=1"
 		scopedCacheHitKey := "active_prefix_summary:path=/nfs/t283_imaging/;filter=ft:32768;" +
 			"active_set_id=e2-active-set;query_version=1"
+
+		const fallbackRoute = "parent_facts_fallback"
 
 		replaceCHPerfRestHooksForTest(
 			func(clickhouse.Config) (provider.Provider, error) {
@@ -212,8 +215,22 @@ func TestClickHousePerfRestCounterSources(t *testing.T) {
 
 						return []string{priorCacheHitKey, scopedCacheHitKey}
 					},
+					FallbackRoutes: func() map[string]uint64 {
+						fallbackSnapshots++
+						switch fallbackSnapshots {
+						case 4:
+							return map[string]uint64{fallbackRoute: 1}
+						case 5:
+							return map[string]uint64{fallbackRoute: 1}
+						case 6:
+							return map[string]uint64{fallbackRoute: 2}
+						default:
+							return map[string]uint64{fallbackRoute: 0}
+						}
+					},
 					QueryCountSource: "test.system.events.Query_delta",
 					CacheStatsSource: "test.tree_query_cache_delta",
+					FallbackSource:   "test.schema3_fallback_routes_delta",
 					Close: func() error {
 						sourceClosed = true
 
@@ -246,6 +263,13 @@ func TestClickHousePerfRestCounterSources(t *testing.T) {
 		So(scopedCacheHitKey, ShouldContainSubstring, "filter=")
 		So(scopedCacheHitKey, ShouldContainSubstring, "active_set_id=")
 		So(scopedCacheHitKey, ShouldContainSubstring, "query_version=1")
+		So(restWhere.Inputs["schema3_fallback_count"], ShouldResemble, []uint64{1})
+		So(restWhere.Inputs["schema3_fallback_routes"], ShouldResemble, []string{fallbackRoute})
+		So(restWhere.Inputs["schema3_fallback_source"], ShouldEqual, "test.schema3_fallback_routes_delta")
+
+		cliWhere := chPerfRestReportOperation(report, "cli_where")
+		So(cliWhere.Inputs["schema3_fallback_count"], ShouldResemble, []uint64{1})
+		So(cliWhere.Inputs["schema3_fallback_routes"], ShouldResemble, []string{fallbackRoute})
 	})
 }
 

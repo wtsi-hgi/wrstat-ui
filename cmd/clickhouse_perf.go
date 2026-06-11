@@ -155,6 +155,8 @@ type chPerfRestCounterSources struct {
 	CacheStats       func() (uint64, uint64)
 	CacheStatsSource string
 	CacheHitKeys     func() []string
+	FallbackRoutes   func() map[string]uint64
+	FallbackSource   string
 	Close            func() error
 }
 
@@ -177,6 +179,8 @@ func openCHPerfRestCounterSources(cfg clickhouse.Config) (chPerfRestCounterSourc
 
 			return stats.ActivePrefixSummaryHitKeys
 		},
+		FallbackRoutes:   clickhouse.ReadSchema3FallbackRoutes,
+		FallbackSource:   "clickhouse.schema3_fallback_routes_delta",
 		CacheStatsSource: chPerfRestCacheStatsSource,
 		Close:            counter.Close,
 	}, nil
@@ -418,6 +422,8 @@ func chPerfRestOptionsWithCounterSources(
 	opts.CacheStats = sources.CacheStats
 	opts.CacheStatsSource = sources.CacheStatsSource
 	opts.CacheHitKeys = sources.CacheHitKeys
+	opts.FallbackRoutes = sources.FallbackRoutes
+	opts.FallbackSource = sources.FallbackSource
 
 	return opts, chPerfRestCounterClose(sources), nil
 }

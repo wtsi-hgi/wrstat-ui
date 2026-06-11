@@ -94,6 +94,15 @@ func (c *SystemEventCounter) Close() error {
 
 // TreeQueryCacheStats is a public snapshot of process-local tree cache counters.
 type TreeQueryCacheStats struct {
+	ParentPacketHits           uint64
+	ParentPacketMisses         uint64
+	ParentPacketReads          uint64
+	ChildFilterAllReads        uint64
+	FactVectorReads            uint64
+	ParentPacketHitKeys        []string
+	ParentPacketMissKeys       []string
+	ParentPacketReadKeys       []string
+	ChildFilterReadKeys        []string
 	ActivePrefixSummaryHits    uint64
 	ActivePrefixSummaryMisses  uint64
 	ActiveMetadataHits         uint64
@@ -107,6 +116,15 @@ func ReadTreeQueryCacheStats(cfg Config) TreeQueryCacheStats {
 	stats := treeQueryCacheForConfig(cfg).stats()
 
 	return TreeQueryCacheStats{
+		ParentPacketHits:           stats.parentPacketHits,
+		ParentPacketMisses:         stats.parentPacketMisses,
+		ParentPacketReads:          stats.parentPacketReads,
+		ChildFilterAllReads:        stats.childFilterAllReads,
+		FactVectorReads:            stats.factVectorReads,
+		ParentPacketHitKeys:        append([]string(nil), stats.parentPacketHitKeys...),
+		ParentPacketMissKeys:       append([]string(nil), stats.parentPacketMissKeys...),
+		ParentPacketReadKeys:       append([]string(nil), stats.parentPacketReadKeys...),
+		ChildFilterReadKeys:        append([]string(nil), stats.childFilterReadKeys...),
 		ActivePrefixSummaryHits:    stats.activePrefixSummaryHits,
 		ActivePrefixSummaryMisses:  stats.activePrefixSummaryMisses,
 		ActiveMetadataHits:         stats.activeMetadataHits,
@@ -118,15 +136,27 @@ func ReadTreeQueryCacheStats(cfg Config) TreeQueryCacheStats {
 
 // Hits returns the total process-local tree query cache hits.
 func (s TreeQueryCacheStats) Hits() uint64 {
-	return s.ActivePrefixSummaryHits + s.ActiveMetadataHits
+	return s.ParentPacketHits + s.ActivePrefixSummaryHits + s.ActiveMetadataHits
 }
 
 // Misses returns the total process-local tree query cache misses.
 func (s TreeQueryCacheStats) Misses() uint64 {
-	return s.ActivePrefixSummaryMisses + s.ActiveMetadataMisses
+	return s.ParentPacketMisses + s.ActivePrefixSummaryMisses + s.ActiveMetadataMisses
 }
 
 // ResetTreeQueryCacheStats clears process-local tree query cache counters.
 func ResetTreeQueryCacheStats(cfg Config) {
 	treeQueryCacheForConfig(cfg).resetStats()
+}
+
+// ReadSchema3FallbackRoutes reads schema3 fallback route counters.
+func ReadSchema3FallbackRoutes() map[string]uint64 {
+	return map[string]uint64{
+		parentFactsFallbackRouteName(): parentFactsFallbackRoutes(),
+	}
+}
+
+// ResetSchema3FallbackRoutes clears schema3 fallback route counters.
+func ResetSchema3FallbackRoutes() {
+	resetParentFactsFallbackRoutesForTest()
 }

@@ -517,6 +517,20 @@ type parentFactChildSummary struct {
 	ChildCount  uint64
 }
 
+func cloneParentFactChildSummaries(in []parentFactChildSummary) []parentFactChildSummary {
+	if len(in) == 0 {
+		return nil
+	}
+
+	out := make([]parentFactChildSummary, len(in))
+	for i, fact := range in {
+		out[i] = fact
+		out[i].Summary = cloneDirSummary(fact.Summary)
+	}
+
+	return out
+}
+
 type parentFactSummaryScalars struct {
 	count        uint64
 	size         uint64

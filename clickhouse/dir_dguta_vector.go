@@ -356,6 +356,8 @@ func (d *clickHouseDatabase) queryMountDirDGUTAVectorsForDirsBatch(
 		return nil, fmt.Errorf("clickhouse: failed to query dir dguta vectors: %w", err)
 	}
 
+	d.treeCache.factVectorReads.Add(1)
+
 	defer func() { _ = rows.Close() }()
 
 	return scanMountDirDGUTAVectorRows(rows)
@@ -375,6 +377,8 @@ func (d *clickHouseDatabase) queryMountDirDGUTAVectorsForExternalDirs(
 	if err != nil {
 		return nil, fmt.Errorf("clickhouse: failed to query external dir dguta vectors: %w", err)
 	}
+
+	d.treeCache.factVectorReads.Add(1)
 
 	defer func() { _ = rows.Close() }()
 

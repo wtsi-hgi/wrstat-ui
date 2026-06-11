@@ -41,8 +41,10 @@ import (
 const (
 	activeMetadataQueryVersion         uint32 = 1
 	activePrefixDirSummaryQueryVersion uint32 = 1
+	parentFactsPacketQueryVersion      uint32 = 1
 
 	treeActiveMetadataCacheMaxEntries      = 256
+	treeParentPacketCacheMaxEntries        = 8192
 	treeActivePrefixSummaryCacheMaxEntries = 32768
 	treeChildrenCacheMaxEntries            = 65536
 	treeDGUTACacheMaxEntries               = 8192
@@ -156,6 +158,31 @@ func treeFilterCacheKeyString(key treeFilterCacheKey) string {
 		",age=" + strconv.FormatUint(uint64(key.age), 10)
 }
 
+type treeParentPacketCacheKey struct {
+	mountPath  string
+	snapshotID string
+	parentDir  string
+	filter     treeFilterCacheKey
+	version    treeQueryVersionKey
+}
+
+func newTreeParentPacketCacheKey(
+	mount activeMount,
+	parentDir string,
+	filter *db.Filter,
+) treeParentPacketCacheKey {
+	return treeParentPacketCacheKey{
+		mountPath:  ensureTrailingSlash(mount.mountPath),
+		snapshotID: mount.snapshotID,
+		parentDir:  ensureTrailingSlash(parentDir),
+		filter:     newTreeFilterCacheKey(filter),
+		version: newTreeQueryVersionKey(
+			currentSchemaVersion,
+			parentFactsPacketQueryVersion,
+		),
+	}
+}
+
 func (c *treeQueryCache) recordActivePrefixSummaryHitKey(key treeActivePrefixSummaryCacheKey) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -200,12 +227,127 @@ func activeMetadataCacheHitKey(key treeActiveMetadataCacheKey) string {
 }
 
 func (c *treeQueryCache) resetStatsLocked() {
+	c.parentPacketHits.Store(0)
+	c.parentPacketMisses.Store(0)
+	c.parentPacketReads.Store(0)
+	c.childFilterAllReads.Store(0)
+	c.factVectorReads.Store(0)
 	c.activePrefixSummaryHits.Store(0)
 	c.activePrefixSummaryMisses.Store(0)
 	c.activeMetadataHits.Store(0)
 	c.activeMetadataMisses.Store(0)
+	c.parentPacketHitKeys = nil
+	c.parentPacketMissKeys = nil
+	c.parentPacketReadKeys = nil
+	c.childFilterReadKeys = nil
 	c.activePrefixSummaryHitKeys = nil
 	c.activeMetadataHitKeys = nil
+}
+
+func (c *treeQueryCache) getParentPacket(
+	key treeParentPacketCacheKey,
+) ([]parentFactChildSummary, bool) {
+	c.mu.RLock()
+	packet, ok := c.parentPackets[key]
+	c.mu.RUnlock()
+
+	if !ok {
+		c.parentPacketMisses.Add(1)
+		c.recordParentPacketMissKey(key)
+
+		return nil, false
+	}
+
+	c.parentPacketHits.Add(1)
+	c.recordParentPacketHitKey(key)
+
+	return cloneParentFactChildSummaries(packet), true
+}
+
+func (c *treeQueryCache) putParentPacket(
+	key treeParentPacketCacheKey,
+	packet []parentFactChildSummary,
+) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if _, exists := c.parentPackets[key]; !exists {
+		c.parentPacketOrder = append(c.parentPacketOrder, key)
+		c.evictOldestParentPackets()
+	}
+
+	c.parentPackets[key] = cloneParentFactChildSummaries(packet)
+}
+
+func (c *treeQueryCache) evictOldestParentPackets() {
+	for len(c.parentPacketOrder) > treeParentPacketCacheMaxEntries {
+		oldest := c.parentPacketOrder[0]
+		c.parentPacketOrder = c.parentPacketOrder[1:]
+		delete(c.parentPackets, oldest)
+	}
+}
+
+func (c *treeQueryCache) recordParentPacketHitKey(key treeParentPacketCacheKey) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.parentPacketHitKeys = appendBoundedCacheHitKey(
+		c.parentPacketHitKeys,
+		parentPacketCacheHitKey(key),
+	)
+}
+
+func parentPacketCacheHitKey(key treeParentPacketCacheKey) string {
+	return "parent_packet:mount_path=" + key.mountPath +
+		";snapshot_id=" + key.snapshotID +
+		";parent_dir=" + key.parentDir +
+		";filter=" + treeFilterCacheKeyString(key.filter) +
+		";schema_version=" + strconv.FormatUint(uint64(key.version.schemaVersion), 10) +
+		";query_version=" + strconv.FormatUint(uint64(key.version.queryVersion), 10)
+}
+
+func (c *treeQueryCache) recordParentPacketMissKey(key treeParentPacketCacheKey) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.parentPacketMissKeys = appendBoundedCacheHitKey(
+		c.parentPacketMissKeys,
+		parentPacketCacheHitKey(key),
+	)
+}
+
+func (c *treeQueryCache) recordParentPacketReadKey(key treeParentPacketCacheKey) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.parentPacketReadKeys = appendBoundedCacheHitKey(
+		c.parentPacketReadKeys,
+		parentPacketCacheHitKey(key),
+	)
+}
+
+func (c *treeQueryCache) recordChildFilterReadKey(key treeParentPacketCacheKey) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.childFilterReadKeys = appendBoundedCacheHitKey(
+		c.childFilterReadKeys,
+		parentPacketCacheHitKey(key),
+	)
+}
+
+func (c *treeQueryCache) resetParentPacketsLocked() {
+	c.parentPackets = make(map[treeParentPacketCacheKey][]parentFactChildSummary)
+	c.parentPacketOrder = nil
+}
+
+func (c *treeQueryCache) resetMountReadinessLocked() {
+	c.mountSummaries = make(map[treeMountCacheKey]bool)
+	c.mountSummaryOrder = nil
+	c.mountVectors = make(map[treeMountCacheKey]bool)
+	c.mountVectorOrder = nil
+	c.mountAgeAll = make(map[treeMountCacheKey]bool)
+	c.mountAgeAllOrder = nil
 }
 
 func uint32SetCacheKey(values []uint32) string {
@@ -304,6 +446,18 @@ type treeQueryCache struct {
 	mountAgeAll       map[treeMountCacheKey]bool
 	mountAgeAllOrder  []treeMountCacheKey
 
+	parentPackets        map[treeParentPacketCacheKey][]parentFactChildSummary
+	parentPacketOrder    []treeParentPacketCacheKey
+	parentPacketHits     atomic.Uint64
+	parentPacketMisses   atomic.Uint64
+	parentPacketReads    atomic.Uint64
+	childFilterAllReads  atomic.Uint64
+	factVectorReads      atomic.Uint64
+	parentPacketHitKeys  []string
+	parentPacketMissKeys []string
+	parentPacketReadKeys []string
+	childFilterReadKeys  []string
+
 	activePrefixSummaries      map[treeActivePrefixSummaryCacheKey]*db.DirSummary
 	activePrefixSummaryOrder   []treeActivePrefixSummaryCacheKey
 	activeMetadata             map[treeActiveMetadataCacheKey]treeActiveMetadata
@@ -329,6 +483,7 @@ func newTreeQueryCache() *treeQueryCache {
 		mountSummaries:   make(map[treeMountCacheKey]bool),
 		mountVectors:     make(map[treeMountCacheKey]bool),
 		mountAgeAll:      make(map[treeMountCacheKey]bool),
+		parentPackets:    make(map[treeParentPacketCacheKey][]parentFactChildSummary),
 		activePrefixSummaries: make(
 			map[treeActivePrefixSummaryCacheKey]*db.DirSummary,
 		),
@@ -701,12 +856,8 @@ func (c *treeQueryCache) reset() {
 	c.dirSummaries = make(map[treeDirSummaryCacheKey]*db.DirSummary)
 	c.dirSummaryCounts = make(map[treeDirSummaryCacheKey]uint64)
 	c.dirSummaryOrder = nil
-	c.mountSummaries = make(map[treeMountCacheKey]bool)
-	c.mountSummaryOrder = nil
-	c.mountVectors = make(map[treeMountCacheKey]bool)
-	c.mountVectorOrder = nil
-	c.mountAgeAll = make(map[treeMountCacheKey]bool)
-	c.mountAgeAllOrder = nil
+	c.resetMountReadinessLocked()
+	c.resetParentPacketsLocked()
 	c.activePrefixSummaries = make(map[treeActivePrefixSummaryCacheKey]*db.DirSummary)
 	c.activePrefixSummaryOrder = nil
 	c.activeMetadata = make(map[treeActiveMetadataCacheKey]treeActiveMetadata)
@@ -715,6 +866,15 @@ func (c *treeQueryCache) reset() {
 }
 
 type treeQueryCacheStats struct {
+	parentPacketHits           uint64
+	parentPacketMisses         uint64
+	parentPacketReads          uint64
+	childFilterAllReads        uint64
+	factVectorReads            uint64
+	parentPacketHitKeys        []string
+	parentPacketMissKeys       []string
+	parentPacketReadKeys       []string
+	childFilterReadKeys        []string
 	activePrefixSummaryHits    uint64
 	activePrefixSummaryMisses  uint64
 	activeMetadataHits         uint64
@@ -725,11 +885,24 @@ type treeQueryCacheStats struct {
 
 func (c *treeQueryCache) stats() treeQueryCacheStats {
 	c.mu.RLock()
+	parentPacketHitKeys := cloneStrings(c.parentPacketHitKeys)
+	parentPacketMissKeys := cloneStrings(c.parentPacketMissKeys)
+	parentPacketReadKeys := cloneStrings(c.parentPacketReadKeys)
+	childFilterReadKeys := cloneStrings(c.childFilterReadKeys)
 	activePrefixSummaryHitKeys := cloneStrings(c.activePrefixSummaryHitKeys)
 	activeMetadataHitKeys := cloneStrings(c.activeMetadataHitKeys)
 	c.mu.RUnlock()
 
 	return treeQueryCacheStats{
+		parentPacketHits:           c.parentPacketHits.Load(),
+		parentPacketMisses:         c.parentPacketMisses.Load(),
+		parentPacketReads:          c.parentPacketReads.Load(),
+		childFilterAllReads:        c.childFilterAllReads.Load(),
+		factVectorReads:            c.factVectorReads.Load(),
+		parentPacketHitKeys:        parentPacketHitKeys,
+		parentPacketMissKeys:       parentPacketMissKeys,
+		parentPacketReadKeys:       parentPacketReadKeys,
+		childFilterReadKeys:        childFilterReadKeys,
 		activePrefixSummaryHits:    c.activePrefixSummaryHits.Load(),
 		activePrefixSummaryMisses:  c.activePrefixSummaryMisses.Load(),
 		activeMetadataHits:         c.activeMetadataHits.Load(),

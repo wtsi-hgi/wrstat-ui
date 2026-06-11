@@ -37,6 +37,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"os/user"
 	"path/filepath"
 	"sort"
@@ -46,15 +47,19 @@ import (
 	"testing"
 	"time"
 
+	ch "github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/gin-gonic/gin"
 	. "github.com/smartystreets/goconvey/convey"
 	gas "github.com/wtsi-hgi/go-authserver"
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
+	"github.com/wtsi-hgi/wrstat-ui/clickhouse"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 	internaldata "github.com/wtsi-hgi/wrstat-ui/internal/data"
 	"github.com/wtsi-hgi/wrstat-ui/internal/fixtimes"
 	"github.com/wtsi-hgi/wrstat-ui/internal/perfreport"
 	"github.com/wtsi-hgi/wrstat-ui/internal/split"
+	internaltest "github.com/wtsi-hgi/wrstat-ui/internal/test"
+	"github.com/wtsi-hgi/wrstat-ui/provider"
 	"github.com/wtsi-hgi/wrstat-ui/summary"
 )
 
@@ -83,6 +88,13 @@ const (
 		"active_set_id=e2;query_version=1"
 	e4ActiveSetA = "set-a"
 	e4ActiveSetB = "set-b"
+)
+
+const a5RESTHighFanoutChildCount = 11205
+
+const (
+	a5RESTProjectMount = "/m/"
+	a5RESTProjectDir   = "/m/project/"
 )
 
 func TestIDsToWanted(t *testing.T) {
@@ -358,7 +370,7 @@ func TestE1ServerPerfHarnessRecordsRESTAndCLI(t *testing.T) {
 		report, err := s.MeasurePerfHarness(PerfHarnessOptions{
 			Repeat:      2,
 			TreePath:    d2MountDir,
-			WhereDir:    "/nfs/t283_imaging/",
+			WhereDir:    e2T283Dir,
 			WhereGroups: d2PerfGroupName,
 			WhereUsers:  d2PerfUserName,
 			WhereTypes:  db.DGUTAFileTypeOther.String(),
@@ -385,7 +397,7 @@ func TestE1ServerPerfHarnessRecordsRESTAndCLI(t *testing.T) {
 
 		whereOp := serverPerfOperation(report, "rest_where")
 		assertServerRESTPerfOperation(whereOp)
-		So(serverPerfQueryParams(whereOp)["dir"], ShouldEqual, "/nfs/t283_imaging/")
+		So(serverPerfQueryParams(whereOp)["dir"], ShouldEqual, e2T283Dir)
 		So(serverPerfQueryParams(whereOp)["groups"], ShouldEqual, d2PerfGroupName)
 		So(serverPerfQueryParams(whereOp)["users"], ShouldEqual, d2PerfUserName)
 		So(serverPerfQueryParams(whereOp)["types"], ShouldEqual, db.DGUTAFileTypeOther.String())
@@ -397,7 +409,7 @@ func TestE1ServerPerfHarnessRecordsRESTAndCLI(t *testing.T) {
 			"./wrstat-ui",
 			"where",
 			"--dir",
-			"/nfs/t283_imaging/",
+			e2T283Dir,
 			"--groups",
 			d2PerfGroupName,
 			"--users",
@@ -458,6 +470,375 @@ func serverPerfQueryParams(op perfreport.Operation) map[string]string {
 	}
 
 	return params
+}
+
+func TestA3ServerPerfHarnessRecordsFallbackRoutes(t *testing.T) {
+	Convey("A3.3 REST and CLI where perf evidence records schema3 fallback routes", t, func() {
+		s := New(gas.NewStringLogger())
+		database := newD2AuthTestDB()
+		s.tree = db.NewTree(database)
+
+		const route = "parent_facts_fallback"
+
+		fallbackSnapshots := 0
+		report, err := s.MeasurePerfHarness(PerfHarnessOptions{
+			Repeat:   1,
+			WhereDir: e2T283Dir,
+			FallbackRoutes: func() map[string]uint64 {
+				fallbackSnapshots++
+				switch fallbackSnapshots {
+				case 4:
+					return map[string]uint64{route: 1}
+				case 5:
+					return map[string]uint64{route: 1}
+				case 6:
+					return map[string]uint64{route: 2}
+				default:
+					return map[string]uint64{route: 0}
+				}
+			},
+			FallbackSource: "test.schema3_fallback_routes_delta",
+		})
+		So(err, ShouldBeNil)
+
+		restWhere := serverPerfOperation(report, "rest_where")
+		So(restWhere.Inputs["schema3_fallback_count"], ShouldResemble, []uint64{1})
+		So(restWhere.Inputs["schema3_fallback_routes"], ShouldResemble, []string{route})
+		So(restWhere.Inputs["schema3_fallback_source"], ShouldEqual, "test.schema3_fallback_routes_delta")
+
+		cliWhere := serverPerfOperation(report, "cli_where")
+		So(cliWhere.Inputs["schema3_fallback_count"], ShouldResemble, []uint64{1})
+		So(cliWhere.Inputs["schema3_fallback_routes"], ShouldResemble, []string{route})
+		So(cliWhere.Inputs["schema3_fallback_source"], ShouldEqual, "test.schema3_fallback_routes_delta")
+	})
+}
+
+type a5RESTTreeEnv struct {
+	cfg       clickhouse.Config
+	mountPath string
+	provider  provider.Provider
+	parentDir string
+	server    *Server
+}
+
+func newA5RESTTreeEnv(t *testing.T) *a5RESTTreeEnv {
+	t.Helper()
+
+	os.Setenv("WRSTAT_ENV", "test")
+	clickhouse.ResetTreeQueryCaches()
+
+	harness := newC3RESTClickHouseHarness(t)
+	cfg := harness.newConfig()
+	cfg.QueryTimeout = 10 * time.Second
+	cfg.PollInterval = 0
+	cfg.MountPoints = []string{c3RESTNFST283Imaging + "/"}
+
+	parentDir := c3RESTWideParent + "/"
+	seedC3RESTClickHouseHighFanout(t, cfg, parentDir, a5RESTHighFanoutChildCount)
+	markA5RESTSchema3Ready(t, cfg, c3RESTNFST283Imaging+"/", parentDir)
+	clickhouse.ResetTreeQueryCaches()
+	clickhouse.ResetTreeQueryCacheStats(cfg)
+
+	p, err := clickhouse.OpenProvider(cfg)
+	So(err, ShouldBeNil)
+
+	s := New(io.Discard)
+	So(s.SetProvider(p), ShouldBeNil)
+
+	return &a5RESTTreeEnv{
+		cfg:       cfg,
+		mountPath: c3RESTNFST283Imaging + "/",
+		provider:  p,
+		parentDir: parentDir,
+		server:    s,
+	}
+}
+
+func newA5RESTProjectTreeEnv(t *testing.T) *a5RESTTreeEnv {
+	t.Helper()
+
+	os.Setenv("WRSTAT_ENV", "test")
+	clickhouse.ResetTreeQueryCaches()
+
+	harness := newC3RESTClickHouseHarness(t)
+	cfg := harness.newConfig()
+	cfg.QueryTimeout = 10 * time.Second
+	cfg.PollInterval = 0
+	cfg.MountPoints = []string{a5RESTProjectMount}
+
+	seedA5RESTProjectFixture(t, cfg)
+	markA5RESTSchema3Ready(t, cfg, a5RESTProjectMount, a5RESTProjectDir)
+	clickhouse.ResetTreeQueryCaches()
+	clickhouse.ResetTreeQueryCacheStats(cfg)
+
+	p, err := clickhouse.OpenProvider(cfg)
+	So(err, ShouldBeNil)
+
+	s := New(io.Discard)
+	a5RESTSeedNameCaches(s)
+	So(s.SetProvider(p), ShouldBeNil)
+
+	return &a5RESTTreeEnv{
+		cfg:       cfg,
+		mountPath: a5RESTProjectMount,
+		provider:  p,
+		parentDir: a5RESTProjectDir,
+		server:    s,
+	}
+}
+
+func (e *a5RESTTreeEnv) close() {
+	if e.provider != nil {
+		So(e.provider.Close(), ShouldBeNil)
+	}
+
+	clickhouse.ResetTreeQueryCaches()
+	os.Unsetenv("WRSTAT_ENV")
+}
+
+func (e *a5RESTTreeEnv) requestTree(values url.Values) TreeElement {
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequestWithContext(
+		context.Background(),
+		http.MethodGet,
+		EndPointAuthTree+"?"+values.Encode(),
+		nil,
+	)
+
+	e.server.getTree(c)
+	So(w.Code, ShouldEqual, http.StatusOK)
+
+	var got TreeElement
+	So(json.Unmarshal(w.Body.Bytes(), &got), ShouldBeNil)
+
+	return got
+}
+
+func TestA5RESTTreeEndpointReusesOnePacket(t *testing.T) {
+	Convey("A5 REST tree endpoint reuses one broad parent packet for child summaries and flags", t, func() {
+		env := newA5RESTTreeEnv(t)
+		defer env.close()
+
+		clickhouse.ResetTreeQueryCacheStats(env.cfg)
+		clickhouse.ResetSchema3FallbackRoutes()
+
+		got := env.requestTree(url.Values{queryParamPath: {env.parentDir}})
+		stats := clickhouse.ReadTreeQueryCacheStats(env.cfg)
+
+		So(got.Children, ShouldHaveLength, a5RESTHighFanoutChildCount)
+		So(a5RESTBroadChildHasChildrenMismatches(got), ShouldEqual, 0)
+		So(stats.ParentPacketReads, ShouldEqual, uint64(1))
+		So(a5RESTPacketKeyCount(stats.ParentPacketReadKeys, env.parentDir), ShouldEqual, 1)
+		So(stats.FactVectorReads, ShouldEqual, uint64(0))
+		So(stats.ParentPacketMisses, ShouldEqual, uint64(1))
+	})
+
+	Convey("A5 REST tree endpoint reuses one full-filter child packet for child summaries and flags", t, func() {
+		env := newA5RESTTreeEnv(t)
+		defer env.close()
+
+		clickhouse.ResetTreeQueryCacheStats(env.cfg)
+		clickhouse.ResetSchema3FallbackRoutes()
+
+		got := env.requestTree(url.Values{
+			queryParamPath:   {env.parentDir},
+			queryParamGroups: {"7"},
+			queryParamUsers:  {"11"},
+			queryParamTypes:  {db.DGUTAFileTypeBam.String()},
+			queryParamAge:    {strconv.Itoa(int(db.DGUTAgeA6M))},
+		})
+		stats := clickhouse.ReadTreeQueryCacheStats(env.cfg)
+
+		So(got.Children, ShouldHaveLength, a5RESTFilteredChildCount())
+		So(a5RESTAllChildFlags(got), ShouldResemble, map[bool]int{false: a5RESTFilteredChildCount()})
+		So(a5RESTPacketKeyCount(stats.ChildFilterReadKeys, env.parentDir), ShouldEqual, 1)
+		So(a5RESTPacketKeyCount(stats.ParentPacketReadKeys, env.parentDir), ShouldEqual, 0)
+		So(stats.FactVectorReads, ShouldEqual, uint64(0))
+		So(clickhouse.ReadSchema3FallbackRoutes()["parent_facts_fallback"], ShouldEqual, uint64(0))
+	})
+
+	Convey("A5 REST tree endpoint serves unused and unchanged project fixtures without fallback", t, func() {
+		for _, fixture := range a5RESTProjectTreeFixtures() {
+			env := newA5RESTProjectTreeEnv(t)
+			clickhouse.ResetTreeQueryCacheStats(env.cfg)
+			clickhouse.ResetSchema3FallbackRoutes()
+
+			got := env.requestTree(url.Values{
+				queryParamPath: {a5RESTProjectDir},
+				queryParamAge:  {strconv.Itoa(int(fixture.age))},
+			})
+			stats := clickhouse.ReadTreeQueryCacheStats(env.cfg)
+			env.close()
+
+			So(got.Children, ShouldHaveLength, fixture.childCount)
+			So(a5RESTChildDigest(got.Children), ShouldEqual, a5RESTProjectManifestDigest(fixture.manifestKey))
+			So(a5RESTAllChildAges(got), ShouldResemble, map[db.DirGUTAge]int{fixture.age: fixture.childCount})
+			So(a5RESTPacketKeyCount(stats.ChildFilterReadKeys, a5RESTProjectDir), ShouldEqual, 1)
+			So(a5RESTPacketKeyCount(stats.ParentPacketReadKeys, a5RESTProjectDir), ShouldEqual, 0)
+			So(stats.FactVectorReads, ShouldEqual, uint64(0))
+			So(clickhouse.ReadSchema3FallbackRoutes()["parent_facts_fallback"], ShouldEqual, uint64(0))
+		}
+	})
+}
+
+func a5RESTBroadChildHasChildrenMismatches(got TreeElement) int {
+	mismatches := 0
+
+	for _, child := range got.Children {
+		expected := child.Path == got.Path+"child000"
+		if child.HasChildren != expected {
+			mismatches++
+		}
+	}
+
+	return mismatches
+}
+
+func a5RESTPacketKeyCount(keys []string, parentDir string) int {
+	count := 0
+
+	needle := ";parent_dir=" + parentDir + ";"
+	for _, key := range keys {
+		if strings.Contains(key, needle) {
+			count++
+		}
+	}
+
+	return count
+}
+
+func a5RESTFilteredChildCount() int {
+	return (a5RESTHighFanoutChildCount + 14) / 15
+}
+
+func a5RESTAllChildFlags(got TreeElement) map[bool]int {
+	flags := make(map[bool]int)
+	for _, child := range got.Children {
+		flags[child.HasChildren]++
+	}
+
+	return flags
+}
+
+func a5RESTProjectTreeFixtures() []a5RESTProjectTreeFixture {
+	return []a5RESTProjectTreeFixture{
+		{
+			manifestKey: "project_tree_unused_1y",
+			age:         db.DGUTAgeA1Y,
+			childCount:  4,
+		},
+		{
+			manifestKey: "project_tree_unchanged_1y",
+			age:         db.DGUTAgeM1Y,
+			childCount:  2,
+		},
+	}
+}
+
+func a5RESTChildDigest(children []*TreeElement) string {
+	elements := make([]a5RESTChildDigestElement, len(children))
+	for i, child := range children {
+		elements[i] = a5RESTChildDigestElement{
+			Path:        child.Path,
+			Count:       child.Count,
+			Size:        child.Size,
+			Age:         child.Age,
+			Users:       child.Users,
+			Groups:      child.Groups,
+			FileTypes:   child.FileTypes,
+			HasChildren: child.HasChildren,
+		}
+	}
+
+	data, err := json.Marshal(elements)
+	So(err, ShouldBeNil)
+
+	sum := sha256.Sum256(data)
+
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+func a5RESTProjectManifestDigest(key string) string {
+	return map[string]string{
+		"project_tree_unused_1y":    "sha256:d66a954e159caaf9152f04166f553ca9343298dfe0dcc8ee38cb87bb3d4177b6",
+		"project_tree_unchanged_1y": "sha256:35f6e8c39b29de195ee42d8cc1ac30d59a5ff0371c4dc6e99759c520504de449",
+	}[key]
+}
+
+func a5RESTAllChildAges(got TreeElement) map[db.DirGUTAge]int {
+	ages := make(map[db.DirGUTAge]int)
+	for _, child := range got.Children {
+		ages[child.Age]++
+	}
+
+	return ages
+}
+
+type a5RESTProjectChild struct {
+	dir   string
+	age   db.DirGUTAge
+	gid   uint32
+	uid   uint32
+	ft    db.DirGUTAFileType
+	count uint64
+	size  uint64
+}
+
+func a5RESTProjectChildrenForAge(age db.DirGUTAge) []a5RESTProjectChild {
+	children := make([]a5RESTProjectChild, 0)
+
+	for _, child := range a5RESTProjectAllChildren() {
+		if child.age == age {
+			children = append(children, child)
+		}
+	}
+
+	return children
+}
+
+func a5RESTProjectAllChildren() []a5RESTProjectChild {
+	return []a5RESTProjectChild{
+		{
+			dir:   a5RESTProjectDir + "alpha/",
+			age:   db.DGUTAgeA1Y,
+			gid:   7,
+			uid:   11,
+			ft:    db.DGUTAFileTypeBam,
+			count: 10,
+			size:  100,
+		},
+		{dir: a5RESTProjectDir + "beta/", age: db.DGUTAgeA1Y, gid: 8, uid: 12, ft: db.DGUTAFileTypeCram, count: 8, size: 80},
+		{dir: a5RESTProjectDir + "gamma/", age: db.DGUTAgeA1Y, gid: 7, uid: 12, ft: db.DGUTAFileTypeBam, count: 6, size: 60},
+		{dir: a5RESTProjectDir + "zeta/", age: db.DGUTAgeA1Y, gid: 9, uid: 13, ft: db.DGUTAFileTypeOther, count: 4, size: 40},
+		{dir: a5RESTProjectDir + "delta/", age: db.DGUTAgeM1Y, gid: 8, uid: 11, ft: db.DGUTAFileTypeCram, count: 5, size: 50},
+		{
+			dir:   a5RESTProjectDir + "omega/",
+			age:   db.DGUTAgeM1Y,
+			gid:   9,
+			uid:   13,
+			ft:    db.DGUTAFileTypeOther,
+			count: 3,
+			size:  30,
+		},
+	}
+}
+
+type a5RESTProjectTreeFixture struct {
+	manifestKey string
+	age         db.DirGUTAge
+	childCount  int
+}
+
+type a5RESTChildDigestElement struct {
+	Path        string       `json:"path"`
+	Count       uint64       `json:"count"`
+	Size        uint64       `json:"size"`
+	Age         db.DirGUTAge `json:"age"`
+	Users       []string     `json:"users"`
+	Groups      []string     `json:"groups"`
+	FileTypes   []string     `json:"filetypes"`
+	HasChildren bool         `json:"has_children"`
 }
 
 type e2FilteredRESTDB struct {
@@ -2714,6 +3095,246 @@ func e4WhereCounts(s *Server, query string) ([]uint64, error) {
 	return counts, nil
 }
 
+func seedA5RESTProjectFixture(t *testing.T, cfg clickhouse.Config) {
+	t.Helper()
+
+	paths := internaltest.NewDirectoryPathCreator()
+
+	w, err := clickhouse.NewDGUTAWriter(cfg)
+	So(err, ShouldBeNil)
+	w.SetMountPath(a5RESTProjectMount)
+	w.SetUpdatedAt(time.Date(2026, 6, 7, 18, 30, 0, 0, time.UTC))
+
+	So(w.Add(db.RecordDGUTA{
+		Dir:      paths.ToDirectoryPath(a5RESTProjectMount),
+		Children: []string{"project/"},
+		GUTAs: db.GUTAs{
+			c3RESTGUTA(7, 11, db.DGUTAFileTypeDir, db.DGUTAgeAll, 1, 1),
+		},
+	}), ShouldBeNil)
+
+	So(w.Add(db.RecordDGUTA{
+		Dir:        paths.ToDirectoryPath(a5RESTProjectDir),
+		ChildCount: 6,
+		Children:   []string{"alpha/", "beta/", "delta/", "gamma/", "omega/", "zeta/"},
+		GUTAs: db.GUTAs{
+			c3RESTGUTA(7, 11, db.DGUTAFileTypeDir, db.DGUTAgeAll, 1, 1),
+		},
+	}), ShouldBeNil)
+
+	for _, child := range a5RESTProjectAllChildren() {
+		So(w.Add(db.RecordDGUTA{
+			Dir: paths.ToDirectoryPath(child.dir),
+			GUTAs: db.GUTAs{
+				c3RESTGUTA(child.gid, child.uid, child.ft, db.DGUTAgeAll, child.count, child.size),
+				c3RESTGUTA(child.gid, child.uid, child.ft, child.age, child.count, child.size),
+			},
+		}), ShouldBeNil)
+	}
+
+	So(w.Close(), ShouldBeNil)
+}
+
+func markA5RESTSchema3Ready(t *testing.T, cfg clickhouse.Config, mountPath string, parentDir string) {
+	t.Helper()
+
+	conn := openC3RESTClickHouseConn(t, cfg.DSN)
+	defer func() { So(conn.Close(), ShouldBeNil) }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	So(conn.Exec(
+		ctx,
+		"CREATE TABLE IF NOT EXISTS wrstat_schema3_snapshot_sets ("+
+			"mount_path LowCardinality(String), snapshot_id UUID, schema3_version UInt32, "+
+			"dir_facts_rows UInt64, parent_facts_rows UInt64, children_rows UInt64, "+
+			"child_filter_all_rows UInt64, dir_filter_all_rows UInt64, manifest_sha256 String, "+
+			"refreshed_at DateTime64(3)) ENGINE = MergeTree "+
+			"PARTITION BY (mount_path, snapshot_id) ORDER BY (mount_path, snapshot_id, schema3_version)",
+	), ShouldBeNil)
+
+	row := conn.QueryRow(
+		ctx,
+		"SELECT snapshot_id FROM wrstat_mounts_active WHERE mount_path = ?",
+		mountPath,
+	)
+
+	var snapshotID string
+	So(row.Scan(&snapshotID), ShouldBeNil)
+	seedA5RESTChildFilterAll(t, conn, snapshotID, mountPath, parentDir)
+	seedA5RESTDirFilterAll(t, conn, snapshotID, mountPath)
+	So(conn.Exec(
+		ctx,
+		"INSERT INTO wrstat_schema3_snapshot_sets "+
+			"(mount_path, snapshot_id, schema3_version, dir_facts_rows, parent_facts_rows, children_rows, "+
+			"child_filter_all_rows, dir_filter_all_rows, manifest_sha256, refreshed_at) "+
+			"VALUES (?, toUUID(?), 1, 0, 0, 0, 0, 0, 'a5-rest-test', now())",
+		mountPath,
+		snapshotID,
+	), ShouldBeNil)
+}
+
+func seedA5RESTChildFilterAll(t *testing.T, conn ch.Conn, snapshotID string, mountPath string, parentDir string) {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	So(conn.Exec(
+		ctx,
+		"CREATE TABLE IF NOT EXISTS wrstat_child_filter_all ("+
+			"mount_path LowCardinality(String), snapshot_id UUID, parent_dir String, age UInt8, "+
+			"gid UInt32, uid UInt32, ft UInt16, dir String, count UInt64, size UInt64, "+
+			"atime_min Int64, mtime_max Int64, atime_buckets Array(UInt64), mtime_buckets Array(UInt64), "+
+			"filter_child_count UInt64, child_count UInt64, has_filter_children UInt8, "+
+			"has_children UInt8, refreshed_at DateTime64(3)) ENGINE = MergeTree "+
+			"PARTITION BY (mount_path, snapshot_id) "+
+			"ORDER BY (mount_path, snapshot_id, parent_dir, age, gid, uid, ft, dir)",
+	), ShouldBeNil)
+
+	batch, err := conn.PrepareBatch(ctx,
+		"INSERT INTO wrstat_child_filter_all "+
+			"(mount_path, snapshot_id, parent_dir, age, gid, uid, ft, dir, count, size, "+
+			"atime_min, mtime_max, atime_buckets, mtime_buckets, filter_child_count, "+
+			"child_count, has_filter_children, has_children, refreshed_at)",
+	)
+	So(err, ShouldBeNil)
+
+	if parentDir == a5RESTProjectDir {
+		seedA5RESTProjectChildFilterAll(t, batch, snapshotID)
+
+		So(batch.Send(), ShouldBeNil)
+
+		return
+	}
+
+	for i := range a5RESTHighFanoutChildCount {
+		if i%15 != 0 {
+			continue
+		}
+
+		hasChildren := uint8(0)
+		childCount := uint64(0)
+
+		if i == 0 {
+			hasChildren = 1
+			childCount = 1
+		}
+
+		So(batch.Append(
+			mountPath,
+			snapshotID,
+			parentDir,
+			uint8(db.DGUTAgeA6M),
+			uint32(7),
+			uint32(11),
+			uint16(db.DGUTAFileTypeBam),
+			parentDir+fmt.Sprintf("child%03d", i),
+			uint64(1),
+			uint64(10+i),
+			int64(90),
+			int64(250),
+			[]uint64{1, 0, 0, 0, 0, 0, 0, 0, 0},
+			[]uint64{0, 1, 0, 0, 0, 0, 0, 0, 0},
+			uint64(0),
+			childCount,
+			uint8(0),
+			hasChildren,
+			time.Now(),
+		), ShouldBeNil)
+	}
+
+	So(batch.Send(), ShouldBeNil)
+}
+
+func seedA5RESTProjectChildFilterAll(t *testing.T, batch interface{ Append(values ...any) error }, snapshotID string) {
+	t.Helper()
+
+	for _, child := range a5RESTProjectAllChildren() {
+		So(batch.Append(
+			a5RESTProjectMount,
+			snapshotID,
+			a5RESTProjectDir,
+			uint8(child.age),
+			child.gid,
+			child.uid,
+			uint16(child.ft),
+			child.dir,
+			child.count,
+			child.size,
+			int64(100),
+			int64(200),
+			[]uint64{child.count, 0, 0, 0, 0, 0, 0, 0, 0},
+			[]uint64{0, child.count, 0, 0, 0, 0, 0, 0, 0},
+			uint64(0),
+			uint64(0),
+			uint8(0),
+			uint8(0),
+			time.Now(),
+		), ShouldBeNil)
+	}
+}
+
+func seedA5RESTDirFilterAll(t *testing.T, conn ch.Conn, snapshotID string, mountPath string) {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	So(conn.Exec(
+		ctx,
+		"CREATE TABLE IF NOT EXISTS wrstat_dir_filter_all ("+
+			"mount_path LowCardinality(String), snapshot_id UUID, age UInt8, gid UInt32, uid UInt32, "+
+			"ft UInt16, dir String, parent_dir String, count UInt64, size UInt64, atime_min Int64, "+
+			"mtime_max Int64, atime_buckets Array(UInt64), mtime_buckets Array(UInt64), "+
+			"filter_child_count UInt64, child_count UInt64, has_filter_children UInt8, "+
+			"has_children UInt8, refreshed_at DateTime64(3)) ENGINE = MergeTree "+
+			"PARTITION BY (mount_path, snapshot_id) "+
+			"ORDER BY (mount_path, snapshot_id, age, gid, uid, ft, dir)",
+	), ShouldBeNil)
+
+	if mountPath != a5RESTProjectMount {
+		return
+	}
+
+	batch, err := conn.PrepareBatch(ctx,
+		"INSERT INTO wrstat_dir_filter_all "+
+			"(mount_path, snapshot_id, age, gid, uid, ft, dir, parent_dir, count, size, "+
+			"atime_min, mtime_max, atime_buckets, mtime_buckets, filter_child_count, "+
+			"child_count, has_filter_children, has_children, refreshed_at)",
+	)
+	So(err, ShouldBeNil)
+
+	for _, fixture := range a5RESTProjectTreeFixtures() {
+		for _, child := range a5RESTProjectChildrenForAge(fixture.age) {
+			So(batch.Append(
+				a5RESTProjectMount,
+				snapshotID,
+				uint8(child.age),
+				child.gid,
+				child.uid,
+				uint16(child.ft),
+				a5RESTProjectDir,
+				a5RESTProjectMount,
+				child.count,
+				child.size,
+				int64(100),
+				int64(200),
+				[]uint64{child.count, 0, 0, 0, 0, 0, 0, 0, 0},
+				[]uint64{0, child.count, 0, 0, 0, 0, 0, 0, 0},
+				c3RESTNonNegativeIntToUint64(t, fixture.childCount),
+				uint64(6),
+				uint8(1),
+				uint8(1),
+				time.Now(),
+			), ShouldBeNil)
+		}
+	}
+
+	So(batch.Send(), ShouldBeNil)
+}
+
 type e4ResponseCacheDB struct {
 	activeSet  *e4ActiveSetProvider
 	whereCalls int
@@ -2921,4 +3542,13 @@ func e2ServerSummaryDigest(summaries []*DirSummary) string {
 	sum := sha256.Sum256(data)
 
 	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+func a5RESTSeedNameCaches(s *Server) {
+	s.gidToNameCache[7] = "group7"
+	s.gidToNameCache[8] = "group8"
+	s.gidToNameCache[9] = "group9"
+	s.uidToNameCache[11] = "user11"
+	s.uidToNameCache[12] = "user12"
+	s.uidToNameCache[13] = "user13"
 }
