@@ -920,9 +920,10 @@ type ActiveVirtualSetRow struct {
 }
 ```
 
-**Package:** `internal/chspool/`
-**File:** `internal/chspool/spool.go`
-**Test file:** `internal/chspool/spool_test.go`
+**Package:** `cmd/`, `internal/chspool/`
+**File:** `cmd/summarise_spool.go`, `internal/chspool/spool.go`
+**Test file:** `cmd/summarise_spool_test.go`,
+`internal/chspool/spool_test.go`
 
 **Acceptance tests:**
 
@@ -946,6 +947,13 @@ type ActiveVirtualSetRow struct {
 6. Given `wrstat_active_virtual_children.gob.gz` decodes a row count different
    from the manifest count, when `VerifyManifest` runs, then it returns
    `ErrManifestMismatch` and names `wrstat_active_virtual_children`.
+7. Given a fixture stats file, mountpoints file, quota/config inputs, and
+   ClickHouse spool target, when the actual summarise command path runs through
+   `cmd/summarise_spool.go`, then the produced spool manifest contains every
+   schema3 table in `TableOrder`, each schema3 file decodes successfully, each
+   decoded row count equals the manifest count, and row counts match the
+   canonical fixture summariser output. The test must not call schema3
+   `Set.Write*` methods directly except through the summarise command path.
 
 ### D3: Spool loader preserves atomic publish
 
@@ -960,9 +968,10 @@ mismatched active virtual spool data, including
 `wrstat_active_virtual_children`, blocks `wrstat_active_virtual_sets` and
 `wrstat_mount_events`.
 
-**Package:** `clickhouse/`
-**File:** `clickhouse/summarise_spool_loader.go`
-**Test file:** `clickhouse/summarise_spool_loader_test.go`
+**Package:** `clickhouse/`, `cmd/`
+**File:** `clickhouse/summarise_spool_loader.go`, `cmd/summarise_spool.go`
+**Test file:** `clickhouse/summarise_spool_loader_test.go`,
+`cmd/summarise_spool_test.go`
 
 **Acceptance tests:**
 
@@ -984,6 +993,15 @@ mismatched active virtual spool data, including
    manifest, when verification runs, then it returns
    `errSpoolLoadedRowsMismatch`, writes no active-set readiness row, writes no
    active mount event, and deletes the partial child partition before retry.
+6. Given the same command fixture as D2 test 7 and an empty ClickHouse test
+   database, when the actual summarise command path builds and publishes the
+   spool, then every schema3 table has the manifest row count in ClickHouse,
+   `wrstat_schema3_snapshot_sets` contains the exact manifest counts and
+   checksum, `wrstat_active_virtual_sets.ready = 1`, the active mount event is
+   visible only after both readiness rows, and cold `DirInfo`,
+   `DirsHaveChildren`, and `Where` probes read schema3 rows with zero fallback,
+   zero facts-vector reads, and fixture-manifest digests equal to the canonical
+   summariser output.
 
 ### D4: Cleanup removes old partitions and active sets
 

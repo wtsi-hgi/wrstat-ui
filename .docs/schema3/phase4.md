@@ -16,9 +16,12 @@ spec.md section: D2
 
 Extend `internal/chspool/spool.go` with schema3 table constants, row types,
 `TableOrder`, manifest entries, write methods, and verification behavior for
-full-filter, schema3 readiness, and active virtual tables. Cover D2 acceptance
-tests 1, 2, 5, and 6 in `internal/chspool/spool_test.go`; D2 acceptance tests
-3 and 4 are loader-facing and are covered by item 4.2.
+full-filter, schema3 readiness, and active virtual tables. Update
+`cmd/summarise_spool.go` so the production summarise command writes every
+schema3 spool table through normal summariser operations. Cover D2 acceptance
+tests 1, 2, 5, and 6 in `internal/chspool/spool_test.go`; cover D2 acceptance
+test 7 in `cmd/summarise_spool_test.go` using the actual command path. D2
+acceptance tests 3 and 4 are loader-facing and are covered by item 4.2.
 
 - [ ] implemented
 - [ ] reviewed
@@ -30,10 +33,11 @@ spec.md section: D3
 Update `clickhouse/summarise_spool_loader.go` so schema3 spool loads follow
 the D1 publish order, verify decoded and inserted rows for every schema3 and
 active virtual table, block readiness on missing or mismatched data, and clean
-partial partitions before retry. Cover all 5 acceptance tests from D3 in
+partial partitions before retry. Cover D3 acceptance tests 1-5 in
 `clickhouse/summarise_spool_loader_test.go`, plus D2 acceptance tests 3 and 4
-for missing schema3 or active virtual manifest entries. Depends on item 4.1
-spool table manifest support.
+for missing schema3 or active virtual manifest entries. Cover D3 acceptance
+test 6 in `cmd/summarise_spool_test.go` as an end-to-end command/load/database
+test. Depends on item 4.1 spool table manifest support.
 
 - [ ] implemented
 - [ ] reviewed
