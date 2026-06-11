@@ -23,8 +23,8 @@ tests 1, 2, 5, and 6 in `internal/chspool/spool_test.go`; cover D2 acceptance
 test 7 in `cmd/summarise_spool_test.go` using the actual command path. D2
 acceptance tests 3 and 4 are loader-facing and are covered by item 4.2.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
 
 ### Item 4.2: D3 - Spool loader preserves atomic publish
 
@@ -39,8 +39,8 @@ for missing schema3 or active virtual manifest entries. Cover D3 acceptance
 test 6 in `cmd/summarise_spool_test.go` as an end-to-end command/load/database
 test. Depends on item 4.1 spool table manifest support.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
 
 ### Item 4.3: D4 - Cleanup removes old partitions and active sets
 
@@ -52,5 +52,5 @@ publish, while guarding the current active snapshot and active set. Cover all
 3 acceptance tests from D4 in `clickhouse/active_snapshot_cleanup_test.go`.
 Depends on items 4.1 and 4.2 table names and readiness semantics.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed

@@ -45,16 +45,377 @@ const (
 		"WHERE mount_path = ? AND gid = ?"
 	activeSnapshotCleanupCountDirFactsQuery = "SELECT count() FROM wrstat_dir_facts " +
 		"WHERE mount_path = ? AND snapshot_id = toUUID(?)"
+	activeSnapshotCleanupCountSnapshotRowsQuery = "SELECT count() FROM %s " +
+		"WHERE mount_path = ? AND snapshot_id = toUUID(?)"
+	activeSnapshotCleanupCountActiveSetRowsQuery = "SELECT count() FROM %s " +
+		"WHERE active_set_id = ?"
 	activeSnapshotCleanupCountAgeAllActivePartsQuery = "SELECT count() FROM system.parts " +
 		"WHERE database = ? AND table = 'wrstat_dir_filter_ageall' AND active = 1 AND rows > 0"
 	activeSnapshotCleanupInsertDirFactsQuery = "INSERT INTO wrstat_dir_facts " +
 		"(mount_path, snapshot_id, dir, updated_at, all_count, all_size, refreshed_at) " +
 		"VALUES (?, toUUID(?), ?, ?, ?, ?, ?)"
+
+	activeSnapshotCleanupDirFactsTable = "wrstat_dir_facts"
+	activeSnapshotCleanupChildrenTable = "wrstat_children"
 )
 
 var errActiveSnapshotCleanupDeleteForbidden = errors.New("active snapshot cleanup delete should not run")
 
 var errActiveSnapshotCleanupNormalDeadline = errors.New("active snapshot cleanup used normal query timeout")
+
+type activeSnapshotCleanupRaceGuardConn struct {
+	bootstrapTestConn
+
+	previousSID string
+	newerSID    string
+
+	switches           int
+	snapshotDrops      int
+	activeVirtualDrops int
+}
+
+func (c *activeSnapshotCleanupRaceGuardConn) Query(
+	_ context.Context,
+	query string,
+	_ ...any,
+) (driver.Rows, error) {
+	switch query {
+	case activeSnapshotQuery:
+		sid := c.previousSID
+		if c.switches > 0 {
+			sid = c.newerSID
+		}
+
+		return &dgutaWriterCloseContextRows{
+			columns: []string{dgutaWriterTestSnapshotIDColumn},
+			values:  [][]any{{sid}},
+		}, nil
+	case mountsActiveRowsQuery:
+		return &dgutaWriterCloseContextRows{
+			columns: []string{
+				dgutaWriterTestMountPathColumn,
+				dgutaWriterTestSnapshotIDColumn,
+				dgutaWriterTestUpdatedAtColumn,
+			},
+			values: [][]any{{testMountPath, c.previousSID, time.Date(2026, 6, 10, 11, 0, 0, 0, time.UTC)}},
+		}, nil
+	default:
+		return nil, errBootstrapTestUnexpectedCall
+	}
+}
+
+func (c *activeSnapshotCleanupRaceGuardConn) Exec(_ context.Context, query string, args ...any) error {
+	switch {
+	case query == switchSnapshotQuery:
+		c.switches++
+
+		return nil
+	case strings.HasPrefix(query, "ALTER TABLE"):
+		if len(args) == 1 {
+			c.activeVirtualDrops++
+
+			return nil
+		}
+
+		c.snapshotDrops++
+
+		return nil
+	default:
+		return errBootstrapTestUnexpectedCall
+	}
+}
+
+func TestCleanupRemovesOldPartitionsAndActiveSetsD4(t *testing.T) {
+	Convey("D4.1 cleanup drops old schema3 snapshot partitions and keeps the published snapshot", t, func() {
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 5 * time.Second
+
+		olderUpdatedAt := time.Date(2026, 6, 10, 9, 0, 0, 0, time.UTC)
+		nextUpdatedAt := olderUpdatedAt.Add(time.Hour)
+		olderSID := snapshotID(testMountPath, olderUpdatedAt).String()
+		nextSID := snapshotID(testMountPath, nextUpdatedAt)
+
+		opts, err := optionsFromConfig(cfg)
+		So(err, ShouldBeNil)
+
+		conn, err := connectAndBootstrap(context.Background(), opts, cfg.Database, queryTimeout(cfg))
+		So(err, ShouldBeNil)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		So(conn.Exec(ctx, testInsertMountStmt, testMountPath, olderUpdatedAt, olderSID, olderUpdatedAt), ShouldBeNil)
+		insertSnapshotCleanupRows(ctx, conn, olderSID, olderUpdatedAt)
+		insertSnapshotCleanupRows(ctx, conn, nextSID.String(), nextUpdatedAt)
+
+		w := &dgutaWriter{
+			cfg:       cfg,
+			conn:      conn,
+			mountPath: testMountPath,
+			updatedAt: nextUpdatedAt,
+			snapshot:  nextSID,
+		}
+
+		So(w.switchSnapshotAndDropOld(ctx), ShouldBeNil)
+
+		activeSID, hasActive, err := readActiveSnapshotID(ctx, conn, testMountPath)
+		So(err, ShouldBeNil)
+		So(hasActive, ShouldBeTrue)
+		So(activeSID, ShouldEqual, nextSID.String())
+		assertSchema3SnapshotCleanupRows(ctx, conn, olderSID, 0)
+		assertSchema3SnapshotCleanupRows(ctx, conn, nextSID.String(), 1)
+	})
+
+	Convey("D4.2 cleanup drops old active virtual overlay partitions and keeps the published active set", t, func() {
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 5 * time.Second
+
+		previousUpdatedAt := time.Date(2026, 6, 10, 10, 0, 0, 0, time.UTC)
+		nextUpdatedAt := previousUpdatedAt.Add(time.Hour)
+		previousSID := snapshotID(testMountPath, previousUpdatedAt).String()
+		nextSID := snapshotID(testMountPath, nextUpdatedAt)
+
+		opts, err := optionsFromConfig(cfg)
+		So(err, ShouldBeNil)
+
+		conn, err := connectAndBootstrap(context.Background(), opts, cfg.Database, queryTimeout(cfg))
+		So(err, ShouldBeNil)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		So(conn.Exec(ctx, testInsertMountStmt, testMountPath, previousUpdatedAt, previousSID, previousUpdatedAt), ShouldBeNil)
+
+		previousSetID := fingerprintForMountsActive([]mountsActiveRow{{
+			mountPath:  testMountPath,
+			snapshotID: previousSID,
+			updatedAt:  previousUpdatedAt,
+		}})
+		nextSetID := fingerprintForMountsActive([]mountsActiveRow{{
+			mountPath:  testMountPath,
+			snapshotID: nextSID.String(),
+			updatedAt:  nextUpdatedAt,
+		}})
+
+		insertActiveVirtualCleanupRows(ctx, conn, previousSetID, previousUpdatedAt)
+		insertActiveVirtualCleanupRows(ctx, conn, nextSetID, nextUpdatedAt)
+
+		w := &dgutaWriter{
+			cfg:               cfg,
+			conn:              conn,
+			mountPath:         testMountPath,
+			updatedAt:         nextUpdatedAt,
+			snapshot:          nextSID,
+			stagedActiveSetID: nextSetID,
+		}
+
+		So(w.switchSnapshotAndDropOld(ctx), ShouldBeNil)
+
+		assertActiveVirtualCleanupRows(ctx, conn, previousSetID, 0)
+		assertActiveVirtualCleanupRows(ctx, conn, nextSetID, 1)
+	})
+
+	Convey("D4.3 cleanup aborts when a newer active publish wins the race before old snapshot deletion", t, func() {
+		previousSID := snapshotID(testMountPath, time.Date(2026, 6, 10, 11, 0, 0, 0, time.UTC)).String()
+		nextUpdatedAt := time.Date(2026, 6, 10, 12, 0, 0, 0, time.UTC)
+		nextSID := snapshotID(testMountPath, nextUpdatedAt)
+		newerSID := snapshotID(testMountPath, nextUpdatedAt.Add(time.Hour)).String()
+		conn := &activeSnapshotCleanupRaceGuardConn{
+			previousSID: previousSID,
+			newerSID:    newerSID,
+		}
+		w := &dgutaWriter{
+			cfg:       Config{QueryTimeout: 100 * time.Millisecond},
+			conn:      conn,
+			mountPath: testMountPath,
+			updatedAt: nextUpdatedAt,
+			snapshot:  nextSID,
+		}
+
+		ctx, cancel := queryContext(context.Background(), 100*time.Millisecond)
+		defer cancel()
+
+		err := w.switchSnapshotAndDropOld(ctx)
+		So(err, ShouldNotBeNil)
+		So(errors.Is(err, errActiveSnapshotStillActive), ShouldBeTrue)
+		So(conn.switches, ShouldEqual, 1)
+		So(conn.snapshotDrops, ShouldEqual, 0)
+		So(conn.activeVirtualDrops, ShouldEqual, 0)
+	})
+}
+
+func insertSnapshotCleanupSchema3Rows(
+	ctx context.Context,
+	conn interface {
+		Exec(ctx context.Context, query string, args ...any) error
+	},
+	sid string,
+	updatedAt time.Time,
+) {
+	So(conn.Exec(
+		ctx,
+		insertChildFilterAllQuery,
+		testMountPath,
+		sid,
+		"/mnt/",
+		uint8(db.DGUTAgeAll),
+		uint32(7),
+		uint32(9),
+		uint16(db.DGUTAFileTypeBam),
+		testMountPath,
+		uint64(2),
+		uint64(123),
+		int64(100),
+		int64(200),
+		[]uint64{2, 0, 0, 0, 0, 0, 0, 0, 0},
+		[]uint64{0, 2, 0, 0, 0, 0, 0, 0, 0},
+		uint64(1),
+		uint64(1),
+		uint8(1),
+		uint8(1),
+		updatedAt,
+	), ShouldBeNil)
+	So(conn.Exec(
+		ctx,
+		insertDirFilterAllQuery,
+		testMountPath,
+		sid,
+		uint8(db.DGUTAgeAll),
+		uint32(7),
+		uint32(9),
+		uint16(db.DGUTAFileTypeBam),
+		testMountPath,
+		"/mnt/",
+		uint64(2),
+		uint64(123),
+		int64(100),
+		int64(200),
+		[]uint64{2, 0, 0, 0, 0, 0, 0, 0, 0},
+		[]uint64{0, 2, 0, 0, 0, 0, 0, 0, 0},
+		uint64(1),
+		uint64(1),
+		uint8(1),
+		uint8(1),
+		updatedAt,
+	), ShouldBeNil)
+
+	counts := schema3SnapshotRowCounts{
+		dirFactsRows:       1,
+		parentFactsRows:    1,
+		childrenRows:       1,
+		childFilterAllRows: 1,
+		dirFilterAllRows:   1,
+	}
+	So(conn.Exec(
+		ctx,
+		insertSchema3SnapshotSetQuery,
+		testMountPath,
+		sid,
+		currentSchemaVersion,
+		counts.dirFactsRows,
+		counts.parentFactsRows,
+		counts.childrenRows,
+		counts.childFilterAllRows,
+		counts.dirFilterAllRows,
+		schema3SnapshotManifestSHA256(activeMount{
+			mountPath:  testMountPath,
+			snapshotID: sid,
+			updatedAt:  updatedAt,
+		}, counts),
+		updatedAt,
+	), ShouldBeNil)
+}
+
+func assertSchema3SnapshotCleanupRows(
+	ctx context.Context,
+	conn interface {
+		Query(ctx context.Context, query string, args ...any) (driver.Rows, error)
+	},
+	sid string,
+	expected uint64,
+) {
+	for _, table := range []string{
+		activeSnapshotCleanupDirFactsTable,
+		"wrstat_parent_facts",
+		activeSnapshotCleanupChildrenTable,
+		"wrstat_child_filter_all",
+		"wrstat_dir_filter_all",
+		"wrstat_schema3_snapshot_sets",
+	} {
+		So(
+			countRows(ctx, conn, fmt.Sprintf(activeSnapshotCleanupCountSnapshotRowsQuery, table), testMountPath, sid),
+			ShouldEqual,
+			expected,
+		)
+	}
+}
+
+func insertActiveVirtualCleanupRows(ctx context.Context, conn ch.Conn, activeSetID string, updatedAt time.Time) {
+	mounts := []activeMount{{
+		mountPath:  testMountPath,
+		snapshotID: snapshotID(testMountPath, updatedAt).String(),
+		updatedAt:  updatedAt,
+	}}
+	summaryRows, filterRows, childRows := activeVirtualRowsForMounts(activeSetID, mounts, updatedAt)
+	writer := newActiveVirtualOverlayWriter(conn, 1)
+
+	for _, row := range summaryRows {
+		So(writer.appendSummary(ctx, row), ShouldBeNil)
+	}
+
+	for _, row := range filterRows {
+		So(writer.appendFilterAll(ctx, row), ShouldBeNil)
+	}
+
+	for _, row := range childRows {
+		So(writer.appendChild(ctx, row), ShouldBeNil)
+	}
+
+	So(writer.flush(ctx), ShouldBeNil)
+	So(writer.appendSet(ctx, activeVirtualSetRowForRows(
+		activeSetID,
+		[]mountsActiveRow{{
+			mountPath:  testMountPath,
+			snapshotID: snapshotID(testMountPath, updatedAt).String(),
+			updatedAt:  updatedAt,
+		}},
+		summaryRows,
+		filterRows,
+		childRows,
+		updatedAt,
+	)), ShouldBeNil)
+}
+
+func assertActiveVirtualCleanupRows(
+	ctx context.Context,
+	conn interface {
+		Query(ctx context.Context, query string, args ...any) (driver.Rows, error)
+	},
+	activeSetID string,
+	expected uint64,
+) {
+	for _, table := range []string{
+		"wrstat_active_virtual_summaries",
+		"wrstat_active_virtual_filter_all",
+		"wrstat_active_virtual_children",
+		"wrstat_active_virtual_sets",
+	} {
+		actual := countRows(ctx, conn, fmt.Sprintf(activeSnapshotCleanupCountActiveSetRowsQuery, table), activeSetID)
+		if expected == 0 {
+			So(actual, ShouldEqual, expected)
+
+			continue
+		}
+
+		So(actual, ShouldBeGreaterThan, 0)
+	}
+}
 
 func TestActiveSetCleanupB3(t *testing.T) {
 	Convey("B3.1 cleanup drops replaced active-prefix and virtual-child partitions and keeps replacement data",
@@ -956,6 +1317,7 @@ func insertSnapshotCleanupRows(
 		updatedAt,
 	), ShouldBeNil)
 	insertSnapshotCleanupSubdirs(ctx, conn, sid, updatedAt)
+	insertSnapshotCleanupSchema3Rows(ctx, conn, sid, updatedAt)
 }
 
 func insertSnapshotCleanupSubdirs(

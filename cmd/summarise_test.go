@@ -417,6 +417,7 @@ func snapshotSummariseGlobals() func() {
 	origClickHouseCleanActiveSnapshotAttempt := clickHouseCleanActiveSnapshotAttempt
 	origWireSummariseClickHouseOperations := wireSummariseClickHouseOperations
 	origLoadSummariseClickHouseSpool := loadSummariseClickHouseSpool
+	origSummariseSpoolNow := summariseSpoolNow
 
 	return func() {
 		defaultDir = origDefaultDir
@@ -436,6 +437,7 @@ func snapshotSummariseGlobals() func() {
 		clickHouseCleanActiveSnapshotAttempt = origClickHouseCleanActiveSnapshotAttempt
 		wireSummariseClickHouseOperations = origWireSummariseClickHouseOperations
 		loadSummariseClickHouseSpool = origLoadSummariseClickHouseSpool
+		summariseSpoolNow = origSummariseSpoolNow
 	}
 }
 

@@ -4934,6 +4934,32 @@ func (c *dgutaWriterCloseContextConn) treeSummaryRefreshes() int {
 	return int(c.treeRefreshes.Load())
 }
 
+func publishedSnapshotIDArg(args []any) string {
+	if len(args) < 2 {
+		return ""
+	}
+
+	sid, ok := args[1].(string)
+	if !ok {
+		return ""
+	}
+
+	return sid
+}
+
+func publishedSnapshotUpdatedAtArg(args []any) time.Time {
+	if len(args) < 3 {
+		return time.Time{}
+	}
+
+	updatedAt, ok := args[2].(time.Time)
+	if !ok {
+		return time.Time{}
+	}
+
+	return updatedAt
+}
+
 func TestDGUTAWriterOldSnapshotDropUsesCleanupTimeout(t *testing.T) {
 	Convey("DGUTAWriter uses the cleanup timeout when dropping the previous snapshot after switch", t, func() {
 		updatedAt := time.Date(2026, 1, 9, 15, 0, 0, 0, time.UTC)
@@ -5023,8 +5049,10 @@ type oldSnapshotDropDeadlineConn struct {
 	previousSID  string
 	normalWindow time.Duration
 
-	oldSnapshotDrops atomic.Int32
-	longDeadline     atomic.Int32
+	publishedSID       string
+	publishedUpdatedAt time.Time
+	oldSnapshotDrops   atomic.Int32
+	longDeadline       atomic.Int32
 }
 
 func (c *oldSnapshotDropDeadlineConn) Query(
@@ -5034,14 +5062,27 @@ func (c *oldSnapshotDropDeadlineConn) Query(
 ) (driver.Rows, error) {
 	switch query {
 	case activeSnapshotQuery:
+		sid := c.previousSID
+		if c.publishedSID != "" {
+			sid = c.publishedSID
+		}
+
 		return &dgutaWriterCloseContextRows{
 			columns: []string{dgutaWriterTestSnapshotIDColumn},
-			values:  [][]any{{c.previousSID}},
+			values:  [][]any{{sid}},
 		}, nil
 	case mountsActiveRowsQuery:
+		sid := c.previousSID
+		updatedAt := time.Now().UTC()
+
+		if c.publishedSID != "" {
+			sid = c.publishedSID
+			updatedAt = c.publishedUpdatedAt
+		}
+
 		return &dgutaWriterCloseContextRows{
 			columns: []string{dgutaWriterTestMountPathColumn, dgutaWriterTestSnapshotIDColumn, dgutaWriterTestUpdatedAtColumn},
-			values:  [][]any{{testMountPath, c.previousSID, time.Now().UTC()}},
+			values:  [][]any{{testMountPath, sid, updatedAt}},
 		}, nil
 	default:
 		return nil, errForcedFailure
@@ -5051,6 +5092,9 @@ func (c *oldSnapshotDropDeadlineConn) Query(
 func (c *oldSnapshotDropDeadlineConn) Exec(ctx context.Context, query string, args ...any) error {
 	switch {
 	case query == switchSnapshotQuery:
+		c.publishedSID = publishedSnapshotIDArg(args)
+		c.publishedUpdatedAt = publishedSnapshotUpdatedAtArg(args)
+
 		return nil
 	case strings.HasPrefix(query, "ALTER TABLE"):
 		deadline, ok := ctx.Deadline()
@@ -5082,8 +5126,9 @@ type oldSnapshotDropFailingConn struct {
 
 	previousSID string
 
-	switches atomic.Int32
-	drops    atomic.Int32
+	publishedSID string
+	switches     atomic.Int32
+	drops        atomic.Int32
 }
 
 func (c *oldSnapshotDropFailingConn) Query(
@@ -5093,9 +5138,14 @@ func (c *oldSnapshotDropFailingConn) Query(
 ) (driver.Rows, error) {
 	switch query {
 	case activeSnapshotQuery:
+		sid := c.previousSID
+		if c.publishedSID != "" {
+			sid = c.publishedSID
+		}
+
 		return &dgutaWriterCloseContextRows{
 			columns: []string{dgutaWriterTestSnapshotIDColumn},
-			values:  [][]any{{c.previousSID}},
+			values:  [][]any{{sid}},
 		}, nil
 	case mountsActiveRowsQuery:
 		return &dgutaWriterCloseContextRows{
@@ -5107,9 +5157,11 @@ func (c *oldSnapshotDropFailingConn) Query(
 	}
 }
 
-func (c *oldSnapshotDropFailingConn) Exec(_ context.Context, query string, _ ...any) error {
+func (c *oldSnapshotDropFailingConn) Exec(_ context.Context, query string, args ...any) error {
 	switch {
 	case query == switchSnapshotQuery:
+		c.publishedSID = publishedSnapshotIDArg(args)
+
 		c.switches.Add(1)
 
 		return nil
@@ -5136,6 +5188,8 @@ type oldActiveSetDropConn struct {
 	previousSID       string
 	previousUpdatedAt time.Time
 
+	publishedSID       string
+	publishedUpdatedAt time.Time
 	switches           atomic.Int32
 	snapshotDrops      atomic.Int32
 	activeVirtualDrops atomic.Int32
@@ -5149,14 +5203,27 @@ func (c *oldActiveSetDropConn) Query(
 ) (driver.Rows, error) {
 	switch query {
 	case activeSnapshotQuery:
+		sid := c.previousSID
+		if c.publishedSID != "" {
+			sid = c.publishedSID
+		}
+
 		return &dgutaWriterCloseContextRows{
 			columns: []string{dgutaWriterTestSnapshotIDColumn},
-			values:  [][]any{{c.previousSID}},
+			values:  [][]any{{sid}},
 		}, nil
 	case mountsActiveRowsQuery:
+		sid := c.previousSID
+
+		updatedAt := c.previousUpdatedAt
+		if c.publishedSID != "" {
+			sid = c.publishedSID
+			updatedAt = c.publishedUpdatedAt
+		}
+
 		return &dgutaWriterCloseContextRows{
 			columns: []string{dgutaWriterTestMountPathColumn, dgutaWriterTestSnapshotIDColumn, dgutaWriterTestUpdatedAtColumn},
-			values:  [][]any{{testMountPath, c.previousSID, c.previousUpdatedAt}},
+			values:  [][]any{{testMountPath, sid, updatedAt}},
 		}, nil
 	default:
 		return nil, errBootstrapTestUnexpectedCall
@@ -5166,6 +5233,9 @@ func (c *oldActiveSetDropConn) Query(
 func (c *oldActiveSetDropConn) Exec(_ context.Context, query string, args ...any) error {
 	switch {
 	case query == switchSnapshotQuery:
+		c.publishedSID = publishedSnapshotIDArg(args)
+		c.publishedUpdatedAt = publishedSnapshotUpdatedAtArg(args)
+
 		c.switches.Add(1)
 
 		return nil

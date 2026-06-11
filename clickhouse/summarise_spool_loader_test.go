@@ -186,8 +186,73 @@ func TestClickHouseSummariseSpoolLoader(t *testing.T) {
 
 		err := validateSummariseSpoolLoad(Config{DSN: testNativeDSN, Database: testDatabaseName}, manifest)
 
-		So(errors.Is(err, errInvalidSummariseSpoolManifest), ShouldBeTrue)
+		So(errors.Is(err, chspool.ErrManifestMismatch), ShouldBeTrue)
 		So(err.Error(), ShouldContainSubstring, chspool.TableDirFilterAgeAll)
+	})
+
+	Convey("D2.3 summarise spool load rejects manifests missing child full-filter table manifests", t, func() {
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		manifest := writeSummariseSpoolLoaderSchema3Spool(filepath.Join(t.TempDir(), "spool"), time.Date(
+			2026,
+			6,
+			9,
+			8,
+			0,
+			0,
+			0,
+			time.UTC,
+		))
+		delete(manifest.Tables, chspool.TableChildFilterAll)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		err := LoadSummariseSpool(ctx, cfg, filepath.Join(t.TempDir(), "unused"), manifest, nil)
+
+		So(errors.Is(err, chspool.ErrManifestMismatch), ShouldBeTrue)
+		So(err.Error(), ShouldContainSubstring, chspool.TableChildFilterAll)
+
+		conn, err := connectForImportFromConfig(cfg)
+		So(err, ShouldBeNil)
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+		So(summariseSpoolLoaderBlockedPublishRows(ctx, conn, manifest), ShouldEqual, uint64(0))
+	})
+
+	Convey("D2.4 summarise spool load rejects manifests missing active virtual table manifests", t, func() {
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		conn, err := connectForImportFromConfig(cfg)
+		So(err, ShouldBeNil)
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		for _, table := range []string{
+			chspool.TableActiveVirtualSummaries,
+			chspool.TableActiveVirtualFilterAll,
+			chspool.TableActiveVirtualChildren,
+			chspool.TableActiveVirtualSets,
+		} {
+			manifest := writeSummariseSpoolLoaderSchema3Spool(filepath.Join(t.TempDir(), "spool"), time.Date(
+				2026,
+				6,
+				9,
+				9,
+				0,
+				0,
+				0,
+				time.UTC,
+			))
+			delete(manifest.Tables, table)
+
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			err := LoadSummariseSpool(ctx, cfg, filepath.Join(t.TempDir(), "unused"), manifest, nil)
+
+			cancel()
+
+			So(errors.Is(err, chspool.ErrManifestMismatch), ShouldBeTrue)
+			So(err.Error(), ShouldContainSubstring, table)
+			So(summariseSpoolLoaderBlockedPublishRows(context.Background(), conn, manifest), ShouldEqual, uint64(0))
+		}
 	})
 
 	Convey("summarise spool reload is idempotent and does not duplicate basedirs history", t, func() {
@@ -338,7 +403,7 @@ func TestClickHouseSummariseSpoolLoader(t *testing.T) {
 			parentFactRows,
 			childRows,
 		)
-		conn := &lazyDGUTAImportConn{}
+		conn := &summariseSpoolLoaderLazyImportConn{}
 
 		loader, err := newSummariseSpoolLoader(Config{}, conn, spoolDir, manifest, nil)
 		So(err, ShouldBeNil)
@@ -353,6 +418,314 @@ func TestClickHouseSummariseSpoolLoader(t *testing.T) {
 		So(conn.totalRowsFor(insertChildrenQuery), ShouldEqual, childRows)
 		So(conn.maxRowsFor(insertChildrenQuery), ShouldBeLessThanOrEqualTo, defaultChildrenBatchSize)
 	})
+
+	Convey("D3.1 summarise spool loader publishes only after schema3 and active virtual readiness", t, func() {
+		spoolDir := filepath.Join(t.TempDir(), "spool")
+		updatedAt := time.Date(2026, 6, 9, 10, 0, 0, 0, time.UTC)
+		manifest := writeSummariseSpoolLoaderSchema3Spool(spoolDir, updatedAt)
+		conn := newSummariseSpoolLoaderSpyConn(manifest)
+
+		loader, err := newSummariseSpoolLoader(Config{}, conn, spoolDir, manifest, nil)
+		So(err, ShouldBeNil)
+
+		So(loader.load(context.Background()), ShouldBeNil)
+		So(conn.insertedRows(chspool.TableChildFilterAll), ShouldEqual, manifest.Tables[chspool.TableChildFilterAll].Rows)
+		So(conn.insertedRows(chspool.TableDirFilterAll), ShouldEqual, manifest.Tables[chspool.TableDirFilterAll].Rows)
+		So(conn.insertedRows(chspool.TableActiveVirtualSummaries),
+			ShouldEqual, manifest.Tables[chspool.TableActiveVirtualSummaries].Rows)
+		So(conn.insertedRows(chspool.TableActiveVirtualFilterAll),
+			ShouldEqual, manifest.Tables[chspool.TableActiveVirtualFilterAll].Rows)
+		So(conn.insertedRows(chspool.TableActiveVirtualChildren),
+			ShouldEqual, manifest.Tables[chspool.TableActiveVirtualChildren].Rows)
+		So(conn.insertedRows(chspool.TableActiveVirtualSets),
+			ShouldEqual, manifest.Tables[chspool.TableActiveVirtualSets].Rows)
+		So(conn.eventIndex("count "+chspool.TableDirFilterAll),
+			ShouldBeLessThan, conn.eventIndex("send "+chspool.TableSchema3SnapshotSets))
+		So(conn.eventIndex("send "+chspool.TableSchema3SnapshotSets),
+			ShouldBeLessThan, conn.eventIndex("send "+chspool.TableActiveVirtualSets))
+		So(conn.eventIndex("send "+chspool.TableActiveVirtualSets), ShouldBeLessThan, conn.eventIndex("publish"))
+		So(conn.publishedSID, ShouldEqual, manifest.SnapshotID)
+	})
+
+	Convey("D3.2 summarise spool loader blocks readiness when dir-filter rows mismatch", t, func() {
+		spoolDir := filepath.Join(t.TempDir(), "spool")
+		manifest := writeSummariseSpoolLoaderSchema3Spool(spoolDir, time.Date(2026, 6, 9, 11, 0, 0, 0, time.UTC))
+		conn := newSummariseSpoolLoaderSpyConn(manifest)
+		conn.countOverrides[chspool.TableDirFilterAll] = manifest.Tables[chspool.TableDirFilterAll].Rows - 1
+
+		loader, err := newSummariseSpoolLoader(Config{}, conn, spoolDir, manifest, nil)
+		So(err, ShouldBeNil)
+
+		err = loader.load(context.Background())
+
+		So(errors.Is(err, errSpoolLoadedRowsMismatch), ShouldBeTrue)
+		So(conn.insertedRows(chspool.TableSchema3SnapshotSets), ShouldEqual, 0)
+		So(conn.activePublishes(), ShouldEqual, 0)
+	})
+
+	Convey("D3.3 summarise spool loader drops stale partitions before deterministic retry publish", t, func() {
+		spoolDir := filepath.Join(t.TempDir(), "spool")
+		updatedAt := time.Date(2026, 6, 9, 12, 0, 0, 0, time.UTC)
+		manifest := writeSummariseSpoolLoaderSchema3Spool(spoolDir, updatedAt)
+		conn := newSummariseSpoolLoaderSpyConn(manifest)
+		conn.countOverrides[chspool.TableDirFilterAll] = manifest.Tables[chspool.TableDirFilterAll].Rows - 1
+
+		loader, err := newSummariseSpoolLoader(Config{}, conn, spoolDir, manifest, nil)
+		So(err, ShouldBeNil)
+		So(errors.Is(loader.load(context.Background()), errSpoolLoadedRowsMismatch), ShouldBeTrue)
+
+		delete(conn.countOverrides, chspool.TableDirFilterAll)
+		conn.resetEvents()
+
+		loader, err = newSummariseSpoolLoader(Config{}, conn, spoolDir, manifest, nil)
+		So(err, ShouldBeNil)
+		So(loader.load(context.Background()), ShouldBeNil)
+
+		So(conn.eventIndex("drop wrstat_dir_filter_all"),
+			ShouldBeLessThan, conn.eventIndex("send "+chspool.TableDirFilterAll))
+		So(conn.publishedSID, ShouldEqual, SnapshotID(testMountPath, updatedAt))
+	})
+
+	Convey("D3.4 summarise spool loader blocks active readiness when active virtual filters mismatch", t, func() {
+		spoolDir := filepath.Join(t.TempDir(), "spool")
+		manifest := writeSummariseSpoolLoaderSchema3Spool(spoolDir, time.Date(2026, 6, 9, 13, 0, 0, 0, time.UTC))
+		conn := newSummariseSpoolLoaderSpyConn(manifest)
+		conn.countOverrides[chspool.TableActiveVirtualFilterAll] =
+			manifest.Tables[chspool.TableActiveVirtualFilterAll].Rows - 1
+
+		loader, err := newSummariseSpoolLoader(Config{}, conn, spoolDir, manifest, nil)
+		So(err, ShouldBeNil)
+
+		err = loader.load(context.Background())
+
+		So(errors.Is(err, errSpoolLoadedRowsMismatch), ShouldBeTrue)
+		So(conn.insertedRows(chspool.TableSchema3SnapshotSets),
+			ShouldEqual, manifest.Tables[chspool.TableSchema3SnapshotSets].Rows)
+		So(conn.insertedRows(chspool.TableActiveVirtualSets), ShouldEqual, 0)
+		So(conn.activePublishes(), ShouldEqual, 0)
+	})
+
+	Convey("D3.5 summarise spool loader drops partial active virtual child partitions before retry", t, func() {
+		spoolDir := filepath.Join(t.TempDir(), "spool")
+		manifest := writeSummariseSpoolLoaderSchema3Spool(spoolDir, time.Date(2026, 6, 9, 14, 0, 0, 0, time.UTC))
+		conn := newSummariseSpoolLoaderSpyConn(manifest)
+		conn.countOverrides[chspool.TableActiveVirtualChildren] =
+			manifest.Tables[chspool.TableActiveVirtualChildren].Rows - 1
+
+		loader, err := newSummariseSpoolLoader(Config{}, conn, spoolDir, manifest, nil)
+		So(err, ShouldBeNil)
+		So(errors.Is(loader.load(context.Background()), errSpoolLoadedRowsMismatch), ShouldBeTrue)
+		So(conn.insertedRows(chspool.TableActiveVirtualSets), ShouldEqual, 0)
+		So(conn.activePublishes(), ShouldEqual, 0)
+
+		delete(conn.countOverrides, chspool.TableActiveVirtualChildren)
+		conn.resetEvents()
+
+		loader, err = newSummariseSpoolLoader(Config{}, conn, spoolDir, manifest, nil)
+		So(err, ShouldBeNil)
+		So(loader.load(context.Background()), ShouldBeNil)
+		So(conn.eventIndex("drop wrstat_active_virtual_children"),
+			ShouldBeLessThan, conn.eventIndex("send "+chspool.TableActiveVirtualChildren))
+	})
+}
+
+func writeSummariseSpoolLoaderSchema3Spool(
+	spoolDir string,
+	updatedAt time.Time,
+) *chspool.Manifest {
+	set, err := chspool.CreateSet(spoolDir)
+	So(err, ShouldBeNil)
+
+	sid := SnapshotID(testMountPath, updatedAt)
+	activeSetID := fingerprintForMountsActive([]mountsActiveRow{{
+		mountPath:  testMountPath,
+		snapshotID: sid,
+		updatedAt:  updatedAt,
+	}})
+	rootFact := summariseSpoolLoaderSchema2FactRow(sid, updatedAt, "/", 1)
+	namespaceFact := summariseSpoolLoaderSchema2FactRow(sid, updatedAt, "/mnt/", 1)
+	mountFact := summariseSpoolLoaderSchema2FactRow(sid, updatedAt, testMountPath, 1)
+	childFilter := summariseSpoolLoaderChildFilterAllRow(sid, updatedAt)
+	dirFilter := summariseSpoolLoaderDirFilterAllRow(childFilter)
+	writeErr := errors.Join(
+		set.WriteDirFact(rootFact),
+		set.WriteDirFact(namespaceFact),
+		set.WriteDirFact(mountFact),
+		set.WriteChild(chspool.ChildRow{
+			MountPath:  testMountPath,
+			SnapshotID: sid,
+			ParentDir:  testMountPath,
+			Child:      testMountPath + "project/",
+		}),
+		set.WriteDirFilterAgeAll(summariseSpoolLoaderSchema2AgeAllRow(rootFact)),
+		set.WriteDirFilterAgeAll(summariseSpoolLoaderSchema2AgeAllRow(namespaceFact)),
+		set.WriteParentFact(summariseSpoolLoaderSchema2ParentFactRow(mountFact, "/")),
+		set.WriteChildFilterAll(childFilter),
+		set.WriteDirFilterAll(dirFilter),
+		set.WriteDirProjectionSet(chspool.DirProjectionSetRow{
+			MountPath:   testMountPath,
+			SnapshotID:  sid,
+			UpdatedAt:   updatedAt,
+			RefreshedAt: updatedAt,
+		}),
+		set.WriteSchema3SnapshotSet(chspool.Schema3SnapshotSetRow{
+			MountPath:          testMountPath,
+			SnapshotID:         sid,
+			Schema3Version:     currentSchemaVersion,
+			DirFactsRows:       3,
+			ParentFactsRows:    1,
+			ChildrenRows:       1,
+			ChildFilterAllRows: 1,
+			DirFilterAllRows:   1,
+			ManifestSHA256:     "schema3-snapshot-test",
+			RefreshedAt:        updatedAt,
+		}),
+		set.WriteActiveVirtualSummary(summariseSpoolLoaderActiveVirtualSummaryRow(activeSetID, updatedAt)),
+		set.WriteActiveVirtualFilterAll(summariseSpoolLoaderActiveVirtualFilterRow(activeSetID, updatedAt)),
+		set.WriteActiveVirtualChild(chspool.ActiveVirtualChildRow{
+			ActiveSetID:    activeSetID,
+			ParentDir:      testRootMountPath,
+			ChildDir:       testMountPath,
+			MountPath:      testMountPath,
+			IsMountRootBox: 1,
+			ChildCount:     1,
+			RefreshedAt:    updatedAt,
+		}),
+		set.WriteActiveVirtualSet(chspool.ActiveVirtualSetRow{
+			ActiveSetID:      activeSetID,
+			Schema3Version:   currentSchemaVersion,
+			MountsSHA256:     activeSetID,
+			ActiveMountCount: 1,
+			SummaryRows:      1,
+			FilterRows:       1,
+			ChildRows:        1,
+			ManifestSHA256:   "active-virtual-test",
+			Ready:            1,
+			RefreshedAt:      updatedAt,
+		}),
+	)
+
+	So(writeErr, ShouldBeNil)
+	So(set.Close(), ShouldBeNil)
+
+	manifest := &chspool.Manifest{
+		Version:      chspool.Version,
+		Format:       chspool.Format,
+		State:        chspool.Complete,
+		MountPath:    testMountPath,
+		SnapshotID:   sid,
+		UpdatedAt:    updatedAt.UTC().Format(time.RFC3339Nano),
+		SchemaMarker: summariseSpoolLoaderSchemaMarker,
+		Tables:       set.TableManifests(),
+		CompletedAt:  time.Now().UTC().Format(time.RFC3339Nano),
+	}
+
+	So(chspool.WriteManifestAtomic(spoolDir, manifest), ShouldBeNil)
+
+	return manifest
+}
+
+func summariseSpoolLoaderChildFilterAllRow(sid string, updatedAt time.Time) chspool.ChildFilterAllRow {
+	return chspool.ChildFilterAllRow{
+		MountPath:         testMountPath,
+		SnapshotID:        sid,
+		ParentDir:         testMountPath,
+		Age:               uint8(db.DGUTAgeAll),
+		GID:               7,
+		UID:               17,
+		FT:                uint16(db.DGUTAFileTypeBam),
+		Dir:               testMountPath + "project/",
+		Count:             3,
+		Size:              30,
+		AtimeMin:          100,
+		MtimeMax:          200,
+		AtimeBuckets:      summariseSpoolLoaderSchema2Buckets(3),
+		MtimeBuckets:      summariseSpoolLoaderSchema2Buckets(3),
+		FilterChildCount:  1,
+		ChildCount:        1,
+		HasFilterChildren: 1,
+		HasChildren:       1,
+		RefreshedAt:       updatedAt,
+	}
+}
+
+func summariseSpoolLoaderDirFilterAllRow(row chspool.ChildFilterAllRow) chspool.DirFilterAllRow {
+	return chspool.DirFilterAllRow{
+		MountPath:         row.MountPath,
+		SnapshotID:        row.SnapshotID,
+		Age:               row.Age,
+		GID:               row.GID,
+		UID:               row.UID,
+		FT:                row.FT,
+		Dir:               row.Dir,
+		ParentDir:         row.ParentDir,
+		Count:             row.Count,
+		Size:              row.Size,
+		AtimeMin:          row.AtimeMin,
+		MtimeMax:          row.MtimeMax,
+		AtimeBuckets:      row.AtimeBuckets,
+		MtimeBuckets:      row.MtimeBuckets,
+		FilterChildCount:  row.FilterChildCount,
+		ChildCount:        row.ChildCount,
+		HasFilterChildren: row.HasFilterChildren,
+		HasChildren:       row.HasChildren,
+		RefreshedAt:       row.RefreshedAt,
+	}
+}
+
+func summariseSpoolLoaderActiveVirtualSummaryRow(
+	activeSetID string,
+	updatedAt time.Time,
+) chspool.ActiveVirtualSummaryRow {
+	return chspool.ActiveVirtualSummaryRow{
+		ActiveSetID:     activeSetID,
+		Dir:             testRootMountPath,
+		UpdatedAt:       updatedAt,
+		AllAtimeBuckets: summariseSpoolLoaderSchema2Buckets(0),
+		AllMtimeBuckets: summariseSpoolLoaderSchema2Buckets(0),
+		ChildCount:      1,
+		RefreshedAt:     updatedAt,
+	}
+}
+
+func summariseSpoolLoaderActiveVirtualFilterRow(
+	activeSetID string,
+	updatedAt time.Time,
+) chspool.ActiveVirtualFilterAllRow {
+	return chspool.ActiveVirtualFilterAllRow{
+		ActiveSetID:      activeSetID,
+		Dir:              testRootMountPath,
+		Age:              uint8(db.DGUTAgeAll),
+		AtimeBuckets:     summariseSpoolLoaderSchema2Buckets(0),
+		MtimeBuckets:     summariseSpoolLoaderSchema2Buckets(0),
+		FilterChildCount: 1,
+		ChildCount:       1,
+		RefreshedAt:      updatedAt,
+	}
+}
+
+func summariseSpoolLoaderBlockedPublishRows(
+	ctx context.Context,
+	conn driver.Conn,
+	manifest *chspool.Manifest,
+) uint64 {
+	return countRows(
+		ctx,
+		conn,
+		"SELECT count() FROM wrstat_schema3_snapshot_sets WHERE mount_path = ? AND snapshot_id = toUUID(?)",
+		manifest.MountPath,
+		manifest.SnapshotID,
+	) + countRows(
+		ctx,
+		conn,
+		"SELECT count() FROM wrstat_active_virtual_sets",
+	) + countRows(
+		ctx,
+		conn,
+		"SELECT count() FROM wrstat_mount_events WHERE mount_path = ? AND snapshot_id = toUUID(?)",
+		manifest.MountPath,
+		manifest.SnapshotID,
+	)
 }
 
 func writeSummariseSpoolLoaderTestSpool(
@@ -415,9 +788,9 @@ func writeSummariseSpoolLoaderSchema2PublishSpool(
 
 	sid := SnapshotID(testMountPath, updatedAt)
 
-	rootFact := summariseSpoolLoaderSchema2FactRow(sid, updatedAt, "/", 3, 0)
-	namespaceFact := summariseSpoolLoaderSchema2FactRow(sid, updatedAt, "/mnt/", 3, 0)
-	mountFact := summariseSpoolLoaderSchema2FactRow(sid, updatedAt, testMountPath, 3, 1)
+	rootFact := summariseSpoolLoaderSchema2FactRow(sid, updatedAt, "/", 0)
+	namespaceFact := summariseSpoolLoaderSchema2FactRow(sid, updatedAt, "/mnt/", 0)
+	mountFact := summariseSpoolLoaderSchema2FactRow(sid, updatedAt, testMountPath, 1)
 	writeErr := errors.Join(
 		set.WriteDirFact(rootFact),
 		set.WriteDirFact(namespaceFact),
@@ -457,9 +830,10 @@ func summariseSpoolLoaderSchema2FactRow(
 	sid string,
 	updatedAt time.Time,
 	dir string,
-	count uint64,
 	childCount uint64,
 ) chspool.DirFactRow {
+	const count uint64 = 3
+
 	size := count * 10
 	buckets := summariseSpoolLoaderSchema2Buckets(count)
 
@@ -677,6 +1051,14 @@ func writeSummariseSpoolLoaderSchema2BatchSpool(
 	return manifest
 }
 
+func newSummariseSpoolLoaderSpyConn(manifest *chspool.Manifest) *summariseSpoolLoaderSpyConn {
+	return &summariseSpoolLoaderSpyConn{
+		manifest:       manifest,
+		batches:        map[string][]*summariseSpoolLoaderSpyBatch{},
+		countOverrides: map[string]uint64{},
+	}
+}
+
 type summariseSpoolHistoryDeleteDeadlineConn struct {
 	bootstrapTestConn
 
@@ -706,4 +1088,292 @@ func (c *summariseSpoolHistoryDeleteDeadlineConn) Exec(
 	c.cleanupDeadlineCalls++
 
 	return c.err
+}
+
+type summariseSpoolLoaderLazyImportConn struct {
+	lazyDGUTAImportConn
+}
+
+func (c *summariseSpoolLoaderLazyImportConn) QueryRow(
+	_ context.Context,
+	query string,
+	_ ...any,
+) driver.Row {
+	table := summariseSpoolLoaderCountQueryTable(query)
+	if table == "" {
+		return summariseSpoolCountRow{err: errBootstrapTestUnexpectedCall}
+	}
+
+	insertQuery := summariseSpoolLoaderInsertQuery(table)
+	if insertQuery == "" {
+		return summariseSpoolCountRow{err: errBootstrapTestUnexpectedCall}
+	}
+
+	return summariseSpoolCountRow{value: summariseSpoolLoaderUint64ForTest(c.totalRowsFor(insertQuery))}
+}
+
+func summariseSpoolLoaderCountQueryTable(query string) string {
+	for spoolTable, chTable := range summariseSpoolLoaderCHTables() {
+		if strings.Contains(query, "FROM "+chTable+" ") {
+			return spoolTable
+		}
+	}
+
+	return ""
+}
+
+func summariseSpoolLoaderInsertQuery(table string) string {
+	switch table {
+	case chspool.TableFiles:
+		return insertFilesBatchQuery
+	case chspool.TableDirFacts:
+		return insertMountDirSummaryQuery
+	case chspool.TableChildren:
+		return insertChildrenQuery
+	case chspool.TableParentFacts:
+		return insertParentFactsQuery
+	case chspool.TableDirFilterAgeAll:
+		return insertDirFilterAgeAllQuery
+	case chspool.TableChildFilterAll:
+		return insertChildFilterAllQuery
+	case chspool.TableDirFilterAll:
+		return insertDirFilterAllQuery
+	case chspool.TableDirProjectionSets:
+		return insertMountDirSummarySetQuery
+	case chspool.TableSchema3SnapshotSets:
+		return insertSchema3SnapshotSetQuery
+	case chspool.TableActiveVirtualSummaries:
+		return insertActiveVirtualSummaryQuery
+	case chspool.TableActiveVirtualFilterAll:
+		return insertActiveVirtualFilterAllQuery
+	case chspool.TableActiveVirtualChildren:
+		return insertActiveVirtualChildQuery
+	case chspool.TableActiveVirtualSets:
+		return insertActiveVirtualSetQuery
+	case chspool.TableBasedirsGroupUsage:
+		return insertBasedirsGroupUsageQuery
+	case chspool.TableBasedirsUserUsage:
+		return insertBasedirsUserUsageQuery
+	case chspool.TableBasedirsGroupSubdirs:
+		return insertBasedirsGroupSubdirsQuery
+	case chspool.TableBasedirsUserSubdirs:
+		return insertBasedirsUserSubdirsQuery
+	default:
+		return ""
+	}
+}
+
+func summariseSpoolLoaderUint64ForTest(n int) uint64 {
+	if n < 0 {
+		return 0
+	}
+
+	return uint64(n)
+}
+
+type summariseSpoolLoaderSpyConn struct {
+	bootstrapTestConn
+
+	manifest       *chspool.Manifest
+	batches        map[string][]*summariseSpoolLoaderSpyBatch
+	events         []string
+	countOverrides map[string]uint64
+	activeEvents   int
+	publishedSID   string
+}
+
+func (c *summariseSpoolLoaderSpyConn) Query(
+	_ context.Context,
+	query string,
+	_ ...any,
+) (driver.Rows, error) {
+	switch query {
+	case activeSnapshotQuery:
+		return &dgutaWriterCloseContextRows{columns: []string{dgutaWriterTestSnapshotIDColumn}}, nil
+	case mountsActiveRowsQuery:
+		return emptyMountsActiveRowsForTest(), nil
+	default:
+		return nil, errBootstrapTestUnexpectedCall
+	}
+}
+
+func (c *summariseSpoolLoaderSpyConn) QueryRow(
+	_ context.Context,
+	query string,
+	_ ...any,
+) driver.Row {
+	table := summariseSpoolLoaderCountQueryTable(query)
+	if table == "" {
+		return summariseSpoolCountRow{err: errBootstrapTestUnexpectedCall}
+	}
+
+	c.recordEvent("count " + table)
+
+	if got, ok := c.countOverrides[table]; ok {
+		return summariseSpoolCountRow{value: got}
+	}
+
+	return summariseSpoolCountRow{value: c.insertedRows(table)}
+}
+
+func (c *summariseSpoolLoaderSpyConn) PrepareBatch(
+	_ context.Context,
+	query string,
+	_ ...driver.PrepareBatchOption,
+) (driver.Batch, error) {
+	table := summariseSpoolLoaderInsertQueryTable(query)
+	if table == "" {
+		return nil, errBootstrapTestUnexpectedCall
+	}
+
+	batch := &summariseSpoolLoaderSpyBatch{
+		b1ImportSQLSpyBatch: b1ImportSQLSpyBatch{},
+		conn:                c,
+		table:               table,
+	}
+	c.batches[table] = append(c.batches[table], batch)
+
+	return batch, nil
+}
+
+func summariseSpoolLoaderInsertQueryTable(query string) string {
+	switch query {
+	case insertFilesBatchQuery:
+		return chspool.TableFiles
+	case insertMountDirSummaryQuery:
+		return chspool.TableDirFacts
+	case insertChildrenQuery:
+		return chspool.TableChildren
+	case insertParentFactsQuery:
+		return chspool.TableParentFacts
+	case insertDirFilterAgeAllQuery:
+		return chspool.TableDirFilterAgeAll
+	case insertChildFilterAllQuery:
+		return chspool.TableChildFilterAll
+	case insertDirFilterAllQuery:
+		return chspool.TableDirFilterAll
+	case insertMountDirSummarySetQuery:
+		return chspool.TableDirProjectionSets
+	case insertSchema3SnapshotSetQuery:
+		return chspool.TableSchema3SnapshotSets
+	case insertActiveVirtualSummaryQuery:
+		return chspool.TableActiveVirtualSummaries
+	case insertActiveVirtualFilterAllQuery:
+		return chspool.TableActiveVirtualFilterAll
+	case insertActiveVirtualChildQuery:
+		return chspool.TableActiveVirtualChildren
+	case insertActiveVirtualSetQuery:
+		return chspool.TableActiveVirtualSets
+	case insertBasedirsGroupUsageQuery:
+		return chspool.TableBasedirsGroupUsage
+	case insertBasedirsUserUsageQuery:
+		return chspool.TableBasedirsUserUsage
+	case insertBasedirsGroupSubdirsQuery:
+		return chspool.TableBasedirsGroupSubdirs
+	case insertBasedirsUserSubdirsQuery:
+		return chspool.TableBasedirsUserSubdirs
+	default:
+		return ""
+	}
+}
+
+func (c *summariseSpoolLoaderSpyConn) Exec(_ context.Context, query string, args ...any) error {
+	switch {
+	case query == switchSnapshotQuery:
+		c.activeEvents++
+
+		sid, ok := args[1].(string)
+		if !ok {
+			return errBootstrapTestUnexpectedCall
+		}
+
+		c.publishedSID = sid
+		c.recordEvent("publish")
+
+		return nil
+	case strings.HasPrefix(query, "ALTER TABLE"):
+		table := alterTableNameForTest(query)
+		c.recordEvent("drop " + table)
+		c.batches[summariseSpoolLoaderCHTableToSpoolTable(table)] = nil
+
+		return nil
+	default:
+		return errBootstrapTestUnexpectedCall
+	}
+}
+
+func summariseSpoolLoaderCHTableToSpoolTable(table string) string {
+	for spoolTable, chTable := range summariseSpoolLoaderCHTables() {
+		if chTable == table {
+			return spoolTable
+		}
+	}
+
+	return ""
+}
+
+func (c *summariseSpoolLoaderSpyConn) insertedRows(table string) uint64 {
+	var count uint64
+	for _, batch := range c.batches[table] {
+		count += summariseSpoolLoaderUint64ForTest(batch.appended)
+	}
+
+	return count
+}
+
+func (c *summariseSpoolLoaderSpyConn) activePublishes() int {
+	return c.activeEvents
+}
+
+func (c *summariseSpoolLoaderSpyConn) eventIndex(event string) int {
+	for i, got := range c.events {
+		if got == event {
+			return i
+		}
+	}
+
+	return -1
+}
+
+func (c *summariseSpoolLoaderSpyConn) recordEvent(event string) {
+	c.events = append(c.events, event)
+}
+
+func (c *summariseSpoolLoaderSpyConn) resetEvents() {
+	c.events = nil
+}
+
+type summariseSpoolLoaderSpyBatch struct {
+	b1ImportSQLSpyBatch
+
+	conn  *summariseSpoolLoaderSpyConn
+	table string
+}
+
+func (b *summariseSpoolLoaderSpyBatch) Send() error {
+	b.conn.recordEvent("send " + b.table)
+
+	return b.b1ImportSQLSpyBatch.Send()
+}
+
+func summariseSpoolLoaderCHTables() map[string]string {
+	return map[string]string{
+		chspool.TableFiles:                  chspool.TableFiles,
+		chspool.TableDirFacts:               chspool.TableDirFacts,
+		chspool.TableChildren:               chspool.TableChildren,
+		chspool.TableParentFacts:            chspool.TableParentFacts,
+		chspool.TableDirFilterAgeAll:        chspool.TableDirFilterAgeAll,
+		chspool.TableChildFilterAll:         chspool.TableChildFilterAll,
+		chspool.TableDirFilterAll:           chspool.TableDirFilterAll,
+		chspool.TableDirProjectionSets:      chspool.TableDirProjectionSets,
+		chspool.TableSchema3SnapshotSets:    chspool.TableSchema3SnapshotSets,
+		chspool.TableActiveVirtualSummaries: chspool.TableActiveVirtualSummaries,
+		chspool.TableActiveVirtualFilterAll: chspool.TableActiveVirtualFilterAll,
+		chspool.TableActiveVirtualChildren:  chspool.TableActiveVirtualChildren,
+		chspool.TableActiveVirtualSets:      chspool.TableActiveVirtualSets,
+		chspool.TableBasedirsGroupUsage:     chspool.TableBasedirsGroupUsage,
+		chspool.TableBasedirsUserUsage:      chspool.TableBasedirsUserUsage,
+		chspool.TableBasedirsGroupSubdirs:   chspool.TableBasedirsGroupSubdirs,
+		chspool.TableBasedirsUserSubdirs:    chspool.TableBasedirsUserSubdirs,
+	}
 }

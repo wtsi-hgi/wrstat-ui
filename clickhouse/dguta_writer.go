@@ -1603,48 +1603,6 @@ func (w *dgutaWriter) switchSnapshotOrCleanup(ctx context.Context) error {
 	return nil
 }
 
-func (w *dgutaWriter) dropPreviousSnapshotPartitions(ctx context.Context, previousSID string) error {
-	// Idempotent retry: if previous snapshot id equals the new snapshot id,
-	// do not drop partitions (we would drop the data we just wrote).
-	if previousSID == w.snapshot.String() {
-		return nil
-	}
-
-	cleanupCtx, cleanupCancel := queryContext(context.WithoutCancel(ctx), activeSnapshotCleanupTimeout)
-	defer cleanupCancel()
-
-	return w.timeImportPhase(importPhaseOldSnapshotDrop, func() error {
-		if err := w.dropAllSnapshotPartitions(cleanupCtx, previousSID); err != nil {
-			return fmt.Errorf("clickhouse: %s: mount_path=%s snapshot_id=%s: %w",
-				importPhaseOldSnapshotDrop, w.mountPath, previousSID, err)
-		}
-
-		return nil
-	})
-}
-
-func (w *dgutaWriter) dropPreviousActiveVirtualPartitions(
-	ctx context.Context,
-	activeSetID string,
-	nextActiveSetID string,
-) error {
-	if activeSetID == "" || activeSetID == nextActiveSetID {
-		return nil
-	}
-
-	cleanupCtx, cleanupCancel := queryContext(context.WithoutCancel(ctx), activeSnapshotCleanupTimeout)
-	defer cleanupCancel()
-
-	return w.timeImportPhase(importPhaseOldSnapshotDrop, func() error {
-		if err := w.dropActiveVirtualPartitions(cleanupCtx, activeSetID); err != nil {
-			return fmt.Errorf("clickhouse: %s: active_set_id=%s: %w",
-				importPhaseOldSnapshotDrop, activeSetID, err)
-		}
-
-		return nil
-	})
-}
-
 func (w *dgutaWriter) readPreviousActiveSnapshotID(ctx context.Context) (string, bool, error) {
 	return readActiveSnapshotID(ctx, w.conn, w.mountPath)
 }

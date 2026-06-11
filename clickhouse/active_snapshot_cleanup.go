@@ -733,3 +733,94 @@ func snapshotCleanupTargetIsActive(
 func activeSnapshotCleanupContext() (context.Context, context.CancelFunc) {
 	return queryContext(context.Background(), activeSnapshotCleanupTimeout)
 }
+
+func guardPublishedActiveSnapshot(ctx context.Context, conn ch.Conn, mountPath string, expectedSID string) error {
+	activeSID, hasActive, err := readActiveSnapshotID(ctx, conn, mountPath)
+	if err != nil {
+		return err
+	}
+
+	if hasActive && activeSID == expectedSID {
+		return nil
+	}
+
+	found := "<none>"
+	if hasActive {
+		found = activeSID
+	}
+
+	return fmt.Errorf(
+		"%w: mount_path=%s snapshot_id=%s changed after publish; active_snapshot_id=%s",
+		errActiveSnapshotStillActive,
+		mountPath,
+		expectedSID,
+		found,
+	)
+}
+
+func guardPublishedActiveSet(ctx context.Context, conn ch.Conn, expectedActiveSetID string) error {
+	rows, err := queryMountsActiveRows(ctx, conn)
+	if err != nil {
+		return err
+	}
+
+	activeSetID := fingerprintForMountsActive(rows)
+	if activeSetID == expectedActiveSetID {
+		return nil
+	}
+
+	return fmt.Errorf(
+		"%w: active_set_id=%s changed after publish; current_active_set_id=%s",
+		errActiveSnapshotStillActive,
+		expectedActiveSetID,
+		activeSetID,
+	)
+}
+
+func (w *dgutaWriter) dropPreviousSnapshotPartitions(ctx context.Context, previousSID string) error {
+	if previousSID == w.snapshot.String() {
+		return nil
+	}
+
+	cleanupCtx, cleanupCancel := queryContext(context.WithoutCancel(ctx), activeSnapshotCleanupTimeout)
+	defer cleanupCancel()
+
+	return w.timeImportPhase(importPhaseOldSnapshotDrop, func() error {
+		if err := guardPublishedActiveSnapshot(cleanupCtx, w.conn, w.mountPath, w.snapshot.String()); err != nil {
+			return err
+		}
+
+		if err := w.dropAllSnapshotPartitions(cleanupCtx, previousSID); err != nil {
+			return fmt.Errorf("clickhouse: %s: mount_path=%s snapshot_id=%s: %w",
+				importPhaseOldSnapshotDrop, w.mountPath, previousSID, err)
+		}
+
+		return nil
+	})
+}
+
+func (w *dgutaWriter) dropPreviousActiveVirtualPartitions(
+	ctx context.Context,
+	activeSetID string,
+	nextActiveSetID string,
+) error {
+	if activeSetID == "" || activeSetID == nextActiveSetID {
+		return nil
+	}
+
+	cleanupCtx, cleanupCancel := queryContext(context.WithoutCancel(ctx), activeSnapshotCleanupTimeout)
+	defer cleanupCancel()
+
+	return w.timeImportPhase(importPhaseOldSnapshotDrop, func() error {
+		if err := guardPublishedActiveSet(cleanupCtx, w.conn, nextActiveSetID); err != nil {
+			return err
+		}
+
+		if err := w.dropActiveVirtualPartitions(cleanupCtx, activeSetID); err != nil {
+			return fmt.Errorf("clickhouse: %s: active_set_id=%s: %w",
+				importPhaseOldSnapshotDrop, activeSetID, err)
+		}
+
+		return nil
+	})
+}

@@ -27,6 +27,8 @@ package chspool
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -36,9 +38,53 @@ import (
 const (
 	chspoolTestMountPath  = "/mnt/test/"
 	chspoolTestSnapshotID = "00000000-0000-0000-0000-000000000001"
+	chspoolTestActiveSet  = "active-set"
+	chspoolTestVirtualDir = "/mnt/"
 )
 
 func TestVerifyManifest(t *testing.T) {
+	Convey("D2.1 closed spool manifests all schema3 tables in order with verified metadata", t, func() {
+		dir := t.TempDir()
+		tables := writeChspoolTestSet(dir)
+		expected := newChspoolTestManifest("/out/expected", tables)
+
+		So(WriteManifestAtomic(dir, expected), ShouldBeNil)
+
+		got, err := ReadManifest(dir)
+		So(err, ShouldBeNil)
+		So(VerifyManifest(dir, got, *expected), ShouldBeNil)
+
+		for _, table := range TableOrder() {
+			tm, ok := got.Tables[table]
+			So(ok, ShouldBeTrue)
+			So(tm.Table, ShouldEqual, table)
+			So(tm.Path, ShouldEqual, table+".gob.gz")
+			So(tm.Bytes, ShouldBeGreaterThan, int64(0))
+			So(tm.SHA256, ShouldNotBeBlank)
+		}
+	})
+
+	Convey("D2.2 VerifyManifest rejects a changed schema3 spool file", t, func() {
+		dir := t.TempDir()
+		tables := writeChspoolTestSet(dir)
+		expected := newChspoolTestManifest("/out/expected", tables)
+		So(WriteManifestAtomic(dir, expected), ShouldBeNil)
+
+		path := filepath.Join(dir, TableChildFilterAll+".gob.gz")
+		fh, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+		So(err, ShouldBeNil)
+		_, err = fh.WriteString("changed")
+		So(err, ShouldBeNil)
+		So(fh.Close(), ShouldBeNil)
+
+		got, err := ReadManifest(dir)
+		So(err, ShouldBeNil)
+		err = VerifyManifest(dir, got, *expected)
+
+		So(errors.Is(err, ErrManifestMismatch), ShouldBeTrue)
+		So(err.Error(), ShouldContainSubstring, TableChildFilterAll)
+	})
+
 	Convey("VerifyManifest rejects a completed spool for a different output dir", t, func() {
 		dir := t.TempDir()
 		tables := writeChspoolTestSet(dir)
@@ -67,6 +113,40 @@ func TestVerifyManifest(t *testing.T) {
 		So(errors.Is(err, ErrManifestMismatch), ShouldBeTrue)
 		So(err.Error(), ShouldContainSubstring, "row count")
 	})
+
+	Convey("D2.5 VerifyManifest rejects active virtual set decoded row-count mismatches", t, func() {
+		dir := t.TempDir()
+		tables := writeChspoolTestSet(dir)
+		expected := newChspoolTestManifest("/out/expected", tables)
+		tampered := cloneChspoolTestTables(tables)
+		table := tampered[TableActiveVirtualSets]
+		table.Rows = 0
+		tampered[TableActiveVirtualSets] = table
+		got := newChspoolTestManifest("/out/expected", tampered)
+
+		err := VerifyManifest(dir, got, *expected)
+
+		So(errors.Is(err, ErrManifestMismatch), ShouldBeTrue)
+		So(err.Error(), ShouldContainSubstring, TableActiveVirtualSets)
+		So(err.Error(), ShouldContainSubstring, "row count")
+	})
+
+	Convey("D2.6 VerifyManifest rejects active virtual child decoded row-count mismatches", t, func() {
+		dir := t.TempDir()
+		tables := writeChspoolTestSet(dir)
+		expected := newChspoolTestManifest("/out/expected", tables)
+		tampered := cloneChspoolTestTables(tables)
+		table := tampered[TableActiveVirtualChildren]
+		table.Rows = 0
+		tampered[TableActiveVirtualChildren] = table
+		got := newChspoolTestManifest("/out/expected", tampered)
+
+		err := VerifyManifest(dir, got, *expected)
+
+		So(errors.Is(err, ErrManifestMismatch), ShouldBeTrue)
+		So(err.Error(), ShouldContainSubstring, TableActiveVirtualChildren)
+		So(err.Error(), ShouldContainSubstring, "row count")
+	})
 }
 
 func writeChspoolTestSet(dir string) map[string]TableManifest {
@@ -82,9 +162,136 @@ func writeChspoolTestSet(dir string) map[string]TableManifest {
 		MTime:      time.Unix(2, 0).UTC(),
 		CTime:      time.Unix(3, 0).UTC(),
 	}), ShouldBeNil)
+	So(writeChspoolSchema3TestRows(set), ShouldBeNil)
 	So(set.Close(), ShouldBeNil)
 
 	return set.TableManifests()
+}
+
+func writeChspoolSchema3TestRows(set *Set) error {
+	refreshedAt := time.Unix(6, 0).UTC()
+	buckets := []uint64{1, 2, 3, 4, 5, 6, 7, 8, 9}
+
+	if err := set.WriteChildFilterAll(ChildFilterAllRow{
+		MountPath:         chspoolTestMountPath,
+		SnapshotID:        chspoolTestSnapshotID,
+		ParentDir:         chspoolTestMountPath,
+		Age:               255,
+		GID:               7,
+		UID:               17,
+		FT:                1,
+		Dir:               chspoolTestMountPath + "project/",
+		Count:             2,
+		Size:              3,
+		AtimeMin:          4,
+		MtimeMax:          5,
+		AtimeBuckets:      buckets,
+		MtimeBuckets:      buckets,
+		FilterChildCount:  1,
+		ChildCount:        1,
+		HasFilterChildren: 1,
+		HasChildren:       1,
+		RefreshedAt:       refreshedAt,
+	}); err != nil {
+		return err
+	}
+
+	if err := set.WriteDirFilterAll(DirFilterAllRow{
+		MountPath:         chspoolTestMountPath,
+		SnapshotID:        chspoolTestSnapshotID,
+		Age:               255,
+		GID:               7,
+		UID:               17,
+		FT:                1,
+		Dir:               chspoolTestMountPath + "project/",
+		ParentDir:         chspoolTestMountPath,
+		Count:             2,
+		Size:              3,
+		AtimeMin:          4,
+		MtimeMax:          5,
+		AtimeBuckets:      buckets,
+		MtimeBuckets:      buckets,
+		FilterChildCount:  1,
+		ChildCount:        1,
+		HasFilterChildren: 1,
+		HasChildren:       1,
+		RefreshedAt:       refreshedAt,
+	}); err != nil {
+		return err
+	}
+
+	if err := set.WriteSchema3SnapshotSet(Schema3SnapshotSetRow{
+		MountPath:          chspoolTestMountPath,
+		SnapshotID:         chspoolTestSnapshotID,
+		Schema3Version:     1,
+		DirFactsRows:       1,
+		ParentFactsRows:    1,
+		ChildrenRows:       1,
+		ChildFilterAllRows: 1,
+		DirFilterAllRows:   1,
+		ManifestSHA256:     "snapshot-manifest",
+		RefreshedAt:        refreshedAt,
+	}); err != nil {
+		return err
+	}
+
+	return writeChspoolActiveVirtualTestRows(set, refreshedAt, buckets)
+}
+
+func writeChspoolActiveVirtualTestRows(set *Set, refreshedAt time.Time, buckets []uint64) error {
+	if err := set.WriteActiveVirtualSummary(ActiveVirtualSummaryRow{
+		ActiveSetID:     chspoolTestActiveSet,
+		Dir:             chspoolTestVirtualDir,
+		MountPath:       chspoolTestMountPath,
+		IsMountRootBox:  1,
+		UpdatedAt:       time.Unix(7, 0).UTC(),
+		AllAtimeBuckets: buckets,
+		AllMtimeBuckets: buckets,
+		AllUIDs:         []uint32{17},
+		AllGIDs:         []uint32{7},
+		ChildCount:      1,
+		RefreshedAt:     refreshedAt,
+	}); err != nil {
+		return err
+	}
+
+	if err := set.WriteActiveVirtualFilterAll(ActiveVirtualFilterAllRow{
+		ActiveSetID:      chspoolTestActiveSet,
+		Dir:              chspoolTestVirtualDir,
+		Age:              255,
+		AtimeBuckets:     buckets,
+		MtimeBuckets:     buckets,
+		FilterChildCount: 1,
+		ChildCount:       1,
+		RefreshedAt:      refreshedAt,
+	}); err != nil {
+		return err
+	}
+
+	if err := set.WriteActiveVirtualChild(ActiveVirtualChildRow{
+		ActiveSetID:    chspoolTestActiveSet,
+		ParentDir:      "/",
+		ChildDir:       chspoolTestVirtualDir,
+		MountPath:      chspoolTestMountPath,
+		IsMountRootBox: 1,
+		ChildCount:     1,
+		RefreshedAt:    refreshedAt,
+	}); err != nil {
+		return err
+	}
+
+	return set.WriteActiveVirtualSet(ActiveVirtualSetRow{
+		ActiveSetID:      chspoolTestActiveSet,
+		Schema3Version:   1,
+		MountsSHA256:     chspoolTestActiveSet,
+		ActiveMountCount: 1,
+		SummaryRows:      1,
+		FilterRows:       1,
+		ChildRows:        1,
+		ManifestSHA256:   "active-manifest",
+		Ready:            1,
+		RefreshedAt:      refreshedAt,
+	})
 }
 
 func newChspoolTestManifest(outputDir string, tables map[string]TableManifest) *Manifest {

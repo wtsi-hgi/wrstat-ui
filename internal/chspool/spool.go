@@ -51,17 +51,24 @@ const (
 	// only, and low-risk; RowBinary can be added behind the same table boundary.
 	Format = "gob-gzip-v1"
 
-	TableFiles                = "wrstat_files"
-	TableChildren             = "wrstat_children"
-	TableDirFacts             = "wrstat_dir_facts"
-	TableDirFilterAgeAll      = "wrstat_dir_filter_ageall"
-	TableParentFacts          = "wrstat_parent_facts"
-	TableDirProjectionSets    = "wrstat_dir_projection_sets"
-	TableBasedirsHistory      = "wrstat_basedirs_history"
-	TableBasedirsGroupUsage   = "wrstat_basedirs_group_usage"
-	TableBasedirsUserUsage    = "wrstat_basedirs_user_usage"
-	TableBasedirsGroupSubdirs = "wrstat_basedirs_group_subdirs"
-	TableBasedirsUserSubdirs  = "wrstat_basedirs_user_subdirs"
+	TableFiles                  = "wrstat_files"
+	TableChildren               = "wrstat_children"
+	TableDirFacts               = "wrstat_dir_facts"
+	TableDirFilterAgeAll        = "wrstat_dir_filter_ageall"
+	TableParentFacts            = "wrstat_parent_facts"
+	TableChildFilterAll         = "wrstat_child_filter_all"
+	TableDirFilterAll           = "wrstat_dir_filter_all"
+	TableSchema3SnapshotSets    = "wrstat_schema3_snapshot_sets"
+	TableActiveVirtualSummaries = "wrstat_active_virtual_summaries"
+	TableActiveVirtualFilterAll = "wrstat_active_virtual_filter_all"
+	TableActiveVirtualChildren  = "wrstat_active_virtual_children"
+	TableActiveVirtualSets      = "wrstat_active_virtual_sets"
+	TableDirProjectionSets      = "wrstat_dir_projection_sets"
+	TableBasedirsHistory        = "wrstat_basedirs_history"
+	TableBasedirsGroupUsage     = "wrstat_basedirs_group_usage"
+	TableBasedirsUserUsage      = "wrstat_basedirs_user_usage"
+	TableBasedirsGroupSubdirs   = "wrstat_basedirs_group_subdirs"
+	TableBasedirsUserSubdirs    = "wrstat_basedirs_user_subdirs"
 )
 
 var ErrManifestMismatch = errors.New("clickhouse spool manifest mismatch")
@@ -74,6 +81,13 @@ var tableOrder = []string{ //nolint:gochecknoglobals
 	TableDirFilterAgeAll,
 	TableParentFacts,
 	TableChildren,
+	TableChildFilterAll,
+	TableDirFilterAll,
+	TableSchema3SnapshotSets,
+	TableActiveVirtualSummaries,
+	TableActiveVirtualFilterAll,
+	TableActiveVirtualChildren,
+	TableActiveVirtualSets,
 	TableDirProjectionSets,
 	TableBasedirsHistory,
 	TableBasedirsGroupUsage,
@@ -211,6 +225,20 @@ func countRows(path string, table string) (uint64, error) { //nolint:gocyclo,cyc
 		return countDecodedRows[DirFilterAgeAllRow](path, table)
 	case TableParentFacts:
 		return countDecodedRows[ParentFactRow](path, table)
+	case TableChildFilterAll:
+		return countDecodedRows[ChildFilterAllRow](path, table)
+	case TableDirFilterAll:
+		return countDecodedRows[DirFilterAllRow](path, table)
+	case TableSchema3SnapshotSets:
+		return countDecodedRows[Schema3SnapshotSetRow](path, table)
+	case TableActiveVirtualSummaries:
+		return countDecodedRows[ActiveVirtualSummaryRow](path, table)
+	case TableActiveVirtualFilterAll:
+		return countDecodedRows[ActiveVirtualFilterAllRow](path, table)
+	case TableActiveVirtualChildren:
+		return countDecodedRows[ActiveVirtualChildRow](path, table)
+	case TableActiveVirtualSets:
+		return countDecodedRows[ActiveVirtualSetRow](path, table)
 	case TableDirProjectionSets:
 		return countDecodedRows[DirProjectionSetRow](path, table)
 	case TableBasedirsHistory:
@@ -449,6 +477,125 @@ type ParentFactRow struct {
 	RefreshedAt      time.Time
 }
 
+type ChildFilterAllRow struct {
+	MountPath         string
+	SnapshotID        string
+	ParentDir         string
+	Age               uint8
+	GID               uint32
+	UID               uint32
+	FT                uint16
+	Dir               string
+	Count             uint64
+	Size              uint64
+	AtimeMin          int64
+	MtimeMax          int64
+	AtimeBuckets      []uint64
+	MtimeBuckets      []uint64
+	FilterChildCount  uint64
+	ChildCount        uint64
+	HasFilterChildren uint8
+	HasChildren       uint8
+	RefreshedAt       time.Time
+}
+
+type DirFilterAllRow struct {
+	MountPath         string
+	SnapshotID        string
+	Age               uint8
+	GID               uint32
+	UID               uint32
+	FT                uint16
+	Dir               string
+	ParentDir         string
+	Count             uint64
+	Size              uint64
+	AtimeMin          int64
+	MtimeMax          int64
+	AtimeBuckets      []uint64
+	MtimeBuckets      []uint64
+	FilterChildCount  uint64
+	ChildCount        uint64
+	HasFilterChildren uint8
+	HasChildren       uint8
+	RefreshedAt       time.Time
+}
+
+type Schema3SnapshotSetRow struct {
+	MountPath          string
+	SnapshotID         string
+	Schema3Version     uint32
+	DirFactsRows       uint64
+	ParentFactsRows    uint64
+	ChildrenRows       uint64
+	ChildFilterAllRows uint64
+	DirFilterAllRows   uint64
+	ManifestSHA256     string
+	RefreshedAt        time.Time
+}
+
+type ActiveVirtualSummaryRow struct {
+	ActiveSetID     string
+	Dir             string
+	MountPath       string
+	IsMountRootBox  uint8
+	UpdatedAt       time.Time
+	AllCount        uint64
+	AllSize         uint64
+	AllAtimeMin     int64
+	AllMtimeMax     int64
+	AllAtimeBuckets []uint64
+	AllMtimeBuckets []uint64
+	AllUIDs         []uint32
+	AllGIDs         []uint32
+	AllFT           uint16
+	FileCount       uint64
+	FileSize        uint64
+	ChildCount      uint64
+	RefreshedAt     time.Time
+}
+
+type ActiveVirtualFilterAllRow struct {
+	ActiveSetID      string
+	Dir              string
+	Age              uint8
+	GID              uint32
+	UID              uint32
+	FT               uint16
+	Count            uint64
+	Size             uint64
+	AtimeMin         int64
+	MtimeMax         int64
+	AtimeBuckets     []uint64
+	MtimeBuckets     []uint64
+	FilterChildCount uint64
+	ChildCount       uint64
+	RefreshedAt      time.Time
+}
+
+type ActiveVirtualChildRow struct {
+	ActiveSetID    string
+	ParentDir      string
+	ChildDir       string
+	MountPath      string
+	IsMountRootBox uint8
+	ChildCount     uint64
+	RefreshedAt    time.Time
+}
+
+type ActiveVirtualSetRow struct {
+	ActiveSetID      string
+	Schema3Version   uint32
+	MountsSHA256     string
+	ActiveMountCount uint64
+	SummaryRows      uint64
+	FilterRows       uint64
+	ChildRows        uint64
+	ManifestSHA256   string
+	Ready            uint8
+	RefreshedAt      time.Time
+}
+
 type DirProjectionSetRow struct {
 	MountPath   string
 	SnapshotID  string
@@ -613,6 +760,34 @@ func (s *Set) WriteDirFilterAgeAll(row DirFilterAgeAllRow) error {
 
 func (s *Set) WriteParentFact(row ParentFactRow) error {
 	return s.encode(TableParentFacts, row)
+}
+
+func (s *Set) WriteChildFilterAll(row ChildFilterAllRow) error {
+	return s.encode(TableChildFilterAll, row)
+}
+
+func (s *Set) WriteDirFilterAll(row DirFilterAllRow) error {
+	return s.encode(TableDirFilterAll, row)
+}
+
+func (s *Set) WriteSchema3SnapshotSet(row Schema3SnapshotSetRow) error {
+	return s.encode(TableSchema3SnapshotSets, row)
+}
+
+func (s *Set) WriteActiveVirtualSummary(row ActiveVirtualSummaryRow) error {
+	return s.encode(TableActiveVirtualSummaries, row)
+}
+
+func (s *Set) WriteActiveVirtualFilterAll(row ActiveVirtualFilterAllRow) error {
+	return s.encode(TableActiveVirtualFilterAll, row)
+}
+
+func (s *Set) WriteActiveVirtualChild(row ActiveVirtualChildRow) error {
+	return s.encode(TableActiveVirtualChildren, row)
+}
+
+func (s *Set) WriteActiveVirtualSet(row ActiveVirtualSetRow) error {
+	return s.encode(TableActiveVirtualSets, row)
 }
 
 func (s *Set) WriteDirProjectionSet(row DirProjectionSetRow) error {
