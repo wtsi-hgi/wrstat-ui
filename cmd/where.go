@@ -180,15 +180,9 @@ with refreshes possible up to 5 days after expiry.
 			die("bad --size: %s", err)
 		}
 
-		if whereUnused != "" && whereUnchanged != "" {
+		age, ok := whereAgeFromUnusedUnchanged(whereUnused, whereUnchanged)
+		if !ok {
 			die("--unused and --unchanged are mutually exclusive")
-		}
-
-		age := db.DGUTAgeAll
-		if whereUnused != "" {
-			age = stringToAge("A" + whereUnused)
-		} else if whereUnchanged != "" {
-			age = stringToAge("M" + whereUnchanged)
 		}
 
 		minAtime := time.Now().Add(-(time.Duration(whereAccess*hoursPerDay) * time.Hour))
@@ -264,6 +258,21 @@ func getServerURL(args []string) string {
 	}
 
 	return url
+}
+
+func whereAgeFromUnusedUnchanged(unused, unchanged string) (db.DirGUTAge, bool) {
+	if unused != "" && unchanged != "" {
+		return db.DGUTAgeAll, false
+	}
+
+	switch {
+	case unused != "":
+		return stringToAge("A" + unused), true
+	case unchanged != "":
+		return stringToAge("M" + unchanged), true
+	default:
+		return db.DGUTAgeAll, true
+	}
 }
 
 func stringToAge(ageStr string) db.DirGUTAge { //nolint:funlen,gocyclo,cyclop

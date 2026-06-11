@@ -107,6 +107,22 @@ func (s *Server) dcssToSummaries(dcss db.DCSs) []*DirSummary {
 	return summaries
 }
 
+// SetCachedUserName stores a UID display name for later summary conversion.
+func (s *Server) SetCachedUserName(uid uint32, name string) {
+	s.nameCacheMu.Lock()
+	defer s.nameCacheMu.Unlock()
+
+	s.uidToNameCache[uid] = name
+}
+
+// SetCachedGroupName stores a GID display name for later summary conversion.
+func (s *Server) SetCachedGroupName(gid uint32, name string) {
+	s.nameCacheMu.Lock()
+	defer s.nameCacheMu.Unlock()
+
+	s.gidToNameCache[gid] = name
+}
+
 // dgutaDStoSummary converts the given dguta.DirSummary to one of our
 // DirSummary, basically just converting the *IDs to names.
 func (s *Server) dgutaDStoSummary(dds *db.DirSummary) *DirSummary {

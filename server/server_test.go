@@ -615,6 +615,25 @@ func (e *a5RESTTreeEnv) requestTree(values url.Values) TreeElement {
 	return got
 }
 
+func (e *a5RESTTreeEnv) requestWhere(values url.Values) []*DirSummary {
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequestWithContext(
+		context.Background(),
+		http.MethodGet,
+		EndPointWhere+"?"+values.Encode(),
+		nil,
+	)
+
+	e.server.getWhere(c)
+	So(w.Code, ShouldEqual, http.StatusOK)
+
+	got, err := decodeWhereResult(w)
+	So(err, ShouldBeNil)
+
+	return got
+}
+
 func TestA5RESTTreeEndpointReusesOnePacket(t *testing.T) {
 	Convey("A5 REST tree endpoint reuses one broad parent packet for child summaries and flags", t, func() {
 		env := newA5RESTTreeEnv(t)
@@ -676,6 +695,28 @@ func TestA5RESTTreeEndpointReusesOnePacket(t *testing.T) {
 			So(a5RESTAllChildAges(got), ShouldResemble, map[db.DirGUTAge]int{fixture.age: fixture.childCount})
 			So(a5RESTPacketKeyCount(stats.ChildFilterReadKeys, a5RESTProjectDir), ShouldEqual, 1)
 			So(a5RESTPacketKeyCount(stats.ParentPacketReadKeys, a5RESTProjectDir), ShouldEqual, 0)
+			So(stats.FactVectorReads, ShouldEqual, uint64(0))
+			So(clickhouse.ReadSchema3FallbackRoutes()["parent_facts_fallback"], ShouldEqual, uint64(0))
+		}
+	})
+
+	Convey("B3.6 REST where endpoint serves unused and unchanged project fixtures without fallback", t, func() {
+		for _, fixture := range b3RESTProjectWhereFixtures() {
+			env := newA5RESTProjectTreeEnv(t)
+			clickhouse.ResetTreeQueryCacheStats(env.cfg)
+			clickhouse.ResetSchema3FallbackRoutes()
+
+			got := env.requestWhere(url.Values{
+				queryParamDir:    {a5RESTProjectDir},
+				queryParamAge:    {b3RESTWhereAgeLabel(fixture.age)},
+				queryParamSplits: {"2"},
+			})
+			stats := clickhouse.ReadTreeQueryCacheStats(env.cfg)
+			responseCacheHits := env.server.ResponseCacheHits()
+			env.close()
+
+			So(b3RESTWhereDigest(got), ShouldEqual, a5RESTProjectManifestDigest(fixture.manifestKey))
+			So(responseCacheHits, ShouldEqual, uint64(0))
 			So(stats.FactVectorReads, ShouldEqual, uint64(0))
 			So(clickhouse.ReadSchema3FallbackRoutes()["parent_facts_fallback"], ShouldEqual, uint64(0))
 		}
@@ -761,8 +802,10 @@ func a5RESTChildDigest(children []*TreeElement) string {
 
 func a5RESTProjectManifestDigest(key string) string {
 	return map[string]string{
-		"project_tree_unused_1y":    "sha256:d66a954e159caaf9152f04166f553ca9343298dfe0dcc8ee38cb87bb3d4177b6",
-		"project_tree_unchanged_1y": "sha256:35f6e8c39b29de195ee42d8cc1ac30d59a5ff0371c4dc6e99759c520504de449",
+		"project_tree_unused_1y":     "sha256:a0db9f74271fc01261630662e548ea7ed826f4b013a17abc81c0609fa4b68fce",
+		"project_tree_unchanged_1y":  "sha256:90d8733ecd5546f6234a3488908b1eb9febd9647ba5eea4a80f3d06f959d0304",
+		"project_where_unused_1y":    "sha256:20b461c3d947a332c2c6f1f21c6958a10198fbed82c9a6d049e9912d22b65070",
+		"project_where_unchanged_1y": "sha256:46f47c20afbca8f779689bc68e3d21d246cc37a16a12559d6f42820d37b8914c",
 	}[key]
 }
 
@@ -773,6 +816,61 @@ func a5RESTAllChildAges(got TreeElement) map[db.DirGUTAge]int {
 	}
 
 	return ages
+}
+
+func b3RESTProjectWhereFixtures() []a5RESTProjectTreeFixture {
+	return []a5RESTProjectTreeFixture{
+		{manifestKey: "project_where_unused_1y", age: db.DGUTAgeA1Y},
+		{manifestKey: "project_where_unchanged_1y", age: db.DGUTAgeM1Y},
+	}
+}
+
+func b3RESTWhereAgeLabel(age db.DirGUTAge) string {
+	switch age {
+	case db.DGUTAgeA1Y:
+		return "A1Y"
+	case db.DGUTAgeM1Y:
+		return "M1Y"
+	default:
+		return strconv.Itoa(int(age))
+	}
+}
+
+func b3RESTWhereDigest(summaries []*DirSummary) string {
+	elements := make([]b3RESTWhereDigestElement, len(summaries))
+	for i, summary := range summaries {
+		elements[i] = b3RESTWhereDigestElement{
+			Dir:       summary.Dir,
+			Count:     summary.Count,
+			Size:      summary.Size,
+			Users:     sortedStrings(summary.Users),
+			Groups:    sortedStrings(summary.Groups),
+			FileTypes: sortedStrings(summary.FileTypes),
+			Age:       summary.Age,
+		}
+	}
+
+	sort.Slice(elements, func(i, j int) bool {
+		if elements[i].Dir == elements[j].Dir {
+			return elements[i].Age < elements[j].Age
+		}
+
+		return elements[i].Dir < elements[j].Dir
+	})
+
+	data, err := json.Marshal(elements)
+	So(err, ShouldBeNil)
+
+	sum := sha256.Sum256(data)
+
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+func sortedStrings(values []string) []string {
+	cp := append([]string(nil), values...)
+	sort.Strings(cp)
+
+	return cp
 }
 
 type a5RESTProjectChild struct {
@@ -839,6 +937,16 @@ type a5RESTChildDigestElement struct {
 	Groups      []string     `json:"groups"`
 	FileTypes   []string     `json:"filetypes"`
 	HasChildren bool         `json:"has_children"`
+}
+
+type b3RESTWhereDigestElement struct {
+	Dir       string       `json:"dir"`
+	Count     uint64       `json:"count"`
+	Size      uint64       `json:"size"`
+	Users     []string     `json:"users"`
+	Groups    []string     `json:"groups"`
+	FileTypes []string     `json:"filetypes"`
+	Age       db.DirGUTAge `json:"age"`
 }
 
 type e2FilteredRESTDB struct {
@@ -3169,9 +3277,11 @@ func markA5RESTSchema3Ready(t *testing.T, cfg clickhouse.Config, mountPath strin
 		"INSERT INTO wrstat_schema3_snapshot_sets "+
 			"(mount_path, snapshot_id, schema3_version, dir_facts_rows, parent_facts_rows, children_rows, "+
 			"child_filter_all_rows, dir_filter_all_rows, manifest_sha256, refreshed_at) "+
-			"VALUES (?, toUUID(?), 1, 0, 0, 0, 0, 0, 'a5-rest-test', now())",
+			"VALUES (?, toUUID(?), 1, 1, 1, 1, ?, ?, 'a5-rest-test', now())",
 		mountPath,
 		snapshotID,
+		uint64(max(1, len(a5RESTProjectAllChildren()))),
+		uint64(max(1, a5RESTDirFilterAllRowsForMount(mountPath))),
 	), ShouldBeNil)
 }
 
@@ -3332,7 +3442,39 @@ func seedA5RESTDirFilterAll(t *testing.T, conn ch.Conn, snapshotID string, mount
 		}
 	}
 
+	for _, child := range a5RESTProjectAllChildren() {
+		So(batch.Append(
+			a5RESTProjectMount,
+			snapshotID,
+			uint8(child.age),
+			child.gid,
+			child.uid,
+			uint16(child.ft),
+			child.dir,
+			a5RESTProjectDir,
+			child.count,
+			child.size,
+			int64(100),
+			int64(200),
+			[]uint64{child.count, 0, 0, 0, 0, 0, 0, 0, 0},
+			[]uint64{0, child.count, 0, 0, 0, 0, 0, 0, 0},
+			uint64(0),
+			uint64(0),
+			uint8(0),
+			uint8(0),
+			time.Now(),
+		), ShouldBeNil)
+	}
+
 	So(batch.Send(), ShouldBeNil)
+}
+
+func a5RESTDirFilterAllRowsForMount(mountPath string) int {
+	if mountPath != a5RESTProjectMount {
+		return 1
+	}
+
+	return len(a5RESTProjectAllChildren()) * 2
 }
 
 type e4ResponseCacheDB struct {

@@ -167,9 +167,10 @@ func marshalResponseBody(value any) ([]byte, error) {
 }
 
 type responseCache struct {
-	mu      sync.Mutex
-	entries map[responseCacheKey][]byte
-	order   []responseCacheKey
+	mu       sync.Mutex
+	entries  map[responseCacheKey][]byte
+	order    []responseCacheKey
+	hitCount uint64
 }
 
 func (c *responseCache) get(key responseCacheKey) ([]byte, bool) {
@@ -180,6 +181,8 @@ func (c *responseCache) get(key responseCacheKey) ([]byte, bool) {
 	if !ok {
 		return nil, false
 	}
+
+	c.hitCount++
 
 	return append([]byte(nil), body...), true
 }
@@ -206,6 +209,7 @@ func (c *responseCache) clear() {
 
 	c.entries = nil
 	c.order = nil
+	c.hitCount = 0
 }
 
 func (c *responseCache) evictOldest() {
@@ -214,6 +218,18 @@ func (c *responseCache) evictOldest() {
 		c.order = c.order[1:]
 		delete(c.entries, oldest)
 	}
+}
+
+func (c *responseCache) hits() uint64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return c.hitCount
+}
+
+// ResponseCacheHits returns the number of successful response-cache reads.
+func (s *Server) ResponseCacheHits() uint64 {
+	return s.responseCache.hits()
 }
 
 // PerfHarnessOptions configures REST/CLI-server perf evidence collection.

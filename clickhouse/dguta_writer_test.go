@@ -2136,6 +2136,7 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 		countingConn := &whereQueryCountingConn{Conn: conn}
 		summaries, err := newClickHouseDatabase(cfg, countingConn).filteredMountWhereSummaries(
 			mount,
+			mount.mountPath,
 			&db.Filter{
 				Age:  db.DGUTAgeAll,
 				GIDs: []uint32{7},
@@ -2201,6 +2202,7 @@ func TestClickHouseDGUTAWriter(t *testing.T) {
 		countingConn := &whereQueryCountingConn{Conn: conn}
 		summaries, err := newClickHouseDatabase(cfg, countingConn).filteredMountWhereSummaries(
 			mountB,
+			mountB.mountPath,
 			&db.Filter{
 				Age:  db.DGUTAgeAll,
 				GIDs: []uint32{7},

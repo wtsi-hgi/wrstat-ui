@@ -57,7 +57,7 @@ const (
 		"groupBitOr(ft) AS file_types " +
 		"FROM wrstat_dir_filter_ageall " +
 		"PREWHERE mount_path = ? AND snapshot_id = ? " +
-		"WHERE %s " +
+		"WHERE startsWith(dir, ?) AND %s " +
 		"GROUP BY dir"
 
 	dirFilterAgeAllSummariesForDirsQuery = "SELECT dir, count() AS raw_rows, " +
@@ -272,6 +272,20 @@ func mergeDirFilterAgeAllSummaries(
 	}
 }
 
+func dirFilterAgeAllWhereSummariesQueryForFilter(
+	mount activeMount,
+	queryDir string,
+	filterExpr string,
+	filterArgs []any,
+) (string, []any) {
+	query := fmt.Sprintf(dirFilterAgeAllWhereSummariesQuery, filterExpr)
+	args := make([]any, 0, queryScopeArgs+1+len(filterArgs))
+	args = append(args, mount.mountPath, mount.snapshotID, ensureTrailingSlash(queryDir))
+	args = append(args, filterArgs...)
+
+	return query, args
+}
+
 func (d *clickHouseDatabase) dirFilterAgeAllReadyForFilter(
 	ctx context.Context,
 	mountPath, snapshotID string,
@@ -352,6 +366,7 @@ func dirFilterAgeAllRowsReady(
 func (d *clickHouseDatabase) dirFilterAgeAllWhereSummaries(
 	ctx context.Context,
 	mount activeMount,
+	queryDir string,
 	filter *db.Filter,
 ) (map[string]*db.DirSummary, bool, error) {
 	ready, err := d.dirFilterAgeAllReadyForFilter(ctx, mount.mountPath, mount.snapshotID, filter)
@@ -360,10 +375,7 @@ func (d *clickHouseDatabase) dirFilterAgeAllWhereSummaries(
 	}
 
 	filterExpr, filterArgs := dirFilterAgeAllFilterExpression(filter)
-	query := fmt.Sprintf(dirFilterAgeAllWhereSummariesQuery, filterExpr)
-	args := make([]any, 0, queryScopeArgs+len(filterArgs))
-	args = append(args, mount.mountPath, mount.snapshotID)
-	args = append(args, filterArgs...)
+	query, args := dirFilterAgeAllWhereSummariesQueryForFilter(mount, queryDir, filterExpr, filterArgs)
 
 	rows, err := d.conn.Query(ctx, query, args...)
 	if err != nil {

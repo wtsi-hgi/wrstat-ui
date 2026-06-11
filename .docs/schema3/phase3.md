@@ -23,8 +23,8 @@ must return empty results without reading schema3 filter tables. Cover all 6
 acceptance tests from B2 in `clickhouse/database_dirinfo_test.go`. Depends on
 phase 2 readiness tests.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
 
 ### Item 3.2: B3 - `where --dir` uses subtree-serving rows
 
@@ -38,5 +38,5 @@ B3 in `clickhouse/database_dirinfo_test.go`, `cmd/where_test.go`, and
 `server/server_test.go`. Depends on item 3.1 filter-row reader routes and
 phase 2 readiness tests.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
