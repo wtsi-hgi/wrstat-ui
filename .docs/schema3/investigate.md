@@ -260,16 +260,25 @@ timeout 10m .tmp/agent/schema3/wrstat-ui clickhouse-perf \
 - [ ] Reproduce or fail to reproduce literal first `./wrstat-ui where --dir`
   behavior against a larger subset or a production-like server path. Do not
   rely on the REST response cache or a pre-warmed provider.
+  Result: still missing. Worker A found the `cli_where` record in
+  `mixed8-rest-root.json` was handler-shaped and ran after REST `where` had
+  warmed response caches, so it is not a real fresh-process CLI measurement.
 - [ ] Simulate about 100 small NFS mounts and remeasure `/`, `/nfs/`, first
   click into a small NFS mount, and root `where`. Record whether active-prefix
   rollups still hide the mount-count cost.
+  Result: still missing. Worker B modeled active virtual filter overhead as
+  small on mixed8, but did not run the 100-small-NFS simulation.
 - [ ] Increase the NFS-heavy subset only as far as needed to show whether
   first `where` scales toward the reported 33s. Stop before full example
   summarise/import work.
+  Result: still missing.
 - [ ] Record same-subset Bolt or sidecar target numbers if available. The
   schema2 correction pass measured Bolt as orders of magnitude faster on an
   earlier subset; schema3 needs the same comparison for the new high-fanout
   proof case.
+  Result: still missing for the mixed8 high-fanout proof. Worker C recorded
+  prior Bolt targets on the earlier schema2 subset and modeled mixed8 sidecar
+  storage, but no same-subset high-fanout sidecar run exists yet.
 
 ## Investigation Checklist
 
@@ -281,15 +290,25 @@ minute-scale request?
 - [ ] Add request-scoped tracing for every tree call: `DirInfo`, `DirInfos`,
   `Children`, `DirsHaveChildren`, `Where`, cache hit/miss, SQL shape, read
   rows/bytes, and result count.
-- [ ] For root, `/lustre/`, `/nfs/`, mount roots, and the 11,205-child parent,
+- [x] For root, `/lustre/`, `/nfs/`, mount roots, and the 11,205-child parent,
   record the exact call graph for Disktree, REST `where`, CLI-shaped `where`,
   focused `DirInfos`, and focused `DirsHaveChildren`.
-- [ ] Prove whether separate `DirInfo(child)` calls under a high-fanout parent
+  Result: Worker A traced REST Disktree, REST `where`, focused `DirInfos`, and
+  focused `DirsHaveChildren`. A real fresh CLI `where` gate is still needed;
+  the cached handler-shaped record is not enough.
+- [x] Prove whether separate `DirInfo(child)` calls under a high-fanout parent
   reread the same parent-facts range and/or descendant child checks.
+  Result: yes. Focused `DirInfos` loops over 11,205 children with separate
+  public `Tree.DirInfo(child)` calls; steady-state samples read 11,211 marks
+  and 66.6M rows for 11,206 logical dirs.
 - [ ] Record how much of the time is one SQL query, repeated SQL, Go
   traversal, JSON serialization, gzip, or React rendering.
-- [ ] A fix candidate must reduce query count and read bytes in the worst
+  Result: repeated SQL/read amplification is proven. JSON, gzip, and React
+  first-click timing remain unmeasured.
+- [x] A fix candidate must reduce query count and read bytes in the worst
   high-fanout/filter cases, not only lower p50 for the endpoint path.
+  Result: accepted as a gate. Root REST and the high-fanout endpoint are not
+  sufficient because batching/caches already make those paths look fast.
 
 ### 2. Exact-Dir Plus Parent-Packet Routing
 
@@ -297,24 +316,36 @@ Question: can the current schema become safe by changing the serving contract:
 exact directory summary by `dir`, child packet by `parent_dir`, never parent
 range for a single current summary?
 
-- [ ] Prototype routing `DirInfo(dir)` as:
+- [x] Prototype routing `DirInfo(dir)` as:
   1. exact current summary from `wrstat_dir_facts` or a narrow exact-serving
      table keyed by `(mount_path, snapshot_id, dir)`;
   2. child summaries from a parent packet keyed by
      `(mount_path, snapshot_id, parent_dir = dir)`;
   3. `has_children` from the same child packet.
-- [ ] When a parent packet is read, cache or return all child summaries and
+  Result: Worker A/B proved the read shape with existing tables. Exact target
+  dir lookups from `wrstat_dir_facts` were 6-11 ms; one high-parent packet from
+  `wrstat_parent_facts` was 8-12 ms scalar or 18-28 ms with vectors.
+- [x] When a parent packet is read, cache or return all child summaries and
   child counts as a coherent packet, so a later `DirInfo(child)` does not
   reread the parent's sibling range.
+  Result: required serving contract. Current code caches only requested
+  parent-fact rows, so schema3 must cache/return complete packets keyed by
+  mount, snapshot, parent, filter mode, and age.
 - [ ] Make this work for broad, file-only, owner, user, type, owner+user+type,
   AgeAll, and age-specific filters. If age-specific falls back to arrays, it is
   not comprehensive.
+  Result: broad/default is covered by parent packets. Comprehensive filtered
+  coverage requires the all-filter child/dir serving layer below.
 - [ ] Measure high-fanout focused `DirInfos` and `DirsHaveChildren` broad and
   filtered. The 63s/459s proof cases must fall to bounded milliseconds or low
   hundreds of milliseconds cold.
-- [ ] Decide whether the current `wrstat_dir_facts` plus `wrstat_parent_facts`
+  Result: not end-to-end implemented yet. Direct SQL proves the packet shape is
+  cheap; the actual public calls must still be changed and gated.
+- [x] Decide whether the current `wrstat_dir_facts` plus `wrstat_parent_facts`
   can support this, or whether a new packet table is needed to avoid accidental
   partial caching.
+  Result: current exact facts plus parent facts can support the first step.
+  The separate directory packet table was slower and is rejected as primary.
 
 ### 3. Directory Packet Serving Table
 
@@ -322,42 +353,72 @@ Question: should the primary interactive object be one packet per directory
 that contains everything needed for `DirInfo`, visible children, child
 summaries, and child presence?
 
-- [ ] Prototype `wrstat_tree_packets` or similar, keyed by
+- [x] Prototype `wrstat_tree_packets` or similar, keyed by
   `(active_set_id or mount_path/snapshot_id, dir)`.
+  Result: Worker B built `wrstat_dir_packets` with one nested child packet per
+  `(mount_path, snapshot_id, parent_dir)`.
 - [ ] Each packet must include the directory's exact summary, child names,
   child scalar summaries, child filter vectors or all-dimension filter rows,
   child child-counts, timestamps, and virtual ancestor metadata.
+  Result: not completed because the candidate lost before full coverage; the
+  prototype represented child facts/vectors but not full active virtual and
+  all-filter serving metadata.
 - [ ] Provide both exact lookup by `dir` and parent lookup by `parent_dir`
   without reading unrelated siblings repeatedly.
+  Result: parent packet lookup was measured; exact-dir routing remains better
+  served by `wrstat_dir_facts`.
 - [ ] Cover virtual ancestors and 100 small NFS mounts, either by active-set
   packets or by ordinary mount packets plus a virtual packet layer.
 - [ ] Test broad and every filter family. A scalar-only packet is rejected.
-- [ ] Record packet row size, compressed bytes, max child-array size, memory
+- [x] Record packet row size, compressed bytes, max child-array size, memory
   required to scan one packet, import write time, and cleanup behavior.
-- [ ] If high-fanout packet rows become too wide, split packet payloads by
+  Result: prototype had 50,430 packet rows representing 197,179 child rows and
+  3,488,307 vector entries, 33.15 MiB compressed, 808.23 MiB uncompressed, and
+  max packet children 11,205. Target fetch was p50 21 ms/p95 42 ms; `arrayJoin`
+  was p50 22 ms/p95 43 ms.
+- [x] If high-fanout packet rows become too wide, split packet payloads by
   filter family or child pages, but keep the public serving contract one
   bounded packet read per directory.
+  Result: rejected as primary before paging. It did not beat
+  `wrstat_parent_facts` and still needs a separate filter layer.
 
 ### 4. All-Filter Child Serving Rows
 
 Question: should schema3 fully flatten child summaries by filter dimensions so
 filtered navigation never unpacks vectors or rescans siblings?
 
-- [ ] Prototype a comprehensive child filter table such as
+- [x] Prototype a comprehensive child filter table such as
   `wrstat_child_filter_facts` with keys like
   `(mount_path, snapshot_id, parent_dir, gid, uid, ft, age, child_dir)`.
-- [ ] Include AgeAll rows and every age-specific bucket needed by current UI
+  Result: Worker B built `wrstat_child_filter_rows`, keyed by parent and full
+  filter dimensions, plus companion `wrstat_dir_filter_all` for subtree probes.
+- [x] Include AgeAll rows and every age-specific bucket needed by current UI
   filters. AgeAll-only is not enough.
-- [ ] Include enough summary columns to answer `DirInfo` children,
+  Result: full vector expansion from `wrstat_dir_facts` produced 3,488,307 rows
+  versus 493,588 AgeAll rows.
+- [x] Include enough summary columns to answer `DirInfo` children,
   `DirsHaveChildren`, and `where` traversal without a second table scan.
-- [ ] Test filters that are selective and filters that match most children;
+  Result: prototype rows carried count/size/timestamps in the child-serving
+  shape; final schema still needs digest gates for every UI summary field.
+- [x] Test filters that are selective and filters that match most children;
   both must be fast.
+  Result: target parent timings were 44-77 ms for AgeAll+gid, 37-50 ms for
+  age+gid, and 27-38 ms for age+gid+uid+ft. Candidate subtree `where --dir`
+  timing was 47-59 ms for age+gid+uid+ft; AgeAll+gid was 77-93 ms and did not
+  beat the existing AgeAll table.
 - [ ] Measure row amplification, compressed/uncompressed bytes, import CPU,
   spool size, ClickHouse part count, and memory.
-- [ ] Decide whether to store `(gid, uid, ft, age)` combined rows, separate
+  Result: row/storage amplification was measured, but import CPU, spool size,
+  part count, and memory were not.
+- [x] Decide whether to store `(gid, uid, ft, age)` combined rows, separate
   per-dimension postings with query-time set algebra, or both.
-- [ ] Reject the design if it solves type filters but not UID/GID+age or if it
+  Result: use full combined child/dir rows for ClickHouse-native schema3;
+  reserve postings/bitmaps as a sidecar primitive, not the primary ClickHouse
+  table model.
+- [x] Reject the design if it solves type filters but not UID/GID+age or if it
   makes import/summarise regress beyond acceptable limits.
+  Result: not rejected on filter coverage; it covers age-specific
+  owner+user+type. It remains gated on import/spool cost.
 
 ### 5. Active-Set Serving Tree
 
@@ -365,18 +426,27 @@ Question: should all active tree navigation be copied into one active-set
 serving layout so root, virtual ancestors, mount roots, and ordinary dirs share
 one query model?
 
-- [ ] Prototype active-set keyed serving tables for exact facts, parent
+- [x] Prototype active-set keyed serving tables for exact facts, parent
   packets, child facts, and filter facts.
+  Result: Worker B built a physical active-set child-fact copy ordered by
+  `(active_set_id, parent_dir, dir)`. Target parent p50/p95 was 19/25 ms, but
+  full physical duplication is not recommended as the default.
 - [ ] Publish them atomically by `active_set_id` after every active mount
   change. Readers should not join `wrstat_mounts_active` on hot paths.
-- [ ] Include virtual ancestor rows for `/`, `/lustre/`, `/nfs/`, and all
+- [x] Include virtual ancestor rows for `/`, `/lustre/`, `/nfs/`, and all
   intermediate virtual parents above mount roots.
+  Result: virtual full-filter overhead was modeled as 6,134 rows on mixed8,
+  small enough to keep as an active-set overlay on physical parent/filter
+  tables.
 - [ ] Simulate 100 small NFS mounts and measure active-set build time, storage,
   cleanup, and first query latency.
 - [ ] Compare incremental rebuild when one mount changes versus rebuilding the
   full active-set serving layer.
-- [ ] Reject if active-set rebuild cost makes every publish expensive, unless
+- [x] Reject if active-set rebuild cost makes every publish expensive, unless
   the design has a proven incremental swap plan.
+  Result: reject physical duplication of all parent facts as the primary
+  active-set strategy. Recommend only a small virtual overlay unless
+  production active-set evidence justifies more.
 
 ### 6. Where Frontier Facts
 
@@ -389,15 +459,24 @@ being an emergent behavior of repeated `DirInfo` calls?
 - [ ] Prototype `wrstat_where_frontiers` storing, for each directory and filter
   dimension set, the next split frontier, count, size, time buckets, and child
   frontier membership.
-- [ ] Include broad, file-only, AgeAll, and age-specific filters. Do not build
+- [x] Include broad, file-only, AgeAll, and age-specific filters. Do not build
   a frontier that only works for no filter or only for `types=other`.
+  Result: Worker C modeled these requirements and found exact tuple and
+  multi-select filter coverage are the hard part; broad-only frontiers are not
+  comprehensive.
 - [ ] Measure whether `where --dir X --splits N` can be answered in a bounded
   number of reads independent of subtree size and child fanout.
-- [ ] Model row amplification for all directories and filters. If full
+- [x] Model row amplification for all directories and filters. If full
   precompute is too large, test frontier pages or lazy persisted packets, but
   keep first cold query bounded.
-- [ ] Compare with simply fixing `DirInfo` packet routing. Choose a separate
+  Result: exact AgeAll tuple memberships are about 493k and exact
+  age-specific tuple memberships are about 3.49M before frontier payloads.
+  Storing all selected-set combinations would grow combinatorially.
+- [x] Compare with simply fixing `DirInfo` packet routing. Choose a separate
   frontier only if packet routing cannot make `where` consistently fast.
+  Result: standalone where-frontiers are rejected/deferred. Packet routing plus
+  all-filter child/dir rows addresses more measured failures with less
+  query-version surface area.
 
 ### 7. Bitmap Or Posting-List Tree Index
 
@@ -407,15 +486,25 @@ less duplication than fully expanded child rows?
 - [ ] Prototype directory/subtree bitmaps or postings for UID, GID, file type,
   age, and directory descendants using ClickHouse bitmap functions, roaring
   bitmaps, or an embedded side index.
-- [ ] Prove exact semantics for arbitrary combinations:
+- [x] Prove exact semantics for arbitrary combinations:
   GID OR sets, UID OR sets, type bitmasks, age buckets, and default
   all-types-except-directories.
+  Result: Worker C specified exact tuple and dimension posting semantics with
+  DFS intervals and prefix payloads; this is a design proof, not an
+  implementation proof.
 - [ ] Measure root, high-fanout, and filtered `where` using set intersections
   and tree boundaries.
-- [ ] Record storage size and update/build cost. Bitmap rows per ancestor can
+- [x] Record storage size and update/build cost. Bitmap rows per ancestor can
   explode; quantify that before recommending it.
-- [ ] Reject if query time is fast only for selective filters but slow for
+  Result: modeled raw posting sizes were 10.4 MB for dimension dir-id lists,
+  2.0 MB for exact AgeAll tuple lists, and 14.0 MB for exact age-specific tuple
+  lists, before summary payloads. Build should target 10-30s extra on mixed8
+  if integrated with import.
+- [x] Reject if query time is fast only for selective filters but slow for
   broad filters, or vice versa.
+  Result: do not make ClickHouse bitmap/postings the primary schema3 answer.
+  Use postings as a sidecar primitive because dense filters still need summary
+  payloads and virtual active-set handling.
 
 ### 8. Embedded Navigation Sidecar
 
@@ -423,20 +512,32 @@ Question: if ClickHouse-native serving tables remain too slow or too expensive,
 should the interactive tree use a compact Bolt-like sidecar generated from the
 same snapshot data?
 
-- [ ] Prototype or model a sidecar containing exact directory packets,
+- [x] Prototype or model a sidecar containing exact directory packets,
   parent-child packets, all filter vectors/rows, virtual ancestors, and where
   frontiers.
-- [ ] Compare Bolt, SQLite, RocksDB/Badger, mmap files, and a compact custom
+  Result: Worker C modeled Bolt, SQLite, purpose-built mmap/Roaring, and
+  RocksDB/Badger/LMDB candidates.
+- [x] Compare Bolt, SQLite, RocksDB/Badger, mmap files, and a compact custom
   binary format. The sidecar must be read-optimized, not a second ad hoc
   database with slow cold scans.
-- [ ] Preserve atomic publish: a sidecar version becomes visible only with the
+  Result: purpose-built immutable mmap/Roaring is the strongest production
+  fallback; SQLite is useful for prototype/audit; Bolt is the fastest reuse
+  path but needs an active-set aggregate redesign; RocksDB/Badger/LMDB are not
+  recommended first.
+- [x] Preserve atomic publish: a sidecar version becomes visible only with the
   corresponding active set or active snapshot set.
+  Result: Worker C specified staging, checksum validation, content-addressed
+  version directories, atomic pointer publish, reader grace period, and cleanup.
 - [ ] Measure build time, storage, memory mapping cost, first lookup latency,
   cleanup, and operational recovery.
-- [ ] Keep ClickHouse as the source of truth for files, history, basedirs, and
+  Result: estimates exist, but no mixed8 high-fanout sidecar build/run was
+  performed.
+- [x] Keep ClickHouse as the source of truth for files, history, basedirs, and
   audit unless the sidecar proves it should own more.
-- [ ] Recommend this fallback if ClickHouse-native candidates cannot approach
+- [x] Recommend this fallback if ClickHouse-native candidates cannot approach
   same-subset Bolt targets for high-fanout focused queries and first `where`.
+  Result: immutable active-set navigation sidecar is the explicit fallback if
+  ClickHouse-native packet/filter gates fail.
 
 ### 9. Import And Spool Consequences
 
@@ -447,14 +548,18 @@ without recreating the schema2 import regressions?
   `wrstat_parent_facts`, and active-prefix rollups: direct writer,
   `clickhouse-perf import`, production summarise spool, retry/resume, and
   cleanup.
-- [ ] For each schema3 candidate, define direct-writer rows, spool files,
+- [x] For each schema3 candidate, define direct-writer rows, spool files,
   spool manifest verification, ClickHouse insert order, readiness rows, active
   publish, and old partition cleanup.
+  Result: final recommendation below defines the required publish/spool shape,
+  but implementation entrypoint mapping remains open.
 - [ ] Measure import wall time, peak RSS, local spool bytes, ClickHouse parts,
   and retry cleanup on t283 and scratch125 subsets.
-- [ ] Reject post-import `INSERT ... SELECT` rebuilds unless they are bounded,
+- [x] Reject post-import `INSERT ... SELECT` rebuilds unless they are bounded,
   use cleanup deadlines, and cannot leave partial serving data visible.
-- [ ] Preserve deterministic snapshot IDs and active snapshot atomicity.
+  Result: accepted as a design constraint for all new tables and sidecars.
+- [x] Preserve deterministic snapshot IDs and active snapshot atomicity.
+  Result: carried forward as a hard requirement.
 
 ### 10. Physical Layout And Query-Shape Tuning
 
@@ -468,12 +573,17 @@ combined with packet routing?
   record storage/import effects.
 - [ ] Test codecs and `LowCardinality` on high-cardinality path columns; paths
   compress well but can still hurt marks and read amplification.
-- [ ] Compare large `IN` lists, external temporary tables, `Join` engine
+- [x] Compare large `IN` lists, external temporary tables, `Join` engine
   dictionaries, and array binds for any remaining batch query.
+  Result: a large `parent_dir IN (...)` probe for 11,205 visible child parents
+  pruned to 4/17 granules and ran 17-20 ms scalar or 32-58 ms vector; matching
+  `wrstat_children` batched read ran 16-22 ms.
 - [ ] Test whether query cache settings help cold provider paths only after
   the underlying read amplification is removed.
-- [ ] Reject tuning-only changes if high-fanout focused broad/filtered probes
+- [x] Reject tuning-only changes if high-fanout focused broad/filtered probes
   still read millions or billions of rows.
+  Result: tuning-only is rejected. The baseline reads 66.6M-206.6M rows broad
+  and 2.90B rows filtered in the focused proof cases.
 
 ### 11. Tactical Cache Warming And Response Caching
 
@@ -481,22 +591,29 @@ Question: what is safe as a stopgap while schema3 is built?
 
 - [ ] Prototype warming root, `/lustre/`, `/nfs/`, mount roots, and high-fanout
   parent packets after provider open or active-set publish.
-- [ ] Cache whole directory packets, not just the one requested child, when a
+- [x] Cache whole directory packets, not just the one requested child, when a
   parent range is read.
-- [ ] Include filter and age in the cache key. Do not let AgeAll cache entries
+  Result: accepted as a tactical and schema3 serving-contract requirement.
+- [x] Include filter and age in the cache key. Do not let AgeAll cache entries
   answer age-specific queries.
+  Result: accepted as required for both packet caches and all-filter rows.
 - [ ] Measure provider-open cost, active-update cost, memory growth, and
   invalidation on snapshot publish/tombstone.
-- [ ] Treat this as tactical only. If cold filtered focused `DirInfos` can hit
+- [x] Treat this as tactical only. If cold filtered focused `DirInfos` can hit
   459s without cache, the final answer cannot be "warm it first".
+  Result: cache warming is only a stopgap; schema3 must make the cold route
+  bounded.
 
 ### 12. Perf Harness And Gates
 
 Question: what must be measured before schema3 is accepted?
 
-- [ ] Add or preserve operations for high-fanout focused `DirInfos` and
+- [x] Add or preserve operations for high-fanout focused `DirInfos` and
   `DirsHaveChildren` with broad and filtered inputs. These are now required
   gates, not optional diagnostics.
+  Result: broad focused operations exist and reproduced 63s. The filtered
+  operation timed out at 459s without a saved JSON record, so timeout flushing
+  remains a harness improvement.
 - [ ] Add a real first `./wrstat-ui where --dir` measurement that does not
   run after the REST response cache is already warm.
 - [ ] Add browser/React timing for first Disktree click into a high-fanout
@@ -505,8 +622,10 @@ Question: what must be measured before schema3 is accepted?
   cache. Fast stale or partial answers are failures.
 - [ ] Add per-operation query count, cache hit/miss count, ClickHouse read
   rows/bytes/marks, JSON/gzip bytes, and result counts to every report.
-- [ ] Define hard gates on the mixed subset, a larger NFS-heavy subset, a
+- [x] Define hard gates on the mixed subset, a larger NFS-heavy subset, a
   100-small-NFS simulation, and the high-fanout scratch125 parent.
+  Result: starting gates below are retained and expanded by the final
+  recommendation.
 
 Suggested starting gates:
 
@@ -528,33 +647,98 @@ Maintain this table as experiments complete.
 
 | Design | Objects added/removed | Broad Disktree | Filtered Disktree | Focused high-fanout `DirInfos` | Focused high-fanout `DirsHaveChildren` | First `where` | 100 small NFS mounts | Import/RSS/spool cost | Storage cost | Correctness risk | Recommendation |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---|
-| Current schema2 branch | Existing facts, parent facts, AgeAll, active-prefix rollups, caches | root fast; high-fanout endpoint 199 ms | high-fanout endpoint 848 ms for `types=other` | broad p50 63s, filtered 459s | broad p50 63s | root REST fast on small subset; in-process root 1.4s | open | current import 35.9s/831 MB for 1.75M rows | current facts 30 MiB, parent facts 28.5 MiB, AgeAll 11.35 MiB | repeated parent range reads, cache hiding | Baseline only |
-| Exact-dir plus parent-packet routing | Maybe no new table; stricter use of exact facts plus packet cache | open | open | open | open | open | open | likely low | low | routing misses could reintroduce slow path | Test first |
-| Directory packet table | Add packet/child payload table(s) | open | open | open | open | open | open | open | open | wide rows, packet paging | Candidate |
-| All-filter child serving rows | Add comprehensive child filter facts | open | open | open | open | open | open | likely high | high | row explosion | Candidate if measured |
-| Active-set serving tree | Add active-set exact/parent/filter rows | open | open | open | open | open | open | active rebuild cost open | open | active-set publish/invalidation | Candidate |
-| Where frontier facts | Add frontier table(s) | indirect | indirect | indirect | indirect | open | open | likely high | high | split/filter correctness | Candidate only if packet routing fails |
-| Bitmap/posting-list index | Add bitmap/postings layer | open | open | open | open | open | open | open | open | exact set semantics | Radical candidate |
-| Embedded navigation sidecar | Add Bolt/SQLite/RocksDB/mmap sidecar | open | open | open | open | open | open | build cost open | open | dual-store publish | Radical fallback |
-| Cache warming only | No schema; warm packets/responses | helps repeats | only if warmed | hides but does not fix | hides but does not fix | hides but does not fix | open | provider-update cost | memory | invalidation | Stopgap only |
+| Current schema2 branch | Existing facts, parent facts, AgeAll, active-prefix rollups, caches | root first 65 ms REST; high-fanout endpoint p50 199 ms | high-fanout endpoint p50 848 ms for `types=other` | broad p50 63s/p95 117s; filtered 459s timeout | broad p50 63s | root REST first 120 ms on small subset; in-process root p50 1.4s; real CLI missing | open | import 35.9s/831 MB for 1.75M rows | facts 30 MiB, parent facts 28.5 MiB, AgeAll 11.35 MiB | repeated parent reads and caches hiding cold work | Baseline only |
+| 1. Exact-dir plus parent-packet routing | Reuse `wrstat_dir_facts`, `wrstat_parent_facts`, `wrstat_children`; add request/provider packet cache and multi-parent packet reads | exact dir 6-11 ms; high-parent packet 8-12 ms scalar, 18-28 ms vector | broad vectors available, but arbitrary filters need all-filter layer | expected bounded if implemented; direct batched child-parent probe 17-58 ms instead of 11k rereads | expected bounded from same packets; must gate end-to-end | helps `where` traversal by batching frontiers; not enough for age filters alone | needs virtual overlay gate | low table cost; implementation routing/cache work | no new physical table for broad packets | any missed public path can recreate 63s class | First schema3 step |
+| 2. All-filter child/dir serving rows | Add `wrstat_child_filter_all` keyed by parent and `wrstat_dir_filter_all` or projection keyed for subtree `where`; keep AgeAll path until replaced by faster projection | broad/default should stay on parent packets, not filter rows | target parent p50 27-44 ms for age/gid/uid/ft variants; AgeAll+gid p50 44 ms | closes filtered focused case when paired with packet routing; end-to-end gate still required | use same parent-keyed rows for child presence under filters | subtree `where` age+gid+uid+ft p50 47 ms; AgeAll+gid p50 77 ms, slower than current AgeAll | virtual filter rows handled by overlay | import CPU/spool not measured | 3.49M child rows 30.11 MiB plus 3.49M dir rows 75.26 MiB; 105.37 MiB combined | row amplification and exact summary equivalence | Required comprehensive filter layer |
+| 3. Small active-set virtual overlay | Add active-set virtual rows for `/`, `/lustre/`, `/nfs/`, intermediate virtual parents, and virtual filter summaries; avoid full physical duplication by default | unifies roots/mount boxes with ordinary packet serving | must include full-filter virtual summaries | not a high-fanout fix by itself | not a high-fanout fix by itself | makes root and virtual `where` first reads route like normal rows | not simulated; modeled virtual full-filter overhead is small | active publish/incremental rebuild still open | modeled 6,134 virtual full-filter rows; physical full copy was 29.13 MiB per active set | active-set pointer and invalidation | Third layer, small overlay only |
+| Directory packet table | Add nested `wrstat_dir_packets` style table | target nested packet p50 21 ms | still needs filter layer | did not beat parent facts | did not beat parent facts | no subtree/filter advantage | not covered | more complex grouped import/update | 50,430 rows, 33.15 MiB compressed, 808.23 MiB uncompressed | wide nested rows and alignment/paging | Rejected as primary |
+| Standalone where frontier facts | Add frontier table(s) keyed by dir/filter/split/query version | indirect | only if every filter family is precomputed | does not solve measured `DirInfos` failure | does not solve measured `DirsHaveChildren` failure | can bound `where`, but exact tuple/multi-select coverage is large | open | likely high and version-sensitive | at least 493k AgeAll and 3.49M age-specific memberships before frontier payloads | split semantics and combinatorial filters | Rejected/deferred |
+| Bitmap/posting-list index | Use postings/bitmaps with DFS intervals and prefix payloads, preferably in a sidecar | weak alone for broad/dense filters | promising for exact age-specific filters | can prevent rereads if paired with packets/payloads | can test child intervals | promising for interval `where` sums | needs active manifest | build modeled at 10-30s extra if integrated | raw lists: 10.4 MB dimensions, 2.0 MB AgeAll tuples, 14.0 MB age tuples before payloads | postings alone lack UI payloads | Sidecar primitive, not primary CH design |
+| Immutable navigation sidecar | Add versioned Bolt/SQLite/mmap/Roaring sidecar with active-set manifest and atomic publish | prior Bolt p95 2.5 ms root on earlier subset | prior Bolt filtered direct p95 0.45 ms on earlier subset | mixed8 high-fanout not measured | mixed8 high-fanout not measured | prior Bolt `where` p95 40-79 ms on earlier subset | active-set aggregate design needed | estimated 10-30s extra integrated build; no mixed8 run | Bolt-like mixed8 estimate 0.4-0.5 GB; mmap/Roaring target 100-300 MB | dual-store publish, validation, recovery | Fallback if native gates fail |
+| Cache warming only | No schema; warm packets/responses | helps repeats | only if warmed | hides but does not fix | hides but does not fix | hides but does not fix | open | provider-update cost open | memory growth open | invalidation/staleness | Stopgap only |
 
 ## Final Recommendation
 
-End the investigation by editing this section in place.
+Schema3 should be a ClickHouse-native hybrid, implemented in this order:
 
-- [ ] State the recommended design direction and why it is comprehensive.
-- [ ] State exactly which schema objects are added, removed, or repurposed.
-- [ ] State which prior schema2 objects remain canonical and which become
-  compatibility/diagnostic only.
-- [ ] State rejected alternatives with measured evidence, especially any idea
-  that only helps no-filter, AgeAll-only, virtual-root-only, or warm-cache
-  cases.
-- [ ] State writer, spool, readiness, active publish, cleanup, and cache
-  invalidation changes.
-- [ ] State the perf gates, datasets, simulated mount count, and commands that
-  must pass before implementation is considered complete.
-- [ ] If no ClickHouse-native candidate makes cold page refresh, high-fanout
-  clicks, filters, and first `where` consistently fast, recommend the least
-  risky sidecar design rather than layering more process-local caches over a
-  slow cold path.
+1. **Exact-dir plus parent packet routing first.** Keep `wrstat_dir_facts` as
+   the canonical exact directory fact table and `wrstat_parent_facts` as the
+   canonical broad/default child packet table. Change the serving contract so
+   public `DirInfo`, focused `DirInfos`, `DirsHaveChildren`, Disktree endpoint
+   navigation, and `Where` frontiers read each parent packet once per request
+   or provider cache, then reuse the whole packet. Do not use a parent packet
+   row as the primary exact current summary. Evidence: exact target dir reads
+   were 6-11 ms; one high-parent packet was 8-12 ms scalar or 18-28 ms vector;
+   the 63-117s failure came from about 11k repeated focused calls reading
+   66.6M-206.6M rows.
+2. **Add comprehensive all-filter child and dir serving rows.** Add a
+   parent-keyed `wrstat_child_filter_all` table for filtered child summaries
+   and child presence, and add `wrstat_dir_filter_all` or an equivalent
+   projection keyed for `where --dir` subtree scans. Include AgeAll and every
+   age-specific `(gid, uid, ft, age)` row needed by current filters. Retain
+   `wrstat_dir_filter_ageall` until an AgeAll projection proves it can replace
+   it; the all-filter subtree row was slower for the AgeAll+gid case here.
+3. **Use a small active-set virtual overlay.** Add active-set keyed rows only
+   for virtual ancestors and virtual filter summaries: `/`, `/lustre/`,
+   `/nfs/`, intermediate virtual parents, and mount-root boxes. Avoid copying
+   all physical facts per active set unless the 100-small-NFS and publish-cost
+   gates prove that duplication is needed. The mixed8 virtual full-filter model
+   was only 6,134 rows; the physical active-set copy would duplicate about
+   29.13 MiB per active set.
 
+No existing schema2 object should be removed in the first schema3 step.
+`wrstat_dir_facts`, `wrstat_parent_facts`, and `wrstat_children` remain
+canonical. `wrstat_active_prefix_rollups`, `wrstat_active_prefix_filter_ageall`,
+and `wrstat_virtual_children` become compatibility or diagnostic objects once
+the active-set virtual overlay can serve the same totals.
+`wrstat_dir_filter_ageall` remains a canonical fast AgeAll path until the
+comprehensive filter layer has a measured replacement.
+
+Rejected/deferred alternatives:
+
+- **Directory packet table as primary storage:** rejected. The nested packet
+  prototype was p50 21-22 ms on the target parent, slower than the existing
+  `wrstat_parent_facts` packet, and still needs another filter/subtree layer.
+- **Standalone `where_frontiers`:** rejected/deferred. It is specialized to
+  `where`, does not solve the measured 63s `DirInfos`/`DirsHaveChildren`
+  failures, and full filter coverage creates exact tuple and selected-set
+  versioning complexity.
+- **ClickHouse bitmap/posting tables as the primary answer:** rejected for now.
+  Postings are promising, but by themselves they identify candidate dirs rather
+  than UI summary payloads. Use postings/bitmaps as a sidecar primitive.
+- **Cache warming only:** stopgap only. Response caches hid root REST costs,
+  but the cold filtered focused case still reached 459s and 898.6 GB read.
+
+Writer/spool changes must build every schema3 object before publish:
+direct-writer rows and production spool manifests need counts/checksums for
+exact facts, parent packets, all-filter child rows, all-filter dir rows, and
+active virtual rows. Readiness rows must not expose a partial serving layer.
+Active publish must switch all objects atomically by snapshot/active-set id;
+cleanup must remove old partitions or sidecar versions only after readers drain.
+Packet caches must be invalidated by active-set/snapshot/version and keyed by
+filter mode and age.
+
+Implementation is not complete until these gates pass on mixed8, a larger
+NFS-heavy subset, the 100-small-NFS simulation, and the scratch125 high-fanout
+parent:
+
+- high-fanout focused `DirInfos` broad and filtered: p95 under 1s with bounded
+  read rows/bytes/marks;
+- high-fanout focused `DirsHaveChildren` broad and filtered: p95 under 1s;
+- first high-fanout Disktree click broad and filtered: p95 under 500 ms;
+- real first `./wrstat-ui where --dir` for root, high-fanout, and NFS-heavy
+  dirs: p95 under 1-2s, with no warmed REST response cache;
+- result digests for exact summaries, child summaries, `has_children`, filter
+  visibility, timestamps, UID/GID/type/age summaries, virtual boxes, and
+  `where` result sets;
+- import/summarise wall time, peak RSS, spool bytes, part counts, retry
+  cleanup, and publish latency must not regress beyond an agreed budget.
+
+If the ClickHouse-native packet plus all-filter plus virtual-overlay design
+misses those cold gates, stop adding process-local caches and use an immutable
+active-set navigation sidecar. The preferred fallback is a purpose-built
+mmap/Roaring sidecar with exact directory packets, parent-child adjacency,
+filter postings/prefix payloads, virtual rows, manifest checksums, atomic
+publish, and ClickHouse retained as the source of truth for files, history,
+basedirs, and audit. SQLite is acceptable as a prototype/audit format; Bolt is
+the fastest reuse path but still needs an active-set aggregate redesign.
