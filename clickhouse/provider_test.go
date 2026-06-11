@@ -94,6 +94,21 @@ func TestFingerprintForMountsActiveB1(t *testing.T) {
 
 		So(fingerprintForMountsActive(changed), ShouldNotEqual, fingerprintForMountsActive(rows))
 	})
+
+	Convey("C1.2 active-set fingerprints change when only snapshot_id changes", t, func() {
+		rows := []mountsActiveRow{{
+			mountPath:  c3Scratch120Mount,
+			snapshotID: b1ActiveFingerprintSnapshotID,
+			updatedAt:  time.Date(2026, 6, 7, 9, 0, 0, 0, time.UTC),
+		}}
+		changed := []mountsActiveRow{{
+			mountPath:  rows[0].mountPath,
+			snapshotID: "22222222-2222-2222-2222-222222222222",
+			updatedAt:  rows[0].updatedAt,
+		}}
+
+		So(fingerprintForMountsActive(changed), ShouldNotEqual, fingerprintForMountsActive(rows))
+	})
 }
 
 type providerSwapTestDB struct {
@@ -621,6 +636,142 @@ func TestE4ProviderReadinessBatching(t *testing.T) {
 		So(err, ShouldBeNil)
 		So(ready, ShouldHaveLength, len(env.mounts))
 		So(countingConn.readinessQueries(), ShouldEqual, 1)
+	})
+}
+
+func TestActiveSetParentPacketCacheC1(t *testing.T) {
+	Convey("C1.3 parent packet cache entries are scoped by active-set id", t, func() {
+		cache := newTreeQueryCache()
+		mountA := activeMount{
+			mountPath:   providerTestMountPath,
+			snapshotID:  b1ActiveFingerprintSnapshotID,
+			activeSetID: "active-set-A",
+		}
+		mountB := activeMount{
+			mountPath:   mountA.mountPath,
+			snapshotID:  mountA.snapshotID,
+			activeSetID: "active-set-B",
+		}
+		parentDir := providerTestMountPath
+		packet := []parentFactChildSummary{{
+			Dir:         providerTestMountPath + "child/",
+			Summary:     &db.DirSummary{Dir: providerTestMountPath + "child/", Count: 7},
+			HasChildren: true,
+			ChildCount:  1,
+		}}
+
+		keyA := newTreeParentPacketCacheKey(mountA, parentDir, nil)
+		keyB := newTreeParentPacketCacheKey(mountB, parentDir, nil)
+		So(keyA, ShouldNotResemble, keyB)
+
+		cache.putParentPacket(keyA, packet)
+
+		cachedA, ok := cache.getParentPacket(keyA)
+		So(ok, ShouldBeTrue)
+		So(cachedA[0].Summary.Count, ShouldEqual, uint64(7))
+
+		_, ok = cache.getParentPacket(keyB)
+		So(ok, ShouldBeFalse)
+
+		summaryA := newTreeActivePrefixSummaryCacheKey(
+			mountA.activeSetID,
+			"/",
+			nil,
+			treePermissionCacheInputs{},
+			currentSchemaVersion,
+			activePrefixDirSummaryQueryVersion,
+		)
+		summaryB := newTreeActivePrefixSummaryCacheKey(
+			mountB.activeSetID,
+			"/",
+			nil,
+			treePermissionCacheInputs{},
+			currentSchemaVersion,
+			activePrefixDirSummaryQueryVersion,
+		)
+
+		cache.putActivePrefixDirSummary(summaryA, &db.DirSummary{Dir: "/", Count: 11})
+
+		_, ok = cache.getActivePrefixDirSummary(summaryB)
+		So(ok, ShouldBeFalse)
+
+		stats := cache.stats()
+		So(stats.parentPacketHits, ShouldEqual, uint64(1))
+		So(stats.parentPacketMisses, ShouldEqual, uint64(1))
+		So(stats.parentPacketMissKeys[0], ShouldContainSubstring, "active_set_id=active-set-B")
+	})
+
+	Convey("C1.3 production active-mount resolution scopes parent packet keys by active-set id", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		resetSharedTreeQueryCachesForTesting()
+		Reset(func() {
+			resetSharedTreeQueryCachesForTesting()
+			os.Unsetenv("WRSTAT_ENV")
+		})
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 5 * time.Second
+		cfg.PollInterval = 0
+
+		p, err := OpenProvider(cfg)
+		So(err, ShouldBeNil)
+		So(p.Close(), ShouldBeNil)
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		mountPath := providerTestMountPath
+		updatedAt := time.Date(2026, 6, 7, 9, 0, 0, 0, time.UTC)
+		sid := snapshotID(mountPath, updatedAt)
+		So(conn.Exec(ctx, testInsertMountStmt, mountPath, updatedAt, sid, updatedAt), ShouldBeNil)
+
+		dbch := newClickHouseDatabase(cfg, conn)
+		mountA, ok, err := dbch.activeMountForDir(mountPath + "project/")
+		So(err, ShouldBeNil)
+		So(ok, ShouldBeTrue)
+
+		rowsA, err := queryMountsActiveRows(ctx, conn)
+		So(err, ShouldBeNil)
+
+		setA := fingerprintForMountsActive(rowsA)
+		So(mountA.activeSetID, ShouldEqual, setA)
+
+		cache := treeQueryCacheForConfig(cfg)
+		keyA := newTreeParentPacketCacheKey(mountA, mountPath, nil)
+		cache.putParentPacket(keyA, []parentFactChildSummary{{
+			Dir:     mountPath + "project/",
+			Summary: &db.DirSummary{Dir: mountPath + "project/", Count: 7},
+		}})
+
+		otherMountPath := "/mnt/other/"
+		otherUpdatedAt := updatedAt.Add(time.Hour)
+		otherSID := snapshotID(otherMountPath, otherUpdatedAt)
+		So(conn.Exec(ctx, testInsertMountStmt, otherMountPath, otherUpdatedAt, otherSID, otherUpdatedAt), ShouldBeNil)
+
+		mountB, ok, err := dbch.activeMountForDir(mountPath + "project/")
+		So(err, ShouldBeNil)
+		So(ok, ShouldBeTrue)
+
+		rowsB, err := queryMountsActiveRows(ctx, conn)
+		So(err, ShouldBeNil)
+
+		setB := fingerprintForMountsActive(rowsB)
+		So(setB, ShouldNotEqual, setA)
+		So(mountB.mountPath, ShouldEqual, mountA.mountPath)
+		So(mountB.snapshotID, ShouldEqual, mountA.snapshotID)
+		So(mountB.activeSetID, ShouldEqual, setB)
+
+		keyB := newTreeParentPacketCacheKey(mountB, mountPath, nil)
+		So(keyB, ShouldNotResemble, keyA)
+
+		_, ok = cache.getParentPacket(keyB)
+		So(ok, ShouldBeFalse)
+		So(parentPacketCacheHitKey(keyB), ShouldContainSubstring, "active_set_id="+setB)
 	})
 }
 

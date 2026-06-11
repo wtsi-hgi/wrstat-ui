@@ -72,9 +72,10 @@ func invalidateActiveMetadataCache(cfg Config) {
 }
 
 type activeMount struct {
-	mountPath  string
-	snapshotID string
-	updatedAt  time.Time
+	mountPath   string
+	snapshotID  string
+	updatedAt   time.Time
+	activeSetID string
 }
 
 func activeMountsQuery(
@@ -249,6 +250,25 @@ func (d *clickHouseDatabase) cachedSnapshotActiveMounts(
 	return metadata.activeSetID, metadata.mounts, nil
 }
 
+func compareActiveMounts(a, b activeMount) int {
+	if cmp := strings.Compare(a.mountPath, b.mountPath); cmp != 0 {
+		return cmp
+	}
+
+	if cmp := strings.Compare(a.snapshotID, b.snapshotID); cmp != 0 {
+		return cmp
+	}
+
+	switch {
+	case a.updatedAt.Before(b.updatedAt):
+		return -1
+	case b.updatedAt.Before(a.updatedAt):
+		return 1
+	default:
+		return 0
+	}
+}
+
 type activeMountsSnapshot struct {
 	mounts           []activeMount
 	fingerprint      string
@@ -256,19 +276,23 @@ type activeMountsSnapshot struct {
 }
 
 func newActiveMountsSnapshot(rows []mountsActiveRow) *activeMountsSnapshot {
+	activeSetID := fingerprintForMountsActive(rows)
 	mounts := make([]activeMount, len(rows))
 
 	for i, row := range rows {
 		mounts[i] = activeMount{
-			mountPath:  row.mountPath,
-			snapshotID: row.snapshotID,
-			updatedAt:  row.updatedAt.UTC(),
+			mountPath:   row.mountPath,
+			snapshotID:  row.snapshotID,
+			updatedAt:   row.updatedAt.UTC(),
+			activeSetID: activeSetID,
 		}
 	}
 
+	slices.SortFunc(mounts, compareActiveMounts)
+
 	return &activeMountsSnapshot{
 		mounts:      mounts,
-		fingerprint: fingerprintForMountsActive(rows),
+		fingerprint: activeSetID,
 	}
 }
 

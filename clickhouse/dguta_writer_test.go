@@ -4411,7 +4411,7 @@ func activePrefixB1Namespace(mountPath string) string {
 		return nfsAncestor
 	}
 
-	return "/lustre/"
+	return c2LustreAncestor
 }
 
 func insertActivePrefixB1Children(
@@ -4911,6 +4911,8 @@ func (c *dgutaWriterCloseContextConn) Query(
 func (c *dgutaWriterCloseContextConn) Exec(ctx context.Context, query string, _ ...any) error {
 	switch {
 	case query == switchSnapshotQuery:
+		c.previousSID = c.nextSID
+
 		return nil
 	case strings.HasPrefix(query, "ALTER TABLE"):
 		c.oldSnapshotDrops.Add(1)
@@ -6097,6 +6099,10 @@ func (c *b1ImportSQLSpyConn) Query(
 			return zeroCountRowsForTest(), nil
 		}
 
+		if isB1ImportSQLSpyActiveVirtualSourceQuery(query) {
+			return &dgutaWriterCloseContextRows{}, nil
+		}
+
 		return nil, errBootstrapTestUnexpectedCall
 	}
 }
@@ -6104,6 +6110,12 @@ func (c *b1ImportSQLSpyConn) Query(
 func d1FakeSnapshotCountQuery(query string) bool {
 	return strings.HasPrefix(query, "SELECT count() FROM wrstat_") &&
 		strings.Contains(query, "WHERE mount_path = ? AND snapshot_id = toUUID(?)")
+}
+
+func isB1ImportSQLSpyActiveVirtualSourceQuery(query string) bool {
+	return strings.Contains(query, "arrayJoin") ||
+		strings.Contains(query, "dir = mount_path") ||
+		strings.Contains(query, "parent_dir = c.mount_path")
 }
 
 func (c *b1ImportSQLSpyConn) PrepareBatch(

@@ -34,6 +34,8 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net/http"
+	"net/url"
 	"os"
 	"regexp"
 	"sort"
@@ -47,9 +49,11 @@ import (
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/google/uuid"
 	. "github.com/smartystreets/goconvey/convey"
+	gas "github.com/wtsi-hgi/go-authserver"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 	"github.com/wtsi-hgi/wrstat-ui/internal/split"
 	internaltest "github.com/wtsi-hgi/wrstat-ui/internal/test"
+	"github.com/wtsi-hgi/wrstat-ui/server"
 	"github.com/wtsi-hgi/wrstat-ui/summary"
 )
 
@@ -122,6 +126,7 @@ const (
 	b2ActiveRootTupleRepeat                = 20
 	b2ActiveRootTupleP50MaxMS              = 5
 	b2ActiveRootTupleP95MaxMS              = 6
+	c2LustreAncestor                       = "/lustre/"
 	nfsAncestor                            = "/nfs/"
 )
 
@@ -1083,6 +1088,1102 @@ func seedA4FilteredFanoutTree(
 	}, records...)
 
 	return seedA4Tree(t, cfg, mountPath, updatedAt, records)
+}
+
+func TestClickHouseDatabaseActiveVirtualOverlayC2(t *testing.T) {
+	Convey("C2.1-C2.2 active virtual summaries cover roots, namespaces, and mount-root boxes", t, func() {
+		env, cleanup := newC2ActiveVirtualEnv(t, c2Mixed8MountSeeds())
+		defer cleanup()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		rows := readC2ActiveVirtualSummaries(ctx, env.conn, env.activeSetID)
+		So(rows["/"].count, ShouldEqual, uint64(1_750_001))
+		So(rows["/"].size, ShouldEqual, uint64(61_484_536_134_482))
+		So(rows["/"].childCount, ShouldEqual, 8)
+		So(rows["/lustre/"].count, ShouldEqual, uint64(1_500_001))
+		So(rows["/lustre/"].size, ShouldEqual, uint64(61_176_182_464_512))
+		So(rows["/lustre/"].childCount, ShouldEqual, 7)
+		So(rows["/nfs/"].count, ShouldEqual, uint64(250_000))
+		So(rows["/nfs/"].size, ShouldEqual, uint64(308_353_669_970))
+		So(rows["/nfs/"].childCount, ShouldEqual, 1)
+
+		dbch := newClickHouseDatabaseWithSnapshot(env.cfg, env.providerConn, env.snapshot)
+		root, err := dbch.DirInfo("/", &db.Filter{Age: db.DGUTAgeAll})
+		So(err, ShouldBeNil)
+		So(root.Count, ShouldEqual, uint64(1_750_001))
+
+		lustre, err := dbch.DirInfo("/lustre/", &db.Filter{Age: db.DGUTAgeAll})
+		So(err, ShouldBeNil)
+		So(lustre.Count, ShouldEqual, uint64(1_500_001))
+
+		children, err := dbch.Children("/lustre/")
+		So(err, ShouldBeNil)
+		So(children, ShouldHaveLength, 7)
+	})
+
+	Convey("C2.2 full-filter virtual DirInfo reads active virtual filter rows and no dir facts", t, func() {
+		env, cleanup := newC2ActiveVirtualEnv(t, c2Mixed8MountSeeds())
+		defer cleanup()
+
+		countingConn := &c2ActiveVirtualRouteCountingConn{Conn: env.providerConn}
+		dbch := newClickHouseDatabaseWithSnapshot(env.cfg, countingConn, env.snapshot)
+
+		filter := &db.Filter{GIDs: []uint32{7}, UIDs: []uint32{11}, Age: db.DGUTAgeAll}
+		for _, expected := range c2Mixed8ExpectedSummaries() {
+			sum, err := dbch.DirInfo(expected.dir, filter)
+			So(err, ShouldBeNil)
+			So(sum.Count, ShouldEqual, expected.count)
+			So(sum.Size, ShouldEqual, expected.size)
+		}
+
+		So(countingConn.activeVirtualFilterReadsValue(), ShouldBeGreaterThan, 0)
+		So(countingConn.dirFactReadsValue(), ShouldEqual, 0)
+	})
+
+	Convey("C2.3 synthetic 100-small-NFS active set keeps /nfs/ virtual", t, func() {
+		suffix := fmt.Sprintf("c2%d", time.Now().UnixNano())
+		seeds := make([]c2MountSeed, 0, 100)
+
+		base := time.Date(2026, 6, 11, 10, 0, 0, 0, time.UTC)
+		for i := range 100 {
+			seeds = append(seeds, c2MountSeed{
+				mountPath: fmt.Sprintf("/nfs/%s-project%03d/", suffix, i),
+				updatedAt: base.Add(time.Duration(i) * time.Minute),
+				count:     1,
+			})
+		}
+
+		mounts := make([]activeMount, 0, len(seeds))
+		for _, seed := range seeds {
+			mounts = append(mounts, activeMount{
+				mountPath:  seed.mountPath,
+				snapshotID: snapshotID(seed.mountPath, seed.updatedAt).String(),
+				updatedAt:  seed.updatedAt,
+			})
+		}
+
+		childRows := activeVirtualChildRowsForMounts("c2-shape", mounts, base)
+		So(activeVirtualSummaryRowsForChildren("c2-shape", mounts, childRows, base), ShouldHaveLength, 102)
+		So(childRows, ShouldHaveLength, 101)
+
+		env, cleanup := newC2ActiveVirtualEnv(t, seeds)
+		defer cleanup()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		So(countRows(ctx, env.conn, d1CountActiveSetRowsQuery("wrstat_active_virtual_summaries"), env.activeSetID),
+			ShouldEqual, 102)
+		So(countRows(ctx, env.conn, d1CountActiveSetRowsQuery("wrstat_active_virtual_children"), env.activeSetID),
+			ShouldEqual, 101)
+
+		dbch := newClickHouseDatabaseWithSnapshot(env.cfg, env.providerConn, env.snapshot)
+		children, err := dbch.Children("/nfs/")
+		So(err, ShouldBeNil)
+		So(children, ShouldHaveLength, 100)
+		So(children[0], ShouldEqual, fmt.Sprintf("/nfs/%s-project000", suffix))
+		So(children[99], ShouldEqual, fmt.Sprintf("/nfs/%s-project099", suffix))
+
+		sum, err := dbch.DirInfo("/nfs/", &db.Filter{Age: db.DGUTAgeAll})
+		So(err, ShouldBeNil)
+		So(sum.Count, ShouldEqual, 100)
+	})
+
+	Convey("C2.4-C2.5 mixed8 virtual paths match deterministic filter totals without fact reads", t, func() {
+		env, cleanup := newC2ActiveVirtualEnv(t, c2Mixed8MountSeeds())
+		defer cleanup()
+
+		for _, tc := range c2Mixed8FilterMatrix() {
+			Convey(tc.name, func() {
+				countingConn := &c2ActiveVirtualRouteCountingConn{Conn: env.providerConn}
+				dbch := newClickHouseDatabaseWithSnapshot(env.cfg, countingConn, env.snapshot)
+
+				for _, expected := range c2Mixed8ExpectedSummariesForAge(tc.ageDivisor) {
+					Convey(expected.dir, func() {
+						sum, err := dbch.DirInfo(expected.dir, tc.filter)
+						So(err, ShouldBeNil)
+						So(c2DirSummaryDigest(sum), ShouldEqual, c2ExpectedDirSummaryDigest(expected, tc.expectedAge))
+					})
+				}
+
+				So(countingConn.activeVirtualReadsValue(), ShouldBeGreaterThan, 0)
+				So(countingConn.dirFactReadsValue(), ShouldEqual, 0)
+			})
+		}
+	})
+
+	Convey("C2.6 virtual-root Tree.Where uses active virtual rows for literal age filters", t, func() {
+		seeds := c2Mixed8MountSeeds()
+
+		env, cleanup := newC2ActiveVirtualEnv(t, seeds)
+		defer cleanup()
+
+		cases := []struct {
+			name    string
+			dir     string
+			age     db.DirGUTAge
+			divisor uint64
+		}{
+			{name: "root where unused 1y", dir: "/", age: db.DirGUTAge(4), divisor: 10},
+			{name: "nfs where unchanged 1y", dir: nfsAncestor, age: db.DirGUTAge(12), divisor: 20},
+		}
+
+		for _, tc := range cases {
+			Convey(tc.name, func() {
+				ResetSchema3FallbackRoutes()
+
+				countingConn := &c2ActiveVirtualRouteCountingConn{Conn: env.providerConn}
+				dbch := newClickHouseDatabaseWithSnapshot(env.cfg, countingConn, env.snapshot)
+
+				got, err := db.NewTree(dbch).Where(
+					tc.dir,
+					&db.Filter{Age: tc.age},
+					split.SplitsToSplitFn(2),
+				)
+				So(err, ShouldBeNil)
+				So(c2WhereDigest(got), ShouldEqual,
+					c2WhereDigest(c2ExpectedWhereSummaries(seeds, tc.dir, tc.age, tc.divisor)))
+				So(countingConn.activeVirtualReadsValue(), ShouldBeGreaterThan, 0)
+				So(countingConn.dirFactReadsValue(), ShouldEqual, 0)
+				So(ReadSchema3FallbackRoutes()["parent_facts_fallback"], ShouldEqual, uint64(0))
+			})
+		}
+	})
+
+	Convey("C2.7 REST where routes serve virtual literal-age roots from fresh providers", t, func() {
+		seeds := c2Mixed8MountSeeds()
+
+		env, cleanup := newC2ActiveVirtualEnv(t, seeds)
+		defer cleanup()
+
+		cases := []struct {
+			name    string
+			dir     string
+			age     db.DirGUTAge
+			ageText string
+			divisor uint64
+		}{
+			{name: "root rest where unused 1y", dir: "/", age: db.DGUTAgeA1Y, ageText: "A1Y", divisor: 10},
+			{name: "nfs rest where unchanged 1y", dir: nfsAncestor, age: db.DGUTAgeM1Y, ageText: "M1Y", divisor: 20},
+		}
+
+		for _, tc := range cases {
+			Convey(tc.name, func() {
+				ResetSchema3FallbackRoutes()
+
+				route, closeProvider := newC2ActiveVirtualRouteServer(t, env.cfg, env.snapshot, false)
+				defer closeProvider()
+
+				got := requestC2RESTWhere(t, route.server, url.Values{
+					"dir":    {tc.dir},
+					"age":    {tc.ageText},
+					"splits": {"2"},
+				})
+
+				So(c2RESTWhereDigest(got), ShouldEqual,
+					c2ExpectedRESTWhereDigest(c2ExpectedWhereSummaries(seeds, tc.dir, tc.age, tc.divisor)))
+				So(route.server.ResponseCacheHits(), ShouldEqual, uint64(0))
+				So(route.counting.activeVirtualReadsValue(), ShouldBeGreaterThan, 0)
+				So(route.counting.dirFactReadsValue(), ShouldEqual, 0)
+				So(route.counting.factVectorReadsValue(), ShouldEqual, 0)
+				So(ReadSchema3FallbackRoutes()["parent_facts_fallback"], ShouldEqual, uint64(0))
+
+				ResetSchema3FallbackRoutes()
+
+				cliRoute, closeCLIProvider := newC2ActiveVirtualRouteServer(t, env.cfg, env.snapshot, true)
+				defer closeCLIProvider()
+
+				cliGot := requestC2CLIWhere(t, cliRoute, tc.dir, tc.age)
+				So(c2RESTWhereDigest(cliGot), ShouldEqual,
+					c2ExpectedRESTWhereDigest(c2ExpectedWhereSummaries(seeds, tc.dir, tc.age, tc.divisor)))
+				So(cliRoute.server.ResponseCacheHits(), ShouldEqual, uint64(0))
+				So(cliRoute.counting.activeVirtualReadsValue(), ShouldBeGreaterThan, 0)
+				So(cliRoute.counting.dirFactReadsValue(), ShouldEqual, 0)
+				So(cliRoute.counting.factVectorReadsValue(), ShouldEqual, 0)
+				So(ReadSchema3FallbackRoutes()["parent_facts_fallback"], ShouldEqual, uint64(0))
+			})
+		}
+	})
+
+	Convey("C2.8 literal-age virtual tree queries return deterministic children without fact reads", t, func() {
+		seeds := c2Mixed8MountSeeds()
+
+		env, cleanup := newC2ActiveVirtualEnv(t, seeds)
+		defer cleanup()
+
+		cases := []struct {
+			name          string
+			dir           string
+			age           db.DirGUTAge
+			divisor       uint64
+			expectedChild []string
+		}{
+			{
+				name:          "root tree unused 1y",
+				dir:           "/",
+				age:           db.DirGUTAge(4),
+				divisor:       10,
+				expectedChild: []string{"/lustre", "/nfs"},
+			},
+			{
+				name:          "nfs tree unchanged 1y",
+				dir:           nfsAncestor,
+				age:           db.DirGUTAge(12),
+				divisor:       20,
+				expectedChild: c2SeedMountPathsWithPrefix(seeds, nfsAncestor),
+			},
+		}
+
+		for _, tc := range cases {
+			Convey(tc.name, func() {
+				ResetSchema3FallbackRoutes()
+
+				route, closeProvider := newC2ActiveVirtualRouteServer(t, env.cfg, env.snapshot, true)
+				defer closeProvider()
+
+				got := requestC2AuthTree(t, route, tc.dir, tc.age)
+				So(got.Children, ShouldHaveLength, len(tc.expectedChild))
+				So(c2RESTTreeCurrentDigest(got), ShouldEqual,
+					c2ExpectedRESTTreeDigest(db.DCSs{
+						c2ExpectedDirSummary(tc.dir, c2ExpectedVirtualSummary(tc.dir, tc.divisor).count,
+							c2ExpectedVirtualSummary(tc.dir, tc.divisor).size, tc.age),
+					}))
+				So(c2RESTTreeChildrenDigest(got.Children), ShouldEqual,
+					c2ExpectedRESTTreeDigest(c2ExpectedTreeChildren(seeds, tc.expectedChild, tc.age, tc.divisor)))
+				So(route.server.ResponseCacheHits(), ShouldEqual, uint64(0))
+				So(route.counting.activeVirtualReadsValue(), ShouldBeGreaterThan, 0)
+				So(route.counting.dirFactReadsValue(), ShouldEqual, 0)
+				So(route.counting.factVectorReadsValue(), ShouldEqual, 0)
+				So(ReadSchema3FallbackRoutes()["parent_facts_fallback"], ShouldEqual, uint64(0))
+			})
+		}
+	})
+}
+
+func newC2ActiveVirtualEnv(t *testing.T, seeds []c2MountSeed) (c2ActiveVirtualEnv, func()) {
+	t.Helper()
+	os.Setenv("WRSTAT_ENV", "test")
+	resetSharedTreeQueryCachesForTesting()
+
+	th := newClickHouseTestHarness(t)
+	cfg := th.newConfig()
+	cfg.QueryTimeout = 10 * time.Second
+	cfg.PollInterval = 0
+	cfg.MountPoints = []string{c2LustreAncestor}
+
+	p, err := OpenProvider(cfg)
+	So(err, ShouldBeNil)
+
+	cp, ok := p.(*chProvider)
+	So(ok, ShouldBeTrue)
+
+	conn := th.openConn(cfg.DSN)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+
+	offset := time.Duration(time.Now().UnixNano()%int64(time.Second)) * time.Nanosecond
+
+	rows := make([]mountsActiveRow, 0, len(seeds))
+	for _, seed := range seeds {
+		seed.updatedAt = seed.updatedAt.Add(offset)
+		rows = append(rows, seedC2ActiveVirtualMount(ctx, conn, seed))
+	}
+
+	activeSetID := fingerprintForMountsActive(rows)
+	So(writeC2ActiveVirtualOverlay(ctx, conn, rows, activeSetID), ShouldBeNil)
+
+	cleanup := func() {
+		cancel()
+		So(conn.Close(), ShouldBeNil)
+		So(p.Close(), ShouldBeNil)
+		os.Unsetenv("WRSTAT_ENV")
+		resetSharedTreeQueryCachesForTesting()
+	}
+
+	return c2ActiveVirtualEnv{
+		cfg:          cfg,
+		conn:         conn,
+		provider:     cp,
+		providerConn: cp.conn,
+		snapshot:     newActiveMountsSnapshot(rows),
+		activeSetID:  activeSetID,
+	}, cleanup
+}
+
+func seedC2ActiveVirtualMount(ctx context.Context, conn ch.Conn, seed c2MountSeed) mountsActiveRow {
+	sid := snapshotID(seed.mountPath, seed.updatedAt)
+
+	size := seed.size
+	if size == 0 {
+		size = seed.count * 10
+	}
+
+	So(conn.Exec(ctx, testInsertMountStmt, seed.mountPath, time.Now(), sid, seed.updatedAt), ShouldBeNil)
+	So(conn.Exec(ctx,
+		testInsertDGUTAStmt,
+		seed.mountPath,
+		sid.String(),
+		seed.mountPath,
+		uint32(7),
+		uint32(11),
+		uint16(db.DGUTAFileTypeBam),
+		uint8(db.DGUTAgeAll),
+		seed.count,
+		size,
+		int64(10),
+		int64(20),
+		[]uint64{seed.count, 0, 0, 0, 0, 0, 0, 0, 0},
+		[]uint64{0, seed.count, 0, 0, 0, 0, 0, 0, 0},
+	), ShouldBeNil)
+	So(conn.Exec(ctx,
+		insertDirFilterAllForTest,
+		seed.mountPath,
+		sid.String(),
+		uint8(db.DGUTAgeAll),
+		uint32(7),
+		uint32(11),
+		uint16(db.DGUTAFileTypeBam),
+		seed.mountPath,
+		parentFactsParentDir(seed.mountPath),
+		seed.count,
+		size,
+		int64(10),
+		int64(20),
+		[]uint64{seed.count, 0, 0, 0, 0, 0, 0, 0, 0},
+		[]uint64{0, seed.count, 0, 0, 0, 0, 0, 0, 0},
+		uint64(0),
+		uint64(1),
+		uint8(0),
+		uint8(1),
+	), ShouldBeNil)
+
+	for _, ageRow := range []struct {
+		age   db.DirGUTAge
+		count uint64
+		size  uint64
+	}{
+		{age: db.DGUTAgeA1Y, count: seed.count / 10, size: size / 10},
+		{age: db.DGUTAgeM1Y, count: seed.count / 20, size: size / 20},
+	} {
+		So(conn.Exec(ctx,
+			insertDirFilterAllForTest,
+			seed.mountPath,
+			sid.String(),
+			uint8(ageRow.age),
+			uint32(7),
+			uint32(11),
+			uint16(db.DGUTAFileTypeBam),
+			seed.mountPath,
+			parentFactsParentDir(seed.mountPath),
+			ageRow.count,
+			ageRow.size,
+			int64(10),
+			int64(20),
+			[]uint64{ageRow.count, 0, 0, 0, 0, 0, 0, 0, 0},
+			[]uint64{0, ageRow.count, 0, 0, 0, 0, 0, 0, 0},
+			uint64(0),
+			uint64(1),
+			uint8(0),
+			uint8(1),
+		), ShouldBeNil)
+	}
+
+	So(conn.Exec(
+		ctx,
+		testInsertChildrenStmt,
+		seed.mountPath,
+		sid.String(),
+		seed.mountPath,
+		seed.mountPath+"leaf",
+	), ShouldBeNil)
+
+	return mountsActiveRow{mountPath: seed.mountPath, snapshotID: sid.String(), updatedAt: seed.updatedAt}
+}
+
+func writeC2ActiveVirtualOverlay(
+	ctx context.Context,
+	conn ch.Conn,
+	rows []mountsActiveRow,
+	activeSetID string,
+) error {
+	mounts := newActiveMountsSnapshot(rows).all()
+	refreshedAt := time.Now().UTC()
+
+	for _, query := range activeVirtualPartitionDropQueries() {
+		if err := dropActiveSetPartition(ctx, conn, query, activeSetID, "test active virtual"); err != nil {
+			return err
+		}
+	}
+
+	rootGUTAs, err := queryActiveVirtualRootGUTAs(ctx, conn, mounts)
+	if err != nil {
+		return err
+	}
+
+	rootFilterRows, err := queryActiveVirtualRootFilterRows(ctx, conn, mounts)
+	if err != nil {
+		return err
+	}
+
+	childCounts, err := queryActiveVirtualMountChildCounts(ctx, conn, mounts)
+	if err != nil {
+		return err
+	}
+
+	summaryRows, filterRows, childRows := activeVirtualRowsForMountsFromData(
+		activeSetID,
+		mounts,
+		refreshedAt,
+		rootGUTAs,
+		rootFilterRows,
+		childCounts,
+	)
+
+	writer := newActiveVirtualOverlayWriter(conn, 1000)
+	if err := appendActiveVirtualOverlayRows(ctx, writer, summaryRows, filterRows, childRows); err != nil {
+		return err
+	}
+
+	if err := writer.flush(ctx); err != nil {
+		return err
+	}
+
+	setRow := activeVirtualSetRowForRows(activeSetID, rows, summaryRows, filterRows, childRows, refreshedAt)
+
+	return writer.appendSet(ctx, setRow)
+}
+
+func c2Mixed8MountSeeds() []c2MountSeed {
+	suffix := fmt.Sprintf("c2%d", time.Now().UnixNano())
+	base := time.Date(2026, 6, 11, 8, 0, 0, 0, time.UTC)
+	seeds := make([]c2MountSeed, 0, 8)
+
+	for i := range 6 {
+		seeds = append(seeds, c2MountSeed{
+			mountPath: fmt.Sprintf("/lustre/%s-project%03d/", suffix, i),
+			updatedAt: base.Add(time.Duration(i) * time.Minute),
+			count:     200_000,
+			size:      8_000_000_000_000,
+		})
+	}
+
+	seeds = append(seeds, c2MountSeed{
+		mountPath: fmt.Sprintf("/lustre/%s-project006/", suffix),
+		updatedAt: base.Add(6 * time.Minute),
+		count:     300_001,
+		size:      13_176_182_464_512,
+	})
+	seeds = append(seeds, c2MountSeed{
+		mountPath: fmt.Sprintf("/nfs/%s-project000/", suffix),
+		updatedAt: base.Add(7 * time.Minute),
+		count:     250_000,
+		size:      308_353_669_970,
+	})
+
+	return seeds
+}
+
+func readC2ActiveVirtualSummaries(
+	ctx context.Context,
+	conn ch.Conn,
+	activeSetID string,
+) map[string]c2ActiveVirtualSummaryForTest {
+	rows, err := conn.Query(ctx,
+		"SELECT dir, all_count, all_size, child_count, is_mount_root_box "+
+			"FROM wrstat_active_virtual_summaries WHERE active_set_id = ?",
+		activeSetID,
+	)
+
+	So(err, ShouldBeNil)
+	defer func() { So(rows.Close(), ShouldBeNil) }()
+
+	out := make(map[string]c2ActiveVirtualSummaryForTest)
+
+	for rows.Next() {
+		var (
+			dir string
+			row c2ActiveVirtualSummaryForTest
+		)
+		So(rows.Scan(&dir, &row.count, &row.size, &row.childCount, &row.isMountRootBox), ShouldBeNil)
+		out[dir] = row
+	}
+
+	So(rows.Err(), ShouldBeNil)
+
+	return out
+}
+
+func c2Mixed8ExpectedSummaries() []struct {
+	dir   string
+	count uint64
+	size  uint64
+} {
+	return []struct {
+		dir   string
+		count uint64
+		size  uint64
+	}{
+		{dir: "/", count: 1_750_001, size: 61_484_536_134_482},
+		{dir: c2LustreAncestor, count: 1_500_001, size: 61_176_182_464_512},
+		{dir: nfsAncestor, count: 250_000, size: 308_353_669_970},
+	}
+}
+
+func c2Mixed8FilterMatrix() []struct {
+	name        string
+	filter      *db.Filter
+	expectedAge db.DirGUTAge
+	ageDivisor  uint64
+} {
+	return []struct {
+		name        string
+		filter      *db.Filter
+		expectedAge db.DirGUTAge
+		ageDivisor  uint64
+	}{
+		{name: "default empty", filter: &db.Filter{}, expectedAge: db.DGUTAgeAll, ageDivisor: 1},
+		{name: "age all", filter: &db.Filter{Age: db.DGUTAgeAll}, expectedAge: db.DGUTAgeAll, ageDivisor: 1},
+		{
+			name:        "file only",
+			filter:      &db.Filter{Age: db.DGUTAgeAll, FT: db.AllTypesExceptDirectories},
+			expectedAge: db.DGUTAgeAll,
+			ageDivisor:  1,
+		},
+		{name: "gid", filter: &db.Filter{GIDs: []uint32{7}, Age: db.DGUTAgeAll}, expectedAge: db.DGUTAgeAll, ageDivisor: 1},
+		{name: "uid", filter: &db.Filter{UIDs: []uint32{11}, Age: db.DGUTAgeAll}, expectedAge: db.DGUTAgeAll, ageDivisor: 1},
+		{
+			name:        "type bitmask",
+			filter:      &db.Filter{FT: db.DGUTAFileTypeBam, Age: db.DGUTAgeAll},
+			expectedAge: db.DGUTAgeAll,
+			ageDivisor:  1,
+		},
+		{
+			name: "owner user type",
+			filter: &db.Filter{
+				GIDs: []uint32{7},
+				UIDs: []uint32{11},
+				FT:   db.DGUTAFileTypeBam,
+				Age:  db.DGUTAgeAll,
+			},
+			expectedAge: db.DGUTAgeAll,
+			ageDivisor:  1,
+		},
+		{name: "unused 1y", filter: &db.Filter{Age: db.DGUTAgeA1Y}, expectedAge: db.DGUTAgeA1Y, ageDivisor: 10},
+		{name: "unchanged 1y", filter: &db.Filter{Age: db.DGUTAgeM1Y}, expectedAge: db.DGUTAgeM1Y, ageDivisor: 20},
+	}
+}
+
+func c2Mixed8ExpectedSummariesForAge(divisor uint64) []struct {
+	dir   string
+	count uint64
+	size  uint64
+} {
+	out := c2Mixed8ExpectedSummaries()
+	if divisor == 1 {
+		return out
+	}
+
+	for i := range out {
+		out[i].count /= divisor
+		out[i].size /= divisor
+	}
+
+	if divisor == 20 {
+		out[0].size = 3_074_226_806_723
+		out[1].size = 3_058_809_123_225
+	}
+
+	return out
+}
+
+func c2DirSummaryDigest(sum *db.DirSummary) string {
+	So(sum, ShouldNotBeNil)
+
+	return c2SummaryDigest(c2DigestSummary{
+		Count: sum.Count,
+		Size:  sum.Size,
+		UIDs:  append([]uint32(nil), sum.UIDs...),
+		GIDs:  append([]uint32(nil), sum.GIDs...),
+		FT:    uint16(sum.FT),
+		Age:   uint8(sum.Age),
+	})
+}
+
+func c2SummaryDigest(summary c2DigestSummary) string {
+	sort.Slice(summary.UIDs, func(i, j int) bool { return summary.UIDs[i] < summary.UIDs[j] })
+	sort.Slice(summary.GIDs, func(i, j int) bool { return summary.GIDs[i] < summary.GIDs[j] })
+
+	data, err := json.Marshal(summary)
+	So(err, ShouldBeNil)
+
+	sum := sha256.Sum256(data)
+
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+func c2ExpectedDirSummaryDigest(
+	expected struct {
+		dir   string
+		count uint64
+		size  uint64
+	},
+	age db.DirGUTAge,
+) string {
+	return c2SummaryDigest(c2DigestSummary{
+		Count: expected.count,
+		Size:  expected.size,
+		UIDs:  []uint32{11},
+		GIDs:  []uint32{7},
+		FT:    uint16(db.DGUTAFileTypeBam),
+		Age:   uint8(age),
+	})
+}
+
+func c2WhereDigest(summaries db.DCSs) string {
+	elements := make([]c2WhereDigestSummary, 0, len(summaries))
+	for _, sum := range summaries {
+		elements = append(elements, c2WhereDigestSummary{
+			Dir:   sum.Dir,
+			Count: sum.Count,
+			Size:  sum.Size,
+			UIDs:  append([]uint32(nil), sum.UIDs...),
+			GIDs:  append([]uint32(nil), sum.GIDs...),
+			FT:    uint16(sum.FT),
+			Age:   uint8(sum.Age),
+		})
+	}
+
+	sort.Slice(elements, func(i, j int) bool {
+		return elements[i].Dir < elements[j].Dir
+	})
+
+	for i := range elements {
+		sort.Slice(elements[i].UIDs, func(a, b int) bool { return elements[i].UIDs[a] < elements[i].UIDs[b] })
+		sort.Slice(elements[i].GIDs, func(a, b int) bool { return elements[i].GIDs[a] < elements[i].GIDs[b] })
+	}
+
+	data, err := json.Marshal(elements)
+	So(err, ShouldBeNil)
+
+	sum := sha256.Sum256(data)
+
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+func c2ExpectedWhereSummaries(
+	seeds []c2MountSeed,
+	dir string,
+	age db.DirGUTAge,
+	divisor uint64,
+) db.DCSs {
+	var out db.DCSs
+
+	for _, expected := range c2Mixed8ExpectedSummariesForAge(divisor) {
+		if c2WhereIncludesVirtualSummary(dir, expected.dir) {
+			out = append(out, c2ExpectedDirSummary(c2WhereResultDir(expected.dir), expected.count, expected.size, age))
+		}
+	}
+
+	for _, seed := range seeds {
+		if c2WhereIncludesMountBox(dir, seed.mountPath) {
+			out = append(out, c2ExpectedDirSummary(
+				c2WhereResultDir(seed.mountPath),
+				seed.count/divisor,
+				c2SeedSize(seed)/divisor,
+				age,
+			))
+		}
+	}
+
+	return out
+}
+
+func c2WhereIncludesVirtualSummary(queryDir, summaryDir string) bool {
+	switch ensureTrailingSlash(queryDir) {
+	case "/":
+		return summaryDir == "/" || summaryDir == "/lustre/"
+	case "/nfs/":
+		return false
+	default:
+		return summaryDir == ensureTrailingSlash(queryDir)
+	}
+}
+
+func c2ExpectedDirSummary(dir string, count uint64, size uint64, age db.DirGUTAge) *db.DirSummary {
+	return &db.DirSummary{
+		Dir:   dir,
+		Count: count,
+		Size:  size,
+		UIDs:  []uint32{11},
+		GIDs:  []uint32{7},
+		FT:    db.DGUTAFileTypeBam,
+		Age:   age,
+	}
+}
+
+func c2WhereResultDir(dir string) string {
+	if dir == "/" {
+		return dir
+	}
+
+	return strings.TrimSuffix(dir, "/")
+}
+
+func c2WhereIncludesMountBox(queryDir, mountPath string) bool {
+	queryDir = ensureTrailingSlash(queryDir)
+
+	return queryDir == "/" || strings.HasPrefix(mountPath, queryDir)
+}
+
+func c2SeedSize(seed c2MountSeed) uint64 {
+	if seed.size != 0 {
+		return seed.size
+	}
+
+	return seed.count * 10
+}
+
+func newC2ActiveVirtualRouteServer(
+	t *testing.T,
+	cfg Config,
+	snapshot *activeMountsSnapshot,
+	withAuthTree bool,
+) (c2ActiveVirtualRouteServer, func()) {
+	t.Helper()
+
+	p, counting := newC2ActiveVirtualRouteProvider(t, cfg, snapshot)
+	s := server.New(gas.NewStringLogger())
+	setC2RouteServerNames(s)
+
+	route := c2ActiveVirtualRouteServer{
+		server:   s,
+		provider: p,
+		counting: counting,
+	}
+
+	if withAuthTree {
+		cert, key, err := gas.CreateTestCert(t)
+		So(err, ShouldBeNil)
+		So(s.EnableAuth(cert, key, func(_, _ string) (bool, string) {
+			return true, ""
+		}), ShouldBeNil)
+		So(s.AddTreePage(), ShouldBeNil)
+
+		route.cert = cert
+		route.key = key
+	}
+
+	So(s.SetProvider(p), ShouldBeNil)
+	counting.reset()
+
+	if withAuthTree {
+		addr, stop, err := gas.StartTestServer(s, route.cert, route.key)
+		So(err, ShouldBeNil)
+
+		token, err := gas.Login(gas.NewClientRequest(addr, route.cert), "c2", "pass")
+		So(err, ShouldBeNil)
+
+		route.addr = addr
+		route.token = token
+		route.stop = stop
+	}
+
+	return route, func() {
+		if route.stop != nil {
+			So(route.stop(), ShouldBeNil)
+		}
+
+		So(p.Close(), ShouldBeNil)
+		ResetTreeQueryCaches()
+	}
+}
+
+func newC2ActiveVirtualRouteProvider(
+	t *testing.T,
+	cfg Config,
+	snapshot *activeMountsSnapshot,
+) (*chProvider, *c2ActiveVirtualRouteCountingConn) {
+	t.Helper()
+
+	conn, err := connectFromConfigContext(context.Background(), cfg)
+	So(err, ShouldBeNil)
+
+	counting := &c2ActiveVirtualRouteCountingConn{Conn: conn}
+	p := newChProvider(cfg, counting)
+
+	dbImpl := newClickHouseDatabaseWithSnapshot(cfg, counting, snapshot)
+	tree := db.NewTree(dbImpl)
+	bd, err := newClickHouseBaseDirsReaderWithSnapshot(cfg, counting, snapshot)
+	So(err, ShouldBeNil)
+	So(p.publishLazyReaders(dbImpl, tree, bd, snapshot.fingerprint), ShouldBeTrue)
+
+	return p, counting
+}
+
+func setC2RouteServerNames(s *server.Server) {
+	s.SetCachedUserName(11, "c2-user-11")
+	s.SetCachedGroupName(7, "c2-group-7")
+}
+
+func requestC2RESTWhere(t *testing.T, s *server.Server, values url.Values) []*server.DirSummary {
+	t.Helper()
+
+	response, err := gas.QueryREST(s.Router(), server.EndPointWhere, "?"+values.Encode())
+	So(err, ShouldBeNil)
+
+	if response.Code != http.StatusOK {
+		t.Logf("C2 REST where failed with %d: %s", response.Code, response.Body.String())
+	}
+
+	So(response.Code, ShouldEqual, http.StatusOK)
+
+	var got []*server.DirSummary
+	So(json.Unmarshal(response.Body.Bytes(), &got), ShouldBeNil)
+
+	return got
+}
+
+func c2RESTWhereDigest(summaries []*server.DirSummary) string {
+	elements := make([]c2RESTDigestSummary, 0, len(summaries))
+	for _, sum := range summaries {
+		elements = append(elements, c2RESTDigestSummary{
+			Dir:       sum.Dir,
+			Count:     sum.Count,
+			Size:      sum.Size,
+			Users:     c2SortedStrings(sum.Users),
+			Groups:    c2SortedStrings(sum.Groups),
+			FileTypes: c2SortedStrings(sum.FileTypes),
+			Age:       sum.Age,
+		})
+	}
+
+	return c2RESTDigest(elements)
+}
+
+func c2SortedStrings(values []string) []string {
+	out := append([]string(nil), values...)
+	sort.Strings(out)
+
+	return out
+}
+
+func c2RESTDigest(elements []c2RESTDigestSummary) string {
+	sort.Slice(elements, func(i, j int) bool {
+		return elements[i].Dir < elements[j].Dir
+	})
+
+	data, err := json.Marshal(elements)
+	So(err, ShouldBeNil)
+
+	sum := sha256.Sum256(data)
+
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+func c2ExpectedRESTWhereDigest(summaries db.DCSs) string {
+	return c2ExpectedRESTTreeDigest(summaries)
+}
+
+func c2ExpectedRESTTreeDigest(summaries db.DCSs) string {
+	elements := make([]c2RESTDigestSummary, 0, len(summaries))
+	for _, sum := range summaries {
+		elements = append(elements, c2RESTDigestSummary{
+			Dir:       sum.Dir,
+			Count:     sum.Count,
+			Size:      sum.Size,
+			Users:     c2RESTUsers(sum.UIDs),
+			Groups:    c2RESTGroups(sum.GIDs),
+			FileTypes: c2RESTFileTypes(sum.FT),
+			Age:       sum.Age,
+		})
+	}
+
+	return c2RESTDigest(elements)
+}
+
+func c2RESTUsers(uids []uint32) []string {
+	out := make([]string, 0, len(uids))
+	for _, uid := range uids {
+		if uid == 11 {
+			out = append(out, "c2-user-11")
+		}
+	}
+
+	return c2SortedStrings(out)
+}
+
+func c2RESTGroups(gids []uint32) []string {
+	out := make([]string, 0, len(gids))
+	for _, gid := range gids {
+		if gid == 7 {
+			out = append(out, "c2-group-7")
+		}
+	}
+
+	return c2SortedStrings(out)
+}
+
+func c2RESTFileTypes(ft db.DirGUTAFileType) []string {
+	if ft == 0 {
+		return nil
+	}
+
+	return []string{ft.String()}
+}
+
+func requestC2CLIWhere(
+	t *testing.T,
+	route c2ActiveVirtualRouteServer,
+	dir string,
+	age db.DirGUTAge,
+) []*server.DirSummary {
+	t.Helper()
+
+	tokenDir := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", tokenDir)
+
+	client, err := gas.NewClientCLI(
+		"jwt",
+		"server-token",
+		route.addr,
+		route.cert,
+		false,
+	)
+	So(err, ShouldBeNil)
+	So(client.Login("c2", "pass"), ShouldBeNil)
+
+	_, got, err := server.GetWhereDataIs(client, dir, "", "", "", age, "2")
+	So(err, ShouldBeNil)
+
+	return got
+}
+
+func c2SeedMountPathsWithPrefix(seeds []c2MountSeed, prefix string) []string {
+	out := make([]string, 0, len(seeds))
+	for _, seed := range seeds {
+		if strings.HasPrefix(seed.mountPath, prefix) {
+			out = append(out, c2WhereResultDir(seed.mountPath))
+		}
+	}
+
+	sort.Strings(out)
+
+	return out
+}
+
+func requestC2AuthTree(
+	t *testing.T,
+	route c2ActiveVirtualRouteServer,
+	dir string,
+	age db.DirGUTAge,
+) server.TreeElement {
+	t.Helper()
+
+	response, err := gas.NewAuthenticatedClientRequest(route.addr, route.cert, route.token).
+		SetResult(&server.TreeElement{}).
+		ForceContentType("application/json").
+		SetQueryParams(map[string]string{
+			"path": dir,
+			"age":  strconv.Itoa(int(age)),
+		}).
+		Get(server.EndPointAuthTree)
+	So(err, ShouldBeNil)
+
+	if response.StatusCode() != http.StatusOK {
+		t.Logf("C2 auth tree failed with %d: %s", response.StatusCode(), response.String())
+	}
+
+	So(response.StatusCode(), ShouldEqual, http.StatusOK)
+
+	got, ok := response.Result().(*server.TreeElement)
+	So(ok, ShouldBeTrue)
+	So(got, ShouldNotBeNil)
+
+	return *got
+}
+
+func c2RESTTreeCurrentDigest(got server.TreeElement) string {
+	return c2RESTDigest([]c2RESTDigestSummary{{
+		Dir:       got.Path,
+		Count:     got.Count,
+		Size:      got.Size,
+		Users:     c2SortedStrings(got.Users),
+		Groups:    c2SortedStrings(got.Groups),
+		FileTypes: c2SortedStrings(got.FileTypes),
+		Age:       got.Age,
+	}})
+}
+
+func c2ExpectedVirtualSummary(dir string, divisor uint64) struct {
+	dir   string
+	count uint64
+	size  uint64
+} {
+	key := ensureTrailingSlash(dir)
+	for _, expected := range c2Mixed8ExpectedSummariesForAge(divisor) {
+		if expected.dir == key {
+			return expected
+		}
+	}
+
+	return struct {
+		dir   string
+		count uint64
+		size  uint64
+	}{dir: key}
+}
+
+func c2RESTTreeChildrenDigest(children []*server.TreeElement) string {
+	elements := make([]c2RESTDigestSummary, 0, len(children))
+	for _, child := range children {
+		elements = append(elements, c2RESTDigestSummary{
+			Dir:       child.Path,
+			Count:     child.Count,
+			Size:      child.Size,
+			Users:     c2SortedStrings(child.Users),
+			Groups:    c2SortedStrings(child.Groups),
+			FileTypes: c2SortedStrings(child.FileTypes),
+			Age:       child.Age,
+		})
+	}
+
+	return c2RESTDigest(elements)
+}
+
+func c2ExpectedTreeChildren(
+	seeds []c2MountSeed,
+	childDirs []string,
+	age db.DirGUTAge,
+	divisor uint64,
+) db.DCSs {
+	out := make(db.DCSs, 0, len(childDirs))
+	for _, childDir := range childDirs {
+		if strings.HasPrefix(ensureTrailingSlash(childDir), "/nfs/") && ensureTrailingSlash(childDir) != "/nfs/" {
+			out = append(out, c2ExpectedSeedSummary(seeds, childDir, age, divisor))
+
+			continue
+		}
+
+		out = append(out, c2ExpectedDirSummary(
+			childDir,
+			c2ExpectedVirtualSummary(childDir, divisor).count,
+			c2ExpectedVirtualSummary(childDir, divisor).size,
+			age,
+		))
+	}
+
+	return out
+}
+
+func c2ExpectedSeedSummary(seeds []c2MountSeed, dir string, age db.DirGUTAge, divisor uint64) *db.DirSummary {
+	for _, seed := range seeds {
+		if seed.mountPath == ensureTrailingSlash(dir) {
+			return c2ExpectedDirSummary(dir, seed.count/divisor, c2SeedSize(seed)/divisor, age)
+		}
+	}
+
+	return c2ExpectedDirSummary(dir, 0, 0, age)
 }
 
 func TestClickHouseDatabaseAllFilterReaderRoutingB2(t *testing.T) {
@@ -3367,6 +4468,121 @@ func explainB2ActiveRootTupleQuery(
 	So(rows.Err(), ShouldBeNil)
 
 	return strings.Join(lines, "\n"), nil
+}
+
+type c2DigestSummary struct {
+	Count uint64   `json:"count"`
+	Size  uint64   `json:"size"`
+	UIDs  []uint32 `json:"uids"`
+	GIDs  []uint32 `json:"gids"`
+	FT    uint16   `json:"ft"`
+	Age   uint8    `json:"age"`
+}
+
+type c2WhereDigestSummary struct {
+	Dir   string   `json:"dir"`
+	Count uint64   `json:"count"`
+	Size  uint64   `json:"size"`
+	UIDs  []uint32 `json:"uids"`
+	GIDs  []uint32 `json:"gids"`
+	FT    uint16   `json:"ft"`
+	Age   uint8    `json:"age"`
+}
+
+type c2RESTDigestSummary struct {
+	Dir       string       `json:"dir"`
+	Count     uint64       `json:"count"`
+	Size      uint64       `json:"size"`
+	Users     []string     `json:"users"`
+	Groups    []string     `json:"groups"`
+	FileTypes []string     `json:"filetypes"`
+	Age       db.DirGUTAge `json:"age"`
+}
+
+type c2ActiveVirtualRouteCountingConn struct {
+	ch.Conn
+
+	activeVirtualReads       atomic.Int32
+	activeVirtualFilterReads atomic.Int32
+	dirFactReads             atomic.Int32
+	factVectorReads          atomic.Int32
+}
+
+func (c *c2ActiveVirtualRouteCountingConn) Query(ctx context.Context, query string, args ...any) (driver.Rows, error) {
+	if strings.Contains(query, "FROM wrstat_active_virtual_") {
+		c.activeVirtualReads.Add(1)
+	}
+
+	if strings.Contains(query, "FROM wrstat_active_virtual_filter_all") {
+		c.activeVirtualFilterReads.Add(1)
+	}
+
+	if strings.Contains(query, "FROM wrstat_dir_facts") {
+		c.dirFactReads.Add(1)
+	}
+
+	if strings.Contains(query, "FROM wrstat_dir_facts") && strings.Contains(query, "arrayJoin") {
+		c.factVectorReads.Add(1)
+	}
+
+	return c.Conn.Query(ctx, query, args...)
+}
+
+func (c *c2ActiveVirtualRouteCountingConn) activeVirtualReadsValue() int {
+	return int(c.activeVirtualReads.Load())
+}
+
+func (c *c2ActiveVirtualRouteCountingConn) activeVirtualFilterReadsValue() int {
+	return int(c.activeVirtualFilterReads.Load())
+}
+
+func (c *c2ActiveVirtualRouteCountingConn) dirFactReadsValue() int {
+	return int(c.dirFactReads.Load())
+}
+
+func (c *c2ActiveVirtualRouteCountingConn) factVectorReadsValue() int {
+	return int(c.factVectorReads.Load())
+}
+
+func (c *c2ActiveVirtualRouteCountingConn) reset() {
+	c.activeVirtualReads.Store(0)
+	c.activeVirtualFilterReads.Store(0)
+	c.dirFactReads.Store(0)
+	c.factVectorReads.Store(0)
+}
+
+type c2ActiveVirtualRouteServer struct {
+	server   *server.Server
+	provider *chProvider
+	counting *c2ActiveVirtualRouteCountingConn
+	addr     string
+	cert     string
+	key      string
+	token    string
+	stop     func() error
+}
+
+type c2ActiveVirtualEnv struct {
+	cfg          Config
+	conn         ch.Conn
+	provider     *chProvider
+	providerConn ch.Conn
+	snapshot     *activeMountsSnapshot
+	activeSetID  string
+}
+
+type c2MountSeed struct {
+	mountPath string
+	updatedAt time.Time
+	count     uint64
+	size      uint64
+}
+
+type c2ActiveVirtualSummaryForTest struct {
+	count          uint64
+	size           uint64
+	childCount     uint64
+	isMountRootBox uint8
 }
 
 type b3ReadVolume struct {

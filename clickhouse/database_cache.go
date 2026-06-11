@@ -159,11 +159,12 @@ func treeFilterCacheKeyString(key treeFilterCacheKey) string {
 }
 
 type treeParentPacketCacheKey struct {
-	mountPath  string
-	snapshotID string
-	parentDir  string
-	filter     treeFilterCacheKey
-	version    treeQueryVersionKey
+	mountPath   string
+	snapshotID  string
+	parentDir   string
+	filter      treeFilterCacheKey
+	activeSetID string
+	version     treeQueryVersionKey
 }
 
 func newTreeParentPacketCacheKey(
@@ -172,10 +173,11 @@ func newTreeParentPacketCacheKey(
 	filter *db.Filter,
 ) treeParentPacketCacheKey {
 	return treeParentPacketCacheKey{
-		mountPath:  ensureTrailingSlash(mount.mountPath),
-		snapshotID: mount.snapshotID,
-		parentDir:  ensureTrailingSlash(parentDir),
-		filter:     newTreeFilterCacheKey(filter),
+		mountPath:   ensureTrailingSlash(mount.mountPath),
+		snapshotID:  mount.snapshotID,
+		parentDir:   ensureTrailingSlash(parentDir),
+		filter:      newTreeFilterCacheKey(filter),
+		activeSetID: mount.activeSetID,
 		version: newTreeQueryVersionKey(
 			currentSchemaVersion,
 			parentFactsPacketQueryVersion,
@@ -302,6 +304,7 @@ func parentPacketCacheHitKey(key treeParentPacketCacheKey) string {
 		";snapshot_id=" + key.snapshotID +
 		";parent_dir=" + key.parentDir +
 		";filter=" + treeFilterCacheKeyString(key.filter) +
+		";active_set_id=" + key.activeSetID +
 		";schema_version=" + strconv.FormatUint(uint64(key.version.schemaVersion), 10) +
 		";query_version=" + strconv.FormatUint(uint64(key.version.queryVersion), 10)
 }

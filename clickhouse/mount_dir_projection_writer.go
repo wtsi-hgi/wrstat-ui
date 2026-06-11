@@ -93,7 +93,7 @@ func addAgeAllMountDirRecordSummary(
 		fileSummary = newMountDirRecordSummary()
 	}
 
-	fileSummary.add(guta)
+	fileSummary.addFile(guta)
 
 	return allSummary, fileSummary
 }
@@ -133,6 +133,11 @@ func appendUniqueUint32(values []uint32, value uint32) []uint32 {
 	}
 
 	return append(values, value)
+}
+
+func (s *mountDirRecordSummary) addFile(guta *db.GUTA) {
+	s.add(guta)
+	s.ft &= db.AllTypesExceptDirectories
 }
 
 func (s *mountDirRecordSummary) sortedUIDs() []uint32 {
@@ -340,6 +345,11 @@ func appendMountDirFactRowValuesForRecord(
 		childCount,
 		refreshedAt,
 	)
+}
+
+func (a *mountDirSummaryAccumulator) addFile(guta *db.GUTA) {
+	a.add(guta)
+	a.ft &= db.AllTypesExceptDirectories
 }
 
 func (s mountDirProjectionState) summaryKeysFor(compactAges bool) []mountDirSummaryKey {
@@ -904,8 +914,8 @@ func (s *mountDirProjectionState) addGUTA(dir string, guta *db.GUTA) {
 	s.summaryAccumulator(s.summaries, key).add(guta)
 
 	if guta.FT&db.AllTypesExceptDirectories > 0 {
-		s.summaryAccumulatorForDir(s.allFileSummaries, dir).add(guta)
-		s.summaryAccumulator(s.fileSummaries, key).add(guta)
+		s.summaryAccumulatorForDir(s.allFileSummaries, dir).addFile(guta)
+		s.summaryAccumulator(s.fileSummaries, key).addFile(guta)
 	}
 
 	s.vectors[dir] = append(s.vectors[dir], guta)

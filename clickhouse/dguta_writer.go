@@ -356,19 +356,30 @@ func activeVirtualSummarySeedRows(
 	for _, row := range childRows {
 		childCounts[row.ParentDir]++
 		dirs[row.ParentDir] = activeVirtualSummaryRow{ActiveSetID: activeSetID, Dir: row.ParentDir}
-		dirs[row.ChildDir] = activeVirtualSummaryRow{
+		childDir := activeVirtualSummaryDirForChild(row)
+		dirs[childDir] = activeVirtualSummaryRow{
 			ActiveSetID:    activeSetID,
-			Dir:            row.ChildDir,
+			Dir:            childDir,
 			MountPath:      row.MountPath,
 			IsMountRootBox: row.IsMountRootBox,
 		}
 	}
 
-	if len(dirs) == 0 && len(mounts) > 0 {
-		dirs["/"] = activeVirtualSummaryRow{ActiveSetID: activeSetID, Dir: "/"}
+	for _, mount := range mounts {
+		dir := ensureTrailingSlash(mount.mountPath)
+		row := dirs[dir]
+		row.ActiveSetID = activeSetID
+		row.Dir = dir
+		row.MountPath = dir
+		row.IsMountRootBox = 1
+		dirs[dir] = row
 	}
 
 	return dirs, childCounts
+}
+
+func activeVirtualSummaryDirForChild(row activeVirtualChildRow) string {
+	return ensureTrailingSlash(row.ChildDir)
 }
 
 func sortActiveVirtualSummaryRows(rows []activeVirtualSummaryRow) {
@@ -872,6 +883,7 @@ func (w *dgutaWriter) AddChildren(parent *summary.DirectoryPath, children []stri
 
 	rawParentDir := string(parent.AppendTo(make([]byte, 0, parent.Len())))
 	parentDir := canonicalPathForMount(w.mountPath, rawParentDir)
+	children = w.canonicalChildrenForParent(parentDir, children)
 
 	if err := w.appendChildrenRows(ctx, children, parentDir); err != nil {
 		return err
@@ -1238,6 +1250,7 @@ func (w *dgutaWriter) stagedMountsActiveRows(ctx context.Context) ([]mountsActiv
 	return stagedMountsActiveRows(rows, mountsActiveRow(w.activeMount())), nil
 }
 
+//nolint:funlen,gocyclo
 func (w *dgutaWriter) writeActiveVirtualOverlay(
 	ctx context.Context,
 	rows []mountsActiveRow,
@@ -1250,7 +1263,30 @@ func (w *dgutaWriter) writeActiveVirtualOverlay(
 
 	mounts := newActiveMountsSnapshot(rows).all()
 	writer := newActiveVirtualOverlayWriter(w.conn, w.effectiveProjectionBatchSize())
-	summaryRows, filterRows, childRows := activeVirtualRowsForMounts(activeSetID, mounts, refreshedAt)
+
+	rootGUTAs, err := queryActiveVirtualRootGUTAs(ctx, w.conn, mounts)
+	if err != nil {
+		return activeVirtualSetRow{}, err
+	}
+
+	rootFilterRows, err := queryActiveVirtualRootFilterRows(ctx, w.conn, mounts)
+	if err != nil {
+		return activeVirtualSetRow{}, err
+	}
+
+	mountChildCounts, err := queryActiveVirtualMountChildCounts(ctx, w.conn, mounts)
+	if err != nil {
+		return activeVirtualSetRow{}, err
+	}
+
+	summaryRows, filterRows, childRows := activeVirtualRowsForMountsFromData(
+		activeSetID,
+		mounts,
+		refreshedAt,
+		rootGUTAs,
+		rootFilterRows,
+		mountChildCounts,
+	)
 
 	if err := appendActiveVirtualOverlayRows(ctx, writer, summaryRows, filterRows, childRows); err != nil {
 		return activeVirtualSetRow{}, err
@@ -2027,7 +2063,7 @@ func (w *dgutaWriter) appendChildrenRows(
 
 	return w.timeImportPhase(importPhaseChildrenInsert, func() error {
 		for _, child := range children {
-			_, err := w.appendChildRowWithContext(ctx, snapshotID, parentDir, child)
+			_, err := w.appendCanonicalChildRowWithContext(ctx, snapshotID, parentDir, child)
 			if err != nil {
 				return err
 			}
@@ -2035,6 +2071,27 @@ func (w *dgutaWriter) appendChildrenRows(
 
 		return nil
 	})
+}
+
+func (w *dgutaWriter) appendCanonicalChildRowWithContext(
+	ctx context.Context,
+	snapshotID, parentDir, child string,
+) (bool, error) {
+	if w.writeErr != nil {
+		return false, w.writeErr
+	}
+
+	if child == "" {
+		return false, nil
+	}
+
+	if err := w.childrenBlockWriter().append(ctx, func(batch driver.Batch) error {
+		return batch.Append(w.mountPath, snapshotID, parentDir, child)
+	}); err != nil {
+		return false, err
+	}
+
+	return true, nil
 }
 
 func (w *dgutaWriter) canonicalChildrenForParent(parentDir string, children []string) []string {

@@ -91,11 +91,19 @@ const (
 		"SELECT mount_path, snapshot_id FROM wrstat_mounts_active" +
 		")"
 
-	resolveMountQuery = "SELECT mount_path, snapshot_id, updated_at FROM wrstat_mounts_active " +
+	activeSetIDExpr = "(SELECT lower(hex(SHA256(arrayStringConcat(" +
+		"arrayMap(x -> concat(x, unhex('00')), " +
+		"arraySort(groupArray(concat(mount_path, '|', toString(snapshot_id), '|', " +
+		"formatDateTime(updated_at, '%Y-%m-%dT%H:%i:%SZ', 'UTC'))))))))) " +
+		"FROM wrstat_mounts_active)"
+
+	resolveMountQuery = "SELECT mount_path, toString(snapshot_id), updated_at, " +
+		activeSetIDExpr + " AS active_set_id FROM wrstat_mounts_active " +
 		"WHERE startsWith(?, mount_path) " +
 		"ORDER BY length(mount_path) DESC LIMIT 1"
 
-	resolveExactMountQuery = "SELECT mount_path, snapshot_id, updated_at FROM wrstat_mounts_active " +
+	resolveExactMountQuery = "SELECT mount_path, toString(snapshot_id), updated_at, " +
+		activeSetIDExpr + " AS active_set_id FROM wrstat_mounts_active " +
 		"WHERE mount_path = ? LIMIT 1"
 
 	dgutaAncestorSnapshotQuery = "SELECT " + dgutaTupleColumns + " FROM (" +
@@ -730,12 +738,17 @@ func newClickHouseDatabaseWithSnapshot(
 	}
 }
 
+//nolint:funlen,gocyclo
 func (d *clickHouseDatabase) DirInfo(
 	dir string,
 	filter *db.Filter,
 ) (*db.DirSummary, error) {
 	if err := d.ensureOpen(); err != nil {
 		return nil, err
+	}
+
+	if sum, ok, err := d.activeVirtualDirInfo(dir, filter); err != nil || ok {
+		return sum, err
 	}
 
 	mountPath, ok, err := d.resolveMountScope(dir)
@@ -759,6 +772,24 @@ func (d *clickHouseDatabase) DirInfo(
 	return d.dirInfoSingleMount(
 		mount.mountPath, mount.snapshotID, mount.updatedAt, dir, filter,
 	)
+}
+
+func (d *clickHouseDatabase) activeVirtualDirInfo(
+	dir string,
+	filter *db.Filter,
+) (*db.DirSummary, bool, error) {
+	result := make(map[string]*db.DirSummary, 1)
+
+	handled, err := d.addActiveVirtualDirInfos(result, []string{dir}, filter)
+	if err != nil {
+		return nil, false, err
+	}
+
+	if !handled[ensureTrailingSlash(dir)] {
+		return nil, false, nil
+	}
+
+	return result[dir], true, nil
 }
 
 func (d *clickHouseDatabase) dirInfoSingleMount(
@@ -1590,6 +1621,93 @@ func dirFilterAllWhereSummariesQueryForFilter(
 	return query, args
 }
 
+func (d *clickHouseDatabase) queryActiveMount(
+	query string,
+	args ...any,
+) (activeMount, bool, error) {
+	ctx, cancel := configQueryContext(d.cfg)
+	defer cancel()
+
+	rows, err := d.conn.Query(ctx, query, args...)
+	if err != nil {
+		return activeMount{}, false, fmt.Errorf("clickhouse: failed to resolve active mount: %w", err)
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	if !rows.Next() {
+		if iterErr := rowIterationErr(rows, "clickhouse: active mount iteration error"); iterErr != nil {
+			return activeMount{}, false, iterErr
+		}
+
+		return activeMount{}, false, nil
+	}
+
+	mount, err := scanActiveMountRow(rows)
+	if err != nil {
+		return activeMount{}, false, err
+	}
+
+	return mount, true, nil
+}
+
+func scanActiveMountRow(rows rowsScanner) (activeMount, error) {
+	var (
+		mountPath, snapshotID, activeSetID string
+		updatedAt                          time.Time
+	)
+
+	if err := rows.Scan(&mountPath, &snapshotID, &updatedAt, &activeSetID); err != nil {
+		return activeMount{}, fmt.Errorf("clickhouse: failed to scan active mount: %w", err)
+	}
+
+	updatedAt = updatedAt.UTC()
+
+	return activeMount{
+		mountPath:   mountPath,
+		snapshotID:  snapshotID,
+		updatedAt:   updatedAt,
+		activeSetID: activeSetID,
+	}, nil
+}
+
+func (d *clickHouseDatabase) addActiveVirtualDirsHaveChildren(
+	result map[string]bool,
+	dirs []string,
+	filter *db.Filter,
+) ([]string, error) {
+	remaining := make([]string, 0, len(dirs))
+	for _, dir := range dirs {
+		hasChildren, handled, err := d.activeVirtualHasChildren(dir, filter)
+		if err != nil {
+			return nil, err
+		}
+
+		if !handled {
+			remaining = append(remaining, dir)
+
+			continue
+		}
+
+		result[dir] = hasChildren
+	}
+
+	return remaining, nil
+}
+
+func unhandledDirs(dirs []string, handled map[string]bool) []string {
+	remaining := make([]string, 0, len(dirs))
+	for _, dir := range dirs {
+		if handled[ensureTrailingSlash(dir)] {
+			continue
+		}
+
+		remaining = append(remaining, dir)
+	}
+
+	return remaining
+}
+
 func scanChildFilterAllChildSummaryRow(
 	rows rowsScanner,
 	filter *db.Filter,
@@ -2039,17 +2157,20 @@ func (d *clickHouseDatabase) dirInfoTreeSummaryAncestor(
 	return dirSummaryWithModtime(gutas, filter, updatedAt), true, nil
 }
 
-func (d *clickHouseDatabase) Children(dir string) ([]string, error) {
+func (d *clickHouseDatabase) Children(dir string) ([]string, error) { //nolint:gocyclo
 	if err := d.ensureOpen(); err != nil {
 		return nil, err
+	}
+
+	parentDir := ensureTrailingSlash(dir)
+	if children, ok, err := d.activeVirtualChildren(parentDir); err != nil || ok {
+		return children, err
 	}
 
 	mountPath, ok, err := d.resolveMountScope(dir)
 	if err != nil {
 		return nil, err
 	}
-
-	parentDir := ensureTrailingSlash(dir)
 
 	if !ok {
 		return d.childrenForAncestor(parentDir)
@@ -2080,6 +2201,8 @@ func (d *clickHouseDatabase) childrenForReadyActiveMount(
 }
 
 // DirInfos returns directory summaries for multiple directories.
+//
+//nolint:funlen
 func (d *clickHouseDatabase) DirInfos(
 	dirs []string,
 	filter *db.Filter,
@@ -2090,7 +2213,12 @@ func (d *clickHouseDatabase) DirInfos(
 
 	result := make(map[string]*db.DirSummary, len(dirs))
 
-	roots, remaining, err := d.splitActiveMountRootDirs(dirs)
+	handled, err := d.addActiveVirtualDirInfos(result, dirs, filter)
+	if err != nil {
+		return nil, err
+	}
+
+	roots, remaining, err := d.splitActiveMountRootDirs(unhandledDirs(dirs, handled))
 	if err != nil {
 		return nil, err
 	}
@@ -2123,7 +2251,12 @@ func (d *clickHouseDatabase) DirsHaveChildren(
 
 	result := newDirsHaveChildrenResult(dirs)
 
-	fallback, err := d.addBatchedDirsHaveChildren(result, dirs, filter)
+	remaining, err := d.addActiveVirtualDirsHaveChildren(result, dirs, filter)
+	if err != nil {
+		return nil, err
+	}
+
+	fallback, err := d.addBatchedDirsHaveChildren(result, remaining, filter)
 	if err != nil {
 		return nil, err
 	}
@@ -3722,59 +3855,12 @@ func (d *clickHouseDatabase) activeMountForDir(dir string) (activeMount, bool, e
 	return d.queryActiveMount(resolveMountQuery, ensureTrailingSlash(dir))
 }
 
-func (d *clickHouseDatabase) queryActiveMount(
-	query string,
-	args ...any,
-) (activeMount, bool, error) {
-	ctx, cancel := configQueryContext(d.cfg)
-	defer cancel()
-
-	rows, err := d.conn.Query(ctx, query, args...)
-	if err != nil {
-		return activeMount{}, false, fmt.Errorf("clickhouse: failed to resolve active mount: %w", err)
-	}
-
-	defer func() { _ = rows.Close() }()
-
-	if !rows.Next() {
-		if iterErr := rowIterationErr(rows, "clickhouse: active mount iteration error"); iterErr != nil {
-			return activeMount{}, false, iterErr
-		}
-
-		return activeMount{}, false, nil
-	}
-
-	mount, err := scanActiveMountRow(rows)
-	if err != nil {
-		return activeMount{}, false, err
-	}
-
-	return mount, true, nil
-}
-
 func rowIterationErr(rows any, msg string) error {
 	if err := rowsErr(rows); err != nil {
 		return fmt.Errorf("%s: %w", msg, err)
 	}
 
 	return nil
-}
-
-func scanActiveMountRow(rows rowsScanner) (activeMount, error) {
-	var (
-		mountPath, snapshotID string
-		updatedAt             time.Time
-	)
-
-	if err := rows.Scan(&mountPath, &snapshotID, &updatedAt); err != nil {
-		return activeMount{}, fmt.Errorf("clickhouse: failed to scan active mount: %w", err)
-	}
-
-	return activeMount{
-		mountPath:  mountPath,
-		snapshotID: snapshotID,
-		updatedAt:  updatedAt.UTC(),
-	}, nil
 }
 
 func (d *clickHouseDatabase) childrenForAncestor(
@@ -5409,7 +5495,18 @@ func (t *whereTraversal) loadFallbackChildGroups(
 }
 
 func (t *whereTraversal) loadFallbackChildDirs(dirs []string) error {
+	childrenByParent, handled, err := t.database.activeVirtualChildrenForParents(dirs)
+	if err != nil {
+		return err
+	}
+
 	for _, dir := range dirs {
+		if handled[ensureTrailingSlash(dir)] {
+			t.storeChildren(dir, childrenByParent[ensureTrailingSlash(dir)])
+
+			continue
+		}
+
 		children, err := t.database.childrenForTraversalFallback(dir)
 		if err != nil {
 			return err

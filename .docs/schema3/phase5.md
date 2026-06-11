@@ -19,8 +19,8 @@ and `clickhouse/active_mounts.go`, then include `ActiveSetID` in parent packet
 cache keys and invalidation behavior in `clickhouse/database_cache.go`. Cover
 all 3 acceptance tests from C1 in `clickhouse/provider_test.go`.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
 
 ### Item 5.2: C2 - Virtual rows cover roots and mount boxes
 
@@ -35,5 +35,5 @@ facts. Cover all 8 acceptance tests from C2 in
 `clickhouse/database_dirinfo_test.go`. Depends on item 5.1 active-set ids and
 phase 2 active virtual writer hooks.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed

@@ -48,9 +48,10 @@ const mountsActiveRowsQuery = "SELECT mount_path, toString(snapshot_id), updated
 	"FROM wrstat_mounts_active ORDER BY mount_path"
 
 type mountsActiveRow struct {
-	mountPath  string
-	snapshotID string
-	updatedAt  time.Time
+	mountPath   string
+	snapshotID  string
+	updatedAt   time.Time
+	activeSetID string
 }
 
 func scanMountsActiveRow(rows rowsScanner) (mountsActiveRow, error) {
@@ -58,6 +59,8 @@ func scanMountsActiveRow(rows rowsScanner) (mountsActiveRow, error) {
 	if err := rows.Scan(&row.mountPath, &row.snapshotID, &row.updatedAt); err != nil {
 		return mountsActiveRow{}, fmt.Errorf("clickhouse: failed to scan mounts_active: %w", err)
 	}
+
+	row.updatedAt = row.updatedAt.UTC()
 
 	return row, nil
 }
