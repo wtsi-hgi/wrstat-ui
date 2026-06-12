@@ -138,7 +138,10 @@ const (
 	finalGateE2BudgetSourceComputed        = "computed_from_measurements"
 	finalGateE2BudgetSourceInput           = "budget_source"
 	finalGateE2ChildFilterAllTable         = "wrstat_child_filter_all"
+	finalGateE2DirFilterAllTable           = "wrstat_dir_filter_all"
 	finalGateE2ExpectedDigestInput         = "expected_result_digest"
+	finalGateE2HighFanoutBroadCheckName    = "E2 high-fanout first click broad"
+	finalGateE2HighFanoutFilteredCheckName = "E2 high-fanout first click filtered"
 	finalGateE2FactsVectorRowsInput        = "facts_vector_rows_read"
 	finalGateE2InputPartCounts             = "part_counts"
 	finalGateE2InputSpoolBytes             = "spool_bytes"
@@ -147,8 +150,12 @@ const (
 	finalGateE2ReadBytesCeilingInput       = "read_bytes_ceiling"
 	finalGateE2ReadMarksCeilingInput       = "read_marks_ceiling"
 	finalGateE2ReadVolumeByteSlack         = 1.25
+	finalGateE2ReadVolumeBytesName         = "bytes"
 	finalGateE2ReadVolumeIndexGranularity  = uint64(8192)
+	finalGateE2ReadVolumeMarksName         = "marks"
+	finalGateE2ReadVolumeRowsName          = "rows"
 	finalGateE2ReadRowsCeilingInput        = "read_rows_ceiling"
+	finalGateE2Schema3SnapshotSetsTable    = "wrstat_schema3_snapshot_sets"
 	finalGateE2ScenarioDirInfosBroad       = "dirinfos_broad_parent_packet"
 	finalGateE2ScenarioDirInfosFiltered    = "dirinfos_filtered_child_filter_packet"
 	finalGateE2ScenarioDHCBroad            = "dirshavechildren_broad_parent_packet"
@@ -1030,7 +1037,7 @@ func validateFinalGateE2RESTTreeFirst(e FinalGateEvidence) FinalGateCheck {
 }
 
 func validateFinalGateE2HighFanoutBroadClick(e FinalGateEvidence) FinalGateCheck {
-	check := finalGateCheck(27, "E2 high-fanout first click broad")
+	check := finalGateCheck(27, finalGateE2HighFanoutBroadCheckName)
 
 	measured, ok := finalGateE2Operation(
 		e,
@@ -1050,7 +1057,7 @@ func validateFinalGateE2HighFanoutBroadClick(e FinalGateEvidence) FinalGateCheck
 }
 
 func validateFinalGateE2HighFanoutFilteredClick(e FinalGateEvidence) FinalGateCheck {
-	check := finalGateCheck(28, "E2 high-fanout first click filtered")
+	check := finalGateCheck(28, finalGateE2HighFanoutFilteredCheckName)
 
 	measured, ok := finalGateE2Operation(
 		e,
@@ -1324,8 +1331,8 @@ func finalGateSidecarColdMissCheck(check FinalGateCheck) bool {
 func finalGateSidecarE2ColdCheckName(name string) bool {
 	switch name {
 	case "E2 REST tree first requests",
-		"E2 high-fanout first click broad",
-		"E2 high-fanout first click filtered",
+		finalGateE2HighFanoutBroadCheckName,
+		finalGateE2HighFanoutFilteredCheckName,
 		"E2 high-fanout DirInfos broad",
 		"E2 high-fanout DirInfos filtered",
 		"E2 high-fanout DirsHaveChildren broad",
@@ -3047,7 +3054,7 @@ func finalGateE2PacketOperationFailure(
 		return reason
 	}
 
-	return finalGateE2ReadVolumeFailure(measured, packetTable)
+	return finalGateE2ReadVolumeFailure(measured, packetTable, requireCurrentRead)
 }
 
 func finalGateE2PacketReadShapeFailure(
@@ -3118,8 +3125,17 @@ func uint64InputPresentValue(inputs map[string]any, key string) (uint64, bool) {
 	}
 }
 
-func finalGateE2ReadVolumeFailure(measured finalGateMeasuredOperation, packetTable string) string {
-	ceiling, reason := finalGateE2ReadVolumeCeiling(measured, packetTable)
+func finalGateE2ReadVolumeFailure(
+	measured finalGateMeasuredOperation,
+	packetTable string,
+	requireCurrentRead bool,
+) string {
+	reads, reason := finalGateE2AllowedReads(measured.op, packetTable, requireCurrentRead)
+	if reason != "" {
+		return reason
+	}
+
+	ceiling, reason := finalGateE2ReadVolumeCeiling(measured, reads)
 	if reason != "" {
 		return reason
 	}
@@ -3129,9 +3145,9 @@ func finalGateE2ReadVolumeFailure(measured finalGateMeasuredOperation, packetTab
 		values  []uint64
 		ceiling uint64
 	}{
-		{"rows", measured.op.ReadRows, ceiling.rows},
-		{"bytes", measured.op.ReadBytes, ceiling.bytes},
-		{"marks", measured.op.ReadMarks, ceiling.marks},
+		{finalGateE2ReadVolumeRowsName, measured.op.ReadRows, ceiling.rows},
+		{finalGateE2ReadVolumeBytesName, measured.op.ReadBytes, ceiling.bytes},
+		{finalGateE2ReadVolumeMarksName, measured.op.ReadMarks, ceiling.marks},
 	} {
 		if reason := finalGateE2ReadVolumeMetricFailure(spec.name, spec.values, spec.ceiling); reason != "" {
 			return reason
@@ -3141,26 +3157,92 @@ func finalGateE2ReadVolumeFailure(measured finalGateMeasuredOperation, packetTab
 	return ""
 }
 
+func finalGateE2AllowedReads(
+	op perfreport.Operation,
+	packetTable string,
+	includeCurrent bool,
+) ([]finalGateE2AllowedRead, string) {
+	expectedPacketRows := finalGateE2ReadVolumeExpectedRows(op)
+	if expectedPacketRows == 0 {
+		return nil, "missing read-volume expected rows"
+	}
+
+	reads := make([]finalGateE2AllowedRead, 0, 4)
+	if includeCurrent {
+		reads = append(reads, finalGateE2ReadVolumeRead(finalGateE2CurrentReadTable(op), 1))
+	}
+
+	reads = append(reads, finalGateE2ReadVolumeRead(packetTable, expectedPacketRows))
+	reads = append(reads, finalGateE2ReadinessReads(op, packetTable)...)
+
+	return reads, ""
+}
+
+func finalGateE2ReadVolumeRead(table string, expectedRows uint64) finalGateE2AllowedRead {
+	return finalGateE2AllowedRead{
+		table:            table,
+		expectedRows:     expectedRows,
+		indexGranularity: finalGateE2ReadVolumeTableIndexGranularity(table),
+	}
+}
+
+func finalGateE2ReadVolumeTableIndexGranularity(_ string) uint64 {
+	return finalGateE2ReadVolumeIndexGranularity
+}
+
+func finalGateE2CurrentReadTable(op perfreport.Operation) string {
+	if finalGateE2UsesFullFilter(op) {
+		return finalGateE2DirFilterAllTable
+	}
+
+	return tableDirSummary
+}
+
+func finalGateE2UsesFullFilter(op perfreport.Operation) bool {
+	return len(uint64SliceInput(op.Inputs, queryInputFilterGIDsKey)) > 0 ||
+		len(uint64SliceInput(op.Inputs, queryInputFilterUIDsKey)) > 0 ||
+		uint64Input(op.Inputs, queryInputFilterFileTypeMaskKey) > 0
+}
+
+func finalGateE2ReadinessReads(op perfreport.Operation, packetTable string) []finalGateE2AllowedRead {
+	reads := []finalGateE2AllowedRead{
+		finalGateE2ReadVolumeRead(tableDirSummarySets, 1),
+	}
+
+	if finalGateE2UsesFullFilter(op) || packetTable == finalGateE2ChildFilterAllTable {
+		reads = append(reads, finalGateE2ReadVolumeRead(finalGateE2Schema3SnapshotSetsTable, 1))
+	}
+
+	return reads
+}
+
 func finalGateE2ReadVolumeCeiling(
 	measured finalGateMeasuredOperation,
-	packetTable string,
+	reads []finalGateE2AllowedRead,
 ) (finalGateE2ReadVolumeLimits, string) {
-	stats, ok := measured.tableStats[packetTable]
-	if !ok || !finalGateE2ReadVolumeTableStatsPass(stats) {
-		return finalGateE2ReadVolumeLimits{}, "missing read-volume table stats for " + packetTable
+	var (
+		ceiling     finalGateE2ReadVolumeLimits
+		byteCeiling float64
+	)
+
+	for _, read := range reads {
+		stats, ok := measured.tableStats[read.table]
+		if !ok || !finalGateE2ReadVolumeTableStatsPass(stats) {
+			return finalGateE2ReadVolumeLimits{}, "missing read-volume table stats for " + read.table
+		}
+
+		marks := finalGateE2ReadVolumeMarks(read.expectedRows, read.indexGranularity)
+		rows := marks * read.indexGranularity
+		bytesPerRow := float64(stats.CompressedBytes) / float64(stats.Rows)
+
+		ceiling.rows += rows
+		ceiling.marks += marks
+		byteCeiling += float64(rows) * bytesPerRow
 	}
 
-	expectedRows := finalGateE2ReadVolumeExpectedRows(measured.op)
-	if expectedRows == 0 {
-		return finalGateE2ReadVolumeLimits{}, "missing read-volume expected rows"
-	}
+	ceiling.bytes = uint64(math.Ceil(byteCeiling * finalGateE2ReadVolumeByteSlack))
 
-	marks := finalGateCeilDiv(expectedRows, finalGateE2ReadVolumeIndexGranularity) + 2
-	rowCeiling := marks * finalGateE2ReadVolumeIndexGranularity
-	bytesPerRow := float64(stats.CompressedBytes) / float64(stats.Rows)
-	byteCeiling := uint64(math.Ceil(float64(rowCeiling) * bytesPerRow * finalGateE2ReadVolumeByteSlack))
-
-	return finalGateE2ReadVolumeLimits{rows: rowCeiling, bytes: byteCeiling, marks: marks}, ""
+	return ceiling, ""
 }
 
 func finalGateE2ReadVolumeTableStatsPass(stats perfreport.TableStats) bool {
@@ -3176,6 +3258,15 @@ func finalGateE2ReadVolumeExpectedRows(op perfreport.Operation) uint64 {
 	}
 
 	return firstResultCount(op)
+}
+
+func finalGateE2ReadVolumeMarks(expectedRows uint64, indexGranularity uint64) uint64 {
+	marks := finalGateCeilDiv(expectedRows, indexGranularity) + 2
+	if marks < 1 {
+		return 1
+	}
+
+	return marks
 }
 
 func finalGateCeilDiv(value uint64, divisor uint64) uint64 {
@@ -3382,6 +3473,12 @@ type finalGateE2ReadVolumeLimits struct {
 	rows  uint64
 	bytes uint64
 	marks uint64
+}
+
+type finalGateE2AllowedRead struct {
+	table            string
+	expectedRows     uint64
+	indexGranularity uint64
 }
 
 // FinalGateSidecarFallbackDecision records whether E3's conditional sidecar

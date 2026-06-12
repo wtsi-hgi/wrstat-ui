@@ -735,7 +735,7 @@ func TestE2ColdPerformanceGates(t *testing.T) {
 
 		result := ValidateFinalGates(evidence)
 
-		So(finalGateTestCheck(result, "E2 high-fanout first click broad").Passed, ShouldBeTrue)
+		So(finalGateTestCheck(result, finalGateE2HighFanoutBroadCheckName).Passed, ShouldBeTrue)
 		finalGateE2ScenarioOp(evidence, finalGateTestE2ScenarioHighFanoutBroad, func(op perfreport.Operation) {
 			So(uint64Input(op.Inputs, "current_read_count"), ShouldEqual, uint64(1))
 			So(uint64Input(op.Inputs, "parent_packet_read_count"), ShouldEqual, uint64(1))
@@ -749,8 +749,8 @@ func TestE2ColdPerformanceGates(t *testing.T) {
 		})
 
 		result = ValidateFinalGates(evidence)
-		So(finalGateTestCheck(result, "E2 high-fanout first click broad").Passed, ShouldBeFalse)
-		So(finalGateTestCheck(result, "E2 high-fanout first click broad").Detail,
+		So(finalGateTestCheck(result, finalGateE2HighFanoutBroadCheckName).Passed, ShouldBeFalse)
+		So(finalGateTestCheck(result, finalGateE2HighFanoutBroadCheckName).Detail,
 			ShouldContainSubstring, "parent-packet")
 	})
 
@@ -759,7 +759,7 @@ func TestE2ColdPerformanceGates(t *testing.T) {
 
 		result := ValidateFinalGates(evidence)
 
-		So(finalGateTestCheck(result, "E2 high-fanout first click filtered").Passed, ShouldBeTrue)
+		So(finalGateTestCheck(result, finalGateE2HighFanoutFilteredCheckName).Passed, ShouldBeTrue)
 		finalGateE2ScenarioOp(evidence, finalGateTestE2ScenarioHighFanoutFilter, func(op perfreport.Operation) {
 			So(op.Inputs[finalGateTestE2ParentPacketTableInput], ShouldEqual, "wrstat_child_filter_all")
 			So(uint64Input(op.Inputs, "per_child_query_count"), ShouldEqual, uint64(0))
@@ -771,8 +771,8 @@ func TestE2ColdPerformanceGates(t *testing.T) {
 		})
 
 		result = ValidateFinalGates(evidence)
-		So(finalGateTestCheck(result, "E2 high-fanout first click filtered").Passed, ShouldBeFalse)
-		So(finalGateTestCheck(result, "E2 high-fanout first click filtered").Detail,
+		So(finalGateTestCheck(result, finalGateE2HighFanoutFilteredCheckName).Passed, ShouldBeFalse)
+		So(finalGateTestCheck(result, finalGateE2HighFanoutFilteredCheckName).Detail,
 			ShouldContainSubstring, "wrstat_child_filter_all")
 	})
 
@@ -819,7 +819,7 @@ func TestE2ColdPerformanceGates(t *testing.T) {
 
 		finalGateMutateE2Op(&evidence, "dirshavechildren_broad_parent_packet", func(op *perfreport.Operation) {
 			op.Inputs[finalGateTestE2ReadRowsCeilingInput] = uint64(1_000_000)
-			op.ReadRows = []uint64{40_000}
+			op.ReadRows = []uint64{60_000}
 		})
 
 		result = ValidateFinalGates(evidence)
@@ -834,24 +834,24 @@ func TestE2ColdPerformanceGates(t *testing.T) {
 			mutate func(*perfreport.Operation)
 		}{
 			{
-				name: "rows",
+				name: finalGateE2ReadVolumeRowsName,
 				mutate: func(op *perfreport.Operation) {
 					op.Inputs[finalGateTestE2ReadRowsCeilingInput] = uint64(1_000_000)
-					op.ReadRows = []uint64{40_000}
+					op.ReadRows = []uint64{60_000}
 				},
 			},
 			{
-				name: "bytes",
+				name: finalGateE2ReadVolumeBytesName,
 				mutate: func(op *perfreport.Operation) {
 					op.Inputs[finalGateTestE2ReadBytesCeilingInput] = uint64(1_000_000)
-					op.ReadBytes = []uint64{500_000}
+					op.ReadBytes = []uint64{800_000}
 				},
 			},
 			{
-				name: "marks",
+				name: finalGateE2ReadVolumeMarksName,
 				mutate: func(op *perfreport.Operation) {
 					op.Inputs[finalGateTestE2ReadMarksCeilingInput] = uint64(100)
-					op.ReadMarks = []uint64{5}
+					op.ReadMarks = []uint64{8}
 				},
 			},
 		}
@@ -887,6 +887,106 @@ func TestE2ColdPerformanceGates(t *testing.T) {
 		check = finalGateTestCheck(result, "E2 high-fanout DirsHaveChildren broad")
 		So(check.Passed, ShouldBeFalse)
 		So(check.Detail, ShouldContainSubstring, "missing read-volume table stats")
+	})
+
+	Convey("E2.2 read-volume gates require current and readiness table stats", t, func() {
+		cases := []struct {
+			name      string
+			scenario  string
+			checkName string
+			table     string
+		}{
+			{
+				name:      "broad current",
+				scenario:  finalGateTestE2ScenarioHighFanoutBroad,
+				checkName: finalGateE2HighFanoutBroadCheckName,
+				table:     tableDirSummary,
+			},
+			{
+				name:      "broad readiness",
+				scenario:  finalGateTestE2ScenarioHighFanoutBroad,
+				checkName: finalGateE2HighFanoutBroadCheckName,
+				table:     tableDirSummarySets,
+			},
+			{
+				name:      "filtered current",
+				scenario:  finalGateTestE2ScenarioHighFanoutFilter,
+				checkName: finalGateE2HighFanoutFilteredCheckName,
+				table:     finalGateE2DirFilterAllTable,
+			},
+			{
+				name:      "filtered readiness",
+				scenario:  finalGateTestE2ScenarioHighFanoutFilter,
+				checkName: finalGateE2HighFanoutFilteredCheckName,
+				table:     finalGateE2Schema3SnapshotSetsTable,
+			},
+		}
+
+		for _, tc := range cases {
+			evidence := finalGateE2Evidence()
+			finalGateDeleteE2TableStats(&evidence, tc.table)
+			finalGateMutateE2Op(&evidence, tc.scenario, func(op *perfreport.Operation) {
+				op.ReadRows = []uint64{1}
+				op.ReadBytes = []uint64{1}
+				op.ReadMarks = []uint64{1}
+			})
+
+			result := ValidateFinalGates(evidence)
+			check := finalGateTestCheck(result, tc.checkName)
+
+			So(check.Passed, ShouldBeFalse)
+			So(check.Detail, ShouldContainSubstring, "missing read-volume table stats for "+tc.table)
+		}
+	})
+
+	Convey("E2.2 read-volume gates sum packet, current, and readiness ceilings", t, func() {
+		evidence := finalGateE2Evidence()
+		finalGateMutateE2Op(&evidence, finalGateTestE2ScenarioHighFanoutBroad, func(op *perfreport.Operation) {
+			op.Inputs[finalGateTestE2ReadRowsCeilingInput] = uint64(1_000_000_000)
+			op.Inputs[finalGateTestE2ReadBytesCeilingInput] = uint64(1_000_000_000)
+			op.Inputs[finalGateTestE2ReadMarksCeilingInput] = uint64(1_000_000_000)
+			op.ReadRows = []uint64{81_920}
+			op.ReadBytes = []uint64{1_000_000}
+			op.ReadMarks = []uint64{10}
+		})
+
+		result := ValidateFinalGates(evidence)
+		check := finalGateTestCheck(result, finalGateE2HighFanoutBroadCheckName)
+		So(check.Passed, ShouldBeTrue)
+
+		cases := []struct {
+			name   string
+			mutate func(*perfreport.Operation)
+		}{
+			{
+				name: finalGateE2ReadVolumeRowsName,
+				mutate: func(op *perfreport.Operation) {
+					op.ReadRows = []uint64{1_000_000_000}
+				},
+			},
+			{
+				name: finalGateE2ReadVolumeBytesName,
+				mutate: func(op *perfreport.Operation) {
+					op.ReadBytes = []uint64{1_000_000_000}
+				},
+			},
+			{
+				name: finalGateE2ReadVolumeMarksName,
+				mutate: func(op *perfreport.Operation) {
+					op.ReadMarks = []uint64{1_000_000}
+				},
+			},
+		}
+
+		for _, tc := range cases {
+			evidence = finalGateE2Evidence()
+			finalGateMutateE2Op(&evidence, finalGateTestE2ScenarioHighFanoutBroad, tc.mutate)
+
+			result = ValidateFinalGates(evidence)
+			check = finalGateTestCheck(result, finalGateE2HighFanoutBroadCheckName)
+			So(check.Passed, ShouldBeFalse)
+			So(check.Detail, ShouldContainSubstring, "read-volume "+tc.name+" exceeded ceiling")
+		}
 	})
 
 	Convey("E2.6 computed read-volume ceilings pass valid measured reads", t, func() {
@@ -2355,17 +2455,21 @@ func finalGateImportReport(rowCap uint64, ageAllSelected, virtualCacheSelected b
 		tableActivePrefixRollups,
 		tableActivePrefixFilterAgeAll,
 		tableActivePrefixRollupSets,
+		finalGateE2DirFilterAllTable,
+		finalGateE2Schema3SnapshotSetsTable,
 	}
 	report.TableStats = map[string]perfreport.TableStats{
-		tableFiles:                    finalGateTableStatsWithBaselines(filesRows, dirFactsRows, childrenRows),
-		tableChildren:                 finalGateTableStatsWithBaselines(childrenRows, dirFactsRows, childrenRows),
-		tableDirSummary:               finalGateTableStatsWithBaselines(dirFactsRows, dirFactsRows, childrenRows),
-		tableParentFacts:              finalGateTableStatsWithBaselines(rowCap, dirFactsRows, childrenRows),
-		tableDirSummarySets:           finalGateTableStatsWithBaselines(1, dirFactsRows, childrenRows),
-		tableDirFilterAgeAll:          finalGateTableStatsWithBaselines(rowCap/2, dirFactsRows, childrenRows),
-		tableActivePrefixRollups:      finalGateTableStatsWithBaselines(3, dirFactsRows, childrenRows),
-		tableActivePrefixFilterAgeAll: finalGateTableStatsWithBaselines(rowCap/3, dirFactsRows, childrenRows),
-		tableActivePrefixRollupSets:   finalGateTableStatsWithBaselines(1, dirFactsRows, childrenRows),
+		tableFiles:                          finalGateTableStatsWithBaselines(filesRows, dirFactsRows, childrenRows),
+		tableChildren:                       finalGateTableStatsWithBaselines(childrenRows, dirFactsRows, childrenRows),
+		tableDirSummary:                     finalGateTableStatsWithBaselines(dirFactsRows, dirFactsRows, childrenRows),
+		tableParentFacts:                    finalGateTableStatsWithBaselines(rowCap, dirFactsRows, childrenRows),
+		tableDirSummarySets:                 finalGateTableStatsWithBaselines(1, dirFactsRows, childrenRows),
+		tableDirFilterAgeAll:                finalGateTableStatsWithBaselines(rowCap/2, dirFactsRows, childrenRows),
+		tableActivePrefixRollups:            finalGateTableStatsWithBaselines(3, dirFactsRows, childrenRows),
+		tableActivePrefixFilterAgeAll:       finalGateTableStatsWithBaselines(rowCap/3, dirFactsRows, childrenRows),
+		tableActivePrefixRollupSets:         finalGateTableStatsWithBaselines(1, dirFactsRows, childrenRows),
+		finalGateE2DirFilterAllTable:        finalGateTableStatsWithBaselines(rowCap/2, dirFactsRows, childrenRows),
+		finalGateE2Schema3SnapshotSetsTable: finalGateTableStatsWithBaselines(1, dirFactsRows, childrenRows),
 	}
 	finalGateAddImportFileTotals(&report, rowCap)
 
