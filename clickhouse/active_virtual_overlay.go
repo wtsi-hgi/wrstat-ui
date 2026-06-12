@@ -455,9 +455,10 @@ func activeVirtualDirInfoCandidateDirs(
 	dirs []string,
 	mounts []activeMount,
 	filter *db.Filter,
+	includeExactMountRoots bool,
 ) []string {
 	candidates := activeVirtualCandidateDirs(dirs, mounts)
-	if !activeVirtualCanSummarizeExactMountRoot(filter) || !activeVirtualCanSummarizeMountRootBoxes(mounts) {
+	if !activeVirtualCanIncludeExactMountRootCandidates(filter, mounts, includeExactMountRoots) {
 		return candidates
 	}
 
@@ -506,6 +507,22 @@ func activeVirtualCandidateDir(dir string, mounts []activeMount) bool {
 	}
 
 	return false
+}
+
+func activeVirtualCanIncludeExactMountRootCandidates(
+	filter *db.Filter,
+	mounts []activeMount,
+	includeExactMountRoots bool,
+) bool {
+	if !includeExactMountRoots {
+		return false
+	}
+
+	if !activeVirtualCanSummarizeExactMountRoot(filter) {
+		return false
+	}
+
+	return activeVirtualCanSummarizeMountRootBoxes(mounts)
 }
 
 func activeVirtualCanSummarizeExactMountRoot(filter *db.Filter) bool {
@@ -570,6 +587,10 @@ func scanActiveVirtualMountRootBoxes(rows rowsScanner) (map[string]bool, error) 
 	return out, rowIterationErr(rows, "clickhouse: active virtual mount-root boxes iteration error")
 }
 
+func (d *clickHouseDatabase) activeVirtualExactMountRootCandidatesAllowed(mounts []activeMount) bool {
+	return d.snapshot != nil || len(mounts) > 1
+}
+
 func (d *clickHouseDatabase) activeVirtualReadySetForDirs(
 	ctx context.Context,
 	dirs []string,
@@ -602,7 +623,12 @@ func (d *clickHouseDatabase) activeVirtualReadySetForDirInfos(
 		return "", nil, nil, false, err
 	}
 
-	candidates := activeVirtualDirInfoCandidateDirs(dirs, mounts, filter)
+	candidates := activeVirtualDirInfoCandidateDirs(
+		dirs,
+		mounts,
+		filter,
+		d.activeVirtualExactMountRootCandidatesAllowed(mounts),
+	)
 	if len(candidates) == 0 {
 		return activeSetID, mounts, nil, false, nil
 	}
