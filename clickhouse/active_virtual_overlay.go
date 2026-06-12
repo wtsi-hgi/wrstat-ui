@@ -457,7 +457,7 @@ func activeVirtualDirInfoCandidateDirs(
 	filter *db.Filter,
 ) []string {
 	candidates := activeVirtualCandidateDirs(dirs, mounts)
-	if !activeVirtualCanSummarizeExactMountRoot(filter) {
+	if !activeVirtualCanSummarizeExactMountRoot(filter) || !activeVirtualCanSummarizeMountRootBoxes(mounts) {
 		return candidates
 	}
 
@@ -500,7 +500,7 @@ func activeVirtualCandidateDir(dir string, mounts []activeMount) bool {
 	key := ensureTrailingSlash(dir)
 	for _, mount := range mounts {
 		mountPath := ensureTrailingSlash(mount.mountPath)
-		if strings.HasPrefix(mountPath, key) {
+		if mountPath != key && strings.HasPrefix(mountPath, key) {
 			return true
 		}
 	}
@@ -518,6 +518,10 @@ func activeVirtualCanSummarizeExactMountRoot(filter *db.Filter) bool {
 	}
 
 	return filter == nil || dirFilterAllCanHandleFilter(filter)
+}
+
+func activeVirtualCanSummarizeMountRootBoxes(mounts []activeMount) bool {
+	return len(mounts) > 1
 }
 
 func activeVirtualExactMountRootCandidate(dir string, mounts []activeMount) bool {
