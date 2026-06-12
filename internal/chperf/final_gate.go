@@ -118,15 +118,17 @@ const (
 	finalGateScratch127Dir                = "/lustre/scratch127/"
 	finalGateWrstatUICommand              = "./wrstat-ui"
 
-	finalGateReportSchemaVersion     = 1
-	finalGateCorrectnessStatusInput  = "correctness_equivalence_status"
-	finalGateComparisonKindBolt      = "bolt"
-	finalGateComparisonKindSidecar   = "sidecar"
-	finalGateComparisonStatusSuccess = "success"
-	finalGateComparisonInfeasible    = "infeasible"
-	finalGateReportStatusPassed      = "passed"
-	finalGateReportStatusFailed      = "failed"
-	finalGateReportStatusBlocked     = "blocked"
+	finalGateReportSchemaVersion      = 1
+	finalGateCorrectnessStatusInput   = "correctness_equivalence_status"
+	finalGateComparisonKindBolt       = "bolt"
+	finalGateComparisonKindSidecar    = "sidecar"
+	finalGateComparisonStatusSuccess  = "success"
+	finalGateComparisonInfeasible     = "infeasible"
+	finalGateReportStatusPassed       = "passed"
+	finalGateReportStatusFailed       = "failed"
+	finalGateReportStatusBlocked      = "blocked"
+	finalGateSidecarFallbackInactive  = "inactive"
+	finalGateSidecarFallbackTriggered = "triggered"
 )
 
 const (
@@ -1281,6 +1283,62 @@ func (c FinalGateCheck) block(detail string) FinalGateCheck {
 	c.Detail = fmt.Sprintf("%s: %s", strings.TrimSpace(c.Name), detail)
 
 	return c
+}
+
+func finalGateSidecarColdMisses(checks []FinalGateCheck) []FinalGateCheck {
+	misses := make([]FinalGateCheck, 0)
+
+	for _, check := range checks {
+		if finalGateSidecarColdMissCheck(check) {
+			misses = append(misses, check)
+		}
+	}
+
+	return misses
+}
+
+func finalGateSidecarFailuresAreOnlyColdMisses(checks []FinalGateCheck) bool {
+	for _, check := range checks {
+		if check.Passed {
+			continue
+		}
+
+		if !finalGateSidecarColdMissCheck(check) {
+			return false
+		}
+	}
+
+	return true
+}
+
+func finalGateSidecarColdMissCheck(check FinalGateCheck) bool {
+	return !check.Passed &&
+		finalGateSidecarE2ColdCheckName(check.Name) &&
+		finalGateSidecarColdMissDetail(check.Detail)
+}
+
+func finalGateSidecarE2ColdCheckName(name string) bool {
+	switch name {
+	case "E2 REST tree first requests",
+		"E2 high-fanout first click broad",
+		"E2 high-fanout first click filtered",
+		"E2 high-fanout DirInfos broad",
+		"E2 high-fanout DirInfos filtered",
+		"E2 high-fanout DirsHaveChildren broad",
+		"E2 high-fanout DirsHaveChildren filtered",
+		"E2 first root where splits 2",
+		"E2 first filter switch",
+		"E2 real first where dirs",
+		"E2 NFS-heavy first where":
+		return true
+	default:
+		return false
+	}
+}
+
+func finalGateSidecarColdMissDetail(detail string) bool {
+	return strings.Contains(detail, "p95") ||
+		strings.Contains(detail, "read-volume") && strings.Contains(detail, "exceeded ceiling")
 }
 
 // FinalGateReportResult captures E1 evidence validation status.
@@ -3249,14 +3307,53 @@ func finalGateCacheHitPathEqualsRoot(value string, root string) bool {
 	return value != "" && normalizeRootPath(value) == root
 }
 
+// FinalGateSidecarFallbackDecision records whether E3's conditional sidecar
+// fallback should be activated from final-gate evidence.
+type FinalGateSidecarFallbackDecision struct {
+	Triggered    bool             `json:"triggered"`
+	Status       string           `json:"status"`
+	Reason       string           `json:"reason"`
+	MissedChecks []FinalGateCheck `json:"missed_checks,omitempty"`
+}
+
+func finalGateSidecarFallbackDecision(result FinalGateResult) FinalGateSidecarFallbackDecision {
+	misses := finalGateSidecarColdMisses(result.Checks)
+	if len(misses) > 0 && finalGateSidecarFailuresAreOnlyColdMisses(result.Checks) {
+		return FinalGateSidecarFallbackDecision{
+			Triggered:    true,
+			Status:       finalGateSidecarFallbackTriggered,
+			Reason:       "E3 fallback triggered by E2 cold gate miss after ClickHouse-native tuning",
+			MissedChecks: misses,
+		}
+	}
+
+	if result.Passed {
+		return finalGateInactiveSidecarDecision("ClickHouse-native E2 cold gates passed; sidecar fallback is not active")
+	}
+
+	if len(misses) > 0 {
+		return finalGateInactiveSidecarDecision("ClickHouse-native A-D gates failed; sidecar fallback precondition not met")
+	}
+
+	return finalGateInactiveSidecarDecision("no validated E2 cold performance miss exists")
+}
+
+func finalGateInactiveSidecarDecision(reason string) FinalGateSidecarFallbackDecision {
+	return FinalGateSidecarFallbackDecision{
+		Status: finalGateSidecarFallbackInactive,
+		Reason: reason,
+	}
+}
+
 // FinalGateResult is a facts-only summary of the E1 prerequisite and E2 gates.
 type FinalGateResult struct {
-	Status          string                 `json:"status,omitempty"`
-	Passed          bool                   `json:"passed"`
-	Blocked         bool                   `json:"blocked,omitempty"`
-	TimingEvaluated bool                   `json:"timing_evaluated"`
-	E1ReportResult  *FinalGateReportResult `json:"e1_report_result,omitempty"`
-	Checks          []FinalGateCheck       `json:"checks"`
+	Status          string                           `json:"status,omitempty"`
+	Passed          bool                             `json:"passed"`
+	Blocked         bool                             `json:"blocked,omitempty"`
+	TimingEvaluated bool                             `json:"timing_evaluated"`
+	E1ReportResult  *FinalGateReportResult           `json:"e1_report_result,omitempty"`
+	SidecarFallback FinalGateSidecarFallbackDecision `json:"sidecar_fallback"`
+	Checks          []FinalGateCheck                 `json:"checks"`
 }
 
 // ValidateFinalGates evaluates the documented E2 perf gates from raw reports.
@@ -3265,6 +3362,8 @@ func ValidateFinalGates(e FinalGateEvidence) FinalGateResult {
 
 	prerequisite, ok := finalGatePrerequisiteResult(e)
 	if !ok {
+		prerequisite.SidecarFallback = finalGateSidecarFallbackDecision(prerequisite)
+
 		return prerequisite
 	}
 
@@ -3320,6 +3419,8 @@ func ValidateFinalGates(e FinalGateEvidence) FinalGateResult {
 	if !result.Passed {
 		result.Status = finalGateReportStatusFailed
 	}
+
+	result.SidecarFallback = finalGateSidecarFallbackDecision(result)
 
 	return result
 }

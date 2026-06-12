@@ -27,5 +27,5 @@ ClickHouse fallback counts, and measure storage size, p50, p95, p99, and
 correctness digest. Cover all 3 acceptance tests from E3 in
 `clickhouse/navigation_sidecar_test.go`. Depends on phase 6 results.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed

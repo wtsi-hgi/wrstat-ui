@@ -543,6 +543,66 @@ func finalGateE1InfeasibleComparison() *FinalGateComparisonEvidence {
 }
 
 func TestE2ColdPerformanceGates(t *testing.T) {
+	Convey("E3 sidecar fallback stays inactive when phase 6 E2 gates pass", t, func() {
+		result := ValidateFinalGates(finalGateE2Evidence())
+
+		So(result.Passed, ShouldBeTrue)
+		So(result.SidecarFallback.Triggered, ShouldBeFalse)
+		So(result.SidecarFallback.Status, ShouldEqual, "inactive")
+		So(result.SidecarFallback.Reason, ShouldContainSubstring, "E2 cold gates passed")
+		So(result.SidecarFallback.MissedChecks, ShouldHaveLength, 0)
+	})
+
+	Convey("E3 sidecar fallback triggers only from an E2 cold performance miss", t, func() {
+		evidence := finalGateE2Evidence()
+		finalGateMutateE2Op(&evidence, finalGateTestE2ScenarioNFSHeavyWhere, func(op *perfreport.Operation) {
+			op.P95MS = 2000
+		})
+
+		result := ValidateFinalGates(evidence)
+
+		So(result.Passed, ShouldBeFalse)
+		So(result.SidecarFallback.Triggered, ShouldBeTrue)
+		So(result.SidecarFallback.Status, ShouldEqual, "triggered")
+		So(result.SidecarFallback.Reason, ShouldContainSubstring, "E2 cold gate miss")
+		So(result.SidecarFallback.MissedChecks, ShouldHaveLength, 1)
+		So(result.SidecarFallback.MissedChecks[0].Name, ShouldEqual, "E2 NFS-heavy first where")
+	})
+
+	Convey("E3 sidecar fallback stays inactive when an A-D gate fails alongside an E2 p95 miss", t, func() {
+		evidence := finalGateE2Evidence()
+		finalGateSetCandidateP95(&evidence, queryOpPermissionCheckName, 11.01)
+		finalGateMutateE2Op(&evidence, finalGateTestE2ScenarioNFSHeavyWhere, func(op *perfreport.Operation) {
+			op.P95MS = 2000
+		})
+
+		result := ValidateFinalGates(evidence)
+
+		So(result.Passed, ShouldBeFalse)
+		So(finalGateTestCheck(result, "D2 permission/auth baseline").Passed, ShouldBeFalse)
+		So(finalGateTestCheck(result, "E2 NFS-heavy first where").Passed, ShouldBeFalse)
+		So(result.SidecarFallback.Triggered, ShouldBeFalse)
+		So(result.SidecarFallback.Status, ShouldEqual, "inactive")
+		So(result.SidecarFallback.MissedChecks, ShouldHaveLength, 0)
+	})
+
+	Convey("E3 sidecar fallback stays inactive when E2 read-volume evidence is missing", t, func() {
+		evidence := finalGateE2Evidence()
+		finalGateMutateE2Op(&evidence, "dirshavechildren_broad_parent_packet", func(op *perfreport.Operation) {
+			delete(op.Inputs, finalGateTestE2ReadRowsCeilingInput)
+		})
+
+		result := ValidateFinalGates(evidence)
+
+		So(result.Passed, ShouldBeFalse)
+		So(finalGateTestCheck(result, "E2 high-fanout DirsHaveChildren broad").Passed, ShouldBeFalse)
+		So(finalGateTestCheck(result, "E2 high-fanout DirsHaveChildren broad").Detail,
+			ShouldContainSubstring, "missing read-volume")
+		So(result.SidecarFallback.Triggered, ShouldBeFalse)
+		So(result.SidecarFallback.Status, ShouldEqual, "inactive")
+		So(result.SidecarFallback.MissedChecks, ShouldHaveLength, 0)
+	})
+
 	Convey("E2.1 REST tree first requests are cold, correct, and under 500 ms", t, func() {
 		evidence := finalGateE2Evidence()
 
