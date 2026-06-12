@@ -39,6 +39,7 @@ import (
 	. "github.com/smartystreets/goconvey/convey"
 	"github.com/wtsi-hgi/wrstat-ui/clickhouse"
 	"github.com/wtsi-hgi/wrstat-ui/internal/chspool"
+	"github.com/wtsi-hgi/wrstat-ui/internal/perfreport"
 )
 
 const summariseTestSecretDSN = "clickhouse://diag:secret@127.0.0.1:9000/default?" +
@@ -88,7 +89,7 @@ func TestSummariseDiagnosticsLogging(t *testing.T) {
 			_ string,
 			manifest *chspool.Manifest,
 			recordImportPhase func(string, time.Duration),
-		) error {
+		) (perfreport.Report, error) {
 			So(cfg.DSN, ShouldEqual, summariseTestSecretDSN)
 			So(manifest.MountPath, ShouldEqual, summariseTestMountPath)
 			So(manifest.UpdatedAt, ShouldEqual, fixture.updatedAt.UTC().Format(time.RFC3339Nano))
@@ -96,7 +97,7 @@ func TestSummariseDiagnosticsLogging(t *testing.T) {
 
 			recordImportPhase("wrstat_files_insert", 37*time.Millisecond)
 
-			return errSummariseTestClose
+			return perfreport.Report{}, errSummariseTestClose
 		}
 
 		err := run([]string{fixture.statsPath})

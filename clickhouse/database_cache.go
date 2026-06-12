@@ -41,6 +41,7 @@ import (
 const (
 	activeMetadataQueryVersion         uint32 = 1
 	activePrefixDirSummaryQueryVersion uint32 = 1
+	activeVirtualReadyQueryVersion     uint32 = 1
 	parentFactsPacketQueryVersion      uint32 = 1
 
 	treeActiveMetadataCacheMaxEntries      = 256
@@ -351,6 +352,103 @@ func (c *treeQueryCache) resetMountReadinessLocked() {
 	c.mountVectorOrder = nil
 	c.mountAgeAll = make(map[treeMountCacheKey]bool)
 	c.mountAgeAllOrder = nil
+	c.mountDirFilterAll = make(map[treeMountCacheKey]bool)
+	c.mountDirFilterAllOrder = nil
+	c.mountChildFilterAll = make(map[treeMountCacheKey]bool)
+	c.mountChildFilterAllOrder = nil
+}
+
+func (c *treeQueryCache) getActiveVirtualReady(key treeActiveMetadataCacheKey) (bool, bool) {
+	c.mu.RLock()
+	ready, cached := c.activeVirtualReady[key]
+	c.mu.RUnlock()
+
+	return ready, cached
+}
+
+func (c *treeQueryCache) putActiveVirtualReady(key treeActiveMetadataCacheKey, ready bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if _, cached := c.activeVirtualReady[key]; cached {
+		c.activeVirtualReady[key] = ready
+
+		return
+	}
+
+	c.activeVirtualReady[key] = ready
+	c.activeVirtualReadyOrder = append(c.activeVirtualReadyOrder, key)
+	c.evictOldestActiveVirtualReady()
+}
+
+func (c *treeQueryCache) evictOldestActiveVirtualReady() {
+	for len(c.activeVirtualReadyOrder) > treeActiveMetadataCacheMaxEntries {
+		oldest := c.activeVirtualReadyOrder[0]
+		c.activeVirtualReadyOrder = c.activeVirtualReadyOrder[1:]
+		delete(c.activeVirtualReady, oldest)
+	}
+}
+
+func (c *treeQueryCache) getDirFilterAllReady(key treeMountCacheKey) (bool, bool) {
+	c.mu.RLock()
+	ready, cached := c.mountDirFilterAll[key]
+	c.mu.RUnlock()
+
+	return ready, cached
+}
+
+func (c *treeQueryCache) putDirFilterAllReady(key treeMountCacheKey, ready bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if _, cached := c.mountDirFilterAll[key]; cached {
+		c.mountDirFilterAll[key] = ready
+
+		return
+	}
+
+	c.mountDirFilterAll[key] = ready
+	c.mountDirFilterAllOrder = append(c.mountDirFilterAllOrder, key)
+	c.evictOldestDirFilterAllReady()
+}
+
+func (c *treeQueryCache) evictOldestDirFilterAllReady() {
+	for len(c.mountDirFilterAllOrder) > treeMountSummaryCacheMaxEntries {
+		oldest := c.mountDirFilterAllOrder[0]
+		c.mountDirFilterAllOrder = c.mountDirFilterAllOrder[1:]
+		delete(c.mountDirFilterAll, oldest)
+	}
+}
+
+func (c *treeQueryCache) getChildFilterAllReady(key treeMountCacheKey) (bool, bool) {
+	c.mu.RLock()
+	ready, cached := c.mountChildFilterAll[key]
+	c.mu.RUnlock()
+
+	return ready, cached
+}
+
+func (c *treeQueryCache) putChildFilterAllReady(key treeMountCacheKey, ready bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if _, cached := c.mountChildFilterAll[key]; cached {
+		c.mountChildFilterAll[key] = ready
+
+		return
+	}
+
+	c.mountChildFilterAll[key] = ready
+	c.mountChildFilterAllOrder = append(c.mountChildFilterAllOrder, key)
+	c.evictOldestChildFilterAllReady()
+}
+
+func (c *treeQueryCache) evictOldestChildFilterAllReady() {
+	for len(c.mountChildFilterAllOrder) > treeMountSummaryCacheMaxEntries {
+		oldest := c.mountChildFilterAllOrder[0]
+		c.mountChildFilterAllOrder = c.mountChildFilterAllOrder[1:]
+		delete(c.mountChildFilterAll, oldest)
+	}
 }
 
 func uint32SetCacheKey(values []uint32) string {
@@ -439,15 +537,19 @@ type treeQueryCache struct {
 	dgutas     map[treeCacheKey]db.GUTAs
 	dgutaOrder []treeCacheKey
 
-	dirSummaries      map[treeDirSummaryCacheKey]*db.DirSummary
-	dirSummaryCounts  map[treeDirSummaryCacheKey]uint64
-	dirSummaryOrder   []treeDirSummaryCacheKey
-	mountSummaries    map[treeMountCacheKey]bool
-	mountSummaryOrder []treeMountCacheKey
-	mountVectors      map[treeMountCacheKey]bool
-	mountVectorOrder  []treeMountCacheKey
-	mountAgeAll       map[treeMountCacheKey]bool
-	mountAgeAllOrder  []treeMountCacheKey
+	dirSummaries             map[treeDirSummaryCacheKey]*db.DirSummary
+	dirSummaryCounts         map[treeDirSummaryCacheKey]uint64
+	dirSummaryOrder          []treeDirSummaryCacheKey
+	mountSummaries           map[treeMountCacheKey]bool
+	mountSummaryOrder        []treeMountCacheKey
+	mountVectors             map[treeMountCacheKey]bool
+	mountVectorOrder         []treeMountCacheKey
+	mountAgeAll              map[treeMountCacheKey]bool
+	mountAgeAllOrder         []treeMountCacheKey
+	mountDirFilterAll        map[treeMountCacheKey]bool
+	mountDirFilterAllOrder   []treeMountCacheKey
+	mountChildFilterAll      map[treeMountCacheKey]bool
+	mountChildFilterAllOrder []treeMountCacheKey
 
 	parentPackets        map[treeParentPacketCacheKey][]parentFactChildSummary
 	parentPacketOrder    []treeParentPacketCacheKey
@@ -465,6 +567,8 @@ type treeQueryCache struct {
 	activePrefixSummaryOrder   []treeActivePrefixSummaryCacheKey
 	activeMetadata             map[treeActiveMetadataCacheKey]treeActiveMetadata
 	activeMetadataOrder        []treeActiveMetadataCacheKey
+	activeVirtualReady         map[treeActiveMetadataCacheKey]bool
+	activeVirtualReadyOrder    []treeActiveMetadataCacheKey
 	activePrefixSummaryHits    atomic.Uint64
 	activePrefixSummaryMisses  atomic.Uint64
 	activeMetadataHits         atomic.Uint64
@@ -479,18 +583,21 @@ func treeQueryCacheForConfig(cfg Config) *treeQueryCache {
 
 func newTreeQueryCache() *treeQueryCache {
 	return &treeQueryCache{
-		children:         make(map[treeCacheKey][]string),
-		dgutas:           make(map[treeCacheKey]db.GUTAs),
-		dirSummaries:     make(map[treeDirSummaryCacheKey]*db.DirSummary),
-		dirSummaryCounts: make(map[treeDirSummaryCacheKey]uint64),
-		mountSummaries:   make(map[treeMountCacheKey]bool),
-		mountVectors:     make(map[treeMountCacheKey]bool),
-		mountAgeAll:      make(map[treeMountCacheKey]bool),
-		parentPackets:    make(map[treeParentPacketCacheKey][]parentFactChildSummary),
+		children:            make(map[treeCacheKey][]string),
+		dgutas:              make(map[treeCacheKey]db.GUTAs),
+		dirSummaries:        make(map[treeDirSummaryCacheKey]*db.DirSummary),
+		dirSummaryCounts:    make(map[treeDirSummaryCacheKey]uint64),
+		mountSummaries:      make(map[treeMountCacheKey]bool),
+		mountVectors:        make(map[treeMountCacheKey]bool),
+		mountAgeAll:         make(map[treeMountCacheKey]bool),
+		mountDirFilterAll:   make(map[treeMountCacheKey]bool),
+		mountChildFilterAll: make(map[treeMountCacheKey]bool),
+		parentPackets:       make(map[treeParentPacketCacheKey][]parentFactChildSummary),
 		activePrefixSummaries: make(
 			map[treeActivePrefixSummaryCacheKey]*db.DirSummary,
 		),
-		activeMetadata: make(map[treeActiveMetadataCacheKey]treeActiveMetadata),
+		activeMetadata:     make(map[treeActiveMetadataCacheKey]treeActiveMetadata),
+		activeVirtualReady: make(map[treeActiveMetadataCacheKey]bool),
 	}
 }
 
@@ -865,6 +972,8 @@ func (c *treeQueryCache) reset() {
 	c.activePrefixSummaryOrder = nil
 	c.activeMetadata = make(map[treeActiveMetadataCacheKey]treeActiveMetadata)
 	c.activeMetadataOrder = nil
+	c.activeVirtualReady = make(map[treeActiveMetadataCacheKey]bool)
+	c.activeVirtualReadyOrder = nil
 	c.resetStatsLocked()
 }
 

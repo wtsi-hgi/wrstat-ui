@@ -29,9 +29,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
@@ -39,11 +41,16 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 	"github.com/wtsi-hgi/wrstat-ui/internal/chspool"
+	"github.com/wtsi-hgi/wrstat-ui/internal/perfreport"
 )
 
 const (
 	summariseSpoolLoadPhasePrefix = "spool_load_"
 	spoolHistoryDeleteChunk       = 512
+	summariseSpoolBytesPerKiB     = 1024
+	spoolLoadReportOperation      = "spool_load_total"
+	spoolLoadReportSuccess        = "success"
+	spoolLoadReportNotAttempted   = "not_attempted"
 )
 
 var (
@@ -62,6 +69,7 @@ type summariseSpoolLoader struct {
 	snapshot            uuid.UUID
 	updatedAt           time.Time
 	importPhaseRecorder func(string, time.Duration)
+	loadedRows          map[string]uint64
 	groupUsageDates     map[uint32]finaliseQuotaDates
 }
 
@@ -90,11 +98,19 @@ func newSummariseSpoolLoader(
 		snapshot:            snapshot,
 		updatedAt:           updatedAt,
 		importPhaseRecorder: recorder,
+		loadedRows:          map[string]uint64{},
 		groupUsageDates:     map[uint32]finaliseQuotaDates{},
 	}, nil
 }
 
 func (l *summariseSpoolLoader) load(parent context.Context) error {
+	return l.loadWithAfterPublish(parent, nil)
+}
+
+func (l *summariseSpoolLoader) loadWithAfterPublish(
+	parent context.Context,
+	afterPublish summariseSpoolAfterPublish,
+) error {
 	defer func() { _ = l.conn.Close() }()
 
 	parent = loadParentContext(parent)
@@ -107,7 +123,15 @@ func (l *summariseSpoolLoader) load(parent context.Context) error {
 		return err
 	}
 
-	return l.publish(parent)
+	if err := l.publish(parent); err != nil {
+		return err
+	}
+
+	if afterPublish == nil {
+		return nil
+	}
+
+	return afterPublish(parent, l)
 }
 
 func loadParentContext(parent context.Context) context.Context {
@@ -709,7 +733,13 @@ func (l *summariseSpoolLoader) loadBasedirsHistory(parent context.Context) error
 		return err
 	}
 
-	return l.insertEligibleHistoryRows(parent, rows)
+	if err := l.insertEligibleHistoryRows(parent, rows); err != nil {
+		return err
+	}
+
+	l.recordLoadedRows(chspool.TableBasedirsHistory, uint64(len(rows)))
+
+	return nil
 }
 
 func (l *summariseSpoolLoader) readBasedirsHistoryRows() ([]chspool.BasedirsHistoryRow, error) {
@@ -1164,9 +1194,19 @@ func (l *summariseSpoolLoader) verifyLoadedCounts(parent context.Context, tables
 				expected,
 			)
 		}
+
+		l.recordLoadedRows(table, got)
 	}
 
 	return nil
+}
+
+func (l *summariseSpoolLoader) recordLoadedRows(table string, rows uint64) {
+	if l.loadedRows == nil {
+		l.loadedRows = make(map[string]uint64)
+	}
+
+	l.loadedRows[table] = rows
 }
 
 func (l *summariseSpoolLoader) countLoadedRows(parent context.Context, table string) (uint64, error) {
@@ -1315,14 +1355,127 @@ func (l *summariseSpoolLoader) timeImportPhase(phase string, fn func() error) er
 	}, phase, fn)
 }
 
-// LoadSummariseSpool loads a completed local summarise spool into ClickHouse
-// and publishes it only after all table loads and count checks pass.
-func LoadSummariseSpool(
+func (l *summariseSpoolLoader) loadReport(parent context.Context) (perfreport.Report, error) {
+	builder := newSummariseSpoolLoadReportBuilder(l.dir, l.manifest, l.importPhaseRecorder)
+	originalRecorder := l.importPhaseRecorder
+
+	l.importPhaseRecorder = builder.record
+	defer func() { l.importPhaseRecorder = originalRecorder }()
+
+	err := l.loadWithAfterPublish(parent, builder.collect)
+	if err != nil {
+		return builder.report, err
+	}
+
+	builder.finish()
+
+	return builder.report, nil
+}
+
+func newSummariseSpoolLoadReportBuilder(
+	spoolDir string,
+	manifest *chspool.Manifest,
+	recorder func(string, time.Duration),
+) *summariseSpoolLoadReportBuilder {
+	return &summariseSpoolLoadReportBuilder{
+		report:         perfreport.NewReport("clickhouse", spoolDir, 1, 0),
+		manifest:       manifest,
+		recorder:       recorder,
+		phaseDurations: make(map[string]time.Duration),
+		started:        time.Now(),
+		usageBefore:    summariseSpoolProcessCPUUsage(),
+	}
+}
+
+func (l *summariseSpoolLoader) loadReportTableStats(
+	parent context.Context,
+) (map[string]perfreport.TableStats, error) {
+	tables := summariseSpoolLoadReportTables(l)
+	if len(tables) == 0 {
+		return map[string]perfreport.TableStats{}, nil
+	}
+
+	query, args := summariseSpoolLoadTableStatsQuery(l.cfg.Database, tables)
+
+	ctx, cancel := l.queryContext(parent)
+	defer cancel()
+
+	rows, err := l.conn.Query(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	return scanSummariseSpoolLoadTableStats(rows)
+}
+
+func summariseSpoolLoadReportTables(loader *summariseSpoolLoader) []string {
+	tables := make([]string, 0, len(loader.loadedRows))
+	for table, rows := range loader.loadedRows {
+		if rows > 0 {
+			tables = append(tables, table)
+		}
+	}
+
+	slices.Sort(tables)
+
+	return tables
+}
+
+func summariseSpoolLoadTableStatsQuery(database string, tables []string) (string, []any) {
+	placeholders := strings.TrimRight(strings.Repeat("?,", len(tables)), ",")
+	query := "SELECT table, toUInt64(sum(rows)), toUInt64(count()), " +
+		"toUInt64(sum(data_compressed_bytes)), toUInt64(sum(data_uncompressed_bytes)) " +
+		"FROM system.parts WHERE database = ? AND active AND table IN (" +
+		placeholders + ") GROUP BY table"
+
+	args := make([]any, 0, len(tables)+1)
+
+	args = append(args, database)
+	for _, table := range tables {
+		args = append(args, table)
+	}
+
+	return query, args
+}
+
+func scanSummariseSpoolLoadTableStats(rows driver.Rows) (map[string]perfreport.TableStats, error) {
+	stats := make(map[string]perfreport.TableStats)
+
+	for rows.Next() {
+		var (
+			table string
+			s     perfreport.TableStats
+		)
+
+		if err := rows.Scan(
+			&table,
+			&s.Rows,
+			&s.ActiveParts,
+			&s.CompressedBytes,
+			&s.UncompressedBytes,
+		); err != nil {
+			return nil, err
+		}
+
+		stats[table] = s
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return stats, nil
+}
+
+func runSummariseSpoolLoad(
 	ctx context.Context,
 	cfg Config,
 	spoolDir string,
 	manifest *chspool.Manifest,
 	recorder func(string, time.Duration),
+	afterPublish summariseSpoolAfterPublish,
 ) error {
 	if err := validateSummariseSpoolLoad(cfg, manifest); err != nil {
 		return err
@@ -1343,7 +1496,237 @@ func LoadSummariseSpool(
 		return err
 	}
 
-	return loader.load(ctx)
+	return loader.loadWithAfterPublish(ctx, afterPublish)
+}
+
+type summariseSpoolAfterPublish func(context.Context, *summariseSpoolLoader) error
+
+type summariseSpoolCPUUsage struct {
+	userMS   uint64
+	systemMS uint64
+}
+
+func summariseSpoolProcessCPUUsage() summariseSpoolCPUUsage {
+	var usage syscall.Rusage
+	if err := syscall.Getrusage(syscall.RUSAGE_SELF, &usage); err != nil {
+		return summariseSpoolCPUUsage{}
+	}
+
+	return summariseSpoolCPUUsage{
+		userMS:   summariseSpoolTimevalMS(usage.Utime),
+		systemMS: summariseSpoolTimevalMS(usage.Stime),
+	}
+}
+
+func summariseSpoolCPUUsageDelta(before, after summariseSpoolCPUUsage) summariseSpoolCPUUsage {
+	return summariseSpoolCPUUsage{
+		userMS:   summariseSpoolSaturatingSub(after.userMS, before.userMS),
+		systemMS: summariseSpoolSaturatingSub(after.systemMS, before.systemMS),
+	}
+}
+
+type summariseSpoolLoadReportBuilder struct {
+	report         perfreport.Report
+	manifest       *chspool.Manifest
+	recorder       func(string, time.Duration)
+	phaseDurations map[string]time.Duration
+	loadedRows     map[string]uint64
+	started        time.Time
+	usageBefore    summariseSpoolCPUUsage
+}
+
+func (b *summariseSpoolLoadReportBuilder) record(phase string, duration time.Duration) {
+	if b.recorder != nil {
+		b.recorder(phase, duration)
+	}
+
+	if phase == "" || duration <= 0 {
+		return
+	}
+
+	b.phaseDurations[phase] += duration
+}
+
+func (b *summariseSpoolLoadReportBuilder) collect(
+	parent context.Context,
+	loader *summariseSpoolLoader,
+) error {
+	stats, err := loader.loadReportTableStats(parent)
+	if err != nil {
+		return err
+	}
+
+	b.loadedRows = summariseSpoolLoadLoadedRows(loader, b.manifest)
+	b.report.TableStats = stats
+	b.report.SelectedTables = summariseSpoolLoadReportTableNames(stats)
+
+	return nil
+}
+
+func summariseSpoolLoadLoadedRows(
+	loader *summariseSpoolLoader,
+	manifest *chspool.Manifest,
+) map[string]uint64 {
+	rows := make(map[string]uint64, len(loader.loadedRows))
+	for table, count := range loader.loadedRows {
+		if count > 0 {
+			rows[table] = count
+		}
+	}
+
+	if manifest == nil {
+		return rows
+	}
+
+	for table, tableManifest := range manifest.Tables {
+		if _, ok := rows[table]; !ok && tableManifest.Rows > 0 {
+			rows[table] = tableManifest.Rows
+		}
+	}
+
+	return rows
+}
+
+func summariseSpoolLoadReportTableNames(stats map[string]perfreport.TableStats) []string {
+	tables := make([]string, 0, len(stats))
+	for table := range stats {
+		tables = append(tables, table)
+	}
+
+	slices.Sort(tables)
+
+	return tables
+}
+
+func (b *summariseSpoolLoadReportBuilder) finish() {
+	usage := summariseSpoolCPUUsageDelta(b.usageBefore, summariseSpoolProcessCPUUsage())
+	b.report.MaxRSSBytes = summariseSpoolMaxRSSBytes()
+	b.report.AddOperation(
+		spoolLoadReportOperation,
+		b.inputs(usage),
+		[]float64{summariseSpoolDurationMS(time.Since(b.started))},
+	)
+
+	summariseSpoolAddE2ComputedBudgetInputs(&b.report.Operations[len(b.report.Operations)-1])
+}
+
+func summariseSpoolMaxRSSBytes() uint64 {
+	var usage syscall.Rusage
+	if err := syscall.Getrusage(syscall.RUSAGE_SELF, &usage); err != nil {
+		return 0
+	}
+
+	if usage.Maxrss <= 0 {
+		return 0
+	}
+
+	return uint64(usage.Maxrss) * summariseSpoolBytesPerKiB
+}
+
+func summariseSpoolDurationMS(duration time.Duration) float64 {
+	return float64(duration) / float64(time.Millisecond)
+}
+
+func summariseSpoolAddE2ComputedBudgetInputs(op *perfreport.Operation) {
+	if op.Inputs == nil {
+		op.Inputs = make(map[string]any)
+	}
+
+	op.Inputs["budget_source"] = "computed_from_measurements"
+	op.Inputs["budget_measurement_count"] = uint64(len(op.DurationsMS))
+	op.Inputs["wall_time_budget_ms"] = uint64(math.Ceil(op.P95MS))
+	op.Inputs["total_cpu_budget_ms"] = summariseSpoolBudgetUint64Input(op.Inputs, "total_cpu_ms")
+	op.Inputs["peak_rss_budget_bytes"] = summariseSpoolBudgetUint64Input(op.Inputs, "peak_rss_bytes")
+	op.Inputs["spool_byte_budget"] = summariseSpoolBudgetUint64Input(op.Inputs, "spool_bytes")
+	op.Inputs["part_count_budget"] = summariseSpoolPartCountBudget(op.Inputs)
+}
+
+func (b *summariseSpoolLoadReportBuilder) inputs(usage summariseSpoolCPUUsage) map[string]any {
+	return map[string]any{
+		"loaded_table_rows":    b.loadedRows,
+		"user_cpu_ms":          usage.userMS,
+		"system_cpu_ms":        usage.systemMS,
+		"total_cpu_ms":         usage.userMS + usage.systemMS,
+		"peak_rss_bytes":       b.report.MaxRSSBytes,
+		"spool_bytes":          summariseSpoolManifestBytes(b.manifest),
+		"part_counts":          summariseSpoolPartCounts(b.report.TableStats),
+		"retry_cleanup_result": b.retryCleanupResult(),
+		"publish_latency_ms":   summariseSpoolDurationMSUint64(b.phaseDurations[importPhaseMountSwitch]),
+	}
+}
+
+func summariseSpoolManifestBytes(manifest *chspool.Manifest) uint64 {
+	if manifest == nil {
+		return 0
+	}
+
+	var total uint64
+
+	for _, table := range manifest.Tables {
+		if table.Bytes > 0 {
+			total += uint64(table.Bytes)
+		}
+	}
+
+	return total
+}
+
+func summariseSpoolPartCounts(stats map[string]perfreport.TableStats) map[string]uint64 {
+	counts := make(map[string]uint64, len(stats))
+	for table, tableStats := range stats {
+		counts[table] = tableStats.ActiveParts
+	}
+
+	return counts
+}
+
+func summariseSpoolDurationMSUint64(duration time.Duration) uint64 {
+	if duration <= 0 {
+		return 0
+	}
+
+	return uint64(duration / time.Millisecond)
+}
+
+func (b *summariseSpoolLoadReportBuilder) retryCleanupResult() string {
+	if b.phaseDurations[importPhasePartitionDropReset] > 0 {
+		return spoolLoadReportSuccess
+	}
+
+	return spoolLoadReportNotAttempted
+}
+
+// LoadSummariseSpoolReport loads a completed local summarise spool into
+// ClickHouse and returns final-gate evidence for the measured load.
+func LoadSummariseSpoolReport(
+	ctx context.Context,
+	cfg Config,
+	spoolDir string,
+	manifest *chspool.Manifest,
+	recorder func(string, time.Duration),
+) (perfreport.Report, error) {
+	builder := newSummariseSpoolLoadReportBuilder(spoolDir, manifest, recorder)
+
+	err := runSummariseSpoolLoad(ctx, cfg, spoolDir, manifest, builder.record, builder.collect)
+	if err != nil {
+		return builder.report, err
+	}
+
+	builder.finish()
+
+	return builder.report, nil
+}
+
+// LoadSummariseSpool loads a completed local summarise spool into ClickHouse
+// and publishes it only after all table loads and count checks pass.
+func LoadSummariseSpool(
+	ctx context.Context,
+	cfg Config,
+	spoolDir string,
+	manifest *chspool.Manifest,
+	recorder func(string, time.Duration),
+) error {
+	return runSummariseSpoolLoad(ctx, cfg, spoolDir, manifest, recorder, nil)
 }
 
 func validateSummariseSpoolLoad(cfg Config, manifest *chspool.Manifest) error { //nolint:gocyclo
@@ -1380,6 +1763,49 @@ func validateSummariseSpoolManifestTables(manifest *chspool.Manifest) error {
 	}
 
 	return nil
+}
+
+func summariseSpoolBudgetUint64Input(inputs map[string]any, key string) uint64 {
+	value, ok := inputs[key].(uint64)
+	if !ok {
+		return 0
+	}
+
+	return value
+}
+
+func summariseSpoolPartCountBudget(inputs map[string]any) uint64 {
+	var count uint64
+	for _, value := range summariseSpoolPartCountsInput(inputs) {
+		count += value
+	}
+
+	return count
+}
+
+func summariseSpoolPartCountsInput(inputs map[string]any) map[string]uint64 {
+	values, ok := inputs["part_counts"].(map[string]uint64)
+	if !ok {
+		return nil
+	}
+
+	return values
+}
+
+func summariseSpoolTimevalMS(value syscall.Timeval) uint64 {
+	if value.Sec < 0 || value.Usec < 0 {
+		return 0
+	}
+
+	return uint64(value.Sec)*1000 + uint64(value.Usec)/1000
+}
+
+func summariseSpoolSaturatingSub(after uint64, before uint64) uint64 {
+	if after < before {
+		return 0
+	}
+
+	return after - before
 }
 
 func addSpoolActiveSetID(ids map[string]struct{}, activeSetID string) {

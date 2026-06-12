@@ -470,7 +470,7 @@ func activeVirtualCandidateDir(dir string, mounts []activeMount) bool {
 	key := ensureTrailingSlash(dir)
 	for _, mount := range mounts {
 		mountPath := ensureTrailingSlash(mount.mountPath)
-		if key == mountPath || strings.HasPrefix(mountPath, key) {
+		if key != mountPath && strings.HasPrefix(mountPath, key) {
 			return true
 		}
 	}
@@ -478,20 +478,46 @@ func activeVirtualCandidateDir(dir string, mounts []activeMount) bool {
 	return false
 }
 
-func (d *clickHouseDatabase) activeVirtualReadySet(
+func (d *clickHouseDatabase) activeVirtualReadySetForDirs(
 	ctx context.Context,
-) (string, []activeMount, bool, error) {
+	dirs []string,
+) (string, []activeMount, []string, bool, error) {
 	activeSetID, mounts, err := d.currentActiveMountsSet(ctx)
 	if err != nil || activeSetID == "" {
-		return "", nil, false, err
+		return "", nil, nil, false, err
+	}
+
+	candidates := activeVirtualCandidateDirs(dirs, mounts)
+	if len(candidates) == 0 {
+		return activeSetID, mounts, nil, false, nil
+	}
+
+	ready, err := d.activeVirtualSetReadyCached(ctx, activeSetID)
+	if err != nil || !ready {
+		return activeSetID, mounts, candidates, false, err
+	}
+
+	return activeSetID, mounts, candidates, true, nil
+}
+
+func (d *clickHouseDatabase) activeVirtualSetReadyCached(ctx context.Context, activeSetID string) (bool, error) {
+	key := newTreeActiveMetadataCacheKey(
+		activeSetID,
+		currentSchemaVersion,
+		activeVirtualReadyQueryVersion,
+	)
+	if ready, cached := d.treeCache.getActiveVirtualReady(key); cached {
+		return ready, nil
 	}
 
 	ready, err := d.activeVirtualSetReady(ctx, activeSetID)
-	if err != nil || !ready {
-		return "", nil, false, err
+	if err != nil {
+		return ready, err
 	}
 
-	return activeSetID, mounts, true, nil
+	d.treeCache.putActiveVirtualReady(key, ready)
+
+	return ready, nil
 }
 
 func (d *clickHouseDatabase) activeVirtualSetReady(ctx context.Context, activeSetID string) (bool, error) {
@@ -513,7 +539,7 @@ func (d *clickHouseDatabase) activeVirtualSetReady(ctx context.Context, activeSe
 	return false, rowIterationErr(rows, "clickhouse: active virtual readiness iteration error")
 }
 
-//nolint:funlen,gocognit,gocyclo,cyclop
+//nolint:funlen,gocognit,gocyclo
 func (d *clickHouseDatabase) addActiveVirtualDirInfos(
 	result map[string]*db.DirSummary,
 	dirs []string,
@@ -527,14 +553,9 @@ func (d *clickHouseDatabase) addActiveVirtualDirInfos(
 	ctx, cancel := configQueryContext(d.cfg)
 	defer cancel()
 
-	activeSetID, mounts, ready, err := d.activeVirtualReadySet(ctx)
+	activeSetID, mounts, dirs, ready, err := d.activeVirtualReadySetForDirs(ctx, dirs)
 	if err != nil || !ready {
 		return handled, err
-	}
-
-	dirs = activeVirtualCandidateDirs(dirs, mounts)
-	if len(dirs) == 0 {
-		return handled, nil
 	}
 
 	if fullFilterAlwaysEmpty(filter) {
@@ -712,10 +733,12 @@ func (d *clickHouseDatabase) activeVirtualChildren(
 	ctx, cancel := configQueryContext(d.cfg)
 	defer cancel()
 
-	activeSetID, _, ready, err := d.activeVirtualReadySet(ctx)
+	activeSetID, _, dirs, ready, err := d.activeVirtualReadySetForDirs(ctx, []string{parentDir})
 	if err != nil || !ready {
 		return nil, false, err
 	}
+
+	parentDir = ensureTrailingSlash(dirs[0])
 
 	children, err := d.queryChildren(ctx, activeVirtualChildrenQuery, "active virtual children", activeSetID, parentDir)
 	if err != nil {
@@ -778,7 +801,7 @@ func (d *clickHouseDatabase) activeVirtualChildrenForParents(
 	ctx, cancel := configQueryContext(d.cfg)
 	defer cancel()
 
-	activeSetID, _, ready, err := d.activeVirtualReadySet(ctx)
+	activeSetID, _, dirs, ready, err := d.activeVirtualReadySetForDirs(ctx, dirs)
 	if err != nil || !ready {
 		return map[string][]string{}, map[string]bool{}, err
 	}
@@ -829,12 +852,12 @@ func (d *clickHouseDatabase) activeVirtualHasChildren(
 	ctx, cancel := configQueryContext(d.cfg)
 	defer cancel()
 
-	activeSetID, _, ready, err := d.activeVirtualReadySet(ctx)
+	activeSetID, _, dirs, ready, err := d.activeVirtualReadySetForDirs(ctx, []string{dir})
 	if err != nil || !ready {
 		return false, false, err
 	}
 
-	rows, err := d.conn.Query(ctx, activeVirtualChildCountQuery, activeSetID, ensureTrailingSlash(dir))
+	rows, err := d.conn.Query(ctx, activeVirtualChildCountQuery, activeSetID, ensureTrailingSlash(dirs[0]))
 	if err != nil {
 		if isUnknownTable(err) {
 			return false, false, nil

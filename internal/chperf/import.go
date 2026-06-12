@@ -116,6 +116,12 @@ const (
 	importInputMountPath = "mount_path"
 	importInputRecords   = "records"
 	importInputRowCap    = "row_cap"
+
+	importInputUserCPUMS      = "user_cpu_ms"
+	importInputSystemCPUMS    = "system_cpu_ms"
+	importInputTotalCPUMS     = "total_cpu_ms"
+	importInputPeakRSSBytes   = "peak_rss_bytes"
+	importInputPublishLatency = "publish_latency_ms"
 )
 
 // ErrNoDatasets indicates no dataset directories were found.
@@ -140,12 +146,15 @@ func Import(
 	}
 
 	report := perfreport.NewReport("clickhouse", inputDir, 1, 0)
+	usageBefore := importProcessCPUUsage()
 	startAll := time.Now()
 
 	results, err := importDatasets(api, datasetDirs, opts, printf)
 	if err != nil {
 		return perfreport.Report{}, err
 	}
+
+	usage := importProcessCPUUsageDelta(usageBefore, importProcessCPUUsage())
 
 	addImportReportOperations(
 		&report,
@@ -158,6 +167,8 @@ func Import(
 	if err := enrichImportReport(context.Background(), &report, api, results); err != nil {
 		return perfreport.Report{}, err
 	}
+
+	addImportFinalGateEvidence(&report, results, usage)
 
 	return report, nil
 }
@@ -175,6 +186,41 @@ func findDatasets(baseDir string) ([]string, error) {
 	slices.Sort(dirs)
 
 	return dirs, nil
+}
+
+func importProcessCPUUsage() importCPUUsage {
+	var usage syscall.Rusage
+	if err := syscall.Getrusage(syscall.RUSAGE_SELF, &usage); err != nil {
+		return importCPUUsage{}
+	}
+
+	return importCPUUsage{
+		userMS:   timevalMS(usage.Utime),
+		systemMS: timevalMS(usage.Stime),
+	}
+}
+
+func timevalMS(value syscall.Timeval) uint64 {
+	if value.Sec < 0 || value.Usec < 0 {
+		return 0
+	}
+
+	return uint64(value.Sec)*1000 + uint64(value.Usec)/1000
+}
+
+func importProcessCPUUsageDelta(before, after importCPUUsage) importCPUUsage {
+	return importCPUUsage{
+		userMS:   uint64SaturatingSub(after.userMS, before.userMS),
+		systemMS: uint64SaturatingSub(after.systemMS, before.systemMS),
+	}
+}
+
+func uint64SaturatingSub(after, before uint64) uint64 {
+	if after < before {
+		return 0
+	}
+
+	return after - before
 }
 
 func addImportReportOperations(
@@ -284,6 +330,76 @@ func rowAmplification(rows uint64, baselineRows uint64) float64 {
 	}
 
 	return float64(rows) / float64(baselineRows)
+}
+
+func addImportFinalGateEvidence(
+	report *perfreport.Report,
+	results []datasetImportResult,
+	usage importCPUUsage,
+) {
+	total := importTotalOperation(report)
+	if total == nil {
+		return
+	}
+
+	if total.Inputs == nil {
+		total.Inputs = make(map[string]any)
+	}
+
+	total.Inputs[importInputUserCPUMS] = usage.userMS
+	total.Inputs[importInputSystemCPUMS] = usage.systemMS
+	total.Inputs[importInputTotalCPUMS] = usage.userMS + usage.systemMS
+	total.Inputs[importInputPeakRSSBytes] = report.MaxRSSBytes
+	total.Inputs["spool_bytes"] = uint64(0)
+	total.Inputs["part_counts"] = importActivePartCounts(report.TableStats)
+	total.Inputs["retry_cleanup_result"] = importRetryCleanupResult(results)
+	total.Inputs[importInputPublishLatency] = importPublishLatencyMS(results)
+	finalGateEnsureE2ComputedBudgetInputs(total)
+}
+
+func importTotalOperation(report *perfreport.Report) *perfreport.Operation {
+	for i := range report.Operations {
+		if report.Operations[i].Name == "import_total" {
+			return &report.Operations[i]
+		}
+	}
+
+	return nil
+}
+
+func importActivePartCounts(stats map[string]perfreport.TableStats) map[string]uint64 {
+	counts := make(map[string]uint64, len(stats))
+	for table, tableStats := range stats {
+		counts[table] = tableStats.ActiveParts
+	}
+
+	return counts
+}
+
+func importRetryCleanupResult(results []datasetImportResult) string {
+	if importPhaseDuration(results, phaseOldSnapshotDrop) > 0 {
+		return finalGateComparisonStatusSuccess
+	}
+
+	return "not_attempted"
+}
+
+func importPhaseDuration(results []datasetImportResult, phase string) time.Duration {
+	var total time.Duration
+	for _, result := range results {
+		total += result.phases[phase]
+	}
+
+	return total
+}
+
+func importPublishLatencyMS(results []datasetImportResult) uint64 {
+	return uint64(durationMS(importPhaseDuration(results, phaseMountSwitch)))
+}
+
+type importCPUUsage struct {
+	userMS   uint64
+	systemMS uint64
 }
 
 func cloneMap[M ~map[K]V, K comparable, V any](src M) M {

@@ -38,6 +38,7 @@ import (
 	. "github.com/smartystreets/goconvey/convey"
 	"github.com/wtsi-hgi/wrstat-ui/clickhouse"
 	"github.com/wtsi-hgi/wrstat-ui/internal/chspool"
+	"github.com/wtsi-hgi/wrstat-ui/internal/perfreport"
 	"github.com/wtsi-hgi/wrstat-ui/internal/statsdata"
 	"github.com/wtsi-hgi/wrstat-ui/summary"
 )
@@ -183,13 +184,13 @@ func TestSummariseClickHouseActiveSnapshotPreflight(t *testing.T) {
 			string,
 			*chspool.Manifest,
 			func(string, time.Duration),
-		) error {
+		) (perfreport.Report, error) {
 			So(cleanupCalled, ShouldBeTrue)
 
 			wireCalled = true
 			closeCalled = true
 
-			return nil
+			return perfreport.NewReport("clickhouse", "", 1, 0), nil
 		}
 
 		err := run([]string{fixture.statsPath})
@@ -241,10 +242,10 @@ func TestSummariseClickHouseActiveSnapshotPreflight(t *testing.T) {
 			string,
 			*chspool.Manifest,
 			func(string, time.Duration),
-		) error {
+		) (perfreport.Report, error) {
 			wireCalled = true
 
-			return nil
+			return perfreport.NewReport("clickhouse", "", 1, 0), nil
 		}
 
 		err := run([]string{fixture.statsPath})
@@ -292,10 +293,10 @@ func TestSummariseClickHouseActiveSnapshotPreflight(t *testing.T) {
 			string,
 			*chspool.Manifest,
 			func(string, time.Duration),
-		) error {
+		) (perfreport.Report, error) {
 			wireCalled = true
 
-			return nil
+			return perfreport.NewReport("clickhouse", "", 1, 0), nil
 		}
 
 		err := run([]string{fixture.statsPath})
@@ -343,12 +344,12 @@ func TestSummariseClickHouseActiveSnapshotPreflight(t *testing.T) {
 			string,
 			*chspool.Manifest,
 			func(string, time.Duration),
-		) error {
+		) (perfreport.Report, error) {
 			So(summariseCompletionMarkerExists(fixture.outputDir), ShouldBeFalse)
 
 			closeCalled = true
 
-			return nil
+			return perfreport.NewReport("clickhouse", "", 1, 0), nil
 		}
 
 		err := run([]string{fixture.statsPath})
@@ -389,8 +390,8 @@ func TestSummariseClickHouseActiveSnapshotPreflight(t *testing.T) {
 			string,
 			*chspool.Manifest,
 			func(string, time.Duration),
-		) error {
-			return errSummariseTestClose
+		) (perfreport.Report, error) {
+			return perfreport.Report{}, errSummariseTestClose
 		}
 
 		err := run([]string{fixture.statsPath})

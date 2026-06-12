@@ -1363,6 +1363,15 @@ func querySampleMemoryBytes(samples []queryRepeatSample) []uint64 {
 	return values
 }
 
+func querySampleResultBytes(samples []queryRepeatSample) []uint64 {
+	values, ok := querySampleMetricValues(samples, func(m *QueryMetrics) uint64 { return m.ResultBytes })
+	if !ok {
+		return nil
+	}
+
+	return values
+}
+
 func querySampleResultCounts(samples []queryRepeatSample, o op) []uint64 {
 	if o.resultCounts != nil {
 		return o.resultCounts()
@@ -3002,6 +3011,7 @@ func runOp(
 		querySampleReadBytes(samples),
 		querySampleReadMarks(samples),
 		querySampleMemoryBytes(samples),
+		querySampleResultBytes(samples),
 		querySampleResultCounts(samples, o),
 	)
 

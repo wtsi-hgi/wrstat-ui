@@ -408,6 +408,12 @@ type whereDirAgeAllRouteEvidence struct {
 	allP95      time.Duration
 }
 
+type dirInfoMountRoute func(
+	map[string]*db.DirSummary,
+	*activeMountDirGroup,
+	*db.Filter,
+) (*activeMountDirGroup, error)
+
 func (t *whereTraversal) summaryDirsForInfos(parentDirs []string) []string {
 	dirs := make([]string, 0, len(parentDirs))
 	dirs = append(dirs, parentDirs...)
@@ -442,8 +448,11 @@ func (t *whereTraversal) preloadFilteredMountWhere(queryDir string) error {
 		return nil
 	}
 
-	summaries, err := t.database.filteredMountWhereSummaries(*t.mount, queryDir, t.filter)
-	if err != nil {
+	ctx, cancel := configQueryContext(t.database.cfg)
+	defer cancel()
+
+	summaries, ok, err := t.database.filteredMountWhereTraversalSummaries(ctx, *t.mount, queryDir, t.filter)
+	if err != nil || !ok {
 		return err
 	}
 
@@ -704,6 +713,64 @@ func (t *whereTraversal) storeWhereParentFactLeafChildren(
 	t.childrenLoaded[childDir] = true
 }
 
+func (t *whereTraversal) loadFallbackChildGroupRootMounts(
+	groups map[string]*activeMountDirGroup,
+) []activeMount {
+	mounts := make([]activeMount, 0)
+	seen := make(map[string]bool, len(groups))
+
+	for _, group := range groups {
+		for _, dir := range group.queryDirs {
+			if ensureTrailingSlash(dir) != ensureTrailingSlash(group.mount.mountPath) {
+				continue
+			}
+
+			key := group.mount.mountPath + "\x00" + group.mount.snapshotID
+			if seen[key] {
+				continue
+			}
+
+			seen[key] = true
+
+			mounts = append(mounts, group.mount)
+		}
+	}
+
+	return mounts
+}
+
+func (t *whereTraversal) loadActiveMountRootChildren(mounts []activeMount) error {
+	if len(mounts) == 0 {
+		return nil
+	}
+
+	childrenByParent, err := t.database.childrenForActiveMountRoots(mounts)
+	if err != nil {
+		return err
+	}
+
+	for _, mount := range mounts {
+		t.storeChildren(mount.mountPath, childrenByParent[ensureTrailingSlash(mount.mountPath)])
+	}
+
+	return nil
+}
+
+func nonActiveMountRootQueryDirs(group *activeMountDirGroup) []string {
+	dirs := make([]string, 0, len(group.queryDirs))
+	mountPath := ensureTrailingSlash(group.mount.mountPath)
+
+	for _, dir := range group.queryDirs {
+		if ensureTrailingSlash(dir) == mountPath {
+			continue
+		}
+
+		dirs = append(dirs, dir)
+	}
+
+	return dirs
+}
+
 type clickHouseDatabase struct {
 	cfg  Config
 	conn ch.Conn
@@ -738,7 +805,6 @@ func newClickHouseDatabaseWithSnapshot(
 	}
 }
 
-//nolint:funlen,gocyclo
 func (d *clickHouseDatabase) DirInfo(
 	dir string,
 	filter *db.Filter,
@@ -747,17 +813,13 @@ func (d *clickHouseDatabase) DirInfo(
 		return nil, err
 	}
 
-	if sum, ok, err := d.activeVirtualDirInfo(dir, filter); err != nil || ok {
-		return sum, err
-	}
-
 	mountPath, ok, err := d.resolveMountScope(dir)
 	if err != nil {
 		return nil, err
 	}
 
 	if !ok {
-		return d.dirInfoAncestor(dir, filter)
+		return d.dirInfoOutsideMount(dir, filter)
 	}
 
 	mount, found, err := d.activeMountForMountPath(mountPath)
@@ -766,12 +828,34 @@ func (d *clickHouseDatabase) DirInfo(
 	}
 
 	if !found {
-		return &db.DirSummary{}, db.ErrDirNotFound
+		return d.dirInfoMissingActiveMount(dir, filter)
 	}
 
 	return d.dirInfoSingleMount(
 		mount.mountPath, mount.snapshotID, mount.updatedAt, dir, filter,
 	)
+}
+
+func (d *clickHouseDatabase) dirInfoOutsideMount(
+	dir string,
+	filter *db.Filter,
+) (*db.DirSummary, error) {
+	if sum, handled, err := d.activeVirtualDirInfo(dir, filter); err != nil || handled {
+		return sum, err
+	}
+
+	return d.dirInfoAncestor(dir, filter)
+}
+
+func (d *clickHouseDatabase) dirInfoMissingActiveMount(
+	dir string,
+	filter *db.Filter,
+) (*db.DirSummary, error) {
+	if sum, handled, err := d.activeVirtualDirInfo(dir, filter); err != nil || handled {
+		return sum, err
+	}
+
+	return &db.DirSummary{}, db.ErrDirNotFound
 }
 
 func (d *clickHouseDatabase) activeVirtualDirInfo(
@@ -1044,14 +1128,38 @@ func (d *clickHouseDatabase) schema3DirFilterAllReady(
 	ctx context.Context,
 	mountPath, snapshotID string,
 ) (bool, error) {
-	return d.queryLatestSchema3RowCountReady(ctx, schema3DirFilterAllReadyQuery, mountPath, snapshotID)
+	key := newTreeMountCacheKey(mountPath, snapshotID)
+	if ready, cached := d.treeCache.getDirFilterAllReady(key); cached {
+		return ready, nil
+	}
+
+	ready, err := d.queryLatestSchema3RowCountReady(ctx, schema3DirFilterAllReadyQuery, mountPath, snapshotID)
+	if err != nil {
+		return ready, err
+	}
+
+	d.treeCache.putDirFilterAllReady(key, ready)
+
+	return ready, nil
 }
 
 func (d *clickHouseDatabase) schema3ChildFilterAllReady(
 	ctx context.Context,
 	mountPath, snapshotID string,
 ) (bool, error) {
-	return d.queryLatestSchema3RowCountReady(ctx, schema3ChildFilterAllReadyQuery, mountPath, snapshotID)
+	key := newTreeMountCacheKey(mountPath, snapshotID)
+	if ready, cached := d.treeCache.getChildFilterAllReady(key); cached {
+		return ready, nil
+	}
+
+	ready, err := d.queryLatestSchema3RowCountReady(ctx, schema3ChildFilterAllReadyQuery, mountPath, snapshotID)
+	if err != nil {
+		return ready, err
+	}
+
+	d.treeCache.putChildFilterAllReady(key, ready)
+
+	return ready, nil
 }
 
 func (d *clickHouseDatabase) queryLatestSchema3RowCountReady(
@@ -1456,19 +1564,13 @@ func (d *clickHouseDatabase) addFullFilterDirInfosForMount(
 		return nil
 	}
 
-	group, err := d.addChildFilterAllDirInfosForMount(result, group, filter)
-	if dirInfoRouteDone(group, err) {
-		return err
-	}
+	for _, route := range d.fullFilterDirInfoRoutes(filter) {
+		var err error
 
-	group, err = d.addDirFilterAllDirInfosForMount(result, group, filter)
-	if dirInfoRouteDone(group, err) {
-		return err
-	}
-
-	group, err = d.addParentFactDirInfosForMount(result, group, filter)
-	if dirInfoRouteDone(group, err) {
-		return err
+		group, err = route(result, group, filter)
+		if dirInfoRouteDone(group, err) {
+			return err
+		}
 	}
 
 	ok, err := d.addGroupedDirInfosForMount(result, group, filter)
@@ -1477,6 +1579,40 @@ func (d *clickHouseDatabase) addFullFilterDirInfosForMount(
 	}
 
 	return d.addRawDirInfosForMount(result, group, filter)
+}
+
+func (d *clickHouseDatabase) fullFilterDirInfoRoutes(filter *db.Filter) []dirInfoMountRoute {
+	var routes []dirInfoMountRoute
+	if dirFilterAgeAllCanHandleFilter(filter) {
+		routes = append(routes, d.addDirFilterAgeAllDirInfosForMount)
+	}
+
+	if parentFactsCanHandleDirInfoFilter(filter) {
+		routes = append(routes, d.addParentFactDirInfosForMount)
+	}
+
+	return append(routes, d.addDirFilterAllDirInfosForMount, d.addChildFilterAllDirInfosForMount)
+}
+
+func (d *clickHouseDatabase) addDirFilterAgeAllDirInfosForMount(
+	result map[string]*db.DirSummary,
+	group *activeMountDirGroup,
+	filter *db.Filter,
+) (*activeMountDirGroup, error) {
+	summaries, handled, ok, err := d.dirFilterAgeAllSummariesForDirsMount(
+		group.mount.mountPath,
+		group.mount.snapshotID,
+		group.mount.updatedAt,
+		group.queryDirs,
+		filter,
+	)
+	if err != nil || !ok {
+		return group, err
+	}
+
+	d.addGroupedDirSummaries(result, group, summaries)
+
+	return remainingDirInfoGroup(group, handled), nil
 }
 
 func (d *clickHouseDatabase) addDirFilterAllDirInfosForMount(
@@ -1693,6 +1829,78 @@ func (d *clickHouseDatabase) addActiveVirtualDirsHaveChildren(
 	}
 
 	return remaining, nil
+}
+
+func (d *clickHouseDatabase) filteredMountWhereTraversalSummaries(
+	ctx context.Context,
+	mount activeMount,
+	queryDir string,
+	filter *db.Filter,
+) (map[string]*db.DirSummary, bool, error) {
+	summaries, ok, err := d.filteredMountWhereSummariesFromAgeAll(ctx, mount, queryDir, filter)
+	if err != nil || ok {
+		return summaries, ok, err
+	}
+
+	if whereParentPacketsPreferredForAgeAll(filter) {
+		return nil, false, nil
+	}
+
+	summaries, ok, err = d.dirFilterAllWhereSummaries(ctx, mount, queryDir, filter)
+	if err != nil || ok || !legacyFilteredMountWherePreloadCanHandle(filter) {
+		return summaries, ok, err
+	}
+
+	summaries, err = d.filteredMountWhereFactsSummaries(ctx, mount, filter)
+
+	return summaries, true, err
+}
+
+func whereParentPacketsPreferredForAgeAll(filter *db.Filter) bool {
+	return filter != nil &&
+		filter.Age == db.DGUTAgeAll &&
+		filter.GIDs == nil &&
+		filter.UIDs == nil
+}
+
+func legacyFilteredMountWherePreloadCanHandle(filter *db.Filter) bool {
+	return filter == nil ||
+		(filter.Age == db.DGUTAgeAll && (filter.GIDs != nil || filter.UIDs != nil))
+}
+
+func (d *clickHouseDatabase) filteredMountWhereFactsSummaries(
+	ctx context.Context,
+	mount activeMount,
+	filter *db.Filter,
+) (map[string]*db.DirSummary, error) {
+	query, args := filteredMountWhereSummariesQueryForFilter(mount.mountPath, mount.snapshotID, filter)
+
+	rows, err := d.conn.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("clickhouse: failed to query filtered mount where summaries: %w", err)
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	summaries, _, err := scanDirSummaryRows(rows, filter, mount.updatedAt)
+
+	return summaries, err
+}
+
+func (d *clickHouseDatabase) childrenOutsideMount(parentDir string) ([]string, error) {
+	if children, handled, err := d.activeVirtualChildren(parentDir); err != nil || handled {
+		return children, err
+	}
+
+	return d.childrenForAncestor(parentDir)
+}
+
+func (d *clickHouseDatabase) childrenMissingActiveMount(parentDir string) ([]string, error) {
+	if children, handled, err := d.activeVirtualChildren(parentDir); err != nil || handled {
+		return children, err
+	}
+
+	return nil, nil
 }
 
 func unhandledDirs(dirs []string, handled map[string]bool) []string {
@@ -2157,15 +2365,12 @@ func (d *clickHouseDatabase) dirInfoTreeSummaryAncestor(
 	return dirSummaryWithModtime(gutas, filter, updatedAt), true, nil
 }
 
-func (d *clickHouseDatabase) Children(dir string) ([]string, error) { //nolint:gocyclo
+func (d *clickHouseDatabase) Children(dir string) ([]string, error) {
 	if err := d.ensureOpen(); err != nil {
 		return nil, err
 	}
 
 	parentDir := ensureTrailingSlash(dir)
-	if children, ok, err := d.activeVirtualChildren(parentDir); err != nil || ok {
-		return children, err
-	}
 
 	mountPath, ok, err := d.resolveMountScope(dir)
 	if err != nil {
@@ -2173,7 +2378,7 @@ func (d *clickHouseDatabase) Children(dir string) ([]string, error) { //nolint:g
 	}
 
 	if !ok {
-		return d.childrenForAncestor(parentDir)
+		return d.childrenOutsideMount(parentDir)
 	}
 
 	mount, found, err := d.activeMountForMountPath(mountPath)
@@ -2182,7 +2387,7 @@ func (d *clickHouseDatabase) Children(dir string) ([]string, error) { //nolint:g
 	}
 
 	if !found {
-		return nil, nil
+		return d.childrenMissingActiveMount(parentDir)
 	}
 
 	return d.childrenForReadyActiveMount(mount, parentDir)
@@ -4830,28 +5035,12 @@ func (d *clickHouseDatabase) filteredMountWhereSummaries(
 	ctx, cancel := configQueryContext(d.cfg)
 	defer cancel()
 
-	summaries, ok, err := d.filteredMountWhereSummariesFromAgeAll(ctx, mount, queryDir, filter)
+	summaries, ok, err := d.filteredMountWhereTraversalSummaries(ctx, mount, queryDir, filter)
 	if err != nil || ok {
 		return summaries, err
 	}
 
-	summaries, ok, err = d.dirFilterAllWhereSummaries(ctx, mount, queryDir, filter)
-	if err != nil || ok {
-		return summaries, err
-	}
-
-	query, args := filteredMountWhereSummariesQueryForFilter(mount.mountPath, mount.snapshotID, filter)
-
-	rows, err := d.conn.Query(ctx, query, args...)
-	if err != nil {
-		return nil, fmt.Errorf("clickhouse: failed to query filtered mount where summaries: %w", err)
-	}
-
-	defer func() { _ = rows.Close() }()
-
-	summaries, _, err = scanDirSummaryRows(rows, filter, mount.updatedAt)
-
-	return summaries, err
+	return d.filteredMountWhereFactsSummaries(ctx, mount, filter)
 }
 
 func filteredMountWhereSummariesQueryForFilter(
@@ -5485,7 +5674,17 @@ func (t *whereTraversal) loadFallbackChildren(dirs []string) error {
 func (t *whereTraversal) loadFallbackChildGroups(
 	groups map[string]*activeMountDirGroup,
 ) error {
+	rootMounts := t.loadFallbackChildGroupRootMounts(groups)
+	if err := t.loadActiveMountRootChildren(rootMounts); err != nil {
+		return err
+	}
+
 	for _, group := range groups {
+		group.queryDirs = nonActiveMountRootQueryDirs(group)
+		if len(group.queryDirs) == 0 {
+			continue
+		}
+
 		if err := t.loadGroupChildren(group); err != nil {
 			return err
 		}

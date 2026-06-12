@@ -30,6 +30,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -42,6 +43,7 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/clickhouse"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 	"github.com/wtsi-hgi/wrstat-ui/internal/chspool"
+	"github.com/wtsi-hgi/wrstat-ui/internal/perfreport"
 	"github.com/wtsi-hgi/wrstat-ui/internal/split"
 	"github.com/wtsi-hgi/wrstat-ui/internal/statsdata"
 )
@@ -67,17 +69,17 @@ func TestSummariseClickHouseSpoolRetry(t *testing.T) {
 			spoolDir string,
 			manifest *chspool.Manifest,
 			_ func(string, time.Duration),
-		) error {
+		) (perfreport.Report, error) {
 			loadCalls++
 
 			So(spoolDir, ShouldEqual, summariseClickHouseSpoolDir(fixture.outputDir))
 			So(manifest.Tables[chspool.TableFiles].Rows, ShouldBeGreaterThan, uint64(0))
 
 			if loadCalls == 1 {
-				return errSummariseTestClose
+				return perfreport.Report{}, errSummariseTestClose
 			}
 
-			return nil
+			return perfreport.NewReport("clickhouse", spoolDir, 1, 0), nil
 		}
 
 		err := run([]string{fixture.statsPath})
@@ -117,10 +119,10 @@ func TestSummariseClickHouseSpoolRetry(t *testing.T) {
 			string,
 			*chspool.Manifest,
 			func(string, time.Duration),
-		) error {
+		) (perfreport.Report, error) {
 			loadCalls++
 
-			return errSummariseTestClose
+			return perfreport.Report{}, errSummariseTestClose
 		}
 
 		err := run([]string{fixture.statsPath})
@@ -267,11 +269,11 @@ func TestSummariseClickHouseSpoolRows(t *testing.T) {
 			gotSpoolDir string,
 			gotManifest *chspool.Manifest,
 			_ func(string, time.Duration),
-		) error {
+		) (perfreport.Report, error) {
 			spoolDir = gotSpoolDir
 			manifest = gotManifest
 
-			return nil
+			return perfreport.NewReport("clickhouse", gotSpoolDir, 1, 0), nil
 		}
 
 		So(run([]string{fixture.statsPath}), ShouldBeNil)
@@ -330,7 +332,7 @@ func TestSummariseClickHouseSpoolRows(t *testing.T) {
 			spoolDir string,
 			manifest *chspool.Manifest,
 			recorder func(string, time.Duration),
-		) error {
+		) (perfreport.Report, error) {
 			wrappedRecorder := func(phase string, duration time.Duration) {
 				recorder(phase, duration)
 
@@ -344,7 +346,7 @@ func TestSummariseClickHouseSpoolRows(t *testing.T) {
 				sawReadinessBeforeActiveMount = true
 			}
 
-			return clickhouse.LoadSummariseSpool(ctx, cfg, spoolDir, manifest, wrappedRecorder)
+			return clickhouse.LoadSummariseSpoolReport(ctx, cfg, spoolDir, manifest, wrappedRecorder)
 		}
 
 		So(run([]string{fixture.statsPath}), ShouldBeNil)
@@ -353,6 +355,9 @@ func TestSummariseClickHouseSpoolRows(t *testing.T) {
 		spoolDir := summariseClickHouseSpoolDir(fixture.outputDir)
 		manifest, err := chspool.ReadManifest(spoolDir)
 		So(err, ShouldBeNil)
+
+		report := readSummariseSpoolLoadReport(t, spoolDir)
+		So(summariseSpoolReportHasOperation(report, "spool_load_total"), ShouldBeTrue)
 
 		conn := openB3CLIClickHouseConn(t, cfg.DSN)
 		defer func() { So(conn.Close(), ShouldBeNil) }()
@@ -581,6 +586,28 @@ func assertD3ReadinessVisibleBeforeActiveMount(
 		manifest.MountPath,
 		manifest.SnapshotID,
 	), ShouldEqual, uint64(0))
+}
+
+func readSummariseSpoolLoadReport(t *testing.T, spoolDir string) perfreport.Report {
+	t.Helper()
+
+	data, err := os.ReadFile(summariseSpoolLoadReportPath(spoolDir))
+	So(err, ShouldBeNil)
+
+	var report perfreport.Report
+	So(json.Unmarshal(data, &report), ShouldBeNil)
+
+	return report
+}
+
+func summariseSpoolReportHasOperation(report perfreport.Report, name string) bool {
+	for _, op := range report.Operations {
+		if op.Name == name {
+			return true
+		}
+	}
+
+	return false
 }
 
 func assertD3LoadedSchema3Counts(

@@ -32,6 +32,7 @@ import (
 	"runtime"
 	"runtime/debug"
 	"slices"
+	"strings"
 	"time"
 )
 
@@ -50,6 +51,7 @@ type Operation struct {
 	ReadBytes   []uint64       `json:"read_bytes,omitempty"`
 	ReadMarks   []uint64       `json:"read_marks,omitempty"`
 	MemoryBytes []uint64       `json:"memory_bytes,omitempty"`
+	ResultBytes []uint64       `json:"result_bytes,omitempty"`
 	ResultCount []uint64       `json:"result_counts,omitempty"`
 	P50MS       float64        `json:"p50_ms"`
 	P95MS       float64        `json:"p95_ms"`
@@ -89,6 +91,7 @@ type Report struct {
 	SchemaVersion    int                   `json:"schema_version"`
 	Backend          string                `json:"backend"`
 	GitCommit        string                `json:"git_commit"`
+	ToolVersion      string                `json:"tool_version"`
 	GoVersion        string                `json:"go_version"`
 	OS               string                `json:"os"`
 	Arch             string                `json:"arch"`
@@ -110,6 +113,7 @@ func NewReport(backend, inputDir string, repeat, warmup int) Report {
 		SchemaVersion: SchemaVersion,
 		Backend:       backend,
 		GitCommit:     gitCommitFromBuildInfo(),
+		ToolVersion:   toolVersionFromBuildInfo(),
 		GoVersion:     runtime.Version(),
 		OS:            runtime.GOOS,
 		Arch:          runtime.GOARCH,
@@ -146,6 +150,7 @@ func (r *Report) AddOperationWithCounters(
 		readBytes,
 		readMarks,
 		nil,
+		nil,
 		resultCounts,
 	)
 }
@@ -160,6 +165,7 @@ func (r *Report) AddOperationWithFullCounters(
 	readBytes []uint64,
 	readMarks []uint64,
 	memoryBytes []uint64,
+	resultBytes []uint64,
 	resultCounts []uint64,
 ) {
 	p50, p95, p99 := PercentilesMS(durationsMS)
@@ -172,6 +178,7 @@ func (r *Report) AddOperationWithFullCounters(
 		ReadBytes:   readBytes,
 		ReadMarks:   readMarks,
 		MemoryBytes: memoryBytes,
+		ResultBytes: resultBytes,
 		ResultCount: resultCounts,
 		P50MS:       p50,
 		P95MS:       p95,
@@ -224,6 +231,15 @@ func percentileMS(values []float64, p float64) float64 {
 	}
 
 	return sorted[idx]
+}
+
+func toolVersionFromBuildInfo() string {
+	info, ok := debug.ReadBuildInfo()
+	if !ok || strings.TrimSpace(info.Main.Version) == "" {
+		return "(devel)"
+	}
+
+	return info.Main.Version
 }
 
 func gitCommitFromBuildInfo() string {

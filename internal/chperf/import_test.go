@@ -27,9 +27,11 @@
 package chperf
 
 import (
+	"compress/gzip"
 	"context"
 	"errors"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -41,6 +43,7 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/db"
 	"github.com/wtsi-hgi/wrstat-ui/internal/boltperf"
 	"github.com/wtsi-hgi/wrstat-ui/internal/perfreport"
+	"github.com/wtsi-hgi/wrstat-ui/internal/statsdata"
 	internaltest "github.com/wtsi-hgi/wrstat-ui/internal/test"
 	"github.com/wtsi-hgi/wrstat-ui/summary"
 )
@@ -688,6 +691,102 @@ func TestImportReportEnrichment(t *testing.T) {
 		So(report.FactsBucketStats, ShouldResemble, &api.bucketStats)
 		So(report.MaxRSSBytes, ShouldBeGreaterThan, uint64(0))
 	})
+}
+
+func TestImportProductionReportEvidence(t *testing.T) {
+	Convey("Import emits E1 resource, cleanup, publish, spool, and part evidence on the real import path", t, func() {
+		inputDir := t.TempDir()
+		datasetDir := filepath.Join(inputDir, importTestDataset)
+		So(os.MkdirAll(datasetDir, 0o755), ShouldBeNil)
+		writeImportTestStatsGZ(t, filepath.Join(datasetDir, statsGZBasename))
+
+		api := &fakeImportAPI{tableStats: importE1TableStats()}
+
+		report, err := Import(api, inputDir, ImportOptions{Parallelism: 1}, func(string, ...any) {})
+
+		So(err, ShouldBeNil)
+
+		total := findImportOperation(report.Operations, "import_total", "")
+		So(total, ShouldNotBeNil)
+		So(total.DurationsMS, ShouldHaveLength, 1)
+		So(total.Inputs["spool_bytes"], ShouldEqual, uint64(0))
+		So(total.Inputs["retry_cleanup_result"], ShouldEqual, "not_attempted")
+
+		for _, key := range []string{
+			importInputUserCPUMS,
+			importInputSystemCPUMS,
+			importInputTotalCPUMS,
+			importInputPeakRSSBytes,
+			importInputPublishLatency,
+		} {
+			_, ok := total.Inputs[key]
+			So(ok, ShouldBeTrue)
+		}
+
+		So(uint64Input(total.Inputs, importInputUserCPUMS), ShouldBeGreaterThanOrEqualTo, uint64(0))
+		So(uint64Input(total.Inputs, importInputSystemCPUMS), ShouldBeGreaterThanOrEqualTo, uint64(0))
+		So(uint64Input(total.Inputs, importInputTotalCPUMS), ShouldBeGreaterThanOrEqualTo, uint64(0))
+		So(uint64Input(total.Inputs, importInputPeakRSSBytes), ShouldBeGreaterThan, uint64(0))
+		So(uint64Input(total.Inputs, importInputPublishLatency), ShouldBeGreaterThanOrEqualTo, uint64(0))
+		partCounts := uint64MapInput(total.Inputs, "part_counts")
+
+		var totalParts uint64
+		for _, count := range partCounts {
+			totalParts += count
+		}
+
+		So(partCounts[tableFiles], ShouldEqual, uint64(2))
+		So(total.Inputs["budget_source"], ShouldEqual, "computed_from_measurements")
+		So(uint64Input(total.Inputs, "budget_measurement_count"), ShouldEqual, uint64(len(total.DurationsMS)))
+		So(uint64Input(total.Inputs, "wall_time_budget_ms"), ShouldEqual, uint64(math.Ceil(total.P95MS)))
+		So(uint64Input(total.Inputs, "total_cpu_budget_ms"),
+			ShouldEqual, uint64Input(total.Inputs, importInputTotalCPUMS))
+		So(uint64Input(total.Inputs, "peak_rss_budget_bytes"),
+			ShouldEqual, uint64Input(total.Inputs, importInputPeakRSSBytes))
+		So(uint64Input(total.Inputs, "spool_byte_budget"), ShouldEqual, uint64(0))
+		So(uint64Input(total.Inputs, "part_count_budget"), ShouldEqual, totalParts)
+		So(report.TableStats[tableFiles].Rows, ShouldEqual, uint64(17))
+		So(report.TableStats[tableFiles].ActiveParts, ShouldEqual, uint64(2))
+		So(report.TableStats[tableFiles].CompressedBytes, ShouldEqual, uint64(170))
+		So(report.TableStats[tableFiles].UncompressedBytes, ShouldEqual, uint64(340))
+	})
+}
+
+func writeImportTestStatsGZ(t *testing.T, path string) {
+	t.Helper()
+
+	fh, err := os.Create(path)
+	So(err, ShouldBeNil)
+
+	gz := gzip.NewWriter(fh)
+	reader := statsdata.TestStats(1, 1, importTestMountScratch, 1).AsReader()
+	_, err = io.Copy(gz, reader)
+	So(err, ShouldBeNil)
+	So(reader.Close(), ShouldBeNil)
+	So(gz.Close(), ShouldBeNil)
+	So(fh.Close(), ShouldBeNil)
+}
+
+func importE1TableStats() map[string]perfreport.TableStats {
+	stats := make(map[string]perfreport.TableStats, len(baseImportSelectedTables()))
+	for i, table := range baseImportSelectedTables() {
+		rows := uint64(i + 1)
+		stats[table] = perfreport.TableStats{
+			Rows:              rows,
+			ActiveParts:       1,
+			CompressedBytes:   rows * 10,
+			UncompressedBytes: rows * 20,
+		}
+	}
+
+	stats[tableFiles] = perfreport.TableStats{
+		Rows:              17,
+		ActiveParts:       2,
+		CompressedBytes:   170,
+		UncompressedBytes: 340,
+	}
+
+	return stats
 }
 
 type orderedCloser struct {

@@ -21,8 +21,8 @@ comparison evidence in `internal/chperf/final_gate.go`,
 Cover all 10 acceptance tests from E1 in `internal/chperf/final_gate_test.go`.
 Depends on phases 1-5 for the measured schema3 routes.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
 
 ### Item 6.2: E2 - Cold performance gates pass without warming
 
@@ -36,5 +36,5 @@ Cover all 12 acceptance tests from E2 in `internal/chperf/final_gate_test.go`.
 Depends on item 6.1 for report validation and correctness evidence, and on
 phases 1-5 for complete schema3 behavior.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed

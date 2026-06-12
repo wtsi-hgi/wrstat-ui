@@ -26,13 +26,24 @@
 package chperf
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"math"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 
 	"github.com/wtsi-hgi/wrstat-ui/internal/perfreport"
+)
+
+var (
+	errFinalGateComparisonNotConfigured = errors.New("final gate comparison not configured")
+	errFinalGateNegativeFileSize        = errors.New("negative file size")
 )
 
 const (
@@ -91,16 +102,1244 @@ const (
 	finalGateRESTParamTypes       = "types"
 	finalGateRESTParamUsers       = "users"
 	finalGateRESTInputQueryParams = "query_params"
+	finalGateWhereCommandName     = "where"
 
 	finalGateT283FilteredRESTOrderAnomaly = "t283_filtered_rest_order_anomaly"
 	finalGateT283Dir                      = "/nfs/t283_imaging/"
+	finalGateHighFanoutParentDir          = "/lustre/scratch125/casm/restricted/dbGaP-team219-43354/VCFS/"
+	finalGateLustreRootDir                = "/lustre/"
+	finalGateNFSHeavyDir                  = finalGateT283Dir
+	finalGateNFSRootDir                   = "/nfs/"
 	finalGateSelectedTreeGIDs             = "14976"
 	finalGateSelectedTreeUIDs             = "20155"
 	finalGateSelectedTreeTypes            = "other"
 	finalGateScratch120Dir                = "/lustre/scratch120/"
 	finalGateScratch122Dir                = "/lustre/scratch122/"
 	finalGateScratch127Dir                = "/lustre/scratch127/"
+	finalGateWrstatUICommand              = "./wrstat-ui"
+
+	finalGateReportSchemaVersion     = 1
+	finalGateCorrectnessStatusInput  = "correctness_equivalence_status"
+	finalGateComparisonKindBolt      = "bolt"
+	finalGateComparisonKindSidecar   = "sidecar"
+	finalGateComparisonStatusSuccess = "success"
+	finalGateComparisonInfeasible    = "infeasible"
+	finalGateReportStatusPassed      = "passed"
+	finalGateReportStatusFailed      = "failed"
+	finalGateReportStatusBlocked     = "blocked"
 )
+
+const (
+	finalGateE2BudgetMeasurementCountInput = "budget_measurement_count"
+	finalGateE2BudgetSourceComputed        = "computed_from_measurements"
+	finalGateE2BudgetSourceInput           = "budget_source"
+	finalGateE2ChildFilterAllTable         = "wrstat_child_filter_all"
+	finalGateE2ExpectedDigestInput         = "expected_result_digest"
+	finalGateE2FactsVectorRowsInput        = "facts_vector_rows_read"
+	finalGateE2InputPartCounts             = "part_counts"
+	finalGateE2InputSpoolBytes             = "spool_bytes"
+	finalGateE2ParentPacketTableInput      = "parent_packet_table"
+	finalGateE2ProactiveWarmingInput       = "proactive_warming"
+	finalGateE2ReadBytesCeilingInput       = "read_bytes_ceiling"
+	finalGateE2ReadMarksCeilingInput       = "read_marks_ceiling"
+	finalGateE2ReadRowsCeilingInput        = "read_rows_ceiling"
+	finalGateE2ScenarioDirInfosBroad       = "dirinfos_broad_parent_packet"
+	finalGateE2ScenarioDirInfosFiltered    = "dirinfos_filtered_child_filter_packet"
+	finalGateE2ScenarioDHCBroad            = "dirshavechildren_broad_parent_packet"
+	finalGateE2ScenarioDHCFiltered         = "dirshavechildren_filtered_parent_packet"
+	finalGateE2ScenarioFirstRootWhere      = "first_root_where_splits_2"
+	finalGateE2ScenarioHighFanoutBroad     = "high_fanout_first_click_broad"
+	finalGateE2ScenarioHighFanoutFiltered  = "high_fanout_first_click_filtered"
+	finalGateE2ScenarioNFSHeavyWhere       = "nfs_heavy_first_where_dir"
+	finalGateE2ScenarioRESTFirst           = "rest_tree_first_requests"
+	finalGateE2ScenarioRealWhere           = "real_first_where_dir"
+	finalGateE2ScenarioSwitch              = "first_filter_switch_after_unfiltered_tree"
+	finalGateE2ScenarioInput               = "e2_scenario"
+)
+
+// FinalGateFixtureDigestEvidence records a fixture manifest digest check.
+type FinalGateFixtureDigestEvidence struct {
+	Key              string `json:"key"`
+	ManifestPath     string `json:"manifest_path"`
+	ExpectedDigest   string `json:"expected_digest"`
+	RecomputedDigest string `json:"recomputed_digest"`
+}
+
+func finalGateBuildFixtureDigest(
+	spec FinalGateFixtureDigestSpec,
+) (FinalGateFixtureDigestEvidence, error) {
+	expected := spec.ExpectedDigest
+	if strings.TrimSpace(expected) == "" {
+		expected = finalGateExpectedDigestFromManifest(spec.ManifestPath, spec.Key)
+	}
+
+	recomputed, err := finalGatePathSHA256(spec.InputPath)
+	if err != nil {
+		return FinalGateFixtureDigestEvidence{}, err
+	}
+
+	return FinalGateFixtureDigestEvidence{
+		Key:              spec.Key,
+		ManifestPath:     spec.ManifestPath,
+		ExpectedDigest:   expected,
+		RecomputedDigest: recomputed,
+	}, nil
+}
+
+func finalGateBuildFixtureDigests(
+	specs []FinalGateFixtureDigestSpec,
+) ([]FinalGateFixtureDigestEvidence, error) {
+	digests := make([]FinalGateFixtureDigestEvidence, 0, len(specs))
+	for _, spec := range specs {
+		digest, err := finalGateBuildFixtureDigest(spec)
+		if err != nil {
+			return nil, err
+		}
+
+		digests = append(digests, digest)
+	}
+
+	return digests, nil
+}
+
+func finalGateFixtureDigestFailure(digest FinalGateFixtureDigestEvidence) string {
+	if strings.TrimSpace(digest.Key) == "" || strings.TrimSpace(digest.ExpectedDigest) == "" {
+		return "missing expected digest"
+	}
+
+	if finalGatePlaceholderDigest(digest.ExpectedDigest) {
+		return "missing expected digest: placeholder digest"
+	}
+
+	if digest.ExpectedDigest != digest.RecomputedDigest {
+		return "stale expected digest"
+	}
+
+	return ""
+}
+
+func finalGatePlaceholderDigest(digest string) bool {
+	trimmed := strings.ToLower(strings.TrimSpace(digest))
+
+	return trimmed == "sha256:" ||
+		strings.Contains(trimmed, "placeholder") ||
+		strings.Contains(trimmed, "todo")
+}
+
+// FinalGateFixtureDigestSpec identifies one fixture digest to validate.
+type FinalGateFixtureDigestSpec struct {
+	Key            string `json:"key"`
+	ManifestPath   string `json:"manifest_path"`
+	InputPath      string `json:"input_path"`
+	ExpectedDigest string `json:"expected_digest,omitempty"`
+}
+
+// FinalGateComparisonSpec identifies same-subset comparison artefacts.
+type FinalGateComparisonSpec struct {
+	Kind                string   `json:"kind"`
+	Status              string   `json:"status"`
+	DatasetManifestPath string   `json:"dataset_manifest_path"`
+	CommandArgv         []string `json:"command_argv"`
+	SourceRevision      string   `json:"source_revision,omitempty"`
+	ToolVersion         string   `json:"tool_version,omitempty"`
+	OutputArtifactPath  string   `json:"output_artifact_path,omitempty"` //nolint:misspell
+	LogPath             string   `json:"log_path"`
+	StoragePath         string   `json:"storage_path,omitempty"`
+	AttemptedPath       string   `json:"attempted_checkout_or_prototype_path,omitempty"`
+	ErrorOutput         string   `json:"error_output,omitempty"`
+	ErrorOutputPath     string   `json:"error_output_path,omitempty"`
+	Reason              string   `json:"reason,omitempty"`
+}
+
+func finalGateComparisonErrorOutput(spec FinalGateComparisonSpec) (string, error) {
+	if strings.TrimSpace(spec.ErrorOutput) != "" {
+		return spec.ErrorOutput, nil
+	}
+
+	path := firstNonBlank(spec.ErrorOutputPath, spec.LogPath)
+	if strings.TrimSpace(path) == "" {
+		return "", nil
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+
+	return string(data), nil
+}
+
+func firstNonBlank(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+
+	return ""
+}
+
+func finalGatePopulateComparisonEvidence(
+	report *FinalGateReport,
+	spec FinalGateComparisonSpec,
+) error {
+	comparison, err := finalGateBuildComparisonEvidence(spec)
+	if errors.Is(err, errFinalGateComparisonNotConfigured) {
+		return nil
+	}
+
+	if err != nil {
+		return err
+	}
+
+	report.Comparison = comparison
+
+	return nil
+}
+
+func finalGateBuildComparisonEvidence(
+	spec FinalGateComparisonSpec,
+) (*FinalGateComparisonEvidence, error) {
+	if strings.TrimSpace(spec.Kind) == "" && strings.TrimSpace(spec.Status) == "" {
+		return nil, errFinalGateComparisonNotConfigured
+	}
+
+	switch spec.Status {
+	case finalGateComparisonStatusSuccess:
+		return finalGateBuildSuccessfulComparisonEvidence(spec)
+	case finalGateComparisonInfeasible:
+		return finalGateBuildInfeasibleComparisonEvidence(spec)
+	default:
+		return &FinalGateComparisonEvidence{
+			Kind:                  spec.Kind,
+			Status:                spec.Status,
+			DatasetManifestPath:   spec.DatasetManifestPath,
+			DatasetManifestSHA256: finalGateSHA256IfPresent(spec.DatasetManifestPath),
+			CommandArgv:           slices.Clone(spec.CommandArgv),
+			SourceRevision:        spec.SourceRevision,
+			ToolVersion:           spec.ToolVersion,
+			LogPath:               spec.LogPath,
+		}, nil
+	}
+}
+
+func finalGateBuildSuccessfulComparisonEvidence(
+	spec FinalGateComparisonSpec,
+) (*FinalGateComparisonEvidence, error) {
+	report, err := finalGateReadPerfReport(spec.OutputArtifactPath)
+	if err != nil {
+		return nil, err
+	}
+
+	storageBytes, err := finalGateStorageBytes(spec.StoragePath, spec.OutputArtifactPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := finalGateRequireReadableFile(spec.LogPath); err != nil {
+		return nil, err
+	}
+
+	p50, p95, p99, digest := finalGateComparisonReportMetrics(report)
+
+	return &FinalGateComparisonEvidence{
+		Kind:                  spec.Kind,
+		Status:                spec.Status,
+		DatasetManifestPath:   spec.DatasetManifestPath,
+		DatasetManifestSHA256: finalGateSHA256IfPresent(spec.DatasetManifestPath),
+		CommandArgv:           slices.Clone(spec.CommandArgv),
+		SourceRevision:        firstNonBlank(report.GitCommit, spec.SourceRevision),
+		ToolVersion:           firstNonBlank(report.ToolVersion, spec.ToolVersion),
+		OutputArtifactPath:    spec.OutputArtifactPath,
+		LogPath:               spec.LogPath,
+		StorageBytes:          storageBytes,
+		P50MS:                 p50,
+		P95MS:                 p95,
+		P99MS:                 p99,
+		ResultDigest:          digest,
+		FallbackCount:         finalGateComparisonFallbackCount(report),
+	}, nil
+}
+
+func finalGateReadPerfReport(path string) (perfreport.Report, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return perfreport.Report{}, err
+	}
+
+	var report perfreport.Report
+	if err := json.Unmarshal(data, &report); err != nil {
+		return perfreport.Report{}, err
+	}
+
+	return report, nil
+}
+
+func finalGateStorageBytes(storagePath string, fallbackPath string) (uint64, error) {
+	path := firstNonBlank(storagePath, fallbackPath)
+	if strings.TrimSpace(path) == "" {
+		return 0, nil
+	}
+
+	return finalGatePathBytes(path)
+}
+
+func finalGatePathBytes(path string) (uint64, error) {
+	var total uint64
+
+	err := filepath.WalkDir(path, func(_ string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+
+		if entry.IsDir() {
+			return nil
+		}
+
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+
+		size, err := finalGateFileSizeBytes(info)
+		if err != nil {
+			return err
+		}
+
+		total += size
+
+		return nil
+	})
+
+	return total, err
+}
+
+func finalGateFileSizeBytes(info os.FileInfo) (uint64, error) {
+	size := info.Size()
+	if size < 0 {
+		return 0, fmt.Errorf("%w: %s", errFinalGateNegativeFileSize, info.Name())
+	}
+
+	return uint64(size), nil
+}
+
+func finalGateRequireReadableFile(path string) error {
+	if strings.TrimSpace(path) == "" {
+		return nil
+	}
+
+	fh, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+
+	return fh.Close()
+}
+
+func finalGateComparisonReportMetrics(report perfreport.Report) (float64, float64, float64, string) {
+	for _, op := range report.Operations {
+		digest := stringInput(op.Inputs, navigationInputResultDigest)
+		if digest != "" && finalGateOperationHasTiming(op) {
+			return op.P50MS, op.P95MS, op.P99MS, digest
+		}
+	}
+
+	return 0, 0, 0, ""
+}
+
+func finalGateOperationHasTiming(op perfreport.Operation) bool {
+	return len(op.DurationsMS) > 0 || op.P50MS > 0 || op.P95MS > 0 || op.P99MS > 0
+}
+
+func finalGateSHA256IfPresent(path string) string {
+	if strings.TrimSpace(path) == "" {
+		return ""
+	}
+
+	digest, err := finalGatePathSHA256(path)
+	if err != nil {
+		return ""
+	}
+
+	return digest
+}
+
+func finalGatePathSHA256(path string) (string, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", err
+	}
+
+	if !info.IsDir() {
+		return finalGateFileSHA256(path)
+	}
+
+	return finalGateDirSHA256(path)
+}
+
+func finalGateFileSHA256(path string) (string, error) {
+	fh, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer fh.Close()
+
+	hash := sha256.New()
+	if _, err := io.Copy(hash, fh); err != nil {
+		return "", err
+	}
+
+	return "sha256:" + hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+func finalGateDirSHA256(root string) (string, error) {
+	hash := sha256.New()
+
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+
+		return finalGateHashDirEntry(hash, root, path, entry)
+	})
+	if err != nil {
+		return "", err
+	}
+
+	return "sha256:" + hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+func finalGateHashDirEntry(hash io.Writer, root string, path string, entry os.DirEntry) error {
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return err
+	}
+
+	if rel == "." {
+		return nil
+	}
+
+	if err := finalGateWriteHash(hash, []byte(filepath.ToSlash(rel))); err != nil {
+		return err
+	}
+
+	if err := finalGateWriteHash(hash, []byte{0}); err != nil {
+		return err
+	}
+
+	if entry.IsDir() {
+		return finalGateWriteHash(hash, []byte("/"))
+	}
+
+	if !entry.Type().IsRegular() {
+		return nil
+	}
+
+	return finalGateHashFileContent(hash, path)
+}
+
+func finalGateWriteHash(hash io.Writer, value []byte) error {
+	_, err := hash.Write(value)
+
+	return err
+}
+
+func finalGateHashFileContent(hash io.Writer, path string) error {
+	fh, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer fh.Close()
+
+	_, err = io.Copy(hash, fh)
+
+	return err
+}
+
+func finalGateComparisonFallbackCount(report perfreport.Report) uint64 {
+	var count uint64
+
+	for _, op := range report.Operations {
+		for _, value := range uint64SliceInput(op.Inputs, "schema3_fallback_count") {
+			count += value
+		}
+	}
+
+	return count
+}
+
+func finalGateBuildInfeasibleComparisonEvidence(
+	spec FinalGateComparisonSpec,
+) (*FinalGateComparisonEvidence, error) {
+	errorOutput, err := finalGateComparisonErrorOutput(spec)
+	if err != nil {
+		return nil, err
+	}
+
+	return &FinalGateComparisonEvidence{
+		Kind:                  spec.Kind,
+		Status:                spec.Status,
+		DatasetManifestPath:   spec.DatasetManifestPath,
+		DatasetManifestSHA256: finalGateSHA256IfPresent(spec.DatasetManifestPath),
+		CommandArgv:           slices.Clone(spec.CommandArgv),
+		SourceRevision:        spec.SourceRevision,
+		ToolVersion:           spec.ToolVersion,
+		LogPath:               spec.LogPath,
+		AttemptedPath:         spec.AttemptedPath,
+		ErrorOutput:           errorOutput,
+		Reason:                spec.Reason,
+	}, nil
+}
+
+// FinalGateReportOptions identifies artefacts used to assemble an E1 report.
+type FinalGateReportOptions struct {
+	FixtureDigests        []FinalGateFixtureDigestSpec `json:"fixture_digests,omitempty"`
+	ClickHouseReportPaths []string                     `json:"clickhouse_report_paths,omitempty"`
+	RESTReportPaths       []string                     `json:"rest_report_paths,omitempty"`
+	ImportReportPaths     []string                     `json:"import_report_paths,omitempty"`
+	SpoolLoadReportPaths  []string                     `json:"spool_load_report_paths,omitempty"`
+	Comparison            FinalGateComparisonSpec      `json:"comparison"`
+}
+
+func finalGatePopulateReportArtifacts(
+	report *FinalGateReport,
+	opts FinalGateReportOptions,
+) error {
+	var err error
+
+	report.FixtureDigests, err = finalGateBuildFixtureDigests(opts.FixtureDigests)
+	if err != nil {
+		return err
+	}
+
+	if report.ClickHouseReports, err = finalGateReadPerfReports(opts.ClickHouseReportPaths); err != nil {
+		return err
+	}
+
+	if report.RESTReports, err = finalGateReadPerfReports(opts.RESTReportPaths); err != nil {
+		return err
+	}
+
+	if report.ImportReports, err = finalGateReadPerfReports(opts.ImportReportPaths); err != nil {
+		return err
+	}
+
+	report.SpoolLoadReports, err = finalGateReadPerfReports(opts.SpoolLoadReportPaths)
+
+	return err
+}
+
+func finalGateReadPerfReports(paths []string) ([]perfreport.Report, error) {
+	reports := make([]perfreport.Report, 0, len(paths))
+	for _, path := range paths {
+		report, err := finalGateReadPerfReport(path)
+		if err != nil {
+			return nil, err
+		}
+
+		reports = append(reports, report)
+	}
+
+	return reports, nil
+}
+
+// FinalGateComparisonEvidence records same-subset Bolt or sidecar evidence.
+type FinalGateComparisonEvidence struct {
+	Kind                  string   `json:"kind"`
+	Status                string   `json:"status"`
+	DatasetManifestPath   string   `json:"dataset_manifest_path"`
+	DatasetManifestSHA256 string   `json:"dataset_manifest_sha256"`
+	CommandArgv           []string `json:"command_argv"`
+	SourceRevision        string   `json:"source_revision"`
+	ToolVersion           string   `json:"tool_version"`
+	OutputArtifactPath    string   `json:"output_artifact_path,omitempty"` //nolint:misspell
+	LogPath               string   `json:"log_path"`
+	StorageBytes          uint64   `json:"storage_bytes,omitempty"`
+	P50MS                 float64  `json:"p50_ms,omitempty"`
+	P95MS                 float64  `json:"p95_ms,omitempty"`
+	P99MS                 float64  `json:"p99_ms,omitempty"`
+	ResultDigest          string   `json:"result_digest,omitempty"`
+	FallbackCount         uint64   `json:"fallback_count"`
+	AttemptedPath         string   `json:"attempted_checkout_or_prototype_path,omitempty"`
+	ErrorOutput           string   `json:"error_output,omitempty"`
+	Reason                string   `json:"reason,omitempty"`
+}
+
+func finalGateSuccessfulComparisonFailure(comparison FinalGateComparisonEvidence) string {
+	if reason := finalGateCommonComparisonFailure(comparison); reason != "" {
+		return reason
+	}
+
+	if strings.TrimSpace(comparison.OutputArtifactPath) == "" {
+		return "missing output artefact path"
+	}
+
+	if finalGateSuccessfulComparisonMetricsMissing(comparison) {
+		return "missing storage, percentile, digest, or fallback evidence"
+	}
+
+	return ""
+}
+
+func finalGateInfeasibleComparisonFailure(comparison FinalGateComparisonEvidence) string {
+	if reason := finalGateCommonComparisonFailure(comparison); reason != "" {
+		return reason
+	}
+
+	if strings.TrimSpace(comparison.AttemptedPath) == "" {
+		return "missing attempted checkout or prototype path"
+	}
+
+	if strings.TrimSpace(comparison.ErrorOutput) == "" && strings.TrimSpace(comparison.Reason) == "" {
+		return "missing infeasible comparison reason"
+	}
+
+	return ""
+}
+
+func finalGateCommonComparisonFailure(comparison FinalGateComparisonEvidence) string {
+	if !finalGateComparisonKindSupported(comparison.Kind) {
+		return "missing comparison evidence"
+	}
+
+	if !finalGateComparisonMetadataPresent(comparison) {
+		return "missing comparison metadata"
+	}
+
+	if len(comparison.CommandArgv) == 0 {
+		return "missing comparison metadata"
+	}
+
+	return ""
+}
+
+func finalGateComparisonKindSupported(kind string) bool {
+	return kind == finalGateComparisonKindBolt || kind == finalGateComparisonKindSidecar
+}
+
+func finalGateComparisonMetadataPresent(comparison FinalGateComparisonEvidence) bool {
+	return finalGateStringsPresent(
+		comparison.DatasetManifestPath,
+		comparison.DatasetManifestSHA256,
+		comparison.SourceRevision,
+		comparison.ToolVersion,
+		comparison.LogPath,
+	)
+}
+
+func finalGateStringsPresent(values ...string) bool {
+	for _, value := range values {
+		if strings.TrimSpace(value) == "" {
+			return false
+		}
+	}
+
+	return true
+}
+
+func finalGateSuccessfulComparisonMetricsMissing(comparison FinalGateComparisonEvidence) bool {
+	if comparison.StorageBytes == 0 {
+		return true
+	}
+
+	if comparison.P50MS <= 0 || comparison.P95MS <= 0 || comparison.P99MS <= 0 {
+		return true
+	}
+
+	return strings.TrimSpace(comparison.ResultDigest) == ""
+}
+
+// FinalGateReport is the E1 evidence envelope written before speed gates run.
+type FinalGateReport struct {
+	SchemaVersion     int                              `json:"schema_version"`
+	FixtureDigests    []FinalGateFixtureDigestEvidence `json:"fixture_digests,omitempty"`
+	ClickHouseReports []perfreport.Report              `json:"clickhouse_reports,omitempty"`
+	RESTReports       []perfreport.Report              `json:"rest_reports,omitempty"`
+	ImportReports     []perfreport.Report              `json:"import_reports,omitempty"`
+	SpoolLoadReports  []perfreport.Report              `json:"spool_load_reports,omitempty"`
+	Comparison        *FinalGateComparisonEvidence     `json:"comparison,omitempty"`
+}
+
+// BuildFinalGateReport assembles E1 evidence from persisted harness artefacts.
+func BuildFinalGateReport(opts FinalGateReportOptions) (FinalGateReport, error) {
+	report := FinalGateReport{SchemaVersion: finalGateReportSchemaVersion}
+
+	if err := finalGatePopulateReportArtifacts(&report, opts); err != nil {
+		return FinalGateReport{}, err
+	}
+
+	if err := finalGatePopulateComparisonEvidence(&report, opts.Comparison); err != nil {
+		return FinalGateReport{}, err
+	}
+
+	if report.Comparison != nil {
+		finalGateSetReportCorrectnessStatus(&report, report.Comparison.Status)
+	}
+
+	return report, nil
+}
+
+func finalGateEvidenceE1Report(e FinalGateEvidence) FinalGateReport {
+	if e.FinalGateReport == nil {
+		return FinalGateReport{}
+	}
+
+	return *e.FinalGateReport
+}
+
+// WriteFinalGateReport writes report as pretty-printed JSON.
+func WriteFinalGateReport(path string, report FinalGateReport) error {
+	fh, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer fh.Close()
+
+	enc := json.NewEncoder(fh)
+	enc.SetIndent("", "  ")
+
+	return enc.Encode(report)
+}
+
+func finalGateSetReportCorrectnessStatus(report *FinalGateReport, status string) {
+	if strings.TrimSpace(status) == "" {
+		return
+	}
+
+	finalGateSetReportsCorrectnessStatus(report.ClickHouseReports, status)
+	finalGateSetReportsCorrectnessStatus(report.RESTReports, status)
+}
+
+func finalGateSetReportsCorrectnessStatus(reports []perfreport.Report, status string) {
+	for reportIndex := range reports {
+		for opIndex := range reports[reportIndex].Operations {
+			op := &reports[reportIndex].Operations[opIndex]
+			if !finalGateOperationHasTiming(*op) {
+				continue
+			}
+
+			if op.Inputs == nil {
+				op.Inputs = make(map[string]any)
+			}
+
+			op.Inputs[finalGateCorrectnessStatusInput] = status
+		}
+	}
+}
+
+func finalGateSpeedOperations(report FinalGateReport) []perfreport.Operation {
+	var ops []perfreport.Operation
+
+	for _, perfReport := range append(slices.Clone(report.ClickHouseReports), report.RESTReports...) {
+		for _, op := range perfReport.Operations {
+			if finalGateOperationHasTiming(op) {
+				ops = append(ops, op)
+			}
+		}
+	}
+
+	return ops
+}
+
+func finalGateE2ImportReports(e FinalGateEvidence) []perfreport.Report {
+	if len(e.ImportReports) > 0 || e.FinalGateReport == nil {
+		return e.ImportReports
+	}
+
+	return e.FinalGateReport.ImportReports
+}
+
+func finalGateE2SpoolReports(e FinalGateEvidence) []perfreport.Report {
+	if e.FinalGateReport == nil {
+		return nil
+	}
+
+	return e.FinalGateReport.SpoolLoadReports
+}
+
+func validateFinalGateFixtureDigests(report FinalGateReport) FinalGateCheck {
+	check := finalGateCheck(10, "E1 fixture digest validation")
+	if len(report.FixtureDigests) == 0 {
+		return check.fail("missing expected digest: no fixture digest evidence")
+	}
+
+	for _, digest := range report.FixtureDigests {
+		if reason := finalGateFixtureDigestFailure(digest); reason != "" {
+			return check.fail(reason)
+		}
+	}
+
+	return check.pass("fixture manifest digests match recomputed fixture input digests")
+}
+
+func validateFinalGateCorrectnessEvidence(report FinalGateReport) FinalGateCheck {
+	check := finalGateCheck(1, "E1 correctness evidence")
+
+	ops := finalGateSpeedOperations(report)
+	if len(ops) == 0 {
+		return check.fail("missing correctness fields: no speed-gated operations")
+	}
+
+	for _, op := range ops {
+		if !finalGateOperationCorrectnessEvidencePasses(op) {
+			return check.fail("missing correctness fields")
+		}
+	}
+
+	return check.pass("speed-gated reports include result counts, result digests, and correctness status")
+}
+
+func validateFinalGateRESTReportEvidence(report FinalGateReport) FinalGateCheck {
+	check := finalGateCheck(2, "E1 REST evidence")
+	if len(report.RESTReports) == 0 {
+		return check.fail("missing REST evidence")
+	}
+
+	if !finalGateRESTOpsPass(report.RESTReports, finalGateRESTOpTree) {
+		return check.fail("REST evidence missing tree counters, bytes, or percentiles")
+	}
+
+	if !finalGateRESTOpsPass(report.RESTReports, finalGateRESTOpWhere) {
+		return check.fail("REST evidence missing where counters, bytes, or percentiles")
+	}
+
+	return check.pass("REST tree and where probes include counters, byte sizes, and percentiles")
+}
+
+func validateFinalGateClickHouseReportEvidence(report FinalGateReport) FinalGateCheck {
+	check := finalGateCheck(3, "E1 ClickHouse evidence")
+
+	ops := finalGateClickHouseOperations(report.ClickHouseReports)
+	if len(ops) == 0 {
+		return check.fail("missing ClickHouse evidence")
+	}
+
+	for _, op := range ops {
+		if !finalGateClickHouseOperationEvidencePasses(op) {
+			return check.fail("ClickHouse evidence missing read rows, read bytes, read marks, result rows, or result bytes")
+		}
+	}
+
+	return check.pass("ClickHouse probes include read rows, read bytes, read marks, result rows, and result bytes")
+}
+
+func validateFinalGateDirectImportEvidence(report FinalGateReport) FinalGateCheck {
+	check := finalGateCheck(4, "E1 import evidence")
+	if len(report.ImportReports) == 0 {
+		return check.fail("missing import evidence")
+	}
+
+	for _, importReport := range report.ImportReports {
+		if reason := finalGateImportEvidenceFailure(importReport, "import_total", false); reason != "" {
+			return check.fail("import evidence " + reason)
+		}
+	}
+
+	return check.pass("direct import reports include table, resource, cleanup, and publish evidence")
+}
+
+func validateFinalGateSpoolLoadEvidence(report FinalGateReport) FinalGateCheck {
+	check := finalGateCheck(5, "E1 spool-load evidence")
+	if len(report.SpoolLoadReports) == 0 {
+		return check.fail("missing spool-load evidence")
+	}
+
+	for _, spoolReport := range report.SpoolLoadReports {
+		if reason := finalGateImportEvidenceFailure(spoolReport, "spool_load_total", true); reason != "" {
+			return check.fail("spool-load evidence " + reason)
+		}
+	}
+
+	return check.pass("spool-load reports include loaded rows, resources, cleanup, and publish evidence")
+}
+
+func validateFinalGateComparisonPresence(report FinalGateReport) FinalGateCheck {
+	check := finalGateCheck(6, "E1 comparison presence")
+	if report.Comparison == nil || !finalGateComparisonKindSupported(report.Comparison.Kind) {
+		return check.fail("missing comparison evidence")
+	}
+
+	return check.pass("same-subset Bolt or sidecar comparison evidence is present")
+}
+
+func validateFinalGateSuccessfulComparisonEvidence(report FinalGateReport) FinalGateCheck {
+	check := finalGateCheck(7, "E1 successful comparison evidence")
+	if report.Comparison == nil || report.Comparison.Status != finalGateComparisonStatusSuccess {
+		return check.pass("comparison is not successful evidence")
+	}
+
+	if reason := finalGateSuccessfulComparisonFailure(*report.Comparison); reason != "" {
+		return check.fail(reason)
+	}
+
+	return check.pass("successful comparison evidence includes manifest, command, version, latency, digest, and storage")
+}
+
+func validateFinalGateInfeasibleComparisonEvidence(report FinalGateReport) FinalGateCheck {
+	check := finalGateCheck(8, "E1 infeasible comparison evidence")
+	if report.Comparison == nil || report.Comparison.Status != finalGateComparisonInfeasible {
+		return check.pass("comparison is not infeasible evidence")
+	}
+
+	if reason := finalGateInfeasibleComparisonFailure(*report.Comparison); reason != "" {
+		return check.fail(reason)
+	}
+
+	return check.pass("infeasible comparison evidence includes attempted route, manifest, command, log, and reason")
+}
+
+func validateFinalGateInfeasibleComparisonBlock(report FinalGateReport) FinalGateCheck {
+	check := finalGateCheck(9, "E1 infeasible comparison block")
+	if report.Comparison == nil || report.Comparison.Status != finalGateComparisonInfeasible {
+		return check.pass("comparison is reproducible")
+	}
+
+	if finalGateInfeasibleComparisonFailure(*report.Comparison) != "" {
+		return check.pass("incomplete infeasible evidence is handled by evidence validation")
+	}
+
+	reason := report.Comparison.Reason
+	if reason == "" {
+		reason = report.Comparison.ErrorOutput
+	}
+
+	return check.block(fmt.Sprintf("%s; log: %s", reason, report.Comparison.LogPath))
+}
+
+func validateFinalGateE2RESTTreeFirst(e FinalGateEvidence) FinalGateCheck {
+	check := finalGateCheck(26, "E2 REST tree first requests")
+
+	for _, path := range []string{"/", finalGateLustreRootDir, finalGateNFSRootDir} {
+		measured, ok := finalGateE2Operation(e, finalGateRESTOpTree, finalGateE2ScenarioRESTFirst, path)
+		if !ok {
+			return check.fail(path + " missing REST tree first-request evidence")
+		}
+
+		if reason := finalGateE2RESTOperationFailure(measured, 500); reason != "" {
+			return check.fail(path + " " + reason)
+		}
+	}
+
+	return check.pass("root, lustre, and nfs first REST tree requests passed cold correctness and p95 gates")
+}
+
+func validateFinalGateE2HighFanoutBroadClick(e FinalGateEvidence) FinalGateCheck {
+	check := finalGateCheck(27, "E2 high-fanout first click broad")
+
+	measured, ok := finalGateE2Operation(
+		e,
+		finalGateRESTOpTree,
+		finalGateE2ScenarioHighFanoutBroad,
+		finalGateHighFanoutParentDir,
+	)
+	if !ok {
+		return check.fail("missing high-fanout broad first-click evidence")
+	}
+
+	if reason := finalGateE2PacketOperationFailure(measured, 500, tableParentFacts, true, false); reason != "" {
+		return check.fail(reason)
+	}
+
+	return check.pass("high-fanout broad first click used one current read and one parent-facts packet")
+}
+
+func validateFinalGateE2HighFanoutFilteredClick(e FinalGateEvidence) FinalGateCheck {
+	check := finalGateCheck(28, "E2 high-fanout first click filtered")
+
+	measured, ok := finalGateE2Operation(
+		e,
+		finalGateRESTOpTree,
+		finalGateE2ScenarioHighFanoutFiltered,
+		finalGateHighFanoutParentDir,
+	)
+	if !ok {
+		return check.fail("missing high-fanout filtered first-click evidence")
+	}
+
+	if reason := finalGateE2PacketOperationFailure(
+		measured,
+		500,
+		finalGateE2ChildFilterAllTable,
+		true,
+		false,
+	); reason != "" {
+		return check.fail(reason)
+	}
+
+	return check.pass("high-fanout filtered first click used one current read and one child-filter packet")
+}
+
+func validateFinalGateE2DirInfosBroad(e FinalGateEvidence) FinalGateCheck {
+	check := finalGateCheck(29, "E2 high-fanout DirInfos broad")
+
+	measured, ok := finalGateE2Operation(
+		e,
+		queryOpDirInfosBroadName,
+		finalGateE2ScenarioDirInfosBroad,
+		finalGateHighFanoutParentDir,
+	)
+	if !ok {
+		return check.fail("missing broad DirInfos evidence")
+	}
+
+	if reason := finalGateE2PacketOperationFailure(measured, 1000, tableParentFacts, false, false); reason != "" {
+		return check.fail(reason)
+	}
+
+	return check.pass("focused broad DirInfos used one parent-facts packet with bounded reads")
+}
+
+func validateFinalGateE2DirInfosFiltered(e FinalGateEvidence) FinalGateCheck {
+	check := finalGateCheck(30, "E2 high-fanout DirInfos filtered")
+
+	measured, ok := finalGateE2Operation(
+		e,
+		queryOpDirInfosFilteredName,
+		finalGateE2ScenarioDirInfosFiltered,
+		finalGateHighFanoutParentDir,
+	)
+	if !ok {
+		return check.fail("missing filtered DirInfos evidence")
+	}
+
+	if reason := finalGateE2PacketOperationFailure(
+		measured,
+		1000,
+		finalGateE2ChildFilterAllTable,
+		false,
+		true,
+	); reason != "" {
+		return check.fail(reason)
+	}
+
+	return check.pass("focused filtered DirInfos used one child-filter packet and no facts-vector rows")
+}
+
+func validateFinalGateE2DirsHaveChildrenBroad(e FinalGateEvidence) FinalGateCheck {
+	check := finalGateCheck(31, "E2 high-fanout DirsHaveChildren broad")
+
+	measured, ok := finalGateE2Operation(
+		e,
+		queryOpDirsHaveChildrenBroadName,
+		finalGateE2ScenarioDHCBroad,
+		finalGateHighFanoutParentDir,
+	)
+	if !ok {
+		return check.fail("missing broad DirsHaveChildren evidence")
+	}
+
+	if reason := finalGateE2PacketOperationFailure(measured, 1000, tableParentFacts, false, false); reason != "" {
+		return check.fail(reason)
+	}
+
+	return check.pass("focused broad DirsHaveChildren used one parent-facts packet with bounded reads")
+}
+
+func validateFinalGateE2DirsHaveChildrenFiltered(e FinalGateEvidence) FinalGateCheck {
+	check := finalGateCheck(32, "E2 high-fanout DirsHaveChildren filtered")
+
+	measured, ok := finalGateE2Operation(
+		e,
+		queryOpDirsHaveChildrenFilteredName,
+		finalGateE2ScenarioDHCFiltered,
+		finalGateHighFanoutParentDir,
+	)
+	if !ok {
+		return check.fail("missing filtered DirsHaveChildren evidence")
+	}
+
+	if reason := finalGateE2PacketOperationFailure(
+		measured,
+		1000,
+		finalGateE2ChildFilterAllTable,
+		false,
+		true,
+	); reason != "" {
+		return check.fail(reason)
+	}
+
+	if reason := finalGateE2ExpectedChildrenFailure(measured.op); reason != "" {
+		return check.fail(reason)
+	}
+
+	return check.pass("focused filtered DirsHaveChildren returned only expected true children")
+}
+
+func validateFinalGateE2FirstRootWhereSplits(e FinalGateEvidence) FinalGateCheck {
+	check := finalGateCheck(33, "E2 first root where splits 2")
+
+	measured, ok := finalGateE2Operation(e, queryOpTreeWhereFreshName, finalGateE2ScenarioFirstRootWhere, "/")
+	if !ok {
+		return check.fail("missing first root where evidence")
+	}
+
+	if uint64Input(measured.op.Inputs, queryInputSplitsKey) != 2 {
+		return check.fail("first root where did not run with splits 2")
+	}
+
+	if reason := finalGateE2QueryOperationFailure(measured, 1000); reason != "" {
+		return check.fail(reason)
+	}
+
+	return check.pass("first root where splits 2 matched current facts under 1s")
+}
+
+func validateFinalGateE2FilterSwitch(e FinalGateEvidence) FinalGateCheck {
+	check := finalGateCheck(34, "E2 first filter switch")
+
+	measured, ok := finalGateE2Operation(
+		e,
+		finalGateRESTOpTree,
+		finalGateE2ScenarioSwitch,
+		finalGateHighFanoutParentDir,
+	)
+	if !ok {
+		return check.fail("missing first filter-switch evidence")
+	}
+
+	if !boolInput(measured.op.Inputs, "preceded_by_unfiltered_tree_request") {
+		return check.fail("filter switch was not measured after an unfiltered tree request")
+	}
+
+	usedBroadPacketCache := boolInput(measured.op.Inputs, "used_broad_packet_cache") ||
+		finalGateE2BroadPacketCacheHit(measured.op)
+	if usedBroadPacketCache {
+		return check.fail("filtered result used broad packet cache evidence")
+	}
+
+	if reason := finalGateE2RESTOperationFailure(measured, 1000); reason != "" {
+		return check.fail(reason)
+	}
+
+	return check.pass("first filter switch was cold, correct, and isolated from broad packet cache entries")
+}
+
+func validateFinalGateE2RealWhereDirs(e FinalGateEvidence) FinalGateCheck {
+	check := finalGateCheck(35, "E2 real first where dirs")
+
+	for _, dir := range []string{"/", finalGateHighFanoutParentDir} {
+		measured, ok := finalGateE2Operation(e, finalGateRESTOpCLIWhere, finalGateE2ScenarioRealWhere, dir)
+		if !ok {
+			return check.fail(dir + " missing real first where --dir evidence")
+		}
+
+		if !finalGateCLIWhereCommandPasses(measured.op, dir) {
+			return check.fail(dir + " where command evidence failed")
+		}
+
+		if reason := finalGateE2QueryOperationFailure(measured, 1000); reason != "" {
+			return check.fail(dir + " " + reason)
+		}
+	}
+
+	return check.pass("root and high-fanout first where --dir runs matched current facts under 1s")
+}
+
+func validateFinalGateE2NFSHeavyWhere(e FinalGateEvidence) FinalGateCheck {
+	check := finalGateCheck(36, "E2 NFS-heavy first where")
+
+	measured, ok := finalGateE2Operation(
+		e,
+		finalGateRESTOpCLIWhere,
+		finalGateE2ScenarioNFSHeavyWhere,
+		finalGateNFSHeavyDir,
+	)
+	if !ok {
+		return check.fail("missing NFS-heavy first where --dir evidence")
+	}
+
+	if !finalGateCLIWhereCommandPasses(measured.op, finalGateNFSHeavyDir) {
+		return check.fail("NFS-heavy where command evidence failed")
+	}
+
+	if reason := finalGateE2QueryOperationFailure(measured, 2000); reason != "" {
+		return check.fail(reason)
+	}
+
+	return check.pass("NFS-heavy first where --dir matched current facts under 2s")
+}
+
+func validateFinalGateE2MeasuredBudgets(e FinalGateEvidence) FinalGateCheck {
+	check := finalGateCheck(37, "E2 import and spool budgets")
+	if reason := finalGateE2BudgetReportsFailure(finalGateE2ImportReports(e), "import_total"); reason != "" {
+		return check.fail("direct import " + reason)
+	}
+
+	spoolReports := finalGateE2SpoolReports(e)
+	if reason := finalGateE2BudgetReportsFailure(spoolReports, "spool_load_total"); reason != "" {
+		return check.fail("spool-load " + reason)
+	}
+
+	return check.pass(
+		"direct import and spool-load budgets were recorded from measured wall, CPU, RSS, spool, and part data",
+	)
+}
+
+func (c FinalGateCheck) block(detail string) FinalGateCheck {
+	c.Passed = false
+	c.Blocked = true
+	c.Detail = fmt.Sprintf("%s: %s", strings.TrimSpace(c.Name), detail)
+
+	return c
+}
+
+// FinalGateReportResult captures E1 evidence validation status.
+type FinalGateReportResult struct {
+	Status          string           `json:"status"`
+	Passed          bool             `json:"passed"`
+	Blocked         bool             `json:"blocked,omitempty"`
+	TimingEvaluated bool             `json:"timing_evaluated"`
+	Checks          []FinalGateCheck `json:"checks"`
+}
+
+// ValidateFinalGateReport evaluates E1 evidence before cold speed gates.
+func ValidateFinalGateReport(report FinalGateReport) FinalGateReportResult {
+	result := FinalGateReportResult{Status: finalGateReportStatusPassed, Passed: true}
+
+	fixture := validateFinalGateFixtureDigests(report)
+	result.add(fixture)
+
+	if !fixture.Passed {
+		return result
+	}
+
+	result.TimingEvaluated = true
+	for _, check := range []FinalGateCheck{
+		validateFinalGateCorrectnessEvidence(report),
+		validateFinalGateRESTReportEvidence(report),
+		validateFinalGateClickHouseReportEvidence(report),
+		validateFinalGateDirectImportEvidence(report),
+		validateFinalGateSpoolLoadEvidence(report),
+		validateFinalGateComparisonPresence(report),
+		validateFinalGateSuccessfulComparisonEvidence(report),
+		validateFinalGateInfeasibleComparisonEvidence(report),
+		validateFinalGateInfeasibleComparisonBlock(report),
+	} {
+		result.add(check)
+	}
+
+	return result
+}
+
+func (r *FinalGateReportResult) add(check FinalGateCheck) {
+	r.Checks = append(r.Checks, check)
+	if check.Passed {
+		return
+	}
+
+	r.Passed = false
+	if check.Blocked && r.Status != finalGateReportStatusFailed {
+		r.Blocked = true
+		r.Status = finalGateReportStatusBlocked
+
+		return
+	}
+
+	if !check.Blocked {
+		r.Blocked = false
+		r.Status = finalGateReportStatusFailed
+	}
+}
 
 // FinalGateResultEquivalence captures paired current-branch/schema-v1 evidence.
 type FinalGateResultEquivalence struct {
@@ -248,6 +1487,7 @@ type FinalGateEvidence struct {
 	BoltQueryReports      []perfreport.Report
 	RequiredQueryRoots    []string
 	ResultEquivalence     []FinalGateResultEquivalence
+	FinalGateReport       *FinalGateReport
 	T283FilteredRESTOrder *FinalGateT283FilteredRESTOrderEvidence
 }
 
@@ -749,11 +1989,19 @@ func appendOperationIfMatch(
 		return ops
 	}
 
+	if finalGateE2ScenarioOperation(op) {
+		return ops
+	}
+
 	if pred != nil && !pred(op) {
 		return ops
 	}
 
 	return append(ops, op)
+}
+
+func finalGateE2ScenarioOperation(op perfreport.Operation) bool {
+	return stringInput(op.Inputs, finalGateE2ScenarioInput) != ""
 }
 
 func operationPasses(op perfreport.Operation, p95Max float64, p99Max float64) bool {
@@ -1021,8 +2269,8 @@ func finalGateCLIWhereCommandPasses(op perfreport.Operation, dir string) bool {
 	}
 
 	return len(command) >= 4 &&
-		command[0] == "./wrstat-ui" &&
-		command[1] == "where" &&
+		command[0] == finalGateWrstatUICommand &&
+		command[1] == finalGateWhereCommandName &&
 		finalGateCommandFlagValue(command, "--dir") == dir &&
 		slices.Contains(command, "--json")
 }
@@ -1212,12 +2460,13 @@ func (p *t283RESTOrderCandidatePair) setDirect(candidate t283RESTOrderCandidate)
 	}
 }
 
-// FinalGateCheck captures one E2 acceptance-test result.
+// FinalGateCheck captures one final-gate acceptance-test result.
 type FinalGateCheck struct {
-	ID     int    `json:"id"`
-	Name   string `json:"name"`
-	Passed bool   `json:"passed"`
-	Detail string `json:"detail"`
+	ID      int    `json:"id"`
+	Name    string `json:"name"`
+	Passed  bool   `json:"passed"`
+	Blocked bool   `json:"blocked,omitempty"`
+	Detail  string `json:"detail"`
 }
 
 func validateFinalGateImport(e FinalGateEvidence) FinalGateCheck {
@@ -1657,17 +2906,374 @@ func (c FinalGateCheck) fail(detail string) FinalGateCheck {
 	return c
 }
 
-// FinalGateResult is a facts-only summary of the E2 final perf gates.
+type finalGateMeasuredOperation struct {
+	report perfreport.Report
+	op     perfreport.Operation
+}
+
+func finalGateE2Operation(
+	e FinalGateEvidence,
+	name string,
+	scenario string,
+	root string,
+) (finalGateMeasuredOperation, bool) {
+	for _, report := range e.QueryReports {
+		for _, op := range report.Operations {
+			if !finalGateE2OperationMatches(op, name, scenario, root) {
+				continue
+			}
+
+			return finalGateMeasuredOperation{report: report, op: op}, true
+		}
+	}
+
+	return finalGateMeasuredOperation{}, false
+}
+
+func finalGateE2RESTOperationFailure(measured finalGateMeasuredOperation, p95MaxMS float64) string {
+	if reason := finalGateE2QueryOperationFailure(measured, p95MaxMS); reason != "" {
+		return reason
+	}
+
+	cacheHits := uint64SliceInput(measured.op.Inputs, finalGateRESTInputCacheHits)
+	if len(cacheHits) == 0 || uint64SliceInputSum(measured.op.Inputs, finalGateRESTInputCacheHits) != 0 {
+		return "response cache was not cold or disabled"
+	}
+
+	return ""
+}
+
+func finalGateE2PacketOperationFailure(
+	measured finalGateMeasuredOperation,
+	p95MaxMS float64,
+	packetTable string,
+	requireCurrentRead bool,
+	requireZeroFactsVector bool,
+) string {
+	if reason := finalGateE2QueryOperationFailure(measured, p95MaxMS); reason != "" {
+		return reason
+	}
+
+	if reason := finalGateE2PacketReadShapeFailure(measured.op, packetTable, requireCurrentRead); reason != "" {
+		return reason
+	}
+
+	if reason := finalGateE2NoFanoutFailure(measured.op); reason != "" {
+		return reason
+	}
+
+	if reason := finalGateE2FactsVectorFailure(measured.op, requireZeroFactsVector); reason != "" {
+		return reason
+	}
+
+	return finalGateE2ReadVolumeFailure(measured.op)
+}
+
+func finalGateE2PacketReadShapeFailure(
+	op perfreport.Operation,
+	packetTable string,
+	requireCurrentRead bool,
+) string {
+	if requireCurrentRead && uint64Input(op.Inputs, "current_read_count") != 1 {
+		return "expected exactly one current read"
+	}
+
+	if uint64Input(op.Inputs, "parent_packet_read_count") != 1 {
+		return "expected exactly one parent-packet read"
+	}
+
+	if stringInput(op.Inputs, finalGateE2ParentPacketTableInput) != packetTable {
+		return "expected one " + packetTable + " parent-packet read"
+	}
+
+	return ""
+}
+
+func finalGateE2NoFanoutFailure(op perfreport.Operation) string {
+	if uint64Input(op.Inputs, "per_child_query_count") != 0 {
+		return "per-child ClickHouse query count was not zero"
+	}
+
+	if uint64Input(op.Inputs, "subtree_scan_count") != 0 {
+		return "subtree scan count was not zero"
+	}
+
+	return ""
+}
+
+func finalGateE2FactsVectorFailure(op perfreport.Operation, required bool) string {
+	if required && !finalGateE2ZeroFactsVectorRows(op) {
+		return "facts-vector rows read was not zero"
+	}
+
+	return ""
+}
+
+func finalGateE2ZeroFactsVectorRows(op perfreport.Operation) bool {
+	value, ok := uint64InputPresentValue(op.Inputs, finalGateE2FactsVectorRowsInput)
+
+	return ok && value == 0
+}
+
+func uint64InputPresentValue(inputs map[string]any, key string) (uint64, bool) {
+	v, ok := inputs[key]
+	if !ok {
+		return 0, false
+	}
+
+	switch typed := v.(type) {
+	case uint64:
+		return typed, true
+	case uint32:
+		return uint64(typed), true
+	case int:
+		return nonNegativeIntSliceValue(int64(typed))
+	case int64:
+		return nonNegativeIntSliceValue(typed)
+	case float64:
+		return wholeFloat64SliceValue(typed)
+	default:
+		return 0, false
+	}
+}
+
+func finalGateE2ReadVolumeFailure(op perfreport.Operation) string {
+	for _, spec := range []struct {
+		name    string
+		values  []uint64
+		ceiling string
+	}{
+		{"rows", op.ReadRows, finalGateE2ReadRowsCeilingInput},
+		{"bytes", op.ReadBytes, finalGateE2ReadBytesCeilingInput},
+		{"marks", op.ReadMarks, finalGateE2ReadMarksCeilingInput},
+	} {
+		if reason := finalGateE2ReadVolumeMetricFailure(op, spec.name, spec.values, spec.ceiling); reason != "" {
+			return reason
+		}
+	}
+
+	return ""
+}
+
+func finalGateE2ReadVolumeMetricFailure(
+	op perfreport.Operation,
+	name string,
+	values []uint64,
+	ceilingKey string,
+) string {
+	ceiling := uint64Input(op.Inputs, ceilingKey)
+	if ceiling == 0 || len(values) == 0 {
+		return "missing read-volume " + name + " ceiling or samples"
+	}
+
+	for _, value := range values {
+		if value == 0 || value > ceiling {
+			return "read-volume " + name + " exceeded ceiling"
+		}
+	}
+
+	return ""
+}
+
+func finalGateE2QueryOperationFailure(measured finalGateMeasuredOperation, p95MaxMS float64) string {
+	if reason := finalGateE2CorrectnessFailure(measured.op); reason != "" {
+		return reason
+	}
+
+	if reason := finalGateE2ColdFailure(measured); reason != "" {
+		return reason
+	}
+
+	return finalGateE2P95Failure(measured.op, p95MaxMS)
+}
+
+func finalGateE2CorrectnessFailure(op perfreport.Operation) string {
+	if stringInput(op.Inputs, finalGateCorrectnessStatusInput) != finalGateComparisonStatusSuccess {
+		return "correctness equivalence status missing or failed"
+	}
+
+	actual := stringInput(op.Inputs, navigationInputResultDigest)
+
+	expected := stringInput(op.Inputs, finalGateE2ExpectedDigestInput)
+	if actual == "" || expected == "" {
+		return "missing result digest evidence"
+	}
+
+	if actual != expected {
+		return finalGateResultDigestMismatch
+	}
+
+	if !resultCountsStable(op) {
+		return finalGateResultCountMismatch
+	}
+
+	return ""
+}
+
+func finalGateE2P95Failure(op perfreport.Operation, p95MaxMS float64) string {
+	if len(op.DurationsMS) < finalGateMinRepeats {
+		return fmt.Sprintf("need at least %d cold repetitions", finalGateMinRepeats)
+	}
+
+	if op.P95MS >= p95MaxMS {
+		return fmt.Sprintf("p95 %.3f ms exceeded %.3f ms cold gate", op.P95MS, p95MaxMS)
+	}
+
+	if !finalGateStatusCodesPass(op) {
+		return "status code evidence failed"
+	}
+
+	return ""
+}
+
+func finalGateE2ColdFailure(measured finalGateMeasuredOperation) string {
+	if measured.report.Warmup != 0 {
+		return "proactive warming was configured before the measured request"
+	}
+
+	if boolInput(measured.op.Inputs, finalGateE2ProactiveWarmingInput) {
+		return "proactive warming ran before the measured request"
+	}
+
+	if reason := finalGateE2CacheEvidenceFailure(measured.op); reason != "" {
+		return reason
+	}
+
+	return ""
+}
+
+func boolInput(inputs map[string]any, key string) bool {
+	value, ok := inputs[key]
+	if !ok {
+		return false
+	}
+
+	typed, ok := value.(bool)
+
+	return ok && typed
+}
+
+func finalGateE2CacheEvidenceFailure(op perfreport.Operation) string {
+	if !finalGateE2ColdCacheScope(stringInput(op.Inputs, queryInputCacheScope)) {
+		return "cache scope was not cold/fresh-provider"
+	}
+
+	for _, key := range stringSliceInput(op.Inputs, queryInputCacheHitKeysKey) {
+		if !finalGateE2AllowedCacheHitKey(op, key) {
+			return "cache hit keys included evidence outside the measured parent-packet read"
+		}
+	}
+
+	return ""
+}
+
+func finalGateE2ColdCacheScope(scope string) bool {
+	return scope == queryScopeColdProvider || scope == queryScopeFreshProvider
+}
+
+func finalGateE2AllowedCacheHitKey(op perfreport.Operation, key string) bool {
+	kind, attrs, ok := finalGateCacheHitKeyAttributes(key)
+	if !ok || kind != "parent_packet" {
+		return false
+	}
+
+	if !finalGateE2ParentPacketCacheHitAttributesHaveScope(attrs) {
+		return false
+	}
+
+	root := normalizeRootPath(operationEvidenceRoot(op))
+	if root == "" {
+		return false
+	}
+
+	return finalGateCacheHitPathEqualsRoot(attrs["path"], root) ||
+		finalGateCacheHitPathEqualsRoot(attrs["parent_dir"], root)
+}
+
+func finalGateCacheHitKeyAttributes(key string) (string, map[string]string, bool) {
+	kind, rawAttrs, ok := strings.Cut(key, ":")
+	if !ok || kind == "" {
+		return "", nil, false
+	}
+
+	attrs, ok := finalGateCacheHitAttributes(rawAttrs)
+	if !ok {
+		return "", nil, false
+	}
+
+	return kind, attrs, true
+}
+
+func finalGateCacheHitAttributes(rawAttrs string) (map[string]string, bool) {
+	attrs := make(map[string]string)
+
+	for _, field := range strings.Split(rawAttrs, ";") {
+		if !finalGateAddCacheHitAttribute(attrs, field) {
+			return nil, false
+		}
+	}
+
+	return attrs, true
+}
+
+func finalGateAddCacheHitAttribute(attrs map[string]string, field string) bool {
+	if field == "" {
+		return true
+	}
+
+	name, value, ok := strings.Cut(field, "=")
+	if !ok || name == "" {
+		return false
+	}
+
+	if _, exists := attrs[name]; exists {
+		return false
+	}
+
+	attrs[name] = value
+
+	return true
+}
+
+func finalGateE2ParentPacketCacheHitAttributesHaveScope(attrs map[string]string) bool {
+	for _, name := range []string{"filter", "active_set_id", "query_version"} {
+		if strings.TrimSpace(attrs[name]) == "" {
+			return false
+		}
+	}
+
+	return true
+}
+
+func finalGateCacheHitPathEqualsRoot(value string, root string) bool {
+	return value != "" && normalizeRootPath(value) == root
+}
+
+// FinalGateResult is a facts-only summary of the E1 prerequisite and E2 gates.
 type FinalGateResult struct {
-	Passed bool             `json:"passed"`
-	Checks []FinalGateCheck `json:"checks"`
+	Status          string                 `json:"status,omitempty"`
+	Passed          bool                   `json:"passed"`
+	Blocked         bool                   `json:"blocked,omitempty"`
+	TimingEvaluated bool                   `json:"timing_evaluated"`
+	E1ReportResult  *FinalGateReportResult `json:"e1_report_result,omitempty"`
+	Checks          []FinalGateCheck       `json:"checks"`
 }
 
 // ValidateFinalGates evaluates the documented E2 perf gates from raw reports.
 func ValidateFinalGates(e FinalGateEvidence) FinalGateResult {
 	e = finalGateEvidenceWithDerivedT283(e)
 
-	result := FinalGateResult{Passed: true}
+	prerequisite, ok := finalGatePrerequisiteResult(e)
+	if !ok {
+		return prerequisite
+	}
+
+	result := FinalGateResult{
+		Status:          finalGateReportStatusPassed,
+		Passed:          true,
+		TimingEvaluated: true,
+		E1ReportResult:  prerequisite.E1ReportResult,
+	}
 	for _, check := range []FinalGateCheck{
 		validateFinalGateImport(e),
 		validateFinalGateTreeWhereSmall(e),
@@ -1694,12 +3300,44 @@ func ValidateFinalGates(e FinalGateEvidence) FinalGateResult {
 		validateFinalGateE3FactsDigestEquivalence(e),
 		validateFinalGateE3TableStatsRowAmplification(e),
 		validateFinalGateE3BaselineRegression(e),
+		validateFinalGateE2RESTTreeFirst(e),
+		validateFinalGateE2HighFanoutBroadClick(e),
+		validateFinalGateE2HighFanoutFilteredClick(e),
+		validateFinalGateE2DirInfosBroad(e),
+		validateFinalGateE2DirInfosFiltered(e),
+		validateFinalGateE2DirsHaveChildrenBroad(e),
+		validateFinalGateE2DirsHaveChildrenFiltered(e),
+		validateFinalGateE2FirstRootWhereSplits(e),
+		validateFinalGateE2FilterSwitch(e),
+		validateFinalGateE2RealWhereDirs(e),
+		validateFinalGateE2NFSHeavyWhere(e),
+		validateFinalGateE2MeasuredBudgets(e),
 	} {
 		result.Checks = append(result.Checks, check)
 		result.Passed = result.Passed && check.Passed
 	}
 
+	if !result.Passed {
+		result.Status = finalGateReportStatusFailed
+	}
+
 	return result
+}
+
+func finalGatePrerequisiteResult(e FinalGateEvidence) (FinalGateResult, bool) {
+	e1 := ValidateFinalGateReport(finalGateEvidenceE1Report(e))
+	if e1.Passed {
+		return FinalGateResult{E1ReportResult: &e1}, true
+	}
+
+	return FinalGateResult{
+		Status:          e1.Status,
+		Passed:          false,
+		Blocked:         e1.Blocked,
+		TimingEvaluated: false,
+		E1ReportResult:  &e1,
+		Checks:          e1.Checks,
+	}, false
 }
 
 type operationPredicate func(perfreport.Operation) bool
@@ -1738,6 +3376,418 @@ func firstOperation(
 	return perfreport.Operation{}, false
 }
 
+func finalGateOperationCorrectnessEvidencePasses(op perfreport.Operation) bool {
+	return len(op.ResultCount) > 0 &&
+		stringInput(op.Inputs, navigationInputResultDigest) != "" &&
+		finalGateCorrectnessStatusPasses(stringInput(op.Inputs, finalGateCorrectnessStatusInput))
+}
+
+func finalGateCorrectnessStatusPasses(status string) bool {
+	return status == finalGateComparisonStatusSuccess || status == finalGateComparisonInfeasible
+}
+
+func finalGateE2ExpectedChildrenFailure(op perfreport.Operation) string {
+	expected := sortedStringsInput(op.Inputs, "expected_true_children")
+
+	actual := sortedStringsInput(op.Inputs, "actual_true_children")
+	if len(expected) == 0 || !slices.Equal(expected, actual) {
+		return "expected child truth did not match filtered DirsHaveChildren output"
+	}
+
+	return ""
+}
+
+func sortedStringsInput(inputs map[string]any, key string) []string {
+	values := stringSliceInput(inputs, key)
+	slices.Sort(values)
+
+	return values
+}
+
+func finalGateE2BroadPacketCacheHit(op perfreport.Operation) bool {
+	return slices.ContainsFunc(stringSliceInput(op.Inputs, queryInputCacheHitKeysKey), func(key string) bool {
+		return strings.Contains(key, "filter=broad") ||
+			strings.Contains(key, "filter=all") ||
+			strings.Contains(key, "filter=none")
+	})
+}
+
+func finalGateE2OperationMatches(
+	op perfreport.Operation,
+	name string,
+	scenario string,
+	root string,
+) bool {
+	return op.Name == name &&
+		stringInput(op.Inputs, finalGateE2ScenarioInput) == scenario &&
+		operationRootEquals(op, root)
+}
+
+func finalGateE2BudgetReportsFailure(reports []perfreport.Report, opName string) string {
+	if len(reports) == 0 {
+		return "missing measured reports"
+	}
+
+	for _, report := range reports {
+		op, ok := firstOperation(report, opName, nil)
+		if !ok {
+			return "missing " + opName
+		}
+
+		if reason := finalGateE2BudgetOperationFailure(op); reason != "" {
+			return reason
+		}
+	}
+
+	return ""
+}
+
+func finalGateE2BudgetOperationFailure(op perfreport.Operation) string {
+	if boolInput(op.Inputs, "budget_hardcoded_before_measurement") {
+		return "budget was hardcoded before measurement"
+	}
+
+	if reason := finalGateE2BudgetMeasuredEvidenceFailure(op); reason != "" {
+		return reason
+	}
+
+	op.Inputs = cloneMap(op.Inputs)
+	finalGateEnsureE2ComputedBudgetInputs(&op)
+
+	if stringInput(op.Inputs, finalGateE2BudgetSourceInput) != finalGateE2BudgetSourceComputed {
+		return "budgets were not recorded as computed from measurements"
+	}
+
+	measuredSamplesMissing := uint64Input(op.Inputs, finalGateE2BudgetMeasurementCountInput) <
+		uint64(len(op.DurationsMS)) || len(op.DurationsMS) == 0
+	if measuredSamplesMissing {
+		return "budget measurement count did not cover measured samples"
+	}
+
+	return finalGateE2BudgetResourceFailure(op)
+}
+
+func finalGateE2BudgetMeasuredEvidenceFailure(op perfreport.Operation) string {
+	for _, key := range []string{importInputTotalCPUMS, importInputPeakRSSBytes, finalGateE2InputSpoolBytes} {
+		if !finalGateUint64InputPresent(op.Inputs, key) {
+			return "missing measured " + key
+		}
+	}
+
+	if len(uint64MapInput(op.Inputs, finalGateE2InputPartCounts)) == 0 {
+		return "missing measured " + finalGateE2InputPartCounts
+	}
+
+	return ""
+}
+
+func finalGateEnsureE2ComputedBudgetInputs(op *perfreport.Operation) {
+	if op.Inputs == nil {
+		op.Inputs = make(map[string]any)
+	}
+
+	finalGateSetInputIfMissing(op.Inputs, finalGateE2BudgetSourceInput, finalGateE2BudgetSourceComputed)
+	finalGateSetInputIfMissing(op.Inputs, finalGateE2BudgetMeasurementCountInput, uint64(len(op.DurationsMS)))
+	finalGateSetInputIfMissing(op.Inputs, "wall_time_budget_ms", uint64(math.Ceil(op.P95MS)))
+	finalGateSetInputIfMissing(op.Inputs, "total_cpu_budget_ms", uint64Input(op.Inputs, importInputTotalCPUMS))
+	finalGateSetInputIfMissing(op.Inputs, "peak_rss_budget_bytes", uint64Input(op.Inputs, importInputPeakRSSBytes))
+	finalGateSetInputIfMissing(op.Inputs, "spool_byte_budget", uint64Input(op.Inputs, finalGateE2InputSpoolBytes))
+	finalGateSetInputIfMissing(op.Inputs, "part_count_budget", finalGateE2PartCount(*op))
+}
+
+func finalGateSetInputIfMissing(inputs map[string]any, key string, value any) {
+	if _, ok := inputs[key]; ok {
+		return
+	}
+
+	inputs[key] = value
+}
+
+func finalGateE2BudgetResourceFailure(op perfreport.Operation) string {
+	for _, spec := range finalGateE2BudgetResources(op) {
+		if reason := finalGateE2BudgetAtLeast(op.Inputs, spec.budgetKey, spec.measured, spec.name); reason != "" {
+			return reason
+		}
+	}
+
+	return ""
+}
+
+func finalGateE2BudgetResources(op perfreport.Operation) []struct {
+	name      string
+	budgetKey string
+	measured  uint64
+} {
+	totalCPU, _ := uint64InputPresentValue(op.Inputs, importInputTotalCPUMS)
+	peakRSS, _ := uint64InputPresentValue(op.Inputs, importInputPeakRSSBytes)
+	spoolBytes, _ := uint64InputPresentValue(op.Inputs, finalGateE2InputSpoolBytes)
+
+	return []struct {
+		name      string
+		budgetKey string
+		measured  uint64
+	}{
+		{"wall-time", "wall_time_budget_ms", uint64(math.Ceil(op.P95MS))},
+		{"CPU-time", "total_cpu_budget_ms", totalCPU},
+		{"RSS", "peak_rss_budget_bytes", peakRSS},
+		{"spool-byte", "spool_byte_budget", spoolBytes},
+		{"part-count", "part_count_budget", finalGateE2PartCount(op)},
+	}
+}
+
+func finalGateE2PartCount(op perfreport.Operation) uint64 {
+	var count uint64
+	for _, value := range uint64MapInput(op.Inputs, finalGateE2InputPartCounts) {
+		count += value
+	}
+
+	return count
+}
+
+func finalGateE2BudgetAtLeast(
+	inputs map[string]any,
+	key string,
+	measured uint64,
+	name string,
+) string {
+	budget, ok := uint64InputPresentValue(inputs, key)
+	if !ok || budget < measured {
+		return name + " budget was not recorded from measured value"
+	}
+
+	return ""
+}
+
+func finalGateImportEvidenceFailure(report perfreport.Report, opName string, spool bool) string {
+	if !finalGateReportTableStatsPass(report.TableStats) {
+		return "missing table rows, parts, or bytes"
+	}
+
+	op, ok := firstOperation(report, opName, nil)
+	if !ok {
+		return "missing total operation"
+	}
+
+	if reason := finalGateImportOperationEvidenceFailure(op, spool); reason != "" {
+		return reason
+	}
+
+	return ""
+}
+
+func finalGateReportTableStatsPass(stats map[string]perfreport.TableStats) bool {
+	if len(stats) == 0 {
+		return false
+	}
+
+	for _, tableStats := range stats {
+		if !finalGateBasicTableSizeEvidencePass(tableStats) {
+			return false
+		}
+	}
+
+	return true
+}
+
+func finalGateBasicTableSizeEvidencePass(stats perfreport.TableStats) bool {
+	return stats.Rows > 0 &&
+		stats.ActiveParts > 0 &&
+		stats.CompressedBytes > 0 &&
+		stats.UncompressedBytes > 0
+}
+
+func finalGateImportOperationEvidenceFailure(op perfreport.Operation, spool bool) string {
+	if reason := finalGateImportNumericEvidenceFailure(op); reason != "" {
+		return reason
+	}
+
+	if reason := finalGateImportMetadataEvidenceFailure(op); reason != "" {
+		return reason
+	}
+
+	if spool && len(uint64MapInput(op.Inputs, "loaded_table_rows")) == 0 {
+		return "missing loaded_table_rows"
+	}
+
+	return ""
+}
+
+func finalGateImportNumericEvidenceFailure(op perfreport.Operation) string {
+	for _, key := range []string{
+		importInputUserCPUMS,
+		importInputSystemCPUMS,
+		importInputTotalCPUMS,
+		importInputPeakRSSBytes,
+		importInputPublishLatency,
+	} {
+		if !finalGateUint64InputPresent(op.Inputs, key) {
+			return "missing " + key
+		}
+	}
+
+	return ""
+}
+
+func finalGateUint64InputPresent(inputs map[string]any, key string) bool {
+	value, ok := inputs[key]
+	if !ok {
+		return false
+	}
+
+	return finalGateUint64InputValuePresent(value)
+}
+
+func finalGateUint64InputValuePresent(value any) bool {
+	switch typed := value.(type) {
+	case uint64, uint32:
+		return true
+	case int:
+		return typed >= 0
+	case int64:
+		return typed >= 0
+	case float64:
+		return typed >= 0 && math.Trunc(typed) == typed
+	default:
+		return false
+	}
+}
+
+func finalGateImportMetadataEvidenceFailure(op perfreport.Operation) string {
+	for _, key := range []string{finalGateE2InputSpoolBytes, "retry_cleanup_result", finalGateE2InputPartCounts} {
+		if !finalGateInputMapHasKey(op.Inputs, key) {
+			return "missing " + key
+		}
+	}
+
+	if len(uint64MapInput(op.Inputs, finalGateE2InputPartCounts)) == 0 {
+		return "missing " + finalGateE2InputPartCounts
+	}
+
+	if strings.TrimSpace(stringInput(op.Inputs, "retry_cleanup_result")) == "" {
+		return "missing retry_cleanup_result"
+	}
+
+	return ""
+}
+
+func finalGateInputMapHasKey(inputs map[string]any, key string) bool {
+	_, ok := inputs[key]
+
+	return ok
+}
+
+func finalGateExpectedDigestFromManifest(path string, key string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+
+	var manifest any
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		return ""
+	}
+
+	digest, _ := finalGateFindDigestKey(manifest, key)
+
+	return digest
+}
+
+func finalGateFindDigestInMap(values map[string]any, key string) (string, bool) {
+	if digest, ok := values[key].(string); ok {
+		return digest, true
+	}
+
+	return finalGateFindDigestInSlice(mapValues(values), key)
+}
+
+func finalGateFindDigestInSlice(values []any, key string) (string, bool) {
+	for _, child := range values {
+		if digest, ok := finalGateFindDigestKey(child, key); ok {
+			return digest, true
+		}
+	}
+
+	return "", false
+}
+
+func finalGateFindDigestKey(value any, key string) (string, bool) {
+	if typed, ok := value.(map[string]any); ok {
+		return finalGateFindDigestInMap(typed, key)
+	}
+
+	if typed, ok := value.([]any); ok {
+		return finalGateFindDigestInSlice(typed, key)
+	}
+
+	return "", false
+}
+
+func mapValues(values map[string]any) []any {
+	out := make([]any, 0, len(values))
+	for _, value := range values {
+		out = append(out, value)
+	}
+
+	return out
+}
+
+func finalGateRESTOpsPass(reports []perfreport.Report, name string) bool {
+	ops := operationsInReports(reports, name, nil)
+	if len(ops) == 0 {
+		return false
+	}
+
+	for _, op := range ops {
+		if !finalGateRESTOperationEvidencePasses(op) {
+			return false
+		}
+	}
+
+	return true
+}
+
+func finalGateRESTOperationEvidencePasses(op perfreport.Operation) bool {
+	for _, key := range []string{
+		"query_count",
+		finalGateRESTInputCacheHits,
+		finalGateRESTInputCacheMisses,
+		finalGateRESTInputJSONBytes,
+		finalGateRESTInputGzipBytes,
+	} {
+		if len(uint64SliceInput(op.Inputs, key)) == 0 {
+			return false
+		}
+	}
+
+	return finalGatePercentilesPresent(op)
+}
+
+func finalGatePercentilesPresent(op perfreport.Operation) bool {
+	return op.P50MS > 0 && op.P95MS > 0 && op.P99MS > 0
+}
+
+func finalGateClickHouseOperations(reports []perfreport.Report) []perfreport.Operation {
+	var ops []perfreport.Operation
+
+	for _, report := range reports {
+		for _, op := range report.Operations {
+			if len(op.ReadRows) > 0 || len(op.ReadBytes) > 0 || len(op.ReadMarks) > 0 {
+				ops = append(ops, op)
+			}
+		}
+	}
+
+	return ops
+}
+
+func finalGateClickHouseOperationEvidencePasses(op perfreport.Operation) bool {
+	return len(op.ReadRows) > 0 &&
+		len(op.ReadBytes) > 0 &&
+		len(op.ReadMarks) > 0 &&
+		len(op.ResultCount) > 0 &&
+		len(op.ResultBytes) > 0
+}
+
 func finalGateBaselineRegressionCandidates(reports []perfreport.Report) []perfreport.Operation {
 	var candidates []perfreport.Operation
 
@@ -1753,6 +3803,10 @@ func finalGateBaselineRegressionCandidates(reports []perfreport.Report) []perfre
 }
 
 func finalGateBaselineRegressionIgnored(op perfreport.Operation) bool {
+	if finalGateE2ScenarioOperation(op) {
+		return true
+	}
+
 	if slices.Contains(finalGatePermissionAuthOps(), op.Name) {
 		return true
 	}
@@ -1795,8 +3849,8 @@ func finalGateTargetedRESTTreeOperation(op perfreport.Operation) bool {
 
 func finalGateE3RESTTreeClickPaths() []string {
 	return []string{
-		"/lustre/",
-		"/nfs/",
+		finalGateLustreRootDir,
+		finalGateNFSRootDir,
 		finalGateT283Dir,
 		finalGateScratch120Dir,
 		finalGateScratch122Dir,

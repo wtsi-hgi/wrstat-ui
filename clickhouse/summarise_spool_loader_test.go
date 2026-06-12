@@ -28,6 +28,7 @@ package clickhouse
 import (
 	"context"
 	"errors"
+	"math"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -37,6 +38,7 @@ import (
 	. "github.com/smartystreets/goconvey/convey"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 	"github.com/wtsi-hgi/wrstat-ui/internal/chspool"
+	"github.com/wtsi-hgi/wrstat-ui/internal/perfreport"
 )
 
 const (
@@ -446,6 +448,74 @@ func TestClickHouseSummariseSpoolLoader(t *testing.T) {
 		So(conn.eventIndex("send "+chspool.TableActiveVirtualSets), ShouldBeLessThan, conn.eventIndex("publish"))
 		So(conn.publishedSID, ShouldEqual, manifest.SnapshotID)
 	})
+
+	Convey("E1.5 summarise spool load reports measured rows, table stats, resources, and publish evidence",
+		t,
+		func() {
+			spoolDir := filepath.Join(t.TempDir(), "spool")
+			updatedAt := time.Date(2026, 6, 9, 10, 30, 0, 0, time.UTC)
+			manifest := writeSummariseSpoolLoaderSchema3Spool(spoolDir, updatedAt)
+			conn := newSummariseSpoolLoaderSpyConn(manifest)
+
+			loader, err := newSummariseSpoolLoader(Config{Database: testDatabaseName}, conn, spoolDir, manifest, nil)
+			So(err, ShouldBeNil)
+
+			report, err := loader.loadReport(context.Background())
+
+			So(err, ShouldBeNil)
+
+			reportTable := chspool.TableDirFacts
+			total := summariseSpoolReportOperation(report, "spool_load_total")
+			So(total, ShouldNotBeNil)
+			So(total.DurationsMS, ShouldHaveLength, 1)
+			So(summariseSpoolReportUint64MapInput(total.Inputs, "loaded_table_rows")[reportTable],
+				ShouldEqual, manifest.Tables[reportTable].Rows)
+			So(report.TableStats[reportTable].Rows, ShouldEqual, manifest.Tables[reportTable].Rows)
+			So(report.TableStats[reportTable].ActiveParts, ShouldEqual, uint64(1))
+			So(report.TableStats[reportTable].CompressedBytes, ShouldBeGreaterThan, uint64(0))
+			So(report.TableStats[reportTable].UncompressedBytes, ShouldBeGreaterThan, uint64(0))
+
+			for _, key := range []string{
+				"user_cpu_ms",
+				"system_cpu_ms",
+				"total_cpu_ms",
+				"peak_rss_bytes",
+				"spool_bytes",
+				"publish_latency_ms",
+			} {
+				_, ok := total.Inputs[key]
+				So(ok, ShouldBeTrue)
+			}
+
+			So(summariseSpoolReportUint64Input(total.Inputs, "user_cpu_ms"), ShouldBeGreaterThanOrEqualTo, uint64(0))
+			So(summariseSpoolReportUint64Input(total.Inputs, "system_cpu_ms"), ShouldBeGreaterThanOrEqualTo, uint64(0))
+			So(summariseSpoolReportUint64Input(total.Inputs, "total_cpu_ms"), ShouldBeGreaterThanOrEqualTo, uint64(0))
+			So(summariseSpoolReportUint64Input(total.Inputs, "peak_rss_bytes"), ShouldBeGreaterThan, uint64(0))
+			So(summariseSpoolReportUint64Input(total.Inputs, "spool_bytes"), ShouldBeGreaterThan, uint64(0))
+			partCounts := summariseSpoolReportUint64MapInput(total.Inputs, "part_counts")
+
+			var totalParts uint64
+			for _, count := range partCounts {
+				totalParts += count
+			}
+
+			So(partCounts[reportTable], ShouldEqual, uint64(1))
+			So(total.Inputs["budget_source"], ShouldEqual, "computed_from_measurements")
+			So(summariseSpoolReportUint64Input(total.Inputs, "budget_measurement_count"),
+				ShouldEqual, uint64(len(total.DurationsMS)))
+			So(summariseSpoolReportUint64Input(total.Inputs, "wall_time_budget_ms"),
+				ShouldEqual, uint64(math.Ceil(total.P95MS)))
+			So(summariseSpoolReportUint64Input(total.Inputs, "total_cpu_budget_ms"),
+				ShouldEqual, summariseSpoolReportUint64Input(total.Inputs, "total_cpu_ms"))
+			So(summariseSpoolReportUint64Input(total.Inputs, "peak_rss_budget_bytes"),
+				ShouldEqual, summariseSpoolReportUint64Input(total.Inputs, "peak_rss_bytes"))
+			So(summariseSpoolReportUint64Input(total.Inputs, "spool_byte_budget"),
+				ShouldEqual, summariseSpoolReportUint64Input(total.Inputs, "spool_bytes"))
+			So(summariseSpoolReportUint64Input(total.Inputs, "part_count_budget"), ShouldEqual, totalParts)
+			So(total.Inputs["retry_cleanup_result"], ShouldEqual, "success")
+			So(summariseSpoolReportUint64Input(total.Inputs, "publish_latency_ms"),
+				ShouldBeGreaterThanOrEqualTo, uint64(0))
+		})
 
 	Convey("D3.2 summarise spool loader blocks readiness when dir-filter rows mismatch", t, func() {
 		spoolDir := filepath.Join(t.TempDir(), "spool")
@@ -1059,6 +1129,44 @@ func newSummariseSpoolLoaderSpyConn(manifest *chspool.Manifest) *summariseSpoolL
 	}
 }
 
+func summariseSpoolReportOperation(report perfreport.Report, name string) *perfreport.Operation {
+	for i := range report.Operations {
+		if report.Operations[i].Name == name {
+			return &report.Operations[i]
+		}
+	}
+
+	return nil
+}
+
+func summariseSpoolReportUint64MapInput(inputs map[string]any, key string) map[string]uint64 {
+	value, ok := inputs[key]
+	if !ok {
+		return nil
+	}
+
+	typed, ok := value.(map[string]uint64)
+	if !ok {
+		return nil
+	}
+
+	return typed
+}
+
+func summariseSpoolReportUint64Input(inputs map[string]any, key string) uint64 {
+	value, ok := inputs[key]
+	if !ok {
+		return 0
+	}
+
+	typed, ok := value.(uint64)
+	if !ok {
+		return 0
+	}
+
+	return typed
+}
+
 type summariseSpoolHistoryDeleteDeadlineConn struct {
 	bootstrapTestConn
 
@@ -1185,7 +1293,7 @@ type summariseSpoolLoaderSpyConn struct {
 func (c *summariseSpoolLoaderSpyConn) Query(
 	_ context.Context,
 	query string,
-	_ ...any,
+	args ...any,
 ) (driver.Rows, error) {
 	switch query {
 	case activeSnapshotQuery:
@@ -1193,8 +1301,49 @@ func (c *summariseSpoolLoaderSpyConn) Query(
 	case mountsActiveRowsQuery:
 		return emptyMountsActiveRowsForTest(), nil
 	default:
+		if strings.Contains(query, "FROM system.parts") {
+			return c.tableStatsRows(args[1:]...), nil
+		}
+
 		return nil, errBootstrapTestUnexpectedCall
 	}
+}
+
+func (c *summariseSpoolLoaderSpyConn) tableStatsRows(tables ...any) driver.Rows {
+	rows := &dgutaWriterCloseContextRows{
+		columns: []string{
+			"table",
+			"sum(rows)",
+			"count()",
+			"sum(data_compressed_bytes)",
+			"sum(data_uncompressed_bytes)",
+		},
+	}
+
+	for _, value := range tables {
+		table, ok := value.(string)
+		if !ok {
+			continue
+		}
+
+		count := c.insertedRows(table)
+		if count == 0 {
+			continue
+		}
+
+		bytes := summariseSpoolLoaderReportBytes(c.manifest.Tables[table])
+		rows.values = append(rows.values, []any{table, count, uint64(1), bytes, bytes * 2})
+	}
+
+	return rows
+}
+
+func summariseSpoolLoaderReportBytes(table chspool.TableManifest) uint64 {
+	if table.Bytes <= 0 {
+		return 1
+	}
+
+	return uint64(table.Bytes)
 }
 
 func (c *summariseSpoolLoaderSpyConn) QueryRow(

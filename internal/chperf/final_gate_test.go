@@ -27,6 +27,11 @@ package chperf
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -38,14 +43,876 @@ import (
 
 const finalGateT283Digest = "sha256:t283"
 
-const finalGateOtherType = finalGateSelectedTreeTypes
+const (
+	finalGateE1BoltPerfCommand = "bolt-perf"
+	finalGateE1OldWrstatUI     = "wrstat-ui-old"
+	finalGateE1ProjectDir      = "/m/project/"
+	finalGateE1QueryCommand    = "query"
+	finalGateE1WrstatUI        = "wrstat-ui"
+	finalGateOtherType         = finalGateSelectedTreeTypes
+)
+
+const (
+	finalGateTestDifferentDigest            = "sha256:different"
+	finalGateTestE2ExpectedDigestInput      = "expected_result_digest"
+	finalGateTestE2FactsVectorRowsInput     = "facts_vector_rows_read"
+	finalGateTestE2ParentPacketTableInput   = "parent_packet_table"
+	finalGateTestE2ProactiveWarmingInput    = "proactive_warming"
+	finalGateTestE2ReadRowsCeilingInput     = "read_rows_ceiling"
+	finalGateTestE2ScenarioDirInfosBroad    = "dirinfos_broad_parent_packet"
+	finalGateTestE2ScenarioDHCFiltered      = "dirshavechildren_filtered_parent_packet"
+	finalGateTestE2ScenarioFirstRootWhere   = "first_root_where_splits_2"
+	finalGateTestE2ScenarioHighFanoutBroad  = "high_fanout_first_click_broad"
+	finalGateTestE2ScenarioHighFanoutFilter = "high_fanout_first_click_filtered"
+	finalGateTestE2ScenarioNFSHeavyWhere    = "nfs_heavy_first_where_dir"
+	finalGateTestE2ScenarioRESTFirst        = "rest_tree_first_requests"
+	finalGateTestE2ScenarioRealWhere        = "real_first_where_dir"
+	finalGateTestE2ScenarioSwitch           = "first_filter_switch_after_unfiltered_tree"
+	finalGateTestE2ScenarioKey              = "e2_scenario"
+)
+
+type finalGateE1Assembly struct {
+	options        FinalGateReportOptions
+	manifestPath   string
+	fixtureDigest  string
+	boltReportPath string
+	logPath        string
+}
+
+func finalGateE1AssemblyFixture(
+	t *testing.T,
+	root string,
+	status string,
+) finalGateE1Assembly {
+	t.Helper()
+
+	fixturePath := filepath.Join(root, "fixture-input.txt")
+	finalGateWriteFile(t, fixturePath, "fixture input\n")
+	fixtureDigest := finalGateTestFileDigest(t, fixturePath)
+
+	manifestPath := filepath.Join(root, "fixture-manifest.json")
+	finalGateWriteExpectedDigestManifest(t, manifestPath, "project_tree_unused_1y", fixtureDigest)
+
+	clickHousePath := filepath.Join(root, "clickhouse-report.json")
+	finalGateWritePerfReport(t, clickHousePath, finalGateE1ArtifactClickHouseReport())
+
+	restPath := filepath.Join(root, "rest-report.json")
+	finalGateWritePerfReport(t, restPath, finalGateE1ArtifactRESTReport())
+
+	importPath := filepath.Join(root, "import-report.json")
+	finalGateWritePerfReport(t, importPath, finalGateE1ImportReport("import_total", 0, "not_attempted"))
+
+	spoolPath := filepath.Join(root, "spool-report.json")
+	finalGateWritePerfReport(t, spoolPath,
+		finalGateE1ImportReport("spool_load_total", 8192, finalGateComparisonStatusSuccess))
+
+	boltPath := filepath.Join(root, "bolt-report.json")
+	finalGateWritePerfReport(t, boltPath, finalGateE1BoltArtifactReport())
+
+	logPath := filepath.Join(root, "comparison.log")
+	finalGateWriteFile(t, logPath, "storage snapshot is unavailable\n")
+
+	storagePath := filepath.Join(root, "bolt.db")
+	finalGateWriteFile(t, storagePath, "bolt storage bytes")
+
+	return finalGateE1Assembly{
+		options: FinalGateReportOptions{
+			FixtureDigests: []FinalGateFixtureDigestSpec{
+				{
+					Key:          "project_tree_unused_1y",
+					ManifestPath: manifestPath,
+					InputPath:    fixturePath,
+				},
+			},
+			ClickHouseReportPaths: []string{clickHousePath},
+			RESTReportPaths:       []string{restPath},
+			ImportReportPaths:     []string{importPath},
+			SpoolLoadReportPaths:  []string{spoolPath},
+			Comparison: FinalGateComparisonSpec{
+				Kind:                finalGateComparisonKindBolt,
+				Status:              status,
+				DatasetManifestPath: manifestPath,
+				CommandArgv:         finalGateAssemblyCommand(root, status),
+				OutputArtifactPath:  finalGateOutputArtifactPath(boltPath, status),
+				StoragePath:         storagePath,
+				LogPath:             logPath,
+				AttemptedPath:       filepath.Join(root, "pre-clickhouse"),
+				SourceRevision:      "oldrev",
+				ToolVersion:         "prototype",
+			},
+		},
+		manifestPath:   manifestPath,
+		fixtureDigest:  fixtureDigest,
+		boltReportPath: boltPath,
+		logPath:        logPath,
+	}
+}
+
+func TestE1FinalGateReportEvidence(t *testing.T) {
+	Convey("E1.1 speed-gated reports require result count, digest, and correctness status", t, func() {
+		report := finalGateE1Report()
+
+		result := ValidateFinalGateReport(report)
+		So(result.Passed, ShouldBeTrue)
+		So(result.TimingEvaluated, ShouldBeTrue)
+
+		report.ClickHouseReports[0].Operations[0].ResultCount = nil
+		result = ValidateFinalGateReport(report)
+		So(result.Passed, ShouldBeFalse)
+		So(finalGateReportTestCheck(result, "E1 correctness evidence").Detail,
+			ShouldContainSubstring, "missing correctness fields")
+
+		report = finalGateE1Report()
+		delete(report.ClickHouseReports[0].Operations[0].Inputs, navigationInputResultDigest)
+		result = ValidateFinalGateReport(report)
+		So(result.Passed, ShouldBeFalse)
+		So(finalGateReportTestCheck(result, "E1 correctness evidence").Detail,
+			ShouldContainSubstring, "missing correctness fields")
+
+		report = finalGateE1Report()
+		delete(report.ClickHouseReports[0].Operations[0].Inputs, finalGateCorrectnessStatusInput)
+		result = ValidateFinalGateReport(report)
+		So(result.Passed, ShouldBeFalse)
+		So(finalGateReportTestCheck(result, "E1 correctness evidence").Detail,
+			ShouldContainSubstring, "missing correctness fields")
+	})
+
+	Convey("E1.2 REST tree and where reports include REST counters, byte sizes, and percentiles", t, func() {
+		report := finalGateE1Report()
+		op := report.RESTReports[0].Operations[0]
+
+		So(uint64SliceInput(op.Inputs, "query_count"), ShouldResemble, finalGateE1Counts(1))
+		So(uint64SliceInput(op.Inputs, finalGateRESTInputCacheHits), ShouldResemble, finalGateE1Counts(2))
+		So(uint64SliceInput(op.Inputs, finalGateRESTInputCacheMisses), ShouldResemble, finalGateE1Counts(3))
+		So(uint64SliceInput(op.Inputs, finalGateRESTInputJSONBytes), ShouldResemble, finalGateE1Counts(4096))
+		So(uint64SliceInput(op.Inputs, finalGateRESTInputGzipBytes), ShouldResemble, finalGateE1Counts(1024))
+		So(op.P50MS, ShouldEqual, 3.0)
+		So(op.P95MS, ShouldEqual, 5.0)
+		So(op.P99MS, ShouldEqual, 5.0)
+
+		delete(report.RESTReports[0].Operations[0].Inputs, finalGateRESTInputJSONBytes)
+		result := ValidateFinalGateReport(report)
+		So(result.Passed, ShouldBeFalse)
+		So(finalGateReportTestCheck(result, "E1 REST evidence").Detail,
+			ShouldContainSubstring, "REST evidence")
+	})
+
+	Convey("E1.3 ClickHouse query reports include read and result counters", t, func() {
+		report := finalGateE1Report()
+		op := report.ClickHouseReports[0].Operations[0]
+
+		So(op.ReadRows, ShouldResemble, finalGateE1Counts(10))
+		So(op.ReadBytes, ShouldResemble, finalGateE1Counts(2048))
+		So(op.ReadMarks, ShouldResemble, finalGateE1Counts(4))
+		So(op.ResultCount, ShouldResemble, finalGateE1Counts(7))
+		So(op.ResultBytes, ShouldResemble, finalGateE1Counts(512))
+
+		report.ClickHouseReports[0].Operations[0].ResultBytes = nil
+		result := ValidateFinalGateReport(report)
+		So(result.Passed, ShouldBeFalse)
+		So(finalGateReportTestCheck(result, "E1 ClickHouse evidence").Detail,
+			ShouldContainSubstring, "result bytes")
+	})
+
+	Convey("E1.4 direct import reports include table, resource, cleanup, and publish evidence", t, func() {
+		report := finalGateE1Report()
+		total := report.ImportReports[0].Operations[0]
+
+		So(report.ImportReports[0].TableStats[tableFiles].Rows, ShouldEqual, uint64(17))
+		So(report.ImportReports[0].TableStats[tableFiles].ActiveParts, ShouldEqual, uint64(2))
+		So(uint64Input(total.Inputs, importInputUserCPUMS), ShouldEqual, uint64(11))
+		So(uint64Input(total.Inputs, importInputSystemCPUMS), ShouldEqual, uint64(13))
+		So(uint64Input(total.Inputs, importInputTotalCPUMS), ShouldEqual, uint64(24))
+		So(uint64Input(total.Inputs, importInputPeakRSSBytes), ShouldEqual, uint64(4096))
+		So(uint64Input(total.Inputs, finalGateE2InputSpoolBytes), ShouldEqual, uint64(0))
+		So(uint64Input(total.Inputs, importInputPublishLatency), ShouldEqual, uint64(19))
+		So(total.Inputs["retry_cleanup_result"], ShouldEqual, "not_attempted")
+
+		delete(report.ImportReports[0].Operations[0].Inputs, importInputUserCPUMS)
+		result := ValidateFinalGateReport(report)
+		So(result.Passed, ShouldBeFalse)
+		So(finalGateReportTestCheck(result, "E1 import evidence").Detail,
+			ShouldContainSubstring, "import evidence")
+	})
+
+	Convey("E1.5 summarise spool-load reports include load, resource, cleanup, and publish evidence", t, func() {
+		report := finalGateE1Report()
+		total := report.SpoolLoadReports[0].Operations[0]
+
+		So(uint64MapInput(total.Inputs, "loaded_table_rows")[tableFiles], ShouldEqual, uint64(17))
+		So(uint64Input(total.Inputs, finalGateE2InputSpoolBytes), ShouldEqual, uint64(8192))
+		So(total.Inputs["retry_cleanup_result"], ShouldEqual, finalGateComparisonStatusSuccess)
+
+		delete(report.SpoolLoadReports[0].Operations[0].Inputs, "loaded_table_rows")
+		result := ValidateFinalGateReport(report)
+		So(result.Passed, ShouldBeFalse)
+		So(finalGateReportTestCheck(result, "E1 spool-load evidence").Detail,
+			ShouldContainSubstring, "spool-load evidence")
+	})
+
+	Convey("E1.6 final gate fails without Bolt or sidecar comparison evidence", t, func() {
+		report := finalGateE1Report()
+		report.Comparison = nil
+
+		result := ValidateFinalGateReport(report)
+
+		So(result.Passed, ShouldBeFalse)
+		So(finalGateReportTestCheck(result, "E1 comparison presence").Detail,
+			ShouldContainSubstring, "missing comparison evidence")
+	})
+
+	Convey("E1.7 successful same-subset comparison writes required Bolt evidence", t, func() {
+		root := t.TempDir()
+		assembly := finalGateE1AssemblyFixture(t, root, finalGateComparisonStatusSuccess)
+
+		written, err := BuildFinalGateReport(assembly.options)
+
+		So(err, ShouldBeNil)
+		So(written.Comparison.Status, ShouldEqual, finalGateComparisonStatusSuccess)
+		So(written.Comparison.Kind, ShouldEqual, finalGateComparisonKindBolt)
+		So(written.Comparison.DatasetManifestPath, ShouldEqual, assembly.manifestPath)
+		So(written.Comparison.DatasetManifestSHA256, ShouldEqual, finalGateTestFileDigest(t, assembly.manifestPath))
+		So(written.Comparison.CommandArgv, ShouldResemble,
+			[]string{finalGateE1WrstatUI, finalGateE1BoltPerfCommand, finalGateE1QueryCommand, root})
+		So(written.Comparison.SourceRevision, ShouldEqual, "bolt-artefact-revision")
+		So(written.Comparison.ToolVersion, ShouldEqual, "v1.2.3-e1")
+		So(written.Comparison.OutputArtifactPath, ShouldEqual, assembly.boltReportPath)
+		So(written.Comparison.LogPath, ShouldEqual, assembly.logPath)
+		So(written.Comparison.StorageBytes, ShouldEqual, uint64(len("bolt storage bytes")))
+		So(written.Comparison.P50MS, ShouldEqual, 3.0)
+		So(written.Comparison.P95MS, ShouldEqual, 5.0)
+		So(written.Comparison.P99MS, ShouldEqual, 5.0)
+		So(written.Comparison.ResultDigest, ShouldEqual, finalGateE1Digest("comparison"))
+		So(written.Comparison.FallbackCount, ShouldEqual, uint64(1))
+
+		So(written.FixtureDigests[0].ExpectedDigest, ShouldEqual, assembly.fixtureDigest)
+		So(written.FixtureDigests[0].RecomputedDigest, ShouldEqual, assembly.fixtureDigest)
+		So(written.ClickHouseReports[0].Operations[0].Inputs[finalGateCorrectnessStatusInput],
+			ShouldEqual, finalGateComparisonStatusSuccess)
+		So(written.RESTReports[0].Operations[0].Inputs[finalGateCorrectnessStatusInput],
+			ShouldEqual, finalGateComparisonStatusSuccess)
+		So(ValidateFinalGateReport(written).Passed, ShouldBeTrue)
+	})
+
+	Convey("E1.8 infeasible comparison writes attempted route and evidence-backed reason", t, func() {
+		root := t.TempDir()
+		assembly := finalGateE1AssemblyFixture(t, root, finalGateComparisonInfeasible)
+
+		written, err := BuildFinalGateReport(assembly.options)
+
+		So(err, ShouldBeNil)
+		So(written.Comparison.Status, ShouldEqual, "infeasible")
+		So(written.Comparison.AttemptedPath, ShouldEqual, filepath.Join(root, "pre-clickhouse"))
+		So(written.Comparison.CommandArgv, ShouldResemble, []string{finalGateE1OldWrstatUI, finalGateWhereCommandName})
+		So(written.Comparison.DatasetManifestPath, ShouldEqual, assembly.manifestPath)
+		So(written.Comparison.DatasetManifestSHA256, ShouldEqual, finalGateTestFileDigest(t, assembly.manifestPath))
+		So(written.Comparison.SourceRevision, ShouldEqual, "oldrev")
+		So(written.Comparison.ToolVersion, ShouldEqual, "prototype")
+		So(written.Comparison.LogPath, ShouldEqual, assembly.logPath)
+		So(written.Comparison.ErrorOutput, ShouldContainSubstring, "storage snapshot is unavailable")
+		So(written.ClickHouseReports[0].Operations[0].Inputs[finalGateCorrectnessStatusInput],
+			ShouldEqual, finalGateComparisonInfeasible)
+	})
+
+	Convey("E1.9 complete infeasible comparison blocks the gate instead of passing", t, func() {
+		report := finalGateE1Report()
+		report.Comparison = finalGateE1InfeasibleComparison()
+
+		result := ValidateFinalGateReport(report)
+
+		So(result.Passed, ShouldBeFalse)
+		So(result.Blocked, ShouldBeTrue)
+		So(result.Status, ShouldEqual, "blocked")
+		So(finalGateReportTestCheck(result, "E1 infeasible comparison block").Blocked, ShouldBeTrue)
+		So(finalGateReportTestCheck(result, "E1 infeasible comparison block").Detail,
+			ShouldContainSubstring, "requires unavailable storage snapshot")
+		So(finalGateReportTestCheck(result, "E1 infeasible comparison block").Detail,
+			ShouldContainSubstring, "/tmp/infeasible.log")
+	})
+
+	Convey("E1.10 fixture digest validation fails missing or stale expected digests before timing", t, func() {
+		report := finalGateE1Report()
+		report.FixtureDigests[0].ExpectedDigest = ""
+
+		result := ValidateFinalGateReport(report)
+		So(result.Passed, ShouldBeFalse)
+		So(result.TimingEvaluated, ShouldBeFalse)
+		So(finalGateReportTestCheck(result, "E1 fixture digest validation").Detail,
+			ShouldContainSubstring, "missing expected digest")
+
+		report = finalGateE1Report()
+		report.FixtureDigests[0].ExpectedDigest = finalGateE1Digest("stale")
+
+		result = ValidateFinalGateReport(report)
+		So(result.Passed, ShouldBeFalse)
+		So(result.TimingEvaluated, ShouldBeFalse)
+		So(finalGateReportTestCheck(result, "E1 fixture digest validation").Detail,
+			ShouldContainSubstring, "stale expected digest")
+	})
+}
+
+func finalGateE1Report() FinalGateReport {
+	return FinalGateReport{
+		SchemaVersion: finalGateReportSchemaVersion,
+		FixtureDigests: []FinalGateFixtureDigestEvidence{
+			{
+				Key:              "project_tree_unused_1y",
+				ManifestPath:     "/fixtures/project/manifest.json",
+				ExpectedDigest:   finalGateE1Digest("fixture"),
+				RecomputedDigest: finalGateE1Digest("fixture"),
+			},
+		},
+		ClickHouseReports: []perfreport.Report{finalGateE1ClickHouseReport()},
+		RESTReports:       []perfreport.Report{finalGateE1RESTReport()},
+		ImportReports:     []perfreport.Report{finalGateE1ImportReport("import_total", 0, "not_attempted")},
+		SpoolLoadReports: []perfreport.Report{
+			finalGateE1ImportReport("spool_load_total", 8192, finalGateComparisonStatusSuccess),
+		},
+		Comparison: finalGateE1SuccessComparison(),
+	}
+}
+
+func finalGateE1Digest(label string) string {
+	return "sha256:e1-" + label
+}
+
+func finalGateE1ClickHouseReport() perfreport.Report {
+	report := perfreport.NewReport("clickhouse", "/fixtures/mixed8", finalGateMinRepeats, 0)
+	inputs := map[string]any{
+		queryInputDirKey:                finalGateE1ProjectDir,
+		navigationInputResultDigest:     finalGateE1Digest("query"),
+		finalGateCorrectnessStatusInput: finalGateComparisonStatusSuccess,
+	}
+	report.AddOperationWithFullCounters(
+		queryOpTreeWhereName,
+		inputs,
+		[]float64{1, 2, 3, 4, 5},
+		finalGateE1Counts(10),
+		finalGateE1Counts(2048),
+		finalGateE1Counts(4),
+		finalGateE1Counts(128),
+		finalGateE1Counts(512),
+		finalGateE1Counts(7),
+	)
+
+	return report
+}
+
+func finalGateE1Counts(value uint64) []uint64 {
+	return []uint64{value, value, value, value, value}
+}
+
+func finalGateE1RESTReport() perfreport.Report {
+	report := perfreport.NewReport("clickhouse_rest", "/fixtures/mixed8", finalGateMinRepeats, 0)
+	inputs := finalGateRESTInputs(
+		"/rest/v1/auth/tree",
+		map[string]string{finalGateRESTParamPath: finalGateE1ProjectDir},
+		finalGateE1Digest("rest"),
+	)
+	inputs[finalGateCorrectnessStatusInput] = finalGateComparisonStatusSuccess
+	inputs["query_count"] = finalGateE1Counts(1)
+	inputs[finalGateRESTInputCacheHits] = finalGateE1Counts(2)
+	inputs[finalGateRESTInputCacheMisses] = finalGateE1Counts(3)
+	inputs[finalGateRESTInputJSONBytes] = finalGateE1Counts(4096)
+	inputs[finalGateRESTInputGzipBytes] = finalGateE1Counts(1024)
+	report.AddOperationWithCounters(
+		finalGateRESTOpTree,
+		inputs,
+		[]float64{1, 2, 3, 4, 5},
+		nil,
+		nil,
+		nil,
+		finalGateE1Counts(3),
+	)
+
+	whereInputs := finalGateRESTInputs(
+		"/rest/v1/where",
+		map[string]string{queryInputDirKey: finalGateE1ProjectDir},
+		finalGateE1Digest("rest-where"),
+	)
+	whereInputs[finalGateCorrectnessStatusInput] = finalGateComparisonStatusSuccess
+	whereInputs["query_count"] = finalGateE1Counts(1)
+	whereInputs[finalGateRESTInputCacheHits] = finalGateE1Counts(2)
+	whereInputs[finalGateRESTInputCacheMisses] = finalGateE1Counts(3)
+	whereInputs[finalGateRESTInputJSONBytes] = finalGateE1Counts(4096)
+	whereInputs[finalGateRESTInputGzipBytes] = finalGateE1Counts(1024)
+	report.AddOperationWithCounters(
+		finalGateRESTOpWhere,
+		whereInputs,
+		[]float64{1, 2, 3, 4, 5},
+		nil,
+		nil,
+		nil,
+		finalGateE1Counts(3),
+	)
+
+	return report
+}
+
+func finalGateE1ImportReport(operation string, spoolBytes uint64, cleanup string) perfreport.Report {
+	report := perfreport.NewReport("clickhouse", "/fixtures/mixed8", 1, 0)
+	report.MaxRSSBytes = 4096
+	report.TableStats = map[string]perfreport.TableStats{
+		tableFiles: {
+			Rows:              17,
+			ActiveParts:       2,
+			CompressedBytes:   300,
+			UncompressedBytes: 900,
+		},
+		tableDirSummary: {
+			Rows:              5,
+			ActiveParts:       1,
+			CompressedBytes:   100,
+			UncompressedBytes: 200,
+		},
+	}
+
+	inputs := map[string]any{
+		importInputUserCPUMS:       uint64(11),
+		importInputSystemCPUMS:     uint64(13),
+		importInputTotalCPUMS:      uint64(24),
+		importInputPeakRSSBytes:    uint64(4096),
+		finalGateE2InputSpoolBytes: spoolBytes,
+		finalGateE2InputPartCounts: map[string]uint64{tableFiles: 2, tableDirSummary: 1},
+		"retry_cleanup_result":     cleanup,
+		importInputPublishLatency:  uint64(19),
+	}
+	if operation == "spool_load_total" {
+		inputs["loaded_table_rows"] = map[string]uint64{tableFiles: 17, tableDirSummary: 5}
+	}
+
+	report.AddOperation(operation, inputs, []float64{42})
+
+	return report
+}
+
+func finalGateE1SuccessComparison() *FinalGateComparisonEvidence {
+	return &FinalGateComparisonEvidence{
+		Kind:                  finalGateComparisonKindBolt,
+		Status:                finalGateComparisonStatusSuccess,
+		DatasetManifestPath:   "/fixtures/mixed8/manifest.json",
+		DatasetManifestSHA256: finalGateE1Digest("manifest"),
+		CommandArgv:           []string{finalGateE1WrstatUI, finalGateE1BoltPerfCommand, finalGateE1QueryCommand},
+		SourceRevision:        "abcdef0",
+		ToolVersion:           "v0.0.0-test",
+		OutputArtifactPath:    "/tmp/bolt-report.json",
+		LogPath:               "/tmp/bolt-report.log",
+		StorageBytes:          12345,
+		P50MS:                 1,
+		P95MS:                 2,
+		P99MS:                 3,
+		ResultDigest:          finalGateE1Digest("comparison"),
+		FallbackCount:         0,
+	}
+}
+
+func finalGateReportTestCheck(result FinalGateReportResult, name string) FinalGateCheck {
+	for _, check := range result.Checks {
+		if check.Name == name {
+			return check
+		}
+	}
+
+	return FinalGateCheck{}
+}
+
+func finalGateTestFileDigest(t *testing.T, path string) string {
+	t.Helper()
+
+	data, err := os.ReadFile(path)
+	So(err, ShouldBeNil)
+
+	sum := sha256.Sum256(data)
+
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+func finalGateE1InfeasibleComparison() *FinalGateComparisonEvidence {
+	return &FinalGateComparisonEvidence{
+		Kind:                  finalGateComparisonKindBolt,
+		Status:                "infeasible",
+		AttemptedPath:         "/src/pre-clickhouse",
+		DatasetManifestPath:   "/fixtures/mixed8/manifest.json",
+		DatasetManifestSHA256: finalGateE1Digest("manifest"),
+		CommandArgv:           []string{finalGateE1OldWrstatUI, finalGateWhereCommandName},
+		SourceRevision:        "oldrev",
+		ToolVersion:           "prototype",
+		LogPath:               "/tmp/infeasible.log",
+		Reason:                "requires unavailable storage snapshot",
+	}
+}
+
+func TestE2ColdPerformanceGates(t *testing.T) {
+	Convey("E2.1 REST tree first requests are cold, correct, and under 500 ms", t, func() {
+		evidence := finalGateE2Evidence()
+
+		result := ValidateFinalGates(evidence)
+
+		So(finalGateTestCheck(result, "E2 REST tree first requests").Passed, ShouldBeTrue)
+		finalGateE2RESTTreeOp(evidence, finalGateNFSRootDir, func(op perfreport.Operation) {
+			So(op.P95MS, ShouldBeLessThan, 500)
+			So(op.Inputs[finalGateTestE2ProactiveWarmingInput], ShouldBeFalse)
+			So(op.Inputs[navigationInputResultDigest], ShouldEqual,
+				op.Inputs[finalGateTestE2ExpectedDigestInput])
+		})
+
+		finalGateMutateE2OpRoot(
+			&evidence,
+			finalGateTestE2ScenarioRESTFirst,
+			finalGateNFSRootDir,
+			func(op *perfreport.Operation) {
+				op.Inputs[navigationInputResultDigest] = finalGateTestDifferentDigest
+				op.P95MS = 900
+			},
+		)
+
+		result = ValidateFinalGates(evidence)
+		So(finalGateTestCheck(result, "E2 REST tree first requests").Passed, ShouldBeFalse)
+		So(finalGateTestCheck(result, "E2 REST tree first requests").Detail,
+			ShouldContainSubstring, finalGateResultDigestMismatch)
+	})
+
+	Convey("E2.1 REST tree first requests reject infeasible correctness before timing", t, func() {
+		evidence := finalGateE2Evidence()
+		finalGateMutateE2OpRoot(
+			&evidence,
+			finalGateTestE2ScenarioRESTFirst,
+			finalGateNFSRootDir,
+			func(op *perfreport.Operation) {
+				op.Inputs[finalGateCorrectnessStatusInput] = finalGateComparisonInfeasible
+				op.P95MS = 900
+			},
+		)
+
+		result := ValidateFinalGates(evidence)
+
+		So(finalGateTestCheck(result, "E2 REST tree first requests").Passed, ShouldBeFalse)
+		So(finalGateTestCheck(result, "E2 REST tree first requests").Detail,
+			ShouldContainSubstring, "correctness equivalence status")
+	})
+
+	Convey("E2.2 high-fanout broad first click uses one current read and one parent packet", t, func() {
+		evidence := finalGateE2Evidence()
+
+		result := ValidateFinalGates(evidence)
+
+		So(finalGateTestCheck(result, "E2 high-fanout first click broad").Passed, ShouldBeTrue)
+		finalGateE2ScenarioOp(evidence, finalGateTestE2ScenarioHighFanoutBroad, func(op perfreport.Operation) {
+			So(uint64Input(op.Inputs, "current_read_count"), ShouldEqual, uint64(1))
+			So(uint64Input(op.Inputs, "parent_packet_read_count"), ShouldEqual, uint64(1))
+			So(op.Inputs[finalGateTestE2ParentPacketTableInput], ShouldEqual, tableParentFacts)
+			So(uint64Input(op.Inputs, "per_child_query_count"), ShouldEqual, uint64(0))
+			So(uint64Input(op.Inputs, "subtree_scan_count"), ShouldEqual, uint64(0))
+		})
+
+		finalGateMutateE2Op(&evidence, finalGateTestE2ScenarioHighFanoutBroad, func(op *perfreport.Operation) {
+			op.Inputs["parent_packet_read_count"] = uint64(2)
+		})
+
+		result = ValidateFinalGates(evidence)
+		So(finalGateTestCheck(result, "E2 high-fanout first click broad").Passed, ShouldBeFalse)
+		So(finalGateTestCheck(result, "E2 high-fanout first click broad").Detail,
+			ShouldContainSubstring, "parent-packet")
+	})
+
+	Convey("E2.3 high-fanout filtered first click uses one child-filter packet", t, func() {
+		evidence := finalGateE2Evidence()
+
+		result := ValidateFinalGates(evidence)
+
+		So(finalGateTestCheck(result, "E2 high-fanout first click filtered").Passed, ShouldBeTrue)
+		finalGateE2ScenarioOp(evidence, finalGateTestE2ScenarioHighFanoutFilter, func(op perfreport.Operation) {
+			So(op.Inputs[finalGateTestE2ParentPacketTableInput], ShouldEqual, "wrstat_child_filter_all")
+			So(uint64Input(op.Inputs, "per_child_query_count"), ShouldEqual, uint64(0))
+			So(uint64Input(op.Inputs, "subtree_scan_count"), ShouldEqual, uint64(0))
+		})
+
+		finalGateMutateE2Op(&evidence, finalGateTestE2ScenarioHighFanoutFilter, func(op *perfreport.Operation) {
+			op.Inputs[finalGateTestE2ParentPacketTableInput] = tableParentFacts
+		})
+
+		result = ValidateFinalGates(evidence)
+		So(finalGateTestCheck(result, "E2 high-fanout first click filtered").Passed, ShouldBeFalse)
+		So(finalGateTestCheck(result, "E2 high-fanout first click filtered").Detail,
+			ShouldContainSubstring, "wrstat_child_filter_all")
+	})
+
+	Convey("E2.4 focused high-fanout DirInfos broad uses one parent-facts packet", t, func() {
+		evidence := finalGateE2Evidence()
+
+		result := ValidateFinalGates(evidence)
+
+		So(finalGateTestCheck(result, "E2 high-fanout DirInfos broad").Passed, ShouldBeTrue)
+
+		finalGateMutateE2Op(&evidence, finalGateTestE2ScenarioDirInfosBroad, func(op *perfreport.Operation) {
+			op.Inputs["per_child_query_count"] = uint64(1)
+		})
+
+		result = ValidateFinalGates(evidence)
+		So(finalGateTestCheck(result, "E2 high-fanout DirInfos broad").Passed, ShouldBeFalse)
+		So(finalGateTestCheck(result, "E2 high-fanout DirInfos broad").Detail,
+			ShouldContainSubstring, "per-child")
+	})
+
+	Convey("E2.5 focused high-fanout DirInfos filtered avoids facts vectors and subtree scans", t, func() {
+		evidence := finalGateE2Evidence()
+
+		result := ValidateFinalGates(evidence)
+
+		So(finalGateTestCheck(result, "E2 high-fanout DirInfos filtered").Passed, ShouldBeTrue)
+
+		finalGateMutateE2Op(&evidence, "dirinfos_filtered_child_filter_packet", func(op *perfreport.Operation) {
+			op.Inputs[finalGateTestE2FactsVectorRowsInput] = uint64(1)
+		})
+
+		result = ValidateFinalGates(evidence)
+		So(finalGateTestCheck(result, "E2 high-fanout DirInfos filtered").Passed, ShouldBeFalse)
+		So(finalGateTestCheck(result, "E2 high-fanout DirInfos filtered").Detail,
+			ShouldContainSubstring, "facts-vector")
+	})
+
+	Convey("E2.6 focused high-fanout DirsHaveChildren broad enforces bounded reads", t, func() {
+		evidence := finalGateE2Evidence()
+
+		result := ValidateFinalGates(evidence)
+
+		So(finalGateTestCheck(result, "E2 high-fanout DirsHaveChildren broad").Passed, ShouldBeTrue)
+
+		finalGateMutateE2Op(&evidence, "dirshavechildren_broad_parent_packet", func(op *perfreport.Operation) {
+			op.ReadRows = []uint64{uint64Input(op.Inputs, finalGateTestE2ReadRowsCeilingInput) + 1}
+		})
+
+		result = ValidateFinalGates(evidence)
+		So(finalGateTestCheck(result, "E2 high-fanout DirsHaveChildren broad").Passed, ShouldBeFalse)
+		So(finalGateTestCheck(result, "E2 high-fanout DirsHaveChildren broad").Detail,
+			ShouldContainSubstring, "read-volume")
+	})
+
+	Convey("E2.7 focused high-fanout DirsHaveChildren filtered returns only expected true children", t, func() {
+		evidence := finalGateE2Evidence()
+
+		result := ValidateFinalGates(evidence)
+
+		So(finalGateTestCheck(result, "E2 high-fanout DirsHaveChildren filtered").Passed, ShouldBeTrue)
+		finalGateE2ScenarioOp(evidence, finalGateTestE2ScenarioDHCFiltered, func(op perfreport.Operation) {
+			So(stringSliceInput(op.Inputs, "actual_true_children"),
+				ShouldResemble, stringSliceInput(op.Inputs, "expected_true_children"))
+			So(uint64Input(op.Inputs, finalGateTestE2FactsVectorRowsInput), ShouldEqual, uint64(0))
+		})
+
+		finalGateMutateE2Op(&evidence, finalGateTestE2ScenarioDHCFiltered, func(op *perfreport.Operation) {
+			op.Inputs["actual_true_children"] = []string{"/unexpected/"}
+		})
+
+		result = ValidateFinalGates(evidence)
+		So(finalGateTestCheck(result, "E2 high-fanout DirsHaveChildren filtered").Passed, ShouldBeFalse)
+		So(finalGateTestCheck(result, "E2 high-fanout DirsHaveChildren filtered").Detail,
+			ShouldContainSubstring, "expected child")
+	})
+
+	Convey("E2.8 first root where with splits 2 matches current facts under 1 s", t, func() {
+		evidence := finalGateE2Evidence()
+
+		result := ValidateFinalGates(evidence)
+
+		So(finalGateTestCheck(result, "E2 first root where splits 2").Passed, ShouldBeTrue)
+
+		finalGateMutateE2Op(&evidence, finalGateTestE2ScenarioFirstRootWhere, func(op *perfreport.Operation) {
+			op.Inputs[queryInputSplitsKey] = uint64(3)
+		})
+
+		result = ValidateFinalGates(evidence)
+		So(finalGateTestCheck(result, "E2 first root where splits 2").Passed, ShouldBeFalse)
+		So(finalGateTestCheck(result, "E2 first root where splits 2").Detail,
+			ShouldContainSubstring, "splits 2")
+	})
+
+	Convey("E2.9 first filter switch does not reuse broad packet cache entries", t, func() {
+		evidence := finalGateE2Evidence()
+
+		result := ValidateFinalGates(evidence)
+
+		So(finalGateTestCheck(result, "E2 first filter switch").Passed, ShouldBeTrue)
+
+		finalGateMutateE2Op(&evidence, finalGateTestE2ScenarioSwitch, func(op *perfreport.Operation) {
+			op.Inputs["used_broad_packet_cache"] = true
+		})
+
+		result = ValidateFinalGates(evidence)
+		So(finalGateTestCheck(result, "E2 first filter switch").Passed, ShouldBeFalse)
+		So(finalGateTestCheck(result, "E2 first filter switch").Detail,
+			ShouldContainSubstring, "broad packet cache")
+	})
+
+	Convey("E2.9 first filter switch requires cold cache scope and scoped parent-packet hits", t, func() {
+		evidence := finalGateE2Evidence()
+		finalGateMutateE2Op(&evidence, finalGateTestE2ScenarioSwitch, func(op *perfreport.Operation) {
+			delete(op.Inputs, queryInputCacheScope)
+		})
+
+		result := ValidateFinalGates(evidence)
+
+		So(finalGateTestCheck(result, "E2 first filter switch").Passed, ShouldBeFalse)
+		So(finalGateTestCheck(result, "E2 first filter switch").Detail, ShouldContainSubstring, "cache scope")
+
+		evidence = finalGateE2Evidence()
+		finalGateMutateE2Op(&evidence, finalGateTestE2ScenarioSwitch, func(op *perfreport.Operation) {
+			op.Inputs[queryInputCacheHitKeysKey] = []string{
+				"parent_packet:path=" + finalGateHighFanoutParentDir + ";filter=other;active_set_id=e2;query_version=1",
+				"active_prefix_summary:path=/prior/;filter=ft:1;active_set_id=old;query_version=1",
+			}
+		})
+
+		result = ValidateFinalGates(evidence)
+		So(finalGateTestCheck(result, "E2 first filter switch").Passed, ShouldBeFalse)
+		So(finalGateTestCheck(result, "E2 first filter switch").Detail, ShouldContainSubstring, "cache hit")
+	})
+
+	Convey("E2.9 rejects root parent-packet hit keys scoped to another parent", t, func() {
+		evidence := finalGateE2Evidence()
+		finalGateMutateE2OpRoot(&evidence, finalGateTestE2ScenarioFirstRootWhere, "/", func(op *perfreport.Operation) {
+			op.Inputs[queryInputCacheHitKeysKey] = []string{
+				"parent_packet:parent_dir=/unrelated/;filter=other;active_set_id=e2;query_version=1",
+			}
+		})
+
+		result := ValidateFinalGates(evidence)
+
+		So(finalGateTestCheck(result, "E2 first root where splits 2").Passed, ShouldBeFalse)
+		So(finalGateTestCheck(result, "E2 first root where splits 2").Detail,
+			ShouldContainSubstring, "cache hit")
+	})
+
+	Convey("E2.9 rejects parent-packet hit keys that only prefix-match the operation root", t, func() {
+		evidence := finalGateE2Evidence()
+		root := strings.TrimSuffix(finalGateHighFanoutParentDir, "/")
+
+		finalGateMutateE2Op(&evidence, finalGateTestE2ScenarioSwitch, func(op *perfreport.Operation) {
+			op.Inputs[queryInputDirKey] = root
+			op.Inputs[queryInputCacheHitKeysKey] = []string{
+				"parent_packet:parent_dir=" + root + "child/;filter=other;active_set_id=e2;query_version=1",
+			}
+		})
+
+		result := ValidateFinalGates(evidence)
+
+		So(finalGateTestCheck(result, "E2 first filter switch").Passed, ShouldBeFalse)
+		So(finalGateTestCheck(result, "E2 first filter switch").Detail,
+			ShouldContainSubstring, "cache hit")
+	})
+
+	Convey("E2.10 real first where --dir root and high-fanout match current facts", t, func() {
+		evidence := finalGateE2Evidence()
+
+		result := ValidateFinalGates(evidence)
+
+		So(finalGateTestCheck(result, "E2 real first where dirs").Passed, ShouldBeTrue)
+
+		finalGateMutateE2OpRoot(&evidence, finalGateTestE2ScenarioRealWhere, finalGateHighFanoutParentDir,
+			func(op *perfreport.Operation) {
+				op.Inputs[navigationInputResultDigest] = "sha256:wrong-high-fanout"
+			})
+
+		result = ValidateFinalGates(evidence)
+		So(finalGateTestCheck(result, "E2 real first where dirs").Passed, ShouldBeFalse)
+		So(finalGateTestCheck(result, "E2 real first where dirs").Detail,
+			ShouldContainSubstring, finalGateResultDigestMismatch)
+	})
+
+	Convey("E2.11 NFS-heavy first where --dir matches current facts under 2 s", t, func() {
+		evidence := finalGateE2Evidence()
+
+		result := ValidateFinalGates(evidence)
+
+		So(finalGateTestCheck(result, "E2 NFS-heavy first where").Passed, ShouldBeTrue)
+
+		finalGateMutateE2Op(&evidence, finalGateTestE2ScenarioNFSHeavyWhere, func(op *perfreport.Operation) {
+			op.P95MS = 2000
+		})
+
+		result = ValidateFinalGates(evidence)
+		So(finalGateTestCheck(result, "E2 NFS-heavy first where").Passed, ShouldBeFalse)
+		So(finalGateTestCheck(result, "E2 NFS-heavy first where").Detail, ShouldContainSubstring, "p95")
+	})
+
+	Convey("E2.12 import and spool-load budgets are computed from measured reports", t, func() {
+		evidence := finalGateE2Evidence()
+
+		result := ValidateFinalGates(evidence)
+
+		So(finalGateTestCheck(result, "E2 import and spool budgets").Passed, ShouldBeTrue)
+		finalGateE2ImportBudgetOp(evidence.ImportReports[0], "import_total", func(op perfreport.Operation) {
+			So(op.Inputs["budget_source"], ShouldBeNil)
+			So(op.Inputs["budget_measurement_count"], ShouldBeNil)
+			So(op.Inputs["wall_time_budget_ms"], ShouldBeNil)
+		})
+
+		finalGateMutateImportBudgetOp(&evidence.ImportReports[0], "import_total", func(op *perfreport.Operation) {
+			op.Inputs["budget_source"] = "hardcoded_before_measurement"
+		})
+
+		result = ValidateFinalGates(evidence)
+		So(finalGateTestCheck(result, "E2 import and spool budgets").Passed, ShouldBeFalse)
+		So(finalGateTestCheck(result, "E2 import and spool budgets").Detail,
+			ShouldContainSubstring, "computed from measurements")
+	})
+
+	Convey("E2.12 rejects import budgets without measured resource evidence", t, func() {
+		for _, key := range []string{importInputTotalCPUMS, importInputPeakRSSBytes, finalGateE2InputSpoolBytes} {
+			evidence := finalGateE2Evidence()
+			finalGateMutateImportBudgetOp(&evidence.ImportReports[0], "import_total", func(op *perfreport.Operation) {
+				delete(op.Inputs, key)
+			})
+
+			result := ValidateFinalGates(evidence)
+			check := finalGateTestCheck(result, "E2 import and spool budgets")
+			So(check.Passed, ShouldBeFalse)
+			So(check.Detail, ShouldContainSubstring, "missing measured "+key)
+		}
+
+		evidence := finalGateE2Evidence()
+		finalGateMutateImportBudgetOp(&evidence.ImportReports[0], "import_total", func(op *perfreport.Operation) {
+			op.Inputs[finalGateE2InputPartCounts] = map[string]uint64{}
+		})
+
+		result := ValidateFinalGates(evidence)
+		check := finalGateTestCheck(result, "E2 import and spool budgets")
+		So(check.Passed, ShouldBeFalse)
+		So(check.Detail, ShouldContainSubstring, "missing measured "+finalGateE2InputPartCounts)
+	})
+
+	Convey("E2.12 rejects spool-load budgets without measured resource evidence", t, func() {
+		for _, key := range []string{importInputTotalCPUMS, importInputPeakRSSBytes, finalGateE2InputSpoolBytes} {
+			report := finalGateE1ImportReport("spool_load_total", 8192, finalGateComparisonStatusSuccess)
+			finalGateMutateImportBudgetOp(&report, "spool_load_total", func(op *perfreport.Operation) {
+				delete(op.Inputs, key)
+			})
+
+			reason := finalGateE2BudgetReportsFailure([]perfreport.Report{report}, "spool_load_total")
+			So(reason, ShouldContainSubstring, "missing measured "+key)
+		}
+
+		report := finalGateE1ImportReport("spool_load_total", 8192, finalGateComparisonStatusSuccess)
+		finalGateMutateImportBudgetOp(&report, "spool_load_total", func(op *perfreport.Operation) {
+			op.Inputs[finalGateE2InputPartCounts] = map[string]uint64{}
+		})
+
+		reason := finalGateE2BudgetReportsFailure([]perfreport.Report{report}, "spool_load_total")
+		So(reason, ShouldContainSubstring, "missing measured "+finalGateE2InputPartCounts)
+	})
+}
+
+func finalGateE2Evidence() FinalGateEvidence {
+	return finalGateTestEvidence(false, false)
+}
 
 func TestValidateFinalGates(t *testing.T) {
-	Convey("ValidateFinalGates covers all 25 final acceptance gates", t, func() {
+	Convey("ValidateFinalGates covers all 37 final acceptance gates", t, func() {
 		result := ValidateFinalGates(finalGateTestEvidence(false, false))
 
 		So(result.Passed, ShouldBeTrue)
-		So(result.Checks, ShouldHaveLength, 25)
+		So(result.TimingEvaluated, ShouldBeTrue)
+		So(result.Checks, ShouldHaveLength, 37)
 
 		for i, check := range result.Checks {
 			So(check.ID, ShouldEqual, i+1)
@@ -62,6 +929,35 @@ func TestValidateFinalGates(t *testing.T) {
 		So(result.Passed, ShouldBeFalse)
 		So(result.Checks[0].Passed, ShouldBeFalse)
 		So(result.Checks[0].Detail, ShouldContainSubstring, "at least 5")
+	})
+
+	Convey("ValidateFinalGates validates E1 before speed gates", t, func() {
+		evidence := finalGateTestEvidence(false, false)
+		evidence.FinalGateReport.FixtureDigests[0].ExpectedDigest = ""
+
+		result := ValidateFinalGates(evidence)
+
+		So(result.Passed, ShouldBeFalse)
+		So(result.Status, ShouldEqual, finalGateReportStatusFailed)
+		So(result.TimingEvaluated, ShouldBeFalse)
+		So(result.Checks, ShouldHaveLength, 1)
+		So(result.Checks[0].Name, ShouldEqual, "E1 fixture digest validation")
+		So(result.Checks[0].Detail, ShouldContainSubstring, "missing expected digest")
+	})
+
+	Convey("ValidateFinalGates blocks on infeasible E1 comparison before speed gates", t, func() {
+		evidence := finalGateTestEvidence(false, false)
+		evidence.FinalGateReport.Comparison = finalGateE1InfeasibleComparison()
+		finalGateSetReportCorrectnessStatus(evidence.FinalGateReport, finalGateComparisonInfeasible)
+
+		result := ValidateFinalGates(evidence)
+
+		So(result.Passed, ShouldBeFalse)
+		So(result.Blocked, ShouldBeTrue)
+		So(result.Status, ShouldEqual, finalGateReportStatusBlocked)
+		So(result.TimingEvaluated, ShouldBeFalse)
+		So(finalGateTestCheck(result, "E1 infeasible comparison block").Blocked, ShouldBeTrue)
+		So(finalGateTestCheck(result, "E2 direct import").Name, ShouldEqual, "")
 	})
 
 	Convey("ValidateFinalGates fails result-equivalence metrics when counts vary", t, func() {
@@ -257,7 +1153,12 @@ func TestValidateFinalGates(t *testing.T) {
 
 	Convey("D2.6 final gate fails when result digests differ", t, func() {
 		evidence := finalGateTestEvidence(false, false)
-		finalGateSetCandidateInput(&evidence, queryOpAuthWhereRestrictedName, navigationInputResultDigest, "sha256:different")
+		finalGateSetCandidateInput(
+			&evidence,
+			queryOpAuthWhereRestrictedName,
+			navigationInputResultDigest,
+			finalGateTestDifferentDigest,
+		)
 
 		result := ValidateFinalGates(evidence)
 
@@ -377,7 +1278,7 @@ func TestValidateFinalGates(t *testing.T) {
 	Convey("E1.5 final gate fails when Bolt result digests differ", t, func() {
 		evidence := finalGateTestEvidence(false, false)
 		finalGateMutateBoltOp(&evidence, queryOpTreeDirInfoName, func(op *perfreport.Operation) {
-			op.Inputs[navigationInputResultDigest] = "sha256:different"
+			op.Inputs[navigationInputResultDigest] = finalGateTestDifferentDigest
 		})
 
 		result := ValidateFinalGates(evidence)
@@ -517,7 +1418,7 @@ func TestE3FinalPerformanceGates(t *testing.T) {
 		finalGateMutateCandidateOpMatching(
 			&evidence,
 			"rest_tree",
-			finalGateRESTPathPredicate("/nfs/"),
+			finalGateRESTPathPredicate(finalGateNFSRootDir),
 			func(op *perfreport.Operation) {
 				op.P95MS = 501
 				op.P99MS = 501
@@ -694,7 +1595,7 @@ func TestE3FinalPerformanceGates(t *testing.T) {
 		evidence := finalGateTestEvidence(false, false)
 		for i := range evidence.ResultEquivalence {
 			if evidence.ResultEquivalence[i].Operation == queryOpWhereFilteredWholeMountName {
-				evidence.ResultEquivalence[i].CandidateDigest = "sha256:different"
+				evidence.ResultEquivalence[i].CandidateDigest = finalGateTestDifferentDigest
 			}
 		}
 
@@ -771,7 +1672,7 @@ func TestE3FinalPerformanceGates(t *testing.T) {
 
 	Convey("E3.9 final gate includes info correctness in permission/auth baseline comparison", t, func() {
 		evidence := finalGateTestEvidence(false, false)
-		finalGateSetCandidateInput(&evidence, queryOpInfoName, navigationInputResultDigest, "sha256:different")
+		finalGateSetCandidateInput(&evidence, queryOpInfoName, navigationInputResultDigest, finalGateTestDifferentDigest)
 
 		result := ValidateFinalGates(evidence)
 
@@ -868,7 +1769,7 @@ func finalGateReplaceD2AuthOps(report *perfreport.Report, replacement perfreport
 
 func finalGateBoltQueryReport() perfreport.Report {
 	report := finalGateQueryReport()
-	report.Backend = "bolt"
+	report.Backend = finalGateComparisonKindBolt
 	finalGateSetReportOpP95(&report, queryOpTreeWhereColdName, "/", finalGateRootBoltP95MS)
 	finalGateSetReportOpP95(&report, queryOpTreeWhereColdName, finalGateT283Dir, finalGateT283BoltP95MS)
 
@@ -887,6 +1788,183 @@ func finalGateSetReportOpP95(report *perfreport.Report, name string, root string
 			return
 		}
 	}
+}
+
+func finalGateAttachE2Evidence(evidence *FinalGateEvidence) {
+	e2QueryReport := finalGateE2QueryReport()
+	evidence.QueryReports = append(evidence.QueryReports, e2QueryReport)
+	evidence.BaselineQueryReports = append(evidence.BaselineQueryReports, e2QueryReport)
+	evidence.FinalGateReport.SpoolLoadReports = finalGateE2SpoolLoadReports()
+}
+
+func finalGateE2QueryReport() perfreport.Report {
+	report := perfreport.NewReport("clickhouse", "mixed8", finalGateMinRepeats, 0)
+
+	finalGateAddE2RESTFirstTreeOps(&report)
+	finalGateAddE2HighFanoutPacketOps(&report)
+	finalGateAddE2WhereOps(&report)
+
+	return report
+}
+
+func finalGateAddE2RESTFirstTreeOps(report *perfreport.Report) {
+	for _, path := range []string{"/", finalGateLustreRootDir, finalGateNFSRootDir} {
+		inputs := finalGateE2RESTInputs(
+			finalGateTestE2ScenarioRESTFirst,
+			path,
+			"sha256:e2-rest-tree-"+path,
+			false,
+		)
+		finalGateAddE2MeasuredOp(report, finalGateRESTOpTree, inputs, 120, 3, 10, 1024, 1)
+	}
+}
+
+func finalGateAddE2HighFanoutPacketOps(report *perfreport.Report) {
+	finalGateAddE2PacketOp(
+		report,
+		finalGateRESTOpTree,
+		finalGateTestE2ScenarioHighFanoutBroad,
+		tableParentFacts,
+		300,
+		true,
+		false,
+	)
+	finalGateAddE2PacketOp(
+		report,
+		finalGateRESTOpTree,
+		finalGateTestE2ScenarioHighFanoutFilter,
+		"wrstat_child_filter_all",
+		280,
+		true,
+		true,
+	)
+	finalGateAddE2PacketOp(
+		report,
+		queryOpDirInfosBroadName,
+		finalGateTestE2ScenarioDirInfosBroad,
+		tableParentFacts,
+		420,
+		false,
+		false,
+	)
+	finalGateAddE2PacketOp(
+		report,
+		queryOpDirInfosFilteredName,
+		"dirinfos_filtered_child_filter_packet",
+		"wrstat_child_filter_all",
+		410,
+		false,
+		true,
+	)
+	finalGateAddE2PacketOp(
+		report,
+		queryOpDirsHaveChildrenBroadName,
+		"dirshavechildren_broad_parent_packet",
+		tableParentFacts,
+		390,
+		false,
+		false,
+	)
+	finalGateAddE2PacketOp(
+		report,
+		queryOpDirsHaveChildrenFilteredName,
+		finalGateTestE2ScenarioDHCFiltered,
+		"wrstat_child_filter_all",
+		380,
+		false,
+		true,
+	)
+}
+
+func finalGateAddE2PacketOp(
+	report *perfreport.Report,
+	name string,
+	scenario string,
+	packetTable string,
+	duration float64,
+	includeCurrent bool,
+	filtered bool,
+) {
+	inputs := finalGateE2PacketInputs(scenario, packetTable, filtered)
+	if includeCurrent {
+		inputs["current_read_count"] = uint64(1)
+	}
+
+	finalGateAddE2MeasuredOp(report, name, inputs, duration, 11205, 602, 48_000, 4)
+}
+
+func finalGateE2PacketInputs(scenario string, packetTable string, filtered bool) map[string]any {
+	inputs := finalGateE2CorrectInputs(scenario, finalGateHighFanoutParentDir, "sha256:e2-"+scenario)
+	inputs[queryInputParentDirKey] = finalGateHighFanoutParentDir
+	inputs[finalGateRESTInputQueryParams] = map[string]string{finalGateRESTParamPath: finalGateHighFanoutParentDir}
+	inputs[finalGateTestE2ParentPacketTableInput] = packetTable
+	inputs["parent_packet_read_count"] = uint64(1)
+	inputs["per_child_query_count"] = uint64(0)
+	inputs["subtree_scan_count"] = uint64(0)
+	inputs[finalGateTestE2ReadRowsCeilingInput] = uint64(700)
+	inputs["read_bytes_ceiling"] = uint64(64_000)
+	inputs["read_marks_ceiling"] = uint64(8)
+	inputs[navigationInputChildCount] = uint64(11205)
+
+	if filtered {
+		for key, value := range finalGateFilteredInputs() {
+			inputs[key] = value
+		}
+
+		inputs[finalGateTestE2FactsVectorRowsInput] = uint64(0)
+	}
+
+	if scenario == finalGateTestE2ScenarioDHCFiltered {
+		inputs["expected_true_children"] = []string{
+			finalGateHighFanoutParentDir + "child-a/",
+			finalGateHighFanoutParentDir + "child-c/",
+		}
+		inputs["actual_true_children"] = []string{
+			finalGateHighFanoutParentDir + "child-a/",
+			finalGateHighFanoutParentDir + "child-c/",
+		}
+	}
+
+	return inputs
+}
+
+func finalGateAddE2WhereOps(report *perfreport.Report) {
+	inputs := finalGateE2CorrectInputs(
+		finalGateTestE2ScenarioFirstRootWhere,
+		"/",
+		"sha256:e2-root-where-splits-2",
+	)
+	inputs[queryInputSplitsKey] = uint64(2)
+	inputs[queryInputCacheScope] = queryScopeFreshProvider
+	finalGateAddE2MeasuredOp(report, queryOpTreeWhereFreshName, inputs, 620, 90, 140, 12_000, 2)
+
+	switchInputs := finalGateE2RESTInputs(
+		finalGateTestE2ScenarioSwitch,
+		finalGateHighFanoutParentDir,
+		"sha256:e2-filter-switch",
+		true,
+	)
+	switchInputs["preceded_by_unfiltered_tree_request"] = true
+	switchInputs["used_broad_packet_cache"] = false
+	switchInputs[queryInputCacheHitKeysKey] = []string{
+		"parent_packet:path=" + finalGateHighFanoutParentDir + ";filter=other;active_set_id=e2;query_version=1",
+	}
+	finalGateAddE2MeasuredOp(report, finalGateRESTOpTree, switchInputs, 450, 12, 80, 8192, 1)
+
+	finalGateAddE2CLIWhereOp(report, finalGateTestE2ScenarioRealWhere, "/", 700)
+	finalGateAddE2CLIWhereOp(report, finalGateTestE2ScenarioRealWhere, finalGateHighFanoutParentDir, 710)
+	finalGateAddE2CLIWhereOp(report, finalGateTestE2ScenarioNFSHeavyWhere, finalGateNFSHeavyDir, 1500)
+}
+
+func finalGateE2SpoolLoadReports() []perfreport.Report {
+	reports := make([]perfreport.Report, 0, finalGateMinRepeats)
+	for range finalGateMinRepeats {
+		report := finalGateE1ImportReport("spool_load_total", 8192, finalGateComparisonStatusSuccess)
+		report.Repeat = 1
+		reports = append(reports, report)
+	}
+
+	return reports
 }
 
 func finalGateMutateCandidateOpMatching(
@@ -952,13 +2030,16 @@ func finalGateT283WhereCheckPassesAfterRESTParamMutation(mutate func(map[string]
 }
 
 func finalGateTestEvidence(ageAllSelected, virtualCacheSelected bool) FinalGateEvidence {
-	return FinalGateEvidence{
+	finalGateReport := finalGateE1Report()
+
+	evidence := FinalGateEvidence{
 		ImportReports:        finalGateImportReports(ageAllSelected, virtualCacheSelected),
 		QueryReports:         []perfreport.Report{finalGateQueryReport()},
 		BaselineQueryReports: []perfreport.Report{finalGateQueryReport()},
 		BoltQueryReports:     []perfreport.Report{finalGateBoltQueryReport()},
 		RequiredQueryRoots:   []string{queryOpTestRootDir},
 		ResultEquivalence:    finalGateResultEquivalence(),
+		FinalGateReport:      &finalGateReport,
 		T283FilteredRESTOrder: &FinalGateT283FilteredRESTOrderEvidence{
 			DirectDigest:      finalGateT283Digest,
 			WarmedDigest:      finalGateT283Digest,
@@ -969,6 +2050,10 @@ func finalGateTestEvidence(ageAllSelected, virtualCacheSelected bool) FinalGateE
 			},
 		},
 	}
+
+	finalGateAttachE2Evidence(&evidence)
+
+	return evidence
 }
 
 func finalGateImportReports(ageAllSelected, virtualCacheSelected bool) []perfreport.Report {
@@ -1014,10 +2099,6 @@ func finalGateImportReport(rowCap uint64, ageAllSelected, virtualCacheSelected b
 		tableActivePrefixRollupSets:   finalGateTableStatsWithBaselines(1, dirFactsRows, childrenRows),
 	}
 	finalGateAddImportFileTotals(&report, rowCap)
-	report.AddOperation("import_total", map[string]any{
-		importInputRecords: rowCap * rootCount,
-		importInputRowCap:  rowCap,
-	}, []float64{4350})
 
 	if ageAllSelected {
 		report.TableStats[tableDirFilterAgeAll] = finalGateTableStatsWithBaselines(rowCap/2, dirFactsRows, childrenRows)
@@ -1027,6 +2108,15 @@ func finalGateImportReport(rowCap uint64, ageAllSelected, virtualCacheSelected b
 		report.SelectedTables = append(report.SelectedTables, tableTreeDGUTA)
 		report.TableStats[tableTreeDGUTA] = finalGateTableStatsWithBaselines(50, dirFactsRows, childrenRows)
 	}
+
+	report.AddOperation("import_total", map[string]any{
+		importInputRecords:         rowCap * rootCount,
+		importInputRowCap:          rowCap,
+		importInputTotalCPUMS:      uint64(2400),
+		importInputPeakRSSBytes:    report.MaxRSSBytes,
+		finalGateE2InputSpoolBytes: uint64(0),
+		finalGateE2InputPartCounts: importActivePartCounts(report.TableStats),
+	}, []float64{4350})
 
 	return report
 }
@@ -1120,6 +2210,186 @@ func finalGateSetCandidateP95(evidence *FinalGateEvidence, name string, p95 floa
 	finalGateMutateCandidateOp(evidence, name, func(op *perfreport.Operation) {
 		op.P95MS = p95
 	})
+}
+
+func finalGateE2RESTTreeOp(evidence FinalGateEvidence, path string, check func(perfreport.Operation)) {
+	finalGateE2ScenarioRootOp(evidence, finalGateTestE2ScenarioRESTFirst, path, check)
+}
+
+func finalGateE2ScenarioRootOp(
+	evidence FinalGateEvidence,
+	scenario string,
+	root string,
+	check func(perfreport.Operation),
+) {
+	for _, report := range evidence.QueryReports {
+		for _, op := range report.Operations {
+			if stringInput(op.Inputs, finalGateTestE2ScenarioKey) != scenario || !operationRootEquals(op, root) {
+				continue
+			}
+
+			check(op)
+
+			return
+		}
+	}
+
+	So("missing "+scenario+" "+root, ShouldEqual, "")
+}
+
+func finalGateMutateE2OpRoot(
+	evidence *FinalGateEvidence,
+	scenario string,
+	root string,
+	mutate func(*perfreport.Operation),
+) {
+	for reportIndex := range evidence.QueryReports {
+		for opIndex := range evidence.QueryReports[reportIndex].Operations {
+			op := &evidence.QueryReports[reportIndex].Operations[opIndex]
+			if stringInput(op.Inputs, finalGateTestE2ScenarioKey) != scenario || !operationRootEquals(*op, root) {
+				continue
+			}
+
+			mutate(op)
+
+			return
+		}
+	}
+}
+
+func finalGateE2ScenarioOp(
+	evidence FinalGateEvidence,
+	scenario string,
+	check func(perfreport.Operation),
+) {
+	for _, report := range evidence.QueryReports {
+		for _, op := range report.Operations {
+			if stringInput(op.Inputs, finalGateTestE2ScenarioKey) == scenario {
+				check(op)
+
+				return
+			}
+		}
+	}
+
+	So("missing "+scenario, ShouldEqual, "")
+}
+
+func finalGateMutateE2Op(
+	evidence *FinalGateEvidence,
+	scenario string,
+	mutate func(*perfreport.Operation),
+) {
+	for reportIndex := range evidence.QueryReports {
+		for opIndex := range evidence.QueryReports[reportIndex].Operations {
+			op := &evidence.QueryReports[reportIndex].Operations[opIndex]
+			if stringInput(op.Inputs, finalGateTestE2ScenarioKey) == scenario {
+				mutate(op)
+
+				return
+			}
+		}
+	}
+}
+
+func finalGateE2ImportBudgetOp(
+	report perfreport.Report,
+	opName string,
+	check func(perfreport.Operation),
+) {
+	op, ok := firstOperation(report, opName, nil)
+	So(ok, ShouldBeTrue)
+	check(op)
+}
+
+func finalGateMutateImportBudgetOp(
+	report *perfreport.Report,
+	opName string,
+	mutate func(*perfreport.Operation),
+) {
+	for opIndex := range report.Operations {
+		op := &report.Operations[opIndex]
+		if op.Name == opName {
+			mutate(op)
+
+			return
+		}
+	}
+}
+
+func finalGateAddE2MeasuredOp(
+	report *perfreport.Report,
+	name string,
+	inputs map[string]any,
+	duration float64,
+	resultCount uint64,
+	readRows uint64,
+	readBytes uint64,
+	readMarks uint64,
+) {
+	durations := []float64{duration, duration, duration, duration, duration}
+	counts := []uint64{resultCount, resultCount, resultCount, resultCount, resultCount}
+	reads := []uint64{readRows, readRows, readRows, readRows, readRows}
+	bytes := []uint64{readBytes, readBytes, readBytes, readBytes, readBytes}
+	marks := []uint64{readMarks, readMarks, readMarks, readMarks, readMarks}
+
+	report.AddOperationWithCounters(name, inputs, durations, reads, bytes, marks, counts)
+}
+
+func finalGateE2RESTInputs(
+	scenario string,
+	path string,
+	digest string,
+	filtered bool,
+) map[string]any {
+	inputs := finalGateE2CorrectInputs(scenario, path, digest)
+	inputs["endpoint"] = "/rest/v1/auth/tree"
+	inputs[finalGateRESTInputQueryParams] = map[string]string{finalGateRESTParamPath: path}
+	inputs[finalGateRESTInputStatusCodes] = []uint64{200, 200, 200, 200, 200}
+	inputs[finalGateRESTInputJSONBytes] = []uint64{8192, 8192, 8192, 8192, 8192}
+	inputs[finalGateRESTInputGzipBytes] = []uint64{2048, 2048, 2048, 2048, 2048}
+	inputs[finalGateRESTInputCacheHits] = []uint64{0, 0, 0, 0, 0}
+	inputs[finalGateRESTInputCacheMisses] = []uint64{1, 1, 1, 1, 1}
+	inputs["query_count"] = []uint64{1, 1, 1, 1, 1}
+
+	if filtered {
+		for key, value := range finalGateFilteredInputs() {
+			inputs[key] = value
+		}
+	}
+
+	return inputs
+}
+
+func finalGateAddE2CLIWhereOp(
+	report *perfreport.Report,
+	scenario string,
+	dir string,
+	duration float64,
+) {
+	inputs := finalGateE2CorrectInputs(scenario, dir, "sha256:e2-cli-where-"+dir)
+	inputs[queryInputCacheScope] = queryScopeFreshProvider
+	inputs["command"] = []string{
+		finalGateWrstatUICommand,
+		finalGateWhereCommandName,
+		"--dir",
+		dir,
+		"--json",
+	}
+
+	finalGateAddE2MeasuredOp(report, finalGateRESTOpCLIWhere, inputs, duration, 11, 120, 10_000, 2)
+}
+
+func finalGateE2CorrectInputs(scenario string, dir string, digest string) map[string]any {
+	return map[string]any{
+		finalGateTestE2ScenarioKey:           scenario,
+		queryInputDirKey:                     dir,
+		queryInputCacheScope:                 queryScopeColdProvider,
+		finalGateTestE2ExpectedDigestInput:   digest,
+		navigationInputResultDigest:          digest,
+		finalGateCorrectnessStatusInput:      finalGateComparisonStatusSuccess,
+		finalGateTestE2ProactiveWarmingInput: false,
+	}
 }
 
 func finalGateAddOp(
@@ -1222,8 +2492,8 @@ func finalGateResultEquivalence() []FinalGateResultEquivalence {
 
 func finalGateAddE3RESTOps(report *perfreport.Report) {
 	finalGateAddRESTTreeOp(report, "/", 900)
-	finalGateAddRESTTreeOp(report, "/lustre/", 400)
-	finalGateAddRESTTreeOp(report, "/nfs/", 400)
+	finalGateAddRESTTreeOp(report, finalGateLustreRootDir, 400)
+	finalGateAddRESTTreeOp(report, finalGateNFSRootDir, 400)
 	finalGateAddRESTTreeOp(report, finalGateT283Dir, 400)
 	finalGateAddRESTTreeOp(report, finalGateScratch120Dir, 400)
 	finalGateAddRESTTreeOp(report, finalGateScratch122Dir, 400)
@@ -1384,8 +2654,8 @@ func finalGateAddCLIWhereOp(
 		"sha256:cli-where-"+dir,
 	)
 	inputs["command"] = []string{
-		"./wrstat-ui",
-		"where",
+		finalGateWrstatUICommand,
+		finalGateWhereCommandName,
 		"--dir",
 		dir,
 		"--groups",
@@ -1488,4 +2758,84 @@ func finalGateT283RESTReport(order string, cacheHits uint64, cacheHitKeys []stri
 	)
 
 	return report
+}
+
+func finalGateAssemblyCommand(root string, status string) []string {
+	if status == finalGateComparisonInfeasible {
+		return []string{finalGateE1OldWrstatUI, finalGateWhereCommandName}
+	}
+
+	return []string{finalGateE1WrstatUI, finalGateE1BoltPerfCommand, finalGateE1QueryCommand, root}
+}
+
+func finalGateOutputArtifactPath(path string, status string) string {
+	if status == finalGateComparisonInfeasible {
+		return ""
+	}
+
+	return path
+}
+
+func finalGateE1ArtifactClickHouseReport() perfreport.Report {
+	report := finalGateE1ClickHouseReport()
+	delete(report.Operations[0].Inputs, finalGateCorrectnessStatusInput)
+
+	return report
+}
+
+func finalGateE1ArtifactRESTReport() perfreport.Report {
+	report := finalGateE1RESTReport()
+	for i := range report.Operations {
+		delete(report.Operations[i].Inputs, finalGateCorrectnessStatusInput)
+	}
+
+	return report
+}
+
+func finalGateE1BoltArtifactReport() perfreport.Report {
+	report := perfreport.NewReport("bolt", "/fixtures/mixed8", finalGateMinRepeats, 0)
+	report.GitCommit = "bolt-artefact-revision"
+	report.ToolVersion = "v1.2.3-e1"
+	inputs := map[string]any{
+		navigationInputResultDigest: finalGateE1Digest("comparison"),
+		"schema3_fallback_count":    []uint64{0, 1, 0, 0, 0},
+	}
+	report.AddOperationWithCounters(
+		queryOpTreeWhereName,
+		inputs,
+		[]float64{1, 2, 3, 4, 5},
+		nil,
+		nil,
+		nil,
+		finalGateE1Counts(7),
+	)
+
+	return report
+}
+
+func finalGateWriteExpectedDigestManifest(
+	t *testing.T,
+	path string,
+	key string,
+	digest string,
+) {
+	t.Helper()
+
+	data, err := json.Marshal(map[string]any{
+		"expected_digests": map[string]string{key: digest},
+	})
+	So(err, ShouldBeNil)
+	So(os.WriteFile(path, data, 0o600), ShouldBeNil)
+}
+
+func finalGateWritePerfReport(t *testing.T, path string, report perfreport.Report) {
+	t.Helper()
+
+	So(perfreport.WriteReport(path, report), ShouldBeNil)
+}
+
+func finalGateWriteFile(t *testing.T, path string, contents string) {
+	t.Helper()
+
+	So(os.WriteFile(path, []byte(contents), 0o600), ShouldBeNil)
 }

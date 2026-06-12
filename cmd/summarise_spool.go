@@ -43,6 +43,7 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/clickhouse"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 	"github.com/wtsi-hgi/wrstat-ui/internal/chspool"
+	"github.com/wtsi-hgi/wrstat-ui/internal/perfreport"
 	"github.com/wtsi-hgi/wrstat-ui/internal/summariseutil"
 	"github.com/wtsi-hgi/wrstat-ui/stats"
 	"github.com/wtsi-hgi/wrstat-ui/summary"
@@ -52,12 +53,13 @@ import (
 
 const (
 	clickHouseSpoolDirName        = ".wrstat-ui-clickhouse-spool"
+	clickHouseSpoolLoadReportName = "spool_load_report.json"
 	clickHouseSpoolSchemaMark     = "wrstat-ui-clickhouse-summarise-spool-v2"
 	clickHouseSpoolSchema3Version = 1
 )
 
 var (
-	loadSummariseClickHouseSpool = clickhouse.LoadSummariseSpool
+	loadSummariseClickHouseSpool = clickhouse.LoadSummariseSpoolReport
 	summariseSpoolNow            = time.Now
 )
 
@@ -1110,12 +1112,22 @@ func publishSummariseSpool(
 	diag *summariseDiagnostics,
 ) error {
 	diag.logCloseStart(true)
-	err := loadSummariseClickHouseSpool(context.Background(), target.cfg, spoolDir, manifest, diag.recordImportPhase)
+	report, err := loadSummariseClickHouseSpool(
+		context.Background(),
+		target.cfg,
+		spoolDir,
+		manifest,
+		diag.recordImportPhase,
+	)
 	diag.logCloseResult(true, err)
 
 	if err != nil {
 		diag.logFailure(err)
 
+		return err
+	}
+
+	if err := writeSummariseSpoolLoadReport(spoolDir, report, diag); err != nil {
 		return err
 	}
 
@@ -1208,6 +1220,24 @@ func summariseSpoolUnsignedFileInfoValues(info *summary.FileInfo) (uint64, uint6
 	}
 
 	return size, apparentSize, inode, nlink, nil
+}
+
+func writeSummariseSpoolLoadReport(
+	spoolDir string,
+	report perfreport.Report,
+	diag *summariseDiagnostics,
+) error {
+	if err := perfreport.WriteReport(summariseSpoolLoadReportPath(spoolDir), report); err != nil {
+		diag.logFailure(err)
+
+		return err
+	}
+
+	return nil
+}
+
+func summariseSpoolLoadReportPath(spoolDir string) string {
+	return filepath.Join(spoolDir, clickHouseSpoolLoadReportName)
 }
 
 func summariseNonNegativeInt64ToUint64(value int64, negativeErr error) (uint64, error) {
