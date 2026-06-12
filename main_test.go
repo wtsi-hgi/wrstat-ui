@@ -99,6 +99,17 @@ var (
 	errSummariseTestDGUTA    = errors.New("summarise dguta")
 )
 
+var (
+	errWatchSummariseCommandStages     = errors.New("watch summarise command stages")
+	errWatchSummariseEscape            = errors.New("unterminated watch summarise escape")
+	errWatchSummariseQuote             = errors.New("unterminated watch summarise quote")
+	errWatchSummariseLogRedirection    = errors.New("watch summarise command missing log redirection")
+	errWatchSummariseCommandShape      = errors.New("watch summarise command shape changed")
+	errWatchSummariseOutputDirMissing  = errors.New("watch summarise command missing -d")
+	errWatchSummariseTouchCommandShape = errors.New("watch summarise touch command shape changed")
+	errWatchSummariseMVCommandShape    = errors.New("watch summarise mv command shape changed")
+)
+
 type clickHouseCLIEnv struct {
 	DSN      string
 	Database string
@@ -1121,6 +1132,493 @@ func clickHousePerfParentDir(dir string) string {
 	return trimmed[:pos+1]
 }
 
+func TestWatchSummariseIntegration(t *testing.T) {
+	Convey("watch-produced concurrent summarise jobs complete for multiple ClickHouse mounts", t, func() {
+		chEnv := setupClickHouseCLIEnv(t)
+		tmp := t.TempDir()
+		inputDir := filepath.Join(tmp, "input")
+		outputDir := filepath.Join(tmp, "output")
+		metaDir := filepath.Join(tmp, "meta")
+
+		So(os.MkdirAll(inputDir, 0o755), ShouldBeNil)
+		So(os.MkdirAll(outputDir, 0o755), ShouldBeNil)
+		So(os.MkdirAll(metaDir, 0o755), ShouldBeNil)
+
+		fixtures := []watchSummariseFixture{
+			{
+				base:      "20260611-170003_／nfs／100k_genomes_db",
+				mountPath: "/nfs/100k_genomes_db/",
+				child:     "projectA",
+				updatedAt: time.Date(2026, 6, 11, 17, 0, 3, 123_000_000, time.UTC),
+			},
+			{
+				base:      "20260611-170003_／nfs／wrstat／nfs",
+				mountPath: "/nfs/wrstat/nfs/",
+				child:     "projectB",
+				updatedAt: time.Date(2026, 6, 11, 17, 0, 4, 237_000_000, time.UTC),
+			},
+		}
+		for _, fixture := range fixtures {
+			writeWatchSummariseStats(t, inputDir, fixture)
+		}
+
+		quotaFile := filepath.Join(metaDir, "quota.csv")
+		basedirsConfig := filepath.Join(metaDir, "basedirs.config")
+		mountsFile := filepath.Join(metaDir, "mounts.txt")
+
+		So(os.WriteFile(quotaFile, []byte(""), 0o600), ShouldBeNil)
+		So(os.WriteFile(basedirsConfig, []byte(
+			"/nfs/100k_genomes_db\t1\t1\n/nfs/wrstat/nfs\t1\t1\n",
+		), 0o600), ShouldBeNil)
+		So(os.WriteFile(mountsFile, []byte("\"/nfs/100k_genomes_db/\"\n\"/nfs/wrstat/nfs/\"\n"), 0o600),
+			ShouldBeNil)
+
+		_, stderr, jobs, err := runWRStat(
+			"watch",
+			"-o",
+			outputDir,
+			"-q",
+			quotaFile,
+			"-c",
+			basedirsConfig,
+			"-m",
+			mountsFile,
+			inputDir,
+		)
+		So(err, ShouldBeNil)
+		So(stderr, ShouldBeBlank)
+		So(jobs, ShouldHaveLength, 2)
+
+		runWatchSummariseJobs(t, jobs)
+
+		for _, fixture := range fixtures {
+			assertWatchSummariseOutput(t, outputDir, fixture)
+		}
+
+		mountPaths := []string{fixtures[0].mountPath, fixtures[1].mountPath}
+		p, err := clickhouse.OpenProvider(clickhouse.Config{
+			DSN:          chEnv.DSN,
+			Database:     chEnv.Database,
+			MountPoints:  mountPaths,
+			QueryTimeout: 5 * time.Second,
+		})
+
+		So(err, ShouldBeNil)
+		defer func() { So(p.Close(), ShouldBeNil) }()
+
+		timestamps, err := p.BaseDirs().MountTimestamps()
+		So(err, ShouldBeNil)
+		So(timestamps, ShouldHaveLength, 2)
+
+		for _, fixture := range fixtures {
+			got, ok := timestamps[watchSummariseMountKey(fixture.mountPath)]
+			So(ok, ShouldBeTrue)
+			So(got.UTC(), ShouldEqual, fixture.updatedAt.UTC().Truncate(time.Second))
+		}
+
+		rootInfo, err := p.Tree().DirInfo("/", &db.Filter{Age: db.DGUTAgeAll})
+		So(err, ShouldBeNil)
+		So(rootInfo.Current.Count, ShouldBeGreaterThan, uint64(0))
+
+		client, err := clickhouse.NewClient(clickhouse.Config{
+			DSN:          chEnv.DSN,
+			Database:     chEnv.Database,
+			MountPoints:  mountPaths,
+			QueryTimeout: 5 * time.Second,
+		})
+
+		So(err, ShouldBeNil)
+		defer func() { So(client.Close(), ShouldBeNil) }()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		rows, err := client.ListDir(ctx, fixtures[0].mountPath, clickhouse.ListOptions{})
+		So(err, ShouldBeNil)
+		So(rows, ShouldNotBeEmpty)
+
+		fileRow, err := client.StatPath(
+			ctx,
+			fixtures[0].mountPath+fixtures[0].child+"/file.bam",
+			clickhouse.StatOptions{},
+		)
+		So(err, ShouldBeNil)
+		So(fileRow.Name, ShouldEqual, "file.bam")
+	})
+}
+
+func writeWatchSummariseStats(t *testing.T, inputDir string, fixture watchSummariseFixture) {
+	t.Helper()
+
+	runDir := filepath.Join(inputDir, fixture.base)
+	So(os.MkdirAll(runDir, 0o755), ShouldBeNil)
+
+	root := statsdata.NewRoot(fixture.mountPath, fixture.updatedAt.Unix())
+	statsdata.AddFile(
+		root,
+		filepath.Join(fixture.child, "file.bam"),
+		101,
+		1,
+		1234,
+		fixture.updatedAt.Unix(),
+		fixture.updatedAt.Unix(),
+	)
+
+	statsGZPath := filepath.Join(runDir, "stats.gz")
+	fh, err := os.Create(statsGZPath)
+	So(err, ShouldBeNil)
+
+	gz := gzip.NewWriter(fh)
+	_, err = io.Copy(gz, root.AsReader())
+	So(err, ShouldBeNil)
+	So(gz.Close(), ShouldBeNil)
+	So(fh.Close(), ShouldBeNil)
+	So(os.Chtimes(statsGZPath, fixture.updatedAt, fixture.updatedAt), ShouldBeNil)
+	So(os.Chtimes(runDir, fixture.updatedAt, fixture.updatedAt), ShouldBeNil)
+}
+
+func runWatchSummariseJobs(t *testing.T, jobs []*jobqueue.Job) {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	results := make(chan watchSummariseJobResult, len(jobs))
+	for idx, job := range jobs {
+		go func(idx int, job *jobqueue.Job) {
+			var stdout, stderr strings.Builder
+
+			command, err := parseWatchSummariseJobCommand(job.Cmd)
+			if err == nil {
+				err = runParsedWatchSummariseJobCommand(ctx, job.Cwd, command, &stdout, &stderr)
+			}
+
+			results <- watchSummariseJobResult{
+				index:  idx,
+				stdout: stdout.String(),
+				stderr: stderr.String(),
+				err:    err,
+			}
+		}(idx, job)
+	}
+
+	for range jobs {
+		result := <-results
+		if result.err != nil {
+			t.Logf("watch summarise job %d stdout:\n%s", result.index, result.stdout)
+			t.Logf("watch summarise job %d stderr:\n%s", result.index, result.stderr)
+		}
+
+		So(result.err, ShouldBeNil)
+		So(result.stdout, ShouldBeBlank)
+		So(result.stderr, ShouldBeBlank)
+	}
+}
+
+func parseWatchSummariseJobCommand(command string) (parsedWatchSummariseJobCommand, error) {
+	stages := splitWatchSummariseJobStages(command)
+	if len(stages) != 4 {
+		return parsedWatchSummariseJobCommand{}, fmt.Errorf("%w: got %d", errWatchSummariseCommandStages, len(stages))
+	}
+
+	summariseWords, err := watchSummariseShellWords(stages[1])
+	if err != nil {
+		return parsedWatchSummariseJobCommand{}, err
+	}
+
+	touchWords, err := watchSummariseShellWords(stages[2])
+	if err != nil {
+		return parsedWatchSummariseJobCommand{}, err
+	}
+
+	mvWords, err := watchSummariseShellWords(stages[3])
+	if err != nil {
+		return parsedWatchSummariseJobCommand{}, err
+	}
+
+	return parseWatchSummariseJobWords(summariseWords, touchWords, mvWords)
+}
+
+func splitWatchSummariseJobStages(command string) []string {
+	stages := []string{}
+
+	var (
+		current strings.Builder
+		quote   rune
+	)
+
+	for idx := 0; idx < len(command); idx++ {
+		ch := rune(command[idx])
+
+		switch {
+		case quote == 0 && (ch == '\'' || ch == '"'):
+			quote = ch
+		case quote == ch && (ch == '\'' || ch == '"'):
+			quote = 0
+		}
+
+		if quote == 0 && ch == '&' && idx+1 < len(command) && command[idx+1] == '&' {
+			stages = append(stages, strings.TrimSpace(current.String()))
+			current.Reset()
+
+			idx++
+
+			continue
+		}
+
+		current.WriteByte(command[idx])
+	}
+
+	stages = append(stages, strings.TrimSpace(current.String()))
+
+	return stages
+}
+
+func watchSummariseShellWords(input string) ([]string, error) {
+	var (
+		words   []string
+		current strings.Builder
+		quote   rune
+		active  bool
+	)
+
+	for idx := 0; idx < len(input); idx++ {
+		ch := rune(input[idx])
+
+		switch {
+		case quote == '\'':
+			if ch == '\'' {
+				quote = 0
+
+				continue
+			}
+
+			current.WriteByte(input[idx])
+		case quote == '"':
+			if ch == '"' {
+				quote = 0
+
+				continue
+			}
+
+			current.WriteByte(input[idx])
+		case ch == '\'' || ch == '"':
+			quote = ch
+			active = true
+		case ch == '\\':
+			idx++
+			if idx >= len(input) {
+				return nil, errWatchSummariseEscape
+			}
+
+			current.WriteByte(input[idx])
+
+			active = true
+		case ch == ' ' || ch == '\t' || ch == '\n':
+			if active {
+				words = append(words, current.String())
+				current.Reset()
+
+				active = false
+			}
+		default:
+			current.WriteByte(input[idx])
+
+			active = true
+		}
+	}
+
+	if quote != 0 {
+		return nil, errWatchSummariseQuote
+	}
+
+	if active {
+		words = append(words, current.String())
+	}
+
+	return words, nil
+}
+
+func parseWatchSummariseJobWords(
+	summariseWords []string,
+	touchWords []string,
+	mvWords []string,
+) (parsedWatchSummariseJobCommand, error) {
+	command, err := parseWatchSummariseInvocationWords(summariseWords)
+	if err != nil {
+		return parsedWatchSummariseJobCommand{}, err
+	}
+
+	touchShapeChanged := len(touchWords) != 4 || touchWords[0] != "touch" ||
+		touchWords[1] != "-r" || touchWords[3] != command.hiddenDir
+	if touchShapeChanged {
+		return parsedWatchSummariseJobCommand{}, errWatchSummariseTouchCommandShape
+	}
+
+	if len(mvWords) != 3 || mvWords[0] != "mv" || mvWords[1] != command.hiddenDir {
+		return parsedWatchSummariseJobCommand{}, errWatchSummariseMVCommandShape
+	}
+
+	command.inputDir = touchWords[2]
+	command.finalDir = mvWords[2]
+
+	return command, nil
+}
+
+func parseWatchSummariseInvocationWords(words []string) (parsedWatchSummariseJobCommand, error) {
+	redirIdx := slices.Index(words, ">")
+
+	logRedirectionInvalid := redirIdx < 0 || redirIdx != len(words)-3 ||
+		words[redirIdx+1] != "$summarise_log" || words[redirIdx+2] != "2>&1"
+	if logRedirectionInvalid {
+		return parsedWatchSummariseJobCommand{}, errWatchSummariseLogRedirection
+	}
+
+	args := slices.Clone(words[1:redirIdx])
+	if len(args) < 9 || words[0] != "./"+app || args[0] != "summarise" || args[1] != "--clickhouse-recover" {
+		return parsedWatchSummariseJobCommand{}, errWatchSummariseCommandShape
+	}
+
+	command := parsedWatchSummariseJobCommand{summariseArgs: args}
+	idx := 2
+
+	if args[idx] != "-d" || args[idx+1] == "" {
+		return parsedWatchSummariseJobCommand{}, errWatchSummariseOutputDirMissing
+	}
+
+	command.hiddenDir = args[idx+1]
+	idx += 2
+
+	if idx < len(args) && args[idx] == "-s" {
+		if idx+1 >= len(args) || args[idx+1] == "" {
+			return parsedWatchSummariseJobCommand{}, errWatchSummariseCommandShape
+		}
+
+		idx += 2
+	}
+
+	if idx < len(args) && args[idx] == "-m" {
+		if idx+1 >= len(args) || args[idx+1] == "" {
+			return parsedWatchSummariseJobCommand{}, errWatchSummariseCommandShape
+		}
+
+		idx += 2
+	}
+
+	if idx+4 >= len(args) || args[idx] != "-q" || args[idx+2] != "-c" {
+		return parsedWatchSummariseJobCommand{}, errWatchSummariseCommandShape
+	}
+
+	statsPath := args[idx+4]
+	if args[idx+1] == "" || args[idx+3] == "" || filepath.Base(statsPath) != "stats.gz" || idx+5 != len(args) {
+		return parsedWatchSummariseJobCommand{}, errWatchSummariseCommandShape
+	}
+
+	return command, nil
+}
+
+func runParsedWatchSummariseJobCommand(
+	ctx context.Context,
+	cwd string,
+	command parsedWatchSummariseJobCommand,
+	stdout *strings.Builder,
+	stderr *strings.Builder,
+) error {
+	logPath := filepath.Join(
+		command.hiddenDir,
+		fmt.Sprintf("summarise-%s-%d.log", time.Now().UTC().Format("20060102T150405Z"), os.Getpid()),
+	)
+
+	logFile, err := os.Create(logPath)
+	if err != nil {
+		return err
+	}
+
+	//nolint:gosec // The binary and command shape were validated above; parsed args are the watch output under test.
+	cmd := exec.CommandContext(ctx, "./"+app, command.summariseArgs...)
+	cmd.Dir = cwd
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	err = cmd.Run()
+	closeErr := logFile.Close()
+
+	if err != nil {
+		watchSummariseAppendLog(stderr, logPath)
+
+		return fmt.Errorf("watch summarise command: %w", err)
+	}
+
+	if closeErr != nil {
+		return closeErr
+	}
+
+	if err := runWatchSummariseStage(
+		ctx, cwd, stdout, stderr, "touch", "-r", command.inputDir, command.hiddenDir,
+	); err != nil {
+		return err
+	}
+
+	return runWatchSummariseStage(ctx, cwd, stdout, stderr, "mv", command.hiddenDir, command.finalDir)
+}
+
+func watchSummariseAppendLog(stderr *strings.Builder, path string) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+
+	stderr.Write(data)
+}
+
+func runWatchSummariseStage(
+	ctx context.Context,
+	cwd string,
+	stdout *strings.Builder,
+	stderr *strings.Builder,
+	name string,
+	args ...string,
+) error {
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Dir = cwd
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+
+	return cmd.Run()
+}
+
+func assertWatchSummariseOutput(t *testing.T, outputDir string, fixture watchSummariseFixture) {
+	t.Helper()
+
+	finalDir := filepath.Join(outputDir, fixture.base)
+	hiddenDir := filepath.Join(outputDir, "."+fixture.base)
+
+	So(watchSummarisePathExists(finalDir), ShouldBeTrue)
+	So(watchSummarisePathExists(hiddenDir), ShouldBeFalse)
+	So(watchSummarisePathExists(filepath.Join(finalDir, "bygroup")), ShouldBeTrue)
+	So(watchSummarisePathExists(filepath.Join(finalDir, ".wrstat-ui-summarise-complete")), ShouldBeTrue)
+
+	logs, err := filepath.Glob(filepath.Join(finalDir, "summarise-*.log"))
+	So(err, ShouldBeNil)
+	So(logs, ShouldHaveLength, 1)
+}
+
+func watchSummarisePathExists(path string) bool {
+	_, err := os.Stat(path)
+
+	return err == nil
+}
+
+func watchSummariseMountKey(mountPath string) string {
+	return strings.ReplaceAll(mountPath, "/", "／")
+}
+
+type parsedWatchSummariseJobCommand struct {
+	summariseArgs []string
+	inputDir      string
+	hiddenDir     string
+	finalDir      string
+}
+
 type chPerfOpenProviderTestStub struct{}
 
 func (chPerfOpenProviderTestStub) Tree() *db.Tree { return nil }
@@ -1478,6 +1976,20 @@ func TestBoltPerf(t *testing.T) {
 			So(report2.GitCommit, ShouldNotBeNil)
 		})
 	})
+}
+
+type watchSummariseFixture struct {
+	base      string
+	mountPath string
+	child     string
+	updatedAt time.Time
+}
+
+type watchSummariseJobResult struct {
+	index  int
+	stdout string
+	stderr string
+	err    error
 }
 
 func TestWatch(t *testing.T) {

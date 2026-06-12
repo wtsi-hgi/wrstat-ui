@@ -160,11 +160,21 @@ func basedirsPartitionDropQueries() []string {
 	}
 }
 
+func activeSetUpdatedAt(t time.Time) time.Time {
+	if t.IsZero() {
+		return t
+	}
+
+	return t.UTC().Truncate(time.Second)
+}
+
 func stagedMountsActiveRows(rows []mountsActiveRow, candidate mountsActiveRow) []mountsActiveRow {
+	candidate = normalizeActiveSetMountRow(candidate)
 	out := make([]mountsActiveRow, 0, len(rows)+1)
 	replaced := false
 
 	for _, row := range rows {
+		row = normalizeActiveSetMountRow(row)
 		if row.mountPath == candidate.mountPath {
 			out = append(out, candidate)
 			replaced = true
@@ -1028,7 +1038,7 @@ func (w *dgutaWriter) switchActiveSnapshot(ctx context.Context) error {
 		switchSnapshotQuery,
 		w.mountPath,
 		w.snapshot.String(),
-		w.updatedAt,
+		activeSetUpdatedAt(w.updatedAt),
 		w.mountPath,
 	); err != nil {
 		return fmt.Errorf("clickhouse: failed to switch active snapshot: %w", err)
@@ -1604,7 +1614,7 @@ func (w *dgutaWriter) activeMount() activeMount {
 	return activeMount{
 		mountPath:  w.mountPath,
 		snapshotID: w.snapshot.String(),
-		updatedAt:  w.updatedAt,
+		updatedAt:  activeSetUpdatedAt(w.updatedAt),
 	}
 }
 
@@ -2416,6 +2426,12 @@ func writeChecksumBytes(hash hashWriter, value []byte) {
 	if _, err := hash.Write(value); err != nil {
 		panic(err)
 	}
+}
+
+func normalizeActiveSetMountRow(row mountsActiveRow) mountsActiveRow {
+	row.updatedAt = activeSetUpdatedAt(row.updatedAt)
+
+	return row
 }
 
 func checksumTime(t time.Time) string {

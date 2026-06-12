@@ -60,7 +60,7 @@ func scanMountsActiveRow(rows rowsScanner) (mountsActiveRow, error) {
 		return mountsActiveRow{}, fmt.Errorf("clickhouse: failed to scan mounts_active: %w", err)
 	}
 
-	row.updatedAt = row.updatedAt.UTC()
+	row.updatedAt = activeSetUpdatedAt(row.updatedAt)
 
 	return row, nil
 }

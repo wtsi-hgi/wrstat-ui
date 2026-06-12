@@ -562,7 +562,7 @@ func maxUpdatedAtForMounts(mounts []activeMount) time.Time {
 			continue
 		}
 
-		latest = mount.updatedAt.UTC()
+		latest = activeSetUpdatedAt(mount.updatedAt)
 		ok = true
 	}
 

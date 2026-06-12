@@ -91,7 +91,7 @@ func summariseDirectoryHeavyStats(data string, refTime int64) (*countingDB, erro
 	s := summary.NewSummariser(stats.NewStatsParser(strings.NewReader(data)))
 	sink := new(countingDB)
 
-	s.AddDirectoryOperation(newDirGroupUserTypeAge(sink, refTime))
+	s.AddDirectoryOperation(newDirGroupUserTypeAge(sink, refTime, refTime))
 
 	return sink, s.Summarise()
 }
@@ -384,6 +384,37 @@ func TestDirGUTA(t *testing.T) {
 
 	refTime := time.Now().Unix()
 
+	Convey("NewDirGroupUserTypeAgeAt uses the supplied time for directory access times", t, func() {
+		referenceTime := time.Date(2026, 6, 12, 10, 30, 15, 0, time.UTC)
+		paths := internaltest.NewDirectoryPathCreator()
+		m := &mockDB{make(map[string]db.GUTAs)}
+		op := NewDirGroupUserTypeAgeAt(m, referenceTime)()
+		info := &summary.FileInfo{
+			Path:      paths.ToDirectoryPath("/a/"),
+			Name:      strToBS("a/"),
+			Size:      4096,
+			UID:       uid,
+			GID:       gid,
+			MTime:     referenceTime.Add(-2 * time.Hour).Unix(),
+			ATime:     referenceTime.Add(-7 * 24 * time.Hour).Unix(),
+			EntryType: stats.DirType,
+		}
+
+		So(op.Add(info), ShouldBeNil)
+		So(op.Output(), ShouldBeNil)
+		So(m.has(
+			"/a/",
+			gid,
+			uid,
+			db.DGUTAFileTypeDir,
+			db.DGUTAgeAll,
+			1,
+			4096,
+			referenceTime.Unix(),
+			info.MTime,
+		), ShouldBeTrue)
+	})
+
 	Convey("You can summarise data with a range of Atimes", t, func() {
 		f := statsdata.NewRoot("/", 0)
 		f.UID = uid
@@ -417,7 +448,7 @@ func TestDirGUTA(t *testing.T) {
 
 		s := summary.NewSummariser(stats.NewStatsParser(f.AsReader()))
 		m := &mockDB{make(map[string]db.GUTAs)}
-		op := newDirGroupUserTypeAge(m, refTime)
+		op := newDirGroupUserTypeAge(m, refTime, refTime)
 		s.AddDirectoryOperation(op)
 
 		err := s.Summarise()
@@ -536,7 +567,7 @@ func TestDirGUTA(t *testing.T) {
 
 		s := summary.NewSummariser(stats.NewStatsParser(f.AsReader()))
 		m := &mockDB{make(map[string]db.GUTAs)}
-		op := newDirGroupUserTypeAge(m, refTime)
+		op := newDirGroupUserTypeAge(m, refTime, refTime)
 		s.AddDirectoryOperation(op)
 
 		err := s.Summarise()
@@ -574,7 +605,7 @@ func TestDirGUTA(t *testing.T) {
 
 		s := summary.NewSummariser(stats.NewStatsParser(f.AsReader()))
 		m := &mockDB{make(map[string]db.GUTAs)}
-		op := newDirGroupUserTypeAge(m, refTime)
+		op := newDirGroupUserTypeAge(m, refTime, refTime)
 		s.AddDirectoryOperation(op)
 
 		err := s.Summarise()
@@ -604,7 +635,7 @@ func TestDirGUTA(t *testing.T) {
 		statsdata.AddFileWithInode(f, "a/b/d/2.bam", uid, gid, 100, atimeOld, mtimeOld, 44, 2)
 
 		s2 := summary.NewSummariser(stats.NewStatsParser(f.AsReader()))
-		op2 := newDirGroupUserTypeAge(m, refTime)
+		op2 := newDirGroupUserTypeAge(m, refTime, refTime)
 		s2.AddDirectoryOperation(op2)
 		err = s2.Summarise()
 		So(err, ShouldBeNil)
@@ -619,7 +650,7 @@ func TestDirGUTA(t *testing.T) {
 		statsdata.AddFileWithInode(f, "a/x/5.bam", uid, gid, 150, atimeRecent, mtimeOld, 50, 3)
 
 		s3 := summary.NewSummariser(stats.NewStatsParser(f.AsReader()))
-		op3 := newDirGroupUserTypeAge(m, refTime)
+		op3 := newDirGroupUserTypeAge(m, refTime, refTime)
 		s3.AddDirectoryOperation(op3)
 		err = s3.Summarise()
 		So(err, ShouldBeNil)
@@ -659,7 +690,7 @@ func TestDirGUTA(t *testing.T) {
 
 		s := summary.NewSummariser(stats.NewStatsParser(f.AsReader()))
 		m := &mockDB{make(map[string]db.GUTAs)}
-		op := newDirGroupUserTypeAge(m, refTime)
+		op := newDirGroupUserTypeAge(m, refTime, refTime)
 		s.AddDirectoryOperation(op)
 
 		err := s.Summarise()
@@ -713,7 +744,7 @@ func TestDirGUTA(t *testing.T) {
 
 		s := summary.NewSummariser(stats.NewStatsParser(f.AsReader()))
 		m := &mockDB{make(map[string]db.GUTAs)}
-		op := newDirGroupUserTypeAge(m, refTime)
+		op := newDirGroupUserTypeAge(m, refTime, refTime)
 		s.AddDirectoryOperation(op)
 
 		err := s.Summarise()
@@ -735,6 +766,7 @@ func TestDirGUTA(t *testing.T) {
 		paths := internaltest.NewDirectoryPathCreator()
 		op, ok := newDirGroupUserTypeAge(
 			&mockDB{make(map[string]db.GUTAs)},
+			refTime,
 			refTime,
 		)().(*DirGroupUserTypeAge)
 		So(ok, ShouldBeTrue)

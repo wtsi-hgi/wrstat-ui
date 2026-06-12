@@ -61,6 +61,7 @@ const (
 var (
 	loadSummariseClickHouseSpool = clickhouse.LoadSummariseSpoolReport
 	summariseSpoolNow            = time.Now
+	summariseSpoolDirGUTANow     = time.Now
 )
 
 var (
@@ -283,12 +284,21 @@ func summariseMaxUpdatedAtForActiveRows(activeRows []summariseMountActiveRow) ti
 	var updatedAt time.Time
 
 	for _, row := range activeRows {
-		if row.updatedAt.After(updatedAt) {
-			updatedAt = row.updatedAt
+		rowUpdatedAt := summariseActiveSetUpdatedAt(row.updatedAt)
+		if rowUpdatedAt.After(updatedAt) {
+			updatedAt = rowUpdatedAt
 		}
 	}
 
 	return updatedAt
+}
+
+func summariseActiveSetUpdatedAt(t time.Time) time.Time {
+	if t.IsZero() {
+		return t
+	}
+
+	return t.UTC().Truncate(time.Second)
 }
 
 func summariseActiveVirtualContributors(
@@ -680,7 +690,7 @@ func (w *summariseDGUTASpoolWriter) writeActiveVirtualRows() error {
 	activeRows := []summariseMountActiveRow{{
 		mountPath:  w.mountPath,
 		snapshotID: w.snapshotID,
-		updatedAt:  w.updatedAt,
+		updatedAt:  summariseActiveSetUpdatedAt(w.updatedAt),
 	}}
 	activeSetID := summariseFingerprintForMountsActive(activeRows)
 	summaryRows, filterRows, childRows := summariseActiveVirtualRowsFromCanonicalData(
@@ -713,7 +723,8 @@ func summariseFingerprintForMountsActive(rows []summariseMountActiveRow) string 
 
 	parts := make([]string, 0, len(rows))
 	for _, row := range rows {
-		parts = append(parts, row.mountPath+"|"+row.snapshotID+"|"+row.updatedAt.UTC().Format(time.RFC3339Nano))
+		updatedAt := summariseActiveSetUpdatedAt(row.updatedAt)
+		parts = append(parts, row.mountPath+"|"+row.snapshotID+"|"+updatedAt.Format(time.RFC3339Nano))
 	}
 
 	slices.Sort(parts)
@@ -915,12 +926,13 @@ func summariseFullFilterRowForGUTA(
 }
 
 type summariseSpoolDataset struct {
-	set         *chspool.Set
-	mountPath   string
-	updatedAt   time.Time
-	snapshotID  string
-	refreshedAt time.Time
-	dgutaWriter *summariseDGUTASpoolWriter
+	set                *chspool.Set
+	mountPath          string
+	updatedAt          time.Time
+	snapshotID         string
+	refreshedAt        time.Time
+	dirgutaReferenceAt time.Time
+	dgutaWriter        *summariseDGUTASpoolWriter
 }
 
 type summariseFileSpoolOperation struct {
@@ -1388,11 +1400,12 @@ func buildSummariseSpool( //nolint:funlen,gocyclo
 	}
 
 	ds := &summariseSpoolDataset{
-		set:         set,
-		mountPath:   target.mountPath,
-		updatedAt:   target.modtime.UTC(),
-		snapshotID:  expected.SnapshotID,
-		refreshedAt: summariseSpoolNow().UTC(),
+		set:                set,
+		mountPath:          target.mountPath,
+		updatedAt:          target.modtime.UTC(),
+		snapshotID:         expected.SnapshotID,
+		refreshedAt:        summariseSpoolNow().UTC(),
+		dirgutaReferenceAt: summariseSpoolDirGUTANow().UTC(),
 	}
 
 	err = parseSummariseToSpool(statsPath, ds, diag)
@@ -1472,7 +1485,7 @@ func addSummariseSpoolOperations(s *summary.Summariser, ds *summariseSpoolDatase
 	dw.SetUpdatedAt(ds.updatedAt)
 	ds.dgutaWriter = dw
 
-	s.AddDirectoryOperation(dirguta.NewDirGroupUserTypeAge(dw))
+	s.AddDirectoryOperation(dirguta.NewDirGroupUserTypeAgeAt(dw, ds.dirgutaReferenceAt))
 	s.AddGlobalOperation((&summariseFileSpoolOperation{ds: ds}).operation)
 }
 

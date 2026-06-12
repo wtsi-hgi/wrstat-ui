@@ -144,6 +144,24 @@ func TestSummariseClickHouseSpoolRetry(t *testing.T) {
 	})
 }
 
+func d2DecodedRowFingerprints[T any](spoolDir string, table string) []string {
+	rows := []string{}
+
+	So(chspool.DecodeRows[T](spoolDir, table, func(row T) error {
+		data, err := json.Marshal(row)
+		if err != nil {
+			return err
+		}
+
+		rows = append(rows, string(data))
+
+		return nil
+	}), ShouldBeNil)
+	slices.Sort(rows)
+
+	return rows
+}
+
 type d2ActiveVirtualSummaryFacts struct {
 	AllCount        uint64
 	AllSize         uint64
@@ -412,6 +430,10 @@ func TestSummariseClickHouseSpoolRows(t *testing.T) {
 		summariseSpoolNow = func() time.Time {
 			return refreshedAt
 		}
+		dirgutaReferenceAt := d2Schema3DirGUTAReferenceTime()
+		summariseSpoolDirGUTANow = func() time.Time {
+			return dirgutaReferenceAt
+		}
 
 		clickHouseSnapshotIsActive = func(clickhouse.Config, string, time.Time) (bool, error) {
 			return false, nil
@@ -464,7 +486,7 @@ func TestSummariseClickHouseSpoolRows(t *testing.T) {
 
 		expectedRows := d2Schema3ExpectedRowCounts()
 		expectedTables := d2Schema3ExpectedTablesFromCanonicalManifest(canonicalManifest, expectedRows)
-		assertD2Schema3ManifestTables(spoolDir, manifest, expectedRows, expectedTables)
+		assertD2Schema3ManifestTables(spoolDir, manifest, expectedRows, expectedTables, canonicalSpoolDir)
 		assertD2Schema3CanonicalCounts(manifest, expectedManifest, fixture.updatedAt, expectedRows)
 		assertD2ActiveVirtualRowsFactsEquivalent(spoolDir, expectedManifest.MountPath)
 	})
@@ -499,6 +521,10 @@ func TestSummariseClickHouseSpoolRows(t *testing.T) {
 		refreshedAt := fixture.updatedAt.Add(time.Hour)
 		summariseSpoolNow = func() time.Time {
 			return refreshedAt
+		}
+		dirgutaReferenceAt := d2Schema3DirGUTAReferenceTime()
+		summariseSpoolDirGUTANow = func() time.Time {
+			return dirgutaReferenceAt
 		}
 
 		orderingConn := openB3CLIClickHouseConn(t, cfg.DSN)
@@ -579,6 +605,10 @@ func writeBasedirsSpoolFixtureStats(t *testing.T, statsPath string, updatedAt ti
 	So(os.Chtimes(statsPath, updatedAt, updatedAt), ShouldBeNil)
 }
 
+func d2Schema3DirGUTAReferenceTime() time.Time {
+	return time.Date(2026, 6, 12, 0, 0, 0, 0, time.UTC)
+}
+
 func d2Schema3ExpectedRowCounts() map[string]uint64 {
 	return map[string]uint64{
 		chspool.TableChildFilterAll:         68,
@@ -615,6 +645,7 @@ func assertD2Schema3ManifestTables(
 	manifest *chspool.Manifest,
 	expectedRows map[string]uint64,
 	expectedTables map[string]chspool.TableManifest,
+	expectedSpoolDir string,
 ) {
 	var seen uint64
 
@@ -627,8 +658,17 @@ func assertD2Schema3ManifestTables(
 		seen++
 		tm, ok := manifest.Tables[table]
 		So(ok, ShouldBeTrue)
-		So(tm, ShouldResemble, expectedTables[table])
+		So(tm.Table, ShouldEqual, expectedTables[table].Table)
+		So(tm.Path, ShouldEqual, expectedTables[table].Path)
+		So(tm.Rows, ShouldEqual, expectedTables[table].Rows)
+		So(tm.Bytes, ShouldBeGreaterThan, int64(0))
+		So(tm.SHA256, ShouldNotBeBlank)
 		So(d2DecodedRowsForTable(spoolDir, table), ShouldEqual, expectedRowCount)
+		So(
+			d2DecodedRowFingerprintsForTable(spoolDir, table),
+			ShouldResemble,
+			d2DecodedRowFingerprintsForTable(expectedSpoolDir, table),
+		)
 	}
 
 	So(seen, ShouldEqual, uint64(len(expectedRows)))
@@ -687,6 +727,27 @@ func d2DecodedRowsForTable(spoolDir string, table string) uint64 {
 	}
 
 	return rows
+}
+
+func d2DecodedRowFingerprintsForTable(spoolDir string, table string) []string {
+	switch table {
+	case chspool.TableChildFilterAll:
+		return d2DecodedRowFingerprints[chspool.ChildFilterAllRow](spoolDir, table)
+	case chspool.TableDirFilterAll:
+		return d2DecodedRowFingerprints[chspool.DirFilterAllRow](spoolDir, table)
+	case chspool.TableSchema3SnapshotSets:
+		return d2DecodedRowFingerprints[chspool.Schema3SnapshotSetRow](spoolDir, table)
+	case chspool.TableActiveVirtualSummaries:
+		return d2DecodedRowFingerprints[chspool.ActiveVirtualSummaryRow](spoolDir, table)
+	case chspool.TableActiveVirtualFilterAll:
+		return d2DecodedRowFingerprints[chspool.ActiveVirtualFilterAllRow](spoolDir, table)
+	case chspool.TableActiveVirtualChildren:
+		return d2DecodedRowFingerprints[chspool.ActiveVirtualChildRow](spoolDir, table)
+	case chspool.TableActiveVirtualSets:
+		return d2DecodedRowFingerprints[chspool.ActiveVirtualSetRow](spoolDir, table)
+	}
+
+	return nil
 }
 
 func assertD2Schema3CanonicalCounts(
@@ -1089,9 +1150,10 @@ func d2SHA256Hex(input string) string {
 }
 
 func d2ExpectedActiveSetID(expectedManifest chspool.Manifest, updatedAt time.Time) string {
+	updatedAt = summariseActiveSetUpdatedAt(updatedAt)
 	hash := sha256.New()
 	_, _ = hash.Write([]byte(expectedManifest.MountPath + "|" + expectedManifest.SnapshotID + "|" +
-		updatedAt.UTC().Format(time.RFC3339Nano)))
+		updatedAt.Format(time.RFC3339Nano)))
 	_, _ = hash.Write([]byte{0})
 
 	return hex.EncodeToString(hash.Sum(nil))

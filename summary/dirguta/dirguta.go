@@ -80,9 +80,7 @@ func (g gutaKey) String() string {
 	return unsafe.String(&a[0], len(a))
 }
 
-func newDirGroupUserTypeAge(d DB, refTime int64) summary.OperationGenerator {
-	now := time.Now().Unix()
-
+func newDirGroupUserTypeAge(d DB, refTime int64, now int64) summary.OperationGenerator {
 	var last *DirGroupUserTypeAge
 
 	childDB, streamChildren := d.(db.DGUTAChildrenWriter)
@@ -255,7 +253,17 @@ type DB interface {
 
 // NewDirGroupUserTypeAge returns a DirGroupUserTypeAge.
 func NewDirGroupUserTypeAge(db DB) summary.OperationGenerator {
-	return newDirGroupUserTypeAge(db, time.Now().Unix())
+	refTime := time.Now().Unix()
+
+	return newDirGroupUserTypeAge(db, refTime, time.Now().Unix())
+}
+
+// NewDirGroupUserTypeAgeAt returns a DirGroupUserTypeAge using referenceTime
+// for age buckets and directory access times.
+func NewDirGroupUserTypeAgeAt(db DB, referenceTime time.Time) summary.OperationGenerator {
+	refTime := referenceTime.Unix()
+
+	return newDirGroupUserTypeAge(db, refTime, refTime)
 }
 
 // inodeEntry stores metadata for a specific inode to track hardlinks.

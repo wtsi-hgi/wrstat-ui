@@ -396,6 +396,47 @@ func TestClickHouseSummariseSpoolLoader(t *testing.T) {
 				postPublishActiveSetID))
 	})
 
+	Convey("summarise spool load validates combined active virtual rows with subsecond mtimes", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+
+		const existingMountPath = "/mnt/d3-subsecond-existing/"
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 5 * time.Second
+		cfg.MountPoints = []string{existingMountPath, testMountPath}
+
+		paths := internaltest.NewDirectoryPathCreator()
+		existingUpdatedAt := time.Date(2026, 6, 8, 13, 0, 0, 0, time.UTC)
+		spoolUpdatedAt := time.Date(2026, 6, 8, 14, 0, 0, 237_000_000, time.UTC)
+
+		writeD1SingleRecord(cfg, existingMountPath, existingUpdatedAt, paths.ToDirectoryPath(existingMountPath), 7)
+
+		spoolDir := filepath.Join(t.TempDir(), "spool")
+		manifest := writeSummariseSpoolLoaderSchema3Spool(spoolDir, spoolUpdatedAt)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		So(LoadSummariseSpool(ctx, cfg, spoolDir, manifest, nil), ShouldBeNil)
+
+		verifyConn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(verifyConn.Close(), ShouldBeNil) })
+
+		activeRows, err := queryMountsActiveRows(ctx, verifyConn)
+		So(err, ShouldBeNil)
+		So(activeRows, ShouldHaveLength, 2)
+
+		activeSetID := fingerprintForMountsActive(activeRows)
+		activeSet := readActiveVirtualSetForTest(ctx, verifyConn, activeSetID)
+		So(activeSet.ready, ShouldEqual, uint8(1))
+		So(activeSet.summaryRows,
+			ShouldEqual, countRows(ctx, verifyConn, d1CountActiveSetRowsQuery("wrstat_active_virtual_summaries"),
+				activeSetID))
+	})
+
 	Convey("summarise spool load uses fresh query contexts after a slow table replay", t, func() {
 		cfg := Config{QueryTimeout: 25 * time.Millisecond}
 		spoolDir := filepath.Join(t.TempDir(), "spool")
