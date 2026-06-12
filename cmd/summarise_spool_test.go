@@ -44,12 +44,136 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/clickhouse"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 	"github.com/wtsi-hgi/wrstat-ui/internal/chspool"
+	"github.com/wtsi-hgi/wrstat-ui/internal/mountpath"
 	"github.com/wtsi-hgi/wrstat-ui/internal/perfreport"
 	"github.com/wtsi-hgi/wrstat-ui/internal/split"
 	"github.com/wtsi-hgi/wrstat-ui/internal/statsdata"
 )
 
 const summariseSpoolVirtualNamespaceDir = "/mnt/"
+
+const reinsertOldDirFactSentinelQuery = `
+INSERT INTO wrstat_dir_facts
+SELECT
+  mount_path,
+  toUUID(?),
+  dir,
+  updated_at,
+  all_count,
+  all_size,
+  all_atime_min,
+  all_mtime_max,
+  all_atime_buckets,
+  all_mtime_buckets,
+  all_uids,
+  all_gids,
+  all_ft,
+  file_count,
+  file_size,
+  file_atime_min,
+  file_mtime_max,
+  file_atime_buckets,
+  file_mtime_buckets,
+  file_uids,
+  file_gids,
+  file_ft,
+  gids,
+  uids,
+  fts,
+  ages,
+  counts,
+  sizes,
+  atime_mins,
+  mtime_maxs,
+  atime_buckets,
+  mtime_buckets,
+  child_count,
+  refreshed_at
+FROM wrstat_dir_facts
+WHERE mount_path = ? AND snapshot_id = toUUID(?)
+LIMIT 1`
+
+const reinsertOldActiveVirtualSetSentinelQuery = `
+INSERT INTO wrstat_active_virtual_sets
+SELECT
+  ?,
+  schema3_version,
+  ?,
+  active_mount_count,
+  summary_rows,
+  filter_rows,
+  child_rows,
+  manifest_sha256,
+  ready,
+  refreshed_at
+FROM wrstat_active_virtual_sets
+WHERE active_set_id = ?
+LIMIT 1`
+
+const insertMountActiveSnapshotEventForTestQuery = `
+INSERT INTO wrstat_mount_events
+  (mount_path, event_at, event_type, snapshot_id, updated_at, reason)
+VALUES (?, ?, 1, toUUID(?), ?, ?)`
+
+type summariseSpoolSwitchPlanForTest struct {
+	HasPrevious         bool   `json:"has_previous"`
+	PreviousSnapshotID  string `json:"previous_snapshot_id"`
+	PreviousActiveSetID string `json:"previous_active_set_id"`
+	NextActiveSetID     string `json:"next_active_set_id"`
+}
+
+func rewriteSummariseSpoolStateToPostSwitchCrash(
+	t *testing.T,
+	statePath string,
+) summariseSpoolSwitchPlanForTest {
+	t.Helper()
+
+	var state map[string]any
+
+	data, err := os.ReadFile(statePath)
+	So(err, ShouldBeNil)
+	So(json.Unmarshal(data, &state), ShouldBeNil)
+
+	plan := summariseSpoolSwitchPlanFromStateForTest(t, state)
+	So(plan.HasPrevious, ShouldBeTrue)
+
+	phases, ok := state["completed_phases"].(map[string]any)
+	So(ok, ShouldBeTrue)
+
+	for _, phase := range []string{
+		"mount_switched",
+		"old_snapshot_dropped",
+		"old_active_virtual_dropped",
+		"tree_summary_refreshed",
+		"active_prefix_refreshed",
+		"post_spool_publish_complete",
+	} {
+		delete(phases, phase)
+	}
+
+	data, err = json.MarshalIndent(state, "", "  ")
+	So(err, ShouldBeNil)
+
+	data = append(data, '\n')
+	So(os.WriteFile(statePath, data, 0o600), ShouldBeNil)
+
+	return plan
+}
+
+func summariseSpoolSwitchPlanFromStateForTest(
+	t *testing.T,
+	state map[string]any,
+) summariseSpoolSwitchPlanForTest {
+	t.Helper()
+
+	raw, err := json.Marshal(state["switch_plan"])
+	So(err, ShouldBeNil)
+
+	var plan summariseSpoolSwitchPlanForTest
+	So(json.Unmarshal(raw, &plan), ShouldBeNil)
+
+	return plan
+}
 
 func TestSummariseClickHouseSpoolRetry(t *testing.T) {
 	Convey("summarise retry reuses a completed spool after ClickHouse publish fails", t, func() {
@@ -142,6 +266,321 @@ func TestSummariseClickHouseSpoolRetry(t *testing.T) {
 		So(loadCalls, ShouldEqual, 1)
 		So(summariseCompletionMarkerExists(fixture.outputDir), ShouldBeFalse)
 	})
+
+	Convey("summarise retry rebuilds stale pre-switch active virtual readiness after another mount publishes", t, func() {
+		const otherMountPath = "/mnt/other/"
+
+		harness := newB3CLIClickHouseHarness(t)
+		cfg := harness.newConfig()
+		cfg.QueryTimeout = 10 * time.Second
+		cfg.PollInterval = 0
+		cfg.MountPoints = []string{summariseTestMountPath, otherMountPath}
+
+		baseDir := t.TempDir()
+		oldUpdatedAt := time.Unix(1_710_000_000, 0).UTC()
+		updatedAt := oldUpdatedAt.Add(time.Hour)
+		otherUpdatedAt := updatedAt.Add(30 * time.Minute)
+
+		fixture := newSummariseActiveSnapshotFixtureForMount(t, baseDir, summariseTestMountPath, updatedAt)
+		otherFixture := newSummariseActiveSnapshotFixtureForMount(t, baseDir, otherMountPath, otherUpdatedAt)
+
+		sharedDir := t.TempDir()
+		quotaFile := filepath.Join(sharedDir, "quota.csv")
+		basedirsFile := filepath.Join(sharedDir, "basedirs.tsv")
+		mountsFile := filepath.Join(sharedDir, "mounts.txt")
+
+		So(os.WriteFile(quotaFile, []byte("7,/mnt/test,1000,100\n7,/mnt/other,1000,100\n"), 0o600),
+			ShouldBeNil)
+		So(os.WriteFile(basedirsFile, []byte("/mnt/test\t1\t3\n/mnt/other\t1\t3\n"), 0o600),
+			ShouldBeNil)
+		So(os.WriteFile(mountsFile, []byte("\"/mnt/test/\"\n\"/mnt/other/\"\n"), 0o600), ShouldBeNil)
+
+		restore := snapshotSummariseGlobals()
+		Reset(restore)
+		Reset(func() { clickhouse.ResetTreeQueryCaches() })
+
+		summariseSpoolNow = func() time.Time {
+			return updatedAt.Add(2 * time.Hour)
+		}
+		summariseSpoolDirGUTANow = d2Schema3DirGUTAReferenceTime
+
+		configureSummariseSpoolRetryFixture(fixture, cfg, quotaFile, basedirsFile, mountsFile)
+		writeBasedirsSpoolFixtureStatsForMount(t, fixture.statsPath, summariseTestMountPath, oldUpdatedAt)
+		So(run([]string{fixture.statsPath}), ShouldBeNil)
+
+		oldSnapshotID := clickhouse.SnapshotID(summariseTestMountPath, oldUpdatedAt)
+		writeBasedirsSpoolFixtureStatsForMount(t, fixture.statsPath, summariseTestMountPath, updatedAt)
+		So(run([]string{fixture.statsPath}), ShouldBeNil)
+
+		spoolDir := summariseClickHouseSpoolDir(fixture.outputDir)
+		manifest, err := chspool.ReadManifest(spoolDir)
+		So(err, ShouldBeNil)
+
+		statePath := filepath.Join(spoolDir, "post_spool_publish_state.json")
+		plan := rewriteSummariseSpoolStateToPostSwitchCrash(t, statePath)
+		So(plan.PreviousSnapshotID, ShouldEqual, oldSnapshotID)
+		So(plan.PreviousActiveSetID, ShouldNotBeBlank)
+		So(plan.NextActiveSetID, ShouldNotBeBlank)
+		So(os.Remove(summariseCompletionMarkerPath(fixture.outputDir)), ShouldBeNil)
+
+		conn := openB3CLIClickHouseConn(t, cfg.DSN)
+		defer func() { So(conn.Close(), ShouldBeNil) }()
+
+		verifyCtx, verifyCancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer verifyCancel()
+
+		insertMountActiveSnapshotEventForTest(
+			t,
+			verifyCtx,
+			conn,
+			summariseTestMountPath,
+			time.Now().UTC().Add(time.Second),
+			oldSnapshotID,
+			oldUpdatedAt,
+			"pre-switch crash rollback",
+		)
+
+		configureSummariseSpoolRetryFixture(otherFixture, cfg, quotaFile, basedirsFile, mountsFile)
+		writeBasedirsSpoolFixtureStatsForMount(t, otherFixture.statsPath, otherMountPath, otherUpdatedAt)
+		So(run([]string{otherFixture.statsPath}), ShouldBeNil)
+
+		otherSnapshotID := clickhouse.SnapshotID(otherMountPath, otherUpdatedAt)
+		combinedActiveSetID := d2ExpectedActiveSetIDForRows([]summariseActiveSetRowForTest{
+			{mountPath: otherMountPath, snapshotID: otherSnapshotID, updatedAt: otherUpdatedAt},
+			{mountPath: summariseTestMountPath, snapshotID: manifest.SnapshotID, updatedAt: updatedAt},
+		})
+		So(combinedActiveSetID, ShouldNotEqual, plan.NextActiveSetID)
+
+		So(os.Chmod(fixture.statsPath, 0), ShouldBeNil)
+		Reset(func() { So(os.Chmod(fixture.statsPath, 0o600), ShouldBeNil) })
+
+		configureSummariseSpoolRetryFixture(fixture, cfg, quotaFile, basedirsFile, mountsFile)
+		So(run([]string{fixture.statsPath}), ShouldBeNil)
+
+		So(countActiveVirtualSetRows(verifyCtx, conn, combinedActiveSetID), ShouldEqual, uint64(1))
+		So(activeVirtualSetMountCountForTest(verifyCtx, conn, combinedActiveSetID), ShouldEqual, uint64(2))
+		So(d3CountRows(
+			verifyCtx,
+			conn,
+			"SELECT count() FROM wrstat_active_virtual_summaries WHERE active_set_id = ?",
+			combinedActiveSetID,
+		), ShouldBeGreaterThan, uint64(0))
+	})
+
+	Convey("summarise retry resumes post-spool publish phases without rereading stats.gz", t, func() {
+		harness := newB3CLIClickHouseHarness(t)
+		cfg := harness.newConfig()
+
+		fixture := newSummariseActiveSnapshotFixture(t)
+		writeBasedirsSpoolFixtureStats(t, fixture.statsPath, fixture.updatedAt)
+
+		restore := snapshotSummariseGlobals()
+		Reset(restore)
+		Reset(func() { clickhouse.ResetTreeQueryCaches() })
+
+		configureSummariseActiveSnapshotTest(fixture.outputDir, true)
+
+		clickhouseDSN = cfg.DSN
+		clickhouseDatabase = cfg.Database
+		quotaPath = filepath.Join(fixture.outputDir, "quota.csv")
+		basedirsConfig = filepath.Join(fixture.outputDir, "basedirs.tsv")
+		basedirsDB = filepath.Join(fixture.outputDir, basedirBasename)
+		mounts = filepath.Join(fixture.outputDir, "mounts.txt")
+
+		So(os.WriteFile(quotaPath, []byte("7,/mnt/test,1000,100\n"), 0o600), ShouldBeNil)
+		So(os.WriteFile(basedirsConfig, []byte("/mnt/test\t1\t3\n"), 0o600), ShouldBeNil)
+		So(os.WriteFile(mounts, []byte("\"/mnt/test/\"\n"), 0o600), ShouldBeNil)
+
+		refreshedAt := fixture.updatedAt.Add(time.Hour)
+		summariseSpoolNow = func() time.Time {
+			return refreshedAt
+		}
+		dirgutaReferenceAt := d2Schema3DirGUTAReferenceTime()
+		summariseSpoolDirGUTANow = func() time.Time {
+			return dirgutaReferenceAt
+		}
+
+		loadCalls := 0
+		secondRunMountSwitches := 0
+		loadSummariseClickHouseSpool = func(
+			ctx context.Context,
+			cfg clickhouse.Config,
+			spoolDir string,
+			manifest *chspool.Manifest,
+			recorder func(string, time.Duration),
+		) (perfreport.Report, error) {
+			loadCalls++
+			loadCtx := ctx
+
+			cancel := func() {}
+			if loadCalls == 1 {
+				loadCtx, cancel = context.WithCancel(ctx)
+			}
+			defer cancel()
+
+			wrappedRecorder := func(phase string, duration time.Duration) {
+				recorder(phase, duration)
+
+				if loadCalls == 1 && phase == "mount_switch" {
+					cancel()
+
+					return
+				}
+
+				if loadCalls == 2 && phase == "mount_switch" {
+					secondRunMountSwitches++
+				}
+			}
+
+			return clickhouse.LoadSummariseSpoolReport(loadCtx, cfg, spoolDir, manifest, wrappedRecorder)
+		}
+
+		err := run([]string{fixture.statsPath})
+		So(errors.Is(err, context.Canceled), ShouldBeTrue)
+		So(loadCalls, ShouldEqual, 1)
+		So(summariseCompletionMarkerExists(fixture.outputDir), ShouldBeFalse)
+
+		So(os.Chmod(fixture.statsPath, 0), ShouldBeNil)
+		Reset(func() { So(os.Chmod(fixture.statsPath, 0o600), ShouldBeNil) })
+
+		So(run([]string{fixture.statsPath}), ShouldBeNil)
+		So(loadCalls, ShouldEqual, 2)
+		So(secondRunMountSwitches, ShouldEqual, 0)
+
+		spoolDir := summariseClickHouseSpoolDir(fixture.outputDir)
+		report := readSummariseSpoolLoadReport(t, spoolDir)
+		So(report.TableStats[chspool.TableDirFacts].Rows, ShouldBeGreaterThan, uint64(0))
+
+		markerMatches, err := summariseCompletionMarkerMatches(*fixture.clickHouseTarget())
+		So(err, ShouldBeNil)
+		So(markerMatches, ShouldBeTrue)
+	})
+
+	Convey("summarise retry resumes after a mount switch crash using the stored switch plan", t, func() {
+		harness := newB3CLIClickHouseHarness(t)
+		cfg := harness.newConfig()
+
+		fixture := newSummariseActiveSnapshotFixture(t)
+		oldUpdatedAt := fixture.updatedAt.Add(-time.Hour)
+		writeBasedirsSpoolFixtureStats(t, fixture.statsPath, oldUpdatedAt)
+
+		restore := snapshotSummariseGlobals()
+		Reset(restore)
+		Reset(func() { clickhouse.ResetTreeQueryCaches() })
+
+		configureSummariseActiveSnapshotTest(fixture.outputDir, true)
+
+		clickhouseDSN = cfg.DSN
+		clickhouseDatabase = cfg.Database
+		quotaPath = filepath.Join(fixture.outputDir, "quota.csv")
+		basedirsConfig = filepath.Join(fixture.outputDir, "basedirs.tsv")
+		basedirsDB = filepath.Join(fixture.outputDir, basedirBasename)
+		mounts = filepath.Join(fixture.outputDir, "mounts.txt")
+
+		So(os.WriteFile(quotaPath, []byte("7,/mnt/test,1000,100\n"), 0o600), ShouldBeNil)
+		So(os.WriteFile(basedirsConfig, []byte("/mnt/test\t1\t3\n"), 0o600), ShouldBeNil)
+		So(os.WriteFile(mounts, []byte("\"/mnt/test/\"\n"), 0o600), ShouldBeNil)
+
+		refreshedAt := fixture.updatedAt.Add(time.Hour)
+		summariseSpoolNow = func() time.Time {
+			return refreshedAt
+		}
+		dirgutaReferenceAt := d2Schema3DirGUTAReferenceTime()
+		summariseSpoolDirGUTANow = func() time.Time {
+			return dirgutaReferenceAt
+		}
+
+		loadCalls := 0
+
+		var retryPhases []string
+
+		loadSummariseClickHouseSpool = func(
+			ctx context.Context,
+			cfg clickhouse.Config,
+			spoolDir string,
+			manifest *chspool.Manifest,
+			recorder func(string, time.Duration),
+		) (perfreport.Report, error) {
+			loadCalls++
+			call := loadCalls
+			wrappedRecorder := func(phase string, duration time.Duration) {
+				recorder(phase, duration)
+
+				if call == 3 {
+					retryPhases = append(retryPhases, phase)
+				}
+			}
+
+			return clickhouse.LoadSummariseSpoolReport(ctx, cfg, spoolDir, manifest, wrappedRecorder)
+		}
+
+		So(run([]string{fixture.statsPath}), ShouldBeNil)
+		So(loadCalls, ShouldEqual, 1)
+
+		oldSnapshotID := clickhouse.SnapshotID(summariseTestMountPath, oldUpdatedAt)
+
+		writeBasedirsSpoolFixtureStats(t, fixture.statsPath, fixture.updatedAt)
+		So(run([]string{fixture.statsPath}), ShouldBeNil)
+		So(loadCalls, ShouldEqual, 2)
+
+		spoolDir := summariseClickHouseSpoolDir(fixture.outputDir)
+		manifest, err := chspool.ReadManifest(spoolDir)
+		So(err, ShouldBeNil)
+
+		statePath := filepath.Join(spoolDir, "post_spool_publish_state.json")
+		plan := rewriteSummariseSpoolStateToPostSwitchCrash(t, statePath)
+		So(plan.PreviousSnapshotID, ShouldEqual, oldSnapshotID)
+		So(plan.PreviousActiveSetID, ShouldNotBeBlank)
+		So(plan.NextActiveSetID, ShouldNotBeBlank)
+
+		So(os.Remove(summariseCompletionMarkerPath(fixture.outputDir)), ShouldBeNil)
+
+		conn := openB3CLIClickHouseConn(t, cfg.DSN)
+		defer func() { So(conn.Close(), ShouldBeNil) }()
+
+		verifyCtx, verifyCancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer verifyCancel()
+
+		reinsertOldPublishSentinels(
+			t,
+			verifyCtx,
+			conn,
+			manifest.SnapshotID,
+			plan.PreviousSnapshotID,
+			plan.PreviousActiveSetID,
+			plan.NextActiveSetID,
+		)
+		So(countDirFactSnapshotRows(verifyCtx, conn, plan.PreviousSnapshotID), ShouldBeGreaterThan, uint64(0))
+		So(countActiveVirtualSetRows(verifyCtx, conn, plan.PreviousActiveSetID), ShouldBeGreaterThan, uint64(0))
+
+		So(os.Chmod(fixture.statsPath, 0), ShouldBeNil)
+		Reset(func() { So(os.Chmod(fixture.statsPath, 0o600), ShouldBeNil) })
+
+		cleanupCalls := 0
+		clickHouseCleanActiveSnapshotAttempt = func(clickhouse.Config, string, time.Time) error {
+			cleanupCalls++
+
+			return errSummariseTestClose
+		}
+
+		So(run([]string{fixture.statsPath}), ShouldBeNil)
+		So(loadCalls, ShouldEqual, 3)
+		So(cleanupCalls, ShouldEqual, 0)
+		So(summariseSpoolPhaseCount(retryPhases, "mount_switch"), ShouldEqual, 0)
+		So(summariseSpoolPhaseCount(retryPhases, "old_snapshot_partition_drop"), ShouldBeGreaterThanOrEqualTo, 2)
+		So(summariseSpoolPhaseCount(retryPhases, "wrstat_tree_summary_refresh"), ShouldBeGreaterThanOrEqualTo, 1)
+		So(summariseSpoolPhaseCount(retryPhases, "wrstat_active_prefix_rollup_refresh"),
+			ShouldBeGreaterThanOrEqualTo, 1)
+		So(countDirFactSnapshotRows(verifyCtx, conn, plan.PreviousSnapshotID), ShouldEqual, uint64(0))
+		So(countActiveVirtualSetRows(verifyCtx, conn, plan.PreviousActiveSetID), ShouldEqual, uint64(0))
+
+		phases := readSummariseSpoolStatePhasesForTest(t, statePath)
+		So(phases["post_spool_publish_complete"], ShouldNotBeBlank)
+
+		markerMatches, err := summariseCompletionMarkerMatches(*fixture.clickHouseTarget())
+		So(err, ShouldBeNil)
+		So(markerMatches, ShouldBeTrue)
+	})
 }
 
 func d2DecodedRowFingerprints[T any](spoolDir string, table string) []string {
@@ -160,6 +599,200 @@ func d2DecodedRowFingerprints[T any](spoolDir string, table string) []string {
 	slices.Sort(rows)
 
 	return rows
+}
+
+func newSummariseActiveSnapshotFixtureForMount(
+	t *testing.T,
+	baseDir string,
+	mountPath string,
+	updatedAt time.Time,
+) summariseActiveSnapshotFixture {
+	t.Helper()
+
+	mountKey := mountpath.EncodeKey(mountPath)
+	outputDir := filepath.Join(baseDir, "12345_"+mountKey)
+	So(os.MkdirAll(outputDir, summariseDirPerm), ShouldBeNil)
+
+	statsPath := filepath.Join(baseDir, mountKey+".stats.gz")
+	writeGzipStats(t, statsPath, []byte("not a valid wrstat row\n"))
+	So(os.Chtimes(statsPath, updatedAt, updatedAt), ShouldBeNil)
+
+	groupUserPath := filepath.Join(outputDir, "bygroup")
+	userGroupPath := filepath.Join(outputDir, "byusergroup.gz")
+	groupUserContent := []byte("existing group output\n")
+	userGroupContent := []byte("existing user output\n")
+
+	So(os.WriteFile(groupUserPath, groupUserContent, 0o600), ShouldBeNil)
+	So(os.WriteFile(userGroupPath, userGroupContent, 0o600), ShouldBeNil)
+
+	return summariseActiveSnapshotFixture{
+		outputDir:        outputDir,
+		statsPath:        statsPath,
+		updatedAt:        updatedAt,
+		groupUserPath:    groupUserPath,
+		userGroupPath:    userGroupPath,
+		groupUserContent: groupUserContent,
+		userGroupContent: userGroupContent,
+	}
+}
+
+func configureSummariseSpoolRetryFixture(
+	fixture summariseActiveSnapshotFixture,
+	cfg clickhouse.Config,
+	quotaFile string,
+	basedirsFile string,
+	mountsFile string,
+) {
+	configureSummariseActiveSnapshotTest(fixture.outputDir, true)
+
+	clickhouseDSN = cfg.DSN
+	clickhouseDatabase = cfg.Database
+	quotaPath = quotaFile
+	basedirsConfig = basedirsFile
+	basedirsDB = filepath.Join(fixture.outputDir, basedirBasename)
+	mounts = mountsFile
+}
+
+func writeBasedirsSpoolFixtureStatsForMount(
+	t *testing.T,
+	statsPath string,
+	mountPath string,
+	updatedAt time.Time,
+) {
+	t.Helper()
+
+	root := statsdata.NewRoot(mountPath, updatedAt.Unix())
+	project := root.AddDirectory("project")
+	file := project.AddFile("file.bam")
+	file.Size = 50
+	file.UID = 17
+	file.GID = 7
+	file.ATime = updatedAt.Unix()
+	file.MTime = updatedAt.Unix()
+	file.CTime = updatedAt.Unix()
+	file.Inode = 99
+	file.Nlink = 1
+
+	var buf bytes.Buffer
+
+	_, err := root.WriteTo(&buf)
+	So(err, ShouldBeNil)
+
+	writeGzipStats(t, statsPath, buf.Bytes())
+	So(os.Chtimes(statsPath, updatedAt, updatedAt), ShouldBeNil)
+}
+
+func insertMountActiveSnapshotEventForTest(
+	t *testing.T,
+	ctx context.Context,
+	conn ch.Conn,
+	mountPath string,
+	eventAt time.Time,
+	snapshotID string,
+	updatedAt time.Time,
+	reason string,
+) {
+	t.Helper()
+
+	So(conn.Exec(
+		ctx,
+		insertMountActiveSnapshotEventForTestQuery,
+		mountPath,
+		eventAt,
+		snapshotID,
+		updatedAt,
+		reason,
+	), ShouldBeNil)
+}
+
+func d2ExpectedActiveSetIDForRows(rows []summariseActiveSetRowForTest) string {
+	parts := make([]string, 0, len(rows))
+	for _, row := range rows {
+		updatedAt := summariseActiveSetUpdatedAt(row.updatedAt)
+		parts = append(parts, row.mountPath+"|"+row.snapshotID+"|"+updatedAt.Format(time.RFC3339Nano))
+	}
+
+	slices.Sort(parts)
+
+	hash := sha256.New()
+	for _, part := range parts {
+		_, _ = hash.Write([]byte(part))
+		_, _ = hash.Write([]byte{0})
+	}
+
+	return hex.EncodeToString(hash.Sum(nil))
+}
+
+func countActiveVirtualSetRows(ctx context.Context, conn ch.Conn, activeSetID string) uint64 {
+	return d3CountRows(ctx, conn, "SELECT count() FROM wrstat_active_virtual_sets WHERE active_set_id = ?", activeSetID)
+}
+
+func activeVirtualSetMountCountForTest(ctx context.Context, conn ch.Conn, activeSetID string) uint64 {
+	return d3CountRows(
+		ctx,
+		conn,
+		"SELECT active_mount_count FROM wrstat_active_virtual_sets WHERE active_set_id = ?",
+		activeSetID,
+	)
+}
+
+func reinsertOldPublishSentinels(
+	t *testing.T,
+	ctx context.Context,
+	conn ch.Conn,
+	sourceSnapshotID string,
+	previousSnapshotID string,
+	previousActiveSetID string,
+	nextActiveSetID string,
+) {
+	t.Helper()
+
+	So(conn.Exec(ctx, reinsertOldDirFactSentinelQuery, previousSnapshotID, summariseTestMountPath, sourceSnapshotID),
+		ShouldBeNil)
+	So(conn.Exec(ctx, reinsertOldActiveVirtualSetSentinelQuery, previousActiveSetID, previousActiveSetID,
+		nextActiveSetID), ShouldBeNil)
+}
+
+func countDirFactSnapshotRows(ctx context.Context, conn ch.Conn, snapshotID string) uint64 {
+	return d3CountRows(
+		ctx,
+		conn,
+		"SELECT count() FROM wrstat_dir_facts WHERE mount_path = ? AND snapshot_id = toUUID(?)",
+		summariseTestMountPath,
+		snapshotID,
+	)
+}
+
+func summariseSpoolPhaseCount(phases []string, want string) int {
+	count := 0
+
+	for _, phase := range phases {
+		if phase == want {
+			count++
+		}
+	}
+
+	return count
+}
+
+func readSummariseSpoolStatePhasesForTest(t *testing.T, statePath string) map[string]string {
+	t.Helper()
+
+	var state struct {
+		CompletedPhases map[string]string `json:"completed_phases"`
+	}
+
+	data, err := os.ReadFile(statePath)
+	So(err, ShouldBeNil)
+	So(json.Unmarshal(data, &state), ShouldBeNil)
+
+	return state.CompletedPhases
+}
+
+type summariseActiveSetRowForTest struct {
+	mountPath  string
+	snapshotID string
+	updatedAt  time.Time
 }
 
 type d2ActiveVirtualSummaryFacts struct {
@@ -584,25 +1217,7 @@ func TestSummariseClickHouseSpoolRows(t *testing.T) {
 func writeBasedirsSpoolFixtureStats(t *testing.T, statsPath string, updatedAt time.Time) {
 	t.Helper()
 
-	root := statsdata.NewRoot(summariseTestMountPath, updatedAt.Unix())
-	project := root.AddDirectory("project")
-	file := project.AddFile("file.bam")
-	file.Size = 50
-	file.UID = 17
-	file.GID = 7
-	file.ATime = updatedAt.Unix()
-	file.MTime = updatedAt.Unix()
-	file.CTime = updatedAt.Unix()
-	file.Inode = 99
-	file.Nlink = 1
-
-	var buf bytes.Buffer
-
-	_, err := root.WriteTo(&buf)
-	So(err, ShouldBeNil)
-
-	writeGzipStats(t, statsPath, buf.Bytes())
-	So(os.Chtimes(statsPath, updatedAt, updatedAt), ShouldBeNil)
+	writeBasedirsSpoolFixtureStatsForMount(t, statsPath, summariseTestMountPath, updatedAt)
 }
 
 func d2Schema3DirGUTAReferenceTime() time.Time {
@@ -1150,13 +1765,11 @@ func d2SHA256Hex(input string) string {
 }
 
 func d2ExpectedActiveSetID(expectedManifest chspool.Manifest, updatedAt time.Time) string {
-	updatedAt = summariseActiveSetUpdatedAt(updatedAt)
-	hash := sha256.New()
-	_, _ = hash.Write([]byte(expectedManifest.MountPath + "|" + expectedManifest.SnapshotID + "|" +
-		updatedAt.Format(time.RFC3339Nano)))
-	_, _ = hash.Write([]byte{0})
-
-	return hex.EncodeToString(hash.Sum(nil))
+	return d2ExpectedActiveSetIDForRows([]summariseActiveSetRowForTest{{
+		mountPath:  expectedManifest.MountPath,
+		snapshotID: expectedManifest.SnapshotID,
+		updatedAt:  updatedAt,
+	}})
 }
 
 func assertD3ColdSchema3Probes(

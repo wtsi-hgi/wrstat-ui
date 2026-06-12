@@ -59,11 +59,14 @@ const (
 )
 
 var (
-	errSummariseSpoolManifestRequired = errors.New("clickhouse: summarise spool manifest is required")
-	errInvalidSummariseSpoolManifest  = errors.New("clickhouse: invalid summarise spool manifest")
-	errSpoolDecodedRowsMismatch       = errors.New("clickhouse: spool decoded row count mismatch")
-	errUnknownSpoolLoadTable          = errors.New("clickhouse: no loader query for spool table")
-	errSpoolLoadedRowsMismatch        = errors.New("clickhouse: spool loaded row count mismatch")
+	errSummariseSpoolManifestRequired         = errors.New("clickhouse: summarise spool manifest is required")
+	errInvalidSummariseSpoolManifest          = errors.New("clickhouse: invalid summarise spool manifest")
+	errSpoolDecodedRowsMismatch               = errors.New("clickhouse: spool decoded row count mismatch")
+	errUnknownSpoolLoadTable                  = errors.New("clickhouse: no loader query for spool table")
+	errSpoolLoadedRowsMismatch                = errors.New("clickhouse: spool loaded row count mismatch")
+	errSummariseSpoolPublishMissingSwitchPlan = errors.New(
+		"clickhouse: summarise spool publish state is missing switch plan",
+	)
 )
 
 type summariseSpoolLoader struct {
@@ -120,15 +123,16 @@ func (l *summariseSpoolLoader) loadWithAfterPublish(
 
 	parent = loadParentContext(parent)
 
-	if err := l.prepareSnapshot(parent); err != nil {
+	tracker, err := newSummariseSpoolPublishTracker(l.dir, l.manifest)
+	if err != nil {
 		return err
 	}
 
-	if err := l.loadTables(parent); err != nil {
+	if err := l.ensureTablesLoaded(parent, tracker); err != nil {
 		return err
 	}
 
-	if err := l.publish(parent); err != nil {
+	if err := l.publishWithTracker(parent, tracker); err != nil {
 		return err
 	}
 
@@ -145,6 +149,41 @@ func loadParentContext(parent context.Context) context.Context {
 	}
 
 	return parent
+}
+
+func (l *summariseSpoolLoader) ensureTablesLoaded(
+	parent context.Context,
+	tracker *summariseSpoolPublishTracker,
+) error {
+	if tracker.done(summariseSpoolPublishPhaseTablesLoaded) {
+		l.recordLoadedRowsFromManifest()
+
+		return nil
+	}
+
+	if err := l.prepareSnapshot(parent); err != nil {
+		return err
+	}
+
+	if err := l.loadTables(parent); err != nil {
+		return err
+	}
+
+	l.recordLoadedRowsFromManifest()
+
+	return tracker.mark(summariseSpoolPublishPhaseTablesLoaded)
+}
+
+func (l *summariseSpoolLoader) recordLoadedRowsFromManifest() {
+	if l.manifest == nil {
+		return
+	}
+
+	for table, manifest := range l.manifest.Tables {
+		if manifest.Rows > 0 {
+			l.recordLoadedRows(table, manifest.Rows)
+		}
+	}
 }
 
 func (l *summariseSpoolLoader) queryContext(parent context.Context) (context.Context, context.CancelFunc) {
@@ -1339,6 +1378,18 @@ func summariseSpoolActiveVirtualCountQueries() map[string]string {
 }
 
 func (l *summariseSpoolLoader) publish(parent context.Context) error {
+	tracker, err := newSummariseSpoolPublishTracker(l.dir, l.manifest)
+	if err != nil {
+		return err
+	}
+
+	return l.publishWithTracker(parent, tracker)
+}
+
+func (l *summariseSpoolLoader) publishWithTracker(
+	parent context.Context,
+	tracker *summariseSpoolPublishTracker,
+) error {
 	writer := &dgutaWriter{
 		cfg:                 l.cfg,
 		conn:                l.conn,
@@ -1348,48 +1399,319 @@ func (l *summariseSpoolLoader) publish(parent context.Context) error {
 		importPhaseRecorder: l.importPhaseRecorder,
 	}
 
-	ctx, cancel := l.queryContext(parent)
-	if err := l.stagePostSwitchActiveVirtualRows(ctx, writer); err != nil {
-		cancel()
-
-		return writer.closeWithNewSnapshotCleanup(ctx, err)
-	}
-
-	cancel()
-
-	ctx, cancel = l.queryContext(parent)
-	defer cancel()
-
-	return writer.switchSnapshotAndDropOld(ctx)
-}
-
-func (l *summariseSpoolLoader) stagePostSwitchActiveVirtualRows(ctx context.Context, writer *dgutaWriter) error {
-	spoolActiveSetIDs, err := l.spoolActiveSetIDs()
-	if err != nil {
+	if err := l.ensureFreshPreSwitchResumeState(parent, writer, tracker); err != nil {
 		return err
 	}
 
-	if len(spoolActiveSetIDs) == 0 {
+	if err := l.ensurePostSwitchActiveVirtualRows(parent, writer, tracker); err != nil {
+		return err
+	}
+
+	if err := l.switchSnapshotAndFinalise(parent, writer, tracker); err != nil {
+		return err
+	}
+
+	return tracker.mark(summariseSpoolPublishPhasePostSpoolPublishComplete)
+}
+
+func (l *summariseSpoolLoader) ensureFreshPreSwitchResumeState(
+	parent context.Context,
+	writer *dgutaWriter,
+	tracker *summariseSpoolPublishTracker,
+) error {
+	if !tracker.reusesPreSwitchState() {
 		return nil
+	}
+
+	ctx, cancel := l.queryContext(parent)
+	defer cancel()
+
+	stale, err := l.preSwitchResumeStateIsStale(ctx, tracker)
+	if err != nil {
+		return writer.closeWithNewSnapshotCleanup(ctx, err)
+	}
+
+	if !stale {
+		return nil
+	}
+
+	return tracker.clearPreSwitchPlan()
+}
+
+func (l *summariseSpoolLoader) preSwitchResumeStateIsStale(
+	ctx context.Context,
+	tracker *summariseSpoolPublishTracker,
+) (bool, error) {
+	if l.currentSnapshotIsActive(ctx) {
+		return false, nil
+	}
+
+	plan, ok := tracker.switchPlan()
+	if !ok {
+		return true, nil
 	}
 
 	activeRows, err := queryMountsActiveRows(ctx, l.conn)
 	if err != nil {
+		return false, err
+	}
+
+	return fingerprintForMountsActive(activeRows) != plan.PreviousActiveSetID, nil
+}
+
+func (l *summariseSpoolLoader) ensurePostSwitchActiveVirtualRows(
+	parent context.Context,
+	writer *dgutaWriter,
+	tracker *summariseSpoolPublishTracker,
+) error {
+	if tracker.done(summariseSpoolPublishPhaseActiveVirtualReady) {
+		writer.stagedActiveSetID = tracker.nextActiveSetID()
+
+		return nil
+	}
+
+	ctx, cancel := l.queryContext(parent)
+	defer cancel()
+
+	activeSetID, err := l.stagePostSwitchActiveVirtualRows(ctx, writer)
+	if err != nil {
+		return writer.closeWithNewSnapshotCleanup(ctx, err)
+	}
+
+	if err := tracker.setNextActiveSetID(activeSetID); err != nil {
 		return err
+	}
+
+	return tracker.mark(summariseSpoolPublishPhaseActiveVirtualReady)
+}
+
+func (l *summariseSpoolLoader) stagePostSwitchActiveVirtualRows(
+	ctx context.Context,
+	writer *dgutaWriter,
+) (string, error) {
+	spoolActiveSetIDs, err := l.spoolActiveSetIDs()
+	if err != nil {
+		return "", err
+	}
+
+	if len(spoolActiveSetIDs) == 0 {
+		return "", nil
+	}
+
+	postPublishActiveSetID, err := l.postPublishActiveSetID(ctx, writer)
+	if err != nil {
+		return "", err
+	}
+
+	writer.stagedActiveSetID = postPublishActiveSetID
+
+	if slices.Contains(spoolActiveSetIDs, postPublishActiveSetID) {
+		return postPublishActiveSetID, nil
+	}
+
+	if err := writer.writeActiveVirtualReadiness(ctx); err != nil {
+		return "", err
+	}
+
+	return postPublishActiveSetID, l.dropSpoolActiveVirtualPartitions(ctx)
+}
+
+func (l *summariseSpoolLoader) postPublishActiveSetID(
+	ctx context.Context,
+	writer *dgutaWriter,
+) (string, error) {
+	activeRows, err := queryMountsActiveRows(ctx, l.conn)
+	if err != nil {
+		return "", err
 	}
 
 	postPublishRows := stagedMountsActiveRows(activeRows, mountsActiveRow(writer.activeMount()))
 
-	postPublishActiveSetID := fingerprintForMountsActive(postPublishRows)
-	if slices.Contains(spoolActiveSetIDs, postPublishActiveSetID) {
-		return nil
+	return fingerprintForMountsActive(postPublishRows), nil
+}
+
+func (l *summariseSpoolLoader) switchSnapshotAndFinalise(
+	parent context.Context,
+	writer *dgutaWriter,
+	tracker *summariseSpoolPublishTracker,
+) error {
+	ctx, cancel := l.queryContext(parent)
+	defer cancel()
+
+	plan, err := l.ensureSwitchPlan(ctx, writer, tracker)
+	if err != nil {
+		return writer.closeWithNewSnapshotCleanup(ctx, err)
 	}
 
-	if err := writer.writeActiveVirtualReadiness(ctx); err != nil {
+	if err := l.ensureMountSwitched(ctx, writer, tracker); err != nil {
 		return err
 	}
 
-	return l.dropSpoolActiveVirtualPartitions(ctx)
+	if err := l.ensureOldSnapshotDropped(ctx, writer, tracker, plan); err != nil {
+		return err
+	}
+
+	if err := l.ensureOldActiveVirtualDropped(ctx, writer, tracker, plan); err != nil {
+		return err
+	}
+
+	if err := l.ensureActiveTreeSummariesRefreshed(ctx, writer, tracker); err != nil {
+		return err
+	}
+
+	return l.ensureActivePrefixRollupsRefreshed(ctx, writer, tracker)
+}
+
+func (l *summariseSpoolLoader) ensureSwitchPlan(
+	ctx context.Context,
+	writer *dgutaWriter,
+	tracker *summariseSpoolPublishTracker,
+) (summariseSpoolSwitchPlan, error) {
+	if plan, ok := tracker.switchPlan(); ok {
+		writer.stagedActiveSetID = plan.NextActiveSetID
+
+		return plan, nil
+	}
+
+	if tracker.done(summariseSpoolPublishPhaseMountSwitched) {
+		return summariseSpoolSwitchPlan{}, errSummariseSpoolPublishMissingSwitchPlan
+	}
+
+	previousSID, hasPrevious, err := writer.readPreviousActiveSnapshotID(ctx)
+	if err != nil {
+		return summariseSpoolSwitchPlan{}, err
+	}
+
+	plan, err := l.switchPlanFromCurrentState(ctx, writer, previousSID, hasPrevious)
+	if err != nil {
+		return summariseSpoolSwitchPlan{}, err
+	}
+
+	if err := tracker.setSwitchPlan(plan); err != nil {
+		return summariseSpoolSwitchPlan{}, err
+	}
+
+	return plan, nil
+}
+
+func (l *summariseSpoolLoader) switchPlanFromCurrentState(
+	ctx context.Context,
+	writer *dgutaWriter,
+	previousSID string,
+	hasPrevious bool,
+) (summariseSpoolSwitchPlan, error) {
+	previousActiveSetID, nextActiveSetID, err := writer.activeSetIDsForSwitch(ctx)
+	if err != nil {
+		return summariseSpoolSwitchPlan{}, err
+	}
+
+	return summariseSpoolSwitchPlan{
+		HasPrevious:         hasPrevious,
+		PreviousSnapshotID:  previousSID,
+		PreviousActiveSetID: previousActiveSetID,
+		NextActiveSetID:     nextActiveSetID,
+	}, nil
+}
+
+func (l *summariseSpoolLoader) ensureMountSwitched(
+	ctx context.Context,
+	writer *dgutaWriter,
+	tracker *summariseSpoolPublishTracker,
+) error {
+	if tracker.done(summariseSpoolPublishPhaseMountSwitched) {
+		return nil
+	}
+
+	if l.currentSnapshotIsActive(ctx) {
+		return tracker.mark(summariseSpoolPublishPhaseMountSwitched)
+	}
+
+	err := writer.timeImportPhase(importPhaseMountSwitch, func() error {
+		return writer.switchActiveSnapshot(ctx)
+	})
+	if err == nil {
+		return tracker.mark(summariseSpoolPublishPhaseMountSwitched)
+	}
+
+	if l.currentSnapshotIsActive(ctx) {
+		return tracker.mark(summariseSpoolPublishPhaseMountSwitched)
+	}
+
+	return writer.closeWithNewSnapshotCleanup(ctx, err)
+}
+
+func (l *summariseSpoolLoader) currentSnapshotIsActive(ctx context.Context) bool {
+	activeSID, hasActive, err := readActiveSnapshotID(ctx, l.conn, l.manifest.MountPath)
+
+	return err == nil && hasActive && activeSID == l.snapshot.String()
+}
+
+func (l *summariseSpoolLoader) ensureOldSnapshotDropped(
+	ctx context.Context,
+	writer *dgutaWriter,
+	tracker *summariseSpoolPublishTracker,
+	plan summariseSpoolSwitchPlan,
+) error {
+	if tracker.done(summariseSpoolPublishPhaseOldSnapshotDropped) {
+		return nil
+	}
+
+	if plan.HasPrevious {
+		if err := writer.dropPreviousSnapshotPartitions(ctx, plan.PreviousSnapshotID); err != nil {
+			return err
+		}
+	}
+
+	return tracker.mark(summariseSpoolPublishPhaseOldSnapshotDropped)
+}
+
+func (l *summariseSpoolLoader) ensureOldActiveVirtualDropped(
+	ctx context.Context,
+	writer *dgutaWriter,
+	tracker *summariseSpoolPublishTracker,
+	plan summariseSpoolSwitchPlan,
+) error {
+	if tracker.done(summariseSpoolPublishPhaseOldActiveVirtualDropped) {
+		return nil
+	}
+
+	if err := writer.dropPreviousActiveVirtualPartitions(
+		ctx,
+		plan.PreviousActiveSetID,
+		plan.NextActiveSetID,
+	); err != nil {
+		return err
+	}
+
+	return tracker.mark(summariseSpoolPublishPhaseOldActiveVirtualDropped)
+}
+
+func (l *summariseSpoolLoader) ensureActiveTreeSummariesRefreshed(
+	ctx context.Context,
+	writer *dgutaWriter,
+	tracker *summariseSpoolPublishTracker,
+) error {
+	if tracker.done(summariseSpoolPublishPhaseTreeSummaryRefreshed) {
+		return nil
+	}
+
+	writer.refreshActiveTreeSummariesBestEffort(ctx)
+
+	return tracker.mark(summariseSpoolPublishPhaseTreeSummaryRefreshed)
+}
+
+func (l *summariseSpoolLoader) ensureActivePrefixRollupsRefreshed(
+	ctx context.Context,
+	writer *dgutaWriter,
+	tracker *summariseSpoolPublishTracker,
+) error {
+	if tracker.done(summariseSpoolPublishPhaseActivePrefixRefreshed) {
+		return nil
+	}
+
+	writer.refreshActivePrefixRollupsBestEffort(ctx)
+
+	return tracker.mark(summariseSpoolPublishPhaseActivePrefixRefreshed)
 }
 
 func (l *summariseSpoolLoader) timeImportPhase(phase string, fn func() error) error {

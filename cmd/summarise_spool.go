@@ -1289,14 +1289,6 @@ func maybeRunClickHouseSpoolSummarise( //nolint:funlen
 	diag.logStart()
 	diag.startSignalHandler()
 
-	if err := preflightClickHouseActiveSnapshot(*target); err != nil {
-		if errors.Is(err, errSummariseClickHouseSnapshotAlreadyActive) {
-			return true, nil
-		}
-
-		return true, err
-	}
-
 	spoolDir := summariseClickHouseSpoolDir(target.outputDir)
 
 	expected, err := newSummariseSpoolManifest(statsPath, target)
@@ -1304,11 +1296,22 @@ func maybeRunClickHouseSpoolSummarise( //nolint:funlen
 		return true, err
 	}
 
-	if manifest, ok := completeSummariseSpool(spoolDir, expected); ok {
+	manifest, hasCompleteSpool := completeSummariseSpool(spoolDir, expected)
+
+	err = preflightClickHouseActiveSnapshotForSpool(*target, spoolDir, manifest)
+	if err != nil {
+		if errors.Is(err, errSummariseClickHouseSnapshotAlreadyActive) {
+			return true, nil
+		}
+
+		return true, err
+	}
+
+	if hasCompleteSpool {
 		return true, publishSummariseSpool(spoolDir, manifest, target, diag)
 	}
 
-	manifest, err := buildSummariseSpool(statsPath, spoolDir, expected, target, diag)
+	manifest, err = buildSummariseSpool(statsPath, spoolDir, expected, target, diag)
 	if err != nil {
 		diag.logFailure(err)
 

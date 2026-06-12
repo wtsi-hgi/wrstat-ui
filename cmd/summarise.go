@@ -39,6 +39,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
 	"github.com/wtsi-hgi/wrstat-ui/clickhouse"
+	"github.com/wtsi-hgi/wrstat-ui/internal/chspool"
 	"github.com/wtsi-hgi/wrstat-ui/internal/mountpath"
 	"github.com/wtsi-hgi/wrstat-ui/internal/summariseutil"
 	"github.com/wtsi-hgi/wrstat-ui/stats"
@@ -365,6 +366,39 @@ func setupClickHouseSummariseHooks(
 	return addClickHouseSummariseHooks(s, chTarget, diag)
 }
 
+func preflightClickHouseActiveSnapshotForSpool(
+	target clickHouseSummariseTarget,
+	spoolDir string,
+	manifest *chspool.Manifest,
+) error {
+	active, err := clickHouseSnapshotIsActive(
+		target.cfg,
+		target.mountPath,
+		target.modtime,
+	)
+	if err != nil {
+		return err
+	}
+
+	if !active {
+		return nil
+	}
+
+	if clickhouseRecover {
+		return preflightClickHouseActiveSnapshotRetry(target, spoolDir, manifest)
+	}
+
+	return summariseActiveSnapshotRewriteError(target)
+}
+
+func summariseSpoolPublishCanResume(spoolDir string, manifest *chspool.Manifest) (bool, error) {
+	if manifest == nil {
+		return false, nil
+	}
+
+	return clickhouse.SummariseSpoolPublishCanResume(spoolDir, manifest)
+}
+
 func abortSummariseHooks(hooks *summariseRunHooks) error {
 	if hooks == nil || hooks.close == nil {
 		return nil
@@ -468,27 +502,14 @@ func prepareClickHouseSummariseTarget(
 }
 
 func preflightClickHouseActiveSnapshot(target clickHouseSummariseTarget) error {
-	active, err := clickHouseSnapshotIsActive(
-		target.cfg,
-		target.mountPath,
-		target.modtime,
-	)
-	if err != nil {
-		return err
-	}
-
-	if !active {
-		return nil
-	}
-
-	if clickhouseRecover {
-		return preflightClickHouseActiveSnapshotRetry(target)
-	}
-
-	return summariseActiveSnapshotRewriteError(target)
+	return preflightClickHouseActiveSnapshotForSpool(target, "", nil)
 }
 
-func preflightClickHouseActiveSnapshotRetry(target clickHouseSummariseTarget) error {
+func preflightClickHouseActiveSnapshotRetry(
+	target clickHouseSummariseTarget,
+	spoolDir string,
+	manifest *chspool.Manifest,
+) error {
 	markerMatches, err := summariseCompletionMarkerMatches(target)
 	if err != nil {
 		return err
@@ -496,6 +517,15 @@ func preflightClickHouseActiveSnapshotRetry(target clickHouseSummariseTarget) er
 
 	if markerMatches {
 		return errSummariseClickHouseSnapshotAlreadyActive
+	}
+
+	resumable, err := summariseSpoolPublishCanResume(spoolDir, manifest)
+	if err != nil {
+		return err
+	}
+
+	if resumable {
+		return nil
 	}
 
 	if err := clickHouseCleanActiveSnapshotAttempt(target.cfg, target.mountPath, target.modtime); err != nil {
