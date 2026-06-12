@@ -32,6 +32,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"math"
 	"os"
 	"path/filepath"
@@ -145,6 +146,8 @@ const (
 	finalGateE2ProactiveWarmingInput       = "proactive_warming"
 	finalGateE2ReadBytesCeilingInput       = "read_bytes_ceiling"
 	finalGateE2ReadMarksCeilingInput       = "read_marks_ceiling"
+	finalGateE2ReadVolumeByteSlack         = 1.25
+	finalGateE2ReadVolumeIndexGranularity  = uint64(8192)
 	finalGateE2ReadRowsCeilingInput        = "read_rows_ceiling"
 	finalGateE2ScenarioDirInfosBroad       = "dirinfos_broad_parent_packet"
 	finalGateE2ScenarioDirInfosFiltered    = "dirinfos_filtered_child_filter_packet"
@@ -2450,6 +2453,22 @@ func finalGateFilteredWhereOps(
 	return clickHouseOp, boltOp, ""
 }
 
+func finalGateE2MeasuredTableStats(e FinalGateEvidence) map[string]perfreport.TableStats {
+	stats := make(map[string]perfreport.TableStats)
+
+	finalGateMergeReportTableStats(stats, finalGateE2ImportReports(e))
+	finalGateMergeReportTableStats(stats, finalGateE2SpoolReports(e))
+	finalGateMergeReportTableStats(stats, e.QueryReports)
+
+	return stats
+}
+
+func finalGateMergeReportTableStats(dst map[string]perfreport.TableStats, reports []perfreport.Report) {
+	for _, report := range reports {
+		maps.Copy(dst, report.TableStats)
+	}
+}
+
 type t283RESTOrderCandidate struct {
 	digest      string
 	resultCount uint64
@@ -2966,8 +2985,9 @@ func (c FinalGateCheck) fail(detail string) FinalGateCheck {
 }
 
 type finalGateMeasuredOperation struct {
-	report perfreport.Report
-	op     perfreport.Operation
+	report     perfreport.Report
+	op         perfreport.Operation
+	tableStats map[string]perfreport.TableStats
 }
 
 func finalGateE2Operation(
@@ -2976,13 +2996,15 @@ func finalGateE2Operation(
 	scenario string,
 	root string,
 ) (finalGateMeasuredOperation, bool) {
+	tableStats := finalGateE2MeasuredTableStats(e)
+
 	for _, report := range e.QueryReports {
 		for _, op := range report.Operations {
 			if !finalGateE2OperationMatches(op, name, scenario, root) {
 				continue
 			}
 
-			return finalGateMeasuredOperation{report: report, op: op}, true
+			return finalGateMeasuredOperation{report: report, op: op, tableStats: tableStats}, true
 		}
 	}
 
@@ -3025,7 +3047,7 @@ func finalGateE2PacketOperationFailure(
 		return reason
 	}
 
-	return finalGateE2ReadVolumeFailure(measured.op)
+	return finalGateE2ReadVolumeFailure(measured, packetTable)
 }
 
 func finalGateE2PacketReadShapeFailure(
@@ -3096,17 +3118,22 @@ func uint64InputPresentValue(inputs map[string]any, key string) (uint64, bool) {
 	}
 }
 
-func finalGateE2ReadVolumeFailure(op perfreport.Operation) string {
+func finalGateE2ReadVolumeFailure(measured finalGateMeasuredOperation, packetTable string) string {
+	ceiling, reason := finalGateE2ReadVolumeCeiling(measured, packetTable)
+	if reason != "" {
+		return reason
+	}
+
 	for _, spec := range []struct {
 		name    string
 		values  []uint64
-		ceiling string
+		ceiling uint64
 	}{
-		{"rows", op.ReadRows, finalGateE2ReadRowsCeilingInput},
-		{"bytes", op.ReadBytes, finalGateE2ReadBytesCeilingInput},
-		{"marks", op.ReadMarks, finalGateE2ReadMarksCeilingInput},
+		{"rows", measured.op.ReadRows, ceiling.rows},
+		{"bytes", measured.op.ReadBytes, ceiling.bytes},
+		{"marks", measured.op.ReadMarks, ceiling.marks},
 	} {
-		if reason := finalGateE2ReadVolumeMetricFailure(op, spec.name, spec.values, spec.ceiling); reason != "" {
+		if reason := finalGateE2ReadVolumeMetricFailure(spec.name, spec.values, spec.ceiling); reason != "" {
 			return reason
 		}
 	}
@@ -3114,15 +3141,58 @@ func finalGateE2ReadVolumeFailure(op perfreport.Operation) string {
 	return ""
 }
 
+func finalGateE2ReadVolumeCeiling(
+	measured finalGateMeasuredOperation,
+	packetTable string,
+) (finalGateE2ReadVolumeLimits, string) {
+	stats, ok := measured.tableStats[packetTable]
+	if !ok || !finalGateE2ReadVolumeTableStatsPass(stats) {
+		return finalGateE2ReadVolumeLimits{}, "missing read-volume table stats for " + packetTable
+	}
+
+	expectedRows := finalGateE2ReadVolumeExpectedRows(measured.op)
+	if expectedRows == 0 {
+		return finalGateE2ReadVolumeLimits{}, "missing read-volume expected rows"
+	}
+
+	marks := finalGateCeilDiv(expectedRows, finalGateE2ReadVolumeIndexGranularity) + 2
+	rowCeiling := marks * finalGateE2ReadVolumeIndexGranularity
+	bytesPerRow := float64(stats.CompressedBytes) / float64(stats.Rows)
+	byteCeiling := uint64(math.Ceil(float64(rowCeiling) * bytesPerRow * finalGateE2ReadVolumeByteSlack))
+
+	return finalGateE2ReadVolumeLimits{rows: rowCeiling, bytes: byteCeiling, marks: marks}, ""
+}
+
+func finalGateE2ReadVolumeTableStatsPass(stats perfreport.TableStats) bool {
+	return stats.Rows > 0 &&
+		stats.ActiveParts > 0 &&
+		stats.CompressedBytes > 0 &&
+		stats.UncompressedBytes > 0
+}
+
+func finalGateE2ReadVolumeExpectedRows(op perfreport.Operation) uint64 {
+	if childCount := uint64Input(op.Inputs, navigationInputChildCount); childCount > 0 {
+		return childCount
+	}
+
+	return firstResultCount(op)
+}
+
+func finalGateCeilDiv(value uint64, divisor uint64) uint64 {
+	if value == 0 || divisor == 0 {
+		return 0
+	}
+
+	return 1 + (value-1)/divisor
+}
+
 func finalGateE2ReadVolumeMetricFailure(
-	op perfreport.Operation,
 	name string,
 	values []uint64,
-	ceilingKey string,
+	ceiling uint64,
 ) string {
-	ceiling := uint64Input(op.Inputs, ceilingKey)
 	if ceiling == 0 || len(values) == 0 {
-		return "missing read-volume " + name + " ceiling or samples"
+		return "missing read-volume " + name + " samples"
 	}
 
 	for _, value := range values {
@@ -3306,6 +3376,12 @@ func finalGateE2ParentPacketCacheHitAttributesHaveScope(attrs map[string]string)
 
 func finalGateCacheHitPathEqualsRoot(value string, root string) bool {
 	return value != "" && normalizeRootPath(value) == root
+}
+
+type finalGateE2ReadVolumeLimits struct {
+	rows  uint64
+	bytes uint64
+	marks uint64
 }
 
 // FinalGateSidecarFallbackDecision records whether E3's conditional sidecar

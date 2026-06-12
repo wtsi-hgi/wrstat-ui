@@ -59,6 +59,8 @@ const (
 	finalGateTestE2FactsVectorRowsInput     = "facts_vector_rows_read"
 	finalGateTestE2ParentPacketTableInput   = "parent_packet_table"
 	finalGateTestE2ProactiveWarmingInput    = "proactive_warming"
+	finalGateTestE2ReadBytesCeilingInput    = "read_bytes_ceiling"
+	finalGateTestE2ReadMarksCeilingInput    = "read_marks_ceiling"
 	finalGateTestE2ReadRowsCeilingInput     = "read_rows_ceiling"
 	finalGateTestE2ScenarioDirInfosBroad    = "dirinfos_broad_parent_packet"
 	finalGateTestE2ScenarioDHCFiltered      = "dirshavechildren_filtered_parent_packet"
@@ -666,7 +668,7 @@ func TestE2ColdPerformanceGates(t *testing.T) {
 	Convey("E3 sidecar fallback stays inactive when E2 read-volume evidence is missing", t, func() {
 		evidence := finalGateE2Evidence()
 		finalGateMutateE2Op(&evidence, "dirshavechildren_broad_parent_packet", func(op *perfreport.Operation) {
-			delete(op.Inputs, finalGateTestE2ReadRowsCeilingInput)
+			op.ReadRows = nil
 		})
 
 		result := ValidateFinalGates(evidence)
@@ -816,13 +818,88 @@ func TestE2ColdPerformanceGates(t *testing.T) {
 		So(finalGateTestCheck(result, "E2 high-fanout DirsHaveChildren broad").Passed, ShouldBeTrue)
 
 		finalGateMutateE2Op(&evidence, "dirshavechildren_broad_parent_packet", func(op *perfreport.Operation) {
-			op.ReadRows = []uint64{uint64Input(op.Inputs, finalGateTestE2ReadRowsCeilingInput) + 1}
+			op.Inputs[finalGateTestE2ReadRowsCeilingInput] = uint64(1_000_000)
+			op.ReadRows = []uint64{40_000}
 		})
 
 		result = ValidateFinalGates(evidence)
 		So(finalGateTestCheck(result, "E2 high-fanout DirsHaveChildren broad").Passed, ShouldBeFalse)
 		So(finalGateTestCheck(result, "E2 high-fanout DirsHaveChildren broad").Detail,
 			ShouldContainSubstring, "read-volume")
+	})
+
+	Convey("E2.6 read-volume gates ignore permissive supplied ceilings", t, func() {
+		cases := []struct {
+			name   string
+			mutate func(*perfreport.Operation)
+		}{
+			{
+				name: "rows",
+				mutate: func(op *perfreport.Operation) {
+					op.Inputs[finalGateTestE2ReadRowsCeilingInput] = uint64(1_000_000)
+					op.ReadRows = []uint64{40_000}
+				},
+			},
+			{
+				name: "bytes",
+				mutate: func(op *perfreport.Operation) {
+					op.Inputs[finalGateTestE2ReadBytesCeilingInput] = uint64(1_000_000)
+					op.ReadBytes = []uint64{500_000}
+				},
+			},
+			{
+				name: "marks",
+				mutate: func(op *perfreport.Operation) {
+					op.Inputs[finalGateTestE2ReadMarksCeilingInput] = uint64(100)
+					op.ReadMarks = []uint64{5}
+				},
+			},
+		}
+
+		for _, tc := range cases {
+			evidence := finalGateE2Evidence()
+			finalGateMutateE2Op(&evidence, "dirshavechildren_broad_parent_packet", tc.mutate)
+
+			result := ValidateFinalGates(evidence)
+			check := finalGateTestCheck(result, "E2 high-fanout DirsHaveChildren broad")
+			So(check.Passed, ShouldBeFalse)
+			So(check.Detail, ShouldContainSubstring, "read-volume "+tc.name+" exceeded ceiling")
+		}
+	})
+
+	Convey("E2.6 read-volume gates require measured table stats", t, func() {
+		evidence := finalGateE2Evidence()
+		finalGateDeleteE2TableStats(&evidence, tableParentFacts)
+
+		result := ValidateFinalGates(evidence)
+
+		check := finalGateTestCheck(result, "E2 high-fanout DirsHaveChildren broad")
+		So(check.Passed, ShouldBeFalse)
+		So(check.Detail, ShouldContainSubstring, "missing read-volume table stats")
+
+		evidence = finalGateE2Evidence()
+		finalGateMutateE2TableStats(&evidence, tableParentFacts, func(stats *perfreport.TableStats) {
+			stats.Rows = 0
+		})
+
+		result = ValidateFinalGates(evidence)
+
+		check = finalGateTestCheck(result, "E2 high-fanout DirsHaveChildren broad")
+		So(check.Passed, ShouldBeFalse)
+		So(check.Detail, ShouldContainSubstring, "missing read-volume table stats")
+	})
+
+	Convey("E2.6 computed read-volume ceilings pass valid measured reads", t, func() {
+		evidence := finalGateE2Evidence()
+		finalGateMutateE2Op(&evidence, "dirshavechildren_broad_parent_packet", func(op *perfreport.Operation) {
+			delete(op.Inputs, finalGateTestE2ReadRowsCeilingInput)
+			delete(op.Inputs, finalGateTestE2ReadBytesCeilingInput)
+			delete(op.Inputs, finalGateTestE2ReadMarksCeilingInput)
+		})
+
+		result := ValidateFinalGates(evidence)
+
+		So(finalGateTestCheck(result, "E2 high-fanout DirsHaveChildren broad").Passed, ShouldBeTrue)
 	})
 
 	Convey("E2.7 focused high-fanout DirsHaveChildren filtered returns only expected true children", t, func() {
@@ -1838,6 +1915,60 @@ func finalGateTableStatsWithBaselines(
 	}
 }
 
+func finalGateDeleteE2TableStats(evidence *FinalGateEvidence, table string) {
+	for reportIndex := range evidence.ImportReports {
+		delete(evidence.ImportReports[reportIndex].TableStats, table)
+	}
+
+	for reportIndex := range evidence.QueryReports {
+		delete(evidence.QueryReports[reportIndex].TableStats, table)
+	}
+
+	if evidence.FinalGateReport == nil {
+		return
+	}
+
+	for reportIndex := range evidence.FinalGateReport.SpoolLoadReports {
+		delete(evidence.FinalGateReport.SpoolLoadReports[reportIndex].TableStats, table)
+	}
+}
+
+func finalGateMutateE2TableStats(
+	evidence *FinalGateEvidence,
+	table string,
+	mutate func(*perfreport.TableStats),
+) {
+	for reportIndex := range evidence.ImportReports {
+		finalGateMutateReportTableStats(&evidence.ImportReports[reportIndex], table, mutate)
+	}
+
+	for reportIndex := range evidence.QueryReports {
+		finalGateMutateReportTableStats(&evidence.QueryReports[reportIndex], table, mutate)
+	}
+
+	if evidence.FinalGateReport == nil {
+		return
+	}
+
+	for reportIndex := range evidence.FinalGateReport.SpoolLoadReports {
+		finalGateMutateReportTableStats(&evidence.FinalGateReport.SpoolLoadReports[reportIndex], table, mutate)
+	}
+}
+
+func finalGateMutateReportTableStats(
+	report *perfreport.Report,
+	table string,
+	mutate func(*perfreport.TableStats),
+) {
+	stats, ok := report.TableStats[table]
+	if !ok {
+		return
+	}
+
+	mutate(&stats)
+	report.TableStats[table] = stats
+}
+
 func finalGateAddImportFileTotals(report *perfreport.Report, rowCap uint64) {
 	for _, root := range finalGateRequiredImportRoots() {
 		report.AddOperation("import_file_total", map[string]any{
@@ -2098,6 +2229,7 @@ func finalGateE2SpoolLoadReports() []perfreport.Report {
 	for range finalGateMinRepeats {
 		report := finalGateE1ImportReport("spool_load_total", 8192, finalGateComparisonStatusSuccess)
 		report.Repeat = 1
+		report.TableStats[finalGateE2ChildFilterAllTable] = finalGateTableStatsWithBaselines(11205, 35006, 35005)
 		reports = append(reports, report)
 	}
 
