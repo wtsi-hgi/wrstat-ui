@@ -58,6 +58,13 @@ const (
 
 var errSummariseSpoolLoaderTestSystemPartsTimedOut = errors.New("system.parts timed out")
 
+const (
+	summariseSpoolPublishFaultEventActiveSnapshot = "query active_snapshot"
+	summariseSpoolPublishFaultEventActiveVirtual  = "drop wrstat_active_virtual_summaries"
+	summariseSpoolPublishFaultEventMountsActive   = "query mounts_active"
+	summariseSpoolPublishFaultEventPublish        = "publish"
+)
+
 type summariseSpoolCountRow struct {
 	value uint64
 	err   error
@@ -719,6 +726,214 @@ func TestClickHouseSummariseSpoolLoader(t *testing.T) {
 			So(err.Error(), ShouldContainSubstring, "system.parts timed out")
 		})
 
+	Convey("summarise spool report retry does not rewrite completed publish state before table evidence",
+		t,
+		func() {
+			spoolDir := filepath.Join(t.TempDir(), "spool")
+			manifest := writeSummariseSpoolLoaderSchema3Spool(
+				spoolDir,
+				time.Date(2026, 6, 12, 14, 0, 0, 0, time.UTC),
+			)
+			conn := newSummariseSpoolLoaderSpyConn(manifest)
+			conn.tableStatsErr = errSummariseSpoolLoaderTestSystemPartsTimedOut
+
+			loader, err := newSummariseSpoolLoader(Config{Database: testDatabaseName}, conn, spoolDir, manifest, nil)
+			So(err, ShouldBeNil)
+
+			_, err = loader.loadReport(context.Background())
+
+			So(err, ShouldNotBeNil)
+			So(err.Error(), ShouldContainSubstring, "system.parts timed out")
+
+			conn.tableStatsErr = nil
+
+			So(os.Chmod(spoolDir, 0o500), ShouldBeNil)
+			Reset(func() { So(os.Chmod(spoolDir, 0o700), ShouldBeNil) })
+
+			loader, err = newSummariseSpoolLoader(Config{Database: testDatabaseName}, conn, spoolDir, manifest, nil)
+			So(err, ShouldBeNil)
+
+			report, err := loader.loadReport(context.Background())
+
+			So(err, ShouldBeNil)
+			So(summariseSpoolReportOperation(report, "spool_load_total"), ShouldNotBeNil)
+		})
+
+	Convey("summarise spool publish resumes from injected failures at every durable phase boundary",
+		t,
+		func() {
+			cases := []summariseSpoolPublishFaultCase{
+				{
+					name:             "tables loaded",
+					failEvent:        summariseSpoolPublishFaultEventMountsActive,
+					completedPhase:   summariseSpoolPublishPhaseTablesLoaded,
+					wantRetryPublish: true,
+					wantRetryPhases: []string{
+						importPhaseMountSwitch,
+						importPhaseOldSnapshotDrop,
+						importPhaseTreeSummaryRefresh,
+						importPhaseActivePrefixRefresh,
+					},
+				},
+				{
+					name:             "active virtual ready",
+					failEvent:        summariseSpoolPublishFaultEventActiveSnapshot,
+					failSkip:         1,
+					completedPhase:   summariseSpoolPublishPhaseActiveVirtualReady,
+					wantRetryPublish: true,
+					wantRetryPhases: []string{
+						importPhaseMountSwitch,
+						importPhaseOldSnapshotDrop,
+						importPhaseTreeSummaryRefresh,
+						importPhaseActivePrefixRefresh,
+					},
+				},
+				{
+					name:             "switch planned",
+					failEvent:        summariseSpoolPublishFaultEventPublish,
+					completedPhase:   summariseSpoolPublishPhaseSwitchPlanned,
+					wantRetryPublish: true,
+					wantRetryPhases: []string{
+						importPhaseMountSwitch,
+						importPhaseOldSnapshotDrop,
+						importPhaseTreeSummaryRefresh,
+						importPhaseActivePrefixRefresh,
+					},
+				},
+				{
+					name:                   "mount switched",
+					failEvent:              "drop wrstat_children",
+					failAfterMountSwitched: true,
+					completedPhase:         summariseSpoolPublishPhaseMountSwitched,
+					wantRetryEvents: []string{
+						"drop wrstat_children",
+						summariseSpoolPublishFaultEventActiveVirtual,
+					},
+					wantRetryPhases: []string{
+						importPhaseOldSnapshotDrop,
+						importPhaseTreeSummaryRefresh,
+						importPhaseActivePrefixRefresh,
+					},
+				},
+				{
+					name:                   "old snapshot dropped",
+					failEvent:              summariseSpoolPublishFaultEventActiveVirtual,
+					failAfterMountSwitched: true,
+					completedPhase:         summariseSpoolPublishPhaseOldSnapshotDropped,
+					wantRetryEvents:        []string{summariseSpoolPublishFaultEventActiveVirtual},
+					wantRetryPhases: []string{
+						importPhaseOldSnapshotDrop,
+						importPhaseTreeSummaryRefresh,
+						importPhaseActivePrefixRefresh,
+					},
+				},
+				{
+					name:              "old active virtual dropped",
+					chmodOnPhase:      importPhaseTreeSummaryRefresh,
+					completedPhase:    summariseSpoolPublishPhaseOldActiveVirtualDropped,
+					wantRetryPhases:   []string{importPhaseTreeSummaryRefresh, importPhaseActivePrefixRefresh},
+					forbidRetryEvents: []string{summariseSpoolPublishFaultEventActiveVirtual},
+				},
+				{
+					name:              "tree summary refreshed",
+					chmodOnPhase:      importPhaseActivePrefixRefresh,
+					completedPhase:    summariseSpoolPublishPhaseTreeSummaryRefreshed,
+					wantRetryPhases:   []string{importPhaseActivePrefixRefresh},
+					forbidRetryPhases: []string{importPhaseTreeSummaryRefresh},
+				},
+			}
+
+			for _, tc := range cases {
+				Convey(tc.name, func() {
+					spoolDir := filepath.Join(t.TempDir(), "spool")
+					manifest := writeSummariseSpoolLoaderSchema3Spool(
+						spoolDir,
+						time.Date(2026, 6, 12, 15, 0, 0, 0, time.UTC),
+					)
+					conn := newSummariseSpoolPublishFaultConn(manifest)
+					conn.failEvent = tc.failEvent
+					conn.failAfterMountSwitched = tc.failAfterMountSwitched
+					conn.failSkip = tc.failSkip
+
+					firstRecorder := summariseSpoolPublishChmodRecorder(t, spoolDir, tc.chmodOnPhase)
+					loader, err := newSummariseSpoolLoader(Config{Database: testDatabaseName}, conn, spoolDir, manifest,
+						firstRecorder)
+					So(err, ShouldBeNil)
+
+					err = loader.load(context.Background())
+
+					So(err, ShouldNotBeNil)
+
+					if tc.chmodOnPhase == "" {
+						So(errors.Is(err, errForcedFailure), ShouldBeTrue)
+					} else {
+						So(err.Error(), ShouldContainSubstring, "summarise spool publish state")
+						So(os.Chmod(spoolDir, 0o700), ShouldBeNil)
+					}
+
+					phases := summariseSpoolPublishStatePhasesForTest(t, spoolDir, manifest)
+					So(phases[tc.completedPhase], ShouldNotBeBlank)
+					So(phases[summariseSpoolPublishPhasePostSpoolPublishComplete], ShouldBeBlank)
+
+					conn.disableFault()
+					conn.resetEvents()
+
+					var retryPhases []string
+
+					loader, err = newSummariseSpoolLoader(Config{Database: testDatabaseName}, conn, spoolDir, manifest,
+						func(phase string, _ time.Duration) {
+							retryPhases = append(retryPhases, phase)
+						})
+					So(err, ShouldBeNil)
+
+					So(loader.load(context.Background()), ShouldBeNil)
+					summariseSpoolPublishAssertAllPhasesComplete(t, spoolDir, manifest)
+					summariseSpoolPublishAssertRetry(t, conn, retryPhases, tc)
+				})
+			}
+		})
+
+	Convey("summarise spool publish resumes after active-prefix refresh before final publish marker",
+		t,
+		func() {
+			spoolDir := filepath.Join(t.TempDir(), "spool")
+			manifest := writeSummariseSpoolLoaderSchema3Spool(
+				spoolDir,
+				time.Date(2026, 6, 12, 16, 0, 0, 0, time.UTC),
+			)
+			conn := newSummariseSpoolPublishFaultConn(manifest)
+			conn.publishCurrentManifest()
+			summariseSpoolPublishSeedStateThrough(t, spoolDir, manifest,
+				summariseSpoolPublishPhaseActivePrefixRefreshed)
+
+			So(os.Chmod(spoolDir, 0o500), ShouldBeNil)
+
+			loader, err := newSummariseSpoolLoader(Config{Database: testDatabaseName}, conn, spoolDir, manifest, nil)
+			So(err, ShouldBeNil)
+
+			err = loader.load(context.Background())
+
+			So(err, ShouldNotBeNil)
+			So(err.Error(), ShouldContainSubstring, "summarise spool publish state")
+			So(os.Chmod(spoolDir, 0o700), ShouldBeNil)
+
+			conn.resetEvents()
+
+			var retryPhases []string
+
+			loader, err = newSummariseSpoolLoader(Config{Database: testDatabaseName}, conn, spoolDir, manifest,
+				func(phase string, _ time.Duration) {
+					retryPhases = append(retryPhases, phase)
+				})
+			So(err, ShouldBeNil)
+
+			So(loader.load(context.Background()), ShouldBeNil)
+			summariseSpoolPublishAssertAllPhasesComplete(t, spoolDir, manifest)
+			So(conn.eventIndex(summariseSpoolPublishFaultEventPublish), ShouldEqual, -1)
+			So(summariseSpoolPublishPhaseCount(retryPhases, importPhaseTreeSummaryRefresh), ShouldEqual, 0)
+			So(summariseSpoolPublishPhaseCount(retryPhases, importPhaseActivePrefixRefresh), ShouldEqual, 0)
+		})
+
 	Convey("D3.2 summarise spool loader blocks readiness when dir-filter rows mismatch", t, func() {
 		spoolDir := filepath.Join(t.TempDir(), "spool")
 		manifest := writeSummariseSpoolLoaderSchema3Spool(spoolDir, time.Date(2026, 6, 9, 11, 0, 0, 0, time.UTC))
@@ -1367,6 +1582,341 @@ func summariseSpoolReportUint64Input(inputs map[string]any, key string) uint64 {
 	}
 
 	return typed
+}
+
+func newSummariseSpoolPublishFaultConn(manifest *chspool.Manifest) *summariseSpoolPublishFaultConn {
+	conn := &summariseSpoolPublishFaultConn{
+		summariseSpoolLoaderSpyConn: newSummariseSpoolLoaderSpyConn(manifest),
+	}
+	plan := summariseSpoolPublishPlanForTest(manifest)
+	conn.activeRows = append([]mountsActiveRow(nil), plan.previousRows...)
+
+	return conn
+}
+
+func summariseSpoolPublishPlanForTest(manifest *chspool.Manifest) summariseSpoolPublishPlanFixture {
+	updatedAt, err := time.Parse(time.RFC3339Nano, manifest.UpdatedAt)
+	So(err, ShouldBeNil)
+
+	previousUpdatedAt := updatedAt.Add(-time.Hour)
+	previousSnapshotID := SnapshotID(manifest.MountPath, previousUpdatedAt)
+	previousRows := []mountsActiveRow{{
+		mountPath:  manifest.MountPath,
+		snapshotID: previousSnapshotID,
+		updatedAt:  previousUpdatedAt,
+	}}
+	nextRows := stagedMountsActiveRows(previousRows, mountsActiveRow{
+		mountPath:  manifest.MountPath,
+		snapshotID: manifest.SnapshotID,
+		updatedAt:  updatedAt,
+	})
+
+	return summariseSpoolPublishPlanFixture{
+		previousRows:        previousRows,
+		previousSnapshotID:  previousSnapshotID,
+		previousActiveSetID: fingerprintForMountsActive(previousRows),
+		nextActiveSetID:     fingerprintForMountsActive(nextRows),
+	}
+}
+
+func summariseSpoolPublishChmodRecorder(
+	t *testing.T,
+	spoolDir string,
+	chmodOnPhase string,
+) func(string, time.Duration) {
+	t.Helper()
+
+	if chmodOnPhase == "" {
+		return nil
+	}
+
+	chmodded := false
+
+	return func(phase string, _ time.Duration) {
+		if phase != chmodOnPhase || chmodded {
+			return
+		}
+
+		chmodded = true
+
+		So(os.Chmod(spoolDir, 0o500), ShouldBeNil)
+	}
+}
+
+func summariseSpoolPublishStatePhasesForTest(
+	t *testing.T,
+	spoolDir string,
+	manifest *chspool.Manifest,
+) map[string]string {
+	t.Helper()
+
+	tracker, err := newSummariseSpoolPublishTracker(spoolDir, manifest)
+	So(err, ShouldBeNil)
+
+	return tracker.state.CompletedPhases
+}
+
+func summariseSpoolPublishAssertAllPhasesComplete(
+	t *testing.T,
+	spoolDir string,
+	manifest *chspool.Manifest,
+) {
+	t.Helper()
+
+	phases := summariseSpoolPublishStatePhasesForTest(t, spoolDir, manifest)
+	for _, phase := range summariseSpoolPublishOrderedPhasesForTest() {
+		So(phases[phase], ShouldNotBeBlank)
+	}
+}
+
+func summariseSpoolPublishOrderedPhasesForTest() []string {
+	return []string{
+		summariseSpoolPublishPhaseTablesLoaded,
+		summariseSpoolPublishPhaseActiveVirtualReady,
+		summariseSpoolPublishPhaseSwitchPlanned,
+		summariseSpoolPublishPhaseMountSwitched,
+		summariseSpoolPublishPhaseOldSnapshotDropped,
+		summariseSpoolPublishPhaseOldActiveVirtualDropped,
+		summariseSpoolPublishPhaseTreeSummaryRefreshed,
+		summariseSpoolPublishPhaseActivePrefixRefreshed,
+		summariseSpoolPublishPhasePostSpoolPublishComplete,
+	}
+}
+
+func summariseSpoolPublishAssertRetry(
+	t *testing.T,
+	conn *summariseSpoolPublishFaultConn,
+	retryPhases []string,
+	tc summariseSpoolPublishFaultCase,
+) {
+	t.Helper()
+
+	So(conn.eventIndex("send "+chspool.TableFiles), ShouldEqual, -1)
+
+	if tc.wantRetryPublish {
+		So(conn.eventIndex(summariseSpoolPublishFaultEventPublish), ShouldBeGreaterThanOrEqualTo, 0)
+	} else {
+		So(conn.eventIndex(summariseSpoolPublishFaultEventPublish), ShouldEqual, -1)
+	}
+
+	for _, event := range tc.wantRetryEvents {
+		So(conn.eventIndex(event), ShouldBeGreaterThanOrEqualTo, 0)
+	}
+
+	for _, event := range tc.forbidRetryEvents {
+		So(conn.eventIndex(event), ShouldEqual, -1)
+	}
+
+	for _, phase := range tc.wantRetryPhases {
+		So(summariseSpoolPublishPhaseCount(retryPhases, phase), ShouldBeGreaterThan, 0)
+	}
+
+	for _, phase := range tc.forbidRetryPhases {
+		So(summariseSpoolPublishPhaseCount(retryPhases, phase), ShouldEqual, 0)
+	}
+}
+
+func summariseSpoolPublishPhaseCount(phases []string, want string) int {
+	var count int
+
+	for _, phase := range phases {
+		if phase == want {
+			count++
+		}
+	}
+
+	return count
+}
+
+func summariseSpoolPublishSeedStateThrough(
+	t *testing.T,
+	spoolDir string,
+	manifest *chspool.Manifest,
+	throughPhase string,
+) {
+	t.Helper()
+
+	tracker, err := newSummariseSpoolPublishTracker(spoolDir, manifest)
+	So(err, ShouldBeNil)
+
+	plan := summariseSpoolPublishPlanForTest(manifest)
+	switchPlan := summariseSpoolSwitchPlan{
+		HasPrevious:         true,
+		PreviousSnapshotID:  plan.previousSnapshotID,
+		PreviousActiveSetID: plan.previousActiveSetID,
+		NextActiveSetID:     plan.nextActiveSetID,
+	}
+
+	for _, phase := range summariseSpoolPublishOrderedPhasesForTest() {
+		switch phase {
+		case summariseSpoolPublishPhaseActiveVirtualReady:
+			So(tracker.setNextActiveSetID(plan.nextActiveSetID), ShouldBeNil)
+			So(tracker.mark(phase), ShouldBeNil)
+		case summariseSpoolPublishPhaseSwitchPlanned:
+			So(tracker.setSwitchPlan(switchPlan), ShouldBeNil)
+		default:
+			So(tracker.mark(phase), ShouldBeNil)
+		}
+
+		if phase == throughPhase {
+			return
+		}
+	}
+}
+
+type summariseSpoolPublishFaultCase struct {
+	name                   string
+	failEvent              string
+	failAfterMountSwitched bool
+	failSkip               int
+	chmodOnPhase           string
+	completedPhase         string
+	wantRetryPublish       bool
+	wantRetryEvents        []string
+	forbidRetryEvents      []string
+	wantRetryPhases        []string
+	forbidRetryPhases      []string
+}
+
+type summariseSpoolPublishFaultConn struct {
+	*summariseSpoolLoaderSpyConn
+
+	activeRows             []mountsActiveRow
+	failEvent              string
+	failAfterMountSwitched bool
+	failSkip               int
+	mountSwitched          bool
+}
+
+func (c *summariseSpoolPublishFaultConn) Query(
+	ctx context.Context,
+	query string,
+	args ...any,
+) (driver.Rows, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	switch query {
+	case activeSnapshotQuery:
+		if err := c.maybeFail(summariseSpoolPublishFaultEventActiveSnapshot); err != nil {
+			return nil, err
+		}
+
+		return c.activeSnapshotRows(args...), nil
+	case mountsActiveRowsQuery:
+		if err := c.maybeFail(summariseSpoolPublishFaultEventMountsActive); err != nil {
+			return nil, err
+		}
+
+		return mountsActiveRowsForTest(c.activeRows), nil
+	default:
+		return c.summariseSpoolLoaderSpyConn.Query(ctx, query, args...)
+	}
+}
+
+func (c *summariseSpoolPublishFaultConn) activeSnapshotRows(args ...any) driver.Rows {
+	mountPath := ""
+
+	if len(args) > 0 {
+		if value, ok := args[0].(string); ok {
+			mountPath = value
+		}
+	}
+
+	rows := &dgutaWriterCloseContextRows{columns: []string{dgutaWriterTestSnapshotIDColumn}}
+
+	for _, row := range c.activeRows {
+		if row.mountPath == mountPath {
+			rows.values = append(rows.values, []any{row.snapshotID})
+
+			break
+		}
+	}
+
+	return rows
+}
+
+func (c *summariseSpoolPublishFaultConn) Exec(ctx context.Context, query string, args ...any) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	switch {
+	case query == switchSnapshotQuery:
+		c.recordEvent(summariseSpoolPublishFaultEventPublish)
+
+		if err := c.maybeFail(summariseSpoolPublishFaultEventPublish); err != nil {
+			return err
+		}
+
+		c.publishRow(switchSnapshotMountPathArg(args), switchSnapshotIDArg(args), switchSnapshotUpdatedAtArg(args))
+
+		return nil
+	case strings.HasPrefix(query, "ALTER TABLE"):
+		table := alterTableNameForTest(query)
+		event := "drop " + table
+		c.recordEvent(event)
+
+		if err := c.maybeFail(event); err != nil {
+			return err
+		}
+
+		c.batches[summariseSpoolLoaderCHTableToSpoolTable(table)] = nil
+
+		return nil
+	default:
+		return errBootstrapTestUnexpectedCall
+	}
+}
+
+func (c *summariseSpoolPublishFaultConn) publishCurrentManifest() {
+	manifest := c.manifest
+	updatedAt, err := time.Parse(time.RFC3339Nano, manifest.UpdatedAt)
+	So(err, ShouldBeNil)
+
+	c.publishRow(manifest.MountPath, manifest.SnapshotID, activeSetUpdatedAt(updatedAt))
+}
+
+func (c *summariseSpoolPublishFaultConn) publishRow(mountPath string, snapshotID string, updatedAt time.Time) {
+	c.activeEvents++
+	c.publishedSID = snapshotID
+	c.mountSwitched = true
+	c.activeRows = stagedMountsActiveRows(c.activeRows, mountsActiveRow{
+		mountPath:  mountPath,
+		snapshotID: snapshotID,
+		updatedAt:  updatedAt,
+	})
+}
+
+func (c *summariseSpoolPublishFaultConn) maybeFail(event string) error {
+	if c.failEvent != event {
+		return nil
+	}
+
+	if c.failAfterMountSwitched && !c.mountSwitched {
+		return nil
+	}
+
+	if c.failSkip > 0 {
+		c.failSkip--
+
+		return nil
+	}
+
+	return errForcedFailure
+}
+
+func (c *summariseSpoolPublishFaultConn) disableFault() {
+	c.failEvent = ""
+	c.failSkip = 0
+}
+
+type summariseSpoolPublishPlanFixture struct {
+	previousRows        []mountsActiveRow
+	previousSnapshotID  string
+	previousActiveSetID string
+	nextActiveSetID     string
 }
 
 type summariseSpoolHistoryDeleteDeadlineConn struct {

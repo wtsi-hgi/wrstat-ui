@@ -1390,6 +1390,10 @@ func (l *summariseSpoolLoader) publishWithTracker(
 	parent context.Context,
 	tracker *summariseSpoolPublishTracker,
 ) error {
+	if tracker.done(summariseSpoolPublishPhasePostSpoolPublishComplete) {
+		return nil
+	}
+
 	writer := &dgutaWriter{
 		cfg:                 l.cfg,
 		conn:                l.conn,

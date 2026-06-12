@@ -226,6 +226,61 @@ func TestSummariseClickHouseSpoolRetry(t *testing.T) {
 		So(markerMatches, ShouldBeTrue)
 	})
 
+	Convey("summarise retry can fail twice then succeed without rereading stats.gz", t, func() {
+		fixture := newSummariseActiveSnapshotFixture(t)
+		fixture.writeValidStats(t)
+
+		restore := snapshotSummariseGlobals()
+		Reset(restore)
+
+		configureSummariseActiveSnapshotTest(fixture.outputDir, false)
+
+		clickHouseSnapshotIsActive = func(clickhouse.Config, string, time.Time) (bool, error) {
+			return false, nil
+		}
+
+		loadCalls := 0
+		loadSummariseClickHouseSpool = func(
+			_ context.Context,
+			_ clickhouse.Config,
+			spoolDir string,
+			manifest *chspool.Manifest,
+			_ func(string, time.Duration),
+		) (perfreport.Report, error) {
+			loadCalls++
+
+			So(spoolDir, ShouldEqual, summariseClickHouseSpoolDir(fixture.outputDir))
+			So(manifest.Tables[chspool.TableFiles].Rows, ShouldBeGreaterThan, uint64(0))
+
+			if loadCalls <= 2 {
+				return perfreport.Report{}, errSummariseTestClose
+			}
+
+			return perfreport.NewReport("clickhouse", spoolDir, 1, 0), nil
+		}
+
+		err := run([]string{fixture.statsPath})
+		So(errors.Is(err, errSummariseTestClose), ShouldBeTrue)
+		So(loadCalls, ShouldEqual, 1)
+		So(summariseCompletionMarkerExists(fixture.outputDir), ShouldBeFalse)
+
+		So(os.Chmod(fixture.statsPath, 0), ShouldBeNil)
+		Reset(func() { So(os.Chmod(fixture.statsPath, 0o600), ShouldBeNil) })
+
+		err = run([]string{fixture.statsPath})
+		So(errors.Is(err, errSummariseTestClose), ShouldBeTrue)
+		So(loadCalls, ShouldEqual, 2)
+		So(summariseCompletionMarkerExists(fixture.outputDir), ShouldBeFalse)
+
+		err = run([]string{fixture.statsPath})
+		So(err, ShouldBeNil)
+		So(loadCalls, ShouldEqual, 3)
+
+		markerMatches, err := summariseCompletionMarkerMatches(*fixture.clickHouseTarget())
+		So(err, ShouldBeNil)
+		So(markerMatches, ShouldBeTrue)
+	})
+
 	Convey("summarise rebuilds instead of loading a corrupt completed spool", t, func() {
 		fixture := newSummariseActiveSnapshotFixture(t)
 		fixture.writeValidStats(t)
