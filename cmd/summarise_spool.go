@@ -89,6 +89,101 @@ func summariseFullFilterKeyForRow(row chspool.DirFilterAllRow) summariseFullFilt
 	}
 }
 
+func summariseActiveVirtualFilterRowsForSummary(
+	summary chspool.ActiveVirtualSummaryRow,
+	contributors []string,
+	rootFilterRows map[string][]chspool.DirFilterAllRow,
+	refreshedAt time.Time,
+) []chspool.ActiveVirtualFilterAllRow {
+	aggregates := make(map[summariseFullFilterTupleKey]summariseActiveVirtualFilterAggregate)
+	keys := make(map[summariseFullFilterTupleKey]chspool.DirFilterAllRow)
+
+	for _, mountPath := range contributors {
+		for _, row := range rootFilterRows[mountPath] {
+			key := summariseFullFilterKeyForRow(row)
+			keys[key] = row
+			aggregates[key] = summariseAddActiveVirtualFilterAggregate(aggregates[key], row)
+		}
+	}
+
+	rows := make([]chspool.ActiveVirtualFilterAllRow, 0, len(aggregates))
+	for key, aggregate := range aggregates {
+		row := keys[key]
+		rows = append(rows, summariseActiveVirtualFilterRow(summary, row, aggregate, refreshedAt))
+	}
+
+	return rows
+}
+
+func summariseAddActiveVirtualFilterAggregate(
+	aggregate summariseActiveVirtualFilterAggregate,
+	row chspool.DirFilterAllRow,
+) summariseActiveVirtualFilterAggregate {
+	aggregate.count += row.Count
+	aggregate.size += row.Size
+	aggregate.atimeMin = summariseMinNonZeroInt64(aggregate.atimeMin, row.AtimeMin)
+	aggregate.mtimeMax = max(aggregate.mtimeMax, row.MtimeMax)
+	aggregate.atimeBuckets = summariseSumUint64Slices(aggregate.atimeBuckets, row.AtimeBuckets)
+	aggregate.mtimeBuckets = summariseSumUint64Slices(aggregate.mtimeBuckets, row.MtimeBuckets)
+
+	return aggregate
+}
+
+func summariseMinNonZeroInt64(a int64, b int64) int64 {
+	if a == 0 {
+		return b
+	}
+
+	if b == 0 {
+		return a
+	}
+
+	return min(a, b)
+}
+
+func summariseSumUint64Slices(a []uint64, b []uint64) []uint64 {
+	if len(a) == 0 {
+		return append([]uint64(nil), b...)
+	}
+
+	for idx, count := range b {
+		if idx >= len(a) {
+			a = append(a, count)
+
+			continue
+		}
+
+		a[idx] += count
+	}
+
+	return a
+}
+
+func summariseActiveVirtualFilterRow(
+	summary chspool.ActiveVirtualSummaryRow,
+	row chspool.DirFilterAllRow,
+	aggregate summariseActiveVirtualFilterAggregate,
+	refreshedAt time.Time,
+) chspool.ActiveVirtualFilterAllRow {
+	return chspool.ActiveVirtualFilterAllRow{
+		ActiveSetID:      summary.ActiveSetID,
+		Dir:              summary.Dir,
+		Age:              row.Age,
+		GID:              row.GID,
+		UID:              row.UID,
+		FT:               row.FT,
+		Count:            aggregate.count,
+		Size:             aggregate.size,
+		AtimeMin:         aggregate.atimeMin,
+		MtimeMax:         aggregate.mtimeMax,
+		AtimeBuckets:     aggregate.atimeBuckets,
+		MtimeBuckets:     aggregate.mtimeBuckets,
+		FilterChildCount: summary.ChildCount,
+		ChildCount:       summary.ChildCount,
+		RefreshedAt:      refreshedAt,
+	}
+}
+
 type summariseFullFilterChildTupleKey struct {
 	childDir string
 	tuple    summariseFullFilterTupleKey
@@ -104,6 +199,221 @@ type summariseMountActiveRow struct {
 	mountPath  string
 	snapshotID string
 	updatedAt  time.Time
+}
+
+func summariseVirtualChildRowsForMounts(activeRows []summariseMountActiveRow) []summariseVirtualChildRow {
+	byKey := make(map[string]summariseVirtualChildRow)
+
+	for _, activeRow := range activeRows {
+		for _, row := range summariseVirtualChildRowsForMount(activeRow.mountPath) {
+			key := row.parentDir + "\x00" + row.childDir
+			if existing, ok := byKey[key]; ok {
+				byKey[key] = summariseMergeVirtualChildRows(existing, row)
+
+				continue
+			}
+
+			byKey[key] = row
+		}
+	}
+
+	rows := make([]summariseVirtualChildRow, 0, len(byKey))
+	for _, row := range byKey {
+		rows = append(rows, row)
+	}
+
+	slices.SortFunc(rows, func(a, b summariseVirtualChildRow) int {
+		if cmpParent := strings.Compare(a.parentDir, b.parentDir); cmpParent != 0 {
+			return cmpParent
+		}
+
+		return strings.Compare(a.childDir, b.childDir)
+	})
+
+	return rows
+}
+
+func summariseMergeVirtualChildRows(a, b summariseVirtualChildRow) summariseVirtualChildRow {
+	if !b.childIsMountRoot {
+		return a
+	}
+
+	a.childIsMountRoot = true
+	a.mountPath = b.mountPath
+
+	return a
+}
+
+func summariseSeedActiveVirtualChildSummaryRows(
+	activeSetID string,
+	childRows []chspool.ActiveVirtualChildRow,
+	dirs map[string]chspool.ActiveVirtualSummaryRow,
+	childCounts map[string]uint64,
+) {
+	for _, row := range childRows {
+		childCounts[row.ParentDir]++
+		dirs[row.ParentDir] = chspool.ActiveVirtualSummaryRow{ActiveSetID: activeSetID, Dir: row.ParentDir}
+		childDir := summariseEnsureTrailingSlash(row.ChildDir)
+		dirs[childDir] = chspool.ActiveVirtualSummaryRow{
+			ActiveSetID:    activeSetID,
+			Dir:            childDir,
+			MountPath:      row.MountPath,
+			IsMountRootBox: row.IsMountRootBox,
+		}
+	}
+}
+
+func summariseSeedActiveVirtualMountRootRows(
+	activeSetID string,
+	activeRows []summariseMountActiveRow,
+	dirs map[string]chspool.ActiveVirtualSummaryRow,
+) {
+	for _, activeRow := range activeRows {
+		dir := summariseEnsureTrailingSlash(activeRow.mountPath)
+		row := dirs[dir]
+		row.ActiveSetID = activeSetID
+		row.Dir = dir
+		row.MountPath = dir
+		row.IsMountRootBox = 1
+		dirs[dir] = row
+	}
+}
+
+func summariseMaxUpdatedAtForActiveRows(activeRows []summariseMountActiveRow) time.Time {
+	var updatedAt time.Time
+
+	for _, row := range activeRows {
+		if row.updatedAt.After(updatedAt) {
+			updatedAt = row.updatedAt
+		}
+	}
+
+	return updatedAt
+}
+
+func summariseActiveVirtualContributors(
+	summaryRows []chspool.ActiveVirtualSummaryRow,
+	activeRows []summariseMountActiveRow,
+) map[string][]string {
+	contributors := make(map[string][]string, len(summaryRows))
+
+	for _, summary := range summaryRows {
+		if summary.IsMountRootBox == 1 {
+			contributors[summary.Dir] = []string{summary.MountPath}
+
+			continue
+		}
+
+		for _, activeRow := range activeRows {
+			if strings.HasPrefix(activeRow.mountPath, summary.Dir) {
+				contributors[summary.Dir] = append(contributors[summary.Dir], activeRow.mountPath)
+			}
+		}
+	}
+
+	return contributors
+}
+
+type summariseActiveVirtualFilterAggregate struct {
+	count        uint64
+	size         uint64
+	atimeMin     int64
+	mtimeMax     int64
+	atimeBuckets []uint64
+	mtimeBuckets []uint64
+}
+
+type summariseActiveVirtualSummaryAggregate struct {
+	allCount        uint64
+	allSize         uint64
+	allAtimeMin     int64
+	allMtimeMax     int64
+	allAtimeBuckets []uint64
+	allMtimeBuckets []uint64
+	allUIDs         []uint32
+	allGIDs         []uint32
+	allFT           uint16
+	fileCount       uint64
+	fileSize        uint64
+}
+
+func summariseActiveVirtualSummaryAggregateForContributors(
+	contributors []string,
+	rootFacts map[string]chspool.DirFactRow,
+) summariseActiveVirtualSummaryAggregate {
+	var aggregate summariseActiveVirtualSummaryAggregate
+
+	for _, mountPath := range contributors {
+		row, ok := rootFacts[mountPath]
+		if !ok {
+			continue
+		}
+
+		aggregate = summariseAddActiveVirtualSummaryAggregate(aggregate, row)
+	}
+
+	return aggregate
+}
+
+func summariseAddActiveVirtualSummaryAggregate(
+	aggregate summariseActiveVirtualSummaryAggregate,
+	row chspool.DirFactRow,
+) summariseActiveVirtualSummaryAggregate {
+	aggregate.allCount += row.AllCount
+	aggregate.allSize += row.AllSize
+	aggregate.allAtimeMin = summariseMinNonZeroInt64(aggregate.allAtimeMin, row.AllAtimeMin)
+	aggregate.allMtimeMax = max(aggregate.allMtimeMax, row.AllMtimeMax)
+	aggregate.allAtimeBuckets = summariseSumUint64Slices(aggregate.allAtimeBuckets, row.AllAtimeBuckets)
+	aggregate.allMtimeBuckets = summariseSumUint64Slices(aggregate.allMtimeBuckets, row.AllMtimeBuckets)
+	aggregate.allUIDs = summariseAppendUniqueUint32Slice(aggregate.allUIDs, row.AllUIDs)
+	aggregate.allGIDs = summariseAppendUniqueUint32Slice(aggregate.allGIDs, row.AllGIDs)
+	aggregate.allFT |= row.AllFT
+	aggregate.fileCount += row.FileCount
+	aggregate.fileSize += row.FileSize
+
+	return aggregate
+}
+
+func summariseFillActiveVirtualSummaries(
+	rows []chspool.ActiveVirtualSummaryRow,
+	contributors map[string][]string,
+	rootFacts map[string]chspool.DirFactRow,
+	mountChildCounts map[string]uint64,
+) {
+	for idx := range rows {
+		aggregate := summariseActiveVirtualSummaryAggregateForContributors(contributors[rows[idx].Dir], rootFacts)
+		summariseApplyActiveVirtualSummaryAggregate(&rows[idx], aggregate)
+
+		if rows[idx].IsMountRootBox == 1 {
+			rows[idx].ChildCount = mountChildCounts[rows[idx].MountPath]
+		} else if contributorCount := uint64(len(contributors[rows[idx].Dir])); contributorCount > rows[idx].ChildCount {
+			rows[idx].ChildCount = contributorCount
+		}
+	}
+}
+
+func summariseApplyActiveVirtualSummaryAggregate(
+	row *chspool.ActiveVirtualSummaryRow,
+	aggregate summariseActiveVirtualSummaryAggregate,
+) {
+	if aggregate.allCount > 0 {
+		row.AllCount = aggregate.allCount
+		row.AllSize = aggregate.allSize
+		row.AllAtimeMin = aggregate.allAtimeMin
+		row.AllMtimeMax = aggregate.allMtimeMax
+		row.AllAtimeBuckets = aggregate.allAtimeBuckets
+		row.AllMtimeBuckets = aggregate.allMtimeBuckets
+		row.AllUIDs = summariseSortedUint32Slice(aggregate.allUIDs)
+		row.AllGIDs = summariseSortedUint32Slice(aggregate.allGIDs)
+		row.AllFT = aggregate.allFT
+	}
+
+	if aggregate.fileCount == 0 {
+		return
+	}
+
+	row.FileCount = aggregate.fileCount
+	row.FileSize = aggregate.fileSize
 }
 
 func (w *summariseDGUTASpoolWriter) writeSchema3FullFilterRows(
@@ -255,13 +565,18 @@ func (w *summariseDGUTASpoolWriter) flushLastSchema3FullFilterPending() error {
 	lastIdx := len(w.fullFilterPending) - 1
 	pending := w.fullFilterPending[lastIdx]
 	w.fullFilterPending = w.fullFilterPending[:lastIdx]
+	flushedRows := make([]chspool.DirFilterAllRow, 0, len(pending.rows))
 
 	for _, row := range pending.rows {
 		row.HasFilterChildren = summariseParentFactsHasChildrenValue(row.FilterChildCount)
 		if err := w.writeSchema3FullFilterRow(row); err != nil {
 			return err
 		}
+
+		flushedRows = append(flushedRows, row)
 	}
+
+	w.noteActiveVirtualRootFilterRows(pending.dir, flushedRows)
 
 	return nil
 }
@@ -296,6 +611,21 @@ func summariseChildFilterAllRowForDirFilterAll(row chspool.DirFilterAllRow) chsp
 		HasChildren:       row.HasChildren,
 		RefreshedAt:       row.RefreshedAt,
 	}
+}
+
+func (w *summariseDGUTASpoolWriter) noteActiveVirtualRootFilterRows(
+	dir string,
+	rows []chspool.DirFilterAllRow,
+) {
+	if dir != w.mountPath {
+		return
+	}
+
+	if w.activeVirtualRootFilterRows == nil {
+		w.activeVirtualRootFilterRows = make(map[string][]chspool.DirFilterAllRow)
+	}
+
+	w.activeVirtualRootFilterRows[w.mountPath] = append([]chspool.DirFilterAllRow(nil), rows...)
 }
 
 func (w *summariseDGUTASpoolWriter) writeSchema3ReadinessRows() error {
@@ -353,9 +683,14 @@ func (w *summariseDGUTASpoolWriter) writeActiveVirtualRows() error {
 		updatedAt:  w.updatedAt,
 	}}
 	activeSetID := summariseFingerprintForMountsActive(activeRows)
-	childRows := summariseActiveVirtualChildRows(activeSetID, w.mountPath, w.refreshedAt)
-	summaryRows := summariseActiveVirtualSummaryRows(activeSetID, childRows, w.updatedAt, w.refreshedAt)
-	filterRows := summariseActiveVirtualFilterRows(summaryRows)
+	summaryRows, filterRows, childRows := summariseActiveVirtualRowsFromCanonicalData(
+		activeSetID,
+		activeRows,
+		w.activeVirtualRootFacts,
+		w.activeVirtualRootFilterRows,
+		w.activeVirtualMountChildCounts,
+		w.refreshedAt,
+	)
 
 	if err := w.writeActiveVirtualDataRows(summaryRows, filterRows, childRows); err != nil {
 		return err
@@ -394,10 +729,10 @@ func summariseFingerprintForMountsActive(rows []summariseMountActiveRow) string 
 
 func summariseActiveVirtualChildRows(
 	activeSetID string,
-	mountPath string,
+	activeRows []summariseMountActiveRow,
 	refreshedAt time.Time,
 ) []chspool.ActiveVirtualChildRow {
-	virtualRows := summariseVirtualChildRowsForMount(mountPath)
+	virtualRows := summariseVirtualChildRowsForMounts(activeRows)
 	rows := make([]chspool.ActiveVirtualChildRow, 0, len(virtualRows))
 
 	for _, row := range virtualRows {
@@ -416,32 +751,83 @@ func summariseActiveVirtualChildRows(
 
 func summariseActiveVirtualSummaryRows(
 	activeSetID string,
+	activeRows []summariseMountActiveRow,
 	childRows []chspool.ActiveVirtualChildRow,
-	updatedAt time.Time,
 	refreshedAt time.Time,
 ) []chspool.ActiveVirtualSummaryRow {
-	dirs, childCounts := summariseActiveVirtualSummarySeeds(activeSetID, childRows)
+	dirs, childCounts := summariseActiveVirtualSummarySeeds(activeSetID, activeRows, childRows)
 
-	return summariseActiveVirtualSummaryRowsFromSeeds(dirs, childCounts, updatedAt, refreshedAt)
+	return summariseActiveVirtualSummaryRowsFromSeeds(
+		dirs,
+		childCounts,
+		summariseMaxUpdatedAtForActiveRows(activeRows),
+		refreshedAt,
+	)
+}
+
+func summariseActiveVirtualRowsFromCanonicalData(
+	activeSetID string,
+	activeRows []summariseMountActiveRow,
+	rootFacts map[string]chspool.DirFactRow,
+	rootFilterRows map[string][]chspool.DirFilterAllRow,
+	mountChildCounts map[string]uint64,
+	refreshedAt time.Time,
+) ([]chspool.ActiveVirtualSummaryRow, []chspool.ActiveVirtualFilterAllRow, []chspool.ActiveVirtualChildRow) {
+	childRows := summariseActiveVirtualChildRows(activeSetID, activeRows, refreshedAt)
+	summaryRows := summariseActiveVirtualSummaryRows(activeSetID, activeRows, childRows, refreshedAt)
+	contributors := summariseActiveVirtualContributors(summaryRows, activeRows)
+
+	summariseFillActiveVirtualSummaries(summaryRows, contributors, rootFacts, mountChildCounts)
+	filterRows := summariseActiveVirtualFilterRows(summaryRows, contributors, rootFilterRows, refreshedAt)
+	summariseFillActiveVirtualChildCounts(childRows, summaryRows)
+
+	return summaryRows, filterRows, childRows
+}
+
+func (w *summariseDGUTASpoolWriter) noteActiveVirtualMountChildRows(parentDir string, count uint64) {
+	if parentDir != w.mountPath || count == 0 {
+		return
+	}
+
+	if w.activeVirtualMountChildCounts == nil {
+		w.activeVirtualMountChildCounts = make(map[string]uint64)
+	}
+
+	w.activeVirtualMountChildCounts[w.mountPath] += count
+}
+
+func (w *summariseDGUTASpoolWriter) noteActiveVirtualRootFact(row chspool.DirFactRow) {
+	if row.Dir != w.mountPath {
+		return
+	}
+
+	if w.activeVirtualRootFacts == nil {
+		w.activeVirtualRootFacts = make(map[string]chspool.DirFactRow)
+	}
+
+	w.activeVirtualRootFacts[row.MountPath] = row
 }
 
 func summariseActiveVirtualFilterRows(
 	summaryRows []chspool.ActiveVirtualSummaryRow,
+	contributors map[string][]string,
+	rootFilterRows map[string][]chspool.DirFilterAllRow,
+	refreshedAt time.Time,
 ) []chspool.ActiveVirtualFilterAllRow {
-	rows := make([]chspool.ActiveVirtualFilterAllRow, 0, len(summaryRows))
+	rows := make([]chspool.ActiveVirtualFilterAllRow, 0, len(summaryRows)*len(rootFilterRows))
 
 	for _, summary := range summaryRows {
-		rows = append(rows, chspool.ActiveVirtualFilterAllRow{
-			ActiveSetID:      summary.ActiveSetID,
-			Dir:              summary.Dir,
-			Age:              uint8(db.DGUTAgeAll),
-			AtimeBuckets:     summariseAgeBucketsSlice(nil),
-			MtimeBuckets:     summariseAgeBucketsSlice(nil),
-			FilterChildCount: summary.ChildCount,
-			ChildCount:       summary.ChildCount,
-			RefreshedAt:      summary.RefreshedAt,
-		})
+		rows = append(rows, summariseActiveVirtualFilterRowsForSummary(
+			summary,
+			contributors[summary.Dir],
+			rootFilterRows,
+			refreshedAt,
+		)...)
 	}
+
+	slices.SortFunc(rows, func(a, b chspool.ActiveVirtualFilterAllRow) int {
+		return strings.Compare(summariseActiveVirtualFilterSortKey(a), summariseActiveVirtualFilterSortKey(b))
+	})
 
 	return rows
 }
@@ -542,15 +928,18 @@ type summariseFileSpoolOperation struct {
 }
 
 type summariseDGUTASpoolWriter struct {
-	ds                   *summariseSpoolDataset
-	mountPath            string
-	updatedAt            time.Time
-	snapshotID           string
-	refreshedAt          time.Time
-	previousDGUTARows    summariseDGUTARecordRows
-	fullFilterPending    []summariseFullFilterPendingDir
-	closed               bool
-	projectionSetWritten bool
+	ds                            *summariseSpoolDataset
+	mountPath                     string
+	updatedAt                     time.Time
+	snapshotID                    string
+	refreshedAt                   time.Time
+	previousDGUTARows             summariseDGUTARecordRows
+	fullFilterPending             []summariseFullFilterPendingDir
+	activeVirtualRootFacts        map[string]chspool.DirFactRow
+	activeVirtualRootFilterRows   map[string][]chspool.DirFilterAllRow
+	activeVirtualMountChildCounts map[string]uint64
+	closed                        bool
+	projectionSetWritten          bool
 }
 
 func (w *summariseDGUTASpoolWriter) writeSchema2Rows(
@@ -793,21 +1182,14 @@ func summariseImmediateChildForMount(parentDir, mountPath string) (string, bool)
 
 func summariseActiveVirtualSummarySeeds(
 	activeSetID string,
+	activeRows []summariseMountActiveRow,
 	childRows []chspool.ActiveVirtualChildRow,
 ) (map[string]chspool.ActiveVirtualSummaryRow, map[string]uint64) {
 	dirs := make(map[string]chspool.ActiveVirtualSummaryRow, len(childRows)+1)
 	childCounts := make(map[string]uint64)
 
-	for _, row := range childRows {
-		childCounts[row.ParentDir]++
-		dirs[row.ParentDir] = chspool.ActiveVirtualSummaryRow{ActiveSetID: activeSetID, Dir: row.ParentDir}
-		dirs[row.ChildDir] = chspool.ActiveVirtualSummaryRow{
-			ActiveSetID:    activeSetID,
-			Dir:            row.ChildDir,
-			MountPath:      row.MountPath,
-			IsMountRootBox: row.IsMountRootBox,
-		}
-	}
+	summariseSeedActiveVirtualChildSummaryRows(activeSetID, childRows, dirs, childCounts)
+	summariseSeedActiveVirtualMountRootRows(activeSetID, activeRows, dirs)
 
 	if len(dirs) == 0 && activeSetID != "" {
 		dirs["/"] = chspool.ActiveVirtualSummaryRow{ActiveSetID: activeSetID, Dir: "/"}
@@ -837,6 +1219,32 @@ func summariseActiveVirtualSummaryRowsFromSeeds(
 	})
 
 	return out
+}
+
+func summariseActiveVirtualFilterSortKey(row chspool.ActiveVirtualFilterAllRow) string {
+	return fmt.Sprintf("%s\x00%03d\x00%010d\x00%010d\x00%05d", row.Dir, row.Age, row.GID, row.UID, row.FT)
+}
+
+func summariseAppendUniqueUint32Slice(values []uint32, more []uint32) []uint32 {
+	for _, value := range more {
+		values = summariseAppendUniqueUint32(values, value)
+	}
+
+	return values
+}
+
+func summariseFillActiveVirtualChildCounts(
+	childRows []chspool.ActiveVirtualChildRow,
+	summaryRows []chspool.ActiveVirtualSummaryRow,
+) {
+	childCounts := make(map[string]uint64, len(summaryRows))
+	for _, row := range summaryRows {
+		childCounts[row.Dir] = row.ChildCount
+	}
+
+	for idx := range childRows {
+		childRows[idx].ChildCount = childCounts[summariseEnsureTrailingSlash(childRows[idx].ChildDir)]
+	}
 }
 
 func summariseActiveVirtualManifestSHA256(activeSetID string, summaryRows, filterRows, childRows int) string {
@@ -1445,6 +1853,8 @@ func (w *summariseDGUTASpoolWriter) canonicalChildrenForParent(
 }
 
 func (w *summariseDGUTASpoolWriter) appendChildrenRows(children []string, parentDir string) error {
+	var written uint64
+
 	for _, child := range children {
 		child = summariseChildPathForParent(parentDir, child)
 		child = summariseCanonicalPathForMount(w.mountPath, child)
@@ -1461,7 +1871,11 @@ func (w *summariseDGUTASpoolWriter) appendChildrenRows(children []string, parent
 		}); err != nil {
 			return err
 		}
+
+		written++
 	}
+
+	w.noteActiveVirtualMountChildRows(parentDir, written)
 
 	return nil
 }
@@ -1478,7 +1892,7 @@ func (w *summariseDGUTASpoolWriter) writeDirFactRow( //nolint:funlen
 
 	columns := summariseMountDirProjectionVectorColumnsFor(gutas)
 
-	return w.ds.set.WriteDirFact(chspool.DirFactRow{
+	row := chspool.DirFactRow{
 		MountPath:        w.mountPath,
 		SnapshotID:       w.snapshotID,
 		Dir:              dir,
@@ -1513,7 +1927,11 @@ func (w *summariseDGUTASpoolWriter) writeDirFactRow( //nolint:funlen
 		MtimeBuckets:     columns.mtimeBuckets,
 		ChildCount:       childCount,
 		RefreshedAt:      w.refreshedAt,
-	})
+	}
+
+	w.noteActiveVirtualRootFact(row)
+
+	return w.ds.set.WriteDirFact(row)
 }
 
 func (w *summariseDGUTASpoolWriter) writeProjectionSetRow() error {

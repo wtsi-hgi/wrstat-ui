@@ -521,7 +521,7 @@ func activeVirtualCanSummarizeExactMountRoot(filter *db.Filter) bool {
 }
 
 func activeVirtualCanSummarizeMountRootBoxes(mounts []activeMount) bool {
-	return len(mounts) > 1
+	return len(mounts) > 0
 }
 
 func activeVirtualExactMountRootCandidate(dir string, mounts []activeMount) bool {
