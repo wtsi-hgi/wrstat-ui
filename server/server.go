@@ -160,34 +160,65 @@ func New(logWriter io.Writer) *Server {
 // stop is called when the server is Stop()ped, cleaning up our additional
 // properties.
 func (s *Server) stop() {
+	var (
+		oldProvider   provider.Provider
+		analyticsDB   *sql.DB
+		analyticsStmt *sql.Stmt
+	)
+
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
-	close(s.stopCh)
+	if s.stopCh != nil {
+		close(s.stopCh)
+		s.stopCh = nil
+	}
 
-	if s.provider != nil {
-		_ = s.provider.Close()
+	oldProvider = s.provider
+	if oldProvider != nil {
 		s.provider = nil
 		s.tree = nil
 		s.activeSetID = ""
 		s.basedirs = nil
 	}
 
-	if s.analyticsDB != nil {
-		s.analyticsDB.Close()
+	analyticsDB = s.analyticsDB
+	analyticsStmt = s.analyticsStmt
+	s.analyticsDB = nil
+	s.analyticsStmt = nil
+	s.mu.Unlock()
+
+	if oldProvider != nil {
+		_ = oldProvider.Close()
 	}
+
+	if analyticsStmt != nil {
+		_ = analyticsStmt.Close()
+	}
+
+	if analyticsDB != nil {
+		_ = analyticsDB.Close()
+	}
+}
+
+func (s *Server) buildUsageCaches(bd basedirs.Reader) (usageCache, usageCache, error) {
+	groupCache, err := s.buildCache(bd.GroupUsage)
+	if err != nil {
+		return usageCache{}, usageCache{}, err
+	}
+
+	userCache, err := s.buildCache(bd.UserUsage)
+	if err != nil {
+		return usageCache{}, usageCache{}, err
+	}
+
+	return groupCache, userCache, nil
 }
 
 // prewarmCaches precomputes the group and user usage caches. It serialises
 // usage data into JSON and gzip. so serveGzippedCache can serve quickly.
 // Returns an error if any cache build fails.
 func (s *Server) prewarmCaches(bd basedirs.Reader) error {
-	groupCache, err := s.buildCache(bd.GroupUsage)
-	if err != nil {
-		return err
-	}
-
-	userCache, err := s.buildCache(bd.UserUsage)
+	groupCache, userCache, err := s.buildUsageCaches(bd)
 	if err != nil {
 		return err
 	}

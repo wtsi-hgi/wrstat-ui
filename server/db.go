@@ -181,17 +181,25 @@ func (s *Server) refreshProviderFrom(p provider.Provider) error {
 
 	dataTimeStamp := mountTimestampsToUnixSeconds(mt)
 
-	if err := s.prewarmCaches(bd); err != nil {
+	groupCache, userCache, err := s.buildUsageCaches(bd)
+	if err != nil {
 		return err
 	}
 
 	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.provider != p {
+		return nil
+	}
+
 	s.tree = p.Tree()
 	s.activeSetID = providerActiveSetID(p)
 	s.basedirs = bd
 	s.dataTimeStamp = dataTimeStamp
+	s.groupUsageCache = groupCache
+	s.userUsageCache = userCache
 	s.responseCache.clear()
-	s.mu.Unlock()
 
 	return nil
 }

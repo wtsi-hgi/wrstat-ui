@@ -873,6 +873,78 @@ func sortedStrings(values []string) []string {
 	return cp
 }
 
+func TestServerStopDoesNotDeadlockWithProviderUpdateCallback(t *testing.T) {
+	Convey("Server stop does not deadlock with an in-flight provider update callback", t, func() {
+		s := New(io.Discard)
+		p := newStopWaitProvider(t)
+
+		So(s.SetProvider(p), ShouldBeNil)
+
+		p.baseDirs.blockMountTimestamps = true
+		p.triggerUpdate(nil, p.baseDirs)
+		requireSignal(t, p.baseDirs.updateStarted, time.Second, "timeout waiting for provider update to start")
+
+		stopped := make(chan struct{})
+
+		go func() {
+			s.stop()
+			close(stopped)
+		}()
+
+		requireSignal(t, p.closeStarted, time.Second, "timeout waiting for provider close to start")
+		close(p.baseDirs.releaseUpdate)
+		requireSignal(t, stopped, time.Second, "timeout waiting for server stop to finish")
+
+		s.mu.RLock()
+		stoppedProvider := s.provider
+		stoppedTree := s.tree
+		stoppedActiveSetID := s.activeSetID
+		stoppedBaseDirs := s.basedirs
+		s.mu.RUnlock()
+
+		So(stoppedProvider, ShouldBeNil)
+		So(stoppedTree, ShouldBeNil)
+		So(stoppedActiveSetID, ShouldBeBlank)
+		So(stoppedBaseDirs, ShouldBeNil)
+		So(func() { s.stop() }, ShouldNotPanic)
+	})
+}
+
+func newStopWaitProvider(t *testing.T) *stopWaitProvider {
+	t.Helper()
+
+	ownersPath, err := internaldata.CreateOwnersCSV(t, "0,Alan")
+	So(err, ShouldBeNil)
+
+	mbd, err := newMemBaseDirs(ownersPath)
+	So(err, ShouldBeNil)
+
+	mbd.mountTimestamps["keyA"] = time.Now().UTC()
+
+	bd := &stopBlockingBaseDirs{
+		memBaseDirs:   mbd,
+		releaseUpdate: make(chan struct{}),
+		updateStarted: make(chan struct{}),
+	}
+
+	return &stopWaitProvider{
+		testProvider: &testProvider{bd: bd},
+		baseDirs:     bd,
+		closeStarted: make(chan struct{}),
+		updateDone:   make(chan struct{}),
+	}
+}
+
+func requireSignal(t *testing.T, ch <-chan struct{}, timeout time.Duration, message string) {
+	t.Helper()
+
+	select {
+	case <-ch:
+	case <-time.After(timeout):
+		t.Fatal(message)
+	}
+}
+
 type a5RESTProjectChild struct {
 	dir   string
 	age   db.DirGUTAge
@@ -2927,6 +2999,56 @@ func decodeHistoryResult(response *httptest.ResponseRecorder) ([]basedirs.Histor
 	err := json.NewDecoder(response.Body).Decode(&result)
 
 	return result, err
+}
+
+type stopBlockingBaseDirs struct {
+	*memBaseDirs
+
+	blockMountTimestamps bool
+	releaseUpdate        chan struct{}
+	updateStarted        chan struct{}
+	updateStartedOnce    sync.Once
+}
+
+func (b *stopBlockingBaseDirs) MountTimestamps() (map[string]time.Time, error) {
+	if b.blockMountTimestamps {
+		b.updateStartedOnce.Do(func() {
+			close(b.updateStarted)
+		})
+		<-b.releaseUpdate
+	}
+
+	return b.memBaseDirs.MountTimestamps()
+}
+
+type stopWaitProvider struct {
+	*testProvider
+
+	baseDirs       *stopBlockingBaseDirs
+	closeStarted   chan struct{}
+	closeStartedMu sync.Once
+	updateDone     chan struct{}
+	updateDoneMu   sync.Once
+}
+
+func (p *stopWaitProvider) OnUpdate(cb func()) {
+	p.testProvider.OnUpdate(func() {
+		defer p.updateDoneMu.Do(func() {
+			close(p.updateDone)
+		})
+
+		cb()
+	})
+}
+
+func (p *stopWaitProvider) Close() error {
+	p.closeStartedMu.Do(func() {
+		close(p.closeStarted)
+	})
+
+	<-p.updateDone
+
+	return p.testProvider.Close()
 }
 
 type badUserUsageReader struct {
