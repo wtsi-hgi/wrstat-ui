@@ -449,6 +449,34 @@ func activeVirtualFullFilterOptionalClauses(filter *db.Filter) (string, []any) {
 	return " AND " + strings.Join(clauses, " AND "), args
 }
 
+func activeVirtualDirInfoCandidateDirs(
+	dirs []string,
+	mounts []activeMount,
+	filter *db.Filter,
+) []string {
+	candidates := activeVirtualCandidateDirs(dirs, mounts)
+	if !activeVirtualCanSummarizeExactMountRoot(filter) {
+		return candidates
+	}
+
+	seen := make(map[string]bool, len(candidates))
+	for _, dir := range candidates {
+		seen[ensureTrailingSlash(dir)] = true
+	}
+
+	for _, dir := range dirs {
+		key := ensureTrailingSlash(dir)
+		if seen[key] || !activeVirtualExactMountRootCandidate(key, mounts) {
+			continue
+		}
+
+		candidates = append(candidates, dir)
+		seen[key] = true
+	}
+
+	return candidates
+}
+
 func activeVirtualCandidateDirs(dirs []string, mounts []activeMount) []string {
 	candidates := make([]string, 0, len(dirs))
 	seen := make(map[string]bool, len(dirs))
@@ -478,16 +506,61 @@ func activeVirtualCandidateDir(dir string, mounts []activeMount) bool {
 	return false
 }
 
+func activeVirtualCanSummarizeExactMountRoot(filter *db.Filter) bool {
+	if filter == nil || fullFilterAlwaysEmpty(filter) {
+		return false
+	}
+
+	if _, ok := mountDirSummaryModeForFilter(filter); ok {
+		return false
+	}
+
+	return dirFilterAllCanHandleFilter(filter)
+}
+
+func activeVirtualExactMountRootCandidate(dir string, mounts []activeMount) bool {
+	for _, mount := range mounts {
+		if dir == ensureTrailingSlash(mount.mountPath) {
+			return true
+		}
+	}
+
+	return false
+}
+
 func (d *clickHouseDatabase) activeVirtualReadySetForDirs(
 	ctx context.Context,
 	dirs []string,
+) (string, []string, bool, error) {
+	activeSetID, mounts, err := d.currentActiveMountsSet(ctx)
+	if err != nil || activeSetID == "" {
+		return "", nil, false, err
+	}
+
+	candidates := activeVirtualCandidateDirs(dirs, mounts)
+	if len(candidates) == 0 {
+		return activeSetID, nil, false, nil
+	}
+
+	ready, err := d.activeVirtualSetReadyCached(ctx, activeSetID)
+	if err != nil || !ready {
+		return activeSetID, candidates, false, err
+	}
+
+	return activeSetID, candidates, true, nil
+}
+
+func (d *clickHouseDatabase) activeVirtualReadySetForDirInfos(
+	ctx context.Context,
+	dirs []string,
+	filter *db.Filter,
 ) (string, []activeMount, []string, bool, error) {
 	activeSetID, mounts, err := d.currentActiveMountsSet(ctx)
 	if err != nil || activeSetID == "" {
 		return "", nil, nil, false, err
 	}
 
-	candidates := activeVirtualCandidateDirs(dirs, mounts)
+	candidates := activeVirtualDirInfoCandidateDirs(dirs, mounts, filter)
 	if len(candidates) == 0 {
 		return activeSetID, mounts, nil, false, nil
 	}
@@ -553,7 +626,7 @@ func (d *clickHouseDatabase) addActiveVirtualDirInfos(
 	ctx, cancel := configQueryContext(d.cfg)
 	defer cancel()
 
-	activeSetID, mounts, dirs, ready, err := d.activeVirtualReadySetForDirs(ctx, dirs)
+	activeSetID, mounts, dirs, ready, err := d.activeVirtualReadySetForDirInfos(ctx, dirs, filter)
 	if err != nil || !ready {
 		return handled, err
 	}
@@ -733,7 +806,7 @@ func (d *clickHouseDatabase) activeVirtualChildren(
 	ctx, cancel := configQueryContext(d.cfg)
 	defer cancel()
 
-	activeSetID, _, dirs, ready, err := d.activeVirtualReadySetForDirs(ctx, []string{parentDir})
+	activeSetID, dirs, ready, err := d.activeVirtualReadySetForDirs(ctx, []string{parentDir})
 	if err != nil || !ready {
 		return nil, false, err
 	}
@@ -801,7 +874,7 @@ func (d *clickHouseDatabase) activeVirtualChildrenForParents(
 	ctx, cancel := configQueryContext(d.cfg)
 	defer cancel()
 
-	activeSetID, _, dirs, ready, err := d.activeVirtualReadySetForDirs(ctx, dirs)
+	activeSetID, dirs, ready, err := d.activeVirtualReadySetForDirs(ctx, dirs)
 	if err != nil || !ready {
 		return map[string][]string{}, map[string]bool{}, err
 	}
@@ -852,7 +925,7 @@ func (d *clickHouseDatabase) activeVirtualHasChildren(
 	ctx, cancel := configQueryContext(d.cfg)
 	defer cancel()
 
-	activeSetID, _, dirs, ready, err := d.activeVirtualReadySetForDirs(ctx, []string{dir})
+	activeSetID, dirs, ready, err := d.activeVirtualReadySetForDirs(ctx, []string{dir})
 	if err != nil || !ready {
 		return false, false, err
 	}

@@ -1587,11 +1587,44 @@ func (d *clickHouseDatabase) fullFilterDirInfoRoutes(filter *db.Filter) []dirInf
 		routes = append(routes, d.addDirFilterAgeAllDirInfosForMount)
 	}
 
+	dirFilterAllPreferred := dirFilterAllPreferredForDirInfo(filter)
+	if dirFilterAllPreferred {
+		routes = append(routes, d.addDirFilterAllDirInfosForMount)
+	}
+
+	routes = append(routes, d.addWideChildFilterAllDirInfosForMount)
+
 	if parentFactsCanHandleDirInfoFilter(filter) {
 		routes = append(routes, d.addParentFactDirInfosForMount)
 	}
 
-	return append(routes, d.addDirFilterAllDirInfosForMount, d.addChildFilterAllDirInfosForMount)
+	if !dirFilterAllPreferred {
+		routes = append(routes, d.addDirFilterAllDirInfosForMount)
+	}
+
+	routes = append(routes, d.addChildFilterAllDirInfosForMount)
+
+	return routes
+}
+
+func dirFilterAllPreferredForDirInfo(filter *db.Filter) bool {
+	return filter != nil &&
+		filter.Age != db.DGUTAgeAll &&
+		filter.GIDs == nil &&
+		filter.UIDs == nil &&
+		filter.FT == 0
+}
+
+func (d *clickHouseDatabase) addWideChildFilterAllDirInfosForMount(
+	result map[string]*db.DirSummary,
+	group *activeMountDirGroup,
+	filter *db.Filter,
+) (*activeMountDirGroup, error) {
+	if len(group.queryDirs) <= dirsHaveChildrenSummaryFanoutLimit {
+		return group, nil
+	}
+
+	return d.addChildFilterAllDirInfosForMount(result, group, filter)
 }
 
 func (d *clickHouseDatabase) addDirFilterAgeAllDirInfosForMount(
@@ -1929,7 +1962,7 @@ func scanChildFilterAllChildSummaryRow(
 	return parentFactChildSummary{
 		Dir:         scanned.summary.dir,
 		Summary:     scanned.summary.summary(filter, updatedAt),
-		HasChildren: scanned.hasFilterChildren > 0,
+		HasChildren: scanned.filterChildCount > 0,
 		ChildCount:  scanned.filterChildCount,
 	}, nil
 }
