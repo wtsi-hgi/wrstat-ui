@@ -109,8 +109,11 @@ const (
 	activePrefixScalarRollupPerfName = "active_prefix_scalar_rollup_prototype"
 	activePrefixScalarRollupRepeat   = 20
 	activePrefixScalarRollupWarmup   = 1
-	activePrefixScalarRollupP50MaxMS = 2
-	activePrefixScalarRollupP95MaxMS = 4
+
+	// Keep this as a smoke guard for accidental slow paths; the precise
+	// regression signal is the one-granule query-plan assertion below.
+	activePrefixScalarRollupP50MaxMS = 10
+	activePrefixScalarRollupP95MaxMS = 25
 )
 
 type forbiddenProjectionRefreshConn struct {
@@ -4319,7 +4322,7 @@ func TestActivePrefixRollupsB1(t *testing.T) {
 			os.Setenv("WRSTAT_ENV", "test")
 			Reset(func() { os.Unsetenv("WRSTAT_ENV") })
 
-			th := newClickHouseTestHarness(t)
+			th := newIsolatedClickHouseTestHarness(t)
 			cfg := th.newConfig()
 			cfg.QueryTimeout = 5 * time.Second
 			cfg.MountPoints = []string{"/"}

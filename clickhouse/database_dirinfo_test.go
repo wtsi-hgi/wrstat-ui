@@ -1091,297 +1091,287 @@ func seedA4FilteredFanoutTree(
 }
 
 func TestClickHouseDatabaseActiveVirtualOverlayC2(t *testing.T) {
-	Convey("C2.1-C2.2 active virtual summaries cover roots, namespaces, and mount-root boxes", t, func() {
-		env, cleanup := newC2ActiveVirtualEnv(t, c2Mixed8MountSeeds())
+	Convey("C2 mixed8 active virtual scenarios share one read-only ClickHouse fixture", t, func() {
+		seeds := c2Mixed8MountSeeds()
+
+		env, cleanup := newC2ActiveVirtualEnv(t, seeds)
 		defer cleanup()
 
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-
-		rows := readC2ActiveVirtualSummaries(ctx, env.conn, env.activeSetID)
-		So(rows["/"].count, ShouldEqual, uint64(1_750_001))
-		So(rows["/"].size, ShouldEqual, uint64(61_484_536_134_482))
-		So(rows["/"].childCount, ShouldEqual, 8)
-		So(rows["/lustre/"].count, ShouldEqual, uint64(1_500_001))
-		So(rows["/lustre/"].size, ShouldEqual, uint64(61_176_182_464_512))
-		So(rows["/lustre/"].childCount, ShouldEqual, 7)
-		So(rows["/nfs/"].count, ShouldEqual, uint64(250_000))
-		So(rows["/nfs/"].size, ShouldEqual, uint64(308_353_669_970))
-		So(rows["/nfs/"].childCount, ShouldEqual, 1)
-
-		dbch := newClickHouseDatabaseWithSnapshot(env.cfg, env.providerConn, env.snapshot)
-		root, err := dbch.DirInfo("/", &db.Filter{Age: db.DGUTAgeAll})
-		So(err, ShouldBeNil)
-		So(root.Count, ShouldEqual, uint64(1_750_001))
-
-		lustre, err := dbch.DirInfo("/lustre/", &db.Filter{Age: db.DGUTAgeAll})
-		So(err, ShouldBeNil)
-		So(lustre.Count, ShouldEqual, uint64(1_500_001))
-
-		children, err := dbch.Children("/lustre/")
-		So(err, ShouldBeNil)
-		So(children, ShouldHaveLength, 7)
+		assertC2ActiveVirtualSummaries(env)
+		assertC2FullFilterVirtualDirInfo(env)
+		assertC2Mixed8VirtualPaths(env, seeds)
+		assertC2VirtualRootWhere(env, seeds)
+		assertC2RESTWhereRoutes(t, env, seeds)
+		assertC2LiteralAgeVirtualTree(t, env, seeds)
 	})
 
-	Convey("C2.2 full-filter virtual DirInfo reads active virtual filter rows and no dir facts", t, func() {
-		env, cleanup := newC2ActiveVirtualEnv(t, c2Mixed8MountSeeds())
-		defer cleanup()
+	Convey("C2.3 synthetic 100-small-NFS active set keeps /nfs/ virtual", t, func() {
+		assertC2SyntheticSmallNFSActiveSet(t)
+	})
+}
+
+func assertC2ActiveVirtualSummaries(env c2ActiveVirtualEnv) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	rows := readC2ActiveVirtualSummaries(ctx, env.conn, env.activeSetID)
+	So(rows["/"].count, ShouldEqual, uint64(1_750_001))
+	So(rows["/"].size, ShouldEqual, uint64(61_484_536_134_482))
+	So(rows["/"].childCount, ShouldEqual, 8)
+	So(rows["/lustre/"].count, ShouldEqual, uint64(1_500_001))
+	So(rows["/lustre/"].size, ShouldEqual, uint64(61_176_182_464_512))
+	So(rows["/lustre/"].childCount, ShouldEqual, 7)
+	So(rows["/nfs/"].count, ShouldEqual, uint64(250_000))
+	So(rows["/nfs/"].size, ShouldEqual, uint64(308_353_669_970))
+	So(rows["/nfs/"].childCount, ShouldEqual, 1)
+
+	dbch := newClickHouseDatabaseWithSnapshot(env.cfg, env.providerConn, env.snapshot)
+	root, err := dbch.DirInfo("/", &db.Filter{Age: db.DGUTAgeAll})
+	So(err, ShouldBeNil)
+	So(root.Count, ShouldEqual, uint64(1_750_001))
+
+	lustre, err := dbch.DirInfo("/lustre/", &db.Filter{Age: db.DGUTAgeAll})
+	So(err, ShouldBeNil)
+	So(lustre.Count, ShouldEqual, uint64(1_500_001))
+
+	children, err := dbch.Children("/lustre/")
+	So(err, ShouldBeNil)
+	So(children, ShouldHaveLength, 7)
+}
+
+func assertC2FullFilterVirtualDirInfo(env c2ActiveVirtualEnv) {
+	countingConn := &c2ActiveVirtualRouteCountingConn{Conn: env.providerConn}
+	dbch := newClickHouseDatabaseWithSnapshot(env.cfg, countingConn, env.snapshot)
+
+	filter := &db.Filter{GIDs: []uint32{7}, UIDs: []uint32{11}, Age: db.DGUTAgeAll}
+	for _, expected := range c2Mixed8ExpectedSummaries() {
+		sum, err := dbch.DirInfo(expected.dir, filter)
+		So(err, ShouldBeNil)
+		So(sum.Count, ShouldEqual, expected.count)
+		So(sum.Size, ShouldEqual, expected.size)
+	}
+
+	So(countingConn.activeVirtualFilterReadsValue(), ShouldBeGreaterThan, 0)
+	So(countingConn.dirFactReadsValue(), ShouldEqual, 0)
+}
+
+func assertC2SyntheticSmallNFSActiveSet(t *testing.T) {
+	t.Helper()
+
+	suffix := fmt.Sprintf("c2%d", time.Now().UnixNano())
+	seeds := make([]c2MountSeed, 0, 100)
+
+	base := time.Date(2026, 6, 11, 10, 0, 0, 0, time.UTC)
+	for i := range 100 {
+		seeds = append(seeds, c2MountSeed{
+			mountPath: fmt.Sprintf("/nfs/%s-project%03d/", suffix, i),
+			updatedAt: base.Add(time.Duration(i) * time.Minute),
+			count:     1,
+		})
+	}
+
+	mounts := make([]activeMount, 0, len(seeds))
+	for _, seed := range seeds {
+		mounts = append(mounts, activeMount{
+			mountPath:  seed.mountPath,
+			snapshotID: snapshotID(seed.mountPath, seed.updatedAt).String(),
+			updatedAt:  seed.updatedAt,
+		})
+	}
+
+	childRows := activeVirtualChildRowsForMounts("c2-shape", mounts, base)
+	So(activeVirtualSummaryRowsForChildren("c2-shape", mounts, childRows, base), ShouldHaveLength, 102)
+	So(childRows, ShouldHaveLength, 101)
+
+	env, cleanup := newC2ActiveVirtualEnv(t, seeds)
+	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	So(countRows(ctx, env.conn, d1CountActiveSetRowsQuery("wrstat_active_virtual_summaries"), env.activeSetID),
+		ShouldEqual, 102)
+	So(countRows(ctx, env.conn, d1CountActiveSetRowsQuery("wrstat_active_virtual_children"), env.activeSetID),
+		ShouldEqual, 101)
+
+	dbch := newClickHouseDatabaseWithSnapshot(env.cfg, env.providerConn, env.snapshot)
+	children, err := dbch.Children("/nfs/")
+	So(err, ShouldBeNil)
+	So(children, ShouldHaveLength, 100)
+	So(children[0], ShouldEqual, fmt.Sprintf("/nfs/%s-project000", suffix))
+	So(children[99], ShouldEqual, fmt.Sprintf("/nfs/%s-project099", suffix))
+
+	sum, err := dbch.DirInfo("/nfs/", &db.Filter{Age: db.DGUTAgeAll})
+	So(err, ShouldBeNil)
+	So(sum.Count, ShouldEqual, 100)
+}
+
+func assertC2Mixed8VirtualPaths(env c2ActiveVirtualEnv, seeds []c2MountSeed) {
+	for _, tc := range c2Mixed8FilterMatrix() {
+		expectedSummaries := c2Mixed8ExpectedSummariesForSeedsAndAge(seeds, tc.ageDivisor)
+		So(expectedSummaries, ShouldHaveLength, 11)
+
+		resetSharedTreeQueryCachesForTesting()
+		ResetSchema3FallbackRoutes()
 
 		countingConn := &c2ActiveVirtualRouteCountingConn{Conn: env.providerConn}
 		dbch := newClickHouseDatabaseWithSnapshot(env.cfg, countingConn, env.snapshot)
 
-		filter := &db.Filter{GIDs: []uint32{7}, UIDs: []uint32{11}, Age: db.DGUTAgeAll}
-		for _, expected := range c2Mixed8ExpectedSummaries() {
-			sum, err := dbch.DirInfo(expected.dir, filter)
+		for _, expected := range expectedSummaries {
+			sum, err := dbch.DirInfo(expected.dir, tc.filter)
 			So(err, ShouldBeNil)
-			So(sum.Count, ShouldEqual, expected.count)
-			So(sum.Size, ShouldEqual, expected.size)
+			So(c2DirSummaryDigest(sum), ShouldEqual, c2ExpectedDirSummaryDigest(expected, tc.expectedAge))
 		}
 
-		So(countingConn.activeVirtualFilterReadsValue(), ShouldBeGreaterThan, 0)
+		c2AssertActiveVirtualOnlyRoute(countingConn)
+
+		resetSharedTreeQueryCachesForTesting()
+		ResetSchema3FallbackRoutes()
+
+		countingConn = &c2ActiveVirtualRouteCountingConn{Conn: env.providerConn}
+		dbch = newClickHouseDatabaseWithSnapshot(env.cfg, countingConn, env.snapshot)
+
+		dirs := c2ExpectedSummaryDirs(expectedSummaries)
+		summaries, err := dbch.DirInfos(dirs, tc.filter)
+		So(err, ShouldBeNil)
+
+		for _, expected := range expectedSummaries {
+			sum := summaries[expected.dir]
+			So(c2DirSummaryDigest(sum), ShouldEqual, c2ExpectedDirSummaryDigest(expected, tc.expectedAge))
+		}
+
+		c2AssertActiveVirtualOnlyRoute(countingConn)
+	}
+}
+
+func assertC2VirtualRootWhere(env c2ActiveVirtualEnv, seeds []c2MountSeed) {
+	cases := []struct {
+		name    string
+		dir     string
+		age     db.DirGUTAge
+		divisor uint64
+	}{
+		{name: "root where unused 1y", dir: "/", age: db.DirGUTAge(4), divisor: 10},
+		{name: "nfs where unchanged 1y", dir: nfsAncestor, age: db.DirGUTAge(12), divisor: 20},
+	}
+
+	for _, tc := range cases {
+		ResetSchema3FallbackRoutes()
+
+		countingConn := &c2ActiveVirtualRouteCountingConn{Conn: env.providerConn}
+		dbch := newClickHouseDatabaseWithSnapshot(env.cfg, countingConn, env.snapshot)
+
+		got, err := db.NewTree(dbch).Where(
+			tc.dir,
+			&db.Filter{Age: tc.age},
+			split.SplitsToSplitFn(2),
+		)
+		So(err, ShouldBeNil)
+		So(c2WhereDigest(got), ShouldEqual,
+			c2WhereDigest(c2ExpectedWhereSummaries(seeds, tc.dir, tc.age, tc.divisor)))
+		So(countingConn.activeVirtualReadsValue(), ShouldBeGreaterThan, 0)
 		So(countingConn.dirFactReadsValue(), ShouldEqual, 0)
-	})
+		So(ReadSchema3FallbackRoutes()["parent_facts_fallback"], ShouldEqual, uint64(0))
+	}
+}
 
-	Convey("C2.3 synthetic 100-small-NFS active set keeps /nfs/ virtual", t, func() {
-		suffix := fmt.Sprintf("c2%d", time.Now().UnixNano())
-		seeds := make([]c2MountSeed, 0, 100)
+func assertC2RESTWhereRoutes(t *testing.T, env c2ActiveVirtualEnv, seeds []c2MountSeed) {
+	t.Helper()
 
-		base := time.Date(2026, 6, 11, 10, 0, 0, 0, time.UTC)
-		for i := range 100 {
-			seeds = append(seeds, c2MountSeed{
-				mountPath: fmt.Sprintf("/nfs/%s-project%03d/", suffix, i),
-				updatedAt: base.Add(time.Duration(i) * time.Minute),
-				count:     1,
-			})
-		}
+	cases := []struct {
+		name    string
+		dir     string
+		age     db.DirGUTAge
+		ageText string
+		divisor uint64
+	}{
+		{name: "root rest where unused 1y", dir: "/", age: db.DGUTAgeA1Y, ageText: "A1Y", divisor: 10},
+		{name: "nfs rest where unchanged 1y", dir: nfsAncestor, age: db.DGUTAgeM1Y, ageText: "M1Y", divisor: 20},
+	}
 
-		mounts := make([]activeMount, 0, len(seeds))
-		for _, seed := range seeds {
-			mounts = append(mounts, activeMount{
-				mountPath:  seed.mountPath,
-				snapshotID: snapshotID(seed.mountPath, seed.updatedAt).String(),
-				updatedAt:  seed.updatedAt,
-			})
-		}
+	for _, tc := range cases {
+		ResetSchema3FallbackRoutes()
 
-		childRows := activeVirtualChildRowsForMounts("c2-shape", mounts, base)
-		So(activeVirtualSummaryRowsForChildren("c2-shape", mounts, childRows, base), ShouldHaveLength, 102)
-		So(childRows, ShouldHaveLength, 101)
+		route, closeProvider := newC2ActiveVirtualRouteServer(t, env.cfg, env.snapshot, false)
+		defer closeProvider()
 
-		env, cleanup := newC2ActiveVirtualEnv(t, seeds)
-		defer cleanup()
+		got := requestC2RESTWhere(t, route.server, url.Values{
+			"dir":    {tc.dir},
+			"age":    {tc.ageText},
+			"splits": {"2"},
+		})
 
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
+		So(c2RESTWhereDigest(got), ShouldEqual,
+			c2ExpectedRESTWhereDigest(c2ExpectedWhereSummaries(seeds, tc.dir, tc.age, tc.divisor)))
+		So(route.server.ResponseCacheHits(), ShouldEqual, uint64(0))
+		So(route.counting.activeVirtualReadsValue(), ShouldBeGreaterThan, 0)
+		So(route.counting.dirFactReadsValue(), ShouldEqual, 0)
+		So(route.counting.factVectorReadsValue(), ShouldEqual, 0)
+		So(ReadSchema3FallbackRoutes()["parent_facts_fallback"], ShouldEqual, uint64(0))
 
-		So(countRows(ctx, env.conn, d1CountActiveSetRowsQuery("wrstat_active_virtual_summaries"), env.activeSetID),
-			ShouldEqual, 102)
-		So(countRows(ctx, env.conn, d1CountActiveSetRowsQuery("wrstat_active_virtual_children"), env.activeSetID),
-			ShouldEqual, 101)
+		ResetSchema3FallbackRoutes()
 
-		dbch := newClickHouseDatabaseWithSnapshot(env.cfg, env.providerConn, env.snapshot)
-		children, err := dbch.Children("/nfs/")
-		So(err, ShouldBeNil)
-		So(children, ShouldHaveLength, 100)
-		So(children[0], ShouldEqual, fmt.Sprintf("/nfs/%s-project000", suffix))
-		So(children[99], ShouldEqual, fmt.Sprintf("/nfs/%s-project099", suffix))
+		cliRoute, closeCLIProvider := newC2ActiveVirtualRouteServer(t, env.cfg, env.snapshot, true)
+		defer closeCLIProvider()
 
-		sum, err := dbch.DirInfo("/nfs/", &db.Filter{Age: db.DGUTAgeAll})
-		So(err, ShouldBeNil)
-		So(sum.Count, ShouldEqual, 100)
-	})
+		cliGot := requestC2CLIWhere(t, cliRoute, tc.dir, tc.age)
+		So(c2RESTWhereDigest(cliGot), ShouldEqual,
+			c2ExpectedRESTWhereDigest(c2ExpectedWhereSummaries(seeds, tc.dir, tc.age, tc.divisor)))
+		So(cliRoute.server.ResponseCacheHits(), ShouldEqual, uint64(0))
+		So(cliRoute.counting.activeVirtualReadsValue(), ShouldBeGreaterThan, 0)
+		So(cliRoute.counting.dirFactReadsValue(), ShouldEqual, 0)
+		So(cliRoute.counting.factVectorReadsValue(), ShouldEqual, 0)
+		So(ReadSchema3FallbackRoutes()["parent_facts_fallback"], ShouldEqual, uint64(0))
+	}
+}
 
-	Convey("C2.4-C2.5 mixed8 virtual paths and mount-root boxes match filter totals without fact reads", t, func() {
-		seeds := c2Mixed8MountSeeds()
+func assertC2LiteralAgeVirtualTree(t *testing.T, env c2ActiveVirtualEnv, seeds []c2MountSeed) {
+	t.Helper()
 
-		env, cleanup := newC2ActiveVirtualEnv(t, seeds)
-		defer cleanup()
+	cases := []struct {
+		name          string
+		dir           string
+		age           db.DirGUTAge
+		divisor       uint64
+		expectedChild []string
+	}{
+		{
+			name:          "root tree unused 1y",
+			dir:           "/",
+			age:           db.DirGUTAge(4),
+			divisor:       10,
+			expectedChild: []string{"/lustre", "/nfs"},
+		},
+		{
+			name:          "nfs tree unchanged 1y",
+			dir:           nfsAncestor,
+			age:           db.DirGUTAge(12),
+			divisor:       20,
+			expectedChild: c2SeedMountPathsWithPrefix(seeds, nfsAncestor),
+		},
+	}
 
-		for _, tc := range c2Mixed8FilterMatrix() {
-			Convey(tc.name, func() {
-				expectedSummaries := c2Mixed8ExpectedSummariesForSeedsAndAge(seeds, tc.ageDivisor)
-				So(expectedSummaries, ShouldHaveLength, 11)
+	for _, tc := range cases {
+		ResetSchema3FallbackRoutes()
 
-				resetSharedTreeQueryCachesForTesting()
-				ResetSchema3FallbackRoutes()
+		route, closeProvider := newC2ActiveVirtualRouteServer(t, env.cfg, env.snapshot, true)
+		defer closeProvider()
 
-				countingConn := &c2ActiveVirtualRouteCountingConn{Conn: env.providerConn}
-				dbch := newClickHouseDatabaseWithSnapshot(env.cfg, countingConn, env.snapshot)
-
-				for _, expected := range expectedSummaries {
-					sum, err := dbch.DirInfo(expected.dir, tc.filter)
-					So(err, ShouldBeNil)
-					So(c2DirSummaryDigest(sum), ShouldEqual, c2ExpectedDirSummaryDigest(expected, tc.expectedAge))
-				}
-
-				c2AssertActiveVirtualOnlyRoute(countingConn)
-
-				resetSharedTreeQueryCachesForTesting()
-				ResetSchema3FallbackRoutes()
-
-				countingConn = &c2ActiveVirtualRouteCountingConn{Conn: env.providerConn}
-				dbch = newClickHouseDatabaseWithSnapshot(env.cfg, countingConn, env.snapshot)
-
-				dirs := c2ExpectedSummaryDirs(expectedSummaries)
-				summaries, err := dbch.DirInfos(dirs, tc.filter)
-				So(err, ShouldBeNil)
-
-				for _, expected := range expectedSummaries {
-					sum := summaries[expected.dir]
-					So(c2DirSummaryDigest(sum), ShouldEqual, c2ExpectedDirSummaryDigest(expected, tc.expectedAge))
-				}
-
-				c2AssertActiveVirtualOnlyRoute(countingConn)
-			})
-		}
-	})
-
-	Convey("C2.6 virtual-root Tree.Where uses active virtual rows for literal age filters", t, func() {
-		seeds := c2Mixed8MountSeeds()
-
-		env, cleanup := newC2ActiveVirtualEnv(t, seeds)
-		defer cleanup()
-
-		cases := []struct {
-			name    string
-			dir     string
-			age     db.DirGUTAge
-			divisor uint64
-		}{
-			{name: "root where unused 1y", dir: "/", age: db.DirGUTAge(4), divisor: 10},
-			{name: "nfs where unchanged 1y", dir: nfsAncestor, age: db.DirGUTAge(12), divisor: 20},
-		}
-
-		for _, tc := range cases {
-			Convey(tc.name, func() {
-				ResetSchema3FallbackRoutes()
-
-				countingConn := &c2ActiveVirtualRouteCountingConn{Conn: env.providerConn}
-				dbch := newClickHouseDatabaseWithSnapshot(env.cfg, countingConn, env.snapshot)
-
-				got, err := db.NewTree(dbch).Where(
-					tc.dir,
-					&db.Filter{Age: tc.age},
-					split.SplitsToSplitFn(2),
-				)
-				So(err, ShouldBeNil)
-				So(c2WhereDigest(got), ShouldEqual,
-					c2WhereDigest(c2ExpectedWhereSummaries(seeds, tc.dir, tc.age, tc.divisor)))
-				So(countingConn.activeVirtualReadsValue(), ShouldBeGreaterThan, 0)
-				So(countingConn.dirFactReadsValue(), ShouldEqual, 0)
-				So(ReadSchema3FallbackRoutes()["parent_facts_fallback"], ShouldEqual, uint64(0))
-			})
-		}
-	})
-
-	Convey("C2.7 REST where routes serve virtual literal-age roots from fresh providers", t, func() {
-		seeds := c2Mixed8MountSeeds()
-
-		env, cleanup := newC2ActiveVirtualEnv(t, seeds)
-		defer cleanup()
-
-		cases := []struct {
-			name    string
-			dir     string
-			age     db.DirGUTAge
-			ageText string
-			divisor uint64
-		}{
-			{name: "root rest where unused 1y", dir: "/", age: db.DGUTAgeA1Y, ageText: "A1Y", divisor: 10},
-			{name: "nfs rest where unchanged 1y", dir: nfsAncestor, age: db.DGUTAgeM1Y, ageText: "M1Y", divisor: 20},
-		}
-
-		for _, tc := range cases {
-			Convey(tc.name, func() {
-				ResetSchema3FallbackRoutes()
-
-				route, closeProvider := newC2ActiveVirtualRouteServer(t, env.cfg, env.snapshot, false)
-				defer closeProvider()
-
-				got := requestC2RESTWhere(t, route.server, url.Values{
-					"dir":    {tc.dir},
-					"age":    {tc.ageText},
-					"splits": {"2"},
-				})
-
-				So(c2RESTWhereDigest(got), ShouldEqual,
-					c2ExpectedRESTWhereDigest(c2ExpectedWhereSummaries(seeds, tc.dir, tc.age, tc.divisor)))
-				So(route.server.ResponseCacheHits(), ShouldEqual, uint64(0))
-				So(route.counting.activeVirtualReadsValue(), ShouldBeGreaterThan, 0)
-				So(route.counting.dirFactReadsValue(), ShouldEqual, 0)
-				So(route.counting.factVectorReadsValue(), ShouldEqual, 0)
-				So(ReadSchema3FallbackRoutes()["parent_facts_fallback"], ShouldEqual, uint64(0))
-
-				ResetSchema3FallbackRoutes()
-
-				cliRoute, closeCLIProvider := newC2ActiveVirtualRouteServer(t, env.cfg, env.snapshot, true)
-				defer closeCLIProvider()
-
-				cliGot := requestC2CLIWhere(t, cliRoute, tc.dir, tc.age)
-				So(c2RESTWhereDigest(cliGot), ShouldEqual,
-					c2ExpectedRESTWhereDigest(c2ExpectedWhereSummaries(seeds, tc.dir, tc.age, tc.divisor)))
-				So(cliRoute.server.ResponseCacheHits(), ShouldEqual, uint64(0))
-				So(cliRoute.counting.activeVirtualReadsValue(), ShouldBeGreaterThan, 0)
-				So(cliRoute.counting.dirFactReadsValue(), ShouldEqual, 0)
-				So(cliRoute.counting.factVectorReadsValue(), ShouldEqual, 0)
-				So(ReadSchema3FallbackRoutes()["parent_facts_fallback"], ShouldEqual, uint64(0))
-			})
-		}
-	})
-
-	Convey("C2.8 literal-age virtual tree queries return deterministic children without fact reads", t, func() {
-		seeds := c2Mixed8MountSeeds()
-
-		env, cleanup := newC2ActiveVirtualEnv(t, seeds)
-		defer cleanup()
-
-		cases := []struct {
-			name          string
-			dir           string
-			age           db.DirGUTAge
-			divisor       uint64
-			expectedChild []string
-		}{
-			{
-				name:          "root tree unused 1y",
-				dir:           "/",
-				age:           db.DirGUTAge(4),
-				divisor:       10,
-				expectedChild: []string{"/lustre", "/nfs"},
-			},
-			{
-				name:          "nfs tree unchanged 1y",
-				dir:           nfsAncestor,
-				age:           db.DirGUTAge(12),
-				divisor:       20,
-				expectedChild: c2SeedMountPathsWithPrefix(seeds, nfsAncestor),
-			},
-		}
-
-		for _, tc := range cases {
-			Convey(tc.name, func() {
-				ResetSchema3FallbackRoutes()
-
-				route, closeProvider := newC2ActiveVirtualRouteServer(t, env.cfg, env.snapshot, true)
-				defer closeProvider()
-
-				got := requestC2AuthTree(t, route, tc.dir, tc.age)
-				So(got.Children, ShouldHaveLength, len(tc.expectedChild))
-				So(c2RESTTreeCurrentDigest(got), ShouldEqual,
-					c2ExpectedRESTTreeDigest(db.DCSs{
-						c2ExpectedDirSummary(tc.dir, c2ExpectedVirtualSummary(tc.dir, tc.divisor).count,
-							c2ExpectedVirtualSummary(tc.dir, tc.divisor).size, tc.age),
-					}))
-				So(c2RESTTreeChildrenDigest(got.Children), ShouldEqual,
-					c2ExpectedRESTTreeDigest(c2ExpectedTreeChildren(seeds, tc.expectedChild, tc.age, tc.divisor)))
-				So(route.server.ResponseCacheHits(), ShouldEqual, uint64(0))
-				So(route.counting.activeVirtualReadsValue(), ShouldBeGreaterThan, 0)
-				So(route.counting.dirFactReadsValue(), ShouldEqual, 0)
-				So(route.counting.factVectorReadsValue(), ShouldEqual, 0)
-				So(ReadSchema3FallbackRoutes()["parent_facts_fallback"], ShouldEqual, uint64(0))
-			})
-		}
-	})
+		got := requestC2AuthTree(t, route, tc.dir, tc.age)
+		So(got.Children, ShouldHaveLength, len(tc.expectedChild))
+		So(c2RESTTreeCurrentDigest(got), ShouldEqual,
+			c2ExpectedRESTTreeDigest(db.DCSs{
+				c2ExpectedDirSummary(tc.dir, c2ExpectedVirtualSummary(tc.dir, tc.divisor).count,
+					c2ExpectedVirtualSummary(tc.dir, tc.divisor).size, tc.age),
+			}))
+		So(c2RESTTreeChildrenDigest(got.Children), ShouldEqual,
+			c2ExpectedRESTTreeDigest(c2ExpectedTreeChildren(seeds, tc.expectedChild, tc.age, tc.divisor)))
+		So(route.server.ResponseCacheHits(), ShouldEqual, uint64(0))
+		So(route.counting.activeVirtualReadsValue(), ShouldBeGreaterThan, 0)
+		So(route.counting.dirFactReadsValue(), ShouldEqual, 0)
+		So(route.counting.factVectorReadsValue(), ShouldEqual, 0)
+		So(ReadSchema3FallbackRoutes()["parent_facts_fallback"], ShouldEqual, uint64(0))
+	}
 }
 
 func newC2ActiveVirtualEnv(t *testing.T, seeds []c2MountSeed) (c2ActiveVirtualEnv, func()) {
@@ -2647,115 +2637,13 @@ func b2AllFilterFamilies() []*db.Filter {
 }
 
 func TestClickHouseDatabaseWhereDirFilterAllB3(t *testing.T) {
-	Convey("B3.1 Tree.Where uses full-filter subtree rows and matches facts vectors", t, func() {
+	Convey("B3 full-filter Tree.Where scenarios share one read-only ClickHouse fixture", t, func() {
 		env, cleanup := newB3WhereDirFilterAllEnv(t)
 		defer cleanup()
 
-		filter := &db.Filter{
-			GIDs: []uint32{7},
-			UIDs: []uint32{11},
-			FT:   db.DGUTAFileTypeBam,
-			Age:  db.DGUTAgeA1Y,
-		}
-		splitFn := split.SplitsToSplitFn(2)
-		genericTree := db.NewTree(&clickHouseGenericTreeDB{
-			d: newClickHouseDatabaseWithSnapshot(env.cfg, env.conn, env.snapshot),
-		})
-		expected, err := genericTree.Where(env.projectDir, filter, splitFn)
-		So(err, ShouldBeNil)
-
-		resetSharedTreeQueryCachesForTesting()
-
-		countingConn := &whereQueryCountingConn{Conn: env.conn}
-		fastTree := db.NewTree(newClickHouseDatabaseWithSnapshot(env.cfg, countingConn, env.snapshot))
-		actual, err := fastTree.Where(env.projectDir, filter, splitFn)
-		So(err, ShouldBeNil)
-
-		So(b3WhereSummaryDirs(actual), ShouldResemble, []string{
-			env.projectDir,
-			env.projectDir + "alpha",
-			env.projectDir + "beta",
-			env.projectDir + "gamma",
-			env.projectDir + "delta",
-		})
-		So(b3WhereSummarySizes(actual), ShouldResemble, []uint64{200, 100, 80, 60, 40})
-		So(b3DCSsDigest(actual), ShouldEqual, b3DCSsDigest(expected))
-		So(countingConn.filterAllQueryCountValue(), ShouldBeGreaterThan, 0)
-		So(countingConn.filterAgeAllQueryCountValue(), ShouldEqual, 0)
-		So(countingConn.summaryBatchQueryCountValue(), ShouldEqual, 0)
-		So(countingConn.mountDirVectorQueryCount(), ShouldEqual, 0)
-	})
-
-	Convey("B3.3 high-fanout where uses one full-filter subtree read and no facts vectors", t, func() {
-		env, cleanup := newB3WhereDirFilterAllEnv(t)
-		defer cleanup()
-
-		resetSharedTreeQueryCachesForTesting()
-		ResetSchema3FallbackRoutes()
-
-		countingConn := &whereQueryCountingConn{Conn: env.conn}
-		tree := db.NewTree(newClickHouseDatabaseWithSnapshot(env.cfg, countingConn, env.snapshot))
-		filter := &db.Filter{GIDs: []uint32{7}, UIDs: []uint32{11}, FT: db.DGUTAFileTypeBam, Age: db.DGUTAgeA1Y}
-		inspector := &Inspector{cfg: env.cfg, conn: env.conn}
-
-		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-		defer cancel()
-
-		var dcss db.DCSs
-
-		metrics, err := inspector.Measure(ctx, func(context.Context) error {
-			var whereErr error
-
-			dcss, whereErr = tree.Where(env.projectDir, filter, split.SplitsToSplitFn(2))
-
-			return whereErr
-		})
-
-		So(err, ShouldBeNil)
-		So(dcss, ShouldHaveLength, 5)
-		So(len(b3WhereChildDirs(env.projectDir)), ShouldBeGreaterThan, 100)
-		So(countingConn.filterAllQueryCountValue(), ShouldEqual, 1)
-		So(countingConn.filterAgeAllQueryCountValue(), ShouldEqual, 0)
-		So(countingConn.summaryBatchQueryCountValue(), ShouldEqual, 0)
-		So(countingConn.mountDirVectorQueryCount(), ShouldEqual, 0)
-
-		ceiling := b3ReadVolumeCeiling(ctx, env.conn, "wrstat_dir_filter_all", uint64(len(dcss))).
-			add(b3ReadVolumeCeiling(ctx, env.conn, "wrstat_schema3_snapshot_sets", 1))
-
-		So(metrics.ReadRows, ShouldBeGreaterThan, uint64(0))
-		So(metrics.ReadRows, ShouldBeLessThanOrEqualTo, ceiling.rows)
-		So(metrics.ReadBytes, ShouldBeGreaterThan, uint64(0))
-		So(metrics.ReadBytes, ShouldBeLessThanOrEqualTo, ceiling.bytes)
-		So(metrics.ReadMarks, ShouldBeGreaterThan, uint64(0))
-		So(metrics.ReadMarks, ShouldBeLessThanOrEqualTo, ceiling.marks)
-		So(ReadSchema3FallbackRoutes()["parent_facts_fallback"], ShouldEqual, uint64(0))
-	})
-
-	Convey("B3.4 Tree.Where unused and unchanged project fixtures use full-filter rows", t, func() {
-		for _, fixture := range b3ClickHouseProjectWhereFixtures() {
-			env, cleanup := newB3WhereDirFilterAllEnv(t)
-
-			resetSharedTreeQueryCachesForTesting()
-			ResetSchema3FallbackRoutes()
-
-			countingConn := &whereQueryCountingConn{Conn: env.conn}
-			tree := db.NewTree(newClickHouseDatabaseWithSnapshot(env.cfg, countingConn, env.snapshot))
-			dcss, err := tree.Where(
-				env.projectDir,
-				&db.Filter{Age: fixture.age},
-				split.SplitsToSplitFn(2),
-			)
-
-			cleanup()
-
-			So(err, ShouldBeNil)
-			So(b3DCSsDigest(dcss), ShouldEqual, b3ClickHouseProjectWhereManifestDigest(fixture.manifestKey))
-			So(countingConn.filterAllQueryCountValue(), ShouldEqual, 1)
-			So(countingConn.filterAgeAllQueryCountValue(), ShouldEqual, 0)
-			So(countingConn.summaryBatchQueryCountValue(), ShouldEqual, 0)
-			So(countingConn.mountDirVectorQueryCount(), ShouldEqual, 0)
-			So(ReadSchema3FallbackRoutes()["parent_facts_fallback"], ShouldEqual, uint64(0))
-		}
+		assertB3WhereMatchesFactsVectors(env)
+		assertB3HighFanoutWhere(env)
+		assertB3ClickHouseProjectWhereFixtures(env)
 	})
 
 	Convey("B3.2 AgeAll keeps the narrow route only when exact and strictly faster", t, func() {
@@ -2829,6 +2717,107 @@ func TestClickHouseDatabaseWhereDirFilterAllB3(t *testing.T) {
 			So(got, ShouldEqual, tc.expected)
 		}
 	})
+}
+
+func assertB3WhereMatchesFactsVectors(env b3WhereDirFilterAllEnv) {
+	filter := &db.Filter{
+		GIDs: []uint32{7},
+		UIDs: []uint32{11},
+		FT:   db.DGUTAFileTypeBam,
+		Age:  db.DGUTAgeA1Y,
+	}
+	splitFn := split.SplitsToSplitFn(2)
+	genericTree := db.NewTree(&clickHouseGenericTreeDB{
+		d: newClickHouseDatabaseWithSnapshot(env.cfg, env.conn, env.snapshot),
+	})
+	expected, err := genericTree.Where(env.projectDir, filter, splitFn)
+	So(err, ShouldBeNil)
+
+	resetSharedTreeQueryCachesForTesting()
+
+	countingConn := &whereQueryCountingConn{Conn: env.conn}
+	fastTree := db.NewTree(newClickHouseDatabaseWithSnapshot(env.cfg, countingConn, env.snapshot))
+	actual, err := fastTree.Where(env.projectDir, filter, splitFn)
+	So(err, ShouldBeNil)
+
+	So(b3WhereSummaryDirs(actual), ShouldResemble, []string{
+		env.projectDir,
+		env.projectDir + "alpha",
+		env.projectDir + "beta",
+		env.projectDir + "gamma",
+		env.projectDir + "delta",
+	})
+	So(b3WhereSummarySizes(actual), ShouldResemble, []uint64{200, 100, 80, 60, 40})
+	So(b3DCSsDigest(actual), ShouldEqual, b3DCSsDigest(expected))
+	So(countingConn.filterAllQueryCountValue(), ShouldBeGreaterThan, 0)
+	So(countingConn.filterAgeAllQueryCountValue(), ShouldEqual, 0)
+	So(countingConn.summaryBatchQueryCountValue(), ShouldEqual, 0)
+	So(countingConn.mountDirVectorQueryCount(), ShouldEqual, 0)
+}
+
+func assertB3HighFanoutWhere(env b3WhereDirFilterAllEnv) {
+	resetSharedTreeQueryCachesForTesting()
+	ResetSchema3FallbackRoutes()
+
+	countingConn := &whereQueryCountingConn{Conn: env.conn}
+	tree := db.NewTree(newClickHouseDatabaseWithSnapshot(env.cfg, countingConn, env.snapshot))
+	filter := &db.Filter{GIDs: []uint32{7}, UIDs: []uint32{11}, FT: db.DGUTAFileTypeBam, Age: db.DGUTAgeA1Y}
+	inspector := &Inspector{cfg: env.cfg, conn: env.conn}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	var dcss db.DCSs
+
+	metrics, err := inspector.Measure(ctx, func(context.Context) error {
+		var whereErr error
+
+		dcss, whereErr = tree.Where(env.projectDir, filter, split.SplitsToSplitFn(2))
+
+		return whereErr
+	})
+
+	So(err, ShouldBeNil)
+	So(dcss, ShouldHaveLength, 5)
+	So(len(b3WhereChildDirs(env.projectDir)), ShouldBeGreaterThan, 100)
+	So(countingConn.filterAllQueryCountValue(), ShouldEqual, 1)
+	So(countingConn.filterAgeAllQueryCountValue(), ShouldEqual, 0)
+	So(countingConn.summaryBatchQueryCountValue(), ShouldEqual, 0)
+	So(countingConn.mountDirVectorQueryCount(), ShouldEqual, 0)
+
+	ceiling := b3ReadVolumeCeiling(ctx, env.conn, "wrstat_dir_filter_all", uint64(len(dcss))).
+		add(b3ReadVolumeCeiling(ctx, env.conn, "wrstat_schema3_snapshot_sets", 1))
+
+	So(metrics.ReadRows, ShouldBeGreaterThan, uint64(0))
+	So(metrics.ReadRows, ShouldBeLessThanOrEqualTo, ceiling.rows)
+	So(metrics.ReadBytes, ShouldBeGreaterThan, uint64(0))
+	So(metrics.ReadBytes, ShouldBeLessThanOrEqualTo, ceiling.bytes)
+	So(metrics.ReadMarks, ShouldBeGreaterThan, uint64(0))
+	So(metrics.ReadMarks, ShouldBeLessThanOrEqualTo, ceiling.marks)
+	So(ReadSchema3FallbackRoutes()["parent_facts_fallback"], ShouldEqual, uint64(0))
+}
+
+func assertB3ClickHouseProjectWhereFixtures(env b3WhereDirFilterAllEnv) {
+	for _, fixture := range b3ClickHouseProjectWhereFixtures() {
+		resetSharedTreeQueryCachesForTesting()
+		ResetSchema3FallbackRoutes()
+
+		countingConn := &whereQueryCountingConn{Conn: env.conn}
+		tree := db.NewTree(newClickHouseDatabaseWithSnapshot(env.cfg, countingConn, env.snapshot))
+		dcss, err := tree.Where(
+			env.projectDir,
+			&db.Filter{Age: fixture.age},
+			split.SplitsToSplitFn(2),
+		)
+
+		So(err, ShouldBeNil)
+		So(b3DCSsDigest(dcss), ShouldEqual, b3ClickHouseProjectWhereManifestDigest(fixture.manifestKey))
+		So(countingConn.filterAllQueryCountValue(), ShouldEqual, 1)
+		So(countingConn.filterAgeAllQueryCountValue(), ShouldEqual, 0)
+		So(countingConn.summaryBatchQueryCountValue(), ShouldEqual, 0)
+		So(countingConn.mountDirVectorQueryCount(), ShouldEqual, 0)
+		So(ReadSchema3FallbackRoutes()["parent_facts_fallback"], ShouldEqual, uint64(0))
+	}
 }
 
 func newB3WhereDirFilterAllEnv(t *testing.T) (b3WhereDirFilterAllEnv, func()) {
@@ -6908,10 +6897,17 @@ func TestClickHouseDatabaseDirsHaveChildrenFastPath(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
 
+		mountBatch, err := conn.PrepareBatch(ctx, testInsertMountBatchStmt)
+		So(err, ShouldBeNil)
 		childrenBatch, err := conn.PrepareBatch(ctx, insertChildrenQuery)
+		So(err, ShouldBeNil)
+		projectionBatch, err := conn.PrepareBatch(ctx, insertMountDirSummaryQuery)
+		So(err, ShouldBeNil)
+		projectionSetBatch, err := conn.PrepareBatch(ctx, insertMountDirSummarySetQuery)
 		So(err, ShouldBeNil)
 
 		baseUpdatedAt := time.Date(2026, 1, 12, 11, 0, 0, 0, time.UTC)
+		refreshedAt := time.Now().UTC()
 		rows := make([]mountsActiveRow, 0, nfsMountCount)
 
 		var nfsCount uint64
@@ -6923,16 +6919,20 @@ func TestClickHouseDatabaseDirsHaveChildrenFastPath(t *testing.T) {
 			mountPath := fmt.Sprintf("/nfs/project%03d/", i)
 			updatedAt := baseUpdatedAt.Add(time.Duration(i) * time.Minute)
 			sid := snapshotID(mountPath, updatedAt)
-
-			So(conn.Exec(ctx, testInsertMountStmt, mountPath, time.Now(), sid, updatedAt), ShouldBeNil)
-			insertMountDirProjectionSetForTest(ctx, conn, activeMount{
+			mount := activeMount{
 				mountPath:  mountPath,
 				snapshotID: sid.String(),
 				updatedAt:  updatedAt,
-			})
-			appendDisktreeNFSClickGUTA(ctx, conn, mountPath, sid.String(), mountPath, count)
-			appendDisktreeNFSClickGUTA(ctx, conn, mountPath, sid.String(), mountPath+"leaf/", 1)
+			}
+
+			appendTestMountEventRow(mountBatch, mount)
 			So(childrenBatch.Append(mountPath, sid.String(), mountPath, mountPath+"leaf"), ShouldBeNil)
+
+			state := newMountDirProjectionState()
+			state.addGUTA(mountPath, newTestDGUTA(uint32(7), uint32(9), db.DGUTAFileTypeBam, count))
+			state.addGUTA(mountPath+"leaf/", newTestDGUTA(uint32(7), uint32(9), db.DGUTAFileTypeBam, 1))
+			state.addChildren(mountPath, 1)
+			appendTestMountDirProjectionRows(projectionBatch, projectionSetBatch, mount, state, refreshedAt)
 
 			rows = append(rows, mountsActiveRow{
 				mountPath:  mountPath,
@@ -6941,11 +6941,10 @@ func TestClickHouseDatabaseDirsHaveChildrenFastPath(t *testing.T) {
 			})
 		}
 
+		So(mountBatch.Send(), ShouldBeNil)
 		So(childrenBatch.Send(), ShouldBeNil)
-
-		for _, row := range rows {
-			So(writeMaintainedMountDirProjectionForTest(ctx, conn, activeMount(row)), ShouldBeNil)
-		}
+		So(projectionBatch.Send(), ShouldBeNil)
+		So(projectionSetBatch.Send(), ShouldBeNil)
 
 		countingConn := &whereQueryCountingConn{Conn: conn}
 		tree := db.NewTree(newClickHouseDatabaseWithSnapshot(
@@ -7855,30 +7854,85 @@ func TestClickHouseDatabaseDirsHaveChildrenFastPath(t *testing.T) {
 	})
 }
 
-func appendDisktreeNFSClickGUTA(
-	ctx context.Context,
-	conn ch.Conn,
+const (
+	testInsertMountBatchStmt = "INSERT INTO wrstat_mount_events (mount_path, event_at, event_type, " +
+		"snapshot_id, updated_at, reason)"
+	testInsertDGUTABatchStmt = "INSERT INTO wrstat_dir_facts (mount_path, snapshot_id, dir, updated_at, gids, uids, " +
+		"fts, ages, counts, sizes, atime_mins, mtime_maxs, atime_buckets, mtime_buckets, refreshed_at)"
+)
+
+func appendTestMountEventRow(batch driver.Batch, mount activeMount) {
+	So(batch.Append(mount.mountPath, time.Now(), uint8(1), mount.snapshotID, mount.updatedAt, "publish"), ShouldBeNil)
+}
+
+func appendTestDGUTAFactRow(
+	batch driver.Batch,
 	mountPath string,
 	sid string,
 	dir string,
+	gid uint32,
+	uid uint32,
+	ft db.DirGUTAFileType,
 	count uint64,
 ) {
-	So(conn.Exec(ctx,
-		testInsertDGUTAStmt,
+	So(batch.Append(
 		mountPath,
 		sid,
 		dir,
-		uint32(7),
-		uint32(9),
-		uint16(db.DGUTAFileTypeBam),
-		uint8(db.DGUTAgeAll),
-		count,
-		count*10,
-		int64(10),
-		int64(20),
-		[]uint64{1, 0, 0, 0, 0, 0, 0, 0, 0},
-		[]uint64{0, 1, 0, 0, 0, 0, 0, 0, 0},
+		time.Now(),
+		[]uint32{gid},
+		[]uint32{uid},
+		[]uint16{uint16(ft)},
+		[]uint8{uint8(db.DGUTAgeAll)},
+		[]uint64{count},
+		[]uint64{count * 10},
+		[]int64{10},
+		[]int64{20},
+		[][]uint64{testATimeBuckets()},
+		[][]uint64{testMTimeBuckets()},
+		time.Now(),
 	), ShouldBeNil)
+}
+
+func newTestDGUTA(gid uint32, uid uint32, ft db.DirGUTAFileType, count uint64) *db.GUTA {
+	return &db.GUTA{
+		GID:         gid,
+		UID:         uid,
+		FT:          ft,
+		Age:         db.DGUTAgeAll,
+		Count:       count,
+		Size:        count * 10,
+		Atime:       10,
+		Mtime:       20,
+		ATimeRanges: summary.AgeBuckets{1, 0, 0, 0, 0, 0, 0, 0, 0},
+		MTimeRanges: summary.AgeBuckets{0, 1, 0, 0, 0, 0, 0, 0, 0},
+	}
+}
+
+func appendTestMountDirProjectionRows(
+	summaryBatch driver.Batch,
+	setBatch driver.Batch,
+	mount activeMount,
+	state mountDirProjectionState,
+	refreshedAt time.Time,
+) {
+	for _, dir := range state.factDirs(false) {
+		So(appendMountDirFactRow(summaryBatch, mount, dir, state, refreshedAt), ShouldBeNil)
+	}
+
+	appendTestMountDirProjectionSetRow(setBatch, mount, refreshedAt)
+}
+
+func appendTestMountDirProjectionSetRow(batch driver.Batch, mount activeMount, refreshedAt time.Time) {
+	So(batch.Append(mount.mountPath, mount.snapshotID, mount.updatedAt, refreshedAt), ShouldBeNil)
+}
+
+func testATimeBuckets() []uint64 {
+	return []uint64{1, 0, 0, 0, 0, 0, 0, 0, 0}
+}
+
+func testMTimeBuckets() []uint64 {
+	return []uint64{0, 1, 0, 0, 0, 0, 0, 0, 0}
 }
 
 func TestClickHouseDatabaseDirInfoAncestor(t *testing.T) {
@@ -9244,15 +9298,72 @@ func TestClickHouseDatabaseWhereFastPath(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
 
+		mountBatch, err := conn.PrepareBatch(ctx, testInsertMountBatchStmt)
+		So(err, ShouldBeNil)
+		gutaBatch, err := conn.PrepareBatch(ctx, testInsertDGUTABatchStmt)
+		So(err, ShouldBeNil)
+		projectionSetBatch, err := conn.PrepareBatch(ctx, insertMountDirSummarySetQuery)
+		So(err, ShouldBeNil)
+
+		refreshedAt := time.Now().UTC()
+		gutaBatchRows := 0
+		projectionSetBatchRows := 0
+
+		flushGUTABatch := func() {
+			if gutaBatchRows == 0 {
+				return
+			}
+
+			So(gutaBatch.Send(), ShouldBeNil)
+
+			var prepareErr error
+
+			gutaBatch, prepareErr = conn.PrepareBatch(ctx, testInsertDGUTABatchStmt)
+			So(prepareErr, ShouldBeNil)
+
+			gutaBatchRows = 0
+		}
+
+		flushProjectionSetBatch := func() {
+			if projectionSetBatchRows == 0 {
+				return
+			}
+
+			So(projectionSetBatch.Send(), ShouldBeNil)
+
+			var prepareErr error
+
+			projectionSetBatch, prepareErr = conn.PrepareBatch(ctx, insertMountDirSummarySetQuery)
+			So(prepareErr, ShouldBeNil)
+
+			projectionSetBatchRows = 0
+		}
+
 		insertMount := func(mountPath string, updatedAt time.Time, count uint64) mountsActiveRow {
 			sid := snapshotID(mountPath, updatedAt)
-			So(conn.Exec(ctx, testInsertMountStmt, mountPath, time.Now(), sid, updatedAt), ShouldBeNil)
-			insertMountDirProjectionSetForTest(ctx, conn, activeMount{
+			mount := activeMount{
 				mountPath:  mountPath,
 				snapshotID: sid.String(),
 				updatedAt:  updatedAt,
-			})
-			insertWhereSummaryTestGUTA(ctx, conn, mountPath, sid.String(), mountPath, db.DGUTAFileTypeBam, count)
+			}
+			appendTestMountEventRow(mountBatch, mount)
+			appendTestMountDirProjectionSetRow(projectionSetBatch, mount, refreshedAt)
+
+			projectionSetBatchRows++
+
+			if projectionSetBatchRows >= 90 {
+				flushProjectionSetBatch()
+			}
+
+			appendTestDGUTAFactRow(
+				gutaBatch, mountPath, sid.String(), mountPath, uint32(7), uint32(9), db.DGUTAFileTypeBam, count,
+			)
+
+			gutaBatchRows++
+
+			if gutaBatchRows >= 90 {
+				flushGUTABatch()
+			}
 
 			return mountsActiveRow{
 				mountPath:  mountPath,
@@ -9280,6 +9391,10 @@ func TestClickHouseDatabaseWhereFastPath(t *testing.T) {
 
 		lustreMount := "/lustre/scratchZ/"
 		rows = append(rows, insertMount(lustreMount, baseUpdatedAt.Add(3*time.Hour), lustreCount))
+
+		So(mountBatch.Send(), ShouldBeNil)
+		flushGUTABatch()
+		flushProjectionSetBatch()
 
 		So(ensureActiveTreeSummaries(ctx, conn, rows), ShouldBeNil)
 

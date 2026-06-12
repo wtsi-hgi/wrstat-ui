@@ -44,6 +44,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -76,6 +77,39 @@ type clickHouseTestHarness struct {
 	stderr   string
 }
 
+type clickHouseServerProcess struct {
+	doneCh  <-chan struct{}
+	exitErr *error
+	stdout  string
+	stderr  string
+	stop    func()
+}
+
+type sharedClickHouseTestServer struct {
+	tcpPort int
+	binPath string
+	baseDir string
+	proc    clickHouseServerProcess
+}
+
+//nolint:gochecknoglobals // Shared server cuts startup churn; per-test databases still isolate state.
+var (
+	sharedClickHouseServerOnce sync.Once
+	sharedClickHouseServer     *sharedClickHouseTestServer
+	errSharedClickHouseServer  error
+)
+
+func TestMain(m *testing.M) {
+	code := m.Run()
+
+	if sharedClickHouseServer != nil {
+		sharedClickHouseServer.proc.stop()
+		_ = os.RemoveAll(sharedClickHouseServer.baseDir)
+	}
+
+	os.Exit(code)
+}
+
 func newClickHouseTestHarness(t *testing.T) *clickHouseTestHarness {
 	t.Helper()
 
@@ -86,8 +120,31 @@ func newClickHouseTestHarness(t *testing.T) *clickHouseTestHarness {
 		return &clickHouseTestHarness{t: t, tcpPort: 0, httpPort: 0, baseDir: "", binPath: ""}
 	}
 
-	binPath := findClickHouseBinary(t)
+	shared := getSharedClickHouseTestServer(t)
 
+	return &clickHouseTestHarness{
+		t:       t,
+		tcpPort: shared.tcpPort,
+		binPath: shared.binPath,
+		baseDir: shared.baseDir,
+		doneCh:  shared.proc.doneCh,
+		exitErr: shared.proc.exitErr,
+		stdout:  shared.proc.stdout,
+		stderr:  shared.proc.stderr,
+	}
+}
+
+func newIsolatedClickHouseTestHarness(t *testing.T) *clickHouseTestHarness {
+	t.Helper()
+
+	envDSN := os.Getenv("WRSTAT_CLICKHOUSE_DSN")
+	if envDSN != "" {
+		refuseNonLocalhostDSN(t, envDSN)
+
+		return &clickHouseTestHarness{t: t, tcpPort: 0, httpPort: 0, baseDir: "", binPath: ""}
+	}
+
+	binPath := findClickHouseBinary(t)
 	baseDir := t.TempDir()
 	tcpPort := pickFreePort(t)
 
@@ -96,7 +153,8 @@ func newClickHouseTestHarness(t *testing.T) *clickHouseTestHarness {
 		httpPort = pickFreePort(t)
 	}
 
-	doneCh, exitErr, stdoutPath, stderrPath := startClickHouseServer(t, binPath, baseDir, tcpPort, httpPort)
+	proc := startClickHouseServerProcess(t, binPath, baseDir, tcpPort, httpPort)
+	t.Cleanup(proc.stop)
 
 	th := &clickHouseTestHarness{
 		t:        t,
@@ -104,15 +162,73 @@ func newClickHouseTestHarness(t *testing.T) *clickHouseTestHarness {
 		httpPort: httpPort,
 		binPath:  binPath,
 		baseDir:  baseDir,
-		doneCh:   doneCh,
-		exitErr:  exitErr,
-		stdout:   stdoutPath,
-		stderr:   stderrPath,
+		doneCh:   proc.doneCh,
+		exitErr:  proc.exitErr,
+		stdout:   proc.stdout,
+		stderr:   proc.stderr,
 	}
-
 	th.waitUntilReady()
 
 	return th
+}
+
+func getSharedClickHouseTestServer(t *testing.T) *sharedClickHouseTestServer {
+	t.Helper()
+
+	sharedClickHouseServerOnce.Do(func() {
+		sharedClickHouseServer = startSharedClickHouseTestServer(t)
+	})
+
+	if errSharedClickHouseServer != nil {
+		t.Fatalf("failed to start shared clickhouse test server: %v", errSharedClickHouseServer)
+	}
+
+	if sharedClickHouseServer == nil {
+		t.Skip("shared clickhouse test server unavailable")
+	}
+
+	return sharedClickHouseServer
+}
+
+func startSharedClickHouseTestServer(t *testing.T) *sharedClickHouseTestServer {
+	t.Helper()
+
+	binPath := findClickHouseBinary(t)
+
+	baseDir, err := os.MkdirTemp("", "wrstat-ui-clickhouse-test-*")
+	if err != nil {
+		errSharedClickHouseServer = err
+
+		return nil
+	}
+
+	tcpPort := pickFreePort(t)
+
+	httpPort := pickFreePort(t)
+	for httpPort == tcpPort {
+		httpPort = pickFreePort(t)
+	}
+
+	proc := startClickHouseServerProcess(t, binPath, baseDir, tcpPort, httpPort)
+
+	th := &clickHouseTestHarness{
+		t:       t,
+		tcpPort: tcpPort,
+		binPath: binPath,
+		baseDir: baseDir,
+		doneCh:  proc.doneCh,
+		exitErr: proc.exitErr,
+		stdout:  proc.stdout,
+		stderr:  proc.stderr,
+	}
+	th.waitUntilReady()
+
+	return &sharedClickHouseTestServer{
+		tcpPort: tcpPort,
+		binPath: binPath,
+		baseDir: baseDir,
+		proc:    proc,
+	}
 }
 
 func (h *clickHouseTestHarness) newConfig() Config {
@@ -351,13 +467,13 @@ func pickFreePort(t *testing.T) int {
 	return port
 }
 
-func startClickHouseServer(
+func startClickHouseServerProcess(
 	t *testing.T,
 	binPath string,
 	baseDir string,
 	tcpPort int,
 	httpPort int,
-) (<-chan struct{}, *error, string, string) {
+) clickHouseServerProcess {
 	t.Helper()
 
 	dataPath := filepath.Join(baseDir, "data")
@@ -426,7 +542,7 @@ func startClickHouseServer(
 		_ = stderrFile.Close()
 	}()
 
-	t.Cleanup(func() {
+	stop := func() {
 		defer cancel()
 
 		if cmd.Process == nil {
@@ -454,9 +570,15 @@ func startClickHouseServer(
 			<-doneCh
 			<-done
 		}
-	})
+	}
 
-	return doneCh, exitErr, stdoutPath, stderrPath
+	return clickHouseServerProcess{
+		doneCh:  doneCh,
+		exitErr: exitErr,
+		stdout:  stdoutPath,
+		stderr:  stderrPath,
+		stop:    stop,
+	}
 }
 
 func writeSelfSignedTLSCertPair(t *testing.T, dir string) (string, string) {
