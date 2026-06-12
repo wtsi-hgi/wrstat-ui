@@ -36,6 +36,7 @@ import (
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
+	"github.com/ClickHouse/clickhouse-go/v2/lib/proto"
 	. "github.com/smartystreets/goconvey/convey"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 	"github.com/wtsi-hgi/wrstat-ui/internal/chspool"
@@ -54,6 +55,8 @@ const (
 	summariseSpoolLoaderSchemaMarker    = "test"
 	summariseSpoolLoaderUpdatedAtColumn = "updated_at"
 )
+
+var errSummariseSpoolLoaderTestSystemPartsTimedOut = errors.New("system.parts timed out")
 
 type summariseSpoolCountRow struct {
 	value uint64
@@ -575,6 +578,64 @@ func TestClickHouseSummariseSpoolLoader(t *testing.T) {
 			So(total.Inputs["retry_cleanup_result"], ShouldEqual, "success")
 			So(summariseSpoolReportUint64Input(total.Inputs, "publish_latency_ms"),
 				ShouldBeGreaterThanOrEqualTo, uint64(0))
+		})
+
+	Convey("E1.5 summarise spool load reports succeed when optional table stats need extra grants",
+		t,
+		func() {
+			spoolDir := filepath.Join(t.TempDir(), "spool")
+			updatedAt := time.Date(2026, 6, 12, 12, 45, 0, 0, time.UTC)
+			manifest := writeSummariseSpoolLoaderSchema3Spool(spoolDir, updatedAt)
+			conn := newSummariseSpoolLoaderSpyConn(manifest)
+			conn.tableStatsErr = &proto.Exception{
+				Code: 497,
+				Message: "wrstat: Not enough privileges. To execute this query, " +
+					"it's necessary to have the grant SELECT(`table`, rows, " +
+					"data_compressed_bytes, data_uncompressed_bytes, database, active) ON system.parts",
+			}
+
+			loader, err := newSummariseSpoolLoader(Config{Database: testDatabaseName}, conn, spoolDir, manifest, nil)
+			So(err, ShouldBeNil)
+
+			report, err := loader.loadReport(context.Background())
+
+			So(err, ShouldBeNil)
+			So(conn.publishedSID, ShouldEqual, manifest.SnapshotID)
+			So(report.TableStats, ShouldHaveLength, 0)
+			So(report.SelectedTables, ShouldHaveLength, 0)
+
+			total := summariseSpoolReportOperation(report, "spool_load_total")
+			So(total, ShouldNotBeNil)
+
+			reportTable := chspool.TableDirFacts
+			So(summariseSpoolReportUint64MapInput(total.Inputs, "loaded_table_rows")[reportTable],
+				ShouldEqual, manifest.Tables[reportTable].Rows)
+			So(summariseSpoolReportUint64MapInput(total.Inputs, "part_counts"), ShouldHaveLength, 0)
+			So(total.Inputs["table_stats_status"], ShouldEqual, "unavailable")
+			So(total.Inputs["table_stats_error"], ShouldContainSubstring, "insufficient_privileges")
+			So(total.Inputs["retry_cleanup_result"], ShouldEqual, "success")
+			So(summariseSpoolReportUint64Input(total.Inputs, "publish_latency_ms"),
+				ShouldBeGreaterThanOrEqualTo, uint64(0))
+		})
+
+	Convey("E1.5 summarise spool load reports still fail on non-optional table stats errors",
+		t,
+		func() {
+			spoolDir := filepath.Join(t.TempDir(), "spool")
+			manifest := writeSummariseSpoolLoaderSchema3Spool(
+				spoolDir,
+				time.Date(2026, 6, 12, 13, 0, 0, 0, time.UTC),
+			)
+			conn := newSummariseSpoolLoaderSpyConn(manifest)
+			conn.tableStatsErr = errSummariseSpoolLoaderTestSystemPartsTimedOut
+
+			loader, err := newSummariseSpoolLoader(Config{Database: testDatabaseName}, conn, spoolDir, manifest, nil)
+			So(err, ShouldBeNil)
+
+			_, err = loader.loadReport(context.Background())
+
+			So(err, ShouldNotBeNil)
+			So(err.Error(), ShouldContainSubstring, "system.parts timed out")
 		})
 
 	Convey("D3.2 summarise spool loader blocks readiness when dir-filter rows mismatch", t, func() {
@@ -1346,6 +1407,7 @@ type summariseSpoolLoaderSpyConn struct {
 	batches        map[string][]*summariseSpoolLoaderSpyBatch
 	events         []string
 	countOverrides map[string]uint64
+	tableStatsErr  error
 	activeEvents   int
 	publishedSID   string
 }
@@ -1362,6 +1424,10 @@ func (c *summariseSpoolLoaderSpyConn) Query(
 		return emptyMountsActiveRowsForTest(), nil
 	default:
 		if strings.Contains(query, "FROM system.parts") {
+			if c.tableStatsErr != nil {
+				return nil, c.tableStatsErr
+			}
+
 			return c.tableStatsRows(args[1:]...), nil
 		}
 

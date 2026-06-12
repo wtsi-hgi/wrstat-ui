@@ -37,6 +37,7 @@ import (
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
+	"github.com/ClickHouse/clickhouse-go/v2/lib/proto"
 	"github.com/google/uuid"
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
 	"github.com/wtsi-hgi/wrstat-ui/db"
@@ -45,12 +46,16 @@ import (
 )
 
 const (
-	summariseSpoolLoadPhasePrefix = "spool_load_"
-	spoolHistoryDeleteChunk       = 512
-	summariseSpoolBytesPerKiB     = 1024
-	spoolLoadReportOperation      = "spool_load_total"
-	spoolLoadReportSuccess        = "success"
-	spoolLoadReportNotAttempted   = "not_attempted"
+	summariseSpoolLoadPhasePrefix       = "spool_load_"
+	spoolHistoryDeleteChunk             = 512
+	summariseSpoolBytesPerKiB           = 1024
+	spoolLoadReportOperation            = "spool_load_total"
+	spoolLoadReportSuccess              = "success"
+	spoolLoadReportNotAttempted         = "not_attempted"
+	spoolLoadTableStatsAvailable        = "available"
+	spoolLoadTableStatsUnavailable      = "unavailable"
+	spoolLoadTableStatsNotRequested     = "not_requested"
+	clickHouseInsufficientPrivilegeCode = 497
 )
 
 var (
@@ -1559,13 +1564,15 @@ func summariseSpoolCPUUsageDelta(before, after summariseSpoolCPUUsage) summarise
 }
 
 type summariseSpoolLoadReportBuilder struct {
-	report         perfreport.Report
-	manifest       *chspool.Manifest
-	recorder       func(string, time.Duration)
-	phaseDurations map[string]time.Duration
-	loadedRows     map[string]uint64
-	started        time.Time
-	usageBefore    summariseSpoolCPUUsage
+	report           perfreport.Report
+	manifest         *chspool.Manifest
+	recorder         func(string, time.Duration)
+	phaseDurations   map[string]time.Duration
+	loadedRows       map[string]uint64
+	tableStatsStatus string
+	tableStatsError  string
+	started          time.Time
+	usageBefore      summariseSpoolCPUUsage
 }
 
 func (b *summariseSpoolLoadReportBuilder) record(phase string, duration time.Duration) {
@@ -1584,14 +1591,28 @@ func (b *summariseSpoolLoadReportBuilder) collect(
 	parent context.Context,
 	loader *summariseSpoolLoader,
 ) error {
+	b.loadedRows = summariseSpoolLoadLoadedRows(loader, b.manifest)
+
 	stats, err := loader.loadReportTableStats(parent)
 	if err != nil {
+		if isSummariseSpoolOptionalTableStatsError(err) {
+			b.report.TableStats = map[string]perfreport.TableStats{}
+			b.tableStatsStatus = spoolLoadTableStatsUnavailable
+			b.tableStatsError = "insufficient_privileges: " + err.Error()
+
+			return nil
+		}
+
 		return err
 	}
 
-	b.loadedRows = summariseSpoolLoadLoadedRows(loader, b.manifest)
 	b.report.TableStats = stats
 	b.report.SelectedTables = summariseSpoolLoadReportTableNames(stats)
+
+	b.tableStatsStatus = spoolLoadTableStatsAvailable
+	if len(stats) == 0 {
+		b.tableStatsStatus = spoolLoadTableStatsNotRequested
+	}
 
 	return nil
 }
@@ -1618,6 +1639,18 @@ func summariseSpoolLoadLoadedRows(
 	}
 
 	return rows
+}
+
+func isSummariseSpoolOptionalTableStatsError(err error) bool {
+	var ex *proto.Exception
+	if errors.As(err, &ex) {
+		return ex.Code == clickHouseInsufficientPrivilegeCode
+	}
+
+	msg := err.Error()
+
+	return strings.Contains(msg, "code: 497") &&
+		strings.Contains(msg, "Not enough privileges")
 }
 
 func summariseSpoolLoadReportTableNames(stats map[string]perfreport.TableStats) []string {
@@ -1675,7 +1708,7 @@ func summariseSpoolAddE2ComputedBudgetInputs(op *perfreport.Operation) {
 }
 
 func (b *summariseSpoolLoadReportBuilder) inputs(usage summariseSpoolCPUUsage) map[string]any {
-	return map[string]any{
+	inputs := map[string]any{
 		"loaded_table_rows":    b.loadedRows,
 		"user_cpu_ms":          usage.userMS,
 		"system_cpu_ms":        usage.systemMS,
@@ -1686,6 +1719,16 @@ func (b *summariseSpoolLoadReportBuilder) inputs(usage summariseSpoolCPUUsage) m
 		"retry_cleanup_result": b.retryCleanupResult(),
 		"publish_latency_ms":   summariseSpoolDurationMSUint64(b.phaseDurations[importPhaseMountSwitch]),
 	}
+
+	if b.tableStatsStatus != "" {
+		inputs["table_stats_status"] = b.tableStatsStatus
+	}
+
+	if b.tableStatsError != "" {
+		inputs["table_stats_error"] = b.tableStatsError
+	}
+
+	return inputs
 }
 
 func summariseSpoolManifestBytes(manifest *chspool.Manifest) uint64 {
