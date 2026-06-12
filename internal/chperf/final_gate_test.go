@@ -47,6 +47,7 @@ const (
 	finalGateE1BoltPerfCommand = "bolt-perf"
 	finalGateE1OldWrstatUI     = "wrstat-ui-old"
 	finalGateE1ProjectDir      = "/m/project/"
+	finalGateE1ProjectTreeKey  = "project_tree_unused_1y"
 	finalGateE1QueryCommand    = "query"
 	finalGateE1WrstatUI        = "wrstat-ui"
 	finalGateOtherType         = finalGateSelectedTreeTypes
@@ -86,12 +87,13 @@ func finalGateE1AssemblyFixture(
 ) finalGateE1Assembly {
 	t.Helper()
 
-	fixturePath := filepath.Join(root, "fixture-input.txt")
-	finalGateWriteFile(t, fixturePath, "fixture input\n")
-	fixtureDigest := finalGateTestFileDigest(t, fixturePath)
+	fixturePath := filepath.Join(root, "fixture-output.json")
+	fixtureSummaries := finalGateE1FixtureSummaries()
+	finalGateWriteCanonicalFixture(t, fixturePath, fixtureSummaries)
+	fixtureDigest := dcssDigest(fixtureSummaries)
 
 	manifestPath := filepath.Join(root, "fixture-manifest.json")
-	finalGateWriteExpectedDigestManifest(t, manifestPath, "project_tree_unused_1y", fixtureDigest)
+	finalGateWriteExpectedDigestManifest(t, manifestPath, finalGateE1ProjectTreeKey, fixtureDigest)
 
 	clickHousePath := filepath.Join(root, "clickhouse-report.json")
 	finalGateWritePerfReport(t, clickHousePath, finalGateE1ArtifactClickHouseReport())
@@ -119,7 +121,7 @@ func finalGateE1AssemblyFixture(
 		options: FinalGateReportOptions{
 			FixtureDigests: []FinalGateFixtureDigestSpec{
 				{
-					Key:          "project_tree_unused_1y",
+					Key:          finalGateE1ProjectTreeKey,
 					ManifestPath: manifestPath,
 					InputPath:    fixturePath,
 				},
@@ -349,6 +351,50 @@ func TestE1FinalGateReportEvidence(t *testing.T) {
 		So(finalGateReportTestCheck(result, "E1 fixture digest validation").Detail,
 			ShouldContainSubstring, "stale expected digest")
 	})
+
+	Convey("E1.11 fixture digest validation hashes canonical result output, not input bytes", t, func() {
+		root := t.TempDir()
+		key := finalGateE1ProjectTreeKey
+		fixturePath := filepath.Join(root, "fixture-output.json")
+		summaries := finalGateE1FixtureSummaries()
+		finalGateWriteCanonicalFixture(t, fixturePath, summaries)
+		rawDigest := finalGateTestFileDigest(t, fixturePath)
+		canonicalDigest := dcssDigest(summaries)
+		So(rawDigest, ShouldNotEqual, canonicalDigest)
+
+		manifestPath := filepath.Join(root, "fixture-manifest.json")
+		finalGateWriteExpectedDigestManifest(t, manifestPath, key, rawDigest)
+
+		digest, err := finalGateBuildFixtureDigest(FinalGateFixtureDigestSpec{
+			Key:          key,
+			ManifestPath: manifestPath,
+			InputPath:    fixturePath,
+		})
+		So(err, ShouldBeNil)
+		So(digest.ExpectedDigest, ShouldEqual, rawDigest)
+		So(digest.RecomputedDigest, ShouldEqual, canonicalDigest)
+
+		report := finalGateE1Report()
+		report.FixtureDigests = []FinalGateFixtureDigestEvidence{digest}
+		result := ValidateFinalGateReport(report)
+		So(result.Passed, ShouldBeFalse)
+		So(result.TimingEvaluated, ShouldBeFalse)
+		So(finalGateReportTestCheck(result, "E1 fixture digest validation").Detail,
+			ShouldContainSubstring, "stale expected digest")
+
+		finalGateWriteExpectedDigestManifest(t, manifestPath, key, canonicalDigest)
+		digest, err = finalGateBuildFixtureDigest(FinalGateFixtureDigestSpec{
+			Key:          key,
+			ManifestPath: manifestPath,
+			InputPath:    fixturePath,
+		})
+		So(err, ShouldBeNil)
+		So(digest.ExpectedDigest, ShouldEqual, canonicalDigest)
+		So(digest.RecomputedDigest, ShouldEqual, canonicalDigest)
+
+		report.FixtureDigests = []FinalGateFixtureDigestEvidence{digest}
+		So(ValidateFinalGateReport(report).Passed, ShouldBeTrue)
+	})
 }
 
 func finalGateE1Report() FinalGateReport {
@@ -356,7 +402,7 @@ func finalGateE1Report() FinalGateReport {
 		SchemaVersion: finalGateReportSchemaVersion,
 		FixtureDigests: []FinalGateFixtureDigestEvidence{
 			{
-				Key:              "project_tree_unused_1y",
+				Key:              finalGateE1ProjectTreeKey,
 				ManifestPath:     "/fixtures/project/manifest.json",
 				ExpectedDigest:   finalGateE1Digest("fixture"),
 				RecomputedDigest: finalGateE1Digest("fixture"),
@@ -540,6 +586,37 @@ func finalGateE1InfeasibleComparison() *FinalGateComparisonEvidence {
 		LogPath:               "/tmp/infeasible.log",
 		Reason:                "requires unavailable storage snapshot",
 	}
+}
+
+func finalGateE1FixtureSummaries() db.DCSs {
+	return db.DCSs{
+		{
+			Dir:   "/m/project/alpha/",
+			Count: 3,
+			Size:  30,
+			UIDs:  []uint32{11},
+			GIDs:  []uint32{7},
+			FT:    db.DGUTAFileTypeBam,
+			Age:   db.DGUTAgeA1Y,
+		},
+		{
+			Dir:   "/m/project/beta/",
+			Count: 2,
+			Size:  20,
+			UIDs:  []uint32{12},
+			GIDs:  []uint32{8},
+			FT:    db.DGUTAFileTypeCram,
+			Age:   db.DGUTAgeA1Y,
+		},
+	}
+}
+
+func finalGateWriteCanonicalFixture(t *testing.T, path string, summaries db.DCSs) {
+	t.Helper()
+
+	data, err := json.MarshalIndent(map[string]db.DCSs{"results": summaries}, "", "  ")
+	So(err, ShouldBeNil)
+	So(os.WriteFile(path, data, 0o600), ShouldBeNil)
 }
 
 func TestE2ColdPerformanceGates(t *testing.T) {

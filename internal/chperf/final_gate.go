@@ -38,6 +38,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/wtsi-hgi/wrstat-ui/db"
 	"github.com/wtsi-hgi/wrstat-ui/internal/perfreport"
 )
 
@@ -175,7 +176,7 @@ func finalGateBuildFixtureDigest(
 		expected = finalGateExpectedDigestFromManifest(spec.ManifestPath, spec.Key)
 	}
 
-	recomputed, err := finalGatePathSHA256(spec.InputPath)
+	recomputed, err := finalGateFixtureResultDigest(spec.InputPath)
 	if err != nil {
 		return FinalGateFixtureDigestEvidence{}, err
 	}
@@ -871,7 +872,7 @@ func validateFinalGateFixtureDigests(report FinalGateReport) FinalGateCheck {
 		}
 	}
 
-	return check.pass("fixture manifest digests match recomputed fixture input digests")
+	return check.pass("fixture manifest digests match recomputed canonical result digests")
 }
 
 func validateFinalGateCorrectnessEvidence(report FinalGateReport) FinalGateCheck {
@@ -3475,6 +3476,104 @@ func firstOperation(
 	}
 
 	return perfreport.Operation{}, false
+}
+
+func finalGateFixtureResultDigest(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+
+	return finalGateFixtureResultDigestBytes(data), nil
+}
+
+func finalGateFixtureResultDigestBytes(data []byte) string {
+	if digest, ok := finalGateFixtureResultSetDigest(data); ok {
+		return digest
+	}
+
+	if digest, ok := finalGateFixtureDirInfoDigest(data); ok {
+		return digest
+	}
+
+	return ""
+}
+
+func finalGateFixtureResultSetDigest(data []byte) (string, bool) {
+	var envelope struct {
+		Results json.RawMessage `json:"results"`
+	}
+	if err := json.Unmarshal(data, &envelope); err == nil && len(envelope.Results) > 0 {
+		return finalGateFixtureSummariesDigest(envelope.Results)
+	}
+
+	return finalGateFixtureSummariesDigest(data)
+}
+
+func finalGateFixtureSummariesDigest(data []byte) (string, bool) {
+	if strings.TrimSpace(string(data)) == "null" {
+		return "", false
+	}
+
+	var summaries db.DCSs
+	if err := json.Unmarshal(data, &summaries); err != nil {
+		return "", false
+	}
+
+	if !finalGateFixtureSummariesValid(summaries) {
+		return "", false
+	}
+
+	return dcssDigest(summaries), true
+}
+
+func finalGateFixtureDirInfoDigest(data []byte) (string, bool) {
+	var envelope struct {
+		DirInfo *db.DirInfo `json:"dir_info"`
+	}
+	if err := json.Unmarshal(data, &envelope); err == nil && finalGateFixtureDirInfoValid(envelope.DirInfo) {
+		return dirInfoDigest(envelope.DirInfo), true
+	}
+
+	var info db.DirInfo
+	if err := json.Unmarshal(data, &info); err != nil || !finalGateFixtureDirInfoValid(&info) {
+		return "", false
+	}
+
+	return dirInfoDigest(&info), true
+}
+
+func finalGateFixtureDirInfoValid(info *db.DirInfo) bool {
+	if info == nil {
+		return false
+	}
+
+	return finalGateFixtureSummaryValid(info.Current) ||
+		(len(info.Children) > 0 && finalGateFixtureSummariesValid(info.Children))
+}
+
+func finalGateFixtureSummaryOwnersValid(summary *db.DirSummary) bool {
+	return len(summary.UIDs) > 0 || len(summary.GIDs) > 0
+}
+
+func finalGateFixtureSummariesValid(summaries db.DCSs) bool {
+	if len(summaries) == 0 {
+		return true
+	}
+
+	return !slices.ContainsFunc(summaries, func(summary *db.DirSummary) bool {
+		return !finalGateFixtureSummaryValid(summary)
+	})
+}
+
+func finalGateFixtureSummaryValid(summary *db.DirSummary) bool {
+	return summary != nil &&
+		(summary.Dir != "" ||
+			summary.Count != 0 ||
+			summary.Size != 0 ||
+			finalGateFixtureSummaryOwnersValid(summary) ||
+			summary.FT != 0 ||
+			summary.Age != 0)
 }
 
 func finalGateOperationCorrectnessEvidencePasses(op perfreport.Operation) bool {
