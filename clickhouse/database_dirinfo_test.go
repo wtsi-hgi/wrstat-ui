@@ -1396,11 +1396,7 @@ func newC2ActiveVirtualEnv(t *testing.T, seeds []c2MountSeed) (c2ActiveVirtualEn
 
 	offset := time.Duration(time.Now().UnixNano()%int64(time.Second)) * time.Nanosecond
 
-	rows := make([]mountsActiveRow, 0, len(seeds))
-	for _, seed := range seeds {
-		seed.updatedAt = seed.updatedAt.Add(offset)
-		rows = append(rows, seedC2ActiveVirtualMount(ctx, conn, seed))
-	}
+	rows := seedC2ActiveVirtualMounts(ctx, conn, seeds, offset)
 
 	activeSetID := fingerprintForMountsActive(rows)
 	So(writeC2ActiveVirtualOverlay(ctx, conn, rows, activeSetID), ShouldBeNil)
@@ -1423,7 +1419,43 @@ func newC2ActiveVirtualEnv(t *testing.T, seeds []c2MountSeed) (c2ActiveVirtualEn
 	}, cleanup
 }
 
-func seedC2ActiveVirtualMount(ctx context.Context, conn ch.Conn, seed c2MountSeed) mountsActiveRow {
+func seedC2ActiveVirtualMounts(
+	ctx context.Context,
+	conn ch.Conn,
+	seeds []c2MountSeed,
+	offset time.Duration,
+) []mountsActiveRow {
+	mountBatch, err := conn.PrepareBatch(ctx, testInsertMountBatchStmt)
+	So(err, ShouldBeNil)
+	factsBatch, err := conn.PrepareBatch(ctx, testInsertDGUTABatchStmt)
+	So(err, ShouldBeNil)
+	filterBatch, err := conn.PrepareBatch(ctx, insertDirFilterAllForTest)
+	So(err, ShouldBeNil)
+	childrenBatch, err := conn.PrepareBatch(ctx, insertChildrenQuery)
+	So(err, ShouldBeNil)
+
+	rows := make([]mountsActiveRow, 0, len(seeds))
+
+	for _, seed := range seeds {
+		seed.updatedAt = seed.updatedAt.Add(offset)
+		rows = append(rows, appendC2ActiveVirtualMountRows(mountBatch, factsBatch, filterBatch, childrenBatch, seed))
+	}
+
+	So(mountBatch.Send(), ShouldBeNil)
+	So(factsBatch.Send(), ShouldBeNil)
+	So(filterBatch.Send(), ShouldBeNil)
+	So(childrenBatch.Send(), ShouldBeNil)
+
+	return rows
+}
+
+func appendC2ActiveVirtualMountRows(
+	mountBatch driver.Batch,
+	factsBatch driver.Batch,
+	filterBatch driver.Batch,
+	childrenBatch driver.Batch,
+	seed c2MountSeed,
+) mountsActiveRow {
 	sid := snapshotID(seed.mountPath, seed.updatedAt)
 
 	size := seed.size
@@ -1431,44 +1463,20 @@ func seedC2ActiveVirtualMount(ctx context.Context, conn ch.Conn, seed c2MountSee
 		size = seed.count * 10
 	}
 
-	So(conn.Exec(ctx, testInsertMountStmt, seed.mountPath, time.Now(), sid, seed.updatedAt), ShouldBeNil)
-	So(conn.Exec(ctx,
-		testInsertDGUTAStmt,
+	appendTestMountEventRow(mountBatch, activeMount{
+		mountPath:  seed.mountPath,
+		snapshotID: sid.String(),
+		updatedAt:  seed.updatedAt,
+	})
+	appendC2ActiveVirtualFactRow(factsBatch, seed, sid.String(), size)
+	appendC2ActiveVirtualFilterRow(
+		filterBatch,
 		seed.mountPath,
 		sid.String(),
-		seed.mountPath,
-		uint32(7),
-		uint32(11),
-		uint16(db.DGUTAFileTypeBam),
-		uint8(db.DGUTAgeAll),
+		db.DGUTAgeAll,
 		seed.count,
 		size,
-		int64(10),
-		int64(20),
-		[]uint64{seed.count, 0, 0, 0, 0, 0, 0, 0, 0},
-		[]uint64{0, seed.count, 0, 0, 0, 0, 0, 0, 0},
-	), ShouldBeNil)
-	So(conn.Exec(ctx,
-		insertDirFilterAllForTest,
-		seed.mountPath,
-		sid.String(),
-		uint8(db.DGUTAgeAll),
-		uint32(7),
-		uint32(11),
-		uint16(db.DGUTAFileTypeBam),
-		seed.mountPath,
-		parentFactsParentDir(seed.mountPath),
-		seed.count,
-		size,
-		int64(10),
-		int64(20),
-		[]uint64{seed.count, 0, 0, 0, 0, 0, 0, 0, 0},
-		[]uint64{0, seed.count, 0, 0, 0, 0, 0, 0, 0},
-		uint64(0),
-		uint64(1),
-		uint8(0),
-		uint8(1),
-	), ShouldBeNil)
+	)
 
 	for _, ageRow := range []struct {
 		age   db.DirGUTAge
@@ -1478,32 +1486,17 @@ func seedC2ActiveVirtualMount(ctx context.Context, conn ch.Conn, seed c2MountSee
 		{age: db.DGUTAgeA1Y, count: seed.count / 10, size: size / 10},
 		{age: db.DGUTAgeM1Y, count: seed.count / 20, size: size / 20},
 	} {
-		So(conn.Exec(ctx,
-			insertDirFilterAllForTest,
+		appendC2ActiveVirtualFilterRow(
+			filterBatch,
 			seed.mountPath,
 			sid.String(),
-			uint8(ageRow.age),
-			uint32(7),
-			uint32(11),
-			uint16(db.DGUTAFileTypeBam),
-			seed.mountPath,
-			parentFactsParentDir(seed.mountPath),
+			ageRow.age,
 			ageRow.count,
 			ageRow.size,
-			int64(10),
-			int64(20),
-			[]uint64{ageRow.count, 0, 0, 0, 0, 0, 0, 0, 0},
-			[]uint64{0, ageRow.count, 0, 0, 0, 0, 0, 0, 0},
-			uint64(0),
-			uint64(1),
-			uint8(0),
-			uint8(1),
-		), ShouldBeNil)
+		)
 	}
 
-	So(conn.Exec(
-		ctx,
-		testInsertChildrenStmt,
+	So(childrenBatch.Append(
 		seed.mountPath,
 		sid.String(),
 		seed.mountPath,
@@ -1511,6 +1504,57 @@ func seedC2ActiveVirtualMount(ctx context.Context, conn ch.Conn, seed c2MountSee
 	), ShouldBeNil)
 
 	return mountsActiveRow{mountPath: seed.mountPath, snapshotID: sid.String(), updatedAt: seed.updatedAt}
+}
+
+func appendC2ActiveVirtualFactRow(batch driver.Batch, seed c2MountSeed, sid string, size uint64) {
+	So(batch.Append(
+		seed.mountPath,
+		sid,
+		seed.mountPath,
+		time.Now(),
+		[]uint32{7},
+		[]uint32{11},
+		[]uint16{uint16(db.DGUTAFileTypeBam)},
+		[]uint8{uint8(db.DGUTAgeAll)},
+		[]uint64{seed.count},
+		[]uint64{size},
+		[]int64{10},
+		[]int64{20},
+		[][]uint64{{seed.count, 0, 0, 0, 0, 0, 0, 0, 0}},
+		[][]uint64{{0, seed.count, 0, 0, 0, 0, 0, 0, 0}},
+		time.Now(),
+	), ShouldBeNil)
+}
+
+func appendC2ActiveVirtualFilterRow(
+	batch driver.Batch,
+	mountPath string,
+	sid string,
+	age db.DirGUTAge,
+	count uint64,
+	size uint64,
+) {
+	So(batch.Append(
+		mountPath,
+		sid,
+		uint8(age),
+		uint32(7),
+		uint32(11),
+		uint16(db.DGUTAFileTypeBam),
+		mountPath,
+		parentFactsParentDir(mountPath),
+		count,
+		size,
+		int64(10),
+		int64(20),
+		[]uint64{count, 0, 0, 0, 0, 0, 0, 0, 0},
+		[]uint64{0, count, 0, 0, 0, 0, 0, 0, 0},
+		uint64(0),
+		uint64(1),
+		uint8(0),
+		uint8(1),
+		time.Now(),
+	), ShouldBeNil)
 }
 
 func writeC2ActiveVirtualOverlay(
@@ -3903,7 +3947,7 @@ func TestClickHouseDatabaseDirFilterAgeAllRoutingA2(t *testing.T) {
 		So(countingConn.mountDirVectorQueryCount(), ShouldEqual, 0)
 	})
 
-	Convey("A2.5 t283-shaped subset AgeAll summaries match facts-vector totals", t, func() {
+	Convey("A2.5-A2.6 t283-shaped AgeAll route matches facts vectors and prunes granules", t, func() {
 		env, cleanup := newDirFilterAgeAllTestEnv(t, testT283ImagingMountPath)
 		defer cleanup()
 		defer useStrictlyFasterAgeAllWhereRouteForTest()()
@@ -3931,21 +3975,9 @@ func TestClickHouseDatabaseDirFilterAgeAllRoutingA2(t *testing.T) {
 		So(bytes, ShouldEqual, uint64(1197943849957))
 		So(countingConn.filterAgeAllQueryCountValue(), ShouldBeGreaterThan, 0)
 		So(countingConn.filteredMountSummaryQueryCountValue(), ShouldEqual, 0)
-	})
 
-	Convey("A2.6 t283-shaped AgeAll route prunes granules and records read metrics", t, func() {
-		env, cleanup := newDirFilterAgeAllTestEnv(t, testT283ImagingMountPath)
-		defer cleanup()
-		defer useStrictlyFasterAgeAllWhereRouteForTest()()
-
-		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-		defer cancel()
-
-		seedA2T283Subset(ctx, env.conn, env.mount)
-		insertDirFilterAgeAllRowsFromFactsForTest(ctx, env.conn, env.mount)
 		optimizeDirFilterAgeAllForTest(ctx, env.conn)
 
-		filter := a2T283Filter()
 		explain, err := explainA2AgeAllQuery(ctx, env.conn, env.mount, filter)
 		So(err, ShouldBeNil)
 
@@ -5208,108 +5240,18 @@ func schema3A3AlternatingChildCount(index int) uint64 {
 }
 
 func TestClickHouseDatabaseOptionalDirFilterAgeAll(t *testing.T) {
-	Convey("C2.1 mandatory AgeAll index serves whole-mount Where", t, func() {
-		env, cleanup := newDirFilterAgeAllTestEnv(t, "/mnt/c2-where-mandatory/")
-		defer cleanup()
-
-		assertAgeAllWhereUsesMandatoryIndex(env)
-	})
-
-	Convey("C2.2 mandatory AgeAll index serves high-fanout DirsHaveChildren", t, func() {
-		env, cleanup := newDirFilterAgeAllTestEnv(t, "/mnt/c2-children-mandatory/")
+	Convey("C2.1-C2.7 mandatory AgeAll index routes ready AgeAll filters and skips age-specific filters", t, func() {
+		env, cleanup := newDirFilterAgeAllTestEnv(t, "/mnt/c2-ageall/")
 		defer cleanup()
 
 		env.createAndSeedAgeAllIndex()
-
-		countingConn := &hasChildrenQueryCountingConn{Conn: env.providerConn}
-		dbch := newClickHouseDatabase(env.cfg, countingConn)
-		filter := &db.Filter{GIDs: []uint32{7}, Age: db.DGUTAgeAll}
-
-		hasChildren, err := dbch.DirsHaveChildren([]string{env.parentDir}, filter)
-		So(err, ShouldBeNil)
-		So(hasChildren, ShouldResemble, map[string]bool{env.parentDir: true})
-		So(countingConn.filterAgeAllQueryCount(), ShouldBeGreaterThan, 0)
-		So(countingConn.mountVectorQueryCount(), ShouldEqual, 0)
-	})
-
-	Convey("C2.3 ready mandatory AgeAll index serves whole-mount Where with facts-equivalent summaries", t, func() {
-		env, cleanup := newDirFilterAgeAllTestEnv(t, "/mnt/c2-where-ready/")
-		defer cleanup()
-		defer useStrictlyFasterAgeAllWhereRouteForTest()()
-
-		filter := &db.Filter{GIDs: []uint32{7}, Age: db.DGUTAgeAll}
-		expected, err := factsVectorDirInfosForTest(
-			env.cfg, env.providerConn, env.mount, []string{env.mount.mountPath}, filter,
-		)
-		So(err, ShouldBeNil)
-
-		env.createAndSeedAgeAllIndex()
-
-		countingConn := &whereQueryCountingConn{Conn: env.providerConn}
-		tree := db.NewTree(newClickHouseDatabase(env.cfg, countingConn))
-		actual, err := tree.Where(env.mount.mountPath, filter, split.SplitsToSplitFn(0))
-		So(err, ShouldBeNil)
-		So(dirSummariesByDir(actual), ShouldResemble, expected)
-		So(countingConn.filterAgeAllQueryCountValue(), ShouldBeGreaterThan, 0)
-	})
-
-	Convey("C2.4 ready mandatory AgeAll index serves high-fanout DirsHaveChildren", t, func() {
-		env, cleanup := newDirFilterAgeAllTestEnv(t, "/mnt/c2-children-ready/")
-		defer cleanup()
-
-		env.createAndSeedAgeAllIndex()
-
-		filter := &db.Filter{GIDs: []uint32{7}, Age: db.DGUTAgeAll}
-		countingConn := &hasChildrenQueryCountingConn{Conn: env.providerConn}
-		dbch := newClickHouseDatabase(env.cfg, countingConn)
-		actual, err := dbch.DirsHaveChildren([]string{env.parentDir}, filter)
-		So(err, ShouldBeNil)
-		So(actual, ShouldResemble, map[string]bool{env.parentDir: true})
-		So(countingConn.filterAgeAllQueryCount(), ShouldBeGreaterThan, 0)
-	})
-
-	Convey("C2.5 present mandatory AgeAll index with readiness serves Where", t, func() {
-		env, cleanup := newDirFilterAgeAllTestEnv(t, "/mnt/c2-where-present/")
-		defer cleanup()
-
-		assertAgeAllWhereUsesMandatoryIndex(env)
-	})
-
-	Convey("C2.6 present mandatory AgeAll index with readiness serves DirsHaveChildren", t, func() {
-		env, cleanup := newDirFilterAgeAllTestEnv(t, "/mnt/c2-children-present/")
-		defer cleanup()
-
-		env.createAndSeedAgeAllIndex()
-
-		countingConn := &hasChildrenQueryCountingConn{Conn: env.providerConn}
-		dbch := newClickHouseDatabase(env.cfg, countingConn)
-		filter := &db.Filter{GIDs: []uint32{7}, Age: db.DGUTAgeAll}
-
-		hasChildren, err := dbch.DirsHaveChildren([]string{env.parentDir}, filter)
-		So(err, ShouldBeNil)
-		So(hasChildren, ShouldResemble, map[string]bool{env.parentDir: true})
-		So(countingConn.filterAgeAllQueryCount(), ShouldBeGreaterThan, 0)
-	})
-
-	Convey("C2.7 age-specific filters never read the mandatory AgeAll index", t, func() {
-		env, cleanup := newDirFilterAgeAllTestEnv(t, "/mnt/c2-age-specific/")
-		defer cleanup()
-
-		env.insertAgeSpecificFacts()
-		env.createAndSeedAgeAllIndex()
-
-		filter := &db.Filter{GIDs: []uint32{7}, Age: db.DGUTAgeM1Y}
-		whereConn := &whereQueryCountingConn{Conn: env.providerConn}
-		tree := db.NewTree(newClickHouseDatabase(env.cfg, whereConn))
-		_, err := tree.Where(env.mount.mountPath, filter, split.SplitsToSplitFn(0))
-		So(err, ShouldBeNil)
-
-		childrenConn := &hasChildrenQueryCountingConn{Conn: env.providerConn}
-		dbch := newClickHouseDatabase(env.cfg, childrenConn)
-		_, err = dbch.DirsHaveChildren([]string{env.parentDir}, filter)
-		So(err, ShouldBeNil)
-		So(whereConn.filterAgeAllQueryCountValue(), ShouldEqual, 0)
-		So(childrenConn.filterAgeAllQueryCount(), ShouldEqual, 0)
+		assertReadyAgeAllWhereUsesMandatoryIndex(env)
+		assertReadyAgeAllChildrenUseMandatoryIndex(env)
+		assertReadyAgeAllWhereMatchesFacts(env)
+		assertReadyAgeAllChildrenUseMandatoryIndex(env)
+		assertReadyAgeAllWhereUsesMandatoryIndex(env)
+		assertReadyAgeAllChildrenUseMandatoryIndex(env)
+		assertAgeSpecificFiltersSkipAgeAllIndex(env)
 	})
 
 	Convey("C2.8 schema SQL includes the mandatory AgeAll index", t, func() {
@@ -8521,10 +8463,10 @@ func (e dirFilterAgeAllTestEnv) insertAgeSpecificFacts() {
 	), ShouldBeNil)
 }
 
-func assertAgeAllWhereUsesMandatoryIndex(env dirFilterAgeAllTestEnv) {
-	env.createAndSeedAgeAllIndex()
-
+func assertReadyAgeAllWhereUsesMandatoryIndex(env dirFilterAgeAllTestEnv) {
 	defer useStrictlyFasterAgeAllWhereRouteForTest()()
+
+	resetSharedTreeQueryCachesForTesting()
 
 	countingConn := &whereQueryCountingConn{Conn: env.providerConn}
 	tree := db.NewTree(newClickHouseDatabase(env.cfg, countingConn))
@@ -8535,6 +8477,58 @@ func assertAgeAllWhereUsesMandatoryIndex(env dirFilterAgeAllTestEnv) {
 	So(dirSummariesByDir(dcss)[env.mount.mountPath].Count, ShouldEqual, 12)
 	So(countingConn.filterAgeAllQueryCountValue(), ShouldBeGreaterThan, 0)
 	So(countingConn.filteredMountSummaryQueryCountValue(), ShouldEqual, 0)
+}
+
+func assertReadyAgeAllChildrenUseMandatoryIndex(env dirFilterAgeAllTestEnv) {
+	resetSharedTreeQueryCachesForTesting()
+
+	countingConn := &hasChildrenQueryCountingConn{Conn: env.providerConn}
+	dbch := newClickHouseDatabase(env.cfg, countingConn)
+	filter := &db.Filter{GIDs: []uint32{7}, Age: db.DGUTAgeAll}
+
+	hasChildren, err := dbch.DirsHaveChildren([]string{env.parentDir}, filter)
+	So(err, ShouldBeNil)
+	So(hasChildren, ShouldResemble, map[string]bool{env.parentDir: true})
+	So(countingConn.filterAgeAllQueryCount(), ShouldBeGreaterThan, 0)
+	So(countingConn.mountVectorQueryCount(), ShouldEqual, 0)
+}
+
+func assertReadyAgeAllWhereMatchesFacts(env dirFilterAgeAllTestEnv) {
+	defer useStrictlyFasterAgeAllWhereRouteForTest()()
+
+	resetSharedTreeQueryCachesForTesting()
+
+	filter := &db.Filter{GIDs: []uint32{7}, Age: db.DGUTAgeAll}
+	expected, err := factsVectorDirInfosForTest(
+		env.cfg, env.providerConn, env.mount, []string{env.mount.mountPath}, filter,
+	)
+	So(err, ShouldBeNil)
+
+	countingConn := &whereQueryCountingConn{Conn: env.providerConn}
+	tree := db.NewTree(newClickHouseDatabase(env.cfg, countingConn))
+	actual, err := tree.Where(env.mount.mountPath, filter, split.SplitsToSplitFn(0))
+	So(err, ShouldBeNil)
+	So(dirSummariesByDir(actual), ShouldResemble, expected)
+	So(countingConn.filterAgeAllQueryCountValue(), ShouldBeGreaterThan, 0)
+}
+
+func assertAgeSpecificFiltersSkipAgeAllIndex(env dirFilterAgeAllTestEnv) {
+	env.insertAgeSpecificFacts()
+
+	resetSharedTreeQueryCachesForTesting()
+
+	filter := &db.Filter{GIDs: []uint32{7}, Age: db.DGUTAgeM1Y}
+	whereConn := &whereQueryCountingConn{Conn: env.providerConn}
+	tree := db.NewTree(newClickHouseDatabase(env.cfg, whereConn))
+	_, err := tree.Where(env.mount.mountPath, filter, split.SplitsToSplitFn(0))
+	So(err, ShouldBeNil)
+
+	childrenConn := &hasChildrenQueryCountingConn{Conn: env.providerConn}
+	dbch := newClickHouseDatabase(env.cfg, childrenConn)
+	_, err = dbch.DirsHaveChildren([]string{env.parentDir}, filter)
+	So(err, ShouldBeNil)
+	So(whereConn.filterAgeAllQueryCountValue(), ShouldEqual, 0)
+	So(childrenConn.filterAgeAllQueryCount(), ShouldEqual, 0)
 }
 
 type stringerString string
