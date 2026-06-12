@@ -758,21 +758,20 @@ func guardPublishedActiveSnapshot(ctx context.Context, conn ch.Conn, mountPath s
 	)
 }
 
-func guardPublishedActiveSet(ctx context.Context, conn ch.Conn, expectedActiveSetID string) error {
+func guardInactiveActiveSet(ctx context.Context, conn ch.Conn, activeSetID string) error {
 	rows, err := queryMountsActiveRows(ctx, conn)
 	if err != nil {
 		return err
 	}
 
-	activeSetID := fingerprintForMountsActive(rows)
-	if activeSetID == expectedActiveSetID {
+	currentActiveSetID := fingerprintForMountsActive(rows)
+	if currentActiveSetID != activeSetID {
 		return nil
 	}
 
 	return fmt.Errorf(
-		"%w: active_set_id=%s changed after publish; current_active_set_id=%s",
+		"%w: active_set_id=%s is still active",
 		errActiveSnapshotStillActive,
-		expectedActiveSetID,
 		activeSetID,
 	)
 }
@@ -812,7 +811,7 @@ func (w *dgutaWriter) dropPreviousActiveVirtualPartitions(
 	defer cleanupCancel()
 
 	return w.timeImportPhase(importPhaseOldSnapshotDrop, func() error {
-		if err := guardPublishedActiveSet(cleanupCtx, w.conn, nextActiveSetID); err != nil {
+		if err := guardInactiveActiveSet(cleanupCtx, w.conn, activeSetID); err != nil {
 			return err
 		}
 

@@ -5363,6 +5363,53 @@ func TestDGUTAWriterOldSnapshotDropUsesCleanupTimeout(t *testing.T) {
 				}}),
 			})
 		})
+
+	conveyClickHouseScenario(t,
+		"DGUTAWriter drops only stale active virtual sets when another publish advances the active set",
+		func(t *testing.T) {
+			t.Helper()
+
+			updatedAt := time.Date(2026, 6, 12, 13, 55, 53, 0, time.UTC)
+			nextSID := snapshotID(testMountPath, updatedAt)
+			otherUpdatedAt := updatedAt.Add(-2 * time.Hour)
+			otherSID := snapshotID("/mnt/other/", otherUpdatedAt)
+			concurrentUpdatedAt := updatedAt.Add(time.Minute)
+			concurrentSID := snapshotID("/mnt/concurrent/", concurrentUpdatedAt)
+			prePublishRows := []mountsActiveRow{{
+				mountPath:  "/mnt/other/",
+				snapshotID: otherSID.String(),
+				updatedAt:  otherUpdatedAt,
+			}}
+			stagedRows := stagedMountsActiveRows(prePublishRows, mountsActiveRow{
+				mountPath:  testMountPath,
+				snapshotID: nextSID.String(),
+				updatedAt:  updatedAt,
+			})
+			postPublishRows := stagedMountsActiveRows(stagedRows, mountsActiveRow{
+				mountPath:  "/mnt/concurrent/",
+				snapshotID: concurrentSID.String(),
+				updatedAt:  concurrentUpdatedAt,
+			})
+			conn := &advancedActiveSetDropConn{
+				prePublishRows:  prePublishRows,
+				postPublishRows: postPublishRows,
+			}
+			w := &dgutaWriter{
+				cfg:       Config{QueryTimeout: 100 * time.Millisecond},
+				conn:      conn,
+				mountPath: testMountPath,
+				updatedAt: updatedAt,
+				snapshot:  nextSID,
+			}
+
+			ctx, cancel := queryContext(context.Background(), 100*time.Millisecond)
+			defer cancel()
+
+			So(w.switchSnapshotAndDropOld(ctx), ShouldBeNil)
+			So(conn.switchCount(), ShouldEqual, 1)
+			So(conn.activeVirtualDropCount(), ShouldEqual, len(activeVirtualPartitionDropQueries()))
+			So(conn.activeSetIDs(), ShouldResemble, []string{fingerprintForMountsActive(prePublishRows)})
+		})
 }
 
 type oldSnapshotDropDeadlineConn struct {
@@ -5597,6 +5644,104 @@ func (c *oldActiveSetDropConn) activeSetIDs() []string {
 	seen := make(map[string]struct{}, len(c.activeSetIDDrops))
 
 	for _, id := range c.activeSetIDDrops {
+		if _, ok := seen[id]; ok {
+			continue
+		}
+
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+
+	return ids
+}
+
+type advancedActiveSetDropConn struct {
+	bootstrapTestConn
+
+	prePublishRows  []mountsActiveRow
+	postPublishRows []mountsActiveRow
+
+	published          atomic.Bool
+	switches           atomic.Int32
+	activeVirtualDrops atomic.Int32
+	activeSetIDDrops   []string
+}
+
+func (c *advancedActiveSetDropConn) Query(
+	_ context.Context,
+	query string,
+	_ ...any,
+) (driver.Rows, error) {
+	switch query {
+	case activeSnapshotQuery:
+		return &dgutaWriterCloseContextRows{
+			columns: []string{dgutaWriterTestSnapshotIDColumn},
+		}, nil
+	case mountsActiveRowsQuery:
+		rows := c.prePublishRows
+		if c.published.Load() {
+			rows = c.postPublishRows
+		}
+
+		return mountsActiveRowsForTest(rows), nil
+	default:
+		return nil, errBootstrapTestUnexpectedCall
+	}
+}
+
+func mountsActiveRowsForTest(rows []mountsActiveRow) driver.Rows {
+	values := make([][]any, 0, len(rows))
+	for _, row := range rows {
+		values = append(values, []any{row.mountPath, row.snapshotID, row.updatedAt})
+	}
+
+	return &dgutaWriterCloseContextRows{
+		columns: []string{dgutaWriterTestMountPathColumn, dgutaWriterTestSnapshotIDColumn, dgutaWriterTestUpdatedAtColumn},
+		values:  values,
+	}
+}
+
+func (c *advancedActiveSetDropConn) Exec(_ context.Context, query string, args ...any) error {
+	switch {
+	case query == switchSnapshotQuery:
+		c.published.Store(true)
+		c.switches.Add(1)
+
+		return nil
+	case strings.HasPrefix(query, "ALTER TABLE"):
+		if len(args) != 1 {
+			return errBootstrapTestUnexpectedCall
+		}
+
+		c.activeVirtualDrops.Add(1)
+
+		if activeSetID, ok := args[0].(string); ok {
+			c.activeSetIDDrops = append(c.activeSetIDDrops, activeSetID)
+		}
+
+		return nil
+	default:
+		return errBootstrapTestUnexpectedCall
+	}
+}
+
+func (c *advancedActiveSetDropConn) switchCount() int {
+	return int(c.switches.Load())
+}
+
+func (c *advancedActiveSetDropConn) activeVirtualDropCount() int {
+	return int(c.activeVirtualDrops.Load())
+}
+
+func (c *advancedActiveSetDropConn) activeSetIDs() []string {
+	return uniqueActiveSetIDs(c.activeSetIDDrops)
+}
+
+func uniqueActiveSetIDs(activeSetIDs []string) []string {
+	ids := make([]string, 0, len(activeSetIDs))
+	seen := make(map[string]struct{}, len(activeSetIDs))
+
+	for _, id := range activeSetIDs {
 		if _, ok := seen[id]; ok {
 			continue
 		}
