@@ -29,6 +29,7 @@ import (
 	"context"
 	"errors"
 	"math"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -39,6 +40,7 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/db"
 	"github.com/wtsi-hgi/wrstat-ui/internal/chspool"
 	"github.com/wtsi-hgi/wrstat-ui/internal/perfreport"
+	internaltest "github.com/wtsi-hgi/wrstat-ui/internal/test"
 )
 
 const (
@@ -331,6 +333,64 @@ func TestClickHouseSummariseSpoolLoader(t *testing.T) {
 		So(countRows(ctx, verifyConn, summariseSpoolLoaderCountActivePrefixSetQuery, activeSetID), ShouldEqual, 1)
 		So(countRows(ctx, verifyConn, summariseSpoolLoaderCountActivePrefixAgeAllQuery, activeSetID),
 			ShouldBeGreaterThan, uint64(0))
+	})
+
+	Convey("summarise spool load publishes active virtual readiness for all active mounts", t, func() {
+		os.Setenv("WRSTAT_ENV", "test")
+		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
+
+		const existingMountPath = "/mnt/d3-existing/"
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 5 * time.Second
+		cfg.MountPoints = []string{existingMountPath, testMountPath}
+
+		paths := internaltest.NewDirectoryPathCreator()
+		existingUpdatedAt := time.Date(2026, 6, 8, 13, 0, 0, 0, time.UTC)
+		spoolUpdatedAt := existingUpdatedAt.Add(time.Hour)
+
+		writeD1SingleRecord(cfg, existingMountPath, existingUpdatedAt, paths.ToDirectoryPath(existingMountPath), 7)
+
+		spoolDir := filepath.Join(t.TempDir(), "spool")
+		manifest := writeSummariseSpoolLoaderSchema3Spool(spoolDir, spoolUpdatedAt)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		So(LoadSummariseSpool(ctx, cfg, spoolDir, manifest, nil), ShouldBeNil)
+
+		verifyConn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(verifyConn.Close(), ShouldBeNil) })
+
+		activeRows, err := queryMountsActiveRows(ctx, verifyConn)
+		So(err, ShouldBeNil)
+		So(activeRows, ShouldHaveLength, 2)
+
+		postPublishActiveSetID := fingerprintForMountsActive(activeRows)
+		spoolOnlyActiveSetID := fingerprintForMountsActive([]mountsActiveRow{{
+			mountPath:  testMountPath,
+			snapshotID: manifest.SnapshotID,
+			updatedAt:  spoolUpdatedAt,
+		}})
+		So(postPublishActiveSetID, ShouldNotEqual, spoolOnlyActiveSetID)
+		So(countRows(ctx, verifyConn, d1CountActiveSetRowsQuery("wrstat_active_virtual_sets"), postPublishActiveSetID),
+			ShouldEqual, uint64(1))
+		So(countRows(ctx, verifyConn, d1CountActiveSetRowsQuery("wrstat_active_virtual_sets"), spoolOnlyActiveSetID),
+			ShouldEqual, uint64(0))
+
+		activeSet := readActiveVirtualSetForTest(ctx, verifyConn, postPublishActiveSetID)
+		So(activeSet.ready, ShouldEqual, uint8(1))
+		So(activeSet.summaryRows,
+			ShouldEqual, countRows(ctx, verifyConn, d1CountActiveSetRowsQuery("wrstat_active_virtual_summaries"),
+				postPublishActiveSetID))
+		So(activeSet.filterRows,
+			ShouldEqual, countRows(ctx, verifyConn, d1CountActiveSetRowsQuery("wrstat_active_virtual_filter_all"),
+				postPublishActiveSetID))
+		So(activeSet.childRows,
+			ShouldEqual, countRows(ctx, verifyConn, d1CountActiveSetRowsQuery("wrstat_active_virtual_children"),
+				postPublishActiveSetID))
 	})
 
 	Convey("summarise spool load uses fresh query contexts after a slow table replay", t, func() {

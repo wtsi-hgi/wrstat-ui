@@ -1346,7 +1346,40 @@ func (l *summariseSpoolLoader) publish(parent context.Context) error {
 	ctx, cancel := l.queryContext(parent)
 	defer cancel()
 
+	if err := l.stagePostSwitchActiveVirtualRows(ctx, writer); err != nil {
+		return writer.closeWithNewSnapshotCleanup(ctx, err)
+	}
+
 	return writer.switchSnapshotAndDropOld(ctx)
+}
+
+func (l *summariseSpoolLoader) stagePostSwitchActiveVirtualRows(ctx context.Context, writer *dgutaWriter) error {
+	spoolActiveSetIDs, err := l.spoolActiveSetIDs()
+	if err != nil {
+		return err
+	}
+
+	if len(spoolActiveSetIDs) == 0 {
+		return nil
+	}
+
+	activeRows, err := queryMountsActiveRows(ctx, l.conn)
+	if err != nil {
+		return err
+	}
+
+	postPublishRows := stagedMountsActiveRows(activeRows, mountsActiveRow(writer.activeMount()))
+
+	postPublishActiveSetID := fingerprintForMountsActive(postPublishRows)
+	if slices.Contains(spoolActiveSetIDs, postPublishActiveSetID) {
+		return nil
+	}
+
+	if err := writer.writeActiveVirtualReadiness(ctx); err != nil {
+		return err
+	}
+
+	return l.dropSpoolActiveVirtualPartitions(ctx)
 }
 
 func (l *summariseSpoolLoader) timeImportPhase(phase string, fn func() error) error {
