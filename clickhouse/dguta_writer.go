@@ -160,12 +160,38 @@ func basedirsPartitionDropQueries() []string {
 	}
 }
 
+func (w *dgutaWriter) withFreshCloseQueryContext(
+	parent context.Context,
+	fn func(context.Context) error,
+) error {
+	ctx, cancel := w.freshCloseQueryContext(parent)
+	defer cancel()
+
+	return fn(ctx)
+}
+
+func (w *dgutaWriter) freshCloseQueryContext(parent context.Context) (context.Context, context.CancelFunc) {
+	return queryContext(withoutCancelOrBackground(parent), queryTimeout(w.cfg))
+}
+
+func withoutCancelOrBackground(parent context.Context) context.Context {
+	if parent == nil {
+		parent = context.Background()
+	}
+
+	return context.WithoutCancel(parent)
+}
+
 func activeSetUpdatedAt(t time.Time) time.Time {
 	if t.IsZero() {
 		return t
 	}
 
 	return t.UTC().Truncate(time.Second)
+}
+
+func (w *dgutaWriter) activeVirtualPublishContext(parent context.Context) (context.Context, context.CancelFunc) {
+	return queryContext(withoutCancelOrBackground(parent), activeSnapshotCleanupTimeout)
 }
 
 func stagedMountsActiveRows(rows []mountsActiveRow, candidate mountsActiveRow) []mountsActiveRow {
@@ -936,11 +962,11 @@ func (w *dgutaWriter) publishSnapshotOnClose(ctx context.Context) error {
 		return nil
 	}
 
-	if err := w.writeMountDirProjectionSummarySet(ctx); err != nil {
+	if err := w.withFreshCloseQueryContext(ctx, w.writeMountDirProjectionSummarySet); err != nil {
 		return w.closeWithNewSnapshotCleanup(ctx, err)
 	}
 
-	if err := w.writeSchema3SnapshotReadiness(ctx); err != nil {
+	if err := w.withFreshCloseQueryContext(ctx, w.writeSchema3SnapshotReadiness); err != nil {
 		return w.closeWithNewSnapshotCleanup(ctx, err)
 	}
 
@@ -948,7 +974,7 @@ func (w *dgutaWriter) publishSnapshotOnClose(ctx context.Context) error {
 		return w.closeWithNewSnapshotCleanup(ctx, err)
 	}
 
-	if err := w.switchSnapshotAndDropOld(ctx); err != nil {
+	if err := w.withFreshCloseQueryContext(ctx, w.switchSnapshotAndDropOld); err != nil {
 		_ = w.conn.Close()
 
 		return err
@@ -1222,6 +1248,9 @@ func schema3SnapshotManifestSHA256(mount activeMount, counts schema3SnapshotRowC
 }
 
 func (w *dgutaWriter) writeActiveVirtualReadiness(ctx context.Context) error {
+	ctx, cancel := w.activeVirtualPublishContext(ctx)
+	defer cancel()
+
 	return w.timeImportPhase(importPhaseActiveVirtualInsert, func() error {
 		rows, err := w.stagedMountsActiveRows(ctx)
 		if err != nil {

@@ -836,7 +836,7 @@ func summariseSpoolHistoryDeleteQuery(rows []chspool.BasedirsHistoryRow) (string
 		args = append(args, row.MountPath, row.GID, row.Date)
 	}
 
-	b.WriteString(") SETTINGS mutations_sync = 2")
+	b.WriteString(") SETTINGS mutations_sync = 1")
 
 	return b.String(), args
 }
@@ -1349,11 +1349,16 @@ func (l *summariseSpoolLoader) publish(parent context.Context) error {
 	}
 
 	ctx, cancel := l.queryContext(parent)
-	defer cancel()
-
 	if err := l.stagePostSwitchActiveVirtualRows(ctx, writer); err != nil {
+		cancel()
+
 		return writer.closeWithNewSnapshotCleanup(ctx, err)
 	}
+
+	cancel()
+
+	ctx, cancel = l.queryContext(parent)
+	defer cancel()
 
 	return writer.switchSnapshotAndDropOld(ctx)
 }

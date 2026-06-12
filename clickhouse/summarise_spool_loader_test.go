@@ -491,6 +491,46 @@ func TestClickHouseSummariseSpoolLoader(t *testing.T) {
 		So(conn.cleanupDeadlineCalls, ShouldEqual, 1)
 	})
 
+	Convey("summarise spool basedirs history retry cleanup waits for local mutation visibility", t, func() {
+		conn := &summariseSpoolHistoryDeleteLocalMutationConn{}
+		loader := &summariseSpoolLoader{conn: conn}
+		rows := []chspool.BasedirsHistoryRow{{
+			MountPath: testMountPath,
+			GID:       9,
+			Date:      time.Date(2026, 6, 12, 18, 0, 0, 0, time.UTC),
+		}}
+
+		So(loader.deleteManifestHistoryRows(context.Background(), rows), ShouldBeNil)
+		So(conn.deleteCalls, ShouldEqual, 1)
+		So(conn.query, ShouldContainSubstring, "mutations_sync = 1")
+	})
+
+	Convey("summarise spool publish gives generated active virtual rows a cleanup-class deadline", t, func() {
+		cfg := Config{QueryTimeout: 100 * time.Millisecond}
+		spoolDir := filepath.Join(t.TempDir(), "spool")
+		updatedAt := time.Date(2026, 6, 12, 18, 30, 0, 0, time.UTC)
+		manifest := writeSummariseSpoolLoaderSchema3Spool(spoolDir, updatedAt)
+		existingUpdatedAt := updatedAt.Add(-time.Hour)
+		conn := &summariseSpoolPublishActiveVirtualDeadlineConn{
+			normalWindow: cfg.QueryTimeout,
+			sourceDelay:  2 * cfg.QueryTimeout,
+			existingMount: activeMount{
+				mountPath:  "/mnt/existing-spool-publish/",
+				snapshotID: SnapshotID("/mnt/existing-spool-publish/", existingUpdatedAt),
+				updatedAt:  existingUpdatedAt,
+			},
+		}
+
+		loader, err := newSummariseSpoolLoader(cfg, conn, spoolDir, manifest, nil)
+		So(err, ShouldBeNil)
+
+		So(loader.publish(context.Background()), ShouldBeNil)
+		So(conn.activeVirtualSourceQueries, ShouldEqual, 3)
+		So(conn.longDeadlineSourceQueries, ShouldEqual, 3)
+		So(conn.switches, ShouldEqual, 1)
+		So(conn.batchStats(insertActiveVirtualSetQuery).appends, ShouldEqual, 1)
+	})
+
 	Convey("summarise spool replay caps schema2 fact and child batches", t, func() {
 		const (
 			factRows       = defaultProjectionBatchSize + 100
@@ -1358,6 +1398,178 @@ func (c *summariseSpoolHistoryDeleteDeadlineConn) Exec(
 	c.cleanupDeadlineCalls++
 
 	return c.err
+}
+
+type summariseSpoolHistoryDeleteLocalMutationConn struct {
+	bootstrapTestConn
+
+	query       string
+	deleteCalls int
+}
+
+func (c *summariseSpoolHistoryDeleteLocalMutationConn) Exec(
+	_ context.Context,
+	query string,
+	_ ...any,
+) error {
+	if !strings.HasPrefix(query, "ALTER TABLE wrstat_basedirs_history DELETE") {
+		return errBootstrapTestUnexpectedCall
+	}
+
+	c.query = query
+	c.deleteCalls++
+
+	if strings.Contains(query, "mutations_sync = 2") {
+		return context.DeadlineExceeded
+	}
+
+	if !strings.Contains(query, "mutations_sync = 1") {
+		return errBootstrapTestUnexpectedCall
+	}
+
+	return nil
+}
+
+type summariseSpoolPublishActiveVirtualDeadlineConn struct {
+	b1ImportSQLSpyConn
+
+	normalWindow  time.Duration
+	sourceDelay   time.Duration
+	existingMount activeMount
+
+	activeVirtualSourceQueries int
+	longDeadlineSourceQueries  int
+	switches                   int
+	published                  activeMount
+}
+
+func (c *summariseSpoolPublishActiveVirtualDeadlineConn) Query(
+	ctx context.Context,
+	query string,
+	args ...any,
+) (driver.Rows, error) {
+	switch {
+	case query == activeSnapshotQuery:
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+
+		return &dgutaWriterCloseContextRows{columns: []string{dgutaWriterTestSnapshotIDColumn}}, nil
+	case query == mountsActiveRowsQuery:
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+
+		return c.mountRows(), nil
+	case isB1ImportSQLSpyActiveVirtualSourceQuery(query):
+		return c.activeVirtualSourceRows(ctx)
+	default:
+		return c.b1ImportSQLSpyConn.Query(ctx, query, args...)
+	}
+}
+
+func (c *summariseSpoolPublishActiveVirtualDeadlineConn) Exec(
+	ctx context.Context,
+	query string,
+	args ...any,
+) error {
+	if query == switchSnapshotQuery {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		c.switches++
+		c.published = activeMount{
+			mountPath:  switchSnapshotMountPathArg(args),
+			snapshotID: switchSnapshotIDArg(args),
+			updatedAt:  switchSnapshotUpdatedAtArg(args),
+		}
+
+		return nil
+	}
+
+	return c.b1ImportSQLSpyConn.Exec(ctx, query, args...)
+}
+
+func switchSnapshotMountPathArg(args []any) string {
+	if len(args) < 1 {
+		return ""
+	}
+
+	value, ok := args[0].(string)
+	if !ok {
+		return ""
+	}
+
+	return value
+}
+
+func switchSnapshotIDArg(args []any) string {
+	if len(args) < 2 {
+		return ""
+	}
+
+	value, ok := args[1].(string)
+	if !ok {
+		return ""
+	}
+
+	return value
+}
+
+func switchSnapshotUpdatedAtArg(args []any) time.Time {
+	if len(args) < 3 {
+		return time.Time{}
+	}
+
+	value, ok := args[2].(time.Time)
+	if !ok {
+		return time.Time{}
+	}
+
+	return value
+}
+
+func (c *summariseSpoolPublishActiveVirtualDeadlineConn) mountRows() driver.Rows {
+	values := [][]any{{
+		c.existingMount.mountPath,
+		c.existingMount.snapshotID,
+		c.existingMount.updatedAt,
+	}}
+	if c.published.mountPath != "" {
+		values = append(values, []any{
+			c.published.mountPath,
+			c.published.snapshotID,
+			c.published.updatedAt,
+		})
+	}
+
+	return &dgutaWriterCloseContextRows{
+		columns: []string{
+			dgutaWriterTestMountPathColumn,
+			dgutaWriterTestSnapshotIDColumn,
+			dgutaWriterTestUpdatedAtColumn,
+		},
+		values: values,
+	}
+}
+
+func (c *summariseSpoolPublishActiveVirtualDeadlineConn) activeVirtualSourceRows(
+	ctx context.Context,
+) (driver.Rows, error) {
+	c.activeVirtualSourceQueries++
+
+	deadline, ok := ctx.Deadline()
+	if !ok || time.Until(deadline) <= c.normalWindow {
+		return nil, context.DeadlineExceeded
+	}
+
+	c.longDeadlineSourceQueries++
+	if c.sourceDelay > 0 {
+		time.Sleep(c.sourceDelay)
+	}
+
+	return &dgutaWriterCloseContextRows{}, nil
 }
 
 type summariseSpoolLoaderLazyImportConn struct {
