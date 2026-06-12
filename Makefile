@@ -2,6 +2,7 @@ PKG := github.com/wtsi-hgi/wrstat-ui
 VERSION := $(shell git describe --tags --always --long --dirty)
 TAG := $(shell git describe --abbrev=0 --tags)
 LDFLAGS = -ldflags "-X ${PKG}/cmd.Version=${VERSION}"
+GO_TEST_TIMEOUT ?= 30m
 export GOPATH := $(shell go env GOPATH)
 PATH := $(PATH):${GOPATH}/bin
 
@@ -37,17 +38,17 @@ installnonpm:
 
 test:
 	@cd server/static/wrstat; npm ci && CI= npm run build:prod
-	@go test -tags netgo --count 1 ./...
+	@go test -tags netgo --count 1 -timeout ${GO_TEST_TIMEOUT} ./...
 	@cd server/static/wrstat; CI=1 npm test
 
 testnonpm:
-	go test -tags netgo --count 1 ./...
+	go test -tags netgo --count 1 -timeout ${GO_TEST_TIMEOUT} ./...
 
 race:
-	go test -tags netgo -race --count 1 ./...
+	go test -tags netgo -race --count 1 -timeout ${GO_TEST_TIMEOUT} ./...
 
 bench:
-	go test -tags netgo --count 1 -run Bench -bench=. ./...
+	go test -tags netgo --count 1 -timeout ${GO_TEST_TIMEOUT} -run Bench -bench=. ./...
 
 # curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh | sh -s -- -b $(go env GOPATH)/bin v2.4.0
 lint:

@@ -1295,6 +1295,7 @@ func TestBoltPerf(t *testing.T) {
 			SchemaVersion int    `json:"schema_version"`
 			Backend       string `json:"backend"`
 			GitCommit     string `json:"git_commit"`
+			ToolVersion   string `json:"tool_version"`
 			GoVersion     string `json:"go_version"`
 			OS            string `json:"os"`
 			Arch          string `json:"arch"`
@@ -1420,6 +1421,7 @@ func TestBoltPerf(t *testing.T) {
 				SchemaVersion int    `json:"schema_version"`
 				Backend       string `json:"backend"`
 				GitCommit     string `json:"git_commit"`
+				ToolVersion   string `json:"tool_version"`
 				GoVersion     string `json:"go_version"`
 				OS            string `json:"os"`
 				Arch          string `json:"arch"`
