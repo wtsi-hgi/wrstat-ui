@@ -51,6 +51,7 @@ const (
 		"WHERE active_set_id = ?"
 	summariseSpoolLoaderCountActivePrefixSetQuery = "SELECT count() FROM wrstat_active_prefix_rollup_sets " +
 		"WHERE active_set_id = ?"
+	summariseSpoolExistingMountPath     = "/mnt/existing-spool-publish/"
 	summariseSpoolLoaderMountPathColumn = "mount_path"
 	summariseSpoolLoaderSchemaMarker    = "test"
 	summariseSpoolLoaderUpdatedAtColumn = "updated_at"
@@ -509,7 +510,99 @@ func TestClickHouseSummariseSpoolLoader(t *testing.T) {
 
 		So(loader.deleteManifestHistoryRows(context.Background(), rows), ShouldBeNil)
 		So(conn.deleteCalls, ShouldEqual, 1)
+		So(conn.query, ShouldContainSubstring, "mount_path = ?")
+		So(conn.query, ShouldContainSubstring, "(gid, date) IN")
 		So(conn.query, ShouldContainSubstring, "mutations_sync = 1")
+	})
+
+	Convey("summarise spool basedirs history load batches last-date checks and inserts", t, func() {
+		updatedAt := time.Date(2026, 6, 12, 19, 0, 0, 0, time.UTC)
+		conn := &summariseSpoolHistoryBatchInsertConn{
+			lastDates: map[summariseSpoolHistoryLastDateKeyForTest]time.Time{
+				{mountPath: testMountPath, gid: 8}: updatedAt.Add(time.Hour),
+			},
+		}
+		loader := &summariseSpoolLoader{
+			conn: conn,
+			manifest: &chspool.Manifest{
+				MountPath: testMountPath,
+			},
+		}
+		rows := []chspool.BasedirsHistoryRow{
+			{
+				MountPath:   testMountPath,
+				GID:         7,
+				Date:        updatedAt,
+				UsageSize:   10,
+				QuotaSize:   20,
+				UsageInodes: 1,
+				QuotaInodes: 2,
+			},
+			{
+				MountPath:   testMountPath,
+				GID:         7,
+				Date:        updatedAt.Add(time.Minute),
+				UsageSize:   11,
+				QuotaSize:   21,
+				UsageInodes: 3,
+				QuotaInodes: 4,
+			},
+			{
+				MountPath:   testMountPath,
+				GID:         8,
+				Date:        updatedAt,
+				UsageSize:   12,
+				QuotaSize:   22,
+				UsageInodes: 5,
+				QuotaInodes: 6,
+			},
+		}
+
+		So(loader.insertEligibleHistoryRows(context.Background(), rows), ShouldBeNil)
+		So(conn.lastDateQueries, ShouldEqual, 1)
+		So(conn.perRowLastDateQueries, ShouldEqual, 0)
+		So(conn.execInserts, ShouldEqual, 0)
+		So(conn.insertBatch.appends, ShouldEqual, 2)
+		So(conn.insertBatch.sends, ShouldEqual, 1)
+	})
+
+	Convey("summarise spool basedirs history cleanup and replay keep mount paths exact", t, func() {
+		updatedAt := time.Date(2026, 6, 12, 19, 15, 0, 0, time.UTC)
+		otherMountPath := "/mnt/other-spool-publish/"
+		conn := &summariseSpoolHistoryBatchInsertConn{
+			lastDates: map[summariseSpoolHistoryLastDateKeyForTest]time.Time{
+				{mountPath: testMountPath, gid: 7}: updatedAt.Add(time.Hour),
+			},
+		}
+		loader := &summariseSpoolLoader{conn: conn}
+		rows := []chspool.BasedirsHistoryRow{
+			{
+				MountPath:   testMountPath,
+				GID:         7,
+				Date:        updatedAt,
+				UsageSize:   10,
+				QuotaSize:   20,
+				UsageInodes: 1,
+				QuotaInodes: 2,
+			},
+			{
+				MountPath:   otherMountPath,
+				GID:         7,
+				Date:        updatedAt,
+				UsageSize:   30,
+				QuotaSize:   40,
+				UsageInodes: 3,
+				QuotaInodes: 4,
+			},
+		}
+
+		So(loader.deleteManifestHistoryRows(context.Background(), rows), ShouldBeNil)
+		So(conn.deleteMountPaths, ShouldResemble, []string{testMountPath, otherMountPath})
+
+		So(loader.insertEligibleHistoryRows(context.Background(), rows), ShouldBeNil)
+		So(conn.lastDateMountPaths, ShouldResemble, []string{testMountPath, otherMountPath})
+		So(conn.insertBatch.appends, ShouldEqual, 1)
+		So(conn.insertBatch.values[0][0], ShouldEqual, otherMountPath)
 	})
 
 	Convey("summarise spool publish gives generated active virtual rows a cleanup-class deadline", t, func() {
@@ -522,8 +615,8 @@ func TestClickHouseSummariseSpoolLoader(t *testing.T) {
 			normalWindow: cfg.QueryTimeout,
 			sourceDelay:  2 * cfg.QueryTimeout,
 			existingMount: activeMount{
-				mountPath:  "/mnt/existing-spool-publish/",
-				snapshotID: SnapshotID("/mnt/existing-spool-publish/", existingUpdatedAt),
+				mountPath:  summariseSpoolExistingMountPath,
+				snapshotID: SnapshotID(summariseSpoolExistingMountPath, existingUpdatedAt),
 				updatedAt:  existingUpdatedAt,
 			},
 		}
@@ -536,6 +629,114 @@ func TestClickHouseSummariseSpoolLoader(t *testing.T) {
 		So(conn.longDeadlineSourceQueries, ShouldEqual, 3)
 		So(conn.switches, ShouldEqual, 1)
 		So(conn.batchStats(insertActiveVirtualSetQuery).appends, ShouldEqual, 1)
+	})
+
+	Convey("summarise spool publish composes zero-row active virtual overlays from the previous ready set", t, func() {
+		cfg := Config{QueryTimeout: 100 * time.Millisecond}
+		spoolDir := filepath.Join(t.TempDir(), "spool")
+		updatedAt := time.Date(2026, 6, 12, 19, 30, 0, 0, time.UTC)
+		manifest := writeSummariseSpoolLoaderZeroContributionActiveVirtualSpool(spoolDir, updatedAt)
+		previousUpdatedAt := updatedAt.Add(-time.Hour)
+		previousRows := []mountsActiveRow{{
+			mountPath:  summariseSpoolExistingMountPath,
+			snapshotID: SnapshotID(summariseSpoolExistingMountPath, previousUpdatedAt),
+			updatedAt:  previousUpdatedAt,
+		}}
+		previousActiveSetID := fingerprintForMountsActive(previousRows)
+		conn := &summariseSpoolZeroActiveVirtualComposeConn{
+			activeRows:          previousRows,
+			previousActiveSetID: previousActiveSetID,
+			previousSummaryRows: []activeVirtualSummaryRow{
+				summariseSpoolPreviousActiveVirtualSummary("/", previousActiveSetID, previousUpdatedAt, 1),
+				summariseSpoolPreviousActiveVirtualSummary("/mnt/", previousActiveSetID, previousUpdatedAt, 1),
+			},
+			previousFilterRows: []activeVirtualFilterAllRow{
+				summariseSpoolPreviousActiveVirtualFilter("/", previousActiveSetID, previousUpdatedAt),
+				summariseSpoolPreviousActiveVirtualFilter("/mnt/", previousActiveSetID, previousUpdatedAt),
+			},
+			previousSet: activeVirtualSetRow{
+				ActiveSetID:      previousActiveSetID,
+				Schema3Version:   currentSchemaVersion,
+				MountsSHA256:     previousActiveSetID,
+				ActiveMountCount: 1,
+				SummaryRows:      3,
+				FilterRows:       2,
+				ChildRows:        2,
+				ManifestSHA256:   activeVirtualManifestSHA256(previousActiveSetID, 3, 2, 2),
+				Ready:            1,
+				RefreshedAt:      previousUpdatedAt,
+			},
+		}
+
+		loader, err := newSummariseSpoolLoader(cfg, conn, spoolDir, manifest, nil)
+		So(err, ShouldBeNil)
+
+		So(loader.publish(context.Background()), ShouldBeNil)
+		So(conn.activeVirtualSourceQueries, ShouldEqual, 0)
+		So(conn.copyQueries, ShouldEqual, 3)
+		So(conn.switches, ShouldEqual, 1)
+		So(conn.batchStats(insertActiveVirtualSummaryQuery).appends, ShouldEqual, 3)
+		So(conn.batchStats(insertActiveVirtualFilterAllQuery).appends, ShouldEqual, 2)
+		So(conn.batchStats(insertActiveVirtualChildQuery).appends, ShouldEqual, 3)
+		So(conn.batchStats(insertActiveVirtualSetQuery).appends, ShouldEqual, 1)
+	})
+
+	Convey("summarise spool publish preserves sibling mount-root child counts in zero-row overlays", t, func() {
+		cfg := Config{QueryTimeout: 100 * time.Millisecond}
+		spoolDir := filepath.Join(t.TempDir(), "spool")
+		updatedAt := time.Date(2026, 6, 12, 19, 45, 0, 0, time.UTC)
+		manifest := writeSummariseSpoolLoaderZeroContributionActiveVirtualSpool(spoolDir, updatedAt)
+		previousUpdatedAt := updatedAt.Add(-time.Hour)
+		previousMountPath := summariseSpoolExistingMountPath
+		previousRows := []mountsActiveRow{{
+			mountPath:  previousMountPath,
+			snapshotID: SnapshotID(previousMountPath, previousUpdatedAt),
+			updatedAt:  previousUpdatedAt,
+		}}
+		previousActiveSetID := fingerprintForMountsActive(previousRows)
+		conn := &summariseSpoolZeroActiveVirtualComposeConn{
+			activeRows:          previousRows,
+			previousActiveSetID: previousActiveSetID,
+			previousSummaryRows: []activeVirtualSummaryRow{
+				summariseSpoolPreviousActiveVirtualSummary("/", previousActiveSetID, previousUpdatedAt, 1),
+				summariseSpoolPreviousActiveVirtualSummary("/mnt/", previousActiveSetID, previousUpdatedAt, 1),
+				summariseSpoolPreviousActiveVirtualMountRootSummary(
+					previousMountPath,
+					previousActiveSetID,
+					previousUpdatedAt,
+					6,
+				),
+			},
+			previousFilterRows: []activeVirtualFilterAllRow{
+				summariseSpoolPreviousActiveVirtualFilter("/", previousActiveSetID, previousUpdatedAt),
+				summariseSpoolPreviousActiveVirtualFilter("/mnt/", previousActiveSetID, previousUpdatedAt),
+			},
+			previousSet: activeVirtualSetRow{
+				ActiveSetID:      previousActiveSetID,
+				Schema3Version:   currentSchemaVersion,
+				MountsSHA256:     previousActiveSetID,
+				ActiveMountCount: 1,
+				SummaryRows:      3,
+				FilterRows:       2,
+				ChildRows:        2,
+				ManifestSHA256:   activeVirtualManifestSHA256(previousActiveSetID, 3, 2, 2),
+				Ready:            1,
+				RefreshedAt:      previousUpdatedAt,
+			},
+		}
+
+		loader, err := newSummariseSpoolLoader(cfg, conn, spoolDir, manifest, nil)
+		So(err, ShouldBeNil)
+
+		So(loader.publish(context.Background()), ShouldBeNil)
+
+		childCount, ok := summariseSpoolActiveVirtualChildCountForTest(
+			conn.batchStats(insertActiveVirtualChildQuery).values,
+			"/mnt/",
+			strings.TrimSuffix(previousMountPath, "/"),
+		)
+		So(ok, ShouldBeTrue)
+		So(childCount, ShouldEqual, uint64(6))
 	})
 
 	Convey("summarise spool replay caps schema2 fact and child batches", t, func() {
@@ -1466,6 +1667,138 @@ func writeSummariseSpoolLoaderFileOnlySpool(
 	return manifest
 }
 
+func writeSummariseSpoolLoaderZeroContributionActiveVirtualSpool(
+	spoolDir string,
+	updatedAt time.Time,
+) *chspool.Manifest {
+	set, err := chspool.CreateSet(spoolDir)
+	So(err, ShouldBeNil)
+
+	sid := SnapshotID(testMountPath, updatedAt)
+	activeRows := []mountsActiveRow{{
+		mountPath:  testMountPath,
+		snapshotID: sid,
+		updatedAt:  activeSetUpdatedAt(updatedAt),
+	}}
+	activeSetID := fingerprintForMountsActive(activeRows)
+	So(set.WriteActiveVirtualSet(chspool.ActiveVirtualSetRow{
+		ActiveSetID:      activeSetID,
+		Schema3Version:   currentSchemaVersion,
+		MountsSHA256:     activeSetID,
+		ActiveMountCount: 1,
+		SummaryRows:      3,
+		FilterRows:       0,
+		ChildRows:        2,
+		ManifestSHA256:   activeVirtualManifestSHA256(activeSetID, 3, 0, 2),
+		Ready:            1,
+		RefreshedAt:      updatedAt,
+	}), ShouldBeNil)
+	So(set.Close(), ShouldBeNil)
+
+	manifest := &chspool.Manifest{
+		Version:      chspool.Version,
+		Format:       chspool.Format,
+		State:        chspool.Complete,
+		MountPath:    testMountPath,
+		SnapshotID:   sid,
+		UpdatedAt:    updatedAt.UTC().Format(time.RFC3339Nano),
+		SchemaMarker: summariseSpoolLoaderSchemaMarker,
+		Tables:       set.TableManifests(),
+		CompletedAt:  time.Now().UTC().Format(time.RFC3339Nano),
+	}
+
+	So(chspool.WriteManifestAtomic(spoolDir, manifest), ShouldBeNil)
+
+	return manifest
+}
+
+func summariseSpoolPreviousActiveVirtualSummary(
+	dir string,
+	activeSetID string,
+	updatedAt time.Time,
+	childCount uint64,
+) activeVirtualSummaryRow {
+	return activeVirtualSummaryRow{
+		ActiveSetID:     activeSetID,
+		Dir:             dir,
+		UpdatedAt:       updatedAt,
+		AllCount:        10,
+		AllSize:         100,
+		AllAtimeMin:     1,
+		AllMtimeMax:     2,
+		AllAtimeBuckets: emptyAgeBuckets(),
+		AllMtimeBuckets: emptyAgeBuckets(),
+		AllUIDs:         []uint32{17},
+		AllGIDs:         []uint32{7},
+		AllFT:           uint16(db.DGUTAFileTypeBam),
+		FileCount:       10,
+		FileSize:        100,
+		ChildCount:      childCount,
+		RefreshedAt:     updatedAt,
+	}
+}
+
+func summariseSpoolPreviousActiveVirtualFilter(
+	dir string,
+	activeSetID string,
+	updatedAt time.Time,
+) activeVirtualFilterAllRow {
+	const childCount = uint64(1)
+
+	return activeVirtualFilterAllRow{
+		ActiveSetID:      activeSetID,
+		Dir:              dir,
+		Age:              uint8(db.DGUTAgeAll),
+		GID:              7,
+		UID:              17,
+		FT:               uint16(db.DGUTAFileTypeBam),
+		Count:            10,
+		Size:             100,
+		AtimeMin:         1,
+		MtimeMax:         2,
+		AtimeBuckets:     emptyAgeBuckets(),
+		MtimeBuckets:     emptyAgeBuckets(),
+		FilterChildCount: childCount,
+		ChildCount:       childCount,
+		RefreshedAt:      updatedAt,
+	}
+}
+
+func summariseSpoolPreviousActiveVirtualMountRootSummary(
+	dir string,
+	activeSetID string,
+	updatedAt time.Time,
+	childCount uint64,
+) activeVirtualSummaryRow {
+	row := summariseSpoolPreviousActiveVirtualSummary(dir, activeSetID, updatedAt, childCount)
+	row.MountPath = ensureTrailingSlash(dir)
+	row.IsMountRootBox = 1
+
+	return row
+}
+
+func summariseSpoolActiveVirtualChildCountForTest(
+	values [][]any,
+	parentDir string,
+	childDir string,
+) (uint64, bool) {
+	for _, row := range values {
+		if len(row) < 6 {
+			continue
+		}
+
+		parent, parentOK := row[1].(string)
+		child, childOK := row[2].(string)
+
+		count, countOK := row[5].(uint64)
+		if parentOK && childOK && countOK && parent == parentDir && child == childDir {
+			return count, true
+		}
+	}
+
+	return 0, false
+}
+
 func writeSummariseSpoolLoaderSchema2BatchSpool(
 	spoolDir string,
 	updatedAt time.Time,
@@ -1980,6 +2313,115 @@ func (c *summariseSpoolHistoryDeleteLocalMutationConn) Exec(
 	return nil
 }
 
+type summariseSpoolHistoryLastDateKeyForTest struct {
+	mountPath string
+	gid       uint32
+}
+
+type summariseSpoolHistoryBatchInsertConn struct {
+	bootstrapTestConn
+
+	lastDates map[summariseSpoolHistoryLastDateKeyForTest]time.Time
+
+	insertBatch           b1ImportSQLSpyBatch
+	deleteMountPaths      []string
+	lastDateMountPaths    []string
+	lastDateQueries       int
+	perRowLastDateQueries int
+	execInserts           int
+}
+
+func (c *summariseSpoolHistoryBatchInsertConn) Query(
+	_ context.Context,
+	query string,
+	args ...any,
+) (driver.Rows, error) {
+	if query == queryBasedirsHistoryLastDate {
+		c.perRowLastDateQueries++
+
+		return emptyMountsActiveRowsForTest(), nil
+	}
+
+	unknownLastDatesQuery := !strings.Contains(query, "FROM wrstat_basedirs_history") ||
+		!strings.Contains(query, "GROUP BY gid")
+	if unknownLastDatesQuery {
+		return nil, errBootstrapTestUnexpectedCall
+	}
+
+	c.lastDateQueries++
+
+	if len(args) == 0 {
+		return nil, errBootstrapTestUnexpectedCall
+	}
+
+	mountPath, ok := args[0].(string)
+	if !ok {
+		return nil, errBootstrapTestUnexpectedCall
+	}
+
+	c.lastDateMountPaths = append(c.lastDateMountPaths, mountPath)
+
+	rows := &dgutaWriterCloseContextRows{}
+
+	for _, arg := range args[1:] {
+		gid, ok := arg.(uint32)
+		if !ok {
+			continue
+		}
+
+		date, ok := c.lastDates[summariseSpoolHistoryLastDateKeyForTest{
+			mountPath: mountPath,
+			gid:       gid,
+		}]
+		if ok {
+			rows.values = append(rows.values, []any{gid, date})
+		}
+	}
+
+	return rows, nil
+}
+
+func (c *summariseSpoolHistoryBatchInsertConn) PrepareBatch(
+	_ context.Context,
+	query string,
+	_ ...driver.PrepareBatchOption,
+) (driver.Batch, error) {
+	if query != insertBasedirsHistoryPoint {
+		return nil, errBootstrapTestUnexpectedCall
+	}
+
+	return &c.insertBatch, nil
+}
+
+func (c *summariseSpoolHistoryBatchInsertConn) Exec(
+	_ context.Context,
+	query string,
+	args ...any,
+) error {
+	if query == insertBasedirsHistoryPoint {
+		c.execInserts++
+
+		return nil
+	}
+
+	if !strings.HasPrefix(query, "ALTER TABLE wrstat_basedirs_history DELETE") {
+		return errBootstrapTestUnexpectedCall
+	}
+
+	if len(args) == 0 {
+		return errBootstrapTestUnexpectedCall
+	}
+
+	mountPath, ok := args[0].(string)
+	if !ok {
+		return errBootstrapTestUnexpectedCall
+	}
+
+	c.deleteMountPaths = append(c.deleteMountPaths, mountPath)
+
+	return nil
+}
+
 type summariseSpoolPublishActiveVirtualDeadlineConn struct {
 	b1ImportSQLSpyConn
 
@@ -2120,6 +2562,203 @@ func (c *summariseSpoolPublishActiveVirtualDeadlineConn) activeVirtualSourceRows
 	}
 
 	return &dgutaWriterCloseContextRows{}, nil
+}
+
+type summariseSpoolZeroActiveVirtualComposeConn struct {
+	b1ImportSQLSpyConn
+
+	activeRows          []mountsActiveRow
+	previousActiveSetID string
+	previousSummaryRows []activeVirtualSummaryRow
+	previousFilterRows  []activeVirtualFilterAllRow
+	previousSet         activeVirtualSetRow
+
+	activeVirtualSourceQueries int
+	copyQueries                int
+	switches                   int
+}
+
+func (c *summariseSpoolZeroActiveVirtualComposeConn) Query(
+	ctx context.Context,
+	query string,
+	args ...any,
+) (driver.Rows, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	if rows, ok := c.activeVirtualValidationRows(query); ok {
+		return rows, nil
+	}
+
+	switch {
+	case query == activeSnapshotQuery:
+		return c.activeSnapshotRows(args...), nil
+	case query == mountsActiveRowsQuery:
+		return mountsActiveRowsForTest(c.activeRows), nil
+	case isB1ImportSQLSpyActiveVirtualSourceQuery(query):
+		c.activeVirtualSourceQueries++
+
+		return &dgutaWriterCloseContextRows{}, nil
+	case strings.Contains(query, "FROM wrstat_active_virtual_sets") &&
+		strings.Contains(query, "summary_rows"):
+		return c.previousActiveVirtualSetRows(args...), nil
+	case strings.Contains(query, "FROM wrstat_active_virtual_summaries") &&
+		strings.Contains(query, "dir IN"):
+		return activeVirtualSummaryRowsForComposeTest(c.previousSummaryRows, args...), nil
+	case strings.Contains(query, "FROM wrstat_active_virtual_filter_all") &&
+		strings.Contains(query, "dir IN"):
+		return activeVirtualFilterRowsForComposeTest(c.previousFilterRows, args...), nil
+	default:
+		return nil, errBootstrapTestUnexpectedCall
+	}
+}
+
+func activeVirtualSummaryRowsForComposeTest(rows []activeVirtualSummaryRow, args ...any) driver.Rows {
+	out := &dgutaWriterCloseContextRows{}
+	dirs := activeVirtualDirsForComposeTest(args...)
+
+	for _, row := range rows {
+		if !activeVirtualComposeTestWantsDir(dirs, row.Dir) {
+			continue
+		}
+
+		out.values = append(out.values, []any{
+			row.Dir,
+			row.MountPath,
+			row.IsMountRootBox,
+			row.UpdatedAt,
+			row.AllCount,
+			row.AllSize,
+			row.AllAtimeMin,
+			row.AllMtimeMax,
+			row.AllAtimeBuckets,
+			row.AllMtimeBuckets,
+			row.AllUIDs,
+			row.AllGIDs,
+			row.AllFT,
+			row.FileCount,
+			row.FileSize,
+			row.ChildCount,
+		})
+	}
+
+	return out
+}
+
+func activeVirtualFilterRowsForComposeTest(rows []activeVirtualFilterAllRow, args ...any) driver.Rows {
+	out := &dgutaWriterCloseContextRows{}
+	dirs := activeVirtualDirsForComposeTest(args...)
+
+	for _, row := range rows {
+		if !activeVirtualComposeTestWantsDir(dirs, row.Dir) {
+			continue
+		}
+
+		out.values = append(out.values, []any{
+			row.Dir,
+			row.Age,
+			row.GID,
+			row.UID,
+			row.FT,
+			row.Count,
+			row.Size,
+			row.AtimeMin,
+			row.MtimeMax,
+			row.AtimeBuckets,
+			row.MtimeBuckets,
+			row.FilterChildCount,
+			row.ChildCount,
+		})
+	}
+
+	return out
+}
+
+func (c *summariseSpoolZeroActiveVirtualComposeConn) activeSnapshotRows(args ...any) driver.Rows {
+	mountPath := ""
+
+	if len(args) > 0 {
+		value, ok := args[0].(string)
+		if ok {
+			mountPath = value
+		}
+	}
+
+	rows := &dgutaWriterCloseContextRows{columns: []string{dgutaWriterTestSnapshotIDColumn}}
+
+	for _, row := range c.activeRows {
+		if row.mountPath == mountPath {
+			rows.values = append(rows.values, []any{row.snapshotID})
+
+			return rows
+		}
+	}
+
+	return rows
+}
+
+func (c *summariseSpoolZeroActiveVirtualComposeConn) previousActiveVirtualSetRows(args ...any) driver.Rows {
+	rows := &dgutaWriterCloseContextRows{}
+	if len(args) == 0 || args[0] != c.previousActiveSetID {
+		return rows
+	}
+
+	rows.values = append(rows.values, []any{
+		c.previousSet.SummaryRows,
+		c.previousSet.FilterRows,
+		c.previousSet.ChildRows,
+	})
+
+	return rows
+}
+
+func (c *summariseSpoolZeroActiveVirtualComposeConn) QueryRow(
+	_ context.Context,
+	query string,
+	_ ...any,
+) driver.Row {
+	switch {
+	case strings.Contains(query, "FROM wrstat_active_virtual_summaries"):
+		return summariseSpoolCountRow{value: 4}
+	case strings.Contains(query, "FROM wrstat_active_virtual_filter_all"):
+		return summariseSpoolCountRow{value: 2}
+	case strings.Contains(query, "FROM wrstat_active_virtual_children"):
+		return summariseSpoolCountRow{value: 3}
+	default:
+		return summariseSpoolCountRow{err: errBootstrapTestUnexpectedCall}
+	}
+}
+
+func (c *summariseSpoolZeroActiveVirtualComposeConn) Exec(
+	ctx context.Context,
+	query string,
+	args ...any,
+) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	switch {
+	case query == switchSnapshotQuery:
+		c.switches++
+		c.activeRows = stagedMountsActiveRows(c.activeRows, mountsActiveRow{
+			mountPath:  switchSnapshotMountPathArg(args),
+			snapshotID: switchSnapshotIDArg(args),
+			updatedAt:  switchSnapshotUpdatedAtArg(args),
+		})
+
+		return nil
+	case strings.HasPrefix(query, "INSERT INTO wrstat_active_virtual_") &&
+		strings.Contains(query, " SELECT "):
+		c.copyQueries++
+
+		return nil
+	case strings.HasPrefix(query, "ALTER TABLE"):
+		return nil
+	default:
+		return errBootstrapTestUnexpectedCall
+	}
 }
 
 type summariseSpoolLoaderLazyImportConn struct {
@@ -2432,6 +3071,34 @@ func (b *summariseSpoolLoaderSpyBatch) Send() error {
 	b.conn.recordEvent("send " + b.table)
 
 	return b.b1ImportSQLSpyBatch.Send()
+}
+
+func activeVirtualDirsForComposeTest(args ...any) map[string]struct{} {
+	if len(args) < 2 {
+		return nil
+	}
+
+	out := make(map[string]struct{}, len(args)-1)
+	for _, arg := range args[1:] {
+		dir, ok := arg.(string)
+		if !ok {
+			continue
+		}
+
+		out[ensureTrailingSlash(dir)] = struct{}{}
+	}
+
+	return out
+}
+
+func activeVirtualComposeTestWantsDir(dirs map[string]struct{}, dir string) bool {
+	if len(dirs) == 0 {
+		return true
+	}
+
+	_, ok := dirs[ensureTrailingSlash(dir)]
+
+	return ok
 }
 
 func summariseSpoolLoaderCHTables() map[string]string {

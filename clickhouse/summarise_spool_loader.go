@@ -56,6 +56,17 @@ const (
 	spoolLoadTableStatsUnavailable      = "unavailable"
 	spoolLoadTableStatsNotRequested     = "not_requested"
 	clickHouseInsufficientPrivilegeCode = 497
+
+	selectReadyActiveVirtualSetCountsQuery = "SELECT summary_rows, filter_rows, child_rows " +
+		"FROM wrstat_active_virtual_sets WHERE active_set_id = ? AND ready = 1 LIMIT 1"
+	selectActiveVirtualSummariesForDirsQuery = "SELECT dir, mount_path, is_mount_root_box, updated_at, " +
+		"all_count, all_size, all_atime_min, all_mtime_max, all_atime_buckets, all_mtime_buckets, " +
+		"all_uids, all_gids, all_ft, file_count, file_size, child_count " +
+		"FROM wrstat_active_virtual_summaries PREWHERE active_set_id = ? WHERE dir IN (%s) ORDER BY dir"
+	selectActiveVirtualFiltersForDirsQuery = "SELECT dir, age, gid, uid, ft, count, size, " +
+		"atime_min, mtime_max, atime_buckets, mtime_buckets, filter_child_count, child_count " +
+		"FROM wrstat_active_virtual_filter_all PREWHERE active_set_id = ? " +
+		"WHERE dir IN (%s) ORDER BY dir, age, gid, uid, ft"
 )
 
 var (
@@ -68,6 +79,31 @@ var (
 		"clickhouse: summarise spool publish state is missing switch plan",
 	)
 )
+
+type activeVirtualCompositionCounts struct {
+	summaryRows uint64
+	filterRows  uint64
+	childRows   uint64
+}
+
+func activeVirtualManifestSHA256ForCounts(
+	activeSetID string,
+	counts activeVirtualCompositionCounts,
+) string {
+	return sha256Hex(fmt.Sprintf(
+		"%s|%d|%d|%d|%d",
+		activeSetID,
+		currentSchemaVersion,
+		counts.summaryRows,
+		counts.filterRows,
+		counts.childRows,
+	))
+}
+
+type historyLastDateKey struct {
+	mountPath string
+	gid       uint32
+}
 
 type summariseSpoolLoader struct {
 	cfg                 Config
@@ -823,17 +859,19 @@ func (l *summariseSpoolLoader) deleteManifestHistoryRows(
 ) error {
 	uniqueRows := compactHistoryDeleteRows(rows)
 
-	for chunk := range slices.Chunk(uniqueRows, spoolHistoryDeleteChunk) {
-		query, args := summariseSpoolHistoryDeleteQuery(chunk)
+	for _, mountRows := range historyRowsGroupedByMountPath(uniqueRows) {
+		for chunk := range slices.Chunk(mountRows, spoolHistoryDeleteChunk) {
+			query, args := summariseSpoolHistoryDeleteQuery(chunk)
 
-		ctx, cancel := l.cleanupContext(parent)
-		if err := l.conn.Exec(ctx, query, args...); err != nil {
+			ctx, cancel := l.cleanupContext(parent)
+			if err := l.conn.Exec(ctx, query, args...); err != nil {
+				cancel()
+
+				return fmt.Errorf("clickhouse: failed to delete retry basedirs history rows: %w", err)
+			}
+
 			cancel()
-
-			return fmt.Errorf("clickhouse: failed to delete retry basedirs history rows: %w", err)
 		}
-
-		cancel()
 	}
 
 	return nil
@@ -857,22 +895,42 @@ func compactHistoryDeleteRows(rows []chspool.BasedirsHistoryRow) []chspool.Based
 	return out
 }
 
+func historyRowsGroupedByMountPath(rows []chspool.BasedirsHistoryRow) [][]chspool.BasedirsHistoryRow {
+	groupIndexes := make(map[string]int)
+	groups := make([][]chspool.BasedirsHistoryRow, 0)
+
+	for _, row := range rows {
+		index, ok := groupIndexes[row.MountPath]
+		if !ok {
+			index = len(groups)
+			groupIndexes[row.MountPath] = index
+
+			groups = append(groups, nil)
+		}
+
+		groups[index] = append(groups[index], row)
+	}
+
+	return groups
+}
+
 func summariseSpoolHistoryDeleteQuery(rows []chspool.BasedirsHistoryRow) (string, []any) {
 	var b strings.Builder
-	b.WriteString("ALTER TABLE wrstat_basedirs_history DELETE WHERE (mount_path, gid, date) IN (")
+	b.WriteString("ALTER TABLE wrstat_basedirs_history DELETE WHERE mount_path = ? AND (gid, date) IN (")
 
-	const historyDeleteArgsPerRow = 3
+	const historyDeleteArgsPerRow = 2
 
-	args := make([]any, 0, len(rows)*historyDeleteArgsPerRow)
+	args := make([]any, 0, 1+len(rows)*historyDeleteArgsPerRow)
+	args = append(args, rows[0].MountPath)
 
 	for i, row := range rows {
 		if i > 0 {
 			b.WriteString(", ")
 		}
 
-		b.WriteString("(?, ?, ?)")
+		b.WriteString("(?, ?)")
 
-		args = append(args, row.MountPath, row.GID, row.Date)
+		args = append(args, row.GID, row.Date)
 	}
 
 	b.WriteString(") SETTINGS mutations_sync = 1")
@@ -889,55 +947,162 @@ func (l *summariseSpoolLoader) insertEligibleHistoryRows( //nolint:funlen,gocogn
 	rows []chspool.BasedirsHistoryRow,
 ) error {
 	return l.timeImportPhase(importPhaseBasedirsHistory, func() error {
-		for _, row := range rows {
-			skip, err := l.historyAlreadyRecorded(parent, row)
-			if err != nil {
-				return err
-			}
+		lastDates, err := l.historyLastDatesByKey(parent, rows)
+		if err != nil {
+			return err
+		}
 
-			if skip {
+		var (
+			batch    driver.Batch
+			openedAt time.Time
+			writeErr error
+		)
+
+		writer := &importBlockWriter{
+			conn:      l.conn,
+			query:     insertBasedirsHistoryPoint,
+			name:      chspool.TableBasedirsHistory,
+			batch:     &batch,
+			openedAt:  &openedAt,
+			writeErr:  &writeErr,
+			batchSize: defaultBatchSize,
+		}
+
+		for _, row := range rows {
+			key := historyLastDateKey{mountPath: row.MountPath, gid: row.GID}
+			if !historyRowAfterLastDate(row, lastDates[key]) {
 				continue
 			}
 
 			ctx, cancel := l.queryContext(parent)
-			if err := l.conn.Exec(
-				ctx,
-				insertBasedirsHistoryPoint,
-				row.MountPath,
-				row.GID,
-				row.Date,
-				row.UsageSize,
-				row.QuotaSize,
-				row.UsageInodes,
-				row.QuotaInodes,
-			); err != nil {
-				cancel()
-
-				return fmt.Errorf("clickhouse: failed to insert basedirs history point: %w", err)
-			}
+			err := writer.append(ctx, func(batch driver.Batch) error {
+				return batch.Append(
+					row.MountPath,
+					row.GID,
+					row.Date,
+					row.UsageSize,
+					row.QuotaSize,
+					row.UsageInodes,
+					row.QuotaInodes,
+				)
+			})
 
 			cancel()
+
+			if err != nil {
+				return err
+			}
+
+			lastDates[key] = row.Date
 		}
 
-		return nil
+		return writer.close()
 	})
 }
 
-func (l *summariseSpoolLoader) historyAlreadyRecorded(
+func historyRowAfterLastDate(row chspool.BasedirsHistoryRow, last time.Time) bool {
+	return last.IsZero() || row.Date.After(last)
+}
+
+func (l *summariseSpoolLoader) historyLastDatesByKey(
 	parent context.Context,
-	row chspool.BasedirsHistoryRow,
-) (bool, error) {
+	rows []chspool.BasedirsHistoryRow,
+) (map[historyLastDateKey]time.Time, error) {
+	out := make(map[historyLastDateKey]time.Time)
+
+	for _, mountRows := range historyRowsGroupedByMountPath(rows) {
+		mountPath := mountRows[0].MountPath
+
+		datesByGID, err := l.historyLastDatesForMountPath(parent, mountPath, uniqueHistoryGIDs(mountRows))
+		if err != nil {
+			return nil, err
+		}
+
+		for gid, date := range datesByGID {
+			out[historyLastDateKey{mountPath: mountPath, gid: gid}] = date
+		}
+	}
+
+	return out, nil
+}
+
+func uniqueHistoryGIDs(rows []chspool.BasedirsHistoryRow) []uint32 {
+	seen := make(map[uint32]struct{})
+	gids := make([]uint32, 0, len(rows))
+
+	for _, row := range rows {
+		if _, ok := seen[row.GID]; ok {
+			continue
+		}
+
+		seen[row.GID] = struct{}{}
+		gids = append(gids, row.GID)
+	}
+
+	slices.Sort(gids)
+
+	return gids
+}
+
+func (l *summariseSpoolLoader) historyLastDatesForMountPath(
+	parent context.Context,
+	mountPath string,
+	gids []uint32,
+) (map[uint32]time.Time, error) {
+	if len(gids) == 0 {
+		return map[uint32]time.Time{}, nil
+	}
+
+	query, args := summariseSpoolHistoryLastDatesQuery(mountPath, gids)
+
 	ctx, cancel := l.queryContext(parent)
 	defer cancel()
 
-	result, err := l.conn.Query(ctx, queryBasedirsHistoryLastDate, row.MountPath, row.GID)
+	result, err := l.conn.Query(ctx, query, args...)
 	if err != nil {
-		return false, fmt.Errorf("clickhouse: failed to query basedirs history last date: %w", err)
+		return nil, fmt.Errorf("clickhouse: failed to query basedirs history last dates: %w", err)
 	}
 
 	defer func() { _ = result.Close() }()
 
-	return scanHistoryLastDate(result, row.Date)
+	return scanHistoryLastDatesByGID(result)
+}
+
+func summariseSpoolHistoryLastDatesQuery(mountPath string, gids []uint32) (string, []any) {
+	placeholders := strings.TrimRight(strings.Repeat("?,", len(gids)), ",")
+	query := "SELECT gid, max(date) FROM wrstat_basedirs_history WHERE mount_path = ? AND gid IN (" +
+		placeholders + ") GROUP BY gid"
+
+	args := make([]any, 0, 1+len(gids))
+
+	args = append(args, mountPath)
+	for _, gid := range gids {
+		args = append(args, gid)
+	}
+
+	return query, args
+}
+
+func scanHistoryLastDatesByGID(rows driver.Rows) (map[uint32]time.Time, error) {
+	out := make(map[uint32]time.Time)
+
+	for rows.Next() {
+		var (
+			gid  uint32
+			last time.Time
+		)
+		if err := rows.Scan(&gid, &last); err != nil {
+			return nil, fmt.Errorf("clickhouse: failed to scan basedirs history last date: %w", err)
+		}
+
+		out[gid] = last
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("clickhouse: basedirs history last dates iteration error: %w", err)
+	}
+
+	return out, nil
 }
 
 func (l *summariseSpoolLoader) loadBasedirsGroupUsage(parent context.Context) error { //nolint:funlen
@@ -1200,6 +1365,319 @@ func (l *summariseSpoolLoader) loadTableWithQuery( //nolint:funlen
 	})
 }
 
+func (l *summariseSpoolLoader) tryStageZeroContributionActiveVirtualRows( //nolint:gocyclo,funlen
+	parent context.Context,
+	writer *dgutaWriter,
+	nextActiveSetID string,
+) (bool, error) {
+	if !l.zeroContributionActiveVirtualCandidate() {
+		return false, nil
+	}
+
+	ctx, cancel := writer.activeVirtualPublishContext(parent)
+	defer cancel()
+
+	previousRows, err := queryMountsActiveRows(ctx, l.conn)
+	if err != nil {
+		return false, err
+	}
+
+	if activeRowsContainMount(previousRows, l.manifest.MountPath) {
+		return false, nil
+	}
+
+	previousActiveSetID := fingerprintForMountsActive(previousRows)
+	if previousActiveSetID == "" {
+		return false, nil
+	}
+
+	previousSet, ok, err := l.readReadyActiveVirtualSetRow(ctx, previousActiveSetID)
+	if err != nil || !ok {
+		return false, err
+	}
+
+	activeRows := stagedMountsActiveRows(previousRows, mountsActiveRow(writer.activeMount()))
+	if fingerprintForMountsActive(activeRows) != nextActiveSetID {
+		return false, nil
+	}
+
+	return true, l.writeZeroContributionActiveVirtualRows(
+		ctx,
+		nextActiveSetID,
+		previousActiveSetID,
+		previousSet,
+		activeRows,
+	)
+}
+
+func activeRowsContainMount(rows []mountsActiveRow, mountPath string) bool {
+	mountPath = ensureTrailingSlash(mountPath)
+	for _, row := range rows {
+		if ensureTrailingSlash(row.mountPath) == mountPath {
+			return true
+		}
+	}
+
+	return false
+}
+
+func (l *summariseSpoolLoader) zeroContributionActiveVirtualCandidate() bool {
+	if l.manifest == nil {
+		return false
+	}
+
+	tables := l.manifest.Tables
+
+	return tables[chspool.TableDirFacts].Rows == 0 &&
+		tables[chspool.TableDirFilterAll].Rows == 0 &&
+		tables[chspool.TableChildren].Rows == 0
+}
+
+func (l *summariseSpoolLoader) writeZeroContributionActiveVirtualRows( //nolint:gocyclo,funlen
+	ctx context.Context,
+	nextActiveSetID string,
+	previousActiveSetID string,
+	previousSet activeVirtualSetRow,
+	activeRows []mountsActiveRow,
+) error {
+	refreshedAt := time.Now().UTC()
+	mounts := newActiveMountsSnapshot(activeRows).all()
+	summaryRows, _, childRows := activeVirtualRowsForMountsFromData(
+		nextActiveSetID,
+		mounts,
+		refreshedAt,
+		nil,
+		nil,
+		nil,
+	)
+	affectedDirs := activeVirtualAffectedDirsForMount(l.manifest.MountPath, summaryRows)
+	affected := activeVirtualAffectedDirSet(affectedDirs)
+	affectedChildren := affectedActiveVirtualChildRows(childRows, affected)
+	summaryDirs := activeVirtualSummaryDirsForChildCounts(affectedDirs, affectedChildren)
+
+	previousSummaries, err := l.readActiveVirtualSummariesForDirs(ctx, previousActiveSetID, summaryDirs)
+	if err != nil {
+		return err
+	}
+
+	previousFilters, err := l.readActiveVirtualFiltersForDirs(ctx, previousActiveSetID, affectedDirs)
+	if err != nil {
+		return err
+	}
+
+	affectedSummaries := composeZeroContributionSummaryRows(summaryRows, previousSummaries, affected)
+	summaryByDir := activeVirtualSummaryRowsByDir(affectedSummaries)
+	affectedFilters := composeZeroContributionFilterRows(
+		previousFilters,
+		summaryByDir,
+		nextActiveSetID,
+		refreshedAt,
+	)
+	childCountSummaries := activeVirtualSummariesForChildCounts(affectedSummaries, previousSummaries, affectedChildren)
+	fillActiveVirtualChildCounts(affectedChildren, childCountSummaries)
+
+	if err := dropActiveVirtualPartitionsForSet(ctx, l.conn, nextActiveSetID); err != nil {
+		return err
+	}
+
+	updatedAt := maxUpdatedAtForMounts(mounts)
+	if err := l.copyUnchangedActiveVirtualRows(
+		ctx,
+		previousActiveSetID,
+		nextActiveSetID,
+		affectedDirs,
+		updatedAt,
+		refreshedAt,
+	); err != nil {
+		return err
+	}
+
+	writer := newActiveVirtualOverlayWriter(l.conn, summariseSpoolBatchSizeFor(chspool.TableActiveVirtualSummaries))
+	if err := appendActiveVirtualOverlayRows(
+		ctx,
+		writer,
+		affectedSummaries,
+		affectedFilters,
+		affectedChildren,
+	); err != nil {
+		return err
+	}
+
+	if err := writer.flush(ctx); err != nil {
+		return err
+	}
+
+	counts := activeVirtualCompositionCounts{
+		summaryRows: uint64(len(summaryRows)),
+		filterRows:  previousSet.FilterRows,
+		childRows:   uint64(len(childRows)),
+	}
+	if err := l.validateActiveVirtualCompositionCounts(ctx, nextActiveSetID, counts); err != nil {
+		return err
+	}
+
+	return newActiveVirtualOverlayWriter(l.conn, defaultBatchSize).appendSet(
+		ctx,
+		activeVirtualSetRowForCounts(nextActiveSetID, activeRows, counts, refreshedAt),
+	)
+}
+
+func activeVirtualAffectedDirsForMount(
+	mountPath string,
+	summaryRows []activeVirtualSummaryRow,
+) []string {
+	mountPath = ensureTrailingSlash(mountPath)
+	dirs := make([]string, 0, len(summaryRows))
+
+	for _, row := range summaryRows {
+		dir := ensureTrailingSlash(row.Dir)
+		if strings.HasPrefix(mountPath, dir) {
+			dirs = append(dirs, dir)
+		}
+	}
+
+	slices.Sort(dirs)
+
+	return slices.Compact(dirs)
+}
+
+func activeVirtualAffectedDirSet(dirs []string) map[string]struct{} {
+	out := make(map[string]struct{}, len(dirs))
+	for _, dir := range dirs {
+		out[ensureTrailingSlash(dir)] = struct{}{}
+	}
+
+	return out
+}
+
+func affectedActiveVirtualChildRows(
+	rows []activeVirtualChildRow,
+	affected map[string]struct{},
+) []activeVirtualChildRow {
+	out := make([]activeVirtualChildRow, 0, len(rows))
+
+	for _, row := range rows {
+		if activeVirtualChildRowAffected(row, affected) {
+			out = append(out, row)
+		}
+	}
+
+	return out
+}
+
+func activeVirtualSummaryDirsForChildCounts(
+	affectedDirs []string,
+	childRows []activeVirtualChildRow,
+) []string {
+	dirs := append([]string(nil), affectedDirs...)
+	seen := activeVirtualAffectedDirSet(affectedDirs)
+
+	for _, row := range childRows {
+		dir := activeVirtualSummaryDirForChild(row)
+		if _, ok := seen[dir]; ok {
+			continue
+		}
+
+		seen[dir] = struct{}{}
+		dirs = append(dirs, dir)
+	}
+
+	slices.Sort(dirs)
+
+	return slices.Compact(dirs)
+}
+
+func composeZeroContributionSummaryRows(
+	rows []activeVirtualSummaryRow,
+	previous map[string]activeVirtualSummaryRow,
+	affected map[string]struct{},
+) []activeVirtualSummaryRow {
+	out := make([]activeVirtualSummaryRow, 0, len(affected))
+
+	for _, row := range rows {
+		if _, ok := affected[ensureTrailingSlash(row.Dir)]; !ok {
+			continue
+		}
+
+		if previousRow, ok := previous[ensureTrailingSlash(row.Dir)]; ok {
+			row = copyActiveVirtualSummaryAggregates(row, previousRow)
+		}
+
+		out = append(out, row)
+	}
+
+	return out
+}
+
+func activeVirtualSummaryRowsByDir(rows []activeVirtualSummaryRow) map[string]activeVirtualSummaryRow {
+	out := make(map[string]activeVirtualSummaryRow, len(rows))
+	for _, row := range rows {
+		out[ensureTrailingSlash(row.Dir)] = row
+	}
+
+	return out
+}
+
+func composeZeroContributionFilterRows(
+	rows []activeVirtualFilterAllRow,
+	summaries map[string]activeVirtualSummaryRow,
+	nextActiveSetID string,
+	refreshedAt time.Time,
+) []activeVirtualFilterAllRow {
+	out := make([]activeVirtualFilterAllRow, 0, len(rows))
+
+	for _, row := range rows {
+		summary, ok := summaries[ensureTrailingSlash(row.Dir)]
+		if !ok {
+			continue
+		}
+
+		row.ActiveSetID = nextActiveSetID
+		row.FilterChildCount = summary.ChildCount
+		row.ChildCount = summary.ChildCount
+		row.RefreshedAt = refreshedAt
+		out = append(out, row)
+	}
+
+	return out
+}
+
+func activeVirtualSummariesForChildCounts(
+	affectedSummaries []activeVirtualSummaryRow,
+	previous map[string]activeVirtualSummaryRow,
+	childRows []activeVirtualChildRow,
+) []activeVirtualSummaryRow {
+	out := append([]activeVirtualSummaryRow(nil), affectedSummaries...)
+	seen := activeVirtualSummaryRowsByDir(out)
+
+	for _, row := range childRows {
+		dir := activeVirtualSummaryDirForChild(row)
+		if _, ok := seen[dir]; ok {
+			continue
+		}
+
+		previousRow, ok := previous[dir]
+		if !ok {
+			continue
+		}
+
+		seen[dir] = previousRow
+		out = append(out, previousRow)
+	}
+
+	return out
+}
+
+func dropActiveVirtualPartitionsForSet(ctx context.Context, conn driver.Conn, activeSetID string) error {
+	for _, query := range activeVirtualPartitionDropQueries() {
+		if err := dropActiveSetPartition(ctx, conn, query, activeSetID, "active-virtual"); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 func summariseSpoolBatchSizeFor(table string) int {
 	switch table {
 	case chspool.TableDirFacts,
@@ -1214,6 +1692,26 @@ func summariseSpoolBatchSizeFor(table string) int {
 		return childrenBatchSizeFor(defaultBatchSize)
 	default:
 		return defaultBatchSize
+	}
+}
+
+func activeVirtualSetRowForCounts(
+	activeSetID string,
+	rows []mountsActiveRow,
+	counts activeVirtualCompositionCounts,
+	refreshedAt time.Time,
+) activeVirtualSetRow {
+	return activeVirtualSetRow{
+		ActiveSetID:      activeSetID,
+		Schema3Version:   currentSchemaVersion,
+		MountsSHA256:     activeSetID,
+		ActiveMountCount: countActiveMountRows(rows),
+		SummaryRows:      counts.summaryRows,
+		FilterRows:       counts.filterRows,
+		ChildRows:        counts.childRows,
+		ManifestSHA256:   activeVirtualManifestSHA256ForCounts(activeSetID, counts),
+		Ready:            1,
+		RefreshedAt:      refreshedAt,
 	}
 }
 
@@ -1489,7 +1987,7 @@ func (l *summariseSpoolLoader) ensurePostSwitchActiveVirtualRows(
 	return tracker.mark(summariseSpoolPublishPhaseActiveVirtualReady)
 }
 
-func (l *summariseSpoolLoader) stagePostSwitchActiveVirtualRows(
+func (l *summariseSpoolLoader) stagePostSwitchActiveVirtualRows( //nolint:gocyclo,funlen
 	ctx context.Context,
 	writer *dgutaWriter,
 ) (string, error) {
@@ -1513,11 +2011,225 @@ func (l *summariseSpoolLoader) stagePostSwitchActiveVirtualRows(
 		return postPublishActiveSetID, nil
 	}
 
+	composed, err := l.tryStageZeroContributionActiveVirtualRows(ctx, writer, postPublishActiveSetID)
+	if err != nil {
+		return "", err
+	}
+
+	if composed {
+		return postPublishActiveSetID, l.dropSpoolActiveVirtualPartitions(ctx)
+	}
+
 	if err := writer.writeActiveVirtualReadiness(ctx); err != nil {
 		return "", err
 	}
 
 	return postPublishActiveSetID, l.dropSpoolActiveVirtualPartitions(ctx)
+}
+
+func (l *summariseSpoolLoader) readReadyActiveVirtualSetRow(
+	ctx context.Context,
+	activeSetID string,
+) (activeVirtualSetRow, bool, error) {
+	rows, err := l.conn.Query(ctx, selectReadyActiveVirtualSetCountsQuery, activeSetID)
+	if err != nil {
+		return activeVirtualSetRow{}, false, fmt.Errorf("clickhouse: failed to query active virtual set: %w", err)
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	if !rows.Next() {
+		return activeVirtualSetRow{}, false, rowIterationErr(rows, "clickhouse: active virtual set iteration error")
+	}
+
+	row := activeVirtualSetRow{ActiveSetID: activeSetID, Ready: 1}
+	if err := rows.Scan(&row.SummaryRows, &row.FilterRows, &row.ChildRows); err != nil {
+		return activeVirtualSetRow{}, false, fmt.Errorf("clickhouse: failed to scan active virtual set: %w", err)
+	}
+
+	return row, true, rowIterationErr(rows, "clickhouse: active virtual set iteration error")
+}
+
+func (l *summariseSpoolLoader) readActiveVirtualSummariesForDirs(
+	ctx context.Context,
+	activeSetID string,
+	dirs []string,
+) (map[string]activeVirtualSummaryRow, error) {
+	if len(dirs) == 0 {
+		return map[string]activeVirtualSummaryRow{}, nil
+	}
+
+	query, args := activeVirtualDirsQuery(
+		fmt.Sprintf(selectActiveVirtualSummariesForDirsQuery, placeholders(len(dirs))),
+		activeSetID,
+		dirs,
+	)
+
+	rows, err := l.conn.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("clickhouse: failed to query previous active virtual summaries: %w", err)
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	return scanActiveVirtualSummaryRows(rows, activeSetID)
+}
+
+func scanActiveVirtualSummaryRows( //nolint:funlen
+	rows driver.Rows,
+	activeSetID string,
+) (map[string]activeVirtualSummaryRow, error) {
+	out := make(map[string]activeVirtualSummaryRow)
+
+	for rows.Next() {
+		row := activeVirtualSummaryRow{ActiveSetID: activeSetID}
+		if err := rows.Scan(
+			&row.Dir,
+			&row.MountPath,
+			&row.IsMountRootBox,
+			&row.UpdatedAt,
+			&row.AllCount,
+			&row.AllSize,
+			&row.AllAtimeMin,
+			&row.AllMtimeMax,
+			&row.AllAtimeBuckets,
+			&row.AllMtimeBuckets,
+			&row.AllUIDs,
+			&row.AllGIDs,
+			&row.AllFT,
+			&row.FileCount,
+			&row.FileSize,
+			&row.ChildCount,
+		); err != nil {
+			return nil, fmt.Errorf("clickhouse: failed to scan previous active virtual summary: %w", err)
+		}
+
+		out[ensureTrailingSlash(row.Dir)] = row
+	}
+
+	return out, rowIterationErr(rows, "clickhouse: previous active virtual summary iteration error")
+}
+
+func (l *summariseSpoolLoader) readActiveVirtualFiltersForDirs(
+	ctx context.Context,
+	activeSetID string,
+	dirs []string,
+) ([]activeVirtualFilterAllRow, error) {
+	if len(dirs) == 0 {
+		return nil, nil
+	}
+
+	query, args := activeVirtualDirsQuery(
+		fmt.Sprintf(selectActiveVirtualFiltersForDirsQuery, placeholders(len(dirs))),
+		activeSetID,
+		dirs,
+	)
+
+	rows, err := l.conn.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("clickhouse: failed to query previous active virtual filters: %w", err)
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	return scanActiveVirtualFilterRows(rows, activeSetID)
+}
+
+func scanActiveVirtualFilterRows(
+	rows driver.Rows,
+	activeSetID string,
+) ([]activeVirtualFilterAllRow, error) {
+	out := []activeVirtualFilterAllRow{}
+
+	for rows.Next() {
+		row := activeVirtualFilterAllRow{ActiveSetID: activeSetID}
+		if err := rows.Scan(
+			&row.Dir,
+			&row.Age,
+			&row.GID,
+			&row.UID,
+			&row.FT,
+			&row.Count,
+			&row.Size,
+			&row.AtimeMin,
+			&row.MtimeMax,
+			&row.AtimeBuckets,
+			&row.MtimeBuckets,
+			&row.FilterChildCount,
+			&row.ChildCount,
+		); err != nil {
+			return nil, fmt.Errorf("clickhouse: failed to scan previous active virtual filter: %w", err)
+		}
+
+		out = append(out, row)
+	}
+
+	return out, rowIterationErr(rows, "clickhouse: previous active virtual filter iteration error")
+}
+
+func (l *summariseSpoolLoader) copyUnchangedActiveVirtualRows(
+	ctx context.Context,
+	previousActiveSetID string,
+	nextActiveSetID string,
+	affectedDirs []string,
+	updatedAt time.Time,
+	refreshedAt time.Time,
+) error {
+	for _, build := range []func(string, string, []string, time.Time, time.Time) (string, []any){
+		copyUnchangedActiveVirtualSummariesQuery,
+		copyUnchangedActiveVirtualFiltersQuery,
+		copyUnchangedActiveVirtualChildrenQuery,
+	} {
+		query, args := build(previousActiveSetID, nextActiveSetID, affectedDirs, updatedAt, refreshedAt)
+		if err := l.conn.Exec(ctx, query, args...); err != nil {
+			return fmt.Errorf("clickhouse: failed to copy unchanged active virtual rows: %w", err)
+		}
+	}
+
+	return nil
+}
+
+func (l *summariseSpoolLoader) validateActiveVirtualCompositionCounts(
+	ctx context.Context,
+	activeSetID string,
+	counts activeVirtualCompositionCounts,
+) error {
+	expected := map[string]uint64{
+		chspool.TableActiveVirtualSummaries: counts.summaryRows,
+		chspool.TableActiveVirtualFilterAll: counts.filterRows,
+		chspool.TableActiveVirtualChildren:  counts.childRows,
+	}
+
+	for table, want := range expected {
+		got, err := l.countActiveVirtualRowsForSet(ctx, table, activeSetID)
+		if err != nil {
+			return err
+		}
+
+		if got != want {
+			return fmt.Errorf("%w: table=%s got=%d expected=%d", errSpoolLoadedRowsMismatch, table, got, want)
+		}
+	}
+
+	return nil
+}
+
+func (l *summariseSpoolLoader) countActiveVirtualRowsForSet(
+	ctx context.Context,
+	table string,
+	activeSetID string,
+) (uint64, error) {
+	query, ok := summariseSpoolActiveVirtualCountQueries()[table]
+	if !ok {
+		return 0, fmt.Errorf("%w: %s", errUnknownSpoolLoadTable, table)
+	}
+
+	var got uint64
+	if err := l.conn.QueryRow(ctx, query, activeSetID).Scan(&got); err != nil {
+		return 0, fmt.Errorf("clickhouse: failed to count composed active virtual table %s: %w", table, err)
+	}
+
+	return got, nil
 }
 
 func (l *summariseSpoolLoader) postPublishActiveSetID(
@@ -2170,6 +2882,103 @@ func validateSummariseSpoolManifestTables(manifest *chspool.Manifest) error {
 	}
 
 	return nil
+}
+
+func copyActiveVirtualSummaryAggregates(
+	row activeVirtualSummaryRow,
+	previous activeVirtualSummaryRow,
+) activeVirtualSummaryRow {
+	row.AllCount = previous.AllCount
+	row.AllSize = previous.AllSize
+	row.AllAtimeMin = previous.AllAtimeMin
+	row.AllMtimeMax = previous.AllMtimeMax
+	row.AllAtimeBuckets = previous.AllAtimeBuckets
+	row.AllMtimeBuckets = previous.AllMtimeBuckets
+	row.AllUIDs = previous.AllUIDs
+	row.AllGIDs = previous.AllGIDs
+	row.AllFT = previous.AllFT
+	row.FileCount = previous.FileCount
+	row.FileSize = previous.FileSize
+
+	if row.IsMountRootBox == 1 && previous.IsMountRootBox == 1 {
+		row.ChildCount = previous.ChildCount
+	}
+
+	return row
+}
+
+func activeVirtualChildRowAffected(row activeVirtualChildRow, affected map[string]struct{}) bool {
+	if _, ok := affected[ensureTrailingSlash(row.ParentDir)]; ok {
+		return true
+	}
+
+	_, ok := affected[ensureTrailingSlash(row.ChildDir)]
+
+	return ok
+}
+
+func copyUnchangedActiveVirtualSummariesQuery(
+	previousActiveSetID string,
+	nextActiveSetID string,
+	affectedDirs []string,
+	updatedAt time.Time,
+	refreshedAt time.Time,
+) (string, []any) {
+	query := "INSERT INTO wrstat_active_virtual_summaries " +
+		"(active_set_id, dir, mount_path, is_mount_root_box, updated_at, all_count, all_size, " +
+		"all_atime_min, all_mtime_max, all_atime_buckets, all_mtime_buckets, all_uids, all_gids, " +
+		"all_ft, file_count, file_size, child_count, refreshed_at) SELECT ?, dir, mount_path, " +
+		"is_mount_root_box, ?, all_count, all_size, all_atime_min, all_mtime_max, all_atime_buckets, " +
+		"all_mtime_buckets, all_uids, all_gids, all_ft, file_count, file_size, child_count, ? " +
+		"FROM wrstat_active_virtual_summaries PREWHERE active_set_id = ? WHERE dir NOT IN (" +
+		placeholders(len(affectedDirs)) + ")"
+	args := []any{nextActiveSetID, updatedAt, refreshedAt, previousActiveSetID}
+
+	return query, appendActiveVirtualDirArgs(args, affectedDirs)
+}
+
+func copyUnchangedActiveVirtualFiltersQuery(
+	previousActiveSetID string,
+	nextActiveSetID string,
+	affectedDirs []string,
+	_ time.Time,
+	refreshedAt time.Time,
+) (string, []any) {
+	query := "INSERT INTO wrstat_active_virtual_filter_all " +
+		"(active_set_id, dir, age, gid, uid, ft, count, size, atime_min, mtime_max, " +
+		"atime_buckets, mtime_buckets, filter_child_count, child_count, refreshed_at) " +
+		"SELECT ?, dir, age, gid, uid, ft, count, size, atime_min, mtime_max, atime_buckets, " +
+		"mtime_buckets, filter_child_count, child_count, ? FROM wrstat_active_virtual_filter_all " +
+		"PREWHERE active_set_id = ? WHERE dir NOT IN (" + placeholders(len(affectedDirs)) + ")"
+	args := []any{nextActiveSetID, refreshedAt, previousActiveSetID}
+
+	return query, appendActiveVirtualDirArgs(args, affectedDirs)
+}
+
+func copyUnchangedActiveVirtualChildrenQuery(
+	previousActiveSetID string,
+	nextActiveSetID string,
+	affectedDirs []string,
+	_ time.Time,
+	refreshedAt time.Time,
+) (string, []any) {
+	query := "INSERT INTO wrstat_active_virtual_children " +
+		"(active_set_id, parent_dir, child_dir, mount_path, is_mount_root_box, child_count, refreshed_at) " +
+		"SELECT ?, parent_dir, child_dir, mount_path, is_mount_root_box, child_count, ? " +
+		"FROM wrstat_active_virtual_children PREWHERE active_set_id = ? WHERE parent_dir NOT IN (" +
+		placeholders(len(affectedDirs)) + ") AND child_dir NOT IN (" + placeholders(len(affectedDirs)) + ")"
+	args := []any{nextActiveSetID, refreshedAt, previousActiveSetID}
+	args = appendActiveVirtualDirArgs(args, affectedDirs)
+
+	return query, appendActiveVirtualDirArgs(args, affectedDirs)
+}
+
+func appendActiveVirtualDirArgs(args []any, dirs []string) []any {
+	for _, dir := range dirs {
+		args = append(args, ensureTrailingSlash(dir))
+	}
+
+	return args
 }
 
 func summariseSpoolBudgetUint64Input(inputs map[string]any, key string) uint64 {
