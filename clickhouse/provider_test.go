@@ -775,6 +775,84 @@ func TestActiveSetParentPacketCacheC1(t *testing.T) {
 	})
 }
 
+func TestProviderCloseCancelsAndWaitsForAsyncRefresh(t *testing.T) {
+	Convey("Close cancels async refreshes and waits before closing the shared connection", t, func() {
+		const activeSetID = "mount|snapshot|2026-01-09T12:00:00Z\n"
+
+		conn := &providerCloseTestConn{firstQuery: make(chan struct{}, 1)}
+		refreshStarted := make(chan struct{})
+		refreshCtxCanceled := make(chan struct{})
+		allowRefreshReturn := make(chan struct{})
+		refreshedActiveSetID := make(chan string, 1)
+		refreshSawClosedConn := atomic.Bool{}
+
+		cp := &chProvider{
+			cfg: Config{
+				QueryTimeout: 100 * time.Millisecond,
+			},
+			conn:  conn,
+			errCh: make(chan struct{}, 1),
+			captureSnapshot: func(context.Context) (*activeMountsSnapshot, string, error) {
+				return &activeMountsSnapshot{}, activeSetID, nil
+			},
+			buildReaders: buildProviderSwapTestReaders,
+		}
+		cp.refreshVirtualChildren = func(ctx context.Context, gotActiveSetID string) error {
+			refreshedActiveSetID <- gotActiveSetID
+
+			close(refreshStarted)
+			<-ctx.Done()
+			close(refreshCtxCanceled)
+			<-allowRefreshReturn
+			refreshSawClosedConn.Store(conn.closed.Load())
+
+			return ctx.Err()
+		}
+
+		So(cp.swapReadersAndInvoke(context.Background(), activeSetID, nil), ShouldBeTrue)
+
+		select {
+		case <-refreshStarted:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for refresh to start")
+		}
+
+		So(<-refreshedActiveSetID, ShouldEqual, activeSetID)
+
+		closeDone := make(chan error, 1)
+
+		go func() {
+			closeDone <- cp.Close()
+		}()
+
+		select {
+		case <-refreshCtxCanceled:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for Close to cancel refresh context")
+		}
+
+		select {
+		case err := <-closeDone:
+			t.Fatalf("Close returned before refresh exited: %v", err)
+		default:
+		}
+
+		So(conn.closed.Load(), ShouldBeFalse)
+
+		close(allowRefreshReturn)
+
+		select {
+		case err := <-closeDone:
+			So(err, ShouldBeNil)
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for Close to return")
+		}
+
+		So(refreshSawClosedConn.Load(), ShouldBeFalse)
+		So(conn.closed.Load(), ShouldBeTrue)
+	})
+}
+
 func TestProviderVirtualChildrenRefreshErrors(t *testing.T) {
 	Convey("provider reports asynchronous virtual children refresh failures through OnError", t, func() {
 		const activeSetID = "mount|snapshot|2026-01-09T12:00:00Z\n"
@@ -804,17 +882,11 @@ func TestProviderVirtualChildrenRefreshErrors(t *testing.T) {
 
 		So(<-refreshedActiveSetID, ShouldEqual, activeSetID)
 
-		cp.drainErrors(context.Background())
-
-		select {
-		case err := <-got:
-			So(err.Error(), ShouldContainSubstring, "virtual_children_refresh")
-			So(err.Error(), ShouldContainSubstring, "active_set_id")
-			So(err.Error(), ShouldContainSubstring, "mount|snapshot|2026-01-09T12:00:00Z")
-			So(errors.Is(err, errProviderTestErr1), ShouldBeTrue)
-		case <-time.After(2 * time.Second):
-			t.Fatalf("timed out waiting for OnError")
-		}
+		err := waitForProviderOnError(t, cp, got)
+		So(err.Error(), ShouldContainSubstring, "virtual_children_refresh")
+		So(err.Error(), ShouldContainSubstring, "active_set_id")
+		So(err.Error(), ShouldContainSubstring, "mount|snapshot|2026-01-09T12:00:00Z")
+		So(errors.Is(err, errProviderTestErr1), ShouldBeTrue)
 
 		select {
 		case err := <-got:
@@ -1581,17 +1653,11 @@ func TestProviderActivePrefixRollupRefreshErrorsB1(t *testing.T) {
 
 		So(<-refreshedActiveSetID, ShouldEqual, activeSetID)
 
-		cp.drainErrors(context.Background())
-
-		select {
-		case err := <-got:
-			So(err.Error(), ShouldContainSubstring, "active_prefix_rollup_refresh")
-			So(err.Error(), ShouldContainSubstring, "active_set_id")
-			So(err.Error(), ShouldContainSubstring, activeSetID)
-			So(errors.Is(err, errProviderTestErr1), ShouldBeTrue)
-		case <-time.After(2 * time.Second):
-			t.Fatalf("timed out waiting for OnError")
-		}
+		err := waitForProviderOnError(t, cp, got)
+		So(err.Error(), ShouldContainSubstring, "active_prefix_rollup_refresh")
+		So(err.Error(), ShouldContainSubstring, "active_set_id")
+		So(err.Error(), ShouldContainSubstring, activeSetID)
+		So(errors.Is(err, errProviderTestErr1), ShouldBeTrue)
 	})
 }
 
@@ -1609,4 +1675,26 @@ func newProviderAsyncRefreshTestProvider(
 	}
 
 	return cp, refreshDone, refreshedActiveSetID
+}
+
+func waitForProviderOnError(t *testing.T, cp *chProvider, got <-chan error) error {
+	t.Helper()
+
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+
+	timeout := time.NewTimer(2 * time.Second)
+	defer timeout.Stop()
+
+	for {
+		cp.drainErrors(context.Background())
+
+		select {
+		case err := <-got:
+			return err
+		case <-ticker.C:
+		case <-timeout.C:
+			t.Fatalf("timed out waiting for OnError")
+		}
+	}
 }

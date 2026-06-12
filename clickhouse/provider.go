@@ -71,9 +71,13 @@ type snapshotCapturer func(context.Context) (*activeMountsSnapshot, string, erro
 
 type clickHouseConfigConnector func(context.Context, Config) (ch.Conn, error)
 
-type virtualChildrenRefresher func(context.Context, string) error
+type activeSetRefresher func(context.Context, string) error
 
-type activePrefixRollupsRefresher func(context.Context, string) error
+type activeSetRefreshReporter func(context.Context, string, activeSetRefresher)
+
+type virtualChildrenRefresher = activeSetRefresher
+
+type activePrefixRollupsRefresher = activeSetRefresher
 
 type chProvider struct {
 	cfg Config
@@ -109,6 +113,8 @@ type chProvider struct {
 	closing        bool
 	workersStarted bool
 	workerCancels  []context.CancelFunc
+	refreshCancels map[uint64]context.CancelFunc
+	nextRefreshID  uint64
 	wg             sync.WaitGroup
 }
 
@@ -302,9 +308,18 @@ func (p *chProvider) cancelWorkers() {
 	p.closing = true
 	cancels := append([]context.CancelFunc(nil), p.workerCancels...)
 
+	refreshCancels := make([]context.CancelFunc, 0, len(p.refreshCancels))
+	for _, cancel := range p.refreshCancels {
+		refreshCancels = append(refreshCancels, cancel)
+	}
+
 	p.mu.Unlock()
 
 	for _, cancel := range cancels {
+		cancel()
+	}
+
+	for _, cancel := range refreshCancels {
 		cancel()
 	}
 }
@@ -359,6 +374,16 @@ func (p *chProvider) signalPendingCallbacks() {
 	}
 }
 
+func (p *chProvider) detachConn() ch.Conn {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	conn := p.conn
+	p.conn = nil
+
+	return conn
+}
+
 func fingerprintForMountsActive(rows []mountsActiveRow) string {
 	if len(rows) == 0 {
 		return ""
@@ -410,9 +435,7 @@ func (p *chProvider) Close() error {
 
 	var err error
 
-	if p.conn != nil {
-		conn := p.conn
-		p.conn = nil
+	if conn := p.detachConn(); conn != nil {
 		err = errors.Join(err, conn.Close())
 	}
 
@@ -679,29 +702,86 @@ func (p *chProvider) buildReadersNow(ctx context.Context) (db.Database, *db.Tree
 	return dbImpl, tree, bd, fingerprint, nil
 }
 
-func (p *chProvider) refreshVirtualChildrenAsync(ctx context.Context, activeSetID string) {
+func (p *chProvider) registerRefreshCancelLocked(cancel context.CancelFunc) uint64 {
+	if p.refreshCancels == nil {
+		p.refreshCancels = make(map[uint64]context.CancelFunc)
+	}
+
+	p.nextRefreshID++
+	p.refreshCancels[p.nextRefreshID] = cancel
+
+	return p.nextRefreshID
+}
+
+func (p *chProvider) finishRefresh(refreshID uint64, cancel context.CancelFunc) {
+	cancel()
+
+	p.mu.Lock()
+	delete(p.refreshCancels, refreshID)
+	p.mu.Unlock()
+
+	p.wg.Done()
+}
+
+func (p *chProvider) prepareRefresh(
+	cancel context.CancelFunc,
+	refreshLocked func() activeSetRefresher,
+) (activeSetRefresher, uint64, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.closing {
+		return nil, 0, false
+	}
+
+	refresh := refreshLocked()
+	if refresh == nil {
+		return nil, 0, false
+	}
+
+	refreshID := p.registerRefreshCancelLocked(cancel)
+	p.wg.Add(1)
+
+	return refresh, refreshID, true
+}
+
+func (p *chProvider) refreshActiveSetAsync(
+	parent context.Context,
+	activeSetID string,
+	refreshLocked func() activeSetRefresher,
+	report activeSetRefreshReporter,
+) {
 	if activeSetID == "" {
 		return
 	}
 
-	refresh := p.virtualChildrenRefresher()
-	if refresh == nil {
+	ctx, cancel := context.WithCancel(parent)
+
+	refresh, refreshID, ok := p.prepareRefresh(cancel, refreshLocked)
+	if !ok {
+		cancel()
+
 		return
 	}
 
-	go p.refreshVirtualChildrenAndReport(ctx, activeSetID, refresh)
+	go func() {
+		defer p.finishRefresh(refreshID, cancel)
+
+		report(ctx, activeSetID, refresh)
+	}()
 }
 
-func (p *chProvider) virtualChildrenRefresher() virtualChildrenRefresher {
-	p.mu.RLock()
-	refresh := p.refreshVirtualChildren
-	conn := p.conn
-	p.mu.RUnlock()
+func (p *chProvider) refreshVirtualChildrenAsync(parent context.Context, activeSetID string) {
+	p.refreshActiveSetAsync(parent, activeSetID, p.virtualChildrenRefresherLocked, p.refreshVirtualChildrenAndReport)
+}
 
+func (p *chProvider) virtualChildrenRefresherLocked() virtualChildrenRefresher {
+	refresh := p.refreshVirtualChildren
 	if refresh != nil {
 		return refresh
 	}
 
+	conn := p.conn
 	if conn == nil {
 		return nil
 	}
@@ -718,9 +798,9 @@ func (p *chProvider) virtualChildrenRefresher() virtualChildrenRefresher {
 func (p *chProvider) refreshVirtualChildrenAndReport(
 	parent context.Context,
 	activeSetID string,
-	refresh virtualChildrenRefresher,
+	refresh activeSetRefresher,
 ) {
-	ctx, cancel := queryContext(context.WithoutCancel(parent), queryTimeout(p.cfg))
+	ctx, cancel := queryContext(parent, queryTimeout(p.cfg))
 	defer cancel()
 
 	if err := refresh(ctx, activeSetID); err != nil {
@@ -732,29 +812,22 @@ func (p *chProvider) refreshVirtualChildrenAndReport(
 	}
 }
 
-func (p *chProvider) refreshActivePrefixRollupsAsync(ctx context.Context, activeSetID string) {
-	if activeSetID == "" {
-		return
-	}
-
-	refresh := p.activePrefixRollupsRefresher()
-	if refresh == nil {
-		return
-	}
-
-	go p.refreshActivePrefixRollupsAndReport(ctx, activeSetID, refresh)
+func (p *chProvider) refreshActivePrefixRollupsAsync(parent context.Context, activeSetID string) {
+	p.refreshActiveSetAsync(
+		parent,
+		activeSetID,
+		p.activePrefixRollupsRefresherLocked,
+		p.refreshActivePrefixRollupsAndReport,
+	)
 }
 
-func (p *chProvider) activePrefixRollupsRefresher() activePrefixRollupsRefresher {
-	p.mu.RLock()
+func (p *chProvider) activePrefixRollupsRefresherLocked() activePrefixRollupsRefresher {
 	refresh := p.refreshActivePrefixRollups
-	conn := p.conn
-	p.mu.RUnlock()
-
 	if refresh != nil {
 		return refresh
 	}
 
+	conn := p.conn
 	if conn == nil {
 		return nil
 	}
@@ -767,9 +840,9 @@ func (p *chProvider) activePrefixRollupsRefresher() activePrefixRollupsRefresher
 func (p *chProvider) refreshActivePrefixRollupsAndReport(
 	parent context.Context,
 	activeSetID string,
-	refresh activePrefixRollupsRefresher,
+	refresh activeSetRefresher,
 ) {
-	ctx, cancel := queryContext(context.WithoutCancel(parent), queryTimeout(p.cfg))
+	ctx, cancel := queryContext(parent, queryTimeout(p.cfg))
 	defer cancel()
 
 	if err := refresh(ctx, activeSetID); err != nil {
