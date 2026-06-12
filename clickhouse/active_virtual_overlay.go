@@ -60,6 +60,8 @@ const (
 		"PREWHERE active_set_id = ? WHERE dir = ? LIMIT 1"
 	activeVirtualMountRootBoxQuery = "SELECT is_mount_root_box FROM wrstat_active_virtual_summaries " +
 		"PREWHERE active_set_id = ? WHERE dir = ? LIMIT 1"
+	activeVirtualMountRootBoxesQuery = "SELECT dir, is_mount_root_box FROM wrstat_active_virtual_summaries " +
+		"PREWHERE active_set_id = ? WHERE dir IN (%s)"
 	activeVirtualRootGUTAsQuery = "SELECT dir, " + dgutaTupleColumns + " FROM (" +
 		"SELECT d.mount_path AS dir, arrayJoin(" + dgutaPrefixedArrayZipExpr + ") AS g " +
 		"FROM wrstat_dir_facts d WHERE d.dir = d.mount_path AND %s)"
@@ -498,7 +500,7 @@ func activeVirtualCandidateDir(dir string, mounts []activeMount) bool {
 	key := ensureTrailingSlash(dir)
 	for _, mount := range mounts {
 		mountPath := ensureTrailingSlash(mount.mountPath)
-		if key != mountPath && strings.HasPrefix(mountPath, key) {
+		if strings.HasPrefix(mountPath, key) {
 			return true
 		}
 	}
@@ -507,15 +509,15 @@ func activeVirtualCandidateDir(dir string, mounts []activeMount) bool {
 }
 
 func activeVirtualCanSummarizeExactMountRoot(filter *db.Filter) bool {
-	if filter == nil || fullFilterAlwaysEmpty(filter) {
+	if fullFilterAlwaysEmpty(filter) {
 		return false
 	}
 
 	if _, ok := mountDirSummaryModeForFilter(filter); ok {
-		return false
+		return true
 	}
 
-	return dirFilterAllCanHandleFilter(filter)
+	return filter == nil || dirFilterAllCanHandleFilter(filter)
 }
 
 func activeVirtualExactMountRootCandidate(dir string, mounts []activeMount) bool {
@@ -526,6 +528,42 @@ func activeVirtualExactMountRootCandidate(dir string, mounts []activeMount) bool
 	}
 
 	return false
+}
+
+func activeVirtualHandledDirsWithoutChildren(
+	dirs []string,
+	children map[string][]string,
+	handled map[string]bool,
+) []string {
+	out := make([]string, 0, len(dirs))
+
+	for _, dir := range dirs {
+		key := ensureTrailingSlash(dir)
+		if handled[key] && len(children[key]) == 0 {
+			out = append(out, key)
+		}
+	}
+
+	return out
+}
+
+func scanActiveVirtualMountRootBoxes(rows rowsScanner) (map[string]bool, error) {
+	out := make(map[string]bool)
+
+	for rows.Next() {
+		var (
+			dir            string
+			isMountRootBox uint8
+		)
+
+		if err := rows.Scan(&dir, &isMountRootBox); err != nil {
+			return nil, fmt.Errorf("clickhouse: failed to scan active virtual mount-root box: %w", err)
+		}
+
+		out[dir] = isMountRootBox == 1
+	}
+
+	return out, rowIterationErr(rows, "clickhouse: active virtual mount-root boxes iteration error")
 }
 
 func (d *clickHouseDatabase) activeVirtualReadySetForDirs(
@@ -665,6 +703,10 @@ func (d *clickHouseDatabase) activeVirtualSummaries(
 	dirs []string,
 	filter *db.Filter,
 ) (map[string]*db.DirSummary, map[string]bool, bool, error) {
+	if filter == nil {
+		return d.activeVirtualScalarSummaries(ctx, activeSetID, updatedAt, dirs, filter)
+	}
+
 	if mode, ok := mountDirSummaryModeForFilter(filter); ok {
 		if mode == mountDirSummaryFiles {
 			return d.activeVirtualFullFilterSummaries(ctx, activeSetID, updatedAt, dirs, filter)
@@ -863,7 +905,7 @@ func (d *clickHouseDatabase) activeVirtualDirIsMountRootBox(
 	return isMountRootBox == 1, nil
 }
 
-//nolint:funlen,gocyclo
+//nolint:funlen,gocognit,gocyclo
 func (d *clickHouseDatabase) activeVirtualChildrenForParents(
 	dirs []string,
 ) (map[string][]string, map[string]bool, error) {
@@ -906,7 +948,62 @@ func (d *clickHouseDatabase) activeVirtualChildrenForParents(
 		return nil, nil, err
 	}
 
+	if err := d.removeHandledActiveVirtualMountRootBoxLeaves(ctx, activeSetID, dirs, children, handled); err != nil {
+		return nil, nil, err
+	}
+
 	return children, handled, nil
+}
+
+func (d *clickHouseDatabase) removeHandledActiveVirtualMountRootBoxLeaves(
+	ctx context.Context,
+	activeSetID string,
+	dirs []string,
+	children map[string][]string,
+	handled map[string]bool,
+) error {
+	dirsWithoutChildren := activeVirtualHandledDirsWithoutChildren(dirs, children, handled)
+	if len(dirsWithoutChildren) == 0 {
+		return nil
+	}
+
+	mountRootBoxes, err := d.activeVirtualMountRootBoxes(ctx, activeSetID, dirsWithoutChildren)
+	if err != nil {
+		return err
+	}
+
+	for dir, isMountRootBox := range mountRootBoxes {
+		if isMountRootBox {
+			delete(handled, dir)
+		}
+	}
+
+	return nil
+}
+
+func (d *clickHouseDatabase) activeVirtualMountRootBoxes(
+	ctx context.Context,
+	activeSetID string,
+	dirs []string,
+) (map[string]bool, error) {
+	query, args := activeVirtualDirsQuery(
+		fmt.Sprintf(activeVirtualMountRootBoxesQuery, placeholders(len(dirs))),
+		activeSetID,
+		dirs,
+	)
+
+	rows, err := d.conn.Query(ctx, query, args...)
+	if err != nil {
+		if isUnknownTable(err) {
+			return map[string]bool{}, nil
+		}
+
+		return nil, fmt.Errorf("clickhouse: failed to query active virtual mount-root boxes: %w", err)
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	return scanActiveVirtualMountRootBoxes(rows)
 }
 
 //nolint:funlen,gocyclo

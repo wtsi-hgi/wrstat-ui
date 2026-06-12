@@ -831,9 +831,33 @@ func (d *clickHouseDatabase) DirInfo(
 		return d.dirInfoMissingActiveMount(dir, filter)
 	}
 
+	return d.dirInfoActiveMount(mount, dir, filter)
+}
+
+func (d *clickHouseDatabase) dirInfoActiveMount(
+	mount activeMount,
+	dir string,
+	filter *db.Filter,
+) (*db.DirSummary, error) {
+	if sum, handled, err := d.activeVirtualExactMountRootDirInfo(mount, dir, filter); err != nil || handled {
+		return sum, err
+	}
+
 	return d.dirInfoSingleMount(
 		mount.mountPath, mount.snapshotID, mount.updatedAt, dir, filter,
 	)
+}
+
+func (d *clickHouseDatabase) activeVirtualExactMountRootDirInfo(
+	mount activeMount,
+	dir string,
+	filter *db.Filter,
+) (*db.DirSummary, bool, error) {
+	if ensureTrailingSlash(dir) != ensureTrailingSlash(mount.mountPath) {
+		return nil, false, nil
+	}
+
+	return d.activeVirtualDirInfo(dir, filter)
 }
 
 func (d *clickHouseDatabase) dirInfoOutsideMount(

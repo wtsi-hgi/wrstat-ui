@@ -1191,25 +1191,47 @@ func TestClickHouseDatabaseActiveVirtualOverlayC2(t *testing.T) {
 		So(sum.Count, ShouldEqual, 100)
 	})
 
-	Convey("C2.4-C2.5 mixed8 virtual paths match deterministic filter totals without fact reads", t, func() {
-		env, cleanup := newC2ActiveVirtualEnv(t, c2Mixed8MountSeeds())
+	Convey("C2.4-C2.5 mixed8 virtual paths and mount-root boxes match filter totals without fact reads", t, func() {
+		seeds := c2Mixed8MountSeeds()
+
+		env, cleanup := newC2ActiveVirtualEnv(t, seeds)
 		defer cleanup()
 
 		for _, tc := range c2Mixed8FilterMatrix() {
 			Convey(tc.name, func() {
+				expectedSummaries := c2Mixed8ExpectedSummariesForSeedsAndAge(seeds, tc.ageDivisor)
+				So(expectedSummaries, ShouldHaveLength, 11)
+
+				resetSharedTreeQueryCachesForTesting()
+				ResetSchema3FallbackRoutes()
+
 				countingConn := &c2ActiveVirtualRouteCountingConn{Conn: env.providerConn}
 				dbch := newClickHouseDatabaseWithSnapshot(env.cfg, countingConn, env.snapshot)
 
-				for _, expected := range c2Mixed8ExpectedSummariesForAge(tc.ageDivisor) {
-					Convey(expected.dir, func() {
-						sum, err := dbch.DirInfo(expected.dir, tc.filter)
-						So(err, ShouldBeNil)
-						So(c2DirSummaryDigest(sum), ShouldEqual, c2ExpectedDirSummaryDigest(expected, tc.expectedAge))
-					})
+				for _, expected := range expectedSummaries {
+					sum, err := dbch.DirInfo(expected.dir, tc.filter)
+					So(err, ShouldBeNil)
+					So(c2DirSummaryDigest(sum), ShouldEqual, c2ExpectedDirSummaryDigest(expected, tc.expectedAge))
 				}
 
-				So(countingConn.activeVirtualReadsValue(), ShouldBeGreaterThan, 0)
-				So(countingConn.dirFactReadsValue(), ShouldEqual, 0)
+				c2AssertActiveVirtualOnlyRoute(countingConn)
+
+				resetSharedTreeQueryCachesForTesting()
+				ResetSchema3FallbackRoutes()
+
+				countingConn = &c2ActiveVirtualRouteCountingConn{Conn: env.providerConn}
+				dbch = newClickHouseDatabaseWithSnapshot(env.cfg, countingConn, env.snapshot)
+
+				dirs := c2ExpectedSummaryDirs(expectedSummaries)
+				summaries, err := dbch.DirInfos(dirs, tc.filter)
+				So(err, ShouldBeNil)
+
+				for _, expected := range expectedSummaries {
+					sum := summaries[expected.dir]
+					So(c2DirSummaryDigest(sum), ShouldEqual, c2ExpectedDirSummaryDigest(expected, tc.expectedAge))
+				}
+
+				c2AssertActiveVirtualOnlyRoute(countingConn)
 			})
 		}
 	})
@@ -1642,6 +1664,7 @@ func c2Mixed8FilterMatrix() []struct {
 		expectedAge db.DirGUTAge
 		ageDivisor  uint64
 	}{
+		{name: "nil default", filter: nil, expectedAge: db.DGUTAgeAll, ageDivisor: 1},
 		{name: "default empty", filter: &db.Filter{}, expectedAge: db.DGUTAgeAll, ageDivisor: 1},
 		{name: "age all", filter: &db.Filter{Age: db.DGUTAgeAll}, expectedAge: db.DGUTAgeAll, ageDivisor: 1},
 		{
@@ -1672,6 +1695,28 @@ func c2Mixed8FilterMatrix() []struct {
 		{name: "unused 1y", filter: &db.Filter{Age: db.DGUTAgeA1Y}, expectedAge: db.DGUTAgeA1Y, ageDivisor: 10},
 		{name: "unchanged 1y", filter: &db.Filter{Age: db.DGUTAgeM1Y}, expectedAge: db.DGUTAgeM1Y, ageDivisor: 20},
 	}
+}
+
+func c2Mixed8ExpectedSummariesForSeedsAndAge(seeds []c2MountSeed, divisor uint64) []struct {
+	dir   string
+	count uint64
+	size  uint64
+} {
+	out := c2Mixed8ExpectedSummariesForAge(divisor)
+
+	for _, seed := range seeds {
+		out = append(out, struct {
+			dir   string
+			count uint64
+			size  uint64
+		}{
+			dir:   seed.mountPath,
+			count: seed.count / divisor,
+			size:  c2SeedSize(seed) / divisor,
+		})
+	}
+
+	return out
 }
 
 func c2Mixed8ExpectedSummariesForAge(divisor uint64) []struct {
@@ -1738,6 +1783,26 @@ func c2ExpectedDirSummaryDigest(
 		FT:    uint16(db.DGUTAFileTypeBam),
 		Age:   uint8(age),
 	})
+}
+
+func c2AssertActiveVirtualOnlyRoute(countingConn *c2ActiveVirtualRouteCountingConn) {
+	So(countingConn.activeVirtualReadsValue(), ShouldBeGreaterThan, 0)
+	So(countingConn.dirFactReadsValue(), ShouldEqual, 0)
+	So(countingConn.factVectorReadsValue(), ShouldEqual, 0)
+	So(ReadSchema3FallbackRoutes()[parentFactsFallbackRouteName()], ShouldEqual, uint64(0))
+}
+
+func c2ExpectedSummaryDirs(expectedSummaries []struct {
+	dir   string
+	count uint64
+	size  uint64
+}) []string {
+	dirs := make([]string, 0, len(expectedSummaries))
+	for _, expected := range expectedSummaries {
+		dirs = append(dirs, expected.dir)
+	}
+
+	return dirs
 }
 
 func c2WhereDigest(summaries db.DCSs) string {
