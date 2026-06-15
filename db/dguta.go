@@ -74,6 +74,10 @@ func (d *DGUTA) Append(other *DGUTA) {
 
 type RecordDGUTA struct {
 	Dir        *summary.DirectoryPath
+	DirID      uint32
+	ParentID   uint32
+	SubtreeEnd uint32
+	Depth      uint16
 	GUTAs      GUTAs
 	Children   []string
 	ChildCount uint64

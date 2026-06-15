@@ -36,8 +36,8 @@ A1 (count/distinct-full_path invariant, interval-vs-parent_id-walk
 invariant, root `parent_id = 0xFFFFFFFF`, full_path-vs-parent-walk
 byte equality).
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
 
 ### Item 1.2: B1 - preorder id assignment in the DFS walk
 
@@ -59,8 +59,8 @@ real fixture, `ErrTooManyDirs` on overflow, `ErrNonContiguousInput` on a
 re-entered directory boundary). Depends on Item 1.1 (catalog schema
 target).
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
 
 ### Item 1.3: B2 - above-root ancestor reserved low-id block
 
@@ -78,8 +78,8 @@ from B2 (reserved chain ids + first descendant >= D+1, ancestor
 `subtree_end = next` with interval invariant, root sentinel + `[0,
 next)` spans all rows). Depends on Item 1.2.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
 
 ### Item 1.4: B3 - ids carried to writers
 
@@ -92,8 +92,8 @@ existing test file `summary/dirguta/dirguta_test.go`. Covers the 1
 acceptance test from B3 (each `RecordDGUTA`'s ids match the catalog
 row for that directory's `full_path`). Depends on Item 1.2 and 1.3.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
 
 ### Item 1.5: B4 - import cost measured, not assumed
 
@@ -107,8 +107,8 @@ dependency the benchmark must honour; no implementation lands in this
 phase beyond ensuring the id path adds no maps/time/concurrency
 (determinism preserved per B1). Depends on Items 1.2-1.4.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
 
 ### Item 1.6: B5 - shared id allocator visible to file ingest
 
@@ -132,5 +132,5 @@ consumption and B5 acceptance tests 1-4 (each `wrstat_files` row's
 the file-ingest writer lands (Phase 2, Item 2.2), since they need the
 files/spool rows. Depends on Items 1.2, 1.3.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed

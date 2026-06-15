@@ -222,6 +222,11 @@ func wireClickHouseOperations( //nolint:funlen
 	modtime time.Time,
 	diag *summariseDiagnostics,
 ) (func(bool) error, error) {
+	idAllocator := summary.NewDirIDAllocator()
+	if err := idAllocator.SetMountPath(mountPath); err != nil {
+		return nil, fmt.Errorf("failed to reserve directory ids: %w", err)
+	}
+
 	dw, err := clickhouse.NewDGUTAWriter(cfg)
 	if err != nil {
 		return nil, fmt.Errorf(
@@ -230,7 +235,7 @@ func wireClickHouseOperations( //nolint:funlen
 	}
 
 	fi, fiCloser, err := clickhouse.NewFileIngestOperation(
-		cfg, mountPath, modtime,
+		cfg, mountPath, modtime, idAllocator,
 	)
 	if err != nil {
 		return nil, errors.Join(
@@ -258,7 +263,7 @@ func wireClickHouseOperations( //nolint:funlen
 	setClickHouseBatchSize(summariseDBBatchSize, bs)
 	setSummariseImportPhaseRecorder(diag.recordImportPhase, bs)
 
-	s.AddDirectoryOperation(dirguta.NewDirGroupUserTypeAge(dw))
+	s.AddDirectoryOperation(dirguta.NewDirGroupUserTypeAge(dw, idAllocator))
 	s.AddGlobalOperation(fi)
 
 	var basedirsCloser func(bool) error

@@ -43,7 +43,16 @@ const (
 	maxNumOfGUTAKeys           = 34
 	lengthOfGUTAKey            = 12
 	streamingChildrenBatchSize = 16_384
+	parentSentinel             = summary.ParentSentinel
 )
+
+// ErrTooManyDirs is returned when the next directory id would collide with the
+// reserved parent sentinel value.
+var ErrTooManyDirs = summary.ErrTooManyDirs
+
+// ErrNonContiguousInput is returned when a directory boundary is re-entered
+// after its subtree has already been closed.
+var ErrNonContiguousInput = summary.ErrNonContiguousInput
 
 var gutaKeyPool = sync.Pool{ //nolint:gochecknoglobals
 	New: func() any {
@@ -80,8 +89,16 @@ func (g gutaKey) String() string {
 	return unsafe.String(&a[0], len(a))
 }
 
-func newDirGroupUserTypeAge(d DB, refTime int64, now int64) summary.OperationGenerator {
+func newDirGroupUserTypeAge(
+	d DB,
+	refTime int64,
+	now int64,
+	alloc ...*summary.DirIDAllocator,
+) summary.OperationGenerator {
 	var last *DirGroupUserTypeAge
+
+	idAssigner := newDirIDAssigner()
+	idAllocator := optionalDirIDAllocator(alloc)
 
 	childDB, streamChildren := d.(db.DGUTAChildrenWriter)
 
@@ -90,6 +107,8 @@ func newDirGroupUserTypeAge(d DB, refTime int64, now int64) summary.OperationGen
 			parent:         last,
 			db:             d,
 			childDB:        childDB,
+			idAssigner:     idAssigner,
+			idAllocator:    idAllocator,
 			streamChildren: streamChildren,
 			store:          gutaStore{make(map[gutaKey]*summary.SummaryWithTimes), refTime},
 			now:            now,
@@ -98,6 +117,18 @@ func newDirGroupUserTypeAge(d DB, refTime int64, now int64) summary.OperationGen
 
 		return last
 	}
+}
+
+func newDirIDAssigner() *dirIDAssigner {
+	return new(dirIDAssigner)
+}
+
+func optionalDirIDAllocator(alloc []*summary.DirIDAllocator) *summary.DirIDAllocator {
+	if len(alloc) == 0 {
+		return nil
+	}
+
+	return alloc[0]
 }
 
 type gutaKeys []gutaKey
@@ -154,6 +185,10 @@ func (g *gutaKeys) append(gid, uid uint32, fileType db.DirGUTAFileType) {
 	for _, age := range db.DirGUTAges {
 		*g = append(*g, gutaKey{gid, uid, fileType, age})
 	}
+}
+
+func sameDirectoryPath(a *summary.DirectoryPath, b *summary.DirectoryPath) bool {
+	return !a.Less(b) && !b.Less(a)
 }
 
 // gutaStore is a sortable map with gid,uid,filetype,age as keys and
@@ -252,18 +287,22 @@ type DB interface {
 }
 
 // NewDirGroupUserTypeAge returns a DirGroupUserTypeAge.
-func NewDirGroupUserTypeAge(db DB) summary.OperationGenerator {
+func NewDirGroupUserTypeAge(db DB, alloc ...*summary.DirIDAllocator) summary.OperationGenerator {
 	refTime := time.Now().Unix()
 
-	return newDirGroupUserTypeAge(db, refTime, time.Now().Unix())
+	return newDirGroupUserTypeAge(db, refTime, time.Now().Unix(), alloc...)
 }
 
 // NewDirGroupUserTypeAgeAt returns a DirGroupUserTypeAge using referenceTime
 // for age buckets and directory access times.
-func NewDirGroupUserTypeAgeAt(db DB, referenceTime time.Time) summary.OperationGenerator {
+func NewDirGroupUserTypeAgeAt(
+	db DB,
+	referenceTime time.Time,
+	alloc ...*summary.DirIDAllocator,
+) summary.OperationGenerator {
 	refTime := referenceTime.Unix()
 
-	return newDirGroupUserTypeAge(db, refTime, refTime)
+	return newDirGroupUserTypeAge(db, refTime, refTime, alloc...)
 }
 
 // inodeEntry stores metadata for a specific inode to track hardlinks.
@@ -279,12 +318,79 @@ type inodeEntry struct {
 	uid      uint32
 }
 
+type dirIDAssigner struct {
+	next        uint32
+	closedFloor *summary.DirectoryPath
+	reserved    bool
+}
+
+func (a *dirIDAssigner) assign(dir *summary.DirectoryPath) (uint32, error) {
+	if a.closedFloor != nil && (!a.closedFloor.Less(dir) || isAncestorOrSelf(a.closedFloor, dir)) {
+		return 0, ErrNonContiguousInput
+	}
+
+	if !a.reserved && a.next == 0 {
+		return a.assignDataRoot(dir)
+	}
+
+	if a.next == parentSentinel {
+		return 0, ErrTooManyDirs
+	}
+
+	a.reserved = true
+
+	id := a.next
+	a.next++
+
+	return id, nil
+}
+
+func isAncestorOrSelf(ancestor *summary.DirectoryPath, dir *summary.DirectoryPath) bool {
+	if ancestor.Depth > dir.Depth {
+		return false
+	}
+
+	for dir.Depth > ancestor.Depth {
+		dir = dir.Parent
+	}
+
+	return sameDirectoryPath(ancestor, dir)
+}
+
+func (a *dirIDAssigner) assignDataRoot(dir *summary.DirectoryPath) (uint32, error) {
+	id, err := reservedDirIDForDepth(dir.Depth)
+	if err != nil {
+		return 0, err
+	}
+
+	a.reserved = true
+	a.next = id + 1
+
+	return id, nil
+}
+
+func reservedDirIDForDepth(depth int) (uint32, error) {
+	if depth < 0 || uint64(depth) >= uint64(parentSentinel) {
+		return 0, ErrTooManyDirs
+	}
+
+	return uint32(depth), nil
+}
+
+func (a *dirIDAssigner) close(dir *summary.DirectoryPath) {
+	if a.closedFloor == nil || a.closedFloor.Less(dir) {
+		a.closedFloor = dir
+	}
+}
+
 // DirGroupUserTypeAge is used to summarise file stats by directory, group,
 // user, file type and age.
 type DirGroupUserTypeAge struct {
 	parent         *DirGroupUserTypeAge
 	db             DB
 	childDB        db.DGUTAChildrenWriter
+	idAssigner     *dirIDAssigner
+	idAllocator    *summary.DirIDAllocator
 	store          gutaStore
 	thisDir        *summary.DirectoryPath
 	children       []string
@@ -293,6 +399,11 @@ type DirGroupUserTypeAge struct {
 	now            int64
 	isTempDir      bool
 	seenHardlinks  map[int64]*inodeEntry
+	dirID          uint32
+	parentID       uint32
+	subtreeEnd     uint32
+	depth          uint16
+	idAssigned     bool
 }
 
 // Add is a summary.Operation method. It will break path in to its directories
@@ -313,6 +424,10 @@ func (d *DirGroupUserTypeAge) Add(info *summary.FileInfo) error { //nolint:funle
 	if d.thisDir == nil {
 		d.thisDir = info.Path
 		d.isTempDir = d.parent != nil && d.parent.isTempDir || IsTemp(info.Name)
+
+		if err := d.assignDirectoryID(info.Path); err != nil {
+			return err
+		}
 	}
 
 	if info.IsDir() && info.Path != nil && info.Path.Parent == d.thisDir {
@@ -345,6 +460,76 @@ func (d *DirGroupUserTypeAge) Add(info *summary.FileInfo) error { //nolint:funle
 	gutaKeyPool.Put(gutaKeysA)
 
 	return nil
+}
+
+func (d *DirGroupUserTypeAge) assignDirectoryID(dir *summary.DirectoryPath) error {
+	if d.idAllocator != nil {
+		return d.assignDirectoryIDWithAllocator(dir)
+	}
+
+	d.ensureIDAssigner()
+
+	parentID, err := d.parentDirID(dir)
+	if err != nil {
+		return err
+	}
+
+	dirID, err := d.idAssigner.assign(dir)
+	if err != nil {
+		return err
+	}
+
+	d.dirID = dirID
+	d.parentID = parentID
+	d.depth = uint16(dir.Depth) //nolint:gosec // directory depth is bounded by summariser traversal.
+	d.idAssigned = true
+
+	return nil
+}
+
+func (d *DirGroupUserTypeAge) assignDirectoryIDWithAllocator(dir *summary.DirectoryPath) error {
+	parentID, err := d.parentDirID(dir)
+	if err != nil {
+		return err
+	}
+
+	dirID, err := d.idAllocator.Enter(dir)
+	if err != nil {
+		return err
+	}
+
+	d.dirID = dirID
+	d.parentID = parentID
+	d.depth = uint16(dir.Depth) //nolint:gosec // directory depth is bounded by summariser traversal.
+	d.idAssigned = true
+
+	return nil
+}
+
+func (d *DirGroupUserTypeAge) parentDirID(dir *summary.DirectoryPath) (uint32, error) {
+	if d.parent == nil {
+		return reservedParentIDForDepth(dir.Depth)
+	}
+
+	if d.parent.thisDir != dir.Parent || !d.parent.idAssigned {
+		return 0, ErrNonContiguousInput
+	}
+
+	return d.parent.dirID, nil
+}
+
+func (d *DirGroupUserTypeAge) ensureIDAssigner() {
+	if d.idAssigner != nil {
+		return
+	}
+
+	if d.parent != nil && d.parent.idAssigner != nil {
+		d.idAssigner = d.parent.idAssigner
+
+		return
+	}
+
+	d.idAssigner = newDirIDAssigner()
 }
 
 func (d *DirGroupUserTypeAge) addChildName(child string) error {
@@ -475,8 +660,16 @@ func (d *DirGroupUserTypeAge) Output() error {
 		return err
 	}
 
+	if err := d.finishDirectoryID(); err != nil {
+		return err
+	}
+
 	dguta := db.RecordDGUTA{
 		Dir:        d.thisDir,
+		DirID:      d.dirID,
+		ParentID:   d.parentID,
+		SubtreeEnd: d.subtreeEnd,
+		Depth:      d.depth,
 		Children:   d.children,
 		ChildCount: d.childCount,
 	}
@@ -490,7 +683,7 @@ func (d *DirGroupUserTypeAge) Output() error {
 	}
 
 	if d.parent == nil { //nolint:nestif
-		if err := d.outputRoot(dguta); err != nil {
+		if err := d.outputRoot(); err != nil {
 			return err
 		}
 	} else {
@@ -498,6 +691,28 @@ func (d *DirGroupUserTypeAge) Output() error {
 	}
 
 	d.clear()
+
+	return nil
+}
+
+func (d *DirGroupUserTypeAge) finishDirectoryID() error {
+	if !d.idAssigned {
+		return nil
+	}
+
+	if d.idAllocator != nil {
+		subtreeEnd, err := d.idAllocator.Leave(d.thisDir)
+		if err != nil {
+			return err
+		}
+
+		d.subtreeEnd = subtreeEnd
+
+		return nil
+	}
+
+	d.subtreeEnd = d.idAssigner.next
+	d.idAssigner.close(d.thisDir)
 
 	return nil
 }
@@ -562,11 +777,29 @@ func (d *DirGroupUserTypeAge) getGUTA(guta gutaKey) *db.GUTA {
 	}
 }
 
-func (d *DirGroupUserTypeAge) outputRoot(dguta db.RecordDGUTA) error {
+func (d *DirGroupUserTypeAge) outputRoot() error {
 	for thisDir := d.thisDir; thisDir.Parent != nil; thisDir = thisDir.Parent {
-		dguta.Dir = thisDir.Parent
-		dguta.Children = []string{thisDir.Name}
-		dguta.ChildCount = 1
+		ancestor := thisDir.Parent
+
+		dirID, err := reservedDirIDForDepth(ancestor.Depth)
+		if err != nil {
+			return err
+		}
+
+		parentID, err := reservedParentIDForDepth(ancestor.Depth)
+		if err != nil {
+			return err
+		}
+
+		dguta := db.RecordDGUTA{
+			Dir:        ancestor,
+			DirID:      dirID,
+			ParentID:   parentID,
+			SubtreeEnd: d.nextDirID(),
+			Depth:      uint16(ancestor.Depth), //nolint:gosec // directory depth is bounded by summariser traversal.
+			Children:   []string{thisDir.Name},
+			ChildCount: 1,
+		}
 
 		if err := d.db.Add(dguta); err != nil {
 			return err
@@ -576,6 +809,22 @@ func (d *DirGroupUserTypeAge) outputRoot(dguta db.RecordDGUTA) error {
 	return nil
 }
 
+func reservedParentIDForDepth(depth int) (uint32, error) {
+	if depth == 0 {
+		return parentSentinel, nil
+	}
+
+	return reservedDirIDForDepth(depth - 1)
+}
+
+func (d *DirGroupUserTypeAge) nextDirID() uint32 {
+	if d.idAllocator != nil {
+		return d.idAllocator.Next()
+	}
+
+	return d.idAssigner.next
+}
+
 func (d *DirGroupUserTypeAge) clear() {
 	d.store.clear()
 	clear(d.seenHardlinks)
@@ -583,4 +832,9 @@ func (d *DirGroupUserTypeAge) clear() {
 	d.thisDir = nil
 	d.children = nil
 	d.childCount = 0
+	d.dirID = 0
+	d.parentID = 0
+	d.subtreeEnd = 0
+	d.depth = 0
+	d.idAssigned = false
 }

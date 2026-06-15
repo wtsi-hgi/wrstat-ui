@@ -183,9 +183,10 @@ type fileIngestWriter struct {
 
 	conn ch.Conn
 
-	mountPath string
-	updatedAt time.Time
-	snapshot  uuid.UUID
+	mountPath   string
+	updatedAt   time.Time
+	snapshot    uuid.UUID
+	idAllocator *summary.DirIDAllocator
 
 	prepared bool
 	batch    driver.Batch
@@ -322,6 +323,10 @@ func (w *fileIngestWriter) bufferFileInfo(info *summary.FileInfo) (bool, error) 
 		return false, nil
 	}
 
+	if _, err := w.fileInfoDirID(info); err != nil {
+		return false, err
+	}
+
 	row, err := fileIngestRowFromInfo(w.mountPath, w.snapshot, parentDir, name, info)
 	if err != nil {
 		return false, err
@@ -351,6 +356,22 @@ func canonicalFileIngestPath(mountPath, parentDir, name string) (string, string,
 	}
 
 	return strings.TrimSuffix(parentDir, name), name, true
+}
+
+func (w *fileIngestWriter) fileInfoDirID(info *summary.FileInfo) (uint32, error) {
+	if w.idAllocator == nil {
+		return 0, nil
+	}
+
+	return w.idAllocator.DirID(fileIngestDirIDPath(info))
+}
+
+func fileIngestDirIDPath(info *summary.FileInfo) *summary.DirectoryPath {
+	if info.IsDir() {
+		return info.Path.Parent
+	}
+
+	return info.Path
 }
 
 func (w *fileIngestWriter) ensureSnapshotID() {
@@ -477,6 +498,7 @@ func NewFileIngestOperation(
 	cfg Config,
 	mountPath string,
 	updatedAt time.Time,
+	alloc ...*summary.DirIDAllocator,
 ) (summary.OperationGenerator, io.Closer, error) {
 	conn, err := connectForFileIngest(cfg)
 	if err != nil {
@@ -484,12 +506,13 @@ func NewFileIngestOperation(
 	}
 
 	w := &fileIngestWriter{
-		cfg:       cfg,
-		conn:      conn,
-		mountPath: mountPath,
-		updatedAt: updatedAt,
-		snapshot:  snapshotID(mountPath, updatedAt),
-		batchSize: defaultBatchSize,
+		cfg:         cfg,
+		conn:        conn,
+		mountPath:   mountPath,
+		updatedAt:   updatedAt,
+		snapshot:    snapshotID(mountPath, updatedAt),
+		idAllocator: optionalFileIngestDirIDAllocator(alloc),
+		batchSize:   defaultBatchSize,
 	}
 
 	gen := func() summary.Operation {
@@ -505,6 +528,14 @@ func connectForFileIngest(cfg Config) (ch.Conn, error) {
 	}
 
 	return connectForImportFromConfig(cfg)
+}
+
+func optionalFileIngestDirIDAllocator(alloc []*summary.DirIDAllocator) *summary.DirIDAllocator {
+	if len(alloc) == 0 {
+		return nil
+	}
+
+	return alloc[0]
 }
 
 type fileIngestOperation struct {

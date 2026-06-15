@@ -514,7 +514,6 @@ func cleanSchemaSQLDenylist() []string {
 		"wrstat_dir_summary",
 		"wrstat_dir_dguta_vector",
 		"wrstat_dir_filter_index",
-		"wrstat_dirs",
 		"wrstat_tree_dguta",
 		"wrstat_tree_children",
 		"AggregatingMergeTree",

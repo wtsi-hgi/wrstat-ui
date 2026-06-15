@@ -162,6 +162,23 @@ func (m *streamingChildrenDB) AddChildren(_ *summary.DirectoryPath, children []s
 	return nil
 }
 
+type recordDGUTACatalogRow struct {
+	dirID      uint32
+	parentID   uint32
+	subtreeEnd uint32
+	depth      uint16
+}
+
+type recordDGUTACaptureDB struct {
+	records []db.RecordDGUTA
+}
+
+func (m *recordDGUTACaptureDB) Add(dguta db.RecordDGUTA) error {
+	m.records = append(m.records, dguta)
+
+	return nil
+}
+
 func TestDirGUTAFileType(t *testing.T) {
 	Convey("isTemp lets you know if a path is a temporary file", t, func() {
 		So(IsTemp(strToBS(".tmp.cram")), ShouldBeTrue)
@@ -415,6 +432,55 @@ func TestDirGUTA(t *testing.T) {
 		), ShouldBeTrue)
 	})
 
+	Convey("B3 carries catalog ids on each RecordDGUTA", t, func() {
+		const b3RefTime = int64(1779120209)
+
+		root := statsdata.NewRoot("/", b3RefTime)
+		statsdata.AddFile(root, "catalog/team/branch-a/deeper/file.txt", 10, 20, 1, b3RefTime, b3RefTime)
+		statsdata.AddFile(root, "catalog/team/branch-b/leaf/file.txt", 10, 20, 1, b3RefTime, b3RefTime)
+		statsdata.AddFile(root, "catalog/team/top-level.txt", 10, 20, 1, b3RefTime, b3RefTime)
+
+		reader := root.AsReader()
+		defer reader.Close()
+
+		s := summary.NewSummariser(stats.NewStatsParser(reader))
+		sink := new(recordDGUTACaptureDB)
+		s.AddDirectoryOperation(newDirGroupUserTypeAge(sink, b3RefTime, b3RefTime))
+
+		err := s.Summarise()
+		So(err, ShouldBeNil)
+
+		catalogRows := map[string]recordDGUTACatalogRow{
+			"/":                              {dirID: 0, parentID: parentSentinel, subtreeEnd: 7, depth: 0},
+			"/catalog/":                      {dirID: 1, parentID: 0, subtreeEnd: 7, depth: 1},
+			"/catalog/team/":                 {dirID: 2, parentID: 1, subtreeEnd: 7, depth: 2},
+			"/catalog/team/branch-a/":        {dirID: 3, parentID: 2, subtreeEnd: 5, depth: 3},
+			"/catalog/team/branch-a/deeper/": {dirID: 4, parentID: 3, subtreeEnd: 5, depth: 4},
+			"/catalog/team/branch-b/":        {dirID: 5, parentID: 2, subtreeEnd: 7, depth: 3},
+			"/catalog/team/branch-b/leaf/":   {dirID: 6, parentID: 5, subtreeEnd: 7, depth: 4},
+		}
+
+		So(len(sink.records), ShouldEqual, len(catalogRows))
+
+		seen := make(map[string]struct{}, len(sink.records))
+
+		for _, record := range sink.records {
+			fullPath := string(record.Dir.AppendTo(nil))
+			expected, ok := catalogRows[fullPath]
+			So(ok, ShouldBeTrue)
+			So(recordDGUTACatalogRow{
+				dirID:      record.DirID,
+				parentID:   record.ParentID,
+				subtreeEnd: record.SubtreeEnd,
+				depth:      record.Depth,
+			}, ShouldResemble, expected)
+
+			seen[fullPath] = struct{}{}
+		}
+
+		So(len(seen), ShouldEqual, len(catalogRows))
+	})
+
 	Convey("You can summarise data with a range of Atimes", t, func() {
 		f := statsdata.NewRoot("/", 0)
 		f.UID = uid
@@ -581,8 +647,8 @@ func TestDirGUTA(t *testing.T) {
 		So(m.hasNot("/a/b/c/", 2, 2, db.DGUTAFileTypeCram, db.DGUTAgeAll), ShouldBeTrue)
 		So(m.has("/a/b/c/", 2, 10, db.DGUTAFileTypeCram, db.DGUTAgeAll, 2, 5, atime3, mtime2), ShouldBeTrue)
 		So(m.has("/a/b/c/", 10, 2, db.DGUTAFileTypeCram, db.DGUTAgeAll, 1, 4, atime4, mtime4), ShouldBeTrue)
-		So(m.has("/", 10, 2, db.DGUTAFileTypeCram, db.DGUTAgeAll, 1, 4, atime4, mtime4), ShouldBeTrue)
-		So(m.has("/a/", 10, 2, db.DGUTAFileTypeCram, db.DGUTAgeAll, 1, 4, atime4, mtime4), ShouldBeTrue)
+		So(m.hasNot("/", 10, 2, db.DGUTAFileTypeCram, db.DGUTAgeAll), ShouldBeTrue)
+		So(m.hasNot("/a/", 10, 2, db.DGUTAFileTypeCram, db.DGUTAgeAll), ShouldBeTrue)
 		So(m.has("/a/b/", 10, 2, db.DGUTAFileTypeCram, db.DGUTAgeAll, 1, 4, atime4, mtime4), ShouldBeTrue)
 	})
 
