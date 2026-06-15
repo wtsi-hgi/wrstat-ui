@@ -36,5 +36,5 @@ captured baseline is the comparison target for the Phase 7 gate (J3,
 J4, J6). No new test code lands here; the artefact's existence and
 completeness are verified when Phase 7 consumes it.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
