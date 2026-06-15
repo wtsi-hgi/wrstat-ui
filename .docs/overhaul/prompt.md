@@ -537,3 +537,67 @@ acceptance artefact.
 
 Steps 3–6 can proceed in parallel once 1–2 land, since they share the catalog but
 touch different tables/queries.
+
+---
+
+## Notes
+
+Clarifications resolved during spec Q&A (these refine the areas above):
+
+- **Snapshot/mount keying.** `dir_id` is unique only within a
+  `(mount_path, snapshot_id)`. Every id-keyed table carries
+  `(mount_path LowCardinality, snapshot_id UUID, dir_id)` and keeps today's
+  partitioning — `dir_id` simply replaces the path column in the sort key. A
+  further optimisation that replaces the `(mount_path, snapshot_id)` pair in hot
+  rows with a compact integer `mount_key`/`snapshot_key` may be adopted **only**
+  if the benchmark shows it materially reduces part sizes; default to the simple
+  model otherwise.
+- **Path → `dir_id` resolution.** Provide a `path_hash`-based resolver that
+  **verifies the full path on hit** (so a hash collision can never return the
+  wrong directory) and a `full_path` projection/index. Default to including
+  `path_hash` as the primary resolver because exact path resolution sits under
+  the hard 100 ms p95 gate; the benchmark may drop it if the `full_path`
+  projection alone meets the gate.
+- **Stream ordering for id assignment.** The `stats` parser already emits
+  directories in DFS-contiguous order (it synthesises intermediate directory
+  entries), so a directory and all its descendants form one uninterrupted run and
+  preorder `dir_id`/`subtree_end` can be assigned with an ancestor stack during
+  the existing walk. Note that files interleave with sibling subdirectories under
+  lexicographic ordering, so id assignment must key off directory boundaries, not
+  raw entry order. The spec must still prove the resulting ids and intervals are
+  correct and deterministic with a test that includes interleaved files.
+- **Basedirs / quota fallback.** Basedirs and quota tables reference `dir_id` for
+  any `basedir`/`subdir` present in the active snapshot catalog. Paths
+  legitimately outside the snapshot (historical or external quota records) keep an
+  explicit string column, clearly marked external, used only as a fallback.
+  Readiness must fail if an in-snapshot active `basedir`/`subdir` cannot be
+  resolved to a `dir_id`.
+- **Virtual namespace id space.** The active virtual namespace keeps its own
+  small id space **only** for the synthetic virtual nodes (`/`, `/lustre/`,
+  `/nfs/`, intermediate virtual parents, and mount-root boxes), keyed by
+  `active_set_id`. Below a mount root it defers to that mount's per-snapshot
+  catalog and `dir_id` ranges — it must not copy mount-local directories into a
+  second namespace.
+- **Optional in-memory navigation index.** Specify it as a flag-gated,
+  explicitly non-blocking phase (the last phase) including a memory/build-cost
+  estimate and benchmark hooks. It must never gate or delay the mandatory core
+  schema and benchmark work; the core must be complete and correct without it.
+- **Above-root ancestor chain in the per-mount catalog.** The summariser today
+  emits facts rows for every path component *above* the data root (`mountPath`) —
+  `/`, `/lustre/`, `/lustre/scratch125/`, … down to `mountPath`'s parent — into
+  the same per-`(mount_path, snapshot_id)` tables that single-mount queries hit
+  (via `dirguta`'s `outputRoot`), lazily at end-of-walk and deepest-first. The
+  per-mount catalog is therefore rooted at filesystem `/`, not at `mountPath`, and
+  this serving behaviour must be preserved. Assign these ancestors a **reserved
+  low `dir_id` block in preorder** (`/` = 0, `/lustre/` = 1, …, `mountPath`'s
+  parent = D−1, then the data root `mountPath` = D), with the data-root subtree
+  numbered contiguously from D+1 onward. `mountPath`'s depth D is known up front
+  (it is set before any `Add`), so the reservation is deterministic even though
+  the ancestor rows are emitted out of order at the end of the walk; backfill
+  their `subtree_end` to the end-of-snapshot bound (the linear chain contains the
+  entire data-root subtree, so every ancestor's interval spans the whole
+  snapshot). The interval invariant from area A must hold for **every** catalog
+  row, ancestors included. `/`'s `parent_id` is the sentinel. The handful of
+  duplicated linear-chain rows per snapshot is acceptable and matches current
+  behaviour; do not move these rows into the `active_set_id` virtual layer (that
+  layer remains only for the cross-mount synthetic namespace).
