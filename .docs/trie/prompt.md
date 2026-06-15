@@ -371,3 +371,91 @@ happens, record it as a blocker or explicit alternative, not as a hidden
 fallback.
 
 Do not modify `.docs/summarise`.
+
+## Notes
+
+The trie rewrite should use correctness plus absolute UX gates as acceptance
+requirements, and it must produce mandatory before/after faster/slower reporting
+for every important query category. A query that is slower than the current
+branch is not automatically a compatibility failure if correctness and absolute
+UX gates pass, but the final report must make the regression visible and must
+explain likely causes.
+
+Use stricter trie-specific cold gates for the target design: exact file stat,
+permission path, exact directory resolution, and direct-child list operations
+should target under 100 ms p95 on representative subsets; recursive subtree,
+filtered summary, glob, Disktree, and `where` operations should target under
+500 ms p95 where the result size is bounded by the existing API behavior. If a
+large-result query cannot meet 500 ms because response serialization or result
+volume dominates, the implementation must still report server-side query time,
+serialization time, rows returned, and current-branch delta separately.
+
+Measured cold gates may use per-request or per-batch caches for path
+reconstruction, `dir_id` resolution, and parent full-path lookup. They must not
+depend on pre-warmed cross-request process caches, browser caches, or repeated
+clicks. Provider or active-snapshot caches may exist for normal operation only
+when keyed by snapshot or active set and fully invalidated on refresh, but perf
+evidence must distinguish cold uncached behavior from warmed behavior.
+
+Prioritize query latency and storage reduction over preserving current import
+cost. The deterministic trie construction may spend more upfront import time or
+spool space than the current implementation, but the spec must require measured
+import wall time, CPU where available, max RSS, spool bytes, ClickHouse bytes,
+part counts, cleanup time, and rows written. Extreme import regressions must be
+called out explicitly in the final report even if query performance improves.
+
+Use the schema3 mixed Lustre/NFS subset, NFS-heavy cases including
+`/nfs/t283_imaging/`, a 100-small-NFS-style active virtual namespace case, the
+known high-fanout parent, and the largest practical production-like dataset
+available at implementation time as authoritative final comparison datasets.
+Each run must record enough manifest detail to reproduce the data selection.
+
+The trie-native scope should include ClickHouse basedirs/quota tables that store
+active basedir or subdir path references. Convert those path references to
+`dir_id` where they refer to scanned active snapshot directories, and preserve
+external request/response path strings at API boundaries. If a historical or
+quota record can legitimately refer to a path outside the active trie, the spec
+must define an explicit fallback representation and explain why that path cannot
+be normalized to a trie node.
+
+Both direct streaming import and spool publish paths must build the same
+trie-native ClickHouse tables and produce equivalent manifests/readiness
+records. It is acceptable for one path to share helper code or write through an
+intermediate spool, but tests must prove the resulting trie rows and query
+behavior match.
+
+Storage reduction is required evidence, not a standalone hard acceptance gate.
+Correctness and absolute cold latency gates determine pass/fail, while the
+before/after storage table must report whether compressed and uncompressed bytes
+for hot snapshot tables improved or regressed and why.
+
+`Client.CountByGlob` is in scope alongside `Client.FindByGlob`. The trie spec
+must include exact count correctness and performance evidence for direct-child,
+recursive, extension, and dotfile glob patterns.
+
+Active snapshot basedir and subdir paths in ClickHouse basedirs/quota tables
+must resolve to `dir_id`. Trie readiness must fail for an active basedir/subdir
+row that should be inside a scanned active snapshot but cannot be resolved.
+Only explicitly out-of-snapshot historical or external records may keep an
+original-path fallback, and those cases must be documented and tested.
+
+All externally reachable ClickHouse basedirs reader paths are in scope for
+acceptance and performance evidence, including group usage, user usage, group
+subdirs, user subdirs, history, and auth-related checks. Where a reader mixes
+active trie-normalized data with historical string fallback data, the evidence
+must separate those cases.
+
+The authoritative final comparison dataset scope is the fixed schema3 mixed
+Lustre/NFS subset, `/nfs/t283_imaging/`, the known high-fanout parent, a
+100-small-NFS-style active virtual namespace simulation, and the largest
+practical local production-like dataset available during implementation. Larger
+full-root runs under `/home/ubuntu/output` may be added when resources allow,
+but they do not replace the fixed representative set unless the spec records a
+bounded fallback reason.
+
+Capture and archive current-branch baseline reports before trie schema changes
+begin. A separate current-branch worktree or preserved binary may be kept to
+rerun baseline reports later for validation. Existing schema2/schema3 reports
+may supplement context, but they are not a substitute for the trie workflow's
+own current-branch baseline unless rerunning the current branch is impossible
+and the reason is documented.
