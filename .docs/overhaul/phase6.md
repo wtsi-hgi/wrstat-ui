@@ -57,11 +57,21 @@ per-snapshot catalog and `dir_id` ranges (no mount-local dir copied).
 `wrstat_active_virtual_summaries`/`_filter_all`/`_children`/`_sets`
 keyed by `active_set_id` + `virtual_id` (mount-root boxes carry the
 mount-local `dir_id` link); the above-root linear chain stays in the
-per-mount catalog (B2), not here. Precedence (matches baseline): the
-overlay is the sole authority for any path that is a strict prefix of
-an active mount root; the B2 rows are never independently summed into
-those answers (no double counting). Reuse the existing `active_set_id`
-derivation and active-set readiness/cleanup (`active_mounts.go`,
+per-mount catalog (B2), not here. `wrstat_active_virtual_children` is
+rewritten numeric too: it survives the `wrstat_virtual_children`
+deletion (a different table) but is NOT kept string-shaped - swap its
+`parent_dir`/`child_dir` strings for parent/child `virtual_id` (+ the
+mount-root `dir_id` link), and rewrite the retained geometry helpers
+(`virtualChildRowsForMount`/`virtualChildRowsForMounts`/
+`mergeVirtualChildRows`), the `virtualChildRow` type, and the
+`activeVirtualChildRowsForMounts` writer (`dguta_writer.go`) to
+populate those numeric fields. No `dir`/`parent_dir`/`child_dir` path
+string survives in any active-virtual hot row (J6 storage gate).
+Precedence (matches baseline): the overlay is the sole authority for
+any path that is a strict prefix of an active mount root; the B2 rows
+are never independently summed into those answers (no double
+counting). Reuse the existing `active_set_id` derivation and active-set
+readiness/cleanup (`active_mounts.go`,
 `active_virtual_overlay.go`, `active_prefix_rollups.go`); only swap
 string keys for `virtual_id`/`dir_id` links. Prune the deleted string
 `wrstat_virtual_children`/`_sets` table and its writer/refresher/reader
@@ -73,14 +83,16 @@ from the virtual catalog / catalog `parent_id` band, and rewrite
 `activeVirtualMountChildCountsQuery` in
 `clickhouse/active_virtual_overlay.go` to read the catalog `parent_id`
 band instead of `wrstat_children`. Add test file
-`clickhouse/virtual_namespace_test.go`. Covers all 6 acceptance tests
+`clickhouse/virtual_namespace_test.go`. Covers all 7 acceptance tests
 from G2 (root `/` aggregates selected mounts with separate
 `/lustre`/`/nfs` boxes + correct totals; virtual children / filtered
 virtual summaries / active-prefix rollups match baseline; virtual
 catalog contains only synthetic nodes; `DirInfo("/lustre/")` aggregated
 once not double-counted; overlay-is-sole-authority precedence for
 above-root/virtual paths; `active_set_id` + readiness reused from
-baseline). Depends on Phases 1-2.
+baseline; and no `dir`/`parent_dir`/`child_dir` string column in
+`wrstat_active_virtual_children`/`_summaries`/`_filter_all`, which are
+keyed by `virtual_id`/`dir_id`). Depends on Phases 1-2.
 
 - [ ] implemented
 - [ ] reviewed

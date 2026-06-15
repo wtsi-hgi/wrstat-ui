@@ -8,6 +8,11 @@ Use the `orchestrator` skill to complete this phase, coordinating
 subagents with the `go-implementor` and `go-reviewer` skills. All
 implementors follow the `go-conventions` skill.
 
+Phase 0 (baseline capture) MUST be complete before this phase begins:
+the first schema/code edit here makes the before/after benchmark
+baseline impossible to reproduce, so the baseline binary/worktree and
+report under `.tmp/agent/overhaul/` must already exist.
+
 This phase is the foundation for everything: preorder interval
 (nested-set) id assignment in the existing DFS walk, the above-root
 reserved low-id block, the `wrstat_dirs` catalog table, and carrying

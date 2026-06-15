@@ -70,7 +70,7 @@ readers) is unchanged.
   (gate). The children/parent-facts harness plumbing is removed alongside the
   deleted tables (area J1).
 
-### ID type and keying (Notes: snapshot/mount keying)
+### ID type and keying
 
 - `dir_id`, `parent_id`, `subtree_end`: `UInt32`. Justification: max dirs per
   `(mount_path, snapshot_id)` is bounded well under 2^32 on production trees;
@@ -92,12 +92,12 @@ readers) is unchanged.
   materially reduces part sizes; default to the simple model.
 - Codecs: `dir_id`/`parent_id`/`subtree_end` use `CODEC(Delta, LZ4)` (dense,
   monotonic in sort order). `full_path` is cold: `CODEC(ZSTD(3))`. Validate
-  codec choices against measured part sizes (prompt Notes).
+  codec choices against measured part sizes.
 
 ### Sentinels
 
-- The mount catalog is rooted at filesystem `/` (area A, Notes: above-root
-  ancestor chain). `/`'s `parent_id` is the sentinel `parentSentinel =
+- The mount catalog is rooted at filesystem `/` (area A, above-root ancestor
+  chain). `/`'s `parent_id` is the sentinel `parentSentinel =
   0xFFFFFFFF` (`dir_id` 0 is `/` itself, so the sentinel must not collide with a
   real id). The B5 overflow guard enforces this: ids are handed out from 0 and
   the import aborts before any id reaches `0xFFFFFFFF`, so `parentSentinel` is
@@ -111,7 +111,7 @@ readers) is unchanged.
   `ErrTooManyDirs` for `dir_id` overflow (B5, ID type and keying) and
   `ErrNonContiguousInput` for a re-entered directory boundary that would break
   the preorder interval invariant (B1).
-- Path-hash hits MUST verify `full_path` before returning (Notes); a mismatch is
+- Path-hash hits MUST verify `full_path` before returning; a mismatch is
   treated as a miss, never a wrong result.
 
 ### Schema file set after the rewrite
@@ -119,15 +119,15 @@ readers) is unchanged.
 The current `clickhouse/schema/` is (verified):
 
 ```text
-001_schema_version.sql        010_basedirs_history.sql
-002_mount_events.sql          011_files.sql
-003_mounts_active.sql         012_dir_filter_ageall.sql
-004_dir_facts.sql             013_active_prefix_rollups.sql
-005_children.sql              014_parent_facts.sql
-006_basedirs_group_usage.sql  015_child_filter_all.sql
-006_dir_projection_sets.sql   016_dir_filter_all.sql
-007_basedirs_user_usage.sql   017_schema3_snapshot_sets.sql
-007_virtual_children.sql      018_active_virtual_overlay.sql
+001_schema_version.sql 010_basedirs_history.sql
+002_mount_events.sql 011_files.sql
+003_mounts_active.sql 012_dir_filter_ageall.sql
+004_dir_facts.sql 013_active_prefix_rollups.sql
+005_children.sql 014_parent_facts.sql
+006_basedirs_group_usage.sql 015_child_filter_all.sql
+006_dir_projection_sets.sql 016_dir_filter_all.sql
+007_basedirs_user_usage.sql 017_schema3_snapshot_sets.sql
+007_virtual_children.sql 018_active_virtual_overlay.sql
 008_basedirs_group_subdirs.sql
 008_virtual_children_sets.sql
 009_basedirs_user_subdirs.sql
@@ -159,11 +159,11 @@ exactly:
   strings (G1).
 - **Renumbered:** the old `004_dir_facts.sql` (`wrstat_dir_facts`) becomes
   `005_dir_facts.sql` (D1), freeing `004` for the new catalog. The bookkeeping
-  files (`006_dir_projection_sets.sql`, `017_schema3_snapshot_sets.sql`) and
-  `001`-`003` are unchanged in number; `006_dir_projection_sets.sql` keeps its
-  number (the `006` clash with `006_basedirs_group_usage.sql` is resolved by
-  renumbering the projection-sets file - implementor's choice of free number,
-  e.g. `019`, as long as no two files share a number).
+  file `017_schema3_snapshot_sets.sql` and `001`-`003` are unchanged in number;
+  the `006` clash between `006_dir_projection_sets.sql` and
+  `006_basedirs_group_usage.sql` is resolved by renumbering the projection-sets
+  file - implementor's choice of free number, e.g. `019`, as long as no two
+  files share a number.
 
 Net result: exactly one file per number, `004_dirs.sql` is the catalog and
 `005_dir_facts.sql` is the facts table; no `004`/`005` conflict remains.
@@ -197,10 +197,10 @@ CREATE TABLE IF NOT EXISTS wrstat_dirs (
   INDEX full_path_tokens full_path TYPE tokenbf_v1(8192, 3, 0) GRANULARITY 4,
   PROJECTION children_proj (
     SELECT * ORDER BY (mount_path, snapshot_id, parent_id, dir_id)
-  ),
+),
   PROJECTION path_hash_proj (
     SELECT * ORDER BY (mount_path, snapshot_id, path_hash)
-  )
+)
 ) ENGINE = MergeTree
 PARTITION BY (mount_path, snapshot_id)
 ORDER BY (mount_path, snapshot_id, dir_id)
@@ -210,8 +210,8 @@ SETTINGS index_granularity = 8192;
 - `path_hash` = 64-bit hash of `full_path` (e.g. CityHash64 / `sipHash64`),
   primary path->id resolver; the `path_hash_proj` projection serves it. Every
   hit re-reads `full_path` and compares before returning (collision safety,
-  Notes). The benchmark may drop `path_hash` + projection if the `full_path`
-  skip-index / ordering alone meets the 100 ms p95 gate.
+  Error handling). The benchmark may drop `path_hash` + projection if the
+  `full_path` skip-index / ordering alone meets the 100 ms p95 gate.
 - `name` is basename only (keeps the trailing `/` convention the summariser uses
   for directories). `full_path` is the single stored copy of the full path.
 - `child_dir_count` / `child_file_count` make "has children" a column read.
@@ -696,22 +696,20 @@ Every `FROM wrstat_children` query-layer READER is **retired** and rewritten to
 the catalog `parent_id` band / facts table (no surviving `wrstat_children`
 read):
 
-- `clickhouse/database.go`: `childrenQuery` (~line 58),
-  `childrenForParentsQuery` (~line 209), `childrenForExternalParentsQuery`
-  (~line 215), `activeMountRootChildrenQuery` (~line 221), and
-  `dirsHaveMatchingChildrenQuery` (~line 226) - all replaced by the catalog
+- `clickhouse/database.go`: `childrenQuery`, `childrenForParentsQuery`,
+  `childrenForExternalParentsQuery`, `activeMountRootChildrenQuery`, and
+  `dirsHaveMatchingChildrenQuery` - all replaced by the catalog
   `parent_id = dir_id` band (and, for the `dir_facts` join in
   `dirsHaveMatchingChildrenQuery`, by `child_dir_count` on the catalog, E2).
-  `infoChildrenQuery` (~line 86) and
-  `infoChildrenSnapshotQuery` (~line 243) - which feed `Info` - are rewritten to
-  count children from the catalog (`uniqExact(parent_id)` / `count()` over
-  `wrstat_dirs`), see Maintenance/`Info` in the J4 matrix.
-- `clickhouse/dir_filter_ageall.go`: `dirsHaveMatchingChildrenAgeAllQuery`
-  (~line 78) - rewritten to the catalog band joined to
-  `wrstat_dir_filter_ageall` by `dir_id` instead of `wrstat_children`.
+  `infoChildrenQuery` and `infoChildrenSnapshotQuery` - which feed `Info` - are
+  rewritten to count children from the catalog (`uniqExact(parent_id)` /
+  `count()` over `wrstat_dirs`), see Maintenance/`Info` in the J4 matrix.
+- `clickhouse/dir_filter_ageall.go`: `dirsHaveMatchingChildrenAgeAllQuery` -
+  rewritten to the catalog band joined to `wrstat_dir_filter_ageall` by `dir_id`
+  instead of `wrstat_children`.
 - `clickhouse/tree_summary.go`: the `addTreeSummaryChildren` query
-  `SELECT c.parent_dir, count() FROM wrstat_children c ...` (~line 234) -
-  rewritten to count the catalog `parent_id` band per parent.
+  `SELECT c.parent_dir, count() FROM wrstat_children c ...` - rewritten to count
+  the catalog `parent_id` band per parent.
 
 Signatures unchanged: `DirInfo(dir string, filter *Filter) (*DirSummary,
 error)`, `Children(dir string) ([]string, error)`, `DirInfos(dirs []string,
@@ -930,39 +928,52 @@ id space above plus the catalog `parent_id` band serve virtual child listings):
   `refreshActiveVirtualChildren`, `refreshActiveVirtualChildrenForActiveSet`;
   and the readers `virtualChildrenReadyQuery`/`virtualChildrenReady` and
   `virtualChildrenQuery` (and the `queryChildren(... virtualChildrenQuery ...)`
-  call ~line 395). The live READER chain that serves `Children` for
+  call). The live READER chain that serves `Children` for
   virtual/ancestor paths via that deleted table is rewritten (not deleted) to
   serve from the per-`active_set_id` virtual catalog
   (`wrstat_active_virtual_dirs`) / catalog `parent_id` band, mirroring how
   `activeVirtualMountChildCountsQuery` below is rewritten off `wrstat_children`:
-  `virtualChildrenForAncestor` (~line 372, replace its `queryChildren(...
-  virtualChildrenQuery ...)` ~line 395 with the virtual-catalog/`parent_id`-band
+  `virtualChildrenForAncestor` (replace its `queryChildren(...
+  virtualChildrenQuery ...)` with the virtual-catalog/`parent_id`-band
   read), `ensureVirtualChildrenReady`
-  (~line 409, drop its `virtualChildrenReady` + `insertVirtualChildrenSet` calls
+  (drop its `virtualChildrenReady` + `insertVirtualChildrenSet` calls
   and use the reused active-set readiness above), and
-  `currentVirtualChildrenActiveSet` (~line 403). In `clickhouse/database.go` the
+  `currentVirtualChildrenActiveSet`. In `clickhouse/database.go` the
   caller chain is rewritten to match: `virtualChildrenForReadyAncestorMounts`
-  (~line 4197) and its two call sites - the call from `readyChildrenForAncestor`
-  (~line 4160) and its own `virtualChildrenForAncestor` call (~line 4206).
+  and its two call sites - the call from `readyChildrenForAncestor` and its own
+  `virtualChildrenForAncestor` call.
   These reader functions preserve current `Children` behaviour for `/`,
   `/lustre/`, `/nfs/` and ancestor paths.
-- `clickhouse/provider.go`: the `virtualChildrenRefresher` type alias (~line
-  78), the `refreshVirtualChildren` field (~line 93), and the
+- `clickhouse/provider.go`: the `virtualChildrenRefresher` type alias, the
+  `refreshVirtualChildren` field, and the
   `refreshVirtualChildrenAsync` / `virtualChildrenRefresherLocked` /
-  `refreshVirtualChildrenAndReport` methods plus their call site (~line 664).
+  `refreshVirtualChildrenAndReport` methods plus their call site.
 - `clickhouse/active_virtual_overlay.go`: the
-  `activeVirtualMountChildCountsQuery` reader (~line 71) currently reads
+  `activeVirtualMountChildCountsQuery` reader currently reads
   mount-root child counts from
   `FROM wrstat_children c`; rewritten to read the per-mount catalog
   (`wrstat_dirs`) `parent_id` band at the mount root (the mount-root box's
   child count) - no `wrstat_children` read survives in the overlay path.
-- **Retained, do NOT remove:** the geometry helpers `virtualChildRowsForMount`,
-  `virtualChildRowsForMounts`, `mergeVirtualChildRows`, and the
-  `virtualChildRow` type stay - they are shared by the RETAINED
-  `activeVirtualChildRowsForMounts` (`dguta_writer.go` ~line 481) that writes
-  the RETAINED `wrstat_active_virtual_children` table. Removing them would break
-  that writer. Only the `wrstat_virtual_children`-specific INSERT/refresh/reader
-  code above is deleted.
+- **Retained but made numeric, NOT swept away with `wrstat_virtual_children`:**
+  the geometry helpers `virtualChildRowsForMount`, `virtualChildRowsForMounts`,
+  `mergeVirtualChildRows`, the `virtualChildRow` type, and the
+  `activeVirtualChildRowsForMounts` writer (`dguta_writer.go`) survive the
+  deletion of the string `wrstat_virtual_children` table because they feed a
+  DIFFERENT, retained table - `wrstat_active_virtual_children` - so the
+  `wrstat_virtual_children` sweep above must not delete them. They are NOT kept
+  string-shaped, however: `wrstat_active_virtual_children` is itself rewritten
+  numeric per this story (keyed by `active_set_id` + parent/child `virtual_id`,
+  with the mount-root box's mount-local `dir_id` link, replacing the current
+  `parent_dir`/`child_dir` string columns), so the writer row struct that maps
+  to those columns swaps its path-string fields for parent/child `virtual_id`
+  (+ the `dir_id` link), and the geometry helpers (`virtualChildRow` and the
+  `virtualChildRows*`/`mergeVirtualChildRows` functions) and
+  `activeVirtualChildRowsForMounts` are rewritten to compute and populate those
+  numeric fields rather than the string paths they carry today. No
+  `dir`/`parent_dir`/`child_dir` path string survives in
+  `wrstat_active_virtual_children` (J6 storage gate). Only the
+  `wrstat_virtual_children`-specific INSERT/refresh/reader code above is deleted
+  outright.
 
 **File:** `clickhouse/schema/018_active_virtual_overlay.sql`,
 `clickhouse/virtual_namespace.go`, `clickhouse/virtual_children.go` (pruned),
@@ -990,6 +1001,14 @@ id space above plus the catalog `parent_id` band serve virtual child listings):
 6. Given an unchanged active mount selection, when the `active_set_id` is
    derived and readiness is evaluated, then both equal the baseline
    implementation's values (derivation and readiness are reused, not redefined).
+7. Given a built active set, when the columns of
+   `wrstat_active_virtual_children`, `wrstat_active_virtual_summaries`, and
+   `wrstat_active_virtual_filter_all` are inspected, then none has a `dir`,
+   `parent_dir`, or `child_dir` string column: `wrstat_active_virtual_children`
+   is keyed by `active_set_id` + parent/child `virtual_id` (with the mount-root
+   box's mount-local `dir_id` link), and the summaries/filter rows are keyed by
+   `active_set_id` + `virtual_id`. The numeric overlay still returns the same
+   virtual child paths, summaries, and filtered summaries as baseline.
 
 ---
 
@@ -1022,10 +1041,10 @@ drop sharply.
   `ParentDir`/`Dir` strings), and the `wrstat_children`/`wrstat_parent_facts`
   streams are removed entirely (the catalog `parent_id` band replaces them, E1).
   In `internal/chspool/spool.go`: the `TableChildren = "wrstat_children"` and
-  `TableParentFacts = "wrstat_parent_facts"` constants (~lines 55, 58), their
-  entries in the deterministic table-order list (~lines 82-83), the
-  `WriteChild`/`WriteParentFact` writer methods (~lines 750, 762), and the
-  `case TableChildren:`/`case TableParentFacts:` decode arms (~lines 220, 226)
+  `TableParentFacts = "wrstat_parent_facts"` constants, their
+  entries in the deterministic table-order list, the
+  `WriteChild`/`WriteParentFact` writer methods, and the
+  `case TableChildren:`/`case TableParentFacts:` decode arms
   are deleted; the loader switch arms for them go too (H2).
 - Basedirs/active-virtual rows carry ids per G1/G2 (+ external string fallback).
 - Keep `Format`/`Manifest`/`TableManifest` machinery and the deterministic table
@@ -1077,17 +1096,15 @@ resumable/retry and readiness-set machinery.
   - in `clickhouse/dguta_writer.go`: `dgutaWriter.AddChildren` plus its
     child-row writers
     (`appendChildrenRows`/`appendChildRow`/`childrenBlockWriter`), the
-    `insertChildrenQuery` constant (~line 105), the `importPhaseChildrenInsert`
-    constant (~line 60), the `dropChildrenPartitionQuery` (~line 79), and the
-    `{name: "wrstat_children", dest: &counts.childrenRows}` row-counter entry
-    (~line 1168);
+    `insertChildrenQuery` constant, the `importPhaseChildrenInsert`
+    constant, the `dropChildrenPartitionQuery`, and the
+    `{name: "wrstat_children", dest: &counts.childrenRows}` row-counter entry;
   - in `cmd/summarise_spool.go` (the production spool PRODUCER): the
     `summariseDGUTASpoolWriter.AddChildren` method, `appendChildrenRows`, the
     `WriteChild`/`ChildRow` emission, the `writeParentFactRow` method
     (emitting `WriteParentFact`/`ParentFactRow`), and the
     `parentFactsRows`/`childrenRows` row-counter fields read from
-    `tables[chspool.TableParentFacts].Rows`/`[chspool.TableChildren].Rows`
-    (~lines 664-665).
+    `tables[chspool.TableParentFacts].Rows`/`[chspool.TableChildren].Rows`.
   These are deleted (B3). Child listings come from the catalog `parent_id` band
   (E1) and "has children" from `child_dir_count` (A1); no live interface is
   wired to a deleted table.
@@ -1098,23 +1115,22 @@ resumable/retry and readiness-set machinery.
     `blockWriter`/`flush`/`abort`/`importPhase`/`importBatchNow` methods, and
     the `insertParentFactsQuery` constant;
   - `clickhouse/dguta_writer.go`: the `selectedNavigationFactWriters()` wiring
-    (~line 1912) that appends a `newParentFactsWriter(...)` (~line 1918) to
+    that appends a `newParentFactsWriter(...)` to
     `selectedDerivedIndexes` (so the writer is no longer flushed by the
-    derived-index path ~line 2243), plus the `importPhaseParentFactsInsert`
-    constant (~line 61), the `dropParentFactsPartitionQuery` (~line 85) and the
+    derived-index path), plus the `importPhaseParentFactsInsert`
+    constant, the `dropParentFactsPartitionQuery` and the
     `{name: "wrstat_parent_facts", dest: &counts.parentFactsRows}` row-counter
-    entry (~line 1167);
+    entry;
   - `clickhouse/summarise_spool_loader.go`: every `TableChildren`/
     `TableParentFacts` load path - the `summariseSpoolTableQuery` switch arms
     `case chspool.TableParentFacts: return insertParentFactsQuery,
-    importPhaseParentFactsInsert` and `case chspool.TableChildren: ...` (~lines
-    1291, 1307); the dedicated children/parent-facts loaders
-    `loadSimpleSpoolTable(... chspool.TableChildren ..., ChildRow ...)` (~line
-    526) and `loadSimpleSpoolTable(... chspool.TableParentFacts ...,
-    ParentFactRow ...)` (~line 636); their entries in the table-order/readiness
-    lists (~lines 412-413, 1685) and per-table row-count queries (~lines
-    1790-1794); and the readiness check
-    `tables[chspool.TableChildren].Rows == 0` (~line 1433). The loaded set is
+    importPhaseParentFactsInsert` and `case chspool.TableChildren: ...`; the
+    dedicated children/parent-facts loaders
+    `loadSimpleSpoolTable(... chspool.TableChildren ..., ChildRow ...)` and
+    `loadSimpleSpoolTable(... chspool.TableParentFacts ..., ParentFactRow ...)`;
+    their entries in the table-order/readiness
+    lists and per-table row-count queries; and the readiness check
+    `tables[chspool.TableChildren].Rows == 0`. The loaded set is
     the catalog + surviving id-keyed tables only.
 - The `wrstat_parent_facts` derived-index READ machinery (the parent-ordered
   navigation object) is **removed**; with the parent-ordered navigation object
@@ -1124,12 +1140,12 @@ resumable/retry and readiness-set machinery.
   - the whole `NavigationObject` selection apparatus is removed (after the
     overhaul, child navigation is served solely from the catalog `parent_id`
     band / facts `dir_id`/`subtree_end`, so no navigation-object is selected):
-    - `clickhouse/parent_facts.go`: the `NavigationObject` type (~line 81), ALL
-      THREE constants - `NavigationObjectParentFacts` (~line 86) and
-      `NavigationObjectChildFacts` (~line 90) here, and
-      `NavigationObjectProjection` (in `mount_dir_projection_writer.go` ~line
-      49, see below) - plus `DefaultNavigationObject` (~line 102) and
-      `ChooseNavigationObject` (~line 108). `NavigationObjectChildFacts`'s
+    - `clickhouse/parent_facts.go`: the `NavigationObject` type, ALL THREE
+      constants - `NavigationObjectParentFacts` and `NavigationObjectChildFacts`
+      here, and `NavigationObjectProjection` (in
+      `mount_dir_projection_writer.go`, see below) - plus
+      `DefaultNavigationObject` and `ChooseNavigationObject`.
+      `NavigationObjectChildFacts`'s
       string value `"wrstat_tree_nav_facts"` named only a benchmark CANDIDATE:
       no such table, writer, reader, or schema file ever existed (verified - it
       appears only in this doc comment), so there is no child-facts serving path
@@ -1138,9 +1154,9 @@ resumable/retry and readiness-set machinery.
       `wrstat_parent_facts` serving path is the parent-facts writer/readers
       deleted above.
     - `clickhouse/mount_dir_projection_writer.go` is RETAINED (it writes the D1
-      `wrstat_dir_facts` table); ONLY its `NavigationObjectProjection` const
-      (~line 49) and that const's doc comment are removed. The
-      `mountDirProjectionWriter` type and all its fact-writing machinery stay.
+      `wrstat_dir_facts` table); ONLY its `NavigationObjectProjection` const and
+      that const's doc comment are removed. The `mountDirProjectionWriter` type
+      and all its fact-writing machinery stay.
       `NavigationObjectProjection` likewise named only a benchmark candidate
       (`"clickhouse_projection"`), not a separate serving path.
     - the remaining `wrstat_parent_facts` READ machinery in
@@ -1148,18 +1164,17 @@ resumable/retry and readiness-set machinery.
       `parentFactsAllChildSummariesQuery` / `parentFactsFileChildSummariesQuery`
       / `parentFactsVectorChildSummariesQuery` query constants, and the
       `parentFactChildSummaries` / `parentFactDirInfoChildSummaries` /
-      `parentFactReadMode*` readers (~line 103, ~line 137).
+      `parentFactReadMode*` readers.
     Both `parent_facts.go` and `mount_dir_projection_writer.go` MUST compile
     after this change (no dangling reference to the deleted `NavigationObject`
     type or its constants/functions).
   - `clickhouse/database.go`: the read-side branches that gate on
-    `DefaultNavigationObject() != NavigationObjectParentFacts` (~lines 586,
-    3224, 3563) are removed, and with them the ENTIRE `whereTraversal`
-    parent-fact packet subsystem (its frontier/packet/store helper cluster -
+    `DefaultNavigationObject() != NavigationObjectParentFacts` are removed, and
+    with them the ENTIRE `whereTraversal` parent-fact packet subsystem (its
+    frontier/packet/store helper cluster -
     e.g. `canUseWhereParentPackets`, `loadWhereParentFactPackets`,
-    `preloadFrontierParentPackets`, `frontierSummaryPacketDirs` (~line 593,
-    which ALSO calls `parentFactsParentDir` at ~line 602),
-    `frontierChildPacketDirs`,
+    `preloadFrontierParentPackets`, `frontierSummaryPacketDirs` (which ALSO
+    calls `parentFactsParentDir`), `frontierChildPacketDirs`,
     `appendWherePacketDir`, `wherePacketDirInMount`,
     `storeWhereParentFactPacket`, `storeWhereParentFactSummary`,
     `storeWhereParentFactLeafChildren`) plus the
@@ -1175,7 +1190,7 @@ resumable/retry and readiness-set machinery.
     none read `wrstat_parent_facts` or build `parentFactChildSummary`. The named
     helpers above are illustrative entry points, NOT an exhaustive list: the
     private helpers transitively orphaned by this subsystem removal are covered
-    by the build-clean acceptance criterion (J1/H2 acceptance test 7), which an
+    by the build-clean acceptance criterion (H2 acceptance test 7), which an
     implementor resolves mechanically by following compiler errors guided by the
     subsystem story.
     - `clickhouse/database_cache.go`: the parent-fact packet CACHE (the
@@ -1231,16 +1246,18 @@ resumable/retry and readiness-set machinery.
    `wrstat_parent_facts` stream and every `FileRow`/`DirFactRow`/filter row
    carries `dir_id` (and `parent_id`/`subtree_end` where applicable) with no
    path string.
-6. Given the rewritten production tree (all non-test `.go` files, excluding the
-   "Current state to replace" descriptive listings and the SQL files that are
-   themselves deleted), when a repo-wide search runs (e.g. `rg -n
+6. Given the rewritten production tree (all non-test `.go` files, excluding this
+   spec's descriptive listings of the code being replaced and the SQL files that
+   are themselves deleted), when a repo-wide search runs (e.g. `rg -n
    'INSERT INTO (wrstat_children|wrstat_parent_facts|wrstat_virtual_children)|
    FROM (wrstat_children|wrstat_parent_facts|wrstat_virtual_children)( |$)'
    --glob '!*_test.go'`), then it finds zero matches: no code path writes,
    refreshes, loads, or selects from `wrstat_children`, `wrstat_parent_facts`,
-   `wrstat_virtual_children`, or `wrstat_virtual_children_sets`. (The retained
-   `wrstat_active_virtual_children` table, written by `activeVirtualChildRows
-   ForMounts`, is a different table and is unaffected.)
+   `wrstat_virtual_children`, or `wrstat_virtual_children_sets`. (The
+   `wrstat_active_virtual_children` table, written by
+   `activeVirtualChildRowsForMounts`, is a different, retained table - not one
+   of the deleted tables this search targets - though it is itself rewritten
+   numeric per G2.)
 7. Given the rewritten production tree, when each affected package is built
    (`go build ./...`) and vetted (`go vet ./...`), then it compiles with NO
    orphaned reference: no retained code refers to a deleted type, constant,
@@ -1308,6 +1325,12 @@ rigorous.
 
 - Baseline = current `clickhouse` HEAD, captured before any overhaul change
   (preserve a built binary or a separate worktree under `.tmp/agent/overhaul/`).
+  This capture is the very first step of the whole effort (Implementation Order
+  step 0), performed with the unmodified harness; it must precede every schema
+  or code edit, because once edits begin the baseline can no longer be
+  reproduced. The harness extension, plumbing removal, and matrix run below are
+  the second half of this story and run in phase 7 against the captured
+  baseline.
 - Reuse and extend `internal/chperf/` (`import.go`, `query.go`, `final_gate.go`,
   `clickhouse_api.go`) and the Bolt comparison harness. Do NOT invent a new
   report format; keep the existing report structures -
@@ -1334,25 +1357,24 @@ rigorous.
   `DefaultNavigationObject`/`ChooseNavigationObject`). Removing only
   `navigationShapeParentFacts` would leave the other two shapes and their
   candidate machinery referencing now-deleted constants, so ALL of it goes:
-  - the three shape constants `navigationShapeParentFacts` (~line 132),
-    `navigationShapeChildFacts` (~line 133), and `navigationShapeProjection`
-    (~line 134) - each `= string(clickhouse.NavigationObject*)`, so each
-    references a deleted constant - plus the supporting constants
+  - the three shape constants `navigationShapeParentFacts`,
+    `navigationShapeChildFacts`, and `navigationShapeProjection` - each
+    `= string(clickhouse.NavigationObject*)`, so each references a deleted
+    constant - plus the supporting constants
     `navigationScenarioHighFanout`/`navigationScenarioFiltered`/
     `navigationInput*`/`navigationMinHighFanoutChildren`/
-    `navigationChildFactsImprovement` (~lines 135-146);
+    `navigationChildFactsImprovement`;
   - the `navigationProjection*` machinery
     (`navigationProjectionPasses`/`navigationProjectionExplainPasses`/
     `navigationProjectionExplainPassesScenario`, `ExplainUsesProjectionPruning`/
-    `explainIndexes1Output`/`explainNamesProjection`, ~lines 1973-2056);
+    `explainIndexes1Output`/`explainNamesProjection`);
   - the `navigationCandidate*` machinery
     (`navigationCandidateOperation`/`navigationCandidateMatches`/
     `navigationShape`/`navigationScenario`/`navigationCandidateAtLeastAsFast`/
     `navigationCandidateBeatsParentBy`/`navigationCandidateP95`/
     `navigationCandidateScenarioComplete`/
     `navigationCandidateOperationComplete`/
-    `navigationCandidateCountersComplete`/`navigationHighFanoutInputPasses`,
-    ~lines 1999-2334);
+    `navigationCandidateCountersComplete`/`navigationHighFanoutInputPasses`);
   - the child-facts machinery
     (`navigationChildFactsPasses`/`navigationChildFactsSpeedPasses`/
     `navigationChildFactsResultsMatch`/`navigationResultDigestMatches`/
@@ -1362,17 +1384,17 @@ rigorous.
     and the import-gate helpers `navigationImportGatesPass`/
     `navigationImportReportPasses`/`navigationRowAmplificationPasses` -
     `navigationRowAmplificationPasses` reads
-    `report.TableStats[navigationShapeChildFacts]`, ~line 2108);
-  - the C1 decision gate itself: the `NavigationDecisionEvidence` (~line 1968),
-    `NavigationDecisionCheck` (~line 2337), and `NavigationDecisionResult`
-    (~line 2434) types; `navigationSelectedObject` (~line 2267, which calls the
-    deleted `clickhouse.ChooseNavigationObject`, ~line 2278); the per-check
+    `report.TableStats[navigationShapeChildFacts]`);
+  - the C1 decision gate itself: the `NavigationDecisionEvidence`,
+    `NavigationDecisionCheck`, and `NavigationDecisionResult` types;
+    `navigationSelectedObject` (which calls the deleted
+    `clickhouse.ChooseNavigationObject`); the per-check
     validators `validateNavigationCandidateReport`/
     `validateNavigationProjection`/`validateNavigationChildFacts`/
     `validateNavigationParentDefault` (the last
-    passing when `selected == navigationShapeParentFacts`, ~line 2408) and
+    passing when `selected == navigationShapeParentFacts`) and
     `navigationDecisionCheck`/`(NavigationDecisionCheck).pass`/`.fail`; and the
-    exported `ValidateNavigationDecisionGate` (~line 2442). This gate is used
+    exported `ValidateNavigationDecisionGate`. This gate is used
     only by `internal/chperf/query_test.go`'s `TestNavigationDecisionGateC1`
     (verified - no other caller), whose C1 test and its
     `navigationGateTestEvidence` fixture are deleted with it.
@@ -1381,20 +1403,20 @@ rigorous.
   no metric, candidate, or check references a deleted `NavigationObject*`
   constant. `internal/chperf` MUST compile after this removal.
 - `internal/perfreport/report.go`: the `RowAmplificationVsChildren` field
-  (`json:"row_amplification_vs_wrstat_children"`, ~line 69) is removed or
+  (`json:"row_amplification_vs_wrstat_children"`) is removed or
   renamed to a surviving table; no report field name references a deleted table.
 - `internal/chperf/final_gate.go`: the final-gate assertions keyed on
   `tableChildren`/`tableParentFacts` are removed or repointed at surviving
   tables - the `finalGateE2PacketOperationFailure(..., tableParentFacts, ...)`
-  packet gates (~lines 1052, 1098, 1144), the `case tableChildren:` /
-  `report.TableStats[tableChildren].Rows == 0` required-rows checks (~lines
-  4453, 4465), the `tableParentFacts` entry in the gated-table list (~line
-  4480), and `tableChildren` in the required-tables slice (~line 4735). The
+  packet gates, the `case tableChildren:` /
+  `report.TableStats[tableChildren].Rows == 0` required-rows checks, the
+  `tableParentFacts` entry in the gated-table list, and `tableChildren` in the
+  required-tables slice. The
   E2-packet latency gate is re-expressed against the catalog `parent_id` band /
   facts-table reads that now serve child packets; no gate references a deleted
   table. A RETAINED gate path also reads the removed field: the
   `stats.RowAmplificationVsChildren > 0` check in
-  `tableStatsDerivedEvidencePass` (~line 4508), reached via
+  `tableStatsDerivedEvidencePass`, reached via
   `tableStatsEvidencePass`/`finalGateNewObjectTableStatsPass`. This check is
   removed (or repointed to a surviving amplification metric) alongside the
   `report.go` field removal so `internal/chperf` compiles.
@@ -1497,6 +1519,14 @@ pathology is exercised before and after: `fresh_provider_per_repeat`,
 
 ## Implementation Order
 
+0. **Baseline capture** (J1, capture half): before any overhaul change touches
+   the working tree, preserve the current `clickhouse` HEAD as the baseline -
+   a built binary or a separate worktree under `.tmp/agent/overhaul/` - and
+   capture its import/query/storage report with the existing (unmodified)
+   harness. This MUST happen first; once schema/code edits begin, an equivalent
+   baseline can no longer be produced. The harness-extension and matrix-run half
+   of J1-J6 stays in step 7 (it compares the overhaul against this captured
+   baseline). This step changes no production code.
 1. **Catalog + ids in the summariser** (A, B): preorder id assignment in the DFS
    walk incl. the above-root reserved low-id block and the shared
    `DirIDAllocator` (B5); emit `wrstat_dirs`. Prove determinism, the interval
@@ -1512,13 +1542,17 @@ pathology is exercised before and after: `fresh_provider_per_repeat`,
 5. **Glob / full-text** (F): catalog skip indexes.
 6. **Basedirs + active virtual namespace** (G): id world + external fallback +
    virtual id space.
-7. **Benchmark study** (J): baseline capture, full matrix, import/storage,
-   gates, per-type deltas, per-pattern collapse decisions. Mandatory gate.
+7. **Benchmark study** (J): harness extension and the children/parent-facts and
+   navigation-object plumbing removal, full matrix, import/storage, gates,
+   per-type deltas, per-pattern collapse decisions, all compared against the
+   step-0 baseline. Mandatory gate.
 8. **(Optional)** in-memory navigation index (I): flag-gated, measured,
    non-blocking.
 
-Phases 3-6 may proceed in parallel once 1-2 land (shared catalog, different
-tables/queries). Phase 7 is the acceptance gate. Phase 8 must never delay 1-7.
+Phase 0 (baseline capture) must complete before phase 1 begins. Phases 3-6 may
+proceed in parallel once phases 1-2 land (shared catalog, different
+tables/queries). Phase 7 is the acceptance gate. Phase 8 must never delay
+phases 1-7.
 
 ---
 
@@ -1535,7 +1569,7 @@ tables/queries). Phase 7 is the acceptance gate. Phase 8 must never delay 1-7.
   impossible to surface as wrong rows.
 - **Filter materialisations retained by default**, made numeric; the in-query
   vector path is implemented for head-to-head benchmarking; collapse only with a
-  cited measurement (D4). This is the prompt's explicit safer-than-trie stance.
+  cited measurement (D4). This is the explicit safer-than-trie stance.
 - **`wrstat_parent_facts`, `wrstat_children`, and `wrstat_virtual_children`
   (string) are removed** - replaced by the catalog `parent_id` band,
   `subtree_end` ranges, and the virtual id space. This is not a filter-table

@@ -10,11 +10,13 @@ subagents with the `go-implementor` and `go-reviewer` skills. All
 implementors follow the `go-conventions` skill.
 
 This is the acceptance gate and is mandatory. It depends on Phases
-1-6 being landed and reviewed. Baseline capture (J1) MUST happen
-before any overhaul change touches the working tree, so the baseline
-binary/worktree under `.tmp/agent/overhaul/` should already exist;
-this phase formalises capture, runs the full matrix, and enforces the
-gates. Do NOT invent a new report format - reuse the existing
+1-6 being landed and reviewed. The baseline itself was captured in
+Phase 0 (before any overhaul change), so the baseline binary/worktree
+and report under `.tmp/agent/overhaul/` already exist; this phase does
+the harness-extension half of J1 (removing the children/parent-facts
+and navigation-object plumbing), runs the full matrix against the
+Phase 0 baseline, and enforces the gates. Do NOT invent a new report
+format - reuse the existing
 `perfreport.Report`/`Operation`/`TableStats`/`QueryMetrics`
 structures and the Bolt comparison harness.
 
@@ -22,13 +24,14 @@ structures and the Bolt comparison harness.
 
 ### Item 7.1: J1 - baseline capture and harness reuse
 
-spec.md section: J1
+spec.md section: J1 (harness-extension half; capture done in Phase 0)
 
-Capture current `clickhouse` HEAD as baseline (preserved built
-binary or separate worktree under `.tmp/agent/overhaul/`) before any
-overhaul change. Reuse and extend `internal/chperf/` (`import.go`,
-`query.go`, `final_gate.go`, `clickhouse_api.go`) and the Bolt
-comparison harness, keeping the existing report structures. Remove the
+The baseline `clickhouse` HEAD was already captured in Phase 0
+(preserved built binary or separate worktree under
+`.tmp/agent/overhaul/`) before any overhaul change. Here, reuse and
+extend `internal/chperf/` (`import.go`, `query.go`, `final_gate.go`,
+`clickhouse_api.go`) and the Bolt comparison harness, keeping the
+existing report structures. Remove the
 children/parent-facts plumbing and the navigation-object selection
 apparatus from `import.go`/`query.go` alongside the table/type
 deletions (mirroring B3/H2). Update existing test files
