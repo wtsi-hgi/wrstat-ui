@@ -1,6 +1,6 @@
 # Phase 1: Catalog + ids in the summariser
 
-Ref: [spec.md](spec.md) sections A1, B1, B2, B3, B4
+Ref: [spec.md](spec.md) sections A1, B1, B2, B3, B4, B5
 
 ## Instructions
 
@@ -43,11 +43,16 @@ hooked into the operation lifecycle (`summary/dirguta/dirguta.go`):
 assign `dir_id`/`parent_id`/`depth` on a directory's first `Add`, set
 `subtree_end = next` on its `Output`, keying off `DirectoryPath`
 push/pop (not raw entry order so interleaved files consume no id).
-No full-tree buffering (ancestor-stack state only); deterministic.
-Test file `summary/dirguta/idassign_test.go`. Covers all 4 acceptance
-tests from B1 (gap-free preorder, determinism byte-for-byte,
-interleaved file consumes no id, interval invariant on a real
-fixture). Depends on Item 1.1 (catalog schema target).
+No full-tree buffering (ancestor-stack state only); deterministic. The
+assignment relies on subtree-contiguous input (an existing pipeline
+invariant) and guards it: re-entry returns `ErrNonContiguousInput` and
+counter overflow returns `ErrTooManyDirs` rather than colliding with
+`parentSentinel`. Test file `summary/dirguta/idassign_test.go`. Covers
+all 6 acceptance tests from B1 (gap-free preorder, determinism
+byte-for-byte, interleaved file consumes no id, interval invariant on a
+real fixture, `ErrTooManyDirs` on overflow, `ErrNonContiguousInput` on a
+re-entered directory boundary). Depends on Item 1.1 (catalog schema
+target).
 
 - [ ] implemented
 - [ ] reviewed
@@ -96,6 +101,31 @@ time, CPU, max RSS for overhaul vs baseline and stating whether the
 dependency the benchmark must honour; no implementation lands in this
 phase beyond ensuring the id path adds no maps/time/concurrency
 (determinism preserved per B1). Depends on Items 1.2-1.4.
+
+- [ ] implemented
+- [ ] reviewed
+
+### Item 1.6: B5 - shared id allocator visible to file ingest
+
+spec.md section: B5
+
+Add `summary.DirIDAllocator` (`summary/idalloc.go`): the preorder
+counter, reserved low-id block, and `*summary.DirectoryPath` -> `dir_id`
+lookup. `cmd/summarise.go` creates one per run, calls `SetMountPath`
+(reserve `0..D`, counter from D+1) and injects it (optional, nil for the
+Bolt path) into `dirguta.NewDirGroupUserTypeAge` and
+`clickhouse.NewFileIngestOperation`. The DGUTA op calls `Enter`/`Leave`
+on directory boundaries; file ingest reads `DirID(info.Path)` (or
+`info.Path.Parent` for a directory entry), replacing the `parent_dir`
+string. Ordering is safe because a containing directory is entered
+earlier in preorder than its entries, and the above-root chain + data
+root are reserved at `SetMountPath`. The allocator-level behaviour
+(reserved ids, counter, `ErrTooManyDirs`, `ErrNonContiguousInput`) is
+unit-tested here in `summary/idalloc_test.go`; the file-ingest
+consumption and B5 acceptance tests 1-4 (each `wrstat_files` row's
+`dir_id`, including the mount-root entry under `D-1`) are exercised when
+the file-ingest writer lands (Phase 2, Item 2.2), since they need the
+files/spool rows. Depends on Items 1.2, 1.3.
 
 - [ ] implemented
 - [ ] reviewed

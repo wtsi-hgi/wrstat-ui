@@ -32,10 +32,13 @@ columns (`all_*`/`file_*` scalar summaries; parallel arrays `gids,
 uids, fts, ages, counts, sizes, atime_mins, mtime_maxs, atime_buckets,
 mtime_buckets`; `child_count`; `updated_at`; `refreshed_at`) except
 replace `dir String` with `dir_id UInt32 CODEC(Delta, LZ4)` and add
-`subtree_end UInt32 CODEC(Delta, LZ4)`; `ORDER BY (mount_path,
-snapshot_id, dir_id)`. Remove `wrstat_parent_facts` (child-fact reads
-served by the `subtree_end`-bearing facts band or the numeric
-child-filter table; "has children" met by catalog `child_dir_count`).
+`parent_id` + `subtree_end UInt32 CODEC(Delta, LZ4)`; `ORDER BY
+(mount_path, snapshot_id, dir_id)` plus a benchmark-gated
+`children_proj` ordered by `(mount_path, snapshot_id, parent_id,
+dir_id)` for the direct-child fact band. Remove `wrstat_parent_facts`
+(direct-child fact reads served by the facts `parent_id` band or the
+numeric child-filter table; recursive subtree reads use the
+`subtree_end` range; "has children" met by catalog `child_dir_count`).
 Verified jointly via D4 / E-section acceptance tests.
 
 - [ ] implemented

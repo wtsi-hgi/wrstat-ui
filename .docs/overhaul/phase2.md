@@ -25,7 +25,8 @@ In `internal/chspool/spool.go`: add a `wrstat_dirs` catalog stream
 child_dir_count, child_file_count, path_hash` - `full_path` once per
 directory); `FileRow` replaces `ParentDir string` with `DirID
 uint32` (keeps `Name`); `DirFactRow` replaces `Dir string` with
-`DirID uint32` (+ `SubtreeEnd`); `ChildFilterAllRow`/`DirFilterAllRow`/
+`DirID uint32` (+ `ParentID` and `SubtreeEnd`, D1);
+`ChildFilterAllRow`/`DirFilterAllRow`/
 `DirFilterAgeAllRow` replace path strings with `ParentID`/`DirID`/
 `SubtreeEnd`; remove `ParentFactRow` and the `wrstat_children`/
 `wrstat_parent_facts` streams; basedirs/active-virtual rows carry ids
@@ -47,19 +48,39 @@ Add new catalog writer `clickhouse/catalog.go` (buffers + inserts
 `wrstat_dirs` rows from `RecordDGUTA` id fields; also serves as the
 path<->id resolver buffer); the dguta writer drives it. Update
 `clickhouse/dguta_writer.go`, `file_ingest_operation.go` (write
-`dir_id` + `name`, no `parent_dir`), `mount_dir_projection_writer.go`
-(facts rows keyed by `dir_id` + `subtree_end`), derived-index writers
-(numeric filter rows), `import_block_writer.go` (mechanism unchanged;
-row counters updated), `summarise_spool_loader.go` (load catalog
-stream first, then id-keyed tables; readiness/manifest records new
-tables' row counts + SHA256). Preserve the `DGUTAWriter` interface
-(`Add, SetBatchSize, SetMountPath, SetUpdatedAt, Close`);
-`SetMountPath` still sets D up front for B2. Update existing test
-file `clickhouse/summarise_spool_loader_test.go`. Covers all 4
-acceptance tests from H2 (full summarise->spool->load correctness
-vs baseline, twice-written byte-identical determinism, spool-bytes /
-path-text-bytes reduction reported, interrupted-mid-batch resume
-produces a complete correct snapshot). Depends on Item 2.1.
+`dir_id` from the shared `DirIDAllocator` (B5, injected via
+`cmd/summarise.go`) + `name`, no `parent_dir`),
+`mount_dir_projection_writer.go` (facts rows keyed by `dir_id`,
+carrying `parent_id` + `subtree_end`), derived-index writers (numeric
+filter rows), `import_block_writer.go` (mechanism unchanged; row
+counters updated), `summarise_spool_loader.go` (load catalog stream
+first, then id-keyed tables; readiness/manifest records new tables'
+row counts + SHA256). Delete the now-dead child-edge and parent-facts
+machinery that only fed the removed `wrstat_children`/
+`wrstat_parent_facts` tables: the `db.DGUTAChildrenWriter` interface
+(B3) and its `summary/dirguta` plumbing, `dgutaWriter.AddChildren` plus
+the parent-facts derived-index writer/readers and the `NavigationObject`
+apparatus in `clickhouse/parent_facts.go` (deleted), the parent-fact
+`whereTraversal`/`DirInfo` packet subsystem in `clickhouse/database.go`,
+its packet cache in `clickhouse/database_cache.go`, the
+`parentFactsParentDir` callers in `clickhouse/dir_filter_all.go`, and the
+parent-facts fallback-route counter in `clickhouse/perf_counters.go`
+(loader child/parent-facts arms drop too); child listings now come from
+the catalog `parent_id` band (E1) and "has children" from
+`child_dir_count` (A1). Preserve the `DGUTAWriter` interface (`Add,
+SetBatchSize, SetMountPath, SetUpdatedAt, Close`); `SetMountPath` still
+sets D up front for B2. Update existing test file
+`clickhouse/summarise_spool_loader_test.go`. Covers all 7 acceptance
+tests from H2 (full summarise->spool->load correctness vs baseline,
+twice-written byte-identical determinism, spool-bytes / path-text-bytes
+reduction reported, interrupted-mid-batch resume produces a complete
+correct snapshot, production-spool streams id-keyed with no
+children/parent-facts stream, a repo-wide search finds no reads/writes
+of the deleted tables, and `go build`/`go vet` are clean with no
+orphaned reference to a deleted symbol or table), and B5 acceptance
+tests 1-4 (each `wrstat_files` row's `dir_id`, incl. the mount-root
+entry under `D-1`), since file ingest reads the allocator here. Depends
+on Item 2.1 and Phase 1 Item 1.6 (`DirIDAllocator`).
 
 - [ ] implemented
 - [ ] reviewed

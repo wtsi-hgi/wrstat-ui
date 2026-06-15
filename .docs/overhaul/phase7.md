@@ -28,9 +28,15 @@ Capture current `clickhouse` HEAD as baseline (preserved built
 binary or separate worktree under `.tmp/agent/overhaul/`) before any
 overhaul change. Reuse and extend `internal/chperf/` (`import.go`,
 `query.go`, `final_gate.go`, `clickhouse_api.go`) and the Bolt
-comparison harness, keeping the existing report structures. Update
-existing test files `internal/chperf/*_test.go`. Foundation for the
-rest of this phase.
+comparison harness, keeping the existing report structures. Remove the
+children/parent-facts plumbing and the navigation-object selection
+apparatus from `import.go`/`query.go` alongside the table/type
+deletions (mirroring B3/H2). Update existing test files
+`internal/chperf/*_test.go`. Covers both J1 acceptance tests (no
+per-table metric / phase / amplification / navigation-shape candidate
+references `wrstat_children` or `wrstat_parent_facts`; `internal/chperf`
+builds and `go vet`s clean with no `NavigationObject*` or
+`navigationShape*` reference). Foundation for the rest of this phase.
 
 - [ ] implemented
 - [ ] reviewed
@@ -87,8 +93,8 @@ Items 7.1, 7.2.
 
 spec.md section: J5
 
-Reproduce the existing harness's cache scopes (`fresh_provider_per_
-repeat`, `cold_provider_with_cold_query_cache`,
+Reproduce the existing harness's cache scopes
+(`fresh_provider_per_repeat`, `cold_provider_with_cold_query_cache`,
 `same_provider_cold_then_warm`, `same_query_client`,
 `ancestor_directory_each_repeat`, `new_directory_each_repeat`,
 `visible_child_directory_each_repeat`,

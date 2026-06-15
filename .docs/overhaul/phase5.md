@@ -26,11 +26,14 @@ In `clickhouse/file_api.go`, compile each pattern: basename-only
 `wrstat_files`; path-bearing (full-path / substring / recursive) ->
 candidate `dir_id`s or `[dir_id, subtree_end)` ranges from the
 `wrstat_dirs` `ngrambf_v1`/`tokenbf_v1` skip index + regex on
-`full_path`, then intersect with files by `dir_id`. Preserve
-gitignore-style multi-pattern semantics (`*` not crossing `/`, `**`
-crossing boundaries, `?`), the `(ownerEnabled=0 OR uid=? OR has(gids,
-gid))` permission filter, ordering, pagination, and the `CountByGlob`
--> `FindByGlob` fallback above 32 patterns. Signatures
+`full_path`, then intersect with files by `dir_id`. The skip index
+only narrows candidates: the `full_path` regex (RE2) is always applied
+and the `ext` shortcut is still glob-verified, so a non-tokenizable
+pattern falls back to scanning the small catalog rather than missing
+matches. Preserve gitignore-style multi-pattern semantics (`*` not
+crossing `/`, `**` crossing boundaries, `?`), the `(ownerEnabled=0 OR
+uid=? OR has(gids, gid))` permission filter, ordering, pagination, and
+the `CountByGlob` -> `FindByGlob` fallback above 32 patterns. Signatures
 (`FindByGlob`/`CountByGlob`) unchanged. Verified jointly with F3 in
 `clickhouse/file_api_test.go`. Depends on Phases 1-3.
 
@@ -45,12 +48,14 @@ In `clickhouse/file_api.go`, after the files read for
 `FindByGlob`/`ListDir`, resolve `full_path` for the result page via
 one catalog `dir_id IN (...)`, then `Path = full_path + name` and
 populate `ParentDir`. Update existing test file
-`clickhouse/file_api_test.go`. Covers all 3 acceptance tests from the
+`clickhouse/file_api_test.go`. Covers all 7 acceptance tests from the
 F section (FindByGlob direct-child/recursive/extension/dotfile paths
 + ordering + pagination + dedup identical to baseline; CountByGlob
 counts match baseline; full-path glob reads `wrstat_dirs` skip-index
-and `wrstat_files` only by `dir_id`, verified via EXPLAIN/read-rows
-in the benchmark). Depends on Item 5.1.
+and `wrstat_files` only by `dir_id`, verified via EXPLAIN/read-rows;
+the `ext`-index over-match trap (`*.bam` excludes `b.BAM`/`fake.cram`),
+`*.tar.gz`, recursive `Limit/Offset`, dotfile + owner-required, and
+CountByGlob returning 2/3/1/1). Depends on Item 5.1.
 
 - [ ] implemented
 - [ ] reviewed

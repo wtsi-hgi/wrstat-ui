@@ -44,10 +44,12 @@ query `wrstat_dir_facts` by `dir_id` with `arrayExists`). Signatures
 unchanged; `FileRow` keeps `Path`/`ParentDir` populated from the
 catalog at read time; path-hash hits MUST verify `full_path` before
 returning. Update existing test file `clickhouse/file_api_test.go`.
-Covers all 4 acceptance tests from C2 (old-vs-new parity for all five
+Covers all 7 acceptance tests from C2 (old-vs-new parity for all five
 calls incl. Path/ParentDir/ordering/pagination, no path-string
 column, baseline not-found behaviour, path-hash collision rejected
-never wrong file). Depends on Item 3.1.
+never wrong file, and mount-root StatPath/ListDir/PermissionPath/
+PermissionAnyInDir via the reserved chain - data root `dir_id = D`,
+its entry filed under `D-1`). Depends on Item 3.1.
 
 - [ ] implemented
 - [ ] reviewed

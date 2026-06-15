@@ -57,13 +57,30 @@ per-snapshot catalog and `dir_id` ranges (no mount-local dir copied).
 `wrstat_active_virtual_summaries`/`_filter_all`/`_children`/`_sets`
 keyed by `active_set_id` + `virtual_id` (mount-root boxes carry the
 mount-local `dir_id` link); the above-root linear chain stays in the
-per-mount catalog (B2), not here. Add test file
-`clickhouse/virtual_namespace_test.go`. Covers all 3 acceptance tests
+per-mount catalog (B2), not here. Precedence (matches baseline): the
+overlay is the sole authority for any path that is a strict prefix of
+an active mount root; the B2 rows are never independently summed into
+those answers (no double counting). Reuse the existing `active_set_id`
+derivation and active-set readiness/cleanup (`active_mounts.go`,
+`active_virtual_overlay.go`, `active_prefix_rollups.go`); only swap
+string keys for `virtual_id`/`dir_id` links. Prune the deleted string
+`wrstat_virtual_children`/`_sets` table and its writer/refresher/reader
+(`clickhouse/virtual_children.go`, `clickhouse/provider.go`), rewriting
+the live `Children` reader chain for virtual/ancestor paths
+(`virtualChildrenForAncestor` plus the `database.go` caller chain
+`virtualChildrenForReadyAncestorMounts` and its call sites) to serve
+from the virtual catalog / catalog `parent_id` band, and rewrite
+`activeVirtualMountChildCountsQuery` in
+`clickhouse/active_virtual_overlay.go` to read the catalog `parent_id`
+band instead of `wrstat_children`. Add test file
+`clickhouse/virtual_namespace_test.go`. Covers all 6 acceptance tests
 from G2 (root `/` aggregates selected mounts with separate
 `/lustre`/`/nfs` boxes + correct totals; virtual children / filtered
 virtual summaries / active-prefix rollups match baseline; virtual
-catalog contains only synthetic nodes, no copied mount-local rows).
-Depends on Phases 1-2.
+catalog contains only synthetic nodes; `DirInfo("/lustre/")` aggregated
+once not double-counted; overlay-is-sole-authority precedence for
+above-root/virtual paths; `active_set_id` + readiness reused from
+baseline). Depends on Phases 1-2.
 
 - [ ] implemented
 - [ ] reviewed
