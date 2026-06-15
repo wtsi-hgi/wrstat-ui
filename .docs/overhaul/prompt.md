@@ -37,9 +37,11 @@ by a compact integer id, and the three core hard problems become near-instant:
    path is an O(1) catalog read, and full-text path search is a small-table skip
    index, not a scan over billions of rows.
 
-The same redesign must make **ingest (summarise) faster**, because the new
-structure is generated for free during the existing depth-first tree walk and the
-spool stops carrying duplicated path text.
+The same redesign aims to make **ingest (summarise) faster too**: the new
+structure should be generated as a near-free byproduct of the existing
+depth-first tree walk, and the spool stops carrying duplicated path text. This is
+a goal to be confirmed by measurement, not an assumption (see area B) — an import
+regression is acceptable if it is reported and the query/storage wins justify it.
 
 ### The core idea: preorder interval labelling (an immutable nested-set trie)
 
@@ -71,16 +73,32 @@ operations on a `MergeTree` ordered by `dir_id`:
 | Full path of a dir | stored redundantly everywhere | one `full_path` copy in the catalog (O(1)) |
 | Files under a dir | `WHERE parent_dir = '...'` | `WHERE dir_id = ?` (direct) or range (recursive) |
 
-Because directory summaries in wrstat are already **recursive roll-ups** (the
-`wrstat_dir_facts` row for `/a/b/` already aggregates everything beneath it, with
-a per-`(gid,uid,ft,age)` breakdown held in parallel arrays), the exploded filter
-tables exist *only* to make filtered subtree scans and high-fanout child listings
-fast over string keys. Interval labelling is the hypothesis that they become
-unnecessary: a filtered subtree query is an integer-range scan that filters the
-compact per-directory vector in-query, and a filtered child listing reads the
-contiguous `parent_id` band of already-recursive child rows. The spec must
-**implement the collapse fully and then measure** whether the base tables alone
-meet the latency gates, deleting the exploded tables if so.
+Interval labelling also changes the *filter* story, but here the design is
+deliberately conservative. Directory summaries in wrstat are already **recursive
+roll-ups** (the `wrstat_dir_facts` row for `/a/b/` already aggregates everything
+beneath it, with a per-`(gid,uid,ft,age)` breakdown held in parallel arrays), and
+the existing exploded filter tables (`*_filter_all`, `*_filter_ageall`) exist to
+make filtered subtree scans and high-fanout child listings fast. There is a
+tempting hypothesis that integer ranges make those tables unnecessary — that a
+filtered subtree query can be served by an integer-range scan filtering the
+per-directory vector in-query. **That hypothesis is exactly the bet that the
+earlier schema work already found too slow over string keys, so this overhaul
+does not bet the design on it.** Instead:
+
+- **Default:** keep the filter materialisations, but make them `dir_id`-keyed and
+  numeric (filter dimensions in the sort key, child/dir `dir_id` instead of path
+  strings). This preserves the proven low-latency serving model for the
+  filtered/high-fanout query class while still removing all path-string
+  duplication.
+- **Optimisation, per pattern, benchmark-gated:** where — and *only* where — the
+  before/after study proves that in-query vector filtering over an integer range
+  meets the latency gate for a specific filtered pattern, collapse that
+  materialisation away. Every such collapse must cite the measurement that
+  justified it; an unproven collapse is a spec failure.
+
+The big, *unconditional* wins (dedup, parent/child, exact lookup, broad subtree,
+full-path) come from interval labelling regardless. The filter-table collapse is
+treated as an upside to be earned by measurement, not a foundational assumption.
 
 ---
 
@@ -103,11 +121,16 @@ meet the latency gates, deleting the exploded tables if so.
 - This overhaul **supersedes and unifies** the incremental `.docs/schema`,
   `.docs/schema2`, and `.docs/schema3` layering (which kept *adding* string-keyed
   tables and thus *added* duplication) and the `.docs/summarise` write-dedup fix.
-  A parallel `.docs/trie` effort sketches the integer-id idea for the query
-  schema only; **treat this prompt as the self-contained superset** — it also
-  redesigns ingest-side id generation, collapses the exploded filter tables,
-  redesigns path search, and mandates full-catalogue benchmarking. The spec
-  writer should not depend on those other documents.
+  A parallel `.docs/trie` effort proposes the same integer-id / preorder-interval
+  core for the query schema. This overhaul **shares that core deliberately** and
+  adopts its safer serving stance — *keep* numeric `dir_id`-keyed filter
+  materialisations rather than betting the design on collapsing them — while
+  adding three things the trie sketch does not commit to: (1) `dir_id` assignment
+  integrated into the summariser's existing walk, (2) a spool/write path that
+  carries ids instead of repeated path text, and (3) catalog-side text
+  skip-indexes for full-path/glob search. **Treat this prompt as self-contained**;
+  the spec writer should not depend on those other documents, but where this
+  prompt and the trie design agree, that agreement is intentional.
 
 ---
 
@@ -201,18 +224,35 @@ subtree_end)`); `parent_id` of the mount root is a sentinel; full path of any
 `dir_id` is reconstructable both via the stored `full_path` (O(1)) and via the
 `parent_id` walk (cross-check they agree).
 
-### B. ID assignment during summarise (free, deterministic, streaming)
+### B. ID assignment during summarise (deterministic, streaming)
 
-The preorder `dir_id` is assigned as a counter during the existing depth-first
-walk; `subtree_end` is fixed when a directory's subtree completes (when it is
-popped). The spec must show this adds negligible CPU and bounded memory (an
-ancestor stack, depth ≤ ~128), produces ids **deterministically** (same input →
-same ids, required for reproducible spool and tests), and works in the streaming
-single-pass model without holding all rows in memory.
+The intended approach assigns the preorder `dir_id` as a counter during the
+summariser's existing depth-first walk, fixing `subtree_end` when a directory's
+subtree completes (when it is popped) — using only an ancestor stack (depth
+≤ ~128) and no full-tree buffering. **This rests on an assumption the spec must
+validate, not assume: that the input stat stream is already DFS-contiguous**
+(every directory's descendants arrive as one uninterrupted run, which the
+existing streaming child→parent roll-up in `summary/dirguta` implies but does not
+guarantee — note in particular how files can interleave with sibling
+subdirectories under lexicographic ordering). The spec must:
 
-Acceptance: deterministic id assignment proven by test; ids dense and gap-free
-per snapshot; assignment integrated into `summary.Summariser` /
-`summary/dirguta` output so the id is available to all writers.
+- prove the stream order yields correct preorder ids and subtree intervals, or
+  define the deterministic step that establishes it (e.g. a bounded reorder, a
+  stack over lexicographic paths, or an intermediate sort), per the same concern
+  the trie design flags;
+- produce ids **deterministically** (same input → same ids, required for
+  reproducible spool and tests);
+- **measure**, not assume, the import cost. The headline claim is that ids are
+  near-free in the existing walk and the leaner spool makes ingest *faster*; the
+  benchmark must confirm or refute this. An import regression is acceptable if
+  query/storage wins justify it, but it must be reported, not hidden behind a
+  "free during the walk" assertion.
+
+Acceptance: correct, deterministic, gap-free ids proven by test (including a case
+with files interleaved among subdirectories); the interval invariant from area A
+holds on real datasets; assignment integrated into `summary.Summariser` /
+`summary/dirguta` output so the id is available to all writers; import wall
+time/CPU/RSS reported vs baseline.
 
 ### C. Files table rewrite — `dir_id` instead of `parent_dir`
 
@@ -226,36 +266,58 @@ display is the catalog `full_path` + `name`.
 Acceptance: results identical to current `StatPath`/`ListDir`/etc.; the largest
 table no longer stores any directory path string.
 
-### D. Collapse the exploded filter tables (the radical bet)
+### D. Numeric filter tables (default), collapse only where measured
 
-Hypothesis: with interval labelling, the per-directory recursive DGUTA vector in
-the facts table is sufficient to serve all filtered queries without
-`wrstat_dir_filter_all`, `wrstat_child_filter_all`, or `wrstat_dir_filter_ageall`:
+The default is **not** to delete the filter materialisations. The earlier schema
+work added `wrstat_dir_filter_all`, `wrstat_child_filter_all`, and
+`wrstat_dir_filter_ageall` precisely because serving filtered/high-fanout queries
+from the per-directory vector was too slow, and this overhaul does not gamble the
+filtered-query latency class on the assumption that integer ranges alone close
+that gap. Instead:
 
-- **Filtered exact summary** (`DirInfo(dir, filter)`): read the one facts row for
-  `dir_id`, apply the filter to its parallel arrays in-query (`arrayFilter` /
-  `arrayReduce`), no extra table.
-- **Filtered child summaries** (`DirInfos` of a parent's children,
-  `DirsHaveChildren`): read the contiguous `parent_id` band of child facts rows
-  (each already a recursive roll-up) and filter each vector. High-fanout parents
-  (e.g. 11k children) read one contiguous range, not 11k scattered lookups.
-- **Filtered subtree** (`Where`, Disktree, `where --dir`): range scan
-  `dir_id ∈ [id, subtree_end)`, emit per-node filtered aggregates above the
-  recurse threshold. Ordered by `dir_id` ⇒ contiguous granules ⇒ minimal reads.
+- **Keep the filter materialisations, made numeric.** Replace their string keys
+  with ids: filtered child facts keyed by `(parent_id, age, gid, uid, ft, child
+  dir_id)`; filtered dir/subtree facts keyed by `dir_id` for exact lookups and by
+  the `(dir_id, subtree_end)` range for subtree scans, with the filter dimensions
+  in the sort key. No `dir`/`parent_dir` strings in any of these hot rows. This
+  removes the duplication (the dominant storage problem in these tables was the
+  repeated path text) while preserving the proven low-latency serving model.
+- **Specify the in-query fallback path too.** The facts table retains the
+  parallel-array DGUTA vector, so filtered queries *can* also be answered by
+  in-query `arrayFilter`/`arrayReduce` over an integer range. Implement this as an
+  available code path so the benchmark can compare it head-to-head against the
+  materialised tables per pattern.
+- **Collapse per pattern, benchmark-gated.** Where — and only where — the
+  before/after study proves the in-query path meets the latency gate for a
+  specific filtered pattern (a given filter shape × dataset × fanout), drop that
+  materialisation. Each collapse must cite the measurement; an unproven collapse
+  is a spec failure. The likeliest safe collapse is filtered *exact* `DirInfo`
+  (a single facts row); the likeliest table to retain is the high-fanout filtered
+  child/subtree serving rows.
 
 The spec must specify the exact facts-table layout (keep the parallel-array DGUTA
 vector; decide whether to also keep narrow scalar `all_*`/`file_*` columns), the
-in-query filter expressions, and then require the benchmark to confirm the
-exploded tables can be **deleted**. If, and only if, measurement shows a specific
-filtered pattern misses its gate, the spec may reintroduce a *single* minimal
-helper — but as an `AggregatingMergeTree`/projection keyed by `dir_id` (still no
-path strings), never as a string-keyed exploded table. Document any such fallback
-with the measurement that forced it.
+numeric filter-table DDL, the in-query filter expressions, and the per-pattern
+decision procedure (which table is kept vs collapsed, and the measurement that
+decided it).
+
+Filtered query routes covered:
+
+- **Filtered exact summary** (`DirInfo(dir, filter)`): `dir_id` lookup against the
+  numeric dir-filter rows, or in-query vector filter of the single facts row.
+- **Filtered child summaries** (`DirInfos` of a parent's children,
+  `DirsHaveChildren`): the numeric `parent_id`-keyed child-filter band, or the
+  contiguous `parent_id` band of child facts rows filtered in-query. High-fanout
+  parents (e.g. 11k children) read one contiguous range, not 11k scattered reads.
+- **Filtered subtree** (`Where`, Disktree, `where --dir`): the numeric
+  `(dir_id, subtree_end)` range over the dir-filter rows, or a range scan of the
+  facts table emitting per-node filtered aggregates above the recurse threshold.
 
 Acceptance: filtered results bit-for-bit match current outputs across the
-benchmark filter matrix (gid, uid, ft, age, and combinations); storage for the
-DGUTA layer drops by the (large) size of the removed exploded tables; latency
-gates in the benchmark section met.
+benchmark filter matrix (gid, uid, ft, age, and combinations); no filter table
+stores a path string; every retained-vs-collapsed decision is backed by a cited
+measurement; latency gates in the benchmark section met for every filtered
+pattern.
 
 ### E. Parent / child / ancestor / full-path resolution
 
@@ -388,14 +450,19 @@ acceptance artefact.
 - **Absolute cold UX (hard):** exact dir resolution, exact file stat, permission
   path, direct-child list ⇒ p95 < 100 ms; recursive subtree, filtered, glob,
   Disktree, `Where` ⇒ p95 < 500 ms.
-- **Storage (hard):** total path-text bytes reduced to one copy per directory per
-  snapshot; the multi-billion-row exploded filter tables are gone (or, if any
-  minimal helper is reintroduced under D, it is `dir_id`-keyed and the
-  justification is the measured gate miss).
+- **Storage (hard):** no hot row in any table stores a `dir`/`parent_dir`/path
+  string — path text is reduced to one copy per directory per snapshot in the
+  catalog. The filter tables remain (now `dir_id`-keyed/numeric) unless a specific
+  pattern's materialisation was collapsed under area D with a cited measurement.
+  Report compressed and uncompressed bytes per table vs baseline (the numeric
+  filter tables should shrink substantially from dropping path strings even when
+  retained).
 - **Relative performance (report, not pass/fail):** per-query before/after delta
-  reported for every type. Net wins expected on subtree/recursive/high-fanout and
-  ingest; any regression must be quantified and explained, and must still satisfy
-  the absolute UX gate to ship.
+  reported for every type. Net wins expected on dedup-driven storage, ingest, and
+  subtree/recursive/high-fanout navigation; the filtered query class is expected
+  to be at parity-or-better because its materialisations are retained; any
+  regression must be quantified and explained, and must still satisfy the absolute
+  UX gate to ship.
 
 ---
 
@@ -409,8 +476,9 @@ acceptance artefact.
   selection, child de-dup/sort, and filter combination logic are preserved.
 - Existing tests across `clickhouse/`, `summary/`, `db/`, and `internal/chperf/`
   must pass (after updating fixtures to the new schema); add tests proving the
-  interval invariant, deterministic ids, collision safety, and the collapse of
-  the filter tables.
+  interval invariant, deterministic ids, collision safety, and parity between the
+  numeric filter tables and the in-query vector-filter path (so either can serve a
+  pattern with identical results).
 
 ---
 
@@ -454,11 +522,13 @@ acceptance artefact.
    (Area H.)
 3. **Files table on `dir_id`.** Rewrite `wrstat_files` and the file API
    (`StatPath`, `ListDir`, `IsDir`, permissions). (Area C.)
-4. **Facts on `dir_id` + collapse filters.** Rewrite `wrstat_dir_facts` keyed by
-   `dir_id`; implement in-query vector filtering for exact/child/subtree;
-   **delete** `wrstat_dir_filter_all` / `wrstat_child_filter_all` /
-   `wrstat_dir_filter_ageall` (subject to the area-D measurement). Rewrite
-   `DirInfo`, `DirInfos`, `DirsHaveChildren`, `Where`, `Children`. (Areas D, E.)
+4. **Facts + numeric filter tables on `dir_id`.** Rewrite `wrstat_dir_facts`
+   keyed by `dir_id`; rewrite `wrstat_dir_filter_all` / `wrstat_child_filter_all`
+   / `wrstat_dir_filter_ageall` as numeric `dir_id`-keyed tables (no path strings)
+   — these are retained by default. Also implement the in-query vector-filtering
+   code path so the benchmark can compare it per pattern and collapse only the
+   materialisations it proves redundant (area D). Rewrite `DirInfo`, `DirInfos`,
+   `DirsHaveChildren`, `Where`, `Children`. (Areas D, E.)
 5. **Glob / full-text search** on the catalog skip indexes. (Area F.)
 6. **Basedirs + active virtual namespace** in the id world. (Area G.)
 7. **Benchmark study**: baseline capture, full query-type matrix, import/storage,
