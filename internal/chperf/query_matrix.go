@@ -211,7 +211,6 @@ func j4RequiredMatrixOperations() []j4RequiredMatrixOperation {
 		{j4QueryTypeMaintenance, queryOpInfoName, "Info"},
 		{j4QueryTypeMaintenance, queryOpMountTimestampsName, "active mount freshness"},
 		{j4QueryTypeMaintenance, queryOpBasedirsInfoName, "basedirs Info"},
-		{j4QueryTypeMaintenance, queryOpNavIndexAuditName, "in-process navigation index"},
 	}
 }
 
