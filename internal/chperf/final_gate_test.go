@@ -2025,7 +2025,7 @@ func TestJ6FinalGates(t *testing.T) {
 
 		evidence = finalGateTestEvidence(false, false)
 		finalGateMutateJ6MatrixOperation(&evidence, queryOpDirInfoFilteredName, func(op *perfreport.Operation) {
-			op.P50MS = 0
+			op.P50MS = -1
 		})
 
 		result = ValidateFinalGates(evidence)

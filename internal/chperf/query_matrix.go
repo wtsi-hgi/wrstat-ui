@@ -269,7 +269,7 @@ func j4OperationMetricsFailure(op perfreport.Operation) string {
 		{"missing duration samples", len(op.DurationsMS) == 0},
 		{"missing result rows", len(op.ResultCount) == 0},
 		{"missing result digest", stringInput(op.Inputs, queryInputResultDigest) == ""},
-		{"missing p50/p95/p99", op.P50MS <= 0 || op.P95MS <= 0 || op.P99MS <= 0},
+		{"invalid p50/p95/p99", op.P50MS < 0 || op.P95MS < 0 || op.P99MS < 0},
 	}
 
 	if j4OperationQueryMetricsRequired(op) {

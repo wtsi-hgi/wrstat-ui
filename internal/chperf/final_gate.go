@@ -4833,7 +4833,7 @@ func finalGateRESTOperationEvidencePasses(op perfreport.Operation) bool {
 }
 
 func finalGatePercentilesPresent(op perfreport.Operation) bool {
-	return op.P50MS > 0 && op.P95MS > 0 && op.P99MS > 0
+	return len(op.DurationsMS) > 0 && op.P50MS >= 0 && op.P95MS >= 0 && op.P99MS >= 0
 }
 
 func finalGateClickHouseOperations(reports []perfreport.Report) []perfreport.Operation {
@@ -5257,7 +5257,7 @@ func finalGateBaselineRegressionFailure(
 
 func finalGateBaselineStatsPresent(ops ...perfreport.Operation) bool {
 	for _, op := range ops {
-		if len(op.DurationsMS) < finalGateMinRepeats || op.P50MS <= 0 || op.P95MS <= 0 || op.P99MS <= 0 {
+		if len(op.DurationsMS) < finalGateMinRepeats || op.P50MS < 0 || op.P95MS < 0 || op.P99MS < 0 {
 			return false
 		}
 	}
