@@ -381,22 +381,23 @@ func (a *dirIDAssigner) close(dir *summary.DirectoryPath) {
 // DirGroupUserTypeAge is used to summarise file stats by directory, group,
 // user, file type and age.
 type DirGroupUserTypeAge struct {
-	parent        *DirGroupUserTypeAge
-	db            DB
-	idAssigner    *dirIDAssigner
-	idAllocator   *summary.DirIDAllocator
-	store         gutaStore
-	thisDir       *summary.DirectoryPath
-	children      []string
-	childCount    uint64
-	now           int64
-	isTempDir     bool
-	seenHardlinks map[int64]*inodeEntry
-	dirID         uint32
-	parentID      uint32
-	subtreeEnd    uint32
-	depth         uint16
-	idAssigned    bool
+	parent         *DirGroupUserTypeAge
+	db             DB
+	idAssigner     *dirIDAssigner
+	idAllocator    *summary.DirIDAllocator
+	store          gutaStore
+	thisDir        *summary.DirectoryPath
+	children       []string
+	childCount     uint64
+	childFileCount uint64
+	now            int64
+	isTempDir      bool
+	seenHardlinks  map[int64]*inodeEntry
+	dirID          uint32
+	parentID       uint32
+	subtreeEnd     uint32
+	depth          uint16
+	idAssigned     bool
 }
 
 // Add is a summary.Operation method. It will break path in to its directories
@@ -431,6 +432,10 @@ func (d *DirGroupUserTypeAge) Add(info *summary.FileInfo) error { //nolint:funle
 
 	if info.Path != d.thisDir {
 		return nil
+	}
+
+	if !info.IsDir() {
+		d.addChildFile()
 	}
 
 	ft := FileTypeWithTemp(info.Name, d.isTempDir)
@@ -530,6 +535,10 @@ func (d *DirGroupUserTypeAge) addChildName(child string) error {
 	d.children = append(d.children, child)
 
 	return nil
+}
+
+func (d *DirGroupUserTypeAge) addChildFile() {
+	d.childFileCount++
 }
 
 // handleHardlink checks if a file is a hardlink that has been seen before.
@@ -637,13 +646,14 @@ func (d *DirGroupUserTypeAge) Output() error {
 	}
 
 	dguta := db.RecordDGUTA{
-		Dir:        d.thisDir,
-		DirID:      d.dirID,
-		ParentID:   d.parentID,
-		SubtreeEnd: d.subtreeEnd,
-		Depth:      d.depth,
-		Children:   d.children,
-		ChildCount: d.childCount,
+		Dir:            d.thisDir,
+		DirID:          d.dirID,
+		ParentID:       d.parentID,
+		SubtreeEnd:     d.subtreeEnd,
+		Depth:          d.depth,
+		Children:       d.children,
+		ChildCount:     d.childCount,
+		ChildFileCount: d.childFileCount,
 	}
 
 	for _, guta := range dgutas {
@@ -804,6 +814,7 @@ func (d *DirGroupUserTypeAge) clear() {
 	d.thisDir = nil
 	d.children = nil
 	d.childCount = 0
+	d.childFileCount = 0
 	d.dirID = 0
 	d.parentID = 0
 	d.subtreeEnd = 0

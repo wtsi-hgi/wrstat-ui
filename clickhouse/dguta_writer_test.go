@@ -4299,9 +4299,11 @@ func readActivePrefixScalarRollupForTest(
 ) activePrefixScalarRollupForTest {
 	rows, err := conn.Query(ctx,
 		"SELECT all_count, file_count, child_count FROM wrstat_active_prefix_rollups "+
-			"WHERE active_set_id = ? AND dir = ?",
+			"AS r INNER JOIN wrstat_active_virtual_dirs AS d "+
+			"ON d.active_set_id = r.active_set_id AND d.virtual_id = r.virtual_id "+
+			"WHERE r.active_set_id = ? AND d.full_path = ?",
 		activeSetID,
-		dir,
+		ensureTrailingSlash(dir),
 	)
 	So(err, ShouldBeNil)
 
@@ -4349,12 +4351,15 @@ func TestActivePrefixRollupsB1(t *testing.T) {
 				seedActivePrefixB1Mount(ctx, conn, testT283ImagingMountPath, updatedAt.Add(3*time.Minute), 83197, 3),
 			}
 			activeSetID := fingerprintForMountsActive(rows)
+			seedActiveVirtualDirsForActivePrefixTest(ctx, conn, activeSetID, rows)
 
 			So(ensureActivePrefixRollups(ctx, conn, rows), ShouldBeNil)
 
 			So(countRows(ctx, conn,
-				"SELECT count() FROM wrstat_active_prefix_rollups WHERE active_set_id = ? "+
-					"AND dir IN ('/', '/lustre/', '/nfs/')",
+				"SELECT count() FROM wrstat_active_prefix_rollups AS r "+
+					"INNER JOIN wrstat_active_virtual_dirs AS d "+
+					"ON d.active_set_id = r.active_set_id AND d.virtual_id = r.virtual_id "+
+					"WHERE r.active_set_id = ? AND d.full_path IN ('/', '/lustre/', '/nfs/')",
 				activeSetID,
 			), ShouldEqual, 3)
 			So(countRows(ctx, conn,
@@ -4362,7 +4367,10 @@ func TestActivePrefixRollupsB1(t *testing.T) {
 				activeSetID,
 			), ShouldEqual, 3)
 			So(countRows(ctx, conn,
-				"SELECT count() FROM wrstat_active_prefix_filter_ageall WHERE active_set_id = ? AND dir = '/'",
+				"SELECT count() FROM wrstat_active_prefix_filter_ageall AS f "+
+					"INNER JOIN wrstat_active_virtual_dirs AS d "+
+					"ON d.active_set_id = f.active_set_id AND d.virtual_id = f.virtual_id "+
+					"WHERE f.active_set_id = ? AND d.full_path = '/'",
 				activeSetID,
 			), ShouldBeGreaterThan, 0)
 
@@ -4614,17 +4622,24 @@ func TestActivePrefixRollupsB1(t *testing.T) {
 				seedActivePrefixB1Mount(ctx, conn, c3Scratch120Mount, updatedAt, 90000, 2),
 			}
 			activeSetID := fingerprintForMountsActive(rows)
+			seedActiveVirtualDirsForActivePrefixTest(ctx, conn, activeSetID, rows)
 			failingConn := &activePrefixRollupSetFailureConn{Conn: conn}
 
 			err = refreshActivePrefixRollups(ctx, failingConn, rows, activeSetID)
 			So(errors.Is(err, errForcedFailure), ShouldBeTrue)
 			So(failingConn.failedSetInserts(), ShouldEqual, 1)
 			So(countRows(ctx, conn,
-				"SELECT count() FROM wrstat_active_prefix_rollups WHERE active_set_id = ? AND dir = '/'",
+				"SELECT count() FROM wrstat_active_prefix_rollups AS r "+
+					"INNER JOIN wrstat_active_virtual_dirs AS d "+
+					"ON d.active_set_id = r.active_set_id AND d.virtual_id = r.virtual_id "+
+					"WHERE r.active_set_id = ? AND d.full_path = '/'",
 				activeSetID,
 			), ShouldEqual, uint64(1))
 			So(countRows(ctx, conn,
-				"SELECT count() FROM wrstat_active_prefix_filter_ageall WHERE active_set_id = ? AND dir = '/'",
+				"SELECT count() FROM wrstat_active_prefix_filter_ageall AS f "+
+					"INNER JOIN wrstat_active_virtual_dirs AS d "+
+					"ON d.active_set_id = f.active_set_id AND d.virtual_id = f.virtual_id "+
+					"WHERE f.active_set_id = ? AND d.full_path = '/'",
 				activeSetID,
 			), ShouldBeGreaterThan, uint64(0))
 			So(countRows(ctx, conn,
@@ -4741,12 +4756,30 @@ func insertActivePrefixB1Children(
 	}
 }
 
+func seedActiveVirtualDirsForActivePrefixTest(
+	ctx context.Context,
+	conn ch.Conn,
+	activeSetID string,
+	rows []mountsActiveRow,
+) {
+	refreshedAt := time.Now().UTC()
+	namespace := activeVirtualNamespaceForMounts(activeSetID, newActiveMountsSnapshot(rows).all(), nil, refreshedAt)
+	writer := newActiveVirtualOverlayWriter(conn, defaultBatchSize)
+
+	for _, row := range namespace.rows {
+		So(writer.appendDir(ctx, row), ShouldBeNil)
+	}
+
+	So(writer.flush(ctx), ShouldBeNil)
+	So(writer.appendSet(ctx, activeVirtualSetRowForRows(activeSetID, rows, nil, nil, nil, refreshedAt)), ShouldBeNil)
+}
+
 func explainActivePrefixScalarRollupForTest(
 	ctx context.Context,
 	conn ch.Conn,
 	activeSetID, dir string,
 ) (string, error) {
-	rows, err := conn.Query(ctx, explainPrefix+activePrefixScalarRollupReadQuery, activeSetID, dir)
+	rows, err := conn.Query(ctx, explainPrefix+activePrefixScalarRollupReadQuery, activeSetID, ensureTrailingSlash(dir))
 	if err != nil {
 		return "", err
 	}

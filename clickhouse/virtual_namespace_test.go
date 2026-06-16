@@ -213,6 +213,21 @@ func TestActiveVirtualNamespaceG2(t *testing.T) {
 		So(summaries, ShouldContainSubstring, "virtual_id UInt32")
 		So(filters, ShouldContainSubstring, "virtual_id UInt32")
 	})
+
+	Convey("G2 active-prefix hot tables key by virtual id, not path text", t, func() {
+		ddl, err := os.ReadFile("schema/013_active_prefix_rollups.sql")
+		So(err, ShouldBeNil)
+
+		rollups := g2CreateTableDDL(string(ddl), "wrstat_active_prefix_rollups")
+		filters := g2CreateTableDDL(string(ddl), "wrstat_active_prefix_filter_ageall")
+
+		for _, table := range []string{rollups, filters} {
+			So(table, ShouldNotContainSubstring, "\n  dir String")
+			So(table, ShouldNotContainSubstring, "\n  parent_dir String")
+			So(table, ShouldNotContainSubstring, "\n  child_dir String")
+			So(table, ShouldContainSubstring, "virtual_id UInt32")
+		}
+	})
 }
 
 func g2ActiveMounts() []activeMount {

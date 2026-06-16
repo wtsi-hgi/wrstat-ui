@@ -59,6 +59,21 @@ func TestCleanSchemaDDLContainsOnlyFinalV1Objects(t *testing.T) {
 		So(offenders, ShouldBeEmpty)
 	})
 
+	Convey("embedded schema SQL filenames have unique numeric prefixes", t, func() {
+		files, err := filepath.Glob(filepath.Join(repoRootForCleanSchemaTest(t), cleanSchemaClickHouseDir, "schema", "*.sql"))
+		So(err, ShouldBeNil)
+		So(files, ShouldNotBeEmpty)
+
+		seen := make(map[string]string, len(files))
+		for _, file := range files {
+			prefix := strings.SplitN(filepath.Base(file), "_", 2)[0]
+			_, duplicate := seen[prefix]
+			So(duplicate, ShouldBeFalse)
+
+			seen[prefix] = file
+		}
+	})
+
 	Convey("wrstat_files is keyed by dir_id and keeps the extension index", t, func() {
 		src, err := os.ReadFile(filepath.Join(
 			repoRootForCleanSchemaTest(t), cleanSchemaClickHouseDir, "schema", "011_files.sql",

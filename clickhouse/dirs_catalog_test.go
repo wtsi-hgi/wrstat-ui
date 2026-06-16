@@ -35,6 +35,7 @@ import (
 	ch "github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/google/uuid"
 	. "github.com/smartystreets/goconvey/convey"
+	"github.com/wtsi-hgi/wrstat-ui/db"
 )
 
 const (
@@ -290,6 +291,24 @@ func reverseDirsCatalogNames(names []string) []string {
 }
 
 func TestDirsCatalogA1(t *testing.T) {
+	Convey("catalog rows carry direct file-child counts from RecordDGUTA", t, func() {
+		row := catalogRowFromRecord(
+			activeMount{mountPath: "/mnt/test/", snapshotID: uuid.NewString()},
+			db.RecordDGUTA{
+				DirID:          7,
+				ParentID:       6,
+				SubtreeEnd:     8,
+				Depth:          3,
+				ChildCount:     2,
+				ChildFileCount: 4,
+			},
+			"/mnt/test/team/",
+		)
+
+		So(row.childDirCount, ShouldEqual, uint32(2))
+		So(row.childFileCount, ShouldEqual, uint32(4))
+	})
+
 	Convey("A1 wrstat_dirs stores one directory row per snapshot with navigable ids", t, func() {
 		th := newClickHouseTestHarness(t)
 		cfg := th.newConfig()

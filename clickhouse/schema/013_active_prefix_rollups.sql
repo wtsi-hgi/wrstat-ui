@@ -26,7 +26,7 @@
 
 CREATE TABLE IF NOT EXISTS wrstat_active_prefix_rollups (
   active_set_id String CODEC(ZSTD(3)),
-  dir String CODEC(LZ4),
+  virtual_id UInt32 CODEC(Delta, LZ4),
   updated_at DateTime CODEC(Delta, ZSTD(3)),
   all_count UInt64 CODEC(Delta, LZ4),
   all_size UInt64 CODEC(Delta, LZ4),
@@ -43,12 +43,12 @@ CREATE TABLE IF NOT EXISTS wrstat_active_prefix_rollups (
   refreshed_at DateTime64(3) CODEC(Delta, ZSTD(3))
 ) ENGINE = MergeTree
 PARTITION BY active_set_id
-ORDER BY (active_set_id, dir)
+ORDER BY (active_set_id, virtual_id)
 SETTINGS index_granularity = 8192;
 
 CREATE TABLE IF NOT EXISTS wrstat_active_prefix_filter_ageall (
   active_set_id String CODEC(ZSTD(3)),
-  dir String CODEC(LZ4),
+  virtual_id UInt32 CODEC(Delta, LZ4),
   gid UInt32,
   uid UInt32,
   ft UInt16,
@@ -61,7 +61,7 @@ CREATE TABLE IF NOT EXISTS wrstat_active_prefix_filter_ageall (
   refreshed_at DateTime64(3) CODEC(Delta, ZSTD(3))
 ) ENGINE = MergeTree
 PARTITION BY active_set_id
-ORDER BY (active_set_id, dir, gid, uid, ft)
+ORDER BY (active_set_id, virtual_id, gid, uid, ft)
 SETTINGS index_granularity = 8192;
 
 CREATE TABLE IF NOT EXISTS wrstat_active_prefix_rollup_sets (

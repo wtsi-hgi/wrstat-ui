@@ -105,16 +105,17 @@ func catalogRowFromRecord(mount activeMount, record db.RecordDGUTA, fullPath str
 	fullPath = ensureTrailingSlash(fullPath)
 
 	return catalogRow{
-		mountPath:     mount.mountPath,
-		snapshotID:    mount.snapshotID,
-		dirID:         record.DirID,
-		parentID:      record.ParentID,
-		subtreeEnd:    record.SubtreeEnd,
-		depth:         record.Depth,
-		name:          catalogNameForFullPath(fullPath),
-		fullPath:      fullPath,
-		childDirCount: safeUint32(record.ChildCount),
-		pathHash:      catalogPathHash(fullPath),
+		mountPath:      mount.mountPath,
+		snapshotID:     mount.snapshotID,
+		dirID:          record.DirID,
+		parentID:       record.ParentID,
+		subtreeEnd:     record.SubtreeEnd,
+		depth:          record.Depth,
+		name:           catalogNameForFullPath(fullPath),
+		fullPath:       fullPath,
+		childDirCount:  safeUint32(record.ChildCount),
+		childFileCount: safeUint32(record.ChildFileCount),
+		pathHash:       catalogPathHash(fullPath),
 	}
 }
 

@@ -1297,6 +1297,11 @@ func TestSummariseClickHouseSpoolRows(t *testing.T) {
 		So(mountRoot.DirID, ShouldEqual, uint32(2))
 		So(mountRoot.ParentID, ShouldEqual, mountParent.DirID)
 		So(subDir.ParentID, ShouldEqual, mountRoot.DirID)
+		So(mountParent.ChildFileCount, ShouldEqual, uint32(0))
+		So(mountRoot.ChildDirCount, ShouldEqual, uint32(1))
+		So(mountRoot.ChildFileCount, ShouldEqual, uint32(1))
+		So(subDir.ChildDirCount, ShouldEqual, uint32(1))
+		So(subDir.ChildFileCount, ShouldEqual, uint32(1))
 
 		So(filesByPath[b5SpoolMountPath].DirID, ShouldEqual, mountParent.DirID)
 		So(filesByPath[b5SpoolMountPath+"sub/"].DirID, ShouldEqual, mountRoot.DirID)

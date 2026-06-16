@@ -313,8 +313,8 @@ func b3CLISortedStrings(values []string) []string {
 
 func b3CLIProjectManifestDigest(key string) string {
 	return map[string]string{
-		"project_where_unused_1y":    "sha256:20b461c3d947a332c2c6f1f21c6958a10198fbed82c9a6d049e9912d22b65070",
-		"project_where_unchanged_1y": "sha256:46f47c20afbca8f779689bc68e3d21d246cc37a16a12559d6f42820d37b8914c",
+		"project_where_unused_1y":    "sha256:b9c64b58b3939fcd42ba147691bd832e1a2797460eb893520f3658978744a312",
+		"project_where_unchanged_1y": "sha256:2170ee7fffd05b33acb17d93337bec6f7d26b5a7e7e1503f1bcc94d176bd2685",
 	}[key]
 }
 

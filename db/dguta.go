@@ -81,6 +81,8 @@ type RecordDGUTA struct {
 	GUTAs      GUTAs
 	Children   []string
 	ChildCount uint64
+	// ChildFileCount is the number of immediate non-directory entries below Dir.
+	ChildFileCount uint64
 }
 
 // EncodeToBytes returns our Dir as a []byte and our GUTAs encoded in another

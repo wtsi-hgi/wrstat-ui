@@ -1261,16 +1261,17 @@ func (w *summariseDGUTASpoolWriter) writeCatalogRow(
 	record summariseDGUTARecordContext,
 ) error {
 	return w.ds.set.WriteDir(chspool.DirRow{
-		MountPath:     w.mountPath,
-		SnapshotID:    w.snapshotID,
-		DirID:         record.dirID,
-		ParentID:      record.parentID,
-		SubtreeEnd:    record.subtreeEnd,
-		Depth:         record.depth,
-		Name:          summariseCatalogNameForFullPath(record.canonicalDir),
-		FullPath:      summariseEnsureTrailingSlash(record.canonicalDir),
-		ChildDirCount: summariseSafeUint32(dguta.ChildCount),
-		PathHash:      summariseCatalogPathHash(record.canonicalDir),
+		MountPath:      w.mountPath,
+		SnapshotID:     w.snapshotID,
+		DirID:          record.dirID,
+		ParentID:       record.parentID,
+		SubtreeEnd:     record.subtreeEnd,
+		Depth:          record.depth,
+		Name:           summariseCatalogNameForFullPath(record.canonicalDir),
+		FullPath:       summariseEnsureTrailingSlash(record.canonicalDir),
+		ChildDirCount:  summariseSafeUint32(dguta.ChildCount),
+		ChildFileCount: summariseSafeUint32(dguta.ChildFileCount),
+		PathHash:       summariseCatalogPathHash(record.canonicalDir),
 	})
 }
 

@@ -985,11 +985,11 @@ func TestNewClientBootstrapsSchema(t *testing.T) {
 
 		partitionKey, sortingKey = tableKeys(ctx, t, conn, cfg.Database, "wrstat_active_prefix_rollups")
 		So(partitionKey, ShouldEqual, "active_set_id")
-		So(sortingKey, ShouldEqual, "active_set_id, dir")
+		So(sortingKey, ShouldEqual, "active_set_id, virtual_id")
 
 		partitionKey, sortingKey = tableKeys(ctx, t, conn, cfg.Database, "wrstat_active_prefix_filter_ageall")
 		So(partitionKey, ShouldEqual, "active_set_id")
-		So(sortingKey, ShouldEqual, "active_set_id, dir, gid, uid, ft")
+		So(sortingKey, ShouldEqual, "active_set_id, virtual_id, gid, uid, ft")
 
 		partitionKey, sortingKey = tableKeys(ctx, t, conn, cfg.Database, "wrstat_active_prefix_rollup_sets")
 		So(partitionKey, ShouldEqual, "active_set_id")

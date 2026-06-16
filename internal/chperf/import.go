@@ -478,10 +478,7 @@ func j6HotRowAuditTables(selectedTables []string) []string {
 func j6HotRowAuditTable(table string) bool {
 	switch table {
 	case "",
-		tableCatalog,
-		tableActivePrefixRollups,
-		tableActivePrefixFilterAgeAll,
-		tableActivePrefixRollupSets:
+		tableCatalog:
 		return false
 	default:
 		return true

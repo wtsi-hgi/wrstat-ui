@@ -963,7 +963,8 @@ func TestImportProductionReportEvidence(t *testing.T) {
 		So(audit.Inputs[finalGateJ6PathTextCopiesPerDirSnapshotInput], ShouldEqual, float64(1))
 		So(api.hotPathAuditTables, ShouldContain, tableDirFilterAgeAll)
 		So(api.hotPathAuditTables, ShouldNotContain, tableCatalog)
-		So(api.hotPathAuditTables, ShouldNotContain, tableActivePrefixRollups)
+		So(api.hotPathAuditTables, ShouldContain, tableActivePrefixRollups)
+		So(api.hotPathAuditTables, ShouldContain, tableActivePrefixFilterAgeAll)
 		So(audit.Inputs["audited_hot_tables"], ShouldResemble, api.hotPathAuditTables)
 	})
 }

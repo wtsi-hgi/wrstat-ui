@@ -27,6 +27,7 @@ package clickhouse
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync/atomic"
@@ -65,10 +66,12 @@ const (
 	activePrefixScalarRollupReadQuery = "SELECT updated_at, toUInt8(0) AS age, all_count AS count, " +
 		"all_size AS size, all_atime_min AS atime_min, all_mtime_max AS mtime_max, " +
 		"all_atime_buckets AS atime_buckets, all_mtime_buckets AS mtime_buckets, " +
-		"all_uids AS uids, all_gids AS gids, all_ft AS ft " +
-		"FROM wrstat_active_prefix_rollups PREWHERE active_set_id = ? WHERE dir = ? LIMIT 1"
+		"all_uids AS uids, all_gids AS gids, all_ft AS ft FROM wrstat_active_prefix_rollups AS r " +
+		"INNER JOIN wrstat_active_virtual_dirs AS d " +
+		"ON d.active_set_id = r.active_set_id AND d.virtual_id = r.virtual_id " +
+		"PREWHERE r.active_set_id = ? WHERE d.full_path = ? LIMIT 1"
 	insertActivePrefixRollupQuery = "INSERT INTO wrstat_active_prefix_rollups " +
-		"(active_set_id, dir, updated_at, all_count, all_size, all_atime_min, all_mtime_max, " +
+		"(active_set_id, virtual_id, updated_at, all_count, all_size, all_atime_min, all_mtime_max, " +
 		"all_atime_buckets, all_mtime_buckets, all_uids, all_gids, all_ft, " +
 		"file_count, file_size, child_count, refreshed_at) " +
 		"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
@@ -88,16 +91,18 @@ const (
 		"INNER JOIN wrstat_dirs c " +
 		"ON c.mount_path = f.mount_path AND c.snapshot_id = f.snapshot_id AND c.dir_id = f.dir_id " +
 		"WHERE %s GROUP BY f.gid, f.uid, f.ft ORDER BY f.gid, f.uid, f.ft"
-	activePrefixAgeAllSummaryReadQuery = "SELECT dir, count() AS raw_rows, " +
+	activePrefixAgeAllSummaryReadQuery = "SELECT d.full_path AS dir, count() AS raw_rows, " +
 		"sum(count) AS total_count, sum(size) AS total_size, " +
 		"minIf(atime_min, atime_min != 0) AS atime_min, max(mtime_max) AS mtime_max, " +
 		"arrayReduce('sumForEach', groupArray(atime_buckets)) AS atime_buckets, " +
 		"arrayReduce('sumForEach', groupArray(mtime_buckets)) AS mtime_buckets, " +
 		"arraySort(groupUniqArray(uid)) AS uids, arraySort(groupUniqArray(gid)) AS gids, " +
 		"groupBitOr(p.ft) AS ft FROM wrstat_active_prefix_filter_ageall AS p " +
-		"PREWHERE active_set_id = ? AND dir = ? WHERE %s GROUP BY dir"
+		"INNER JOIN wrstat_active_virtual_dirs AS d " +
+		"ON d.active_set_id = p.active_set_id AND d.virtual_id = p.virtual_id " +
+		"PREWHERE p.active_set_id = ? WHERE d.full_path = ? AND %s GROUP BY d.full_path"
 	insertActivePrefixAgeAllQuery = "INSERT INTO wrstat_active_prefix_filter_ageall " +
-		"(active_set_id, dir, gid, uid, ft, count, size, atime_min, mtime_max, " +
+		"(active_set_id, virtual_id, gid, uid, ft, count, size, atime_min, mtime_max, " +
 		"atime_buckets, mtime_buckets, refreshed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
 	insertActivePrefixRollupSetQuery = "INSERT INTO wrstat_active_prefix_rollup_sets " +
 		"(active_set_id, active_mount_count, prefix_count, refreshed_at) VALUES (?, ?, ?, ?)"
@@ -109,6 +114,8 @@ const (
 )
 
 var activePrefixRollupMissCounter atomic.Uint64 //nolint:gochecknoglobals
+
+var errActivePrefixVirtualIDMissing = errors.New("clickhouse: active-prefix missing virtual id")
 
 type activePrefixAgeAllRow struct {
 	gid          uint32
@@ -273,7 +280,7 @@ func appendActivePrefixAgeAllRows(
 	conn ch.Conn,
 	batch *driver.Batch,
 	activeSetID string,
-	dir string,
+	virtualID uint32,
 	rows []activePrefixAgeAllRow,
 	refreshedAt time.Time,
 ) error {
@@ -287,7 +294,7 @@ func appendActivePrefixAgeAllRows(
 			*batch = prepared
 		}
 
-		if err := (*batch).Append(activePrefixAgeAllValues(activeSetID, dir, row, refreshedAt)...); err != nil {
+		if err := (*batch).Append(activePrefixAgeAllValues(activeSetID, virtualID, row, refreshedAt)...); err != nil {
 			return fmt.Errorf("clickhouse: failed to append active-prefix AgeAll row: %w", err)
 		}
 	}
@@ -297,13 +304,13 @@ func appendActivePrefixAgeAllRows(
 
 func activePrefixAgeAllValues(
 	activeSetID string,
-	dir string,
+	virtualID uint32,
 	row activePrefixAgeAllRow,
 	refreshedAt time.Time,
 ) []any {
 	return []any{
 		activeSetID,
-		dir,
+		virtualID,
 		row.gid,
 		row.uid,
 		row.ft,
@@ -390,6 +397,30 @@ func shouldRefreshActivePrefixRollups(
 	}
 
 	return activePrefixRollupMountsReady(ctx, conn, rows)
+}
+
+func activePrefixVirtualIDsForDirs(
+	activeSetID string,
+	mounts []activeMount,
+	refreshedAt time.Time,
+) map[string]uint32 {
+	namespace := activeVirtualNamespaceForMounts(activeSetID, mounts, nil, refreshedAt)
+	ids := make(map[string]uint32, len(namespace.rows))
+
+	for _, row := range namespace.rows {
+		ids[ensureTrailingSlash(row.FullPath)] = row.VirtualID
+	}
+
+	return ids
+}
+
+func activePrefixVirtualID(ids map[string]uint32, dir string) (uint32, error) {
+	virtualID := ids[ensureTrailingSlash(dir)]
+	if virtualID == 0 {
+		return 0, fmt.Errorf("%w: %q", errActivePrefixVirtualIDMissing, dir)
+	}
+
+	return virtualID, nil
 }
 
 func activePrefixRollupProjectionState(
@@ -616,14 +647,20 @@ func refreshActivePrefixRollups(
 	mounts := snapshot.all()
 	dirs := activeTreeDirs(mounts)
 	refreshedAt := time.Now().UTC()
+	virtualIDs := activePrefixVirtualIDsForDirs(activeSetID, mounts, refreshedAt)
 
 	for _, dir := range dirs {
-		if err := insertActivePrefixRollup(ctx, conn, activeSetID, dir, snapshot, refreshedAt); err != nil {
+		virtualID, err := activePrefixVirtualID(virtualIDs, dir)
+		if err != nil {
+			return err
+		}
+
+		if err := insertActivePrefixRollup(ctx, conn, activeSetID, virtualID, dir, snapshot, refreshedAt); err != nil {
 			return err
 		}
 	}
 
-	if err := insertActivePrefixAgeAllRows(ctx, conn, activeSetID, dirs, snapshot, refreshedAt); err != nil {
+	if err := insertActivePrefixAgeAllRows(ctx, conn, activeSetID, dirs, virtualIDs, snapshot, refreshedAt); err != nil {
 		return err
 	}
 
@@ -634,6 +671,7 @@ func insertActivePrefixRollup(
 	ctx context.Context,
 	conn ch.Conn,
 	activeSetID string,
+	virtualID uint32,
 	dir string,
 	snapshot *activeMountsSnapshot,
 	refreshedAt time.Time,
@@ -650,20 +688,19 @@ func insertActivePrefixRollup(
 
 	values := activePrefixRollupRowValues(
 		activeSetID,
+		virtualID,
 		dir,
 		maxUpdatedAtForMounts(mounts),
 		refreshedAt,
 		state,
 	)
-	if err := conn.Exec(ctx, insertActivePrefixRollupQuery, values...); err != nil {
-		return fmt.Errorf("clickhouse: failed to insert active-prefix rollup: %w", err)
-	}
 
-	return nil
+	return execActivePrefixRollup(ctx, conn, values)
 }
 
 func activePrefixRollupRowValues(
 	activeSetID string,
+	virtualID uint32,
 	dir string,
 	updatedAt time.Time,
 	refreshedAt time.Time,
@@ -675,7 +712,7 @@ func activePrefixRollupRowValues(
 
 	return []any{
 		activeSetID,
-		dir,
+		virtualID,
 		updatedAt,
 		allAcc.count,
 		allAcc.size,
@@ -693,23 +730,29 @@ func activePrefixRollupRowValues(
 	}
 }
 
+func execActivePrefixRollup(ctx context.Context, conn ch.Conn, values []any) error {
+	if err := conn.Exec(ctx, insertActivePrefixRollupQuery, values...); err != nil {
+		return fmt.Errorf("clickhouse: failed to insert active-prefix rollup: %w", err)
+	}
+
+	return nil
+}
+
 func insertActivePrefixAgeAllRows(
 	ctx context.Context,
 	conn ch.Conn,
 	activeSetID string,
 	dirs []string,
+	virtualIDs map[string]uint32,
 	snapshot *activeMountsSnapshot,
 	refreshedAt time.Time,
 ) error {
 	var batch driver.Batch
 
 	for _, dir := range dirs {
-		rows, err := activePrefixAgeAllRows(ctx, conn, dir, snapshot.under(dir))
-		if err != nil {
-			return err
-		}
-
-		if err := appendActivePrefixAgeAllRows(ctx, conn, &batch, activeSetID, dir, rows, refreshedAt); err != nil {
+		if err := appendActivePrefixAgeAllRowsForDir(
+			ctx, conn, &batch, activeSetID, dir, virtualIDs, snapshot, refreshedAt,
+		); err != nil {
 			return err
 		}
 	}
@@ -723,6 +766,29 @@ func insertActivePrefixAgeAllRows(
 	}
 
 	return nil
+}
+
+func appendActivePrefixAgeAllRowsForDir(
+	ctx context.Context,
+	conn ch.Conn,
+	batch *driver.Batch,
+	activeSetID string,
+	dir string,
+	virtualIDs map[string]uint32,
+	snapshot *activeMountsSnapshot,
+	refreshedAt time.Time,
+) error {
+	virtualID, err := activePrefixVirtualID(virtualIDs, dir)
+	if err != nil {
+		return err
+	}
+
+	rows, err := activePrefixAgeAllRows(ctx, conn, dir, snapshot.under(dir))
+	if err != nil {
+		return err
+	}
+
+	return appendActivePrefixAgeAllRows(ctx, conn, batch, activeSetID, virtualID, rows, refreshedAt)
 }
 
 func insertActivePrefixRollupSet(

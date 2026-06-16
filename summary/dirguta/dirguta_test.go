@@ -136,10 +136,11 @@ func BenchmarkDirGUTADirectoryHeavy(b *testing.B) {
 }
 
 type recordDGUTACatalogRow struct {
-	dirID      uint32
-	parentID   uint32
-	subtreeEnd uint32
-	depth      uint16
+	dirID          uint32
+	parentID       uint32
+	subtreeEnd     uint32
+	depth          uint16
+	childFileCount uint64
 }
 
 type recordDGUTACaptureDB struct {
@@ -426,11 +427,11 @@ func TestDirGUTA(t *testing.T) {
 		catalogRows := map[string]recordDGUTACatalogRow{
 			"/":                              {dirID: 0, parentID: parentSentinel, subtreeEnd: 7, depth: 0},
 			"/catalog/":                      {dirID: 1, parentID: 0, subtreeEnd: 7, depth: 1},
-			"/catalog/team/":                 {dirID: 2, parentID: 1, subtreeEnd: 7, depth: 2},
+			"/catalog/team/":                 {dirID: 2, parentID: 1, subtreeEnd: 7, depth: 2, childFileCount: 1},
 			"/catalog/team/branch-a/":        {dirID: 3, parentID: 2, subtreeEnd: 5, depth: 3},
-			"/catalog/team/branch-a/deeper/": {dirID: 4, parentID: 3, subtreeEnd: 5, depth: 4},
+			"/catalog/team/branch-a/deeper/": {dirID: 4, parentID: 3, subtreeEnd: 5, depth: 4, childFileCount: 1},
 			"/catalog/team/branch-b/":        {dirID: 5, parentID: 2, subtreeEnd: 7, depth: 3},
-			"/catalog/team/branch-b/leaf/":   {dirID: 6, parentID: 5, subtreeEnd: 7, depth: 4},
+			"/catalog/team/branch-b/leaf/":   {dirID: 6, parentID: 5, subtreeEnd: 7, depth: 4, childFileCount: 1},
 		}
 
 		So(len(sink.records), ShouldEqual, len(catalogRows))
@@ -442,10 +443,11 @@ func TestDirGUTA(t *testing.T) {
 			expected, ok := catalogRows[fullPath]
 			So(ok, ShouldBeTrue)
 			So(recordDGUTACatalogRow{
-				dirID:      record.DirID,
-				parentID:   record.ParentID,
-				subtreeEnd: record.SubtreeEnd,
-				depth:      record.Depth,
+				dirID:          record.DirID,
+				parentID:       record.ParentID,
+				subtreeEnd:     record.SubtreeEnd,
+				depth:          record.Depth,
+				childFileCount: record.ChildFileCount,
 			}, ShouldResemble, expected)
 
 			seen[fullPath] = struct{}{}
