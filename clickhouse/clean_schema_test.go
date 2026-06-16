@@ -44,7 +44,10 @@ import (
 	. "github.com/smartystreets/goconvey/convey"
 )
 
-const cleanSchemaClickHouseDir = "clickhouse"
+const (
+	cleanSchemaClickHouseDir = "clickhouse"
+	cleanSchemaDirIDColumn   = "dir_id UInt32 CODEC(Delta, LZ4)"
+)
 
 func TestCleanSchemaDDLContainsOnlyFinalV1Objects(t *testing.T) {
 	Convey("embedded schema SQL has no legacy DDL, migration, or compatibility objects", t, func() {
@@ -56,12 +59,20 @@ func TestCleanSchemaDDLContainsOnlyFinalV1Objects(t *testing.T) {
 		So(offenders, ShouldBeEmpty)
 	})
 
-	Convey("wrstat_files extension index matches schema-v1 DDL", t, func() {
+	Convey("wrstat_files is keyed by dir_id and keeps the extension index", t, func() {
 		src, err := os.ReadFile(filepath.Join(
 			repoRootForCleanSchemaTest(t), cleanSchemaClickHouseDir, "schema", "011_files.sql",
 		))
 		So(err, ShouldBeNil)
-		So(string(src), ShouldContainSubstring, "INDEX ext_idx ext TYPE set(256) GRANULARITY 1")
+
+		ddl := strings.Join(strings.Fields(string(src)), " ")
+		So(ddl, ShouldContainSubstring, cleanSchemaDirIDColumn)
+		So(ddl, ShouldContainSubstring, "name String CODEC(LZ4)")
+		So(ddl, ShouldContainSubstring, "INDEX ext_idx ext TYPE set(256) GRANULARITY 1")
+		So(ddl, ShouldContainSubstring, "PARTITION BY (mount_path, snapshot_id)")
+		So(ddl, ShouldContainSubstring, "ORDER BY (mount_path, snapshot_id, dir_id, name)")
+		So(ddl, ShouldNotContainSubstring, "parent_dir")
+		So(ddl, ShouldNotContainSubstring, " ALIAS ")
 	})
 
 	Convey("wrstat_dir_filter_ageall is a mandatory snapshot-scoped DDL object", t, func() {

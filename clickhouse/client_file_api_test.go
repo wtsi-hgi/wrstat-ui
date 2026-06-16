@@ -49,6 +49,12 @@ const testInsertFileDirStmt = "INSERT INTO wrstat_dirs " +
 	"(mount_path, snapshot_id, dir_id, parent_id, subtree_end, depth, name, full_path, " +
 	"child_dir_count, child_file_count, path_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
 
+const clientFileAPIBName = "b.txt"
+
+const clientFileAPITestFanout uint32 = 32
+
+const clientFileAPITestMaxDepth = 5
+
 func TestClientStatPath(t *testing.T) {
 	Convey("Client.StatPath returns FileRow for active snapshot", t, func() {
 		os.Setenv("WRSTAT_ENV", "test")
@@ -353,7 +359,7 @@ func TestClientListDir(t *testing.T) {
 		)
 
 		// Active snapshot entries.
-		names := []string{"b.txt", "a.txt", "c.txt"}
+		names := []string{clientFileAPIBName, "a.txt", "c.txt"}
 		for _, name := range names {
 			insertClientFileForTest(
 				ctx,
@@ -381,7 +387,7 @@ func TestClientListDir(t *testing.T) {
 		So(err, ShouldBeNil)
 		So(len(rows), ShouldEqual, 3)
 		So(rows[0].Name, ShouldEqual, "a.txt")
-		So(rows[1].Name, ShouldEqual, "b.txt")
+		So(rows[1].Name, ShouldEqual, clientFileAPIBName)
 		So(rows[2].Name, ShouldEqual, "c.txt")
 		So(rows[0].ParentDir, ShouldEqual, base)
 		So(rows[0].Path, ShouldEqual, base+"a.txt")
@@ -417,7 +423,7 @@ func TestClientListDir(t *testing.T) {
 		So(conn.Exec(ctx, testInsertMountStmt, mountPath, time.Now(), sid, updatedAt), ShouldBeNil)
 
 		now := time.Now().UTC().Truncate(time.Second)
-		for _, name := range []string{"a.txt", "b.txt", "c.txt"} {
+		for _, name := range []string{"a.txt", clientFileAPIBName, "c.txt"} {
 			insertClientFileForTest(
 				ctx,
 				conn,
@@ -442,7 +448,7 @@ func TestClientListDir(t *testing.T) {
 		rows, err := c.ListDir(ctx, base, ListOptions{Limit: 2, Offset: 1})
 		So(err, ShouldBeNil)
 		So(len(rows), ShouldEqual, 2)
-		So(rows[0].Name, ShouldEqual, "b.txt")
+		So(rows[0].Name, ShouldEqual, clientFileAPIBName)
 		So(rows[1].Name, ShouldEqual, "c.txt")
 	})
 }
@@ -594,32 +600,7 @@ func insertPermissionAgeAllFact(
 	dir = ensureTrailingSlash(dir)
 	dirID := clientFileAPIDirID(dir)
 
-	dirExists := countRows(
-		ctx,
-		conn,
-		"SELECT count() FROM wrstat_dirs WHERE mount_path = ? AND snapshot_id = ? AND dir_id = ?",
-		mountPath,
-		sid,
-		dirID,
-	) > 0
-
-	if !dirExists {
-		So(conn.Exec(
-			ctx,
-			testInsertFileDirStmt,
-			mountPath,
-			sid,
-			dirID,
-			uint32(0),
-			dirID+1,
-			clientFileAPIDepth(dir),
-			catalogNameForFullPath(dir),
-			dir,
-			uint32(0),
-			uint32(0),
-			catalogPathHash(dir),
-		), ShouldBeNil)
-	}
+	ensureClientFileAPICatalogChain(ctx, conn, mountPath, sid, dir)
 
 	So(conn.Exec(
 		ctx,
@@ -628,7 +609,7 @@ func insertPermissionAgeAllFact(
 		sid,
 		dirID,
 		uint32(0),
-		dirID+1,
+		clientFileAPISubtreeEnd(dir),
 		[]uint32{gid},
 		[]uint32{uid},
 		[]uint16{uint16(db.DGUTAFileTypeBam)},
@@ -840,14 +821,14 @@ func TestClientFindByGlob(t *testing.T) {
 		)
 
 		base2 := mountPath + "other/"
-		path3 := base2 + "b.txt"
+		path3 := base2 + clientFileAPIBName
 		insertClientFileForTest(
 			ctx,
 			conn,
 			mountPath,
 			sid,
 			base2,
-			"b.txt",
+			clientFileAPIBName,
 			"txt",
 			uint8(stats.FileType),
 			uint64(3),
@@ -1133,32 +1114,7 @@ func insertClientFileForTest(
 	parentDir = ensureTrailingSlash(parentDir)
 	dirID := clientFileAPIDirID(parentDir)
 
-	dirExists := countRows(
-		ctx,
-		conn,
-		"SELECT count() FROM wrstat_dirs WHERE mount_path = ? AND snapshot_id = ? AND dir_id = ?",
-		mountPath,
-		sid,
-		dirID,
-	) > 0
-
-	if !dirExists {
-		So(conn.Exec(
-			ctx,
-			testInsertFileDirStmt,
-			mountPath,
-			sid,
-			dirID,
-			uint32(0),
-			dirID+1,
-			clientFileAPIDepth(parentDir),
-			catalogNameForFullPath(parentDir),
-			parentDir,
-			uint32(0),
-			uint32(0),
-			catalogPathHash(parentDir),
-		), ShouldBeNil)
-	}
+	ensureClientFileAPICatalogChain(ctx, conn, mountPath, sid, parentDir)
 
 	So(conn.Exec(
 		ctx,
@@ -1181,8 +1137,124 @@ func insertClientFileForTest(
 	), ShouldBeNil)
 }
 
+func clientFileAPICatalogChain(dir string) []string {
+	trimmed := strings.Trim(ensureTrailingSlash(dir), "/")
+	if trimmed == "" {
+		return []string{"/"}
+	}
+
+	segments := strings.Split(trimmed, "/")
+	out := make([]string, 0, len(segments))
+	current := "/"
+
+	for _, segment := range segments {
+		current += segment + "/"
+		out = append(out, current)
+	}
+
+	return out
+}
+
+func ensureClientFileAPICatalogDir(ctx context.Context, conn ch.Conn, mountPath string, sid any, dir string) {
+	dir = ensureTrailingSlash(dir)
+	dirID := clientFileAPIDirID(dir)
+
+	dirExists := countRows(
+		ctx,
+		conn,
+		"SELECT count() FROM wrstat_dirs WHERE mount_path = ? AND snapshot_id = ? AND dir_id = ?",
+		mountPath,
+		sid,
+		dirID,
+	) > 0
+
+	if !dirExists {
+		So(conn.Exec(
+			ctx,
+			testInsertFileDirStmt,
+			mountPath,
+			sid,
+			dirID,
+			clientFileAPIParentID(dir),
+			clientFileAPISubtreeEnd(dir),
+			clientFileAPIDepth(dir),
+			catalogNameForFullPath(dir),
+			dir,
+			uint32(0),
+			uint32(0),
+			catalogPathHash(dir),
+		), ShouldBeNil)
+	}
+}
+
+func clientFileAPIParentID(dir string) uint32 {
+	parentDir, _, ok := splitPathParentAndName(ensureTrailingSlash(dir))
+	if !ok {
+		return 0
+	}
+
+	return clientFileAPIDirID(parentDir)
+}
+
+func ensureClientFileAPICatalogChain(ctx context.Context, conn ch.Conn, mountPath string, sid any, dir string) {
+	for _, catalogDir := range clientFileAPICatalogChain(dir) {
+		ensureClientFileAPICatalogDir(ctx, conn, mountPath, sid, catalogDir)
+	}
+}
+
+func clientFileAPISubtreeEnd(dir string) uint32 {
+	id := clientFileAPIDirID(dir)
+
+	trimmed := strings.Trim(ensureTrailingSlash(dir), "/")
+	if trimmed == "" {
+		return id + clientFileAPIPow(clientFileAPITestFanout, clientFileAPITestMaxDepth+1)
+	}
+
+	exp := max(clientFileAPITestMaxDepth-len(strings.Split(trimmed, "/"))+1, 0)
+
+	return id + clientFileAPIPow(clientFileAPITestFanout, exp)
+}
+
 func clientFileAPIDirID(dir string) uint32 {
-	return uint32(catalogPathHash(ensureTrailingSlash(dir))) //nolint:gosec // Fixture IDs intentionally use low hash bits.
+	trimmed := strings.Trim(ensureTrailingSlash(dir), "/")
+	if trimmed == "" {
+		return 1
+	}
+
+	var id uint32 = 1
+
+	segments := strings.Split(trimmed, "/")
+	for i, segment := range segments {
+		exp := max(clientFileAPITestMaxDepth-i, 0)
+		id += clientFileAPIComponentRank(segment) * clientFileAPIPow(clientFileAPITestFanout, exp)
+	}
+
+	return id
+}
+
+func clientFileAPIComponentRank(segment string) uint32 {
+	if segment == "" {
+		return 1
+	}
+
+	c := strings.ToLower(segment[:1])[0]
+	switch {
+	case c >= 'a' && c <= 'z':
+		return uint32(c-'a') + 1
+	case c >= '0' && c <= '9':
+		return uint32(c-'0') + 1
+	default:
+		return 1
+	}
+}
+
+func clientFileAPIPow(base uint32, exp int) uint32 {
+	out := uint32(1)
+	for range exp {
+		out *= base
+	}
+
+	return out
 }
 
 func clientFileAPIDepth(dir string) uint16 {

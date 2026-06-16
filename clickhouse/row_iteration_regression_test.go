@@ -29,6 +29,7 @@ package clickhouse
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -104,7 +105,7 @@ func TestClickHouseRowIterationErrors(t *testing.T) {
 	Convey("PermissionAnyInDir propagates ClickHouse iterator errors", t, func() {
 		client := &Client{
 			cfg:         Config{QueryTimeout: time.Second},
-			conn:        &iterationRegressionConn{rows: newIterationRegressionRows()},
+			conn:        &permissionAnyIterationRegressionConn{rows: newIterationRegressionRows()},
 			mountPoints: basedirs.ValidateMountPoints([]string{testRootMountPath}),
 		}
 
@@ -196,5 +197,25 @@ type iterationRegressionConn struct {
 }
 
 func (c *iterationRegressionConn) Query(context.Context, string, ...any) (driver.Rows, error) {
+	return c.rows, nil
+}
+
+type permissionAnyIterationRegressionConn struct {
+	bootstrapTestConn
+
+	rows driver.Rows
+}
+
+func (c *permissionAnyIterationRegressionConn) Query(
+	_ context.Context,
+	query string,
+	args ...any,
+) (driver.Rows, error) {
+	if strings.Contains(query, "FROM wrstat_dirs") && strings.Contains(query, "path_hash") {
+		fullPath := c2Arg[string](args, 3)
+
+		return newC2Rows([][]any{{uint32(42), uint32(43), fullPath}}), nil
+	}
+
 	return c.rows, nil
 }

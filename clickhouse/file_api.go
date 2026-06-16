@@ -52,17 +52,22 @@ const (
 		"f.apparent_size, f.uid, f.gid, f.atime, f.mtime, f.ctime, f.inode, f.nlink"
 )
 
+const catalogDirByPathQuery = "WITH (SELECT snapshot_id FROM wrstat_mounts_active WHERE mount_path = ?) AS sid " +
+	"SELECT dir_id, subtree_end, full_path FROM wrstat_dirs " +
+	"PREWHERE mount_path = ? AND snapshot_id = sid AND path_hash = ? " +
+	"WHERE full_path = ? LIMIT 1"
+
 const statPathQueryTemplate = "WITH (SELECT snapshot_id FROM wrstat_mounts_active WHERE mount_path = ?) AS sid " +
 	"SELECT %s FROM wrstat_files f INNER JOIN wrstat_dirs d " +
 	"ON d.mount_path = f.mount_path AND d.snapshot_id = f.snapshot_id AND d.dir_id = f.dir_id " +
-	"PREWHERE f.mount_path = ? AND f.snapshot_id = sid " +
-	"WHERE d.full_path = ? AND f.name = ? LIMIT 1"
+	"PREWHERE f.mount_path = ? AND f.snapshot_id = sid AND f.dir_id = ? " +
+	"WHERE f.name = ? LIMIT 1"
 
 const listDirQueryTemplate = "WITH (SELECT snapshot_id FROM wrstat_mounts_active WHERE mount_path = ?) AS sid " +
 	"SELECT %s FROM wrstat_files f INNER JOIN wrstat_dirs d " +
 	"ON d.mount_path = f.mount_path AND d.snapshot_id = f.snapshot_id AND d.dir_id = f.dir_id " +
-	"PREWHERE f.mount_path = ? AND f.snapshot_id = sid " +
-	"WHERE d.full_path = ? ORDER BY f.name ASC LIMIT ? OFFSET ?"
+	"PREWHERE f.mount_path = ? AND f.snapshot_id = sid AND f.dir_id = ? " +
+	"ORDER BY f.name ASC LIMIT ? OFFSET ?"
 
 const findByGlobQueryTemplate = "WITH (SELECT snapshot_id FROM wrstat_mounts_active WHERE mount_path = ?) AS sid " +
 	"SELECT %s FROM wrstat_files f INNER JOIN wrstat_dirs d " +
@@ -82,21 +87,20 @@ const countByGlobQueryTemplate = "WITH (SELECT snapshot_id FROM wrstat_mounts_ac
 const isDirQuery = "WITH (SELECT snapshot_id FROM wrstat_mounts_active WHERE mount_path = ?) AS sid " +
 	"SELECT f.entry_type FROM wrstat_files f INNER JOIN wrstat_dirs d " +
 	"ON d.mount_path = f.mount_path AND d.snapshot_id = f.snapshot_id AND d.dir_id = f.dir_id " +
-	"PREWHERE f.mount_path = ? AND f.snapshot_id = sid " +
-	"WHERE d.full_path = ? AND f.name = ? LIMIT 1"
+	"PREWHERE f.mount_path = ? AND f.snapshot_id = sid AND f.dir_id = ? " +
+	"WHERE f.name = ? LIMIT 1"
 
 const permissionAnyInDirQuery = "WITH (SELECT snapshot_id FROM wrstat_mounts_active WHERE mount_path = ?) AS sid " +
-	"SELECT 1 FROM wrstat_dir_facts f INNER JOIN wrstat_dirs d " +
-	"ON d.mount_path = f.mount_path AND d.snapshot_id = f.snapshot_id AND d.dir_id = f.dir_id " +
-	"PREWHERE f.mount_path = ? AND f.snapshot_id = sid " +
-	"WHERE d.full_path = ? AND arrayExists((age, uid, gid) -> age = ? AND (uid = ? OR has(?, gid)), " +
+	"SELECT 1 FROM wrstat_dir_facts f " +
+	"PREWHERE f.mount_path = ? AND f.snapshot_id = sid AND f.dir_id = ? " +
+	"WHERE arrayExists((age, uid, gid) -> age = ? AND (uid = ? OR has(?, gid)), " +
 	"f.ages, f.uids, f.gids) LIMIT 1"
 
 const permissionPathQuery = "WITH (SELECT snapshot_id FROM wrstat_mounts_active WHERE mount_path = ?) AS sid " +
 	"SELECT 1 FROM wrstat_files f INNER JOIN wrstat_dirs d " +
 	"ON d.mount_path = f.mount_path AND d.snapshot_id = f.snapshot_id AND d.dir_id = f.dir_id " +
-	"PREWHERE f.mount_path = ? AND f.snapshot_id = sid " +
-	"WHERE d.full_path = ? AND f.name = ? AND (f.uid = ? OR has(?, f.gid)) LIMIT 1"
+	"PREWHERE f.mount_path = ? AND f.snapshot_id = sid AND f.dir_id = ? " +
+	"WHERE f.name = ? AND (f.uid = ? OR has(?, f.gid)) LIMIT 1"
 
 const defaultFileLimit = 1_000_000
 
@@ -107,7 +111,6 @@ const (
 	findByGlobClauseCap           = 2
 	minDedupeByPathLen            = 2
 	growExtraForAnchors           = 2
-	maxByte                       = 0xFF
 )
 
 const (
@@ -197,10 +200,15 @@ func (c *Client) StatPath(ctx context.Context, path string, opts StatOptions) (*
 		return nil, err
 	}
 
+	parent, err := c.resolveCatalogDir(ctx, mountPath, parentDir)
+	if err != nil {
+		return nil, err
+	}
+
 	qctx, cancel := queryContext(ctx, queryTimeout(c.cfg))
 	defer cancel()
 
-	rows, err := c.conn.Query(qctx, q, mountPath, mountPath, parentDir, name)
+	rows, err := c.conn.Query(qctx, q, mountPath, mountPath, parent.dirID, name)
 	if err != nil {
 		return nil, fmt.Errorf("clickhouse: failed to query StatPath: %w", err)
 	}
@@ -262,7 +270,7 @@ func fileRowFieldSpecFor(field string) (fileRowFieldSpec, bool) {
 	return fileRowFieldSpec{}, false
 }
 
-// ListDir lists direct children (by parent_dir) for the given directory.
+// ListDir lists direct children for the given directory.
 func (c *Client) ListDir(ctx context.Context, dir string, opts ListOptions) ([]FileRow, error) {
 	if c == nil || c.conn == nil {
 		return nil, errClientClosed
@@ -278,6 +286,30 @@ func (c *Client) ListDir(ctx context.Context, dir string, opts ListOptions) ([]F
 		return nil, err
 	}
 
+	dirRef, ok, err := c.resolveListDirRef(ctx, mountPath, parentDir)
+	if err != nil {
+		return nil, err
+	}
+
+	if !ok {
+		return []FileRow{}, nil
+	}
+
+	return c.queryListDirRows(ctx, q, fields, mountPath, dirRef.dirID, opts)
+}
+
+func listDirQuery(opts ListOptions) (string, []string, error) {
+	return fileRowQuery(listDirQueryTemplate, opts.Fields)
+}
+
+func (c *Client) queryListDirRows(
+	ctx context.Context,
+	query string,
+	fields []string,
+	mountPath string,
+	dirID uint32,
+	opts ListOptions,
+) ([]FileRow, error) {
 	limit := listLimit(opts.Limit)
 
 	qctx, cancel := queryContext(ctx, queryTimeout(c.cfg))
@@ -286,18 +318,14 @@ func (c *Client) ListDir(ctx context.Context, dir string, opts ListOptions) ([]F
 	return c.queryFileRows(
 		qctx,
 		"ListDir",
-		q,
+		query,
 		fields,
 		mountPath,
 		mountPath,
-		parentDir,
+		dirID,
 		limit,
 		opts.Offset,
 	)
-}
-
-func listDirQuery(opts ListOptions) (string, []string, error) {
-	return fileRowQuery(listDirQueryTemplate, opts.Fields)
 }
 
 func listLimit(limit int64) int64 {
@@ -324,7 +352,7 @@ func (c *Client) FindByGlob(
 		return []FileRow{}, nil
 	}
 
-	prepared, err := c.prepareFindByGlob(baseDirs, patterns, opts)
+	prepared, err := c.prepareFindByGlob(ctx, baseDirs, patterns, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -363,7 +391,7 @@ func (c *Client) runFindByGlobPlan(
 
 type findByGlobQuerySpec struct {
 	mountPath    string
-	baseDirs     []string
+	baseDirs     []catalogDirRef
 	patternChunk []string
 }
 
@@ -393,7 +421,7 @@ func (c *Client) findByGlobQuery(
 func buildFindByGlobQueryAndParams(
 	selectList string,
 	mountPath string,
-	baseDirs []string,
+	baseDirs []catalogDirRef,
 	patterns []string,
 	ownerEnabled int64,
 	uid uint32,
@@ -406,7 +434,7 @@ func buildFindByGlobQueryAndParams(
 	params = append(params, mountPath, mountPath)
 
 	for _, baseDir := range baseDirs {
-		compiled := compileGlobPatterns(baseDir, patterns)
+		compiled := compileGlobPatterns(baseDir.fullPath, patterns)
 		clause, clauseParams := findByGlobBaseDirClause(baseDir, compiled)
 		baseDirClauses = append(baseDirClauses, clause)
 		params = append(params, clauseParams...)
@@ -543,9 +571,9 @@ func exactSafeGlobExt(pattern string) string {
 	return strings.ToLower(ext)
 }
 
-func findByGlobBaseDirClause(baseDir string, compiled compiledGlobPatterns) (string, []any) {
+func findByGlobBaseDirClause(baseDir catalogDirRef, compiled compiledGlobPatterns) (string, []any) {
 	if compiled.matchAll {
-		return findByGlobRangeClause(), []any{baseDir, prefixNext(baseDir)}
+		return findByGlobRangeClause(), []any{baseDir.dirID, baseDir.subtreeEnd}
 	}
 
 	clauses := make([]string, 0, findByGlobClauseCap)
@@ -553,15 +581,15 @@ func findByGlobBaseDirClause(baseDir string, compiled compiledGlobPatterns) (str
 
 	if len(compiled.direct) > 0 {
 		matchClause, matchParams := matchOrExtList("f.name", compiled.direct)
-		clauses = append(clauses, "(d.full_path = ? AND ("+matchClause+"))")
-		params = append(params, baseDir)
+		clauses = append(clauses, "(f.dir_id = ? AND ("+matchClause+"))")
+		params = append(params, baseDir.dirID)
 		params = append(params, matchParams...)
 	}
 
 	if len(compiled.recursive) > 0 {
 		matchClause, matchParams := matchOrExtList("concat(d.full_path, f.name)", compiled.recursive)
 		clauses = append(clauses, findByGlobRangeClause()+" AND ("+matchClause+")")
-		params = append(params, baseDir, prefixNext(baseDir))
+		params = append(params, baseDir.dirID, baseDir.subtreeEnd)
 		params = append(params, matchParams...)
 	}
 
@@ -573,24 +601,7 @@ func findByGlobBaseDirClause(baseDir string, compiled compiledGlobPatterns) (str
 }
 
 func findByGlobRangeClause() string {
-	return "(d.full_path >= ? AND d.full_path < ?)"
-}
-
-func prefixNext(prefix string) string {
-	if prefix == "" {
-		return "\x00"
-	}
-
-	b := []byte(prefix)
-	for i := len(b) - 1; i >= 0; i-- {
-		if b[i] != maxByte {
-			b[i]++
-
-			return string(b[:i+1])
-		}
-	}
-
-	return prefix + "\x00"
+	return "(f.dir_id >= ? AND f.dir_id < ?)"
 }
 
 func matchOrExtList(column string, patterns []compiledGlobPattern) (string, []any) {
@@ -707,6 +718,133 @@ func sliceLimitOffset(in []FileRow, limit int64, offset int64) []FileRow {
 	}
 
 	return in[:limit]
+}
+
+type catalogDirRef struct {
+	dirID      uint32
+	subtreeEnd uint32
+	fullPath   string
+}
+
+func scanCatalogDirRef(rows fileRowIterator, normalised string) (catalogDirRef, error) {
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return catalogDirRef{}, fmt.Errorf("clickhouse: catalog dir iteration error: %w", err)
+		}
+
+		return catalogDirRef{}, errPathNotFound
+	}
+
+	var ref catalogDirRef
+	if err := rows.Scan(&ref.dirID, &ref.subtreeEnd, &ref.fullPath); err != nil {
+		return catalogDirRef{}, fmt.Errorf("clickhouse: failed to scan catalog dir: %w", err)
+	}
+
+	if ref.fullPath != normalised {
+		return catalogDirRef{}, errPathNotFound
+	}
+
+	return ref, nil
+}
+
+func (c *Client) resolveListDirRef(
+	ctx context.Context,
+	mountPath string,
+	dir string,
+) (catalogDirRef, bool, error) {
+	dirRef, err := c.resolveCatalogDir(ctx, mountPath, dir)
+	if errors.Is(err, errPathNotFound) {
+		return catalogDirRef{}, false, nil
+	}
+
+	if err != nil {
+		return catalogDirRef{}, false, err
+	}
+
+	return dirRef, true, nil
+}
+
+func (c *Client) addBaseDirRef(
+	ctx context.Context,
+	seen map[string]map[string]struct{},
+	out map[string][]catalogDirRef,
+	baseDir string,
+) error {
+	mountPath, normalised, err := c.resolveMountAndDir(baseDir)
+	if err != nil {
+		return err
+	}
+
+	if markSeenBaseDir(seen, mountPath, normalised) {
+		return nil
+	}
+
+	ref, ok, err := c.resolveBaseDirRef(ctx, mountPath, normalised)
+	if err != nil {
+		return err
+	}
+
+	if ok {
+		out[mountPath] = append(out[mountPath], ref)
+	}
+
+	return nil
+}
+
+func markSeenBaseDir(seen map[string]map[string]struct{}, mountPath string, dir string) bool {
+	seenMount := seen[mountPath]
+	if seenMount == nil {
+		seenMount = make(map[string]struct{})
+		seen[mountPath] = seenMount
+	}
+
+	if _, ok := seenMount[dir]; ok {
+		return true
+	}
+
+	seenMount[dir] = struct{}{}
+
+	return false
+}
+
+func (c *Client) resolveBaseDirRef(
+	ctx context.Context,
+	mountPath string,
+	dir string,
+) (catalogDirRef, bool, error) {
+	ref, err := c.resolveCatalogDir(ctx, mountPath, dir)
+	if errors.Is(err, errPathNotFound) {
+		return catalogDirRef{}, false, nil
+	}
+
+	if err != nil {
+		return catalogDirRef{}, false, err
+	}
+
+	return ref, true, nil
+}
+
+func (c *Client) resolveCatalogDir(ctx context.Context, mountPath string, dir string) (catalogDirRef, error) {
+	normalised := ensureTrailingSlash(dir)
+
+	qctx, cancel := queryContext(ctx, queryTimeout(c.cfg))
+	defer cancel()
+
+	rows, err := c.conn.Query(
+		qctx,
+		catalogDirByPathQuery,
+		mountPath,
+		mountPath,
+		catalogPathHash(normalised),
+		normalised,
+	)
+	if err != nil {
+		return catalogDirRef{}, fmt.Errorf("clickhouse: failed to query catalog dir: %w", err)
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	return scanCatalogDirRef(rows, normalised)
 }
 
 type compiledGlobPattern struct {
@@ -847,7 +985,7 @@ type findByGlobExecPlan struct {
 	queries []findByGlobQuerySpec
 }
 
-func findByGlobPlan(baseDirsByMount map[string][]string, patterns []string) findByGlobExecPlan {
+func findByGlobPlan(baseDirsByMount map[string][]catalogDirRef, patterns []string) findByGlobExecPlan {
 	patternChunks := chunkStrings(patterns, maxGlobPatternsPerQuery)
 	queries := make([]findByGlobQuerySpec, 0, len(baseDirsByMount)*len(patternChunks))
 
@@ -902,6 +1040,7 @@ func newFindByGlobPrepared(
 }
 
 func (c *Client) prepareFindByGlob(
+	ctx context.Context,
 	baseDirs []string,
 	patterns []string,
 	opts FindOptions,
@@ -911,7 +1050,7 @@ func (c *Client) prepareFindByGlob(
 		return findByGlobPrepared{}, err
 	}
 
-	baseDirsByMount, err := c.groupBaseDirsByMount(baseDirs)
+	baseDirsByMount, err := c.groupBaseDirsByMount(ctx, baseDirs)
 	if err != nil {
 		return findByGlobPrepared{}, err
 	}
@@ -922,11 +1061,12 @@ func (c *Client) prepareFindByGlob(
 }
 
 func (c *Client) prepareCountByGlob(
+	ctx context.Context,
 	baseDirs []string,
 	patterns []string,
 	opts FindOptions,
 ) (findByGlobPrepared, error) {
-	baseDirsByMount, err := c.groupBaseDirsByMount(baseDirs)
+	baseDirsByMount, err := c.groupBaseDirsByMount(ctx, baseDirs)
 	if err != nil {
 		return findByGlobPrepared{}, err
 	}
@@ -983,7 +1123,7 @@ func (c *Client) countByGlobQuery(
 
 func buildCountByGlobQueryAndParams(
 	mountPath string,
-	baseDirs []string,
+	baseDirs []catalogDirRef,
 	patterns []string,
 	ownerEnabled int64,
 	uid uint32,
@@ -994,7 +1134,7 @@ func buildCountByGlobQueryAndParams(
 	params = append(params, mountPath, mountPath)
 
 	for _, baseDir := range baseDirs {
-		compiled := compileGlobPatterns(baseDir, patterns)
+		compiled := compileGlobPatterns(baseDir.fullPath, patterns)
 		clause, clauseParams := findByGlobBaseDirClause(baseDir, compiled)
 		baseDirClauses = append(baseDirClauses, clause)
 		params = append(params, clauseParams...)
@@ -1058,7 +1198,7 @@ func (c *Client) CountByGlob(
 		return len(rows), err
 	}
 
-	prepared, err := c.prepareCountByGlob(baseDirs, patterns, opts)
+	prepared, err := c.prepareCountByGlob(ctx, baseDirs, patterns, opts)
 	if err != nil {
 		return 0, err
 	}
@@ -1208,43 +1348,29 @@ func lastComponentSlashIndex(path string) int {
 	return strings.LastIndex(path, "/")
 }
 
-func permissionAnyInDirArgs(mountPath string, dir string, uid uint32, gids []uint32) []any {
+func permissionAnyInDirArgs(mountPath string, dirID uint32, uid uint32, gids []uint32) []any {
 	return []any{
 		mountPath,
 		mountPath,
-		dir,
+		dirID,
 		uint8(db.DGUTAgeAll),
 		uid,
 		gids,
 	}
 }
 
-func (c *Client) groupBaseDirsByMount(baseDirs []string) (map[string][]string, error) {
+func (c *Client) groupBaseDirsByMount(ctx context.Context, baseDirs []string) (map[string][]catalogDirRef, error) {
 	if len(baseDirs) == 0 {
-		return map[string][]string{}, nil
+		return map[string][]catalogDirRef{}, nil
 	}
 
 	seen := make(map[string]map[string]struct{})
-	out := make(map[string][]string)
+	out := make(map[string][]catalogDirRef)
 
 	for _, bd := range baseDirs {
-		mountPath, normalised, err := c.resolveMountAndDir(bd)
-		if err != nil {
+		if err := c.addBaseDirRef(ctx, seen, out, bd); err != nil {
 			return nil, err
 		}
-
-		seenMount := seen[mountPath]
-		if seenMount == nil {
-			seenMount = make(map[string]struct{})
-			seen[mountPath] = seenMount
-		}
-
-		if _, ok := seenMount[normalised]; ok {
-			continue
-		}
-
-		seenMount[normalised] = struct{}{}
-		out[mountPath] = append(out[mountPath], normalised)
 	}
 
 	return out, nil
@@ -1270,10 +1396,19 @@ func (c *Client) IsDir(ctx context.Context, path string) (bool, error) {
 		return false, err
 	}
 
+	parent, err := c.resolveCatalogDir(ctx, mountPath, parentDir)
+	if errors.Is(err, errPathNotFound) {
+		return false, nil
+	}
+
+	if err != nil {
+		return false, err
+	}
+
 	qctx, cancel := queryContext(ctx, queryTimeout(c.cfg))
 	defer cancel()
 
-	rows, err := c.conn.Query(qctx, isDirQuery, mountPath, mountPath, parentDir, name)
+	rows, err := c.conn.Query(qctx, isDirQuery, mountPath, mountPath, parent.dirID, name)
 	if err != nil {
 		return false, fmt.Errorf("clickhouse: failed to query IsDir: %w", err)
 	}
@@ -1298,13 +1433,22 @@ func (c *Client) PermissionAnyInDir(ctx context.Context, dir string, uid uint32,
 
 	gids = ensureNonNilUInt32s(gids)
 
-	return c.permissionAnyInDir(ctx, mountPath, normalisedDir, uid, gids)
+	dirRef, err := c.resolveCatalogDir(ctx, mountPath, normalisedDir)
+	if errors.Is(err, errPathNotFound) {
+		return false, nil
+	}
+
+	if err != nil {
+		return false, err
+	}
+
+	return c.permissionAnyInDir(ctx, mountPath, dirRef.dirID, uid, gids)
 }
 
 func (c *Client) permissionAnyInDir(
 	ctx context.Context,
 	mountPath string,
-	dir string,
+	dirID uint32,
 	uid uint32,
 	gids []uint32,
 ) (bool, error) {
@@ -1314,7 +1458,7 @@ func (c *Client) permissionAnyInDir(
 	rows, err := c.conn.Query(
 		qctx,
 		permissionAnyInDirQuery,
-		permissionAnyInDirArgs(mountPath, dir, uid, gids)...,
+		permissionAnyInDirArgs(mountPath, dirID, uid, gids)...,
 	)
 	if err != nil {
 		return false, fmt.Errorf("clickhouse: failed to query PermissionAnyInDir: %w", err)
@@ -1342,13 +1486,22 @@ func (c *Client) PermissionPath(ctx context.Context, path string, uid uint32, gi
 		return false, err
 	}
 
-	return c.permissionPath(ctx, mountPath, parentDir, name, uid, ensureNonNilUInt32s(gids))
+	parent, err := c.resolveCatalogDir(ctx, mountPath, parentDir)
+	if errors.Is(err, errPathNotFound) {
+		return false, nil
+	}
+
+	if err != nil {
+		return false, err
+	}
+
+	return c.permissionPath(ctx, mountPath, parent.dirID, name, uid, ensureNonNilUInt32s(gids))
 }
 
 func (c *Client) permissionPath(
 	ctx context.Context,
 	mountPath string,
-	parentDir string,
+	dirID uint32,
 	name string,
 	uid uint32,
 	gids []uint32,
@@ -1361,7 +1514,7 @@ func (c *Client) permissionPath(
 		permissionPathQuery,
 		mountPath,
 		mountPath,
-		parentDir,
+		dirID,
 		name,
 		uid,
 		gids,

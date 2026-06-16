@@ -105,7 +105,7 @@ func NewInspector(cfg Config) (*Inspector, error) {
 // It uses the same SQL text as Client.ListDir.
 func (i *Inspector) ExplainListDir(
 	ctx context.Context,
-	mountPath, dir string,
+	mountPath, _ string,
 	limit, offset int64,
 ) (string, error) {
 	q, _, err := listDirQuery(ListOptions{})
@@ -115,7 +115,7 @@ func (i *Inspector) ExplainListDir(
 
 	explainQ := explainPrefix + q
 
-	return i.runExplain(ctx, explainQ, mountPath, mountPath, dir, limit, offset)
+	return i.runExplain(ctx, explainQ, mountPath, mountPath, uint32(0), limit, offset)
 }
 
 // ExplainStatPath returns EXPLAIN output for the StatPath SQL statement.
@@ -124,7 +124,7 @@ func (i *Inspector) ExplainStatPath(
 	ctx context.Context,
 	mountPath, path string,
 ) (string, error) {
-	parentDir, name, ok := splitPathParentAndName(path)
+	_, name, ok := splitPathParentAndName(path)
 	if !ok {
 		return "", errInvalidPath
 	}
@@ -136,7 +136,7 @@ func (i *Inspector) ExplainStatPath(
 
 	explainQ := explainPrefix + q
 
-	return i.runExplain(ctx, explainQ, mountPath, mountPath, parentDir, name)
+	return i.runExplain(ctx, explainQ, mountPath, mountPath, uint32(0), name)
 }
 
 // Measure runs the provided function, then returns metrics for the last

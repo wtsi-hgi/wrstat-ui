@@ -27,8 +27,8 @@ keep `ext_idx` set index; `PARTITION BY (mount_path, snapshot_id)`.
 Verified jointly via C2's acceptance tests (esp. C2.2 "no column
 stores a directory path string"). Depends on Phases 1-2.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
 
 ### Item 3.2: C2 - file API resolves path->dir_id then point-looks-up
 
@@ -51,5 +51,5 @@ never wrong file, and mount-root StatPath/ListDir/PermissionPath/
 PermissionAnyInDir via the reserved chain - data root `dir_id = D`,
 its entry filed under `D-1`). Depends on Item 3.1.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
