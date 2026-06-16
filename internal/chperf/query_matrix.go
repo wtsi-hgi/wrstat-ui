@@ -169,6 +169,7 @@ func j4RequiredMatrixOperations() []j4RequiredMatrixOperation {
 		{j4QueryTypeExactDirectory, queryOpAuthTreeName, "DirInfo auth restricted"},
 		{j4QueryTypeBatchDirectory, queryOpDirInfosBroadName, "DirInfos broad"},
 		{j4QueryTypeBatchDirectory, queryOpDirInfosFilteredName, "DirInfos filtered"},
+		{j4QueryTypeChildren, queryOpChildrenName, "Children"},
 		{j4QueryTypeChildren, queryOpDirsHaveChildrenBroadName, "DirsHaveChildren broad"},
 		{j4QueryTypeChildren, queryOpDirsHaveChildrenFilteredName, "DirsHaveChildren filtered"},
 		{j4QueryTypeSubtree, queryOpTreeWhereName, "Where same provider directory"},

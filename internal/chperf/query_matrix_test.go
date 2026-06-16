@@ -321,6 +321,7 @@ func queryMatrixRepresentativeOps() []string {
 	return []string{
 		queryOpTreeDirInfoName,
 		queryOpDirInfosBroadName,
+		queryOpChildrenName,
 		queryOpDirsHaveChildrenBroadName,
 		queryOpTreeWhereName,
 		queryOpTreeDiskTreeEndName,

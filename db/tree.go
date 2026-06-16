@@ -104,6 +104,11 @@ func NewTree(db Database) *Tree {
 	return &Tree{db: db}
 }
 
+// Children returns the immediate child directory paths for dir.
+func (t *Tree) Children(dir string) ([]string, error) {
+	return t.db.Children(dir)
+}
+
 // DirSummary returns only the summary for dir, without falling back to child
 // composition when dir itself has no matching rows.
 func (t *Tree) DirSummary(dir string, filter *Filter) (*DirSummary, error) {

@@ -1368,6 +1368,34 @@ func TestBuildOps(t *testing.T) {
 		So(database.dirInfoFilters[0], ShouldResemble, filter)
 	})
 
+	Convey("children op calls through and records standalone J4 labels", t, func() {
+		database := newQueryOpTestDB()
+		database.children[queryOpTestRootDir] = []string{queryOpTestChildBDir, queryOpTestChildADir}
+		qctx := queryContext{
+			provider: fakeMountTimestampsProvider{tree: db.NewTree(database)},
+			client:   &fakeQueryClient{},
+			dir:      queryOpTestRootDir,
+		}
+
+		ops := buildOps(qctx, QueryOptions{}, func(string, ...any) {})
+		childrenOp := findQueryTestOp(ops, queryOpChildrenName)
+		So(childrenOp, ShouldNotBeNil)
+		So(childrenOp.inputs[queryInputQueryTypeKey], ShouldEqual, j4QueryTypeChildren)
+		So(childrenOp.inputs[queryInputQueryVariantKey], ShouldEqual, "Children")
+		So(childrenOp.inputs[queryInputDirKey], ShouldEqual, queryOpTestRootDir)
+
+		So(childrenOp.run(context.Background()), ShouldBeNil)
+
+		So(database.childrenCalls, ShouldResemble, []string{queryOpTestRootDir})
+		So(database.dirInfoCalls, ShouldBeEmpty)
+		So(childrenOp.resultCount(), ShouldEqual, uint64(2))
+		So(
+			childrenOp.inputs[queryInputResultDigest],
+			ShouldEqual,
+			digestValue([]string{queryOpTestChildBDir, queryOpTestChildADir}),
+		)
+	})
+
 	Convey("tree ops mark AgeAll owner/type filters as optional-index gated", t, func() {
 		filter := queryTestTreeFilter()
 		inputs := treeOpInputs(filter, nil)

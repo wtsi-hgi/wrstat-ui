@@ -95,6 +95,7 @@ const (
 	queryOpTreeDiskTreeNewName            = "tree_disktree_endpoint_new_dirs"
 	queryOpTreeDiskTreeProviderUpdateName = "tree_disktree_endpoint_provider_update_cold_cache"
 	queryOpTreeDiskTreeVisibleChildName   = "tree_disktree_endpoint_visible_child_dirs"
+	queryOpChildrenName                   = "children"
 	queryOpTreeDirInfoName                = "tree_dirinfo"
 	queryOpDirInfoBroadName               = "dirinfo_broad"
 	queryOpDirInfoFilteredName            = "dirinfo_filtered"
@@ -2798,6 +2799,7 @@ func focusedQueryOps(qctx queryContext, opts QueryOptions) []op {
 		opFocusedDirInfo(qctx, queryOpDirInfoFilteredName, filtered),
 		opFocusedDirInfos(qctx, queryOpDirInfosBroadName, broadFilter),
 		opFocusedDirInfos(qctx, queryOpDirInfosFilteredName, filtered),
+		opFocusedChildren(qctx),
 		opFocusedDirsHaveChildren(qctx, queryOpDirsHaveChildrenBroadName, broadFilter),
 		opFocusedDirsHaveChildren(qctx, queryOpDirsHaveChildrenFilteredName, filtered),
 		opFocusedWhere(qctx, queryOpWhereWholeMountName, broadFilter, opts.Splits),
@@ -2895,6 +2897,32 @@ func focusedDirInfoDirs(tree *db.Tree, dir string, filter *db.Filter) ([]string,
 	}
 
 	return dirs, summaries, nil
+}
+
+func opFocusedChildren(qctx queryContext) op {
+	var resultCount uint64
+
+	inputs := j4Inputs(j4QueryTypeChildren, "Children", map[string]any{
+		queryInputDirKey:         qctx.dir,
+		queryInputCacheScope:     queryScopeSameProviderDir,
+		queryInputDurationSource: querySourceClickHouseLog,
+	})
+
+	return op{
+		name:   queryOpChildrenName,
+		inputs: inputs,
+		run: func(_ context.Context) error {
+			children, err := qctx.provider.Tree().Children(qctx.dir)
+
+			resultCount = uint64(len(children))
+			if err == nil {
+				inputs[queryInputResultDigest] = digestValue(children)
+			}
+
+			return err
+		},
+		resultCount: func() uint64 { return resultCount },
+	}
 }
 
 func opFocusedDirsHaveChildren(qctx queryContext, name string, filter *db.Filter) op {
