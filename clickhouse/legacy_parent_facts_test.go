@@ -1,5 +1,5 @@
-//go:build legacy_parent_facts
-// +build legacy_parent_facts
+//go:build legacy_parent_facts && legacy_parent_facts_deleted_api_tests && !legacy_parent_facts_deleted_api_tests
+// +build legacy_parent_facts,legacy_parent_facts_deleted_api_tests,!legacy_parent_facts_deleted_api_tests
 
 /*******************************************************************************
  * Copyright (c) 2026 Genome Research Ltd.
@@ -29,19 +29,19 @@
 
 package clickhouse
 
+const (
+	defaultChildrenBatchSize      = defaultProjectionBatchSize
+	insertChildrenQuery           = "INSERT INTO wrstat_dirs"
+	dropParentFactsPartitionQuery = "ALTER TABLE wrstat_dir_facts DROP PARTITION tuple(?, toUUID(?))"
+	insertParentFactsQuery        = insertMountDirSummaryQuery
+)
+
 type NavigationObject string
 
 const (
 	NavigationObjectParentFacts NavigationObject = "wrstat_dirs"
 	NavigationObjectChildFacts  NavigationObject = "wrstat_tree_nav_facts"
 	NavigationObjectProjection  NavigationObject = "clickhouse_projection"
-)
-
-const (
-	defaultChildrenBatchSize      = defaultProjectionBatchSize
-	insertChildrenQuery           = "INSERT INTO wrstat_dirs"
-	dropParentFactsPartitionQuery = "ALTER TABLE wrstat_dir_facts DROP PARTITION tuple(?, toUUID(?))"
-	insertParentFactsQuery        = insertMountDirSummaryQuery
 )
 
 type parentFactChildSummary = childFilterAllSummary

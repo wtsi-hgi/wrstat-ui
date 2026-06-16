@@ -1,5 +1,5 @@
-//go:build legacy_parent_facts
-// +build legacy_parent_facts
+//go:build legacy_parent_facts && legacy_parent_facts_deleted_api_tests && !legacy_parent_facts_deleted_api_tests
+// +build legacy_parent_facts,legacy_parent_facts_deleted_api_tests,!legacy_parent_facts_deleted_api_tests
 
 /*******************************************************************************
  * Copyright (c) 2026 Genome Research Ltd.
