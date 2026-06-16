@@ -87,6 +87,114 @@ func TestCleanSchemaDDLContainsOnlyFinalV1Objects(t *testing.T) {
 		So(ddl, ShouldContainSubstring, "ORDER BY (mount_path, snapshot_id, gid, uid, ft, dir_id)")
 	})
 
+	Convey("D2 filter materialisations use numeric ids and retain measures", t, func() {
+		baseMeasures := []string{
+			"count UInt64 CODEC(Delta, LZ4)",
+			"size UInt64 CODEC(Delta, LZ4)",
+			"atime_min Int64 CODEC(Delta, LZ4)",
+			"mtime_max Int64 CODEC(Delta, LZ4)",
+			"atime_buckets Array(UInt64) CODEC(LZ4)",
+			"mtime_buckets Array(UInt64) CODEC(LZ4)",
+			"refreshed_at DateTime64(3) CODEC(Delta, ZSTD(3))",
+		}
+		flagMeasures := []string{
+			"filter_child_count UInt64 CODEC(Delta, LZ4)",
+			"child_count UInt64 CODEC(Delta, LZ4)",
+			"has_filter_children UInt8",
+			"has_children UInt8",
+		}
+		cases := []struct {
+			file      string
+			table     string
+			orderBy   string
+			idColumns []string
+			extraKeep []string
+		}{
+			{
+				file:    "015_child_filter_all.sql",
+				table:   "wrstat_child_filter_all",
+				orderBy: "ORDER BY (mount_path, snapshot_id, parent_id, age, gid, uid, ft, dir_id)",
+				idColumns: []string{
+					"parent_id UInt32 CODEC(Delta, LZ4)",
+					cleanSchemaDirIDColumn,
+				},
+				extraKeep: flagMeasures,
+			},
+			{
+				file:    "016_dir_filter_all.sql",
+				table:   "wrstat_dir_filter_all",
+				orderBy: "ORDER BY (mount_path, snapshot_id, age, gid, uid, ft, dir_id)",
+				idColumns: []string{
+					cleanSchemaDirIDColumn,
+					"subtree_end UInt32 CODEC(Delta, LZ4)",
+				},
+				extraKeep: flagMeasures,
+			},
+			{
+				file:    "012_dir_filter_ageall.sql",
+				table:   "wrstat_dir_filter_ageall",
+				orderBy: "ORDER BY (mount_path, snapshot_id, gid, uid, ft, dir_id)",
+				idColumns: []string{
+					cleanSchemaDirIDColumn,
+					"subtree_end UInt32 CODEC(Delta, LZ4)",
+				},
+			},
+		}
+
+		for _, tc := range cases {
+			src, err := os.ReadFile(filepath.Join(
+				repoRootForCleanSchemaTest(t), cleanSchemaClickHouseDir, "schema", tc.file,
+			))
+			So(err, ShouldBeNil)
+
+			ddl := strings.Join(strings.Fields(string(src)), " ")
+			So(ddl, ShouldContainSubstring, "CREATE TABLE IF NOT EXISTS "+tc.table)
+			So(ddl, ShouldContainSubstring, "PARTITION BY (mount_path, snapshot_id)")
+			So(ddl, ShouldContainSubstring, tc.orderBy)
+			So(ddl, ShouldNotContainSubstring, " parent_dir String")
+			So(ddl, ShouldNotContainSubstring, " parent_dir LowCardinality(String)")
+			So(ddl, ShouldNotContainSubstring, " dir String")
+			So(ddl, ShouldNotContainSubstring, " dir LowCardinality(String)")
+
+			requiredColumns := make([]string, 0, len(baseMeasures)+len(tc.idColumns)+len(tc.extraKeep))
+			requiredColumns = append(requiredColumns, baseMeasures...)
+			requiredColumns = append(requiredColumns, tc.idColumns...)
+			requiredColumns = append(requiredColumns, tc.extraKeep...)
+
+			for _, column := range requiredColumns {
+				So(ddl, ShouldContainSubstring, column)
+			}
+		}
+	})
+
+	Convey("wrstat_dir_facts is keyed by dir_id with a direct-child projection", t, func() {
+		_, err := os.Stat(filepath.Join(
+			repoRootForCleanSchemaTest(t), cleanSchemaClickHouseDir, "schema", "004_dir_facts.sql",
+		))
+		So(os.IsNotExist(err), ShouldBeTrue)
+
+		src, err := os.ReadFile(filepath.Join(
+			repoRootForCleanSchemaTest(t), cleanSchemaClickHouseDir, "schema", "005_dir_facts.sql",
+		))
+		So(err, ShouldBeNil)
+
+		ddl := strings.Join(strings.Fields(string(src)), " ")
+		So(ddl, ShouldContainSubstring, "CREATE TABLE IF NOT EXISTS wrstat_dir_facts")
+		So(ddl, ShouldContainSubstring, cleanSchemaDirIDColumn)
+		So(ddl, ShouldContainSubstring, "parent_id UInt32 CODEC(Delta, LZ4)")
+		So(ddl, ShouldContainSubstring, "subtree_end UInt32 CODEC(Delta, LZ4)")
+		So(ddl, ShouldContainSubstring, "child_count UInt64 CODEC(Delta, LZ4)")
+		So(
+			ddl,
+			ShouldContainSubstring,
+			"PROJECTION children_proj ( SELECT * ORDER BY (mount_path, snapshot_id, parent_id, dir_id) )",
+		)
+		So(ddl, ShouldContainSubstring, "ORDER BY (mount_path, snapshot_id, dir_id)")
+		So(ddl, ShouldNotContainSubstring, " dir String")
+		So(ddl, ShouldNotContainSubstring, "parent_dir")
+		So(ddl, ShouldNotContainSubstring, "wrstat_parent_facts")
+	})
+
 	Convey("wrstat_dirs is the mandatory id-keyed directory catalog", t, func() {
 		src, err := os.ReadFile(filepath.Join(
 			repoRootForCleanSchemaTest(t), cleanSchemaClickHouseDir, "schema", "004_dirs.sql",

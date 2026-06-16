@@ -31,6 +31,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -44,7 +45,10 @@ import (
 const (
 	childrenInitialCap            = 16
 	childFilterAllPacketBaseArgs  = 4
+	dirFactVectorColumnCount      = 10
 	fullFilterOptionalClauseCount = 3
+	mountDirFactScalarColumns     = 2
+	resolvedDirFactScalarColumns  = 4
 
 	dgutaInitialCap                      = 8
 	dirsHaveChildrenSummaryPrefetchLimit = 64
@@ -55,10 +59,43 @@ const (
 	queryScopeArgs                       = 2
 	activeMountDirTupleArgs              = 3
 
-	childrenQuery = "SELECT DISTINCT full_path FROM wrstat_dirs " +
+	dirForFullPathQuery = "SELECT dir_id, parent_id, subtree_end, full_path FROM wrstat_dirs " +
 		"PREWHERE mount_path = ? AND snapshot_id = ? " +
-		"WHERE parent_id = (SELECT dir_id FROM wrstat_dirs WHERE mount_path = ? AND snapshot_id = ? AND full_path = ?) " +
+		"WHERE path_hash = ? AND full_path = ? " +
+		"ORDER BY dir_id LIMIT 1"
+
+	dirForIDQuery = "SELECT dir_id, parent_id, subtree_end, full_path FROM wrstat_dirs " +
+		"WHERE mount_path = ? AND snapshot_id = ? AND dir_id = ? " +
+		"LIMIT 1"
+
+	whereRangeCatalogQuery = "SELECT dir_id, parent_id, full_path FROM wrstat_dirs " +
+		"PREWHERE mount_path = ? AND snapshot_id = ? " +
+		"WHERE dir_id >= ? AND dir_id < ? " +
+		"ORDER BY dir_id"
+
+	dirIDsForDirsQuery = "SELECT full_path, dir_id FROM wrstat_dirs " +
+		"PREWHERE mount_path = ? AND snapshot_id = ? AND full_path IN (%s) " +
+		"ORDER BY full_path ASC, dir_id ASC"
+
+	dirIDsForActiveMountsDirQuery = "SELECT mount_path, toString(snapshot_id), dir_id " +
+		"FROM wrstat_dirs WHERE full_path = ? AND %s " +
+		"ORDER BY mount_path ASC, snapshot_id ASC, dir_id ASC"
+
+	childrenForDirIDQuery = "SELECT DISTINCT full_path FROM wrstat_dirs " +
+		"PREWHERE mount_path = ? AND snapshot_id = ? " +
+		"WHERE parent_id = ? " +
 		"ORDER BY full_path"
+
+	dirFactRowsForDirIDsQuery = "SELECT dir_id, updated_at, gids, uids, fts, ages, " +
+		"counts, sizes, atime_mins, mtime_maxs, atime_buckets, mtime_buckets " +
+		"FROM wrstat_dir_facts " +
+		"PREWHERE mount_path = ? AND snapshot_id = ? " +
+		"WHERE dir_id IN (%s)"
+
+	dirFactRowsForResolvedDirsQuery = "SELECT mount_path, toString(snapshot_id), dir_id, " +
+		"updated_at, gids, uids, fts, ages, counts, sizes, atime_mins, mtime_maxs, " +
+		"atime_buckets, mtime_buckets FROM wrstat_dir_facts " +
+		"WHERE (mount_path, snapshot_id, dir_id) IN (%s)"
 
 	dgutaArrayZipExpr = "arrayZip(gids, uids, fts, ages, counts, sizes, " +
 		"atime_mins, mtime_maxs, atime_buckets, mtime_buckets)"
@@ -205,6 +242,38 @@ const (
 		"WHERE f.mount_path = ? AND f.snapshot_id = ? AND f.age = ? %s AND startsWith(c.full_path, ?) " +
 		"GROUP BY c.full_path"
 
+	whereRangeDirFactsScalarSummariesQuery = "SELECT c.full_path AS dir, toUInt64(1) AS raw_rows, " +
+		"%s AS total_count, " +
+		"%s AS total_size, " +
+		"%s AS atime_min, " +
+		"%s AS mtime_max, " +
+		"%s AS atime_buckets, " +
+		"%s AS mtime_buckets, " +
+		"%s AS uids, " +
+		"%s AS gids, " +
+		"%s AS file_types " +
+		"FROM wrstat_dir_facts f " +
+		"INNER JOIN wrstat_dirs c " +
+		"ON c.mount_path = f.mount_path AND c.snapshot_id = f.snapshot_id AND c.dir_id = f.dir_id " +
+		"WHERE f.mount_path = ? AND f.snapshot_id = ? AND f.dir_id >= ? AND f.dir_id < ? " +
+		"ORDER BY c.full_path"
+
+	dirFilterAgeAllWhereRangeSummariesQuery = "SELECT c.full_path AS dir, count() AS raw_rows, " +
+		"sum(f.count) AS total_count, " +
+		"sum(f.size) AS total_size, " +
+		"minIf(f.atime_min, f.atime_min != 0) AS atime_min, " +
+		"max(f.mtime_max) AS mtime_max, " +
+		"arrayReduce('sumForEach', groupArray(f.atime_buckets)) AS atime_buckets, " +
+		"arrayReduce('sumForEach', groupArray(f.mtime_buckets)) AS mtime_buckets, " +
+		"arraySort(groupUniqArray(f.uid)) AS uids, " +
+		"arraySort(groupUniqArray(f.gid)) AS gids, " +
+		"groupBitOr(f.ft) AS file_types " +
+		"FROM wrstat_dir_filter_ageall f " +
+		"INNER JOIN wrstat_dirs c " +
+		"ON c.mount_path = f.mount_path AND c.snapshot_id = f.snapshot_id AND c.dir_id = f.dir_id " +
+		"WHERE f.mount_path = ? AND f.snapshot_id = ? AND f.dir_id >= ? AND f.dir_id < ? AND %s " +
+		"GROUP BY c.full_path"
+
 	childFilterAllChildSummariesPacketQuery = "SELECT child.full_path AS dir, count() AS raw_rows, " +
 		"sum(f.count) AS total_count, " +
 		"sum(f.size) AS total_size, " +
@@ -256,6 +325,16 @@ const (
 		"AND parent.dir_id = child.parent_id " +
 		"WHERE parent.full_path = parent.mount_path AND %s " +
 		"ORDER BY parent.full_path ASC, child.full_path ASC"
+
+	dirsHaveCatalogChildrenQuery = "SELECT full_path FROM wrstat_dirs " +
+		"PREWHERE mount_path = ? AND snapshot_id = ? " +
+		"WHERE full_path IN (%s) AND child_dir_count > 0 " +
+		"ORDER BY full_path ASC"
+
+	dirsHaveFilteredChildrenQuery = "SELECT parent_id FROM wrstat_child_filter_all " +
+		"PREWHERE mount_path = ? AND snapshot_id = ? " +
+		"WHERE parent_id IN (%s) AND age = ? %s AND count > 0 " +
+		"GROUP BY parent_id ORDER BY parent_id ASC"
 
 	dirsHaveMatchingChildrenQuery = "SELECT parent.full_path " +
 		"FROM wrstat_dirs parent " +
@@ -317,6 +396,10 @@ const (
 var errIntOverflow = errors.New("value overflows int")
 
 var errReaderClosed = errors.New("clickhouse: reader is closed")
+
+var errCatalogParentCycle = errors.New("clickhouse: catalog parent_id cycle")
+
+var errCatalogParentMissing = errors.New("clickhouse: missing catalog parent")
 
 var whereDirAgeAllRouteEvidenceFor = func( //nolint:gochecknoglobals // Tests inject measured p95 evidence.
 	_ context.Context,
@@ -380,21 +463,11 @@ func remainingDirInfoGroup(
 	return remaining
 }
 
-func addChildFilterAllRequestResults(
-	result map[string]bool,
-	group *activeMountDirGroup,
-	requested map[string]bool,
-	packet map[string]bool,
-	handled map[string]bool,
-) {
-	for queryDir := range requested {
-		hasChildren, ok := packet[queryDir]
-		if !ok {
-			continue
-		}
-
-		result[group.originalDirs[queryDir]] = hasChildren
-		handled[queryDir] = true
+func activeMountRootDirGroup(mount activeMount) *activeMountDirGroup {
+	return &activeMountDirGroup{
+		mount:        mount,
+		queryDirs:    []string{mount.mountPath},
+		originalDirs: map[string]string{mount.mountPath: mount.mountPath},
 	}
 }
 
@@ -408,6 +481,252 @@ type whereTraversalItem struct {
 	step int
 }
 
+type treeCatalogDirRef struct {
+	dirID      uint32
+	parentID   uint32
+	subtreeEnd uint32
+	fullPath   string
+}
+
+func scanTreeCatalogDirRef(rows rowsScanner, what string) (treeCatalogDirRef, bool, error) {
+	if !rows.Next() {
+		if err := rowsErr(rows); err != nil {
+			return treeCatalogDirRef{}, false, fmt.Errorf("clickhouse: %s iteration error: %w", what, err)
+		}
+
+		return treeCatalogDirRef{}, false, nil
+	}
+
+	var ref treeCatalogDirRef
+	if err := rows.Scan(&ref.dirID, &ref.parentID, &ref.subtreeEnd, &ref.fullPath); err != nil {
+		return treeCatalogDirRef{}, false, fmt.Errorf("clickhouse: failed to scan catalog dir: %w", err)
+	}
+
+	return ref, true, nil
+}
+
+type whereRangeCatalogNode struct {
+	dirID    uint32
+	parentID uint32
+	fullPath string
+}
+
+type dirFactRowKey struct {
+	mountPath  string
+	snapshotID string
+	dirID      uint32
+}
+
+func scanResolvedDirFactSummaryRow(
+	rows rowsScanner,
+) (dirFactRowKey, time.Time, db.GUTAs, error) {
+	var (
+		key       dirFactRowKey
+		updatedAt time.Time
+		vector    dgutaVectorColumns
+	)
+
+	dest := make([]any, 0, resolvedDirFactScalarColumns+dirFactVectorColumnCount)
+	dest = append(dest,
+		&key.mountPath,
+		&key.snapshotID,
+		&key.dirID,
+		&updatedAt,
+	)
+	dest = append(dest, dirFactVectorScanDest(&vector)...)
+
+	if err := rows.Scan(dest...); err != nil {
+		return dirFactRowKey{}, time.Time{}, nil, fmt.Errorf("clickhouse: failed to scan active dir facts row: %w", err)
+	}
+
+	gutas, err := vector.gutas("dir_id", strconv.FormatUint(uint64(key.dirID), 10))
+	if err != nil {
+		return dirFactRowKey{}, time.Time{}, nil, err
+	}
+
+	return key, updatedAt.UTC(), gutas, nil
+}
+
+func resolvedDirFactKeys(resolved []resolvedDirFact) map[dirFactRowKey]bool {
+	keys := make(map[dirFactRowKey]bool, len(resolved))
+	for _, fact := range resolved {
+		keys[fact.key] = true
+	}
+
+	return keys
+}
+
+func addResolvedDirFactSummaryRow(
+	rows rowsScanner,
+	wanted map[dirFactRowKey]bool,
+	acc *dirFactSummaryAccumulator,
+) (bool, error) {
+	key, updatedAt, gutas, err := scanResolvedDirFactSummaryRow(rows)
+	if err != nil || !wanted[key] {
+		return false, err
+	}
+
+	acc.gutas = append(acc.gutas, gutas...)
+	if updatedAt.After(acc.updatedAt) {
+		acc.updatedAt = updatedAt
+	}
+
+	return true, nil
+}
+
+type resolvedDirFact struct {
+	key dirFactRowKey
+	dir string
+}
+
+type dirFactSummaryAccumulator struct {
+	gutas     db.GUTAs
+	updatedAt time.Time
+}
+
+func scanResolvedDirFactSummaryRows(
+	rows rowsScanner,
+	resolved []resolvedDirFact,
+) (*dirFactSummaryAccumulator, bool, error) {
+	wanted := resolvedDirFactKeys(resolved)
+	acc := &dirFactSummaryAccumulator{}
+	found := false
+
+	for rows.Next() {
+		rowFound, err := addResolvedDirFactSummaryRow(rows, wanted, acc)
+		if err != nil {
+			return nil, false, err
+		}
+
+		found = found || rowFound
+	}
+
+	if err := rowsErr(rows); err != nil {
+		return nil, false, fmt.Errorf("clickhouse: active dir facts row iteration error: %w", err)
+	}
+
+	return acc, found, nil
+}
+
+func addDirFactSummary(
+	accs map[string]*dirFactSummaryAccumulator,
+	dir string,
+	updatedAt time.Time,
+	gutas db.GUTAs,
+) {
+	acc := accs[dir]
+	if acc == nil {
+		acc = &dirFactSummaryAccumulator{}
+		accs[dir] = acc
+	}
+
+	acc.gutas = append(acc.gutas, gutas...)
+
+	if updatedAt.After(acc.updatedAt) {
+		acc.updatedAt = updatedAt
+	}
+}
+
+type whereRangeScalarColumns struct {
+	count        string
+	size         string
+	atimeMin     string
+	mtimeMax     string
+	atimeBuckets string
+	mtimeBuckets string
+	uids         string
+	gids         string
+	ft           string
+}
+
+func whereRangeScalarSummaryColumns(mode mountDirSummaryMode) whereRangeScalarColumns {
+	if mode == mountDirSummaryFiles {
+		return whereRangeScalarColumns{
+			count:        "f.file_count",
+			size:         "f.file_size",
+			atimeMin:     "f.file_atime_min",
+			mtimeMax:     "f.file_mtime_max",
+			atimeBuckets: "f.file_atime_buckets",
+			mtimeBuckets: "f.file_mtime_buckets",
+			uids:         "f.file_uids",
+			gids:         "f.file_gids",
+			ft:           "f.file_ft",
+		}
+	}
+
+	return whereRangeScalarColumns{
+		count:        "f.all_count",
+		size:         "f.all_size",
+		atimeMin:     "f.all_atime_min",
+		mtimeMax:     "f.all_mtime_max",
+		atimeBuckets: "f.all_atime_buckets",
+		mtimeBuckets: "f.all_mtime_buckets",
+		uids:         "f.all_uids",
+		gids:         "f.all_gids",
+		ft:           "f.all_ft",
+	}
+}
+
+type whereRangeData struct {
+	summaries map[string]*db.DirSummary
+	children  map[string][]string
+}
+
+func newWhereRangeData(
+	nodes []whereRangeCatalogNode,
+	summaries map[string]*db.DirSummary,
+) *whereRangeData {
+	children := make(map[string][]string)
+
+	dirsByID := make(map[uint32]string, len(nodes))
+	for _, node := range nodes {
+		dirsByID[node.dirID] = node.fullPath
+	}
+
+	for _, node := range nodes {
+		parent, ok := dirsByID[node.parentID]
+		if !ok {
+			continue
+		}
+
+		children[parent] = append(children[parent], node.fullPath)
+	}
+
+	for parent, childDirs := range children {
+		children[parent] = canonicalSortedChildren(childDirs)
+	}
+
+	return &whereRangeData{
+		summaries: summaries,
+		children:  children,
+	}
+}
+
+func (r *whereRangeData) where(dir string, recurseCount func(string) int) db.DCSs {
+	var dcss db.DCSs
+
+	frontier := []whereTraversalItem{{dir: dir}}
+	for len(frontier) > 0 {
+		next := make([]whereTraversalItem, 0)
+
+		for _, item := range frontier {
+			info := r.where0(item.dir)
+			if info == nil {
+				continue
+			}
+
+			dcss = append(dcss, info.Current)
+			if recurseCount(item.dir) > item.step {
+				next = append(next, childWhereTraversalItems(info.Children, item.step+1)...)
+			}
+		}
+
+		frontier = next
+	}
+
+	return dcss
+}
+
 func childWhereTraversalItems(children []*db.DirSummary, step int) []whereTraversalItem {
 	items := make([]whereTraversalItem, len(children))
 	for i, child := range children {
@@ -415,6 +734,60 @@ func childWhereTraversalItems(children []*db.DirSummary, step int) []whereTraver
 	}
 
 	return items
+}
+
+func (r *whereRangeData) where0(dir string) *db.DirInfo {
+	key := ensureTrailingSlash(dir)
+	displayDir := dir
+
+	for {
+		info := r.dirInfo(key, displayDir)
+		if info == nil {
+			return nil
+		}
+
+		if !info.IsSameAsChild() {
+			return info
+		}
+
+		displayDir = info.Children[0].Dir
+		key = ensureTrailingSlash(displayDir)
+	}
+}
+
+func (r *whereRangeData) dirInfo(key, displayDir string) *db.DirInfo {
+	current := r.summaryForDir(key, displayDir)
+	if current == nil {
+		return nil
+	}
+
+	return &db.DirInfo{
+		Current:  current,
+		Children: r.childSummaries(key),
+	}
+}
+
+func (r *whereRangeData) childSummaries(parent string) []*db.DirSummary {
+	children := make([]*db.DirSummary, 0, len(r.children[parent]))
+	for _, child := range r.children[parent] {
+		if summary := r.summaryForDir(child, child); summary != nil && summary.Count > 0 {
+			children = append(children, summary)
+		}
+	}
+
+	return children
+}
+
+func (r *whereRangeData) summaryForDir(key, displayDir string) *db.DirSummary {
+	summary := r.summaries[key]
+	if summary == nil {
+		return nil
+	}
+
+	cp := *summary
+	cp.Dir = displayDir
+
+	return &cp
 }
 
 type whereDirAgeAllRouteEvidence struct {
@@ -679,6 +1052,1165 @@ func newClickHouseDatabaseWithSnapshot(
 	}
 }
 
+func (d *clickHouseDatabase) dirInfoSingleMountGuard(
+	mountPath, snapshotID string,
+	updatedAt time.Time,
+	filter *db.Filter,
+) (*db.DirSummary, bool, error) {
+	ready, err := d.activeMountFactsReady(mountPath, snapshotID)
+	if err != nil {
+		return nil, true, err
+	}
+
+	if !ready {
+		return &db.DirSummary{Modtime: updatedAt}, true, db.ErrDirNotFound
+	}
+
+	if fullFilterAlwaysEmpty(filter) {
+		return nil, true, nil
+	}
+
+	return nil, false, nil
+}
+
+func (d *clickHouseDatabase) dirInfoSingleMountFacts(
+	mountPath, snapshotID string,
+	updatedAt time.Time,
+	dir string,
+	filter *db.Filter,
+) (*db.DirSummary, bool, error) {
+	if d.conn == nil {
+		return nil, false, nil
+	}
+
+	sum, found, err := d.dirFactSummaryForDirMount(mountPath, snapshotID, dir, filter)
+	if err != nil || found {
+		return sum, true, err
+	}
+
+	return &db.DirSummary{Modtime: updatedAt}, true, db.ErrDirNotFound
+}
+
+func (d *clickHouseDatabase) childFilterAllParentsWithMatchingChildren(
+	ctx context.Context,
+	group *activeMountDirGroup,
+	filter *db.Filter,
+) (map[string]bool, map[string]bool, error) {
+	dirsByID, handled, err := d.resolveChildFilterAllParentDirs(ctx, group)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	if len(dirsByID) == 0 {
+		return map[string]bool{}, handled, nil
+	}
+
+	parentIDs, err := d.queryChildFilterAllMatchingParentIDs(
+		ctx,
+		group.mount.mountPath,
+		group.mount.snapshotID,
+		dirFactIDs(dirsByID),
+		filter,
+	)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return matchingParentDirsByID(parentIDs, dirsByID), handled, nil
+}
+
+func dirFactIDs(dirsByID map[uint32]string) []uint32 {
+	ids := make([]uint32, 0, len(dirsByID))
+	for dirID := range dirsByID {
+		ids = append(ids, dirID)
+	}
+
+	return ids
+}
+
+func matchingParentDirsByID(
+	parentIDs map[uint32]bool,
+	dirsByID map[uint32]string,
+) map[string]bool {
+	parents := make(map[string]bool, len(parentIDs))
+	for parentID := range parentIDs {
+		if dir, ok := dirsByID[parentID]; ok {
+			parents[dir] = true
+		}
+	}
+
+	return parents
+}
+
+func (d *clickHouseDatabase) resolveChildFilterAllParentDirs(
+	ctx context.Context,
+	group *activeMountDirGroup,
+) (map[uint32]string, map[string]bool, error) {
+	dirsByID, err := d.resolveDirIDsForDirsMount(
+		ctx,
+		group.mount.mountPath,
+		group.mount.snapshotID,
+		group.queryDirs,
+	)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return dirsByID, handledDirFilterAllDirs(group.queryDirs), nil
+}
+
+func (d *clickHouseDatabase) queryChildFilterAllMatchingParentIDs(
+	ctx context.Context,
+	mountPath, snapshotID string,
+	parentIDs []uint32,
+	filter *db.Filter,
+) (map[uint32]bool, error) {
+	parents := make(map[uint32]bool)
+
+	for _, batchIDs := range uint32ValueBatches(parentIDs) {
+		batchParents, err := d.queryChildFilterAllMatchingParentIDBatch(
+			ctx,
+			mountPath,
+			snapshotID,
+			batchIDs,
+			filter,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		for parentID := range batchParents {
+			parents[parentID] = true
+		}
+	}
+
+	return parents, nil
+}
+
+func uint32ValueBatches(values []uint32) [][]uint32 {
+	if len(values) == 0 {
+		return nil
+	}
+
+	if len(values) <= queryStringINMaxValues {
+		return [][]uint32{values}
+	}
+
+	batches := make([][]uint32, 0, (len(values)+queryStringINMaxValues-1)/queryStringINMaxValues)
+	for start := 0; start < len(values); start += queryStringINMaxValues {
+		end := min(start+queryStringINMaxValues, len(values))
+		batches = append(batches, values[start:end])
+	}
+
+	return batches
+}
+
+func (d *clickHouseDatabase) queryChildFilterAllMatchingParentIDBatch(
+	ctx context.Context,
+	mountPath, snapshotID string,
+	parentIDs []uint32,
+	filter *db.Filter,
+) (map[uint32]bool, error) {
+	query, args := childFilterAllMatchingParentIDQuery(mountPath, snapshotID, parentIDs, filter)
+
+	rows, err := d.conn.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("clickhouse: failed to query filtered child parent_ids: %w", err)
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	return scanParentIDSet(rows)
+}
+
+func childFilterAllMatchingParentIDQuery(
+	mountPath, snapshotID string,
+	parentIDs []uint32,
+	filter *db.Filter,
+) (string, []any) {
+	clauses, filterArgs := fullFilterOptionalClauses(filter)
+	query := fmt.Sprintf(dirsHaveFilteredChildrenQuery, placeholders(len(parentIDs)), clauses)
+
+	args := make([]any, 0, queryScopeArgs+len(parentIDs)+1+len(filterArgs))
+	args = append(args, mountPath, snapshotID)
+	args = appendUint32Args(args, parentIDs)
+	args = append(args, uint8(filter.Age))
+	args = append(args, filterArgs...)
+
+	return query, args
+}
+
+func scanParentIDSet(rows rowsScanner) (map[uint32]bool, error) {
+	parents := make(map[uint32]bool)
+
+	for rows.Next() {
+		var parentID uint32
+		if err := rows.Scan(&parentID); err != nil {
+			return nil, fmt.Errorf("clickhouse: failed to scan matching child parent_id: %w", err)
+		}
+
+		parents[parentID] = true
+	}
+
+	if err := rowsErr(rows); err != nil {
+		return nil, fmt.Errorf("clickhouse: matching child parent_id iteration error: %w", err)
+	}
+
+	return parents, nil
+}
+
+func (d *clickHouseDatabase) addCatalogDirsHaveChildrenForMount(
+	result map[string]bool,
+	group *activeMountDirGroup,
+) (*activeMountDirGroup, error) {
+	ctx, cancel := configQueryContext(d.cfg)
+	defer cancel()
+
+	parents, err := d.catalogParentsWithChildrenForMount(
+		ctx,
+		group.mount.mountPath,
+		group.mount.snapshotID,
+		group.queryDirs,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, queryDir := range group.queryDirs {
+		if parents[queryDir] {
+			result[group.originalDirs[queryDir]] = true
+		}
+	}
+
+	return remainingDirInfoGroup(group, handledDirFilterAllDirs(group.queryDirs)), nil
+}
+
+func (d *clickHouseDatabase) catalogParentsWithChildrenForMount(
+	ctx context.Context,
+	mountPath, snapshotID string,
+	dirs []string,
+) (map[string]bool, error) {
+	parents := make(map[string]bool)
+
+	for _, batchDirs := range stringValueBatches(uniqueQueryDirs(dirs)) {
+		batchParents, err := d.queryCatalogParentsWithChildrenBatch(ctx, mountPath, snapshotID, batchDirs)
+		if err != nil {
+			return nil, err
+		}
+
+		for parent := range batchParents {
+			parents[parent] = true
+		}
+	}
+
+	return parents, nil
+}
+
+func uniqueQueryDirs(dirs []string) []string {
+	unique := make([]string, 0, len(dirs))
+	seen := make(map[string]bool, len(dirs))
+
+	for _, dir := range dirs {
+		queryDir := ensureTrailingSlash(dir)
+		if seen[queryDir] {
+			continue
+		}
+
+		seen[queryDir] = true
+		unique = append(unique, queryDir)
+	}
+
+	return unique
+}
+
+func (d *clickHouseDatabase) queryCatalogParentsWithChildrenBatch(
+	ctx context.Context,
+	mountPath, snapshotID string,
+	dirs []string,
+) (map[string]bool, error) {
+	query, args := scopedBatchQuery(dirsHaveCatalogChildrenQuery, dirs, mountPath, snapshotID)
+
+	rows, err := d.conn.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("clickhouse: failed to query catalog child counts: %w", err)
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	return scanParentDirSet(rows)
+}
+
+func (d *clickHouseDatabase) dirFactGUTAsForAncestorMounts(
+	dir string,
+	mounts []activeMount,
+) (db.GUTAs, time.Time, bool, error) {
+	if len(mounts) == 0 {
+		return nil, time.Time{}, false, nil
+	}
+
+	ctx, cancel := configQueryContext(d.cfg)
+	defer cancel()
+
+	resolved, err := d.resolveDirIDsForActiveMountsDir(ctx, dir, mounts)
+	if err != nil || len(resolved) == 0 {
+		return nil, time.Time{}, false, err
+	}
+
+	acc, found, err := d.queryResolvedDirFactSummaryAccumulator(ctx, resolved)
+	if err != nil || !found {
+		return nil, time.Time{}, false, err
+	}
+
+	return acc.gutas, acc.updatedAt, true, nil
+}
+
+func (d *clickHouseDatabase) resolveDirIDsForActiveMountsDir(
+	ctx context.Context,
+	dir string,
+	mounts []activeMount,
+) ([]resolvedDirFact, error) {
+	query, args := activeMountsQuery(
+		dirIDsForActiveMountsDirQuery,
+		"mount_path",
+		"snapshot_id",
+		mounts,
+		ensureTrailingSlash(dir),
+	)
+
+	rows, err := d.conn.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("clickhouse: failed to resolve active dir_ids: %w", err)
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	return scanResolvedDirFacts(rows, ensureTrailingSlash(dir))
+}
+
+func scanResolvedDirFacts(rows rowsScanner, dir string) ([]resolvedDirFact, error) {
+	resolved := make([]resolvedDirFact, 0)
+
+	for rows.Next() {
+		var fact resolvedDirFact
+
+		fact.dir = dir
+
+		if err := rows.Scan(&fact.key.mountPath, &fact.key.snapshotID, &fact.key.dirID); err != nil {
+			return nil, fmt.Errorf("clickhouse: failed to scan active dir_id: %w", err)
+		}
+
+		resolved = append(resolved, fact)
+	}
+
+	if err := rowsErr(rows); err != nil {
+		return nil, fmt.Errorf("clickhouse: active dir_id iteration error: %w", err)
+	}
+
+	return resolved, nil
+}
+
+func (d *clickHouseDatabase) queryResolvedDirFactSummaryAccumulator(
+	ctx context.Context,
+	resolved []resolvedDirFact,
+) (*dirFactSummaryAccumulator, bool, error) {
+	query, args := resolvedDirFactRowsQuery(resolved)
+
+	rows, err := d.conn.Query(ctx, query, args...)
+	if err != nil {
+		return nil, false, fmt.Errorf("clickhouse: failed to query active dir facts rows: %w", err)
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	return scanResolvedDirFactSummaryRows(rows, resolved)
+}
+
+func resolvedDirFactRowsQuery(resolved []resolvedDirFact) (string, []any) {
+	var b strings.Builder
+
+	args := make([]any, 0, len(resolved)*activeMountDirTupleArgs)
+
+	for i, fact := range resolved {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+
+		b.WriteString("(?, toUUID(?), ?)")
+
+		args = append(args, fact.key.mountPath, fact.key.snapshotID, fact.key.dirID)
+	}
+
+	return fmt.Sprintf(dirFactRowsForResolvedDirsQuery, b.String()), args
+}
+
+func (d *clickHouseDatabase) resolveDirIDForMount(
+	ctx context.Context,
+	mountPath, snapshotID string,
+	dir string,
+) (uint32, bool, error) {
+	ref, ok, err := d.resolveCatalogDirForMount(ctx, mountPath, snapshotID, dir)
+	if err != nil || !ok {
+		return 0, ok, err
+	}
+
+	return ref.dirID, true, nil
+}
+
+func (d *clickHouseDatabase) resolveCatalogDirForMount(
+	ctx context.Context,
+	mountPath, snapshotID string,
+	dir string,
+) (treeCatalogDirRef, bool, error) {
+	queryDir := ensureTrailingSlash(dir)
+
+	rows, err := d.conn.Query(
+		ctx,
+		dirForFullPathQuery,
+		mountPath,
+		snapshotID,
+		catalogPathHash(queryDir),
+		queryDir,
+	)
+	if err != nil {
+		return treeCatalogDirRef{}, false, fmt.Errorf("clickhouse: failed to resolve dir_id: %w", err)
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	return scanTreeCatalogDirRef(rows, "dir resolution")
+}
+
+func (d *clickHouseDatabase) catalogDirForID(
+	ctx context.Context,
+	mountPath, snapshotID string,
+	dirID uint32,
+) (treeCatalogDirRef, bool, error) {
+	rows, err := d.conn.Query(ctx, dirForIDQuery, mountPath, snapshotID, dirID)
+	if err != nil {
+		return treeCatalogDirRef{}, false, fmt.Errorf("clickhouse: failed to resolve catalog parent: %w", err)
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	return scanTreeCatalogDirRef(rows, "catalog parent resolution")
+}
+
+func (d *clickHouseDatabase) catalogAncestorPathsForMount(
+	ctx context.Context,
+	mountPath, snapshotID string,
+	dir string,
+) ([]string, bool, error) {
+	ref, ok, err := d.resolveCatalogDirForMount(ctx, mountPath, snapshotID, dir)
+	if err != nil || !ok {
+		return nil, ok, err
+	}
+
+	return d.catalogAncestorPathsFromRef(ctx, mountPath, snapshotID, ref)
+}
+
+func (d *clickHouseDatabase) catalogAncestorPathsFromRef(
+	ctx context.Context,
+	mountPath, snapshotID string,
+	ref treeCatalogDirRef,
+) ([]string, bool, error) {
+	refs, err := d.catalogAncestorRefs(ctx, mountPath, snapshotID, ref)
+	if err != nil {
+		return nil, false, err
+	}
+
+	paths := make([]string, len(refs))
+	for i, ancestor := range refs {
+		paths[len(refs)-1-i] = ancestor.fullPath
+	}
+
+	return paths, true, nil
+}
+
+func (d *clickHouseDatabase) catalogAncestorRefs(
+	ctx context.Context,
+	mountPath, snapshotID string,
+	ref treeCatalogDirRef,
+) ([]treeCatalogDirRef, error) {
+	refs := []treeCatalogDirRef{ref}
+	seen := map[uint32]bool{ref.dirID: true}
+
+	for ref.parentID != 0 {
+		if seen[ref.parentID] {
+			return nil, fmt.Errorf("%w: dir_id %d", errCatalogParentCycle, ref.parentID)
+		}
+
+		parent, ok, err := d.catalogDirForID(ctx, mountPath, snapshotID, ref.parentID)
+		if err != nil {
+			return nil, err
+		}
+
+		if !ok {
+			return nil, fmt.Errorf("%w: dir_id %d", errCatalogParentMissing, ref.parentID)
+		}
+
+		refs = append(refs, parent)
+		seen[parent.dirID] = true
+		ref = parent
+	}
+
+	return refs, nil
+}
+
+func (d *clickHouseDatabase) dirFactSummaryForDirMount(
+	mountPath, snapshotID string,
+	dir string,
+	filter *db.Filter,
+) (*db.DirSummary, bool, error) {
+	queryDir := ensureTrailingSlash(dir)
+
+	summaries, handled, err := d.dirFactSummariesForDirsMount(
+		mountPath,
+		snapshotID,
+		[]string{queryDir},
+		filter,
+	)
+	if err != nil || !handled[queryDir] {
+		return nil, false, err
+	}
+
+	return summaries[queryDir], true, nil
+}
+
+func (d *clickHouseDatabase) addDirFactInfosForMount(
+	result map[string]*db.DirSummary,
+	group *activeMountDirGroup,
+	filter *db.Filter,
+) (bool, error) {
+	summaries, _, err := d.dirFactSummariesForDirsMount(
+		group.mount.mountPath,
+		group.mount.snapshotID,
+		group.queryDirs,
+		filter,
+	)
+	if err != nil {
+		return false, err
+	}
+
+	d.addGroupedDirSummaries(result, group, summaries)
+
+	return true, nil
+}
+
+func (d *clickHouseDatabase) dirFactSummariesForDirsMount(
+	mountPath, snapshotID string,
+	dirs []string,
+	filter *db.Filter,
+) (map[string]*db.DirSummary, map[string]bool, error) {
+	if len(dirs) == 0 {
+		return map[string]*db.DirSummary{}, map[string]bool{}, nil
+	}
+
+	ctx, cancel := configQueryContext(d.cfg)
+	defer cancel()
+
+	dirsByID, err := d.resolveDirIDsForDirsMount(ctx, mountPath, snapshotID, dirs)
+	if err != nil || len(dirsByID) == 0 {
+		return map[string]*db.DirSummary{}, map[string]bool{}, err
+	}
+
+	accs, err := d.queryDirFactSummaryAccumulatorsForDirIDs(ctx, mountPath, snapshotID, dirsByID)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return dirFactSummariesFromAccumulators(accs, filter), handledDirFactAccumulators(accs), nil
+}
+
+func dirFactSummariesFromAccumulators(
+	accs map[string]*dirFactSummaryAccumulator,
+	filter *db.Filter,
+) map[string]*db.DirSummary {
+	summaries := make(map[string]*db.DirSummary, len(accs))
+	for dir, acc := range accs {
+		if sum := dirSummaryWithModtime(acc.gutas, filter, acc.updatedAt); sum != nil {
+			summaries[dir] = sum
+		}
+	}
+
+	return summaries
+}
+
+func handledDirFactAccumulators(accs map[string]*dirFactSummaryAccumulator) map[string]bool {
+	handled := make(map[string]bool, len(accs))
+	for dir := range accs {
+		handled[dir] = true
+	}
+
+	return handled
+}
+
+func (d *clickHouseDatabase) resolveDirIDsForDirsMount(
+	ctx context.Context,
+	mountPath, snapshotID string,
+	dirs []string,
+) (map[uint32]string, error) {
+	result := make(map[uint32]string, len(dirs))
+
+	for _, batchDirs := range stringValueBatches(uniqueQueryDirs(dirs)) {
+		if err := d.addResolvedDirIDsForDirsBatch(ctx, mountPath, snapshotID, batchDirs, result); err != nil {
+			return nil, err
+		}
+	}
+
+	return result, nil
+}
+
+func (d *clickHouseDatabase) addResolvedDirIDsForDirsBatch(
+	ctx context.Context,
+	mountPath, snapshotID string,
+	dirs []string,
+	result map[uint32]string,
+) error {
+	query, args := scopedBatchQuery(dirIDsForDirsQuery, dirs, mountPath, snapshotID)
+
+	rows, err := d.conn.Query(ctx, query, args...)
+	if err != nil {
+		return fmt.Errorf("clickhouse: failed to resolve dir_id batch: %w", err)
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	return scanResolvedDirIDRows(rows, result)
+}
+
+func scanResolvedDirIDRows(rows rowsScanner, result map[uint32]string) error {
+	for rows.Next() {
+		var (
+			dir   string
+			dirID uint32
+		)
+
+		if err := rows.Scan(&dir, &dirID); err != nil {
+			return fmt.Errorf("clickhouse: failed to scan dir_id batch row: %w", err)
+		}
+
+		result[dirID] = dir
+	}
+
+	if err := rowsErr(rows); err != nil {
+		return fmt.Errorf("clickhouse: dir_id batch iteration error: %w", err)
+	}
+
+	return nil
+}
+
+func (d *clickHouseDatabase) queryDirFactSummaryAccumulatorsForDirIDs(
+	ctx context.Context,
+	mountPath, snapshotID string,
+	dirsByID map[uint32]string,
+) (map[string]*dirFactSummaryAccumulator, error) {
+	accs := make(map[string]*dirFactSummaryAccumulator, len(dirsByID))
+
+	for _, batchIDs := range uint32ValueBatches(dirFactIDs(dirsByID)) {
+		if err := d.addDirFactSummaryAccumulatorBatch(ctx, mountPath, snapshotID, batchIDs, dirsByID, accs); err != nil {
+			return nil, err
+		}
+	}
+
+	return accs, nil
+}
+
+func (d *clickHouseDatabase) addDirFactSummaryAccumulatorBatch(
+	ctx context.Context,
+	mountPath, snapshotID string,
+	dirIDs []uint32,
+	dirsByID map[uint32]string,
+	accs map[string]*dirFactSummaryAccumulator,
+) error {
+	query, args := scopedUint32BatchQuery(dirFactRowsForDirIDsQuery, dirIDs, mountPath, snapshotID)
+
+	rows, err := d.conn.Query(ctx, query, args...)
+	if err != nil {
+		return fmt.Errorf("clickhouse: failed to query dir facts rows: %w", err)
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	return scanDirFactSummaryRowsForMount(rows, dirsByID, accs)
+}
+
+func scopedUint32BatchQuery(queryFmt string, values []uint32, scopeArgs ...any) (string, []any) {
+	query := fmt.Sprintf(queryFmt, placeholders(len(values)))
+	args := make([]any, 0, len(values)+len(scopeArgs))
+	args = append(args, scopeArgs...)
+
+	for _, value := range values {
+		args = append(args, value)
+	}
+
+	return query, args
+}
+
+func scanDirFactSummaryRowsForMount(
+	rows rowsScanner,
+	dirsByID map[uint32]string,
+	accs map[string]*dirFactSummaryAccumulator,
+) error {
+	for rows.Next() {
+		dirID, updatedAt, gutas, err := scanDirFactSummaryRow(rows)
+		if err != nil {
+			return err
+		}
+
+		dir, ok := dirsByID[dirID]
+		if !ok {
+			continue
+		}
+
+		addDirFactSummary(accs, dir, updatedAt, gutas)
+	}
+
+	if err := rowsErr(rows); err != nil {
+		return fmt.Errorf("clickhouse: dir facts row iteration error: %w", err)
+	}
+
+	return nil
+}
+
+func (d *clickHouseDatabase) addDirInfosForMountFallback(
+	result map[string]*db.DirSummary,
+	group *activeMountDirGroup,
+	filter *db.Filter,
+) error {
+	if dirFilterAllCanHandleFilter(filter) {
+		return d.addFullFilterDirInfosForMount(result, group, filter)
+	}
+
+	group, err := d.addChildFilterAllDirInfosForMount(result, group, filter)
+	if dirInfoRouteDone(group, err) {
+		return err
+	}
+
+	ok, err := d.addGroupedDirInfosForMount(result, group, filter)
+	if err != nil || ok {
+		return err
+	}
+
+	return d.addRawDirInfosForMount(result, group, filter)
+}
+
+func (d *clickHouseDatabase) addIndexedActiveMountRootDirsHaveChildren(
+	result map[string]bool,
+	roots activeMountRootDirs,
+	mounts []activeMount,
+	filter *db.Filter,
+) (bool, error) {
+	if fullFilterAlwaysEmpty(filter) {
+		return true, nil
+	}
+
+	if broadFilterCanUseChildRows(filter) {
+		return true, d.addCatalogActiveMountRootDirsHaveChildren(result, roots, mounts)
+	}
+
+	return d.addChildFilterAllActiveMountRootDirsHaveChildren(result, roots, mounts, filter)
+}
+
+func (d *clickHouseDatabase) addCatalogActiveMountRootDirsHaveChildren(
+	result map[string]bool,
+	roots activeMountRootDirs,
+	mounts []activeMount,
+) error {
+	ctx, cancel := configQueryContext(d.cfg)
+	defer cancel()
+
+	for _, mount := range mounts {
+		parents, err := d.catalogParentsWithChildrenForMount(
+			ctx,
+			mount.mountPath,
+			mount.snapshotID,
+			[]string{mount.mountPath},
+		)
+		if err != nil {
+			return err
+		}
+
+		if parents[mount.mountPath] {
+			markActiveMountRootHasChildren(result, roots, mount.mountPath)
+		}
+	}
+
+	return nil
+}
+
+func markActiveMountRootHasChildren(
+	result map[string]bool,
+	roots activeMountRootDirs,
+	mountPath string,
+) {
+	for _, original := range roots.originalDirs[mountPath] {
+		result[original] = true
+	}
+}
+
+func (d *clickHouseDatabase) addChildFilterAllActiveMountRootDirsHaveChildren(
+	result map[string]bool,
+	roots activeMountRootDirs,
+	mounts []activeMount,
+	filter *db.Filter,
+) (bool, error) {
+	if !childFilterAllCanHandleDirsHaveChildrenFilter(filter) {
+		return false, nil
+	}
+
+	handledAll := true
+
+	for _, mount := range mounts {
+		handled, err := d.addChildFilterAllActiveMountRootDirHaveChildren(result, roots, mount, filter)
+		if err != nil {
+			return false, err
+		}
+
+		if !handled {
+			handledAll = false
+		}
+	}
+
+	return handledAll, nil
+}
+
+func (d *clickHouseDatabase) addChildFilterAllActiveMountRootDirHaveChildren(
+	result map[string]bool,
+	roots activeMountRootDirs,
+	mount activeMount,
+	filter *db.Filter,
+) (bool, error) {
+	canonicalResult := map[string]bool{mount.mountPath: false}
+	group := activeMountRootDirGroup(mount)
+
+	remaining, err := d.addChildFilterAllDirsHaveChildrenForMount(canonicalResult, group, filter)
+	if err != nil {
+		return false, err
+	}
+
+	if len(remaining.queryDirs) > 0 {
+		return false, nil
+	}
+
+	if canonicalResult[mount.mountPath] {
+		markActiveMountRootHasChildren(result, roots, mount.mountPath)
+	}
+
+	return true, nil
+}
+
+func (d *clickHouseDatabase) whereByDirIDRange(
+	queryDir string,
+	displayDir string,
+	filter *db.Filter,
+	recurseCount func(string) int,
+) (db.DCSs, bool, error) {
+	mount, ok, err := d.whereRangeActiveMount(queryDir)
+	if err != nil || !ok {
+		return nil, ok, err
+	}
+
+	ctx, cancel := configQueryContext(d.cfg)
+	defer cancel()
+
+	ref, err := d.whereRangeDirRef(ctx, mount, queryDir)
+	if err != nil {
+		return nil, true, err
+	}
+
+	nodes, err := d.whereRangeCatalog(ctx, mount, ref)
+	if err != nil {
+		return nil, true, err
+	}
+
+	summaries, err := d.whereRangeSummaries(ctx, mount, ref, queryDir, filter)
+	if err != nil {
+		return nil, true, err
+	}
+
+	return sortedWhereRangeDCSs(nodes, summaries, displayDir, recurseCount), true, nil
+}
+
+func sortedWhereRangeDCSs(
+	nodes []whereRangeCatalogNode,
+	summaries map[string]*db.DirSummary,
+	displayDir string,
+	recurseCount func(string) int,
+) db.DCSs {
+	dcss := newWhereRangeData(nodes, summaries).where(displayDir, recurseCount)
+	sort.Sort(dcss)
+
+	return dcss
+}
+
+func (d *clickHouseDatabase) whereRangeDirRef(
+	ctx context.Context,
+	mount activeMount,
+	queryDir string,
+) (treeCatalogDirRef, error) {
+	ref, found, err := d.resolveCatalogDirForMount(ctx, mount.mountPath, mount.snapshotID, queryDir)
+	if err != nil {
+		return treeCatalogDirRef{}, err
+	}
+
+	if !found {
+		return treeCatalogDirRef{}, db.ErrDirNotFound
+	}
+
+	return ref, nil
+}
+
+func (d *clickHouseDatabase) whereRangeActiveMount(queryDir string) (activeMount, bool, error) {
+	mountPath, ok, err := d.resolveMountScope(queryDir)
+	if err != nil || !ok {
+		return activeMount{}, false, err
+	}
+
+	mount, found, err := d.activeMountForMountPath(mountPath)
+	if err != nil || !found {
+		return activeMount{}, false, err
+	}
+
+	ready, err := d.activeMountReady(mount)
+	if err != nil || !ready {
+		return activeMount{}, false, err
+	}
+
+	return mount, true, nil
+}
+
+func (d *clickHouseDatabase) whereRangeCatalog(
+	ctx context.Context,
+	mount activeMount,
+	ref treeCatalogDirRef,
+) ([]whereRangeCatalogNode, error) {
+	rows, err := d.conn.Query(ctx, whereRangeCatalogQuery, mount.mountPath, mount.snapshotID, ref.dirID, ref.subtreeEnd)
+	if err != nil {
+		return nil, fmt.Errorf("clickhouse: failed to query where catalog range: %w", err)
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	return scanWhereRangeCatalogRows(rows)
+}
+
+func scanWhereRangeCatalogRows(rows rowsScanner) ([]whereRangeCatalogNode, error) {
+	nodes := make([]whereRangeCatalogNode, 0)
+
+	for rows.Next() {
+		var node whereRangeCatalogNode
+		if err := rows.Scan(&node.dirID, &node.parentID, &node.fullPath); err != nil {
+			return nil, fmt.Errorf("clickhouse: failed to scan where catalog range: %w", err)
+		}
+
+		node.fullPath = ensureTrailingSlash(node.fullPath)
+		nodes = append(nodes, node)
+	}
+
+	if err := rowsErr(rows); err != nil {
+		return nil, fmt.Errorf("clickhouse: where catalog range iteration error: %w", err)
+	}
+
+	return nodes, nil
+}
+
+func (d *clickHouseDatabase) whereRangeSummaries(
+	ctx context.Context,
+	mount activeMount,
+	ref treeCatalogDirRef,
+	queryDir string,
+	filter *db.Filter,
+) (map[string]*db.DirSummary, error) {
+	if summaries, ok, err := d.whereRangeAgeAllSummaries(ctx, mount, ref, queryDir, filter); err != nil || ok {
+		return summaries, err
+	}
+
+	if summaries, ok, err := d.whereRangeDirFilterAllSummaries(ctx, mount, ref, filter); err != nil || ok {
+		return summaries, err
+	}
+
+	if summaries, ok, err := d.whereRangeScalarSummaries(ctx, mount, ref, filter); err != nil || ok {
+		return summaries, err
+	}
+
+	return d.whereRangeVectorSummaries(ctx, mount, ref, filter)
+}
+
+func (d *clickHouseDatabase) whereRangeAgeAllSummaries(
+	ctx context.Context,
+	mount activeMount,
+	ref treeCatalogDirRef,
+	queryDir string,
+	filter *db.Filter,
+) (map[string]*db.DirSummary, bool, error) {
+	useAgeAll, err := d.useDirFilterAgeAllForWhere(ctx, mount, queryDir, filter)
+	if err != nil || !useAgeAll {
+		return nil, false, err
+	}
+
+	ready, err := d.dirFilterAgeAllReadyForFilter(ctx, mount.mountPath, mount.snapshotID, filter)
+	if err != nil || !ready {
+		return nil, false, err
+	}
+
+	query, args := whereRangeAgeAllSummariesQuery(mount, ref, filter)
+
+	rows, err := d.conn.Query(ctx, query, args...)
+	if err != nil {
+		if isUnknownTable(err) {
+			return nil, false, nil
+		}
+
+		return nil, true, fmt.Errorf("clickhouse: failed to query AgeAll where range summaries: %w", err)
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	return scanWhereRangeSummaryRows(rows, filter, mount.updatedAt)
+}
+
+func whereRangeAgeAllSummariesQuery(
+	mount activeMount,
+	ref treeCatalogDirRef,
+	filter *db.Filter,
+) (string, []any) {
+	filterExpr, filterArgs := dirFilterAgeAllFilterExpression(filter)
+	query := fmt.Sprintf(dirFilterAgeAllWhereRangeSummariesQuery, filterExpr)
+	args := make([]any, 0, queryScopeArgs+2+len(filterArgs))
+	args = append(args, mount.mountPath, mount.snapshotID, ref.dirID, ref.subtreeEnd)
+	args = append(args, filterArgs...)
+
+	return query, args
+}
+
+func scanWhereRangeSummaryRows(
+	rows rowsScanner,
+	filter *db.Filter,
+	updatedAt time.Time,
+) (map[string]*db.DirSummary, bool, error) {
+	summaries, _, err := scanDirSummaryRows(rows, filter, updatedAt)
+
+	return summaries, true, err
+}
+
+func (d *clickHouseDatabase) whereRangeDirFilterAllSummaries(
+	ctx context.Context,
+	mount activeMount,
+	ref treeCatalogDirRef,
+	filter *db.Filter,
+) (map[string]*db.DirSummary, bool, error) {
+	if !dirFilterAllCanHandleFilter(filter) {
+		return nil, false, nil
+	}
+
+	ready, err := d.schema3DirFilterAllReady(ctx, mount.mountPath, mount.snapshotID)
+	if err != nil || !ready {
+		return nil, false, err
+	}
+
+	query, args := whereRangeDirFilterAllSummariesQuery(mount, ref, filter)
+
+	rows, err := d.conn.Query(ctx, query, args...)
+	if err != nil {
+		if isUnknownTable(err) {
+			return nil, false, nil
+		}
+
+		return nil, true, fmt.Errorf("clickhouse: failed to query full-filter where range summaries: %w", err)
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	return scanWhereRangeSummaryRows(rows, filter, mount.updatedAt)
+}
+
+func whereRangeDirFilterAllSummariesQuery(
+	mount activeMount,
+	ref treeCatalogDirRef,
+	filter *db.Filter,
+) (string, []any) {
+	return dgutaMaterialisedSubtreeSummariesQuery(
+		mount.mountPath,
+		mount.snapshotID,
+		ref.dirID,
+		ref.subtreeEnd,
+		filter,
+	)
+}
+
+func (d *clickHouseDatabase) whereRangeScalarSummaries(
+	ctx context.Context,
+	mount activeMount,
+	ref treeCatalogDirRef,
+	filter *db.Filter,
+) (map[string]*db.DirSummary, bool, error) {
+	mode, ok := mountDirSummaryModeForFilter(filter)
+	if !ok {
+		return nil, false, nil
+	}
+
+	query, args := whereRangeScalarSummariesQuery(mount, ref, mode)
+
+	rows, err := d.conn.Query(ctx, query, args...)
+	if err != nil {
+		return nil, true, fmt.Errorf("clickhouse: failed to query scalar where range summaries: %w", err)
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	summaries, _, err := scanDirSummaryRows(rows, filter, mount.updatedAt)
+
+	return summaries, true, err
+}
+
+func whereRangeScalarSummariesQuery(
+	mount activeMount,
+	ref treeCatalogDirRef,
+	mode mountDirSummaryMode,
+) (string, []any) {
+	columns := whereRangeScalarSummaryColumns(mode)
+	query := fmt.Sprintf(
+		whereRangeDirFactsScalarSummariesQuery,
+		columns.count,
+		columns.size,
+		columns.atimeMin,
+		columns.mtimeMax,
+		columns.atimeBuckets,
+		columns.mtimeBuckets,
+		columns.uids,
+		columns.gids,
+		columns.ft,
+	)
+
+	return query, []any{mount.mountPath, mount.snapshotID, ref.dirID, ref.subtreeEnd}
+}
+
+func (d *clickHouseDatabase) whereRangeVectorSummaries(
+	ctx context.Context,
+	mount activeMount,
+	ref treeCatalogDirRef,
+	filter *db.Filter,
+) (map[string]*db.DirSummary, error) {
+	query, args := dgutaVectorSubtreeSummariesQuery(
+		mount.mountPath,
+		mount.snapshotID,
+		ref.dirID,
+		ref.subtreeEnd,
+		filter,
+	)
+
+	rows, err := d.conn.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("clickhouse: failed to query vector where range summaries: %w", err)
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	summaries, _, err := scanDirSummaryRows(rows, filter, mount.updatedAt)
+
+	return summaries, err
+}
+
 func (d *clickHouseDatabase) DirInfo(
 	dir string,
 	filter *db.Filter,
@@ -779,18 +2311,13 @@ func (d *clickHouseDatabase) dirInfoSingleMount(
 	updatedAt time.Time,
 	dir string, filter *db.Filter,
 ) (*db.DirSummary, error) {
-	ready, err := d.activeMountFactsReady(mountPath, snapshotID)
-	if err != nil {
-		return nil, err
+	if sum, done, err := d.dirInfoSingleMountGuard(mountPath, snapshotID, updatedAt, filter); done || err != nil {
+		return sum, err
 	}
 
-	if !ready {
-		return &db.DirSummary{Modtime: updatedAt}, db.ErrDirNotFound
-	}
-
-	if fullFilterAlwaysEmpty(filter) {
-		//nolint:nilnil // An empty UID/GID list is a valid filter with no possible summary.
-		return nil, nil
+	sum, handled, err := d.dirInfoSingleMountFacts(mountPath, snapshotID, updatedAt, dir, filter)
+	if err != nil || handled {
+		return sum, err
 	}
 
 	sum, ok, err := d.maintainedDirInfoSingleMount(mountPath, snapshotID, updatedAt, dir, filter)
@@ -1285,7 +2812,7 @@ func (d *clickHouseDatabase) addReadyChildFilterAllDirsHaveChildren(
 	group *activeMountDirGroup,
 	filter *db.Filter,
 ) (*activeMountDirGroup, error) {
-	handled, err := d.addChildFilterAllRequestResults(ctx, result, group, filter)
+	parents, handled, err := d.childFilterAllParentsWithMatchingChildren(ctx, group, filter)
 	if err != nil {
 		if isUnknownTable(err) {
 			group.schema3ChildFilterAllUnavailable = true
@@ -1296,31 +2823,15 @@ func (d *clickHouseDatabase) addReadyChildFilterAllDirsHaveChildren(
 		return nil, err
 	}
 
+	for _, queryDir := range group.queryDirs {
+		if parents[queryDir] {
+			result[group.originalDirs[queryDir]] = true
+		}
+	}
+
 	remaining := remainingDirInfoGroup(group, handled)
 
 	return remaining, nil
-}
-
-func (d *clickHouseDatabase) addChildFilterAllRequestResults(
-	ctx context.Context,
-	result map[string]bool,
-	group *activeMountDirGroup,
-	filter *db.Filter,
-) (map[string]bool, error) {
-	requests := dirInfoRequestsByParent(group)
-	handled := make(map[string]bool)
-
-	for _, parentDir := range sortedRequestParents(requests) {
-		facts, err := d.childFilterAllPacketChildSummaries(ctx, group.mount, parentDir, filter)
-		if err != nil {
-			return nil, err
-		}
-
-		packet := childFilterAllHasChildrenByDir(facts)
-		addChildFilterAllRequestResults(result, group, requests[parentDir], packet, handled)
-	}
-
-	return handled, nil
 }
 
 func dirInfoRequestsByParent(group *activeMountDirGroup) map[string]map[string]bool {
@@ -1352,20 +2863,19 @@ func sortedRequestParents(requests map[string]map[string]bool) []string {
 	return parentDirs
 }
 
-func childFilterAllHasChildrenByDir(facts []childFilterAllSummary) map[string]bool {
-	hasChildren := make(map[string]bool, len(facts))
-	for _, fact := range facts {
-		hasChildren[ensureTrailingSlash(fact.Dir)] = fact.HasChildren
-	}
-
-	return hasChildren
-}
-
 func (d *clickHouseDatabase) addIndexedDirsHaveChildrenForMount(
 	result map[string]bool,
 	group *activeMountDirGroup,
 	filter *db.Filter,
 ) (*activeMountDirGroup, error) {
+	if fullFilterAlwaysEmpty(filter) {
+		return remainingDirInfoGroup(group, handledDirFilterAllDirs(group.queryDirs)), nil
+	}
+
+	if broadFilterCanUseChildRows(filter) {
+		return d.addCatalogDirsHaveChildrenForMount(result, group)
+	}
+
 	group, err := d.addChildFilterAllDirsHaveChildrenForMount(result, group, filter)
 	if err != nil || len(group.queryDirs) == 0 {
 		return group, err
@@ -1798,6 +3308,31 @@ func emptyDirInfoSummary(
 	}
 }
 
+func (d *clickHouseDatabase) addFallbackActiveMountRootDirsHaveChildren(
+	result map[string]bool,
+	roots activeMountRootDirs,
+	mounts []activeMount,
+	filter *db.Filter,
+) error {
+	childrenByParent, err := d.childrenForActiveMountRoots(mounts)
+	if err != nil {
+		return err
+	}
+
+	parents, err := d.parentActiveMountRootsWithChildren(mounts, filter, childrenByParent)
+	if err != nil {
+		return err
+	}
+
+	for parent := range parents {
+		for _, original := range roots.originalDirs[parent] {
+			result[original] = true
+		}
+	}
+
+	return nil
+}
+
 func unhandledDirs(dirs []string, handled map[string]bool) []string {
 	remaining := make([]string, 0, len(dirs))
 	for _, dir := range dirs {
@@ -1833,6 +3368,47 @@ func scanChildFilterAllChildSummaryRow(
 		HasChildren: scanned.filterChildCount > 0,
 		ChildCount:  scanned.filterChildCount,
 	}, nil
+}
+
+func scanDirFactSummaryRow(rows rowsScanner) (uint32, time.Time, db.GUTAs, error) {
+	var (
+		dirID     uint32
+		updatedAt time.Time
+		vector    dgutaVectorColumns
+	)
+
+	dest := make([]any, 0, mountDirFactScalarColumns+dirFactVectorColumnCount)
+	dest = append(dest,
+		&dirID,
+		&updatedAt,
+	)
+	dest = append(dest, dirFactVectorScanDest(&vector)...)
+
+	if err := rows.Scan(dest...); err != nil {
+		return 0, time.Time{}, nil, fmt.Errorf("clickhouse: failed to scan dir facts row: %w", err)
+	}
+
+	gutas, err := vector.gutas("dir_id", strconv.FormatUint(uint64(dirID), 10))
+	if err != nil {
+		return 0, time.Time{}, nil, err
+	}
+
+	return dirID, updatedAt.UTC(), gutas, nil
+}
+
+func dirFactVectorScanDest(vector *dgutaVectorColumns) []any {
+	return []any{
+		&vector.gids,
+		&vector.uids,
+		&vector.fts,
+		&vector.ages,
+		&vector.counts,
+		&vector.sizes,
+		&vector.atimeMins,
+		&vector.mtimeMaxs,
+		&vector.atimeBuckets,
+		&vector.mtimeBuckets,
+	}
 }
 
 func scanReadyActiveMountRows(rows rowsScanner) (map[treeMountCacheKey]bool, error) {
@@ -1933,6 +3509,9 @@ func (d *clickHouseDatabase) Where(
 	}
 
 	queryDir := ensureTrailingSlash(dir)
+	if dcss, handled, err := d.whereByDirIDRange(queryDir, dir, filter, recurseCount); err != nil || handled {
+		return dcss, err
+	}
 
 	traversal, err := d.whereTraversalFor(queryDir, filter)
 	if err != nil {
@@ -2147,12 +3726,12 @@ func (d *clickHouseDatabase) dirInfoAncestorFallback(
 		return nil, err
 	}
 
-	gutas, err := d.gutasForAncestorMounts(normDir, mounts)
+	gutas, updatedAt, found, err := d.dirFactGUTAsForAncestorMounts(normDir, mounts)
 	if err != nil {
 		return nil, err
 	}
 
-	if len(gutas) == 0 {
+	if !found {
 		sum, ok, virtualErr := d.dirInfoVirtualAncestorFromFacts(normDir, filter)
 		if virtualErr != nil || ok {
 			return sum, virtualErr
@@ -2160,8 +3739,6 @@ func (d *clickHouseDatabase) dirInfoAncestorFallback(
 
 		return &db.DirSummary{}, db.ErrDirNotFound
 	}
-
-	updatedAt := maxUpdatedAtForMounts(mounts)
 
 	return dirSummaryWithModtime(gutas, filter, updatedAt), nil
 }
@@ -2438,23 +4015,12 @@ func (d *clickHouseDatabase) addActiveMountRootDirsHaveChildren(
 		return err
 	}
 
-	childrenByParent, err := d.childrenForActiveMountRoots(mounts)
-	if err != nil {
+	handled, err := d.addIndexedActiveMountRootDirsHaveChildren(result, roots, mounts, filter)
+	if err != nil || handled {
 		return err
 	}
 
-	parents, err := d.parentActiveMountRootsWithChildren(mounts, filter, childrenByParent)
-	if err != nil {
-		return err
-	}
-
-	for parent := range parents {
-		for _, original := range roots.originalDirs[parent] {
-			result[original] = true
-		}
-	}
-
-	return nil
+	return d.addFallbackActiveMountRootDirsHaveChildren(result, roots, mounts, filter)
 }
 
 func (d *clickHouseDatabase) readyActiveRootMounts(
@@ -2698,16 +4264,12 @@ func (d *clickHouseDatabase) childrenForMount(mountPath, snapshotID, parentDir s
 	ctx, cancel := configQueryContext(d.cfg)
 	defer cancel()
 
-	children, err := d.queryChildren(
-		ctx,
-		childrenQuery,
-		"children",
-		mountPath,
-		snapshotID,
-		mountPath,
-		snapshotID,
-		parentDir,
-	)
+	parentID, ok, err := d.resolveDirIDForMount(ctx, mountPath, snapshotID, parentDir)
+	if err != nil || !ok {
+		return nil, err
+	}
+
+	children, err := d.queryChildren(ctx, childrenForDirIDQuery, "children", mountPath, snapshotID, parentID)
 	if err != nil {
 		return nil, err
 	}
@@ -3026,21 +4588,16 @@ func (d *clickHouseDatabase) addDirInfosForMount(
 	group *activeMountDirGroup,
 	filter *db.Filter,
 ) error {
-	if dirFilterAllCanHandleFilter(filter) {
-		return d.addFullFilterDirInfosForMount(result, group, filter)
+	if fullFilterAlwaysEmpty(filter) {
+		return nil
 	}
 
-	group, err := d.addChildFilterAllDirInfosForMount(result, group, filter)
-	if dirInfoRouteDone(group, err) {
+	handled, err := d.addDirFactInfosForMount(result, group, filter)
+	if err != nil || handled {
 		return err
 	}
 
-	ok, err := d.addGroupedDirInfosForMount(result, group, filter)
-	if err != nil || ok {
-		return err
-	}
-
-	return d.addRawDirInfosForMount(result, group, filter)
+	return d.addDirInfosForMountFallback(result, group, filter)
 }
 
 func (d *clickHouseDatabase) addGroupedDirInfosForMount(
@@ -4600,28 +6157,6 @@ func (d *clickHouseDatabase) addQueriedGUTAsForDirs(
 			result[dir] = cloneGUTAs(gutas)
 		}
 	}
-}
-
-func (d *clickHouseDatabase) gutasForAncestorMounts(
-	dir string,
-	mounts []activeMount,
-) (db.GUTAs, error) {
-	if len(mounts) == 0 {
-		return nil, nil
-	}
-
-	ctx, cancel := configQueryContext(d.cfg)
-	defer cancel()
-
-	query, args := activeMountsQuery(
-		dgutaAncestorSnapshotQuery,
-		"d.mount_path",
-		"d.snapshot_id",
-		mounts,
-		dir,
-	)
-
-	return d.queryGUTAs(ctx, "ancestor dguta", query, args...)
 }
 
 func scanMountRootDGUTAVectorRow(rows rowsScanner) (string, db.GUTAs, error) {

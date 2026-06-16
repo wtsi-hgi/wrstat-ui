@@ -41,8 +41,8 @@ numeric child-filter table; recursive subtree reads use the
 `subtree_end` range; "has children" met by catalog `child_dir_count`).
 Verified jointly via D4 / E-section acceptance tests.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
 
 #### Item 4.2: D2 - numeric filter materialisations (retained by default) [parallel with 4.1]
 
@@ -58,8 +58,8 @@ parent_id, age, gid, uid, ft, dir_id)`, `wrstat_dir_filter_all`
 `ORDER BY (..., gid, uid, ft, dir_id)`. No path string in any hot
 row. Verified jointly via D4.2 (no path/dir/parent_dir column).
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
 
 ### Batch 2 (parallel, after batch 1 is reviewed)
 
@@ -74,8 +74,8 @@ to filtered aggregates for `(gids, uids, ft, age)` via ClickHouse
 results identical to the materialised-table route. Depends on Items
 4.1, 4.2.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
 
 #### Item 4.4: E1 - `Children`/`DirInfo`/`DirInfos` via integer bands [parallel with 4.3]
 
@@ -90,8 +90,8 @@ filter)` (`dir_id IN (...)` batch facts read). Signatures unchanged.
 Verified jointly with E2 in `clickhouse/database_test.go`. Depends on
 Items 4.1, 4.2.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
 
 ### Batch 3 (parallel, after batch 2 is reviewed)
 
@@ -112,8 +112,8 @@ matches baseline, breadcrumb ancestors via parent_id walk). Note: E1
 acceptance is exercised by these same tests. Depends on Items 4.3,
 4.4.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
 
 #### Item 4.6: E3 - `Where` over `dir_id` ranges [parallel with 4.5, 4.7]
 
@@ -128,8 +128,8 @@ Covers both acceptance tests from E3 (broad+filtered `DCSs` identical
 to baseline incl. order; auth-restricted `Where` shows only permitted
 dirs). Depends on Items 4.3, 4.4.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
 
 #### Item 4.7: D4 - per-pattern collapse decision (benchmark-gated) [parallel with 4.5, 4.6]
 
@@ -149,8 +149,8 @@ filtered `DirInfo`/`DirInfos`/`DirsHaveChildren`/`Where` match
 baseline, any collapse cites a measurement meeting the gate). Depends
 on Items 4.3, 4.4.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
 
 For parallel batch items, use separate subagents per item.
 Launch review subagents using the `go-reviewer` skill (review all

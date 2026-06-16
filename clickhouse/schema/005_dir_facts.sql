@@ -60,7 +60,10 @@ CREATE TABLE IF NOT EXISTS wrstat_dir_facts (
   atime_buckets Array(Array(UInt64)) CODEC(LZ4),
   mtime_buckets Array(Array(UInt64)) CODEC(LZ4),
   child_count UInt64 CODEC(Delta, LZ4),
-  refreshed_at DateTime64(3) CODEC(Delta, ZSTD(3))
+  refreshed_at DateTime64(3) CODEC(Delta, ZSTD(3)),
+  PROJECTION children_proj (
+    SELECT * ORDER BY (mount_path, snapshot_id, parent_id, dir_id)
+  )
 ) ENGINE = MergeTree
 PARTITION BY (mount_path, snapshot_id)
 ORDER BY (mount_path, snapshot_id, dir_id)
