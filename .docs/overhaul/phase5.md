@@ -37,8 +37,8 @@ the `CountByGlob` -> `FindByGlob` fallback above 32 patterns. Signatures
 (`FindByGlob`/`CountByGlob`) unchanged. Verified jointly with F3 in
 `clickhouse/file_api_test.go`. Depends on Phases 1-3.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
 
 ### Item 5.2: F3 - result full-path reconstruction
 
@@ -57,5 +57,5 @@ the `ext`-index over-match trap (`*.bam` excludes `b.BAM`/`fake.cram`),
 `*.tar.gz`, recursive `Limit/Offset`, dotfile + owner-required, and
 CountByGlob returning 2/3/1/1). Depends on Item 5.1.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
