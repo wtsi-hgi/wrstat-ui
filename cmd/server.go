@@ -58,6 +58,7 @@ var (
 	clickhouseDatabase    string
 	clickhousePoll        string
 	clickhouseQueryTO     string
+	clickhouseNavIndex    bool
 	oktaURL               string
 	oktaOAuthIssuer       string
 	oktaOAuthClientID     string
@@ -160,6 +161,7 @@ func setServerClickHouseProvider(s *server.Server, mountpoints []string) {
 		pollIntervalFlag:    clickhousePoll,
 		pollIntervalDefault: sentinelPollFrequency,
 		queryTimeoutFlag:    clickhouseQueryTO,
+		navIndex:            clickhouseNavIndex,
 	})
 	if err != nil {
 		die("failed to build ClickHouse config: %s", err)
@@ -223,6 +225,7 @@ func init() {
 	serverCmd.Flags().StringVar(&clickhousePoll, "poll-interval", "",
 		"how often to poll ClickHouse for mount updates (default $WRSTAT_POLL_INTERVAL or 1m)")
 	addClickhouseQueryTimeoutFlag(serverCmd.Flags(), &clickhouseQueryTO)
+	addClickhouseNavIndexFlag(serverCmd.Flags(), &clickhouseNavIndex)
 	serverCmd.Flags().StringVar(&oktaURL, "okta_url", "",
 		"Okta application URL, eg host:port (defaults to --bind)")
 	serverCmd.Flags().StringVar(&oktaOAuthIssuer, "okta_issuer", os.Getenv("OKTA_OAUTH2_ISSUER"),

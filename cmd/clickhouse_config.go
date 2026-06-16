@@ -48,6 +48,7 @@ const (
 	clickhouseDSNFlagHelp      = "ClickHouse DSN (default $WRSTAT_CLICKHOUSE_DSN)"
 	clickhouseDatabaseFlagHelp = "ClickHouse database name (default $WRSTAT_CLICKHOUSE_DATABASE)"
 	clickhouseQueryTOFlagHelp  = "per-query timeout (default $WRSTAT_QUERY_TIMEOUT or 30s)"
+	clickhouseNavIndexFlagHelp = "build an optional in-process navigation index for active snapshots"
 	mountpointsFlagHelp        = "path to a file containing a list of quoted mountpoints"
 )
 
@@ -70,6 +71,10 @@ func addClickhouseConnectionFlags(flags *pflag.FlagSet, dsn, database *string) {
 
 func addClickhouseQueryTimeoutFlag(flags *pflag.FlagSet, queryTimeout *string) {
 	flags.StringVar(queryTimeout, "query-timeout", "", clickhouseQueryTOFlagHelp)
+}
+
+func addClickhouseNavIndexFlag(flags *pflag.FlagSet, navIndex *bool) {
+	flags.BoolVar(navIndex, "nav-index", false, clickhouseNavIndexFlagHelp)
 }
 
 func addMountpointsFlag(flags *pflag.FlagSet, mountpoints *string) {
@@ -122,6 +127,7 @@ type clickhouseConfigInput struct {
 	pollIntervalFlag    string
 	pollIntervalDefault time.Duration
 	queryTimeoutFlag    string
+	navIndex            bool
 }
 
 func clickhouseDurationsFromEnvAndFlags(
@@ -210,6 +216,7 @@ func clickhouseConfigFromEnvAndFlags(input clickhouseConfigInput) (clickhouse.Co
 		MountPoints:   input.mountpoints,
 		PollInterval:  pollInterval,
 		QueryTimeout:  queryTimeout,
+		NavIndex:      input.navIndex,
 	}, nil
 }
 

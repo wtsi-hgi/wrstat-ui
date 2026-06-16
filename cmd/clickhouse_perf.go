@@ -115,6 +115,7 @@ type chPerfFlags struct {
 	owners      string
 	mountpoints string
 	jsonOut     string
+	navIndex    bool
 
 	maxLines    int
 	batchSize   int
@@ -215,6 +216,7 @@ func addCHPerfPersistentFlags() {
 
 	addClickhouseConnectionFlags(pf, &chPerf.dsn, &chPerf.database)
 	addClickhouseQueryTimeoutFlag(pf, &chPerf.queryTO)
+	addClickhouseNavIndexFlag(pf, &chPerf.navIndex)
 	pf.StringVar(&chPerf.owners, "owners", "", "gid,owner csv file")
 	addMountpointsFlag(pf, &chPerf.mountpoints)
 	pf.StringVar(&chPerf.jsonOut, "json", "", "write JSON report to this file")
@@ -380,6 +382,7 @@ func chPerfConfig() (clickhouse.Config, error) {
 		databaseFlag:     chPerf.database,
 		ownersPath:       chPerf.owners,
 		queryTimeoutFlag: chPerf.queryTO,
+		navIndex:         chPerf.navIndex,
 	}, chPerf.mountpoints)
 }
 

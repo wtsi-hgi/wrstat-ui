@@ -37,5 +37,5 @@ latency delta vs the ClickHouse path). Depends on Phases 1-2 (catalog)
 and the navigation query paths from Phase 4; benchmark hooks from
 Phase 7.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed

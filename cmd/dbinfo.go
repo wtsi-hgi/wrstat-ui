@@ -51,6 +51,7 @@ NB: for large databases, this can take hours to run.
 			databaseFlag:     clickhouseDatabase,
 			ownersPath:       ownersPath,
 			queryTimeoutFlag: clickhouseQueryTO,
+			navIndex:         clickhouseNavIndex,
 		})
 		if err != nil {
 			die("failed to build ClickHouse config: %s", err)
@@ -88,5 +89,6 @@ func init() {
 	RootCmd.AddCommand(dbinfoCmd)
 	addClickhouseConnectionFlags(dbinfoCmd.Flags(), &clickhouseDSN, &clickhouseDatabase)
 	addClickhouseQueryTimeoutFlag(dbinfoCmd.Flags(), &clickhouseQueryTO)
+	addClickhouseNavIndexFlag(dbinfoCmd.Flags(), &clickhouseNavIndex)
 	dbinfoCmd.Flags().StringVarP(&ownersPath, "owners", "o", "", "path to owners csv file (optional)")
 }

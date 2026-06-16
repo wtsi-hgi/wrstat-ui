@@ -1033,6 +1033,7 @@ type clickHouseDatabase struct {
 	closed   atomic.Bool
 
 	treeCache *treeQueryCache
+	navIndex  *navIndexManager
 }
 
 func newClickHouseDatabaseWithSnapshot(
@@ -1040,9 +1041,18 @@ func newClickHouseDatabaseWithSnapshot(
 	conn ch.Conn,
 	snapshot *activeMountsSnapshot,
 ) *clickHouseDatabase {
+	return newClickHouseDatabaseWithSnapshotContext(context.Background(), cfg, conn, snapshot)
+}
+
+func newClickHouseDatabaseWithSnapshotContext(
+	ctx context.Context,
+	cfg Config,
+	conn ch.Conn,
+	snapshot *activeMountsSnapshot,
+) *clickHouseDatabase {
 	mountPoints, err := mountPointsFromConfig(cfg)
 
-	return &clickHouseDatabase{
+	database := &clickHouseDatabase{
 		cfg:            cfg,
 		conn:           conn,
 		mountPoints:    mountPoints,
@@ -1050,6 +1060,11 @@ func newClickHouseDatabaseWithSnapshot(
 		snapshot:       snapshot,
 		treeCache:      treeQueryCacheForConfig(cfg),
 	}
+
+	database.navIndex = newNavIndexManager(cfg, conn, snapshot)
+	database.navIndex.start(ctx)
+
+	return database
 }
 
 func (d *clickHouseDatabase) dirInfoSingleMountGuard(
@@ -1290,6 +1305,10 @@ func (d *clickHouseDatabase) catalogParentsWithChildrenForMount(
 	mountPath, snapshotID string,
 	dirs []string,
 ) (map[string]bool, error) {
+	if parents, handled, err := d.navIndexParentsWithChildren(mountPath, snapshotID, dirs); handled {
+		return parents, err
+	}
+
 	parents := make(map[string]bool)
 
 	for _, batchDirs := range stringValueBatches(uniqueQueryDirs(dirs)) {
@@ -1461,6 +1480,10 @@ func (d *clickHouseDatabase) resolveCatalogDirForMount(
 	mountPath, snapshotID string,
 	dir string,
 ) (treeCatalogDirRef, bool, error) {
+	if ref, found, handled, err := d.navIndexCatalogDirForMount(mountPath, snapshotID, dir); handled {
+		return ref, found, err
+	}
+
 	queryDir := ensureTrailingSlash(dir)
 
 	rows, err := d.conn.Query(
@@ -1485,6 +1508,10 @@ func (d *clickHouseDatabase) catalogDirForID(
 	mountPath, snapshotID string,
 	dirID uint32,
 ) (treeCatalogDirRef, bool, error) {
+	if ref, found, handled, err := d.navIndexCatalogDirForID(mountPath, snapshotID, dirID); handled {
+		return ref, found, err
+	}
+
 	rows, err := d.conn.Query(ctx, dirForIDQuery, mountPath, snapshotID, dirID)
 	if err != nil {
 		return treeCatalogDirRef{}, false, fmt.Errorf("clickhouse: failed to resolve catalog parent: %w", err)
@@ -4256,6 +4283,10 @@ func (d *clickHouseDatabase) virtualChildHasSummary(
 }
 
 func (d *clickHouseDatabase) childrenForMount(mountPath, snapshotID, parentDir string) ([]string, error) {
+	if children, handled, err := d.navIndexChildrenForMount(mountPath, snapshotID, parentDir); handled {
+		return children, err
+	}
+
 	key := newTreeCacheKey(mountPath, snapshotID, parentDir)
 	if children, ok := d.treeCache.getChildren(key); ok {
 		return children, nil
@@ -5539,6 +5570,7 @@ func (d *clickHouseDatabase) Close() error {
 	}
 
 	d.closed.Store(true)
+	d.navIndex.close()
 
 	return nil
 }
@@ -6263,6 +6295,10 @@ func (d *clickHouseDatabase) childrenForParentsMount(
 ) (map[string][]string, error) {
 	if len(parentDirs) == 0 {
 		return map[string][]string{}, nil
+	}
+
+	if children, handled, err := d.navIndexChildrenForParents(mountPath, snapshotID, parentDirs); handled {
+		return children, err
 	}
 
 	result, missing := d.cachedChildrenForParents(mountPath, snapshotID, parentDirs)

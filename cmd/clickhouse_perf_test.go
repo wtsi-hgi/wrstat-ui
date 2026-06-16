@@ -88,6 +88,18 @@ func TestClickHousePerfQueryFlags(t *testing.T) {
 	})
 }
 
+func TestClickHouseNavIndexConfigFlag(t *testing.T) {
+	Convey("--nav-index propagates into ClickHouse provider config", t, func() {
+		cfg, err := clickhouseConfigFromEnvAndFlags(clickhouseConfigInput{
+			dsnFlag:      "clickhouse://127.0.0.1/default",
+			databaseFlag: "wrstat",
+			navIndex:     true,
+		})
+		So(err, ShouldBeNil)
+		So(cfg.NavIndex, ShouldBeTrue)
+	})
+}
+
 type chPerfRestTestBaseDirs struct{}
 
 func (b *chPerfRestTestBaseDirs) GroupUsage(db.DirGUTAge) ([]*basedirs.Usage, error) {
@@ -343,16 +355,16 @@ func TestE3PerfDocumentedCommandFlags(t *testing.T) {
 	Convey("E3 clickhouse-perf import/query/rest expose documented long flags", t, func() {
 		assertDocumentedLongFlags(chPerfImportCmd,
 			"clickhouse-dsn", "clickhouse-database", "owners", "mounts",
-			"maxLines", "batchSize", "parallelism", "json",
+			"nav-index", "maxLines", "batchSize", "parallelism", "json",
 		)
 		assertDocumentedLongFlags(chPerfQueryCmd,
 			"clickhouse-dsn", "clickhouse-database", "owners", "mounts",
-			"repeat", "warmup", "uid", "gids", "dir", "tree-gids",
+			"nav-index", "repeat", "warmup", "uid", "gids", "dir", "tree-gids",
 			"tree-uids", "tree-types", "json",
 		)
 		assertDocumentedLongFlags(chPerfRestCmd,
 			"clickhouse-dsn", "clickhouse-database", "owners", "mounts",
-			"base-url", "repeat", "warmup", "paths", "where-dir",
+			"nav-index", "base-url", "repeat", "warmup", "paths", "where-dir",
 			"tree-gids", "tree-uids", "tree-types", "json",
 		)
 	})
@@ -437,6 +449,7 @@ func resetClickHousePerfConnectionForTest() {
 	origDSN := chPerf.dsn
 	origDB := chPerf.database
 	origMountpoints := chPerf.mountpoints
+	origNavIndex := chPerf.navIndex
 	origRepeat := chPerf.repeat
 	origWarmup := chPerf.warmup
 	origSplits := chPerf.splits
@@ -456,6 +469,7 @@ func resetClickHousePerfConnectionForTest() {
 	chPerf.dsn = ""
 	chPerf.database = ""
 	chPerf.mountpoints = ""
+	chPerf.navIndex = false
 	_ = os.Unsetenv(envClickhouseDSN)
 	_ = os.Unsetenv(envClickhouseDatabase)
 
@@ -463,6 +477,7 @@ func resetClickHousePerfConnectionForTest() {
 		chPerf.dsn = origDSN
 		chPerf.database = origDB
 		chPerf.mountpoints = origMountpoints
+		chPerf.navIndex = origNavIndex
 		chPerf.repeat = origRepeat
 		chPerf.warmup = origWarmup
 		chPerf.splits = origSplits

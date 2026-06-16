@@ -230,7 +230,7 @@ func (p *chProvider) defaultBuildReaders(
 	ctx context.Context,
 	snapshot *activeMountsSnapshot,
 ) (db.Database, *db.Tree, basedirs.Reader, error) {
-	dbImpl := newClickHouseDatabaseWithSnapshot(p.cfg, p.conn, snapshot)
+	dbImpl := newClickHouseDatabaseWithSnapshotContext(ctx, p.cfg, p.conn, snapshot)
 
 	bd, err := newClickHouseBaseDirsReaderWithSnapshot(ctx, p.cfg, p.conn, snapshot)
 	if err != nil {

@@ -40,4 +40,5 @@ type Config struct {
 	QueryTimeout  time.Duration
 	MaxOpenConns  int
 	MaxIdleConns  int
+	NavIndex      bool
 }

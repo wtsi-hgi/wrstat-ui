@@ -85,6 +85,7 @@ const (
 	queryOpFilesListDirName               = "files_listdir"
 	queryOpInfoName                       = "info"
 	queryOpNoAuthWhereName                = "noauth_where"
+	queryOpNavIndexAuditName              = "nav_index_audit"
 	queryOpPermissionCheckName            = "permission_check"
 	queryOpStartupCacheWarmingAuditName   = "startup_cache_warming_audit"
 	queryOpTreeDiskTreeAncName            = "tree_disktree_endpoint_ancestor_dirs"
@@ -708,6 +709,7 @@ func buildOps(qctx queryContext, opts QueryOptions, printf PrintfFunc) []op {
 
 	ops := []op{
 		opStartupCacheWarmingAudit(),
+		opNavIndexAudit(qctx),
 		opMountTimestamps(qctx),
 		opInfo(qctx),
 		opTreeWhereColdThenCached(qctx, opts.Splits),
@@ -818,6 +820,47 @@ func opStartupCacheWarmingAudit() op {
 		hasRepeatOverride: true,
 		repeatOverride:    1,
 		resultCount:       func() uint64 { return 1 },
+	}
+}
+
+func opNavIndexAudit(qctx queryContext) op {
+	inputs := j4Inputs(j4QueryTypeMaintenance, "in-process navigation index", map[string]any{
+		queryInputDirKey:             qctx.dir,
+		queryInputCacheScope:         queryScopeSameProviderDir,
+		queryInputDurationSource:     querySourceWall,
+		"optional_feature":           "nav-index",
+		"required_flag":              "--nav-index",
+		"index_fields":               []string{"parent_id", "name", "subtree_end", "child_dir_count", "child_file_count"},
+		"latency_comparison_surface": "Children",
+	})
+
+	var resultCount uint64
+
+	return op{
+		name:   queryOpNavIndexAuditName,
+		inputs: inputs,
+		run: func(ctx context.Context) error {
+			p, ok := qctx.provider.(navIndexEvidenceProvider)
+			if !ok {
+				inputs["ready"] = false
+				resultCount = 0
+
+				return nil
+			}
+
+			for key, value := range p.NavIndexBenchmarkEvidence(ctx, qctx.dir) {
+				inputs[key] = value
+			}
+
+			resultCount = 1
+
+			return nil
+		},
+		useWallTime:       true,
+		skipWarmup:        true,
+		hasRepeatOverride: true,
+		repeatOverride:    1,
+		resultCount:       func() uint64 { return resultCount },
 	}
 }
 
@@ -3008,6 +3051,10 @@ func buildTreeFilter(qctx queryContext, opts QueryOptions) *db.Filter {
 	}
 
 	return treeFilterFromOptions(qctx.treeFilter)
+}
+
+type navIndexEvidenceProvider interface {
+	NavIndexBenchmarkEvidence(ctx context.Context, parentDir string) map[string]any
 }
 
 type queryD4DecisionSpec struct {
