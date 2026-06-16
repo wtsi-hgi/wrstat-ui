@@ -2096,6 +2096,17 @@ func TestJ6FinalGates(t *testing.T) {
 		check := finalGateTestCheck(result, "J6 absolute cold UX")
 		So(check.Passed, ShouldBeFalse)
 		So(check.Detail, ShouldContainSubstring, "file_stat")
+
+		evidence = finalGateTestEvidence(false, false)
+		finalGateMutateCandidateOp(&evidence, queryOpTreeWhereColdProviderName, func(op *perfreport.Operation) {
+			op.Inputs[queryInputCacheScope] = queryScopeColdProvider
+			op.P95MS = 750
+			op.P99MS = 750
+		})
+
+		result = ValidateFinalGates(evidence)
+		check = finalGateTestCheck(result, "J6 absolute cold UX")
+		So(check.Passed, ShouldBeTrue)
 	})
 
 	Convey("J6 requires collapsed D4 materialisations to cite a passing measurement", t, func() {

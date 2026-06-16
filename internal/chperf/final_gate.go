@@ -4313,8 +4313,12 @@ func finalGateJ6DirectChildListOperation(op perfreport.Operation) bool {
 }
 
 func finalGateJ6RecursiveOperation(op perfreport.Operation) bool {
+	if finalGateJ6ProviderLifecycleOperation(op) {
+		return false
+	}
+
 	switch op.Name {
-	case queryOpTreeWhereName, queryOpTreeWhereColdProviderName, queryOpTreeWhereFreshName, queryOpWhereWholeMountName:
+	case queryOpTreeWhereName, queryOpTreeWhereColdName, queryOpWhereWholeMountName:
 		return true
 	default:
 		return stringInput(op.Inputs, queryInputQueryTypeKey) == j4QueryTypeSubtree
@@ -4331,13 +4335,30 @@ func finalGateJ6GlobOperation(op perfreport.Operation) bool {
 }
 
 func finalGateJ6DisktreeOperation(op perfreport.Operation) bool {
+	if finalGateJ6ProviderLifecycleOperation(op) {
+		return false
+	}
+
 	return stringInput(op.Inputs, queryInputQueryTypeKey) == j4QueryTypeDisktree ||
 		strings.Contains(strings.ToLower(op.Name), "disktree")
 }
 
 func finalGateJ6WhereOperation(op perfreport.Operation) bool {
+	if finalGateJ6ProviderLifecycleOperation(op) {
+		return false
+	}
+
 	return stringInput(op.Inputs, queryInputQueryTypeKey) == j4QueryTypeSubtree ||
 		strings.Contains(strings.ToLower(op.Name), "where")
+}
+
+func finalGateJ6ProviderLifecycleOperation(op perfreport.Operation) bool {
+	switch stringInput(op.Inputs, queryInputCacheScope) {
+	case queryScopeColdProvider, queryScopeFreshProvider:
+		return true
+	default:
+		return false
+	}
 }
 
 func finalGateJ6D4RequiredPatterns() []string {
