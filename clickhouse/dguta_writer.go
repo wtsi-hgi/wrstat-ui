@@ -27,6 +27,7 @@
 package clickhouse
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -88,6 +89,7 @@ const (
 	dropDirDGUTAVectorPartitionQuery = "ALTER TABLE wrstat_dir_facts " +
 		"DROP PARTITION tuple(?, toUUID(?))"
 
+	dropActiveVirtualDirsPartitionQuery      = "ALTER TABLE wrstat_active_virtual_dirs DROP PARTITION ?"
 	dropActiveVirtualSummariesPartitionQuery = "ALTER TABLE wrstat_active_virtual_summaries DROP PARTITION ?"
 	dropActiveVirtualFilterAllPartitionQuery = "ALTER TABLE wrstat_active_virtual_filter_all DROP PARTITION ?"
 	dropActiveVirtualChildrenPartitionQuery  = "ALTER TABLE wrstat_active_virtual_children DROP PARTITION ?"
@@ -103,30 +105,36 @@ const (
 		"(mount_path, snapshot_id, schema3_version, dirs_rows, dir_facts_rows, " +
 		"child_filter_all_rows, dir_filter_all_rows, manifest_sha256, refreshed_at) " +
 		"VALUES (?, toUUID(?), ?, ?, ?, ?, ?, ?, ?)"
+	insertActiveVirtualDirQuery = "INSERT INTO wrstat_active_virtual_dirs " +
+		"(active_set_id, virtual_id, parent_id, name, full_path, mount_path, snapshot_id, mount_root_dir_id, " +
+		"is_mount_root_box, refreshed_at) VALUES (?, ?, ?, ?, ?, ?, toUUID(?), ?, ?, ?)"
 	insertActiveVirtualSummaryQuery = "INSERT INTO wrstat_active_virtual_summaries " +
-		"(active_set_id, dir, mount_path, is_mount_root_box, updated_at, all_count, all_size, " +
+		"(active_set_id, virtual_id, mount_path, snapshot_id, mount_root_dir_id, is_mount_root_box, " +
+		"updated_at, all_count, all_size, " +
 		"all_atime_min, all_mtime_max, all_atime_buckets, all_mtime_buckets, all_uids, all_gids, " +
 		"all_ft, file_count, file_size, child_count, refreshed_at) " +
-		"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+		"VALUES (?, ?, ?, toUUID(?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
 	insertActiveVirtualFilterAllQuery = "INSERT INTO wrstat_active_virtual_filter_all " +
-		"(active_set_id, dir, age, gid, uid, ft, count, size, atime_min, mtime_max, " +
+		"(active_set_id, virtual_id, age, gid, uid, ft, count, size, atime_min, mtime_max, " +
 		"atime_buckets, mtime_buckets, filter_child_count, child_count, refreshed_at) " +
 		"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
 	insertActiveVirtualChildQuery = "INSERT INTO wrstat_active_virtual_children " +
-		"(active_set_id, parent_virtual_id, child_virtual_id, mount_path, is_mount_root_box, child_count, refreshed_at) " +
-		"VALUES (?, ?, ?, ?, ?, ?, ?)"
+		"(active_set_id, parent_virtual_id, child_virtual_id, mount_path, snapshot_id, mount_root_dir_id, " +
+		"is_mount_root_box, child_count, refreshed_at) VALUES (?, ?, ?, ?, toUUID(?), ?, ?, ?, ?)"
 	insertActiveVirtualSetQuery = "INSERT INTO wrstat_active_virtual_sets " +
 		"(active_set_id, schema3_version, mounts_sha256, active_mount_count, summary_rows, filter_rows, " +
 		"child_rows, manifest_sha256, ready, refreshed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-	selectActiveVirtualSummariesValidationQuery = "SELECT dir, mount_path, is_mount_root_box, updated_at, " +
+	selectActiveVirtualSummariesValidationQuery = "SELECT virtual_id, mount_path, toString(snapshot_id), " +
+		"mount_root_dir_id, is_mount_root_box, updated_at, " +
 		"all_count, all_size, all_atime_min, all_mtime_max, all_atime_buckets, all_mtime_buckets, " +
 		"all_uids, all_gids, all_ft, file_count, file_size, child_count " +
-		"FROM wrstat_active_virtual_summaries WHERE active_set_id = ? ORDER BY dir"
-	selectActiveVirtualFilterAllValidationQuery = "SELECT dir, age, gid, uid, ft, count, size, " +
+		"FROM wrstat_active_virtual_summaries WHERE active_set_id = ? ORDER BY virtual_id"
+	selectActiveVirtualFilterAllValidationQuery = "SELECT virtual_id, age, gid, uid, ft, count, size, " +
 		"atime_min, mtime_max, atime_buckets, mtime_buckets, filter_child_count, child_count " +
-		"FROM wrstat_active_virtual_filter_all WHERE active_set_id = ? ORDER BY dir, age, gid, uid, ft"
+		"FROM wrstat_active_virtual_filter_all WHERE active_set_id = ? ORDER BY virtual_id, age, gid, uid, ft"
 	selectActiveVirtualChildrenValidationQuery = "SELECT parent_virtual_id, child_virtual_id, mount_path, " +
-		"is_mount_root_box, child_count FROM wrstat_active_virtual_children WHERE active_set_id = ? " +
+		"toString(snapshot_id), mount_root_dir_id, is_mount_root_box, child_count " +
+		"FROM wrstat_active_virtual_children WHERE active_set_id = ? " +
 		"ORDER BY parent_virtual_id, child_virtual_id"
 )
 
@@ -193,6 +201,27 @@ func compareActiveVirtualChildRows(a, b activeVirtualChildRow) int {
 	}
 
 	return 0
+}
+
+func (w *activeVirtualOverlayWriter) appendDir(
+	ctx context.Context,
+	row activeVirtualDirRow,
+) error {
+	return w.blockWriter(insertActiveVirtualDirQuery, &w.dirBatch, &w.dirOpenedAt, "active virtual dir").
+		append(ctx, func(batch driver.Batch) error {
+			return batch.Append(
+				row.ActiveSetID,
+				row.VirtualID,
+				row.ParentID,
+				row.Name,
+				row.FullPath,
+				row.MountPath,
+				row.SnapshotID,
+				row.MountRootDirID,
+				row.IsMountRootBox,
+				row.RefreshedAt,
+			)
+		})
 }
 
 func (w *dgutaWriter) withFreshCloseQueryContext(
@@ -372,8 +401,11 @@ type schema3SnapshotRowCounts struct {
 
 type activeVirtualSummaryRow struct {
 	ActiveSetID     string
+	VirtualID       uint32
 	Dir             string
 	MountPath       string
+	SnapshotID      string
+	MountRootDirID  uint32
 	IsMountRootBox  uint8
 	UpdatedAt       time.Time
 	AllCount        uint64
@@ -425,6 +457,7 @@ func activeVirtualSummaryRowsForChildren(
 	return out
 }
 
+//nolint:funlen
 func activeVirtualSummarySeedRows(
 	activeSetID string,
 	mounts []activeMount,
@@ -435,12 +468,20 @@ func activeVirtualSummarySeedRows(
 
 	for _, row := range childRows {
 		childCounts[row.ParentDir]++
-		dirs[row.ParentDir] = activeVirtualSummaryRow{ActiveSetID: activeSetID, Dir: row.ParentDir}
+		dirs[row.ParentDir] = activeVirtualSummaryRow{
+			ActiveSetID: activeSetID,
+			VirtualID:   row.ParentVirtualID,
+			Dir:         row.ParentDir,
+			SnapshotID:  activeVirtualZeroSnapshot,
+		}
 		childDir := activeVirtualSummaryDirForChild(row)
 		dirs[childDir] = activeVirtualSummaryRow{
 			ActiveSetID:    activeSetID,
+			VirtualID:      row.ChildVirtualID,
 			Dir:            childDir,
 			MountPath:      row.MountPath,
+			SnapshotID:     row.SnapshotID,
+			MountRootDirID: row.MountRootDirID,
 			IsMountRootBox: row.IsMountRootBox,
 		}
 	}
@@ -449,8 +490,17 @@ func activeVirtualSummarySeedRows(
 		dir := ensureTrailingSlash(mount.mountPath)
 		row := dirs[dir]
 		row.ActiveSetID = activeSetID
+
 		row.Dir = dir
+		if row.VirtualID == 0 {
+			row.VirtualID = virtualIDForDir(dir)
+		}
+
 		row.MountPath = dir
+		if row.SnapshotID == "" {
+			row.SnapshotID = mount.snapshotID
+		}
+
 		row.IsMountRootBox = 1
 		dirs[dir] = row
 	}
@@ -464,6 +514,10 @@ func activeVirtualSummaryDirForChild(row activeVirtualChildRow) string {
 
 func sortActiveVirtualSummaryRows(rows []activeVirtualSummaryRow) {
 	slices.SortFunc(rows, func(a, b activeVirtualSummaryRow) int {
+		if a.VirtualID != 0 && b.VirtualID != 0 {
+			return cmp.Compare(a.VirtualID, b.VirtualID)
+		}
+
 		return strings.Compare(a.Dir, b.Dir)
 	})
 }
@@ -474,6 +528,7 @@ func emptyAgeBuckets() []uint64 {
 
 type activeVirtualFilterAllRow struct {
 	ActiveSetID      string
+	VirtualID        uint32
 	Dir              string
 	Age              uint8
 	GID              uint32
@@ -491,7 +546,12 @@ type activeVirtualFilterAllRow struct {
 }
 
 func activeVirtualFilterSortKey(row activeVirtualFilterAllRow) string {
-	return fmt.Sprintf("%s\x00%03d\x00%010d\x00%010d\x00%05d", row.Dir, row.Age, row.GID, row.UID, row.FT)
+	prefix := row.Dir
+	if row.VirtualID != 0 {
+		prefix = fmt.Sprintf("%010d", row.VirtualID)
+	}
+
+	return fmt.Sprintf("%s\x00%03d\x00%010d\x00%010d\x00%05d", prefix, row.Age, row.GID, row.UID, row.FT)
 }
 
 type activeVirtualChildRow struct {
@@ -501,35 +561,23 @@ type activeVirtualChildRow struct {
 	ParentVirtualID uint32
 	ChildVirtualID  uint32
 	MountPath       string
+	SnapshotID      string
+	MountRootDirID  uint32
 	IsMountRootBox  uint8
 	ChildCount      uint64
 	RefreshedAt     time.Time
 }
 
+//nolint:unused
 func activeVirtualChildRowsForMounts(
 	activeSetID string,
 	mounts []activeMount,
 	refreshedAt time.Time,
 ) []activeVirtualChildRow {
-	virtualRows := virtualChildRowsForMounts(mounts)
-	rows := make([]activeVirtualChildRow, 0, len(virtualRows))
-
-	for _, row := range virtualRows {
-		rows = append(rows, activeVirtualChildRow{
-			ActiveSetID:     activeSetID,
-			ParentDir:       row.parentDir,
-			ChildDir:        row.child,
-			ParentVirtualID: virtualIDForDir(row.parentDir),
-			ChildVirtualID:  virtualIDForDir(row.child),
-			MountPath:       row.mountPath,
-			IsMountRootBox:  boolAsUInt8(row.childIsMountRoot),
-			RefreshedAt:     refreshedAt,
-		})
-	}
-
-	return rows
+	return activeVirtualNamespaceForMounts(activeSetID, mounts, nil, refreshedAt).childRows(activeSetID, refreshedAt)
 }
 
+//nolint:unused
 func boolAsUInt8(v bool) uint8 {
 	if v {
 		return 1
@@ -619,11 +667,13 @@ func activeVirtualChildValidation(rows []activeVirtualChildRow) activeVirtualVal
 type activeVirtualOverlayWriter struct {
 	conn ch.Conn
 
+	dirBatch     driver.Batch
 	summaryBatch driver.Batch
 	filterBatch  driver.Batch
 	childBatch   driver.Batch
 	setBatch     driver.Batch
 
+	dirOpenedAt     time.Time
 	summaryOpenedAt time.Time
 	filterOpenedAt  time.Time
 	childOpenedAt   time.Time
@@ -649,8 +699,10 @@ func (w *activeVirtualOverlayWriter) appendSummary(
 		append(ctx, func(batch driver.Batch) error {
 			return batch.Append(
 				row.ActiveSetID,
-				row.Dir,
+				row.VirtualID,
 				row.MountPath,
+				row.SnapshotID,
+				row.MountRootDirID,
 				row.IsMountRootBox,
 				row.UpdatedAt,
 				row.AllCount,
@@ -682,7 +734,7 @@ func (w *activeVirtualOverlayWriter) appendFilterAll(
 	).append(ctx, func(batch driver.Batch) error {
 		return batch.Append(
 			row.ActiveSetID,
-			row.Dir,
+			row.VirtualID,
 			row.Age,
 			row.GID,
 			row.UID,
@@ -711,6 +763,8 @@ func (w *activeVirtualOverlayWriter) appendChild(
 				row.ParentVirtualID,
 				row.ChildVirtualID,
 				row.MountPath,
+				row.SnapshotID,
+				row.MountRootDirID,
 				row.IsMountRootBox,
 				row.ChildCount,
 				row.RefreshedAt,
@@ -748,6 +802,7 @@ func (w *activeVirtualOverlayWriter) flush(ctx context.Context) error {
 	_ = ctx
 
 	return errors.Join(
+		w.closeBatch(&w.dirBatch, &w.dirOpenedAt, "active virtual dir"),
 		w.closeBatch(&w.summaryBatch, &w.summaryOpenedAt, "active virtual summary"),
 		w.closeBatch(&w.filterBatch, &w.filterOpenedAt, "active virtual filter-all"),
 		w.closeBatch(&w.childBatch, &w.childOpenedAt, "active virtual child"),
@@ -1285,21 +1340,21 @@ func (w *dgutaWriter) writeActiveVirtualOverlay(
 		return activeVirtualSetRow{}, err
 	}
 
-	mountChildCounts, err := queryActiveVirtualMountChildCounts(ctx, w.conn, mounts)
+	mountRootLinks, err := queryActiveVirtualMountRootLinks(ctx, w.conn, mounts)
 	if err != nil {
 		return activeVirtualSetRow{}, err
 	}
 
-	summaryRows, filterRows, childRows := activeVirtualRowsForMountsFromData(
+	namespace, summaryRows, filterRows, childRows := activeVirtualRowsForMountsFromDataWithLinks(
 		activeSetID,
 		mounts,
 		refreshedAt,
 		rootGUTAs,
 		rootFilterRows,
-		mountChildCounts,
+		mountRootLinks,
 	)
 
-	if err := appendActiveVirtualOverlayRows(ctx, writer, summaryRows, filterRows, childRows); err != nil {
+	if err := appendActiveVirtualOverlayRows(ctx, writer, namespace.rows, summaryRows, filterRows, childRows); err != nil {
 		return activeVirtualSetRow{}, err
 	}
 
@@ -1314,13 +1369,21 @@ func (w *dgutaWriter) writeActiveVirtualOverlay(
 	return activeVirtualSetRowForRows(activeSetID, rows, summaryRows, filterRows, childRows, refreshedAt), nil
 }
 
+//nolint:funlen,gocognit,gocyclo
 func appendActiveVirtualOverlayRows(
 	ctx context.Context,
 	writer *activeVirtualOverlayWriter,
+	dirRows []activeVirtualDirRow,
 	summaryRows []activeVirtualSummaryRow,
 	filterRows []activeVirtualFilterAllRow,
 	childRows []activeVirtualChildRow,
 ) error {
+	for _, row := range dirRows {
+		if err := writer.appendDir(ctx, row); err != nil {
+			return err
+		}
+	}
+
 	for _, row := range summaryRows {
 		if err := writer.appendSummary(ctx, row); err != nil {
 			return err
@@ -1424,8 +1487,10 @@ func (w *dgutaWriter) readActiveVirtualSummaryValidation(
 	for rows.Next() {
 		row := activeVirtualSummaryRow{ActiveSetID: activeSetID}
 		if err := rows.Scan(
-			&row.Dir,
+			&row.VirtualID,
 			&row.MountPath,
+			&row.SnapshotID,
+			&row.MountRootDirID,
 			&row.IsMountRootBox,
 			&row.UpdatedAt,
 			&row.AllCount,
@@ -1460,8 +1525,10 @@ func writeActiveVirtualSummaryChecksum(hash hashWriter, row activeVirtualSummary
 	writeChecksumFields(
 		hash,
 		row.ActiveSetID,
-		row.Dir,
+		row.VirtualID,
 		row.MountPath,
+		row.SnapshotID,
+		row.MountRootDirID,
 		row.IsMountRootBox,
 		checksumTime(row.UpdatedAt),
 		row.AllCount,
@@ -1498,7 +1565,7 @@ func (w *dgutaWriter) readActiveVirtualFilterValidation(
 	for rows.Next() {
 		row := activeVirtualFilterAllRow{ActiveSetID: activeSetID}
 		if err := rows.Scan(
-			&row.Dir,
+			&row.VirtualID,
 			&row.Age,
 			&row.GID,
 			&row.UID,
@@ -1531,7 +1598,7 @@ func writeActiveVirtualFilterChecksum(hash hashWriter, row activeVirtualFilterAl
 	writeChecksumFields(
 		hash,
 		row.ActiveSetID,
-		row.Dir,
+		row.VirtualID,
 		row.Age,
 		row.GID,
 		row.UID,
@@ -1569,6 +1636,8 @@ func (w *dgutaWriter) readActiveVirtualChildValidation(
 			&row.ParentVirtualID,
 			&row.ChildVirtualID,
 			&row.MountPath,
+			&row.SnapshotID,
+			&row.MountRootDirID,
 			&row.IsMountRootBox,
 			&row.ChildCount,
 		); err != nil {
@@ -1594,6 +1663,8 @@ func writeActiveVirtualChildChecksum(hash hashWriter, row activeVirtualChildRow)
 		row.ParentVirtualID,
 		row.ChildVirtualID,
 		row.MountPath,
+		row.SnapshotID,
+		row.MountRootDirID,
 		row.IsMountRootBox,
 		row.ChildCount,
 	)
@@ -1726,6 +1797,7 @@ func (w *dgutaWriter) dropActiveVirtualPartitions(ctx context.Context, activeSet
 
 func activeVirtualPartitionDropQueries() []string {
 	return []string{
+		dropActiveVirtualDirsPartitionQuery,
 		dropActiveVirtualSummariesPartitionQuery,
 		dropActiveVirtualFilterAllPartitionQuery,
 		dropActiveVirtualChildrenPartitionQuery,

@@ -1607,7 +1607,7 @@ func writeC2ActiveVirtualOverlay(
 	)
 
 	writer := newActiveVirtualOverlayWriter(conn, 1000)
-	if err := appendActiveVirtualOverlayRows(ctx, writer, summaryRows, filterRows, childRows); err != nil {
+	if err := appendActiveVirtualOverlayRows(ctx, writer, nil, summaryRows, filterRows, childRows); err != nil {
 		return err
 	}
 
@@ -2023,7 +2023,7 @@ func newC2ActiveVirtualRouteProvider(
 
 	dbImpl := newClickHouseDatabaseWithSnapshot(cfg, counting, snapshot)
 	tree := db.NewTree(dbImpl)
-	bd, err := newClickHouseBaseDirsReaderWithSnapshot(cfg, counting, snapshot)
+	bd, err := newClickHouseBaseDirsReaderWithSnapshot(context.Background(), cfg, counting, snapshot)
 	So(err, ShouldBeNil)
 	So(p.publishLazyReaders(dbImpl, tree, bd, snapshot.fingerprint), ShouldBeTrue)
 

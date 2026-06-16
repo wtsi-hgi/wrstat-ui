@@ -6616,6 +6616,7 @@ func (c *b1ImportSQLSpyConn) PrepareBatch(
 		insertDirFilterAllQuery,
 		insertParentFactsQuery,
 		insertMountDirSummarySetQuery,
+		insertActiveVirtualDirQuery,
 		insertActiveVirtualSummaryQuery,
 		insertActiveVirtualFilterAllQuery,
 		insertActiveVirtualChildQuery,
@@ -6650,11 +6651,11 @@ func (c *b1ImportSQLSpyConn) batchStats(query string) b1ImportSQLSpyBatch {
 func (c *b1ImportSQLSpyConn) activeVirtualValidationRows(query string) (*dgutaWriterCloseContextRows, bool) {
 	switch query {
 	case selectActiveVirtualSummariesValidationQuery:
-		return activeVirtualValidationRowsForBatches(c.allBatches[insertActiveVirtualSummaryQuery], 1, 17), true
+		return activeVirtualValidationRowsForBatches(c.allBatches[insertActiveVirtualSummaryQuery], 1, 19), true
 	case selectActiveVirtualFilterAllValidationQuery:
 		return activeVirtualValidationRowsForBatches(c.allBatches[insertActiveVirtualFilterAllQuery], 1, 14), true
 	case selectActiveVirtualChildrenValidationQuery:
-		return activeVirtualValidationRowsForBatches(c.allBatches[insertActiveVirtualChildQuery], 1, 6), true
+		return activeVirtualValidationRowsForBatches(c.allBatches[insertActiveVirtualChildQuery], 1, 8), true
 	default:
 		return nil, false
 	}

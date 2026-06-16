@@ -28,7 +28,9 @@ package clickhouse
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -37,17 +39,24 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/db"
 )
 
+// ErrIDUnresolved is returned when an active in-snapshot path cannot be resolved
+// to a wrstat_dirs dir_id during basedirs readiness checks.
+var ErrIDUnresolved = errors.New("clickhouse: directory id unresolved")
+
 const groupUsageQuery = `
 WITH active AS (
 	SELECT mount_path, snapshot_id
 	FROM wrstat_mounts_active
 )
 SELECT
-	gid, basedir, uids, usage_size, quota_size, usage_inodes, quota_inodes,
+	gid, if(u.basedir_external != '', u.basedir_external, d.full_path) AS basedir,
+	uids, usage_size, quota_size, usage_inodes, quota_inodes,
 	mtime, date_no_space, date_no_files, age
 FROM wrstat_basedirs_group_usage u
 ANY INNER JOIN active a
 ON u.mount_path = a.mount_path AND u.snapshot_id = a.snapshot_id
+LEFT JOIN wrstat_dirs d
+ON d.mount_path = u.mount_path AND d.snapshot_id = u.snapshot_id AND d.dir_id = u.basedir_id
 WHERE u.age = ?
 ORDER BY gid ASC, basedir ASC
 `
@@ -58,11 +67,14 @@ WITH active AS (
 	FROM wrstat_mounts_active
 )
 SELECT
-	uid, basedir, gids, usage_size, quota_size, usage_inodes, quota_inodes,
+	uid, if(u.basedir_external != '', u.basedir_external, d.full_path) AS basedir,
+	gids, usage_size, quota_size, usage_inodes, quota_inodes,
 	mtime, age
 FROM wrstat_basedirs_user_usage u
 ANY INNER JOIN active a
 ON u.mount_path = a.mount_path AND u.snapshot_id = a.snapshot_id
+LEFT JOIN wrstat_dirs d
+ON d.mount_path = u.mount_path AND d.snapshot_id = u.snapshot_id AND d.dir_id = u.basedir_id
 WHERE u.age = ?
 ORDER BY uid ASC, basedir ASC
 `
@@ -73,11 +85,20 @@ WITH active AS (
 	FROM wrstat_mounts_active
 )
 SELECT
-	subdir, num_files, size_files, last_modified, file_usage
+	if(s.basedir_external != '', s.basedir_external, base.full_path) AS basedir,
+	if(s.subdir_external != '', s.subdir_external, sub.full_path) AS subdir,
+	s.subdir_external, num_files, size_files, last_modified, file_usage
 FROM wrstat_basedirs_group_subdirs s
 ANY INNER JOIN active a
 ON s.mount_path = a.mount_path AND s.snapshot_id = a.snapshot_id
-WHERE s.gid = ? AND s.basedir = ? AND s.age = ?
+LEFT JOIN wrstat_dirs base
+ON base.mount_path = s.mount_path AND base.snapshot_id = s.snapshot_id AND base.dir_id = s.basedir_id
+LEFT JOIN wrstat_dirs sub
+ON sub.mount_path = s.mount_path AND sub.snapshot_id = s.snapshot_id AND sub.dir_id = s.subdir_id
+WHERE s.gid = ? AND (
+	(s.basedir_external != '' AND s.basedir_external = ?)
+	OR (s.basedir_external = '' AND base.full_path = ?)
+) AND s.age = ?
 ORDER BY s.pos ASC
 `
 
@@ -87,11 +108,20 @@ WITH active AS (
 	FROM wrstat_mounts_active
 )
 SELECT
-	subdir, num_files, size_files, last_modified, file_usage
+	if(s.basedir_external != '', s.basedir_external, base.full_path) AS basedir,
+	if(s.subdir_external != '', s.subdir_external, sub.full_path) AS subdir,
+	s.subdir_external, num_files, size_files, last_modified, file_usage
 FROM wrstat_basedirs_user_subdirs s
 ANY INNER JOIN active a
 ON s.mount_path = a.mount_path AND s.snapshot_id = a.snapshot_id
-WHERE s.uid = ? AND s.basedir = ? AND s.age = ?
+LEFT JOIN wrstat_dirs base
+ON base.mount_path = s.mount_path AND base.snapshot_id = s.snapshot_id AND base.dir_id = s.basedir_id
+LEFT JOIN wrstat_dirs sub
+ON sub.mount_path = s.mount_path AND sub.snapshot_id = s.snapshot_id AND sub.dir_id = s.subdir_id
+WHERE s.uid = ? AND (
+	(s.basedir_external != '' AND s.basedir_external = ?)
+	OR (s.basedir_external = '' AND base.full_path = ?)
+) AND s.age = ?
 ORDER BY s.pos ASC
 `
 
@@ -106,35 +136,59 @@ const mountTimestampsQuery = "SELECT mount_path, updated_at FROM wrstat_mounts_a
 
 const groupUsageSnapshotQuery = `
 SELECT
-	gid, basedir, uids, usage_size, quota_size, usage_inodes, quota_inodes,
+	gid, if(u.basedir_external != '', u.basedir_external, d.full_path) AS basedir,
+	uids, usage_size, quota_size, usage_inodes, quota_inodes,
 	mtime, date_no_space, date_no_files, age
 FROM wrstat_basedirs_group_usage u
+LEFT JOIN wrstat_dirs d
+ON d.mount_path = u.mount_path AND d.snapshot_id = u.snapshot_id AND d.dir_id = u.basedir_id
 WHERE u.age = ? AND %s
 ORDER BY gid ASC, basedir ASC
 `
 
 const userUsageSnapshotQuery = `
 SELECT
-	uid, basedir, gids, usage_size, quota_size, usage_inodes, quota_inodes,
+	uid, if(u.basedir_external != '', u.basedir_external, d.full_path) AS basedir,
+	gids, usage_size, quota_size, usage_inodes, quota_inodes,
 	mtime, age
 FROM wrstat_basedirs_user_usage u
+LEFT JOIN wrstat_dirs d
+ON d.mount_path = u.mount_path AND d.snapshot_id = u.snapshot_id AND d.dir_id = u.basedir_id
 WHERE u.age = ? AND %s
 ORDER BY uid ASC, basedir ASC
 `
 
 const groupSubDirsSnapshotQuery = `
 SELECT
-	subdir, num_files, size_files, last_modified, file_usage
+	if(s.basedir_external != '', s.basedir_external, base.full_path) AS basedir,
+	if(s.subdir_external != '', s.subdir_external, sub.full_path) AS subdir,
+	s.subdir_external, num_files, size_files, last_modified, file_usage
 FROM wrstat_basedirs_group_subdirs s
-WHERE s.gid = ? AND s.basedir = ? AND s.age = ? AND %s
+LEFT JOIN wrstat_dirs base
+ON base.mount_path = s.mount_path AND base.snapshot_id = s.snapshot_id AND base.dir_id = s.basedir_id
+LEFT JOIN wrstat_dirs sub
+ON sub.mount_path = s.mount_path AND sub.snapshot_id = s.snapshot_id AND sub.dir_id = s.subdir_id
+WHERE s.gid = ? AND (
+	(s.basedir_external != '' AND s.basedir_external = ?)
+	OR (s.basedir_external = '' AND base.full_path = ?)
+) AND s.age = ? AND %s
 ORDER BY s.pos ASC
 `
 
 const userSubDirsSnapshotQuery = `
 SELECT
-	subdir, num_files, size_files, last_modified, file_usage
+	if(s.basedir_external != '', s.basedir_external, base.full_path) AS basedir,
+	if(s.subdir_external != '', s.subdir_external, sub.full_path) AS subdir,
+	s.subdir_external, num_files, size_files, last_modified, file_usage
 FROM wrstat_basedirs_user_subdirs s
-WHERE s.uid = ? AND s.basedir = ? AND s.age = ? AND %s
+LEFT JOIN wrstat_dirs base
+ON base.mount_path = s.mount_path AND base.snapshot_id = s.snapshot_id AND base.dir_id = s.basedir_id
+LEFT JOIN wrstat_dirs sub
+ON sub.mount_path = s.mount_path AND sub.snapshot_id = s.snapshot_id AND sub.dir_id = s.subdir_id
+WHERE s.uid = ? AND (
+	(s.basedir_external != '' AND s.basedir_external = ?)
+	OR (s.basedir_external = '' AND base.full_path = ?)
+) AND s.age = ? AND %s
 ORDER BY s.pos ASC
 `
 
@@ -188,7 +242,7 @@ const infoGroupHistoryQuery = `
 
 const infoGroupSubDirsSnapshotQuery = `
 	SELECT
-		countDistinct((gid, basedir)) AS group_subdir_combos,
+		countDistinct((gid, basedir_id, basedir_external)) AS group_subdir_combos,
 		count() AS group_subdirs
 	FROM wrstat_basedirs_group_subdirs s
 	WHERE s.age = ? AND %s
@@ -197,7 +251,7 @@ const infoGroupSubDirsSnapshotQuery = `
 const infoGroupSubDirsQuery = `
 	WITH active AS (SELECT mount_path, snapshot_id FROM wrstat_mounts_active)
 	SELECT
-		countDistinct((gid, basedir)) AS group_subdir_combos,
+		countDistinct((gid, basedir_id, basedir_external)) AS group_subdir_combos,
 		count() AS group_subdirs
 	FROM wrstat_basedirs_group_subdirs s
 	ANY INNER JOIN active a
@@ -207,7 +261,7 @@ const infoGroupSubDirsQuery = `
 
 const infoUserSubDirsSnapshotQuery = `
 	SELECT
-		countDistinct((uid, basedir)) AS user_subdir_combos,
+		countDistinct((uid, basedir_id, basedir_external)) AS user_subdir_combos,
 		count() AS user_subdirs
 	FROM wrstat_basedirs_user_subdirs s
 	WHERE s.age = ? AND %s
@@ -216,7 +270,7 @@ const infoUserSubDirsSnapshotQuery = `
 const infoUserSubDirsQuery = `
 	WITH active AS (SELECT mount_path, snapshot_id FROM wrstat_mounts_active)
 	SELECT
-		countDistinct((uid, basedir)) AS user_subdir_combos,
+		countDistinct((uid, basedir_id, basedir_external)) AS user_subdir_combos,
 		count() AS user_subdirs
 	FROM wrstat_basedirs_user_subdirs s
 	ANY INNER JOIN active a
@@ -224,10 +278,182 @@ const infoUserSubDirsQuery = `
 	WHERE s.age = ?
 `
 
+const basedirsUsageUnresolvedQuery = `
+SELECT count()
+FROM %s u
+LEFT JOIN wrstat_dirs id_dir
+ON id_dir.mount_path = u.mount_path
+AND id_dir.snapshot_id = u.snapshot_id
+AND id_dir.dir_id = u.basedir_id
+LEFT JOIN wrstat_dirs external_dir
+ON external_dir.mount_path = u.mount_path
+AND external_dir.snapshot_id = u.snapshot_id
+AND external_dir.full_path = if(endsWith(u.basedir_external, '/'), u.basedir_external, concat(u.basedir_external, '/'))
+WHERE %s AND (
+	(u.basedir_external = '' AND id_dir.full_path = '')
+	OR (
+		u.basedir_external != ''
+		AND startsWith(
+			if(endsWith(u.basedir_external, '/'), u.basedir_external, concat(u.basedir_external, '/')),
+			u.mount_path
+		)
+		AND external_dir.full_path = ''
+	)
+)
+`
+
+const basedirsSubdirsUnresolvedQuery = `
+WITH
+	if(endsWith(s.basedir_external, '/'), s.basedir_external, concat(s.basedir_external, '/')) AS basedir_external_path,
+	if(s.basedir_external != '', basedir_external_path, base_id.full_path) AS basedir_path,
+	if(
+		s.subdir_external = '.',
+		basedir_path,
+		if(
+			startsWith(s.subdir_external, '/'),
+			if(endsWith(s.subdir_external, '/'), s.subdir_external, concat(s.subdir_external, '/')),
+			concat(if(endsWith(basedir_path, '/'), basedir_path, concat(basedir_path, '/')), s.subdir_external, '/')
+		)
+	) AS subdir_external_path
+SELECT count()
+FROM %s s
+LEFT JOIN wrstat_dirs base_id
+ON base_id.mount_path = s.mount_path
+AND base_id.snapshot_id = s.snapshot_id
+AND base_id.dir_id = s.basedir_id
+LEFT JOIN wrstat_dirs base_external
+ON base_external.mount_path = s.mount_path
+AND base_external.snapshot_id = s.snapshot_id
+AND base_external.full_path = basedir_external_path
+LEFT JOIN wrstat_dirs sub_id
+ON sub_id.mount_path = s.mount_path
+AND sub_id.snapshot_id = s.snapshot_id
+AND sub_id.dir_id = s.subdir_id
+LEFT JOIN wrstat_dirs sub_external
+ON sub_external.mount_path = s.mount_path
+AND sub_external.snapshot_id = s.snapshot_id
+AND sub_external.full_path = subdir_external_path
+WHERE %s AND (
+	(s.basedir_external = '' AND base_id.full_path = '')
+	OR (
+		s.basedir_external != ''
+		AND startsWith(basedir_external_path, s.mount_path)
+		AND base_external.full_path = ''
+	)
+	OR (s.subdir_external = '' AND sub_id.full_path = '')
+	OR (
+		s.subdir_external != ''
+		AND startsWith(subdir_external_path, s.mount_path)
+		AND sub_external.full_path = ''
+	)
+)
+`
+
 type iterRows interface {
 	Next() bool
 	Scan(dest ...any) error
 	Close() error
+}
+
+type basedirsReadinessCheck struct {
+	name  string
+	table string
+	query string
+	alias string
+}
+
+func (r *chBaseDirsReader) ensureBasedirsIDsResolved(ctx context.Context) error {
+	if r == nil || r.snapshot == nil {
+		return nil
+	}
+
+	mounts := r.snapshot.all()
+	if len(mounts) == 0 {
+		return nil
+	}
+
+	for _, check := range basedirsReadinessChecks() {
+		unresolved, err := r.countUnresolvedBasedirsRows(
+			ctx, check.query, check.table, check.alias, mounts,
+		)
+		if err != nil {
+			return err
+		}
+
+		if unresolved > 0 {
+			return fmt.Errorf("%w: %s has %d unresolved active rows", ErrIDUnresolved, check.name, unresolved)
+		}
+	}
+
+	return nil
+}
+
+func basedirsReadinessChecks() []basedirsReadinessCheck {
+	return []basedirsReadinessCheck{
+		{"basedirs group usage", "wrstat_basedirs_group_usage", basedirsUsageUnresolvedQuery, "u"},
+		{"basedirs user usage", "wrstat_basedirs_user_usage", basedirsUsageUnresolvedQuery, "u"},
+		{"basedirs group subdirs", "wrstat_basedirs_group_subdirs", basedirsSubdirsUnresolvedQuery, "s"},
+		{"basedirs user subdirs", "wrstat_basedirs_user_subdirs", basedirsSubdirsUnresolvedQuery, "s"},
+	}
+}
+
+func (r *chBaseDirsReader) countUnresolvedBasedirsRows(
+	parent context.Context,
+	queryFmt string,
+	table string,
+	alias string,
+	mounts []activeMount,
+) (uint64, error) {
+	condition, args := activeMountsTupleCondition(alias+".mount_path", alias+".snapshot_id", mounts)
+	query := fmt.Sprintf(queryFmt, table, condition)
+
+	ctx, cancel := queryContext(parent, queryTimeout(r.cfg))
+	defer cancel()
+
+	rows, err := r.conn.Query(ctx, query, args...)
+	if err != nil {
+		return 0, fmt.Errorf("clickhouse: failed to query basedirs id readiness: %w", err)
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	return scanBasedirsUnresolvedCount(rows)
+}
+
+func scanBasedirsUnresolvedCount(rows iterRows) (uint64, error) {
+	if !rows.Next() {
+		if iterErr := rowIterationErr(rows, "clickhouse: basedirs id readiness iteration error"); iterErr != nil {
+			return 0, iterErr
+		}
+
+		return 0, nil
+	}
+
+	var count uint64
+	if err := rows.Scan(&count); err != nil {
+		return 0, fmt.Errorf("clickhouse: failed to scan basedirs id readiness: %w", err)
+	}
+
+	if err := rowsErr(rows); err != nil {
+		return 0, fmt.Errorf("clickhouse: basedirs id readiness iteration error: %w", err)
+	}
+
+	return count, nil
+}
+
+func (r *chBaseDirsReader) loadOwners(path string) error {
+	if path == "" {
+		return nil
+	}
+
+	owners, err := basedirs.ParseOwners(path)
+	if err != nil {
+		return fmt.Errorf("clickhouse: failed to parse owners csv: %w", err)
+	}
+
+	r.owners = owners
+
+	return nil
 }
 
 type groupUsageScanned struct {
@@ -434,6 +660,7 @@ func (r *chBaseDirsReader) snapshotSubDirs(
 		"s.snapshot_id",
 		mounts,
 		id,
+		basedir,
 		basedir,
 		uint8(age),
 	)
@@ -668,7 +895,7 @@ func (r *chBaseDirsReader) GroupSubDirs(gid uint32, basedir string, age db.DirGU
 	ctx, cancel := configQueryContext(r.cfg)
 	defer cancel()
 
-	return r.subDirs(ctx, "group", groupSubDirsQuery, gid, basedir, uint8(age))
+	return r.subDirs(ctx, "group", groupSubDirsQuery, gid, basedir, basedir, uint8(age))
 }
 
 func (r *chBaseDirsReader) UserSubDirs(uid uint32, basedir string, age db.DirGUTAge) ([]*basedirs.SubDir, error) {
@@ -683,7 +910,7 @@ func (r *chBaseDirsReader) UserSubDirs(uid uint32, basedir string, age db.DirGUT
 	ctx, cancel := configQueryContext(r.cfg)
 	defer cancel()
 
-	return r.subDirs(ctx, "user", userSubDirsQuery, uid, basedir, uint8(age))
+	return r.subDirs(ctx, "user", userSubDirsQuery, uid, basedir, basedir, uint8(age))
 }
 
 func (r *chBaseDirsReader) subDirs(ctx context.Context, what, query string, args ...any) ([]*basedirs.SubDir, error) {
@@ -1001,6 +1228,7 @@ func (r *chBaseDirsReader) Close() error {
 }
 
 func newClickHouseBaseDirsReaderWithSnapshot(
+	ctx context.Context,
 	cfg Config,
 	conn ch.Conn,
 	snapshot *activeMountsSnapshot,
@@ -1020,38 +1248,66 @@ func newClickHouseBaseDirsReaderWithSnapshot(
 		mountPoints: mountPoints,
 	}
 
-	if cfg.OwnersCSVPath != "" {
-		owners, err := basedirs.ParseOwners(cfg.OwnersCSVPath)
-		if err != nil {
-			return nil, fmt.Errorf("clickhouse: failed to parse owners csv: %w", err)
-		}
+	if err := r.loadOwners(cfg.OwnersCSVPath); err != nil {
+		return nil, err
+	}
 
-		r.owners = owners
+	if err := r.ensureBasedirsIDsResolved(ctx); err != nil {
+		return nil, err
 	}
 
 	return r, nil
 }
 
 type subDirScanned struct {
-	subdir       string
-	numFiles     uint64
-	sizeFiles    uint64
-	lastModified time.Time
-	usageMap     map[uint16]uint64
+	basedir        string
+	subdir         string
+	subdirExternal string
+	numFiles       uint64
+	sizeFiles      uint64
+	lastModified   time.Time
+	usageMap       map[uint16]uint64
 }
 
 func (s *subDirScanned) scanFrom(rows iterRows) error {
-	return rows.Scan(&s.subdir, &s.numFiles, &s.sizeFiles, &s.lastModified, &s.usageMap)
+	return rows.Scan(
+		&s.basedir,
+		&s.subdir,
+		&s.subdirExternal,
+		&s.numFiles,
+		&s.sizeFiles,
+		&s.lastModified,
+		&s.usageMap,
+	)
 }
 
 func (s *subDirScanned) toSubDir() *basedirs.SubDir {
 	return &basedirs.SubDir{
-		SubDir:       s.subdir,
+		SubDir:       basedirsSubDirDisplay(s.basedir, s.subdir, s.subdirExternal),
 		NumFiles:     s.numFiles,
 		SizeFiles:    s.sizeFiles,
 		LastModified: s.lastModified,
 		FileUsage:    convertUsageMap(s.usageMap),
 	}
+}
+
+func basedirsSubDirDisplay(basedir, subdir, external string) string {
+	if external != "" {
+		return subdir
+	}
+
+	base := ensureTrailingSlash(basedir)
+	child := ensureTrailingSlash(subdir)
+
+	if child == base {
+		return "."
+	}
+
+	if rel, ok := strings.CutPrefix(child, base); ok {
+		return strings.TrimSuffix(rel, "/")
+	}
+
+	return strings.TrimSuffix(subdir, "/")
 }
 
 func convertUsageMap(m map[uint16]uint64) basedirs.UsageBreakdownByType {

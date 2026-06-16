@@ -47,8 +47,12 @@ const (
 	chspoolFieldBaseDirID       = "BaseDirID"
 	chspoolFieldDir             = "Dir"
 	chspoolFieldDirID           = "DirID"
+	chspoolFieldMountRootDirID  = "MountRootDirID"
+	chspoolFieldParentID        = "ParentID"
 	chspoolFieldParentDir       = "ParentDir"
+	chspoolFieldSnapshotID      = "SnapshotID"
 	chspoolFieldSubtreeEnd      = "SubtreeEnd"
+	chspoolFieldVirtualID       = "VirtualID"
 )
 
 func TestVerifyManifest(t *testing.T) {
@@ -65,7 +69,7 @@ func TestVerifyManifest(t *testing.T) {
 		assertChspoolFields(
 			t,
 			DirFactRow{},
-			[]string{chspoolFieldDirID, "ParentID", chspoolFieldSubtreeEnd},
+			[]string{chspoolFieldDirID, chspoolFieldParentID, chspoolFieldSubtreeEnd},
 			[]string{chspoolFieldDir},
 		)
 		assertChspoolFields(
@@ -106,15 +110,27 @@ func TestVerifyManifest(t *testing.T) {
 		)
 		assertChspoolFields(
 			t,
-			ActiveVirtualSummaryRow{},
-			[]string{"VirtualID", "SnapshotID", "MountRootDirID"},
+			ActiveVirtualDirRow{},
+			[]string{
+				chspoolFieldVirtualID,
+				chspoolFieldParentID,
+				"FullPath",
+				chspoolFieldSnapshotID,
+				chspoolFieldMountRootDirID,
+			},
 			[]string{chspoolFieldDir},
 		)
-		assertChspoolFields(t, ActiveVirtualFilterAllRow{}, []string{"VirtualID"}, []string{chspoolFieldDir})
+		assertChspoolFields(
+			t,
+			ActiveVirtualSummaryRow{},
+			[]string{chspoolFieldVirtualID, chspoolFieldSnapshotID, chspoolFieldMountRootDirID},
+			[]string{chspoolFieldDir},
+		)
+		assertChspoolFields(t, ActiveVirtualFilterAllRow{}, []string{chspoolFieldVirtualID}, []string{chspoolFieldDir})
 		assertChspoolFields(
 			t,
 			ActiveVirtualChildRow{},
-			[]string{"ParentVirtualID", "ChildVirtualID", "SnapshotID", "MountRootDirID"},
+			[]string{"ParentVirtualID", "ChildVirtualID", chspoolFieldSnapshotID, chspoolFieldMountRootDirID},
 			[]string{"ParentDir", "ChildDir"},
 		)
 	})
@@ -346,6 +362,19 @@ func writeChspoolSchema3TestRows(set *Set) error {
 }
 
 func writeChspoolActiveVirtualTestRows(set *Set, refreshedAt time.Time, buckets []uint64) error {
+	if err := set.WriteActiveVirtualDir(ActiveVirtualDirRow{
+		ActiveSetID:    chspoolTestActiveSet,
+		VirtualID:      1,
+		ParentID:       0,
+		Name:           "/",
+		FullPath:       "/",
+		SnapshotID:     "00000000-0000-0000-0000-000000000000",
+		MountRootDirID: 0,
+		RefreshedAt:    refreshedAt,
+	}); err != nil {
+		return err
+	}
+
 	if err := set.WriteActiveVirtualSummary(ActiveVirtualSummaryRow{
 		ActiveSetID:     chspoolTestActiveSet,
 		VirtualID:       1,

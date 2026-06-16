@@ -52,6 +52,7 @@ import (
 )
 
 const summariseSpoolVirtualNamespaceDir = "/mnt/"
+
 const b5SpoolMountPath = "/m/teamX/"
 
 const reinsertOldDirFactSentinelQuery = `
@@ -1497,6 +1498,7 @@ func d2Schema3ExpectedRowCounts() map[string]uint64 {
 		chspool.TableChildFilterAll:         34,
 		chspool.TableDirFilterAll:           34,
 		chspool.TableSchema3SnapshotSets:    1,
+		chspool.TableActiveVirtualDirs:      3,
 		chspool.TableActiveVirtualSummaries: 3,
 		chspool.TableActiveVirtualFilterAll: 51,
 		chspool.TableActiveVirtualChildren:  2,
@@ -1591,6 +1593,12 @@ func d2DecodedRowsForTable(spoolDir string, table string) uint64 {
 
 			return nil
 		}), ShouldBeNil)
+	case chspool.TableActiveVirtualDirs:
+		So(chspool.DecodeRows[chspool.ActiveVirtualDirRow](spoolDir, table, func(chspool.ActiveVirtualDirRow) error {
+			rows++
+
+			return nil
+		}), ShouldBeNil)
 	case chspool.TableActiveVirtualSummaries:
 		So(chspool.DecodeRows[chspool.ActiveVirtualSummaryRow](spoolDir, table, func(chspool.ActiveVirtualSummaryRow) error {
 			rows++
@@ -1636,6 +1644,8 @@ func d2DecodedRowFingerprintsForTable(spoolDir string, table string) []string {
 		return d2DecodedRowFingerprints[chspool.DirFilterAllRow](spoolDir, table)
 	case chspool.TableSchema3SnapshotSets:
 		return d2DecodedRowFingerprints[chspool.Schema3SnapshotSetRow](spoolDir, table)
+	case chspool.TableActiveVirtualDirs:
+		return d2DecodedRowFingerprints[chspool.ActiveVirtualDirRow](spoolDir, table)
 	case chspool.TableActiveVirtualSummaries:
 		return d2DecodedRowFingerprints[chspool.ActiveVirtualSummaryRow](spoolDir, table)
 	case chspool.TableActiveVirtualFilterAll:
@@ -1702,10 +1712,12 @@ func assertD2Schema3CanonicalCounts(
 }
 
 func assertD2ActiveVirtualRowsFactsEquivalent(spoolDir string, mountPath string) {
-	summaries := d2ActiveVirtualSummaryRowsByDir(spoolDir, mountPath)
+	virtualDirsByID := d2ActiveVirtualDirsByID(spoolDir)
+	summaries := d2ActiveVirtualSummaryRowsByDir(spoolDir, virtualDirsByID)
 	virtualDirs := []string{"/", summariseSpoolVirtualNamespaceDir, mountPath}
 
 	So(d2SortedActiveVirtualSummaryDirs(summaries), ShouldResemble, virtualDirs)
+	assertD2ActiveVirtualCatalogRows(spoolDir, virtualDirsByID, mountPath)
 
 	rootFact := d2RootDirFactRow(spoolDir, mountPath)
 	expectedSummaryDigest := d2RootDirFactSummaryDigest(rootFact)
@@ -1724,7 +1736,7 @@ func assertD2ActiveVirtualRowsFactsEquivalent(spoolDir string, mountPath string)
 	So(summaries[mountPath].IsMountRootBox, ShouldEqual, uint8(1))
 
 	rootFilters := d2RootDirFilterRowsByTuple(spoolDir, mountPath)
-	activeFilters := d2ActiveVirtualFilterRowsByDirAndTuple(spoolDir, mountPath)
+	activeFilters := d2ActiveVirtualFilterRowsByDirAndTuple(spoolDir, virtualDirsByID)
 
 	for _, dir := range virtualDirs {
 		rowsByTuple := activeFilters[dir]
@@ -1751,14 +1763,33 @@ func assertD2ActiveVirtualRowsFactsEquivalent(spoolDir string, mountPath string)
 	}
 }
 
-func d2ActiveVirtualSummaryRowsByDir(spoolDir string, mountPath string) map[string]chspool.ActiveVirtualSummaryRow {
+func d2ActiveVirtualDirsByID(spoolDir string) map[uint32]chspool.ActiveVirtualDirRow {
+	out := make(map[uint32]chspool.ActiveVirtualDirRow)
+
+	So(chspool.DecodeRows[chspool.ActiveVirtualDirRow](
+		spoolDir,
+		chspool.TableActiveVirtualDirs,
+		func(row chspool.ActiveVirtualDirRow) error {
+			out[row.VirtualID] = row
+
+			return nil
+		},
+	), ShouldBeNil)
+
+	return out
+}
+
+func d2ActiveVirtualSummaryRowsByDir(
+	spoolDir string,
+	virtualDirsByID map[uint32]chspool.ActiveVirtualDirRow,
+) map[string]chspool.ActiveVirtualSummaryRow {
 	out := make(map[string]chspool.ActiveVirtualSummaryRow)
 
 	So(chspool.DecodeRows[chspool.ActiveVirtualSummaryRow](
 		spoolDir,
 		chspool.TableActiveVirtualSummaries,
 		func(row chspool.ActiveVirtualSummaryRow) error {
-			out[d2VirtualDirForID(row.VirtualID, mountPath)] = row
+			out[virtualDirsByID[row.VirtualID].FullPath] = row
 
 			return nil
 		},
@@ -1776,6 +1807,29 @@ func d2SortedActiveVirtualSummaryDirs(rows map[string]chspool.ActiveVirtualSumma
 	slices.Sort(dirs)
 
 	return dirs
+}
+
+func assertD2ActiveVirtualCatalogRows(
+	spoolDir string,
+	rows map[uint32]chspool.ActiveVirtualDirRow,
+	mountPath string,
+) {
+	root := rows[summariseActiveVirtualRootID]
+	namespace := rows[2]
+	mountRoot := rows[3]
+
+	So(root.FullPath, ShouldEqual, "/")
+	So(root.ParentID, ShouldEqual, summariseActiveVirtualNoParentID)
+	So(root.SnapshotID, ShouldEqual, summariseActiveVirtualZeroSnapshot)
+	So(namespace.FullPath, ShouldEqual, summariseSpoolVirtualNamespaceDir)
+	So(namespace.ParentID, ShouldEqual, summariseActiveVirtualRootID)
+	So(namespace.SnapshotID, ShouldEqual, summariseActiveVirtualZeroSnapshot)
+	So(mountRoot.FullPath, ShouldEqual, mountPath)
+	So(mountRoot.ParentID, ShouldEqual, namespace.VirtualID)
+	So(mountRoot.MountPath, ShouldEqual, mountPath)
+	So(mountRoot.IsMountRootBox, ShouldEqual, uint8(1))
+	So(mountRoot.SnapshotID, ShouldNotBeBlank)
+	So(mountRoot.MountRootDirID, ShouldEqual, d2DirIDForPath(spoolDir, mountPath))
 }
 
 func d2RootDirFactRow(spoolDir string, mountPath string) chspool.DirFactRow {
@@ -1843,7 +1897,7 @@ func d2DirIDForPath(spoolDir string, fullPath string) uint32 {
 
 func d2ActiveVirtualFilterRowsByDirAndTuple(
 	spoolDir string,
-	mountPath string,
+	virtualDirsByID map[uint32]chspool.ActiveVirtualDirRow,
 ) map[string]map[summariseFullFilterTupleKey]chspool.ActiveVirtualFilterAllRow {
 	out := make(map[string]map[summariseFullFilterTupleKey]chspool.ActiveVirtualFilterAllRow)
 
@@ -1851,7 +1905,7 @@ func d2ActiveVirtualFilterRowsByDirAndTuple(
 		spoolDir,
 		chspool.TableActiveVirtualFilterAll,
 		func(row chspool.ActiveVirtualFilterAllRow) error {
-			dir := d2VirtualDirForID(row.VirtualID, mountPath)
+			dir := virtualDirsByID[row.VirtualID].FullPath
 			if out[dir] == nil {
 				out[dir] = make(map[summariseFullFilterTupleKey]chspool.ActiveVirtualFilterAllRow)
 			}
@@ -1868,16 +1922,6 @@ func d2ActiveVirtualFilterRowsByDirAndTuple(
 	), ShouldBeNil)
 
 	return out
-}
-
-func d2VirtualDirForID(id uint32, mountPath string) string {
-	for _, dir := range []string{"/", summariseSpoolVirtualNamespaceDir, mountPath} {
-		if id == summariseVirtualIDForDir(dir) {
-			return dir
-		}
-	}
-
-	return fmt.Sprintf("unknown:%d", id)
 }
 
 func assertD3ReadinessVisibleBeforeActiveMount(
@@ -1953,6 +1997,7 @@ func assertD3LoadedSchema3Counts(
 	}
 
 	for table, expected := range map[string]uint64{
+		chspool.TableActiveVirtualDirs:      expectedRows[chspool.TableActiveVirtualDirs],
 		chspool.TableActiveVirtualSummaries: expectedRows[chspool.TableActiveVirtualSummaries],
 		chspool.TableActiveVirtualFilterAll: expectedRows[chspool.TableActiveVirtualFilterAll],
 		chspool.TableActiveVirtualChildren:  expectedRows[chspool.TableActiveVirtualChildren],

@@ -24,10 +24,31 @@
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  ***************************************************************************** */
 
+CREATE TABLE IF NOT EXISTS wrstat_active_virtual_dirs (
+  active_set_id String CODEC(ZSTD(3)),
+  virtual_id UInt32 CODEC(Delta, LZ4),
+  parent_id UInt32 CODEC(Delta, LZ4),
+  name String CODEC(ZSTD(3)),
+  full_path String CODEC(ZSTD(3)),
+  mount_path LowCardinality(String) CODEC(LZ4),
+  snapshot_id UUID,
+  mount_root_dir_id UInt32 CODEC(Delta, LZ4),
+  is_mount_root_box UInt8,
+  refreshed_at DateTime64(3) CODEC(Delta, ZSTD(3)),
+  INDEX full_path_tokens full_path TYPE tokenbf_v1(8192, 3, 0) GRANULARITY 4,
+  PROJECTION parent_proj (
+    SELECT * ORDER BY (active_set_id, parent_id, virtual_id)
+  )
+) ENGINE = MergeTree
+PARTITION BY active_set_id
+ORDER BY (active_set_id, virtual_id);
+
 CREATE TABLE IF NOT EXISTS wrstat_active_virtual_summaries (
   active_set_id String CODEC(ZSTD(3)),
-  dir String CODEC(LZ4),
+  virtual_id UInt32 CODEC(Delta, LZ4),
   mount_path LowCardinality(String) CODEC(LZ4),
+  snapshot_id UUID,
+  mount_root_dir_id UInt32 CODEC(Delta, LZ4),
   is_mount_root_box UInt8,
   updated_at DateTime CODEC(Delta, ZSTD(3)),
   all_count UInt64 CODEC(Delta, LZ4),
@@ -45,11 +66,11 @@ CREATE TABLE IF NOT EXISTS wrstat_active_virtual_summaries (
   refreshed_at DateTime64(3) CODEC(Delta, ZSTD(3))
 ) ENGINE = MergeTree
 PARTITION BY active_set_id
-ORDER BY (active_set_id, dir);
+ORDER BY (active_set_id, virtual_id);
 
 CREATE TABLE IF NOT EXISTS wrstat_active_virtual_filter_all (
   active_set_id String CODEC(ZSTD(3)),
-  dir String CODEC(LZ4),
+  virtual_id UInt32 CODEC(Delta, LZ4),
   age UInt8,
   gid UInt32,
   uid UInt32,
@@ -65,13 +86,15 @@ CREATE TABLE IF NOT EXISTS wrstat_active_virtual_filter_all (
   refreshed_at DateTime64(3) CODEC(Delta, ZSTD(3))
 ) ENGINE = MergeTree
 PARTITION BY active_set_id
-ORDER BY (active_set_id, dir, age, gid, uid, ft);
+ORDER BY (active_set_id, virtual_id, age, gid, uid, ft);
 
 CREATE TABLE IF NOT EXISTS wrstat_active_virtual_children (
   active_set_id String CODEC(ZSTD(3)),
   parent_virtual_id UInt32 CODEC(Delta, LZ4),
   child_virtual_id UInt32 CODEC(Delta, LZ4),
   mount_path LowCardinality(String) CODEC(LZ4),
+  snapshot_id UUID,
+  mount_root_dir_id UInt32 CODEC(Delta, LZ4),
   is_mount_root_box UInt8,
   child_count UInt64 CODEC(Delta, LZ4),
   refreshed_at DateTime64(3) CODEC(Delta, ZSTD(3))

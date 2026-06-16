@@ -800,7 +800,7 @@ func TestProviderCloseCancelsAndWaitsForAsyncRefresh(t *testing.T) {
 			},
 			buildReaders: buildProviderSwapTestReaders,
 		}
-		cp.refreshVirtualChildren = func(ctx context.Context, gotActiveSetID string) error {
+		cp.refreshActivePrefixRollups = func(ctx context.Context, gotActiveSetID string) error {
 			refreshedActiveSetID <- gotActiveSetID
 
 			close(refreshStarted)
@@ -861,7 +861,7 @@ func TestProviderVirtualChildrenRefreshErrors(t *testing.T) {
 		const activeSetID = "mount|snapshot|2026-01-09T12:00:00Z\n"
 
 		cp, refreshDone, refreshedActiveSetID := newProviderAsyncRefreshTestProvider(activeSetID)
-		cp.refreshVirtualChildren = func(_ context.Context, gotActiveSetID string) error {
+		cp.refreshActivePrefixRollups = func(_ context.Context, gotActiveSetID string) error {
 			defer close(refreshDone)
 
 			refreshedActiveSetID <- gotActiveSetID
@@ -886,7 +886,7 @@ func TestProviderVirtualChildrenRefreshErrors(t *testing.T) {
 		So(<-refreshedActiveSetID, ShouldEqual, activeSetID)
 
 		err := waitForProviderOnError(t, cp, got)
-		So(err.Error(), ShouldContainSubstring, "virtual_children_refresh")
+		So(err.Error(), ShouldContainSubstring, "active_prefix_rollup_refresh")
 		So(err.Error(), ShouldContainSubstring, "active_set_id")
 		So(err.Error(), ShouldContainSubstring, "mount|snapshot|2026-01-09T12:00:00Z")
 		So(errors.Is(err, errProviderTestErr1), ShouldBeTrue)

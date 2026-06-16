@@ -41,6 +41,7 @@ import (
 const (
 	activeMetadataQueryVersion         uint32 = 1
 	activePrefixDirSummaryQueryVersion uint32 = 1
+	activeVirtualReadyQueryVersionC2   uint32 = 1
 	activeVirtualReadyQueryVersion     uint32 = 1
 
 	treeActiveMetadataCacheMaxEntries      = 256

@@ -40,8 +40,8 @@ in-snapshot active basedir fails with `ErrIDUnresolved`;
 external/historical path resolves via external column). Depends on
 Phases 1-2.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
 
 #### Item 6.2: G2 - per-active_set_id virtual catalog with its own id space [parallel with 6.1]
 
@@ -94,8 +94,8 @@ baseline; and no `dir`/`parent_dir`/`child_dir` string column in
 `wrstat_active_virtual_children`/`_summaries`/`_filter_all`, which are
 keyed by `virtual_id`/`dir_id`). Depends on Phases 1-2.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
 
 For parallel batch items, use separate subagents per item.
 Launch review subagents using the `go-reviewer` skill (review all

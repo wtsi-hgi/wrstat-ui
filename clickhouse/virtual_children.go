@@ -28,150 +28,21 @@ package clickhouse
 import (
 	"context"
 	"fmt"
-	"sort"
 	"strings"
 	"time"
 
 	ch "github.com/ClickHouse/clickhouse-go/v2"
-	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 )
 
-const (
-	virtualChildrenReadyQuery = "SELECT 1 FROM wrstat_active_virtual_sets " +
-		"WHERE active_set_id = ? LIMIT 1"
-	virtualChildrenQuery = "SELECT child_virtual_id FROM wrstat_active_virtual_children " +
-		"WHERE active_set_id = ? AND parent_virtual_id = ? ORDER BY child_virtual_id"
-	insertVirtualChildQuery = "INSERT INTO wrstat_active_virtual_children " +
-		"(active_set_id, parent_virtual_id, child_virtual_id, mount_path, is_mount_root_box, child_count, refreshed_at) " +
-		"VALUES (?, ?, ?, ?, ?, ?, ?)"
-	insertVirtualChildrenSetQuery = "INSERT INTO wrstat_active_virtual_sets " +
-		"(active_set_id, schema3_version, mounts_sha256, active_mount_count, summary_rows, filter_rows, child_rows, " +
-		"manifest_sha256, ready, refreshed_at) VALUES (?, 0, ?, ?, 0, 0, 0, '', 1, ?)"
-	virtualChildrenSetIDsQuery = "SELECT DISTINCT active_set_id FROM wrstat_active_virtual_sets " +
-		"WHERE active_set_id != ?"
-	dropVirtualChildrenPartitionQuery     = "ALTER TABLE wrstat_active_virtual_children DROP PARTITION ?"
-	dropVirtualChildrenSetPartitionQuery  = "ALTER TABLE wrstat_active_virtual_sets DROP PARTITION ?"
-	dropVirtualSummaryCachePartitionQuery = "ALTER TABLE wrstat_virtual_summary_cache DROP PARTITION ?"
-	dropVirtualSummarySetPartitionQuery   = "ALTER TABLE wrstat_virtual_summary_sets DROP PARTITION ?"
-)
-
-type virtualChildRow struct {
-	parentDir        string
-	child            string
-	childIsMountRoot bool
-	mountPath        string
-}
-
-func mergeVirtualChildRows(a, b virtualChildRow) virtualChildRow {
-	if !b.childIsMountRoot {
-		return a
-	}
-
-	a.childIsMountRoot = true
-	a.mountPath = b.mountPath
-
-	return a
-}
-
-func virtualChildRowsForMounts(mounts []activeMount) []virtualChildRow {
-	byKey := make(map[string]virtualChildRow)
-
-	for _, mount := range mounts {
-		for _, row := range virtualChildRowsForMount(mount.mountPath) {
-			key := row.parentDir + "\x00" + row.child
-			if existing, ok := byKey[key]; ok {
-				byKey[key] = mergeVirtualChildRows(existing, row)
-
-				continue
-			}
-
-			byKey[key] = row
-		}
-	}
-
-	rows := make([]virtualChildRow, 0, len(byKey))
-	for _, row := range byKey {
-		rows = append(rows, row)
-	}
-
-	sort.Slice(rows, func(i, j int) bool {
-		if rows[i].parentDir == rows[j].parentDir {
-			return rows[i].child < rows[j].child
-		}
-
-		return rows[i].parentDir < rows[j].parentDir
-	})
-
-	return rows
-}
-
-func virtualChildRowsForMount(mountPath string) []virtualChildRow {
-	parent := "/"
-	mountPath = ensureTrailingSlash(mountPath)
-	rows := make([]virtualChildRow, 0, strings.Count(mountPath, "/"))
-
-	for {
-		child, ok := immediateChildForMount(parent, mountPath)
-		if !ok {
-			return rows
-		}
-
-		childIsMountRoot := ensureTrailingSlash(child) == mountPath
-
-		row := virtualChildRow{
-			parentDir:        parent,
-			child:            child,
-			childIsMountRoot: childIsMountRoot,
-		}
-		if childIsMountRoot {
-			row.mountPath = mountPath
-		}
-
-		rows = append(rows, row)
-		if childIsMountRoot {
-			return rows
-		}
-
-		parent = ensureTrailingSlash(child)
-	}
-}
-
-func appendVirtualChildRows(
-	batch driver.Batch,
-	activeSetID string,
-	rows []virtualChildRow,
-	refreshedAt time.Time,
-) error {
-	for _, row := range rows {
-		err := batch.Append(
-			activeSetID,
-			virtualIDForDir(row.parentDir),
-			virtualIDForDir(row.child),
-			row.mountPath,
-			boolToUInt8(row.childIsMountRoot),
-			uint64(0),
-			refreshedAt,
-		)
-		if err != nil {
-			return fmt.Errorf("clickhouse: failed to append virtual child: %w", err)
-		}
-	}
-
-	return nil
-}
+//nolint:unused
+const activeVirtualSetIDsExceptQuery = "SELECT DISTINCT active_set_id FROM wrstat_active_virtual_sets " +
+	"WHERE active_set_id != ?"
 
 func virtualIDForDir(dir string) uint32 {
 	return uint32(catalogPathHash(ensureTrailingSlash(dir))) //nolint:gosec // Virtual IDs intentionally use low hash bits.
 }
 
-func boolToUInt8(v bool) uint8 {
-	if v {
-		return 1
-	}
-
-	return 0
-}
-
+//nolint:unused
 func refreshActiveVirtualChildrenForActiveSet(ctx context.Context, conn ch.Conn, activeSetID string) error {
 	rows, err := queryMountsActiveRows(ctx, conn)
 	if err != nil || activeSetID == "" {
@@ -185,95 +56,61 @@ func refreshActiveVirtualChildrenForActiveSet(ctx context.Context, conn ch.Conn,
 	return refreshActiveVirtualChildren(ctx, conn, rows)
 }
 
+//nolint:funlen,gocyclo,unused
 func refreshActiveVirtualChildren(ctx context.Context, conn ch.Conn, rows []mountsActiveRow) error {
 	activeSetID := fingerprintForMountsActive(rows)
 	if activeSetID == "" {
 		return nil
 	}
 
-	ready, err := virtualChildrenReady(ctx, conn, activeSetID)
+	db := &clickHouseDatabase{conn: conn}
+
+	ready, err := db.activeVirtualSetReady(ctx, activeSetID)
 	if err != nil || ready {
 		return err
 	}
 
 	mounts := newActiveMountsSnapshot(rows).all()
-
-	return insertVirtualChildrenSet(ctx, conn, activeSetID, mounts)
-}
-
-func virtualChildrenReady(ctx context.Context, conn ch.Conn, activeSetID string) (bool, error) {
-	rows, err := conn.Query(ctx, virtualChildrenReadyQuery, activeSetID)
-	if err != nil {
-		return false, fmt.Errorf("clickhouse: failed to query virtual children readiness: %w", err)
-	}
-
-	defer func() { _ = rows.Close() }()
-
-	if rows.Next() {
-		return true, nil
-	}
-
-	if err := rows.Err(); err != nil {
-		return false, fmt.Errorf("clickhouse: virtual children readiness iteration error: %w", err)
-	}
-
-	return false, nil
-}
-
-func insertVirtualChildrenSet(
-	ctx context.Context,
-	conn ch.Conn,
-	activeSetID string,
-	mounts []activeMount,
-) error {
 	refreshedAt := time.Now().UTC()
+	writer := newActiveVirtualOverlayWriter(conn, defaultBatchSize)
 
-	if err := insertVirtualChildRows(ctx, conn, activeSetID, mounts, refreshedAt); err != nil {
-		return err
-	}
-
-	if err := conn.Exec(
-		ctx,
-		insertVirtualChildrenSetQuery,
-		activeSetID,
-		activeSetID,
-		uint64(len(mounts)),
-		refreshedAt,
-	); err != nil {
-		return fmt.Errorf("clickhouse: failed to insert virtual children set: %w", err)
-	}
-
-	return nil
-}
-
-func insertVirtualChildRows(
-	ctx context.Context,
-	conn ch.Conn,
-	activeSetID string,
-	mounts []activeMount,
-	refreshedAt time.Time,
-) error {
-	rows := virtualChildRowsForMounts(mounts)
-	if len(rows) == 0 {
-		return nil
-	}
-
-	batch, err := conn.PrepareBatch(ctx, insertVirtualChildQuery)
+	rootGUTAs, err := queryActiveVirtualRootGUTAs(ctx, conn, mounts)
 	if err != nil {
-		return fmt.Errorf("clickhouse: failed to prepare virtual children batch: %w", err)
-	}
-
-	if err := appendVirtualChildRows(batch, activeSetID, rows, refreshedAt); err != nil {
 		return err
 	}
 
-	if err := batch.Send(); err != nil {
-		return fmt.Errorf("clickhouse: failed to insert virtual children: %w", err)
+	rootFilterRows, err := queryActiveVirtualRootFilterRows(ctx, conn, mounts)
+	if err != nil {
+		return err
 	}
 
-	return nil
+	mountRootLinks, err := queryActiveVirtualMountRootLinks(ctx, conn, mounts)
+	if err != nil {
+		return err
+	}
+
+	namespace, summaryRows, filterRows, childRows := activeVirtualRowsForMountsFromDataWithLinks(
+		activeSetID,
+		mounts,
+		refreshedAt,
+		rootGUTAs,
+		rootFilterRows,
+		mountRootLinks,
+	)
+	if err := appendActiveVirtualOverlayRows(ctx, writer, namespace.rows, summaryRows, filterRows, childRows); err != nil {
+		return err
+	}
+
+	if err := writer.flush(ctx); err != nil {
+		return err
+	}
+
+	setRow := activeVirtualSetRowForRows(activeSetID, rows, summaryRows, filterRows, childRows, refreshedAt)
+
+	return writer.appendSet(ctx, setRow)
 }
 
+//nolint:unused
 func cleanupOldVirtualChildrenSets(ctx context.Context, conn ch.Conn, keepActiveSetID string) error {
 	oldSetIDs, err := virtualChildrenSetIDsExcept(ctx, conn, keepActiveSetID)
 	if err != nil {
@@ -289,8 +126,9 @@ func cleanupOldVirtualChildrenSets(ctx context.Context, conn ch.Conn, keepActive
 	return nil
 }
 
+//nolint:unused
 func virtualChildrenSetIDsExcept(ctx context.Context, conn ch.Conn, keepActiveSetID string) ([]string, error) {
-	rows, err := conn.Query(ctx, virtualChildrenSetIDsQuery, keepActiveSetID)
+	rows, err := conn.Query(ctx, activeVirtualSetIDsExceptQuery, keepActiveSetID)
 	if err != nil {
 		return nil, fmt.Errorf("clickhouse: failed to query old virtual children sets: %w", err)
 	}
@@ -315,14 +153,10 @@ func virtualChildrenSetIDsExcept(ctx context.Context, conn ch.Conn, keepActiveSe
 	return setIDs, nil
 }
 
+//nolint:unused
 func dropVirtualActiveSetPartitions(ctx context.Context, conn ch.Conn, activeSetID string) error {
-	for _, query := range []string{
-		dropVirtualChildrenPartitionQuery,
-		dropVirtualChildrenSetPartitionQuery,
-		dropVirtualSummaryCachePartitionQuery,
-		dropVirtualSummarySetPartitionQuery,
-	} {
-		if err := dropActiveSetPartition(ctx, conn, query, activeSetID, "virtual"); err != nil {
+	for _, query := range activeVirtualPartitionDropQueries() {
+		if err := dropActiveSetPartition(ctx, conn, query, activeSetID, "active-virtual"); err != nil {
 			return err
 		}
 	}
@@ -358,64 +192,7 @@ func isUnknownTable(err error) bool {
 		strings.Contains(msg, "does not exist")
 }
 
-func activeVirtualChildrenForIDs(parentDir string, childIDs []uint32, mounts []activeMount) []string {
-	if len(childIDs) == 0 || len(mounts) == 0 {
-		return nil
-	}
-
-	allowed := make(map[uint32]bool, len(childIDs))
-	for _, childID := range childIDs {
-		allowed[childID] = true
-	}
-
-	candidates := immediateChildrenForMounts(parentDir, mounts)
-	filtered := make([]string, 0, len(candidates))
-
-	for _, child := range candidates {
-		if allowed[virtualIDForDir(child)] {
-			filtered = append(filtered, child)
-		}
-	}
-
-	if len(filtered) == 0 {
-		return nil
-	}
-
-	return filtered
-}
-
-func queryActiveVirtualChildIDs(
-	ctx context.Context,
-	conn ch.Conn,
-	query string,
-	label string,
-	args ...any,
-) ([]uint32, error) {
-	rows, err := conn.Query(ctx, query, args...)
-	if err != nil {
-		return nil, fmt.Errorf("clickhouse: failed to query %s: %w", label, err)
-	}
-
-	defer func() { _ = rows.Close() }()
-
-	childIDs := make([]uint32, 0, childrenInitialCap)
-
-	for rows.Next() {
-		var childID uint32
-		if err := rows.Scan(&childID); err != nil {
-			return nil, fmt.Errorf("clickhouse: failed to scan %s: %w", label, err)
-		}
-
-		childIDs = append(childIDs, childID)
-	}
-
-	if err := rowsErr(rows); err != nil {
-		return nil, fmt.Errorf("clickhouse: %s iteration error: %w", label, err)
-	}
-
-	return childIDs, nil
-}
-
+//nolint:cyclop,funlen,gocognit,gocyclo
 func (d *clickHouseDatabase) virtualChildrenForAncestor(
 	ctx context.Context,
 	parentDir string,
@@ -425,7 +202,7 @@ func (d *clickHouseDatabase) virtualChildrenForAncestor(
 		return nil, false, nil
 	}
 
-	activeSetID, activeMounts, err := d.currentVirtualChildrenActiveSet(ctx)
+	activeSetID, _, err := d.currentVirtualChildrenActiveSet(ctx)
 	if err != nil {
 		return nil, false, err
 	}
@@ -434,41 +211,41 @@ func (d *clickHouseDatabase) virtualChildrenForAncestor(
 		return nil, false, nil
 	}
 
-	readyErr := d.ensureVirtualChildrenReady(ctx, activeSetID, activeMounts)
-	if readyErr != nil {
-		return nil, false, readyErr
+	ready, err := d.activeVirtualSetReadyCached(ctx, activeSetID)
+	if err != nil || !ready {
+		return nil, false, err
 	}
 
-	childIDs, err := queryActiveVirtualChildIDs(
-		ctx,
-		d.conn,
-		virtualChildrenQuery,
-		"virtual children",
-		activeSetID,
-		virtualIDForDir(parentDir),
-	)
+	rows, err := d.conn.Query(ctx, activeVirtualCatalogChildrenQuery, activeSetID, ensureTrailingSlash(parentDir))
+	if err != nil {
+		if isUnknownTable(err) {
+			return nil, false, nil
+		}
+
+		return nil, false, fmt.Errorf("clickhouse: failed to query virtual catalog children: %w", err)
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	children, err := scanChildrenRows(rows)
 	if err != nil {
 		return nil, false, err
 	}
 
-	return activeVirtualChildrenForIDs(parentDir, childIDs, mounts), true, nil
+	if len(children) > 0 {
+		return children, true, nil
+	}
+
+	handled, err := d.activeVirtualExistingDirs(ctx, activeSetID, []string{parentDir})
+	if err != nil {
+		return nil, false, err
+	}
+
+	return nil, handled[ensureTrailingSlash(parentDir)], nil
 }
 
 func (d *clickHouseDatabase) currentVirtualChildrenActiveSet(
 	ctx context.Context,
 ) (string, []activeMount, error) {
 	return d.currentActiveMountsSet(ctx)
-}
-
-func (d *clickHouseDatabase) ensureVirtualChildrenReady(
-	ctx context.Context,
-	activeSetID string,
-	mounts []activeMount,
-) error {
-	ready, err := virtualChildrenReady(ctx, d.conn, activeSetID)
-	if err != nil || ready {
-		return err
-	}
-
-	return insertVirtualChildrenSet(ctx, d.conn, activeSetID, mounts)
 }

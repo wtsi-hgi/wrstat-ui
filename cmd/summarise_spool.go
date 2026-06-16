@@ -57,6 +57,10 @@ const (
 	clickHouseSpoolLoadReportName = "spool_load_report.json"
 	clickHouseSpoolSchemaMark     = "wrstat-ui-clickhouse-summarise-spool-v2"
 	clickHouseSpoolSchema3Version = 1
+
+	summariseActiveVirtualRootID       uint32 = 1
+	summariseActiveVirtualNoParentID   uint32 = 0
+	summariseActiveVirtualZeroSnapshot        = "00000000-0000-0000-0000-000000000000"
 )
 
 var (
@@ -168,6 +172,7 @@ func summariseActiveVirtualFilterRow(
 ) summariseActiveVirtualFilterAllRow {
 	return summariseActiveVirtualFilterAllRow{
 		ActiveSetID:      summary.ActiveSetID,
+		VirtualID:        summary.VirtualID,
 		Dir:              summary.Dir,
 		Age:              row.Age,
 		GID:              row.GID,
@@ -202,82 +207,88 @@ type summariseMountActiveRow struct {
 	updatedAt  time.Time
 }
 
-func summariseVirtualChildRowsForMounts(activeRows []summariseMountActiveRow) []summariseVirtualChildRow {
-	byKey := make(map[string]summariseVirtualChildRow)
-
-	for _, activeRow := range activeRows {
-		for _, row := range summariseVirtualChildRowsForMount(activeRow.mountPath) {
-			key := row.parentDir + "\x00" + row.childDir
-			if existing, ok := byKey[key]; ok {
-				byKey[key] = summariseMergeVirtualChildRows(existing, row)
-
-				continue
-			}
-
-			byKey[key] = row
-		}
-	}
-
-	rows := make([]summariseVirtualChildRow, 0, len(byKey))
-	for _, row := range byKey {
-		rows = append(rows, row)
-	}
-
-	slices.SortFunc(rows, func(a, b summariseVirtualChildRow) int {
-		if cmpParent := strings.Compare(a.parentDir, b.parentDir); cmpParent != 0 {
-			return cmpParent
-		}
-
-		return strings.Compare(a.childDir, b.childDir)
-	})
-
-	return rows
-}
-
-func summariseMergeVirtualChildRows(a, b summariseVirtualChildRow) summariseVirtualChildRow {
-	if !b.childIsMountRoot {
-		return a
-	}
-
-	a.childIsMountRoot = true
-	a.mountPath = b.mountPath
-
-	return a
-}
-
-func summariseSeedActiveVirtualChildSummaryRows(
-	activeSetID string,
-	childRows []summariseActiveVirtualChildRow,
-	dirs map[string]summariseActiveVirtualSummaryRow,
-	childCounts map[string]uint64,
-) {
-	for _, row := range childRows {
-		childCounts[row.ParentDir]++
-		dirs[row.ParentDir] = summariseActiveVirtualSummaryRow{ActiveSetID: activeSetID, Dir: row.ParentDir}
-		childDir := summariseEnsureTrailingSlash(row.ChildDir)
-		dirs[childDir] = summariseActiveVirtualSummaryRow{
-			ActiveSetID:    activeSetID,
-			Dir:            childDir,
-			MountPath:      row.MountPath,
-			IsMountRootBox: row.IsMountRootBox,
-		}
-	}
-}
-
-func summariseSeedActiveVirtualMountRootRows(
+func summariseActiveVirtualCatalogRows(
 	activeSetID string,
 	activeRows []summariseMountActiveRow,
-	dirs map[string]summariseActiveVirtualSummaryRow,
-) {
-	for _, activeRow := range activeRows {
-		dir := summariseEnsureTrailingSlash(activeRow.mountPath)
-		row := dirs[dir]
-		row.ActiveSetID = activeSetID
-		row.Dir = dir
-		row.MountPath = dir
-		row.IsMountRootBox = 1
-		dirs[dir] = row
+	rootFacts map[string]chspool.DirFactRow,
+	refreshedAt time.Time,
+) []summariseActiveVirtualCatalogRow {
+	namespace := newSummariseActiveVirtualNamespace(activeSetID, refreshedAt)
+
+	for _, activeRow := range summariseSortedMountActiveRows(activeRows) {
+		namespace.addMount(activeRow, rootFacts[summariseEnsureTrailingSlash(activeRow.mountPath)])
 	}
+
+	return namespace.rows
+}
+
+func newSummariseActiveVirtualNamespace(activeSetID string, refreshedAt time.Time) summariseActiveVirtualNamespace {
+	root := summariseActiveVirtualCatalogRow{
+		ActiveSetID: activeSetID,
+		VirtualID:   summariseActiveVirtualRootID,
+		ParentID:    summariseActiveVirtualNoParentID,
+		Name:        "/",
+		FullPath:    "/",
+		SnapshotID:  summariseActiveVirtualZeroSnapshot,
+		RefreshedAt: refreshedAt,
+	}
+
+	return summariseActiveVirtualNamespace{
+		rows:   []summariseActiveVirtualCatalogRow{root},
+		byPath: map[string]int{"/": 0},
+	}
+}
+
+func summariseSortedMountActiveRows(rows []summariseMountActiveRow) []summariseMountActiveRow {
+	out := slices.Clone(rows)
+	slices.SortFunc(out, func(a, b summariseMountActiveRow) int {
+		return strings.Compare(summariseEnsureTrailingSlash(a.mountPath), summariseEnsureTrailingSlash(b.mountPath))
+	})
+
+	return out
+}
+
+func summariseActiveVirtualCatalogChildCounts(rows []summariseActiveVirtualCatalogRow) map[uint32]uint64 {
+	out := make(map[uint32]uint64, len(rows))
+	for _, row := range rows {
+		if row.ParentID != summariseActiveVirtualNoParentID {
+			out[row.ParentID]++
+		}
+	}
+
+	return out
+}
+
+func summariseActiveVirtualSummaryRowsFromCatalog(
+	activeSetID string,
+	catalogRows []summariseActiveVirtualCatalogRow,
+	childCounts map[uint32]uint64,
+	updatedAt time.Time,
+	refreshedAt time.Time,
+) []summariseActiveVirtualSummaryRow {
+	out := make([]summariseActiveVirtualSummaryRow, 0, len(catalogRows))
+	for _, row := range catalogRows {
+		out = append(out, summariseActiveVirtualSummaryRow{
+			ActiveSetID:     activeSetID,
+			VirtualID:       row.VirtualID,
+			Dir:             row.FullPath,
+			MountPath:       row.MountPath,
+			SnapshotID:      row.SnapshotID,
+			MountRootDirID:  row.MountRootDirID,
+			IsMountRootBox:  row.IsMountRootBox,
+			UpdatedAt:       updatedAt,
+			AllAtimeBuckets: summariseAgeBucketsSlice(nil),
+			AllMtimeBuckets: summariseAgeBucketsSlice(nil),
+			ChildCount:      childCounts[row.VirtualID],
+			RefreshedAt:     refreshedAt,
+		})
+	}
+
+	slices.SortFunc(out, func(a, b summariseActiveVirtualSummaryRow) int {
+		return cmp.Compare(a.VirtualID, b.VirtualID)
+	})
+
+	return out
 }
 
 func summariseMaxUpdatedAtForActiveRows(activeRows []summariseMountActiveRow) time.Time {
@@ -326,8 +337,11 @@ func summariseActiveVirtualContributors(
 
 type summariseActiveVirtualSummaryRow struct {
 	ActiveSetID     string
+	VirtualID       uint32
 	Dir             string
 	MountPath       string
+	SnapshotID      string
+	MountRootDirID  uint32
 	IsMountRootBox  uint8
 	UpdatedAt       time.Time
 	AllCount        uint64
@@ -347,6 +361,7 @@ type summariseActiveVirtualSummaryRow struct {
 
 type summariseActiveVirtualFilterAllRow struct {
 	ActiveSetID      string
+	VirtualID        uint32
 	Dir              string
 	Age              uint8
 	GID              uint32
@@ -364,13 +379,117 @@ type summariseActiveVirtualFilterAllRow struct {
 }
 
 type summariseActiveVirtualChildRow struct {
+	ActiveSetID     string
+	ParentDir       string
+	ChildDir        string
+	ParentVirtualID uint32
+	ChildVirtualID  uint32
+	MountPath       string
+	SnapshotID      string
+	MountRootDirID  uint32
+	IsMountRootBox  uint8
+	ChildCount      uint64
+	RefreshedAt     time.Time
+}
+
+func summariseActiveVirtualCatalogRowsByID(
+	rows []summariseActiveVirtualCatalogRow,
+) map[uint32]summariseActiveVirtualCatalogRow {
+	out := make(map[uint32]summariseActiveVirtualCatalogRow, len(rows))
+	for _, row := range rows {
+		out[row.VirtualID] = row
+	}
+
+	return out
+}
+
+type summariseActiveVirtualCatalogRow struct {
 	ActiveSetID    string
-	ParentDir      string
-	ChildDir       string
+	VirtualID      uint32
+	ParentID       uint32
+	Name           string
+	FullPath       string
 	MountPath      string
+	SnapshotID     string
+	MountRootDirID uint32
 	IsMountRootBox uint8
-	ChildCount     uint64
 	RefreshedAt    time.Time
+}
+
+type summariseActiveVirtualNamespace struct {
+	rows   []summariseActiveVirtualCatalogRow
+	byPath map[string]int
+}
+
+func (n *summariseActiveVirtualNamespace) addMount(
+	activeRow summariseMountActiveRow,
+	rootFact chspool.DirFactRow,
+) {
+	parent := "/"
+	mountPath := summariseEnsureTrailingSlash(activeRow.mountPath)
+
+	for {
+		child, ok := summariseImmediateChildForMount(parent, mountPath)
+		if !ok {
+			return
+		}
+
+		child = summariseEnsureTrailingSlash(child)
+		childIsMountRoot := child == mountPath
+
+		row := n.ensureChild(parent, child)
+		if childIsMountRoot {
+			n.markMountRoot(row, activeRow, rootFact)
+
+			return
+		}
+
+		parent = child
+	}
+}
+
+func (n *summariseActiveVirtualNamespace) ensureChild(
+	parentPath string,
+	childPath string,
+) *summariseActiveVirtualCatalogRow {
+	childPath = summariseEnsureTrailingSlash(childPath)
+	if idx, ok := n.byPath[childPath]; ok {
+		return &n.rows[idx]
+	}
+
+	parentID := n.idForPath(parentPath)
+	n.rows = append(n.rows, summariseActiveVirtualCatalogRow{
+		ActiveSetID: n.rows[0].ActiveSetID,
+		VirtualID:   uint32(len(n.rows) + 1), //nolint:gosec // Namespace rows are bounded by active mount path segments.
+		ParentID:    parentID,
+		Name:        summariseCatalogNameForFullPath(childPath),
+		FullPath:    childPath,
+		SnapshotID:  summariseActiveVirtualZeroSnapshot,
+		RefreshedAt: n.rows[0].RefreshedAt,
+	})
+
+	n.byPath[childPath] = len(n.rows) - 1
+
+	return &n.rows[len(n.rows)-1]
+}
+
+func (n *summariseActiveVirtualNamespace) markMountRoot(
+	row *summariseActiveVirtualCatalogRow,
+	activeRow summariseMountActiveRow,
+	rootFact chspool.DirFactRow,
+) {
+	row.MountPath = summariseEnsureTrailingSlash(activeRow.mountPath)
+	row.SnapshotID = activeRow.snapshotID
+	row.MountRootDirID = rootFact.DirID
+	row.IsMountRootBox = 1
+}
+
+func (n summariseActiveVirtualNamespace) idForPath(path string) uint32 {
+	if idx, ok := n.byPath[summariseEnsureTrailingSlash(path)]; ok {
+		return n.rows[idx].VirtualID
+	}
+
+	return 0
 }
 
 type summariseActiveVirtualFilterAggregate struct {
@@ -772,7 +891,7 @@ func (w *summariseDGUTASpoolWriter) writeActiveVirtualRows() error {
 		updatedAt:  summariseActiveSetUpdatedAt(w.updatedAt),
 	}}
 	activeSetID := summariseFingerprintForMountsActive(activeRows)
-	summaryRows, filterRows, childRows := summariseActiveVirtualRowsFromCanonicalData(
+	catalogRows, summaryRows, filterRows, childRows := summariseActiveVirtualRowsFromCanonicalData(
 		activeSetID,
 		activeRows,
 		w.activeVirtualRootFacts,
@@ -781,7 +900,7 @@ func (w *summariseDGUTASpoolWriter) writeActiveVirtualRows() error {
 		w.refreshedAt,
 	)
 
-	if err := w.writeActiveVirtualDataRows(summaryRows, filterRows, childRows); err != nil {
+	if err := w.writeActiveVirtualDataRows(catalogRows, summaryRows, filterRows, childRows); err != nil {
 		return err
 	}
 
@@ -819,20 +938,29 @@ func summariseFingerprintForMountsActive(rows []summariseMountActiveRow) string 
 
 func summariseActiveVirtualChildRows(
 	activeSetID string,
-	activeRows []summariseMountActiveRow,
+	catalogRows []summariseActiveVirtualCatalogRow,
 	refreshedAt time.Time,
 ) []summariseActiveVirtualChildRow {
-	virtualRows := summariseVirtualChildRowsForMounts(activeRows)
-	rows := make([]summariseActiveVirtualChildRow, 0, len(virtualRows))
+	byID := summariseActiveVirtualCatalogRowsByID(catalogRows)
+	rows := make([]summariseActiveVirtualChildRow, 0, len(catalogRows))
 
-	for _, row := range virtualRows {
+	for _, row := range catalogRows {
+		if row.ParentID == summariseActiveVirtualNoParentID {
+			continue
+		}
+
+		parent := byID[row.ParentID]
 		rows = append(rows, summariseActiveVirtualChildRow{
-			ActiveSetID:    activeSetID,
-			ParentDir:      row.parentDir,
-			ChildDir:       row.childDir,
-			MountPath:      row.mountPath,
-			IsMountRootBox: summariseBoolAsUInt8(row.childIsMountRoot),
-			RefreshedAt:    refreshedAt,
+			ActiveSetID:     activeSetID,
+			ParentDir:       parent.FullPath,
+			ChildDir:        row.FullPath,
+			ParentVirtualID: row.ParentID,
+			ChildVirtualID:  row.VirtualID,
+			MountPath:       row.MountPath,
+			SnapshotID:      row.SnapshotID,
+			MountRootDirID:  row.MountRootDirID,
+			IsMountRootBox:  row.IsMountRootBox,
+			RefreshedAt:     refreshedAt,
 		})
 	}
 
@@ -842,13 +970,14 @@ func summariseActiveVirtualChildRows(
 func summariseActiveVirtualSummaryRows(
 	activeSetID string,
 	activeRows []summariseMountActiveRow,
-	childRows []summariseActiveVirtualChildRow,
+	catalogRows []summariseActiveVirtualCatalogRow,
 	refreshedAt time.Time,
 ) []summariseActiveVirtualSummaryRow {
-	dirs, childCounts := summariseActiveVirtualSummarySeeds(activeSetID, activeRows, childRows)
+	childCounts := summariseActiveVirtualCatalogChildCounts(catalogRows)
 
-	return summariseActiveVirtualSummaryRowsFromSeeds(
-		dirs,
+	return summariseActiveVirtualSummaryRowsFromCatalog(
+		activeSetID,
+		catalogRows,
 		childCounts,
 		summariseMaxUpdatedAtForActiveRows(activeRows),
 		refreshedAt,
@@ -862,16 +991,22 @@ func summariseActiveVirtualRowsFromCanonicalData(
 	rootFilterRows map[string][]chspool.DirFilterAllRow,
 	mountChildCounts map[string]uint64,
 	refreshedAt time.Time,
-) ([]summariseActiveVirtualSummaryRow, []summariseActiveVirtualFilterAllRow, []summariseActiveVirtualChildRow) {
-	childRows := summariseActiveVirtualChildRows(activeSetID, activeRows, refreshedAt)
-	summaryRows := summariseActiveVirtualSummaryRows(activeSetID, activeRows, childRows, refreshedAt)
+) (
+	[]summariseActiveVirtualCatalogRow,
+	[]summariseActiveVirtualSummaryRow,
+	[]summariseActiveVirtualFilterAllRow,
+	[]summariseActiveVirtualChildRow,
+) {
+	catalogRows := summariseActiveVirtualCatalogRows(activeSetID, activeRows, rootFacts, refreshedAt)
+	childRows := summariseActiveVirtualChildRows(activeSetID, catalogRows, refreshedAt)
+	summaryRows := summariseActiveVirtualSummaryRows(activeSetID, activeRows, catalogRows, refreshedAt)
 	contributors := summariseActiveVirtualContributors(summaryRows, activeRows)
 
 	summariseFillActiveVirtualSummaries(summaryRows, contributors, rootFacts, mountChildCounts)
 	filterRows := summariseActiveVirtualFilterRows(summaryRows, contributors, rootFilterRows, refreshedAt)
 	summariseFillActiveVirtualChildCounts(childRows, summaryRows)
 
-	return summaryRows, filterRows, childRows
+	return catalogRows, summaryRows, filterRows, childRows
 }
 
 func (w *summariseDGUTASpoolWriter) noteActiveVirtualMountChildRows(parentDir string, count uint64) {
@@ -952,29 +1087,24 @@ func summariseActiveVirtualSetRow(
 }
 
 func (w *summariseDGUTASpoolWriter) writeActiveVirtualDataRows(
+	catalogRows []summariseActiveVirtualCatalogRow,
 	summaryRows []summariseActiveVirtualSummaryRow,
 	filterRows []summariseActiveVirtualFilterAllRow,
 	childRows []summariseActiveVirtualChildRow,
 ) error {
-	for _, row := range summaryRows {
-		if err := w.ds.set.WriteActiveVirtualSummary(summariseActiveVirtualSummarySpoolRow(row)); err != nil {
-			return err
-		}
+	if err := w.writeActiveVirtualCatalogRows(catalogRows); err != nil {
+		return err
 	}
 
-	for _, row := range filterRows {
-		if err := w.ds.set.WriteActiveVirtualFilterAll(summariseActiveVirtualFilterSpoolRow(row)); err != nil {
-			return err
-		}
+	if err := w.writeActiveVirtualSummaryRows(summaryRows); err != nil {
+		return err
 	}
 
-	for _, row := range childRows {
-		if err := w.ds.set.WriteActiveVirtualChild(summariseActiveVirtualChildSpoolRow(row)); err != nil {
-			return err
-		}
+	if err := w.writeActiveVirtualFilterRows(filterRows); err != nil {
+		return err
 	}
 
-	return nil
+	return w.writeActiveVirtualChildRows(childRows)
 }
 
 func summariseFullFilterRowForGUTA(
@@ -1004,12 +1134,52 @@ func summariseFullFilterRowForGUTA(
 	}
 }
 
+func (w *summariseDGUTASpoolWriter) writeActiveVirtualCatalogRows(
+	rows []summariseActiveVirtualCatalogRow,
+) error {
+	for _, row := range rows {
+		if err := w.ds.set.WriteActiveVirtualDir(summariseActiveVirtualDirSpoolRow(row)); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func summariseActiveVirtualDirSpoolRow(row summariseActiveVirtualCatalogRow) chspool.ActiveVirtualDirRow {
+	return chspool.ActiveVirtualDirRow{
+		ActiveSetID:    row.ActiveSetID,
+		VirtualID:      row.VirtualID,
+		ParentID:       row.ParentID,
+		Name:           row.Name,
+		FullPath:       row.FullPath,
+		MountPath:      row.MountPath,
+		SnapshotID:     row.SnapshotID,
+		MountRootDirID: row.MountRootDirID,
+		IsMountRootBox: row.IsMountRootBox,
+		RefreshedAt:    row.RefreshedAt,
+	}
+}
+
+func (w *summariseDGUTASpoolWriter) writeActiveVirtualSummaryRows(
+	rows []summariseActiveVirtualSummaryRow,
+) error {
+	for _, row := range rows {
+		if err := w.ds.set.WriteActiveVirtualSummary(summariseActiveVirtualSummarySpoolRow(row)); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 func summariseActiveVirtualSummarySpoolRow(row summariseActiveVirtualSummaryRow) chspool.ActiveVirtualSummaryRow {
 	return chspool.ActiveVirtualSummaryRow{
 		ActiveSetID:     row.ActiveSetID,
-		VirtualID:       summariseVirtualIDForDir(row.Dir),
+		VirtualID:       row.VirtualID,
 		MountPath:       row.MountPath,
-		MountRootDirID:  summariseMountRootDirID(row.MountPath),
+		SnapshotID:      row.SnapshotID,
+		MountRootDirID:  row.MountRootDirID,
 		IsMountRootBox:  row.IsMountRootBox,
 		UpdatedAt:       row.UpdatedAt,
 		AllCount:        row.AllCount,
@@ -1028,10 +1198,22 @@ func summariseActiveVirtualSummarySpoolRow(row summariseActiveVirtualSummaryRow)
 	}
 }
 
+func (w *summariseDGUTASpoolWriter) writeActiveVirtualFilterRows(
+	rows []summariseActiveVirtualFilterAllRow,
+) error {
+	for _, row := range rows {
+		if err := w.ds.set.WriteActiveVirtualFilterAll(summariseActiveVirtualFilterSpoolRow(row)); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 func summariseActiveVirtualFilterSpoolRow(row summariseActiveVirtualFilterAllRow) chspool.ActiveVirtualFilterAllRow {
 	return chspool.ActiveVirtualFilterAllRow{
 		ActiveSetID:      row.ActiveSetID,
-		VirtualID:        summariseVirtualIDForDir(row.Dir),
+		VirtualID:        row.VirtualID,
 		Age:              row.Age,
 		GID:              row.GID,
 		UID:              row.UID,
@@ -1048,13 +1230,26 @@ func summariseActiveVirtualFilterSpoolRow(row summariseActiveVirtualFilterAllRow
 	}
 }
 
+func (w *summariseDGUTASpoolWriter) writeActiveVirtualChildRows(
+	rows []summariseActiveVirtualChildRow,
+) error {
+	for _, row := range rows {
+		if err := w.ds.set.WriteActiveVirtualChild(summariseActiveVirtualChildSpoolRow(row)); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 func summariseActiveVirtualChildSpoolRow(row summariseActiveVirtualChildRow) chspool.ActiveVirtualChildRow {
 	return chspool.ActiveVirtualChildRow{
 		ActiveSetID:     row.ActiveSetID,
-		ParentVirtualID: summariseVirtualIDForDir(row.ParentDir),
-		ChildVirtualID:  summariseVirtualIDForDir(row.ChildDir),
+		ParentVirtualID: row.ParentVirtualID,
+		ChildVirtualID:  row.ChildVirtualID,
 		MountPath:       row.MountPath,
-		MountRootDirID:  summariseMountRootDirID(row.MountPath),
+		SnapshotID:      row.SnapshotID,
+		MountRootDirID:  row.MountRootDirID,
 		IsMountRootBox:  row.IsMountRootBox,
 		ChildCount:      row.ChildCount,
 		RefreshedAt:     row.RefreshedAt,
@@ -1245,44 +1440,6 @@ type summariseSchema3SnapshotCounts struct {
 	dirFilterAllRows   uint64
 }
 
-type summariseVirtualChildRow struct {
-	parentDir        string
-	childDir         string
-	childIsMountRoot bool
-	mountPath        string
-}
-
-func summariseVirtualChildRowsForMount(mountPath string) []summariseVirtualChildRow {
-	parent := "/"
-	mountPath = summariseEnsureTrailingSlash(mountPath)
-	rows := make([]summariseVirtualChildRow, 0, strings.Count(mountPath, "/"))
-
-	for {
-		child, ok := summariseImmediateChildForMount(parent, mountPath)
-		if !ok {
-			return rows
-		}
-
-		childIsMountRoot := summariseEnsureTrailingSlash(child) == mountPath
-
-		row := summariseVirtualChildRow{
-			parentDir:        parent,
-			childDir:         child,
-			childIsMountRoot: childIsMountRoot,
-		}
-		if childIsMountRoot {
-			row.mountPath = mountPath
-		}
-
-		rows = append(rows, row)
-		if childIsMountRoot {
-			return rows
-		}
-
-		parent = summariseEnsureTrailingSlash(child)
-	}
-}
-
 func summariseImmediateChildForMount(parentDir, mountPath string) (string, bool) {
 	parentDir = summariseEnsureTrailingSlash(parentDir)
 	mountPath = summariseEnsureTrailingSlash(mountPath)
@@ -1305,49 +1462,13 @@ func summariseImmediateChildForMount(parentDir, mountPath string) (string, bool)
 	return strings.TrimSuffix(parentDir, "/") + "/" + part, true
 }
 
-func summariseActiveVirtualSummarySeeds(
-	activeSetID string,
-	activeRows []summariseMountActiveRow,
-	childRows []summariseActiveVirtualChildRow,
-) (map[string]summariseActiveVirtualSummaryRow, map[string]uint64) {
-	dirs := make(map[string]summariseActiveVirtualSummaryRow, len(childRows)+1)
-	childCounts := make(map[string]uint64)
-
-	summariseSeedActiveVirtualChildSummaryRows(activeSetID, childRows, dirs, childCounts)
-	summariseSeedActiveVirtualMountRootRows(activeSetID, activeRows, dirs)
-
-	if len(dirs) == 0 && activeSetID != "" {
-		dirs["/"] = summariseActiveVirtualSummaryRow{ActiveSetID: activeSetID, Dir: "/"}
-	}
-
-	return dirs, childCounts
-}
-
-func summariseActiveVirtualSummaryRowsFromSeeds(
-	dirs map[string]summariseActiveVirtualSummaryRow,
-	childCounts map[string]uint64,
-	updatedAt time.Time,
-	refreshedAt time.Time,
-) []summariseActiveVirtualSummaryRow {
-	out := make([]summariseActiveVirtualSummaryRow, 0, len(dirs))
-	for _, row := range dirs {
-		row.UpdatedAt = updatedAt
-		row.ChildCount = childCounts[row.Dir]
-		row.AllAtimeBuckets = summariseAgeBucketsSlice(nil)
-		row.AllMtimeBuckets = summariseAgeBucketsSlice(nil)
-		row.RefreshedAt = refreshedAt
-		out = append(out, row)
-	}
-
-	slices.SortFunc(out, func(a, b summariseActiveVirtualSummaryRow) int {
-		return strings.Compare(a.Dir, b.Dir)
-	})
-
-	return out
-}
-
 func summariseActiveVirtualFilterSortKey(row summariseActiveVirtualFilterAllRow) string {
-	return fmt.Sprintf("%s\x00%03d\x00%010d\x00%010d\x00%05d", row.Dir, row.Age, row.GID, row.UID, row.FT)
+	prefix := row.Dir
+	if row.VirtualID != 0 {
+		prefix = fmt.Sprintf("%010d", row.VirtualID)
+	}
+
+	return fmt.Sprintf("%s\x00%03d\x00%010d\x00%010d\x00%05d", prefix, row.Age, row.GID, row.UID, row.FT)
 }
 
 func summariseAppendUniqueUint32Slice(values []uint32, more []uint32) []uint32 {
@@ -1370,24 +1491,6 @@ func summariseFillActiveVirtualChildCounts(
 	for idx := range childRows {
 		childRows[idx].ChildCount = childCounts[summariseEnsureTrailingSlash(childRows[idx].ChildDir)]
 	}
-}
-
-func summariseVirtualIDForDir(dir string) uint32 {
-	return uint32(summariseCatalogPathHash(dir)) //nolint:gosec // Virtual IDs intentionally use low hash bits.
-}
-
-func summariseMountRootDirID(mountPath string) uint32 {
-	mountPath = summariseEnsureTrailingSlash(mountPath)
-	if mountPath == "/" || mountPath == "" {
-		return 0
-	}
-
-	trimmed := strings.Trim(mountPath, "/")
-	if trimmed == "" {
-		return 0
-	}
-
-	return uint32(strings.Count(trimmed, "/") + 1) //nolint:gosec // Mount path segment counts are bounded.
 }
 
 func summariseActiveVirtualManifestSHA256(activeSetID string, summaryRows, filterRows, childRows int) string {
@@ -2599,12 +2702,4 @@ func statsFileModtime(statsPath string) (time.Time, error) {
 	}
 
 	return st.ModTime(), nil
-}
-
-func summariseBoolAsUInt8(v bool) uint8 {
-	if v {
-		return 1
-	}
-
-	return 0
 }

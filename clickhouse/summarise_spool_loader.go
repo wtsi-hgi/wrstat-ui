@@ -59,14 +59,18 @@ const (
 
 	selectReadyActiveVirtualSetCountsQuery = "SELECT summary_rows, filter_rows, child_rows " +
 		"FROM wrstat_active_virtual_sets WHERE active_set_id = ? AND ready = 1 LIMIT 1"
-	selectActiveVirtualSummariesForDirsQuery = "SELECT dir, mount_path, is_mount_root_box, updated_at, " +
+	selectActiveVirtualSummariesForDirsQuery = "SELECT d.full_path, s.virtual_id, s.mount_path, " +
+		"toString(s.snapshot_id), s.mount_root_dir_id, s.is_mount_root_box, s.updated_at, " +
 		"all_count, all_size, all_atime_min, all_mtime_max, all_atime_buckets, all_mtime_buckets, " +
 		"all_uids, all_gids, all_ft, file_count, file_size, child_count " +
-		"FROM wrstat_active_virtual_summaries PREWHERE active_set_id = ? WHERE dir IN (%s) ORDER BY dir"
-	selectActiveVirtualFiltersForDirsQuery = "SELECT dir, age, gid, uid, ft, count, size, " +
+		"FROM wrstat_active_virtual_summaries AS s INNER JOIN wrstat_active_virtual_dirs AS d " +
+		"ON d.active_set_id = s.active_set_id AND d.virtual_id = s.virtual_id " +
+		"PREWHERE s.active_set_id = ? WHERE d.full_path IN (%s) ORDER BY s.virtual_id"
+	selectActiveVirtualFiltersForDirsQuery = "SELECT d.full_path, v.virtual_id, age, gid, uid, ft, count, size, " +
 		"atime_min, mtime_max, atime_buckets, mtime_buckets, filter_child_count, child_count " +
-		"FROM wrstat_active_virtual_filter_all PREWHERE active_set_id = ? " +
-		"WHERE dir IN (%s) ORDER BY dir, age, gid, uid, ft"
+		"FROM wrstat_active_virtual_filter_all AS v INNER JOIN wrstat_active_virtual_dirs AS d " +
+		"ON d.active_set_id = v.active_set_id AND d.virtual_id = v.virtual_id " +
+		"PREWHERE v.active_set_id = ? WHERE d.full_path IN (%s) ORDER BY v.virtual_id, age, gid, uid, ft"
 )
 
 var (
@@ -105,12 +109,6 @@ type historyLastDateKey struct {
 	gid       uint32
 }
 
-type summariseSpoolVirtualDirKey struct {
-	mountPath  string
-	snapshotID string
-	virtualID  uint32
-}
-
 type summariseSpoolLoader struct {
 	cfg                 Config
 	conn                driver.Conn
@@ -121,7 +119,6 @@ type summariseSpoolLoader struct {
 	importPhaseRecorder func(string, time.Duration)
 	loadedRows          map[string]uint64
 	groupUsageDates     map[uint32]finaliseQuotaDates
-	virtualDirs         map[summariseSpoolVirtualDirKey]string
 }
 
 func newSummariseSpoolLoader(
@@ -275,27 +272,47 @@ func (l *summariseSpoolLoader) dropSpoolActiveVirtualPartitions(parent context.C
 
 func (l *summariseSpoolLoader) spoolActiveSetIDs() ([]string, error) {
 	ids := make(map[string]struct{})
-
-	if err := decodeSpoolActiveSetIDs(l.dir, ids, chspool.TableActiveVirtualSummaries,
-		func(row chspool.ActiveVirtualSummaryRow) string { return row.ActiveSetID }); err != nil {
+	if err := decodeSpoolActiveVirtualSetIDs(l.dir, ids); err != nil {
 		return nil, err
 	}
 
-	if err := decodeSpoolActiveSetIDs(l.dir, ids, chspool.TableActiveVirtualFilterAll,
-		func(row chspool.ActiveVirtualFilterAllRow) string { return row.ActiveSetID }); err != nil {
-		return nil, err
+	return sortedSpoolActiveSetIDs(ids), nil
+}
+
+func decodeSpoolActiveVirtualSetIDs(dir string, ids map[string]struct{}) error {
+	decoders := []func() error{
+		func() error {
+			return decodeSpoolActiveSetIDs(dir, ids, chspool.TableActiveVirtualDirs,
+				func(row chspool.ActiveVirtualDirRow) string { return row.ActiveSetID })
+		},
+		func() error {
+			return decodeSpoolActiveSetIDs(dir, ids, chspool.TableActiveVirtualSummaries,
+				func(row chspool.ActiveVirtualSummaryRow) string { return row.ActiveSetID })
+		},
+		func() error {
+			return decodeSpoolActiveSetIDs(dir, ids, chspool.TableActiveVirtualFilterAll,
+				func(row chspool.ActiveVirtualFilterAllRow) string { return row.ActiveSetID })
+		},
+		func() error {
+			return decodeSpoolActiveSetIDs(dir, ids, chspool.TableActiveVirtualChildren,
+				func(row chspool.ActiveVirtualChildRow) string { return row.ActiveSetID })
+		},
+		func() error {
+			return decodeSpoolActiveSetIDs(dir, ids, chspool.TableActiveVirtualSets,
+				func(row chspool.ActiveVirtualSetRow) string { return row.ActiveSetID })
+		},
 	}
 
-	if err := decodeSpoolActiveSetIDs(l.dir, ids, chspool.TableActiveVirtualChildren,
-		func(row chspool.ActiveVirtualChildRow) string { return row.ActiveSetID }); err != nil {
-		return nil, err
+	for _, decode := range decoders {
+		if err := decode(); err != nil {
+			return err
+		}
 	}
 
-	if err := decodeSpoolActiveSetIDs(l.dir, ids, chspool.TableActiveVirtualSets,
-		func(row chspool.ActiveVirtualSetRow) string { return row.ActiveSetID }); err != nil {
-		return nil, err
-	}
+	return nil
+}
 
+func sortedSpoolActiveSetIDs(ids map[string]struct{}) []string {
 	out := make([]string, 0, len(ids))
 	for id := range ids {
 		out = append(out, id)
@@ -303,7 +320,142 @@ func (l *summariseSpoolLoader) spoolActiveSetIDs() ([]string, error) {
 
 	sort.Strings(out)
 
-	return out, nil
+	return out
+}
+
+func (l *summariseSpoolLoader) validateSpoolActiveVirtualCatalog() error {
+	catalog, err := l.spoolActiveVirtualCatalogIDs()
+	if err != nil {
+		return err
+	}
+
+	if err := l.validateSpoolActiveVirtualSummaryCatalog(catalog); err != nil {
+		return err
+	}
+
+	if err := l.validateSpoolActiveVirtualFilterCatalog(catalog); err != nil {
+		return err
+	}
+
+	return l.validateSpoolActiveVirtualChildCatalog(catalog)
+}
+
+func (l *summariseSpoolLoader) spoolActiveVirtualCatalogIDs() (map[string]map[uint32]struct{}, error) {
+	catalog := make(map[string]map[uint32]struct{})
+	err := chspool.DecodeRows[chspool.ActiveVirtualDirRow](
+		l.dir,
+		chspool.TableActiveVirtualDirs,
+		func(row chspool.ActiveVirtualDirRow) error {
+			if catalog[row.ActiveSetID] == nil {
+				catalog[row.ActiveSetID] = make(map[uint32]struct{})
+			}
+
+			catalog[row.ActiveSetID][row.VirtualID] = struct{}{}
+
+			return nil
+		},
+	)
+
+	return catalog, err
+}
+
+func (l *summariseSpoolLoader) validateSpoolActiveVirtualSummaryCatalog(
+	catalog map[string]map[uint32]struct{},
+) error {
+	return chspool.DecodeRows[chspool.ActiveVirtualSummaryRow](
+		l.dir,
+		chspool.TableActiveVirtualSummaries,
+		func(row chspool.ActiveVirtualSummaryRow) error {
+			return validateSpoolActiveVirtualCatalogID(
+				catalog,
+				row.ActiveSetID,
+				row.VirtualID,
+				chspool.TableActiveVirtualSummaries,
+			)
+		},
+	)
+}
+
+func validateSpoolActiveVirtualCatalogID(
+	catalog map[string]map[uint32]struct{},
+	activeSetID string,
+	virtualID uint32,
+	table string,
+) error {
+	if _, ok := catalog[activeSetID][virtualID]; ok {
+		return nil
+	}
+
+	return fmt.Errorf(
+		"%w: %s active_set_id=%s virtual_id=%d missing wrstat_active_virtual_dirs row",
+		errInvalidSummariseSpoolManifest,
+		table,
+		activeSetID,
+		virtualID,
+	)
+}
+
+func (l *summariseSpoolLoader) validateSpoolActiveVirtualFilterCatalog(
+	catalog map[string]map[uint32]struct{},
+) error {
+	return chspool.DecodeRows[chspool.ActiveVirtualFilterAllRow](
+		l.dir,
+		chspool.TableActiveVirtualFilterAll,
+		func(row chspool.ActiveVirtualFilterAllRow) error {
+			return validateSpoolActiveVirtualCatalogID(
+				catalog,
+				row.ActiveSetID,
+				row.VirtualID,
+				chspool.TableActiveVirtualFilterAll,
+			)
+		},
+	)
+}
+
+func (l *summariseSpoolLoader) validateSpoolActiveVirtualChildCatalog(
+	catalog map[string]map[uint32]struct{},
+) error {
+	return chspool.DecodeRows[chspool.ActiveVirtualChildRow](
+		l.dir,
+		chspool.TableActiveVirtualChildren,
+		func(row chspool.ActiveVirtualChildRow) error {
+			if err := validateSpoolActiveVirtualCatalogID(
+				catalog,
+				row.ActiveSetID,
+				row.ParentVirtualID,
+				chspool.TableActiveVirtualChildren,
+			); err != nil {
+				return err
+			}
+
+			return validateSpoolActiveVirtualCatalogID(
+				catalog,
+				row.ActiveSetID,
+				row.ChildVirtualID,
+				chspool.TableActiveVirtualChildren,
+			)
+		},
+	)
+}
+
+func (l *summariseSpoolLoader) loadActiveVirtualDirs(parent context.Context) error {
+	return loadSimpleSpoolTable(parent, l, chspool.TableActiveVirtualDirs, func(
+		batch driver.Batch,
+		row chspool.ActiveVirtualDirRow,
+	) error {
+		return batch.Append(
+			row.ActiveSetID,
+			row.VirtualID,
+			row.ParentID,
+			row.Name,
+			row.FullPath,
+			row.MountPath,
+			row.SnapshotID,
+			row.MountRootDirID,
+			row.IsMountRootBox,
+			row.RefreshedAt,
+		)
+	})
 }
 
 func decodeSpoolActiveSetIDs[T any](
@@ -361,6 +513,10 @@ func (l *summariseSpoolLoader) loadTables(ctx context.Context) error { //nolint:
 		return err
 	}
 
+	if err := l.loadActiveVirtualDirs(ctx); err != nil {
+		return err
+	}
+
 	if err := l.loadActiveVirtualSummaries(ctx); err != nil {
 		return err
 	}
@@ -374,6 +530,10 @@ func (l *summariseSpoolLoader) loadTables(ctx context.Context) error { //nolint:
 	}
 
 	if err := l.verifyLoadedCounts(ctx, summariseSpoolActiveVirtualStageTables()); err != nil {
+		return err
+	}
+
+	if err := l.validateSpoolActiveVirtualCatalog(); err != nil {
 		return err
 	}
 
@@ -421,6 +581,7 @@ func summariseSpoolSnapshotStageTables() []string {
 
 func summariseSpoolActiveVirtualStageTables() []string {
 	return []string{
+		chspool.TableActiveVirtualDirs,
 		chspool.TableActiveVirtualSummaries,
 		chspool.TableActiveVirtualFilterAll,
 		chspool.TableActiveVirtualChildren,
@@ -684,15 +845,12 @@ func (l *summariseSpoolLoader) loadActiveVirtualSummaries(parent context.Context
 		batch driver.Batch,
 		row chspool.ActiveVirtualSummaryRow,
 	) error {
-		dir, err := l.resolveSpoolVirtualDir(parent, row.MountPath, row.SnapshotID, row.VirtualID)
-		if err != nil {
-			return err
-		}
-
 		return batch.Append(
 			row.ActiveSetID,
-			dir,
+			row.VirtualID,
 			row.MountPath,
+			row.SnapshotID,
+			row.MountRootDirID,
 			row.IsMountRootBox,
 			row.UpdatedAt,
 			row.AllCount,
@@ -717,14 +875,9 @@ func (l *summariseSpoolLoader) loadActiveVirtualFilterAll(parent context.Context
 		batch driver.Batch,
 		row chspool.ActiveVirtualFilterAllRow,
 	) error {
-		dir, err := l.resolveSpoolVirtualDir(parent, l.manifest.MountPath, l.manifest.SnapshotID, row.VirtualID)
-		if err != nil {
-			return err
-		}
-
 		return batch.Append(
 			row.ActiveSetID,
-			dir,
+			row.VirtualID,
 			row.Age,
 			row.GID,
 			row.UID,
@@ -752,94 +905,13 @@ func (l *summariseSpoolLoader) loadActiveVirtualChildren(parent context.Context)
 			row.ParentVirtualID,
 			row.ChildVirtualID,
 			row.MountPath,
+			row.SnapshotID,
+			row.MountRootDirID,
 			row.IsMountRootBox,
 			row.ChildCount,
 			row.RefreshedAt,
 		)
 	})
-}
-
-func (l *summariseSpoolLoader) resolveSpoolVirtualDir(
-	parent context.Context,
-	mountPath string,
-	snapshotID string,
-	virtualID uint32,
-) (string, error) {
-	key := l.spoolVirtualDirKey(mountPath, snapshotID, virtualID)
-	if dir, ok := l.cachedSpoolVirtualDir(key); ok {
-		return dir, nil
-	}
-
-	dir, err := l.querySpoolVirtualDir(parent, key)
-	if err != nil {
-		return "", err
-	}
-
-	l.cacheSpoolVirtualDir(key, dir)
-
-	return dir, nil
-}
-
-func (l *summariseSpoolLoader) spoolVirtualDirKey(
-	mountPath string,
-	snapshotID string,
-	virtualID uint32,
-) summariseSpoolVirtualDirKey {
-	if mountPath == "" {
-		mountPath = l.manifest.MountPath
-	}
-
-	if snapshotID == "" {
-		snapshotID = l.manifest.SnapshotID
-	}
-
-	return summariseSpoolVirtualDirKey{
-		mountPath:  mountPath,
-		snapshotID: snapshotID,
-		virtualID:  virtualID,
-	}
-}
-
-func (l *summariseSpoolLoader) cachedSpoolVirtualDir(key summariseSpoolVirtualDirKey) (string, bool) {
-	if l.virtualDirs == nil {
-		return "", false
-	}
-
-	dir, ok := l.virtualDirs[key]
-
-	return dir, ok
-}
-
-func (l *summariseSpoolLoader) querySpoolVirtualDir(
-	parent context.Context,
-	key summariseSpoolVirtualDirKey,
-) (string, error) {
-	ctx, cancel := l.queryContext(parent)
-	defer cancel()
-
-	var dir string
-
-	err := l.conn.QueryRow(
-		ctx,
-		"SELECT full_path FROM wrstat_dirs WHERE mount_path = ? AND snapshot_id = toUUID(?) "+
-			"AND toUInt32(path_hash) = ? LIMIT 1",
-		key.mountPath,
-		key.snapshotID,
-		key.virtualID,
-	).Scan(&dir)
-	if err != nil {
-		return "", fmt.Errorf("clickhouse: failed to resolve active virtual directory id %d: %w", key.virtualID, err)
-	}
-
-	return ensureTrailingSlash(dir), nil
-}
-
-func (l *summariseSpoolLoader) cacheSpoolVirtualDir(key summariseSpoolVirtualDirKey, dir string) {
-	if l.virtualDirs == nil {
-		l.virtualDirs = make(map[summariseSpoolVirtualDirKey]string)
-	}
-
-	l.virtualDirs[key] = dir
 }
 
 func (l *summariseSpoolLoader) loadActiveVirtualSets(parent context.Context) error {
@@ -1196,6 +1268,7 @@ func (l *summariseSpoolLoader) loadBasedirsGroupUsage(parent context.Context) er
 						row.MountPath,
 						row.SnapshotID,
 						row.GID,
+						row.BaseDirID,
 						row.BaseDirExternal,
 						row.Age,
 						ensureNonNilUInt32s(row.UIDs),
@@ -1274,6 +1347,7 @@ func (l *summariseSpoolLoader) loadBasedirsUserUsage(parent context.Context) err
 						row.MountPath,
 						row.SnapshotID,
 						row.UID,
+						row.BaseDirID,
 						row.BaseDirExternal,
 						row.Age,
 						ensureNonNilUInt32s(row.GIDs),
@@ -1314,9 +1388,11 @@ func (l *summariseSpoolLoader) loadBasedirsSubdirs(parent context.Context, table
 					row.MountPath,
 					row.SnapshotID,
 					row.ID,
+					row.BaseDirID,
 					row.BaseDirExternal,
 					row.Age,
 					row.Pos,
+					row.SubDirID,
 					row.SubDirExternal,
 					row.NumFiles,
 					row.SizeFiles,
@@ -1359,6 +1435,8 @@ func summariseSpoolTableQuery(table string) (string, string, error) { //nolint:g
 		return insertDirFilterAllQuery, importPhaseFullFilterAllInsert, nil
 	case chspool.TableSchema3SnapshotSets:
 		return insertSchema3SnapshotSetQuery, importPhaseSchema3Ready, nil
+	case chspool.TableActiveVirtualDirs:
+		return insertActiveVirtualDirQuery, importPhaseActiveVirtualInsert, nil
 	case chspool.TableActiveVirtualSummaries:
 		return insertActiveVirtualSummaryQuery, importPhaseActiveVirtualInsert, nil
 	case chspool.TableActiveVirtualFilterAll:
@@ -1502,7 +1580,7 @@ func (l *summariseSpoolLoader) writeZeroContributionActiveVirtualRows( //nolint:
 ) error {
 	refreshedAt := time.Now().UTC()
 	mounts := newActiveMountsSnapshot(activeRows).all()
-	summaryRows, _, childRows := activeVirtualRowsForMountsFromData(
+	namespace, summaryRows, _, childRows := activeVirtualRowsForMountsFromDataWithLinks(
 		nextActiveSetID,
 		mounts,
 		refreshedAt,
@@ -1556,6 +1634,7 @@ func (l *summariseSpoolLoader) writeZeroContributionActiveVirtualRows( //nolint:
 	if err := appendActiveVirtualOverlayRows(
 		ctx,
 		writer,
+		namespace.rows,
 		affectedSummaries,
 		affectedFilters,
 		affectedChildren,
@@ -1915,6 +1994,9 @@ func (l *summariseSpoolLoader) countLoadedActiveVirtualRows( //nolint:funlen
 
 func summariseSpoolActiveVirtualCountQueries() map[string]string {
 	return map[string]string{
+		chspool.TableActiveVirtualDirs: activeVirtualSpoolRowsQuery(
+			chspool.TableActiveVirtualDirs,
+		),
 		chspool.TableActiveVirtualSummaries: activeVirtualSpoolRowsQuery(
 			chspool.TableActiveVirtualSummaries,
 		),
@@ -2140,7 +2222,10 @@ func scanActiveVirtualSummaryRows( //nolint:funlen
 		row := activeVirtualSummaryRow{ActiveSetID: activeSetID}
 		if err := rows.Scan(
 			&row.Dir,
+			&row.VirtualID,
 			&row.MountPath,
+			&row.SnapshotID,
+			&row.MountRootDirID,
 			&row.IsMountRootBox,
 			&row.UpdatedAt,
 			&row.AllCount,
@@ -2200,6 +2285,7 @@ func scanActiveVirtualFilterRows(
 		row := activeVirtualFilterAllRow{ActiveSetID: activeSetID}
 		if err := rows.Scan(
 			&row.Dir,
+			&row.VirtualID,
 			&row.Age,
 			&row.GID,
 			&row.UID,
@@ -2980,14 +3066,17 @@ func copyUnchangedActiveVirtualSummariesQuery(
 	refreshedAt time.Time,
 ) (string, []any) {
 	query := "INSERT INTO wrstat_active_virtual_summaries " +
-		"(active_set_id, dir, mount_path, is_mount_root_box, updated_at, all_count, all_size, " +
+		"(active_set_id, virtual_id, mount_path, snapshot_id, mount_root_dir_id, is_mount_root_box, " +
+		"updated_at, all_count, all_size, " +
 		"all_atime_min, all_mtime_max, all_atime_buckets, all_mtime_buckets, all_uids, all_gids, " +
-		"all_ft, file_count, file_size, child_count, refreshed_at) SELECT ?, dir, mount_path, " +
-		"is_mount_root_box, ?, all_count, all_size, all_atime_min, all_mtime_max, all_atime_buckets, " +
+		"all_ft, file_count, file_size, child_count, refreshed_at) SELECT ?, virtual_id, mount_path, " +
+		"snapshot_id, mount_root_dir_id, is_mount_root_box, ?, all_count, all_size, all_atime_min, " +
+		"all_mtime_max, all_atime_buckets, " +
 		"all_mtime_buckets, all_uids, all_gids, all_ft, file_count, file_size, child_count, ? " +
-		"FROM wrstat_active_virtual_summaries PREWHERE active_set_id = ? WHERE dir NOT IN (" +
-		placeholders(len(affectedDirs)) + ")"
-	args := []any{nextActiveSetID, updatedAt, refreshedAt, previousActiveSetID}
+		"FROM wrstat_active_virtual_summaries PREWHERE active_set_id = ? WHERE virtual_id NOT IN (" +
+		"SELECT virtual_id FROM wrstat_active_virtual_dirs PREWHERE active_set_id = ? WHERE full_path IN (" +
+		placeholders(len(affectedDirs)) + "))"
+	args := []any{nextActiveSetID, updatedAt, refreshedAt, previousActiveSetID, previousActiveSetID}
 
 	return query, appendActiveVirtualDirArgs(args, affectedDirs)
 }
@@ -3000,12 +3089,14 @@ func copyUnchangedActiveVirtualFiltersQuery(
 	refreshedAt time.Time,
 ) (string, []any) {
 	query := "INSERT INTO wrstat_active_virtual_filter_all " +
-		"(active_set_id, dir, age, gid, uid, ft, count, size, atime_min, mtime_max, " +
+		"(active_set_id, virtual_id, age, gid, uid, ft, count, size, atime_min, mtime_max, " +
 		"atime_buckets, mtime_buckets, filter_child_count, child_count, refreshed_at) " +
-		"SELECT ?, dir, age, gid, uid, ft, count, size, atime_min, mtime_max, atime_buckets, " +
+		"SELECT ?, virtual_id, age, gid, uid, ft, count, size, atime_min, mtime_max, atime_buckets, " +
 		"mtime_buckets, filter_child_count, child_count, ? FROM wrstat_active_virtual_filter_all " +
-		"PREWHERE active_set_id = ? WHERE dir NOT IN (" + placeholders(len(affectedDirs)) + ")"
-	args := []any{nextActiveSetID, refreshedAt, previousActiveSetID}
+		"PREWHERE active_set_id = ? WHERE virtual_id NOT IN (" +
+		"SELECT virtual_id FROM wrstat_active_virtual_dirs PREWHERE active_set_id = ? WHERE full_path IN (" +
+		placeholders(len(affectedDirs)) + "))"
+	args := []any{nextActiveSetID, refreshedAt, previousActiveSetID, previousActiveSetID}
 
 	return query, appendActiveVirtualDirArgs(args, affectedDirs)
 }
@@ -3018,27 +3109,25 @@ func copyUnchangedActiveVirtualChildrenQuery(
 	refreshedAt time.Time,
 ) (string, []any) {
 	query := "INSERT INTO wrstat_active_virtual_children " +
-		"(active_set_id, parent_virtual_id, child_virtual_id, mount_path, is_mount_root_box, child_count, refreshed_at) " +
-		"SELECT ?, parent_virtual_id, child_virtual_id, mount_path, is_mount_root_box, child_count, ? " +
-		"FROM wrstat_active_virtual_children PREWHERE active_set_id = ? WHERE parent_virtual_id NOT IN (" +
-		placeholders(len(affectedDirs)) + ") AND child_virtual_id NOT IN (" + placeholders(len(affectedDirs)) + ")"
-	args := []any{nextActiveSetID, refreshedAt, previousActiveSetID}
-	args = appendActiveVirtualDirIDArgs(args, affectedDirs)
+		"(active_set_id, parent_virtual_id, child_virtual_id, mount_path, snapshot_id, mount_root_dir_id, " +
+		"is_mount_root_box, child_count, refreshed_at) " +
+		"SELECT ?, parent_virtual_id, child_virtual_id, mount_path, snapshot_id, mount_root_dir_id, " +
+		"is_mount_root_box, child_count, ? FROM wrstat_active_virtual_children " +
+		"PREWHERE active_set_id = ? WHERE parent_virtual_id NOT IN (" +
+		"SELECT virtual_id FROM wrstat_active_virtual_dirs PREWHERE active_set_id = ? WHERE full_path IN (" +
+		placeholders(len(affectedDirs)) + ")) AND child_virtual_id NOT IN (" +
+		"SELECT virtual_id FROM wrstat_active_virtual_dirs PREWHERE active_set_id = ? WHERE full_path IN (" +
+		placeholders(len(affectedDirs)) + "))"
+	args := []any{nextActiveSetID, refreshedAt, previousActiveSetID, previousActiveSetID}
+	args = appendActiveVirtualDirArgs(args, affectedDirs)
+	args = append(args, previousActiveSetID)
 
-	return query, appendActiveVirtualDirIDArgs(args, affectedDirs)
+	return query, appendActiveVirtualDirArgs(args, affectedDirs)
 }
 
 func appendActiveVirtualDirArgs(args []any, dirs []string) []any {
 	for _, dir := range dirs {
 		args = append(args, ensureTrailingSlash(dir))
-	}
-
-	return args
-}
-
-func appendActiveVirtualDirIDArgs(args []any, dirs []string) []any {
-	for _, dir := range dirs {
-		args = append(args, virtualIDForDir(dir))
 	}
 
 	return args

@@ -28,7 +28,8 @@ CREATE TABLE IF NOT EXISTS wrstat_basedirs_user_usage (
   mount_path LowCardinality(String) CODEC(ZSTD(3)),
   snapshot_id UUID,
   uid UInt32,
-  basedir String CODEC(ZSTD(3)),
+  basedir_id UInt32 CODEC(Delta, LZ4),
+  basedir_external String CODEC(ZSTD(3)),
   age UInt8,
   gids Array(UInt32),
   usage_size UInt64 CODEC(Delta, ZSTD(3)),
@@ -38,4 +39,4 @@ CREATE TABLE IF NOT EXISTS wrstat_basedirs_user_usage (
   mtime DateTime CODEC(Delta, ZSTD(3))
 ) ENGINE = MergeTree
 PARTITION BY (mount_path, snapshot_id)
-ORDER BY (mount_path, snapshot_id, uid, age, basedir);
+ORDER BY (mount_path, snapshot_id, uid, age, basedir_id, basedir_external);

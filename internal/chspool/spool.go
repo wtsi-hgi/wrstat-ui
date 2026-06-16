@@ -58,6 +58,7 @@ const (
 	TableChildFilterAll         = "wrstat_child_filter_all"
 	TableDirFilterAll           = "wrstat_dir_filter_all"
 	TableSchema3SnapshotSets    = "wrstat_schema3_snapshot_sets"
+	TableActiveVirtualDirs      = "wrstat_active_virtual_dirs"
 	TableActiveVirtualSummaries = "wrstat_active_virtual_summaries"
 	TableActiveVirtualFilterAll = "wrstat_active_virtual_filter_all"
 	TableActiveVirtualChildren  = "wrstat_active_virtual_children"
@@ -82,6 +83,7 @@ var tableOrder = []string{ //nolint:gochecknoglobals
 	TableChildFilterAll,
 	TableDirFilterAll,
 	TableSchema3SnapshotSets,
+	TableActiveVirtualDirs,
 	TableActiveVirtualSummaries,
 	TableActiveVirtualFilterAll,
 	TableActiveVirtualChildren,
@@ -227,6 +229,8 @@ func countRows(path string, table string) (uint64, error) { //nolint:gocyclo,cyc
 		return countDecodedRows[DirFilterAllRow](path, table)
 	case TableSchema3SnapshotSets:
 		return countDecodedRows[Schema3SnapshotSetRow](path, table)
+	case TableActiveVirtualDirs:
+		return countDecodedRows[ActiveVirtualDirRow](path, table)
 	case TableActiveVirtualSummaries:
 		return countDecodedRows[ActiveVirtualSummaryRow](path, table)
 	case TableActiveVirtualFilterAll:
@@ -500,6 +504,19 @@ type Schema3SnapshotSetRow struct {
 	RefreshedAt        time.Time
 }
 
+type ActiveVirtualDirRow struct {
+	ActiveSetID    string
+	VirtualID      uint32
+	ParentID       uint32
+	Name           string
+	FullPath       string
+	MountPath      string
+	SnapshotID     string
+	MountRootDirID uint32
+	IsMountRootBox uint8
+	RefreshedAt    time.Time
+}
+
 type ActiveVirtualSummaryRow struct {
 	ActiveSetID     string
 	VirtualID       uint32
@@ -742,6 +759,10 @@ func (s *Set) WriteDirFilterAll(row DirFilterAllRow) error {
 
 func (s *Set) WriteSchema3SnapshotSet(row Schema3SnapshotSetRow) error {
 	return s.encode(TableSchema3SnapshotSets, row)
+}
+
+func (s *Set) WriteActiveVirtualDir(row ActiveVirtualDirRow) error {
+	return s.encode(TableActiveVirtualDirs, row)
 }
 
 func (s *Set) WriteActiveVirtualSummary(row ActiveVirtualSummaryRow) error {

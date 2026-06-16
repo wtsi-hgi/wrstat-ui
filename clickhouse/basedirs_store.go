@@ -44,22 +44,26 @@ import (
 
 const (
 	insertBasedirsGroupUsageQuery = "INSERT INTO wrstat_basedirs_group_usage " +
-		"(mount_path, snapshot_id, gid, basedir, age, uids, usage_size, quota_size, usage_inodes, quota_inodes, " +
+		"(mount_path, snapshot_id, gid, basedir_id, basedir_external, age, uids, " +
+		"usage_size, quota_size, usage_inodes, quota_inodes, " +
 		"mtime, date_no_space, date_no_files) " +
-		"VALUES (?, toUUID(?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+		"VALUES (?, toUUID(?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
 
 	insertBasedirsUserUsageQuery = "INSERT INTO wrstat_basedirs_user_usage " +
-		"(mount_path, snapshot_id, uid, basedir, age, gids, usage_size, quota_size, usage_inodes, quota_inodes, " +
+		"(mount_path, snapshot_id, uid, basedir_id, basedir_external, age, gids, " +
+		"usage_size, quota_size, usage_inodes, quota_inodes, " +
 		"mtime) " +
-		"VALUES (?, toUUID(?), ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+		"VALUES (?, toUUID(?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
 
 	insertBasedirsGroupSubdirsQuery = "INSERT INTO wrstat_basedirs_group_subdirs " +
-		"(mount_path, snapshot_id, gid, basedir, age, pos, subdir, num_files, size_files, last_modified, file_usage) " +
-		"VALUES (?, toUUID(?), ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+		"(mount_path, snapshot_id, gid, basedir_id, basedir_external, age, pos, " +
+		"subdir_id, subdir_external, num_files, size_files, last_modified, file_usage) " +
+		"VALUES (?, toUUID(?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
 
 	insertBasedirsUserSubdirsQuery = "INSERT INTO wrstat_basedirs_user_subdirs " +
-		"(mount_path, snapshot_id, uid, basedir, age, pos, subdir, num_files, size_files, last_modified, file_usage) " +
-		"VALUES (?, toUUID(?), ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+		"(mount_path, snapshot_id, uid, basedir_id, basedir_external, age, pos, " +
+		"subdir_id, subdir_external, num_files, size_files, last_modified, file_usage) " +
+		"VALUES (?, toUUID(?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
 
 	queryBasedirsHistoryLastDate = "SELECT max(date) FROM wrstat_basedirs_history WHERE mount_path = ? AND gid = ?"
 	insertBasedirsHistoryPoint   = "INSERT INTO wrstat_basedirs_history " +
@@ -67,6 +71,8 @@ const (
 		"VALUES (?, ?, ?, ?, ?, ?, ?)"
 	queryBasedirsHistorySeries = "SELECT date, usage_size, quota_size, usage_inodes, quota_inodes " +
 		"FROM wrstat_basedirs_history WHERE mount_path = ? AND gid = ? ORDER BY date ASC"
+	queryBasedirsDirID = "SELECT dir_id FROM wrstat_dirs " +
+		"WHERE mount_path = ? AND snapshot_id = toUUID(?) AND full_path = ? LIMIT 1"
 )
 
 const (
@@ -95,6 +101,35 @@ type historyRollbackEntry struct {
 type finaliseQuotaDates struct {
 	noSpace time.Time
 	noFiles time.Time
+}
+
+type basedirsResolvedDirID struct {
+	id    uint32
+	found bool
+}
+
+func scanBasedirsDirID(rows iterRows) (basedirsResolvedDirID, error) {
+	resolved := basedirsResolvedDirID{}
+	if rows.Next() {
+		if err := rows.Scan(&resolved.id); err != nil {
+			return basedirsResolvedDirID{}, fmt.Errorf("clickhouse: failed to scan basedirs dir_id: %w", err)
+		}
+
+		resolved.found = true
+	}
+
+	if err := rowsErr(rows); err != nil {
+		return basedirsResolvedDirID{}, fmt.Errorf("clickhouse: basedirs dir_id iteration error: %w", err)
+	}
+
+	return resolved, nil
+}
+
+type basedirsSubdirColumns struct {
+	basedirID       uint32
+	basedirExternal string
+	subdirID        uint32
+	subdirExternal  string
 }
 
 type batchSlot struct {
@@ -135,6 +170,7 @@ type chBaseDirsStore struct {
 	bufferedAgeAllGroupUsage  map[uint32][]*basedirs.Usage
 	insertedHistory           []historyRollbackEntry
 	lastHistoryAppendInserted bool
+	dirIDCache                map[string]basedirsResolvedDirID
 
 	closed bool
 }
@@ -345,6 +381,7 @@ func (s *chBaseDirsStore) clearRollbackState() {
 	s.insertedHistory = nil
 	s.bufferedAgeAllGroupUsage = nil
 	s.lastHistoryAppendInserted = false
+	s.dirIDCache = nil
 	s.reset = false
 	s.writePhase = ""
 }
@@ -409,6 +446,7 @@ func (s *chBaseDirsStore) resetSnapshotState() {
 	s.bufferedAgeAllGroupUsage = map[uint32][]*basedirs.Usage{}
 	s.insertedHistory = nil
 	s.lastHistoryAppendInserted = false
+	s.dirIDCache = map[string]basedirsResolvedDirID{}
 	s.reset = false
 	s.writePhase = ""
 }
@@ -482,34 +520,99 @@ func (s *chBaseDirsStore) PutUserUsage(u *basedirs.Usage) error {
 	return s.appendUserUsage(u)
 }
 
+func (s *chBaseDirsStore) basedirsPathColumns(catalogPath, external string) (uint32, string, error) {
+	id, found, err := s.resolveBasedirsDirID(catalogPath)
+	if err != nil {
+		return 0, "", err
+	}
+
+	if found {
+		return id, "", nil
+	}
+
+	return 0, external, nil
+}
+
+func (s *chBaseDirsStore) resolveBasedirsDirID(path string) (uint32, bool, error) {
+	if !basedirsCanResolvePath(path) {
+		return 0, false, nil
+	}
+
+	path = ensureTrailingSlash(path)
+	if cached, ok := s.cachedBasedirsDirID(path); ok {
+		return cached.id, cached.found, nil
+	}
+
+	resolved, err := s.queryBasedirsDirID(path)
+	if err != nil {
+		return 0, false, err
+	}
+
+	s.dirIDCache[path] = resolved
+
+	return resolved.id, resolved.found, nil
+}
+
+func basedirsCanResolvePath(path string) bool {
+	return path != "" && strings.HasPrefix(path, "/")
+}
+
+func (s *chBaseDirsStore) cachedBasedirsDirID(path string) (basedirsResolvedDirID, bool) {
+	if s.dirIDCache == nil {
+		s.dirIDCache = map[string]basedirsResolvedDirID{}
+	}
+
+	if cached, ok := s.dirIDCache[path]; ok {
+		return cached, true
+	}
+
+	return basedirsResolvedDirID{}, false
+}
+
+func (s *chBaseDirsStore) queryBasedirsDirID(path string) (basedirsResolvedDirID, error) {
+	ctx, cancel := configQueryContext(s.cfg)
+	defer cancel()
+
+	rows, err := s.conn.Query(ctx, queryBasedirsDirID, s.mountPath, s.snapshot.String(), path)
+	if err != nil {
+		return basedirsResolvedDirID{}, fmt.Errorf("clickhouse: failed to resolve basedirs dir_id: %w", err)
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	return scanBasedirsDirID(rows)
+}
+
 func (s *chBaseDirsStore) appendUserUsage(u *basedirs.Usage) error {
-	err := s.timeImportPhase(importPhaseBasedirsUserUsage, func() error {
-		if err := s.transitionWritePhase(importPhaseBasedirsUserUsage); err != nil {
-			return err
+	basedirID, basedirExternal, resolveErr := s.basedirsPathColumns(u.BaseDir, u.BaseDir)
+	if resolveErr != nil {
+		return resolveErr
+	}
+
+	return s.timeImportPhase(importPhaseBasedirsUserUsage, func() error {
+		if phaseErr := s.transitionWritePhase(importPhaseBasedirsUserUsage); phaseErr != nil {
+			return phaseErr
 		}
 
 		return s.appendToBatch(s.userUsageSlot(), func(batch driver.Batch) error {
-			if err := batch.Append(
-				s.mountPath,
-				s.snapshot.String(),
-				u.UID,
-				u.BaseDir,
-				uint8(u.Age),
-				ensureNonNilUInt32s(u.GIDs),
-				u.UsageSize,
-				u.QuotaSize,
-				u.UsageInodes,
-				u.QuotaInodes,
-				u.Mtime,
-			); err != nil {
-				return fmt.Errorf("clickhouse: failed to append basedirs user usage: %w", err)
-			}
-
-			return nil
+			return appendBasedirsUserUsageBatch(batch, s, u, basedirID, basedirExternal)
 		})
 	})
-	if err != nil {
-		return err
+}
+
+func appendBasedirsUserUsageBatch(
+	batch driver.Batch,
+	s *chBaseDirsStore,
+	u *basedirs.Usage,
+	basedirID uint32,
+	basedirExternal string,
+) error {
+	if err := batch.Append(
+		s.mountPath, s.snapshot.String(), u.UID, basedirID, basedirExternal,
+		uint8(u.Age), ensureNonNilUInt32s(u.GIDs), u.UsageSize, u.QuotaSize,
+		u.UsageInodes, u.QuotaInodes, u.Mtime,
+	); err != nil {
+		return fmt.Errorf("clickhouse: failed to append basedirs user usage: %w", err)
 	}
 
 	return nil
@@ -565,20 +668,23 @@ func (s *chBaseDirsStore) appendOneSubDir(
 	kind string,
 	phase string,
 ) error {
-	err := s.timeImportPhase(phase, func() error {
-		if err := s.transitionWritePhase(phase); err != nil {
-			return err
+	cols, resolveErr := s.basedirsSubdirColumns(key, sd)
+	if resolveErr != nil {
+		return resolveErr
+	}
+
+	return s.timeImportPhase(phase, func() error {
+		if phaseErr := s.transitionWritePhase(phase); phaseErr != nil {
+			return phaseErr
 		}
 
 		return s.appendToBatch(s.subdirSlot(batch, kind), func(prepared driver.Batch) error {
 			return appendBasedirsSubDirBatch(
 				prepared, s.mountPath, s.snapshot.String(),
-				key, sd, pos, kind,
+				key, sd, cols, pos, kind,
 			)
 		})
 	})
-
-	return err
 }
 
 func appendBasedirsSubDirBatch(
@@ -586,12 +692,13 @@ func appendBasedirsSubDirBatch(
 	mountPath, snapshot string,
 	key basedirs.SubDirKey,
 	sd *basedirs.SubDir,
+	cols basedirsSubdirColumns,
 	pos uint32,
 	kind string,
 ) error {
 	if err := batch.Append(
-		mountPath, snapshot, key.ID, key.BaseDir, uint8(key.Age), pos,
-		sd.SubDir, sd.NumFiles, sd.SizeFiles, sd.LastModified,
+		mountPath, snapshot, key.ID, cols.basedirID, cols.basedirExternal, uint8(key.Age), pos,
+		cols.subdirID, cols.subdirExternal, sd.NumFiles, sd.SizeFiles, sd.LastModified,
 		usageBreakdownToCHMap(sd.FileUsage),
 	); err != nil {
 		return fmt.Errorf(
@@ -601,6 +708,37 @@ func appendBasedirsSubDirBatch(
 	}
 
 	return nil
+}
+
+func (s *chBaseDirsStore) basedirsSubdirColumns(
+	key basedirs.SubDirKey,
+	sd *basedirs.SubDir,
+) (basedirsSubdirColumns, error) {
+	basedirID, basedirExternal, err := s.basedirsPathColumns(key.BaseDir, key.BaseDir)
+	if err != nil {
+		return basedirsSubdirColumns{}, err
+	}
+
+	subdirPath := basedirsSubdirCatalogPath(key.BaseDir, sd.SubDir)
+
+	subdirID, subdirExternal, err := s.basedirsPathColumns(subdirPath, sd.SubDir)
+	if err != nil {
+		return basedirsSubdirColumns{}, err
+	}
+
+	return basedirsSubdirColumns{basedirID, basedirExternal, subdirID, subdirExternal}, nil
+}
+
+func basedirsSubdirCatalogPath(basedir, subdir string) string {
+	if subdir == "." {
+		return basedir
+	}
+
+	if strings.HasPrefix(subdir, "/") {
+		return subdir
+	}
+
+	return ensureTrailingSlash(basedir) + strings.TrimSuffix(subdir, "/") + "/"
 }
 
 func (s *chBaseDirsStore) AppendGroupHistory(
@@ -774,6 +912,26 @@ func (s *chBaseDirsStore) closeBatches() error {
 	return fmt.Errorf("clickhouse: failed to flush basedirs batches: %w", out)
 }
 
+func appendBasedirsGroupUsageBatch(
+	batch driver.Batch,
+	s *chBaseDirsStore,
+	u *basedirs.Usage,
+	basedirID uint32,
+	basedirExternal string,
+	dateNoSpace time.Time,
+	dateNoFiles time.Time,
+) error {
+	if err := batch.Append(
+		s.mountPath, s.snapshot.String(), u.GID, basedirID, basedirExternal,
+		uint8(u.Age), ensureNonNilUInt32s(u.UIDs), u.UsageSize, u.QuotaSize,
+		u.UsageInodes, u.QuotaInodes, u.Mtime, dateNoSpace, dateNoFiles,
+	); err != nil {
+		return fmt.Errorf("clickhouse: failed to append basedirs group usage: %w", err)
+	}
+
+	return nil
+}
+
 func usageBreakdownToCHMap(in basedirs.UsageBreakdownByType) map[uint16]uint64 {
 	if in == nil {
 		return map[uint16]uint64{}
@@ -922,35 +1080,22 @@ func (s *chBaseDirsStore) Close() error {
 }
 
 func (s *chBaseDirsStore) appendGroupUsage(u *basedirs.Usage, dateNoSpace, dateNoFiles time.Time) error {
-	err := s.timeImportPhase(importPhaseBasedirsGroupUsage, func() error {
-		if err := s.transitionWritePhase(importPhaseBasedirsGroupUsage); err != nil {
-			return err
+	basedirID, basedirExternal, resolveErr := s.basedirsPathColumns(u.BaseDir, u.BaseDir)
+	if resolveErr != nil {
+		return resolveErr
+	}
+
+	return s.timeImportPhase(importPhaseBasedirsGroupUsage, func() error {
+		if phaseErr := s.transitionWritePhase(importPhaseBasedirsGroupUsage); phaseErr != nil {
+			return phaseErr
 		}
 
 		return s.appendToBatch(s.groupUsageSlot(), func(batch driver.Batch) error {
-			if err := batch.Append(
-				s.mountPath,
-				s.snapshot.String(),
-				u.GID,
-				u.BaseDir,
-				uint8(u.Age),
-				ensureNonNilUInt32s(u.UIDs),
-				u.UsageSize,
-				u.QuotaSize,
-				u.UsageInodes,
-				u.QuotaInodes,
-				u.Mtime,
-				dateNoSpace,
-				dateNoFiles,
-			); err != nil {
-				return fmt.Errorf("clickhouse: failed to append basedirs group usage: %w", err)
-			}
-
-			return nil
+			return appendBasedirsGroupUsageBatch(
+				batch, s, u, basedirID, basedirExternal, dateNoSpace, dateNoFiles,
+			)
 		})
 	})
-
-	return err
 }
 
 func (s *chBaseDirsStore) readHistorySeries(

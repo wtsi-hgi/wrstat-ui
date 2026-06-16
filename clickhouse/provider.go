@@ -75,8 +75,6 @@ type activeSetRefresher func(context.Context, string) error
 
 type activeSetRefreshReporter func(context.Context, string, activeSetRefresher)
 
-type virtualChildrenRefresher = activeSetRefresher
-
 type activePrefixRollupsRefresher = activeSetRefresher
 
 type chProvider struct {
@@ -90,7 +88,6 @@ type chProvider struct {
 
 	buildReaders               readerBuilder
 	captureSnapshot            snapshotCapturer
-	refreshVirtualChildren     virtualChildrenRefresher
 	refreshActivePrefixRollups activePrefixRollupsRefresher
 
 	mu        sync.RWMutex
@@ -230,12 +227,12 @@ func (p *chProvider) readerHooksLocked() (readerBuilder, snapshotCapturer) {
 }
 
 func (p *chProvider) defaultBuildReaders(
-	_ context.Context,
+	ctx context.Context,
 	snapshot *activeMountsSnapshot,
 ) (db.Database, *db.Tree, basedirs.Reader, error) {
 	dbImpl := newClickHouseDatabaseWithSnapshot(p.cfg, p.conn, snapshot)
 
-	bd, err := newClickHouseBaseDirsReaderWithSnapshot(p.cfg, p.conn, snapshot)
+	bd, err := newClickHouseBaseDirsReaderWithSnapshot(ctx, p.cfg, p.conn, snapshot)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -661,7 +658,6 @@ func (p *chProvider) swapReadersAndInvoke(ctx context.Context, targetFingerprint
 
 	invokeOnFreshGoroutine(cb)
 
-	p.refreshVirtualChildrenAsync(ctx, publishedFingerprint)
 	p.refreshActivePrefixRollupsAsync(ctx, publishedFingerprint)
 	p.closeOldReaders(oldDB, oldBD)
 
@@ -769,47 +765,6 @@ func (p *chProvider) refreshActiveSetAsync(
 
 		report(ctx, activeSetID, refresh)
 	}()
-}
-
-func (p *chProvider) refreshVirtualChildrenAsync(parent context.Context, activeSetID string) {
-	p.refreshActiveSetAsync(parent, activeSetID, p.virtualChildrenRefresherLocked, p.refreshVirtualChildrenAndReport)
-}
-
-func (p *chProvider) virtualChildrenRefresherLocked() virtualChildrenRefresher {
-	refresh := p.refreshVirtualChildren
-	if refresh != nil {
-		return refresh
-	}
-
-	conn := p.conn
-	if conn == nil {
-		return nil
-	}
-
-	return func(ctx context.Context, activeSetID string) error {
-		if err := refreshActiveVirtualChildrenForActiveSet(ctx, conn, activeSetID); err != nil {
-			return err
-		}
-
-		return cleanupOldVirtualChildrenSets(ctx, conn, activeSetID)
-	}
-}
-
-func (p *chProvider) refreshVirtualChildrenAndReport(
-	parent context.Context,
-	activeSetID string,
-	refresh activeSetRefresher,
-) {
-	ctx, cancel := queryContext(parent, queryTimeout(p.cfg))
-	defer cancel()
-
-	if err := refresh(ctx, activeSetID); err != nil {
-		p.queueError(fmt.Errorf(
-			"clickhouse: virtual_children_refresh active_set_id=%q: %w",
-			activeSetID,
-			err,
-		))
-	}
 }
 
 func (p *chProvider) refreshActivePrefixRollupsAsync(parent context.Context, activeSetID string) {

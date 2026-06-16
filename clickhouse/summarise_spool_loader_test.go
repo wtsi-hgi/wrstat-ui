@@ -792,6 +792,8 @@ func TestClickHouseSummariseSpoolLoader(t *testing.T) {
 		So(loader.load(context.Background()), ShouldBeNil)
 		So(conn.insertedRows(chspool.TableChildFilterAll), ShouldEqual, manifest.Tables[chspool.TableChildFilterAll].Rows)
 		So(conn.insertedRows(chspool.TableDirFilterAll), ShouldEqual, manifest.Tables[chspool.TableDirFilterAll].Rows)
+		So(conn.insertedRows(chspool.TableActiveVirtualDirs),
+			ShouldEqual, manifest.Tables[chspool.TableActiveVirtualDirs].Rows)
 		So(conn.insertedRows(chspool.TableActiveVirtualSummaries),
 			ShouldEqual, manifest.Tables[chspool.TableActiveVirtualSummaries].Rows)
 		So(conn.insertedRows(chspool.TableActiveVirtualFilterAll),
@@ -803,6 +805,10 @@ func TestClickHouseSummariseSpoolLoader(t *testing.T) {
 		So(conn.eventIndex("count "+chspool.TableDirFilterAll),
 			ShouldBeLessThan, conn.eventIndex("send "+chspool.TableSchema3SnapshotSets))
 		So(conn.eventIndex("send "+chspool.TableSchema3SnapshotSets),
+			ShouldBeLessThan, conn.eventIndex("send "+chspool.TableActiveVirtualDirs))
+		So(conn.eventIndex("send "+chspool.TableActiveVirtualDirs),
+			ShouldBeLessThan, conn.eventIndex("send "+chspool.TableActiveVirtualSummaries))
+		So(conn.eventIndex("send "+chspool.TableActiveVirtualSummaries),
 			ShouldBeLessThan, conn.eventIndex("send "+chspool.TableActiveVirtualSets))
 		So(conn.eventIndex("send "+chspool.TableActiveVirtualSets), ShouldBeLessThan, conn.eventIndex("publish"))
 		So(conn.publishedSID, ShouldEqual, manifest.SnapshotID)
@@ -1222,6 +1228,22 @@ func TestClickHouseSummariseSpoolLoader(t *testing.T) {
 		So(conn.eventIndex("drop wrstat_active_virtual_children"),
 			ShouldBeLessThan, conn.eventIndex("send "+chspool.TableActiveVirtualChildren))
 	})
+
+	Convey("D3.5 summarise spool loader refuses ready active virtual sets without catalog rows", t, func() {
+		spoolDir := filepath.Join(t.TempDir(), "spool")
+		manifest := writeSummariseSpoolLoaderActiveVirtualWithoutCatalogSpool(
+			spoolDir,
+			time.Date(2026, 6, 9, 14, 30, 0, 0, time.UTC),
+		)
+		conn := newSummariseSpoolLoaderSpyConn(manifest)
+
+		loader, err := newSummariseSpoolLoader(Config{}, conn, spoolDir, manifest, nil)
+		So(err, ShouldBeNil)
+
+		err = loader.loadTables(context.Background())
+		So(errors.Is(err, errInvalidSummariseSpoolManifest), ShouldBeTrue)
+		So(conn.insertedRows(chspool.TableActiveVirtualSets), ShouldEqual, 0)
+	})
 }
 
 func writeSummariseSpoolLoaderSchema3Spool(
@@ -1271,6 +1293,24 @@ func writeSummariseSpoolLoaderSchema3Spool(
 			ManifestSHA256:     "schema3-snapshot-test",
 			RefreshedAt:        updatedAt,
 		}),
+		set.WriteActiveVirtualDir(summariseSpoolLoaderActiveVirtualDirRow(
+			activeSetID,
+			"/",
+			0,
+			updatedAt,
+		)),
+		set.WriteActiveVirtualDir(summariseSpoolLoaderActiveVirtualDirRow(
+			activeSetID,
+			testRootMountPath,
+			summariseSpoolLoaderVirtualIDForDir("/"),
+			updatedAt,
+		)),
+		set.WriteActiveVirtualDir(summariseSpoolLoaderActiveVirtualDirRow(
+			activeSetID,
+			testMountPath,
+			summariseSpoolLoaderVirtualIDForDir(testRootMountPath),
+			updatedAt,
+		)),
 		set.WriteActiveVirtualSummary(summariseSpoolLoaderActiveVirtualSummaryRow(activeSetID, updatedAt)),
 		set.WriteActiveVirtualFilterAll(summariseSpoolLoaderActiveVirtualFilterRow(activeSetID, updatedAt)),
 		set.WriteActiveVirtualChild(chspool.ActiveVirtualChildRow{
@@ -1322,7 +1362,7 @@ func summariseSpoolLoaderDirID(dir string) uint32 {
 	switch dir {
 	case "/":
 		return 0
-	case "/mnt/":
+	case testRootMountPath:
 		return 1
 	case testMountPath:
 		return 2
@@ -1412,16 +1452,44 @@ func summariseSpoolLoaderDepth(dir string) uint16 {
 	return uint16(strings.Count(strings.Trim(dir, "/"), "/")) //nolint:gosec // Test fixture paths have bounded depth.
 }
 
+func summariseSpoolLoaderActiveVirtualDirRow(
+	activeSetID string,
+	dir string,
+	parentID uint32,
+	updatedAt time.Time,
+) chspool.ActiveVirtualDirRow {
+	row := chspool.ActiveVirtualDirRow{
+		ActiveSetID:    activeSetID,
+		VirtualID:      summariseSpoolLoaderVirtualIDForDir(dir),
+		ParentID:       parentID,
+		Name:           catalogNameForFullPath(dir),
+		FullPath:       ensureTrailingSlash(dir),
+		SnapshotID:     activeVirtualZeroSnapshot,
+		MountRootDirID: 0,
+		RefreshedAt:    updatedAt,
+	}
+
+	if ensureTrailingSlash(dir) == testMountPath {
+		row.MountPath = testMountPath
+		row.SnapshotID = SnapshotID(testMountPath, updatedAt)
+		row.MountRootDirID = summariseSpoolLoaderDirID(testMountPath)
+		row.IsMountRootBox = 1
+	}
+
+	return row
+}
+
 func summariseSpoolLoaderActiveVirtualSummaryRow(
 	activeSetID string,
 	updatedAt time.Time,
 ) chspool.ActiveVirtualSummaryRow {
 	return chspool.ActiveVirtualSummaryRow{
 		ActiveSetID:     activeSetID,
-		VirtualID:       summariseSpoolLoaderVirtualIDForDir(testRootMountPath),
+		VirtualID:       summariseSpoolLoaderVirtualIDForDir(testMountPath),
 		MountPath:       testMountPath,
 		SnapshotID:      SnapshotID(testMountPath, updatedAt),
 		MountRootDirID:  summariseSpoolLoaderDirID(testMountPath),
+		IsMountRootBox:  1,
 		UpdatedAt:       updatedAt,
 		AllAtimeBuckets: summariseSpoolLoaderSchema2Buckets(0),
 		AllMtimeBuckets: summariseSpoolLoaderSchema2Buckets(0),
@@ -1431,7 +1499,16 @@ func summariseSpoolLoaderActiveVirtualSummaryRow(
 }
 
 func summariseSpoolLoaderVirtualIDForDir(dir string) uint32 {
-	return uint32(catalogPathHash(ensureTrailingSlash(dir))) //nolint:gosec // Fixture IDs intentionally use low hash bits.
+	switch ensureTrailingSlash(dir) {
+	case "/":
+		return activeVirtualRootID
+	case testRootMountPath:
+		return 2
+	case testMountPath:
+		return 3
+	default:
+		return virtualIDForDir(dir)
+	}
 }
 
 func summariseSpoolLoaderActiveVirtualFilterRow(
@@ -1440,7 +1517,7 @@ func summariseSpoolLoaderActiveVirtualFilterRow(
 ) chspool.ActiveVirtualFilterAllRow {
 	return chspool.ActiveVirtualFilterAllRow{
 		ActiveSetID:      activeSetID,
-		VirtualID:        summariseSpoolLoaderVirtualIDForDir(testRootMountPath),
+		VirtualID:        summariseSpoolLoaderVirtualIDForDir(testMountPath),
 		Age:              uint8(db.DGUTAgeAll),
 		AtimeBuckets:     summariseSpoolLoaderSchema2Buckets(0),
 		MtimeBuckets:     summariseSpoolLoaderSchema2Buckets(0),
@@ -1738,7 +1815,9 @@ func summariseSpoolPreviousActiveVirtualSummary(
 ) activeVirtualSummaryRow {
 	return activeVirtualSummaryRow{
 		ActiveSetID:     activeSetID,
+		VirtualID:       summariseSpoolActiveVirtualIDForPath(dir),
 		Dir:             dir,
+		SnapshotID:      activeVirtualZeroSnapshot,
 		UpdatedAt:       updatedAt,
 		AllCount:        10,
 		AllSize:         100,
@@ -1756,6 +1835,19 @@ func summariseSpoolPreviousActiveVirtualSummary(
 	}
 }
 
+func summariseSpoolActiveVirtualIDForPath(dir string) uint32 {
+	switch ensureTrailingSlash(dir) {
+	case "/":
+		return activeVirtualRootID
+	case "/mnt/":
+		return 2
+	case summariseSpoolExistingMountPath:
+		return 3
+	default:
+		return virtualIDForDir(dir)
+	}
+}
+
 func summariseSpoolPreviousActiveVirtualFilter(
 	dir string,
 	activeSetID string,
@@ -1765,6 +1857,7 @@ func summariseSpoolPreviousActiveVirtualFilter(
 
 	return activeVirtualFilterAllRow{
 		ActiveSetID:      activeSetID,
+		VirtualID:        summariseSpoolActiveVirtualIDForPath(dir),
 		Dir:              dir,
 		Age:              uint8(db.DGUTAgeAll),
 		GID:              7,
@@ -1790,6 +1883,8 @@ func summariseSpoolPreviousActiveVirtualMountRootSummary(
 ) activeVirtualSummaryRow {
 	row := summariseSpoolPreviousActiveVirtualSummary(dir, activeSetID, updatedAt, childCount)
 	row.MountPath = ensureTrailingSlash(dir)
+	row.SnapshotID = SnapshotID(ensureTrailingSlash(dir), updatedAt)
+	row.MountRootDirID = summariseSpoolLoaderDirID(dir)
 	row.IsMountRootBox = 1
 
 	return row
@@ -1800,18 +1895,18 @@ func summariseSpoolActiveVirtualChildCountForTest(
 	parentDir string,
 	childDir string,
 ) (uint64, bool) {
-	parentID := summariseSpoolLoaderVirtualIDForDir(parentDir)
-	childID := summariseSpoolLoaderVirtualIDForDir(childDir)
+	parentID := summariseSpoolActiveVirtualIDForPath(parentDir)
+	childID := summariseSpoolActiveVirtualIDForPath(childDir)
 
 	for _, row := range values {
-		if len(row) < 6 {
+		if len(row) < 8 {
 			continue
 		}
 
 		parent, parentOK := row[1].(uint32)
 		child, childOK := row[2].(uint32)
 
-		count, countOK := row[5].(uint64)
+		count, countOK := row[7].(uint64)
 		if parentOK && childOK && countOK && parent == parentID && child == childID {
 			return count, true
 		}
@@ -2111,6 +2206,67 @@ func summariseSpoolPublishSeedStateThrough(
 			return
 		}
 	}
+}
+
+func writeSummariseSpoolLoaderActiveVirtualWithoutCatalogSpool(
+	spoolDir string,
+	updatedAt time.Time,
+) *chspool.Manifest {
+	set, err := chspool.CreateSet(spoolDir)
+	So(err, ShouldBeNil)
+
+	sid := SnapshotID(testMountPath, updatedAt)
+	activeSetID := fingerprintForMountsActive([]mountsActiveRow{{
+		mountPath:  testMountPath,
+		snapshotID: sid,
+		updatedAt:  updatedAt,
+	}})
+	writeErr := errors.Join(
+		set.WriteActiveVirtualSummary(summariseSpoolLoaderActiveVirtualSummaryRow(activeSetID, updatedAt)),
+		set.WriteActiveVirtualFilterAll(summariseSpoolLoaderActiveVirtualFilterRow(activeSetID, updatedAt)),
+		set.WriteActiveVirtualChild(chspool.ActiveVirtualChildRow{
+			ActiveSetID:     activeSetID,
+			ParentVirtualID: summariseSpoolLoaderVirtualIDForDir(testRootMountPath),
+			ChildVirtualID:  summariseSpoolLoaderVirtualIDForDir(testMountPath),
+			MountPath:       testMountPath,
+			SnapshotID:      sid,
+			MountRootDirID:  summariseSpoolLoaderDirID(testMountPath),
+			IsMountRootBox:  1,
+			ChildCount:      1,
+			RefreshedAt:     updatedAt,
+		}),
+		set.WriteActiveVirtualSet(chspool.ActiveVirtualSetRow{
+			ActiveSetID:      activeSetID,
+			Schema3Version:   currentSchemaVersion,
+			MountsSHA256:     activeSetID,
+			ActiveMountCount: 1,
+			SummaryRows:      1,
+			FilterRows:       1,
+			ChildRows:        1,
+			ManifestSHA256:   "active-virtual-without-catalog-test",
+			Ready:            1,
+			RefreshedAt:      updatedAt,
+		}),
+	)
+
+	So(writeErr, ShouldBeNil)
+	So(set.Close(), ShouldBeNil)
+
+	manifest := &chspool.Manifest{
+		Version:      chspool.Version,
+		Format:       chspool.Format,
+		State:        chspool.Complete,
+		MountPath:    testMountPath,
+		SnapshotID:   sid,
+		UpdatedAt:    updatedAt.UTC().Format(time.RFC3339Nano),
+		SchemaMarker: summariseSpoolLoaderSchemaMarker,
+		Tables:       set.TableManifests(),
+		CompletedAt:  time.Now().UTC().Format(time.RFC3339Nano),
+	}
+
+	So(chspool.WriteManifestAtomic(spoolDir, manifest), ShouldBeNil)
+
+	return manifest
 }
 
 type summariseSpoolPublishFaultCase struct {
@@ -2639,10 +2795,10 @@ func (c *summariseSpoolZeroActiveVirtualComposeConn) Query(
 		strings.Contains(query, "summary_rows"):
 		return c.previousActiveVirtualSetRows(args...), nil
 	case strings.Contains(query, "FROM wrstat_active_virtual_summaries") &&
-		strings.Contains(query, "dir IN"):
+		strings.Contains(query, "full_path IN"):
 		return activeVirtualSummaryRowsForComposeTest(c.previousSummaryRows, args...), nil
 	case strings.Contains(query, "FROM wrstat_active_virtual_filter_all") &&
-		strings.Contains(query, "dir IN"):
+		strings.Contains(query, "full_path IN"):
 		return activeVirtualFilterRowsForComposeTest(c.previousFilterRows, args...), nil
 	default:
 		return nil, errBootstrapTestUnexpectedCall
@@ -2660,7 +2816,10 @@ func activeVirtualSummaryRowsForComposeTest(rows []activeVirtualSummaryRow, args
 
 		out.values = append(out.values, []any{
 			row.Dir,
+			row.VirtualID,
 			row.MountPath,
+			row.SnapshotID,
+			row.MountRootDirID,
 			row.IsMountRootBox,
 			row.UpdatedAt,
 			row.AllCount,
@@ -2692,6 +2851,7 @@ func activeVirtualFilterRowsForComposeTest(rows []activeVirtualFilterAllRow, arg
 
 		out.values = append(out.values, []any{
 			row.Dir,
+			row.VirtualID,
 			row.Age,
 			row.GID,
 			row.UID,
@@ -2846,6 +3006,8 @@ func summariseSpoolLoaderInsertQuery(table string) string {
 		return insertMountDirSummarySetQuery
 	case chspool.TableSchema3SnapshotSets:
 		return insertSchema3SnapshotSetQuery
+	case chspool.TableActiveVirtualDirs:
+		return insertActiveVirtualDirQuery
 	case chspool.TableActiveVirtualSummaries:
 		return insertActiveVirtualSummaryQuery
 	case chspool.TableActiveVirtualFilterAll:
@@ -3013,6 +3175,8 @@ func summariseSpoolLoaderInsertQueryTable(query string) string {
 		return chspool.TableDirProjectionSets
 	case insertSchema3SnapshotSetQuery:
 		return chspool.TableSchema3SnapshotSets
+	case insertActiveVirtualDirQuery:
+		return chspool.TableActiveVirtualDirs
 	case insertActiveVirtualSummaryQuery:
 		return chspool.TableActiveVirtualSummaries
 	case insertActiveVirtualFilterAllQuery:
@@ -3151,6 +3315,7 @@ func summariseSpoolLoaderCHTables() map[string]string {
 		chspool.TableDirFilterAll:           chspool.TableDirFilterAll,
 		chspool.TableDirProjectionSets:      chspool.TableDirProjectionSets,
 		chspool.TableSchema3SnapshotSets:    chspool.TableSchema3SnapshotSets,
+		chspool.TableActiveVirtualDirs:      chspool.TableActiveVirtualDirs,
 		chspool.TableActiveVirtualSummaries: chspool.TableActiveVirtualSummaries,
 		chspool.TableActiveVirtualFilterAll: chspool.TableActiveVirtualFilterAll,
 		chspool.TableActiveVirtualChildren:  chspool.TableActiveVirtualChildren,

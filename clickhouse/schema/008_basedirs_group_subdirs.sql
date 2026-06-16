@@ -28,14 +28,16 @@ CREATE TABLE IF NOT EXISTS wrstat_basedirs_group_subdirs (
   mount_path LowCardinality(String) CODEC(ZSTD(3)),
   snapshot_id UUID,
   gid UInt32,
-  basedir String CODEC(ZSTD(3)),
+  basedir_id UInt32 CODEC(Delta, LZ4),
+  basedir_external String CODEC(ZSTD(3)),
   age UInt8,
   pos UInt32,
-  subdir String CODEC(ZSTD(3)),
+  subdir_id UInt32 CODEC(Delta, LZ4),
+  subdir_external String CODEC(ZSTD(3)),
   num_files UInt64 CODEC(Delta, ZSTD(3)),
   size_files UInt64 CODEC(Delta, ZSTD(3)),
   last_modified DateTime CODEC(Delta, ZSTD(3)),
   file_usage Map(UInt16, UInt64)
 ) ENGINE = MergeTree
 PARTITION BY (mount_path, snapshot_id)
-ORDER BY (mount_path, snapshot_id, gid, age, basedir, pos);
+ORDER BY (mount_path, snapshot_id, gid, age, basedir_id, basedir_external, pos);

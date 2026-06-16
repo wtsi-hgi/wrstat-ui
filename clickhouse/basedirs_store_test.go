@@ -99,6 +99,8 @@ func (c *basedirsIdleBatchConn) Query(
 		return &dgutaWriterCloseContextRows{
 			columns: []string{"date", "usage_size", "quota_size", "usage_inodes", "quota_inodes"},
 		}, nil
+	case queryBasedirsDirID:
+		return &dgutaWriterCloseContextRows{columns: []string{"dir_id"}}, nil
 	default:
 		return nil, errBootstrapTestUnexpectedCall
 	}
