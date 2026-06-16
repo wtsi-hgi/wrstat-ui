@@ -160,20 +160,32 @@ func TestJ4CanonicalMatrix(t *testing.T) {
 	Convey("buildOps labels every canonical J4 query type", t, func() {
 		ops := buildOps(queryMatrixTestContext(), queryMatrixTestOptions(), func(string, ...any) {})
 		covered := make(map[string]int)
+		required := make(map[j4RequiredMatrixOperation]bool)
 
 		for _, op := range ops {
 			queryType := stringInput(op.inputs, queryInputQueryTypeKey)
 			if queryType != "" {
 				covered[queryType]++
 			}
+
+			spec := j4RequiredMatrixOperation{
+				QueryType:    queryType,
+				Operation:    op.name,
+				QueryVariant: stringInput(op.inputs, queryInputQueryVariantKey),
+			}
+			required[spec] = true
 		}
 
 		for _, queryType := range j4CanonicalQueryTypes() {
 			So(covered[queryType], ShouldBeGreaterThan, 0)
 		}
+
+		for _, spec := range j4RequiredMatrixOperations() {
+			So(required[spec], ShouldBeTrue)
+		}
 	})
 
-	Convey("runSuite records metrics, result rows, and digest for every J4 type", t, func() {
+	Convey("runSuite records metrics, result rows, and digest for selected J4 operations", t, func() {
 		report := perfreport.NewReport("clickhouse", "", 1, 0)
 		err := runSuite(
 			&report,
@@ -187,10 +199,9 @@ func TestJ4CanonicalMatrix(t *testing.T) {
 		)
 
 		So(err, ShouldBeNil)
-		So(j4MatrixCoverageFailure([]perfreport.Report{report}, []perfreport.Report{report}), ShouldEqual, "")
 
-		for _, queryType := range j4CanonicalQueryTypes() {
-			op, ok := j4FirstOperationOfType([]perfreport.Report{report}, queryType)
+		for _, name := range queryMatrixRepresentativeOps() {
+			op, ok := j4FirstOperationNamed([]perfreport.Report{report}, name)
 			So(ok, ShouldBeTrue)
 			So(op.DurationsMS, ShouldHaveLength, 1)
 			So(op.ReadRows, ShouldHaveLength, 1)
@@ -235,9 +246,25 @@ func TestJ4CanonicalMatrix(t *testing.T) {
 			ShouldContainSubstring,
 			"result digest",
 		)
+
+		missingStatPath := cloneJ4Report(report)
+		removeJ4ReportOperation(&missingStatPath, queryOpFilesStatPathName)
+		So(
+			j4MatrixCoverageFailure([]perfreport.Report{report}, []perfreport.Report{missingStatPath}),
+			ShouldContainSubstring,
+			queryOpFilesStatPathName,
+		)
+
+		missingFilteredDirInfo := cloneJ4Report(report)
+		removeJ4ReportOperation(&missingFilteredDirInfo, queryOpDirInfoFilteredName)
+		So(
+			j4MatrixCoverageFailure([]perfreport.Report{report}, []perfreport.Report{missingFilteredDirInfo}),
+			ShouldContainSubstring,
+			queryOpDirInfoFilteredName,
+		)
 	})
 
-	Convey("matrix deltas report before/after p95 differences by query type", t, func() {
+	Convey("matrix deltas report before/after p95 differences by operation variant", t, func() {
 		baseline := queryMatrixCompleteReport()
 		candidate := queryMatrixCompleteReport()
 		candidate.Operations[0].P95MS = baseline.Operations[0].P95MS + 7
@@ -245,8 +272,10 @@ func TestJ4CanonicalMatrix(t *testing.T) {
 		deltas, err := j4MatrixDeltas([]perfreport.Report{baseline}, []perfreport.Report{candidate})
 
 		So(err, ShouldBeNil)
-		So(deltas, ShouldHaveLength, len(j4CanonicalQueryTypes()))
+		So(deltas, ShouldHaveLength, len(j4RequiredMatrixOperations()))
 		So(deltas[0].QueryType, ShouldEqual, j4QueryTypeExactDirectory)
+		So(deltas[0].Operation, ShouldEqual, queryOpTreeDirInfoName)
+		So(deltas[0].QueryVariant, ShouldEqual, "DirInfo selected directory")
 		So(deltas[0].DeltaP95MS, ShouldEqual, float64(7))
 	})
 
@@ -295,13 +324,14 @@ func queryMatrixRepresentativeOps() []string {
 func queryMatrixCompleteReport() perfreport.Report {
 	report := perfreport.NewReport("clickhouse", "", 1, 0)
 
-	for i, queryType := range j4CanonicalQueryTypes() {
-		name := "j4_" + queryType
+	for i, spec := range j4RequiredMatrixOperations() {
 		report.AddOperationWithCounters(
-			name,
+			spec.Operation,
 			map[string]any{
-				queryInputQueryTypeKey: queryType,
-				queryInputResultDigest: "sha256:digest",
+				queryInputQueryTypeKey:    spec.QueryType,
+				queryInputQueryVariantKey: spec.QueryVariant,
+				queryInputDurationSource:  querySourceClickHouseLog,
+				queryInputResultDigest:    "sha256:digest",
 			},
 			[]float64{float64(i + 1)},
 			[]uint64{1},
@@ -336,4 +366,14 @@ func cloneAnyMap(src map[string]any) map[string]any {
 	}
 
 	return out
+}
+
+func removeJ4ReportOperation(report *perfreport.Report, name string) {
+	for i := range report.Operations {
+		if report.Operations[i].Name == name {
+			report.Operations = append(report.Operations[:i], report.Operations[i+1:]...)
+
+			return
+		}
+	}
 }

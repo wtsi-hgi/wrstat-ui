@@ -2604,18 +2604,18 @@ func finalGateJ6WrongRowFailure(e FinalGateEvidence) string {
 
 func finalGateJ6WrongRowReportFailure(group string, reports []perfreport.Report) string {
 	for _, op := range finalGateJ6MatrixOperations(reports) {
-		queryType := stringInput(op.Inputs, queryInputQueryTypeKey)
+		label := finalGateJ6MatrixOperationLabel(op)
 		if count := uint64Input(op.Inputs, finalGateJ6WrongRowCountInput); count > 0 {
-			return fmt.Sprintf("%s %s wrong row count was %d", group, queryType, count)
+			return fmt.Sprintf("%s %s wrong row count was %d", group, label, count)
 		}
 
 		if count := uint64Input(op.Inputs, finalGateJ6PathHashCollisionMismatchInput); count > 0 {
-			return fmt.Sprintf("%s %s path-hash collision mismatch count was %d", group, queryType, count)
+			return fmt.Sprintf("%s %s path-hash collision mismatch count was %d", group, label, count)
 		}
 
 		status := stringInput(op.Inputs, finalGateCorrectnessStatusInput)
 		if status != "" && status != finalGateComparisonStatusSuccess {
-			return fmt.Sprintf("%s %s correctness status was %s", group, queryType, status)
+			return fmt.Sprintf("%s %s correctness status was %s", group, label, status)
 		}
 	}
 
@@ -2635,6 +2635,21 @@ func finalGateJ6MatrixOperations(reports []perfreport.Report) []perfreport.Opera
 	}
 
 	return ops
+}
+
+func finalGateJ6MatrixOperationLabel(op perfreport.Operation) string {
+	queryType := stringInput(op.Inputs, queryInputQueryTypeKey)
+
+	queryVariant := stringInput(op.Inputs, queryInputQueryVariantKey)
+	if queryVariant != "" {
+		return fmt.Sprintf("%s %s (%s)", queryType, queryVariant, op.Name)
+	}
+
+	if queryType != "" {
+		return fmt.Sprintf("%s (%s)", queryType, op.Name)
+	}
+
+	return op.Name
 }
 
 func finalGateJ6StorageLayoutFailure(e FinalGateEvidence) string {

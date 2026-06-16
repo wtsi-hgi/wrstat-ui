@@ -28,6 +28,7 @@ package chperf
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/wtsi-hgi/wrstat-ui/internal/perfreport"
@@ -64,9 +65,25 @@ func j4Inputs(queryType string, variant string, inputs map[string]any) map[strin
 	return inputs
 }
 
+func j4FirstOperationNamed(
+	reports []perfreport.Report,
+	name string,
+) (perfreport.Operation, bool) {
+	for _, report := range reports {
+		for _, op := range report.Operations {
+			if op.Name == name {
+				return op, true
+			}
+		}
+	}
+
+	return perfreport.Operation{}, false
+}
+
 type j4MatrixDelta struct {
 	QueryType      string
 	Operation      string
+	QueryVariant   string
 	BaselineP50MS  float64
 	CandidateP50MS float64
 	DeltaP50MS     float64
@@ -90,13 +107,16 @@ func j4MatrixDeltas(
 		return nil, fmt.Errorf("%w: %s", errJ4MatrixCoverage, reason)
 	}
 
-	deltas := make([]j4MatrixDelta, 0, len(j4CanonicalQueryTypes()))
-	for _, queryType := range j4CanonicalQueryTypes() {
-		before, _ := j4FirstOperationOfType(baseline, queryType)
-		after, _ := j4FirstOperationOfType(candidate, queryType)
+	required := j4RequiredMatrixOperations()
+	deltas := make([]j4MatrixDelta, 0, len(required))
+
+	for _, spec := range required {
+		before, _ := j4FirstOperationMatching(baseline, spec)
+		after, _ := j4FirstOperationMatching(candidate, spec)
 		deltas = append(deltas, j4MatrixDelta{
-			QueryType:      queryType,
-			Operation:      after.Name,
+			QueryType:      spec.QueryType,
+			Operation:      spec.Operation,
+			QueryVariant:   spec.QueryVariant,
 			BaselineP50MS:  before.P50MS,
 			CandidateP50MS: after.P50MS,
 			DeltaP50MS:     after.P50MS - before.P50MS,
@@ -113,13 +133,13 @@ func j4MatrixDeltas(
 }
 
 func j4MatrixCoverageFailure(baseline []perfreport.Report, candidate []perfreport.Report) string {
-	for _, queryType := range j4CanonicalQueryTypes() {
-		if _, ok, beforeReason := j4FirstValidOperationOfType(baseline, queryType); !ok {
-			return fmt.Sprintf("%s baseline %s", queryType, beforeReason)
+	for _, spec := range j4RequiredMatrixOperations() {
+		if _, ok, beforeReason := j4FirstValidOperationMatching(baseline, spec); !ok {
+			return fmt.Sprintf("%s baseline %s", j4MatrixOperationLabel(spec), beforeReason)
 		}
 
-		if _, ok, afterReason := j4FirstValidOperationOfType(candidate, queryType); !ok {
-			return fmt.Sprintf("%s candidate %s", queryType, afterReason)
+		if _, ok, afterReason := j4FirstValidOperationMatching(candidate, spec); !ok {
+			return fmt.Sprintf("%s candidate %s", j4MatrixOperationLabel(spec), afterReason)
 		}
 	}
 
@@ -141,11 +161,65 @@ func j4CanonicalQueryTypes() []string {
 	}
 }
 
-func j4FirstValidOperationOfType(
+func j4RequiredMatrixOperations() []j4RequiredMatrixOperation {
+	return []j4RequiredMatrixOperation{
+		{j4QueryTypeExactDirectory, queryOpTreeDirInfoName, "DirInfo selected directory"},
+		{j4QueryTypeExactDirectory, queryOpDirInfoBroadName, "DirInfo broad"},
+		{j4QueryTypeExactDirectory, queryOpDirInfoFilteredName, "DirInfo filtered"},
+		{j4QueryTypeExactDirectory, queryOpAuthTreeName, "DirInfo auth restricted"},
+		{j4QueryTypeBatchDirectory, queryOpDirInfosBroadName, "DirInfos broad"},
+		{j4QueryTypeBatchDirectory, queryOpDirInfosFilteredName, "DirInfos filtered"},
+		{j4QueryTypeChildren, queryOpDirsHaveChildrenBroadName, "DirsHaveChildren broad"},
+		{j4QueryTypeChildren, queryOpDirsHaveChildrenFilteredName, "DirsHaveChildren filtered"},
+		{j4QueryTypeSubtree, queryOpTreeWhereName, "Where same provider directory"},
+		{j4QueryTypeSubtree, queryOpTreeWhereColdName, "Where cold then cached"},
+		{j4QueryTypeSubtree, queryOpTreeWhereColdProviderName, "Where cold provider"},
+		{j4QueryTypeSubtree, queryOpTreeWhereProviderUpdateName, "Where provider update cold cache"},
+		{j4QueryTypeSubtree, queryOpAuthWhereRestrictedName, "Where auth restricted"},
+		{j4QueryTypeSubtree, queryOpNoAuthWhereName, "Where no auth"},
+		{j4QueryTypeSubtree, queryOpTreeWhereFreshName, "Where fresh provider"},
+		{j4QueryTypeSubtree, queryOpWhereWholeMountName, queryOpWhereWholeMountName},
+		{j4QueryTypeSubtree, queryOpWhereFilteredWholeMountName, queryOpWhereFilteredWholeMountName},
+		{j4QueryTypeDisktree, queryOpTreeDiskTreeEndName, "Disktree same provider directory"},
+		{j4QueryTypeDisktree, queryOpTreeDiskTreeColdProviderName, "Disktree cold provider"},
+		{j4QueryTypeDisktree, queryOpTreeDiskTreeProviderUpdateName, "Disktree provider update cold cache"},
+		{j4QueryTypeDisktree, queryOpTreeDiskTreeNewName, "Disktree new directories"},
+		{j4QueryTypeDisktree, queryOpTreeDiskTreeAncName, "Disktree ancestor directories"},
+		{j4QueryTypeDisktree, queryOpTreeDiskTreeVisibleChildName, "Disktree visible child directories"},
+		{j4QueryTypeFileAPI, queryOpFilesListDirName, "ListDir"},
+		{j4QueryTypeFileAPI, queryOpFilesIsDirName, "IsDir"},
+		{j4QueryTypeFileAPI, queryOpFilesStatPathName, "StatPath"},
+		{j4QueryTypeFileAPI, queryOpPermissionCheckName, "PermissionPath and PermissionAnyInDir"},
+		{j4QueryTypeGlob, queryOpGlobCaseAName, "FindByGlob case A"},
+		{j4QueryTypeGlob, queryOpGlobCaseBName, "FindByGlob case B"},
+		{j4QueryTypeGlob, "glob_case_C", "FindByGlob case C"},
+		{j4QueryTypeGlob, "glob_case_D", "FindByGlob case D"},
+		{j4QueryTypeGlob, "glob_case_E", "FindByGlob case E"},
+		{j4QueryTypeGlob, "glob_case_F", "FindByGlob case F"},
+		{j4QueryTypeGlob, "glob_case_G", "FindByGlob case G"},
+		{j4QueryTypeGlob, "glob_case_H", "FindByGlob case H"},
+		{j4QueryTypeGlob, queryOpCountGlobCaseAName, "CountByGlob case A"},
+		{j4QueryTypeGlob, queryOpGlobFullPathName, "FindByGlob full-path"},
+		{j4QueryTypeGlob, queryOpFindGlobExtensionDotfileName, "FindByGlob extension dotfile"},
+		{j4QueryTypeVirtual, queryOpVirtualChildrenName, "virtual children filtered"},
+		{j4QueryTypeVirtual, queryOpVirtualDirInfoName, "active virtual root summary filtered"},
+		{j4QueryTypeBasedirs, queryOpBasedirsGroupUsageName, "GroupUsage"},
+		{j4QueryTypeBasedirs, queryOpBasedirsUserUsageName, "UserUsage"},
+		{j4QueryTypeBasedirs, queryOpBasedirsGroupSubDirsName, "GroupSubDirs"},
+		{j4QueryTypeBasedirs, queryOpBasedirsUserSubDirsName, "UserSubDirs"},
+		{j4QueryTypeBasedirs, queryOpBasedirsHistoryName, "history"},
+		{j4QueryTypeMaintenance, queryOpInfoName, "Info"},
+		{j4QueryTypeMaintenance, queryOpMountTimestampsName, "active mount freshness"},
+		{j4QueryTypeMaintenance, queryOpBasedirsInfoName, "basedirs Info"},
+		{j4QueryTypeMaintenance, queryOpNavIndexAuditName, "in-process navigation index"},
+	}
+}
+
+func j4FirstValidOperationMatching(
 	reports []perfreport.Report,
-	queryType string,
+	spec j4RequiredMatrixOperation,
 ) (perfreport.Operation, bool, string) {
-	ops := j4OperationsOfType(reports, queryType)
+	ops := j4OperationsMatching(reports, spec)
 	firstReason := j4MissingOperation
 
 	for _, op := range ops {
@@ -162,12 +236,15 @@ func j4FirstValidOperationOfType(
 	return perfreport.Operation{}, false, firstReason
 }
 
-func j4OperationsOfType(reports []perfreport.Report, queryType string) []perfreport.Operation {
+func j4OperationsMatching(
+	reports []perfreport.Report,
+	spec j4RequiredMatrixOperation,
+) []perfreport.Operation {
 	var ops []perfreport.Operation
 
 	for _, report := range reports {
 		for _, op := range report.Operations {
-			if stringInput(op.Inputs, queryInputQueryTypeKey) == queryType {
+			if j4OperationMatchesSpec(op, spec) {
 				ops = append(ops, op)
 			}
 		}
@@ -176,18 +253,31 @@ func j4OperationsOfType(reports []perfreport.Report, queryType string) []perfrep
 	return ops
 }
 
+func j4OperationMatchesSpec(op perfreport.Operation, spec j4RequiredMatrixOperation) bool {
+	return op.Name == spec.Operation &&
+		stringInput(op.Inputs, queryInputQueryTypeKey) == spec.QueryType &&
+		stringInput(op.Inputs, queryInputQueryVariantKey) == spec.QueryVariant
+}
+
 func j4OperationMetricsFailure(op perfreport.Operation) string {
-	checks := []struct {
+	type check struct {
 		reason  string
 		missing bool
-	}{
+	}
+
+	checks := []check{
 		{"missing duration samples", len(op.DurationsMS) == 0},
-		{"missing ReadRows", len(op.ReadRows) == 0},
-		{"missing ReadBytes", len(op.ReadBytes) == 0},
-		{"missing ReadMarks", len(op.ReadMarks) == 0},
 		{"missing result rows", len(op.ResultCount) == 0},
 		{"missing result digest", stringInput(op.Inputs, queryInputResultDigest) == ""},
 		{"missing p50/p95/p99", op.P50MS <= 0 || op.P95MS <= 0 || op.P99MS <= 0},
+	}
+
+	if j4OperationQueryMetricsRequired(op) {
+		checks = append(checks,
+			check{"missing ReadRows", len(op.ReadRows) == 0},
+			check{"missing ReadBytes", len(op.ReadBytes) == 0},
+			check{"missing ReadMarks", len(op.ReadMarks) == 0},
+		)
 	}
 
 	for _, check := range checks {
@@ -199,31 +289,40 @@ func j4OperationMetricsFailure(op perfreport.Operation) string {
 	return ""
 }
 
+func j4OperationQueryMetricsRequired(op perfreport.Operation) bool {
+	return stringInput(op.Inputs, queryInputDurationSource) != querySourceWall
+}
+
+func j4MatrixOperationLabel(spec j4RequiredMatrixOperation) string {
+	return fmt.Sprintf("%s %s (%s)", spec.QueryType, spec.QueryVariant, spec.Operation)
+}
+
 func j4MatrixCorrectnessFailure(baseline []perfreport.Report, candidate []perfreport.Report) string {
-	for _, queryType := range j4CanonicalQueryTypes() {
-		before, _ := j4FirstOperationOfType(baseline, queryType)
-		after, _ := j4FirstOperationOfType(candidate, queryType)
+	for _, spec := range j4RequiredMatrixOperations() {
+		before, _ := j4FirstOperationMatching(baseline, spec)
+		after, _ := j4FirstOperationMatching(candidate, spec)
+		label := j4MatrixOperationLabel(spec)
 
 		if !j4ResultCountsEquivalent(before.ResultCount, after.ResultCount) {
-			return queryType + " result rows mismatch"
+			return label + " result rows mismatch"
 		}
 
 		beforeDigest := stringInput(before.Inputs, queryInputResultDigest)
 
 		afterDigest := stringInput(after.Inputs, queryInputResultDigest)
 		if beforeDigest != afterDigest {
-			return queryType + " result digest mismatch"
+			return label + " result digest mismatch"
 		}
 	}
 
 	return ""
 }
 
-func j4FirstOperationOfType(
+func j4FirstOperationMatching(
 	reports []perfreport.Report,
-	queryType string,
+	spec j4RequiredMatrixOperation,
 ) (perfreport.Operation, bool) {
-	op, ok, _ := j4FirstValidOperationOfType(reports, queryType)
+	op, ok, _ := j4FirstValidOperationMatching(reports, spec)
 
 	return op, ok
 }
@@ -233,14 +332,7 @@ func j4ResultCountsEquivalent(before []uint64, after []uint64) bool {
 		return false
 	}
 
-	beforeCount := before[0]
-
-	afterCount := after[0]
-	if beforeCount != afterCount {
-		return false
-	}
-
-	return allUint64Equal(before, beforeCount) && allUint64Equal(after, afterCount)
+	return slices.Equal(before, after)
 }
 
 func allUint64Equal(values []uint64, want uint64) bool {
@@ -251,6 +343,12 @@ func allUint64Equal(values []uint64, want uint64) bool {
 	}
 
 	return true
+}
+
+type j4RequiredMatrixOperation struct {
+	QueryType    string
+	Operation    string
+	QueryVariant string
 }
 
 // ExplainFindByGlobAvoidsFilePathScan reports whether a full-path glob plan

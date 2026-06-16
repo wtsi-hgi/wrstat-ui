@@ -84,6 +84,7 @@ const (
 	queryOpAuthWhereRestrictedName        = "auth_where_restricted"
 	queryOpFilesListDirName               = "files_listdir"
 	queryOpInfoName                       = "info"
+	queryOpMountTimestampsName            = "mount_timestamps"
 	queryOpNoAuthWhereName                = "noauth_where"
 	queryOpNavIndexAuditName              = "nav_index_audit"
 	queryOpPermissionCheckName            = "permission_check"
@@ -843,15 +844,18 @@ func opNavIndexAudit(qctx queryContext) op {
 			p, ok := qctx.provider.(navIndexEvidenceProvider)
 			if !ok {
 				inputs["ready"] = false
+				inputs[queryInputResultDigest] = digestValue(map[string]any{"ready": false})
 				resultCount = 0
 
 				return nil
 			}
 
-			for key, value := range p.NavIndexBenchmarkEvidence(ctx, qctx.dir) {
+			evidence := p.NavIndexBenchmarkEvidence(ctx, qctx.dir)
+			for key, value := range evidence {
 				inputs[key] = value
 			}
 
+			inputs[queryInputResultDigest] = digestValue(evidence)
 			resultCount = 1
 
 			return nil
@@ -870,7 +874,7 @@ func opMountTimestamps(qctx queryContext) op {
 	var resultCount uint64
 
 	return op{
-		name:   "mount_timestamps",
+		name:   queryOpMountTimestampsName,
 		inputs: inputs,
 		run: func(_ context.Context) error {
 			ts, err := qctx.provider.BaseDirs().MountTimestamps()
@@ -1069,12 +1073,12 @@ func digestSummary(summary *db.DirSummary) digestDirSummary {
 
 func opTreeWhereColdProvider(qctx queryContext, splits int) op {
 	filter := treeFilterFromOptions(qctx.treeFilter)
-	inputs := treeOpInputs(filter, map[string]any{
+	inputs := j4Inputs(j4QueryTypeSubtree, "Where cold provider", treeOpInputs(filter, map[string]any{
 		queryInputDirKey:         qctx.dir,
 		queryInputCacheScope:     queryScopeColdProvider,
 		queryInputDurationSource: querySourceWall,
 		queryInputSplitsKey:      splits,
-	})
+	}))
 
 	var resultCount uint64
 
@@ -1142,9 +1146,8 @@ func opTreeDiskTreeEndpointColdProvider(qctx queryContext) op {
 			return nil
 		},
 		run: func(_ context.Context) error {
-			count, err := runTreeDiskTreeFreshProvider(qctx, filter)
-			resultCount = count
-			recordHighFanoutChildCount(inputs, count)
+			childPaths, err := runTreeDiskTreeFreshProvider(qctx, filter)
+			resultCount = recordDisktreeEndpointResult(inputs, childPaths, err)
 
 			return err
 		},
@@ -1154,26 +1157,20 @@ func opTreeDiskTreeEndpointColdProvider(qctx queryContext) op {
 	}
 }
 
-func runTreeDiskTreeFreshProvider(qctx queryContext, filter *db.Filter) (uint64, error) {
+func runTreeDiskTreeFreshProvider(qctx queryContext, filter *db.Filter) ([]string, error) {
 	if qctx.openProvider == nil {
-		return 0, errOpenProviderRequired
+		return nil, errOpenProviderRequired
 	}
 
 	p, err := qctx.openProvider()
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 
-	count, runErr := runTreeDiskTreeEndpoint(p.Tree(), qctx.dir, filter)
+	childPaths, runErr := loadTreeDiskTreeEndpoint(p.Tree(), qctx.dir, filter)
 	closeErr := p.Close()
 
-	return count, errors.Join(runErr, closeErr)
-}
-
-func runTreeDiskTreeEndpoint(tree *db.Tree, dir string, filter *db.Filter) (uint64, error) {
-	childPaths, err := loadTreeDiskTreeEndpoint(tree, dir, filter)
-
-	return uint64(len(childPaths)), err
+	return childPaths, errors.Join(runErr, closeErr)
 }
 
 func loadTreeDiskTreeEndpoint(tree *db.Tree, dir string, filter *db.Filter) ([]string, error) {
@@ -1192,6 +1189,20 @@ func loadTreeDiskTreeEndpoint(tree *db.Tree, dir string, filter *db.Filter) ([]s
 	_ = tree.DirsHaveChildren(childPaths, filter)
 
 	return childPaths, nil
+}
+
+func recordDisktreeEndpointResult(
+	inputs map[string]any,
+	childPaths []string,
+	err error,
+) uint64 {
+	count := uint64(len(childPaths))
+	if err == nil {
+		recordHighFanoutChildCount(inputs, count)
+		inputs[queryInputResultDigest] = digestValue(childPaths)
+	}
+
+	return count
 }
 
 func recordHighFanoutChildCount(inputs map[string]any, count uint64) {
@@ -1281,9 +1292,8 @@ func opTreeDiskTreeProviderUpdateColdCache(qctx queryContext) op {
 			return err
 		},
 		run: func(_ context.Context) error {
-			count, err := runTreeDiskTreeEndpoint(p.Tree(), qctx.dir, filter)
+			count, err := runTreeDiskTreeEndpointWithDigest(p.Tree(), qctx.dir, filter, inputs)
 			resultCount = count
-			recordHighFanoutChildCount(inputs, count)
 
 			return err
 		},
@@ -1297,6 +1307,17 @@ func opTreeDiskTreeProviderUpdateColdCache(qctx queryContext) op {
 		useWallTime: true,
 		skipWarmup:  true,
 	}
+}
+
+func runTreeDiskTreeEndpointWithDigest(
+	tree *db.Tree,
+	dir string,
+	filter *db.Filter,
+	inputs map[string]any,
+) (uint64, error) {
+	childPaths, err := loadTreeDiskTreeEndpoint(tree, dir, filter)
+
+	return recordDisktreeEndpointResult(inputs, childPaths, err), err
 }
 
 func opTreeDiskTreeEndpointNewDirs(qctx queryContext, opts QueryOptions) op {
@@ -1328,9 +1349,8 @@ func opTreeDiskTreeEndpointNewDirs(qctx queryContext, opts QueryOptions) op {
 			dir := timedDirs[i]
 			i++
 
-			count, err := runTreeDiskTreeEndpoint(qctx.provider.Tree(), dir, filter)
+			count, err := runTreeDiskTreeEndpointWithDigest(qctx.provider.Tree(), dir, filter, inputs)
 			resultCount = count
-			recordHighFanoutChildCount(inputs, count)
 
 			return err
 		},
@@ -1379,9 +1399,8 @@ func opTreeDiskTreeEndpointAncestorDirs(qctx queryContext, opts QueryOptions) op
 			dir := timedDirs[i]
 			i++
 
-			count, err := runTreeDiskTreeEndpoint(qctx.provider.Tree(), dir, filter)
+			count, err := runTreeDiskTreeEndpointWithDigest(qctx.provider.Tree(), dir, filter, inputs)
 			resultCount = count
-			recordHighFanoutChildCount(inputs, count)
 
 			return err
 		},
@@ -1524,9 +1543,8 @@ func opTreeDiskTreeEndpointVisibleChildDirs(qctx queryContext) op {
 			dir := timedDirs[i]
 			i++
 
-			count, err := runTreeDiskTreeEndpoint(qctx.provider.Tree(), dir, filter)
+			count, err := runTreeDiskTreeEndpointWithDigest(qctx.provider.Tree(), dir, filter, inputs)
 			resultCount = count
-			recordHighFanoutChildCount(inputs, count)
 
 			return err
 		},

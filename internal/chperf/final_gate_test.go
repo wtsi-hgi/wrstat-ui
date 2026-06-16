@@ -2007,22 +2007,24 @@ func TestJ6FinalGates(t *testing.T) {
 		So(finalGateTestCheck(result, "J6 absolute cold UX").Passed, ShouldBeTrue)
 		So(finalGateTestCheck(result, "J6 storage layout and table bytes").Passed, ShouldBeTrue)
 		So(finalGateTestCheck(result, "J6 D4 collapse decisions").Passed, ShouldBeTrue)
-		So(result.J6QueryDeltas, ShouldHaveLength, len(j4CanonicalQueryTypes()))
+		So(result.J6QueryDeltas, ShouldHaveLength, len(j4RequiredMatrixOperations()))
+		So(result.J6QueryDeltas[0].Operation, ShouldEqual, queryOpTreeDirInfoName)
+		So(result.J6QueryDeltas[0].QueryVariant, ShouldEqual, "DirInfo selected directory")
 		So(result.J6TableByteDeltas, ShouldNotBeEmpty)
 	})
 
-	Convey("J6 fails when a matrix type is missing or reports a wrong row", t, func() {
+	Convey("J6 fails when a matrix operation variant is missing or reports a wrong row", t, func() {
 		evidence := finalGateTestEvidence(false, false)
-		finalGateRemoveJ6MatrixType(&evidence, j4QueryTypeMaintenance)
+		finalGateRemoveJ6MatrixOperation(&evidence, queryOpFilesStatPathName)
 
 		result := ValidateFinalGates(evidence)
 
 		check := finalGateTestCheck(result, "J6 matrix correctness and deltas")
 		So(check.Passed, ShouldBeFalse)
-		So(check.Detail, ShouldContainSubstring, j4QueryTypeMaintenance)
+		So(check.Detail, ShouldContainSubstring, queryOpFilesStatPathName)
 
 		evidence = finalGateTestEvidence(false, false)
-		finalGateMutateJ6MatrixType(&evidence, j4QueryTypeExactDirectory, func(op *perfreport.Operation) {
+		finalGateMutateJ6MatrixOperation(&evidence, queryOpDirInfoFilteredName, func(op *perfreport.Operation) {
 			op.P50MS = 0
 		})
 
@@ -2030,9 +2032,10 @@ func TestJ6FinalGates(t *testing.T) {
 		check = finalGateTestCheck(result, "J6 matrix correctness and deltas")
 		So(check.Passed, ShouldBeFalse)
 		So(check.Detail, ShouldContainSubstring, "p50/p95/p99")
+		So(check.Detail, ShouldContainSubstring, queryOpDirInfoFilteredName)
 
 		evidence = finalGateTestEvidence(false, false)
-		finalGateMutateJ6MatrixType(&evidence, j4QueryTypeExactDirectory, func(op *perfreport.Operation) {
+		finalGateMutateJ6MatrixOperation(&evidence, queryOpTreeDirInfoName, func(op *perfreport.Operation) {
 			op.Inputs[finalGateJ6WrongRowCountInput] = uint64(1)
 		})
 
@@ -2135,52 +2138,29 @@ func TestJ6FinalGates(t *testing.T) {
 
 func finalGateJ6MatrixReport() perfreport.Report {
 	report := perfreport.NewReport("clickhouse", "", finalGateMinRepeats, 0)
-	for _, spec := range finalGateJ6MatrixOpSpecs() {
-		finalGateAddJ6MatrixOp(&report, spec.name, spec.queryType, spec.duration)
+	for _, spec := range j4RequiredMatrixOperations() {
+		finalGateAddJ6MatrixOp(&report, spec)
 	}
 
 	return report
 }
 
-func finalGateJ6MatrixOpSpecs() []struct {
-	name      string
-	queryType string
-	duration  float64
-} {
-	return []struct {
-		name      string
-		queryType string
-		duration  float64
-	}{
-		{"j6_exact_directory", j4QueryTypeExactDirectory, 20},
-		{"j6_batch_directory", j4QueryTypeBatchDirectory, 25},
-		{"j6_children_presence", j4QueryTypeChildren, 30},
-		{"j6_subtree_recursive", j4QueryTypeSubtree, 180},
-		{"j6_disktree", j4QueryTypeDisktree, 190},
-		{"j6_file_api", j4QueryTypeFileAPI, 20},
-		{"j6_glob_full_text", j4QueryTypeGlob, 160},
-		{"j6_virtual_active", j4QueryTypeVirtual, 35},
-		{"j6_basedirs_quota", j4QueryTypeBasedirs, 40},
-		{"j6_maintenance", j4QueryTypeMaintenance, 45},
-	}
-}
-
 func finalGateAddJ6MatrixOp(
 	report *perfreport.Report,
-	name string,
-	queryType string,
-	duration float64,
+	spec j4RequiredMatrixOperation,
 ) {
 	inputs := map[string]any{
 		queryInputDirKey:          queryOpTestRootDir,
-		queryInputQueryTypeKey:    queryType,
-		queryInputQueryVariantKey: strings.ToLower(strings.ReplaceAll(queryType, " ", "_")),
-		queryInputResultDigest:    "sha256:j6-" + strings.ToLower(strings.ReplaceAll(queryType, " ", "-")),
+		queryInputQueryTypeKey:    spec.QueryType,
+		queryInputQueryVariantKey: spec.QueryVariant,
+		queryInputDurationSource:  querySourceClickHouseLog,
+		queryInputResultDigest:    "sha256:j6-" + strings.ReplaceAll(spec.Operation, "_", "-"),
 	}
+
 	report.AddOperationWithCounters(
-		name,
+		spec.Operation,
 		inputs,
-		[]float64{duration, duration, duration, duration, duration},
+		[]float64{0.01, 0.01, 0.01, 0.01, 0.01},
 		finalGateE1Counts(100),
 		finalGateE1Counts(2048),
 		finalGateE1Counts(2),
@@ -2188,12 +2168,12 @@ func finalGateAddJ6MatrixOp(
 	)
 }
 
-func finalGateRemoveJ6MatrixType(evidence *FinalGateEvidence, queryType string) {
+func finalGateRemoveJ6MatrixOperation(evidence *FinalGateEvidence, operation string) {
 	remove := func(reports []perfreport.Report) {
 		for reportIndex := range reports {
 			ops := reports[reportIndex].Operations
 			for opIndex := range ops {
-				if stringInput(ops[opIndex].Inputs, queryInputQueryTypeKey) == queryType {
+				if finalGateJ6MatrixOperationMatches(ops[opIndex], operation) {
 					reports[reportIndex].Operations = slices.Delete(ops, opIndex, opIndex+1)
 
 					return
@@ -2205,21 +2185,25 @@ func finalGateRemoveJ6MatrixType(evidence *FinalGateEvidence, queryType string) 
 	remove(evidence.QueryReports)
 }
 
-func finalGateMutateJ6MatrixType(
+func finalGateMutateJ6MatrixOperation(
 	evidence *FinalGateEvidence,
-	queryType string,
+	operation string,
 	mutate func(*perfreport.Operation),
 ) {
 	for reportIndex := range evidence.QueryReports {
 		for opIndex := range evidence.QueryReports[reportIndex].Operations {
 			op := &evidence.QueryReports[reportIndex].Operations[opIndex]
-			if stringInput(op.Inputs, queryInputQueryTypeKey) == queryType {
+			if finalGateJ6MatrixOperationMatches(*op, operation) {
 				mutate(op)
 
 				return
 			}
 		}
 	}
+}
+
+func finalGateJ6MatrixOperationMatches(op perfreport.Operation, operation string) bool {
+	return op.Name == operation && stringInput(op.Inputs, queryInputQueryTypeKey) != ""
 }
 
 func finalGateMutateJ6StorageAudit(
