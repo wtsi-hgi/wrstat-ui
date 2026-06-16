@@ -62,9 +62,13 @@ const (
 	phaseFilesInsert         = "wrstat_files_insert"
 	phaseFilesFlush          = "wrstat_files_flush"
 	phaseDGUTAInsert         = "wrstat_dguta_insert"
-	phaseChildrenInsert      = "wrstat_dirs_insert"
+	phaseCatalogInsert       = "wrstat_dirs_insert"
 	phaseDirFactsInsert      = "wrstat_dir_facts_insert"
 	phaseDirProjectionWrite  = "wrstat_dir_projection_insert"
+	phaseFullFilterAllInsert = "wrstat_filter_all_insert"
+	phaseSchema3Ready        = "wrstat_schema3_snapshot_ready"
+	phaseActiveVirtualInsert = "wrstat_active_virtual_insert"
+	phaseActiveVirtualReady  = "wrstat_active_virtual_ready"
 	phaseMountSwitch         = "mount_switch"
 	phaseTreeSummaryRefresh  = "wrstat_tree_summary_refresh"
 	phaseActivePrefixRefresh = "wrstat_active_prefix_rollup_refresh"
@@ -80,7 +84,7 @@ const (
 
 	tableFiles                    = "wrstat_files"
 	tableDGUTA                    = "wrstat_dguta"
-	tableChildren                 = "wrstat_dirs"
+	tableCatalog                  = "wrstat_dirs"
 	tableDirFacts                 = "wrstat_dir_facts"
 	tableDirSummary               = "wrstat_dir_facts"
 	tableDirSummarySets           = "wrstat_dir_projection_sets"
@@ -95,6 +99,16 @@ const (
 	tableBasedirsUserSubdirs      = "wrstat_basedirs_user_subdirs"
 	tableBasedirsHistory          = "wrstat_basedirs_history"
 	tableDirFilterAgeAll          = "wrstat_dir_filter_ageall"
+	tableChildFilterAll           = "wrstat_child_filter_all"
+	tableDirFilterAll             = "wrstat_dir_filter_all"
+	tableSchema3SnapshotSets      = "wrstat_schema3_snapshot_sets"
+	tableActiveVirtualDirs        = "wrstat_active_virtual_dirs"
+	tableActiveVirtualSummaries   = "wrstat_active_virtual_summaries"
+	tableActiveVirtualFilterAll   = "wrstat_active_virtual_filter_all"
+	tableActiveVirtualChildren    = "wrstat_active_virtual_children"
+	tableActiveVirtualSets        = "wrstat_active_virtual_sets"
+	tableMountEvents              = "wrstat_mount_events"
+	tableSchemaVersion            = "wrstat_schema_version"
 	tableActivePrefixRollups      = "wrstat_active_prefix_rollups"
 	tableActivePrefixFilterAgeAll = "wrstat_active_prefix_filter_ageall"
 	tableActivePrefixRollupSets   = "wrstat_active_prefix_rollup_sets"
@@ -122,6 +136,19 @@ const (
 	importInputTotalCPUMS     = "total_cpu_ms"
 	importInputPeakRSSBytes   = "peak_rss_bytes"
 	importInputPublishLatency = "publish_latency_ms"
+
+	importInputRowsPerTable                = "rows_per_table"
+	importInputSpoolBytes                  = "spool_bytes"
+	importInputPartCounts                  = "part_counts"
+	importInputMaxDirsPerSnapshot          = "max_dirs_per_snapshot"
+	importInputDirIDUInt32Justified        = "dir_id_uint32_justified"
+	importInputDirIDUInt32WarningThreshold = "dir_id_uint32_warning_threshold"
+	importInputPathTextBytesBefore         = "path_text_bytes_before"
+	importInputPathTextBytesAfter          = "path_text_bytes_after"
+	importInputPathTextBytesReduction      = "path_text_bytes_reduction"
+	importInputPathTextBytesReductionPct   = "path_text_bytes_reduction_percent"
+
+	dirIDUInt32WarningThreshold uint64 = 1 << 31
 )
 
 // ErrNoDatasets indicates no dataset directories were found.
@@ -310,14 +337,87 @@ func addImportRowCapInput(inputs map[string]any, rowCap uint64) {
 	}
 }
 
+func importSnapshotMultiTablePhase(phase string) ([]string, bool) {
+	switch phase {
+	case phasePartitionDropReset:
+		return []string{
+			tableDGUTA,
+			tableCatalog,
+			tableDirFacts,
+			tableFiles,
+			tableDirSummary,
+			tableDirSummarySets,
+			tableDirDGUTAVector,
+			tableBasedirsGroupUsage,
+			tableBasedirsUserUsage,
+			tableBasedirsGroupSubdirs,
+			tableBasedirsUserSubdirs,
+			tableDirFilterAgeAll,
+			tableChildFilterAll,
+			tableDirFilterAll,
+			tableSchema3SnapshotSets,
+			tableActiveVirtualDirs,
+			tableActiveVirtualSummaries,
+			tableActiveVirtualFilterAll,
+			tableActiveVirtualChildren,
+			tableActiveVirtualSets,
+		}, true
+	case phaseDirProjectionWrite:
+		return []string{tableDirSummary, tableDirSummarySets, tableDirDGUTAVector, tableDirFilterAgeAll}, true
+	case phaseFullFilterAllInsert:
+		return []string{tableChildFilterAll, tableDirFilterAll}, true
+	case phaseSchema3Ready:
+		return []string{tableSchema3SnapshotSets}, true
+	case phaseActiveVirtualInsert:
+		return []string{
+			tableActiveVirtualDirs,
+			tableActiveVirtualSummaries,
+			tableActiveVirtualFilterAll,
+			tableActiveVirtualChildren,
+			tableActiveVirtualSets,
+		}, true
+	case phaseActiveVirtualReady:
+		return []string{tableActiveVirtualSets}, true
+	default:
+		return nil, false
+	}
+}
+
+func importBasedirsMultiTablePhase(phase string) ([]string, bool) {
+	switch phase {
+	case phaseBasedirsReset, phaseBasedirsFlush:
+		return []string{
+			tableBasedirsGroupUsage,
+			tableBasedirsUserUsage,
+			tableBasedirsGroupSubdirs,
+			tableBasedirsUserSubdirs,
+		}, true
+	case phaseBasedirsFinalise:
+		return []string{tableBasedirsGroupUsage, tableBasedirsHistory}, true
+	default:
+		return nil, false
+	}
+}
+
+func importRefreshMultiTablePhase(phase string) ([]string, bool) {
+	switch phase {
+	case phaseTreeSummaryRefresh:
+		return []string{tableTreeSummarySets, tableTreeDGUTA, tableTreeDirSummary, tableTreeChildren}, true
+	case phaseActivePrefixRefresh:
+		return []string{tableActivePrefixRollups, tableActivePrefixFilterAgeAll, tableActivePrefixRollupSets}, true
+	default:
+		return nil, false
+	}
+}
+
 func addImportDerivedTableEvidence(stats map[string]perfreport.TableStats, memoryBytes uint64) {
 	dirFactsRows := stats[tableDirSummary].Rows
-	childrenRows := stats[tableChildren].Rows
+	catalogRows := stats[tableCatalog].Rows
 
 	for table, tableStats := range stats {
 		tableStats.ImportMemoryBytes = memoryBytes
 		tableStats.RowAmplificationVsDirFacts = rowAmplification(tableStats.Rows, dirFactsRows)
-		tableStats.RowAmplificationVsChildren = rowAmplification(tableStats.Rows, childrenRows)
+		tableStats.RowAmplificationVsCatalog = rowAmplification(tableStats.Rows, catalogRows)
 		stats[table] = tableStats
 	}
 }
@@ -328,6 +428,64 @@ func rowAmplification(rows uint64, baselineRows uint64) float64 {
 	}
 
 	return float64(rows) / float64(baselineRows)
+}
+
+func addImportJ6StorageAudit(
+	ctx context.Context,
+	report *perfreport.Report,
+	api ImportAPI,
+	selectedTables []string,
+) error {
+	auditAPI, ok := api.(ImportStorageAuditAPI)
+	if !ok {
+		return nil
+	}
+
+	auditTables := j6HotRowAuditTables(selectedTables)
+
+	hotPathTables, err := auditAPI.ImportHotRowPathStringTables(ctx, auditTables)
+	if err != nil {
+		return err
+	}
+
+	if hotPathTables == nil {
+		hotPathTables = []string{}
+	}
+
+	report.AddOperation(finalGateJ6StorageAuditOpName, map[string]any{
+		finalGateJ6HotRowPathStringTablesInput:       hotPathTables,
+		finalGateJ6PathTextCatalogTableInput:         tableCatalog,
+		finalGateJ6PathTextCopiesPerDirSnapshotInput: float64(1),
+		"audited_hot_tables":                         auditTables,
+	}, nil)
+
+	return nil
+}
+
+func j6HotRowAuditTables(selectedTables []string) []string {
+	tables := make([]string, 0, len(selectedTables))
+	for _, table := range selectedTables {
+		if !j6HotRowAuditTable(table) {
+			continue
+		}
+
+		tables = append(tables, table)
+	}
+
+	return tables
+}
+
+func j6HotRowAuditTable(table string) bool {
+	switch table {
+	case "",
+		tableCatalog,
+		tableActivePrefixRollups,
+		tableActivePrefixFilterAgeAll,
+		tableActivePrefixRollupSets:
+		return false
+	default:
+		return true
+	}
 }
 
 func addImportFinalGateEvidence(
@@ -348,8 +506,13 @@ func addImportFinalGateEvidence(
 	total.Inputs[importInputSystemCPUMS] = usage.systemMS
 	total.Inputs[importInputTotalCPUMS] = usage.userMS + usage.systemMS
 	total.Inputs[importInputPeakRSSBytes] = report.MaxRSSBytes
-	total.Inputs["spool_bytes"] = uint64(0)
-	total.Inputs["part_counts"] = importActivePartCounts(report.TableStats)
+	total.Inputs[importInputSpoolBytes] = uint64(0)
+	total.Inputs[importInputRowsPerTable] = importRowsByReportedTableStats(report.TableStats, results)
+	total.Inputs[importInputPartCounts] = importActivePartCounts(report.TableStats)
+	total.Inputs[importInputMaxDirsPerSnapshot] = importMaxDirsPerSnapshot(results)
+	total.Inputs[importInputDirIDUInt32WarningThreshold] = dirIDUInt32WarningThreshold
+	total.Inputs[importInputDirIDUInt32Justified] = importDirIDUInt32Justified(results)
+	addImportPathTextReductionInputs(total, results)
 	total.Inputs["retry_cleanup_result"] = importRetryCleanupResult(results)
 	total.Inputs[importInputPublishLatency] = importPublishLatencyMS(results)
 	finalGateEnsureE2ComputedBudgetInputs(total)
@@ -365,6 +528,34 @@ func importTotalOperation(report *perfreport.Report) *perfreport.Operation {
 	return nil
 }
 
+func importRowsByReportedTableStats(
+	stats map[string]perfreport.TableStats,
+	results []datasetImportResult,
+) map[string]uint64 {
+	if len(stats) == 0 {
+		return totalImportRowsByPhysicalTable(results)
+	}
+
+	rows := make(map[string]uint64, len(stats))
+	for table, tableStats := range stats {
+		rows[table] = tableStats.Rows
+	}
+
+	return rows
+}
+
+func totalImportRowsByPhysicalTable(results []datasetImportResult) map[string]uint64 {
+	rows := make(map[string]uint64)
+
+	for _, result := range results {
+		for table, count := range result.rows {
+			rows[importPhysicalTable(table)] += count
+		}
+	}
+
+	return rows
+}
+
 func importActivePartCounts(stats map[string]perfreport.TableStats) map[string]uint64 {
 	counts := make(map[string]uint64, len(stats))
 	for table, tableStats := range stats {
@@ -372,6 +563,52 @@ func importActivePartCounts(stats map[string]perfreport.TableStats) map[string]u
 	}
 
 	return counts
+}
+
+func importMaxDirsPerSnapshot(results []datasetImportResult) uint64 {
+	var maxDirs uint64
+
+	for _, result := range results {
+		maxDirs = max(maxDirs, result.rows[tableCatalog])
+	}
+
+	return maxDirs
+}
+
+func importDirIDUInt32Justified(results []datasetImportResult) bool {
+	return importMaxDirsPerSnapshot(results) < dirIDUInt32WarningThreshold
+}
+
+func addImportPathTextReductionInputs(total *perfreport.Operation, results []datasetImportResult) {
+	before, after := importPathTextBytes(results)
+	reduction := uint64SaturatingSub(before, after)
+
+	total.Inputs[importInputPathTextBytesBefore] = before
+	total.Inputs[importInputPathTextBytesAfter] = after
+	total.Inputs[importInputPathTextBytesReduction] = reduction
+	total.Inputs[importInputPathTextBytesReductionPct] = importPathTextReductionPercent(before, reduction)
+}
+
+func importPathTextBytes(results []datasetImportResult) (uint64, uint64) {
+	var (
+		before uint64
+		after  uint64
+	)
+
+	for _, result := range results {
+		before += result.pathTextBytesBefore
+		after += result.pathTextBytesAfter
+	}
+
+	return before, after
+}
+
+func importPathTextReductionPercent(before, reduction uint64) float64 {
+	if before == 0 {
+		return 0
+	}
+
+	return 100 * float64(reduction) / float64(before)
 }
 
 func importRetryCleanupResult(results []datasetImportResult) string {
@@ -398,6 +635,15 @@ func importPublishLatencyMS(results []datasetImportResult) uint64 {
 type importCPUUsage struct {
 	userMS   uint64
 	systemMS uint64
+}
+
+func (m *datasetImportMetrics) addPathTextBytes(before, after uint64) {
+	if m == nil {
+		return
+	}
+
+	m.pathTextBytesBefore += before
+	m.pathTextBytesAfter += after
 }
 
 func cloneMap[M ~map[K]V, K comparable, V any](src M) M {
@@ -455,10 +701,12 @@ func importMainTablePhase(phase string) (string, bool) {
 		return tableFiles, true
 	case phaseDGUTAInsert:
 		return tableDGUTA, true
-	case phaseChildrenInsert:
-		return tableChildren, true
+	case phaseCatalogInsert:
+		return tableCatalog, true
 	case phaseDirFactsInsert:
 		return tableDirFacts, true
+	case phaseMountSwitch:
+		return tableMountEvents, true
 	default:
 		return "", false
 	}
@@ -482,40 +730,19 @@ func importBasedirsTablePhase(phase string) (string, bool) {
 }
 
 func importMultiTablePhase(phase string) ([]string, bool) {
-	switch phase {
-	case phasePartitionDropReset:
-		return []string{
-			tableDGUTA,
-			tableChildren,
-			tableDirFacts,
-			tableFiles,
-			tableDirSummary,
-			tableDirSummarySets,
-			tableDirDGUTAVector,
-			tableBasedirsGroupUsage,
-			tableBasedirsUserUsage,
-			tableBasedirsGroupSubdirs,
-			tableBasedirsUserSubdirs,
-			tableDirFilterAgeAll,
-		}, true
-	case phaseDirProjectionWrite:
-		return []string{tableDirSummary, tableDirSummarySets, tableDirDGUTAVector, tableDirFilterAgeAll}, true
-	case phaseBasedirsReset, phaseBasedirsFlush:
-		return []string{
-			tableBasedirsGroupUsage,
-			tableBasedirsUserUsage,
-			tableBasedirsGroupSubdirs,
-			tableBasedirsUserSubdirs,
-		}, true
-	case phaseBasedirsFinalise:
-		return []string{tableBasedirsGroupUsage, tableBasedirsHistory}, true
-	case phaseTreeSummaryRefresh:
-		return []string{tableTreeSummarySets, tableTreeDGUTA, tableTreeDirSummary, tableTreeChildren}, true
-	case phaseActivePrefixRefresh:
-		return []string{tableActivePrefixRollups, tableActivePrefixFilterAgeAll, tableActivePrefixRollupSets}, true
-	default:
-		return nil, false
+	if tables, ok := importSnapshotMultiTablePhase(phase); ok {
+		return tables, true
 	}
+
+	if tables, ok := importBasedirsMultiTablePhase(phase); ok {
+		return tables, true
+	}
+
+	if tables, ok := importRefreshMultiTablePhase(phase); ok {
+		return tables, true
+	}
+
+	return nil, false
 }
 
 func totalImportRecords(results []datasetImportResult) uint64 {
@@ -702,16 +929,28 @@ func enrichImportReport(
 	report.SelectedTables = selectedTables
 	report.TableStats = tableStatsForSelectedTables(tableStats, selectedTables)
 
+	if err := addImportJ6StorageAudit(ctx, report, api, selectedTables); err != nil {
+		return err
+	}
+
 	return nil
 }
 
 func selectedImportTables(collected map[string]perfreport.TableStats) []string {
-	selected := baseImportSelectedTables()
+	if collected == nil {
+		return baseImportSelectedTables()
+	}
 
-	for _, optional := range []string{tableTreeDGUTA} {
-		if importTableSelected(collected[optional]) {
-			selected = append(selected, optional)
+	selected := make([]string, 0, len(collected))
+
+	for _, table := range slices.Sorted(maps.Keys(collected)) {
+		skip := !strings.HasPrefix(table, "wrstat_") ||
+			!importTableSelected(collected[table])
+		if skip {
+			continue
 		}
+
+		selected = append(selected, table)
 	}
 
 	return selected
@@ -721,8 +960,7 @@ func baseImportSelectedTables() []string {
 	return []string{
 		tableFiles,
 		tableDirSummary,
-		tableChildren,
-		tableDirFacts,
+		tableCatalog,
 		tableDirSummarySets,
 		tableBasedirsGroupUsage,
 		tableBasedirsUserUsage,
@@ -777,7 +1015,7 @@ func collectImportReportStats(
 	selectedTables *[]string,
 	tableStats map[string]perfreport.TableStats,
 ) error {
-	collected, err := statsAPI.ImportTableStats(ctx, importStatsCandidateTables())
+	collected, err := statsAPI.ImportTableStats(ctx, nil)
 	if err != nil {
 		return err
 	}
@@ -794,13 +1032,6 @@ func collectImportReportStats(
 	report.FactsBucketStats = &buckets
 
 	return nil
-}
-
-func importStatsCandidateTables() []string {
-	tables := baseImportSelectedTables()
-	tables = append(tables, tableTreeDGUTA)
-
-	return tables
 }
 
 func addImportPhaseDurations(
@@ -1229,6 +1460,30 @@ func countDirFactRows(record db.RecordDGUTA) uint64 {
 	return 1
 }
 
+func importPathTextBytesForRows(path string, rows uint64) uint64 {
+	if path == "" || rows == 0 {
+		return 0
+	}
+
+	return uint64(len(path)) * rows
+}
+
+func recordDirPath(record db.RecordDGUTA) string {
+	if record.Dir == nil {
+		return ""
+	}
+
+	return string(record.Dir.AppendTo(nil))
+}
+
+func importFileParentPathTextBytes(info *summary.FileInfo) uint64 {
+	if info == nil || info.Path == nil {
+		return 0
+	}
+
+	return importPathTextBytesForRows(string(info.Path.AppendTo(nil)), 1)
+}
+
 func noopPublishCloser(bool) error {
 	return nil
 }
@@ -1370,6 +1625,9 @@ type datasetImportResult struct {
 	elapsed   time.Duration
 	rows      map[string]uint64
 	phases    map[string]time.Duration
+
+	pathTextBytesBefore uint64
+	pathTextBytesAfter  uint64
 }
 
 func (r datasetImportResult) records() uint64 {
@@ -1388,6 +1646,9 @@ type datasetImportMetrics struct {
 	mountPath string
 	rows      map[string]uint64
 	phases    map[string]time.Duration
+
+	pathTextBytesBefore uint64
+	pathTextBytesAfter  uint64
 }
 
 func (m *datasetImportMetrics) addRows(table string, rows uint64) {
@@ -1408,13 +1669,15 @@ func (m *datasetImportMetrics) addPhase(phase string, d time.Duration) {
 
 func (m *datasetImportMetrics) result(lines uint64, elapsed time.Duration) datasetImportResult {
 	return datasetImportResult{
-		dataset:   m.dataset,
-		statsPath: m.statsPath,
-		mountPath: m.mountPath,
-		lines:     lines,
-		elapsed:   elapsed,
-		rows:      cloneMap(m.rows),
-		phases:    cloneMap(m.phases),
+		dataset:             m.dataset,
+		statsPath:           m.statsPath,
+		mountPath:           m.mountPath,
+		lines:               lines,
+		elapsed:             elapsed,
+		rows:                cloneMap(m.rows),
+		phases:              cloneMap(m.phases),
+		pathTextBytesBefore: m.pathTextBytesBefore,
+		pathTextBytesAfter:  m.pathTextBytesAfter,
 	}
 }
 
@@ -1453,9 +1716,16 @@ type trackedDGUTAWriter struct {
 func (w *trackedDGUTAWriter) Add(record db.RecordDGUTA) error {
 	err := w.DGUTAWriter.Add(record)
 	if err == nil {
-		w.metrics.addRows(tableDGUTA, countDGUTARows(record, w.mountPath))
-		w.metrics.addRows(tableChildren, countCatalogRows(record))
+		dgutaRows := countDGUTARows(record, w.mountPath)
+		catalogRows := countCatalogRows(record)
+
+		w.metrics.addRows(tableDGUTA, dgutaRows)
+		w.metrics.addRows(tableCatalog, catalogRows)
 		w.metrics.addRows(tableDirFacts, countDirFactRows(record))
+		w.metrics.addPathTextBytes(
+			importPathTextBytesForRows(recordDirPath(record), dgutaRows),
+			importPathTextBytesForRows(recordDirPath(record), catalogRows),
+		)
 	}
 
 	return err
@@ -1504,6 +1774,7 @@ func (o *trackedFileOperation) Add(info *summary.FileInfo) error {
 
 	if err == nil && info != nil {
 		o.metrics.addRows(tableFiles, 1)
+		o.metrics.addPathTextBytes(importFileParentPathTextBytes(info), 0)
 	}
 
 	return err

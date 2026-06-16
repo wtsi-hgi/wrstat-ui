@@ -27,6 +27,7 @@ package chperf
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	. "github.com/smartystreets/goconvey/convey"
@@ -38,6 +39,25 @@ const (
 	clickHouseAPIFieldTestExt      = "cram"
 	clickHouseAPIFieldTestFilePath = clickHouseAPIFieldTestDir + "file." + clickHouseAPIFieldTestExt
 )
+
+func TestImportTableStatsQuery(t *testing.T) {
+	Convey("importTableStatsQuery discovers active wrstat tables when no table list is supplied", t, func() {
+		query, args := importTableStatsQuery("wrstat_perf", nil)
+
+		So(query, ShouldContainSubstring, "startsWith(table, 'wrstat_')")
+		So(strings.Contains(query, "table IN"), ShouldBeFalse)
+		So(query, ShouldContainSubstring, "GROUP BY table")
+		So(args, ShouldResemble, []any{"wrstat_perf"})
+	})
+
+	Convey("importTableStatsQuery keeps explicit table filters for targeted calls", t, func() {
+		query, args := importTableStatsQuery("wrstat_perf", []string{tableFiles, tableDirSummary})
+
+		So(query, ShouldContainSubstring, "table IN (?,?)")
+		So(query, ShouldContainSubstring, "GROUP BY table")
+		So(args, ShouldResemble, []any{"wrstat_perf", tableFiles, tableDirSummary})
+	})
+}
 
 type recordingClickHouseFileClient struct {
 	listOpts      []clickhouse.ListOptions
@@ -68,7 +88,11 @@ func (c *recordingClickHouseFileClient) StatPath(
 ) (*clickhouse.FileRow, error) {
 	c.statOpts = append(c.statOpts, opts)
 
-	return &clickhouse.FileRow{Path: path}, nil
+	return &clickhouse.FileRow{Path: path, Ext: clickHouseAPIFieldTestExt, EntryType: 'f'}, nil
+}
+
+func (*recordingClickHouseFileClient) IsDir(context.Context, string) (bool, error) {
+	return true, nil
 }
 
 func (*recordingClickHouseFileClient) PermissionAnyInDir(
@@ -138,14 +162,52 @@ func TestClickHouseQueryClientUsesNarrowFileFields(t *testing.T) {
 			clickHouseFileFieldEntryType,
 		})
 
-		So(client.StatPath(ctx, clickHouseAPIFieldTestFilePath), ShouldBeNil)
+		row, err := client.StatPath(ctx, clickHouseAPIFieldTestFilePath)
+		So(err, ShouldBeNil)
+		So(row, ShouldResemble, &QueryRow{
+			Path:      clickHouseAPIFieldTestFilePath,
+			Ext:       clickHouseAPIFieldTestExt,
+			EntryType: 'f',
+		})
 		So(recorder.statOpts, ShouldHaveLength, 1)
-		So(recorder.statOpts[0].Fields, ShouldResemble, []string{clickHouseFileFieldPath})
+		So(recorder.statOpts[0].Fields, ShouldResemble, []string{
+			clickHouseFileFieldPath,
+			clickHouseFileFieldExt,
+			clickHouseFileFieldEntryType,
+		})
 
-		So(client.PermissionPath(ctx, clickHouseAPIFieldTestFilePath, 123, []uint32{456}), ShouldBeNil)
+		ok, err := client.IsDir(ctx, clickHouseAPIFieldTestDir)
+		So(err, ShouldBeNil)
+		So(ok, ShouldBeTrue)
+
+		ok, err = client.PermissionPath(ctx, clickHouseAPIFieldTestFilePath, 123, []uint32{456})
+		So(err, ShouldBeNil)
+		So(ok, ShouldBeTrue)
 		So(recorder.permPathCalls, ShouldResemble, []string{clickHouseAPIFieldTestFilePath})
 
-		count, err := client.FindByGlob(
+		globRows, err := client.FindByGlob(
+			ctx,
+			[]string{clickHouseAPIFieldTestDir},
+			[]string{"**/*." + clickHouseAPIFieldTestExt},
+			true,
+			123,
+			[]uint32{456},
+		)
+		So(err, ShouldBeNil)
+		So(globRows, ShouldResemble, []QueryRow{{
+			Path: clickHouseAPIFieldTestFilePath,
+		}})
+		So(recorder.findOpts, ShouldHaveLength, 1)
+		So(recorder.findOpts[0].Fields, ShouldResemble, []string{
+			clickHouseFileFieldPath,
+			clickHouseFileFieldExt,
+			clickHouseFileFieldEntryType,
+		})
+		So(recorder.findOpts[0].RequireOwner, ShouldBeTrue)
+		So(recorder.findOpts[0].UID, ShouldEqual, uint32(123))
+		So(recorder.findOpts[0].GIDs, ShouldResemble, []uint32{456})
+
+		count, err := client.CountByGlob(
 			ctx,
 			[]string{clickHouseAPIFieldTestDir},
 			[]string{"**/*." + clickHouseAPIFieldTestExt},
@@ -155,7 +217,6 @@ func TestClickHouseQueryClientUsesNarrowFileFields(t *testing.T) {
 		)
 		So(err, ShouldBeNil)
 		So(count, ShouldEqual, 1)
-		So(recorder.findOpts, ShouldBeEmpty)
 		So(recorder.countGlobOpts, ShouldHaveLength, 1)
 		So(recorder.countGlobOpts[0].Fields, ShouldBeEmpty)
 		So(recorder.countGlobOpts[0].RequireOwner, ShouldBeTrue)

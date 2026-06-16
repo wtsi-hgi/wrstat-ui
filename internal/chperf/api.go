@@ -50,8 +50,15 @@ type ImportAPI interface {
 
 // ImportReportStatsAPI exposes post-import ClickHouse evidence.
 type ImportReportStatsAPI interface {
+	// ImportTableStats returns active wrstat table evidence when tables is
+	// empty, or evidence for the supplied table names when it is non-empty.
 	ImportTableStats(ctx context.Context, tables []string) (map[string]perfreport.TableStats, error)
 	ImportFactsStats(ctx context.Context) (perfreport.FactsVectorStats, perfreport.FactsBucketStats, error)
+}
+
+// ImportStorageAuditAPI exposes post-import schema evidence for J6 storage gates.
+type ImportStorageAuditAPI interface {
+	ImportHotRowPathStringTables(ctx context.Context, tables []string) ([]string, error)
 }
 
 // QueryRow captures the file metadata fields used by the perf harness.
@@ -66,9 +73,18 @@ type QueryClient interface {
 	io.Closer
 
 	ListDir(ctx context.Context, dir string, limit int64) ([]QueryRow, error)
-	StatPath(ctx context.Context, path string) error
-	PermissionAnyInDir(ctx context.Context, dir string, uid uint32, gids []uint32) error
+	StatPath(ctx context.Context, path string) (*QueryRow, error)
+	IsDir(ctx context.Context, path string) (bool, error)
+	PermissionAnyInDir(ctx context.Context, dir string, uid uint32, gids []uint32) (bool, error)
 	FindByGlob(
+		ctx context.Context,
+		baseDirs []string,
+		patterns []string,
+		requireOwner bool,
+		uid uint32,
+		gids []uint32,
+	) ([]QueryRow, error)
+	CountByGlob(
 		ctx context.Context,
 		baseDirs []string,
 		patterns []string,
@@ -95,6 +111,7 @@ type QueryInspector interface {
 
 	ExplainListDir(ctx context.Context, mountPath, dir string, limit, offset int64) (string, error)
 	ExplainStatPath(ctx context.Context, mountPath, path string) (string, error)
+	ExplainFindByGlob(ctx context.Context, baseDirs, patterns []string) (string, error)
 	Measure(ctx context.Context, run func(ctx context.Context) error) (*QueryMetrics, error)
 }
 

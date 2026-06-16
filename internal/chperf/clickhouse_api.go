@@ -73,6 +73,7 @@ type ClickHouseAPI interface {
 type clickHouseFileAPI interface {
 	ListDir(ctx context.Context, dir string, opts clickhouse.ListOptions) ([]clickhouse.FileRow, error)
 	StatPath(ctx context.Context, path string, opts clickhouse.StatOptions) (*clickhouse.FileRow, error)
+	IsDir(ctx context.Context, path string) (bool, error)
 	PermissionAnyInDir(ctx context.Context, dir string, uid uint32, gids []uint32) (bool, error)
 	PermissionPath(ctx context.Context, path string, uid uint32, gids []uint32) (bool, error)
 	CountByGlob(
@@ -91,13 +92,30 @@ type clickHouseFileAPI interface {
 }
 
 var (
-	_ ClickHouseAPI        = (*clickHouseAPI)(nil)
-	_ clickHouseFileAPI    = (*clickhouse.Client)(nil)
-	_ ImportAPI            = (*clickHouseAPI)(nil)
-	_ ImportReportStatsAPI = (*clickHouseAPI)(nil)
-	_ QueryAPI             = (*clickHouseAPI)(nil)
-	_ QueryCacheResetter   = (*clickHouseAPI)(nil)
+	_ ClickHouseAPI         = (*clickHouseAPI)(nil)
+	_ clickHouseFileAPI     = (*clickhouse.Client)(nil)
+	_ ImportAPI             = (*clickHouseAPI)(nil)
+	_ ImportReportStatsAPI  = (*clickHouseAPI)(nil)
+	_ ImportStorageAuditAPI = (*clickHouseAPI)(nil)
+	_ QueryAPI              = (*clickHouseAPI)(nil)
+	_ QueryCacheResetter    = (*clickHouseAPI)(nil)
 )
+
+// NewClickHouseAPI returns a ClickHouse-backed adapter for the perf harness.
+func NewClickHouseAPI(cfg clickhouse.Config) ClickHouseAPI {
+	return newClickHouseAPIWithOpenProvider(cfg, clickhouse.OpenProvider)
+}
+
+func newClickHouseAPIWithOpenProvider(
+	cfg clickhouse.Config,
+	openProvider clickHouseOpenProvider,
+) ClickHouseAPI {
+	if openProvider == nil {
+		openProvider = clickhouse.OpenProvider
+	}
+
+	return &clickHouseAPI{cfg: cfg, openProvider: openProvider}
+}
 
 type clickHouseOpenProvider func(clickhouse.Config) (provider.Provider, error)
 
@@ -138,12 +156,27 @@ func convertQueryRows(rows []clickhouse.FileRow) []QueryRow {
 	return converted
 }
 
-func (c clickHouseQueryClient) StatPath(ctx context.Context, path string) error {
-	_, err := c.client.StatPath(ctx, path, clickhouse.StatOptions{
-		Fields: []string{clickHouseFileFieldPath},
+func (c clickHouseQueryClient) StatPath(ctx context.Context, path string) (*QueryRow, error) {
+	row, err := c.client.StatPath(ctx, path, clickhouse.StatOptions{
+		Fields: []string{
+			clickHouseFileFieldPath,
+			clickHouseFileFieldExt,
+			clickHouseFileFieldEntryType,
+		},
 	})
+	if err != nil {
+		return nil, err
+	}
 
-	return err
+	return &QueryRow{
+		Path:      row.Path,
+		Ext:       row.Ext,
+		EntryType: row.EntryType,
+	}, nil
+}
+
+func (c clickHouseQueryClient) IsDir(ctx context.Context, path string) (bool, error) {
+	return c.client.IsDir(ctx, path)
 }
 
 func (c clickHouseQueryClient) PermissionAnyInDir(
@@ -151,10 +184,8 @@ func (c clickHouseQueryClient) PermissionAnyInDir(
 	dir string,
 	uid uint32,
 	gids []uint32,
-) error {
-	_, err := c.client.PermissionAnyInDir(ctx, dir, uid, gids)
-
-	return err
+) (bool, error) {
+	return c.client.PermissionAnyInDir(ctx, dir, uid, gids)
 }
 
 func (c clickHouseQueryClient) PermissionPath(
@@ -162,13 +193,36 @@ func (c clickHouseQueryClient) PermissionPath(
 	path string,
 	uid uint32,
 	gids []uint32,
-) error {
-	_, err := c.client.PermissionPath(ctx, path, uid, gids)
-
-	return err
+) (bool, error) {
+	return c.client.PermissionPath(ctx, path, uid, gids)
 }
 
 func (c clickHouseQueryClient) FindByGlob(
+	ctx context.Context,
+	baseDirs []string,
+	patterns []string,
+	requireOwner bool,
+	uid uint32,
+	gids []uint32,
+) ([]QueryRow, error) {
+	rows, err := c.client.FindByGlob(ctx, baseDirs, patterns, clickhouse.FindOptions{
+		Fields: []string{
+			clickHouseFileFieldPath,
+			clickHouseFileFieldExt,
+			clickHouseFileFieldEntryType,
+		},
+		RequireOwner: requireOwner,
+		UID:          uid,
+		GIDs:         gids,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return convertQueryRows(rows), nil
+}
+
+func (c clickHouseQueryClient) CountByGlob(
 	ctx context.Context,
 	baseDirs []string,
 	patterns []string,
@@ -206,6 +260,16 @@ func (i clickHouseQueryInspector) ExplainStatPath(
 	return i.inspector.ExplainStatPath(ctx, mountPath, path)
 }
 
+func (i clickHouseQueryInspector) ExplainFindByGlob(
+	ctx context.Context,
+	baseDirs []string,
+	patterns []string,
+) (string, error) {
+	return i.inspector.ExplainFindByGlob(ctx, baseDirs, patterns, clickhouse.FindOptions{
+		Fields: []string{clickHouseFileFieldPath},
+	})
+}
+
 func (i clickHouseQueryInspector) Measure(
 	ctx context.Context,
 	run func(ctx context.Context) error,
@@ -237,22 +301,6 @@ func (i clickHouseQueryInspector) Close() error {
 type clickHouseAPI struct {
 	cfg          clickhouse.Config
 	openProvider clickHouseOpenProvider
-}
-
-// NewClickHouseAPI returns a ClickHouse-backed adapter for the perf harness.
-func NewClickHouseAPI(cfg clickhouse.Config) ClickHouseAPI {
-	return newClickHouseAPIWithOpenProvider(cfg, clickhouse.OpenProvider)
-}
-
-func newClickHouseAPIWithOpenProvider(
-	cfg clickhouse.Config,
-	openProvider clickHouseOpenProvider,
-) ClickHouseAPI {
-	if openProvider == nil {
-		openProvider = clickhouse.OpenProvider
-	}
-
-	return &clickHouseAPI{cfg: cfg, openProvider: openProvider}
 }
 
 func (a *clickHouseAPI) providerConfig() clickhouse.Config {
@@ -316,10 +364,6 @@ func queryImportTableStats(
 	database string,
 	tables []string,
 ) (map[string]perfreport.TableStats, error) {
-	if len(tables) == 0 {
-		return map[string]perfreport.TableStats{}, nil
-	}
-
 	query, args := importTableStatsQuery(database, tables)
 
 	rows, err := conn.Query(ctx, query, args...)
@@ -373,6 +417,38 @@ func queryImportFactsStats(
 	return vector, bucket, nil
 }
 
+func (a *clickHouseAPI) ImportHotRowPathStringTables(
+	ctx context.Context,
+	tables []string,
+) ([]string, error) {
+	conn, err := a.openStatsConn(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	defer func() { _ = conn.Close() }()
+
+	return queryImportHotRowPathStringTables(ctx, conn, a.cfg.Database, tables)
+}
+
+func queryImportHotRowPathStringTables(
+	ctx context.Context,
+	conn driver.Conn,
+	database string,
+	tables []string,
+) ([]string, error) {
+	query, args := importHotRowPathStringTablesQuery(database, tables)
+
+	rows, err := conn.Query(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	return scanImportHotRowPathStringTables(rows)
+}
+
 func (a *clickHouseAPI) OpenProvider() (provider.Provider, error) {
 	return a.openProvider(a.providerConfig())
 }
@@ -404,18 +480,49 @@ func (a *clickHouseAPI) openStatsConn(ctx context.Context) (driver.Conn, error) 
 }
 
 func importTableStatsQuery(database string, tables []string) (string, []any) {
-	placeholders := strings.TrimRight(strings.Repeat("?,", len(tables)), ",")
+	tableFilter := "startsWith(table, 'wrstat_')"
 	query := "SELECT table, toUInt64(sum(rows)), toUInt64(count()), " +
 		"toUInt64(sum(data_compressed_bytes)), toUInt64(sum(data_uncompressed_bytes)) " +
-		"FROM system.parts WHERE database = ? AND active AND table IN (" +
-		placeholders + ") GROUP BY table"
+		"FROM system.parts WHERE database = ? AND active AND "
 
-	args := make([]any, 0, len(tables)+1)
+	args := make([]any, 0, max(len(tables)+1, 1))
 
 	args = append(args, database)
-	for _, table := range tables {
-		args = append(args, table)
+
+	if len(tables) > 0 {
+		placeholders := strings.TrimRight(strings.Repeat("?,", len(tables)), ",")
+		tableFilter = "table IN (" + placeholders + ")"
+
+		for _, table := range tables {
+			args = append(args, table)
+		}
 	}
+
+	query += tableFilter + " GROUP BY table ORDER BY table"
+
+	return query, args
+}
+
+func importHotRowPathStringTablesQuery(database string, tables []string) (string, []any) {
+	tableFilter := "startsWith(table, 'wrstat_')"
+	query := "SELECT DISTINCT table FROM system.columns " +
+		"WHERE database = ? AND table != ? AND " +
+		"positionCaseInsensitive(type, 'String') > 0 AND " +
+		"lower(name) IN ('dir', 'parent_dir', 'child_dir', 'path') AND "
+	args := make([]any, 0, max(len(tables)+2, 2))
+
+	args = append(args, database, tableCatalog)
+
+	if len(tables) > 0 {
+		placeholders := strings.TrimRight(strings.Repeat("?,", len(tables)), ",")
+		tableFilter = "table IN (" + placeholders + ")"
+
+		for _, table := range tables {
+			args = append(args, table)
+		}
+	}
+
+	query += tableFilter + " ORDER BY table"
 
 	return query, args
 }
@@ -447,4 +554,23 @@ func scanImportTableStats(rows driver.Rows) (map[string]perfreport.TableStats, e
 	}
 
 	return stats, nil
+}
+
+func scanImportHotRowPathStringTables(rows driver.Rows) ([]string, error) {
+	tables := make([]string, 0)
+
+	for rows.Next() {
+		var table string
+		if err := rows.Scan(&table); err != nil {
+			return nil, err
+		}
+
+		tables = append(tables, table)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return tables, nil
 }

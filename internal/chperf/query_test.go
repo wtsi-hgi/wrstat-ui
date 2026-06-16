@@ -48,15 +48,17 @@ var (
 )
 
 const (
-	explainPruningOutput     = "mount_path partition pruning\ndir_id key condition"
-	navigationGateWinningP95 = 4
-	queryTestNFSTeamPath     = "/nfs/team/"
-	queryOpTestChildADir     = "/root/a/"
-	queryOpTestChildBDir     = "/root/b/"
-	queryOpTestGrandDir      = "/root/a/grand/"
-	queryOpTestRootDir       = "/root/"
-	queryTestBamExt          = "bam"
-	queryTestE2CacheHitKey   = "active_prefix_summary:path=/nfs/t283_imaging/;filter=ft:32768;" +
+	explainPruningOutput   = "mount_path partition pruning\ndir_id key condition"
+	queryTestExplainDir    = "/mnt/test/project/"
+	queryTestExplainFile   = queryTestExplainDir + "file.txt"
+	queryTestExplainMount  = "／mnt／test"
+	queryTestNFSTeamPath   = "/nfs/team/"
+	queryOpTestChildADir   = "/root/a/"
+	queryOpTestChildBDir   = "/root/b/"
+	queryOpTestGrandDir    = "/root/a/grand/"
+	queryOpTestRootDir     = "/root/"
+	queryTestBamExt        = "bam"
+	queryTestE2CacheHitKey = "active_prefix_summary:path=/nfs/t283_imaging/;filter=ft:32768;" +
 		"active_set_id=e2;query_version=1"
 	queryTestNoMatchGID = 404
 )
@@ -239,10 +241,11 @@ func TestPickDir(t *testing.T) {
 }
 
 type fakeQueryInspector struct {
-	explainListDir  func(ctx context.Context, mountPath, dir string, limit, offset int64) (string, error)
-	explainStatPath func(ctx context.Context, mountPath, path string) (string, error)
-	measure         func(ctx context.Context, run func(ctx context.Context) error) (*QueryMetrics, error)
-	closeFn         func() error
+	explainFindByGlob func(ctx context.Context, baseDirs, patterns []string) (string, error)
+	explainListDir    func(ctx context.Context, mountPath, dir string, limit, offset int64) (string, error)
+	explainStatPath   func(ctx context.Context, mountPath, path string) (string, error)
+	measure           func(ctx context.Context, run func(ctx context.Context) error) (*QueryMetrics, error)
+	closeFn           func() error
 }
 
 func (f fakeQueryInspector) ExplainListDir(
@@ -266,6 +269,18 @@ func (f fakeQueryInspector) ExplainStatPath(
 ) (string, error) {
 	if f.explainStatPath != nil {
 		return f.explainStatPath(ctx, mountPath, path)
+	}
+
+	return "", nil
+}
+
+func (f fakeQueryInspector) ExplainFindByGlob(
+	ctx context.Context,
+	baseDirs []string,
+	patterns []string,
+) (string, error) {
+	if f.explainFindByGlob != nil {
+		return f.explainFindByGlob(ctx, baseDirs, patterns)
 	}
 
 	return "", nil
@@ -629,8 +644,9 @@ func TestRunSuiteOperationSelection(t *testing.T) {
 		So(resultCountsByName(report)[queryOpFilesListDirName], ShouldResemble, []uint64{1})
 		So(resultCountsByName(report)[queryOpFilesStatPathName], ShouldResemble, []uint64{1})
 		So(resultCountsByName(report)["glob_case_E"], ShouldResemble, []uint64{2})
-		So(operationByName(report, queryOpTreeWhereName).Inputs[navigationInputResultDigest], ShouldNotBeBlank)
-		So(operationByName(report, queryOpTreeDirInfoName).Inputs[navigationInputResultDigest], ShouldNotBeBlank)
+		So(operationByName(report, queryOpTreeDiskTreeEndName).Inputs[queryInputHighFanoutChildCount], ShouldEqual, uint64(2))
+		So(operationByName(report, queryOpTreeWhereName).Inputs[queryInputResultDigest], ShouldNotBeBlank)
+		So(operationByName(report, queryOpTreeDirInfoName).Inputs[queryInputResultDigest], ShouldNotBeBlank)
 	})
 
 	Convey("D2.6 permission_check records directory and path permission checks", t, func() {
@@ -763,10 +779,15 @@ func TestRunSuiteOperationSelection(t *testing.T) {
 		}, func(string, ...any) {})
 
 		So(err, ShouldBeNil)
-		So(report.Operations, ShouldHaveLength, len(focusedOps))
+		So(report.Operations, ShouldHaveLength, len(focusedOps)+len(finalGateJ6D4RequiredPatterns()))
 
-		names := make([]string, 0, len(report.Operations))
+		names := make([]string, 0, len(focusedOps))
+
 		for _, op := range report.Operations {
+			if op.Name == finalGateJ6D4DecisionOpName {
+				continue
+			}
+
 			names = append(names, op.Name)
 			So(op.DurationsMS, ShouldResemble, []float64{3})
 			So(op.P50MS, ShouldEqual, float64(3))
@@ -781,6 +802,44 @@ func TestRunSuiteOperationSelection(t *testing.T) {
 
 		for _, name := range focusedOps {
 			So(names, ShouldContain, name)
+		}
+
+		decisions := queryTestD4Decisions(report)
+		So(decisions, ShouldHaveLength, len(finalGateJ6D4RequiredPatterns()))
+
+		for _, pattern := range finalGateJ6D4RequiredPatterns() {
+			decision, ok := finalGateJ6D4DecisionForPattern(decisions, pattern)
+			So(ok, ShouldBeTrue)
+			So(decision.Decision, ShouldEqual, finalGateJ6D4DecisionRetained)
+			So(decision.Citation, ShouldNotBeBlank)
+			So(decision.MeasuredP95MS, ShouldEqual, float64(3))
+			So(decision.LatencyGateMS, ShouldEqual, float64(finalGateJ6ColdUXBroadMaxMS))
+		}
+
+		expectedMeasuredOps := map[string][]string{
+			finalGateJ6D4PatternFilteredExact: {
+				queryOpDirInfoFilteredName,
+			},
+			finalGateJ6D4PatternFilteredChildren: {
+				queryOpDirInfosFilteredName,
+				queryOpDirsHaveChildrenFilteredName,
+			},
+			finalGateJ6D4PatternFilteredSubtree: {
+				queryOpWhereFilteredWholeMountName,
+			},
+		}
+
+		for _, op := range report.Operations {
+			if op.Name != finalGateJ6D4DecisionOpName {
+				continue
+			}
+
+			pattern := stringInput(op.Inputs, finalGateJ6D4PatternInput)
+			measuredOps, ok := op.Inputs["measured_operations"].([]string)
+			So(ok, ShouldBeTrue)
+			So(measuredOps, ShouldResemble, expectedMeasuredOps[pattern])
+			So(op.Inputs[finalGateJ6D4CitationInput], ShouldEqual,
+				"query_report:"+strings.Join(expectedMeasuredOps[pattern], ","))
 		}
 	})
 
@@ -875,7 +934,7 @@ func TestRunSuiteOperationSelection(t *testing.T) {
 		So(authTree.Name, ShouldEqual, queryOpAuthTreeName)
 		So(authTree.Inputs[queryInputAllowedGIDsKey], ShouldResemble, []uint32{7})
 		So(authTree.Inputs[queryInputStatusCodeKey], ShouldEqual, 200)
-		So(authTree.Inputs[navigationInputResultDigest], ShouldNotBeBlank)
+		So(authTree.Inputs[queryInputResultDigest], ShouldNotBeBlank)
 		So(authTree.Inputs[queryInputNoAuthFlagsKey], ShouldResemble, map[string]bool{
 			queryOpTestRootDir:   false,
 			queryOpTestChildADir: false,
@@ -885,15 +944,31 @@ func TestRunSuiteOperationSelection(t *testing.T) {
 		restrictedWhere := report.Operations[1]
 		So(restrictedWhere.Name, ShouldEqual, queryOpAuthWhereRestrictedName)
 		So(restrictedWhere.Inputs[queryInputFilterGIDsKey], ShouldResemble, []uint32{7})
-		So(restrictedWhere.Inputs[navigationInputResultDigest], ShouldNotBeBlank)
+		So(restrictedWhere.Inputs[queryInputResultDigest], ShouldNotBeBlank)
 		So(restrictedWhere.ResultCount, ShouldResemble, []uint64{3})
 
 		noAuthWhere := report.Operations[2]
 		So(noAuthWhere.Name, ShouldEqual, queryOpNoAuthWhereName)
 		So(noAuthWhere.Inputs[queryInputFilterGIDsKey], ShouldBeEmpty)
-		So(noAuthWhere.Inputs[navigationInputResultDigest], ShouldNotBeBlank)
+		So(noAuthWhere.Inputs[queryInputResultDigest], ShouldNotBeBlank)
 		So(noAuthWhere.ResultCount, ShouldResemble, []uint64{3})
 	})
+}
+
+func newQueryOpTestDB() *queryOpTestDB {
+	return &queryOpTestDB{
+		children: map[string][]string{
+			queryOpTestRootDir:   {queryOpTestChildADir, queryOpTestChildBDir},
+			queryOpTestChildADir: {queryOpTestGrandDir},
+			queryOpTestChildBDir: {},
+		},
+		summaries: map[string]*db.DirSummary{
+			queryOpTestRootDir:   {Count: 3},
+			queryOpTestChildADir: {Count: 2},
+			queryOpTestChildBDir: {Count: 1},
+			queryOpTestGrandDir:  {Count: 1},
+		},
+	}
 }
 
 func resultCountsByName(report boltperf.Report) map[string][]uint64 {
@@ -913,6 +988,27 @@ func operationByName(report boltperf.Report, name string) perfreport.Operation {
 	}
 
 	return perfreport.Operation{}
+}
+
+func queryTestTreeFilter() *db.Filter {
+	return &db.Filter{
+		GIDs: []uint32{7, 8},
+		UIDs: []uint32{9, 10},
+		FT:   db.DGUTAFileTypeBam | db.DGUTAFileTypeCram,
+		Age:  db.DGUTAgeAll,
+	}
+}
+
+func queryTestD4Decisions(report boltperf.Report) []FinalGateD4DecisionEvidence {
+	decisions := make([]FinalGateD4DecisionEvidence, 0)
+
+	for _, op := range report.Operations {
+		if op.Name == finalGateJ6D4DecisionOpName {
+			decisions = append(decisions, finalGateJ6D4DecisionFromOperation(op))
+		}
+	}
+
+	return decisions
 }
 
 func TestBuildQueryContext(t *testing.T) {
@@ -956,9 +1052,9 @@ func TestVerifyPlans(t *testing.T) {
 	Convey("verifyPlans fails when ExplainStatPath lacks pruning", t, func() {
 		qctx := queryContext{
 			provider: fakeMountTimestampsProvider{bd: fakeMountTimestampsReader{mountTimestamps: map[string]time.Time{
-				"／mnt／test": time.Now(),
+				queryTestExplainMount: time.Now(),
 			}}},
-			client: &fakeQueryClient{rows: []QueryRow{{Path: "/mnt/test/project/file.txt"}}},
+			client: &fakeQueryClient{rows: []QueryRow{{Path: queryTestExplainFile}}},
 			inspector: fakeQueryInspector{
 				explainListDir: func(context.Context, string, string, int64, int64) (string, error) {
 					return explainPruningOutput, nil
@@ -966,8 +1062,11 @@ func TestVerifyPlans(t *testing.T) {
 				explainStatPath: func(context.Context, string, string) (string, error) {
 					return "mount_path partition pruning", nil
 				},
+				explainFindByGlob: func(context.Context, []string, []string) (string, error) {
+					return f3GlobCatalogProofExplain, nil
+				},
 			},
-			dir: "/mnt/test/project/",
+			dir: queryTestExplainDir,
 		}
 
 		err := verifyPlans(qctx, func(string, ...any) {})
@@ -980,9 +1079,9 @@ func TestVerifyPlans(t *testing.T) {
 	Convey("verifyPlans accepts ExplainStatPath when pruning is present", t, func() {
 		qctx := queryContext{
 			provider: fakeMountTimestampsProvider{bd: fakeMountTimestampsReader{mountTimestamps: map[string]time.Time{
-				"／mnt／test": time.Now(),
+				queryTestExplainMount: time.Now(),
 			}}},
-			client: &fakeQueryClient{rows: []QueryRow{{Path: "/mnt/test/project/file.txt"}}},
+			client: &fakeQueryClient{rows: []QueryRow{{Path: queryTestExplainFile}}},
 			inspector: fakeQueryInspector{
 				explainListDir: func(context.Context, string, string, int64, int64) (string, error) {
 					return explainPruningOutput, nil
@@ -990,8 +1089,37 @@ func TestVerifyPlans(t *testing.T) {
 				explainStatPath: func(context.Context, string, string) (string, error) {
 					return explainPruningOutput, nil
 				},
+				explainFindByGlob: func(context.Context, []string, []string) (string, error) {
+					return "ReadFromMergeTree wrstat_files match(f.path, ?) dir_id", nil
+				},
 			},
-			dir: "/mnt/test/project/",
+			dir: queryTestExplainDir,
+		}
+
+		err := verifyPlans(qctx, func(string, ...any) {})
+
+		So(err, ShouldNotBeNil)
+		So(err.Error(), ShouldContainSubstring, ErrExplainGlobScansFilesPath.Error())
+	})
+
+	Convey("verifyPlans accepts full-path glob proof when files are read by dir_id", t, func() {
+		qctx := queryContext{
+			provider: fakeMountTimestampsProvider{bd: fakeMountTimestampsReader{mountTimestamps: map[string]time.Time{
+				queryTestExplainMount: time.Now(),
+			}}},
+			client: &fakeQueryClient{rows: []QueryRow{{Path: queryTestExplainFile}}},
+			inspector: fakeQueryInspector{
+				explainListDir: func(context.Context, string, string, int64, int64) (string, error) {
+					return explainPruningOutput, nil
+				},
+				explainStatPath: func(context.Context, string, string) (string, error) {
+					return explainPruningOutput, nil
+				},
+				explainFindByGlob: func(context.Context, []string, []string) (string, error) {
+					return f3GlobCatalogProofExplain, nil
+				},
+			},
+			dir: queryTestExplainDir,
 		}
 
 		So(verifyPlans(qctx, func(string, ...any) {}), ShouldBeNil)
@@ -1013,6 +1141,7 @@ type permissionPathCall struct {
 type fakeQueryClient struct {
 	rows                []QueryRow
 	rowsByDir           map[string][]QueryRow
+	globRows            []QueryRow
 	permissionAnyCalls  []permissionAnyCall
 	permissionPathCalls []permissionPathCall
 	closeHook           func() error
@@ -1030,21 +1159,27 @@ func (c *fakeQueryClient) ListDir(
 	return c.rows, nil
 }
 
-func (*fakeQueryClient) StatPath(context.Context, string) error { return nil }
+func (*fakeQueryClient) StatPath(_ context.Context, path string) (*QueryRow, error) {
+	return &QueryRow{Path: path, EntryType: 'f'}, nil
+}
+
+func (*fakeQueryClient) IsDir(context.Context, string) (bool, error) {
+	return true, nil
+}
 
 func (c *fakeQueryClient) PermissionAnyInDir(
 	_ context.Context,
 	dir string,
 	uid uint32,
 	gids []uint32,
-) error {
+) (bool, error) {
 	c.permissionAnyCalls = append(c.permissionAnyCalls, permissionAnyCall{
 		dir:  dir,
 		uid:  uid,
 		gids: append([]uint32(nil), gids...),
 	})
 
-	return nil
+	return true, nil
 }
 
 func (c *fakeQueryClient) PermissionPath(
@@ -1052,25 +1187,48 @@ func (c *fakeQueryClient) PermissionPath(
 	path string,
 	uid uint32,
 	gids []uint32,
-) error {
+) (bool, error) {
 	c.permissionPathCalls = append(c.permissionPathCalls, permissionPathCall{
 		path: path,
 		uid:  uid,
 		gids: append([]uint32(nil), gids...),
 	})
 
-	return nil
+	return true, nil
 }
 
-func (*fakeQueryClient) FindByGlob(
-	context.Context,
-	[]string,
-	[]string,
-	bool,
-	uint32,
-	[]uint32,
+func (c *fakeQueryClient) FindByGlob(
+	_ context.Context,
+	_ []string,
+	_ []string,
+	_ bool,
+	_ uint32,
+	_ []uint32,
+) ([]QueryRow, error) {
+	if c.globRows != nil {
+		return append([]QueryRow(nil), c.globRows...), nil
+	}
+
+	return []QueryRow{
+		{Path: queryOpTestRootDir + "glob-a.bam", Ext: queryTestBamExt, EntryType: 'f'},
+		{Path: queryOpTestRootDir + "glob-b.bam", Ext: queryTestBamExt, EntryType: 'f'},
+	}, nil
+}
+
+func (c *fakeQueryClient) CountByGlob(
+	ctx context.Context,
+	baseDirs []string,
+	patterns []string,
+	requireOwner bool,
+	uid uint32,
+	gids []uint32,
 ) (int, error) {
-	return 2, nil
+	rows, err := c.FindByGlob(ctx, baseDirs, patterns, requireOwner, uid, gids)
+	if err != nil {
+		return 0, err
+	}
+
+	return len(rows), nil
 }
 
 func (c *fakeQueryClient) Close() error {
@@ -1602,31 +1760,6 @@ func TestBuildOps(t *testing.T) {
 	})
 }
 
-func newQueryOpTestDB() *queryOpTestDB {
-	return &queryOpTestDB{
-		children: map[string][]string{
-			queryOpTestRootDir:   {queryOpTestChildADir, queryOpTestChildBDir},
-			queryOpTestChildADir: {queryOpTestGrandDir},
-			queryOpTestChildBDir: {},
-		},
-		summaries: map[string]*db.DirSummary{
-			queryOpTestRootDir:   {Count: 3},
-			queryOpTestChildADir: {Count: 2},
-			queryOpTestChildBDir: {Count: 1},
-			queryOpTestGrandDir:  {Count: 1},
-		},
-	}
-}
-
-func queryTestTreeFilter() *db.Filter {
-	return &db.Filter{
-		GIDs: []uint32{7, 8},
-		UIDs: []uint32{9, 10},
-		FT:   db.DGUTAFileTypeBam | db.DGUTAFileTypeCram,
-		Age:  db.DGUTAgeAll,
-	}
-}
-
 func findQueryTestOp(ops []op, name string) *op {
 	for i := range ops {
 		if ops[i].name == name {
@@ -1776,341 +1909,4 @@ func (d *queryOpTestDB) Info() (*db.Info, error) {
 
 func (d *queryOpTestDB) Close() error {
 	return nil
-}
-
-func TestNavigationDecisionGateC1(t *testing.T) {
-	Convey("navigation reports carry timing, counters, result counts, and EXPLAIN for all shapes", t, func() {
-		evidence := navigationGateTestEvidence()
-
-		result := ValidateNavigationDecisionGate(evidence)
-
-		So(result.Checks[0].Passed, ShouldBeTrue)
-
-		for _, shape := range []string{
-			navigationShapeCatalog,
-			navigationShapeChildFacts,
-			navigationShapeProjection,
-		} {
-			for _, scenario := range []string{navigationScenarioHighFanout, navigationScenarioFiltered} {
-				op, ok := navigationCandidateOperation(evidence.QueryReports, shape, scenario)
-				So(ok, ShouldBeTrue)
-				So(op.P50MS, ShouldBeGreaterThan, 0)
-				So(op.P95MS, ShouldBeGreaterThan, 0)
-				So(op.P99MS, ShouldBeGreaterThan, 0)
-				So(op.ReadRows, ShouldNotBeEmpty)
-				So(op.ReadBytes, ShouldNotBeEmpty)
-				So(op.ReadMarks, ShouldNotBeEmpty)
-				So(op.ResultCount, ShouldNotBeEmpty)
-				So(stringInput(op.Inputs, navigationInputExplainOutput), ShouldContainSubstring, "EXPLAIN indexes = 1")
-			}
-		}
-	})
-
-	Convey("catalog subset prototype records high-fanout p50 within the C2 gate", t, func() {
-		evidence := navigationGateTestEvidence()
-		op, ok := navigationCandidateOperation(
-			evidence.QueryReports,
-			navigationShapeCatalog,
-			navigationScenarioHighFanout,
-		)
-
-		So(ok, ShouldBeTrue)
-		So(op.P50MS, ShouldBeLessThanOrEqualTo, float64(5))
-		So(op.ResultCount, ShouldResemble, []uint64{305, 305, 305, 305, 305})
-	})
-
-	Convey("navigation report evidence rejects arbitrary non-EXPLAIN text for every shape", t, func() {
-		for _, shape := range []string{
-			navigationShapeCatalog,
-			navigationShapeChildFacts,
-			navigationShapeProjection,
-		} {
-			evidence := navigationGateTestEvidence()
-			setNavigationCandidateInput(
-				&evidence,
-				shape,
-				navigationScenarioHighFanout,
-				navigationInputExplainOutput,
-				"not an EXPLAIN indexes query",
-			)
-
-			result := ValidateNavigationDecisionGate(evidence)
-
-			So(result.Checks[0].Passed, ShouldBeFalse)
-			So(result.Checks[0].Detail, ShouldContainSubstring, shape)
-		}
-	})
-
-	Convey("projection is selected only with broad and filtered projection pruning evidence", t, func() {
-		evidence := navigationGateTestEvidence()
-		setNavigationCandidateWinningP95(&evidence, navigationShapeProjection)
-
-		result := ValidateNavigationDecisionGate(evidence)
-
-		So(result.SelectedObject, ShouldEqual, navigationShapeProjection)
-		So(result.Checks[1].Passed, ShouldBeTrue)
-
-		for reportIndex := range evidence.QueryReports {
-			for opIndex := range evidence.QueryReports[reportIndex].Operations {
-				op := &evidence.QueryReports[reportIndex].Operations[opIndex]
-				if navigationCandidateMatches(*op, navigationShapeProjection, navigationScenarioFiltered) {
-					op.Inputs[navigationInputExplainOutput] = explainPruningOutput
-				}
-			}
-		}
-
-		result = ValidateNavigationDecisionGate(evidence)
-
-		So(result.SelectedObject, ShouldEqual, navigationShapeCatalog)
-		So(result.Checks[1].Passed, ShouldBeFalse)
-		So(result.Checks[1].Detail, ShouldContainSubstring, "projection")
-	})
-
-	Convey("projection evidence must name the selected projection", t, func() {
-		evidence := navigationGateTestEvidence()
-		setNavigationCandidateWinningP95(&evidence, navigationShapeProjection)
-		setNavigationCandidateInput(
-			&evidence,
-			navigationShapeProjection,
-			navigationScenarioFiltered,
-			navigationInputProjectionName,
-			"",
-		)
-
-		result := ValidateNavigationDecisionGate(evidence)
-
-		So(result.SelectedObject, ShouldEqual, navigationShapeCatalog)
-		So(result.Checks[1].Passed, ShouldBeFalse)
-		So(result.Checks[1].Detail, ShouldContainSubstring, "projection")
-	})
-
-	Convey("child facts require faster filtered AgeAll evidence, one parent range, import gates, and exact results",
-		t, func() {
-			evidence := navigationGateTestEvidence()
-			setNavigationCandidateWinningP95(&evidence, navigationShapeChildFacts)
-
-			result := ValidateNavigationDecisionGate(evidence)
-
-			So(result.SelectedObject, ShouldEqual, navigationShapeChildFacts)
-			So(result.Checks[2].Passed, ShouldBeTrue)
-
-			for reportIndex := range evidence.QueryReports {
-				for opIndex := range evidence.QueryReports[reportIndex].Operations {
-					op := &evidence.QueryReports[reportIndex].Operations[opIndex]
-					if navigationCandidateMatches(*op, navigationShapeChildFacts, navigationScenarioFiltered) {
-						op.Inputs[navigationInputResultDigest] = "different"
-					}
-				}
-			}
-
-			result = ValidateNavigationDecisionGate(evidence)
-
-			So(result.SelectedObject, ShouldEqual, navigationShapeCatalog)
-			So(result.Checks[2].Passed, ShouldBeFalse)
-			So(result.Checks[2].Detail, ShouldContainSubstring, "exact")
-		})
-
-	Convey("child facts allow a filtered AgeAll owner/type companion read", t, func() {
-		evidence := navigationGateTestEvidence()
-		setNavigationCandidateWinningP95(&evidence, navigationShapeChildFacts)
-		setNavigationCandidateInput(
-			&evidence,
-			navigationShapeChildFacts,
-			navigationScenarioFiltered,
-			navigationInputParentRangeReads,
-			uint64(0),
-		)
-		setNavigationCandidateInput(
-			&evidence,
-			navigationShapeChildFacts,
-			navigationScenarioFiltered,
-			navigationInputAgeAllCompanionRead,
-			"wrstat_dir_filter_ageall owner/type lookup",
-		)
-
-		result := ValidateNavigationDecisionGate(evidence)
-
-		So(result.SelectedObject, ShouldEqual, navigationShapeChildFacts)
-		So(result.Checks[2].Passed, ShouldBeTrue)
-	})
-
-	Convey("child facts reject companion reads outside filtered AgeAll owner/type evidence", t, func() {
-		evidence := navigationGateTestEvidence()
-		setNavigationCandidateWinningP95(&evidence, navigationShapeChildFacts)
-		setNavigationCandidateInput(
-			&evidence,
-			navigationShapeChildFacts,
-			navigationScenarioHighFanout,
-			navigationInputParentRangeReads,
-			uint64(0),
-		)
-		setNavigationCandidateInput(
-			&evidence,
-			navigationShapeChildFacts,
-			navigationScenarioHighFanout,
-			navigationInputAgeAllCompanionRead,
-			"wrstat_dir_filter_ageall owner/type lookup",
-		)
-
-		result := ValidateNavigationDecisionGate(evidence)
-
-		So(result.SelectedObject, ShouldEqual, navigationShapeCatalog)
-		So(result.Checks[2].Passed, ShouldBeFalse)
-		So(result.Checks[2].Detail, ShouldContainSubstring, "read-shape")
-	})
-
-	Convey("child facts reject empty UID and GID slices as AgeAll owner/type evidence", t, func() {
-		evidence := navigationGateTestEvidence()
-		setNavigationCandidateWinningP95(&evidence, navigationShapeChildFacts)
-		setNavigationCandidateInput(
-			&evidence,
-			navigationShapeChildFacts,
-			navigationScenarioFiltered,
-			queryInputFilterGIDsKey,
-			[]uint32{},
-		)
-		setNavigationCandidateInput(
-			&evidence,
-			navigationShapeChildFacts,
-			navigationScenarioFiltered,
-			queryInputFilterUIDsKey,
-			[]uint32{},
-		)
-		setNavigationCandidateInput(
-			&evidence,
-			navigationShapeChildFacts,
-			navigationScenarioFiltered,
-			queryInputFilterFileTypeMaskKey,
-			0,
-		)
-
-		result := ValidateNavigationDecisionGate(evidence)
-
-		So(result.SelectedObject, ShouldEqual, navigationShapeCatalog)
-		So(result.Checks[2].Passed, ShouldBeFalse)
-		So(result.Checks[2].Detail, ShouldContainSubstring, "AgeAll")
-		So(treeFilterHasOwnerOrTypePredicate(&db.Filter{
-			GIDs: []uint32{},
-			UIDs: []uint32{},
-			Age:  db.DGUTAgeAll,
-		}), ShouldBeFalse)
-	})
-
-	Convey("catalog remains selected when no alternative beats the evidence gate", t, func() {
-		evidence := navigationGateTestEvidence()
-
-		result := ValidateNavigationDecisionGate(evidence)
-
-		So(result.SelectedObject, ShouldEqual, navigationShapeCatalog)
-		So(result.Checks[3].Passed, ShouldBeTrue)
-		So(result.Checks[3].Detail, ShouldContainSubstring, "wrstat_dirs")
-	})
-}
-
-func navigationGateTestEvidence() NavigationDecisionEvidence {
-	queryReport := perfreport.NewReport("clickhouse", "", 5, 0)
-	for _, scenario := range []string{navigationScenarioHighFanout, navigationScenarioFiltered} {
-		navigationGateAddCandidate(&queryReport, navigationShapeCatalog, scenario, 5)
-		navigationGateAddCandidate(&queryReport, navigationShapeChildFacts, scenario, 6)
-		navigationGateAddCandidate(&queryReport, navigationShapeProjection, scenario, 6)
-	}
-
-	importReport := perfreport.NewReport("clickhouse", "", 1, 0)
-	importReport.MaxRSSBytes = 128 * 1024 * 1024
-	importReport.TableStats = map[string]perfreport.TableStats{
-		navigationShapeChildFacts: {Rows: 35_005},
-		tableChildren:             {Rows: 35_005},
-		tableDirSummary:           {Rows: 35_006},
-		tableDirSummarySets:       {Rows: 1},
-		tableFiles:                {Rows: 100_000},
-	}
-	importReport.AddOperation("import_total", map[string]any{importInputRecords: uint64(100_000)}, []float64{1})
-
-	return NavigationDecisionEvidence{
-		ImportReports: []perfreport.Report{importReport},
-		QueryReports:  []perfreport.Report{queryReport},
-	}
-}
-
-func navigationGateAddCandidate(
-	report *perfreport.Report,
-	shape string,
-	scenario string,
-	durationMS float64,
-) {
-	inputs := navigationGateCandidateInputs(shape, scenario)
-	report.AddOperationWithCounters(
-		"navigation_shape_candidate",
-		inputs,
-		[]float64{durationMS, durationMS, durationMS, durationMS, durationMS},
-		[]uint64{100, 100, 100, 100, 100},
-		[]uint64{200, 200, 200, 200, 200},
-		[]uint64{1, 1, 1, 1, 1},
-		[]uint64{305, 305, 305, 305, 305},
-	)
-}
-
-func navigationGateCandidateInputs(shape string, scenario string) map[string]any {
-	inputs := treeOpInputs(&db.Filter{
-		GIDs: []uint32{7},
-		FT:   db.DGUTAFileTypeBam,
-		Age:  db.DGUTAgeAll,
-	}, map[string]any{
-		navigationInputShape:            shape,
-		navigationInputScenario:         scenario,
-		navigationInputChildCount:       uint64(navigationMinHighFanoutChildren),
-		navigationInputParentRangeReads: uint64(1),
-		navigationInputResultDigest:     scenario + "-digest",
-		navigationInputProjectionName:   "wrstat_dirs_projection",
-		navigationInputExplainOutput: "EXPLAIN indexes = 1\n" +
-			"Projection wrstat_dirs_projection\n" +
-			explainPruningOutput,
-	})
-
-	if scenario == navigationScenarioHighFanout {
-		inputs[queryInputFilterGIDsKey] = []uint32(nil)
-		inputs[queryInputFilterFileTypeMaskKey] = 0
-	}
-
-	return inputs
-}
-
-func setNavigationCandidateInput(
-	evidence *NavigationDecisionEvidence,
-	shape string,
-	scenario string,
-	key string,
-	value any,
-) {
-	for reportIndex := range evidence.QueryReports {
-		for opIndex := range evidence.QueryReports[reportIndex].Operations {
-			op := &evidence.QueryReports[reportIndex].Operations[opIndex]
-			if navigationCandidateMatches(*op, shape, scenario) {
-				op.Inputs[key] = value
-			}
-		}
-	}
-}
-
-func setNavigationCandidateWinningP95(
-	evidence *NavigationDecisionEvidence,
-	shape string,
-) {
-	for reportIndex := range evidence.QueryReports {
-		for opIndex := range evidence.QueryReports[reportIndex].Operations {
-			op := &evidence.QueryReports[reportIndex].Operations[opIndex]
-			if navigationShape(*op) != shape {
-				continue
-			}
-
-			op.DurationsMS = []float64{
-				navigationGateWinningP95,
-				navigationGateWinningP95,
-				navigationGateWinningP95,
-				navigationGateWinningP95,
-				navigationGateWinningP95,
-			}
-			op.P50MS, op.P95MS, op.P99MS = perfreport.PercentilesMS(op.DurationsMS)
-		}
-	}
 }

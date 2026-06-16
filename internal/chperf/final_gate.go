@@ -170,6 +170,34 @@ const (
 	finalGateE2ScenarioInput               = "e2_scenario"
 )
 
+const (
+	finalGateJ6ColdUXFastMaxMS  = 100
+	finalGateJ6ColdUXBroadMaxMS = 500
+
+	finalGateJ6ColdUXCheckName = "J6 absolute cold UX"
+
+	finalGateJ6StorageAuditOpName = "j6_storage_audit"
+	finalGateJ6D4DecisionOpName   = "d4_collapse_decision"
+
+	finalGateJ6HotRowPathStringTablesInput       = "hot_row_path_string_tables"
+	finalGateJ6PathTextCatalogTableInput         = "path_text_catalog_table"
+	finalGateJ6PathTextCopiesPerDirSnapshotInput = "path_text_copies_per_dir_snapshot"
+	finalGateJ6WrongRowCountInput                = "wrong_row_count"
+	finalGateJ6PathHashCollisionMismatchInput    = "path_hash_collision_mismatch_count"
+
+	finalGateJ6D4CitationInput           = "measurement_citation"
+	finalGateJ6D4DecisionCollapsed       = "collapsed"
+	finalGateJ6D4DecisionInput           = "decision"
+	finalGateJ6D4DecisionRetained        = "retained"
+	finalGateJ6D4LatencyGateInput        = "latency_gate_ms"
+	finalGateJ6D4MaterialisationInput    = "materialisation"
+	finalGateJ6D4MeasuredP95Input        = "measured_p95_ms"
+	finalGateJ6D4PatternFilteredExact    = "filtered_exact"
+	finalGateJ6D4PatternFilteredChildren = "filtered_children"
+	finalGateJ6D4PatternFilteredSubtree  = "filtered_subtree"
+	finalGateJ6D4PatternInput            = "pattern"
+)
+
 // FinalGateFixtureDigestEvidence records a fixture manifest digest check.
 type FinalGateFixtureDigestEvidence struct {
 	Key              string `json:"key"`
@@ -451,7 +479,7 @@ func finalGateRequireReadableFile(path string) error {
 
 func finalGateComparisonReportMetrics(report perfreport.Report) (float64, float64, float64, string) {
 	for _, op := range report.Operations {
-		digest := stringInput(op.Inputs, navigationInputResultDigest)
+		digest := stringInput(op.Inputs, queryInputResultDigest)
 		if digest != "" && finalGateOperationHasTiming(op) {
 			return op.P50MS, op.P95MS, op.P99MS, digest
 		}
@@ -1053,7 +1081,7 @@ func validateFinalGateE2HighFanoutBroadClick(e FinalGateEvidence) FinalGateCheck
 		return check.fail(reason)
 	}
 
-	return check.pass("high-fanout broad first click used one current read and one parent-facts packet")
+	return check.pass("high-fanout broad first click used one current read and one catalog parent-id packet")
 }
 
 func validateFinalGateE2HighFanoutFilteredClick(e FinalGateEvidence) FinalGateCheck {
@@ -1099,7 +1127,7 @@ func validateFinalGateE2DirInfosBroad(e FinalGateEvidence) FinalGateCheck {
 		return check.fail(reason)
 	}
 
-	return check.pass("focused broad DirInfos used one parent-facts packet with bounded reads")
+	return check.pass("focused broad DirInfos used one catalog parent-id packet with bounded reads")
 }
 
 func validateFinalGateE2DirInfosFiltered(e FinalGateEvidence) FinalGateCheck {
@@ -1145,7 +1173,7 @@ func validateFinalGateE2DirsHaveChildrenBroad(e FinalGateEvidence) FinalGateChec
 		return check.fail(reason)
 	}
 
-	return check.pass("focused broad DirsHaveChildren used one parent-facts packet with bounded reads")
+	return check.pass("focused broad DirsHaveChildren used one catalog parent-id packet with bounded reads")
 }
 
 func validateFinalGateE2DirsHaveChildrenFiltered(e FinalGateEvidence) FinalGateCheck {
@@ -1288,6 +1316,70 @@ func validateFinalGateE2MeasuredBudgets(e FinalGateEvidence) FinalGateCheck {
 	)
 }
 
+func validateFinalGateJ6Matrix(e FinalGateEvidence) (FinalGateCheck, []j4MatrixDelta) {
+	check := finalGateCheck(38, "J6 matrix correctness and deltas")
+
+	deltas, err := j4MatrixDeltas(e.BaselineQueryReports, e.QueryReports)
+	if err != nil {
+		return check.fail(err.Error()), nil
+	}
+
+	if reason := finalGateJ6WrongRowFailure(e); reason != "" {
+		return check.fail(reason), deltas
+	}
+
+	return check.pass("all canonical matrix types have p50/p95/p99, before/after deltas, and matching results"), deltas
+}
+
+func validateFinalGateJ6ColdUX(e FinalGateEvidence) FinalGateCheck {
+	check := finalGateCheck(39, finalGateJ6ColdUXCheckName)
+
+	for _, spec := range finalGateJ6ColdUXSpecs() {
+		if reason := finalGateJ6ColdUXSpecFailure(e.QueryReports, spec); reason != "" {
+			return check.fail(reason)
+		}
+	}
+
+	return check.pass("exact, file, permission, list, recursive, filtered, glob, Disktree, and Where p95 gates passed")
+}
+
+func validateFinalGateJ6Storage(e FinalGateEvidence) (FinalGateCheck, []FinalGateTableByteDelta) {
+	check := finalGateCheck(40, "J6 storage layout and table bytes")
+
+	if reason := finalGateJ6StorageLayoutFailure(e); reason != "" {
+		return check.fail(reason), nil
+	}
+
+	deltas, reason := finalGateJ6TableByteDeltas(e)
+	if reason != "" {
+		return check.fail(reason), nil
+	}
+
+	return check.pass(
+		"hot rows are path-string-free and per-table compressed/uncompressed bytes compare to baseline",
+	), deltas
+}
+
+func validateFinalGateJ6D4Decisions(
+	e FinalGateEvidence,
+) (FinalGateCheck, []FinalGateD4DecisionEvidence) {
+	check := finalGateCheck(41, "J6 D4 collapse decisions")
+	decisions := finalGateJ6D4DecisionEvidence(e)
+
+	for _, pattern := range finalGateJ6D4RequiredPatterns() {
+		decision, ok := finalGateJ6D4DecisionForPattern(decisions, pattern)
+		if !ok {
+			return check.fail(pattern + " missing D4 decision"), decisions
+		}
+
+		if reason := finalGateJ6D4DecisionFailure(decision); reason != "" {
+			return check.fail(pattern + " " + reason), decisions
+		}
+	}
+
+	return check.pass("D4 retained/collapsed choices cite measurements and collapsed routes meet their gates"), decisions
+}
+
 func (c FinalGateCheck) block(detail string) FinalGateCheck {
 	c.Passed = false
 	c.Blocked = true
@@ -1305,7 +1397,7 @@ func finalGateSidecarColdMisses(checks []FinalGateCheck) []FinalGateCheck {
 		}
 	}
 
-	return misses
+	return finalGateDeduplicateJ6ColdMiss(misses)
 }
 
 func finalGateSidecarFailuresAreOnlyColdMisses(checks []FinalGateCheck) bool {
@@ -1340,7 +1432,8 @@ func finalGateSidecarE2ColdCheckName(name string) bool {
 		"E2 first root where splits 2",
 		"E2 first filter switch",
 		"E2 real first where dirs",
-		"E2 NFS-heavy first where":
+		"E2 NFS-heavy first where",
+		finalGateJ6ColdUXCheckName:
 		return true
 	default:
 		return false
@@ -1350,6 +1443,22 @@ func finalGateSidecarE2ColdCheckName(name string) bool {
 func finalGateSidecarColdMissDetail(detail string) bool {
 	return strings.Contains(detail, "p95") ||
 		strings.Contains(detail, "read-volume") && strings.Contains(detail, "exceeded ceiling")
+}
+
+func finalGateDeduplicateJ6ColdMiss(misses []FinalGateCheck) []FinalGateCheck {
+	if !finalGateSpecificColdMissPresent(misses) {
+		return misses
+	}
+
+	return slices.DeleteFunc(misses, func(check FinalGateCheck) bool {
+		return check.Name == finalGateJ6ColdUXCheckName
+	})
+}
+
+func finalGateSpecificColdMissPresent(misses []FinalGateCheck) bool {
+	return slices.ContainsFunc(misses, func(check FinalGateCheck) bool {
+		return check.Name != finalGateJ6ColdUXCheckName
+	})
 }
 
 // FinalGateReportResult captures E1 evidence validation status.
@@ -1551,6 +1660,7 @@ func t283RESTOrderCountsMatch(order *FinalGateT283FilteredRESTOrderEvidence) boo
 // FinalGateEvidence contains the raw perf reports used for E2 validation.
 type FinalGateEvidence struct {
 	ImportReports         []perfreport.Report
+	BaselineImportReports []perfreport.Report
 	QueryReports          []perfreport.Report
 	BaselineQueryReports  []perfreport.Report
 	BoltQueryReports      []perfreport.Report
@@ -1659,7 +1769,7 @@ func finalGateComparePermissionAuthOperation(
 	}
 
 	digestMismatch := finalGateOperationRequiresDigest(name, baseline, candidate) &&
-		!finalGateStringInputMatches(baseline, candidate, navigationInputResultDigest)
+		!finalGateStringInputMatches(baseline, candidate, queryInputResultDigest)
 	if digestMismatch {
 		return finalGateResultDigestMismatch
 	}
@@ -1722,7 +1832,7 @@ func finalGateOperationRequiresDigest(
 	name string,
 	ops ...perfreport.Operation,
 ) bool {
-	if finalGateAnyInputPresent([]string{navigationInputResultDigest}, ops...) {
+	if finalGateAnyInputPresent([]string{queryInputResultDigest}, ops...) {
 		return true
 	}
 
@@ -1962,7 +2072,7 @@ func finalGateBoltOperationRootFailure(
 		return finalGateResultCountMismatch
 	}
 
-	if !finalGateStringInputMatches(clickHouseOp, boltOp, navigationInputResultDigest) {
+	if !finalGateStringInputMatches(clickHouseOp, boltOp, queryInputResultDigest) {
 		return finalGateResultDigestMismatch
 	}
 
@@ -2427,8 +2537,8 @@ func finalGateWhereBoltEvidenceFailure(
 		return finalGateResultCountMismatch
 	}
 
-	digestMismatch := finalGateAnyInputPresent([]string{navigationInputResultDigest}, clickHouseOp, boltOp) &&
-		!finalGateStringInputMatches(clickHouseOp, boltOp, navigationInputResultDigest)
+	digestMismatch := finalGateAnyInputPresent([]string{queryInputResultDigest}, clickHouseOp, boltOp) &&
+		!finalGateStringInputMatches(clickHouseOp, boltOp, queryInputResultDigest)
 	if digestMismatch {
 		return finalGateResultDigestMismatch
 	}
@@ -2476,6 +2586,337 @@ func finalGateMergeReportTableStats(dst map[string]perfreport.TableStats, report
 	}
 }
 
+func finalGateJ6WrongRowFailure(e FinalGateEvidence) string {
+	for _, group := range []struct {
+		name    string
+		reports []perfreport.Report
+	}{
+		{"baseline", e.BaselineQueryReports},
+		{"candidate", e.QueryReports},
+	} {
+		if reason := finalGateJ6WrongRowReportFailure(group.name, group.reports); reason != "" {
+			return reason
+		}
+	}
+
+	return ""
+}
+
+func finalGateJ6WrongRowReportFailure(group string, reports []perfreport.Report) string {
+	for _, op := range finalGateJ6MatrixOperations(reports) {
+		queryType := stringInput(op.Inputs, queryInputQueryTypeKey)
+		if count := uint64Input(op.Inputs, finalGateJ6WrongRowCountInput); count > 0 {
+			return fmt.Sprintf("%s %s wrong row count was %d", group, queryType, count)
+		}
+
+		if count := uint64Input(op.Inputs, finalGateJ6PathHashCollisionMismatchInput); count > 0 {
+			return fmt.Sprintf("%s %s path-hash collision mismatch count was %d", group, queryType, count)
+		}
+
+		status := stringInput(op.Inputs, finalGateCorrectnessStatusInput)
+		if status != "" && status != finalGateComparisonStatusSuccess {
+			return fmt.Sprintf("%s %s correctness status was %s", group, queryType, status)
+		}
+	}
+
+	return ""
+}
+
+func finalGateJ6MatrixOperations(reports []perfreport.Report) []perfreport.Operation {
+	var ops []perfreport.Operation
+
+	for _, report := range reports {
+		for _, op := range report.Operations {
+			queryType := stringInput(op.Inputs, queryInputQueryTypeKey)
+			if slices.Contains(j4CanonicalQueryTypes(), queryType) {
+				ops = append(ops, op)
+			}
+		}
+	}
+
+	return ops
+}
+
+func finalGateJ6StorageLayoutFailure(e FinalGateEvidence) string {
+	audit, ok := finalGateJ6StorageAuditOperation(e)
+	if !ok {
+		return "missing storage audit"
+	}
+
+	if !finalGateInputMapHasKey(audit.Inputs, finalGateJ6HotRowPathStringTablesInput) {
+		return "missing hot-row path string audit"
+	}
+
+	if tables := stringSliceInput(audit.Inputs, finalGateJ6HotRowPathStringTablesInput); len(tables) > 0 {
+		return "hot row stores a path string in " + strings.Join(tables, ", ")
+	}
+
+	copies, ok := float64InputPresentValue(audit.Inputs, finalGateJ6PathTextCopiesPerDirSnapshotInput)
+	if !ok || copies != 1 {
+		return "path text is not one copy per dir per snapshot"
+	}
+
+	if stringInput(audit.Inputs, finalGateJ6PathTextCatalogTableInput) != tableCatalog {
+		return "path text catalog table evidence missing"
+	}
+
+	return finalGateJ6FilterTableRetentionFailure(e)
+}
+
+func float64InputPresentValue(inputs map[string]any, key string) (float64, bool) {
+	v, ok := inputs[key]
+	if !ok {
+		return 0, false
+	}
+
+	return float64InputValue(v)
+}
+
+func float64InputValue(v any) (float64, bool) {
+	if value, ok := float64InputFloatValue(v); ok {
+		return value, true
+	}
+
+	return float64InputIntegerValue(v)
+}
+
+func float64InputFloatValue(v any) (float64, bool) {
+	switch typed := v.(type) {
+	case float64:
+		return nonNegativeFloat64(typed)
+	case float32:
+		return nonNegativeFloat64(float64(typed))
+	default:
+		return 0, false
+	}
+}
+
+func nonNegativeFloat64(value float64) (float64, bool) {
+	if value < 0 {
+		return 0, false
+	}
+
+	return value, true
+}
+
+func float64InputIntegerValue(v any) (float64, bool) {
+	switch typed := v.(type) {
+	case uint64:
+		return float64(typed), true
+	case uint32:
+		return float64(typed), true
+	case int:
+		return nonNegativeIntFloat64(int64(typed))
+	case int64:
+		return nonNegativeIntFloat64(typed)
+	default:
+		return 0, false
+	}
+}
+
+func nonNegativeIntFloat64(value int64) (float64, bool) {
+	if value < 0 {
+		return 0, false
+	}
+
+	return float64(value), true
+}
+
+func finalGateJ6StorageAuditOperation(e FinalGateEvidence) (perfreport.Operation, bool) {
+	for _, report := range finalGateJ6CandidateReports(e) {
+		if op, ok := firstOperation(report, finalGateJ6StorageAuditOpName, nil); ok {
+			return op, true
+		}
+	}
+
+	return perfreport.Operation{}, false
+}
+
+func finalGateJ6CandidateReports(e FinalGateEvidence) []perfreport.Report {
+	reports := append(slices.Clone(finalGateE2ImportReports(e)), finalGateE2SpoolReports(e)...)
+	reports = append(reports, e.QueryReports...)
+
+	return reports
+}
+
+func finalGateJ6FilterTableRetentionFailure(e FinalGateEvidence) string {
+	stats := finalGateJ6CandidateTableStats(e)
+	decisions := finalGateJ6D4DecisionEvidence(e)
+
+	for _, table := range finalGateJ6FilterTables() {
+		if finalGateBasicTableSizeEvidencePass(stats[table]) {
+			continue
+		}
+
+		if finalGateJ6MaterialisationCollapsed(decisions, table) {
+			continue
+		}
+
+		return table + " filter table was not retained and has no D4 collapse proof"
+	}
+
+	return ""
+}
+
+func finalGateJ6FilterTables() []string {
+	return []string{tableChildFilterAll, tableDirFilterAll, tableDirFilterAgeAll}
+}
+
+func finalGateJ6MaterialisationCollapsed(decisions []FinalGateD4DecisionEvidence, table string) bool {
+	return slices.ContainsFunc(decisions, func(decision FinalGateD4DecisionEvidence) bool {
+		return decision.Materialisation == table && decision.Decision == finalGateJ6D4DecisionCollapsed
+	})
+}
+
+func finalGateJ6TableByteDeltas(e FinalGateEvidence) ([]FinalGateTableByteDelta, string) {
+	candidate := finalGateJ6CandidateTableStats(e)
+	baseline := finalGateJ6BaselineTableStats(e)
+
+	if len(candidate) == 0 {
+		return nil, "missing candidate table bytes"
+	}
+
+	if len(baseline) == 0 {
+		return nil, "missing baseline table bytes"
+	}
+
+	tables := mapKeysTableStats(candidate)
+
+	deltas := make([]FinalGateTableByteDelta, 0, len(tables))
+	for _, table := range tables {
+		delta, reason := finalGateJ6TableByteDelta(table, baseline[table], candidate[table])
+		if reason != "" {
+			return nil, reason
+		}
+
+		deltas = append(deltas, delta)
+	}
+
+	return deltas, ""
+}
+
+func mapKeysTableStats(values map[string]perfreport.TableStats) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+
+	slices.Sort(keys)
+
+	return keys
+}
+
+func finalGateJ6TableByteDelta(
+	table string,
+	baseline perfreport.TableStats,
+	candidate perfreport.TableStats,
+) (FinalGateTableByteDelta, string) {
+	if candidate.CompressedBytes == 0 || candidate.UncompressedBytes == 0 {
+		return FinalGateTableByteDelta{}, table + " missing candidate compressed/uncompressed bytes"
+	}
+
+	if baseline.Rows > 0 && (baseline.CompressedBytes == 0 || baseline.UncompressedBytes == 0) {
+		return FinalGateTableByteDelta{}, table + " missing baseline compressed/uncompressed bytes"
+	}
+
+	return FinalGateTableByteDelta{
+		Table:                      table,
+		BaselineCompressedBytes:    baseline.CompressedBytes,
+		CandidateCompressedBytes:   candidate.CompressedBytes,
+		DeltaCompressedBytes:       finalGateUint64Delta(candidate.CompressedBytes, baseline.CompressedBytes),
+		BaselineUncompressedBytes:  baseline.UncompressedBytes,
+		CandidateUncompressedBytes: candidate.UncompressedBytes,
+		DeltaUncompressedBytes: finalGateUint64Delta(
+			candidate.UncompressedBytes,
+			baseline.UncompressedBytes,
+		),
+	}, ""
+}
+
+func finalGateUint64Delta(after uint64, before uint64) int64 {
+	if after >= before {
+		return finalGateBoundedUint64ToInt64(after - before)
+	}
+
+	diff := before - after
+	if diff >= finalGateMinInt64Magnitude() {
+		return finalGateMinInt64()
+	}
+
+	return -finalGateBoundedUint64ToInt64(diff)
+}
+
+func finalGateBoundedUint64ToInt64(value uint64) int64 {
+	if value > finalGateMaxInt64Uint64() {
+		return finalGateMaxInt64()
+	}
+
+	return int64(value) //nolint:gosec // value is bounded to MaxInt64 above.
+}
+
+func finalGateMaxInt64Uint64() uint64 {
+	return uint64(1<<63 - 1)
+}
+
+func finalGateMaxInt64() int64 {
+	return int64(1<<63 - 1)
+}
+
+func finalGateMinInt64Magnitude() uint64 {
+	return uint64(1 << 63)
+}
+
+func finalGateMinInt64() int64 {
+	return -1 << 63
+}
+
+func finalGateJ6CandidateTableStats(e FinalGateEvidence) map[string]perfreport.TableStats {
+	stats := make(map[string]perfreport.TableStats)
+	finalGateMergeReportTableStats(stats, finalGateE2ImportReports(e))
+	finalGateMergeReportTableStats(stats, finalGateE2SpoolReports(e))
+	finalGateMergeReportTableStats(stats, e.QueryReports)
+
+	return stats
+}
+
+func finalGateJ6BaselineTableStats(e FinalGateEvidence) map[string]perfreport.TableStats {
+	stats := make(map[string]perfreport.TableStats)
+	finalGateMergeReportTableStats(stats, e.BaselineImportReports)
+	finalGateMergeReportTableStats(stats, e.BaselineQueryReports)
+
+	return stats
+}
+
+func finalGateJ6D4DecisionEvidence(e FinalGateEvidence) []FinalGateD4DecisionEvidence {
+	var decisions []FinalGateD4DecisionEvidence
+
+	for _, report := range e.QueryReports {
+		for _, op := range report.Operations {
+			if op.Name != finalGateJ6D4DecisionOpName {
+				continue
+			}
+
+			decisions = append(decisions, finalGateJ6D4DecisionFromOperation(op))
+		}
+	}
+
+	return decisions
+}
+
+func finalGateJ6D4DecisionFromOperation(op perfreport.Operation) FinalGateD4DecisionEvidence {
+	measuredP95, _ := float64InputPresentValue(op.Inputs, finalGateJ6D4MeasuredP95Input)
+	latencyGate, _ := float64InputPresentValue(op.Inputs, finalGateJ6D4LatencyGateInput)
+
+	return FinalGateD4DecisionEvidence{
+		Pattern:         stringInput(op.Inputs, finalGateJ6D4PatternInput),
+		Materialisation: stringInput(op.Inputs, finalGateJ6D4MaterialisationInput),
+		Decision:        stringInput(op.Inputs, finalGateJ6D4DecisionInput),
+		Citation:        stringInput(op.Inputs, finalGateJ6D4CitationInput),
+		MeasuredP95MS:   measuredP95,
+		LatencyGateMS:   latencyGate,
+	}
+}
+
 type t283RESTOrderCandidate struct {
 	digest      string
 	resultCount uint64
@@ -2506,7 +2947,7 @@ func t283RESTOrderCandidateFromOperation(
 	}
 
 	return t283RESTOrderCandidate{
-		digest:      stringInput(op.Inputs, navigationInputResultDigest),
+		digest:      stringInput(op.Inputs, queryInputResultDigest),
 		resultCount: firstResultCount(op),
 		cacheKeys:   stringSliceInput(op.Inputs, queryInputCacheHitKeysKey),
 		warmed:      t283RESTOperationWarmed(report, op),
@@ -3253,7 +3694,7 @@ func finalGateE2ReadVolumeTableStatsPass(stats perfreport.TableStats) bool {
 }
 
 func finalGateE2ReadVolumeExpectedRows(op perfreport.Operation) uint64 {
-	if childCount := uint64Input(op.Inputs, navigationInputChildCount); childCount > 0 {
+	if childCount := uint64Input(op.Inputs, queryInputHighFanoutChildCount); childCount > 0 {
 		return childCount
 	}
 
@@ -3312,7 +3753,7 @@ func finalGateE2CorrectnessFailure(op perfreport.Operation) string {
 		return "correctness equivalence status missing or failed"
 	}
 
-	actual := stringInput(op.Inputs, navigationInputResultDigest)
+	actual := stringInput(op.Inputs, queryInputResultDigest)
 
 	expected := stringInput(op.Inputs, finalGateE2ExpectedDigestInput)
 	if actual == "" || expected == "" {
@@ -3519,15 +3960,191 @@ func finalGateInactiveSidecarDecision(reason string) FinalGateSidecarFallbackDec
 	}
 }
 
+// FinalGateTableByteDelta captures J6 per-table storage byte evidence.
+type FinalGateTableByteDelta struct {
+	Table                      string `json:"table"`
+	BaselineCompressedBytes    uint64 `json:"baseline_compressed_bytes"`
+	CandidateCompressedBytes   uint64 `json:"candidate_compressed_bytes"`
+	DeltaCompressedBytes       int64  `json:"delta_compressed_bytes"`
+	BaselineUncompressedBytes  uint64 `json:"baseline_uncompressed_bytes"`
+	CandidateUncompressedBytes uint64 `json:"candidate_uncompressed_bytes"`
+	DeltaUncompressedBytes     int64  `json:"delta_uncompressed_bytes"`
+}
+
+// FinalGateD4DecisionEvidence captures the D4 retained/collapsed decision proof.
+type FinalGateD4DecisionEvidence struct {
+	Pattern         string  `json:"pattern"`
+	Materialisation string  `json:"materialisation"`
+	Decision        string  `json:"decision"`
+	Citation        string  `json:"measurement_citation"`
+	MeasuredP95MS   float64 `json:"measured_p95_ms"`
+	LatencyGateMS   float64 `json:"latency_gate_ms"`
+}
+
+func finalGateJ6D4DecisionForPattern(
+	decisions []FinalGateD4DecisionEvidence,
+	pattern string,
+) (FinalGateD4DecisionEvidence, bool) {
+	for _, decision := range decisions {
+		if decision.Pattern == pattern {
+			return decision, true
+		}
+	}
+
+	return FinalGateD4DecisionEvidence{}, false
+}
+
+func finalGateJ6D4DecisionFailure(decision FinalGateD4DecisionEvidence) string {
+	if !finalGateStringsPresent(decision.Materialisation, decision.Decision, decision.Citation) {
+		return "missing materialisation, decision, or citation"
+	}
+
+	if decision.MeasuredP95MS <= 0 || decision.LatencyGateMS <= 0 {
+		return "missing cited measured p95 or latency gate"
+	}
+
+	if reason := finalGateJ6D4CitationFailure(decision); reason != "" {
+		return reason
+	}
+
+	return finalGateJ6D4DecisionValueFailure(decision)
+}
+
+func finalGateJ6D4CitationFailure(decision FinalGateD4DecisionEvidence) string {
+	requiredOps, ok := finalGateJ6D4RequiredCitationOps(decision.Pattern)
+	if !ok {
+		return ""
+	}
+
+	for _, opName := range requiredOps {
+		if !strings.Contains(decision.Citation, opName) {
+			return "citation missing filtered measurement " + opName
+		}
+	}
+
+	return ""
+}
+
+func finalGateJ6D4RequiredCitationOps(pattern string) ([]string, bool) {
+	switch pattern {
+	case finalGateJ6D4PatternFilteredExact:
+		return []string{queryOpDirInfoFilteredName}, true
+	case finalGateJ6D4PatternFilteredChildren:
+		return []string{queryOpDirInfosFilteredName, queryOpDirsHaveChildrenFilteredName}, true
+	case finalGateJ6D4PatternFilteredSubtree:
+		return []string{queryOpWhereFilteredWholeMountName}, true
+	default:
+		return nil, false
+	}
+}
+
+func finalGateJ6D4DecisionValueFailure(decision FinalGateD4DecisionEvidence) string {
+	switch decision.Decision {
+	case finalGateJ6D4DecisionRetained:
+		return ""
+	case finalGateJ6D4DecisionCollapsed:
+		return finalGateJ6D4CollapsedDecisionFailure(decision)
+	default:
+		return "unknown D4 decision"
+	}
+}
+
+func finalGateJ6D4CollapsedDecisionFailure(decision FinalGateD4DecisionEvidence) string {
+	if decision.MeasuredP95MS >= decision.LatencyGateMS {
+		return "collapsed materialisation did not meet its latency gate"
+	}
+
+	return ""
+}
+
+func finalGateJ6MatchingOperations(
+	reports []perfreport.Report,
+	pred operationPredicate,
+) []perfreport.Operation {
+	var ops []perfreport.Operation
+
+	for _, report := range reports {
+		for _, op := range report.Operations {
+			if pred(op) {
+				ops = append(ops, op)
+			}
+		}
+	}
+
+	return ops
+}
+
+type finalGateJ6ColdUXSpec struct {
+	name  string
+	maxMS float64
+	pred  operationPredicate
+}
+
+func finalGateJ6ColdUXSpecs() []finalGateJ6ColdUXSpec {
+	return []finalGateJ6ColdUXSpec{
+		{"exact_dir", finalGateJ6ColdUXFastMaxMS, finalGateJ6ExactDirOperation},
+		{"file_stat", finalGateJ6ColdUXFastMaxMS, finalGateJ6FileStatOperation},
+		{"permission_path", finalGateJ6ColdUXFastMaxMS, finalGateJ6PermissionPathOperation},
+		{"direct_child_list", finalGateJ6ColdUXFastMaxMS, finalGateJ6DirectChildListOperation},
+		{"recursive", finalGateJ6ColdUXBroadMaxMS, finalGateJ6RecursiveOperation},
+		{"filtered", finalGateJ6ColdUXBroadMaxMS, finalGateJ6FilteredOperation},
+		{"glob", finalGateJ6ColdUXBroadMaxMS, finalGateJ6GlobOperation},
+		{"disktree", finalGateJ6ColdUXBroadMaxMS, finalGateJ6DisktreeOperation},
+		{"where", finalGateJ6ColdUXBroadMaxMS, finalGateJ6WhereOperation},
+	}
+}
+
+func finalGateJ6ColdUXSpecFailure(reports []perfreport.Report, spec finalGateJ6ColdUXSpec) string {
+	ops := finalGateJ6MatchingOperations(reports, spec.pred)
+	if len(ops) == 0 {
+		return spec.name + " missing cold UX evidence"
+	}
+
+	for _, op := range ops {
+		if reason := finalGateJ6ColdUXOperationFailure(op, spec.maxMS); reason != "" {
+			return fmt.Sprintf("%s %s %s", spec.name, finalGateJ6OperationLabel(op), reason)
+		}
+	}
+
+	return ""
+}
+
+func finalGateJ6ColdUXOperationFailure(op perfreport.Operation, maxMS float64) string {
+	if !finalGatePercentilesPresent(op) {
+		return "missing p50/p95/p99 evidence"
+	}
+
+	if op.P95MS >= maxMS {
+		return fmt.Sprintf("p95 %.3f ms exceeded %.3f ms gate", op.P95MS, maxMS)
+	}
+
+	if !finalGateStatusCodesPass(op) {
+		return "status code evidence failed"
+	}
+
+	return ""
+}
+
+func finalGateJ6OperationLabel(op perfreport.Operation) string {
+	if queryType := stringInput(op.Inputs, queryInputQueryTypeKey); queryType != "" {
+		return queryType
+	}
+
+	return op.Name
+}
+
 // FinalGateResult is a facts-only summary of the E1 prerequisite and E2 gates.
 type FinalGateResult struct {
-	Status          string                           `json:"status,omitempty"`
-	Passed          bool                             `json:"passed"`
-	Blocked         bool                             `json:"blocked,omitempty"`
-	TimingEvaluated bool                             `json:"timing_evaluated"`
-	E1ReportResult  *FinalGateReportResult           `json:"e1_report_result,omitempty"`
-	SidecarFallback FinalGateSidecarFallbackDecision `json:"sidecar_fallback"`
-	Checks          []FinalGateCheck                 `json:"checks"`
+	Status            string                           `json:"status,omitempty"`
+	Passed            bool                             `json:"passed"`
+	Blocked           bool                             `json:"blocked,omitempty"`
+	TimingEvaluated   bool                             `json:"timing_evaluated"`
+	E1ReportResult    *FinalGateReportResult           `json:"e1_report_result,omitempty"`
+	SidecarFallback   FinalGateSidecarFallbackDecision `json:"sidecar_fallback"`
+	Checks            []FinalGateCheck                 `json:"checks"`
+	J6QueryDeltas     []j4MatrixDelta                  `json:"j6_query_deltas,omitempty"`
+	J6TableByteDeltas []FinalGateTableByteDelta        `json:"j6_table_byte_deltas,omitempty"`
+	J6D4Decisions     []FinalGateD4DecisionEvidence    `json:"j6_d4_decisions,omitempty"`
 }
 
 // ValidateFinalGates evaluates the documented E2 perf gates from raw reports.
@@ -3547,6 +4164,13 @@ func ValidateFinalGates(e FinalGateEvidence) FinalGateResult {
 		TimingEvaluated: true,
 		E1ReportResult:  prerequisite.E1ReportResult,
 	}
+	j6MatrixCheck, queryDeltas := validateFinalGateJ6Matrix(e)
+	j6StorageCheck, tableDeltas := validateFinalGateJ6Storage(e)
+	j6D4Check, d4Decisions := validateFinalGateJ6D4Decisions(e)
+	result.J6QueryDeltas = queryDeltas
+	result.J6TableByteDeltas = tableDeltas
+	result.J6D4Decisions = d4Decisions
+
 	for _, check := range []FinalGateCheck{
 		validateFinalGateImport(e),
 		validateFinalGateTreeWhereSmall(e),
@@ -3585,6 +4209,10 @@ func ValidateFinalGates(e FinalGateEvidence) FinalGateResult {
 		validateFinalGateE2RealWhereDirs(e),
 		validateFinalGateE2NFSHeavyWhere(e),
 		validateFinalGateE2MeasuredBudgets(e),
+		j6MatrixCheck,
+		validateFinalGateJ6ColdUX(e),
+		j6StorageCheck,
+		j6D4Check,
 	} {
 		result.Checks = append(result.Checks, check)
 		result.Passed = result.Passed && check.Passed
@@ -3649,6 +4277,60 @@ func firstOperation(
 	}
 
 	return perfreport.Operation{}, false
+}
+
+func finalGateJ6ExactDirOperation(op perfreport.Operation) bool {
+	return stringInput(op.Inputs, queryInputQueryTypeKey) == j4QueryTypeExactDirectory ||
+		op.Name == queryOpTreeDirInfoName ||
+		op.Name == queryOpDirInfoBroadName
+}
+
+func finalGateJ6FileStatOperation(op perfreport.Operation) bool {
+	return op.Name == queryOpFilesStatPathName
+}
+
+func finalGateJ6PermissionPathOperation(op perfreport.Operation) bool {
+	return op.Name == queryOpPermissionCheckName
+}
+
+func finalGateJ6DirectChildListOperation(op perfreport.Operation) bool {
+	return op.Name == queryOpFilesListDirName
+}
+
+func finalGateJ6RecursiveOperation(op perfreport.Operation) bool {
+	switch op.Name {
+	case queryOpTreeWhereName, queryOpTreeWhereColdProviderName, queryOpTreeWhereFreshName, queryOpWhereWholeMountName:
+		return true
+	default:
+		return stringInput(op.Inputs, queryInputQueryTypeKey) == j4QueryTypeSubtree
+	}
+}
+
+func finalGateJ6FilteredOperation(op perfreport.Operation) bool {
+	return filteredOperation(op) || finalGateRESTWhereFilterPresent(op)
+}
+
+func finalGateJ6GlobOperation(op perfreport.Operation) bool {
+	return stringInput(op.Inputs, queryInputQueryTypeKey) == j4QueryTypeGlob ||
+		strings.Contains(strings.ToLower(op.Name), "glob")
+}
+
+func finalGateJ6DisktreeOperation(op perfreport.Operation) bool {
+	return stringInput(op.Inputs, queryInputQueryTypeKey) == j4QueryTypeDisktree ||
+		strings.Contains(strings.ToLower(op.Name), "disktree")
+}
+
+func finalGateJ6WhereOperation(op perfreport.Operation) bool {
+	return stringInput(op.Inputs, queryInputQueryTypeKey) == j4QueryTypeSubtree ||
+		strings.Contains(strings.ToLower(op.Name), "where")
+}
+
+func finalGateJ6D4RequiredPatterns() []string {
+	return []string{
+		finalGateJ6D4PatternFilteredExact,
+		finalGateJ6D4PatternFilteredChildren,
+		finalGateJ6D4PatternFilteredSubtree,
+	}
 }
 
 func finalGateFixtureResultDigest(path string) (string, error) {
@@ -3751,7 +4433,7 @@ func finalGateFixtureSummaryValid(summary *db.DirSummary) bool {
 
 func finalGateOperationCorrectnessEvidencePasses(op perfreport.Operation) bool {
 	return len(op.ResultCount) > 0 &&
-		stringInput(op.Inputs, navigationInputResultDigest) != "" &&
+		stringInput(op.Inputs, queryInputResultDigest) != "" &&
 		finalGateCorrectnessStatusPasses(stringInput(op.Inputs, finalGateCorrectnessStatusInput))
 }
 
@@ -4180,6 +4862,10 @@ func finalGateBaselineRegressionIgnored(op perfreport.Operation) bool {
 		return true
 	}
 
+	if op.Name == finalGateJ6D4DecisionOpName {
+		return true
+	}
+
 	if slices.Contains(finalGatePermissionAuthOps(), op.Name) {
 		return true
 	}
@@ -4450,7 +5136,7 @@ func finalGateNonOptionalRowCap(table string, capRows uint64, rootCount uint64) 
 	switch table {
 	case tableFiles:
 		return capRows * rootCount, true
-	case tableChildren:
+	case tableCatalog:
 		return capRows * rootCount, true
 	case tableDirSummary:
 		return capRows * rootCount, true
@@ -4462,7 +5148,7 @@ func finalGateNonOptionalRowCap(table string, capRows uint64, rootCount uint64) 
 }
 
 func finalGateNewObjectTableStatsPass(report perfreport.Report) bool {
-	if report.TableStats[tableDirSummary].Rows == 0 || report.TableStats[tableChildren].Rows == 0 {
+	if report.TableStats[tableDirSummary].Rows == 0 || report.TableStats[tableCatalog].Rows == 0 {
 		return false
 	}
 
@@ -4505,7 +5191,7 @@ func tableStatsSizeEvidencePass(stats perfreport.TableStats) bool {
 func tableStatsDerivedEvidencePass(stats perfreport.TableStats) bool {
 	return stats.ImportMemoryBytes > 0 &&
 		stats.RowAmplificationVsDirFacts > 0 &&
-		stats.RowAmplificationVsChildren > 0
+		stats.RowAmplificationVsCatalog > 0
 }
 
 func finalGateMatchingBaselineOperation(
@@ -4732,7 +5418,7 @@ func wholeFloat64(value float64) uint64 {
 }
 
 func finalGateNonOptionalTables() []string {
-	return []string{tableFiles, tableChildren, tableDirSummary, tableDirSummarySets}
+	return []string{tableFiles, tableCatalog, tableDirSummary, tableDirSummarySets}
 }
 
 func finalGateNonOptionalRowBaseline(table string) (uint64, bool) {

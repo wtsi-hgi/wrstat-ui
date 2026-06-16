@@ -181,7 +181,7 @@ func TestDGUTARowCounting(t *testing.T) {
 			},
 		}), ShouldBeNil)
 
-		So(metrics.rows[tableChildren], ShouldEqual, uint64(1))
+		So(metrics.rows[tableCatalog], ShouldEqual, uint64(1))
 		So(metrics.rows[tableDirFacts], ShouldEqual, uint64(1))
 	})
 }
@@ -272,6 +272,46 @@ func countZeroDirIDs(dirIDs []uint32) int {
 	}
 
 	return count
+}
+
+func TestImportPathTextByteMetrics(t *testing.T) {
+	Convey("tracked DGUTA writer measures old duplicated and new catalog path text bytes", t, func() {
+		paths := internaltest.NewDirectoryPathCreator()
+		metrics := newDatasetImportMetrics("dataset", "/input/stats.gz", importTestMountScratch)
+		tracked := newTrackedDGUTAWriter(&fakeImportDGUTAWriter{}, metrics)
+		tracked.SetMountPath(importTestMountScratch)
+
+		dir := importTestMountScratch + "alpha/"
+		So(tracked.Add(db.RecordDGUTA{
+			Dir: paths.ToDirectoryPath(dir),
+			GUTAs: db.GUTAs{
+				&db.GUTA{Age: db.DGUTAgeAll},
+				&db.GUTA{Age: db.DGUTAgeA1M},
+			},
+		}), ShouldBeNil)
+
+		So(metrics.pathTextBytesBefore, ShouldEqual, importPathTextBytesForRows(dir, metrics.rows[tableDGUTA]))
+		So(metrics.pathTextBytesAfter, ShouldEqual, uint64(len(dir)))
+	})
+
+	Convey("tracked file operation measures old duplicated parent path bytes", t, func() {
+		paths := internaltest.NewDirectoryPathCreator()
+		metrics := newDatasetImportMetrics("dataset", "/input/stats.gz", importTestMountScratch)
+		parentDir := importTestMountScratch + "alpha/"
+		op := &trackedFileOperation{
+			Operation: fakeImportOperation{},
+			metrics:   metrics,
+		}
+
+		So(op.Add(&summary.FileInfo{
+			Path:      paths.ToDirectoryPath(parentDir),
+			Name:      []byte("file.dat"),
+			EntryType: stats.FileType,
+		}), ShouldBeNil)
+
+		So(metrics.pathTextBytesBefore, ShouldEqual, uint64(len(parentDir)))
+		So(metrics.pathTextBytesAfter, ShouldEqual, uint64(0))
+	})
 }
 
 type fakeImportCloser struct {
@@ -486,18 +526,20 @@ func findImportOperation(ops []boltperf.Operation, name, phase string) *boltperf
 }
 
 type fakeImportAPI struct {
-	dgutaWriter      *fakeImportDGUTAWriter
-	fileCloser       *fakeImportCloser
-	baseDirsStore    *historyTrackingBasedirsStore
-	tableStats       map[string]perfreport.TableStats
-	tableStatsTables []string
-	vectorStats      perfreport.FactsVectorStats
-	bucketStats      perfreport.FactsBucketStats
-	fileMountPath    string
-	fileUpdatedAt    time.Time
-	fileAllocator    *summary.DirIDAllocator
-	fileDirIDs       []uint32
-	baseDirsCalls    int
+	dgutaWriter        *fakeImportDGUTAWriter
+	fileCloser         *fakeImportCloser
+	baseDirsStore      *historyTrackingBasedirsStore
+	tableStats         map[string]perfreport.TableStats
+	tableStatsTables   []string
+	vectorStats        perfreport.FactsVectorStats
+	bucketStats        perfreport.FactsBucketStats
+	hotPathTables      []string
+	hotPathAuditTables []string
+	fileMountPath      string
+	fileUpdatedAt      time.Time
+	fileAllocator      *summary.DirIDAllocator
+	fileDirIDs         []uint32
+	baseDirsCalls      int
 }
 
 func (a *fakeImportAPI) NewDGUTAWriter() (db.DGUTAWriter, error) {
@@ -554,6 +596,12 @@ func (a *fakeImportAPI) ImportFactsStats(
 	return a.vectorStats, a.bucketStats, nil
 }
 
+func (a *fakeImportAPI) ImportHotRowPathStringTables(_ context.Context, tables []string) ([]string, error) {
+	a.hotPathAuditTables = append([]string(nil), tables...)
+
+	return append([]string(nil), a.hotPathTables...), nil
+}
+
 func TestImportReportEnrichment(t *testing.T) {
 	Convey("enrichImportReport records selected table stats, facts stats, and optional tables", t, func() {
 		report := boltperf.NewReport("clickhouse", "/input", 1, 0)
@@ -564,7 +612,7 @@ func TestImportReportEnrichment(t *testing.T) {
 			rows: map[string]uint64{
 				tableFiles:                42,
 				tableDGUTA:                3,
-				tableChildren:             2,
+				tableCatalog:              2,
 				tableDirFacts:             3,
 				tableBasedirsGroupUsage:   1,
 				tableBasedirsUserUsage:    1,
@@ -575,7 +623,7 @@ func TestImportReportEnrichment(t *testing.T) {
 			phases: map[string]time.Duration{
 				phaseFilesInsert:         10 * time.Millisecond,
 				phaseDirProjectionWrite:  20 * time.Millisecond,
-				phaseChildrenInsert:      30 * time.Millisecond,
+				phaseCatalogInsert:       30 * time.Millisecond,
 				phaseDirFactsInsert:      50 * time.Millisecond,
 				phaseBasedirsGroupUsage:  40 * time.Millisecond,
 				phaseActivePrefixRefresh: 60 * time.Millisecond,
@@ -595,11 +643,47 @@ func TestImportReportEnrichment(t *testing.T) {
 					CompressedBytes:   80,
 					UncompressedBytes: 160,
 				},
-				tableChildren: {
+				tableCatalog: {
 					Rows:              2,
 					ActiveParts:       1,
 					CompressedBytes:   50,
 					UncompressedBytes: 100,
+				},
+				tableDirSummarySets: {
+					Rows:              3,
+					ActiveParts:       1,
+					CompressedBytes:   30,
+					UncompressedBytes: 60,
+				},
+				tableBasedirsGroupUsage: {
+					Rows:              1,
+					ActiveParts:       1,
+					CompressedBytes:   10,
+					UncompressedBytes: 20,
+				},
+				tableBasedirsUserUsage: {
+					Rows:              1,
+					ActiveParts:       1,
+					CompressedBytes:   10,
+					UncompressedBytes: 20,
+				},
+				tableBasedirsGroupSubdirs: {
+					Rows:              1,
+					ActiveParts:       1,
+					CompressedBytes:   10,
+					UncompressedBytes: 20,
+				},
+				tableBasedirsUserSubdirs: {
+					Rows:              1,
+					ActiveParts:       1,
+					CompressedBytes:   10,
+					UncompressedBytes: 20,
+				},
+				tableBasedirsHistory: {
+					Rows:              1,
+					ActiveParts:       1,
+					CompressedBytes:   10,
+					UncompressedBytes: 20,
 				},
 				tableDirFilterAgeAll: {
 					Rows:              5,
@@ -650,7 +734,7 @@ func TestImportReportEnrichment(t *testing.T) {
 
 		So(report.SelectedTables, ShouldContain, tableFiles)
 		So(report.SelectedTables, ShouldContain, tableDirSummary)
-		So(report.SelectedTables, ShouldContain, tableChildren)
+		So(report.SelectedTables, ShouldContain, tableCatalog)
 		So(report.SelectedTables, ShouldContain, tableDirSummarySets)
 		So(report.SelectedTables, ShouldContain, tableBasedirsGroupUsage)
 		So(report.SelectedTables, ShouldContain, tableBasedirsUserUsage)
@@ -664,10 +748,7 @@ func TestImportReportEnrichment(t *testing.T) {
 		So(report.SelectedTables, ShouldContain, tableActivePrefixFilterAgeAll)
 		So(report.SelectedTables, ShouldContain, tableActivePrefixRollupSets)
 
-		So(api.tableStatsTables, ShouldContain, tableDirFilterAgeAll)
-		So(api.tableStatsTables, ShouldContain, tableActivePrefixRollups)
-		So(api.tableStatsTables, ShouldContain, tableActivePrefixFilterAgeAll)
-		So(api.tableStatsTables, ShouldContain, tableActivePrefixRollupSets)
+		So(api.tableStatsTables, ShouldBeNil)
 
 		files := report.TableStats[tableFiles]
 		So(files.Rows, ShouldEqual, uint64(42))
@@ -681,9 +762,9 @@ func TestImportReportEnrichment(t *testing.T) {
 		So(dirFacts.ImportPhaseDurationsMS[phaseDirProjectionWrite], ShouldEqual, float64(20))
 		So(dirFacts.ImportPhaseDurationsMS[phaseDirFactsInsert], ShouldEqual, float64(50))
 
-		catalog := report.TableStats[tableChildren]
+		catalog := report.TableStats[tableCatalog]
 		So(catalog.Rows, ShouldEqual, uint64(2))
-		So(catalog.ImportPhaseDurationsMS[phaseChildrenInsert], ShouldEqual, float64(30))
+		So(catalog.ImportPhaseDurationsMS[phaseCatalogInsert], ShouldEqual, float64(30))
 
 		basedirs := report.TableStats[tableBasedirsGroupUsage]
 		So(basedirs.Rows, ShouldEqual, uint64(1))
@@ -697,6 +778,118 @@ func TestImportReportEnrichment(t *testing.T) {
 		So(report.FactsBucketStats, ShouldResemble, &api.bucketStats)
 		So(report.MaxRSSBytes, ShouldBeGreaterThan, uint64(0))
 	})
+
+	Convey("enrichImportReport discovers every active wrstat table from ClickHouse stats", t, func() {
+		report := boltperf.NewReport("clickhouse", "/input", 1, 0)
+		result := datasetImportResult{
+			rows: map[string]uint64{tableFiles: 7},
+			phases: map[string]time.Duration{
+				phaseFullFilterAllInsert: 21 * time.Millisecond,
+				phaseSchema3Ready:        22 * time.Millisecond,
+				phaseActiveVirtualInsert: 23 * time.Millisecond,
+				phaseActiveVirtualReady:  24 * time.Millisecond,
+				phaseMountSwitch:         25 * time.Millisecond,
+			},
+		}
+		api := &fakeImportAPI{
+			tableStats: map[string]perfreport.TableStats{
+				tableFiles:                   importTestTableStats(7),
+				tableChildFilterAll:          importTestTableStats(11),
+				tableDirFilterAll:            importTestTableStats(13),
+				tableSchema3SnapshotSets:     importTestTableStats(2),
+				tableActiveVirtualDirs:       importTestTableStats(5),
+				tableActiveVirtualSummaries:  importTestTableStats(5),
+				tableActiveVirtualFilterAll:  importTestTableStats(17),
+				tableActiveVirtualChildren:   importTestTableStats(4),
+				tableActiveVirtualSets:       importTestTableStats(1),
+				tableMountEvents:             importTestTableStats(2),
+				tableSchemaVersion:           importTestTableStats(1),
+				"scratch_non_wrstat_summary": importTestTableStats(99),
+			},
+		}
+
+		So(enrichImportReport(context.Background(), &report, api, []datasetImportResult{result}), ShouldBeNil)
+
+		So(api.tableStatsTables, ShouldBeNil)
+
+		for _, table := range []string{
+			tableChildFilterAll,
+			tableDirFilterAll,
+			tableSchema3SnapshotSets,
+			tableActiveVirtualDirs,
+			tableActiveVirtualSummaries,
+			tableActiveVirtualFilterAll,
+			tableActiveVirtualChildren,
+			tableActiveVirtualSets,
+			tableMountEvents,
+			tableSchemaVersion,
+		} {
+			So(report.SelectedTables, ShouldContain, table)
+			So(report.TableStats[table].Rows, ShouldBeGreaterThan, uint64(0))
+		}
+
+		So(report.SelectedTables, ShouldNotContain, "scratch_non_wrstat_summary")
+		So(report.TableStats[tableChildFilterAll].ImportPhaseDurationsMS[phaseFullFilterAllInsert],
+			ShouldEqual, float64(21))
+		So(report.TableStats[tableDirFilterAll].ImportPhaseDurationsMS[phaseFullFilterAllInsert],
+			ShouldEqual, float64(21))
+		So(report.TableStats[tableSchema3SnapshotSets].ImportPhaseDurationsMS[phaseSchema3Ready],
+			ShouldEqual, float64(22))
+		So(report.TableStats[tableActiveVirtualFilterAll].ImportPhaseDurationsMS[phaseActiveVirtualInsert],
+			ShouldEqual, float64(23))
+		So(report.TableStats[tableActiveVirtualSets].ImportPhaseDurationsMS[phaseActiveVirtualReady],
+			ShouldEqual, float64(24))
+		So(report.TableStats[tableMountEvents].ImportPhaseDurationsMS[phaseMountSwitch],
+			ShouldEqual, float64(25))
+	})
+
+	Convey("enrichImportReport excludes absent base tables from active ClickHouse stats", t, func() {
+		report := boltperf.NewReport("clickhouse", "/input", 1, 0)
+		result := datasetImportResult{
+			rows: map[string]uint64{
+				tableFiles:      7,
+				tableDirSummary: 3,
+			},
+			phases: map[string]time.Duration{
+				phaseDirProjectionWrite:  20 * time.Millisecond,
+				phaseActivePrefixRefresh: 60 * time.Millisecond,
+			},
+		}
+		api := &fakeImportAPI{
+			tableStats: map[string]perfreport.TableStats{
+				tableFiles:      importTestTableStats(7),
+				tableDirSummary: importTestTableStats(3),
+			},
+		}
+
+		So(enrichImportReport(context.Background(), &report, api, []datasetImportResult{result}), ShouldBeNil)
+
+		So(api.tableStatsTables, ShouldBeNil)
+		So(report.SelectedTables, ShouldResemble, []string{tableDirSummary, tableFiles})
+		So(report.TableStats, ShouldHaveLength, 2)
+		So(report.TableStats[tableFiles].Rows, ShouldEqual, uint64(7))
+		So(report.TableStats[tableDirSummary].Rows, ShouldEqual, uint64(3))
+
+		for _, table := range []string{
+			tableDirSummarySets,
+			tableActivePrefixRollups,
+			tableActivePrefixFilterAgeAll,
+			tableActivePrefixRollupSets,
+		} {
+			So(report.SelectedTables, ShouldNotContain, table)
+			_, ok := report.TableStats[table]
+			So(ok, ShouldBeFalse)
+		}
+	})
+}
+
+func importTestTableStats(rows uint64) perfreport.TableStats {
+	return perfreport.TableStats{
+		Rows:              rows,
+		ActiveParts:       1,
+		CompressedBytes:   rows * 10,
+		UncompressedBytes: rows * 20,
+	}
 }
 
 func TestImportProductionReportEvidence(t *testing.T) {
@@ -717,6 +910,7 @@ func TestImportProductionReportEvidence(t *testing.T) {
 		So(total.DurationsMS, ShouldHaveLength, 1)
 		So(total.Inputs["spool_bytes"], ShouldEqual, uint64(0))
 		So(total.Inputs["retry_cleanup_result"], ShouldEqual, "not_attempted")
+		So(total.Inputs[importInputDirIDUInt32Justified], ShouldEqual, true)
 
 		for _, key := range []string{
 			importInputUserCPUMS,
@@ -724,6 +918,12 @@ func TestImportProductionReportEvidence(t *testing.T) {
 			importInputTotalCPUMS,
 			importInputPeakRSSBytes,
 			importInputPublishLatency,
+			importInputRowsPerTable,
+			importInputMaxDirsPerSnapshot,
+			importInputPathTextBytesBefore,
+			importInputPathTextBytesAfter,
+			importInputPathTextBytesReduction,
+			importInputPathTextBytesReductionPct,
 		} {
 			_, ok := total.Inputs[key]
 			So(ok, ShouldBeTrue)
@@ -755,6 +955,16 @@ func TestImportProductionReportEvidence(t *testing.T) {
 		So(report.TableStats[tableFiles].ActiveParts, ShouldEqual, uint64(2))
 		So(report.TableStats[tableFiles].CompressedBytes, ShouldEqual, uint64(170))
 		So(report.TableStats[tableFiles].UncompressedBytes, ShouldEqual, uint64(340))
+
+		audit := findImportOperation(report.Operations, finalGateJ6StorageAuditOpName, "")
+		So(audit, ShouldNotBeNil)
+		So(audit.Inputs[finalGateJ6HotRowPathStringTablesInput], ShouldResemble, []string{})
+		So(audit.Inputs[finalGateJ6PathTextCatalogTableInput], ShouldEqual, tableCatalog)
+		So(audit.Inputs[finalGateJ6PathTextCopiesPerDirSnapshotInput], ShouldEqual, float64(1))
+		So(api.hotPathAuditTables, ShouldContain, tableDirFilterAgeAll)
+		So(api.hotPathAuditTables, ShouldNotContain, tableCatalog)
+		So(api.hotPathAuditTables, ShouldNotContain, tableActivePrefixRollups)
+		So(audit.Inputs["audited_hot_tables"], ShouldResemble, api.hotPathAuditTables)
 	})
 }
 
@@ -968,6 +1178,77 @@ func (c abortTrackingCloser) Abort() error {
 	return c.abortErr
 }
 
+func TestImportJ3AggregateEvidence(t *testing.T) {
+	Convey("addImportFinalGateEvidence records J3 import and storage aggregate inputs", t, func() {
+		report := boltperf.NewReport("clickhouse", "/input", 1, 0)
+		report.TableStats = map[string]perfreport.TableStats{
+			tableFiles: {
+				Rows:        11,
+				ActiveParts: 2,
+			},
+			tableCatalog: {
+				Rows:        7,
+				ActiveParts: 3,
+			},
+			tableDirSummary: {
+				Rows:        5,
+				ActiveParts: 1,
+			},
+		}
+		report.AddOperation("import_total", map[string]any{}, []float64{125})
+
+		results := []datasetImportResult{
+			{
+				rows: map[string]uint64{
+					tableFiles:   11,
+					tableDGUTA:   2,
+					tableCatalog: 7,
+				},
+				pathTextBytesBefore: 1_000,
+				pathTextBytesAfter:  250,
+			},
+			{
+				rows: map[string]uint64{
+					tableFiles:   3,
+					tableCatalog: 4,
+				},
+				pathTextBytesBefore: 50,
+				pathTextBytesAfter:  20,
+			},
+		}
+
+		addImportFinalGateEvidence(&report, results, importCPUUsage{userMS: 12, systemMS: 8})
+
+		total := findImportOperation(report.Operations, "import_total", "")
+		So(total, ShouldNotBeNil)
+		So(total.Inputs[importInputRowsPerTable], ShouldResemble, map[string]uint64{
+			tableFiles:      11,
+			tableCatalog:    7,
+			tableDirSummary: 5,
+		})
+		So(total.Inputs[importInputMaxDirsPerSnapshot], ShouldEqual, uint64(7))
+		So(total.Inputs[importInputDirIDUInt32Justified], ShouldEqual, true)
+		So(total.Inputs[importInputDirIDUInt32WarningThreshold], ShouldEqual, uint64(1<<31))
+		So(total.Inputs[importInputPathTextBytesBefore], ShouldEqual, uint64(1_050))
+		So(total.Inputs[importInputPathTextBytesAfter], ShouldEqual, uint64(270))
+		So(total.Inputs[importInputPathTextBytesReduction], ShouldEqual, uint64(780))
+		So(total.Inputs[importInputPathTextBytesReductionPct], ShouldAlmostEqual, 74.28571428571429)
+	})
+
+	Convey("addImportFinalGateEvidence warns when max dirs approach the UInt32 widening threshold", t, func() {
+		report := boltperf.NewReport("clickhouse", "/input", 1, 0)
+		report.AddOperation("import_total", map[string]any{}, []float64{1})
+
+		addImportFinalGateEvidence(&report, []datasetImportResult{
+			{rows: map[string]uint64{tableCatalog: 1 << 31}},
+		}, importCPUUsage{})
+
+		total := findImportOperation(report.Operations, "import_total", "")
+		So(total.Inputs[importInputMaxDirsPerSnapshot], ShouldEqual, uint64(1<<31))
+		So(total.Inputs[importInputDirIDUInt32Justified], ShouldEqual, false)
+	})
+}
+
 func TestImportReportOperations(t *testing.T) {
 	Convey("addImportReportOperations emits per-file and per-phase detail", t, func() {
 		report := boltperf.NewReport("clickhouse", "/input", 1, 0)
@@ -980,7 +1261,7 @@ func TestImportReportOperations(t *testing.T) {
 			rows: map[string]uint64{
 				tableFiles:                42,
 				tableDGUTA:                7,
-				tableChildren:             5,
+				tableCatalog:              5,
 				tableDirFacts:             7,
 				tableBasedirsGroupUsage:   3,
 				tableBasedirsUserUsage:    2,
@@ -1020,7 +1301,7 @@ func TestImportReportOperations(t *testing.T) {
 		So(rows, ShouldResemble, map[string]uint64{
 			tableFiles:                42,
 			tableDirSummary:           14,
-			tableChildren:             5,
+			tableCatalog:              5,
 			tableBasedirsGroupUsage:   3,
 			tableBasedirsUserUsage:    2,
 			tableBasedirsGroupSubdirs: 4,
@@ -1033,7 +1314,7 @@ func TestImportReportOperations(t *testing.T) {
 		So(ok, ShouldBeTrue)
 		So(tables, ShouldResemble, []string{
 			tableDirSummary,
-			tableChildren,
+			tableCatalog,
 			tableFiles,
 			tableDirSummarySets,
 			tableBasedirsGroupUsage,
@@ -1041,6 +1322,14 @@ func TestImportReportOperations(t *testing.T) {
 			tableBasedirsGroupSubdirs,
 			tableBasedirsUserSubdirs,
 			tableDirFilterAgeAll,
+			tableChildFilterAll,
+			tableDirFilterAll,
+			tableSchema3SnapshotSets,
+			tableActiveVirtualDirs,
+			tableActiveVirtualSummaries,
+			tableActiveVirtualFilterAll,
+			tableActiveVirtualChildren,
+			tableActiveVirtualSets,
 		})
 		So(partitionReset.DurationsMS, ShouldResemble, []float64{160})
 
@@ -1071,7 +1360,7 @@ func TestImportReportOperations(t *testing.T) {
 
 		catalogInsert := findImportOperation(report.Operations, "import_phase", expectedPhaseCatalogInsert)
 		So(catalogInsert, ShouldNotBeNil)
-		So(catalogInsert.Inputs["table"], ShouldEqual, tableChildren)
+		So(catalogInsert.Inputs["table"], ShouldEqual, tableCatalog)
 		So(catalogInsert.Inputs["rows"], ShouldEqual, uint64(5))
 		So(catalogInsert.DurationsMS, ShouldResemble, []float64{100})
 

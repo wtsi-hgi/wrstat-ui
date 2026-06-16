@@ -41,8 +41,8 @@ references `wrstat_children` or `wrstat_parent_facts`; `internal/chperf`
 builds and `go vet`s clean with no `NavigationObject*` or
 `navigationShape*` reference). Foundation for the rest of this phase.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
 
 ### Item 7.2: J2 - datasets
 
@@ -56,8 +56,8 @@ datasets are used and why a bounded subset still reproduces each
 access pattern; if a bounded dataset cannot reproduce a pattern, say
 so explicitly. Depends on Item 7.1.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
 
 ### Item 7.3: J3 - import / storage metrics
 
@@ -72,8 +72,8 @@ measured max-dirs-per-snapshot (justifies `UInt32`, widen to
 "ids near-free / leaner spool" claim held). Depends on Items 7.1,
 7.2.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
 
 ### Item 7.4: J4 - per-query-type metrics and the canonical matrix
 
@@ -89,8 +89,8 @@ failure. Also satisfies F3 acceptance test 3 (EXPLAIN/read-rows
 proof the files table is not scanned for path text). Depends on
 Items 7.1, 7.2.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
 
 ### Item 7.5: J5 - cache scopes
 
@@ -105,8 +105,8 @@ Reproduce the existing harness's cache scopes
 `same_provider_same_dir`) so the high-fanout repeated-read pathology
 is exercised before and after. Depends on Items 7.1, 7.4.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
 
 ### Item 7.6: J6 - gates and final report
 
@@ -129,5 +129,5 @@ fails; no hot-row path string + per-table compressed/uncompressed
 reported; cold UX p95 thresholds met; any collapsed materialisation
 cites a measurement meeting its gate). Depends on Items 7.1-7.5.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed

@@ -66,7 +66,7 @@ type TableStats struct {
 	UncompressedBytes          uint64             `json:"uncompressed_bytes"`
 	ImportMemoryBytes          uint64             `json:"import_memory_bytes,omitempty"`
 	RowAmplificationVsDirFacts float64            `json:"row_amplification_vs_wrstat_dir_facts,omitempty"`
-	RowAmplificationVsChildren float64            `json:"row_amplification_vs_catalog,omitempty"`
+	RowAmplificationVsCatalog  float64            `json:"row_amplification_vs_catalog,omitempty"`
 	ImportPhaseDurationsMS     map[string]float64 `json:"import_phase_durations_ms,omitempty"`
 }
 

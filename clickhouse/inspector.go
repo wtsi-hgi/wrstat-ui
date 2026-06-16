@@ -139,6 +139,55 @@ func (i *Inspector) ExplainStatPath(
 	return i.runExplain(ctx, explainQ, mountPath, mountPath, uint32(0), name)
 }
 
+// ExplainFindByGlob returns EXPLAIN output for the FindByGlob SQL statement.
+// It uses the same preparation and query builder as Client.FindByGlob.
+func (i *Inspector) ExplainFindByGlob(
+	ctx context.Context,
+	baseDirs []string,
+	patterns []string,
+	opts FindOptions,
+) (string, error) {
+	mountPoints, err := mountPointsFromConfig(i.cfg)
+	if err != nil {
+		return "", err
+	}
+
+	client := &Client{cfg: i.cfg, conn: i.conn, mountPoints: mountPoints}
+
+	prepared, err := client.prepareFindByGlob(ctx, baseDirs, patterns, opts)
+	if err != nil {
+		return "", err
+	}
+
+	query, args := explainFindByGlobQuery(prepared)
+	if query == "" {
+		return "", nil
+	}
+
+	return i.runExplain(ctx, query, args...)
+}
+
+func explainFindByGlobQuery(prepared findByGlobPrepared) (string, []any) {
+	if len(prepared.plan.queries) == 0 {
+		return "", nil
+	}
+
+	spec := prepared.plan.queries[0]
+	query, args := buildFindByGlobQueryAndParams(
+		prepared.selectList,
+		spec.mountPath,
+		spec.baseDirs,
+		spec.patternChunk,
+		prepared.ownerEnabled,
+		prepared.uid,
+		prepared.gids,
+		prepared.queryLimit,
+		prepared.queryOffset,
+	)
+
+	return explainPrefix + query, args
+}
+
 // Measure runs the provided function, then returns metrics for the last
 // completed query executed on the configured server after the run started.
 func (i *Inspector) Measure(
