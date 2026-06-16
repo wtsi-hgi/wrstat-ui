@@ -473,6 +473,7 @@ type ChildFilterAllRow struct {
 type DirFilterAllRow struct {
 	MountPath         string
 	SnapshotID        string
+	ParentID          uint32
 	Age               uint8
 	GID               uint32
 	UID               uint32

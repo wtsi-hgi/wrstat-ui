@@ -55,7 +55,7 @@ import (
 const (
 	clickHouseSpoolDirName        = ".wrstat-ui-clickhouse-spool"
 	clickHouseSpoolLoadReportName = "spool_load_report.json"
-	clickHouseSpoolSchemaMark     = "wrstat-ui-clickhouse-summarise-spool-v2"
+	clickHouseSpoolSchemaMark     = "wrstat-ui-clickhouse-summarise-spool-v3"
 	clickHouseSpoolSchema3Version = 1
 
 	summariseActiveVirtualRootID       uint32 = 1
@@ -804,7 +804,7 @@ func summariseChildFilterAllRowForDirFilterAll(row chspool.DirFilterAllRow) chsp
 	return chspool.ChildFilterAllRow{
 		MountPath:         row.MountPath,
 		SnapshotID:        row.SnapshotID,
-		ParentID:          0,
+		ParentID:          row.ParentID,
 		Age:               row.Age,
 		GID:               row.GID,
 		UID:               row.UID,
@@ -1116,6 +1116,7 @@ func summariseFullFilterRowForGUTA(
 	return chspool.DirFilterAllRow{
 		MountPath:    w.mountPath,
 		SnapshotID:   w.snapshotID,
+		ParentID:     record.parentID,
 		Age:          uint8(guta.Age),
 		GID:          guta.GID,
 		UID:          guta.UID,

@@ -231,6 +231,77 @@ func TestSummariseClickHouseSpoolRetry(t *testing.T) {
 		So(markerMatches, ShouldBeTrue)
 	})
 
+	Convey("summarise retry rebuilds a completed spool with an old schema marker", t, func() {
+		const previousClickHouseSpoolSchemaMark = "wrstat-ui-clickhouse-summarise-spool-v2"
+
+		fixture := newSummariseActiveSnapshotFixture(t)
+		fixture.writeValidStats(t)
+
+		restore := snapshotSummariseGlobals()
+		Reset(restore)
+
+		configureSummariseActiveSnapshotTest(fixture.outputDir, false)
+
+		clickHouseSnapshotIsActive = func(clickhouse.Config, string, time.Time) (bool, error) {
+			return false, nil
+		}
+
+		loadCalls := 0
+		loadSummariseClickHouseSpool = func(
+			_ context.Context,
+			_ clickhouse.Config,
+			spoolDir string,
+			manifest *chspool.Manifest,
+			_ func(string, time.Duration),
+		) (perfreport.Report, error) {
+			loadCalls++
+
+			So(spoolDir, ShouldEqual, summariseClickHouseSpoolDir(fixture.outputDir))
+			So(manifest.SchemaMarker, ShouldEqual, clickHouseSpoolSchemaMark)
+
+			if loadCalls == 1 {
+				return perfreport.Report{}, errSummariseTestClose
+			}
+
+			return perfreport.NewReport("clickhouse", spoolDir, 1, 0), nil
+		}
+
+		err := run([]string{fixture.statsPath})
+		So(errors.Is(err, errSummariseTestClose), ShouldBeTrue)
+		So(loadCalls, ShouldEqual, 1)
+		So(summariseCompletionMarkerExists(fixture.outputDir), ShouldBeFalse)
+
+		spoolDir := summariseClickHouseSpoolDir(fixture.outputDir)
+		manifest, err := chspool.ReadManifest(spoolDir)
+		So(err, ShouldBeNil)
+
+		manifest.SchemaMarker = previousClickHouseSpoolSchemaMark
+		So(chspool.WriteManifestAtomic(spoolDir, manifest), ShouldBeNil)
+
+		So(os.Chmod(fixture.statsPath, 0), ShouldBeNil)
+		Reset(func() { So(os.Chmod(fixture.statsPath, 0o600), ShouldBeNil) })
+
+		err = run([]string{fixture.statsPath})
+		So(err, ShouldNotBeNil)
+		So(loadCalls, ShouldEqual, 1)
+		So(summariseCompletionMarkerExists(fixture.outputDir), ShouldBeFalse)
+
+		So(os.Chmod(fixture.statsPath, 0o600), ShouldBeNil)
+
+		err = run([]string{fixture.statsPath})
+		So(err, ShouldBeNil)
+		So(loadCalls, ShouldEqual, 2)
+
+		manifest, err = chspool.ReadManifest(spoolDir)
+		So(err, ShouldBeNil)
+		So(manifest.SchemaMarker, ShouldEqual, clickHouseSpoolSchemaMark)
+		So(manifest.SchemaMarker, ShouldNotEqual, previousClickHouseSpoolSchemaMark)
+
+		markerMatches, err := summariseCompletionMarkerMatches(*fixture.clickHouseTarget())
+		So(err, ShouldBeNil)
+		So(markerMatches, ShouldBeTrue)
+	})
+
 	Convey("summarise retry can fail twice then succeed without rereading stats.gz", t, func() {
 		fixture := newSummariseActiveSnapshotFixture(t)
 		fixture.writeValidStats(t)
@@ -742,6 +813,52 @@ func writeBasedirsSpoolFixtureStatsForMount(
 	So(os.Chtimes(statsPath, updatedAt, updatedAt), ShouldBeNil)
 }
 
+func assertChildFilterAllParentsMatchCatalog(spoolDir string) {
+	dirsByID := make(map[uint32]chspool.DirRow)
+
+	So(chspool.DecodeRows[chspool.DirRow](spoolDir, chspool.TableDirs, func(row chspool.DirRow) error {
+		dirsByID[row.DirID] = row
+
+		return nil
+	}), ShouldBeNil)
+
+	var (
+		rows       uint64
+		missing    uint64
+		mismatches []string
+	)
+
+	So(chspool.DecodeRows[chspool.ChildFilterAllRow](
+		spoolDir,
+		chspool.TableChildFilterAll,
+		func(row chspool.ChildFilterAllRow) error {
+			rows++
+
+			dir, ok := dirsByID[row.DirID]
+			if !ok {
+				missing++
+
+				return nil
+			}
+
+			if row.ParentID != dir.ParentID {
+				mismatches = append(mismatches, fmt.Sprintf(
+					"dir_id=%d got parent_id=%d want %d",
+					row.DirID,
+					row.ParentID,
+					dir.ParentID,
+				))
+			}
+
+			return nil
+		},
+	), ShouldBeNil)
+
+	So(rows, ShouldBeGreaterThan, uint64(0))
+	So(missing, ShouldEqual, uint64(0))
+	So(mismatches, ShouldHaveLength, 0)
+}
+
 func writeB5SpoolFixtureStats(t *testing.T, statsPath string, mountPath string, updatedAt time.Time) {
 	t.Helper()
 
@@ -1248,6 +1365,8 @@ func TestSummariseClickHouseSpoolRows(t *testing.T) {
 		So(facts[0].SubtreeEnd, ShouldBeGreaterThanOrEqualTo, facts[0].DirID)
 		So(facts[0].GIDs, ShouldContain, uint32(7))
 		So(facts[0].UIDs, ShouldContain, uint32(17))
+
+		assertChildFilterAllParentsMatchCatalog(spoolDir)
 	})
 
 	Convey("B5 summarise spool file rows share catalog directory ids for /m/teamX/", t, func() {

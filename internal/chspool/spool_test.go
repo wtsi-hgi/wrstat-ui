@@ -81,7 +81,7 @@ func TestVerifyManifest(t *testing.T) {
 		assertChspoolFields(
 			t,
 			DirFilterAllRow{},
-			[]string{chspoolFieldDirID, chspoolFieldSubtreeEnd},
+			[]string{chspoolFieldDirID, chspoolFieldParentID, chspoolFieldSubtreeEnd},
 			[]string{chspoolFieldParentDir, chspoolFieldDir},
 		)
 		assertChspoolFields(
@@ -323,6 +323,7 @@ func writeChspoolSchema3TestRows(set *Set) error {
 	if err := set.WriteDirFilterAll(DirFilterAllRow{
 		MountPath:         chspoolTestMountPath,
 		SnapshotID:        chspoolTestSnapshotID,
+		ParentID:          7,
 		Age:               255,
 		GID:               7,
 		UID:               17,
