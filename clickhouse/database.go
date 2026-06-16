@@ -303,7 +303,7 @@ const (
 		"ON parent.mount_path = child.mount_path " +
 		"AND parent.snapshot_id = child.snapshot_id " +
 		"AND parent.dir_id = child.parent_id " +
-		"PREWHERE mount_path = ? AND snapshot_id = ? " +
+		"PREWHERE child.mount_path = ? AND child.snapshot_id = ? " +
 		"WHERE parent.full_path IN (%s) " +
 		"ORDER BY parent.full_path ASC, child.full_path ASC"
 
@@ -4358,8 +4358,8 @@ func (d *clickHouseDatabase) queryChildrenForActiveMountRoots(
 
 	query, args := activeMountsQuery(
 		activeMountRootChildrenQuery,
-		"c.mount_path",
-		"c.snapshot_id",
+		"child.mount_path",
+		"child.snapshot_id",
 		mounts,
 	)
 
