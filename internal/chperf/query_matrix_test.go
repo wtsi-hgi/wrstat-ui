@@ -183,6 +183,17 @@ func TestJ4CanonicalMatrix(t *testing.T) {
 		for _, spec := range j4RequiredMatrixOperations() {
 			So(required[spec], ShouldBeTrue)
 		}
+
+		fullPathSpec := j4RequiredMatrixOperation{
+			QueryType:    j4QueryTypeGlob,
+			Operation:    queryOpGlobFullPathName,
+			QueryVariant: "FindByGlob full-path",
+		}
+		So(required[fullPathSpec], ShouldBeTrue)
+
+		for _, spec := range j4RequiredMatrixOperations() {
+			So(spec, ShouldNotResemble, fullPathSpec)
+		}
 	})
 
 	Convey("runSuite records metrics, result rows, and digest for selected J4 operations", t, func() {

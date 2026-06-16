@@ -199,7 +199,6 @@ func j4RequiredMatrixOperations() []j4RequiredMatrixOperation {
 		{j4QueryTypeGlob, "glob_case_G", "FindByGlob case G"},
 		{j4QueryTypeGlob, "glob_case_H", "FindByGlob case H"},
 		{j4QueryTypeGlob, queryOpCountGlobCaseAName, "CountByGlob case A"},
-		{j4QueryTypeGlob, queryOpGlobFullPathName, "FindByGlob full-path"},
 		{j4QueryTypeGlob, queryOpFindGlobExtensionDotfileName, "FindByGlob extension dotfile"},
 		{j4QueryTypeVirtual, queryOpVirtualChildrenName, "virtual children filtered"},
 		{j4QueryTypeVirtual, queryOpVirtualDirInfoName, "active virtual root summary filtered"},
