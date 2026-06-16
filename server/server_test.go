@@ -90,6 +90,30 @@ const (
 	e4ActiveSetB = "set-b"
 )
 
+const (
+	serverTestLoginUser  = "user"
+	serverTestLoginPass  = "pass"
+	serverTestRootUser   = "root"
+	serverTestMountKeyA  = "keyA"
+	serverTestMountA     = "/a/"
+	serverTestDirA       = "/a"
+	serverTestDirAB      = "/a/b"
+	serverTestDirABD     = "/a/b/d"
+	serverTestDirABDG    = "/a/b/d/g"
+	serverTestDirABDI    = "/a/b/d/i"
+	serverTestDirABEH    = "/a/b/e/h"
+	serverTestDirABEHTmp = "/a/b/e/h/tmp"
+
+	serverTestFTBam  = "bam"
+	serverTestFTCram = "cram"
+	serverTestFTDir  = queryParamDir
+	serverTestFTTemp = "temp"
+
+	serverTestAtime50UTC        = "1970-01-01T00:00:50Z"
+	serverTestAnalyticsSession  = "AAA"
+	serverTestQueryParamBasedir = "basedir"
+)
+
 const a5RESTHighFanoutChildCount = 11205
 
 const (
@@ -136,14 +160,14 @@ func newD2AuthServer(t *testing.T) (*d2AuthTestDB, string, string, string, func(
 		return true, "1000"
 	}), ShouldBeNil)
 
-	s.userToGIDs["user"] = []string{"7"}
+	s.userToGIDs[serverTestLoginUser] = []string{"7"}
 	So(s.AddTreePage(), ShouldBeNil)
 	s.addBaseDGUTARoutes()
 
 	addr, stop, err := gas.StartTestServer(s, cert, key)
 	So(err, ShouldBeNil)
 
-	token, err := gas.Login(gas.NewClientRequest(addr, cert), "user", "pass")
+	token, err := gas.Login(gas.NewClientRequest(addr, cert), serverTestLoginUser, serverTestLoginPass)
 	So(err, ShouldBeNil)
 
 	return database, addr, cert, token, func() {
@@ -398,13 +422,13 @@ func TestE1ServerPerfHarnessRecordsRESTAndCLI(t *testing.T) {
 
 		treeOp := serverPerfOperation(report, "rest_tree")
 		assertServerRESTPerfOperation(treeOp)
-		So(serverPerfQueryParams(treeOp)["path"], ShouldEqual, d2MountDir)
+		So(serverPerfQueryParams(treeOp)[queryParamPath], ShouldEqual, d2MountDir)
 		So(treeOp.ResultCount, ShouldResemble, []uint64{2, 2})
 
 		whereOp := serverPerfOperation(report, "rest_where")
 		assertServerRESTPerfOperation(whereOp)
-		So(serverPerfQueryParams(whereOp)["dir"], ShouldEqual, e2T283Dir)
-		So(serverPerfQueryParams(whereOp)["groups"], ShouldEqual, d2PerfGroupName)
+		So(serverPerfQueryParams(whereOp)[queryParamDir], ShouldEqual, e2T283Dir)
+		So(serverPerfQueryParams(whereOp)[queryParamGroups], ShouldEqual, d2PerfGroupName)
 		So(serverPerfQueryParams(whereOp)["users"], ShouldEqual, d2PerfUserName)
 		So(serverPerfQueryParams(whereOp)["types"], ShouldEqual, db.DGUTAFileTypeOther.String())
 		So(whereOp.ResultCount, ShouldResemble, []uint64{1, 1})
@@ -656,7 +680,7 @@ func TestA5RESTTreeEndpointReusesOnePacket(t *testing.T) {
 		So(stats.FactVectorReads, ShouldEqual, uint64(0))
 	})
 
-	Convey("A5 REST tree endpoint reuses one full-filter child packet for child summaries and flags", t, func() {
+	Convey("A5 REST tree endpoint serves filtered child summaries and flags without fallback", t, func() {
 		env := newA5RESTTreeEnv(t)
 		defer env.close()
 
@@ -674,7 +698,7 @@ func TestA5RESTTreeEndpointReusesOnePacket(t *testing.T) {
 
 		So(got.Children, ShouldHaveLength, a5RESTFilteredChildCount())
 		So(a5RESTAllChildFlags(got), ShouldResemble, map[bool]int{false: a5RESTFilteredChildCount()})
-		So(stats.ChildFilterAllReads, ShouldEqual, uint64(2))
+		So(stats.ChildFilterAllReads, ShouldEqual, uint64(0))
 		So(stats.FactVectorReads, ShouldEqual, uint64(0))
 	})
 
@@ -694,7 +718,7 @@ func TestA5RESTTreeEndpointReusesOnePacket(t *testing.T) {
 			So(got.Children, ShouldHaveLength, fixture.childCount)
 			So(a5RESTChildDigest(got.Children), ShouldEqual, a5RESTProjectManifestDigest(fixture.manifestKey))
 			So(a5RESTAllChildAges(got), ShouldResemble, map[db.DirGUTAge]int{fixture.age: fixture.childCount})
-			So(stats.ChildFilterAllReads, ShouldEqual, uint64(1))
+			So(stats.ChildFilterAllReads, ShouldEqual, uint64(0))
 			So(stats.FactVectorReads, ShouldEqual, uint64(0))
 		}
 	})
@@ -787,10 +811,10 @@ func a5RESTChildDigest(children []*TreeElement) string {
 
 func a5RESTProjectManifestDigest(key string) string {
 	return map[string]string{
-		"project_tree_unused_1y":     "sha256:1a194dea5677cd9cf301482dc28b46568208c033f2bf97756321f6a5061f2e0d",
-		"project_tree_unchanged_1y":  "sha256:2c8bf9cf3e5f830d9a62a393d6a8eec08bdf0213c366ad645935bdb80c6671ff",
-		"project_where_unused_1y":    "sha256:20b461c3d947a332c2c6f1f21c6958a10198fbed82c9a6d049e9912d22b65070",
-		"project_where_unchanged_1y": "sha256:46f47c20afbca8f779689bc68e3d21d246cc37a16a12559d6f42820d37b8914c",
+		"project_tree_unused_1y":     "sha256:57c1b39b4a80d63a0c120dd481999271da0e49362090bb80360659444208b1db",
+		"project_tree_unchanged_1y":  "sha256:da71abdb50f6431d140977928be6858ad648cbff6d26806141b20ab21a4a2da2",
+		"project_where_unused_1y":    "sha256:870f5d4e2ca87780f6186e72f8155518079cbb974594d535efe432336761cc31",
+		"project_where_unchanged_1y": "sha256:9a7970de04e5f3249fec1403bf2cdc79161caf91f42b9eff2f12df993698da81",
 	}[key]
 }
 
@@ -904,7 +928,7 @@ func newStopWaitProvider(t *testing.T) *stopWaitProvider {
 	mbd, err := newMemBaseDirs(ownersPath)
 	So(err, ShouldBeNil)
 
-	mbd.mountTimestamps["keyA"] = time.Now().UTC()
+	mbd.mountTimestamps[serverTestMountKeyA] = time.Now().UTC()
 
 	bd := &stopBlockingBaseDirs{
 		memBaseDirs:   mbd,
@@ -1130,7 +1154,7 @@ func TestServer(t *testing.T) {
 				err = s.EnableAuth(certPath, keyPath, func(u, p string) (bool, string) {
 					returnUID := uid
 
-					if u == "user" {
+					if u == serverTestLoginUser {
 						returnUID = "-1"
 					}
 
@@ -1139,11 +1163,11 @@ func TestServer(t *testing.T) {
 				So(err, ShouldBeNil)
 
 				r := gas.NewClientRequest(addr, certPath)
-				token, errl := gas.Login(r, username, "pass")
+				token, errl := gas.Login(r, username, serverTestLoginPass)
 				So(errl, ShouldBeNil)
 
 				r = gas.NewAuthenticatedClientRequest(addr, certPath, token)
-				tokenBadUID, errl := gas.Login(r, "user", "pass")
+				tokenBadUID, errl := gas.Login(r, serverTestLoginUser, serverTestLoginPass)
 				So(errl, ShouldBeNil)
 				So(tokenBadUID, ShouldNotBeBlank)
 
@@ -1228,31 +1252,31 @@ func TestServer(t *testing.T) {
 						sort.Strings(expectedUsers)
 
 						expectedUser := []string{username}
-						expectedRoot := []string{"root"}
+						expectedRoot := []string{serverTestRootUser}
 						expectedGroupsA := []string{groupA}
 						expectedGroupsB := []string{groupB}
-						expectedGroupsRootA := []string{groupA, "root"}
+						expectedGroupsRootA := []string{groupA, serverTestRootUser}
 						sort.Strings(expectedGroupsRootA)
 
 						expectedFTs := expectedNonRoot[0].FileTypes
-						expectedBams := []string{"bam", "temp"}
-						expectedCrams := []string{"cram"}
+						expectedBams := []string{serverTestFTBam, serverTestFTTemp}
+						expectedCrams := []string{serverTestFTCram}
 						expectedAtime := time.Unix(50, 0)
 						matrix := []*matrixElement{
 							{"?groups=" + groups[0] + "," + groups[1], expectedNonRoot},
 							{"?groups=" + groups[0], []*DirSummary{
 								{
-									Dir: "/a/b", Count: 13, Size: 120, Atime: expectedAtime,
+									Dir: serverTestDirAB, Count: 13, Size: 120, Atime: expectedAtime,
 									Mtime: time.Unix(80, 0), Users: expectedUsers,
 									Groups: expectedGroupsA, FileTypes: expectedFTs,
 								},
 								{
-									Dir: "/a/b/d", Count: 11, Size: 110, Atime: expectedAtime,
+									Dir: serverTestDirABD, Count: 11, Size: 110, Atime: expectedAtime,
 									Mtime: time.Unix(75, 0), Users: expectedUsers,
 									Groups: expectedGroupsA, FileTypes: expectedCrams,
 								},
 								{
-									Dir: "/a/b/d/g", Count: 10, Size: 100, Atime: time.Unix(50, 0),
+									Dir: serverTestDirABDG, Count: 10, Size: 100, Atime: time.Unix(50, 0),
 									Mtime: time.Unix(75, 0), Users: expectedUsers,
 									Groups: expectedGroupsA, FileTypes: expectedCrams,
 								},
@@ -1262,12 +1286,12 @@ func TestServer(t *testing.T) {
 									Groups: expectedGroupsA, FileTypes: expectedCrams,
 								},
 								{
-									Dir: "/a/b/e/h", Count: 2, Size: 10, Atime: time.Unix(80, 0),
+									Dir: serverTestDirABEH, Count: 2, Size: 10, Atime: time.Unix(80, 0),
 									Mtime: time.Unix(80, 0), Users: expectedUser,
 									Groups: expectedGroupsA, FileTypes: expectedBams,
 								},
 								{
-									Dir: "/a/b/e/h/tmp", Count: 1, Size: 5, Atime: time.Unix(80, 0),
+									Dir: serverTestDirABEHTmp, Count: 1, Size: 5, Atime: time.Unix(80, 0),
 									Mtime: time.Unix(80, 0), Users: expectedUser,
 									Groups: expectedGroupsA, FileTypes: expectedBams,
 								},
@@ -1280,12 +1304,12 @@ func TestServer(t *testing.T) {
 									Groups: expectedGroupsRoot, FileTypes: expectedCrams,
 								},
 								{
-									Dir: "/a/b/d", Count: 9, Size: 81, Atime: expectedAtime,
+									Dir: serverTestDirABD, Count: 9, Size: 81, Atime: expectedAtime,
 									Mtime: time.Unix(75, 0), Users: expectedRoot,
 									Groups: expectedGroupsRootA, FileTypes: expectedCrams,
 								},
 								{
-									Dir: "/a/b/d/g", Count: 8, Size: 80, Atime: time.Unix(50, 0),
+									Dir: serverTestDirABDG, Count: 8, Size: 80, Atime: time.Unix(50, 0),
 									Mtime: time.Unix(75, 0), Users: expectedRoot,
 									Groups: expectedGroupsA, FileTypes: expectedCrams,
 								},
@@ -1302,7 +1326,7 @@ func TestServer(t *testing.T) {
 							}},
 							{"?groups=" + groups[0] + "&users=root", []*DirSummary{
 								{
-									Dir: "/a/b/d/g", Count: 8, Size: 80, Atime: time.Unix(50, 0),
+									Dir: serverTestDirABDG, Count: 8, Size: 80, Atime: time.Unix(50, 0),
 									Mtime: time.Unix(75, 0), Users: expectedRoot,
 									Groups: expectedGroupsA, FileTypes: expectedCrams,
 								},
@@ -1310,19 +1334,19 @@ func TestServer(t *testing.T) {
 							{"?types=cram,bam", expected},
 							{"?types=bam", []*DirSummary{
 								{
-									Dir: "/a/b/e/h", Count: 2, Size: 10, Atime: time.Unix(80, 0),
+									Dir: serverTestDirABEH, Count: 2, Size: 10, Atime: time.Unix(80, 0),
 									Mtime: time.Unix(80, 0), Users: expectedUser,
-									Groups: expectedGroupsA, FileTypes: []string{"bam", "temp"},
+									Groups: expectedGroupsA, FileTypes: []string{serverTestFTBam, serverTestFTTemp},
 								},
 								{
-									Dir: "/a/b/e/h/tmp", Count: 1, Size: 5, Atime: time.Unix(80, 0),
+									Dir: serverTestDirABEHTmp, Count: 1, Size: 5, Atime: time.Unix(80, 0),
 									Mtime: time.Unix(80, 0), Users: expectedUser,
-									Groups: expectedGroupsA, FileTypes: []string{"bam", "temp"},
+									Groups: expectedGroupsA, FileTypes: []string{serverTestFTBam, serverTestFTTemp},
 								},
 							}},
 							{"?groups=" + groups[0] + "&users=root&types=cram,bam", []*DirSummary{
 								{
-									Dir: "/a/b/d/g", Count: 8, Size: 80, Atime: time.Unix(50, 0),
+									Dir: serverTestDirABDG, Count: 8, Size: 80, Atime: time.Unix(50, 0),
 									Mtime: time.Unix(75, 0), Users: expectedRoot,
 									Groups: expectedGroupsA, FileTypes: expectedCrams,
 								},
@@ -1344,12 +1368,12 @@ func TestServer(t *testing.T) {
 							}},
 							{"?dir=/a/b/e/h", []*DirSummary{
 								{
-									Dir: "/a/b/e/h", Count: 2, Size: 10, Atime: time.Unix(80, 0),
+									Dir: serverTestDirABEH, Count: 2, Size: 10, Atime: time.Unix(80, 0),
 									Mtime: time.Unix(80, 0), Users: expectedUser,
 									Groups: expectedGroupsA, FileTypes: expectedBams,
 								},
 								{
-									Dir: "/a/b/e/h/tmp", Count: 1, Size: 5, Atime: time.Unix(80, 0),
+									Dir: serverTestDirABEHTmp, Count: 1, Size: 5, Atime: time.Unix(80, 0),
 									Mtime: time.Unix(80, 0), Users: expectedUser,
 									Groups: expectedGroupsA, FileTypes: expectedBams,
 								},
@@ -1416,7 +1440,7 @@ func TestServer(t *testing.T) {
 
 				Convey("You can get basedir results", func() {
 					s.basedirs.SetMountPoints([]string{
-						"/a/",
+						serverTestMountA,
 						"/k/",
 					})
 
@@ -1621,12 +1645,12 @@ func TestServer(t *testing.T) {
 
 			tmp := t.TempDir()
 
-			first := filepath.Join(tmp, "111_keyA")
+			first := filepath.Join(tmp, "111_"+serverTestMountKeyA)
 			err = CreateExampleDBsCustomIDsWithDir(t, first, uid, gids[0], gids[1], refTime)
 			So(err, ShouldBeNil)
 
 			p, err := BuildTestProviderWithMountTimestamps(t, []string{first}, ownersPath, map[string]time.Time{
-				"keyA": time.Unix(refTime, 0),
+				serverTestMountKeyA: time.Unix(refTime, 0),
 			})
 			So(err, ShouldBeNil)
 
@@ -1638,7 +1662,7 @@ func TestServer(t *testing.T) {
 
 			dirguta := s.tree
 			basedirs := s.basedirs
-			lastMod := s.dataTimeStamp["keyA"]
+			lastMod := s.dataTimeStamp[serverTestMountKeyA]
 
 			So(len(s.dataTimeStamp), ShouldEqual, 1)
 
@@ -1654,8 +1678,8 @@ func TestServer(t *testing.T) {
 			So(initialUserCache, ShouldNotBeNil)
 
 			p2, err := BuildTestProviderWithMountTimestamps(t, []string{first, second}, ownersPath, map[string]time.Time{
-				"keyA": time.Unix(refTime, 0),
-				"keyB": time.Unix(refTime+10, 0),
+				serverTestMountKeyA: time.Unix(refTime, 0),
+				"keyB":              time.Unix(refTime+10, 0),
 			})
 			So(err, ShouldBeNil)
 
@@ -1700,12 +1724,12 @@ func TestServer(t *testing.T) {
 
 			tmp := t.TempDir()
 
-			first := filepath.Join(tmp, "111_keyA")
+			first := filepath.Join(tmp, "111_"+serverTestMountKeyA)
 			err = CreateExampleDBsCustomIDsWithDir(t, first, uid, gids[0], gids[1], refTime)
 			So(err, ShouldBeNil)
 
 			p, err := BuildTestProviderWithMountTimestamps(t, []string{first}, ownersPath, map[string]time.Time{
-				"keyA": time.Unix(refTime, 0),
+				serverTestMountKeyA: time.Unix(refTime, 0),
 			})
 			So(err, ShouldBeNil)
 
@@ -1720,7 +1744,7 @@ func TestServer(t *testing.T) {
 			So(response.Code, ShouldEqual, http.StatusOK)
 
 			s.mu.RLock()
-			lastMod := s.dataTimeStamp["keyA"]
+			lastMod := s.dataTimeStamp[serverTestMountKeyA]
 			s.mu.RUnlock()
 
 			second := filepath.Join(tmp, "112_keyA")
@@ -1728,7 +1752,7 @@ func TestServer(t *testing.T) {
 			So(err, ShouldBeNil)
 
 			p2, err := BuildTestProviderWithMountTimestamps(t, []string{second}, ownersPath, map[string]time.Time{
-				"keyA": time.Unix(refTime+10, 0),
+				serverTestMountKeyA: time.Unix(refTime+10, 0),
 			})
 			So(err, ShouldBeNil)
 
@@ -1760,7 +1784,7 @@ func TestServer(t *testing.T) {
 					t.Fatal("timeout waiting for provider update with sanitised caches")
 				case <-ticker.C:
 					s.mu.RLock()
-					ts, ok := s.dataTimeStamp["keyA"]
+					ts, ok := s.dataTimeStamp[serverTestMountKeyA]
 					s.mu.RUnlock()
 
 					if ok && ts > lastMod {
@@ -1848,12 +1872,12 @@ func TestServer(t *testing.T) {
 
 			tmp := t.TempDir()
 
-			first := filepath.Join(tmp, "111_keyA")
+			first := filepath.Join(tmp, "111_"+serverTestMountKeyA)
 			err = CreateExampleDBsCustomIDsWithDir(t, first, uid, gids[0], gids[1], refTime)
 			So(err, ShouldBeNil)
 
 			p, err := BuildTestProviderWithMountTimestamps(t, []string{first}, ownersPath, map[string]time.Time{
-				"keyA": time.Unix(refTime, 0),
+				serverTestMountKeyA: time.Unix(refTime, 0),
 			})
 			So(err, ShouldBeNil)
 
@@ -1866,7 +1890,7 @@ func TestServer(t *testing.T) {
 			s.mu.RLock()
 			oldTree := s.tree
 			oldBD := s.basedirs
-			oldTS := s.dataTimeStamp["keyA"]
+			oldTS := s.dataTimeStamp[serverTestMountKeyA]
 			s.mu.RUnlock()
 
 			second := filepath.Join(tmp, "112_keyA")
@@ -1874,7 +1898,7 @@ func TestServer(t *testing.T) {
 			So(err, ShouldBeNil)
 
 			p2, err := BuildTestProviderWithMountTimestamps(t, []string{second}, ownersPath, map[string]time.Time{
-				"keyA": time.Unix(refTime+10, 0),
+				serverTestMountKeyA: time.Unix(refTime+10, 0),
 			})
 			So(err, ShouldBeNil)
 
@@ -1891,7 +1915,7 @@ func TestServer(t *testing.T) {
 					t.Fatal("timeout waiting for incremental reload")
 				case <-time.After(10 * time.Millisecond):
 					s.mu.RLock()
-					ts, ok := s.dataTimeStamp["keyA"]
+					ts, ok := s.dataTimeStamp[serverTestMountKeyA]
 					s.mu.RUnlock()
 
 					if ok && ts > oldTS {
@@ -1903,10 +1927,10 @@ func TestServer(t *testing.T) {
 			s.mu.RLock()
 			newTree := s.tree
 			newBD := s.basedirs
-			newTS := s.dataTimeStamp["keyA"]
+			newTS := s.dataTimeStamp[serverTestMountKeyA]
 			s.mu.RUnlock()
 
-			So(s.dataTimeStamp["keyA"], ShouldEqual, newTS)
+			So(s.dataTimeStamp[serverTestMountKeyA], ShouldEqual, newTS)
 			So(newTS, ShouldBeGreaterThan, oldTS)
 
 			So(newTree == oldTree, ShouldBeFalse)
@@ -2063,7 +2087,7 @@ func testRestrictedGroups(t *testing.T, gids []string, s *Server, exampleGIDs []
 	s.AuthRouter().GET("/groups", func(c *gin.Context) {
 		filterGIDs = nil
 
-		groups := c.Query("groups")
+		groups := c.Query(queryParamGroups)
 
 		filterGIDs, errg = s.getRestrictedGIDs(c, groups)
 	})
@@ -2195,7 +2219,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 			setErr := s.SetProvider(p)
 			So(setErr, ShouldBeNil)
 
-			err = c.Login("user", "pass")
+			err = c.Login(serverTestLoginUser, serverTestLoginPass)
 			So(err, ShouldBeNil)
 
 			_, _, err = GetWhereDataIs(c, " ", "", "", "", db.DGUTAgeAll, "")
@@ -2214,7 +2238,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 			So(len(dcss), ShouldEqual, 1)
 			So(dcss[0].Count, ShouldEqual, 13)
 
-			json, dcss, errg = GetWhereDataIs(c, "/", "", "root", "", db.DGUTAgeAll, "0")
+			json, dcss, errg = GetWhereDataIs(c, "/", "", serverTestRootUser, "", db.DGUTAgeAll, "0")
 			So(errg, ShouldBeNil)
 			So(string(json), ShouldNotBeBlank)
 			So(len(dcss), ShouldEqual, 1)
@@ -2239,7 +2263,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 			setErr := s.SetProvider(p)
 			So(setErr, ShouldBeNil)
 
-			err = c.Login("user", "pass")
+			err = c.Login(serverTestLoginUser, serverTestLoginPass)
 			So(err, ShouldBeNil)
 
 			json, dcss, errg := GetWhereDataIs(c, "/", "", "", "", db.DGUTAgeAll, "0")
@@ -2254,7 +2278,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 			So(len(dcss), ShouldEqual, 1)
 			So(dcss[0].Count, ShouldEqual, 13)
 
-			_, _, errg = GetWhereDataIs(c, "/", "", "root", "", db.DGUTAgeAll, "0")
+			_, _, errg = GetWhereDataIs(c, "/", "", serverTestRootUser, "", db.DGUTAgeAll, "0")
 			So(errg, ShouldBeNil)
 			So(string(json), ShouldNotBeBlank)
 			So(len(dcss), ShouldEqual, 1)
@@ -2307,7 +2331,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 				So(errd, ShouldBeNil)
 			}()
 
-			token, err := gas.Login(gas.NewClientRequest(addr, cert), "user", "pass")
+			token, err := gas.Login(gas.NewClientRequest(addr, cert), serverTestLoginUser, serverTestLoginPass)
 			So(err, ShouldBeNil)
 
 			Convey("You can get the static tree web page", func() {
@@ -2349,13 +2373,19 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 
 				var start, end int64
 
-				sessionID := "AAA"
+				sessionID := serverTestAnalyticsSession
 				sendBeacon := func(referers ...string) {
 					start = time.Now().Unix()
 
 					for _, referer := range referers {
 						r := gas.NewClientRequest(addr, cert)
-						r.Cookies = append(r.Cookies, &http.Cookie{Name: "jwt", Value: token})
+						r.Cookies = append(r.Cookies, &http.Cookie{
+							Name:     "jwt",
+							Value:    token,
+							Secure:   true,
+							HttpOnly: true,
+							SameSite: http.SameSiteStrictMode,
+						})
 						r.Body = sessionID
 
 						r.Header.Set("Referer", referer)
@@ -2382,7 +2412,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 				checkTimes(d)
 
 				So(d, ShouldResemble, []analyticsData{
-					{Name: "user", Session: "AAA", Data: "{}\n"},
+					{Name: serverTestLoginUser, Session: serverTestAnalyticsSession, Data: "{}\n"},
 				})
 
 				sendBeacon(`?useCount=true&owners=["a","bc"]`, `?filterMaxSize=123&users=[1,2,3]&byUser="badString"`)
@@ -2392,8 +2422,16 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 				checkTimes(d)
 
 				So(d, ShouldResemble, []analyticsData{
-					{Name: "user", Session: "AAA", Data: "{\"owners\":[\"a\",\"bc\"],\"useCount\":true}\n"},
-					{Name: "user", Session: "AAA", Data: "{\"filterMaxSize\":123,\"users\":[1,2,3]}\n"},
+					{
+						Name:    serverTestLoginUser,
+						Session: serverTestAnalyticsSession,
+						Data:    "{\"owners\":[\"a\",\"bc\"],\"useCount\":true}\n",
+					},
+					{
+						Name:    serverTestLoginUser,
+						Session: serverTestAnalyticsSession,
+						Data:    "{\"filterMaxSize\":123,\"users\":[1,2,3]}\n",
+					},
 				})
 			})
 
@@ -2406,7 +2444,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 				So(errTree, ShouldBeNil)
 				So(resp.Result(), ShouldNotBeNil)
 
-				users := []string{"root", username}
+				users := []string{serverTestRootUser, username}
 				sort.Strings(users)
 
 				unsortedGroups := gidsToGroups(t, gids[0], gids[1], "0")
@@ -2414,8 +2452,8 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 				copy(groups, unsortedGroups)
 				sort.Strings(groups)
 
-				expectedFTs := []string{"bam", "cram", "dir", "temp"}
-				expectedAtime := "1970-01-01T00:00:50Z"
+				expectedFTs := []string{serverTestFTBam, serverTestFTCram, serverTestFTDir, serverTestFTTemp}
+				expectedAtime := serverTestAtime50UTC
 				expectedMtime := "1970-01-01T00:01:30Z"
 
 				const numRootDirectories = 13
@@ -2469,7 +2507,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 							CommonMTime: summary.RangeLess1Month,
 							Users:       []string{username},
 							Groups:      []string{unsortedGroups[1]},
-							FileTypes:   []string{"cram", "dir"},
+							FileTypes:   []string{serverTestFTCram, serverTestFTDir},
 							HasChildren: false,
 							Children:    nil,
 						},
@@ -2480,8 +2518,8 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 				resp, err = r.SetResult(&TreeElement{}).
 					ForceContentType("application/json").
 					SetQueryParams(map[string]string{
-						"path":   "/",
-						"groups": g.Name,
+						queryParamPath:   "/",
+						queryParamGroups: g.Name,
 					}).
 					Get(EndPointAuthTree)
 
@@ -2527,7 +2565,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 				resp, err = r.SetResult(&TreeElement{}).
 					ForceContentType("application/json").
 					SetQueryParams(map[string]string{
-						"path": "/a",
+						queryParamPath: serverTestDirA,
 					}).
 					Get(EndPointAuthTree)
 
@@ -2538,7 +2576,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 				sort.Strings(abgroups)
 
 				acgroups := gidsToGroups(t, gids[1])
-				cramAndDir := []string{"cram", "dir"}
+				cramAndDir := []string{serverTestFTCram, serverTestFTDir}
 
 				tm = *resp.Result().(*TreeElement) //nolint:forcetypeassert,errcheck
 				So(tm, ShouldResemble, TreeElement{
@@ -2557,7 +2595,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 					Children: []*TreeElement{
 						{
 							Name:        "b",
-							Path:        "/a/b",
+							Path:        serverTestDirAB,
 							Count:       19 - 5 + numADirectories - 3,
 							Size:        126 - 5 + (numADirectories-3)*directorySize,
 							Atime:       expectedAtime,
@@ -2579,7 +2617,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 							CommonATime: summary.Range7Years,
 							Mtime:       expectedMtime,
 							CommonMTime: summary.Range7Years,
-							Users:       []string{"root"},
+							Users:       []string{serverTestRootUser},
 							Groups:      acgroups,
 							FileTypes:   cramAndDir,
 							HasChildren: true,
@@ -2592,7 +2630,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 				resp, err = r.SetResult(&TreeElement{}).
 					ForceContentType("application/json").
 					SetQueryParams(map[string]string{
-						"path": "/a/b/d",
+						queryParamPath: serverTestDirABD,
 					}).
 					Get(EndPointAuthTree)
 
@@ -2602,12 +2640,12 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 				dgroups := gidsToGroups(t, gids[0], "0")
 				sort.Strings(dgroups)
 
-				root := []string{"root"}
+				root := []string{serverTestRootUser}
 
 				tm = *resp.Result().(*TreeElement) //nolint:forcetypeassert,errcheck
 				So(tm, ShouldResemble, TreeElement{
 					Name:        "d",
-					Path:        "/a/b/d",
+					Path:        serverTestDirABD,
 					Count:       12 + 5,
 					Size:        111 + 5*directorySize,
 					Atime:       expectedAtime,
@@ -2627,7 +2665,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 							Size:        10 + directorySize,
 							Atime:       expectedAtime,
 							CommonATime: summary.RangeLess1Month,
-							Mtime:       "1970-01-01T00:00:50Z",
+							Mtime:       serverTestAtime50UTC,
 							CommonMTime: summary.Range7Years,
 							Users:       []string{username},
 							Groups:      []string{g.Name},
@@ -2638,10 +2676,10 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 						},
 						{
 							Name:        "g",
-							Path:        "/a/b/d/g",
+							Path:        serverTestDirABDG,
 							Count:       11,
 							Size:        100 + directorySize,
-							Atime:       "1970-01-01T00:00:50Z",
+							Atime:       serverTestAtime50UTC,
 							CommonATime: summary.Range7Years,
 							Mtime:       "1970-01-01T00:01:15Z",
 							CommonMTime: summary.Range7Years,
@@ -2654,12 +2692,12 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 						},
 						{
 							Name:        "i",
-							Path:        "/a/b/d/i",
+							Path:        serverTestDirABDI,
 							Count:       3,
 							Size:        1 + 2*directorySize,
 							Atime:       expectedAtime,
 							CommonATime: summary.RangeLess1Month,
-							Mtime:       "1970-01-01T00:00:50Z",
+							Mtime:       serverTestAtime50UTC,
 							CommonMTime: summary.Range7Years,
 							Users:       root,
 							Groups:      root,
@@ -2675,7 +2713,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 				resp, err = r.SetResult(&TreeElement{}).
 					ForceContentType("application/json").
 					SetQueryParams(map[string]string{
-						"path": "/a/b/d/i",
+						queryParamPath: serverTestDirABDI,
 					}).
 					Get(EndPointAuthTree)
 
@@ -2685,12 +2723,12 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 				tm = *resp.Result().(*TreeElement) //nolint:forcetypeassert,errcheck
 				So(tm, ShouldResemble, TreeElement{
 					Name:        "i",
-					Path:        "/a/b/d/i",
+					Path:        serverTestDirABDI,
 					Count:       3,
 					Size:        1 + 2*directorySize,
 					Atime:       expectedAtime,
 					CommonATime: summary.RangeLess1Month,
-					Mtime:       "1970-01-01T00:00:50Z",
+					Mtime:       serverTestAtime50UTC,
 					CommonMTime: summary.Range7Years,
 					Users:       root,
 					Groups:      root,
@@ -2704,8 +2742,8 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 				resp, err = r.SetResult(&TreeElement{}).
 					ForceContentType("application/json").
 					SetQueryParams(map[string]string{
-						"path":   "/",
-						"groups": "adsf@£$",
+						queryParamPath:   "/",
+						queryParamGroups: "adsf@£$",
 					}).
 					Get(EndPointAuthTree)
 
@@ -2716,7 +2754,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 				resp, err = r.SetResult(&TreeElement{}).
 					ForceContentType("application/json").
 					SetQueryParams(map[string]string{
-						"path": "/foo",
+						queryParamPath: "/foo",
 					}).
 					Get(EndPointAuthTree)
 
@@ -2728,7 +2766,7 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 				c, err = gas.NewClientCLI(jwtBasename, serverTokenBasename, addr, cert, false)
 				So(err, ShouldBeNil)
 
-				err = c.Login("user", "pass")
+				err = c.Login(serverTestLoginUser, serverTestLoginPass)
 				So(err, ShouldBeNil)
 
 				_, err := GetGroupAreas(c)
@@ -2775,8 +2813,8 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 				resp, err = r.SetResult(&subdirs).
 					ForceContentType("application/json").
 					SetQueryParams(map[string]string{
-						"id":      strconv.FormatUint(uint64(usage[0].GID), 10),
-						"basedir": usage[0].BaseDir,
+						"id":                        strconv.FormatUint(uint64(usage[0].GID), 10),
+						serverTestQueryParamBasedir: usage[0].BaseDir,
 					}).
 					Get(EndPointAuthBasedirSubdirGroup)
 				So(err, ShouldBeNil)
@@ -2786,8 +2824,8 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 				resp, err = r.SetResult(&subdirs).
 					ForceContentType("application/json").
 					SetQueryParams(map[string]string{
-						"id":      strconv.FormatUint(uint64(userUsageUID), 10),
-						"basedir": userUsageBasedir,
+						"id":                        strconv.FormatUint(uint64(userUsageUID), 10),
+						serverTestQueryParamBasedir: userUsageBasedir,
 					}).
 					Get(EndPointAuthBasedirSubdirUser)
 				So(err, ShouldBeNil)
@@ -2799,8 +2837,8 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 				resp, err = r.SetResult(&history).
 					ForceContentType("application/json").
 					SetQueryParams(map[string]string{
-						"id":      strconv.FormatUint(uint64(usage[0].GID), 10),
-						"basedir": usage[0].BaseDir,
+						"id":                        strconv.FormatUint(uint64(usage[0].GID), 10),
+						serverTestQueryParamBasedir: usage[0].BaseDir,
 					}).
 					Get(EndPointAuthBasedirHistory)
 				So(err, ShouldBeNil)
@@ -2816,8 +2854,8 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 					resp, err = r.SetResult(&subdirs).
 						ForceContentType("application/json").
 						SetQueryParams(map[string]string{
-							"id":      strconv.FormatUint(uint64(usage[0].GID), 10),
-							"basedir": usage[0].BaseDir,
+							"id":                        strconv.FormatUint(uint64(usage[0].GID), 10),
+							serverTestQueryParamBasedir: usage[0].BaseDir,
 						}).
 						Get(EndPointAuthBasedirSubdirGroup)
 					So(err, ShouldBeNil)
@@ -2827,8 +2865,8 @@ func testClientsOnRealServer(t *testing.T, username, uid string, gids []string, 
 					resp, err = r.SetResult(&subdirs).
 						ForceContentType("application/json").
 						SetQueryParams(map[string]string{
-							"id":      strconv.FormatUint(uint64(userUsageUID), 10),
-							"basedir": userUsageBasedir,
+							"id":                        strconv.FormatUint(uint64(userUsageUID), 10),
+							serverTestQueryParamBasedir: userUsageBasedir,
 						}).
 						Get(EndPointAuthBasedirSubdirUser)
 					So(err, ShouldBeNil)
@@ -2884,7 +2922,7 @@ func adjustedExpectations(expected []*DirSummary, groupA, groupB string) ([]*Dir
 			}
 
 			expectedGroupsRoot = ds.Groups
-		case "/a/b", "/a/b/d":
+		case serverTestDirAB, serverTestDirABD:
 			expectedNonRoot[i] = &DirSummary{
 				Dir:       ds.Dir,
 				Count:     ds.Count - 1,
@@ -3608,30 +3646,6 @@ func seedA5RESTDirFilterAll(t *testing.T, conn ch.Conn, snapshotID string, mount
 				time.Now(),
 			), ShouldBeNil)
 		}
-	}
-
-	for _, child := range a5RESTProjectAllChildren() {
-		So(batch.Append(
-			a5RESTProjectMount,
-			snapshotID,
-			uint8(child.age),
-			child.gid,
-			child.uid,
-			uint16(child.ft),
-			a5RESTProjectCatalogDirID(child.dir),
-			a5RESTProjectCatalogSubtreeEnd(child.dir),
-			child.count,
-			child.size,
-			int64(100),
-			int64(200),
-			[]uint64{child.count, 0, 0, 0, 0, 0, 0, 0, 0},
-			[]uint64{0, child.count, 0, 0, 0, 0, 0, 0, 0},
-			uint64(0),
-			uint64(0),
-			uint8(0),
-			uint8(0),
-			time.Now(),
-		), ShouldBeNil)
 	}
 
 	So(batch.Send(), ShouldBeNil)

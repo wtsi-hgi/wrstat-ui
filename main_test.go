@@ -81,6 +81,8 @@ const (
 	perfOpTreeWhere                    = "tree_where"
 	perfOpTreeWhereColdCached          = "tree_where_cold_then_cached"
 	perfOpTreeWhereFresh               = "tree_where_fresh_provider"
+	perfOpD4CollapseDecision           = "d4_collapse_decision"
+	perfOpNavIndexAudit                = "nav_index_audit"
 	perfOpStartupCacheWarmingAudit     = "startup_cache_warming_audit"
 
 	testLustreMount        = "/lustre/"
@@ -919,17 +921,20 @@ func TestClickHousePerfQuery(t *testing.T) {
 		for _, op := range report.Operations {
 			opNames = append(opNames, op.Name)
 
-			hasChildDirRepeatOverride := op.Name == perfOpTreeDiskTreeNewDirs ||
-				op.Name == perfOpTreeDiskTreeVisibleChildDirs
-			if hasChildDirRepeatOverride {
+			switch op.Name {
+			case perfOpTreeDiskTreeNewDirs, perfOpTreeDiskTreeVisibleChildDirs:
 				So(len(op.DurationsMS), ShouldBeGreaterThan, 0)
 				So(len(op.DurationsMS), ShouldBeLessThanOrEqualTo, 2)
 
 				continue
-			}
-
-			if op.Name == perfOpStartupCacheWarmingAudit {
+			case perfOpStartupCacheWarmingAudit, perfOpNavIndexAudit:
 				So(len(op.DurationsMS), ShouldEqual, 1)
+
+				continue
+			case perfOpD4CollapseDecision:
+				So(op.DurationsMS, ShouldBeEmpty)
+				So(op.Inputs["measurement_citation"], ShouldNotBeBlank)
+				So(op.Inputs["measured_p95_ms"], ShouldBeGreaterThan, float64(0))
 
 				continue
 			}
@@ -938,6 +943,8 @@ func TestClickHousePerfQuery(t *testing.T) {
 		}
 
 		So(opNames, ShouldContain, perfOpStartupCacheWarmingAudit)
+		So(opNames, ShouldContain, perfOpNavIndexAudit)
+		So(opNames, ShouldContain, perfOpD4CollapseDecision)
 		So(opNames, ShouldContain, "mount_timestamps")
 		So(opNames, ShouldContain, perfOpTreeDirInfo)
 		So(opNames, ShouldContain, perfOpTreeDiskTreeEndpoint)
@@ -1216,8 +1223,10 @@ func TestWatchSummariseIntegration(t *testing.T) {
 			So(got.UTC(), ShouldEqual, fixture.updatedAt.UTC().Truncate(time.Second))
 		}
 
-		rootInfo, err := p.Tree().DirInfo("/", &db.Filter{Age: db.DGUTAgeAll})
+		rootInfo, err := p.Tree().DirInfo(fixtures[0].mountPath, &db.Filter{Age: db.DGUTAgeAll})
 		So(err, ShouldBeNil)
+		So(rootInfo, ShouldNotBeNil)
+		So(rootInfo.Current, ShouldNotBeNil)
 		So(rootInfo.Current.Count, ShouldBeGreaterThan, uint64(0))
 
 		client, err := clickhouse.NewClient(clickhouse.Config{
