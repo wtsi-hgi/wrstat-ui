@@ -117,16 +117,19 @@ type usageCache struct {
 type Server struct {
 	gas.Server
 
-	mu             sync.RWMutex
-	provider       provider.Provider
-	basedirs       basedirs.Reader
-	tree           *db.Tree
-	whiteCB        WhiteListCallback
+	mu       sync.RWMutex
+	provider provider.Provider
+	basedirs basedirs.Reader
+	tree     *db.Tree
+	whiteCB  WhiteListCallback
+
 	uidToNameCache map[uint32]string
 	gidToNameCache map[uint32]string
-	userToGIDs     map[string][]string
 	dataTimeStamp  map[string]int64
 	areas          map[string][]string
+
+	cacheMu    sync.RWMutex
+	userToGIDs map[string][]string
 
 	stopCh chan struct{}
 

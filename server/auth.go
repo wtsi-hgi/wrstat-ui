@@ -38,7 +38,11 @@ import (
 // As a special case, if one of the groups is white-listed per
 // WhiteListGroups(), returns a nil slice.
 func (s *Server) userGIDs(u *gas.User) ([]string, error) {
-	if gids, found := s.userToGIDs[u.Username]; found {
+	s.cacheMu.RLock()
+	gids, found := s.userToGIDs[u.Username]
+	s.cacheMu.RUnlock()
+
+	if found {
 		return gids, nil
 	}
 
@@ -51,7 +55,9 @@ func (s *Server) userGIDs(u *gas.User) ([]string, error) {
 		gids = nil
 	}
 
+	s.cacheMu.Lock()
 	s.userToGIDs[u.Username] = gids
+	s.cacheMu.Unlock()
 
 	return gids, nil
 }
