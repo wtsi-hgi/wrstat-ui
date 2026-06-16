@@ -27,12 +27,8 @@
 CREATE TABLE IF NOT EXISTS wrstat_files (
   mount_path LowCardinality(String) CODEC(LZ4),
   snapshot_id UUID,
-  parent_dir String CODEC(LZ4),
+  dir_id UInt32 CODEC(Delta, LZ4),
   name String CODEC(LZ4),
-  -- path is derived from (parent_dir, name) so we don't store it twice.
-  -- This keeps directory lookups fast (via ORDER BY) while avoiding
-  -- redundant storage at ~1.3B rows.
-  path String ALIAS concat(parent_dir, name),
   ext LowCardinality(String) CODEC(LZ4),
   entry_type UInt8,
   size UInt64 CODEC(Delta, LZ4),
@@ -47,5 +43,5 @@ CREATE TABLE IF NOT EXISTS wrstat_files (
   INDEX ext_idx ext TYPE set(256) GRANULARITY 1
 ) ENGINE = MergeTree
 PARTITION BY (mount_path, snapshot_id)
-ORDER BY (mount_path, snapshot_id, parent_dir, name)
+ORDER BY (mount_path, snapshot_id, dir_id, name)
 SETTINGS index_granularity = 8192, min_bytes_for_wide_part = 0;

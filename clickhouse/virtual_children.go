@@ -37,19 +37,20 @@ import (
 )
 
 const (
-	virtualChildrenReadyQuery = "SELECT 1 FROM wrstat_virtual_children_sets " +
+	virtualChildrenReadyQuery = "SELECT 1 FROM wrstat_active_virtual_sets " +
 		"WHERE active_set_id = ? LIMIT 1"
-	virtualChildrenQuery = "SELECT child FROM wrstat_virtual_children " +
-		"WHERE active_set_id = ? AND parent_dir = ? ORDER BY child"
-	insertVirtualChildQuery = "INSERT INTO wrstat_virtual_children " +
-		"(active_set_id, parent_dir, child, child_is_mount_root, mount_path, refreshed_at) " +
-		"VALUES (?, ?, ?, ?, ?, ?)"
-	insertVirtualChildrenSetQuery = "INSERT INTO wrstat_virtual_children_sets " +
-		"(active_set_id, active_mount_count, refreshed_at) VALUES (?, ?, ?)"
-	virtualChildrenSetIDsQuery = "SELECT DISTINCT active_set_id FROM wrstat_virtual_children_sets " +
+	virtualChildrenQuery = "SELECT child_virtual_id FROM wrstat_active_virtual_children " +
+		"WHERE active_set_id = ? AND parent_virtual_id = ? ORDER BY child_virtual_id"
+	insertVirtualChildQuery = "INSERT INTO wrstat_active_virtual_children " +
+		"(active_set_id, parent_virtual_id, child_virtual_id, mount_path, is_mount_root_box, child_count, refreshed_at) " +
+		"VALUES (?, ?, ?, ?, ?, ?, ?)"
+	insertVirtualChildrenSetQuery = "INSERT INTO wrstat_active_virtual_sets " +
+		"(active_set_id, schema3_version, mounts_sha256, active_mount_count, summary_rows, filter_rows, child_rows, " +
+		"manifest_sha256, ready, refreshed_at) VALUES (?, 0, ?, ?, 0, 0, 0, '', 1, ?)"
+	virtualChildrenSetIDsQuery = "SELECT DISTINCT active_set_id FROM wrstat_active_virtual_sets " +
 		"WHERE active_set_id != ?"
-	dropVirtualChildrenPartitionQuery     = "ALTER TABLE wrstat_virtual_children DROP PARTITION ?"
-	dropVirtualChildrenSetPartitionQuery  = "ALTER TABLE wrstat_virtual_children_sets DROP PARTITION ?"
+	dropVirtualChildrenPartitionQuery     = "ALTER TABLE wrstat_active_virtual_children DROP PARTITION ?"
+	dropVirtualChildrenSetPartitionQuery  = "ALTER TABLE wrstat_active_virtual_sets DROP PARTITION ?"
 	dropVirtualSummaryCachePartitionQuery = "ALTER TABLE wrstat_virtual_summary_cache DROP PARTITION ?"
 	dropVirtualSummarySetPartitionQuery   = "ALTER TABLE wrstat_virtual_summary_sets DROP PARTITION ?"
 )
@@ -144,10 +145,11 @@ func appendVirtualChildRows(
 	for _, row := range rows {
 		err := batch.Append(
 			activeSetID,
-			row.parentDir,
-			row.child,
-			boolToUInt8(row.childIsMountRoot),
+			virtualIDForDir(row.parentDir),
+			virtualIDForDir(row.child),
 			row.mountPath,
+			boolToUInt8(row.childIsMountRoot),
+			uint64(0),
 			refreshedAt,
 		)
 		if err != nil {
@@ -156,6 +158,10 @@ func appendVirtualChildRows(
 	}
 
 	return nil
+}
+
+func virtualIDForDir(dir string) uint32 {
+	return uint32(catalogPathHash(ensureTrailingSlash(dir))) //nolint:gosec // Virtual IDs intentionally use low hash bits.
 }
 
 func boolToUInt8(v bool) uint8 {
@@ -226,7 +232,14 @@ func insertVirtualChildrenSet(
 		return err
 	}
 
-	if err := conn.Exec(ctx, insertVirtualChildrenSetQuery, activeSetID, uint64(len(mounts)), refreshedAt); err != nil {
+	if err := conn.Exec(
+		ctx,
+		insertVirtualChildrenSetQuery,
+		activeSetID,
+		activeSetID,
+		uint64(len(mounts)),
+		refreshedAt,
+	); err != nil {
 		return fmt.Errorf("clickhouse: failed to insert virtual children set: %w", err)
 	}
 
@@ -345,19 +358,21 @@ func isUnknownTable(err error) bool {
 		strings.Contains(msg, "does not exist")
 }
 
-func virtualChildrenForMounts(parentDir string, children []string, mounts []activeMount) []string {
-	if len(children) == 0 || len(mounts) == 0 {
+func activeVirtualChildrenForIDs(parentDir string, childIDs []uint32, mounts []activeMount) []string {
+	if len(childIDs) == 0 || len(mounts) == 0 {
 		return nil
 	}
 
-	allowed := make(map[string]bool, len(mounts))
-	for _, child := range immediateChildrenForMounts(parentDir, mounts) {
-		allowed[child] = true
+	allowed := make(map[uint32]bool, len(childIDs))
+	for _, childID := range childIDs {
+		allowed[childID] = true
 	}
 
-	filtered := make([]string, 0, len(children))
-	for _, child := range children {
-		if allowed[child] {
+	candidates := immediateChildrenForMounts(parentDir, mounts)
+	filtered := make([]string, 0, len(candidates))
+
+	for _, child := range candidates {
+		if allowed[virtualIDForDir(child)] {
 			filtered = append(filtered, child)
 		}
 	}
@@ -367,6 +382,38 @@ func virtualChildrenForMounts(parentDir string, children []string, mounts []acti
 	}
 
 	return filtered
+}
+
+func queryActiveVirtualChildIDs(
+	ctx context.Context,
+	conn ch.Conn,
+	query string,
+	label string,
+	args ...any,
+) ([]uint32, error) {
+	rows, err := conn.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("clickhouse: failed to query %s: %w", label, err)
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	childIDs := make([]uint32, 0, childrenInitialCap)
+
+	for rows.Next() {
+		var childID uint32
+		if err := rows.Scan(&childID); err != nil {
+			return nil, fmt.Errorf("clickhouse: failed to scan %s: %w", label, err)
+		}
+
+		childIDs = append(childIDs, childID)
+	}
+
+	if err := rowsErr(rows); err != nil {
+		return nil, fmt.Errorf("clickhouse: %s iteration error: %w", label, err)
+	}
+
+	return childIDs, nil
 }
 
 func (d *clickHouseDatabase) virtualChildrenForAncestor(
@@ -392,12 +439,19 @@ func (d *clickHouseDatabase) virtualChildrenForAncestor(
 		return nil, false, readyErr
 	}
 
-	children, err := d.queryChildren(ctx, virtualChildrenQuery, "virtual children", activeSetID, parentDir)
+	childIDs, err := queryActiveVirtualChildIDs(
+		ctx,
+		d.conn,
+		virtualChildrenQuery,
+		"virtual children",
+		activeSetID,
+		virtualIDForDir(parentDir),
+	)
 	if err != nil {
 		return nil, false, err
 	}
 
-	return virtualChildrenForMounts(parentDir, children, mounts), true, nil
+	return activeVirtualChildrenForIDs(parentDir, childIDs, mounts), true, nil
 }
 
 func (d *clickHouseDatabase) currentVirtualChildrenActiveSet(

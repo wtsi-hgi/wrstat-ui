@@ -38,53 +38,57 @@ import (
 )
 
 const (
-	dirFilterAgeAllTableName = "wrstat_dir_filter_ageall"
-
 	insertDirFilterAgeAllQuery = "INSERT INTO wrstat_dir_filter_ageall " +
-		"(mount_path, snapshot_id, gid, uid, ft, dir, count, size, atime_min, mtime_max, " +
+		"(mount_path, snapshot_id, gid, uid, ft, dir_id, subtree_end, count, size, atime_min, mtime_max, " +
 		"atime_buckets, mtime_buckets, refreshed_at) " +
-		"VALUES (?, toUUID(?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+		"VALUES (?, toUUID(?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
 
-	dirFilterAgeAllWhereSummariesQuery = "SELECT dir, count() AS raw_rows, " +
-		"sum(count) AS total_count, " +
-		"sum(size) AS total_size, " +
-		"minIf(atime_min, atime_min != 0) AS atime_min, " +
-		"max(mtime_max) AS mtime_max, " +
-		"arrayReduce('sumForEach', groupArray(atime_buckets)) AS atime_buckets, " +
-		"arrayReduce('sumForEach', groupArray(mtime_buckets)) AS mtime_buckets, " +
-		"arraySort(groupUniqArray(uid)) AS uids, " +
-		"arraySort(groupUniqArray(gid)) AS gids, " +
-		"groupBitOr(ft) AS file_types " +
-		"FROM wrstat_dir_filter_ageall " +
-		"PREWHERE mount_path = ? AND snapshot_id = ? " +
-		"WHERE startsWith(dir, ?) AND %s " +
-		"GROUP BY dir"
+	dirFilterAgeAllWhereSummariesQuery = "SELECT c.full_path AS dir, count() AS raw_rows, " +
+		"sum(f.count) AS total_count, " +
+		"sum(f.size) AS total_size, " +
+		"minIf(f.atime_min, f.atime_min != 0) AS atime_min, " +
+		"max(f.mtime_max) AS mtime_max, " +
+		"arrayReduce('sumForEach', groupArray(f.atime_buckets)) AS atime_buckets, " +
+		"arrayReduce('sumForEach', groupArray(f.mtime_buckets)) AS mtime_buckets, " +
+		"arraySort(groupUniqArray(f.uid)) AS uids, " +
+		"arraySort(groupUniqArray(f.gid)) AS gids, " +
+		"groupBitOr(f.ft) AS file_types " +
+		"FROM wrstat_dir_filter_ageall f " +
+		"INNER JOIN wrstat_dirs c " +
+		"ON c.mount_path = f.mount_path AND c.snapshot_id = f.snapshot_id AND c.dir_id = f.dir_id " +
+		"WHERE f.mount_path = ? AND f.snapshot_id = ? AND startsWith(c.full_path, ?) AND %s " +
+		"GROUP BY c.full_path"
 
-	dirFilterAgeAllSummariesForDirsQuery = "SELECT dir, count() AS raw_rows, " +
-		"sum(count) AS total_count, " +
-		"sum(size) AS total_size, " +
-		"minIf(atime_min, atime_min != 0) AS atime_min, " +
-		"max(mtime_max) AS mtime_max, " +
-		"arrayReduce('sumForEach', groupArray(atime_buckets)) AS atime_buckets, " +
-		"arrayReduce('sumForEach', groupArray(mtime_buckets)) AS mtime_buckets, " +
-		"arraySort(groupUniqArray(uid)) AS uids, " +
-		"arraySort(groupUniqArray(gid)) AS gids, " +
-		"groupBitOr(ft) AS file_types " +
-		"FROM wrstat_dir_filter_ageall " +
-		"PREWHERE mount_path = ? AND snapshot_id = ? " +
-		"WHERE dir IN (%s) AND %s " +
-		"GROUP BY dir"
+	dirFilterAgeAllSummariesForDirsQuery = "SELECT c.full_path AS dir, count() AS raw_rows, " +
+		"sum(f.count) AS total_count, " +
+		"sum(f.size) AS total_size, " +
+		"minIf(f.atime_min, f.atime_min != 0) AS atime_min, " +
+		"max(f.mtime_max) AS mtime_max, " +
+		"arrayReduce('sumForEach', groupArray(f.atime_buckets)) AS atime_buckets, " +
+		"arrayReduce('sumForEach', groupArray(f.mtime_buckets)) AS mtime_buckets, " +
+		"arraySort(groupUniqArray(f.uid)) AS uids, " +
+		"arraySort(groupUniqArray(f.gid)) AS gids, " +
+		"groupBitOr(f.ft) AS file_types " +
+		"FROM wrstat_dir_filter_ageall f " +
+		"INNER JOIN wrstat_dirs c " +
+		"ON c.mount_path = f.mount_path AND c.snapshot_id = f.snapshot_id AND c.dir_id = f.dir_id " +
+		"WHERE f.mount_path = ? AND f.snapshot_id = ? AND c.full_path IN (%s) AND %s " +
+		"GROUP BY c.full_path"
 
-	dirsHaveMatchingChildrenAgeAllQuery = "SELECT c.parent_dir " +
-		"FROM wrstat_children c " +
+	dirsHaveMatchingChildrenAgeAllQuery = "SELECT parent.full_path " +
+		"FROM wrstat_dirs parent " +
+		"INNER JOIN wrstat_dirs child " +
+		"ON child.mount_path = parent.mount_path " +
+		"AND child.snapshot_id = parent.snapshot_id " +
+		"AND child.parent_id = parent.dir_id " +
 		"INNER JOIN wrstat_dir_filter_ageall f " +
-		"ON f.mount_path = c.mount_path " +
-		"AND f.snapshot_id = c.snapshot_id " +
-		"AND f.dir = if(endsWith(c.child, '/'), c.child, concat(c.child, '/')) " +
-		"WHERE c.mount_path = ? AND c.snapshot_id = ? " +
-		"AND c.parent_dir IN (%s) AND %s " +
-		"GROUP BY c.parent_dir " +
-		"ORDER BY c.parent_dir ASC"
+		"ON f.mount_path = child.mount_path " +
+		"AND f.snapshot_id = child.snapshot_id " +
+		"AND f.dir_id = child.dir_id " +
+		"WHERE parent.mount_path = ? AND parent.snapshot_id = ? " +
+		"AND parent.full_path IN (%s) AND %s " +
+		"GROUP BY parent.full_path " +
+		"ORDER BY parent.full_path ASC"
 
 	dirFilterAgeAllReadyQuery = "SELECT count() FROM wrstat_dir_filter_ageall " +
 		"WHERE mount_path = ? AND snapshot_id = ?"
@@ -122,9 +126,8 @@ func newDirFilterAgeAllWriter(conn ch.Conn, batchSize int, refreshedAt time.Time
 func (w *dirFilterAgeAllWriter) appendRecord(
 	ctx context.Context,
 	mount activeMount,
-	parentDir string,
+	record dgutaRecordContext,
 	gutas db.GUTAs,
-	_ []string,
 	_ uint64,
 	_ []db.DirGUTAge,
 ) error {
@@ -133,7 +136,7 @@ func (w *dirFilterAgeAllWriter) appendRecord(
 			continue
 		}
 
-		if err := w.appendRow(ctx, mount, parentDir, guta); err != nil {
+		if err := w.appendRow(ctx, mount, record, guta); err != nil {
 			return err
 		}
 	}
@@ -148,7 +151,7 @@ func dirFilterAgeAllWritableGUTA(guta *db.GUTA) bool {
 func (w *dirFilterAgeAllWriter) appendRow(
 	ctx context.Context,
 	mount activeMount,
-	parentDir string,
+	record dgutaRecordContext,
 	guta *db.GUTA,
 ) error {
 	return w.blockWriter().append(ctx, func(batch driver.Batch) error {
@@ -158,7 +161,8 @@ func (w *dirFilterAgeAllWriter) appendRow(
 			guta.GID,
 			guta.UID,
 			uint16(guta.FT),
-			parentDir,
+			record.dirID,
+			record.subtreeEnd,
 			guta.Count,
 			guta.Size,
 			guta.Atime,

@@ -52,10 +52,11 @@ const (
 		"WHERE age = ? %s AND dir IN (%s) GROUP BY dir"
 	activeVirtualExistingDirsQuery = "SELECT dir FROM wrstat_active_virtual_summaries " +
 		"PREWHERE active_set_id = ? WHERE dir IN (%s)"
-	activeVirtualChildrenQuery = "SELECT child_dir FROM wrstat_active_virtual_children " +
-		"PREWHERE active_set_id = ? WHERE parent_dir = ? ORDER BY child_dir"
-	activeVirtualChildrenForParentsQuery = "SELECT parent_dir, child_dir FROM wrstat_active_virtual_children " +
-		"PREWHERE active_set_id = ? WHERE parent_dir IN (%s) ORDER BY parent_dir, child_dir"
+	activeVirtualChildrenQuery = "SELECT child_virtual_id FROM wrstat_active_virtual_children " +
+		"PREWHERE active_set_id = ? WHERE parent_virtual_id = ? ORDER BY child_virtual_id"
+	activeVirtualChildrenForParentsQuery = "SELECT parent_virtual_id, child_virtual_id " +
+		"FROM wrstat_active_virtual_children PREWHERE active_set_id = ? " +
+		"WHERE parent_virtual_id IN (%s) ORDER BY parent_virtual_id, child_virtual_id"
 	activeVirtualChildCountQuery = "SELECT child_count FROM wrstat_active_virtual_summaries " +
 		"PREWHERE active_set_id = ? WHERE dir = ? LIMIT 1"
 	activeVirtualMountRootBoxQuery = "SELECT is_mount_root_box FROM wrstat_active_virtual_summaries " +
@@ -64,12 +65,16 @@ const (
 		"PREWHERE active_set_id = ? WHERE dir IN (%s)"
 	activeVirtualRootGUTAsQuery = "SELECT dir, " + dgutaTupleColumns + " FROM (" +
 		"SELECT d.mount_path AS dir, arrayJoin(" + dgutaPrefixedArrayZipExpr + ") AS g " +
-		"FROM wrstat_dir_facts d WHERE d.dir = d.mount_path AND %s)"
-	activeVirtualRootFilterRowsQuery = "SELECT mount_path, age, gid, uid, ft, count, size, " +
-		"atime_min, mtime_max, atime_buckets, mtime_buckets, filter_child_count, child_count " +
-		"FROM wrstat_dir_filter_all WHERE dir = mount_path AND %s ORDER BY mount_path, age, gid, uid, ft"
-	activeVirtualMountChildCountsQuery = "SELECT c.mount_path, count() FROM wrstat_children c " +
-		"WHERE c.parent_dir = c.mount_path AND %s GROUP BY c.mount_path"
+		"FROM wrstat_dir_facts d INNER JOIN wrstat_dirs c " +
+		"ON c.mount_path = d.mount_path AND c.snapshot_id = d.snapshot_id AND c.dir_id = d.dir_id " +
+		"WHERE c.full_path = d.mount_path AND %s)"
+	activeVirtualRootFilterRowsQuery = "SELECT f.mount_path, f.age, f.gid, f.uid, f.ft, f.count, f.size, " +
+		"f.atime_min, f.mtime_max, f.atime_buckets, f.mtime_buckets, f.filter_child_count, f.child_count " +
+		"FROM wrstat_dir_filter_all AS f INNER JOIN wrstat_dirs AS c " +
+		"ON c.mount_path = f.mount_path AND c.snapshot_id = f.snapshot_id AND c.dir_id = f.dir_id " +
+		"WHERE c.full_path = f.mount_path AND %s ORDER BY f.mount_path, f.age, f.gid, f.uid, f.ft"
+	activeVirtualMountChildCountsQuery = "SELECT d.mount_path, toUInt64(any(d.child_dir_count)) FROM wrstat_dirs d " +
+		"WHERE d.full_path = d.mount_path AND %s GROUP BY d.mount_path"
 )
 
 func queryActiveVirtualRootGUTAs(
@@ -96,8 +101,8 @@ func queryActiveVirtualRootFilterRows( //nolint:funlen
 ) (map[string][]activeVirtualFilterAllRow, error) {
 	query, args := activeMountsQuery(
 		activeVirtualRootFilterRowsQuery,
-		"mount_path",
-		"snapshot_id",
+		"f.mount_path",
+		"f.snapshot_id",
 		mounts,
 	)
 
@@ -149,8 +154,8 @@ func queryActiveVirtualMountChildCounts( //nolint:funlen
 ) (map[string]uint64, error) {
 	query, args := activeMountsQuery(
 		activeVirtualMountChildCountsQuery,
-		"c.mount_path",
-		"c.snapshot_id",
+		"d.mount_path",
+		"d.snapshot_id",
 		mounts,
 	)
 
@@ -344,6 +349,17 @@ func activeVirtualDirsQuery(query string, activeSetID string, dirs []string) (st
 	args = append(args, activeSetID)
 	for _, dir := range dirs {
 		args = append(args, ensureTrailingSlash(dir))
+	}
+
+	return query, args
+}
+
+func activeVirtualParentIDsQuery(query string, activeSetID string, dirs []string) (string, []any) {
+	args := make([]any, 0, len(dirs)+1)
+
+	args = append(args, activeSetID)
+	for _, dir := range dirs {
+		args = append(args, virtualIDForDir(dir))
 	}
 
 	return query, args
@@ -587,6 +603,45 @@ func scanActiveVirtualMountRootBoxes(rows rowsScanner) (map[string]bool, error) 
 	return out, rowIterationErr(rows, "clickhouse: active virtual mount-root boxes iteration error")
 }
 
+func scanActiveVirtualChildIDsByParent(rows rowsScanner) (map[uint32][]uint32, error) {
+	children := make(map[uint32][]uint32)
+
+	for rows.Next() {
+		var parentID, childID uint32
+		if err := rows.Scan(&parentID, &childID); err != nil {
+			return nil, fmt.Errorf("clickhouse: failed to scan active virtual child batch: %w", err)
+		}
+
+		children[parentID] = append(children[parentID], childID)
+	}
+
+	if err := rowsErr(rows); err != nil {
+		return nil, fmt.Errorf("clickhouse: active virtual child batch iteration error: %w", err)
+	}
+
+	return children, nil
+}
+
+func activeVirtualChildrenForParentIDs(
+	parentDirs []string,
+	childIDs map[uint32][]uint32,
+	mounts []activeMount,
+) map[string][]string {
+	children := make(map[string][]string, len(parentDirs))
+
+	for _, parentDir := range parentDirs {
+		key := ensureTrailingSlash(parentDir)
+		ids := childIDs[virtualIDForDir(key)]
+		paths := activeVirtualChildrenForIDs(key, ids, mounts)
+
+		if len(paths) > 0 {
+			children[key] = paths
+		}
+	}
+
+	return children
+}
+
 func (d *clickHouseDatabase) activeVirtualExactMountRootCandidatesAllowed(mounts []activeMount) bool {
 	return d.snapshot != nil || len(mounts) > 1
 }
@@ -594,23 +649,23 @@ func (d *clickHouseDatabase) activeVirtualExactMountRootCandidatesAllowed(mounts
 func (d *clickHouseDatabase) activeVirtualReadySetForDirs(
 	ctx context.Context,
 	dirs []string,
-) (string, []string, bool, error) {
+) (string, []activeMount, []string, bool, error) {
 	activeSetID, mounts, err := d.currentActiveMountsSet(ctx)
 	if err != nil || activeSetID == "" {
-		return "", nil, false, err
+		return "", nil, nil, false, err
 	}
 
 	candidates := activeVirtualCandidateDirs(dirs, mounts)
 	if len(candidates) == 0 {
-		return activeSetID, nil, false, nil
+		return activeSetID, mounts, nil, false, nil
 	}
 
 	ready, err := d.activeVirtualSetReadyCached(ctx, activeSetID)
 	if err != nil || !ready {
-		return activeSetID, candidates, false, err
+		return activeSetID, mounts, candidates, false, err
 	}
 
-	return activeSetID, candidates, true, nil
+	return activeSetID, mounts, candidates, true, nil
 }
 
 func (d *clickHouseDatabase) activeVirtualReadySetForDirInfos(
@@ -878,18 +933,26 @@ func (d *clickHouseDatabase) activeVirtualChildren(
 	ctx, cancel := configQueryContext(d.cfg)
 	defer cancel()
 
-	activeSetID, dirs, ready, err := d.activeVirtualReadySetForDirs(ctx, []string{parentDir})
+	activeSetID, mounts, dirs, ready, err := d.activeVirtualReadySetForDirs(ctx, []string{parentDir})
 	if err != nil || !ready {
 		return nil, false, err
 	}
 
 	parentDir = ensureTrailingSlash(dirs[0])
 
-	children, err := d.queryChildren(ctx, activeVirtualChildrenQuery, "active virtual children", activeSetID, parentDir)
+	childIDs, err := queryActiveVirtualChildIDs(
+		ctx,
+		d.conn,
+		activeVirtualChildrenQuery,
+		"active virtual children",
+		activeSetID,
+		virtualIDForDir(parentDir),
+	)
 	if err != nil {
 		return nil, false, err
 	}
 
+	children := activeVirtualChildrenForIDs(parentDir, childIDs, mounts)
 	if len(children) > 0 {
 		return children, true, nil
 	}
@@ -946,12 +1009,12 @@ func (d *clickHouseDatabase) activeVirtualChildrenForParents(
 	ctx, cancel := configQueryContext(d.cfg)
 	defer cancel()
 
-	activeSetID, dirs, ready, err := d.activeVirtualReadySetForDirs(ctx, dirs)
+	activeSetID, mounts, dirs, ready, err := d.activeVirtualReadySetForDirs(ctx, dirs)
 	if err != nil || !ready {
 		return map[string][]string{}, map[string]bool{}, err
 	}
 
-	query, args := activeVirtualDirsQuery(
+	query, args := activeVirtualParentIDsQuery(
 		fmt.Sprintf(activeVirtualChildrenForParentsQuery, placeholders(len(dirs))),
 		activeSetID,
 		dirs,
@@ -968,10 +1031,12 @@ func (d *clickHouseDatabase) activeVirtualChildrenForParents(
 
 	defer func() { _ = rows.Close() }()
 
-	children, err := scanChildrenRowsByParent(rows)
+	childIDs, err := scanActiveVirtualChildIDsByParent(rows)
 	if err != nil {
 		return nil, nil, err
 	}
+
+	children := activeVirtualChildrenForParentIDs(dirs, childIDs, mounts)
 
 	handled, err := d.activeVirtualExistingDirs(ctx, activeSetID, dirs)
 	if err != nil {
@@ -1052,7 +1117,7 @@ func (d *clickHouseDatabase) activeVirtualHasChildren(
 	ctx, cancel := configQueryContext(d.cfg)
 	defer cancel()
 
-	activeSetID, dirs, ready, err := d.activeVirtualReadySetForDirs(ctx, []string{dir})
+	activeSetID, _, dirs, ready, err := d.activeVirtualReadySetForDirs(ctx, []string{dir})
 	if err != nil || !ready {
 		return false, false, err
 	}

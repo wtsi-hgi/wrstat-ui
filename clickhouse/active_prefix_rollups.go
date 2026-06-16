@@ -42,14 +42,26 @@ const (
 	activePrefixMountReadinessPollInterval = 25 * time.Millisecond
 	activePrefixRollupReadyQuery           = "SELECT 1 FROM wrstat_active_prefix_rollup_sets " +
 		"WHERE active_set_id = ? LIMIT 1"
-	activePrefixDirFactsReadyQuery = "SELECT mount_path, toString(snapshot_id) FROM wrstat_dir_facts " +
-		"WHERE dir = ? AND %s GROUP BY mount_path, snapshot_id"
-	activePrefixRootFactsReadyQuery = "SELECT mount_path, toString(snapshot_id) FROM wrstat_dir_facts " +
-		"WHERE %s GROUP BY mount_path, snapshot_id"
-	activePrefixDirAgeAllReadyQuery = "SELECT mount_path, toString(snapshot_id) FROM wrstat_dir_filter_ageall " +
-		"WHERE dir = ? AND %s GROUP BY mount_path, snapshot_id"
-	activePrefixRootAgeAllReadyQuery = "SELECT mount_path, toString(snapshot_id) FROM wrstat_dir_filter_ageall " +
-		"WHERE %s GROUP BY mount_path, snapshot_id"
+	activePrefixDirFactsReadyQuery = "SELECT d.mount_path, toString(d.snapshot_id) " +
+		"FROM wrstat_dir_facts d " +
+		"INNER JOIN wrstat_dirs c " +
+		"ON c.mount_path = d.mount_path AND c.snapshot_id = d.snapshot_id AND c.dir_id = d.dir_id " +
+		"WHERE c.full_path = ? AND %s GROUP BY d.mount_path, d.snapshot_id"
+	activePrefixRootFactsReadyQuery = "SELECT d.mount_path, toString(d.snapshot_id) " +
+		"FROM wrstat_dir_facts d " +
+		"INNER JOIN wrstat_dirs c " +
+		"ON c.mount_path = d.mount_path AND c.snapshot_id = d.snapshot_id AND c.dir_id = d.dir_id " +
+		"WHERE %s GROUP BY d.mount_path, d.snapshot_id"
+	activePrefixDirAgeAllReadyQuery = "SELECT f.mount_path, toString(f.snapshot_id) " +
+		"FROM wrstat_dir_filter_ageall f " +
+		"INNER JOIN wrstat_dirs c " +
+		"ON c.mount_path = f.mount_path AND c.snapshot_id = f.snapshot_id AND c.dir_id = f.dir_id " +
+		"WHERE c.full_path = ? AND %s GROUP BY f.mount_path, f.snapshot_id"
+	activePrefixRootAgeAllReadyQuery = "SELECT f.mount_path, toString(f.snapshot_id) " +
+		"FROM wrstat_dir_filter_ageall f " +
+		"INNER JOIN wrstat_dirs c " +
+		"ON c.mount_path = f.mount_path AND c.snapshot_id = f.snapshot_id AND c.dir_id = f.dir_id " +
+		"WHERE %s GROUP BY f.mount_path, f.snapshot_id"
 	activePrefixScalarRollupReadQuery = "SELECT updated_at, toUInt8(0) AS age, all_count AS count, " +
 		"all_size AS size, all_atime_min AS atime_min, all_mtime_max AS mtime_max, " +
 		"all_atime_buckets AS atime_buckets, all_mtime_buckets AS mtime_buckets, " +
@@ -60,16 +72,22 @@ const (
 		"all_atime_buckets, all_mtime_buckets, all_uids, all_gids, all_ft, " +
 		"file_count, file_size, child_count, refreshed_at) " +
 		"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-	activePrefixAgeAllRowsQuery = "SELECT gid, uid, ft, sum(count), sum(size), " +
-		"minIf(atime_min, atime_min != 0), max(mtime_max), " +
-		"arrayReduce('sumForEach', groupArray(atime_buckets)), " +
-		"arrayReduce('sumForEach', groupArray(mtime_buckets)) " +
-		"FROM wrstat_dir_filter_ageall WHERE dir = ? AND %s GROUP BY gid, uid, ft ORDER BY gid, uid, ft"
-	activePrefixRootAgeAllRowsQuery = "SELECT gid, uid, ft, sum(count), sum(size), " +
-		"minIf(atime_min, atime_min != 0), max(mtime_max), " +
-		"arrayReduce('sumForEach', groupArray(atime_buckets)), " +
-		"arrayReduce('sumForEach', groupArray(mtime_buckets)) " +
-		"FROM wrstat_dir_filter_ageall WHERE %s GROUP BY gid, uid, ft ORDER BY gid, uid, ft"
+	activePrefixAgeAllRowsQuery = "SELECT f.gid, f.uid, f.ft, sum(f.count), sum(f.size), " +
+		"minIf(f.atime_min, f.atime_min != 0), max(f.mtime_max), " +
+		"arrayReduce('sumForEach', groupArray(f.atime_buckets)), " +
+		"arrayReduce('sumForEach', groupArray(f.mtime_buckets)) " +
+		"FROM wrstat_dir_filter_ageall f " +
+		"INNER JOIN wrstat_dirs c " +
+		"ON c.mount_path = f.mount_path AND c.snapshot_id = f.snapshot_id AND c.dir_id = f.dir_id " +
+		"WHERE c.full_path = ? AND %s GROUP BY f.gid, f.uid, f.ft ORDER BY f.gid, f.uid, f.ft"
+	activePrefixRootAgeAllRowsQuery = "SELECT f.gid, f.uid, f.ft, sum(f.count), sum(f.size), " +
+		"minIf(f.atime_min, f.atime_min != 0), max(f.mtime_max), " +
+		"arrayReduce('sumForEach', groupArray(f.atime_buckets)), " +
+		"arrayReduce('sumForEach', groupArray(f.mtime_buckets)) " +
+		"FROM wrstat_dir_filter_ageall f " +
+		"INNER JOIN wrstat_dirs c " +
+		"ON c.mount_path = f.mount_path AND c.snapshot_id = f.snapshot_id AND c.dir_id = f.dir_id " +
+		"WHERE %s GROUP BY f.gid, f.uid, f.ft ORDER BY f.gid, f.uid, f.ft"
 	activePrefixAgeAllSummaryReadQuery = "SELECT dir, count() AS raw_rows, " +
 		"sum(count) AS total_count, sum(size) AS total_size, " +
 		"minIf(atime_min, atime_min != 0) AS atime_min, max(mtime_max) AS mtime_max, " +
@@ -91,14 +109,6 @@ const (
 )
 
 var activePrefixRollupMissCounter atomic.Uint64 //nolint:gochecknoglobals
-
-func activePrefixRollupMisses() uint64 {
-	return activePrefixRollupMissCounter.Load()
-}
-
-func resetActivePrefixRollupMissesForTest() {
-	activePrefixRollupMissCounter.Store(0)
-}
 
 type activePrefixAgeAllRow struct {
 	gid          uint32
@@ -153,8 +163,8 @@ func queryReadyActivePrefixAgeAllRows(
 ) (map[treeMountCacheKey]bool, error) {
 	query, args := activeMountsQuery(
 		activePrefixDirAgeAllReadyQuery,
-		"mount_path",
-		"snapshot_id",
+		"f.mount_path",
+		"f.snapshot_id",
 		mounts,
 		dir,
 	)
@@ -191,8 +201,8 @@ func activePrefixAgeAllRowsForDir(
 ) ([]activePrefixAgeAllRow, error) {
 	query, args := activeMountsQuery(
 		activePrefixAgeAllRowsQuery,
-		"mount_path",
-		"snapshot_id",
+		"f.mount_path",
+		"f.snapshot_id",
 		mounts,
 		dir,
 	)
@@ -213,9 +223,8 @@ func activePrefixRootAgeAllRows(
 	mounts []activeMount,
 ) ([]activePrefixAgeAllRow, error) {
 	condition, args := activeMountRootDirTuplesCondition(
-		"mount_path",
-		"snapshot_id",
-		"dir",
+		"f.mount_path",
+		"f.snapshot_id",
 		mounts,
 	)
 	query := fmt.Sprintf(activePrefixRootAgeAllRowsQuery, condition)
@@ -498,33 +507,6 @@ func dropActivePrefixRollupPartitions(ctx context.Context, conn ch.Conn, activeS
 	}
 
 	return nil
-}
-
-func activePrefixScalarRollupOrFallback(
-	ctx context.Context,
-	conn ch.Conn,
-	activeSetID, dir string,
-	fallback func() (*db.DirSummary, error),
-) (*db.DirSummary, error) {
-	ready, err := activePrefixRollupsReady(ctx, conn, activeSetID)
-	if err != nil {
-		return nil, err
-	}
-
-	if !ready {
-		return activePrefixRollupFallback(fallback)
-	}
-
-	sum, found, err := readActivePrefixScalarRollup(ctx, conn, activeSetID, dir)
-	if err != nil {
-		return nil, err
-	}
-
-	if !found {
-		return activePrefixRollupFallback(fallback)
-	}
-
-	return sum, nil
 }
 
 func activePrefixDirSummary(
@@ -834,8 +816,8 @@ func queryReadyActivePrefixDirFactRows(
 ) (map[treeMountCacheKey]bool, error) {
 	query, args := activeMountsQuery(
 		activePrefixDirFactsReadyQuery,
-		"mount_path",
-		"snapshot_id",
+		"d.mount_path",
+		"d.snapshot_id",
 		mounts,
 		dir,
 	)
@@ -856,9 +838,8 @@ func queryReadyActiveMountRootFactRows(
 	mounts []activeMount,
 ) (map[treeMountCacheKey]bool, error) {
 	condition, args := activeMountRootDirTuplesCondition(
-		"mount_path",
-		"snapshot_id",
-		"dir",
+		"d.mount_path",
+		"d.snapshot_id",
 		mounts,
 	)
 	query := fmt.Sprintf(activePrefixRootFactsReadyQuery, condition)
@@ -927,9 +908,8 @@ func queryReadyActiveMountRootAgeAllRows(
 	mounts []activeMount,
 ) (map[treeMountCacheKey]bool, error) {
 	condition, args := activeMountRootDirTuplesCondition(
-		"mount_path",
-		"snapshot_id",
-		"dir",
+		"f.mount_path",
+		"f.snapshot_id",
 		mounts,
 	)
 	query := fmt.Sprintf(activePrefixRootAgeAllReadyQuery, condition)

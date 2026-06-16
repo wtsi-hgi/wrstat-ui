@@ -37,8 +37,8 @@ counters. Update existing test file `internal/chspool/spool_test.go`.
 Implements H1 (no standalone acceptance list; verified jointly via
 H2's tests). Depends on Phase 1.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
 
 ### Item 2.2: H2 - writers and loader emit/load id rows
 
@@ -82,5 +82,5 @@ tests 1-4 (each `wrstat_files` row's `dir_id`, incl. the mount-root
 entry under `D-1`), since file ingest reads the allocator here. Depends
 on Item 2.1 and Phase 1 Item 1.6 (`DirIDAllocator`).
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed

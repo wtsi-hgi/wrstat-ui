@@ -125,7 +125,6 @@ func activeMountRootDirTuplesQuery(mounts []activeMount) (string, []any) {
 	condition, args := activeMountRootDirTuplesCondition(
 		"d.mount_path",
 		"d.snapshot_id",
-		"d.dir",
 		mounts,
 	)
 
@@ -133,7 +132,7 @@ func activeMountRootDirTuplesQuery(mounts []activeMount) (string, []any) {
 }
 
 func activeMountRootDirTuplesCondition(
-	mountColumn, snapshotColumn, dirColumn string,
+	mountColumn, snapshotColumn string,
 	mounts []activeMount,
 ) (string, []any) {
 	if len(mounts) == 0 {
@@ -146,7 +145,7 @@ func activeMountRootDirTuplesCondition(
 	b.WriteString(", ")
 	b.WriteString(snapshotColumn)
 	b.WriteString(", ")
-	b.WriteString(dirColumn)
+	b.WriteString("c.full_path")
 	b.WriteString(") IN (")
 
 	args := make([]any, 0, len(mounts)*activeMountDirArgs)

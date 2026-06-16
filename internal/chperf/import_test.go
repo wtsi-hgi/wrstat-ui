@@ -45,14 +45,15 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/internal/perfreport"
 	"github.com/wtsi-hgi/wrstat-ui/internal/statsdata"
 	internaltest "github.com/wtsi-hgi/wrstat-ui/internal/test"
+	"github.com/wtsi-hgi/wrstat-ui/stats"
 	"github.com/wtsi-hgi/wrstat-ui/summary"
 )
 
 const (
 	expectedPhasePartitionDropReset = "partition_drop_reset"
 	expectedPhaseDGUTAInsert        = "wrstat_dguta_insert"
-	expectedPhaseChildrenInsert     = "wrstat_children_insert"
-	expectedPhaseParentFactsInsert  = "wrstat_parent_facts_insert"
+	expectedPhaseCatalogInsert      = "wrstat_dirs_insert"
+	expectedPhaseDirFactsInsert     = "wrstat_dir_facts_insert"
 	expectedPhaseMountSwitch        = "mount_switch"
 	expectedPhaseOldSnapshotDrop    = "old_snapshot_partition_drop"
 
@@ -135,20 +136,6 @@ func TestLineCountingReader(t *testing.T) {
 	})
 }
 
-type fakeStreamingImportDGUTAWriter struct {
-	fakeImportDGUTAWriter
-	streamedChildren uint64
-}
-
-func (w *fakeStreamingImportDGUTAWriter) AddChildren(
-	_ *summary.DirectoryPath,
-	children []string,
-) error {
-	w.streamedChildren += uint64(len(children))
-
-	return nil
-}
-
 func TestDGUTARowCounting(t *testing.T) {
 	Convey("countDGUTARows ignores nil gutas", t, func() {
 		record := db.RecordDGUTA{GUTAs: db.GUTAs{nil, &db.GUTA{}, nil, &db.GUTA{}}}
@@ -180,29 +167,7 @@ func TestDGUTARowCounting(t *testing.T) {
 		So(countDGUTARows(sibling, strings.TrimSuffix(importTestMountScratch, "/")), ShouldEqual, 3)
 	})
 
-	Convey("countChildrenRows ignores blank child names", t, func() {
-		children := []string{"/a", "", "/b/", "/"}
-		So(countChildrenRows(children), ShouldEqual, 2)
-	})
-
-	Convey("tracked DGUTA writer counts streamed child rows", t, func() {
-		paths := internaltest.NewDirectoryPathCreator()
-		metrics := newDatasetImportMetrics("dataset", "/input/stats.gz", importTestMountScratch)
-		writer := &fakeStreamingImportDGUTAWriter{}
-		tracked := newTrackedDGUTAWriter(writer, metrics)
-		sink := tracked.directorySink()
-		childWriter, ok := sink.(db.DGUTAChildrenWriter)
-
-		So(ok, ShouldBeTrue)
-		So(childWriter.AddChildren(
-			paths.ToDirectoryPath(importTestMountScratch+"wide/"),
-			[]string{"child-a/", "", "child-b/"},
-		), ShouldBeNil)
-		So(writer.streamedChildren, ShouldEqual, uint64(3))
-		So(metrics.rows[tableChildren], ShouldEqual, uint64(2))
-	})
-
-	Convey("tracked DGUTA writer counts one parent-facts row per imported directory fact", t, func() {
+	Convey("tracked DGUTA writer counts one catalog and dir-facts row per imported directory", t, func() {
 		paths := internaltest.NewDirectoryPathCreator()
 		metrics := newDatasetImportMetrics("dataset", "/input/stats.gz", importTestMountScratch)
 		tracked := newTrackedDGUTAWriter(&fakeImportDGUTAWriter{}, metrics)
@@ -216,7 +181,8 @@ func TestDGUTARowCounting(t *testing.T) {
 			},
 		}), ShouldBeNil)
 
-		So(metrics.rows[tableParentFacts], ShouldEqual, uint64(1))
+		So(metrics.rows[tableChildren], ShouldEqual, uint64(1))
+		So(metrics.rows[tableDirFacts], ShouldEqual, uint64(1))
 	})
 }
 
@@ -263,8 +229,12 @@ func TestAddAllSummarisers(t *testing.T) {
 		updatedAt := time.Date(2026, 3, 9, 12, 34, 56, 0, time.UTC)
 		metrics := newDatasetImportMetrics("dataset", "/input/stats.gz", importTestMountScratch)
 
+		reader := statsdata.TestStats(1, 1, importTestMountScratch, updatedAt.Unix()).AsReader()
+		defer func() { So(reader.Close(), ShouldBeNil) }()
+
+		ss := summary.NewSummariser(stats.NewStatsParser(reader))
 		closer, err := addAllSummarisers(
-			summary.NewSummariser(nil),
+			ss,
 			api,
 			importTestMountScratch,
 			updatedAt,
@@ -280,12 +250,28 @@ func TestAddAllSummarisers(t *testing.T) {
 		So(api.dgutaWriter.mountPath, ShouldEqual, importTestMountScratch)
 		So(api.dgutaWriter.updatedAt, ShouldEqual, updatedAt)
 		So(api.baseDirsCalls, ShouldEqual, 0)
+		So(api.fileAllocator, ShouldNotBeNil)
+		So(ss.Summarise(), ShouldBeNil)
+		So(api.fileDirIDs, ShouldNotBeEmpty)
+		So(countZeroDirIDs(api.fileDirIDs), ShouldEqual, 0)
 
 		So(closer(true), ShouldBeNil)
 		So(api.fileCloser.closed, ShouldBeTrue)
 		So(api.dgutaWriter.closed, ShouldBeTrue)
 		So(api.dgutaWriter.aborted, ShouldBeFalse)
 	})
+}
+
+func countZeroDirIDs(dirIDs []uint32) int {
+	var count int
+
+	for _, dirID := range dirIDs {
+		if dirID == 0 {
+			count++
+		}
+	}
+
+	return count
 }
 
 type fakeImportCloser struct {
@@ -303,9 +289,31 @@ func (c *fakeImportCloser) Close() error {
 	return nil
 }
 
-type fakeImportOperation struct{}
+type fakeImportOperation struct {
+	allocator *summary.DirIDAllocator
+	dirIDs    *[]uint32
+}
 
-func (fakeImportOperation) Add(*summary.FileInfo) error { return nil }
+func (o fakeImportOperation) Add(info *summary.FileInfo) error {
+	if info.IsDir() || o.dirIDs == nil {
+		return nil
+	}
+
+	if o.allocator == nil {
+		*o.dirIDs = append(*o.dirIDs, 0)
+
+		return nil
+	}
+
+	dirID, err := o.allocator.DirID(info.Path)
+	if err != nil {
+		return err
+	}
+
+	*o.dirIDs = append(*o.dirIDs, dirID)
+
+	return nil
+}
 
 func (fakeImportOperation) Output() error { return nil }
 
@@ -487,6 +495,8 @@ type fakeImportAPI struct {
 	bucketStats      perfreport.FactsBucketStats
 	fileMountPath    string
 	fileUpdatedAt    time.Time
+	fileAllocator    *summary.DirIDAllocator
+	fileDirIDs       []uint32
 	baseDirsCalls    int
 }
 
@@ -501,15 +511,22 @@ func (a *fakeImportAPI) NewDGUTAWriter() (db.DGUTAWriter, error) {
 func (a *fakeImportAPI) NewFileIngestOperation(
 	mountPath string,
 	updatedAt time.Time,
+	alloc *summary.DirIDAllocator,
 ) (summary.OperationGenerator, io.Closer, error) {
 	a.fileMountPath = mountPath
 	a.fileUpdatedAt = updatedAt
+	a.fileAllocator = alloc
 
 	if a.fileCloser == nil {
 		a.fileCloser = &fakeImportCloser{}
 	}
 
-	return func() summary.Operation { return fakeImportOperation{} }, a.fileCloser, nil
+	return func() summary.Operation {
+		return fakeImportOperation{
+			allocator: a.fileAllocator,
+			dirIDs:    &a.fileDirIDs,
+		}
+	}, a.fileCloser, nil
 }
 
 func (a *fakeImportAPI) NewBaseDirsStore() (basedirs.Store, error) {
@@ -548,7 +565,7 @@ func TestImportReportEnrichment(t *testing.T) {
 				tableFiles:                42,
 				tableDGUTA:                3,
 				tableChildren:             2,
-				tableParentFacts:          3,
+				tableDirFacts:             3,
 				tableBasedirsGroupUsage:   1,
 				tableBasedirsUserUsage:    1,
 				tableBasedirsGroupSubdirs: 1,
@@ -559,7 +576,7 @@ func TestImportReportEnrichment(t *testing.T) {
 				phaseFilesInsert:         10 * time.Millisecond,
 				phaseDirProjectionWrite:  20 * time.Millisecond,
 				phaseChildrenInsert:      30 * time.Millisecond,
-				phaseParentFactsInsert:   50 * time.Millisecond,
+				phaseDirFactsInsert:      50 * time.Millisecond,
 				phaseBasedirsGroupUsage:  40 * time.Millisecond,
 				phaseActivePrefixRefresh: 60 * time.Millisecond,
 			},
@@ -589,12 +606,6 @@ func TestImportReportEnrichment(t *testing.T) {
 					ActiveParts:       1,
 					CompressedBytes:   70,
 					UncompressedBytes: 140,
-				},
-				tableParentFacts: {
-					Rows:              46_307,
-					ActiveParts:       1,
-					CompressedBytes:   1_840_000,
-					UncompressedBytes: 39_700_000,
 				},
 				tableTreeDGUTA: {
 					Rows:              6,
@@ -647,7 +658,7 @@ func TestImportReportEnrichment(t *testing.T) {
 		So(report.SelectedTables, ShouldContain, tableBasedirsUserSubdirs)
 		So(report.SelectedTables, ShouldContain, tableBasedirsHistory)
 		So(report.SelectedTables, ShouldContain, tableDirFilterAgeAll)
-		So(report.SelectedTables, ShouldContain, tableParentFacts)
+		So(report.SelectedTables, ShouldContain, tableDirFacts)
 		So(report.SelectedTables, ShouldContain, tableTreeDGUTA)
 		So(report.SelectedTables, ShouldContain, tableActivePrefixRollups)
 		So(report.SelectedTables, ShouldContain, tableActivePrefixFilterAgeAll)
@@ -668,16 +679,11 @@ func TestImportReportEnrichment(t *testing.T) {
 		dirFacts := report.TableStats[tableDirSummary]
 		So(dirFacts.Rows, ShouldEqual, uint64(3))
 		So(dirFacts.ImportPhaseDurationsMS[phaseDirProjectionWrite], ShouldEqual, float64(20))
+		So(dirFacts.ImportPhaseDurationsMS[phaseDirFactsInsert], ShouldEqual, float64(50))
 
-		children := report.TableStats[tableChildren]
-		So(children.Rows, ShouldEqual, uint64(2))
-		So(children.ImportPhaseDurationsMS[phaseChildrenInsert], ShouldEqual, float64(30))
-
-		parentFacts := report.TableStats[tableParentFacts]
-		So(parentFacts.Rows, ShouldEqual, uint64(46_307))
-		So(parentFacts.CompressedBytes, ShouldEqual, uint64(1_840_000))
-		So(parentFacts.UncompressedBytes, ShouldEqual, uint64(39_700_000))
-		So(parentFacts.ImportPhaseDurationsMS[phaseParentFactsInsert], ShouldEqual, float64(50))
+		catalog := report.TableStats[tableChildren]
+		So(catalog.Rows, ShouldEqual, uint64(2))
+		So(catalog.ImportPhaseDurationsMS[phaseChildrenInsert], ShouldEqual, float64(30))
 
 		basedirs := report.TableStats[tableBasedirsGroupUsage]
 		So(basedirs.Rows, ShouldEqual, uint64(1))
@@ -975,7 +981,7 @@ func TestImportReportOperations(t *testing.T) {
 				tableFiles:                42,
 				tableDGUTA:                7,
 				tableChildren:             5,
-				tableParentFacts:          7,
+				tableDirFacts:             7,
 				tableBasedirsGroupUsage:   3,
 				tableBasedirsUserUsage:    2,
 				tableBasedirsGroupSubdirs: 4,
@@ -985,8 +991,8 @@ func TestImportReportOperations(t *testing.T) {
 				phaseFilesInsert:                500 * time.Millisecond,
 				phaseFilesFlush:                 50 * time.Millisecond,
 				expectedPhaseDGUTAInsert:        200 * time.Millisecond,
-				expectedPhaseChildrenInsert:     100 * time.Millisecond,
-				expectedPhaseParentFactsInsert:  110 * time.Millisecond,
+				expectedPhaseCatalogInsert:      100 * time.Millisecond,
+				expectedPhaseDirFactsInsert:     110 * time.Millisecond,
 				phaseDirProjectionWrite:         90 * time.Millisecond,
 				expectedPhaseMountSwitch:        120 * time.Millisecond,
 				expectedPhaseOldSnapshotDrop:    80 * time.Millisecond,
@@ -1013,9 +1019,8 @@ func TestImportReportOperations(t *testing.T) {
 		So(ok, ShouldBeTrue)
 		So(rows, ShouldResemble, map[string]uint64{
 			tableFiles:                42,
-			tableDirSummary:           7,
+			tableDirSummary:           14,
 			tableChildren:             5,
-			tableParentFacts:          7,
 			tableBasedirsGroupUsage:   3,
 			tableBasedirsUserUsage:    2,
 			tableBasedirsGroupSubdirs: 4,
@@ -1029,7 +1034,6 @@ func TestImportReportOperations(t *testing.T) {
 		So(tables, ShouldResemble, []string{
 			tableDirSummary,
 			tableChildren,
-			tableParentFacts,
 			tableFiles,
 			tableDirSummarySets,
 			tableBasedirsGroupUsage,
@@ -1065,17 +1069,17 @@ func TestImportReportOperations(t *testing.T) {
 		So(dgutaInsert.Inputs["rows"], ShouldEqual, uint64(7))
 		So(dgutaInsert.DurationsMS, ShouldResemble, []float64{200})
 
-		childrenInsert := findImportOperation(report.Operations, "import_phase", expectedPhaseChildrenInsert)
-		So(childrenInsert, ShouldNotBeNil)
-		So(childrenInsert.Inputs["table"], ShouldEqual, tableChildren)
-		So(childrenInsert.Inputs["rows"], ShouldEqual, uint64(5))
-		So(childrenInsert.DurationsMS, ShouldResemble, []float64{100})
+		catalogInsert := findImportOperation(report.Operations, "import_phase", expectedPhaseCatalogInsert)
+		So(catalogInsert, ShouldNotBeNil)
+		So(catalogInsert.Inputs["table"], ShouldEqual, tableChildren)
+		So(catalogInsert.Inputs["rows"], ShouldEqual, uint64(5))
+		So(catalogInsert.DurationsMS, ShouldResemble, []float64{100})
 
-		parentFactsInsert := findImportOperation(report.Operations, "import_phase", expectedPhaseParentFactsInsert)
-		So(parentFactsInsert, ShouldNotBeNil)
-		So(parentFactsInsert.Inputs["table"], ShouldEqual, tableParentFacts)
-		So(parentFactsInsert.Inputs["rows"], ShouldEqual, uint64(7))
-		So(parentFactsInsert.DurationsMS, ShouldResemble, []float64{110})
+		dirFactsInsert := findImportOperation(report.Operations, "import_phase", expectedPhaseDirFactsInsert)
+		So(dirFactsInsert, ShouldNotBeNil)
+		So(dirFactsInsert.Inputs["table"], ShouldEqual, tableDirFacts)
+		So(dirFactsInsert.Inputs["rows"], ShouldEqual, uint64(7))
+		So(dirFactsInsert.DurationsMS, ShouldResemble, []float64{110})
 
 		mountSwitch := findImportOperation(report.Operations, "import_phase", expectedPhaseMountSwitch)
 		So(mountSwitch, ShouldNotBeNil)

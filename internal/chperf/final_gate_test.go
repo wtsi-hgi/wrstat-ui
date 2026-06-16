@@ -739,7 +739,7 @@ func TestE2ColdPerformanceGates(t *testing.T) {
 		finalGateE2ScenarioOp(evidence, finalGateTestE2ScenarioHighFanoutBroad, func(op perfreport.Operation) {
 			So(uint64Input(op.Inputs, "current_read_count"), ShouldEqual, uint64(1))
 			So(uint64Input(op.Inputs, "parent_packet_read_count"), ShouldEqual, uint64(1))
-			So(op.Inputs[finalGateTestE2ParentPacketTableInput], ShouldEqual, tableParentFacts)
+			So(op.Inputs[finalGateTestE2ParentPacketTableInput], ShouldEqual, tableDirFacts)
 			So(uint64Input(op.Inputs, "per_child_query_count"), ShouldEqual, uint64(0))
 			So(uint64Input(op.Inputs, "subtree_scan_count"), ShouldEqual, uint64(0))
 		})
@@ -767,7 +767,7 @@ func TestE2ColdPerformanceGates(t *testing.T) {
 		})
 
 		finalGateMutateE2Op(&evidence, finalGateTestE2ScenarioHighFanoutFilter, func(op *perfreport.Operation) {
-			op.Inputs[finalGateTestE2ParentPacketTableInput] = tableParentFacts
+			op.Inputs[finalGateTestE2ParentPacketTableInput] = tableDirFacts
 		})
 
 		result = ValidateFinalGates(evidence)
@@ -844,7 +844,7 @@ func TestE2ColdPerformanceGates(t *testing.T) {
 				name: finalGateE2ReadVolumeBytesName,
 				mutate: func(op *perfreport.Operation) {
 					op.Inputs[finalGateTestE2ReadBytesCeilingInput] = uint64(1_000_000)
-					op.ReadBytes = []uint64{800_000}
+					op.ReadBytes = []uint64{2_000_000}
 				},
 			},
 			{
@@ -869,7 +869,7 @@ func TestE2ColdPerformanceGates(t *testing.T) {
 
 	Convey("E2.6 read-volume gates require measured table stats", t, func() {
 		evidence := finalGateE2Evidence()
-		finalGateDeleteE2TableStats(&evidence, tableParentFacts)
+		finalGateSetE2QueryTableStats(&evidence, tableDirFacts, perfreport.TableStats{})
 
 		result := ValidateFinalGates(evidence)
 
@@ -878,8 +878,10 @@ func TestE2ColdPerformanceGates(t *testing.T) {
 		So(check.Detail, ShouldContainSubstring, "missing read-volume table stats")
 
 		evidence = finalGateE2Evidence()
-		finalGateMutateE2TableStats(&evidence, tableParentFacts, func(stats *perfreport.TableStats) {
-			stats.Rows = 0
+		finalGateSetE2QueryTableStats(&evidence, tableDirFacts, perfreport.TableStats{
+			ActiveParts:       1,
+			CompressedBytes:   10,
+			UncompressedBytes: 20,
 		})
 
 		result = ValidateFinalGates(evidence)
@@ -1921,11 +1923,11 @@ func TestE3FinalPerformanceGates(t *testing.T) {
 
 	Convey("E3.7 final gate fails when new table stats lack memory and amplification evidence", t, func() {
 		evidence := finalGateTestEvidence(false, false)
-		stats := evidence.ImportReports[0].TableStats[tableParentFacts]
+		stats := evidence.ImportReports[0].TableStats[tableDirFacts]
 		stats.ImportMemoryBytes = 0
 		stats.RowAmplificationVsDirFacts = 0
 		stats.RowAmplificationVsChildren = 0
-		evidence.ImportReports[0].TableStats[tableParentFacts] = stats
+		evidence.ImportReports[0].TableStats[tableDirFacts] = stats
 
 		result := ValidateFinalGates(evidence)
 
@@ -2015,6 +2017,20 @@ func finalGateTableStatsWithBaselines(
 	}
 }
 
+func finalGateSetE2QueryTableStats(
+	evidence *FinalGateEvidence,
+	table string,
+	stats perfreport.TableStats,
+) {
+	for reportIndex := range evidence.QueryReports {
+		if evidence.QueryReports[reportIndex].TableStats == nil {
+			evidence.QueryReports[reportIndex].TableStats = make(map[string]perfreport.TableStats)
+		}
+
+		evidence.QueryReports[reportIndex].TableStats[table] = stats
+	}
+}
+
 func finalGateDeleteE2TableStats(evidence *FinalGateEvidence, table string) {
 	for reportIndex := range evidence.ImportReports {
 		delete(evidence.ImportReports[reportIndex].TableStats, table)
@@ -2031,42 +2047,6 @@ func finalGateDeleteE2TableStats(evidence *FinalGateEvidence, table string) {
 	for reportIndex := range evidence.FinalGateReport.SpoolLoadReports {
 		delete(evidence.FinalGateReport.SpoolLoadReports[reportIndex].TableStats, table)
 	}
-}
-
-func finalGateMutateE2TableStats(
-	evidence *FinalGateEvidence,
-	table string,
-	mutate func(*perfreport.TableStats),
-) {
-	for reportIndex := range evidence.ImportReports {
-		finalGateMutateReportTableStats(&evidence.ImportReports[reportIndex], table, mutate)
-	}
-
-	for reportIndex := range evidence.QueryReports {
-		finalGateMutateReportTableStats(&evidence.QueryReports[reportIndex], table, mutate)
-	}
-
-	if evidence.FinalGateReport == nil {
-		return
-	}
-
-	for reportIndex := range evidence.FinalGateReport.SpoolLoadReports {
-		finalGateMutateReportTableStats(&evidence.FinalGateReport.SpoolLoadReports[reportIndex], table, mutate)
-	}
-}
-
-func finalGateMutateReportTableStats(
-	report *perfreport.Report,
-	table string,
-	mutate func(*perfreport.TableStats),
-) {
-	stats, ok := report.TableStats[table]
-	if !ok {
-		return
-	}
-
-	mutate(&stats)
-	report.TableStats[table] = stats
 }
 
 func finalGateAddImportFileTotals(report *perfreport.Report, rowCap uint64) {
@@ -2192,7 +2172,7 @@ func finalGateAddE2HighFanoutPacketOps(report *perfreport.Report) {
 		report,
 		finalGateRESTOpTree,
 		finalGateTestE2ScenarioHighFanoutBroad,
-		tableParentFacts,
+		tableDirFacts,
 		300,
 		true,
 		false,
@@ -2210,7 +2190,7 @@ func finalGateAddE2HighFanoutPacketOps(report *perfreport.Report) {
 		report,
 		queryOpDirInfosBroadName,
 		finalGateTestE2ScenarioDirInfosBroad,
-		tableParentFacts,
+		tableDirFacts,
 		420,
 		false,
 		false,
@@ -2228,7 +2208,7 @@ func finalGateAddE2HighFanoutPacketOps(report *perfreport.Report) {
 		report,
 		queryOpDirsHaveChildrenBroadName,
 		"dirshavechildren_broad_parent_packet",
-		tableParentFacts,
+		tableDirFacts,
 		390,
 		false,
 		false,
@@ -2449,7 +2429,6 @@ func finalGateImportReport(rowCap uint64, ageAllSelected, virtualCacheSelected b
 		tableFiles,
 		tableChildren,
 		tableDirSummary,
-		tableParentFacts,
 		tableDirSummarySets,
 		tableDirFilterAgeAll,
 		tableActivePrefixRollups,
@@ -2462,7 +2441,6 @@ func finalGateImportReport(rowCap uint64, ageAllSelected, virtualCacheSelected b
 		tableFiles:                          finalGateTableStatsWithBaselines(filesRows, dirFactsRows, childrenRows),
 		tableChildren:                       finalGateTableStatsWithBaselines(childrenRows, dirFactsRows, childrenRows),
 		tableDirSummary:                     finalGateTableStatsWithBaselines(dirFactsRows, dirFactsRows, childrenRows),
-		tableParentFacts:                    finalGateTableStatsWithBaselines(rowCap, dirFactsRows, childrenRows),
 		tableDirSummarySets:                 finalGateTableStatsWithBaselines(1, dirFactsRows, childrenRows),
 		tableDirFilterAgeAll:                finalGateTableStatsWithBaselines(rowCap/2, dirFactsRows, childrenRows),
 		tableActivePrefixRollups:            finalGateTableStatsWithBaselines(3, dirFactsRows, childrenRows),

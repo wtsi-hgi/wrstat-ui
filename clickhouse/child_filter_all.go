@@ -35,7 +35,7 @@ import (
 )
 
 const insertChildFilterAllQuery = "INSERT INTO wrstat_child_filter_all " +
-	"(mount_path, snapshot_id, parent_dir, age, gid, uid, ft, dir, count, size, " +
+	"(mount_path, snapshot_id, parent_id, age, gid, uid, ft, dir_id, count, size, " +
 	"atime_min, mtime_max, atime_buckets, mtime_buckets, filter_child_count, " +
 	"child_count, has_filter_children, has_children, refreshed_at) " +
 	"VALUES (?, toUUID(?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
@@ -65,12 +65,12 @@ func (w *childFilterAllWriter) appendRow(ctx context.Context, row filterAllRow) 
 		return batch.Append(
 			row.MountPath,
 			row.SnapshotID,
-			row.ParentDir,
+			row.ParentID,
 			uint8(row.Age),
 			row.GID,
 			row.UID,
 			uint16(row.FT),
-			row.Dir,
+			row.DirID,
 			row.Count,
 			row.Size,
 			row.AtimeMin,

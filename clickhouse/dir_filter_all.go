@@ -37,7 +37,7 @@ import (
 )
 
 const insertDirFilterAllQuery = "INSERT INTO wrstat_dir_filter_all " +
-	"(mount_path, snapshot_id, age, gid, uid, ft, dir, parent_dir, count, size, " +
+	"(mount_path, snapshot_id, age, gid, uid, ft, dir_id, subtree_end, count, size, " +
 	"atime_min, mtime_max, atime_buckets, mtime_buckets, filter_child_count, " +
 	"child_count, has_filter_children, has_children, refreshed_at) " +
 	"VALUES (?, toUUID(?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
@@ -47,8 +47,10 @@ var errDirFilterAllBatchNotPrepared = errors.New("clickhouse: dir full-filter ba
 type filterAllRow struct {
 	MountPath         string
 	SnapshotID        string
-	ParentDir         string
 	Dir               string
+	ParentID          uint32
+	DirID             uint32
+	SubtreeEnd        uint32
 	Age               db.DirGUTAge
 	GID               uint32
 	UID               uint32
@@ -68,7 +70,7 @@ type filterAllRow struct {
 
 func fullFilterRowForGUTA(
 	mount activeMount,
-	dir string,
+	record dgutaRecordContext,
 	guta *db.GUTA,
 	childCount uint64,
 	refreshedAt time.Time,
@@ -76,8 +78,10 @@ func fullFilterRowForGUTA(
 	return filterAllRow{
 		MountPath:    mount.mountPath,
 		SnapshotID:   mount.snapshotID,
-		ParentDir:    parentFactsParentDir(dir),
-		Dir:          dir,
+		Dir:          record.canonicalDir,
+		ParentID:     record.parentID,
+		DirID:        record.dirID,
+		SubtreeEnd:   record.subtreeEnd,
 		Age:          guta.Age,
 		GID:          guta.GID,
 		UID:          guta.UID,
@@ -148,8 +152,8 @@ func (w *dirFilterAllWriter) appendRow(ctx context.Context, row filterAllRow) er
 			row.GID,
 			row.UID,
 			uint16(row.FT),
-			row.Dir,
-			row.ParentDir,
+			row.DirID,
+			row.SubtreeEnd,
 			row.Count,
 			row.Size,
 			row.AtimeMin,
@@ -218,26 +222,25 @@ func newFullFilterAllWriter(conn ch.Conn, batchSize int, refreshedAt time.Time) 
 func (w *fullFilterAllWriter) appendRecord(
 	ctx context.Context,
 	mount activeMount,
-	dir string,
+	record dgutaRecordContext,
 	gutas db.GUTAs,
-	_ []string,
 	childCount uint64,
 	_ []db.DirGUTAge,
 ) error {
-	if err := w.flushCompleted(ctx, dir); err != nil {
+	if err := w.flushCompleted(ctx, record.canonicalDir); err != nil {
 		return err
 	}
 
 	tuples := fullFilterTupleKeys(gutas)
-	w.noteDirectChildTuples(parentFactsParentDir(dir), dir, tuples)
+	w.noteDirectChildTuples(parentDirForPath(record.canonicalDir), record.canonicalDir, tuples)
 
-	rows := fullFilterRowsForGUTAs(mount, dir, gutas, childCount, w.refreshedAt)
+	rows := fullFilterRowsForGUTAs(mount, record, gutas, childCount, w.refreshedAt)
 	if len(rows) == 0 {
 		return nil
 	}
 
 	w.pending = append(w.pending, fullFilterPendingDir{
-		dir:       ensureTrailingSlash(dir),
+		dir:       ensureTrailingSlash(record.canonicalDir),
 		rows:      rows,
 		seenChild: make(map[fullFilterChildTupleKey]struct{}),
 	})
@@ -263,22 +266,38 @@ func fullFilterTupleKeys(gutas db.GUTAs) map[fullFilterTupleKey]struct{} {
 	return keys
 }
 
+func parentDirForPath(dir string) string {
+	dir = ensureTrailingSlash(dir)
+	if dir == "/" {
+		return "/"
+	}
+
+	trimmed := strings.TrimSuffix(dir, "/")
+
+	idx := strings.LastIndexByte(trimmed, '/')
+	if idx <= 0 {
+		return "/"
+	}
+
+	return trimmed[:idx+1]
+}
+
 func fullFilterRowsForGUTAs(
 	mount activeMount,
-	dir string,
+	record dgutaRecordContext,
 	gutas db.GUTAs,
 	childCount uint64,
 	refreshedAt time.Time,
 ) []filterAllRow {
 	rows := make([]filterAllRow, 0, len(gutas))
-	dir = ensureTrailingSlash(dir)
+	record.canonicalDir = ensureTrailingSlash(record.canonicalDir)
 
 	for _, guta := range gutas {
 		if guta == nil {
 			continue
 		}
 
-		rows = append(rows, fullFilterRowForGUTA(mount, dir, guta, childCount, refreshedAt))
+		rows = append(rows, fullFilterRowForGUTA(mount, record, guta, childCount, refreshedAt))
 	}
 
 	return rows

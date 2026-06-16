@@ -42,10 +42,8 @@ const (
 	activeMetadataQueryVersion         uint32 = 1
 	activePrefixDirSummaryQueryVersion uint32 = 1
 	activeVirtualReadyQueryVersion     uint32 = 1
-	parentFactsPacketQueryVersion      uint32 = 1
 
 	treeActiveMetadataCacheMaxEntries      = 256
-	treeParentPacketCacheMaxEntries        = 8192
 	treeActivePrefixSummaryCacheMaxEntries = 32768
 	treeChildrenCacheMaxEntries            = 65536
 	treeDGUTACacheMaxEntries               = 8192
@@ -159,33 +157,6 @@ func treeFilterCacheKeyString(key treeFilterCacheKey) string {
 		",age=" + strconv.FormatUint(uint64(key.age), 10)
 }
 
-type treeParentPacketCacheKey struct {
-	mountPath   string
-	snapshotID  string
-	parentDir   string
-	filter      treeFilterCacheKey
-	activeSetID string
-	version     treeQueryVersionKey
-}
-
-func newTreeParentPacketCacheKey(
-	mount activeMount,
-	parentDir string,
-	filter *db.Filter,
-) treeParentPacketCacheKey {
-	return treeParentPacketCacheKey{
-		mountPath:   ensureTrailingSlash(mount.mountPath),
-		snapshotID:  mount.snapshotID,
-		parentDir:   ensureTrailingSlash(parentDir),
-		filter:      newTreeFilterCacheKey(filter),
-		activeSetID: mount.activeSetID,
-		version: newTreeQueryVersionKey(
-			currentSchemaVersion,
-			parentFactsPacketQueryVersion,
-		),
-	}
-}
-
 func (c *treeQueryCache) recordActivePrefixSummaryHitKey(key treeActivePrefixSummaryCacheKey) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -230,119 +201,15 @@ func activeMetadataCacheHitKey(key treeActiveMetadataCacheKey) string {
 }
 
 func (c *treeQueryCache) resetStatsLocked() {
-	c.parentPacketHits.Store(0)
-	c.parentPacketMisses.Store(0)
-	c.parentPacketReads.Store(0)
 	c.childFilterAllReads.Store(0)
 	c.factVectorReads.Store(0)
 	c.activePrefixSummaryHits.Store(0)
 	c.activePrefixSummaryMisses.Store(0)
 	c.activeMetadataHits.Store(0)
 	c.activeMetadataMisses.Store(0)
-	c.parentPacketHitKeys = nil
-	c.parentPacketMissKeys = nil
-	c.parentPacketReadKeys = nil
 	c.childFilterReadKeys = nil
 	c.activePrefixSummaryHitKeys = nil
 	c.activeMetadataHitKeys = nil
-}
-
-func (c *treeQueryCache) getParentPacket(
-	key treeParentPacketCacheKey,
-) ([]parentFactChildSummary, bool) {
-	c.mu.RLock()
-	packet, ok := c.parentPackets[key]
-	c.mu.RUnlock()
-
-	if !ok {
-		c.parentPacketMisses.Add(1)
-		c.recordParentPacketMissKey(key)
-
-		return nil, false
-	}
-
-	c.parentPacketHits.Add(1)
-	c.recordParentPacketHitKey(key)
-
-	return cloneParentFactChildSummaries(packet), true
-}
-
-func (c *treeQueryCache) putParentPacket(
-	key treeParentPacketCacheKey,
-	packet []parentFactChildSummary,
-) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if _, exists := c.parentPackets[key]; !exists {
-		c.parentPacketOrder = append(c.parentPacketOrder, key)
-		c.evictOldestParentPackets()
-	}
-
-	c.parentPackets[key] = cloneParentFactChildSummaries(packet)
-}
-
-func (c *treeQueryCache) evictOldestParentPackets() {
-	for len(c.parentPacketOrder) > treeParentPacketCacheMaxEntries {
-		oldest := c.parentPacketOrder[0]
-		c.parentPacketOrder = c.parentPacketOrder[1:]
-		delete(c.parentPackets, oldest)
-	}
-}
-
-func (c *treeQueryCache) recordParentPacketHitKey(key treeParentPacketCacheKey) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	c.parentPacketHitKeys = appendBoundedCacheHitKey(
-		c.parentPacketHitKeys,
-		parentPacketCacheHitKey(key),
-	)
-}
-
-func parentPacketCacheHitKey(key treeParentPacketCacheKey) string {
-	return "parent_packet:mount_path=" + key.mountPath +
-		";snapshot_id=" + key.snapshotID +
-		";parent_dir=" + key.parentDir +
-		";filter=" + treeFilterCacheKeyString(key.filter) +
-		";active_set_id=" + key.activeSetID +
-		";schema_version=" + strconv.FormatUint(uint64(key.version.schemaVersion), 10) +
-		";query_version=" + strconv.FormatUint(uint64(key.version.queryVersion), 10)
-}
-
-func (c *treeQueryCache) recordParentPacketMissKey(key treeParentPacketCacheKey) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	c.parentPacketMissKeys = appendBoundedCacheHitKey(
-		c.parentPacketMissKeys,
-		parentPacketCacheHitKey(key),
-	)
-}
-
-func (c *treeQueryCache) recordParentPacketReadKey(key treeParentPacketCacheKey) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	c.parentPacketReadKeys = appendBoundedCacheHitKey(
-		c.parentPacketReadKeys,
-		parentPacketCacheHitKey(key),
-	)
-}
-
-func (c *treeQueryCache) recordChildFilterReadKey(key treeParentPacketCacheKey) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	c.childFilterReadKeys = appendBoundedCacheHitKey(
-		c.childFilterReadKeys,
-		parentPacketCacheHitKey(key),
-	)
-}
-
-func (c *treeQueryCache) resetParentPacketsLocked() {
-	c.parentPackets = make(map[treeParentPacketCacheKey][]parentFactChildSummary)
-	c.parentPacketOrder = nil
 }
 
 func (c *treeQueryCache) resetMountReadinessLocked() {
@@ -551,17 +418,9 @@ type treeQueryCache struct {
 	mountChildFilterAll      map[treeMountCacheKey]bool
 	mountChildFilterAllOrder []treeMountCacheKey
 
-	parentPackets        map[treeParentPacketCacheKey][]parentFactChildSummary
-	parentPacketOrder    []treeParentPacketCacheKey
-	parentPacketHits     atomic.Uint64
-	parentPacketMisses   atomic.Uint64
-	parentPacketReads    atomic.Uint64
-	childFilterAllReads  atomic.Uint64
-	factVectorReads      atomic.Uint64
-	parentPacketHitKeys  []string
-	parentPacketMissKeys []string
-	parentPacketReadKeys []string
-	childFilterReadKeys  []string
+	childFilterAllReads atomic.Uint64
+	factVectorReads     atomic.Uint64
+	childFilterReadKeys []string
 
 	activePrefixSummaries      map[treeActivePrefixSummaryCacheKey]*db.DirSummary
 	activePrefixSummaryOrder   []treeActivePrefixSummaryCacheKey
@@ -592,7 +451,6 @@ func newTreeQueryCache() *treeQueryCache {
 		mountAgeAll:         make(map[treeMountCacheKey]bool),
 		mountDirFilterAll:   make(map[treeMountCacheKey]bool),
 		mountChildFilterAll: make(map[treeMountCacheKey]bool),
-		parentPackets:       make(map[treeParentPacketCacheKey][]parentFactChildSummary),
 		activePrefixSummaries: make(
 			map[treeActivePrefixSummaryCacheKey]*db.DirSummary,
 		),
@@ -769,13 +627,6 @@ func (c *treeQueryCache) evictOldestDirSummaries() {
 	}
 }
 
-func (c *treeQueryCache) dirSummaryEntryCount() int {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	return len(c.dirSummaries)
-}
-
 func (c *treeQueryCache) getActivePrefixDirSummary(
 	key treeActivePrefixSummaryCacheKey,
 ) (*db.DirSummary, bool) {
@@ -816,13 +667,6 @@ func (c *treeQueryCache) evictOldestActivePrefixSummaries() {
 		c.activePrefixSummaryOrder = c.activePrefixSummaryOrder[1:]
 		delete(c.activePrefixSummaries, oldest)
 	}
-}
-
-func (c *treeQueryCache) activePrefixSummaryEntryCount() int {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	return len(c.activePrefixSummaries)
 }
 
 func (c *treeQueryCache) getActiveMetadata(key treeActiveMetadataCacheKey) (treeActiveMetadata, bool) {
@@ -967,7 +811,6 @@ func (c *treeQueryCache) reset() {
 	c.dirSummaryCounts = make(map[treeDirSummaryCacheKey]uint64)
 	c.dirSummaryOrder = nil
 	c.resetMountReadinessLocked()
-	c.resetParentPacketsLocked()
 	c.activePrefixSummaries = make(map[treeActivePrefixSummaryCacheKey]*db.DirSummary)
 	c.activePrefixSummaryOrder = nil
 	c.activeMetadata = make(map[treeActiveMetadataCacheKey]treeActiveMetadata)
@@ -978,14 +821,8 @@ func (c *treeQueryCache) reset() {
 }
 
 type treeQueryCacheStats struct {
-	parentPacketHits           uint64
-	parentPacketMisses         uint64
-	parentPacketReads          uint64
 	childFilterAllReads        uint64
 	factVectorReads            uint64
-	parentPacketHitKeys        []string
-	parentPacketMissKeys       []string
-	parentPacketReadKeys       []string
 	childFilterReadKeys        []string
 	activePrefixSummaryHits    uint64
 	activePrefixSummaryMisses  uint64
@@ -997,23 +834,14 @@ type treeQueryCacheStats struct {
 
 func (c *treeQueryCache) stats() treeQueryCacheStats {
 	c.mu.RLock()
-	parentPacketHitKeys := cloneStrings(c.parentPacketHitKeys)
-	parentPacketMissKeys := cloneStrings(c.parentPacketMissKeys)
-	parentPacketReadKeys := cloneStrings(c.parentPacketReadKeys)
 	childFilterReadKeys := cloneStrings(c.childFilterReadKeys)
 	activePrefixSummaryHitKeys := cloneStrings(c.activePrefixSummaryHitKeys)
 	activeMetadataHitKeys := cloneStrings(c.activeMetadataHitKeys)
 	c.mu.RUnlock()
 
 	return treeQueryCacheStats{
-		parentPacketHits:           c.parentPacketHits.Load(),
-		parentPacketMisses:         c.parentPacketMisses.Load(),
-		parentPacketReads:          c.parentPacketReads.Load(),
 		childFilterAllReads:        c.childFilterAllReads.Load(),
 		factVectorReads:            c.factVectorReads.Load(),
-		parentPacketHitKeys:        parentPacketHitKeys,
-		parentPacketMissKeys:       parentPacketMissKeys,
-		parentPacketReadKeys:       parentPacketReadKeys,
 		childFilterReadKeys:        childFilterReadKeys,
 		activePrefixSummaryHits:    c.activePrefixSummaryHits.Load(),
 		activePrefixSummaryMisses:  c.activePrefixSummaryMisses.Load(),
@@ -1096,10 +924,6 @@ func (r *treeQueryCacheRegistry) reset() {
 // ClickHouse providers.
 func ResetTreeQueryCaches() {
 	sharedTreeQueryCaches.reset()
-}
-
-func resetSharedTreeQueryCachesForTesting() {
-	ResetTreeQueryCaches()
 }
 
 func cloneUint32s(in []uint32) []uint32 {

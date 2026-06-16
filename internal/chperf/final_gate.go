@@ -1049,7 +1049,7 @@ func validateFinalGateE2HighFanoutBroadClick(e FinalGateEvidence) FinalGateCheck
 		return check.fail("missing high-fanout broad first-click evidence")
 	}
 
-	if reason := finalGateE2PacketOperationFailure(measured, 500, tableParentFacts, true, false); reason != "" {
+	if reason := finalGateE2PacketOperationFailure(measured, 500, tableDirFacts, true, false); reason != "" {
 		return check.fail(reason)
 	}
 
@@ -1095,7 +1095,7 @@ func validateFinalGateE2DirInfosBroad(e FinalGateEvidence) FinalGateCheck {
 		return check.fail("missing broad DirInfos evidence")
 	}
 
-	if reason := finalGateE2PacketOperationFailure(measured, 1000, tableParentFacts, false, false); reason != "" {
+	if reason := finalGateE2PacketOperationFailure(measured, 1000, tableDirFacts, false, false); reason != "" {
 		return check.fail(reason)
 	}
 
@@ -1141,7 +1141,7 @@ func validateFinalGateE2DirsHaveChildrenBroad(e FinalGateEvidence) FinalGateChec
 		return check.fail("missing broad DirsHaveChildren evidence")
 	}
 
-	if reason := finalGateE2PacketOperationFailure(measured, 1000, tableParentFacts, false, false); reason != "" {
+	if reason := finalGateE2PacketOperationFailure(measured, 1000, tableDirFacts, false, false); reason != "" {
 		return check.fail(reason)
 	}
 
@@ -4477,7 +4477,7 @@ func finalGateNewObjectTableStatsPass(report perfreport.Report) bool {
 
 func finalGateNewObjectTables(report perfreport.Report) []string {
 	tables := []string{
-		tableParentFacts,
+		tableDirFacts,
 		tableDirSummarySets,
 		tableDirFilterAgeAll,
 		tableActivePrefixRollups,

@@ -98,8 +98,8 @@ func TestFileAPISelectFields(t *testing.T) {
 			Fields: []string{fileFieldPath, fileFieldExt, fileFieldEntryType},
 		})
 		So(err, ShouldBeNil)
-		So(listQuery, ShouldContainSubstring, "SELECT f.path, f.ext, f.entry_type FROM")
-		So(listQuery, ShouldNotContainSubstring, "SELECT f.path, f.ext, f.entry_type, f.parent_dir")
+		So(listQuery, ShouldContainSubstring, "SELECT concat(d.full_path, f.name), f.ext, f.entry_type FROM")
+		So(listQuery, ShouldNotContainSubstring, "SELECT concat(d.full_path, f.name), f.ext, f.entry_type, d.full_path")
 		So(listQuery, ShouldNotContainSubstring, "f.size")
 		So(listFields, ShouldResemble, []string{fileFieldPath, fileFieldExt, fileFieldEntryType})
 
@@ -107,8 +107,8 @@ func TestFileAPISelectFields(t *testing.T) {
 			Fields: []string{fileFieldPath},
 		})
 		So(err, ShouldBeNil)
-		So(statQuery, ShouldContainSubstring, "SELECT f.path FROM")
-		So(statQuery, ShouldNotContainSubstring, "SELECT f.path, f.parent_dir")
+		So(statQuery, ShouldContainSubstring, "SELECT concat(d.full_path, f.name) FROM")
+		So(statQuery, ShouldNotContainSubstring, "SELECT concat(d.full_path, f.name), d.full_path")
 		So(statQuery, ShouldNotContainSubstring, "f.size")
 		So(statFields, ShouldResemble, []string{fileFieldPath})
 
@@ -119,7 +119,7 @@ func TestFileAPISelectFields(t *testing.T) {
 			FindOptions{Fields: []string{fileFieldPath}},
 		)
 		So(err, ShouldBeNil)
-		So(prepared.selectList, ShouldEqual, "f.path")
+		So(prepared.selectList, ShouldEqual, "concat(d.full_path, f.name)")
 		So(prepared.fields, ShouldResemble, []string{fileFieldPath})
 
 		spec := prepared.plan.queries[0]
@@ -134,8 +134,8 @@ func TestFileAPISelectFields(t *testing.T) {
 			prepared.queryLimit,
 			prepared.queryOffset,
 		)
-		So(globQuery, ShouldContainSubstring, "SELECT f.path FROM")
-		So(globQuery, ShouldNotContainSubstring, "SELECT f.path, f.parent_dir")
+		So(globQuery, ShouldContainSubstring, "SELECT concat(d.full_path, f.name) FROM")
+		So(globQuery, ShouldNotContainSubstring, "SELECT concat(d.full_path, f.name), d.full_path")
 		So(globQuery, ShouldNotContainSubstring, "f.size")
 	})
 }
@@ -272,7 +272,7 @@ func TestClientFindByGlobQueryGrouping(t *testing.T) {
 }
 
 func TestFindByGlobQueryShape(t *testing.T) {
-	Convey("FindByGlob uses parent_dir equality for direct child patterns", t, func() {
+	Convey("FindByGlob uses catalog parent equality for direct child patterns", t, func() {
 		q, params := buildFindByGlobQueryAndParams(
 			fileRowSelectAll,
 			findByGlobAlphaMount,
@@ -285,7 +285,7 @@ func TestFindByGlobQueryShape(t *testing.T) {
 			0,
 		)
 
-		So(q, ShouldContainSubstring, "f.parent_dir = ?")
+		So(q, ShouldContainSubstring, "d.full_path = ?")
 		So(q, ShouldContainSubstring, "f.ext = ?")
 		So(q, ShouldContainSubstring, "match(f.name, ?)")
 		So(q, ShouldNotContainSubstring, "match(f.path, ?)")
@@ -319,7 +319,7 @@ func TestFindByGlobQueryShape(t *testing.T) {
 
 		So(q, ShouldContainSubstring, "f.ext = ?")
 		So(q, ShouldContainSubstring, "f.name = ?")
-		So(q, ShouldContainSubstring, "match(f.path, ?)")
+		So(q, ShouldContainSubstring, "match(concat(d.full_path, f.name), ?)")
 		So(q, ShouldContainSubstring, "f.uid = ? OR has(?, f.gid)")
 		So(params, ShouldResemble, []any{
 			findByGlobAlphaMount,
@@ -408,7 +408,7 @@ func TestFindByGlobQueryShape(t *testing.T) {
 			0,
 		)
 
-		So(q, ShouldContainSubstring, "f.parent_dir >= ? AND f.parent_dir < ?")
+		So(q, ShouldContainSubstring, "d.full_path >= ? AND d.full_path < ?")
 		So(strings.Count(q, "match("), ShouldEqual, 0)
 		So(params, ShouldResemble, []any{
 			findByGlobAlphaMount,
@@ -436,7 +436,7 @@ func TestFindByGlobQueryShape(t *testing.T) {
 		So(q, ShouldContainSubstring, "SELECT count() FROM")
 		So(q, ShouldContainSubstring, "f.ext = ?")
 		So(q, ShouldContainSubstring, "f.name = ?")
-		So(q, ShouldContainSubstring, "match(f.path, ?)")
+		So(q, ShouldContainSubstring, "match(concat(d.full_path, f.name), ?)")
 		So(q, ShouldContainSubstring, "f.uid = ? OR has(?, f.gid)")
 		So(q, ShouldNotContainSubstring, "ORDER BY")
 		So(q, ShouldNotContainSubstring, "LIMIT ? OFFSET ?")
@@ -534,7 +534,7 @@ func TestClientPermissionPathQueryShape(t *testing.T) {
 		So(conn.query, ShouldNotContainSubstring, "wrstat_dguta")
 		So(conn.query, ShouldNotContainSubstring, "wrstat_dir_facts")
 		So(conn.query, ShouldNotContainSubstring, "wrstat_children")
-		So(conn.query, ShouldContainSubstring, "f.parent_dir = ? AND f.name = ?")
+		So(conn.query, ShouldContainSubstring, "d.full_path = ? AND f.name = ?")
 		So(conn.query, ShouldContainSubstring, "f.uid = ? OR has(?, f.gid)")
 		So(conn.args, ShouldResemble, []any{
 			findByGlobAlphaMount,

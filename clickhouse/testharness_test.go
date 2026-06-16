@@ -58,11 +58,16 @@ const (
 	testPingQuery           = "SELECT 1"
 	testInsertMountStmt     = "INSERT INTO wrstat_mount_events (mount_path, event_at, event_type, " +
 		"snapshot_id, updated_at, reason) VALUES (?, ?, 1, ?, ?, 'publish')"
-	testInsertChildrenStmt = "INSERT INTO wrstat_children (mount_path, snapshot_id, " +
-		"parent_dir, child) VALUES (?, ?, ?, ?)"
 	testInsertDGUTAStmt = "INSERT INTO wrstat_dir_facts (mount_path, snapshot_id, dir, updated_at, gids, uids, " +
 		"fts, ages, counts, sizes, atime_mins, mtime_maxs, atime_buckets, mtime_buckets, refreshed_at) " +
 		"VALUES (?, ?, ?, now(), [?], [?], [?], [?], [?], [?], [?], [?], [?], [?], now())"
+)
+
+//nolint:gochecknoglobals // Shared server cuts startup churn; per-test databases still isolate state.
+var (
+	sharedClickHouseServerOnce sync.Once
+	sharedClickHouseServer     *sharedClickHouseTestServer
+	errSharedClickHouseServer  error
 )
 
 type clickHouseTestHarness struct {
@@ -91,13 +96,6 @@ type sharedClickHouseTestServer struct {
 	baseDir string
 	proc    clickHouseServerProcess
 }
-
-//nolint:gochecknoglobals // Shared server cuts startup churn; per-test databases still isolate state.
-var (
-	sharedClickHouseServerOnce sync.Once
-	sharedClickHouseServer     *sharedClickHouseTestServer
-	errSharedClickHouseServer  error
-)
 
 func TestMain(m *testing.M) {
 	code := m.Run()
@@ -132,44 +130,6 @@ func newClickHouseTestHarness(t *testing.T) *clickHouseTestHarness {
 		stdout:  shared.proc.stdout,
 		stderr:  shared.proc.stderr,
 	}
-}
-
-func newIsolatedClickHouseTestHarness(t *testing.T) *clickHouseTestHarness {
-	t.Helper()
-
-	envDSN := os.Getenv("WRSTAT_CLICKHOUSE_DSN")
-	if envDSN != "" {
-		refuseNonLocalhostDSN(t, envDSN)
-
-		return &clickHouseTestHarness{t: t, tcpPort: 0, httpPort: 0, baseDir: "", binPath: ""}
-	}
-
-	binPath := findClickHouseBinary(t)
-	baseDir := t.TempDir()
-	tcpPort := pickFreePort(t)
-
-	httpPort := pickFreePort(t)
-	for httpPort == tcpPort {
-		httpPort = pickFreePort(t)
-	}
-
-	proc := startClickHouseServerProcess(t, binPath, baseDir, tcpPort, httpPort)
-	t.Cleanup(proc.stop)
-
-	th := &clickHouseTestHarness{
-		t:        t,
-		tcpPort:  tcpPort,
-		httpPort: httpPort,
-		binPath:  binPath,
-		baseDir:  baseDir,
-		doneCh:   proc.doneCh,
-		exitErr:  proc.exitErr,
-		stdout:   proc.stdout,
-		stderr:   proc.stderr,
-	}
-	th.waitUntilReady()
-
-	return th
 }
 
 func getSharedClickHouseTestServer(t *testing.T) *sharedClickHouseTestServer {

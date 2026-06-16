@@ -74,24 +74,25 @@ const (
 
 	c3RESTAuthRepeat = 5
 
-	c3RESTInputChildCount             = "child_count"
-	c3RESTInputColdProviderState      = "cold_provider_state"
-	c3RESTInputEndpoint               = "endpoint"
-	c3RESTInputGzipBytes              = "gzip_bytes"
-	c3RESTInputJSONBytes              = "json_bytes"
-	c3RESTInputPath                   = "path"
-	c3RESTInputP95BaselineMS          = "p95_baseline_ms"
-	c3RESTInputP95BaselineOperation   = "p95_baseline_operation"
-	c3RESTInputP95CandidateMS         = "p95_candidate_ms"
-	c3RESTInputP95ComparisonMetric    = "p95_comparison_metric"
-	c3RESTInputP95ObservedImproved    = "p95_observed_improved"
-	c3RESTInputQueryCount             = "query_count"
-	c3RESTInputQueryCountSource       = "query_count_source"
-	c3RESTInputRoute                  = "route"
-	c3RESTInputStatusCodes            = "status_codes"
-	c3RESTP95ComparisonMetricDuration = "p95_ms"
-	c3RESTRouteChildrenDirIn          = "children_dir_in"
-	c3RESTRouteParentFacts            = "parent_facts"
+	c3RESTInputChildCount        = "child_count"
+	c3RESTInputColdProviderState = "cold_provider_state"
+	c3RESTInputEndpoint          = "endpoint"
+	c3RESTInputGzipBytes         = "gzip_bytes"
+	c3RESTInputJSONBytes         = "json_bytes"
+	c3RESTInputPath              = "path"
+	c3RESTInputQueryCount        = "query_count"
+	c3RESTInputQueryCountSource  = "query_count_source"
+	c3RESTInputRoute             = "route"
+	c3RESTInputStatusCodes       = "status_codes"
+	c3RESTRouteCatalog           = "wrstat_dirs"
+)
+
+const (
+	c3RESTNFSDirID            = 1
+	c3RESTMountDirID          = 2
+	c3RESTWideParentDirID     = 3
+	c3RESTFirstChildDirID     = 4
+	c3RESTHighFanoutLeafDirID = 5
 )
 
 type batchHasChildrenTestDB struct {
@@ -175,9 +176,16 @@ func seedC3RESTClickHouseHighFanout(
 	w.SetMountPath(mountPath)
 	w.SetUpdatedAt(time.Date(2026, 6, 7, 18, 30, 0, 0, time.UTC))
 
+	snapshotEnd := c3RESTHighFanoutSnapshotEnd(childCount)
+
+	mountDir := paths.ToDirectoryPath(mountPath)
 	So(w.Add(db.RecordDGUTA{
-		Dir:      paths.ToDirectoryPath(mountPath),
-		Children: []string{"wide/"},
+		Dir:        mountDir,
+		DirID:      c3RESTMountDirID,
+		ParentID:   c3RESTNFSDirID,
+		SubtreeEnd: snapshotEnd,
+		Depth:      schema3FixtureDepth(t, mountDir.Depth),
+		Children:   []string{"wide/"},
 		GUTAs: db.GUTAs{
 			c3RESTGUTA(7, 11, db.DGUTAFileTypeDir, db.DGUTAgeAll, 1, 1),
 		},
@@ -188,8 +196,13 @@ func seedC3RESTClickHouseHighFanout(
 		children[i] = fmt.Sprintf("child%03d/", i)
 	}
 
+	parentPath := paths.ToDirectoryPath(parentDir)
 	So(w.Add(db.RecordDGUTA{
-		Dir:        paths.ToDirectoryPath(parentDir),
+		Dir:        parentPath,
+		DirID:      c3RESTWideParentDirID,
+		ParentID:   c3RESTMountDirID,
+		SubtreeEnd: snapshotEnd,
+		Depth:      schema3FixtureDepth(t, parentPath.Depth),
 		ChildCount: c3RESTNonNegativeIntToUint64(t, childCount),
 		Children:   children,
 		GUTAs: db.GUTAs{
@@ -199,9 +212,14 @@ func seedC3RESTClickHouseHighFanout(
 
 	for i, child := range children {
 		dir := parentDir + child
+		childPath := paths.ToDirectoryPath(dir)
 
 		record := db.RecordDGUTA{
-			Dir: paths.ToDirectoryPath(dir),
+			Dir:        childPath,
+			DirID:      c3RESTHighFanoutChildDirID(i),
+			ParentID:   c3RESTWideParentDirID,
+			SubtreeEnd: c3RESTHighFanoutChildSubtreeEnd(i),
+			Depth:      schema3FixtureDepth(t, childPath.Depth),
 			GUTAs: db.GUTAs{
 				c3RESTGUTA(
 					uint32(7+i%3),
@@ -230,13 +248,31 @@ func seedC3RESTClickHouseHighFanout(
 		So(w.Add(record), ShouldBeNil)
 	}
 
+	leafPath := paths.ToDirectoryPath(parentDir + "child000/leaf/")
 	So(w.Add(db.RecordDGUTA{
-		Dir: paths.ToDirectoryPath(parentDir + "child000/leaf/"),
+		Dir:        leafPath,
+		DirID:      c3RESTHighFanoutLeafDirID,
+		ParentID:   c3RESTHighFanoutChildDirID(0),
+		SubtreeEnd: c3RESTHighFanoutLeafDirID + 1,
+		Depth:      schema3FixtureDepth(t, leafPath.Depth),
 		GUTAs: db.GUTAs{
 			c3RESTGUTA(7, 11, db.DGUTAFileTypeBam, db.DGUTAgeAll, 1, 10),
 		},
 	}), ShouldBeNil)
 	So(w.Close(), ShouldBeNil)
+}
+
+func c3RESTHighFanoutSnapshotEnd(childCount int) uint32 {
+	return uint32(childCount + int(c3RESTHighFanoutLeafDirID) + 1) //nolint:gosec // Fixture child counts are bounded.
+}
+
+func schema3FixtureDepth(t *testing.T, depth int) uint16 {
+	t.Helper()
+
+	So(depth, ShouldBeGreaterThanOrEqualTo, 0)
+	So(depth, ShouldBeLessThanOrEqualTo, int(^uint16(0)))
+
+	return uint16(depth) //nolint:gosec // Fixture depth range is checked above.
 }
 
 func c3RESTGUTA(
@@ -268,16 +304,20 @@ func c3RESTNonNegativeIntToUint64(t *testing.T, value int) uint64 {
 	return converted
 }
 
-func truncateC3RESTParentFacts(t *testing.T, cfg clickhouse.Config) {
-	t.Helper()
+func c3RESTHighFanoutChildDirID(i int) uint32 {
+	if i == 0 {
+		return c3RESTFirstChildDirID
+	}
 
-	conn := openC3RESTClickHouseConn(t, cfg.DSN)
-	defer func() { _ = conn.Close() }()
+	return uint32(i + int(c3RESTHighFanoutLeafDirID) + 1) //nolint:gosec // Fixture child counts are bounded.
+}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+func c3RESTHighFanoutChildSubtreeEnd(i int) uint32 {
+	if i == 0 {
+		return c3RESTHighFanoutLeafDirID + 1
+	}
 
-	So(conn.Exec(ctx, "TRUNCATE TABLE wrstat_parent_facts"), ShouldBeNil)
+	return c3RESTHighFanoutChildDirID(i) + 1
 }
 
 func openC3RESTClickHouseConn(t *testing.T, dsn string) ch.Conn {
@@ -779,40 +819,31 @@ func TestTreeRESTVirtualAncestorRoutesC3(t *testing.T) {
 		So(gzipBytes, ShouldBeLessThan, jsonBytes)
 	})
 
-	Convey("C3.5 real cold-provider auth REST tree report records parent-facts comparison", t, func() {
+	Convey("C3.5 real cold-provider auth REST tree report records catalog-route evidence", t, func() {
 		os.Setenv("WRSTAT_ENV", "test")
 		Reset(func() { os.Unsetenv("WRSTAT_ENV") })
 		clickhouse.ResetTreeQueryCaches()
 		Reset(clickhouse.ResetTreeQueryCaches)
 
 		harness := newC3RESTClickHouseHarness(t)
-		parentCfg := harness.newConfig()
-		legacyCfg := harness.newConfig()
+		cfg := harness.newConfig()
 
-		for _, cfg := range []*clickhouse.Config{&parentCfg, &legacyCfg} {
-			cfg.QueryTimeout = 5 * time.Second
-			cfg.PollInterval = 0
-			cfg.MountPoints = []string{c3RESTNFST283Imaging + "/"}
-		}
+		cfg.QueryTimeout = 5 * time.Second
+		cfg.PollInterval = 0
+		cfg.MountPoints = []string{c3RESTNFST283Imaging + "/"}
 
 		parentDir := c3RESTWideParent + "/"
-		seedC3RESTClickHouseHighFanout(t, parentCfg, parentDir, 305)
-		seedC3RESTClickHouseHighFanout(t, legacyCfg, parentDir, 305)
-		truncateC3RESTParentFacts(t, legacyCfg)
+		seedC3RESTClickHouseHighFanout(t, cfg, parentDir, 305)
 
 		cert, key, err := gas.CreateTestCert(t)
 		So(err, ShouldBeNil)
 
-		report := measureC3RESTAuthTreeReport(t, parentCfg, legacyCfg, cert, key, parentDir)
-		parentOp := c3RESTReportOperation(report, "auth_rest_tree_parent_facts")
-		legacyOp := c3RESTReportOperation(report, "auth_rest_tree_children_dir_in")
+		report := measureC3RESTAuthTreeReport(t, cfg, cert, key, parentDir)
+		catalogOp := c3RESTReportOperation(report, "auth_rest_tree_"+c3RESTRouteCatalog)
 
-		So(parentOp, ShouldNotBeNil)
-		So(legacyOp, ShouldNotBeNil)
-		assertC3RESTAuthTreeOperation(parentOp, c3RESTRouteParentFacts, parentDir)
-		assertC3RESTAuthTreeOperation(legacyOp, c3RESTRouteChildrenDirIn, parentDir)
-		assertC3RESTP95ComparisonInputs(parentOp, legacyOp)
-		assertC3RESTQueryCountImprovement(parentOp, legacyOp)
+		So(catalogOp, ShouldNotBeNil)
+		assertC3RESTAuthTreeOperation(catalogOp, c3RESTRouteCatalog, parentDir)
+		So(catalogOp.ResultCount, ShouldResemble, []uint64{305, 305, 305, 305, 305})
 	})
 }
 
@@ -901,8 +932,7 @@ func newC3RESTClickHouseHarness(t *testing.T) *c3RESTClickHouseHarness {
 
 func measureC3RESTAuthTreeReport(
 	t *testing.T,
-	parentCfg clickhouse.Config,
-	legacyCfg clickhouse.Config,
+	cfg clickhouse.Config,
 	cert string,
 	key string,
 	parentDir string,
@@ -925,27 +955,9 @@ func measureC3RESTAuthTreeReport(
 	So(err, ShouldBeNil)
 
 	report := perfreport.NewReport("clickhouse", "", c3RESTAuthRepeat, 0)
-	addC3RESTAuthTreeOperation(t, &report, s, addr, cert, token, parentCfg, parentDir, c3RESTRouteParentFacts)
-	addC3RESTAuthTreeOperation(t, &report, s, addr, cert, token, legacyCfg, parentDir, c3RESTRouteChildrenDirIn)
-	addC3RESTAuthTreeP95Comparison(&report)
+	addC3RESTAuthTreeOperation(t, &report, s, addr, cert, token, cfg, parentDir, c3RESTRouteCatalog)
 
 	return report
-}
-
-func addC3RESTAuthTreeP95Comparison(report *perfreport.Report) {
-	parentOp := c3RESTReportOperation(*report, "auth_rest_tree_"+c3RESTRouteParentFacts)
-
-	legacyOp := c3RESTReportOperation(*report, "auth_rest_tree_"+c3RESTRouteChildrenDirIn)
-
-	if parentOp == nil || legacyOp == nil {
-		return
-	}
-
-	parentOp.Inputs[c3RESTInputP95BaselineOperation] = legacyOp.Name
-	parentOp.Inputs[c3RESTInputP95ComparisonMetric] = c3RESTP95ComparisonMetricDuration
-	parentOp.Inputs[c3RESTInputP95CandidateMS] = parentOp.P95MS
-	parentOp.Inputs[c3RESTInputP95BaselineMS] = legacyOp.P95MS
-	parentOp.Inputs[c3RESTInputP95ObservedImproved] = parentOp.P95MS < legacyOp.P95MS
 }
 
 func c3RESTReportOperation(report perfreport.Report, name string) *perfreport.Operation {
@@ -1024,29 +1036,6 @@ func c3RESTStatusInputs(op *perfreport.Operation) []uint64 {
 	}
 
 	return values
-}
-
-func assertC3RESTP95ComparisonInputs(parentOp *perfreport.Operation, legacyOp *perfreport.Operation) {
-	So(parentOp.Inputs[c3RESTInputP95BaselineOperation], ShouldEqual, legacyOp.Name)
-	So(parentOp.Inputs[c3RESTInputP95ComparisonMetric], ShouldEqual, c3RESTP95ComparisonMetricDuration)
-	So(parentOp.Inputs[c3RESTInputP95CandidateMS], ShouldEqual, parentOp.P95MS)
-	So(parentOp.Inputs[c3RESTInputP95BaselineMS], ShouldEqual, legacyOp.P95MS)
-
-	improved, ok := parentOp.Inputs[c3RESTInputP95ObservedImproved].(bool)
-	So(ok, ShouldBeTrue)
-	So(improved, ShouldEqual, parentOp.P95MS < legacyOp.P95MS)
-}
-
-func assertC3RESTQueryCountImprovement(parentOp *perfreport.Operation, legacyOp *perfreport.Operation) {
-	parentCounts := c3RESTUintInputs(parentOp, c3RESTInputQueryCount)
-	legacyCounts := c3RESTUintInputs(legacyOp, c3RESTInputQueryCount)
-
-	So(parentCounts, ShouldHaveLength, c3RESTAuthRepeat)
-	So(legacyCounts, ShouldHaveLength, c3RESTAuthRepeat)
-
-	for i, parentCount := range parentCounts {
-		So(parentCount, ShouldBeLessThan, legacyCounts[i])
-	}
 }
 
 func seedC3RESTHighFanoutParent(database *c3RESTTreeTestDB, parentDir string, childCount int) {

@@ -40,7 +40,11 @@ import (
 // ImportAPI creates the storage-backed writers required by Import.
 type ImportAPI interface {
 	NewDGUTAWriter() (db.DGUTAWriter, error)
-	NewFileIngestOperation(mountPath string, updatedAt time.Time) (summary.OperationGenerator, io.Closer, error)
+	NewFileIngestOperation(
+		mountPath string,
+		updatedAt time.Time,
+		alloc *summary.DirIDAllocator,
+	) (summary.OperationGenerator, io.Closer, error)
 	NewBaseDirsStore() (basedirs.Store, error)
 }
 

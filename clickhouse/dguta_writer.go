@@ -40,13 +40,11 @@ import (
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/google/uuid"
 	"github.com/wtsi-hgi/wrstat-ui/db"
-	"github.com/wtsi-hgi/wrstat-ui/summary"
 )
 
 const (
 	defaultBatchSize           = 100_000
 	defaultProjectionBatchSize = 15_300
-	defaultChildrenBatchSize   = 10_000
 	dgutaAgeMaskBits           = 32
 	defaultCHReceiveTimeout    = 300 * time.Second
 	importBatchReceiveGuard    = time.Minute
@@ -56,9 +54,8 @@ const (
 	activeVirtualChildName     = "child"
 
 	importPhasePartitionDropReset  = "partition_drop_reset"
+	importPhaseCatalogInsert       = "wrstat_dirs_insert"
 	importPhaseDGUTAInsert         = "wrstat_dguta_insert"
-	importPhaseChildrenInsert      = "wrstat_children_insert"
-	importPhaseParentFactsInsert   = "wrstat_parent_facts_insert"
 	importPhaseFullFilterAllInsert = "wrstat_filter_all_insert"
 	importPhaseSchema3Ready        = "wrstat_schema3_snapshot_ready"
 	importPhaseActiveVirtualInsert = "wrstat_active_virtual_insert"
@@ -76,13 +73,12 @@ const (
 		"SELECT ?, greatest(coalesce(max(event_at) + toIntervalMillisecond(1), now64(3)), now64(3)), " +
 		"1, toUUID(?), ?, 'publish' FROM wrstat_mount_events WHERE mount_path = ?"
 
-	dropChildrenPartitionQuery        = "ALTER TABLE wrstat_children DROP PARTITION tuple(?, toUUID(?))"
+	dropDirsPartitionQuery            = "ALTER TABLE wrstat_dirs DROP PARTITION tuple(?, toUUID(?))"
 	dropFilesPartitionQuery           = "ALTER TABLE wrstat_files DROP PARTITION tuple(?, toUUID(?))"
 	dropDirSummaryPartitionQuery      = "ALTER TABLE wrstat_dir_facts DROP PARTITION tuple(?, toUUID(?))"
 	dropDirSummarySetPartitionQuery   = "ALTER TABLE wrstat_dir_projection_sets DROP PARTITION tuple(?, toUUID(?))"
 	dropDirFilterAgeAllPartitionQuery = "ALTER TABLE wrstat_dir_filter_ageall " +
 		"DROP PARTITION tuple(?, toUUID(?))"
-	dropParentFactsPartitionQuery    = "ALTER TABLE wrstat_parent_facts DROP PARTITION tuple(?, toUUID(?))"
 	dropChildFilterAllPartitionQuery = "ALTER TABLE wrstat_child_filter_all " +
 		"DROP PARTITION tuple(?, toUUID(?))"
 	dropDirFilterAllPartitionQuery = "ALTER TABLE wrstat_dir_filter_all " +
@@ -102,14 +98,11 @@ const (
 	dropBasedirsGroupSubdirsPartitionQuery = "ALTER TABLE wrstat_basedirs_group_subdirs DROP PARTITION tuple(?, toUUID(?))"
 	dropBasedirsUserSubdirsPartitionQuery  = "ALTER TABLE wrstat_basedirs_user_subdirs DROP PARTITION tuple(?, toUUID(?))"
 
-	insertChildrenQuery = "INSERT INTO wrstat_children " +
-		"(mount_path, snapshot_id, parent_dir, child) " +
-		"VALUES (?, toUUID(?), ?, ?)"
 	countSnapshotTableRowsQuery   = "SELECT count() FROM %s WHERE mount_path = ? AND snapshot_id = toUUID(?)"
 	insertSchema3SnapshotSetQuery = "INSERT INTO wrstat_schema3_snapshot_sets " +
-		"(mount_path, snapshot_id, schema3_version, dir_facts_rows, parent_facts_rows, children_rows, " +
+		"(mount_path, snapshot_id, schema3_version, dirs_rows, dir_facts_rows, " +
 		"child_filter_all_rows, dir_filter_all_rows, manifest_sha256, refreshed_at) " +
-		"VALUES (?, toUUID(?), ?, ?, ?, ?, ?, ?, ?, ?)"
+		"VALUES (?, toUUID(?), ?, ?, ?, ?, ?, ?, ?)"
 	insertActiveVirtualSummaryQuery = "INSERT INTO wrstat_active_virtual_summaries " +
 		"(active_set_id, dir, mount_path, is_mount_root_box, updated_at, all_count, all_size, " +
 		"all_atime_min, all_mtime_max, all_atime_buckets, all_mtime_buckets, all_uids, all_gids, " +
@@ -120,7 +113,7 @@ const (
 		"atime_buckets, mtime_buckets, filter_child_count, child_count, refreshed_at) " +
 		"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
 	insertActiveVirtualChildQuery = "INSERT INTO wrstat_active_virtual_children " +
-		"(active_set_id, parent_dir, child_dir, mount_path, is_mount_root_box, child_count, refreshed_at) " +
+		"(active_set_id, parent_virtual_id, child_virtual_id, mount_path, is_mount_root_box, child_count, refreshed_at) " +
 		"VALUES (?, ?, ?, ?, ?, ?, ?)"
 	insertActiveVirtualSetQuery = "INSERT INTO wrstat_active_virtual_sets " +
 		"(active_set_id, schema3_version, mounts_sha256, active_mount_count, summary_rows, filter_rows, " +
@@ -132,16 +125,15 @@ const (
 	selectActiveVirtualFilterAllValidationQuery = "SELECT dir, age, gid, uid, ft, count, size, " +
 		"atime_min, mtime_max, atime_buckets, mtime_buckets, filter_child_count, child_count " +
 		"FROM wrstat_active_virtual_filter_all WHERE active_set_id = ? ORDER BY dir, age, gid, uid, ft"
-	selectActiveVirtualChildrenValidationQuery = "SELECT parent_dir, child_dir, mount_path, " +
+	selectActiveVirtualChildrenValidationQuery = "SELECT parent_virtual_id, child_virtual_id, mount_path, " +
 		"is_mount_root_box, child_count FROM wrstat_active_virtual_children WHERE active_set_id = ? " +
-		"ORDER BY parent_dir, child_dir"
+		"ORDER BY parent_virtual_id, child_virtual_id"
 )
 
 var (
 	errMountPathRequired         = errors.New("clickhouse: mount path is required")
 	errUpdatedAtRequired         = errors.New("clickhouse: updated at is required")
 	errDirRequired               = errors.New("clickhouse: record dir is required")
-	errChildrenBatchNotPrepared  = errors.New("clickhouse: children batch is not prepared")
 	errSnapshotCountNoRows       = errors.New("clickhouse: snapshot table count returned no rows")
 	errActiveVirtualRowsMismatch = errors.New(
 		"clickhouse: active virtual row validation mismatch",
@@ -158,6 +150,49 @@ func basedirsPartitionDropQueries() []string {
 		dropBasedirsGroupSubdirsPartitionQuery,
 		dropBasedirsUserSubdirsPartitionQuery,
 	}
+}
+
+type dgutaRecordContext struct {
+	rawDir       string
+	canonicalDir string
+	dirID        uint32
+	parentID     uint32
+	subtreeEnd   uint32
+	depth        uint16
+}
+
+func dgutaRecordContextForRecord(mountPath string, dguta db.RecordDGUTA) (string, string, dgutaRecordContext) {
+	rawParentDir := string(dguta.Dir.AppendTo(make([]byte, 0, dguta.Dir.Len())))
+	parentDir := canonicalPathForMount(mountPath, rawParentDir)
+
+	return rawParentDir, parentDir, dgutaRecordContext{
+		rawDir:       rawParentDir,
+		canonicalDir: parentDir,
+		dirID:        dguta.DirID,
+		parentID:     dguta.ParentID,
+		subtreeEnd:   dguta.SubtreeEnd,
+		depth:        dguta.Depth,
+	}
+}
+
+func compareActiveVirtualChildRows(a, b activeVirtualChildRow) int {
+	if a.ParentVirtualID < b.ParentVirtualID {
+		return -1
+	}
+
+	if a.ParentVirtualID > b.ParentVirtualID {
+		return 1
+	}
+
+	if a.ChildVirtualID < b.ChildVirtualID {
+		return -1
+	}
+
+	if a.ChildVirtualID > b.ChildVirtualID {
+		return 1
+	}
+
+	return 0
 }
 
 func (w *dgutaWriter) withFreshCloseQueryContext(
@@ -180,6 +215,17 @@ func withoutCancelOrBackground(parent context.Context) context.Context {
 	}
 
 	return context.WithoutCancel(parent)
+}
+
+func (w *dgutaWriter) appendCatalogRow(ctx context.Context, dguta db.RecordDGUTA, fullPath string) error {
+	err := w.timeImportPhase(importPhaseCatalogInsert, func() error {
+		return w.catalog.appendRecord(ctx, w.activeMount(), dguta, fullPath)
+	})
+	if err != nil {
+		w.writeErr = err
+	}
+
+	return err
 }
 
 func activeSetUpdatedAt(t time.Time) time.Time {
@@ -286,9 +332,8 @@ type dgutaDerivedIndexWriter interface {
 	appendRecord(
 		ctx context.Context,
 		mount activeMount,
-		parentDir string,
+		record dgutaRecordContext,
 		gutas db.GUTAs,
-		children []string,
 		childCount uint64,
 		ages []db.DirGUTAge,
 	) error
@@ -319,9 +364,8 @@ func (slot dgutaBatchSlot) wasFlushed() bool {
 }
 
 type schema3SnapshotRowCounts struct {
+	dirsRows           uint64
 	dirFactsRows       uint64
-	parentFactsRows    uint64
-	childrenRows       uint64
 	childFilterAllRows uint64
 	dirFilterAllRows   uint64
 }
@@ -424,24 +468,6 @@ func sortActiveVirtualSummaryRows(rows []activeVirtualSummaryRow) {
 	})
 }
 
-func activeVirtualFilterRowsForSummaries(summaryRows []activeVirtualSummaryRow) []activeVirtualFilterAllRow {
-	rows := make([]activeVirtualFilterAllRow, 0, len(summaryRows))
-	for _, summary := range summaryRows {
-		rows = append(rows, activeVirtualFilterAllRow{
-			ActiveSetID:      summary.ActiveSetID,
-			Dir:              summary.Dir,
-			Age:              uint8(db.DGUTAgeAll),
-			AtimeBuckets:     emptyAgeBuckets(),
-			MtimeBuckets:     emptyAgeBuckets(),
-			FilterChildCount: summary.ChildCount,
-			ChildCount:       summary.ChildCount,
-			RefreshedAt:      summary.RefreshedAt,
-		})
-	}
-
-	return rows
-}
-
 func emptyAgeBuckets() []uint64 {
 	return append([]uint64(nil), ageBucketsSlice(nil)...)
 }
@@ -469,13 +495,15 @@ func activeVirtualFilterSortKey(row activeVirtualFilterAllRow) string {
 }
 
 type activeVirtualChildRow struct {
-	ActiveSetID    string
-	ParentDir      string
-	ChildDir       string
-	MountPath      string
-	IsMountRootBox uint8
-	ChildCount     uint64
-	RefreshedAt    time.Time
+	ActiveSetID     string
+	ParentDir       string
+	ChildDir        string
+	ParentVirtualID uint32
+	ChildVirtualID  uint32
+	MountPath       string
+	IsMountRootBox  uint8
+	ChildCount      uint64
+	RefreshedAt     time.Time
 }
 
 func activeVirtualChildRowsForMounts(
@@ -488,12 +516,14 @@ func activeVirtualChildRowsForMounts(
 
 	for _, row := range virtualRows {
 		rows = append(rows, activeVirtualChildRow{
-			ActiveSetID:    activeSetID,
-			ParentDir:      row.parentDir,
-			ChildDir:       row.child,
-			MountPath:      row.mountPath,
-			IsMountRootBox: boolAsUInt8(row.childIsMountRoot),
-			RefreshedAt:    refreshedAt,
+			ActiveSetID:     activeSetID,
+			ParentDir:       row.parentDir,
+			ChildDir:        row.child,
+			ParentVirtualID: virtualIDForDir(row.parentDir),
+			ChildVirtualID:  virtualIDForDir(row.child),
+			MountPath:       row.mountPath,
+			IsMountRootBox:  boolAsUInt8(row.childIsMountRoot),
+			RefreshedAt:     refreshedAt,
 		})
 	}
 
@@ -576,9 +606,7 @@ func activeVirtualFilterValidation(rows []activeVirtualFilterAllRow) activeVirtu
 
 func activeVirtualChildValidation(rows []activeVirtualChildRow) activeVirtualValidation {
 	sorted := slices.Clone(rows)
-	slices.SortFunc(sorted, func(a, b activeVirtualChildRow) int {
-		return strings.Compare(a.ParentDir+"\x00"+a.ChildDir, b.ParentDir+"\x00"+b.ChildDir)
-	})
+	slices.SortFunc(sorted, compareActiveVirtualChildRows)
 
 	hash := sha256.New()
 	for _, row := range sorted {
@@ -680,8 +708,8 @@ func (w *activeVirtualOverlayWriter) appendChild(
 		append(ctx, func(batch driver.Batch) error {
 			return batch.Append(
 				row.ActiveSetID,
-				row.ParentDir,
-				row.ChildDir,
+				row.ParentVirtualID,
+				row.ChildVirtualID,
 				row.MountPath,
 				row.IsMountRootBox,
 				row.ChildCount,
@@ -778,7 +806,6 @@ type dgutaWriter struct {
 
 	batchSize           int
 	projectionBatchSize int
-	childrenBatchSize   int
 
 	mountPath string
 	updatedAt time.Time
@@ -786,10 +813,7 @@ type dgutaWriter struct {
 
 	prepared bool
 
-	childrenBatch driver.Batch
-	childOpenedAt time.Time
-	batchNow      func() time.Time
-	childFlushed  bool
+	batchNow func() time.Time
 
 	importPhaseRecorder func(string, time.Duration)
 
@@ -800,6 +824,7 @@ type dgutaWriter struct {
 	stagedActiveSetID string
 
 	previousDGUTARows dgutaRecordRows
+	catalog           catalogWriter
 	dirProjection     mountDirProjectionWriter
 
 	selectedDerivedIndexes []dgutaDerivedIndexWriter
@@ -812,7 +837,6 @@ func (w *dgutaWriter) SetBatchSize(batchSize int) {
 	if batchSize > 0 {
 		w.batchSize = batchSize
 		w.projectionBatchSize = projectionBatchSizeFor(batchSize)
-		w.childrenBatchSize = childrenBatchSizeFor(batchSize)
 	}
 }
 
@@ -822,14 +846,6 @@ func projectionBatchSizeFor(batchSize int) int {
 	}
 
 	return min(batchSize, defaultProjectionBatchSize)
-}
-
-func childrenBatchSizeFor(batchSize int) int {
-	if batchSize <= 0 {
-		return defaultChildrenBatchSize
-	}
-
-	return min(batchSize, defaultChildrenBatchSize)
 }
 
 func (w *dgutaWriter) SetProjectionBatchSize(batchSize int) {
@@ -874,10 +890,12 @@ func (w *dgutaWriter) Add(dguta db.RecordDGUTA) error {
 }
 
 func (w *dgutaWriter) addReadyRecord(ctx context.Context, dguta db.RecordDGUTA) error {
-	rawParentDir := string(dguta.Dir.AppendTo(make([]byte, 0, dguta.Dir.Len())))
-	parentDir := canonicalPathForMount(w.mountPath, rawParentDir)
-	children := w.canonicalChildrenForParent(parentDir, dguta.Children)
-	childCount := max(dguta.ChildCount, uint64(len(children)))
+	rawParentDir, parentDir, record := dgutaRecordContextForRecord(w.mountPath, dguta)
+	childCount := max(dguta.ChildCount, uint64(len(dguta.Children)))
+
+	if err := w.appendCatalogRow(ctx, dguta, parentDir); err != nil {
+		return err
+	}
 
 	appendedGUTAs, err := w.appendDGUTARows(dguta, rawParentDir, parentDir)
 	if err != nil {
@@ -886,7 +904,7 @@ func (w *dgutaWriter) addReadyRecord(ctx context.Context, dguta db.RecordDGUTA) 
 
 	if err := w.appendMountDirProjectionRows(
 		ctx,
-		parentDir,
+		record,
 		appendedGUTAs,
 		childCount,
 		w.previousDGUTARows.ages(),
@@ -894,38 +912,11 @@ func (w *dgutaWriter) addReadyRecord(ctx context.Context, dguta db.RecordDGUTA) 
 		return err
 	}
 
-	if err := w.appendChildrenRows(ctx, children, parentDir); err != nil {
-		return err
-	}
-
-	if err := w.appendSelectedDerivedIndexRows(ctx, parentDir, appendedGUTAs, children, childCount); err != nil {
+	if err := w.appendSelectedDerivedIndexRows(ctx, record, appendedGUTAs, childCount); err != nil {
 		return err
 	}
 
 	return w.flushFullBatches()
-}
-
-func (w *dgutaWriter) AddChildren(parent *summary.DirectoryPath, children []string) error {
-	if err := w.validateAddChildren(parent); err != nil {
-		return err
-	}
-
-	ctx, cancel := configQueryContext(w.cfg)
-	defer cancel()
-
-	if err := w.ensureWriteReady(ctx); err != nil {
-		return err
-	}
-
-	rawParentDir := string(parent.AppendTo(make([]byte, 0, parent.Len())))
-	parentDir := canonicalPathForMount(w.mountPath, rawParentDir)
-	children = w.canonicalChildrenForParent(parentDir, children)
-
-	if err := w.appendChildrenRows(ctx, children, parentDir); err != nil {
-		return err
-	}
-
-	return w.sendFullChildrenBatchIfFull()
 }
 
 func (w *dgutaWriter) Close() error {
@@ -1010,22 +1001,6 @@ func (w *dgutaWriter) validateAdd(dguta db.RecordDGUTA) error {
 	}
 
 	if dguta.Dir == nil {
-		return errDirRequired
-	}
-
-	return nil
-}
-
-func (w *dgutaWriter) validateAddChildren(parent *summary.DirectoryPath) error {
-	if w.mountPath == "" {
-		return errMountPathRequired
-	}
-
-	if w.updatedAt.IsZero() {
-		return errUpdatedAtRequired
-	}
-
-	if parent == nil {
 		return errDirRequired
 	}
 
@@ -1163,9 +1138,8 @@ func (w *dgutaWriter) schema3SnapshotRowCounts(ctx context.Context) (schema3Snap
 		name string
 		dest *uint64
 	}{
+		{name: "wrstat_dirs", dest: &counts.dirsRows},
 		{name: "wrstat_dir_facts", dest: &counts.dirFactsRows},
-		{name: "wrstat_parent_facts", dest: &counts.parentFactsRows},
-		{name: "wrstat_children", dest: &counts.childrenRows},
 		{name: "wrstat_child_filter_all", dest: &counts.childFilterAllRows},
 		{name: "wrstat_dir_filter_all", dest: &counts.dirFilterAllRows},
 	} {
@@ -1217,9 +1191,8 @@ func (w *dgutaWriter) insertSchema3SnapshotSet(ctx context.Context, counts schem
 		w.mountPath,
 		w.snapshot.String(),
 		currentSchemaVersion,
+		counts.dirsRows,
 		counts.dirFactsRows,
-		counts.parentFactsRows,
-		counts.childrenRows,
 		counts.childFilterAllRows,
 		counts.dirFilterAllRows,
 		manifest,
@@ -1233,13 +1206,12 @@ func (w *dgutaWriter) insertSchema3SnapshotSet(ctx context.Context, counts schem
 
 func schema3SnapshotManifestSHA256(mount activeMount, counts schema3SnapshotRowCounts) string {
 	input := fmt.Sprintf(
-		"%s|%s|%d|%d|%d|%d|%d|%d",
+		"%s|%s|%d|%d|%d|%d|%d",
 		mount.mountPath,
 		mount.snapshotID,
 		currentSchemaVersion,
+		counts.dirsRows,
 		counts.dirFactsRows,
-		counts.parentFactsRows,
-		counts.childrenRows,
 		counts.childFilterAllRows,
 		counts.dirFilterAllRows,
 	)
@@ -1340,18 +1312,6 @@ func (w *dgutaWriter) writeActiveVirtualOverlay(
 	}
 
 	return activeVirtualSetRowForRows(activeSetID, rows, summaryRows, filterRows, childRows, refreshedAt), nil
-}
-
-func activeVirtualRowsForMounts(
-	activeSetID string,
-	mounts []activeMount,
-	refreshedAt time.Time,
-) ([]activeVirtualSummaryRow, []activeVirtualFilterAllRow, []activeVirtualChildRow) {
-	childRows := activeVirtualChildRowsForMounts(activeSetID, mounts, refreshedAt)
-	summaryRows := activeVirtualSummaryRowsForChildren(activeSetID, mounts, childRows, refreshedAt)
-	filterRows := activeVirtualFilterRowsForSummaries(summaryRows)
-
-	return summaryRows, filterRows, childRows
 }
 
 func appendActiveVirtualOverlayRows(
@@ -1606,8 +1566,8 @@ func (w *dgutaWriter) readActiveVirtualChildValidation(
 	for rows.Next() {
 		row := activeVirtualChildRow{ActiveSetID: activeSetID}
 		if err := rows.Scan(
-			&row.ParentDir,
-			&row.ChildDir,
+			&row.ParentVirtualID,
+			&row.ChildVirtualID,
 			&row.MountPath,
 			&row.IsMountRootBox,
 			&row.ChildCount,
@@ -1631,8 +1591,8 @@ func writeActiveVirtualChildChecksum(hash hashWriter, row activeVirtualChildRow)
 	writeChecksumFields(
 		hash,
 		row.ActiveSetID,
-		row.ParentDir,
-		row.ChildDir,
+		row.ParentVirtualID,
+		row.ChildVirtualID,
 		row.MountPath,
 		row.IsMountRootBox,
 		row.ChildCount,
@@ -1783,7 +1743,7 @@ func (w *dgutaWriter) snapshotCleanupContext(ctx context.Context) (context.Conte
 
 func (w *dgutaWriter) abortAllBatches() error {
 	return errors.Join(
-		abortBatch(&w.childrenBatch, "children"),
+		w.catalog.abort(),
 		w.dirProjection.abortAll(),
 		w.abortSelectedDerivedIndexes(),
 	)
@@ -1826,11 +1786,10 @@ func dropSnapshotPartitionsForMount(
 
 func allPartitionDropQueries() []string {
 	return []string{
-		dropChildrenPartitionQuery,
+		dropDirsPartitionQuery,
 		dropFilesPartitionQuery,
 		dropDirSummaryPartitionQuery,
 		dropDirFilterAgeAllPartitionQuery,
-		dropParentFactsPartitionQuery,
 		dropChildFilterAllPartitionQuery,
 		dropDirFilterAllPartitionQuery,
 		dropSchema3SnapshotSetPartitionQuery,
@@ -1892,6 +1851,7 @@ func refuseActiveSnapshotRewrite(
 }
 
 func (w *dgutaWriter) prepareWriteBatches(ctx context.Context) error {
+	w.catalog = *newCatalogWriter(w.conn, w.effectiveProjectionBatchSize())
 	w.dirProjection = prepareMountDirProjectionWriter(ctx, w.conn)
 	w.selectedDerivedIndexes = append(w.selectedDerivedIndexes, newDirFilterAgeAllWriter(
 		w.conn,
@@ -1903,24 +1863,9 @@ func (w *dgutaWriter) prepareWriteBatches(ctx context.Context) error {
 		w.effectiveProjectionBatchSize(),
 		w.dirProjection.refreshedAt,
 	))
-	w.selectedDerivedIndexes = append(w.selectedDerivedIndexes, w.selectedNavigationFactWriters()...)
 	w.prepared = true
 
 	return nil
-}
-
-func (w *dgutaWriter) selectedNavigationFactWriters() []dgutaDerivedIndexWriter {
-	if DefaultNavigationObject() != NavigationObjectParentFacts {
-		return nil
-	}
-
-	return []dgutaDerivedIndexWriter{
-		newParentFactsWriter(
-			w.conn,
-			w.effectiveProjectionBatchSize(),
-			w.dirProjection.refreshedAt,
-		),
-	}
 }
 
 func (w *dgutaWriter) dropNewSnapshotPartitions(ctx context.Context) error {
@@ -2093,123 +2038,9 @@ func (w *dgutaWriter) isConsecutiveCanonicalDGUTADuplicate(rawDir, canonicalDir 
 	return ok
 }
 
-func (w *dgutaWriter) appendChildrenRows(
-	ctx context.Context,
-	children []string,
-	parentDir string,
-) error {
-	snapshotID := w.snapshot.String()
-
-	return w.timeImportPhase(importPhaseChildrenInsert, func() error {
-		for _, child := range children {
-			_, err := w.appendCanonicalChildRowWithContext(ctx, snapshotID, parentDir, child)
-			if err != nil {
-				return err
-			}
-		}
-
-		return nil
-	})
-}
-
-func (w *dgutaWriter) appendCanonicalChildRowWithContext(
-	ctx context.Context,
-	snapshotID, parentDir, child string,
-) (bool, error) {
-	if w.writeErr != nil {
-		return false, w.writeErr
-	}
-
-	if child == "" {
-		return false, nil
-	}
-
-	if err := w.childrenBlockWriter().append(ctx, func(batch driver.Batch) error {
-		return batch.Append(w.mountPath, snapshotID, parentDir, child)
-	}); err != nil {
-		return false, err
-	}
-
-	return true, nil
-}
-
-func (w *dgutaWriter) canonicalChildrenForParent(parentDir string, children []string) []string {
-	out := make([]string, 0, len(children))
-
-	for _, child := range children {
-		child = childPathForParent(parentDir, child)
-
-		child = canonicalPathForMount(w.mountPath, child)
-		if child != "" {
-			out = append(out, child)
-		}
-	}
-
-	return out
-}
-
-func (w *dgutaWriter) appendChildRow(snapshotID, parentDir, child string) (bool, error) {
-	return w.appendChildRowWithContext(context.Background(), snapshotID, parentDir, child)
-}
-
-func childPathForParent(parentDir, child string) string {
-	child = strings.TrimSuffix(child, "/")
-	if child == "" {
-		return ""
-	}
-
-	if strings.HasPrefix(child, "/") {
-		return child
-	}
-
-	return parentDir + child
-}
-
-func (w *dgutaWriter) appendChildRowWithContext(
-	ctx context.Context,
-	snapshotID, parentDir, child string,
-) (bool, error) {
-	if w.writeErr != nil {
-		return false, w.writeErr
-	}
-
-	child = childPathForParent(parentDir, child)
-
-	child = canonicalPathForMount(w.mountPath, child)
-	if child == "" {
-		return false, nil
-	}
-
-	if err := w.childrenBlockWriter().append(ctx, func(batch driver.Batch) error {
-		return batch.Append(w.mountPath, snapshotID, parentDir, child)
-	}); err != nil {
-		return false, err
-	}
-
-	return true, nil
-}
-
-func (w *dgutaWriter) childrenBlockWriter() *importBlockWriter {
-	return &importBlockWriter{
-		conn:        w.conn,
-		query:       insertChildrenQuery,
-		name:        "children",
-		batch:       &w.childrenBatch,
-		openedAt:    &w.childOpenedAt,
-		writeErr:    &w.writeErr,
-		batchSize:   w.effectiveChildrenBatchSize(),
-		notPrepared: errChildrenBatchNotPrepared,
-		now:         w.importBatchNow,
-	}
-}
-
-func (w *dgutaWriter) sendFullChildrenBatchIfFull() error {
-	return w.childrenBlockWriter().sendIfFull()
-}
-
 func (w *dgutaWriter) appendMountDirProjectionRows(
 	ctx context.Context,
-	parentDir string,
+	record dgutaRecordContext,
 	gutas db.GUTAs,
 	childCount uint64,
 	recordAges []db.DirGUTAge,
@@ -2218,11 +2049,11 @@ func (w *dgutaWriter) appendMountDirProjectionRows(
 		return w.dirProjection.appendRecordWithContext(
 			ctx,
 			w.activeMount(),
-			parentDir,
+			record,
 			gutas,
 			childCount,
 			recordAges,
-			w.compactInternalDGUTAAges(parentDir),
+			w.compactInternalDGUTAAges(record.canonicalDir),
 			w.effectiveProjectionBatchSize(),
 		)
 	})
@@ -2235,13 +2066,12 @@ func (w *dgutaWriter) appendMountDirProjectionRows(
 
 func (w *dgutaWriter) appendSelectedDerivedIndexRows(
 	ctx context.Context,
-	parentDir string,
+	record dgutaRecordContext,
 	gutas db.GUTAs,
-	children []string,
 	childCount uint64,
 ) error {
 	for _, writer := range w.selectedDerivedIndexes {
-		err := w.appendSelectedDerivedIndexRow(ctx, writer, parentDir, gutas, children, childCount)
+		err := w.appendSelectedDerivedIndexRow(ctx, writer, record, gutas, childCount)
 		if err != nil {
 			w.writeErr = err
 
@@ -2255,18 +2085,16 @@ func (w *dgutaWriter) appendSelectedDerivedIndexRows(
 func (w *dgutaWriter) appendSelectedDerivedIndexRow(
 	ctx context.Context,
 	writer dgutaDerivedIndexWriter,
-	parentDir string,
+	record dgutaRecordContext,
 	gutas db.GUTAs,
-	children []string,
 	childCount uint64,
 ) error {
 	appendRecord := func() error {
 		return writer.appendRecord(
 			ctx,
 			w.activeMount(),
-			parentDir,
+			record,
 			gutas,
-			children,
 			childCount,
 			w.previousDGUTARows.ages(),
 		)
@@ -2280,6 +2108,10 @@ func (w *dgutaWriter) appendSelectedDerivedIndexRow(
 }
 
 func (w *dgutaWriter) flushFullBatches() error {
+	if err := w.catalog.sendFullBatchIfFull(); err != nil {
+		return err
+	}
+
 	if err := w.dirProjection.sendFullBatchIfFull(
 		&w.dirProjection.summaryBatch,
 		&w.dirProjection.summaryOpenedAt,
@@ -2289,18 +2121,14 @@ func (w *dgutaWriter) flushFullBatches() error {
 		return err
 	}
 
-	if err := w.sendFullChildrenBatchIfFull(); err != nil {
-		return err
-	}
-
 	return nil
 }
 
-func (w *dgutaWriter) flushAllBatches() error {
-	return w.flushAllBatchesWithContext(context.Background())
-}
-
 func (w *dgutaWriter) flushAllBatchesWithContext(ctx context.Context) error {
+	if err := w.catalog.flush(ctx); err != nil {
+		return err
+	}
+
 	for _, slot := range w.batchSlots() {
 		if slot.rows() == 0 && !slot.wasFlushed() {
 			_ = abortBatch(slot.batch, slot.name) //nolint:errcheck // Best-effort release; preserve close error behaviour.
@@ -2316,7 +2144,7 @@ func (w *dgutaWriter) flushAllBatchesWithContext(ctx context.Context) error {
 	return w.flushSelectedDerivedIndexes(ctx)
 }
 
-func (w *dgutaWriter) batchSlots() [2]dgutaBatchSlot {
+func (w *dgutaWriter) batchSlots() [1]dgutaBatchSlot {
 	return [...]dgutaBatchSlot{
 		{
 			batch:     &w.dirProjection.summaryBatch,
@@ -2325,14 +2153,6 @@ func (w *dgutaWriter) batchSlots() [2]dgutaBatchSlot {
 			batchSize: w.effectiveProjectionBatchSize(),
 			phase:     importPhaseDirProjectionWrite,
 			name:      "dir facts",
-		},
-		{
-			batch:     &w.childrenBatch,
-			openedAt:  &w.childOpenedAt,
-			flushed:   &w.childFlushed,
-			batchSize: w.effectiveChildrenBatchSize(),
-			phase:     importPhaseChildrenInsert,
-			name:      "children",
 		},
 	}
 }
@@ -2382,14 +2202,6 @@ func (w *dgutaWriter) effectiveProjectionBatchSize() int {
 	return projectionBatchSizeFor(w.batchSize)
 }
 
-func (w *dgutaWriter) effectiveChildrenBatchSize() int {
-	if w.childrenBatchSize > 0 {
-		return w.childrenBatchSize
-	}
-
-	return childrenBatchSizeFor(w.batchSize)
-}
-
 func (w *dgutaWriter) sendAndCloseBatch(slot dgutaBatchSlot) error {
 	return w.timeImportPhase(slot.phase, func() error {
 		return (&importBlockWriter{
@@ -2431,7 +2243,6 @@ func NewDGUTAWriter(cfg Config) (db.DGUTAWriter, error) {
 		conn:                conn,
 		batchSize:           defaultBatchSize,
 		projectionBatchSize: projectionBatchSizeFor(defaultBatchSize),
-		childrenBatchSize:   childrenBatchSizeFor(defaultBatchSize),
 	}, nil
 }
 

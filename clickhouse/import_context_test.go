@@ -160,7 +160,7 @@ func TestClickHouseImportBatchContexts(t *testing.T) {
 
 		waitForContextDone(ctx)
 
-		next, err := sendAndReprepareBatch(ctx, conn, batch, insertChildrenQuery)
+		next, err := sendAndReprepareBatch(ctx, conn, batch, insertDirsQuery)
 		So(err, ShouldBeNil)
 		So(next, ShouldNotBeNil)
 		So(batch.sends, ShouldEqual, 1)
@@ -176,10 +176,12 @@ func TestClickHouseImportBatchContexts(t *testing.T) {
 		waitForContextDone(ctx)
 
 		queries := []string{
+			insertDirsQuery,
 			insertDGUTAQuery,
-			insertChildrenQuery,
 			insertMountDirSummaryQuery,
 			insertDirFilterAgeAllQuery,
+			insertChildFilterAllQuery,
+			insertDirFilterAllQuery,
 			insertMountDirSummarySetQuery,
 			insertFilesBatchQuery,
 			insertBasedirsGroupUsageQuery,
@@ -219,7 +221,7 @@ func TestClickHouseImportBatchContexts(t *testing.T) {
 		writer.buf.appendRow(fileIngestRow{
 			mountPath:    testMountPath,
 			snapshot:     uuid.New(),
-			parentDir:    testMountPath,
+			dirID:        1,
 			name:         "late.txt",
 			ext:          "txt",
 			entryType:    1,

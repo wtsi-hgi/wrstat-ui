@@ -1,3 +1,6 @@
+//go:build legacy_parent_facts
+// +build legacy_parent_facts
+
 /*******************************************************************************
  * Copyright (c) 2026 Genome Research Ltd.
  *
@@ -306,9 +309,8 @@ func insertSnapshotCleanupSchema3Rows(
 	), ShouldBeNil)
 
 	counts := schema3SnapshotRowCounts{
+		dirsRows:           1,
 		dirFactsRows:       1,
-		parentFactsRows:    1,
-		childrenRows:       1,
 		childFilterAllRows: 1,
 		dirFilterAllRows:   1,
 	}
@@ -318,9 +320,8 @@ func insertSnapshotCleanupSchema3Rows(
 		testMountPath,
 		sid,
 		currentSchemaVersion,
+		counts.dirsRows,
 		counts.dirFactsRows,
-		counts.parentFactsRows,
-		counts.childrenRows,
 		counts.childFilterAllRows,
 		counts.dirFilterAllRows,
 		schema3SnapshotManifestSHA256(activeMount{

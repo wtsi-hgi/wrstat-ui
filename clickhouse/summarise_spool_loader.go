@@ -105,6 +105,12 @@ type historyLastDateKey struct {
 	gid       uint32
 }
 
+type summariseSpoolVirtualDirKey struct {
+	mountPath  string
+	snapshotID string
+	virtualID  uint32
+}
+
 type summariseSpoolLoader struct {
 	cfg                 Config
 	conn                driver.Conn
@@ -115,6 +121,7 @@ type summariseSpoolLoader struct {
 	importPhaseRecorder func(string, time.Duration)
 	loadedRows          map[string]uint64
 	groupUsageDates     map[uint32]finaliseQuotaDates
+	virtualDirs         map[summariseSpoolVirtualDirKey]string
 }
 
 func newSummariseSpoolLoader(
@@ -313,19 +320,15 @@ func decodeSpoolActiveSetIDs[T any](
 }
 
 func (l *summariseSpoolLoader) loadTables(ctx context.Context) error { //nolint:funlen,gocyclo,gocognit,cyclop
+	if err := l.loadDirs(ctx); err != nil {
+		return err
+	}
+
 	if err := l.loadFiles(ctx); err != nil {
 		return err
 	}
 
 	if err := l.loadDirFacts(ctx); err != nil {
-		return err
-	}
-
-	if err := l.loadChildren(ctx); err != nil {
-		return err
-	}
-
-	if err := l.loadParentFacts(ctx); err != nil {
 		return err
 	}
 
@@ -407,10 +410,9 @@ func (l *summariseSpoolLoader) loadTables(ctx context.Context) error { //nolint:
 
 func summariseSpoolSnapshotStageTables() []string {
 	return []string{
+		chspool.TableDirs,
 		chspool.TableFiles,
 		chspool.TableDirFacts,
-		chspool.TableChildren,
-		chspool.TableParentFacts,
 		chspool.TableDirFilterAgeAll,
 		chspool.TableChildFilterAll,
 		chspool.TableDirFilterAll,
@@ -434,6 +436,24 @@ func summariseSpoolBasedirsTables() []string {
 	}
 }
 
+func (l *summariseSpoolLoader) loadDirs(parent context.Context) error {
+	return loadSimpleSpoolTable(parent, l, chspool.TableDirs, func(batch driver.Batch, row chspool.DirRow) error {
+		return batch.Append(
+			row.MountPath,
+			row.SnapshotID,
+			row.DirID,
+			row.ParentID,
+			row.SubtreeEnd,
+			row.Depth,
+			row.Name,
+			row.FullPath,
+			row.ChildDirCount,
+			row.ChildFileCount,
+			row.PathHash,
+		)
+	})
+}
+
 func (l *summariseSpoolLoader) loadFiles(parent context.Context) error { //nolint:funlen
 	return l.loadTable(parent, chspool.TableFiles, func(ctx context.Context, writer *importBlockWriter) (uint64, error) {
 		sid := l.snapshot
@@ -447,7 +467,7 @@ func (l *summariseSpoolLoader) loadFiles(parent context.Context) error { //nolin
 				return batch.Append(
 					row.MountPath,
 					sid,
-					row.ParentDir,
+					row.DirID,
 					row.Name,
 					row.Ext,
 					row.EntryType,
@@ -482,7 +502,9 @@ func (l *summariseSpoolLoader) loadDirFacts(parent context.Context) error { //no
 				return batch.Append(
 					row.MountPath,
 					row.SnapshotID,
-					row.Dir,
+					row.DirID,
+					row.ParentID,
+					row.SubtreeEnd,
 					row.UpdatedAt,
 					row.AllCount,
 					row.AllSize,
@@ -522,12 +544,6 @@ func (l *summariseSpoolLoader) loadDirFacts(parent context.Context) error { //no
 	})
 }
 
-func (l *summariseSpoolLoader) loadChildren(parent context.Context) error {
-	return loadSimpleSpoolTable(parent, l, chspool.TableChildren, func(batch driver.Batch, row chspool.ChildRow) error {
-		return batch.Append(row.MountPath, row.SnapshotID, row.ParentDir, row.Child)
-	})
-}
-
 func loadSimpleSpoolTable[T any](
 	parent context.Context,
 	l *summariseSpoolLoader,
@@ -561,7 +577,8 @@ func (l *summariseSpoolLoader) loadDirFilterAgeAll(parent context.Context) error
 				row.GID,
 				row.UID,
 				row.FT,
-				row.Dir,
+				row.DirID,
+				row.SubtreeEnd,
 				row.Count,
 				row.Size,
 				row.AtimeMin,
@@ -582,12 +599,12 @@ func (l *summariseSpoolLoader) loadChildFilterAll(parent context.Context) error 
 		return batch.Append(
 			row.MountPath,
 			row.SnapshotID,
-			row.ParentDir,
+			row.ParentID,
 			row.Age,
 			row.GID,
 			row.UID,
 			row.FT,
-			row.Dir,
+			row.DirID,
 			row.Count,
 			row.Size,
 			row.AtimeMin,
@@ -615,8 +632,8 @@ func (l *summariseSpoolLoader) loadDirFilterAll(parent context.Context) error { 
 			row.GID,
 			row.UID,
 			row.FT,
-			row.Dir,
-			row.ParentDir,
+			row.DirID,
+			row.SubtreeEnd,
 			row.Count,
 			row.Size,
 			row.AtimeMin,
@@ -626,52 +643,6 @@ func (l *summariseSpoolLoader) loadDirFilterAll(parent context.Context) error { 
 			row.FilterChildCount,
 			row.ChildCount,
 			row.HasFilterChildren,
-			row.HasChildren,
-			row.RefreshedAt,
-		)
-	})
-}
-
-func (l *summariseSpoolLoader) loadParentFacts(parent context.Context) error { //nolint:funlen
-	return loadSimpleSpoolTable(parent, l, chspool.TableParentFacts, func(
-		batch driver.Batch,
-		row chspool.ParentFactRow,
-	) error {
-		return batch.Append(
-			row.MountPath,
-			row.SnapshotID,
-			row.ParentDir,
-			row.Dir,
-			row.UpdatedAt,
-			row.AllCount,
-			row.AllSize,
-			row.AllAtimeMin,
-			row.AllMtimeMax,
-			row.AllAtimeBuckets,
-			row.AllMtimeBuckets,
-			row.AllUIDs,
-			row.AllGIDs,
-			row.AllFT,
-			row.FileCount,
-			row.FileSize,
-			row.FileAtimeMin,
-			row.FileMtimeMax,
-			row.FileAtimeBuckets,
-			row.FileMtimeBuckets,
-			row.FileUIDs,
-			row.FileGIDs,
-			row.FileFT,
-			row.GIDs,
-			row.UIDs,
-			row.FTs,
-			row.Ages,
-			row.Counts,
-			row.Sizes,
-			row.AtimeMins,
-			row.MtimeMaxs,
-			row.AtimeBuckets,
-			row.MtimeBuckets,
-			row.ChildCount,
 			row.HasChildren,
 			row.RefreshedAt,
 		)
@@ -698,9 +669,8 @@ func (l *summariseSpoolLoader) loadSchema3SnapshotSets(parent context.Context) e
 			row.MountPath,
 			row.SnapshotID,
 			row.Schema3Version,
+			row.DirsRows,
 			row.DirFactsRows,
-			row.ParentFactsRows,
-			row.ChildrenRows,
 			row.ChildFilterAllRows,
 			row.DirFilterAllRows,
 			row.ManifestSHA256,
@@ -714,9 +684,14 @@ func (l *summariseSpoolLoader) loadActiveVirtualSummaries(parent context.Context
 		batch driver.Batch,
 		row chspool.ActiveVirtualSummaryRow,
 	) error {
+		dir, err := l.resolveSpoolVirtualDir(parent, row.MountPath, row.SnapshotID, row.VirtualID)
+		if err != nil {
+			return err
+		}
+
 		return batch.Append(
 			row.ActiveSetID,
-			row.Dir,
+			dir,
 			row.MountPath,
 			row.IsMountRootBox,
 			row.UpdatedAt,
@@ -742,9 +717,14 @@ func (l *summariseSpoolLoader) loadActiveVirtualFilterAll(parent context.Context
 		batch driver.Batch,
 		row chspool.ActiveVirtualFilterAllRow,
 	) error {
+		dir, err := l.resolveSpoolVirtualDir(parent, l.manifest.MountPath, l.manifest.SnapshotID, row.VirtualID)
+		if err != nil {
+			return err
+		}
+
 		return batch.Append(
 			row.ActiveSetID,
-			row.Dir,
+			dir,
 			row.Age,
 			row.GID,
 			row.UID,
@@ -769,14 +749,97 @@ func (l *summariseSpoolLoader) loadActiveVirtualChildren(parent context.Context)
 	) error {
 		return batch.Append(
 			row.ActiveSetID,
-			row.ParentDir,
-			row.ChildDir,
+			row.ParentVirtualID,
+			row.ChildVirtualID,
 			row.MountPath,
 			row.IsMountRootBox,
 			row.ChildCount,
 			row.RefreshedAt,
 		)
 	})
+}
+
+func (l *summariseSpoolLoader) resolveSpoolVirtualDir(
+	parent context.Context,
+	mountPath string,
+	snapshotID string,
+	virtualID uint32,
+) (string, error) {
+	key := l.spoolVirtualDirKey(mountPath, snapshotID, virtualID)
+	if dir, ok := l.cachedSpoolVirtualDir(key); ok {
+		return dir, nil
+	}
+
+	dir, err := l.querySpoolVirtualDir(parent, key)
+	if err != nil {
+		return "", err
+	}
+
+	l.cacheSpoolVirtualDir(key, dir)
+
+	return dir, nil
+}
+
+func (l *summariseSpoolLoader) spoolVirtualDirKey(
+	mountPath string,
+	snapshotID string,
+	virtualID uint32,
+) summariseSpoolVirtualDirKey {
+	if mountPath == "" {
+		mountPath = l.manifest.MountPath
+	}
+
+	if snapshotID == "" {
+		snapshotID = l.manifest.SnapshotID
+	}
+
+	return summariseSpoolVirtualDirKey{
+		mountPath:  mountPath,
+		snapshotID: snapshotID,
+		virtualID:  virtualID,
+	}
+}
+
+func (l *summariseSpoolLoader) cachedSpoolVirtualDir(key summariseSpoolVirtualDirKey) (string, bool) {
+	if l.virtualDirs == nil {
+		return "", false
+	}
+
+	dir, ok := l.virtualDirs[key]
+
+	return dir, ok
+}
+
+func (l *summariseSpoolLoader) querySpoolVirtualDir(
+	parent context.Context,
+	key summariseSpoolVirtualDirKey,
+) (string, error) {
+	ctx, cancel := l.queryContext(parent)
+	defer cancel()
+
+	var dir string
+
+	err := l.conn.QueryRow(
+		ctx,
+		"SELECT full_path FROM wrstat_dirs WHERE mount_path = ? AND snapshot_id = toUUID(?) "+
+			"AND toUInt32(path_hash) = ? LIMIT 1",
+		key.mountPath,
+		key.snapshotID,
+		key.virtualID,
+	).Scan(&dir)
+	if err != nil {
+		return "", fmt.Errorf("clickhouse: failed to resolve active virtual directory id %d: %w", key.virtualID, err)
+	}
+
+	return ensureTrailingSlash(dir), nil
+}
+
+func (l *summariseSpoolLoader) cacheSpoolVirtualDir(key summariseSpoolVirtualDirKey, dir string) {
+	if l.virtualDirs == nil {
+		l.virtualDirs = make(map[summariseSpoolVirtualDirKey]string)
+	}
+
+	l.virtualDirs[key] = dir
 }
 
 func (l *summariseSpoolLoader) loadActiveVirtualSets(parent context.Context) error {
@@ -1133,7 +1196,7 @@ func (l *summariseSpoolLoader) loadBasedirsGroupUsage(parent context.Context) er
 						row.MountPath,
 						row.SnapshotID,
 						row.GID,
-						row.BaseDir,
+						row.BaseDirExternal,
 						row.Age,
 						ensureNonNilUInt32s(row.UIDs),
 						row.UsageSize,
@@ -1211,7 +1274,7 @@ func (l *summariseSpoolLoader) loadBasedirsUserUsage(parent context.Context) err
 						row.MountPath,
 						row.SnapshotID,
 						row.UID,
-						row.BaseDir,
+						row.BaseDirExternal,
 						row.Age,
 						ensureNonNilUInt32s(row.GIDs),
 						row.UsageSize,
@@ -1251,10 +1314,10 @@ func (l *summariseSpoolLoader) loadBasedirsSubdirs(parent context.Context, table
 					row.MountPath,
 					row.SnapshotID,
 					row.ID,
-					row.BaseDir,
+					row.BaseDirExternal,
 					row.Age,
 					row.Pos,
-					row.SubDir,
+					row.SubDirExternal,
 					row.NumFiles,
 					row.SizeFiles,
 					row.LastModified,
@@ -1282,14 +1345,14 @@ func (l *summariseSpoolLoader) loadTable(
 
 func summariseSpoolTableQuery(table string) (string, string, error) { //nolint:gocyclo,cyclop,funlen
 	switch table {
+	case chspool.TableDirs:
+		return insertDirsQuery, summariseSpoolLoadPhasePrefix + table, nil
 	case chspool.TableFiles:
 		return insertFilesBatchQuery, summariseSpoolLoadPhasePrefix + table, nil
 	case chspool.TableDirFacts:
 		return insertMountDirSummaryQuery, summariseSpoolLoadPhasePrefix + table, nil
 	case chspool.TableDirFilterAgeAll:
 		return insertDirFilterAgeAllQuery, summariseSpoolLoadPhasePrefix + table, nil
-	case chspool.TableParentFacts:
-		return insertParentFactsQuery, importPhaseParentFactsInsert, nil
 	case chspool.TableChildFilterAll:
 		return insertChildFilterAllQuery, importPhaseFullFilterAllInsert, nil
 	case chspool.TableDirFilterAll:
@@ -1304,8 +1367,6 @@ func summariseSpoolTableQuery(table string) (string, string, error) { //nolint:g
 		return insertActiveVirtualChildQuery, importPhaseActiveVirtualInsert, nil
 	case chspool.TableActiveVirtualSets:
 		return insertActiveVirtualSetQuery, importPhaseActiveVirtualReady, nil
-	case chspool.TableChildren:
-		return insertChildrenQuery, summariseSpoolLoadPhasePrefix + table, nil
 	case chspool.TableDirProjectionSets:
 		return insertMountDirSummarySetQuery, summariseSpoolLoadPhasePrefix + table, nil
 	case chspool.TableBasedirsGroupUsage:
@@ -1429,8 +1490,7 @@ func (l *summariseSpoolLoader) zeroContributionActiveVirtualCandidate() bool {
 	tables := l.manifest.Tables
 
 	return tables[chspool.TableDirFacts].Rows == 0 &&
-		tables[chspool.TableDirFilterAll].Rows == 0 &&
-		tables[chspool.TableChildren].Rows == 0
+		tables[chspool.TableDirFilterAll].Rows == 0
 }
 
 func (l *summariseSpoolLoader) writeZeroContributionActiveVirtualRows( //nolint:gocyclo,funlen
@@ -1680,16 +1740,16 @@ func dropActiveVirtualPartitionsForSet(ctx context.Context, conn driver.Conn, ac
 
 func summariseSpoolBatchSizeFor(table string) int {
 	switch table {
-	case chspool.TableDirFacts,
+	case chspool.TableDirs,
+		chspool.TableDirFacts,
 		chspool.TableDirFilterAgeAll,
-		chspool.TableParentFacts,
 		chspool.TableChildFilterAll,
 		chspool.TableDirFilterAll,
 		chspool.TableActiveVirtualSummaries,
 		chspool.TableActiveVirtualFilterAll:
 		return projectionBatchSizeFor(defaultBatchSize)
-	case chspool.TableChildren, chspool.TableActiveVirtualChildren:
-		return childrenBatchSizeFor(defaultBatchSize)
+	case chspool.TableActiveVirtualChildren:
+		return defaultBatchSize
 	default:
 		return defaultBatchSize
 	}
@@ -1780,18 +1840,13 @@ func isActiveVirtualSpoolTable(table string) bool {
 
 func summariseSpoolSnapshotCountQueries() map[string]string { //nolint:funlen
 	return map[string]string{
+		chspool.TableDirs:  countLoadedSpoolRowsQuery(chspool.TableDirs),
 		chspool.TableFiles: countLoadedSpoolRowsQuery(chspool.TableFiles),
 		chspool.TableDirFacts: countLoadedSpoolRowsQuery(
 			chspool.TableDirFacts,
 		),
 		chspool.TableDirFilterAgeAll: countLoadedSpoolRowsQuery(
 			chspool.TableDirFilterAgeAll,
-		),
-		chspool.TableParentFacts: countLoadedSpoolRowsQuery(
-			chspool.TableParentFacts,
-		),
-		chspool.TableChildren: countLoadedSpoolRowsQuery(
-			chspool.TableChildren,
 		),
 		chspool.TableChildFilterAll: countLoadedSpoolRowsQuery(
 			chspool.TableChildFilterAll,
@@ -2963,19 +3018,27 @@ func copyUnchangedActiveVirtualChildrenQuery(
 	refreshedAt time.Time,
 ) (string, []any) {
 	query := "INSERT INTO wrstat_active_virtual_children " +
-		"(active_set_id, parent_dir, child_dir, mount_path, is_mount_root_box, child_count, refreshed_at) " +
-		"SELECT ?, parent_dir, child_dir, mount_path, is_mount_root_box, child_count, ? " +
-		"FROM wrstat_active_virtual_children PREWHERE active_set_id = ? WHERE parent_dir NOT IN (" +
-		placeholders(len(affectedDirs)) + ") AND child_dir NOT IN (" + placeholders(len(affectedDirs)) + ")"
+		"(active_set_id, parent_virtual_id, child_virtual_id, mount_path, is_mount_root_box, child_count, refreshed_at) " +
+		"SELECT ?, parent_virtual_id, child_virtual_id, mount_path, is_mount_root_box, child_count, ? " +
+		"FROM wrstat_active_virtual_children PREWHERE active_set_id = ? WHERE parent_virtual_id NOT IN (" +
+		placeholders(len(affectedDirs)) + ") AND child_virtual_id NOT IN (" + placeholders(len(affectedDirs)) + ")"
 	args := []any{nextActiveSetID, refreshedAt, previousActiveSetID}
-	args = appendActiveVirtualDirArgs(args, affectedDirs)
+	args = appendActiveVirtualDirIDArgs(args, affectedDirs)
 
-	return query, appendActiveVirtualDirArgs(args, affectedDirs)
+	return query, appendActiveVirtualDirIDArgs(args, affectedDirs)
 }
 
 func appendActiveVirtualDirArgs(args []any, dirs []string) []any {
 	for _, dir := range dirs {
 		args = append(args, ensureTrailingSlash(dir))
+	}
+
+	return args
+}
+
+func appendActiveVirtualDirIDArgs(args []any, dirs []string) []any {
+	for _, dir := range dirs {
+		args = append(args, virtualIDForDir(dir))
 	}
 
 	return args

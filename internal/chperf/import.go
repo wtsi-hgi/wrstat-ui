@@ -62,8 +62,8 @@ const (
 	phaseFilesInsert         = "wrstat_files_insert"
 	phaseFilesFlush          = "wrstat_files_flush"
 	phaseDGUTAInsert         = "wrstat_dguta_insert"
-	phaseChildrenInsert      = "wrstat_children_insert"
-	phaseParentFactsInsert   = "wrstat_parent_facts_insert"
+	phaseChildrenInsert      = "wrstat_dirs_insert"
+	phaseDirFactsInsert      = "wrstat_dir_facts_insert"
 	phaseDirProjectionWrite  = "wrstat_dir_projection_insert"
 	phaseMountSwitch         = "mount_switch"
 	phaseTreeSummaryRefresh  = "wrstat_tree_summary_refresh"
@@ -80,8 +80,8 @@ const (
 
 	tableFiles                    = "wrstat_files"
 	tableDGUTA                    = "wrstat_dguta"
-	tableChildren                 = "wrstat_children"
-	tableParentFacts              = "wrstat_parent_facts"
+	tableChildren                 = "wrstat_dirs"
+	tableDirFacts                 = "wrstat_dir_facts"
 	tableDirSummary               = "wrstat_dir_facts"
 	tableDirSummarySets           = "wrstat_dir_projection_sets"
 	tableDirDGUTAVector           = "wrstat_dir_facts"
@@ -126,8 +126,6 @@ const (
 
 // ErrNoDatasets indicates no dataset directories were found.
 var ErrNoDatasets = errors.New("no dataset directories found")
-
-var errDGUTAChildrenWriterRequired = errors.New("tracked streaming DGUTA writer requires child writer")
 
 // PrintfFunc matches fmt.Printf-style output.
 type PrintfFunc = perfreport.PrintfFunc
@@ -459,8 +457,8 @@ func importMainTablePhase(phase string) (string, bool) {
 		return tableDGUTA, true
 	case phaseChildrenInsert:
 		return tableChildren, true
-	case phaseParentFactsInsert:
-		return tableParentFacts, true
+	case phaseDirFactsInsert:
+		return tableDirFacts, true
 	default:
 		return "", false
 	}
@@ -489,7 +487,7 @@ func importMultiTablePhase(phase string) ([]string, bool) {
 		return []string{
 			tableDGUTA,
 			tableChildren,
-			tableParentFacts,
+			tableDirFacts,
 			tableFiles,
 			tableDirSummary,
 			tableDirSummarySets,
@@ -724,7 +722,7 @@ func baseImportSelectedTables() []string {
 		tableFiles,
 		tableDirSummary,
 		tableChildren,
-		tableParentFacts,
+		tableDirFacts,
 		tableDirSummarySets,
 		tableBasedirsGroupUsage,
 		tableBasedirsUserUsage,
@@ -1080,6 +1078,11 @@ func addAllSummarisers(
 	opts ImportOptions,
 	metrics *datasetImportMetrics,
 ) (func(bool) error, error) {
+	idAllocator := summary.NewDirIDAllocator()
+	if err := idAllocator.SetMountPath(mountPath); err != nil {
+		return nil, fmt.Errorf("failed to reserve directory ids: %w", err)
+	}
+
 	dw, err := api.NewDGUTAWriter()
 	if err != nil {
 		return nil, err
@@ -1090,7 +1093,7 @@ func addAllSummarisers(
 	trackedDW.SetMountPath(mountPath)
 	trackedDW.SetUpdatedAt(updatedAt)
 
-	fi, fiCloser, err := api.NewFileIngestOperation(mountPath, updatedAt)
+	fi, fiCloser, err := api.NewFileIngestOperation(mountPath, updatedAt, idAllocator)
 	if err != nil {
 		return nil, errors.Join(err, trackedDW.Abort())
 	}
@@ -1102,7 +1105,10 @@ func addAllSummarisers(
 	trackedFI := trackFileIngestOperation(fi, metrics)
 	timedFICloser := timedImportCloser{Closer: fiCloser, metrics: metrics, phase: phaseFilesFlush}
 
-	ss.AddDirectoryOperation(dirguta.NewDirGroupUserTypeAge(trackedDW.directorySink()))
+	ss.AddDirectoryOperation(dirguta.NewDirGroupUserTypeAge(
+		trackedDW.directorySink(),
+		idAllocator,
+	))
 	ss.AddGlobalOperation(trackedFI)
 
 	bsCloser, err := addBasedirsSummariser(ss, api, mountPath, updatedAt, opts, metrics)
@@ -1204,32 +1210,23 @@ func (w *trackedDGUTAWriter) SetMountPath(mountPath string) {
 }
 
 func (w *trackedDGUTAWriter) directorySink() dirguta.DB {
-	if _, ok := w.DGUTAWriter.(db.DGUTAChildrenWriter); ok {
-		return &trackedStreamingDGUTAWriter{trackedDGUTAWriter: w}
-	}
-
 	return w
 }
 
-type trackedStreamingDGUTAWriter struct {
-	*trackedDGUTAWriter
+func countCatalogRows(record db.RecordDGUTA) uint64 {
+	if record.Dir == nil {
+		return 0
+	}
+
+	return 1
 }
 
-func (w *trackedStreamingDGUTAWriter) AddChildren(
-	parent *summary.DirectoryPath,
-	children []string,
-) error {
-	childWriter, ok := w.DGUTAWriter.(db.DGUTAChildrenWriter)
-	if !ok {
-		return errDGUTAChildrenWriterRequired
+func countDirFactRows(record db.RecordDGUTA) uint64 {
+	if record.Dir == nil {
+		return 0
 	}
 
-	err := childWriter.AddChildren(parent, children)
-	if err == nil {
-		w.metrics.addRows(tableChildren, countChildrenRows(children))
-	}
-
-	return err
+	return 1
 }
 
 func noopPublishCloser(bool) error {
@@ -1457,8 +1454,8 @@ func (w *trackedDGUTAWriter) Add(record db.RecordDGUTA) error {
 	err := w.DGUTAWriter.Add(record)
 	if err == nil {
 		w.metrics.addRows(tableDGUTA, countDGUTARows(record, w.mountPath))
-		w.metrics.addRows(tableChildren, countChildrenRows(record.Children))
-		w.metrics.addRows(tableParentFacts, countParentFactsRows(record))
+		w.metrics.addRows(tableChildren, countCatalogRows(record))
+		w.metrics.addRows(tableDirFacts, countDirFactRows(record))
 	}
 
 	return err
@@ -1472,26 +1469,6 @@ func countDGUTARows(record db.RecordDGUTA, mountPath string) uint64 {
 
 	for _, guta := range record.GUTAs {
 		if guta != nil && (!compactAges || guta.Age == db.DGUTAgeAll) {
-			rows++
-		}
-	}
-
-	return rows
-}
-
-func countParentFactsRows(record db.RecordDGUTA) uint64 {
-	if record.Dir == nil {
-		return 0
-	}
-
-	return 1
-}
-
-func countChildrenRows(children []string) uint64 {
-	var rows uint64
-
-	for _, child := range children {
-		if strings.TrimSuffix(child, "/") != "" {
 			rows++
 		}
 	}

@@ -41,7 +41,7 @@ import (
 )
 
 const insertFilesBatchQuery = "INSERT INTO wrstat_files " +
-	"(mount_path, snapshot_id, parent_dir, name, ext, entry_type, size, apparent_size, " +
+	"(mount_path, snapshot_id, dir_id, name, ext, entry_type, size, apparent_size, " +
 	"uid, gid, atime, mtime, ctime, inode, nlink)"
 
 var (
@@ -54,7 +54,7 @@ var (
 type fileIngestRow struct {
 	mountPath    string
 	snapshot     uuid.UUID
-	parentDir    string
+	dirID        uint32
 	name         string
 	ext          string
 	entryType    uint8
@@ -72,7 +72,7 @@ type fileIngestRow struct {
 func fileIngestRowFromInfo(
 	mountPath string,
 	snapshot uuid.UUID,
-	parentDir string,
+	dirID uint32,
 	name string,
 	info *summary.FileInfo,
 ) (fileIngestRow, error) {
@@ -84,7 +84,7 @@ func fileIngestRowFromInfo(
 	return fileIngestRow{
 		mountPath:    mountPath,
 		snapshot:     snapshot,
-		parentDir:    parentDir,
+		dirID:        dirID,
 		name:         name,
 		ext:          extFromName(name),
 		entryType:    info.EntryType,
@@ -103,7 +103,7 @@ func fileIngestRowFromInfo(
 type fileIngestBuffer struct {
 	mountPath    []string
 	snapshot     []uuid.UUID
-	parentDir    []string
+	dirID        []uint32
 	name         []string
 	ext          []string
 	entryType    []uint8
@@ -125,7 +125,7 @@ func (b *fileIngestBuffer) rows() int {
 func (b *fileIngestBuffer) reset() {
 	b.mountPath = b.mountPath[:0]
 	b.snapshot = b.snapshot[:0]
-	b.parentDir = b.parentDir[:0]
+	b.dirID = b.dirID[:0]
 	b.name = b.name[:0]
 	b.ext = b.ext[:0]
 	b.entryType = b.entryType[:0]
@@ -143,7 +143,7 @@ func (b *fileIngestBuffer) reset() {
 func (b *fileIngestBuffer) appendRow(row fileIngestRow) {
 	b.mountPath = append(b.mountPath, row.mountPath)
 	b.snapshot = append(b.snapshot, row.snapshot)
-	b.parentDir = append(b.parentDir, row.parentDir)
+	b.dirID = append(b.dirID, row.dirID)
 	b.name = append(b.name, row.name)
 	b.ext = append(b.ext, row.ext)
 	b.entryType = append(b.entryType, row.entryType)
@@ -162,7 +162,7 @@ func (b *fileIngestBuffer) columns() []any {
 	return []any{
 		b.mountPath,
 		b.snapshot,
-		b.parentDir,
+		b.dirID,
 		b.name,
 		b.ext,
 		b.entryType,
@@ -318,16 +318,17 @@ func (w *fileIngestWriter) flushIfBatchFull() error {
 func (w *fileIngestWriter) bufferFileInfo(info *summary.FileInfo) (bool, error) {
 	parentDir, name := fileIngestParentAndName(info)
 
-	parentDir, name, keep := canonicalFileIngestPath(w.mountPath, parentDir, name)
+	_, name, keep := canonicalFileIngestPath(w.mountPath, parentDir, name)
 	if !keep {
 		return false, nil
 	}
 
-	if _, err := w.fileInfoDirID(info); err != nil {
+	dirID, err := w.fileInfoDirID(info)
+	if err != nil {
 		return false, err
 	}
 
-	row, err := fileIngestRowFromInfo(w.mountPath, w.snapshot, parentDir, name, info)
+	row, err := fileIngestRowFromInfo(w.mountPath, w.snapshot, dirID, name, info)
 	if err != nil {
 		return false, err
 	}
@@ -368,6 +369,10 @@ func (w *fileIngestWriter) fileInfoDirID(info *summary.FileInfo) (uint32, error)
 
 func fileIngestDirIDPath(info *summary.FileInfo) *summary.DirectoryPath {
 	if info.IsDir() {
+		if info.Path.Parent == nil {
+			return info.Path
+		}
+
 		return info.Path.Parent
 	}
 

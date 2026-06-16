@@ -231,9 +231,10 @@ func addTreeSummaryChildren(
 	state *mountDirProjectionState,
 ) error {
 	query, args := activeMountsQuery(
-		"SELECT c.parent_dir, count() FROM wrstat_children c WHERE c.parent_dir = ? AND %s GROUP BY c.parent_dir",
-		"c.mount_path",
-		"c.snapshot_id",
+		"SELECT parent.full_path, toUInt64(any(parent.child_dir_count)) FROM wrstat_dirs parent "+
+			"WHERE parent.full_path = ? AND %s GROUP BY parent.full_path",
+		"parent.mount_path",
+		"parent.snapshot_id",
 		mounts,
 		dir,
 	)

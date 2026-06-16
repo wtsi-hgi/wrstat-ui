@@ -30,6 +30,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -40,9 +41,13 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/stats"
 )
 
-const testInsertFileStmt = "INSERT INTO wrstat_files (mount_path, snapshot_id, parent_dir, " +
+const testInsertFileStmt = "INSERT INTO wrstat_files (mount_path, snapshot_id, dir_id, " +
 	"name, ext, entry_type, size, apparent_size, uid, gid, atime, mtime, ctime, inode, nlink) " +
 	"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+
+const testInsertFileDirStmt = "INSERT INTO wrstat_dirs " +
+	"(mount_path, snapshot_id, dir_id, parent_id, subtree_end, depth, name, full_path, " +
+	"child_dir_count, child_file_count, path_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
 
 func TestClientStatPath(t *testing.T) {
 	Convey("Client.StatPath returns FileRow for active snapshot", t, func() {
@@ -87,9 +92,9 @@ func TestClientStatPath(t *testing.T) {
 		mtime := atime.Add(-time.Minute)
 		ctime := atime.Add(-2 * time.Minute)
 
-		So(conn.Exec(
+		insertClientFileForTest(
 			ctx,
-			testInsertFileStmt,
+			conn,
 			mountPath,
 			sid,
 			parentDir,
@@ -105,7 +110,7 @@ func TestClientStatPath(t *testing.T) {
 			ctime,
 			uint64(777),
 			uint64(1),
-		), ShouldBeNil)
+		)
 
 		row, err := c.StatPath(ctx, path, StatOptions{})
 		So(err, ShouldBeNil)
@@ -214,9 +219,9 @@ func TestClientIsDir(t *testing.T) {
 		path := parentDir + name
 		now := time.Now().UTC().Truncate(time.Second)
 
-		So(conn.Exec(
+		insertClientFileForTest(
 			ctx,
-			testInsertFileStmt,
+			conn,
 			mountPath,
 			sid,
 			parentDir,
@@ -232,7 +237,7 @@ func TestClientIsDir(t *testing.T) {
 			now,
 			uint64(888),
 			uint64(2),
-		), ShouldBeNil)
+		)
 
 		isDir, err := c.IsDir(ctx, path)
 		So(err, ShouldBeNil)
@@ -327,9 +332,9 @@ func TestClientListDir(t *testing.T) {
 		now := time.Now().UTC().Truncate(time.Second)
 
 		// Old snapshot entry that must not appear.
-		So(conn.Exec(
+		insertClientFileForTest(
 			ctx,
-			testInsertFileStmt,
+			conn,
 			mountPath,
 			sid1,
 			base,
@@ -345,14 +350,14 @@ func TestClientListDir(t *testing.T) {
 			now,
 			uint64(1),
 			uint64(1),
-		), ShouldBeNil)
+		)
 
 		// Active snapshot entries.
 		names := []string{"b.txt", "a.txt", "c.txt"}
 		for _, name := range names {
-			So(conn.Exec(
+			insertClientFileForTest(
 				ctx,
-				testInsertFileStmt,
+				conn,
 				mountPath,
 				sid2,
 				base,
@@ -368,7 +373,7 @@ func TestClientListDir(t *testing.T) {
 				now,
 				uint64(2),
 				uint64(1),
-			), ShouldBeNil)
+			)
 		}
 
 		// Pass dir without trailing slash to ensure normalisation.
@@ -413,9 +418,9 @@ func TestClientListDir(t *testing.T) {
 
 		now := time.Now().UTC().Truncate(time.Second)
 		for _, name := range []string{"a.txt", "b.txt", "c.txt"} {
-			So(conn.Exec(
+			insertClientFileForTest(
 				ctx,
-				testInsertFileStmt,
+				conn,
 				mountPath,
 				sid,
 				base,
@@ -431,7 +436,7 @@ func TestClientListDir(t *testing.T) {
 				now,
 				uint64(2),
 				uint64(1),
-			), ShouldBeNil)
+			)
 		}
 
 		rows, err := c.ListDir(ctx, base, ListOptions{Limit: 2, Offset: 1})
@@ -512,23 +517,7 @@ func TestClientPermissionAnyInDir(t *testing.T) {
 
 		So(conn.Exec(ctx, testInsertMountStmt, mountPath, time.Now(), sid, updatedAt), ShouldBeNil)
 
-		So(conn.Exec(
-			ctx,
-			testInsertDGUTAStmt,
-			mountPath,
-			sid,
-			dir,
-			uint32(111),
-			uint32(222),
-			uint16(db.DGUTAFileTypeBam),
-			uint8(db.DGUTAgeAll),
-			uint64(1),
-			uint64(1),
-			int64(1),
-			int64(1),
-			[]uint64{1, 0, 0, 0, 0, 0, 0, 0, 0},
-			[]uint64{1, 0, 0, 0, 0, 0, 0, 0, 0},
-		), ShouldBeNil)
+		insertPermissionAgeAllFact(ctx, conn, mountPath, sid.String(), dir, 222, 111)
 
 		ok, err := c.PermissionAnyInDir(ctx, mountPath+"dir", 222, nil)
 		So(err, ShouldBeNil)
@@ -602,12 +591,44 @@ func insertPermissionAgeAllFact(
 	uid uint32,
 	gid uint32,
 ) {
+	dir = ensureTrailingSlash(dir)
+	dirID := clientFileAPIDirID(dir)
+
+	dirExists := countRows(
+		ctx,
+		conn,
+		"SELECT count() FROM wrstat_dirs WHERE mount_path = ? AND snapshot_id = ? AND dir_id = ?",
+		mountPath,
+		sid,
+		dirID,
+	) > 0
+
+	if !dirExists {
+		So(conn.Exec(
+			ctx,
+			testInsertFileDirStmt,
+			mountPath,
+			sid,
+			dirID,
+			uint32(0),
+			dirID+1,
+			clientFileAPIDepth(dir),
+			catalogNameForFullPath(dir),
+			dir,
+			uint32(0),
+			uint32(0),
+			catalogPathHash(dir),
+		), ShouldBeNil)
+	}
+
 	So(conn.Exec(
 		ctx,
 		testInsertInfoFactVectorStmt,
 		mountPath,
 		sid,
-		dir,
+		dirID,
+		uint32(0),
+		dirID+1,
 		[]uint32{gid},
 		[]uint32{uid},
 		[]uint16{uint16(db.DGUTAFileTypeBam)},
@@ -653,9 +674,9 @@ func TestClientPermissionPath(t *testing.T) {
 
 		now := time.Now().UTC().Truncate(time.Second)
 		insert := func(name string, uid uint32, gid uint32) {
-			So(conn.Exec(
+			insertClientFileForTest(
 				ctx,
-				testInsertFileStmt,
+				conn,
 				mountPath,
 				sid,
 				base,
@@ -671,7 +692,7 @@ func TestClientPermissionPath(t *testing.T) {
 				now,
 				uint64(1),
 				uint64(1),
-			), ShouldBeNil)
+			)
 		}
 
 		insert("owned.txt", 10, 30)
@@ -777,9 +798,9 @@ func TestClientFindByGlob(t *testing.T) {
 		ctime := atime.Add(-2 * time.Minute)
 
 		path1 := base + "a.txt"
-		So(conn.Exec(
+		insertClientFileForTest(
 			ctx,
-			testInsertFileStmt,
+			conn,
 			mountPath,
 			sid,
 			base,
@@ -795,12 +816,12 @@ func TestClientFindByGlob(t *testing.T) {
 			ctime,
 			uint64(1),
 			uint64(1),
-		), ShouldBeNil)
+		)
 
 		path2 := base + "sub/nested.txt"
-		So(conn.Exec(
+		insertClientFileForTest(
 			ctx,
-			testInsertFileStmt,
+			conn,
 			mountPath,
 			sid,
 			base+"sub/",
@@ -816,13 +837,13 @@ func TestClientFindByGlob(t *testing.T) {
 			ctime,
 			uint64(2),
 			uint64(1),
-		), ShouldBeNil)
+		)
 
 		base2 := mountPath + "other/"
 		path3 := base2 + "b.txt"
-		So(conn.Exec(
+		insertClientFileForTest(
 			ctx,
-			testInsertFileStmt,
+			conn,
 			mountPath,
 			sid,
 			base2,
@@ -838,7 +859,7 @@ func TestClientFindByGlob(t *testing.T) {
 			ctime,
 			uint64(3),
 			uint64(1),
-		), ShouldBeNil)
+		)
 
 		rows, err := c.FindByGlob(ctx, []string{base}, nil, FindOptions{})
 		So(err, ShouldBeNil)
@@ -921,9 +942,9 @@ func insertPermissionFile(
 ) {
 	now := time.Now().UTC().Truncate(time.Second)
 
-	So(conn.Exec(
+	insertClientFileForTest(
 		ctx,
-		testInsertFileStmt,
+		conn,
 		mountPath,
 		sid,
 		parentDir,
@@ -939,7 +960,7 @@ func insertPermissionFile(
 		now,
 		uint64(1),
 		uint64(1),
-	), ShouldBeNil)
+	)
 }
 
 func TestClientFindByGlobC5ExtensionPredicates(t *testing.T) {
@@ -975,9 +996,9 @@ func TestClientFindByGlobC5ExtensionPredicates(t *testing.T) {
 
 		now := time.Now().UTC().Truncate(time.Second)
 		insert := func(parentDir string, name string, ext string, uid uint32, gid uint32, inode uint64) {
-			So(conn.Exec(
+			insertClientFileForTest(
 				ctx,
-				testInsertFileStmt,
+				conn,
 				mountPath,
 				sid,
 				parentDir,
@@ -993,7 +1014,7 @@ func TestClientFindByGlobC5ExtensionPredicates(t *testing.T) {
 				now,
 				inode,
 				uint64(1),
-			), ShouldBeNil)
+			)
 		}
 
 		insert(base, "a.bam", "bam", 10, 30, 1)
@@ -1050,9 +1071,9 @@ func TestClientFindByGlobC5OwnerAndRegexAuthority(t *testing.T) {
 
 		now := time.Now().UTC().Truncate(time.Second)
 		insert := func(name string, ext string, uid uint32, gid uint32, inode uint64) {
-			So(conn.Exec(
+			insertClientFileForTest(
 				ctx,
-				testInsertFileStmt,
+				conn,
 				mountPath,
 				sid,
 				nested,
@@ -1068,7 +1089,7 @@ func TestClientFindByGlobC5OwnerAndRegexAuthority(t *testing.T) {
 				now,
 				inode,
 				uint64(1),
-			), ShouldBeNil)
+			)
 		}
 
 		insert("owned.bam", "bam", 10, 30, 1)
@@ -1088,6 +1109,84 @@ func TestClientFindByGlobC5OwnerAndRegexAuthority(t *testing.T) {
 			nested + "owned.bam",
 		})
 	})
+}
+
+func insertClientFileForTest(
+	ctx context.Context,
+	conn ch.Conn,
+	mountPath string,
+	sid any,
+	parentDir string,
+	name string,
+	ext string,
+	entryType uint8,
+	size uint64,
+	apparentSize uint64,
+	uid uint32,
+	gid uint32,
+	atime time.Time,
+	mtime time.Time,
+	ctime time.Time,
+	inode uint64,
+	nlink uint64,
+) {
+	parentDir = ensureTrailingSlash(parentDir)
+	dirID := clientFileAPIDirID(parentDir)
+
+	dirExists := countRows(
+		ctx,
+		conn,
+		"SELECT count() FROM wrstat_dirs WHERE mount_path = ? AND snapshot_id = ? AND dir_id = ?",
+		mountPath,
+		sid,
+		dirID,
+	) > 0
+
+	if !dirExists {
+		So(conn.Exec(
+			ctx,
+			testInsertFileDirStmt,
+			mountPath,
+			sid,
+			dirID,
+			uint32(0),
+			dirID+1,
+			clientFileAPIDepth(parentDir),
+			catalogNameForFullPath(parentDir),
+			parentDir,
+			uint32(0),
+			uint32(0),
+			catalogPathHash(parentDir),
+		), ShouldBeNil)
+	}
+
+	So(conn.Exec(
+		ctx,
+		testInsertFileStmt,
+		mountPath,
+		sid,
+		dirID,
+		name,
+		ext,
+		entryType,
+		size,
+		apparentSize,
+		uid,
+		gid,
+		atime,
+		mtime,
+		ctime,
+		inode,
+		nlink,
+	), ShouldBeNil)
+}
+
+func clientFileAPIDirID(dir string) uint32 {
+	return uint32(catalogPathHash(ensureTrailingSlash(dir))) //nolint:gosec // Fixture IDs intentionally use low hash bits.
+}
+
+func clientFileAPIDepth(dir string) uint16 {
+	return uint16(strings.Count(strings.Trim(dir, "/"), "/")) //nolint:gosec // Test fixture paths have bounded depth.
 }
 
 func fileRowPaths(rows []FileRow) []string {

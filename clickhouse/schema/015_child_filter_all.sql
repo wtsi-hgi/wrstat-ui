@@ -27,12 +27,12 @@
 CREATE TABLE IF NOT EXISTS wrstat_child_filter_all (
   mount_path LowCardinality(String) CODEC(LZ4),
   snapshot_id UUID,
-  parent_dir String CODEC(LZ4),
+  parent_id UInt32 CODEC(Delta, LZ4),
   age UInt8,
   gid UInt32,
   uid UInt32,
   ft UInt16,
-  dir String CODEC(LZ4),
+  dir_id UInt32 CODEC(Delta, LZ4),
   count UInt64 CODEC(Delta, LZ4),
   size UInt64 CODEC(Delta, LZ4),
   atime_min Int64 CODEC(Delta, LZ4),
@@ -46,5 +46,5 @@ CREATE TABLE IF NOT EXISTS wrstat_child_filter_all (
   refreshed_at DateTime64(3) CODEC(Delta, ZSTD(3))
 ) ENGINE = MergeTree
 PARTITION BY (mount_path, snapshot_id)
-ORDER BY (mount_path, snapshot_id, parent_dir, age, gid, uid, ft, dir)
+ORDER BY (mount_path, snapshot_id, parent_id, age, gid, uid, ft, dir_id)
 SETTINGS index_granularity = 8192;

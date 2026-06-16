@@ -40,10 +40,9 @@ import (
 )
 
 const (
-	maxNumOfGUTAKeys           = 34
-	lengthOfGUTAKey            = 12
-	streamingChildrenBatchSize = 16_384
-	parentSentinel             = summary.ParentSentinel
+	maxNumOfGUTAKeys = 34
+	lengthOfGUTAKey  = 12
+	parentSentinel   = summary.ParentSentinel
 )
 
 // ErrTooManyDirs is returned when the next directory id would collide with the
@@ -100,19 +99,15 @@ func newDirGroupUserTypeAge(
 	idAssigner := newDirIDAssigner()
 	idAllocator := optionalDirIDAllocator(alloc)
 
-	childDB, streamChildren := d.(db.DGUTAChildrenWriter)
-
 	return func() summary.Operation {
 		last = &DirGroupUserTypeAge{
-			parent:         last,
-			db:             d,
-			childDB:        childDB,
-			idAssigner:     idAssigner,
-			idAllocator:    idAllocator,
-			streamChildren: streamChildren,
-			store:          gutaStore{make(map[gutaKey]*summary.SummaryWithTimes), refTime},
-			now:            now,
-			seenHardlinks:  make(map[int64]*inodeEntry),
+			parent:        last,
+			db:            d,
+			idAssigner:    idAssigner,
+			idAllocator:   idAllocator,
+			store:         gutaStore{make(map[gutaKey]*summary.SummaryWithTimes), refTime},
+			now:           now,
+			seenHardlinks: make(map[int64]*inodeEntry),
 		}
 
 		return last
@@ -386,24 +381,22 @@ func (a *dirIDAssigner) close(dir *summary.DirectoryPath) {
 // DirGroupUserTypeAge is used to summarise file stats by directory, group,
 // user, file type and age.
 type DirGroupUserTypeAge struct {
-	parent         *DirGroupUserTypeAge
-	db             DB
-	childDB        db.DGUTAChildrenWriter
-	idAssigner     *dirIDAssigner
-	idAllocator    *summary.DirIDAllocator
-	store          gutaStore
-	thisDir        *summary.DirectoryPath
-	children       []string
-	childCount     uint64
-	streamChildren bool
-	now            int64
-	isTempDir      bool
-	seenHardlinks  map[int64]*inodeEntry
-	dirID          uint32
-	parentID       uint32
-	subtreeEnd     uint32
-	depth          uint16
-	idAssigned     bool
+	parent        *DirGroupUserTypeAge
+	db            DB
+	idAssigner    *dirIDAssigner
+	idAllocator   *summary.DirIDAllocator
+	store         gutaStore
+	thisDir       *summary.DirectoryPath
+	children      []string
+	childCount    uint64
+	now           int64
+	isTempDir     bool
+	seenHardlinks map[int64]*inodeEntry
+	dirID         uint32
+	parentID      uint32
+	subtreeEnd    uint32
+	depth         uint16
+	idAssigned    bool
 }
 
 // Add is a summary.Operation method. It will break path in to its directories
@@ -536,24 +529,6 @@ func (d *DirGroupUserTypeAge) addChildName(child string) error {
 	d.childCount++
 	d.children = append(d.children, child)
 
-	if !d.streamChildren || len(d.children) < streamingChildrenBatchSize {
-		return nil
-	}
-
-	return d.flushChildren()
-}
-
-func (d *DirGroupUserTypeAge) flushChildren() error {
-	if !d.streamChildren || len(d.children) == 0 {
-		return nil
-	}
-
-	if err := d.childDB.AddChildren(d.thisDir, d.children); err != nil {
-		return err
-	}
-
-	d.children = d.children[:0]
-
 	return nil
 }
 
@@ -656,9 +631,6 @@ func (d *DirGroupUserTypeAge) handleHardlink(info *summary.FileInfo, //nolint:fu
 // Returns an error on failure to write.
 func (d *DirGroupUserTypeAge) Output() error {
 	dgutas := d.store.sort()
-	if err := d.flushChildren(); err != nil {
-		return err
-	}
 
 	if err := d.finishDirectoryID(); err != nil {
 		return err

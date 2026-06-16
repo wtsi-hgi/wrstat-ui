@@ -48,41 +48,55 @@ var (
 )
 
 const (
-	fileRowSelectAll = "f.path, f.parent_dir, f.name, f.ext, f.entry_type, f.size, " +
+	fileRowSelectAll = "concat(d.full_path, f.name), d.full_path, f.name, f.ext, f.entry_type, f.size, " +
 		"f.apparent_size, f.uid, f.gid, f.atime, f.mtime, f.ctime, f.inode, f.nlink"
 )
 
 const statPathQueryTemplate = "WITH (SELECT snapshot_id FROM wrstat_mounts_active WHERE mount_path = ?) AS sid " +
-	"SELECT %s FROM wrstat_files f PREWHERE f.mount_path = ? AND f.snapshot_id = sid " +
-	"AND f.parent_dir = ? AND f.name = ? LIMIT 1"
+	"SELECT %s FROM wrstat_files f INNER JOIN wrstat_dirs d " +
+	"ON d.mount_path = f.mount_path AND d.snapshot_id = f.snapshot_id AND d.dir_id = f.dir_id " +
+	"PREWHERE f.mount_path = ? AND f.snapshot_id = sid " +
+	"WHERE d.full_path = ? AND f.name = ? LIMIT 1"
 
 const listDirQueryTemplate = "WITH (SELECT snapshot_id FROM wrstat_mounts_active WHERE mount_path = ?) AS sid " +
-	"SELECT %s FROM wrstat_files f PREWHERE f.mount_path = ? AND f.snapshot_id = sid " +
-	"AND f.parent_dir = ? ORDER BY f.name ASC LIMIT ? OFFSET ?"
+	"SELECT %s FROM wrstat_files f INNER JOIN wrstat_dirs d " +
+	"ON d.mount_path = f.mount_path AND d.snapshot_id = f.snapshot_id AND d.dir_id = f.dir_id " +
+	"PREWHERE f.mount_path = ? AND f.snapshot_id = sid " +
+	"WHERE d.full_path = ? ORDER BY f.name ASC LIMIT ? OFFSET ?"
 
 const findByGlobQueryTemplate = "WITH (SELECT snapshot_id FROM wrstat_mounts_active WHERE mount_path = ?) AS sid " +
-	"SELECT %s FROM wrstat_files f PREWHERE f.mount_path = ? AND f.snapshot_id = sid " +
+	"SELECT %s FROM wrstat_files f INNER JOIN wrstat_dirs d " +
+	"ON d.mount_path = f.mount_path AND d.snapshot_id = f.snapshot_id AND d.dir_id = f.dir_id " +
+	"PREWHERE f.mount_path = ? AND f.snapshot_id = sid " +
 	"WHERE (%s) " +
 	"AND (? = 0 OR f.uid = ? OR has(?, f.gid)) " +
-	"ORDER BY f.parent_dir ASC, f.name ASC LIMIT ? OFFSET ?"
+	"ORDER BY d.full_path ASC, f.name ASC LIMIT ? OFFSET ?"
 
 const countByGlobQueryTemplate = "WITH (SELECT snapshot_id FROM wrstat_mounts_active WHERE mount_path = ?) AS sid " +
-	"SELECT count() FROM wrstat_files f PREWHERE f.mount_path = ? AND f.snapshot_id = sid " +
+	"SELECT count() FROM wrstat_files f INNER JOIN wrstat_dirs d " +
+	"ON d.mount_path = f.mount_path AND d.snapshot_id = f.snapshot_id AND d.dir_id = f.dir_id " +
+	"PREWHERE f.mount_path = ? AND f.snapshot_id = sid " +
 	"WHERE (%s) " +
 	"AND (? = 0 OR f.uid = ? OR has(?, f.gid))"
 
 const isDirQuery = "WITH (SELECT snapshot_id FROM wrstat_mounts_active WHERE mount_path = ?) AS sid " +
-	"SELECT f.entry_type FROM wrstat_files f PREWHERE f.mount_path = ? AND f.snapshot_id = sid " +
-	"AND f.parent_dir = ? AND f.name = ? LIMIT 1"
+	"SELECT f.entry_type FROM wrstat_files f INNER JOIN wrstat_dirs d " +
+	"ON d.mount_path = f.mount_path AND d.snapshot_id = f.snapshot_id AND d.dir_id = f.dir_id " +
+	"PREWHERE f.mount_path = ? AND f.snapshot_id = sid " +
+	"WHERE d.full_path = ? AND f.name = ? LIMIT 1"
 
 const permissionAnyInDirQuery = "WITH (SELECT snapshot_id FROM wrstat_mounts_active WHERE mount_path = ?) AS sid " +
-	"SELECT 1 FROM wrstat_dir_facts d PREWHERE d.mount_path = ? AND d.snapshot_id = sid " +
-	"AND d.dir = ? AND arrayExists((age, uid, gid) -> age = ? AND (uid = ? OR has(?, gid)), " +
-	"d.ages, d.uids, d.gids) LIMIT 1"
+	"SELECT 1 FROM wrstat_dir_facts f INNER JOIN wrstat_dirs d " +
+	"ON d.mount_path = f.mount_path AND d.snapshot_id = f.snapshot_id AND d.dir_id = f.dir_id " +
+	"PREWHERE f.mount_path = ? AND f.snapshot_id = sid " +
+	"WHERE d.full_path = ? AND arrayExists((age, uid, gid) -> age = ? AND (uid = ? OR has(?, gid)), " +
+	"f.ages, f.uids, f.gids) LIMIT 1"
 
 const permissionPathQuery = "WITH (SELECT snapshot_id FROM wrstat_mounts_active WHERE mount_path = ?) AS sid " +
-	"SELECT 1 FROM wrstat_files f PREWHERE f.mount_path = ? AND f.snapshot_id = sid " +
-	"AND f.parent_dir = ? AND f.name = ? AND (f.uid = ? OR has(?, f.gid)) LIMIT 1"
+	"SELECT 1 FROM wrstat_files f INNER JOIN wrstat_dirs d " +
+	"ON d.mount_path = f.mount_path AND d.snapshot_id = f.snapshot_id AND d.dir_id = f.dir_id " +
+	"PREWHERE f.mount_path = ? AND f.snapshot_id = sid " +
+	"WHERE d.full_path = ? AND f.name = ? AND (f.uid = ? OR has(?, f.gid)) LIMIT 1"
 
 const defaultFileLimit = 1_000_000
 
@@ -115,8 +129,8 @@ const (
 
 //nolint:gochecknoglobals // Immutable lookup table used on hot file-row scan paths.
 var fileRowSpecs = []fileRowFieldSpec{
-	{fileFieldPath, "f.path", func(s *fileRowScanState) any { return &s.path }},
-	{fileFieldParentDir, "f.parent_dir", func(s *fileRowScanState) any { return &s.parentDir }},
+	{fileFieldPath, "concat(d.full_path, f.name)", func(s *fileRowScanState) any { return &s.path }},
+	{fileFieldParentDir, "d.full_path", func(s *fileRowScanState) any { return &s.parentDir }},
 	{fileFieldName, "f.name", func(s *fileRowScanState) any { return &s.name }},
 	{fileFieldExt, "f.ext", func(s *fileRowScanState) any { return &s.ext }},
 	{fileFieldEntryType, "f.entry_type", func(s *fileRowScanState) any { return &s.entryType }},
@@ -539,13 +553,13 @@ func findByGlobBaseDirClause(baseDir string, compiled compiledGlobPatterns) (str
 
 	if len(compiled.direct) > 0 {
 		matchClause, matchParams := matchOrExtList("f.name", compiled.direct)
-		clauses = append(clauses, "(f.parent_dir = ? AND ("+matchClause+"))")
+		clauses = append(clauses, "(d.full_path = ? AND ("+matchClause+"))")
 		params = append(params, baseDir)
 		params = append(params, matchParams...)
 	}
 
 	if len(compiled.recursive) > 0 {
-		matchClause, matchParams := matchOrExtList("f.path", compiled.recursive)
+		matchClause, matchParams := matchOrExtList("concat(d.full_path, f.name)", compiled.recursive)
 		clauses = append(clauses, findByGlobRangeClause()+" AND ("+matchClause+")")
 		params = append(params, baseDir, prefixNext(baseDir))
 		params = append(params, matchParams...)
@@ -559,7 +573,7 @@ func findByGlobBaseDirClause(baseDir string, compiled compiledGlobPatterns) (str
 }
 
 func findByGlobRangeClause() string {
-	return "(f.parent_dir >= ? AND f.parent_dir < ?)"
+	return "(d.full_path >= ? AND d.full_path < ?)"
 }
 
 func prefixNext(prefix string) string {

@@ -287,8 +287,9 @@ func (a *clickHouseAPI) NewDGUTAWriter() (db.DGUTAWriter, error) {
 func (a *clickHouseAPI) NewFileIngestOperation(
 	mountPath string,
 	updatedAt time.Time,
+	alloc *summary.DirIDAllocator,
 ) (summary.OperationGenerator, io.Closer, error) {
-	return clickhouse.NewFileIngestOperation(a.cfg, mountPath, updatedAt)
+	return clickhouse.NewFileIngestOperation(a.cfg, mountPath, updatedAt, alloc)
 }
 
 func (a *clickHouseAPI) NewBaseDirsStore() (basedirs.Store, error) {

@@ -69,7 +69,7 @@ const app = "wrstat-ui_test"
 const (
 	clickHousePerfPhasePartitionDropReset = "partition_drop_reset"
 	clickHousePerfPhaseDGUTAInsert        = "wrstat_dguta_insert"
-	clickHousePerfPhaseChildrenInsert     = "wrstat_children_insert"
+	clickHousePerfPhaseCatalogInsert      = "wrstat_dirs_insert"
 	clickHousePerfPhaseMountSwitch        = "mount_switch"
 	clickHousePerfPhaseOldSnapshotDrop    = "old_snapshot_partition_drop"
 
@@ -526,7 +526,7 @@ func TestClickHousePerfImport(t *testing.T) {
 		}
 
 		So(tableNames, ShouldContain, "wrstat_dir_facts")
-		So(tableNames, ShouldContain, "wrstat_children")
+		So(tableNames, ShouldContain, "wrstat_dirs")
 		So(tableNames, ShouldContain, "wrstat_files")
 		So(tableNames, ShouldContain, "wrstat_basedirs_group_usage")
 
@@ -535,10 +535,10 @@ func TestClickHousePerfImport(t *testing.T) {
 		So(dgutaInsert.Inputs["table"], ShouldEqual, "wrstat_dir_facts")
 		So(dgutaInsert.Inputs["rows"], ShouldBeGreaterThan, float64(0))
 
-		childrenInsert := findReportPhaseOperation(report.Operations, clickHousePerfPhaseChildrenInsert)
-		So(childrenInsert, ShouldNotBeNil)
-		So(childrenInsert.Inputs["table"], ShouldEqual, "wrstat_children")
-		So(childrenInsert.Inputs["rows"], ShouldBeGreaterThan, float64(0))
+		catalogInsert := findReportPhaseOperation(report.Operations, clickHousePerfPhaseCatalogInsert)
+		So(catalogInsert, ShouldNotBeNil)
+		So(catalogInsert.Inputs["table"], ShouldEqual, "wrstat_dirs")
+		So(catalogInsert.Inputs["rows"], ShouldBeGreaterThan, float64(0))
 
 		mountSwitch := findReportPhaseOperation(report.Operations, clickHousePerfPhaseMountSwitch)
 		So(mountSwitch, ShouldNotBeNil)

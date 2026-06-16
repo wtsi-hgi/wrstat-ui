@@ -1,3 +1,6 @@
+//go:build legacy_parent_facts
+// +build legacy_parent_facts
+
 /*******************************************************************************
  * Copyright (c) 2026 Genome Research Ltd.
  *

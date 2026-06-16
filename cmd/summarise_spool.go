@@ -32,6 +32,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"math"
 	"os"
 	"path/filepath"
@@ -68,7 +69,6 @@ var (
 	errSummariseSpoolFileDirRequired       = errors.New("clickhouse spool: file row requires directory path")
 	errSummariseSpoolFileNameRequired      = errors.New("clickhouse spool: file row requires entry name")
 	errSummariseSpoolFileNonNegative       = errors.New("clickhouse spool: file row requires non-negative numeric fields")
-	errSummariseSpoolChildrenParent        = errors.New("clickhouse spool: child rows require parent")
 	errSummariseSpoolDirFactsDir           = errors.New("clickhouse spool: dir facts require dir")
 	errSummariseSpoolBasedirsNotReset      = errors.New("clickhouse spool: basedirs store not reset")
 	errSummariseSpoolSubdirPositionInvalid = errors.New("clickhouse spool: basedirs subdir position overflows UInt32")
@@ -91,11 +91,11 @@ func summariseFullFilterKeyForRow(row chspool.DirFilterAllRow) summariseFullFilt
 }
 
 func summariseActiveVirtualFilterRowsForSummary(
-	summary chspool.ActiveVirtualSummaryRow,
+	summary summariseActiveVirtualSummaryRow,
 	contributors []string,
 	rootFilterRows map[string][]chspool.DirFilterAllRow,
 	refreshedAt time.Time,
-) []chspool.ActiveVirtualFilterAllRow {
+) []summariseActiveVirtualFilterAllRow {
 	aggregates := make(map[summariseFullFilterTupleKey]summariseActiveVirtualFilterAggregate)
 	keys := make(map[summariseFullFilterTupleKey]chspool.DirFilterAllRow)
 
@@ -107,7 +107,7 @@ func summariseActiveVirtualFilterRowsForSummary(
 		}
 	}
 
-	rows := make([]chspool.ActiveVirtualFilterAllRow, 0, len(aggregates))
+	rows := make([]summariseActiveVirtualFilterAllRow, 0, len(aggregates))
 	for key, aggregate := range aggregates {
 		row := keys[key]
 		rows = append(rows, summariseActiveVirtualFilterRow(summary, row, aggregate, refreshedAt))
@@ -161,12 +161,12 @@ func summariseSumUint64Slices(a []uint64, b []uint64) []uint64 {
 }
 
 func summariseActiveVirtualFilterRow(
-	summary chspool.ActiveVirtualSummaryRow,
+	summary summariseActiveVirtualSummaryRow,
 	row chspool.DirFilterAllRow,
 	aggregate summariseActiveVirtualFilterAggregate,
 	refreshedAt time.Time,
-) chspool.ActiveVirtualFilterAllRow {
-	return chspool.ActiveVirtualFilterAllRow{
+) summariseActiveVirtualFilterAllRow {
+	return summariseActiveVirtualFilterAllRow{
 		ActiveSetID:      summary.ActiveSetID,
 		Dir:              summary.Dir,
 		Age:              row.Age,
@@ -247,15 +247,15 @@ func summariseMergeVirtualChildRows(a, b summariseVirtualChildRow) summariseVirt
 
 func summariseSeedActiveVirtualChildSummaryRows(
 	activeSetID string,
-	childRows []chspool.ActiveVirtualChildRow,
-	dirs map[string]chspool.ActiveVirtualSummaryRow,
+	childRows []summariseActiveVirtualChildRow,
+	dirs map[string]summariseActiveVirtualSummaryRow,
 	childCounts map[string]uint64,
 ) {
 	for _, row := range childRows {
 		childCounts[row.ParentDir]++
-		dirs[row.ParentDir] = chspool.ActiveVirtualSummaryRow{ActiveSetID: activeSetID, Dir: row.ParentDir}
+		dirs[row.ParentDir] = summariseActiveVirtualSummaryRow{ActiveSetID: activeSetID, Dir: row.ParentDir}
 		childDir := summariseEnsureTrailingSlash(row.ChildDir)
-		dirs[childDir] = chspool.ActiveVirtualSummaryRow{
+		dirs[childDir] = summariseActiveVirtualSummaryRow{
 			ActiveSetID:    activeSetID,
 			Dir:            childDir,
 			MountPath:      row.MountPath,
@@ -267,7 +267,7 @@ func summariseSeedActiveVirtualChildSummaryRows(
 func summariseSeedActiveVirtualMountRootRows(
 	activeSetID string,
 	activeRows []summariseMountActiveRow,
-	dirs map[string]chspool.ActiveVirtualSummaryRow,
+	dirs map[string]summariseActiveVirtualSummaryRow,
 ) {
 	for _, activeRow := range activeRows {
 		dir := summariseEnsureTrailingSlash(activeRow.mountPath)
@@ -302,7 +302,7 @@ func summariseActiveSetUpdatedAt(t time.Time) time.Time {
 }
 
 func summariseActiveVirtualContributors(
-	summaryRows []chspool.ActiveVirtualSummaryRow,
+	summaryRows []summariseActiveVirtualSummaryRow,
 	activeRows []summariseMountActiveRow,
 ) map[string][]string {
 	contributors := make(map[string][]string, len(summaryRows))
@@ -322,6 +322,55 @@ func summariseActiveVirtualContributors(
 	}
 
 	return contributors
+}
+
+type summariseActiveVirtualSummaryRow struct {
+	ActiveSetID     string
+	Dir             string
+	MountPath       string
+	IsMountRootBox  uint8
+	UpdatedAt       time.Time
+	AllCount        uint64
+	AllSize         uint64
+	AllAtimeMin     int64
+	AllMtimeMax     int64
+	AllAtimeBuckets []uint64
+	AllMtimeBuckets []uint64
+	AllUIDs         []uint32
+	AllGIDs         []uint32
+	AllFT           uint16
+	FileCount       uint64
+	FileSize        uint64
+	ChildCount      uint64
+	RefreshedAt     time.Time
+}
+
+type summariseActiveVirtualFilterAllRow struct {
+	ActiveSetID      string
+	Dir              string
+	Age              uint8
+	GID              uint32
+	UID              uint32
+	FT               uint16
+	Count            uint64
+	Size             uint64
+	AtimeMin         int64
+	MtimeMax         int64
+	AtimeBuckets     []uint64
+	MtimeBuckets     []uint64
+	FilterChildCount uint64
+	ChildCount       uint64
+	RefreshedAt      time.Time
+}
+
+type summariseActiveVirtualChildRow struct {
+	ActiveSetID    string
+	ParentDir      string
+	ChildDir       string
+	MountPath      string
+	IsMountRootBox uint8
+	ChildCount     uint64
+	RefreshedAt    time.Time
 }
 
 type summariseActiveVirtualFilterAggregate struct {
@@ -385,7 +434,7 @@ func summariseAddActiveVirtualSummaryAggregate(
 }
 
 func summariseFillActiveVirtualSummaries(
-	rows []chspool.ActiveVirtualSummaryRow,
+	rows []summariseActiveVirtualSummaryRow,
 	contributors map[string][]string,
 	rootFacts map[string]chspool.DirFactRow,
 	mountChildCounts map[string]uint64,
@@ -403,7 +452,7 @@ func summariseFillActiveVirtualSummaries(
 }
 
 func summariseApplyActiveVirtualSummaryAggregate(
-	row *chspool.ActiveVirtualSummaryRow,
+	row *summariseActiveVirtualSummaryRow,
 	aggregate summariseActiveVirtualSummaryAggregate,
 ) {
 	if aggregate.allCount > 0 {
@@ -426,25 +475,42 @@ func summariseApplyActiveVirtualSummaryAggregate(
 	row.FileSize = aggregate.fileSize
 }
 
+type summariseDGUTARecordContext struct {
+	rawDir       string
+	canonicalDir string
+	dirID        uint32
+	parentID     uint32
+	subtreeEnd   uint32
+	depth        uint16
+}
+
+func summariseHasChildrenValue(childCount uint64) uint8 {
+	if childCount > 0 {
+		return 1
+	}
+
+	return 0
+}
+
 func (w *summariseDGUTASpoolWriter) writeSchema3FullFilterRows(
-	dir string,
+	record summariseDGUTARecordContext,
 	gutas db.GUTAs,
 	childCount uint64,
 ) error {
-	if err := w.flushCompletedSchema3FullFilterRows(dir); err != nil {
+	if err := w.flushCompletedSchema3FullFilterRows(record.canonicalDir); err != nil {
 		return err
 	}
 
 	tuples := summariseFullFilterTupleKeys(gutas)
-	w.noteSchema3DirectChildTuples(summariseParentFactsParentDir(dir), dir, tuples)
+	w.noteSchema3DirectChildTuples(summariseParentDirForPath(record.canonicalDir), record.canonicalDir, tuples)
 
-	rows := summariseFullFilterRowsForGUTAs(w, dir, gutas, childCount)
+	rows := summariseFullFilterRowsForGUTAs(w, record, gutas, childCount)
 	if len(rows) == 0 {
 		return nil
 	}
 
 	w.fullFilterPending = append(w.fullFilterPending, summariseFullFilterPendingDir{
-		dir:       summariseEnsureTrailingSlash(dir),
+		dir:       summariseEnsureTrailingSlash(record.canonicalDir),
 		rows:      rows,
 		seenChild: make(map[summariseFullFilterChildTupleKey]struct{}),
 	})
@@ -471,21 +537,37 @@ func summariseFullFilterTupleKeys(gutas db.GUTAs) map[summariseFullFilterTupleKe
 	return keys
 }
 
+func summariseParentDirForPath(dir string) string {
+	dir = summariseNormalizeImportMountPath(dir)
+	if dir == "/" {
+		return "/"
+	}
+
+	trimmed := strings.TrimSuffix(dir, "/")
+	idx := strings.LastIndex(trimmed, "/")
+
+	if idx <= 0 {
+		return "/"
+	}
+
+	return trimmed[:idx+1]
+}
+
 func summariseFullFilterRowsForGUTAs(
 	w *summariseDGUTASpoolWriter,
-	dir string,
+	record summariseDGUTARecordContext,
 	gutas db.GUTAs,
 	childCount uint64,
 ) []chspool.DirFilterAllRow {
 	rows := make([]chspool.DirFilterAllRow, 0, len(gutas))
-	dir = summariseEnsureTrailingSlash(dir)
+	record.canonicalDir = summariseEnsureTrailingSlash(record.canonicalDir)
 
 	for _, guta := range gutas {
 		if guta == nil {
 			continue
 		}
 
-		rows = append(rows, summariseFullFilterRowForGUTA(w, dir, guta, childCount))
+		rows = append(rows, summariseFullFilterRowForGUTA(w, record, guta, childCount))
 	}
 
 	return rows
@@ -578,7 +660,7 @@ func (w *summariseDGUTASpoolWriter) flushLastSchema3FullFilterPending() error {
 	flushedRows := make([]chspool.DirFilterAllRow, 0, len(pending.rows))
 
 	for _, row := range pending.rows {
-		row.HasFilterChildren = summariseParentFactsHasChildrenValue(row.FilterChildCount)
+		row.HasFilterChildren = summariseHasChildrenValue(row.FilterChildCount)
 		if err := w.writeSchema3FullFilterRow(row); err != nil {
 			return err
 		}
@@ -603,12 +685,12 @@ func summariseChildFilterAllRowForDirFilterAll(row chspool.DirFilterAllRow) chsp
 	return chspool.ChildFilterAllRow{
 		MountPath:         row.MountPath,
 		SnapshotID:        row.SnapshotID,
-		ParentDir:         row.ParentDir,
+		ParentID:          0,
 		Age:               row.Age,
 		GID:               row.GID,
 		UID:               row.UID,
 		FT:                row.FT,
-		Dir:               row.Dir,
+		DirID:             row.DirID,
 		Count:             row.Count,
 		Size:              row.Size,
 		AtimeMin:          row.AtimeMin,
@@ -644,9 +726,8 @@ func (w *summariseDGUTASpoolWriter) writeSchema3ReadinessRows() error {
 		MountPath:          w.mountPath,
 		SnapshotID:         w.snapshotID,
 		Schema3Version:     clickHouseSpoolSchema3Version,
+		DirsRows:           counts.dirsRows,
 		DirFactsRows:       counts.dirFactsRows,
-		ParentFactsRows:    counts.parentFactsRows,
-		ChildrenRows:       counts.childrenRows,
 		ChildFilterAllRows: counts.childFilterAllRows,
 		DirFilterAllRows:   counts.dirFilterAllRows,
 		ManifestSHA256:     summariseSchema3SnapshotManifestSHA256(w.mountPath, w.snapshotID, counts),
@@ -660,9 +741,8 @@ func (w *summariseDGUTASpoolWriter) writeSchema3ReadinessRows() error {
 
 func summariseSchema3SnapshotRowCounts(tables map[string]chspool.TableManifest) summariseSchema3SnapshotCounts {
 	return summariseSchema3SnapshotCounts{
+		dirsRows:           tables[chspool.TableDirs].Rows,
 		dirFactsRows:       tables[chspool.TableDirFacts].Rows,
-		parentFactsRows:    tables[chspool.TableParentFacts].Rows,
-		childrenRows:       tables[chspool.TableChildren].Rows,
 		childFilterAllRows: tables[chspool.TableChildFilterAll].Rows,
 		dirFilterAllRows:   tables[chspool.TableDirFilterAll].Rows,
 	}
@@ -674,13 +754,12 @@ func summariseSchema3SnapshotManifestSHA256(
 	counts summariseSchema3SnapshotCounts,
 ) string {
 	return summariseSHA256Hex(fmt.Sprintf(
-		"%s|%s|%d|%d|%d|%d|%d|%d",
+		"%s|%s|%d|%d|%d|%d|%d",
 		mountPath,
 		snapshotID,
 		clickHouseSpoolSchema3Version,
+		counts.dirsRows,
 		counts.dirFactsRows,
-		counts.parentFactsRows,
-		counts.childrenRows,
 		counts.childFilterAllRows,
 		counts.dirFilterAllRows,
 	))
@@ -742,12 +821,12 @@ func summariseActiveVirtualChildRows(
 	activeSetID string,
 	activeRows []summariseMountActiveRow,
 	refreshedAt time.Time,
-) []chspool.ActiveVirtualChildRow {
+) []summariseActiveVirtualChildRow {
 	virtualRows := summariseVirtualChildRowsForMounts(activeRows)
-	rows := make([]chspool.ActiveVirtualChildRow, 0, len(virtualRows))
+	rows := make([]summariseActiveVirtualChildRow, 0, len(virtualRows))
 
 	for _, row := range virtualRows {
-		rows = append(rows, chspool.ActiveVirtualChildRow{
+		rows = append(rows, summariseActiveVirtualChildRow{
 			ActiveSetID:    activeSetID,
 			ParentDir:      row.parentDir,
 			ChildDir:       row.childDir,
@@ -763,9 +842,9 @@ func summariseActiveVirtualChildRows(
 func summariseActiveVirtualSummaryRows(
 	activeSetID string,
 	activeRows []summariseMountActiveRow,
-	childRows []chspool.ActiveVirtualChildRow,
+	childRows []summariseActiveVirtualChildRow,
 	refreshedAt time.Time,
-) []chspool.ActiveVirtualSummaryRow {
+) []summariseActiveVirtualSummaryRow {
 	dirs, childCounts := summariseActiveVirtualSummarySeeds(activeSetID, activeRows, childRows)
 
 	return summariseActiveVirtualSummaryRowsFromSeeds(
@@ -783,7 +862,7 @@ func summariseActiveVirtualRowsFromCanonicalData(
 	rootFilterRows map[string][]chspool.DirFilterAllRow,
 	mountChildCounts map[string]uint64,
 	refreshedAt time.Time,
-) ([]chspool.ActiveVirtualSummaryRow, []chspool.ActiveVirtualFilterAllRow, []chspool.ActiveVirtualChildRow) {
+) ([]summariseActiveVirtualSummaryRow, []summariseActiveVirtualFilterAllRow, []summariseActiveVirtualChildRow) {
 	childRows := summariseActiveVirtualChildRows(activeSetID, activeRows, refreshedAt)
 	summaryRows := summariseActiveVirtualSummaryRows(activeSetID, activeRows, childRows, refreshedAt)
 	contributors := summariseActiveVirtualContributors(summaryRows, activeRows)
@@ -807,8 +886,8 @@ func (w *summariseDGUTASpoolWriter) noteActiveVirtualMountChildRows(parentDir st
 	w.activeVirtualMountChildCounts[w.mountPath] += count
 }
 
-func (w *summariseDGUTASpoolWriter) noteActiveVirtualRootFact(row chspool.DirFactRow) {
-	if row.Dir != w.mountPath {
+func (w *summariseDGUTASpoolWriter) noteActiveVirtualRootFact(dir string, row chspool.DirFactRow) {
+	if dir != w.mountPath {
 		return
 	}
 
@@ -820,12 +899,12 @@ func (w *summariseDGUTASpoolWriter) noteActiveVirtualRootFact(row chspool.DirFac
 }
 
 func summariseActiveVirtualFilterRows(
-	summaryRows []chspool.ActiveVirtualSummaryRow,
+	summaryRows []summariseActiveVirtualSummaryRow,
 	contributors map[string][]string,
 	rootFilterRows map[string][]chspool.DirFilterAllRow,
 	refreshedAt time.Time,
-) []chspool.ActiveVirtualFilterAllRow {
-	rows := make([]chspool.ActiveVirtualFilterAllRow, 0, len(summaryRows)*len(rootFilterRows))
+) []summariseActiveVirtualFilterAllRow {
+	rows := make([]summariseActiveVirtualFilterAllRow, 0, len(summaryRows)*len(rootFilterRows))
 
 	for _, summary := range summaryRows {
 		rows = append(rows, summariseActiveVirtualFilterRowsForSummary(
@@ -836,7 +915,7 @@ func summariseActiveVirtualFilterRows(
 		)...)
 	}
 
-	slices.SortFunc(rows, func(a, b chspool.ActiveVirtualFilterAllRow) int {
+	slices.SortFunc(rows, func(a, b summariseActiveVirtualFilterAllRow) int {
 		return strings.Compare(summariseActiveVirtualFilterSortKey(a), summariseActiveVirtualFilterSortKey(b))
 	})
 
@@ -846,9 +925,9 @@ func summariseActiveVirtualFilterRows(
 func summariseActiveVirtualSetRow(
 	activeRows []summariseMountActiveRow,
 	activeSetID string,
-	summaryRows []chspool.ActiveVirtualSummaryRow,
-	filterRows []chspool.ActiveVirtualFilterAllRow,
-	childRows []chspool.ActiveVirtualChildRow,
+	summaryRows []summariseActiveVirtualSummaryRow,
+	filterRows []summariseActiveVirtualFilterAllRow,
+	childRows []summariseActiveVirtualChildRow,
 	refreshedAt time.Time,
 ) chspool.ActiveVirtualSetRow {
 	manifest := summariseActiveVirtualManifestSHA256(
@@ -873,24 +952,24 @@ func summariseActiveVirtualSetRow(
 }
 
 func (w *summariseDGUTASpoolWriter) writeActiveVirtualDataRows(
-	summaryRows []chspool.ActiveVirtualSummaryRow,
-	filterRows []chspool.ActiveVirtualFilterAllRow,
-	childRows []chspool.ActiveVirtualChildRow,
+	summaryRows []summariseActiveVirtualSummaryRow,
+	filterRows []summariseActiveVirtualFilterAllRow,
+	childRows []summariseActiveVirtualChildRow,
 ) error {
 	for _, row := range summaryRows {
-		if err := w.ds.set.WriteActiveVirtualSummary(row); err != nil {
+		if err := w.ds.set.WriteActiveVirtualSummary(summariseActiveVirtualSummarySpoolRow(row)); err != nil {
 			return err
 		}
 	}
 
 	for _, row := range filterRows {
-		if err := w.ds.set.WriteActiveVirtualFilterAll(row); err != nil {
+		if err := w.ds.set.WriteActiveVirtualFilterAll(summariseActiveVirtualFilterSpoolRow(row)); err != nil {
 			return err
 		}
 	}
 
 	for _, row := range childRows {
-		if err := w.ds.set.WriteActiveVirtualChild(row); err != nil {
+		if err := w.ds.set.WriteActiveVirtualChild(summariseActiveVirtualChildSpoolRow(row)); err != nil {
 			return err
 		}
 	}
@@ -900,7 +979,7 @@ func (w *summariseDGUTASpoolWriter) writeActiveVirtualDataRows(
 
 func summariseFullFilterRowForGUTA(
 	w *summariseDGUTASpoolWriter,
-	dir string,
+	record summariseDGUTARecordContext,
 	guta *db.GUTA,
 	childCount uint64,
 ) chspool.DirFilterAllRow {
@@ -911,8 +990,8 @@ func summariseFullFilterRowForGUTA(
 		GID:          guta.GID,
 		UID:          guta.UID,
 		FT:           uint16(guta.FT),
-		Dir:          dir,
-		ParentDir:    summariseParentFactsParentDir(dir),
+		DirID:        record.dirID,
+		SubtreeEnd:   record.subtreeEnd,
 		Count:        guta.Count,
 		Size:         guta.Size,
 		AtimeMin:     guta.Atime,
@@ -920,9 +999,115 @@ func summariseFullFilterRowForGUTA(
 		AtimeBuckets: summariseAgeBucketsSlice(&guta.ATimeRanges),
 		MtimeBuckets: summariseAgeBucketsSlice(&guta.MTimeRanges),
 		ChildCount:   childCount,
-		HasChildren:  summariseParentFactsHasChildrenValue(childCount),
+		HasChildren:  summariseHasChildrenValue(childCount),
 		RefreshedAt:  w.refreshedAt,
 	}
+}
+
+func summariseActiveVirtualSummarySpoolRow(row summariseActiveVirtualSummaryRow) chspool.ActiveVirtualSummaryRow {
+	return chspool.ActiveVirtualSummaryRow{
+		ActiveSetID:     row.ActiveSetID,
+		VirtualID:       summariseVirtualIDForDir(row.Dir),
+		MountPath:       row.MountPath,
+		MountRootDirID:  summariseMountRootDirID(row.MountPath),
+		IsMountRootBox:  row.IsMountRootBox,
+		UpdatedAt:       row.UpdatedAt,
+		AllCount:        row.AllCount,
+		AllSize:         row.AllSize,
+		AllAtimeMin:     row.AllAtimeMin,
+		AllMtimeMax:     row.AllMtimeMax,
+		AllAtimeBuckets: row.AllAtimeBuckets,
+		AllMtimeBuckets: row.AllMtimeBuckets,
+		AllUIDs:         row.AllUIDs,
+		AllGIDs:         row.AllGIDs,
+		AllFT:           row.AllFT,
+		FileCount:       row.FileCount,
+		FileSize:        row.FileSize,
+		ChildCount:      row.ChildCount,
+		RefreshedAt:     row.RefreshedAt,
+	}
+}
+
+func summariseActiveVirtualFilterSpoolRow(row summariseActiveVirtualFilterAllRow) chspool.ActiveVirtualFilterAllRow {
+	return chspool.ActiveVirtualFilterAllRow{
+		ActiveSetID:      row.ActiveSetID,
+		VirtualID:        summariseVirtualIDForDir(row.Dir),
+		Age:              row.Age,
+		GID:              row.GID,
+		UID:              row.UID,
+		FT:               row.FT,
+		Count:            row.Count,
+		Size:             row.Size,
+		AtimeMin:         row.AtimeMin,
+		MtimeMax:         row.MtimeMax,
+		AtimeBuckets:     row.AtimeBuckets,
+		MtimeBuckets:     row.MtimeBuckets,
+		FilterChildCount: row.FilterChildCount,
+		ChildCount:       row.ChildCount,
+		RefreshedAt:      row.RefreshedAt,
+	}
+}
+
+func summariseActiveVirtualChildSpoolRow(row summariseActiveVirtualChildRow) chspool.ActiveVirtualChildRow {
+	return chspool.ActiveVirtualChildRow{
+		ActiveSetID:     row.ActiveSetID,
+		ParentVirtualID: summariseVirtualIDForDir(row.ParentDir),
+		ChildVirtualID:  summariseVirtualIDForDir(row.ChildDir),
+		MountPath:       row.MountPath,
+		MountRootDirID:  summariseMountRootDirID(row.MountPath),
+		IsMountRootBox:  row.IsMountRootBox,
+		ChildCount:      row.ChildCount,
+		RefreshedAt:     row.RefreshedAt,
+	}
+}
+
+func (w *summariseDGUTASpoolWriter) writeCatalogRow(
+	dguta db.RecordDGUTA,
+	record summariseDGUTARecordContext,
+) error {
+	return w.ds.set.WriteDir(chspool.DirRow{
+		MountPath:     w.mountPath,
+		SnapshotID:    w.snapshotID,
+		DirID:         record.dirID,
+		ParentID:      record.parentID,
+		SubtreeEnd:    record.subtreeEnd,
+		Depth:         record.depth,
+		Name:          summariseCatalogNameForFullPath(record.canonicalDir),
+		FullPath:      summariseEnsureTrailingSlash(record.canonicalDir),
+		ChildDirCount: summariseSafeUint32(dguta.ChildCount),
+		PathHash:      summariseCatalogPathHash(record.canonicalDir),
+	})
+}
+
+func summariseCatalogNameForFullPath(fullPath string) string {
+	fullPath = summariseEnsureTrailingSlash(fullPath)
+	if fullPath == "/" {
+		return "/"
+	}
+
+	trimmed := strings.TrimSuffix(fullPath, "/")
+
+	idx := strings.LastIndexByte(trimmed, '/')
+	if idx < 0 {
+		return trimmed + "/"
+	}
+
+	return trimmed[idx+1:] + "/"
+}
+
+func summariseSafeUint32(value uint64) uint32 {
+	if value > uint64(^uint32(0)) {
+		return ^uint32(0)
+	}
+
+	return uint32(value)
+}
+
+func summariseCatalogPathHash(fullPath string) uint64 {
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(summariseEnsureTrailingSlash(fullPath)))
+
+	return h.Sum64()
 }
 
 type summariseSpoolDataset struct {
@@ -932,6 +1117,7 @@ type summariseSpoolDataset struct {
 	snapshotID         string
 	refreshedAt        time.Time
 	dirgutaReferenceAt time.Time
+	idAllocator        *summary.DirIDAllocator
 	dgutaWriter        *summariseDGUTASpoolWriter
 }
 
@@ -955,18 +1141,13 @@ type summariseDGUTASpoolWriter struct {
 }
 
 func (w *summariseDGUTASpoolWriter) writeSchema2Rows(
-	dir string,
+	record summariseDGUTARecordContext,
 	gutas db.GUTAs,
-	childCount uint64,
 ) error {
-	if err := w.writeDirFilterAgeAllRows(dir, gutas); err != nil {
-		return err
-	}
-
-	return w.writeParentFactRow(dir, gutas, childCount)
+	return w.writeDirFilterAgeAllRows(record, gutas)
 }
 
-func (w *summariseDGUTASpoolWriter) writeDirFilterAgeAllRows(dir string, gutas db.GUTAs) error {
+func (w *summariseDGUTASpoolWriter) writeDirFilterAgeAllRows(record summariseDGUTARecordContext, gutas db.GUTAs) error {
 	for _, guta := range gutas {
 		if guta == nil || guta.Age != db.DGUTAgeAll {
 			continue
@@ -978,7 +1159,8 @@ func (w *summariseDGUTASpoolWriter) writeDirFilterAgeAllRows(dir string, gutas d
 			GID:          guta.GID,
 			UID:          guta.UID,
 			FT:           uint16(guta.FT),
-			Dir:          dir,
+			DirID:        record.dirID,
+			SubtreeEnd:   record.subtreeEnd,
 			Count:        guta.Count,
 			Size:         guta.Size,
 			AtimeMin:     guta.Atime,
@@ -994,80 +1176,12 @@ func (w *summariseDGUTASpoolWriter) writeDirFilterAgeAllRows(dir string, gutas d
 	return nil
 }
 
-func (w *summariseDGUTASpoolWriter) writeParentFactRow( //nolint:funlen
-	dir string,
-	gutas db.GUTAs,
-	childCount uint64,
-) error {
-	allSummary, fileSummary := summariseMountDirRecordSummaries(gutas)
-	if allSummary == nil {
-		allSummary = newSummariseMountDirRecordSummary()
+func summariseFileIngestDirIDPath(info *summary.FileInfo) *summary.DirectoryPath {
+	if info.IsDir() {
+		return info.Path.Parent
 	}
 
-	columns := summariseMountDirProjectionVectorColumnsFor(gutas)
-
-	return w.ds.set.WriteParentFact(chspool.ParentFactRow{
-		MountPath:        w.mountPath,
-		SnapshotID:       w.snapshotID,
-		ParentDir:        summariseParentFactsParentDir(dir),
-		Dir:              dir,
-		UpdatedAt:        w.updatedAt,
-		AllCount:         allSummary.count,
-		AllSize:          allSummary.size,
-		AllAtimeMin:      allSummary.atimeMin,
-		AllMtimeMax:      allSummary.mtimeMax,
-		AllAtimeBuckets:  summariseAgeBucketsSlice(&allSummary.atimeBuckets),
-		AllMtimeBuckets:  summariseAgeBucketsSlice(&allSummary.mtimeBuckets),
-		AllUIDs:          allSummary.sortedUIDs(),
-		AllGIDs:          allSummary.sortedGIDs(),
-		AllFT:            uint16(allSummary.ft),
-		FileCount:        summariseRecordSummaryCount(fileSummary),
-		FileSize:         summariseRecordSummarySize(fileSummary),
-		FileAtimeMin:     summariseRecordSummaryAtimeMin(fileSummary),
-		FileMtimeMax:     summariseRecordSummaryMtimeMax(fileSummary),
-		FileAtimeBuckets: summariseRecordSummaryATimeBuckets(fileSummary),
-		FileMtimeBuckets: summariseRecordSummaryMTimeBuckets(fileSummary),
-		FileUIDs:         summariseRecordSummaryUIDs(fileSummary),
-		FileGIDs:         summariseRecordSummaryGIDs(fileSummary),
-		FileFT:           summariseRecordSummaryFT(fileSummary),
-		GIDs:             columns.gids,
-		UIDs:             columns.uids,
-		FTs:              columns.fts,
-		Ages:             columns.ages,
-		Counts:           columns.counts,
-		Sizes:            columns.sizes,
-		AtimeMins:        columns.atimeMins,
-		MtimeMaxs:        columns.mtimeMaxs,
-		AtimeBuckets:     columns.atimeBuckets,
-		MtimeBuckets:     columns.mtimeBuckets,
-		ChildCount:       childCount,
-		HasChildren:      summariseParentFactsHasChildrenValue(childCount),
-		RefreshedAt:      w.refreshedAt,
-	})
-}
-
-func summariseParentFactsParentDir(dir string) string {
-	dir = summariseNormalizeImportMountPath(dir)
-	if dir == "/" {
-		return "/"
-	}
-
-	trimmed := strings.TrimSuffix(dir, "/")
-	idx := strings.LastIndex(trimmed, "/")
-
-	if idx <= 0 {
-		return "/"
-	}
-
-	return trimmed[:idx+1]
-}
-
-func summariseParentFactsHasChildrenValue(childCount uint64) uint8 {
-	if childCount > 0 {
-		return 1
-	}
-
-	return 0
+	return info.Path
 }
 
 type summariseBasedirsSpoolStore struct {
@@ -1125,9 +1239,8 @@ type summariseMountDirProjectionVectorColumns struct {
 }
 
 type summariseSchema3SnapshotCounts struct {
+	dirsRows           uint64
 	dirFactsRows       uint64
-	parentFactsRows    uint64
-	childrenRows       uint64
 	childFilterAllRows uint64
 	dirFilterAllRows   uint64
 }
@@ -1195,28 +1308,28 @@ func summariseImmediateChildForMount(parentDir, mountPath string) (string, bool)
 func summariseActiveVirtualSummarySeeds(
 	activeSetID string,
 	activeRows []summariseMountActiveRow,
-	childRows []chspool.ActiveVirtualChildRow,
-) (map[string]chspool.ActiveVirtualSummaryRow, map[string]uint64) {
-	dirs := make(map[string]chspool.ActiveVirtualSummaryRow, len(childRows)+1)
+	childRows []summariseActiveVirtualChildRow,
+) (map[string]summariseActiveVirtualSummaryRow, map[string]uint64) {
+	dirs := make(map[string]summariseActiveVirtualSummaryRow, len(childRows)+1)
 	childCounts := make(map[string]uint64)
 
 	summariseSeedActiveVirtualChildSummaryRows(activeSetID, childRows, dirs, childCounts)
 	summariseSeedActiveVirtualMountRootRows(activeSetID, activeRows, dirs)
 
 	if len(dirs) == 0 && activeSetID != "" {
-		dirs["/"] = chspool.ActiveVirtualSummaryRow{ActiveSetID: activeSetID, Dir: "/"}
+		dirs["/"] = summariseActiveVirtualSummaryRow{ActiveSetID: activeSetID, Dir: "/"}
 	}
 
 	return dirs, childCounts
 }
 
 func summariseActiveVirtualSummaryRowsFromSeeds(
-	dirs map[string]chspool.ActiveVirtualSummaryRow,
+	dirs map[string]summariseActiveVirtualSummaryRow,
 	childCounts map[string]uint64,
 	updatedAt time.Time,
 	refreshedAt time.Time,
-) []chspool.ActiveVirtualSummaryRow {
-	out := make([]chspool.ActiveVirtualSummaryRow, 0, len(dirs))
+) []summariseActiveVirtualSummaryRow {
+	out := make([]summariseActiveVirtualSummaryRow, 0, len(dirs))
 	for _, row := range dirs {
 		row.UpdatedAt = updatedAt
 		row.ChildCount = childCounts[row.Dir]
@@ -1226,14 +1339,14 @@ func summariseActiveVirtualSummaryRowsFromSeeds(
 		out = append(out, row)
 	}
 
-	slices.SortFunc(out, func(a, b chspool.ActiveVirtualSummaryRow) int {
+	slices.SortFunc(out, func(a, b summariseActiveVirtualSummaryRow) int {
 		return strings.Compare(a.Dir, b.Dir)
 	})
 
 	return out
 }
 
-func summariseActiveVirtualFilterSortKey(row chspool.ActiveVirtualFilterAllRow) string {
+func summariseActiveVirtualFilterSortKey(row summariseActiveVirtualFilterAllRow) string {
 	return fmt.Sprintf("%s\x00%03d\x00%010d\x00%010d\x00%05d", row.Dir, row.Age, row.GID, row.UID, row.FT)
 }
 
@@ -1246,8 +1359,8 @@ func summariseAppendUniqueUint32Slice(values []uint32, more []uint32) []uint32 {
 }
 
 func summariseFillActiveVirtualChildCounts(
-	childRows []chspool.ActiveVirtualChildRow,
-	summaryRows []chspool.ActiveVirtualSummaryRow,
+	childRows []summariseActiveVirtualChildRow,
+	summaryRows []summariseActiveVirtualSummaryRow,
 ) {
 	childCounts := make(map[string]uint64, len(summaryRows))
 	for _, row := range summaryRows {
@@ -1257,6 +1370,24 @@ func summariseFillActiveVirtualChildCounts(
 	for idx := range childRows {
 		childRows[idx].ChildCount = childCounts[summariseEnsureTrailingSlash(childRows[idx].ChildDir)]
 	}
+}
+
+func summariseVirtualIDForDir(dir string) uint32 {
+	return uint32(summariseCatalogPathHash(dir)) //nolint:gosec // Virtual IDs intentionally use low hash bits.
+}
+
+func summariseMountRootDirID(mountPath string) uint32 {
+	mountPath = summariseEnsureTrailingSlash(mountPath)
+	if mountPath == "/" || mountPath == "" {
+		return 0
+	}
+
+	trimmed := strings.Trim(mountPath, "/")
+	if trimmed == "" {
+		return 0
+	}
+
+	return uint32(strings.Count(trimmed, "/") + 1) //nolint:gosec // Mount path segment counts are bounded.
 }
 
 func summariseActiveVirtualManifestSHA256(activeSetID string, summaryRows, filterRows, childRows int) string {
@@ -1409,6 +1540,12 @@ func buildSummariseSpool( //nolint:funlen,gocyclo
 		snapshotID:         expected.SnapshotID,
 		refreshedAt:        summariseSpoolNow().UTC(),
 		dirgutaReferenceAt: summariseSpoolDirGUTANow().UTC(),
+		idAllocator:        summary.NewDirIDAllocator(),
+	}
+	if mountErr := ds.idAllocator.SetMountPath(target.mountPath); mountErr != nil {
+		_ = os.RemoveAll(partialDir)
+
+		return nil, mountErr
 	}
 
 	err = parseSummariseToSpool(statsPath, ds, diag)
@@ -1488,7 +1625,7 @@ func addSummariseSpoolOperations(s *summary.Summariser, ds *summariseSpoolDatase
 	dw.SetUpdatedAt(ds.updatedAt)
 	ds.dgutaWriter = dw
 
-	s.AddDirectoryOperation(dirguta.NewDirGroupUserTypeAgeAt(dw, ds.dirgutaReferenceAt))
+	s.AddDirectoryOperation(dirguta.NewDirGroupUserTypeAgeAt(dw, ds.dirgutaReferenceAt, ds.idAllocator))
 	s.AddGlobalOperation((&summariseFileSpoolOperation{ds: ds}).operation)
 }
 
@@ -1582,15 +1719,20 @@ func (f *summariseFileSpoolOperation) Add(info *summary.FileInfo) error { //noli
 	parentDir := string(info.Path.AppendTo(make([]byte, 0, info.Path.Len())))
 	name := string(info.Name)
 
-	parentDir, name, keep := summariseCanonicalFileIngestPath(f.ds.mountPath, parentDir, name)
+	_, name, keep := summariseCanonicalFileIngestPath(f.ds.mountPath, parentDir, name)
 	if !keep {
 		return nil
+	}
+
+	dirID, err := f.ds.idAllocator.DirID(summariseFileIngestDirIDPath(info))
+	if err != nil {
+		return err
 	}
 
 	return f.ds.set.WriteFile(chspool.FileRow{
 		MountPath:    f.ds.mountPath,
 		SnapshotID:   f.ds.snapshotID,
-		ParentDir:    parentDir,
+		DirID:        dirID,
 		Name:         name,
 		Ext:          summariseExtFromName(name),
 		EntryType:    info.EntryType,
@@ -1698,19 +1840,6 @@ func (w *summariseDGUTASpoolWriter) refreshIDs() {
 	}
 }
 
-func (w *summariseDGUTASpoolWriter) AddChildren(parent *summary.DirectoryPath, children []string) error {
-	if parent == nil {
-		return errSummariseSpoolChildrenParent
-	}
-
-	w.refreshIDs()
-
-	parentDir := string(parent.AppendTo(make([]byte, 0, parent.Len())))
-	parentDir = summariseCanonicalPathForMount(w.mountPath, parentDir)
-
-	return w.appendChildrenRows(children, parentDir)
-}
-
 func (w *summariseDGUTASpoolWriter) Add(dguta db.RecordDGUTA) error { //nolint:funlen,gocyclo,gocognit
 	if dguta.Dir == nil {
 		return errSummariseSpoolDirFactsDir
@@ -1720,9 +1849,20 @@ func (w *summariseDGUTASpoolWriter) Add(dguta db.RecordDGUTA) error { //nolint:f
 
 	rawParentDir := string(dguta.Dir.AppendTo(make([]byte, 0, dguta.Dir.Len())))
 	parentDir := summariseCanonicalPathForMount(w.mountPath, rawParentDir)
-	children := w.canonicalChildrenForParent(parentDir, dguta.Children)
-	childCount := max(dguta.ChildCount, uint64(len(children)))
+	childCount := max(dguta.ChildCount, uint64(len(dguta.Children)))
+	record := summariseDGUTARecordContext{
+		rawDir:       rawParentDir,
+		canonicalDir: parentDir,
+		dirID:        dguta.DirID,
+		parentID:     dguta.ParentID,
+		subtreeEnd:   dguta.SubtreeEnd,
+		depth:        dguta.Depth,
+	}
 	appendedGUTAs := make(db.GUTAs, 0, len(dguta.GUTAs))
+
+	if err := w.writeCatalogRow(dguta, record); err != nil {
+		return err
+	}
 
 	tracker := w.newDGUTARecordTracker(len(dguta.GUTAs))
 	for _, guta := range dguta.GUTAs {
@@ -1736,21 +1876,19 @@ func (w *summariseDGUTASpoolWriter) Add(dguta db.RecordDGUTA) error { //nolint:f
 		}
 	}
 
-	if err := w.writeDirFactRow(parentDir, appendedGUTAs, childCount); err != nil {
+	if err := w.writeDirFactRow(record, appendedGUTAs, childCount); err != nil {
 		return err
 	}
 
-	if err := w.writeSchema2Rows(parentDir, appendedGUTAs, childCount); err != nil {
+	if err := w.writeSchema2Rows(record, appendedGUTAs); err != nil {
 		return err
 	}
 
-	if err := w.writeSchema3FullFilterRows(parentDir, appendedGUTAs, childCount); err != nil {
+	if err := w.writeSchema3FullFilterRows(record, appendedGUTAs, childCount); err != nil {
 		return err
 	}
 
-	if err := w.appendChildrenRows(children, parentDir); err != nil {
-		return err
-	}
+	w.noteActiveVirtualMountChildRows(parentDir, childCount)
 
 	w.previousDGUTARows = summariseDGUTARecordRows{
 		rawDir:       rawParentDir,
@@ -1850,54 +1988,8 @@ func newSummariseDGUTARowKey(dir string, guta *db.GUTA) summariseDGUTARowKey {
 	}
 }
 
-func (w *summariseDGUTASpoolWriter) canonicalChildrenForParent(
-	parentDir string,
-	children []string,
-) []string {
-	out := make([]string, 0, len(children))
-
-	for _, child := range children {
-		child = summariseChildPathForParent(parentDir, child)
-		child = summariseCanonicalPathForMount(w.mountPath, child)
-
-		if child != "" {
-			out = append(out, child)
-		}
-	}
-
-	return out
-}
-
-func (w *summariseDGUTASpoolWriter) appendChildrenRows(children []string, parentDir string) error {
-	var written uint64
-
-	for _, child := range children {
-		child = summariseChildPathForParent(parentDir, child)
-		child = summariseCanonicalPathForMount(w.mountPath, child)
-
-		if child == "" {
-			continue
-		}
-
-		if err := w.ds.set.WriteChild(chspool.ChildRow{
-			MountPath:  w.mountPath,
-			SnapshotID: w.snapshotID,
-			ParentDir:  parentDir,
-			Child:      child,
-		}); err != nil {
-			return err
-		}
-
-		written++
-	}
-
-	w.noteActiveVirtualMountChildRows(parentDir, written)
-
-	return nil
-}
-
 func (w *summariseDGUTASpoolWriter) writeDirFactRow( //nolint:funlen
-	dir string,
+	record summariseDGUTARecordContext,
 	gutas db.GUTAs,
 	childCount uint64,
 ) error {
@@ -1911,7 +2003,9 @@ func (w *summariseDGUTASpoolWriter) writeDirFactRow( //nolint:funlen
 	row := chspool.DirFactRow{
 		MountPath:        w.mountPath,
 		SnapshotID:       w.snapshotID,
-		Dir:              dir,
+		DirID:            record.dirID,
+		ParentID:         record.parentID,
+		SubtreeEnd:       record.subtreeEnd,
 		UpdatedAt:        w.updatedAt,
 		AllCount:         allSummary.count,
 		AllSize:          allSummary.size,
@@ -1945,7 +2039,7 @@ func (w *summariseDGUTASpoolWriter) writeDirFactRow( //nolint:funlen
 		RefreshedAt:      w.refreshedAt,
 	}
 
-	w.noteActiveVirtualRootFact(row)
+	w.noteActiveVirtualRootFact(record.canonicalDir, row)
 
 	return w.ds.set.WriteDirFact(row)
 }
@@ -2025,17 +2119,18 @@ func (s *summariseBasedirsSpoolStore) PutUserUsage(u *basedirs.Usage) error {
 	}
 
 	return s.ds.set.WriteBasedirsUserUsage(chspool.BasedirsUserUsageRow{
-		MountPath:   s.mountPath,
-		SnapshotID:  s.snapshotID,
-		UID:         u.UID,
-		BaseDir:     u.BaseDir,
-		Age:         uint8(u.Age),
-		GIDs:        summariseEnsureNonNilUInt32s(u.GIDs),
-		UsageSize:   u.UsageSize,
-		QuotaSize:   u.QuotaSize,
-		UsageInodes: u.UsageInodes,
-		QuotaInodes: u.QuotaInodes,
-		Mtime:       u.Mtime,
+		MountPath:       s.mountPath,
+		SnapshotID:      s.snapshotID,
+		UID:             u.UID,
+		BaseDirID:       0,
+		BaseDirExternal: u.BaseDir,
+		Age:             uint8(u.Age),
+		GIDs:            summariseEnsureNonNilUInt32s(u.GIDs),
+		UsageSize:       u.UsageSize,
+		QuotaSize:       u.QuotaSize,
+		UsageInodes:     u.UsageInodes,
+		QuotaInodes:     u.QuotaInodes,
+		Mtime:           u.Mtime,
 	})
 }
 
@@ -2072,17 +2167,19 @@ func (s *summariseBasedirsSpoolStore) writeSubDirs( //nolint:funlen,gocognit,goc
 		}
 
 		row := chspool.BasedirsSubdirRow{
-			MountPath:    s.mountPath,
-			SnapshotID:   s.snapshotID,
-			ID:           key.ID,
-			BaseDir:      key.BaseDir,
-			Age:          uint8(key.Age),
-			Pos:          uint32(pos),
-			SubDir:       sd.SubDir,
-			NumFiles:     sd.NumFiles,
-			SizeFiles:    sd.SizeFiles,
-			LastModified: sd.LastModified,
-			FileUsage:    summariseUsageBreakdownToCHMap(sd.FileUsage),
+			MountPath:       s.mountPath,
+			SnapshotID:      s.snapshotID,
+			ID:              key.ID,
+			BaseDirID:       key.ID,
+			SubDirID:        0,
+			BaseDirExternal: key.BaseDir,
+			SubDirExternal:  sd.SubDir,
+			Age:             uint8(key.Age),
+			Pos:             uint32(pos),
+			NumFiles:        sd.NumFiles,
+			SizeFiles:       sd.SizeFiles,
+			LastModified:    sd.LastModified,
+			FileUsage:       summariseUsageBreakdownToCHMap(sd.FileUsage),
 		}
 
 		if table == chspool.TableBasedirsGroupSubdirs { //nolint:nestif
@@ -2146,19 +2243,20 @@ func (s *summariseBasedirsSpoolStore) writeGroupUsage(
 	dateNoFiles time.Time,
 ) error {
 	return s.ds.set.WriteBasedirsGroupUsage(chspool.BasedirsGroupUsageRow{
-		MountPath:   s.mountPath,
-		SnapshotID:  s.snapshotID,
-		GID:         u.GID,
-		BaseDir:     u.BaseDir,
-		Age:         uint8(u.Age),
-		UIDs:        summariseEnsureNonNilUInt32s(u.UIDs),
-		UsageSize:   u.UsageSize,
-		QuotaSize:   u.QuotaSize,
-		UsageInodes: u.UsageInodes,
-		QuotaInodes: u.QuotaInodes,
-		Mtime:       u.Mtime,
-		DateNoSpace: dateNoSpace,
-		DateNoFiles: dateNoFiles,
+		MountPath:       s.mountPath,
+		SnapshotID:      s.snapshotID,
+		GID:             u.GID,
+		BaseDirID:       0,
+		BaseDirExternal: u.BaseDir,
+		Age:             uint8(u.Age),
+		UIDs:            summariseEnsureNonNilUInt32s(u.UIDs),
+		UsageSize:       u.UsageSize,
+		QuotaSize:       u.QuotaSize,
+		UsageInodes:     u.UsageInodes,
+		QuotaInodes:     u.QuotaInodes,
+		Mtime:           u.Mtime,
+		DateNoSpace:     dateNoSpace,
+		DateNoFiles:     dateNoFiles,
 	})
 }
 
@@ -2426,19 +2524,6 @@ func summariseCanonicalPathForMount(mountPath, path string) string {
 	}
 
 	return "/" + trimmed
-}
-
-func summariseChildPathForParent(parentDir, child string) string {
-	child = strings.TrimSuffix(child, "/")
-	if child == "" {
-		return ""
-	}
-
-	if strings.HasPrefix(child, "/") {
-		return child
-	}
-
-	return parentDir + child
 }
 
 func summariseNormalizeImportMountPath(mountPath string) string {

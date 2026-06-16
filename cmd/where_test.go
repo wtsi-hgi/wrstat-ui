@@ -45,6 +45,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -66,24 +67,24 @@ const (
 const (
 	b3CLICreateSchema3SnapshotSetsTable = "CREATE TABLE IF NOT EXISTS wrstat_schema3_snapshot_sets (" +
 		"mount_path LowCardinality(String), snapshot_id UUID, schema3_version UInt32, " +
-		"dir_facts_rows UInt64, parent_facts_rows UInt64, children_rows UInt64, " +
-		"child_filter_all_rows UInt64, dir_filter_all_rows UInt64, manifest_sha256 String, " +
+		"dirs_rows UInt64, dir_facts_rows UInt64, child_filter_all_rows UInt64, " +
+		"dir_filter_all_rows UInt64, manifest_sha256 String, " +
 		"refreshed_at DateTime64(3)) ENGINE = MergeTree " +
 		"PARTITION BY (mount_path, snapshot_id) ORDER BY (mount_path, snapshot_id, schema3_version)"
 	b3CLIInsertSchema3SnapshotSet = "INSERT INTO wrstat_schema3_snapshot_sets " +
-		"(mount_path, snapshot_id, schema3_version, dir_facts_rows, parent_facts_rows, children_rows, " +
+		"(mount_path, snapshot_id, schema3_version, dirs_rows, dir_facts_rows, " +
 		"child_filter_all_rows, dir_filter_all_rows, manifest_sha256, refreshed_at) " +
-		"VALUES (?, toUUID(?), 1, 1, 1, 1, ?, ?, 'b3-cli-test', now())"
+		"VALUES (?, toUUID(?), 1, ?, ?, ?, ?, 'b3-cli-test', now())"
 	b3CLICreateDirFilterAllTable = "CREATE TABLE IF NOT EXISTS wrstat_dir_filter_all (" +
 		"mount_path LowCardinality(String), snapshot_id UUID, age UInt8, gid UInt32, uid UInt32, " +
-		"ft UInt16, dir String, parent_dir String, count UInt64, size UInt64, atime_min Int64, " +
+		"ft UInt16, dir_id UInt32, subtree_end UInt32, count UInt64, size UInt64, atime_min Int64, " +
 		"mtime_max Int64, atime_buckets Array(UInt64), mtime_buckets Array(UInt64), " +
 		"filter_child_count UInt64, child_count UInt64, has_filter_children UInt8, " +
 		"has_children UInt8, refreshed_at DateTime64(3)) ENGINE = MergeTree " +
 		"PARTITION BY (mount_path, snapshot_id) " +
-		"ORDER BY (mount_path, snapshot_id, age, gid, uid, ft, dir)"
+		"ORDER BY (mount_path, snapshot_id, age, gid, uid, ft, dir_id)"
 	b3CLIInsertDirFilterAll = "INSERT INTO wrstat_dir_filter_all " +
-		"(mount_path, snapshot_id, age, gid, uid, ft, dir, parent_dir, count, size, " +
+		"(mount_path, snapshot_id, age, gid, uid, ft, dir_id, subtree_end, count, size, " +
 		"atime_min, mtime_max, atime_buckets, mtime_buckets, filter_child_count, " +
 		"child_count, has_filter_children, has_children, refreshed_at)"
 )
@@ -199,7 +200,7 @@ func TestWhereCommandProjectFixtureB3(t *testing.T) {
 			So(b3CLIWhereDigest(got), ShouldEqual, b3CLIProjectManifestDigest(tc.manifestKey))
 			So(responseCacheHits, ShouldEqual, uint64(0))
 			So(stats.FactVectorReads, ShouldEqual, uint64(0))
-			So(clickhouse.ReadSchema3FallbackRoutes()["parent_facts_fallback"], ShouldEqual, uint64(0))
+			So(clickhouse.ReadSchema3FallbackRoutes(), ShouldResemble, map[string]uint64{})
 		}
 	})
 }
@@ -718,8 +719,13 @@ func seedB3CLIProjectFixture(t *testing.T, cfg clickhouse.Config) {
 	w.SetUpdatedAt(time.Date(2026, 6, 7, 18, 30, 0, 0, time.UTC))
 
 	So(w.Add(db.RecordDGUTA{
-		Dir:      paths.ToDirectoryPath(b3CLIProjectMount),
-		Children: []string{"project/"},
+		Dir:        paths.ToDirectoryPath(b3CLIProjectMount),
+		DirID:      b3CLIProjectDirID(b3CLIProjectMount),
+		ParentID:   b3CLIProjectParentID(b3CLIProjectMount),
+		SubtreeEnd: b3CLIProjectSubtreeEnd(b3CLIProjectMount),
+		Depth:      b3CLIProjectDepth(b3CLIProjectMount),
+		Children:   []string{"project/"},
+		ChildCount: 1,
 		GUTAs: db.GUTAs{
 			b3CLIGUTA(7, 11, db.DGUTAFileTypeDir, db.DGUTAgeAll, 1, 1),
 		},
@@ -727,6 +733,10 @@ func seedB3CLIProjectFixture(t *testing.T, cfg clickhouse.Config) {
 
 	So(w.Add(db.RecordDGUTA{
 		Dir:        paths.ToDirectoryPath(b3CLIProjectDir),
+		DirID:      b3CLIProjectDirID(b3CLIProjectDir),
+		ParentID:   b3CLIProjectParentID(b3CLIProjectDir),
+		SubtreeEnd: b3CLIProjectSubtreeEnd(b3CLIProjectDir),
+		Depth:      b3CLIProjectDepth(b3CLIProjectDir),
 		ChildCount: uint64(len(b3CLIProjectAllChildren())),
 		Children:   b3CLIProjectChildNames(),
 		GUTAs: db.GUTAs{
@@ -736,7 +746,11 @@ func seedB3CLIProjectFixture(t *testing.T, cfg clickhouse.Config) {
 
 	for _, child := range b3CLIProjectAllChildren() {
 		So(w.Add(db.RecordDGUTA{
-			Dir: paths.ToDirectoryPath(child.dir),
+			Dir:        paths.ToDirectoryPath(child.dir),
+			DirID:      b3CLIProjectDirID(child.dir),
+			ParentID:   b3CLIProjectParentID(child.dir),
+			SubtreeEnd: b3CLIProjectSubtreeEnd(child.dir),
+			Depth:      b3CLIProjectDepth(child.dir),
 			GUTAs: db.GUTAs{
 				b3CLIGUTA(child.gid, child.uid, child.ft, db.DGUTAgeAll, child.count, child.size),
 				b3CLIGUTA(child.gid, child.uid, child.ft, child.age, child.count, child.size),
@@ -745,6 +759,51 @@ func seedB3CLIProjectFixture(t *testing.T, cfg clickhouse.Config) {
 	}
 
 	So(w.Close(), ShouldBeNil)
+}
+
+func b3CLIProjectParentID(dir string) uint32 {
+	switch dir {
+	case b3CLIProjectMount:
+		return 0
+	case b3CLIProjectDir:
+		return b3CLIProjectDirID(b3CLIProjectMount)
+	default:
+		return b3CLIProjectDirID(b3CLIProjectDir)
+	}
+}
+
+func b3CLIProjectSubtreeEnd(dir string) uint32 {
+	if dir == b3CLIProjectMount || dir == b3CLIProjectDir {
+		return uint32(len(b3CLIProjectAllChildren()) + 3) //nolint:gosec // Test fixture size is bounded.
+	}
+
+	return b3CLIProjectDirID(dir) + 1
+}
+
+func b3CLIProjectDirID(dir string) uint32 {
+	switch dir {
+	case b3CLIProjectMount:
+		return 1
+	case b3CLIProjectDir:
+		return 2
+	}
+
+	for i, child := range b3CLIProjectAllChildren() {
+		if child.dir == dir {
+			return uint32(i + 3)
+		}
+	}
+
+	return 0
+}
+
+func b3CLIProjectDepth(dir string) uint16 {
+	trimmed := strings.Trim(dir, "/")
+	if trimmed == "" {
+		return 0
+	}
+
+	return uint16(strings.Count(trimmed, "/") + 1) //nolint:gosec // Test fixture paths have bounded depth.
 }
 
 func b3CLIGUTA(
@@ -802,6 +861,8 @@ func markB3CLISchema3Ready(t *testing.T, cfg clickhouse.Config) {
 		b3CLIInsertSchema3SnapshotSet,
 		b3CLIProjectMount,
 		snapshotID,
+		uint64(len(b3CLIProjectAllChildren())+2),
+		uint64(len(b3CLIProjectAllChildren())+2),
 		uint64(len(b3CLIProjectAllChildren())),
 		uint64(len(b3CLIProjectAllChildren())*2),
 	), ShouldBeNil)
@@ -827,8 +888,8 @@ func seedB3CLIDirFilterAll(t *testing.T, conn ch.Conn, snapshotID string) {
 				child.gid,
 				child.uid,
 				uint16(child.ft),
-				b3CLIProjectDir,
-				b3CLIProjectMount,
+				b3CLIProjectDirID(b3CLIProjectDir),
+				b3CLIProjectSubtreeEnd(b3CLIProjectDir),
 				child.count,
 				child.size,
 				int64(100),
@@ -852,8 +913,8 @@ func seedB3CLIDirFilterAll(t *testing.T, conn ch.Conn, snapshotID string) {
 			child.gid,
 			child.uid,
 			uint16(child.ft),
-			child.dir,
-			b3CLIProjectDir,
+			b3CLIProjectDirID(child.dir),
+			b3CLIProjectSubtreeEnd(child.dir),
 			child.count,
 			child.size,
 			int64(100),

@@ -48,7 +48,7 @@ var (
 )
 
 const (
-	explainPruningOutput     = "mount_path partition pruning\nparent_dir key condition"
+	explainPruningOutput     = "mount_path partition pruning\ndir_id key condition"
 	navigationGateWinningP95 = 4
 	queryTestNFSTeamPath     = "/nfs/team/"
 	queryOpTestChildADir     = "/root/a/"
@@ -82,16 +82,16 @@ func TestDecodeMountPaths(t *testing.T) {
 
 func TestExplainHasPruning(t *testing.T) {
 	Convey("ExplainHasPruning returns true when both indices appear", t, func() {
-		explain := "ReadFromMergeTree\n  Indexes:\n    mount_path partition pruning\n    parent_dir key condition"
+		explain := "ReadFromMergeTree\n  Indexes:\n    mount_path partition pruning\n    dir_id key condition"
 		So(ExplainHasPruning(explain), ShouldBeTrue)
 	})
 
 	Convey("ExplainHasPruning returns false when mount_path is missing", t, func() {
-		explain := "ReadFromMergeTree\n  parent_dir key condition"
+		explain := "ReadFromMergeTree\n  dir_id key condition"
 		So(ExplainHasPruning(explain), ShouldBeFalse)
 	})
 
-	Convey("ExplainHasPruning returns false when parent_dir is missing", t, func() {
+	Convey("ExplainHasPruning returns false when dir_id is missing", t, func() {
 		explain := "ReadFromMergeTree\n  mount_path partition pruning"
 		So(ExplainHasPruning(explain), ShouldBeFalse)
 	})
@@ -1787,7 +1787,7 @@ func TestNavigationDecisionGateC1(t *testing.T) {
 		So(result.Checks[0].Passed, ShouldBeTrue)
 
 		for _, shape := range []string{
-			navigationShapeParentFacts,
+			navigationShapeCatalog,
 			navigationShapeChildFacts,
 			navigationShapeProjection,
 		} {
@@ -1806,11 +1806,11 @@ func TestNavigationDecisionGateC1(t *testing.T) {
 		}
 	})
 
-	Convey("parent facts subset prototype records high-fanout p50 within the C2 gate", t, func() {
+	Convey("catalog subset prototype records high-fanout p50 within the C2 gate", t, func() {
 		evidence := navigationGateTestEvidence()
 		op, ok := navigationCandidateOperation(
 			evidence.QueryReports,
-			navigationShapeParentFacts,
+			navigationShapeCatalog,
 			navigationScenarioHighFanout,
 		)
 
@@ -1821,7 +1821,7 @@ func TestNavigationDecisionGateC1(t *testing.T) {
 
 	Convey("navigation report evidence rejects arbitrary non-EXPLAIN text for every shape", t, func() {
 		for _, shape := range []string{
-			navigationShapeParentFacts,
+			navigationShapeCatalog,
 			navigationShapeChildFacts,
 			navigationShapeProjection,
 		} {
@@ -1861,7 +1861,7 @@ func TestNavigationDecisionGateC1(t *testing.T) {
 
 		result = ValidateNavigationDecisionGate(evidence)
 
-		So(result.SelectedObject, ShouldEqual, navigationShapeParentFacts)
+		So(result.SelectedObject, ShouldEqual, navigationShapeCatalog)
 		So(result.Checks[1].Passed, ShouldBeFalse)
 		So(result.Checks[1].Detail, ShouldContainSubstring, "projection")
 	})
@@ -1879,7 +1879,7 @@ func TestNavigationDecisionGateC1(t *testing.T) {
 
 		result := ValidateNavigationDecisionGate(evidence)
 
-		So(result.SelectedObject, ShouldEqual, navigationShapeParentFacts)
+		So(result.SelectedObject, ShouldEqual, navigationShapeCatalog)
 		So(result.Checks[1].Passed, ShouldBeFalse)
 		So(result.Checks[1].Detail, ShouldContainSubstring, "projection")
 	})
@@ -1905,7 +1905,7 @@ func TestNavigationDecisionGateC1(t *testing.T) {
 
 			result = ValidateNavigationDecisionGate(evidence)
 
-			So(result.SelectedObject, ShouldEqual, navigationShapeParentFacts)
+			So(result.SelectedObject, ShouldEqual, navigationShapeCatalog)
 			So(result.Checks[2].Passed, ShouldBeFalse)
 			So(result.Checks[2].Detail, ShouldContainSubstring, "exact")
 		})
@@ -1954,7 +1954,7 @@ func TestNavigationDecisionGateC1(t *testing.T) {
 
 		result := ValidateNavigationDecisionGate(evidence)
 
-		So(result.SelectedObject, ShouldEqual, navigationShapeParentFacts)
+		So(result.SelectedObject, ShouldEqual, navigationShapeCatalog)
 		So(result.Checks[2].Passed, ShouldBeFalse)
 		So(result.Checks[2].Detail, ShouldContainSubstring, "read-shape")
 	})
@@ -1986,7 +1986,7 @@ func TestNavigationDecisionGateC1(t *testing.T) {
 
 		result := ValidateNavigationDecisionGate(evidence)
 
-		So(result.SelectedObject, ShouldEqual, navigationShapeParentFacts)
+		So(result.SelectedObject, ShouldEqual, navigationShapeCatalog)
 		So(result.Checks[2].Passed, ShouldBeFalse)
 		So(result.Checks[2].Detail, ShouldContainSubstring, "AgeAll")
 		So(treeFilterHasOwnerOrTypePredicate(&db.Filter{
@@ -1996,21 +1996,21 @@ func TestNavigationDecisionGateC1(t *testing.T) {
 		}), ShouldBeFalse)
 	})
 
-	Convey("parent facts remain selected when no alternative beats the evidence gate", t, func() {
+	Convey("catalog remains selected when no alternative beats the evidence gate", t, func() {
 		evidence := navigationGateTestEvidence()
 
 		result := ValidateNavigationDecisionGate(evidence)
 
-		So(result.SelectedObject, ShouldEqual, navigationShapeParentFacts)
+		So(result.SelectedObject, ShouldEqual, navigationShapeCatalog)
 		So(result.Checks[3].Passed, ShouldBeTrue)
-		So(result.Checks[3].Detail, ShouldContainSubstring, "wrstat_parent_facts")
+		So(result.Checks[3].Detail, ShouldContainSubstring, "wrstat_dirs")
 	})
 }
 
 func navigationGateTestEvidence() NavigationDecisionEvidence {
 	queryReport := perfreport.NewReport("clickhouse", "", 5, 0)
 	for _, scenario := range []string{navigationScenarioHighFanout, navigationScenarioFiltered} {
-		navigationGateAddCandidate(&queryReport, navigationShapeParentFacts, scenario, 5)
+		navigationGateAddCandidate(&queryReport, navigationShapeCatalog, scenario, 5)
 		navigationGateAddCandidate(&queryReport, navigationShapeChildFacts, scenario, 6)
 		navigationGateAddCandidate(&queryReport, navigationShapeProjection, scenario, 6)
 	}
@@ -2061,9 +2061,9 @@ func navigationGateCandidateInputs(shape string, scenario string) map[string]any
 		navigationInputChildCount:       uint64(navigationMinHighFanoutChildren),
 		navigationInputParentRangeReads: uint64(1),
 		navigationInputResultDigest:     scenario + "-digest",
-		navigationInputProjectionName:   "wrstat_parent_facts_projection",
+		navigationInputProjectionName:   "wrstat_dirs_projection",
 		navigationInputExplainOutput: "EXPLAIN indexes = 1\n" +
-			"Projection wrstat_parent_facts_projection\n" +
+			"Projection wrstat_dirs_projection\n" +
 			explainPruningOutput,
 	})
 

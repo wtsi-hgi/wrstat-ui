@@ -51,11 +51,10 @@ const (
 	// only, and low-risk; RowBinary can be added behind the same table boundary.
 	Format = "gob-gzip-v1"
 
+	TableDirs                   = "wrstat_dirs"
 	TableFiles                  = "wrstat_files"
-	TableChildren               = "wrstat_children"
 	TableDirFacts               = "wrstat_dir_facts"
 	TableDirFilterAgeAll        = "wrstat_dir_filter_ageall"
-	TableParentFacts            = "wrstat_parent_facts"
 	TableChildFilterAll         = "wrstat_child_filter_all"
 	TableDirFilterAll           = "wrstat_dir_filter_all"
 	TableSchema3SnapshotSets    = "wrstat_schema3_snapshot_sets"
@@ -76,11 +75,10 @@ var ErrManifestMismatch = errors.New("clickhouse spool manifest mismatch")
 var errUnknownTable = errors.New("unknown clickhouse spool table")
 
 var tableOrder = []string{ //nolint:gochecknoglobals
+	TableDirs,
 	TableFiles,
 	TableDirFacts,
 	TableDirFilterAgeAll,
-	TableParentFacts,
-	TableChildren,
 	TableChildFilterAll,
 	TableDirFilterAll,
 	TableSchema3SnapshotSets,
@@ -215,16 +213,14 @@ func HashFile(path string) (int64, string, error) {
 
 func countRows(path string, table string) (uint64, error) { //nolint:gocyclo,cyclop
 	switch table {
+	case TableDirs:
+		return countDecodedRows[DirRow](path, table)
 	case TableFiles:
 		return countDecodedRows[FileRow](path, table)
-	case TableChildren:
-		return countDecodedRows[ChildRow](path, table)
 	case TableDirFacts:
 		return countDecodedRows[DirFactRow](path, table)
 	case TableDirFilterAgeAll:
 		return countDecodedRows[DirFilterAgeAllRow](path, table)
-	case TableParentFacts:
-		return countDecodedRows[ParentFactRow](path, table)
 	case TableChildFilterAll:
 		return countDecodedRows[ChildFilterAllRow](path, table)
 	case TableDirFilterAll:
@@ -360,10 +356,24 @@ func verifyIdentity(got *Manifest, expected Manifest) error {
 	return nil
 }
 
+type DirRow struct {
+	MountPath      string
+	SnapshotID     string
+	DirID          uint32
+	ParentID       uint32
+	SubtreeEnd     uint32
+	Depth          uint16
+	Name           string
+	FullPath       string
+	ChildDirCount  uint32
+	ChildFileCount uint32
+	PathHash       uint64
+}
+
 type FileRow struct {
 	MountPath    string
 	SnapshotID   string
-	ParentDir    string
+	DirID        uint32
 	Name         string
 	Ext          string
 	EntryType    uint8
@@ -378,17 +388,12 @@ type FileRow struct {
 	Nlink        uint64
 }
 
-type ChildRow struct {
-	MountPath  string
-	SnapshotID string
-	ParentDir  string
-	Child      string
-}
-
 type DirFactRow struct {
 	MountPath        string
 	SnapshotID       string
-	Dir              string
+	DirID            uint32
+	ParentID         uint32
+	SubtreeEnd       uint32
 	UpdatedAt        time.Time
 	AllCount         uint64
 	AllSize          uint64
@@ -428,7 +433,8 @@ type DirFilterAgeAllRow struct {
 	GID          uint32
 	UID          uint32
 	FT           uint16
-	Dir          string
+	DirID        uint32
+	SubtreeEnd   uint32
 	Count        uint64
 	Size         uint64
 	AtimeMin     int64
@@ -438,54 +444,15 @@ type DirFilterAgeAllRow struct {
 	RefreshedAt  time.Time
 }
 
-type ParentFactRow struct {
-	MountPath        string
-	SnapshotID       string
-	ParentDir        string
-	Dir              string
-	UpdatedAt        time.Time
-	AllCount         uint64
-	AllSize          uint64
-	AllAtimeMin      int64
-	AllMtimeMax      int64
-	AllAtimeBuckets  []uint64
-	AllMtimeBuckets  []uint64
-	AllUIDs          []uint32
-	AllGIDs          []uint32
-	AllFT            uint16
-	FileCount        uint64
-	FileSize         uint64
-	FileAtimeMin     int64
-	FileMtimeMax     int64
-	FileAtimeBuckets []uint64
-	FileMtimeBuckets []uint64
-	FileUIDs         []uint32
-	FileGIDs         []uint32
-	FileFT           uint16
-	GIDs             []uint32
-	UIDs             []uint32
-	FTs              []uint16
-	Ages             []uint8
-	Counts           []uint64
-	Sizes            []uint64
-	AtimeMins        []int64
-	MtimeMaxs        []int64
-	AtimeBuckets     [][]uint64
-	MtimeBuckets     [][]uint64
-	ChildCount       uint64
-	HasChildren      uint8
-	RefreshedAt      time.Time
-}
-
 type ChildFilterAllRow struct {
 	MountPath         string
 	SnapshotID        string
-	ParentDir         string
+	ParentID          uint32
 	Age               uint8
 	GID               uint32
 	UID               uint32
 	FT                uint16
-	Dir               string
+	DirID             uint32
 	Count             uint64
 	Size              uint64
 	AtimeMin          int64
@@ -506,8 +473,8 @@ type DirFilterAllRow struct {
 	GID               uint32
 	UID               uint32
 	FT                uint16
-	Dir               string
-	ParentDir         string
+	DirID             uint32
+	SubtreeEnd        uint32
 	Count             uint64
 	Size              uint64
 	AtimeMin          int64
@@ -525,9 +492,8 @@ type Schema3SnapshotSetRow struct {
 	MountPath          string
 	SnapshotID         string
 	Schema3Version     uint32
+	DirsRows           uint64
 	DirFactsRows       uint64
-	ParentFactsRows    uint64
-	ChildrenRows       uint64
 	ChildFilterAllRows uint64
 	DirFilterAllRows   uint64
 	ManifestSHA256     string
@@ -536,8 +502,10 @@ type Schema3SnapshotSetRow struct {
 
 type ActiveVirtualSummaryRow struct {
 	ActiveSetID     string
-	Dir             string
+	VirtualID       uint32
 	MountPath       string
+	SnapshotID      string
+	MountRootDirID  uint32
 	IsMountRootBox  uint8
 	UpdatedAt       time.Time
 	AllCount        uint64
@@ -557,7 +525,7 @@ type ActiveVirtualSummaryRow struct {
 
 type ActiveVirtualFilterAllRow struct {
 	ActiveSetID      string
-	Dir              string
+	VirtualID        uint32
 	Age              uint8
 	GID              uint32
 	UID              uint32
@@ -574,13 +542,15 @@ type ActiveVirtualFilterAllRow struct {
 }
 
 type ActiveVirtualChildRow struct {
-	ActiveSetID    string
-	ParentDir      string
-	ChildDir       string
-	MountPath      string
-	IsMountRootBox uint8
-	ChildCount     uint64
-	RefreshedAt    time.Time
+	ActiveSetID     string
+	ParentVirtualID uint32
+	ChildVirtualID  uint32
+	MountPath       string
+	SnapshotID      string
+	MountRootDirID  uint32
+	IsMountRootBox  uint8
+	ChildCount      uint64
+	RefreshedAt     time.Time
 }
 
 type ActiveVirtualSetRow struct {
@@ -614,47 +584,51 @@ type BasedirsHistoryRow struct {
 }
 
 type BasedirsGroupUsageRow struct {
-	MountPath   string
-	SnapshotID  string
-	GID         uint32
-	BaseDir     string
-	Age         uint8
-	UIDs        []uint32
-	UsageSize   uint64
-	QuotaSize   uint64
-	UsageInodes uint64
-	QuotaInodes uint64
-	Mtime       time.Time
-	DateNoSpace time.Time
-	DateNoFiles time.Time
+	MountPath       string
+	SnapshotID      string
+	GID             uint32
+	BaseDirID       uint32
+	BaseDirExternal string
+	Age             uint8
+	UIDs            []uint32
+	UsageSize       uint64
+	QuotaSize       uint64
+	UsageInodes     uint64
+	QuotaInodes     uint64
+	Mtime           time.Time
+	DateNoSpace     time.Time
+	DateNoFiles     time.Time
 }
 
 type BasedirsUserUsageRow struct {
-	MountPath   string
-	SnapshotID  string
-	UID         uint32
-	BaseDir     string
-	Age         uint8
-	GIDs        []uint32
-	UsageSize   uint64
-	QuotaSize   uint64
-	UsageInodes uint64
-	QuotaInodes uint64
-	Mtime       time.Time
+	MountPath       string
+	SnapshotID      string
+	UID             uint32
+	BaseDirID       uint32
+	BaseDirExternal string
+	Age             uint8
+	GIDs            []uint32
+	UsageSize       uint64
+	QuotaSize       uint64
+	UsageInodes     uint64
+	QuotaInodes     uint64
+	Mtime           time.Time
 }
 
 type BasedirsSubdirRow struct {
-	MountPath    string
-	SnapshotID   string
-	ID           uint32
-	BaseDir      string
-	Age          uint8
-	Pos          uint32
-	SubDir       string
-	NumFiles     uint64
-	SizeFiles    uint64
-	LastModified time.Time
-	FileUsage    map[uint16]uint64
+	MountPath       string
+	SnapshotID      string
+	ID              uint32
+	BaseDirID       uint32
+	SubDirID        uint32
+	BaseDirExternal string
+	SubDirExternal  string
+	Age             uint8
+	Pos             uint32
+	NumFiles        uint64
+	SizeFiles       uint64
+	LastModified    time.Time
+	FileUsage       map[uint16]uint64
 }
 
 type tableWriter struct {
@@ -742,12 +716,12 @@ func (s *Set) Close() error {
 	return out
 }
 
-func (s *Set) WriteFile(row FileRow) error {
-	return s.encode(TableFiles, row)
+func (s *Set) WriteDir(row DirRow) error {
+	return s.encode(TableDirs, row)
 }
 
-func (s *Set) WriteChild(row ChildRow) error {
-	return s.encode(TableChildren, row)
+func (s *Set) WriteFile(row FileRow) error {
+	return s.encode(TableFiles, row)
 }
 
 func (s *Set) WriteDirFact(row DirFactRow) error {
@@ -756,10 +730,6 @@ func (s *Set) WriteDirFact(row DirFactRow) error {
 
 func (s *Set) WriteDirFilterAgeAll(row DirFilterAgeAllRow) error {
 	return s.encode(TableDirFilterAgeAll, row)
-}
-
-func (s *Set) WriteParentFact(row ParentFactRow) error {
-	return s.encode(TableParentFacts, row)
 }
 
 func (s *Set) WriteChildFilterAll(row ChildFilterAllRow) error {

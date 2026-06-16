@@ -186,7 +186,7 @@ func TestClickHousePerfRestCounterSources(t *testing.T) {
 		scopedCacheHitKey := "active_prefix_summary:path=/nfs/t283_imaging/;filter=ft:32768;" +
 			"active_set_id=e2-active-set;query_version=1"
 
-		const fallbackRoute = "parent_facts_fallback"
+		const fallbackRoute = "schema3_catalog_fallback"
 
 		replaceCHPerfRestHooksForTest(
 			func(clickhouse.Config) (provider.Provider, error) {

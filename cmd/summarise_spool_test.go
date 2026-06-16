@@ -36,6 +36,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -51,13 +52,16 @@ import (
 )
 
 const summariseSpoolVirtualNamespaceDir = "/mnt/"
+const b5SpoolMountPath = "/m/teamX/"
 
 const reinsertOldDirFactSentinelQuery = `
 INSERT INTO wrstat_dir_facts
 SELECT
   mount_path,
   toUUID(?),
-  dir,
+  dir_id,
+  parent_id,
+  subtree_end,
   updated_at,
   all_count,
   all_size,
@@ -737,6 +741,131 @@ func writeBasedirsSpoolFixtureStatsForMount(
 	So(os.Chtimes(statsPath, updatedAt, updatedAt), ShouldBeNil)
 }
 
+func writeB5SpoolFixtureStats(t *testing.T, statsPath string, mountPath string, updatedAt time.Time) {
+	t.Helper()
+
+	root := statsdata.NewRoot(mountPath, updatedAt.Unix())
+	root.UID = 30
+	root.GID = 40
+	root.Inode = 200
+	root.Nlink = 1
+
+	rootFile := root.AddFile("root.bam")
+	rootFile.Size = 50
+	rootFile.UID = 31
+	rootFile.GID = 40
+	rootFile.ATime = updatedAt.Unix()
+	rootFile.MTime = updatedAt.Unix()
+	rootFile.CTime = updatedAt.Unix()
+	rootFile.Inode = 201
+	rootFile.Nlink = 1
+
+	sub := root.AddDirectory("sub")
+	sub.UID = 32
+	sub.GID = 41
+	sub.Inode = 202
+	sub.Nlink = 1
+
+	nested := sub.AddFile("nested.cram")
+	nested.Size = 75
+	nested.UID = 33
+	nested.GID = 42
+	nested.ATime = updatedAt.Unix()
+	nested.MTime = updatedAt.Unix()
+	nested.CTime = updatedAt.Unix()
+	nested.Inode = 203
+	nested.Nlink = 1
+
+	deep := sub.AddDirectory("deep")
+	deep.UID = 34
+	deep.GID = 43
+	deep.Inode = 204
+	deep.Nlink = 1
+
+	leaf := deep.AddFile("leaf.txt")
+	leaf.Size = 25
+	leaf.UID = 35
+	leaf.GID = 44
+	leaf.ATime = updatedAt.Unix()
+	leaf.MTime = updatedAt.Unix()
+	leaf.CTime = updatedAt.Unix()
+	leaf.Inode = 205
+	leaf.Nlink = 1
+
+	var buf bytes.Buffer
+
+	_, err := root.WriteTo(&buf)
+	So(err, ShouldBeNil)
+
+	writeGzipStats(t, statsPath, buf.Bytes())
+	So(os.Chtimes(statsPath, updatedAt, updatedAt), ShouldBeNil)
+}
+
+func b5CatalogRows(spoolDir string) (map[string]chspool.DirRow, map[uint32]chspool.DirRow) {
+	byPath := make(map[string]chspool.DirRow)
+	byID := make(map[uint32]chspool.DirRow)
+
+	So(chspool.DecodeRows[chspool.DirRow](spoolDir, chspool.TableDirs, func(row chspool.DirRow) error {
+		byPath[row.FullPath] = row
+		byID[row.DirID] = row
+
+		return nil
+	}), ShouldBeNil)
+
+	return byPath, byID
+}
+
+func b5FileRowsByFullPath(
+	spoolDir string,
+	dirsByID map[uint32]chspool.DirRow,
+) map[string]chspool.FileRow {
+	files := make(map[string]chspool.FileRow)
+
+	So(chspool.DecodeRows[chspool.FileRow](spoolDir, chspool.TableFiles, func(row chspool.FileRow) error {
+		parent, ok := dirsByID[row.DirID]
+		So(ok, ShouldBeTrue)
+		So(row.DirID, ShouldBeGreaterThan, uint32(0))
+
+		files[parent.FullPath+row.Name] = row
+
+		return nil
+	}), ShouldBeNil)
+
+	return files
+}
+
+func b5AssertFileCatalogAgreement(
+	dirsByPath map[string]chspool.DirRow,
+	dirsByID map[uint32]chspool.DirRow,
+	filesByPath map[string]chspool.FileRow,
+	mountPath string,
+) {
+	for fullPath, file := range filesByPath {
+		parent, ok := dirsByID[file.DirID]
+		So(ok, ShouldBeTrue)
+		So(parent.FullPath+file.Name, ShouldEqual, fullPath)
+
+		if file.EntryType != 'd' {
+			continue
+		}
+
+		dir, ok := dirsByPath[fullPath]
+		So(ok, ShouldBeTrue)
+		So(file.DirID, ShouldEqual, dir.ParentID)
+	}
+
+	for fullPath, dir := range dirsByPath {
+		if !strings.HasPrefix(fullPath, mountPath) {
+			continue
+		}
+
+		file, ok := filesByPath[fullPath]
+		So(ok, ShouldBeTrue)
+		So(file.EntryType, ShouldEqual, uint8('d'))
+		So(file.DirID, ShouldEqual, dir.ParentID)
+	}
+}
+
 func insertMountActiveSnapshotEventForTest(
 	t *testing.T,
 	ctx context.Context,
@@ -958,8 +1087,10 @@ type d3SummaryFacts struct {
 func d3RootBroadFactDigest(ctx context.Context, conn ch.Conn, manifest *chspool.Manifest) string {
 	row := conn.QueryRow(
 		ctx,
-		"SELECT all_count, all_size, all_uids, all_gids, all_ft FROM wrstat_dir_facts "+
-			"WHERE mount_path = ? AND snapshot_id = toUUID(?) AND dir = ? LIMIT 1",
+		"SELECT f.all_count, f.all_size, f.all_uids, f.all_gids, f.all_ft "+
+			"FROM wrstat_dir_facts f INNER JOIN wrstat_dirs d "+
+			"ON d.mount_path = f.mount_path AND d.snapshot_id = f.snapshot_id AND d.dir_id = f.dir_id "+
+			"WHERE f.mount_path = ? AND f.snapshot_id = toUUID(?) AND d.full_path = ? LIMIT 1",
 		manifest.MountPath,
 		manifest.SnapshotID,
 		manifest.MountPath,
@@ -979,9 +1110,11 @@ func d3RootFullFilterDigest(
 ) string {
 	row := conn.QueryRow(
 		ctx,
-		"SELECT count, size, uid, gid, ft FROM wrstat_dir_filter_all "+
-			"WHERE mount_path = ? AND snapshot_id = toUUID(?) AND dir = ? "+
-			"AND age = ? AND gid = ? AND uid = ? AND ft = ? LIMIT 1",
+		"SELECT f.count, f.size, f.uid, f.gid, f.ft "+
+			"FROM wrstat_dir_filter_all f INNER JOIN wrstat_dirs d "+
+			"ON d.mount_path = f.mount_path AND d.snapshot_id = f.snapshot_id AND d.dir_id = f.dir_id "+
+			"WHERE f.mount_path = ? AND f.snapshot_id = toUUID(?) AND d.full_path = ? "+
+			"AND f.age = ? AND f.gid = ? AND f.uid = ? AND f.ft = ? LIMIT 1",
 		manifest.MountPath,
 		manifest.SnapshotID,
 		manifest.MountPath,
@@ -1064,11 +1197,15 @@ func TestSummariseClickHouseSpoolRows(t *testing.T) {
 
 		spoolDir := summariseClickHouseSpoolDir(fixture.outputDir)
 
+		_, hasChildrenStream := manifest.Tables["wrstat_"+"children"]
+		_, hasParentFactsStream := manifest.Tables["wrstat_"+"parent_facts"]
+
+		So(hasChildrenStream, ShouldBeFalse)
+		So(hasParentFactsStream, ShouldBeFalse)
+		So(manifest.Tables[chspool.TableDirs].Rows, ShouldBeGreaterThan, uint64(0))
 		So(manifest.Tables[chspool.TableFiles].Rows, ShouldBeGreaterThanOrEqualTo, uint64(3))
-		So(manifest.Tables[chspool.TableChildren].Rows, ShouldBeGreaterThan, uint64(0))
 		So(manifest.Tables[chspool.TableDirFacts].Rows, ShouldBeGreaterThan, uint64(0))
 		So(manifest.Tables[chspool.TableDirFilterAgeAll].Rows, ShouldBeGreaterThan, uint64(0))
-		So(manifest.Tables[chspool.TableParentFacts].Rows, ShouldEqual, manifest.Tables[chspool.TableDirFacts].Rows)
 		So(manifest.Tables[chspool.TableDirProjectionSets].Rows, ShouldEqual, uint64(1))
 		So(manifest.Tables[chspool.TableBasedirsHistory].Rows, ShouldBeGreaterThan, uint64(0))
 		So(manifest.Tables[chspool.TableBasedirsGroupUsage].Rows, ShouldBeGreaterThan, uint64(0))
@@ -1084,7 +1221,20 @@ func TestSummariseClickHouseSpoolRows(t *testing.T) {
 			return nil
 		}), ShouldBeNil)
 		So(files[0].MountPath, ShouldEqual, summariseTestMountPath)
+		So(files[0].DirID, ShouldBeGreaterThan, uint32(0))
+		So(files[0].Name, ShouldNotBeBlank)
 		So(files[len(files)-1].SnapshotID, ShouldEqual, manifest.SnapshotID)
+
+		var dirs []chspool.DirRow
+
+		So(chspool.DecodeRows[chspool.DirRow](spoolDir, chspool.TableDirs, func(row chspool.DirRow) error {
+			dirs = append(dirs, row)
+
+			return nil
+		}), ShouldBeNil)
+		So(dirs[0].MountPath, ShouldEqual, summariseTestMountPath)
+		So(dirs[0].DirID, ShouldBeGreaterThan, uint32(0))
+		So(dirs[0].FullPath, ShouldNotBeBlank)
 
 		var facts []chspool.DirFactRow
 
@@ -1093,8 +1243,69 @@ func TestSummariseClickHouseSpoolRows(t *testing.T) {
 
 			return nil
 		}), ShouldBeNil)
+		So(facts[0].DirID, ShouldBeGreaterThan, uint32(0))
+		So(facts[0].SubtreeEnd, ShouldBeGreaterThanOrEqualTo, facts[0].DirID)
 		So(facts[0].GIDs, ShouldContain, uint32(7))
 		So(facts[0].UIDs, ShouldContain, uint32(17))
+	})
+
+	Convey("B5 summarise spool file rows share catalog directory ids for /m/teamX/", t, func() {
+		baseDir := t.TempDir()
+		updatedAt := time.Date(2026, 6, 13, 10, 0, 0, 0, time.UTC)
+		fixture := newSummariseActiveSnapshotFixtureForMount(t, baseDir, b5SpoolMountPath, updatedAt)
+		writeB5SpoolFixtureStats(t, fixture.statsPath, b5SpoolMountPath, updatedAt)
+
+		restore := snapshotSummariseGlobals()
+		Reset(restore)
+
+		configureSummariseActiveSnapshotTest(fixture.outputDir, false)
+		quotaPath = filepath.Join(fixture.outputDir, "quota.csv")
+		basedirsConfig = filepath.Join(fixture.outputDir, "basedirs.tsv")
+		basedirsDB = filepath.Join(fixture.outputDir, basedirBasename)
+
+		So(os.WriteFile(quotaPath, []byte("40,/m/teamX,1000,100\n"), 0o600), ShouldBeNil)
+		So(os.WriteFile(basedirsConfig, []byte("/m/teamX\t1\t3\n"), 0o600), ShouldBeNil)
+
+		target := &clickHouseSummariseTarget{
+			cfg:       clickhouse.Config{DSN: summariseTestClickHouseDSN, Database: summariseTestClickHouseDatabase},
+			mountPath: b5SpoolMountPath,
+			modtime:   fixture.updatedAt,
+			outputDir: fixture.outputDir,
+		}
+		expected, err := newSummariseSpoolManifest(fixture.statsPath, target)
+		So(err, ShouldBeNil)
+
+		manifest, err := buildSummariseSpool(
+			fixture.statsPath,
+			summariseClickHouseSpoolDir(fixture.outputDir),
+			expected,
+			target,
+			newSummariseDiagnostics(fixture.statsPath),
+		)
+		So(err, ShouldBeNil)
+
+		spoolDir := summariseClickHouseSpoolDir(fixture.outputDir)
+		dirsByPath, dirsByID := b5CatalogRows(spoolDir)
+		filesByPath := b5FileRowsByFullPath(spoolDir, dirsByID)
+
+		mountParent := dirsByPath["/m/"]
+		mountRoot := dirsByPath[b5SpoolMountPath]
+		subDir := dirsByPath[b5SpoolMountPath+"sub/"]
+
+		So(mountParent.DirID, ShouldEqual, uint32(1))
+		So(mountRoot.DirID, ShouldEqual, uint32(2))
+		So(mountRoot.ParentID, ShouldEqual, mountParent.DirID)
+		So(subDir.ParentID, ShouldEqual, mountRoot.DirID)
+
+		So(filesByPath[b5SpoolMountPath].DirID, ShouldEqual, mountParent.DirID)
+		So(filesByPath[b5SpoolMountPath+"sub/"].DirID, ShouldEqual, mountRoot.DirID)
+		So(filesByPath[b5SpoolMountPath+"root.bam"].DirID, ShouldEqual, mountRoot.DirID)
+		So(filesByPath[b5SpoolMountPath+"sub/nested.cram"].DirID, ShouldEqual, subDir.DirID)
+		So(filesByPath[b5SpoolMountPath+"sub/deep/leaf.txt"].DirID,
+			ShouldEqual, dirsByPath[b5SpoolMountPath+"sub/deep/"].DirID)
+
+		b5AssertFileCatalogAgreement(dirsByPath, dirsByID, filesByPath, b5SpoolMountPath)
+		So(filesByPath[b5SpoolMountPath].SnapshotID, ShouldEqual, manifest.SnapshotID)
 	})
 
 	Convey("D2.7 actual summarise command path writes and verifies every schema3 spool table", t, func() {
@@ -1281,8 +1492,10 @@ func d2Schema3DirGUTAReferenceTime() time.Time {
 
 func d2Schema3ExpectedRowCounts() map[string]uint64 {
 	return map[string]uint64{
-		chspool.TableChildFilterAll:         68,
-		chspool.TableDirFilterAll:           68,
+		chspool.TableDirs:                   4,
+		chspool.TableDirFacts:               4,
+		chspool.TableChildFilterAll:         34,
+		chspool.TableDirFilterAll:           34,
 		chspool.TableSchema3SnapshotSets:    1,
 		chspool.TableActiveVirtualSummaries: 3,
 		chspool.TableActiveVirtualFilterAll: 51,
@@ -1348,6 +1561,18 @@ func d2DecodedRowsForTable(spoolDir string, table string) uint64 {
 	var rows uint64
 
 	switch table {
+	case chspool.TableDirs:
+		So(chspool.DecodeRows[chspool.DirRow](spoolDir, table, func(chspool.DirRow) error {
+			rows++
+
+			return nil
+		}), ShouldBeNil)
+	case chspool.TableDirFacts:
+		So(chspool.DecodeRows[chspool.DirFactRow](spoolDir, table, func(chspool.DirFactRow) error {
+			rows++
+
+			return nil
+		}), ShouldBeNil)
 	case chspool.TableChildFilterAll:
 		So(chspool.DecodeRows[chspool.ChildFilterAllRow](spoolDir, table, func(chspool.ChildFilterAllRow) error {
 			rows++
@@ -1401,6 +1626,10 @@ func d2DecodedRowsForTable(spoolDir string, table string) uint64 {
 
 func d2DecodedRowFingerprintsForTable(spoolDir string, table string) []string {
 	switch table {
+	case chspool.TableDirs:
+		return d2DecodedRowFingerprints[chspool.DirRow](spoolDir, table)
+	case chspool.TableDirFacts:
+		return d2DecodedRowFingerprints[chspool.DirFactRow](spoolDir, table)
 	case chspool.TableChildFilterAll:
 		return d2DecodedRowFingerprints[chspool.ChildFilterAllRow](spoolDir, table)
 	case chspool.TableDirFilterAll:
@@ -1440,9 +1669,8 @@ func assertD2Schema3CanonicalCounts(
 	So(snapshotSets, ShouldHaveLength, 1)
 
 	snapshotCounts := d2Schema3ExpectedSnapshotCounts(expectedRows)
+	So(snapshotSets[0].DirsRows, ShouldEqual, snapshotCounts.dirsRows)
 	So(snapshotSets[0].DirFactsRows, ShouldEqual, snapshotCounts.dirFactsRows)
-	So(snapshotSets[0].ParentFactsRows, ShouldEqual, snapshotCounts.parentFactsRows)
-	So(snapshotSets[0].ChildrenRows, ShouldEqual, snapshotCounts.childrenRows)
 	So(snapshotSets[0].ChildFilterAllRows, ShouldEqual, snapshotCounts.childFilterAllRows)
 	So(snapshotSets[0].DirFilterAllRows, ShouldEqual, snapshotCounts.dirFilterAllRows)
 	So(snapshotSets[0].ManifestSHA256, ShouldEqual, d2ExpectedSchema3SnapshotDigest(expectedManifest, snapshotCounts))
@@ -1474,7 +1702,7 @@ func assertD2Schema3CanonicalCounts(
 }
 
 func assertD2ActiveVirtualRowsFactsEquivalent(spoolDir string, mountPath string) {
-	summaries := d2ActiveVirtualSummaryRowsByDir(spoolDir)
+	summaries := d2ActiveVirtualSummaryRowsByDir(spoolDir, mountPath)
 	virtualDirs := []string{"/", summariseSpoolVirtualNamespaceDir, mountPath}
 
 	So(d2SortedActiveVirtualSummaryDirs(summaries), ShouldResemble, virtualDirs)
@@ -1496,7 +1724,7 @@ func assertD2ActiveVirtualRowsFactsEquivalent(spoolDir string, mountPath string)
 	So(summaries[mountPath].IsMountRootBox, ShouldEqual, uint8(1))
 
 	rootFilters := d2RootDirFilterRowsByTuple(spoolDir, mountPath)
-	activeFilters := d2ActiveVirtualFilterRowsByDirAndTuple(spoolDir)
+	activeFilters := d2ActiveVirtualFilterRowsByDirAndTuple(spoolDir, mountPath)
 
 	for _, dir := range virtualDirs {
 		rowsByTuple := activeFilters[dir]
@@ -1523,14 +1751,14 @@ func assertD2ActiveVirtualRowsFactsEquivalent(spoolDir string, mountPath string)
 	}
 }
 
-func d2ActiveVirtualSummaryRowsByDir(spoolDir string) map[string]chspool.ActiveVirtualSummaryRow {
+func d2ActiveVirtualSummaryRowsByDir(spoolDir string, mountPath string) map[string]chspool.ActiveVirtualSummaryRow {
 	out := make(map[string]chspool.ActiveVirtualSummaryRow)
 
 	So(chspool.DecodeRows[chspool.ActiveVirtualSummaryRow](
 		spoolDir,
 		chspool.TableActiveVirtualSummaries,
 		func(row chspool.ActiveVirtualSummaryRow) error {
-			out[row.Dir] = row
+			out[d2VirtualDirForID(row.VirtualID, mountPath)] = row
 
 			return nil
 		},
@@ -1556,8 +1784,10 @@ func d2RootDirFactRow(spoolDir string, mountPath string) chspool.DirFactRow {
 		found bool
 	)
 
+	rootID := d2DirIDForPath(spoolDir, mountPath)
+
 	So(chspool.DecodeRows[chspool.DirFactRow](spoolDir, chspool.TableDirFacts, func(row chspool.DirFactRow) error {
-		if row.Dir == mountPath {
+		if row.DirID == rootID {
 			out = row
 			found = true
 		}
@@ -1574,12 +1804,13 @@ func d2RootDirFilterRowsByTuple(
 	mountPath string,
 ) map[summariseFullFilterTupleKey]chspool.DirFilterAllRow {
 	out := make(map[summariseFullFilterTupleKey]chspool.DirFilterAllRow)
+	rootID := d2DirIDForPath(spoolDir, mountPath)
 
 	So(chspool.DecodeRows[chspool.DirFilterAllRow](
 		spoolDir,
 		chspool.TableDirFilterAll,
 		func(row chspool.DirFilterAllRow) error {
-			if row.Dir == mountPath {
+			if row.DirID == rootID {
 				out[summariseFullFilterKeyForRow(row)] = row
 			}
 
@@ -1591,8 +1822,28 @@ func d2RootDirFilterRowsByTuple(
 	return out
 }
 
+func d2DirIDForPath(spoolDir string, fullPath string) uint32 {
+	var (
+		dirID uint32
+		found bool
+	)
+
+	So(chspool.DecodeRows[chspool.DirRow](spoolDir, chspool.TableDirs, func(row chspool.DirRow) error {
+		if row.FullPath == fullPath {
+			dirID = row.DirID
+			found = true
+		}
+
+		return nil
+	}), ShouldBeNil)
+	So(found, ShouldBeTrue)
+
+	return dirID
+}
+
 func d2ActiveVirtualFilterRowsByDirAndTuple(
 	spoolDir string,
+	mountPath string,
 ) map[string]map[summariseFullFilterTupleKey]chspool.ActiveVirtualFilterAllRow {
 	out := make(map[string]map[summariseFullFilterTupleKey]chspool.ActiveVirtualFilterAllRow)
 
@@ -1600,11 +1851,12 @@ func d2ActiveVirtualFilterRowsByDirAndTuple(
 		spoolDir,
 		chspool.TableActiveVirtualFilterAll,
 		func(row chspool.ActiveVirtualFilterAllRow) error {
-			if out[row.Dir] == nil {
-				out[row.Dir] = make(map[summariseFullFilterTupleKey]chspool.ActiveVirtualFilterAllRow)
+			dir := d2VirtualDirForID(row.VirtualID, mountPath)
+			if out[dir] == nil {
+				out[dir] = make(map[summariseFullFilterTupleKey]chspool.ActiveVirtualFilterAllRow)
 			}
 
-			out[row.Dir][summariseFullFilterTupleKey{
+			out[dir][summariseFullFilterTupleKey{
 				age: row.Age,
 				gid: row.GID,
 				uid: row.UID,
@@ -1616,6 +1868,16 @@ func d2ActiveVirtualFilterRowsByDirAndTuple(
 	), ShouldBeNil)
 
 	return out
+}
+
+func d2VirtualDirForID(id uint32, mountPath string) string {
+	for _, dir := range []string{"/", summariseSpoolVirtualNamespaceDir, mountPath} {
+		if id == summariseVirtualIDForDir(dir) {
+			return dir
+		}
+	}
+
+	return fmt.Sprintf("unknown:%d", id)
 }
 
 func assertD3ReadinessVisibleBeforeActiveMount(
@@ -1722,7 +1984,7 @@ func assertD3LoadedSchema3Readiness(
 	snapshotCounts := d2Schema3ExpectedSnapshotCounts(expectedRows)
 	row := conn.QueryRow(
 		ctx,
-		"SELECT dir_facts_rows, parent_facts_rows, children_rows, child_filter_all_rows, "+
+		"SELECT dirs_rows, dir_facts_rows, child_filter_all_rows, "+
 			"dir_filter_all_rows, manifest_sha256 FROM wrstat_schema3_snapshot_sets "+
 			"WHERE mount_path = ? AND snapshot_id = toUUID(?)",
 		manifest.MountPath,
@@ -1730,24 +1992,21 @@ func assertD3LoadedSchema3Readiness(
 	)
 
 	var (
+		dirsRows           uint64
 		dirFactsRows       uint64
-		parentFactsRows    uint64
-		childrenRows       uint64
 		childFilterAllRows uint64
 		dirFilterAllRows   uint64
 		manifestSHA256     string
 	)
 	So(row.Scan(
+		&dirsRows,
 		&dirFactsRows,
-		&parentFactsRows,
-		&childrenRows,
 		&childFilterAllRows,
 		&dirFilterAllRows,
 		&manifestSHA256,
 	), ShouldBeNil)
+	So(dirsRows, ShouldEqual, snapshotCounts.dirsRows)
 	So(dirFactsRows, ShouldEqual, snapshotCounts.dirFactsRows)
-	So(parentFactsRows, ShouldEqual, snapshotCounts.parentFactsRows)
-	So(childrenRows, ShouldEqual, snapshotCounts.childrenRows)
 	So(childFilterAllRows, ShouldEqual, snapshotCounts.childFilterAllRows)
 	So(dirFilterAllRows, ShouldEqual, snapshotCounts.dirFilterAllRows)
 	So(manifestSHA256, ShouldEqual, d2ExpectedSchema3SnapshotDigest(*manifest, snapshotCounts))
@@ -1777,9 +2036,8 @@ func assertD3LoadedSchema3Readiness(
 
 func d2Schema3ExpectedSnapshotCounts(expectedRows map[string]uint64) summariseSchema3SnapshotCounts {
 	return summariseSchema3SnapshotCounts{
-		dirFactsRows:       4,
-		parentFactsRows:    4,
-		childrenRows:       3,
+		dirsRows:           expectedRows[chspool.TableDirs],
+		dirFactsRows:       expectedRows[chspool.TableDirFacts],
 		childFilterAllRows: expectedRows[chspool.TableChildFilterAll],
 		dirFilterAllRows:   expectedRows[chspool.TableDirFilterAll],
 	}
@@ -1790,13 +2048,12 @@ func d2ExpectedSchema3SnapshotDigest(
 	counts summariseSchema3SnapshotCounts,
 ) string {
 	return d2SHA256Hex(fmt.Sprintf(
-		"%s|%s|%d|%d|%d|%d|%d|%d",
+		"%s|%s|%d|%d|%d|%d|%d",
 		expectedManifest.MountPath,
 		expectedManifest.SnapshotID,
 		clickHouseSpoolSchema3Version,
+		counts.dirsRows,
 		counts.dirFactsRows,
-		counts.parentFactsRows,
-		counts.childrenRows,
 		counts.childFilterAllRows,
 		counts.dirFilterAllRows,
 	))
@@ -1870,12 +2127,12 @@ func assertD3ColdSchema3Probes(
 
 	clickhouse.ResetTreeQueryCacheStats(cfg)
 	clickhouse.ResetSchema3FallbackRoutes()
-	d3AssertChildrenProbe(tree, virtualDirs, broadFilter)
+	d3AssertChildrenProbe(tree, virtualDirs[:2], broadFilter)
 	d3AssertNoFactVectorFallback(cfg, "virtual-broad-children")
 
 	clickhouse.ResetTreeQueryCacheStats(cfg)
 	clickhouse.ResetSchema3FallbackRoutes()
-	d3AssertChildrenProbe(tree, virtualDirs, fullFilter)
+	d3AssertChildrenProbe(tree, virtualDirs[:2], fullFilter)
 	d3AssertNoFactVectorFallback(cfg, "virtual-full-children")
 
 	projectDir := summariseTestMountPath + "project/"
@@ -1894,7 +2151,7 @@ func assertD3ColdSchema3Probes(
 	So(err, ShouldBeNil)
 	So(dcss, ShouldHaveLength, 1)
 
-	So(clickhouse.ReadSchema3FallbackRoutes()["parent_facts_fallback"], ShouldEqual, uint64(0))
+	So(clickhouse.ReadSchema3FallbackRoutes(), ShouldResemble, map[string]uint64{})
 }
 
 func d3AssertDirSummaryDigest(tree *db.Tree, dir string, filter *db.Filter, expectedDigest string) {
@@ -1907,17 +2164,13 @@ func d3AssertNoFactVectorFallback(cfg clickhouse.Config, label string) {
 	stats := clickhouse.ReadTreeQueryCacheStats(cfg)
 	So(fmt.Sprintf("%s fact vector reads=%d", label, stats.FactVectorReads), ShouldEqual,
 		label+" fact vector reads=0")
-	So(fmt.Sprintf(
-		"%s parent facts fallback=%d",
-		label,
-		clickhouse.ReadSchema3FallbackRoutes()["parent_facts_fallback"],
-	), ShouldEqual, label+" parent facts fallback=0")
+	So(clickhouse.ReadSchema3FallbackRoutes(), ShouldResemble, map[string]uint64{})
 }
 
 func d3AssertChildrenProbe(tree *db.Tree, dirs []string, filter *db.Filter) {
 	haveChildren := tree.DirsHaveChildren(dirs, filter)
 
 	for _, dir := range dirs {
-		So(haveChildren[dir], ShouldBeTrue)
+		So(fmt.Sprintf("%s=%t", dir, haveChildren[dir]), ShouldEqual, dir+"=true")
 	}
 }

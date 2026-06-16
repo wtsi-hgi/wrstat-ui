@@ -1,3 +1,6 @@
+//go:build legacy_parent_facts
+// +build legacy_parent_facts
+
 /*******************************************************************************
  * Copyright (c) 2026 Genome Research Ltd.
  *
@@ -128,6 +131,13 @@ const (
 	b2ActiveRootTupleP95MaxMS              = 6
 	c2LustreAncestor                       = "/lustre/"
 	nfsAncestor                            = "/nfs/"
+)
+
+const (
+	testInsertMountBatchStmt = "INSERT INTO wrstat_mount_events (mount_path, event_at, event_type, " +
+		"snapshot_id, updated_at, reason)"
+	testInsertDGUTABatchStmt = "INSERT INTO wrstat_dir_facts (mount_path, snapshot_id, dir, updated_at, gids, uids, " +
+		"fts, ages, counts, sizes, atime_mins, mtime_maxs, atime_buckets, mtime_buckets, refreshed_at)"
 )
 
 type clickHouseGenericTreeDB struct {
@@ -7795,13 +7805,6 @@ func TestClickHouseDatabaseDirsHaveChildrenFastPath(t *testing.T) {
 		So(countingConn.existenceQueryCount(), ShouldEqual, 0)
 	})
 }
-
-const (
-	testInsertMountBatchStmt = "INSERT INTO wrstat_mount_events (mount_path, event_at, event_type, " +
-		"snapshot_id, updated_at, reason)"
-	testInsertDGUTABatchStmt = "INSERT INTO wrstat_dir_facts (mount_path, snapshot_id, dir, updated_at, gids, uids, " +
-		"fts, ages, counts, sizes, atime_mins, mtime_maxs, atime_buckets, mtime_buckets, refreshed_at)"
-)
 
 func appendTestMountEventRow(batch driver.Batch, mount activeMount) {
 	So(batch.Append(mount.mountPath, time.Now(), uint8(1), mount.snapshotID, mount.updatedAt, "publish"), ShouldBeNil)

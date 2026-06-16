@@ -211,8 +211,15 @@ func TestClickHouseFileIngestOperation(t *testing.T) {
 		sid := snapshotID(mountPath, updatedAt)
 
 		paths := internaltest.NewDirectoryPathCreator()
+		rootDir := paths.ToDirectoryPath("/")
+		alloc := summary.NewDirIDAllocator()
+		So(alloc.SetMountPath(mountPath), ShouldBeNil)
 
-		gen, closer, err := NewFileIngestOperation(cfg, mountPath, updatedAt)
+		bootDir := paths.ToDirectoryPath("/boot/")
+		bootDirID, err := alloc.Enter(bootDir)
+		So(err, ShouldBeNil)
+
+		gen, closer, err := NewFileIngestOperation(cfg, mountPath, updatedAt, alloc)
 		So(err, ShouldBeNil)
 		So(gen, ShouldNotBeNil)
 		So(closer, ShouldNotBeNil)
@@ -221,7 +228,7 @@ func TestClickHouseFileIngestOperation(t *testing.T) {
 		So(op, ShouldNotBeNil)
 
 		So(op.Add(&summary.FileInfo{
-			Path:         paths.ToDirectoryPath("//"),
+			Path:         rootDir,
 			Name:         []byte("/"),
 			Size:         0,
 			ApparentSize: 0,
@@ -236,7 +243,7 @@ func TestClickHouseFileIngestOperation(t *testing.T) {
 		}), ShouldBeNil)
 
 		So(op.Add(&summary.FileInfo{
-			Path:         paths.ToDirectoryPath("//boot/"),
+			Path:         rootDir,
 			Name:         []byte("boot/"),
 			Size:         0,
 			ApparentSize: 0,
@@ -251,7 +258,7 @@ func TestClickHouseFileIngestOperation(t *testing.T) {
 		}), ShouldBeNil)
 
 		So(op.Add(&summary.FileInfo{
-			Path:         paths.ToDirectoryPath("//"),
+			Path:         rootDir,
 			Name:         []byte("bin"),
 			Size:         7,
 			ApparentSize: 7,
@@ -266,7 +273,7 @@ func TestClickHouseFileIngestOperation(t *testing.T) {
 		}), ShouldBeNil)
 
 		So(op.Add(&summary.FileInfo{
-			Path:         paths.ToDirectoryPath("//boot/"),
+			Path:         bootDir,
 			Name:         []byte("vmlinuz"),
 			Size:         123,
 			ApparentSize: 456,
@@ -289,6 +296,10 @@ func TestClickHouseFileIngestOperation(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
+		So(conn.Exec(ctx, testInsertFileDirStmt, mountPath, sid, uint32(0), uint32(0), uint32(1), uint16(0),
+			"/", "/", uint32(1), uint32(1), catalogPathHash("/")), ShouldBeNil)
+		So(conn.Exec(ctx, testInsertFileDirStmt, mountPath, sid, bootDirID, uint32(0), bootDirID+1, uint16(1),
+			"boot/", "/boot/", uint32(0), uint32(1), catalogPathHash("/boot/")), ShouldBeNil)
 		So(conn.Exec(ctx, testInsertMountStmt, mountPath, time.Now(), sid, updatedAt), ShouldBeNil)
 
 		client, err := NewClient(cfg)

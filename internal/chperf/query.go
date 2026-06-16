@@ -40,7 +40,6 @@ import (
 	"time"
 
 	"github.com/wtsi-hgi/wrstat-ui/basedirs"
-	"github.com/wtsi-hgi/wrstat-ui/clickhouse"
 	"github.com/wtsi-hgi/wrstat-ui/db"
 	"github.com/wtsi-hgi/wrstat-ui/internal/mountpath"
 	"github.com/wtsi-hgi/wrstat-ui/internal/perfreport"
@@ -129,9 +128,9 @@ const (
 	queryStartupStageBackgroundProvider   = "background_provider_polling_or_update_after_initial_readers"
 	queryStartupStageLazyInteraction      = "lazy_during_user_or_perf_interactions"
 	queryStartupStageSynchronousInitial   = "synchronous_before_server_started"
-	navigationShapeParentFacts            = string(clickhouse.NavigationObjectParentFacts)
-	navigationShapeChildFacts             = string(clickhouse.NavigationObjectChildFacts)
-	navigationShapeProjection             = string(clickhouse.NavigationObjectProjection)
+	navigationShapeCatalog                = "wrstat_dirs"
+	navigationShapeChildFacts             = "wrstat_tree_nav_facts"
+	navigationShapeProjection             = "clickhouse_projection"
 	navigationScenarioHighFanout          = "high_fanout_305_children"
 	navigationScenarioFiltered            = "filtered_ageall_owner_type"
 	navigationInputShape                  = "navigation_shape"
@@ -148,9 +147,9 @@ const (
 
 var (
 	// ErrExplainMissingIndex is returned when EXPLAIN output does not
-	// mention both mount_path and parent_dir pruning.
+	// mention both mount_path and dir_id pruning.
 	ErrExplainMissingIndex = errors.New(
-		"EXPLAIN output does not mention both mount_path and parent_dir pruning",
+		"EXPLAIN output does not mention both mount_path and dir_id pruning",
 	)
 
 	// ErrEmptyDir is returned when the selected directory has no files
@@ -2061,7 +2060,7 @@ func navigationCandidateAtLeastAsFast(
 	scenario string,
 ) bool {
 	candidate := navigationCandidateP95(e, shape, scenario)
-	parent := navigationCandidateP95(e, navigationShapeParentFacts, scenario)
+	parent := navigationCandidateP95(e, navigationShapeCatalog, scenario)
 
 	return candidate > 0 && parent > 0 && candidate <= parent
 }
@@ -2135,14 +2134,14 @@ func navigationCandidateBeatsParentBy(
 	improvement float64,
 ) bool {
 	candidate := navigationCandidateP95(e, shape, scenario)
-	parent := navigationCandidateP95(e, navigationShapeParentFacts, scenario)
+	parent := navigationCandidateP95(e, navigationShapeCatalog, scenario)
 
 	return candidate > 0 && parent > 0 && candidate <= parent*(1-improvement)
 }
 
 func navigationChildFactsResultsMatch(e NavigationDecisionEvidence) bool {
 	for _, scenario := range []string{navigationScenarioHighFanout, navigationScenarioFiltered} {
-		parent, parentOK := navigationCandidateOperation(e.QueryReports, navigationShapeParentFacts, scenario)
+		parent, parentOK := navigationCandidateOperation(e.QueryReports, navigationShapeCatalog, scenario)
 
 		child, childOK := navigationCandidateOperation(e.QueryReports, navigationShapeChildFacts, scenario)
 		if !parentOK || !childOK || !navigationResultDigestMatches(parent, child) {
@@ -2275,7 +2274,15 @@ func navigationSelectedObject(
 		}
 	}
 
-	return string(clickhouse.ChooseNavigationObject(projectionPass, childFactsPass))
+	if projectionPass {
+		return navigationShapeProjection
+	}
+
+	if childFactsPass {
+		return navigationShapeChildFacts
+	}
+
+	return navigationShapeCatalog
 }
 
 func navigationChildFactsPreferred(e NavigationDecisionEvidence) bool {
@@ -2345,7 +2352,7 @@ func validateNavigationCandidateReport(e NavigationDecisionEvidence) NavigationD
 	check := navigationDecisionCheck(1, "candidate report evidence")
 
 	for _, shape := range []string{
-		navigationShapeParentFacts,
+		navigationShapeCatalog,
 		navigationShapeChildFacts,
 		navigationShapeProjection,
 	} {
@@ -2372,7 +2379,7 @@ func validateNavigationProjection(
 		return check.fail("projection was rejected because EXPLAIN did not prove projection pruning")
 	}
 
-	return check.fail("projection was rejected because it did not beat parent facts")
+	return check.fail("projection was rejected because it did not beat the catalog baseline")
 }
 
 func validateNavigationChildFacts(
@@ -2400,16 +2407,16 @@ func validateNavigationChildFacts(
 		return check.fail("child facts were rejected because import memory or row amplification evidence failed")
 	}
 
-	return check.fail("child facts were rejected because p95 did not improve on parent facts by 15%")
+	return check.fail("child facts were rejected because p95 did not improve on the catalog baseline by 15%")
 }
 
 func validateNavigationParentDefault(selected string) NavigationDecisionCheck {
-	check := navigationDecisionCheck(4, "parent facts default")
-	if selected == navigationShapeParentFacts {
-		return check.pass("wrstat_parent_facts is the implemented object")
+	check := navigationDecisionCheck(4, "catalog default")
+	if selected == navigationShapeCatalog {
+		return check.pass("wrstat_dirs is the implemented object")
 	}
 
-	return check.fail("wrstat_parent_facts was not selected")
+	return check.fail("wrstat_dirs was not selected")
 }
 
 func navigationDecisionCheck(id int, name string) NavigationDecisionCheck {
@@ -2437,7 +2444,7 @@ type NavigationDecisionResult struct {
 }
 
 // ValidateNavigationDecisionGate applies the C1 evidence rules. The default is
-// wrstat_parent_facts unless projection or child facts satisfy every required
+// wrstat_dir_facts unless projection or child facts satisfy every required
 // proof item.
 func ValidateNavigationDecisionGate(e NavigationDecisionEvidence) NavigationDecisionResult {
 	projectionPass := navigationProjectionPasses(e)
@@ -2644,10 +2651,10 @@ func mountPathForDir(qctx queryContext) string {
 }
 
 // ExplainHasPruning reports whether the EXPLAIN output mentions both
-// mount_path and parent_dir index pruning.
+// mount_path and dir_id index pruning.
 func ExplainHasPruning(explain string) bool {
 	return strings.Contains(explain, "mount_path") &&
-		strings.Contains(explain, "parent_dir")
+		strings.Contains(explain, "dir_id")
 }
 
 func pickPath(client QueryClient, dir string) string {

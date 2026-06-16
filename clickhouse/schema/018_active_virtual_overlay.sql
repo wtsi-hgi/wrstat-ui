@@ -69,15 +69,15 @@ ORDER BY (active_set_id, dir, age, gid, uid, ft);
 
 CREATE TABLE IF NOT EXISTS wrstat_active_virtual_children (
   active_set_id String CODEC(ZSTD(3)),
-  parent_dir String CODEC(LZ4),
-  child_dir String CODEC(LZ4),
+  parent_virtual_id UInt32 CODEC(Delta, LZ4),
+  child_virtual_id UInt32 CODEC(Delta, LZ4),
   mount_path LowCardinality(String) CODEC(LZ4),
   is_mount_root_box UInt8,
   child_count UInt64 CODEC(Delta, LZ4),
   refreshed_at DateTime64(3) CODEC(Delta, ZSTD(3))
 ) ENGINE = MergeTree
 PARTITION BY active_set_id
-ORDER BY (active_set_id, parent_dir, child_dir);
+ORDER BY (active_set_id, parent_virtual_id, child_virtual_id);
 
 CREATE TABLE IF NOT EXISTS wrstat_active_virtual_sets (
   active_set_id String CODEC(ZSTD(3)),
