@@ -1561,7 +1561,7 @@ func (d *clickHouseDatabase) catalogAncestorRefs(
 	refs := []treeCatalogDirRef{ref}
 	seen := map[uint32]bool{ref.dirID: true}
 
-	for ref.parentID != 0 {
+	for ref.fullPath != "/" && ref.parentID != summary.ParentSentinel {
 		if seen[ref.parentID] {
 			return nil, fmt.Errorf("%w: dir_id %d", errCatalogParentCycle, ref.parentID)
 		}

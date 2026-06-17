@@ -34,6 +34,7 @@ import (
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	. "github.com/smartystreets/goconvey/convey"
+	"github.com/wtsi-hgi/wrstat-ui/summary"
 )
 
 const (
@@ -120,7 +121,7 @@ func (c *navIndexCatalogConn) resolvePathRows(args []any) driver.Rows {
 
 func navIndexRefs() []navIndexCatalogFixtureRow {
 	return []navIndexCatalogFixtureRow{
-		{dirID: 0, parentID: 0, subtreeEnd: 6, name: "/", childDirCount: 1, fullPath: "/"},
+		{dirID: 0, parentID: summary.ParentSentinel, subtreeEnd: 6, name: "/", childDirCount: 1, fullPath: "/"},
 		{dirID: 1, parentID: 0, subtreeEnd: 6, name: "mnt/", childDirCount: 1, fullPath: testRootMountPath},
 		{dirID: 2, parentID: 1, subtreeEnd: 6, name: "a/", childDirCount: 2, childFileCount: 3, fullPath: navIndexTestMount},
 		{dirID: 3, parentID: 2, subtreeEnd: 5, name: "alpha/", childDirCount: 1, fullPath: navIndexTestAlpha},
@@ -221,12 +222,13 @@ func TestNavIndexI1(t *testing.T) {
 		So(err, ShouldBeNil)
 		So(ok, ShouldBeTrue)
 		So(ancestors, ShouldResemble, []string{
+			"/",
 			testRootMountPath,
 			navIndexTestMount,
 			navIndexTestAlpha,
 			navIndexTestAlphaLeaf,
 		})
-		So(conn.queryCount(), ShouldEqual, 6)
+		So(conn.queryCount(), ShouldEqual, 7)
 	})
 
 	Convey("I1 flag on uses a ready index without ClickHouse round-trips", t, func() {
@@ -258,6 +260,7 @@ func TestNavIndexI1(t *testing.T) {
 		So(err, ShouldBeNil)
 		So(ok, ShouldBeTrue)
 		So(ancestors, ShouldResemble, []string{
+			"/",
 			testRootMountPath,
 			navIndexTestMount,
 			navIndexTestAlpha,

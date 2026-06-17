@@ -432,10 +432,12 @@ func TestClickHouseDatabaseE1IntegerBands(t *testing.T) {
 		updatedAt := time.Date(2026, 6, 16, 16, 0, 0, 0, time.UTC)
 		mount := e1SeedMount(ctx, conn, "/mnt/e2-ancestors/", updatedAt)
 		e1SeedProjectionSet(ctx, conn, mount)
-		e1SeedCatalogDir(ctx, conn, mount, 1, 0, 5, 0, mount.mountPath, 1)
-		e1SeedCatalogDir(ctx, conn, mount, 2, 1, 5, 1, mount.mountPath+"alpha/", 1)
-		e1SeedCatalogDir(ctx, conn, mount, 3, 2, 5, 2, mount.mountPath+"alpha/beta/", 1)
-		e1SeedCatalogDir(ctx, conn, mount, 4, 3, 5, 3, mount.mountPath+"alpha/beta/leaf/", 0)
+		e1SeedCatalogDir(ctx, conn, mount, 0, summary.ParentSentinel, 6, 0, "/", 1)
+		e1SeedCatalogDir(ctx, conn, mount, 1, 0, 6, 1, testRootMountPath, 1)
+		e1SeedCatalogDir(ctx, conn, mount, 2, 1, 6, 2, mount.mountPath, 1)
+		e1SeedCatalogDir(ctx, conn, mount, 3, 2, 6, 3, mount.mountPath+"alpha/", 1)
+		e1SeedCatalogDir(ctx, conn, mount, 4, 3, 6, 4, mount.mountPath+"alpha/beta/", 1)
+		e1SeedCatalogDir(ctx, conn, mount, 5, 4, 6, 5, mount.mountPath+"alpha/beta/leaf/", 0)
 
 		dbch := newClickHouseDatabaseWithSnapshot(cfg, conn, e1Snapshot(mount))
 		ancestors, ok, err := dbch.catalogAncestorPathsForMount(
@@ -447,11 +449,88 @@ func TestClickHouseDatabaseE1IntegerBands(t *testing.T) {
 		So(err, ShouldBeNil)
 		So(ok, ShouldBeTrue)
 		So(ancestors, ShouldResemble, []string{
+			"/",
+			testRootMountPath,
 			mount.mountPath,
 			mount.mountPath + "alpha/",
 			mount.mountPath + "alpha/beta/",
 			mount.mountPath + "alpha/beta/leaf/",
 		})
+	})
+
+	Convey("Catalog parent_id walk stops at the sentinel-root catalog row", t, func() {
+		setE1ClickHouseTestEnv()
+		ResetTreeQueryCaches()
+		Reset(ResetTreeQueryCaches)
+
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 5 * time.Second
+		cfg.PollInterval = 0
+		fixtureRows := dirsCatalogFixtureRows()
+		fixtureMountPath := fixtureRows[2].fullPath
+		cfg.MountPoints = []string{fixtureMountPath}
+
+		p, err := OpenProvider(cfg)
+		So(err, ShouldBeNil)
+		Reset(func() { So(p.Close(), ShouldBeNil) })
+
+		conn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(conn.Close(), ShouldBeNil) })
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		updatedAt := time.Date(2026, 6, 16, 17, 0, 0, 0, time.UTC)
+		mount := e1SeedMount(ctx, conn, fixtureMountPath, updatedAt)
+		e1SeedProjectionSet(ctx, conn, mount)
+
+		for _, row := range fixtureRows {
+			e1SeedCatalogDir(
+				ctx,
+				conn,
+				mount,
+				row.dirID,
+				row.parentID,
+				row.subtreeEnd,
+				row.depth,
+				row.fullPath,
+				row.childDirCount,
+			)
+		}
+
+		dbch := newClickHouseDatabaseWithSnapshot(cfg, conn, e1Snapshot(mount))
+		ancestors, ok, err := dbch.catalogAncestorPathsForMount(
+			ctx,
+			mount.mountPath,
+			mount.snapshotID,
+			"/catalog/team/branch-b/leaf",
+		)
+		So(err, ShouldBeNil)
+		So(ok, ShouldBeTrue)
+		So(ancestors, ShouldResemble, []string{
+			"/",
+			"/catalog/",
+			mount.mountPath,
+			"/catalog/team/branch-b/",
+			"/catalog/team/branch-b/leaf/",
+		})
+
+		rootAncestors, ok, err := dbch.catalogAncestorPathsFromRef(
+			ctx,
+			mount.mountPath,
+			mount.snapshotID,
+			treeCatalogDirRef{
+				dirID:      fixtureRows[0].dirID,
+				parentID:   fixtureRows[0].parentID,
+				subtreeEnd: fixtureRows[0].subtreeEnd,
+				fullPath:   fixtureRows[0].fullPath,
+			},
+		)
+		So(err, ShouldBeNil)
+		So(ok, ShouldBeTrue)
+		So(rootAncestors, ShouldResemble, []string{"/"})
 	})
 }
 
