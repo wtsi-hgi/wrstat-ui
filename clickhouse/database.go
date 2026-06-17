@@ -313,7 +313,7 @@ const (
 		"ON parent.mount_path = child.mount_path " +
 		"AND parent.snapshot_id = child.snapshot_id " +
 		"AND parent.dir_id = child.parent_id " +
-		"ANY INNER JOIN " + externalDirsTableName + " AS q ON q.dir = parent.full_path " +
+		"INNER JOIN " + externalDirsTableName + " AS q ON q.dir = parent.full_path " +
 		"WHERE child.mount_path = ? AND child.snapshot_id = ? " +
 		"ORDER BY parent.full_path ASC, child.full_path ASC"
 

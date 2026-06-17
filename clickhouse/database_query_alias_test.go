@@ -88,6 +88,39 @@ func TestClickHouseDatabaseChildrenQueryAliases(t *testing.T) {
 		So(args, ShouldHaveLength, 3)
 	})
 
+	Convey("external parent child lookup preserves all children per parent", t, func() {
+		query := compactSQL(childrenForExternalParentsQuery)
+		So(query, ShouldContainSubstring, "INNER JOIN "+externalDirsTableName+" AS q")
+		So(query, ShouldContainSubstring, "q.dir = parent.full_path")
+		So(query, ShouldNotContainSubstring, "ANY INNER JOIN "+externalDirsTableName)
+	})
+
+	Convey("maintained DGUTA vector lookups resolve paths through the catalog", t, func() {
+		batchQuery, args := scopedBatchQuery(
+			mountDirDGUTAVectorsForDirsQuery,
+			[]string{testRootMountPath},
+			testRootMountPath,
+			"00000000-0000-0000-0000-000000000001",
+		)
+
+		batchQuery = compactSQL(batchQuery)
+		So(batchQuery, ShouldContainSubstring, "SELECT c.full_path, v.updated_at")
+		So(batchQuery, ShouldContainSubstring, "INNER JOIN wrstat_dirs AS c")
+		So(batchQuery, ShouldContainSubstring, "c.dir_id = v.dir_id")
+		So(batchQuery, ShouldContainSubstring, "c.full_path IN (?)")
+		So(batchQuery, ShouldNotContainSubstring, "SELECT dir,")
+		So(batchQuery, ShouldNotContainSubstring, "WHERE dir IN")
+		So(args, ShouldHaveLength, 3)
+
+		externalQuery := compactSQL(mountDirDGUTAVectorsForExternalDirsQuery)
+		So(externalQuery, ShouldContainSubstring, "SELECT c.full_path, v.updated_at")
+		So(externalQuery, ShouldContainSubstring, "INNER JOIN wrstat_dirs AS c")
+		So(externalQuery, ShouldContainSubstring, "INNER JOIN "+externalDirsTableName+" AS q ON q.dir = c.full_path")
+		So(externalQuery, ShouldNotContainSubstring, "SELECT v.dir")
+		So(externalQuery, ShouldNotContainSubstring, "q.dir = v.dir")
+		So(externalQuery, ShouldNotContainSubstring, "ANY INNER JOIN "+externalDirsTableName)
+	})
+
 	Convey("Info parent count uses path semantics across mount-local dir ids", t, func() {
 		query := compactSQL(infoChildrenQuery)
 		So(query, ShouldContainSubstring, "uniqExactIf(full_path, child_dir_count > 0) AS num_parents")

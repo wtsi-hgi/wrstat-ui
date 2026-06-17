@@ -35,17 +35,20 @@ import (
 )
 
 const (
-	mountDirDGUTAVectorsForDirsQuery = "SELECT dir, updated_at, gids, uids, fts, ages, " +
-		"counts, sizes, atime_mins, mtime_maxs, atime_buckets, mtime_buckets, child_count " +
-		"FROM wrstat_dir_facts " +
-		"PREWHERE mount_path = ? AND snapshot_id = ? " +
-		"WHERE dir IN (%s)"
+	mountDirDGUTAVectorsForDirsQuery = "SELECT c.full_path, v.updated_at, v.gids, v.uids, v.fts, v.ages, " +
+		"v.counts, v.sizes, v.atime_mins, v.mtime_maxs, v.atime_buckets, v.mtime_buckets, v.child_count " +
+		"FROM wrstat_dir_facts AS v " +
+		"INNER JOIN wrstat_dirs AS c " +
+		"ON c.mount_path = v.mount_path AND c.snapshot_id = v.snapshot_id AND c.dir_id = v.dir_id " +
+		"WHERE v.mount_path = ? AND v.snapshot_id = ? AND c.full_path IN (%s)"
 
-	mountDirDGUTAVectorsForExternalDirsQuery = "SELECT v.dir, v.updated_at, v.gids, v.uids, " +
+	mountDirDGUTAVectorsForExternalDirsQuery = "SELECT c.full_path, v.updated_at, v.gids, v.uids, " +
 		"v.fts, v.ages, v.counts, v.sizes, v.atime_mins, v.mtime_maxs, " +
 		"v.atime_buckets, v.mtime_buckets, v.child_count " +
 		"FROM wrstat_dir_facts AS v " +
-		"ANY INNER JOIN " + externalDirsTableName + " AS q ON q.dir = v.dir " +
+		"INNER JOIN wrstat_dirs AS c " +
+		"ON c.mount_path = v.mount_path AND c.snapshot_id = v.snapshot_id AND c.dir_id = v.dir_id " +
+		"INNER JOIN " + externalDirsTableName + " AS q ON q.dir = c.full_path " +
 		"WHERE v.mount_path = ? AND v.snapshot_id = ?"
 )
 
