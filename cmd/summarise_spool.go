@@ -1375,6 +1375,10 @@ func (w *summariseDGUTASpoolWriter) writeDirFilterAgeAllRows(record summariseDGU
 
 func summariseFileIngestDirIDPath(info *summary.FileInfo) *summary.DirectoryPath {
 	if info.IsDir() {
+		if info.Path.Parent == nil {
+			return info.Path
+		}
+
 		return info.Path.Parent
 	}
 

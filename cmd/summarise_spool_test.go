@@ -49,6 +49,8 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/internal/perfreport"
 	"github.com/wtsi-hgi/wrstat-ui/internal/split"
 	"github.com/wtsi-hgi/wrstat-ui/internal/statsdata"
+	"github.com/wtsi-hgi/wrstat-ui/stats"
+	"github.com/wtsi-hgi/wrstat-ui/summary"
 )
 
 const summariseSpoolVirtualNamespaceDir = "/mnt/"
@@ -119,6 +121,28 @@ const insertMountActiveSnapshotEventForTestQuery = `
 INSERT INTO wrstat_mount_events
   (mount_path, event_at, event_type, snapshot_id, updated_at, reason)
 VALUES (?, ?, 1, toUUID(?), ?, ?)`
+
+func TestSummariseFileIngestDirIDPath(t *testing.T) {
+	Convey("summarise file spool resolves / mount top-level directory rows against /", t, func() {
+		rootDir := &summary.DirectoryPath{Name: "/", Depth: 0}
+		info := &summary.FileInfo{
+			Path:      rootDir,
+			Name:      []byte("boot/"),
+			EntryType: stats.DirType,
+		}
+
+		dirIDPath := summariseFileIngestDirIDPath(info)
+
+		So(dirIDPath, ShouldEqual, rootDir)
+
+		alloc := summary.NewDirIDAllocator()
+		So(alloc.SetMountPath("/"), ShouldBeNil)
+
+		dirID, err := alloc.DirID(dirIDPath)
+		So(err, ShouldBeNil)
+		So(dirID, ShouldEqual, uint32(0))
+	})
+}
 
 type summariseSpoolSwitchPlanForTest struct {
 	HasPrevious         bool   `json:"has_previous"`
