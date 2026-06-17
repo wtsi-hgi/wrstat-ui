@@ -1318,6 +1318,64 @@ type summariseSpoolDataset struct {
 	dgutaWriter        *summariseDGUTASpoolWriter
 }
 
+func buildSummariseSpoolAttempt( //nolint:funlen
+	statsPath string,
+	partialDir string,
+	expected chspool.Manifest,
+	target *clickHouseSummariseTarget,
+	diag *summariseDiagnostics,
+	sortInput bool,
+) (*chspool.Manifest, error) {
+	if err := os.RemoveAll(partialDir); err != nil {
+		return nil, err
+	}
+
+	set, err := chspool.CreateSet(partialDir)
+	if err != nil {
+		return nil, err
+	}
+
+	ds := &summariseSpoolDataset{
+		set:                set,
+		mountPath:          target.mountPath,
+		updatedAt:          target.modtime.UTC(),
+		snapshotID:         expected.SnapshotID,
+		refreshedAt:        summariseSpoolNow().UTC(),
+		dirgutaReferenceAt: summariseSpoolDirGUTANow().UTC(),
+		idAllocator:        summary.NewDirIDAllocator(),
+	}
+	if mountErr := ds.idAllocator.SetMountPath(target.mountPath); mountErr != nil {
+		_ = os.RemoveAll(partialDir)
+
+		return nil, mountErr
+	}
+
+	err = parseSummariseToSpool(statsPath, partialDir, ds, diag, sortInput)
+
+	closeErr := set.Close()
+	if err != nil || closeErr != nil {
+		_ = os.RemoveAll(partialDir)
+
+		return nil, errors.Join(err, closeErr)
+	}
+
+	manifest := expected
+	manifest.Tables = set.TableManifests()
+	manifest.CompletedAt = summariseSpoolNow().UTC().Format(time.RFC3339Nano)
+
+	if err := chspool.WriteManifestAtomic(partialDir, &manifest); err != nil {
+		_ = os.RemoveAll(partialDir)
+
+		return nil, err
+	}
+
+	return &manifest, nil
+}
+
+func shouldLogSummariseSpoolParseResult(err error, sortInput bool) bool {
+	return sortInput || !errors.Is(err, summary.ErrNonContiguousInput)
+}
+
 type summariseFileSpoolOperation struct {
 	ds *summariseSpoolDataset
 }
@@ -1624,7 +1682,7 @@ func newSummariseSpoolManifest( //nolint:funlen
 	}, nil
 }
 
-func buildSummariseSpool( //nolint:funlen,gocyclo
+func buildSummariseSpool( //nolint:funlen
 	statsPath string,
 	spoolDir string,
 	expected chspool.Manifest,
@@ -1633,44 +1691,12 @@ func buildSummariseSpool( //nolint:funlen,gocyclo
 ) (*chspool.Manifest, error) {
 	partialDir := spoolDir + ".partial"
 
-	if err := os.RemoveAll(partialDir); err != nil {
-		return nil, err
+	manifest, err := buildSummariseSpoolAttempt(statsPath, partialDir, expected, target, diag, false)
+	if errors.Is(err, summary.ErrNonContiguousInput) {
+		manifest, err = buildSummariseSpoolAttempt(statsPath, partialDir, expected, target, diag, true)
 	}
 
-	set, err := chspool.CreateSet(partialDir)
 	if err != nil {
-		return nil, err
-	}
-
-	ds := &summariseSpoolDataset{
-		set:                set,
-		mountPath:          target.mountPath,
-		updatedAt:          target.modtime.UTC(),
-		snapshotID:         expected.SnapshotID,
-		refreshedAt:        summariseSpoolNow().UTC(),
-		dirgutaReferenceAt: summariseSpoolDirGUTANow().UTC(),
-		idAllocator:        summary.NewDirIDAllocator(),
-	}
-	if mountErr := ds.idAllocator.SetMountPath(target.mountPath); mountErr != nil {
-		_ = os.RemoveAll(partialDir)
-
-		return nil, mountErr
-	}
-
-	err = parseSummariseToSpool(statsPath, ds, diag)
-
-	closeErr := set.Close()
-	if err != nil || closeErr != nil {
-		_ = os.RemoveAll(partialDir)
-
-		return nil, errors.Join(err, closeErr)
-	}
-
-	manifest := expected
-	manifest.Tables = set.TableManifests()
-	manifest.CompletedAt = summariseSpoolNow().UTC().Format(time.RFC3339Nano)
-
-	if err := chspool.WriteManifestAtomic(partialDir, &manifest); err != nil {
 		_ = os.RemoveAll(partialDir)
 
 		return nil, err
@@ -1688,15 +1714,17 @@ func buildSummariseSpool( //nolint:funlen,gocyclo
 		return nil, err
 	}
 
-	return &manifest, nil
+	return manifest, nil
 }
 
 func parseSummariseToSpool( //nolint:funlen
 	statsPath string,
+	partialDir string,
 	ds *summariseSpoolDataset,
 	diag *summariseDiagnostics,
+	sortInput bool,
 ) (err error) {
-	r, _, err := openStatsFile(statsPath)
+	r, err := openSummariseSpoolStats(statsPath, partialDir, sortInput)
 	if err != nil {
 		return err
 	}
@@ -1719,7 +1747,9 @@ func parseSummariseToSpool( //nolint:funlen
 	diag.setCurrentPhase("parse")
 
 	err = s.Summarise()
-	diag.logParseResult(err)
+	if shouldLogSummariseSpoolParseResult(err, sortInput) {
+		diag.logParseResult(err)
+	}
 
 	if err != nil {
 		return err

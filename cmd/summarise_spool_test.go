@@ -1457,6 +1457,57 @@ func TestSummariseClickHouseSpoolRows(t *testing.T) {
 		So(filesByPath[b5SpoolMountPath].SnapshotID, ShouldEqual, manifest.SnapshotID)
 	})
 
+	Convey("summarise command spools raw stats whose directory subtree is revisited later", t, func() {
+		fixture := newSummariseActiveSnapshotFixture(t)
+		writeNonContiguousSpoolFixtureStats(t, fixture.statsPath, fixture.updatedAt)
+
+		restore := snapshotSummariseGlobals()
+		Reset(restore)
+
+		configureSummariseActiveSnapshotTest(fixture.outputDir, false)
+
+		clickHouseSnapshotIsActive = func(clickhouse.Config, string, time.Time) (bool, error) {
+			return false, nil
+		}
+
+		loadSummariseClickHouseSpool = func(
+			_ context.Context,
+			_ clickhouse.Config,
+			spoolDir string,
+			manifest *chspool.Manifest,
+			_ func(string, time.Duration),
+		) (perfreport.Report, error) {
+			dirsByPath, dirsByID := b5CatalogRows(spoolDir)
+			filesByPath := b5FileRowsByFullPath(spoolDir, dirsByID)
+
+			mountRoot := dirsByPath[summariseTestMountPath]
+			alpha := dirsByPath[summariseTestMountPath+"a/"]
+			alphaDeep := dirsByPath[summariseTestMountPath+"a/deep/"]
+			beta := dirsByPath[summariseTestMountPath+"b/"]
+
+			So(alpha.ParentID, ShouldEqual, mountRoot.DirID)
+			So(alphaDeep.ParentID, ShouldEqual, alpha.DirID)
+			So(beta.ParentID, ShouldEqual, mountRoot.DirID)
+			So(alpha.DirID, ShouldBeLessThan, alphaDeep.DirID)
+			So(alphaDeep.DirID, ShouldBeLessThan, alpha.SubtreeEnd)
+			So(beta.DirID, ShouldBeGreaterThanOrEqualTo, alpha.SubtreeEnd)
+			So(mountRoot.SubtreeEnd, ShouldEqual, beta.SubtreeEnd)
+
+			So(filesByPath[summariseTestMountPath+"a/"].DirID, ShouldEqual, mountRoot.DirID)
+			So(filesByPath[summariseTestMountPath+"a/one.dat"].DirID, ShouldEqual, alpha.DirID)
+			So(filesByPath[summariseTestMountPath+"a/deep/"].DirID, ShouldEqual, alpha.DirID)
+			So(filesByPath[summariseTestMountPath+"a/deep/three.txt"].DirID, ShouldEqual, alphaDeep.DirID)
+			So(filesByPath[summariseTestMountPath+"b/two.dat"].DirID, ShouldEqual, beta.DirID)
+
+			assertSpoolCatalogIntervals(dirsByPath)
+			assertChildFilterAllParentsMatchCatalog(spoolDir)
+
+			return perfreport.NewReport("clickhouse", spoolDir, 1, 0), nil
+		}
+
+		So(run([]string{fixture.statsPath}), ShouldBeNil)
+	})
+
 	Convey("D2.7 actual summarise command path writes and verifies every schema3 spool table", t, func() {
 		fixture := newSummariseActiveSnapshotFixture(t)
 		writeBasedirsSpoolFixtureStats(t, fixture.statsPath, fixture.updatedAt)
@@ -1637,6 +1688,66 @@ func writeBasedirsSpoolFixtureStats(t *testing.T, statsPath string, updatedAt ti
 
 func d2Schema3DirGUTAReferenceTime() time.Time {
 	return time.Date(2026, 6, 12, 0, 0, 0, 0, time.UTC)
+}
+
+func writeNonContiguousSpoolFixtureStats(t *testing.T, statsPath string, updatedAt time.Time) {
+	t.Helper()
+
+	var buf bytes.Buffer
+
+	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath, 'd', 4096, 10, 20, updatedAt.Unix(), 300, 1)
+	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath+"a/", 'd', 4096, 11, 21, updatedAt.Unix(), 301, 1)
+	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath+"a/one.dat", 'f', 10, 12, 22, updatedAt.Unix(), 302, 1)
+	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath+"b/", 'd', 4096, 13, 23, updatedAt.Unix(), 303, 1)
+	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath+"b/two.dat", 'f', 20, 14, 24, updatedAt.Unix(), 304, 1)
+	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath+"a/deep/", 'd', 4096, 15, 25, updatedAt.Unix(), 305, 1)
+	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath+"a/deep/three.txt", 'f', 30, 16, 26, updatedAt.Unix(), 306, 1)
+
+	writeGzipStats(t, statsPath, buf.Bytes())
+	So(os.Chtimes(statsPath, updatedAt, updatedAt), ShouldBeNil)
+}
+
+func writeSpoolFixtureStatsRow(
+	buf *bytes.Buffer,
+	path string,
+	entryType byte,
+	size int64,
+	uid uint32,
+	gid uint32,
+	stamp int64,
+	inode uint64,
+	nlink uint64,
+) {
+	fmt.Fprintf(
+		buf,
+		"%q\t%d\t%d\t%d\t%d\t%d\t%d\t%c\t%d\t%d\t1\t%d\n",
+		path,
+		size,
+		uid,
+		gid,
+		stamp,
+		stamp,
+		stamp,
+		entryType,
+		inode,
+		nlink,
+		size,
+	)
+}
+
+func assertSpoolCatalogIntervals(dirsByPath map[string]chspool.DirRow) {
+	for _, parent := range dirsByPath {
+		for _, child := range dirsByPath {
+			inInterval := child.DirID >= parent.DirID && child.DirID < parent.SubtreeEnd
+			isDescendant := spoolCatalogDescendantOrSelf(parent.FullPath, child.FullPath)
+
+			So(inInterval, ShouldEqual, isDescendant)
+		}
+	}
+}
+
+func spoolCatalogDescendantOrSelf(parent string, child string) bool {
+	return parent == "/" || child == parent || strings.HasPrefix(child, parent)
 }
 
 func d2Schema3ExpectedRowCounts() map[string]uint64 {
