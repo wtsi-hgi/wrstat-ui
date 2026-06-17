@@ -40,7 +40,7 @@ const (
 		"FROM wrstat_dir_facts AS v " +
 		"INNER JOIN wrstat_dirs AS c " +
 		"ON c.mount_path = v.mount_path AND c.snapshot_id = v.snapshot_id AND c.dir_id = v.dir_id " +
-		"WHERE v.mount_path = ? AND v.snapshot_id = ? AND c.full_path IN (%s)"
+		"WHERE v.mount_path = ? AND v.snapshot_id = toUUID(?) AND c.full_path IN (%s)"
 
 	mountDirDGUTAVectorsForExternalDirsQuery = "SELECT c.full_path, v.updated_at, v.gids, v.uids, " +
 		"v.fts, v.ages, v.counts, v.sizes, v.atime_mins, v.mtime_maxs, " +
@@ -49,7 +49,7 @@ const (
 		"INNER JOIN wrstat_dirs AS c " +
 		"ON c.mount_path = v.mount_path AND c.snapshot_id = v.snapshot_id AND c.dir_id = v.dir_id " +
 		"INNER JOIN " + externalDirsTableName + " AS q ON q.dir = c.full_path " +
-		"WHERE v.mount_path = ? AND v.snapshot_id = ?"
+		"WHERE v.mount_path = ? AND v.snapshot_id = toUUID(?)"
 )
 
 var errMountDirDGUTAVectorLengthMismatch = errors.New("clickhouse: dir dguta vector column lengths differ")

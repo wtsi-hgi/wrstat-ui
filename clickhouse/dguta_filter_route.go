@@ -78,7 +78,7 @@ const (
 		"FROM wrstat_dir_filter_all AS f " +
 		"INNER JOIN wrstat_dirs AS c " +
 		"ON c.mount_path = f.mount_path AND c.snapshot_id = f.snapshot_id AND c.dir_id = f.dir_id " +
-		"WHERE f.mount_path = ? AND f.snapshot_id = ? AND f.age = ? %s AND %s " +
+		"WHERE f.mount_path = ? AND f.snapshot_id = toUUID(?) AND f.age = ? %s AND %s " +
 		"GROUP BY c.full_path ORDER BY c.full_path"
 
 	dgutaFilterMaterialisedChildrenQuery = "SELECT c.full_path AS dir, count() AS raw_rows, " +
@@ -93,7 +93,7 @@ const (
 		"FROM wrstat_child_filter_all AS f " +
 		"INNER JOIN wrstat_dirs AS c " +
 		"ON c.mount_path = f.mount_path AND c.snapshot_id = f.snapshot_id AND c.dir_id = f.dir_id " +
-		"WHERE f.mount_path = ? AND f.snapshot_id = ? AND f.parent_id = ? AND f.age = ? %s " +
+		"WHERE f.mount_path = ? AND f.snapshot_id = toUUID(?) AND f.parent_id = ? AND f.age = ? %s " +
 		"GROUP BY c.full_path ORDER BY c.full_path"
 
 	dgutaFilterMaterialisedSubtreeQuery = "SELECT c.full_path AS dir, count() AS raw_rows, " +
@@ -106,7 +106,7 @@ const (
 		"FROM wrstat_dir_filter_all AS f " +
 		"INNER JOIN wrstat_dirs AS c " +
 		"ON c.mount_path = f.mount_path AND c.snapshot_id = f.snapshot_id AND c.dir_id = f.dir_id " +
-		"WHERE f.mount_path = ? AND f.snapshot_id = ? AND f.age = ? %s " +
+		"WHERE f.mount_path = ? AND f.snapshot_id = toUUID(?) AND f.age = ? %s " +
 		"AND f.dir_id >= ? AND f.dir_id < ? GROUP BY c.full_path ORDER BY c.full_path"
 )
 
@@ -155,7 +155,7 @@ func dgutaVectorExactSummariesQuery(
 	source, filterArgs := dgutaVectorRowsSource(
 		"d",
 		filter,
-		"WHERE d.mount_path = ? AND d.snapshot_id = ? AND "+
+		"WHERE d.mount_path = ? AND d.snapshot_id = toUUID(?) AND "+
 			dgutaFilterIDPredicate("d", "dir_id", len(dirIDs)),
 	)
 	query := dgutaVectorSummaryQuery(source)
@@ -327,7 +327,7 @@ func dgutaVectorChildrenSummariesQuery(
 	source, sourceFilterArgs := dgutaVectorRowsSource(
 		"d",
 		filter,
-		"WHERE d.mount_path = ? AND d.snapshot_id = ? AND d.parent_id = ?",
+		"WHERE d.mount_path = ? AND d.snapshot_id = toUUID(?) AND d.parent_id = ?",
 	)
 	childCounts, childFilterArgs := dgutaVectorFilteredChildCountsQuery(filter)
 	query := "WITH filtered_child_counts AS (" + childCounts + ") " +
@@ -352,9 +352,9 @@ func dgutaVectorFilteredChildCountsQuery(filter *db.Filter) (string, []any) {
 		"SELECT gd.parent_id, gd.dir_id, arrayJoin(arrayFilter(g -> " + filterExpr + ", " +
 		dgutaVectorZipExpr("gd") + ")) AS g " +
 		"FROM wrstat_dir_facts AS gd " +
-		"WHERE gd.mount_path = ? AND gd.snapshot_id = ? AND gd.parent_id IN (" +
+		"WHERE gd.mount_path = ? AND gd.snapshot_id = toUUID(?) AND gd.parent_id IN (" +
 		"SELECT cd.dir_id FROM wrstat_dir_facts AS cd " +
-		"WHERE cd.mount_path = ? AND cd.snapshot_id = ? AND cd.parent_id = ?" +
+		"WHERE cd.mount_path = ? AND cd.snapshot_id = toUUID(?) AND cd.parent_id = ?" +
 		"))" +
 		") GROUP BY summary_dir_id, gid, uid, ft, age"
 
@@ -417,7 +417,7 @@ func dgutaVectorSubtreeSummariesQuery(
 	source, filterArgs := dgutaVectorRowsSource(
 		"d",
 		filter,
-		"WHERE d.mount_path = ? AND d.snapshot_id = ? AND d.dir_id >= ? AND d.dir_id < ?",
+		"WHERE d.mount_path = ? AND d.snapshot_id = toUUID(?) AND d.dir_id >= ? AND d.dir_id < ?",
 	)
 	query := dgutaVectorSummaryQuery(source)
 	args := make([]any, 0, len(filterArgs)+queryScopeArgs+dgutaVectorSubtreeRangeArgs)

@@ -60,21 +60,21 @@ const (
 	activeMountDirTupleArgs              = 3
 
 	dirForFullPathQuery = "SELECT dir_id, parent_id, subtree_end, full_path FROM wrstat_dirs " +
-		"PREWHERE mount_path = ? AND snapshot_id = ? " +
-		"WHERE path_hash = ? AND full_path = ? " +
+		"WHERE mount_path = ? AND snapshot_id = toUUID(?) " +
+		"AND path_hash = ? AND full_path = ? " +
 		"ORDER BY dir_id LIMIT 1"
 
 	dirForIDQuery = "SELECT dir_id, parent_id, subtree_end, full_path FROM wrstat_dirs " +
-		"WHERE mount_path = ? AND snapshot_id = ? AND dir_id = ? " +
+		"WHERE mount_path = ? AND snapshot_id = toUUID(?) AND dir_id = ? " +
 		"LIMIT 1"
 
 	whereRangeCatalogQuery = "SELECT dir_id, parent_id, full_path FROM wrstat_dirs " +
-		"PREWHERE mount_path = ? AND snapshot_id = ? " +
-		"WHERE dir_id >= ? AND dir_id < ? " +
+		"WHERE mount_path = ? AND snapshot_id = toUUID(?) " +
+		"AND dir_id >= ? AND dir_id < ? " +
 		"ORDER BY dir_id"
 
 	dirIDsForDirsQuery = "SELECT full_path, dir_id FROM wrstat_dirs " +
-		"PREWHERE mount_path = ? AND snapshot_id = ? AND full_path IN (%s) " +
+		"WHERE mount_path = ? AND snapshot_id = toUUID(?) AND full_path IN (%s) " +
 		"ORDER BY full_path ASC, dir_id ASC"
 
 	dirIDsForActiveMountsDirQuery = "SELECT mount_path, toString(snapshot_id), dir_id " +
@@ -82,14 +82,14 @@ const (
 		"ORDER BY mount_path ASC, snapshot_id ASC, dir_id ASC"
 
 	childrenForDirIDQuery = "SELECT DISTINCT full_path FROM wrstat_dirs " +
-		"PREWHERE mount_path = ? AND snapshot_id = ? " +
-		"WHERE parent_id = ? " +
+		"WHERE mount_path = ? AND snapshot_id = toUUID(?) " +
+		"AND parent_id = ? " +
 		"ORDER BY full_path"
 
 	dirFactRowsForDirIDsQuery = "SELECT dir_id, updated_at, gids, uids, fts, ages, " +
 		"counts, sizes, atime_mins, mtime_maxs, atime_buckets, mtime_buckets " +
 		"FROM wrstat_dir_facts " +
-		"PREWHERE mount_path = ? AND snapshot_id = ? " +
+		"PREWHERE mount_path = ? AND snapshot_id = toUUID(?) " +
 		"WHERE dir_id IN (%s)"
 
 	dirFactRowsForResolvedDirsQuery = "SELECT mount_path, toString(snapshot_id), dir_id, " +
@@ -114,7 +114,7 @@ const (
 		"FROM wrstat_dir_facts d " +
 		"INNER JOIN wrstat_dirs c " +
 		"ON c.mount_path = d.mount_path AND c.snapshot_id = d.snapshot_id AND c.dir_id = d.dir_id " +
-		"WHERE d.mount_path = ? AND d.snapshot_id = ? AND c.full_path = ?)"
+		"WHERE d.mount_path = ? AND d.snapshot_id = toUUID(?) AND c.full_path = ?)"
 
 	infoDGUTAQuery = "SELECT " +
 		"count() AS num_dirs, " +
@@ -174,7 +174,7 @@ const (
 		"FROM wrstat_dir_facts d " +
 		"INNER JOIN wrstat_dirs c " +
 		"ON c.mount_path = d.mount_path AND c.snapshot_id = d.snapshot_id AND c.dir_id = d.dir_id " +
-		"WHERE d.mount_path = ? AND d.snapshot_id = ? AND c.full_path IN (%s))"
+		"WHERE d.mount_path = ? AND d.snapshot_id = toUUID(?) AND c.full_path IN (%s))"
 
 	dirSummariesForDirsQuery = "SELECT dir, count() AS raw_rows, " +
 		"sumIf(file_count, passes_filter) AS total_count, " +
@@ -197,17 +197,17 @@ const (
 		"FROM wrstat_dir_facts d " +
 		"INNER JOIN wrstat_dirs c " +
 		"ON c.mount_path = d.mount_path AND c.snapshot_id = d.snapshot_id AND c.dir_id = d.dir_id " +
-		"WHERE d.mount_path = ? AND d.snapshot_id = ? AND c.full_path IN (%s)" +
+		"WHERE d.mount_path = ? AND d.snapshot_id = toUUID(?) AND c.full_path IN (%s)" +
 		")" +
 		") " +
 		"GROUP BY dir"
 
 	schema3DirFilterAllReadyQuery = "SELECT dir_filter_all_rows FROM wrstat_schema3_snapshot_sets " +
-		"WHERE mount_path = ? AND snapshot_id = ? AND schema3_version = ? " +
+		"WHERE mount_path = ? AND snapshot_id = toUUID(?) AND schema3_version = ? " +
 		"ORDER BY refreshed_at DESC LIMIT 1"
 
 	schema3ChildFilterAllReadyQuery = "SELECT child_filter_all_rows FROM wrstat_schema3_snapshot_sets " +
-		"WHERE mount_path = ? AND snapshot_id = ? AND schema3_version = ? " +
+		"WHERE mount_path = ? AND snapshot_id = toUUID(?) AND schema3_version = ? " +
 		"ORDER BY refreshed_at DESC LIMIT 1"
 
 	dirFilterAllSummariesForDirsQuery = "SELECT c.full_path AS dir, count() AS raw_rows, " +
@@ -223,7 +223,7 @@ const (
 		"FROM wrstat_dir_filter_all f " +
 		"INNER JOIN wrstat_dirs c " +
 		"ON c.mount_path = f.mount_path AND c.snapshot_id = f.snapshot_id AND c.dir_id = f.dir_id " +
-		"WHERE f.mount_path = ? AND f.snapshot_id = ? AND f.age = ? %s AND c.full_path IN (%s) " +
+		"WHERE f.mount_path = ? AND f.snapshot_id = toUUID(?) AND f.age = ? %s AND c.full_path IN (%s) " +
 		"GROUP BY c.full_path"
 
 	dirFilterAllWhereSummariesQuery = "SELECT c.full_path AS dir, count() AS raw_rows, " +
@@ -239,7 +239,7 @@ const (
 		"FROM wrstat_dir_filter_all f " +
 		"INNER JOIN wrstat_dirs c " +
 		"ON c.mount_path = f.mount_path AND c.snapshot_id = f.snapshot_id AND c.dir_id = f.dir_id " +
-		"WHERE f.mount_path = ? AND f.snapshot_id = ? AND f.age = ? %s AND startsWith(c.full_path, ?) " +
+		"WHERE f.mount_path = ? AND f.snapshot_id = toUUID(?) AND f.age = ? %s AND startsWith(c.full_path, ?) " +
 		"GROUP BY c.full_path"
 
 	whereRangeDirFactsScalarSummariesQuery = "SELECT c.full_path AS dir, toUInt64(1) AS raw_rows, " +
@@ -255,7 +255,7 @@ const (
 		"FROM wrstat_dir_facts f " +
 		"INNER JOIN wrstat_dirs c " +
 		"ON c.mount_path = f.mount_path AND c.snapshot_id = f.snapshot_id AND c.dir_id = f.dir_id " +
-		"WHERE f.mount_path = ? AND f.snapshot_id = ? AND f.dir_id >= ? AND f.dir_id < ? " +
+		"WHERE f.mount_path = ? AND f.snapshot_id = toUUID(?) AND f.dir_id >= ? AND f.dir_id < ? " +
 		"ORDER BY c.full_path"
 
 	dirFilterAgeAllWhereRangeSummariesQuery = "SELECT c.full_path AS dir, count() AS raw_rows, " +
@@ -271,7 +271,7 @@ const (
 		"FROM wrstat_dir_filter_ageall f " +
 		"INNER JOIN wrstat_dirs c " +
 		"ON c.mount_path = f.mount_path AND c.snapshot_id = f.snapshot_id AND c.dir_id = f.dir_id " +
-		"WHERE f.mount_path = ? AND f.snapshot_id = ? AND f.dir_id >= ? AND f.dir_id < ? AND %s " +
+		"WHERE f.mount_path = ? AND f.snapshot_id = toUUID(?) AND f.dir_id >= ? AND f.dir_id < ? AND %s " +
 		"GROUP BY c.full_path"
 
 	childFilterAllChildSummariesPacketQuery = "SELECT child.full_path AS dir, count() AS raw_rows, " +
@@ -293,7 +293,7 @@ const (
 		"ON parent.mount_path = f.mount_path AND parent.snapshot_id = f.snapshot_id AND parent.dir_id = f.parent_id " +
 		"INNER JOIN wrstat_dirs child " +
 		"ON child.mount_path = f.mount_path AND child.snapshot_id = f.snapshot_id AND child.dir_id = f.dir_id " +
-		"WHERE f.mount_path = ? AND f.snapshot_id = ? AND parent.full_path = ? AND f.age = ? %s " +
+		"WHERE f.mount_path = ? AND f.snapshot_id = toUUID(?) AND parent.full_path = ? AND f.age = ? %s " +
 		"GROUP BY child.full_path " +
 		"ORDER BY child.full_path"
 
@@ -303,8 +303,8 @@ const (
 		"ON parent.mount_path = child.mount_path " +
 		"AND parent.snapshot_id = child.snapshot_id " +
 		"AND parent.dir_id = child.parent_id " +
-		"PREWHERE child.mount_path = ? AND child.snapshot_id = ? " +
-		"WHERE parent.full_path IN (%s) " +
+		"WHERE child.mount_path = ? AND child.snapshot_id = toUUID(?) " +
+		"AND parent.full_path IN (%s) " +
 		"ORDER BY parent.full_path ASC, child.full_path ASC"
 
 	childrenForExternalParentsQuery = "SELECT parent.full_path, child.full_path " +
@@ -314,7 +314,7 @@ const (
 		"AND parent.snapshot_id = child.snapshot_id " +
 		"AND parent.dir_id = child.parent_id " +
 		"INNER JOIN " + externalDirsTableName + " AS q ON q.dir = parent.full_path " +
-		"WHERE child.mount_path = ? AND child.snapshot_id = ? " +
+		"WHERE child.mount_path = ? AND child.snapshot_id = toUUID(?) " +
 		"ORDER BY parent.full_path ASC, child.full_path ASC"
 
 	activeMountRootChildrenQuery = "SELECT parent.full_path, child.full_path " +
@@ -327,12 +327,12 @@ const (
 		"ORDER BY parent.full_path ASC, child.full_path ASC"
 
 	dirsHaveCatalogChildrenQuery = "SELECT full_path FROM wrstat_dirs " +
-		"PREWHERE mount_path = ? AND snapshot_id = ? " +
-		"WHERE full_path IN (%s) AND child_dir_count > 0 " +
+		"WHERE mount_path = ? AND snapshot_id = toUUID(?) " +
+		"AND full_path IN (%s) AND child_dir_count > 0 " +
 		"ORDER BY full_path ASC"
 
 	dirsHaveFilteredChildrenQuery = "SELECT parent_id FROM wrstat_child_filter_all " +
-		"PREWHERE mount_path = ? AND snapshot_id = ? " +
+		"PREWHERE mount_path = ? AND snapshot_id = toUUID(?) " +
 		"WHERE parent_id IN (%s) AND age = ? %s AND count > 0 " +
 		"GROUP BY parent_id ORDER BY parent_id ASC"
 
@@ -346,7 +346,7 @@ const (
 		"ON d.mount_path = child.mount_path " +
 		"AND d.snapshot_id = child.snapshot_id " +
 		"AND d.dir_id = child.dir_id " +
-		"WHERE parent.mount_path = ? AND parent.snapshot_id = ? " +
+		"WHERE parent.mount_path = ? AND parent.snapshot_id = toUUID(?) " +
 		"AND parent.full_path IN (%s) %s " +
 		"GROUP BY parent.full_path " +
 		"ORDER BY parent.full_path ASC"
@@ -383,7 +383,7 @@ const (
 		"FROM wrstat_dir_facts d " +
 		"INNER JOIN wrstat_dirs c " +
 		"ON c.mount_path = d.mount_path AND c.snapshot_id = d.snapshot_id AND c.dir_id = d.dir_id " +
-		"WHERE d.mount_path = ? AND d.snapshot_id = ? " +
+		"WHERE d.mount_path = ? AND d.snapshot_id = toUUID(?) " +
 		")" +
 		") " +
 		"WHERE %s " +

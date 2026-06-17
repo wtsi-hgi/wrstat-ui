@@ -42,7 +42,7 @@ import (
 const (
 	navIndexCatalogQuery = "SELECT dir_id, parent_id, subtree_end, name, " +
 		"child_dir_count, child_file_count FROM wrstat_dirs " +
-		"WHERE mount_path = ? AND snapshot_id = ? ORDER BY dir_id"
+		"WHERE mount_path = ? AND snapshot_id = toUUID(?) ORDER BY dir_id"
 	navIndexEstimateFormula = "4 dir_id implicit + 4 parent_id + 4 subtree_end + " +
 		"4 counts + len(name) bytes per dir plus map overhead"
 	navIndexEstimateNote = "10-100M directories are expected to land in the low-GB range " +

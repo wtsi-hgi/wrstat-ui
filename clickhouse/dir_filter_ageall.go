@@ -56,7 +56,7 @@ const (
 		"FROM wrstat_dir_filter_ageall f " +
 		"INNER JOIN wrstat_dirs c " +
 		"ON c.mount_path = f.mount_path AND c.snapshot_id = f.snapshot_id AND c.dir_id = f.dir_id " +
-		"WHERE f.mount_path = ? AND f.snapshot_id = ? AND startsWith(c.full_path, ?) AND %s " +
+		"WHERE f.mount_path = ? AND f.snapshot_id = toUUID(?) AND startsWith(c.full_path, ?) AND %s " +
 		"GROUP BY c.full_path"
 
 	dirFilterAgeAllSummariesForDirsQuery = "SELECT c.full_path AS dir, count() AS raw_rows, " +
@@ -72,7 +72,7 @@ const (
 		"FROM wrstat_dir_filter_ageall f " +
 		"INNER JOIN wrstat_dirs c " +
 		"ON c.mount_path = f.mount_path AND c.snapshot_id = f.snapshot_id AND c.dir_id = f.dir_id " +
-		"WHERE f.mount_path = ? AND f.snapshot_id = ? AND c.full_path IN (%s) AND %s " +
+		"WHERE f.mount_path = ? AND f.snapshot_id = toUUID(?) AND c.full_path IN (%s) AND %s " +
 		"GROUP BY c.full_path"
 
 	dirsHaveMatchingChildrenAgeAllQuery = "SELECT parent.full_path " +
@@ -85,13 +85,13 @@ const (
 		"ON f.mount_path = child.mount_path " +
 		"AND f.snapshot_id = child.snapshot_id " +
 		"AND f.dir_id = child.dir_id " +
-		"WHERE parent.mount_path = ? AND parent.snapshot_id = ? " +
+		"WHERE parent.mount_path = ? AND parent.snapshot_id = toUUID(?) " +
 		"AND parent.full_path IN (%s) AND %s " +
 		"GROUP BY parent.full_path " +
 		"ORDER BY parent.full_path ASC"
 
 	dirFilterAgeAllReadyQuery = "SELECT count() FROM wrstat_dir_filter_ageall " +
-		"WHERE mount_path = ? AND snapshot_id = ?"
+		"WHERE mount_path = ? AND snapshot_id = toUUID(?)"
 )
 
 var errDirFilterAgeAllBatchNotPrepared = errors.New("clickhouse: AgeAll filter batch is not prepared")

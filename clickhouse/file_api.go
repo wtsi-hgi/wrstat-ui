@@ -57,13 +57,13 @@ const (
 
 const catalogDirByPathQuery = "WITH (SELECT snapshot_id FROM wrstat_mounts_active WHERE mount_path = ?) AS sid " +
 	"SELECT dir_id, subtree_end, full_path FROM wrstat_dirs " +
-	"PREWHERE mount_path = ? AND snapshot_id = sid AND path_hash = ? " +
-	"WHERE full_path = ? LIMIT 1"
+	"WHERE mount_path = ? AND snapshot_id = sid AND path_hash = ? " +
+	"AND full_path = ? LIMIT 1"
 
 const catalogDirsByIDQueryTemplate = "WITH " +
 	"(SELECT snapshot_id FROM wrstat_mounts_active WHERE mount_path = ?) AS sid " +
 	"SELECT dir_id, full_path FROM wrstat_dirs " +
-	"PREWHERE mount_path = ? AND snapshot_id = sid AND dir_id IN (%s)"
+	"WHERE mount_path = ? AND snapshot_id = sid AND dir_id IN (%s)"
 
 const statPathQueryTemplate = "WITH (SELECT snapshot_id FROM wrstat_mounts_active WHERE mount_path = ?) AS sid " +
 	"SELECT %s FROM wrstat_files f INNER JOIN wrstat_dirs d " +
@@ -821,9 +821,9 @@ func catalogDirCandidateClause(
 	}
 
 	return "f.dir_id IN (SELECT cd.dir_id FROM wrstat_dirs cd " +
-		"PREWHERE cd.mount_path = ? AND cd.snapshot_id = sid " +
+		"WHERE cd.mount_path = ? AND cd.snapshot_id = sid " +
 		"AND cd.dir_id >= ? AND cd.dir_id < ? " +
-		"WHERE (" + strings.Join(patternClauses, " OR ") + "))", params
+		"AND (" + strings.Join(patternClauses, " OR ") + "))", params
 }
 
 func catalogDirPatternClause(pattern compiledGlobPattern) (string, []any) {

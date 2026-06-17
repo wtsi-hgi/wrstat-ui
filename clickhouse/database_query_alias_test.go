@@ -74,7 +74,7 @@ func TestClickHouseDatabaseChildrenQueryAliases(t *testing.T) {
 		So(query, ShouldNotContainSubstring, "c.snapshot_id")
 	})
 
-	Convey("children parent self-join scopes PREWHERE to the child alias", t, func() {
+	Convey("children parent self-join scopes filters to the child alias", t, func() {
 		query, args := scopedBatchQuery(
 			childrenForParentsQuery,
 			[]string{testRootMountPath},
@@ -83,9 +83,50 @@ func TestClickHouseDatabaseChildrenQueryAliases(t *testing.T) {
 		)
 
 		query = compactSQL(query)
-		So(query, ShouldContainSubstring, "PREWHERE child.mount_path = ? AND child.snapshot_id = ?")
+		So(query, ShouldContainSubstring, "WHERE child.mount_path = ? AND child.snapshot_id = toUUID(?)")
 		So(query, ShouldNotContainSubstring, "PREWHERE mount_path = ? AND snapshot_id = ?")
 		So(args, ShouldHaveLength, 3)
+	})
+
+	Convey("directory catalog path lookups avoid fragile PREWHERE predicates", t, func() {
+		queries := []string{
+			dirForFullPathQuery,
+			whereRangeCatalogQuery,
+			dirIDsForDirsQuery,
+			childrenForDirIDQuery,
+			childrenForParentsQuery,
+			dirsHaveCatalogChildrenQuery,
+			catalogDirByPathQuery,
+			catalogDirsByIDQueryTemplate,
+		}
+
+		for _, query := range queries {
+			So(compactSQL(query), ShouldNotContainSubstring, "PREWHERE")
+		}
+
+		clause, _ := catalogDirCandidateClause(
+			testRootMountPath,
+			fileCatalogDirRef{dirID: 1, subtreeEnd: 2, fullPath: testRootMountPath},
+			[]compiledGlobPattern{{dirRegex: ".*"}},
+		)
+		So(compactSQL(clause), ShouldNotContainSubstring, "PREWHERE")
+	})
+
+	Convey("string snapshot parameters are explicitly cast to UUID", t, func() {
+		queries := []string{
+			dirForFullPathQuery,
+			dirForIDQuery,
+			whereRangeCatalogQuery,
+			childrenForDirIDQuery,
+			dirFactRowsForDirIDsQuery,
+			mountDirSummaryReadyQuery,
+			dirFilterAgeAllReadyQuery,
+			navIndexCatalogQuery,
+		}
+
+		for _, query := range queries {
+			So(compactSQL(query), ShouldContainSubstring, "snapshot_id = toUUID(?)")
+		}
 	})
 
 	Convey("external parent child lookup preserves all children per parent", t, func() {

@@ -51,7 +51,7 @@ const (
 		"VALUES (?, toUUID(?), ?, ?)"
 
 	mountDirSummaryReadyQuery = "SELECT 1 FROM wrstat_dir_projection_sets " +
-		"WHERE mount_path = ? AND snapshot_id = ? LIMIT 1"
+		"WHERE mount_path = ? AND snapshot_id = toUUID(?) LIMIT 1"
 
 	mountDirSummariesForDirsQuery = "SELECT c.full_path, s.updated_at, s.all_count, s.all_size, " +
 		"s.all_atime_min, s.all_mtime_max, s.all_atime_buckets, s.all_mtime_buckets, " +
@@ -59,7 +59,7 @@ const (
 		"FROM wrstat_dir_facts AS s " +
 		"INNER JOIN wrstat_dirs AS c " +
 		"ON c.mount_path = s.mount_path AND c.snapshot_id = s.snapshot_id AND c.dir_id = s.dir_id " +
-		"WHERE s.mount_path = ? AND s.snapshot_id = ? AND c.full_path IN (%s)"
+		"WHERE s.mount_path = ? AND s.snapshot_id = toUUID(?) AND c.full_path IN (%s)"
 
 	mountDirFileSummariesForDirsQuery = "SELECT c.full_path, s.updated_at, s.file_count, s.file_size, " +
 		"s.file_atime_min, s.file_mtime_max, s.file_atime_buckets, s.file_mtime_buckets, " +
@@ -67,7 +67,7 @@ const (
 		"FROM wrstat_dir_facts AS s " +
 		"INNER JOIN wrstat_dirs AS c " +
 		"ON c.mount_path = s.mount_path AND c.snapshot_id = s.snapshot_id AND c.dir_id = s.dir_id " +
-		"WHERE s.mount_path = ? AND s.snapshot_id = ? AND c.full_path IN (%s)"
+		"WHERE s.mount_path = ? AND s.snapshot_id = toUUID(?) AND c.full_path IN (%s)"
 
 	mountDirSummariesForExternalDirsQuery = "SELECT c.full_path, s.updated_at, s.all_count, s.all_size, " +
 		"s.all_atime_min, s.all_mtime_max, s.all_atime_buckets, s.all_mtime_buckets, " +
@@ -76,7 +76,7 @@ const (
 		"INNER JOIN wrstat_dirs AS c " +
 		"ON c.mount_path = s.mount_path AND c.snapshot_id = s.snapshot_id AND c.dir_id = s.dir_id " +
 		"ANY INNER JOIN " + externalDirsTableName + " AS q ON q.dir = c.full_path " +
-		"WHERE s.mount_path = ? AND s.snapshot_id = ?"
+		"WHERE s.mount_path = ? AND s.snapshot_id = toUUID(?)"
 
 	mountDirFileSummariesForExternalDirsQuery = "SELECT c.full_path, s.updated_at, " +
 		"s.file_count, s.file_size, s.file_atime_min, s.file_mtime_max, " +
@@ -85,7 +85,7 @@ const (
 		"INNER JOIN wrstat_dirs AS c " +
 		"ON c.mount_path = s.mount_path AND c.snapshot_id = s.snapshot_id AND c.dir_id = s.dir_id " +
 		"ANY INNER JOIN " + externalDirsTableName + " AS q ON q.dir = c.full_path " +
-		"WHERE s.mount_path = ? AND s.snapshot_id = ?"
+		"WHERE s.mount_path = ? AND s.snapshot_id = toUUID(?)"
 )
 
 type mountDirSummaryMode uint8
