@@ -56,6 +56,8 @@ const (
 	queryInputDirKey                      = "dir"
 	queryInputDurationSource              = "duration_source"
 	queryInputCacheScope                  = "cache_scope"
+	queryInputDirsKey                     = "dirs"
+	queryInputChildDirsKey                = "child_dirs"
 	queryInputAuditCounts                 = "audit_counts"
 	queryInputAuditSurfaces               = "audit_surfaces"
 	queryInputFilterFileTypeMaskKey       = "filter_file_type_mask"
@@ -1479,7 +1481,7 @@ func opTreeDiskTreeEndpointNewDirs(qctx queryContext, opts QueryOptions) op {
 	timedDirs := uniqueDirsForRepeats(dirs, opts.Repeat)
 	inputs := j4Inputs(j4QueryTypeDisktree, "Disktree new directories", treeOpInputs(filter, map[string]any{
 		queryInputStartDirKey:    qctx.dir,
-		"dirs":                   timedDirs,
+		queryInputDirsKey:        timedDirs,
 		"dir_count":              len(timedDirs),
 		"walk_depth":             opts.WalkDepth,
 		"walk_limit":             opts.WalkLimit,
@@ -1530,7 +1532,7 @@ func opTreeDiskTreeEndpointAncestorDirs(qctx queryContext, opts QueryOptions) op
 	timedDirs := cycledDirsForRepeats(dirs, opts.Repeat)
 	inputs := j4Inputs(j4QueryTypeDisktree, "Disktree ancestor directories", treeOpInputs(filter, map[string]any{
 		queryInputStartDirKey:    ancestorStartDir(opts),
-		"dirs":                   timedDirs,
+		queryInputDirsKey:        timedDirs,
 		"dir_count":              len(timedDirs),
 		"ancestor_limit":         opts.AncestorLimit,
 		queryInputCacheScope:     queryScopeAncestorDirs,
@@ -1654,7 +1656,7 @@ func opTreeDiskTreeEndpointVisibleChildDirs(qctx queryContext) op {
 	filter := treeFilterFromOptions(qctx.treeFilter)
 	inputs := j4Inputs(j4QueryTypeDisktree, "Disktree visible child directories", treeOpInputs(filter, map[string]any{
 		queryInputParentDirKey:   qctx.dir,
-		"child_dirs":             []string{},
+		queryInputChildDirsKey:   []string{},
 		"child_count":            0,
 		"fallback_to_parent_dir": false,
 		queryInputCacheScope:     queryScopeVisibleChildDirs,
@@ -1679,7 +1681,7 @@ func opTreeDiskTreeEndpointVisibleChildDirs(qctx queryContext) op {
 			var fallback bool
 
 			timedDirs, fallback = visibleChildDirsForRepeats(childDirs, qctx.dir, repeat)
-			inputs["child_dirs"] = timedDirs
+			inputs[queryInputChildDirsKey] = timedDirs
 			inputs["child_count"] = len(timedDirs)
 			inputs["fallback_to_parent_dir"] = fallback
 			i = 0

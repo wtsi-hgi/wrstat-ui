@@ -39,6 +39,12 @@ import (
 const f3GlobCatalogProofExplain = "ReadFromMergeTree wrstat_dirs cd full_path ngrambf_v1 " +
 	"ReadFromMergeTree wrstat_files PrimaryKey Keys: mount_path snapshot_id dir_id"
 
+const (
+	queryMatrixBaselineCommit  = "baseline-commit"
+	queryMatrixCandidateCommit = "candidate-commit"
+	queryMatrixFixtureDir      = "/fixtures/j4-matrix"
+)
+
 func TestF3GlobProof(t *testing.T) {
 	Convey("full-path glob proof requires catalog path matching and dir-id file reads", t, func() {
 		So(ExplainFindByGlobAvoidsFilePathScan(f3GlobCatalogProofExplain), ShouldBeTrue)
@@ -182,7 +188,7 @@ func TestJ4CanonicalMatrix(t *testing.T) {
 		}
 
 		for _, spec := range j4RequiredMatrixOperations() {
-			So(required[spec], ShouldBeTrue)
+			So(required[j4RequiredMatrixOperationBasic(spec)], ShouldBeTrue)
 		}
 
 		for _, spec := range []j4RequiredMatrixOperation{
@@ -404,6 +410,7 @@ func TestJ4CanonicalMatrix(t *testing.T) {
 	Convey("matrix deltas report before/after p95 differences by operation variant", t, func() {
 		baseline := queryMatrixCompleteReport()
 		candidate := queryMatrixCompleteReport()
+		candidate.GitCommit = queryMatrixCandidateCommit
 		candidate.Operations[0].P95MS = baseline.Operations[0].P95MS + 7
 
 		deltas, err := j4MatrixDeltas([]perfreport.Report{baseline}, []perfreport.Report{candidate})
@@ -420,21 +427,101 @@ func TestJ4CanonicalMatrix(t *testing.T) {
 		baseline := queryMatrixCompleteReport()
 
 		differentCount := queryMatrixCompleteReport()
+		differentCount.GitCommit = queryMatrixCandidateCommit
 		differentCount.Operations[0].ResultCount = []uint64{99, 99}
 		_, err := j4MatrixDeltas([]perfreport.Report{baseline}, []perfreport.Report{differentCount})
 		So(err, ShouldNotBeNil)
 		So(err.Error(), ShouldContainSubstring, "result rows mismatch")
 
 		differentDigest := queryMatrixCompleteReport()
+		differentDigest.GitCommit = queryMatrixCandidateCommit
 		differentDigest.Operations[0].Inputs[queryInputResultDigest] = "sha256:different"
 		_, err = j4MatrixDeltas([]perfreport.Report{baseline}, []perfreport.Report{differentDigest})
 		So(err, ShouldNotBeNil)
 		So(err.Error(), ShouldContainSubstring, "result digest mismatch")
 	})
 
+	Convey("matrix deltas reject duplicate matching rows before choosing a stale first row", t, func() {
+		baseline := queryMatrixCompleteReport()
+		candidate := queryMatrixCompleteReport()
+		candidate.GitCommit = queryMatrixCandidateCommit
+		duplicate := cloneJ4Operation(candidate.Operations[0])
+		duplicate.P95MS = 999
+		duplicate.Inputs[queryInputResultDigest] = "sha256:stale-duplicate"
+		candidate.Operations = append(candidate.Operations, duplicate)
+
+		_, err := j4MatrixDeltas([]perfreport.Report{baseline}, []perfreport.Report{candidate})
+
+		So(err, ShouldNotBeNil)
+		So(err.Error(), ShouldContainSubstring, "duplicate")
+		So(err.Error(), ShouldContainSubstring, candidate.Operations[0].Name)
+	})
+
+	Convey("matrix deltas reject mixed or mismatched report provenance", t, func() {
+		baseline := queryMatrixCompleteReport()
+		candidate := queryMatrixCompleteReport()
+		candidate.GitCommit = queryMatrixCandidateCommit
+
+		mismatchedFixture := cloneJ4Report(candidate)
+		mismatchedFixture.InputDir = "/fixtures/other"
+		_, err := j4MatrixDeltas([]perfreport.Report{baseline}, []perfreport.Report{mismatchedFixture})
+		So(err, ShouldNotBeNil)
+		So(err.Error(), ShouldContainSubstring, "input_dir")
+
+		mismatchedRepeat := cloneJ4Report(candidate)
+		mismatchedRepeat.Repeat = baseline.Repeat + 1
+		_, err = j4MatrixDeltas([]perfreport.Report{baseline}, []perfreport.Report{mismatchedRepeat})
+		So(err, ShouldNotBeNil)
+		So(err.Error(), ShouldContainSubstring, "repeat")
+
+		firstHalf, secondHalf := splitJ4Report(baseline)
+		secondHalf.GitCommit = "other-baseline-commit"
+		_, err = j4MatrixDeltas([]perfreport.Report{firstHalf, secondHalf}, []perfreport.Report{candidate})
+		So(err, ShouldNotBeNil)
+		So(err.Error(), ShouldContainSubstring, "baseline")
+		So(err.Error(), ShouldContainSubstring, "git_commit")
+	})
+
+	Convey("matrix validation requires Disktree path classes, high fanout, and filter predicates", t, func() {
+		report := queryMatrixCompleteReport()
+
+		missingRoot := cloneJ4Report(report)
+		mutateJ4ReportOperation(&missingRoot, queryOpTreeDiskTreeEndName, func(op *perfreport.Operation) {
+			op.Inputs[queryInputDirKey] = "/not-root/"
+		})
+		So(
+			j4MatrixCoverageFailure([]perfreport.Report{report}, []perfreport.Report{missingRoot}),
+			ShouldContainSubstring,
+			"root /",
+		)
+
+		missingHighFanout := cloneJ4Report(report)
+		mutateJ4ReportOperation(&missingHighFanout, queryOpTreeDiskTreeVisibleChildName, func(op *perfreport.Operation) {
+			op.Inputs[queryInputHighFanoutChildCount] = uint64(12)
+		})
+		So(
+			j4MatrixCoverageFailure([]perfreport.Report{report}, []perfreport.Report{missingHighFanout}),
+			ShouldContainSubstring,
+			queryInputHighFanoutChildCount,
+		)
+
+		missingFilter := cloneJ4Report(report)
+		mutateJ4ReportOperation(&missingFilter, queryOpTreeDiskTreeVisibleChildName, func(op *perfreport.Operation) {
+			op.Inputs[queryInputAgeKey] = int(db.DGUTAgeAll)
+			op.Inputs[queryInputFilterGIDsKey] = []uint32{}
+			op.Inputs[queryInputFilterFileTypeMaskKey] = 0
+		})
+		So(
+			j4MatrixCoverageFailure([]perfreport.Report{report}, []perfreport.Report{missingFilter}),
+			ShouldContainSubstring,
+			"type/owner/age filters",
+		)
+	})
+
 	Convey("active snapshot cleanup evidence accepts baseline and current schema cleanup surfaces", t, func() {
 		baseline := queryMatrixCompleteReport()
 		candidate := queryMatrixCompleteReport()
+		candidate.GitCommit = queryMatrixCandidateCommit
 
 		queryMatrixSetActiveSnapshotCleanupEvidence(
 			&baseline,
@@ -490,6 +577,7 @@ func TestJ4CanonicalMatrix(t *testing.T) {
 		)
 
 		current := queryMatrixCompleteReport()
+		current.GitCommit = queryMatrixCandidateCommit
 		queryMatrixSetActiveSnapshotCleanupEvidence(
 			&current,
 			queryMatrixJ4CurrentCleanupSurfaces(),
@@ -529,6 +617,14 @@ func j4RequiredMatrixOperationSet() map[j4RequiredMatrixOperation]bool {
 	return rows
 }
 
+func j4RequiredMatrixOperationBasic(spec j4RequiredMatrixOperation) j4RequiredMatrixOperation {
+	return j4RequiredMatrixOperation{
+		QueryType:    spec.QueryType,
+		Operation:    spec.Operation,
+		QueryVariant: spec.QueryVariant,
+	}
+}
+
 func queryMatrixRepresentativeOps() []string {
 	return []string{
 		queryOpTreeDirInfoName,
@@ -546,7 +642,8 @@ func queryMatrixRepresentativeOps() []string {
 }
 
 func queryMatrixCompleteReport() perfreport.Report {
-	report := perfreport.NewReport("clickhouse", "", 1, 0)
+	report := perfreport.NewReport("clickhouse", queryMatrixFixtureDir, 1, 0)
+	report.GitCommit = queryMatrixBaselineCommit
 
 	for i, spec := range j4RequiredMatrixOperations() {
 		inputs := map[string]any{
@@ -573,6 +670,26 @@ func queryMatrixCompleteReport() perfreport.Report {
 
 func queryMatrixAddRequiredEvidence(inputs map[string]any, operation string) {
 	switch operation {
+	case queryOpTreeDiskTreeEndName:
+		inputs[queryInputDirKey] = "/"
+	case queryOpTreeDiskTreeColdProviderName:
+		inputs[queryInputDirKey] = j4DisktreePathLustre
+	case queryOpTreeDiskTreeProviderUpdateName:
+		inputs[queryInputDirKey] = j4DisktreePathNFS
+	case queryOpTreeDiskTreeNewName:
+		inputs[queryInputStartDirKey] = "/nfs/t283_imaging/"
+		inputs[queryInputDirsKey] = []string{"/nfs/t283_imaging/run-1/"}
+	case queryOpTreeDiskTreeAncName:
+		inputs[queryInputStartDirKey] = "/"
+		inputs[queryInputDirsKey] = []string{"/", j4DisktreePathLustre, j4DisktreePathNFS}
+	case queryOpTreeDiskTreeVisibleChildName:
+		inputs[queryInputParentDirKey] = "/nfs/t283_imaging/high-fanout/"
+		inputs[queryInputChildDirsKey] = []string{"/nfs/t283_imaging/high-fanout/child-a/"}
+		inputs[queryInputHighFanoutChildCount] = uint64(11_000)
+		inputs[queryInputAgeKey] = int(db.DGUTAgeA1M)
+		inputs[queryInputFilterGIDsKey] = []uint32{14_976}
+		inputs[queryInputFilterFileTypeMaskKey] = int(db.DGUTAFileTypeBam)
+		inputs[queryInputFilterFileTypesKey] = db.DGUTAFileTypeBam.String()
 	case queryOpTreeWhereColdProviderName:
 		inputs[queryInputCacheScope] = queryScopeColdProvider
 	case queryOpTreeWhereFreshName:
@@ -605,16 +722,31 @@ func queryMatrixAddAuditEvidence(inputs map[string]any, surfaces []string) {
 	inputs[queryInputAuditCounts] = counts
 }
 
+func cloneJ4Operation(op perfreport.Operation) perfreport.Operation {
+	op.Inputs = cloneAnyMap(op.Inputs)
+	op.DurationsMS = append([]float64(nil), op.DurationsMS...)
+	op.ReadRows = append([]uint64(nil), op.ReadRows...)
+	op.ReadBytes = append([]uint64(nil), op.ReadBytes...)
+	op.ReadMarks = append([]uint64(nil), op.ReadMarks...)
+	op.ResultCount = append([]uint64(nil), op.ResultCount...)
+
+	return op
+}
+
+func splitJ4Report(report perfreport.Report) (perfreport.Report, perfreport.Report) {
+	left := cloneJ4Report(report)
+	right := cloneJ4Report(report)
+	mid := len(report.Operations) / 2
+	left.Operations = left.Operations[:mid]
+	right.Operations = right.Operations[mid:]
+
+	return left, right
+}
+
 func cloneJ4Report(report perfreport.Report) perfreport.Report {
 	report.Operations = append([]perfreport.Operation(nil), report.Operations...)
 	for i := range report.Operations {
-		op := &report.Operations[i]
-		op.Inputs = cloneAnyMap(op.Inputs)
-		op.DurationsMS = append([]float64(nil), op.DurationsMS...)
-		op.ReadRows = append([]uint64(nil), op.ReadRows...)
-		op.ReadBytes = append([]uint64(nil), op.ReadBytes...)
-		op.ReadMarks = append([]uint64(nil), op.ReadMarks...)
-		op.ResultCount = append([]uint64(nil), op.ResultCount...)
+		report.Operations[i] = cloneJ4Operation(report.Operations[i])
 	}
 
 	return report

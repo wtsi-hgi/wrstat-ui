@@ -1420,6 +1420,13 @@ func TestValidateFinalGates(t *testing.T) {
 		evidence := finalGateTestEvidence(false, false)
 		finalGateReplaceD2AuthOps(&evidence.BaselineQueryReports[0], runSuiteReport)
 		finalGateReplaceD2AuthOps(&evidence.QueryReports[0], runSuiteReport)
+		finalGateSetJ4MatrixReportProvenance(&evidence.BaselineQueryReports[0])
+		finalGateSetJ4MatrixReportProvenance(&evidence.QueryReports[0])
+
+		for _, name := range finalGatePermissionAuthOps() {
+			finalGateRemoveJ6MatrixOperationFromReport(&evidence.BaselineQueryReports[1], name)
+			finalGateRemoveJ6MatrixOperationFromReport(&evidence.QueryReports[1], name)
+		}
 
 		result := ValidateFinalGates(evidence)
 
@@ -2217,12 +2224,21 @@ func TestJ6FinalGates(t *testing.T) {
 }
 
 func finalGateJ6MatrixReport() perfreport.Report {
-	report := perfreport.NewReport("clickhouse", "", finalGateMinRepeats, 0)
+	report := perfreport.NewReport("clickhouse", queryMatrixFixtureDir, finalGateMinRepeats, 0)
+	finalGateSetJ4MatrixReportProvenance(&report)
+
 	for _, spec := range j4RequiredMatrixOperations() {
 		finalGateAddJ6MatrixOp(&report, spec)
 	}
 
 	return report
+}
+
+func finalGateSetJ4MatrixReportProvenance(report *perfreport.Report) {
+	report.GitCommit = queryMatrixBaselineCommit
+	report.InputDir = queryMatrixFixtureDir
+	report.Repeat = finalGateMinRepeats
+	report.Warmup = 0
 }
 
 func finalGateAddJ6MatrixOp(
@@ -2274,13 +2290,8 @@ func finalGateJ6MatrixCheckAfterRemoving(operation string) FinalGateCheck {
 func finalGateRemoveJ6MatrixOperation(evidence *FinalGateEvidence, operation string) {
 	remove := func(reports []perfreport.Report) {
 		for reportIndex := range reports {
-			ops := reports[reportIndex].Operations
-			for opIndex := range ops {
-				if finalGateJ6MatrixOperationMatches(ops[opIndex], operation) {
-					reports[reportIndex].Operations = slices.Delete(ops, opIndex, opIndex+1)
-
-					return
-				}
+			if finalGateRemoveJ6MatrixOperationFromReport(&reports[reportIndex], operation) {
+				return
 			}
 		}
 	}
@@ -2303,6 +2314,18 @@ func finalGateMutateJ6MatrixOperation(
 			}
 		}
 	}
+}
+
+func finalGateRemoveJ6MatrixOperationFromReport(report *perfreport.Report, operation string) bool {
+	for opIndex, op := range report.Operations {
+		if finalGateJ6MatrixOperationMatches(op, operation) {
+			report.Operations = slices.Delete(report.Operations, opIndex, opIndex+1)
+
+			return true
+		}
+	}
+
+	return false
 }
 
 func finalGateJ6MatrixOperationMatches(op perfreport.Operation, operation string) bool {

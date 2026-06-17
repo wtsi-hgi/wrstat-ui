@@ -505,7 +505,7 @@ func TestRunOp(t *testing.T) {
 		activeMounts, ok := report.Operations[0].Inputs["active_mounts"].([]activeMountFreshness)
 		So(ok, ShouldBeTrue)
 		So(activeMounts, ShouldResemble, []activeMountFreshness{
-			{MountPath: "/lustre/", UpdatedAt: updatedAtA.Format(time.RFC3339Nano)},
+			{MountPath: j4DisktreePathLustre, UpdatedAt: updatedAtA.Format(time.RFC3339Nano)},
 			{MountPath: queryTestNFSTeamPath, UpdatedAt: updatedAtB.Format(time.RFC3339Nano)},
 		})
 	})
@@ -644,7 +644,7 @@ func TestRunSuiteOperationSelection(t *testing.T) {
 		So(err, ShouldBeNil)
 		So(report.Operations, ShouldHaveLength, 1)
 		So(report.Operations[0].Name, ShouldEqual, queryOpTreeDiskTreeVisibleChildName)
-		So(report.Operations[0].Inputs["child_dirs"], ShouldResemble, []string{queryOpTestChildADir})
+		So(report.Operations[0].Inputs[queryInputChildDirsKey], ShouldResemble, []string{queryOpTestChildADir})
 	})
 
 	Convey("runSuite records result counts for general final-gate operations", t, func() {
@@ -1667,7 +1667,7 @@ func TestBuildOps(t *testing.T) {
 		newDirsOp := findQueryTestOp(ops, "tree_disktree_endpoint_new_dirs")
 		So(newDirsOp, ShouldNotBeNil)
 		So(newDirsOp.inputs[queryInputStartDirKey], ShouldEqual, queryOpTestRootDir)
-		So(newDirsOp.inputs["dirs"], ShouldResemble, []string{queryOpTestChildADir, queryOpTestChildBDir})
+		So(newDirsOp.inputs[queryInputDirsKey], ShouldResemble, []string{queryOpTestChildADir, queryOpTestChildBDir})
 		So(newDirsOp.inputs["cache_scope"], ShouldEqual, "new_directory_each_repeat")
 		So(newDirsOp.inputs["duration_source"], ShouldEqual, querySourceClickHouseLog)
 		So(newDirsOp.skipWarmup, ShouldBeTrue)
@@ -1685,9 +1685,9 @@ func TestBuildOps(t *testing.T) {
 		ancestorOp := findQueryTestOp(ops, queryOpTreeDiskTreeAncName)
 		So(ancestorOp, ShouldNotBeNil)
 		So(ancestorOp.inputs[queryInputStartDirKey], ShouldEqual, "/")
-		So(ancestorOp.inputs["dirs"], ShouldResemble, []string{
+		So(ancestorOp.inputs[queryInputDirsKey], ShouldResemble, []string{
 			"/",
-			"/nfs/",
+			j4DisktreePathNFS,
 			queryTestNFSTeamPath,
 			queryOpTestRootDir,
 			queryOpTestChildADir,
@@ -1843,7 +1843,7 @@ func TestBuildOps(t *testing.T) {
 		ops := buildOps(qctx, QueryOptions{Repeat: 3, WalkDepth: 2, WalkLimit: 3}, func(string, ...any) {})
 		newDirsOp := findQueryTestOp(ops, "tree_disktree_endpoint_new_dirs")
 		So(newDirsOp, ShouldNotBeNil)
-		So(newDirsOp.inputs["dirs"], ShouldResemble, []string{
+		So(newDirsOp.inputs[queryInputDirsKey], ShouldResemble, []string{
 			queryOpTestChildBDir,
 			queryOpTestGrandDir,
 		})
@@ -1893,7 +1893,7 @@ func TestBuildOps(t *testing.T) {
 		So(report.Operations[0].Name, ShouldEqual, queryOpTreeDiskTreeVisibleChildName)
 		So(report.Operations[0].DurationsMS, ShouldHaveLength, 2)
 		So(report.Operations[0].Inputs["parent_dir"], ShouldEqual, queryOpTestRootDir)
-		So(report.Operations[0].Inputs["child_dirs"], ShouldResemble, []string{
+		So(report.Operations[0].Inputs[queryInputChildDirsKey], ShouldResemble, []string{
 			queryOpTestChildADir,
 			queryOpTestChildBDir,
 		})
@@ -1944,7 +1944,7 @@ func TestBuildOps(t *testing.T) {
 		So(report.Operations, ShouldHaveLength, 1)
 		So(report.Operations[0].DurationsMS, ShouldHaveLength, 1)
 		So(report.Operations[0].ReadRows, ShouldResemble, []uint64{2})
-		So(report.Operations[0].Inputs["child_dirs"], ShouldResemble, []string{queryOpTestRootDir})
+		So(report.Operations[0].Inputs[queryInputChildDirsKey], ShouldResemble, []string{queryOpTestRootDir})
 		So(report.Operations[0].Inputs["child_count"], ShouldEqual, 1)
 		So(report.Operations[0].Inputs["fallback_to_parent_dir"], ShouldBeTrue)
 	})

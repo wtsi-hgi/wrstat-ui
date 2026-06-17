@@ -38,7 +38,8 @@ const (
 	queryInputQueryTypeKey    = "query_type"
 	queryInputQueryVariantKey = "query_variant"
 
-	j4MissingOperation = "missing before/after operation"
+	j4MissingOperation      = "missing before/after operation"
+	j4MinHighFanoutChildren = 10_000
 
 	queryAuditSurfaceLegacyChildren    = "wrstat_children"
 	queryAuditSurfaceLegacyParentFacts = "wrstat_parent_facts"
@@ -53,6 +54,14 @@ const (
 	j4QueryTypeVirtual        = "Virtual/active"
 	j4QueryTypeBasedirs       = "Basedirs/quota"
 	j4QueryTypeMaintenance    = "Maintenance"
+
+	j4DisktreePathRoot       = "root /"
+	j4DisktreePathLustre     = "/lustre/"
+	j4DisktreePathNFS        = "/nfs/"
+	j4DisktreePathMountRoot  = "mount root"
+	j4DisktreePathHighFanout = "high-fanout parent"
+
+	j4DisktreeFilterTypeOwnerAge = "type/owner/age filters"
 )
 
 var errJ4MatrixCoverage = errors.New("j4 matrix coverage failed")
@@ -83,6 +92,19 @@ func j4FirstOperationNamed(
 	return perfreport.Operation{}, false
 }
 
+func j4InferredMountRootPath(path string) bool {
+	path = normalizeRootPath(path)
+	if path == "" || path == "/" || path == j4DisktreePathLustre || path == j4DisktreePathNFS {
+		return false
+	}
+
+	if !strings.HasPrefix(path, j4DisktreePathLustre) && !strings.HasPrefix(path, j4DisktreePathNFS) {
+		return false
+	}
+
+	return len(strings.Split(strings.Trim(path, "/"), "/")) == 2
+}
+
 type j4MatrixDelta struct {
 	QueryType      string
 	Operation      string
@@ -102,6 +124,10 @@ func j4MatrixDeltas(
 	baseline []perfreport.Report,
 	candidate []perfreport.Report,
 ) ([]j4MatrixDelta, error) {
+	if reason := j4MatrixProvenanceFailure(baseline, candidate); reason != "" {
+		return nil, fmt.Errorf("%w: %s", errJ4MatrixCoverage, reason)
+	}
+
 	if reason := j4MatrixCoverageFailure(baseline, candidate); reason != "" {
 		return nil, fmt.Errorf("%w: %s", errJ4MatrixCoverage, reason)
 	}
@@ -135,6 +161,221 @@ func j4MatrixDeltas(
 	return deltas, nil
 }
 
+func j4MatrixProvenanceFailure(baseline []perfreport.Report, candidate []perfreport.Report) string {
+	before, reason := j4MatrixReportSetProvenance("baseline", baseline)
+	if reason != "" {
+		return reason
+	}
+
+	after, reason := j4MatrixReportSetProvenance("candidate", candidate)
+	if reason != "" {
+		return reason
+	}
+
+	if !before.observed || !after.observed {
+		return ""
+	}
+
+	return j4MatrixCrossProvenanceMismatch(before, after)
+}
+
+func j4MatrixReportSetProvenance(role string, reports []perfreport.Report) (j4ReportProvenance, string) {
+	var out j4ReportProvenance
+
+	for _, report := range reports {
+		if !j4ReportHasMatrixOperation(report) {
+			continue
+		}
+
+		current, reason := j4ReportProvenanceForReport(role, report)
+		if reason != "" {
+			return j4ReportProvenance{}, reason
+		}
+
+		if !out.observed {
+			out = current
+
+			continue
+		}
+
+		if reason := j4ReportProvenanceMismatch(role, out, current); reason != "" {
+			return j4ReportProvenance{}, reason
+		}
+	}
+
+	return out, ""
+}
+
+func j4ReportHasMatrixOperation(report perfreport.Report) bool {
+	for _, spec := range j4RequiredMatrixOperations() {
+		for _, op := range report.Operations {
+			if j4OperationMatchesSpec(op, spec) {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+func j4Required(queryType string, operation string, variant string) j4RequiredMatrixOperation {
+	return j4RequiredMatrixOperation{
+		QueryType:    queryType,
+		Operation:    operation,
+		QueryVariant: variant,
+	}
+}
+
+func j4OperationMatchesPathClass(op perfreport.Operation, pathClass string) bool {
+	if pathClass == "" {
+		return true
+	}
+
+	paths := j4OperationEvidencePaths(op)
+
+	switch pathClass {
+	case j4DisktreePathRoot:
+		return slices.Contains(paths, "/")
+	case j4DisktreePathLustre:
+		return slices.Contains(paths, j4DisktreePathLustre)
+	case j4DisktreePathNFS:
+		return slices.Contains(paths, j4DisktreePathNFS)
+	case j4DisktreePathMountRoot:
+		return slices.ContainsFunc(paths, j4InferredMountRootPath)
+	case j4DisktreePathHighFanout:
+		return j4OperationMatchesHighFanout(op, j4MinHighFanoutChildren)
+	default:
+		return false
+	}
+}
+
+func j4OperationEvidencePaths(op perfreport.Operation) []string {
+	var paths []string
+
+	for _, key := range []string{queryInputDirKey, queryInputStartDirKey, queryInputParentDirKey} {
+		if path := normalizeRootPath(stringInput(op.Inputs, key)); path != "" {
+			paths = append(paths, path)
+		}
+	}
+
+	for _, key := range []string{queryInputDirsKey, queryInputChildDirsKey} {
+		for _, path := range stringSliceInput(op.Inputs, key) {
+			if normalised := normalizeRootPath(path); normalised != "" {
+				paths = append(paths, normalised)
+			}
+		}
+	}
+
+	return paths
+}
+
+func j4OperationMatchesHighFanout(op perfreport.Operation, minChildren uint64) bool {
+	return minChildren == 0 || uint64Input(op.Inputs, queryInputHighFanoutChildCount) >= minChildren
+}
+
+func j4OperationMatchesFilterShape(op perfreport.Operation, filterShape string) bool {
+	if filterShape == "" {
+		return true
+	}
+
+	switch filterShape {
+	case j4DisktreeFilterTypeOwnerAge:
+		return j4OperationHasTypeFilter(op) &&
+			j4OperationHasOwnerFilter(op) &&
+			j4OperationHasAgeFilter(op)
+	default:
+		return false
+	}
+}
+
+func j4OperationHasTypeFilter(op perfreport.Operation) bool {
+	return uint64Input(op.Inputs, queryInputFilterFileTypeMaskKey) > 0
+}
+
+func j4OperationHasOwnerFilter(op perfreport.Operation) bool {
+	return len(uint64SliceInput(op.Inputs, queryInputFilterGIDsKey)) > 0 ||
+		len(uint64SliceInput(op.Inputs, queryInputFilterUIDsKey)) > 0
+}
+
+func j4OperationHasAgeFilter(op perfreport.Operation) bool {
+	return uint64Input(op.Inputs, queryInputAgeKey) > 0
+}
+
+func j4ReportProvenanceForReport(role string, report perfreport.Report) (j4ReportProvenance, string) {
+	if report.Backend == "" {
+		return j4ReportProvenance{}, role + " missing backend"
+	}
+
+	if report.GitCommit == "" {
+		return j4ReportProvenance{}, role + " missing git_commit"
+	}
+
+	if strings.Contains(strings.ToLower(report.GitCommit), "dirty") {
+		return j4ReportProvenance{}, role + " dirty git_commit " + report.GitCommit
+	}
+
+	if report.InputDir == "" {
+		return j4ReportProvenance{}, role + " missing input_dir"
+	}
+
+	if report.Repeat <= 0 {
+		return j4ReportProvenance{}, role + " invalid repeat"
+	}
+
+	return j4ReportProvenance{
+		observed:  true,
+		backend:   report.Backend,
+		gitCommit: report.GitCommit,
+		inputDir:  report.InputDir,
+		repeat:    report.Repeat,
+		warmup:    report.Warmup,
+	}, ""
+}
+
+func j4ReportProvenanceMismatch(role string, want j4ReportProvenance, got j4ReportProvenance) string {
+	if want.backend != got.backend {
+		return fmt.Sprintf("%s mixed backend: %s vs %s", role, want.backend, got.backend)
+	}
+
+	if want.gitCommit != got.gitCommit {
+		return fmt.Sprintf("%s mixed git_commit: %s vs %s", role, want.gitCommit, got.gitCommit)
+	}
+
+	if want.inputDir != got.inputDir {
+		return fmt.Sprintf("%s mixed input_dir: %s vs %s", role, want.inputDir, got.inputDir)
+	}
+
+	if want.repeat != got.repeat {
+		return fmt.Sprintf("%s mixed repeat: %d vs %d", role, want.repeat, got.repeat)
+	}
+
+	if want.warmup != got.warmup {
+		return fmt.Sprintf("%s mixed warmup: %d vs %d", role, want.warmup, got.warmup)
+	}
+
+	return ""
+}
+
+func j4MatrixCrossProvenanceMismatch(before j4ReportProvenance, after j4ReportProvenance) string {
+	if before.backend != after.backend {
+		return fmt.Sprintf("baseline/candidate backend mismatch: %s vs %s", before.backend, after.backend)
+	}
+
+	if before.inputDir != after.inputDir {
+		return fmt.Sprintf("baseline/candidate input_dir mismatch: %s vs %s", before.inputDir, after.inputDir)
+	}
+
+	if before.repeat != after.repeat {
+		return fmt.Sprintf("baseline/candidate repeat mismatch: %d vs %d", before.repeat, after.repeat)
+	}
+
+	if before.warmup != after.warmup {
+		return fmt.Sprintf("baseline/candidate warmup mismatch: %d vs %d", before.warmup, after.warmup)
+	}
+
+	return ""
+}
+
 func j4MatrixCoverageFailure(baseline []perfreport.Report, candidate []perfreport.Report) string {
 	for _, spec := range j4RequiredMatrixOperations() {
 		if _, ok, beforeReason := j4FirstValidOperationMatching(baseline, spec); !ok {
@@ -166,57 +407,89 @@ func j4CanonicalQueryTypes() []string {
 
 func j4RequiredMatrixOperations() []j4RequiredMatrixOperation {
 	return []j4RequiredMatrixOperation{
-		{j4QueryTypeExactDirectory, queryOpTreeDirInfoName, "DirInfo selected directory"},
-		{j4QueryTypeExactDirectory, queryOpDirInfoBroadName, "DirInfo broad"},
-		{j4QueryTypeExactDirectory, queryOpDirInfoFilteredName, "DirInfo filtered"},
-		{j4QueryTypeExactDirectory, queryOpAuthTreeName, "DirInfo auth restricted"},
-		{j4QueryTypeBatchDirectory, queryOpDirInfosBroadName, "DirInfos broad"},
-		{j4QueryTypeBatchDirectory, queryOpDirInfosFilteredName, "DirInfos filtered"},
-		{j4QueryTypeChildren, queryOpChildrenName, "Children"},
-		{j4QueryTypeChildren, queryOpDirsHaveChildrenBroadName, "DirsHaveChildren broad"},
-		{j4QueryTypeChildren, queryOpDirsHaveChildrenFilteredName, "DirsHaveChildren filtered"},
-		{j4QueryTypeSubtree, queryOpTreeWhereName, "Where same provider directory"},
-		{j4QueryTypeSubtree, queryOpTreeWhereColdName, "Where cold then cached"},
-		{j4QueryTypeSubtree, queryOpTreeWhereColdProviderName, "Where cold provider"},
-		{j4QueryTypeSubtree, queryOpTreeWhereProviderUpdateName, "Where provider update cold cache"},
-		{j4QueryTypeSubtree, queryOpAuthWhereRestrictedName, "Where auth restricted"},
-		{j4QueryTypeSubtree, queryOpNoAuthWhereName, "Where no auth"},
-		{j4QueryTypeSubtree, queryOpTreeWhereFreshName, "Where fresh provider"},
-		{j4QueryTypeSubtree, queryOpWhereWholeMountName, queryOpWhereWholeMountName},
-		{j4QueryTypeSubtree, queryOpWhereFilteredWholeMountName, queryOpWhereFilteredWholeMountName},
-		{j4QueryTypeDisktree, queryOpTreeDiskTreeEndName, "Disktree same provider directory"},
-		{j4QueryTypeDisktree, queryOpTreeDiskTreeColdProviderName, "Disktree cold provider"},
-		{j4QueryTypeDisktree, queryOpTreeDiskTreeProviderUpdateName, "Disktree provider update cold cache"},
-		{j4QueryTypeDisktree, queryOpTreeDiskTreeNewName, "Disktree new directories"},
-		{j4QueryTypeDisktree, queryOpTreeDiskTreeAncName, "Disktree ancestor directories"},
-		{j4QueryTypeDisktree, queryOpTreeDiskTreeVisibleChildName, "Disktree visible child directories"},
-		{j4QueryTypeFileAPI, queryOpFilesListDirName, "ListDir"},
-		{j4QueryTypeFileAPI, queryOpFilesIsDirName, "IsDir"},
-		{j4QueryTypeFileAPI, queryOpFilesStatPathName, "StatPath"},
-		{j4QueryTypeFileAPI, queryOpPermissionCheckName, "PermissionPath and PermissionAnyInDir"},
-		{j4QueryTypeGlob, queryOpGlobCaseAName, "FindByGlob case A"},
-		{j4QueryTypeGlob, queryOpGlobCaseBName, "FindByGlob case B"},
-		{j4QueryTypeGlob, "glob_case_C", "FindByGlob case C"},
-		{j4QueryTypeGlob, "glob_case_D", "FindByGlob case D"},
-		{j4QueryTypeGlob, "glob_case_E", "FindByGlob case E"},
-		{j4QueryTypeGlob, "glob_case_F", "FindByGlob case F"},
-		{j4QueryTypeGlob, "glob_case_G", "FindByGlob case G"},
-		{j4QueryTypeGlob, "glob_case_H", "FindByGlob case H"},
-		{j4QueryTypeGlob, queryOpCountGlobCaseAName, "CountByGlob case A"},
-		{j4QueryTypeGlob, queryOpFindGlobExtensionDotfileName, "FindByGlob extension dotfile"},
-		{j4QueryTypeVirtual, queryOpVirtualChildrenName, "virtual children filtered"},
-		{j4QueryTypeVirtual, queryOpVirtualDirInfoName, "active virtual root summary filtered"},
-		{j4QueryTypeVirtual, queryOpVirtualActivePrefixRollupName, "active-prefix rollups"},
-		{j4QueryTypeBasedirs, queryOpBasedirsGroupUsageName, "GroupUsage"},
-		{j4QueryTypeBasedirs, queryOpBasedirsUserUsageName, "UserUsage"},
-		{j4QueryTypeBasedirs, queryOpBasedirsGroupSubDirsName, "GroupSubDirs"},
-		{j4QueryTypeBasedirs, queryOpBasedirsUserSubDirsName, "UserSubDirs"},
-		{j4QueryTypeBasedirs, queryOpBasedirsHistoryName, "history"},
-		{j4QueryTypeMaintenance, queryOpImportReadinessPublishName, "import readiness/publish"},
-		{j4QueryTypeMaintenance, queryOpActiveSnapshotCleanupName, "active-snapshot cleanup"},
-		{j4QueryTypeMaintenance, queryOpInfoName, "Info"},
-		{j4QueryTypeMaintenance, queryOpMountTimestampsName, "active mount freshness"},
-		{j4QueryTypeMaintenance, queryOpBasedirsInfoName, "basedirs Info"},
+		j4Required(j4QueryTypeExactDirectory, queryOpTreeDirInfoName, "DirInfo selected directory"),
+		j4Required(j4QueryTypeExactDirectory, queryOpDirInfoBroadName, "DirInfo broad"),
+		j4Required(j4QueryTypeExactDirectory, queryOpDirInfoFilteredName, "DirInfo filtered"),
+		j4Required(j4QueryTypeExactDirectory, queryOpAuthTreeName, "DirInfo auth restricted"),
+		j4Required(j4QueryTypeBatchDirectory, queryOpDirInfosBroadName, "DirInfos broad"),
+		j4Required(j4QueryTypeBatchDirectory, queryOpDirInfosFilteredName, "DirInfos filtered"),
+		j4Required(j4QueryTypeChildren, queryOpChildrenName, "Children"),
+		j4Required(j4QueryTypeChildren, queryOpDirsHaveChildrenBroadName, "DirsHaveChildren broad"),
+		j4Required(j4QueryTypeChildren, queryOpDirsHaveChildrenFilteredName, "DirsHaveChildren filtered"),
+		j4Required(j4QueryTypeSubtree, queryOpTreeWhereName, "Where same provider directory"),
+		j4Required(j4QueryTypeSubtree, queryOpTreeWhereColdName, "Where cold then cached"),
+		j4Required(j4QueryTypeSubtree, queryOpTreeWhereColdProviderName, "Where cold provider"),
+		j4Required(j4QueryTypeSubtree, queryOpTreeWhereProviderUpdateName, "Where provider update cold cache"),
+		j4Required(j4QueryTypeSubtree, queryOpAuthWhereRestrictedName, "Where auth restricted"),
+		j4Required(j4QueryTypeSubtree, queryOpNoAuthWhereName, "Where no auth"),
+		j4Required(j4QueryTypeSubtree, queryOpTreeWhereFreshName, "Where fresh provider"),
+		j4Required(j4QueryTypeSubtree, queryOpWhereWholeMountName, queryOpWhereWholeMountName),
+		j4Required(j4QueryTypeSubtree, queryOpWhereFilteredWholeMountName, queryOpWhereFilteredWholeMountName),
+		{
+			QueryType:    j4QueryTypeDisktree,
+			Operation:    queryOpTreeDiskTreeEndName,
+			QueryVariant: "Disktree same provider directory",
+			PathClass:    j4DisktreePathRoot,
+		},
+		{
+			QueryType:    j4QueryTypeDisktree,
+			Operation:    queryOpTreeDiskTreeColdProviderName,
+			QueryVariant: "Disktree cold provider",
+			PathClass:    j4DisktreePathLustre,
+		},
+		{
+			QueryType:    j4QueryTypeDisktree,
+			Operation:    queryOpTreeDiskTreeProviderUpdateName,
+			QueryVariant: "Disktree provider update cold cache",
+			PathClass:    j4DisktreePathNFS,
+		},
+		{
+			QueryType:    j4QueryTypeDisktree,
+			Operation:    queryOpTreeDiskTreeNewName,
+			QueryVariant: "Disktree new directories",
+			PathClass:    j4DisktreePathMountRoot,
+		},
+		{
+			QueryType:    j4QueryTypeDisktree,
+			Operation:    queryOpTreeDiskTreeAncName,
+			QueryVariant: "Disktree ancestor directories",
+			PathClass:    j4DisktreePathRoot,
+		},
+		{
+			QueryType:             j4QueryTypeDisktree,
+			Operation:             queryOpTreeDiskTreeVisibleChildName,
+			QueryVariant:          "Disktree visible child directories",
+			PathClass:             j4DisktreePathHighFanout,
+			FilterShape:           j4DisktreeFilterTypeOwnerAge,
+			MinHighFanoutChildren: j4MinHighFanoutChildren,
+		},
+		j4Required(j4QueryTypeFileAPI, queryOpFilesListDirName, "ListDir"),
+		j4Required(j4QueryTypeFileAPI, queryOpFilesIsDirName, "IsDir"),
+		j4Required(j4QueryTypeFileAPI, queryOpFilesStatPathName, "StatPath"),
+		j4Required(j4QueryTypeFileAPI, queryOpPermissionCheckName, "PermissionPath and PermissionAnyInDir"),
+		j4Required(j4QueryTypeGlob, queryOpGlobCaseAName, "FindByGlob case A"),
+		j4Required(j4QueryTypeGlob, queryOpGlobCaseBName, "FindByGlob case B"),
+		j4Required(j4QueryTypeGlob, "glob_case_C", "FindByGlob case C"),
+		j4Required(j4QueryTypeGlob, "glob_case_D", "FindByGlob case D"),
+		j4Required(j4QueryTypeGlob, "glob_case_E", "FindByGlob case E"),
+		j4Required(j4QueryTypeGlob, "glob_case_F", "FindByGlob case F"),
+		j4Required(j4QueryTypeGlob, "glob_case_G", "FindByGlob case G"),
+		j4Required(j4QueryTypeGlob, "glob_case_H", "FindByGlob case H"),
+		j4Required(j4QueryTypeGlob, queryOpCountGlobCaseAName, "CountByGlob case A"),
+		j4Required(j4QueryTypeGlob, queryOpFindGlobExtensionDotfileName, "FindByGlob extension dotfile"),
+		j4Required(j4QueryTypeVirtual, queryOpVirtualChildrenName, "virtual children filtered"),
+		j4Required(j4QueryTypeVirtual, queryOpVirtualDirInfoName, "active virtual root summary filtered"),
+		j4Required(j4QueryTypeVirtual, queryOpVirtualActivePrefixRollupName, "active-prefix rollups"),
+		j4Required(j4QueryTypeBasedirs, queryOpBasedirsGroupUsageName, "GroupUsage"),
+		j4Required(j4QueryTypeBasedirs, queryOpBasedirsUserUsageName, "UserUsage"),
+		j4Required(j4QueryTypeBasedirs, queryOpBasedirsGroupSubDirsName, "GroupSubDirs"),
+		j4Required(j4QueryTypeBasedirs, queryOpBasedirsUserSubDirsName, "UserSubDirs"),
+		j4Required(j4QueryTypeBasedirs, queryOpBasedirsHistoryName, "history"),
+		j4Required(j4QueryTypeMaintenance, queryOpImportReadinessPublishName, "import readiness/publish"),
+		j4Required(j4QueryTypeMaintenance, queryOpActiveSnapshotCleanupName, "active-snapshot cleanup"),
+		j4Required(j4QueryTypeMaintenance, queryOpInfoName, "Info"),
+		j4Required(j4QueryTypeMaintenance, queryOpMountTimestampsName, "active mount freshness"),
+		j4Required(j4QueryTypeMaintenance, queryOpBasedirsInfoName, "basedirs Info"),
 	}
 }
 
@@ -225,20 +498,19 @@ func j4FirstValidOperationMatching(
 	spec j4RequiredMatrixOperation,
 ) (perfreport.Operation, bool, string) {
 	ops := j4OperationsMatching(reports, spec)
-	firstReason := j4MissingOperation
-
-	for _, op := range ops {
-		reason := j4OperationMetricsFailure(op)
-		if reason == "" {
-			return op, true, ""
-		}
-
-		if firstReason == j4MissingOperation {
-			firstReason = reason
-		}
+	if len(ops) == 0 {
+		return perfreport.Operation{}, false, j4MissingOperation
 	}
 
-	return perfreport.Operation{}, false, firstReason
+	if len(ops) > 1 {
+		return perfreport.Operation{}, false, fmt.Sprintf("duplicate matching rows: %d", len(ops))
+	}
+
+	if reason := j4OperationMetricsFailure(ops[0]); reason != "" {
+		return perfreport.Operation{}, false, reason
+	}
+
+	return ops[0], true, ""
 }
 
 func j4OperationsMatching(
@@ -261,7 +533,10 @@ func j4OperationsMatching(
 func j4OperationMatchesSpec(op perfreport.Operation, spec j4RequiredMatrixOperation) bool {
 	return op.Name == spec.Operation &&
 		stringInput(op.Inputs, queryInputQueryTypeKey) == spec.QueryType &&
-		stringInput(op.Inputs, queryInputQueryVariantKey) == spec.QueryVariant
+		stringInput(op.Inputs, queryInputQueryVariantKey) == spec.QueryVariant &&
+		j4OperationMatchesPathClass(op, spec.PathClass) &&
+		j4OperationMatchesFilterShape(op, spec.FilterShape) &&
+		j4OperationMatchesHighFanout(op, spec.MinHighFanoutChildren)
 }
 
 func j4OperationMetricsFailure(op perfreport.Operation) string {
@@ -529,7 +804,23 @@ func j4ActivePrefixRollupEvidenceFailure(op perfreport.Operation) string {
 }
 
 func j4MatrixOperationLabel(spec j4RequiredMatrixOperation) string {
-	return fmt.Sprintf("%s %s (%s)", spec.QueryType, spec.QueryVariant, spec.Operation)
+	details := []string{spec.Operation}
+	if spec.PathClass != "" {
+		details = append(details, spec.PathClass)
+	}
+
+	if spec.FilterShape != "" {
+		details = append(details, spec.FilterShape)
+	}
+
+	if spec.MinHighFanoutChildren > 0 {
+		details = append(
+			details,
+			fmt.Sprintf("%s>=%d", queryInputHighFanoutChildCount, spec.MinHighFanoutChildren),
+		)
+	}
+
+	return fmt.Sprintf("%s %s (%s)", spec.QueryType, spec.QueryVariant, strings.Join(details, "; "))
 }
 
 func j4MatrixCorrectnessFailure(baseline []perfreport.Report, candidate []perfreport.Report) string {
@@ -615,9 +906,21 @@ type activeSnapshotCleanupSchema struct {
 }
 
 type j4RequiredMatrixOperation struct {
-	QueryType    string
-	Operation    string
-	QueryVariant string
+	QueryType             string
+	Operation             string
+	QueryVariant          string
+	PathClass             string
+	FilterShape           string
+	MinHighFanoutChildren uint64
+}
+
+type j4ReportProvenance struct {
+	observed  bool
+	backend   string
+	gitCommit string
+	inputDir  string
+	repeat    int
+	warmup    int
 }
 
 // ExplainFindByGlobAvoidsFilePathScan reports whether a full-path glob plan
