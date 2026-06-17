@@ -58,6 +58,7 @@ const (
 	queryInputCacheScope                  = "cache_scope"
 	queryInputDirsKey                     = "dirs"
 	queryInputChildDirsKey                = "child_dirs"
+	queryInputParentChildCountKey         = "parent_child_count"
 	queryInputAuditCounts                 = "audit_counts"
 	queryInputAuditSurfaces               = "audit_surfaces"
 	queryInputFilterFileTypeMaskKey       = "filter_file_type_mask"
@@ -191,6 +192,7 @@ var (
 type QueryOptions struct {
 	Dir           string
 	AncestorDir   string
+	InputDir      string
 	Ops           []string
 	UID           uint32
 	GIDs          []uint32
@@ -225,7 +227,7 @@ func Query(
 		return perfreport.Report{}, err
 	}
 
-	report := perfreport.NewReport("clickhouse", "", opts.Repeat, opts.Warmup)
+	report := perfreport.NewReport("clickhouse", opts.InputDir, opts.Repeat, opts.Warmup)
 
 	if err := runSuite(&report, qctx, opts, printf); err != nil {
 		return perfreport.Report{}, err
@@ -1683,6 +1685,7 @@ func opTreeDiskTreeEndpointVisibleChildDirs(qctx queryContext) op {
 			timedDirs, fallback = visibleChildDirsForRepeats(childDirs, qctx.dir, repeat)
 			inputs[queryInputChildDirsKey] = timedDirs
 			inputs["child_count"] = len(timedDirs)
+			inputs[queryInputParentChildCountKey] = uint64(len(childDirs))
 			inputs["fallback_to_parent_dir"] = fallback
 			i = 0
 

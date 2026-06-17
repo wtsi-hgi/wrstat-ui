@@ -270,7 +270,7 @@ func j4OperationEvidencePaths(op perfreport.Operation) []string {
 }
 
 func j4OperationMatchesHighFanout(op perfreport.Operation, minChildren uint64) bool {
-	return minChildren == 0 || uint64Input(op.Inputs, queryInputHighFanoutChildCount) >= minChildren
+	return minChildren == 0 || uint64Input(op.Inputs, queryInputParentChildCountKey) >= minChildren
 }
 
 func j4OperationMatchesFilterShape(op perfreport.Operation, filterShape string) bool {
@@ -816,7 +816,7 @@ func j4MatrixOperationLabel(spec j4RequiredMatrixOperation) string {
 	if spec.MinHighFanoutChildren > 0 {
 		details = append(
 			details,
-			fmt.Sprintf("%s>=%d", queryInputHighFanoutChildCount, spec.MinHighFanoutChildren),
+			fmt.Sprintf("%s>=%d", queryInputParentChildCountKey, spec.MinHighFanoutChildren),
 		)
 	}
 

@@ -51,6 +51,7 @@ func TestClickHousePerfQueryFlags(t *testing.T) {
 		So(flags.Lookup("walk-limit"), ShouldNotBeNil)
 		So(flags.Lookup("ancestor-dir"), ShouldNotBeNil)
 		So(flags.Lookup("ancestor-limit"), ShouldNotBeNil)
+		So(flags.Lookup("input-dir"), ShouldNotBeNil)
 		So(flags.Lookup("ops"), ShouldNotBeNil)
 		So(flags.Lookup("tree-gids"), ShouldNotBeNil)
 		So(flags.Lookup("tree-uids"), ShouldNotBeNil)
@@ -97,6 +98,36 @@ func TestClickHouseNavIndexConfigFlag(t *testing.T) {
 		})
 		So(err, ShouldBeNil)
 		So(cfg.NavIndex, ShouldBeTrue)
+	})
+}
+
+func TestClickHousePerfQueryInputDir(t *testing.T) {
+	Convey("clickhouse-perf query records an explicit query evidence input label", t, func() {
+		resetClickHousePerfConnectionForTest()
+
+		chPerf.inputDir = "/fixtures/clickhouse-query"
+
+		So(
+			chPerfQueryInputDir(clickhouse.Config{MountPoints: []string{"/nfs/team/"}}),
+			ShouldEqual,
+			"/fixtures/clickhouse-query",
+		)
+	})
+
+	Convey("clickhouse-perf query derives a non-empty input label from mount points", t, func() {
+		resetClickHousePerfConnectionForTest()
+
+		So(
+			chPerfQueryInputDir(clickhouse.Config{MountPoints: []string{"/nfs/team/", "/lustre/project/"}}),
+			ShouldEqual,
+			"mounts:/nfs/team/,/lustre/project/",
+		)
+	})
+
+	Convey("clickhouse-perf query falls back to active mounts when no mount file is configured", t, func() {
+		resetClickHousePerfConnectionForTest()
+
+		So(chPerfQueryInputDir(clickhouse.Config{}), ShouldEqual, "clickhouse-active-mounts")
 	})
 }
 
@@ -359,8 +390,8 @@ func TestE3PerfDocumentedCommandFlags(t *testing.T) {
 		)
 		assertDocumentedLongFlags(chPerfQueryCmd,
 			"clickhouse-dsn", "clickhouse-database", "owners", "mounts",
-			"nav-index", "repeat", "warmup", "uid", "gids", "dir", "tree-gids",
-			"tree-uids", "tree-types", "json",
+			"nav-index", "repeat", "warmup", "uid", "gids", "dir", "input-dir",
+			"tree-gids", "tree-uids", "tree-types", "json",
 		)
 		assertDocumentedLongFlags(chPerfRestCmd,
 			"clickhouse-dsn", "clickhouse-database", "owners", "mounts",
@@ -449,6 +480,7 @@ func resetClickHousePerfConnectionForTest() {
 	origDSN := chPerf.dsn
 	origDB := chPerf.database
 	origMountpoints := chPerf.mountpoints
+	origInputDir := chPerf.inputDir
 	origNavIndex := chPerf.navIndex
 	origRepeat := chPerf.repeat
 	origWarmup := chPerf.warmup
@@ -469,6 +501,7 @@ func resetClickHousePerfConnectionForTest() {
 	chPerf.dsn = ""
 	chPerf.database = ""
 	chPerf.mountpoints = ""
+	chPerf.inputDir = ""
 	chPerf.navIndex = false
 	_ = os.Unsetenv(envClickhouseDSN)
 	_ = os.Unsetenv(envClickhouseDatabase)
@@ -477,6 +510,7 @@ func resetClickHousePerfConnectionForTest() {
 		chPerf.dsn = origDSN
 		chPerf.database = origDB
 		chPerf.mountpoints = origMountpoints
+		chPerf.inputDir = origInputDir
 		chPerf.navIndex = origNavIndex
 		chPerf.repeat = origRepeat
 		chPerf.warmup = origWarmup

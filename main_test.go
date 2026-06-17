@@ -915,7 +915,7 @@ func TestClickHousePerfQuery(t *testing.T) {
 		So(report.OS, ShouldNotBeBlank)
 		So(report.Arch, ShouldNotBeBlank)
 		So(report.StartedAt, ShouldNotBeBlank)
-		So(report.InputDir, ShouldEqual, "")
+		So(report.InputDir, ShouldEqual, fixture.statsInputDir)
 		So(report.Repeat, ShouldEqual, 2)
 		So(report.Warmup, ShouldEqual, 1)
 		So(len(report.Operations), ShouldBeGreaterThanOrEqualTo, 10)
@@ -1080,6 +1080,8 @@ func runClickHousePerfQuery(
 		fixture.mountsFile,
 		"--dir",
 		queryDir,
+		"--input-dir",
+		fixture.statsInputDir,
 		"--uid",
 		fixture.queryReportUID,
 		"--gids",

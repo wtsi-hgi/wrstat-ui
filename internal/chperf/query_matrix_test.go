@@ -497,12 +497,12 @@ func TestJ4CanonicalMatrix(t *testing.T) {
 
 		missingHighFanout := cloneJ4Report(report)
 		mutateJ4ReportOperation(&missingHighFanout, queryOpTreeDiskTreeVisibleChildName, func(op *perfreport.Operation) {
-			op.Inputs[queryInputHighFanoutChildCount] = uint64(12)
+			op.Inputs[queryInputParentChildCountKey] = uint64(12)
 		})
 		So(
 			j4MatrixCoverageFailure([]perfreport.Report{report}, []perfreport.Report{missingHighFanout}),
 			ShouldContainSubstring,
-			queryInputHighFanoutChildCount,
+			queryInputParentChildCountKey,
 		)
 
 		missingFilter := cloneJ4Report(report)
@@ -685,7 +685,7 @@ func queryMatrixAddRequiredEvidence(inputs map[string]any, operation string) {
 	case queryOpTreeDiskTreeVisibleChildName:
 		inputs[queryInputParentDirKey] = "/nfs/t283_imaging/high-fanout/"
 		inputs[queryInputChildDirsKey] = []string{"/nfs/t283_imaging/high-fanout/child-a/"}
-		inputs[queryInputHighFanoutChildCount] = uint64(11_000)
+		inputs[queryInputParentChildCountKey] = uint64(11_000)
 		inputs[queryInputAgeKey] = int(db.DGUTAgeA1M)
 		inputs[queryInputFilterGIDsKey] = []uint32{14_976}
 		inputs[queryInputFilterFileTypeMaskKey] = int(db.DGUTAFileTypeBam)

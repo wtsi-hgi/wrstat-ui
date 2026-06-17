@@ -1898,6 +1898,7 @@ func TestBuildOps(t *testing.T) {
 			queryOpTestChildBDir,
 		})
 		So(report.Operations[0].Inputs["child_count"], ShouldEqual, 2)
+		So(report.Operations[0].Inputs[queryInputParentChildCountKey], ShouldEqual, uint64(2))
 		So(report.Operations[0].Inputs["cache_scope"], ShouldEqual, queryScopeVisibleChildDirs)
 		So(report.Operations[0].Inputs["duration_source"], ShouldEqual, querySourceClickHouseLog)
 		So(report.Operations[0].ReadRows, ShouldResemble, []uint64{2, 2})

@@ -125,6 +125,7 @@ type chPerfFlags struct {
 
 	dir       string
 	ancDir    string
+	inputDir  string
 	ops       []string
 	uid       uint32
 	gids      string
@@ -242,6 +243,8 @@ func addCHPerfQueryFlags() {
 		"directory to query (default: auto-select)")
 	f.StringVar(&chPerf.ancDir, "ancestor-dir", "/",
 		"ancestor directory for root/click-through Disktree timings")
+	f.StringVar(&chPerf.inputDir, "input-dir", "",
+		"dataset or fixture label to record in query report provenance")
 	f.StringSliceVar(&chPerf.ops, "ops", nil,
 		"comma-separated query operation names to run (default: all)")
 	f.Uint32Var(&chPerf.uid, "uid", 0, "UID for permission query")
@@ -328,7 +331,7 @@ func runCHPerfQuery() error {
 		return err
 	}
 
-	opts, err := chPerfQueryOptions()
+	opts, err := chPerfQueryOptions(cfg)
 	if err != nil {
 		return err
 	}
@@ -454,7 +457,7 @@ func chPerfRestFilterValue(namedValue string, idValue string) string {
 	return idValue
 }
 
-func chPerfQueryOptions() (chperf.QueryOptions, error) {
+func chPerfQueryOptions(cfg clickhouse.Config) (chperf.QueryOptions, error) {
 	treeFilter, err := parsePerfTreeFilter(chPerf.treeGIDs, chPerf.treeUIDs, chPerf.treeFT, chPerf.treeTypes)
 	if err != nil {
 		return chperf.QueryOptions{}, err
@@ -463,6 +466,7 @@ func chPerfQueryOptions() (chperf.QueryOptions, error) {
 	return chperf.QueryOptions{
 		Dir:           chPerf.dir,
 		AncestorDir:   chPerf.ancDir,
+		InputDir:      chPerfQueryInputDir(cfg),
 		Ops:           chPerf.ops,
 		UID:           chPerf.uid,
 		GIDs:          parseGIDs(chPerf.gids),
@@ -474,6 +478,18 @@ func chPerfQueryOptions() (chperf.QueryOptions, error) {
 		WalkLimit:     chPerf.walkLimit,
 		AncestorLimit: chPerf.ancLimit,
 	}, nil
+}
+
+func chPerfQueryInputDir(cfg clickhouse.Config) string {
+	if inputDir := strings.TrimSpace(chPerf.inputDir); inputDir != "" {
+		return inputDir
+	}
+
+	if len(cfg.MountPoints) == 0 {
+		return "clickhouse-active-mounts"
+	}
+
+	return "mounts:" + strings.Join(cfg.MountPoints, ",")
 }
 
 func parsePerfTreeFilter(gidsRaw, uidsRaw, ftRaw, typesRaw string) (*db.Filter, error) {
