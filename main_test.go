@@ -1021,7 +1021,10 @@ func TestClickHousePerfQuery(t *testing.T) {
 		coldCachedWhere := findReportOperation(report.Operations, perfOpTreeWhereColdCached)
 		So(coldCachedWhere, ShouldNotBeNil)
 		So(coldCachedWhere.Inputs["cache_scope"], ShouldEqual, "same_provider_cold_then_warm")
-		So(coldCachedWhere.Inputs["duration_source"], ShouldEqual, "wall")
+		So(coldCachedWhere.Inputs["duration_source"], ShouldEqual, "clickhouse_query_log")
+		So(coldCachedWhere.ReadRows, ShouldNotBeEmpty)
+		So(coldCachedWhere.ReadBytes, ShouldNotBeEmpty)
+		So(coldCachedWhere.ReadMarks, ShouldNotBeEmpty)
 
 		newDirs := findReportOperation(report.Operations, perfOpTreeDiskTreeNewDirs)
 		So(newDirs, ShouldNotBeNil)
@@ -1033,7 +1036,10 @@ func TestClickHousePerfQuery(t *testing.T) {
 		So(visibleChildDirs.Inputs["parent_dir"], ShouldEqual, treeDirInfo.Inputs["dir"])
 		So(visibleChildDirs.Inputs["child_count"], ShouldBeGreaterThan, float64(0))
 		So(visibleChildDirs.Inputs["cache_scope"], ShouldEqual, "visible_child_directory_each_repeat")
-		So(visibleChildDirs.Inputs["duration_source"], ShouldEqual, "wall")
+		So(visibleChildDirs.Inputs["duration_source"], ShouldEqual, "clickhouse_query_log")
+		So(visibleChildDirs.ReadRows, ShouldNotBeEmpty)
+		So(visibleChildDirs.ReadBytes, ShouldNotBeEmpty)
+		So(visibleChildDirs.ReadMarks, ShouldNotBeEmpty)
 
 		ancestorDirs := findReportOperation(report.Operations, perfOpTreeDiskTreeAncDirs)
 		So(ancestorDirs, ShouldNotBeNil)
