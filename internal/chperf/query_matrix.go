@@ -40,6 +40,9 @@ const (
 
 	j4MissingOperation = "missing before/after operation"
 
+	queryAuditSurfaceLegacyChildren    = "wrstat_children"
+	queryAuditSurfaceLegacyParentFacts = "wrstat_parent_facts"
+
 	j4QueryTypeExactDirectory = "Exact directory"
 	j4QueryTypeBatchDirectory = "Batch directory"
 	j4QueryTypeChildren       = "Children/presence"
@@ -203,11 +206,14 @@ func j4RequiredMatrixOperations() []j4RequiredMatrixOperation {
 		{j4QueryTypeGlob, queryOpFindGlobExtensionDotfileName, "FindByGlob extension dotfile"},
 		{j4QueryTypeVirtual, queryOpVirtualChildrenName, "virtual children filtered"},
 		{j4QueryTypeVirtual, queryOpVirtualDirInfoName, "active virtual root summary filtered"},
+		{j4QueryTypeVirtual, queryOpVirtualActivePrefixRollupName, "active-prefix rollups"},
 		{j4QueryTypeBasedirs, queryOpBasedirsGroupUsageName, "GroupUsage"},
 		{j4QueryTypeBasedirs, queryOpBasedirsUserUsageName, "UserUsage"},
 		{j4QueryTypeBasedirs, queryOpBasedirsGroupSubDirsName, "GroupSubDirs"},
 		{j4QueryTypeBasedirs, queryOpBasedirsUserSubDirsName, "UserSubDirs"},
 		{j4QueryTypeBasedirs, queryOpBasedirsHistoryName, "history"},
+		{j4QueryTypeMaintenance, queryOpImportReadinessPublishName, "import readiness/publish"},
+		{j4QueryTypeMaintenance, queryOpActiveSnapshotCleanupName, "active-snapshot cleanup"},
 		{j4QueryTypeMaintenance, queryOpInfoName, "Info"},
 		{j4QueryTypeMaintenance, queryOpMountTimestampsName, "active mount freshness"},
 		{j4QueryTypeMaintenance, queryOpBasedirsInfoName, "basedirs Info"},
@@ -259,26 +265,22 @@ func j4OperationMatchesSpec(op perfreport.Operation, spec j4RequiredMatrixOperat
 }
 
 func j4OperationMetricsFailure(op perfreport.Operation) string {
-	type check struct {
-		reason  string
-		missing bool
+	if reason := j4FirstFailedOperationMetricCheck(j4OperationBaseMetricChecks(op)); reason != "" {
+		return reason
 	}
 
-	checks := []check{
-		{"missing duration samples", len(op.DurationsMS) == 0},
-		{"missing result rows", len(op.ResultCount) == 0},
-		{"missing result digest", stringInput(op.Inputs, queryInputResultDigest) == ""},
-		{"invalid p50/p95/p99", op.P50MS < 0 || op.P95MS < 0 || op.P99MS < 0},
+	if reason := j4OperationDurationSourceFailure(op); reason != "" {
+		return reason
 	}
 
-	if j4OperationQueryMetricsRequired(op) {
-		checks = append(checks,
-			check{"missing ReadRows", len(op.ReadRows) == 0},
-			check{"missing ReadBytes", len(op.ReadBytes) == 0},
-			check{"missing ReadMarks", len(op.ReadMarks) == 0},
-		)
+	if reason := j4OperationReadMetricsFailure(op); reason != "" {
+		return reason
 	}
 
+	return j4OperationEvidenceFailure(op)
+}
+
+func j4FirstFailedOperationMetricCheck(checks []j4OperationMetricCheck) string {
 	for _, check := range checks {
 		if check.missing {
 			return check.reason
@@ -288,8 +290,250 @@ func j4OperationMetricsFailure(op perfreport.Operation) string {
 	return ""
 }
 
+func j4OperationBaseMetricChecks(op perfreport.Operation) []j4OperationMetricCheck {
+	return []j4OperationMetricCheck{
+		{"missing duration samples", len(op.DurationsMS) == 0},
+		{"missing result rows", len(op.ResultCount) == 0},
+		{"missing result digest", stringInput(op.Inputs, queryInputResultDigest) == ""},
+		{"invalid p50/p95/p99", op.P50MS < 0 || op.P95MS < 0 || op.P99MS < 0},
+	}
+}
+
+func j4OperationDurationSourceFailure(op perfreport.Operation) string {
+	if !j4OperationRequiresClickHouseSource(op.Name) {
+		return ""
+	}
+
+	if stringInput(op.Inputs, queryInputDurationSource) != querySourceClickHouseLog {
+		return "duration_source must be " + querySourceClickHouseLog
+	}
+
+	return ""
+}
+
+func j4OperationRequiresClickHouseSource(name string) bool {
+	switch name {
+	case queryOpImportReadinessPublishName,
+		queryOpActiveSnapshotCleanupName,
+		queryOpVirtualActivePrefixRollupName:
+		return true
+	default:
+		return false
+	}
+}
+
+func j4OperationReadMetricsFailure(op perfreport.Operation) string {
+	if !j4OperationQueryMetricsRequired(op) {
+		return ""
+	}
+
+	return j4FirstFailedOperationMetricCheck([]j4OperationMetricCheck{
+		{"missing ReadRows", len(op.ReadRows) == 0},
+		{"missing ReadBytes", len(op.ReadBytes) == 0},
+		{"missing ReadMarks", len(op.ReadMarks) == 0},
+	})
+}
+
 func j4OperationQueryMetricsRequired(op perfreport.Operation) bool {
 	return stringInput(op.Inputs, queryInputDurationSource) != querySourceWall
+}
+
+func j4OperationEvidenceFailure(op perfreport.Operation) string {
+	switch op.Name {
+	case queryOpImportReadinessPublishName:
+		return j4AuditEvidenceFailure(op, j4ImportReadinessPublishAuditSurfaces())
+	case queryOpActiveSnapshotCleanupName:
+		return j4ActiveSnapshotCleanupEvidenceFailure(op)
+	case queryOpVirtualActivePrefixRollupName:
+		return j4ActivePrefixRollupEvidenceFailure(op)
+	default:
+		return ""
+	}
+}
+
+func j4AuditEvidenceFailure(op perfreport.Operation, requiredSurfaces []string) string {
+	counts := uint64MapInput(op.Inputs, queryInputAuditCounts)
+	if len(counts) == 0 {
+		return "missing " + queryInputAuditCounts
+	}
+
+	surfaces := stringSliceInput(op.Inputs, queryInputAuditSurfaces)
+	if len(surfaces) == 0 {
+		return "missing " + queryInputAuditSurfaces
+	}
+
+	for _, surface := range requiredSurfaces {
+		if counts[surface] == 0 {
+			return fmt.Sprintf("missing positive %s[%s]", queryInputAuditCounts, surface)
+		}
+
+		if !slices.Contains(surfaces, surface) {
+			return "missing audit surface " + surface
+		}
+	}
+
+	return ""
+}
+
+func j4ImportReadinessPublishAuditSurfaces() []string {
+	return []string{
+		tableSchema3SnapshotSets,
+		queryAuditSurfaceActiveVirtualReady,
+		tableActivePrefixRollupSets,
+		queryAuditSurfaceMountEventsPublish,
+	}
+}
+
+func j4ActiveSnapshotCleanupEvidenceFailure(op perfreport.Operation) string {
+	_, reason := activeSnapshotCleanupRoleDigestFromInputs(op.Inputs)
+
+	return reason
+}
+
+func activeSnapshotCleanupRoleDigestFromInputs(inputs map[string]any) (string, string) {
+	counts := uint64MapInput(inputs, queryInputAuditCounts)
+	if len(counts) == 0 {
+		return "", "missing " + queryInputAuditCounts
+	}
+
+	surfaces := stringSliceInput(inputs, queryInputAuditSurfaces)
+	if len(surfaces) == 0 {
+		return "", "missing " + queryInputAuditSurfaces
+	}
+
+	schemas := activeSnapshotCleanupSchemasForInputs(inputs)
+	firstReason := ""
+
+	for _, schema := range schemas {
+		reason := activeSnapshotCleanupSchemaFailure(counts, surfaces, schema)
+		if reason == "" {
+			return activeSnapshotCleanupRoleDigest(schema.roles), ""
+		}
+
+		if firstReason == "" {
+			firstReason = reason
+		}
+	}
+
+	return "", firstReason
+}
+
+func activeSnapshotCleanupSchemasForInputs(inputs map[string]any) []activeSnapshotCleanupSchema {
+	current := activeSnapshotCleanupCurrentSchema()
+
+	baseline := activeSnapshotCleanupBaselineSchema()
+	if activeSnapshotCleanupInputsPreferBaseline(inputs) {
+		return []activeSnapshotCleanupSchema{baseline, current}
+	}
+
+	return []activeSnapshotCleanupSchema{current, baseline}
+}
+
+func activeSnapshotCleanupCurrentSchema() activeSnapshotCleanupSchema {
+	return activeSnapshotCleanupSchema{
+		roles: activeSnapshotCleanupSchemaRoles(
+			tableCatalog,
+			tableCatalog,
+			tableActiveVirtualDirs,
+		),
+	}
+}
+
+func activeSnapshotCleanupSchemaRoles(
+	directoryCatalogSurface string,
+	parentFactsSurface string,
+	activeVirtualCatalogSurface string,
+) []activeSnapshotCleanupRoleRequirement {
+	return []activeSnapshotCleanupRoleRequirement{
+		{"mount_events", tableMountEvents},
+		{"directory_catalog", directoryCatalogSurface},
+		{"files", tableFiles},
+		{"snapshot_sets", tableSchema3SnapshotSets},
+		{"directory_facts", tableDirFacts},
+		{"parent_directory_facts", parentFactsSurface},
+		{"directory_projection_sets", tableDirSummarySets},
+		{"directory_age_filter", tableDirFilterAgeAll},
+		{"child_filter_all", tableChildFilterAll},
+		{"directory_filter_all", tableDirFilterAll},
+		{"basedirs_group_usage", tableBasedirsGroupUsage},
+		{"basedirs_user_usage", tableBasedirsUserUsage},
+		{"basedirs_group_subdirs", tableBasedirsGroupSubdirs},
+		{"basedirs_user_subdirs", tableBasedirsUserSubdirs},
+		{"active_virtual_catalog", activeVirtualCatalogSurface},
+		{"active_virtual_summaries", tableActiveVirtualSummaries},
+		{"active_virtual_filter_all", tableActiveVirtualFilterAll},
+		{"active_virtual_children", tableActiveVirtualChildren},
+		{"active_virtual_sets", tableActiveVirtualSets},
+		{"active_prefix_rollups", tableActivePrefixRollups},
+		{"active_prefix_filter_ageall", tableActivePrefixFilterAgeAll},
+		{"active_prefix_rollup_sets", tableActivePrefixRollupSets},
+	}
+}
+
+func activeSnapshotCleanupBaselineSchema() activeSnapshotCleanupSchema {
+	return activeSnapshotCleanupSchema{
+		roles: activeSnapshotCleanupSchemaRoles(
+			queryAuditSurfaceLegacyChildren,
+			queryAuditSurfaceLegacyParentFacts,
+			tableActiveVirtualSummaries,
+		),
+	}
+}
+
+func activeSnapshotCleanupInputsPreferBaseline(inputs map[string]any) bool {
+	counts := uint64MapInput(inputs, queryInputAuditCounts)
+	if counts[queryAuditSurfaceLegacyChildren] > 0 || counts[queryAuditSurfaceLegacyParentFacts] > 0 {
+		return true
+	}
+
+	surfaces := stringSliceInput(inputs, queryInputAuditSurfaces)
+
+	return slices.Contains(surfaces, queryAuditSurfaceLegacyChildren) ||
+		slices.Contains(surfaces, queryAuditSurfaceLegacyParentFacts)
+}
+
+func activeSnapshotCleanupSchemaFailure(
+	counts map[string]uint64,
+	surfaces []string,
+	schema activeSnapshotCleanupSchema,
+) string {
+	for _, role := range schema.roles {
+		if counts[role.surface] == 0 {
+			return fmt.Sprintf(
+				"missing positive %s[%s] for cleanup role %s",
+				queryInputAuditCounts,
+				role.surface,
+				role.name,
+			)
+		}
+
+		if !slices.Contains(surfaces, role.surface) {
+			return fmt.Sprintf("missing audit surface %s for cleanup role %s", role.surface, role.name)
+		}
+	}
+
+	return ""
+}
+
+func activeSnapshotCleanupRoleDigest(roles []activeSnapshotCleanupRoleRequirement) string {
+	roleNames := make([]string, len(roles))
+	for index, role := range roles {
+		roleNames[index] = role.name
+	}
+
+	return digestValue(roleNames)
+}
+
+func j4ActivePrefixRollupEvidenceFailure(op perfreport.Operation) string {
+	if stringInput(op.Inputs, queryInputActivePrefixRouteProof) != queryActivePrefixRollupRouteProofRead {
+		return queryInputActivePrefixRouteProof + " must be " + queryActivePrefixRollupRouteProofRead
+	}
+
+	if uint64Input(op.Inputs, queryInputActivePrefixScalarRootRows) == 0 {
+		return "missing " + queryInputActivePrefixScalarRootRows
+	}
+
+	return ""
 }
 
 func j4MatrixOperationLabel(spec j4RequiredMatrixOperation) string {
@@ -306,9 +550,16 @@ func j4MatrixCorrectnessFailure(baseline []perfreport.Report, candidate []perfre
 			return label + " result rows mismatch"
 		}
 
-		beforeDigest := stringInput(before.Inputs, queryInputResultDigest)
+		beforeDigest, beforeDigestReason := j4MatrixComparableResultDigest(before)
+		if beforeDigestReason != "" {
+			return label + " " + beforeDigestReason
+		}
 
-		afterDigest := stringInput(after.Inputs, queryInputResultDigest)
+		afterDigest, afterDigestReason := j4MatrixComparableResultDigest(after)
+		if afterDigestReason != "" {
+			return label + " " + afterDigestReason
+		}
+
 		if beforeDigest != afterDigest {
 			return label + " result digest mismatch"
 		}
@@ -342,6 +593,33 @@ func allUint64Equal(values []uint64, want uint64) bool {
 	}
 
 	return true
+}
+
+func j4MatrixComparableResultDigest(op perfreport.Operation) (string, string) {
+	if op.Name != queryOpActiveSnapshotCleanupName {
+		return stringInput(op.Inputs, queryInputResultDigest), ""
+	}
+
+	digest, reason := activeSnapshotCleanupRoleDigestFromInputs(op.Inputs)
+	if reason != "" {
+		return "", reason
+	}
+
+	return digest, ""
+}
+
+type j4OperationMetricCheck struct {
+	reason  string
+	missing bool
+}
+
+type activeSnapshotCleanupRoleRequirement struct {
+	name    string
+	surface string
+}
+
+type activeSnapshotCleanupSchema struct {
+	roles []activeSnapshotCleanupRoleRequirement
 }
 
 type j4RequiredMatrixOperation struct {

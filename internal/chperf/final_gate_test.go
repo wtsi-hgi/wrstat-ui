@@ -2045,6 +2045,66 @@ func TestJ6FinalGates(t *testing.T) {
 		So(check.Detail, ShouldContainSubstring, "wrong row")
 	})
 
+	Convey("J6 fails when required virtual and maintenance matrix rows are missing", t, func() {
+		check := finalGateJ6MatrixCheckAfterRemoving(queryOpVirtualActivePrefixRollupName)
+		So(check.Passed, ShouldBeFalse)
+		So(check.Detail, ShouldContainSubstring, queryOpVirtualActivePrefixRollupName)
+
+		check = finalGateJ6MatrixCheckAfterRemoving(queryOpImportReadinessPublishName)
+		So(check.Passed, ShouldBeFalse)
+		So(check.Detail, ShouldContainSubstring, queryOpImportReadinessPublishName)
+
+		check = finalGateJ6MatrixCheckAfterRemoving(queryOpActiveSnapshotCleanupName)
+		So(check.Passed, ShouldBeFalse)
+		So(check.Detail, ShouldContainSubstring, queryOpActiveSnapshotCleanupName)
+	})
+
+	Convey("J6 rejects synthetic virtual and maintenance matrix evidence", t, func() {
+		evidence := finalGateTestEvidence(false, false)
+		finalGateMutateJ6MatrixOperation(&evidence, queryOpImportReadinessPublishName, func(op *perfreport.Operation) {
+			op.Inputs[queryInputDurationSource] = querySourceWall
+		})
+
+		result := ValidateFinalGates(evidence)
+		check := finalGateTestCheck(result, "J6 matrix correctness and deltas")
+		So(check.Passed, ShouldBeFalse)
+		So(check.Detail, ShouldContainSubstring, "duration_source")
+
+		evidence = finalGateTestEvidence(false, false)
+		finalGateMutateJ6MatrixOperation(&evidence, queryOpActiveSnapshotCleanupName, func(op *perfreport.Operation) {
+			delete(op.Inputs, queryInputAuditCounts)
+		})
+
+		result = ValidateFinalGates(evidence)
+		check = finalGateTestCheck(result, "J6 matrix correctness and deltas")
+		So(check.Passed, ShouldBeFalse)
+		So(check.Detail, ShouldContainSubstring, queryInputAuditCounts)
+
+		evidence = finalGateTestEvidence(false, false)
+		finalGateMutateJ6MatrixOperation(&evidence, queryOpImportReadinessPublishName, func(op *perfreport.Operation) {
+			op.Inputs[queryInputAuditSurfaces] = []string{
+				tableSchema3SnapshotSets,
+				queryAuditSurfaceActiveVirtualReady,
+				tableActivePrefixRollupSets,
+			}
+		})
+
+		result = ValidateFinalGates(evidence)
+		check = finalGateTestCheck(result, "J6 matrix correctness and deltas")
+		So(check.Passed, ShouldBeFalse)
+		So(check.Detail, ShouldContainSubstring, queryAuditSurfaceMountEventsPublish)
+
+		evidence = finalGateTestEvidence(false, false)
+		finalGateMutateJ6MatrixOperation(&evidence, queryOpVirtualActivePrefixRollupName, func(op *perfreport.Operation) {
+			op.Inputs[queryInputActivePrefixRouteProof] = queryActivePrefixRouteProofUnobserved
+		})
+
+		result = ValidateFinalGates(evidence)
+		check = finalGateTestCheck(result, "J6 matrix correctness and deltas")
+		So(check.Passed, ShouldBeFalse)
+		So(check.Detail, ShouldContainSubstring, queryInputActivePrefixRouteProof)
+	})
+
 	Convey("J6 fails storage when hot rows store paths or table bytes lack a baseline", t, func() {
 		evidence := finalGateTestEvidence(false, false)
 		finalGateMutateJ6StorageAudit(&evidence, func(op *perfreport.Operation) {
@@ -2167,6 +2227,7 @@ func finalGateAddJ6MatrixOp(
 		queryInputDurationSource:  querySourceClickHouseLog,
 		queryInputResultDigest:    "sha256:j6-" + strings.ReplaceAll(spec.Operation, "_", "-"),
 	}
+	queryMatrixAddRequiredEvidence(inputs, spec.Operation)
 
 	report.AddOperationWithCounters(
 		spec.Operation,
@@ -2177,6 +2238,15 @@ func finalGateAddJ6MatrixOp(
 		finalGateE1Counts(2),
 		finalGateE1Counts(9),
 	)
+}
+
+func finalGateJ6MatrixCheckAfterRemoving(operation string) FinalGateCheck {
+	evidence := finalGateTestEvidence(false, false)
+	finalGateRemoveJ6MatrixOperation(&evidence, operation)
+
+	result := ValidateFinalGates(evidence)
+
+	return finalGateTestCheck(result, "J6 matrix correctness and deltas")
 }
 
 func finalGateRemoveJ6MatrixOperation(evidence *FinalGateEvidence, operation string) {

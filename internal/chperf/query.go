@@ -56,6 +56,8 @@ const (
 	queryInputDirKey                      = "dir"
 	queryInputDurationSource              = "duration_source"
 	queryInputCacheScope                  = "cache_scope"
+	queryInputAuditCounts                 = "audit_counts"
+	queryInputAuditSurfaces               = "audit_surfaces"
 	queryInputFilterFileTypeMaskKey       = "filter_file_type_mask"
 	queryInputFilterFileTypesKey          = "filter_file_types"
 	queryInputFilterGIDsKey               = "filter_gids"
@@ -78,6 +80,13 @@ const (
 	queryInputStatusCodeKey               = "status_code"
 	queryInputSurfaceKey                  = "surface"
 	queryInputSurfaceInProcessEquivalent  = "in_process_equivalent"
+	queryInputActivePrefixRouteProof      = "active_prefix_route_proof"
+	queryInputActivePrefixScalarRootRows  = "active_prefix_scalar_root_read_rows"
+	queryAuditSurfaceActiveVirtualReady   = "wrstat_active_virtual_sets_ready"
+	queryAuditSurfaceMountEventsPublish   = "wrstat_mount_events_publish"
+	queryAuditSurfaceActivePrefixRootRead = "wrstat_active_prefix_scalar_root_read"
+	queryActivePrefixRollupRouteProofRead = "active_prefix_rollup_read"
+	queryActivePrefixRouteProofUnobserved = "unobserved"
 	queryPermissionCheckAnyInDir          = "any_in_dir"
 	queryPermissionCheckPath              = clickHouseFileFieldPath
 	queryOpAuthTreeName                   = "auth_tree"
@@ -89,6 +98,8 @@ const (
 	queryOpNavIndexAuditName              = "nav_index_audit"
 	queryOpPermissionCheckName            = "permission_check"
 	queryOpStartupCacheWarmingAuditName   = "startup_cache_warming_audit"
+	queryOpImportReadinessPublishName     = "import_readiness_publish"
+	queryOpActiveSnapshotCleanupName      = "active_snapshot_cleanup"
 	queryOpTreeDiskTreeAncName            = "tree_disktree_endpoint_ancestor_dirs"
 	queryOpTreeDiskTreeColdProviderName   = "tree_disktree_endpoint_cold_provider"
 	queryOpTreeDiskTreeEndName            = "tree_disktree_endpoint"
@@ -121,6 +132,7 @@ const (
 	queryOpTreeWhereFreshName             = "tree_where_fresh_provider"
 	queryOpTreeWhereName                  = "tree_where"
 	queryOpTreeWhereProviderUpdateName    = "tree_where_provider_update_cold_cache"
+	queryOpVirtualActivePrefixRollupName  = "virtual_active_prefix_rollup"
 	queryOpVirtualChildrenName            = "virtual_children"
 	queryOpVirtualDirInfoName             = "virtual_dirinfo"
 	queryOpWhereFilteredWholeMountName    = "where_filtered_whole_mount"
@@ -146,6 +158,7 @@ const (
 	queryStartupStageSynchronousInitial   = "synchronous_before_server_started"
 	queryInputHighFanoutChildCount        = "high_fanout_child_count"
 	queryInputResultDigest                = "result_digest"
+	queryInputCleanupRoleDigest           = "cleanup_role_digest"
 )
 
 var (
@@ -165,8 +178,9 @@ var (
 	// for StatPath testing.
 	ErrEmptyDir = errors.New("directory is empty, skipping StatPath")
 
-	errUnknownQueryOps      = errors.New("unknown query ops")
-	errOpenProviderRequired = errors.New("OpenProvider is required")
+	errUnknownQueryOps        = errors.New("unknown query ops")
+	errOpenProviderRequired   = errors.New("OpenProvider is required")
+	errQueryInspectorRequired = errors.New("query inspector is required")
 )
 
 // QueryOptions configures the query timing suite.
@@ -712,6 +726,8 @@ func buildOps(qctx queryContext, opts QueryOptions, printf PrintfFunc) []op {
 	ops := []op{
 		opStartupCacheWarmingAudit(),
 		opNavIndexAudit(qctx),
+		opImportReadinessPublishAudit(qctx),
+		opActiveSnapshotCleanupAudit(qctx),
 		opMountTimestamps(qctx),
 		opInfo(qctx),
 		opTreeWhereColdThenCached(qctx, opts.Splits),
@@ -866,6 +882,161 @@ func opNavIndexAudit(qctx queryContext) op {
 		hasRepeatOverride: true,
 		repeatOverride:    1,
 		resultCount:       func() uint64 { return resultCount },
+	}
+}
+
+func opImportReadinessPublishAudit(qctx queryContext) op {
+	evidence := importReadinessPublishEvidence()
+	inputs := j4Inputs(j4QueryTypeMaintenance, "import readiness/publish", evidence)
+
+	return opQueryInspectorAudit(
+		queryOpImportReadinessPublishName,
+		inputs,
+		qctx,
+		QueryInspector.ImportReadinessPublishAudit,
+		queryInspectorAuditOptions{skipWarmup: true, repeatOverride: 1},
+	)
+}
+
+func importReadinessPublishEvidence() map[string]any {
+	return map[string]any{
+		queryInputDurationSource: querySourceClickHouseLog,
+		"readiness_phases":       importReadinessPublishPhases(),
+		"readiness_tables": []string{
+			tableSchema3SnapshotSets,
+			tableActiveVirtualSets,
+			tableActivePrefixRollupSets,
+			tableMountEvents,
+		},
+		"publish_guardrail": importGuardrailActiveSnapshotPublish,
+		"publish_phase":     phaseMountSwitch,
+	}
+}
+
+func importReadinessPublishPhases() []string {
+	return []string{
+		phaseSchema3Ready,
+		phaseActiveVirtualReady,
+		phaseActivePrefixRefresh,
+	}
+}
+
+func opQueryInspectorAudit(
+	name string,
+	inputs map[string]any,
+	qctx queryContext,
+	read queryInspectorAuditFunc,
+	opts queryInspectorAuditOptions,
+) op {
+	var auditRows []QueryAuditRow
+
+	auditOp := op{
+		name:   name,
+		inputs: inputs,
+		run: func(ctx context.Context) error {
+			if qctx.inspector == nil {
+				return errQueryInspectorRequired
+			}
+
+			rows, err := read(qctx.inspector, ctx)
+			if err != nil {
+				return err
+			}
+
+			auditRows = rows
+			recordAuditRows(inputs, rows)
+
+			if opts.after != nil {
+				opts.after(inputs, rows)
+			}
+
+			return nil
+		},
+		skipWarmup:  opts.skipWarmup,
+		resultCount: func() uint64 { return uint64(len(auditRows)) },
+	}
+
+	if opts.repeatOverride > 0 {
+		auditOp.hasRepeatOverride = true
+		auditOp.repeatOverride = opts.repeatOverride
+	}
+
+	return auditOp
+}
+
+func recordAuditRows(inputs map[string]any, rows []QueryAuditRow) {
+	inputs[queryInputAuditSurfaces] = auditSurfaces(rows)
+	inputs[queryInputAuditCounts] = auditCounts(rows)
+	inputs[queryInputResultDigest] = digestValue(rows)
+}
+
+func auditSurfaces(rows []QueryAuditRow) []string {
+	surfaces := make([]string, len(rows))
+	for index, row := range rows {
+		surfaces[index] = row.Surface
+	}
+
+	return surfaces
+}
+
+func auditCounts(rows []QueryAuditRow) map[string]uint64 {
+	counts := make(map[string]uint64, len(rows))
+	for _, row := range rows {
+		counts[row.Surface] = row.Rows
+	}
+
+	return counts
+}
+
+func opActiveSnapshotCleanupAudit(qctx queryContext) op {
+	evidence := activeSnapshotCleanupEvidence()
+	inputs := j4Inputs(j4QueryTypeMaintenance, "active-snapshot cleanup", evidence)
+
+	return opQueryInspectorAudit(
+		queryOpActiveSnapshotCleanupName,
+		inputs,
+		qctx,
+		QueryInspector.ActiveSnapshotCleanupAudit,
+		queryInspectorAuditOptions{
+			after:          recordActiveSnapshotCleanupRoleDigest,
+			skipWarmup:     true,
+			repeatOverride: 1,
+		},
+	)
+}
+
+func activeSnapshotCleanupEvidence() map[string]any {
+	return map[string]any{
+		queryInputDurationSource: querySourceClickHouseLog,
+		"cleanup_phase":          phaseOldSnapshotDrop,
+		"cleanup_surfaces":       activeSnapshotCleanupSurfaces(),
+		"cleanup_guard":          "published_active_snapshot_and_inactive_active_set",
+	}
+}
+
+func activeSnapshotCleanupSurfaces() []string {
+	return []string{
+		tableMountEvents,
+		tableCatalog,
+		tableFiles,
+		tableSchema3SnapshotSets,
+		tableDirSummary,
+		tableDirSummarySets,
+		tableDirFilterAgeAll,
+		tableChildFilterAll,
+		tableDirFilterAll,
+		tableBasedirsGroupUsage,
+		tableBasedirsUserUsage,
+		tableBasedirsGroupSubdirs,
+		tableBasedirsUserSubdirs,
+		tableActiveVirtualDirs,
+		tableActiveVirtualSummaries,
+		tableActiveVirtualFilterAll,
+		tableActiveVirtualChildren,
+		tableActiveVirtualSets,
+		tableActivePrefixRollups,
+		tableActivePrefixFilterAgeAll,
+		tableActivePrefixRollupSets,
 	}
 }
 
@@ -2806,6 +2977,7 @@ func focusedQueryOps(qctx queryContext, opts QueryOptions) []op {
 		opFocusedWhere(qctx, queryOpWhereFilteredWholeMountName, filtered, opts.Splits),
 		opFocusedVirtualChildren(qctx, filtered),
 		opFocusedVirtualDirInfo(qctx, filtered),
+		opFocusedActivePrefixRollup(qctx, filtered),
 		opFocusedGlobExtensionDotfile(qctx),
 	}
 }
@@ -3050,6 +3222,29 @@ func opFocusedVirtualDirInfo(qctx queryContext, filter *db.Filter) op {
 	}
 }
 
+func opFocusedActivePrefixRollup(qctx queryContext, filter *db.Filter) op {
+	inputs := j4Inputs(j4QueryTypeVirtual, "active-prefix rollups", treeOpInputs(filter, map[string]any{
+		queryInputDirKey:         "/",
+		queryInputCacheScope:     queryScopeSameProviderDir,
+		queryInputDurationSource: querySourceClickHouseLog,
+		"rollup_tables": []string{
+			tableActivePrefixRollups,
+			tableActivePrefixFilterAgeAll,
+			tableActivePrefixRollupSets,
+		},
+	}))
+	inputs[queryInputTreeFilterRouteKey] = tableActivePrefixRollups
+	inputs["active_prefix_probe"] = "wrstat_active_prefix_rollups_join_active_virtual_dirs"
+
+	return opQueryInspectorAudit(
+		queryOpVirtualActivePrefixRollupName,
+		inputs,
+		qctx,
+		QueryInspector.ActivePrefixRollupAudit,
+		queryInspectorAuditOptions{after: recordActivePrefixRollupAuditProof},
+	)
+}
+
 func opFocusedGlobExtensionDotfile(qctx queryContext) op {
 	ext := pickExt(qctx.client, qctx.dir)
 	if ext == "" {
@@ -3097,6 +3292,14 @@ func buildTreeFilter(qctx queryContext, opts QueryOptions) *db.Filter {
 	}
 
 	return treeFilterFromOptions(qctx.treeFilter)
+}
+
+type queryInspectorAuditFunc func(QueryInspector, context.Context) ([]QueryAuditRow, error)
+
+type queryInspectorAuditOptions struct {
+	after          func(map[string]any, []QueryAuditRow)
+	skipWarmup     bool
+	repeatOverride int
 }
 
 type navIndexEvidenceProvider interface {
@@ -3188,6 +3391,31 @@ func (q queryContext) resetCaches() {
 	if q.resetQueryCaches != nil {
 		q.resetQueryCaches()
 	}
+}
+
+func recordActiveSnapshotCleanupRoleDigest(inputs map[string]any, _ []QueryAuditRow) {
+	digest, reason := activeSnapshotCleanupRoleDigestFromInputs(inputs)
+	if reason == "" {
+		inputs[queryInputCleanupRoleDigest] = digest
+	}
+}
+
+func recordActivePrefixRollupAuditProof(inputs map[string]any, rows []QueryAuditRow) {
+	counts := auditCounts(rows)
+	readRows := counts[queryAuditSurfaceActivePrefixRootRead]
+
+	inputs["active_prefix_rollup_set_rows"] = counts[tableActivePrefixRollupSets]
+	inputs["active_prefix_rollup_rows"] = counts[tableActivePrefixRollups]
+	inputs["active_prefix_filter_ageall_rows"] = counts[tableActivePrefixFilterAgeAll]
+	inputs[queryInputActivePrefixScalarRootRows] = readRows
+
+	if readRows > 0 {
+		inputs[queryInputActivePrefixRouteProof] = queryActivePrefixRollupRouteProofRead
+
+		return
+	}
+
+	inputs[queryInputActivePrefixRouteProof] = queryActivePrefixRouteProofUnobserved
 }
 
 func firstUserUsage(reader basedirs.Reader) (*basedirs.Usage, error) {

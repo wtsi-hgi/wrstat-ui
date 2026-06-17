@@ -82,8 +82,11 @@ const (
 	perfOpTreeWhereColdCached          = "tree_where_cold_then_cached"
 	perfOpTreeWhereFresh               = "tree_where_fresh_provider"
 	perfOpD4CollapseDecision           = "d4_collapse_decision"
+	perfOpImportReadinessPublish       = "import_readiness_publish"
+	perfOpActiveSnapshotCleanup        = "active_snapshot_cleanup"
 	perfOpNavIndexAudit                = "nav_index_audit"
 	perfOpStartupCacheWarmingAudit     = "startup_cache_warming_audit"
+	perfOpVirtualActivePrefixRollup    = "virtual_active_prefix_rollup"
 
 	testLustreMount        = "/lustre/"
 	summariseCloseName     = "close"
@@ -927,7 +930,10 @@ func TestClickHousePerfQuery(t *testing.T) {
 				So(len(op.DurationsMS), ShouldBeLessThanOrEqualTo, 2)
 
 				continue
-			case perfOpStartupCacheWarmingAudit, perfOpNavIndexAudit:
+			case perfOpStartupCacheWarmingAudit,
+				perfOpNavIndexAudit,
+				perfOpImportReadinessPublish,
+				perfOpActiveSnapshotCleanup:
 				So(len(op.DurationsMS), ShouldEqual, 1)
 
 				continue
@@ -944,6 +950,8 @@ func TestClickHousePerfQuery(t *testing.T) {
 
 		So(opNames, ShouldContain, perfOpStartupCacheWarmingAudit)
 		So(opNames, ShouldContain, perfOpNavIndexAudit)
+		So(opNames, ShouldContain, perfOpImportReadinessPublish)
+		So(opNames, ShouldContain, perfOpActiveSnapshotCleanup)
 		So(opNames, ShouldContain, perfOpD4CollapseDecision)
 		So(opNames, ShouldContain, "mount_timestamps")
 		So(opNames, ShouldContain, perfOpTreeDirInfo)
@@ -954,6 +962,7 @@ func TestClickHousePerfQuery(t *testing.T) {
 		So(opNames, ShouldContain, perfOpTreeWhere)
 		So(opNames, ShouldContain, perfOpTreeWhereColdCached)
 		So(opNames, ShouldContain, perfOpTreeWhereFresh)
+		So(opNames, ShouldContain, perfOpVirtualActivePrefixRollup)
 		So(opNames, ShouldContain, "basedirs_group_usage")
 		So(opNames, ShouldContain, "files_listdir")
 		So(opNames, ShouldContain, "permission_check")
@@ -973,6 +982,37 @@ func TestClickHousePerfQuery(t *testing.T) {
 			"lazy_during_user_or_perf_interactions")
 		So(startupAudit.Inputs["provider_update_refresh_timing"], ShouldEqual,
 			"background_provider_polling_or_update_after_initial_readers")
+
+		readinessPublish := findReportOperation(report.Operations, perfOpImportReadinessPublish)
+		So(readinessPublish, ShouldNotBeNil)
+		So(readinessPublish.Inputs["query_type"], ShouldEqual, "Maintenance")
+		So(readinessPublish.Inputs["query_variant"], ShouldEqual, "import readiness/publish")
+		So(readinessPublish.Inputs["duration_source"], ShouldEqual, "clickhouse_query_log")
+		So(readinessPublish.Inputs["audit_counts"], ShouldNotBeNil)
+		So(readinessPublish.Inputs["result_digest"], ShouldNotBeBlank)
+		So(readinessPublish.ReadRows, ShouldHaveLength, 1)
+		So(readinessPublish.ReadBytes, ShouldHaveLength, 1)
+		So(readinessPublish.ReadMarks, ShouldHaveLength, 1)
+
+		activeSnapshotCleanup := findReportOperation(report.Operations, perfOpActiveSnapshotCleanup)
+		So(activeSnapshotCleanup, ShouldNotBeNil)
+		So(activeSnapshotCleanup.Inputs["query_type"], ShouldEqual, "Maintenance")
+		So(activeSnapshotCleanup.Inputs["query_variant"], ShouldEqual, "active-snapshot cleanup")
+		So(activeSnapshotCleanup.Inputs["duration_source"], ShouldEqual, "clickhouse_query_log")
+		So(activeSnapshotCleanup.Inputs["audit_counts"], ShouldNotBeNil)
+		So(activeSnapshotCleanup.Inputs["result_digest"], ShouldNotBeBlank)
+		So(activeSnapshotCleanup.ReadRows, ShouldHaveLength, 1)
+		So(activeSnapshotCleanup.ReadBytes, ShouldHaveLength, 1)
+		So(activeSnapshotCleanup.ReadMarks, ShouldHaveLength, 1)
+
+		activePrefix := findReportOperation(report.Operations, perfOpVirtualActivePrefixRollup)
+		So(activePrefix, ShouldNotBeNil)
+		So(activePrefix.Inputs["query_type"], ShouldEqual, "Virtual/active")
+		So(activePrefix.Inputs["query_variant"], ShouldEqual, "active-prefix rollups")
+		So(activePrefix.Inputs["tree_filter_route"], ShouldEqual, "wrstat_active_prefix_rollups")
+		So(activePrefix.Inputs["active_prefix_route_proof"], ShouldNotBeBlank)
+		So(activePrefix.Inputs["active_prefix_route_proof"], ShouldNotEqual, "unobserved")
+		So(activePrefix.Inputs["result_digest"], ShouldNotBeBlank)
 
 		treeWhere := findReportOperation(report.Operations, perfOpTreeWhere)
 		So(treeWhere, ShouldNotBeNil)

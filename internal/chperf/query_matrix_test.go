@@ -161,6 +161,7 @@ func TestJ4CanonicalMatrix(t *testing.T) {
 		ops := buildOps(queryMatrixTestContext(), queryMatrixTestOptions(), func(string, ...any) {})
 		covered := make(map[string]int)
 		required := make(map[j4RequiredMatrixOperation]bool)
+		matrixRows := j4RequiredMatrixOperationSet()
 
 		for _, op := range ops {
 			queryType := stringInput(op.inputs, queryInputQueryTypeKey)
@@ -181,6 +182,27 @@ func TestJ4CanonicalMatrix(t *testing.T) {
 		}
 
 		for _, spec := range j4RequiredMatrixOperations() {
+			So(required[spec], ShouldBeTrue)
+		}
+
+		for _, spec := range []j4RequiredMatrixOperation{
+			{
+				QueryType:    j4QueryTypeVirtual,
+				Operation:    queryOpVirtualActivePrefixRollupName,
+				QueryVariant: "active-prefix rollups",
+			},
+			{
+				QueryType:    j4QueryTypeMaintenance,
+				Operation:    queryOpImportReadinessPublishName,
+				QueryVariant: "import readiness/publish",
+			},
+			{
+				QueryType:    j4QueryTypeMaintenance,
+				Operation:    queryOpActiveSnapshotCleanupName,
+				QueryVariant: "active-snapshot cleanup",
+			},
+		} {
+			So(matrixRows[spec], ShouldBeTrue)
 			So(required[spec], ShouldBeTrue)
 		}
 
@@ -273,6 +295,78 @@ func TestJ4CanonicalMatrix(t *testing.T) {
 			ShouldContainSubstring,
 			queryOpDirInfoFilteredName,
 		)
+
+		missingActivePrefixRollup := cloneJ4Report(report)
+		removeJ4ReportOperation(&missingActivePrefixRollup, queryOpVirtualActivePrefixRollupName)
+		So(
+			j4MatrixCoverageFailure([]perfreport.Report{report}, []perfreport.Report{missingActivePrefixRollup}),
+			ShouldContainSubstring,
+			queryOpVirtualActivePrefixRollupName,
+		)
+
+		missingImportReadinessPublish := cloneJ4Report(report)
+		removeJ4ReportOperation(&missingImportReadinessPublish, queryOpImportReadinessPublishName)
+		So(
+			j4MatrixCoverageFailure([]perfreport.Report{report}, []perfreport.Report{missingImportReadinessPublish}),
+			ShouldContainSubstring,
+			queryOpImportReadinessPublishName,
+		)
+
+		missingActiveSnapshotCleanup := cloneJ4Report(report)
+		removeJ4ReportOperation(&missingActiveSnapshotCleanup, queryOpActiveSnapshotCleanupName)
+		So(
+			j4MatrixCoverageFailure([]perfreport.Report{report}, []perfreport.Report{missingActiveSnapshotCleanup}),
+			ShouldContainSubstring,
+			queryOpActiveSnapshotCleanupName,
+		)
+	})
+
+	Convey("matrix validation rejects synthetic virtual and maintenance evidence", t, func() {
+		report := queryMatrixCompleteReport()
+
+		wallDuration := cloneJ4Report(report)
+		mutateJ4ReportOperation(&wallDuration, queryOpImportReadinessPublishName, func(op *perfreport.Operation) {
+			op.Inputs[queryInputDurationSource] = querySourceWall
+		})
+		So(
+			j4MatrixCoverageFailure([]perfreport.Report{report}, []perfreport.Report{wallDuration}),
+			ShouldContainSubstring,
+			"duration_source",
+		)
+
+		missingAuditCounts := cloneJ4Report(report)
+		mutateJ4ReportOperation(&missingAuditCounts, queryOpActiveSnapshotCleanupName, func(op *perfreport.Operation) {
+			delete(op.Inputs, queryInputAuditCounts)
+		})
+		So(
+			j4MatrixCoverageFailure([]perfreport.Report{report}, []perfreport.Report{missingAuditCounts}),
+			ShouldContainSubstring,
+			queryInputAuditCounts,
+		)
+
+		missingAuditSurface := cloneJ4Report(report)
+		mutateJ4ReportOperation(&missingAuditSurface, queryOpImportReadinessPublishName, func(op *perfreport.Operation) {
+			op.Inputs[queryInputAuditSurfaces] = []string{
+				tableSchema3SnapshotSets,
+				queryAuditSurfaceActiveVirtualReady,
+				tableActivePrefixRollupSets,
+			}
+		})
+		So(
+			j4MatrixCoverageFailure([]perfreport.Report{report}, []perfreport.Report{missingAuditSurface}),
+			ShouldContainSubstring,
+			queryAuditSurfaceMountEventsPublish,
+		)
+
+		unobservedRoute := cloneJ4Report(report)
+		mutateJ4ReportOperation(&unobservedRoute, queryOpVirtualActivePrefixRollupName, func(op *perfreport.Operation) {
+			op.Inputs[queryInputActivePrefixRouteProof] = queryActivePrefixRouteProofUnobserved
+		})
+		So(
+			j4MatrixCoverageFailure([]perfreport.Report{report}, []perfreport.Report{unobservedRoute}),
+			ShouldContainSubstring,
+			queryInputActivePrefixRouteProof,
+		)
 	})
 
 	Convey("matrix deltas report before/after p95 differences by operation variant", t, func() {
@@ -305,6 +399,83 @@ func TestJ4CanonicalMatrix(t *testing.T) {
 		So(err, ShouldNotBeNil)
 		So(err.Error(), ShouldContainSubstring, "result digest mismatch")
 	})
+
+	Convey("active snapshot cleanup evidence accepts baseline and current schema cleanup surfaces", t, func() {
+		baseline := queryMatrixCompleteReport()
+		candidate := queryMatrixCompleteReport()
+
+		queryMatrixSetActiveSnapshotCleanupEvidence(
+			&baseline,
+			queryMatrixJ4BaselineCleanupSurfaces(),
+			queryMatrixJ4BaselineCleanupCounts(),
+			"sha256:e1e57ce8d510d38b862d8784bd5637a61d0b05bff3e5c51f74e838f5a81b63b7",
+		)
+		queryMatrixSetActiveSnapshotCleanupEvidence(
+			&candidate,
+			queryMatrixJ4CurrentCleanupSurfaces(),
+			queryMatrixJ4CurrentCleanupCounts(),
+			"sha256:573541fae285acc57b15895d1b6fb957ad40e1d218b3a3ded3f203fcd781498c",
+		)
+
+		So(j4MatrixCoverageFailure([]perfreport.Report{baseline}, []perfreport.Report{candidate}), ShouldBeBlank)
+
+		baselineCleanup, ok := j4FirstOperationNamed([]perfreport.Report{baseline}, queryOpActiveSnapshotCleanupName)
+		So(ok, ShouldBeTrue)
+		candidateCleanup, ok := j4FirstOperationNamed([]perfreport.Report{candidate}, queryOpActiveSnapshotCleanupName)
+		So(ok, ShouldBeTrue)
+
+		baselineDigest, baselineReason := activeSnapshotCleanupRoleDigestFromInputs(baselineCleanup.Inputs)
+		candidateDigest, candidateReason := activeSnapshotCleanupRoleDigestFromInputs(candidateCleanup.Inputs)
+
+		So(baselineReason, ShouldBeBlank)
+		So(candidateReason, ShouldBeBlank)
+		So(baselineDigest, ShouldEqual, candidateDigest)
+
+		deltas, err := j4MatrixDeltas([]perfreport.Report{baseline}, []perfreport.Report{candidate})
+		So(err, ShouldBeNil)
+		So(deltas, ShouldHaveLength, len(j4RequiredMatrixOperations()))
+	})
+
+	Convey("active snapshot cleanup evidence rejects missing cleanup roles", t, func() {
+		valid := queryMatrixCompleteReport()
+		queryMatrixSetActiveSnapshotCleanupEvidence(
+			&valid,
+			queryMatrixJ4BaselineCleanupSurfaces(),
+			queryMatrixJ4BaselineCleanupCounts(),
+			"sha256:e1e57ce8d510d38b862d8784bd5637a61d0b05bff3e5c51f74e838f5a81b63b7",
+		)
+
+		missingBaselineRole := cloneJ4Report(valid)
+		mutateJ4ReportOperation(&missingBaselineRole, queryOpActiveSnapshotCleanupName, func(op *perfreport.Operation) {
+			counts := queryMatrixJ4BaselineCleanupCounts()
+			delete(counts, "wrstat_parent_facts")
+			op.Inputs[queryInputAuditCounts] = counts
+		})
+		So(
+			j4MatrixCoverageFailure([]perfreport.Report{valid}, []perfreport.Report{missingBaselineRole}),
+			ShouldContainSubstring,
+			"wrstat_parent_facts",
+		)
+
+		current := queryMatrixCompleteReport()
+		queryMatrixSetActiveSnapshotCleanupEvidence(
+			&current,
+			queryMatrixJ4CurrentCleanupSurfaces(),
+			queryMatrixJ4CurrentCleanupCounts(),
+			"sha256:573541fae285acc57b15895d1b6fb957ad40e1d218b3a3ded3f203fcd781498c",
+		)
+		missingCurrentRole := cloneJ4Report(current)
+		mutateJ4ReportOperation(&missingCurrentRole, queryOpActiveSnapshotCleanupName, func(op *perfreport.Operation) {
+			counts := queryMatrixJ4CurrentCleanupCounts()
+			delete(counts, tableActiveVirtualDirs)
+			op.Inputs[queryInputAuditCounts] = counts
+		})
+		So(
+			j4MatrixCoverageFailure([]perfreport.Report{current}, []perfreport.Report{missingCurrentRole}),
+			ShouldContainSubstring,
+			tableActiveVirtualDirs,
+		)
+	})
 }
 
 func queryMatrixTestOptions() QueryOptions {
@@ -315,6 +486,15 @@ func queryMatrixTestOptions() QueryOptions {
 		WalkLimit:     3,
 		AncestorLimit: 3,
 	}
+}
+
+func j4RequiredMatrixOperationSet() map[j4RequiredMatrixOperation]bool {
+	rows := make(map[j4RequiredMatrixOperation]bool, len(j4RequiredMatrixOperations()))
+	for _, spec := range j4RequiredMatrixOperations() {
+		rows[spec] = true
+	}
+
+	return rows
 }
 
 func queryMatrixRepresentativeOps() []string {
@@ -337,14 +517,17 @@ func queryMatrixCompleteReport() perfreport.Report {
 	report := perfreport.NewReport("clickhouse", "", 1, 0)
 
 	for i, spec := range j4RequiredMatrixOperations() {
+		inputs := map[string]any{
+			queryInputQueryTypeKey:    spec.QueryType,
+			queryInputQueryVariantKey: spec.QueryVariant,
+			queryInputDurationSource:  querySourceClickHouseLog,
+			queryInputResultDigest:    "sha256:digest",
+		}
+		queryMatrixAddRequiredEvidence(inputs, spec.Operation)
+
 		report.AddOperationWithCounters(
 			spec.Operation,
-			map[string]any{
-				queryInputQueryTypeKey:    spec.QueryType,
-				queryInputQueryVariantKey: spec.QueryVariant,
-				queryInputDurationSource:  querySourceClickHouseLog,
-				queryInputResultDigest:    "sha256:digest",
-			},
+			inputs,
 			[]float64{float64(i + 1)},
 			[]uint64{1},
 			[]uint64{2},
@@ -354,6 +537,34 @@ func queryMatrixCompleteReport() perfreport.Report {
 	}
 
 	return report
+}
+
+func queryMatrixAddRequiredEvidence(inputs map[string]any, operation string) {
+	switch operation {
+	case queryOpImportReadinessPublishName:
+		queryMatrixAddAuditEvidence(inputs, []string{
+			tableSchema3SnapshotSets,
+			queryAuditSurfaceActiveVirtualReady,
+			tableActivePrefixRollupSets,
+			queryAuditSurfaceMountEventsPublish,
+		})
+	case queryOpActiveSnapshotCleanupName:
+		queryMatrixAddAuditEvidence(inputs, activeSnapshotCleanupSurfaces())
+	case queryOpVirtualActivePrefixRollupName:
+		inputs[queryInputActivePrefixRouteProof] = queryActivePrefixRollupRouteProofRead
+		inputs[queryInputActivePrefixScalarRootRows] = uint64(1)
+	}
+}
+
+func queryMatrixAddAuditEvidence(inputs map[string]any, surfaces []string) {
+	inputs[queryInputAuditSurfaces] = append([]string(nil), surfaces...)
+
+	counts := make(map[string]uint64, len(surfaces))
+	for index, surface := range surfaces {
+		counts[surface] = uint64(index + 1)
+	}
+
+	inputs[queryInputAuditCounts] = counts
 }
 
 func cloneJ4Report(report perfreport.Report) perfreport.Report {
@@ -387,5 +598,137 @@ func removeJ4ReportOperation(report *perfreport.Report, name string) {
 
 			return
 		}
+	}
+}
+
+func queryMatrixSetActiveSnapshotCleanupEvidence(
+	report *perfreport.Report,
+	surfaces []string,
+	counts map[string]uint64,
+	digest string,
+) {
+	mutateJ4ReportOperation(report, queryOpActiveSnapshotCleanupName, func(op *perfreport.Operation) {
+		op.Inputs[queryInputAuditSurfaces] = surfaces
+		op.Inputs[queryInputAuditCounts] = counts
+		op.Inputs[queryInputResultDigest] = digest
+		op.ResultCount = []uint64{uint64(len(surfaces))}
+	})
+}
+
+func mutateJ4ReportOperation(
+	report *perfreport.Report,
+	name string,
+	mutate func(*perfreport.Operation),
+) {
+	for i := range report.Operations {
+		if report.Operations[i].Name == name {
+			mutate(&report.Operations[i])
+
+			return
+		}
+	}
+}
+
+func queryMatrixJ4BaselineCleanupSurfaces() []string {
+	return []string{
+		tableMountEvents,
+		tableFiles,
+		"wrstat_children",
+		"wrstat_parent_facts",
+		tableDirFacts,
+		tableDirSummarySets,
+		tableDirFilterAgeAll,
+		tableChildFilterAll,
+		tableDirFilterAll,
+		tableSchema3SnapshotSets,
+		tableBasedirsGroupUsage,
+		tableBasedirsUserUsage,
+		tableBasedirsGroupSubdirs,
+		tableBasedirsUserSubdirs,
+		tableActiveVirtualSummaries,
+		tableActiveVirtualFilterAll,
+		tableActiveVirtualChildren,
+		tableActiveVirtualSets,
+		tableActivePrefixRollups,
+		tableActivePrefixFilterAgeAll,
+		tableActivePrefixRollupSets,
+	}
+}
+
+func queryMatrixJ4BaselineCleanupCounts() map[string]uint64 {
+	return map[string]uint64{
+		tableActivePrefixFilterAgeAll: 51,
+		tableActivePrefixRollupSets:   1,
+		tableActivePrefixRollups:      3,
+		tableActiveVirtualChildren:    4,
+		tableActiveVirtualFilterAll:   658,
+		tableActiveVirtualSets:        1,
+		tableActiveVirtualSummaries:   5,
+		tableBasedirsGroupSubdirs:     202,
+		tableBasedirsGroupUsage:       60,
+		tableBasedirsUserSubdirs:      229,
+		tableBasedirsUserUsage:        87,
+		tableChildFilterAll:           712009,
+		"wrstat_children":             36149,
+		tableDirFacts:                 36151,
+		tableDirFilterAgeAll:          72434,
+		tableDirFilterAll:             712009,
+		tableDirSummarySets:           2,
+		tableFiles:                    200000,
+		tableMountEvents:              2,
+		"wrstat_parent_facts":         36151,
+		tableSchema3SnapshotSets:      2,
+	}
+}
+
+func queryMatrixJ4CurrentCleanupSurfaces() []string {
+	return []string{
+		tableMountEvents,
+		tableCatalog,
+		tableFiles,
+		tableSchema3SnapshotSets,
+		tableDirFacts,
+		tableDirSummarySets,
+		tableDirFilterAgeAll,
+		tableChildFilterAll,
+		tableDirFilterAll,
+		tableBasedirsGroupUsage,
+		tableBasedirsUserUsage,
+		tableBasedirsGroupSubdirs,
+		tableBasedirsUserSubdirs,
+		tableActiveVirtualDirs,
+		tableActiveVirtualSummaries,
+		tableActiveVirtualFilterAll,
+		tableActiveVirtualChildren,
+		tableActiveVirtualSets,
+		tableActivePrefixRollups,
+		tableActivePrefixFilterAgeAll,
+		tableActivePrefixRollupSets,
+	}
+}
+
+func queryMatrixJ4CurrentCleanupCounts() map[string]uint64 {
+	return map[string]uint64{
+		tableActivePrefixFilterAgeAll: 51,
+		tableActivePrefixRollupSets:   1,
+		tableActivePrefixRollups:      3,
+		tableActiveVirtualChildren:    4,
+		tableActiveVirtualDirs:        5,
+		tableActiveVirtualFilterAll:   658,
+		tableActiveVirtualSets:        1,
+		tableActiveVirtualSummaries:   5,
+		tableBasedirsGroupSubdirs:     202,
+		tableBasedirsGroupUsage:       60,
+		tableBasedirsUserSubdirs:      229,
+		tableBasedirsUserUsage:        87,
+		tableChildFilterAll:           711569,
+		tableDirFacts:                 36151,
+		tableDirFilterAgeAll:          72382,
+		tableDirFilterAll:             711569,
+		tableDirSummarySets:           2,
+		tableCatalog:                  36151,
+		tableFiles:                    200000,
+		tableMountEvents:              2,
+		tableSchema3SnapshotSets:      2,
 	}
 }

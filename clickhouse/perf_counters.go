@@ -94,15 +94,16 @@ func (c *SystemEventCounter) Close() error {
 
 // TreeQueryCacheStats is a public snapshot of process-local tree cache counters.
 type TreeQueryCacheStats struct {
-	ChildFilterAllReads        uint64
-	FactVectorReads            uint64
-	ChildFilterReadKeys        []string
-	ActivePrefixSummaryHits    uint64
-	ActivePrefixSummaryMisses  uint64
-	ActiveMetadataHits         uint64
-	ActiveMetadataMisses       uint64
-	ActivePrefixSummaryHitKeys []string
-	ActiveMetadataHitKeys      []string
+	ChildFilterAllReads         uint64
+	FactVectorReads             uint64
+	ChildFilterReadKeys         []string
+	ActivePrefixSummaryHits     uint64
+	ActivePrefixSummaryMisses   uint64
+	ActivePrefixRollupFallbacks uint64
+	ActiveMetadataHits          uint64
+	ActiveMetadataMisses        uint64
+	ActivePrefixSummaryHitKeys  []string
+	ActiveMetadataHitKeys       []string
 }
 
 // ReadTreeQueryCacheStats reads process-local tree query cache counters.
@@ -110,15 +111,16 @@ func ReadTreeQueryCacheStats(cfg Config) TreeQueryCacheStats {
 	stats := treeQueryCacheForConfig(cfg).stats()
 
 	return TreeQueryCacheStats{
-		ChildFilterAllReads:        stats.childFilterAllReads,
-		FactVectorReads:            stats.factVectorReads,
-		ChildFilterReadKeys:        append([]string(nil), stats.childFilterReadKeys...),
-		ActivePrefixSummaryHits:    stats.activePrefixSummaryHits,
-		ActivePrefixSummaryMisses:  stats.activePrefixSummaryMisses,
-		ActiveMetadataHits:         stats.activeMetadataHits,
-		ActiveMetadataMisses:       stats.activeMetadataMisses,
-		ActivePrefixSummaryHitKeys: append([]string(nil), stats.activePrefixSummaryHitKeys...),
-		ActiveMetadataHitKeys:      append([]string(nil), stats.activeMetadataHitKeys...),
+		ChildFilterAllReads:         stats.childFilterAllReads,
+		FactVectorReads:             stats.factVectorReads,
+		ChildFilterReadKeys:         append([]string(nil), stats.childFilterReadKeys...),
+		ActivePrefixSummaryHits:     stats.activePrefixSummaryHits,
+		ActivePrefixSummaryMisses:   stats.activePrefixSummaryMisses,
+		ActivePrefixRollupFallbacks: activePrefixRollupMissCounter.Load(),
+		ActiveMetadataHits:          stats.activeMetadataHits,
+		ActiveMetadataMisses:        stats.activeMetadataMisses,
+		ActivePrefixSummaryHitKeys:  append([]string(nil), stats.activePrefixSummaryHitKeys...),
+		ActiveMetadataHitKeys:       append([]string(nil), stats.activeMetadataHitKeys...),
 	}
 }
 
@@ -135,6 +137,7 @@ func (s TreeQueryCacheStats) Misses() uint64 {
 // ResetTreeQueryCacheStats clears process-local tree query cache counters.
 func ResetTreeQueryCacheStats(cfg Config) {
 	treeQueryCacheForConfig(cfg).resetStats()
+	activePrefixRollupMissCounter.Store(0)
 }
 
 // ReadSchema3FallbackRoutes reads schema3 fallback route counters.

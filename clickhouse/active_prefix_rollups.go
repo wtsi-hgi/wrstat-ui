@@ -63,6 +63,12 @@ const (
 		"INNER JOIN wrstat_dirs c " +
 		"ON c.mount_path = f.mount_path AND c.snapshot_id = f.snapshot_id AND c.dir_id = f.dir_id " +
 		"WHERE %s GROUP BY f.mount_path, f.snapshot_id"
+	activePrefixRootDGUTAsQuery = "SELECT dir, " + dgutaTupleColumns + " FROM (" +
+		"SELECT d.mount_path AS dir, arrayJoin(" + dgutaPrefixedArrayZipExpr + ") AS g " +
+		"FROM wrstat_dir_facts d " +
+		"INNER JOIN wrstat_dirs c " +
+		"ON c.mount_path = d.mount_path AND c.snapshot_id = d.snapshot_id AND c.dir_id = d.dir_id " +
+		"WHERE c.full_path = d.mount_path AND %s)"
 	activePrefixScalarRollupReadQuery = "SELECT updated_at, toUInt8(0) AS age, all_count AS count, " +
 		"all_size AS size, all_atime_min AS atime_min, all_mtime_max AS mtime_max, " +
 		"all_atime_buckets AS atime_buckets, all_mtime_buckets AS mtime_buckets, " +
@@ -454,7 +460,12 @@ func addActivePrefixRootGUTAs(
 	mounts []activeMount,
 	state *mountDirProjectionState,
 ) error {
-	query, args := activeMountRootDirTuplesQuery(mounts)
+	condition, args := activeMountRootDirTuplesCondition(
+		"d.mount_path",
+		"d.snapshot_id",
+		mounts,
+	)
+	query := fmt.Sprintf(activePrefixRootDGUTAsQuery, condition)
 
 	rows, err := conn.Query(ctx, query, args...)
 	if err != nil {

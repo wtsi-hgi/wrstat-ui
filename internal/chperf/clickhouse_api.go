@@ -242,6 +242,7 @@ func (c clickHouseQueryClient) Close() error {
 }
 
 type clickHouseQueryInspector struct {
+	cfg       clickhouse.Config
 	inspector *clickhouse.Inspector
 }
 
@@ -294,6 +295,59 @@ func convertQueryMetrics(metrics *clickhouse.QueryMetrics) *QueryMetrics {
 	}
 }
 
+func (i clickHouseQueryInspector) ImportReadinessPublishAudit(ctx context.Context) ([]QueryAuditRow, error) {
+	rows, err := i.inspector.ImportReadinessPublishAudit(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	return convertInspectorAuditRows(rows), nil
+}
+
+func convertInspectorAuditRows(rows []clickhouse.InspectorAuditRow) []QueryAuditRow {
+	converted := make([]QueryAuditRow, len(rows))
+	for index, row := range rows {
+		converted[index] = QueryAuditRow{
+			Surface: row.Surface,
+			Rows:    row.Rows,
+		}
+	}
+
+	return converted
+}
+
+func (i clickHouseQueryInspector) ActiveSnapshotCleanupAudit(ctx context.Context) ([]QueryAuditRow, error) {
+	rows, err := i.inspector.ActiveSnapshotCleanupAudit(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	return convertInspectorAuditRows(rows), nil
+}
+
+func (i clickHouseQueryInspector) ActivePrefixRollupAudit(ctx context.Context) ([]QueryAuditRow, error) {
+	rows, err := i.inspector.ActivePrefixRollupAudit(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	return convertInspectorAuditRows(rows), nil
+}
+
+func (i clickHouseQueryInspector) TreeRouteStats() QueryRouteStats {
+	stats := clickhouse.ReadTreeQueryCacheStats(i.cfg)
+
+	return QueryRouteStats{
+		ActivePrefixSummaryHits:     stats.ActivePrefixSummaryHits,
+		ActivePrefixSummaryMisses:   stats.ActivePrefixSummaryMisses,
+		ActivePrefixRollupFallbacks: stats.ActivePrefixRollupFallbacks,
+		ActiveMetadataHits:          stats.ActiveMetadataHits,
+		ActiveMetadataMisses:        stats.ActiveMetadataMisses,
+		ActivePrefixSummaryHitKeys:  append([]string(nil), stats.ActivePrefixSummaryHitKeys...),
+		ActiveMetadataHitKeys:       append([]string(nil), stats.ActiveMetadataHitKeys...),
+	}
+}
+
 func (i clickHouseQueryInspector) Close() error {
 	return i.inspector.Close()
 }
@@ -325,7 +379,7 @@ func (a *clickHouseAPI) NewQueryInspector() (QueryInspector, error) {
 		return nil, err
 	}
 
-	return clickHouseQueryInspector{inspector: inspector}, nil
+	return clickHouseQueryInspector{cfg: a.cfg, inspector: inspector}, nil
 }
 
 func (a *clickHouseAPI) NewDGUTAWriter() (db.DGUTAWriter, error) {

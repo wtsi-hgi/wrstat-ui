@@ -105,6 +105,24 @@ type QueryMetrics struct {
 	ResultBytes uint64
 }
 
+// QueryAuditRow captures a read-only maintenance audit surface and row count.
+type QueryAuditRow struct {
+	Surface string `json:"surface"`
+	Rows    uint64 `json:"rows"`
+}
+
+// QueryRouteStats captures process-local route counters around measured query
+// operations.
+type QueryRouteStats struct {
+	ActivePrefixSummaryHits     uint64
+	ActivePrefixSummaryMisses   uint64
+	ActivePrefixRollupFallbacks uint64
+	ActiveMetadataHits          uint64
+	ActiveMetadataMisses        uint64
+	ActivePrefixSummaryHitKeys  []string
+	ActiveMetadataHitKeys       []string
+}
+
 // QueryInspector exposes EXPLAIN and per-query metrics for the perf harness.
 type QueryInspector interface {
 	io.Closer
@@ -113,6 +131,10 @@ type QueryInspector interface {
 	ExplainStatPath(ctx context.Context, mountPath, path string) (string, error)
 	ExplainFindByGlob(ctx context.Context, baseDirs, patterns []string) (string, error)
 	Measure(ctx context.Context, run func(ctx context.Context) error) (*QueryMetrics, error)
+	ImportReadinessPublishAudit(ctx context.Context) ([]QueryAuditRow, error)
+	ActiveSnapshotCleanupAudit(ctx context.Context) ([]QueryAuditRow, error)
+	ActivePrefixRollupAudit(ctx context.Context) ([]QueryAuditRow, error)
+	TreeRouteStats() QueryRouteStats
 }
 
 // QueryCacheResetter clears storage-local query caches for cold-cache

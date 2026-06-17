@@ -44,6 +44,11 @@ var (
 	errTestIteration = errors.New("iteration failed")
 )
 
+const (
+	testAuditMountEvents         = "wrstat_mount_events"
+	testAuditSchema3SnapshotSets = "wrstat_schema3_snapshot_sets"
+)
+
 func TestNewInspector(t *testing.T) {
 	Convey("NewInspector validates Config", t, func() {
 		Convey("it errors when DSN is empty", func() {
@@ -128,6 +133,29 @@ func (*profileEventsTestRows) Err() error {
 
 func (*profileEventsTestRows) HasData() bool {
 	return true
+}
+
+func TestInspectorAuditRows(t *testing.T) {
+	Convey("scanInspectorAuditRows captures named audit counts", t, func() {
+		rows := &profileEventsTestRows{
+			events: map[string]uint64{
+				testAuditMountEvents:         4,
+				testAuditSchema3SnapshotSets: 2,
+			},
+			keys: []string{
+				testAuditMountEvents,
+				testAuditSchema3SnapshotSets,
+			},
+		}
+
+		auditRows, err := scanInspectorAuditRows(rows, "test")
+
+		So(err, ShouldBeNil)
+		So(auditRows, ShouldResemble, []InspectorAuditRow{
+			{Surface: testAuditMountEvents, Rows: 4},
+			{Surface: testAuditSchema3SnapshotSets, Rows: 2},
+		})
+	})
 }
 
 func TestInspectorExplainListDir(t *testing.T) {

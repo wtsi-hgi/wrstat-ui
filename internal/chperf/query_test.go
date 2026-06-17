@@ -241,11 +241,15 @@ func TestPickDir(t *testing.T) {
 }
 
 type fakeQueryInspector struct {
-	explainFindByGlob func(ctx context.Context, baseDirs, patterns []string) (string, error)
-	explainListDir    func(ctx context.Context, mountPath, dir string, limit, offset int64) (string, error)
-	explainStatPath   func(ctx context.Context, mountPath, path string) (string, error)
-	measure           func(ctx context.Context, run func(ctx context.Context) error) (*QueryMetrics, error)
-	closeFn           func() error
+	explainFindByGlob           func(ctx context.Context, baseDirs, patterns []string) (string, error)
+	explainListDir              func(ctx context.Context, mountPath, dir string, limit, offset int64) (string, error)
+	explainStatPath             func(ctx context.Context, mountPath, path string) (string, error)
+	measure                     func(ctx context.Context, run func(ctx context.Context) error) (*QueryMetrics, error)
+	importReadinessPublishAudit func(ctx context.Context) ([]QueryAuditRow, error)
+	activeSnapshotCleanupAudit  func(ctx context.Context) ([]QueryAuditRow, error)
+	activePrefixRollupAudit     func(ctx context.Context) ([]QueryAuditRow, error)
+	treeRouteStats              func() QueryRouteStats
+	closeFn                     func() error
 }
 
 func (f fakeQueryInspector) ExplainListDir(
@@ -291,6 +295,38 @@ func (f fakeQueryInspector) Measure(
 	run func(ctx context.Context) error,
 ) (*QueryMetrics, error) {
 	return f.measure(ctx, run)
+}
+
+func (f fakeQueryInspector) ImportReadinessPublishAudit(ctx context.Context) ([]QueryAuditRow, error) {
+	if f.importReadinessPublishAudit != nil {
+		return f.importReadinessPublishAudit(ctx)
+	}
+
+	return nil, nil
+}
+
+func (f fakeQueryInspector) ActiveSnapshotCleanupAudit(ctx context.Context) ([]QueryAuditRow, error) {
+	if f.activeSnapshotCleanupAudit != nil {
+		return f.activeSnapshotCleanupAudit(ctx)
+	}
+
+	return nil, nil
+}
+
+func (f fakeQueryInspector) ActivePrefixRollupAudit(ctx context.Context) ([]QueryAuditRow, error) {
+	if f.activePrefixRollupAudit != nil {
+		return f.activePrefixRollupAudit(ctx)
+	}
+
+	return nil, nil
+}
+
+func (f fakeQueryInspector) TreeRouteStats() QueryRouteStats {
+	if f.treeRouteStats != nil {
+		return f.treeRouteStats()
+	}
+
+	return QueryRouteStats{}
 }
 
 func (f fakeQueryInspector) Close() error {
@@ -753,6 +789,14 @@ func TestRunSuiteOperationSelection(t *testing.T) {
 						ReadMarks:  6,
 					}, nil
 				},
+				activePrefixRollupAudit: func(context.Context) ([]QueryAuditRow, error) {
+					return []QueryAuditRow{
+						{Surface: tableActivePrefixRollupSets, Rows: 1},
+						{Surface: tableActivePrefixRollups, Rows: 3},
+						{Surface: tableActivePrefixFilterAgeAll, Rows: 51},
+						{Surface: "wrstat_active_prefix_scalar_root_read", Rows: 1},
+					}, nil
+				},
 			},
 			dir:        queryOpTestRootDir,
 			treeFilter: queryTestTreeFilter(),
@@ -769,6 +813,7 @@ func TestRunSuiteOperationSelection(t *testing.T) {
 			queryOpWhereFilteredWholeMountName,
 			queryOpVirtualChildrenName,
 			queryOpVirtualDirInfoName,
+			queryOpVirtualActivePrefixRollupName,
 			queryOpFindGlobExtensionDotfileName,
 		}
 
@@ -803,6 +848,15 @@ func TestRunSuiteOperationSelection(t *testing.T) {
 		for _, name := range focusedOps {
 			So(names, ShouldContain, name)
 		}
+
+		activePrefix := operationByName(report, queryOpVirtualActivePrefixRollupName)
+		So(activePrefix.Inputs["rollup_tables"], ShouldContain, tableActivePrefixRollups)
+		So(activePrefix.Inputs[queryInputTreeFilterRouteKey], ShouldEqual, tableActivePrefixRollups)
+		So(activePrefix.Inputs[queryInputActivePrefixRouteProof], ShouldEqual, "active_prefix_rollup_read")
+		So(activePrefix.Inputs["active_prefix_rollup_rows"], ShouldEqual, uint64(3))
+		So(activePrefix.Inputs["active_prefix_scalar_root_read_rows"], ShouldEqual, uint64(1))
+		So(activePrefix.Inputs[queryInputAuditSurfaces], ShouldContain, "wrstat_active_prefix_scalar_root_read")
+		So(activePrefix.Inputs[queryInputResultDigest], ShouldNotBeBlank)
 
 		decisions := queryTestD4Decisions(report)
 		So(decisions, ShouldHaveLength, len(finalGateJ6D4RequiredPatterns()))
@@ -1301,6 +1355,108 @@ func TestStartupCacheWarmingAudit(t *testing.T) {
 			queryOpTreeDiskTreeProviderUpdateName,
 		})
 	})
+
+	Convey("runSuite reports measured maintenance readiness and cleanup matrix audits", t, func() {
+		var (
+			readinessCalls int
+			cleanupCalls   int
+		)
+
+		qctx := queryContext{
+			client: &fakeQueryClient{},
+			inspector: fakeQueryInspector{
+				measure: func(ctx context.Context, run func(context.Context) error) (*QueryMetrics, error) {
+					if err := run(ctx); err != nil {
+						return nil, err
+					}
+
+					return &QueryMetrics{
+						DurationMs:  7,
+						ReadRows:    11,
+						ReadBytes:   13,
+						ReadMarks:   17,
+						ResultRows:  4,
+						ResultBytes: 19,
+					}, nil
+				},
+				importReadinessPublishAudit: func(context.Context) ([]QueryAuditRow, error) {
+					readinessCalls++
+
+					return []QueryAuditRow{
+						{Surface: tableActivePrefixRollupSets, Rows: 3},
+						{Surface: tableActiveVirtualSets, Rows: 2},
+						{Surface: tableMountEvents, Rows: 5},
+						{Surface: tableSchema3SnapshotSets, Rows: 1},
+					}, nil
+				},
+				activeSnapshotCleanupAudit: func(context.Context) ([]QueryAuditRow, error) {
+					cleanupCalls++
+
+					return []QueryAuditRow{
+						{Surface: tableMountEvents, Rows: 5},
+						{Surface: tableActiveVirtualChildren, Rows: 8},
+						{Surface: tableActivePrefixRollupSets, Rows: 3},
+					}, nil
+				},
+			},
+			dir: queryOpTestRootDir,
+		}
+		report := boltperf.NewReport("clickhouse", "", 5, 3)
+
+		err := runSuite(&report, qctx, QueryOptions{
+			Repeat: 5,
+			Warmup: 3,
+			Ops: []string{
+				queryOpImportReadinessPublishName,
+				queryOpActiveSnapshotCleanupName,
+			},
+		}, func(string, ...any) {})
+
+		So(err, ShouldBeNil)
+		So(report.Operations, ShouldHaveLength, 2)
+
+		readinessPublish := operationByName(report, queryOpImportReadinessPublishName)
+		So(readinessPublish.Inputs[queryInputQueryTypeKey], ShouldEqual, j4QueryTypeMaintenance)
+		So(readinessPublish.Inputs[queryInputQueryVariantKey], ShouldEqual, "import readiness/publish")
+		So(readinessPublish.Inputs[queryInputDurationSource], ShouldEqual, querySourceClickHouseLog)
+		So(readinessPublish.Inputs["readiness_phases"], ShouldContain, phaseActivePrefixRefresh)
+		So(readinessPublish.Inputs["publish_guardrail"], ShouldEqual, importGuardrailActiveSnapshotPublish)
+		So(readinessPublish.Inputs["readiness_tables"], ShouldContain, tableMountEvents)
+		So(readinessPublish.Inputs[queryInputAuditSurfaces], ShouldContain, tableMountEvents)
+		So(readinessPublish.Inputs[queryInputAuditCounts], ShouldResemble, map[string]uint64{
+			tableActivePrefixRollupSets: 3,
+			tableActiveVirtualSets:      2,
+			tableMountEvents:            5,
+			tableSchema3SnapshotSets:    1,
+		})
+		So(readinessPublish.ResultCount, ShouldResemble, []uint64{4})
+		So(readinessPublish.DurationsMS, ShouldResemble, []float64{7})
+		So(readinessPublish.ReadRows, ShouldResemble, []uint64{11})
+		So(readinessPublish.ReadBytes, ShouldResemble, []uint64{13})
+		So(readinessPublish.ReadMarks, ShouldResemble, []uint64{17})
+		So(readinessPublish.Inputs[queryInputResultDigest], ShouldNotBeBlank)
+		So(readinessCalls, ShouldEqual, 1)
+
+		cleanup := operationByName(report, queryOpActiveSnapshotCleanupName)
+		So(cleanup.Inputs[queryInputQueryTypeKey], ShouldEqual, j4QueryTypeMaintenance)
+		So(cleanup.Inputs[queryInputQueryVariantKey], ShouldEqual, "active-snapshot cleanup")
+		So(cleanup.Inputs[queryInputDurationSource], ShouldEqual, querySourceClickHouseLog)
+		So(cleanup.Inputs["cleanup_phase"], ShouldEqual, phaseOldSnapshotDrop)
+		So(cleanup.Inputs["cleanup_surfaces"], ShouldContain, tableActiveVirtualChildren)
+		So(cleanup.Inputs["cleanup_surfaces"], ShouldContain, tableActivePrefixRollupSets)
+		So(cleanup.Inputs[queryInputAuditCounts], ShouldResemble, map[string]uint64{
+			tableMountEvents:            5,
+			tableActiveVirtualChildren:  8,
+			tableActivePrefixRollupSets: 3,
+		})
+		So(cleanup.ResultCount, ShouldResemble, []uint64{3})
+		So(cleanup.DurationsMS, ShouldResemble, []float64{7})
+		So(cleanup.ReadRows, ShouldResemble, []uint64{11})
+		So(cleanup.ReadBytes, ShouldResemble, []uint64{13})
+		So(cleanup.ReadMarks, ShouldResemble, []uint64{17})
+		So(cleanup.Inputs[queryInputResultDigest], ShouldNotBeBlank)
+		So(cleanupCalls, ShouldEqual, 1)
+	})
 }
 
 func TestBuildOps(t *testing.T) {
@@ -1325,6 +1481,9 @@ func TestBuildOps(t *testing.T) {
 
 		So(names, ShouldContain, queryOpTreeDiskTreeEndName)
 		So(names, ShouldContain, queryOpTreeWhereName)
+		So(names, ShouldContain, queryOpVirtualActivePrefixRollupName)
+		So(names, ShouldContain, queryOpImportReadinessPublishName)
+		So(names, ShouldContain, queryOpActiveSnapshotCleanupName)
 		So(whereInputs, ShouldNotBeNil)
 		So(whereInputs[queryInputDirKey], ShouldEqual, queryOpTestRootDir)
 		So(whereInputs["splits"], ShouldEqual, 2)
