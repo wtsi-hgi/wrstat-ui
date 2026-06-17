@@ -52,10 +52,30 @@ const (
 		"WHERE active_set_id = ?"
 	summariseSpoolLoaderCountActivePrefixSetQuery = "SELECT count() FROM wrstat_active_prefix_rollup_sets " +
 		"WHERE active_set_id = ?"
-	summariseSpoolExistingMountPath     = "/mnt/existing-spool-publish/"
-	summariseSpoolLoaderMountPathColumn = "mount_path"
-	summariseSpoolLoaderSchemaMarker    = "test"
-	summariseSpoolLoaderUpdatedAtColumn = "updated_at"
+	summariseSpoolExistingMountPath                 = "/mnt/existing-spool-publish/"
+	summariseSpoolLoaderMountPathColumn             = "mount_path"
+	summariseSpoolLoaderSchemaMarker                = "test"
+	summariseSpoolLoaderUpdatedAtColumn             = "updated_at"
+	summariseSpoolLoaderCreatePreOverhaulFilesTable = "CREATE TABLE wrstat_files (" +
+		"mount_path LowCardinality(String) CODEC(LZ4), " +
+		"snapshot_id UUID, " +
+		"parent_dir String CODEC(LZ4), " +
+		"name String CODEC(LZ4), " +
+		"path String ALIAS concat(parent_dir, name), " +
+		"ext LowCardinality(String) CODEC(LZ4), " +
+		"entry_type UInt8, " +
+		"size UInt64 CODEC(Delta, LZ4), " +
+		"apparent_size UInt64 CODEC(Delta, LZ4), " +
+		"uid UInt32, " +
+		"gid UInt32, " +
+		"atime DateTime CODEC(Delta, LZ4), " +
+		"mtime DateTime CODEC(Delta, LZ4), " +
+		"ctime DateTime CODEC(Delta, LZ4), " +
+		"inode UInt64 CODEC(Delta, LZ4), " +
+		"nlink UInt64 CODEC(Delta, LZ4), " +
+		"INDEX ext_idx ext TYPE set(256) GRANULARITY 1" +
+		") ENGINE = MergeTree PARTITION BY (mount_path, snapshot_id) " +
+		"ORDER BY (mount_path, snapshot_id, parent_dir, name)"
 )
 
 var errSummariseSpoolLoaderTestSystemPartsTimedOut = errors.New("system.parts timed out")
@@ -100,6 +120,30 @@ func (r summariseSpoolCountRow) Scan(dest ...any) error {
 
 func (r summariseSpoolCountRow) ScanStruct(any) error {
 	return r.err
+}
+
+func summariseSpoolTableColumns(
+	ctx context.Context,
+	conn driver.Conn,
+	database string,
+	table string,
+) []string {
+	rows, err := conn.Query(ctx, testSystemColumnsQuery, database, table)
+	So(err, ShouldBeNil)
+
+	defer func() { _ = rows.Close() }()
+
+	columns := make([]string, 0)
+
+	for rows.Next() {
+		var column string
+		So(rows.Scan(&column), ShouldBeNil)
+		columns = append(columns, column)
+	}
+
+	So(rows.Err(), ShouldBeNil)
+
+	return columns
 }
 
 type summariseSpoolSlowBatch struct {
@@ -355,6 +399,42 @@ func TestClickHouseSummariseSpoolLoader(t *testing.T) {
 		So(countRows(ctx, verifyConn, summariseSpoolLoaderCountActivePrefixSetQuery, activeSetID), ShouldEqual, 1)
 		So(countRows(ctx, verifyConn, summariseSpoolLoaderCountActivePrefixAgeAllQuery, activeSetID),
 			ShouldBeGreaterThan, uint64(0))
+	})
+
+	Convey("summarise spool publish updates a pre-overhaul wrstat_files table before loading file rows", t, func() {
+		th := newClickHouseTestHarness(t)
+		cfg := th.newConfig()
+		cfg.QueryTimeout = 5 * time.Second
+
+		seedConn := summariseSpoolSeedPreOverhaulFilesDB(t, th, cfg)
+		So(summariseSpoolTableColumns(context.Background(), seedConn, cfg.Database, chspool.TableFiles),
+			ShouldNotContain, "dir_id")
+		So(seedConn.Close(), ShouldBeNil)
+
+		spoolDir := filepath.Join(t.TempDir(), "spool")
+		updatedAt := time.Date(2026, 6, 17, 20, 0, 26, 0, time.UTC)
+		manifest := writeSummariseSpoolLoaderSchema3SpoolWithFiles(spoolDir, updatedAt)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		So(LoadSummariseSpool(ctx, cfg, spoolDir, manifest, nil), ShouldBeNil)
+
+		verifyConn := th.openConn(cfg.DSN)
+
+		Reset(func() { So(verifyConn.Close(), ShouldBeNil) })
+
+		columns := summariseSpoolTableColumns(ctx, verifyConn, cfg.Database, chspool.TableFiles)
+		So(columns, ShouldContain, "dir_id")
+		So(countRows(ctx, verifyConn, "SELECT count() FROM wrstat_files WHERE mount_path = ? "+
+			"AND snapshot_id = toUUID(?) AND dir_id = ? AND name = ?",
+			testMountPath, manifest.SnapshotID, summariseSpoolLoaderDirID(testMountPath), f3GlobFileTxtName),
+			ShouldEqual, 1)
+
+		activeSID, hasActive, err := readActiveSnapshotID(ctx, verifyConn, testMountPath)
+		So(err, ShouldBeNil)
+		So(hasActive, ShouldBeTrue)
+		So(activeSID, ShouldEqual, manifest.SnapshotID)
 	})
 
 	Convey("summarise spool load publishes active virtual readiness for all active mounts", t, func() {
@@ -1250,6 +1330,14 @@ func writeSummariseSpoolLoaderSchema3Spool(
 	spoolDir string,
 	updatedAt time.Time,
 ) *chspool.Manifest {
+	return writeSummariseSpoolLoaderSchema3SpoolWithOptionalFiles(spoolDir, updatedAt, false)
+}
+
+func writeSummariseSpoolLoaderSchema3SpoolWithOptionalFiles(
+	spoolDir string,
+	updatedAt time.Time,
+	includeFiles bool,
+) *chspool.Manifest {
 	set, err := chspool.CreateSet(spoolDir)
 	So(err, ShouldBeNil)
 
@@ -1269,6 +1357,7 @@ func writeSummariseSpoolLoaderSchema3Spool(
 		set.WriteDir(summariseSpoolLoaderDirRow(sid, "/mnt/", 1, 1)),
 		set.WriteDir(summariseSpoolLoaderDirRow(sid, testMountPath, 1, 1)),
 		set.WriteDir(summariseSpoolLoaderDirRow(sid, testMountPath+"project/", 0, 0)),
+		writeSummariseSpoolLoaderOptionalFile(set, sid, updatedAt, includeFiles),
 		set.WriteDirFact(rootFact),
 		set.WriteDirFact(namespaceFact),
 		set.WriteDirFact(mountFact),
@@ -1450,6 +1539,35 @@ func summariseSpoolLoaderDirRow(sid string, dir string, childDirs, childFiles ui
 
 func summariseSpoolLoaderDepth(dir string) uint16 {
 	return uint16(strings.Count(strings.Trim(dir, "/"), "/")) //nolint:gosec // Test fixture paths have bounded depth.
+}
+
+func writeSummariseSpoolLoaderOptionalFile(
+	set *chspool.Set,
+	sid string,
+	updatedAt time.Time,
+	include bool,
+) error {
+	if !include {
+		return nil
+	}
+
+	return set.WriteFile(chspool.FileRow{
+		MountPath:    testMountPath,
+		SnapshotID:   sid,
+		DirID:        summariseSpoolLoaderDirID(testMountPath),
+		Name:         f3GlobFileTxtName,
+		Ext:          f3GlobTxtExt,
+		EntryType:    1,
+		Size:         42,
+		ApparentSize: 48,
+		UID:          17,
+		GID:          7,
+		ATime:        updatedAt,
+		MTime:        updatedAt,
+		CTime:        updatedAt,
+		Inode:        123,
+		Nlink:        1,
+	})
 }
 
 func summariseSpoolLoaderActiveVirtualDirRow(
@@ -1724,6 +1842,38 @@ func summariseSpoolLoaderSchema2AgeAllRow(row chspool.DirFactRow) chspool.DirFil
 		MtimeBuckets: row.MtimeBuckets[0],
 		RefreshedAt:  row.RefreshedAt,
 	}
+}
+
+func summariseSpoolSeedPreOverhaulFilesDB(
+	t *testing.T,
+	th *clickHouseTestHarness,
+	cfg Config,
+) driver.Conn {
+	t.Helper()
+
+	adminConn := th.openConn(th.baseDSN(defaultDatabaseName))
+	defer func() { So(adminConn.Close(), ShouldBeNil) }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	So(adminConn.Exec(ctx, createDatabaseStmtPrefix+quoteIdent(cfg.Database)), ShouldBeNil)
+
+	conn := th.openConn(cfg.DSN)
+	So(conn.Exec(ctx, "CREATE TABLE wrstat_schema_version ("+
+		"singleton UInt8 DEFAULT 1, version UInt32, inserted_at DateTime64(3) DEFAULT now64(3)"+
+		") ENGINE = ReplacingMergeTree(inserted_at) ORDER BY singleton"), ShouldBeNil)
+	So(conn.Exec(ctx, insertSchemaVersionStmt, currentSchemaVersion), ShouldBeNil)
+	So(conn.Exec(ctx, summariseSpoolLoaderCreatePreOverhaulFilesTable), ShouldBeNil)
+
+	return conn
+}
+
+func writeSummariseSpoolLoaderSchema3SpoolWithFiles(
+	spoolDir string,
+	updatedAt time.Time,
+) *chspool.Manifest {
+	return writeSummariseSpoolLoaderSchema3SpoolWithOptionalFiles(spoolDir, updatedAt, true)
 }
 
 func writeSummariseSpoolLoaderFileOnlySpool(

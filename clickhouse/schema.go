@@ -54,6 +54,8 @@ const (
 	schemaVersionStatsQuery        = "SELECT count(), min(singleton), max(singleton), " +
 		"min(version), max(version) FROM wrstat_schema_version FINAL"
 	insertSchemaVersionStmt = "INSERT INTO wrstat_schema_version (singleton, version) VALUES (1, ?)"
+	ensureFilesDirIDColumn  = "ALTER TABLE wrstat_files ADD COLUMN IF NOT EXISTS " +
+		"dir_id UInt32 CODEC(Delta, LZ4) AFTER snapshot_id"
 )
 
 //go:embed schema/*.sql
@@ -123,6 +125,10 @@ func ensureSchema(ctx context.Context, execer ch.Conn) error {
 		return err
 	}
 
+	if err := ensureFilesSchemaReady(ctx, execer); err != nil {
+		return err
+	}
+
 	return ensureSchemaVersion(ctx, execer)
 }
 
@@ -147,6 +153,17 @@ func schemaSQL() ([]string, error) {
 	}
 
 	return stmts, nil
+}
+
+func ensureFilesSchemaReady(ctx context.Context, execer ch.Conn) error {
+	if err := execer.Exec(ctx, ensureFilesDirIDColumn); err != nil {
+		return fmt.Errorf(
+			"clickhouse: failed to ensure wrstat_files.dir_id column; please migrate or recreate wrstat_files: %w",
+			err,
+		)
+	}
+
+	return nil
 }
 
 func readSchemaStatement(name string) (string, error) {
