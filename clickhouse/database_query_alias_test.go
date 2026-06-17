@@ -87,6 +87,16 @@ func TestClickHouseDatabaseChildrenQueryAliases(t *testing.T) {
 		So(query, ShouldNotContainSubstring, "PREWHERE mount_path = ? AND snapshot_id = ?")
 		So(args, ShouldHaveLength, 3)
 	})
+
+	Convey("Info parent count uses path semantics across mount-local dir ids", t, func() {
+		query := compactSQL(infoChildrenQuery)
+		So(query, ShouldContainSubstring, "uniqExactIf(full_path, child_dir_count > 0) AS num_parents")
+		So(query, ShouldNotContainSubstring, "uniqExact(parent_id)")
+
+		snapshotQuery := compactSQL(infoChildrenSnapshotQuery)
+		So(snapshotQuery, ShouldContainSubstring, "uniqExactIf(full_path, child_dir_count > 0) AS num_parents")
+		So(snapshotQuery, ShouldNotContainSubstring, "uniqExact(parent_id)")
+	})
 }
 
 func compactSQL(query string) string {

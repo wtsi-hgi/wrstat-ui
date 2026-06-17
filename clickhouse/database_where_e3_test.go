@@ -144,6 +144,8 @@ func TestClickHouseDatabaseWhereE3DirIDRanges(t *testing.T) {
 			env.mount.mountPath + "alpha/deep/",
 			env.mount.mountPath + "beta/open/",
 		})
+		So(actual, ShouldHaveLength, 3)
+		So(actual[0].Count, ShouldEqual, actual[1].Count+actual[2].Count)
 		So(e3WhereAllGIDsAllowed(actual, 7), ShouldBeTrue)
 		So(env.shapeConn.summaryRangeReadsValue(), ShouldBeGreaterThan, 0)
 	})

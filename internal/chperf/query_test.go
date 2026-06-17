@@ -1007,6 +1007,27 @@ func TestRunSuiteOperationSelection(t *testing.T) {
 		So(noAuthWhere.Inputs[queryInputResultDigest], ShouldNotBeBlank)
 		So(noAuthWhere.ResultCount, ShouldResemble, []uint64{3})
 	})
+
+	Convey("D2.6 auth-restricted Where intersects explicit filters with allowed GIDs", t, func() {
+		filter := &db.Filter{
+			GIDs: []uint32{7, 8},
+			UIDs: []uint32{11},
+			FT:   db.DGUTAFileTypeOther,
+			Age:  db.DGUTAgeAll,
+		}
+
+		restricted := restrictedAuthWhereFilter(filter, []uint32{8, 9})
+		So(restricted.GIDs, ShouldResemble, []uint32{8})
+		So(restricted.UIDs, ShouldResemble, []uint32{11})
+		So(restricted.FT, ShouldEqual, db.DGUTAFileTypeOther)
+		So(filter.GIDs, ShouldResemble, []uint32{7, 8})
+
+		noOverlap := restrictedAuthWhereFilter(filter, []uint32{9})
+		So(noOverlap.GIDs, ShouldBeEmpty)
+
+		noFilterGIDs := restrictedAuthWhereFilter(&db.Filter{Age: db.DGUTAgeAll}, []uint32{8})
+		So(noFilterGIDs.GIDs, ShouldResemble, []uint32{8})
+	})
 }
 
 func newQueryOpTestDB() *queryOpTestDB {

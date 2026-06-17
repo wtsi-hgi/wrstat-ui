@@ -125,7 +125,7 @@ const (
 		")"
 
 	infoChildrenQuery = "SELECT " +
-		"uniqExact(parent_id) AS num_parents, " +
+		"uniqExactIf(full_path, child_dir_count > 0) AS num_parents, " +
 		"sum(child_dir_count) AS num_children " +
 		"FROM wrstat_dirs " +
 		"WHERE (mount_path, snapshot_id) IN (" +
@@ -358,7 +358,7 @@ const (
 		"WHERE %s"
 
 	infoChildrenSnapshotQuery = "SELECT " +
-		"uniqExact(parent_id) AS num_parents, " +
+		"uniqExactIf(full_path, child_dir_count > 0) AS num_parents, " +
 		"sum(child_dir_count) AS num_children " +
 		"FROM wrstat_dirs " +
 		"WHERE %s"
