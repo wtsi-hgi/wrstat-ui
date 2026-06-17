@@ -971,6 +971,7 @@ func TestClickHousePerfQuery(t *testing.T) {
 		treeDirInfo := findReportOperation(report.Operations, perfOpTreeDirInfo)
 		So(treeDirInfo, ShouldNotBeNil)
 		So(treeDirInfo.Inputs["dir"], ShouldNotBeBlank)
+		assertClickHouseQueryLogReadMetrics(t, treeDirInfo)
 
 		startupAudit := findReportOperation(report.Operations, perfOpStartupCacheWarmingAudit)
 		So(startupAudit, ShouldNotBeNil)
@@ -987,7 +988,7 @@ func TestClickHousePerfQuery(t *testing.T) {
 		So(readinessPublish, ShouldNotBeNil)
 		So(readinessPublish.Inputs["query_type"], ShouldEqual, "Maintenance")
 		So(readinessPublish.Inputs["query_variant"], ShouldEqual, "import readiness/publish")
-		So(readinessPublish.Inputs["duration_source"], ShouldEqual, "clickhouse_query_log")
+		assertClickHouseQueryLogReadMetrics(t, readinessPublish)
 		So(readinessPublish.Inputs["audit_counts"], ShouldNotBeNil)
 		So(readinessPublish.Inputs["result_digest"], ShouldNotBeBlank)
 		So(readinessPublish.ReadRows, ShouldHaveLength, 1)
@@ -998,7 +999,7 @@ func TestClickHousePerfQuery(t *testing.T) {
 		So(activeSnapshotCleanup, ShouldNotBeNil)
 		So(activeSnapshotCleanup.Inputs["query_type"], ShouldEqual, "Maintenance")
 		So(activeSnapshotCleanup.Inputs["query_variant"], ShouldEqual, "active-snapshot cleanup")
-		So(activeSnapshotCleanup.Inputs["duration_source"], ShouldEqual, "clickhouse_query_log")
+		assertClickHouseQueryLogReadMetrics(t, activeSnapshotCleanup)
 		So(activeSnapshotCleanup.Inputs["audit_counts"], ShouldNotBeNil)
 		So(activeSnapshotCleanup.Inputs["result_digest"], ShouldNotBeBlank)
 		So(activeSnapshotCleanup.ReadRows, ShouldHaveLength, 1)
@@ -1013,42 +1014,45 @@ func TestClickHousePerfQuery(t *testing.T) {
 		So(activePrefix.Inputs["active_prefix_route_proof"], ShouldNotBeBlank)
 		So(activePrefix.Inputs["active_prefix_route_proof"], ShouldNotEqual, "unobserved")
 		So(activePrefix.Inputs["result_digest"], ShouldNotBeBlank)
+		assertClickHouseQueryLogReadMetrics(t, activePrefix)
 
 		treeWhere := findReportOperation(report.Operations, perfOpTreeWhere)
 		So(treeWhere, ShouldNotBeNil)
 		So(treeWhere.Inputs["splits"], ShouldEqual, float64(2))
+		assertClickHouseQueryLogReadMetrics(t, treeWhere)
+
+		treeDiskTreeEndpoint := findReportOperation(report.Operations, perfOpTreeDiskTreeEndpoint)
+		So(treeDiskTreeEndpoint, ShouldNotBeNil)
+		assertClickHouseQueryLogReadMetrics(t, treeDiskTreeEndpoint)
 
 		coldCachedWhere := findReportOperation(report.Operations, perfOpTreeWhereColdCached)
 		So(coldCachedWhere, ShouldNotBeNil)
 		So(coldCachedWhere.Inputs["cache_scope"], ShouldEqual, "same_provider_cold_then_warm")
-		So(coldCachedWhere.Inputs["duration_source"], ShouldEqual, "clickhouse_query_log")
-		So(coldCachedWhere.ReadRows, ShouldNotBeEmpty)
-		So(coldCachedWhere.ReadBytes, ShouldNotBeEmpty)
-		So(coldCachedWhere.ReadMarks, ShouldNotBeEmpty)
+		assertClickHouseQueryLogReadMetrics(t, coldCachedWhere)
 
 		newDirs := findReportOperation(report.Operations, perfOpTreeDiskTreeNewDirs)
 		So(newDirs, ShouldNotBeNil)
 		So(newDirs.Inputs["start_dir"], ShouldEqual, treeDirInfo.Inputs["dir"])
 		So(newDirs.Inputs["cache_scope"], ShouldEqual, "new_directory_each_repeat")
+		assertClickHouseQueryLogReadMetrics(t, newDirs)
 
 		visibleChildDirs := findReportOperation(report.Operations, perfOpTreeDiskTreeVisibleChildDirs)
 		So(visibleChildDirs, ShouldNotBeNil)
 		So(visibleChildDirs.Inputs["parent_dir"], ShouldEqual, treeDirInfo.Inputs["dir"])
 		So(visibleChildDirs.Inputs["child_count"], ShouldBeGreaterThan, float64(0))
 		So(visibleChildDirs.Inputs["cache_scope"], ShouldEqual, "visible_child_directory_each_repeat")
-		So(visibleChildDirs.Inputs["duration_source"], ShouldEqual, "clickhouse_query_log")
-		So(visibleChildDirs.ReadRows, ShouldNotBeEmpty)
-		So(visibleChildDirs.ReadBytes, ShouldNotBeEmpty)
-		So(visibleChildDirs.ReadMarks, ShouldNotBeEmpty)
+		assertClickHouseQueryLogReadMetrics(t, visibleChildDirs)
 
 		ancestorDirs := findReportOperation(report.Operations, perfOpTreeDiskTreeAncDirs)
 		So(ancestorDirs, ShouldNotBeNil)
 		So(ancestorDirs.Inputs["start_dir"], ShouldEqual, "/")
 		So(ancestorDirs.Inputs["cache_scope"], ShouldEqual, "ancestor_directory_each_repeat")
+		assertClickHouseQueryLogReadMetrics(t, ancestorDirs)
 
 		freshWhere := findReportOperation(report.Operations, perfOpTreeWhereFresh)
 		So(freshWhere, ShouldNotBeNil)
 		So(freshWhere.Inputs["cache_scope"], ShouldEqual, "fresh_provider_per_repeat")
+		assertClickHouseQueryLogReadMetrics(t, freshWhere)
 
 		filesListDir := findReportOperation(report.Operations, "files_listdir")
 		So(filesListDir, ShouldNotBeNil)
@@ -1097,6 +1101,15 @@ func runClickHousePerfQuery(
 	)
 
 	return stdout, stderr, err
+}
+
+func assertClickHouseQueryLogReadMetrics(t *testing.T, op *boltperf.Operation) {
+	t.Helper()
+
+	So(op.Inputs["duration_source"], ShouldEqual, "clickhouse_query_log")
+	So(op.ReadRows, ShouldNotBeEmpty)
+	So(op.ReadBytes, ShouldNotBeEmpty)
+	So(op.ReadMarks, ShouldNotBeEmpty)
 }
 
 func findClickHousePerfQueryableDir(
