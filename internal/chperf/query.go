@@ -67,6 +67,7 @@ const (
 	queryInputPermissionChecksKey         = "permission_checks"
 	queryInputPermissionPathKey           = "permission_path"
 	queryInputParentDirKey                = "parent_dir"
+	queryInputProviderLifecycle           = "provider_lifecycle"
 	queryInputSplitsKey                   = "splits"
 	queryInputStartDirKey                 = "start_dir"
 	queryInputTreeFilterRouteKey          = "tree_filter_route"
@@ -149,6 +150,7 @@ const (
 	queryScopeVisibleChildDirs            = "visible_child_directory_each_repeat"
 	querySourceClickHouseLog              = "clickhouse_query_log"
 	querySourceWall                       = "wall"
+	queryProviderLifecycleMeasuredQuery   = "setup_teardown_outside_measured_query"
 	queryTreeFilterRouteFactsVectors      = "wrstat_dir_facts_vectors"
 	queryTreeFilterRouteOptionalAgeAll    = "wrstat_dir_facts_default_optional_wrstat_dir_filter_ageall"
 	queryFilterIndexGateInapplicable      = "not_applicable"
@@ -1129,7 +1131,7 @@ func opTreeWhereColdThenCached(qctx queryContext, splits int) op {
 	inputs := j4Inputs(j4QueryTypeSubtree, "Where cold then cached", treeOpInputs(filter, map[string]any{
 		queryInputDirKey:         qctx.dir,
 		queryInputCacheScope:     queryScopeSameProviderCold,
-		queryInputDurationSource: querySourceWall,
+		queryInputDurationSource: querySourceClickHouseLog,
 		queryInputSplitsKey:      splits,
 	}))
 
@@ -1146,7 +1148,6 @@ func opTreeWhereColdThenCached(qctx queryContext, splits int) op {
 			return err
 		},
 		resultCount: func() uint64 { return resultCount },
-		useWallTime: true,
 		skipWarmup:  true,
 	}
 }
@@ -1246,11 +1247,11 @@ func digestSummary(summary *db.DirSummary) digestDirSummary {
 func opTreeWhereColdProvider(qctx queryContext, splits int) op {
 	filter := treeFilterFromOptions(qctx.treeFilter)
 	inputs := j4Inputs(j4QueryTypeSubtree, "Where cold provider", treeOpInputs(filter, map[string]any{
-		queryInputDirKey:         qctx.dir,
-		queryInputCacheScope:     queryScopeColdProvider,
-		queryInputDurationSource: querySourceClickHouseLog,
-		queryInputSplitsKey:      splits,
-		"provider_lifecycle":     "setup_teardown_outside_measured_query",
+		queryInputDirKey:            qctx.dir,
+		queryInputCacheScope:        queryScopeColdProvider,
+		queryInputDurationSource:    querySourceClickHouseLog,
+		queryInputSplitsKey:         splits,
+		queryInputProviderLifecycle: queryProviderLifecycleMeasuredQuery,
 	}))
 
 	var (
@@ -1303,49 +1304,60 @@ func runTreeWhereOnProvider(
 }
 
 func opTreeDiskTreeEndpointColdProvider(qctx queryContext) op {
+	return opTreeDiskTreeEndpointProviderLifecycle(
+		qctx,
+		queryOpTreeDiskTreeColdProviderName,
+		"Disktree cold provider",
+		queryScopeColdProvider,
+	)
+}
+
+func opTreeDiskTreeEndpointProviderLifecycle(
+	qctx queryContext,
+	name string,
+	variant string,
+	cacheScope string,
+) op {
 	filter := treeFilterFromOptions(qctx.treeFilter)
-	inputs := j4Inputs(j4QueryTypeDisktree, "Disktree cold provider", treeOpInputs(filter, map[string]any{
-		queryInputDirKey:         qctx.dir,
-		queryInputCacheScope:     queryScopeColdProvider,
-		queryInputDurationSource: querySourceWall,
+	inputs := j4Inputs(j4QueryTypeDisktree, variant, treeOpInputs(filter, map[string]any{
+		queryInputDirKey:            qctx.dir,
+		queryInputCacheScope:        cacheScope,
+		queryInputDurationSource:    querySourceClickHouseLog,
+		queryInputProviderLifecycle: queryProviderLifecycleMeasuredQuery,
 	}))
 
-	var resultCount uint64
+	var (
+		p           provider.Provider
+		resultCount uint64
+	)
 
 	return op{
-		name:   queryOpTreeDiskTreeColdProviderName,
+		name:   name,
 		inputs: inputs,
 		setup: func(_ context.Context) error {
 			qctx.resetCaches()
 
-			return nil
+			var err error
+
+			p, err = openProviderForRepeat(qctx)
+
+			return err
 		},
 		run: func(_ context.Context) error {
-			childPaths, err := runTreeDiskTreeFreshProvider(qctx, filter)
-			resultCount = recordDisktreeEndpointResult(inputs, childPaths, err)
+			count, err := runTreeDiskTreeEndpointWithDigest(p.Tree(), qctx.dir, filter, inputs)
+			resultCount = count
+
+			return err
+		},
+		teardown: func(_ context.Context) error {
+			err := p.Close()
+			p = nil
 
 			return err
 		},
 		resultCount: func() uint64 { return resultCount },
-		useWallTime: true,
 		skipWarmup:  true,
 	}
-}
-
-func runTreeDiskTreeFreshProvider(qctx queryContext, filter *db.Filter) ([]string, error) {
-	if qctx.openProvider == nil {
-		return nil, errOpenProviderRequired
-	}
-
-	p, err := qctx.openProvider()
-	if err != nil {
-		return nil, err
-	}
-
-	childPaths, runErr := loadTreeDiskTreeEndpoint(p.Tree(), qctx.dir, filter)
-	closeErr := p.Close()
-
-	return childPaths, errors.Join(runErr, closeErr)
 }
 
 func loadTreeDiskTreeEndpoint(tree *db.Tree, dir string, filter *db.Filter) ([]string, error) {
@@ -1391,10 +1403,11 @@ func recordHighFanoutChildCount(inputs map[string]any, count uint64) {
 func opTreeWhereProviderUpdateColdCache(qctx queryContext, splits int) op {
 	filter := treeFilterFromOptions(qctx.treeFilter)
 	inputs := j4Inputs(j4QueryTypeSubtree, "Where provider update cold cache", treeOpInputs(filter, map[string]any{
-		queryInputDirKey:         qctx.dir,
-		queryInputCacheScope:     queryScopeProviderUpdateCold,
-		queryInputDurationSource: querySourceWall,
-		queryInputSplitsKey:      splits,
+		queryInputDirKey:            qctx.dir,
+		queryInputCacheScope:        queryScopeProviderUpdateCold,
+		queryInputDurationSource:    querySourceClickHouseLog,
+		queryInputSplitsKey:         splits,
+		queryInputProviderLifecycle: queryProviderLifecycleMeasuredQuery,
 	}))
 
 	var (
@@ -1428,7 +1441,6 @@ func opTreeWhereProviderUpdateColdCache(qctx queryContext, splits int) op {
 			return err
 		},
 		resultCount: func() uint64 { return resultCount },
-		useWallTime: true,
 		skipWarmup:  true,
 	}
 }
@@ -1442,46 +1454,12 @@ func openProviderForRepeat(qctx queryContext) (provider.Provider, error) {
 }
 
 func opTreeDiskTreeProviderUpdateColdCache(qctx queryContext) op {
-	filter := treeFilterFromOptions(qctx.treeFilter)
-	inputs := j4Inputs(j4QueryTypeDisktree, "Disktree provider update cold cache", treeOpInputs(filter, map[string]any{
-		queryInputDirKey:         qctx.dir,
-		queryInputCacheScope:     queryScopeProviderUpdateCold,
-		queryInputDurationSource: querySourceWall,
-	}))
-
-	var (
-		p           provider.Provider
-		resultCount uint64
+	return opTreeDiskTreeEndpointProviderLifecycle(
+		qctx,
+		queryOpTreeDiskTreeProviderUpdateName,
+		"Disktree provider update cold cache",
+		queryScopeProviderUpdateCold,
 	)
-
-	return op{
-		name:   queryOpTreeDiskTreeProviderUpdateName,
-		inputs: inputs,
-		setup: func(_ context.Context) error {
-			qctx.resetCaches()
-
-			var err error
-
-			p, err = openProviderForRepeat(qctx)
-
-			return err
-		},
-		run: func(_ context.Context) error {
-			count, err := runTreeDiskTreeEndpointWithDigest(p.Tree(), qctx.dir, filter, inputs)
-			resultCount = count
-
-			return err
-		},
-		teardown: func(_ context.Context) error {
-			err := p.Close()
-			p = nil
-
-			return err
-		},
-		resultCount: func() uint64 { return resultCount },
-		useWallTime: true,
-		skipWarmup:  true,
-	}
 }
 
 func runTreeDiskTreeEndpointWithDigest(
@@ -1507,7 +1485,7 @@ func opTreeDiskTreeEndpointNewDirs(qctx queryContext, opts QueryOptions) op {
 		"walk_limit":             opts.WalkLimit,
 		"fallback_to_start_dir":  fallback,
 		queryInputCacheScope:     queryScopeNewDirEachRepeat,
-		queryInputDurationSource: querySourceWall,
+		queryInputDurationSource: querySourceClickHouseLog,
 	}))
 	i := 0
 
@@ -1530,7 +1508,6 @@ func opTreeDiskTreeEndpointNewDirs(qctx queryContext, opts QueryOptions) op {
 			return err
 		},
 		resultCount:       func() uint64 { return resultCount },
-		useWallTime:       true,
 		skipWarmup:        true,
 		hasRepeatOverride: true,
 		repeatOverride:    len(timedDirs),
@@ -1557,7 +1534,7 @@ func opTreeDiskTreeEndpointAncestorDirs(qctx queryContext, opts QueryOptions) op
 		"dir_count":              len(timedDirs),
 		"ancestor_limit":         opts.AncestorLimit,
 		queryInputCacheScope:     queryScopeAncestorDirs,
-		queryInputDurationSource: querySourceWall,
+		queryInputDurationSource: querySourceClickHouseLog,
 	}))
 	i := 0
 
@@ -1580,7 +1557,6 @@ func opTreeDiskTreeEndpointAncestorDirs(qctx queryContext, opts QueryOptions) op
 			return err
 		},
 		resultCount:       func() uint64 { return resultCount },
-		useWallTime:       true,
 		skipWarmup:        true,
 		hasRepeatOverride: true,
 		repeatOverride:    len(timedDirs),
@@ -1682,7 +1658,7 @@ func opTreeDiskTreeEndpointVisibleChildDirs(qctx queryContext) op {
 		"child_count":            0,
 		"fallback_to_parent_dir": false,
 		queryInputCacheScope:     queryScopeVisibleChildDirs,
-		queryInputDurationSource: querySourceWall,
+		queryInputDurationSource: querySourceClickHouseLog,
 	}))
 
 	var timedDirs []string
@@ -1724,7 +1700,6 @@ func opTreeDiskTreeEndpointVisibleChildDirs(qctx queryContext) op {
 			return err
 		},
 		resultCount: func() uint64 { return resultCount },
-		useWallTime: true,
 		skipWarmup:  true,
 	}
 }
@@ -1935,11 +1910,11 @@ func opNoAuthWhere(qctx queryContext, splits int) op {
 func opTreeWhereFreshProvider(qctx queryContext, splits int) op {
 	filter := treeFilterFromOptions(qctx.treeFilter)
 	inputs := j4Inputs(j4QueryTypeSubtree, "Where fresh provider", treeOpInputs(filter, map[string]any{
-		queryInputDirKey:         qctx.dir,
-		queryInputCacheScope:     queryScopeFreshProvider,
-		queryInputDurationSource: querySourceClickHouseLog,
-		queryInputSplitsKey:      splits,
-		"provider_lifecycle":     "setup_teardown_outside_measured_query",
+		queryInputDirKey:            qctx.dir,
+		queryInputCacheScope:        queryScopeFreshProvider,
+		queryInputDurationSource:    querySourceClickHouseLog,
+		queryInputSplitsKey:         splits,
+		queryInputProviderLifecycle: queryProviderLifecycleMeasuredQuery,
 	}))
 
 	var (

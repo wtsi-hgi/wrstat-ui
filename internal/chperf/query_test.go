@@ -623,7 +623,16 @@ func TestRunSuiteOperationSelection(t *testing.T) {
 		qctx := queryContext{
 			provider: fakeMountTimestampsProvider{tree: db.NewTree(newQueryOpTestDB())},
 			client:   &fakeQueryClient{},
-			dir:      queryOpTestRootDir,
+			inspector: fakeQueryInspector{
+				measure: func(ctx context.Context, run func(context.Context) error) (*QueryMetrics, error) {
+					if err := run(ctx); err != nil {
+						return nil, err
+					}
+
+					return &QueryMetrics{DurationMs: 1, ReadRows: 2, ReadBytes: 3, ReadMarks: 4}, nil
+				},
+			},
+			dir: queryOpTestRootDir,
 		}
 		report := boltperf.NewReport("clickhouse", "", 1, 0)
 
@@ -1632,10 +1641,10 @@ func TestBuildOps(t *testing.T) {
 		So(coldCachedWhereOp, ShouldNotBeNil)
 		So(coldCachedWhereOp.inputs[queryInputDirKey], ShouldEqual, queryOpTestRootDir)
 		So(coldCachedWhereOp.inputs["cache_scope"], ShouldEqual, "same_provider_cold_then_warm")
-		So(coldCachedWhereOp.inputs["duration_source"], ShouldEqual, "wall")
+		So(coldCachedWhereOp.inputs["duration_source"], ShouldEqual, querySourceClickHouseLog)
 		So(coldCachedWhereOp.inputs["splits"], ShouldEqual, 2)
 		So(coldCachedWhereOp.skipWarmup, ShouldBeTrue)
-		So(coldCachedWhereOp.useWallTime, ShouldBeTrue)
+		So(coldCachedWhereOp.useWallTime, ShouldBeFalse)
 
 		So(names, ShouldContain, "tree_disktree_endpoint_new_dirs")
 		So(names, ShouldContain, queryOpTreeDiskTreeVisibleChildName)
@@ -1660,7 +1669,7 @@ func TestBuildOps(t *testing.T) {
 		So(newDirsOp.inputs[queryInputStartDirKey], ShouldEqual, queryOpTestRootDir)
 		So(newDirsOp.inputs["dirs"], ShouldResemble, []string{queryOpTestChildADir, queryOpTestChildBDir})
 		So(newDirsOp.inputs["cache_scope"], ShouldEqual, "new_directory_each_repeat")
-		So(newDirsOp.inputs["duration_source"], ShouldEqual, "wall")
+		So(newDirsOp.inputs["duration_source"], ShouldEqual, querySourceClickHouseLog)
 		So(newDirsOp.skipWarmup, ShouldBeTrue)
 		So(newDirsOp.repeatOverride, ShouldEqual, 2)
 
@@ -1668,10 +1677,10 @@ func TestBuildOps(t *testing.T) {
 		So(visibleChildDirsOp, ShouldNotBeNil)
 		So(visibleChildDirsOp.inputs["parent_dir"], ShouldEqual, queryOpTestRootDir)
 		So(visibleChildDirsOp.inputs["cache_scope"], ShouldEqual, queryScopeVisibleChildDirs)
-		So(visibleChildDirsOp.inputs["duration_source"], ShouldEqual, "wall")
+		So(visibleChildDirsOp.inputs["duration_source"], ShouldEqual, querySourceClickHouseLog)
 		So(visibleChildDirsOp.inputs[queryInputAgeKey], ShouldEqual, int(db.DGUTAgeAll))
 		So(visibleChildDirsOp.skipWarmup, ShouldBeTrue)
-		So(visibleChildDirsOp.useWallTime, ShouldBeTrue)
+		So(visibleChildDirsOp.useWallTime, ShouldBeFalse)
 
 		ancestorOp := findQueryTestOp(ops, queryOpTreeDiskTreeAncName)
 		So(ancestorOp, ShouldNotBeNil)
@@ -1684,7 +1693,7 @@ func TestBuildOps(t *testing.T) {
 			queryOpTestChildADir,
 		})
 		So(ancestorOp.inputs["cache_scope"], ShouldEqual, queryScopeAncestorDirs)
-		So(ancestorOp.inputs["duration_source"], ShouldEqual, "wall")
+		So(ancestorOp.inputs["duration_source"], ShouldEqual, querySourceClickHouseLog)
 		So(ancestorOp.skipWarmup, ShouldBeTrue)
 		So(ancestorOp.repeatOverride, ShouldEqual, 5)
 
@@ -1706,23 +1715,23 @@ func TestBuildOps(t *testing.T) {
 		updateWhereOp := findQueryTestOp(ops, queryOpTreeWhereProviderUpdateName)
 		So(updateWhereOp, ShouldNotBeNil)
 		So(updateWhereOp.inputs["cache_scope"], ShouldEqual, queryScopeProviderUpdateCold)
-		So(updateWhereOp.inputs["duration_source"], ShouldEqual, "wall")
+		So(updateWhereOp.inputs["duration_source"], ShouldEqual, querySourceClickHouseLog)
 		So(updateWhereOp.skipWarmup, ShouldBeTrue)
-		So(updateWhereOp.useWallTime, ShouldBeTrue)
+		So(updateWhereOp.useWallTime, ShouldBeFalse)
 
 		coldProviderDiskTreeOp := findQueryTestOp(ops, queryOpTreeDiskTreeColdProviderName)
 		So(coldProviderDiskTreeOp, ShouldNotBeNil)
 		So(coldProviderDiskTreeOp.inputs["cache_scope"], ShouldEqual, queryScopeColdProvider)
-		So(coldProviderDiskTreeOp.inputs["duration_source"], ShouldEqual, "wall")
+		So(coldProviderDiskTreeOp.inputs["duration_source"], ShouldEqual, querySourceClickHouseLog)
 		So(coldProviderDiskTreeOp.skipWarmup, ShouldBeTrue)
-		So(coldProviderDiskTreeOp.useWallTime, ShouldBeTrue)
+		So(coldProviderDiskTreeOp.useWallTime, ShouldBeFalse)
 
 		updateDiskTreeOp := findQueryTestOp(ops, queryOpTreeDiskTreeProviderUpdateName)
 		So(updateDiskTreeOp, ShouldNotBeNil)
 		So(updateDiskTreeOp.inputs["cache_scope"], ShouldEqual, queryScopeProviderUpdateCold)
-		So(updateDiskTreeOp.inputs["duration_source"], ShouldEqual, "wall")
+		So(updateDiskTreeOp.inputs["duration_source"], ShouldEqual, querySourceClickHouseLog)
 		So(updateDiskTreeOp.skipWarmup, ShouldBeTrue)
-		So(updateDiskTreeOp.useWallTime, ShouldBeTrue)
+		So(updateDiskTreeOp.useWallTime, ShouldBeFalse)
 	})
 
 	Convey("provider-update cold-cache tree ops open providers outside timed runs", t, func() {
@@ -1855,7 +1864,16 @@ func TestBuildOps(t *testing.T) {
 		qctx := queryContext{
 			provider: fakeMountTimestampsProvider{tree: db.NewTree(database)},
 			client:   &fakeQueryClient{},
-			dir:      queryOpTestRootDir,
+			inspector: fakeQueryInspector{
+				measure: func(ctx context.Context, run func(context.Context) error) (*QueryMetrics, error) {
+					if err := run(ctx); err != nil {
+						return nil, err
+					}
+
+					return &QueryMetrics{DurationMs: 1, ReadRows: 2, ReadBytes: 3, ReadMarks: 4}, nil
+				},
+			},
+			dir: queryOpTestRootDir,
 		}
 
 		ops := buildOps(qctx, QueryOptions{Repeat: 5}, func(string, ...any) {})
@@ -1881,7 +1899,8 @@ func TestBuildOps(t *testing.T) {
 		})
 		So(report.Operations[0].Inputs["child_count"], ShouldEqual, 2)
 		So(report.Operations[0].Inputs["cache_scope"], ShouldEqual, queryScopeVisibleChildDirs)
-		So(report.Operations[0].Inputs["duration_source"], ShouldEqual, "wall")
+		So(report.Operations[0].Inputs["duration_source"], ShouldEqual, querySourceClickHouseLog)
+		So(report.Operations[0].ReadRows, ShouldResemble, []uint64{2, 2})
 		So(report.Operations[0].Inputs[queryInputAgeKey], ShouldEqual, int(db.DGUTAgeAll))
 		So(countQueryTestDir(database.dirInfoCalls, queryOpTestRootDir), ShouldEqual, 1)
 		So(database.dirInfoCalls, ShouldContain, queryOpTestChildADir)
@@ -1897,7 +1916,16 @@ func TestBuildOps(t *testing.T) {
 		qctx := queryContext{
 			provider: fakeMountTimestampsProvider{tree: db.NewTree(database)},
 			client:   &fakeQueryClient{},
-			dir:      queryOpTestRootDir,
+			inspector: fakeQueryInspector{
+				measure: func(ctx context.Context, run func(context.Context) error) (*QueryMetrics, error) {
+					if err := run(ctx); err != nil {
+						return nil, err
+					}
+
+					return &QueryMetrics{DurationMs: 1, ReadRows: 2, ReadBytes: 3, ReadMarks: 4}, nil
+				},
+			},
+			dir: queryOpTestRootDir,
 		}
 
 		ops := buildOps(qctx, QueryOptions{Repeat: 5}, func(string, ...any) {})
@@ -1915,6 +1943,7 @@ func TestBuildOps(t *testing.T) {
 
 		So(report.Operations, ShouldHaveLength, 1)
 		So(report.Operations[0].DurationsMS, ShouldHaveLength, 1)
+		So(report.Operations[0].ReadRows, ShouldResemble, []uint64{2})
 		So(report.Operations[0].Inputs["child_dirs"], ShouldResemble, []string{queryOpTestRootDir})
 		So(report.Operations[0].Inputs["child_count"], ShouldEqual, 1)
 		So(report.Operations[0].Inputs["fallback_to_parent_dir"], ShouldBeTrue)

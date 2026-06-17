@@ -323,19 +323,11 @@ func j4OperationRequiresClickHouseSource(name string) bool {
 }
 
 func j4OperationReadMetricsFailure(op perfreport.Operation) string {
-	if !j4OperationQueryMetricsRequired(op) {
-		return ""
-	}
-
 	return j4FirstFailedOperationMetricCheck([]j4OperationMetricCheck{
 		{"missing ReadRows", len(op.ReadRows) == 0},
 		{"missing ReadBytes", len(op.ReadBytes) == 0},
 		{"missing ReadMarks", len(op.ReadMarks) == 0},
 	})
-}
-
-func j4OperationQueryMetricsRequired(op perfreport.Operation) bool {
-	return stringInput(op.Inputs, queryInputDurationSource) != querySourceWall
 }
 
 func j4OperationEvidenceFailure(op perfreport.Operation) string {

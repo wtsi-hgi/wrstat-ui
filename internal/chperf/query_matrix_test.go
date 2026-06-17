@@ -218,6 +218,25 @@ func TestJ4CanonicalMatrix(t *testing.T) {
 		}
 	})
 
+	Convey("buildOps records canonical cache-scope rows as server-side query-log measurements", t, func() {
+		ops := buildOps(queryMatrixTestContext(), queryMatrixTestOptions(), func(string, ...any) {})
+
+		for _, name := range []string{
+			queryOpTreeWhereColdName,
+			queryOpTreeWhereProviderUpdateName,
+			queryOpTreeDiskTreeColdProviderName,
+			queryOpTreeDiskTreeProviderUpdateName,
+			queryOpTreeDiskTreeNewName,
+			queryOpTreeDiskTreeAncName,
+			queryOpTreeDiskTreeVisibleChildName,
+		} {
+			op := findQueryTestOp(ops, name)
+			So(op, ShouldNotBeNil)
+			So(op.inputs[queryInputDurationSource], ShouldEqual, querySourceClickHouseLog)
+			So(op.useWallTime, ShouldBeFalse)
+		}
+	})
+
 	Convey("runSuite records metrics, result rows, and digest for selected J4 operations", t, func() {
 		report := perfreport.NewReport("clickhouse", "", 1, 0)
 		err := runSuite(
@@ -260,6 +279,19 @@ func TestJ4CanonicalMatrix(t *testing.T) {
 		missingCounters.Operations[0].ReadRows = nil
 		So(
 			j4MatrixCoverageFailure([]perfreport.Report{report}, []perfreport.Report{missingCounters}),
+			ShouldContainSubstring,
+			"ReadRows",
+		)
+
+		wallMissingCounters := cloneJ4Report(report)
+		mutateJ4ReportOperation(&wallMissingCounters, queryOpTreeDiskTreeNewName, func(op *perfreport.Operation) {
+			op.Inputs[queryInputDurationSource] = querySourceWall
+			op.ReadRows = nil
+			op.ReadBytes = nil
+			op.ReadMarks = nil
+		})
+		So(
+			j4MatrixCoverageFailure([]perfreport.Report{report}, []perfreport.Report{wallMissingCounters}),
 			ShouldContainSubstring,
 			"ReadRows",
 		)
