@@ -1508,6 +1508,52 @@ func TestSummariseClickHouseSpoolRows(t *testing.T) {
 		So(run([]string{fixture.statsPath}), ShouldBeNil)
 	})
 
+	Convey("summarise command spools unordered stats with repeated directory boundaries", t, func() {
+		fixture := newSummariseActiveSnapshotFixture(t)
+		writeRepeatedDirectoryBoundarySpoolFixtureStats(t, fixture.statsPath, fixture.updatedAt)
+
+		restore := snapshotSummariseGlobals()
+		Reset(restore)
+
+		configureSummariseActiveSnapshotTest(fixture.outputDir, false)
+
+		clickHouseSnapshotIsActive = func(clickhouse.Config, string, time.Time) (bool, error) {
+			return false, nil
+		}
+
+		loadSummariseClickHouseSpool = func(
+			_ context.Context,
+			_ clickhouse.Config,
+			spoolDir string,
+			manifest *chspool.Manifest,
+			_ func(string, time.Duration),
+		) (perfreport.Report, error) {
+			dirsByPath, dirsByID := b5CatalogRows(spoolDir)
+			filesByPath := b5FileRowsByFullPath(spoolDir, dirsByID)
+
+			mountRoot := dirsByPath[summariseTestMountPath]
+			alpha := dirsByPath[summariseTestMountPath+"a/"]
+			alphaDeep := dirsByPath[summariseTestMountPath+"a/deep/"]
+			beta := dirsByPath[summariseTestMountPath+"b/"]
+
+			So(alpha.ParentID, ShouldEqual, mountRoot.DirID)
+			So(alphaDeep.ParentID, ShouldEqual, alpha.DirID)
+			So(beta.ParentID, ShouldEqual, mountRoot.DirID)
+			So(filesByPath[summariseTestMountPath+"a/"].DirID, ShouldEqual, mountRoot.DirID)
+			So(filesByPath[summariseTestMountPath+"a/one.dat"].DirID, ShouldEqual, alpha.DirID)
+			So(filesByPath[summariseTestMountPath+"a/deep/"].DirID, ShouldEqual, alpha.DirID)
+			So(filesByPath[summariseTestMountPath+"a/deep/three.txt"].DirID, ShouldEqual, alphaDeep.DirID)
+			So(filesByPath[summariseTestMountPath+"b/two.dat"].DirID, ShouldEqual, beta.DirID)
+
+			assertSpoolCatalogIntervals(dirsByPath)
+			assertChildFilterAllParentsMatchCatalog(spoolDir)
+
+			return perfreport.NewReport("clickhouse", spoolDir, 1, 0), nil
+		}
+
+		So(run([]string{fixture.statsPath}), ShouldBeNil)
+	})
+
 	Convey("D2.7 actual summarise command path writes and verifies every schema3 spool table", t, func() {
 		fixture := newSummariseActiveSnapshotFixture(t)
 		writeBasedirsSpoolFixtureStats(t, fixture.statsPath, fixture.updatedAt)
@@ -1700,6 +1746,24 @@ func writeNonContiguousSpoolFixtureStats(t *testing.T, statsPath string, updated
 	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath+"a/one.dat", 'f', 10, 12, 22, updatedAt.Unix(), 302, 1)
 	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath+"b/", 'd', 4096, 13, 23, updatedAt.Unix(), 303, 1)
 	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath+"b/two.dat", 'f', 20, 14, 24, updatedAt.Unix(), 304, 1)
+	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath+"a/deep/", 'd', 4096, 15, 25, updatedAt.Unix(), 305, 1)
+	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath+"a/deep/three.txt", 'f', 30, 16, 26, updatedAt.Unix(), 306, 1)
+
+	writeGzipStats(t, statsPath, buf.Bytes())
+	So(os.Chtimes(statsPath, updatedAt, updatedAt), ShouldBeNil)
+}
+
+func writeRepeatedDirectoryBoundarySpoolFixtureStats(t *testing.T, statsPath string, updatedAt time.Time) {
+	t.Helper()
+
+	var buf bytes.Buffer
+
+	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath, 'd', 4096, 10, 20, updatedAt.Unix(), 300, 1)
+	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath+"a/one.dat", 'f', 10, 12, 22, updatedAt.Unix(), 302, 1)
+	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath+"b/", 'd', 4096, 13, 23, updatedAt.Unix(), 303, 1)
+	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath+"b/two.dat", 'f', 20, 14, 24, updatedAt.Unix(), 304, 1)
+	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath+"a/", 'd', 4096, 11, 21, updatedAt.Unix(), 301, 1)
+	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath+"a/", 'd', 4096, 11, 21, updatedAt.Unix(), 301, 1)
 	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath+"a/deep/", 'd', 4096, 15, 25, updatedAt.Unix(), 305, 1)
 	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath+"a/deep/three.txt", 'f', 30, 16, 26, updatedAt.Unix(), 306, 1)
 

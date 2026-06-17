@@ -26,6 +26,8 @@
 package cmd
 
 import (
+	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -35,6 +37,8 @@ import (
 )
 
 const summariseStatsSortTestBDirLine = "\"/mnt/test/b/\"\tb-dir"
+
+const summariseStatsSortFixtureStamp int64 = 1_717_000_000
 
 func TestSummariseStatsSort(t *testing.T) {
 	Convey("sorted stats file uses unquoted path keys to restore subtree contiguity", t, func() {
@@ -90,4 +94,49 @@ func TestSummariseStatsSort(t *testing.T) {
 			summariseStatsSortTestBDirLine,
 		})
 	})
+
+	Convey("mount sorted stats deduplicates directory boundaries and synthesises missing parents", t, func() {
+		dir := t.TempDir()
+		statsPath := filepath.Join(dir, "stats")
+		input := strings.Join([]string{
+			summariseStatsSortFixtureRow("/mnt/test/", 'd', 4096, 10, 20, 300, 1),
+			summariseStatsSortFixtureRow("/mnt/test/a/one.dat", 'f', 10, 12, 22, 302, 2),
+			summariseStatsSortFixtureRow("/mnt/test/b/two.dat", 'f', 20, 14, 24, 304, 3),
+			summariseStatsSortFixtureRow("/mnt/test/a/", 'd', 4096, 11, 21, 301, 1),
+			summariseStatsSortFixtureRow("/mnt/test/a/", 'd', 4096, 11, 21, 301, 1),
+		}, "\n") + "\n"
+
+		So(os.WriteFile(statsPath, []byte(input), 0o600), ShouldBeNil)
+
+		sortedPath, err := summariseWriteSortedStatsFileForMount(statsPath, filepath.Join(dir, "scratch"), "/mnt/test/")
+		So(err, ShouldBeNil)
+
+		data, err := os.ReadFile(sortedPath)
+		So(err, ShouldBeNil)
+		So(strings.Split(strings.TrimSpace(string(data)), "\n"), ShouldResemble, []string{
+			summariseStatsSortFixtureRow("/mnt/test/", 'd', 4096, 10, 20, 300, 1),
+			summariseStatsSortFixtureRow("/mnt/test/a/", 'd', 4096, 11, 21, 301, 1),
+			summariseStatsSortFixtureRow("/mnt/test/a/one.dat", 'f', 10, 12, 22, 302, 2),
+			fmt.Sprintf("%q\t0\t%d\t%d\t%d\t%d\t%d\td\t0\t%d\t1\t0",
+				"/mnt/test/b/", uint32(14), uint32(24), summariseStatsSortFixtureStamp,
+				summariseStatsSortFixtureStamp, summariseStatsSortFixtureStamp, int64(3)),
+			summariseStatsSortFixtureRow("/mnt/test/b/two.dat", 'f', 20, 14, 24, 304, 3),
+		})
+	})
+}
+
+func summariseStatsSortFixtureRow(
+	path string,
+	entryType byte,
+	size int64,
+	uid uint32,
+	gid uint32,
+	inode uint64,
+	nlink uint64,
+) string {
+	var buf bytes.Buffer
+
+	writeSpoolFixtureStatsRow(&buf, path, entryType, size, uid, gid, summariseStatsSortFixtureStamp, inode, nlink)
+
+	return strings.TrimSuffix(buf.String(), "\n")
 }

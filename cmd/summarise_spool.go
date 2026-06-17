@@ -1724,7 +1724,7 @@ func parseSummariseToSpool( //nolint:funlen
 	diag *summariseDiagnostics,
 	sortInput bool,
 ) (err error) {
-	r, err := openSummariseSpoolStats(statsPath, partialDir, sortInput)
+	r, err := openSummariseSpoolStats(statsPath, partialDir, ds.mountPath, sortInput)
 	if err != nil {
 		return err
 	}

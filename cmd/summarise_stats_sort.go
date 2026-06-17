@@ -39,6 +39,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+
+	"github.com/wtsi-hgi/wrstat-ui/stats"
 )
 
 const (
@@ -51,10 +53,25 @@ var errSummariseStatsSortRecordTooLarge = errors.New("summarise stats sort recor
 
 var errSummariseStatsSortHeapType = errors.New("summarise stats sort heap contained an invalid item")
 
+const (
+	summariseStatsSortExplicitDirPriority = iota
+	summariseStatsSortSyntheticDirPriority
+	summariseStatsSortFilePriority
+)
+
+type summariseStatsSortRecordKind uint8
+
+const (
+	summariseStatsSortRecordFile summariseStatsSortRecordKind = iota
+	summariseStatsSortRecordExplicitDir
+	summariseStatsSortRecordSyntheticDir
+)
+
 type summariseStatsSortRecord struct {
 	key  string
 	line []byte
 	seq  uint64
+	kind summariseStatsSortRecordKind
 }
 
 func summariseReadStatsSortRecord(r io.Reader) (summariseStatsSortRecord, error) {
@@ -68,12 +85,32 @@ func summariseReadStatsSortRecord(r io.Reader) (summariseStatsSortRecord, error)
 		return summariseStatsSortRecord{}, readErr
 	}
 
+	var kind summariseStatsSortRecordKind
+	if readErr := binary.Read(r, binary.BigEndian, &kind); readErr != nil {
+		return summariseStatsSortRecord{}, readErr
+	}
+
 	line, err := summariseReadStatsSortBytes(r)
 	if err != nil {
 		return summariseStatsSortRecord{}, err
 	}
 
-	return summariseStatsSortRecord{key: string(key), line: line, seq: seq}, nil
+	return summariseStatsSortRecord{key: string(key), line: line, seq: seq, kind: kind}, nil
+}
+
+func (r summariseStatsSortRecord) priority() int {
+	switch r.kind {
+	case summariseStatsSortRecordExplicitDir:
+		return summariseStatsSortExplicitDirPriority
+	case summariseStatsSortRecordSyntheticDir:
+		return summariseStatsSortSyntheticDirPriority
+	default:
+		return summariseStatsSortFilePriority
+	}
+}
+
+func (r summariseStatsSortRecord) isDir() bool {
+	return r.kind == summariseStatsSortRecordExplicitDir || r.kind == summariseStatsSortRecordSyntheticDir
 }
 
 func summariseWriteStatsSortRecord(w io.Writer, record summariseStatsSortRecord) error {
@@ -89,6 +126,10 @@ func summariseWriteStatsSortRecord(w io.Writer, record summariseStatsSortRecord)
 		return err
 	}
 
+	if err := binary.Write(w, binary.BigEndian, record.kind); err != nil {
+		return err
+	}
+
 	if err := binary.Write(w, binary.BigEndian, uint64(len(record.line))); err != nil {
 		return err
 	}
@@ -98,6 +139,108 @@ func summariseWriteStatsSortRecord(w io.Writer, record summariseStatsSortRecord)
 	return err
 }
 
+func summariseStatsSortSyntheticDirRecords(
+	info stats.FileInfo,
+	mountPath string,
+	seq uint64,
+) []summariseStatsSortRecord {
+	dirPath, ok := summariseStatsSortDirPath(info)
+	if !ok {
+		return nil
+	}
+
+	dirs := summariseStatsSortAncestorDirsForMount(mountPath, dirPath)
+	records := make([]summariseStatsSortRecord, 0, len(dirs))
+
+	for _, dir := range dirs {
+		records = append(records, summariseStatsSortRecord{
+			key:  dir,
+			line: summariseStatsSortSyntheticDirLine(dir, info),
+			seq:  seq,
+			kind: summariseStatsSortRecordSyntheticDir,
+		})
+	}
+
+	return records
+}
+
+func summariseStatsSortDirPath(info stats.FileInfo) (string, bool) {
+	path := string(info.Path)
+	if path == "" {
+		return "", false
+	}
+
+	if info.EntryType == stats.DirType {
+		return summariseEnsureTrailingSlash(path), true
+	}
+
+	idx := strings.LastIndexByte(path, '/')
+	if idx < 0 {
+		return "", false
+	}
+
+	return path[:idx+1], true
+}
+
+func summariseStatsSortAncestorDirsForMount(mountPath, dirPath string) []string {
+	mountPath = summariseNormalizeImportMountPath(mountPath)
+	if mountPath == "" {
+		return nil
+	}
+
+	dirPath = summariseEnsureTrailingSlash(dirPath)
+	if !strings.HasPrefix(dirPath, mountPath) {
+		return nil
+	}
+
+	dirs := []string{mountPath}
+	current := mountPath
+	relative := strings.TrimPrefix(dirPath, mountPath)
+
+	for relative != "" {
+		part, rest, _ := strings.Cut(relative, "/")
+		if part == "" {
+			break
+		}
+
+		current += part + "/"
+		dirs = append(dirs, current)
+		relative = rest
+	}
+
+	return dirs
+}
+
+func summariseStatsSortSyntheticDirLine(path string, info stats.FileInfo) []byte {
+	return []byte(fmt.Sprintf(
+		"%q\t0\t%d\t%d\t%d\t%d\t%d\td\t0\t%d\t1\t0",
+		path,
+		info.UID,
+		info.GID,
+		info.ATime,
+		info.MTime,
+		info.CTime,
+		info.Nlink,
+	))
+}
+
+func summariseWriteStatsSortOutputLineIfNeeded(
+	bw *bufio.Writer,
+	record summariseStatsSortRecord,
+	state *summariseStatsSortMergeState,
+) error {
+	if record.isDir() {
+		if state.hasLastDirKey && state.lastDirKey == record.key {
+			return nil
+		}
+
+		state.lastDirKey = record.key
+		state.hasLastDirKey = true
+	}
+
+	return summariseWriteStatsSortOutputLine(bw, record.line)
+}
+
 type summariseStatsSortScanState struct {
 	chunks     []string
 	records    []summariseStatsSortRecord
@@ -105,13 +248,81 @@ type summariseStatsSortScanState struct {
 	seq        uint64
 }
 
-func (s *summariseStatsSortScanState) add(scannerLine []byte) {
-	line := slices.Clone(scannerLine)
-	key := summariseStatsSortKey(line)
+func (s *summariseStatsSortScanState) add(scannerLine []byte, mountPath string) {
+	records := summariseStatsSortRecordsForLine(scannerLine, mountPath, s.seq)
 
-	s.records = append(s.records, summariseStatsSortRecord{key: key, line: line, seq: s.seq})
-	s.chunkBytes += len(key) + len(line)
+	for _, record := range records {
+		s.records = append(s.records, record)
+		s.chunkBytes += len(record.key) + len(record.line)
+	}
+
 	s.seq++
+}
+
+func summariseStatsSortRecordsForLine(
+	scannerLine []byte,
+	mountPath string,
+	seq uint64,
+) []summariseStatsSortRecord {
+	line := slices.Clone(scannerLine)
+	record := summariseStatsSortRecord{key: summariseStatsSortKey(line), line: line, seq: seq}
+
+	info, ok := summariseStatsSortParseLine(line)
+	if !ok {
+		return []summariseStatsSortRecord{record}
+	}
+
+	record.key = string(info.Path)
+	if info.EntryType == stats.DirType {
+		record.kind = summariseStatsSortRecordExplicitDir
+	}
+
+	records := summariseStatsSortSyntheticDirRecords(info, mountPath, seq)
+	records = append(records, record)
+
+	return records
+}
+
+type summariseStatsSortMergeState struct {
+	lastDirKey    string
+	hasLastDirKey bool
+}
+
+func summariseWriteSortedStatsFileForMount(statsPath string, scratchDir string, mountPath string) (string, error) {
+	if err := os.RemoveAll(scratchDir); err != nil {
+		return "", err
+	}
+
+	if err := os.MkdirAll(scratchDir, summariseDirPerm); err != nil {
+		return "", err
+	}
+
+	chunks, err := summariseSortStatsChunks(statsPath, scratchDir, mountPath)
+	if err != nil {
+		return "", err
+	}
+
+	outPath := filepath.Join(scratchDir, summariseStatsSortOutputName)
+	if err := summariseMergeStatsSortChunks(chunks, outPath); err != nil {
+		return "", err
+	}
+
+	return outPath, nil
+}
+
+func summariseStatsSortParseLine(line []byte) (stats.FileInfo, bool) {
+	data := make([]byte, len(line)+1)
+	copy(data, line)
+	data[len(data)-1] = '\n'
+
+	parser := stats.NewStatsParser(bytes.NewReader(data))
+
+	var info stats.FileInfo
+	if parser.Scan(&info) != nil {
+		return stats.FileInfo{}, false
+	}
+
+	return info, true
 }
 
 func summariseStatsSortKey(line []byte) string {
@@ -186,10 +397,10 @@ func (s *summariseStatsSortScanState) finish(scratchDir string) ([]string, error
 	return s.chunks, nil
 }
 
-func summariseScanStatsSortChunks(scanner *bufio.Scanner, scratchDir string) ([]string, error) {
+func summariseScanStatsSortChunks(scanner *bufio.Scanner, scratchDir string, mountPath string) ([]string, error) {
 	state := summariseStatsSortScanState{}
 	for scanner.Scan() {
-		state.add(scanner.Bytes())
+		state.add(scanner.Bytes(), mountPath)
 
 		if state.shouldFlush() {
 			if err := state.flush(scratchDir); err != nil {
@@ -214,8 +425,8 @@ func (r *summariseSortedStatsReadCloser) Close() error {
 	return errors.Join(r.ReadCloser.Close(), os.RemoveAll(r.scratchDir))
 }
 
-func openSortedSummariseStats(statsPath string, scratchDir string) (io.ReadCloser, error) {
-	sortedPath, err := summariseWriteSortedStatsFile(statsPath, scratchDir)
+func openSortedSummariseStats(statsPath string, scratchDir string, mountPath string) (io.ReadCloser, error) {
+	sortedPath, err := summariseWriteSortedStatsFileForMount(statsPath, scratchDir, mountPath)
 	if err != nil {
 		return nil, errors.Join(err, os.RemoveAll(scratchDir))
 	}
@@ -229,28 +440,10 @@ func openSortedSummariseStats(statsPath string, scratchDir string) (io.ReadClose
 }
 
 func summariseWriteSortedStatsFile(statsPath string, scratchDir string) (string, error) {
-	if err := os.RemoveAll(scratchDir); err != nil {
-		return "", err
-	}
-
-	if err := os.MkdirAll(scratchDir, summariseDirPerm); err != nil {
-		return "", err
-	}
-
-	chunks, err := summariseSortStatsChunks(statsPath, scratchDir)
-	if err != nil {
-		return "", err
-	}
-
-	outPath := filepath.Join(scratchDir, summariseStatsSortOutputName)
-	if err := summariseMergeStatsSortChunks(chunks, outPath); err != nil {
-		return "", err
-	}
-
-	return outPath, nil
+	return summariseWriteSortedStatsFileForMount(statsPath, scratchDir, "")
 }
 
-func summariseSortStatsChunks(statsPath string, scratchDir string) (_ []string, err error) {
+func summariseSortStatsChunks(statsPath string, scratchDir string, mountPath string) (_ []string, err error) {
 	r, _, err := openStatsFile(statsPath)
 	if err != nil {
 		return nil, err
@@ -262,7 +455,7 @@ func summariseSortStatsChunks(statsPath string, scratchDir string) (_ []string, 
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, summariseStatsSortMaxLineBytes), summariseStatsSortMaxLineBytes)
 
-	return summariseScanStatsSortChunks(scanner, scratchDir)
+	return summariseScanStatsSortChunks(scanner, scratchDir, mountPath)
 }
 
 func summariseMergeStatsSortChunks(chunks []string, outPath string) (err error) {
@@ -343,8 +536,10 @@ func summariseWriteMergedStatsSortChunks(
 	h := summariseStatsSortHeap(readers)
 	heap.Init(&h)
 
+	state := summariseStatsSortMergeState{}
+
 	for h.Len() > 0 {
-		if err := summariseWriteNextMergedStatsSortChunk(bw, &h); err != nil {
+		if err := summariseWriteNextMergedStatsSortChunk(bw, &h, &state); err != nil {
 			return err
 		}
 	}
@@ -355,13 +550,14 @@ func summariseWriteMergedStatsSortChunks(
 func summariseWriteNextMergedStatsSortChunk(
 	bw *bufio.Writer,
 	h *summariseStatsSortHeap,
+	state *summariseStatsSortMergeState,
 ) error {
 	reader, err := popSummariseStatsSortChunkReader(h)
 	if err != nil {
 		return err
 	}
 
-	if err := summariseWriteStatsSortOutputLine(bw, reader.record.line); err != nil {
+	if err := summariseWriteStatsSortOutputLineIfNeeded(bw, reader.record, state); err != nil {
 		return err
 	}
 
@@ -452,6 +648,10 @@ func compareSummariseStatsSortRecords(a, b summariseStatsSortRecord) int {
 		return diff
 	}
 
+	if diff := cmp.Compare(a.priority(), b.priority()); diff != 0 {
+		return diff
+	}
+
 	return cmp.Compare(a.seq, b.seq)
 }
 
@@ -480,10 +680,11 @@ func (h *summariseStatsSortHeap) Pop() any {
 func openSummariseSpoolStats(
 	statsPath string,
 	partialDir string,
+	mountPath string,
 	sortInput bool,
 ) (io.ReadCloser, error) {
 	if sortInput {
-		return openSortedSummariseStats(statsPath, summariseStatsSortScratchDir(partialDir))
+		return openSortedSummariseStats(statsPath, summariseStatsSortScratchDir(partialDir), mountPath)
 	}
 
 	r, _, err := openStatsFile(statsPath)
