@@ -396,34 +396,37 @@ func TestD4VectorFilterParity(t *testing.T) {
 		So(err, ShouldBeNil)
 		Reset(func() { So(client.Close(), ShouldBeNil) })
 
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-
 		mountPath := "/mnt/d3-parity/"
 		snapshotID := uuid.NewString()
 		updatedAt := time.Unix(1_700_000_000, 0).UTC()
 
-		seedD3ParityRows(ctx, client.conn, mountPath, snapshotID, updatedAt)
+		setupCtx, setupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		seedD3ParityRows(setupCtx, client.conn, mountPath, snapshotID, updatedAt)
+		setupCancel()
 
 		for _, testCase := range d3ParityFilterCases() {
 			filter := testCase.filter
 			t.Logf("checking D4 vector parity for %s", testCase.name)
 
-			assertD3SummaryRouteParity(ctx, client.conn, updatedAt, filter,
+			caseCtx, caseCancel := context.WithTimeout(context.Background(), 10*time.Second)
+
+			assertD3SummaryRouteParity(caseCtx, client.conn, updatedAt, filter,
 				func(route dgutaFilterRoute) (string, []any) {
 					return dgutaFilterExactSummariesQueryForRoute(route, mountPath, snapshotID, []uint32{2, 3}, filter)
 				},
 			)
-			assertD3ChildRouteParity(ctx, client.conn, updatedAt, filter,
+			assertD3ChildRouteParity(caseCtx, client.conn, updatedAt, filter,
 				func(route dgutaFilterRoute) (string, []any) {
 					return dgutaFilterChildrenSummariesQueryForRoute(route, mountPath, snapshotID, 1, filter)
 				},
 			)
-			assertD3SummaryRouteParity(ctx, client.conn, updatedAt, filter,
+			assertD3SummaryRouteParity(caseCtx, client.conn, updatedAt, filter,
 				func(route dgutaFilterRoute) (string, []any) {
 					return dgutaFilterSubtreeSummariesQueryForRoute(route, mountPath, snapshotID, 1, 5, filter)
 				},
 			)
+
+			caseCancel()
 		}
 	})
 }
