@@ -541,6 +541,12 @@ func queryMatrixCompleteReport() perfreport.Report {
 
 func queryMatrixAddRequiredEvidence(inputs map[string]any, operation string) {
 	switch operation {
+	case queryOpTreeWhereColdProviderName:
+		inputs[queryInputCacheScope] = queryScopeColdProvider
+	case queryOpTreeWhereFreshName:
+		inputs[queryInputCacheScope] = queryScopeFreshProvider
+	case queryOpTreeWhereProviderUpdateName:
+		inputs[queryInputCacheScope] = queryScopeProviderUpdateCold
 	case queryOpImportReadinessPublishName:
 		queryMatrixAddAuditEvidence(inputs, []string{
 			tableSchema3SnapshotSets,

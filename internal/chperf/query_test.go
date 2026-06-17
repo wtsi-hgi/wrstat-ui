@@ -1692,16 +1692,16 @@ func TestBuildOps(t *testing.T) {
 		So(freshWhereOp, ShouldNotBeNil)
 		So(freshWhereOp.inputs[queryInputDirKey], ShouldEqual, queryOpTestRootDir)
 		So(freshWhereOp.inputs["cache_scope"], ShouldEqual, "fresh_provider_per_repeat")
-		So(freshWhereOp.inputs["duration_source"], ShouldEqual, "wall")
+		So(freshWhereOp.inputs["duration_source"], ShouldEqual, querySourceClickHouseLog)
 		So(freshWhereOp.skipWarmup, ShouldBeTrue)
-		So(freshWhereOp.useWallTime, ShouldBeTrue)
+		So(freshWhereOp.useWallTime, ShouldBeFalse)
 
 		coldProviderWhereOp := findQueryTestOp(ops, queryOpTreeWhereColdProviderName)
 		So(coldProviderWhereOp, ShouldNotBeNil)
 		So(coldProviderWhereOp.inputs["cache_scope"], ShouldEqual, queryScopeColdProvider)
-		So(coldProviderWhereOp.inputs["duration_source"], ShouldEqual, "wall")
+		So(coldProviderWhereOp.inputs["duration_source"], ShouldEqual, querySourceClickHouseLog)
 		So(coldProviderWhereOp.skipWarmup, ShouldBeTrue)
-		So(coldProviderWhereOp.useWallTime, ShouldBeTrue)
+		So(coldProviderWhereOp.useWallTime, ShouldBeFalse)
 
 		updateWhereOp := findQueryTestOp(ops, queryOpTreeWhereProviderUpdateName)
 		So(updateWhereOp, ShouldNotBeNil)
@@ -1944,8 +1944,8 @@ func TestBuildOps(t *testing.T) {
 
 		o := opTreeWhereFreshProvider(qctx, 1)
 
-		So(o.run(context.Background()), ShouldBeNil)
-		So(o.run(context.Background()), ShouldBeNil)
+		So(runOpCycle(context.Background(), o, o.run), ShouldBeNil)
+		So(runOpCycle(context.Background(), o, o.run), ShouldBeNil)
 		So(openCalls, ShouldEqual, 2)
 		So(closeCalls, ShouldEqual, 2)
 	})

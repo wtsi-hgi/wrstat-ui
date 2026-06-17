@@ -4106,6 +4106,8 @@ func finalGateJ6ColdUXSpecs() []finalGateJ6ColdUXSpec {
 		{"glob", finalGateJ6ColdUXBroadMaxMS, finalGateJ6GlobOperation},
 		{"disktree", finalGateJ6ColdUXBroadMaxMS, finalGateJ6DisktreeOperation},
 		{"where", finalGateJ6ColdUXBroadMaxMS, finalGateJ6WhereOperation},
+		{"where_cold_provider", finalGateJ6ColdUXBroadMaxMS, finalGateJ6WhereColdProviderOperation},
+		{"where_fresh_provider", finalGateJ6ColdUXBroadMaxMS, finalGateJ6WhereFreshProviderOperation},
 	}
 }
 
@@ -4359,6 +4361,16 @@ func finalGateJ6ProviderLifecycleOperation(op perfreport.Operation) bool {
 	default:
 		return false
 	}
+}
+
+func finalGateJ6WhereColdProviderOperation(op perfreport.Operation) bool {
+	return op.Name == queryOpTreeWhereColdProviderName &&
+		stringInput(op.Inputs, queryInputCacheScope) == queryScopeColdProvider
+}
+
+func finalGateJ6WhereFreshProviderOperation(op perfreport.Operation) bool {
+	return op.Name == queryOpTreeWhereFreshName &&
+		stringInput(op.Inputs, queryInputCacheScope) == queryScopeFreshProvider
 }
 
 func finalGateJ6D4RequiredPatterns() []string {

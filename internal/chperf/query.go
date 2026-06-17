@@ -1248,11 +1248,15 @@ func opTreeWhereColdProvider(qctx queryContext, splits int) op {
 	inputs := j4Inputs(j4QueryTypeSubtree, "Where cold provider", treeOpInputs(filter, map[string]any{
 		queryInputDirKey:         qctx.dir,
 		queryInputCacheScope:     queryScopeColdProvider,
-		queryInputDurationSource: querySourceWall,
+		queryInputDurationSource: querySourceClickHouseLog,
 		queryInputSplitsKey:      splits,
+		"provider_lifecycle":     "setup_teardown_outside_measured_query",
 	}))
 
-	var resultCount uint64
+	var (
+		p           provider.Provider
+		resultCount uint64
+	)
 
 	return op{
 		name:   queryOpTreeWhereColdProviderName,
@@ -1260,43 +1264,42 @@ func opTreeWhereColdProvider(qctx queryContext, splits int) op {
 		setup: func(_ context.Context) error {
 			qctx.resetCaches()
 
-			return nil
+			var err error
+
+			p, err = openProviderForRepeat(qctx)
+
+			return err
 		},
 		run: func(_ context.Context) error {
-			count, err := runTreeWhereFreshProvider(qctx, splits, filter, inputs)
+			count, err := runTreeWhereOnProvider(p, qctx.dir, splits, filter, inputs)
 			resultCount = count
 
 			return err
 		},
+		teardown: func(_ context.Context) error {
+			err := p.Close()
+			p = nil
+
+			return err
+		},
 		resultCount: func() uint64 { return resultCount },
-		useWallTime: true,
 		skipWarmup:  true,
 	}
 }
 
-func runTreeWhereFreshProvider(
-	qctx queryContext,
+func runTreeWhereOnProvider(
+	p provider.Provider,
+	dir string,
 	splits int,
 	filter *db.Filter,
 	inputs map[string]any,
 ) (uint64, error) {
-	if qctx.openProvider == nil {
-		return 0, errOpenProviderRequired
-	}
-
-	p, err := qctx.openProvider()
-	if err != nil {
-		return 0, err
-	}
-
-	results, whereErr := p.Tree().Where(qctx.dir, filter, split.SplitsToSplitFn(splits))
-	if whereErr == nil && inputs != nil {
+	results, err := p.Tree().Where(dir, filter, split.SplitsToSplitFn(splits))
+	if err == nil && inputs != nil {
 		inputs[queryInputResultDigest] = dcssDigest(results)
 	}
 
-	closeErr := p.Close()
-
-	return uint64(len(results)), errors.Join(whereErr, closeErr)
+	return uint64(len(results)), err
 }
 
 func opTreeDiskTreeEndpointColdProvider(qctx queryContext) op {
@@ -1934,23 +1937,39 @@ func opTreeWhereFreshProvider(qctx queryContext, splits int) op {
 	inputs := j4Inputs(j4QueryTypeSubtree, "Where fresh provider", treeOpInputs(filter, map[string]any{
 		queryInputDirKey:         qctx.dir,
 		queryInputCacheScope:     queryScopeFreshProvider,
-		queryInputDurationSource: querySourceWall,
+		queryInputDurationSource: querySourceClickHouseLog,
 		queryInputSplitsKey:      splits,
+		"provider_lifecycle":     "setup_teardown_outside_measured_query",
 	}))
 
-	var resultCount uint64
+	var (
+		p           provider.Provider
+		resultCount uint64
+	)
 
 	return op{
 		name:   queryOpTreeWhereFreshName,
 		inputs: inputs,
+		setup: func(_ context.Context) error {
+			var err error
+
+			p, err = openProviderForRepeat(qctx)
+
+			return err
+		},
 		run: func(_ context.Context) error {
-			count, err := runTreeWhereFreshProvider(qctx, splits, filter, inputs)
+			count, err := runTreeWhereOnProvider(p, qctx.dir, splits, filter, inputs)
 			resultCount = count
 
 			return err
 		},
+		teardown: func(_ context.Context) error {
+			err := p.Close()
+			p = nil
+
+			return err
+		},
 		resultCount: func() uint64 { return resultCount },
-		useWallTime: true,
 		skipWarmup:  true,
 	}
 }

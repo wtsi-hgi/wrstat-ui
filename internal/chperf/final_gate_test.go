@@ -2166,7 +2166,16 @@ func TestJ6FinalGates(t *testing.T) {
 
 		result = ValidateFinalGates(evidence)
 		check = finalGateTestCheck(result, "J6 absolute cold UX")
-		So(check.Passed, ShouldBeTrue)
+		So(check.Passed, ShouldBeFalse)
+		So(check.Detail, ShouldContainSubstring, "where_cold_provider")
+
+		evidence = finalGateTestEvidence(false, false)
+		finalGateRemoveCandidateOpMatching(&evidence, queryOpTreeWhereFreshName, nil)
+
+		result = ValidateFinalGates(evidence)
+		check = finalGateTestCheck(result, "J6 absolute cold UX")
+		So(check.Passed, ShouldBeFalse)
+		So(check.Detail, ShouldContainSubstring, "where_fresh_provider missing")
 	})
 
 	Convey("J6 requires collapsed D4 materialisations to cite a passing measurement", t, func() {
@@ -2238,6 +2247,19 @@ func finalGateAddJ6MatrixOp(
 		finalGateE1Counts(2),
 		finalGateE1Counts(9),
 	)
+}
+
+func finalGateCacheScopeInputs(scope string) map[string]any {
+	return map[string]any{
+		queryInputCacheScope: scope,
+	}
+}
+
+func finalGateFilteredCacheScopeInputs(scope string) map[string]any {
+	inputs := finalGateFilteredInputs()
+	inputs[queryInputCacheScope] = scope
+
+	return inputs
 }
 
 func finalGateJ6MatrixCheckAfterRemoving(operation string) FinalGateCheck {
@@ -2652,13 +2674,17 @@ func finalGateRemoveCandidateOpMatching(
 ) {
 	for reportIndex := range evidence.QueryReports {
 		ops := evidence.QueryReports[reportIndex].Operations
-		for opIndex := range ops {
+		for opIndex := 0; opIndex < len(ops); {
 			if ops[opIndex].Name == name && (pred == nil || pred(ops[opIndex])) {
-				evidence.QueryReports[reportIndex].Operations = slices.Delete(ops, opIndex, opIndex+1)
+				ops = slices.Delete(ops, opIndex, opIndex+1)
 
-				return
+				continue
 			}
+
+			opIndex++
 		}
+
+		evidence.QueryReports[reportIndex].Operations = ops
 	}
 }
 
@@ -2812,8 +2838,9 @@ func finalGateQueryReport() perfreport.Report {
 	finalGateAddOp(&report, queryOpTreeWhereColdName, finalGateFilteredWhereInputs("/", "sha256:root-filtered-where"), 40)
 	finalGateAddOp(&report, queryOpTreeWhereColdName,
 		finalGateFilteredWhereInputs(finalGateT283Dir, "sha256:t283-filtered-where"), 80)
-	finalGateAddOp(&report, queryOpTreeWhereColdProviderName, nil, 110)
-	finalGateAddOp(&report, queryOpTreeWhereColdProviderName, finalGateFilteredInputs(), 100)
+	finalGateAddOp(&report, queryOpTreeWhereColdProviderName, finalGateCacheScopeInputs(queryScopeColdProvider), 110)
+	finalGateAddOp(&report, queryOpTreeWhereColdProviderName,
+		finalGateFilteredCacheScopeInputs(queryScopeColdProvider), 100)
 	finalGateAddOp(&report, queryOpTreeDiskTreeColdProviderName, nil, 100)
 	finalGateAddOp(&report, queryOpTreeDiskTreeColdProviderName, finalGateFilteredInputs(), 90)
 	finalGateAddOp(&report, queryOpTreeDiskTreeEndName, nil, 1)
