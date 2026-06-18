@@ -40,6 +40,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/wtsi-hgi/wrstat-ui/internal/split"
 	"github.com/wtsi-hgi/wrstat-ui/stats"
 )
 
@@ -47,6 +48,7 @@ const (
 	summariseStatsSortChunkBytes   = 64 * bytesPerMiB
 	summariseStatsSortMaxLineBytes = 64 * 1024
 	summariseStatsSortOutputName   = "stats.sorted"
+	summariseStatsSortPathKeySep   = byte(0)
 )
 
 var errSummariseStatsSortRecordTooLarge = errors.New("summarise stats sort record too large")
@@ -154,7 +156,7 @@ func summariseStatsSortSyntheticDirRecords(
 
 	for _, dir := range dirs {
 		records = append(records, summariseStatsSortRecord{
-			key:  dir,
+			key:  summariseStatsSortPathKey(dir),
 			line: summariseStatsSortSyntheticDirLine(dir, info),
 			seq:  seq,
 			kind: summariseStatsSortRecordSyntheticDir,
@@ -209,6 +211,20 @@ func summariseStatsSortAncestorDirsForMount(mountPath, dirPath string) []string 
 	}
 
 	return dirs
+}
+
+func summariseStatsSortPathKey(path string) string {
+	parts := split.SplitPath(path)
+
+	var key strings.Builder
+	key.Grow(len(path))
+
+	for _, part := range parts {
+		key.WriteString(strings.TrimSuffix(part, "/"))
+		key.WriteByte(summariseStatsSortPathKeySep)
+	}
+
+	return key.String()
 }
 
 func summariseStatsSortSyntheticDirLine(path string, info stats.FileInfo) []byte {
@@ -272,7 +288,7 @@ func summariseStatsSortRecordsForLine(
 		return []summariseStatsSortRecord{record}
 	}
 
-	record.key = string(info.Path)
+	record.key = summariseStatsSortPathKey(string(info.Path))
 	if info.EntryType == stats.DirType {
 		record.kind = summariseStatsSortRecordExplicitDir
 	}

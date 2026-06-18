@@ -1554,6 +1554,53 @@ func TestSummariseClickHouseSpoolRows(t *testing.T) {
 		So(run([]string{fixture.statsPath}), ShouldBeNil)
 	})
 
+	Convey("summarise command spools unordered stats with prefix-sharing directory siblings", t, func() {
+		fixture := newSummariseActiveSnapshotFixture(t)
+		writePrefixSharingDirectorySiblingSpoolFixtureStats(t, fixture.statsPath, fixture.updatedAt)
+
+		restore := snapshotSummariseGlobals()
+		Reset(restore)
+
+		configureSummariseActiveSnapshotTest(fixture.outputDir, false)
+
+		clickHouseSnapshotIsActive = func(clickhouse.Config, string, time.Time) (bool, error) {
+			return false, nil
+		}
+
+		loadSummariseClickHouseSpool = func(
+			_ context.Context,
+			_ clickhouse.Config,
+			spoolDir string,
+			manifest *chspool.Manifest,
+			_ func(string, time.Duration),
+		) (perfreport.Report, error) {
+			dirsByPath, dirsByID := b5CatalogRows(spoolDir)
+			filesByPath := b5FileRowsByFullPath(spoolDir, dirsByID)
+
+			mountRoot := dirsByPath[summariseTestMountPath]
+			project := dirsByPath[summariseTestMountPath+"project/"]
+			projectV2 := dirsByPath[summariseTestMountPath+"project.v2/"]
+
+			So(project.ParentID, ShouldEqual, mountRoot.DirID)
+			So(projectV2.ParentID, ShouldEqual, mountRoot.DirID)
+			So(project.DirID, ShouldBeLessThan, projectV2.DirID)
+			So(project.SubtreeEnd, ShouldBeLessThanOrEqualTo, projectV2.DirID)
+			So(mountRoot.SubtreeEnd, ShouldEqual, projectV2.SubtreeEnd)
+
+			So(filesByPath[summariseTestMountPath+"project/"].DirID, ShouldEqual, mountRoot.DirID)
+			So(filesByPath[summariseTestMountPath+"project/root.dat"].DirID, ShouldEqual, project.DirID)
+			So(filesByPath[summariseTestMountPath+"project.v2/"].DirID, ShouldEqual, mountRoot.DirID)
+			So(filesByPath[summariseTestMountPath+"project.v2/result.dat"].DirID, ShouldEqual, projectV2.DirID)
+
+			assertSpoolCatalogIntervals(dirsByPath)
+			assertChildFilterAllParentsMatchCatalog(spoolDir)
+
+			return perfreport.NewReport("clickhouse", spoolDir, 1, 0), nil
+		}
+
+		So(run([]string{fixture.statsPath}), ShouldBeNil)
+	})
+
 	Convey("D2.7 actual summarise command path writes and verifies every schema3 spool table", t, func() {
 		fixture := newSummariseActiveSnapshotFixture(t)
 		writeBasedirsSpoolFixtureStats(t, fixture.statsPath, fixture.updatedAt)
@@ -1766,6 +1813,23 @@ func writeRepeatedDirectoryBoundarySpoolFixtureStats(t *testing.T, statsPath str
 	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath+"a/", 'd', 4096, 11, 21, updatedAt.Unix(), 301, 1)
 	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath+"a/deep/", 'd', 4096, 15, 25, updatedAt.Unix(), 305, 1)
 	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath+"a/deep/three.txt", 'f', 30, 16, 26, updatedAt.Unix(), 306, 1)
+
+	writeGzipStats(t, statsPath, buf.Bytes())
+	So(os.Chtimes(statsPath, updatedAt, updatedAt), ShouldBeNil)
+}
+
+func writePrefixSharingDirectorySiblingSpoolFixtureStats(t *testing.T, statsPath string, updatedAt time.Time) {
+	t.Helper()
+
+	var buf bytes.Buffer
+
+	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath, 'd', 4096, 10, 20, updatedAt.Unix(), 300, 1)
+	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath+"project.v2/", 'd', 4096, 11, 21, updatedAt.Unix(), 301, 1)
+	writeSpoolFixtureStatsRow(
+		&buf, summariseTestMountPath+"project.v2/result.dat", 'f', 20, 12, 22, updatedAt.Unix(), 302, 1,
+	)
+	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath+"project/", 'd', 4096, 13, 23, updatedAt.Unix(), 303, 1)
+	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath+"project/root.dat", 'f', 10, 14, 24, updatedAt.Unix(), 304, 1)
 
 	writeGzipStats(t, statsPath, buf.Bytes())
 	So(os.Chtimes(statsPath, updatedAt, updatedAt), ShouldBeNil)

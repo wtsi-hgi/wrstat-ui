@@ -123,6 +123,33 @@ func TestSummariseStatsSort(t *testing.T) {
 			summariseStatsSortFixtureRow("/mnt/test/b/two.dat", 'f', 20, 14, 24, 304, 3),
 		})
 	})
+
+	Convey("mount sorted stats uses component preorder when sibling names share a prefix", t, func() {
+		dir := t.TempDir()
+		statsPath := filepath.Join(dir, "stats")
+		input := strings.Join([]string{
+			summariseStatsSortFixtureRow("/mnt/test/", 'd', 4096, 10, 20, 300, 1),
+			summariseStatsSortFixtureRow("/mnt/test/project.v2/", 'd', 4096, 11, 21, 301, 1),
+			summariseStatsSortFixtureRow("/mnt/test/project.v2/result.dat", 'f', 20, 12, 22, 302, 1),
+			summariseStatsSortFixtureRow("/mnt/test/project/", 'd', 4096, 13, 23, 303, 1),
+			summariseStatsSortFixtureRow("/mnt/test/project/root.dat", 'f', 10, 14, 24, 304, 1),
+		}, "\n") + "\n"
+
+		So(os.WriteFile(statsPath, []byte(input), 0o600), ShouldBeNil)
+
+		sortedPath, err := summariseWriteSortedStatsFileForMount(statsPath, filepath.Join(dir, "scratch"), "/mnt/test/")
+		So(err, ShouldBeNil)
+
+		data, err := os.ReadFile(sortedPath)
+		So(err, ShouldBeNil)
+		So(strings.Split(strings.TrimSpace(string(data)), "\n"), ShouldResemble, []string{
+			summariseStatsSortFixtureRow("/mnt/test/", 'd', 4096, 10, 20, 300, 1),
+			summariseStatsSortFixtureRow("/mnt/test/project/", 'd', 4096, 13, 23, 303, 1),
+			summariseStatsSortFixtureRow("/mnt/test/project/root.dat", 'f', 10, 14, 24, 304, 1),
+			summariseStatsSortFixtureRow("/mnt/test/project.v2/", 'd', 4096, 11, 21, 301, 1),
+			summariseStatsSortFixtureRow("/mnt/test/project.v2/result.dat", 'f', 20, 12, 22, 302, 1),
+		})
+	})
 }
 
 func summariseStatsSortFixtureRow(
