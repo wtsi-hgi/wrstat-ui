@@ -242,7 +242,7 @@ func summariseStatsSortSyntheticDirLine(path string, info stats.FileInfo) []byte
 
 func summariseWriteStatsSortOutputLineIfNeeded(
 	bw *bufio.Writer,
-	record summariseStatsSortRecord,
+	record *summariseStatsSortRecord,
 	state *summariseStatsSortMergeState,
 ) error {
 	if record.isDir() {
@@ -555,29 +555,21 @@ func summariseWriteMergedStatsSortChunks(
 	state := summariseStatsSortMergeState{}
 
 	for h.Len() > 0 {
-		if err := summariseWriteNextMergedStatsSortChunk(bw, &h, &state); err != nil {
+		reader, err := popSummariseStatsSortChunkReader(&h)
+		if err != nil {
+			return err
+		}
+
+		if err := summariseWriteStatsSortOutputLineIfNeeded(bw, &reader.record, &state); err != nil {
+			return err
+		}
+
+		if err := summariseAdvanceStatsSortChunkReader(&h, reader); err != nil {
 			return err
 		}
 	}
 
 	return nil
-}
-
-func summariseWriteNextMergedStatsSortChunk(
-	bw *bufio.Writer,
-	h *summariseStatsSortHeap,
-	state *summariseStatsSortMergeState,
-) error {
-	reader, err := popSummariseStatsSortChunkReader(h)
-	if err != nil {
-		return err
-	}
-
-	if err := summariseWriteStatsSortOutputLineIfNeeded(bw, reader.record, state); err != nil {
-		return err
-	}
-
-	return summariseAdvanceStatsSortChunkReader(h, reader)
 }
 
 func popSummariseStatsSortChunkReader(

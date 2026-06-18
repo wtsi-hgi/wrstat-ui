@@ -26,12 +26,17 @@
 package cmd
 
 import (
+	"bufio"
 	"bytes"
+	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	. "github.com/smartystreets/goconvey/convey"
 )
@@ -39,6 +44,8 @@ import (
 const summariseStatsSortTestBDirLine = "\"/mnt/test/b/\"\tb-dir"
 
 const summariseStatsSortFixtureStamp int64 = 1_717_000_000
+
+const summariseStatsSortTestCommandTimeout = 2 * time.Minute
 
 func TestSummariseStatsSort(t *testing.T) {
 	Convey("sorted stats file uses unquoted path keys to restore subtree contiguity", t, func() {
@@ -204,4 +211,59 @@ func summariseStatsSortFixtureRow(
 	writeSpoolFixtureStatsRow(&buf, path, entryType, size, uid, gid, summariseStatsSortFixtureStamp, inode, nlink)
 
 	return strings.TrimSuffix(buf.String(), "\n")
+}
+
+func TestSummariseStatsSortMergeHotPathSymbols(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("ELF symbol guard is Linux-only")
+	}
+
+	Convey("stats sort merge hot path omits the async-preemption wrapper named in the runtime fatal", t, func() {
+		var buf bytes.Buffer
+		So(summariseWriteMergedStatsSortChunks(bufio.NewWriter(&buf), nil), ShouldBeNil)
+
+		testBinary := filepath.Join(t.TempDir(), "cmd.test")
+		So(summariseStatsSortBuildTestBinary(testBinary), ShouldBeNil)
+
+		present, err := summariseStatsSortTestExecutableHasSymbol(
+			testBinary,
+			"github.com/wtsi-hgi/wrstat-ui/cmd.summariseWriteNextMergedStatsSortChunk",
+		)
+		So(err, ShouldBeNil)
+		So(present, ShouldBeFalse)
+	})
+}
+
+func summariseStatsSortBuildTestBinary(path string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), summariseStatsSortTestCommandTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "go", "test", "-tags", "netgo", "-c", ".", "-o", path)
+
+	cmd.Env = append(os.Environ(), "CGO_ENABLED=1")
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(output)))
+	}
+
+	return nil
+}
+
+func summariseStatsSortTestExecutableHasSymbol(path string, name string) (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), summariseStatsSortTestCommandTimeout)
+	defer cancel()
+
+	output, err := exec.CommandContext(ctx, "go", "tool", "nm", path).CombinedOutput()
+	if err != nil {
+		return false, fmt.Errorf("%w: %s", err, strings.TrimSpace(string(output)))
+	}
+
+	for _, line := range bytes.Split(output, []byte{'\n'}) {
+		if strings.HasSuffix(string(line), " "+name) {
+			return true, nil
+		}
+	}
+
+	return false, nil
 }
