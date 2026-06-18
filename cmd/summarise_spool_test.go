@@ -1601,6 +1601,59 @@ func TestSummariseClickHouseSpoolRows(t *testing.T) {
 		So(run([]string{fixture.statsPath}), ShouldBeNil)
 	})
 
+	Convey("summarise command spools escaped unicode siblings without reopening a prefix subtree", t, func() {
+		fixture := newSummariseActiveSnapshotFixture(t)
+		writeEscapedUnicodeSiblingSpoolFixtureStats(t, fixture.statsPath, fixture.updatedAt)
+
+		restore := snapshotSummariseGlobals()
+		Reset(restore)
+
+		configureSummariseActiveSnapshotTest(fixture.outputDir, false)
+
+		clickHouseSnapshotIsActive = func(clickhouse.Config, string, time.Time) (bool, error) {
+			return false, nil
+		}
+
+		loadSummariseClickHouseSpool = func(
+			_ context.Context,
+			_ clickhouse.Config,
+			spoolDir string,
+			manifest *chspool.Manifest,
+			_ func(string, time.Duration),
+		) (perfreport.Report, error) {
+			dirsByPath, dirsByID := b5CatalogRows(spoolDir)
+			filesByPath := b5FileRowsByFullPath(spoolDir, dirsByID)
+
+			nbspDirPath := summariseTestMountPath + "chr1\u00a0/"
+			nbspFilePath := nbspDirPath + "leaf.dat"
+			_, hasNULDir := dirsByPath[summariseTestMountPath+"chr1\x00/"]
+			mountRoot := dirsByPath[summariseTestMountPath]
+			chr1 := dirsByPath[summariseTestMountPath+"chr1/"]
+			chr1NBSP := dirsByPath[nbspDirPath]
+			chr2 := dirsByPath[summariseTestMountPath+"chr2/"]
+
+			So(hasNULDir, ShouldBeFalse)
+			So(chr1.ParentID, ShouldEqual, mountRoot.DirID)
+			So(chr1NBSP.ParentID, ShouldEqual, mountRoot.DirID)
+			So(chr2.ParentID, ShouldEqual, mountRoot.DirID)
+			So(chr1.DirID, ShouldBeLessThan, chr1NBSP.DirID)
+			So(chr1.SubtreeEnd, ShouldBeLessThanOrEqualTo, chr1NBSP.DirID)
+			So(chr1NBSP.SubtreeEnd, ShouldBeLessThanOrEqualTo, chr2.DirID)
+
+			So(filesByPath[summariseTestMountPath+"chr1/file.dat"].DirID, ShouldEqual, chr1.DirID)
+			So(filesByPath[nbspDirPath].DirID, ShouldEqual, mountRoot.DirID)
+			So(filesByPath[nbspFilePath].DirID, ShouldEqual, chr1NBSP.DirID)
+			So(filesByPath[summariseTestMountPath+"chr2/two.dat"].DirID, ShouldEqual, chr2.DirID)
+
+			assertSpoolCatalogIntervals(dirsByPath)
+			assertChildFilterAllParentsMatchCatalog(spoolDir)
+
+			return perfreport.NewReport("clickhouse", spoolDir, 1, 0), nil
+		}
+
+		So(run([]string{fixture.statsPath}), ShouldBeNil)
+	})
+
 	Convey("D2.7 actual summarise command path writes and verifies every schema3 spool table", t, func() {
 		fixture := newSummariseActiveSnapshotFixture(t)
 		writeBasedirsSpoolFixtureStats(t, fixture.statsPath, fixture.updatedAt)
@@ -1830,6 +1883,25 @@ func writePrefixSharingDirectorySiblingSpoolFixtureStats(t *testing.T, statsPath
 	)
 	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath+"project/", 'd', 4096, 13, 23, updatedAt.Unix(), 303, 1)
 	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath+"project/root.dat", 'f', 10, 14, 24, updatedAt.Unix(), 304, 1)
+
+	writeGzipStats(t, statsPath, buf.Bytes())
+	So(os.Chtimes(statsPath, updatedAt, updatedAt), ShouldBeNil)
+}
+
+func writeEscapedUnicodeSiblingSpoolFixtureStats(t *testing.T, statsPath string, updatedAt time.Time) {
+	t.Helper()
+
+	var buf bytes.Buffer
+
+	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath, 'd', 4096, 10, 20, updatedAt.Unix(), 300, 1)
+	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath+"chr1\u00a0/", 'd', 4096, 11, 21, updatedAt.Unix(), 301, 1)
+	writeSpoolFixtureStatsRow(
+		&buf, summariseTestMountPath+"chr1\u00a0/leaf.dat", 'f', 20, 12, 22, updatedAt.Unix(), 302, 1,
+	)
+	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath+"chr2/two.dat", 'f', 30, 13, 23, updatedAt.Unix(), 303, 1)
+	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath+"chr1/file.dat", 'f', 10, 14, 24, updatedAt.Unix(), 304, 1)
+	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath+"chr2/", 'd', 4096, 15, 25, updatedAt.Unix(), 305, 1)
+	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath+"chr1/", 'd', 4096, 16, 26, updatedAt.Unix(), 306, 1)
 
 	writeGzipStats(t, statsPath, buf.Bytes())
 	So(os.Chtimes(statsPath, updatedAt, updatedAt), ShouldBeNil)

@@ -150,6 +150,44 @@ func TestSummariseStatsSort(t *testing.T) {
 			summariseStatsSortFixtureRow("/mnt/test/project.v2/result.dat", 'f', 20, 12, 22, 302, 1),
 		})
 	})
+
+	Convey("mount sorted stats keeps escaped unicode siblings after the plain-prefix subtree", t, func() {
+		dir := t.TempDir()
+		statsPath := filepath.Join(dir, "stats")
+		root := summariseStatsSortFixtureRow("/mnt/test/", 'd', 4096, 10, 20, 300, 1)
+		chr1Dir := summariseStatsSortFixtureRow("/mnt/test/chr1/", 'd', 4096, 11, 21, 301, 1)
+		chr1File := summariseStatsSortFixtureRow("/mnt/test/chr1/file.dat", 'f', 10, 12, 22, 302, 1)
+		chr1NBSPDir := summariseStatsSortFixtureRow("/mnt/test/chr1\u00a0/", 'd', 4096, 13, 23, 303, 1)
+		chr1NBSPFile := summariseStatsSortFixtureRow("/mnt/test/chr1\u00a0/leaf.dat", 'f', 20, 14, 24, 304, 1)
+		chr2Dir := summariseStatsSortFixtureRow("/mnt/test/chr2/", 'd', 4096, 15, 25, 305, 1)
+		chr2File := summariseStatsSortFixtureRow("/mnt/test/chr2/two.dat", 'f', 30, 16, 26, 306, 1)
+		input := strings.Join([]string{
+			root,
+			chr1NBSPDir,
+			chr1NBSPFile,
+			chr2File,
+			chr1File,
+			chr2Dir,
+			chr1Dir,
+		}, "\n") + "\n"
+
+		So(os.WriteFile(statsPath, []byte(input), 0o600), ShouldBeNil)
+
+		sortedPath, err := summariseWriteSortedStatsFileForMount(statsPath, filepath.Join(dir, "scratch"), "/mnt/test/")
+		So(err, ShouldBeNil)
+
+		data, err := os.ReadFile(sortedPath)
+		So(err, ShouldBeNil)
+		So(strings.Split(strings.TrimSpace(string(data)), "\n"), ShouldResemble, []string{
+			root,
+			chr1Dir,
+			chr1File,
+			chr1NBSPDir,
+			chr1NBSPFile,
+			chr2Dir,
+			chr2File,
+		})
+	})
 }
 
 func summariseStatsSortFixtureRow(

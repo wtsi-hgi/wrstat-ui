@@ -51,6 +51,7 @@ const (
 	secsPerYear                = 3600 * 24 * 365
 	maxLineLength              = 64 * 1024
 	maxBase64EncodedPathLength = 1024
+	hexLetterValueOffset       = 10
 
 	ErrBadPath       = Error("invalid file format: path is not base64 encoded")
 	ErrTooFewColumns = Error("invalid file format: too few tab separated columns")
@@ -339,9 +340,9 @@ func unquote(path []byte) []byte { //nolint:funlen,gocognit,gocyclo,cyclop
 				if b >= '0' && b <= '9' { //nolint:gocritic,nestif
 					value |= rune(b) - '0'
 				} else if b >= 'A' && b <= 'F' {
-					value |= rune(b) - 'A'
+					value |= rune(b) - 'A' + hexLetterValueOffset
 				} else if b >= 'a' && b <= 'f' {
-					value |= rune(b) - 'a'
+					value |= rune(b) - 'a' + hexLetterValueOffset
 				}
 			}
 

@@ -165,48 +165,25 @@ func TestParseStats(t *testing.T) {
 }
 
 func TestUnquote(t *testing.T) {
-	for n, test := range [...][2][]byte{
-		{
-			[]byte(`""`),
-			[]byte(``),
-		},
-		{
-			[]byte(`"abc"`),
-			[]byte(`abc`),
-		},
-		{
-			[]byte(`"\""`),
-			[]byte(`"`),
-		},
-		{
-			[]byte(`"\""`),
-			[]byte(`"`),
-		},
-		{
-			[]byte(`"\'"`),
-			[]byte(`'`),
-		},
-		{
-			[]byte(`"\x20"`),
-			[]byte(` `),
-		},
-		{
-			[]byte(`"abc\x20def"`),
-			[]byte(`abc def`),
-		},
-		{
-			[]byte(`"abc\u0020def"`),
-			[]byte(`abc def`),
-		},
-		{
-			[]byte(`"abc\U00000020def"`),
-			[]byte(`abc def`),
-		},
-	} {
-		if out := unquote(test[0]); !bytes.Equal(out, test[1]) {
-			t.Errorf("test %d: expecting output %v, got %v", n+1, test[1], out)
+	Convey("stats path unquote decodes escaped bytes and unicode code points", t, func() {
+		for _, test := range [...]struct {
+			in   []byte
+			want []byte
+		}{
+			{[]byte(`""`), []byte(``)},
+			{[]byte(`"abc"`), []byte(`abc`)},
+			{[]byte(`"\""`), []byte(`"`)},
+			{[]byte(`"\""`), []byte(`"`)},
+			{[]byte(`"\'"`), []byte(`'`)},
+			{[]byte(`"\x20"`), []byte(` `)},
+			{[]byte(`"abc\x20def"`), []byte(`abc def`)},
+			{[]byte(`"abc\u0020def"`), []byte(`abc def`)},
+			{[]byte(`"abc\U00000020def"`), []byte(`abc def`)},
+			{[]byte(`"/mnt/test/chr1\u00a0/"`), []byte("/mnt/test/chr1\xc2\xa0/")},
+		} {
+			So(unquote(test.in), ShouldResemble, test.want)
 		}
-	}
+	})
 }
 
 func BenchmarkScanAndFileInfo(b *testing.B) {
