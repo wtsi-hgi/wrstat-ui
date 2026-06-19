@@ -309,7 +309,9 @@ func summariseStatsSortRecordsForLine(
 	}
 
 	if info.EntryType == stats.DirType {
-		record.key = summariseStatsSortDirPathKey(string(info.Path))
+		dirPath := summariseEnsureTrailingSlash(string(info.Path))
+		record.key = summariseStatsSortDirPathKey(dirPath)
+		record.line = summariseStatsSortDirRecordLine(line, info)
 		record.kind = summariseStatsSortRecordExplicitDir
 	} else {
 		record.key = summariseStatsSortFilePathKey(string(info.Path))
@@ -346,6 +348,23 @@ func summariseWriteSortedStatsFileForMount(statsPath string, scratchDir string, 
 	}
 
 	return outPath, nil
+}
+
+func summariseStatsSortDirRecordLine(line []byte, info stats.FileInfo) []byte {
+	if len(info.Path) == 0 || info.Path[len(info.Path)-1] == '/' {
+		return line
+	}
+
+	idx := bytes.IndexByte(line, '\t')
+	if idx < 0 {
+		return line
+	}
+
+	out := make([]byte, 0, len(line)+1)
+	out = strconv.AppendQuote(out, summariseEnsureTrailingSlash(string(info.Path)))
+	out = append(out, line[idx:]...)
+
+	return out
 }
 
 func summariseStatsSortFilePathKey(path string) string {

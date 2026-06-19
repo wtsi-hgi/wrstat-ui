@@ -227,6 +227,44 @@ func TestSummariseStatsSort(t *testing.T) {
 			nextDir,
 		})
 	})
+
+	Convey("mount sorted stats normalises explicit directory rows without trailing slash", t, func() {
+		dir := t.TempDir()
+		statsPath := filepath.Join(dir, "stats")
+		root := summariseStatsSortFixtureRow("/mnt/test/", 'd', 4096, 10, 20, 300, 1)
+		binsDir := summariseStatsSortFixtureRow("/mnt/test/bins/", 'd', 4096, 11, 21, 301, 1)
+		priorDir := summariseStatsSortFixtureRow("/mnt/test/bins/maxbin2.004_sub/", 'd', 4096, 12, 22, 302, 1)
+		priorFile := summariseStatsSortFixtureRow(
+			"/mnt/test/bins/maxbin2.004_sub/hmmer.tree.txt", 'f', 10, 13, 23, 303, 1,
+		)
+		slashlessDir := summariseStatsSortFixtureRow("/mnt/test/bins/maxbin2.006", 'd', 4096, 14, 24, 304, 1)
+		normalisedDir := summariseStatsSortFixtureRow("/mnt/test/bins/maxbin2.006/", 'd', 4096, 14, 24, 304, 1)
+		childFile := summariseStatsSortFixtureRow("/mnt/test/bins/maxbin2.006/genes.faa", 'f', 20, 15, 25, 305, 1)
+		input := strings.Join([]string{
+			root,
+			binsDir,
+			slashlessDir,
+			childFile,
+			priorFile,
+			priorDir,
+		}, "\n") + "\n"
+
+		So(os.WriteFile(statsPath, []byte(input), 0o600), ShouldBeNil)
+
+		sortedPath, err := summariseWriteSortedStatsFileForMount(statsPath, filepath.Join(dir, "scratch"), "/mnt/test/")
+		So(err, ShouldBeNil)
+
+		data, err := os.ReadFile(sortedPath)
+		So(err, ShouldBeNil)
+		So(strings.Split(strings.TrimSpace(string(data)), "\n"), ShouldResemble, []string{
+			root,
+			binsDir,
+			priorDir,
+			priorFile,
+			normalisedDir,
+			childFile,
+		})
+	})
 }
 
 func summariseStatsSortFixtureRow(
