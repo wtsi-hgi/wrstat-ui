@@ -1601,6 +1601,52 @@ func TestSummariseClickHouseSpoolRows(t *testing.T) {
 		So(run([]string{fixture.statsPath}), ShouldBeNil)
 	})
 
+	Convey("summarise command spools same-name file and directory entries without reopening the directory", t, func() {
+		fixture := newSummariseActiveSnapshotFixture(t)
+		writeSameNameFileDirectorySpoolFixtureStats(t, fixture.statsPath, fixture.updatedAt)
+
+		restore := snapshotSummariseGlobals()
+		Reset(restore)
+
+		configureSummariseActiveSnapshotTest(fixture.outputDir, false)
+
+		clickHouseSnapshotIsActive = func(clickhouse.Config, string, time.Time) (bool, error) {
+			return false, nil
+		}
+
+		loadSummariseClickHouseSpool = func(
+			_ context.Context,
+			_ clickhouse.Config,
+			spoolDir string,
+			manifest *chspool.Manifest,
+			_ func(string, time.Duration),
+		) (perfreport.Report, error) {
+			dirsByPath, dirsByID := b5CatalogRows(spoolDir)
+			filesByPath := b5FileRowsByFullPath(spoolDir, dirsByID)
+
+			mountRoot := dirsByPath[summariseTestMountPath]
+			clash := dirsByPath[summariseTestMountPath+"clash/"]
+			next := dirsByPath[summariseTestMountPath+"next/"]
+
+			So(clash.ParentID, ShouldEqual, mountRoot.DirID)
+			So(next.ParentID, ShouldEqual, mountRoot.DirID)
+			So(clash.DirID, ShouldBeLessThan, next.DirID)
+			So(clash.SubtreeEnd, ShouldBeLessThanOrEqualTo, next.DirID)
+
+			So(filesByPath[summariseTestMountPath+"clash"].DirID, ShouldEqual, mountRoot.DirID)
+			So(filesByPath[summariseTestMountPath+"clash/"].DirID, ShouldEqual, mountRoot.DirID)
+			So(filesByPath[summariseTestMountPath+"clash/leaf.dat"].DirID, ShouldEqual, clash.DirID)
+			So(filesByPath[summariseTestMountPath+"next/"].DirID, ShouldEqual, mountRoot.DirID)
+
+			assertSpoolCatalogIntervals(dirsByPath)
+			assertChildFilterAllParentsMatchCatalog(spoolDir)
+
+			return perfreport.NewReport("clickhouse", spoolDir, 1, 0), nil
+		}
+
+		So(run([]string{fixture.statsPath}), ShouldBeNil)
+	})
+
 	Convey("summarise command spools escaped unicode siblings without reopening a prefix subtree", t, func() {
 		fixture := newSummariseActiveSnapshotFixture(t)
 		writeEscapedUnicodeSiblingSpoolFixtureStats(t, fixture.statsPath, fixture.updatedAt)
@@ -1883,6 +1929,21 @@ func writePrefixSharingDirectorySiblingSpoolFixtureStats(t *testing.T, statsPath
 	)
 	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath+"project/", 'd', 4096, 13, 23, updatedAt.Unix(), 303, 1)
 	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath+"project/root.dat", 'f', 10, 14, 24, updatedAt.Unix(), 304, 1)
+
+	writeGzipStats(t, statsPath, buf.Bytes())
+	So(os.Chtimes(statsPath, updatedAt, updatedAt), ShouldBeNil)
+}
+
+func writeSameNameFileDirectorySpoolFixtureStats(t *testing.T, statsPath string, updatedAt time.Time) {
+	t.Helper()
+
+	var buf bytes.Buffer
+
+	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath, 'd', 4096, 10, 20, updatedAt.Unix(), 300, 1)
+	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath+"clash/", 'd', 4096, 11, 21, updatedAt.Unix(), 301, 1)
+	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath+"next/", 'd', 4096, 12, 22, updatedAt.Unix(), 302, 1)
+	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath+"clash/leaf.dat", 'f', 20, 14, 24, updatedAt.Unix(), 304, 1)
+	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath+"clash", 'f', 10, 13, 23, updatedAt.Unix(), 303, 1)
 
 	writeGzipStats(t, statsPath, buf.Bytes())
 	So(os.Chtimes(statsPath, updatedAt, updatedAt), ShouldBeNil)

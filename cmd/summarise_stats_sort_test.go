@@ -195,6 +195,38 @@ func TestSummariseStatsSort(t *testing.T) {
 			chr2File,
 		})
 	})
+
+	Convey("mount sorted stats keeps a same-name directory subtree before the file entry", t, func() {
+		dir := t.TempDir()
+		statsPath := filepath.Join(dir, "stats")
+		root := summariseStatsSortFixtureRow("/mnt/test/", 'd', 4096, 10, 20, 300, 1)
+		clashDir := summariseStatsSortFixtureRow("/mnt/test/clash/", 'd', 4096, 11, 21, 301, 1)
+		clashFile := summariseStatsSortFixtureRow("/mnt/test/clash", 'f', 10, 12, 22, 302, 1)
+		clashLeaf := summariseStatsSortFixtureRow("/mnt/test/clash/leaf.dat", 'f', 20, 13, 23, 303, 1)
+		nextDir := summariseStatsSortFixtureRow("/mnt/test/next/", 'd', 4096, 14, 24, 304, 1)
+		input := strings.Join([]string{
+			root,
+			clashDir,
+			nextDir,
+			clashFile,
+			clashLeaf,
+		}, "\n") + "\n"
+
+		So(os.WriteFile(statsPath, []byte(input), 0o600), ShouldBeNil)
+
+		sortedPath, err := summariseWriteSortedStatsFileForMount(statsPath, filepath.Join(dir, "scratch"), "/mnt/test/")
+		So(err, ShouldBeNil)
+
+		data, err := os.ReadFile(sortedPath)
+		So(err, ShouldBeNil)
+		So(strings.Split(strings.TrimSpace(string(data)), "\n"), ShouldResemble, []string{
+			root,
+			clashDir,
+			clashLeaf,
+			clashFile,
+			nextDir,
+		})
+	})
 }
 
 func summariseStatsSortFixtureRow(

@@ -48,7 +48,9 @@ const (
 	summariseStatsSortChunkBytes   = 64 * bytesPerMiB
 	summariseStatsSortMaxLineBytes = 64 * 1024
 	summariseStatsSortOutputName   = "stats.sorted"
-	summariseStatsSortPathKeySep   = byte(0)
+	summariseStatsSortHexByteLen   = 2
+	summariseStatsSortPathKeyDir   = byte(0)
+	summariseStatsSortPathKeyFile  = byte(1)
 )
 
 var errSummariseStatsSortRecordTooLarge = errors.New("summarise stats sort record too large")
@@ -156,7 +158,7 @@ func summariseStatsSortSyntheticDirRecords(
 
 	for _, dir := range dirs {
 		records = append(records, summariseStatsSortRecord{
-			key:  summariseStatsSortPathKey(dir),
+			key:  summariseStatsSortDirPathKey(dir),
 			line: summariseStatsSortSyntheticDirLine(dir, info),
 			seq:  seq,
 			kind: summariseStatsSortRecordSyntheticDir,
@@ -213,18 +215,36 @@ func summariseStatsSortAncestorDirsForMount(mountPath, dirPath string) []string 
 	return dirs
 }
 
-func summariseStatsSortPathKey(path string) string {
+func summariseStatsSortDirPathKey(path string) string {
+	return summariseStatsSortPathKey(path, summariseStatsSortPathKeyDir)
+}
+
+func summariseStatsSortPathKey(path string, terminal byte) string {
 	parts := split.SplitPath(path)
 
 	var key strings.Builder
-	key.Grow(len(path))
+	key.Grow(len(path) * summariseStatsSortHexByteLen)
 
-	for _, part := range parts {
-		key.WriteString(strings.TrimSuffix(part, "/"))
-		key.WriteByte(summariseStatsSortPathKeySep)
+	for idx, part := range parts {
+		summariseWriteStatsSortPathKeyPart(&key, strings.TrimSuffix(part, "/"))
+
+		if idx == len(parts)-1 {
+			key.WriteByte(terminal)
+		} else {
+			key.WriteByte(summariseStatsSortPathKeyDir)
+		}
 	}
 
 	return key.String()
+}
+
+func summariseWriteStatsSortPathKeyPart(key *strings.Builder, part string) {
+	const hex = "0123456789abcdef"
+
+	for _, b := range []byte(part) {
+		key.WriteByte(hex[b>>4])
+		key.WriteByte(hex[b&0x0f])
+	}
 }
 
 func summariseStatsSortSyntheticDirLine(path string, info stats.FileInfo) []byte {
@@ -288,9 +308,11 @@ func summariseStatsSortRecordsForLine(
 		return []summariseStatsSortRecord{record}
 	}
 
-	record.key = summariseStatsSortPathKey(string(info.Path))
 	if info.EntryType == stats.DirType {
+		record.key = summariseStatsSortDirPathKey(string(info.Path))
 		record.kind = summariseStatsSortRecordExplicitDir
+	} else {
+		record.key = summariseStatsSortFilePathKey(string(info.Path))
 	}
 
 	records := summariseStatsSortSyntheticDirRecords(info, mountPath, seq)
@@ -324,6 +346,10 @@ func summariseWriteSortedStatsFileForMount(statsPath string, scratchDir string, 
 	}
 
 	return outPath, nil
+}
+
+func summariseStatsSortFilePathKey(path string) string {
+	return summariseStatsSortPathKey(path, summariseStatsSortPathKeyFile)
 }
 
 func summariseStatsSortParseLine(line []byte) (stats.FileInfo, bool) {
