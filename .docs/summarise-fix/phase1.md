@@ -35,5 +35,5 @@ pre-extraction golden bytes).
 This is the sequential foundation for Phase 2; no behaviour change is
 permitted.
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed

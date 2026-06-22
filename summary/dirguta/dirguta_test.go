@@ -26,6 +26,7 @@
 package dirguta
 
 import (
+	"encoding/hex"
 	"fmt"
 	"strings"
 	"testing"
@@ -151,6 +152,16 @@ func (m *recordDGUTACaptureDB) Add(dguta db.RecordDGUTA) error {
 	m.records = append(m.records, dguta)
 
 	return nil
+}
+
+func (m *recordDGUTACaptureDB) record(path string) (db.RecordDGUTA, bool) {
+	for _, record := range m.records {
+		if string(record.Dir.AppendTo(nil)) == path {
+			return record, true
+		}
+	}
+
+	return db.RecordDGUTA{}, false
 }
 
 func TestDirGUTAFileType(t *testing.T) {
@@ -454,6 +465,87 @@ func TestDirGUTA(t *testing.T) {
 		}
 
 		So(len(seen), ShouldEqual, len(catalogRows))
+	})
+
+	Convey("DirGUTA emits stable bytes for regular, temp, and hardlink files", t, func() {
+		const (
+			goldenRefTime = int64(1779120209)
+			goldenUID     = uint32(101)
+			goldenGID     = uint32(202)
+		)
+
+		f := statsdata.NewRoot("/", goldenRefTime)
+		f.UID = goldenUID
+		f.GID = goldenGID
+
+		statsdata.AddFileWithInode(
+			f,
+			"one/regular.txt",
+			goldenUID,
+			goldenGID,
+			11,
+			goldenRefTime-10,
+			goldenRefTime-5,
+			1001,
+			1,
+		)
+		statsdata.AddFileWithInode(
+			f,
+			"one/scratch.tmp",
+			goldenUID,
+			goldenGID,
+			13,
+			goldenRefTime-20,
+			goldenRefTime-15,
+			1002,
+			1,
+		)
+		statsdata.AddFileWithInode(
+			f,
+			"one/hard-a.bam",
+			goldenUID,
+			goldenGID,
+			17,
+			goldenRefTime-30,
+			goldenRefTime-25,
+			1003,
+			2,
+		)
+		statsdata.AddFileWithInode(
+			f,
+			"one/hard-b.bam",
+			goldenUID,
+			goldenGID,
+			17,
+			goldenRefTime-30,
+			goldenRefTime-25,
+			1003,
+			2,
+		)
+
+		reader := f.AsReader()
+		defer reader.Close()
+
+		s := summary.NewSummariser(stats.NewStatsParser(reader))
+		sink := new(recordDGUTACaptureDB)
+		s.AddDirectoryOperation(newDirGroupUserTypeAge(sink, goldenRefTime, goldenRefTime))
+
+		err := s.Summarise()
+		So(err, ShouldBeNil)
+
+		record, ok := sink.record("/one/")
+		So(ok, ShouldBeTrue)
+		So(record.ChildFileCount, ShouldEqual, 4)
+
+		_, encodedGUTAs := record.EncodeToBytes()
+		So(
+			hex.EncodeToString(encodedGUTAs),
+			ShouldEqual,
+			"04ca00652000000111e6dfd89f0cf0dfd89f0c000000000000000002000000000000000002"+
+				"ca0065001000010b8ee0d89f0c98e0d89f0c000000000000000001000000000000000001"+
+				"ca006500400001801fa2e0d89f0ca2e0d89f0c000000000000000001000000000000000001"+
+				"ca0065018000010dfadfd89f0c84e0d89f0c000000000000000001000000000000000001",
+		)
 	})
 
 	Convey("You can summarise data with a range of Atimes", t, func() {
