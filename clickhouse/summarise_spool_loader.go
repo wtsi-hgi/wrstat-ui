@@ -29,7 +29,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
+	"os"
 	"slices"
 	"sort"
 	"strings"
@@ -46,16 +48,19 @@ import (
 )
 
 const (
-	summariseSpoolLoadPhasePrefix       = "spool_load_"
-	spoolHistoryDeleteChunk             = 512
-	summariseSpoolBytesPerKiB           = 1024
-	spoolLoadReportOperation            = "spool_load_total"
-	spoolLoadReportSuccess              = "success"
-	spoolLoadReportNotAttempted         = "not_attempted"
-	spoolLoadTableStatsAvailable        = "available"
-	spoolLoadTableStatsUnavailable      = "unavailable"
-	spoolLoadTableStatsNotRequested     = "not_requested"
-	clickHouseInsufficientPrivilegeCode = 497
+	summariseSpoolLoadPhasePrefix                  = "spool_load_"
+	spoolHistoryDeleteChunk                        = 512
+	summariseSpoolBytesPerKiB                      = 1024
+	spoolLoadReportOperation                       = "spool_load_total"
+	spoolLoadReportSuccess                         = "success"
+	spoolLoadReportNotAttempted                    = "not_attempted"
+	spoolLoadTableStatsAvailable                   = "available"
+	spoolLoadTableStatsUnavailable                 = "unavailable"
+	spoolLoadTableStatsNotRequested                = "not_requested"
+	clickHouseInsufficientPrivilegeCode            = 497
+	summariseSpoolFilterAmplificationWaiverEnv     = "WRSTAT_FILTER_AMPLIFICATION_WAIVER"
+	summariseSpoolFilterAmplificationWarnThreshold = 5.0
+	summariseSpoolFilterAmplificationHardThreshold = 10.0
 
 	selectReadyActiveVirtualSetCountsQuery = "SELECT summary_rows, filter_rows, child_rows " +
 		"FROM wrstat_active_virtual_sets WHERE active_set_id = ? AND ready = 1 LIMIT 1"
@@ -74,11 +79,24 @@ const (
 )
 
 var (
-	errSummariseSpoolManifestRequired         = errors.New("clickhouse: summarise spool manifest is required")
-	errInvalidSummariseSpoolManifest          = errors.New("clickhouse: invalid summarise spool manifest")
-	errSpoolDecodedRowsMismatch               = errors.New("clickhouse: spool decoded row count mismatch")
-	errUnknownSpoolLoadTable                  = errors.New("clickhouse: no loader query for spool table")
-	errSpoolLoadedRowsMismatch                = errors.New("clickhouse: spool loaded row count mismatch")
+	// ErrFilterAmplificationWaiverRequired is returned when full-filter row
+	// amplification exceeds the hard threshold without an explicit waiver.
+	ErrFilterAmplificationWaiverRequired = errors.New(
+		"clickhouse: full-filter row amplification requires waiver",
+	)
+	// ErrFilterAmplificationStatsUnavailable is returned when the mandatory
+	// pre-publish amplification gate cannot load or derive row-count evidence.
+	ErrFilterAmplificationStatsUnavailable = errors.New(
+		"clickhouse: full-filter row amplification stats unavailable",
+	)
+	errSummariseSpoolManifestRequired          = errors.New("clickhouse: summarise spool manifest is required")
+	errInvalidSummariseSpoolManifest           = errors.New("clickhouse: invalid summarise spool manifest")
+	errSpoolDecodedRowsMismatch                = errors.New("clickhouse: spool decoded row count mismatch")
+	errUnknownSpoolLoadTable                   = errors.New("clickhouse: no loader query for spool table")
+	errSpoolLoadedRowsMismatch                 = errors.New("clickhouse: spool loaded row count mismatch")
+	errSummariseSpoolAmplificationStatsMissing = errors.New(
+		"clickhouse: required row-count evidence missing or zero",
+	)
 	errSummariseSpoolPublishMissingSwitchPlan = errors.New(
 		"clickhouse: summarise spool publish state is missing switch plan",
 	)
@@ -172,6 +190,10 @@ func (l *summariseSpoolLoader) loadWithAfterPublish(
 		return err
 	}
 
+	if err := l.enforceFullFilterAmplificationGateBeforePublish(parent, tracker); err != nil {
+		return err
+	}
+
 	if err := l.publishWithTracker(parent, tracker); err != nil {
 		return err
 	}
@@ -189,6 +211,17 @@ func loadParentContext(parent context.Context) context.Context {
 	}
 
 	return parent
+}
+
+func (l *summariseSpoolLoader) enforceFullFilterAmplificationGateBeforePublish(
+	parent context.Context,
+	tracker *summariseSpoolPublishTracker,
+) error {
+	if tracker.done(summariseSpoolPublishPhasePostSpoolPublishComplete) {
+		return nil
+	}
+
+	return l.enforceFullFilterAmplificationGate(parent)
 }
 
 func (l *summariseSpoolLoader) ensureTablesLoaded(
@@ -499,6 +532,255 @@ func (l *summariseSpoolLoader) verifyDerivedChildFilterAllRows(parent context.Co
 	l.recordLoadedRows(chspool.TableChildFilterAll, childRows)
 
 	return nil
+}
+
+func (l *summariseSpoolLoader) enforceFullFilterAmplificationGate(parent context.Context) error {
+	if !l.requiresFullFilterAmplificationGate() {
+		return nil
+	}
+
+	stats, err := l.loadScopedFullFilterAmplificationStats(parent)
+	if err != nil {
+		return summariseSpoolAmplificationStatsUnavailable(l.manifest, err)
+	}
+
+	return summariseSpoolCheckFullFilterAmplification(parent, l.manifest, stats)
+}
+
+func summariseSpoolAmplificationStatsUnavailable(manifest *chspool.Manifest, err error) error {
+	var mountPath, snapshotID string
+	if manifest != nil {
+		mountPath = manifest.MountPath
+		snapshotID = manifest.SnapshotID
+	}
+
+	return fmt.Errorf(
+		"%w: mount_path=%s snapshot_id=%s: %w",
+		ErrFilterAmplificationStatsUnavailable,
+		mountPath,
+		snapshotID,
+		err,
+	)
+}
+
+func summariseSpoolCheckFullFilterAmplification(
+	parent context.Context,
+	manifest *chspool.Manifest,
+	stats map[string]perfreport.TableStats,
+) error {
+	amplification := summariseSpoolFullFilterAmplificationFromStats(stats)
+	if !amplification.exceedsWarnThreshold() {
+		return nil
+	}
+
+	waived := summariseSpoolFilterAmplificationWaived()
+	summariseSpoolLogFullFilterAmplification(parent, manifest, amplification, waived)
+
+	if amplification.maxVsDirFacts() <= summariseSpoolFilterAmplificationHardThreshold || waived {
+		return nil
+	}
+
+	return fmt.Errorf(
+		"%w: mount_path=%s snapshot_id=%s dir_filter_amplification_vs_dir_facts=%.3g "+
+			"child_filter_amplification_vs_dir_facts=%.3g threshold=%.3g waiver_env=%s",
+		ErrFilterAmplificationWaiverRequired,
+		manifest.MountPath,
+		manifest.SnapshotID,
+		amplification.dirVsDirFacts,
+		amplification.childVsDirFacts,
+		summariseSpoolFilterAmplificationHardThreshold,
+		summariseSpoolFilterAmplificationWaiverEnv,
+	)
+}
+
+func (l *summariseSpoolLoader) loadScopedFullFilterAmplificationStats(
+	parent context.Context,
+) (map[string]perfreport.TableStats, error) {
+	counts, ok := l.loadedFullFilterAmplificationRows()
+	if !ok {
+		var err error
+
+		counts, err = l.countScopedFullFilterAmplificationRows(parent)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	stats := summariseSpoolFullFilterAmplificationStatsFromRows(counts)
+	if err := summariseSpoolValidateFullFilterAmplificationStats(stats); err != nil {
+		return nil, err
+	}
+
+	summariseSpoolAddRowAmplification(stats)
+
+	return stats, nil
+}
+
+func summariseSpoolFullFilterAmplificationStatsFromRows(
+	counts map[string]uint64,
+) map[string]perfreport.TableStats {
+	stats := make(map[string]perfreport.TableStats, len(counts))
+	for table, rows := range counts {
+		stats[table] = perfreport.TableStats{Rows: rows}
+	}
+
+	return stats
+}
+
+func summariseSpoolValidateFullFilterAmplificationStats(stats map[string]perfreport.TableStats) error {
+	for _, table := range summariseSpoolFullFilterAmplificationTables() {
+		tableStats, ok := stats[table]
+		if !ok || tableStats.Rows == 0 {
+			return fmt.Errorf("%w: table=%s", errSummariseSpoolAmplificationStatsMissing, table)
+		}
+	}
+
+	return nil
+}
+
+func summariseSpoolAddRowAmplification(stats map[string]perfreport.TableStats) {
+	dirFactsRows := stats[chspool.TableDirFacts].Rows
+	catalogRows := stats[chspool.TableDirs].Rows
+
+	for table, tableStats := range stats {
+		tableStats.RowAmplificationVsDirFacts = summariseSpoolRowAmplification(tableStats.Rows, dirFactsRows)
+		tableStats.RowAmplificationVsCatalog = summariseSpoolRowAmplification(tableStats.Rows, catalogRows)
+		stats[table] = tableStats
+	}
+}
+
+func (l *summariseSpoolLoader) loadedFullFilterAmplificationRows() (map[string]uint64, bool) {
+	counts := make(map[string]uint64, len(summariseSpoolFullFilterAmplificationTables()))
+	for _, table := range summariseSpoolFullFilterAmplificationTables() {
+		rows := l.loadedRows[table]
+		if rows == 0 {
+			return nil, false
+		}
+
+		counts[table] = rows
+	}
+
+	return counts, true
+}
+
+func summariseSpoolFullFilterAmplificationTables() []string {
+	return []string{
+		chspool.TableDirs,
+		chspool.TableDirFacts,
+		chspool.TableDirFilterAll,
+		chspool.TableChildFilterAll,
+	}
+}
+
+func (l *summariseSpoolLoader) countScopedFullFilterAmplificationRows(
+	parent context.Context,
+) (map[string]uint64, error) {
+	counts := make(map[string]uint64, len(summariseSpoolFullFilterAmplificationTables()))
+	for _, table := range summariseSpoolFullFilterAmplificationTables() {
+		rows, err := l.countLoadedRows(parent, table)
+		if err != nil {
+			return nil, err
+		}
+
+		counts[table] = rows
+	}
+
+	return counts, nil
+}
+
+func (l *summariseSpoolLoader) requiresFullFilterAmplificationGate() bool {
+	return l.loadedRows[chspool.TableDirFilterAll] > 0
+}
+
+type summariseSpoolFullFilterAmplification struct {
+	dirVsDirFacts   float64
+	childVsDirFacts float64
+	dirVsCatalog    float64
+	childVsCatalog  float64
+}
+
+func summariseSpoolFullFilterAmplificationFromStats(
+	stats map[string]perfreport.TableStats,
+) summariseSpoolFullFilterAmplification {
+	dirStats := stats[chspool.TableDirFilterAll]
+	childStats := stats[chspool.TableChildFilterAll]
+
+	return summariseSpoolFullFilterAmplification{
+		dirVsDirFacts:   dirStats.RowAmplificationVsDirFacts,
+		childVsDirFacts: childStats.RowAmplificationVsDirFacts,
+		dirVsCatalog:    dirStats.RowAmplificationVsCatalog,
+		childVsCatalog:  childStats.RowAmplificationVsCatalog,
+	}
+}
+
+func (a summariseSpoolFullFilterAmplification) exceedsWarnThreshold() bool {
+	return a.maxVsDirFacts() > summariseSpoolFilterAmplificationWarnThreshold
+}
+
+func (a summariseSpoolFullFilterAmplification) maxVsDirFacts() float64 {
+	return max(a.dirVsDirFacts, a.childVsDirFacts)
+}
+
+func summariseSpoolLogFullFilterAmplification(
+	parent context.Context,
+	manifest *chspool.Manifest,
+	amplification summariseSpoolFullFilterAmplification,
+	waived bool,
+) {
+	slog.WarnContext(loadParentContext(parent), "clickhouse full-filter row amplification exceeds warning threshold",
+		"mount_path", manifest.MountPath,
+		"snapshot_id", manifest.SnapshotID,
+		"basis", "per_table_vs_wrstat_dir_facts",
+		"dir_filter_table", chspool.TableDirFilterAll,
+		"dir_filter_amplification_vs_dir_facts", amplification.dirVsDirFacts,
+		"dir_filter_amplification_vs_catalog", amplification.dirVsCatalog,
+		"child_filter_table", chspool.TableChildFilterAll,
+		"child_filter_amplification_vs_dir_facts", amplification.childVsDirFacts,
+		"child_filter_amplification_vs_catalog", amplification.childVsCatalog,
+		"combined_amplification_vs_dir_facts", amplification.dirVsDirFacts+amplification.childVsDirFacts,
+		"warn_threshold", summariseSpoolFilterAmplificationWarnThreshold,
+		"hard_threshold", summariseSpoolFilterAmplificationHardThreshold,
+		"waiver", waived,
+		"waiver_env", summariseSpoolFilterAmplificationWaiverEnv,
+	)
+}
+
+func summariseSpoolAddImportPhaseDurations(
+	stats map[string]perfreport.TableStats,
+	phaseDurations map[string]time.Duration,
+) {
+	for phase, duration := range phaseDurations {
+		for _, table := range summariseSpoolImportPhaseTables(phase) {
+			tableStats, ok := stats[table]
+			if !ok {
+				continue
+			}
+
+			if tableStats.ImportPhaseDurationsMS == nil {
+				tableStats.ImportPhaseDurationsMS = make(map[string]float64)
+			}
+
+			tableStats.ImportPhaseDurationsMS[phase] += summariseSpoolDurationMS(duration)
+			stats[table] = tableStats
+		}
+	}
+}
+
+func summariseSpoolRowAmplification(rows uint64, baselineRows uint64) float64 {
+	if rows == 0 || baselineRows == 0 {
+		return 0
+	}
+
+	return float64(rows) / float64(baselineRows)
+}
+
+func summariseSpoolFilterAmplificationWaived() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(summariseSpoolFilterAmplificationWaiverEnv))) {
+	case "1", "true", "yes", "y", "on":
+		return true
+	default:
+		return false
+	}
 }
 
 func decodeSpoolActiveSetIDs[T any](
@@ -2803,6 +3085,9 @@ func (b *summariseSpoolLoadReportBuilder) collect(
 		return err
 	}
 
+	summariseSpoolAddImportPhaseDurations(stats, b.phaseDurations)
+	summariseSpoolAddRowAmplification(stats)
+
 	b.report.TableStats = stats
 	b.report.SelectedTables = summariseSpoolLoadReportTableNames(stats)
 
@@ -3036,6 +3321,33 @@ func validateSummariseSpoolManifestTables(manifest *chspool.Manifest) error {
 	}
 
 	return nil
+}
+
+func summariseSpoolImportPhaseTables(phase string) []string {
+	if table, ok := strings.CutPrefix(phase, summariseSpoolLoadPhasePrefix); ok {
+		return []string{table}
+	}
+
+	switch phase {
+	case importPhaseDirFilterAllInsert:
+		return []string{chspool.TableDirFilterAll}
+	case importPhaseChildFilterAllInsert:
+		return []string{chspool.TableChildFilterAll}
+	case importPhaseSchema3Ready:
+		return []string{chspool.TableSchema3SnapshotSets}
+	case importPhaseActiveVirtualInsert:
+		return []string{
+			chspool.TableActiveVirtualDirs,
+			chspool.TableActiveVirtualSummaries,
+			chspool.TableActiveVirtualFilterAll,
+			chspool.TableActiveVirtualChildren,
+			chspool.TableActiveVirtualSets,
+		}
+	case importPhaseActiveVirtualReady:
+		return []string{chspool.TableActiveVirtualSets}
+	default:
+		return nil
+	}
 }
 
 func copyActiveVirtualSummaryAggregates(

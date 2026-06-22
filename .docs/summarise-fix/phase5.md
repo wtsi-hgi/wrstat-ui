@@ -30,8 +30,8 @@ phase keys with non-zero duration and NO `wrstat_filter_all_insert` key;
 `clickhouse-perf import` report has both phase keys with rows, bytes, duration,
 and a computable rows/sec).
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
 
 ### Item 5.2: C2 - Amplification ratio + waiver gate
 
@@ -55,8 +55,8 @@ not activate the snapshot; amplification 11 with the waiver completes and
 publishes with a warn logged; t283-shaped density stays within the hard-fail
 threshold on the default waiver-free path).
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
 
 ### Item 5.3: C3 - Golden-shape telemetry assertion
 
@@ -79,5 +79,5 @@ absent; FAILS when either full-filter table's
 both phase keys are non-zero and both tables' amplification fields are
 populated).
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed

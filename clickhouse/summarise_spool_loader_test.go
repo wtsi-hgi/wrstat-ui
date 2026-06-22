@@ -26,11 +26,13 @@
 package clickhouse
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"math"
 	"os"
 	"path/filepath"
@@ -89,6 +91,7 @@ const (
 	summariseSpoolPublishFaultEventActiveVirtual  = "drop wrstat_active_virtual_summaries"
 	summariseSpoolPublishFaultEventMountsActive   = "query mounts_active"
 	summariseSpoolPublishFaultEventPublish        = "publish"
+	summariseSpoolPreviousSnapshotID              = "previous-snapshot"
 )
 
 type summariseSpoolCountRow struct {
@@ -211,6 +214,61 @@ func (b *summariseSpoolSlowBatch) Send() error {
 	time.Sleep(b.delay)
 
 	return b.countingDGUTABatch.Send()
+}
+
+func writeSummariseSpoolLoaderActiveVirtualFixtureRows(
+	set *chspool.Set,
+	activeSetID string,
+	sid string,
+	updatedAt time.Time,
+) error {
+	return errors.Join(
+		writeSummariseSpoolLoaderActiveVirtualDirs(set, activeSetID, updatedAt),
+		set.WriteActiveVirtualSummary(summariseSpoolLoaderActiveVirtualSummaryRow(activeSetID, updatedAt)),
+		set.WriteActiveVirtualFilterAll(summariseSpoolLoaderActiveVirtualFilterRow(activeSetID, updatedAt)),
+		set.WriteActiveVirtualChild(summariseSpoolLoaderActiveVirtualChildRow(activeSetID, sid, updatedAt)),
+		set.WriteActiveVirtualSet(summariseSpoolLoaderActiveVirtualSetRow(activeSetID, updatedAt)),
+	)
+}
+
+func writeSummariseSpoolLoaderActiveVirtualDirs(
+	set *chspool.Set,
+	activeSetID string,
+	updatedAt time.Time,
+) error {
+	return errors.Join(
+		set.WriteActiveVirtualDir(summariseSpoolLoaderActiveVirtualDirRow(activeSetID, "/", 0, updatedAt)),
+		set.WriteActiveVirtualDir(summariseSpoolLoaderActiveVirtualDirRow(
+			activeSetID, testRootMountPath, summariseSpoolLoaderVirtualIDForDir("/"), updatedAt,
+		)),
+		set.WriteActiveVirtualDir(summariseSpoolLoaderActiveVirtualDirRow(
+			activeSetID, testMountPath, summariseSpoolLoaderVirtualIDForDir(testRootMountPath), updatedAt,
+		)),
+	)
+}
+
+func summariseSpoolLoaderActiveVirtualChildRow(
+	activeSetID string,
+	sid string,
+	updatedAt time.Time,
+) chspool.ActiveVirtualChildRow {
+	return chspool.ActiveVirtualChildRow{
+		ActiveSetID: activeSetID, ParentVirtualID: summariseSpoolLoaderVirtualIDForDir(testRootMountPath),
+		ChildVirtualID: summariseSpoolLoaderVirtualIDForDir(testMountPath), MountPath: testMountPath,
+		SnapshotID: sid, MountRootDirID: summariseSpoolLoaderDirID(testMountPath), IsMountRootBox: 1,
+		ChildCount: 1, RefreshedAt: updatedAt,
+	}
+}
+
+func summariseSpoolLoaderActiveVirtualSetRow(
+	activeSetID string,
+	updatedAt time.Time,
+) chspool.ActiveVirtualSetRow {
+	return chspool.ActiveVirtualSetRow{
+		ActiveSetID: activeSetID, Schema3Version: currentSchemaVersion, MountsSHA256: activeSetID,
+		ActiveMountCount: 1, SummaryRows: 1, FilterRows: 1, ChildRows: 1,
+		ManifestSHA256: "active-virtual-test", Ready: 1, RefreshedAt: updatedAt,
+	}
 }
 
 func insertSummariseSpoolLoaderDirRows(ctx context.Context, conn driver.Conn, rows []chspool.DirRow) {
@@ -508,7 +566,7 @@ func TestClickHouseSummariseSpoolLoader(t *testing.T) {
 		)
 		conn := newSummariseSpoolLoaderSpyConn(manifest)
 		conn.deriveErr = errForcedFailure
-		conn.publishedSID = "previous-snapshot"
+		conn.publishedSID = summariseSpoolPreviousSnapshotID
 
 		loader, err := newSummariseSpoolLoader(Config{}, conn, spoolDir, manifest, nil)
 		So(err, ShouldBeNil)
@@ -518,7 +576,7 @@ func TestClickHouseSummariseSpoolLoader(t *testing.T) {
 		So(errors.Is(err, errForcedFailure), ShouldBeTrue)
 		So(conn.insertedRows(chspool.TableSchema3SnapshotSets), ShouldEqual, uint64(0))
 		So(conn.activePublishes(), ShouldEqual, 0)
-		So(conn.publishedSID, ShouldEqual, "previous-snapshot")
+		So(conn.publishedSID, ShouldEqual, summariseSpoolPreviousSnapshotID)
 		So(conn.eventIndex("derive "+chspool.TableChildFilterAll), ShouldBeGreaterThan, -1)
 		So(conn.eventIndex("send "+chspool.TableSchema3SnapshotSets), ShouldEqual, -1)
 	})
@@ -1156,6 +1214,7 @@ func TestClickHouseSummariseSpoolLoader(t *testing.T) {
 			So(err, ShouldBeNil)
 
 			reportTable := chspool.TableDirFacts
+			dirTable := chspool.TableDirFilterAll
 			childTable := chspool.TableChildFilterAll
 			total := summariseSpoolReportOperation(report, "spool_load_total")
 			So(total, ShouldNotBeNil)
@@ -1164,11 +1223,29 @@ func TestClickHouseSummariseSpoolLoader(t *testing.T) {
 			So(summariseSpoolReportUint64MapInput(total.Inputs, "loaded_table_rows")[childTable],
 				ShouldEqual, manifest.Tables[chspool.TableDirFilterAll].Rows)
 			So(report.TableStats[reportTable].Rows, ShouldEqual, manifest.Tables[reportTable].Rows)
+			So(report.TableStats[dirTable].Rows, ShouldEqual, manifest.Tables[dirTable].Rows)
 			So(report.TableStats[childTable].Rows, ShouldEqual, manifest.Tables[chspool.TableDirFilterAll].Rows)
 			So(report.TableStats[reportTable].ActiveParts, ShouldEqual, uint64(1))
+			So(report.TableStats[dirTable].ActiveParts, ShouldEqual, uint64(1))
 			So(report.TableStats[childTable].ActiveParts, ShouldEqual, uint64(1))
 			So(report.TableStats[reportTable].CompressedBytes, ShouldBeGreaterThan, uint64(0))
 			So(report.TableStats[reportTable].UncompressedBytes, ShouldBeGreaterThan, uint64(0))
+			So(report.TableStats[dirTable].CompressedBytes, ShouldBeGreaterThan, uint64(0))
+			So(report.TableStats[childTable].CompressedBytes, ShouldBeGreaterThan, uint64(0))
+
+			dirDuration := report.TableStats[dirTable].ImportPhaseDurationsMS[importPhaseDirFilterAllInsert]
+			childDuration := report.TableStats[childTable].ImportPhaseDurationsMS[importPhaseChildFilterAllInsert]
+
+			So(dirDuration, ShouldBeGreaterThan, float64(0))
+			So(childDuration, ShouldBeGreaterThan, float64(0))
+			So(report.TableStats[dirTable].ImportPhaseDurationsMS, ShouldNotContainKey, "wrstat_filter_all_insert")
+			So(report.TableStats[childTable].ImportPhaseDurationsMS, ShouldNotContainKey, "wrstat_filter_all_insert")
+			So(float64(report.TableStats[dirTable].Rows)/(dirDuration/1000), ShouldBeGreaterThan, float64(0))
+			So(float64(report.TableStats[childTable].Rows)/(childDuration/1000), ShouldBeGreaterThan, float64(0))
+			So(report.TableStats[dirTable].RowAmplificationVsDirFacts, ShouldBeGreaterThan, float64(0))
+			So(report.TableStats[dirTable].RowAmplificationVsCatalog, ShouldBeGreaterThan, float64(0))
+			So(report.TableStats[childTable].RowAmplificationVsDirFacts, ShouldBeGreaterThan, float64(0))
+			So(report.TableStats[childTable].RowAmplificationVsCatalog, ShouldBeGreaterThan, float64(0))
 
 			for _, key := range []string{
 				"user_cpu_ms",
@@ -1213,7 +1290,244 @@ func TestClickHouseSummariseSpoolLoader(t *testing.T) {
 				ShouldBeGreaterThanOrEqualTo, uint64(0))
 		})
 
-	Convey("E1.5 summarise spool load reports succeed when optional table stats need extra grants",
+	Convey("C2 summarise spool load warns and completes when full-filter amplification exceeds 5",
+		t,
+		func() {
+			manifest, conn, logs, err := runSummariseSpoolAmplificationLoadForTest(
+				t,
+				time.Date(2026, 6, 18, 10, 0, 0, 0, time.UTC),
+				6,
+				"",
+				"",
+				true,
+			)
+
+			So(err, ShouldBeNil)
+			So(conn.publishedSID, ShouldEqual, manifest.SnapshotID)
+			So(logs, ShouldContainSubstring, `"level":"WARN"`)
+			So(logs, ShouldContainSubstring, "full-filter row amplification")
+			So(logs, ShouldContainSubstring, `"dir_filter_amplification_vs_dir_facts":6`)
+			So(logs, ShouldContainSubstring, `"child_filter_amplification_vs_dir_facts":6`)
+		})
+
+	Convey("C2 summarise spool load hard-fails amplification above 10 before publish without waiver",
+		t,
+		func() {
+			_, conn, logs, err := runSummariseSpoolAmplificationLoadForTest(
+				t,
+				time.Date(2026, 6, 18, 10, 30, 0, 0, time.UTC),
+				11,
+				"",
+				summariseSpoolPreviousSnapshotID,
+				true,
+			)
+
+			So(errors.Is(err, ErrFilterAmplificationWaiverRequired), ShouldBeTrue)
+			So(conn.activePublishes(), ShouldEqual, 0)
+			So(conn.eventIndex("publish"), ShouldEqual, -1)
+			So(conn.publishedSID, ShouldEqual, summariseSpoolPreviousSnapshotID)
+			So(logs, ShouldContainSubstring, `"level":"WARN"`)
+			So(logs, ShouldContainSubstring, `"dir_filter_amplification_vs_dir_facts":11`)
+			So(logs, ShouldContainSubstring, `"child_filter_amplification_vs_dir_facts":11`)
+		})
+
+	Convey("C2 summarise spool load cannot let older normal table stats mask bad staged amplification",
+		t,
+		func() {
+			spoolDir := filepath.Join(t.TempDir(), "spool")
+			manifest := writeSummariseSpoolLoaderAmplifiedSchema3Spool(
+				spoolDir,
+				time.Date(2026, 6, 18, 10, 45, 0, 0, time.UTC),
+				11,
+			)
+			conn := newSummariseSpoolLoaderSpyConn(manifest)
+			conn.publishedSID = summariseSpoolPreviousSnapshotID
+			conn.setFullFilterAmplificationForTest(1)
+
+			var logs bytes.Buffer
+
+			restoreLogs := captureSummariseSpoolAmplificationLogs(&logs)
+			Reset(restoreLogs)
+
+			restoreWaiver := setSummariseSpoolAmplificationWaiverForTest("")
+			Reset(restoreWaiver)
+
+			loader, err := newSummariseSpoolLoader(Config{Database: testDatabaseName}, conn, spoolDir, manifest, nil)
+			So(err, ShouldBeNil)
+
+			err = loader.load(context.Background())
+
+			So(errors.Is(err, ErrFilterAmplificationWaiverRequired), ShouldBeTrue)
+			So(conn.activePublishes(), ShouldEqual, 0)
+			So(conn.eventIndex("publish"), ShouldEqual, -1)
+			So(conn.publishedSID, ShouldEqual, summariseSpoolPreviousSnapshotID)
+			So(logs.String(), ShouldContainSubstring, `"dir_filter_amplification_vs_dir_facts":11`)
+			So(logs.String(), ShouldContainSubstring, `"child_filter_amplification_vs_dir_facts":11`)
+		})
+
+	Convey("C2 summarise spool load completes amplification above 10 with waiver",
+		t,
+		func() {
+			manifest, conn, logs, err := runSummariseSpoolAmplificationLoadForTest(
+				t,
+				time.Date(2026, 6, 18, 11, 0, 0, 0, time.UTC),
+				11,
+				"1",
+				"",
+				true,
+			)
+
+			So(err, ShouldBeNil)
+			So(conn.publishedSID, ShouldEqual, manifest.SnapshotID)
+			So(logs, ShouldContainSubstring, `"level":"WARN"`)
+			So(logs, ShouldContainSubstring, `"waiver":true`)
+			So(logs, ShouldContainSubstring, `"dir_filter_amplification_vs_dir_facts":11`)
+			So(logs, ShouldContainSubstring, `"child_filter_amplification_vs_dir_facts":11`)
+		})
+
+	Convey("C2 summarise spool load allows t283-shaped per-table density without waiver",
+		t,
+		func() {
+			manifest, conn, _, err := runSummariseSpoolAmplificationLoadForTest(
+				t,
+				time.Date(2026, 6, 18, 11, 30, 0, 0, time.UTC),
+				6.9,
+				"",
+				"",
+				false,
+			)
+
+			So(err, ShouldBeNil)
+			So(conn.publishedSID, ShouldEqual, manifest.SnapshotID)
+		})
+
+	Convey("C2 summarise spool load fails closed when scoped amplification counts are unavailable",
+		t,
+		func() {
+			spoolDir := filepath.Join(t.TempDir(), "spool")
+			manifest := writeSummariseSpoolLoaderSchema3Spool(
+				spoolDir,
+				time.Date(2026, 6, 18, 12, 0, 0, 0, time.UTC),
+			)
+			conn := newSummariseSpoolLoaderSpyConn(manifest)
+			conn.publishedSID = summariseSpoolPreviousSnapshotID
+			conn.failCountAfterForTest(chspool.TableDirs, 0, errSummariseSpoolLoaderTestSystemPartsTimedOut)
+
+			loader, err := newSummariseSpoolLoader(Config{Database: testDatabaseName}, conn, spoolDir, manifest, nil)
+			So(err, ShouldBeNil)
+
+			loader.loadedRows = map[string]uint64{chspool.TableDirFilterAll: manifest.Tables[chspool.TableDirFilterAll].Rows}
+
+			err = loader.enforceFullFilterAmplificationGate(context.Background())
+
+			So(errors.Is(err, ErrFilterAmplificationStatsUnavailable), ShouldBeTrue)
+			So(conn.activePublishes(), ShouldEqual, 0)
+			So(conn.eventIndex("publish"), ShouldEqual, -1)
+			So(conn.publishedSID, ShouldEqual, summariseSpoolPreviousSnapshotID)
+		})
+
+	Convey("C2 summarise spool load fails closed on scoped count privilege errors before publish",
+		t,
+		func() {
+			spoolDir := filepath.Join(t.TempDir(), "spool")
+			manifest := writeSummariseSpoolLoaderSchema3Spool(
+				spoolDir,
+				time.Date(2026, 6, 18, 12, 15, 0, 0, time.UTC),
+			)
+			conn := newSummariseSpoolLoaderSpyConn(manifest)
+			conn.publishedSID = summariseSpoolPreviousSnapshotID
+			conn.failCountAfterForTest(chspool.TableDirs, 0, &proto.Exception{
+				Code:    497,
+				Message: "wrstat: Not enough privileges to SELECT FROM wrstat_dirs",
+			})
+
+			loader, err := newSummariseSpoolLoader(Config{Database: testDatabaseName}, conn, spoolDir, manifest, nil)
+			So(err, ShouldBeNil)
+
+			loader.loadedRows = map[string]uint64{chspool.TableDirFilterAll: manifest.Tables[chspool.TableDirFilterAll].Rows}
+
+			err = loader.enforceFullFilterAmplificationGate(context.Background())
+
+			So(errors.Is(err, ErrFilterAmplificationStatsUnavailable), ShouldBeTrue)
+			So(conn.activePublishes(), ShouldEqual, 0)
+			So(conn.eventIndex("publish"), ShouldEqual, -1)
+			So(conn.publishedSID, ShouldEqual, summariseSpoolPreviousSnapshotID)
+		})
+
+	Convey("C2 summarise spool load fails closed when scoped amplification evidence is partial or empty",
+		t,
+		func() {
+			cases := []struct {
+				name       string
+				zeroTables []string
+			}{
+				{
+					name:       "missing wrstat_dirs catalog baseline",
+					zeroTables: []string{chspool.TableDirs},
+				},
+				{
+					name:       "missing wrstat_dir_facts baseline",
+					zeroTables: []string{chspool.TableDirFacts},
+				},
+				{
+					name:       "missing wrstat_dir_filter_all evidence",
+					zeroTables: []string{chspool.TableDirFilterAll},
+				},
+				{
+					name:       "missing wrstat_child_filter_all evidence",
+					zeroTables: []string{chspool.TableChildFilterAll},
+				},
+				{
+					name: "empty scoped evidence result",
+					zeroTables: []string{
+						chspool.TableDirs,
+						chspool.TableDirFacts,
+						chspool.TableDirFilterAll,
+						chspool.TableChildFilterAll,
+					},
+				},
+			}
+
+			for i, tc := range cases {
+				Convey(tc.name, func() {
+					spoolDir := filepath.Join(t.TempDir(), "spool")
+					updatedAt := time.Date(2026, 6, 18, 12, 30+i, 0, 0, time.UTC)
+					manifest := writeSummariseSpoolLoaderSchema3Spool(spoolDir, updatedAt)
+					conn := newSummariseSpoolLoaderSpyConn(manifest)
+
+					conn.publishedSID = summariseSpoolPreviousSnapshotID
+					for _, table := range summariseSpoolFullFilterAmplificationTables() {
+						conn.countOverrides[table] = 1
+					}
+
+					for _, table := range tc.zeroTables {
+						conn.zeroCountAfterForTest(table, 0)
+					}
+
+					loader, err := newSummariseSpoolLoader(
+						Config{Database: testDatabaseName},
+						conn,
+						spoolDir,
+						manifest,
+						nil,
+					)
+					So(err, ShouldBeNil)
+
+					loader.loadedRows = map[string]uint64{
+						chspool.TableDirFilterAll: manifest.Tables[chspool.TableDirFilterAll].Rows,
+					}
+
+					err = loader.enforceFullFilterAmplificationGate(context.Background())
+
+					So(errors.Is(err, ErrFilterAmplificationStatsUnavailable), ShouldBeTrue)
+					So(conn.activePublishes(), ShouldEqual, 0)
+					So(conn.eventIndex("publish"), ShouldEqual, -1)
+					So(conn.publishedSID, ShouldEqual, summariseSpoolPreviousSnapshotID)
+				})
+			}
+		})
+
+	Convey("E1.5 summarise spool load reports succeed when post-publish table stats need extra grants",
 		t,
 		func() {
 			spoolDir := filepath.Join(t.TempDir(), "spool")
@@ -1634,49 +1948,7 @@ func writeSummariseSpoolLoaderSchema3SpoolWithOptionalFiles(
 			ManifestSHA256:     "schema3-snapshot-test",
 			RefreshedAt:        updatedAt,
 		}),
-		set.WriteActiveVirtualDir(summariseSpoolLoaderActiveVirtualDirRow(
-			activeSetID,
-			"/",
-			0,
-			updatedAt,
-		)),
-		set.WriteActiveVirtualDir(summariseSpoolLoaderActiveVirtualDirRow(
-			activeSetID,
-			testRootMountPath,
-			summariseSpoolLoaderVirtualIDForDir("/"),
-			updatedAt,
-		)),
-		set.WriteActiveVirtualDir(summariseSpoolLoaderActiveVirtualDirRow(
-			activeSetID,
-			testMountPath,
-			summariseSpoolLoaderVirtualIDForDir(testRootMountPath),
-			updatedAt,
-		)),
-		set.WriteActiveVirtualSummary(summariseSpoolLoaderActiveVirtualSummaryRow(activeSetID, updatedAt)),
-		set.WriteActiveVirtualFilterAll(summariseSpoolLoaderActiveVirtualFilterRow(activeSetID, updatedAt)),
-		set.WriteActiveVirtualChild(chspool.ActiveVirtualChildRow{
-			ActiveSetID:     activeSetID,
-			ParentVirtualID: summariseSpoolLoaderVirtualIDForDir(testRootMountPath),
-			ChildVirtualID:  summariseSpoolLoaderVirtualIDForDir(testMountPath),
-			MountPath:       testMountPath,
-			SnapshotID:      sid,
-			MountRootDirID:  summariseSpoolLoaderDirID(testMountPath),
-			IsMountRootBox:  1,
-			ChildCount:      1,
-			RefreshedAt:     updatedAt,
-		}),
-		set.WriteActiveVirtualSet(chspool.ActiveVirtualSetRow{
-			ActiveSetID:      activeSetID,
-			Schema3Version:   currentSchemaVersion,
-			MountsSHA256:     activeSetID,
-			ActiveMountCount: 1,
-			SummaryRows:      1,
-			FilterRows:       1,
-			ChildRows:        1,
-			ManifestSHA256:   "active-virtual-test",
-			Ready:            1,
-			RefreshedAt:      updatedAt,
-		}),
+		writeSummariseSpoolLoaderActiveVirtualFixtureRows(set, activeSetID, sid, updatedAt),
 	)
 
 	So(writeErr, ShouldBeNil)
@@ -2572,6 +2844,7 @@ func newSummariseSpoolLoaderSpyConn(manifest *chspool.Manifest) *summariseSpoolL
 		manifest:       manifest,
 		batches:        map[string][]*summariseSpoolLoaderSpyBatch{},
 		countOverrides: map[string]uint64{},
+		countCalls:     map[string]int{},
 	}
 }
 
@@ -2611,6 +2884,200 @@ func summariseSpoolReportUint64Input(inputs map[string]any, key string) uint64 {
 	}
 
 	return typed
+}
+
+func runSummariseSpoolAmplificationLoadForTest(
+	t *testing.T,
+	updatedAt time.Time,
+	ratio float64,
+	waiver string,
+	previousSID string,
+	captureLogs bool,
+) (*chspool.Manifest, *summariseSpoolLoaderSpyConn, string, error) {
+	t.Helper()
+
+	spoolDir := filepath.Join(t.TempDir(), "spool")
+	manifest := writeSummariseSpoolLoaderAmplifiedSchema3Spool(spoolDir, updatedAt, ratio)
+	conn := newSummariseSpoolLoaderSpyConn(manifest)
+	conn.publishedSID = previousSID
+
+	restoreWaiver := setSummariseSpoolAmplificationWaiverForTest(waiver)
+	Reset(restoreWaiver)
+
+	var logs bytes.Buffer
+	if captureLogs {
+		restoreLogs := captureSummariseSpoolAmplificationLogs(&logs)
+		Reset(restoreLogs)
+	}
+
+	loader, err := newSummariseSpoolLoader(Config{Database: testDatabaseName}, conn, spoolDir, manifest, nil)
+	So(err, ShouldBeNil)
+
+	err = loader.load(context.Background())
+
+	return manifest, conn, logs.String(), err
+}
+
+func writeSummariseSpoolLoaderAmplifiedSchema3Spool(
+	spoolDir string,
+	updatedAt time.Time,
+	ratio float64,
+) *chspool.Manifest {
+	const baselineRows = uint64(10)
+
+	set, err := chspool.CreateSet(spoolDir)
+	So(err, ShouldBeNil)
+
+	sid := SnapshotID(testMountPath, updatedAt)
+	activeSetID := fingerprintForMountsActive([]mountsActiveRow{{
+		mountPath: testMountPath, snapshotID: sid, updatedAt: updatedAt,
+	}})
+	fullFilterRows := uint64(math.Round(float64(baselineRows) * ratio))
+	writeErr := errors.Join(
+		writeSummariseSpoolLoaderAmplifiedStageRows(set, sid, updatedAt, baselineRows, fullFilterRows),
+		writeSummariseSpoolLoaderAmplifiedReadinessRows(set, sid, updatedAt, baselineRows, fullFilterRows),
+		writeSummariseSpoolLoaderActiveVirtualFixtureRows(set, activeSetID, sid, updatedAt),
+	)
+
+	So(writeErr, ShouldBeNil)
+	So(set.Close(), ShouldBeNil)
+
+	manifest := summariseSpoolLoaderManifestForSet(set, sid, updatedAt)
+	So(chspool.WriteManifestAtomic(spoolDir, manifest), ShouldBeNil)
+
+	return manifest
+}
+
+func writeSummariseSpoolLoaderAmplifiedStageRows(
+	set *chspool.Set,
+	sid string,
+	updatedAt time.Time,
+	baselineRows uint64,
+	fullFilterRows uint64,
+) error {
+	return errors.Join(
+		writeSummariseSpoolLoaderRepeatedDirs(set, sid, baselineRows),
+		writeSummariseSpoolLoaderRepeatedFacts(set, sid, updatedAt, baselineRows),
+		writeSummariseSpoolLoaderRepeatedAgeAll(set, sid, updatedAt, baselineRows),
+		writeSummariseSpoolLoaderRepeatedFullFilters(set, sid, updatedAt, fullFilterRows),
+	)
+}
+
+func writeSummariseSpoolLoaderRepeatedDirs(set *chspool.Set, sid string, rows uint64) error {
+	var err error
+	for range rows {
+		err = errors.Join(err, set.WriteDir(summariseSpoolLoaderDirRow(sid, testMountPath+"project/", 0, 0)))
+	}
+
+	return err
+}
+
+func writeSummariseSpoolLoaderRepeatedFacts(
+	set *chspool.Set,
+	sid string,
+	updatedAt time.Time,
+	rows uint64,
+) error {
+	var err error
+	for range rows {
+		err = errors.Join(err, set.WriteDirFact(summariseSpoolLoaderSchema2FactRow(sid, updatedAt, testMountPath, 1)))
+	}
+
+	return err
+}
+
+func writeSummariseSpoolLoaderRepeatedAgeAll(
+	set *chspool.Set,
+	sid string,
+	updatedAt time.Time,
+	rows uint64,
+) error {
+	fact := summariseSpoolLoaderSchema2FactRow(sid, updatedAt, testMountPath, 1)
+
+	var err error
+	for range rows {
+		err = errors.Join(err, set.WriteDirFilterAgeAll(summariseSpoolLoaderSchema2AgeAllRow(fact)))
+	}
+
+	return err
+}
+
+func writeSummariseSpoolLoaderRepeatedFullFilters(
+	set *chspool.Set,
+	sid string,
+	updatedAt time.Time,
+	rows uint64,
+) error {
+	dirFilter := summariseSpoolLoaderDirFilterAllRow(summariseSpoolLoaderChildFilterAllRow(sid, updatedAt))
+
+	var err error
+	for range rows {
+		err = errors.Join(err, set.WriteDirFilterAll(dirFilter))
+	}
+
+	return err
+}
+
+func writeSummariseSpoolLoaderAmplifiedReadinessRows(
+	set *chspool.Set,
+	sid string,
+	updatedAt time.Time,
+	baselineRows uint64,
+	fullFilterRows uint64,
+) error {
+	return errors.Join(
+		set.WriteDirProjectionSet(chspool.DirProjectionSetRow{
+			MountPath: testMountPath, SnapshotID: sid, UpdatedAt: updatedAt, RefreshedAt: updatedAt,
+		}),
+		set.WriteSchema3SnapshotSet(chspool.Schema3SnapshotSetRow{
+			MountPath: testMountPath, SnapshotID: sid, Schema3Version: currentSchemaVersion,
+			DirsRows: baselineRows, DirFactsRows: baselineRows, ChildFilterAllRows: fullFilterRows,
+			DirFilterAllRows: fullFilterRows, ManifestSHA256: "schema3-amplification-test", RefreshedAt: updatedAt,
+		}),
+	)
+}
+
+func summariseSpoolLoaderManifestForSet(
+	set *chspool.Set,
+	sid string,
+	updatedAt time.Time,
+) *chspool.Manifest {
+	return &chspool.Manifest{
+		Version: chspool.Version, Format: chspool.Format, State: chspool.Complete,
+		MountPath: testMountPath, SnapshotID: sid, UpdatedAt: updatedAt.UTC().Format(time.RFC3339Nano),
+		SchemaMarker: summariseSpoolLoaderSchemaMarker, Tables: set.TableManifests(),
+		CompletedAt: time.Now().UTC().Format(time.RFC3339Nano),
+	}
+}
+
+func setSummariseSpoolAmplificationWaiverForTest(value string) func() {
+	orig, ok := os.LookupEnv(summariseSpoolFilterAmplificationWaiverEnv)
+
+	if value == "" {
+		So(os.Unsetenv(summariseSpoolFilterAmplificationWaiverEnv), ShouldBeNil)
+	} else {
+		So(os.Setenv(summariseSpoolFilterAmplificationWaiverEnv, value), ShouldBeNil)
+	}
+
+	return func() {
+		if ok {
+			So(os.Setenv(summariseSpoolFilterAmplificationWaiverEnv, orig), ShouldBeNil)
+
+			return
+		}
+
+		So(os.Unsetenv(summariseSpoolFilterAmplificationWaiverEnv), ShouldBeNil)
+	}
+}
+
+func captureSummariseSpoolAmplificationLogs(buf *bytes.Buffer) func() {
+	orig := slog.Default()
+
+	slog.SetDefault(slog.New(slog.NewJSONHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+
+	return func() {
+		slog.SetDefault(orig)
+	}
 }
 
 func newSummariseSpoolPublishFaultConn(manifest *chspool.Manifest) *summariseSpoolPublishFaultConn {
@@ -2875,6 +3342,11 @@ type summariseSpoolPublishFaultCase struct {
 	forbidRetryPhases      []string
 }
 
+type summariseSpoolCountFailure struct {
+	after int
+	err   error
+}
+
 func (c *summariseSpoolLoaderSpyConn) deriveChildFilterAllRows(args ...any) ([]chspool.ChildFilterAllRow, error) {
 	if len(args) != 2 {
 		return nil, errBootstrapTestUnexpectedCall
@@ -3027,6 +3499,67 @@ func (c *summariseSpoolLoaderSpyConn) derivedChildParentIDs(mountPath string, sn
 	}
 
 	return parentIDs
+}
+
+func (c *summariseSpoolLoaderSpyConn) setFullFilterAmplificationForTest(ratio float64) {
+	const inputRows = 10
+
+	fullFilterRows := uint64(math.Round(float64(inputRows) * ratio))
+	c.tableStatsRowOverrides = map[string]uint64{
+		chspool.TableDirs:           inputRows,
+		chspool.TableDirFacts:       inputRows,
+		chspool.TableDirFilterAll:   fullFilterRows,
+		chspool.TableChildFilterAll: fullFilterRows,
+	}
+}
+
+func (c *summariseSpoolLoaderSpyConn) failCountAfterForTest(table string, successes int, err error) {
+	if c.countFailures == nil {
+		c.countFailures = make(map[string]summariseSpoolCountFailure)
+	}
+
+	c.countFailures[table] = summariseSpoolCountFailure{after: successes, err: err}
+}
+
+func (c *summariseSpoolLoaderSpyConn) zeroCountAfterForTest(table string, successes int) {
+	if c.zeroCountsAfter == nil {
+		c.zeroCountsAfter = make(map[string]int)
+	}
+
+	c.zeroCountsAfter[table] = successes
+}
+
+func (c *summariseSpoolLoaderSpyConn) queryTableStats(tables ...any) (driver.Rows, error) {
+	c.recordEvent("table_stats")
+
+	if err := c.nextTableStatsErr(); err != nil {
+		return nil, err
+	}
+
+	return c.tableStatsRows(tables...), nil
+}
+
+func (c *summariseSpoolLoaderSpyConn) nextTableStatsErr() error {
+	if len(c.tableStatsErrs) == 0 {
+		return c.tableStatsErr
+	}
+
+	err := c.tableStatsErrs[0]
+	c.tableStatsErrs = c.tableStatsErrs[1:]
+
+	return err
+}
+
+func (c *summariseSpoolLoaderSpyConn) manifestRowsForTableStats(table string) uint64 {
+	if c.manifest == nil {
+		return 0
+	}
+
+	if table == chspool.TableChildFilterAll {
+		return c.manifest.Tables[chspool.TableDirFilterAll].Rows
+	}
+
+	return c.manifest.Tables[table].Rows
 }
 
 func summariseSpoolLoaderVirtualDirForTest(args ...any) (string, bool) {
@@ -3788,16 +4321,21 @@ func summariseSpoolLoaderUint64ForTest(n int) uint64 {
 type summariseSpoolLoaderSpyConn struct {
 	bootstrapTestConn
 
-	manifest         *chspool.Manifest
-	batches          map[string][]*summariseSpoolLoaderSpyBatch
-	events           []string
-	countOverrides   map[string]uint64
-	tableStatsErr    error
-	deriveErr        error
-	deriveArgs       []any
-	derivedChildRows []chspool.ChildFilterAllRow
-	activeEvents     int
-	publishedSID     string
+	manifest               *chspool.Manifest
+	batches                map[string][]*summariseSpoolLoaderSpyBatch
+	events                 []string
+	countOverrides         map[string]uint64
+	countCalls             map[string]int
+	countFailures          map[string]summariseSpoolCountFailure
+	zeroCountsAfter        map[string]int
+	tableStatsErr          error
+	tableStatsErrs         []error
+	tableStatsRowOverrides map[string]uint64
+	deriveErr              error
+	deriveArgs             []any
+	derivedChildRows       []chspool.ChildFilterAllRow
+	activeEvents           int
+	publishedSID           string
 }
 
 func (c *summariseSpoolLoaderSpyConn) Query(
@@ -3812,11 +4350,7 @@ func (c *summariseSpoolLoaderSpyConn) Query(
 		return emptyMountsActiveRowsForTest(), nil
 	default:
 		if strings.Contains(query, "FROM system.parts") {
-			if c.tableStatsErr != nil {
-				return nil, c.tableStatsErr
-			}
-
-			return c.tableStatsRows(args[1:]...), nil
+			return c.queryTableStats(args[1:]...)
 		}
 
 		return nil, errBootstrapTestUnexpectedCall
@@ -3841,6 +4375,12 @@ func (c *summariseSpoolLoaderSpyConn) tableStatsRows(tables ...any) driver.Rows 
 		}
 
 		count := c.insertedRows(table)
+		if override, ok := c.tableStatsRowOverrides[table]; ok {
+			count = override
+		} else if count == 0 {
+			count = c.manifestRowsForTableStats(table)
+		}
+
 		if count == 0 {
 			continue
 		}
@@ -3880,6 +4420,15 @@ func (c *summariseSpoolLoaderSpyConn) QueryRow(
 	}
 
 	c.recordEvent("count " + table)
+	c.countCalls[table]++
+
+	if failure, ok := c.countFailures[table]; ok && c.countCalls[table] > failure.after {
+		return summariseSpoolCountRow{err: failure.err}
+	}
+
+	if after, ok := c.zeroCountsAfter[table]; ok && c.countCalls[table] > after {
+		return summariseSpoolCountRow{value: 0}
+	}
 
 	if got, ok := c.countOverrides[table]; ok {
 		return summariseSpoolCountRow{value: got}

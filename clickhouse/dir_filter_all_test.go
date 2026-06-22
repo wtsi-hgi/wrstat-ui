@@ -81,6 +81,12 @@ func TestClickHouseDirFilterAllWriter(t *testing.T) {
 		}
 		conn := &dirFilterAllDerivedSpyConn{}
 		writer := newFullFilterAllWriter(conn, 100, updatedAt)
+		phases := make(map[string]time.Duration)
+		impl := &dgutaWriter{
+			importPhaseRecorder: func(phase string, d time.Duration) {
+				phases[phase] += d
+			},
+		}
 
 		err := writer.appendRecord(
 			context.Background(),
@@ -110,7 +116,7 @@ func TestClickHouseDirFilterAllWriter(t *testing.T) {
 		)
 		So(err, ShouldBeNil)
 
-		So(writer.flush(context.Background()), ShouldBeNil)
+		So(impl.flushSelectedDerivedIndex(context.Background(), writer), ShouldBeNil)
 
 		So(conn.prepared, ShouldResemble, []string{insertDirFilterAllQuery})
 		So(conn.batch.appends, ShouldEqual, 1)
@@ -119,6 +125,9 @@ func TestClickHouseDirFilterAllWriter(t *testing.T) {
 			"derive " + chspool.TableChildFilterAll,
 		})
 		So(conn.derivedArgs, ShouldResemble, []any{testMountPath, mount.snapshotID})
+		So(phases[importPhaseDirFilterAllInsert], ShouldBeGreaterThan, time.Duration(0))
+		So(phases[importPhaseChildFilterAllInsert], ShouldBeGreaterThan, time.Duration(0))
+		So(phases, ShouldNotContainKey, "wrstat_filter_all_insert")
 	})
 }
 

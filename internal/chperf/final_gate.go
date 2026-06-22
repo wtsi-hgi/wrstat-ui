@@ -1380,6 +1380,23 @@ func validateFinalGateJ6D4Decisions(
 	return check.pass("D4 retained/collapsed choices cite measurements and collapsed routes meet their gates"), decisions
 }
 
+func validateFinalGateC3SplitFullFilterTelemetryShape(e FinalGateEvidence) FinalGateCheck {
+	check := finalGateCheck(42, "C3 split full-filter telemetry shape")
+
+	reports := finalGateE2ImportReports(e)
+	if len(reports) == 0 {
+		return check.fail("missing import reports for split full-filter telemetry")
+	}
+
+	for _, report := range reports {
+		if reason := finalGateSplitFullFilterTelemetryFailure(report); reason != "" {
+			return check.fail(reason)
+		}
+	}
+
+	return check.pass("split full-filter phases and table amplification fields are populated")
+}
+
 func (c FinalGateCheck) block(detail string) FinalGateCheck {
 	c.Passed = false
 	c.Blocked = true
@@ -4230,6 +4247,7 @@ func ValidateFinalGates(e FinalGateEvidence) FinalGateResult {
 		validateFinalGateJ6ColdUX(e),
 		j6StorageCheck,
 		j6D4Check,
+		validateFinalGateC3SplitFullFilterTelemetryShape(e),
 	} {
 		result.Checks = append(result.Checks, check)
 		result.Passed = result.Passed && check.Passed
@@ -5240,6 +5258,46 @@ func tableStatsDerivedEvidencePass(stats perfreport.TableStats) bool {
 	return stats.ImportMemoryBytes > 0 &&
 		stats.RowAmplificationVsDirFacts > 0 &&
 		stats.RowAmplificationVsCatalog > 0
+}
+
+func finalGateSplitFullFilterTelemetryFailure(report perfreport.Report) string {
+	for _, required := range []struct {
+		table string
+		phase string
+	}{
+		{table: tableDirFilterAll, phase: phaseDirFilterAllInsert},
+		{table: tableChildFilterAll, phase: phaseChildFilterAllInsert},
+	} {
+		table := required.table
+		phase := required.phase
+
+		stats, ok := report.TableStats[table]
+		if !ok {
+			return "missing table stats for " + table
+		}
+
+		if stats.ImportPhaseDurationsMS[phase] <= 0 {
+			return table + " missing non-zero import phase " + phase
+		}
+
+		if reason := finalGateFullFilterAmplificationFailure(table, stats); reason != "" {
+			return reason
+		}
+	}
+
+	return ""
+}
+
+func finalGateFullFilterAmplificationFailure(table string, stats perfreport.TableStats) string {
+	if stats.RowAmplificationVsDirFacts <= 0 {
+		return table + " RowAmplificationVsDirFacts is zero"
+	}
+
+	if stats.RowAmplificationVsCatalog <= 0 {
+		return table + " RowAmplificationVsCatalog is zero"
+	}
+
+	return ""
 }
 
 func finalGateMatchingBaselineOperation(

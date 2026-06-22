@@ -58,29 +58,30 @@ const (
 	lineReaderBufSize = 32 * 1024
 	maxImportParallel = 4
 
-	phasePartitionDropReset  = "partition_drop_reset"
-	phaseFilesInsert         = "wrstat_files_insert"
-	phaseFilesFlush          = "wrstat_files_flush"
-	phaseDGUTAInsert         = "wrstat_dguta_insert"
-	phaseCatalogInsert       = "wrstat_dirs_insert"
-	phaseDirFactsInsert      = "wrstat_dir_facts_insert"
-	phaseDirProjectionWrite  = "wrstat_dir_projection_insert"
-	phaseFullFilterAllInsert = "wrstat_filter_all_insert"
-	phaseSchema3Ready        = "wrstat_schema3_snapshot_ready"
-	phaseActiveVirtualInsert = "wrstat_active_virtual_insert"
-	phaseActiveVirtualReady  = "wrstat_active_virtual_ready"
-	phaseMountSwitch         = "mount_switch"
-	phaseTreeSummaryRefresh  = "wrstat_tree_summary_refresh"
-	phaseActivePrefixRefresh = "wrstat_active_prefix_rollup_refresh"
-	phaseOldSnapshotDrop     = "old_snapshot_partition_drop"
-	phaseBasedirsReset       = "wrstat_basedirs_reset"
-	phaseBasedirsGroupUsage  = "wrstat_basedirs_group_usage_insert"
-	phaseBasedirsUserUsage   = "wrstat_basedirs_user_usage_insert"
-	phaseBasedirsGroupSubs   = "wrstat_basedirs_group_subdirs_insert"
-	phaseBasedirsUserSubs    = "wrstat_basedirs_user_subdirs_insert"
-	phaseBasedirsHistory     = "wrstat_basedirs_history_insert"
-	phaseBasedirsFinalise    = "wrstat_basedirs_finalise"
-	phaseBasedirsFlush       = "wrstat_basedirs_flush"
+	phasePartitionDropReset   = "partition_drop_reset"
+	phaseFilesInsert          = "wrstat_files_insert"
+	phaseFilesFlush           = "wrstat_files_flush"
+	phaseDGUTAInsert          = "wrstat_dguta_insert"
+	phaseCatalogInsert        = "wrstat_dirs_insert"
+	phaseDirFactsInsert       = "wrstat_dir_facts_insert"
+	phaseDirProjectionWrite   = "wrstat_dir_projection_insert"
+	phaseDirFilterAllInsert   = "wrstat_dir_filter_all_insert"
+	phaseChildFilterAllInsert = "wrstat_child_filter_all_insert"
+	phaseSchema3Ready         = "wrstat_schema3_snapshot_ready"
+	phaseActiveVirtualInsert  = "wrstat_active_virtual_insert"
+	phaseActiveVirtualReady   = "wrstat_active_virtual_ready"
+	phaseMountSwitch          = "mount_switch"
+	phaseTreeSummaryRefresh   = "wrstat_tree_summary_refresh"
+	phaseActivePrefixRefresh  = "wrstat_active_prefix_rollup_refresh"
+	phaseOldSnapshotDrop      = "old_snapshot_partition_drop"
+	phaseBasedirsReset        = "wrstat_basedirs_reset"
+	phaseBasedirsGroupUsage   = "wrstat_basedirs_group_usage_insert"
+	phaseBasedirsUserUsage    = "wrstat_basedirs_user_usage_insert"
+	phaseBasedirsGroupSubs    = "wrstat_basedirs_group_subdirs_insert"
+	phaseBasedirsUserSubs     = "wrstat_basedirs_user_subdirs_insert"
+	phaseBasedirsHistory      = "wrstat_basedirs_history_insert"
+	phaseBasedirsFinalise     = "wrstat_basedirs_finalise"
+	phaseBasedirsFlush        = "wrstat_basedirs_flush"
 
 	tableFiles                    = "wrstat_files"
 	tableDGUTA                    = "wrstat_dguta"
@@ -364,8 +365,6 @@ func importSnapshotMultiTablePhase(phase string) ([]string, bool) {
 		}, true
 	case phaseDirProjectionWrite:
 		return []string{tableDirSummary, tableDirSummarySets, tableDirDGUTAVector, tableDirFilterAgeAll}, true
-	case phaseFullFilterAllInsert:
-		return []string{tableChildFilterAll, tableDirFilterAll}, true
 	case phaseSchema3Ready:
 		return []string{tableSchema3SnapshotSets}, true
 	case phaseActiveVirtualInsert:
@@ -693,6 +692,14 @@ func importSingleTablePhase(result datasetImportResult, phase string) (string, u
 }
 
 func importMainTablePhase(phase string) (string, bool) {
+	if table, ok := importBaseMainTablePhase(phase); ok {
+		return table, true
+	}
+
+	return importFilterMainTablePhase(phase)
+}
+
+func importBaseMainTablePhase(phase string) (string, bool) {
 	switch phase {
 	case phaseFilesInsert, phaseFilesFlush:
 		return tableFiles, true
@@ -704,6 +711,17 @@ func importMainTablePhase(phase string) (string, bool) {
 		return tableDirFacts, true
 	case phaseMountSwitch:
 		return tableMountEvents, true
+	default:
+		return "", false
+	}
+}
+
+func importFilterMainTablePhase(phase string) (string, bool) {
+	switch phase {
+	case phaseDirFilterAllInsert:
+		return tableDirFilterAll, true
+	case phaseChildFilterAllInsert:
+		return tableChildFilterAll, true
 	default:
 		return "", false
 	}

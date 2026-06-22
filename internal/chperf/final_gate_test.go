@@ -1223,12 +1223,12 @@ func finalGateE2Evidence() FinalGateEvidence {
 }
 
 func TestValidateFinalGates(t *testing.T) {
-	Convey("ValidateFinalGates covers all 41 final acceptance gates", t, func() {
+	Convey("ValidateFinalGates covers all 42 final acceptance gates", t, func() {
 		result := ValidateFinalGates(finalGateTestEvidence(false, false))
 
 		So(result.Passed, ShouldBeTrue)
 		So(result.TimingEvaluated, ShouldBeTrue)
-		So(result.Checks, ShouldHaveLength, 41)
+		So(result.Checks, ShouldHaveLength, 42)
 
 		for i, check := range result.Checks {
 			So(check.ID, ShouldEqual, i+1)
@@ -1675,6 +1675,74 @@ func TestValidateFinalGates(t *testing.T) {
 		So(result.Passed, ShouldBeFalse)
 		So(result.Checks[3].Detail, ShouldContainSubstring, "t283_filtered_rest_order_anomaly")
 		So(result.Checks[5].Detail, ShouldContainSubstring, "t283_filtered_rest_order_anomaly")
+	})
+}
+
+func TestC3SplitFullFilterTelemetryShape(t *testing.T) {
+	Convey("C3 fails naming the missing dir full-filter phase", t, func() {
+		evidence := finalGateTestEvidence(false, false)
+		finalGateMutateImportTableStats(&evidence, tableDirFilterAll, func(stats *perfreport.TableStats) {
+			delete(stats.ImportPhaseDurationsMS, phaseDirFilterAllInsert)
+		})
+
+		result := ValidateFinalGates(evidence)
+		check := finalGateTestCheck(result, "C3 split full-filter telemetry shape")
+
+		So(result.Passed, ShouldBeFalse)
+		So(check.Passed, ShouldBeFalse)
+		So(check.Detail, ShouldContainSubstring, phaseDirFilterAllInsert)
+	})
+
+	Convey("C3 fails naming the missing child full-filter phase", t, func() {
+		evidence := finalGateTestEvidence(false, false)
+		finalGateMutateImportTableStats(&evidence, tableChildFilterAll, func(stats *perfreport.TableStats) {
+			stats.ImportPhaseDurationsMS[phaseChildFilterAllInsert] = 0
+		})
+
+		result := ValidateFinalGates(evidence)
+		check := finalGateTestCheck(result, "C3 split full-filter telemetry shape")
+
+		So(result.Passed, ShouldBeFalse)
+		So(check.Passed, ShouldBeFalse)
+		So(check.Detail, ShouldContainSubstring, phaseChildFilterAllInsert)
+	})
+
+	Convey("C3 fails when dir full-filter amplification fields are zero", t, func() {
+		evidence := finalGateTestEvidence(false, false)
+		finalGateMutateImportTableStats(&evidence, tableDirFilterAll, func(stats *perfreport.TableStats) {
+			stats.RowAmplificationVsDirFacts = 0
+		})
+
+		result := ValidateFinalGates(evidence)
+		check := finalGateTestCheck(result, "C3 split full-filter telemetry shape")
+
+		So(result.Passed, ShouldBeFalse)
+		So(check.Passed, ShouldBeFalse)
+		So(check.Detail, ShouldContainSubstring, tableDirFilterAll)
+		So(check.Detail, ShouldContainSubstring, "RowAmplificationVsDirFacts")
+	})
+
+	Convey("C3 fails when child full-filter amplification fields are zero", t, func() {
+		evidence := finalGateTestEvidence(false, false)
+		finalGateMutateImportTableStats(&evidence, tableChildFilterAll, func(stats *perfreport.TableStats) {
+			stats.RowAmplificationVsCatalog = 0
+		})
+
+		result := ValidateFinalGates(evidence)
+		check := finalGateTestCheck(result, "C3 split full-filter telemetry shape")
+
+		So(result.Passed, ShouldBeFalse)
+		So(check.Passed, ShouldBeFalse)
+		So(check.Detail, ShouldContainSubstring, tableChildFilterAll)
+		So(check.Detail, ShouldContainSubstring, "RowAmplificationVsCatalog")
+	})
+
+	Convey("C3 passes when split phases and full-filter amplification fields are populated", t, func() {
+		result := ValidateFinalGates(finalGateTestEvidence(false, false))
+		check := finalGateTestCheck(result, "C3 split full-filter telemetry shape")
+
+		So(result.Passed, ShouldBeTrue)
+		So(check.Passed, ShouldBeTrue)
 	})
 }
 
@@ -2223,6 +2291,18 @@ func TestJ6FinalGates(t *testing.T) {
 	})
 }
 
+func finalGateMutateImportTableStats(
+	evidence *FinalGateEvidence,
+	table string,
+	mutate func(*perfreport.TableStats),
+) {
+	for reportIndex := range evidence.ImportReports {
+		stats := evidence.ImportReports[reportIndex].TableStats[table]
+		mutate(&stats)
+		evidence.ImportReports[reportIndex].TableStats[table] = stats
+	}
+}
+
 func finalGateJ6MatrixReport() perfreport.Report {
 	report := perfreport.NewReport("clickhouse", queryMatrixFixtureDir, finalGateMinRepeats, 0)
 	finalGateSetJ4MatrixReportProvenance(&report)
@@ -2232,6 +2312,18 @@ func finalGateJ6MatrixReport() perfreport.Report {
 	}
 
 	return report
+}
+
+func finalGateFullFilterTableStatsWithBaselines(
+	rows uint64,
+	dirFactsRows uint64,
+	catalogRows uint64,
+	phase string,
+) perfreport.TableStats {
+	stats := finalGateTableStatsWithBaselines(rows, dirFactsRows, catalogRows)
+	stats.ImportPhaseDurationsMS[phase] = 1
+
+	return stats
 }
 
 func finalGateSetJ4MatrixReportProvenance(report *perfreport.Report) {
@@ -2797,16 +2889,26 @@ func finalGateImportReport(rowCap uint64, ageAllSelected, virtualCacheSelected b
 		finalGateE2Schema3SnapshotSetsTable,
 	}
 	report.TableStats = map[string]perfreport.TableStats{
-		tableFiles:                          finalGateTableStatsWithBaselines(filesRows, dirFactsRows, catalogRows),
-		tableCatalog:                        finalGateTableStatsWithBaselines(catalogRows, dirFactsRows, catalogRows),
-		tableDirSummary:                     finalGateTableStatsWithBaselines(dirFactsRows, dirFactsRows, catalogRows),
-		tableDirSummarySets:                 finalGateTableStatsWithBaselines(1, dirFactsRows, catalogRows),
-		tableDirFilterAgeAll:                finalGateTableStatsWithBaselines(rowCap/2, dirFactsRows, catalogRows),
-		tableChildFilterAll:                 finalGateTableStatsWithBaselines(rowCap/2, dirFactsRows, catalogRows),
-		tableActivePrefixRollups:            finalGateTableStatsWithBaselines(3, dirFactsRows, catalogRows),
-		tableActivePrefixFilterAgeAll:       finalGateTableStatsWithBaselines(rowCap/3, dirFactsRows, catalogRows),
-		tableActivePrefixRollupSets:         finalGateTableStatsWithBaselines(1, dirFactsRows, catalogRows),
-		finalGateE2DirFilterAllTable:        finalGateTableStatsWithBaselines(rowCap/2, dirFactsRows, catalogRows),
+		tableFiles:           finalGateTableStatsWithBaselines(filesRows, dirFactsRows, catalogRows),
+		tableCatalog:         finalGateTableStatsWithBaselines(catalogRows, dirFactsRows, catalogRows),
+		tableDirSummary:      finalGateTableStatsWithBaselines(dirFactsRows, dirFactsRows, catalogRows),
+		tableDirSummarySets:  finalGateTableStatsWithBaselines(1, dirFactsRows, catalogRows),
+		tableDirFilterAgeAll: finalGateTableStatsWithBaselines(rowCap/2, dirFactsRows, catalogRows),
+		tableChildFilterAll: finalGateFullFilterTableStatsWithBaselines(
+			rowCap/2,
+			dirFactsRows,
+			catalogRows,
+			phaseChildFilterAllInsert,
+		),
+		tableActivePrefixRollups:      finalGateTableStatsWithBaselines(3, dirFactsRows, catalogRows),
+		tableActivePrefixFilterAgeAll: finalGateTableStatsWithBaselines(rowCap/3, dirFactsRows, catalogRows),
+		tableActivePrefixRollupSets:   finalGateTableStatsWithBaselines(1, dirFactsRows, catalogRows),
+		finalGateE2DirFilterAllTable: finalGateFullFilterTableStatsWithBaselines(
+			rowCap/2,
+			dirFactsRows,
+			catalogRows,
+			phaseDirFilterAllInsert,
+		),
 		finalGateE2Schema3SnapshotSetsTable: finalGateTableStatsWithBaselines(1, dirFactsRows, catalogRows),
 	}
 	finalGateAddImportFileTotals(&report, rowCap)

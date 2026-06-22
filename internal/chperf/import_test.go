@@ -784,11 +784,12 @@ func TestImportReportEnrichment(t *testing.T) {
 		result := datasetImportResult{
 			rows: map[string]uint64{tableFiles: 7},
 			phases: map[string]time.Duration{
-				phaseFullFilterAllInsert: 21 * time.Millisecond,
-				phaseSchema3Ready:        22 * time.Millisecond,
-				phaseActiveVirtualInsert: 23 * time.Millisecond,
-				phaseActiveVirtualReady:  24 * time.Millisecond,
-				phaseMountSwitch:         25 * time.Millisecond,
+				phaseDirFilterAllInsert:   21 * time.Millisecond,
+				phaseChildFilterAllInsert: 12 * time.Millisecond,
+				phaseSchema3Ready:         22 * time.Millisecond,
+				phaseActiveVirtualInsert:  23 * time.Millisecond,
+				phaseActiveVirtualReady:   24 * time.Millisecond,
+				phaseMountSwitch:          25 * time.Millisecond,
 			},
 		}
 		api := &fakeImportAPI{
@@ -829,10 +830,22 @@ func TestImportReportEnrichment(t *testing.T) {
 		}
 
 		So(report.SelectedTables, ShouldNotContain, "scratch_non_wrstat_summary")
-		So(report.TableStats[tableChildFilterAll].ImportPhaseDurationsMS[phaseFullFilterAllInsert],
+		childDuration := report.TableStats[tableChildFilterAll].ImportPhaseDurationsMS[phaseChildFilterAllInsert]
+		dirDuration := report.TableStats[tableDirFilterAll].ImportPhaseDurationsMS[phaseDirFilterAllInsert]
+
+		So(childDuration, ShouldEqual, float64(12))
+		So(dirDuration,
 			ShouldEqual, float64(21))
-		So(report.TableStats[tableDirFilterAll].ImportPhaseDurationsMS[phaseFullFilterAllInsert],
-			ShouldEqual, float64(21))
+		So(report.TableStats[tableChildFilterAll].ImportPhaseDurationsMS,
+			ShouldNotContainKey, "wrstat_filter_all_insert")
+		So(report.TableStats[tableDirFilterAll].ImportPhaseDurationsMS,
+			ShouldNotContainKey, "wrstat_filter_all_insert")
+		So(report.TableStats[tableChildFilterAll].CompressedBytes, ShouldBeGreaterThan, uint64(0))
+		So(report.TableStats[tableDirFilterAll].CompressedBytes, ShouldBeGreaterThan, uint64(0))
+		So(float64(report.TableStats[tableChildFilterAll].Rows)/(childDuration/1000),
+			ShouldBeGreaterThan, float64(0))
+		So(float64(report.TableStats[tableDirFilterAll].Rows)/(dirDuration/1000),
+			ShouldBeGreaterThan, float64(0))
 		So(report.TableStats[tableSchema3SnapshotSets].ImportPhaseDurationsMS[phaseSchema3Ready],
 			ShouldEqual, float64(22))
 		So(report.TableStats[tableActiveVirtualFilterAll].ImportPhaseDurationsMS[phaseActiveVirtualInsert],

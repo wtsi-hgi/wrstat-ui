@@ -433,10 +433,10 @@ func (w *fullFilterAllWriter) flush(ctx context.Context) error {
 		}
 	}
 
-	if err := w.dirWriter.flush(ctx); err != nil {
-		return err
-	}
+	return w.dirWriter.flush(ctx)
+}
 
+func (w *fullFilterAllWriter) derive(ctx context.Context) error {
 	if !w.hasRows {
 		return nil
 	}
@@ -460,4 +460,12 @@ func (w *fullFilterAllWriter) abort() error {
 
 func (w *fullFilterAllWriter) importPhase() string {
 	return importPhaseDirFilterAllInsert
+}
+
+func (w *fullFilterAllWriter) deriveImportPhase() string {
+	if !w.hasRows {
+		return ""
+	}
+
+	return importPhaseChildFilterAllInsert
 }

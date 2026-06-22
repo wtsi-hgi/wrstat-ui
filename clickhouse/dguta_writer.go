@@ -184,6 +184,11 @@ func dgutaRecordContextForRecord(mountPath string, dguta db.RecordDGUTA) (string
 	}
 }
 
+type dgutaPostFlushDerivedIndexWriter interface {
+	derive(ctx context.Context) error
+	deriveImportPhase() string
+}
+
 func compareActiveVirtualChildRows(a, b activeVirtualChildRow) int {
 	if a.ParentVirtualID < b.ParentVirtualID {
 		return -1
@@ -2250,11 +2255,32 @@ func (w *dgutaWriter) flushSelectedDerivedIndex(
 		return writer.flush(ctx)
 	}
 
-	if phase := writer.importPhase(); phase != "" {
-		return w.timeImportPhase(phase, flush)
+	if err := w.flushDerivedIndexPhase(writer.importPhase(), flush); err != nil {
+		return err
 	}
 
-	return flush()
+	deriver, ok := writer.(dgutaPostFlushDerivedIndexWriter)
+	if !ok {
+		return nil
+	}
+
+	derive := func() error {
+		return deriver.derive(ctx)
+	}
+
+	if phase := deriver.deriveImportPhase(); phase != "" {
+		return w.timeImportPhase(phase, derive)
+	}
+
+	return derive()
+}
+
+func (w *dgutaWriter) flushDerivedIndexPhase(phase string, flush func() error) error {
+	if phase == "" {
+		return flush()
+	}
+
+	return w.timeImportPhase(phase, flush)
 }
 
 func (w *dgutaWriter) abortSelectedDerivedIndexes() error {
