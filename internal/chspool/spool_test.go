@@ -62,6 +62,7 @@ func TestVerifyManifest(t *testing.T) {
 		So(order[0], ShouldEqual, TableDirs)
 		So(order, ShouldNotContain, "wrstat_children")
 		So(order, ShouldNotContain, "wrstat_parent_facts")
+		So(order, ShouldNotContain, TableChildFilterAll)
 	})
 
 	Convey("H1 row structs carry ids instead of repeated path strings", t, func() {
@@ -157,6 +158,13 @@ func TestVerifyManifest(t *testing.T) {
 
 		So(got.Tables[TableDirs].Rows, ShouldEqual, 1)
 		So(got.Tables[TableFiles].Rows, ShouldEqual, 1)
+		So(got.Tables[TableDirFilterAll].Rows, ShouldEqual, 1)
+
+		_, hasChildFilterAll := got.Tables[TableChildFilterAll]
+		So(hasChildFilterAll, ShouldBeFalse)
+
+		_, err = os.Stat(filepath.Join(dir, TableChildFilterAll+".gob.gz"))
+		So(errors.Is(err, os.ErrNotExist), ShouldBeTrue)
 	})
 
 	Convey("D2.2 VerifyManifest rejects a changed schema3 spool file", t, func() {
@@ -165,7 +173,7 @@ func TestVerifyManifest(t *testing.T) {
 		expected := newChspoolTestManifest("/out/expected", tables)
 		So(WriteManifestAtomic(dir, expected), ShouldBeNil)
 
-		path := filepath.Join(dir, TableChildFilterAll+".gob.gz")
+		path := filepath.Join(dir, TableDirFilterAll+".gob.gz")
 		fh, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
 		So(err, ShouldBeNil)
 		_, err = fh.WriteString("changed")
@@ -177,7 +185,7 @@ func TestVerifyManifest(t *testing.T) {
 		err = VerifyManifest(dir, got, *expected)
 
 		So(errors.Is(err, ErrManifestMismatch), ShouldBeTrue)
-		So(err.Error(), ShouldContainSubstring, TableChildFilterAll)
+		So(err.Error(), ShouldContainSubstring, TableDirFilterAll)
 	})
 
 	Convey("VerifyManifest rejects a completed spool for a different output dir", t, func() {
@@ -295,30 +303,6 @@ func writeChspoolTestSet(dir string) map[string]TableManifest {
 func writeChspoolSchema3TestRows(set *Set) error {
 	refreshedAt := time.Unix(6, 0).UTC()
 	buckets := []uint64{1, 2, 3, 4, 5, 6, 7, 8, 9}
-
-	if err := set.WriteChildFilterAll(ChildFilterAllRow{
-		MountPath:         chspoolTestMountPath,
-		SnapshotID:        chspoolTestSnapshotID,
-		ParentID:          7,
-		Age:               255,
-		GID:               7,
-		UID:               17,
-		FT:                1,
-		DirID:             8,
-		Count:             2,
-		Size:              3,
-		AtimeMin:          4,
-		MtimeMax:          5,
-		AtimeBuckets:      buckets,
-		MtimeBuckets:      buckets,
-		FilterChildCount:  1,
-		ChildCount:        1,
-		HasFilterChildren: 1,
-		HasChildren:       1,
-		RefreshedAt:       refreshedAt,
-	}); err != nil {
-		return err
-	}
 
 	if err := set.WriteDirFilterAll(DirFilterAllRow{
 		MountPath:         chspoolTestMountPath,

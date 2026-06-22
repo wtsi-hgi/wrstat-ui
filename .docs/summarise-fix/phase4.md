@@ -32,8 +32,8 @@ Covering all 2 acceptance tests from B1 (`manifest.Tables` does not contain
 spool dir; dir full-filter row count equals N with the prior duplicate child
 bytes absent).
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
 
 ### Item 4.2: B2 - Derive child server-side as a distinct pre-readiness phase
 
@@ -66,5 +66,5 @@ without reparsing `stats.gz`; failed/old/tombstoned partition's derived rows
 removed by the existing partition drop with no separate child-cleanup call;
 load report records the derived child row count and table stats).
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed

@@ -224,6 +224,10 @@ func (l *summariseSpoolLoader) recordLoadedRowsFromManifest() {
 			l.recordLoadedRows(table, manifest.Rows)
 		}
 	}
+
+	if manifest, ok := l.manifest.Tables[chspool.TableDirFilterAll]; ok && manifest.Rows > 0 {
+		l.recordLoadedRows(chspool.TableChildFilterAll, manifest.Rows)
+	}
 }
 
 func (l *summariseSpoolLoader) queryContext(parent context.Context) (context.Context, context.CancelFunc) {
@@ -458,6 +462,45 @@ func (l *summariseSpoolLoader) loadActiveVirtualDirs(parent context.Context) err
 	})
 }
 
+func (l *summariseSpoolLoader) deriveChildFilterAll(parent context.Context) error {
+	return l.timeImportPhase(importPhaseChildFilterAllInsert, func() error {
+		ctx, cancel := l.queryContext(parent)
+		defer cancel()
+
+		if err := deriveChildFilterAll(ctx, l.conn, l.manifest.MountPath, l.snapshot.String()); err != nil {
+			return err
+		}
+
+		return l.verifyDerivedChildFilterAllRows(parent)
+	})
+}
+
+func (l *summariseSpoolLoader) verifyDerivedChildFilterAllRows(parent context.Context) error {
+	dirRows, err := l.countLoadedRows(parent, chspool.TableDirFilterAll)
+	if err != nil {
+		return err
+	}
+
+	childRows, err := l.countLoadedRows(parent, chspool.TableChildFilterAll)
+	if err != nil {
+		return err
+	}
+
+	if childRows != dirRows {
+		return fmt.Errorf(
+			"%w: table=%s got=%d expected=%d",
+			errSpoolLoadedRowsMismatch,
+			chspool.TableChildFilterAll,
+			childRows,
+			dirRows,
+		)
+	}
+
+	l.recordLoadedRows(chspool.TableChildFilterAll, childRows)
+
+	return nil
+}
+
 func decodeSpoolActiveSetIDs[T any](
 	dir string,
 	ids map[string]struct{},
@@ -488,11 +531,11 @@ func (l *summariseSpoolLoader) loadTables(ctx context.Context) error { //nolint:
 		return err
 	}
 
-	if err := l.loadChildFilterAll(ctx); err != nil {
+	if err := l.loadDirFilterAll(ctx); err != nil {
 		return err
 	}
 
-	if err := l.loadDirFilterAll(ctx); err != nil {
+	if err := l.deriveChildFilterAll(ctx); err != nil {
 		return err
 	}
 
@@ -574,7 +617,6 @@ func summariseSpoolSnapshotStageTables() []string {
 		chspool.TableFiles,
 		chspool.TableDirFacts,
 		chspool.TableDirFilterAgeAll,
-		chspool.TableChildFilterAll,
 		chspool.TableDirFilterAll,
 	}
 }
@@ -752,36 +794,7 @@ func (l *summariseSpoolLoader) loadDirFilterAgeAll(parent context.Context) error
 	)
 }
 
-func (l *summariseSpoolLoader) loadChildFilterAll(parent context.Context) error { //nolint:dupl
-	return loadSimpleSpoolTable(parent, l, chspool.TableChildFilterAll, func(
-		batch driver.Batch,
-		row chspool.ChildFilterAllRow,
-	) error {
-		return batch.Append(
-			row.MountPath,
-			row.SnapshotID,
-			row.ParentID,
-			row.Age,
-			row.GID,
-			row.UID,
-			row.FT,
-			row.DirID,
-			row.Count,
-			row.Size,
-			row.AtimeMin,
-			row.MtimeMax,
-			row.AtimeBuckets,
-			row.MtimeBuckets,
-			row.FilterChildCount,
-			row.ChildCount,
-			row.HasFilterChildren,
-			row.HasChildren,
-			row.RefreshedAt,
-		)
-	})
-}
-
-func (l *summariseSpoolLoader) loadDirFilterAll(parent context.Context) error { //nolint:dupl
+func (l *summariseSpoolLoader) loadDirFilterAll(parent context.Context) error {
 	return loadSimpleSpoolTable(parent, l, chspool.TableDirFilterAll, func(
 		batch driver.Batch,
 		row chspool.DirFilterAllRow,
@@ -1430,9 +1443,9 @@ func summariseSpoolTableQuery(table string) (string, string, error) { //nolint:g
 	case chspool.TableDirFilterAgeAll:
 		return insertDirFilterAgeAllQuery, summariseSpoolLoadPhasePrefix + table, nil
 	case chspool.TableChildFilterAll:
-		return insertChildFilterAllQuery, importPhaseFullFilterAllInsert, nil
+		return insertChildFilterAllQuery, importPhaseChildFilterAllInsert, nil
 	case chspool.TableDirFilterAll:
-		return insertDirFilterAllQuery, importPhaseFullFilterAllInsert, nil
+		return insertDirFilterAllQuery, importPhaseDirFilterAllInsert, nil
 	case chspool.TableSchema3SnapshotSets:
 		return insertSchema3SnapshotSetQuery, importPhaseSchema3Ready, nil
 	case chspool.TableActiveVirtualDirs:

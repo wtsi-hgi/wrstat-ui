@@ -28,6 +28,7 @@ package clickhouse
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -42,7 +43,25 @@ const insertDirFilterAllQuery = "INSERT INTO wrstat_dir_filter_all " +
 	"child_count, has_filter_children, has_children, refreshed_at) " +
 	"VALUES (?, toUUID(?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
 
+const derivedChildFilterAllInsertQuery = "INSERT INTO wrstat_child_filter_all " +
+	"(mount_path, snapshot_id, parent_id, age, gid, uid, ft, dir_id, count, size, " +
+	"atime_min, mtime_max, atime_buckets, mtime_buckets, filter_child_count, " +
+	"child_count, has_filter_children, has_children, refreshed_at) " +
+	"SELECT d.mount_path, d.snapshot_id, c.parent_id, d.age, d.gid, d.uid, d.ft, " +
+	"d.dir_id, d.count, d.size, d.atime_min, d.mtime_max, d.atime_buckets, " +
+	"d.mtime_buckets, d.filter_child_count, d.child_count, d.has_filter_children, " +
+	"d.has_children, d.refreshed_at " +
+	"FROM wrstat_dir_filter_all d INNER JOIN wrstat_dirs c " +
+	"ON d.mount_path = c.mount_path AND d.snapshot_id = c.snapshot_id AND d.dir_id = c.dir_id " +
+	"WHERE d.mount_path = ? AND d.snapshot_id = toUUID(?)"
+
 var errDirFilterAllBatchNotPrepared = errors.New("clickhouse: dir full-filter batch is not prepared")
+
+var errDirFilterAllMixedSnapshot = errors.New("clickhouse: dir full-filter writer cannot mix snapshots")
+
+type childFilterAllDeriver interface {
+	Exec(ctx context.Context, query string, args ...any) error
+}
 
 type filterAllRow struct {
 	MountPath         string
@@ -200,11 +219,12 @@ func (w *dirFilterAllWriter) importBatchNow() time.Time {
 }
 
 type fullFilterAllWriter struct {
-	dirWriter   *dirFilterAllWriter
-	childWriter *childFilterAllWriter
+	dirWriter *dirFilterAllWriter
 
 	refreshedAt time.Time
 	pending     []fullFilterPendingDir
+	mount       activeMount
+	hasRows     bool
 }
 
 func newFullFilterAllWriter(conn ch.Conn, batchSize int, refreshedAt time.Time) *fullFilterAllWriter {
@@ -214,7 +234,6 @@ func newFullFilterAllWriter(conn ch.Conn, batchSize int, refreshedAt time.Time) 
 
 	return &fullFilterAllWriter{
 		dirWriter:   newDirFilterAllWriter(conn, batchSize),
-		childWriter: newChildFilterAllWriter(conn, batchSize),
 		refreshedAt: refreshedAt,
 	}
 }
@@ -237,6 +256,10 @@ func (w *fullFilterAllWriter) appendRecord(
 	rows := fullFilterRowsForGUTAs(mount, record, gutas, childCount, w.refreshedAt)
 	if len(rows) == 0 {
 		return nil
+	}
+
+	if err := w.rememberMount(mount); err != nil {
+		return err
 	}
 
 	w.pending = append(w.pending, fullFilterPendingDir{
@@ -301,6 +324,21 @@ func fullFilterRowsForGUTAs(
 	}
 
 	return rows
+}
+
+func (w *fullFilterAllWriter) rememberMount(mount activeMount) error {
+	if !w.hasRows {
+		w.mount = mount
+		w.hasRows = true
+
+		return nil
+	}
+
+	if w.mount.mountPath == mount.mountPath && w.mount.snapshotID == mount.snapshotID {
+		return nil
+	}
+
+	return errDirFilterAllMixedSnapshot
 }
 
 func (w *fullFilterAllWriter) noteDirectChildTuples(
@@ -375,10 +413,6 @@ func (w *fullFilterAllWriter) flushLastPending(ctx context.Context) error {
 		if err := w.dirWriter.appendRow(ctx, row); err != nil {
 			return err
 		}
-
-		if err := w.childWriter.appendRow(ctx, row); err != nil {
-			return err
-		}
 	}
 
 	return nil
@@ -399,15 +433,31 @@ func (w *fullFilterAllWriter) flush(ctx context.Context) error {
 		}
 	}
 
-	return errors.Join(w.dirWriter.flush(ctx), w.childWriter.flush(ctx))
+	if err := w.dirWriter.flush(ctx); err != nil {
+		return err
+	}
+
+	if !w.hasRows {
+		return nil
+	}
+
+	return deriveChildFilterAll(ctx, w.dirWriter.conn, w.mount.mountPath, w.mount.snapshotID)
+}
+
+func deriveChildFilterAll(ctx context.Context, conn childFilterAllDeriver, mountPath, snapshotID string) error {
+	if err := conn.Exec(ctx, derivedChildFilterAllInsertQuery, mountPath, snapshotID); err != nil {
+		return fmt.Errorf("clickhouse: failed to derive child full-filter rows: %w", err)
+	}
+
+	return nil
 }
 
 func (w *fullFilterAllWriter) abort() error {
 	w.pending = nil
 
-	return errors.Join(w.dirWriter.abort(), w.childWriter.abort())
+	return w.dirWriter.abort()
 }
 
 func (w *fullFilterAllWriter) importPhase() string {
-	return importPhaseFullFilterAllInsert
+	return importPhaseDirFilterAllInsert
 }

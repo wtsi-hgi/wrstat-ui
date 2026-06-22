@@ -80,7 +80,6 @@ var tableOrder = []string{ //nolint:gochecknoglobals
 	TableFiles,
 	TableDirFacts,
 	TableDirFilterAgeAll,
-	TableChildFilterAll,
 	TableDirFilterAll,
 	TableSchema3SnapshotSets,
 	TableActiveVirtualDirs,
@@ -223,8 +222,6 @@ func countRows(path string, table string) (uint64, error) { //nolint:gocyclo,cyc
 		return countDecodedRows[DirFactRow](path, table)
 	case TableDirFilterAgeAll:
 		return countDecodedRows[DirFilterAgeAllRow](path, table)
-	case TableChildFilterAll:
-		return countDecodedRows[ChildFilterAllRow](path, table)
 	case TableDirFilterAll:
 		return countDecodedRows[DirFilterAllRow](path, table)
 	case TableSchema3SnapshotSets:
@@ -748,10 +745,6 @@ func (s *Set) WriteDirFact(row DirFactRow) error {
 
 func (s *Set) WriteDirFilterAgeAll(row DirFilterAgeAllRow) error {
 	return s.encode(TableDirFilterAgeAll, row)
-}
-
-func (s *Set) WriteChildFilterAll(row ChildFilterAllRow) error {
-	return s.encode(TableChildFilterAll, row)
 }
 
 func (s *Set) WriteDirFilterAll(row DirFilterAllRow) error {

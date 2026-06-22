@@ -812,35 +812,7 @@ func (w *summariseDGUTASpoolWriter) flushLastSchema3FullFilterPending() error {
 }
 
 func (w *summariseDGUTASpoolWriter) writeSchema3FullFilterRow(row chspool.DirFilterAllRow) error {
-	if err := w.ds.set.WriteDirFilterAll(row); err != nil {
-		return err
-	}
-
-	return w.ds.set.WriteChildFilterAll(summariseChildFilterAllRowForDirFilterAll(row))
-}
-
-func summariseChildFilterAllRowForDirFilterAll(row chspool.DirFilterAllRow) chspool.ChildFilterAllRow {
-	return chspool.ChildFilterAllRow{
-		MountPath:         row.MountPath,
-		SnapshotID:        row.SnapshotID,
-		ParentID:          row.ParentID,
-		Age:               row.Age,
-		GID:               row.GID,
-		UID:               row.UID,
-		FT:                row.FT,
-		DirID:             row.DirID,
-		Count:             row.Count,
-		Size:              row.Size,
-		AtimeMin:          row.AtimeMin,
-		MtimeMax:          row.MtimeMax,
-		AtimeBuckets:      row.AtimeBuckets,
-		MtimeBuckets:      row.MtimeBuckets,
-		FilterChildCount:  row.FilterChildCount,
-		ChildCount:        row.ChildCount,
-		HasFilterChildren: row.HasFilterChildren,
-		HasChildren:       row.HasChildren,
-		RefreshedAt:       row.RefreshedAt,
-	}
+	return w.ds.set.WriteDirFilterAll(row)
 }
 
 func (w *summariseDGUTASpoolWriter) noteActiveVirtualRootFilterRows(
@@ -881,8 +853,8 @@ func summariseSchema3SnapshotRowCounts(tables map[string]chspool.TableManifest) 
 	return summariseSchema3SnapshotCounts{
 		dirsRows:           tables[chspool.TableDirs].Rows,
 		dirFactsRows:       tables[chspool.TableDirFacts].Rows,
-		childFilterAllRows: tables[chspool.TableChildFilterAll].Rows,
 		dirFilterAllRows:   tables[chspool.TableDirFilterAll].Rows,
+		childFilterAllRows: tables[chspool.TableDirFilterAll].Rows,
 	}
 }
 
