@@ -538,9 +538,12 @@ func ExplainHasPruning(explain string) bool {
 }
 
 func verifyFindByGlobPlan(ctx context.Context, qctx queryContext, printf PrintfFunc) error {
-	patterns := []string{qctx.dir + "*"}
+	baseDir := qctx.dir
+	if baseDir == "/" {
+		baseDir = mountPathForDir(qctx)
+	}
 
-	explain, err := qctx.inspector.ExplainFindByGlob(ctx, []string{qctx.dir}, patterns)
+	explain, err := qctx.inspector.ExplainFindByGlob(ctx, []string{baseDir}, []string{baseDir + "*"})
 	if err != nil {
 		return fmt.Errorf("ExplainFindByGlob failed: %w", err)
 	}

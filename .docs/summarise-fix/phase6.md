@@ -37,5 +37,5 @@ the ~18s combined baseline, with the derived insert near ~1-2s (measured 1.16s
 for 1,122,958 rows) and spool bytes dropping by roughly the child table's
 former share).
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed

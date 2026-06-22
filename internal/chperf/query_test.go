@@ -1208,6 +1208,34 @@ func TestVerifyPlans(t *testing.T) {
 
 		So(verifyPlans(qctx, func(string, ...any) {}), ShouldBeNil)
 	})
+
+	Convey("verifyFindByGlobPlan uses the active mount root for virtual root explains", t, func() {
+		var (
+			capturedBaseDirs []string
+			capturedPatterns []string
+		)
+
+		const decodedMountPath = "/mnt/test/"
+
+		qctx := queryContext{
+			provider: fakeMountTimestampsProvider{bd: fakeMountTimestampsReader{mountTimestamps: map[string]time.Time{
+				queryTestExplainMount: time.Now(),
+			}}},
+			inspector: fakeQueryInspector{
+				explainFindByGlob: func(_ context.Context, baseDirs []string, patterns []string) (string, error) {
+					capturedBaseDirs = append([]string(nil), baseDirs...)
+					capturedPatterns = append([]string(nil), patterns...)
+
+					return f3GlobCatalogProofExplain, nil
+				},
+			},
+			dir: "/",
+		}
+
+		So(verifyFindByGlobPlan(context.Background(), qctx, func(string, ...any) {}), ShouldBeNil)
+		So(capturedBaseDirs, ShouldResemble, []string{decodedMountPath})
+		So(capturedPatterns, ShouldResemble, []string{decodedMountPath + "*"})
+	})
 }
 
 type permissionAnyCall struct {
