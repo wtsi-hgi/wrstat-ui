@@ -33,6 +33,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"io"
 	"math"
 	"os"
 	"path/filepath"
@@ -49,6 +50,7 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/stats"
 	"github.com/wtsi-hgi/wrstat-ui/summary"
 	sbasedirs "github.com/wtsi-hgi/wrstat-ui/summary/basedirs"
+	"github.com/wtsi-hgi/wrstat-ui/summary/dirbuild"
 	dirguta "github.com/wtsi-hgi/wrstat-ui/summary/dirguta"
 )
 
@@ -67,6 +69,8 @@ var (
 	loadSummariseClickHouseSpool = clickhouse.LoadSummariseSpoolReport
 	summariseSpoolNow            = time.Now
 	summariseSpoolDirGUTANow     = time.Now
+	openSummariseSpoolStats      = openSummariseSpoolStatsFile
+	buildSummariseSpoolDirbuild  = dirbuild.BuildWithFiles
 )
 
 var (
@@ -77,6 +81,12 @@ var (
 	errSummariseSpoolBasedirsNotReset      = errors.New("clickhouse spool: basedirs store not reset")
 	errSummariseSpoolSubdirPositionInvalid = errors.New("clickhouse spool: basedirs subdir position overflows UInt32")
 )
+
+func openSummariseSpoolStatsFile(statsPath string) (io.ReadCloser, error) {
+	r, _, err := openStatsFile(statsPath)
+
+	return r, err
+}
 
 type summariseFullFilterTupleKey struct {
 	age uint8
@@ -609,6 +619,15 @@ func summariseHasChildrenValue(childCount uint64) uint8 {
 	}
 
 	return 0
+}
+
+func newSummariseDGUTASpoolWriter(ds *summariseSpoolDataset) *summariseDGUTASpoolWriter {
+	dw := &summariseDGUTASpoolWriter{ds: ds}
+	dw.SetMountPath(ds.mountPath)
+	dw.SetUpdatedAt(ds.updatedAt)
+	ds.dgutaWriter = dw
+
+	return dw
 }
 
 func (w *summariseDGUTASpoolWriter) writeSchema3FullFilterRows(
@@ -1307,34 +1326,62 @@ func summariseCatalogPathHash(fullPath string) uint64 {
 	return h.Sum64()
 }
 
-type summariseSpoolDataset struct {
-	set                *chspool.Set
-	mountPath          string
-	updatedAt          time.Time
-	snapshotID         string
-	refreshedAt        time.Time
-	dirgutaReferenceAt time.Time
-	idAllocator        *summary.DirIDAllocator
-	dgutaWriter        *summariseDGUTASpoolWriter
-}
-
-func buildSummariseSpoolAttempt( //nolint:funlen
+func buildSummariseSpoolWithDirbuild(
 	statsPath string,
 	partialDir string,
 	expected chspool.Manifest,
 	target *clickHouseSummariseTarget,
 	diag *summariseDiagnostics,
-	sortInput bool,
 ) (*chspool.Manifest, error) {
-	if err := os.RemoveAll(partialDir); err != nil {
-		return nil, err
-	}
-
-	set, err := chspool.CreateSet(partialDir)
+	set, ds, err := createSummariseSpoolPartial(partialDir, expected, target)
 	if err != nil {
 		return nil, err
 	}
 
+	dw := newSummariseDGUTASpoolWriter(ds)
+	fileWriter := &summariseFileSpoolOperation{ds: ds}
+
+	diag.setCurrentPhase("parse")
+
+	err = runSummariseSpoolDirbuild(statsPath, ds, dw, fileWriter)
+	diag.logParseResult(err)
+
+	if err == nil {
+		err = closeSummariseSpoolOperations(ds)
+	}
+
+	return finishSummariseSpoolPartial(partialDir, expected, set, err)
+}
+
+func createSummariseSpoolPartial(
+	partialDir string,
+	expected chspool.Manifest,
+	target *clickHouseSummariseTarget,
+) (*chspool.Set, *summariseSpoolDataset, error) {
+	if err := os.RemoveAll(partialDir); err != nil {
+		return nil, nil, err
+	}
+
+	set, err := chspool.CreateSet(partialDir)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	ds, err := newSummariseSpoolDataset(set, expected, target)
+	if err != nil {
+		_ = os.RemoveAll(partialDir)
+
+		return nil, nil, err
+	}
+
+	return set, ds, nil
+}
+
+func newSummariseSpoolDataset(
+	set *chspool.Set,
+	expected chspool.Manifest,
+	target *clickHouseSummariseTarget,
+) (*summariseSpoolDataset, error) {
 	ds := &summariseSpoolDataset{
 		set:                set,
 		mountPath:          target.mountPath,
@@ -1345,13 +1392,18 @@ func buildSummariseSpoolAttempt( //nolint:funlen
 		idAllocator:        summary.NewDirIDAllocator(),
 	}
 	if mountErr := ds.idAllocator.SetMountPath(target.mountPath); mountErr != nil {
-		_ = os.RemoveAll(partialDir)
-
 		return nil, mountErr
 	}
 
-	err = parseSummariseToSpool(statsPath, partialDir, ds, diag, sortInput)
+	return ds, nil
+}
 
+func finishSummariseSpoolPartial(
+	partialDir string,
+	expected chspool.Manifest,
+	set *chspool.Set,
+	err error,
+) (*chspool.Manifest, error) {
 	closeErr := set.Close()
 	if err != nil || closeErr != nil {
 		_ = os.RemoveAll(partialDir)
@@ -1372,8 +1424,53 @@ func buildSummariseSpoolAttempt( //nolint:funlen
 	return &manifest, nil
 }
 
-func shouldLogSummariseSpoolParseResult(err error, sortInput bool) bool {
-	return sortInput || !errors.Is(err, summary.ErrNonContiguousInput)
+func runSummariseSpoolDirbuild(
+	statsPath string,
+	ds *summariseSpoolDataset,
+	dw *summariseDGUTASpoolWriter,
+	fileWriter *summariseFileSpoolOperation,
+) error {
+	open := func() (io.ReadCloser, error) {
+		return openSummariseSpoolStats(statsPath)
+	}
+
+	return buildSummariseSpoolDirbuild(
+		open,
+		ds.mountPath,
+		dw,
+		ds.dirgutaReferenceAt,
+		func(dirID uint32, info summary.FileInfo) error {
+			return fileWriter.addWithDirID(&info, dirID)
+		},
+	)
+}
+
+type summariseSpoolDataset struct {
+	set                *chspool.Set
+	mountPath          string
+	updatedAt          time.Time
+	snapshotID         string
+	refreshedAt        time.Time
+	dirgutaReferenceAt time.Time
+	idAllocator        *summary.DirIDAllocator
+	dgutaWriter        *summariseDGUTASpoolWriter
+}
+
+func buildSummariseSpoolAttempt(
+	statsPath string,
+	partialDir string,
+	expected chspool.Manifest,
+	target *clickHouseSummariseTarget,
+	diag *summariseDiagnostics,
+) (*chspool.Manifest, error) {
+	set, ds, err := createSummariseSpoolPartial(partialDir, expected, target)
+	if err != nil {
+		return nil, err
+	}
+
+	err = parseSummariseToSpool(statsPath, ds, diag)
+
+	return finishSummariseSpoolPartial(partialDir, expected, set, err)
 }
 
 type summariseFileSpoolOperation struct {
@@ -1429,6 +1526,47 @@ func (w *summariseDGUTASpoolWriter) writeDirFilterAgeAllRows(record summariseDGU
 	}
 
 	return nil
+}
+
+func (f *summariseFileSpoolOperation) addWithDirID(info *summary.FileInfo, dirID uint32) error { //nolint:funlen
+	if info == nil {
+		return nil
+	}
+
+	if err := validateSummariseFileInfo(info); err != nil {
+		return err
+	}
+
+	size, apparentSize, inode, nlink, err := summariseSpoolUnsignedFileInfoValues(info)
+	if err != nil {
+		return err
+	}
+
+	parentDir := string(info.Path.AppendTo(make([]byte, 0, info.Path.Len())))
+	name := string(info.Name)
+
+	_, name, keep := summariseCanonicalFileIngestPath(f.ds.mountPath, parentDir, name)
+	if !keep {
+		return nil
+	}
+
+	return f.ds.set.WriteFile(chspool.FileRow{
+		MountPath:    f.ds.mountPath,
+		SnapshotID:   f.ds.snapshotID,
+		DirID:        dirID,
+		Name:         name,
+		Ext:          summariseExtFromName(name),
+		EntryType:    info.EntryType,
+		Size:         size,
+		ApparentSize: apparentSize,
+		UID:          info.UID,
+		GID:          info.GID,
+		ATime:        time.Unix(info.ATime, 0),
+		MTime:        time.Unix(info.MTime, 0),
+		CTime:        time.Unix(info.CTime, 0),
+		Inode:        inode,
+		Nlink:        nlink,
+	})
 }
 
 func summariseFileIngestDirIDPath(info *summary.FileInfo) *summary.DirectoryPath {
@@ -1691,9 +1829,9 @@ func buildSummariseSpool( //nolint:funlen
 ) (*chspool.Manifest, error) {
 	partialDir := spoolDir + ".partial"
 
-	manifest, err := buildSummariseSpoolAttempt(statsPath, partialDir, expected, target, diag, false)
+	manifest, err := buildSummariseSpoolAttempt(statsPath, partialDir, expected, target, diag)
 	if errors.Is(err, summary.ErrNonContiguousInput) {
-		manifest, err = buildSummariseSpoolAttempt(statsPath, partialDir, expected, target, diag, true)
+		manifest, err = buildSummariseSpoolWithDirbuild(statsPath, partialDir, expected, target, diag)
 	}
 
 	if err != nil {
@@ -1719,12 +1857,10 @@ func buildSummariseSpool( //nolint:funlen
 
 func parseSummariseToSpool( //nolint:funlen
 	statsPath string,
-	partialDir string,
 	ds *summariseSpoolDataset,
 	diag *summariseDiagnostics,
-	sortInput bool,
 ) (err error) {
-	r, err := openSummariseSpoolStats(statsPath, partialDir, ds.mountPath, sortInput)
+	r, err := openSummariseSpoolStats(statsPath)
 	if err != nil {
 		return err
 	}
@@ -1747,7 +1883,7 @@ func parseSummariseToSpool( //nolint:funlen
 	diag.setCurrentPhase("parse")
 
 	err = s.Summarise()
-	if shouldLogSummariseSpoolParseResult(err, sortInput) {
+	if !errors.Is(err, summary.ErrNonContiguousInput) {
 		diag.logParseResult(err)
 	}
 
@@ -1841,25 +1977,8 @@ func (f *summariseFileSpoolOperation) operation() summary.Operation {
 	return f
 }
 
-func (f *summariseFileSpoolOperation) Add(info *summary.FileInfo) error { //nolint:funlen
+func (f *summariseFileSpoolOperation) Add(info *summary.FileInfo) error {
 	if info == nil {
-		return nil
-	}
-
-	if err := validateSummariseFileInfo(info); err != nil {
-		return err
-	}
-
-	size, apparentSize, inode, nlink, err := summariseSpoolUnsignedFileInfoValues(info)
-	if err != nil {
-		return err
-	}
-
-	parentDir := string(info.Path.AppendTo(make([]byte, 0, info.Path.Len())))
-	name := string(info.Name)
-
-	_, name, keep := summariseCanonicalFileIngestPath(f.ds.mountPath, parentDir, name)
-	if !keep {
 		return nil
 	}
 
@@ -1868,23 +1987,7 @@ func (f *summariseFileSpoolOperation) Add(info *summary.FileInfo) error { //noli
 		return err
 	}
 
-	return f.ds.set.WriteFile(chspool.FileRow{
-		MountPath:    f.ds.mountPath,
-		SnapshotID:   f.ds.snapshotID,
-		DirID:        dirID,
-		Name:         name,
-		Ext:          summariseExtFromName(name),
-		EntryType:    info.EntryType,
-		Size:         size,
-		ApparentSize: apparentSize,
-		UID:          info.UID,
-		GID:          info.GID,
-		ATime:        time.Unix(info.ATime, 0),
-		MTime:        time.Unix(info.MTime, 0),
-		CTime:        time.Unix(info.CTime, 0),
-		Inode:        inode,
-		Nlink:        nlink,
-	})
+	return f.addWithDirID(info, dirID)
 }
 
 func validateSummariseFileInfo(info *summary.FileInfo) error {

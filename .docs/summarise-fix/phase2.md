@@ -47,8 +47,8 @@ cross-subdir hardlink counted once; `ErrTooManyDirs` on uint32 overflow;
 reserved above-root chain `dir_id`/`parent_id` match
 `ReservedDirIDForDepth`/`ReservedParentIDForDepth`).
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
 
 ### Item 2.2: A3 - Inline switch on non-contiguity; retire the sort
 
@@ -76,8 +76,8 @@ fixtures - unordered subtree revisit, prefix-sharing siblings `project/` vs
 `project.v2/`, same-name file and directory, slashless `d` rows, U+00A0 unicode
 path - all build identically to contiguous ordering).
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
 
 ### Item 2.3: A4 - Bounded memory and bytes-written
 
@@ -99,5 +99,5 @@ via the go-conventions `runtime.GC()` + `ReadMemStats` before/after pattern
 guarding unsigned underflow, with zero temp files under `t.TempDir()` beyond
 the input; and no `*.bin`/`stats.sorted` artifacts created).
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed

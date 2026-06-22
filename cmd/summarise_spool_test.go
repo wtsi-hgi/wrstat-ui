@@ -33,6 +33,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -51,6 +52,8 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/internal/statsdata"
 	"github.com/wtsi-hgi/wrstat-ui/stats"
 	"github.com/wtsi-hgi/wrstat-ui/summary"
+	"github.com/wtsi-hgi/wrstat-ui/summary/dirbuild"
+	dirguta "github.com/wtsi-hgi/wrstat-ui/summary/dirguta"
 )
 
 const summariseSpoolVirtualNamespaceDir = "/mnt/"
@@ -837,6 +840,87 @@ func writeBasedirsSpoolFixtureStatsForMount(
 	So(os.Chtimes(statsPath, updatedAt, updatedAt), ShouldBeNil)
 }
 
+func buildSummariseSpoolFixtureForTest(
+	t *testing.T,
+	fixture summariseActiveSnapshotFixture,
+) (string, *chspool.Manifest) {
+	t.Helper()
+
+	target := &clickHouseSummariseTarget{
+		cfg:       clickhouse.Config{DSN: summariseTestClickHouseDSN, Database: summariseTestClickHouseDatabase},
+		mountPath: summariseTestMountPath,
+		modtime:   fixture.updatedAt,
+		outputDir: fixture.outputDir,
+	}
+	expected, err := newSummariseSpoolManifest(fixture.statsPath, target)
+	So(err, ShouldBeNil)
+
+	spoolDir := summariseClickHouseSpoolDir(fixture.outputDir)
+	manifest, err := buildSummariseSpool(
+		fixture.statsPath,
+		spoolDir,
+		expected,
+		target,
+		newSummariseDiagnostics(fixture.statsPath),
+	)
+	So(err, ShouldBeNil)
+
+	return spoolDir, manifest
+}
+
+func writeContiguousSubtreeRevisitSpoolFixtureStats(t *testing.T, statsPath string, updatedAt time.Time) {
+	t.Helper()
+
+	var buf bytes.Buffer
+
+	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath, 'd', 4096, 10, 20, updatedAt.Unix(), 300, 1)
+	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath+"a/", 'd', 4096, 11, 21, updatedAt.Unix(), 301, 1)
+	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath+"a/one.dat", 'f', 10, 12, 22, updatedAt.Unix(), 302, 1)
+	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath+"a/deep/", 'd', 4096, 15, 25, updatedAt.Unix(), 305, 1)
+	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath+"a/deep/three.txt", 'f', 30, 16, 26, updatedAt.Unix(), 306, 1)
+	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath+"b/", 'd', 4096, 13, 23, updatedAt.Unix(), 303, 1)
+	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath+"b/two.dat", 'f', 20, 14, 24, updatedAt.Unix(), 304, 1)
+
+	writeGzipStats(t, statsPath, buf.Bytes())
+	So(os.Chtimes(statsPath, updatedAt, updatedAt), ShouldBeNil)
+}
+
+func assertSummariseManifestTableRowsMatch(expected, actual *chspool.Manifest) {
+	So(actual, ShouldNotBeNil)
+	So(expected, ShouldNotBeNil)
+	So(actual.Tables, ShouldHaveLength, len(expected.Tables))
+
+	for table, expectedManifest := range expected.Tables {
+		actualManifest, ok := actual.Tables[table]
+		So(ok, ShouldBeTrue)
+		So(actualManifest.Rows, ShouldEqual, expectedManifest.Rows)
+	}
+}
+
+func assertSummariseSpoolDecodedRowsMatch(expectedSpoolDir, actualSpoolDir string) {
+	for _, table := range []string{
+		chspool.TableDirs,
+		chspool.TableFiles,
+		chspool.TableDirFacts,
+		chspool.TableDirFilterAgeAll,
+		chspool.TableChildFilterAll,
+		chspool.TableDirFilterAll,
+		chspool.TableSchema3SnapshotSets,
+		chspool.TableActiveVirtualDirs,
+		chspool.TableActiveVirtualSummaries,
+		chspool.TableActiveVirtualFilterAll,
+		chspool.TableActiveVirtualChildren,
+		chspool.TableActiveVirtualSets,
+		chspool.TableDirProjectionSets,
+	} {
+		So(
+			d2DecodedRowFingerprintsForTable(actualSpoolDir, table),
+			ShouldResemble,
+			d2DecodedRowFingerprintsForTable(expectedSpoolDir, table),
+		)
+	}
+}
+
 func assertChildFilterAllParentsMatchCatalog(spoolDir string) {
 	dirsByID := make(map[uint32]chspool.DirRow)
 
@@ -1304,6 +1388,149 @@ func d3SummaryDigest(facts d3SummaryFacts) string {
 }
 
 func TestSummariseClickHouseSpoolRows(t *testing.T) {
+	Convey("A3.1 contiguous spool build uses one raw stats open and does not invoke dirbuild", t, func() {
+		fixture := newSummariseActiveSnapshotFixture(t)
+		fixture.writeValidStats(t)
+
+		restore := snapshotSummariseGlobals()
+		Reset(restore)
+
+		configureSummariseActiveSnapshotTest(fixture.outputDir, false)
+
+		openCalls := 0
+		dirbuildCalls := 0
+		originalOpen := openSummariseSpoolStats
+		originalDirbuild := buildSummariseSpoolDirbuild
+
+		openSummariseSpoolStats = func(statsPath string) (io.ReadCloser, error) {
+			openCalls++
+
+			return originalOpen(statsPath)
+		}
+		buildSummariseSpoolDirbuild = func(
+			open func() (io.ReadCloser, error),
+			mountPath string,
+			database dirguta.DB,
+			refTime time.Time,
+			files dirbuild.FileSink,
+		) error {
+			dirbuildCalls++
+
+			return originalDirbuild(open, mountPath, database, refTime, files)
+		}
+
+		_, manifest := buildSummariseSpoolFixtureForTest(t, fixture)
+
+		So(manifest.Tables[chspool.TableDirs].Rows, ShouldBeGreaterThan, uint64(0))
+		So(openCalls, ShouldEqual, 1)
+		So(dirbuildCalls, ShouldEqual, 0)
+	})
+
+	Convey("A3.2 non-contiguous spool build removes stale partial rows and matches contiguous row counts", t, func() {
+		baseDir := t.TempDir()
+		updatedAt := time.Unix(1_710_000_000, 123).UTC()
+		contiguous := newSummariseActiveSnapshotFixtureForMount(t, baseDir, summariseTestMountPath, updatedAt)
+		nonContiguous := newSummariseActiveSnapshotFixtureForMount(t, baseDir, summariseTestMountPath, updatedAt)
+
+		writeContiguousSubtreeRevisitSpoolFixtureStats(t, contiguous.statsPath, updatedAt)
+		writeNonContiguousSpoolFixtureStats(t, nonContiguous.statsPath, updatedAt)
+
+		restore := snapshotSummariseGlobals()
+		Reset(restore)
+		configureSummariseActiveSnapshotTest(contiguous.outputDir, false)
+
+		_, contiguousManifest := buildSummariseSpoolFixtureForTest(t, contiguous)
+
+		configureSummariseActiveSnapshotTest(nonContiguous.outputDir, false)
+
+		stalePartial := filepath.Join(summariseClickHouseSpoolDir(nonContiguous.outputDir)+".partial", "stale")
+		So(os.MkdirAll(filepath.Dir(stalePartial), 0o700), ShouldBeNil)
+		So(os.WriteFile(stalePartial, []byte("discard me"), 0o600), ShouldBeNil)
+
+		originalDirbuild := buildSummariseSpoolDirbuild
+		buildSummariseSpoolDirbuild = func(
+			open func() (io.ReadCloser, error),
+			mountPath string,
+			database dirguta.DB,
+			refTime time.Time,
+			files dirbuild.FileSink,
+		) error {
+			_, err := os.Stat(stalePartial)
+			So(errors.Is(err, os.ErrNotExist), ShouldBeTrue)
+
+			return originalDirbuild(open, mountPath, database, refTime, files)
+		}
+
+		_, nonContiguousManifest := buildSummariseSpoolFixtureForTest(t, nonContiguous)
+
+		assertSummariseManifestTableRowsMatch(contiguousManifest, nonContiguousManifest)
+	})
+
+	Convey("A3.4 non-contiguity regression fixtures match their contiguous spool rows", t, func() {
+		type fixtureCase struct {
+			name       string
+			unordered  func(*testing.T, string, time.Time)
+			contiguous func(*testing.T, string, time.Time)
+		}
+
+		cases := []fixtureCase{
+			{
+				name:       "unordered subtree revisit",
+				unordered:  writeNonContiguousSpoolFixtureStats,
+				contiguous: writeContiguousSubtreeRevisitSpoolFixtureStats,
+			},
+			{
+				name:       "prefix-sharing siblings",
+				unordered:  writePrefixSharingDirectorySiblingSpoolFixtureStats,
+				contiguous: writeContiguousPrefixSharingDirectorySiblingSpoolFixtureStats,
+			},
+			{
+				name:       "same-name file and directory",
+				unordered:  writeSameNameFileDirectorySpoolFixtureStats,
+				contiguous: writeContiguousSameNameFileDirectorySpoolFixtureStats,
+			},
+			{
+				name:       "slashless directory rows",
+				unordered:  writeSlashlessDirectoryBoundarySpoolFixtureStats,
+				contiguous: writeContiguousSlashlessDirectoryBoundarySpoolFixtureStats,
+			},
+			{
+				name:       "unicode non-breaking-space path",
+				unordered:  writeEscapedUnicodeSiblingSpoolFixtureStats,
+				contiguous: writeContiguousEscapedUnicodeSiblingSpoolFixtureStats,
+			},
+		}
+
+		for _, tc := range cases {
+			Convey(tc.name, func() {
+				baseDir := t.TempDir()
+				updatedAt := time.Unix(1_710_000_000, 123).UTC()
+				contiguous := newSummariseActiveSnapshotFixtureForMount(t, baseDir, summariseTestMountPath, updatedAt)
+				unordered := newSummariseActiveSnapshotFixtureForMount(t, baseDir, summariseTestMountPath, updatedAt)
+
+				tc.contiguous(t, contiguous.statsPath, updatedAt)
+				tc.unordered(t, unordered.statsPath, updatedAt)
+
+				restore := snapshotSummariseGlobals()
+				Reset(restore)
+
+				summariseSpoolNow = func() time.Time {
+					return updatedAt.Add(time.Hour)
+				}
+				summariseSpoolDirGUTANow = d2Schema3DirGUTAReferenceTime
+
+				configureSummariseActiveSnapshotTest(contiguous.outputDir, false)
+				contiguousSpoolDir, contiguousManifest := buildSummariseSpoolFixtureForTest(t, contiguous)
+
+				configureSummariseActiveSnapshotTest(unordered.outputDir, false)
+				unorderedSpoolDir, unorderedManifest := buildSummariseSpoolFixtureForTest(t, unordered)
+
+				assertSummariseManifestTableRowsMatch(contiguousManifest, unorderedManifest)
+				assertSummariseSpoolDecodedRowsMatch(contiguousSpoolDir, unorderedSpoolDir)
+			})
+		}
+	})
+
 	Convey("summarise spool records small-fixture rows for files, tree facts and basedirs", t, func() {
 		fixture := newSummariseActiveSnapshotFixture(t)
 		writeBasedirsSpoolFixtureStats(t, fixture.statsPath, fixture.updatedAt)
@@ -2045,6 +2272,85 @@ func writeSlashlessDirectoryBoundarySpoolFixtureStats(t *testing.T, statsPath st
 	So(os.Chtimes(statsPath, updatedAt, updatedAt), ShouldBeNil)
 }
 
+func writeContiguousPrefixSharingDirectorySiblingSpoolFixtureStats(
+	t *testing.T,
+	statsPath string,
+	updatedAt time.Time,
+) {
+	t.Helper()
+
+	var buf bytes.Buffer
+
+	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath, 'd', 4096, 10, 20, updatedAt.Unix(), 300, 1)
+	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath+"project/", 'd', 4096, 13, 23, updatedAt.Unix(), 303, 1)
+	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath+"project/root.dat", 'f', 10, 14, 24, updatedAt.Unix(), 304, 1)
+	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath+"project.v2/", 'd', 4096, 11, 21, updatedAt.Unix(), 301, 1)
+	writeSpoolFixtureStatsRow(
+		&buf, summariseTestMountPath+"project.v2/result.dat", 'f', 20, 12, 22, updatedAt.Unix(), 302, 1,
+	)
+
+	writeGzipStats(t, statsPath, buf.Bytes())
+	So(os.Chtimes(statsPath, updatedAt, updatedAt), ShouldBeNil)
+}
+
+func writeContiguousSameNameFileDirectorySpoolFixtureStats(t *testing.T, statsPath string, updatedAt time.Time) {
+	t.Helper()
+
+	var buf bytes.Buffer
+
+	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath, 'd', 4096, 10, 20, updatedAt.Unix(), 300, 1)
+	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath+"clash/", 'd', 4096, 11, 21, updatedAt.Unix(), 301, 1)
+	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath+"clash/leaf.dat", 'f', 20, 14, 24, updatedAt.Unix(), 304, 1)
+	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath+"clash", 'f', 10, 13, 23, updatedAt.Unix(), 303, 1)
+	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath+"next/", 'd', 4096, 12, 22, updatedAt.Unix(), 302, 1)
+
+	writeGzipStats(t, statsPath, buf.Bytes())
+	So(os.Chtimes(statsPath, updatedAt, updatedAt), ShouldBeNil)
+}
+
+func writeContiguousEscapedUnicodeSiblingSpoolFixtureStats(t *testing.T, statsPath string, updatedAt time.Time) {
+	t.Helper()
+
+	var buf bytes.Buffer
+
+	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath, 'd', 4096, 10, 20, updatedAt.Unix(), 300, 1)
+	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath+"chr1/", 'd', 4096, 16, 26, updatedAt.Unix(), 306, 1)
+	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath+"chr1/file.dat", 'f', 10, 14, 24, updatedAt.Unix(), 304, 1)
+	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath+"chr1\u00a0/", 'd', 4096, 11, 21, updatedAt.Unix(), 301, 1)
+	writeSpoolFixtureStatsRow(
+		&buf, summariseTestMountPath+"chr1\u00a0/leaf.dat", 'f', 20, 12, 22, updatedAt.Unix(), 302, 1,
+	)
+	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath+"chr2/", 'd', 4096, 15, 25, updatedAt.Unix(), 305, 1)
+	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath+"chr2/two.dat", 'f', 30, 13, 23, updatedAt.Unix(), 303, 1)
+
+	writeGzipStats(t, statsPath, buf.Bytes())
+	So(os.Chtimes(statsPath, updatedAt, updatedAt), ShouldBeNil)
+}
+
+func writeContiguousSlashlessDirectoryBoundarySpoolFixtureStats(t *testing.T, statsPath string, updatedAt time.Time) {
+	t.Helper()
+
+	var buf bytes.Buffer
+
+	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath, 'd', 4096, 10, 20, updatedAt.Unix(), 300, 1)
+	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath+"bins/", 'd', 4096, 11, 21, updatedAt.Unix(), 301, 1)
+	writeSpoolFixtureStatsRow(
+		&buf, summariseTestMountPath+"bins/maxbin2.004_sub/", 'd', 4096, 12, 22, updatedAt.Unix(), 302, 1,
+	)
+	writeSpoolFixtureStatsRow(
+		&buf, summariseTestMountPath+"bins/maxbin2.004_sub/hmmer.tree.txt", 'f', 10, 13, 23,
+		updatedAt.Unix(), 303, 1,
+	)
+	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath+"bins/maxbin2.006", 'd', 4096, 14, 24,
+		updatedAt.Unix(), 304, 1)
+	writeSpoolFixtureStatsRow(
+		&buf, summariseTestMountPath+"bins/maxbin2.006/genes.faa", 'f', 20, 15, 25, updatedAt.Unix(), 305, 1,
+	)
+
+	writeGzipStats(t, statsPath, buf.Bytes())
+	So(os.Chtimes(statsPath, updatedAt, updatedAt), ShouldBeNil)
+}
+
 func writeSpoolFixtureStatsRow(
 	buf *bytes.Buffer,
 	path string,
@@ -2166,8 +2472,20 @@ func d2DecodedRowsForTable(spoolDir string, table string) uint64 {
 
 			return nil
 		}), ShouldBeNil)
+	case chspool.TableFiles:
+		So(chspool.DecodeRows[chspool.FileRow](spoolDir, table, func(chspool.FileRow) error {
+			rows++
+
+			return nil
+		}), ShouldBeNil)
 	case chspool.TableDirFacts:
 		So(chspool.DecodeRows[chspool.DirFactRow](spoolDir, table, func(chspool.DirFactRow) error {
+			rows++
+
+			return nil
+		}), ShouldBeNil)
+	case chspool.TableDirFilterAgeAll:
+		So(chspool.DecodeRows[chspool.DirFilterAgeAllRow](spoolDir, table, func(chspool.DirFilterAgeAllRow) error {
 			rows++
 
 			return nil
@@ -2224,6 +2542,12 @@ func d2DecodedRowsForTable(spoolDir string, table string) uint64 {
 
 			return nil
 		}), ShouldBeNil)
+	case chspool.TableDirProjectionSets:
+		So(chspool.DecodeRows[chspool.DirProjectionSetRow](spoolDir, table, func(chspool.DirProjectionSetRow) error {
+			rows++
+
+			return nil
+		}), ShouldBeNil)
 	}
 
 	return rows
@@ -2233,8 +2557,12 @@ func d2DecodedRowFingerprintsForTable(spoolDir string, table string) []string {
 	switch table {
 	case chspool.TableDirs:
 		return d2DecodedRowFingerprints[chspool.DirRow](spoolDir, table)
+	case chspool.TableFiles:
+		return d2DecodedRowFingerprints[chspool.FileRow](spoolDir, table)
 	case chspool.TableDirFacts:
 		return d2DecodedRowFingerprints[chspool.DirFactRow](spoolDir, table)
+	case chspool.TableDirFilterAgeAll:
+		return d2DecodedRowFingerprints[chspool.DirFilterAgeAllRow](spoolDir, table)
 	case chspool.TableChildFilterAll:
 		return d2DecodedRowFingerprints[chspool.ChildFilterAllRow](spoolDir, table)
 	case chspool.TableDirFilterAll:
@@ -2251,6 +2579,8 @@ func d2DecodedRowFingerprintsForTable(spoolDir string, table string) []string {
 		return d2DecodedRowFingerprints[chspool.ActiveVirtualChildRow](spoolDir, table)
 	case chspool.TableActiveVirtualSets:
 		return d2DecodedRowFingerprints[chspool.ActiveVirtualSetRow](spoolDir, table)
+	case chspool.TableDirProjectionSets:
+		return d2DecodedRowFingerprints[chspool.DirProjectionSetRow](spoolDir, table)
 	}
 
 	return nil
