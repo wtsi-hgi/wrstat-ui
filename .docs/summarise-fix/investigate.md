@@ -100,32 +100,54 @@ Artifacts:
 - Local ClickHouse: `127.0.0.1:9000`, data under `.tmp/agent/summarise-fix/ch/`
 - Evidence summary + reports: `.tmp/agent/summarise-fix/perf/`
 
-### Sort-retry path is the dominant regression (no ClickHouse)
+### Sort-retry path is the dominant regression
 
-Timing `summariseWriteSortedStatsFileForMount` directly against the same 1.5M
-prefix used for a plain parse:
+Measured directly inside the real summarise path (env-gated `WRSTAT_FORCE_SORT=1`
+on a warm DB so the sort is isolated), and a plain parse of the same input:
 
-| Mount | parse-only wall | sort-retry wall | slowdown | peak sort scratch |
+| Mount | parse-only wall | sort wall | slowdown | sort scratch bytes (chunks+merged) |
 |---|---:|---:|---:|---:|
-| `/lustre/scratch127/` | 1.11s | 111s | ~100x | ~5.0 GB |
-| `/nfs/t283_imaging/`  | 1.21s | 162s | ~134x | ~9.8 GB |
-| `/lustre/scratch122/` | 1.44s | not run (lustre class ~scratch127) | - | - |
+| `/lustre/scratch127/` 1.5M | 1.11s | 32.2s | ~29x | 1.07 GB |
+| `/nfs/t283_imaging/` 1.5M  | 1.21s | 31.8s | ~26x | 1.26 GB |
+
+(An earlier standalone probe reported ~100x and ~5-10 GB; that was inflated by
+concurrent Go compilation I/O and a disk watcher that included the build cache.
+The numbers above are the clean, in-path figures and should be used.)
 
 The sort output line count equals the input (1.5M); the blow-up is the
 *intermediate* chunk files. `summariseStatsSortRecordsForLine` emits a synthetic
-directory record for every ancestor of every file before duplicates are
-suppressed at merge time, so a depth-`D` tree multiplies on-disk chunk volume by
-roughly `D`. ~5-10 GB of scratch per 1.5M lines extrapolates to hundreds of GB
-for a full mount, overflowing disk and preventing completion. This is the
-reliability failure, not only a speed failure.
+directory record for every ancestor of every file (plus a 2-byte-per-byte
+hex-encoded component key) before duplicates are suppressed at merge time, so a
+depth-`D` tree inflates chunk volume well beyond the input. ~1.1-1.3 GB of
+scratch per 1.5M lines extrapolates to tens of GB for a full mount. On the
+production host disk does not run out, but it is **NFS**, so writing tens of GB
+of sort scratch (then reading it back) is itself a dominant cost; locally (26 GB
+free) a full mount would overflow disk. Either way the sort path is the failure.
 
 The retry also runs only *after* a full first parse attempt has already failed
 part-way through with `ErrNonContiguousInput`, then re-parses the sorted output.
 A non-contiguous mount therefore pays: full parse #1 (fails) + external sort
-(~100x a parse) + full parse #2 of the sorted stream + spool build + load. The
-three failing mounts are precisely the ones whose raw stats are non-contiguous
-(see bug fixes 260618-3 scratch124, 260619-1/2 scratch122, 260618-4 t283), so
-they always take the slow, fragile path.
+(~26-29x a parse, ~1 GB writes per 1.5M lines) + full parse #2 of the sorted
+stream + spool build + load. The three failing mounts are precisely the ones
+whose raw stats are non-contiguous (bug fixes 260618-3 scratch124, 260619-1/2
+scratch122, 260618-4 t283), so they always take the slow, fragile path. Healthy
+mounts (scratch120/123/124/125/126) are contiguous and skip it.
+
+### Directory-only reorder is ~70x cheaper than the full sort
+
+The catalog needs contiguity, not the files. Directory rows are a small fraction
+of the stream, and sorting only them avoids the synthetic-ancestor explosion:
+
+| Mount | total rows | directory rows | % dirs |
+|---|---:|---:|---:|
+| `/lustre/scratch127/` 1.5M | 1,500,000 | 49,702 | 3.3% |
+| `/nfs/t283_imaging/` 1.5M  | 1,500,000 | 482,830 | 32.2% |
+
+Sorting all 482,830 t283 directory paths took **0.44s** (`sort(1)`), versus the
+full file+ancestor sort at ~32s. Files then resolve their `dir_id` by an
+in-memory parent-path lookup against the sorted directory set — no file rows and
+no synthetic ancestors need to be spilled to disk. This is the enabling fact for
+the radical fix in section 2.
 
 ### End-to-end fast path (contiguous), scratch127 1.5M
 
@@ -156,6 +178,15 @@ the sort retry and the duplicated full-filter load. Halving the full-filter
 write/load by deriving `child_filter_all` from `dir_filter_all` server-side is
 still a real win on top of fixing the sort path.
 
+Overhaul nuance: unlike the pre-overhaul string schema, `child_filter_all`
+(keyed `parent_id`,`dir_id`) is NOT a column-rename of `dir_filter_all` (keyed
+`dir_id`,`subtree_end`) — the derived insert needs `parent_id` from the
+`wrstat_dirs` catalog. Measured: `INSERT INTO child SELECT ... FROM
+dir_filter_all d INNER JOIN wrstat_dirs c ON (mount,snapshot,dir_id)` produced
+the exact 1,122,958 rows for the scratch127 snapshot in **1.16s**, versus
+writing+loading a second ~1 GB gob table. So derive-child still applies; it just
+joins the (small) catalog.
+
 ### Completed-spool verification
 
 Re-running summarise against an existing complete t283 1.5M spool spent ~53s in
@@ -175,7 +206,7 @@ progress interval is not reported). Unchanged from the prior investigation.
   production-scale run. Use bounded prefixes. To reproduce the non-contiguous
   failure specifically, take a window around a known break point (e.g. scratch122
   raw line ~14.96M, scratch124 ~11.35M) or a prefix large enough to contain one.
-- Watch disk. The sort retry can write hundreds of GB of scratch; only ~26 GB is
+- Watch disk. The sort retry writes ~1 GB scratch per 1.5M lines (depth-scaled, tens of GB per full mount); on NFS that write/read is itself a dominant cost, and only ~26 GB is
   free. Cap inputs and clean scratch between runs.
 - Always test at least one of the three failing mounts AND at least one healthy
   contiguous Lustre mount, so a candidate cannot fix the failing mounts by
@@ -226,15 +257,19 @@ zcat <mount>/stats.gz | head -n 1500000 | gzip > inputs/<m>-1500k.stats.gz
   Result: ~10s build + 30s load (18s duplicated full-filter) on a warm DB.
 - [x] Confirm the duplicated full-filter write/load and density on t283/scratch127.
   Result: child == dir full-filter exactly; t283 20.7M full-filter rows from 1.5M.
-- [ ] Reproduce a real end-to-end `summarise` of one failing mount that actually
-  enters the sort retry (window a known break point), and record total wall,
-  peak scratch, and whether it completes within free disk. Not yet run here;
-  bounded DFS-head prefixes are contiguous and take the fast path.
-- [ ] Measure peak sort scratch for a Lustre mount (scratch122 or 127) at 3M+
-  lines to confirm the scratch-bytes-per-line slope and extrapolate full-mount
-  disk need.
+- [x] Reproduce a real end-to-end `summarise` that actually enters the sort retry
+  and record wall + scratch. Synthetic re-entry appends did not trip the
+  Summariser (it tolerates a lone re-declared dir), so the sort was exercised via
+  an env-gated force flag on the real path: scratch127 1.5M sort = 32.2s / 1.07 GB,
+  t283 1.5M = 31.8s / 1.26 GB. Completes within free disk at 1.5M; a full mount
+  would not.
+- [x] Confirm the scratch-bytes-per-line slope.
+  Result: ~715-840 bytes of sort scratch per input line (1.07-1.26 GB / 1.5M);
+  scales with tree depth via synthetic ancestors. A 60M-line mount ~= 45-50 GB.
 - [ ] Record same-subset query guardrails (root, mount-root, high-fanout) before
-  and after any candidate, using `clickhouse-perf query`.
+  and after any candidate, using `clickhouse-perf query`. Harness exists but its
+  pre-flight glob-routing EXPLAIN assertion failed on the polluted multi-mount
+  experiment DB; establish on a clean single-mount load during spec work.
 
 ## Investigation Checklist
 
@@ -245,15 +280,19 @@ disk actually go?
 
 - [ ] Add phase-level timing/telemetry that separates: first parse attempt (the
   one that fails), external sort (chunk write + merge), second parse of the
-  sorted stream, spool build, and each ClickHouse load phase.
-- [ ] For one windowed non-contiguous subset of each failing mount, record total
-  wall, peak sort scratch bytes, spool bytes, and per-phase split.
-- [ ] Confirm the double/triple pass over the data: a non-contiguous mount parses
-  the full stream at least twice plus a full external sort.
+  sorted stream, spool build, and each ClickHouse load phase. (Prototyped here
+  via a temporary stderr timer; production telemetry still to implement.)
+- [x] Record sort wall, sort scratch bytes, and the parse baseline for the
+  failing mounts. Result: scratch127 32.2s/1.07 GB, t283 31.8s/1.26 GB vs ~1.1s
+  parse. Per-phase end-to-end split: cold-DB scratch127 1.5M = ~110s one-time
+  schema bootstrap + ~10s parse/build + 30s load (18s combined filter_all).
+- [x] Confirm the double/triple pass over the data.
+  Result: yes by construction — failed parse #1 + full external sort (reads input,
+  writes/reads ~1 GB chunks+merged) + parse #2 of the sorted stream.
 - [x] Quantify synthetic-ancestor amplification in the sort chunks.
-  Result: chunk volume scales ~`depth` x input before merge dedup; ~5-10 GB per
-  1.5M lines on real mounts.
-- [ ] A fix candidate must reduce wall time AND bound peak scratch disk for the
+  Result: ~715-840 scratch bytes per input line (depth-scaled), the source of the
+  ~1.1-1.3 GB per 1.5M lines.
+- [ ] A fix candidate must reduce wall time AND bound bytes written (NFS!) for the
   failing mounts, not only lower a micro-benchmark.
 
 ### 2. Make Id Assignment Tolerate Non-Contiguous Input (radical, preferred)
@@ -262,14 +301,16 @@ Question: can the preorder `dir_id`/`subtree_end` interval be assigned WITHOUT
 requiring the raw stats to be DFS-contiguous, removing the need for the sort
 retry entirely?
 
+- [x] Establish the enabling fact: the directory set is a small fraction of the
+  stream and sorting only it is cheap. Result: scratch127 3.3% dirs (49,702),
+  t283 32.2% dirs (482,830); sorting all 482,830 t283 dir paths = 0.44s vs ~32s
+  for the full file+ancestor sort.
 - [ ] Prototype a two-pass-over-catalog-only assignment: stream the stats once
   accumulating per-directory facts keyed by path (not requiring order), then
-  assign preorder intervals from the directory set alone (which is far smaller
-  than the file set: t283 1.5M files -> 482,832 dirs; scratch127 -> 49,704).
+  assign preorder intervals from the directory set alone. (Needs implementation.)
 - [ ] Assign `dir_id`/`parent_id`/`subtree_end`/`depth` by sorting only the
-  DIRECTORY paths in component order (hundreds of thousands of entries, not tens
-  of millions of file lines), then resolve each file's `dir_id` by parent-path
-  lookup.
+  DIRECTORY paths in component order, then resolve each file's `dir_id` by an
+  in-memory parent-path lookup (no file rows or synthetic ancestors spilled).
 - [ ] Keep the existing fast streaming path when input IS contiguous; fall back
   to the directory-only reorder when it is not, instead of sorting every file
   line plus synthetic ancestors.
@@ -320,12 +361,15 @@ Question: re-land the prior spec's primary fix that the overhaul dropped.
 - [ ] Stop writing `wrstat_child_filter_all` to the gob spool
   (`cmd/summarise_spool.go:800`); keep `wrstat_dir_filter_all` canonical.
 - [ ] Populate `wrstat_child_filter_all` with `INSERT INTO ... SELECT` from
-  `wrstat_dir_filter_all` before schema3 readiness/active publish.
+  `wrstat_dir_filter_all` JOIN `wrstat_dirs` (for `parent_id`) before readiness.
 - [ ] Preserve the final physical table shape and query semantics; record row
   counts/evidence for the derived table.
 - [x] Confirm the duplication still exists and its size.
   Result: child == dir exactly; scratch127 1.12M each, t283 10.37M each; ~18s of
   a 30s load on scratch127 1.5M is the combined filter_all insert.
+- [x] Measure the derived-insert cost on the overhaul schema (catalog join).
+  Result: 1.16s for the 1,122,958-row scratch127 snapshot, exact row parity,
+  versus writing+loading a second ~1 GB gob table.
 - [ ] Make `clickhouse-perf import` consistent with summarise (it has the same
   double write in `clickhouse/dir_filter_all.go`).
 - [ ] Gate: failing/derived insert must not publish or switch active state;
@@ -376,15 +420,15 @@ Question: re-land the prior spec's primary fix that the overhaul dropped.
 
 Maintain this table as experiments complete.
 
-| Design | Objects/paths changed | Failing-mount wall | Peak sort scratch | Healthy-mount wall | Full-filter write/load | Retry verify | Disk-overflow risk | Correctness/fragility risk | Recommendation |
-|---|---|---:|---:|---:|---:|---:|---:|---|---|
-| Current HEAD | overhaul intervals + sort retry + double full-filter | sort ~100-134x parse per 1.5M; full mount unfinished | ~5-10 GB / 1.5M lines | ~10s build + 30s load / 1.5M | child == dir, doubled | ~53s/182MB decode | high (hundreds of GB) | 6 sort fixes deep; brittle | Baseline only |
-| 2. Non-contiguous-tolerant id assignment | directory-only reorder; no full-stream sort | target: small multiple of fast path | O(dirs) not O(files x depth) | must not regress | unchanged here | unchanged | low | removes the brittle path entirely | Preferred radical fix |
-| 3. Reorder without synthetic ancestors | sort explicit dirs only; compact keys | lower than current sort | small constant/line | n/a | unchanged | unchanged | medium->low | simpler than current sort | Strong if 2 is too large |
-| 4. Detect + skip failed first parse | streaming contiguity check | removes one full parse | unchanged | unchanged | unchanged | unchanged | unchanged | low | Cheap complement |
-| 5. Derive child_filter_all server-side | drop child gob; INSERT..SELECT | n/a | n/a | ~ -9s load on dense mounts | halves write/load | n/a | n/a | preserves table shape | Re-land; low risk |
-| 7. Fast spool verify | trusted manifest counts | n/a | n/a | n/a | n/a | ~53s -> sub-second | n/a | size/hash still checked | Retry ergonomics |
-| Another sort correctness patch | tweak existing sort | still ~100x; still blows disk | still huge | unchanged | unchanged | unchanged | high | 7th patch | Rejected as the answer |
+| Design | Objects/paths changed | Failing-mount cost | Sort scratch (bytes written) | Healthy-mount wall | Full-filter write/load | Correctness/fragility | Recommendation |
+|---|---|---:|---:|---:|---:|---|---|
+| Current HEAD | overhaul intervals + sort retry + double full-filter | sort ~26-29x parse / 1.5M; +failed parse #1 +parse #2 | ~1.1-1.3 GB / 1.5M (~45-50 GB on a 60M mount) | ~10s build + 30s load / 1.5M | child == dir, doubled | 6 sort fixes deep; brittle | Baseline only |
+| 2. Non-contiguous-tolerant id assignment | directory-only reorder; no full-stream sort | dir sort 0.44s/482k dirs; file dir_id via in-mem lookup | ~0 (catalog only, files not spilled) | must not regress | unchanged here | removes the brittle path entirely | Preferred radical fix |
+| 3. Reorder without synthetic ancestors | sort explicit dirs only; compact keys | << current sort | small constant/line, no depth blow-up | n/a | unchanged | simpler than current sort | Strong if 2 is too large |
+| 4. Detect + skip failed first parse | streaming contiguity check | removes one full parse | unchanged | unchanged | unchanged | low | Cheap complement |
+| 5. Derive child_filter_all server-side | drop child gob; INSERT..SELECT + catalog join | n/a | n/a (removes ~1 GB gob write) | derive 1.16s/1.12M rows vs ~9s gob load | halves write/load | preserves table shape | Re-land; low risk |
+| 7. Fast spool verify | trusted manifest counts | n/a | n/a | n/a | n/a | size/hash still checked | Retry ergonomics |
+| Another sort correctness patch | tweak existing sort | still ~26x; still writes ~1 GB+/1.5M | still depth-scaled | unchanged | unchanged | 7th patch | Rejected as the answer |
 
 ## Final Recommendation (to be confirmed by the spec experiments)
 
@@ -392,7 +436,7 @@ Order the work by what removes the failure class, not just the symptom:
 
 1. **Remove the contiguity requirement (sections 2-4).** The root liability is
    that interval id assignment demands DFS-contiguous raw stats, and production
-   stats for these three mounts are not contiguous, forcing a ~100x external
+   stats for these three mounts are not contiguous, forcing a ~26-29x external
    sort that emits a synthetic record per ancestor per file and blows out disk.
    Prefer assigning preorder intervals from the directory set alone (hundreds of
    thousands of dirs, not tens of millions of file lines), keeping the fast
@@ -424,4 +468,4 @@ at least one healthy Lustre mount:
 
 Do not accept a candidate that fixes the failing mounts by regressing the
 healthy ones, nor a seventh `non-contiguous directory input` patch that leaves
-the ~100x sort and the disk blow-up in place.
+the ~26-29x sort and the depth-scaled disk writes (tens of GB to NFS) in place.
