@@ -170,12 +170,7 @@ func (d *summariseDiagnostics) logProgress(records uint64, elapsed time.Duration
 		return
 	}
 
-	d.mu.Lock()
-	d.lastRecords = records
-	d.lastElapsed = elapsed
-	currentPhase := d.currentPhase
-	recent := d.recentPhaseSummaryLocked()
-	d.mu.Unlock()
+	currentPhase, recent := d.recordProgress(records, elapsed)
 
 	mem := memorySnapshot()
 
@@ -217,10 +212,12 @@ func quoteForDiagnostics(value string) string {
 	return strconv.Quote(value)
 }
 
-func (d *summariseDiagnostics) logParseResult(err error) {
+func (d *summariseDiagnostics) logParseResult(records uint64, err error) {
 	if d == nil {
 		return
 	}
+
+	d.setRecordCount(records)
 
 	if err != nil {
 		d.setCurrentPhase("parse_failed")
@@ -231,6 +228,23 @@ func (d *summariseDiagnostics) logParseResult(err error) {
 
 	d.setCurrentPhase("parse_complete")
 	d.logState("summarise parse complete")
+}
+
+func (d *summariseDiagnostics) recordProgress(records uint64, elapsed time.Duration) (string, string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	d.lastRecords = records
+	d.lastElapsed = elapsed
+
+	return d.currentPhase, d.recentPhaseSummaryLocked()
+}
+
+func (d *summariseDiagnostics) setRecordCount(records uint64) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	d.lastRecords = records
 }
 
 func (d *summariseDiagnostics) logCloseStart(publish bool) {
@@ -453,6 +467,41 @@ func setSummariseImportPhaseRecorder(recorder func(string, time.Duration), targe
 
 		setter.SetImportPhaseRecorder(recorder)
 	}
+}
+
+type summariseParseCounter struct {
+	records uint64
+}
+
+func addSummariseParseCounter(s *summary.Summariser) *summariseParseCounter {
+	counter := &summariseParseCounter{}
+	if s == nil {
+		return counter
+	}
+
+	s.AddGlobalOperation(func() summary.Operation {
+		return counter
+	})
+
+	return counter
+}
+
+func (c *summariseParseCounter) Add(*summary.FileInfo) error {
+	c.records++
+
+	return nil
+}
+
+func (c *summariseParseCounter) Output() error {
+	return nil
+}
+
+func (c *summariseParseCounter) Count() uint64 {
+	if c == nil {
+		return 0
+	}
+
+	return c.records
 }
 
 func processRSSMiB() (uint64, bool) {

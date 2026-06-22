@@ -419,8 +419,10 @@ func summariseWithHooks(
 ) error {
 	diag.setCurrentPhase("parse")
 
+	parseCounter := addSummariseParseCounter(s)
+
 	err := s.Summarise()
-	diag.logParseResult(err)
+	diag.logParseResult(parseCounter.Count(), err)
 
 	err = errors.Join(err, closeSummariseHooksWithDiagnostics(hooks, diag, err == nil))
 	if err != nil {

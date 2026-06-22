@@ -1315,8 +1315,10 @@ func buildSummariseSpoolWithDirbuild(
 
 	diag.setCurrentPhase("parse")
 
-	err = runSummariseSpoolDirbuild(statsPath, ds, dw, fileWriter)
-	diag.logParseResult(err)
+	var records uint64
+
+	records, err = runSummariseSpoolDirbuild(statsPath, ds, dw, fileWriter)
+	diag.logParseResult(records, err)
 
 	if err == nil {
 		err = closeSummariseSpoolOperations(ds)
@@ -1401,20 +1403,26 @@ func runSummariseSpoolDirbuild(
 	ds *summariseSpoolDataset,
 	dw *summariseDGUTASpoolWriter,
 	fileWriter *summariseFileSpoolOperation,
-) error {
+) (uint64, error) {
 	open := func() (io.ReadCloser, error) {
 		return openSummariseSpoolStats(statsPath)
 	}
 
-	return buildSummariseSpoolDirbuild(
+	var records uint64
+
+	err := buildSummariseSpoolDirbuild(
 		open,
 		ds.mountPath,
 		dw,
 		ds.dirgutaReferenceAt,
 		func(dirID uint32, info summary.FileInfo) error {
+			records++
+
 			return fileWriter.addWithDirID(&info, dirID)
 		},
 	)
+
+	return records, err
 }
 
 type summariseSpoolDataset struct {
@@ -1841,6 +1849,7 @@ func parseSummariseToSpool( //nolint:funlen
 	}()
 
 	s := summary.NewSummariser(stats.NewStatsParser(r))
+	parseCounter := addSummariseParseCounter(s)
 	setSummariseProgress(s, diag)
 	addSummariseSpoolOperations(s, ds)
 
@@ -1856,7 +1865,7 @@ func parseSummariseToSpool( //nolint:funlen
 
 	err = s.Summarise()
 	if !errors.Is(err, summary.ErrNonContiguousInput) {
-		diag.logParseResult(err)
+		diag.logParseResult(parseCounter.Count(), err)
 	}
 
 	if err != nil {

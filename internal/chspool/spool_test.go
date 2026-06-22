@@ -136,7 +136,7 @@ func TestVerifyManifest(t *testing.T) {
 		)
 	})
 
-	Convey("D2.1 closed spool manifests all schema3 tables in order with verified metadata", t, func() {
+	Convey("D1 valid complete spool verifies without decoding table files", t, func() {
 		dir := t.TempDir()
 		tables := writeChspoolTestSet(dir)
 		expected := newChspoolTestManifest("/out/expected", tables)
@@ -145,7 +145,18 @@ func TestVerifyManifest(t *testing.T) {
 
 		got, err := ReadManifest(dir)
 		So(err, ShouldBeNil)
+
+		var decodedTables []string
+
+		decodeRowsFromPathHook = func(table string) {
+			decodedTables = append(decodedTables, table)
+		}
+		defer func() {
+			decodeRowsFromPathHook = nil
+		}()
+
 		So(VerifyManifest(dir, got, *expected), ShouldBeNil)
+		So(decodedTables, ShouldBeEmpty)
 
 		for _, table := range TableOrder() {
 			tm, ok := got.Tables[table]
@@ -165,6 +176,61 @@ func TestVerifyManifest(t *testing.T) {
 
 		_, err = os.Stat(filepath.Join(dir, TableChildFilterAll+".gob.gz"))
 		So(errors.Is(err, os.ErrNotExist), ShouldBeTrue)
+	})
+
+	Convey("D1 VerifyManifest rejects an older manifest version", t, func() {
+		dir := t.TempDir()
+		tables := writeChspoolTestSet(dir)
+		expected := newChspoolTestManifest("/out/expected", tables)
+		got := newChspoolTestManifest("/out/expected", tables)
+		got.Version = 1
+
+		err := VerifyManifest(dir, got, *expected)
+
+		So(errors.Is(err, ErrManifestMismatch), ShouldBeTrue)
+		So(err.Error(), ShouldContainSubstring, "version")
+	})
+
+	Convey("D1 VerifyManifest rejects a missing required table file", t, func() {
+		dir := t.TempDir()
+		tables := writeChspoolTestSet(dir)
+		expected := newChspoolTestManifest("/out/expected", tables)
+		So(WriteManifestAtomic(dir, expected), ShouldBeNil)
+		So(os.Remove(filepath.Join(dir, TableFiles+".gob.gz")), ShouldBeNil)
+
+		got, err := ReadManifest(dir)
+		So(err, ShouldBeNil)
+		err = VerifyManifest(dir, got, *expected)
+
+		So(errors.Is(err, ErrManifestMismatch), ShouldBeTrue)
+		So(err.Error(), ShouldContainSubstring, TableFiles)
+	})
+
+	Convey("D1 VerifyManifest rejects same-size table byte changes", t, func() {
+		dir := t.TempDir()
+		tables := writeChspoolTestSet(dir)
+		expected := newChspoolTestManifest("/out/expected", tables)
+		So(WriteManifestAtomic(dir, expected), ShouldBeNil)
+
+		path := filepath.Join(dir, TableDirFilterAll+".gob.gz")
+		fh, err := os.OpenFile(path, os.O_RDWR, 0)
+		So(err, ShouldBeNil)
+
+		buf := []byte{0}
+		_, err = fh.ReadAt(buf, 0)
+		So(err, ShouldBeNil)
+
+		buf[0] ^= 0xff
+		_, err = fh.WriteAt(buf, 0)
+		So(err, ShouldBeNil)
+		So(fh.Close(), ShouldBeNil)
+
+		got, err := ReadManifest(dir)
+		So(err, ShouldBeNil)
+		err = VerifyManifest(dir, got, *expected)
+
+		So(errors.Is(err, ErrManifestMismatch), ShouldBeTrue)
+		So(err.Error(), ShouldContainSubstring, TableDirFilterAll)
 	})
 
 	Convey("D2.2 VerifyManifest rejects a changed schema3 spool file", t, func() {
@@ -200,7 +266,7 @@ func TestVerifyManifest(t *testing.T) {
 		So(err.Error(), ShouldContainSubstring, "output_dir")
 	})
 
-	Convey("VerifyTables rejects manifest-only row count tampering", t, func() {
+	Convey("D1 VerifyTables trusts manifest row counts without decoding", t, func() {
 		dir := t.TempDir()
 		tables := writeChspoolTestSet(dir)
 
@@ -211,13 +277,20 @@ func TestVerifyManifest(t *testing.T) {
 		table.Rows = 0
 		tampered[TableFiles] = table
 
-		err := VerifyTables(dir, tampered)
+		var decodedTables []string
 
-		So(errors.Is(err, ErrManifestMismatch), ShouldBeTrue)
-		So(err.Error(), ShouldContainSubstring, "row count")
+		decodeRowsFromPathHook = func(table string) {
+			decodedTables = append(decodedTables, table)
+		}
+		defer func() {
+			decodeRowsFromPathHook = nil
+		}()
+
+		So(VerifyTables(dir, tampered), ShouldBeNil)
+		So(decodedTables, ShouldBeEmpty)
 	})
 
-	Convey("D2.5 VerifyManifest rejects active virtual set decoded row-count mismatches", t, func() {
+	Convey("D1 VerifyManifest trusts active virtual set manifest row counts", t, func() {
 		dir := t.TempDir()
 		tables := writeChspoolTestSet(dir)
 		expected := newChspoolTestManifest("/out/expected", tables)
@@ -229,12 +302,10 @@ func TestVerifyManifest(t *testing.T) {
 
 		err := VerifyManifest(dir, got, *expected)
 
-		So(errors.Is(err, ErrManifestMismatch), ShouldBeTrue)
-		So(err.Error(), ShouldContainSubstring, TableActiveVirtualSets)
-		So(err.Error(), ShouldContainSubstring, "row count")
+		So(err, ShouldBeNil)
 	})
 
-	Convey("D2.6 VerifyManifest rejects active virtual child decoded row-count mismatches", t, func() {
+	Convey("D1 VerifyManifest trusts active virtual child manifest row counts", t, func() {
 		dir := t.TempDir()
 		tables := writeChspoolTestSet(dir)
 		expected := newChspoolTestManifest("/out/expected", tables)
@@ -246,9 +317,7 @@ func TestVerifyManifest(t *testing.T) {
 
 		err := VerifyManifest(dir, got, *expected)
 
-		So(errors.Is(err, ErrManifestMismatch), ShouldBeTrue)
-		So(err.Error(), ShouldContainSubstring, TableActiveVirtualChildren)
-		So(err.Error(), ShouldContainSubstring, "row count")
+		So(err, ShouldBeNil)
 	})
 }
 

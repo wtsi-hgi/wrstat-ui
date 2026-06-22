@@ -39,8 +39,8 @@ decode hook that must not fire; modified table bytes (size or SHA256 differ):
 `ErrManifestMismatch` forcing a safe rebuild; missing required table file:
 `ErrManifestMismatch`).
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
 
 #### Item 7.2: E1 - Report true final parsed record count [parallel with 7.1]
 
@@ -57,8 +57,8 @@ Covering all 2 acceptance tests from E1 (a parse of exactly 1,500,000 records
 with a 1M progress interval logs 1,500,000 on success, not 1,000,000; a parse
 of 0 records logs 0 with no spurious progress line).
 
-- [ ] implemented
-- [ ] reviewed
+- [x] implemented
+- [x] reviewed
 
 For parallel batch items, use separate subagents per item.
 Launch review subagents using the `go-reviewer` skill (review all

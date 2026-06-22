@@ -31,6 +31,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -154,6 +155,41 @@ func TestSummariseDiagnosticsLogging(t *testing.T) {
 			quoteForDiagnostics("wrstat_dguta_insert:20ms,wrstat_dir_projection_insert:30ms"))
 	})
 
+	Convey("parse-complete breadcrumbs use the final parsed record count after a partial progress interval", t, func() {
+		var logs bytes.Buffer
+
+		restoreLogs := captureSummariseDiagnosticsLogs(&logs)
+		Reset(restoreLogs)
+
+		diag := newSummariseDiagnostics("stats.gz")
+		diag.setCurrentPhase("parse")
+		diag.logProgress(1_000_000, time.Second)
+
+		diag.logParseResult(1_500_000, nil)
+
+		output := logs.String()
+		line := summariseDiagnosticLineContaining(output, "summarise parse complete")
+		So(line, ShouldContainSubstring, "records=1500000")
+		So(line, ShouldNotContainSubstring, "records=1000000")
+	})
+
+	Convey("parse-complete breadcrumbs report zero records without emitting progress for an empty parse", t, func() {
+		var logs bytes.Buffer
+
+		restoreLogs := captureSummariseDiagnosticsLogs(&logs)
+		Reset(restoreLogs)
+
+		diag := newSummariseDiagnostics("empty.stats.gz")
+		diag.setCurrentPhase("parse")
+
+		diag.logParseResult(0, nil)
+
+		output := logs.String()
+		line := summariseDiagnosticLineContaining(output, "summarise parse complete")
+		So(line, ShouldContainSubstring, "records=0")
+		So(output, ShouldNotContainSubstring, "summarise progress")
+	})
+
 	Convey("signal breadcrumbs include the last known state for catchable termination signals", t, func() {
 		var logs bytes.Buffer
 
@@ -241,4 +277,14 @@ func stubSummariseProcessRSS(mb uint64, ok bool) func() {
 	return func() {
 		summariseProcessRSSMiB = orig
 	}
+}
+
+func summariseDiagnosticLineContaining(output string, needle string) string {
+	for _, line := range strings.Split(output, "\n") {
+		if strings.Contains(line, needle) {
+			return line
+		}
+	}
+
+	return ""
 }

@@ -43,7 +43,7 @@ import (
 
 const (
 	ManifestName = "manifest.json"
-	Version      = 1
+	Version      = 2
 	Complete     = "complete"
 
 	// Format is intentionally isolated from the retry/publish logic. The first
@@ -75,6 +75,8 @@ var ErrManifestMismatch = errors.New("clickhouse spool manifest mismatch")
 
 var errUnknownTable = errors.New("unknown clickhouse spool table")
 
+var decodeRowsFromPathHook func(table string) //nolint:gochecknoglobals
+
 var tableOrder = []string{ //nolint:gochecknoglobals
 	TableDirs,
 	TableFiles,
@@ -97,18 +99,6 @@ var tableOrder = []string{ //nolint:gochecknoglobals
 
 func TableOrder() []string {
 	return slices.Clone(tableOrder)
-}
-
-func countDecodedRows[T any](path string, table string) (uint64, error) {
-	var rows uint64
-
-	err := decodeRowsFromPath[T](path, table, func(T) error {
-		rows++
-
-		return nil
-	})
-
-	return rows, err
 }
 
 type FileIdentity struct {
@@ -154,42 +144,35 @@ type TableManifest struct {
 	SHA256 string `json:"sha256"`
 }
 
-func VerifyTables(dir string, tables map[string]TableManifest) error { //nolint:gocognit,gocyclo
+func VerifyTables(dir string, tables map[string]TableManifest) error {
 	for _, table := range tableOrder {
-		tm, ok := tables[table]
-		if !ok {
-			return fmt.Errorf("%w: missing table %s", ErrManifestMismatch, table)
-		}
-
-		if tm.Table != table {
-			return fmt.Errorf("%w: table key %s contains %s", ErrManifestMismatch, table, tm.Table)
-		}
-
-		path := filepath.Join(dir, tm.Path)
-
-		bytes, sum, err := HashFile(path)
-		if err != nil {
+		if err := verifyTableManifest(dir, tables, table); err != nil {
 			return err
 		}
+	}
 
-		if bytes != tm.Bytes || sum != tm.SHA256 {
-			return fmt.Errorf("%w: table %s checksum or size changed", ErrManifestMismatch, table)
-		}
+	return nil
+}
 
-		rows, err := countRows(path, table)
-		if err != nil {
-			return err
-		}
+func verifyTableManifest(dir string, tables map[string]TableManifest, table string) error {
+	tm, ok := tables[table]
+	if !ok {
+		return fmt.Errorf("%w: missing table %s", ErrManifestMismatch, table)
+	}
 
-		if rows != tm.Rows {
-			return fmt.Errorf(
-				"%w: table %s row count changed decoded=%d expected=%d",
-				ErrManifestMismatch,
-				table,
-				rows,
-				tm.Rows,
-			)
-		}
+	if tm.Table != table {
+		return fmt.Errorf("%w: table key %s contains %s", ErrManifestMismatch, table, tm.Table)
+	}
+
+	path := filepath.Join(dir, tm.Path)
+
+	bytes, sum, err := HashFile(path)
+	if err != nil {
+		return fmt.Errorf("%w: table %s: %w", ErrManifestMismatch, table, err)
+	}
+
+	if bytes != tm.Bytes || sum != tm.SHA256 {
+		return fmt.Errorf("%w: table %s checksum or size changed", ErrManifestMismatch, table)
 	}
 
 	return nil
@@ -210,45 +193,6 @@ func HashFile(path string) (int64, string, error) {
 	}
 
 	return n, hex.EncodeToString(h.Sum(nil)), nil
-}
-
-func countRows(path string, table string) (uint64, error) { //nolint:gocyclo,cyclop
-	switch table {
-	case TableDirs:
-		return countDecodedRows[DirRow](path, table)
-	case TableFiles:
-		return countDecodedRows[FileRow](path, table)
-	case TableDirFacts:
-		return countDecodedRows[DirFactRow](path, table)
-	case TableDirFilterAgeAll:
-		return countDecodedRows[DirFilterAgeAllRow](path, table)
-	case TableDirFilterAll:
-		return countDecodedRows[DirFilterAllRow](path, table)
-	case TableSchema3SnapshotSets:
-		return countDecodedRows[Schema3SnapshotSetRow](path, table)
-	case TableActiveVirtualDirs:
-		return countDecodedRows[ActiveVirtualDirRow](path, table)
-	case TableActiveVirtualSummaries:
-		return countDecodedRows[ActiveVirtualSummaryRow](path, table)
-	case TableActiveVirtualFilterAll:
-		return countDecodedRows[ActiveVirtualFilterAllRow](path, table)
-	case TableActiveVirtualChildren:
-		return countDecodedRows[ActiveVirtualChildRow](path, table)
-	case TableActiveVirtualSets:
-		return countDecodedRows[ActiveVirtualSetRow](path, table)
-	case TableDirProjectionSets:
-		return countDecodedRows[DirProjectionSetRow](path, table)
-	case TableBasedirsHistory:
-		return countDecodedRows[BasedirsHistoryRow](path, table)
-	case TableBasedirsGroupUsage:
-		return countDecodedRows[BasedirsGroupUsageRow](path, table)
-	case TableBasedirsUserUsage:
-		return countDecodedRows[BasedirsUserUsageRow](path, table)
-	case TableBasedirsGroupSubdirs, TableBasedirsUserSubdirs:
-		return countDecodedRows[BasedirsSubdirRow](path, table)
-	default:
-		return 0, fmt.Errorf("%w: %q", errUnknownTable, table)
-	}
 }
 
 type Manifest struct {
@@ -832,6 +776,8 @@ func (s *Set) TableManifests() map[string]TableManifest {
 }
 
 func decodeRowsFromPath[T any](path string, table string, fn func(T) error) error {
+	notifyDecodeRowsFromPath(table)
+
 	fh, err := os.Open(path)
 	if err != nil {
 		return err
@@ -861,6 +807,12 @@ func decodeRowsFromPath[T any](path string, table string, fn func(T) error) erro
 		if err := fn(row); err != nil {
 			return err
 		}
+	}
+}
+
+func notifyDecodeRowsFromPath(table string) {
+	if decodeRowsFromPathHook != nil {
+		decodeRowsFromPathHook(table)
 	}
 }
 
