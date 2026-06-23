@@ -1009,6 +1009,41 @@ func buildSummariseSpoolFixtureForTest(
 	return spoolDir, manifest
 }
 
+func readSummariseSpoolBuildReport(t *testing.T, spoolDir string) perfreport.Report {
+	t.Helper()
+
+	data, err := os.ReadFile(summariseSpoolBuildReportPath(spoolDir))
+	So(err, ShouldBeNil)
+
+	var report perfreport.Report
+	So(json.Unmarshal(data, &report), ShouldBeNil)
+
+	return report
+}
+
+func summariseSpoolBuildReportOperationForTest(report perfreport.Report) perfreport.Operation {
+	for _, op := range report.Operations {
+		if op.Name == "summarise_build_total" {
+			return op
+		}
+	}
+
+	So("summarise_build_total", ShouldEqual, "missing")
+
+	return perfreport.Operation{}
+}
+
+func uint64InputForTest(inputs map[string]any, key string) uint64 {
+	switch value := inputs[key].(type) {
+	case float64:
+		return uint64(value)
+	case uint64:
+		return value
+	default:
+		return 0
+	}
+}
+
 func writeContiguousSubtreeRevisitSpoolFixtureStats(t *testing.T, statsPath string, updatedAt time.Time) {
 	t.Helper()
 
@@ -1529,6 +1564,16 @@ func TestSummariseClickHouseSpoolRows(t *testing.T) {
 		So(manifest.Tables[chspool.TableDirs].Rows, ShouldBeGreaterThan, uint64(0))
 		So(openCalls, ShouldEqual, 1)
 		So(dirbuildCalls, ShouldEqual, 0)
+
+		report := readSummariseSpoolBuildReport(t, summariseClickHouseSpoolDir(fixture.outputDir))
+		op := summariseSpoolBuildReportOperationForTest(report)
+		So(op.Inputs["input_shape"], ShouldEqual, "contiguous")
+		So(op.Inputs["build_path"], ShouldEqual, "contiguous_fast_path")
+		So(op.Inputs["completed"], ShouldEqual, true)
+		So(uint64InputForTest(op.Inputs, "build_phase_bytes_written"), ShouldEqual, uint64(0))
+		So(uint64InputForTest(op.Inputs, "spool_bytes"), ShouldBeGreaterThan, uint64(0))
+		So(uint64InputForTest(op.Inputs, "row_cap"), ShouldBeGreaterThan, uint64(0))
+		So(report.MaxRSSBytes, ShouldBeGreaterThan, uint64(0))
 	})
 
 	Convey("A3.2 non-contiguous spool build removes stale partial rows and matches contiguous row counts", t, func() {
@@ -1553,6 +1598,9 @@ func TestSummariseClickHouseSpoolRows(t *testing.T) {
 		So(os.WriteFile(stalePartial, []byte("discard me"), 0o600), ShouldBeNil)
 
 		originalDirbuild := buildSummariseSpoolDirbuild
+		buildScratchPath := filepath.Join(filepath.Dir(stalePartial), "dirbuild-scratch.tmp")
+		buildScratch := []byte("scratch proof")
+
 		buildSummariseSpoolDirbuild = func(
 			open func() (io.ReadCloser, error),
 			mountPath string,
@@ -1562,6 +1610,7 @@ func TestSummariseClickHouseSpoolRows(t *testing.T) {
 		) error {
 			_, err := os.Stat(stalePartial)
 			So(errors.Is(err, os.ErrNotExist), ShouldBeTrue)
+			So(os.WriteFile(buildScratchPath, buildScratch, 0o600), ShouldBeNil)
 
 			return originalDirbuild(open, mountPath, database, refTime, files)
 		}
@@ -1569,6 +1618,13 @@ func TestSummariseClickHouseSpoolRows(t *testing.T) {
 		_, nonContiguousManifest := buildSummariseSpoolFixtureForTest(t, nonContiguous)
 
 		assertSummariseManifestTableRowsMatch(contiguousManifest, nonContiguousManifest)
+
+		report := readSummariseSpoolBuildReport(t, summariseClickHouseSpoolDir(nonContiguous.outputDir))
+		op := summariseSpoolBuildReportOperationForTest(report)
+		So(op.Inputs["input_shape"], ShouldEqual, "non_contiguous")
+		So(op.Inputs["build_path"], ShouldEqual, "dirbuild")
+		So(op.Inputs["completed"], ShouldEqual, true)
+		So(uint64InputForTest(op.Inputs, "build_phase_bytes_written"), ShouldEqual, uint64(len(buildScratch)))
 	})
 
 	Convey("A3.4 non-contiguity regression fixtures match their contiguous spool rows", t, func() {

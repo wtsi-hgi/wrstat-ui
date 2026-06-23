@@ -398,6 +398,9 @@ func TestE3PerfDocumentedCommandFlags(t *testing.T) {
 			"nav-index", "base-url", "repeat", "warmup", "paths", "where-dir",
 			"tree-gids", "tree-uids", "tree-types", "json",
 		)
+		assertDocumentedLongFlags(chPerfA5BuildGateCmd,
+			"scratch127-report", "t283-report", "healthy-before-report", "healthy-after-report", "json",
+		)
 	})
 
 	Convey("E3 bolt-perf import/query expose documented long flags", t, func() {
@@ -495,6 +498,10 @@ func resetClickHousePerfConnectionForTest() {
 	origRestGroups := chPerf.restGroups
 	origRestUsers := chPerf.restUsers
 	origRestTypes := chPerf.restTypes
+	origA5Scratch127Report := chPerf.a5Scratch127Report
+	origA5T283Report := chPerf.a5T283Report
+	origA5HealthyBeforeReport := chPerf.a5HealthyBeforeReport
+	origA5HealthyAfterReport := chPerf.a5HealthyAfterReport
 	origEnvDSN, hadEnvDSN := os.LookupEnv(envClickhouseDSN)
 	origEnvDB, hadEnvDB := os.LookupEnv(envClickhouseDatabase)
 
@@ -503,6 +510,10 @@ func resetClickHousePerfConnectionForTest() {
 	chPerf.mountpoints = ""
 	chPerf.inputDir = ""
 	chPerf.navIndex = false
+	chPerf.a5Scratch127Report = ""
+	chPerf.a5T283Report = ""
+	chPerf.a5HealthyBeforeReport = ""
+	chPerf.a5HealthyAfterReport = ""
 	_ = os.Unsetenv(envClickhouseDSN)
 	_ = os.Unsetenv(envClickhouseDatabase)
 
@@ -525,6 +536,10 @@ func resetClickHousePerfConnectionForTest() {
 		chPerf.restGroups = origRestGroups
 		chPerf.restUsers = origRestUsers
 		chPerf.restTypes = origRestTypes
+		chPerf.a5Scratch127Report = origA5Scratch127Report
+		chPerf.a5T283Report = origA5T283Report
+		chPerf.a5HealthyBeforeReport = origA5HealthyBeforeReport
+		chPerf.a5HealthyAfterReport = origA5HealthyAfterReport
 
 		restoreEnv(envClickhouseDSN, origEnvDSN, hadEnvDSN)
 		restoreEnv(envClickhouseDatabase, origEnvDB, hadEnvDB)
