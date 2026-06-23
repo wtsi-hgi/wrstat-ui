@@ -437,15 +437,11 @@ func recordsByPath(records []db.RecordDGUTA) map[string]comparableRecord {
 
 func recordHasGUTA(
 	record comparableRecord,
-	gid uint32,
-	uid uint32,
 	ft db.DirGUTAFileType,
-	age db.DirGUTAge,
-	count uint64,
 	size uint64,
 ) bool {
 	for _, guta := range record.gutas {
-		if comparableGUTAMatches(guta, gid, uid, ft, age, count, size) {
+		if comparableGUTAMatches(guta, 20, 10, ft, db.DGUTAgeAll, 1, size) {
 			return true
 		}
 	}
@@ -509,8 +505,8 @@ func TestBuild(t *testing.T) {
 		So(other.parentID, ShouldEqual, byPath["/mnt/"].dirID)
 		So(child.childFileCount, ShouldEqual, uint64(1))
 		So(other.childFileCount, ShouldEqual, uint64(1))
-		So(recordHasGUTA(child, 20, 10, db.DGUTAFileTypeText, db.DGUTAgeAll, 1, 11), ShouldBeTrue)
-		So(recordHasGUTA(other, 20, 10, db.DGUTAFileTypeText, db.DGUTAgeAll, 1, 7), ShouldBeTrue)
+		So(recordHasGUTA(child, db.DGUTAFileTypeText, 11), ShouldBeTrue)
+		So(recordHasGUTA(other, db.DGUTAFileTypeText, 7), ShouldBeTrue)
 	})
 
 	Convey("A2.3 cross-subdir hardlinks are counted once in the rolled-up parent", t, func() {
@@ -527,7 +523,7 @@ func TestBuild(t *testing.T) {
 		So(err, ShouldBeNil)
 
 		parent := recordsByPath(records)["/parent/"]
-		So(recordHasGUTA(parent, 20, 10, db.DGUTAFileTypeBam, db.DGUTAgeAll, 1, 100), ShouldBeTrue)
+		So(recordHasGUTA(parent, db.DGUTAFileTypeBam, 100), ShouldBeTrue)
 	})
 
 	Convey("A2.4 uint32 preorder overflow is returned as ErrTooManyDirs", t, func() {
@@ -568,6 +564,47 @@ func TestBuild(t *testing.T) {
 		So(mount.dirID, ShouldEqual, expectedByPath[mountPath+"/"].dirID)
 		So(mount.parentID, ShouldEqual, expectedByPath[mountPath+"/"].parentID)
 		So(gotByPath["/"].subtreeEnd, ShouldEqual, expectedByPath["/"].subtreeEnd)
+	})
+
+	Convey("A2.6 file rows imply missing leaf and intermediate directory facts", t, func() {
+		input := strings.Join([]string{
+			statsRow("/", stats.DirType, 4096, dirbuildRefUnix, dirbuildRefUnix, 2000, 2),
+			statsRow("/project/", stats.DirType, 4096, dirbuildRefUnix, dirbuildRefUnix, 2001, 2),
+			statsRow("/project/missing/leaf/file.txt", stats.FileType, 37, dirbuildRefUnix-30, dirbuildRefUnix-20, 3001, 1),
+		}, "")
+
+		expected, err := summariseWithDirGUTA(input, "/")
+		So(err, ShouldBeNil)
+
+		got, err := buildWithDirBuild(input, "/")
+		So(err, ShouldBeNil)
+
+		expectedByPath := recordsByPath(expected)
+		gotByPath := recordsByPath(got)
+
+		project, ok := gotByPath["/project/"]
+		So(ok, ShouldBeTrue)
+		missing, ok := gotByPath["/project/missing/"]
+		So(ok, ShouldBeTrue)
+		leaf, ok := gotByPath["/project/missing/leaf/"]
+		So(ok, ShouldBeTrue)
+
+		expectedProject := expectedByPath["/project/"]
+		expectedMissing := expectedByPath["/project/missing/"]
+		expectedLeaf := expectedByPath["/project/missing/leaf/"]
+
+		So(project.children, ShouldResemble, expectedProject.children)
+		So(project.childCount, ShouldEqual, expectedProject.childCount)
+		So(project.childFileCount, ShouldEqual, expectedProject.childFileCount)
+		So(missing.children, ShouldResemble, expectedMissing.children)
+		So(missing.childCount, ShouldEqual, expectedMissing.childCount)
+		So(missing.childFileCount, ShouldEqual, expectedMissing.childFileCount)
+		So(leaf.parentID, ShouldEqual, expectedLeaf.parentID)
+		So(leaf.childCount, ShouldEqual, expectedLeaf.childCount)
+		So(leaf.childFileCount, ShouldEqual, expectedLeaf.childFileCount)
+		So(recordHasGUTA(leaf, db.DGUTAFileTypeText, 37), ShouldBeTrue)
+		So(recordHasGUTA(missing, db.DGUTAFileTypeText, 37), ShouldBeTrue)
+		So(recordHasGUTA(project, db.DGUTAFileTypeText, 37), ShouldBeTrue)
 	})
 }
 

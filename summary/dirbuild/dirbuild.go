@@ -154,11 +154,13 @@ func cleanDirPath(path string) string {
 func collectDirectoryRows(open func() (io.ReadCloser, error), paths *pathBuilder) error {
 	return withStatsReader(open, func(reader io.Reader) error {
 		return scanRawStats(reader, func(row rawStatsRow) error {
-			if !row.isDir() {
+			if row.isDir() {
+				paths.dir(row.dirKey())
+
 				return nil
 			}
 
-			paths.dir(row.dirKey())
+			paths.dir(row.leafDirKey())
 
 			return nil
 		})
