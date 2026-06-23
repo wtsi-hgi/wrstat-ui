@@ -44,12 +44,13 @@ import (
 )
 
 const (
-	schemaBootstrapLockDirName    = "wrstat-ui"
-	schemaBootstrapLockFilePrefix = "clickhouse-schema-bootstrap-"
-	schemaBootstrapLockRetryDelay = 10 * time.Millisecond
-	schemaBootstrapLockFileMode   = 0o600
-	schemaBootstrapLockDirMode    = 0o700
-	minSchemaBootstrapTimeout     = defaultQueryTimeout
+	schemaBootstrapLockDirName     = "wrstat-ui"
+	schemaBootstrapLockFilePrefix  = "clickhouse-schema-bootstrap-"
+	schemaBootstrapLockRetryDelay  = 10 * time.Millisecond
+	schemaBootstrapLockFileMode    = 0o600
+	schemaBootstrapLockDirMode     = 0o700
+	minSchemaBootstrapTimeout      = defaultQueryTimeout
+	schemaBootstrapLockWaitTimeout = 10 * time.Minute
 )
 
 type schemaBootstrapLock struct {
@@ -158,14 +159,37 @@ func ensureSchemaWithBootstrapLock(
 		}
 	}()
 
-	if err = lock.acquire(ctx); err != nil {
+	lockCtx, lockCancel := schemaBootstrapContext(ctx, schemaBootstrapLockWaitTimeout)
+	defer lockCancel()
+
+	if err = lock.acquire(lockCtx); err != nil {
 		return err
 	}
 
-	queryCtx, cancel := queryContext(ctx, schemaBootstrapTimeout(queryTO))
+	queryCtx, cancel := schemaBootstrapContext(ctx, schemaBootstrapTimeout(queryTO))
 	defer cancel()
 
 	return ensureSchema(queryCtx, execer)
+}
+
+func schemaBootstrapContext(parent context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	if parent == nil {
+		parent = context.Background()
+	}
+
+	// Summarise/import callers can pass per-query deadline contexts; schema
+	// bootstrap needs a fresh bounded window while still honouring explicit cancels.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), timeout)
+	stop := context.AfterFunc(parent, func() {
+		if errors.Is(parent.Err(), context.Canceled) {
+			cancel()
+		}
+	})
+
+	return ctx, func() {
+		stop()
+		cancel()
+	}
 }
 
 func schemaBootstrapTimeout(queryTO time.Duration) time.Duration {

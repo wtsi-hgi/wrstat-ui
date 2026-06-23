@@ -92,6 +92,83 @@ const (
 	errBootstrapTestUnexpectedScanDestinationN bootstrapTestError = "unexpected scan destination count"
 )
 
+func TestSchemaBootstrapLockWaitContext(t *testing.T) {
+	Convey("schema bootstrap lock wait has its own bounded timeout", t, func() {
+		t.Setenv("XDG_CACHE_HOME", t.TempDir())
+
+		const database = "wrstat_schema_lock_wait_bound"
+
+		opts := &ch.Options{
+			Addr: []string{"schema-lock-wait-bound:9000"},
+			Auth: ch.Auth{Database: database},
+		}
+		lock, err := newSchemaBootstrapLock(opts, database)
+		So(err, ShouldBeNil)
+		So(lock.acquire(context.Background()), ShouldBeNil)
+
+		Reset(func() {
+			So(lock.release(), ShouldBeNil)
+		})
+
+		contender, err := newSchemaBootstrapLock(opts, database)
+
+		So(err, ShouldBeNil)
+		defer func() { So(contender.release(), ShouldBeNil) }()
+
+		waitCtx, cancel := schemaBootstrapContext(context.Background(), 30*time.Millisecond)
+		defer cancel()
+
+		start := time.Now()
+		err = contender.acquire(waitCtx)
+
+		So(errors.Is(err, context.DeadlineExceeded), ShouldBeTrue)
+		So(time.Since(start), ShouldBeLessThan, 500*time.Millisecond)
+	})
+
+	Convey("schema bootstrap lock wait honours explicit cancellation", t, func() {
+		t.Setenv("XDG_CACHE_HOME", t.TempDir())
+
+		const database = "wrstat_schema_lock_wait_cancel"
+
+		opts := &ch.Options{
+			Addr: []string{"schema-lock-wait-cancel:9000"},
+			Auth: ch.Auth{Database: database},
+		}
+		lock, err := newSchemaBootstrapLock(opts, database)
+		So(err, ShouldBeNil)
+		So(lock.acquire(context.Background()), ShouldBeNil)
+
+		Reset(func() {
+			So(lock.release(), ShouldBeNil)
+		})
+
+		contender, err := newSchemaBootstrapLock(opts, database)
+
+		So(err, ShouldBeNil)
+		defer func() { So(contender.release(), ShouldBeNil) }()
+
+		parentCtx, parentCancel := context.WithCancel(context.Background())
+
+		waitCtx, cancel := schemaBootstrapContext(parentCtx, time.Second)
+		defer cancel()
+
+		done := make(chan error, 1)
+		go func() {
+			done <- contender.acquire(waitCtx)
+		}()
+
+		time.Sleep(30 * time.Millisecond)
+		parentCancel()
+
+		select {
+		case err := <-done:
+			So(errors.Is(err, context.Canceled), ShouldBeTrue)
+		case <-time.After(500 * time.Millisecond):
+			t.Fatal("timed out waiting for explicit cancellation")
+		}
+	})
+}
+
 func (e bootstrapTestError) Error() string {
 	return string(e)
 }
@@ -110,6 +187,66 @@ func (r bootstrapTestRow) Scan(...any) error {
 
 func (r bootstrapTestRow) ScanStruct(any) error {
 	return r.err
+}
+
+func TestEnsureSchemaWithBootstrapLockWaitsPastCallerQueryDeadline(t *testing.T) {
+	Convey("ensureSchemaWithBootstrapLock waits past the caller query deadline for the schema lock", t, func() {
+		t.Setenv("XDG_CACHE_HOME", t.TempDir())
+
+		const database = "wrstat_schema_lock_wait_regression"
+
+		opts := &ch.Options{
+			Addr: []string{"schema-lock-wait-regression:9000"},
+			Auth: ch.Auth{Database: database},
+		}
+		lock, err := newSchemaBootstrapLock(opts, database)
+		So(err, ShouldBeNil)
+		So(lock.acquire(context.Background()), ShouldBeNil)
+
+		lockReleased := false
+
+		Reset(func() {
+			if !lockReleased {
+				So(lock.release(), ShouldBeNil)
+			}
+		})
+
+		const queryTO = 25 * time.Millisecond
+
+		ctx, cancel := context.WithTimeout(context.Background(), queryTO)
+		defer cancel()
+
+		conn := newSchemaBootstrapTestConn()
+		done := make(chan error, 1)
+
+		go func() {
+			done <- ensureSchemaWithBootstrapLock(ctx, conn, opts, database, queryTO)
+		}()
+
+		time.Sleep(3 * queryTO)
+		So(errors.Is(ctx.Err(), context.DeadlineExceeded), ShouldBeTrue)
+		So(lock.release(), ShouldBeNil)
+
+		lockReleased = true
+
+		select {
+		case err := <-done:
+			So(err, ShouldBeNil)
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for schema bootstrap after lock release")
+		}
+
+		So(conn.executedQueryCount(), ShouldBeGreaterThan, 0)
+	})
+}
+
+func newSchemaBootstrapTestConn() *schemaBootstrapTestConn {
+	store := newSchemaVersionTestStore()
+	store.versionRows = 1
+
+	return &schemaBootstrapTestConn{
+		schemaVersionTestConn: &schemaVersionTestConn{store: store},
+	}
 }
 
 func tableKeys(ctx context.Context, t *testing.T, conn ch.Conn, database, table string) (string, string) {
@@ -1241,6 +1378,32 @@ func waitForSchemaVersionBootstrapRelease(t *testing.T, syncDir string) {
 
 func schemaVersionBootstrapReleasePath(syncDir string) string {
 	return filepath.Join(syncDir, schemaVersionBootstrapReleaseFile)
+}
+
+type schemaBootstrapTestConn struct {
+	*schemaVersionTestConn
+
+	mu      sync.Mutex
+	queries []string
+}
+
+func (c *schemaBootstrapTestConn) Exec(_ context.Context, query string, _ ...any) error {
+	c.mu.Lock()
+	c.queries = append(c.queries, query)
+	c.mu.Unlock()
+
+	if query == insertSchemaVersionStmt {
+		c.store.insertVersion()
+	}
+
+	return nil
+}
+
+func (c *schemaBootstrapTestConn) executedQueryCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return len(c.queries)
 }
 
 type schemaVersionBootstrapHelper struct {
