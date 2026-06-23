@@ -1298,7 +1298,6 @@ func TestClickHouseSummariseSpoolLoader(t *testing.T) {
 				time.Date(2026, 6, 18, 10, 0, 0, 0, time.UTC),
 				6,
 				"",
-				"",
 				true,
 			)
 
@@ -1308,30 +1307,31 @@ func TestClickHouseSummariseSpoolLoader(t *testing.T) {
 			So(logs, ShouldContainSubstring, "full-filter row amplification")
 			So(logs, ShouldContainSubstring, `"dir_filter_amplification_vs_dir_facts":6`)
 			So(logs, ShouldContainSubstring, `"child_filter_amplification_vs_dir_facts":6`)
+			So(logs, ShouldNotContainSubstring, "waiver")
 		})
 
-	Convey("C2 summarise spool load hard-fails amplification above 10 before publish without waiver",
+	Convey("C2 summarise spool load warns and publishes when full-filter amplification exceeds 10",
 		t,
 		func() {
-			_, conn, logs, err := runSummariseSpoolAmplificationLoadForTest(
+			manifest, conn, logs, err := runSummariseSpoolAmplificationLoadForTest(
 				t,
 				time.Date(2026, 6, 18, 10, 30, 0, 0, time.UTC),
 				11,
-				"",
 				summariseSpoolPreviousSnapshotID,
 				true,
 			)
 
-			So(errors.Is(err, ErrFilterAmplificationWaiverRequired), ShouldBeTrue)
-			So(conn.activePublishes(), ShouldEqual, 0)
-			So(conn.eventIndex("publish"), ShouldEqual, -1)
-			So(conn.publishedSID, ShouldEqual, summariseSpoolPreviousSnapshotID)
+			So(err, ShouldBeNil)
+			So(conn.activePublishes(), ShouldEqual, 1)
+			So(conn.eventIndex("publish"), ShouldBeGreaterThanOrEqualTo, 0)
+			So(conn.publishedSID, ShouldEqual, manifest.SnapshotID)
 			So(logs, ShouldContainSubstring, `"level":"WARN"`)
 			So(logs, ShouldContainSubstring, `"dir_filter_amplification_vs_dir_facts":11`)
 			So(logs, ShouldContainSubstring, `"child_filter_amplification_vs_dir_facts":11`)
+			So(logs, ShouldNotContainSubstring, "waiver")
 		})
 
-	Convey("C2 summarise spool load cannot let older normal table stats mask bad staged amplification",
+	Convey("C2 summarise spool load uses staged amplification evidence when publishing",
 		t,
 		func() {
 			spoolDir := filepath.Join(t.TempDir(), "spool")
@@ -1349,50 +1349,27 @@ func TestClickHouseSummariseSpoolLoader(t *testing.T) {
 			restoreLogs := captureSummariseSpoolAmplificationLogs(&logs)
 			Reset(restoreLogs)
 
-			restoreWaiver := setSummariseSpoolAmplificationWaiverForTest("")
-			Reset(restoreWaiver)
-
 			loader, err := newSummariseSpoolLoader(Config{Database: testDatabaseName}, conn, spoolDir, manifest, nil)
 			So(err, ShouldBeNil)
 
 			err = loader.load(context.Background())
 
-			So(errors.Is(err, ErrFilterAmplificationWaiverRequired), ShouldBeTrue)
-			So(conn.activePublishes(), ShouldEqual, 0)
-			So(conn.eventIndex("publish"), ShouldEqual, -1)
-			So(conn.publishedSID, ShouldEqual, summariseSpoolPreviousSnapshotID)
+			So(err, ShouldBeNil)
+			So(conn.activePublishes(), ShouldEqual, 1)
+			So(conn.eventIndex("publish"), ShouldBeGreaterThanOrEqualTo, 0)
+			So(conn.publishedSID, ShouldEqual, manifest.SnapshotID)
 			So(logs.String(), ShouldContainSubstring, `"dir_filter_amplification_vs_dir_facts":11`)
 			So(logs.String(), ShouldContainSubstring, `"child_filter_amplification_vs_dir_facts":11`)
+			So(logs.String(), ShouldNotContainSubstring, "waiver")
 		})
 
-	Convey("C2 summarise spool load completes amplification above 10 with waiver",
-		t,
-		func() {
-			manifest, conn, logs, err := runSummariseSpoolAmplificationLoadForTest(
-				t,
-				time.Date(2026, 6, 18, 11, 0, 0, 0, time.UTC),
-				11,
-				"1",
-				"",
-				true,
-			)
-
-			So(err, ShouldBeNil)
-			So(conn.publishedSID, ShouldEqual, manifest.SnapshotID)
-			So(logs, ShouldContainSubstring, `"level":"WARN"`)
-			So(logs, ShouldContainSubstring, `"waiver":true`)
-			So(logs, ShouldContainSubstring, `"dir_filter_amplification_vs_dir_facts":11`)
-			So(logs, ShouldContainSubstring, `"child_filter_amplification_vs_dir_facts":11`)
-		})
-
-	Convey("C2 summarise spool load allows t283-shaped per-table density without waiver",
+	Convey("C2 summarise spool load allows t283-shaped per-table density",
 		t,
 		func() {
 			manifest, conn, _, err := runSummariseSpoolAmplificationLoadForTest(
 				t,
 				time.Date(2026, 6, 18, 11, 30, 0, 0, time.UTC),
 				6.9,
-				"",
 				"",
 				false,
 			)
@@ -2890,7 +2867,6 @@ func runSummariseSpoolAmplificationLoadForTest(
 	t *testing.T,
 	updatedAt time.Time,
 	ratio float64,
-	waiver string,
 	previousSID string,
 	captureLogs bool,
 ) (*chspool.Manifest, *summariseSpoolLoaderSpyConn, string, error) {
@@ -2900,9 +2876,6 @@ func runSummariseSpoolAmplificationLoadForTest(
 	manifest := writeSummariseSpoolLoaderAmplifiedSchema3Spool(spoolDir, updatedAt, ratio)
 	conn := newSummariseSpoolLoaderSpyConn(manifest)
 	conn.publishedSID = previousSID
-
-	restoreWaiver := setSummariseSpoolAmplificationWaiverForTest(waiver)
-	Reset(restoreWaiver)
 
 	var logs bytes.Buffer
 	if captureLogs {
@@ -3047,26 +3020,6 @@ func summariseSpoolLoaderManifestForSet(
 		MountPath: testMountPath, SnapshotID: sid, UpdatedAt: updatedAt.UTC().Format(time.RFC3339Nano),
 		SchemaMarker: summariseSpoolLoaderSchemaMarker, Tables: set.TableManifests(),
 		CompletedAt: time.Now().UTC().Format(time.RFC3339Nano),
-	}
-}
-
-func setSummariseSpoolAmplificationWaiverForTest(value string) func() {
-	orig, ok := os.LookupEnv(summariseSpoolFilterAmplificationWaiverEnv)
-
-	if value == "" {
-		So(os.Unsetenv(summariseSpoolFilterAmplificationWaiverEnv), ShouldBeNil)
-	} else {
-		So(os.Setenv(summariseSpoolFilterAmplificationWaiverEnv, value), ShouldBeNil)
-	}
-
-	return func() {
-		if ok {
-			So(os.Setenv(summariseSpoolFilterAmplificationWaiverEnv, orig), ShouldBeNil)
-
-			return
-		}
-
-		So(os.Unsetenv(summariseSpoolFilterAmplificationWaiverEnv), ShouldBeNil)
 	}
 }
 

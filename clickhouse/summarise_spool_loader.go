@@ -31,7 +31,6 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
-	"os"
 	"slices"
 	"sort"
 	"strings"
@@ -58,9 +57,7 @@ const (
 	spoolLoadTableStatsUnavailable                 = "unavailable"
 	spoolLoadTableStatsNotRequested                = "not_requested"
 	clickHouseInsufficientPrivilegeCode            = 497
-	summariseSpoolFilterAmplificationWaiverEnv     = "WRSTAT_FILTER_AMPLIFICATION_WAIVER"
 	summariseSpoolFilterAmplificationWarnThreshold = 5.0
-	summariseSpoolFilterAmplificationHardThreshold = 10.0
 
 	selectReadyActiveVirtualSetCountsQuery = "SELECT summary_rows, filter_rows, child_rows " +
 		"FROM wrstat_active_virtual_sets WHERE active_set_id = ? AND ready = 1 LIMIT 1"
@@ -79,11 +76,6 @@ const (
 )
 
 var (
-	// ErrFilterAmplificationWaiverRequired is returned when full-filter row
-	// amplification exceeds the hard threshold without an explicit waiver.
-	ErrFilterAmplificationWaiverRequired = errors.New(
-		"clickhouse: full-filter row amplification requires waiver",
-	)
 	// ErrFilterAmplificationStatsUnavailable is returned when the mandatory
 	// pre-publish amplification gate cannot load or derive row-count evidence.
 	ErrFilterAmplificationStatsUnavailable = errors.New(
@@ -573,24 +565,9 @@ func summariseSpoolCheckFullFilterAmplification(
 		return nil
 	}
 
-	waived := summariseSpoolFilterAmplificationWaived()
-	summariseSpoolLogFullFilterAmplification(parent, manifest, amplification, waived)
+	summariseSpoolLogFullFilterAmplification(parent, manifest, amplification)
 
-	if amplification.maxVsDirFacts() <= summariseSpoolFilterAmplificationHardThreshold || waived {
-		return nil
-	}
-
-	return fmt.Errorf(
-		"%w: mount_path=%s snapshot_id=%s dir_filter_amplification_vs_dir_facts=%.3g "+
-			"child_filter_amplification_vs_dir_facts=%.3g threshold=%.3g waiver_env=%s",
-		ErrFilterAmplificationWaiverRequired,
-		manifest.MountPath,
-		manifest.SnapshotID,
-		amplification.dirVsDirFacts,
-		amplification.childVsDirFacts,
-		summariseSpoolFilterAmplificationHardThreshold,
-		summariseSpoolFilterAmplificationWaiverEnv,
-	)
+	return nil
 }
 
 func (l *summariseSpoolLoader) loadScopedFullFilterAmplificationStats(
@@ -725,7 +702,6 @@ func summariseSpoolLogFullFilterAmplification(
 	parent context.Context,
 	manifest *chspool.Manifest,
 	amplification summariseSpoolFullFilterAmplification,
-	waived bool,
 ) {
 	slog.WarnContext(loadParentContext(parent), "clickhouse full-filter row amplification exceeds warning threshold",
 		"mount_path", manifest.MountPath,
@@ -739,9 +715,6 @@ func summariseSpoolLogFullFilterAmplification(
 		"child_filter_amplification_vs_catalog", amplification.childVsCatalog,
 		"combined_amplification_vs_dir_facts", amplification.dirVsDirFacts+amplification.childVsDirFacts,
 		"warn_threshold", summariseSpoolFilterAmplificationWarnThreshold,
-		"hard_threshold", summariseSpoolFilterAmplificationHardThreshold,
-		"waiver", waived,
-		"waiver_env", summariseSpoolFilterAmplificationWaiverEnv,
 	)
 }
 
@@ -772,15 +745,6 @@ func summariseSpoolRowAmplification(rows uint64, baselineRows uint64) float64 {
 	}
 
 	return float64(rows) / float64(baselineRows)
-}
-
-func summariseSpoolFilterAmplificationWaived() bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv(summariseSpoolFilterAmplificationWaiverEnv))) {
-	case "1", "true", "yes", "y", "on":
-		return true
-	default:
-		return false
-	}
 }
 
 func decodeSpoolActiveSetIDs[T any](
