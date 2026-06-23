@@ -421,6 +421,7 @@ func snapshotSummariseGlobals() func() {
 	origSummariseSpoolNow := summariseSpoolNow
 	origSummariseSpoolDirGUTANow := summariseSpoolDirGUTANow
 	origOpenSummariseSpoolStats := openSummariseSpoolStats
+	origStatSummariseSpoolStats := statSummariseSpoolStats
 	origBuildSummariseSpoolDirbuild := buildSummariseSpoolDirbuild
 
 	return func() {
@@ -444,6 +445,7 @@ func snapshotSummariseGlobals() func() {
 		summariseSpoolNow = origSummariseSpoolNow
 		summariseSpoolDirGUTANow = origSummariseSpoolDirGUTANow
 		openSummariseSpoolStats = origOpenSummariseSpoolStats
+		statSummariseSpoolStats = origStatSummariseSpoolStats
 		buildSummariseSpoolDirbuild = origBuildSummariseSpoolDirbuild
 	}
 }

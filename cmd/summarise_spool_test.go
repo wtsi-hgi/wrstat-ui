@@ -147,6 +147,15 @@ func TestSummariseFileIngestDirIDPath(t *testing.T) {
 	})
 }
 
+type summariseSpoolSizedFileInfo struct {
+	os.FileInfo
+	size int64
+}
+
+func (i summariseSpoolSizedFileInfo) Size() int64 {
+	return i.size
+}
+
 type summariseSpoolSwitchPlanForTest struct {
 	HasPrevious         bool   `json:"has_previous"`
 	PreviousSnapshotID  string `json:"previous_snapshot_id"`
@@ -1589,6 +1598,67 @@ func TestSummariseClickHouseSpoolRows(t *testing.T) {
 		So(uint64InputForTest(op.Inputs, "spool_bytes"), ShouldBeGreaterThan, uint64(0))
 		So(uint64InputForTest(op.Inputs, "row_cap"), ShouldBeGreaterThan, uint64(0))
 		So(report.MaxRSSBytes, ShouldBeGreaterThan, uint64(0))
+	})
+
+	Convey("A3.1b large spool build goes straight to dirbuild", t, func() {
+		fixture := newSummariseActiveSnapshotFixture(t)
+		fixture.writeValidStats(t)
+
+		restore := snapshotSummariseGlobals()
+		Reset(restore)
+
+		configureSummariseActiveSnapshotTest(fixture.outputDir, false)
+
+		originalStat := statSummariseSpoolStats
+		statSummariseSpoolStats = func(path string) (os.FileInfo, error) {
+			info, err := originalStat(path)
+			if err != nil {
+				return nil, err
+			}
+
+			if path == fixture.statsPath {
+				return summariseSpoolSizedFileInfo{
+					FileInfo: info,
+					size:     summariseSpoolDirbuildFirstBytes + 1,
+				}, nil
+			}
+
+			return info, nil
+		}
+
+		openCalls := 0
+		dirbuildCalls := 0
+		originalOpen := openSummariseSpoolStats
+		originalDirbuild := buildSummariseSpoolDirbuild
+
+		openSummariseSpoolStats = func(statsPath string) (io.ReadCloser, error) {
+			openCalls++
+
+			return originalOpen(statsPath)
+		}
+		buildSummariseSpoolDirbuild = func(
+			open func() (io.ReadCloser, error),
+			mountPath string,
+			database dirguta.DB,
+			refTime time.Time,
+			files dirbuild.FileSink,
+		) error {
+			dirbuildCalls++
+
+			return originalDirbuild(open, mountPath, database, refTime, files)
+		}
+
+		_, manifest := buildSummariseSpoolFixtureForTest(t, fixture)
+
+		So(manifest.Tables[chspool.TableDirs].Rows, ShouldBeGreaterThan, uint64(0))
+		So(openCalls, ShouldEqual, 2)
+		So(dirbuildCalls, ShouldEqual, 1)
+
+		report := readSummariseSpoolBuildReport(t, summariseClickHouseSpoolDir(fixture.outputDir))
+		op := summariseSpoolBuildReportOperationForTest(report)
+		So(op.Inputs["input_shape"], ShouldEqual, "non_contiguous")
+		So(op.Inputs["build_path"], ShouldEqual, "dirbuild")
+		So(op.Inputs["completed"], ShouldEqual, true)
 	})
 
 	Convey("A3.2 non-contiguous spool build removes stale partial rows and matches contiguous row counts", t, func() {

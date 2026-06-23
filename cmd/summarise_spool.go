@@ -68,6 +68,7 @@ const (
 	summariseActiveVirtualNoParentID   uint32 = 0
 	summariseActiveVirtualZeroSnapshot        = "00000000-0000-0000-0000-000000000000"
 	summariseBuildBytesPerKiB                 = 1024
+	summariseSpoolDirbuildFirstBytes          = 512 * 1024 * 1024
 )
 
 var (
@@ -75,6 +76,7 @@ var (
 	summariseSpoolNow            = time.Now
 	summariseSpoolDirGUTANow     = time.Now
 	openSummariseSpoolStats      = openSummariseSpoolStatsFile
+	statSummariseSpoolStats      = os.Stat
 	buildSummariseSpoolDirbuild  = dirbuild.BuildWithFiles
 )
 
@@ -2304,6 +2306,97 @@ func summariseFillActiveVirtualChildCounts(
 	}
 }
 
+type summariseSpoolBuildResult struct {
+	manifest     *chspool.Manifest
+	inputShape   string
+	buildPath    string
+	records      uint64
+	scratchBytes uint64
+	err          error
+}
+
+func runSummariseSpoolBuild(
+	statsPath string,
+	partialDir string,
+	expected chspool.Manifest,
+	target *clickHouseSummariseTarget,
+	diag *summariseDiagnostics,
+) summariseSpoolBuildResult {
+	if summariseSpoolShouldUseDirbuildFirst(statsPath) {
+		return runSummariseSpoolDirbuildFirst(statsPath, partialDir, expected, target, diag)
+	}
+
+	manifest, records, scratchBytes, err := buildSummariseSpoolAttempt(statsPath, partialDir, expected, target, diag)
+	if !errors.Is(err, summary.ErrNonContiguousInput) {
+		return summariseSpoolContiguousFastResult(manifest, records, scratchBytes, err)
+	}
+
+	return retrySummariseSpoolWithDirbuild(statsPath, partialDir, expected, target, diag, scratchBytes)
+}
+
+func runSummariseSpoolDirbuildFirst(
+	statsPath string,
+	partialDir string,
+	expected chspool.Manifest,
+	target *clickHouseSummariseTarget,
+	diag *summariseDiagnostics,
+) summariseSpoolBuildResult {
+	manifest, records, scratchBytes, err := buildSummariseSpoolWithDirbuild(
+		statsPath, partialDir, expected, target, diag,
+	)
+
+	return summariseSpoolDirbuildResult(manifest, records, scratchBytes, err)
+}
+
+func retrySummariseSpoolWithDirbuild(
+	statsPath string,
+	partialDir string,
+	expected chspool.Manifest,
+	target *clickHouseSummariseTarget,
+	diag *summariseDiagnostics,
+	firstAttemptScratchBytes uint64,
+) summariseSpoolBuildResult {
+	manifest, records, scratchBytes, err := buildSummariseSpoolWithDirbuild(
+		statsPath, partialDir, expected, target, diag,
+	)
+	result := summariseSpoolDirbuildResult(manifest, records, scratchBytes, err)
+	result.scratchBytes += firstAttemptScratchBytes
+
+	return result
+}
+
+func summariseSpoolContiguousFastResult(
+	manifest *chspool.Manifest,
+	records uint64,
+	scratchBytes uint64,
+	err error,
+) summariseSpoolBuildResult {
+	return summariseSpoolBuildResult{
+		manifest:     manifest,
+		inputShape:   chperf.A5BuildInputContiguous,
+		buildPath:    chperf.A5BuildPathContiguousFast,
+		records:      records,
+		scratchBytes: scratchBytes,
+		err:          err,
+	}
+}
+
+func summariseSpoolDirbuildResult(
+	manifest *chspool.Manifest,
+	records uint64,
+	scratchBytes uint64,
+	err error,
+) summariseSpoolBuildResult {
+	return summariseSpoolBuildResult{
+		manifest:     manifest,
+		inputShape:   chperf.A5BuildInputNonContiguous,
+		buildPath:    chperf.A5BuildPathDirbuild,
+		records:      records,
+		scratchBytes: scratchBytes,
+		err:          err,
+	}
+}
+
 func summariseActiveVirtualManifestSHA256(activeSetID string, summaryRows, filterRows, childRows int) string {
 	return summariseSHA256Hex(fmt.Sprintf(
 		"%s|%d|%d|%d|%d",
@@ -2438,35 +2531,22 @@ func buildSummariseSpool( //nolint:funlen
 ) (*chspool.Manifest, error) {
 	partialDir := spoolDir + ".partial"
 	started := time.Now()
-	inputShape := chperf.A5BuildInputContiguous
-	buildPath := chperf.A5BuildPathContiguousFast
 
-	manifest, records, buildScratchBytes, err := buildSummariseSpoolAttempt(statsPath, partialDir, expected, target, diag)
-	if errors.Is(err, summary.ErrNonContiguousInput) {
-		var retryScratchBytes uint64
-
-		inputShape = chperf.A5BuildInputNonContiguous
-		buildPath = chperf.A5BuildPathDirbuild
-		manifest, records, retryScratchBytes, err = buildSummariseSpoolWithDirbuild(
-			statsPath, partialDir, expected, target, diag,
-		)
-		buildScratchBytes += retryScratchBytes
-	}
-
-	if err != nil {
+	build := runSummariseSpoolBuild(statsPath, partialDir, expected, target, diag)
+	if build.err != nil {
 		_ = os.RemoveAll(partialDir)
 
-		return nil, err
+		return nil, build.err
 	}
 
 	report := summariseBuildReport(
 		statsPath,
 		target,
-		manifest,
-		inputShape,
-		buildPath,
-		records,
-		buildScratchBytes,
+		build.manifest,
+		build.inputShape,
+		build.buildPath,
+		build.records,
+		build.scratchBytes,
 		time.Since(started),
 	)
 	if err := writeSummariseSpoolBuildReport(partialDir, report); err != nil {
@@ -2487,7 +2567,7 @@ func buildSummariseSpool( //nolint:funlen
 		return nil, err
 	}
 
-	return manifest, nil
+	return build.manifest, nil
 }
 
 func parseSummariseToSpool( //nolint:funlen
@@ -2762,6 +2842,15 @@ func writeSummariseSpoolBuildReport(spoolDir string, report perfreport.Report) e
 
 func summariseSpoolBuildReportPath(spoolDir string) string {
 	return filepath.Join(spoolDir, clickHouseSpoolBuildReportName)
+}
+
+func summariseSpoolShouldUseDirbuildFirst(statsPath string) bool {
+	info, err := statSummariseSpoolStats(statsPath)
+	if err != nil {
+		return false
+	}
+
+	return info.Size() >= summariseSpoolDirbuildFirstBytes
 }
 
 func summariseNonNegativeInt64ToUint64(value int64, negativeErr error) (uint64, error) {
