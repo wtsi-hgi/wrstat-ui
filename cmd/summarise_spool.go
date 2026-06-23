@@ -84,6 +84,7 @@ var (
 	errSummariseSpoolFileNonNegative       = errors.New("clickhouse spool: file row requires non-negative numeric fields")
 	errSummariseSpoolDirFactsDir           = errors.New("clickhouse spool: dir facts require dir")
 	errSummariseSpoolBasedirsNotReset      = errors.New("clickhouse spool: basedirs store not reset")
+	errSummariseSpoolBasedirsDirUnknown    = errors.New("clickhouse spool: basedirs dirbuild directory metadata missing")
 	errSummariseSpoolSubdirPositionInvalid = errors.New("clickhouse spool: basedirs subdir position overflows UInt32")
 )
 
@@ -624,6 +625,437 @@ func summariseHasChildrenValue(childCount uint64) uint8 {
 	}
 
 	return 0
+}
+
+type summariseDirbuildBasedirsAgeMap map[db.DirGUTAge]*basedirs.SummaryWithChildren
+
+func summariseDirbuildBasedirsMergeAgeMap(
+	parent summariseDirbuildBasedirsAgeMap,
+	child summariseDirbuildBasedirsAgeMap,
+	parentDir string,
+) {
+	for age, childSummary := range child {
+		parentSummary := parent[age]
+
+		switch {
+		case parentSummary == nil:
+			parent[age] = childSummary
+		case parentSummary.Dir == parentDir:
+			summariseDirbuildBasedirsMergeSummary(parentSummary, childSummary, parentDir)
+		default:
+			parent[age] = summariseDirbuildBasedirsMergedParent(parentSummary, childSummary, parentDir, age)
+		}
+	}
+}
+
+func summariseDirbuildBasedirsMergeSummary(
+	parent *basedirs.SummaryWithChildren,
+	child *basedirs.SummaryWithChildren,
+	parentDir string,
+) {
+	if parent == nil || child == nil {
+		return
+	}
+
+	parentDot := summariseDirbuildBasedirsDot(parent)
+	childDot := summariseDirbuildBasedirsDot(child)
+
+	for ft, size := range childDot.FileUsage {
+		parentDot.FileUsage[ft] += size
+	}
+
+	parent.UIDs = summariseAppendUniqueUint32Slice(parent.UIDs, child.UIDs)
+	parent.GIDs = summariseAppendUniqueUint32Slice(parent.GIDs, child.GIDs)
+	summariseDirbuildBasedirsSetTimes(parent, child.Atime, child.Mtime)
+
+	parentDot.NumFiles += childDot.NumFiles
+	parentDot.SizeFiles += childDot.SizeFiles
+	childDot.SubDir = summariseDirbuildBasedirsChildName(parentDir, child.Dir)
+	parent.Children = append(parent.Children, childDot)
+}
+
+func summariseDirbuildBasedirsDot(summary *basedirs.SummaryWithChildren) *basedirs.SubDir {
+	if len(summary.Children) == 0 {
+		summary.Children = []*basedirs.SubDir{{FileUsage: make(basedirs.UsageBreakdownByType)}}
+	}
+
+	if summary.Children[0].FileUsage == nil {
+		summary.Children[0].FileUsage = make(basedirs.UsageBreakdownByType)
+	}
+
+	return summary.Children[0]
+}
+
+func summariseDirbuildBasedirsSetTimes(
+	summary *basedirs.SummaryWithChildren,
+	atime time.Time,
+	mtime time.Time,
+) {
+	if atime.Before(summary.Atime) || summary.Atime.IsZero() {
+		summary.Atime = atime
+	}
+
+	if mtime.After(summary.Mtime) {
+		summary.Mtime = mtime
+		summariseDirbuildBasedirsDot(summary).LastModified = mtime
+	}
+}
+
+func summariseDirbuildBasedirsChildName(parentDir string, childDir string) string {
+	parentDir = summariseEnsureTrailingSlash(parentDir)
+	childDir = summariseEnsureTrailingSlash(childDir)
+
+	relative := strings.TrimPrefix(childDir, parentDir)
+
+	part, _, _ := strings.Cut(relative, "/")
+	if part == "" {
+		return "."
+	}
+
+	return part + "/"
+}
+
+func summariseDirbuildBasedirsMergedParent(
+	left *basedirs.SummaryWithChildren,
+	right *basedirs.SummaryWithChildren,
+	parentDir string,
+	age db.DirGUTAge,
+) *basedirs.SummaryWithChildren {
+	merged := summariseNewDirbuildBasedirsSummary(parentDir, age)
+	summariseDirbuildBasedirsMergeSummary(merged, left, parentDir)
+	summariseDirbuildBasedirsMergeSummary(merged, right, parentDir)
+
+	return merged
+}
+
+func summariseNewDirbuildBasedirsSummary(
+	dir string,
+	age db.DirGUTAge,
+) *basedirs.SummaryWithChildren {
+	return &basedirs.SummaryWithChildren{
+		DirSummary: db.DirSummary{
+			Dir: summariseEnsureTrailingSlash(dir),
+			Age: age,
+		},
+		Children: []*basedirs.SubDir{{
+			FileUsage: make(basedirs.UsageBreakdownByType),
+		}},
+	}
+}
+
+type summariseDirbuildBasedirsIDMap map[uint32]summariseDirbuildBasedirsAgeMap
+
+func (m summariseDirbuildBasedirsIDMap) summary(
+	id uint32,
+	age db.DirGUTAge,
+	dir string,
+) *basedirs.SummaryWithChildren {
+	ages, ok := m[id]
+	if !ok {
+		ages = make(summariseDirbuildBasedirsAgeMap)
+		m[id] = ages
+	}
+
+	summary, ok := ages[age]
+	if !ok {
+		summary = summariseNewDirbuildBasedirsSummary(dir, age)
+		ages[age] = summary
+	}
+
+	return summary
+}
+
+type summariseDirbuildBasedirsNode struct {
+	dirID      uint32
+	parentID   uint32
+	path       string
+	depth      uint16
+	users      summariseDirbuildBasedirsIDMap
+	groups     summariseDirbuildBasedirsIDMap
+	seenInodes map[int64]struct{}
+}
+
+func (n *summariseDirbuildBasedirsNode) hasSummaries() bool {
+	return len(n.users) > 0 || len(n.groups) > 0
+}
+
+func (n *summariseDirbuildBasedirsNode) mergeChild(child *summariseDirbuildBasedirsNode) {
+	summariseDirbuildBasedirsMergeIDMap(n.users, child.users, n.path)
+	summariseDirbuildBasedirsMergeIDMap(n.groups, child.groups, n.path)
+}
+
+func summariseDirbuildBasedirsMergeIDMap(
+	parent summariseDirbuildBasedirsIDMap,
+	child summariseDirbuildBasedirsIDMap,
+	parentDir string,
+) {
+	for id, childAges := range child {
+		parentAges, ok := parent[id]
+		if !ok {
+			parent[id] = childAges
+
+			continue
+		}
+
+		summariseDirbuildBasedirsMergeAgeMap(parentAges, childAges, parentDir)
+	}
+}
+
+type summariseDirbuildBasedirsBuilder struct {
+	enabled   bool
+	creator   *basedirs.BaseDirs
+	config    basedirs.Config
+	mountPath string
+	refUnix   int64
+	nodes     map[uint32]*summariseDirbuildBasedirsNode
+	users     basedirs.IDAgeDirs
+	groups    basedirs.IDAgeDirs
+}
+
+func newSummariseDirbuildBasedirsBuilder(
+	ds *summariseSpoolDataset,
+) (*summariseDirbuildBasedirsBuilder, error) {
+	if basedirsDB == "" {
+		return &summariseDirbuildBasedirsBuilder{}, nil
+	}
+
+	creator, config, err := newSummariseDirbuildBasedirsCreator(ds)
+	if err != nil {
+		return nil, err
+	}
+
+	return &summariseDirbuildBasedirsBuilder{
+		enabled:   true,
+		creator:   creator,
+		config:    config,
+		mountPath: ds.mountPath,
+		refUnix:   time.Now().Unix(),
+		nodes:     make(map[uint32]*summariseDirbuildBasedirsNode),
+		users:     make(basedirs.IDAgeDirs),
+		groups:    make(basedirs.IDAgeDirs),
+	}, nil
+}
+
+func (b *summariseDirbuildBasedirsBuilder) addDir(record summariseDGUTARecordContext) {
+	if !b.enabled {
+		return
+	}
+
+	node := b.node(record.dirID)
+	node.dirID = record.dirID
+	node.parentID = record.parentID
+	node.path = summariseEnsureTrailingSlash(record.canonicalDir)
+	node.depth = record.depth
+}
+
+func (b *summariseDirbuildBasedirsBuilder) addFile(
+	dirID uint32,
+	info *summary.FileInfo,
+	size uint64,
+) error {
+	if !b.enabled || info == nil || info.IsDir() {
+		return nil
+	}
+
+	node := b.node(dirID)
+	if summariseDirbuildBasedirsSeenHardlink(node, info) {
+		return nil
+	}
+
+	dir := summariseDirbuildBasedirsInfoDir(b.mountPath, info)
+	tempDir := summariseDirbuildBasedirsPathIsTemp(info.Path)
+
+	for _, age := range db.DirGUTAges {
+		if !age.FitsAgeInterval(info.ATime, info.MTime, b.refUnix) {
+			continue
+		}
+
+		summariseDirbuildBasedirsAddFile(node.groups.summary(info.GID, age, dir), info, size, tempDir)
+		summariseDirbuildBasedirsAddFile(node.users.summary(info.UID, age, dir), info, size, tempDir)
+	}
+
+	return nil
+}
+
+func summariseDirbuildBasedirsSeenHardlink(
+	node *summariseDirbuildBasedirsNode,
+	info *summary.FileInfo,
+) bool {
+	if info.Nlink <= 1 || info.Inode == 0 {
+		return false
+	}
+
+	if _, seen := node.seenInodes[info.Inode]; seen {
+		return true
+	}
+
+	node.seenInodes[info.Inode] = struct{}{}
+
+	return false
+}
+
+func summariseDirbuildBasedirsInfoDir(mountPath string, info *summary.FileInfo) string {
+	if info.Path == nil {
+		return "/"
+	}
+
+	dir := string(info.Path.AppendTo(make([]byte, 0, info.Path.Len())))
+
+	return summariseEnsureTrailingSlash(summariseCanonicalPathForMount(mountPath, dir))
+}
+
+func summariseDirbuildBasedirsPathIsTemp(path *summary.DirectoryPath) bool {
+	for path != nil {
+		if dirguta.IsTemp([]byte(path.Name)) {
+			return true
+		}
+
+		path = path.Parent
+	}
+
+	return false
+}
+
+func summariseDirbuildBasedirsAddFile(
+	summary *basedirs.SummaryWithChildren,
+	info *summary.FileInfo,
+	size uint64,
+	tempDir bool,
+) {
+	dot := summariseDirbuildBasedirsDot(summary)
+	dot.NumFiles++
+	dot.SizeFiles += size
+
+	atime := time.Unix(info.ATime, 0)
+	mtime := time.Unix(info.MTime, 0)
+	summariseDirbuildBasedirsSetTimes(summary, atime, mtime)
+
+	ft := dirguta.FilenameToType(info.Name)
+
+	dot.FileUsage[ft] += size
+	if tempDir || dirguta.IsTemp(info.Name) {
+		dot.FileUsage[db.DGUTAFileTypeTemp] += size
+	}
+
+	summary.UIDs = summariseAppendUniqueUint32(summary.UIDs, info.UID)
+	summary.GIDs = summariseAppendUniqueUint32(summary.GIDs, info.GID)
+}
+
+func (b *summariseDirbuildBasedirsBuilder) node(dirID uint32) *summariseDirbuildBasedirsNode {
+	if node, ok := b.nodes[dirID]; ok {
+		return node
+	}
+
+	node := &summariseDirbuildBasedirsNode{
+		dirID:      dirID,
+		users:      make(summariseDirbuildBasedirsIDMap),
+		groups:     make(summariseDirbuildBasedirsIDMap),
+		seenInodes: make(map[int64]struct{}),
+	}
+	b.nodes[dirID] = node
+
+	return node
+}
+
+func (b *summariseDirbuildBasedirsBuilder) output() error {
+	if !b.enabled {
+		return nil
+	}
+
+	nodes, err := b.outputNodes()
+	if err != nil {
+		return err
+	}
+
+	for _, node := range nodes {
+		if b.config.PathShouldOutput(summariseDirbuildBasedirsPath(node.path)) {
+			b.addOutputNode(node)
+
+			continue
+		}
+
+		if parent := b.nodes[node.parentID]; parent != nil {
+			parent.mergeChild(node)
+		}
+	}
+
+	summariseDirbuildBasedirsNormalize(b.users)
+	summariseDirbuildBasedirsNormalize(b.groups)
+
+	return b.creator.Output(b.users, b.groups)
+}
+
+func summariseDirbuildBasedirsPath(path string) *summary.DirectoryPath {
+	current := &summary.DirectoryPath{Name: "/", Depth: 0}
+
+	trimmed := strings.Trim(strings.TrimSpace(path), "/")
+	if trimmed == "" {
+		return current
+	}
+
+	for _, part := range strings.Split(trimmed, "/") {
+		current = &summary.DirectoryPath{
+			Name:   part + "/",
+			Depth:  current.Depth + 1,
+			Parent: current,
+		}
+	}
+
+	return current
+}
+
+func summariseDirbuildBasedirsNormalize(idAgeDirs basedirs.IDAgeDirs) {
+	for _, ageDirs := range idAgeDirs {
+		if ageDirs == nil {
+			continue
+		}
+
+		for age := range ageDirs {
+			for idx := range ageDirs[age] {
+				summariseDirbuildBasedirsNormalizeSummary(&ageDirs[age][idx])
+			}
+		}
+	}
+}
+
+func (b *summariseDirbuildBasedirsBuilder) outputNodes() ([]*summariseDirbuildBasedirsNode, error) {
+	nodes := make([]*summariseDirbuildBasedirsNode, 0, len(b.nodes))
+
+	for _, node := range b.nodes {
+		if node.path == "" && node.hasSummaries() {
+			return nil, fmt.Errorf("%w: dir_id=%d", errSummariseSpoolBasedirsDirUnknown, node.dirID)
+		}
+
+		if node.path != "" {
+			nodes = append(nodes, node)
+		}
+	}
+
+	slices.SortFunc(nodes, func(a, b *summariseDirbuildBasedirsNode) int {
+		if diff := cmp.Compare(b.depth, a.depth); diff != 0 {
+			return diff
+		}
+
+		return strings.Compare(b.path, a.path)
+	})
+
+	return nodes, nil
+}
+
+func (b *summariseDirbuildBasedirsBuilder) addOutputNode(node *summariseDirbuildBasedirsNode) {
+	summariseDirbuildBasedirsAddOutputMap(b.users, node.users)
+	summariseDirbuildBasedirsAddOutputMap(b.groups, node.groups)
+}
+
+func summariseDirbuildBasedirsAddOutputMap(
+	out basedirs.IDAgeDirs,
+	in summariseDirbuildBasedirsIDMap,
+) {
+	for id, ages := range in {
+		for age, summary := range ages {
+			summariseDirbuildBasedirsAddOutputSummary(out, id, age, summary)
+		}
+	}
 }
 
 func newSummariseDGUTASpoolWriter(ds *summariseSpoolDataset) *summariseDGUTASpoolWriter {
@@ -1303,6 +1735,60 @@ func summariseCatalogPathHash(fullPath string) uint64 {
 	return h.Sum64()
 }
 
+func (w *summariseDGUTASpoolWriter) noteDirbuildBasedirsDir(record summariseDGUTARecordContext) {
+	if w.dirbuildBasedirs != nil {
+		w.dirbuildBasedirs.addDir(record)
+	}
+}
+
+func newSummariseDirbuildBasedirsCreator(
+	ds *summariseSpoolDataset,
+) (*basedirs.BaseDirs, basedirs.Config, error) {
+	quotas, config, err := summariseutil.ParseBasedirConfig(quotaPath, basedirsConfig)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	mountpoints, err := summariseutil.ParseMountpointsFromFile(mounts)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	store := &summariseBasedirsSpoolStore{ds: ds}
+	store.SetMountPath(ds.mountPath)
+	store.SetUpdatedAt(ds.updatedAt)
+
+	creator, err := summariseutil.NewBaseDirsCreator(store, quotas, mountpoints, ds.updatedAt)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return creator, config, nil
+}
+
+func runAndCloseSummariseSpoolDirbuild(
+	statsPath string,
+	ds *summariseSpoolDataset,
+	dw *summariseDGUTASpoolWriter,
+	fileWriter *summariseFileSpoolOperation,
+	diag *summariseDiagnostics,
+) (uint64, error) {
+	diag.setCurrentPhase("parse")
+
+	records, err := runSummariseSpoolDirbuild(statsPath, ds, dw, fileWriter)
+	diag.logParseResult(records, err)
+
+	if err == nil {
+		err = fileWriter.outputDirbuildBasedirs()
+	}
+
+	if err == nil {
+		err = closeSummariseSpoolOperations(ds)
+	}
+
+	return records, err
+}
+
 func buildSummariseSpoolWithDirbuild(
 	statsPath string,
 	partialDir string,
@@ -1315,20 +1801,14 @@ func buildSummariseSpoolWithDirbuild(
 		return nil, 0, 0, err
 	}
 
-	dw := newSummariseDGUTASpoolWriter(ds)
-	fileWriter := &summariseFileSpoolOperation{ds: ds}
+	dw, fileWriter, err := newSummariseDirbuildSpoolWriters(ds)
+	if err != nil {
+		manifest, scratchBytes, finishErr := finishSummariseSpoolPartial(partialDir, expected, set, err)
 
-	diag.setCurrentPhase("parse")
-
-	var records uint64
-
-	records, err = runSummariseSpoolDirbuild(statsPath, ds, dw, fileWriter)
-	diag.logParseResult(records, err)
-
-	if err == nil {
-		err = closeSummariseSpoolOperations(ds)
+		return manifest, 0, scratchBytes, finishErr
 	}
 
+	records, err := runAndCloseSummariseSpoolDirbuild(statsPath, ds, dw, fileWriter, diag)
 	manifest, scratchBytes, err := finishSummariseSpoolPartial(partialDir, expected, set, err)
 
 	return manifest, records, scratchBytes, err
@@ -1569,12 +2049,29 @@ func buildSummariseSpoolAttempt(
 	return manifest, records, scratchBytes, err
 }
 
+func newSummariseDirbuildSpoolWriters(
+	ds *summariseSpoolDataset,
+) (*summariseDGUTASpoolWriter, *summariseFileSpoolOperation, error) {
+	dw := newSummariseDGUTASpoolWriter(ds)
+
+	basedirsBuilder, err := newSummariseDirbuildBasedirsBuilder(ds)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	dw.dirbuildBasedirs = basedirsBuilder
+
+	return dw, &summariseFileSpoolOperation{ds: ds, dirbuildBasedirs: basedirsBuilder}, nil
+}
+
 type summariseFileSpoolOperation struct {
-	ds *summariseSpoolDataset
+	ds               *summariseSpoolDataset
+	dirbuildBasedirs *summariseDirbuildBasedirsBuilder
 }
 
 type summariseDGUTASpoolWriter struct {
 	ds                            *summariseSpoolDataset
+	dirbuildBasedirs              *summariseDirbuildBasedirsBuilder
 	mountPath                     string
 	updatedAt                     time.Time
 	snapshotID                    string
@@ -1646,7 +2143,7 @@ func (f *summariseFileSpoolOperation) addWithDirID(info *summary.FileInfo, dirID
 		return nil
 	}
 
-	return f.ds.set.WriteFile(chspool.FileRow{
+	if err := f.ds.set.WriteFile(chspool.FileRow{
 		MountPath:    f.ds.mountPath,
 		SnapshotID:   f.ds.snapshotID,
 		DirID:        dirID,
@@ -1662,7 +2159,23 @@ func (f *summariseFileSpoolOperation) addWithDirID(info *summary.FileInfo, dirID
 		CTime:        time.Unix(info.CTime, 0),
 		Inode:        inode,
 		Nlink:        nlink,
-	})
+	}); err != nil {
+		return err
+	}
+
+	if f.dirbuildBasedirs != nil {
+		return f.dirbuildBasedirs.addFile(dirID, info, size)
+	}
+
+	return nil
+}
+
+func (f *summariseFileSpoolOperation) outputDirbuildBasedirs() error {
+	if f.dirbuildBasedirs == nil {
+		return nil
+	}
+
+	return f.dirbuildBasedirs.output()
 }
 
 func summariseFileIngestDirIDPath(info *summary.FileInfo) *summary.DirectoryPath {
@@ -2308,6 +2821,8 @@ func (w *summariseDGUTASpoolWriter) Add(dguta db.RecordDGUTA) error { //nolint:f
 	if err := w.writeCatalogRow(dguta, record); err != nil {
 		return err
 	}
+
+	w.noteDirbuildBasedirsDir(record)
 
 	tracker := w.newDGUTARecordTracker(len(dguta.GUTAs))
 	for _, guta := range dguta.GUTAs {
@@ -3044,4 +3559,113 @@ func statsFileModtime(statsPath string) (time.Time, error) {
 	}
 
 	return st.ModTime(), nil
+}
+
+func summariseDirbuildBasedirsAddOutputSummary(
+	out basedirs.IDAgeDirs,
+	id uint32,
+	age db.DirGUTAge,
+	summary *basedirs.SummaryWithChildren,
+) {
+	if summary == nil {
+		return
+	}
+
+	next := summariseDirbuildBasedirsCloneSummary(summary)
+	ageDirs := out.Get(id)
+	kept := ageDirs[age][:0]
+
+	for _, existing := range ageDirs[age] {
+		if strings.HasPrefix(existing.Dir, next.Dir) {
+			summariseDirbuildBasedirsMergeSummary(&next, &existing, next.Dir)
+
+			continue
+		}
+
+		kept = append(kept, existing)
+	}
+
+	ageDirs[age] = append(kept, next)
+}
+
+func summariseDirbuildBasedirsCloneSummary(
+	summary *basedirs.SummaryWithChildren,
+) basedirs.SummaryWithChildren {
+	out := *summary
+	out.UIDs = slices.Clone(summary.UIDs)
+	out.GIDs = slices.Clone(summary.GIDs)
+	out.Children = make([]*basedirs.SubDir, 0, len(summary.Children))
+
+	for _, child := range summary.Children {
+		out.Children = append(out.Children, summariseDirbuildBasedirsCloneSubdir(child))
+	}
+
+	return out
+}
+
+func summariseDirbuildBasedirsCloneSubdir(in *basedirs.SubDir) *basedirs.SubDir {
+	if in == nil {
+		return nil
+	}
+
+	out := *in
+
+	out.FileUsage = make(basedirs.UsageBreakdownByType, len(in.FileUsage))
+	for ft, size := range in.FileUsage {
+		out.FileUsage[ft] = size
+	}
+
+	return &out
+}
+
+func summariseDirbuildBasedirsNormalizeSummary(summary *basedirs.SummaryWithChildren) {
+	dot := summariseDirbuildBasedirsDot(summary)
+	dot.SubDir = "."
+	summary.Count = dot.NumFiles
+	summary.Size = dot.SizeFiles
+	summary.Dir = strings.TrimSuffix(summary.Dir, "/")
+	summary.UIDs = summariseSortedUint32Slice(summary.UIDs)
+	summary.GIDs = summariseSortedUint32Slice(summary.GIDs)
+
+	for ft, size := range dot.FileUsage {
+		if size > 0 {
+			summary.FT |= ft
+		}
+	}
+
+	summariseDirbuildBasedirsRemoveChildFilesFromDot(summary)
+	summariseDirbuildBasedirsCleanDot(summary)
+}
+
+func summariseDirbuildBasedirsRemoveChildFilesFromDot(summary *basedirs.SummaryWithChildren) {
+	dot := summariseDirbuildBasedirsDot(summary)
+
+	for _, child := range summary.Children[1:] {
+		if child == nil {
+			continue
+		}
+
+		child.SubDir = strings.TrimSuffix(child.SubDir, "/")
+		dot.NumFiles -= child.NumFiles
+		dot.SizeFiles -= child.SizeFiles
+
+		for ft, size := range child.FileUsage {
+			dot.FileUsage[ft] -= size
+		}
+	}
+}
+
+func summariseDirbuildBasedirsCleanDot(summary *basedirs.SummaryWithChildren) {
+	dot := summariseDirbuildBasedirsDot(summary)
+	if dot.NumFiles == 0 {
+		summary.Children = summary.Children[1:]
+
+		return
+	}
+
+	for ft, size := range dot.FileUsage {
+		if size == 0 {
+			delete(dot.FileUsage, ft)
+		}
+	}
 }

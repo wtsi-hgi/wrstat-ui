@@ -1073,6 +1073,21 @@ func assertSummariseManifestTableRowsMatch(expected, actual *chspool.Manifest) {
 	}
 }
 
+func writeNonContiguousBasedirsSpoolFixtureStats(t *testing.T, statsPath string, updatedAt time.Time) {
+	t.Helper()
+
+	var buf bytes.Buffer
+
+	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath, 'd', 4096, 7, 7, updatedAt.Unix(), 98, 1)
+	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath+"project/file.bam", 'f', 50, 17, 7,
+		updatedAt.Unix(), 99, 1)
+	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath+"project/", 'd', 4096, 7, 7,
+		updatedAt.Unix(), 100, 1)
+
+	writeGzipStats(t, statsPath, buf.Bytes())
+	So(os.Chtimes(statsPath, updatedAt, updatedAt), ShouldBeNil)
+}
+
 func assertSummariseSpoolDecodedRowsMatch(expectedSpoolDir, actualSpoolDir string) {
 	for _, table := range []string{
 		chspool.TableDirs,
@@ -1625,6 +1640,53 @@ func TestSummariseClickHouseSpoolRows(t *testing.T) {
 		So(op.Inputs["build_path"], ShouldEqual, "dirbuild")
 		So(op.Inputs["completed"], ShouldEqual, true)
 		So(uint64InputForTest(op.Inputs, "build_phase_bytes_written"), ShouldEqual, uint64(len(buildScratch)))
+	})
+
+	Convey("A3.3 non-contiguous spool build keeps basedirs row counts", t, func() {
+		baseDir := t.TempDir()
+		updatedAt := time.Unix(1_710_000_000, 123).UTC()
+		contiguous := newSummariseActiveSnapshotFixtureForMount(t, baseDir, summariseTestMountPath, updatedAt)
+		nonContiguous := newSummariseActiveSnapshotFixtureForMount(t, baseDir, summariseTestMountPath, updatedAt)
+
+		writeBasedirsSpoolFixtureStats(t, contiguous.statsPath, updatedAt)
+		writeNonContiguousBasedirsSpoolFixtureStats(t, nonContiguous.statsPath, updatedAt)
+
+		restore := snapshotSummariseGlobals()
+		Reset(restore)
+		configureSummariseActiveSnapshotTest(contiguous.outputDir, false)
+		quotaPath = filepath.Join(contiguous.outputDir, "quota.csv")
+		basedirsConfig = filepath.Join(contiguous.outputDir, "basedirs.tsv")
+		basedirsDB = filepath.Join(contiguous.outputDir, basedirBasename)
+		mounts = filepath.Join(contiguous.outputDir, "mounts.txt")
+
+		So(os.WriteFile(quotaPath, []byte("7,/mnt/test,1000,100\n"), 0o600), ShouldBeNil)
+		So(os.WriteFile(basedirsConfig, []byte("/mnt/test\t1\t3\n"), 0o600), ShouldBeNil)
+		So(os.WriteFile(mounts, []byte("\"/mnt/test/\"\n"), 0o600), ShouldBeNil)
+
+		_, contiguousManifest := buildSummariseSpoolFixtureForTest(t, contiguous)
+
+		configureSummariseActiveSnapshotTest(nonContiguous.outputDir, false)
+		quotaPath = filepath.Join(nonContiguous.outputDir, "quota.csv")
+		basedirsConfig = filepath.Join(nonContiguous.outputDir, "basedirs.tsv")
+		basedirsDB = filepath.Join(nonContiguous.outputDir, basedirBasename)
+		mounts = filepath.Join(nonContiguous.outputDir, "mounts.txt")
+
+		So(os.WriteFile(quotaPath, []byte("7,/mnt/test,1000,100\n"), 0o600), ShouldBeNil)
+		So(os.WriteFile(basedirsConfig, []byte("/mnt/test\t1\t3\n"), 0o600), ShouldBeNil)
+		So(os.WriteFile(mounts, []byte("\"/mnt/test/\"\n"), 0o600), ShouldBeNil)
+
+		_, nonContiguousManifest := buildSummariseSpoolFixtureForTest(t, nonContiguous)
+
+		for _, table := range []string{
+			chspool.TableBasedirsHistory,
+			chspool.TableBasedirsGroupUsage,
+			chspool.TableBasedirsUserUsage,
+			chspool.TableBasedirsGroupSubdirs,
+			chspool.TableBasedirsUserSubdirs,
+		} {
+			So(contiguousManifest.Tables[table].Rows, ShouldBeGreaterThan, uint64(0))
+			So(nonContiguousManifest.Tables[table].Rows, ShouldEqual, contiguousManifest.Tables[table].Rows)
+		}
 	})
 
 	Convey("A3.4 non-contiguity regression fixtures match their contiguous spool rows", t, func() {

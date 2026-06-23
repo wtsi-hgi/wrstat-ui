@@ -163,6 +163,8 @@ func setupClickHouseCLIEnv(t *testing.T) clickHouseCLIEnv {
 
 func TestSummarise(t *testing.T) {
 	Convey("summarise produces the correct output", t, func() {
+		t.Setenv("WRSTAT_FILTER_AMPLIFICATION_WAIVER", "1")
+
 		chEnv := setupClickHouseCLIEnv(t)
 
 		gid, uid, _, _, err := internaluser.RealGIDAndUID()
