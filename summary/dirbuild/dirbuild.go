@@ -130,8 +130,9 @@ func newPathBuilder() *pathBuilder {
 	root := &summary.DirectoryPath{Name: "/", Depth: 0}
 
 	return &pathBuilder{
-		paths: map[string]*summary.DirectoryPath{"/": root},
-		keys:  map[*summary.DirectoryPath]string{root: "/"},
+		paths:   map[string]*summary.DirectoryPath{"/": root},
+		keys:    map[*summary.DirectoryPath]string{root: "/"},
+		rawDirs: make(map[string]struct{}),
 	}
 }
 
@@ -155,7 +156,7 @@ func collectDirectoryRows(open func() (io.ReadCloser, error), paths *pathBuilder
 	return withStatsReader(open, func(reader io.Reader) error {
 		return scanRawStats(reader, func(row rawStatsRow) error {
 			if row.isDir() {
-				paths.dir(row.dirKey())
+				paths.rawDir(row.dirKey())
 
 				return nil
 			}
@@ -368,9 +369,28 @@ func emit(index *directoryIndex, database dirguta.DB) error {
 func addStatsRows(open func() (io.ReadCloser, error), index *directoryIndex, refUnix int64, files FileSink) error {
 	return withStatsReader(open, func(reader io.Reader) error {
 		return scanRawStats(reader, func(row rawStatsRow) error {
+			if err := addSyntheticDirRows(row, index, refUnix); err != nil {
+				return err
+			}
+
 			return addStatsRow(row, index, refUnix, files)
 		})
 	})
+}
+
+func addSyntheticDirRows(row rawStatsRow, index *directoryIndex, refUnix int64) error {
+	nodes, err := index.syntheticDirNodes(row)
+	if err != nil {
+		return err
+	}
+
+	for _, node := range nodes {
+		info := row.syntheticDirInfo(node.dir)
+		addToNode(node, &info, refUnix)
+		node.syntheticStatsRowAdded = true
+	}
+
+	return nil
 }
 
 func addStatsRow(row rawStatsRow, index *directoryIndex, refUnix int64, files FileSink) error {
@@ -429,19 +449,21 @@ func fileRowDirID(node *dirNode, info summary.FileInfo) uint32 {
 }
 
 type dirNode struct {
-	dir            *summary.DirectoryPath
-	key            string
-	dirID          uint32
-	parentID       uint32
-	subtreeEnd     uint32
-	depth          uint16
-	store          dirguta.GUTAStore
-	seenHardlinks  map[int64]*dirguta.InodeEntry
-	gutas          db.GUTAs
-	children       []string
-	childCount     uint64
-	childFileCount uint64
-	isTempDir      bool
+	dir                    *summary.DirectoryPath
+	key                    string
+	dirID                  uint32
+	parentID               uint32
+	subtreeEnd             uint32
+	depth                  uint16
+	store                  dirguta.GUTAStore
+	seenHardlinks          map[int64]*dirguta.InodeEntry
+	gutas                  db.GUTAs
+	children               []string
+	childCount             uint64
+	childFileCount         uint64
+	isTempDir              bool
+	hasRawStatsRow         bool
+	syntheticStatsRowAdded bool
 }
 
 func enterNode(
@@ -505,8 +527,9 @@ func isTempDirectory(dir *summary.DirectoryPath, nodesByPath map[string]*dirNode
 }
 
 type pathBuilder struct {
-	paths map[string]*summary.DirectoryPath
-	keys  map[*summary.DirectoryPath]string
+	paths   map[string]*summary.DirectoryPath
+	keys    map[*summary.DirectoryPath]string
+	rawDirs map[string]struct{}
 }
 
 func (p *pathBuilder) dir(path string) *summary.DirectoryPath {
@@ -549,6 +572,17 @@ func dirName(path string) string {
 	idx := strings.LastIndexByte(trimmed, '/')
 
 	return path[idx+1:]
+}
+
+func (p *pathBuilder) rawDir(path string) {
+	dir := p.dir(path)
+	p.rawDirs[p.key(dir)] = struct{}{}
+}
+
+func (p *pathBuilder) hasRawDir(path string) bool {
+	_, ok := p.rawDirs[path]
+
+	return ok
 }
 
 func (p *pathBuilder) sorted() []*summary.DirectoryPath {
@@ -594,6 +628,8 @@ func (s *idAssignmentState) enterNext(dir *summary.DirectoryPath) error {
 	if err != nil {
 		return err
 	}
+
+	node.hasRawStatsRow = s.paths.hasRawDir(node.key)
 
 	s.nodes = append(s.nodes, node)
 	s.nodesByPath[node.key] = node
@@ -790,6 +826,23 @@ func fileName(path string) []byte {
 	return []byte(path[idx+1:])
 }
 
+func (r rawStatsRow) syntheticDirInfo(dir *summary.DirectoryPath) summary.FileInfo {
+	return summary.FileInfo{
+		Path:         dir,
+		Name:         []byte(dir.Name),
+		Size:         0,
+		ApparentSize: 0,
+		UID:          r.uid,
+		GID:          r.gid,
+		MTime:        r.mtime,
+		ATime:        r.atime,
+		CTime:        r.ctime,
+		Inode:        0,
+		Nlink:        r.nlink,
+		EntryType:    stats.DirType,
+	}
+}
+
 type directoryIndex struct {
 	nodes    []*dirNode
 	byID     map[uint32]*dirNode
@@ -803,6 +856,42 @@ func (index *directoryIndex) resolve(row rawStatsRow) (*dirNode, error) {
 	}
 
 	return index.byID[dirID], nil
+}
+
+func (index *directoryIndex) syntheticDirNodes(row rawStatsRow) ([]*dirNode, error) {
+	node, err := index.resolve(row)
+	if err != nil {
+		return nil, err
+	}
+
+	if row.isDir() {
+		node = index.byID[node.parentID]
+	}
+
+	nodes := make([]*dirNode, 0, nodeDepth(node))
+	for node != nil {
+		if node.dir.Parent == nil {
+			break
+		}
+
+		if !node.hasRawStatsRow && !node.syntheticStatsRowAdded {
+			nodes = append(nodes, node)
+		}
+
+		node = index.byID[node.parentID]
+	}
+
+	slices.Reverse(nodes)
+
+	return nodes, nil
+}
+
+func nodeDepth(node *dirNode) int {
+	if node == nil {
+		return 0
+	}
+
+	return int(node.depth)
 }
 
 // Build runs the two-pass directory-centric build over the stats stream,

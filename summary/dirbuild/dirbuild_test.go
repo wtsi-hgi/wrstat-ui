@@ -578,6 +578,7 @@ func TestBuild(t *testing.T) {
 
 		got, err := buildWithDirBuild(input, "/")
 		So(err, ShouldBeNil)
+		So(comparableRecords(got), ShouldResemble, comparableRecords(expected))
 
 		expectedByPath := recordsByPath(expected)
 		gotByPath := recordsByPath(got)
