@@ -31,6 +31,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"runtime/debug"
 	"slices"
 	"strconv"
 	"strings"
@@ -43,6 +44,8 @@ import (
 )
 
 const maxStatsLineLength = 64 * 1024
+
+const dirbuildGCPercent = 10
 
 var newDirIDAllocator = func() dirIDAllocator { //nolint:gochecknoglobals
 	return summary.NewDirIDAllocator()
@@ -92,6 +95,9 @@ func BuildWithFiles(
 	refTime time.Time,
 	files FileSink,
 ) error {
+	restoreGC := useDirbuildGCPercent()
+	defer restoreGC()
+
 	index, err := buildDirectoryIndex(open, mountPath, refTime.Unix())
 	if err != nil {
 		return err
@@ -101,9 +107,20 @@ func BuildWithFiles(
 		return err
 	}
 
-	rollUp(index)
+	return rollUpAndEmit(index, database)
+}
 
-	return emit(index, database)
+func useDirbuildGCPercent() func() {
+	previous := debug.SetGCPercent(dirbuildGCPercent)
+	if previous >= 0 && previous < dirbuildGCPercent {
+		debug.SetGCPercent(previous)
+
+		return func() {}
+	}
+
+	return func() {
+		debug.SetGCPercent(previous)
+	}
 }
 
 func buildDirectoryIndex(
@@ -306,29 +323,80 @@ func indexNodes(nodes []*dirNode) *directoryIndex {
 	return index
 }
 
-func rollUp(index *directoryIndex) {
+func rollUpAndEmit(index *directoryIndex, database dirguta.DB) error {
+	index.pathToNode = nil
+
 	for i := len(index.nodes) - 1; i >= 0; i-- {
 		node := index.nodes[i]
-		node.gutas = materializeGUTAs(node.store)
+		if err := emitNode(database, node); err != nil {
+			return err
+		}
 
 		if node.parent == nil {
+			node.store.Clear()
+
 			continue
 		}
 
 		mergeNodeHardlinks(node.parent, node)
 		drainNodeStore(node.parent, node)
 	}
+
+	return nil
+}
+
+func emitNode(database dirguta.DB, node *dirNode) error {
+	err := database.Add(db.RecordDGUTA{
+		Dir:            node.dir,
+		DirID:          node.dirID,
+		ParentID:       node.parentID,
+		SubtreeEnd:     node.subtreeEnd,
+		Depth:          node.depth,
+		GUTAs:          materializeGUTAs(node.store),
+		Children:       node.children,
+		ChildCount:     node.childCount,
+		ChildFileCount: node.childFileCount,
+	})
+	if err != nil {
+		return err
+	}
+
+	node.children = nil
+
+	return nil
 }
 
 func materializeGUTAs(store dirguta.GUTAStore) db.GUTAs {
 	keys := store.Sort()
-	gutas := make(db.GUTAs, 0, len(keys))
+	if len(keys) == 0 {
+		return nil
+	}
 
-	for _, key := range keys {
-		gutas = append(gutas, dirguta.GetGUTA(store, key))
+	values := make([]db.GUTA, len(keys))
+	gutas := make(db.GUTAs, len(keys))
+
+	for idx, key := range keys {
+		materializeGUTA(&values[idx], store, key)
+		gutas[idx] = &values[idx]
 	}
 
 	return gutas
+}
+
+func materializeGUTA(out *db.GUTA, store dirguta.GUTAStore, key dirguta.GUTAKey) {
+	summary := store.SumMap[key]
+	*out = db.GUTA{
+		GID:         key.GID,
+		UID:         key.UID,
+		FT:          key.FileType,
+		Age:         key.Age,
+		Count:       uint64(summary.Count), //nolint:gosec
+		Size:        uint64(summary.Size),  //nolint:gosec
+		Atime:       summary.Atime,
+		ATimeRanges: summary.AtimeBuckets,
+		Mtime:       summary.Mtime,
+		MTimeRanges: summary.MtimeBuckets,
+	}
 }
 
 func mergeNodeHardlinks(parent *dirNode, node *dirNode) {
@@ -339,6 +407,7 @@ func mergeNodeHardlinks(parent *dirNode, node *dirNode) {
 	parent.ensureStore()
 	parent.ensureHardlinks()
 	dirguta.MergeSeenHardlinks(&parent.store, parent.seenHardlinks, &node.store, node.seenHardlinks)
+	clear(node.seenHardlinks)
 }
 
 func drainNodeStore(parent *dirNode, node *dirNode) {
@@ -348,32 +417,6 @@ func drainNodeStore(parent *dirNode, node *dirNode) {
 
 	parent.ensureStore()
 	node.store.DrainInto(&parent.store)
-}
-
-func emit(index *directoryIndex, database dirguta.DB) error {
-	slices.SortFunc(index.nodes, func(a, b *dirNode) int {
-		return int(a.dirID) - int(b.dirID)
-	})
-
-	for _, node := range index.nodes {
-		if err := database.Add(db.RecordDGUTA{
-			Dir:            node.dir,
-			DirID:          node.dirID,
-			ParentID:       node.parentID,
-			SubtreeEnd:     node.subtreeEnd,
-			Depth:          node.depth,
-			GUTAs:          node.gutas,
-			Children:       node.children,
-			ChildCount:     node.childCount,
-			ChildFileCount: node.childFileCount,
-		}); err != nil {
-			return err
-		}
-
-		node.store.Clear()
-	}
-
-	return nil
 }
 
 func addStatsRows(open func() (io.ReadCloser, error), index *directoryIndex, refUnix int64, files FileSink) error {
@@ -477,7 +520,6 @@ type dirNode struct {
 	depth                  uint16
 	store                  dirguta.GUTAStore
 	seenHardlinks          map[int64]*dirguta.InodeEntry
-	gutas                  db.GUTAs
 	children               []string
 	childCount             uint64
 	childFileCount         uint64
@@ -923,9 +965,9 @@ func nodeDepth(node *dirNode) int {
 	return int(node.depth)
 }
 
-// Build runs the two-pass directory-centric build over the stats stream,
-// emitting RecordDGUTA rows to db in ascending dir_id order. open is called
-// once per pass to obtain a fresh reader of the same stats stream.
+// Build runs the two-pass directory-centric build over the stats stream. open
+// is called once per pass to obtain a fresh reader of the same stats stream.
+// Output order is not part of the contract.
 func Build(
 	open func() (io.ReadCloser, error),
 	mountPath string,

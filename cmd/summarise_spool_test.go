@@ -235,6 +235,50 @@ func summariseHeapInuseGrowth(before uint64, after uint64) uint64 {
 	return 0
 }
 
+func writeNestedFullFilterSpoolFixtureStats(t *testing.T, statsPath string, updatedAt time.Time) {
+	t.Helper()
+
+	var buf bytes.Buffer
+
+	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath, 'd', 4096, 10, 20, updatedAt.Unix(), 300, 1)
+	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath+"project/", 'd', 4096, 17, 7,
+		updatedAt.Unix(), 301, 1)
+	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath+"project/alpha/", 'd', 4096, 17, 7,
+		updatedAt.Unix(), 302, 1)
+	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath+"project/alpha/one.bam", 'f', 10, 17, 7,
+		updatedAt.Unix(), 303, 1)
+	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath+"project/beta/", 'd', 4096, 17, 7,
+		updatedAt.Unix(), 304, 1)
+	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath+"project/beta/two.bam", 'f', 20, 17, 7,
+		updatedAt.Unix(), 305, 1)
+
+	writeGzipStats(t, statsPath, buf.Bytes())
+	So(os.Chtimes(statsPath, updatedAt, updatedAt), ShouldBeNil)
+}
+
+func d2DirFilterRowsByDirPathAndTuple(
+	spoolDir string,
+	fullPath string,
+) map[summariseFullFilterTupleKey]chspool.DirFilterAllRow {
+	out := make(map[summariseFullFilterTupleKey]chspool.DirFilterAllRow)
+	dirID := d2DirIDForPath(spoolDir, fullPath)
+
+	So(chspool.DecodeRows[chspool.DirFilterAllRow](
+		spoolDir,
+		chspool.TableDirFilterAll,
+		func(row chspool.DirFilterAllRow) error {
+			if row.DirID == dirID {
+				out[summariseFullFilterKeyForRow(row)] = row
+			}
+
+			return nil
+		},
+	), ShouldBeNil)
+	So(len(out), ShouldBeGreaterThan, 0)
+
+	return out
+}
+
 func writeHighFanoutNonContiguousSpoolFixtureStats(
 	t *testing.T,
 	statsPath string,
@@ -1751,7 +1795,7 @@ func TestSummariseClickHouseSpoolRows(t *testing.T) {
 		So(report.MaxRSSBytes, ShouldBeGreaterThan, uint64(0))
 	})
 
-	Convey("A3.1b large non-contiguous spool build goes to dirbuild after the probe", t, func() {
+	Convey("A3.1b large non-contiguous spool build goes to dirbuild before the probe", t, func() {
 		fixture := newSummariseActiveSnapshotFixture(t)
 		writeNonContiguousSpoolFixtureStats(t, fixture.statsPath, fixture.updatedAt)
 
@@ -1802,17 +1846,17 @@ func TestSummariseClickHouseSpoolRows(t *testing.T) {
 		_, manifest := buildSummariseSpoolFixtureForTest(t, fixture)
 
 		So(manifest.Tables[chspool.TableDirs].Rows, ShouldBeGreaterThan, uint64(0))
-		So(openCalls, ShouldEqual, 3)
+		So(openCalls, ShouldEqual, 2)
 		So(dirbuildCalls, ShouldEqual, 1)
 
 		report := readSummariseSpoolBuildReport(t, summariseClickHouseSpoolDir(fixture.outputDir))
 		op := summariseSpoolBuildReportOperationForTest(report)
-		So(op.Inputs["input_shape"], ShouldEqual, "non_contiguous")
+		So(op.Inputs["input_shape"], ShouldEqual, "large_unprobed")
 		So(op.Inputs["build_path"], ShouldEqual, "dirbuild")
 		So(op.Inputs["completed"], ShouldEqual, true)
 	})
 
-	Convey("A3.1c large contiguous spool build probes then stays on the bounded fast path", t, func() {
+	Convey("A3.1c large contiguous spool build goes to dirbuild before the probe", t, func() {
 		fixture := newSummariseActiveSnapshotFixture(t)
 		writeLargeContiguousSpoolFixtureStats(t, fixture.statsPath, fixture.updatedAt, 30_000)
 
@@ -1875,16 +1919,60 @@ func TestSummariseClickHouseSpoolRows(t *testing.T) {
 		runtime.ReadMemStats(&after)
 
 		So(manifest.Tables[chspool.TableDirs].Rows, ShouldEqual, uint64(30_003))
-		So(dirbuildCalls, ShouldEqual, 0)
+		So(dirbuildCalls, ShouldEqual, 1)
 		So(openCalls, ShouldEqual, 2)
 		So(peakGrowth, ShouldBeLessThan, uint64(220*1024*1024))
 		So(summariseHeapInuseGrowth(before.HeapInuse, after.HeapInuse), ShouldBeLessThan, uint64(120*1024*1024))
 
 		report := readSummariseSpoolBuildReport(t, summariseClickHouseSpoolDir(fixture.outputDir))
 		op := summariseSpoolBuildReportOperationForTest(report)
-		So(op.Inputs["input_shape"], ShouldEqual, "contiguous")
-		So(op.Inputs["build_path"], ShouldEqual, "contiguous_fast_path")
+		So(op.Inputs["input_shape"], ShouldEqual, "large_unprobed")
+		So(op.Inputs["build_path"], ShouldEqual, "dirbuild")
 		So(op.Inputs["completed"], ShouldEqual, true)
+	})
+
+	Convey("A3.1c2 dirbuild full-filter rows retain direct-child tuple counts", t, func() {
+		fixture := newSummariseActiveSnapshotFixture(t)
+		writeNestedFullFilterSpoolFixtureStats(t, fixture.statsPath, fixture.updatedAt)
+
+		restore := snapshotSummariseGlobals()
+		Reset(restore)
+
+		configureSummariseActiveSnapshotTest(fixture.outputDir, false)
+
+		originalStat := statSummariseSpoolStats
+		statSummariseSpoolStats = func(path string) (os.FileInfo, error) {
+			info, err := originalStat(path)
+			if err != nil {
+				return nil, err
+			}
+
+			if path == fixture.statsPath {
+				return summariseSpoolSizedFileInfo{
+					FileInfo: info,
+					size:     summariseSpoolDirbuildFirstBytes + 1,
+				}, nil
+			}
+
+			return info, nil
+		}
+
+		spoolDir, _ := buildSummariseSpoolFixtureForTest(t, fixture)
+
+		rows := d2DirFilterRowsByDirPathAndTuple(spoolDir, summariseTestMountPath+"project/")
+		tuple := summariseFullFilterTupleKey{
+			age: uint8(db.DGUTAgeAll),
+			gid: 7,
+			uid: 17,
+			ft:  uint16(db.DGUTAFileTypeBam),
+		}
+		row, ok := rows[tuple]
+
+		So(ok, ShouldBeTrue)
+		So(row.FilterChildCount, ShouldEqual, uint64(2))
+		So(row.HasFilterChildren, ShouldEqual, uint8(1))
+		So(row.ChildCount, ShouldEqual, uint64(2))
+		So(row.HasChildren, ShouldEqual, uint8(1))
 	})
 
 	Convey("A3.1d small non-contiguous high-fanout basedirs build is bounded", t, func() {

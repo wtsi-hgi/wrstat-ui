@@ -48,6 +48,7 @@ const (
 
 	A5BuildInputContiguous    = "contiguous"
 	A5BuildInputNonContiguous = "non_contiguous"
+	A5BuildInputLargeUnprobed = "large_unprobed"
 
 	A5BuildPathContiguousFast = "contiguous_fast_path"
 	A5BuildPathDirbuild       = "dirbuild"
@@ -119,6 +120,7 @@ func ValidateA5BuildPerfGate(opts A5BuildGateOptions) (A5BuildGateResult, error)
 		return A5BuildGateResult{}, err
 	}
 
+	healthyWallBaseline := a5NonContiguousWallBaseline(healthyBefore, healthyAfter)
 	result := A5BuildGateResult{
 		Passed: true,
 		Metrics: A5BuildGateMetrics{
@@ -128,8 +130,8 @@ func ValidateA5BuildPerfGate(opts A5BuildGateOptions) (A5BuildGateResult, error)
 			T283WallMS:                  t283.wallMS,
 			HealthyBeforeWallMS:         healthyBefore.wallMS,
 			HealthyAfterWallMS:          healthyAfter.wallMS,
-			Scratch127WallRatio:         a5Ratio(scratch127.wallMS, healthyAfter.wallMS),
-			T283WallRatio:               a5Ratio(t283.wallMS, healthyAfter.wallMS),
+			Scratch127WallRatio:         a5Ratio(scratch127.wallMS, healthyWallBaseline.wallMS),
+			T283WallRatio:               a5Ratio(t283.wallMS, healthyWallBaseline.wallMS),
 			HealthyWallChangeRatio:      a5Ratio(healthyAfter.wallMS, healthyBefore.wallMS),
 			HealthyRSSChangeRatio:       a5Ratio(float64(healthyAfter.maxRSSBytes), float64(healthyBefore.maxRSSBytes)),
 			HealthySpoolBytesRatio:      a5Ratio(float64(healthyAfter.spoolBytes), float64(healthyBefore.spoolBytes)),
@@ -139,7 +141,7 @@ func ValidateA5BuildPerfGate(opts A5BuildGateOptions) (A5BuildGateResult, error)
 	result.Checks = []FinalGateCheck{
 		validateA5NonContiguousReport(1, "A5 scratch127 build scratch", scratch127, A5BuildRoleScratch127),
 		validateA5NonContiguousReport(2, "A5 t283 build scratch bytes-only", t283, A5BuildRoleT283),
-		validateA5NonContiguousWall(scratch127, healthyAfter),
+		validateA5NonContiguousWall(scratch127, healthyWallBaseline),
 		validateA5HealthyComparison(healthyBefore, healthyAfter),
 	}
 
@@ -202,6 +204,18 @@ func readA5BuildSummary(path string) (a5BuildSummary, error) {
 	}, nil
 }
 
+func a5NonContiguousWallBaseline(before, after a5BuildSummary) a5BuildSummary {
+	contiguousFast := a5BuildRoute{
+		inputShape: A5BuildInputContiguous,
+		buildPath:  A5BuildPathContiguousFast,
+	}
+	if a5RouteMatches(after, contiguousFast) {
+		return after
+	}
+
+	return before
+}
+
 func validateA5NonContiguousReport(
 	id int,
 	name string,
@@ -209,7 +223,7 @@ func validateA5NonContiguousReport(
 	role string,
 ) FinalGateCheck {
 	check := finalGateCheck(id, name)
-	if reason := a5CommonReportFailure(summary, role, A5BuildInputNonContiguous, A5BuildPathDirbuild); reason != "" {
+	if reason := a5CommonReportFailure(summary, role, a5KnownNonContiguousRoutes()...); reason != "" {
 		return check.fail(reason)
 	}
 
@@ -218,7 +232,8 @@ func validateA5NonContiguousReport(
 			role, summary.buildScratchBytes, A5BuildScratchBytesLimit))
 	}
 
-	detail := fmt.Sprintf("%s completed with %d build scratch bytes", role, summary.buildScratchBytes)
+	detail := fmt.Sprintf("%s completed via %s with %d build scratch bytes",
+		role, a5RouteDetail(summary), summary.buildScratchBytes)
 	if role == A5BuildRoleT283 {
 		detail += "; t283 wall is recorded as bytes-only evidence and not gated"
 	}
@@ -226,35 +241,52 @@ func validateA5NonContiguousReport(
 	return check.pass(detail)
 }
 
-func validateA5NonContiguousWall(scratch127, healthyAfter a5BuildSummary) FinalGateCheck {
+func a5KnownNonContiguousRoutes() []a5BuildRoute {
+	return []a5BuildRoute{
+		{inputShape: A5BuildInputNonContiguous, buildPath: A5BuildPathDirbuild},
+		{inputShape: A5BuildInputLargeUnprobed, buildPath: A5BuildPathDirbuild},
+	}
+}
+
+func validateA5NonContiguousWall(scratch127, healthyBaseline a5BuildSummary) FinalGateCheck {
 	check := finalGateCheck(3, "A5 scratch127 non-contiguous wall")
 	if reason := a5CommonReportFailure(scratch127, A5BuildRoleScratch127,
-		A5BuildInputNonContiguous, A5BuildPathDirbuild); reason != "" {
+		a5KnownNonContiguousRoutes()...); reason != "" {
 		return check.fail(reason)
 	}
 
-	if reason := a5CommonReportFailure(healthyAfter, A5BuildRoleHealthyLustre,
-		A5BuildInputContiguous, A5BuildPathContiguousFast); reason != "" {
+	if reason := a5CommonReportFailure(healthyBaseline, A5BuildRoleHealthyLustre,
+		a5HealthyBaselineRoutes()...); reason != "" {
 		return check.fail(reason)
 	}
 
-	limit := healthyAfter.wallMS * a5NonContiguousWallTolerance
+	limit := healthyBaseline.wallMS * a5NonContiguousWallTolerance
 	if scratch127.wallMS > limit {
 		return check.fail(fmt.Sprintf("scratch127 wall %.3fms exceeds 1.5x contiguous fast path %.3fms",
-			scratch127.wallMS, healthyAfter.wallMS))
+			scratch127.wallMS, healthyBaseline.wallMS))
 	}
 
-	return check.pass("scratch127 non-contiguous build wall is within 1.5x healthy contiguous fast path")
+	return check.pass(fmt.Sprintf("scratch127 %s build wall is within 1.5x healthy %s",
+		a5RouteDetail(scratch127), a5RouteDetail(healthyBaseline)))
+}
+
+func a5HealthyBaselineRoutes() []a5BuildRoute {
+	return []a5BuildRoute{
+		{inputShape: A5BuildInputContiguous, buildPath: A5BuildPathContiguousFast},
+	}
 }
 
 func validateA5HealthyComparison(before, after a5BuildSummary) FinalGateCheck {
-	check := finalGateCheck(4, "A5 healthy contiguous before-after")
+	check := finalGateCheck(4, "A5 healthy build before-after")
 
-	for label, summary := range map[string]a5BuildSummary{"before": before, "after": after} {
-		if reason := a5CommonReportFailure(summary, A5BuildRoleHealthyLustre,
-			A5BuildInputContiguous, A5BuildPathContiguousFast); reason != "" {
-			return check.fail(label + " " + reason)
-		}
+	if reason := a5CommonReportFailure(before, A5BuildRoleHealthyLustre,
+		a5HealthyBaselineRoutes()...); reason != "" {
+		return check.fail("before " + reason)
+	}
+
+	if reason := a5CommonReportFailure(after, A5BuildRoleHealthyLustre,
+		a5HealthyCurrentRoutes()...); reason != "" {
+		return check.fail("after " + reason)
 	}
 
 	failures := a5HealthyComparisonFailures(before, after)
@@ -262,15 +294,27 @@ func validateA5HealthyComparison(before, after a5BuildSummary) FinalGateCheck {
 		return check.fail(strings.Join(failures, "; "))
 	}
 
-	return check.pass("healthy contiguous wall, RSS, and spool bytes are within +/-10%")
+	return check.pass(fmt.Sprintf("healthy current %s wall, RSS, and spool bytes are within +/-10%%",
+		a5RouteDetail(after)))
 }
 
-func a5CommonReportFailure(summary a5BuildSummary, role, inputShape, buildPath string) string {
+func a5HealthyCurrentRoutes() []a5BuildRoute {
+	return []a5BuildRoute{
+		{inputShape: A5BuildInputContiguous, buildPath: A5BuildPathContiguousFast},
+		{inputShape: A5BuildInputLargeUnprobed, buildPath: A5BuildPathDirbuild},
+	}
+}
+
+func a5CommonReportFailure(summary a5BuildSummary, role string, routes ...a5BuildRoute) string {
 	if reason := a5CompletionFailure(summary); reason != "" {
 		return reason
 	}
 
-	if reason := a5IdentityFailure(summary, role, inputShape, buildPath); reason != "" {
+	if reason := a5IdentityFailure(summary, role); reason != "" {
+		return reason
+	}
+
+	if reason := a5RouteFailure(summary, routes...); reason != "" {
 		return reason
 	}
 
@@ -285,17 +329,9 @@ func a5CompletionFailure(summary a5BuildSummary) string {
 	return ""
 }
 
-func a5IdentityFailure(summary a5BuildSummary, role, inputShape, buildPath string) string {
+func a5IdentityFailure(summary a5BuildSummary, role string) string {
 	if summary.role != role {
 		return fmt.Sprintf("role %q != %q", summary.role, role)
-	}
-
-	if summary.inputShape != inputShape {
-		return fmt.Sprintf("input_shape %q != %q", summary.inputShape, inputShape)
-	}
-
-	if summary.buildPath != buildPath {
-		return fmt.Sprintf("build_path %q != %q", summary.buildPath, buildPath)
 	}
 
 	if summary.rowCap != a5BuildExpectedRowCap {
@@ -303,6 +339,47 @@ func a5IdentityFailure(summary a5BuildSummary, role, inputShape, buildPath strin
 	}
 
 	return ""
+}
+
+func a5RouteFailure(summary a5BuildSummary, routes ...a5BuildRoute) string {
+	for _, route := range routes {
+		if a5RouteMatches(summary, route) {
+			return ""
+		}
+	}
+
+	if len(routes) == 1 {
+		return a5SingleRouteFailure(summary, routes[0])
+	}
+
+	return fmt.Sprintf("input_shape/build_path %q not in %s",
+		a5RouteDetail(summary), a5RouteList(routes))
+}
+
+func a5RouteList(routes []a5BuildRoute) string {
+	labels := make([]string, 0, len(routes))
+	for _, route := range routes {
+		labels = append(labels, route.inputShape+"/"+route.buildPath)
+	}
+
+	return strings.Join(labels, ", ")
+}
+
+func a5RouteMatches(summary a5BuildSummary, route a5BuildRoute) bool {
+	return summary.inputShape == route.inputShape && summary.buildPath == route.buildPath
+}
+
+func a5SingleRouteFailure(summary a5BuildSummary, route a5BuildRoute) string {
+	if summary.inputShape != route.inputShape {
+		return fmt.Sprintf("input_shape %q != %q", summary.inputShape, route.inputShape)
+	}
+
+	if summary.buildPath != route.buildPath {
+		return fmt.Sprintf("build_path %q != %q", summary.buildPath, route.buildPath)
+	}
+
+	return fmt.Sprintf("input_shape/build_path %q != %s/%s",
+		a5RouteDetail(summary), route.inputShape, route.buildPath)
 }
 
 func a5MeasurementFailure(summary a5BuildSummary) string {
@@ -352,6 +429,15 @@ func a5Ratio(after, before float64) float64 {
 	}
 
 	return after / before
+}
+
+func a5RouteDetail(summary a5BuildSummary) string {
+	return summary.inputShape + "/" + summary.buildPath
+}
+
+type a5BuildRoute struct {
+	inputShape string
+	buildPath  string
 }
 
 func a5BuildOperation(report perfreport.Report) (perfreport.Operation, bool) {

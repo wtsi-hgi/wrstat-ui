@@ -55,11 +55,14 @@ const (
 	a4TotalEntries      = 1_000_000
 	a4DirectoryRows     = 50_000
 	a4DirectoryOnlyRows = 250_000
+	a4AgedFanoutDirs    = 80_000
 	// A4's heap budget scales with directory rows, not file rows.
 	a4HeapBaseBudgetBytes          = 64 * 1024 * 1024
 	a4HeapPerDirectoryBudgetBytes  = 8 * 1024
 	a4IndexHeapBaseBudgetBytes     = 48 * 1024 * 1024
 	a4IndexHeapPerDirectoryBytes   = 430
+	a4RollupHeapBaseBudgetBytes    = 128 * 1024 * 1024
+	a4RollupHeapPerDirectoryBytes  = 6 * 1024
 	a4HeapSamplerInterval          = 10 * time.Millisecond
 	a4LargeNonContiguousStatsInput = "stats.tsv"
 )
@@ -191,6 +194,38 @@ func TestBuildA4BoundedMemoryAndBytesWritten(t *testing.T) {
 		So(sink.records, ShouldEqual, a4DirectoryRows)
 		So(errArtifacts, ShouldBeNil)
 		So(artefacts, ShouldBeEmpty)
+	})
+
+	Convey("A4.3 aged per-directory rollup emits without retaining every materialised output row", t, func() {
+		dir := t.TempDir()
+		input := filepath.Join(dir, a4LargeNonContiguousStatsInput)
+
+		So(writeAgedDirectoryFanoutStats(input, a4AgedFanoutDirs), ShouldBeNil)
+
+		runtime.GC()
+
+		var before runtime.MemStats
+		runtime.ReadMemStats(&before)
+
+		stopSampling := startHeapInuseSampler(before.HeapInuse, a4HeapSamplerInterval)
+		sink := new(countingDB)
+		err := Build(func() (io.ReadCloser, error) {
+			return os.Open(input)
+		}, "/", sink, dirbuildRefTime)
+		peakGrowth := stopSampling()
+
+		runtime.GC()
+
+		var after runtime.MemStats
+		runtime.ReadMemStats(&after)
+
+		heapBudget := a4RollupHeapBudget(a4AgedFanoutDirs)
+		retainedGrowth := heapInuseGrowth(before.HeapInuse, after.HeapInuse)
+
+		So(err, ShouldBeNil)
+		So(sink.records, ShouldEqual, a4AgedFanoutDirs+2)
+		So(peakGrowth, ShouldBeLessThan, heapBudget)
+		So(retainedGrowth, ShouldBeLessThan, heapBudget)
 	})
 }
 
@@ -427,6 +462,50 @@ func chunkSortArtifactsBelow(root string) ([]string, error) {
 	slices.Sort(artefacts)
 
 	return artefacts, err
+}
+
+func writeAgedDirectoryFanoutStats(path string, dirs int) error {
+	file, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+
+	writer := bufio.NewWriterSize(file, 1024*1024)
+	writeErr := writeAgedDirectoryFanoutStatsRows(writer, dirs)
+	flushErr := writer.Flush()
+	closeErr := file.Close()
+
+	return errors.Join(writeErr, flushErr, closeErr)
+}
+
+func writeAgedDirectoryFanoutStatsRows(writer io.Writer, dirs int) error {
+	old := dirbuildRefUnix - 8*db.SecondsInAYear
+
+	for dirIndex := range dirs {
+		if _, err := fmt.Fprintf(
+			writer,
+			"%q\t%d\t%d\t%d\t%d\t%d\t%d\t%c\t%d\t%d\t1\t%d\n",
+			fmt.Sprintf("/fanout/d%06d/old.bam", dirIndex),
+			int64(1),
+			uint32(10),
+			uint32(20),
+			old,
+			old,
+			old,
+			stats.FileType,
+			int64(3_000_000+dirIndex),
+			int64(1),
+			int64(1),
+		); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func a4RollupHeapBudget(dirRows uint64) uint64 {
+	return a4RollupHeapBaseBudgetBytes + dirRows*a4RollupHeapPerDirectoryBytes
 }
 
 type comparableGUTA struct {

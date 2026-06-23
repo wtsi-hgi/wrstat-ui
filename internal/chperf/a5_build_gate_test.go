@@ -36,6 +36,10 @@ import (
 type a5BuildGateFixtureOptions struct {
 	scratch127BuildScratchBytes uint64
 	scratch127WallMS            float64
+	scratch127Route             a5BuildRoute
+	t283Route                   a5BuildRoute
+	healthyBeforeRoute          a5BuildRoute
+	healthyAfterRoute           a5BuildRoute
 	healthyAfterMS              float64
 	healthyAfterSpoolBytes      uint64
 }
@@ -61,6 +65,27 @@ func TestA5BuildPerfGates(t *testing.T) {
 		So(result.Checks[2].Name, ShouldContainSubstring, "scratch127")
 		So(result.Metrics.T283WallRatio, ShouldBeGreaterThan, 4.0)
 		So(result.Metrics.HealthyWallChangeRatio, ShouldEqual, 1.05)
+	})
+
+	Convey("A5 accepts large-unprobed dirbuild evidence without weakening healthy fast-path checks", t, func() {
+		root := t.TempDir()
+		largeDirbuild := a5BuildRoute{inputShape: A5BuildInputLargeUnprobed, buildPath: A5BuildPathDirbuild}
+		opts := a5BuildGateFixture(root, a5BuildGateFixtureOptions{
+			scratch127Route:    largeDirbuild,
+			t283Route:          largeDirbuild,
+			healthyAfterRoute:  largeDirbuild,
+			healthyAfterMS:     10_500,
+			healthyBeforeRoute: a5BuildRoute{inputShape: A5BuildInputContiguous, buildPath: A5BuildPathContiguousFast},
+		})
+
+		result, err := ValidateA5BuildPerfGate(opts)
+
+		So(err, ShouldBeNil)
+		So(result.Passed, ShouldBeTrue)
+		So(result.Checks[0].Detail, ShouldContainSubstring, A5BuildInputLargeUnprobed)
+		So(result.Checks[2].Detail, ShouldContainSubstring, A5BuildPathContiguousFast)
+		So(result.Checks[3].Detail, ShouldContainSubstring, A5BuildInputLargeUnprobed)
+		So(result.Metrics.Scratch127WallRatio, ShouldEqual, 1.2)
 	})
 
 	Convey("A5 rejects non-contiguous build scratch at the 100 MB cap", t, func() {
@@ -106,6 +131,20 @@ func TestA5BuildPerfGates(t *testing.T) {
 		So(result.Checks[3].Passed, ShouldBeFalse)
 		So(result.Checks[3].Detail, ShouldContainSubstring, "spool")
 	})
+
+	Convey("A5 rejects healthy Lustre current evidence that is non-contiguous instead of large-unprobed", t, func() {
+		root := t.TempDir()
+		opts := a5BuildGateFixture(root, a5BuildGateFixtureOptions{
+			healthyAfterRoute: a5BuildRoute{inputShape: A5BuildInputNonContiguous, buildPath: A5BuildPathDirbuild},
+		})
+
+		result, err := ValidateA5BuildPerfGate(opts)
+
+		So(err, ShouldBeNil)
+		So(result.Passed, ShouldBeFalse)
+		So(result.Checks[3].Passed, ShouldBeFalse)
+		So(result.Checks[3].Detail, ShouldContainSubstring, A5BuildInputNonContiguous)
+	})
 }
 
 func a5BuildGateFixture(root string, opts a5BuildGateFixtureOptions) A5BuildGateOptions {
@@ -133,20 +172,41 @@ func a5BuildGateFixture(root string, opts a5BuildGateFixtureOptions) A5BuildGate
 		HealthyAfterPath:     filepath.Join(root, "healthy-after.json"),
 	}
 
+	scratchRoute := a5BuildRouteOrDefault(opts.scratch127Route,
+		A5BuildInputNonContiguous, A5BuildPathDirbuild)
+	t283Route := a5BuildRouteOrDefault(opts.t283Route,
+		A5BuildInputNonContiguous, A5BuildPathDirbuild)
+	healthyBeforeRoute := a5BuildRouteOrDefault(opts.healthyBeforeRoute,
+		A5BuildInputContiguous, A5BuildPathContiguousFast)
+	healthyAfterRoute := a5BuildRouteOrDefault(opts.healthyAfterRoute,
+		A5BuildInputContiguous, A5BuildPathContiguousFast)
+
 	a5WriteBuildReportForTest(paths.Scratch127ReportPath,
-		a5BuildReportForTest(A5BuildRoleScratch127, A5BuildInputNonContiguous, A5BuildPathDirbuild,
+		a5BuildReportForTest(A5BuildRoleScratch127, scratchRoute.inputShape, scratchRoute.buildPath,
 			scratchBytes, 51_000_000, 900_000_000, scratchWallMS))
 	a5WriteBuildReportForTest(paths.T283ReportPath,
-		a5BuildReportForTest(A5BuildRoleT283, A5BuildInputNonContiguous, A5BuildPathDirbuild,
+		a5BuildReportForTest(A5BuildRoleT283, t283Route.inputShape, t283Route.buildPath,
 			0, 134_000_000, 7_300_000_000, 48_000))
 	a5WriteBuildReportForTest(paths.HealthyBeforePath,
-		a5BuildReportForTest(A5BuildRoleHealthyLustre, A5BuildInputContiguous, A5BuildPathContiguousFast,
+		a5BuildReportForTest(A5BuildRoleHealthyLustre, healthyBeforeRoute.inputShape, healthyBeforeRoute.buildPath,
 			0, 60_000_000, 1_000_000_000, 10_000))
 	a5WriteBuildReportForTest(paths.HealthyAfterPath,
-		a5BuildReportForTest(A5BuildRoleHealthyLustre, A5BuildInputContiguous, A5BuildPathContiguousFast,
+		a5BuildReportForTest(A5BuildRoleHealthyLustre, healthyAfterRoute.inputShape, healthyAfterRoute.buildPath,
 			0, healthyAfterSpool, 1_040_000_000, healthyAfterMS))
 
 	return paths
+}
+
+func a5BuildRouteOrDefault(route a5BuildRoute, inputShape string, buildPath string) a5BuildRoute {
+	if route.inputShape == "" {
+		route.inputShape = inputShape
+	}
+
+	if route.buildPath == "" {
+		route.buildPath = buildPath
+	}
+
+	return route
 }
 
 func a5WriteBuildReportForTest(path string, report perfreport.Report) {

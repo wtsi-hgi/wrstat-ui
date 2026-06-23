@@ -68,7 +68,7 @@ const (
 	summariseActiveVirtualNoParentID   uint32 = 0
 	summariseActiveVirtualZeroSnapshot        = "00000000-0000-0000-0000-000000000000"
 	summariseBuildBytesPerKiB                 = 1024
-	summariseSpoolDirbuildFirstBytes          = 512 * 1024 * 1024
+	summariseSpoolDirbuildFirstBytes          = 32 * 1024 * 1024
 )
 
 var (
@@ -87,6 +87,14 @@ var (
 	errSummariseSpoolDirFactsDir           = errors.New("clickhouse spool: dir facts require dir")
 	errSummariseSpoolBasedirsNotReset      = errors.New("clickhouse spool: basedirs store not reset")
 	errSummariseSpoolSubdirPositionInvalid = errors.New("clickhouse spool: basedirs subdir position overflows UInt32")
+)
+
+type summariseSpoolDirbuildFirstReason uint8
+
+const (
+	summariseSpoolDirbuildFirstNone summariseSpoolDirbuildFirstReason = iota
+	summariseSpoolDirbuildFirstLargeUnprobed
+	summariseSpoolDirbuildFirstNonContiguous
 )
 
 func openSummariseSpoolStatsFile(statsPath string) (io.ReadCloser, error) {
@@ -212,6 +220,8 @@ type summariseFullFilterPendingDir struct {
 	rows             []chspool.DirFilterAllRow
 	lastChildByTuple map[summariseFullFilterTupleKey]string
 }
+
+type summariseFullFilterDirectChildCounts map[summariseFullFilterTupleKey]uint64
 
 type summariseMountActiveRow struct {
 	mountPath  string
@@ -848,6 +858,44 @@ func (b *summariseDirbuildBasedirsBuilder) addDirectOutputMap(
 	}
 }
 
+func (w *summariseDGUTASpoolWriter) noteSchema3FutureDirectChildTuples(
+	parentDir string,
+	tuples map[summariseFullFilterTupleKey]struct{},
+) {
+	if w.fullFilterFutureChildren == nil {
+		w.fullFilterFutureChildren = make(map[string]summariseFullFilterDirectChildCounts)
+	}
+
+	counts := w.fullFilterFutureChildren[parentDir]
+	if counts == nil {
+		counts = make(summariseFullFilterDirectChildCounts, len(tuples))
+		w.fullFilterFutureChildren[parentDir] = counts
+	}
+
+	for tuple := range tuples {
+		counts[tuple]++
+	}
+}
+
+func (w *summariseDGUTASpoolWriter) applySchema3FutureDirectChildTuples(
+	dir string,
+	rows []chspool.DirFilterAllRow,
+) {
+	dir = summariseEnsureTrailingSlash(dir)
+
+	counts := w.fullFilterFutureChildren[dir]
+	if len(counts) == 0 {
+		return
+	}
+
+	delete(w.fullFilterFutureChildren, dir)
+
+	for idx := range rows {
+		tuple := summariseFullFilterKeyForRow(rows[idx])
+		rows[idx].FilterChildCount += counts[tuple]
+	}
+}
+
 func summariseSpoolProbeContiguity(statsPath string, mountPath string) (bool, error) {
 	reader, err := openSummariseSpoolStats(statsPath)
 	if err != nil {
@@ -872,6 +920,22 @@ func summariseSpoolProbeContiguity(statsPath string, mountPath string) (bool, er
 	}
 
 	return scanErr == nil && closeErr == nil, errors.Join(scanErr, closeErr)
+}
+
+func summariseSpoolDirbuildFirstReasonForLarge(large bool) summariseSpoolDirbuildFirstReason {
+	if large {
+		return summariseSpoolDirbuildFirstLargeUnprobed
+	}
+
+	return summariseSpoolDirbuildFirstNone
+}
+
+func summariseSpoolDirbuildFirstInputShape(reason summariseSpoolDirbuildFirstReason) string {
+	if reason == summariseSpoolDirbuildFirstLargeUnprobed {
+		return chperf.A5BuildInputLargeUnprobed
+	}
+
+	return chperf.A5BuildInputNonContiguous
 }
 
 func summariseDirbuildBasedirsMergeSummary(
@@ -1112,6 +1176,8 @@ func (w *summariseDGUTASpoolWriter) writeSchema3FullFilterRows(
 	w.noteSchema3DirectChildTuples(summariseParentDirForPath(record.canonicalDir), record.canonicalDir, tuples)
 
 	rows := summariseFullFilterRowsForGUTAs(w, record, gutas, childCount)
+	w.applySchema3FutureDirectChildTuples(record.canonicalDir, rows)
+
 	if len(rows) == 0 {
 		return nil
 	}
@@ -1197,14 +1263,26 @@ func (w *summariseDGUTASpoolWriter) noteSchema3DirectChildTuples(
 	}
 
 	parentDir = summariseEnsureTrailingSlash(parentDir)
+
 	childDir = summariseEnsureTrailingSlash(childDir)
+	if parentDir == childDir {
+		return
+	}
+
+	foundPendingParent := false
 
 	for idx := range w.fullFilterPending {
 		if w.fullFilterPending[idx].dir != parentDir {
 			continue
 		}
 
+		foundPendingParent = true
+
 		summariseNotePendingDirectChildTuples(&w.fullFilterPending[idx], childDir, tuples)
+	}
+
+	if !foundPendingParent {
+		w.noteSchema3FutureDirectChildTuples(parentDir, tuples)
 	}
 }
 
@@ -2112,6 +2190,7 @@ type summariseDGUTASpoolWriter struct {
 	refreshedAt                   time.Time
 	previousDGUTARows             summariseDGUTARecordRows
 	fullFilterPending             []summariseFullFilterPendingDir
+	fullFilterFutureChildren      map[string]summariseFullFilterDirectChildCounts
 	activeVirtualRootFacts        map[string]chspool.DirFactRow
 	activeVirtualRootFilterRows   map[string][]chspool.DirFilterAllRow
 	activeVirtualMountChildCounts map[string]uint64
@@ -2354,13 +2433,13 @@ func runSummariseSpoolBuild(
 	target *clickHouseSummariseTarget,
 	diag *summariseDiagnostics,
 ) summariseSpoolBuildResult {
-	useDirbuildFirst, err := summariseSpoolShouldUseDirbuildFirst(statsPath, target.mountPath, diag)
+	dirbuildFirstReason, err := summariseSpoolShouldUseDirbuildFirst(statsPath, target.mountPath, diag)
 	if err != nil {
 		return summariseSpoolBuildResult{err: err}
 	}
 
-	if useDirbuildFirst {
-		return runSummariseSpoolDirbuildFirst(statsPath, partialDir, expected, target, diag)
+	if dirbuildFirstReason != summariseSpoolDirbuildFirstNone {
+		return runSummariseSpoolDirbuildFirst(statsPath, partialDir, expected, target, diag, dirbuildFirstReason)
 	}
 
 	manifest, records, scratchBytes, err := buildSummariseSpoolAttempt(statsPath, partialDir, expected, target, diag)
@@ -2377,12 +2456,19 @@ func runSummariseSpoolDirbuildFirst(
 	expected chspool.Manifest,
 	target *clickHouseSummariseTarget,
 	diag *summariseDiagnostics,
+	reason summariseSpoolDirbuildFirstReason,
 ) summariseSpoolBuildResult {
 	manifest, records, scratchBytes, err := buildSummariseSpoolWithDirbuild(
 		statsPath, partialDir, expected, target, diag,
 	)
 
-	return summariseSpoolDirbuildResult(manifest, records, scratchBytes, err)
+	return summariseSpoolDirbuildResult(
+		manifest,
+		summariseSpoolDirbuildFirstInputShape(reason),
+		records,
+		scratchBytes,
+		err,
+	)
 }
 
 func retrySummariseSpoolWithDirbuild(
@@ -2396,7 +2482,13 @@ func retrySummariseSpoolWithDirbuild(
 	manifest, records, scratchBytes, err := buildSummariseSpoolWithDirbuild(
 		statsPath, partialDir, expected, target, diag,
 	)
-	result := summariseSpoolDirbuildResult(manifest, records, scratchBytes, err)
+	result := summariseSpoolDirbuildResult(
+		manifest,
+		chperf.A5BuildInputNonContiguous,
+		records,
+		scratchBytes,
+		err,
+	)
 	result.scratchBytes += firstAttemptScratchBytes
 
 	return result
@@ -2420,13 +2512,14 @@ func summariseSpoolContiguousFastResult(
 
 func summariseSpoolDirbuildResult(
 	manifest *chspool.Manifest,
+	inputShape string,
 	records uint64,
 	scratchBytes uint64,
 	err error,
 ) summariseSpoolBuildResult {
 	return summariseSpoolBuildResult{
 		manifest:     manifest,
-		inputShape:   chperf.A5BuildInputNonContiguous,
+		inputShape:   inputShape,
 		buildPath:    chperf.A5BuildPathDirbuild,
 		records:      records,
 		scratchBytes: scratchBytes,
@@ -2907,19 +3000,41 @@ func summariseSpoolShouldUseDirbuildFirst(
 	statsPath string,
 	mountPath string,
 	diag *summariseDiagnostics,
-) (bool, error) {
+) (summariseSpoolDirbuildFirstReason, error) {
+	large, err := summariseSpoolStatsAtLeast(statsPath, summariseSpoolDirbuildFirstBytes)
+	if large || err != nil {
+		return summariseSpoolDirbuildFirstReasonForLarge(large), err
+	}
+
 	if !summariseSpoolShouldProbeBeforeFastPath(statsPath) {
-		return false, nil
+		return summariseSpoolDirbuildFirstNone, nil
 	}
 
 	diag.setCurrentPhase("parse")
 
 	contiguous, err := summariseSpoolProbeContiguity(statsPath, mountPath)
 	if err != nil {
+		return summariseSpoolDirbuildFirstNone, err
+	}
+
+	if !contiguous {
+		return summariseSpoolDirbuildFirstNonContiguous, nil
+	}
+
+	return summariseSpoolDirbuildFirstNone, nil
+}
+
+func summariseSpoolStatsAtLeast(statsPath string, threshold int64) (bool, error) {
+	if statsPath == "-" {
+		return false, nil
+	}
+
+	info, err := statSummariseSpoolStats(statsPath)
+	if err != nil {
 		return false, err
 	}
 
-	return !contiguous, nil
+	return info.Size() >= threshold, nil
 }
 
 func summariseSpoolShouldProbeBeforeFastPath(statsPath string) bool {
