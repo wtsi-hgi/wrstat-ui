@@ -131,7 +131,6 @@ func newPathBuilder() *pathBuilder {
 
 	return &pathBuilder{
 		paths:   map[string]*summary.DirectoryPath{"/": root},
-		keys:    map[*summary.DirectoryPath]string{root: "/"},
 		rawDirs: make(map[string]struct{}),
 	}
 }
@@ -262,7 +261,7 @@ func assignDirectoryIDs(paths *pathBuilder, mountPath string, refUnix int64) ([]
 		return nil, err
 	}
 
-	populateChildren(state.nodes, state.nodesByPath)
+	populateChildren(state.nodes)
 
 	return state.nodes, nil
 }
@@ -283,32 +282,25 @@ func newIDAssignmentState(
 	}
 }
 
-func populateChildren(nodes []*dirNode, nodesByPath map[string]*dirNode) {
+func populateChildren(nodes []*dirNode) {
 	for _, node := range nodes {
-		if node.dir.Parent == nil {
+		if node.parent == nil {
 			continue
 		}
 
-		parent := nodesByPath[string(node.dir.Parent.AppendTo(nil))]
-		if parent == nil {
-			continue
-		}
-
-		parent.children = append(parent.children, node.dir.Name)
-		parent.childCount++
+		node.parent.children = append(node.parent.children, node.dir.Name)
+		node.parent.childCount++
 	}
 }
 
 func indexNodes(nodes []*dirNode) *directoryIndex {
 	index := &directoryIndex{
-		nodes:    nodes,
-		byID:     make(map[uint32]*dirNode, len(nodes)),
-		pathToID: make(map[string]uint32, len(nodes)),
+		nodes:      nodes,
+		pathToNode: make(map[string]*dirNode, len(nodes)),
 	}
 
 	for _, node := range nodes {
-		index.byID[node.dirID] = node
-		index.pathToID[node.key] = node.dirID
+		index.pathToNode[node.key] = node
 	}
 
 	return index
@@ -319,13 +311,12 @@ func rollUp(index *directoryIndex) {
 		node := index.nodes[i]
 		node.gutas = materializeGUTAs(node.store)
 
-		parent := index.byID[node.parentID]
-		if parent == nil {
+		if node.parent == nil {
 			continue
 		}
 
-		dirguta.MergeSeenHardlinks(&parent.store, parent.seenHardlinks, &node.store, node.seenHardlinks)
-		node.store.DrainInto(&parent.store)
+		mergeNodeHardlinks(node.parent, node)
+		drainNodeStore(node.parent, node)
 	}
 }
 
@@ -338,6 +329,25 @@ func materializeGUTAs(store dirguta.GUTAStore) db.GUTAs {
 	}
 
 	return gutas
+}
+
+func mergeNodeHardlinks(parent *dirNode, node *dirNode) {
+	if len(node.seenHardlinks) == 0 {
+		return
+	}
+
+	parent.ensureStore()
+	parent.ensureHardlinks()
+	dirguta.MergeSeenHardlinks(&parent.store, parent.seenHardlinks, &node.store, node.seenHardlinks)
+}
+
+func drainNodeStore(parent *dirNode, node *dirNode) {
+	if len(node.store.SumMap) == 0 {
+		return
+	}
+
+	parent.ensureStore()
+	node.store.DrainInto(&parent.store)
 }
 
 func emit(index *directoryIndex, database dirguta.DB) error {
@@ -393,6 +403,10 @@ func addSyntheticDirRows(row rawStatsRow, index *directoryIndex, refUnix int64) 
 	return nil
 }
 
+func shouldTrackHardlink(info *summary.FileInfo) bool {
+	return !info.IsDir() && info.Nlink > 1 && info.Inode != 0
+}
+
 func addStatsRow(row rawStatsRow, index *directoryIndex, refUnix int64, files FileSink) error {
 	node, err := index.resolve(row)
 	if err != nil {
@@ -421,14 +435,19 @@ func addToNode(node *dirNode, info *summary.FileInfo, refUnix int64) {
 		atime = refUnix
 	}
 
-	if dirguta.HandleHardlink(&node.store, node.seenHardlinks, info, ft, atime) {
+	store := node.ensureStore()
+	if shouldTrackHardlink(info) {
+		node.ensureHardlinks()
+	}
+
+	if dirguta.HandleHardlink(store, node.seenHardlinks, info, ft, atime) {
 		return
 	}
 
 	gutaKeysA := dirguta.GUTAKeyPool.Get().(*[dirguta.MaxNumOfGUTAKeys]dirguta.GUTAKey) //nolint:errcheck,forcetypeassert
 	gutaKeys := dirguta.GUTAKeys(gutaKeysA[:0])
 	gutaKeys.Append(info.GID, info.UID, ft)
-	node.store.AddForEach(gutaKeys, info.Size, atime, max(0, info.MTime))
+	store.AddForEach(gutaKeys, info.Size, atime, max(0, info.MTime))
 	dirguta.GUTAKeyPool.Put(gutaKeysA)
 }
 
@@ -450,6 +469,7 @@ func fileRowDirID(node *dirNode, info summary.FileInfo) uint32 {
 
 type dirNode struct {
 	dir                    *summary.DirectoryPath
+	parent                 *dirNode
 	key                    string
 	dirID                  uint32
 	parentID               uint32
@@ -473,7 +493,7 @@ func enterNode(
 	nodesByPath map[string]*dirNode,
 	refUnix int64,
 ) (*dirNode, error) {
-	parentID, err := parentID(dir, nodesByPath)
+	parent, parentID, err := parentAndID(dir, nodesByPath)
 	if err != nil {
 		return nil, err
 	}
@@ -484,31 +504,47 @@ func enterNode(
 	}
 
 	return &dirNode{
-		dir:           dir,
-		key:           key,
-		dirID:         dirID,
-		parentID:      parentID,
-		depth:         uint16(dir.Depth), //nolint:gosec // stats paths are bounded by max path length.
-		store:         dirguta.NewGUTAStore(refUnix),
-		seenHardlinks: make(map[int64]*dirguta.InodeEntry),
-		isTempDir:     isTempDirectory(dir, nodesByPath),
+		dir:       dir,
+		parent:    parent,
+		key:       key,
+		dirID:     dirID,
+		parentID:  parentID,
+		depth:     uint16(dir.Depth), //nolint:gosec // stats paths are bounded by max path length.
+		store:     dirguta.GUTAStore{RefTime: refUnix},
+		isTempDir: isTempDirectory(dir, parent),
 	}, nil
 }
 
-func parentID(dir *summary.DirectoryPath, nodesByPath map[string]*dirNode) (uint32, error) {
+func parentAndID(dir *summary.DirectoryPath, nodesByPath map[string]*dirNode) (*dirNode, uint32, error) {
 	if dir.Parent == nil {
-		return summary.ReservedParentIDForDepth(dir.Depth)
+		parentID, err := summary.ReservedParentIDForDepth(dir.Depth)
+
+		return nil, parentID, err
 	}
 
 	parent, ok := nodesByPath[string(dir.Parent.AppendTo(nil))]
 	if !ok {
-		return 0, fmt.Errorf("%w: %s", summary.ErrDirIDUnassigned, dir.Parent.AppendTo(nil))
+		return nil, 0, fmt.Errorf("%w: %s", summary.ErrDirIDUnassigned, dir.Parent.AppendTo(nil))
 	}
 
-	return parent.dirID, nil
+	return parent, parent.dirID, nil
 }
 
-func isTempDirectory(dir *summary.DirectoryPath, nodesByPath map[string]*dirNode) bool {
+func (node *dirNode) ensureStore() *dirguta.GUTAStore {
+	if node.store.SumMap == nil {
+		node.store = dirguta.NewGUTAStore(node.store.RefTime)
+	}
+
+	return &node.store
+}
+
+func (node *dirNode) ensureHardlinks() {
+	if node.seenHardlinks == nil {
+		node.seenHardlinks = make(map[int64]*dirguta.InodeEntry)
+	}
+}
+
+func isTempDirectory(dir *summary.DirectoryPath, parent *dirNode) bool {
 	if dir == nil {
 		return false
 	}
@@ -517,18 +553,16 @@ func isTempDirectory(dir *summary.DirectoryPath, nodesByPath map[string]*dirNode
 		return true
 	}
 
-	if dir.Parent == nil {
-		return false
-	}
+	return parent != nil && parent.isTempDir
+}
 
-	parent, ok := nodesByPath[string(dir.Parent.AppendTo(nil))]
-
-	return ok && parent.isTempDir
+type pathEntry struct {
+	key string
+	dir *summary.DirectoryPath
 }
 
 type pathBuilder struct {
 	paths   map[string]*summary.DirectoryPath
-	keys    map[*summary.DirectoryPath]string
 	rawDirs map[string]struct{}
 }
 
@@ -547,7 +581,6 @@ func (p *pathBuilder) dir(path string) *summary.DirectoryPath {
 	}
 
 	p.paths[key] = dir
-	p.keys[dir] = key
 
 	return dir
 }
@@ -575,8 +608,9 @@ func dirName(path string) string {
 }
 
 func (p *pathBuilder) rawDir(path string) {
-	dir := p.dir(path)
-	p.rawDirs[p.key(dir)] = struct{}{}
+	key := cleanDirPath(path)
+	p.dir(key)
+	p.rawDirs[key] = struct{}{}
 }
 
 func (p *pathBuilder) hasRawDir(path string) bool {
@@ -585,18 +619,18 @@ func (p *pathBuilder) hasRawDir(path string) bool {
 	return ok
 }
 
-func (p *pathBuilder) sorted() []*summary.DirectoryPath {
-	dirs := make([]*summary.DirectoryPath, 0, len(p.paths))
-	for _, dir := range p.paths {
-		dirs = append(dirs, dir)
+func (p *pathBuilder) sorted() []pathEntry {
+	dirs := make([]pathEntry, 0, len(p.paths))
+	for key, dir := range p.paths {
+		dirs = append(dirs, pathEntry{key: key, dir: dir})
 	}
 
-	slices.SortFunc(dirs, func(a, b *summary.DirectoryPath) int {
-		if a.Less(b) {
+	slices.SortFunc(dirs, func(a, b pathEntry) int {
+		if a.dir.Less(b.dir) {
 			return -1
 		}
 
-		if b.Less(a) {
+		if b.dir.Less(a.dir) {
 			return 1
 		}
 
@@ -604,10 +638,6 @@ func (p *pathBuilder) sorted() []*summary.DirectoryPath {
 	})
 
 	return dirs
-}
-
-func (p *pathBuilder) key(dir *summary.DirectoryPath) string {
-	return p.keys[dir]
 }
 
 type idAssignmentState struct {
@@ -619,17 +649,17 @@ type idAssignmentState struct {
 	nodesByPath map[string]*dirNode
 }
 
-func (s *idAssignmentState) enterNext(dir *summary.DirectoryPath) error {
-	if err := s.closeCompletedAncestors(dir); err != nil {
+func (s *idAssignmentState) enterNext(entry pathEntry) error {
+	if err := s.closeCompletedAncestors(entry.dir); err != nil {
 		return err
 	}
 
-	node, err := enterNode(s.alloc, dir, s.paths.key(dir), s.nodesByPath, s.refUnix)
+	node, err := enterNode(s.alloc, entry.dir, entry.key, s.nodesByPath, s.refUnix)
 	if err != nil {
 		return err
 	}
 
-	node.hasRawStatsRow = s.paths.hasRawDir(node.key)
+	node.hasRawStatsRow = s.paths.hasRawDir(entry.key)
 
 	s.nodes = append(s.nodes, node)
 	s.nodesByPath[node.key] = node
@@ -844,18 +874,17 @@ func (r rawStatsRow) syntheticDirInfo(dir *summary.DirectoryPath) summary.FileIn
 }
 
 type directoryIndex struct {
-	nodes    []*dirNode
-	byID     map[uint32]*dirNode
-	pathToID map[string]uint32
+	nodes      []*dirNode
+	pathToNode map[string]*dirNode
 }
 
 func (index *directoryIndex) resolve(row rawStatsRow) (*dirNode, error) {
-	dirID, ok := index.pathToID[row.leafDirKey()]
+	node, ok := index.pathToNode[row.leafDirKey()]
 	if !ok {
 		return nil, fmt.Errorf("%w: %s", summary.ErrDirIDUnassigned, row.leafDirKey())
 	}
 
-	return index.byID[dirID], nil
+	return node, nil
 }
 
 func (index *directoryIndex) syntheticDirNodes(row rawStatsRow) ([]*dirNode, error) {
@@ -865,7 +894,7 @@ func (index *directoryIndex) syntheticDirNodes(row rawStatsRow) ([]*dirNode, err
 	}
 
 	if row.isDir() {
-		node = index.byID[node.parentID]
+		node = node.parent
 	}
 
 	nodes := make([]*dirNode, 0, nodeDepth(node))
@@ -878,7 +907,7 @@ func (index *directoryIndex) syntheticDirNodes(row rawStatsRow) ([]*dirNode, err
 			nodes = append(nodes, node)
 		}
 
-		node = index.byID[node.parentID]
+		node = node.parent
 	}
 
 	slices.Reverse(nodes)

@@ -52,11 +52,14 @@ const dirbuildRefUnix = int64(1779120209)
 var dirbuildRefTime = time.Unix(dirbuildRefUnix, 0).UTC() //nolint:gochecknoglobals
 
 const (
-	a4TotalEntries  = 1_000_000
-	a4DirectoryRows = 50_000
+	a4TotalEntries      = 1_000_000
+	a4DirectoryRows     = 50_000
+	a4DirectoryOnlyRows = 250_000
 	// A4's heap budget scales with directory rows, not file rows.
 	a4HeapBaseBudgetBytes          = 64 * 1024 * 1024
 	a4HeapPerDirectoryBudgetBytes  = 8 * 1024
+	a4IndexHeapBaseBudgetBytes     = 48 * 1024 * 1024
+	a4IndexHeapPerDirectoryBytes   = 430
 	a4HeapSamplerInterval          = 10 * time.Millisecond
 	a4LargeNonContiguousStatsInput = "stats.tsv"
 )
@@ -105,6 +108,37 @@ func (c *countingDB) Add(db.RecordDGUTA) error {
 }
 
 func TestBuildA4BoundedMemoryAndBytesWritten(t *testing.T) {
+	Convey("A4.0 directory-only index build does not preallocate per-directory accumulators", t, func() {
+		dir := t.TempDir()
+		input := filepath.Join(dir, a4LargeNonContiguousStatsInput)
+
+		So(writeDirectoryOnlyStats(input, a4DirectoryOnlyRows), ShouldBeNil)
+
+		runtime.GC()
+
+		var before runtime.MemStats
+		runtime.ReadMemStats(&before)
+
+		stopSampling := startHeapInuseSampler(before.HeapInuse, a4HeapSamplerInterval)
+		index, err := buildDirectoryIndex(func() (io.ReadCloser, error) {
+			return os.Open(input)
+		}, "/", dirbuildRefUnix)
+		peakGrowth := stopSampling()
+
+		runtime.GC()
+
+		var after runtime.MemStats
+		runtime.ReadMemStats(&after)
+
+		heapBudget := a4DirectoryIndexHeapBudget(a4DirectoryOnlyRows)
+		retainedGrowth := heapInuseGrowth(before.HeapInuse, after.HeapInuse)
+
+		So(err, ShouldBeNil)
+		So(index.nodes, ShouldHaveLength, a4DirectoryOnlyRows)
+		So(peakGrowth, ShouldBeLessThan, heapBudget)
+		So(retainedGrowth, ShouldBeLessThan, heapBudget)
+	})
+
 	Convey("A4.1 one million non-contiguous entries keep heap growth scaled to directory count", t, func() {
 		dir := t.TempDir()
 		input := filepath.Join(dir, a4LargeNonContiguousStatsInput)
@@ -158,6 +192,58 @@ func TestBuildA4BoundedMemoryAndBytesWritten(t *testing.T) {
 		So(errArtifacts, ShouldBeNil)
 		So(artefacts, ShouldBeEmpty)
 	})
+}
+
+func writeDirectoryOnlyStats(path string, dirRows int) error {
+	file, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+
+	writer := bufio.NewWriterSize(file, 1024*1024)
+	writeErr := writeDirectoryOnlyStatsRows(writer, dirRows)
+	flushErr := writer.Flush()
+	closeErr := file.Close()
+
+	return errors.Join(writeErr, flushErr, closeErr)
+}
+
+func writeDirectoryOnlyStatsRows(writer io.Writer, dirRows int) error {
+	if dirRows <= 0 {
+		return nil
+	}
+
+	if _, err := writer.Write([]byte(statsRow(
+		"/",
+		stats.DirType,
+		4096,
+		dirbuildRefUnix,
+		dirbuildRefUnix,
+		99,
+		2,
+	))); err != nil {
+		return err
+	}
+
+	for dirIndex := 1; dirIndex < dirRows; dirIndex++ {
+		if _, err := writer.Write([]byte(statsRow(
+			fmt.Sprintf("/dir%06d/", dirIndex),
+			stats.DirType,
+			4096,
+			dirbuildRefUnix,
+			dirbuildRefUnix,
+			int64(2_000_000+dirIndex),
+			2,
+		))); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func a4DirectoryIndexHeapBudget(dirRows uint64) uint64 {
+	return a4IndexHeapBaseBudgetBytes + dirRows*a4IndexHeapPerDirectoryBytes
 }
 
 func writeLargeNonContiguousStats(path string) error {
