@@ -52,13 +52,15 @@ const dirbuildRefUnix = int64(1779120209)
 var dirbuildRefTime = time.Unix(dirbuildRefUnix, 0).UTC() //nolint:gochecknoglobals
 
 const (
-	a4TotalEntries      = 1_000_000
-	a4DirectoryRows     = 50_000
-	a4DirectoryOnlyRows = 250_000
-	a4AgedFanoutDirs    = 80_000
-	a4CompactFanoutDirs = 100_000
-	a4LongPathDirs      = 80_000
-	a4LongPathNameBytes = 1024
+	a4TotalEntries               = 1_000_000
+	a4DirectoryRows              = 50_000
+	a4DirectoryOnlyRows          = 250_000
+	a4AgedFanoutDirs             = 80_000
+	a4CompactFanoutDirs          = 100_000
+	a4LongPathDirs               = 80_000
+	a4LongPathNameBytes          = 1024
+	a4AssignmentOverlapDirs      = 300_000
+	a4AssignmentOverlapNameBytes = 128
 	// A4's heap budget scales with directory rows, not file rows.
 	a4HeapBaseBudgetBytes          = 64 * 1024 * 1024
 	a4HeapPerDirectoryBudgetBytes  = 8 * 1024
@@ -70,6 +72,8 @@ const (
 	a4CompactHeapPerDirectoryBytes = 3 * 1024
 	a4LongPathHeapBaseBudgetBytes  = 64 * 1024 * 1024
 	a4LongPathHeapPerDirectoryByte = 700
+	a4AssignHeapBaseBudgetBytes    = 48 * 1024 * 1024
+	a4AssignHeapPerDirectoryByte   = 360
 	a4HeapSamplerInterval          = 10 * time.Millisecond
 	a4LargeNonContiguousStatsInput = "stats.tsv"
 )
@@ -219,8 +223,94 @@ func writeLongPathDirectoryStatsRows(writer io.Writer, dirs int, nameBytes int) 
 	return nil
 }
 
+func assertDirectoryIndexMemory(input string, expectedNodes int, heapBudget uint64) {
+	runtime.GC()
+
+	var before runtime.MemStats
+	runtime.ReadMemStats(&before)
+
+	stopSampling := startHeapInuseSampler(before.HeapInuse)
+	index, err := buildDirectoryIndex(func() (io.ReadCloser, error) {
+		return os.Open(input)
+	}, "/", dirbuildRefUnix)
+	peakGrowth := stopSampling()
+
+	runtime.GC()
+
+	var after runtime.MemStats
+	runtime.ReadMemStats(&after)
+
+	retainedGrowth := heapInuseGrowth(before.HeapInuse, after.HeapInuse)
+
+	So(err, ShouldBeNil)
+	So(index.nodes, ShouldHaveLength, expectedNodes)
+	So(peakGrowth, ShouldBeLessThan, heapBudget)
+	So(retainedGrowth, ShouldBeLessThan, heapBudget)
+}
+
 func a4LongPathIndexHeapBudget(dirRows uint64) uint64 {
 	return a4LongPathHeapBaseBudgetBytes + dirRows*a4LongPathHeapPerDirectoryByte
+}
+
+func writeWideDirectoryStats(path string, dirs int, nameBytes int) error {
+	file, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+
+	writer := bufio.NewWriterSize(file, 1024*1024)
+	writeErr := writeWideDirectoryStatsRows(writer, dirs, nameBytes)
+	flushErr := writer.Flush()
+	closeErr := file.Close()
+
+	return errors.Join(writeErr, flushErr, closeErr)
+}
+
+func writeWideDirectoryStatsRows(writer io.Writer, dirs int, nameBytes int) error {
+	if _, err := writer.Write([]byte(statsRow(
+		"/",
+		stats.DirType,
+		4096,
+		dirbuildRefUnix,
+		dirbuildRefUnix,
+		99,
+		2,
+	))); err != nil {
+		return err
+	}
+
+	if _, err := writer.Write([]byte(statsRow(
+		"/wide/",
+		stats.DirType,
+		4096,
+		dirbuildRefUnix,
+		dirbuildRefUnix,
+		100,
+		2,
+	))); err != nil {
+		return err
+	}
+
+	namePrefix := strings.Repeat("w", nameBytes)
+	for dirIndex := range dirs {
+		if _, err := writer.Write([]byte(statsRow(
+			fmt.Sprintf("/wide/%s%06d/", namePrefix, dirIndex),
+			stats.DirType,
+			4096,
+			dirbuildRefUnix,
+			dirbuildRefUnix,
+			int64(5_000_000+dirIndex),
+			2,
+		))); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func a4AssignmentIndexHeapBudget(dirRows uint64) uint64 {
+	return a4AssignHeapBaseBudgetBytes + dirRows*a4AssignHeapPerDirectoryByte
 }
 
 func buildWithDirBuild(data string, mountPath string) ([]db.RecordDGUTA, error) {
@@ -365,30 +455,19 @@ func TestBuildA4BoundedMemoryAndBytesWritten(t *testing.T) {
 		input := filepath.Join(dir, a4LargeNonContiguousStatsInput)
 
 		So(writeLongPathDirectoryStats(input, a4LongPathDirs, a4LongPathNameBytes), ShouldBeNil)
+		assertDirectoryIndexMemory(input, a4LongPathDirs+3, a4LongPathIndexHeapBudget(a4LongPathDirs))
+	})
 
-		runtime.GC()
+	Convey("A4.7 index assignment does not retain the full builder trie", t, func() {
+		dir := t.TempDir()
+		input := filepath.Join(dir, a4LargeNonContiguousStatsInput)
 
-		var before runtime.MemStats
-		runtime.ReadMemStats(&before)
-
-		stopSampling := startHeapInuseSampler(before.HeapInuse)
-		index, err := buildDirectoryIndex(func() (io.ReadCloser, error) {
-			return os.Open(input)
-		}, "/", dirbuildRefUnix)
-		peakGrowth := stopSampling()
-
-		runtime.GC()
-
-		var after runtime.MemStats
-		runtime.ReadMemStats(&after)
-
-		heapBudget := a4LongPathIndexHeapBudget(a4LongPathDirs)
-		retainedGrowth := heapInuseGrowth(before.HeapInuse, after.HeapInuse)
-
-		So(err, ShouldBeNil)
-		So(index.nodes, ShouldHaveLength, a4LongPathDirs+3)
-		So(peakGrowth, ShouldBeLessThan, heapBudget)
-		So(retainedGrowth, ShouldBeLessThan, heapBudget)
+		So(writeWideDirectoryStats(input, a4AssignmentOverlapDirs, a4AssignmentOverlapNameBytes), ShouldBeNil)
+		assertDirectoryIndexMemory(
+			input,
+			a4AssignmentOverlapDirs+2,
+			a4AssignmentIndexHeapBudget(a4AssignmentOverlapDirs),
+		)
 	})
 }
 

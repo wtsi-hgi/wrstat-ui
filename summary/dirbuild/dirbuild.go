@@ -49,8 +49,6 @@ const dirbuildGCPercent = 10
 
 const defaultDiskNodeThreshold = 1_000_000
 
-const idAssignmentStackInitialCap = 64
-
 var newDirIDAllocator = func() dirIDAllocator { //nolint:gochecknoglobals
 	return summary.NewDirIDAllocator()
 }
@@ -287,53 +285,28 @@ func assignDirectoryIDs(
 	mountPath string,
 	refUnix int64,
 ) ([]*dirNode, error) {
-	dirs := paths.sorted()
-
 	alloc := newDirIDAllocator()
 	if err := alloc.SetMountPath(mountPath); err != nil {
 		return nil, err
 	}
 
-	state := newIDAssignmentState(alloc, paths, refUnix, len(dirs))
-
-	for _, dir := range dirs {
-		if err := state.enterNext(dir); err != nil {
-			return nil, err
-		}
-	}
-
-	if err := state.closeRemaining(); err != nil {
+	state := newIDAssignmentState(alloc, refUnix, paths.count)
+	if err := state.assignSubtree(paths.root, nil); err != nil {
 		return nil, err
 	}
-
-	populateChildren(state.nodes)
 
 	return state.nodes, nil
 }
 
 func newIDAssignmentState(
 	alloc dirIDAllocator,
-	paths *pathBuilder,
 	refUnix int64,
 	dirCount int,
 ) *idAssignmentState {
 	return &idAssignmentState{
 		alloc:   alloc,
-		paths:   paths,
 		refUnix: refUnix,
 		nodes:   make([]*dirNode, 0, dirCount),
-		stack:   make([]*dirNode, 0, idAssignmentStackInitialCap),
-	}
-}
-
-func populateChildren(nodes []*dirNode) {
-	for _, node := range nodes {
-		if node.parent == nil {
-			continue
-		}
-
-		node.parent.addChild(node)
-		node.parent.childCount++
 	}
 }
 
@@ -716,12 +689,6 @@ type pathBuilderNode struct {
 	parent   *pathBuilderNode
 	children map[string]*pathBuilderNode
 	raw      bool
-	assigned *dirNode
-}
-
-type pathEntry struct {
-	node *pathBuilderNode
-	dir  *summary.DirectoryPath
 }
 
 type pathBuilder struct {
@@ -781,38 +748,6 @@ func (p *pathBuilder) rawDir(path string) {
 	p.node(path).raw = true
 }
 
-func (p *pathBuilder) sorted() []pathEntry {
-	dirs := make([]pathEntry, 0, p.count)
-	p.appendSorted(&dirs, p.root)
-
-	return dirs
-}
-
-func (p *pathBuilder) appendSorted(dirs *[]pathEntry, node *pathBuilderNode) {
-	*dirs = append(*dirs, pathEntry{node: node, dir: node.dir})
-
-	children := make([]*pathBuilderNode, 0, len(node.children))
-	for _, child := range node.children {
-		children = append(children, child)
-	}
-
-	slices.SortFunc(children, func(a, b *pathBuilderNode) int {
-		if a.dir.Less(b.dir) {
-			return -1
-		}
-
-		if b.dir.Less(a.dir) {
-			return 1
-		}
-
-		return 0
-	})
-
-	for _, child := range children {
-		p.appendSorted(dirs, child)
-	}
-}
-
 func (p *pathBuilder) clear() {
 	p.root = nil
 	p.count = 0
@@ -820,77 +755,83 @@ func (p *pathBuilder) clear() {
 
 type idAssignmentState struct {
 	alloc   dirIDAllocator
-	paths   *pathBuilder
 	refUnix int64
 	nodes   []*dirNode
-	stack   []*dirNode
 }
 
-func (s *idAssignmentState) enterNext(entry pathEntry) error {
-	if err := s.closeCompletedAncestors(entry.dir); err != nil {
-		return err
-	}
-
-	var parent *dirNode
-	if entry.node.parent != nil {
-		parent = entry.node.parent.assigned
-	}
-
-	node, err := enterNode(s.alloc, entry.dir, parent, s.refUnix)
+func (s *idAssignmentState) assignSubtree(builder *pathBuilderNode, parent *dirNode) error {
+	node, err := s.enterBuilderNode(builder, parent)
 	if err != nil {
 		return err
 	}
 
-	node.hasRawStatsRow = entry.node.raw
-	entry.node.assigned = node
+	if err := s.assignBuilderChildren(builder, node); err != nil {
+		return err
+	}
+
+	clearPathBuilderNode(builder)
+
+	return s.leaveAssignedNode(node)
+}
+
+func clearPathBuilderNode(builder *pathBuilderNode) {
+	builder.children = nil
+	builder.parent = nil
+	builder.dir = nil
+}
+
+func (s *idAssignmentState) enterBuilderNode(builder *pathBuilderNode, parent *dirNode) (*dirNode, error) {
+	node, err := enterNode(s.alloc, builder.dir, parent, s.refUnix)
+	if err != nil {
+		return nil, err
+	}
+
+	node.hasRawStatsRow = builder.raw
+	if parent != nil {
+		parent.addChild(node)
+		parent.childCount++
+	}
 
 	s.nodes = append(s.nodes, node)
-	s.stack = append(s.stack, node)
 
-	return nil
+	return node, nil
 }
 
-func (s *idAssignmentState) closeCompletedAncestors(dir *summary.DirectoryPath) error {
-	for len(s.stack) > 0 && !isAncestor(s.stack[len(s.stack)-1].dir, dir) {
-		if err := leaveNode(s.alloc, s.stack[len(s.stack)-1]); err != nil {
-			return err
+func (s *idAssignmentState) assignBuilderChildren(builder *pathBuilderNode, node *dirNode) error {
+	children := sortedPathBuilderChildren(builder)
+	for idx, child := range children {
+		childName := child.dir.Name
+		if childErr := s.assignSubtree(child, node); childErr != nil {
+			return childErr
 		}
 
-		s.stack = s.stack[:len(s.stack)-1]
+		delete(builder.children, childName)
+		children[idx] = nil
 	}
 
 	return nil
 }
 
-func isAncestor(ancestor *summary.DirectoryPath, dir *summary.DirectoryPath) bool {
-	if ancestor == nil || dir == nil || ancestor.Depth >= dir.Depth {
-		return false
+func sortedPathBuilderChildren(builder *pathBuilderNode) []*pathBuilderNode {
+	children := make([]*pathBuilderNode, 0, len(builder.children))
+	for _, child := range builder.children {
+		children = append(children, child)
 	}
 
-	for dir.Depth > ancestor.Depth {
-		dir = dir.Parent
-	}
+	slices.SortFunc(children, func(a, b *pathBuilderNode) int {
+		return compareDirNames(a.dir.Name, b.dir.Name)
+	})
 
-	return dir == ancestor
+	return children
 }
 
-func leaveNode(alloc dirIDAllocator, node *dirNode) error {
-	subtreeEnd, err := alloc.Leave(node.dir)
+func (s *idAssignmentState) leaveAssignedNode(node *dirNode) error {
+	subtreeEnd, err := s.alloc.Leave(node.dir)
 	if err != nil {
 		return err
 	}
 
 	node.subtreeEnd = subtreeEnd
-
-	return nil
-}
-
-func (s *idAssignmentState) closeRemaining() error {
-	for i := len(s.stack) - 1; i >= 0; i-- {
-		if err := leaveNode(s.alloc, s.stack[i]); err != nil {
-			return err
-		}
-	}
 
 	return nil
 }
