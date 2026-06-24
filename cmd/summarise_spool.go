@@ -77,7 +77,7 @@ var (
 	summariseSpoolDirGUTANow     = time.Now
 	openSummariseSpoolStats      = openSummariseSpoolStatsFile
 	statSummariseSpoolStats      = os.Stat
-	buildSummariseSpoolDirbuild  = dirbuild.BuildWithFiles
+	buildSummariseSpoolDirbuild  = dirbuild.BuildWithFilesOptions
 )
 
 var (
@@ -893,6 +893,55 @@ func (w *summariseDGUTASpoolWriter) applySchema3FutureDirectChildTuples(
 	for idx := range rows {
 		tuple := summariseFullFilterKeyForRow(rows[idx])
 		rows[idx].FilterChildCount += counts[tuple]
+	}
+}
+
+func finishSummariseSpoolScratch(partialDir string, manifest *chspool.Manifest) (uint64, error) {
+	scratchBytes, err := summariseBuildPhaseBytesWritten(partialDir, manifest)
+	if err != nil {
+		return scratchBytes, err
+	}
+
+	return scratchBytes, cleanupSummariseBuildPhaseScratch(partialDir, manifest)
+}
+
+func cleanupSummariseBuildPhaseScratch(partialDir string, manifest *chspool.Manifest) error {
+	canonical := summariseBuildCanonicalArtifactPaths(manifest)
+
+	entries, err := os.ReadDir(partialDir)
+	if err != nil {
+		return err
+	}
+
+	for _, entry := range entries {
+		if summariseBuildCanonicalTopLevel(entry.Name(), canonical) {
+			continue
+		}
+
+		if err := os.RemoveAll(filepath.Join(partialDir, entry.Name())); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func summariseBuildCanonicalTopLevel(name string, canonical map[string]bool) bool {
+	cleanName := filepath.Clean(name)
+	for path := range canonical {
+		cleanPath := filepath.Clean(path)
+		if cleanPath == cleanName || strings.HasPrefix(cleanPath, cleanName+string(os.PathSeparator)) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func summariseSpoolDirbuildOptions(partialDir string) dirbuild.Options {
+	return dirbuild.Options{
+		TempDir:       partialDir,
+		RetainTempDir: true,
 	}
 }
 
@@ -1880,6 +1929,7 @@ func newSummariseDirbuildBasedirsCreator(
 
 func runAndCloseSummariseSpoolDirbuild(
 	statsPath string,
+	partialDir string,
 	ds *summariseSpoolDataset,
 	dw *summariseDGUTASpoolWriter,
 	fileWriter *summariseFileSpoolOperation,
@@ -1887,7 +1937,7 @@ func runAndCloseSummariseSpoolDirbuild(
 ) (uint64, error) {
 	diag.setCurrentPhase("parse")
 
-	records, err := runSummariseSpoolDirbuild(statsPath, ds, dw, fileWriter)
+	records, err := runSummariseSpoolDirbuild(statsPath, partialDir, ds, dw, fileWriter)
 	diag.logParseResult(records, err)
 
 	if err == nil {
@@ -1920,7 +1970,7 @@ func buildSummariseSpoolWithDirbuild(
 		return manifest, 0, scratchBytes, finishErr
 	}
 
-	records, err := runAndCloseSummariseSpoolDirbuild(statsPath, ds, dw, fileWriter, diag)
+	records, err := runAndCloseSummariseSpoolDirbuild(statsPath, partialDir, ds, dw, fileWriter, diag)
 	manifest, scratchBytes, err := finishSummariseSpoolPartial(partialDir, expected, set, err)
 
 	return manifest, records, scratchBytes, err
@@ -1993,7 +2043,7 @@ func finishSummariseSpoolPartial(
 		return nil, scratchBytes, cleanupErr
 	}
 
-	scratchBytes, err := summariseBuildPhaseBytesWritten(partialDir, &manifest)
+	scratchBytes, err := finishSummariseSpoolScratch(partialDir, &manifest)
 	if err != nil {
 		_ = os.RemoveAll(partialDir)
 
@@ -2005,6 +2055,7 @@ func finishSummariseSpoolPartial(
 
 func runSummariseSpoolDirbuild(
 	statsPath string,
+	partialDir string,
 	ds *summariseSpoolDataset,
 	dw *summariseDGUTASpoolWriter,
 	fileWriter *summariseFileSpoolOperation,
@@ -2025,6 +2076,7 @@ func runSummariseSpoolDirbuild(
 
 			return fileWriter.addWithDirID(&info, dirID)
 		},
+		summariseSpoolDirbuildOptions(partialDir),
 	)
 
 	return records, err

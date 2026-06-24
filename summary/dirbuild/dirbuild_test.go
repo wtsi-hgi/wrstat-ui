@@ -57,6 +57,8 @@ const (
 	a4DirectoryOnlyRows = 250_000
 	a4AgedFanoutDirs    = 80_000
 	a4CompactFanoutDirs = 100_000
+	a4LongPathDirs      = 80_000
+	a4LongPathNameBytes = 1024
 	// A4's heap budget scales with directory rows, not file rows.
 	a4HeapBaseBudgetBytes          = 64 * 1024 * 1024
 	a4HeapPerDirectoryBudgetBytes  = 8 * 1024
@@ -66,6 +68,8 @@ const (
 	a4RollupHeapPerDirectoryBytes  = 6 * 1024
 	a4CompactHeapBaseBudgetBytes   = 96 * 1024 * 1024
 	a4CompactHeapPerDirectoryBytes = 3 * 1024
+	a4LongPathHeapBaseBudgetBytes  = 64 * 1024 * 1024
+	a4LongPathHeapPerDirectoryByte = 700
 	a4HeapSamplerInterval          = 10 * time.Millisecond
 	a4LargeNonContiguousStatsInput = "stats.tsv"
 )
@@ -94,13 +98,135 @@ func summariseWithDirGUTA(data string, mountPath string) ([]db.RecordDGUTA, erro
 	return sink.records, s.Summarise()
 }
 
-func buildWithDirBuild(data string, mountPath string) ([]db.RecordDGUTA, error) {
+func buildWithDirBuildOptions(
+	data string,
+	mountPath string,
+	opts Options,
+) ([]db.RecordDGUTA, []comparableFileRow, int, error) {
 	sink := new(captureDB)
-	err := Build(func() (io.ReadCloser, error) {
-		return io.NopCloser(strings.NewReader(data)), nil
-	}, mountPath, sink, dirbuildRefTime)
 
-	return sink.records, err
+	var files []comparableFileRow
+
+	openCalls := 0
+
+	err := BuildWithFilesOptions(func() (io.ReadCloser, error) {
+		openCalls++
+
+		return io.NopCloser(strings.NewReader(data)), nil
+	}, mountPath, sink, dirbuildRefTime, func(dirID uint32, info summary.FileInfo) error {
+		files = append(files, comparableFileRow{
+			dirID:     dirID,
+			name:      string(info.Name),
+			size:      info.Size,
+			entryType: info.EntryType,
+		})
+
+		return nil
+	}, opts)
+
+	return sink.records, files, openCalls, err
+}
+
+type comparableFileRow struct {
+	dirID     uint32
+	name      string
+	size      int64
+	entryType byte
+}
+
+func diskBackedRoutingFixtureStats() string {
+	return strings.Join([]string{
+		statsRow("/project/b/deep/linked.bam", stats.FileType, 100, dirbuildRefUnix-90, dirbuildRefUnix-10, 9001, 2),
+		statsRow("/project/a/early.txt", stats.FileType, 11, dirbuildRefUnix-30, dirbuildRefUnix-20, 3001, 1),
+		statsRow("/project/b/deep/other.cram", stats.FileType, 17, dirbuildRefUnix-50, dirbuildRefUnix-15, 3002, 1),
+		statsRow("/project/a/linked.bam", stats.FileType, 100, dirbuildRefUnix-90, dirbuildRefUnix-10, 9001, 2),
+		statsRow("/", stats.DirType, 4096, dirbuildRefUnix, dirbuildRefUnix, 2000, 2),
+		statsRow("/project/", stats.DirType, 4096, dirbuildRefUnix, dirbuildRefUnix, 2001, 2),
+		statsRow("/project/b/", stats.DirType, 4096, dirbuildRefUnix, dirbuildRefUnix, 2002, 2),
+		statsRow("/project/a/", stats.DirType, 4096, dirbuildRefUnix, dirbuildRefUnix, 2003, 2),
+		statsRow("/project/b/deep/", stats.DirType, 4096, dirbuildRefUnix, dirbuildRefUnix, 2004, 2),
+	}, "")
+}
+
+func writeLongPathDirectoryStats(path string, dirs int, nameBytes int) error {
+	file, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+
+	writer := bufio.NewWriterSize(file, 1024*1024)
+	writeErr := writeLongPathDirectoryStatsRows(writer, dirs, nameBytes)
+	flushErr := writer.Flush()
+	closeErr := file.Close()
+
+	return errors.Join(writeErr, flushErr, closeErr)
+}
+
+func writeLongPathDirectoryStatsRows(writer io.Writer, dirs int, nameBytes int) error {
+	longName := strings.Repeat("x", nameBytes)
+
+	if _, err := writer.Write([]byte(statsRow(
+		"/",
+		stats.DirType,
+		4096,
+		dirbuildRefUnix,
+		dirbuildRefUnix,
+		99,
+		2,
+	))); err != nil {
+		return err
+	}
+
+	if _, err := writer.Write([]byte(statsRow(
+		"/long/",
+		stats.DirType,
+		4096,
+		dirbuildRefUnix,
+		dirbuildRefUnix,
+		100,
+		2,
+	))); err != nil {
+		return err
+	}
+
+	longRoot := "/long/" + longName + "/"
+	if _, err := writer.Write([]byte(statsRow(
+		longRoot,
+		stats.DirType,
+		4096,
+		dirbuildRefUnix,
+		dirbuildRefUnix,
+		101,
+		2,
+	))); err != nil {
+		return err
+	}
+
+	for dirIndex := range dirs {
+		if _, err := writer.Write([]byte(statsRow(
+			fmt.Sprintf("%sd%06d/", longRoot, dirIndex),
+			stats.DirType,
+			4096,
+			dirbuildRefUnix,
+			dirbuildRefUnix,
+			int64(4_000_000+dirIndex),
+			2,
+		))); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func a4LongPathIndexHeapBudget(dirRows uint64) uint64 {
+	return a4LongPathHeapBaseBudgetBytes + dirRows*a4LongPathHeapPerDirectoryByte
+}
+
+func buildWithDirBuild(data string, mountPath string) ([]db.RecordDGUTA, error) {
+	records, _, _, err := buildWithDirBuildOptions(data, mountPath, Options{})
+
+	return records, err
 }
 
 type countingDB struct {
@@ -215,6 +341,54 @@ func TestBuildA4BoundedMemoryAndBytesWritten(t *testing.T) {
 		So(writeAgedDirectoryFanoutStats(input, a4CompactFanoutDirs), ShouldBeNil)
 
 		assertAgedFanoutBuildMemory(input, a4CompactFanoutDirs, a4CompactHeapBudget(a4CompactFanoutDirs))
+	})
+
+	Convey("A4.5 extreme directory counts route to disk summaries before pass 2", t, func() {
+		input := diskBackedRoutingFixtureStats()
+		expected, expectedFiles, _, expectedErr := buildWithDirBuildOptions(input, "/", Options{
+			DiskNodeThreshold: 1_000_000,
+		})
+		got, gotFiles, openCalls, gotErr := buildWithDirBuildOptions(input, "/", Options{
+			DiskNodeThreshold: 2,
+			TempDir:           t.TempDir(),
+		})
+
+		So(expectedErr, ShouldBeNil)
+		So(gotErr, ShouldBeNil)
+		So(openCalls, ShouldEqual, 2)
+		So(comparableRecords(got), ShouldResemble, comparableRecords(expected))
+		So(gotFiles, ShouldResemble, expectedFiles)
+	})
+
+	Convey("A4.6 long path topology does not retain every full stats path", t, func() {
+		dir := t.TempDir()
+		input := filepath.Join(dir, a4LargeNonContiguousStatsInput)
+
+		So(writeLongPathDirectoryStats(input, a4LongPathDirs, a4LongPathNameBytes), ShouldBeNil)
+
+		runtime.GC()
+
+		var before runtime.MemStats
+		runtime.ReadMemStats(&before)
+
+		stopSampling := startHeapInuseSampler(before.HeapInuse)
+		index, err := buildDirectoryIndex(func() (io.ReadCloser, error) {
+			return os.Open(input)
+		}, "/", dirbuildRefUnix)
+		peakGrowth := stopSampling()
+
+		runtime.GC()
+
+		var after runtime.MemStats
+		runtime.ReadMemStats(&after)
+
+		heapBudget := a4LongPathIndexHeapBudget(a4LongPathDirs)
+		retainedGrowth := heapInuseGrowth(before.HeapInuse, after.HeapInuse)
+
+		So(err, ShouldBeNil)
+		So(index.nodes, ShouldHaveLength, a4LongPathDirs+3)
+		So(peakGrowth, ShouldBeLessThan, heapBudget)
+		So(retainedGrowth, ShouldBeLessThan, heapBudget)
 	})
 }
 

@@ -279,6 +279,25 @@ func d2DirFilterRowsByDirPathAndTuple(
 	return out
 }
 
+func summariseSpoolHasDirbuildScratchForTest(t *testing.T, spoolDir string) bool {
+	t.Helper()
+
+	hasScratch := false
+	err := filepath.WalkDir(spoolDir, func(path string, entry os.DirEntry, err error) error {
+		So(err, ShouldBeNil)
+
+		name := entry.Name()
+		if strings.HasPrefix(name, "wrstat-dirbuild-summary-") || name == "summaries.sqlite" {
+			hasScratch = true
+		}
+
+		return nil
+	})
+	So(err, ShouldBeNil)
+
+	return hasScratch
+}
+
 func writeHighFanoutNonContiguousSpoolFixtureStats(
 	t *testing.T,
 	statsPath string,
@@ -1772,10 +1791,11 @@ func TestSummariseClickHouseSpoolRows(t *testing.T) {
 			database dirguta.DB,
 			refTime time.Time,
 			files dirbuild.FileSink,
+			opts dirbuild.Options,
 		) error {
 			dirbuildCalls++
 
-			return originalDirbuild(open, mountPath, database, refTime, files)
+			return originalDirbuild(open, mountPath, database, refTime, files, opts)
 		}
 
 		_, manifest := buildSummariseSpoolFixtureForTest(t, fixture)
@@ -1837,10 +1857,11 @@ func TestSummariseClickHouseSpoolRows(t *testing.T) {
 			database dirguta.DB,
 			refTime time.Time,
 			files dirbuild.FileSink,
+			opts dirbuild.Options,
 		) error {
 			dirbuildCalls++
 
-			return originalDirbuild(open, mountPath, database, refTime, files)
+			return originalDirbuild(open, mountPath, database, refTime, files, opts)
 		}
 
 		_, manifest := buildSummariseSpoolFixtureForTest(t, fixture)
@@ -1898,10 +1919,11 @@ func TestSummariseClickHouseSpoolRows(t *testing.T) {
 			database dirguta.DB,
 			refTime time.Time,
 			files dirbuild.FileSink,
+			opts dirbuild.Options,
 		) error {
 			dirbuildCalls++
 
-			return originalDirbuild(open, mountPath, database, refTime, files)
+			return originalDirbuild(open, mountPath, database, refTime, files, opts)
 		}
 
 		runtime.GC()
@@ -1975,6 +1997,116 @@ func TestSummariseClickHouseSpoolRows(t *testing.T) {
 		So(row.HasChildren, ShouldEqual, uint8(1))
 	})
 
+	Convey("A3.1c3 disk-backed dirbuild keeps full-filter direct-child counts", t, func() {
+		fixture := newSummariseActiveSnapshotFixture(t)
+		writeNestedFullFilterSpoolFixtureStats(t, fixture.statsPath, fixture.updatedAt)
+
+		restore := snapshotSummariseGlobals()
+		Reset(restore)
+
+		configureSummariseActiveSnapshotTest(fixture.outputDir, false)
+
+		originalStat := statSummariseSpoolStats
+		statSummariseSpoolStats = func(path string) (os.FileInfo, error) {
+			info, err := originalStat(path)
+			if err != nil {
+				return nil, err
+			}
+
+			if path == fixture.statsPath {
+				return summariseSpoolSizedFileInfo{
+					FileInfo: info,
+					size:     summariseSpoolDirbuildFirstBytes + 1,
+				}, nil
+			}
+
+			return info, nil
+		}
+
+		dirbuildCalls := 0
+		buildSummariseSpoolDirbuild = func(
+			open func() (io.ReadCloser, error),
+			mountPath string,
+			database dirguta.DB,
+			refTime time.Time,
+			files dirbuild.FileSink,
+			opts dirbuild.Options,
+		) error {
+			dirbuildCalls++
+			opts.DiskNodeThreshold = 2
+
+			return dirbuild.BuildWithFilesOptions(open, mountPath, database, refTime, files, opts)
+		}
+
+		spoolDir, _ := buildSummariseSpoolFixtureForTest(t, fixture)
+
+		rows := d2DirFilterRowsByDirPathAndTuple(spoolDir, summariseTestMountPath+"project/")
+		tuple := summariseFullFilterTupleKey{
+			age: uint8(db.DGUTAgeAll),
+			gid: 7,
+			uid: 17,
+			ft:  uint16(db.DGUTAFileTypeBam),
+		}
+		row, ok := rows[tuple]
+
+		So(dirbuildCalls, ShouldEqual, 1)
+		So(ok, ShouldBeTrue)
+		So(row.FilterChildCount, ShouldEqual, uint64(2))
+		So(row.HasFilterChildren, ShouldEqual, uint8(1))
+		So(row.ChildCount, ShouldEqual, uint64(2))
+		So(row.HasChildren, ShouldEqual, uint8(1))
+	})
+
+	Convey("A3.1c4 disk-backed dirbuild scratch is reported and cleaned", t, func() {
+		fixture := newSummariseActiveSnapshotFixture(t)
+		writeNestedFullFilterSpoolFixtureStats(t, fixture.statsPath, fixture.updatedAt)
+
+		restore := snapshotSummariseGlobals()
+		Reset(restore)
+
+		configureSummariseActiveSnapshotTest(fixture.outputDir, false)
+
+		originalStat := statSummariseSpoolStats
+		statSummariseSpoolStats = func(path string) (os.FileInfo, error) {
+			info, err := originalStat(path)
+			if err != nil {
+				return nil, err
+			}
+
+			if path == fixture.statsPath {
+				return summariseSpoolSizedFileInfo{
+					FileInfo: info,
+					size:     summariseSpoolDirbuildFirstBytes + 1,
+				}, nil
+			}
+
+			return info, nil
+		}
+
+		buildSummariseSpoolDirbuild = func(
+			open func() (io.ReadCloser, error),
+			mountPath string,
+			database dirguta.DB,
+			refTime time.Time,
+			files dirbuild.FileSink,
+			opts dirbuild.Options,
+		) error {
+			opts.DiskNodeThreshold = 2
+
+			return dirbuild.BuildWithFilesOptions(open, mountPath, database, refTime, files, opts)
+		}
+
+		spoolDir, _ := buildSummariseSpoolFixtureForTest(t, fixture)
+		report := readSummariseSpoolBuildReport(t, spoolDir)
+		op := summariseSpoolBuildReportOperationForTest(report)
+
+		So(op.Inputs["input_shape"], ShouldEqual, "large_unprobed")
+		So(op.Inputs["build_path"], ShouldEqual, "dirbuild")
+		So(op.Inputs["completed"], ShouldEqual, true)
+		So(uint64InputForTest(op.Inputs, "build_phase_bytes_written"), ShouldBeGreaterThan, uint64(0))
+		So(summariseSpoolHasDirbuildScratchForTest(t, spoolDir), ShouldBeFalse)
+	})
+
 	Convey("A3.1d small non-contiguous high-fanout basedirs build is bounded", t, func() {
 		fixture := newSummariseActiveSnapshotFixture(t)
 		writeHighFanoutNonContiguousSpoolFixtureStats(t, fixture.statsPath, fixture.updatedAt, 2_000, 12)
@@ -2008,10 +2140,11 @@ func TestSummariseClickHouseSpoolRows(t *testing.T) {
 			database dirguta.DB,
 			refTime time.Time,
 			files dirbuild.FileSink,
+			opts dirbuild.Options,
 		) error {
 			dirbuildCalls++
 
-			return originalDirbuild(open, mountPath, database, refTime, files)
+			return originalDirbuild(open, mountPath, database, refTime, files, opts)
 		}
 
 		runtime.GC()
@@ -2072,12 +2205,13 @@ func TestSummariseClickHouseSpoolRows(t *testing.T) {
 			database dirguta.DB,
 			refTime time.Time,
 			files dirbuild.FileSink,
+			opts dirbuild.Options,
 		) error {
 			_, err := os.Stat(stalePartial)
 			So(errors.Is(err, os.ErrNotExist), ShouldBeTrue)
 			So(os.WriteFile(buildScratchPath, buildScratch, 0o600), ShouldBeNil)
 
-			return originalDirbuild(open, mountPath, database, refTime, files)
+			return originalDirbuild(open, mountPath, database, refTime, files, opts)
 		}
 
 		_, nonContiguousManifest := buildSummariseSpoolFixtureForTest(t, nonContiguous)
