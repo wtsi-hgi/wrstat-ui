@@ -384,7 +384,11 @@ func materializeGUTAs(store dirguta.GUTAStore) db.GUTAs {
 }
 
 func materializeGUTA(out *db.GUTA, store dirguta.GUTAStore, key dirguta.GUTAKey) {
-	summary := store.SumMap[key]
+	summary := store.Summary(key)
+	if summary == nil {
+		return
+	}
+
 	*out = db.GUTA{
 		GID:         key.GID,
 		UID:         key.UID,
@@ -411,7 +415,7 @@ func mergeNodeHardlinks(parent *dirNode, node *dirNode) {
 }
 
 func drainNodeStore(parent *dirNode, node *dirNode) {
-	if len(node.store.SumMap) == 0 {
+	if node.store.Empty() {
 		return
 	}
 
@@ -573,10 +577,6 @@ func parentAndID(dir *summary.DirectoryPath, nodesByPath map[string]*dirNode) (*
 }
 
 func (node *dirNode) ensureStore() *dirguta.GUTAStore {
-	if node.store.SumMap == nil {
-		node.store = dirguta.NewGUTAStore(node.store.RefTime)
-	}
-
 	return &node.store
 }
 

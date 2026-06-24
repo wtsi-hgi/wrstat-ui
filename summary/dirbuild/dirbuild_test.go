@@ -56,6 +56,7 @@ const (
 	a4DirectoryRows     = 50_000
 	a4DirectoryOnlyRows = 250_000
 	a4AgedFanoutDirs    = 80_000
+	a4CompactFanoutDirs = 100_000
 	// A4's heap budget scales with directory rows, not file rows.
 	a4HeapBaseBudgetBytes          = 64 * 1024 * 1024
 	a4HeapPerDirectoryBudgetBytes  = 8 * 1024
@@ -63,6 +64,8 @@ const (
 	a4IndexHeapPerDirectoryBytes   = 430
 	a4RollupHeapBaseBudgetBytes    = 128 * 1024 * 1024
 	a4RollupHeapPerDirectoryBytes  = 6 * 1024
+	a4CompactHeapBaseBudgetBytes   = 96 * 1024 * 1024
+	a4CompactHeapPerDirectoryBytes = 3 * 1024
 	a4HeapSamplerInterval          = 10 * time.Millisecond
 	a4LargeNonContiguousStatsInput = "stats.tsv"
 )
@@ -122,7 +125,7 @@ func TestBuildA4BoundedMemoryAndBytesWritten(t *testing.T) {
 		var before runtime.MemStats
 		runtime.ReadMemStats(&before)
 
-		stopSampling := startHeapInuseSampler(before.HeapInuse, a4HeapSamplerInterval)
+		stopSampling := startHeapInuseSampler(before.HeapInuse)
 		index, err := buildDirectoryIndex(func() (io.ReadCloser, error) {
 			return os.Open(input)
 		}, "/", dirbuildRefUnix)
@@ -154,7 +157,7 @@ func TestBuildA4BoundedMemoryAndBytesWritten(t *testing.T) {
 		var before runtime.MemStats
 		runtime.ReadMemStats(&before)
 
-		stopSampling := startHeapInuseSampler(before.HeapInuse, a4HeapSamplerInterval)
+		stopSampling := startHeapInuseSampler(before.HeapInuse)
 		sink := new(countingDB)
 		err := Build(func() (io.ReadCloser, error) {
 			return os.Open(input)
@@ -202,30 +205,16 @@ func TestBuildA4BoundedMemoryAndBytesWritten(t *testing.T) {
 
 		So(writeAgedDirectoryFanoutStats(input, a4AgedFanoutDirs), ShouldBeNil)
 
-		runtime.GC()
+		assertAgedFanoutBuildMemory(input, a4AgedFanoutDirs, a4RollupHeapBudget(a4AgedFanoutDirs))
+	})
 
-		var before runtime.MemStats
-		runtime.ReadMemStats(&before)
+	Convey("A4.4 aged fanout avoids per-directory GUTA age-key maps", t, func() {
+		dir := t.TempDir()
+		input := filepath.Join(dir, a4LargeNonContiguousStatsInput)
 
-		stopSampling := startHeapInuseSampler(before.HeapInuse, a4HeapSamplerInterval)
-		sink := new(countingDB)
-		err := Build(func() (io.ReadCloser, error) {
-			return os.Open(input)
-		}, "/", sink, dirbuildRefTime)
-		peakGrowth := stopSampling()
+		So(writeAgedDirectoryFanoutStats(input, a4CompactFanoutDirs), ShouldBeNil)
 
-		runtime.GC()
-
-		var after runtime.MemStats
-		runtime.ReadMemStats(&after)
-
-		heapBudget := a4RollupHeapBudget(a4AgedFanoutDirs)
-		retainedGrowth := heapInuseGrowth(before.HeapInuse, after.HeapInuse)
-
-		So(err, ShouldBeNil)
-		So(sink.records, ShouldEqual, a4AgedFanoutDirs+2)
-		So(peakGrowth, ShouldBeLessThan, heapBudget)
-		So(retainedGrowth, ShouldBeLessThan, heapBudget)
+		assertAgedFanoutBuildMemory(input, a4CompactFanoutDirs, a4CompactHeapBudget(a4CompactFanoutDirs))
 	})
 }
 
@@ -370,12 +359,12 @@ func statsRow(
 	)
 }
 
-func startHeapInuseSampler(baseline uint64, interval time.Duration) func() uint64 {
+func startHeapInuseSampler(baseline uint64) func() uint64 {
 	done := make(chan struct{})
 	peak := make(chan uint64, 1)
 
 	go func() {
-		ticker := time.NewTicker(interval)
+		ticker := time.NewTicker(a4HeapSamplerInterval)
 		defer ticker.Stop()
 
 		maxGrowth := uint64(0)
@@ -506,6 +495,36 @@ func writeAgedDirectoryFanoutStatsRows(writer io.Writer, dirs int) error {
 
 func a4RollupHeapBudget(dirRows uint64) uint64 {
 	return a4RollupHeapBaseBudgetBytes + dirRows*a4RollupHeapPerDirectoryBytes
+}
+
+func a4CompactHeapBudget(dirRows uint64) uint64 {
+	return a4CompactHeapBaseBudgetBytes + dirRows*a4CompactHeapPerDirectoryBytes
+}
+
+func assertAgedFanoutBuildMemory(input string, dirs int, heapBudget uint64) {
+	runtime.GC()
+
+	var before runtime.MemStats
+	runtime.ReadMemStats(&before)
+
+	stopSampling := startHeapInuseSampler(before.HeapInuse)
+	sink := new(countingDB)
+	err := Build(func() (io.ReadCloser, error) {
+		return os.Open(input)
+	}, "/", sink, dirbuildRefTime)
+	peakGrowth := stopSampling()
+
+	runtime.GC()
+
+	var after runtime.MemStats
+	runtime.ReadMemStats(&after)
+
+	retainedGrowth := heapInuseGrowth(before.HeapInuse, after.HeapInuse)
+
+	So(err, ShouldBeNil)
+	So(sink.records, ShouldEqual, dirs+2)
+	So(peakGrowth, ShouldBeLessThan, heapBudget)
+	So(retainedGrowth, ShouldBeLessThan, heapBudget)
 }
 
 type comparableGUTA struct {
