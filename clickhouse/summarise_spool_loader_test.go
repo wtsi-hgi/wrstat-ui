@@ -851,6 +851,49 @@ func TestClickHouseSummariseSpoolLoader(t *testing.T) {
 		So(conn.prepares, ShouldEqual, 1)
 	})
 
+	Convey("summarise spool derives child full-filter rows with the import timeout", t, func() {
+		cfg := Config{QueryTimeout: 25 * time.Millisecond}
+		spoolDir := filepath.Join(t.TempDir(), "spool")
+		manifest := writeSummariseSpoolLoaderSchema3Spool(
+			spoolDir,
+			time.Date(2026, 6, 25, 9, 20, 0, 0, time.UTC),
+		)
+		spy := newSummariseSpoolLoaderSpyConn(manifest)
+		conn := &summariseSpoolDerivedChildDeadlineConn{summariseSpoolLoaderSpyConn: spy}
+
+		loader, err := newSummariseSpoolLoader(cfg, conn, spoolDir, manifest, nil)
+		So(err, ShouldBeNil)
+
+		So(loader.loadTables(context.Background()), ShouldBeNil)
+		So(conn.deadlines, ShouldHaveLength, 1)
+		So(conn.deadlines[0], ShouldBeGreaterThan, cfg.QueryTimeout*10)
+		So(conn.insertedRows(chspool.TableChildFilterAll), ShouldEqual, manifest.Tables[chspool.TableDirFilterAll].Rows)
+	})
+
+	Convey("summarise spool cancels child full-filter derivation when the parent is cancelled", t, func() {
+		cfg := Config{QueryTimeout: 25 * time.Millisecond}
+		spoolDir := filepath.Join(t.TempDir(), "spool")
+		manifest := writeSummariseSpoolLoaderSchema3Spool(
+			spoolDir,
+			time.Date(2026, 6, 25, 10, 55, 0, 0, time.UTC),
+		)
+		spy := newSummariseSpoolLoaderSpyConn(manifest)
+		parent, cancelParent := context.WithCancel(context.Background())
+		conn := &summariseSpoolDerivedChildDeadlineConn{
+			summariseSpoolLoaderSpyConn: spy,
+			cancelParentDuringDerive:    cancelParent,
+		}
+
+		loader, err := newSummariseSpoolLoader(cfg, conn, spoolDir, manifest, nil)
+		So(err, ShouldBeNil)
+
+		err = loader.loadTables(parent)
+
+		So(errors.Is(err, context.Canceled), ShouldBeTrue)
+		So(conn.cancelledDerives, ShouldEqual, 1)
+		So(conn.insertedRows(chspool.TableChildFilterAll), ShouldEqual, uint64(0))
+	})
+
 	Convey("summarise spool basedirs history retry cleanup uses the cleanup timeout", t, func() {
 		cfg := Config{QueryTimeout: 100 * time.Millisecond}
 		conn := &summariseSpoolHistoryDeleteDeadlineConn{normalWindow: cfg.QueryTimeout}
@@ -3272,6 +3315,46 @@ func writeSummariseSpoolLoaderActiveVirtualWithoutCatalogSpool(
 	So(chspool.WriteManifestAtomic(spoolDir, manifest), ShouldBeNil)
 
 	return manifest
+}
+
+type summariseSpoolDerivedChildDeadlineConn struct {
+	*summariseSpoolLoaderSpyConn
+
+	cancelParentDuringDerive context.CancelFunc
+	cancelledDerives         int
+	deadlines                []time.Duration
+}
+
+func (c *summariseSpoolDerivedChildDeadlineConn) Exec(
+	ctx context.Context,
+	query string,
+	args ...any,
+) error {
+	if query != derivedChildFilterAllInsertQuery {
+		return c.summariseSpoolLoaderSpyConn.Exec(ctx, query, args...)
+	}
+
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		c.deadlines = append(c.deadlines, 0)
+	} else {
+		c.deadlines = append(c.deadlines, time.Until(deadline))
+	}
+
+	if c.cancelParentDuringDerive != nil {
+		c.cancelParentDuringDerive()
+
+		select {
+		case <-ctx.Done():
+			c.cancelledDerives++
+
+			return ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+			return errBootstrapTestUnexpectedCall
+		}
+	}
+
+	return c.summariseSpoolLoaderSpyConn.Exec(ctx, query, args...)
 }
 
 type summariseSpoolLoaderChildDigest struct {

@@ -445,7 +445,10 @@ func (w *fullFilterAllWriter) derive(ctx context.Context) error {
 }
 
 func deriveChildFilterAll(ctx context.Context, conn childFilterAllDeriver, mountPath, snapshotID string) error {
-	if err := conn.Exec(ctx, derivedChildFilterAllInsertQuery, mountPath, snapshotID); err != nil {
+	deriveCtx, cancel := importFinalizationContext(ctx)
+	defer cancel()
+
+	if err := conn.Exec(deriveCtx, derivedChildFilterAllInsertQuery, mountPath, snapshotID); err != nil {
 		return fmt.Errorf("clickhouse: failed to derive child full-filter rows: %w", err)
 	}
 

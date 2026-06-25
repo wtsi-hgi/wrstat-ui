@@ -36,9 +36,30 @@ import (
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 )
 
-const importBatchSendTimeout = defaultCHReceiveTimeout
+const (
+	importBatchSendTimeout    = defaultCHReceiveTimeout
+	importFinalizationTimeout = defaultCHReceiveTimeout
+)
 
 var errImportBlockBatchNotPrepared = errors.New("clickhouse: import block batch is not prepared")
+
+func importFinalizationContext(parent context.Context) (context.Context, context.CancelFunc) {
+	if parent == nil {
+		parent = context.Background()
+	}
+
+	ctx, cancel := queryContext(context.WithoutCancel(parent), importFinalizationTimeout)
+	stopParentCancel := context.AfterFunc(parent, func() {
+		if errors.Is(parent.Err(), context.Canceled) {
+			cancel()
+		}
+	})
+
+	return ctx, func() {
+		stopParentCancel()
+		cancel()
+	}
+}
 
 type importBlockWriter struct {
 	conn ch.Conn
