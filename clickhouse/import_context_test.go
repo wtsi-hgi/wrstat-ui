@@ -27,6 +27,7 @@ package clickhouse
 
 import (
 	"context"
+	"slices"
 	"testing"
 	"time"
 
@@ -49,6 +50,9 @@ func (importContextColumn) AppendRow(any) error {
 type importBlockWriterSpyBatch struct {
 	rows        int
 	appends     int
+	appendCalls int
+	appendErr   error
+	appendArgs  [][]any
 	sends       int
 	aborts      int
 	emptySends  int
@@ -66,7 +70,14 @@ func (b *importBlockWriterSpyBatch) Abort() error {
 	return nil
 }
 
-func (b *importBlockWriterSpyBatch) Append(...any) error {
+func (b *importBlockWriterSpyBatch) Append(values ...any) error {
+	b.appendCalls++
+	if b.appendErr != nil {
+		b.appendArgs = append(b.appendArgs, slices.Clone(values))
+
+		return b.appendErr
+	}
+
 	b.appends++
 	b.rows++
 
@@ -403,6 +414,7 @@ type importBlockWriterSpyConn struct {
 	bootstrapTestConn
 
 	prepareCalls int
+	appendErr    error
 	batches      []*importBlockWriterSpyBatch
 }
 
@@ -413,7 +425,7 @@ func (c *importBlockWriterSpyConn) PrepareBatch(
 ) (driver.Batch, error) {
 	c.prepareCalls++
 
-	batch := &importBlockWriterSpyBatch{ctxErr: ctx.Err}
+	batch := &importBlockWriterSpyBatch{ctxErr: ctx.Err, appendErr: c.appendErr}
 	batch.deadline, batch.hasDeadline = ctx.Deadline()
 	c.batches = append(c.batches, batch)
 

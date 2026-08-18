@@ -56,16 +56,25 @@ func recordImportPhase(recorder importPhaseRecorder, phase string, d time.Durati
 // SummariseImportTelemetry reports exact client batch counters and optional
 // server-reported byte/part evidence during spool publication.
 type SummariseImportTelemetry struct {
-	Phase                    string
-	CurrentCheckpoint        string
-	RowsSent                 uint64
-	BytesSent                uint64
-	BytesSentAvailable       bool
-	BatchCount               uint64
-	PhaseRows                uint64
-	PhaseElapsed             time.Duration
-	ServerPartCount          uint64
-	ServerPartCountAvailable bool
+	Phase                               string
+	CurrentCheckpoint                   string
+	RowsSent                            uint64
+	BytesSent                           uint64
+	BytesSentAvailable                  bool
+	BatchCount                          uint64
+	EstimatedUncompressedBytesSent      uint64
+	LastBatchEstimatedUncompressedBytes uint64
+	PhaseRows                           uint64
+	PhaseElapsed                        time.Duration
+	ServerPartCount                     uint64
+	ServerPartCountAvailable            bool
+	ServerActiveMerges                  uint64
+	ServerActiveMergesAvailable         bool
+	ServerMemoryBytes                   uint64
+	ServerMemoryBytesAvailable          bool
+	ServerQueryLatency                  time.Duration
+	ServerQueryLatencyAvailable         bool
+	ServerPressureBackoff               bool
 }
 
 // WithSummariseImportTelemetry attaches a live publication recorder without

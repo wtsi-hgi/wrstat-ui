@@ -52,13 +52,21 @@ import (
 )
 
 const (
-	summariseDBBatchSize       = 100_000
-	summariseProgressEveryRows = 1_000_000
-	bytesPerMiB                = 1024 * 1024
-	summariseDirPerm           = 0o755
-	summariseMarkerPerm        = 0o600
-	clickhouseRecoverFlag      = "clickhouse-recover"
-	completionMarkerName       = ".wrstat-ui-summarise-complete"
+	summariseDBBatchSize                 = 100_000
+	summariseProgressEveryRows           = 1_000_000
+	bytesPerMiB                          = 1024 * 1024
+	summariseDirPerm                     = 0o755
+	summariseMarkerPerm                  = 0o600
+	clickhouseRecoverFlag                = "clickhouse-recover"
+	completionMarkerName                 = ".wrstat-ui-summarise-complete"
+	defaultSummariseFilesInsertBytes     = 16 * bytesPerMiB
+	defaultSummariseFilterInsertBytes    = 8 * bytesPerMiB
+	defaultSummariseOtherInsertBytes     = 32 * bytesPerMiB
+	defaultSummarisePressureActiveParts  = 1000
+	defaultSummarisePressureMerges       = 16
+	defaultSummarisePressureMemoryBytes  = 64 * 1024 * bytesPerMiB
+	defaultSummarisePressureQueryLatency = time.Second
+	defaultSummarisePressurePollInterval = 5 * time.Second
 )
 
 var (
@@ -73,7 +81,15 @@ var (
 	basedirsConfig string
 	mounts         string
 
-	clickhouseRecover bool
+	clickhouseRecover                bool
+	summariseFilesInsertBytes        int64
+	summariseFilterInsertBytes       int64
+	summariseOtherInsertBytes        int64
+	summarisePressureMaxActiveParts  int64
+	summarisePressureMaxMerges       int64
+	summarisePressureMaxMemoryBytes  int64
+	summarisePressureMaxQueryLatency time.Duration
+	summarisePressurePollInterval    time.Duration
 )
 
 var (
@@ -91,6 +107,18 @@ var (
 	)
 	errSummariseClickHouseActiveSnapshotRewrite = errors.New(
 		"clickhouse: refusing to rewrite active snapshot",
+	)
+	errSummariseInsertByteTarget = errors.New(
+		"clickhouse summarise insert byte targets must be greater than zero",
+	)
+	errSummarisePressureThreshold = errors.New(
+		"clickhouse pressure thresholds must not be negative",
+	)
+	errSummarisePressurePollInterval = errors.New(
+		"clickhouse pressure poll interval must be greater than zero and at most 1m",
+	)
+	errSummarisePressureQueryLatency = errors.New(
+		"clickhouse pressure query latency must not be negative",
 	)
 )
 
@@ -161,6 +189,53 @@ An example command would be the following:
 	},
 }
 
+func validateSummariseClickHouseInsertFlags() error {
+	if err := validateSummariseInsertByteFlags(); err != nil {
+		return err
+	}
+
+	if err := validateSummarisePressureThresholdFlags(); err != nil {
+		return err
+	}
+
+	return validateSummarisePressureDurationFlags()
+}
+
+func validateSummariseInsertByteFlags() error {
+	if summariseFilesInsertBytes <= 0 || summariseFilterInsertBytes <= 0 || summariseOtherInsertBytes <= 0 {
+		return errSummariseInsertByteTarget
+	}
+
+	return nil
+}
+
+func validateSummarisePressureThresholdFlags() error {
+	thresholds := [...]int64{
+		summarisePressureMaxActiveParts,
+		summarisePressureMaxMerges,
+		summarisePressureMaxMemoryBytes,
+	}
+	for _, threshold := range thresholds {
+		if threshold < 0 {
+			return errSummarisePressureThreshold
+		}
+	}
+
+	return nil
+}
+
+func validateSummarisePressureDurationFlags() error {
+	if summarisePressurePollInterval <= 0 || summarisePressurePollInterval > time.Minute {
+		return errSummarisePressurePollInterval
+	}
+
+	if summarisePressureMaxQueryLatency < 0 {
+		return errSummarisePressureQueryLatency
+	}
+
+	return nil
+}
+
 func init() {
 	RootCmd.AddCommand(summariseCmd)
 
@@ -180,6 +255,7 @@ func init() {
 	addClickhouseQueryTimeoutFlag(summariseCmd.Flags(), &clickhouseQueryTO)
 	summariseCmd.Flags().BoolVar(&clickhouseRecover, clickhouseRecoverFlag, false,
 		"recover a failed ClickHouse summarise retry")
+	addSummariseClickHouseInsertFlags(summariseCmd)
 }
 
 func warnIfSummariseUnguarded() {
@@ -882,9 +958,47 @@ func mountPathCandidates(
 func clickhouseSummariserConfig(
 	mountpoints string,
 ) (clickhouse.Config, error) {
-	return loadClickhouseConfigWithMountpoints(clickhouseConfigInput{
+	cfg, err := loadClickhouseConfigWithMountpoints(clickhouseConfigInput{
 		dsnFlag:          clickhouseDSN,
 		databaseFlag:     clickhouseDatabase,
 		queryTimeoutFlag: clickhouseQueryTO,
 	}, mountpoints)
+	if err != nil {
+		return clickhouse.Config{}, err
+	}
+
+	if err := validateSummariseClickHouseInsertFlags(); err != nil {
+		return clickhouse.Config{}, err
+	}
+
+	cfg.SummariseFilesInsertBytes = summariseFilesInsertBytes
+	cfg.SummariseFilterInsertBytes = summariseFilterInsertBytes
+	cfg.SummariseOtherInsertBytes = summariseOtherInsertBytes
+	cfg.SummarisePressureMaxActiveParts = summarisePressureMaxActiveParts
+	cfg.SummarisePressureMaxMerges = summarisePressureMaxMerges
+	cfg.SummarisePressureMaxMemoryBytes = summarisePressureMaxMemoryBytes
+	cfg.SummarisePressureMaxQueryLatency = summarisePressureMaxQueryLatency
+	cfg.SummarisePressurePollInterval = summarisePressurePollInterval
+
+	return cfg, nil
+}
+
+func addSummariseClickHouseInsertFlags(cmd *cobra.Command) {
+	flags := cmd.Flags()
+	flags.Int64Var(&summariseFilesInsertBytes, "clickhouse-files-insert-bytes",
+		defaultSummariseFilesInsertBytes, "maximum estimated uncompressed bytes per files insert batch")
+	flags.Int64Var(&summariseFilterInsertBytes, "clickhouse-filter-insert-bytes",
+		defaultSummariseFilterInsertBytes, "maximum estimated uncompressed bytes per filter insert batch")
+	flags.Int64Var(&summariseOtherInsertBytes, "clickhouse-other-insert-bytes",
+		defaultSummariseOtherInsertBytes, "maximum estimated uncompressed bytes per other insert batch")
+	flags.Int64Var(&summarisePressureMaxActiveParts, "clickhouse-pressure-active-parts",
+		defaultSummarisePressureActiveParts, "pause inserts above this active-part count; zero disables")
+	flags.Int64Var(&summarisePressureMaxMerges, "clickhouse-pressure-merges",
+		defaultSummarisePressureMerges, "pause inserts above this active-merge count; zero disables")
+	flags.Int64Var(&summarisePressureMaxMemoryBytes, "clickhouse-pressure-memory-bytes",
+		defaultSummarisePressureMemoryBytes, "pause inserts above this server memory use; zero disables")
+	flags.DurationVar(&summarisePressureMaxQueryLatency, "clickhouse-pressure-query-latency",
+		defaultSummarisePressureQueryLatency, "pause inserts above this pressure-probe latency; zero disables")
+	flags.DurationVar(&summarisePressurePollInterval, "clickhouse-pressure-poll-interval",
+		defaultSummarisePressurePollInterval, "poll interval while ClickHouse is under pressure")
 }

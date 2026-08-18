@@ -223,23 +223,38 @@ func TestSummariseDiagnosticsLogging(t *testing.T) {
 
 		diag := newSummariseDiagnostics("stats.gz")
 		diag.observeClickHouseTelemetry(clickhouse.SummariseImportTelemetry{
-			Phase:                    "spool_load_wrstat_files",
-			CurrentCheckpoint:        "spool_load_wrstat_files",
-			RowsSent:                 300_000,
-			BytesSent:                45_000_000,
-			BytesSentAvailable:       true,
-			BatchCount:               3,
-			PhaseElapsed:             125 * time.Millisecond,
-			ServerPartCount:          7,
-			ServerPartCountAvailable: true,
+			Phase:                               "spool_load_wrstat_files",
+			CurrentCheckpoint:                   "spool_load_wrstat_files",
+			RowsSent:                            300_000,
+			BytesSent:                           45_000_000,
+			BytesSentAvailable:                  true,
+			BatchCount:                          3,
+			EstimatedUncompressedBytesSent:      33_000_000,
+			LastBatchEstimatedUncompressedBytes: 9_000_000,
+			PhaseElapsed:                        125 * time.Millisecond,
+			ServerPartCount:                     7,
+			ServerPartCountAvailable:            true,
+			ServerActiveMerges:                  2,
+			ServerActiveMergesAvailable:         true,
+			ServerMemoryBytes:                   1_000_000,
+			ServerMemoryBytesAvailable:          true,
+			ServerQueryLatency:                  15 * time.Millisecond,
+			ServerQueryLatencyAvailable:         true,
+			ServerPressureBackoff:               true,
 		})
 
 		line := summariseDiagnosticLineContaining(logs.String(), "summarise clickhouse progress")
 		So(line, ShouldContainSubstring, "clickhouse_rows_sent=300000")
 		So(line, ShouldContainSubstring, "clickhouse_bytes_sent=45000000")
 		So(line, ShouldContainSubstring, "clickhouse_batch_count=3")
+		So(line, ShouldContainSubstring, "clickhouse_estimated_uncompressed_bytes_sent=33000000")
+		So(line, ShouldContainSubstring, "clickhouse_last_batch_estimated_uncompressed_bytes=9000000")
 		So(line, ShouldContainSubstring, "phase_elapsed=125ms")
 		So(line, ShouldContainSubstring, "clickhouse_server_part_count=7")
+		So(line, ShouldContainSubstring, "clickhouse_server_active_merges=2")
+		So(line, ShouldContainSubstring, "clickhouse_server_memory_bytes=1000000")
+		So(line, ShouldContainSubstring, "clickhouse_server_query_latency=15ms")
+		So(line, ShouldContainSubstring, "clickhouse_server_pressure_backoff=true")
 		So(line, ShouldContainSubstring, "current_checkpoint="+
 			quoteForDiagnostics("spool_load_wrstat_files"))
 	})

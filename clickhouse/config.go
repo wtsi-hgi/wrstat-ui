@@ -41,4 +41,13 @@ type Config struct {
 	MaxOpenConns  int
 	MaxIdleConns  int
 	NavIndex      bool
+
+	SummariseFilesInsertBytes        int64
+	SummariseFilterInsertBytes       int64
+	SummariseOtherInsertBytes        int64
+	SummarisePressureMaxActiveParts  int64
+	SummarisePressureMaxMerges       int64
+	SummarisePressureMaxMemoryBytes  int64
+	SummarisePressureMaxQueryLatency time.Duration
+	SummarisePressurePollInterval    time.Duration
 }

@@ -165,6 +165,9 @@ type summariseSpoolLoader struct {
 	telemetryMu         sync.Mutex
 	telemetryEmitMu     sync.Mutex
 	telemetryTicker     func(time.Duration) summariseSpoolTelemetryTicker
+	pressureProbe       func(context.Context, string) summariseServerPressure
+	pressurePollTimer   func(time.Duration) summarisePressurePollTimer
+	batchMeasurements   map[string][]importBatchMeasurement
 	amplificationGated  bool
 }
 
@@ -193,12 +196,17 @@ func newSummariseSpoolLoader(
 		groupUsageDates:     map[uint32]finaliseQuotaDates{},
 		telemetryNow:        time.Now,
 		telemetryTicker:     newSummariseSpoolTelemetryTicker,
+		batchMeasurements:   make(map[string][]importBatchMeasurement),
 	}
-	if len(telemetryRecorder) > 0 {
-		loader.telemetryRecorder = telemetryRecorder[0]
-	}
+	loader.setTelemetryRecorder(telemetryRecorder)
 
 	return loader, nil
+}
+
+func (l *summariseSpoolLoader) setTelemetryRecorder(recorders []func(SummariseImportTelemetry)) {
+	if len(recorders) > 0 {
+		l.telemetryRecorder = recorders[0]
+	}
 }
 
 func (l *summariseSpoolLoader) load(parent context.Context) error {
@@ -739,21 +747,139 @@ func (l *summariseSpoolLoader) beginImportTelemetry(phase string) {
 	l.telemetry.PhaseRows = 0
 	l.telemetry.PhaseElapsed = 0
 	l.telemetry.ServerPartCountAvailable = false
+	l.telemetry.ServerActiveMergesAvailable = false
+	l.telemetry.ServerMemoryBytesAvailable = false
+	l.telemetry.ServerQueryLatencyAvailable = false
+	l.telemetry.ServerPressureBackoff = false
 	l.telemetryStarted = now
 	l.telemetryMu.Unlock()
 	l.emitImportTelemetryAt(now)
 }
 
-func (l *summariseSpoolLoader) recordBatchTelemetry(phase string, rows uint64) {
+func (l *summariseSpoolLoader) recordBatchTelemetry(
+	phase string,
+	measurement importBatchMeasurement,
+) {
+	table := strings.TrimPrefix(phase, summariseSpoolLoadPhasePrefix)
+
+	if l.batchMeasurements == nil {
+		l.batchMeasurements = make(map[string][]importBatchMeasurement)
+	}
+
+	l.batchMeasurements[table] = append(l.batchMeasurements[table], measurement)
+
 	if l.telemetryRecorder == nil {
 		return
 	}
 
 	l.telemetryMu.Lock()
 	l.telemetry.Phase = phase
-	l.telemetry.RowsSent += rows
+	l.telemetry.RowsSent += measurement.Rows
 	l.telemetry.BatchCount++
-	l.telemetry.PhaseRows += rows
+	l.telemetry.PhaseRows += measurement.Rows
+	l.telemetry.EstimatedUncompressedBytesSent = saturatingAddUint64(
+		l.telemetry.EstimatedUncompressedBytesSent,
+		measurement.EstimatedUncompressedBytes,
+	)
+	l.telemetry.LastBatchEstimatedUncompressedBytes = measurement.EstimatedUncompressedBytes
+	l.telemetryMu.Unlock()
+	l.emitImportTelemetry()
+}
+
+func (l *summariseSpoolLoader) waitForServerPressure(parent context.Context, table string) error {
+	parent = loadParentContext(parent)
+	if !summarisePressureEnabled(l.cfg) {
+		return parent.Err()
+	}
+
+	for {
+		pressure, err := l.readServerPressure(parent, table)
+		if err != nil {
+			return err
+		}
+
+		l.recordPressureTelemetry(pressure)
+
+		if !pressure.exceeds(l.cfg) {
+			return nil
+		}
+
+		if err := waitForSummarisePressurePoll(
+			parent,
+			summarisePressurePollInterval(l.cfg),
+			l.pressurePollTimer,
+		); err != nil {
+			return err
+		}
+	}
+}
+
+func (l *summariseSpoolLoader) readServerPressure(
+	parent context.Context,
+	table string,
+) (summariseServerPressure, error) {
+	if err := parent.Err(); err != nil {
+		return summariseServerPressure{}, err
+	}
+
+	var pressure summariseServerPressure
+	if l.pressureProbe != nil {
+		pressure = l.pressureProbe(parent, table)
+	} else {
+		pressure = l.queryServerPressure(parent, table)
+	}
+
+	return pressure, parent.Err()
+}
+
+func (l *summariseSpoolLoader) queryServerPressure(
+	parent context.Context,
+	table string,
+) summariseServerPressure {
+	ctx, cancel := queryContext(parent, min(queryTimeout(l.cfg), summariseSpoolPartTelemetryTimeout))
+	defer cancel()
+
+	const query = "SELECT " +
+		"(SELECT toUInt64(count()) FROM system.parts WHERE database = ? AND table = ? AND active), " +
+		"(SELECT toUInt64(count()) FROM system.merges WHERE database = ? AND table = ?), " +
+		"toUInt64(ifNull((SELECT value FROM system.metrics WHERE metric = 'MemoryTracking'), 0))"
+
+	started := l.telemetryTime()
+	pressure := summariseServerPressure{}
+
+	err := l.conn.QueryRow(ctx, query, l.cfg.Database, table, l.cfg.Database, table).Scan(
+		&pressure.ActiveParts,
+		&pressure.ActiveMerges,
+		&pressure.MemoryBytes,
+	)
+	if err != nil {
+		return pressure
+	}
+
+	pressure.ActivePartsAvailable = true
+	pressure.ActiveMergesAvailable = true
+	pressure.MemoryBytesAvailable = true
+	pressure.QueryLatency = l.telemetryTime().Sub(started)
+	pressure.QueryLatencyAvailable = true
+
+	return pressure
+}
+
+func (l *summariseSpoolLoader) recordPressureTelemetry(pressure summariseServerPressure) {
+	if l.telemetryRecorder == nil {
+		return
+	}
+
+	l.telemetryMu.Lock()
+	l.telemetry.ServerPartCount = pressure.ActiveParts
+	l.telemetry.ServerPartCountAvailable = pressure.ActivePartsAvailable
+	l.telemetry.ServerActiveMerges = pressure.ActiveMerges
+	l.telemetry.ServerActiveMergesAvailable = pressure.ActiveMergesAvailable
+	l.telemetry.ServerMemoryBytes = pressure.MemoryBytes
+	l.telemetry.ServerMemoryBytesAvailable = pressure.MemoryBytesAvailable
+	l.telemetry.ServerQueryLatency = pressure.QueryLatency
+	l.telemetry.ServerQueryLatencyAvailable = pressure.QueryLatencyAvailable
+	l.telemetry.ServerPressureBackoff = pressure.exceeds(l.cfg)
 	l.telemetryMu.Unlock()
 	l.emitImportTelemetry()
 }
@@ -1330,6 +1456,22 @@ func summariseSpoolLogFullFilterAmplification(
 	)
 }
 
+func (b *summariseSpoolLoadReportBuilder) captureLoadState(loader *summariseSpoolLoader) {
+	b.loadedRows = summariseSpoolLoadLoadedRows(loader, b.manifest)
+	b.batchMeasurements = cloneImportBatchMeasurements(loader.batchMeasurements)
+}
+
+func cloneImportBatchMeasurements(
+	measurements map[string][]importBatchMeasurement,
+) map[string][]importBatchMeasurement {
+	out := make(map[string][]importBatchMeasurement, len(measurements))
+	for table, batches := range measurements {
+		out[table] = slices.Clone(batches)
+	}
+
+	return out
+}
+
 func summariseSpoolAddImportPhaseDurations(
 	stats map[string]perfreport.TableStats,
 	phaseDurations map[string]time.Duration,
@@ -1349,6 +1491,22 @@ func summariseSpoolAddImportPhaseDurations(
 			stats[table] = tableStats
 		}
 	}
+}
+
+func importBatchEstimatedBytes(
+	measurements map[string][]importBatchMeasurement,
+) map[string][]uint64 {
+	out := make(map[string][]uint64, len(measurements))
+	for table, batches := range measurements {
+		bytes := make([]uint64, 0, len(batches))
+		for _, batch := range batches {
+			bytes = append(bytes, batch.EstimatedUncompressedBytes)
+		}
+
+		out[table] = bytes
+	}
+
+	return out
 }
 
 // LoadSummariseSpoolReportWithTelemetry loads a spool while reporting live
@@ -1870,13 +2028,23 @@ func (l *summariseSpoolLoader) insertEligibleHistoryRows( //nolint:funlen,gocogn
 		)
 
 		writer := &importBlockWriter{
-			conn:      l.conn,
-			query:     insertBasedirsHistoryPoint,
-			name:      chspool.TableBasedirsHistory,
-			batch:     &batch,
-			openedAt:  &openedAt,
-			writeErr:  &writeErr,
-			batchSize: defaultBatchSize,
+			conn:       l.conn,
+			query:      insertBasedirsHistoryPoint,
+			name:       chspool.TableBasedirsHistory,
+			batch:      &batch,
+			openedAt:   &openedAt,
+			writeErr:   &writeErr,
+			batchSize:  defaultBatchSize,
+			batchBytes: summariseSpoolBatchBytesFor(l.cfg, chspool.TableBasedirsHistory),
+			onSendMeasurement: func(measurement importBatchMeasurement) {
+				l.recordBatchTelemetry(
+					summariseSpoolLoadPhasePrefix+chspool.TableBasedirsHistory,
+					measurement,
+				)
+			},
+			beforeBatch: func(ctx context.Context) error {
+				return l.waitForServerPressure(ctx, chspool.TableBasedirsHistory)
+			},
 		}
 
 		for _, row := range rows {
@@ -2254,17 +2422,21 @@ func (l *summariseSpoolLoader) loadTableWithQuery( //nolint:funlen
 		)
 
 		writer := &importBlockWriter{
-			conn:      l.conn,
-			query:     query,
-			name:      table,
-			batch:     &batch,
-			openedAt:  &openedAt,
-			writeErr:  &writeErr,
-			batchSize: summariseSpoolBatchSizeFor(table),
-			onSend: func(rows uint64) {
-				l.recordBatchTelemetry(telemetryPhase, rows)
+			conn:       l.conn,
+			query:      query,
+			name:       table,
+			batch:      &batch,
+			openedAt:   &openedAt,
+			writeErr:   &writeErr,
+			batchSize:  summariseSpoolBatchSizeFor(table),
+			batchBytes: summariseSpoolBatchBytesFor(l.cfg, table),
+			onSendMeasurement: func(measurement importBatchMeasurement) {
+				l.recordBatchTelemetry(telemetryPhase, measurement)
 			},
 			onProgress: l.recordServerProgress,
+			beforeBatch: func(ctx context.Context) error {
+				return l.waitForServerPressure(ctx, table)
+			},
 		}
 
 		rows, err := load(parent, writer)
@@ -3501,15 +3673,16 @@ func summariseSpoolCPUUsageDelta(before, after summariseSpoolCPUUsage) summarise
 }
 
 type summariseSpoolLoadReportBuilder struct {
-	report           perfreport.Report
-	manifest         *chspool.Manifest
-	recorder         func(string, time.Duration)
-	phaseDurations   map[string]time.Duration
-	loadedRows       map[string]uint64
-	tableStatsStatus string
-	tableStatsError  string
-	started          time.Time
-	usageBefore      summariseSpoolCPUUsage
+	report            perfreport.Report
+	manifest          *chspool.Manifest
+	recorder          func(string, time.Duration)
+	phaseDurations    map[string]time.Duration
+	loadedRows        map[string]uint64
+	batchMeasurements map[string][]importBatchMeasurement
+	tableStatsStatus  string
+	tableStatsError   string
+	started           time.Time
+	usageBefore       summariseSpoolCPUUsage
 }
 
 func (b *summariseSpoolLoadReportBuilder) record(phase string, duration time.Duration) {
@@ -3528,7 +3701,7 @@ func (b *summariseSpoolLoadReportBuilder) collect(
 	parent context.Context,
 	loader *summariseSpoolLoader,
 ) error {
-	b.loadedRows = summariseSpoolLoadLoadedRows(loader, b.manifest)
+	b.captureLoadState(loader)
 
 	stats, err := loader.loadReportTableStats(parent)
 	if err != nil {
@@ -3649,15 +3822,16 @@ func summariseSpoolAddE2ComputedBudgetInputs(op *perfreport.Operation) {
 
 func (b *summariseSpoolLoadReportBuilder) inputs(usage summariseSpoolCPUUsage) map[string]any {
 	inputs := map[string]any{
-		"loaded_table_rows":    b.loadedRows,
-		"user_cpu_ms":          usage.userMS,
-		"system_cpu_ms":        usage.systemMS,
-		"total_cpu_ms":         usage.userMS + usage.systemMS,
-		"peak_rss_bytes":       b.report.MaxRSSBytes,
-		"spool_bytes":          summariseSpoolManifestBytes(b.manifest),
-		"part_counts":          summariseSpoolPartCounts(b.report.TableStats),
-		"retry_cleanup_result": b.retryCleanupResult(),
-		"publish_latency_ms":   summariseSpoolDurationMSUint64(b.phaseDurations[importPhaseMountSwitch]),
+		"loaded_table_rows":                  b.loadedRows,
+		"user_cpu_ms":                        usage.userMS,
+		"system_cpu_ms":                      usage.systemMS,
+		"total_cpu_ms":                       usage.userMS + usage.systemMS,
+		"peak_rss_bytes":                     b.report.MaxRSSBytes,
+		"spool_bytes":                        summariseSpoolManifestBytes(b.manifest),
+		"part_counts":                        summariseSpoolPartCounts(b.report.TableStats),
+		"retry_cleanup_result":               b.retryCleanupResult(),
+		"publish_latency_ms":                 summariseSpoolDurationMSUint64(b.phaseDurations[importPhaseMountSwitch]),
+		"batch_estimated_uncompressed_bytes": importBatchEstimatedBytes(b.batchMeasurements),
 	}
 
 	if b.tableStatsStatus != "" {
@@ -3755,6 +3929,10 @@ func LoadSummariseSpool(
 
 func validateSummariseSpoolLoad(cfg Config, manifest *chspool.Manifest) error { //nolint:gocyclo
 	if err := validateConfig(cfg); err != nil {
+		return err
+	}
+
+	if err := validateSummariseInsertLimits(cfg); err != nil {
 		return err
 	}
 

@@ -65,25 +65,34 @@ type summariseDiagnostics struct {
 	target    *clickHouseSummariseTarget
 	started   time.Time
 
-	currentPhase                   string
-	lastRecords                    uint64
-	inputRows                      uint64
-	directoryNodes                 uint64
-	impliedDirectories             uint64
-	maximumDepth                   uint64
-	depthHistogram                 []uint64
-	heavyPrefixes                  []dirbuild.PrefixCount
-	sqliteBytes                    uint64
-	spoolBytes                     uint64
-	rowsPerSecond                  float64
-	phaseElapsed                   time.Duration
-	clickHouseRowsSent             uint64
-	clickHouseBytesSent            uint64
-	clickHouseBytesAvailable       bool
-	clickHouseBatchCount           uint64
-	clickHouseServerParts          uint64
-	clickHouseServerPartsAvailable bool
-	currentCheckpoint              string
+	currentPhase                          string
+	lastRecords                           uint64
+	inputRows                             uint64
+	directoryNodes                        uint64
+	impliedDirectories                    uint64
+	maximumDepth                          uint64
+	depthHistogram                        []uint64
+	heavyPrefixes                         []dirbuild.PrefixCount
+	sqliteBytes                           uint64
+	spoolBytes                            uint64
+	rowsPerSecond                         float64
+	phaseElapsed                          time.Duration
+	clickHouseRowsSent                    uint64
+	clickHouseBytesSent                   uint64
+	clickHouseBytesAvailable              bool
+	clickHouseBatchCount                  uint64
+	clickHouseEstimatedUncompressedBytes  uint64
+	clickHouseLastBatchEstimatedBytes     uint64
+	clickHouseServerParts                 uint64
+	clickHouseServerPartsAvailable        bool
+	clickHouseServerMerges                uint64
+	clickHouseServerMergesAvailable       bool
+	clickHouseServerMemoryBytes           uint64
+	clickHouseServerMemoryAvailable       bool
+	clickHouseServerQueryLatency          time.Duration
+	clickHouseServerQueryLatencyAvailable bool
+	clickHouseServerPressureBackoff       bool
+	currentCheckpoint                     string
 
 	phaseTotals  map[string]time.Duration
 	recentPhases []summarisePhaseDuration
@@ -230,10 +239,11 @@ func (d *summariseDiagnostics) observeClickHouseTelemetry(snapshot clickhouse.Su
 	d.clickHouseBytesSent = snapshot.BytesSent
 	d.clickHouseBytesAvailable = snapshot.BytesSentAvailable
 	d.clickHouseBatchCount = snapshot.BatchCount
+	d.clickHouseEstimatedUncompressedBytes = snapshot.EstimatedUncompressedBytesSent
+	d.clickHouseLastBatchEstimatedBytes = snapshot.LastBatchEstimatedUncompressedBytes
 	d.phaseElapsed = snapshot.PhaseElapsed
 	d.rowsPerSecond = diagnosticRowsPerSecond(snapshot.PhaseRows, snapshot.PhaseElapsed)
-	d.clickHouseServerParts = snapshot.ServerPartCount
-	d.clickHouseServerPartsAvailable = snapshot.ServerPartCountAvailable
+	d.observeClickHousePressureTelemetryLocked(snapshot)
 	d.mu.Unlock()
 	d.logState("summarise clickhouse progress")
 }
@@ -244,6 +254,20 @@ func diagnosticRowsPerSecond(rows uint64, elapsed time.Duration) float64 {
 	}
 
 	return float64(rows) / elapsed.Seconds()
+}
+
+func (d *summariseDiagnostics) observeClickHousePressureTelemetryLocked(
+	snapshot clickhouse.SummariseImportTelemetry,
+) {
+	d.clickHouseServerParts = snapshot.ServerPartCount
+	d.clickHouseServerPartsAvailable = snapshot.ServerPartCountAvailable
+	d.clickHouseServerMerges = snapshot.ServerActiveMerges
+	d.clickHouseServerMergesAvailable = snapshot.ServerActiveMergesAvailable
+	d.clickHouseServerMemoryBytes = snapshot.ServerMemoryBytes
+	d.clickHouseServerMemoryAvailable = snapshot.ServerMemoryBytesAvailable
+	d.clickHouseServerQueryLatency = snapshot.ServerQueryLatency
+	d.clickHouseServerQueryLatencyAvailable = snapshot.ServerQueryLatencyAvailable
+	d.clickHouseServerPressureBackoff = snapshot.ServerPressureBackoff
 }
 
 func (d *summariseDiagnostics) setSpoolBytes(bytes uint64) {
@@ -347,8 +371,17 @@ func (d *summariseDiagnostics) telemetryFieldsLocked() []string {
 		fmt.Sprintf("clickhouse_rows_sent=%d", d.clickHouseRowsSent),
 		"clickhouse_bytes_sent=" + diagnosticOptionalUint64(d.clickHouseBytesSent, d.clickHouseBytesAvailable),
 		fmt.Sprintf("clickhouse_batch_count=%d", d.clickHouseBatchCount),
+		fmt.Sprintf("clickhouse_estimated_uncompressed_bytes_sent=%d", d.clickHouseEstimatedUncompressedBytes),
+		fmt.Sprintf("clickhouse_last_batch_estimated_uncompressed_bytes=%d", d.clickHouseLastBatchEstimatedBytes),
 		"clickhouse_server_part_count=" +
 			diagnosticOptionalUint64(d.clickHouseServerParts, d.clickHouseServerPartsAvailable),
+		"clickhouse_server_active_merges=" +
+			diagnosticOptionalUint64(d.clickHouseServerMerges, d.clickHouseServerMergesAvailable),
+		"clickhouse_server_memory_bytes=" +
+			diagnosticOptionalUint64(d.clickHouseServerMemoryBytes, d.clickHouseServerMemoryAvailable),
+		"clickhouse_server_query_latency=" +
+			diagnosticOptionalDuration(d.clickHouseServerQueryLatency, d.clickHouseServerQueryLatencyAvailable),
+		fmt.Sprintf("clickhouse_server_pressure_backoff=%t", d.clickHouseServerPressureBackoff),
 		"current_checkpoint=" + quoteForDiagnostics(d.currentCheckpoint),
 	}
 }
@@ -385,6 +418,14 @@ func diagnosticOptionalUint64(value uint64, available bool) string {
 	}
 
 	return strconv.FormatUint(value, 10)
+}
+
+func diagnosticOptionalDuration(value time.Duration, available bool) string {
+	if !available {
+		return unknownRSS
+	}
+
+	return formatDiagnosticDuration(value)
 }
 
 func (d *summariseDiagnostics) logParseResult(records uint64, err error) {

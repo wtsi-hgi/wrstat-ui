@@ -71,11 +71,16 @@ type importBlockWriter struct {
 	openedAt *time.Time
 	writeErr *error
 
-	batchSize   int
-	notPrepared error
-	now         func() time.Time
-	onSend      func(uint64)
-	onProgress  func(*ch.Progress)
+	batchSize            int
+	batchBytes           uint64
+	currentBytes         uint64
+	notPrepared          error
+	now                  func() time.Time
+	onSend               func(uint64)
+	onSendMeasurement    func(importBatchMeasurement)
+	onProgress           func(*ch.Progress)
+	beforeBatch          func(context.Context) error
+	checkBeforeNextBatch bool
 }
 
 func (w *importBlockWriter) append(
@@ -94,7 +99,7 @@ func (w *importBlockWriter) append(
 		return err
 	}
 
-	if err := appendRow(*w.batch); err != nil {
+	if err := w.appendMeasuredRow(ctx, appendRow); err != nil {
 		return fmt.Errorf(
 			"clickhouse: failed to append %s row: %w",
 			w.name,
@@ -105,17 +110,65 @@ func (w *importBlockWriter) append(
 	return w.sendIfFull()
 }
 
-func (w *importBlockWriter) ensureReady(ctx context.Context) error {
-	if err := w.err(); err != nil {
+func (w *importBlockWriter) appendMeasuredRow(
+	ctx context.Context,
+	appendRow func(driver.Batch) error,
+) error {
+	if w.batchBytes == 0 && w.onSendMeasurement == nil {
+		return appendRow(*w.batch)
+	}
+
+	bufferedBatch := &importBatchBufferedBatch{Batch: *w.batch}
+	if err := appendRow(bufferedBatch); err != nil {
 		return err
 	}
 
-	if w.batch == nil || w.conn == nil {
-		return w.setErr(w.notPreparedError())
+	if !bufferedBatch.appended {
+		return nil
+	}
+
+	if err := w.prepareBatchForBufferedRow(ctx, bufferedBatch.bytes); err != nil {
+		return err
+	}
+
+	if err := (*w.batch).Append(bufferedBatch.values...); err != nil {
+		return err
+	}
+
+	w.currentBytes = saturatingAddUint64(w.currentBytes, bufferedBatch.bytes)
+
+	return nil
+}
+
+func (w *importBlockWriter) prepareBatchForBufferedRow(ctx context.Context, rowBytes uint64) error {
+	if !w.nextRowExceedsByteLimit(rowBytes) {
+		return nil
+	}
+
+	if err := w.send(); err != nil {
+		return err
+	}
+
+	return w.ensureReady(ctx)
+}
+
+func (w *importBlockWriter) nextRowExceedsByteLimit(rowBytes uint64) bool {
+	return w.batchBytes > 0 &&
+		(*w.batch).Rows() > 0 &&
+		saturatingAddUint64(w.currentBytes, rowBytes) > w.batchBytes
+}
+
+func (w *importBlockWriter) ensureReady(ctx context.Context) error {
+	if err := w.validateReadyState(); err != nil {
+		return err
 	}
 
 	if *w.batch != nil {
 		return nil
+	}
+
+	if err := w.checkServerPressure(ctx); err != nil {
+		return err
 	}
 
 	if w.onProgress != nil {
@@ -156,12 +209,47 @@ func markImportBatchOpened(openedAt *time.Time, now func() time.Time) {
 	}
 }
 
+func (w *importBlockWriter) validateReadyState() error {
+	if err := w.err(); err != nil {
+		return err
+	}
+
+	if w.batch == nil || w.conn == nil {
+		return w.setErr(w.notPreparedError())
+	}
+
+	return nil
+}
+
+func (w *importBlockWriter) checkServerPressure(ctx context.Context) error {
+	if !w.checkBeforeNextBatch || w.beforeBatch == nil {
+		return nil
+	}
+
+	if err := w.beforeBatch(ctx); err != nil {
+		return w.setErr(err)
+	}
+
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return w.setErr(err)
+		}
+	}
+
+	w.checkBeforeNextBatch = false
+
+	return nil
+}
+
 func (w *importBlockWriter) sendIfFull() error {
 	if w.batch == nil || *w.batch == nil || w.batchSize <= 0 {
 		return nil
 	}
 
-	if (*w.batch).Rows() < w.batchSize {
+	rowLimitReached := (*w.batch).Rows() >= w.batchSize
+
+	byteLimitReached := w.batchBytes > 0 && w.currentBytes >= w.batchBytes
+	if !rowLimitReached && !byteLimitReached {
 		return nil
 	}
 
@@ -215,6 +303,7 @@ func (w *importBlockWriter) abort() error {
 
 	err := (*w.batch).Abort()
 	*w.batch = nil
+	w.currentBytes = 0
 	clearImportBatchOpened(w.openedAt)
 
 	if err == nil {
@@ -240,14 +329,14 @@ func (w *importBlockWriter) send() error {
 	}
 
 	rows := uint64((*w.batch).Rows()) //nolint:gosec // batch rows cannot be negative.
+	measurement := importBatchMeasurement{Rows: rows, EstimatedUncompressedBytes: w.currentBytes}
 	err := (*w.batch).Send()
 	*w.batch = nil
+	w.currentBytes = 0
 	clearImportBatchOpened(w.openedAt)
 
 	if err == nil {
-		if w.onSend != nil {
-			w.onSend(rows)
-		}
+		w.recordSuccessfulSend(rows, measurement)
 
 		return nil
 	}
@@ -257,6 +346,17 @@ func (w *importBlockWriter) send() error {
 		w.name,
 		err,
 	))
+}
+
+func (w *importBlockWriter) recordSuccessfulSend(rows uint64, measurement importBatchMeasurement) {
+	w.checkBeforeNextBatch = true
+	if w.onSend != nil {
+		w.onSend(rows)
+	}
+
+	if w.onSendMeasurement != nil {
+		w.onSendMeasurement(measurement)
+	}
 }
 
 func (w *importBlockWriter) err() error {

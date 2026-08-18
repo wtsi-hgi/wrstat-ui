@@ -588,7 +588,7 @@ func TestClickHouseSummariseSpoolLoader(t *testing.T) {
 
 			now = now.Add(3 * time.Second)
 
-			loader.recordBatchTelemetry("derived_stage", 2)
+			loader.recordBatchTelemetry("derived_stage", importBatchMeasurement{Rows: 2})
 
 			return nil
 		})
@@ -599,6 +599,9 @@ func TestClickHouseSummariseSpoolLoader(t *testing.T) {
 		So(live, ShouldHaveLength, 3)
 		So(live[1].PhaseElapsed, ShouldEqual, 3*time.Second)
 		So(live[2].PhaseElapsed, ShouldEqual, 3*time.Second)
+		So(live[1].EstimatedUncompressedBytesSent, ShouldEqual, uint64(0))
+		So(loader.batchMeasurements["derived_stage"], ShouldResemble,
+			[]importBatchMeasurement{{Rows: 2}})
 	})
 
 	Convey("summarise spool load rejects manifests missing schema2 table manifests", t, func() {

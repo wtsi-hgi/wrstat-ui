@@ -456,6 +456,14 @@ func snapshotSummariseGlobals() func() {
 	origClickHouseDatabase := clickhouseDatabase
 	origClickHouseQueryTO := clickhouseQueryTO
 	origClickHouseRecover := clickhouseRecover
+	origSummariseFilesInsertBytes := summariseFilesInsertBytes
+	origSummariseFilterInsertBytes := summariseFilterInsertBytes
+	origSummariseOtherInsertBytes := summariseOtherInsertBytes
+	origSummarisePressureMaxActiveParts := summarisePressureMaxActiveParts
+	origSummarisePressureMaxMerges := summarisePressureMaxMerges
+	origSummarisePressureMaxMemoryBytes := summarisePressureMaxMemoryBytes
+	origSummarisePressureMaxQueryLatency := summarisePressureMaxQueryLatency
+	origSummarisePressurePollInterval := summarisePressurePollInterval
 	origClickHouseSnapshotIsActive := clickHouseSnapshotIsActive
 	origClickHouseCleanActiveSnapshotAttempt := clickHouseCleanActiveSnapshotAttempt
 	origWireSummariseClickHouseOperations := wireSummariseClickHouseOperations
@@ -479,6 +487,14 @@ func snapshotSummariseGlobals() func() {
 		clickhouseDatabase = origClickHouseDatabase
 		clickhouseQueryTO = origClickHouseQueryTO
 		clickhouseRecover = origClickHouseRecover
+		summariseFilesInsertBytes = origSummariseFilesInsertBytes
+		summariseFilterInsertBytes = origSummariseFilterInsertBytes
+		summariseOtherInsertBytes = origSummariseOtherInsertBytes
+		summarisePressureMaxActiveParts = origSummarisePressureMaxActiveParts
+		summarisePressureMaxMerges = origSummarisePressureMaxMerges
+		summarisePressureMaxMemoryBytes = origSummarisePressureMaxMemoryBytes
+		summarisePressureMaxQueryLatency = origSummarisePressureMaxQueryLatency
+		summarisePressurePollInterval = origSummarisePressurePollInterval
 		clickHouseSnapshotIsActive = origClickHouseSnapshotIsActive
 		clickHouseCleanActiveSnapshotAttempt = origClickHouseCleanActiveSnapshotAttempt
 		wireSummariseClickHouseOperations = origWireSummariseClickHouseOperations
@@ -532,6 +548,48 @@ func summariseCompletionMarkerExists(outputDir string) bool {
 	_, err := os.Stat(summariseCompletionMarkerPath(outputDir))
 
 	return err == nil
+}
+
+func TestSummariseClickHouseInsertConfig(t *testing.T) {
+	Convey("Summarise applies fixed per-class byte budgets and pressure defaults", t, func() {
+		restore := snapshotSummariseGlobals()
+		Reset(restore)
+
+		clickhouseDSN = summariseTestClickHouseDSN
+		clickhouseDatabase = summariseTestClickHouseDatabase
+
+		cfg, err := clickhouseSummariserConfig("")
+		So(err, ShouldBeNil)
+		So(cfg.SummariseFilesInsertBytes, ShouldEqual, int64(defaultSummariseFilesInsertBytes))
+		So(cfg.SummariseFilterInsertBytes, ShouldEqual, int64(defaultSummariseFilterInsertBytes))
+		So(cfg.SummariseOtherInsertBytes, ShouldEqual, int64(defaultSummariseOtherInsertBytes))
+		So(cfg.SummarisePressureMaxActiveParts, ShouldEqual, int64(defaultSummarisePressureActiveParts))
+		So(cfg.SummarisePressureMaxMerges, ShouldEqual, int64(defaultSummarisePressureMerges))
+		So(cfg.SummarisePressureMaxMemoryBytes, ShouldEqual, int64(defaultSummarisePressureMemoryBytes))
+		So(cfg.SummarisePressureMaxQueryLatency, ShouldEqual, defaultSummarisePressureQueryLatency)
+		So(cfg.SummarisePressurePollInterval, ShouldEqual, defaultSummarisePressurePollInterval)
+	})
+
+	Convey("Summarise rejects zero byte budgets and negative pressure values", t, func() {
+		restore := snapshotSummariseGlobals()
+		Reset(restore)
+
+		clickhouseDSN = summariseTestClickHouseDSN
+		clickhouseDatabase = summariseTestClickHouseDatabase
+
+		summariseFilesInsertBytes = 0
+		_, err := clickhouseSummariserConfig("")
+		So(err, ShouldNotBeNil)
+
+		summariseFilesInsertBytes = defaultSummariseFilesInsertBytes
+		summariseOtherInsertBytes = defaultSummariseOtherInsertBytes
+		summarisePressureMaxMerges = -1
+		_, err = clickhouseSummariserConfig("")
+		So(err, ShouldNotBeNil)
+
+		flag := summariseCmd.Flags().Lookup("clickhouse-files-insert-bytes")
+		So(flag.Value.Set("9223372036854775808"), ShouldNotBeNil)
+	})
 }
 
 func TestSummariseClickHouseRecoverFlag(t *testing.T) {
