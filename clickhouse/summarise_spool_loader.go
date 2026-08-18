@@ -95,6 +95,9 @@ var (
 	errSummariseSpoolPublishMissingSwitchPlan = errors.New(
 		"clickhouse: summarise spool publish state is missing switch plan",
 	)
+	errUnsupportedSummariseSpoolPublishStateVersion = errors.New(
+		"clickhouse: unsupported summarise spool publish state version",
+	)
 )
 
 type activeVirtualCompositionCounts struct {
@@ -269,39 +272,36 @@ func (l *summariseSpoolLoader) ensureTablesLoaded(
 	parent context.Context,
 	tracker *summariseSpoolPublishTracker,
 ) error {
-	if tracker.done(summariseSpoolPublishPhaseTablesLoaded) {
-		l.recordLoadedRowsFromManifest()
+	retry, err := l.ensureSnapshotPrepared(parent, tracker)
+	if err != nil {
+		return err
+	}
 
+	if err := l.loadTablesWithTracker(parent, tracker, retry); err != nil {
+		return err
+	}
+
+	tracker.legacyCoarseTables = false
+	if tracker.done(summariseSpoolPublishPhaseTablesLoaded) {
 		return nil
 	}
-
-	if err := l.prepareSnapshot(parent); err != nil {
-		return err
-	}
-
-	if err := l.loadTables(parent); err != nil {
-		return err
-	}
-
-	l.recordLoadedRowsFromManifest()
 
 	return tracker.mark(summariseSpoolPublishPhaseTablesLoaded)
 }
 
-func (l *summariseSpoolLoader) recordLoadedRowsFromManifest() {
-	if l.manifest == nil {
-		return
+func (l *summariseSpoolLoader) ensureSnapshotPrepared(
+	parent context.Context,
+	tracker *summariseSpoolPublishTracker,
+) (bool, error) {
+	if tracker.done(summariseSpoolPublishPhaseSnapshotPrepared) {
+		return true, nil
 	}
 
-	for table, manifest := range l.manifest.Tables {
-		if manifest.Rows > 0 {
-			l.recordLoadedRows(table, manifest.Rows)
-		}
+	if err := l.prepareSnapshot(parent); err != nil {
+		return false, err
 	}
 
-	if manifest, ok := l.manifest.Tables[chspool.TableDirFilterAll]; ok && manifest.Rows > 0 {
-		l.recordLoadedRows(chspool.TableChildFilterAll, manifest.Rows)
-	}
+	return false, tracker.mark(summariseSpoolPublishPhaseSnapshotPrepared)
 }
 
 func (l *summariseSpoolLoader) queryContext(parent context.Context) (context.Context, context.CancelFunc) {
@@ -921,13 +921,352 @@ func (l *summariseSpoolLoader) newDGUTAWriter(parent context.Context) *dgutaWrit
 	}
 }
 
-func summariseSpoolCheapSnapshotStageTables() []string {
-	return []string{
-		chspool.TableDirs,
-		chspool.TableDirFacts,
-		chspool.TableDirFilterAgeAll,
-		chspool.TableDirFilterAll,
+func (l *summariseSpoolLoader) loadTablesWithTracker( //nolint:funlen,gocyclo,gocognit
+	ctx context.Context,
+	tracker *summariseSpoolPublishTracker,
+	retry bool,
+) error {
+	tableLoads := []struct {
+		table string
+		load  func(context.Context) error
+	}{
+		{chspool.TableDirs, l.loadDirs},
+		{chspool.TableDirFacts, l.loadDirFacts},
+		{chspool.TableDirFilterAgeAll, l.loadDirFilterAgeAll},
+		{chspool.TableDirFilterAll, l.loadDirFilterAll},
 	}
+	for _, tableLoad := range tableLoads {
+		if err := l.loadCheckpointedTable(ctx, tracker, tableLoad.table, retry, tableLoad.load); err != nil {
+			return err
+		}
+	}
+
+	if err := l.loadCheckpointedChildFilterAll(ctx, tracker, retry); err != nil {
+		return err
+	}
+
+	if err := l.enforceFullFilterAmplificationGate(ctx); err != nil {
+		return err
+	}
+
+	tableLoads = []struct {
+		table string
+		load  func(context.Context) error
+	}{
+		{chspool.TableFiles, l.loadFiles},
+		{chspool.TableDirProjectionSets, l.loadDirProjectionSets},
+		{chspool.TableSchema3SnapshotSets, l.loadSchema3SnapshotSets},
+		{chspool.TableActiveVirtualDirs, l.loadActiveVirtualDirs},
+		{chspool.TableActiveVirtualSummaries, l.loadActiveVirtualSummaries},
+		{chspool.TableActiveVirtualFilterAll, l.loadActiveVirtualFilterAll},
+		{chspool.TableActiveVirtualChildren, l.loadActiveVirtualChildren},
+	}
+	for _, tableLoad := range tableLoads {
+		if err := l.loadCheckpointedTable(ctx, tracker, tableLoad.table, retry, tableLoad.load); err != nil {
+			return err
+		}
+	}
+
+	if err := l.validateSpoolActiveVirtualCatalog(); err != nil {
+		return err
+	}
+
+	tableLoads = []struct {
+		table string
+		load  func(context.Context) error
+	}{
+		{chspool.TableActiveVirtualSets, l.loadActiveVirtualSets},
+		{chspool.TableBasedirsHistory, l.loadBasedirsHistory},
+		{chspool.TableBasedirsGroupUsage, l.loadBasedirsGroupUsage},
+		{chspool.TableBasedirsUserUsage, l.loadBasedirsUserUsage},
+		{chspool.TableBasedirsGroupSubdirs, func(parent context.Context) error {
+			return l.loadBasedirsSubdirs(parent, chspool.TableBasedirsGroupSubdirs)
+		}},
+		{chspool.TableBasedirsUserSubdirs, func(parent context.Context) error {
+			return l.loadBasedirsSubdirs(parent, chspool.TableBasedirsUserSubdirs)
+		}},
+	}
+	for _, tableLoad := range tableLoads {
+		if err := l.loadCheckpointedTable(ctx, tracker, tableLoad.table, retry, tableLoad.load); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (l *summariseSpoolLoader) loadCheckpointedTable(
+	parent context.Context,
+	tracker *summariseSpoolPublishTracker,
+	table string,
+	retry bool,
+	load func(context.Context) error,
+) error {
+	expected := l.manifest.Tables[table].Rows
+
+	verified, err := l.checkPersistedTableCheckpoint(parent, tracker, table, expected)
+	if err != nil || verified {
+		return err
+	}
+
+	if err := l.resetIncompleteSpoolTable(parent, table, retry); err != nil {
+		return err
+	}
+
+	if expected == 0 {
+		return tracker.markTable(table, 0)
+	}
+
+	if err := load(parent); err != nil {
+		return err
+	}
+
+	if err := l.verifyLoadedCount(parent, table, expected); err != nil {
+		return err
+	}
+
+	return tracker.markTable(table, expected)
+}
+
+func (l *summariseSpoolLoader) resetIncompleteSpoolTable(
+	parent context.Context,
+	table string,
+	retry bool,
+) error {
+	if !retry || table == chspool.TableBasedirsHistory {
+		return nil
+	}
+
+	return l.resetSpoolTable(parent, table)
+}
+
+func (l *summariseSpoolLoader) checkPersistedTableCheckpoint(
+	parent context.Context,
+	tracker *summariseSpoolPublishTracker,
+	table string,
+	expected uint64,
+) (bool, error) {
+	checkpointed := tracker.tableDone(table, expected)
+	if !checkpointed && !tracker.legacyCoarseTables {
+		return false, nil
+	}
+
+	got, err := l.countLoadedRows(parent, table)
+	if err != nil {
+		return false, err
+	}
+
+	if got != expected {
+		if !checkpointed {
+			return false, nil
+		}
+
+		return false, tracker.clearTable(table)
+	}
+
+	l.recordLoadedRows(table, got)
+
+	if checkpointed {
+		return true, nil
+	}
+
+	return true, tracker.markTable(table, expected)
+}
+
+func (l *summariseSpoolLoader) checkPersistedChildFilterAllCheckpoint(
+	parent context.Context,
+	tracker *summariseSpoolPublishTracker,
+	expected uint64,
+) (bool, error) {
+	checkpointed := tracker.operationDone(expected)
+	if !checkpointed && !tracker.legacyCoarseTables {
+		return false, nil
+	}
+
+	got, err := l.countLoadedRows(parent, chspool.TableChildFilterAll)
+	if err != nil {
+		return false, err
+	}
+
+	if got != expected {
+		if !checkpointed {
+			return false, nil
+		}
+
+		return false, tracker.clearOperation(summariseSpoolPublishOperationChildFilterAll)
+	}
+
+	l.recordLoadedRows(chspool.TableChildFilterAll, got)
+
+	if checkpointed {
+		return true, nil
+	}
+
+	return true, tracker.markOperation(expected)
+}
+
+func (l *summariseSpoolLoader) loadCheckpointedChildFilterAll(
+	parent context.Context,
+	tracker *summariseSpoolPublishTracker,
+	retry bool,
+) error {
+	expected := l.manifest.Tables[chspool.TableDirFilterAll].Rows
+
+	verified, err := l.checkPersistedChildFilterAllCheckpoint(parent, tracker, expected)
+	if err != nil || verified {
+		return err
+	}
+
+	if retry {
+		if err := l.resetSpoolTable(parent, chspool.TableChildFilterAll); err != nil {
+			return err
+		}
+	}
+
+	if expected == 0 {
+		return tracker.markOperation(0)
+	}
+
+	if err := l.deriveChildFilterAll(parent); err != nil {
+		return err
+	}
+
+	return tracker.markOperation(expected)
+}
+
+func (l *summariseSpoolLoader) verifyLoadedCount(
+	parent context.Context,
+	table string,
+	expected uint64,
+) error {
+	got, err := l.countLoadedRows(parent, table)
+	if err != nil {
+		return err
+	}
+
+	if got != expected {
+		return fmt.Errorf(
+			"%w: table=%s got=%d expected=%d",
+			errSpoolLoadedRowsMismatch,
+			table,
+			got,
+			expected,
+		)
+	}
+
+	l.recordLoadedRows(table, got)
+
+	return nil
+}
+
+func (l *summariseSpoolLoader) resetSpoolTable(parent context.Context, table string) error {
+	if query, ok := summariseSpoolSnapshotDropQueries()[table]; ok {
+		return dropPartitionIgnoreUnknown(parent, l.conn, l.manifest.MountPath, l.snapshot.String(), query)
+	}
+
+	query, ok := summariseSpoolActiveVirtualDropQueries()[table]
+	if !ok {
+		return fmt.Errorf("%w: %s", errUnknownSpoolLoadTable, table)
+	}
+
+	activeSetIDs, err := l.spoolActiveSetIDs()
+	if err != nil {
+		return err
+	}
+
+	for _, activeSetID := range activeSetIDs {
+		if err := dropActiveSetPartition(parent, l.conn, query, activeSetID, table); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func summariseSpoolSnapshotDropQueries() map[string]string {
+	return map[string]string{
+		chspool.TableDirs:                 dropDirsPartitionQuery,
+		chspool.TableFiles:                dropFilesPartitionQuery,
+		chspool.TableDirFacts:             dropDirSummaryPartitionQuery,
+		chspool.TableDirFilterAgeAll:      dropDirFilterAgeAllPartitionQuery,
+		chspool.TableChildFilterAll:       dropChildFilterAllPartitionQuery,
+		chspool.TableDirFilterAll:         dropDirFilterAllPartitionQuery,
+		chspool.TableSchema3SnapshotSets:  dropSchema3SnapshotSetPartitionQuery,
+		chspool.TableDirProjectionSets:    dropDirSummarySetPartitionQuery,
+		chspool.TableBasedirsGroupUsage:   dropBasedirsGroupUsagePartitionQuery,
+		chspool.TableBasedirsUserUsage:    dropBasedirsUserUsagePartitionQuery,
+		chspool.TableBasedirsGroupSubdirs: dropBasedirsGroupSubdirsPartitionQuery,
+		chspool.TableBasedirsUserSubdirs:  dropBasedirsUserSubdirsPartitionQuery,
+	}
+}
+
+func summariseSpoolActiveVirtualDropQueries() map[string]string {
+	return map[string]string{
+		chspool.TableActiveVirtualDirs:      dropActiveVirtualDirsPartitionQuery,
+		chspool.TableActiveVirtualSummaries: dropActiveVirtualSummariesPartitionQuery,
+		chspool.TableActiveVirtualFilterAll: dropActiveVirtualFilterAllPartitionQuery,
+		chspool.TableActiveVirtualChildren:  dropActiveVirtualChildrenPartitionQuery,
+		chspool.TableActiveVirtualSets:      dropActiveVirtualSetsPartitionQuery,
+	}
+}
+
+func (l *summariseSpoolLoader) countLoadedBasedirsHistoryRows(parent context.Context) (uint64, error) {
+	rows, err := l.readBasedirsHistoryRows()
+	if err != nil {
+		return 0, err
+	}
+
+	uniqueRows := compactHistoryDeleteRows(rows)
+
+	var total uint64
+
+	for _, mountRows := range historyRowsGroupedByMountPath(uniqueRows) {
+		for chunk := range slices.Chunk(mountRows, spoolHistoryDeleteChunk) {
+			count, err := l.countLoadedBasedirsHistoryChunk(parent, chunk)
+			if err != nil {
+				return 0, err
+			}
+
+			total += count
+		}
+	}
+
+	return total, nil
+}
+
+func (l *summariseSpoolLoader) countLoadedBasedirsHistoryChunk(
+	parent context.Context,
+	rows []chspool.BasedirsHistoryRow,
+) (uint64, error) {
+	query, args := summariseSpoolHistoryCountRowsQuery(rows)
+
+	ctx, cancel := l.queryContext(parent)
+	defer cancel()
+
+	var count uint64
+
+	if err := l.conn.QueryRow(ctx, query, args...).Scan(&count); err != nil {
+		return 0, fmt.Errorf(
+			"clickhouse: failed to count loaded spool table %s: %w",
+			chspool.TableBasedirsHistory,
+			err,
+		)
+	}
+
+	return count, nil
+}
+
+func summariseSpoolHistoryCountRowsQuery(rows []chspool.BasedirsHistoryRow) (string, []any) {
+	query, args := summariseSpoolHistoryDeleteQuery(rows)
+	query = strings.TrimSuffix(query, " SETTINGS mutations_sync = 1")
+	query = strings.Replace(
+		query,
+		"ALTER TABLE wrstat_basedirs_history DELETE",
+		"SELECT count() FROM wrstat_basedirs_history",
+		1,
+	)
+
+	return query, args
 }
 
 type summariseSpoolRealTelemetryTicker struct {
@@ -1057,127 +1396,10 @@ func decodeSpoolActiveSetIDs[T any](
 	})
 }
 
-func (l *summariseSpoolLoader) loadTables(ctx context.Context) error { //nolint:funlen,gocyclo,gocognit,cyclop
-	if err := l.loadDirs(ctx); err != nil {
-		return err
-	}
+func (l *summariseSpoolLoader) loadTables(ctx context.Context) error {
+	tracker := newEmptySummariseSpoolPublishTracker("", l.manifest, summariseSpoolPublishManifestKey(l.manifest))
 
-	if err := l.loadDirFacts(ctx); err != nil {
-		return err
-	}
-
-	if err := l.loadDirFilterAgeAll(ctx); err != nil {
-		return err
-	}
-
-	if err := l.loadDirFilterAll(ctx); err != nil {
-		return err
-	}
-
-	if err := l.deriveChildFilterAll(ctx); err != nil {
-		return err
-	}
-
-	if err := l.verifyLoadedCounts(ctx, summariseSpoolCheapSnapshotStageTables()); err != nil {
-		return err
-	}
-
-	if err := l.enforceFullFilterAmplificationGate(ctx); err != nil {
-		return err
-	}
-
-	if err := l.loadFiles(ctx); err != nil {
-		return err
-	}
-
-	if err := l.verifyLoadedCounts(ctx, []string{chspool.TableFiles}); err != nil {
-		return err
-	}
-
-	if err := l.loadDirProjectionSets(ctx); err != nil {
-		return err
-	}
-
-	if err := l.loadSchema3SnapshotSets(ctx); err != nil {
-		return err
-	}
-
-	readinessTables := []string{chspool.TableDirProjectionSets, chspool.TableSchema3SnapshotSets}
-	if err := l.verifyLoadedCounts(ctx, readinessTables); err != nil {
-		return err
-	}
-
-	if err := l.loadActiveVirtualDirs(ctx); err != nil {
-		return err
-	}
-
-	if err := l.loadActiveVirtualSummaries(ctx); err != nil {
-		return err
-	}
-
-	if err := l.loadActiveVirtualFilterAll(ctx); err != nil {
-		return err
-	}
-
-	if err := l.loadActiveVirtualChildren(ctx); err != nil {
-		return err
-	}
-
-	if err := l.verifyLoadedCounts(ctx, summariseSpoolActiveVirtualStageTables()); err != nil {
-		return err
-	}
-
-	if err := l.validateSpoolActiveVirtualCatalog(); err != nil {
-		return err
-	}
-
-	if err := l.loadActiveVirtualSets(ctx); err != nil {
-		return err
-	}
-
-	if err := l.verifyLoadedCounts(ctx, []string{chspool.TableActiveVirtualSets}); err != nil {
-		return err
-	}
-
-	if err := l.loadBasedirsHistory(ctx); err != nil {
-		return err
-	}
-
-	if err := l.loadBasedirsGroupUsage(ctx); err != nil {
-		return err
-	}
-
-	if err := l.loadBasedirsUserUsage(ctx); err != nil {
-		return err
-	}
-
-	if err := l.loadBasedirsSubdirs(ctx, chspool.TableBasedirsGroupSubdirs); err != nil {
-		return err
-	}
-
-	if err := l.loadBasedirsSubdirs(ctx, chspool.TableBasedirsUserSubdirs); err != nil {
-		return err
-	}
-
-	return l.verifyLoadedCounts(ctx, summariseSpoolBasedirsTables())
-}
-
-func summariseSpoolActiveVirtualStageTables() []string {
-	return []string{
-		chspool.TableActiveVirtualDirs,
-		chspool.TableActiveVirtualSummaries,
-		chspool.TableActiveVirtualFilterAll,
-		chspool.TableActiveVirtualChildren,
-	}
-}
-
-func summariseSpoolBasedirsTables() []string {
-	return []string{
-		chspool.TableBasedirsGroupUsage,
-		chspool.TableBasedirsUserUsage,
-		chspool.TableBasedirsGroupSubdirs,
-		chspool.TableBasedirsUserSubdirs,
-	}
+	return l.loadTablesWithTracker(ctx, tracker, false)
 }
 
 func (l *summariseSpoolLoader) loadDirs(parent context.Context) error {
@@ -2421,34 +2643,6 @@ func activeVirtualSetRowForCounts(
 	}
 }
 
-func (l *summariseSpoolLoader) verifyLoadedCounts(parent context.Context, tables []string) error {
-	for _, table := range tables {
-		expected := l.manifest.Tables[table].Rows
-		if expected == 0 {
-			continue
-		}
-
-		got, err := l.countLoadedRows(parent, table)
-		if err != nil {
-			return err
-		}
-
-		if got != expected {
-			return fmt.Errorf(
-				"%w: table=%s got=%d expected=%d",
-				errSpoolLoadedRowsMismatch,
-				table,
-				got,
-				expected,
-			)
-		}
-
-		l.recordLoadedRows(table, got)
-	}
-
-	return nil
-}
-
 func (l *summariseSpoolLoader) recordLoadedRows(table string, rows uint64) {
 	if l.loadedRows == nil {
 		l.loadedRows = make(map[string]uint64)
@@ -2458,6 +2652,10 @@ func (l *summariseSpoolLoader) recordLoadedRows(table string, rows uint64) {
 }
 
 func (l *summariseSpoolLoader) countLoadedRows(parent context.Context, table string) (uint64, error) {
+	if table == chspool.TableBasedirsHistory {
+		return l.countLoadedBasedirsHistoryRows(parent)
+	}
+
 	if isActiveVirtualSpoolTable(table) {
 		return l.countLoadedActiveVirtualRows(parent, table)
 	}

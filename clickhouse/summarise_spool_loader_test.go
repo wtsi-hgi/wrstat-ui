@@ -37,6 +37,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -792,6 +793,366 @@ func TestClickHouseSummariseSpoolLoader(t *testing.T) {
 		So(conn.eventIndex("send "+chspool.TableSchema3SnapshotSets), ShouldEqual, -1)
 	})
 
+	Convey("summarise spool retry checkpoints verified tables and resets only the incomplete table", t, func() {
+		spoolDir := filepath.Join(t.TempDir(), "spool")
+		manifest := writeSummariseSpoolLoaderSchema3SpoolWithFiles(
+			spoolDir,
+			time.Date(2026, 8, 18, 15, 0, 0, 0, time.UTC),
+		)
+		conn := newSummariseSpoolLoaderSpyConn(manifest)
+		conn.countOverrides[chspool.TableFiles] = manifest.Tables[chspool.TableFiles].Rows - 1
+
+		loader, err := newSummariseSpoolLoader(Config{}, conn, spoolDir, manifest, nil)
+		So(err, ShouldBeNil)
+		So(errors.Is(loader.load(context.Background()), errSpoolLoadedRowsMismatch), ShouldBeTrue)
+
+		tracker, err := newSummariseSpoolPublishTracker(spoolDir, manifest)
+		So(err, ShouldBeNil)
+		So(tracker.tableDone(chspool.TableDirs, manifest.Tables[chspool.TableDirs].Rows), ShouldBeTrue)
+		So(tracker.tableDone(chspool.TableDirFacts, manifest.Tables[chspool.TableDirFacts].Rows), ShouldBeTrue)
+		So(tracker.operationDone(manifest.Tables[chspool.TableDirFilterAll].Rows), ShouldBeTrue)
+		So(tracker.tableDone(chspool.TableFiles, manifest.Tables[chspool.TableFiles].Rows), ShouldBeFalse)
+		So(conn.countArgs[chspool.TableDirs], ShouldResemble, []any{testMountPath, manifest.SnapshotID})
+
+		delete(conn.countOverrides, chspool.TableFiles)
+		conn.resetEvents()
+
+		loader, err = newSummariseSpoolLoader(Config{}, conn, spoolDir, manifest, nil)
+		So(err, ShouldBeNil)
+		So(loader.load(context.Background()), ShouldBeNil)
+		So(conn.eventIndex("send "+chspool.TableDirs), ShouldEqual, -1)
+		So(conn.eventIndex("send "+chspool.TableDirFacts), ShouldEqual, -1)
+		So(conn.eventIndex("drop "+chspool.TableDirs), ShouldEqual, -1)
+		So(conn.eventIndex("drop "+chspool.TableDirFacts), ShouldEqual, -1)
+		So(conn.eventIndex("drop "+chspool.TableFiles), ShouldBeGreaterThan, -1)
+		So(conn.eventIndex("send "+chspool.TableFiles), ShouldBeGreaterThan, -1)
+
+		tracker, err = newSummariseSpoolPublishTracker(spoolDir, manifest)
+		So(err, ShouldBeNil)
+
+		for table, tableManifest := range manifest.Tables {
+			So(tracker.tableDone(table, tableManifest.Rows), ShouldBeTrue)
+		}
+	})
+
+	Convey("summarise spool retry checkpoints and isolates the derived child-filter operation", t, func() {
+		spoolDir := filepath.Join(t.TempDir(), "spool")
+		manifest := writeSummariseSpoolLoaderSchema3SpoolWithFiles(
+			spoolDir,
+			time.Date(2026, 8, 18, 15, 30, 0, 0, time.UTC),
+		)
+		conn := newSummariseSpoolLoaderSpyConn(manifest)
+		conn.deriveErr = errForcedFailure
+
+		loader, err := newSummariseSpoolLoader(Config{}, conn, spoolDir, manifest, nil)
+		So(err, ShouldBeNil)
+		So(errors.Is(loader.load(context.Background()), errForcedFailure), ShouldBeTrue)
+
+		tracker, err := newSummariseSpoolPublishTracker(spoolDir, manifest)
+		So(err, ShouldBeNil)
+		So(tracker.tableDone(chspool.TableDirFilterAll, manifest.Tables[chspool.TableDirFilterAll].Rows), ShouldBeTrue)
+		So(tracker.operationDone(manifest.Tables[chspool.TableDirFilterAll].Rows), ShouldBeFalse)
+
+		conn.deriveErr = nil
+		conn.resetEvents()
+
+		loader, err = newSummariseSpoolLoader(Config{}, conn, spoolDir, manifest, nil)
+		So(err, ShouldBeNil)
+		So(loader.load(context.Background()), ShouldBeNil)
+		So(conn.eventIndex("send "+chspool.TableDirFilterAll), ShouldEqual, -1)
+		So(conn.eventIndex("drop "+chspool.TableDirFilterAll), ShouldEqual, -1)
+		So(conn.eventIndex("drop "+chspool.TableChildFilterAll), ShouldBeGreaterThan, -1)
+		So(conn.eventIndex("derive "+chspool.TableChildFilterAll), ShouldBeGreaterThan, -1)
+	})
+
+	Convey("summarise spool checkpoints are atomically visible before notification", t, func() {
+		spoolDir := filepath.Join(t.TempDir(), "spool")
+		manifest := writeSummariseSpoolLoaderSchema3Spool(
+			spoolDir,
+			time.Date(2026, 8, 18, 16, 0, 0, 0, time.UTC),
+		)
+		tracker, err := newSummariseSpoolPublishTracker(spoolDir, manifest)
+		So(err, ShouldBeNil)
+
+		tracker.onMark = func(checkpoint string) {
+			So(checkpoint, ShouldEqual, "table:"+chspool.TableDirs)
+
+			persisted, readErr := newSummariseSpoolPublishTracker(spoolDir, manifest)
+			So(readErr, ShouldBeNil)
+			So(persisted.tableDone(chspool.TableDirs, manifest.Tables[chspool.TableDirs].Rows), ShouldBeTrue)
+		}
+
+		So(tracker.markTable(chspool.TableDirs, manifest.Tables[chspool.TableDirs].Rows), ShouldBeNil)
+
+		tmpFiles, err := filepath.Glob(filepath.Join(spoolDir, summariseSpoolPublishStateName+".*.tmp"))
+		So(err, ShouldBeNil)
+		So(tmpFiles, ShouldBeEmpty)
+	})
+
+	Convey("summarise spool retries a verified insert when its checkpoint cannot be persisted", t, func() {
+		spoolDir := filepath.Join(t.TempDir(), "spool")
+		manifest := writeSummariseSpoolLoaderSchema3SpoolWithFiles(
+			spoolDir,
+			time.Date(2026, 8, 18, 16, 15, 0, 0, time.UTC),
+		)
+		conn := newSummariseSpoolLoaderSpyConn(manifest)
+		chmodded := false
+		recorder := func(phase string, _ time.Duration) {
+			if phase != summariseSpoolLoadPhasePrefix+chspool.TableFiles || chmodded {
+				return
+			}
+
+			chmodded = true
+
+			So(os.Chmod(spoolDir, 0o500), ShouldBeNil)
+		}
+		loader, err := newSummariseSpoolLoader(Config{}, conn, spoolDir, manifest, recorder)
+		So(err, ShouldBeNil)
+
+		err = loader.load(context.Background())
+
+		So(err, ShouldNotBeNil)
+		So(err.Error(), ShouldContainSubstring, "failed to write summarise spool publish state")
+		So(os.Chmod(spoolDir, 0o700), ShouldBeNil)
+		tracker, err := newSummariseSpoolPublishTracker(spoolDir, manifest)
+		So(err, ShouldBeNil)
+		So(tracker.tableDone(chspool.TableFiles, manifest.Tables[chspool.TableFiles].Rows), ShouldBeFalse)
+
+		conn.resetEvents()
+		loader, err = newSummariseSpoolLoader(Config{}, conn, spoolDir, manifest, nil)
+		So(err, ShouldBeNil)
+		So(loader.load(context.Background()), ShouldBeNil)
+		So(conn.eventIndex("drop "+chspool.TableFiles), ShouldBeGreaterThan, -1)
+		So(conn.eventIndex("send "+chspool.TableFiles), ShouldBeGreaterThan, -1)
+		So(conn.eventIndex("send "+chspool.TableDirs), ShouldEqual, -1)
+	})
+
+	Convey("summarise spool legacy coarse state queries every nonempty stage before migration", t, func() {
+		spoolDir := filepath.Join(t.TempDir(), "spool")
+		manifest := writeSummariseSpoolLoaderTestSpool(
+			spoolDir,
+			time.Date(2026, 8, 18, 16, 30, 0, 0, time.UTC),
+		)
+		verifiedAt := time.Date(2026, 8, 18, 17, 0, 0, 0, time.UTC).Format(time.RFC3339Nano)
+		legacy := summariseSpoolPublishState{
+			Version:          summariseSpoolPublishStateLegacyVersion,
+			ManifestKey:      summariseSpoolPublishManifestKey(manifest),
+			MountPath:        manifest.MountPath,
+			SnapshotID:       manifest.SnapshotID,
+			UpdatedAt:        manifest.UpdatedAt,
+			CompletedPhases:  map[string]string{summariseSpoolPublishPhaseTablesLoaded: verifiedAt},
+			LastCompletedUTC: verifiedAt,
+		}
+		data, err := json.Marshal(legacy)
+		So(err, ShouldBeNil)
+		So(os.WriteFile(filepath.Join(spoolDir, summariseSpoolPublishStateName), data, 0o600), ShouldBeNil)
+
+		conn := newSummariseSpoolLoaderSpyConn(manifest)
+		for table, tableManifest := range manifest.Tables {
+			if tableManifest.Rows > 0 {
+				conn.countOverrides[table] = tableManifest.Rows
+			}
+		}
+
+		loader, err := newSummariseSpoolLoader(Config{}, conn, spoolDir, manifest, nil)
+		So(err, ShouldBeNil)
+		tracker, err := loader.newPublishTracker()
+		So(err, ShouldBeNil)
+		So(loader.ensureTablesLoaded(context.Background(), tracker), ShouldBeNil)
+		So(tracker.state.Version, ShouldEqual, summariseSpoolPublishStateVersion)
+		So(tracker.done(summariseSpoolPublishPhaseSnapshotPrepared), ShouldBeTrue)
+
+		for table, tableManifest := range manifest.Tables {
+			So(tracker.tableDone(table, tableManifest.Rows), ShouldBeTrue)
+
+			if tableManifest.Rows > 0 {
+				So(conn.eventIndex("count "+table), ShouldBeGreaterThanOrEqualTo, 0)
+				So(conn.eventIndex("send "+table), ShouldEqual, -1)
+			}
+		}
+
+		So(tracker.operationDone(manifest.Tables[chspool.TableDirFilterAll].Rows), ShouldBeTrue)
+		So(conn.countArgs[chspool.TableBasedirsHistory], ShouldResemble, []any{
+			testMountPath,
+			uint32(7),
+			time.Date(2026, 8, 18, 16, 30, 0, 0, time.UTC),
+		})
+		So(conn.eventIndex("drop "+chspool.TableBasedirsHistory), ShouldEqual, -1)
+	})
+
+	Convey("summarise spool completed retry revalidates every checkpoint and repairs only stale stages", t, func() {
+		spoolDir := filepath.Join(t.TempDir(), "spool")
+		manifest := writeSummariseSpoolLoaderSchema3SpoolWithFiles(
+			spoolDir,
+			time.Date(2026, 8, 18, 17, 0, 0, 0, time.UTC),
+		)
+		conn := newSummariseSpoolLoaderSpyConn(manifest)
+		loader, err := newSummariseSpoolLoader(Config{}, conn, spoolDir, manifest, nil)
+		So(err, ShouldBeNil)
+		So(loader.load(context.Background()), ShouldBeNil)
+
+		conn.batches[chspool.TableDirs][0].appended--
+		conn.derivedChildRows = nil
+		conn.resetEvents()
+		conn.countCalls = map[string]int{}
+
+		loader, err = newSummariseSpoolLoader(Config{}, conn, spoolDir, manifest, nil)
+		So(err, ShouldBeNil)
+		So(loader.load(context.Background()), ShouldBeNil)
+
+		for table, tableManifest := range manifest.Tables {
+			if tableManifest.Rows > 0 {
+				So(conn.countCalls[table], ShouldBeGreaterThanOrEqualTo, 1)
+			}
+		}
+
+		So(conn.countCalls[chspool.TableChildFilterAll], ShouldBeGreaterThanOrEqualTo, 1)
+		So(conn.eventIndex("drop "+chspool.TableDirs), ShouldBeGreaterThanOrEqualTo, 0)
+		So(conn.eventIndex("send "+chspool.TableDirs), ShouldBeGreaterThanOrEqualTo, 0)
+		So(conn.eventIndex("drop "+chspool.TableChildFilterAll), ShouldBeGreaterThanOrEqualTo, 0)
+		So(conn.eventIndex("derive "+chspool.TableChildFilterAll), ShouldBeGreaterThanOrEqualTo, 0)
+		So(conn.eventIndex("drop "+chspool.TableFiles), ShouldEqual, -1)
+		So(conn.eventIndex("send "+chspool.TableFiles), ShouldEqual, -1)
+	})
+
+	Convey("summarise spool completed retry reloads only a table whose checkpoint is missing", t, func() {
+		spoolDir := filepath.Join(t.TempDir(), "spool")
+		manifest := writeSummariseSpoolLoaderSchema3SpoolWithFiles(
+			spoolDir,
+			time.Date(2026, 8, 18, 17, 15, 0, 0, time.UTC),
+		)
+		conn := newSummariseSpoolLoaderSpyConn(manifest)
+		loader, err := newSummariseSpoolLoader(Config{}, conn, spoolDir, manifest, nil)
+		So(err, ShouldBeNil)
+		So(loader.load(context.Background()), ShouldBeNil)
+
+		tracker, err := newSummariseSpoolPublishTracker(spoolDir, manifest)
+		So(err, ShouldBeNil)
+		So(tracker.clearTable(chspool.TableFiles), ShouldBeNil)
+		conn.resetEvents()
+
+		loader, err = newSummariseSpoolLoader(Config{}, conn, spoolDir, manifest, nil)
+		So(err, ShouldBeNil)
+		So(loader.load(context.Background()), ShouldBeNil)
+		So(conn.eventIndex("drop "+chspool.TableFiles), ShouldBeGreaterThanOrEqualTo, 0)
+		So(conn.eventIndex("send "+chspool.TableFiles), ShouldBeGreaterThanOrEqualTo, 0)
+		So(conn.eventIndex("drop "+chspool.TableDirs), ShouldEqual, -1)
+		So(conn.eventIndex("send "+chspool.TableDirs), ShouldEqual, -1)
+	})
+
+	Convey("summarise spool retry reloads a stale table checkpoint without disturbing its peers", t, func() {
+		spoolDir := filepath.Join(t.TempDir(), "spool")
+		manifest := writeSummariseSpoolLoaderSchema3SpoolWithFiles(
+			spoolDir,
+			time.Date(2026, 8, 18, 17, 30, 0, 0, time.UTC),
+		)
+		conn := newSummariseSpoolLoaderSpyConn(manifest)
+		conn.countOverrides[chspool.TableFiles] = manifest.Tables[chspool.TableFiles].Rows - 1
+		loader, err := newSummariseSpoolLoader(Config{}, conn, spoolDir, manifest, nil)
+		So(err, ShouldBeNil)
+		So(errors.Is(loader.load(context.Background()), errSpoolLoadedRowsMismatch), ShouldBeTrue)
+
+		tracker, err := newSummariseSpoolPublishTracker(spoolDir, manifest)
+		So(err, ShouldBeNil)
+
+		checkpoint := tracker.state.VerifiedTables[chspool.TableDirs]
+		checkpoint.Rows++
+		tracker.state.VerifiedTables[chspool.TableDirs] = checkpoint
+		So(tracker.save(), ShouldBeNil)
+
+		delete(conn.countOverrides, chspool.TableFiles)
+		conn.resetEvents()
+		loader, err = newSummariseSpoolLoader(Config{}, conn, spoolDir, manifest, nil)
+		So(err, ShouldBeNil)
+		So(loader.load(context.Background()), ShouldBeNil)
+		So(conn.eventIndex("drop "+chspool.TableDirs), ShouldBeGreaterThan, -1)
+		So(conn.eventIndex("send "+chspool.TableDirs), ShouldBeGreaterThan, -1)
+		So(conn.eventIndex("drop "+chspool.TableDirFacts), ShouldEqual, -1)
+		So(conn.eventIndex("send "+chspool.TableDirFacts), ShouldEqual, -1)
+	})
+
+	Convey("summarise spool load fails safely on corrupt checkpoint JSON", t, func() {
+		spoolDir := filepath.Join(t.TempDir(), "spool")
+		manifest := writeSummariseSpoolLoaderSchema3Spool(
+			spoolDir,
+			time.Date(2026, 8, 18, 18, 0, 0, 0, time.UTC),
+		)
+		So(os.WriteFile(
+			filepath.Join(spoolDir, summariseSpoolPublishStateName),
+			[]byte("{not-json"),
+			0o600,
+		), ShouldBeNil)
+
+		conn := newSummariseSpoolLoaderSpyConn(manifest)
+		loader, err := newSummariseSpoolLoader(Config{}, conn, spoolDir, manifest, nil)
+		So(err, ShouldBeNil)
+
+		err = loader.load(context.Background())
+
+		So(err, ShouldNotBeNil)
+		So(err.Error(), ShouldContainSubstring, "failed to parse summarise spool publish state")
+		So(conn.events, ShouldBeEmpty)
+	})
+
+	Convey("summarise spool load fails closed before database access on unsupported checkpoint version", t, func() {
+		spoolDir := filepath.Join(t.TempDir(), "spool")
+		manifest := writeSummariseSpoolLoaderSchema3Spool(
+			spoolDir,
+			time.Date(2026, 8, 18, 18, 15, 0, 0, time.UTC),
+		)
+		state := summariseSpoolPublishState{
+			Version:         summariseSpoolPublishStateVersion + 1,
+			ManifestKey:     summariseSpoolPublishManifestKey(manifest),
+			MountPath:       manifest.MountPath,
+			SnapshotID:      manifest.SnapshotID,
+			UpdatedAt:       manifest.UpdatedAt,
+			CompletedPhases: map[string]string{},
+		}
+		data, err := json.Marshal(state)
+		So(err, ShouldBeNil)
+		So(os.WriteFile(filepath.Join(spoolDir, summariseSpoolPublishStateName), data, 0o600), ShouldBeNil)
+
+		conn := newSummariseSpoolLoaderSpyConn(manifest)
+		loader, err := newSummariseSpoolLoader(Config{}, conn, spoolDir, manifest, nil)
+		So(err, ShouldBeNil)
+
+		err = loader.load(context.Background())
+
+		So(errors.Is(err, errUnsupportedSummariseSpoolPublishStateVersion), ShouldBeTrue)
+		So(err.Error(), ShouldContainSubstring, "version=3")
+		So(conn.events, ShouldBeEmpty)
+		So(conn.batches, ShouldBeEmpty)
+		So(conn.activePublishes(), ShouldEqual, 0)
+	})
+
+	Convey("active-set partition drops preserve peer rows in a mixed batch regardless of order", t, func() {
+		const (
+			targetActiveSetID = "target-active-set"
+			peerActiveSetID   = "peer-active-set"
+		)
+
+		peerRows := [][]any{{peerActiveSetID, uint32(11)}, {peerActiveSetID, uint32(12)}}
+		orders := [][][]any{
+			{{targetActiveSetID, uint32(1)}, peerRows[0], {targetActiveSetID, uint32(2)}, peerRows[1]},
+			{peerRows[0], {targetActiveSetID, uint32(1)}, peerRows[1], {targetActiveSetID, uint32(2)}},
+		}
+
+		for _, rows := range orders {
+			conn := newSummariseSpoolLoaderSpyConn(nil)
+			batch, err := conn.PrepareBatch(context.Background(), insertActiveVirtualSummaryQuery)
+			So(err, ShouldBeNil)
+
+			for _, row := range rows {
+				So(batch.Append(row...), ShouldBeNil)
+			}
+
+			So(batch.Send(), ShouldBeNil)
+			So(conn.Exec(context.Background(), dropActiveVirtualSummariesPartitionQuery, targetActiveSetID), ShouldBeNil)
+			So(conn.batches[chspool.TableActiveVirtualSummaries][0].values, ShouldResemble, peerRows)
+			So(conn.insertedRows(chspool.TableActiveVirtualSummaries), ShouldEqual, uint64(len(peerRows)))
+		}
+	})
+
 	Convey("D2.4 summarise spool load rejects manifests missing active virtual table manifests", t, func() {
 		th := newClickHouseTestHarness(t)
 		cfg := th.newConfig()
@@ -1101,7 +1462,7 @@ func TestClickHouseSummariseSpoolLoader(t *testing.T) {
 
 		So(loader.load(context.Background()), ShouldBeNil)
 		So(conn.switches, ShouldEqual, 1)
-		So(conn.counts, ShouldEqual, 3)
+		So(conn.counts, ShouldEqual, 1)
 		So(conn.prepares, ShouldEqual, 1)
 	})
 
@@ -3151,6 +3512,7 @@ func newSummariseSpoolLoaderSpyConn(manifest *chspool.Manifest) *summariseSpoolL
 		batches:        map[string][]*summariseSpoolLoaderSpyBatch{},
 		countOverrides: map[string]uint64{},
 		countCalls:     map[string]int{},
+		countArgs:      map[string][]any{},
 	}
 }
 
@@ -3527,6 +3889,15 @@ func summariseSpoolPublishSeedStateThrough(
 
 	for _, phase := range summariseSpoolPublishOrderedPhasesForTest() {
 		switch phase {
+		case summariseSpoolPublishPhaseTablesLoaded:
+			So(tracker.mark(summariseSpoolPublishPhaseSnapshotPrepared), ShouldBeNil)
+
+			for table, tableManifest := range manifest.Tables {
+				So(tracker.markTable(table, tableManifest.Rows), ShouldBeNil)
+			}
+
+			So(tracker.markOperation(manifest.Tables[chspool.TableDirFilterAll].Rows), ShouldBeNil)
+			So(tracker.mark(phase), ShouldBeNil)
 		case summariseSpoolPublishPhaseActiveVirtualReady:
 			So(tracker.setNextActiveSetID(plan.nextActiveSetID), ShouldBeNil)
 			So(tracker.mark(phase), ShouldBeNil)
@@ -3601,6 +3972,37 @@ func writeSummariseSpoolLoaderActiveVirtualWithoutCatalogSpool(
 	So(chspool.WriteManifestAtomic(spoolDir, manifest), ShouldBeNil)
 
 	return manifest
+}
+
+func (c *summariseSpoolLoaderSpyConn) dropRowsForPartition(table string, args ...any) {
+	spoolTable := summariseSpoolLoaderCHTableToSpoolTable(table)
+	if !isActiveVirtualSpoolTable(spoolTable) || len(args) == 0 {
+		c.batches[spoolTable] = nil
+
+		return
+	}
+
+	activeSetID, ok := args[0].(string)
+	if !ok {
+		c.batches[spoolTable] = nil
+
+		return
+	}
+
+	for _, batch := range c.batches[spoolTable] {
+		before := len(batch.values)
+		batch.values = slices.DeleteFunc(batch.values, func(values []any) bool {
+			if len(values) == 0 {
+				return false
+			}
+
+			rowActiveSetID, rowHasActiveSetID := values[0].(string)
+
+			return rowHasActiveSetID && rowActiveSetID == activeSetID
+		})
+		removed := before - len(batch.values)
+		batch.appended = max(batch.appended-removed, 0)
+	}
 }
 
 type summariseSpoolDerivedChildDeadlineConn struct {
@@ -4024,7 +4426,7 @@ func (c *summariseSpoolPublishFaultConn) Exec(ctx context.Context, query string,
 			return err
 		}
 
-		c.batches[summariseSpoolLoaderCHTableToSpoolTable(table)] = nil
+		c.dropRowsForPartition(table, args...)
 
 		return nil
 	default:
@@ -4683,6 +5085,7 @@ type summariseSpoolLoaderSpyConn struct {
 	events                 []string
 	countOverrides         map[string]uint64
 	countCalls             map[string]int
+	countArgs              map[string][]any
 	countFailures          map[string]summariseSpoolCountFailure
 	zeroCountsAfter        map[string]int
 	tableStatsErr          error
@@ -4779,6 +5182,8 @@ func (c *summariseSpoolLoaderSpyConn) QueryRow(
 	c.recordEvent("count " + table)
 	c.countCalls[table]++
 
+	c.countArgs[table] = append([]any(nil), args...)
+
 	if failure, ok := c.countFailures[table]; ok && c.countCalls[table] > failure.after {
 		return summariseSpoolCountRow{err: failure.err}
 	}
@@ -4874,6 +5279,10 @@ func (c *summariseSpoolLoaderSpyConn) Exec(_ context.Context, query string, args
 
 		return nil
 	case query == switchSnapshotQuery:
+		if len(args) < 2 {
+			return errBootstrapTestUnexpectedCall
+		}
+
 		c.activeEvents++
 
 		sid, ok := args[1].(string)
@@ -4889,7 +5298,8 @@ func (c *summariseSpoolLoaderSpyConn) Exec(_ context.Context, query string, args
 		table := alterTableNameForTest(query)
 		c.recordEvent("drop " + table)
 
-		c.batches[summariseSpoolLoaderCHTableToSpoolTable(table)] = nil
+		c.dropRowsForPartition(table, args...)
+
 		if table == chspool.TableChildFilterAll {
 			c.derivedChildRows = nil
 		}
@@ -5001,6 +5411,7 @@ func summariseSpoolLoaderCHTables() map[string]string {
 		chspool.TableActiveVirtualFilterAll: chspool.TableActiveVirtualFilterAll,
 		chspool.TableActiveVirtualChildren:  chspool.TableActiveVirtualChildren,
 		chspool.TableActiveVirtualSets:      chspool.TableActiveVirtualSets,
+		chspool.TableBasedirsHistory:        chspool.TableBasedirsHistory,
 		chspool.TableBasedirsGroupUsage:     chspool.TableBasedirsGroupUsage,
 		chspool.TableBasedirsUserUsage:      chspool.TableBasedirsUserUsage,
 		chspool.TableBasedirsGroupSubdirs:   chspool.TableBasedirsGroupSubdirs,

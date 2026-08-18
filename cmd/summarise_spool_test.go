@@ -1132,7 +1132,7 @@ func writeBasedirsSpoolFixtureStatsForMount(
 }
 
 func TestSummariseClickHouseSpoolB2Retry(t *testing.T) {
-	Convey("B2 completed-spool retry derives child rows without rereading stats.gz", t, func() {
+	Convey("B2 completed-spool retry reuses checkpointed child rows without rereading stats.gz", t, func() {
 		harness := newB3CLIClickHouseHarness(t)
 		cfg := harness.newConfig()
 
@@ -1218,7 +1218,7 @@ func TestSummariseClickHouseSpoolB2Retry(t *testing.T) {
 
 		So(run([]string{fixture.statsPath}), ShouldBeNil)
 		So(loadCalls, ShouldEqual, 2)
-		So(summariseSpoolPhaseCount(retryPhases, "wrstat_child_filter_all_insert"), ShouldEqual, 1)
+		So(summariseSpoolPhaseCount(retryPhases, "wrstat_child_filter_all_insert"), ShouldEqual, 0)
 
 		manifest, err := chspool.ReadManifest(spoolDir)
 		So(err, ShouldBeNil)

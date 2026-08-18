@@ -39,10 +39,12 @@ import (
 )
 
 const (
-	summariseSpoolPublishStateVersion = 1
-	summariseSpoolPublishStateName    = "post_spool_publish_state.json"
-	summariseSpoolPublishStatePerm    = 0o600
+	summariseSpoolPublishStateVersion       = 2
+	summariseSpoolPublishStateLegacyVersion = 1
+	summariseSpoolPublishStateName          = "post_spool_publish_state.json"
+	summariseSpoolPublishStatePerm          = 0o600
 
+	summariseSpoolPublishPhaseSnapshotPrepared         = "snapshot_prepared"
 	summariseSpoolPublishPhaseTablesLoaded             = "tables_loaded"
 	summariseSpoolPublishPhaseActiveVirtualReady       = "active_virtual_ready"
 	summariseSpoolPublishPhaseSwitchPlanned            = "switch_planned"
@@ -52,7 +54,14 @@ const (
 	summariseSpoolPublishPhaseTreeSummaryRefreshed     = "tree_summary_refreshed"
 	summariseSpoolPublishPhaseActivePrefixRefreshed    = "active_prefix_refreshed"
 	summariseSpoolPublishPhasePostSpoolPublishComplete = "post_spool_publish_complete"
+
+	summariseSpoolPublishOperationChildFilterAll = "derive_child_filter_all"
 )
+
+type summariseSpoolVerifiedCheckpoint struct {
+	Rows       uint64 `json:"rows"`
+	VerifiedAt string `json:"verified_at"`
+}
 
 type summariseSpoolSwitchPlan struct {
 	HasPrevious         bool   `json:"has_previous"`
@@ -62,22 +71,25 @@ type summariseSpoolSwitchPlan struct {
 }
 
 type summariseSpoolPublishState struct {
-	Version          int                       `json:"version"`
-	ManifestKey      string                    `json:"manifest_key"`
-	MountPath        string                    `json:"mount_path"`
-	SnapshotID       string                    `json:"snapshot_id"`
-	UpdatedAt        string                    `json:"updated_at"`
-	CompletedPhases  map[string]string         `json:"completed_phases"`
-	NextActiveSetID  string                    `json:"next_active_set_id,omitempty"`
-	SwitchPlan       *summariseSpoolSwitchPlan `json:"switch_plan,omitempty"`
-	LastCompletedUTC string                    `json:"last_completed_utc,omitempty"`
+	Version            int                                         `json:"version"`
+	ManifestKey        string                                      `json:"manifest_key"`
+	MountPath          string                                      `json:"mount_path"`
+	SnapshotID         string                                      `json:"snapshot_id"`
+	UpdatedAt          string                                      `json:"updated_at"`
+	CompletedPhases    map[string]string                           `json:"completed_phases"`
+	VerifiedTables     map[string]summariseSpoolVerifiedCheckpoint `json:"verified_tables,omitempty"`
+	VerifiedOperations map[string]summariseSpoolVerifiedCheckpoint `json:"verified_operations,omitempty"`
+	NextActiveSetID    string                                      `json:"next_active_set_id,omitempty"`
+	SwitchPlan         *summariseSpoolSwitchPlan                   `json:"switch_plan,omitempty"`
+	LastCompletedUTC   string                                      `json:"last_completed_utc,omitempty"`
 }
 
 type summariseSpoolPublishTracker struct {
-	path   string
-	key    string
-	state  summariseSpoolPublishState
-	onMark func(string)
+	path               string
+	key                string
+	state              summariseSpoolPublishState
+	legacyCoarseTables bool
+	onMark             func(string)
 }
 
 func newSummariseSpoolPublishTracker(
@@ -107,12 +119,14 @@ func newEmptySummariseSpoolPublishTracker(
 		path: filepath.Join(spoolDir, summariseSpoolPublishStateName),
 		key:  key,
 		state: summariseSpoolPublishState{
-			Version:         summariseSpoolPublishStateVersion,
-			ManifestKey:     key,
-			MountPath:       manifest.MountPath,
-			SnapshotID:      manifest.SnapshotID,
-			UpdatedAt:       manifest.UpdatedAt,
-			CompletedPhases: map[string]string{},
+			Version:            summariseSpoolPublishStateVersion,
+			ManifestKey:        key,
+			MountPath:          manifest.MountPath,
+			SnapshotID:         manifest.SnapshotID,
+			UpdatedAt:          manifest.UpdatedAt,
+			CompletedPhases:    map[string]string{},
+			VerifiedTables:     map[string]summariseSpoolVerifiedCheckpoint{},
+			VerifiedOperations: map[string]summariseSpoolVerifiedCheckpoint{},
 		},
 	}
 }
@@ -132,32 +146,105 @@ func (t *summariseSpoolPublishTracker) loadExisting(manifest *chspool.Manifest) 
 		return fmt.Errorf("clickhouse: failed to parse summarise spool publish state: %w", err)
 	}
 
-	if !summariseSpoolPublishStateMatches(existing, manifest, t.key) {
+	if err := validateSummariseSpoolPublishStateVersion(existing.Version); err != nil {
+		return err
+	}
+
+	if !summariseSpoolPublishStateIdentityMatches(existing, manifest, t.key) {
 		return nil
 	}
 
-	if existing.CompletedPhases == nil {
-		existing.CompletedPhases = map[string]string{}
-	}
-
-	t.state = existing
+	t.loadMatchedState(existing, manifest)
 
 	return nil
 }
 
-func summariseSpoolPublishStateMatches(
+func validateSummariseSpoolPublishStateVersion(version int) error {
+	if summariseSpoolPublishStateVersionSupported(version) {
+		return nil
+	}
+
+	return fmt.Errorf(
+		"%w: version=%d supported=%d,%d",
+		errUnsupportedSummariseSpoolPublishStateVersion,
+		version,
+		summariseSpoolPublishStateLegacyVersion,
+		summariseSpoolPublishStateVersion,
+	)
+}
+
+func summariseSpoolPublishStateIdentityMatches(
 	state summariseSpoolPublishState,
 	manifest *chspool.Manifest,
 	key string,
 ) bool {
-	if state.Version != summariseSpoolPublishStateVersion {
-		return false
-	}
-
 	return state.ManifestKey == key &&
 		state.MountPath == manifest.MountPath &&
 		state.SnapshotID == manifest.SnapshotID &&
 		state.UpdatedAt == manifest.UpdatedAt
+}
+
+func (t *summariseSpoolPublishTracker) loadMatchedState(
+	existing summariseSpoolPublishState,
+	manifest *chspool.Manifest,
+) {
+	if existing.CompletedPhases == nil {
+		existing.CompletedPhases = map[string]string{}
+	}
+
+	if existing.VerifiedTables == nil {
+		existing.VerifiedTables = map[string]summariseSpoolVerifiedCheckpoint{}
+	}
+
+	if existing.VerifiedOperations == nil {
+		existing.VerifiedOperations = map[string]summariseSpoolVerifiedCheckpoint{}
+	}
+
+	t.state = existing
+	if existing.Version == summariseSpoolPublishStateLegacyVersion {
+		t.migrateLegacyTableCheckpoint()
+	}
+
+	t.sanitiseCheckpoints(manifest)
+}
+
+func (t *summariseSpoolPublishTracker) migrateLegacyTableCheckpoint() {
+	t.state.Version = summariseSpoolPublishStateVersion
+	if !t.done(summariseSpoolPublishPhaseTablesLoaded) {
+		return
+	}
+
+	verifiedAt := t.state.CompletedPhases[summariseSpoolPublishPhaseTablesLoaded]
+	t.state.CompletedPhases[summariseSpoolPublishPhaseSnapshotPrepared] = verifiedAt
+	t.legacyCoarseTables = true
+}
+
+func (t *summariseSpoolPublishTracker) sanitiseCheckpoints(manifest *chspool.Manifest) {
+	for table, checkpoint := range t.state.VerifiedTables {
+		tableManifest, ok := manifest.Tables[table]
+		if !ok || !validSummariseSpoolVerifiedCheckpoint(checkpoint, tableManifest.Rows) {
+			delete(t.state.VerifiedTables, table)
+		}
+	}
+
+	expected := manifest.Tables[chspool.TableDirFilterAll].Rows
+	for operation, checkpoint := range t.state.VerifiedOperations {
+		valid := operation == summariseSpoolPublishOperationChildFilterAll &&
+			validSummariseSpoolVerifiedCheckpoint(checkpoint, expected)
+		if !valid {
+			delete(t.state.VerifiedOperations, operation)
+		}
+	}
+}
+
+func validSummariseSpoolVerifiedCheckpoint(checkpoint summariseSpoolVerifiedCheckpoint, rows uint64) bool {
+	if checkpoint.Rows != rows || checkpoint.VerifiedAt == "" {
+		return false
+	}
+
+	_, err := time.Parse(time.RFC3339Nano, checkpoint.VerifiedAt)
+
+	return err == nil
 }
 
 func (t *summariseSpoolPublishTracker) done(phase string) bool {
@@ -182,12 +269,89 @@ func (t *summariseSpoolPublishTracker) mark(phase string) error {
 	return nil
 }
 
+func (t *summariseSpoolPublishTracker) tableDone(table string, rows uint64) bool {
+	checkpoint, ok := t.state.VerifiedTables[table]
+
+	return ok && validSummariseSpoolVerifiedCheckpoint(checkpoint, rows)
+}
+
+func (t *summariseSpoolPublishTracker) markTable(table string, rows uint64) error {
+	return t.markVerifiedCheckpoint(t.state.VerifiedTables, table, rows, "table:"+table)
+}
+
+func (t *summariseSpoolPublishTracker) clearTable(table string) error {
+	if _, ok := t.state.VerifiedTables[table]; !ok {
+		return nil
+	}
+
+	delete(t.state.VerifiedTables, table)
+
+	return t.saveAndNotifyCurrentCheckpoint()
+}
+
+func (t *summariseSpoolPublishTracker) operationDone(rows uint64) bool {
+	checkpoint, ok := t.state.VerifiedOperations[summariseSpoolPublishOperationChildFilterAll]
+
+	return ok && validSummariseSpoolVerifiedCheckpoint(checkpoint, rows)
+}
+
+func (t *summariseSpoolPublishTracker) markOperation(rows uint64) error {
+	operation := summariseSpoolPublishOperationChildFilterAll
+
+	return t.markVerifiedCheckpoint(t.state.VerifiedOperations, operation, rows, "operation:"+operation)
+}
+
+func (t *summariseSpoolPublishTracker) clearOperation(operation string) error {
+	if _, ok := t.state.VerifiedOperations[operation]; !ok {
+		return nil
+	}
+
+	delete(t.state.VerifiedOperations, operation)
+
+	return t.saveAndNotifyCurrentCheckpoint()
+}
+
+func (t *summariseSpoolPublishTracker) markVerifiedCheckpoint(
+	checkpoints map[string]summariseSpoolVerifiedCheckpoint,
+	name string,
+	rows uint64,
+	telemetryName string,
+) error {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	checkpoints[name] = summariseSpoolVerifiedCheckpoint{Rows: rows, VerifiedAt: now}
+	t.state.LastCompletedUTC = now
+
+	if err := t.save(); err != nil {
+		return err
+	}
+
+	if t.onMark != nil {
+		t.onMark(telemetryName)
+	}
+
+	return nil
+}
+
 func (t *summariseSpoolPublishTracker) currentCheckpoint() string {
 	var checkpoint, completedAt string
 	for phase, timestamp := range t.state.CompletedPhases {
 		if timestamp > completedAt {
 			checkpoint = phase
 			completedAt = timestamp
+		}
+	}
+
+	for table, verified := range t.state.VerifiedTables {
+		if verified.VerifiedAt > completedAt {
+			checkpoint = "table:" + table
+			completedAt = verified.VerifiedAt
+		}
+	}
+
+	for operation, verified := range t.state.VerifiedOperations {
+		if verified.VerifiedAt > completedAt {
+			checkpoint = "operation:" + operation
+			completedAt = verified.VerifiedAt
 		}
 	}
 
@@ -297,25 +461,81 @@ func (t *summariseSpoolPublishTracker) save() error {
 		return nil
 	}
 
-	data, err := json.MarshalIndent(t.state, "", "  ")
+	data, err := t.marshal()
 	if err != nil {
 		return err
 	}
 
-	data = append(data, '\n')
-
-	tmp := fmt.Sprintf("%s.%d.tmp", t.path, os.Getpid())
-	if err := os.WriteFile(tmp, data, summariseSpoolPublishStatePerm); err != nil {
+	tmpFile, err := os.CreateTemp(filepath.Dir(t.path), filepath.Base(t.path)+".*.tmp")
+	if err != nil {
 		return fmt.Errorf("clickhouse: failed to write summarise spool publish state: %w", err)
 	}
 
-	if err := os.Rename(tmp, t.path); err != nil {
-		_ = os.Remove(tmp)
+	tmp := tmpFile.Name()
+	defer func() { _ = os.Remove(tmp) }()
 
+	if err := writeSummariseSpoolPublishStateTemp(tmpFile, data); err != nil {
+		return err
+	}
+
+	if err := os.Rename(tmp, t.path); err != nil {
 		return fmt.Errorf("clickhouse: failed to replace summarise spool publish state: %w", err)
 	}
 
+	if err := syncSummariseSpoolPublishStateDir(filepath.Dir(t.path)); err != nil {
+		return err
+	}
+
 	return nil
+}
+
+func writeSummariseSpoolPublishStateTemp(file *os.File, data []byte) error {
+	if err := file.Chmod(summariseSpoolPublishStatePerm); err != nil {
+		_ = file.Close()
+
+		return fmt.Errorf("clickhouse: failed to secure summarise spool publish state: %w", err)
+	}
+
+	if _, err := file.Write(data); err != nil {
+		_ = file.Close()
+
+		return fmt.Errorf("clickhouse: failed to write summarise spool publish state: %w", err)
+	}
+
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+
+		return fmt.Errorf("clickhouse: failed to sync summarise spool publish state: %w", err)
+	}
+
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("clickhouse: failed to close summarise spool publish state: %w", err)
+	}
+
+	return nil
+}
+
+func syncSummariseSpoolPublishStateDir(dir string) error {
+	file, err := os.Open(dir)
+	if err != nil {
+		return fmt.Errorf("clickhouse: failed to open summarise spool publish state directory: %w", err)
+	}
+	defer func() { _ = file.Close() }()
+
+	if err := file.Sync(); err != nil {
+		return fmt.Errorf("clickhouse: failed to sync summarise spool publish state directory: %w", err)
+	}
+
+	return nil
+}
+
+func (t *summariseSpoolPublishTracker) marshal() ([]byte, error) {
+	data, err := json.MarshalIndent(t.state, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+
+	return append(data, '\n'), nil
 }
 
 // SummariseSpoolPublishCanResume reports whether a completed spool has durable
@@ -331,6 +551,10 @@ func SummariseSpoolPublishCanResume(spoolDir string, manifest *chspool.Manifest)
 	}
 
 	return tracker.done(summariseSpoolPublishPhaseMountSwitched) || tracker.hasSwitchPlan(), nil
+}
+
+func summariseSpoolPublishStateVersionSupported(version int) bool {
+	return version == summariseSpoolPublishStateVersion || version == summariseSpoolPublishStateLegacyVersion
 }
 
 func summariseSpoolPublishManifestKey(manifest *chspool.Manifest) string {
