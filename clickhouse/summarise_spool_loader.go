@@ -162,6 +162,7 @@ type summariseSpoolLoader struct {
 	telemetryMu         sync.Mutex
 	telemetryEmitMu     sync.Mutex
 	telemetryTicker     func(time.Duration) summariseSpoolTelemetryTicker
+	amplificationGated  bool
 }
 
 func newSummariseSpoolLoader(
@@ -575,6 +576,10 @@ func (l *summariseSpoolLoader) verifyDerivedChildFilterAllRows(parent context.Co
 }
 
 func (l *summariseSpoolLoader) enforceFullFilterAmplificationGate(parent context.Context) error {
+	if l.amplificationGated {
+		return nil
+	}
+
 	if !l.requiresFullFilterAmplificationGate() {
 		return nil
 	}
@@ -584,7 +589,13 @@ func (l *summariseSpoolLoader) enforceFullFilterAmplificationGate(parent context
 		return summariseSpoolAmplificationStatsUnavailable(l.manifest, err)
 	}
 
-	return summariseSpoolCheckFullFilterAmplification(parent, l.manifest, stats)
+	if err := summariseSpoolCheckFullFilterAmplification(parent, l.manifest, stats); err != nil {
+		return err
+	}
+
+	l.amplificationGated = true
+
+	return nil
 }
 
 func summariseSpoolAmplificationStatsUnavailable(manifest *chspool.Manifest, err error) error {
@@ -910,6 +921,15 @@ func (l *summariseSpoolLoader) newDGUTAWriter(parent context.Context) *dgutaWrit
 	}
 }
 
+func summariseSpoolCheapSnapshotStageTables() []string {
+	return []string{
+		chspool.TableDirs,
+		chspool.TableDirFacts,
+		chspool.TableDirFilterAgeAll,
+		chspool.TableDirFilterAll,
+	}
+}
+
 type summariseSpoolRealTelemetryTicker struct {
 	*time.Ticker
 }
@@ -1042,10 +1062,6 @@ func (l *summariseSpoolLoader) loadTables(ctx context.Context) error { //nolint:
 		return err
 	}
 
-	if err := l.loadFiles(ctx); err != nil {
-		return err
-	}
-
 	if err := l.loadDirFacts(ctx); err != nil {
 		return err
 	}
@@ -1062,7 +1078,19 @@ func (l *summariseSpoolLoader) loadTables(ctx context.Context) error { //nolint:
 		return err
 	}
 
-	if err := l.verifyLoadedCounts(ctx, summariseSpoolSnapshotStageTables()); err != nil {
+	if err := l.verifyLoadedCounts(ctx, summariseSpoolCheapSnapshotStageTables()); err != nil {
+		return err
+	}
+
+	if err := l.enforceFullFilterAmplificationGate(ctx); err != nil {
+		return err
+	}
+
+	if err := l.loadFiles(ctx); err != nil {
+		return err
+	}
+
+	if err := l.verifyLoadedCounts(ctx, []string{chspool.TableFiles}); err != nil {
 		return err
 	}
 
@@ -1132,16 +1160,6 @@ func (l *summariseSpoolLoader) loadTables(ctx context.Context) error { //nolint:
 	}
 
 	return l.verifyLoadedCounts(ctx, summariseSpoolBasedirsTables())
-}
-
-func summariseSpoolSnapshotStageTables() []string {
-	return []string{
-		chspool.TableDirs,
-		chspool.TableFiles,
-		chspool.TableDirFacts,
-		chspool.TableDirFilterAgeAll,
-		chspool.TableDirFilterAll,
-	}
 }
 
 func summariseSpoolActiveVirtualStageTables() []string {

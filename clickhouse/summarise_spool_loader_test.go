@@ -676,6 +676,35 @@ func TestClickHouseSummariseSpoolLoader(t *testing.T) {
 		So(conn.deriveArgs, ShouldResemble, []any{testMountPath, manifest.SnapshotID})
 	})
 
+	Convey("summarise spool load validates cheap snapshot stages before files and readiness", t, func() {
+		spoolDir := filepath.Join(t.TempDir(), "spool")
+		updatedAt := time.Date(2026, 8, 18, 14, 0, 0, 0, time.UTC)
+		manifest := writeSummariseSpoolLoaderSchema3SpoolWithFiles(spoolDir, updatedAt)
+		conn := newSummariseSpoolLoaderSpyConn(manifest)
+
+		loader, err := newSummariseSpoolLoader(Config{}, conn, spoolDir, manifest, nil)
+		So(err, ShouldBeNil)
+
+		So(loader.loadTables(context.Background()), ShouldBeNil)
+		So(summariseSpoolLoaderOrderedStageEvents(conn.events), ShouldResemble, []string{
+			"send " + chspool.TableDirs,
+			"send " + chspool.TableDirFacts,
+			"send " + chspool.TableDirFilterAgeAll,
+			"send " + chspool.TableDirFilterAll,
+			"derive " + chspool.TableChildFilterAll,
+			"count " + chspool.TableChildFilterAll,
+			"send " + chspool.TableFiles,
+			"count " + chspool.TableFiles,
+			"send " + chspool.TableDirProjectionSets,
+			"send " + chspool.TableSchema3SnapshotSets,
+			"send " + chspool.TableActiveVirtualDirs,
+			"send " + chspool.TableActiveVirtualSummaries,
+			"send " + chspool.TableActiveVirtualFilterAll,
+			"send " + chspool.TableActiveVirtualChildren,
+			"send " + chspool.TableActiveVirtualSets,
+		})
+	})
+
 	Convey("B2.2 derived child rows match legacy double-write rows and digests", t, func() {
 		th := newClickHouseTestHarness(t)
 		cfg := th.newConfig()
@@ -721,7 +750,7 @@ func TestClickHouseSummariseSpoolLoader(t *testing.T) {
 
 	Convey("B2 summarise spool load stops before readiness when derived child insert fails", t, func() {
 		spoolDir := filepath.Join(t.TempDir(), "spool")
-		manifest := writeSummariseSpoolLoaderSchema3Spool(
+		manifest := writeSummariseSpoolLoaderSchema3SpoolWithFiles(
 			spoolDir,
 			time.Date(2026, 6, 9, 9, 45, 0, 0, time.UTC),
 		)
@@ -739,6 +768,27 @@ func TestClickHouseSummariseSpoolLoader(t *testing.T) {
 		So(conn.activePublishes(), ShouldEqual, 0)
 		So(conn.publishedSID, ShouldEqual, summariseSpoolPreviousSnapshotID)
 		So(conn.eventIndex("derive "+chspool.TableChildFilterAll), ShouldBeGreaterThan, -1)
+		So(conn.insertedRows(chspool.TableFiles), ShouldEqual, uint64(0))
+		So(conn.eventIndex("send "+chspool.TableFiles), ShouldEqual, -1)
+		So(conn.eventIndex("send "+chspool.TableSchema3SnapshotSets), ShouldEqual, -1)
+	})
+
+	Convey("summarise spool load withholds snapshot readiness until files are verified", t, func() {
+		spoolDir := filepath.Join(t.TempDir(), "spool")
+		manifest := writeSummariseSpoolLoaderSchema3SpoolWithFiles(
+			spoolDir,
+			time.Date(2026, 8, 18, 14, 30, 0, 0, time.UTC),
+		)
+		conn := newSummariseSpoolLoaderSpyConn(manifest)
+		conn.countOverrides[chspool.TableFiles] = manifest.Tables[chspool.TableFiles].Rows - 1
+
+		loader, err := newSummariseSpoolLoader(Config{}, conn, spoolDir, manifest, nil)
+		So(err, ShouldBeNil)
+
+		err = loader.loadTables(context.Background())
+
+		So(errors.Is(err, errSpoolLoadedRowsMismatch), ShouldBeTrue)
+		So(conn.insertedRows(chspool.TableSchema3SnapshotSets), ShouldEqual, uint64(0))
 		So(conn.eventIndex("send "+chspool.TableSchema3SnapshotSets), ShouldEqual, -1)
 	})
 
@@ -2391,6 +2441,38 @@ func summariseSpoolLoaderActiveVirtualFilterRow(
 		ChildCount:       1,
 		RefreshedAt:      updatedAt,
 	}
+}
+
+func summariseSpoolLoaderOrderedStageEvents(events []string) []string {
+	wanted := map[string]struct{}{
+		"send " + chspool.TableDirs:                   {},
+		"send " + chspool.TableDirFacts:               {},
+		"send " + chspool.TableDirFilterAgeAll:        {},
+		"send " + chspool.TableDirFilterAll:           {},
+		"derive " + chspool.TableChildFilterAll:       {},
+		"count " + chspool.TableChildFilterAll:        {},
+		"send " + chspool.TableFiles:                  {},
+		"count " + chspool.TableFiles:                 {},
+		"send " + chspool.TableDirProjectionSets:      {},
+		"send " + chspool.TableSchema3SnapshotSets:    {},
+		"send " + chspool.TableActiveVirtualDirs:      {},
+		"send " + chspool.TableActiveVirtualSummaries: {},
+		"send " + chspool.TableActiveVirtualFilterAll: {},
+		"send " + chspool.TableActiveVirtualChildren:  {},
+		"send " + chspool.TableActiveVirtualSets:      {},
+	}
+
+	ordered := make([]string, 0, len(wanted))
+	for _, event := range events {
+		if _, ok := wanted[event]; !ok {
+			continue
+		}
+
+		ordered = append(ordered, event)
+		delete(wanted, event)
+	}
+
+	return ordered
 }
 
 func summariseSpoolLegacyDerivedFixtureRows(
