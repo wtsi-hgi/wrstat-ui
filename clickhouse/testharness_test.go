@@ -29,26 +29,21 @@ package clickhouse
 import (
 	"context"
 	"crypto/rand"
-	"crypto/rsa"
-	"crypto/x509"
 	"encoding/hex"
-	"encoding/pem"
 	"fmt"
-	"math/big"
 	"net"
 	"net/url"
 	"os"
 	"os/exec"
 	"os/user"
-	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	ch "github.com/ClickHouse/clickhouse-go/v2"
+	internaltest "github.com/wtsi-hgi/wrstat-ui/internal/test"
 )
 
 const (
@@ -82,26 +77,18 @@ type clickHouseTestHarness struct {
 	stderr   string
 }
 
-type clickHouseServerProcess struct {
-	doneCh  <-chan struct{}
-	exitErr *error
-	stdout  string
-	stderr  string
-	stop    func()
-}
-
 type sharedClickHouseTestServer struct {
 	tcpPort int
 	binPath string
 	baseDir string
-	proc    clickHouseServerProcess
+	server  *internaltest.LocalClickHouseServer
 }
 
 func TestMain(m *testing.M) {
 	code := m.Run()
 
 	if sharedClickHouseServer != nil {
-		sharedClickHouseServer.proc.stop()
+		sharedClickHouseServer.server.Stop()
 		_ = os.RemoveAll(sharedClickHouseServer.baseDir)
 	}
 
@@ -125,10 +112,10 @@ func newClickHouseTestHarness(t *testing.T) *clickHouseTestHarness {
 		tcpPort: shared.tcpPort,
 		binPath: shared.binPath,
 		baseDir: shared.baseDir,
-		doneCh:  shared.proc.doneCh,
-		exitErr: shared.proc.exitErr,
-		stdout:  shared.proc.stdout,
-		stderr:  shared.proc.stderr,
+		doneCh:  nil,
+		exitErr: nil,
+		stdout:  shared.server.StdoutPath,
+		stderr:  shared.server.StderrPath,
 	}
 }
 
@@ -155,39 +142,18 @@ func startSharedClickHouseTestServer(t *testing.T) *sharedClickHouseTestServer {
 
 	binPath := findClickHouseBinary(t)
 
-	baseDir, err := os.MkdirTemp("", "wrstat-ui-clickhouse-test-*")
+	server, err := internaltest.StartLocalClickHouseServer(binPath, "")
 	if err != nil {
 		errSharedClickHouseServer = err
 
 		return nil
 	}
 
-	tcpPort := pickFreePort(t)
-
-	httpPort := pickFreePort(t)
-	for httpPort == tcpPort {
-		httpPort = pickFreePort(t)
-	}
-
-	proc := startClickHouseServerProcess(t, binPath, baseDir, tcpPort, httpPort)
-
-	th := &clickHouseTestHarness{
-		t:       t,
-		tcpPort: tcpPort,
-		binPath: binPath,
-		baseDir: baseDir,
-		doneCh:  proc.doneCh,
-		exitErr: proc.exitErr,
-		stdout:  proc.stdout,
-		stderr:  proc.stderr,
-	}
-	th.waitUntilReady()
-
 	return &sharedClickHouseTestServer{
-		tcpPort: tcpPort,
+		tcpPort: server.TCPPort,
 		binPath: binPath,
-		baseDir: baseDir,
-		proc:    proc,
+		baseDir: server.BaseDir,
+		server:  server,
 	}
 }
 
@@ -280,67 +246,6 @@ func (h *clickHouseTestHarness) schemaVersions(cfg Config) []uint32 {
 	return versions
 }
 
-func (h *clickHouseTestHarness) waitUntilReady() {
-	h.t.Helper()
-
-	dsn := h.baseDSN("default")
-	conn := h.openConn(dsn)
-
-	defer func() { _ = conn.Close() }()
-
-	deadline := time.Now().Add(30 * time.Second)
-
-	for {
-		select {
-		case <-h.doneCh:
-			stdout := readFileOrEmpty(h.stdout)
-			stderr := readFileOrEmpty(h.stderr)
-			h.t.Fatalf(
-				"clickhouse server exited early: %v\nstdout:\n%s\nstderr:\n%s",
-				*h.exitErr,
-				stdout,
-				stderr,
-			)
-		default:
-		}
-
-		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
-		err := conn.Exec(ctx, testPingQuery)
-
-		cancel()
-
-		if err == nil {
-			return
-		}
-
-		if time.Now().After(deadline) {
-			stdout := readFileOrEmpty(h.stdout)
-			stderr := readFileOrEmpty(h.stderr)
-			h.t.Fatalf(
-				"clickhouse server did not become ready: %v\nstdout:\n%s\nstderr:\n%s",
-				err,
-				stdout,
-				stderr,
-			)
-		}
-
-		time.Sleep(200 * time.Millisecond)
-	}
-}
-
-func readFileOrEmpty(path string) string {
-	if path == "" {
-		return ""
-	}
-
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return ""
-	}
-
-	return string(b)
-}
-
 func (h *clickHouseTestHarness) openConn(dsn string) ch.Conn {
 	h.t.Helper()
 
@@ -398,188 +303,6 @@ func findClickHouseBinary(t *testing.T) string {
 	t.Skip("clickhouse binary not found")
 
 	return ""
-}
-
-func pickFreePort(t *testing.T) int {
-	t.Helper()
-
-	lc := net.ListenConfig{}
-
-	l, err := lc.Listen(context.Background(), "tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("failed to pick free port: %v", err)
-	}
-
-	defer func() { _ = l.Close() }()
-
-	addr := l.Addr().String()
-
-	_, portStr, err := net.SplitHostPort(addr)
-	if err != nil {
-		t.Fatalf("failed to parse listener addr %q: %v", addr, err)
-	}
-
-	port, err := strconv.Atoi(portStr)
-	if err != nil {
-		t.Fatalf("failed to parse listener port %q: %v", portStr, err)
-	}
-
-	return port
-}
-
-func startClickHouseServerProcess(
-	t *testing.T,
-	binPath string,
-	baseDir string,
-	tcpPort int,
-	httpPort int,
-) clickHouseServerProcess {
-	t.Helper()
-
-	dataPath := filepath.Join(baseDir, "data")
-	stdoutPath := filepath.Join(baseDir, "clickhouse.stdout.log")
-	stderrPath := filepath.Join(baseDir, "clickhouse.stderr.log")
-
-	if err := os.MkdirAll(dataPath, 0o755); err != nil {
-		t.Fatalf("failed to create clickhouse data dir: %v", err)
-	}
-
-	crtPath, keyPath := writeSelfSignedTLSCertPair(t, baseDir)
-
-	args := []string{
-		"server",
-		"--",
-		"--listen_host=127.0.0.1",
-		"--tcp_port=" + strconv.Itoa(tcpPort),
-		"--tcp_port_secure=0",
-		"--http_port=" + strconv.Itoa(httpPort),
-		"--https_port=0",
-		"--mysql_port=0",
-		"--postgresql_port=0",
-		"--grpc_port=0",
-		"--openSSL.server.certificateFile=" + crtPath,
-		"--openSSL.server.privateKeyFile=" + keyPath,
-		"--path=" + dataPath + string(os.PathSeparator),
-	}
-
-	cmdCtx, cancel := context.WithCancel(context.Background())
-	cmd := exec.CommandContext(cmdCtx, binPath, args...)
-	cmd.Dir = baseDir
-
-	cmd.Env = append(os.Environ(), "CLICKHOUSE_WATCHDOG_ENABLE=0")
-
-	stdoutFile, err := os.Create(stdoutPath)
-	if err != nil {
-		t.Fatalf("failed to create clickhouse stdout log: %v", err)
-	}
-
-	stderrFile, err := os.Create(stderrPath)
-	if err != nil {
-		_ = stdoutFile.Close()
-
-		t.Fatalf("failed to create clickhouse stderr log: %v", err)
-	}
-
-	cmd.Stdout = stdoutFile
-	cmd.Stderr = stderrFile
-
-	if err := cmd.Start(); err != nil {
-		_ = stdoutFile.Close()
-		_ = stderrFile.Close()
-
-		t.Fatalf("failed to start clickhouse: %v", err)
-	}
-
-	doneCh := make(chan struct{})
-	exitErr := new(error)
-
-	go func() {
-		*exitErr = cmd.Wait()
-
-		close(doneCh)
-
-		_ = stdoutFile.Close()
-		_ = stderrFile.Close()
-	}()
-
-	stop := func() {
-		defer cancel()
-
-		if cmd.Process == nil {
-			return
-		}
-
-		done := make(chan struct{})
-
-		go func() {
-			if err := cmd.Process.Signal(os.Interrupt); err != nil {
-				t.Logf("failed to signal clickhouse server: %v", err)
-			}
-
-			close(done)
-		}()
-
-		select {
-		case <-doneCh:
-			return
-		case <-time.After(5 * time.Second):
-			if err := cmd.Process.Kill(); err != nil {
-				t.Logf("failed to kill clickhouse server: %v", err)
-			}
-
-			<-doneCh
-			<-done
-		}
-	}
-
-	return clickHouseServerProcess{
-		doneCh:  doneCh,
-		exitErr: exitErr,
-		stdout:  stdoutPath,
-		stderr:  stderrPath,
-		stop:    stop,
-	}
-}
-
-func writeSelfSignedTLSCertPair(t *testing.T, dir string) (string, string) {
-	t.Helper()
-
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatalf("failed to generate TLS key: %v", err)
-	}
-
-	now := time.Now()
-	tmpl := x509.Certificate{
-		SerialNumber: big.NewInt(1),
-		NotBefore:    now.Add(-1 * time.Hour),
-		NotAfter:     now.Add(24 * time.Hour),
-		KeyUsage:     x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		DNSNames:     []string{"localhost"},
-		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
-	}
-
-	der, err := x509.CreateCertificate(rand.Reader, &tmpl, &tmpl, &key.PublicKey, key)
-	if err != nil {
-		t.Fatalf("failed to create TLS certificate: %v", err)
-	}
-
-	crtPath := filepath.Join(dir, "server.crt")
-	keyPath := filepath.Join(dir, "server.key")
-
-	crtPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
-	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
-
-	if err := os.WriteFile(crtPath, crtPEM, 0o600); err != nil {
-		t.Fatalf("failed to write TLS certificate: %v", err)
-	}
-
-	if err := os.WriteFile(keyPath, keyPEM, 0o600); err != nil {
-		t.Fatalf("failed to write TLS private key: %v", err)
-	}
-
-	return crtPath, keyPath
 }
 
 func sanitizeDatabaseSuffix(s string) string {

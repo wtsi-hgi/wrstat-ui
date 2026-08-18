@@ -28,21 +28,16 @@ package server
 import (
 	"context"
 	"crypto/rand"
-	"crypto/rsa"
-	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
-	"encoding/pem"
 	"fmt"
 	"io"
-	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"testing"
 	"time"
@@ -362,189 +357,6 @@ func c3RESTRefuseNonLocalhostDSN(t *testing.T, dsn string) {
 		if !ip.IP.IsLoopback() {
 			t.Fatalf("refusing non-localhost DSN host %q (%v)", host, ip.IP)
 		}
-	}
-}
-
-func c3RESTPickFreePort(t *testing.T) int {
-	t.Helper()
-
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-
-	listener, err := (&net.ListenConfig{}).Listen(ctx, "tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("failed to pick free port: %v", err)
-	}
-
-	defer func() { _ = listener.Close() }()
-
-	_, portStr, err := net.SplitHostPort(listener.Addr().String())
-	if err != nil {
-		t.Fatalf("failed to parse listener addr %q: %v", listener.Addr().String(), err)
-	}
-
-	port, err := strconv.Atoi(portStr)
-	if err != nil {
-		t.Fatalf("failed to parse listener port %q: %v", portStr, err)
-	}
-
-	return port
-}
-
-func startC3RESTClickHouseServer(
-	t *testing.T,
-	binPath string,
-	baseDir string,
-	tcpPort int,
-	httpPort int,
-) (<-chan struct{}, *error, string, string) {
-	t.Helper()
-
-	dataPath := filepath.Join(baseDir, "data")
-	stdoutPath := filepath.Join(baseDir, "clickhouse.stdout.log")
-	stderrPath := filepath.Join(baseDir, "clickhouse.stderr.log")
-
-	if err := os.MkdirAll(dataPath, 0o755); err != nil {
-		t.Fatalf("failed to create clickhouse data dir: %v", err)
-	}
-
-	crtPath, keyPath := writeC3RESTSelfSignedTLSCertPair(t, baseDir)
-	args := []string{
-		"server",
-		"--",
-		"--listen_host=127.0.0.1",
-		"--tcp_port=" + strconv.Itoa(tcpPort),
-		"--tcp_port_secure=0",
-		"--http_port=" + strconv.Itoa(httpPort),
-		"--https_port=0",
-		"--mysql_port=0",
-		"--postgresql_port=0",
-		"--grpc_port=0",
-		"--openSSL.server.certificateFile=" + crtPath,
-		"--openSSL.server.privateKeyFile=" + keyPath,
-		"--path=" + dataPath + string(os.PathSeparator),
-	}
-
-	cmdCtx, cancel := context.WithCancel(context.Background())
-	cmd := exec.CommandContext(cmdCtx, binPath, args...)
-	cmd.Dir = baseDir
-
-	cmd.Env = append(os.Environ(), "CLICKHOUSE_WATCHDOG_ENABLE=0")
-
-	stdoutFile, err := os.Create(stdoutPath)
-	if err != nil {
-		t.Fatalf("failed to create clickhouse stdout log: %v", err)
-	}
-
-	stderrFile, err := os.Create(stderrPath)
-	if err != nil {
-		_ = stdoutFile.Close()
-
-		t.Fatalf("failed to create clickhouse stderr log: %v", err)
-	}
-
-	cmd.Stdout = stdoutFile
-	cmd.Stderr = stderrFile
-
-	if err := cmd.Start(); err != nil {
-		_ = stdoutFile.Close()
-		_ = stderrFile.Close()
-
-		t.Fatalf("failed to start clickhouse: %v", err)
-	}
-
-	doneCh := make(chan struct{})
-	exitErr := new(error)
-
-	go func() {
-		*exitErr = cmd.Wait()
-
-		close(doneCh)
-
-		_ = stdoutFile.Close()
-		_ = stderrFile.Close()
-	}()
-
-	t.Cleanup(func() {
-		defer cancel()
-
-		if cmd.Process == nil {
-			return
-		}
-
-		if c3RESTStopClickHouseProcess(t, cmd, doneCh) {
-			return
-		}
-	})
-
-	return doneCh, exitErr, stdoutPath, stderrPath
-}
-
-func writeC3RESTSelfSignedTLSCertPair(t *testing.T, dir string) (string, string) {
-	t.Helper()
-
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatalf("failed to generate TLS key: %v", err)
-	}
-
-	now := time.Now()
-	tmpl := x509.Certificate{
-		SerialNumber: big.NewInt(1),
-		NotBefore:    now.Add(-time.Hour),
-		NotAfter:     now.Add(24 * time.Hour),
-		KeyUsage:     x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		DNSNames:     []string{"localhost"},
-		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
-	}
-
-	der, err := x509.CreateCertificate(rand.Reader, &tmpl, &tmpl, &key.PublicKey, key)
-	if err != nil {
-		t.Fatalf("failed to create TLS certificate: %v", err)
-	}
-
-	crtPath := filepath.Join(dir, "server.crt")
-	keyPath := filepath.Join(dir, "server.key")
-	crtPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
-	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
-
-	if err := os.WriteFile(crtPath, crtPEM, 0o600); err != nil {
-		t.Fatalf("failed to write TLS certificate: %v", err)
-	}
-
-	if err := os.WriteFile(keyPath, keyPEM, 0o600); err != nil {
-		t.Fatalf("failed to write TLS private key: %v", err)
-	}
-
-	return crtPath, keyPath
-}
-
-func c3RESTStopClickHouseProcess(t *testing.T, cmd *exec.Cmd, doneCh <-chan struct{}) bool {
-	t.Helper()
-
-	done := make(chan struct{})
-
-	go func() {
-		if err := cmd.Process.Signal(os.Interrupt); err != nil {
-			t.Logf("failed to signal clickhouse server: %v", err)
-		}
-
-		close(done)
-	}()
-
-	select {
-	case <-doneCh:
-		return true
-	case <-time.After(5 * time.Second):
-		if err := cmd.Process.Kill(); err != nil {
-			t.Logf("failed to kill clickhouse server: %v", err)
-		}
-
-		<-doneCh
-		<-done
-
-		return false
 	}
 }
 
@@ -903,29 +715,19 @@ func newC3RESTClickHouseHarness(t *testing.T) *c3RESTClickHouseHarness {
 		t.Skip("clickhouse binary not found")
 	}
 
-	baseDir := t.TempDir()
-	tcpPort := c3RESTPickFreePort(t)
-
-	httpPort := c3RESTPickFreePort(t)
-
-	for httpPort == tcpPort {
-		httpPort = c3RESTPickFreePort(t)
+	server, err := internaltest.StartLocalClickHouseServer(bin, t.TempDir())
+	if err != nil {
+		t.Fatalf("failed to start local clickhouse server: %v", err)
 	}
 
-	doneCh, exitErr, stdoutPath, stderrPath := startC3RESTClickHouseServer(
-		t, bin, baseDir, tcpPort, httpPort,
-	)
+	t.Cleanup(server.Stop)
+
 	h := &c3RESTClickHouseHarness{
 		t:        t,
-		tcpPort:  tcpPort,
-		httpPort: httpPort,
-		baseDir:  baseDir,
-		doneCh:   doneCh,
-		exitErr:  exitErr,
-		stdout:   stdoutPath,
-		stderr:   stderrPath,
+		tcpPort:  server.TCPPort,
+		httpPort: server.HTTPPort,
+		baseDir:  server.BaseDir,
 	}
-	h.waitUntilReady()
 
 	return h
 }
@@ -1074,10 +876,6 @@ type c3RESTClickHouseHarness struct {
 	tcpPort  int
 	httpPort int
 	baseDir  string
-	doneCh   <-chan struct{}
-	exitErr  *error
-	stdout   string
-	stderr   string
 }
 
 func (h *c3RESTClickHouseHarness) newConfig() clickhouse.Config {
@@ -1124,59 +922,4 @@ func (h *c3RESTClickHouseHarness) baseDSN(database string) string {
 		h.tcpPort,
 		url.QueryEscape(database),
 	)
-}
-
-func (h *c3RESTClickHouseHarness) waitUntilReady() {
-	h.t.Helper()
-
-	conn := openC3RESTClickHouseConn(h.t, h.baseDSN("default"))
-	defer func() { _ = conn.Close() }()
-
-	deadline := time.Now().Add(30 * time.Second)
-
-	for {
-		select {
-		case <-h.doneCh:
-			h.t.Fatalf(
-				"clickhouse server exited early: %v\nstdout:\n%s\nstderr:\n%s",
-				*h.exitErr,
-				c3RESTReadFileOrEmpty(h.stdout),
-				c3RESTReadFileOrEmpty(h.stderr),
-			)
-		default:
-		}
-
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		err := conn.Exec(ctx, "SELECT 1")
-
-		cancel()
-
-		if err == nil {
-			return
-		}
-
-		if time.Now().After(deadline) {
-			h.t.Fatalf(
-				"clickhouse server did not become ready: %v\nstdout:\n%s\nstderr:\n%s",
-				err,
-				c3RESTReadFileOrEmpty(h.stdout),
-				c3RESTReadFileOrEmpty(h.stderr),
-			)
-		}
-
-		time.Sleep(200 * time.Millisecond)
-	}
-}
-
-func c3RESTReadFileOrEmpty(path string) string {
-	if path == "" {
-		return ""
-	}
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return ""
-	}
-
-	return string(data)
 }
