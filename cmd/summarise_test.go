@@ -40,6 +40,7 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/internal/chspool"
 	"github.com/wtsi-hgi/wrstat-ui/internal/perfreport"
 	"github.com/wtsi-hgi/wrstat-ui/internal/statsdata"
+	"github.com/wtsi-hgi/wrstat-ui/internal/watchenv"
 	"github.com/wtsi-hgi/wrstat-ui/summary"
 )
 
@@ -50,6 +51,47 @@ const (
 )
 
 var errSummariseTestClose = errors.New("close failed")
+
+func TestSummariseSchedulerGuardWarning(t *testing.T) {
+	Convey("A manual summarise emits an operational concurrency warning", t, func() {
+		t.Setenv(watchenv.Name, "")
+
+		var logs bytes.Buffer
+
+		restoreLogs := captureSummariseDiagnosticsLogs(&logs)
+		Reset(restoreLogs)
+
+		warnIfSummariseUnguarded()
+
+		So(logs.String(), ShouldContainSubstring, "not protected by the watch scheduler concurrency limit")
+	})
+
+	Convey("A watch-scheduled summarise emits no concurrency warning", t, func() {
+		t.Setenv(watchenv.Name, watchenv.Value)
+
+		var logs bytes.Buffer
+
+		restoreLogs := captureSummariseDiagnosticsLogs(&logs)
+		Reset(restoreLogs)
+
+		warnIfSummariseUnguarded()
+
+		So(logs.String(), ShouldBeBlank)
+	})
+
+	Convey("A user-supplied lookalike value does not suppress the warning", t, func() {
+		t.Setenv(watchenv.Name, "1")
+
+		var logs bytes.Buffer
+
+		restoreLogs := captureSummariseDiagnosticsLogs(&logs)
+		Reset(restoreLogs)
+
+		warnIfSummariseUnguarded()
+
+		So(logs.String(), ShouldContainSubstring, "not protected by the watch scheduler concurrency limit")
+	})
+}
 
 type summariseActiveSnapshotFixture struct {
 	outputDir        string

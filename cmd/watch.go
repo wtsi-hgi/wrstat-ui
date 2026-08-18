@@ -32,11 +32,14 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/watch"
 )
 
+const defaultWatchSummariseConcurrency = 1
+
 var (
-	group            string
-	watchMinMem      int
-	watchQueue       string
-	watchQueuesAvoid string
+	group                     string
+	watchMinMem               int
+	watchQueue                string
+	watchQueuesAvoid          string
+	watchSummariseConcurrency int
 )
 
 var watchcmd = &cobra.Command{
@@ -75,6 +78,9 @@ defaulting to 8. Lower values are clamped to 8, and wr may still raise RAM or
 runtime above the submitted 8GB/30m floors when it has learned higher
 requirements for the mount.
 
+The --summarise_concurrency flag limits the total number of summarise jobs
+scheduled by watch that may run at once. It defaults to 1.
+
 The --group flag can be specified to override the unix group with which the
 summarise subcommands will be run.
 `,
@@ -83,7 +89,7 @@ summarise subcommands will be run.
 			die("%s", err)
 		}
 
-		if err := watch.Watch(
+		if err := watch.WithOptions(
 			args,
 			group,
 			defaultDir,
@@ -93,6 +99,7 @@ summarise subcommands will be run.
 			watchMinMem,
 			watchQueue,
 			watchQueuesAvoid,
+			watch.Options{SummariseConcurrency: watchSummariseConcurrency},
 			appLogger,
 		); err != nil {
 			die("%s", err)
@@ -101,11 +108,12 @@ summarise subcommands will be run.
 }
 
 var (
-	errWatchNeedInput        = errors.New("at least 1 input directory should be provided")
-	errWatchNoOutput         = errors.New("no output files specified")
-	errWatchNoQuota          = errors.New("no quota file specified")
-	errWatchNoBasedirsConfig = errors.New("no basedirs config file specified")
-	errWatchBadMinMem        = errors.New("min_mem must be 0 or greater")
+	errWatchNeedInput               = errors.New("at least 1 input directory should be provided")
+	errWatchNoOutput                = errors.New("no output files specified")
+	errWatchNoQuota                 = errors.New("no quota file specified")
+	errWatchNoBasedirsConfig        = errors.New("no basedirs config file specified")
+	errWatchBadMinMem               = errors.New("min_mem must be 0 or greater")
+	errWatchBadSummariseConcurrency = errors.New("summarise_concurrency must be greater than 0")
 )
 
 func checkWatchArgs(args []string) error {
@@ -129,6 +137,10 @@ func checkWatchArgs(args []string) error {
 		return errWatchBadMinMem
 	}
 
+	if watchSummariseConcurrency <= 0 {
+		return errWatchBadSummariseConcurrency
+	}
+
 	return nil
 }
 
@@ -143,5 +155,7 @@ func init() {
 		"minimum RAM in GB to request for summarise jobs; values below 8 are clamped to 8")
 	watchcmd.Flags().StringVar(&watchQueue, "queues", "", "comma-separated queues to submit jobs to")
 	watchcmd.Flags().StringVar(&watchQueuesAvoid, "queues_avoid", "", "comma-separated queues to avoid")
+	watchcmd.Flags().IntVar(&watchSummariseConcurrency, "summarise_concurrency", defaultWatchSummariseConcurrency,
+		"maximum number of watch-scheduled summarise jobs that may run at once")
 	watchcmd.Flags().StringVarP(&group, "group", "g", "", "unix group to run the summarisers with")
 }

@@ -25,6 +25,7 @@
 package watch
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -36,6 +37,7 @@ import (
 	"github.com/VertebrateResequencing/wr/jobqueue"
 	"github.com/inconshreveable/log15"
 	"github.com/wtsi-hgi/wrstat-ui/datasets"
+	"github.com/wtsi-hgi/wrstat-ui/internal/watchenv"
 )
 
 const (
@@ -50,9 +52,20 @@ const (
 	jobTimestampLayout    = "20060102150405"
 	clickhouseRecoverFlag = "--clickhouse-recover"
 	summariseReqGroupBase = "wrstat-ui-summarise"
+	summariseLimitGroup   = "wrstat-ui-clickhouse-import"
+	defaultConcurrency    = 1
 )
 
 var connectTimeout = 10 * time.Second //nolint:gochecknoglobals
+
+var errSummariseConcurrency = errors.New("summarise concurrency cannot be negative")
+
+// Options configures watch job scheduling.
+type Options struct {
+	// SummariseConcurrency limits the number of watch-scheduled summarise jobs
+	// that may run globally. Zero uses the default of one.
+	SummariseConcurrency int
+}
 
 // Watch watches input directories (which should be output directories of wrstat
 // multi runs) for new stats.gz files, upon which it will run the summarise
@@ -63,12 +76,31 @@ var connectTimeout = 10 * time.Second //nolint:gochecknoglobals
 // requested memory for summarise jobs, with values below the default 8GB floor
 // clamped upward. Higher learned or historical requirements remain unchanged.
 // The queue and queuesAvoid values are passed to wr so scheduler submission can
-// target or avoid specific queues.
+// target or avoid specific queues. Watch uses a global summarise concurrency
+// limit of one; use WithOptions to configure it.
 func Watch(inputDirs []string, group, outputDir, quotaPath, basedirsConfig,
 	mounts string, minMemGB int, queue, queuesAvoid string, logger log15.Logger) error {
+	return WithOptions(inputDirs, group, outputDir, quotaPath, basedirsConfig,
+		mounts, minMemGB, queue, queuesAvoid, Options{}, logger)
+}
+
+// WithOptions watches input directories and schedules summarise jobs with
+// the supplied options.
+func WithOptions(inputDirs []string, group, outputDir, quotaPath, basedirsConfig,
+	mounts string, minMemGB int, queue, queuesAvoid string, options Options,
+	logger log15.Logger) error {
+	summariseConcurrency := options.SummariseConcurrency
+	if summariseConcurrency < 0 {
+		return errSummariseConcurrency
+	}
+
+	if summariseConcurrency == 0 {
+		summariseConcurrency = defaultConcurrency
+	}
+
 	for {
 		if err := watch(inputDirs, group, outputDir, quotaPath, basedirsConfig,
-			mounts, minMemGB, queue, queuesAvoid, logger); err != nil {
+			mounts, minMemGB, queue, queuesAvoid, summariseConcurrency, logger); err != nil {
 			return err
 		}
 
@@ -81,7 +113,7 @@ func Watch(inputDirs []string, group, outputDir, quotaPath, basedirsConfig,
 }
 
 func watch(inputDirs []string, group, outputDir, quotaPath, basedirsConfig, mounts string,
-	minMemGB int, queue, queuesAvoid string, logger log15.Logger) error {
+	minMemGB int, queue, queuesAvoid string, summariseConcurrency int, logger log15.Logger) error {
 	s, err := client.New(client.SchedulerSettings{
 		Logger:      logger,
 		Timeout:     connectTimeout,
@@ -106,7 +138,7 @@ func watch(inputDirs []string, group, outputDir, quotaPath, basedirsConfig, moun
 		}
 
 		if err := scheduleSummarisers(s, group, inputDir, outputDir, quotaPath,
-			basedirsConfig, mounts, minMemGB, inputPaths); err != nil {
+			basedirsConfig, mounts, minMemGB, summariseConcurrency, inputPaths); err != nil {
 			return err
 		}
 	}
@@ -154,14 +186,14 @@ func entryExists(path string) bool {
 }
 
 func scheduleSummarisers(s *client.Scheduler, group, inputDir, outputDir, quotaPath, basedirsConfig, mounts string,
-	minMemGB int, inputPaths []string) error {
+	minMemGB, summariseConcurrency int, inputPaths []string) error {
 	jobs := make([]*jobqueue.Job, 0, len(inputPaths))
 
 	for _, p := range inputPaths {
 		base := filepath.Base(p)
 
 		job, err := createSummariseJob(group, inputDir, outputDir, base,
-			quotaPath, basedirsConfig, mounts, minMemGB, s)
+			quotaPath, basedirsConfig, mounts, minMemGB, summariseConcurrency, s)
 		if err != nil {
 			return fmt.Errorf("error scheduling summarise (%s): %w", base, err)
 		}
@@ -181,7 +213,7 @@ func scheduleSummarisers(s *client.Scheduler, group, inputDir, outputDir, quotaP
 }
 
 func createSummariseJob(group, inputDir, outputDir, base, quotaPath, basedirsConfig, mounts string,
-	minMemGB int, s *client.Scheduler) (*jobqueue.Job, error) {
+	minMemGB, summariseConcurrency int, s *client.Scheduler) (*jobqueue.Job, error) {
 	dotOutputBase := hiddenOutputDir(outputDir, base)
 
 	if err := os.MkdirAll(dotOutputBase, dirPerms); err != nil {
@@ -208,6 +240,11 @@ func createSummariseJob(group, inputDir, outputDir, base, quotaPath, basedirsCon
 		req,
 	)
 	job.Group = group
+
+	job.LimitGroups = []string{fmt.Sprintf("%s:%d", summariseLimitGroup, summariseConcurrency)}
+	if err := job.EnvAddOverride([]string{watchenv.Name + "=" + watchenv.Value}); err != nil {
+		return nil, fmt.Errorf("failed to mark watch-scheduled summarise job: %w", err)
+	}
 
 	return job, nil
 }

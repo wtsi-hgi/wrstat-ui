@@ -44,9 +44,12 @@ import (
 	"github.com/inconshreveable/log15"
 	. "github.com/smartystreets/goconvey/convey"
 	gas "github.com/wtsi-hgi/go-authserver"
+	"github.com/wtsi-hgi/wrstat-ui/internal/watchenv"
 )
 
 var errTimedOut = errors.New("timed out")
+
+const defaultSummariseLimitGroupForTest = "wrstat-ui-clickhouse-import:1"
 
 func TestWatchSummariseResourceMinimums(t *testing.T) {
 	Convey("Watch creates summarise jobs with resource minimums that wr can only raise", t, func() {
@@ -74,7 +77,7 @@ func TestWatchSummariseResourceMinimums(t *testing.T) {
 
 		defer s.Disconnect() //nolint:errcheck
 
-		job, err := createSummariseJob("", inputDir, outputDir, inputBase, "", "", "", 0, s)
+		job, err := createSummariseJob("", inputDir, outputDir, inputBase, "", "", "", 0, 1, s)
 		So(err, ShouldBeNil)
 		So(job.Requirements.RAM, ShouldEqual, 8192)
 		So(job.Requirements.Time, ShouldEqual, 30*time.Minute)
@@ -82,18 +85,162 @@ func TestWatchSummariseResourceMinimums(t *testing.T) {
 		So(job.Override, ShouldEqual, 1)
 		So(job.ReqGroup, ShouldEqual, "wrstat-ui-summarise-／lustre／scratch127")
 
-		lowMemJob, err := createSummariseJob("", inputDir, outputDir, lowMemBase, "", "", "", 4, s)
+		lowMemJob, err := createSummariseJob("", inputDir, outputDir, lowMemBase, "", "", "", 4, 1, s)
 		So(err, ShouldBeNil)
 		So(lowMemJob.Requirements.RAM, ShouldEqual, 8192)
 		So(lowMemJob.Requirements.Time, ShouldEqual, 30*time.Minute)
 		So(lowMemJob.Override, ShouldEqual, 1)
 
-		highMemJob, err := createSummariseJob("", inputDir, outputDir, highMemBase, "", "", "", 16, s)
+		highMemJob, err := createSummariseJob("", inputDir, outputDir, highMemBase, "", "", "", 16, 1, s)
 		So(err, ShouldBeNil)
 		So(highMemJob.Requirements.RAM, ShouldEqual, 16384)
 		So(highMemJob.Requirements.Time, ShouldEqual, 30*time.Minute)
 		So(highMemJob.Override, ShouldEqual, 1)
 	})
+}
+
+func TestWatchRejectsInvalidSummariseConcurrency(t *testing.T) {
+	Convey("Watch rejects a negative summarise concurrency before connecting to wr", t, func() {
+		err := WithOptions(
+			[]string{"input"}, "", "output", "quota", "basedirs", "", 0, "", "",
+			Options{SummariseConcurrency: -1}, nil,
+		)
+
+		So(err, ShouldNotBeNil)
+		So(err.Error(), ShouldContainSubstring, "summarise concurrency cannot be negative")
+	})
+}
+
+func TestWatchSummariseConcurrencyLimit(t *testing.T) {
+	Convey("Watch assigns every summarise job to the default shared concurrency limit", t, func() {
+		inputDir := t.TempDir()
+		outputDir := t.TempDir()
+		pr, pw, err := os.Pipe()
+		So(err, ShouldBeNil)
+
+		defer pr.Close()
+		defer pw.Close()
+
+		pretendSubmissions := client.PretendSubmissions
+		client.PretendSubmissions = strconv.FormatUint(uint64(pw.Fd()), 10)
+
+		defer func() {
+			client.PretendSubmissions = pretendSubmissions
+		}()
+
+		s, err := client.New(client.SchedulerSettings{})
+		So(err, ShouldBeNil)
+
+		defer s.Disconnect() //nolint:errcheck
+
+		jobA, err := createSummariseJob("", inputDir, outputDir, "12345_a", "", "", "", 0, 1, s)
+		So(err, ShouldBeNil)
+
+		jobB, err := createSummariseJob("", inputDir, outputDir, "12345_b", "", "", "", 0, 1, s)
+		So(err, ShouldBeNil)
+
+		So(jobA.LimitGroups, ShouldResemble, []string{defaultSummariseLimitGroupForTest})
+		So(jobB.LimitGroups, ShouldResemble, jobA.LimitGroups)
+		assertWatchScheduledEnvironment(jobA)
+		assertWatchScheduledEnvironment(jobB)
+	})
+
+	Convey("Watch applies a configured summarise concurrency limit", t, func() {
+		inputDir := t.TempDir()
+		outputDir := t.TempDir()
+		pr, pw, err := os.Pipe()
+		So(err, ShouldBeNil)
+
+		defer pr.Close()
+		defer pw.Close()
+
+		pretendSubmissions := client.PretendSubmissions
+		client.PretendSubmissions = strconv.FormatUint(uint64(pw.Fd()), 10)
+
+		defer func() {
+			client.PretendSubmissions = pretendSubmissions
+		}()
+
+		s, err := client.New(client.SchedulerSettings{})
+		So(err, ShouldBeNil)
+
+		defer s.Disconnect() //nolint:errcheck
+
+		jobA, err := createSummariseJob("", inputDir, outputDir, "12345_a", "", "", "", 0, 4, s)
+		So(err, ShouldBeNil)
+
+		jobB, err := createSummariseJob("", inputDir, outputDir, "12345_b", "", "", "", 0, 4, s)
+		So(err, ShouldBeNil)
+
+		So(jobA.LimitGroups, ShouldResemble, []string{"wrstat-ui-clickhouse-import:4"})
+		So(jobB.LimitGroups, ShouldResemble, jobA.LimitGroups)
+		assertWatchScheduledEnvironment(jobA)
+		assertWatchScheduledEnvironment(jobB)
+	})
+}
+
+func assertWatchScheduledEnvironment(job *jobqueue.Job) {
+	job.EnvCRetrieved = true
+
+	So(job.Getenv(watchenv.Name), ShouldEqual, watchenv.Value)
+}
+
+func TestWatchPublicConcurrencyAPI(t *testing.T) {
+	Convey("The established Watch API keeps its exact signature and defaults to one", t, func() {
+		type legacyWatchFunc func(
+			[]string, string, string, string, string, string, int, string, string, log15.Logger,
+		) error
+
+		legacyWatch := legacyWatchFunc(Watch)
+
+		jobs := capturePublicWatchJobs(t, func(inputDir, outputDir string) error {
+			return legacyWatch([]string{inputDir}, "", outputDir, "quota", "basedirs", "", 0, "", "", nil)
+		})
+
+		So(jobs, ShouldHaveLength, 1)
+		So(jobs[0].LimitGroups, ShouldResemble, []string{defaultSummariseLimitGroupForTest})
+	})
+
+	Convey("WithOptions applies a configured concurrency", t, func() {
+		jobs := capturePublicWatchJobs(t, func(inputDir, outputDir string) error {
+			options := Options{SummariseConcurrency: 4}
+
+			return WithOptions(
+				[]string{inputDir}, "", outputDir, "quota", "basedirs", "", 0, "", "", options, nil,
+			)
+		})
+
+		So(jobs, ShouldHaveLength, 1)
+		So(jobs[0].LimitGroups, ShouldResemble, []string{"wrstat-ui-clickhouse-import:4"})
+	})
+}
+
+func capturePublicWatchJobs(t *testing.T, run func(inputDir, outputDir string) error) []*jobqueue.Job {
+	t.Helper()
+
+	inputDir := t.TempDir()
+	outputDir := t.TempDir()
+	inputBase := filepath.Join(inputDir, "12345_a")
+	So(os.Mkdir(inputBase, 0o755), ShouldBeNil)
+	So(createFile(filepath.Join(inputBase, inputStatsFile)), ShouldBeNil)
+
+	pr, pw, err := os.Pipe()
+	So(err, ShouldBeNil)
+
+	defer pw.Close()
+
+	previousPretendSubmissions := client.PretendSubmissions
+
+	client.PretendSubmissions = strconv.FormatUint(uint64(pw.Fd()), 10)
+	defer func() { client.PretendSubmissions = previousPretendSubmissions }()
+
+	So(run(inputDir, outputDir), ShouldBeNil)
+
+	var jobs []*jobqueue.Job
+	So(json.NewDecoder(pr).Decode(&jobs), ShouldBeNil)
+	So(pr.Close(), ShouldBeNil)
+
+	return jobs
 }
 
 func TestWatchSummariseCommandPreservesAttemptLogs(t *testing.T) {
@@ -232,6 +379,7 @@ func TestWatch(t *testing.T) {
 				0,
 				"",
 				"",
+				1,
 				nil,
 			)
 			So(err, ShouldBeNil)
@@ -255,6 +403,9 @@ func TestWatch(t *testing.T) {
 					Cwd:        cwd,
 					CwdMatters: true,
 					ReqGroup:   reqGroupABC,
+					LimitGroups: []string{
+						defaultSummariseLimitGroupForTest,
+					},
 					Requirements: &scheduler.Requirements{
 						RAM:   8192,
 						Time:  summariseMinRuntime,
@@ -270,7 +421,7 @@ func TestWatch(t *testing.T) {
 
 		Convey("Watch overrides summarise RAM when min mem is set", func() {
 			err = watch([]string{inputDir}, "", outputDir, "/path/to/quota",
-				"/path/to/basedirs.config", "/path/to/mounts", 16, "", "", nil)
+				"/path/to/basedirs.config", "/path/to/mounts", 16, "", "", 1, nil)
 			So(err, ShouldBeNil)
 
 			pw.Close()
@@ -284,7 +435,8 @@ func TestWatch(t *testing.T) {
 		})
 
 		Convey("Watch leaves job requirements other nil when no queue settings are provided", func() {
-			err = watch([]string{inputDir}, "", outputDir, "/path/to/quota", "/path/to/basedirs.config", "", 0, "", "", nil)
+			err = watch([]string{inputDir}, "", outputDir, "/path/to/quota",
+				"/path/to/basedirs.config", "", 0, "", "", 1, nil)
 			So(err, ShouldBeNil)
 
 			pw.Close()
@@ -297,7 +449,8 @@ func TestWatch(t *testing.T) {
 		})
 
 		Convey("Watch passes queue through to job requirements other", func() {
-			err = watch([]string{inputDir}, "", outputDir, "/path/to/quota", "/path/to/basedirs.config", "", 0, "myq", "", nil)
+			err = watch([]string{inputDir}, "", outputDir, "/path/to/quota",
+				"/path/to/basedirs.config", "", 0, "myq", "", 1, nil)
 			So(err, ShouldBeNil)
 
 			pw.Close()
@@ -312,7 +465,8 @@ func TestWatch(t *testing.T) {
 		})
 
 		Convey("Watch passes queues to avoid through to job requirements other", func() {
-			err = watch([]string{inputDir}, "", outputDir, "/path/to/quota", "/path/to/basedirs.config", "", 0, "", "badq", nil)
+			err = watch([]string{inputDir}, "", outputDir, "/path/to/quota",
+				"/path/to/basedirs.config", "", 0, "", "badq", 1, nil)
 			So(err, ShouldBeNil)
 
 			pw.Close()
@@ -328,7 +482,7 @@ func TestWatch(t *testing.T) {
 
 		Convey("Watch passes queue and queues to avoid through to job requirements other", func() {
 			err = watch([]string{inputDir}, "", outputDir, "/path/to/quota",
-				"/path/to/basedirs.config", "", 0, "q1,q2", "q3", nil)
+				"/path/to/basedirs.config", "", 0, "q1,q2", "q3", 1, nil)
 			So(err, ShouldBeNil)
 
 			pw.Close()
@@ -353,7 +507,7 @@ func TestWatch(t *testing.T) {
 			So(err, ShouldBeNil)
 
 			err := watch([]string{relInput}, "myGroup", relOutput, "/path/to/quota",
-				"/path/to/basedirs.config", "", 0, "", "", nil)
+				"/path/to/basedirs.config", "", 0, "", "", 1, nil)
 
 			errr := os.Chdir(cwd)
 			So(errr, ShouldBeNil)
@@ -378,6 +532,9 @@ func TestWatch(t *testing.T) {
 					CwdMatters: true,
 					ReqGroup:   reqGroupABC,
 					Group:      "myGroup",
+					LimitGroups: []string{
+						defaultSummariseLimitGroupForTest,
+					},
 					Requirements: &scheduler.Requirements{
 						RAM:   8192,
 						Time:  summariseMinRuntime,
@@ -394,7 +551,8 @@ func TestWatch(t *testing.T) {
 		Convey("Watch will not reschedule a summarise if one has already started", func() {
 			So(os.Mkdir(filepath.Join(outputDir, ".12345_abc"), 0755), ShouldBeNil)
 
-			err := watch([]string{inputDir}, "", outputDir, "/path/to/quota", "/path/to/basedirs.config", "", 0, "", "", nil)
+			err := watch([]string{inputDir}, "", outputDir, "/path/to/quota",
+				"/path/to/basedirs.config", "", 0, "", "", 1, nil)
 			So(err, ShouldBeNil)
 
 			pw.Close()
@@ -407,7 +565,8 @@ func TestWatch(t *testing.T) {
 		Convey("Watch will not reschedule a summarise if one has already completed", func() {
 			So(os.Mkdir(filepath.Join(outputDir, "12345_abc"), 0755), ShouldBeNil)
 
-			err := watch([]string{inputDir}, "", outputDir, "/path/to/quota", "/path/to/basedirs.config", "", 0, "", "", nil)
+			err := watch([]string{inputDir}, "", outputDir, "/path/to/quota",
+				"/path/to/basedirs.config", "", 0, "", "", 1, nil)
 			So(err, ShouldBeNil)
 
 			pw.Close()
@@ -422,7 +581,8 @@ func TestWatch(t *testing.T) {
 			So(os.Mkdir(existingOutput, 0755), ShouldBeNil)
 			So(createFile(filepath.Join(existingOutput, basedirBasename)), ShouldBeNil)
 
-			err := watch([]string{inputDir}, "", outputDir, "/path/to/quota", "/path/to/basedirs.config", "", 0, "", "", nil)
+			err := watch([]string{inputDir}, "", outputDir, "/path/to/quota",
+				"/path/to/basedirs.config", "", 0, "", "", 1, nil)
 			So(err, ShouldBeNil)
 
 			pw.Close()
@@ -444,6 +604,9 @@ func TestWatch(t *testing.T) {
 					Cwd:        cwd,
 					CwdMatters: true,
 					ReqGroup:   reqGroupABC,
+					LimitGroups: []string{
+						defaultSummariseLimitGroupForTest,
+					},
 					Requirements: &scheduler.Requirements{
 						RAM:   8192,
 						Time:  summariseMinRuntime,
@@ -473,6 +636,7 @@ func TestWatch(t *testing.T) {
 				0,
 				"",
 				"",
+				1,
 				nil,
 			)
 			So(err, ShouldBeNil)
@@ -496,6 +660,9 @@ func TestWatch(t *testing.T) {
 					Cwd:        cwd,
 					CwdMatters: true,
 					ReqGroup:   reqGroupABC,
+					LimitGroups: []string{
+						defaultSummariseLimitGroupForTest,
+					},
 					Requirements: &scheduler.Requirements{
 						RAM:   8192,
 						Time:  summariseMinRuntime,
@@ -517,6 +684,9 @@ func TestWatch(t *testing.T) {
 					Cwd:        cwd,
 					CwdMatters: true,
 					ReqGroup:   "wrstat-ui-summarise-c",
+					LimitGroups: []string{
+						defaultSummariseLimitGroupForTest,
+					},
 					Requirements: &scheduler.Requirements{
 						RAM:   8192,
 						Time:  summariseMinRuntime,
@@ -558,7 +728,7 @@ func TestWatch(t *testing.T) {
 
 			go func() {
 				errCh <- watch([]string{inputDir}, "", outputDir, "/path/to/quota",
-					"/path/to/basedirs.config", "", 0, "", "", logger)
+					"/path/to/basedirs.config", "", 0, "", "", 1, logger)
 			}()
 
 			err = <-errCh
@@ -604,7 +774,7 @@ func TestWatchSummariseReqGroupIncludesMountKey(t *testing.T) {
 		So(os.Mkdir(testInput, 0755), ShouldBeNil)
 		So(createFile(filepath.Join(testInput, inputStatsFile)), ShouldBeNil)
 
-		err = watch([]string{inputDir}, "", outputDir, "", "", "", 0, "", "", nil)
+		err = watch([]string{inputDir}, "", outputDir, "", "", "", 0, "", "", 1, nil)
 		So(err, ShouldBeNil)
 
 		pw.Close()
@@ -635,6 +805,8 @@ func assertSummariseRepGroup(repGroup string) {
 func jobsWithoutRepGroups(jobs []*jobqueue.Job) []*jobqueue.Job {
 	for _, job := range jobs {
 		job.RepGroup = ""
+		job.EnvOverride = nil
+		job.EnvCRetrieved = false
 	}
 
 	return jobs

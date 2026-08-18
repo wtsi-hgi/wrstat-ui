@@ -42,6 +42,7 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/internal/chspool"
 	"github.com/wtsi-hgi/wrstat-ui/internal/mountpath"
 	"github.com/wtsi-hgi/wrstat-ui/internal/summariseutil"
+	"github.com/wtsi-hgi/wrstat-ui/internal/watchenv"
 	"github.com/wtsi-hgi/wrstat-ui/stats"
 	"github.com/wtsi-hgi/wrstat-ui/summary"
 	sbasedirs "github.com/wtsi-hgi/wrstat-ui/summary/basedirs"
@@ -152,6 +153,8 @@ An example command would be the following:
 		`/path/to/quota.file -c /path/to/basedirs.config /path/to/stats.file
 `,
 	Run: func(_ *cobra.Command, args []string) {
+		warnIfSummariseUnguarded()
+
 		if err := run(args); err != nil {
 			die("%s", err)
 		}
@@ -177,6 +180,15 @@ func init() {
 	addClickhouseQueryTimeoutFlag(summariseCmd.Flags(), &clickhouseQueryTO)
 	summariseCmd.Flags().BoolVar(&clickhouseRecover, clickhouseRecoverFlag, false,
 		"recover a failed ClickHouse summarise retry")
+}
+
+func warnIfSummariseUnguarded() {
+	if os.Getenv(watchenv.Name) == watchenv.Value {
+		return
+	}
+
+	warn("summarise is not protected by the watch scheduler concurrency limit; " +
+		"concurrent manual jobs may overload ClickHouse and shared storage")
 }
 
 type compressedFile struct {

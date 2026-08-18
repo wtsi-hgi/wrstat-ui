@@ -61,6 +61,7 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/internal/statsdata"
 	internaltest "github.com/wtsi-hgi/wrstat-ui/internal/test"
 	internaluser "github.com/wtsi-hgi/wrstat-ui/internal/user"
+	"github.com/wtsi-hgi/wrstat-ui/internal/watchenv"
 	"github.com/wtsi-hgi/wrstat-ui/provider"
 )
 
@@ -232,6 +233,7 @@ func TestSummarise(t *testing.T) {
 			t.Logf("stderr: %s", stderr)
 		}
 		So(err, ShouldBeNil)
+		So(stderr, ShouldContainSubstring, "not protected by the watch scheduler concurrency limit")
 
 		compareFileContents(t, filepath.Join(outputA, "bygroup"), sortLines(fmt.Sprintf("%[1]s\t%[2]s\t2\t2684354560\n"+
 			"%[3]s\t%[4]s\t2\t80\n"+
@@ -1358,9 +1360,16 @@ func runWatchSummariseJobs(t *testing.T, jobs []*jobqueue.Job) {
 		go func(idx int, job *jobqueue.Job) {
 			var stdout, stderr strings.Builder
 
-			command, err := parseWatchSummariseJobCommand(job.Cmd)
+			job.EnvCRetrieved = true
+
+			env, err := job.Env()
 			if err == nil {
-				err = runParsedWatchSummariseJobCommand(ctx, job.Cwd, command, &stdout, &stderr)
+				var command parsedWatchSummariseJobCommand
+
+				command, err = parseWatchSummariseJobCommand(job.Cmd)
+				if err == nil {
+					err = runParsedWatchSummariseJobCommand(ctx, job.Cwd, command, env, &stdout, &stderr)
+				}
 			}
 
 			results <- watchSummariseJobResult{
@@ -1545,7 +1554,10 @@ func parseWatchSummariseInvocationWords(words []string) (parsedWatchSummariseJob
 	}
 
 	args := slices.Clone(words[1:redirIdx])
-	if len(args) < 9 || words[0] != "./"+app || args[0] != "summarise" || args[1] != "--clickhouse-recover" {
+
+	commandShapeChanged := len(args) < 9 || words[0] != "./"+app || args[0] != "summarise" ||
+		args[1] != "--clickhouse-recover"
+	if commandShapeChanged {
 		return parsedWatchSummariseJobCommand{}, errWatchSummariseCommandShape
 	}
 
@@ -1591,6 +1603,7 @@ func runParsedWatchSummariseJobCommand(
 	ctx context.Context,
 	cwd string,
 	command parsedWatchSummariseJobCommand,
+	env []string,
 	stdout *strings.Builder,
 	stderr *strings.Builder,
 ) error {
@@ -1607,6 +1620,7 @@ func runParsedWatchSummariseJobCommand(
 	//nolint:gosec // The binary and command shape were validated above; parsed args are the watch output under test.
 	cmd := exec.CommandContext(ctx, "./"+app, command.summariseArgs...)
 	cmd.Dir = cwd
+	cmd.Env = env
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	err = cmd.Run()
@@ -1670,6 +1684,10 @@ func assertWatchSummariseOutput(t *testing.T, outputDir string, fixture watchSum
 	logs, err := filepath.Glob(filepath.Join(finalDir, "summarise-*.log"))
 	So(err, ShouldBeNil)
 	So(logs, ShouldHaveLength, 1)
+
+	logBytes, err := os.ReadFile(logs[0])
+	So(err, ShouldBeNil)
+	So(string(logBytes), ShouldNotContainSubstring, "not protected by the watch scheduler concurrency limit")
 }
 
 func watchSummarisePathExists(path string) bool {
@@ -2062,6 +2080,17 @@ type watchSummariseJobResult struct {
 	err    error
 }
 
+func TestSummariseSchedulerGuardCLI(t *testing.T) {
+	Convey("summarise exposes no user-controlled scheduler guard flag", t, func() {
+		stdout, stderr, _, err := runWRStat("summarise", "--help")
+
+		So(err, ShouldBeNil)
+		So(stderr, ShouldBeBlank)
+		So(stdout, ShouldNotContainSubstring, "scheduler-guarded")
+		So(stdout, ShouldNotContainSubstring, watchenv.Name)
+	})
+}
+
 func TestWatch(t *testing.T) {
 	Convey("watch starts the correct jobs", t, func() {
 		tmp := t.TempDir()
@@ -2089,6 +2118,8 @@ func TestWatch(t *testing.T) {
 		So(len(jobs), ShouldBeGreaterThan, 0)
 		So(jobs[0].Requirements.Other, ShouldBeNil)
 		assertWatchSummariseRepGroup(jobs[0].RepGroup)
+		jobs[0].EnvCRetrieved = true
+		So(jobs[0].Getenv(watchenv.Name), ShouldEqual, watchenv.Value)
 		So(jobsWithoutWatchRepGroups(jobs), ShouldResemble, []*jobqueue.Job{
 			{
 				Cmd: fmt.Sprintf(
@@ -2102,6 +2133,9 @@ func TestWatch(t *testing.T) {
 				Cwd:        cwd,
 				CwdMatters: true,
 				ReqGroup:   "wrstat-ui-summarise-A",
+				LimitGroups: []string{
+					"wrstat-ui-clickhouse-import:1",
+				},
 				Requirements: &scheduler.Requirements{
 					Cores: cpus,
 					RAM:   ram,
@@ -2113,6 +2147,25 @@ func TestWatch(t *testing.T) {
 				State:    jobqueue.JobStateDelayed,
 			},
 		})
+		So(jobs[0].Cmd, ShouldNotContainSubstring, "scheduler-guarded")
+		So(jobs[0].Cmd, ShouldNotContainSubstring, watchenv.Name)
+
+		//nolint:gosec // This deliberately exercises the exact command produced by watch.
+		manualCopy := exec.CommandContext(context.Background(), "sh", "-c", jobs[0].Cmd)
+		manualCopy.Dir = cwd
+		manualCopy.Env = slices.DeleteFunc(os.Environ(), func(entry string) bool {
+			return strings.HasPrefix(entry, watchenv.Name+"=")
+		})
+		So(manualCopy.Run(), ShouldNotBeNil)
+
+		manualLogs, err := filepath.Glob(filepath.Join(dotA, "summarise-*.log"))
+		So(err, ShouldBeNil)
+		So(manualLogs, ShouldHaveLength, 1)
+
+		manualLog, err := os.ReadFile(manualLogs[0])
+		So(err, ShouldBeNil)
+		So(string(manualLog), ShouldContainSubstring, "not protected by the watch scheduler concurrency limit")
+		So(os.Remove(manualLogs[0]), ShouldBeNil)
 
 		So(os.Remove(dotA), ShouldBeNil)
 
@@ -2140,6 +2193,9 @@ func TestWatch(t *testing.T) {
 				Cwd:        cwd,
 				CwdMatters: true,
 				ReqGroup:   "wrstat-ui-summarise-A",
+				LimitGroups: []string{
+					"wrstat-ui-clickhouse-import:1",
+				},
 				Requirements: &scheduler.Requirements{
 					Cores: cpus,
 					RAM:   ram,
@@ -2173,6 +2229,15 @@ func TestWatch(t *testing.T) {
 		So(len(jobs), ShouldBeGreaterThan, 0)
 		So(jobs[0].Requirements.RAM, ShouldEqual, 16384)
 		So(jobs[0].Override, ShouldEqual, 1)
+
+		So(os.Remove(dotA), ShouldBeNil)
+
+		_, _, jobs, err = runWRStat("watch", "-o", output, "-q", "/some/quota.file", "-c", "basedirs.config",
+			"--summarise_concurrency=4", tmp)
+		So(err, ShouldBeNil)
+
+		So(len(jobs), ShouldBeGreaterThan, 0)
+		So(jobs[0].LimitGroups, ShouldResemble, []string{"wrstat-ui-clickhouse-import:4"})
 	})
 }
 
@@ -2723,6 +2788,8 @@ func assertWatchSummariseRepGroup(repGroup string) {
 func jobsWithoutWatchRepGroups(jobs []*jobqueue.Job) []*jobqueue.Job {
 	for _, job := range jobs {
 		job.RepGroup = ""
+		job.EnvOverride = nil
+		job.EnvCRetrieved = false
 	}
 
 	return jobs
