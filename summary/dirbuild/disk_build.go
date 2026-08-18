@@ -28,6 +28,7 @@ package dirbuild
 import (
 	"errors"
 	"io"
+	"time"
 
 	"github.com/wtsi-hgi/wrstat-ui/db"
 	"github.com/wtsi-hgi/wrstat-ui/summary"
@@ -42,17 +43,46 @@ func buildWithDiskBackedSummaries(
 	files FileSink,
 	opts Options,
 ) error {
+	if opts.DiskMetrics == nil {
+		opts.DiskMetrics = new(DiskMetrics)
+	}
+
 	store, err := newDiskBackedSummaryStore(opts, refUnix)
 	if err != nil {
 		return err
 	}
 
-	buildErr := addStatsRowsDisk(open, index, store, refUnix, files)
-	if buildErr == nil {
-		buildErr = rollUpAndEmitDisk(index, database, store)
+	metrics := opts.DiskMetrics
+
+	buildErr := addStatsRowsDiskMeasured(open, index, store, refUnix, files, metrics)
+	if buildErr != nil {
+		return errors.Join(buildErr, store.close(false))
 	}
 
-	return errors.Join(buildErr, store.close())
+	return rollUpAndEmitDiskMeasured(index, database, store, metrics)
+}
+
+func addStatsRowsDiskMeasured(
+	open func() (io.ReadCloser, error),
+	index *directoryIndex,
+	store diskSummaryStore,
+	refUnix int64,
+	files FileSink,
+	metrics *DiskMetrics,
+) error {
+	started := time.Now()
+	writesBefore := startProcessWriteBytesMeasurement(metrics)
+
+	err := addStatsRowsDisk(open, index, store, refUnix, files)
+	if err == nil {
+		err = store.flush()
+	}
+
+	metrics.Pass2Elapsed = time.Since(started)
+	metrics.Pass2ProcessWriteBytes, metrics.Pass2ProcessWriteBytesAvailable =
+		finishProcessWriteBytesMeasurement(metrics, writesBefore)
+
+	return err
 }
 
 func addStatsRowsDisk(
@@ -150,6 +180,29 @@ func addToDiskNode(
 	return err
 }
 
+func rollUpAndEmitDiskMeasured(
+	index *directoryIndex,
+	database dirguta.DB,
+	store diskSummaryStore,
+	metrics *DiskMetrics,
+) error {
+	started := time.Now()
+	writesBefore := startProcessWriteBytesMeasurement(metrics)
+	buildErr := rollUpAndEmitDisk(index, database, store)
+	closeErr := store.close(buildErr == nil)
+	metrics.RollupElapsed = time.Since(started)
+	metrics.RollupProcessWriteBytes, metrics.RollupProcessWriteBytesAvailable =
+		finishProcessWriteBytesMeasurement(metrics, writesBefore)
+
+	metrics.ProcessWriteBytesAvailable = metrics.Pass2ProcessWriteBytesAvailable &&
+		metrics.RollupProcessWriteBytesAvailable
+	if metrics.ProcessWriteBytesAvailable {
+		metrics.ProcessWriteBytes = metrics.Pass2ProcessWriteBytes + metrics.RollupProcessWriteBytes
+	}
+
+	return errors.Join(buildErr, closeErr)
+}
+
 func rollUpAndEmitDisk(index *directoryIndex, database dirguta.DB, store diskSummaryStore) error {
 	for i := len(index.nodes) - 1; i >= 0; i-- {
 		if err := rollUpDiskNode(database, store, index.nodes[i]); err != nil {
@@ -161,7 +214,18 @@ func rollUpAndEmitDisk(index *directoryIndex, database dirguta.DB, store diskSum
 }
 
 func rollUpDiskNode(database dirguta.DB, store diskSummaryStore, node *dirNode) error {
-	if err := emitDiskNode(database, store, node); err != nil {
+	hardlinkStore := dirguta.NewGUTAStore(node.refUnix)
+	hardlinks := dirguta.MaterializeGUTAs(hardlinkStore, node.seenHardlinks)
+
+	var parentID *uint32
+	if node.parent != nil {
+		parentID = &node.parent.dirID
+	}
+
+	err := store.rollUp(node.dirID, parentID, hardlinks, func(gutas db.GUTAs) error {
+		return emitDiskRecord(database, node, gutas)
+	})
+	if err != nil {
 		return err
 	}
 
@@ -169,23 +233,15 @@ func rollUpDiskNode(database dirguta.DB, store diskSummaryStore, node *dirNode) 
 		clear(node.seenHardlinks)
 		node.seenHardlinks = nil
 
-		return store.clear(node.dirID)
+		return nil
 	}
 
 	mergeNodeHardlinks(node.parent, node)
 
-	return store.merge(node.parent.dirID, node.dirID)
+	return nil
 }
 
-func emitDiskNode(database dirguta.DB, store diskSummaryStore, node *dirNode) error {
-	hardlinkStore := dirguta.NewGUTAStore(node.refUnix)
-	hardlinks := dirguta.MaterializeGUTAs(hardlinkStore, node.seenHardlinks)
-
-	gutas, err := store.materialise(node.dirID, hardlinks)
-	if err != nil {
-		return err
-	}
-
+func emitDiskRecord(database dirguta.DB, node *dirNode, gutas db.GUTAs) error {
 	return database.Add(db.RecordDGUTA{
 		Dir:            node.dir,
 		DirID:          node.dirID,

@@ -426,6 +426,18 @@ func writeRawStatsFixtureLine(
 	)
 }
 
+type failingDirbuildError struct{}
+
+func (failingDirbuildError) Error() string {
+	return "forced dirbuild emission failure"
+}
+
+type failingDirbuildDatabase struct{}
+
+func (failingDirbuildDatabase) Add(db.RecordDGUTA) error {
+	return failingDirbuildError{}
+}
+
 type summariseSpoolSwitchPlanForTest struct {
 	HasPrevious         bool   `json:"has_previous"`
 	PreviousSnapshotID  string `json:"previous_snapshot_id"`
@@ -2087,7 +2099,63 @@ func TestSummariseClickHouseSpoolRows(t *testing.T) {
 		So(op.Inputs["build_path"], ShouldEqual, "dirbuild")
 		So(op.Inputs["completed"], ShouldEqual, true)
 		So(uint64InputForTest(op.Inputs, "build_phase_bytes_written"), ShouldBeGreaterThan, uint64(0))
+		So(uint64InputForTest(op.Inputs, "sqlite_write_behind_limit_bytes"), ShouldEqual, uint64(4*1024*1024))
+		So(uint64InputForTest(op.Inputs, "sqlite_max_write_behind_bytes"),
+			ShouldBeLessThanOrEqualTo, uint64InputForTest(op.Inputs, "sqlite_write_behind_limit_bytes"))
+		So(uint64InputForTest(op.Inputs, "sqlite_rows_received"), ShouldBeGreaterThan, uint64(0))
+		So(uint64InputForTest(op.Inputs, "sqlite_rows_written"), ShouldBeGreaterThan, uint64(0))
+		So(uint64InputForTest(op.Inputs, "sqlite_statements"), ShouldBeGreaterThan, uint64(0))
+		So(uint64InputForTest(op.Inputs, "sqlite_select_statements"), ShouldBeGreaterThan, uint64(0))
+		So(uint64InputForTest(op.Inputs, "sqlite_database_bytes"), ShouldBeGreaterThan, uint64(0))
+		So(op.Inputs, ShouldNotContainKey, "sqlite_write_bytes")
+		So(op.Inputs["dirbuild_process_write_bytes_source"], ShouldEqual, "/proc/self/io write_bytes")
+		So(op.Inputs["dirbuild_process_write_bytes_available"], ShouldEqual, true)
+		So(uint64InputForTest(op.Inputs, "dirbuild_process_write_bytes"), ShouldEqual,
+			uint64InputForTest(op.Inputs, "dirbuild_pass2_process_write_bytes")+
+				uint64InputForTest(op.Inputs, "dirbuild_rollup_process_write_bytes"))
+		So(op.Inputs["dirbuild_pass2_elapsed_ms"], ShouldBeGreaterThan, float64(0))
+		So(op.Inputs["dirbuild_rollup_elapsed_ms"], ShouldBeGreaterThan, float64(0))
 		So(summariseSpoolHasDirbuildScratchForTest(t, spoolDir), ShouldBeFalse)
+	})
+
+	Convey("A3.1c4b failed disk-backed dirbuild retains SQLite scratch for diagnosis", t, func() {
+		fixture := newSummariseActiveSnapshotFixture(t)
+		writeNestedFullFilterSpoolFixtureStats(t, fixture.statsPath, fixture.updatedAt)
+
+		restore := snapshotSummariseGlobals()
+		Reset(restore)
+
+		configureSummariseActiveSnapshotTest(fixture.outputDir, false)
+
+		buildSummariseSpoolDirbuild = func(
+			open func() (io.ReadCloser, error),
+			mountPath string,
+			_ dirguta.DB,
+			refTime time.Time,
+			files dirbuild.FileSink,
+			opts dirbuild.Options,
+		) error {
+			opts.DiskNodeThreshold = 2
+
+			return dirbuild.BuildWithFilesOptions(open, mountPath, failingDirbuildDatabase{}, refTime, files, opts)
+		}
+
+		target := &clickHouseSummariseTarget{
+			cfg:       clickhouse.Config{DSN: summariseTestClickHouseDSN, Database: summariseTestClickHouseDatabase},
+			mountPath: summariseTestMountPath,
+			modtime:   fixture.updatedAt,
+			outputDir: fixture.outputDir,
+		}
+		expected, err := newSummariseSpoolManifest(fixture.statsPath, target)
+		So(err, ShouldBeNil)
+
+		spoolDir := summariseClickHouseSpoolDir(fixture.outputDir)
+		_, err = buildSummariseSpool(
+			fixture.statsPath, spoolDir, expected, target, newSummariseDiagnostics(fixture.statsPath),
+		)
+
+		So(err, ShouldNotBeNil)
+		So(summariseSpoolHasDirbuildScratchForTest(t, spoolDir+".partial"), ShouldBeTrue)
 	})
 
 	Convey("A3.1c5 non-contiguous stdin is rejected instead of attempting a second pass", t, func() {

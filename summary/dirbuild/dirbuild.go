@@ -497,6 +497,9 @@ type Options struct {
 	// RetainTempDir leaves disk-backed summary scratch in place after closing so
 	// callers can measure and clean it with surrounding build artefacts.
 	RetainTempDir bool
+	// DiskMetrics receives bounded-accumulator, SQLite, and phase measurements
+	// when the disk-backed summary path is used.
+	DiskMetrics *DiskMetrics
 }
 
 type dirNode struct {

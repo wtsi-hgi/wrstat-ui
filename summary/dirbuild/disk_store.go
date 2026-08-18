@@ -32,8 +32,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
+	"time"
 
 	_ "github.com/mattn/go-sqlite3" // register sqlite3 for disk-backed dirbuild scratch stores.
 	"github.com/wtsi-hgi/wrstat-ui/db"
@@ -45,12 +47,41 @@ const sqliteDiskSummaryCacheKiB = 64 * 1024
 
 const sqliteDiskSummaryBaseColumnCount = 9
 
+const sqliteDiskSummaryWriteBehindBytes = 4 * 1024 * 1024
+
+const sqliteDiskSummaryAccumulatorEntryBytes = 256
+
+// DiskMetrics reports work performed by the disk-backed summary path.
+// ProcessWriteBytes and its phase fields are Linux process write_bytes deltas
+// observed while each phase runs; DatabaseBytes is the resulting SQLite file.
+type DiskMetrics struct {
+	WriteBehindLimitBytes            uint64
+	MaxWriteBehindBytes              uint64
+	RowsReceived                     uint64
+	RowsWritten                      uint64
+	RowsCombined                     uint64
+	MaxRowsCombinedPerFlush          uint64
+	Flushes                          uint64
+	SQLiteStatements                 uint64
+	SelectStatements                 uint64
+	DatabaseBytes                    uint64
+	ProcessWriteBytes                uint64
+	Pass2ProcessWriteBytes           uint64
+	RollupProcessWriteBytes          uint64
+	ProcessWriteBytesAvailable       bool
+	Pass2ProcessWriteBytesAvailable  bool
+	RollupProcessWriteBytesAvailable bool
+	ProcessWriteBytesSource          string
+	Pass2Elapsed                     time.Duration
+	RollupElapsed                    time.Duration
+	readProcessWriteBytes            func() (uint64, error)
+}
+
 type diskSummaryStore interface {
 	addFile(dirID uint32, keys []dirguta.GUTAKey, size int64, atime int64, mtime int64) error
-	materialise(dirID uint32, hardlinks db.GUTAs) (db.GUTAs, error)
-	merge(parentID uint32, childID uint32) error
-	clear(dirID uint32) error
-	close() error
+	rollUp(dirID uint32, parentID *uint32, hardlinks db.GUTAs, emit func(db.GUTAs) error) error
+	flush() error
+	close(success bool) error
 }
 
 func newDiskBackedSummaryStore(opts Options, refTime int64) (diskSummaryStore, error) {
@@ -61,10 +92,54 @@ func newDiskBackedSummaryStore(opts Options, refTime int64) (diskSummaryStore, e
 
 	store, err := openSQLiteDiskSummaryStore(dir, refTime, !opts.RetainTempDir)
 	if err != nil {
-		return nil, errors.Join(err, os.RemoveAll(dir))
+		return nil, err
+	}
+
+	if opts.DiskMetrics != nil {
+		store.metrics = opts.DiskMetrics
+		store.resetMetricLimit()
 	}
 
 	return store, nil
+}
+
+type diskSummaryKey struct {
+	dirID uint32
+	gid   uint32
+	uid   uint32
+	ft    db.DirGUTAFileType
+	mask  uint32
+}
+
+func compareDiskSummaryKeys(a, b diskSummaryKey) int {
+	if a.dirID != b.dirID {
+		return cmpUint32(a.dirID, b.dirID)
+	}
+
+	if a.gid != b.gid {
+		return cmpUint32(a.gid, b.gid)
+	}
+
+	if a.uid != b.uid {
+		return cmpUint32(a.uid, b.uid)
+	}
+
+	if a.ft != b.ft {
+		return cmpUint32(uint32(a.ft), uint32(b.ft))
+	}
+
+	return cmpUint32(a.mask, b.mask)
+}
+
+func cmpUint32(a, b uint32) int {
+	switch {
+	case a < b:
+		return -1
+	case a > b:
+		return 1
+	default:
+		return 0
+	}
 }
 
 type diskSummaryRow struct {
@@ -146,6 +221,12 @@ type sqliteDiskSummaryStore struct {
 	closed           bool
 	refTime          int64
 	removeDirOnClose bool
+	pending          map[diskSummaryKey]*summary.SummaryWithTimes
+	pendingBytes     uint64
+	pendingRows      uint64
+	writeBehindLimit uint64
+	metrics          *DiskMetrics
+	observeFlush     func([]diskSummaryKey)
 }
 
 func openSQLiteDiskSummaryStore(dir string, refTime int64, removeDirOnClose bool) (*sqliteDiskSummaryStore, error) {
@@ -159,12 +240,22 @@ func openSQLiteDiskSummaryStore(dir string, refTime int64, removeDirOnClose bool
 		db:               handle,
 		refTime:          refTime,
 		removeDirOnClose: removeDirOnClose,
+		pending:          make(map[diskSummaryKey]*summary.SummaryWithTimes),
+		writeBehindLimit: sqliteDiskSummaryWriteBehindBytes,
+		metrics:          new(DiskMetrics),
 	}
+	store.resetMetricLimit()
+
 	if err := store.configure(); err != nil {
 		return nil, errors.Join(err, handle.Close())
 	}
 
 	return store, nil
+}
+
+func (s *sqliteDiskSummaryStore) resetMetricLimit() {
+	s.metrics.WriteBehindLimitBytes = s.writeBehindLimit
+	s.metrics.ProcessWriteBytesSource = linuxProcessWriteBytesSource
 }
 
 func (s *sqliteDiskSummaryStore) configure() error {
@@ -245,7 +336,7 @@ func sqliteDiskSummaryUpsertSQL() string {
 func sqliteDiskSummarySelectSQL() string {
 	return "SELECT gid, uid, ft, mask, count, size, atime, mtime, " +
 		sqliteBucketNames("ab") + ", " + sqliteBucketNames("mb") +
-		" FROM summaries WHERE dir_id = ?"
+		" FROM summaries WHERE dir_id = ? ORDER BY gid, uid, ft, mask"
 }
 
 func (s *sqliteDiskSummaryStore) addFile(
@@ -299,9 +390,84 @@ func (s *sqliteDiskSummaryStore) upsertSummary(
 	mask uint32,
 	sum *summary.SummaryWithTimes,
 ) error {
-	_, err := s.upsert.ExecContext(context.Background(), sqliteDiskSummaryArgs(dirID, key, mask, sum)...)
+	s.resetMetricLimit()
 
-	return err
+	pendingKey := diskSummaryKey{dirID: dirID, gid: key.GID, uid: key.UID, ft: key.FileType, mask: mask}
+	if s.shouldFlushBefore(pendingKey) {
+		if err := s.flush(); err != nil {
+			return err
+		}
+	}
+
+	pending := s.pending[pendingKey]
+	if pending == nil {
+		pending = new(summary.SummaryWithTimes)
+		s.pending[pendingKey] = pending
+		s.pendingBytes += sqliteDiskSummaryAccumulatorEntryBytes
+	}
+
+	pending.AddSummary(sum)
+
+	s.pendingRows++
+	s.metrics.RowsReceived++
+	s.metrics.MaxWriteBehindBytes = max(s.metrics.MaxWriteBehindBytes, s.pendingBytes)
+
+	return nil
+}
+
+func (s *sqliteDiskSummaryStore) shouldFlushBefore(key diskSummaryKey) bool {
+	_, exists := s.pending[key]
+
+	return !exists && len(s.pending) > 0 &&
+		s.pendingBytes+sqliteDiskSummaryAccumulatorEntryBytes > s.writeBehindLimit
+}
+
+func (s *sqliteDiskSummaryStore) flush() error {
+	if len(s.pending) == 0 {
+		return nil
+	}
+
+	keys := make([]diskSummaryKey, 0, len(s.pending))
+	for key := range s.pending {
+		keys = append(keys, key)
+	}
+
+	slices.SortFunc(keys, compareDiskSummaryKeys)
+
+	if s.observeFlush != nil {
+		s.observeFlush(keys)
+	}
+
+	if err := s.flushRows(keys); err != nil {
+		return err
+	}
+
+	written := uint64(len(keys))
+	combined := s.pendingRows - written
+	s.metrics.Flushes++
+	s.metrics.RowsCombined += combined
+	s.metrics.MaxRowsCombinedPerFlush = max(s.metrics.MaxRowsCombinedPerFlush, combined)
+	clear(s.pending)
+	s.pendingBytes = 0
+	s.pendingRows = 0
+
+	return nil
+}
+
+func (s *sqliteDiskSummaryStore) flushRows(keys []diskSummaryKey) error {
+	for _, key := range keys {
+		gutaKey := dirguta.GUTAKey{GID: key.gid, UID: key.uid, FileType: key.ft}
+		if _, err := s.upsert.ExecContext(
+			context.Background(), sqliteDiskSummaryArgs(key.dirID, gutaKey, key.mask, s.pending[key])...,
+		); err != nil {
+			return err
+		}
+
+		s.metrics.SQLiteStatements++
+		s.metrics.RowsWritten++
+	}
+
+	return nil
 }
 
 func sqliteDiskSummaryArgs(
@@ -328,15 +494,34 @@ func sqliteDiskSummaryArgs(
 	return args
 }
 
-func (s *sqliteDiskSummaryStore) materialise(
+func (s *sqliteDiskSummaryStore) rollUp(
 	dirID uint32,
+	parentID *uint32,
 	hardlinks db.GUTAs,
-) (db.GUTAs, error) {
+	emit func(db.GUTAs) error,
+) error {
 	rows, err := s.summaryRows(dirID)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
+	if err := emit(materialiseDiskSummaryRows(rows, hardlinks)); err != nil {
+		return err
+	}
+
+	if parentID != nil {
+		for _, row := range rows {
+			key := dirguta.GUTAKey{GID: row.gid, UID: row.uid, FileType: row.ft}
+			if err := s.upsertSummary(*parentID, key, row.mask, row.summary()); err != nil {
+				return err
+			}
+		}
+	}
+
+	return s.clear(dirID)
+}
+
+func materialiseDiskSummaryRows(rows []diskSummaryRow, hardlinks db.GUTAs) db.GUTAs {
 	expanded := make(map[dirguta.GUTAKey]*summary.SummaryWithTimes)
 	for _, row := range rows {
 		row.expandInto(expanded)
@@ -353,7 +538,16 @@ func (s *sqliteDiskSummaryStore) materialise(
 
 	sort.Sort(keys)
 
-	return diskMaterializedGUTAs(keys, expanded), nil
+	return diskMaterializedGUTAs(keys, expanded)
+}
+
+func regularFileSize(path string) uint64 {
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Size() <= 0 {
+		return 0
+	}
+
+	return uint64(info.Size()) //nolint:gosec // guarded positive int64 file size.
 }
 
 func expandMaterializedGUTA(
@@ -417,10 +611,18 @@ func diskMaterializedGUTAs(
 }
 
 func (s *sqliteDiskSummaryStore) summaryRows(dirID uint32) ([]diskSummaryRow, error) {
+	if err := s.flush(); err != nil {
+		return nil, err
+	}
+
 	rows, err := s.selectBy.QueryContext(context.Background(), dirID)
 	if err != nil {
 		return nil, err
 	}
+
+	s.metrics.SQLiteStatements++
+	s.metrics.SelectStatements++
+
 	defer rows.Close()
 
 	var summaries []diskSummaryRow
@@ -437,48 +639,33 @@ func (s *sqliteDiskSummaryStore) summaryRows(dirID uint32) ([]diskSummaryRow, er
 	return summaries, rows.Err()
 }
 
-func (s *sqliteDiskSummaryStore) merge(parentID uint32, childID uint32) error {
-	rows, err := s.summaryRows(childID)
-	if err != nil {
-		return err
-	}
-
-	for _, row := range rows {
-		key := dirguta.GUTAKey{
-			GID:      row.gid,
-			UID:      row.uid,
-			FileType: row.ft,
-		}
-		if err := s.upsertSummary(parentID, key, row.mask, row.summary()); err != nil {
-			return err
-		}
-	}
-
-	return s.clear(childID)
-}
-
 func (s *sqliteDiskSummaryStore) clear(dirID uint32) error {
 	_, err := s.deleteBy.ExecContext(context.Background(), dirID)
+	if err == nil {
+		s.metrics.SQLiteStatements++
+	}
 
 	return err
 }
 
-func (s *sqliteDiskSummaryStore) close() error {
+func (s *sqliteDiskSummaryStore) close(success bool) error {
 	if s.closed {
 		return nil
 	}
 
-	s.closed = true
-
+	flushErr := s.flush()
 	stmtErr := errors.Join(closeStmt(s.upsert), closeStmt(s.selectBy), closeStmt(s.deleteBy))
 	commitErr := s.tx.Commit()
 	closeErr := s.db.Close()
+	s.closed = true
+	s.metrics.DatabaseBytes = regularFileSize(filepath.Join(s.dir, "summaries.sqlite"))
+	closeResult := errors.Join(flushErr, stmtErr, commitErr, closeErr)
 
-	if !s.removeDirOnClose {
-		return errors.Join(stmtErr, commitErr, closeErr)
+	if !s.removeDirOnClose || !success || closeResult != nil {
+		return closeResult
 	}
 
-	return errors.Join(stmtErr, commitErr, closeErr, os.RemoveAll(s.dir))
+	return os.RemoveAll(s.dir)
 }
 
 func closeStmt(stmt *sql.Stmt) error {

@@ -933,6 +933,25 @@ func (w *summariseDGUTASpoolWriter) applySchema3FutureDirectChildTuples(
 	}
 }
 
+func retainSummariseDiskScratch(partialDir string) bool {
+	found := false
+	err := filepath.WalkDir(partialDir, func(_ string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+
+		if !entry.IsDir() && entry.Name() == "summaries.sqlite" {
+			found = true
+
+			return fs.SkipAll
+		}
+
+		return nil
+	})
+
+	return found || err != nil
+}
+
 func finishSummariseSpoolScratch(partialDir string, manifest *chspool.Manifest) (uint64, error) {
 	scratchBytes, err := summariseBuildPhaseBytesWritten(partialDir, manifest)
 	if err != nil {
@@ -975,10 +994,11 @@ func summariseBuildCanonicalTopLevel(name string, canonical map[string]bool) boo
 	return false
 }
 
-func summariseSpoolDirbuildOptions(partialDir string) dirbuild.Options {
+func summariseSpoolDirbuildOptions(partialDir string, metrics *dirbuild.DiskMetrics) dirbuild.Options {
 	return dirbuild.Options{
 		TempDir:       partialDir,
 		RetainTempDir: true,
+		DiskMetrics:   metrics,
 	}
 }
 
@@ -1046,6 +1066,7 @@ func summariseBuildReportInputs(
 	buildPath string,
 	records uint64,
 	buildScratchBytes uint64,
+	diskMetrics *dirbuild.DiskMetrics,
 	contiguityViolationRow uint64,
 	contiguityViolationDepth uint64,
 ) map[string]any {
@@ -1059,12 +1080,56 @@ func summariseBuildReportInputs(
 		chperf.A5BuildInputSpoolBytes:        summariseBuildManifestBytes(manifest),
 		"mount_path":                         target.mountPath,
 	}
+	addSummariseDiskMetrics(inputs, diskMetrics)
+
 	if contiguityViolationRow != 0 {
 		inputs["contiguity_violation_row"] = contiguityViolationRow
 		inputs["contiguity_violation_path_depth"] = contiguityViolationDepth
 	}
 
 	return inputs
+}
+
+func addSummariseDiskMetrics(inputs map[string]any, metrics *dirbuild.DiskMetrics) {
+	if metrics == nil || metrics.WriteBehindLimitBytes == 0 {
+		return
+	}
+
+	inputs["sqlite_write_behind_limit_bytes"] = metrics.WriteBehindLimitBytes
+	inputs["sqlite_max_write_behind_bytes"] = metrics.MaxWriteBehindBytes
+	inputs["sqlite_rows_received"] = metrics.RowsReceived
+	inputs["sqlite_rows_written"] = metrics.RowsWritten
+	inputs["sqlite_rows_combined"] = metrics.RowsCombined
+	inputs["sqlite_rows_combined_per_flush"] = summariseRowsCombinedPerFlush(metrics)
+	inputs["sqlite_max_rows_combined_per_flush"] = metrics.MaxRowsCombinedPerFlush
+	inputs["sqlite_flushes"] = metrics.Flushes
+	inputs["sqlite_statements"] = metrics.SQLiteStatements
+	inputs["sqlite_select_statements"] = metrics.SelectStatements
+	inputs["sqlite_database_bytes"] = metrics.DatabaseBytes
+	addSummariseDiskProcessWriteMetrics(inputs, metrics)
+	inputs["dirbuild_pass2_elapsed_ms"] = float64(metrics.Pass2Elapsed) / float64(time.Millisecond)
+	inputs["dirbuild_rollup_elapsed_ms"] = float64(metrics.RollupElapsed) / float64(time.Millisecond)
+}
+
+func summariseRowsCombinedPerFlush(metrics *dirbuild.DiskMetrics) float64 {
+	if metrics.Flushes == 0 {
+		return 0
+	}
+
+	return float64(metrics.RowsCombined) / float64(metrics.Flushes)
+}
+
+func addSummariseDiskProcessWriteMetrics(inputs map[string]any, metrics *dirbuild.DiskMetrics) {
+	inputs["dirbuild_process_write_bytes_source"] = metrics.ProcessWriteBytesSource
+	inputs["dirbuild_process_write_bytes_available"] = metrics.ProcessWriteBytesAvailable
+	inputs["dirbuild_pass2_process_write_bytes_available"] = metrics.Pass2ProcessWriteBytesAvailable
+
+	inputs["dirbuild_rollup_process_write_bytes_available"] = metrics.RollupProcessWriteBytesAvailable
+	if metrics.ProcessWriteBytesAvailable {
+		inputs["dirbuild_process_write_bytes"] = metrics.ProcessWriteBytes
+		inputs["dirbuild_pass2_process_write_bytes"] = metrics.Pass2ProcessWriteBytes
+		inputs["dirbuild_rollup_process_write_bytes"] = metrics.RollupProcessWriteBytes
+	}
 }
 
 func summariseDirbuildBasedirsMergeSummary(
@@ -2014,10 +2079,11 @@ func runAndCloseSummariseSpoolDirbuild(
 	dw *summariseDGUTASpoolWriter,
 	fileWriter *summariseFileSpoolOperation,
 	diag *summariseDiagnostics,
+	diskMetrics *dirbuild.DiskMetrics,
 ) (uint64, error) {
 	diag.setCurrentPhase("parse")
 
-	records, err := runSummariseSpoolDirbuild(statsPath, partialDir, ds, dw, fileWriter)
+	records, err := runSummariseSpoolDirbuild(statsPath, partialDir, ds, dw, fileWriter, diskMetrics)
 	diag.logParseResult(records, err)
 
 	if err == nil {
@@ -2037,23 +2103,27 @@ func buildSummariseSpoolWithDirbuild(
 	expected chspool.Manifest,
 	target *clickHouseSummariseTarget,
 	diag *summariseDiagnostics,
-) (*chspool.Manifest, uint64, uint64, error) {
+) (*chspool.Manifest, uint64, uint64, *dirbuild.DiskMetrics, error) {
 	set, ds, err := createSummariseSpoolPartial(partialDir, expected, target)
 	if err != nil {
-		return nil, 0, 0, err
+		return nil, 0, 0, nil, err
 	}
+
+	diskMetrics := new(dirbuild.DiskMetrics)
 
 	dw, fileWriter, err := newSummariseDirbuildSpoolWriters(ds)
 	if err != nil {
 		manifest, scratchBytes, finishErr := finishSummariseSpoolPartial(partialDir, expected, set, err)
 
-		return manifest, 0, scratchBytes, finishErr
+		return manifest, 0, scratchBytes, diskMetrics, finishErr
 	}
 
-	records, err := runAndCloseSummariseSpoolDirbuild(statsPath, partialDir, ds, dw, fileWriter, diag)
+	records, err := runAndCloseSummariseSpoolDirbuild(
+		statsPath, partialDir, ds, dw, fileWriter, diag, diskMetrics,
+	)
 	manifest, scratchBytes, err := finishSummariseSpoolPartial(partialDir, expected, set, err)
 
-	return manifest, records, scratchBytes, err
+	return manifest, records, scratchBytes, diskMetrics, err
 }
 
 func createSummariseSpoolPartial(
@@ -2125,8 +2195,6 @@ func finishSummariseSpoolPartial(
 
 	scratchBytes, err := finishSummariseSpoolScratch(partialDir, &manifest)
 	if err != nil {
-		_ = os.RemoveAll(partialDir)
-
 		return nil, scratchBytes, err
 	}
 
@@ -2139,6 +2207,7 @@ func runSummariseSpoolDirbuild(
 	ds *summariseSpoolDataset,
 	dw *summariseDGUTASpoolWriter,
 	fileWriter *summariseFileSpoolOperation,
+	diskMetrics *dirbuild.DiskMetrics,
 ) (uint64, error) {
 	open := func() (io.ReadCloser, error) {
 		return openSummariseSpoolStats(statsPath)
@@ -2156,7 +2225,7 @@ func runSummariseSpoolDirbuild(
 
 			return fileWriter.addWithDirID(&info, dirID)
 		},
-		summariseSpoolDirbuildOptions(partialDir),
+		summariseSpoolDirbuildOptions(partialDir, diskMetrics),
 	)
 
 	return records, err
@@ -2164,7 +2233,9 @@ func runSummariseSpoolDirbuild(
 
 func cleanupSummariseSpoolPartial(partialDir string, manifest *chspool.Manifest, err error) (uint64, error) {
 	scratchBytes, scratchErr := summariseBuildPhaseBytesWritten(partialDir, manifest)
-	_ = os.RemoveAll(partialDir)
+	if !retainSummariseDiskScratch(partialDir) {
+		_ = os.RemoveAll(partialDir)
+	}
 
 	return scratchBytes, errors.Join(err, scratchErr)
 }
@@ -2555,6 +2626,7 @@ type summariseSpoolBuildResult struct {
 	buildPath                string
 	records                  uint64
 	scratchBytes             uint64
+	diskMetrics              *dirbuild.DiskMetrics
 	contiguityViolationRow   uint64
 	contiguityViolationDepth uint64
 	err                      error
@@ -2597,7 +2669,7 @@ func runSummariseSpoolDirbuildFirst(
 	reason summariseSpoolDirbuildFirstReason,
 	probe summariseSpoolContiguityResult,
 ) summariseSpoolBuildResult {
-	manifest, records, scratchBytes, err := buildSummariseSpoolWithDirbuild(
+	manifest, records, scratchBytes, diskMetrics, err := buildSummariseSpoolWithDirbuild(
 		statsPath, partialDir, expected, target, diag,
 	)
 
@@ -2606,6 +2678,7 @@ func runSummariseSpoolDirbuildFirst(
 		summariseSpoolDirbuildFirstInputShape(reason),
 		records,
 		scratchBytes,
+		diskMetrics,
 		err,
 	)
 	result.contiguityViolationRow = probe.violationRow
@@ -2622,7 +2695,7 @@ func retrySummariseSpoolWithDirbuild(
 	diag *summariseDiagnostics,
 	firstAttemptScratchBytes uint64,
 ) summariseSpoolBuildResult {
-	manifest, records, scratchBytes, err := buildSummariseSpoolWithDirbuild(
+	manifest, records, scratchBytes, diskMetrics, err := buildSummariseSpoolWithDirbuild(
 		statsPath, partialDir, expected, target, diag,
 	)
 	result := summariseSpoolDirbuildResult(
@@ -2630,6 +2703,7 @@ func retrySummariseSpoolWithDirbuild(
 		chperf.A5BuildInputNonContiguous,
 		records,
 		scratchBytes,
+		diskMetrics,
 		err,
 	)
 	result.scratchBytes += firstAttemptScratchBytes
@@ -2658,6 +2732,7 @@ func summariseSpoolDirbuildResult(
 	inputShape string,
 	records uint64,
 	scratchBytes uint64,
+	diskMetrics *dirbuild.DiskMetrics,
 	err error,
 ) summariseSpoolBuildResult {
 	return summariseSpoolBuildResult{
@@ -2666,6 +2741,7 @@ func summariseSpoolDirbuildResult(
 		buildPath:    chperf.A5BuildPathDirbuild,
 		records:      records,
 		scratchBytes: scratchBytes,
+		diskMetrics:  diskMetrics,
 		err:          err,
 	}
 }
@@ -2829,8 +2905,6 @@ func buildSummariseSpool( //nolint:funlen
 
 	build := runSummariseSpoolBuild(statsPath, partialDir, expected, target, diag)
 	if build.err != nil {
-		_ = os.RemoveAll(partialDir)
-
 		return nil, build.err
 	}
 
@@ -2842,6 +2916,7 @@ func buildSummariseSpool( //nolint:funlen
 		build.buildPath,
 		build.records,
 		build.scratchBytes,
+		build.diskMetrics,
 		build.contiguityViolationRow,
 		build.contiguityViolationDepth,
 		time.Since(started),
@@ -3069,6 +3144,7 @@ func summariseBuildReport(
 	buildPath string,
 	records uint64,
 	buildScratchBytes uint64,
+	diskMetrics *dirbuild.DiskMetrics,
 	contiguityViolationRow uint64,
 	contiguityViolationDepth uint64,
 	elapsed time.Duration,
@@ -3077,6 +3153,7 @@ func summariseBuildReport(
 	report.MaxRSSBytes = summariseBuildMaxRSSBytes()
 	inputs := summariseBuildReportInputs(
 		target, manifest, inputShape, buildPath, records, buildScratchBytes,
+		diskMetrics,
 		contiguityViolationRow, contiguityViolationDepth,
 	)
 	inputs["stats_path"] = statsPath
