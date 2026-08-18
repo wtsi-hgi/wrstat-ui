@@ -61,6 +61,8 @@ const summariseSpoolVirtualNamespaceDir = "/mnt/"
 
 const b5SpoolMountPath = "/m/teamX/"
 
+const summariseSpoolOldCompressedSizeThreshold int64 = 32 * 1024 * 1024
+
 const reinsertOldDirFactSentinelQuery = `
 INSERT INTO wrstat_dir_facts
 SELECT
@@ -148,13 +150,58 @@ func TestSummariseFileIngestDirIDPath(t *testing.T) {
 	})
 }
 
-type summariseSpoolSizedFileInfo struct {
-	os.FileInfo
-	size int64
+type summariseCountingReadCloser struct {
+	io.Reader
+	bytesRead *int
 }
 
-func (i summariseSpoolSizedFileInfo) Size() int64 {
-	return i.size
+func (r *summariseCountingReadCloser) Read(p []byte) (int, error) {
+	n, err := r.Reader.Read(p)
+	*r.bytesRead += n
+
+	return n, err
+}
+
+func (r *summariseCountingReadCloser) Close() error {
+	return nil
+}
+
+func writeEarlyNonContiguousSpoolFixtureStats(
+	t *testing.T,
+	statsPath string,
+	updatedAt time.Time,
+	tailDirs int,
+) []byte {
+	t.Helper()
+
+	var buf bytes.Buffer
+
+	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath, 'd', 4096, 10, 20, updatedAt.Unix(), 300, 1)
+	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath+"a/", 'd', 4096, 11, 21, updatedAt.Unix(), 301, 1)
+	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath+"a/one.dat", 'f', 10, 12, 22,
+		updatedAt.Unix(), 302, 1)
+	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath+"a/implied/deep/file.dat", 'f', 11, 12, 22,
+		updatedAt.Unix(), 307, 1)
+	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath+"b/", 'd', 4096, 13, 23, updatedAt.Unix(), 303, 1)
+	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath+"b/two.dat", 'f', 20, 14, 24,
+		updatedAt.Unix(), 304, 1)
+	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath+"a/deep/", 'd', 4096, 15, 25,
+		updatedAt.Unix(), 305, 1)
+	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath+"a/deep/three.txt", 'f', 30, 16, 26,
+		updatedAt.Unix(), 306, 1)
+
+	for idx := range tailDirs {
+		dirPath := fmt.Sprintf("%stail/dir%05d/", summariseTestMountPath, idx)
+		writeSpoolFixtureStatsRow(&buf, dirPath, 'd', 4096, 17, 27, updatedAt.Unix(), uint64(1_000+idx*2), 1)
+		writeSpoolFixtureStatsRow(&buf, dirPath+"file.dat", 'f', int64(idx+1), 18, 28,
+			updatedAt.Unix(), uint64(1_001+idx*2), 1)
+	}
+
+	rawStats := bytes.Clone(buf.Bytes())
+	writeGzipStats(t, statsPath, rawStats)
+	So(os.Chtimes(statsPath, updatedAt, updatedAt), ShouldBeNil)
+
+	return rawStats
 }
 
 func writeLargeContiguousSpoolFixtureStats(
@@ -185,6 +232,13 @@ func writeLargeContiguousSpoolFixtureStats(
 	So(err, ShouldBeNil)
 
 	writeGzipStats(t, statsPath, buf.Bytes())
+	So(os.Chtimes(statsPath, updatedAt, updatedAt), ShouldBeNil)
+}
+
+func padSummariseSpoolFixturePastOldThreshold(t *testing.T, statsPath string, updatedAt time.Time) {
+	t.Helper()
+
+	So(os.Truncate(statsPath, summariseSpoolOldCompressedSizeThreshold+1), ShouldBeNil)
 	So(os.Chtimes(statsPath, updatedAt, updatedAt), ShouldBeNil)
 }
 
@@ -241,6 +295,8 @@ func writeNestedFullFilterSpoolFixtureStats(t *testing.T, statsPath string, upda
 	var buf bytes.Buffer
 
 	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath, 'd', 4096, 10, 20, updatedAt.Unix(), 300, 1)
+	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath+"zz_unordered/", 'd', 4096, 17, 7,
+		updatedAt.Unix(), 306, 1)
 	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath+"project/", 'd', 4096, 17, 7,
 		updatedAt.Unix(), 301, 1)
 	writeSpoolFixtureStatsRow(&buf, summariseTestMountPath+"project/alpha/", 'd', 4096, 17, 7,
@@ -1815,39 +1871,29 @@ func TestSummariseClickHouseSpoolRows(t *testing.T) {
 		So(report.MaxRSSBytes, ShouldBeGreaterThan, uint64(0))
 	})
 
-	Convey("A3.1b large non-contiguous spool build goes to dirbuild before the probe", t, func() {
+	Convey("A3.1b an early-unordered spool stops the exact probe and records the violation", t, func() {
 		fixture := newSummariseActiveSnapshotFixture(t)
-		writeNonContiguousSpoolFixtureStats(t, fixture.statsPath, fixture.updatedAt)
+		rawStats := writeEarlyNonContiguousSpoolFixtureStats(t, fixture.statsPath, fixture.updatedAt, 20_000)
 
 		restore := snapshotSummariseGlobals()
 		Reset(restore)
 
 		configureSummariseActiveSnapshotTest(fixture.outputDir, false)
 
-		originalStat := statSummariseSpoolStats
-		statSummariseSpoolStats = func(path string) (os.FileInfo, error) {
-			info, err := originalStat(path)
-			if err != nil {
-				return nil, err
-			}
-
-			if path == fixture.statsPath {
-				return summariseSpoolSizedFileInfo{
-					FileInfo: info,
-					size:     summariseSpoolDirbuildFirstBytes + 1,
-				}, nil
-			}
-
-			return info, nil
-		}
-
 		openCalls := 0
+		probeBytesRead := 0
 		dirbuildCalls := 0
 		originalOpen := openSummariseSpoolStats
 		originalDirbuild := buildSummariseSpoolDirbuild
 
 		openSummariseSpoolStats = func(statsPath string) (io.ReadCloser, error) {
 			openCalls++
+			if openCalls == 1 {
+				return &summariseCountingReadCloser{
+					Reader:    bytes.NewReader(rawStats),
+					bytesRead: &probeBytesRead,
+				}, nil
+			}
 
 			return originalOpen(statsPath)
 		}
@@ -1867,17 +1913,20 @@ func TestSummariseClickHouseSpoolRows(t *testing.T) {
 		_, manifest := buildSummariseSpoolFixtureForTest(t, fixture)
 
 		So(manifest.Tables[chspool.TableDirs].Rows, ShouldBeGreaterThan, uint64(0))
-		So(openCalls, ShouldEqual, 2)
+		So(openCalls, ShouldEqual, 3)
 		So(dirbuildCalls, ShouldEqual, 1)
+		So(probeBytesRead, ShouldBeLessThan, len(rawStats))
 
 		report := readSummariseSpoolBuildReport(t, summariseClickHouseSpoolDir(fixture.outputDir))
 		op := summariseSpoolBuildReportOperationForTest(report)
-		So(op.Inputs["input_shape"], ShouldEqual, "large_unprobed")
+		So(op.Inputs["input_shape"], ShouldEqual, "non_contiguous")
 		So(op.Inputs["build_path"], ShouldEqual, "dirbuild")
+		So(uint64InputForTest(op.Inputs, "contiguity_violation_row"), ShouldEqual, uint64(7))
+		So(uint64InputForTest(op.Inputs, "contiguity_violation_path_depth"), ShouldEqual, uint64(3))
 		So(op.Inputs["completed"], ShouldEqual, true)
 	})
 
-	Convey("A3.1c large contiguous spool build goes to dirbuild before the probe", t, func() {
+	Convey("A3.1c input large by the old threshold is exactly probed and uses the contiguous fast path", t, func() {
 		fixture := newSummariseActiveSnapshotFixture(t)
 		writeLargeContiguousSpoolFixtureStats(t, fixture.statsPath, fixture.updatedAt, 30_000)
 
@@ -1886,22 +1935,7 @@ func TestSummariseClickHouseSpoolRows(t *testing.T) {
 
 		configureSummariseActiveSnapshotTest(fixture.outputDir, false)
 
-		originalStat := statSummariseSpoolStats
-		statSummariseSpoolStats = func(path string) (os.FileInfo, error) {
-			info, err := originalStat(path)
-			if err != nil {
-				return nil, err
-			}
-
-			if path == fixture.statsPath {
-				return summariseSpoolSizedFileInfo{
-					FileInfo: info,
-					size:     summariseSpoolDirbuildFirstBytes + 1,
-				}, nil
-			}
-
-			return info, nil
-		}
+		padSummariseSpoolFixturePastOldThreshold(t, fixture.statsPath, fixture.updatedAt)
 
 		openCalls := 0
 		dirbuildCalls := 0
@@ -1941,15 +1975,15 @@ func TestSummariseClickHouseSpoolRows(t *testing.T) {
 		runtime.ReadMemStats(&after)
 
 		So(manifest.Tables[chspool.TableDirs].Rows, ShouldEqual, uint64(30_003))
-		So(dirbuildCalls, ShouldEqual, 1)
+		So(dirbuildCalls, ShouldEqual, 0)
 		So(openCalls, ShouldEqual, 2)
 		So(peakGrowth, ShouldBeLessThan, uint64(220*1024*1024))
 		So(summariseHeapInuseGrowth(before.HeapInuse, after.HeapInuse), ShouldBeLessThan, uint64(120*1024*1024))
 
 		report := readSummariseSpoolBuildReport(t, summariseClickHouseSpoolDir(fixture.outputDir))
 		op := summariseSpoolBuildReportOperationForTest(report)
-		So(op.Inputs["input_shape"], ShouldEqual, "large_unprobed")
-		So(op.Inputs["build_path"], ShouldEqual, "dirbuild")
+		So(op.Inputs["input_shape"], ShouldEqual, "contiguous")
+		So(op.Inputs["build_path"], ShouldEqual, "contiguous_fast_path")
 		So(op.Inputs["completed"], ShouldEqual, true)
 	})
 
@@ -1961,23 +1995,6 @@ func TestSummariseClickHouseSpoolRows(t *testing.T) {
 		Reset(restore)
 
 		configureSummariseActiveSnapshotTest(fixture.outputDir, false)
-
-		originalStat := statSummariseSpoolStats
-		statSummariseSpoolStats = func(path string) (os.FileInfo, error) {
-			info, err := originalStat(path)
-			if err != nil {
-				return nil, err
-			}
-
-			if path == fixture.statsPath {
-				return summariseSpoolSizedFileInfo{
-					FileInfo: info,
-					size:     summariseSpoolDirbuildFirstBytes + 1,
-				}, nil
-			}
-
-			return info, nil
-		}
 
 		spoolDir, _ := buildSummariseSpoolFixtureForTest(t, fixture)
 
@@ -2005,23 +2022,6 @@ func TestSummariseClickHouseSpoolRows(t *testing.T) {
 		Reset(restore)
 
 		configureSummariseActiveSnapshotTest(fixture.outputDir, false)
-
-		originalStat := statSummariseSpoolStats
-		statSummariseSpoolStats = func(path string) (os.FileInfo, error) {
-			info, err := originalStat(path)
-			if err != nil {
-				return nil, err
-			}
-
-			if path == fixture.statsPath {
-				return summariseSpoolSizedFileInfo{
-					FileInfo: info,
-					size:     summariseSpoolDirbuildFirstBytes + 1,
-				}, nil
-			}
-
-			return info, nil
-		}
 
 		dirbuildCalls := 0
 		buildSummariseSpoolDirbuild = func(
@@ -2066,23 +2066,6 @@ func TestSummariseClickHouseSpoolRows(t *testing.T) {
 
 		configureSummariseActiveSnapshotTest(fixture.outputDir, false)
 
-		originalStat := statSummariseSpoolStats
-		statSummariseSpoolStats = func(path string) (os.FileInfo, error) {
-			info, err := originalStat(path)
-			if err != nil {
-				return nil, err
-			}
-
-			if path == fixture.statsPath {
-				return summariseSpoolSizedFileInfo{
-					FileInfo: info,
-					size:     summariseSpoolDirbuildFirstBytes + 1,
-				}, nil
-			}
-
-			return info, nil
-		}
-
 		buildSummariseSpoolDirbuild = func(
 			open func() (io.ReadCloser, error),
 			mountPath string,
@@ -2100,11 +2083,65 @@ func TestSummariseClickHouseSpoolRows(t *testing.T) {
 		report := readSummariseSpoolBuildReport(t, spoolDir)
 		op := summariseSpoolBuildReportOperationForTest(report)
 
-		So(op.Inputs["input_shape"], ShouldEqual, "large_unprobed")
+		So(op.Inputs["input_shape"], ShouldEqual, "non_contiguous")
 		So(op.Inputs["build_path"], ShouldEqual, "dirbuild")
 		So(op.Inputs["completed"], ShouldEqual, true)
 		So(uint64InputForTest(op.Inputs, "build_phase_bytes_written"), ShouldBeGreaterThan, uint64(0))
 		So(summariseSpoolHasDirbuildScratchForTest(t, spoolDir), ShouldBeFalse)
+	})
+
+	Convey("A3.1c5 non-contiguous stdin is rejected instead of attempting a second pass", t, func() {
+		fixture := newSummariseActiveSnapshotFixture(t)
+		rawStats := writeEarlyNonContiguousSpoolFixtureStats(t, fixture.statsPath, fixture.updatedAt, 0)
+
+		restore := snapshotSummariseGlobals()
+		Reset(restore)
+
+		configureSummariseActiveSnapshotTest(fixture.outputDir, false)
+
+		stdinPath := filepath.Join(t.TempDir(), "stdin.stats")
+		So(os.WriteFile(stdinPath, rawStats, 0o600), ShouldBeNil)
+
+		stdin, err := os.Open(stdinPath)
+		So(err, ShouldBeNil)
+
+		originalStdin := os.Stdin
+		os.Stdin = stdin
+
+		Reset(func() {
+			os.Stdin = originalStdin
+
+			So(stdin.Close(), ShouldBeNil)
+		})
+
+		dirbuildCalls := 0
+		buildSummariseSpoolDirbuild = func(
+			open func() (io.ReadCloser, error),
+			mountPath string,
+			database dirguta.DB,
+			refTime time.Time,
+			files dirbuild.FileSink,
+			opts dirbuild.Options,
+		) error {
+			dirbuildCalls++
+
+			return dirbuild.BuildWithFilesOptions(open, mountPath, database, refTime, files, opts)
+		}
+
+		target := fixture.clickHouseTarget()
+		expected, err := newSummariseSpoolManifest("-", target)
+		So(err, ShouldBeNil)
+
+		result := runSummariseSpoolBuild(
+			"-",
+			filepath.Join(t.TempDir(), "spool.partial"),
+			expected,
+			target,
+			newSummariseDiagnostics("-"),
+		)
+
+		So(errors.Is(result.err, errSummariseSpoolNonContiguousStdin), ShouldBeTrue)
+		So(dirbuildCalls, ShouldEqual, 0)
 	})
 
 	Convey("A3.1d small non-contiguous high-fanout basedirs build is bounded", t, func() {

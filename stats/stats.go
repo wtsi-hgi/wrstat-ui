@@ -88,6 +88,7 @@ func (f *FileInfo) BaseName() []byte {
 // StatsParser is used to parse wrstat stats files.
 type StatsParser struct { //nolint:revive
 	scanner      *bufio.Scanner
+	inputRow     uint64
 	lineBytes    []byte
 	lineLength   int
 	lineIndex    int
@@ -135,11 +136,19 @@ func (p *StatsParser) Scan(info *FileInfo) error {
 		return io.EOF
 	}
 
+	p.inputRow++
+
 	if !p.parseLine() {
 		return p.error
 	}
 
 	return p.fillInfo(info)
+}
+
+// InputRow returns the one-based source row most recently read from the input.
+// Synthesised parent-directory records do not advance this value.
+func (p *StatsParser) InputRow() uint64 {
+	return p.inputRow
 }
 
 func (p *StatsParser) fillInfo(info *FileInfo) error {

@@ -68,7 +68,6 @@ const (
 	summariseActiveVirtualNoParentID   uint32 = 0
 	summariseActiveVirtualZeroSnapshot        = "00000000-0000-0000-0000-000000000000"
 	summariseBuildBytesPerKiB                 = 1024
-	summariseSpoolDirbuildFirstBytes          = 32 * 1024 * 1024
 )
 
 var (
@@ -76,7 +75,6 @@ var (
 	summariseSpoolNow            = time.Now
 	summariseSpoolDirGUTANow     = time.Now
 	openSummariseSpoolStats      = openSummariseSpoolStatsFile
-	statSummariseSpoolStats      = os.Stat
 	buildSummariseSpoolDirbuild  = dirbuild.BuildWithFilesOptions
 )
 
@@ -87,13 +85,15 @@ var (
 	errSummariseSpoolDirFactsDir           = errors.New("clickhouse spool: dir facts require dir")
 	errSummariseSpoolBasedirsNotReset      = errors.New("clickhouse spool: basedirs store not reset")
 	errSummariseSpoolSubdirPositionInvalid = errors.New("clickhouse spool: basedirs subdir position overflows UInt32")
+	errSummariseSpoolNonContiguousStdin    = errors.New(
+		"clickhouse spool: non-contiguous stdin requires a reopenable input",
+	)
 )
 
 type summariseSpoolDirbuildFirstReason uint8
 
 const (
 	summariseSpoolDirbuildFirstNone summariseSpoolDirbuildFirstReason = iota
-	summariseSpoolDirbuildFirstLargeUnprobed
 	summariseSpoolDirbuildFirstNonContiguous
 )
 
@@ -101,6 +101,12 @@ func openSummariseSpoolStatsFile(statsPath string) (io.ReadCloser, error) {
 	r, _, err := openStatsFile(statsPath)
 
 	return r, err
+}
+
+type summariseSpoolContiguityResult struct {
+	contiguous         bool
+	violationRow       uint64
+	violationPathDepth uint64
 }
 
 type summariseFullFilterTupleKey struct {
@@ -682,9 +688,16 @@ func (m summariseDirbuildBasedirsDirectMap) summary(
 	return entry
 }
 
+type summariseSpoolContiguityProbeState struct {
+	parser             *stats.StatsParser
+	violationRow       uint64
+	violationPathDepth uint64
+}
+
 type summariseSpoolContiguityProbe struct {
 	alloc   *summary.DirIDAllocator
 	parent  *summariseSpoolContiguityProbe
+	state   *summariseSpoolContiguityProbeState
 	dir     *summary.DirectoryPath
 	entered bool
 }
@@ -697,11 +710,15 @@ func (p *summariseSpoolContiguityProbe) Add(info *summary.FileInfo) error {
 	p.dir = info.Path
 
 	if err := p.validateParent(); err != nil {
+		p.recordViolation(err)
+
 		return err
 	}
 
 	_, err := p.alloc.Enter(p.dir)
 	if err != nil {
+		p.recordViolation(err)
+
 		return err
 	}
 
@@ -730,25 +747,45 @@ func (p *summariseSpoolContiguityProbe) Output() error {
 	}
 
 	_, err := p.alloc.Leave(p.dir)
+	p.recordViolation(err)
 	p.dir = nil
 	p.entered = false
 
 	return err
 }
 
-func newSummariseSpoolContiguityProbe(mountPath string) (summary.OperationGenerator, error) {
+func newSummariseSpoolContiguityProbe(
+	mountPath string,
+) (summary.OperationGenerator, *summariseSpoolContiguityProbeState, error) {
 	alloc := summary.NewDirIDAllocator()
 	if err := alloc.SetMountPath(mountPath); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	var last *summariseSpoolContiguityProbe
+	var (
+		last  *summariseSpoolContiguityProbe
+		state = new(summariseSpoolContiguityProbeState)
+	)
 
 	return func() summary.Operation {
-		last = &summariseSpoolContiguityProbe{alloc: alloc, parent: last}
+		last = &summariseSpoolContiguityProbe{alloc: alloc, parent: last, state: state}
 
 		return last
-	}, nil
+	}, state, nil
+}
+
+func (p *summariseSpoolContiguityProbe) recordViolation(err error) {
+	if !errors.Is(err, summary.ErrNonContiguousInput) || p.state.violationRow != 0 {
+		return
+	}
+
+	depth, depthErr := summary.ReservedDirIDForDepth(p.dir.Depth)
+	if depthErr != nil {
+		return
+	}
+
+	p.state.violationRow = p.state.parser.InputRow()
+	p.state.violationPathDepth = uint64(depth)
 }
 
 func (b *summariseDirbuildBasedirsBuilder) addFileSummaries(
@@ -945,46 +982,89 @@ func summariseSpoolDirbuildOptions(partialDir string) dirbuild.Options {
 	}
 }
 
-func summariseSpoolProbeContiguity(statsPath string, mountPath string) (bool, error) {
+func summariseSpoolProbeContiguity(statsPath string, mountPath string) (summariseSpoolContiguityResult, error) {
 	reader, err := openSummariseSpoolStats(statsPath)
 	if err != nil {
-		return false, err
+		return summariseSpoolContiguityResult{}, err
 	}
 
-	generator, err := newSummariseSpoolContiguityProbe(mountPath)
+	generator, state, err := newSummariseSpoolContiguityProbe(mountPath)
 	if err != nil {
 		_ = reader.Close()
 
-		return false, err
+		return summariseSpoolContiguityResult{}, err
 	}
 
-	s := summary.NewSummariser(stats.NewStatsParser(reader))
+	parser := stats.NewStatsParser(reader)
+	state.parser = parser
+	s := summary.NewSummariser(parser)
 	s.AddDirectoryOperation(generator)
 
 	scanErr := s.Summarise()
-
 	closeErr := reader.Close()
+
+	result := summariseSpoolContiguityResult{
+		contiguous:         scanErr == nil && closeErr == nil,
+		violationRow:       state.violationRow,
+		violationPathDepth: state.violationPathDepth,
+	}
 	if errors.Is(scanErr, summary.ErrNonContiguousInput) {
-		return false, closeErr
+		return result, closeErr
 	}
 
-	return scanErr == nil && closeErr == nil, errors.Join(scanErr, closeErr)
+	return result, errors.Join(scanErr, closeErr)
 }
 
-func summariseSpoolDirbuildFirstReasonForLarge(large bool) summariseSpoolDirbuildFirstReason {
-	if large {
-		return summariseSpoolDirbuildFirstLargeUnprobed
-	}
-
-	return summariseSpoolDirbuildFirstNone
-}
-
-func summariseSpoolDirbuildFirstInputShape(reason summariseSpoolDirbuildFirstReason) string {
-	if reason == summariseSpoolDirbuildFirstLargeUnprobed {
-		return chperf.A5BuildInputLargeUnprobed
-	}
-
+func summariseSpoolDirbuildFirstInputShape(_ summariseSpoolDirbuildFirstReason) string {
 	return chperf.A5BuildInputNonContiguous
+}
+
+func handleSummariseSpoolFastPathViolation(
+	statsPath string,
+	partialDir string,
+	expected chspool.Manifest,
+	target *clickHouseSummariseTarget,
+	diag *summariseDiagnostics,
+	records uint64,
+	scratchBytes uint64,
+) summariseSpoolBuildResult {
+	if statsPath == "-" {
+		return summariseSpoolBuildResult{
+			records:      records,
+			scratchBytes: scratchBytes,
+			err:          errSummariseSpoolNonContiguousStdin,
+		}
+	}
+
+	return retrySummariseSpoolWithDirbuild(statsPath, partialDir, expected, target, diag, scratchBytes)
+}
+
+func summariseBuildReportInputs(
+	target *clickHouseSummariseTarget,
+	manifest *chspool.Manifest,
+	inputShape string,
+	buildPath string,
+	records uint64,
+	buildScratchBytes uint64,
+	contiguityViolationRow uint64,
+	contiguityViolationDepth uint64,
+) map[string]any {
+	inputs := map[string]any{
+		chperf.A5BuildInputRole:              summariseBuildA5Role(target.mountPath),
+		chperf.A5BuildInputShape:             inputShape,
+		chperf.A5BuildInputPath:              buildPath,
+		chperf.A5BuildInputCompleted:         true,
+		chperf.A5BuildInputRowCap:            records,
+		chperf.A5BuildInputBuildScratchBytes: buildScratchBytes,
+		chperf.A5BuildInputSpoolBytes:        summariseBuildManifestBytes(manifest),
+		"mount_path":                         target.mountPath,
+	}
+	if contiguityViolationRow != 0 {
+		inputs["contiguity_violation_row"] = contiguityViolationRow
+		inputs["contiguity_violation_path_depth"] = contiguityViolationDepth
+	}
+
+	return inputs
 }
 
 func summariseDirbuildBasedirsMergeSummary(
@@ -2470,12 +2550,14 @@ func summariseFillActiveVirtualChildCounts(
 }
 
 type summariseSpoolBuildResult struct {
-	manifest     *chspool.Manifest
-	inputShape   string
-	buildPath    string
-	records      uint64
-	scratchBytes uint64
-	err          error
+	manifest                 *chspool.Manifest
+	inputShape               string
+	buildPath                string
+	records                  uint64
+	scratchBytes             uint64
+	contiguityViolationRow   uint64
+	contiguityViolationDepth uint64
+	err                      error
 }
 
 func runSummariseSpoolBuild(
@@ -2485,13 +2567,15 @@ func runSummariseSpoolBuild(
 	target *clickHouseSummariseTarget,
 	diag *summariseDiagnostics,
 ) summariseSpoolBuildResult {
-	dirbuildFirstReason, err := summariseSpoolShouldUseDirbuildFirst(statsPath, target.mountPath, diag)
+	dirbuildFirstReason, probe, err := summariseSpoolShouldUseDirbuildFirst(statsPath, target.mountPath, diag)
 	if err != nil {
 		return summariseSpoolBuildResult{err: err}
 	}
 
 	if dirbuildFirstReason != summariseSpoolDirbuildFirstNone {
-		return runSummariseSpoolDirbuildFirst(statsPath, partialDir, expected, target, diag, dirbuildFirstReason)
+		return runSummariseSpoolDirbuildFirst(
+			statsPath, partialDir, expected, target, diag, dirbuildFirstReason, probe,
+		)
 	}
 
 	manifest, records, scratchBytes, err := buildSummariseSpoolAttempt(statsPath, partialDir, expected, target, diag)
@@ -2499,7 +2583,9 @@ func runSummariseSpoolBuild(
 		return summariseSpoolContiguousFastResult(manifest, records, scratchBytes, err)
 	}
 
-	return retrySummariseSpoolWithDirbuild(statsPath, partialDir, expected, target, diag, scratchBytes)
+	return handleSummariseSpoolFastPathViolation(
+		statsPath, partialDir, expected, target, diag, records, scratchBytes,
+	)
 }
 
 func runSummariseSpoolDirbuildFirst(
@@ -2509,18 +2595,23 @@ func runSummariseSpoolDirbuildFirst(
 	target *clickHouseSummariseTarget,
 	diag *summariseDiagnostics,
 	reason summariseSpoolDirbuildFirstReason,
+	probe summariseSpoolContiguityResult,
 ) summariseSpoolBuildResult {
 	manifest, records, scratchBytes, err := buildSummariseSpoolWithDirbuild(
 		statsPath, partialDir, expected, target, diag,
 	)
 
-	return summariseSpoolDirbuildResult(
+	result := summariseSpoolDirbuildResult(
 		manifest,
 		summariseSpoolDirbuildFirstInputShape(reason),
 		records,
 		scratchBytes,
 		err,
 	)
+	result.contiguityViolationRow = probe.violationRow
+	result.contiguityViolationDepth = probe.violationPathDepth
+
+	return result
 }
 
 func retrySummariseSpoolWithDirbuild(
@@ -2751,6 +2842,8 @@ func buildSummariseSpool( //nolint:funlen
 		build.buildPath,
 		build.records,
 		build.scratchBytes,
+		build.contiguityViolationRow,
+		build.contiguityViolationDepth,
 		time.Since(started),
 	)
 	if err := writeSummariseSpoolBuildReport(partialDir, report); err != nil {
@@ -2976,21 +3069,22 @@ func summariseBuildReport(
 	buildPath string,
 	records uint64,
 	buildScratchBytes uint64,
+	contiguityViolationRow uint64,
+	contiguityViolationDepth uint64,
 	elapsed time.Duration,
 ) perfreport.Report {
 	report := perfreport.NewReport("clickhouse_summarise_build", statsPath, 1, 0)
 	report.MaxRSSBytes = summariseBuildMaxRSSBytes()
-	report.AddOperation(chperf.A5BuildOperationName, map[string]any{
-		chperf.A5BuildInputRole:              summariseBuildA5Role(target.mountPath),
-		chperf.A5BuildInputShape:             inputShape,
-		chperf.A5BuildInputPath:              buildPath,
-		chperf.A5BuildInputCompleted:         true,
-		chperf.A5BuildInputRowCap:            records,
-		chperf.A5BuildInputBuildScratchBytes: buildScratchBytes,
-		chperf.A5BuildInputSpoolBytes:        summariseBuildManifestBytes(manifest),
-		"mount_path":                         target.mountPath,
-		"stats_path":                         statsPath,
-	}, []float64{float64(elapsed) / float64(time.Millisecond)})
+	inputs := summariseBuildReportInputs(
+		target, manifest, inputShape, buildPath, records, buildScratchBytes,
+		contiguityViolationRow, contiguityViolationDepth,
+	)
+	inputs["stats_path"] = statsPath
+	report.AddOperation(
+		chperf.A5BuildOperationName,
+		inputs,
+		[]float64{float64(elapsed) / float64(time.Millisecond)},
+	)
 
 	return report
 }
@@ -3052,41 +3146,23 @@ func summariseSpoolShouldUseDirbuildFirst(
 	statsPath string,
 	mountPath string,
 	diag *summariseDiagnostics,
-) (summariseSpoolDirbuildFirstReason, error) {
-	large, err := summariseSpoolStatsAtLeast(statsPath, summariseSpoolDirbuildFirstBytes)
-	if large || err != nil {
-		return summariseSpoolDirbuildFirstReasonForLarge(large), err
-	}
-
+) (summariseSpoolDirbuildFirstReason, summariseSpoolContiguityResult, error) {
 	if !summariseSpoolShouldProbeBeforeFastPath(statsPath) {
-		return summariseSpoolDirbuildFirstNone, nil
+		return summariseSpoolDirbuildFirstNone, summariseSpoolContiguityResult{}, nil
 	}
 
 	diag.setCurrentPhase("parse")
 
-	contiguous, err := summariseSpoolProbeContiguity(statsPath, mountPath)
+	probe, err := summariseSpoolProbeContiguity(statsPath, mountPath)
 	if err != nil {
-		return summariseSpoolDirbuildFirstNone, err
+		return summariseSpoolDirbuildFirstNone, probe, err
 	}
 
-	if !contiguous {
-		return summariseSpoolDirbuildFirstNonContiguous, nil
+	if !probe.contiguous {
+		return summariseSpoolDirbuildFirstNonContiguous, probe, nil
 	}
 
-	return summariseSpoolDirbuildFirstNone, nil
-}
-
-func summariseSpoolStatsAtLeast(statsPath string, threshold int64) (bool, error) {
-	if statsPath == "-" {
-		return false, nil
-	}
-
-	info, err := statSummariseSpoolStats(statsPath)
-	if err != nil {
-		return false, err
-	}
-
-	return info.Size() >= threshold, nil
+	return summariseSpoolDirbuildFirstNone, probe, nil
 }
 
 func summariseSpoolShouldProbeBeforeFastPath(statsPath string) bool {
