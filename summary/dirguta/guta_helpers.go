@@ -97,6 +97,21 @@ func GetGUTA(store GUTAStore, guta GUTAKey) *db.GUTA {
 	}
 }
 
+func compareMaterializedGUTA(left *db.GUTA, right *db.GUTA) int {
+	leftKey := GUTAKey{GID: left.GID, UID: left.UID, FileType: left.FT, Age: left.Age}
+	rightKey := GUTAKey{GID: right.GID, UID: right.UID, FileType: right.FT, Age: right.Age}
+	keys := GUTAKeys{leftKey, rightKey}
+
+	switch {
+	case keys.Less(0, 1):
+		return -1
+	case keys.Less(1, 0):
+		return 1
+	default:
+		return 0
+	}
+}
+
 // GUTAKeys is a sortable list of GUTAKey values.
 type GUTAKeys []GUTAKey
 
@@ -152,65 +167,83 @@ func (g *GUTAKeys) Append(gid, uid uint32, fileType db.DirGUTAFileType) {
 	}
 }
 
-// UpdateExistingHardlink merges parent and child inode entries and updates stores.
-func UpdateExistingHardlink(parentStore, childStore *GUTAStore, parentEntry, childEntry *InodeEntry) {
-	existingParentKeys := GUTAKeysFromEntry(parentEntry.gid, parentEntry.uid, parentEntry.fileType)
-
-	parentStore.SubtractFromStore(existingParentKeys, parentEntry.size, parentEntry.atime, parentEntry.mtime)
-
-	existingChildKeys := GUTAKeysFromEntry(childEntry.gid, childEntry.uid, childEntry.fileType)
-
-	childStore.SubtractFromStore(existingChildKeys, childEntry.size, childEntry.atime, childEntry.mtime)
-
-	parentEntry.fileType |= childEntry.fileType
-	parentEntry.size = max(parentEntry.size, childEntry.size)
-	parentEntry.atime = min(parentEntry.atime, childEntry.atime)
-	parentEntry.mtime = max(parentEntry.mtime, childEntry.mtime)
-
-	updatedKeys := GUTAKeysFromEntry(parentEntry.gid, parentEntry.uid, parentEntry.fileType)
-
-	childStore.AddForEach(updatedKeys, parentEntry.size, parentEntry.atime, parentEntry.mtime)
-}
-
-func addNewHardlink(
-	store *GUTAStore,
-	seenHardlinks map[int64]*InodeEntry,
-	info *summary.FileInfo,
-	ft db.DirGUTAFileType,
-	atime int64,
-) {
-	keys := GUTAKeysFromEntry(info.GID, info.UID, ft)
-
-	seenHardlinks[info.Inode] = &InodeEntry{
-		fileType: ft,
-		size:     info.Size,
-		atime:    atime,
-		mtime:    info.MTime,
-		gid:      info.GID,
-		uid:      info.UID,
+// MaterializeGUTAs combines ordinary summaries with finalised hardlink inode entries.
+func MaterializeGUTAs(store GUTAStore, seenHardlinks map[int64]*InodeEntry) db.GUTAs {
+	ordinary := materializeStoreGUTAs(store)
+	if len(seenHardlinks) == 0 {
+		return ordinary
 	}
-	store.AddForEach(keys, info.Size, atime, info.MTime)
+
+	hardlinks := NewGUTAStore(store.RefTime)
+
+	for _, entry := range seenHardlinks {
+		keys := GUTAKeysFromEntry(entry.gid, entry.uid, entry.fileType)
+		hardlinks.AddForEach(keys, entry.size, entry.atime, entry.mtime)
+	}
+
+	materialised := mergeMaterializedGUTAs(ordinary, materializeStoreGUTAs(hardlinks))
+	hardlinks.Clear()
+
+	return materialised
 }
 
-func updateSeenHardlink(
-	store *GUTAStore,
-	entry *InodeEntry,
-	info *summary.FileInfo,
-	ft db.DirGUTAFileType,
-	atime int64,
-) {
-	keys := GUTAKeysFromEntry(entry.gid, entry.uid, entry.fileType)
+func materializeStoreGUTAs(store GUTAStore) db.GUTAs {
+	keys := store.Sort()
+	gutas := make(db.GUTAs, 0, len(keys))
 
-	store.SubtractFromStore(keys, entry.size, entry.atime, entry.mtime)
+	for _, key := range keys {
+		gutas = append(gutas, GetGUTA(store, key))
+	}
 
-	entry.fileType |= ft
-	entry.size = max(entry.size, info.Size)
-	entry.atime = min(entry.atime, atime)
-	entry.mtime = max(entry.mtime, info.MTime)
+	return gutas
+}
 
-	keys = GUTAKeysFromEntry(entry.gid, entry.uid, entry.fileType)
+func mergeMaterializedGUTAs(left db.GUTAs, right db.GUTAs) db.GUTAs {
+	values := make([]db.GUTA, 0, len(left)+len(right))
+	merged := make(db.GUTAs, 0, len(left)+len(right))
 
-	store.AddForEach(keys, entry.size, entry.atime, entry.mtime)
+	for len(left) > 0 || len(right) > 0 {
+		next, remainingLeft, remainingRight := nextMaterializedGUTA(left, right)
+		left = remainingLeft
+		right = remainingRight
+
+		values = append(values, next)
+		merged = append(merged, &values[len(values)-1])
+	}
+
+	return merged
+}
+
+func nextMaterializedGUTA(left db.GUTAs, right db.GUTAs) (db.GUTA, db.GUTAs, db.GUTAs) {
+	switch {
+	case len(right) == 0 || len(left) > 0 && compareMaterializedGUTA(left[0], right[0]) < 0:
+		return *left[0], left[1:], right
+	case len(left) == 0 || compareMaterializedGUTA(left[0], right[0]) > 0:
+		return *right[0], left, right[1:]
+	default:
+		merged := *left[0]
+		addMaterializedGUTA(&merged, right[0])
+
+		return merged, left[1:], right[1:]
+	}
+}
+
+func addMaterializedGUTA(sum *db.GUTA, addition *db.GUTA) {
+	sum.Count += addition.Count
+
+	sum.Size += addition.Size
+	if addition.Atime > 0 && (sum.Atime == 0 || addition.Atime < sum.Atime) {
+		sum.Atime = addition.Atime
+	}
+
+	if addition.Mtime > sum.Mtime {
+		sum.Mtime = addition.Mtime
+	}
+
+	for index := range sum.ATimeRanges {
+		sum.ATimeRanges[index] += addition.ATimeRanges[index]
+		sum.MTimeRanges[index] += addition.MTimeRanges[index]
+	}
 }
 
 type gutaTupleKey struct {
@@ -432,30 +465,6 @@ func (tuple *gutaInlineTuple) merge(child *gutaInlineTuple) {
 	tuple.ageMask |= child.ageMask
 	child.clearMaskSummaries()
 	child.ageMask = 0
-}
-
-func (tuple *gutaInlineTuple) subtract(ageMask uint32, size int64) {
-	if ageMask == 0 {
-		return
-	}
-
-	if tuple.singleSummary != nil && tuple.singleMask == ageMask {
-		tuple.singleSummary.Count--
-		tuple.singleSummary.Size -= size
-		tuple.clearAgeCache()
-
-		return
-	}
-
-	sum := tuple.maskSummaries[ageMask]
-	if sum == nil {
-		return
-	}
-
-	sum.Count--
-	sum.Size -= size
-
-	tuple.clearAgeCache()
 }
 
 func (tuple *gutaInlineTuple) forEachMaskSummary(fn func(uint32, *summary.SummaryWithTimes)) {
@@ -688,14 +697,6 @@ func (store *GUTAStore) tupleForAdd(tupleKey gutaTupleKey) *gutaInlineTuple {
 	return tuple
 }
 
-func (store *GUTAStore) tupleForKey(tupleKey gutaTupleKey) *gutaInlineTuple {
-	if store.inlineTuple != nil && store.inlineTuple.key == tupleKey {
-		return store.inlineTuple
-	}
-
-	return store.tupleSummaries[tupleKey]
-}
-
 func (store *GUTAStore) takeSummary(key GUTAKey, childSummary *summary.SummaryWithTimes) {
 	if childSummary == nil {
 		return
@@ -832,32 +833,6 @@ func (store *GUTAStore) inlineMaskForKeys(
 	return tupleKey, ageMask, true
 }
 
-// SubtractFromStore subtracts one file summary from each key in the store.
-func (store *GUTAStore) SubtractFromStore(keys GUTAKeys, size int64, atime int64, mtime int64) {
-	tupleKey, ageMask, ok := store.inlineMaskForKeys(keys, atime, mtime)
-	if ok {
-		if tuple := store.tupleForKey(tupleKey); tuple != nil {
-			tuple.subtract(ageMask, size)
-		}
-
-		return
-	}
-
-	for _, key := range keys {
-		if !key.Age.FitsAgeInterval(atime, mtime, store.RefTime) {
-			continue
-		}
-
-		s := store.Summary(key)
-		if s == nil {
-			continue
-		}
-
-		s.Count--
-		s.Size -= size
-	}
-}
-
 // DrainInto moves every summary from the child store into parent.
 func (store *GUTAStore) DrainInto(parent *GUTAStore) {
 	if store.inlineTuple != nil {
@@ -910,9 +885,20 @@ func (store *GUTAStore) Clear() {
 	store.SumMap = nil
 }
 
-// HandleHardlink updates store and seenHardlinks for a hardlink file.
-func HandleHardlink(
-	store *GUTAStore,
+type gutaStore = GUTAStore
+
+// InodeEntry stores metadata for a specific inode to track hardlinks.
+type InodeEntry struct {
+	fileType db.DirGUTAFileType
+	size     int64
+	atime    int64
+	mtime    int64
+	gid      uint32
+	uid      uint32
+}
+
+// TrackHardlink finalises hardlink metadata in an inode map without updating aggregates.
+func TrackHardlink(
 	seenHardlinks map[int64]*InodeEntry,
 	info *summary.FileInfo,
 	ft db.DirGUTAFileType,
@@ -924,42 +910,41 @@ func HandleHardlink(
 
 	entry, exists := seenHardlinks[info.Inode]
 	if !exists {
-		addNewHardlink(store, seenHardlinks, info, ft, atime)
+		seenHardlinks[info.Inode] = &InodeEntry{
+			fileType: ft,
+			size:     info.Size,
+			atime:    atime,
+			mtime:    info.MTime,
+			gid:      info.GID,
+			uid:      info.UID,
+		}
 
 		return true
 	}
 
-	updateSeenHardlink(store, entry, info, ft, atime)
+	entry.fileType |= ft
+	entry.size = max(entry.size, info.Size)
+	entry.atime = min(entry.atime, atime)
+	entry.mtime = max(entry.mtime, info.MTime)
 
 	return true
 }
 
-// MergeSeenHardlinks merges a child's inode set into the parent's inode set.
-func MergeSeenHardlinks(
-	parentStore *GUTAStore,
-	parentSeen map[int64]*InodeEntry,
-	childStore *GUTAStore,
-	childSeen map[int64]*InodeEntry,
-) {
+// MergeHardlinks merges finalised child inode entries into a parent inode map.
+func MergeHardlinks(parentSeen map[int64]*InodeEntry, childSeen map[int64]*InodeEntry) {
 	for inode, childEntry := range childSeen {
-		if parentEntry, exists := parentSeen[inode]; exists {
-			UpdateExistingHardlink(parentStore, childStore, parentEntry, childEntry)
-		} else {
+		parentEntry, exists := parentSeen[inode]
+		if !exists {
 			parentSeen[inode] = childEntry
+
+			continue
 		}
+
+		parentEntry.fileType |= childEntry.fileType
+		parentEntry.size = max(parentEntry.size, childEntry.size)
+		parentEntry.atime = min(parentEntry.atime, childEntry.atime)
+		parentEntry.mtime = max(parentEntry.mtime, childEntry.mtime)
 	}
-}
-
-type gutaStore = GUTAStore
-
-// InodeEntry stores metadata for a specific inode to track hardlinks.
-type InodeEntry struct {
-	fileType db.DirGUTAFileType
-	size     int64
-	atime    int64
-	mtime    int64
-	gid      uint32
-	uid      uint32
 }
 
 type inodeEntry = InodeEntry

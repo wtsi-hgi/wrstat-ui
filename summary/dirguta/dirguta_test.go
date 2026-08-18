@@ -541,7 +541,7 @@ func TestDirGUTA(t *testing.T) {
 		So(
 			hex.EncodeToString(encodedGUTAs),
 			ShouldEqual,
-			"04ca00652000000111e6dfd89f0cf0dfd89f0c000000000000000002000000000000000002"+
+			"04ca00652000000111e6dfd89f0cf0dfd89f0c000000000000000001000000000000000001"+
 				"ca0065001000010b8ee0d89f0c98e0d89f0c000000000000000001000000000000000001"+
 				"ca006500400001801fa2e0d89f0ca2e0d89f0c000000000000000001000000000000000001"+
 				"ca0065018000010dfadfd89f0c84e0d89f0c000000000000000001000000000000000001",
@@ -747,7 +747,7 @@ func TestDirGUTA(t *testing.T) {
 		ft := db.DGUTAFileTypeBam
 		count := uint64(1)
 		size := uint64(200)
-		So(m.has("/a/b/c/", gid, uid, ft, db.DGUTAgeAll, count, size, atimeOld, mtimeRecent), ShouldBeTrue)
+		So(m.has("/a/b/c/", gid, uid, ft, db.DGUTAgeAll, count, size, atimeOld, mtimeOld), ShouldBeTrue)
 
 		ft = db.DGUTAFileTypeBam | db.DGUTAFileTypeCram
 		count = uint64(1)

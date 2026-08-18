@@ -45,20 +45,9 @@ const sqliteDiskSummaryCacheKiB = 64 * 1024
 
 const sqliteDiskSummaryBaseColumnCount = 9
 
-type diskHardlinkEntry struct {
-	fileType db.DirGUTAFileType
-	size     int64
-	atime    int64
-	mtime    int64
-	gid      uint32
-	uid      uint32
-}
-
 type diskSummaryStore interface {
 	addFile(dirID uint32, keys []dirguta.GUTAKey, size int64, atime int64, mtime int64) error
-	addHardlinkEntry(dirID uint32, entry *diskHardlinkEntry) error
-	subtractHardlinkEntry(dirID uint32, entry *diskHardlinkEntry) error
-	materialise(dirID uint32) (db.GUTAs, error)
+	materialise(dirID uint32, hardlinks db.GUTAs) (db.GUTAs, error)
 	merge(parentID uint32, childID uint32) error
 	clear(dirID uint32) error
 	close() error
@@ -152,7 +141,6 @@ type sqliteDiskSummaryStore struct {
 	db               *sql.DB
 	tx               *sql.Tx
 	upsert           *sql.Stmt
-	subtract         *sql.Stmt
 	selectBy         *sql.Stmt
 	deleteBy         *sql.Stmt
 	closed           bool
@@ -231,10 +219,6 @@ func (s *sqliteDiskSummaryStore) prepareStatements() error {
 		return err
 	}
 
-	if s.subtract, err = s.tx.PrepareContext(ctx, sqliteDiskSummarySubtractSQL()); err != nil {
-		return err
-	}
-
 	if s.selectBy, err = s.tx.PrepareContext(ctx, sqliteDiskSummarySelectSQL()); err != nil {
 		return err
 	}
@@ -256,11 +240,6 @@ func sqliteDiskSummaryUpsertSQL() string {
 		"WHEN excluded.atime < atime THEN excluded.atime ELSE atime END, " +
 		"mtime = CASE WHEN excluded.mtime > mtime THEN excluded.mtime ELSE mtime END, " +
 		sqliteBucketAddAssignments("ab") + ", " + sqliteBucketAddAssignments("mb")
-}
-
-func sqliteDiskSummarySubtractSQL() string {
-	return "UPDATE summaries SET count = count - ?, size = size - ? " +
-		"WHERE dir_id = ? AND gid = ? AND uid = ? AND ft = ? AND mask = ?"
 }
 
 func sqliteDiskSummarySelectSQL() string {
@@ -314,34 +293,6 @@ func diskSummaryMaskForKeys(
 	return tuple, mask, true
 }
 
-func (s *sqliteDiskSummaryStore) addHardlinkEntry(dirID uint32, entry *diskHardlinkEntry) error {
-	keys := dirguta.GUTAKeysFromEntry(entry.gid, entry.uid, entry.fileType)
-
-	return s.addFile(dirID, keys, entry.size, entry.atime, entry.mtime)
-}
-
-func (s *sqliteDiskSummaryStore) subtractHardlinkEntry(dirID uint32, entry *diskHardlinkEntry) error {
-	keys := dirguta.GUTAKeysFromEntry(entry.gid, entry.uid, entry.fileType)
-
-	_, mask, ok := diskSummaryMaskForKeys(keys, entry.atime, entry.mtime, s.refTime)
-	if !ok || mask == 0 {
-		return nil
-	}
-
-	_, err := s.subtract.ExecContext(
-		context.Background(),
-		int64(1),
-		entry.size,
-		dirID,
-		entry.gid,
-		entry.uid,
-		uint16(entry.fileType),
-		mask,
-	)
-
-	return err
-}
-
 func (s *sqliteDiskSummaryStore) upsertSummary(
 	dirID uint32,
 	key dirguta.GUTAKey,
@@ -377,7 +328,10 @@ func sqliteDiskSummaryArgs(
 	return args
 }
 
-func (s *sqliteDiskSummaryStore) materialise(dirID uint32) (db.GUTAs, error) {
+func (s *sqliteDiskSummaryStore) materialise(
+	dirID uint32,
+	hardlinks db.GUTAs,
+) (db.GUTAs, error) {
 	rows, err := s.summaryRows(dirID)
 	if err != nil {
 		return nil, err
@@ -388,6 +342,10 @@ func (s *sqliteDiskSummaryStore) materialise(dirID uint32) (db.GUTAs, error) {
 		row.expandInto(expanded)
 	}
 
+	for _, guta := range hardlinks {
+		expandMaterializedGUTA(expanded, guta)
+	}
+
 	keys := make(dirguta.GUTAKeys, 0, len(expanded))
 	for key := range expanded {
 		keys = append(keys, key)
@@ -396,6 +354,35 @@ func (s *sqliteDiskSummaryStore) materialise(dirID uint32) (db.GUTAs, error) {
 	sort.Sort(keys)
 
 	return diskMaterializedGUTAs(keys, expanded), nil
+}
+
+func expandMaterializedGUTA(
+	expanded map[dirguta.GUTAKey]*summary.SummaryWithTimes,
+	guta *db.GUTA,
+) {
+	key := dirguta.GUTAKey{
+		GID:      guta.GID,
+		UID:      guta.UID,
+		FileType: guta.FT,
+		Age:      guta.Age,
+	}
+
+	sum := expanded[key]
+	if sum == nil {
+		sum = new(summary.SummaryWithTimes)
+		expanded[key] = sum
+	}
+
+	sum.AddSummary(&summary.SummaryWithTimes{
+		Summary: summary.Summary{
+			Count: int64(guta.Count), //nolint:gosec
+			Size:  int64(guta.Size),  //nolint:gosec
+		},
+		Atime:        guta.Atime,
+		Mtime:        guta.Mtime,
+		AtimeBuckets: guta.ATimeRanges,
+		MtimeBuckets: guta.MTimeRanges,
+	})
 }
 
 func diskMaterializedGUTAs(
@@ -483,7 +470,7 @@ func (s *sqliteDiskSummaryStore) close() error {
 
 	s.closed = true
 
-	stmtErr := errors.Join(closeStmt(s.upsert), closeStmt(s.subtract), closeStmt(s.selectBy), closeStmt(s.deleteBy))
+	stmtErr := errors.Join(closeStmt(s.upsert), closeStmt(s.selectBy), closeStmt(s.deleteBy))
 	commitErr := s.tx.Commit()
 	closeErr := s.db.Close()
 

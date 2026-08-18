@@ -1069,3 +1069,112 @@ func permuteStatsLines(data string) string {
 
 	return strings.Join(lines, "\n") + "\n"
 }
+
+func TestBuildDiskHardlinkParity(t *testing.T) {
+	Convey("forced disk summaries emit the same hardlink aggregates as memory summaries", t, func() {
+		for name, input := range diskHardlinkFixtures() {
+			Convey(name, func() {
+				expected, _, _, expectedErr := buildWithDirBuildOptions(input, "/", Options{
+					DiskNodeThreshold: 1_000_000,
+				})
+				got, _, _, gotErr := buildWithDirBuildOptions(input, "/", Options{
+					DiskNodeThreshold: 1,
+					TempDir:           t.TempDir(),
+				})
+
+				So(expectedErr, ShouldBeNil)
+				So(gotErr, ShouldBeNil)
+				So(comparableRecords(got), ShouldResemble, comparableRecords(expected))
+				So(inexactAggregateRows(got), ShouldEqual, 0)
+				So(inexactAggregateRows(expected), ShouldEqual, 0)
+			})
+		}
+	})
+}
+
+func diskHardlinkFixtures() map[string]string {
+	return map[string]string{
+		"same directory changes aggregate key and age mask": strings.Join([]string{
+			statsRow("/", stats.DirType, 4096, dirbuildRefUnix, dirbuildRefUnix, 2000, 2),
+			statsRow("/same/", stats.DirType, 4096, dirbuildRefUnix, dirbuildRefUnix, 2001, 2),
+			statsRow("/same/old.txt", stats.FileType, 10,
+				dirbuildRefUnix-8*db.SecondsInAYear, dirbuildRefUnix-8*db.SecondsInAYear, 3001, 2),
+			statsRow("/same/recent.bam", stats.FileType, 20,
+				dirbuildRefUnix-db.SecondsInAMonth, dirbuildRefUnix-db.SecondsInAMonth, 3001, 2),
+			statsRow("/same/ordinary.bam", stats.FileType, 7,
+				dirbuildRefUnix-2*db.SecondsInAYear, dirbuildRefUnix-db.SecondsInAYear, 4001, 1),
+		}, ""),
+		"sibling and nested directories merge exact inode summaries": strings.Join([]string{
+			statsRow("/", stats.DirType, 4096, dirbuildRefUnix, dirbuildRefUnix, 2100, 2),
+			statsRow("/tree/", stats.DirType, 4096, dirbuildRefUnix, dirbuildRefUnix, 2101, 2),
+			statsRow("/tree/left/", stats.DirType, 4096, dirbuildRefUnix, dirbuildRefUnix, 2102, 2),
+			statsRow("/tree/right/", stats.DirType, 4096, dirbuildRefUnix, dirbuildRefUnix, 2103, 2),
+			statsRow("/tree/right/nested/", stats.DirType, 4096, dirbuildRefUnix, dirbuildRefUnix, 2104, 2),
+			statsRow("/tree/left/sibling.cram", stats.FileType, 31,
+				dirbuildRefUnix-5*db.SecondsInAYear, dirbuildRefUnix-3*db.SecondsInAYear, 3101, 2),
+			statsRow("/tree/right/sibling.txt", stats.FileType, 37,
+				dirbuildRefUnix-db.SecondsInAYear, dirbuildRefUnix-db.SecondsInAMonth, 3101, 2),
+			statsRow("/tree/left/nested.bam", stats.FileType, 41,
+				dirbuildRefUnix-7*db.SecondsInAYear, dirbuildRefUnix-2*db.SecondsInAYear, 3102, 2),
+			statsRow("/tree/right/nested/nested.cram", stats.FileType, 43,
+				dirbuildRefUnix-2*db.SecondsInAYear, dirbuildRefUnix-db.SecondsInAMonth, 3102, 2),
+		}, ""),
+		"every age bucket remains exact": diskHardlinkAgeBucketFixture(),
+	}
+}
+
+func diskHardlinkAgeBucketFixture() string {
+	offsets := [...]int64{
+		8 * db.SecondsInAYear,
+		6 * db.SecondsInAYear,
+		4 * db.SecondsInAYear,
+		2*db.SecondsInAYear + db.SecondsInAMonth,
+		db.SecondsInAYear + db.SecondsInAMonth,
+		7 * db.SecondsInAMonth,
+		3 * db.SecondsInAMonth,
+		db.SecondsInAMonth + 24*60*60,
+		24 * 60 * 60,
+	}
+
+	var input strings.Builder
+	input.WriteString(statsRow("/", stats.DirType, 4096, dirbuildRefUnix, dirbuildRefUnix, 2200, 2))
+	input.WriteString(statsRow("/buckets/", stats.DirType, 4096, dirbuildRefUnix, dirbuildRefUnix, 2201, 2))
+
+	for index, offset := range offsets {
+		inode := int64(3200 + index)
+		stamp := dirbuildRefUnix - offset
+		input.WriteString(statsRow(
+			fmt.Sprintf("/buckets/link-%d-a.txt", index), stats.FileType, int64(index+1), stamp, stamp, inode, 2,
+		))
+		input.WriteString(statsRow(
+			fmt.Sprintf("/buckets/link-%d-b.txt", index), stats.FileType, int64(index+1), stamp, stamp, inode, 2,
+		))
+	}
+
+	return input.String()
+}
+
+func inexactAggregateRows(records []db.RecordDGUTA) int {
+	inexact := 0
+
+	for _, record := range records {
+		for _, guta := range record.GUTAs {
+			atimeBucketCount := uint64(0)
+			mtimeBucketCount := uint64(0)
+
+			for index := range guta.ATimeRanges {
+				atimeBucketCount += guta.ATimeRanges[index]
+				mtimeBucketCount += guta.MTimeRanges[index]
+			}
+
+			staleTimes := guta.Count == 0 && (guta.Atime != 0 || guta.Mtime != 0)
+			incorrectBuckets := atimeBucketCount != guta.Count || mtimeBucketCount != guta.Count
+
+			if staleTimes || incorrectBuckets {
+				inexact++
+			}
+		}
+	}
+
+	return inexact
+}

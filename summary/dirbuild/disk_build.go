@@ -134,7 +134,10 @@ func addToDiskNode(
 	}
 
 	if shouldTrackHardlink(info) {
-		return handleDiskHardlink(store, node, info, ft, atime)
+		node.ensureHardlinks()
+		dirguta.TrackHardlink(node.seenHardlinks, info, ft, atime)
+
+		return nil
 	}
 
 	keys := dirguta.GUTAKeyPool.Get().(*[dirguta.MaxNumOfGUTAKeys]dirguta.GUTAKey) //nolint:errcheck,forcetypeassert
@@ -145,46 +148,6 @@ func addToDiskNode(
 	dirguta.GUTAKeyPool.Put(keys)
 
 	return err
-}
-
-func handleDiskHardlink(
-	store diskSummaryStore,
-	node *dirNode,
-	info *summary.FileInfo,
-	ft db.DirGUTAFileType,
-	atime int64,
-) error {
-	node.ensureDiskHardlinks()
-
-	entry, exists := node.diskSeenHardlinks[info.Inode]
-	if !exists {
-		node.diskSeenHardlinks[info.Inode] = newDiskHardlinkEntry(info, ft, atime)
-
-		return store.addHardlinkEntry(node.dirID, node.diskSeenHardlinks[info.Inode])
-	}
-
-	if err := store.subtractHardlinkEntry(node.dirID, entry); err != nil {
-		return err
-	}
-
-	entry.merge(info, ft, atime)
-
-	return store.addHardlinkEntry(node.dirID, entry)
-}
-
-func newDiskHardlinkEntry(
-	info *summary.FileInfo,
-	ft db.DirGUTAFileType,
-	atime int64,
-) *diskHardlinkEntry {
-	return &diskHardlinkEntry{
-		fileType: ft,
-		size:     info.Size,
-		atime:    atime,
-		mtime:    info.MTime,
-		gid:      info.GID,
-		uid:      info.UID,
-	}
 }
 
 func rollUpAndEmitDisk(index *directoryIndex, database dirguta.DB, store diskSummaryStore) error {
@@ -203,18 +166,22 @@ func rollUpDiskNode(database dirguta.DB, store diskSummaryStore, node *dirNode) 
 	}
 
 	if node.parent == nil {
+		clear(node.seenHardlinks)
+		node.seenHardlinks = nil
+
 		return store.clear(node.dirID)
 	}
 
-	if err := mergeDiskNodeHardlinks(store, node.parent, node); err != nil {
-		return err
-	}
+	mergeNodeHardlinks(node.parent, node)
 
 	return store.merge(node.parent.dirID, node.dirID)
 }
 
 func emitDiskNode(database dirguta.DB, store diskSummaryStore, node *dirNode) error {
-	gutas, err := store.materialise(node.dirID)
+	hardlinkStore := dirguta.NewGUTAStore(node.refUnix)
+	hardlinks := dirguta.MaterializeGUTAs(hardlinkStore, node.seenHardlinks)
+
+	gutas, err := store.materialise(node.dirID, hardlinks)
 	if err != nil {
 		return err
 	}
@@ -230,74 +197,4 @@ func emitDiskNode(database dirguta.DB, store diskSummaryStore, node *dirNode) er
 		ChildCount:     node.childCount,
 		ChildFileCount: node.childFileCount,
 	})
-}
-
-func mergeDiskNodeHardlinks(store diskSummaryStore, parent *dirNode, node *dirNode) error {
-	if len(node.diskSeenHardlinks) == 0 {
-		return nil
-	}
-
-	parent.ensureDiskHardlinks()
-
-	for inode, childEntry := range node.diskSeenHardlinks {
-		parentEntry, exists := parent.diskSeenHardlinks[inode]
-		if !exists {
-			parent.diskSeenHardlinks[inode] = childEntry
-
-			continue
-		}
-
-		if err := updateExistingDiskHardlink(store, parent, node, parentEntry, childEntry); err != nil {
-			return err
-		}
-	}
-
-	clear(node.diskSeenHardlinks)
-	node.diskSeenHardlinks = nil
-
-	return nil
-}
-
-func updateExistingDiskHardlink(
-	store diskSummaryStore,
-	parent *dirNode,
-	node *dirNode,
-	parentEntry *diskHardlinkEntry,
-	childEntry *diskHardlinkEntry,
-) error {
-	if err := store.subtractHardlinkEntry(parent.dirID, parentEntry); err != nil {
-		return err
-	}
-
-	if err := store.subtractHardlinkEntry(node.dirID, childEntry); err != nil {
-		return err
-	}
-
-	parentEntry.mergeEntry(childEntry)
-
-	return store.addHardlinkEntry(node.dirID, parentEntry)
-}
-
-func (entry *diskHardlinkEntry) merge(
-	info *summary.FileInfo,
-	ft db.DirGUTAFileType,
-	atime int64,
-) {
-	entry.fileType |= ft
-	entry.size = max(entry.size, info.Size)
-	entry.atime = min(entry.atime, atime)
-	entry.mtime = max(entry.mtime, info.MTime)
-}
-
-func (entry *diskHardlinkEntry) mergeEntry(child *diskHardlinkEntry) {
-	entry.fileType |= child.fileType
-	entry.size = max(entry.size, child.size)
-	entry.atime = min(entry.atime, child.atime)
-	entry.mtime = max(entry.mtime, child.mtime)
-}
-
-func (node *dirNode) ensureDiskHardlinks() {
-	if node.diskSeenHardlinks == nil {
-		node.diskSeenHardlinks = make(map[int64]*diskHardlinkEntry)
-	}
 }

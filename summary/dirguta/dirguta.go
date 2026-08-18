@@ -248,7 +248,7 @@ func (d *DirGroupUserTypeAge) Add(info *summary.FileInfo) error { //nolint:funle
 		atime = d.now
 	}
 
-	if HandleHardlink(&d.store, d.seenHardlinks, info, ft, atime) {
+	if TrackHardlink(d.seenHardlinks, info, ft, atime) {
 		return nil
 	}
 
@@ -350,7 +350,7 @@ func (d *DirGroupUserTypeAge) addChildFile() {
 // merging file types and updating atime and mtime as needed. Returns true if the
 // file was handled as a hardlink, false otherwise.
 func (d *DirGroupUserTypeAge) handleHardlink(info *summary.FileInfo, ft db.DirGUTAFileType, atime int64) bool {
-	return HandleHardlink(&d.store, d.seenHardlinks, info, ft, atime)
+	return TrackHardlink(d.seenHardlinks, info, ft, atime)
 }
 
 // Output is a summary.Operation method, and will write summary information for
@@ -405,8 +405,6 @@ func (d *DirGroupUserTypeAge) handleHardlink(info *summary.FileInfo, ft db.DirGU
 //
 // Returns an error on failure to write.
 func (d *DirGroupUserTypeAge) Output() error {
-	dgutas := d.store.Sort()
-
 	if err := d.finishDirectoryID(); err != nil {
 		return err
 	}
@@ -417,13 +415,10 @@ func (d *DirGroupUserTypeAge) Output() error {
 		ParentID:       d.parentID,
 		SubtreeEnd:     d.subtreeEnd,
 		Depth:          d.depth,
+		GUTAs:          MaterializeGUTAs(d.store, d.seenHardlinks),
 		Children:       d.children,
 		ChildCount:     d.childCount,
 		ChildFileCount: d.childFileCount,
-	}
-
-	for _, guta := range dgutas {
-		dguta.GUTAs = append(dguta.GUTAs, GetGUTA(d.store, guta))
 	}
 
 	if err := d.db.Add(dguta); err != nil {
@@ -467,7 +462,7 @@ func (d *DirGroupUserTypeAge) finishDirectoryID() error {
 
 // addChild merges a child directory's store and seen inodes into this DirGroupUserTypeAge.
 func (d *DirGroupUserTypeAge) addChild(child *gutaStore, childSeen map[int64]*inodeEntry) {
-	MergeSeenHardlinks(&d.store, d.seenHardlinks, child, childSeen)
+	MergeHardlinks(d.seenHardlinks, childSeen)
 	child.DrainInto(&d.store)
 }
 

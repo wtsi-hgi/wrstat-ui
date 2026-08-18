@@ -342,6 +342,8 @@ func rollUpAndEmit(index *directoryIndex, database dirguta.DB) error {
 
 		if node.parent == nil {
 			node.clearStore()
+			clear(node.seenHardlinks)
+			node.seenHardlinks = nil
 
 			continue
 		}
@@ -360,7 +362,7 @@ func emitNode(database dirguta.DB, node *dirNode) error {
 		ParentID:       node.parentID,
 		SubtreeEnd:     node.subtreeEnd,
 		Depth:          node.depth,
-		GUTAs:          materializeGUTAs(node.store),
+		GUTAs:          dirguta.MaterializeGUTAs(*node.ensureStore(), node.seenHardlinks),
 		Children:       node.childNames(),
 		ChildCount:     node.childCount,
 		ChildFileCount: node.childFileCount,
@@ -372,56 +374,16 @@ func emitNode(database dirguta.DB, node *dirNode) error {
 	return nil
 }
 
-func materializeGUTAs(store *dirguta.GUTAStore) db.GUTAs {
-	if store == nil {
-		return nil
-	}
-
-	keys := store.Sort()
-	if len(keys) == 0 {
-		return nil
-	}
-
-	values := make([]db.GUTA, len(keys))
-	gutas := make(db.GUTAs, len(keys))
-
-	for idx, key := range keys {
-		materializeGUTA(&values[idx], store, key)
-		gutas[idx] = &values[idx]
-	}
-
-	return gutas
-}
-
-func materializeGUTA(out *db.GUTA, store *dirguta.GUTAStore, key dirguta.GUTAKey) {
-	summary := store.Summary(key)
-	if summary == nil {
-		return
-	}
-
-	*out = db.GUTA{
-		GID:         key.GID,
-		UID:         key.UID,
-		FT:          key.FileType,
-		Age:         key.Age,
-		Count:       uint64(summary.Count), //nolint:gosec
-		Size:        uint64(summary.Size),  //nolint:gosec
-		Atime:       summary.Atime,
-		ATimeRanges: summary.AtimeBuckets,
-		Mtime:       summary.Mtime,
-		MTimeRanges: summary.MtimeBuckets,
-	}
-}
-
 func mergeNodeHardlinks(parent *dirNode, node *dirNode) {
 	if len(node.seenHardlinks) == 0 {
 		return
 	}
 
-	parent.ensureStore()
 	parent.ensureHardlinks()
-	dirguta.MergeSeenHardlinks(parent.ensureStore(), parent.seenHardlinks, node.ensureStore(), node.seenHardlinks)
+	dirguta.MergeHardlinks(parent.seenHardlinks, node.seenHardlinks)
+
 	clear(node.seenHardlinks)
+	node.seenHardlinks = nil
 }
 
 func drainNodeStore(parent *dirNode, node *dirNode) {
@@ -492,15 +454,14 @@ func addToNode(node *dirNode, info *summary.FileInfo, refUnix int64) {
 		atime = refUnix
 	}
 
-	store := node.ensureStore()
 	if shouldTrackHardlink(info) {
 		node.ensureHardlinks()
-	}
+		dirguta.TrackHardlink(node.seenHardlinks, info, ft, atime)
 
-	if dirguta.HandleHardlink(store, node.seenHardlinks, info, ft, atime) {
 		return
 	}
 
+	store := node.ensureStore()
 	gutaKeysA := dirguta.GUTAKeyPool.Get().(*[dirguta.MaxNumOfGUTAKeys]dirguta.GUTAKey) //nolint:errcheck,forcetypeassert
 	gutaKeys := dirguta.GUTAKeys(gutaKeysA[:0])
 	gutaKeys.Append(info.GID, info.UID, ft)
@@ -547,7 +508,6 @@ type dirNode struct {
 	depth                  uint16
 	store                  *dirguta.GUTAStore
 	seenHardlinks          map[int64]*dirguta.InodeEntry
-	diskSeenHardlinks      map[int64]*diskHardlinkEntry
 	firstChild             *dirNode
 	childByName            map[string]*dirNode
 	childCount             uint64
