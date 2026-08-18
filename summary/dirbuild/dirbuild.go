@@ -112,20 +112,22 @@ func BuildWithFilesOptions(
 	restoreGC := useDirbuildGCPercent()
 	defer restoreGC()
 
-	index, err := buildDirectoryIndex(open, mountPath, refTime.Unix())
+	if opts.DiskMetrics == nil {
+		opts.DiskMetrics = new(DiskMetrics)
+	}
+
+	telemetry := newBuildTelemetry(opts)
+
+	index, err := buildDirectoryIndex(open, mountPath, refTime.Unix(), telemetry)
 	if err != nil {
 		return err
 	}
 
 	if shouldUseDiskBackedSummaries(index, opts) {
-		return buildWithDiskBackedSummaries(open, index, database, refTime.Unix(), files, opts)
+		return buildWithDiskBackedSummaries(open, index, database, refTime.Unix(), files, opts, telemetry)
 	}
 
-	if err := addStatsRows(open, index, refTime.Unix(), files); err != nil {
-		return err
-	}
-
-	return rollUpAndEmit(index, database)
+	return buildWithMemorySummaries(open, index, database, refTime.Unix(), files, telemetry)
 }
 
 func useDirbuildGCPercent() func() {
@@ -145,32 +147,162 @@ func buildDirectoryIndex(
 	open func() (io.ReadCloser, error),
 	mountPath string,
 	refUnix int64,
+	telemetryOption ...*buildTelemetry,
 ) (*directoryIndex, error) {
-	paths := newPathBuilder()
-	paths.node(cleanDirPath(mountPath))
+	telemetry := selectedBuildTelemetry(telemetryOption)
 
-	if err := collectDirectoryRows(open, paths); err != nil {
+	paths := newPathBuilder(telemetry != nil)
+	paths.setMount(mountPath)
+
+	telemetry.begin(PhaseDirectoryScan)
+
+	if err := collectDirectoryRows(open, paths, telemetry); err != nil {
 		return nil, err
 	}
 
-	nodes, err := assignDirectoryIDs(paths, mountPath, refUnix)
+	telemetry.setShape(paths)
+	telemetry.finish(telemetry.inputRows())
+
+	return finaliseDirectoryIndex(paths, mountPath, refUnix, telemetry)
+}
+
+func selectedBuildTelemetry(options []*buildTelemetry) *buildTelemetry {
+	if len(options) > 0 {
+		return options[0]
+	}
+
+	return nil
+}
+
+func newPathBuilder(trackShape ...bool) *pathBuilder {
+	root := &summary.DirectoryPath{Name: "/", Depth: 0}
+
+	paths := &pathBuilder{
+		root:  &pathBuilderNode{dir: root},
+		count: 1,
+	}
+	if len(trackShape) > 0 && trackShape[0] {
+		paths.shape = &pathBuilderShape{depthHistogram: [TelemetryDepthBins]uint64{1}}
+	}
+
+	return paths
+}
+
+func scanRawStatsObserved(
+	reader io.Reader,
+	handle func(rawStatsRow) error,
+	observe func(uint64),
+) error {
+	scanner := bufio.NewScanner(reader)
+	scanner.Buffer(make([]byte, 0, maxStatsLineLength), maxStatsLineLength)
+
+	var rows uint64
+
+	for scanner.Scan() {
+		if len(scanner.Bytes()) == 0 {
+			continue
+		}
+
+		row, err := parseRawStatsLine(scanner.Bytes())
+		if err != nil {
+			return err
+		}
+
+		if err := handle(row); err != nil {
+			return err
+		}
+
+		rows++
+		if observe != nil {
+			observe(rows)
+		}
+	}
+
+	return scanner.Err()
+}
+
+func finaliseDirectoryIndex(
+	paths *pathBuilder,
+	mountPath string,
+	refUnix int64,
+	telemetry *buildTelemetry,
+) (*directoryIndex, error) {
+	telemetry.begin(PhaseIDAssignment)
+
+	nodes, err := assignDirectoryIDs(paths, mountPath, refUnix, telemetry)
 	if err != nil {
 		return nil, err
 	}
 
 	index := indexNodes(nodes)
+	telemetry.finish(uint64(len(nodes)))
 
 	paths.clear()
 
 	return index, nil
 }
 
-func newPathBuilder() *pathBuilder {
-	root := &summary.DirectoryPath{Name: "/", Depth: 0}
+func buildWithMemorySummaries(
+	open func() (io.ReadCloser, error),
+	index *directoryIndex,
+	database dirguta.DB,
+	refUnix int64,
+	files FileSink,
+	telemetry *buildTelemetry,
+) error {
+	telemetry.begin(PhasePass2Aggregation)
 
-	return &pathBuilder{
-		root:  &pathBuilderNode{dir: root},
-		count: 1,
+	if err := addStatsRows(open, index, refUnix, files, telemetry); err != nil {
+		return err
+	}
+
+	telemetry.finish(telemetry.inputRows())
+
+	telemetry.begin(PhaseSpoolEmission)
+	err := rollUpAndEmit(index, database, telemetry)
+	telemetry.finish(uint64(len(index.nodes)))
+
+	return err
+}
+
+type pathBuilderShape struct {
+	mount          *pathBuilderNode
+	rawCount       int
+	maximumDepth   uint64
+	depthHistogram [TelemetryDepthBins]uint64
+	heavyPrefixes  heavyPrefixCounter
+}
+
+func (p *pathBuilder) observeNewNode(node *pathBuilderNode) {
+	if p.shape == nil {
+		return
+	}
+
+	depth := uint64(node.dir.Depth) //nolint:gosec // parser path depth is non-negative.
+	p.shape.maximumDepth = max(p.shape.maximumDepth, depth)
+	bin := min(depth, uint64(TelemetryDepthBins-1))
+
+	p.shape.depthHistogram[bin]++
+	if p.shape.mount == nil {
+		return
+	}
+
+	prefix := node
+	for prefix.parent != nil && prefix.parent != p.shape.mount {
+		prefix = prefix.parent
+	}
+
+	if prefix.parent != p.shape.mount {
+		return
+	}
+
+	p.shape.heavyPrefixes.add(prefix.dir.Name)
+}
+
+func (p *pathBuilder) setMount(path string) {
+	mount := p.node(cleanDirPath(path))
+	if p.shape != nil {
+		p.shape.mount = mount
 	}
 }
 
@@ -190,9 +322,9 @@ func cleanDirPath(path string) string {
 	return path
 }
 
-func collectDirectoryRows(open func() (io.ReadCloser, error), paths *pathBuilder) error {
+func collectDirectoryRows(open func() (io.ReadCloser, error), paths *pathBuilder, telemetry *buildTelemetry) error {
 	return withStatsReader(open, func(reader io.Reader) error {
-		return scanRawStats(reader, func(row rawStatsRow) error {
+		handle := func(row rawStatsRow) error {
 			if row.isDir() {
 				paths.rawDir(row.dirKey())
 
@@ -202,7 +334,12 @@ func collectDirectoryRows(open func() (io.ReadCloser, error), paths *pathBuilder
 			paths.node(row.leafDirKey())
 
 			return nil
-		})
+		}
+		if telemetry == nil {
+			return scanRawStatsObserved(reader, handle, nil)
+		}
+
+		return scanRawStatsObserved(reader, handle, func(rows uint64) { telemetry.progressShape(rows, paths) })
 	})
 }
 
@@ -216,28 +353,6 @@ func withStatsReader(open func() (io.ReadCloser, error), fn func(io.Reader) erro
 	closeErr := reader.Close()
 
 	return errors.Join(fnErr, closeErr)
-}
-
-func scanRawStats(reader io.Reader, handle func(rawStatsRow) error) error {
-	scanner := bufio.NewScanner(reader)
-	scanner.Buffer(make([]byte, 0, maxStatsLineLength), maxStatsLineLength)
-
-	for scanner.Scan() {
-		if len(scanner.Bytes()) == 0 {
-			continue
-		}
-
-		row, err := parseRawStatsLine(scanner.Bytes())
-		if err != nil {
-			return err
-		}
-
-		if err := handle(row); err != nil {
-			return err
-		}
-	}
-
-	return scanner.Err()
 }
 
 func parseRawStatsLine(line []byte) (rawStatsRow, error) {
@@ -284,6 +399,7 @@ func assignDirectoryIDs(
 	paths *pathBuilder,
 	mountPath string,
 	refUnix int64,
+	telemetry *buildTelemetry,
 ) ([]*dirNode, error) {
 	alloc := newDirIDAllocator()
 	if err := alloc.SetMountPath(mountPath); err != nil {
@@ -291,6 +407,8 @@ func assignDirectoryIDs(
 	}
 
 	state := newIDAssignmentState(alloc, refUnix, paths.count)
+
+	state.telemetry = telemetry
 	if err := state.assignSubtree(paths.root, nil); err != nil {
 		return nil, err
 	}
@@ -333,8 +451,10 @@ func diskNodeThreshold(opts Options) int {
 	return defaultDiskNodeThreshold
 }
 
-func rollUpAndEmit(index *directoryIndex, database dirguta.DB) error {
+func rollUpAndEmit(index *directoryIndex, database dirguta.DB, telemetry *buildTelemetry) error {
 	for i := len(index.nodes) - 1; i >= 0; i-- {
+		telemetry.progress(uint64(len(index.nodes) - i)) //nolint:gosec // non-negative loop progress.
+
 		node := index.nodes[i]
 		if err := emitNode(database, node); err != nil {
 			return err
@@ -395,14 +515,28 @@ func drainNodeStore(parent *dirNode, node *dirNode) {
 	node.store = nil
 }
 
-func addStatsRows(open func() (io.ReadCloser, error), index *directoryIndex, refUnix int64, files FileSink) error {
+func addStatsRows(
+	open func() (io.ReadCloser, error),
+	index *directoryIndex,
+	refUnix int64,
+	files FileSink,
+	telemetry *buildTelemetry,
+) error {
 	return withStatsReader(open, func(reader io.Reader) error {
-		return scanRawStats(reader, func(row rawStatsRow) error {
+		handle := func(row rawStatsRow) error {
 			if err := addSyntheticDirRows(row, index, refUnix); err != nil {
 				return err
 			}
 
 			return addStatsRow(row, index, refUnix, files)
+		}
+		if telemetry == nil {
+			return scanRawStatsObserved(reader, handle, nil)
+		}
+
+		return scanRawStatsObserved(reader, handle, func(rows uint64) {
+			telemetry.setInputRows(rows)
+			telemetry.progress(rows)
 		})
 	})
 }
@@ -500,6 +634,9 @@ type Options struct {
 	// DiskMetrics receives bounded-accumulator, SQLite, and phase measurements
 	// when the disk-backed summary path is used.
 	DiskMetrics *DiskMetrics
+	// Progress receives bounded live snapshots at phase transitions and fixed
+	// work intervals. The callback must return promptly.
+	Progress func(Telemetry)
 }
 
 type dirNode struct {
@@ -657,6 +794,7 @@ type pathBuilderNode struct {
 type pathBuilder struct {
 	root  *pathBuilderNode
 	count int
+	shape *pathBuilderShape
 }
 
 func (p *pathBuilder) node(path string) *pathBuilderNode {
@@ -703,23 +841,31 @@ func (p *pathBuilder) child(parent *pathBuilderNode, name string) *pathBuilderNo
 	}
 	parent.children[name] = child
 	p.count++
+	p.observeNewNode(child)
 
 	return child
 }
 
 func (p *pathBuilder) rawDir(path string) {
-	p.node(path).raw = true
+	node := p.node(path)
+	if !node.raw && p.shape != nil {
+		p.shape.rawCount++
+	}
+
+	node.raw = true
 }
 
 func (p *pathBuilder) clear() {
 	p.root = nil
 	p.count = 0
+	p.shape = nil
 }
 
 type idAssignmentState struct {
-	alloc   dirIDAllocator
-	refUnix int64
-	nodes   []*dirNode
+	alloc     dirIDAllocator
+	refUnix   int64
+	nodes     []*dirNode
+	telemetry *buildTelemetry
 }
 
 func (s *idAssignmentState) assignSubtree(builder *pathBuilderNode, parent *dirNode) error {
@@ -756,6 +902,7 @@ func (s *idAssignmentState) enterBuilderNode(builder *pathBuilderNode, parent *d
 	}
 
 	s.nodes = append(s.nodes, node)
+	s.telemetry.progress(uint64(len(s.nodes)))
 
 	return node, nil
 }

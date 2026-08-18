@@ -42,6 +42,7 @@ func buildWithDiskBackedSummaries(
 	refUnix int64,
 	files FileSink,
 	opts Options,
+	telemetry *buildTelemetry,
 ) error {
 	if opts.DiskMetrics == nil {
 		opts.DiskMetrics = new(DiskMetrics)
@@ -54,12 +55,16 @@ func buildWithDiskBackedSummaries(
 
 	metrics := opts.DiskMetrics
 
-	buildErr := addStatsRowsDiskMeasured(open, index, store, refUnix, files, metrics)
+	telemetry.begin(PhasePass2Aggregation)
+
+	buildErr := addStatsRowsDiskMeasured(open, index, store, refUnix, files, metrics, telemetry)
 	if buildErr != nil {
 		return errors.Join(buildErr, store.close(false))
 	}
 
-	return rollUpAndEmitDiskMeasured(index, database, store, metrics)
+	telemetry.begin(PhaseSQLiteRollupSpoolEmission)
+
+	return rollUpAndEmitDiskMeasured(index, database, store, metrics, telemetry)
 }
 
 func addStatsRowsDiskMeasured(
@@ -69,16 +74,20 @@ func addStatsRowsDiskMeasured(
 	refUnix int64,
 	files FileSink,
 	metrics *DiskMetrics,
+	telemetry *buildTelemetry,
 ) error {
 	started := time.Now()
 	writesBefore := startProcessWriteBytesMeasurement(metrics)
 
-	err := addStatsRowsDisk(open, index, store, refUnix, files)
+	err := addStatsRowsDisk(open, index, store, refUnix, files, telemetry)
 	if err == nil {
 		err = store.flush()
 	}
 
 	metrics.Pass2Elapsed = time.Since(started)
+
+	telemetry.finish(telemetry.inputRows())
+
 	metrics.Pass2ProcessWriteBytes, metrics.Pass2ProcessWriteBytesAvailable =
 		finishProcessWriteBytesMeasurement(metrics, writesBefore)
 
@@ -91,14 +100,23 @@ func addStatsRowsDisk(
 	store diskSummaryStore,
 	refUnix int64,
 	files FileSink,
+	telemetry *buildTelemetry,
 ) error {
 	return withStatsReader(open, func(reader io.Reader) error {
-		return scanRawStats(reader, func(row rawStatsRow) error {
+		handle := func(row rawStatsRow) error {
 			if err := addSyntheticDirRowsDisk(row, index, store, refUnix); err != nil {
 				return err
 			}
 
 			return addStatsRowDisk(row, index, store, refUnix, files)
+		}
+		if telemetry == nil {
+			return scanRawStatsObserved(reader, handle, nil)
+		}
+
+		return scanRawStatsObserved(reader, handle, func(rows uint64) {
+			telemetry.setInputRows(rows)
+			telemetry.progress(rows)
 		})
 	})
 }
@@ -185,12 +203,16 @@ func rollUpAndEmitDiskMeasured(
 	database dirguta.DB,
 	store diskSummaryStore,
 	metrics *DiskMetrics,
+	telemetry *buildTelemetry,
 ) error {
 	started := time.Now()
 	writesBefore := startProcessWriteBytesMeasurement(metrics)
-	buildErr := rollUpAndEmitDisk(index, database, store)
+	buildErr := rollUpAndEmitDisk(index, database, store, telemetry)
 	closeErr := store.close(buildErr == nil)
 	metrics.RollupElapsed = time.Since(started)
+
+	telemetry.finish(uint64(len(index.nodes)))
+
 	metrics.RollupProcessWriteBytes, metrics.RollupProcessWriteBytesAvailable =
 		finishProcessWriteBytesMeasurement(metrics, writesBefore)
 
@@ -203,8 +225,15 @@ func rollUpAndEmitDiskMeasured(
 	return errors.Join(buildErr, closeErr)
 }
 
-func rollUpAndEmitDisk(index *directoryIndex, database dirguta.DB, store diskSummaryStore) error {
+func rollUpAndEmitDisk(
+	index *directoryIndex,
+	database dirguta.DB,
+	store diskSummaryStore,
+	telemetry *buildTelemetry,
+) error {
 	for i := len(index.nodes) - 1; i >= 0; i-- {
+		telemetry.progress(uint64(len(index.nodes) - i)) //nolint:gosec // non-negative loop progress.
+
 		if err := rollUpDiskNode(database, store, index.nodes[i]); err != nil {
 			return err
 		}

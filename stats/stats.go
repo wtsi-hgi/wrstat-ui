@@ -89,6 +89,7 @@ func (f *FileInfo) BaseName() []byte {
 type StatsParser struct { //nolint:revive
 	scanner      *bufio.Scanner
 	inputRow     uint64
+	synthesised  bool
 	lineBytes    []byte
 	lineLength   int
 	lineIndex    int
@@ -149,6 +150,12 @@ func (p *StatsParser) Scan(info *FileInfo) error {
 // Synthesised parent-directory records do not advance this value.
 func (p *StatsParser) InputRow() uint64 {
 	return p.inputRow
+}
+
+// Synthesised reports whether the most recent Scan result was an implied
+// parent-directory record rather than a source input row.
+func (p *StatsParser) Synthesised() bool {
+	return p.synthesised
 }
 
 func (p *StatsParser) fillInfo(info *FileInfo) error {
@@ -230,7 +237,10 @@ func (p *StatsParser) fillMissingOrFullInfo(info *FileInfo) bool {
 	info.CTime = p.ctime
 	info.Nlink = p.nlink
 
-	if p.indexes = p.indexes[:len(p.indexes)-1]; len(p.indexes) == 0 {
+	p.indexes = p.indexes[:len(p.indexes)-1]
+
+	p.synthesised = len(p.indexes) > 0
+	if len(p.indexes) == 0 {
 		info.Size = p.size
 		info.ApparentSize = p.apparentSize
 		info.EntryType = p.entryType
@@ -246,6 +256,7 @@ func (p *StatsParser) fillMissingOrFullInfo(info *FileInfo) bool {
 }
 
 func (p *StatsParser) fillFullInfo(info *FileInfo) {
+	p.synthesised = false
 	info.Path = p.path
 	info.Size = p.size
 	info.ApparentSize = p.apparentSize

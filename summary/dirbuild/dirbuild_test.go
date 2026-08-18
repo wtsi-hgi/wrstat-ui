@@ -88,6 +88,143 @@ func (c *captureDB) Add(record db.RecordDGUTA) error {
 	return nil
 }
 
+func TestDirbuildTelemetry(t *testing.T) {
+	Convey("recorder-free index builds avoid telemetry allocations and callbacks", t, func() {
+		var input strings.Builder
+		input.WriteString(statsRow("/", stats.DirType, 4096, dirbuildRefUnix, dirbuildRefUnix, 2000, 2))
+
+		for i := range 64 {
+			input.WriteString(statsRow(fmt.Sprintf("/prefix-%03d/file", i), stats.FileType,
+				1, dirbuildRefUnix, dirbuildRefUnix, int64(3000+i), 1))
+		}
+
+		data := input.String()
+		withoutRecorder := testing.AllocsPerRun(5, func() {
+			index, err := buildDirectoryIndex(func() (io.ReadCloser, error) {
+				return io.NopCloser(strings.NewReader(data)), nil
+			}, "/", dirbuildRefUnix)
+			So(err, ShouldBeNil)
+			So(index.nodes, ShouldHaveLength, 65)
+		})
+
+		callbacks := 0
+		withRecorder := testing.AllocsPerRun(5, func() {
+			telemetry := newBuildTelemetry(Options{Progress: func(Telemetry) { callbacks++ }})
+			index, err := buildDirectoryIndex(func() (io.ReadCloser, error) {
+				return io.NopCloser(strings.NewReader(data)), nil
+			}, "/", dirbuildRefUnix, telemetry)
+			So(err, ShouldBeNil)
+			So(index.nodes, ShouldHaveLength, 65)
+		})
+
+		withoutShape := testing.AllocsPerRun(100, func() {
+			paths := newPathBuilder(false)
+			runtime.KeepAlive(paths)
+		})
+		withShape := testing.AllocsPerRun(100, func() {
+			paths := newPathBuilder(true)
+			runtime.KeepAlive(paths)
+		})
+
+		So(callbacks, ShouldBeGreaterThan, 0)
+		So(withoutRecorder, ShouldBeLessThan, withRecorder)
+		So(withoutShape, ShouldBeLessThan, withShape)
+	})
+
+	Convey("multi-pass builds expose live phase, shape, and bounded prefix telemetry", t, func() {
+		input := strings.Join([]string{
+			statsRow("/", stats.DirType, 4096, dirbuildRefUnix, dirbuildRefUnix, 2000, 2),
+			statsRow("/alpha/deep/file.txt", stats.FileType, 11, dirbuildRefUnix-30, dirbuildRefUnix-20, 3001, 1),
+			statsRow("/beta/file.txt", stats.FileType, 12, dirbuildRefUnix-30, dirbuildRefUnix-20, 3002, 1),
+		}, "")
+
+		var snapshots []Telemetry
+
+		err := BuildWithFilesOptions(func() (io.ReadCloser, error) {
+			return io.NopCloser(strings.NewReader(input)), nil
+		}, "/", &captureDB{}, dirbuildRefTime, nil, Options{
+			DiskNodeThreshold: 1,
+			TempDir:           t.TempDir(),
+			Progress: func(snapshot Telemetry) {
+				snapshots = append(snapshots, snapshot)
+			},
+		})
+
+		So(err, ShouldBeNil)
+		So(telemetryPhases(snapshots), ShouldResemble, []string{
+			PhaseDirectoryScan,
+			PhaseIDAssignment,
+			PhasePass2Aggregation,
+			PhaseSQLiteRollupSpoolEmission,
+		})
+		last := snapshots[len(snapshots)-1]
+		So(last.InputRows, ShouldEqual, uint64(3))
+		So(last.DirectoryNodes, ShouldEqual, uint64(4))
+		So(last.ImpliedDirectories, ShouldEqual, uint64(3))
+		So(last.MaximumDepth, ShouldEqual, uint64(2))
+		So(len(last.DepthHistogram), ShouldBeLessThanOrEqualTo, TelemetryDepthBins)
+		So(len(last.HeavyPrefixes), ShouldBeLessThanOrEqualTo, TelemetryHeavyPrefixCapacity)
+		So(last.SQLiteBytes, ShouldBeGreaterThan, uint64(0))
+	})
+
+	Convey("shape telemetry remains bounded as prefix variety grows", t, func() {
+		var input strings.Builder
+		input.WriteString(statsRow("/", stats.DirType, 4096, dirbuildRefUnix, dirbuildRefUnix, 2000, 2))
+
+		for i := range TelemetryHeavyPrefixCapacity * 10 {
+			input.WriteString(statsRow(fmt.Sprintf("/prefix-%03d/file", i), stats.FileType,
+				1, dirbuildRefUnix, dirbuildRefUnix, int64(3000+i), 1))
+		}
+
+		var last Telemetry
+
+		err := BuildWithFilesOptions(func() (io.ReadCloser, error) {
+			return io.NopCloser(strings.NewReader(input.String())), nil
+		}, "/", &captureDB{}, dirbuildRefTime, nil, Options{
+			Progress: func(snapshot Telemetry) { last = snapshot },
+		})
+
+		So(err, ShouldBeNil)
+		So(len(last.HeavyPrefixes), ShouldBeLessThanOrEqualTo, TelemetryHeavyPrefixCapacity)
+		So(len(last.DepthHistogram), ShouldBeLessThanOrEqualTo, TelemetryDepthBins)
+	})
+
+	Convey("heavy prefixes and counts are relative to a non-root selected mount", t, func() {
+		input := strings.Join([]string{
+			statsRow("/mnt/test/", stats.DirType, 4096, dirbuildRefUnix, dirbuildRefUnix, 2000, 2),
+			statsRow("/mnt/test/alpha/deep/file.txt", stats.FileType,
+				11, dirbuildRefUnix-30, dirbuildRefUnix-20, 3001, 1),
+			statsRow("/mnt/test/beta/file.txt", stats.FileType,
+				12, dirbuildRefUnix-30, dirbuildRefUnix-20, 3002, 1),
+		}, "")
+
+		var last Telemetry
+
+		err := BuildWithFilesOptions(func() (io.ReadCloser, error) {
+			return io.NopCloser(strings.NewReader(input)), nil
+		}, "/mnt/test/", &captureDB{}, dirbuildRefTime, nil, Options{
+			Progress: func(snapshot Telemetry) { last = snapshot },
+		})
+
+		So(err, ShouldBeNil)
+		So(last.HeavyPrefixes, ShouldResemble, []PrefixCount{
+			{Prefix: "alpha/", Count: 2},
+			{Prefix: "beta/", Count: 1},
+		})
+	})
+}
+
+func telemetryPhases(snapshots []Telemetry) []string {
+	phases := make([]string, 0, len(snapshots))
+	for _, snapshot := range snapshots {
+		if len(phases) == 0 || phases[len(phases)-1] != snapshot.Phase {
+			phases = append(phases, snapshot.Phase)
+		}
+	}
+
+	return phases
+}
+
 func summariseWithDirGUTA(data string, mountPath string) ([]db.RecordDGUTA, error) {
 	sink := new(captureDB)
 
@@ -224,6 +361,9 @@ func writeLongPathDirectoryStatsRows(writer io.Writer, dirs int, nameBytes int) 
 }
 
 func assertDirectoryIndexMemory(input string, expectedNodes int, heapBudget uint64) {
+	restoreGC := useDirbuildGCPercent()
+	defer restoreGC()
+
 	runtime.GC()
 
 	var before runtime.MemStats

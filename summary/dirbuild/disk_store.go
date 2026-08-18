@@ -51,6 +51,8 @@ const sqliteDiskSummaryWriteBehindBytes = 4 * 1024 * 1024
 
 const sqliteDiskSummaryAccumulatorEntryBytes = 256
 
+const sqliteDiskSummaryFileName = "summaries.sqlite"
+
 // DiskMetrics reports work performed by the disk-backed summary path.
 // ProcessWriteBytes and its phase fields are Linux process write_bytes deltas
 // observed while each phase runs; DatabaseBytes is the resulting SQLite file.
@@ -75,6 +77,7 @@ type DiskMetrics struct {
 	Pass2Elapsed                     time.Duration
 	RollupElapsed                    time.Duration
 	readProcessWriteBytes            func() (uint64, error)
+	readDatabaseBytes                func() uint64
 }
 
 type diskSummaryStore interface {
@@ -230,7 +233,7 @@ type sqliteDiskSummaryStore struct {
 }
 
 func openSQLiteDiskSummaryStore(dir string, refTime int64, removeDirOnClose bool) (*sqliteDiskSummaryStore, error) {
-	handle, err := sql.Open("sqlite3", filepath.Join(dir, "summaries.sqlite"))
+	handle, err := sql.Open("sqlite3", filepath.Join(dir, sqliteDiskSummaryFileName))
 	if err != nil {
 		return nil, err
 	}
@@ -256,6 +259,9 @@ func openSQLiteDiskSummaryStore(dir string, refTime int64, removeDirOnClose bool
 func (s *sqliteDiskSummaryStore) resetMetricLimit() {
 	s.metrics.WriteBehindLimitBytes = s.writeBehindLimit
 	s.metrics.ProcessWriteBytesSource = linuxProcessWriteBytesSource
+	s.metrics.readDatabaseBytes = func() uint64 {
+		return regularFileSize(filepath.Join(s.dir, sqliteDiskSummaryFileName))
+	}
 }
 
 func (s *sqliteDiskSummaryStore) configure() error {
@@ -447,6 +453,7 @@ func (s *sqliteDiskSummaryStore) flush() error {
 	s.metrics.Flushes++
 	s.metrics.RowsCombined += combined
 	s.metrics.MaxRowsCombinedPerFlush = max(s.metrics.MaxRowsCombinedPerFlush, combined)
+	s.metrics.DatabaseBytes = regularFileSize(filepath.Join(s.dir, sqliteDiskSummaryFileName))
 	clear(s.pending)
 	s.pendingBytes = 0
 	s.pendingRows = 0
@@ -658,7 +665,8 @@ func (s *sqliteDiskSummaryStore) close(success bool) error {
 	commitErr := s.tx.Commit()
 	closeErr := s.db.Close()
 	s.closed = true
-	s.metrics.DatabaseBytes = regularFileSize(filepath.Join(s.dir, "summaries.sqlite"))
+	s.metrics.DatabaseBytes = regularFileSize(filepath.Join(s.dir, sqliteDiskSummaryFileName))
+	s.metrics.readDatabaseBytes = nil
 	closeResult := errors.Join(flushErr, stmtErr, commitErr, closeErr)
 
 	if !s.removeDirOnClose || !success || closeResult != nil {

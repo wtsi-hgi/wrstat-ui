@@ -439,6 +439,167 @@ func (c *summariseSpoolFreshContextConn) PrepareBatch(
 }
 
 func TestClickHouseSummariseSpoolLoader(t *testing.T) {
+	Convey("blocking derived stages emit advancing live telemetry and stop their ticker", t, func() {
+		spoolDir := filepath.Join(t.TempDir(), "spool")
+		manifest := writeSummariseSpoolLoaderSchema3Spool(
+			spoolDir,
+			time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC),
+		)
+		conn := &summariseSpoolBlockingDerivedConn{
+			summariseSpoolLoaderSpyConn: newSummariseSpoolLoaderSpyConn(manifest),
+			started:                     make(chan struct{}),
+			release:                     make(chan struct{}),
+		}
+		live := make(chan SummariseImportTelemetry, 8)
+		completed := make(chan time.Duration, 1)
+
+		loader, err := newSummariseSpoolLoader(
+			Config{},
+			conn,
+			spoolDir,
+			manifest,
+			func(_ string, elapsed time.Duration) { completed <- elapsed },
+			func(snapshot SummariseImportTelemetry) { live <- snapshot },
+		)
+		So(err, ShouldBeNil)
+
+		startedAt := time.Date(2026, 8, 18, 12, 30, 0, 0, time.UTC)
+		loader.telemetryNow = func() time.Time { return startedAt }
+		ticker := &summariseSpoolManualTelemetryTicker{
+			ticks:   make(chan time.Time),
+			stopped: make(chan struct{}),
+		}
+		interval := make(chan time.Duration, 1)
+		loader.telemetryTicker = func(every time.Duration) summariseSpoolTelemetryTicker {
+			interval <- every
+
+			return ticker
+		}
+
+		result := make(chan error, 1)
+		go func() { result <- loader.deriveChildFilterAll(context.Background()) }()
+
+		<-conn.started
+		So(<-interval, ShouldEqual, summariseSpoolLiveTelemetryInterval)
+
+		initial := <-live
+		So(initial.Phase, ShouldEqual, importPhaseChildFilterAllInsert)
+		So(initial.PhaseElapsed, ShouldEqual, time.Duration(0))
+
+		ticker.ticks <- startedAt.Add(10 * time.Second)
+
+		first := <-live
+		So(first.PhaseElapsed, ShouldEqual, 10*time.Second)
+
+		ticker.ticks <- startedAt.Add(25 * time.Second)
+
+		second := <-live
+		So(second.PhaseElapsed, ShouldEqual, 25*time.Second)
+		So(second.PhaseElapsed, ShouldBeGreaterThan, first.PhaseElapsed)
+
+		close(conn.release)
+		So(errors.Is(<-result, errForcedFailure), ShouldBeTrue)
+		So(<-completed, ShouldBeGreaterThan, time.Duration(0))
+		<-ticker.stopped
+
+		final := <-live
+		So(final.PhaseElapsed, ShouldEqual, second.PhaseElapsed)
+		So(len(live), ShouldEqual, 0)
+	})
+
+	Convey("cancelling a blocking derived stage stops its live telemetry goroutine", t, func() {
+		spoolDir := filepath.Join(t.TempDir(), "spool")
+		manifest := writeSummariseSpoolLoaderSchema3Spool(
+			spoolDir,
+			time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC),
+		)
+		conn := &summariseSpoolBlockingDerivedConn{
+			summariseSpoolLoaderSpyConn: newSummariseSpoolLoaderSpyConn(manifest),
+			started:                     make(chan struct{}),
+			release:                     make(chan struct{}),
+		}
+		live := make(chan SummariseImportTelemetry, 4)
+
+		loader, err := newSummariseSpoolLoader(
+			Config{}, conn, spoolDir, manifest, nil,
+			func(snapshot SummariseImportTelemetry) { live <- snapshot },
+		)
+		So(err, ShouldBeNil)
+
+		startedAt := time.Date(2026, 8, 18, 12, 30, 0, 0, time.UTC)
+		loader.telemetryNow = func() time.Time { return startedAt }
+		ticker := &summariseSpoolManualTelemetryTicker{
+			ticks:   make(chan time.Time),
+			stopped: make(chan struct{}),
+		}
+		loader.telemetryTicker = func(time.Duration) summariseSpoolTelemetryTicker { return ticker }
+
+		ctx, cancel := context.WithCancel(context.Background())
+
+		result := make(chan error, 1)
+		go func() { result <- loader.deriveChildFilterAll(ctx) }()
+
+		<-conn.started
+
+		initial := <-live
+		So(initial.PhaseElapsed, ShouldEqual, time.Duration(0))
+
+		cancel()
+		So(errors.Is(<-result, context.Canceled), ShouldBeTrue)
+		<-ticker.stopped
+
+		final := <-live
+		So(final.PhaseElapsed, ShouldEqual, initial.PhaseElapsed)
+		So(len(live), ShouldEqual, 0)
+	})
+
+	Convey("live publication telemetry uses its own phase channel and advances elapsed time", t, func() {
+		spoolDir := filepath.Join(t.TempDir(), "spool")
+		manifest := writeSummariseSpoolLoaderSchema3Spool(
+			spoolDir,
+			time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC),
+		)
+		conn := newSummariseSpoolLoaderSpyConn(manifest)
+
+		var (
+			completed []time.Duration
+			live      []SummariseImportTelemetry
+		)
+
+		loader, err := newSummariseSpoolLoader(
+			Config{},
+			conn,
+			spoolDir,
+			manifest,
+			func(_ string, elapsed time.Duration) { completed = append(completed, elapsed) },
+			func(snapshot SummariseImportTelemetry) { live = append(live, snapshot) },
+		)
+		So(err, ShouldBeNil)
+
+		now := time.Date(2026, 8, 18, 12, 30, 0, 0, time.UTC)
+		loader.telemetryNow = func() time.Time { return now }
+
+		err = loader.timeImportPhaseContext(context.Background(), "derived_stage", func() error {
+			So(completed, ShouldBeEmpty)
+			So(live, ShouldHaveLength, 1)
+			So(live[0].Phase, ShouldEqual, "derived_stage")
+			So(live[0].PhaseElapsed, ShouldEqual, time.Duration(0))
+
+			now = now.Add(3 * time.Second)
+
+			loader.recordBatchTelemetry("derived_stage", 2)
+
+			return nil
+		})
+
+		So(err, ShouldBeNil)
+		So(completed, ShouldHaveLength, 1)
+		So(completed[0], ShouldBeGreaterThan, time.Duration(0))
+		So(live, ShouldHaveLength, 3)
+		So(live[1].PhaseElapsed, ShouldEqual, 3*time.Second)
+		So(live[2].PhaseElapsed, ShouldEqual, 3*time.Second)
+	})
+
 	Convey("summarise spool load rejects manifests missing schema2 table manifests", t, func() {
 		manifest := &chspool.Manifest{
 			Version:    chspool.Version,
@@ -660,6 +821,49 @@ func TestClickHouseSummariseSpoolLoader(t *testing.T) {
 		So(hasActive, ShouldBeTrue)
 		So(activeSID, ShouldEqual, sid)
 	})
+
+	Convey("live loader progress never declares zero server-written bytes available for nonempty inserts", t,
+		func() {
+			th := newClickHouseTestHarness(t)
+			cfg := th.newConfig()
+			cfg.QueryTimeout = 5 * time.Second
+
+			spoolDir := filepath.Join(t.TempDir(), "spool")
+			manifest := writeSummariseSpoolLoaderSchema3SpoolWithFiles(
+				spoolDir,
+				time.Date(2026, 8, 18, 13, 0, 0, 0, time.UTC),
+			)
+
+			var snapshots []SummariseImportTelemetry
+
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+
+			_, err := LoadSummariseSpoolReportWithTelemetry(
+				ctx,
+				cfg,
+				spoolDir,
+				manifest,
+				nil,
+				func(snapshot SummariseImportTelemetry) { snapshots = append(snapshots, snapshot) },
+			)
+
+			So(err, ShouldBeNil)
+
+			var sentRows uint64
+
+			invalidAvailability := 0
+
+			for _, snapshot := range snapshots {
+				sentRows = max(sentRows, snapshot.RowsSent)
+				if snapshot.RowsSent > 0 && snapshot.BytesSentAvailable && snapshot.BytesSent == 0 {
+					invalidAvailability++
+				}
+			}
+
+			So(sentRows, ShouldBeGreaterThan, uint64(0))
+			So(invalidAvailability, ShouldEqual, 0)
+		})
 
 	Convey("summarise spool replay loads schema2 rows before active-prefix publish refresh", t, func() {
 		th := newClickHouseTestHarness(t)
@@ -3355,6 +3559,41 @@ func (c *summariseSpoolDerivedChildDeadlineConn) Exec(
 	}
 
 	return c.summariseSpoolLoaderSpyConn.Exec(ctx, query, args...)
+}
+
+type summariseSpoolBlockingDerivedConn struct {
+	*summariseSpoolLoaderSpyConn
+
+	started chan struct{}
+	release chan struct{}
+}
+
+func (c *summariseSpoolBlockingDerivedConn) Exec(ctx context.Context, query string, args ...any) error {
+	if query != derivedChildFilterAllInsertQuery {
+		return c.summariseSpoolLoaderSpyConn.Exec(ctx, query, args...)
+	}
+
+	close(c.started)
+
+	select {
+	case <-c.release:
+		return errForcedFailure
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+type summariseSpoolManualTelemetryTicker struct {
+	ticks   chan time.Time
+	stopped chan struct{}
+}
+
+func (t *summariseSpoolManualTelemetryTicker) channel() <-chan time.Time {
+	return t.ticks
+}
+
+func (t *summariseSpoolManualTelemetryTicker) stop() {
+	close(t.stopped)
 }
 
 type summariseSpoolLoaderChildDigest struct {

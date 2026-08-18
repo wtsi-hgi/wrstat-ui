@@ -34,6 +34,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -58,6 +59,8 @@ const (
 	spoolLoadTableStatsNotRequested                = "not_requested"
 	clickHouseInsufficientPrivilegeCode            = 497
 	summariseSpoolFilterAmplificationWarnThreshold = 5.0
+	summariseSpoolPartTelemetryTimeout             = 2 * time.Second
+	summariseSpoolLiveTelemetryInterval            = 30 * time.Second
 
 	selectReadyActiveVirtualSetCountsQuery = "SELECT summary_rows, filter_rows, child_rows " +
 		"FROM wrstat_active_virtual_sets WHERE active_set_id = ? AND ready = 1 LIMIT 1"
@@ -119,6 +122,29 @@ type historyLastDateKey struct {
 	gid       uint32
 }
 
+type summariseSpoolTelemetryTicker interface {
+	channel() <-chan time.Time
+	stop()
+}
+
+func newSummariseSpoolTelemetryTicker(every time.Duration) summariseSpoolTelemetryTicker {
+	return &summariseSpoolRealTelemetryTicker{Ticker: time.NewTicker(every)}
+}
+
+func parseSummariseSpoolIdentity(manifest *chspool.Manifest) (uuid.UUID, time.Time, error) {
+	snapshot, err := uuid.Parse(manifest.SnapshotID)
+	if err != nil {
+		return uuid.Nil, time.Time{}, fmt.Errorf("clickhouse: invalid summarise spool snapshot id: %w", err)
+	}
+
+	updatedAt, err := time.Parse(time.RFC3339Nano, manifest.UpdatedAt)
+	if err != nil {
+		return uuid.Nil, time.Time{}, fmt.Errorf("clickhouse: invalid summarise spool updated_at: %w", err)
+	}
+
+	return snapshot, updatedAt, nil
+}
+
 type summariseSpoolLoader struct {
 	cfg                 Config
 	conn                driver.Conn
@@ -129,6 +155,13 @@ type summariseSpoolLoader struct {
 	importPhaseRecorder func(string, time.Duration)
 	loadedRows          map[string]uint64
 	groupUsageDates     map[uint32]finaliseQuotaDates
+	telemetryRecorder   func(SummariseImportTelemetry)
+	telemetry           SummariseImportTelemetry
+	telemetryNow        func() time.Time
+	telemetryStarted    time.Time
+	telemetryMu         sync.Mutex
+	telemetryEmitMu     sync.Mutex
+	telemetryTicker     func(time.Duration) summariseSpoolTelemetryTicker
 }
 
 func newSummariseSpoolLoader(
@@ -137,18 +170,14 @@ func newSummariseSpoolLoader(
 	spoolDir string,
 	manifest *chspool.Manifest,
 	recorder func(string, time.Duration),
+	telemetryRecorder ...func(SummariseImportTelemetry),
 ) (*summariseSpoolLoader, error) {
-	snapshot, err := uuid.Parse(manifest.SnapshotID)
+	snapshot, updatedAt, err := parseSummariseSpoolIdentity(manifest)
 	if err != nil {
-		return nil, fmt.Errorf("clickhouse: invalid summarise spool snapshot id: %w", err)
+		return nil, err
 	}
 
-	updatedAt, err := time.Parse(time.RFC3339Nano, manifest.UpdatedAt)
-	if err != nil {
-		return nil, fmt.Errorf("clickhouse: invalid summarise spool updated_at: %w", err)
-	}
-
-	return &summariseSpoolLoader{
+	loader := &summariseSpoolLoader{
 		cfg:                 cfg,
 		conn:                conn,
 		dir:                 spoolDir,
@@ -158,7 +187,14 @@ func newSummariseSpoolLoader(
 		importPhaseRecorder: recorder,
 		loadedRows:          map[string]uint64{},
 		groupUsageDates:     map[uint32]finaliseQuotaDates{},
-	}, nil
+		telemetryNow:        time.Now,
+		telemetryTicker:     newSummariseSpoolTelemetryTicker,
+	}
+	if len(telemetryRecorder) > 0 {
+		loader.telemetryRecorder = telemetryRecorder[0]
+	}
+
+	return loader, nil
 }
 
 func (l *summariseSpoolLoader) load(parent context.Context) error {
@@ -173,7 +209,7 @@ func (l *summariseSpoolLoader) loadWithAfterPublish(
 
 	parent = loadParentContext(parent)
 
-	tracker, err := newSummariseSpoolPublishTracker(l.dir, l.manifest)
+	tracker, err := l.newPublishTracker()
 	if err != nil {
 		return err
 	}
@@ -203,6 +239,18 @@ func loadParentContext(parent context.Context) context.Context {
 	}
 
 	return parent
+}
+
+func (l *summariseSpoolLoader) newPublishTracker() (*summariseSpoolPublishTracker, error) {
+	tracker, err := newSummariseSpoolPublishTracker(l.dir, l.manifest)
+	if err != nil {
+		return nil, err
+	}
+
+	tracker.onMark = l.recordCheckpointTelemetry
+	l.recordCheckpointTelemetry(tracker.currentCheckpoint())
+
+	return tracker, nil
 }
 
 func (l *summariseSpoolLoader) enforceFullFilterAmplificationGateBeforePublish(
@@ -267,7 +315,7 @@ func (l *summariseSpoolLoader) prepareSnapshot(parent context.Context) error {
 		return err
 	}
 
-	return l.timeImportPhase(importPhasePartitionDropReset, func() error {
+	return l.timeImportPhaseContext(parent, importPhasePartitionDropReset, func() error {
 		if err := dropSnapshotPartitionsForMount(
 			parent,
 			l.conn,
@@ -488,7 +536,7 @@ func (l *summariseSpoolLoader) loadActiveVirtualDirs(parent context.Context) err
 }
 
 func (l *summariseSpoolLoader) deriveChildFilterAll(parent context.Context) error {
-	return l.timeImportPhase(importPhaseChildFilterAllInsert, func() error {
+	return l.timeImportPhaseContext(parent, importPhaseChildFilterAllInsert, func() error {
 		ctx, cancel := l.queryContext(parent)
 		defer cancel()
 
@@ -669,6 +717,211 @@ func (l *summariseSpoolLoader) requiresFullFilterAmplificationGate() bool {
 	return l.loadedRows[chspool.TableDirFilterAll] > 0
 }
 
+func (l *summariseSpoolLoader) beginImportTelemetry(phase string) {
+	if l.telemetryRecorder == nil {
+		return
+	}
+
+	now := l.telemetryTime()
+	l.telemetryMu.Lock()
+	l.telemetry.Phase = phase
+	l.telemetry.PhaseRows = 0
+	l.telemetry.PhaseElapsed = 0
+	l.telemetry.ServerPartCountAvailable = false
+	l.telemetryStarted = now
+	l.telemetryMu.Unlock()
+	l.emitImportTelemetryAt(now)
+}
+
+func (l *summariseSpoolLoader) recordBatchTelemetry(phase string, rows uint64) {
+	if l.telemetryRecorder == nil {
+		return
+	}
+
+	l.telemetryMu.Lock()
+	l.telemetry.Phase = phase
+	l.telemetry.RowsSent += rows
+	l.telemetry.BatchCount++
+	l.telemetry.PhaseRows += rows
+	l.telemetryMu.Unlock()
+	l.emitImportTelemetry()
+}
+
+func (l *summariseSpoolLoader) recordCheckpointTelemetry(checkpoint string) {
+	if l.telemetryRecorder == nil {
+		return
+	}
+
+	l.telemetryMu.Lock()
+	l.telemetry.CurrentCheckpoint = checkpoint
+	l.telemetryMu.Unlock()
+	l.emitImportTelemetry()
+}
+
+func (l *summariseSpoolLoader) recordServerProgress(progress *proto.Progress) {
+	if l.telemetryRecorder == nil || progress == nil {
+		return
+	}
+
+	if progress.WroteBytes == 0 {
+		return
+	}
+
+	l.telemetryMu.Lock()
+	l.telemetry.BytesSentAvailable = true
+	l.telemetry.BytesSent += progress.WroteBytes
+	l.telemetryMu.Unlock()
+}
+
+func (l *summariseSpoolLoader) emitImportTelemetry() {
+	l.emitImportTelemetryAt(l.telemetryTime())
+}
+
+func (l *summariseSpoolLoader) emitImportTelemetryAt(now time.Time) {
+	if l.telemetryRecorder == nil {
+		return
+	}
+
+	l.telemetryMu.Lock()
+	if !l.telemetryStarted.IsZero() {
+		elapsed := now.Sub(l.telemetryStarted)
+		if elapsed > l.telemetry.PhaseElapsed {
+			l.telemetry.PhaseElapsed = elapsed
+		}
+	}
+
+	snapshot := l.telemetry
+	l.telemetryMu.Unlock()
+
+	l.telemetryEmitMu.Lock()
+	l.telemetryRecorder(snapshot)
+	l.telemetryEmitMu.Unlock()
+}
+
+func (l *summariseSpoolLoader) telemetryTime() time.Time {
+	if l.telemetryNow != nil {
+		return l.telemetryNow()
+	}
+
+	return time.Now()
+}
+
+func (l *summariseSpoolLoader) recordServerPartCount(parent context.Context, table string) {
+	if l.telemetryRecorder == nil {
+		return
+	}
+
+	ctx, cancel := queryContext(parent, min(queryTimeout(l.cfg), summariseSpoolPartTelemetryTimeout))
+	defer cancel()
+
+	const query = "SELECT toUInt64(count()) FROM system.parts WHERE database = ? AND table = ? AND active"
+
+	var count uint64
+	if err := l.conn.QueryRow(ctx, query, l.cfg.Database, table).Scan(&count); err == nil {
+		l.telemetryMu.Lock()
+		l.telemetry.ServerPartCount = count
+		l.telemetry.ServerPartCountAvailable = true
+		l.telemetryMu.Unlock()
+	}
+
+	l.emitImportTelemetry()
+}
+
+func (l *summariseSpoolLoader) timeImportPhaseWithTelemetry(
+	parent context.Context,
+	phase string,
+	telemetryPhase string,
+	fn func() error,
+) error {
+	l.beginImportTelemetry(telemetryPhase)
+	stopLiveTelemetry := l.startLiveImportTelemetry(parent)
+
+	err := timeImportPhase(func(p string, d time.Duration) {
+		recordImportPhase(l.importPhaseRecorder, p, d)
+	}, phase, fn)
+
+	stopLiveTelemetry()
+	l.emitImportTelemetry()
+
+	return err
+}
+
+func (l *summariseSpoolLoader) startLiveImportTelemetry(parent context.Context) func() {
+	if l.telemetryRecorder == nil {
+		return func() {}
+	}
+
+	ticker := l.telemetryTicker(summariseSpoolLiveTelemetryInterval)
+	stop := make(chan struct{})
+	done := make(chan struct{})
+
+	go l.runLiveImportTelemetry(parent, ticker, stop, done)
+
+	return func() {
+		close(stop)
+		<-done
+	}
+}
+
+func (l *summariseSpoolLoader) runLiveImportTelemetry(
+	parent context.Context,
+	ticker summariseSpoolTelemetryTicker,
+	stop <-chan struct{},
+	done chan<- struct{},
+) {
+	defer close(done)
+	defer ticker.stop()
+
+	for {
+		select {
+		case now, ok := <-ticker.channel():
+			if !ok {
+				return
+			}
+
+			l.emitImportTelemetryAt(now)
+		case <-parent.Done():
+			return
+		case <-stop:
+			return
+		}
+	}
+}
+
+func (l *summariseSpoolLoader) timeImportPhaseContext(
+	parent context.Context,
+	phase string,
+	fn func() error,
+) error {
+	return l.timeImportPhaseWithTelemetry(parent, phase, phase, fn)
+}
+
+func (l *summariseSpoolLoader) newDGUTAWriter(parent context.Context) *dgutaWriter {
+	return &dgutaWriter{
+		cfg:                 l.cfg,
+		conn:                l.conn,
+		mountPath:           l.manifest.MountPath,
+		updatedAt:           l.updatedAt,
+		snapshot:            l.snapshot,
+		importPhaseRecorder: l.importPhaseRecorder,
+		importPhaseRunner: func(phase string, fn func() error) error {
+			return l.timeImportPhaseContext(parent, phase, fn)
+		},
+	}
+}
+
+type summariseSpoolRealTelemetryTicker struct {
+	*time.Ticker
+}
+
+func (t *summariseSpoolRealTelemetryTicker) channel() <-chan time.Time {
+	return t.C
+}
+
+func (t *summariseSpoolRealTelemetryTicker) stop() {
+	t.Stop()
+}
+
 type summariseSpoolFullFilterAmplification struct {
 	dirVsDirFacts   float64
 	childVsDirFacts float64
@@ -737,6 +990,30 @@ func summariseSpoolAddImportPhaseDurations(
 			stats[table] = tableStats
 		}
 	}
+}
+
+// LoadSummariseSpoolReportWithTelemetry loads a spool while reporting live
+// client/server publication counters in addition to completed phase timings.
+func LoadSummariseSpoolReportWithTelemetry(
+	ctx context.Context,
+	cfg Config,
+	spoolDir string,
+	manifest *chspool.Manifest,
+	recorder func(string, time.Duration),
+	telemetryRecorder func(SummariseImportTelemetry),
+) (perfreport.Report, error) {
+	builder := newSummariseSpoolLoadReportBuilder(spoolDir, manifest, recorder)
+
+	err := runSummariseSpoolLoad(
+		ctx, cfg, spoolDir, manifest, builder.record, builder.collect, telemetryRecorder,
+	)
+	if err != nil {
+		return builder.report, err
+	}
+
+	builder.finish()
+
+	return builder.report, nil
 }
 
 func summariseSpoolRowAmplification(rows uint64, baselineRows uint64) float64 {
@@ -1340,7 +1617,7 @@ func (l *summariseSpoolLoader) insertEligibleHistoryRows( //nolint:funlen,gocogn
 	parent context.Context,
 	rows []chspool.BasedirsHistoryRow,
 ) error {
-	return l.timeImportPhase(importPhaseBasedirsHistory, func() error {
+	return l.timeImportPhaseContext(parent, importPhaseBasedirsHistory, func() error {
 		lastDates, err := l.historyLastDatesByKey(parent, rows)
 		if err != nil {
 			return err
@@ -1727,7 +2004,9 @@ func (l *summariseSpoolLoader) loadTableWithQuery( //nolint:funlen
 		return nil
 	}
 
-	return l.timeImportPhase(phase, func() error {
+	telemetryPhase := summariseSpoolLoadPhasePrefix + table
+
+	err := l.timeImportPhaseWithTelemetry(parent, phase, telemetryPhase, func() error {
 		var (
 			batch    driver.Batch
 			openedAt time.Time
@@ -1742,6 +2021,10 @@ func (l *summariseSpoolLoader) loadTableWithQuery( //nolint:funlen
 			openedAt:  &openedAt,
 			writeErr:  &writeErr,
 			batchSize: summariseSpoolBatchSizeFor(table),
+			onSend: func(rows uint64) {
+				l.recordBatchTelemetry(telemetryPhase, rows)
+			},
+			onProgress: l.recordServerProgress,
 		}
 
 		rows, err := load(parent, writer)
@@ -1761,6 +2044,13 @@ func (l *summariseSpoolLoader) loadTableWithQuery( //nolint:funlen
 
 		return nil
 	})
+	if err != nil {
+		return err
+	}
+
+	l.recordServerPartCount(parent, table)
+
+	return nil
 }
 
 func (l *summariseSpoolLoader) tryStageZeroContributionActiveVirtualRows( //nolint:gocyclo,funlen
@@ -2288,14 +2578,7 @@ func (l *summariseSpoolLoader) publishWithTracker(
 		return nil
 	}
 
-	writer := &dgutaWriter{
-		cfg:                 l.cfg,
-		conn:                l.conn,
-		mountPath:           l.manifest.MountPath,
-		updatedAt:           l.updatedAt,
-		snapshot:            l.snapshot,
-		importPhaseRecorder: l.importPhaseRecorder,
-	}
+	writer := l.newDGUTAWriter(parent)
 
 	if err := l.ensureFreshPreSwitchResumeState(parent, writer, tracker); err != nil {
 		return err
@@ -2830,12 +3113,6 @@ func (l *summariseSpoolLoader) ensureActivePrefixRollupsRefreshed(
 	return tracker.mark(summariseSpoolPublishPhaseActivePrefixRefreshed)
 }
 
-func (l *summariseSpoolLoader) timeImportPhase(phase string, fn func() error) error {
-	return timeImportPhase(func(p string, d time.Duration) {
-		recordImportPhase(l.importPhaseRecorder, p, d)
-	}, phase, fn)
-}
-
 func (l *summariseSpoolLoader) loadReport(parent context.Context) (perfreport.Report, error) {
 	builder := newSummariseSpoolLoadReportBuilder(l.dir, l.manifest, l.importPhaseRecorder)
 	originalRecorder := l.importPhaseRecorder
@@ -2957,6 +3234,7 @@ func runSummariseSpoolLoad(
 	manifest *chspool.Manifest,
 	recorder func(string, time.Duration),
 	afterPublish summariseSpoolAfterPublish,
+	telemetryRecorder ...func(SummariseImportTelemetry),
 ) error {
 	if err := validateSummariseSpoolLoad(cfg, manifest); err != nil {
 		return err
@@ -2970,7 +3248,7 @@ func runSummariseSpoolLoad(
 		return err
 	}
 
-	loader, err := newSummariseSpoolLoader(cfg, conn, spoolDir, manifest, recorder)
+	loader, err := newSummariseSpoolLoader(cfg, conn, spoolDir, manifest, recorder, telemetryRecorder...)
 	if err != nil {
 		_ = conn.Close()
 
@@ -3229,7 +3507,15 @@ func LoadSummariseSpoolReport(
 ) (perfreport.Report, error) {
 	builder := newSummariseSpoolLoadReportBuilder(spoolDir, manifest, recorder)
 
-	err := runSummariseSpoolLoad(ctx, cfg, spoolDir, manifest, builder.record, builder.collect)
+	err := runSummariseSpoolLoad(
+		ctx,
+		cfg,
+		spoolDir,
+		manifest,
+		builder.record,
+		builder.collect,
+		summariseImportTelemetryFromContext(ctx),
+	)
 	if err != nil {
 		return builder.report, err
 	}

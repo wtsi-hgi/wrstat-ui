@@ -93,14 +93,20 @@ func TestParseStats(t *testing.T) {
 
 			p = NewStatsParser(strings.NewReader(strings.Join(lines, "\n")))
 
+			var synthesised int
 			for p.Scan(info) == nil {
 				So(files, ShouldNotBeEmpty)
 				So(string(info.Path), ShouldEqual, files[0])
+
+				if p.Synthesised() {
+					synthesised++
+				}
 
 				files = files[1:]
 			}
 
 			So(files, ShouldBeEmpty)
+			So(synthesised, ShouldEqual, 6)
 		})
 
 		Convey("Directories marked as file will be typed as a directory", func() {

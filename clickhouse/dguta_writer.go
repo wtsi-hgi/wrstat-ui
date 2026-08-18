@@ -876,7 +876,9 @@ type dgutaWriter struct {
 
 	batchNow func() time.Time
 
-	importPhaseRecorder func(string, time.Duration)
+	importPhaseRecorder      func(string, time.Duration)
+	importPhaseStartRecorder func(string)
+	importPhaseRunner        func(string, func() error) error
 
 	// failBeforeSwitchErr forces Close() to fail before switching snapshots.
 	// Used only by integration tests.
@@ -2323,6 +2325,14 @@ func (w *dgutaWriter) recordImportPhase(phase string, d time.Duration) {
 }
 
 func (w *dgutaWriter) timeImportPhase(phase string, fn func() error) error {
+	if w != nil && w.importPhaseRunner != nil {
+		return w.importPhaseRunner(phase, fn)
+	}
+
+	if w != nil && w.importPhaseStartRecorder != nil {
+		w.importPhaseStartRecorder(phase)
+	}
+
 	return timeImportPhase(w.recordImportPhase, phase, fn)
 }
 

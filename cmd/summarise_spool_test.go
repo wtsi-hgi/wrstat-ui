@@ -343,7 +343,7 @@ func summariseSpoolHasDirbuildScratchForTest(t *testing.T, spoolDir string) bool
 		So(err, ShouldBeNil)
 
 		name := entry.Name()
-		if strings.HasPrefix(name, "wrstat-dirbuild-summary-") || name == "summaries.sqlite" {
+		if strings.HasPrefix(name, "wrstat-dirbuild-summary-") || name == summariseSQLiteScratchName {
 			hasScratch = true
 		}
 
@@ -3223,6 +3223,85 @@ func summariseSpoolReportUint64MapInputForTest(
 	}
 
 	return nil
+}
+
+func TestSummariseContiguityTelemetry(t *testing.T) {
+	Convey("recorder-free probes and dirbuild options allocate no shape recorder", t, func() {
+		withoutShape := testing.AllocsPerRun(100, func() {
+			_, state, err := newSummariseSpoolContiguityProbe(summariseTestMountPath, false)
+			So(err, ShouldBeNil)
+			runtime.KeepAlive(state)
+		})
+		withShape := testing.AllocsPerRun(100, func() {
+			_, state, err := newSummariseSpoolContiguityProbe(summariseTestMountPath, true)
+			So(err, ShouldBeNil)
+			runtime.KeepAlive(state)
+		})
+
+		withoutRecorder := summariseSpoolDirbuildOptions(t.TempDir(), new(dirbuild.DiskMetrics), nil)
+		So(withoutRecorder.Progress, ShouldBeNil)
+
+		diag := newSummariseDiagnostics("input")
+		withRecorder := summariseSpoolDirbuildOptions(t.TempDir(), new(dirbuild.DiskMetrics), diag)
+
+		So(withRecorder.Progress, ShouldNotBeNil)
+		So(withoutShape, ShouldBeLessThan, withShape)
+	})
+
+	Convey("contiguity telemetry reports distinct heavy descendants relative to a non-root mount", t, func() {
+		fixture := newSummariseActiveSnapshotFixture(t)
+
+		var input bytes.Buffer
+		writeSpoolFixtureStatsRow(
+			&input, summariseTestMountPath, 'd', 4096, 10, 20, fixture.updatedAt.Unix(), 300, 1,
+		)
+		writeSpoolFixtureStatsRow(
+			&input, summariseTestMountPath+"alpha/", 'd',
+			4096, 11, 21, fixture.updatedAt.Unix(), 301, 1,
+		)
+		writeSpoolFixtureStatsRow(
+			&input, summariseTestMountPath+"alpha/deep/", 'd',
+			4096, 12, 22, fixture.updatedAt.Unix(), 302, 1,
+		)
+		writeSpoolFixtureStatsRow(
+			&input, summariseTestMountPath+"alpha/deep/file.dat", 'f',
+			10, 13, 23, fixture.updatedAt.Unix(), 303, 1,
+		)
+		writeSpoolFixtureStatsRow(
+			&input, summariseTestMountPath+"beta/", 'd',
+			4096, 14, 24, fixture.updatedAt.Unix(), 304, 1,
+		)
+		writeSpoolFixtureStatsRow(
+			&input, summariseTestMountPath+"beta/deep/", 'd',
+			4096, 15, 25, fixture.updatedAt.Unix(), 305, 1,
+		)
+		writeSpoolFixtureStatsRow(
+			&input, summariseTestMountPath+"beta/deep/file.dat", 'f',
+			20, 16, 26, fixture.updatedAt.Unix(), 306, 1,
+		)
+		writeSpoolFixtureStatsRow(
+			&input, summariseTestMountPath+"tail.dat", 'f',
+			30, 17, 27, fixture.updatedAt.Unix(), 307, 1,
+		)
+		writeGzipStats(t, fixture.statsPath, input.Bytes())
+
+		var logs bytes.Buffer
+
+		restoreLogs := captureSummariseDiagnosticsLogs(&logs)
+		Reset(restoreLogs)
+
+		result, err := summariseSpoolProbeContiguity(
+			fixture.statsPath,
+			summariseTestMountPath,
+			newSummariseDiagnostics(fixture.statsPath),
+		)
+
+		So(err, ShouldBeNil)
+		So(result.contiguous, ShouldBeTrue)
+
+		So(logs.String(), ShouldContainSubstring,
+			"heavy_prefixes="+quoteForDiagnostics("alpha/:2,beta/:2"))
+	})
 }
 
 func writeContiguousPrefixSharingDirectorySiblingSpoolFixtureStats(

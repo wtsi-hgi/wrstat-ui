@@ -303,6 +303,22 @@ func TestClickHouseImportBlockWriter(t *testing.T) {
 		So(conn.emptySends(), ShouldEqual, 0)
 	})
 
+	Convey("Import block writer reports exact rows for each successful live batch", t, func() {
+		conn := &importBlockWriterSpyConn{}
+		writer := newTestImportBlockWriter(conn, 2, time.Now)
+
+		var sent []uint64
+
+		writer.onSend = func(rows uint64) { sent = append(sent, rows) }
+
+		for range 5 {
+			So(writer.append(context.Background(), appendSpyImportBlockRow), ShouldBeNil)
+		}
+
+		So(writer.close(), ShouldBeNil)
+		So(sent, ShouldResemble, []uint64{2, 2, 1})
+	})
+
 	Convey("Import block writer sends an old non-empty block before appending the next row", t, func() {
 		now := time.Date(2026, 5, 29, 9, 0, 0, 0, time.UTC)
 		conn := &importBlockWriterSpyConn{}

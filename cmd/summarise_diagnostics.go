@@ -39,6 +39,7 @@ import (
 
 	"github.com/wtsi-hgi/wrstat-ui/clickhouse"
 	"github.com/wtsi-hgi/wrstat-ui/summary"
+	"github.com/wtsi-hgi/wrstat-ui/summary/dirbuild"
 )
 
 const (
@@ -64,9 +65,25 @@ type summariseDiagnostics struct {
 	target    *clickHouseSummariseTarget
 	started   time.Time
 
-	currentPhase string
-	lastRecords  uint64
-	lastElapsed  time.Duration
+	currentPhase                   string
+	lastRecords                    uint64
+	inputRows                      uint64
+	directoryNodes                 uint64
+	impliedDirectories             uint64
+	maximumDepth                   uint64
+	depthHistogram                 []uint64
+	heavyPrefixes                  []dirbuild.PrefixCount
+	sqliteBytes                    uint64
+	spoolBytes                     uint64
+	rowsPerSecond                  float64
+	phaseElapsed                   time.Duration
+	clickHouseRowsSent             uint64
+	clickHouseBytesSent            uint64
+	clickHouseBytesAvailable       bool
+	clickHouseBatchCount           uint64
+	clickHouseServerParts          uint64
+	clickHouseServerPartsAvailable bool
+	currentCheckpoint              string
 
 	phaseTotals  map[string]time.Duration
 	recentPhases []summarisePhaseDuration
@@ -121,13 +138,69 @@ func (d *summariseDiagnostics) setCurrentPhase(phase string) {
 	d.currentPhase = phase
 }
 
+func (d *summariseDiagnostics) beginPhase(phase string) {
+	if d == nil || phase == "" {
+		return
+	}
+
+	d.setCurrentPhase(phase)
+	d.logState("summarise phase start")
+}
+
+func (d *summariseDiagnostics) observeDirbuildTelemetry(snapshot dirbuild.Telemetry, spoolBytes uint64) {
+	if d == nil {
+		return
+	}
+
+	d.mu.Lock()
+	if snapshot.Phase != "" {
+		d.currentPhase = snapshot.Phase
+	}
+
+	d.lastRecords = snapshot.InputRows
+	d.inputRows = snapshot.InputRows
+	d.directoryNodes = snapshot.DirectoryNodes
+	d.impliedDirectories = snapshot.ImpliedDirectories
+	d.maximumDepth = snapshot.MaximumDepth
+	d.depthHistogram = append(d.depthHistogram[:0], snapshot.DepthHistogram...)
+	d.heavyPrefixes = append(d.heavyPrefixes[:0], snapshot.HeavyPrefixes...)
+	d.sqliteBytes = snapshot.SQLiteBytes
+	d.spoolBytes = spoolBytes
+	d.phaseElapsed = snapshot.PhaseElapsed
+	d.rowsPerSecond = dirbuildRowsPerSecond(snapshot)
+	d.mu.Unlock()
+
+	d.logState("summarise phase progress")
+}
+
+func dirbuildRowsPerSecond(snapshot dirbuild.Telemetry) float64 {
+	if snapshot.Phase != dirbuild.PhaseDirectoryScan && snapshot.Phase != dirbuild.PhasePass2Aggregation {
+		return 0
+	}
+
+	return diagnosticRowsPerSecond(snapshot.PhaseRows, snapshot.PhaseElapsed)
+}
+
+func (d *summariseDiagnostics) setShapeTelemetry(snapshot dirbuild.Telemetry) {
+	if d == nil {
+		return
+	}
+
+	d.mu.Lock()
+	d.directoryNodes = snapshot.DirectoryNodes
+	d.impliedDirectories = snapshot.ImpliedDirectories
+	d.maximumDepth = snapshot.MaximumDepth
+	d.depthHistogram = append(d.depthHistogram[:0], snapshot.DepthHistogram...)
+	d.heavyPrefixes = append(d.heavyPrefixes[:0], snapshot.HeavyPrefixes...)
+	d.mu.Unlock()
+}
+
 func (d *summariseDiagnostics) recordImportPhase(phase string, duration time.Duration) {
 	if d == nil || phase == "" || duration <= 0 {
 		return
 	}
 
 	d.mu.Lock()
-	defer d.mu.Unlock()
 
 	d.currentPhase = phase
 	d.phaseTotals[phase] += duration
@@ -139,6 +212,48 @@ func (d *summariseDiagnostics) recordImportPhase(phase string, duration time.Dur
 	if len(d.recentPhases) > summariseRecentPhaseLimit {
 		d.recentPhases = d.recentPhases[len(d.recentPhases)-summariseRecentPhaseLimit:]
 	}
+	d.mu.Unlock()
+}
+
+func (d *summariseDiagnostics) observeClickHouseTelemetry(snapshot clickhouse.SummariseImportTelemetry) {
+	if d == nil {
+		return
+	}
+
+	d.mu.Lock()
+	if snapshot.Phase != "" {
+		d.currentPhase = snapshot.Phase
+	}
+
+	d.currentCheckpoint = snapshot.CurrentCheckpoint
+	d.clickHouseRowsSent = snapshot.RowsSent
+	d.clickHouseBytesSent = snapshot.BytesSent
+	d.clickHouseBytesAvailable = snapshot.BytesSentAvailable
+	d.clickHouseBatchCount = snapshot.BatchCount
+	d.phaseElapsed = snapshot.PhaseElapsed
+	d.rowsPerSecond = diagnosticRowsPerSecond(snapshot.PhaseRows, snapshot.PhaseElapsed)
+	d.clickHouseServerParts = snapshot.ServerPartCount
+	d.clickHouseServerPartsAvailable = snapshot.ServerPartCountAvailable
+	d.mu.Unlock()
+	d.logState("summarise clickhouse progress")
+}
+
+func diagnosticRowsPerSecond(rows uint64, elapsed time.Duration) float64 {
+	if rows == 0 || elapsed <= 0 {
+		return 0
+	}
+
+	return float64(rows) / elapsed.Seconds()
+}
+
+func (d *summariseDiagnostics) setSpoolBytes(bytes uint64) {
+	if d == nil {
+		return
+	}
+
+	d.mu.Lock()
+	d.spoolBytes = bytes
+	d.mu.Unlock()
 }
 
 func (d *summariseDiagnostics) setProgress(s *summary.Summariser) {
@@ -170,13 +285,13 @@ func (d *summariseDiagnostics) logProgress(records uint64, elapsed time.Duration
 		return
 	}
 
-	currentPhase, recent := d.recordProgress(records, elapsed)
+	currentPhase, recent, telemetry := d.recordProgress(records, elapsed)
 
 	mem := memorySnapshot()
 
 	info(
 		"summarise progress input=%s records=%d elapsed=%s current_phase=%s "+
-			"heap_alloc_mb=%d heap_sys_mb=%d rss_mb=%s goroutines=%d gc_count=%d recent_import_phases=%s",
+			"heap_alloc_mb=%d heap_sys_mb=%d rss_mb=%s goroutines=%d gc_count=%d recent_import_phases=%s %s",
 		quoteForDiagnostics(d.input),
 		records,
 		elapsed.Round(time.Second),
@@ -187,6 +302,7 @@ func (d *summariseDiagnostics) logProgress(records uint64, elapsed time.Duration
 		mem.goroutines,
 		mem.gcCount,
 		quoteForDiagnostics(recent),
+		strings.Join(telemetry, " "),
 	)
 }
 
@@ -208,8 +324,67 @@ func memorySnapshot() summariseMemorySnapshot {
 	}
 }
 
+func (d *summariseDiagnostics) logInputProgress(records uint64, elapsed time.Duration) {
+	if d == nil {
+		return
+	}
+
+	d.logProgress(records, elapsed)
+}
+
+func (d *summariseDiagnostics) telemetryFieldsLocked() []string {
+	return []string{
+		fmt.Sprintf("input_rows=%d", d.inputRows),
+		fmt.Sprintf("directory_nodes=%d", d.directoryNodes),
+		fmt.Sprintf("implied_directories=%d", d.impliedDirectories),
+		fmt.Sprintf("maximum_depth=%d", d.maximumDepth),
+		fmt.Sprintf("sqlite_bytes=%d", d.sqliteBytes),
+		fmt.Sprintf("spool_bytes=%d", d.spoolBytes),
+		fmt.Sprintf("rows_per_second=%.2f", d.rowsPerSecond),
+		"phase_elapsed=" + formatDiagnosticDuration(d.phaseElapsed),
+		"depth_histogram=" + quoteForDiagnostics(formatDepthHistogram(d.depthHistogram)),
+		"heavy_prefixes=" + quoteForDiagnostics(formatHeavyPrefixes(d.heavyPrefixes)),
+		fmt.Sprintf("clickhouse_rows_sent=%d", d.clickHouseRowsSent),
+		"clickhouse_bytes_sent=" + diagnosticOptionalUint64(d.clickHouseBytesSent, d.clickHouseBytesAvailable),
+		fmt.Sprintf("clickhouse_batch_count=%d", d.clickHouseBatchCount),
+		"clickhouse_server_part_count=" +
+			diagnosticOptionalUint64(d.clickHouseServerParts, d.clickHouseServerPartsAvailable),
+		"current_checkpoint=" + quoteForDiagnostics(d.currentCheckpoint),
+	}
+}
+
 func quoteForDiagnostics(value string) string {
 	return strconv.Quote(value)
+}
+
+func formatDepthHistogram(histogram []uint64) string {
+	parts := make([]string, 0, len(histogram))
+	for depth, count := range histogram {
+		if count == 0 {
+			continue
+		}
+
+		parts = append(parts, fmt.Sprintf("%d:%d", depth, count))
+	}
+
+	return strings.Join(parts, ",")
+}
+
+func formatHeavyPrefixes(prefixes []dirbuild.PrefixCount) string {
+	parts := make([]string, 0, len(prefixes))
+	for _, prefix := range prefixes {
+		parts = append(parts, fmt.Sprintf("%s:%d", prefix.Prefix, prefix.Count))
+	}
+
+	return strings.Join(parts, ",")
+}
+
+func diagnosticOptionalUint64(value uint64, available bool) string {
+	if !available {
+		return unknownRSS
+	}
+
+	return strconv.FormatUint(value, 10)
 }
 
 func (d *summariseDiagnostics) logParseResult(records uint64, err error) {
@@ -230,14 +405,19 @@ func (d *summariseDiagnostics) logParseResult(records uint64, err error) {
 	d.logState("summarise parse complete")
 }
 
-func (d *summariseDiagnostics) recordProgress(records uint64, elapsed time.Duration) (string, string) {
+func (d *summariseDiagnostics) recordProgress(
+	records uint64,
+	elapsed time.Duration,
+) (string, string, []string) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
 	d.lastRecords = records
-	d.lastElapsed = elapsed
+	d.inputRows = records
+	d.rowsPerSecond = diagnosticRowsPerSecond(records, elapsed)
+	d.phaseElapsed = elapsed
 
-	return d.currentPhase, d.recentPhaseSummaryLocked()
+	return d.currentPhase, d.recentPhaseSummaryLocked(), d.telemetryFieldsLocked()
 }
 
 func (d *summariseDiagnostics) setRecordCount(records uint64) {
@@ -355,6 +535,7 @@ func (d *summariseDiagnostics) stateFields() []string {
 		"recent_import_phases="+quoteForDiagnostics(d.recentPhaseSummaryLocked()),
 		"total_import_phases="+quoteForDiagnostics(d.totalPhaseSummaryLocked()),
 	)
+	fields = append(fields, d.telemetryFieldsLocked()...)
 
 	fields = append(fields, chFields...)
 
@@ -362,10 +543,6 @@ func (d *summariseDiagnostics) stateFields() []string {
 }
 
 func (d *summariseDiagnostics) elapsed() time.Duration {
-	if d.lastElapsed > 0 {
-		return d.lastElapsed
-	}
-
 	return time.Since(d.started)
 }
 

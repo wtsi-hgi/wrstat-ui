@@ -74,6 +74,8 @@ type importBlockWriter struct {
 	batchSize   int
 	notPrepared error
 	now         func() time.Time
+	onSend      func(uint64)
+	onProgress  func(*ch.Progress)
 }
 
 func (w *importBlockWriter) append(
@@ -114,6 +116,10 @@ func (w *importBlockWriter) ensureReady(ctx context.Context) error {
 
 	if *w.batch != nil {
 		return nil
+	}
+
+	if w.onProgress != nil {
+		ctx = ch.Context(ctx, ch.WithProgress(w.onProgress))
 	}
 
 	prepared, err := prepareImportBatch(ctx, w.conn, w.query)
@@ -233,11 +239,16 @@ func (w *importBlockWriter) send() error {
 		return nil
 	}
 
+	rows := uint64((*w.batch).Rows()) //nolint:gosec // batch rows cannot be negative.
 	err := (*w.batch).Send()
 	*w.batch = nil
 	clearImportBatchOpened(w.openedAt)
 
 	if err == nil {
+		if w.onSend != nil {
+			w.onSend(rows)
+		}
+
 		return nil
 	}
 

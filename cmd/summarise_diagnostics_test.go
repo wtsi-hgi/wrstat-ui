@@ -41,6 +41,7 @@ import (
 	"github.com/wtsi-hgi/wrstat-ui/clickhouse"
 	"github.com/wtsi-hgi/wrstat-ui/internal/chspool"
 	"github.com/wtsi-hgi/wrstat-ui/internal/perfreport"
+	"github.com/wtsi-hgi/wrstat-ui/summary/dirbuild"
 )
 
 const summariseTestSecretDSN = "clickhouse://diag:secret@127.0.0.1:9000/default?" +
@@ -151,6 +152,13 @@ func TestSummariseDiagnosticsLogging(t *testing.T) {
 		So(output, ShouldContainSubstring, "goroutines=")
 		So(output, ShouldContainSubstring, "gc_count=")
 		So(output, ShouldContainSubstring, "current_phase=wrstat_dir_projection_insert")
+		So(output, ShouldContainSubstring, "input_rows=1000000")
+		So(output, ShouldContainSubstring, "rows_per_second=500000.00")
+		So(output, ShouldContainSubstring, "phase_elapsed=2s")
+		So(output, ShouldContainSubstring, "depth_histogram=")
+		So(output, ShouldContainSubstring, "heavy_prefixes=")
+		So(output, ShouldContainSubstring, "sqlite_bytes=0")
+		So(output, ShouldContainSubstring, "spool_bytes=0")
 		So(output, ShouldContainSubstring, "recent_import_phases="+
 			quoteForDiagnostics("wrstat_dguta_insert:20ms,wrstat_dir_projection_insert:30ms"))
 	})
@@ -171,6 +179,69 @@ func TestSummariseDiagnosticsLogging(t *testing.T) {
 		line := summariseDiagnosticLineContaining(output, "summarise parse complete")
 		So(line, ShouldContainSubstring, "records=1500000")
 		So(line, ShouldNotContainSubstring, "records=1000000")
+	})
+
+	Convey("live build telemetry reports phase transitions, counters, rate, storage, and bounded shape", t, func() {
+		var logs bytes.Buffer
+
+		restoreLogs := captureSummariseDiagnosticsLogs(&logs)
+		Reset(restoreLogs)
+
+		diag := newSummariseDiagnostics("stats.gz")
+		diag.observeDirbuildTelemetry(dirbuild.Telemetry{
+			Phase:              dirbuild.PhasePass2Aggregation,
+			InputRows:          250,
+			DirectoryNodes:     12,
+			ImpliedDirectories: 3,
+			MaximumDepth:       4,
+			DepthHistogram:     []uint64{1, 2, 5, 4},
+			HeavyPrefixes:      []dirbuild.PrefixCount{{Prefix: "/alpha/", Count: 140}},
+			SQLiteBytes:        4096,
+			PhaseRows:          200,
+			PhaseElapsed:       2 * time.Second,
+		}, 8192)
+
+		line := summariseDiagnosticLineContaining(logs.String(), "summarise phase progress")
+		So(line, ShouldContainSubstring, "current_phase=pass2_fact_aggregation")
+		So(line, ShouldContainSubstring, "input_rows=250")
+		So(line, ShouldContainSubstring, "directory_nodes=12")
+		So(line, ShouldContainSubstring, "implied_directories=3")
+		So(line, ShouldContainSubstring, "maximum_depth=4")
+		So(line, ShouldContainSubstring, "sqlite_bytes=4096")
+		So(line, ShouldContainSubstring, "spool_bytes=8192")
+		So(line, ShouldContainSubstring, "rows_per_second=100.00")
+		So(line, ShouldContainSubstring, "phase_elapsed=2s")
+		So(line, ShouldContainSubstring, "depth_histogram="+quoteForDiagnostics("0:1,1:2,2:5,3:4"))
+		So(line, ShouldContainSubstring, "heavy_prefixes="+quoteForDiagnostics("/alpha/:140"))
+	})
+
+	Convey("live ClickHouse telemetry reports batches, optional server evidence, and checkpoint", t, func() {
+		var logs bytes.Buffer
+
+		restoreLogs := captureSummariseDiagnosticsLogs(&logs)
+		Reset(restoreLogs)
+
+		diag := newSummariseDiagnostics("stats.gz")
+		diag.observeClickHouseTelemetry(clickhouse.SummariseImportTelemetry{
+			Phase:                    "spool_load_wrstat_files",
+			CurrentCheckpoint:        "spool_load_wrstat_files",
+			RowsSent:                 300_000,
+			BytesSent:                45_000_000,
+			BytesSentAvailable:       true,
+			BatchCount:               3,
+			PhaseElapsed:             125 * time.Millisecond,
+			ServerPartCount:          7,
+			ServerPartCountAvailable: true,
+		})
+
+		line := summariseDiagnosticLineContaining(logs.String(), "summarise clickhouse progress")
+		So(line, ShouldContainSubstring, "clickhouse_rows_sent=300000")
+		So(line, ShouldContainSubstring, "clickhouse_bytes_sent=45000000")
+		So(line, ShouldContainSubstring, "clickhouse_batch_count=3")
+		So(line, ShouldContainSubstring, "phase_elapsed=125ms")
+		So(line, ShouldContainSubstring, "clickhouse_server_part_count=7")
+		So(line, ShouldContainSubstring, "current_checkpoint="+
+			quoteForDiagnostics("spool_load_wrstat_files"))
 	})
 
 	Convey("parse-complete breadcrumbs report zero records without emitting progress for an empty parse", t, func() {

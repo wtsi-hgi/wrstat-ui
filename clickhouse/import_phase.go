@@ -25,7 +25,10 @@
 
 package clickhouse
 
-import "time"
+import (
+	"context"
+	"time"
+)
 
 type importPhaseRecorder func(string, time.Duration)
 
@@ -43,9 +46,52 @@ func timeImportPhase(
 }
 
 func recordImportPhase(recorder importPhaseRecorder, phase string, d time.Duration) {
-	if recorder == nil || d <= 0 {
+	if recorder == nil || phase == "" || d <= 0 {
 		return
 	}
 
 	recorder(phase, d)
 }
+
+// SummariseImportTelemetry reports exact client batch counters and optional
+// server-reported byte/part evidence during spool publication.
+type SummariseImportTelemetry struct {
+	Phase                    string
+	CurrentCheckpoint        string
+	RowsSent                 uint64
+	BytesSent                uint64
+	BytesSentAvailable       bool
+	BatchCount               uint64
+	PhaseRows                uint64
+	PhaseElapsed             time.Duration
+	ServerPartCount          uint64
+	ServerPartCountAvailable bool
+}
+
+// WithSummariseImportTelemetry attaches a live publication recorder without
+// changing the stable spool-loader call signature.
+func WithSummariseImportTelemetry(
+	ctx context.Context,
+	recorder func(SummariseImportTelemetry),
+) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	return context.WithValue(ctx, summariseImportTelemetryContextKey{}, recorder)
+}
+
+func summariseImportTelemetryFromContext(ctx context.Context) func(SummariseImportTelemetry) {
+	if ctx == nil {
+		return nil
+	}
+
+	recorder, ok := ctx.Value(summariseImportTelemetryContextKey{}).(func(SummariseImportTelemetry))
+	if !ok {
+		return nil
+	}
+
+	return recorder
+}
+
+type summariseImportTelemetryContextKey struct{}

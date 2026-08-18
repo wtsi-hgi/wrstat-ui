@@ -74,9 +74,10 @@ type summariseSpoolPublishState struct {
 }
 
 type summariseSpoolPublishTracker struct {
-	path  string
-	key   string
-	state summariseSpoolPublishState
+	path   string
+	key    string
+	state  summariseSpoolPublishState
+	onMark func(string)
 }
 
 func newSummariseSpoolPublishTracker(
@@ -170,7 +171,27 @@ func (t *summariseSpoolPublishTracker) mark(phase string) error {
 	t.state.CompletedPhases[phase] = now
 	t.state.LastCompletedUTC = now
 
-	return t.save()
+	if err := t.save(); err != nil {
+		return err
+	}
+
+	if t.onMark != nil {
+		t.onMark(phase)
+	}
+
+	return nil
+}
+
+func (t *summariseSpoolPublishTracker) currentCheckpoint() string {
+	var checkpoint, completedAt string
+	for phase, timestamp := range t.state.CompletedPhases {
+		if timestamp > completedAt {
+			checkpoint = phase
+			completedAt = timestamp
+		}
+	}
+
+	return checkpoint
 }
 
 func (t *summariseSpoolPublishTracker) setNextActiveSetID(activeSetID string) error {
@@ -197,7 +218,15 @@ func (t *summariseSpoolPublishTracker) setSwitchPlan(plan summariseSpoolSwitchPl
 	t.state.CompletedPhases[summariseSpoolPublishPhaseSwitchPlanned] = now
 	t.state.LastCompletedUTC = now
 
-	return t.save()
+	if err := t.save(); err != nil {
+		return err
+	}
+
+	if t.onMark != nil {
+		t.onMark(summariseSpoolPublishPhaseSwitchPlanned)
+	}
+
+	return nil
 }
 
 func (t *summariseSpoolPublishTracker) switchPlan() (summariseSpoolSwitchPlan, bool) {
@@ -248,7 +277,19 @@ func (t *summariseSpoolPublishTracker) clearPreSwitchPlan() error {
 		return nil
 	}
 
-	return t.save()
+	return t.saveAndNotifyCurrentCheckpoint()
+}
+
+func (t *summariseSpoolPublishTracker) saveAndNotifyCurrentCheckpoint() error {
+	if err := t.save(); err != nil {
+		return err
+	}
+
+	if t.onMark != nil {
+		t.onMark(t.currentCheckpoint())
+	}
+
+	return nil
 }
 
 func (t *summariseSpoolPublishTracker) save() error {
