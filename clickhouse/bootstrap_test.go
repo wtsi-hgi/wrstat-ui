@@ -775,6 +775,23 @@ func mustReadSchemaStatementForTest(t *testing.T, name string) string {
 	return stmt
 }
 
+func createSchemaBootstrapTestDatabase(
+	t *testing.T,
+	ctx context.Context,
+	h *clickHouseTestHarness,
+	cfg Config,
+) {
+	t.Helper()
+
+	conn := h.openConn(h.baseDSN(defaultDatabaseName))
+	defer func() { _ = conn.Close() }()
+
+	stmt := createDatabaseStmtPrefix + quoteIdent(cfg.Database)
+	if err := conn.Exec(ctx, stmt); err != nil {
+		t.Fatalf("failed to create bootstrap test database: %v", err)
+	}
+}
+
 func waitForSchemaVersionBootstrapHelpers(
 	t *testing.T,
 	ctx context.Context,
@@ -1523,6 +1540,8 @@ func TestNewClientBootstrapIsCrossProcessSafe(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 
+		createSchemaBootstrapTestDatabase(t, ctx, th, cfg)
+
 		lock, err := newSchemaBootstrapLock(opts, cfg.Database)
 		So(err, ShouldBeNil)
 		So(lock.acquire(ctx), ShouldBeNil)
@@ -1592,6 +1611,8 @@ func TestNewClientBootstrapLockWaitDoesNotUseQueryTimeout(t *testing.T) {
 
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
+
+		createSchemaBootstrapTestDatabase(t, ctx, th, cfg)
 
 		lock, err := newSchemaBootstrapLock(opts, cfg.Database)
 		So(err, ShouldBeNil)
