@@ -57,6 +57,8 @@ const (
 	bytesPerMiB                          = 1024 * 1024
 	summariseDirPerm                     = 0o755
 	summariseMarkerPerm                  = 0o600
+	clickhouseBuildOnlyFlag              = "clickhouse-build-only"
+	clickhousePublishOnlyFlag            = "clickhouse-publish-only"
 	clickhouseRecoverFlag                = "clickhouse-recover"
 	completionMarkerName                 = ".wrstat-ui-summarise-complete"
 	defaultSummariseFilesInsertBytes     = 16 * bytesPerMiB
@@ -82,6 +84,8 @@ var (
 	mounts         string
 
 	clickhouseRecover                bool
+	clickhouseBuildOnly              bool
+	clickhousePublishOnly            bool
 	summariseFilesInsertBytes        int64
 	summariseFilterInsertBytes       int64
 	summariseOtherInsertBytes        int64
@@ -104,6 +108,15 @@ var (
 	)
 	errSummariseClickHouseSnapshotAlreadyActive = errors.New(
 		"clickhouse snapshot already active",
+	)
+	errSummariseClickHousePhaseConflict = errors.New(
+		"clickhouse build-only and publish-only modes are mutually exclusive",
+	)
+	errSummariseClickHousePhaseTarget = errors.New(
+		"clickhouse build-only and publish-only modes require a ClickHouse output",
+	)
+	errSummariseClickHouseSpoolNotVerified = errors.New(
+		"clickhouse publish requires a verified complete spool",
 	)
 	errSummariseClickHouseActiveSnapshotRewrite = errors.New(
 		"clickhouse: refusing to rewrite active snapshot",
@@ -236,6 +249,14 @@ func validateSummarisePressureDurationFlags() error {
 	return nil
 }
 
+func validateSummariseClickHousePhaseTarget(target *clickHouseSummariseTarget) error {
+	if (clickhouseBuildOnly || clickhousePublishOnly) && target == nil {
+		return errSummariseClickHousePhaseTarget
+	}
+
+	return nil
+}
+
 func init() {
 	RootCmd.AddCommand(summariseCmd)
 
@@ -255,10 +276,18 @@ func init() {
 	addClickhouseQueryTimeoutFlag(summariseCmd.Flags(), &clickhouseQueryTO)
 	summariseCmd.Flags().BoolVar(&clickhouseRecover, clickhouseRecoverFlag, false,
 		"recover a failed ClickHouse summarise retry")
+	summariseCmd.Flags().BoolVar(&clickhouseBuildOnly, clickhouseBuildOnlyFlag, false,
+		"build and verify the ClickHouse spool without publishing it")
+	summariseCmd.Flags().BoolVar(&clickhousePublishOnly, clickhousePublishOnlyFlag, false,
+		"publish an existing verified ClickHouse spool without rebuilding it")
 	addSummariseClickHouseInsertFlags(summariseCmd)
 }
 
 func warnIfSummariseUnguarded() {
+	if clickhouseBuildOnly {
+		return
+	}
+
 	if os.Getenv(watchenv.Name) == watchenv.Value {
 		return
 	}
@@ -751,6 +780,10 @@ func run(args []string) (err error) {
 		return err
 	}
 
+	if phaseErr := validateSummariseClickHousePhaseTarget(chTarget); phaseErr != nil {
+		return phaseErr
+	}
+
 	handled, err := maybeRunClickHouseSpoolSummarise(args[0], chTarget, diag)
 	if handled {
 		return err
@@ -785,6 +818,10 @@ func run(args []string) (err error) {
 func checkArgs(args []string) error {
 	if len(args) != 1 {
 		return errSummariseExactlyOneInput
+	}
+
+	if clickhouseBuildOnly && clickhousePublishOnly {
+		return errSummariseClickHousePhaseConflict
 	}
 
 	if defaultDir == "" && userGroup == "" && groupUser == "" && basedirsDB == "" && dirgutaDB == "" {

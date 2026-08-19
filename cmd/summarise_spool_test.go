@@ -432,6 +432,111 @@ func (failingDirbuildError) Error() string {
 	return "forced dirbuild emission failure"
 }
 
+func TestSummariseClickHouseBuildPublishSplit(t *testing.T) {
+	Convey("a verified spool can be built without ClickHouse and published without rereading stats", t, func() {
+		fixture := newSummariseActiveSnapshotFixture(t)
+		fixture.writeValidStats(t)
+
+		restore := snapshotSummariseGlobals()
+		Reset(restore)
+
+		configureSummariseActiveSnapshotTest(fixture.outputDir, false)
+
+		activeChecks := 0
+		clickHouseSnapshotIsActive = func(clickhouse.Config, string, time.Time) (bool, error) {
+			activeChecks++
+
+			return false, nil
+		}
+
+		loadCalls := 0
+		loadSummariseClickHouseSpool = func(
+			_ context.Context,
+			_ clickhouse.Config,
+			spoolDir string,
+			manifest *chspool.Manifest,
+			_ func(string, time.Duration),
+		) (perfreport.Report, error) {
+			loadCalls++
+
+			So(spoolDir, ShouldEqual, summariseClickHouseSpoolDir(fixture.outputDir))
+			So(manifest.Tables[chspool.TableFiles].Rows, ShouldBeGreaterThan, uint64(0))
+
+			return perfreport.NewReport("clickhouse", spoolDir, 1, 0), nil
+		}
+
+		clickhouseBuildOnly = true
+
+		So(run([]string{fixture.statsPath}), ShouldBeNil)
+		So(activeChecks, ShouldEqual, 0)
+		So(loadCalls, ShouldEqual, 0)
+		So(summariseCompletionMarkerExists(fixture.outputDir), ShouldBeFalse)
+
+		spoolDir := summariseClickHouseSpoolDir(fixture.outputDir)
+		manifest, err := chspool.ReadManifest(spoolDir)
+		So(err, ShouldBeNil)
+		So(chspool.VerifyManifest(spoolDir, manifest, *manifest), ShouldBeNil)
+
+		So(os.Chmod(fixture.statsPath, 0), ShouldBeNil)
+		Reset(func() { So(os.Chmod(fixture.statsPath, 0o600), ShouldBeNil) })
+
+		So(run([]string{fixture.statsPath}), ShouldBeNil)
+		So(activeChecks, ShouldEqual, 0)
+		So(loadCalls, ShouldEqual, 0)
+
+		clickhouseBuildOnly = false
+		clickhousePublishOnly = true
+
+		So(run([]string{fixture.statsPath}), ShouldBeNil)
+		So(activeChecks, ShouldEqual, 1)
+		So(loadCalls, ShouldEqual, 1)
+		So(summariseCompletionMarkerExists(fixture.outputDir), ShouldBeTrue)
+	})
+
+	Convey("publish-only fails before ClickHouse when no verified spool exists", t, func() {
+		fixture := newSummariseActiveSnapshotFixture(t)
+		fixture.writeValidStats(t)
+
+		restore := snapshotSummariseGlobals()
+		Reset(restore)
+
+		configureSummariseActiveSnapshotTest(fixture.outputDir, false)
+
+		clickhousePublishOnly = true
+
+		activeChecks := 0
+		clickHouseSnapshotIsActive = func(clickhouse.Config, string, time.Time) (bool, error) {
+			activeChecks++
+
+			return false, nil
+		}
+
+		err := run([]string{fixture.statsPath})
+		So(errors.Is(err, errSummariseClickHouseSpoolNotVerified), ShouldBeTrue)
+		So(activeChecks, ShouldEqual, 0)
+		So(summariseCompletionMarkerExists(fixture.outputDir), ShouldBeFalse)
+	})
+
+	Convey("ClickHouse-only phases reject a command with only file outputs", t, func() {
+		fixture := newSummariseActiveSnapshotFixture(t)
+		fixture.writeValidStats(t)
+
+		restore := snapshotSummariseGlobals()
+		Reset(restore)
+
+		defaultDir = ""
+		userGroup = filepath.Join(fixture.outputDir, "only-usergroup.gz")
+		groupUser = ""
+		basedirsDB = ""
+		dirgutaDB = ""
+		clickhouseBuildOnly = true
+
+		err := run([]string{fixture.statsPath})
+		So(err, ShouldNotBeNil)
+		So(err.Error(), ShouldContainSubstring, "require a ClickHouse output")
+	})
+}
+
 type failingDirbuildDatabase struct{}
 
 func (failingDirbuildDatabase) Add(db.RecordDGUTA) error {

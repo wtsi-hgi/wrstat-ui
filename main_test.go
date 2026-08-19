@@ -1249,7 +1249,7 @@ func TestWatchSummariseIntegration(t *testing.T) {
 		)
 		So(err, ShouldBeNil)
 		So(stderr, ShouldBeBlank)
-		So(jobs, ShouldHaveLength, 2)
+		So(jobs, ShouldHaveLength, 4)
 
 		runWatchSummariseJobs(t, jobs)
 
@@ -1344,6 +1344,29 @@ func writeWatchSummariseStats(t *testing.T, inputDir string, fixture watchSummar
 func runWatchSummariseJobs(t *testing.T, jobs []*jobqueue.Job) {
 	t.Helper()
 
+	buildJobs := make([]*jobqueue.Job, 0, len(jobs)/2)
+
+	publishJobs := make([]*jobqueue.Job, 0, len(jobs)/2)
+	for _, job := range jobs {
+		if len(job.LimitGroups) == 0 {
+			buildJobs = append(buildJobs, job)
+
+			continue
+		}
+
+		publishJobs = append(publishJobs, job)
+	}
+
+	runWatchSummariseJobBatch(t, buildJobs)
+
+	for _, job := range publishJobs {
+		runWatchSummariseJobBatch(t, []*jobqueue.Job{job})
+	}
+}
+
+func runWatchSummariseJobBatch(t *testing.T, jobs []*jobqueue.Job) {
+	t.Helper()
+
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
@@ -1386,9 +1409,9 @@ func runWatchSummariseJobs(t *testing.T, jobs []*jobqueue.Job) {
 	}
 }
 
-func parseWatchSummariseJobCommand(command string) (parsedWatchSummariseJobCommand, error) {
-	stages := splitWatchSummariseJobStages(command)
-	if len(stages) != 4 {
+func parseWatchSummariseJobCommand(commandLine string) (parsedWatchSummariseJobCommand, error) {
+	stages := splitWatchSummariseJobStages(commandLine)
+	if len(stages) != 2 && len(stages) != 4 {
 		return parsedWatchSummariseJobCommand{}, fmt.Errorf("%w: got %d", errWatchSummariseCommandStages, len(stages))
 	}
 
@@ -1397,17 +1420,20 @@ func parseWatchSummariseJobCommand(command string) (parsedWatchSummariseJobComma
 		return parsedWatchSummariseJobCommand{}, err
 	}
 
-	touchWords, err := watchSummariseShellWords(stages[2])
+	command, err := parseWatchSummariseInvocationWords(summariseWords)
 	if err != nil {
 		return parsedWatchSummariseJobCommand{}, err
 	}
 
-	mvWords, err := watchSummariseShellWords(stages[3])
-	if err != nil {
-		return parsedWatchSummariseJobCommand{}, err
+	if !command.promote && len(stages) == 2 {
+		return command, nil
 	}
 
-	return parseWatchSummariseJobWords(summariseWords, touchWords, mvWords)
+	if !command.promote || len(stages) != 4 {
+		return parsedWatchSummariseJobCommand{}, errWatchSummariseCommandStages
+	}
+
+	return parseWatchSummarisePromotionWords(command, stages[2], stages[3])
 }
 
 func splitWatchSummariseJobStages(command string) []string {
@@ -1510,32 +1536,6 @@ func watchSummariseShellWords(input string) ([]string, error) {
 	return words, nil
 }
 
-func parseWatchSummariseJobWords(
-	summariseWords []string,
-	touchWords []string,
-	mvWords []string,
-) (parsedWatchSummariseJobCommand, error) {
-	command, err := parseWatchSummariseInvocationWords(summariseWords)
-	if err != nil {
-		return parsedWatchSummariseJobCommand{}, err
-	}
-
-	touchShapeChanged := len(touchWords) != 4 || touchWords[0] != "touch" ||
-		touchWords[1] != "-r" || touchWords[3] != command.hiddenDir
-	if touchShapeChanged {
-		return parsedWatchSummariseJobCommand{}, errWatchSummariseTouchCommandShape
-	}
-
-	if len(mvWords) != 3 || mvWords[0] != "mv" || mvWords[1] != command.hiddenDir {
-		return parsedWatchSummariseJobCommand{}, errWatchSummariseMVCommandShape
-	}
-
-	command.inputDir = touchWords[2]
-	command.finalDir = mvWords[2]
-
-	return command, nil
-}
-
 func parseWatchSummariseInvocationWords(words []string) (parsedWatchSummariseJobCommand, error) {
 	redirIdx := slices.Index(words, ">")
 
@@ -1547,14 +1547,22 @@ func parseWatchSummariseInvocationWords(words []string) (parsedWatchSummariseJob
 
 	args := slices.Clone(words[1:redirIdx])
 
-	commandShapeChanged := len(args) < 9 || words[0] != "./"+app || args[0] != "summarise" ||
+	commandShapeChanged := len(args) < 10 || words[0] != "./"+app || args[0] != "summarise" ||
 		args[1] != "--clickhouse-recover"
 	if commandShapeChanged {
 		return parsedWatchSummariseJobCommand{}, errWatchSummariseCommandShape
 	}
 
 	command := parsedWatchSummariseJobCommand{summariseArgs: args}
-	idx := 2
+	switch args[2] {
+	case "--clickhouse-build-only":
+	case "--clickhouse-publish-only":
+		command.promote = true
+	default:
+		return parsedWatchSummariseJobCommand{}, errWatchSummariseCommandShape
+	}
+
+	idx := 3
 
 	if args[idx] != "-d" || args[idx+1] == "" {
 		return parsedWatchSummariseJobCommand{}, errWatchSummariseOutputDirMissing
@@ -1591,6 +1599,37 @@ func parseWatchSummariseInvocationWords(words []string) (parsedWatchSummariseJob
 	return command, nil
 }
 
+func parseWatchSummarisePromotionWords(
+	command parsedWatchSummariseJobCommand,
+	touchStage string,
+	mvStage string,
+) (parsedWatchSummariseJobCommand, error) {
+	touchWords, err := watchSummariseShellWords(touchStage)
+	if err != nil {
+		return parsedWatchSummariseJobCommand{}, err
+	}
+
+	mvWords, err := watchSummariseShellWords(mvStage)
+	if err != nil {
+		return parsedWatchSummariseJobCommand{}, err
+	}
+
+	touchShapeChanged := len(touchWords) != 4 || touchWords[0] != "touch" ||
+		touchWords[1] != "-r" || touchWords[3] != command.hiddenDir
+	if touchShapeChanged {
+		return parsedWatchSummariseJobCommand{}, errWatchSummariseTouchCommandShape
+	}
+
+	if len(mvWords) != 3 || mvWords[0] != "mv" || mvWords[1] != command.hiddenDir {
+		return parsedWatchSummariseJobCommand{}, errWatchSummariseMVCommandShape
+	}
+
+	command.inputDir = touchWords[2]
+	command.finalDir = mvWords[2]
+
+	return command, nil
+}
+
 func runParsedWatchSummariseJobCommand(
 	ctx context.Context,
 	cwd string,
@@ -1601,7 +1640,7 @@ func runParsedWatchSummariseJobCommand(
 ) error {
 	logPath := filepath.Join(
 		command.hiddenDir,
-		fmt.Sprintf("summarise-%s-%d.log", time.Now().UTC().Format("20060102T150405Z"), os.Getpid()),
+		fmt.Sprintf("summarise-%s-%d.log", time.Now().UTC().Format("20060102T150405Z"), time.Now().UnixNano()),
 	)
 
 	logFile, err := os.Create(logPath)
@@ -1626,6 +1665,10 @@ func runParsedWatchSummariseJobCommand(
 
 	if closeErr != nil {
 		return closeErr
+	}
+
+	if !command.promote {
+		return nil
 	}
 
 	if err := runWatchSummariseStage(
@@ -1675,11 +1718,13 @@ func assertWatchSummariseOutput(t *testing.T, outputDir string, fixture watchSum
 
 	logs, err := filepath.Glob(filepath.Join(finalDir, "summarise-*.log"))
 	So(err, ShouldBeNil)
-	So(logs, ShouldHaveLength, 1)
+	So(logs, ShouldHaveLength, 2)
 
-	logBytes, err := os.ReadFile(logs[0])
-	So(err, ShouldBeNil)
-	So(string(logBytes), ShouldNotContainSubstring, "not protected by the watch scheduler concurrency limit")
+	for _, logPath := range logs {
+		logBytes, err := os.ReadFile(logPath)
+		So(err, ShouldBeNil)
+		So(string(logBytes), ShouldNotContainSubstring, "not protected by the watch scheduler concurrency limit")
+	}
 }
 
 func watchSummarisePathExists(path string) bool {
@@ -1697,6 +1742,7 @@ type parsedWatchSummariseJobCommand struct {
 	inputDir      string
 	hiddenDir     string
 	finalDir      string
+	promote       bool
 }
 
 type chPerfOpenProviderTestStub struct{}
@@ -2094,8 +2140,9 @@ func TestWatch(t *testing.T) {
 		statsA := filepath.Join(runA, "stats.gz")
 
 		const (
-			cpus = 2
-			ram  = 8192
+			cpus     = 2
+			ram      = 8192
+			reqGroup = "wrstat-ui-summarise-A"
 		)
 
 		cwd, err := os.Getwd()
@@ -2107,7 +2154,7 @@ func TestWatch(t *testing.T) {
 		_, _, jobs, err := runWRStat("watch", "-o", output, "-q", "/some/quota.file", "-c", "basedirs.config", tmp)
 		So(err, ShouldBeNil)
 
-		So(len(jobs), ShouldBeGreaterThan, 0)
+		So(jobs, ShouldHaveLength, 2)
 		So(jobs[0].Requirements.Other, ShouldBeNil)
 		assertWatchSummariseRepGroup(jobs[0].RepGroup)
 		jobs[0].EnvCRetrieved = true
@@ -2117,14 +2164,36 @@ func TestWatch(t *testing.T) {
 				Cmd: fmt.Sprintf(
 					`summarise_log=$(printf '%%s/summarise-%%s-%%s.log' '%[1]s' `+
 						`"$(date -u +%%Y%%m%%dT%%H%%M%%SZ)" "$$") && `+
-						`'./wrstat-ui_test' summarise --clickhouse-recover -d '%[1]s' -q `+
-						`'/some/quota.file' -c 'basedirs.config' '%[2]s' > "$summarise_log" 2>&1 `+
-						`&& touch -r '%[3]s' '%[1]s' && mv '%[1]s' '%[4]s'`,
+						`'./wrstat-ui_test' summarise --clickhouse-recover --clickhouse-build-only `+
+						`-d '%[1]s' -q '/some/quota.file' -c 'basedirs.config' '%[2]s' `+
+						`> "$summarise_log" 2>&1`,
+					dotA, statsA,
+				),
+				Cwd:        cwd,
+				CwdMatters: true,
+				ReqGroup:   reqGroup,
+				Requirements: &scheduler.Requirements{
+					Cores: cpus,
+					RAM:   ram,
+					Time:  30 * time.Minute,
+					Disk:  1,
+				},
+				Override: 1,
+				Retries:  30,
+				State:    jobqueue.JobStateDelayed,
+			},
+			{
+				Cmd: fmt.Sprintf(
+					`summarise_log=$(printf '%%s/summarise-%%s-%%s.log' '%[1]s' `+
+						`"$(date -u +%%Y%%m%%dT%%H%%M%%SZ)" "$$") && `+
+						`'./wrstat-ui_test' summarise --clickhouse-recover --clickhouse-publish-only `+
+						`-d '%[1]s' -q '/some/quota.file' -c 'basedirs.config' '%[2]s' `+
+						`> "$summarise_log" 2>&1 && touch -r '%[3]s' '%[1]s' && mv '%[1]s' '%[4]s'`,
 					dotA, statsA, runA, finalA,
 				),
 				Cwd:        cwd,
 				CwdMatters: true,
-				ReqGroup:   "wrstat-ui-summarise-A",
+				ReqGroup:   reqGroup,
 				LimitGroups: []string{
 					"wrstat-ui-clickhouse-import:1",
 				},
@@ -2143,7 +2212,7 @@ func TestWatch(t *testing.T) {
 		So(jobs[0].Cmd, ShouldNotContainSubstring, watchenv.Name)
 
 		//nolint:gosec // This deliberately exercises the exact command produced by watch.
-		manualCopy := exec.CommandContext(context.Background(), "sh", "-c", jobs[0].Cmd)
+		manualCopy := exec.CommandContext(context.Background(), "sh", "-c", jobs[1].Cmd)
 		manualCopy.Dir = cwd
 		manualCopy.Env = slices.DeleteFunc(os.Environ(), func(entry string) bool {
 			return strings.HasPrefix(entry, watchenv.Name+"=")
@@ -2170,21 +2239,43 @@ func TestWatch(t *testing.T) {
 		_, _, jobs, err = runWRStat("watch", "-o", output, "-q", "/some/quota.file", "-c", "basedirs.config", tmp)
 		So(err, ShouldBeNil)
 
-		So(len(jobs), ShouldBeGreaterThan, 0)
+		So(jobs, ShouldHaveLength, 2)
 		assertWatchSummariseRepGroup(jobs[0].RepGroup)
 		So(jobsWithoutWatchRepGroups(jobs), ShouldResemble, []*jobqueue.Job{
 			{
 				Cmd: fmt.Sprintf(
 					`summarise_log=$(printf '%%s/summarise-%%s-%%s.log' '%[1]s' `+
 						`"$(date -u +%%Y%%m%%dT%%H%%M%%SZ)" "$$") && `+
-						`'./wrstat-ui_test' summarise --clickhouse-recover -d '%[1]s' `+
+						`'./wrstat-ui_test' summarise --clickhouse-recover --clickhouse-build-only -d '%[1]s' `+
+						`-s '%[2]s' -q '/some/quota.file' -c 'basedirs.config' '%[3]s' `+
+						`> "$summarise_log" 2>&1`,
+					dotA, previousBasedirs, statsA,
+				),
+				Cwd:        cwd,
+				CwdMatters: true,
+				ReqGroup:   reqGroup,
+				Requirements: &scheduler.Requirements{
+					Cores: cpus,
+					RAM:   ram,
+					Time:  30 * time.Minute,
+					Disk:  1,
+				},
+				Override: 1,
+				Retries:  30,
+				State:    jobqueue.JobStateDelayed,
+			},
+			{
+				Cmd: fmt.Sprintf(
+					`summarise_log=$(printf '%%s/summarise-%%s-%%s.log' '%[1]s' `+
+						`"$(date -u +%%Y%%m%%dT%%H%%M%%SZ)" "$$") && `+
+						`'./wrstat-ui_test' summarise --clickhouse-recover --clickhouse-publish-only -d '%[1]s' `+
 						`-s '%[2]s' -q '/some/quota.file' -c 'basedirs.config' '%[3]s' `+
 						`> "$summarise_log" 2>&1 && touch -r '%[4]s' '%[1]s' && mv '%[1]s' '%[5]s'`,
 					dotA, previousBasedirs, statsA, runA, finalA,
 				),
 				Cwd:        cwd,
 				CwdMatters: true,
-				ReqGroup:   "wrstat-ui-summarise-A",
+				ReqGroup:   reqGroup,
 				LimitGroups: []string{
 					"wrstat-ui-clickhouse-import:1",
 				},
@@ -2206,7 +2297,7 @@ func TestWatch(t *testing.T) {
 			"--queues=q1,q2", "--queues_avoid=q3", tmp)
 		So(err, ShouldBeNil)
 
-		So(len(jobs), ShouldBeGreaterThan, 0)
+		So(jobs, ShouldHaveLength, 2)
 		So(jobs[0].Requirements.Other, ShouldResemble, map[string]string{
 			"scheduler_queue":        "q1,q2",
 			"scheduler_queues_avoid": "q3",
@@ -2218,7 +2309,7 @@ func TestWatch(t *testing.T) {
 			"--min_mem=16", tmp)
 		So(err, ShouldBeNil)
 
-		So(len(jobs), ShouldBeGreaterThan, 0)
+		So(jobs, ShouldHaveLength, 2)
 		So(jobs[0].Requirements.RAM, ShouldEqual, 16384)
 		So(jobs[0].Override, ShouldEqual, 1)
 
@@ -2228,8 +2319,9 @@ func TestWatch(t *testing.T) {
 			"--summarise_concurrency=4", tmp)
 		So(err, ShouldBeNil)
 
-		So(len(jobs), ShouldBeGreaterThan, 0)
-		So(jobs[0].LimitGroups, ShouldResemble, []string{"wrstat-ui-clickhouse-import:4"})
+		So(jobs, ShouldHaveLength, 2)
+		So(jobs[0].LimitGroups, ShouldBeEmpty)
+		So(jobs[1].LimitGroups, ShouldResemble, []string{"wrstat-ui-clickhouse-import:4"})
 	})
 }
 
@@ -2591,6 +2683,7 @@ func jobsWithoutWatchRepGroups(jobs []*jobqueue.Job) []*jobqueue.Job {
 		job.RepGroup = ""
 		job.EnvOverride = nil
 		job.EnvCRetrieved = false
+		job.Dependencies = nil
 	}
 
 	return jobs

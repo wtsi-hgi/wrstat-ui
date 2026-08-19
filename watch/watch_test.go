@@ -39,17 +39,22 @@ import (
 	"time"
 
 	"github.com/VertebrateResequencing/wr/client"
+	wrtesting "github.com/VertebrateResequencing/wr/client/testing"
 	"github.com/VertebrateResequencing/wr/jobqueue"
 	"github.com/VertebrateResequencing/wr/jobqueue/scheduler"
 	"github.com/inconshreveable/log15"
 	. "github.com/smartystreets/goconvey/convey"
 	gas "github.com/wtsi-hgi/go-authserver"
+	"github.com/wtsi-hgi/wrstat-ui/internal/chspool"
 	"github.com/wtsi-hgi/wrstat-ui/internal/watchenv"
 )
 
 var errTimedOut = errors.New("timed out")
 
-const defaultSummariseLimitGroupForTest = "wrstat-ui-clickhouse-import:1"
+const (
+	defaultSummariseLimitGroupForTest = "wrstat-ui-clickhouse-import:1"
+	watchTestMountPath                = "/watch/test/"
+)
 
 func TestWatchSummariseResourceMinimums(t *testing.T) {
 	Convey("Watch creates summarise jobs with resource minimums that wr can only raise", t, func() {
@@ -77,22 +82,28 @@ func TestWatchSummariseResourceMinimums(t *testing.T) {
 
 		defer s.Disconnect() //nolint:errcheck
 
-		job, err := createSummariseJob("", inputDir, outputDir, inputBase, "", "", "", 0, 1, s)
+		jobs, err := createSummariseJobs("", inputDir, outputDir, inputBase, "", "", "", 0, 1, s)
 		So(err, ShouldBeNil)
+		So(jobs, ShouldHaveLength, 2)
+		job := jobs[0]
 		So(job.Requirements.RAM, ShouldEqual, 8192)
 		So(job.Requirements.Time, ShouldEqual, 30*time.Minute)
 		So(job.Requirements.Cores, ShouldEqual, 2)
 		So(job.Override, ShouldEqual, 1)
 		So(job.ReqGroup, ShouldEqual, "wrstat-ui-summarise-／lustre／scratch127")
 
-		lowMemJob, err := createSummariseJob("", inputDir, outputDir, lowMemBase, "", "", "", 4, 1, s)
+		lowMemJobs, err := createSummariseJobs("", inputDir, outputDir, lowMemBase, "", "", "", 4, 1, s)
 		So(err, ShouldBeNil)
+
+		lowMemJob := lowMemJobs[0]
 		So(lowMemJob.Requirements.RAM, ShouldEqual, 8192)
 		So(lowMemJob.Requirements.Time, ShouldEqual, 30*time.Minute)
 		So(lowMemJob.Override, ShouldEqual, 1)
 
-		highMemJob, err := createSummariseJob("", inputDir, outputDir, highMemBase, "", "", "", 16, 1, s)
+		highMemJobs, err := createSummariseJobs("", inputDir, outputDir, highMemBase, "", "", "", 16, 1, s)
 		So(err, ShouldBeNil)
+
+		highMemJob := highMemJobs[0]
 		So(highMemJob.Requirements.RAM, ShouldEqual, 16384)
 		So(highMemJob.Requirements.Time, ShouldEqual, 30*time.Minute)
 		So(highMemJob.Override, ShouldEqual, 1)
@@ -112,7 +123,7 @@ func TestWatchRejectsInvalidSummariseConcurrency(t *testing.T) {
 }
 
 func TestWatchSummariseConcurrencyLimit(t *testing.T) {
-	Convey("Watch assigns every summarise job to the default shared concurrency limit", t, func() {
+	Convey("Watch assigns only publish jobs to the default shared concurrency limit", t, func() {
 		inputDir := t.TempDir()
 		outputDir := t.TempDir()
 		pr, pw, err := os.Pipe()
@@ -133,16 +144,20 @@ func TestWatchSummariseConcurrencyLimit(t *testing.T) {
 
 		defer s.Disconnect() //nolint:errcheck
 
-		jobA, err := createSummariseJob("", inputDir, outputDir, "12345_a", "", "", "", 0, 1, s)
+		jobsA, err := createSummariseJobs("", inputDir, outputDir, "12345_a", "", "", "", 0, 1, s)
 		So(err, ShouldBeNil)
 
-		jobB, err := createSummariseJob("", inputDir, outputDir, "12345_b", "", "", "", 0, 1, s)
+		jobsB, err := createSummariseJobs("", inputDir, outputDir, "12345_b", "", "", "", 0, 1, s)
 		So(err, ShouldBeNil)
 
-		So(jobA.LimitGroups, ShouldResemble, []string{defaultSummariseLimitGroupForTest})
-		So(jobB.LimitGroups, ShouldResemble, jobA.LimitGroups)
-		assertWatchScheduledEnvironment(jobA)
-		assertWatchScheduledEnvironment(jobB)
+		So(jobsA[0].LimitGroups, ShouldBeEmpty)
+		So(jobsB[0].LimitGroups, ShouldBeEmpty)
+		So(jobsA[1].LimitGroups, ShouldResemble, []string{defaultSummariseLimitGroupForTest})
+		So(jobsB[1].LimitGroups, ShouldResemble, jobsA[1].LimitGroups)
+		assertWatchScheduledEnvironment(jobsA[0])
+		assertWatchScheduledEnvironment(jobsA[1])
+		assertWatchScheduledEnvironment(jobsB[0])
+		assertWatchScheduledEnvironment(jobsB[1])
 	})
 
 	Convey("Watch applies a configured summarise concurrency limit", t, func() {
@@ -166,16 +181,20 @@ func TestWatchSummariseConcurrencyLimit(t *testing.T) {
 
 		defer s.Disconnect() //nolint:errcheck
 
-		jobA, err := createSummariseJob("", inputDir, outputDir, "12345_a", "", "", "", 0, 4, s)
+		jobsA, err := createSummariseJobs("", inputDir, outputDir, "12345_a", "", "", "", 0, 4, s)
 		So(err, ShouldBeNil)
 
-		jobB, err := createSummariseJob("", inputDir, outputDir, "12345_b", "", "", "", 0, 4, s)
+		jobsB, err := createSummariseJobs("", inputDir, outputDir, "12345_b", "", "", "", 0, 4, s)
 		So(err, ShouldBeNil)
 
-		So(jobA.LimitGroups, ShouldResemble, []string{"wrstat-ui-clickhouse-import:4"})
-		So(jobB.LimitGroups, ShouldResemble, jobA.LimitGroups)
-		assertWatchScheduledEnvironment(jobA)
-		assertWatchScheduledEnvironment(jobB)
+		So(jobsA[0].LimitGroups, ShouldBeEmpty)
+		So(jobsB[0].LimitGroups, ShouldBeEmpty)
+		So(jobsA[1].LimitGroups, ShouldResemble, []string{"wrstat-ui-clickhouse-import:4"})
+		So(jobsB[1].LimitGroups, ShouldResemble, jobsA[1].LimitGroups)
+		assertWatchScheduledEnvironment(jobsA[0])
+		assertWatchScheduledEnvironment(jobsA[1])
+		assertWatchScheduledEnvironment(jobsB[0])
+		assertWatchScheduledEnvironment(jobsB[1])
 	})
 }
 
@@ -183,6 +202,101 @@ func assertWatchScheduledEnvironment(job *jobqueue.Job) {
 	job.EnvCRetrieved = true
 
 	So(job.Getenv(watchenv.Name), ShouldEqual, watchenv.Value)
+}
+
+func TestWatchSplitsSummariseBuildFromPublish(t *testing.T) {
+	Convey("Watch schedules an unlimited build before a ClickHouse-limited publish", t, func() {
+		jobs := capturePublicWatchJobs(t, func(inputDir, outputDir string) error {
+			return Watch([]string{inputDir}, "", outputDir, "quota", "basedirs", "", 0, "", "", nil)
+		})
+
+		So(jobs, ShouldHaveLength, 2)
+
+		buildJob := jobs[0]
+		publishJob := jobs[1]
+
+		So(buildJob.Cmd, ShouldContainSubstring, "summarise --clickhouse-recover --clickhouse-build-only")
+		So(buildJob.LimitGroups, ShouldBeEmpty)
+		So(buildJob.Dependencies, ShouldBeEmpty)
+		So(buildJob.Cmd, ShouldNotContainSubstring, "&& touch -r")
+		So(buildJob.Cmd, ShouldNotContainSubstring, "&& mv")
+
+		So(publishJob.Cmd, ShouldContainSubstring, "summarise --clickhouse-recover --clickhouse-publish-only")
+		So(publishJob.LimitGroups, ShouldResemble, []string{defaultSummariseLimitGroupForTest})
+		So(publishJob.Dependencies, ShouldHaveLength, 1)
+		So(publishJob.Dependencies[0].Essence, ShouldNotBeNil)
+		So(publishJob.Dependencies[0].Essence.Cmd, ShouldEqual, buildJob.Cmd)
+		So(publishJob.Dependencies[0].Essence.Cwd, ShouldEqual, buildJob.Cwd)
+		So(publishJob.Cmd, ShouldContainSubstring, "&& touch -r")
+		So(publishJob.Cmd, ShouldContainSubstring, "&& mv")
+	})
+}
+
+func TestWatchRestartDoesNotDuplicatePendingPublish(t *testing.T) {
+	Convey("A watch restart preserves a built spool and its already-pending publish", t, func() {
+		inputDir := t.TempDir()
+		outputDir := t.TempDir()
+		base := "12345_a"
+		inputBase := filepath.Join(inputDir, base)
+		statsPath := filepath.Join(inputBase, inputStatsFile)
+
+		So(os.Mkdir(inputBase, 0o755), ShouldBeNil)
+		So(createFile(statsPath), ShouldBeNil)
+
+		previousPretendSubmissions := client.PretendSubmissions
+
+		client.PretendSubmissions = ""
+		defer func() { client.PretendSubmissions = previousPretendSubmissions }()
+
+		config, restoreCWD := wrtesting.PrepareWrConfig(t)
+		defer restoreCWD()
+
+		t.Setenv("WR_DEPLOYMENT", "development")
+
+		server := wrtesting.Serve(t, config)
+		defer server.Stop(context.Background(), true)
+
+		logger := log15.New()
+		So(watch([]string{inputDir}, "", outputDir, "", "", "", 0, "", "", 1, logger), ShouldBeNil)
+
+		jq, err := jobqueue.ConnectUsingConfig(context.Background(), "development", 2*time.Second)
+		So(err, ShouldBeNil)
+
+		defer jq.Disconnect() //nolint:errcheck
+
+		buildJob, err := jq.Reserve(time.Second)
+		So(err, ShouldBeNil)
+		So(buildJob.Cmd, ShouldContainSubstring, clickhouseBuildFlag)
+		So(buildJob.LimitGroups, ShouldBeEmpty)
+
+		spoolDir := filepath.Join(hiddenOutputDir(outputDir, base), ".wrstat-ui-clickhouse-spool")
+		manifest := writeVerifiedWatchSpool(t, spoolDir, hiddenOutputDir(outputDir, base), statsPath)
+		spoolBeforeRestart := watchSpoolHashes(t, spoolDir)
+
+		So(jq.Started(buildJob, os.Getpid()), ShouldBeNil)
+		So(jq.Archive(buildJob, &jobqueue.JobEndState{
+			Exited:  true,
+			EndTime: time.Now(),
+		}), ShouldBeNil)
+		completedBuild, err := jq.GetByEssence(buildJob.ToEssense(), false, false)
+		So(err, ShouldBeNil)
+		So(completedBuild.State, ShouldEqual, jobqueue.JobStateComplete)
+
+		pendingBeforeRestart := incompleteWatchJobs(t, jq)
+		assertOnlyPendingPublish(pendingBeforeRestart)
+		publishKey := pendingBeforeRestart[0].Key()
+
+		So(watch([]string{inputDir}, "", outputDir, "", "", "", 0, "", "", 1, logger), ShouldBeNil)
+
+		pendingAfterRestart := incompleteWatchJobs(t, jq)
+		assertOnlyPendingPublish(pendingAfterRestart)
+		So(pendingAfterRestart[0].Key(), ShouldEqual, publishKey)
+		So(watchSpoolHashes(t, spoolDir), ShouldResemble, spoolBeforeRestart)
+
+		gotManifest, err := chspool.ReadManifest(spoolDir)
+		So(err, ShouldBeNil)
+		So(chspool.VerifyManifest(spoolDir, gotManifest, *manifest), ShouldBeNil)
+	})
 }
 
 func TestWatchPublicConcurrencyAPI(t *testing.T) {
@@ -197,8 +311,9 @@ func TestWatchPublicConcurrencyAPI(t *testing.T) {
 			return legacyWatch([]string{inputDir}, "", outputDir, "quota", "basedirs", "", 0, "", "", nil)
 		})
 
-		So(jobs, ShouldHaveLength, 1)
-		So(jobs[0].LimitGroups, ShouldResemble, []string{defaultSummariseLimitGroupForTest})
+		So(jobs, ShouldHaveLength, 2)
+		So(jobs[0].LimitGroups, ShouldBeEmpty)
+		So(jobs[1].LimitGroups, ShouldResemble, []string{defaultSummariseLimitGroupForTest})
 	})
 
 	Convey("WithOptions applies a configured concurrency", t, func() {
@@ -210,8 +325,9 @@ func TestWatchPublicConcurrencyAPI(t *testing.T) {
 			)
 		})
 
-		So(jobs, ShouldHaveLength, 1)
-		So(jobs[0].LimitGroups, ShouldResemble, []string{"wrstat-ui-clickhouse-import:4"})
+		So(jobs, ShouldHaveLength, 2)
+		So(jobs[0].LimitGroups, ShouldBeEmpty)
+		So(jobs[1].LimitGroups, ShouldResemble, []string{"wrstat-ui-clickhouse-import:4"})
 	})
 }
 
@@ -388,12 +504,13 @@ func TestWatch(t *testing.T) {
 
 			<-wrWrittenCh
 
-			So(jobs, ShouldHaveLength, 1)
+			So(jobs, ShouldHaveLength, 2)
 			assertSummariseRepGroup(jobs[0].RepGroup)
-			So(jobsWithoutRepGroups(jobs), ShouldResemble, []*jobqueue.Job{
+			So(publishJobsWithoutDynamicSchedulingFields(jobs), ShouldResemble, []*jobqueue.Job{
 				{
 					Cmd: fmt.Sprintf(expectedSummariseLogAssignment(`'%[2]s/.12345_abc'`)+
-						`'%[1]s' summarise --clickhouse-recover -d '%[2]s/.12345_abc' `+
+						`'%[1]s' summarise --clickhouse-recover --clickhouse-publish-only `+
+						`-d '%[2]s/.12345_abc' `+
 						`-m '/path/to/mounts' `+
 						`-q '/path/to/quota' -c '/path/to/basedirs.config' `+
 						`'%[3]s/stats.gz' > "$summarise_log" 2>&1 `+
@@ -428,7 +545,7 @@ func TestWatch(t *testing.T) {
 
 			<-wrWrittenCh
 
-			So(jobs, ShouldHaveLength, 1)
+			So(jobs, ShouldHaveLength, 2)
 			So(jobs[0].Requirements, ShouldNotBeNil)
 			So(jobs[0].Requirements.RAM, ShouldEqual, 16384)
 			So(jobs[0].Override, ShouldEqual, 1)
@@ -443,7 +560,7 @@ func TestWatch(t *testing.T) {
 
 			<-wrWrittenCh
 
-			So(jobs, ShouldHaveLength, 1)
+			So(jobs, ShouldHaveLength, 2)
 			So(jobs[0].Requirements, ShouldNotBeNil)
 			So(jobs[0].Requirements.Other, ShouldBeNil)
 		})
@@ -457,7 +574,7 @@ func TestWatch(t *testing.T) {
 
 			<-wrWrittenCh
 
-			So(jobs, ShouldHaveLength, 1)
+			So(jobs, ShouldHaveLength, 2)
 			So(jobs[0].Requirements, ShouldNotBeNil)
 			So(jobs[0].Requirements.Other, ShouldResemble, map[string]string{
 				"scheduler_queue": "myq",
@@ -473,7 +590,7 @@ func TestWatch(t *testing.T) {
 
 			<-wrWrittenCh
 
-			So(jobs, ShouldHaveLength, 1)
+			So(jobs, ShouldHaveLength, 2)
 			So(jobs[0].Requirements, ShouldNotBeNil)
 			So(jobs[0].Requirements.Other, ShouldResemble, map[string]string{
 				"scheduler_queues_avoid": "badq",
@@ -489,7 +606,7 @@ func TestWatch(t *testing.T) {
 
 			<-wrWrittenCh
 
-			So(jobs, ShouldHaveLength, 1)
+			So(jobs, ShouldHaveLength, 2)
 			So(jobs[0].Requirements, ShouldNotBeNil)
 			So(jobs[0].Requirements.Other, ShouldResemble, map[string]string{
 				"scheduler_queue":        "q1,q2",
@@ -517,12 +634,13 @@ func TestWatch(t *testing.T) {
 
 			<-wrWrittenCh
 
-			So(jobs, ShouldHaveLength, 1)
+			So(jobs, ShouldHaveLength, 2)
 			assertSummariseRepGroup(jobs[0].RepGroup)
-			So(jobsWithoutRepGroups(jobs), ShouldResemble, []*jobqueue.Job{
+			So(publishJobsWithoutDynamicSchedulingFields(jobs), ShouldResemble, []*jobqueue.Job{
 				{
 					Cmd: fmt.Sprintf(expectedSummariseLogAssignment(`'%[2]s/.12345_abc'`)+
-						`'%[1]s' summarise --clickhouse-recover -d '%[2]s/.12345_abc' `+
+						`'%[1]s' summarise --clickhouse-recover --clickhouse-publish-only `+
+						`-d '%[2]s/.12345_abc' `+
 						`-q '/path/to/quota' -c '/path/to/basedirs.config' `+
 						`'%[3]s/stats.gz' > "$summarise_log" 2>&1 `+
 						`&& touch -r '%[3]s' '%[2]s/.12345_abc' `+
@@ -589,12 +707,13 @@ func TestWatch(t *testing.T) {
 
 			<-wrWrittenCh
 
-			So(jobs, ShouldHaveLength, 1)
+			So(jobs, ShouldHaveLength, 2)
 			assertSummariseRepGroup(jobs[0].RepGroup)
-			So(jobsWithoutRepGroups(jobs), ShouldResemble, []*jobqueue.Job{
+			So(publishJobsWithoutDynamicSchedulingFields(jobs), ShouldResemble, []*jobqueue.Job{
 				{
 					Cmd: fmt.Sprintf(expectedSummariseLogAssignment(`'%[2]s/.12345_abc'`)+
-						`'%[1]s' summarise --clickhouse-recover -d '%[2]s/.12345_abc' `+
+						`'%[1]s' summarise --clickhouse-recover --clickhouse-publish-only `+
+						`-d '%[2]s/.12345_abc' `+
 						`-s '%[2]s/00001_abc/basedirs.db' `+
 						`-q '/path/to/quota' -c '/path/to/basedirs.config' `+
 						`'%[3]s/stats.gz' > "$summarise_log" 2>&1 `+
@@ -645,13 +764,14 @@ func TestWatch(t *testing.T) {
 
 			<-wrWrittenCh
 
-			So(jobs, ShouldHaveLength, 2)
+			So(jobs, ShouldHaveLength, 4)
 			assertSummariseRepGroup(jobs[0].RepGroup)
-			assertSummariseRepGroup(jobs[1].RepGroup)
-			So(jobsWithoutRepGroups(jobs), ShouldResemble, []*jobqueue.Job{
+			assertSummariseRepGroup(jobs[2].RepGroup)
+			So(publishJobsWithoutDynamicSchedulingFields(jobs), ShouldResemble, []*jobqueue.Job{
 				{
 					Cmd: fmt.Sprintf(expectedSummariseLogAssignment(`'%[2]s/.12345_abc'`)+
-						`'%[1]s' summarise --clickhouse-recover -d '%[2]s/.12345_abc' `+
+						`'%[1]s' summarise --clickhouse-recover --clickhouse-publish-only `+
+						`-d '%[2]s/.12345_abc' `+
 						`-q '/path/to/quota' -c '/path/to/basedirs.config' `+
 						`'%[3]s/stats.gz' > "$summarise_log" 2>&1 `+
 						`&& touch -r '%[3]s' '%[2]s/.12345_abc' `+
@@ -675,7 +795,8 @@ func TestWatch(t *testing.T) {
 				},
 				{
 					Cmd: fmt.Sprintf(expectedSummariseLogAssignment(`'%[2]s/.98765_c'`)+
-						`'%[1]s' summarise --clickhouse-recover -d '%[2]s/.98765_c' `+
+						`'%[1]s' summarise --clickhouse-recover --clickhouse-publish-only `+
+						`-d '%[2]s/.98765_c' `+
 						`-q '/path/to/quota' -c '/path/to/basedirs.config' `+
 						`'%[3]s/stats.gz' > "$summarise_log" 2>&1 `+
 						`&& touch -r '%[3]s' '%[2]s/.98765_c' `+
@@ -781,8 +902,9 @@ func TestWatchSummariseReqGroupIncludesMountKey(t *testing.T) {
 
 		<-wrWrittenCh
 
-		So(jobs, ShouldHaveLength, 1)
+		So(jobs, ShouldHaveLength, 2)
 		So(jobs[0].ReqGroup, ShouldEqual, "wrstat-ui-summarise-／lustre／scratch127")
+		So(jobs[1].ReqGroup, ShouldEqual, "wrstat-ui-summarise-／lustre／scratch127")
 	})
 }
 
@@ -802,18 +924,97 @@ func assertSummariseRepGroup(repGroup string) {
 	So(err, ShouldBeNil)
 }
 
-func jobsWithoutRepGroups(jobs []*jobqueue.Job) []*jobqueue.Job {
-	for _, job := range jobs {
+func publishJobsWithoutDynamicSchedulingFields(jobs []*jobqueue.Job) []*jobqueue.Job {
+	publishJobs := make([]*jobqueue.Job, 0, len(jobs)/2)
+	for idx, job := range jobs {
+		if idx%2 == 0 {
+			continue
+		}
+
 		job.RepGroup = ""
 		job.EnvOverride = nil
 		job.EnvCRetrieved = false
+		job.Dependencies = nil
+		publishJobs = append(publishJobs, job)
 	}
 
-	return jobs
+	return publishJobs
 }
 
 func expectedSummariseLogAssignment(quotedDotOutput string) string {
 	return `summarise_log=$(printf '%%s/summarise-%%s-%%s.log' ` +
 		quotedDotOutput +
 		` "$(date -u +%%Y%%m%%dT%%H%%M%%SZ)" "$$") && `
+}
+
+func writeVerifiedWatchSpool(t *testing.T, spoolDir, outputDir, statsPath string) *chspool.Manifest {
+	t.Helper()
+
+	set, err := chspool.CreateSet(spoolDir)
+	So(err, ShouldBeNil)
+	So(set.WriteDir(chspool.DirRow{
+		MountPath:  watchTestMountPath,
+		SnapshotID: "00000000-0000-0000-0000-000000000001",
+		DirID:      1,
+		FullPath:   watchTestMountPath,
+	}), ShouldBeNil)
+	So(set.Close(), ShouldBeNil)
+
+	stats, err := chspool.IdentifyExistingPath(statsPath, false)
+	So(err, ShouldBeNil)
+
+	manifest := &chspool.Manifest{
+		Version:      chspool.Version,
+		Format:       chspool.Format,
+		State:        chspool.Complete,
+		MountPath:    watchTestMountPath,
+		SnapshotID:   "00000000-0000-0000-0000-000000000001",
+		UpdatedAt:    time.Unix(1, 0).UTC().Format(time.RFC3339Nano),
+		OutputDir:    outputDir,
+		SchemaMarker: "watch-restart-test",
+		Stats:        stats,
+		Tables:       set.TableManifests(),
+		CompletedAt:  time.Unix(2, 0).UTC().Format(time.RFC3339Nano),
+	}
+	So(chspool.WriteManifestAtomic(spoolDir, manifest), ShouldBeNil)
+
+	got, err := chspool.ReadManifest(spoolDir)
+	So(err, ShouldBeNil)
+	So(chspool.VerifyManifest(spoolDir, got, *manifest), ShouldBeNil)
+
+	return manifest
+}
+
+func watchSpoolHashes(t *testing.T, spoolDir string) map[string]string {
+	t.Helper()
+
+	entries, err := os.ReadDir(spoolDir)
+	So(err, ShouldBeNil)
+
+	hashes := make(map[string]string, len(entries))
+	for _, entry := range entries {
+		_, hash, hashErr := chspool.HashFile(filepath.Join(spoolDir, entry.Name()))
+		So(hashErr, ShouldBeNil)
+
+		hashes[entry.Name()] = hash
+	}
+
+	return hashes
+}
+
+func incompleteWatchJobs(t *testing.T, jq *jobqueue.Client) []*jobqueue.Job {
+	t.Helper()
+
+	jobs, err := jq.GetIncomplete(0, "", false, false)
+	So(err, ShouldBeNil)
+
+	return jobs
+}
+
+func assertOnlyPendingPublish(jobs []*jobqueue.Job) {
+	So(jobs, ShouldHaveLength, 1)
+	So(jobs[0].Cmd, ShouldContainSubstring, clickhousePublishFlag)
+	So(jobs[0].Cmd, ShouldNotContainSubstring, clickhouseBuildFlag)
+	So(jobs[0].State, ShouldEqual, jobqueue.JobStateReady)
+	So(jobs[0].LimitGroups, ShouldResemble, []string{summariseLimitGroup})
 }

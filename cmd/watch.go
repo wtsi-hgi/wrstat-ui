@@ -59,8 +59,9 @@ following name format:
 That is, starting with some version string, an underscore, and then at least one
 character of key data.
 
-Once found, a summarise task will be launched via wr and it will be given the
-stats.gz file in that directory.
+Once found, dependent summarise build and publish tasks will be launched via wr.
+The build task processes stats.gz into a verified durable spool; only the
+publish task interacts with ClickHouse.
 
 The --output flag determines where the summarised data will be written. A new
 subdirectory, named the same as the subdirectory containing the stats.gz file,
@@ -78,8 +79,9 @@ defaulting to 8. Lower values are clamped to 8, and wr may still raise RAM or
 runtime above the submitted 8GB/30m floors when it has learned higher
 requirements for the mount.
 
-The --summarise_concurrency flag limits the total number of summarise jobs
-scheduled by watch that may run at once. It defaults to 1.
+The --summarise_concurrency flag limits the total number of ClickHouse publish
+jobs scheduled by watch that may run at once. Spool builds remain unrestricted,
+and the publish limit defaults to 1.
 
 The --group flag can be specified to override the unix group with which the
 summarise subcommands will be run.
@@ -156,6 +158,6 @@ func init() {
 	watchcmd.Flags().StringVar(&watchQueue, "queues", "", "comma-separated queues to submit jobs to")
 	watchcmd.Flags().StringVar(&watchQueuesAvoid, "queues_avoid", "", "comma-separated queues to avoid")
 	watchcmd.Flags().IntVar(&watchSummariseConcurrency, "summarise_concurrency", defaultWatchSummariseConcurrency,
-		"maximum number of watch-scheduled summarise jobs that may run at once")
+		"maximum number of watch-scheduled ClickHouse publish jobs that may run at once")
 	watchcmd.Flags().StringVarP(&group, "group", "g", "", "unix group to run the summarisers with")
 }

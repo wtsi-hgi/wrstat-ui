@@ -35,6 +35,7 @@ import (
 
 	"github.com/VertebrateResequencing/wr/client"
 	"github.com/VertebrateResequencing/wr/jobqueue"
+	"github.com/VertebrateResequencing/wr/jobqueue/scheduler"
 	"github.com/inconshreveable/log15"
 	"github.com/wtsi-hgi/wrstat-ui/datasets"
 	"github.com/wtsi-hgi/wrstat-ui/internal/watchenv"
@@ -51,9 +52,12 @@ const (
 	mbPerGB               = 1024
 	jobTimestampLayout    = "20060102150405"
 	clickhouseRecoverFlag = "--clickhouse-recover"
+	clickhouseBuildFlag   = "--clickhouse-build-only"
+	clickhousePublishFlag = "--clickhouse-publish-only"
 	summariseReqGroupBase = "wrstat-ui-summarise"
 	summariseLimitGroup   = "wrstat-ui-clickhouse-import"
 	defaultConcurrency    = 1
+	summariseJobsPerInput = 2
 )
 
 var connectTimeout = 10 * time.Second //nolint:gochecknoglobals
@@ -62,8 +66,8 @@ var errSummariseConcurrency = errors.New("summarise concurrency cannot be negati
 
 // Options configures watch job scheduling.
 type Options struct {
-	// SummariseConcurrency limits the number of watch-scheduled summarise jobs
-	// that may run globally. Zero uses the default of one.
+	// SummariseConcurrency limits the number of watch-scheduled ClickHouse
+	// publish jobs that may run globally. Zero uses the default of one.
 	SummariseConcurrency int
 }
 
@@ -76,8 +80,9 @@ type Options struct {
 // requested memory for summarise jobs, with values below the default 8GB floor
 // clamped upward. Higher learned or historical requirements remain unchanged.
 // The queue and queuesAvoid values are passed to wr so scheduler submission can
-// target or avoid specific queues. Watch uses a global summarise concurrency
-// limit of one; use WithOptions to configure it.
+// target or avoid specific queues. Spool builds are unrestricted, while Watch
+// uses a global ClickHouse publish concurrency limit of one; use WithOptions
+// to configure it.
 func Watch(inputDirs []string, group, outputDir, quotaPath, basedirsConfig,
 	mounts string, minMemGB int, queue, queuesAvoid string, logger log15.Logger) error {
 	return WithOptions(inputDirs, group, outputDir, quotaPath, basedirsConfig,
@@ -187,18 +192,18 @@ func entryExists(path string) bool {
 
 func scheduleSummarisers(s *client.Scheduler, group, inputDir, outputDir, quotaPath, basedirsConfig, mounts string,
 	minMemGB, summariseConcurrency int, inputPaths []string) error {
-	jobs := make([]*jobqueue.Job, 0, len(inputPaths))
+	jobs := make([]*jobqueue.Job, 0, summariseJobsPerInput*len(inputPaths))
 
 	for _, p := range inputPaths {
 		base := filepath.Base(p)
 
-		job, err := createSummariseJob(group, inputDir, outputDir, base,
+		pair, err := createSummariseJobs(group, inputDir, outputDir, base,
 			quotaPath, basedirsConfig, mounts, minMemGB, summariseConcurrency, s)
 		if err != nil {
 			return fmt.Errorf("error scheduling summarise (%s): %w", base, err)
 		}
 
-		jobs = append(jobs, job)
+		jobs = append(jobs, pair...)
 	}
 
 	if len(jobs) == 0 {
@@ -212,17 +217,52 @@ func scheduleSummarisers(s *client.Scheduler, group, inputDir, outputDir, quotaP
 	return nil
 }
 
-func createSummariseJob(group, inputDir, outputDir, base, quotaPath, basedirsConfig, mounts string,
-	minMemGB, summariseConcurrency int, s *client.Scheduler) (*jobqueue.Job, error) {
-	dotOutputBase := hiddenOutputDir(outputDir, base)
-
-	if err := os.MkdirAll(dotOutputBase, dirPerms); err != nil {
+func createSummariseJobs(group, inputDir, outputDir, base, quotaPath, basedirsConfig, mounts string,
+	minMemGB, summariseConcurrency int, s *client.Scheduler) ([]*jobqueue.Job, error) {
+	dotOutputBase, previousBasedirsDB, req, err := prepareSummariseJobs(outputDir, base, minMemGB)
+	if err != nil {
 		return nil, err
+	}
+
+	buildJob, err := createSummarisePhaseJob(
+		s, group, getSummariseJobCommand(dotOutputBase, previousBasedirsDB, quotaPath,
+			basedirsConfig, mounts, inputDir, base, outputDir, clickhouseBuildFlag, false),
+		summariseReqGroup(base), req,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	publishJob, err := createSummarisePhaseJob(
+		s, group, getSummariseJobCommand(dotOutputBase, previousBasedirsDB, quotaPath,
+			basedirsConfig, mounts, inputDir, base, outputDir, clickhousePublishFlag, true),
+		summariseReqGroup(base), req,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	publishJob.Dependencies = jobqueue.Dependencies{
+		jobqueue.NewEssenceDependency(buildJob.Cmd, buildJob.Cwd),
+	}
+	publishJob.LimitGroups = []string{fmt.Sprintf("%s:%d", summariseLimitGroup, summariseConcurrency)}
+
+	return []*jobqueue.Job{buildJob, publishJob}, nil
+}
+
+func prepareSummariseJobs(
+	outputDir string,
+	base string,
+	minMemGB int,
+) (string, string, *scheduler.Requirements, error) {
+	dotOutputBase := hiddenOutputDir(outputDir, base)
+	if err := os.MkdirAll(dotOutputBase, dirPerms); err != nil {
+		return "", "", nil, err
 	}
 
 	previousBasedirsDB, err := getPreviousBasedirsDB(outputDir, base)
 	if err != nil {
-		return nil, err
+		return "", "", nil, err
 	}
 
 	req := client.DefaultRequirements()
@@ -230,23 +270,7 @@ func createSummariseJob(group, inputDir, outputDir, base, quotaPath, basedirsCon
 	req.RAM = summariseMinRAMMB(minMemGB)
 	req.Time = summariseMinRuntime
 
-	job := s.NewJob(
-		getJobCommand(dotOutputBase, previousBasedirsDB, quotaPath, basedirsConfig, mounts,
-			inputDir, base, outputDir),
-		summariseJobName(),
-		summariseReqGroup(base),
-		"",
-		"",
-		req,
-	)
-	job.Group = group
-
-	job.LimitGroups = []string{fmt.Sprintf("%s:%d", summariseLimitGroup, summariseConcurrency)}
-	if err := job.EnvAddOverride([]string{watchenv.Name + "=" + watchenv.Value}); err != nil {
-		return nil, fmt.Errorf("failed to mark watch-scheduled summarise job: %w", err)
-	}
-
-	return job, nil
+	return dotOutputBase, previousBasedirsDB, req, nil
 }
 
 func summariseMinRAMMB(minMemGB int) int {
@@ -260,6 +284,65 @@ func summariseMinRAMMB(minMemGB int) int {
 	}
 
 	return requestedRAM
+}
+
+func createSummarisePhaseJob(
+	s *client.Scheduler,
+	group string,
+	command string,
+	reqGroup string,
+	req *scheduler.Requirements,
+) (*jobqueue.Job, error) {
+	job := s.NewJob(command, summariseJobName(), reqGroup, "", "", req)
+	job.Group = group
+
+	if err := job.EnvAddOverride([]string{watchenv.Name + "=" + watchenv.Value}); err != nil {
+		return nil, fmt.Errorf("failed to mark watch-scheduled summarise job: %w", err)
+	}
+
+	return job, nil
+}
+
+func getSummariseJobCommand(dotOutputBase, previousBasedirsDB, quotaPath, basedirsConfig, mounts,
+	inputDir, base, outputDir, phaseFlag string, promote bool) string {
+	inputBase := filepath.Join(inputDir, base)
+	finalOutputBase := filepath.Join(outputDir, base)
+
+	parts := summariseJobCommandPrefix(dotOutputBase, phaseFlag)
+	if previousBasedirsDB != "" {
+		parts = append(parts, "-s", shellQuote(previousBasedirsDB))
+	}
+
+	if mounts != "" {
+		parts = append(parts, "-m", shellQuote(mounts))
+	}
+
+	parts = append(parts,
+		"-q", shellQuote(quotaPath),
+		"-c", shellQuote(basedirsConfig),
+		shellQuote(filepath.Join(inputBase, inputStatsFile)),
+		">", `"$summarise_log"`, "2>&1",
+	)
+	parts = appendSummarisePromotion(parts, inputBase, dotOutputBase, finalOutputBase, promote)
+
+	return strings.Join(parts, " ")
+}
+
+func summariseJobCommandPrefix(dotOutputBase, phaseFlag string) []string {
+	parts := []string{
+		summariseLogAssignment(dotOutputBase),
+		"&&",
+		shellQuote(os.Args[0]),
+		"summarise",
+		clickhouseRecoverFlag,
+	}
+	if phaseFlag != "" {
+		parts = append(parts, phaseFlag)
+	}
+
+	parts = append(parts, "-d", shellQuote(dotOutputBase))
+
+	return parts
 }
 
 func summariseLogAssignment(dotOutputBase string) string {
@@ -294,6 +377,18 @@ func getPreviousBasedirsDB(outputDir, base string) (string, error) {
 	return "", nil
 }
 
+func appendSummarisePromotion(parts []string, inputBase, dotOutputBase, finalOutputBase string,
+	promote bool) []string {
+	if !promote {
+		return parts
+	}
+
+	return append(parts,
+		"&&", "touch", "-r", shellQuote(inputBase), shellQuote(dotOutputBase),
+		"&&", "mv", shellQuote(dotOutputBase), shellQuote(finalOutputBase),
+	)
+}
+
 func summariseReqGroup(base string) string {
 	key, ok := datasetKey(base)
 	if !ok {
@@ -315,36 +410,10 @@ func hiddenOutputDir(outputDir, base string) string {
 
 func getJobCommand(dotOutputBase, previousBasedirsDB, quotaPath, basedirsConfig, mounts,
 	inputDir, base, outputDir string) string {
-	inputBase := filepath.Join(inputDir, base)
-	finalOutputBase := filepath.Join(outputDir, base)
-	parts := []string{
-		summariseLogAssignment(dotOutputBase),
-		"&&",
-		shellQuote(os.Args[0]),
-		"summarise",
-		clickhouseRecoverFlag,
-		"-d",
-		shellQuote(dotOutputBase),
-	}
-
-	if previousBasedirsDB != "" {
-		parts = append(parts, "-s", shellQuote(previousBasedirsDB))
-	}
-
-	if mounts != "" {
-		parts = append(parts, "-m", shellQuote(mounts))
-	}
-
-	parts = append(parts,
-		"-q", shellQuote(quotaPath),
-		"-c", shellQuote(basedirsConfig),
-		shellQuote(filepath.Join(inputBase, inputStatsFile)),
-		">", `"$summarise_log"`, "2>&1",
-		"&&", "touch", "-r", shellQuote(inputBase), shellQuote(dotOutputBase),
-		"&&", "mv", shellQuote(dotOutputBase), shellQuote(finalOutputBase),
+	return getSummariseJobCommand(
+		dotOutputBase, previousBasedirsDB, quotaPath, basedirsConfig, mounts,
+		inputDir, base, outputDir, "", true,
 	)
-
-	return strings.Join(parts, " ")
 }
 
 func shellQuote(value string) string {

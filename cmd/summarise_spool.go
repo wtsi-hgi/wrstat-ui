@@ -3055,6 +3055,15 @@ func maybeRunClickHouseSpoolSummarise( //nolint:funlen
 	}
 
 	manifest, hasCompleteSpool := completeSummariseSpool(spoolDir, expected)
+	if handled, buildErr := maybeBuildSummariseSpoolOnly(
+		statsPath, spoolDir, expected, target, diag, hasCompleteSpool,
+	); handled {
+		return true, buildErr
+	}
+
+	if publishErr := validateSummariseSpoolPublishOnly(hasCompleteSpool); publishErr != nil {
+		return true, publishErr
+	}
 
 	err = preflightClickHouseActiveSnapshotForSpool(*target, spoolDir, manifest)
 	if err != nil {
@@ -3065,18 +3074,9 @@ func maybeRunClickHouseSpoolSummarise( //nolint:funlen
 		return true, err
 	}
 
-	if hasCompleteSpool {
-		return true, publishSummariseSpool(spoolDir, manifest, target, diag)
-	}
-
-	manifest, err = buildSummariseSpool(statsPath, spoolDir, expected, target, diag)
-	if err != nil {
-		diag.logFailure(err)
-
-		return true, err
-	}
-
-	return true, publishSummariseSpool(spoolDir, manifest, target, diag)
+	return true, buildAndPublishSummariseSpool(
+		statsPath, spoolDir, expected, manifest, target, diag, hasCompleteSpool,
+	)
 }
 
 func summariseClickHouseSpoolDir(outputDir string) string {
@@ -3286,6 +3286,57 @@ func closeSummariseSpoolOperations(ds *summariseSpoolDataset) error {
 	}
 
 	return ds.dgutaWriter.Close()
+}
+
+func maybeBuildSummariseSpoolOnly(
+	statsPath string,
+	spoolDir string,
+	expected chspool.Manifest,
+	target *clickHouseSummariseTarget,
+	diag *summariseDiagnostics,
+	hasCompleteSpool bool,
+) (bool, error) {
+	if !clickhouseBuildOnly || hasCompleteSpool {
+		return clickhouseBuildOnly, nil
+	}
+
+	_, err := buildSummariseSpool(statsPath, spoolDir, expected, target, diag)
+	if err != nil {
+		diag.logFailure(err)
+	}
+
+	return true, err
+}
+
+func validateSummariseSpoolPublishOnly(hasCompleteSpool bool) error {
+	if clickhousePublishOnly && !hasCompleteSpool {
+		return errSummariseClickHouseSpoolNotVerified
+	}
+
+	return nil
+}
+
+func buildAndPublishSummariseSpool(
+	statsPath string,
+	spoolDir string,
+	expected chspool.Manifest,
+	manifest *chspool.Manifest,
+	target *clickHouseSummariseTarget,
+	diag *summariseDiagnostics,
+	hasCompleteSpool bool,
+) error {
+	if hasCompleteSpool {
+		return publishSummariseSpool(spoolDir, manifest, target, diag)
+	}
+
+	manifest, err := buildSummariseSpool(statsPath, spoolDir, expected, target, diag)
+	if err != nil {
+		diag.logFailure(err)
+
+		return err
+	}
+
+	return publishSummariseSpool(spoolDir, manifest, target, diag)
 }
 
 func publishSummariseSpool(

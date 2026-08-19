@@ -91,6 +91,23 @@ func TestSummariseSchedulerGuardWarning(t *testing.T) {
 
 		So(logs.String(), ShouldContainSubstring, "not protected by the watch scheduler concurrency limit")
 	})
+
+	Convey("A spool-only build does not warn about the ClickHouse concurrency limit", t, func() {
+		t.Setenv(watchenv.Name, "")
+
+		var logs bytes.Buffer
+
+		restoreLogs := captureSummariseDiagnosticsLogs(&logs)
+		Reset(restoreLogs)
+
+		clickhouseBuildOnly = true
+
+		Reset(func() { clickhouseBuildOnly = false })
+
+		warnIfSummariseUnguarded()
+
+		So(logs.String(), ShouldBeBlank)
+	})
 }
 
 type summariseActiveSnapshotFixture struct {
@@ -456,6 +473,8 @@ func snapshotSummariseGlobals() func() {
 	origClickHouseDatabase := clickhouseDatabase
 	origClickHouseQueryTO := clickhouseQueryTO
 	origClickHouseRecover := clickhouseRecover
+	origClickHouseBuildOnly := clickhouseBuildOnly
+	origClickHousePublishOnly := clickhousePublishOnly
 	origSummariseFilesInsertBytes := summariseFilesInsertBytes
 	origSummariseFilterInsertBytes := summariseFilterInsertBytes
 	origSummariseOtherInsertBytes := summariseOtherInsertBytes
@@ -487,6 +506,8 @@ func snapshotSummariseGlobals() func() {
 		clickhouseDatabase = origClickHouseDatabase
 		clickhouseQueryTO = origClickHouseQueryTO
 		clickhouseRecover = origClickHouseRecover
+		clickhouseBuildOnly = origClickHouseBuildOnly
+		clickhousePublishOnly = origClickHousePublishOnly
 		summariseFilesInsertBytes = origSummariseFilesInsertBytes
 		summariseFilterInsertBytes = origSummariseFilterInsertBytes
 		summariseOtherInsertBytes = origSummariseOtherInsertBytes
@@ -592,21 +613,32 @@ func TestSummariseClickHouseInsertConfig(t *testing.T) {
 	})
 }
 
-func TestSummariseClickHouseRecoverFlag(t *testing.T) {
-	Convey("summarise exposes only clickhouse recover", t, func() {
+func TestSummariseClickHousePhaseFlags(t *testing.T) {
+	Convey("summarise exposes recoverable ClickHouse build and publish phases", t, func() {
 		restore := snapshotSummariseGlobals()
 		Reset(restore)
 		Reset(func() {
 			So(summariseCmd.Flags().Set("clickhouse-recover", "false"), ShouldBeNil)
+			So(summariseCmd.Flags().Set("clickhouse-build-only", "false"), ShouldBeNil)
+			So(summariseCmd.Flags().Set("clickhouse-publish-only", "false"), ShouldBeNil)
 		})
 
 		usages := summariseCmd.Flags().FlagUsages()
 		So(usages, ShouldContainSubstring, "--clickhouse-recover")
+		So(usages, ShouldContainSubstring, "--clickhouse-build-only")
+		So(usages, ShouldContainSubstring, "--clickhouse-publish-only")
 
 		So(summariseCmd.Flags().Set("clickhouse-recover", "true"), ShouldBeNil)
 		So(clickhouseRecover, ShouldBeTrue)
 
 		So(summariseCmd.Flags().Set("clickhouse-recover", "false"), ShouldBeNil)
 		So(clickhouseRecover, ShouldBeFalse)
+
+		So(summariseCmd.Flags().Set("clickhouse-build-only", "true"), ShouldBeNil)
+		So(clickhouseBuildOnly, ShouldBeTrue)
+
+		So(summariseCmd.Flags().Set("clickhouse-publish-only", "true"), ShouldBeNil)
+		So(clickhousePublishOnly, ShouldBeTrue)
+		So(checkArgs([]string{"stats.gz"}), ShouldEqual, errSummariseClickHousePhaseConflict)
 	})
 }
