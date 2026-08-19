@@ -35,6 +35,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -52,6 +53,7 @@ import (
 var errTimedOut = errors.New("timed out")
 
 const (
+	attemptLogTestBase                = "20260517-200015_／nfs／t283_imaging"
 	defaultSummariseLimitGroupForTest = "wrstat-ui-clickhouse-import:1"
 	watchTestMountPath                = "/watch/test/"
 )
@@ -119,6 +121,111 @@ func TestWatchRejectsInvalidSummariseConcurrency(t *testing.T) {
 
 		So(err, ShouldNotBeNil)
 		So(err.Error(), ShouldContainSubstring, "summarise concurrency cannot be negative")
+	})
+}
+
+func TestWatchSummariseCommandFailsWhenAttemptLogCannotBeAllocated(t *testing.T) {
+	Convey("A summarise command does not run when its attempt log cannot be allocated", t, func() {
+		tempDir := t.TempDir()
+		inputDir := filepath.Join(tempDir, "input")
+		outputDir := filepath.Join(tempDir, "output")
+		base := attemptLogTestBase
+		dotOutputBase := hiddenOutputDir(outputDir, base)
+		fakeBinDir := filepath.Join(tempDir, "bin")
+		fakeWrstatUI := filepath.Join(fakeBinDir, "wrstat-ui")
+		marker := filepath.Join(tempDir, "summarise-ran")
+
+		So(os.MkdirAll(filepath.Join(inputDir, base), 0755), ShouldBeNil)
+		So(os.MkdirAll(dotOutputBase, 0755), ShouldBeNil)
+		So(os.MkdirAll(fakeBinDir, 0755), ShouldBeNil)
+		fakeMktemp := filepath.Join(fakeBinDir, "mktemp")
+		So(os.WriteFile(fakeMktemp, []byte("#!/bin/sh\nexit 73\n"), 0600), ShouldBeNil)
+		So(os.Chmod(fakeMktemp, 0700), ShouldBeNil)
+		So(os.WriteFile(fakeWrstatUI, []byte("#!/bin/sh\nprintf ran > \"$FAKE_SUMMARISE_MARKER\"\n"), 0600), ShouldBeNil)
+		So(os.Chmod(fakeWrstatUI, 0700), ShouldBeNil)
+
+		oldArgs := os.Args
+
+		os.Args = []string{fakeWrstatUI}
+		defer func() { os.Args = oldArgs }()
+
+		command := getSummariseJobCommand(
+			dotOutputBase, "", "", "", "", inputDir, base, outputDir, clickhouseBuildFlag, false,
+		)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		attempt := exec.CommandContext(ctx, "sh", "-c", command)
+
+		attempt.Env = append(os.Environ(), "PATH="+fakeBinDir, "FAKE_SUMMARISE_MARKER="+marker)
+		So(attempt.Run(), ShouldNotBeNil)
+		So(entryExists(marker), ShouldBeFalse)
+
+		logs, err := filepath.Glob(filepath.Join(dotOutputBase, "summarise-*"))
+		So(err, ShouldBeNil)
+		So(logs, ShouldBeEmpty)
+	})
+}
+
+func TestWatchSummariseCommandUsesPortableAttemptLogTemplates(t *testing.T) {
+	Convey("Summarise commands allocate phase-labelled logs with portable mktemp templates", t, func() {
+		tempDir := t.TempDir()
+		inputDir := filepath.Join(tempDir, "input")
+		outputDir := filepath.Join(tempDir, "output")
+		base := attemptLogTestBase
+		dotOutputBase := hiddenOutputDir(outputDir, base)
+		fakeBinDir := filepath.Join(tempDir, "bin")
+		fakeWrstatUI := filepath.Join(fakeBinDir, "wrstat-ui")
+
+		So(os.MkdirAll(filepath.Join(inputDir, base), 0755), ShouldBeNil)
+		So(os.MkdirAll(dotOutputBase, 0755), ShouldBeNil)
+		So(os.MkdirAll(fakeBinDir, 0755), ShouldBeNil)
+
+		fakeMktemp := filepath.Join(fakeBinDir, "mktemp")
+		So(os.WriteFile(fakeMktemp, []byte(`#!/bin/sh
+template=$1
+case "${template##*/}" in
+*XXXXXX) ;;
+*) exit 64 ;;
+esac
+path=$template
+while [ "${path%X}" != "$path" ]; do
+path=${path%X}
+done
+path=${path}portable
+(umask 077; set -C; : > "$path") || exit 65
+printf '%s\n' "$path"
+`), 0600), ShouldBeNil)
+		So(os.Chmod(fakeMktemp, 0700), ShouldBeNil)
+		So(os.WriteFile(fakeWrstatUI, []byte("#!/bin/sh\nprintf '%s\\n' \"$2\"\n"), 0600), ShouldBeNil)
+		So(os.Chmod(fakeWrstatUI, 0700), ShouldBeNil)
+
+		oldArgs := os.Args
+
+		os.Args = []string{fakeWrstatUI}
+		defer func() { os.Args = oldArgs }()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		for _, phaseFlag := range []string{clickhouseBuildFlag, clickhousePublishFlag} {
+			command := getSummariseJobCommand(
+				dotOutputBase, "", "", "", "", inputDir, base, outputDir, phaseFlag, false,
+			)
+			attempt := exec.CommandContext(ctx, "sh", "-c", command)
+
+			attempt.Env = append(os.Environ(), "PATH="+fakeBinDir)
+
+			So(attempt.Run(), ShouldBeNil)
+		}
+
+		logs, err := filepath.Glob(filepath.Join(dotOutputBase, "summarise-*.log-*"))
+		So(err, ShouldBeNil)
+		So(logs, ShouldResemble, []string{
+			filepath.Join(dotOutputBase, "summarise-build.log-portable"),
+			filepath.Join(dotOutputBase, "summarise-publish.log-portable"),
+		})
 	})
 }
 
@@ -496,11 +603,11 @@ func archiveSuccessfulWatchJob(jq *jobqueue.Client, job *jobqueue.Job) {
 }
 
 func TestWatchSummariseCommandPreservesAttemptLogs(t *testing.T) {
-	Convey("Generated summarise commands preserve per-attempt stdout and stderr logs", t, func() {
+	Convey("Repeated concurrent runs preserve distinct phase-labelled attempt logs", t, func() {
 		tempDir := t.TempDir()
 		outputDir := filepath.Join(tempDir, "output-$WRSTAT_UI_UNSAFE_TOKEN-`touch BACKTICK_MARKER`-$(touch DOLLAR_MARKER)")
 		inputDir := filepath.Join(tempDir, "input")
-		base := "20260517-200015_／nfs／t283_imaging"
+		base := attemptLogTestBase
 		inputBase := filepath.Join(inputDir, base)
 		dotOutputBase := hiddenOutputDir(outputDir, base)
 		finalOutputBase := filepath.Join(outputDir, base)
@@ -515,8 +622,8 @@ func TestWatchSummariseCommandPreservesAttemptLogs(t *testing.T) {
 		So(createFile(filepath.Join(inputBase, inputStatsFile)), ShouldBeNil)
 		So(os.MkdirAll(filepath.Dir(fakeWrstatUI), 0755), ShouldBeNil)
 		So(os.WriteFile(fakeWrstatUI, []byte(`#!/bin/sh
-printf 'fake stdout for %s\n' "$1"
-printf 'fake stderr for %s\n' "$1" >&2
+printf 'stdout:%s\n' "$FAKE_SUMMARISE_ATTEMPT"
+printf 'stderr:%s\n' "$FAKE_SUMMARISE_ATTEMPT" >&2
 exit "$FAKE_SUMMARISE_EXIT"
 `), 0600), ShouldBeNil)
 		So(os.Chmod(fakeWrstatUI, 0700), ShouldBeNil)
@@ -528,49 +635,92 @@ exit "$FAKE_SUMMARISE_EXIT"
 			os.Args = oldArgs
 		}()
 
-		command := getJobCommand(dotOutputBase, "", "", "", "", inputDir, base, outputDir)
-		So(command, ShouldContainSubstring, `$(date -u +%Y%m%dT%H%M%SZ)`)
-		So(command, ShouldContainSubstring, `"$$"`)
-		So(command, ShouldContainSubstring, `> "$summarise_log" 2>&1`)
+		buildCommand := getSummariseJobCommand(
+			dotOutputBase, "", "", "", "", inputDir, base, outputDir, clickhouseBuildFlag, false,
+		)
+		publishCommand := getSummariseJobCommand(
+			dotOutputBase, "", "", "", "", inputDir, base, outputDir, clickhousePublishFlag, true,
+		)
 
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		So(buildCommand, ShouldContainSubstring, `> "$summarise_log" 2>&1`)
+		So(publishCommand, ShouldContainSubstring, `> "$summarise_log" 2>&1`)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
-		failedAttempt := exec.CommandContext(ctx, "sh", "-c", command)
+		const attempts = 32
 
-		failedAttempt.Dir = tempDir
+		results := make(chan error, attempts)
 
-		failedAttempt.Env = append(os.Environ(), "FAKE_SUMMARISE_EXIT=7", "WRSTAT_UI_UNSAFE_TOKEN=expanded")
-		err := failedAttempt.Run()
-		So(err, ShouldNotBeNil)
+		var wg sync.WaitGroup
 
-		stagingLogs, err := filepath.Glob(filepath.Join(dotOutputBase, "summarise-*.log"))
+		for attempt := range attempts {
+			wg.Add(1)
+
+			go func() {
+				defer wg.Done()
+
+				failedAttempt := exec.CommandContext(ctx, "sh", "-c", buildCommand)
+				failedAttempt.Dir = tempDir
+
+				failedAttempt.Env = append(
+					os.Environ(), "FAKE_SUMMARISE_EXIT=7", "WRSTAT_UI_UNSAFE_TOKEN=expanded",
+					fmt.Sprintf("FAKE_SUMMARISE_ATTEMPT=%02d", attempt),
+				)
+				results <- failedAttempt.Run()
+			}()
+		}
+
+		wg.Wait()
+		close(results)
+
+		failed := 0
+
+		for err := range results {
+			if err != nil {
+				failed++
+			}
+		}
+
+		So(failed, ShouldEqual, attempts)
+
+		stagingLogs, err := filepath.Glob(filepath.Join(dotOutputBase, "summarise-build.log-*"))
 		So(err, ShouldBeNil)
-		So(stagingLogs, ShouldHaveLength, 1)
+		So(stagingLogs, ShouldHaveLength, attempts)
 		So(entryExists(finalOutputBase), ShouldBeFalse)
 
-		logBytes, err := os.ReadFile(stagingLogs[0])
+		contents, err := attemptLogContents(stagingLogs)
 		So(err, ShouldBeNil)
-		So(string(logBytes), ShouldContainSubstring, "fake stdout for summarise")
-		So(string(logBytes), ShouldContainSubstring, "fake stderr for summarise")
 
-		successfulRetry := exec.CommandContext(ctx, "sh", "-c", command)
+		expectedContents := make(map[string]int, attempts)
+		for attempt := range attempts {
+			expectedContents[fmt.Sprintf("stdout:%02d\nstderr:%02d\n", attempt, attempt)] = 1
+		}
+
+		So(contents, ShouldResemble, expectedContents)
+
+		successfulRetry := exec.CommandContext(ctx, "sh", "-c", publishCommand)
 
 		successfulRetry.Dir = tempDir
 
-		successfulRetry.Env = append(os.Environ(), "FAKE_SUMMARISE_EXIT=0", "WRSTAT_UI_UNSAFE_TOKEN=expanded")
+		successfulRetry.Env = append(
+			os.Environ(), "FAKE_SUMMARISE_EXIT=0", "FAKE_SUMMARISE_ATTEMPT=publish",
+			"WRSTAT_UI_UNSAFE_TOKEN=expanded",
+		)
 		So(successfulRetry.Run(), ShouldBeNil)
 
-		finalLogs, err := filepath.Glob(filepath.Join(finalOutputBase, "summarise-*.log"))
+		finalBuildLogs, err := filepath.Glob(filepath.Join(finalOutputBase, "summarise-build.log-*"))
 		So(err, ShouldBeNil)
-		So(finalLogs, ShouldHaveLength, 2)
-		So(entryExists(dotOutputBase), ShouldBeFalse)
-		So(filepath.Base(finalLogs[0]), ShouldNotEqual, filepath.Base(finalLogs[1]))
+		So(finalBuildLogs, ShouldHaveLength, attempts)
 
-		for _, logPath := range finalLogs {
-			So(strings.HasPrefix(filepath.Base(logPath), "summarise-"), ShouldBeTrue)
-			So(strings.HasSuffix(filepath.Base(logPath), ".log"), ShouldBeTrue)
-		}
+		finalPublishLogs, err := filepath.Glob(filepath.Join(finalOutputBase, "summarise-publish.log-*"))
+		So(err, ShouldBeNil)
+		So(finalPublishLogs, ShouldHaveLength, 1)
+		So(entryExists(dotOutputBase), ShouldBeFalse)
+
+		publishLog, err := os.ReadFile(finalPublishLogs[0])
+		So(err, ShouldBeNil)
+		So(string(publishLog), ShouldEqual, "stdout:publish\nstderr:publish\n")
 
 		So(entryExists(filepath.Join(tempDir, "BACKTICK_MARKER")), ShouldBeFalse)
 		So(entryExists(filepath.Join(tempDir, "DOLLAR_MARKER")), ShouldBeFalse)
@@ -1083,9 +1233,23 @@ func publishJobsWithoutDynamicSchedulingFields(jobs []*jobqueue.Job) []*jobqueue
 }
 
 func expectedSummariseLogAssignment(quotedDotOutput string) string {
-	return `summarise_log=$(printf '%%s/summarise-%%s-%%s.log' ` +
-		quotedDotOutput +
-		` "$(date -u +%%Y%%m%%dT%%H%%M%%SZ)" "$$") && `
+	return `summarise_log=$(mktemp ` + strings.TrimSuffix(quotedDotOutput, "'") +
+		`/summarise-publish.log-XXXXXXXXXX') && `
+}
+
+func attemptLogContents(paths []string) (map[string]int, error) {
+	contents := make(map[string]int, len(paths))
+
+	for _, path := range paths {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, err
+		}
+
+		contents[string(data)]++
+	}
+
+	return contents, nil
 }
 
 func writeVerifiedWatchSpool(t *testing.T, spoolDir, outputDir, statsPath string) *chspool.Manifest {

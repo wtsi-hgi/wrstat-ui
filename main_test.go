@@ -2162,8 +2162,7 @@ func TestWatch(t *testing.T) {
 		So(jobsWithoutWatchRepGroups(jobs), ShouldResemble, []*jobqueue.Job{
 			{
 				Cmd: fmt.Sprintf(
-					`summarise_log=$(printf '%%s/summarise-%%s-%%s.log' '%[1]s' `+
-						`"$(date -u +%%Y%%m%%dT%%H%%M%%SZ)" "$$") && `+
+					`summarise_log=$(mktemp '%[1]s/summarise-build.log-XXXXXXXXXX') && `+
 						`'./wrstat-ui_test' summarise --clickhouse-recover --clickhouse-build-only `+
 						`-d '%[1]s' -q '/some/quota.file' -c 'basedirs.config' '%[2]s' `+
 						`> "$summarise_log" 2>&1`,
@@ -2184,8 +2183,7 @@ func TestWatch(t *testing.T) {
 			},
 			{
 				Cmd: fmt.Sprintf(
-					`summarise_log=$(printf '%%s/summarise-%%s-%%s.log' '%[1]s' `+
-						`"$(date -u +%%Y%%m%%dT%%H%%M%%SZ)" "$$") && `+
+					`summarise_log=$(mktemp '%[1]s/summarise-publish.log-XXXXXXXXXX') && `+
 						`'./wrstat-ui_test' summarise --clickhouse-recover --clickhouse-publish-only `+
 						`-d '%[1]s' -q '/some/quota.file' -c 'basedirs.config' '%[2]s' `+
 						`> "$summarise_log" 2>&1 && touch -r '%[3]s' '%[1]s' && mv '%[1]s' '%[4]s'`,
@@ -2219,7 +2217,7 @@ func TestWatch(t *testing.T) {
 		})
 		So(manualCopy.Run(), ShouldNotBeNil)
 
-		manualLogs, err := filepath.Glob(filepath.Join(dotA, "summarise-*.log"))
+		manualLogs, err := filepath.Glob(filepath.Join(dotA, "summarise-*.log-*"))
 		So(err, ShouldBeNil)
 		So(manualLogs, ShouldHaveLength, 1)
 
@@ -2244,8 +2242,7 @@ func TestWatch(t *testing.T) {
 		So(jobsWithoutWatchRepGroups(jobs), ShouldResemble, []*jobqueue.Job{
 			{
 				Cmd: fmt.Sprintf(
-					`summarise_log=$(printf '%%s/summarise-%%s-%%s.log' '%[1]s' `+
-						`"$(date -u +%%Y%%m%%dT%%H%%M%%SZ)" "$$") && `+
+					`summarise_log=$(mktemp '%[1]s/summarise-build.log-XXXXXXXXXX') && `+
 						`'./wrstat-ui_test' summarise --clickhouse-recover --clickhouse-build-only -d '%[1]s' `+
 						`-s '%[2]s' -q '/some/quota.file' -c 'basedirs.config' '%[3]s' `+
 						`> "$summarise_log" 2>&1`,
@@ -2266,8 +2263,7 @@ func TestWatch(t *testing.T) {
 			},
 			{
 				Cmd: fmt.Sprintf(
-					`summarise_log=$(printf '%%s/summarise-%%s-%%s.log' '%[1]s' `+
-						`"$(date -u +%%Y%%m%%dT%%H%%M%%SZ)" "$$") && `+
+					`summarise_log=$(mktemp '%[1]s/summarise-publish.log-XXXXXXXXXX') && `+
 						`'./wrstat-ui_test' summarise --clickhouse-recover --clickhouse-publish-only -d '%[1]s' `+
 						`-s '%[2]s' -q '/some/quota.file' -c 'basedirs.config' '%[3]s' `+
 						`> "$summarise_log" 2>&1 && touch -r '%[4]s' '%[1]s' && mv '%[1]s' '%[5]s'`,

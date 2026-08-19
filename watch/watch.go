@@ -342,7 +342,7 @@ func getSummariseJobCommand(dotOutputBase, previousBasedirsDB, quotaPath, basedi
 
 func summariseJobCommandPrefix(dotOutputBase, phaseFlag string) []string {
 	parts := []string{
-		summariseLogAssignment(dotOutputBase),
+		summariseLogAssignment(dotOutputBase, phaseFlag),
 		"&&",
 		shellQuote(os.Args[0]),
 		"summarise",
@@ -357,11 +357,19 @@ func summariseJobCommandPrefix(dotOutputBase, phaseFlag string) []string {
 	return parts
 }
 
-func summariseLogAssignment(dotOutputBase string) string {
-	return fmt.Sprintf(
-		`summarise_log=$(printf '%%s/summarise-%%s-%%s.log' %s "$(date -u +%%Y%%m%%dT%%H%%M%%SZ)" "$$")`,
-		shellQuote(dotOutputBase),
-	)
+func summariseLogAssignment(dotOutputBase, phaseFlag string) string {
+	phase := "run"
+
+	switch phaseFlag {
+	case clickhouseBuildFlag:
+		phase = "build"
+	case clickhousePublishFlag:
+		phase = "publish"
+	}
+
+	template := filepath.Join(dotOutputBase, fmt.Sprintf("summarise-%s.log-XXXXXXXXXX", phase))
+
+	return fmt.Sprintf("summarise_log=$(mktemp %s)", shellQuote(template))
 }
 
 func summariseJobName(createdAt time.Time, uniqueID string) string {
@@ -426,14 +434,6 @@ func configureSummariseJobPair(buildJob, publishJob *jobqueue.Job, repGroup stri
 	publishJob.LimitGroups = []string{fmt.Sprintf("%s:%d", summariseLimitGroup, summariseConcurrency)}
 
 	return []*jobqueue.Job{buildJob, publishJob}
-}
-
-func getJobCommand(dotOutputBase, previousBasedirsDB, quotaPath, basedirsConfig, mounts,
-	inputDir, base, outputDir string) string {
-	return getSummariseJobCommand(
-		dotOutputBase, previousBasedirsDB, quotaPath, basedirsConfig, mounts,
-		inputDir, base, outputDir, "", true,
-	)
 }
 
 func shellQuote(value string) string {
