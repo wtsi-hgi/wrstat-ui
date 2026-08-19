@@ -219,15 +219,28 @@ func scheduleSummarisers(s *client.Scheduler, group, inputDir, outputDir, quotaP
 
 func createSummariseJobs(group, inputDir, outputDir, base, quotaPath, basedirsConfig, mounts string,
 	minMemGB, summariseConcurrency int, s *client.Scheduler) ([]*jobqueue.Job, error) {
-	dotOutputBase, previousBasedirsDB, req, err := prepareSummariseJobs(outputDir, base, minMemGB)
+	return createSummariseJobsAt(
+		group, inputDir, outputDir, base, quotaPath, basedirsConfig, mounts,
+		minMemGB, summariseConcurrency, time.Now(), client.UniqueString(), s,
+	)
+}
+
+func createSummariseJobsAt(group, inputDir, outputDir, base, quotaPath, basedirsConfig, mounts string,
+	minMemGB, summariseConcurrency int, createdAt time.Time, uniqueID string,
+	s *client.Scheduler) ([]*jobqueue.Job, error) {
+	dotOutputBase, previousBasedirsDB, repGroup, req, err := prepareSummariseJobs(
+		outputDir, base, minMemGB, createdAt, uniqueID,
+	)
 	if err != nil {
 		return nil, err
 	}
 
+	reqGroup := summariseReqGroup(base)
+
 	buildJob, err := createSummarisePhaseJob(
 		s, group, getSummariseJobCommand(dotOutputBase, previousBasedirsDB, quotaPath,
 			basedirsConfig, mounts, inputDir, base, outputDir, clickhouseBuildFlag, false),
-		summariseReqGroup(base), req,
+		repGroup, reqGroup+"-build", repGroup+"-build", req,
 	)
 	if err != nil {
 		return nil, err
@@ -236,33 +249,30 @@ func createSummariseJobs(group, inputDir, outputDir, base, quotaPath, basedirsCo
 	publishJob, err := createSummarisePhaseJob(
 		s, group, getSummariseJobCommand(dotOutputBase, previousBasedirsDB, quotaPath,
 			basedirsConfig, mounts, inputDir, base, outputDir, clickhousePublishFlag, true),
-		summariseReqGroup(base), req,
+		repGroup, reqGroup+"-publish", "", req,
 	)
 	if err != nil {
 		return nil, err
 	}
 
-	publishJob.Dependencies = jobqueue.Dependencies{
-		jobqueue.NewEssenceDependency(buildJob.Cmd, buildJob.Cwd),
-	}
-	publishJob.LimitGroups = []string{fmt.Sprintf("%s:%d", summariseLimitGroup, summariseConcurrency)}
-
-	return []*jobqueue.Job{buildJob, publishJob}, nil
+	return configureSummariseJobPair(buildJob, publishJob, repGroup, summariseConcurrency), nil
 }
 
 func prepareSummariseJobs(
 	outputDir string,
 	base string,
 	minMemGB int,
-) (string, string, *scheduler.Requirements, error) {
+	createdAt time.Time,
+	uniqueID string,
+) (string, string, string, *scheduler.Requirements, error) {
 	dotOutputBase := hiddenOutputDir(outputDir, base)
 	if err := os.MkdirAll(dotOutputBase, dirPerms); err != nil {
-		return "", "", nil, err
+		return "", "", "", nil, err
 	}
 
 	previousBasedirsDB, err := getPreviousBasedirsDB(outputDir, base)
 	if err != nil {
-		return "", "", nil, err
+		return "", "", "", nil, err
 	}
 
 	req := client.DefaultRequirements()
@@ -270,7 +280,7 @@ func prepareSummariseJobs(
 	req.RAM = summariseMinRAMMB(minMemGB)
 	req.Time = summariseMinRuntime
 
-	return dotOutputBase, previousBasedirsDB, req, nil
+	return dotOutputBase, previousBasedirsDB, summariseJobName(createdAt, uniqueID), req, nil
 }
 
 func summariseMinRAMMB(minMemGB int) int {
@@ -290,10 +300,12 @@ func createSummarisePhaseJob(
 	s *client.Scheduler,
 	group string,
 	command string,
+	repGroup string,
 	reqGroup string,
+	depGroup string,
 	req *scheduler.Requirements,
 ) (*jobqueue.Job, error) {
-	job := s.NewJob(command, summariseJobName(), reqGroup, "", "", req)
+	job := s.NewJob(command, repGroup, reqGroup, depGroup, "", req)
 	job.Group = group
 
 	if err := job.EnvAddOverride([]string{watchenv.Name + "=" + watchenv.Value}); err != nil {
@@ -352,8 +364,8 @@ func summariseLogAssignment(dotOutputBase string) string {
 	)
 }
 
-func summariseJobName() string {
-	return "wrstat-ui-summarise-" + time.Now().Format(jobTimestampLayout)
+func summariseJobName(createdAt time.Time, uniqueID string) string {
+	return fmt.Sprintf("%s-%s-%s", summariseReqGroupBase, createdAt.Format(jobTimestampLayout), uniqueID)
 }
 
 func getPreviousBasedirsDB(outputDir, base string) (string, error) {
@@ -406,6 +418,14 @@ func datasetKey(name string) (string, bool) {
 
 func hiddenOutputDir(outputDir, base string) string {
 	return filepath.Join(outputDir, hiddenOutputPrefix+base)
+}
+
+func configureSummariseJobPair(buildJob, publishJob *jobqueue.Job, repGroup string,
+	summariseConcurrency int) []*jobqueue.Job {
+	publishJob.Dependencies = jobqueue.Dependencies{jobqueue.NewDepGroupDependency(repGroup + "-build")}
+	publishJob.LimitGroups = []string{fmt.Sprintf("%s:%d", summariseLimitGroup, summariseConcurrency)}
+
+	return []*jobqueue.Job{buildJob, publishJob}
 }
 
 func getJobCommand(dotOutputBase, previousBasedirsDB, quotaPath, basedirsConfig, mounts,

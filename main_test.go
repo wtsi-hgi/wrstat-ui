@@ -2171,7 +2171,7 @@ func TestWatch(t *testing.T) {
 				),
 				Cwd:        cwd,
 				CwdMatters: true,
-				ReqGroup:   reqGroup,
+				ReqGroup:   reqGroup + "-build",
 				Requirements: &scheduler.Requirements{
 					Cores: cpus,
 					RAM:   ram,
@@ -2193,7 +2193,7 @@ func TestWatch(t *testing.T) {
 				),
 				Cwd:        cwd,
 				CwdMatters: true,
-				ReqGroup:   reqGroup,
+				ReqGroup:   reqGroup + "-publish",
 				LimitGroups: []string{
 					"wrstat-ui-clickhouse-import:1",
 				},
@@ -2253,7 +2253,7 @@ func TestWatch(t *testing.T) {
 				),
 				Cwd:        cwd,
 				CwdMatters: true,
-				ReqGroup:   reqGroup,
+				ReqGroup:   reqGroup + "-build",
 				Requirements: &scheduler.Requirements{
 					Cores: cpus,
 					RAM:   ram,
@@ -2275,7 +2275,7 @@ func TestWatch(t *testing.T) {
 				),
 				Cwd:        cwd,
 				CwdMatters: true,
-				ReqGroup:   reqGroup,
+				ReqGroup:   reqGroup + "-publish",
 				LimitGroups: []string{
 					"wrstat-ui-clickhouse-import:1",
 				},
@@ -2674,7 +2674,12 @@ func assertWatchSummariseRepGroup(repGroup string) {
 
 	So(repGroup, ShouldStartWith, prefix)
 
-	_, err := time.Parse(timeStamp, strings.TrimPrefix(repGroup, prefix))
+	remainder := strings.TrimPrefix(repGroup, prefix)
+	timestamp, targetID, found := strings.Cut(remainder, "-")
+	So(found, ShouldBeTrue)
+	So(targetID, ShouldHaveLength, 20)
+
+	_, err := time.Parse(timeStamp, timestamp)
 	So(err, ShouldBeNil)
 }
 
@@ -2683,6 +2688,7 @@ func jobsWithoutWatchRepGroups(jobs []*jobqueue.Job) []*jobqueue.Job {
 		job.RepGroup = ""
 		job.EnvOverride = nil
 		job.EnvCRetrieved = false
+		job.DepGroups = nil
 		job.Dependencies = nil
 	}
 

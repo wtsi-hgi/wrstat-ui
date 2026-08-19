@@ -90,7 +90,7 @@ func TestWatchSummariseResourceMinimums(t *testing.T) {
 		So(job.Requirements.Time, ShouldEqual, 30*time.Minute)
 		So(job.Requirements.Cores, ShouldEqual, 2)
 		So(job.Override, ShouldEqual, 1)
-		So(job.ReqGroup, ShouldEqual, "wrstat-ui-summarise-／lustre／scratch127")
+		So(job.ReqGroup, ShouldEqual, "wrstat-ui-summarise-／lustre／scratch127-build")
 
 		lowMemJobs, err := createSummariseJobs("", inputDir, outputDir, lowMemBase, "", "", "", 4, 1, s)
 		So(err, ShouldBeNil)
@@ -223,12 +223,136 @@ func TestWatchSplitsSummariseBuildFromPublish(t *testing.T) {
 
 		So(publishJob.Cmd, ShouldContainSubstring, "summarise --clickhouse-recover --clickhouse-publish-only")
 		So(publishJob.LimitGroups, ShouldResemble, []string{defaultSummariseLimitGroupForTest})
-		So(publishJob.Dependencies, ShouldHaveLength, 1)
-		So(publishJob.Dependencies[0].Essence, ShouldNotBeNil)
-		So(publishJob.Dependencies[0].Essence.Cmd, ShouldEqual, buildJob.Cmd)
-		So(publishJob.Dependencies[0].Essence.Cwd, ShouldEqual, buildJob.Cwd)
+		So(publishJob.RepGroup, ShouldEqual, buildJob.RepGroup)
+		So(buildJob.DepGroups, ShouldResemble, []string{buildJob.RepGroup + "-build"})
+		assertPublishGroupDependency(publishJob, buildJob.DepGroups[0])
 		So(publishJob.Cmd, ShouldContainSubstring, "&& touch -r")
 		So(publishJob.Cmd, ShouldContainSubstring, "&& mv")
+	})
+}
+
+func TestWatchIsolatesSummarisePhaseScheduling(t *testing.T) {
+	Convey("Distinct submissions for one target at the same instant use isolated build groups", t, func() {
+		inputDir := t.TempDir()
+		outputDir := t.TempDir()
+		createdAt := time.Date(2026, time.August, 19, 12, 34, 56, 789, time.UTC)
+		pr, pw, err := os.Pipe()
+		So(err, ShouldBeNil)
+
+		defer pr.Close()
+		defer pw.Close()
+
+		previousPretendSubmissions := client.PretendSubmissions
+		client.PretendSubmissions = strconv.FormatUint(uint64(pw.Fd()), 10)
+
+		defer func() { client.PretendSubmissions = previousPretendSubmissions }()
+
+		s, err := client.New(client.SchedulerSettings{})
+		So(err, ShouldBeNil)
+
+		defer s.Disconnect() //nolint:errcheck
+
+		jobsA, err := createSummariseJobsAt(
+			"", inputDir, outputDir, "12345_a", "quota-a", "", "", 0, 1, createdAt,
+			"d7akoe4rvimc9pmg5t00", s,
+		)
+		So(err, ShouldBeNil)
+
+		jobsB, err := createSummariseJobsAt(
+			"", inputDir, outputDir, "12345_a", "quota-a", "", "", 0, 1, createdAt,
+			"d7akoe4rvimc9pmg5t01", s,
+		)
+		So(err, ShouldBeNil)
+
+		So(jobsA[0].ReqGroup, ShouldEqual, "wrstat-ui-summarise-a-build")
+		So(jobsA[1].ReqGroup, ShouldEqual, "wrstat-ui-summarise-a-publish")
+		So(jobsB[0].ReqGroup, ShouldEqual, "wrstat-ui-summarise-a-build")
+		So(jobsB[1].ReqGroup, ShouldEqual, "wrstat-ui-summarise-a-publish")
+		So(jobsA[0].RepGroup, ShouldEqual, jobsA[1].RepGroup)
+		So(jobsB[0].RepGroup, ShouldEqual, jobsB[1].RepGroup)
+		So(jobsA[0].Cmd, ShouldEqual, jobsB[0].Cmd)
+		So(jobsA[1].Cmd, ShouldEqual, jobsB[1].Cmd)
+		So(jobsA[0].RepGroup, ShouldNotEqual, jobsB[0].RepGroup)
+
+		buildGroupA := jobsA[0].RepGroup + "-build"
+		buildGroupB := jobsB[0].RepGroup + "-build"
+
+		So(jobsA[0].DepGroups, ShouldResemble, []string{buildGroupA})
+		So(jobsB[0].DepGroups, ShouldResemble, []string{buildGroupB})
+		So(buildGroupA, ShouldNotEqual, buildGroupB)
+		assertPublishGroupDependency(jobsA[1], buildGroupA)
+		assertPublishGroupDependency(jobsB[1], buildGroupB)
+		So(jobsA[1].Dependencies[0].DepGroup, ShouldNotEqual, buildGroupB)
+		So(jobsB[1].Dependencies[0].DepGroup, ShouldNotEqual, buildGroupA)
+	})
+
+	Convey("Completing one build releases only its publisher", t, func() {
+		previousPretendSubmissions := client.PretendSubmissions
+		client.PretendSubmissions = ""
+
+		defer func() { client.PretendSubmissions = previousPretendSubmissions }()
+
+		config, restoreCWD := wrtesting.PrepareWrConfig(t)
+		defer restoreCWD()
+
+		t.Setenv("WR_DEPLOYMENT", "development")
+
+		server := wrtesting.Serve(t, config)
+		defer server.Stop(context.Background(), true)
+
+		s, err := client.New(client.SchedulerSettings{Logger: log15.New()})
+		So(err, ShouldBeNil)
+
+		defer s.Disconnect() //nolint:errcheck
+
+		inputDir := t.TempDir()
+		outputDir := t.TempDir()
+		createdAt := time.Date(2026, time.August, 19, 12, 34, 56, 789, time.UTC)
+		jobsA, err := createSummariseJobsAt(
+			"", inputDir, outputDir, "12345_a", "quota-a", "", "", 0, 1, createdAt,
+			"d7akoe4rvimc9pmg5t00", s,
+		)
+		So(err, ShouldBeNil)
+
+		jobsB, err := createSummariseJobsAt(
+			"", inputDir, outputDir, "12345_a", "quota-b", "", "", 0, 1, createdAt,
+			"d7akoe4rvimc9pmg5t01", s,
+		)
+		So(err, ShouldBeNil)
+
+		So(s.SubmitJobs(append(jobsA, jobsB...)), ShouldBeNil)
+
+		jq, err := jobqueue.ConnectUsingConfig(context.Background(), "development", 2*time.Second)
+		So(err, ShouldBeNil)
+
+		defer jq.Disconnect() //nolint:errcheck
+
+		reserved := make(map[string]*jobqueue.Job, 2)
+
+		for range 2 {
+			job, reserveErr := jq.Reserve(time.Second)
+			So(reserveErr, ShouldBeNil)
+
+			reserved[job.Cmd] = job
+		}
+
+		So(reserved, ShouldContainKey, jobsA[0].Cmd)
+		So(reserved, ShouldContainKey, jobsB[0].Cmd)
+		So(reserved, ShouldNotContainKey, jobsA[1].Cmd)
+		So(reserved, ShouldNotContainKey, jobsB[1].Cmd)
+
+		archiveSuccessfulWatchJob(jq, reserved[jobsA[0].Cmd])
+
+		publishA, err := jq.Reserve(time.Second)
+		So(err, ShouldBeNil)
+		So(publishA.Cmd, ShouldEqual, jobsA[1].Cmd)
+		archiveSuccessfulWatchJob(jq, publishA)
+
+		archiveSuccessfulWatchJob(jq, reserved[jobsB[0].Cmd])
+
+		publishB, err := jq.Reserve(time.Second)
+		So(err, ShouldBeNil)
+		So(publishB.Cmd, ShouldEqual, jobsB[1].Cmd)
 	})
 }
 
@@ -359,6 +483,18 @@ func capturePublicWatchJobs(t *testing.T, run func(inputDir, outputDir string) e
 	return jobs
 }
 
+func assertPublishGroupDependency(job *jobqueue.Job, buildGroup string) {
+	So(job.DepGroups, ShouldBeEmpty)
+	So(job.Dependencies, ShouldHaveLength, 1)
+	So(job.Dependencies[0].DepGroup, ShouldEqual, buildGroup)
+	So(job.Dependencies[0].Essence, ShouldBeNil)
+}
+
+func archiveSuccessfulWatchJob(jq *jobqueue.Client, job *jobqueue.Job) {
+	So(jq.Started(job, os.Getpid()), ShouldBeNil)
+	So(jq.Archive(job, &jobqueue.JobEndState{Exited: true, EndTime: time.Now()}), ShouldBeNil)
+}
+
 func TestWatchSummariseCommandPreservesAttemptLogs(t *testing.T) {
 	Convey("Generated summarise commands preserve per-attempt stdout and stderr logs", t, func() {
 		tempDir := t.TempDir()
@@ -445,7 +581,7 @@ exit "$FAKE_SUMMARISE_EXIT"
 
 func TestWatch(t *testing.T) {
 	Convey("Given the expected setup", t, func() {
-		const reqGroupABC = "wrstat-ui-summarise-abc"
+		const reqGroupABC = "wrstat-ui-summarise-abc-publish"
 
 		inputDir := t.TempDir()
 		outputDir := t.TempDir()
@@ -804,7 +940,7 @@ func TestWatch(t *testing.T) {
 						os.Args[0], outputDir, testInputC),
 					Cwd:        cwd,
 					CwdMatters: true,
-					ReqGroup:   "wrstat-ui-summarise-c",
+					ReqGroup:   "wrstat-ui-summarise-c-publish",
 					LimitGroups: []string{
 						defaultSummariseLimitGroupForTest,
 					},
@@ -903,8 +1039,8 @@ func TestWatchSummariseReqGroupIncludesMountKey(t *testing.T) {
 		<-wrWrittenCh
 
 		So(jobs, ShouldHaveLength, 2)
-		So(jobs[0].ReqGroup, ShouldEqual, "wrstat-ui-summarise-／lustre／scratch127")
-		So(jobs[1].ReqGroup, ShouldEqual, "wrstat-ui-summarise-／lustre／scratch127")
+		So(jobs[0].ReqGroup, ShouldEqual, "wrstat-ui-summarise-／lustre／scratch127-build")
+		So(jobs[1].ReqGroup, ShouldEqual, "wrstat-ui-summarise-／lustre／scratch127-publish")
 	})
 }
 
@@ -920,7 +1056,12 @@ func createFile(path string) error {
 func assertSummariseRepGroup(repGroup string) {
 	So(repGroup, ShouldStartWith, summariseReqGroupBase+"-")
 
-	_, err := time.Parse(jobTimestampLayout, strings.TrimPrefix(repGroup, summariseReqGroupBase+"-"))
+	remainder := strings.TrimPrefix(repGroup, summariseReqGroupBase+"-")
+	timestamp, targetID, found := strings.Cut(remainder, "-")
+	So(found, ShouldBeTrue)
+	So(targetID, ShouldHaveLength, 20)
+
+	_, err := time.Parse(jobTimestampLayout, timestamp)
 	So(err, ShouldBeNil)
 }
 
