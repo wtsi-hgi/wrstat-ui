@@ -38,7 +38,7 @@ import (
 	"github.com/VertebrateResequencing/wr/client"
 	"github.com/VertebrateResequencing/wr/jobqueue"
 	"github.com/VertebrateResequencing/wr/jobqueue/scheduler"
-	"github.com/inconshreveable/log15"
+	"github.com/inconshreveable/log15/v3"
 	. "github.com/smartystreets/goconvey/convey"
 	gas "github.com/wtsi-hgi/go-authserver"
 )

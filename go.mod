@@ -8,7 +8,7 @@ require (
 	github.com/dustin/go-humanize v1.0.1
 	github.com/gin-gonic/gin v1.10.0
 	github.com/hashicorp/go-multierror v1.1.1
-	github.com/inconshreveable/log15 v2.16.0+incompatible
+	github.com/inconshreveable/log15/v3 v3.2.1
 	github.com/klauspost/pgzip v1.2.6
 	github.com/mattn/go-sqlite3 v1.14.24
 	github.com/moby/sys/mountinfo v0.7.2
@@ -60,7 +60,6 @@ require (
 	github.com/go-playground/universal-translator v0.18.1 // indirect
 	github.com/go-playground/validator/v10 v10.25.0 // indirect
 	github.com/go-resty/resty/v2 v2.16.5 // indirect
-	github.com/go-stack/stack v1.8.1 // indirect
 	github.com/goccy/go-json v0.10.6 // indirect
 	github.com/gofrs/uuid/v5 v5.4.0 // indirect
 	github.com/golang-jwt/jwt/v4 v4.5.1 // indirect
@@ -75,7 +74,6 @@ require (
 	github.com/hashicorp/errwrap v1.1.0 // indirect
 	github.com/hashicorp/golang-lru/arc/v2 v2.0.7 // indirect
 	github.com/hashicorp/golang-lru/v2 v2.0.7 // indirect
-	github.com/inconshreveable/log15/v3 v3.2.1 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/jinzhu/configor v1.2.2 // indirect
 	github.com/jpillora/backoff v1.0.0 // indirect

@@ -35,7 +35,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/inconshreveable/log15"
+	"github.com/inconshreveable/log15/v3"
 	"github.com/spf13/cobra"
 	"github.com/wtsi-hgi/wrstat-ui/bolt"
 	"github.com/wtsi-hgi/wrstat-ui/internal/summariseutil"
