@@ -38,7 +38,7 @@ import (
 	"github.com/VertebrateResequencing/wr/client"
 	"github.com/VertebrateResequencing/wr/jobqueue"
 	"github.com/VertebrateResequencing/wr/jobqueue/scheduler"
-	"github.com/inconshreveable/log15"
+	"github.com/inconshreveable/log15/v3"
 	. "github.com/smartystreets/goconvey/convey"
 	gas "github.com/wtsi-hgi/go-authserver"
 )
@@ -121,9 +121,10 @@ func TestWatch(t *testing.T) {
 						Cores: 2,
 						Disk:  1,
 					},
-					Override: 0,
-					Retries:  30,
-					State:    jobqueue.JobStateDelayed,
+					Override:     0,
+					Retries:      30,
+					State:        jobqueue.JobStateDelayed,
+					Dependencies: []*jobqueue.Dependency{},
 				},
 			})
 		})
@@ -241,9 +242,10 @@ func TestWatch(t *testing.T) {
 						Cores: 2,
 						Disk:  1,
 					},
-					Override: 0,
-					Retries:  30,
-					State:    jobqueue.JobStateDelayed,
+					Override:     0,
+					Retries:      30,
+					State:        jobqueue.JobStateDelayed,
+					Dependencies: []*jobqueue.Dependency{},
 				},
 			})
 		})
@@ -304,9 +306,10 @@ func TestWatch(t *testing.T) {
 						Cores: 2,
 						Disk:  1,
 					},
-					Override: 0,
-					Retries:  30,
-					State:    jobqueue.JobStateDelayed,
+					Override:     0,
+					Retries:      30,
+					State:        jobqueue.JobStateDelayed,
+					Dependencies: []*jobqueue.Dependency{},
 				},
 			})
 		})
@@ -352,9 +355,10 @@ func TestWatch(t *testing.T) {
 						Cores: 2,
 						Disk:  1,
 					},
-					Override: 0,
-					Retries:  30,
-					State:    jobqueue.JobStateDelayed,
+					Override:     0,
+					Retries:      30,
+					State:        jobqueue.JobStateDelayed,
+					Dependencies: []*jobqueue.Dependency{},
 				},
 				{
 					Cmd: fmt.Sprintf(`%[1]q summarise -d "%[2]s/.98765_c" `+
@@ -372,9 +376,10 @@ func TestWatch(t *testing.T) {
 						Cores: 2,
 						Disk:  1,
 					},
-					Override: 0,
-					Retries:  30,
-					State:    jobqueue.JobStateDelayed,
+					Override:     0,
+					Retries:      30,
+					State:        jobqueue.JobStateDelayed,
+					Dependencies: []*jobqueue.Dependency{},
 				},
 			})
 		})

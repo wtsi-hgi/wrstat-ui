@@ -62,6 +62,14 @@ func TestIDsToWanted(t *testing.T) {
 	})
 }
 
+func ShouldNotBeSamePointer(actual any, expected ...any) string {
+	if actual != expected[0] {
+		return ""
+	}
+
+	return "Pointers are the same"
+}
+
 type badMountTSReader struct {
 	basedirs.Reader
 	err error
@@ -80,6 +88,8 @@ func TestServer(t *testing.T) {
 	Convey("Given a Server", t, func() {
 		logWriter := gas.NewStringLogger()
 		s := New(logWriter)
+
+		Reset(func() { s.Stop() })
 
 		Convey("You can convert dguta.DCSs to DirSummarys", func() {
 			uid32, err := strconv.Atoi(uid)
@@ -586,8 +596,6 @@ func TestServer(t *testing.T) {
 			So(usageUser[0].Mtime.Year(), ShouldBeLessThanOrEqualTo, 9999)
 		})
 
-		Reset(func() { s.Stop() })
-
 		Convey("Server updates when provider updates", func() {
 			ownersPath, err := internaldata.CreateOwnersCSV(t, internaldata.ExampleOwnersCSV)
 			So(err, ShouldBeNil)
@@ -654,7 +662,7 @@ func TestServer(t *testing.T) {
 				}
 			}
 
-			So(s.tree, ShouldNotEqual, dirguta)
+			So(s.tree, ShouldNotBeSamePointer, dirguta)
 			So(s.basedirs, ShouldNotEqual, basedirs)
 			So(len(s.dataTimeStamp), ShouldEqual, 2)
 			So(s.dataTimeStamp["keyB"], ShouldBeGreaterThan, lastMod)
@@ -882,7 +890,7 @@ func TestServer(t *testing.T) {
 			So(s.dataTimeStamp["keyA"], ShouldEqual, newTS)
 			So(newTS, ShouldBeGreaterThan, oldTS)
 
-			So(newTree, ShouldNotEqual, oldTree)
+			So(newTree, ShouldNotBeSamePointer, oldTree)
 			So(newBD, ShouldNotEqual, oldBD)
 		})
 

@@ -599,9 +599,10 @@ func TestWatch(t *testing.T) {
 					Time:  10 * time.Second,
 					Disk:  1,
 				},
-				Override: 0,
-				Retries:  30,
-				State:    jobqueue.JobStateDelayed,
+				Override:     0,
+				Retries:      30,
+				State:        jobqueue.JobStateDelayed,
+				Dependencies: jobqueue.Dependencies{},
 			},
 		})
 
@@ -634,9 +635,10 @@ func TestWatch(t *testing.T) {
 					Time:  10 * time.Second,
 					Disk:  1,
 				},
-				Override: 0,
-				Retries:  30,
-				State:    jobqueue.JobStateDelayed,
+				Override:     0,
+				Retries:      30,
+				State:        jobqueue.JobStateDelayed,
+				Dependencies: jobqueue.Dependencies{},
 			},
 		})
 

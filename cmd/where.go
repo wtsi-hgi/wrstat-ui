@@ -458,9 +458,9 @@ func prepareWhereTable() *tablewriter.Table {
 	table := tablewriter.NewWriter(os.Stdout)
 
 	if whereShowUG {
-		table.SetHeader([]string{"Directory", "Users", "Groups", "Count", "Size", "Age", "Modified"})
+		table.Header([]string{"Directory", "Users", "Groups", "Count", "Size", "Age", "Modified"})
 	} else {
-		table.SetHeader([]string{"Directory", "Count", "Size", "Age", "Modified"})
+		table.Header([]string{"Directory", "Count", "Size", "Age", "Modified"})
 	}
 
 	return table
