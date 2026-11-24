@@ -197,7 +197,7 @@ const stringSort = new Intl.Collator().compare,
 						return;
 					}
 
-					(byUser ? downloadUsers : downloadGroups)(usage);
+					(byUser ? downloadUsers : downloadGroups)(fitlerTableRows(usage, { "Age": (filter as any)["Age"] ?? (() => true) } as any));
 				}}>Download Unfiltered Table</button>
 				<button className="download" onClick={e => {
 					if (e.button !== 0) {
@@ -206,7 +206,7 @@ const stringSort = new Intl.Collator().compare,
 
 					(byUser ? downloadUsers : downloadGroups)(fitlerTableRows(usage.filter(u => u.BaseDir.includes(baseDirFilter)), filter));
 				}}>Download Filtered Table</button>
-			</details>
+			</details >
 		</>;
 	};
 
